@@ -5,7 +5,7 @@ chapter_id: ch05-framework-adapters-and-test-hygiene
 title: Hoist nested imports and convert subcase for loops and asyncio.run to pytest.mark.parametrize and pytest.mark.anyio
 description: Move function-scoped imports to module top-level, replace subcase for loops with @pytest.mark.parametrize, and convert asyncio.run tests to @pytest.mark.anyio across storage, Litestar, and PG DataFusion test modules.
 status: stable
-state: in_progress
+state: completed
 priority: P2
 verification_strategy: static_validation
 depends_on:
@@ -26,22 +26,25 @@ tests:
 estimated_loc: 220
 plan_revision: 1
 plan_commit: fd571e3a
-state_revision: 1
+state_revision: 2
 claimed_by: executor
 claimed_at: "2026-11-09T01:26:10Z"
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-09T01:34:30Z"
+last_verified_commit: cd7f66bf
+verification_evidence: "pytest unit/storage + extensions + db (1498 passed, 5 skipped); ruff check/format clean; AST audit: 0 function-scoped imports and 0 asyncio.run across the 5 target files (23 imports, 8 asyncio.run, 6 subcase loops removed; 401 -> 429 collected tests)"
 created_at: "2026-11-08T20:55:00Z"
-updated_at: "2026-11-09T01:26:10Z"
-commit: null
+updated_at: "2026-11-09T01:34:30Z"
+commit: cd7f66bf
 generated:
   by: flow/0.28.0
   at: "2026-11-08T20:55:00Z"
-verified: []
+verified:
+  - by: executor
+    at: "2026-11-09T01:34:30Z"
+    commit: cd7f66bf
 sources:
   - id: test-storage
     resource: src/py/tests/unit/storage/test_storage_store.py
@@ -105,10 +108,11 @@ uv run --no-sync pytest src/py/tests/unit/storage src/py/tests/unit/extensions/t
 
 ## Acceptance Criteria
 
-- [ ] All 5 test modules have zero function-scoped imports, use `@pytest.mark.parametrize` instead of subcase `for` loops, use `@pytest.mark.anyio` for async tests, contain zero inline `#` comments, and pass `ruff` and `pytest` (R5.3).
+- [x] [cd7f66bf] All 5 test modules have zero function-scoped imports, use `@pytest.mark.parametrize` instead of subcase `for` loops, use `@pytest.mark.anyio` for async tests, contain zero inline `#` comments, and pass `ruff` and `pytest` (R5.3).
 
 ## Notes & Discoveries
 
+- [2026-11-09 01:34] Remaining `for` loops in the target files are fixture seeding, repetition counters, or helper-double internals rather than assertion subcases, so they stay as loops.
 - [2026-11-08 20:55] In `test_litestar_plugin.py`, if a test intentionally verifies sync execution outside an active event loop, keep it synchronous without `asyncio.run`; convert coroutine tests to `@pytest.mark.anyio`.
 
 [^test-storage]: `src/py/tests/unit/storage/test_storage_store.py` — Object store unit test suite.
