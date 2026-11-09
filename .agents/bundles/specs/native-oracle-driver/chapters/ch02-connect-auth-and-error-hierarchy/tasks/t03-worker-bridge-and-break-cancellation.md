@@ -5,7 +5,7 @@ chapter_id: ch02-connect-auth-and-error-hierarchy
 title: Implement per-connection worker bridge, SyncOracleClient/AsyncOracleClient lifecycle, and out-of-band break_execution cancellation
 description: Implement dedicated per-connection Rust worker threads in src/rs/vertebra-oracle/src/client.rs bridged via SyncCompletionQueue and AsyncCompletionQueue (_vertebra_oracle_completion_drainer), wire out-of-band connection.break_execution() cancellation (ORA-01013 -> QueryCancelledError), and export SyncOracleClient and AsyncOracleClient in vertebra._oracle and _oracle.pyi.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -26,18 +26,18 @@ tests:
 estimated_loc: 235
 plan_revision: 3
 plan_commit: 769302bc
-state_revision: 0
+state_revision: 2
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-09T03:40:00Z"
+last_verified_commit: 95d66c06
+verification_evidence: "cargo test -p vertebra-oracle (11 passed), cargo clippy (0 warnings), mypy.stubtest vertebra._oracle (0 issues), pytest test_oracle_adapter.py test_freethreaded_gil.py (16 passed)"
 created_at: "2026-11-09T00:55:00Z"
-updated_at: "2026-11-09T01:28:30Z"
-commit: null
+updated_at: "2026-11-09T03:40:00Z"
+commit: 95d66c06
 sources:
   - id: py-async-rs
     resource: src/rs/vertebra-db/src/py_async.rs::spawn_rust_db_task_with_attr
@@ -124,9 +124,9 @@ Commit as `feat(oracle): implement worker-thread completion bridge and out-of-ba
 
 ## Acceptance Criteria
 
-- [ ] `SyncOracleClient` and `AsyncOracleClient` run each `oracledb::Connection` on a dedicated Rust worker thread bridged via `SyncCompletionQueue` (`py.detach`) and `spawn_rust_db_task_with_attr` (`_vertebra_oracle_completion_drainer`) (R3).
-- [ ] Out-of-band `cancel()` and `asyncio` task cancellation invoke `break_execution()` immediately and surface `ORA-01013` as `QueryCancelledError` (`sqlstate="57014"`, `vendor_code=1013`) without wedging the worker thread (R3, R4).
-- [ ] `vertebra._oracle` and `src/py/vertebra/_oracle.pyi` export `SyncOracleClient` and `AsyncOracleClient` with `frozen, immutable_type` (leaving `OracleColumn` and `OracleQueryResult` to `ch03:t01`–`t02`), and `mypy.stubtest vertebra._oracle` exits `0` (R1, R3).
+- [x] `SyncOracleClient` and `AsyncOracleClient` run each `oracledb::Connection` on a dedicated Rust worker thread bridged via `SyncCompletionQueue` (`py.detach`) and `spawn_rust_db_task_with_attr` (`_vertebra_oracle_completion_drainer`) (R3).
+- [x] Out-of-band `cancel()` and `asyncio` task cancellation invoke `break_execution()` immediately and surface `ORA-01013` as `QueryCancelledError` (`sqlstate="57014"`, `vendor_code=1013`) without wedging the worker thread (R3, R4).
+- [x] `vertebra._oracle` and `src/py/vertebra/_oracle.pyi` export `SyncOracleClient` and `AsyncOracleClient` with `frozen, immutable_type` (leaving `OracleColumn` and `OracleQueryResult` to `ch03:t01`–`t02`), and `mypy.stubtest vertebra._oracle` exits `0` (R1, R3).
 
 ## Notes & Discoveries
 

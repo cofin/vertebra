@@ -210,8 +210,8 @@ Progress: `[0/6 files documented]` (owned by [ch07-conformance-and-okf-synthesis
 Every worksheet (`22` total across `7` chapters) executes in one bounded invocation and produces one signed local conventional commit (`<= 3` production files, `read_set <= 6`, `estimated_loc <= 250`).
 
 - [x] ch01-crate-and-packaging — Rust Crate Scaffold, Build Matrix, and Optional Wheel Wiring (chapters/ch01-crate-and-packaging/spec.md)
-- [~] ch02-connect-auth-and-error-hierarchy — TNS/Wallet/Token Dialer, Worker Bridge, and SQLSTATE Error Mapping (chapters/ch02-connect-auth-and-error-hierarchy/spec.md)
-- [ ] ch03-types-bind-and-arrow-shm — Type Codecs, Positional/Named Binds, RETURNING, and Arrow 59 SHM Bridge (chapters/ch03-types-bind-and-arrow-shm/spec.md)
+- [x] ch02-connect-auth-and-error-hierarchy — TNS/Wallet/Token Dialer, Worker Bridge, and SQLSTATE Error Mapping (chapters/ch02-connect-auth-and-error-hierarchy/spec.md)
+- [~] ch03-types-bind-and-arrow-shm — Type Codecs, Positional/Named Binds, RETURNING, and Arrow 59 SHM Bridge (chapters/ch03-types-bind-and-arrow-shm/spec.md)
 - [ ] ch04-pools-drcp-and-session-piggyback — Native Sync/Async Pools, DRCP Purity/Tagging, and TTC Session Piggyback (chapters/ch04-pools-drcp-and-session-piggyback/spec.md)
 - [ ] ch05-pipelines-tenancy-and-apex — Transaction/Savepoint Pipelines, VPD Trusted Tenancy, and APEX Session Bridge (chapters/ch05-pipelines-tenancy-and-apex/spec.md)
 - [ ] ch06-notifications-and-embeddings — TxEventQ / AQ Notification Stream and Vector Embedding Pushdown (chapters/ch06-notifications-and-embeddings/spec.md)

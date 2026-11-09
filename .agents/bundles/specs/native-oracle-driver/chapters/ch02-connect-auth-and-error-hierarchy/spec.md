@@ -5,19 +5,19 @@ chapter_id: ch02-connect-auth-and-error-hierarchy
 title: "Chapter 02: TNS/Wallet/Token Dialer, Worker Bridge, and SQLSTATE Error Mapping"
 description: Implement NativeOracleConfig validation and ORA-xxxxx to SQLSTATE DbExceptionTypes error mapping, fix OracleConfig.connect_descriptor() precedence, build the TNS/Wallet mTLS and IAM token dialer, and wire dedicated per-connection worker threads over SyncCompletionQueue and AsyncCompletionQueue with out-of-band break_execution() cancellation.
 status: stable
-state: in_progress
+state: completed
 planning_status: complete
 depends_on_chapters:
   - ch01-crate-and-packaging
 replan_trigger: null
-current_task: "native-oracle-driver:ch02:t03"
+current_task: null
 plan_revision: 3
 plan_commit: 769302bc
-state_revision: 3
-last_verified_checkpoint: 1ad8a82b
+state_revision: 4
+last_verified_checkpoint: 95d66c06
 last_reviewed_commit: null
 created_at: "2026-11-05T00:00:00Z"
-updated_at: "2026-11-09T01:28:30Z"
+updated_at: "2026-11-09T03:41:00Z"
 generated:
   by: flow-plan
   at: "2026-11-09T01:15:00Z"
@@ -161,8 +161,8 @@ Progress: `[0/6 files documented]` (`src/py/vertebra/_oracle.pyi` is updated in 
 ## 5. Implementation Plan
 
 - [x] [1ad8a82b] native-oracle-driver:ch02:t01 — Implement NativeOracleConfig validation and ORA-xxxxx to DbExceptionTypes SQLSTATE error mapping (tasks/t01-descriptor-precedence-and-error-hierarchy.md)
-- [x] native-oracle-driver:ch02:t02 — Fix OracleConfig.connect_descriptor() precedence and implement TNS, Autonomous Wallet mTLS, and GcpTokenCache dialer (tasks/t02-tns-wallet-and-token-dialer.md)
-- [~] native-oracle-driver:ch02:t03 — Implement per-connection worker bridge, SyncOracleClient/AsyncOracleClient lifecycle, and out-of-band break_execution cancellation (tasks/t03-worker-bridge-and-break-cancellation.md)
+- [x] [95d66c06] native-oracle-driver:ch02:t02 — Fix OracleConfig.connect_descriptor() precedence and implement TNS, Autonomous Wallet mTLS, and GcpTokenCache dialer (tasks/t02-tns-wallet-and-token-dialer.md)
+- [x] native-oracle-driver:ch02:t03 — Implement per-connection worker bridge, SyncOracleClient/AsyncOracleClient lifecycle, and out-of-band break_execution cancellation (tasks/t03-worker-bridge-and-break-cancellation.md)
 
 **Chapter Recovery Checkpoint:** `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-oracle --locked && cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-oracle --all-targets --locked -- -D warnings && make dev && uv run --no-sync python -m mypy.stubtest vertebra._oracle && uv run --no-sync pytest src/py/tests/unit/db/test_oracle_adapter.py -v` exits `0`.
 

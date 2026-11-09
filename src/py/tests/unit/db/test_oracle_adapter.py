@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 import io
+import threading
+import time
 import zipfile
 from typing import TYPE_CHECKING, Any
 
 import pytest
 
+import vertebra._oracle as _oracle
 from vertebra.db.adapters.oracle.config import (
     DEFAULT_ORACLE_DSN,
     OracleConfig,
@@ -15,6 +19,11 @@ from vertebra.db.adapters.oracle.config import (
     OracleDrcpConfig,
     OracleTopologyConfig,
     OracleWallet,
+)
+from vertebra.db.driver import (
+    InterfaceError,
+    ProgrammingError,
+    QueryCancelledError,
 )
 
 if TYPE_CHECKING:
@@ -156,3 +165,126 @@ def test_oracle_config_topology_and_wallet_resolution(tmp_path: Path) -> None:
     assert path_cfg.access_token == "ya29-sample"
     wallet = OracleWallet.from_path(zip_file)
     assert "MYDB_HIGH" in wallet.aliases
+
+
+@pytest.mark.parametrize(
+    ("bad_kwargs", "match_substr"),
+    [
+        ({"port": 0}, "port"),
+        ({"purity": "SHARED"}, "purity"),
+        ({"auth_mode": "kerberos"}, "auth_mode"),
+        ({"connect_timeout": -5.0}, "connect_timeout"),
+    ],
+)
+def test_oracle_native_client_constructor_validation_and_immutability(
+    bad_kwargs: dict[str, Any],
+    match_substr: str,
+) -> None:
+    """Verify zero-I/O constructor validation, GIL_USED=False, and immutable PyO3 types."""
+    assert _oracle.GIL_USED is False
+
+    sync_client = _oracle.SyncOracleClient(
+        host="nonexistent.invalid",
+        port=1521,
+        service_name="FREEPDB1",
+        user="hr",
+        password="pw",
+    )
+    assert sync_client.closed is False
+    assert sync_client.in_transaction is False
+    sync_client.close()
+    assert sync_client.closed is True
+
+    attr_name = "_custom_attr"
+    with pytest.raises(TypeError):
+        setattr(_oracle.SyncOracleClient, attr_name, 1)
+    with pytest.raises(TypeError):
+        setattr(_oracle.AsyncOracleClient, attr_name, 1)
+
+    with pytest.raises(InterfaceError, match=match_substr):
+        _oracle.SyncOracleClient(**bad_kwargs)
+    with pytest.raises(InterfaceError, match=match_substr):
+        _oracle.AsyncOracleClient(**bad_kwargs)
+
+
+def test_sync_oracle_client_cancel_transactions_and_post_close() -> None:
+    """Verify SyncOracleClient out-of-band cancel(), transaction/savepoint state, and post-close errors."""
+    client = _oracle.SyncOracleClient(host="memory", service_name="FREEPDB1")
+    client.cancel()
+
+    def _trigger_cancel() -> None:
+        time.sleep(0.03)
+        client.cancel()
+
+    canceller = threading.Thread(target=_trigger_cancel)
+    canceller.start()
+    with pytest.raises(QueryCancelledError) as exc_info:
+        client.execute("SELECT /*+ VTB_SLEEP_MS(2000) */ 1 FROM DUAL")
+    canceller.join()
+    assert exc_info.value.sqlstate == "57014"
+    assert exc_info.value.vendor_code == 1013
+
+    assert client.in_transaction is False
+    client.begin()
+    assert client.in_transaction is True
+    client.savepoint("sp_1")
+    client.rollback_to_savepoint("sp_1")
+    assert client.in_transaction is True
+    client.commit()
+    assert client.in_transaction is False
+
+    client.begin()
+    assert client.in_transaction is True
+    client.rollback()
+    assert client.in_transaction is False
+
+    with pytest.raises(ProgrammingError) as sp_exc:
+        client.savepoint("sp;drop")
+    assert sp_exc.value.sqlstate == "42000"
+
+    client.close()
+    assert client.closed is True
+    client.close()
+    client.cancel()
+    with pytest.raises(InterfaceError, match="closed"):
+        client.execute("SELECT 1 FROM DUAL")
+
+
+@pytest.mark.anyio
+async def test_async_oracle_client_drainer_cancel_and_lifecycle() -> None:
+    """Verify AsyncOracleClient completion drainer, out-of-band cancel(), and task cancellation."""
+    client = _oracle.AsyncOracleClient(host="memory", service_name="FREEPDB1")
+    await client.begin()
+    assert client.in_transaction is True
+
+    loop = asyncio.get_running_loop()
+    assert hasattr(loop, "_vertebra_oracle_completion_drainer")
+
+    await client.savepoint("sp_async_1")
+    await client.rollback_to_savepoint("sp_async_1")
+    await client.commit()
+    assert client.in_transaction is False
+
+    async def _delayed_cancel() -> None:
+        await asyncio.sleep(0.03)
+        client.cancel()
+
+    cancel_task = asyncio.create_task(_delayed_cancel())
+    with pytest.raises(QueryCancelledError) as exc_info:
+        await client.execute("SELECT /*+ VTB_SLEEP_MS(2000) */ 1 FROM DUAL")
+    await cancel_task
+    assert exc_info.value.sqlstate == "57014"
+    assert exc_info.value.vendor_code == 1013
+
+    fut = asyncio.ensure_future(client.execute("SELECT /*+ VTB_SLEEP_MS(2000) */ 1 FROM DUAL"))
+    await asyncio.sleep(0.02)
+    fut.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await fut
+
+    assert await client.execute("SELECT 1 FROM DUAL") == 0
+    await client.close()
+    assert client.closed is True
+    with pytest.raises(InterfaceError, match="closed"):
+        await client.execute("SELECT 1 FROM DUAL")
+
