@@ -7,8 +7,6 @@ status: draft
 state: draft
 has_chapters: false
 parent_prd: native-data-platform
-depends_on_flows:
-  - driver-fail-loud
 research:
   - ../native-data-platform/research/rust-driver-crates_20261103.md
   - ../integration-remediation/research/audit-findings_20261103.md
@@ -31,8 +29,8 @@ sources:
     resource: .agents/bundles/specs/native-data-platform/research/rust-driver-crates_20261103.md
     title: Rust client crate selection including mysql_async 0.37.1
   - id: fail-loud-baseline
-    resource: .agents/bundles/specs/driver-fail-loud/spec.md
-    title: Upstream flow that deletes vertebra_db::mysql and MySQL memory:// paths
+    resource: .agents/bundles/knowledge/domains/data/database-drivers-and-dialers.md
+    title: Completed fail-loud baseline removing vertebra_db::mysql and MySQL memory:// paths
   - id: mysql-py
     resource: src/py/vertebra/db/adapters/mysql/driver.py
     title: Python SyncMySQLDriver and AsyncMySQLDriver target cutover module
@@ -59,7 +57,7 @@ tags:
 
 See [crate research](../native-data-platform/research/rust-driver-crates_20261103.md).
 
-- **Fail-loud baseline.** [`driver-fail-loud`](../driver-fail-loud/spec.md) deletes the `vertebra_db::mysql` module (packet framing, `caching_sha2` scramble, `MysqlPool`) and every MySQL `memory://` branch before this flow starts [^fail-loud-baseline]. `mysql_async` owns Handshake v10, `caching_sha2_password`, and packet framing inside `vertebra-mysql`, so this flow adds no MySQL codec to `vertebra-db`.
+- **Fail-loud baseline.** The completed [`driver-fail-loud` baseline](../../knowledge/domains/data/database-drivers-and-dialers.md) deletes the `vertebra_db::mysql` module (packet framing, `caching_sha2` scramble, `MysqlPool`) and every MySQL `memory://` branch [^fail-loud-baseline]. `mysql_async` owns Handshake v10, `caching_sha2_password`, and packet framing inside `vertebra-mysql`, so this flow adds no MySQL codec to `vertebra-db`.
 
 - **MySQL / MariaDB (`src/rs/vertebra-mysql/` -> `vertebra._mysql` + `vertebra-core[mysql]`).** Build a standalone workspace PyO3 `cdylib` + `rlib` crate on `mysql_async` `0.37.1` (`default-features = false`, `default-rustls-ring`) with `#[pymodule(gil_used = false)]`, `src/py/vertebra/_mysql.pyi` verified by `mypy.stubtest`, `[project.optional-dependencies].mysql`, wheel isolation `exclude` globs, `uv.lock`, and `areas.toml` registration so `vertebra-core` remains free of MySQL wire crates when unused.
 - **Explicit `Sync*` / `Async*` clients & Arrow SHM transfer.** Expose `SyncMySQLClient` (`SyncCompletionQueue`) and `AsyncMySQLClient` (`AsyncCompletionQueue` via `vertebra_db::py_async` with `"_vertebra_mysql_completion_drainer"`), binary-protocol row -> `VTBARROW` `ShmCapsule` `ArrowCursor` decoding, Cloud SQL `:3307` mTLS / direct `:3306` IAM token authentication (`SyncGcpTokenCache` / `AsyncGcpTokenCache`), `KILL QUERY <conn_id>` cancellation, and MariaDB conformance.
@@ -80,7 +78,7 @@ See [crate research](../native-data-platform/research/rust-driver-crates_2026110
 
 ## Dependencies
 
-`db-layout-and-contract` (`main @ 21c99f95`), `integration-remediation/db-engine-primitives` (`main @ 80ff8a65`), and [`driver-fail-loud`](../driver-fail-loud/spec.md), which removes MySQL `memory://` execution and `vertebra_db::mysql`; this flow starts from that baseline.
+`db-layout-and-contract` (`main @ 21c99f95`), `integration-remediation/db-engine-primitives` (`main @ 80ff8a65`), and the completed [`driver-fail-loud` baseline](../../knowledge/domains/data/database-drivers-and-dialers.md), which removes MySQL `memory://` execution and `vertebra_db::mysql`; this flow starts from that baseline.
 
 ## Acceptance Boundary
 
@@ -97,6 +95,6 @@ See [crate research](../native-data-platform/research/rust-driver-crates_2026110
 - t04 Python `SyncMySQLDriver` / `AsyncMySQLDriver` cutover, `pymysql`/`asyncmy` removal, conformance activation, and docs/OKF update.
 
 [^crate-research]: `.agents/bundles/specs/native-data-platform/research/rust-driver-crates_20261103.md` — Rust client crate selection including `mysql_async` 0.37.1.
-[^fail-loud-baseline]: `.agents/bundles/specs/driver-fail-loud/spec.md` — Upstream flow that deletes `vertebra_db::mysql` and MySQL `memory://` paths.
+[^fail-loud-baseline]: `.agents/bundles/knowledge/domains/data/database-drivers-and-dialers.md` — Completed fail-loud baseline removing `vertebra_db::mysql` and MySQL `memory://` paths.
 [^mysql-py]: `src/py/vertebra/db/adapters/mysql/driver.py` — Python SyncMySQLDriver and AsyncMySQLDriver target cutover module.
 [^py-async-rs]: `src/rs/vertebra-db/src/py_async.rs` — Shared AsyncCompletionQueue + Notifier PyO3 bridge.

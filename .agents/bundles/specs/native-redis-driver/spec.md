@@ -7,8 +7,6 @@ status: draft
 state: draft
 has_chapters: false
 parent_prd: native-data-platform
-depends_on_flows:
-  - driver-fail-loud
 research:
   - ../native-data-platform/research/rust-driver-crates_20261103.md
   - ../integration-remediation/research/audit-findings_20261103.md
@@ -43,8 +41,8 @@ sources:
     resource: .agents/bundles/specs/native-data-platform/research/rust-driver-crates_20261103.md
     title: Rust client crate selection including redis 1.8.1
   - id: fail-loud-baseline
-    resource: .agents/bundles/specs/driver-fail-loud/spec.md
-    title: Upstream flow that deletes Redis and Valkey memory:// execution
+    resource: .agents/bundles/knowledge/domains/data/database-drivers-and-dialers.md
+    title: Completed fail-loud baseline removing Redis and Valkey memory:// execution
 tags:
   - rust
   - redis
@@ -68,7 +66,7 @@ tags:
 See [crate research](../native-data-platform/research/rust-driver-crates_20261103.md).
 
 - **Redis & Valkey (`src/rs/vertebra-redis/` -> `vertebra._redis` + `vertebra-core[redis]` / `vertebra-core[valkey]`).** Build a standalone workspace PyO3 `cdylib` + `rlib` crate on `redis` `1.8.1` (`default-features = false`, `tokio-rustls-comp`, `cluster-async`, `connection-manager`, `cache-aio`, `streams`, `script`, `acl`) with `#[pymodule(gil_used = false)]`, `src/py/vertebra/_redis.pyi` verified by `mypy.stubtest`, `[project.optional-dependencies].{redis,valkey}`, wheel isolation `exclude` globs, `uv.lock`, and `areas.toml` registration, benchmarked against the Python socket driver it replaces. The `redis` crate owns RESP3 framing, so `vertebra-redis` adds no RESP3 codec to `vertebra-db` [^crate-research].
-- **Fail-loud baseline.** [`driver-fail-loud`](../driver-fail-loud/spec.md) deletes `memory://` support from the Redis and Valkey drivers and `RedisConfig.url_schemes` while keeping the `vertebra_db::resp3` bindings for the Python socket driver; the `from_redis` and `from_valkey` store factories stay and raise `ImproperConfigurationError` for `memory://` [^fail-loud-baseline] [^resp3-rs].
+- **Fail-loud baseline.** The completed [`driver-fail-loud` baseline](../../knowledge/domains/data/database-drivers-and-dialers.md) deletes `memory://` support from the Redis and Valkey drivers and `RedisConfig.url_schemes` while keeping the `vertebra_db::resp3` bindings for the Python socket driver; the `from_redis` and `from_valkey` store factories stay and raise `ImproperConfigurationError` for `memory://` [^fail-loud-baseline] [^resp3-rs].
 - **Explicit `Sync*` / `Async*` clients & notification sources.** Expose `SyncRedisClient` (`SyncCompletionQueue`) and `AsyncRedisClient` (`AsyncCompletionQueue` + `Notifier` via `vertebra_db::py_async` with `"_vertebra_redis_completion_drainer"`), plus `SyncRedisNotificationSource` / `AsyncRedisNotificationSource` (`SyncNotificationSource` / `AsyncNotificationSource`) re-exported for Valkey.
 
 ## Scope
@@ -88,7 +86,7 @@ See [crate research](../native-data-platform/research/rust-driver-crates_2026110
 
 ## Dependencies
 
-`db-layout-and-contract` (`main @ 21c99f95`), `integration-remediation/db-engine-primitives` (`main @ 80ff8a65`), and [`driver-fail-loud`](../driver-fail-loud/spec.md), which removes Redis and Valkey `memory://` execution; this flow starts from that baseline.
+`db-layout-and-contract` (`main @ 21c99f95`), `integration-remediation/db-engine-primitives` (`main @ 80ff8a65`), and the completed [`driver-fail-loud` baseline](../../knowledge/domains/data/database-drivers-and-dialers.md), which removes Redis and Valkey `memory://` execution; this flow starts from that baseline.
 
 ## Acceptance Boundary
 
@@ -110,4 +108,4 @@ See [crate research](../native-data-platform/research/rust-driver-crates_2026110
 [^py-async-rs]: `src/rs/vertebra-db/src/py_async.rs` — Shared AsyncCompletionQueue + Notifier PyO3 bridge.
 [^resp3-rs]: `src/rs/vertebra-db/src/resp3/mod.rs` — RESP3 frame codecs in vertebra-db bound to Python for the socket driver.
 [^crate-research]: `.agents/bundles/specs/native-data-platform/research/rust-driver-crates_20261103.md` — Rust client crate selection including `redis` 1.8.1.
-[^fail-loud-baseline]: `.agents/bundles/specs/driver-fail-loud/spec.md` — Upstream flow that deletes Redis and Valkey `memory://` execution.
+[^fail-loud-baseline]: `.agents/bundles/knowledge/domains/data/database-drivers-and-dialers.md` — Completed fail-loud baseline removing Redis and Valkey `memory://` execution.

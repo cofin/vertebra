@@ -8,7 +8,6 @@ state: draft
 has_chapters: false
 parent_prd: integration-remediation
 depends_on_flows:
-  - driver-fail-loud
   - broker-pool-sharing
 research:
   - ../integration-remediation/research/audit-findings_20261103.md
@@ -37,8 +36,8 @@ sources:
     resource: src/py/vertebra/extensions/django/db/backends/__init__.py
     title: Django database backend wrapper mixin
   - id: fail-loud-baseline
-    resource: .agents/bundles/specs/driver-fail-loud/spec.md
-    title: Upstream flow that makes the DB-API raise InterfaceError on URL parse failure
+    resource: .agents/bundles/knowledge/domains/data/database-drivers-and-dialers.md
+    title: Completed fail-loud baseline raising InterfaceError on DB-API URL parse failure
 tags:
   - sqlalchemy
   - advanced-alchemy
@@ -94,7 +93,7 @@ SQLAlchemy and Advanced Alchemy are the primary user path. Vertebra's `Sync<Engi
 
 ## Dependencies
 
-`native-data-platform` `db-layout-and-contract` (`main @ 21c99f95`), `broker-pool-sharing`, and completed object-storage contracts ([object-storage.md](../../knowledge/domains/storage/object-storage.md)); `integration-remediation` `db-engine-primitives` (`main @ 80ff8a65`); and [`driver-fail-loud`](../driver-fail-loud/spec.md), which removes the DB-API SQLite parse fallback.
+`native-data-platform` `db-layout-and-contract` (`main @ 21c99f95`), `broker-pool-sharing`, and completed object-storage contracts ([object-storage.md](../../knowledge/domains/storage/object-storage.md)); `integration-remediation` `db-engine-primitives` (`main @ 80ff8a65`); and the completed [`driver-fail-loud` baseline](../../knowledge/domains/data/database-drivers-and-dialers.md), which removes the DB-API SQLite parse fallback.
 
 ## Acceptance Boundary
 
@@ -119,4 +118,4 @@ SQLAlchemy and Advanced Alchemy are the primary user path. Vertebra's `Sync<Engi
 [^sa-dialects]: `src/py/vertebra/extensions/sqlalchemy/dialects.py` — Current multi-engine SQLAlchemy dialect module slated for per-engine split.
 [^aa-cache]: `src/py/vertebra/extensions/alchemy/cache.py` — Advanced Alchemy cache integration slated for dogpile.cache backend.
 [^django-backends]: `src/py/vertebra/extensions/django/db/backends/__init__.py` — Django database backend wrapper mixin.
-[^fail-loud-baseline]: `.agents/bundles/specs/driver-fail-loud/spec.md` — Upstream flow that makes the DB-API raise `InterfaceError` on URL parse failure.
+[^fail-loud-baseline]: `.agents/bundles/knowledge/domains/data/database-drivers-and-dialers.md` — Completed fail-loud baseline raising `InterfaceError` on DB-API URL parse failure.

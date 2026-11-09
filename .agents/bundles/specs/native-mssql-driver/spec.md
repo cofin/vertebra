@@ -7,8 +7,6 @@ status: draft
 state: draft
 has_chapters: false
 parent_prd: native-data-platform
-depends_on_flows:
-  - driver-fail-loud
 research:
   - ../native-data-platform/research/rust-driver-crates_20261103.md
   - ../integration-remediation/research/audit-findings_20261103.md
@@ -31,8 +29,8 @@ sources:
     resource: src/rs/vertebra-db/src/mssql/mod.rs::rewrite_mssql_placeholders
     title: "@P1 placeholder rewrite helper, the surviving MSSQL codec in vertebra-db"
   - id: fail-loud-baseline
-    resource: .agents/bundles/specs/driver-fail-loud/spec.md
-    title: Upstream flow that replaces the MSSQL sqlite3 stand-in with a MissingDependencyError guard and deletes TDS framing
+    resource: .agents/bundles/knowledge/domains/data/database-drivers-and-dialers.md
+    title: Completed fail-loud baseline placing a MissingDependencyError guard on MSSQL and deleting TDS framing
   - id: mssql-py
     resource: src/py/vertebra/db/adapters/mssql/driver.py
     title: Python SyncMSSQLDriver and AsyncMSSQLDriver target cutover module
@@ -59,7 +57,7 @@ tags:
 
 See [crate research](../native-data-platform/research/rust-driver-crates_20261103.md).
 
-- **Fail-loud baseline.** [`driver-fail-loud`](../driver-fail-loud/spec.md) runs first: `SyncMSSQLDriver` and `AsyncMSSQLDriver` raise `MissingDependencyError` through `_require_mssql_native()` (and `AsyncMSSQLDriver` forwards `dialer`), the `encode_tds_sql_batch` binding and stub are deleted, and `vertebra-db` no longer carries `encode_tds_packet`, `decode_tds_packet`, `TdsPacketType`, `MSSQL_DIALECT_TAG`, or `MssqlPool` [^fail-loud-baseline]. `rewrite_mssql_placeholders` stays and this flow consumes it [^mssql-rs].
+- **Fail-loud baseline.** The completed [`driver-fail-loud` baseline](../../knowledge/domains/data/database-drivers-and-dialers.md) ensures `SyncMSSQLDriver` and `AsyncMSSQLDriver` raise `MissingDependencyError` through `_require_mssql_native()` (and `AsyncMSSQLDriver` forwards `dialer`), the `encode_tds_sql_batch` binding and stub are deleted, and `vertebra-db` no longer carries `encode_tds_packet`, `decode_tds_packet`, `TdsPacketType`, `MSSQL_DIALECT_TAG`, or `MssqlPool` [^fail-loud-baseline]. `rewrite_mssql_placeholders` stays and this flow consumes it [^mssql-rs].
 
 - **SQL Server / MSSQL (`src/rs/vertebra-mssql/` -> `vertebra._mssql` + `vertebra-core[mssql]`).** Build a standalone workspace PyO3 `cdylib` + `rlib` crate on `tiberius` `0.13.0` (`default-features = false`, `tds73`, `rustls`, `chrono`, `rust_decimal`) with `#[pymodule(gil_used = false)]`, `src/py/vertebra/_mssql.pyi` verified by `mypy.stubtest`, `[project.optional-dependencies].mssql`, wheel isolation `exclude` globs, `uv.lock`, and `areas.toml` registration so `vertebra-core` stays free of TDS wire crates and requires zero `msodbcsql18` or `unixODBC` C/C++ packages.
 - **Explicit `Sync*` / `Async*` clients & Arrow SHM transfer.** Expose `SyncMSSQLClient` (`SyncCompletionQueue`) and `AsyncMSSQLClient` (`AsyncCompletionQueue` via `vertebra_db::py_async` with `"_vertebra_mssql_completion_drainer"`), token stream -> `VTBARROW` `ShmCapsule` `ArrowCursor` decoding, Cloud SQL for SQL Server `:3307` mTLS dialer integration, `BulkLoadRequest` `load_from_arrow`, and out-of-band `ATTENTION` cancellation.
@@ -80,7 +78,7 @@ See [crate research](../native-data-platform/research/rust-driver-crates_2026110
 
 ## Dependencies
 
-`db-layout-and-contract` (`main @ 21c99f95`), `integration-remediation/db-engine-primitives` (`main @ 80ff8a65`), and [`driver-fail-loud`](../driver-fail-loud/spec.md), which replaces the MSSQL `sqlite3` stand-in with the `MissingDependencyError` guard and deletes TDS framing; this flow starts from that baseline.
+`db-layout-and-contract` (`main @ 21c99f95`), `integration-remediation/db-engine-primitives` (`main @ 80ff8a65`), and the completed [`driver-fail-loud` baseline](../../knowledge/domains/data/database-drivers-and-dialers.md), which replaces the MSSQL `sqlite3` stand-in with the `MissingDependencyError` guard and deletes TDS framing; this flow starts from that baseline.
 
 ## Acceptance Boundary
 
@@ -97,6 +95,6 @@ See [crate research](../native-data-platform/research/rust-driver-crates_2026110
 - t04 Python `SyncMSSQLDriver` / `AsyncMSSQLDriver` cutover from the `MissingDependencyError` guard, conformance activation, and docs/OKF update.
 
 [^mssql-rs]: `src/rs/vertebra-db/src/mssql/mod.rs::rewrite_mssql_placeholders` — `@P1` placeholder rewrite helper, the surviving MSSQL codec in vertebra-db.
-[^fail-loud-baseline]: `.agents/bundles/specs/driver-fail-loud/spec.md` — Upstream flow that replaces the MSSQL `sqlite3` stand-in with a `MissingDependencyError` guard and deletes TDS framing.
+[^fail-loud-baseline]: `.agents/bundles/knowledge/domains/data/database-drivers-and-dialers.md` — Completed fail-loud baseline placing a `MissingDependencyError` guard on MSSQL and deleting TDS framing.
 [^mssql-py]: `src/py/vertebra/db/adapters/mssql/driver.py` — Python SyncMSSQLDriver and AsyncMSSQLDriver target cutover module.
 [^py-async-rs]: `src/rs/vertebra-db/src/py_async.rs` — Shared AsyncCompletionQueue + Notifier PyO3 bridge.

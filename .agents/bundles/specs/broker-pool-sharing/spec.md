@@ -8,7 +8,6 @@ state: draft
 has_chapters: false
 parent_prd: native-data-platform
 depends_on_flows:
-  - driver-fail-loud
   - native-postgres-driver
 research:
   - ../native-data-platform/research/gap-analysis_20261103.md
@@ -38,8 +37,8 @@ sources:
     resource: src/py/vertebra/extensions/sqlspec/proxy.py
     title: ProxySyncDriver and ProxyAsyncDriver upstream SQLSpec wrappers
   - id: fail-loud-baseline
-    resource: .agents/bundles/specs/driver-fail-loud/spec.md
-    title: Upstream flow that deletes the unused admission-only *Pool structs from vertebra-db
+    resource: .agents/bundles/knowledge/domains/data/database-drivers-and-dialers.md
+    title: Completed fail-loud baseline removing unused admission-only *Pool structs from vertebra-db
 tags:
   - broker
   - shm
@@ -87,7 +86,7 @@ Users keep existing configurations such as `sqlspec.adapters.asyncpg.AsyncpgConf
 
 ## Dependencies
 
-`db-layout-and-contract` (`main @ 21c99f95`), `integration-remediation/db-engine-primitives` (`main @ 80ff8a65`), [`driver-fail-loud`](../driver-fail-loud/spec.md) (deletes the admission-only `*Pool` structs in `vertebra-db`; this flow starts from that baseline), and `native-postgres-driver` (first native Rust pool hosted by the broker).
+`db-layout-and-contract` (`main @ 21c99f95`), `integration-remediation/db-engine-primitives` (`main @ 80ff8a65`), the completed [`driver-fail-loud` baseline](../../knowledge/domains/data/database-drivers-and-dialers.md) (deletes the admission-only `*Pool` structs in `vertebra-db`; this flow starts from that baseline), and `native-postgres-driver` (first native Rust pool hosted by the broker).
 
 ## Acceptance Boundary
 
@@ -119,4 +118,4 @@ These are planning research gaps, not runtime acceptance evidence. Resolve them 
 [^core-broker]: `src/rs/vertebra-core/src/broker.rs` — Shared-memory ring broker lease table and pool partitioning.
 [^broker-transport]: `src/py/vertebra/extensions/broker/transport.py` — SyncSHMBrokerTransport and AsyncSHMBrokerTransport worker transports.
 [^sqlspec-proxy]: `src/py/vertebra/extensions/sqlspec/proxy.py` — ProxySyncDriver and ProxyAsyncDriver upstream SQLSpec wrappers.
-[^fail-loud-baseline]: `.agents/bundles/specs/driver-fail-loud/spec.md` — Upstream flow that deletes the unused admission-only `*Pool` structs from vertebra-db.
+[^fail-loud-baseline]: `.agents/bundles/knowledge/domains/data/database-drivers-and-dialers.md` — Completed fail-loud baseline removing unused admission-only `*Pool` structs from `vertebra-db`.

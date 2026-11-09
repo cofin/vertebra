@@ -7,17 +7,13 @@ Active specifications and promoted research notes under `.agents/bundles/specs/`
 - [`native-data-platform`](native-data-platform/spec.md) — Shared connection pools across worker processes via the shared-memory ring broker and per-engine standalone Rust PyO3 driver wheels (`vertebra-<engine>`).
 - [`integration-remediation`](integration-remediation/spec.md) — Driver layering, SQLSpec adapter parity, SQLAlchemy/Advanced Alchemy/Django integration, native queues/channels/stores, MCP `2026-07-28` core, and runtime fastpath consolidation.
 
-The completed database foundation is documented in [driver contracts and adapter layout](../knowledge/domains/data/database-drivers-and-dialers.md) and [ADR-004](../knowledge/decisions/adr-004-optional-driver-wheels-and-shm-ownership.md).
+The completed database foundation and fail-loud baseline are documented in [driver contracts and adapter layout](../knowledge/domains/data/database-drivers-and-dialers.md), [collaborator-required queue backends](../knowledge/domains/framework/distributed-queues-and-email.md), and [ADR-004](../knowledge/decisions/adr-004-optional-driver-wheels-and-shm-ownership.md).
 
-## 2. Active Feature Specifications (`state: active`)
-
-- [`driver-fail-loud`](driver-fail-loud/spec.md) — Fail-loud database drivers and queue backends removing SQLite and `memory://` stand-ins, dead `vertebra-db` pools/codecs, and stale install hints across 13 completed chapters and 38 completed tasks ([`chapters/index.md`](driver-fail-loud/chapters/index.md)).
-
-## 3. Planned Feature Specifications (`state: planned`)
+## 2. Planned Feature Specifications (`state: planned`)
 
 - [`native-postgres-driver`](native-postgres-driver/spec.md) — Standalone Rust PostgreSQL wheel (`vertebra-postgres`) covering wire authentication, cloud mTLS/IAM, pools, single-Sync pipelines, binary COPY, SHM Arrow, notifications, logical replication, and native adapter cutover (`t01`–`t102`).
 
-## 4. Draft Child Flow Charters (`state: draft`)
+## 3. Draft Child Flow Charters (`state: draft`)
 
 - [`broker-pool-sharing`](broker-pool-sharing/spec.md) — Shared broker-owned pools for any SQLSpec, Advanced Alchemy, or SQLAlchemy config.
 - [`native-oracle-driver`](native-oracle-driver/spec.md) — Standalone Rust Oracle Thin wheel (`vertebra-oracle`).
@@ -30,12 +26,10 @@ The completed database foundation is documented in [driver contracts and adapter
 - [`sqlspec-adapter-parity`](sqlspec-adapter-parity/spec.md) — Feature-complete SQLSpec per-engine adapters, stores, and data dictionaries.
 - [`queues-tasks-and-channels`](queues-tasks-and-channels/spec.md) — Native PostgreSQL and Oracle `QueueStore` backends, `litestar-queues`, Django tasks, distributed channels, and `ValkeyStore`.
 
-## 5. Promoted Spec Research (`state: promoted`)
+## 4. Promoted Spec Research (`state: promoted`)
 
 - [`gap-analysis_20261103.md`](native-data-platform/research/gap-analysis_20261103.md) — Broker, native driver, and storage gap analysis (`native-data-platform`).
 - [`rust-driver-crates_20261103.md`](native-data-platform/research/rust-driver-crates_20261103.md) — Primary-source Rust client crate comparison and per-engine wheel packaging (`native-data-platform`).
-- [`driver-restructure_20261107.md`](driver-fail-loud/research/driver-restructure_20261107.md) — Fail-loud driver restructure and stand-in removal audit (`driver-fail-loud`).
-- [`change-surface_20261107.md`](driver-fail-loud/research/change-surface_20261107.md) — File-level change surface across drivers, queues, packaging, conformance, and docs (`driver-fail-loud`).
 - [`protocol-and-execution_20261105.md`](native-postgres-driver/research/protocol-and-execution_20261105.md) — PostgreSQL v3.0 extended query, single-Sync pipeline, COPY, and pgoutput v1 wire semantics (`native-postgres-driver`).
 - [`cloud-material_20261105.md`](native-postgres-driver/research/cloud-material_20261105.md) — Cloud SQL Admin and AlloyDB ephemeral mTLS certificate and IAM token lifecycle (`native-postgres-driver`).
 - [`audit-findings_20261103.md`](integration-remediation/research/audit-findings_20261103.md) — Audit findings across database extensions, framework, GCP drivers, MCP/WebMCP, and `vertebra.db` (`integration-remediation`).

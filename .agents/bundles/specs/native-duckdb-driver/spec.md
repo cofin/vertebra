@@ -7,8 +7,6 @@ status: draft
 state: draft
 has_chapters: false
 parent_prd: native-data-platform
-depends_on_flows:
-  - driver-fail-loud
 research:
   - ../native-data-platform/research/rust-driver-crates_20261103.md
   - ../integration-remediation/research/audit-findings_20261103.md
@@ -31,8 +29,8 @@ sources:
     resource: src/rs/vertebra-db/src/duckdb/mod.rs::DuckdbConfig
     title: DuckDB configuration and bootstrap pragma primitives in vertebra-db
   - id: fail-loud-baseline
-    resource: .agents/bundles/specs/driver-fail-loud/spec.md
-    title: Upstream flow that removes the DuckDB sqlite3 fallback and deletes DuckdbBrokerPool
+    resource: .agents/bundles/knowledge/domains/data/database-drivers-and-dialers.md
+    title: Completed fail-loud baseline removing the DuckDB sqlite3 fallback and DuckdbBrokerPool
   - id: duckdb-py
     resource: src/py/vertebra/db/adapters/duckdb/driver.py
     title: Python SyncDuckDBDriver and AsyncDuckDBDriver target cutover module
@@ -59,7 +57,7 @@ tags:
 
 See [crate research](../native-data-platform/research/rust-driver-crates_20261103.md).
 
-- **Fail-loud baseline.** [`driver-fail-loud`](../driver-fail-loud/spec.md) runs first: the DuckDB drivers execute only through the PyPI `duckdb` package, which lives in the GIL-only `[dependency-groups].duckdb` group that `make install`, `make py-test`, and `make coverage` install on GIL interpreters; DuckDB tests skip through `pytest.importorskip("duckdb")` on free-threaded interpreters, `DuckdbBrokerPool` is deleted from `vertebra-db`, and `DuckdbConfig::bootstrap_statements` stays as the shared pragma source [^fail-loud-baseline] [^duckdb-rs].
+- **Fail-loud baseline.** The completed [`driver-fail-loud` baseline](../../knowledge/domains/data/database-drivers-and-dialers.md) ensures the DuckDB drivers execute only through the PyPI `duckdb` package, which lives in the GIL-only `[dependency-groups].duckdb` group that `make install`, `make py-test`, and `make coverage` install on GIL interpreters; DuckDB tests skip through `pytest.importorskip("duckdb")` on free-threaded interpreters, `DuckdbBrokerPool` is deleted from `vertebra-db`, and `DuckdbConfig::bootstrap_statements` stays as the shared pragma source [^fail-loud-baseline] [^duckdb-rs].
 
 - **DuckDB (`src/rs/vertebra-duckdb/` -> `vertebra._duckdb` + `vertebra-core[duckdb]`).** Isolate `duckdb` `1.20000.1` (`bundled`, `appender-arrow`, `arrow 60`) in its own workspace PyO3 `cdylib` + `rlib` crate (`#[pymodule(gil_used = false)]`, `src/py/vertebra/_duckdb.pyi` verified by `mypy.stubtest`, `[project.optional-dependencies].duckdb`, wheel isolation `exclude` globs, `uv.lock`, and `areas.toml` registration) so `vertebra-core` stays free of the C++ DuckDB amalgamation and `arrow 60` never collides with `vertebra-oracle` (`arrow 59`).
 - **Explicit `Sync*` / `Async*` clients & Arrow SHM transfer.** Expose `SyncDuckDBClient` (`SyncCompletionQueue`) and `AsyncDuckDBClient` (`AsyncCompletionQueue` + `Notifier` via `vertebra_db::py_async` with `"_vertebra_duckdb_completion_drainer"`), serializing `arrow 60` `RecordBatch` streams directly into `VTBARROW` `ShmCapsule` `ArrowCursor` frames and loading Arrow batches via DuckDB `Appender`.
@@ -79,7 +77,7 @@ See [crate research](../native-data-platform/research/rust-driver-crates_2026110
 
 ## Dependencies
 
-`db-layout-and-contract` (`main @ 21c99f95`), `integration-remediation/db-engine-primitives` (`main @ 80ff8a65`), and [`driver-fail-loud`](../driver-fail-loud/spec.md), which removes the DuckDB `sqlite3` fallback and deletes `DuckdbBrokerPool`; this flow starts from that baseline.
+`db-layout-and-contract` (`main @ 21c99f95`), `integration-remediation/db-engine-primitives` (`main @ 80ff8a65`), and the completed [`driver-fail-loud` baseline](../../knowledge/domains/data/database-drivers-and-dialers.md), which removes the DuckDB `sqlite3` fallback and deletes `DuckdbBrokerPool`; this flow starts from that baseline.
 
 ## Acceptance Boundary
 
@@ -95,6 +93,6 @@ See [crate research](../native-data-platform/research/rust-driver-crates_2026110
 - t03 Python `SyncDuckDBDriver` / `AsyncDuckDBDriver` cutover from PyPI `duckdb` to `vertebra._duckdb`, conformance activation, and docs/OKF update.
 
 [^duckdb-rs]: `src/rs/vertebra-db/src/duckdb/mod.rs::DuckdbConfig` — DuckDB configuration and bootstrap pragma primitives in vertebra-db.
-[^fail-loud-baseline]: `.agents/bundles/specs/driver-fail-loud/spec.md` — Upstream flow that removes the DuckDB `sqlite3` fallback and deletes `DuckdbBrokerPool`.
+[^fail-loud-baseline]: `.agents/bundles/knowledge/domains/data/database-drivers-and-dialers.md` — Completed fail-loud baseline removing the DuckDB `sqlite3` fallback and `DuckdbBrokerPool`.
 [^duckdb-py]: `src/py/vertebra/db/adapters/duckdb/driver.py` — Python SyncDuckDBDriver and AsyncDuckDBDriver target cutover module.
 [^sqlspec-storage]: `src/py/vertebra/extensions/sqlspec/storage.py::build_duckdb_gcs_secret_sql` — GCS secret SQL builder slated for relocation to DuckDBCore.

@@ -7,8 +7,6 @@ status: draft
 state: draft
 has_chapters: false
 parent_prd: integration-remediation
-depends_on_flows:
-  - driver-fail-loud
 research:
   - ../integration-remediation/research/audit-findings_20261103.md
 plan_revision: 1
@@ -36,8 +34,8 @@ sources:
     resource: src/py/vertebra/extensions/litestar/channels.py
     title: Litestar pub/sub channels integration
   - id: fail-loud-baseline
-    resource: .agents/bundles/specs/driver-fail-loud/spec.md
-    title: Upstream flow that deletes production in-memory queue executors and clients and requires executor= or client=
+    resource: .agents/bundles/knowledge/domains/framework/distributed-queues-and-email.md
+    title: Completed fail-loud queue baseline requiring explicit executor= or client= collaborators
 tags:
   - queues
   - tasks
@@ -62,7 +60,7 @@ Vertebra executes durable queuing and pub/sub on its own Rust-backed adapter pri
 
 ## Baseline
 
-[`driver-fail-loud`](../driver-fail-loud/spec.md) runs first: production in-memory queue executors and clients are deleted; `OracleQueueBackend`, `PostgreSQLQueueBackend`, and `SpannerQueueBackend` require an injected `executor=` and `RedisQueueBackend` / `ValkeyQueueBackend` a live `client=` (or a `redis://host` URL with `redis` installed), raising `MissingDependencyError` or `ImproperConfigurationError` otherwise; the executor and stream-client fakes live in the queue test modules [^fail-loud-baseline]. This flow owns the live `PostgresQueueStore` and `OracleQueueStore` executors.
+The completed [`driver-fail-loud` queue baseline](../../knowledge/domains/framework/distributed-queues-and-email.md) removes production in-memory queue executors and clients: `OracleQueueBackend`, `PostgreSQLQueueBackend`, and `SpannerQueueBackend` require an injected `executor=` and `RedisQueueBackend` / `ValkeyQueueBackend` a live `client=` (or a `redis://host` URL with `redis` installed), raising `MissingDependencyError` or `ImproperConfigurationError` otherwise; the executor and stream-client fakes live in the queue test modules [^fail-loud-baseline]. This flow owns the live `PostgresQueueStore` and `OracleQueueStore` executors.
 
 ## Scope
 
@@ -94,7 +92,7 @@ Spanner and Redis/Valkey native `QueueStore` backends (deferred to PRD backlog);
 
 ## Dependencies
 
-[`driver-fail-loud`](../driver-fail-loud/spec.md); `native-data-platform` `native-postgres-driver`, `native-oracle-driver`, and `native-redis-driver` (`main @ 80ff8a65`); `integration-remediation` `db-engine-primitives` and `sqlspec-adapter-parity`.
+Completed [`driver-fail-loud` queue baseline](../../knowledge/domains/framework/distributed-queues-and-email.md); `native-data-platform` `native-postgres-driver`, `native-oracle-driver`, and `native-redis-driver` (`main @ 80ff8a65`); `integration-remediation` `db-engine-primitives` and `sqlspec-adapter-parity`.
 
 ## Acceptance Boundary
 
@@ -116,4 +114,4 @@ Spanner and Redis/Valkey native `QueueStore` backends (deferred to PRD backlog);
 [^queue-service]: `src/py/vertebra/framework/queues/base.py::QueueService` — First-party QueueService backend registry and cron scheduling.
 [^litestar-queues]: `src/py/vertebra/extensions/litestar/queues/__init__.py` — litestar-queues extension integration.
 [^litestar-channels]: `src/py/vertebra/extensions/litestar/channels.py` — Litestar pub/sub channels integration.
-[^fail-loud-baseline]: `.agents/bundles/specs/driver-fail-loud/spec.md` — Upstream flow that deletes production in-memory queue executors and clients and requires `executor=` or `client=`.
+[^fail-loud-baseline]: `.agents/bundles/knowledge/domains/framework/distributed-queues-and-email.md` — Completed fail-loud queue baseline requiring explicit `executor=` or `client=` collaborators.

@@ -1,5 +1,27 @@
 # Bundle Activity Log
 
+## [2026-11-09T20:56:00Z] flow-archive | driver-fail-loud
+
+Completed 13 chapters and 38 tasks on `feat/driver-fail-loud`; final correctness and fresh quality review remediations (`df6e0b8e`, `62a29db7`) have no unresolved findings. Source range `3c2b066a..62a29db7` is preserved in Git. Full lint, Clippy, Mypy, stubtest, Rust `vertebra-db` tests, Python fail-loud/queue/packaging/docs tests, and Zensical documentation gates pass.
+
+Durable synthesis is committed in `database-drivers-and-dialers.md`, `query-pipeline-cdc-and-tenancy.md`, `distributed-queues-and-email.md`, `sqlspec-alchemy-and-dialects.md`, `embeddings-and-vectors.md`, `polyglot-test-matrix.md`, `benchmarks-and-free-threaded.md`, `workflow.md`, `product.md`, `tech-stack.md`, and `adr-002-two-tier-shm-database-and-arrow-data-plane.md` before spec deletion.
+
+Reviewed chapter checkpoints:
+- `ch01-oracle-mssql-fail-loud`: `da2913ed`.
+- `ch02-duckdb-sqlalchemy-queue-fail-loud`: `67d6bca5`.
+- `ch03-remove-memory-fakes`: `ca1736b8`.
+- `ch04-redis-valkey-memory-removal`: `7f9c2a6c`.
+- `ch05-mssql-codec-cleanup`: `b29fdf87`.
+- `ch06-oracle-codec-cleanup`: `92e52f31`.
+- `ch07-vertebra-db-pools-and-mysql`: `5ae19501`.
+- `ch08-install-hints-and-extras-gate`: `3766bda4`.
+- `ch09-conformance-outcomes`: `a5bd15e5`.
+- `ch10-queue-backend-fail-loud`: `c0b5b022`.
+- `ch11-docs-and-okf`: `6035aff2`.
+- `ch12-queue-docs-and-knowledge`: `4d07461c`.
+- `ch13-agent-knowledge-and-embeddings-docs`: `b02636d9`.
+- Review remediation checkpoints: `df6e0b8e`, `62a29db7`.
+
 ## [2026-11-09T02:30:00Z] flow-plan | driver-fail-loud
 
 Approved `driver-fail-loud` at 13 chapters and 38 tasks ahead of the standalone native database driver flows, removing SQLite and `memory://` stand-ins across database drivers and SQLAlchemy DB-API, requiring live or injected collaborators across queue backends, deleting dead `vertebra-db` pools and superseded codecs, aligning `MissingDependencyError` install hints behind an AST extras gate, making conformance skip/fail outcomes explicit, and updating database, queue, and agent docs and OKF knowledge.

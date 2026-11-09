@@ -10,23 +10,23 @@ parent_prd: null
 research:
   - research/audit-findings_20261103.md
   - research/google-cloud-rust_20261103.md
-plan_revision: 8
-plan_commit: 7fda5d85
-state_revision: 4
+plan_revision: 9
+plan_commit: 62a29db7
+state_revision: 5
 current_task: null
-last_verified_checkpoint: 7fda5d85
+last_verified_checkpoint: 62a29db7
 created_at: "2026-11-03T03:30:00Z"
-updated_at: "2026-11-09T19:25:00Z"
+updated_at: "2026-11-09T20:56:00Z"
 generated:
   by: flow-setup
   at: "2026-11-07T04:15:00Z"
 verified:
-  - by: agent:flow-executor
-    at: "2026-11-09T19:25:00Z"
-    commit: 7fda5d85
+  - by: agent:flow-archive
+    at: "2026-11-09T20:56:00Z"
+    commit: 62a29db7
   - by: agent:flow-archive
     at: "2026-11-09T02:25:00Z"
-    commit: 4c48ba62
+    commit: 07ea4a4b
   - by: agent:flow-setup
     at: "2026-11-07T04:15:00Z"
     commit: 9af810f5
@@ -58,7 +58,7 @@ tags:
 - **Remaining Open Child Flows**: `sqlspec-adapter-parity` (Ch4), `queues-tasks-and-channels` (Ch5), and `sqlalchemy-and-django-integration` (Ch6) remain in `draft` sequenced behind sibling [native-data-platform](../native-data-platform/spec.md) driver and broker cutovers [^sqlspec-adapters].
 <!-- truth: end -->
 
-Baseline: `main @ 077a3fe9` / `HEAD @ 7fda5d85` (Chapters 1 `critical-correctness-fixes` [`364c7cbe`], 2 `gcp-wire-protocol-correctness` [`984ce732`], 9 `gcp-driver-resilience` [`abd33ab6`], the `Sync*` / `Async*` class split [`f7417015`], `db-layout-and-contract` [`21c99f95`], Chapter 3 `db-engine-primitives` [`80ff8a65`], post-merge review remediation [`2b737240`], Chapter 8 `runtime-structure-and-throughput` [`d2fa5072`], and Chapter 7 `mcp-webmcp-core` [`077a3fe9`] completed and merged onto `main`, sibling `storage-completeness` [`a2af5066`] and `storage-remediation` [`7139b40b`] completed and archived on `feat/storage-updates`, and sibling `driver-fail-loud` [`5c95a733`] implemented on `feat/driver-fail-loud`). Verified audit findings live in [research/audit-findings_20261103.md](research/audit-findings_20261103.md).
+Baseline: `main @ 077a3fe9` / `HEAD @ 62a29db7` (Chapters 1 `critical-correctness-fixes` [`364c7cbe`], 2 `gcp-wire-protocol-correctness` [`984ce732`], 9 `gcp-driver-resilience` [`abd33ab6`], the `Sync*` / `Async*` class split [`f7417015`], `db-layout-and-contract` [`21c99f95`], Chapter 3 `db-engine-primitives` [`80ff8a65`], post-merge review remediation [`2b737240`], Chapter 8 `runtime-structure-and-throughput` [`d2fa5072`], and Chapter 7 `mcp-webmcp-core` [`077a3fe9`] completed and merged onto `main`, sibling `storage-completeness` [`77c6acfa`] and `storage-remediation` [`c8c8998a`] completed and archived on `feat/storage-updates`, and sibling `driver-fail-loud` [`62a29db7`] completed and archived on `feat/driver-fail-loud`). Verified audit findings live in [research/audit-findings_20261103.md](research/audit-findings_20261103.md).
 
 ## 1. North Star Goal & Problem Framing
 
@@ -197,8 +197,8 @@ flowchart LR
 
 ## Continuity Snapshot
 
-- **Flow ID:** `integration-remediation` (`state: planned`, `plan_revision: 8`, `plan_commit: 7fda5d85`, `last_verified_checkpoint: 7fda5d85`)
-- **Active Focus:** Chapters 1, 2, 3, 7 (`077a3fe9`), 8 (`d2fa5072`), and 9 are merged onto `main @ 077a3fe9`; sibling `storage-completeness` (`a2af5066`) and `storage-remediation` (`7139b40b`) are archived into durable knowledge on `feat/storage-updates`, and sibling `driver-fail-loud` (`5c95a733`, 13 chapters / 38 tasks) is active on `feat/driver-fail-loud` ahead of `native-postgres-driver`, the per-engine native driver flows, and Chapters 4 (`sqlspec-adapter-parity`), 5 (`queues-tasks-and-channels`), and 6 (`sqlalchemy-and-django-integration`).
+- **Flow ID:** `integration-remediation` (`state: planned`, `plan_revision: 9`, `plan_commit: 62a29db7`, `last_verified_checkpoint: 62a29db7`)
+- **Active Focus:** Chapters 1, 2, 3, 7 (`077a3fe9`), 8 (`d2fa5072`), and 9 are merged onto `main @ 077a3fe9`; sibling `storage-completeness` (`77c6acfa`) and `storage-remediation` (`c8c8998a`) are archived into durable knowledge on `feat/storage-updates`, and sibling `driver-fail-loud` (`62a29db7`, 13 chapters / 38 tasks) is completed and archived on `feat/driver-fail-loud` ahead of `native-postgres-driver`, the per-engine native driver flows, and Chapters 4 (`sqlspec-adapter-parity`), 5 (`queues-tasks-and-channels`), and 6 (`sqlalchemy-and-django-integration`).
 - **Completed Checkpoints:** `critical-correctness-fixes` (`364c7cbe`), `gcp-wire-protocol-correctness` (`984ce732`), `gcp-driver-resilience` (`abd33ab6`), `db-engine-primitives` (`80ff8a65`), `runtime-structure-and-throughput` (`d2fa5072`), and `mcp-webmcp-core` (`077a3fe9`).
 - **Key decisions:**
   - Engine adapters and local primitives live under `vertebra/db/adapters/<engine>/` backed by per-engine PyO3 wheels `src/rs/vertebra-<engine>` (`vertebra._<engine>`); framework and agent integrations live under `vertebra.extensions.*`, `vertebra.framework.*`, and `vertebra.agent.tools`.

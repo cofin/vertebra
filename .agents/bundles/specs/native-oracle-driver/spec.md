@@ -7,8 +7,6 @@ status: draft
 state: draft
 has_chapters: false
 parent_prd: native-data-platform
-depends_on_flows:
-  - driver-fail-loud
 research:
   - ../native-data-platform/research/rust-driver-crates_20261103.md
   - ../integration-remediation/research/audit-findings_20261103.md
@@ -37,8 +35,8 @@ sources:
     resource: src/py/vertebra/db/adapters/oracle/driver.py
     title: Python SyncOracleDriver and AsyncOracleDriver target cutover module
   - id: fail-loud-baseline
-    resource: .agents/bundles/specs/driver-fail-loud/spec.md
-    title: Upstream flow that replaces the Oracle sqlite3 stand-in with a MissingDependencyError guard and deletes TNS framing
+    resource: .agents/bundles/knowledge/domains/data/database-drivers-and-dialers.md
+    title: Completed fail-loud baseline placing a MissingDependencyError guard on Oracle and deleting TNS framing
 tags:
   - rust
   - oracle
@@ -62,7 +60,7 @@ See [crate research](../native-data-platform/research/rust-driver-crates_2026110
 
 Oracle application-context writes require the namespace's trusted package in the call stack, associated through `CREATE CONTEXT`; context values persist for the session until reset. The trusted-package requirement also applies to namespace clearing. The native tenant-context path and pool cleanup follow these [Oracle 26 DBMS_SESSION requirements](https://docs.oracle.com/en/database/oracle/oracle-database/26/arpls/DBMS_SESSION.html). A rendered anonymous block or an in-process context dictionary establishes neither deployed context authorization nor VPD enforcement.
 
-[`driver-fail-loud`](../driver-fail-loud/spec.md) runs first: `SyncOracleDriver` and `AsyncOracleDriver` raise `MissingDependencyError` through `_require_oracle_native()` until `vertebra._oracle` exists, and `vertebra-db` no longer carries `encode_tns_connect_packet`, `encode_tns_data_packet`, `decode_tns_packet`, `TnsPacketType`, `ORACLE_DIALECT_TAG`, `OraclePool`, or `OracleWalletMaterial` [^fail-loud-baseline]. `oracledb` owns TNS framing inside `vertebra-oracle`.
+The completed [`driver-fail-loud` baseline](../../knowledge/domains/data/database-drivers-and-dialers.md) establishes the prerequisite state: `SyncOracleDriver` and `AsyncOracleDriver` raise `MissingDependencyError` through `_require_oracle_native()` until `vertebra._oracle` exists, and `vertebra-db` no longer carries `encode_tns_connect_packet`, `encode_tns_data_packet`, `decode_tns_packet`, `TnsPacketType`, `ORACLE_DIALECT_TAG`, `OraclePool`, or `OracleWalletMaterial` [^fail-loud-baseline]. `oracledb` owns TNS framing inside `vertebra-oracle`.
 
 - **Official pure-Rust crate in its own wheel (`vertebra._oracle` + `vertebra-core[oracle]`).** Build `src/rs/vertebra-oracle` (`#[pymodule(gil_used = false)]`, `src/py/vertebra/_oracle.pyi`, `[project.optional-dependencies].oracle`, `uv lock --offline`) on Oracle's official `oracledb` crate pinned `=26.0.0-beta.5` (`arrow` feature, `UPL-1.0 OR Apache-2.0`, zero Oracle Instant Client / ODPI-C dependency). Isolating `vertebra-oracle` in its own wheel keeps `oracledb` and `arrow 59` completely out of `vertebra-core` and `vertebra-duckdb` (`arrow 60`).
 - **Leading `Sync*` / `Async*` clients (`SyncOracleClient` & `AsyncOracleClient`) & `VTBARROW` `ShmCapsule` IPC**. Although `oracledb` `26.0.0-beta.5` uses blocking Rust sockets internally, Python gets full non-blocking `AsyncOracleDriver` (`asyncio` / `oracle+vertebra_async`) alongside `SyncOracleDriver`: each pooled connection runs on a dedicated Rust worker thread bridged synchronously via `SyncCompletionQueue` (`SyncOracleClient`) and asynchronously to `asyncio.Future` via `AsyncCompletionQueue` + `Notifier` (`AsyncOracleClient` via `vertebra_db::py_async` with `"_vertebra_oracle_completion_drainer"`) and `_DbTaskCanceller` calling out-of-band `connection.break_execution()`. `query_arrow` (`arrow 59`) batches serialize directly into `VTBARROW` IPC v5 shared memory and return `vertebra._vertebra.ArrowCursor` via `ShmCapsule` with zero copies.
@@ -96,7 +94,7 @@ Oracle application-context writes require the namespace's trusted package in the
 
 ## Dependencies
 
-`db-layout-and-contract` (`main @ 21c99f95`), `integration-remediation/db-engine-primitives` (`main @ 80ff8a65`), and [`driver-fail-loud`](../driver-fail-loud/spec.md), which replaces the Oracle `sqlite3` stand-in with the `MissingDependencyError` guard and deletes TNS framing; this flow starts from that baseline.
+`db-layout-and-contract` (`main @ 21c99f95`), `integration-remediation/db-engine-primitives` (`main @ 80ff8a65`), and the completed [`driver-fail-loud` baseline](../../knowledge/domains/data/database-drivers-and-dialers.md), which replaces the Oracle `sqlite3` stand-in with the `MissingDependencyError` guard and deletes TNS framing; this flow starts from that baseline.
 
 ## Acceptance Boundary
 
@@ -120,4 +118,4 @@ Oracle application-context writes require the namespace's trusted package in the
 [^oracle-rs]: `src/rs/vertebra-db/src/oracle/mod.rs` — Shared Oracle OSON, VECTOR, and session attribute codecs in vertebra-db.
 [^oracle-tns]: `src/rs/vertebra-db/src/oracle/tns.rs` — TNS descriptor parsing primitives in vertebra-db.
 [^oracle-py]: `src/py/vertebra/db/adapters/oracle/driver.py` — Python SyncOracleDriver and AsyncOracleDriver target cutover module.
-[^fail-loud-baseline]: `.agents/bundles/specs/driver-fail-loud/spec.md` — Upstream flow that replaces the Oracle `sqlite3` stand-in with a `MissingDependencyError` guard and deletes TNS framing.
+[^fail-loud-baseline]: `.agents/bundles/knowledge/domains/data/database-drivers-and-dialers.md` — Completed fail-loud baseline placing a `MissingDependencyError` guard on Oracle and deleting TNS framing.
