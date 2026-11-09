@@ -722,6 +722,110 @@ async def test_direct_async_storage_range_fastpath_matches_sync(end: int | None)
     assert dict(headers)[b"content-length"] == str(len(body)).encode()
 
 
+@pytest.fixture
+def storage_read_spy(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[tuple[int, int | None]]]:
+    """Forbid full-object reads on `SyncObjectStore` and record bounded `get_range` / `get_stream` calls."""
+    calls: dict[str, list[tuple[int, int | None]]] = {"get_range": [], "get_stream": []}
+    original_range = SyncObjectStore.get_range
+    original_stream = SyncObjectStore.get_stream
+
+    def forbidden(self: SyncObjectStore, path: str) -> bytes:
+        raise AssertionError(f"full-object read of {path}")
+
+    def spy_range(self: SyncObjectStore, path: str, offset: int, length: int) -> bytes:
+        calls["get_range"].append((offset, length))
+        return original_range(self, path, offset, length)
+
+    def spy_stream(self: SyncObjectStore, path: str, *, chunk_size: int | None = None) -> Iterator[StorageBuffer]:
+        calls["get_stream"].append((0, chunk_size))
+        return original_stream(self, path, chunk_size=chunk_size)
+
+    monkeypatch.setattr(SyncObjectStore, "get", forbidden)
+    monkeypatch.setattr(SyncObjectStore, "get_view", forbidden)
+    monkeypatch.setattr(SyncObjectStore, "get_range", spy_range)
+    monkeypatch.setattr(SyncObjectStore, "get_stream", spy_stream)
+    return calls
+
+
+def test_storage_response_streams_full_body_in_bounded_chunks(
+    storage_read_spy: dict[str, list[tuple[int, int | None]]],
+) -> None:
+    """A `200` response streams native chunks bounded by `chunk_size` without a full-object read."""
+    store = SyncObjectStore("memory://")
+    payload = os.urandom(256 * 1024)
+    store.put("large.bin", payload)
+    response = StreamingStorageResponse.from_sync_store(store, "large.bin")
+    chunks = list(response.iter_chunks(chunk_size=65536))
+    assert [len(chunk) for chunk in chunks] == [65536] * 4
+    assert all(isinstance(chunk, memoryview) for chunk in chunks)
+    assert b"".join(chunks) == payload
+    assert storage_read_spy == {"get_range": [], "get_stream": [(0, 65536)]}
+
+
+@pytest.mark.parametrize("explicit_chunk_size", [True, False])
+def test_storage_response_range_reads_only_requested_windows(
+    storage_read_spy: dict[str, list[tuple[int, int | None]]], explicit_chunk_size: bool
+) -> None:
+    """A `206` response reads bounded `get_range` windows for chunks and one exact slice for fastpath."""
+    store = SyncObjectStore("memory://")
+    payload = bytes(range(64))
+    store.put("range.bin", payload)
+    response = StreamingStorageResponse.from_sync_store(
+        store, "range.bin", range_header="bytes=10-25", chunk_size=65536 if explicit_chunk_size else 6
+    )
+    chunks = list(response.iter_chunks(chunk_size=6) if explicit_chunk_size else response.iter_chunks())
+    status, headers, body = response.to_fastpath_tuple()
+    assert [bytes(chunk) for chunk in chunks] == [payload[10:16], payload[16:22], payload[22:26]]
+    assert all(isinstance(chunk, memoryview) for chunk in chunks)
+    assert status == 206
+    assert bytes(body) == payload[10:26]
+    assert dict(headers)[b"content-range"] == b"bytes 10-25/64"
+    assert dict(headers)[b"content-length"] == b"16"
+    assert storage_read_spy == {"get_range": [(10, 6), (16, 6), (22, 4), (10, 16)], "get_stream": []}
+
+
+@pytest.mark.anyio
+async def test_storage_response_async_iteration_over_sync_store_streams_ranges(
+    storage_read_spy: dict[str, list[tuple[int, int | None]]],
+) -> None:
+    """`aiter_chunks()` over a sync store reuses bounded range windows instead of a full-object read."""
+    store = SyncObjectStore("memory://")
+    store.put("range.bin", b"0123456789")
+    response = StreamingStorageResponse.from_sync_store(store, "range.bin", range_header="bytes=2-8", chunk_size=4)
+    assert [bytes(chunk) async for chunk in response.aiter_chunks()] == [b"2345", b"678"]
+    assert storage_read_spy == {"get_range": [(2, 4), (6, 3)], "get_stream": []}
+
+
+@pytest.mark.parametrize(
+    ("payload", "range_header", "expected_status"),
+    [(b"", None, 200), (b"", "bytes=0-", 416), (b"0123456789", "bytes=99-", 416)],
+)
+def test_storage_response_empty_and_unsatisfiable_skip_storage_reads(
+    storage_read_spy: dict[str, list[tuple[int, int | None]]],
+    payload: bytes,
+    range_header: str | None,
+    expected_status: int,
+) -> None:
+    """Empty objects and `416` responses yield no chunks and an empty body without touching the payload."""
+    store = SyncObjectStore("memory://")
+    store.put("object.bin", payload)
+    response = StreamingStorageResponse.from_sync_store(store, "object.bin", range_header=range_header)
+    status, headers, body = response.to_fastpath_tuple()
+    assert list(response.iter_chunks()) == []
+    assert status == expected_status
+    assert body == b""
+    assert dict(headers)[b"content-length"] == b"0"
+    assert storage_read_spy == {"get_range": [], "get_stream": []}
+
+
+@pytest.mark.parametrize("chunk_size", [0, -1])
+def test_storage_response_iter_chunks_rejects_non_positive_chunk_size(chunk_size: int) -> None:
+    """Explicit non-positive chunk sizes fail before any storage read."""
+    response = StreamingStorageResponse(data=b"body")
+    with pytest.raises(ValueError, match="chunk_size must be positive"):
+        list(response.iter_chunks(chunk_size=chunk_size))
+
+
 @pytest.mark.parametrize(
     ("etag", "expected"),
     [("0", b'"0"'), ('"quoted"', b'"quoted"'), ('W/"weak"', b'W/"weak"'), ("tagé", b'"tag\xe9"')],

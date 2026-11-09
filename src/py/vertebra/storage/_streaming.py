@@ -142,27 +142,42 @@ class StreamingStorageResponse(msgspec.Struct, frozen=True, gc=False):
             raise ValueError("chunk_size must be >= 1")
         return cls._from_meta(store, key, store.head(key), range_header, content_type, headers, chunk_size)
 
-    def iter_chunks(self) -> Iterator[memoryview]:
-        """Yield fixed-size zero-copy memoryview slices over the stored object."""
+    def iter_chunks(self, chunk_size: int | None = None) -> Iterator[memoryview]:
+        """Yield zero-copy memoryview chunks of at most `chunk_size` bytes.
+
+        Full responses stream through `SyncObjectStore.get_stream`; byte-range responses read
+        bounded `SyncObjectStore.get_range` windows, so the full object is never materialized.
+
+        Args:
+            chunk_size: Maximum bytes per chunk; defaults to the descriptor's `chunk_size`.
+
+        Raises:
+            ValueError: `chunk_size` is not positive.
+            ImproperConfigurationError: The descriptor is backed by an `AsyncObjectStore`.
+        """
+        step = self.chunk_size if chunk_size is None else chunk_size
+        if step <= 0:
+            raise ValueError("chunk_size must be positive")
         if self.status_code == 416:
             return
         if self.data is not None:
-            view = memoryview(self.data)
-            for offset in range(0, len(view), self.chunk_size):
-                yield view[offset : offset + self.chunk_size]
+            yield from self._slice_view(memoryview(self.data), step)
             return
         if self.store is None:
             return
         if isinstance(self.store, AsyncObjectStore):
             msg = "AsyncObjectStore cannot be used with synchronous iter_chunks; use aiter_chunks or SyncObjectStore"
             raise ImproperConfigurationError(msg)
-        view = self.store.get_view(self.key)
         if self.range_start is not None or self.range_end is not None:
-            start = max(0, int(self.range_start or 0))
-            end = int(self.range_end) + 1 if self.range_end is not None else len(view)
-            view = view[start:end]
-        for offset in range(0, len(view), self.chunk_size):
-            yield view[offset : offset + self.chunk_size]
+            selected = self._resolve_sync_range(self.store)
+            for offset in range(selected.start, selected.end_exclusive, step):
+                length = min(step, selected.end_exclusive - offset)
+                yield memoryview(self.store.get_range(self.key, offset, length))
+            return
+        if self.total_size == 0:
+            return
+        for buffer in self.store.get_stream(self.key, chunk_size=step):
+            yield from self._slice_view(memoryview(buffer), step)
 
     async def aiter_chunks(self) -> AsyncIterator[StorageBuffer | bytes | memoryview]:
         """Yield native async chunks or bounded async range reads."""
@@ -206,8 +221,12 @@ class StreamingStorageResponse(msgspec.Struct, frozen=True, gc=False):
         headers.append((b"content-length", str(len(payload)).encode("ascii")))
         return status, headers, payload
 
-    def to_fastpath_tuple(self) -> tuple[int, list[tuple[bytes, bytes]], bytes]:
-        """Serialize into a `(status_code, headers, body)` tuple for FastPath dispatch."""
+    def to_fastpath_tuple(self) -> tuple[int, list[tuple[bytes, bytes]], bytes | memoryview]:
+        """Serialize into a `(status_code, headers, body)` tuple for FastPath dispatch.
+
+        Byte-range bodies are fetched with one `SyncObjectStore.get_range` call covering only the
+        selected bytes; full bodies are returned as a zero-copy view over the native buffer.
+        """
         if self.store is not None and isinstance(self.store, AsyncObjectStore) and self.data is None and self.key:
             msg = (
                 "AsyncObjectStore cannot be used with synchronous to_fastpath_tuple; "
@@ -221,21 +240,22 @@ class StreamingStorageResponse(msgspec.Struct, frozen=True, gc=False):
         if self.etag is not None:
             encoded_headers.append((b"etag", self._format_etag(self.etag).encode("latin-1")))
         resolved_range = self.content_range
+        payload: bytes | memoryview
         if self.status_code == 416:
             payload = b""
         elif self.data is not None:
             payload = self.data
         elif isinstance(self.store, SyncObjectStore) and self.key:
-            view = self.store.get_view(self.key)
-            total_len = self.total_size or len(view)
             if self.range_start is not None or self.range_end is not None:
-                start = max(0, int(self.range_start or 0))
-                end = int(self.range_end) + 1 if self.range_end is not None else len(view)
-                payload = bytes(view[start:end])
+                selected = self._resolve_sync_range(self.store)
+                payload = self.store.get_range(self.key, selected.start, selected.content_length)
                 if resolved_range is None:
-                    resolved_range = f"bytes {start}-{max(start, end - 1)}/{total_len}"
+                    last = max(selected.start, selected.end_exclusive - 1)
+                    resolved_range = f"bytes {selected.start}-{last}/{selected.total_size}"
+            elif self.total_size == 0:
+                payload = b""
             else:
-                payload = bytes(view)
+                payload = self.store.get_view(self.key)
         else:
             payload = b""
 
@@ -317,3 +337,16 @@ class StreamingStorageResponse(msgspec.Struct, frozen=True, gc=False):
         if any(not (ord(char) == 0x21 or 0x23 <= ord(char) <= 0x7E or 0x80 <= ord(char) <= 0xFF) for char in token):
             raise ValueError("ETag contains invalid opaque tag characters")
         return value if quoted else f'"{value}"'
+
+    @staticmethod
+    def _slice_view(view: memoryview, step: int) -> Iterator[memoryview]:
+        """Yield zero-copy slices of at most `step` bytes over `view`."""
+        for offset in range(0, len(view), step):
+            yield view[offset : offset + step]
+
+    def _resolve_sync_range(self, store: SyncObjectStore) -> ByteRange:
+        """Clamp the descriptor's inclusive range to the object size, issuing a HEAD only when the size is unknown."""
+        total_size = self.total_size or store.head(self.key).size
+        start = max(0, self.range_start or 0)
+        end = min(self.range_end + 1, total_size) if self.range_end is not None else total_size
+        return ByteRange(start, max(start, end), total_size)
