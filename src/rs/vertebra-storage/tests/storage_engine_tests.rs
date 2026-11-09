@@ -1011,6 +1011,105 @@ async fn test_incremental_s3_uniform_multipart_session() {
     assert_incremental_uniform_multipart_session("s3").await;
 }
 
+#[tokio::test]
+async fn test_incremental_gcs_uniform_multipart_session() {
+    assert_incremental_uniform_multipart_session("gs").await;
+}
+
+async fn write_small_multipart_chunks(
+    scheme: &str,
+    chunk_count: usize,
+    chunk_len: usize,
+) -> (Vec<usize>, Vec<u8>, Bytes) {
+    use _storage::store::PutConditionalOptions;
+    use std::sync::Arc;
+
+    let counting = Arc::new(CountingStore::new(std::time::Duration::ZERO));
+    let engine = ObjectStoreEngine::with_store(counting.clone(), scheme);
+    let mut session = engine
+        .create_multipart("blobs/small-chunks.bin", PutConditionalOptions::default())
+        .await
+        .expect("create multipart session");
+    let mut expected = Vec::with_capacity(chunk_count * chunk_len);
+    for chunk_idx in 0..chunk_count {
+        let data: Vec<u8> = (0..chunk_len)
+            .map(|offset| ((chunk_idx * 31 + offset) % 251) as u8)
+            .collect();
+        expected.extend_from_slice(&data);
+        session
+            .write_chunk(Bytes::from(data))
+            .await
+            .expect("write_chunk");
+    }
+    session.complete().await.expect("complete multipart");
+    let stored_parts = counting
+        .uploads
+        .part_sizes
+        .lock()
+        .expect("part sizes lock")
+        .clone();
+    assert_eq!(
+        stored_parts,
+        session.part_sizes_flushed(),
+        "session part ledger must match parts received by the store"
+    );
+    let fetched = engine
+        .get("blobs/small-chunks.bin")
+        .await
+        .expect("get completed object");
+    (stored_parts, expected, fetched)
+}
+
+#[tokio::test]
+async fn test_gcs_multipart_coalesces_small_chunks_into_uniform_parts() {
+    const CHUNK_LEN: usize = 64 * 1024;
+    const CHUNK_COUNT: usize = 300;
+
+    for scheme in ["gs", "gcs"] {
+        let (parts, expected, fetched) =
+            write_small_multipart_chunks(scheme, CHUNK_COUNT, CHUNK_LEN).await;
+        let total = CHUNK_COUNT * CHUNK_LEN;
+        assert_eq!(
+            parts.len(),
+            total.div_ceil(R2_UNIFORM_PART_SIZE),
+            "{scheme}: unexpected part count {parts:?}"
+        );
+        let (tail, non_final) = parts.split_last().expect("at least one part");
+        assert!(
+            non_final.iter().all(|&len| len == R2_UNIFORM_PART_SIZE),
+            "{scheme}: every non-final part must be exactly 8 MiB, got {parts:?}"
+        );
+        assert_eq!(*tail, total - non_final.len() * R2_UNIFORM_PART_SIZE);
+        assert_eq!(fetched.len(), total);
+        assert_eq!(
+            &fetched[..],
+            &expected[..],
+            "{scheme}: bytes must round-trip"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_non_uniform_backends_upload_chunks_as_written() {
+    const CHUNK_LEN: usize = 64 * 1024;
+    const CHUNK_COUNT: usize = 20;
+
+    for scheme in ["az", "azure", "memory", "file"] {
+        let (parts, expected, fetched) =
+            write_small_multipart_chunks(scheme, CHUNK_COUNT, CHUNK_LEN).await;
+        assert_eq!(
+            parts,
+            vec![CHUNK_LEN; CHUNK_COUNT],
+            "{scheme}: chunks must pass through without coalescing"
+        );
+        assert_eq!(
+            &fetched[..],
+            &expected[..],
+            "{scheme}: bytes must round-trip"
+        );
+    }
+}
+
 #[test]
 fn test_s3_and_b2_url_aliases_normalize_to_s3_backend() {
     let options = HashMap::from([
@@ -2148,8 +2247,13 @@ async fn test_checked_get_range_raw_keys_local_metadata_and_s3_http_options() {
     assert_eq!(&s3_bytes[..], b"ok");
 
     let http_opts = HashMap::from([
-        ("X-Api-Key".to_string(), "secret-api-key".to_string()),
+        (
+            "headers".to_string(),
+            r#"{"X-Api-Key":"secret-api-key"}"#.to_string(),
+        ),
         ("header.X-Trace-Id".to_string(), "trace-42".to_string()),
+        ("http_header.X-Tenant".to_string(), "tenant-7".to_string()),
+        ("region".to_string(), "x".to_string()),
     ]);
     let http_engine = ObjectStoreEngine::from_url(
         &format!("http://127.0.0.1:{}", addr.port()),
@@ -2183,6 +2287,18 @@ async fn test_checked_get_range_raw_keys_local_metadata_and_s3_http_options() {
     assert!(
         http_req.contains("x-trace-id: trace-42"),
         "expected x-trace-id header, got: {http_req}"
+    );
+    assert!(
+        http_req.contains("x-tenant: tenant-7"),
+        "expected x-tenant header, got: {http_req}"
+    );
+    assert!(
+        !http_req.contains("\r\nregion:"),
+        "unrelated option keys must not become headers, got: {http_req}"
+    );
+    assert!(
+        !http_req.contains("\r\nheaders:"),
+        "the JSON headers option must not be sent verbatim, got: {http_req}"
     );
 }
 
@@ -2959,6 +3075,7 @@ struct UploadProbes {
     aborts: std::sync::atomic::AtomicUsize,
     fail_parts: std::sync::atomic::AtomicBool,
     fail_complete: std::sync::atomic::AtomicBool,
+    part_sizes: std::sync::Mutex<Vec<usize>>,
 }
 
 #[derive(Debug)]
@@ -2982,6 +3099,11 @@ impl object_store::MultipartUpload for CountingUpload {
     ) -> futures::future::BoxFuture<'static, object_store::Result<()>> {
         use std::sync::atomic::Ordering;
         self.probes.parts.fetch_add(1, Ordering::SeqCst);
+        self.probes
+            .part_sizes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(data.content_length());
         if self.probes.fail_parts.load(Ordering::SeqCst) {
             return Box::pin(async { Err(injected_failure("part")) });
         }

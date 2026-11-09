@@ -280,9 +280,10 @@ pub struct PutConditionalOptions {
 
 /// Stateful incremental multipart upload session.
 ///
-/// S3, Cloudflare R2, and OCI chunks pass through a rolling 8 MiB `UniformPartAccumulator`.
-/// This satisfies S3's non-trailing 5 MiB minimum and R2/OCI part uniformity without
-/// buffering the entire payload in memory. B2 URLs normalize to the S3 backend.
+/// S3, GCS, Cloudflare R2, and OCI chunks pass through a rolling 8 MiB
+/// `UniformPartAccumulator`. This satisfies the S3 and GCS XML non-trailing 5 MiB minimum and
+/// R2/OCI part uniformity without buffering the entire payload in memory. B2 URLs normalize to
+/// the S3 backend. Azure, memory, and local-file chunks are uploaded as written.
 pub struct MultipartUploadSession {
     path: String,
     upload: Option<Box<dyn MultipartUpload>>,
@@ -667,6 +668,8 @@ pub enum BackendConfig {
     },
 }
 
+/// Collect outbound HTTP headers from the JSON `headers` option and `header.<name>` /
+/// `http_header.<name>` keys; every other option key is backend configuration, not a header.
 fn parse_http_headers_from_options(
     opts: &HashMap<String, String>,
 ) -> Result<HashMap<String, String>, StorageError> {
@@ -678,15 +681,15 @@ fn parse_http_headers_from_options(
         headers.extend(parsed);
     }
     for (k, v) in opts {
-        if k == "allow_http" || k == "headers" {
-            continue;
-        }
-        let header_name = k
+        let Some(header_name) = k
             .strip_prefix("header.")
             .or_else(|| k.strip_prefix("http_header."))
-            .unwrap_or(k.as_str());
-        if !header_name.trim().is_empty() {
-            headers.insert(header_name.trim().to_string(), v.clone());
+        else {
+            continue;
+        };
+        let header_name = header_name.trim();
+        if !header_name.is_empty() {
+            headers.insert(header_name.to_string(), v.clone());
         }
     }
     Ok(headers)

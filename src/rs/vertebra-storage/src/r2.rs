@@ -1,13 +1,17 @@
-//! Bounded multipart chunking for S3 minimum sizes and R2/OCI uniformity.
+//! Bounded multipart chunking for S3/GCS minimum sizes and R2/OCI uniformity.
 
 use bytes::{Bytes, BytesMut};
 
-/// Uniform 8 MiB chunks satisfy S3's 5 MiB minimum and R2/OCI part uniformity.
+/// Uniform 8 MiB chunks satisfy the S3 and GCS XML 5 MiB minimum and R2/OCI part uniformity.
 pub const R2_UNIFORM_PART_SIZE: usize = 8 * 1024 * 1024;
 
 /// Return `true` when the backend uses bounded uniform non-trailing multipart parts.
+///
+/// S3 and the GCS XML multipart API reject non-final parts below 5 MiB; R2 and OCI also
+/// require identical non-final part sizes. Azure block blobs, memory, and local files accept
+/// arbitrary block sizes, so their chunks pass through unchanged.
 pub fn requires_uniform_part_size(scheme: &str) -> bool {
-    matches!(scheme, "s3" | "r2" | "oci")
+    matches!(scheme, "s3" | "r2" | "oci" | "gs" | "gcs")
 }
 
 /// Split a payload into uniform `part_size` chunks (all non-trailing chunks have identical byte length).
