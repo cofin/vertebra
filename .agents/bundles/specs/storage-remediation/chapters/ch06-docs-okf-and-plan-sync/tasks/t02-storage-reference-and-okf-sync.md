@@ -5,7 +5,7 @@ chapter_id: ch06-docs-okf-and-plan-sync
 title: Expand docs/reference/storage.md API coverage and synchronize product.md and object-storage.md OKF chapters
 description: Expand mkdocstrings member lists in docs/reference/storage.md to cover the full public vertebra.storage surface, flatten the truth block and fix vertebra._storage vs vertebra._vertebra attribution in .agents/bundles/product/product.md, and resynthesize .agents/bundles/knowledge/domains/storage/object-storage.md within <= 200 lines.
 status: stable
-state: pending
+state: in_progress
 priority: P1
 verification_strategy: documentation_validation
 depends_on:
@@ -24,9 +24,9 @@ tests: []
 estimated_loc: 220
 plan_revision: 1
 plan_commit: fd571e3a
-state_revision: 0
-claimed_by: null
-claimed_at: null
+state_revision: 1
+claimed_by: executor
+claimed_at: "2026-11-09T01:27:00Z"
 blocked_reason: null
 unblock_condition: null
 next_step: null
@@ -34,7 +34,7 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: "2026-11-08T20:55:00Z"
-updated_at: "2026-11-08T20:55:00Z"
+updated_at: "2026-11-09T01:27:00Z"
 commit: null
 generated:
   by: flow/0.28.0

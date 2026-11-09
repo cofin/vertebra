@@ -137,8 +137,8 @@ Zero-context reviews (`CR-09`, `QUAL-009`..`QUAL-012`) plus the expanded storage
 
 ## 5. Implementation Plan
 
-- [ ] storage-remediation:ch06:t01 — Update Zensical storage usage guides (`storage.md`, `storage-auth-and-signing.md`, `storage-parquet-and-orm.md`) (tasks/t01-zensical-storage-usage-docs.md)
-- [ ] storage-remediation:ch06:t02 — Expand `docs/reference/storage.md` API coverage and synchronize `product.md` and `object-storage.md` OKF chapters (tasks/t02-storage-reference-and-okf-sync.md)
+- [~] storage-remediation:ch06:t01 — Update Zensical storage usage guides (`storage.md`, `storage-auth-and-signing.md`, `storage-parquet-and-orm.md`) (tasks/t01-zensical-storage-usage-docs.md)
+- [~] storage-remediation:ch06:t02 — Expand `docs/reference/storage.md` API coverage and synchronize `product.md` and `object-storage.md` OKF chapters (tasks/t02-storage-reference-and-okf-sync.md)
 - **Chapter / Phase Recovery Checkpoint**: `make docs && make docs-clean && make review-check`
 
 ## 6. Current State & Remaining Plan Snapshot
