@@ -45,9 +45,28 @@ The public cache types are shared native-core exports:
 from vertebra.storage import AsyncGcpTokenCache, GcpTokenSnapshot, SyncGcpTokenCache
 ```
 
-These types come from `vertebra._vertebra`. `GCSConfig.sync_token_cache()` and `async_token_cache()` build them with GCS scopes; both factories accept `allow_ambient_adc` and `scopes`. Pass a cache as `token_cache=` when constructing a store. Converting a store with `.to_async()` / `.to_sync()` shares its engine and converts its attached cache handle while retaining the underlying Rust cache.
+These types come from `vertebra._vertebra`. `GCSConfig.sync_token_cache()` and `async_token_cache()` build them with GCS scopes; both factories accept `allow_ambient_adc` and `scopes`. Without an explicit cache, each GCS store builds its own.
 
-Native `RefreshingGcpCredentialProvider` supplies fresh tokens to GCS. The cache refreshes before expiry using `refresh_skew_seconds` (default `300`) and coalesces concurrent refreshes. IAM signing retries a `401` after invalidating the observed token generation. No Python OAuth fetcher or duplicate storage-extension cache is required.
+Pass one cache as `token_cache=` to several stores so they share a single token and refresh schedule:
+
+```python
+import os
+from vertebra.storage import GCSConfig, SyncObjectStore
+
+config = GCSConfig(
+    bucket="app-assets",
+    service_account_email=os.environ["GCS_SIGNING_SERVICE_ACCOUNT"],
+)
+cache = config.sync_token_cache()
+assets = SyncObjectStore(config, token_cache=cache)
+reports = SyncObjectStore(GCSConfig(bucket="app-reports"), token_cache=cache)
+```
+
+The cache lives in the core `vertebra._vertebra` extension and reaches the storage extension as a named C-ABI capsule, so both modules use the same native cache rather than copies. A store uses it for every GCS request: reads, writes, listings, server-side `compose`, and the IAM `signBlob` call behind keyless presigning. `cache.to_async()` and `cache.to_sync()` return handles over the same cache, and an `AsyncObjectStore` given a `SyncGcpTokenCache` converts it the same way. Converting a store with `.to_async()` / `.to_sync()` shares its engine and its cache.
+
+Native `RefreshingGcpCredentialProvider` supplies fresh tokens to GCS. The cache refreshes before expiry using `refresh_skew_seconds` (default `300`) and coalesces concurrent refreshes. IAM signing and `compose` retry a `401` once after invalidating the observed token generation. `quota_project_id` is sent as the `x-goog-user-project` header on storage and IAM requests.
+
+To stop the store from falling back to ambient credentials (environment variables, the gcloud ADC file, or the metadata server), pass `options={"allow_ambient_adc": "false"}`; only explicitly configured credentials are then used. `skip_signature=True` sends unauthenticated requests for public buckets and emulators. When `STORAGE_EMULATOR_HOST` is set and no `endpoint` or explicit credentials are configured, the store targets the emulator without signing.
 
 ## GCS V4: local RSA or IAM signing
 
@@ -66,6 +85,8 @@ upload_url = store.presign_put("incoming/report.parquet", expires_in_secs=900)
 
 The configured identity needs permission to invoke `signBlob` for the signing service account. `target_service_account` selects keyless impersonation. Both synchronous and asynchronous signing use native credential handling. GCS V4 expiry must be between 1 and 604800 seconds.
 
+`GCSConfig(endpoint=...)` changes the origin of both data requests and presigned URLs, which is useful behind a private gateway or against an emulator. The signature covers the custom host, so the URL is valid only at that origin.
+
 ## S3 SigV4 and R2
 
 S3 configurations with explicit access keys derive URL signing automatically:
@@ -82,7 +103,7 @@ store = SyncObjectStore(S3Config(
 download_url = store.presign_get("reports/latest.parquet", expires_in_secs=900)
 ```
 
-SigV4 uses RFC 3986 path encoding and `UNSIGNED-PAYLOAD`; expiry is 1–604800 seconds. Custom S3-compatible origins use `endpoint`; local HTTP endpoints require `allow_http=True`. `R2Config` derives SigV4 signing from its access keys and resolved account/jurisdiction endpoint, using region `auto`. An explicit `SigningConfig(provider="s3", ...)` can override signing configuration.
+SigV4 uses RFC 3986 path encoding and `UNSIGNED-PAYLOAD`; expiry is 1–604800 seconds. Custom S3-compatible origins use `endpoint`; local HTTP endpoints require `allow_http=True`. With `virtual_hosted_style=True`, presigned URLs put the bucket in the host (`https://app-assets.s3.us-east-1.amazonaws.com/key`) instead of the path; a custom `endpoint` must then be a DNS name, because an IP address cannot carry a bucket subdomain. `R2Config` derives SigV4 signing from its access keys and resolved account/jurisdiction endpoint, using region `auto`; presigned R2 URLs always target the R2 S3 API host, even when `custom_domain` is set. An explicit `SigningConfig(provider="s3", ...)` can override signing configuration.
 
 ## Azure Blob SAS
 
