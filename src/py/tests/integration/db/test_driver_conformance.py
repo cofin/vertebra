@@ -128,6 +128,22 @@ _TYPES_DDL = (
     ")"
 )
 
+_DUCKDB_ITEMS_DDL = "CREATE TABLE vtb_conformance_items (id BIGINT PRIMARY KEY, label VARCHAR NOT NULL, amount BIGINT)"
+
+_DUCKDB_TYPES_DDL = (
+    "CREATE TABLE vtb_conformance_types ("
+    "id BIGINT PRIMARY KEY, "
+    "val_int BIGINT, "
+    "val_float DOUBLE, "
+    "val_decimal DECIMAL(18, 4), "
+    "val_bool BOOLEAN, "
+    "val_text VARCHAR, "
+    "val_bytes BLOB, "
+    "val_ts TIMESTAMP, "
+    "val_json VARCHAR"
+    ")"
+)
+
 _BIGQUERY_ITEMS_DDL = "CREATE TABLE vtb_conformance_items (id INT64, label STRING NOT NULL, amount INT64)"
 
 _BIGQUERY_TYPES_DDL = (
@@ -388,8 +404,10 @@ ENGINE_SPECS: tuple[EngineConformanceSpec, ...] = (
         async_driver_cls=AsyncDuckDBDriver,
         sample_url="duckdb:////tmp/vtb_conformance_sample.duckdb",
         placeholder_style="qmark",
+        items_ddl=_DUCKDB_ITEMS_DDL,
+        types_ddl=_DUCKDB_TYPES_DDL,
+        supports_pipeline=True,
         native_extension_module="vertebra._duckdb",
-        pending_flow_id="native-embedded-and-cache-drivers",
         env_dsn_vars=("VERTEBRA_CONFORMANCE_DUCKDB_DSN",),
     ),
     EngineConformanceSpec(
