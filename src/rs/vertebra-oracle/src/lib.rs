@@ -5,6 +5,7 @@ pub mod client;
 pub mod config;
 pub mod dialer;
 pub mod errors;
+pub mod notify;
 pub mod pool;
 pub mod types;
 
@@ -14,6 +15,7 @@ use crate::client::{
     AsyncOracleClient, ORACLESQL_NATIVE_TTC_PIPELINE_SUPPORTED, OraclePipelineOutcome,
     SyncOracleClient,
 };
+use crate::notify::{AsyncOracleListener, OracleNotification};
 use crate::pool::{AsyncOraclePool, SyncOraclePool};
 use crate::types::{OracleColumn, OracleQueryResult};
 
@@ -38,6 +40,8 @@ pub fn _oracle(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<OracleColumn>()?;
     m.add_class::<OracleQueryResult>()?;
     m.add_class::<OraclePipelineOutcome>()?;
+    m.add_class::<OracleNotification>()?;
+    m.add_class::<AsyncOracleListener>()?;
     m.add_class::<SyncOracleClient>()?;
     m.add_class::<AsyncOracleClient>()?;
     m.add_class::<SyncOraclePool>()?;

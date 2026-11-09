@@ -6,16 +6,16 @@ chapter_id: ch06-notifications-and-embeddings
 title: "Chapter 06: TxEventQ / AQ Notification Stream and Vector Embedding Pushdown"
 description: Implement the dedicated Rust and Python Oracle 26ai TxEventQ / DBMS_AQ notification pump with out-of-band break_execution wakeup and exponential reconnect backoff, plus native VectorView extraction in OracleEmbeddingPushdown.
 status: stable
-state: planned
+state: in_progress
 planning_status: complete
 chapter_order: 6
 depends_on_chapters:
   - ch05-pipelines-tenancy-and-apex
 replan_trigger: null
-current_task: "native-oracle-driver:ch06:t01"
+current_task: "native-oracle-driver:ch06:t02"
 plan_revision: 3
 plan_commit: 769302bc
-state_revision: 0
+state_revision: 1
 last_verified_checkpoint: null
 last_reviewed_commit: null
 created_at: "2026-11-09T00:48:00Z"
@@ -157,15 +157,15 @@ Progress: `[0/6 files documented]` (user documentation in `docs/usage/databases.
 
 ## 5. Implementation Plan
 
-- [ ] native-oracle-driver:ch06:t01 — Implement Rust and Python AQ / TxEventQ Notification Pump (tasks/t01-rust-and-python-aq-notification-pump.md)
-- [ ] native-oracle-driver:ch06:t02 — Implement OracleNotificationSource and Reconnect Backoff (tasks/t02-oracle-notification-source-and-backoff.md)
+- [x] native-oracle-driver:ch06:t01 — Implement Rust and Python AQ / TxEventQ Notification Pump (tasks/t01-rust-and-python-aq-notification-pump.md)
+- [~] native-oracle-driver:ch06:t02 — Implement OracleNotificationSource and Reconnect Backoff (tasks/t02-oracle-notification-source-and-backoff.md)
 - [ ] native-oracle-driver:ch06:t03 — Align OracleEmbeddingPushdown with Native VectorView (tasks/t03-oracle-embedding-pushdown-vector-view.md)
 
 **Chapter Recovery Checkpoint:** `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-oracle && uv run pytest src/py/tests/unit/db/test_oracle_adapter.py && make lint-all` exits `0`.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Chapter State**: `draft` (`0/3` tasks completed); `current_task: "native-oracle-driver:ch06:t01"`.
+- **Chapter State**: `in_progress` (`1/3` tasks completed); `current_task: "native-oracle-driver:ch06:t02"`.
 - **Upstream Prerequisite**: [Chapter 05 (`ch05-pipelines-tenancy-and-apex`)](../ch05-pipelines-tenancy-and-apex/spec.md) (`native-oracle-driver:ch05:t03`).
 - **Downstream Consumer**: [Chapter 07 (`ch07-conformance-and-okf-synthesis`)](../ch07-conformance-and-okf-synthesis/spec.md) (`native-oracle-driver:ch07:t01`).
 

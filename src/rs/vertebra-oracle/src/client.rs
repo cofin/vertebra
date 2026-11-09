@@ -19,6 +19,7 @@ use vertebra_db::py_async::{
 use crate::config::{NativeOracleConfig, RawOracleOptions};
 use crate::dialer::connect_oracledb;
 use crate::errors::OracleError;
+use crate::notify::{AsyncOracleListener, enqueue_notification_sync, validate_aq_identifier};
 use crate::types::{
     OracleCellValue, OracleColumn, OracleQueryResult, OracleVectorData, cell_to_oracledb_bind,
     decode_oracledb_row, extract_bind_value, normalize_named_bind_map, out_bind_type_placeholder,
@@ -3278,6 +3279,12 @@ impl OracleWorkerHandle {
         &self.config
     }
 
+    /// Return a shared [`Arc<NativeOracleConfig>`] for this worker session.
+    #[must_use]
+    pub fn config_arc(&self) -> Arc<NativeOracleConfig> {
+        Arc::clone(&self.config)
+    }
+
     /// Return a shared reference to the out-of-band [`OracleBreakHandle`].
     #[must_use]
     pub fn break_handle(&self) -> &Arc<OracleBreakHandle> {
@@ -4084,6 +4091,36 @@ impl SyncOracleClient {
     ) -> PyResult<Vec<OraclePipelineOutcome>> {
         self.execute_pipeline_batch(py, operations, continue_on_error)
     }
+
+    #[pyo3(signature = (
+        *,
+        queue_name,
+        payload,
+        consumer_name=None,
+        correlation_id=None,
+    ))]
+    pub fn enqueue_notification<'py>(
+        &self,
+        py: Python<'py>,
+        queue_name: String,
+        payload: Vec<u8>,
+        consumer_name: Option<String>,
+        correlation_id: Option<String>,
+    ) -> PyResult<Bound<'py, PyBytes>> {
+        let worker = Arc::clone(&self.worker);
+        let msg_id = py
+            .detach(|| {
+                enqueue_notification_sync(
+                    &worker,
+                    &queue_name,
+                    &payload,
+                    consumer_name.as_deref(),
+                    correlation_id.as_deref(),
+                )
+            })
+            .map_err(|e| e.to_py_err(py))?;
+        Ok(PyBytes::new(py, &msg_id))
+    }
 }
 
 /// Asynchronous physical Oracle session client (`vertebra._oracle.AsyncOracleClient`).
@@ -4590,6 +4627,92 @@ impl AsyncOracleClient {
         continue_on_error: bool,
     ) -> PyResult<RustDbTaskAwaitable> {
         self.execute_pipeline_batch(py, operations, continue_on_error)
+    }
+
+    #[pyo3(signature = (
+        *,
+        queue_name,
+        consumer_name=None,
+        wait_timeout_seconds=5,
+        max_buffered=1024,
+    ))]
+    pub fn open_listener(
+        &self,
+        py: Python<'_>,
+        queue_name: String,
+        consumer_name: Option<String>,
+        wait_timeout_seconds: u32,
+        max_buffered: usize,
+    ) -> PyResult<RustDbTaskAwaitable> {
+        self.worker.ensure_open().map_err(|e| e.to_py_err(py))?;
+        validate_aq_identifier(&queue_name, "queue_name").map_err(|e| e.to_py_err(py))?;
+        if let Some(ref c) = consumer_name {
+            validate_aq_identifier(c, "consumer_name").map_err(|e| e.to_py_err(py))?;
+        }
+        if max_buffered == 0 {
+            return Err(OracleError::Config(
+                "AsyncOracleListener max_buffered must be >= 1".to_owned(),
+            )
+            .to_py_err(py));
+        }
+        let cfg = self.worker.config_arc();
+        spawn_rust_db_task_with_attr(
+            py,
+            async move {
+                AsyncOracleListener::spawn(
+                    cfg,
+                    queue_name,
+                    consumer_name,
+                    wait_timeout_seconds,
+                    max_buffered,
+                )
+            },
+            |py, listener| Ok(Py::new(py, listener)?.into_any()),
+            |py, err| err.to_py_err(py),
+            ORACLE_COMPLETION_DRAINER_ATTR,
+        )
+    }
+
+    #[pyo3(signature = (
+        *,
+        queue_name,
+        payload,
+        consumer_name=None,
+        correlation_id=None,
+    ))]
+    pub fn enqueue_notification(
+        &self,
+        py: Python<'_>,
+        queue_name: String,
+        payload: Vec<u8>,
+        consumer_name: Option<String>,
+        correlation_id: Option<String>,
+    ) -> PyResult<RustDbTaskAwaitable> {
+        self.worker.ensure_open().map_err(|e| e.to_py_err(py))?;
+        validate_aq_identifier(&queue_name, "queue_name").map_err(|e| e.to_py_err(py))?;
+        if let Some(ref c) = consumer_name {
+            validate_aq_identifier(c, "consumer_name").map_err(|e| e.to_py_err(py))?;
+        }
+        let worker = Arc::clone(&self.worker);
+        spawn_rust_db_task_with_attr(
+            py,
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    enqueue_notification_sync(
+                        &worker,
+                        &queue_name,
+                        &payload,
+                        consumer_name.as_deref(),
+                        correlation_id.as_deref(),
+                    )
+                })
+                .await
+                .map_err(|e| OracleError::Interface(format!("enqueue task join error: {e}")))?
+            },
+            |py, msg_id| Ok(PyBytes::new(py, &msg_id).into_any().unbind()),
+            |py, err| err.to_py_err(py),
+            ORACLE_COMPLETION_DRAINER_ATTR,
+        )
     }
 }
 

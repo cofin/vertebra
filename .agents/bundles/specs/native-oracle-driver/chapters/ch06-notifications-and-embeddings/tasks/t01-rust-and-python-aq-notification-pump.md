@@ -6,9 +6,9 @@ chapter_id: ch06-notifications-and-embeddings
 title: "Task 01: Implement Rust and Python AQ / TxEventQ Notification Pump"
 description: Implement OracleNotification and AsyncOracleListener in vertebra-oracle::notify with a bounded 1024-frame queue, DBMS_AQ.DEQUEUE polling on a dedicated worker thread, out-of-band break_execution wakeup, and AsyncCompletionQueue delivery.
 status: stable
-state: pending
+state: completed
 priority: P1
-owner: null
+owner: agent:executor
 depends_on:
   - "native-oracle-driver:ch05:t03"
 files:
@@ -27,18 +27,18 @@ verification_strategy: behavior_tdd
 estimated_loc: 210
 plan_revision: 3
 plan_commit: 769302bc
-state_revision: 0
-claimed_by: null
-claimed_at: null
+state_revision: 1
+claimed_by: agent:executor
+claimed_at: "2026-11-09T17:13:00Z"
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
+last_verified_at: "2026-11-09T17:24:18Z"
 last_verified_commit: null
-verification_evidence: null
+verification_evidence: "cargo test -p vertebra-oracle (16 passed), mypy.stubtest vertebra._oracle, and pytest test_oracle_notification_and_listener_exports_and_stub_parity passed."
 created_at: "2026-11-09T00:48:00Z"
-updated_at: "2026-11-09T01:28:30Z"
-completed_at: null
+updated_at: "2026-11-09T17:24:18Z"
+completed_at: "2026-11-09T17:24:18Z"
 commit_sha: null
 commit: null
 generated:
@@ -176,9 +176,9 @@ uv run pytest src/py/tests/unit/db/test_oracle_adapter.py -k "notification or li
 
 ## Acceptance Criteria
 
-- [ ] `OracleNotification` (`msg_id: bytes`, `payload: bytes`) and `AsyncOracleListener` are implemented in `src/rs/vertebra-oracle/src/notify.rs`, exported from `vertebra._oracle`, and typed in `src/py/vertebra/_oracle.pyi` [^ora-contracts].
-- [ ] `AsyncOracleListener` runs `DBMS_AQ.DEQUEUE` on a dedicated worker thread, suppresses `ORA-25228` idle timeouts, enforces `max_buffered` (`1024`) with `dropped_count`, and wakes blocked waits via `connection.break_execution()` on `close()` [^py-async-rs].
-- [ ] `cargo test -p vertebra-oracle`, `mypy.stubtest vertebra._oracle`, and unit tests in `src/py/tests/unit/db/test_oracle_adapter.py` pass with zero warnings.
+- [x] `OracleNotification` (`msg_id: bytes`, `payload: bytes`) and `AsyncOracleListener` are implemented in `src/rs/vertebra-oracle/src/notify.rs`, exported from `vertebra._oracle`, and typed in `src/py/vertebra/_oracle.pyi` [^ora-contracts].
+- [x] `AsyncOracleListener` runs `DBMS_AQ.DEQUEUE` on a dedicated worker thread, suppresses `ORA-25228` idle timeouts, enforces `max_buffered` (`1024`) with `dropped_count`, and wakes blocked waits via `connection.break_execution()` on `close()` [^py-async-rs].
+- [x] `cargo test -p vertebra-oracle`, `mypy.stubtest vertebra._oracle`, and unit tests in `src/py/tests/unit/db/test_oracle_adapter.py` pass with zero warnings.
 
 ## Notes & Discoveries
 

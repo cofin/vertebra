@@ -79,6 +79,40 @@ class OraclePipelineOutcome:
     ) -> OraclePipelineOutcome: ...
 
 @final
+class OracleNotification:
+    @property
+    def queue_name(self) -> str: ...
+    @property
+    def consumer_name(self) -> str | None: ...
+    @property
+    def msg_id(self) -> bytes: ...
+    @property
+    def payload(self) -> bytes: ...
+    @property
+    def enqueued_at_epoch_ms(self) -> int | None: ...
+    def __new__(
+        cls,
+        queue_name: str,
+        msg_id: bytes,
+        payload: bytes,
+        consumer_name: str | None = None,
+        enqueued_at_epoch_ms: int | None = None,
+    ) -> OracleNotification: ...
+
+@final
+class AsyncOracleListener:
+    @property
+    def queue_name(self) -> str: ...
+    @property
+    def consumer_name(self) -> str | None: ...
+    @property
+    def is_closed(self) -> bool: ...
+    @property
+    def dropped_count(self) -> int: ...
+    def next_notification(self, timeout: float | None = None) -> Awaitable[OracleNotification | None]: ...
+    def close(self) -> Awaitable[None]: ...
+
+@final
 class SyncOracleClient:
     @property
     def closed(self) -> bool: ...
@@ -203,6 +237,14 @@ class SyncOracleClient:
         *,
         continue_on_error: bool = False,
     ) -> list[OraclePipelineOutcome]: ...
+    def enqueue_notification(
+        self,
+        *,
+        queue_name: str,
+        payload: bytes,
+        consumer_name: str | None = None,
+        correlation_id: str | None = None,
+    ) -> bytes: ...
 
 @final
 class AsyncOracleClient:
@@ -329,6 +371,22 @@ class AsyncOracleClient:
         *,
         continue_on_error: bool = False,
     ) -> Awaitable[list[OraclePipelineOutcome]]: ...
+    def open_listener(
+        self,
+        *,
+        queue_name: str,
+        consumer_name: str | None = None,
+        wait_timeout_seconds: int = 5,
+        max_buffered: int = 1024,
+    ) -> Awaitable[AsyncOracleListener]: ...
+    def enqueue_notification(
+        self,
+        *,
+        queue_name: str,
+        payload: bytes,
+        consumer_name: str | None = None,
+        correlation_id: str | None = None,
+    ) -> Awaitable[bytes]: ...
 
 @final
 class SyncOraclePool:
@@ -528,11 +586,13 @@ class AsyncOraclePool:
 
 __all__ = [
     "AsyncOracleClient",
+    "AsyncOracleListener",
     "AsyncOraclePool",
     "FREE_THREADED",
     "GIL_USED",
     "ORACLESQL_NATIVE_TTC_PIPELINE_SUPPORTED",
     "OracleColumn",
+    "OracleNotification",
     "OraclePipelineOutcome",
     "OracleQueryResult",
     "SyncOracleClient",

@@ -1466,3 +1466,67 @@ async def test_sqlspec_oracle_apply_tenant_predicate_uses_trusted_package_or_set
         assert await async_trusted.select_value("SELECT SYS_CONTEXT('APP_CTX', 'TENANT_ID') FROM DUAL") is None
 
 
+@pytest.mark.anyio
+async def test_oracle_notification_and_listener_exports_and_stub_parity() -> None:
+    """Verify OracleNotification and AsyncOracleListener exports, attributes, and in-memory AQ delivery."""
+    notification = _oracle.OracleNotification(
+        "VTB_AQ_ORDERS",
+        b"msg-001",
+        b'{"event":"created"}',
+        "ORDER_WORKER",
+        1700000000000,
+    )
+    assert notification.queue_name == "VTB_AQ_ORDERS"
+    assert notification.consumer_name == "ORDER_WORKER"
+    assert notification.msg_id == b"msg-001"
+    assert notification.payload == b'{"event":"created"}'
+    assert notification.enqueued_at_epoch_ms == 1700000000000
+
+    client = _oracle.AsyncOracleClient(host="memory", user="app", password="secret")
+    await client.connect()
+    try:
+        with pytest.raises(ProgrammingError) as exc_info:
+            await client.open_listener(queue_name="BAD;QUEUE")
+        assert exc_info.value.sqlstate == "42602"
+
+        listener = await client.open_listener(
+            queue_name="VTB_AQ_ORDERS",
+            consumer_name="ORDER_WORKER",
+            wait_timeout_seconds=1,
+            max_buffered=16,
+        )
+        assert isinstance(listener, _oracle.AsyncOracleListener)
+        assert listener.queue_name == "VTB_AQ_ORDERS"
+        assert listener.consumer_name == "ORDER_WORKER"
+        assert listener.is_closed is False
+        assert listener.dropped_count == 0
+
+        timed_out = await listener.next_notification(timeout=0.02)
+        assert timed_out is None
+
+        msg_id = await client.enqueue_notification(
+            queue_name="VTB_AQ_ORDERS",
+            payload=b"order-42",
+            consumer_name="ORDER_WORKER",
+            correlation_id="corr-42",
+        )
+        assert isinstance(msg_id, bytes)
+        assert len(msg_id) > 0
+
+        received = await listener.next_notification(timeout=1.0)
+        assert received is not None
+        assert received.queue_name == "VTB_AQ_ORDERS"
+        assert received.consumer_name == "ORDER_WORKER"
+        assert received.msg_id == msg_id
+        assert received.payload == b"order-42"
+        assert isinstance(received.enqueued_at_epoch_ms, int)
+
+        await listener.close()
+        assert listener.is_closed is True
+        await listener.close()
+        assert await listener.next_notification(timeout=0.05) is None
+    finally:
+        await client.close()
+
+
+

@@ -55,6 +55,9 @@ pub enum OracleError {
     /// Connection pool exhausted within `acquire_timeout` (`sqlstate="53300"`).
     #[error("{0}")]
     PoolExhausted(String),
+    /// Invalid SQL, PL/SQL, or AQ identifier (`sqlstate="42602"`).
+    #[error("{0}")]
+    InvalidIdentifier(String),
 }
 
 /// Extract a numeric `ORA-xxxxx` vendor code from an Oracle error string if present.
@@ -389,6 +392,12 @@ impl OracleError {
                 sqlstate: "53300",
                 vendor_code: None,
                 is_transient: true,
+            },
+            Self::InvalidIdentifier(_) => OracleErrorClassification {
+                kind: OracleErrorKind::Programming,
+                sqlstate: "42602",
+                vendor_code: None,
+                is_transient: false,
             },
             Self::Server { code, message } => classify_oracle_error(Some(*code), message),
             Self::Transport { code, message } => classify_oracle_error(*code, message),
