@@ -5,7 +5,7 @@ use std::fmt;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
-use pyo3::types::PyType;
+use pyo3::types::{PyTuple, PyType};
 
 /// Sanitized PostgreSQL backend `ErrorResponse` record retaining 5-byte ASCII SQLSTATE and raw diagnostics.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,6 +62,14 @@ pub enum PostgresError {
         source: Box<PostgresError>,
         completed_result: crate::result::QueryResult,
     },
+    #[error("pipeline validation failed at operation {failing_index}: {source}")]
+    PipelineValidation {
+        #[source]
+        source: Box<PostgresError>,
+        failing_index: usize,
+    },
+    #[error("pipeline failed at operation {}: {}", .0.failing_index, .0.first_error)]
+    PipelineAborted(Box<crate::pipeline::PipelineFailure>),
 }
 
 impl PostgresError {
@@ -89,7 +97,10 @@ impl PostgresError {
     pub fn sqlstate(&self) -> Option<&str> {
         match self {
             Self::Server(err) => Some(err.sqlstate.as_str()),
-            Self::AfterCompletion { source, .. } => source.sqlstate(),
+            Self::AfterCompletion { source, .. } | Self::PipelineValidation { source, .. } => {
+                source.sqlstate()
+            }
+            Self::PipelineAborted(fail) => fail.first_error.sqlstate(),
             _ => None,
         }
     }
@@ -105,7 +116,10 @@ impl PostgresError {
                     || err.sqlstate == "53300"
                     || err.sqlstate.starts_with("57P")
             }
-            Self::AfterCompletion { source, .. } => source.is_transient(),
+            Self::AfterCompletion { source, .. } | Self::PipelineValidation { source, .. } => {
+                source.is_transient()
+            }
+            Self::PipelineAborted(fail) => fail.first_error.is_transient(),
             _ => false,
         }
     }
@@ -265,6 +279,48 @@ pub fn postgres_error_to_py(py: Python<'_>, err: PostgresError) -> PyErr {
                 let _ = py_err.value(py).setattr("completed_result", py_res);
             }
             py_err
+        }
+        PostgresError::PipelineValidation {
+            source,
+            failing_index,
+        } => {
+            let py_err = postgres_error_to_py(py, *source);
+            let _ = py_err.value(py).setattr("outcomes", PyTuple::empty(py));
+            let _ = py_err.value(py).setattr("failing_index", failing_index);
+            py_err
+        }
+        PostgresError::PipelineAborted(failure) => {
+            let PipelineAbortedParts {
+                first_error,
+                failing_index,
+                outcomes,
+            } = PipelineAbortedParts::from(*failure);
+            let py_err = postgres_error_to_py(py, first_error);
+            if let Ok(py_outcomes) =
+                crate::python_values::pipeline_outcomes_to_python(py, &outcomes)
+            {
+                let _ = py_err.value(py).setattr("outcomes", py_outcomes);
+            } else {
+                let _ = py_err.value(py).setattr("outcomes", PyTuple::empty(py));
+            }
+            let _ = py_err.value(py).setattr("failing_index", failing_index);
+            py_err
+        }
+    }
+}
+
+struct PipelineAbortedParts {
+    first_error: PostgresError,
+    failing_index: usize,
+    outcomes: Vec<crate::pipeline::PipelineOutcome>,
+}
+
+impl From<crate::pipeline::PipelineFailure> for PipelineAbortedParts {
+    fn from(f: crate::pipeline::PipelineFailure) -> Self {
+        Self {
+            first_error: f.first_error,
+            failing_index: f.failing_index,
+            outcomes: f.outcomes,
         }
     }
 }

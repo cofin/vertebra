@@ -5,7 +5,7 @@ chapter_id: ch15-pool-facades-and-single-sync-pipeline
 title: "Implement native pipeline SQL-head transaction and COPY command guard"
 description: "Build a bounded linear UTF-8 SQL-head scanner in vertebra-postgres that rejects transaction-control aliases and COPY before any pipeline batch operation is emitted."
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -118,10 +118,10 @@ Implement a crate-private, bounded linear UTF-8 SQL-head scanner (`pipeline_guar
 
 ## Acceptance Criteria
 
-- [ ] Every transaction-control alias (`BEGIN`/`COMMIT`/`END`/`ROLLBACK`/`ABORT`/`SAVEPOINT`/`RELEASE`, `START`/`PREPARE TRANSACTION`, `SET [LOCAL|SESSION] TRANSACTION`, `SET SESSION CHARACTERISTICS`) is rejected across leading `;`, whitespace, `--`, and nested `/* ... */` comments (R13, R17).
-- [ ] `PREPARE name AS ...`, quoted `"TRANSACTION"`, string/dollar-quoted markers, `DO`/`WITH`/`CALL` bodies, and identifier-continuation prefixes (`COMMIT_suffix`, `COMMITé`) pass without false positives (R17).
-- [ ] `COPY` maps to `NotSupportedError` and transaction control maps to `InterfaceError` with `sqlstate = None`, `outcomes = ()`, and exact `failing_index` on the first failing batch item (R13, R17).
-- [ ] Named semantic unit tests in `pipeline_guard::tests`, Clippy `-D warnings`, and `git diff --check` pass with zero warnings or diff hygiene errors.
+- [x] Every transaction-control alias (`BEGIN`/`COMMIT`/`END`/`ROLLBACK`/`ABORT`/`SAVEPOINT`/`RELEASE`, `START`/`PREPARE TRANSACTION`, `SET [LOCAL|SESSION] TRANSACTION`, `SET SESSION CHARACTERISTICS`) is rejected across leading `;`, whitespace, `--`, and nested `/* ... */` comments (R13, R17).
+- [x] `PREPARE name AS ...`, quoted `"TRANSACTION"`, string/dollar-quoted markers, `DO`/`WITH`/`CALL` bodies, and identifier-continuation prefixes (`COMMIT_suffix`, `COMMITé`) pass without false positives (R17).
+- [x] `COPY` maps to `NotSupportedError` and transaction control maps to `InterfaceError` with `sqlstate = None`, `outcomes = ()`, and exact `failing_index` on the first failing batch item (R13, R17).
+- [x] Named semantic unit tests in `pipeline_guard::tests`, Clippy `-D warnings`, and `git diff --check` pass with zero warnings or diff hygiene errors.
 
 ## Notes & Discoveries
 

@@ -12,9 +12,12 @@ pub mod credentials;
 pub mod errors;
 pub mod extended;
 pub mod metadata;
+pub mod pipeline;
+mod pipeline_guard;
 pub mod pool;
 pub mod portal;
 pub mod protocol;
+pub mod python_pool;
 pub mod python_values;
 pub mod query;
 pub mod result;
@@ -36,10 +39,16 @@ pub use metadata::{
     OwnedTextField, OwnedTextResult, ParameterCandidate, ResolvedParameters,
     normalize_materialized_result, resolve_parameter_metadata,
 };
+pub use pipeline::{
+    PipelineBatch, PipelineFailure, PipelineLimits, PipelineOperation, PipelineOutcome,
+    SubmittedPipeline,
+};
 pub use pool::{PoolStats, PooledConnection, PostgresPool, PostgresPoolOptions};
 pub use portal::{Portal, PortalEvent};
+pub use python_pool::{PyAsyncPostgresPool, PySyncPostgresPool};
 pub use python_values::{
-    extract_parameters, extract_pg_value, pg_value_to_python, query_result_to_python,
+    extract_parameters, extract_pg_value, extract_pipeline_operations, pg_value_to_python,
+    pipeline_outcomes_to_python, query_result_to_python, server_error_to_python,
 };
 pub use query::SimpleQueryCollector;
 pub use result::{
@@ -64,5 +73,6 @@ fn _postgres(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("GIL_USED", GIL_USED)?;
     sync_client::PySyncPostgresClient::register(m)?;
     async_client::PyAsyncPostgresClient::register(m)?;
+    python_pool::register(m)?;
     Ok(())
 }

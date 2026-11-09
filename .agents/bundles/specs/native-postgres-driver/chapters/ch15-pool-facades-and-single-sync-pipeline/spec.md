@@ -5,15 +5,15 @@ chapter_id: ch15-pool-facades-and-single-sync-pipeline
 title: "Chapter 15: Python Pool Facades, Pipeline SQL-Head Guard, and Single-Sync Pipeline Execution"
 description: Expose SyncPostgresPool and AsyncPostgresPool over real Rust leases, enforce pre-emission SQL-head transaction/COPY guards, submit cold and warm pipeline batches under one Sync and one flush, and demultiplex ordered result/error/skipped outcomes.
 status: stable
-state: planned
+state: completed
 planning_status: complete
 depends_on_chapters:
   - ch14-physical-pools-and-query-facades
 replan_trigger: null
-current_task: "native-postgres-driver:ch15:t01"
+current_task: null
 plan_revision: 5
 plan_commit: fd571e3a
-state_revision: 0
+state_revision: 1
 last_verified_checkpoint: null
 last_reviewed_commit: null
 created_at: "2026-11-05T00:00:00Z"
@@ -105,7 +105,7 @@ Parent roadmap: [spec.md](../../spec.md) and frozen contracts: [contracts.md](..
 
 ## 3. Documentation & OKF Knowledge Plan
 
-Progress: `[0/2 files documented in ch15]` (`src/py/vertebra/_postgres.pyi` and `src/py/vertebra/db/adapters/postgres/types.py` docstrings update inline in `ch15:t01` and `ch15:t04`; user/OKF guides consolidate in `ch30`).
+Progress: `[2/2 files documented in ch15]` (`src/py/vertebra/_postgres.pyi` and `src/py/vertebra/db/adapters/postgres/types.py` docstrings updated inline across `ch15:t01` and `ch15:t04`; user/OKF guides consolidate in `ch30`).
 
 ## 4. Requirement-to-Task Traceability Matrix
 
@@ -118,17 +118,17 @@ Progress: `[0/2 files documented in ch15]` (`src/py/vertebra/_postgres.pyi` and 
 
 ## 5. Implementation Plan
 
-- [ ] native-postgres-driver:ch15:t01 — Expose SyncPostgresPool and AsyncPostgresPool carrying real session leases (tasks/t01-python-pool-facades.md)
-- [ ] native-postgres-driver:ch15:t02 — Implement native pipeline SQL-head transaction and COPY command guard (tasks/t02-pipeline-sql-head-guard.md)
-- [ ] native-postgres-driver:ch15:t03 — Implement single-Sync cold and warm outbound pipeline submission (tasks/t03-single-sync-pipeline-outbound.md)
-- [ ] native-postgres-driver:ch15:t04 — Demultiplex ordered pipeline results, errors, and skipped outcomes (tasks/t04-ordered-pipeline-outcomes.md)
+- [x] native-postgres-driver:ch15:t01 — Expose SyncPostgresPool and AsyncPostgresPool carrying real session leases (tasks/t01-python-pool-facades.md)
+- [x] native-postgres-driver:ch15:t02 — Implement native pipeline SQL-head transaction and COPY command guard (tasks/t02-pipeline-sql-head-guard.md)
+- [x] native-postgres-driver:ch15:t03 — Implement single-Sync cold and warm outbound pipeline submission (tasks/t03-single-sync-pipeline-outbound.md)
+- [x] native-postgres-driver:ch15:t04 — Demultiplex ordered pipeline results, errors, and skipped outcomes (tasks/t04-ordered-pipeline-outcomes.md)
 
 **Chapter Recovery Checkpoint:** `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --lib pipeline_guard::tests && cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --test pipeline_wire --test pipeline_outcomes && make dev && uv run --no-sync pytest src/py/tests/unit/db/test_postgres_native_pools.py src/py/tests/unit/db/test_postgres_types.py -q && uv run --no-sync python -m mypy.stubtest vertebra._postgres` exits `0`.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Plan Baseline**: `e8901de4`; chapter `state: planned`, `planning_status: complete`.
-- **Remaining Tasks in Chapter**: `t01`, `t02`, `t03`, `t04` (`4/4` pending).
+- **Verified Plan Baseline**: `e8901de4`; chapter `state: completed`, `planning_status: complete`.
+- **Remaining Tasks in Chapter**: None (`4/4` completed).
 - **Downstream Dependents**: Unblocks `ch16-pipeline-scope-and-cancellation` (retained pipeline transaction scopes, `SyncPostgresPipeline` / `AsyncPostgresPipeline`, and protocol cancellation).
 
 [^pg-contracts]: `.agents/bundles/specs/native-postgres-driver/contracts.md` — Frozen pool constructor options, SQL-head guard rules, and pipeline outcome/exception contracts.

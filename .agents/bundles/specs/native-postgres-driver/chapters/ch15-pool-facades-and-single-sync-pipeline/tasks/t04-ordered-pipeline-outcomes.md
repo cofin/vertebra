@@ -5,7 +5,7 @@ chapter_id: ch15-pool-facades-and-single-sync-pipeline
 title: "Demultiplex ordered pipeline results, errors, and skipped outcomes"
 description: "Demultiplex cold and warm single-Sync pipeline frame streams into ordered Result, Error, and Skipped outcomes, drain through ReadyForQuery, and define frozen Python pipeline outcome records."
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -132,10 +132,10 @@ Demultiplex single-`Sync` cold and warm pipeline responses into ordered `Pipelin
 
 ## Acceptance Criteria
 
-- [ ] `PostgresConnection::pipeline_results` produces one ordered `Result` / `Error` / `Skipped { failed_index }` per submitted operation, accurately attributing `Parse`/`Describe`/`Bind`/`Execute` failures without fabricated SQLSTATEs (R17).
-- [ ] First server error drains boundedly through the single trailing `Sync` `ReadyForQuery` (`I`/`T`/`E`) without committing, rolling back, or releasing caller scopes (R17).
-- [ ] `PostgresErrorInfo`, `PostgresPipelineOperation`, and `PostgresPipelineOutcome` in `types.py` enforce frozen `gc=False` discriminant, length, and integer invariants (R17).
-- [ ] `pipeline_outcomes`, `pipeline_wire`, `test_postgres_types.py`, Ruff, Mypy, Clippy `-D warnings`, and `git diff --check` pass with zero warnings or diff hygiene errors.
+- [x] `PostgresConnection::pipeline_results` produces one ordered `Result` / `Error` / `Skipped { failed_index }` per submitted operation, accurately attributing `Parse`/`Describe`/`Bind`/`Execute` failures without fabricated SQLSTATEs (R17).
+- [x] First server error drains boundedly through the single trailing `Sync` `ReadyForQuery` (`I`/`T`/`E`) without committing, rolling back, or releasing caller scopes (R17).
+- [x] `PostgresErrorInfo`, `PostgresPipelineOperation`, and `PostgresPipelineOutcome` in `types.py` enforce frozen `gc=False` discriminant, length, and integer invariants (R17).
+- [x] `pipeline_outcomes`, `pipeline_wire`, `test_postgres_types.py`, Ruff, Mypy, Clippy `-D warnings`, and `git diff --check` pass with zero warnings or diff hygiene errors.
 
 ## Notes & Discoveries
 

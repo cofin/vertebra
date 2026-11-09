@@ -5,7 +5,7 @@ chapter_id: ch15-pool-facades-and-single-sync-pipeline
 title: "Expose SyncPostgresPool and AsyncPostgresPool carrying real session leases"
 description: "Implement immutable Python SyncPostgresPool and AsyncPostgresPool classes transferring concrete PooledConnection leases into SessionHandle with cancelled-acquire recovery and validate_configuration."
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -131,10 +131,10 @@ Expose immutable `SyncPostgresPool` and `AsyncPostgresPool` PyO3 classes in `ver
 
 ## Acceptance Criteria
 
-- [ ] `SyncPostgresPool` and `AsyncPostgresPool` expose the exact constructor, `acquire`, `close`, and `validate_configuration` contracts from `contracts.md` and `_postgres.pyi` (R6, R7, R14).
-- [ ] Acquired clients own real `PooledConnection` leases verified by backend PID, and cancelled async acquisitions or dropped clients never leak pool capacity (R7, R14).
-- [ ] `validate_configuration` detects credential, TLS, GUC, cloud/IAM, and preparation-policy mismatches synchronously without caller keys or network I/O (R14).
-- [ ] `test_postgres_native_pools.py`, `mypy.stubtest vertebra._postgres`, Ruff, Clippy `-D warnings`, and `git diff --check` pass with zero warnings or diff hygiene errors.
+- [x] `SyncPostgresPool` and `AsyncPostgresPool` expose the exact constructor, `acquire`, `close`, and `validate_configuration` contracts from `contracts.md` and `_postgres.pyi` (R6, R7, R14).
+- [x] Acquired clients own real `PooledConnection` leases verified by backend PID, and cancelled async acquisitions or dropped clients never leak pool capacity (R7, R14).
+- [x] `validate_configuration` detects credential, TLS, GUC, cloud/IAM, and preparation-policy mismatches synchronously without caller keys or network I/O (R14).
+- [x] `test_postgres_native_pools.py`, `mypy.stubtest vertebra._postgres`, Ruff, Clippy `-D warnings`, and `git diff --check` pass with zero warnings or diff hygiene errors.
 
 ## Notes & Discoveries
 

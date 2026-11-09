@@ -199,10 +199,210 @@ class AsyncPostgresClient:
         """Return a copied dictionary of server ParameterStatus values."""
         ...
 
+@final
+class SyncPostgresPool:
+    """Synchronous physical PostgreSQL Protocol 3.0 connection pool."""
+
+    def __new__(
+        cls,
+        *,
+        user: str,
+        database: str,
+        host: str = "localhost",
+        port: int = 5432,
+        password: str | None = None,
+        unix_socket: str | None = None,
+        sslmode: str = "verify-full",
+        ca_pem: bytes | None = None,
+        client_cert_pem: bytes | None = None,
+        client_key_pem: bytes | None = None,
+        server_name: str | None = None,
+        channel_binding: str = "prefer",
+        connect_timeout: float = 10.0,
+        application_name: str = "vertebra",
+        session_gucs: Mapping[str, str] | None = None,
+        keepalives: bool = True,
+        keepalives_idle: int | None = None,
+        keepalives_interval: int | None = None,
+        keepalives_count: int | None = None,
+        cloud_sql_instance: str | None = None,
+        cloud_sql_ip_type: str = "PRIVATE",
+        alloydb_instance_uri: str | None = None,
+        alloydb_ip_type: str = "PRIVATE",
+        enable_iam_auth: bool = False,
+        cloud_auth_options: Mapping[str, str] | None = None,
+        iam_auth_options: Mapping[str, str] | None = None,
+        pooler_mode: str = "direct",
+        protocol_level_pooler_cache: bool = False,
+        statement_cache_size: int = 256,
+        min_size: int = 1,
+        max_size: int = 10,
+        acquire_timeout: float = 30.0,
+        reset_timeout: float = 10.0,
+        close_timeout: float = 30.0,
+    ) -> SyncPostgresPool:
+        """Validate connection and pool sizing options without network I/O."""
+        ...
+
+    def acquire(self) -> SyncPostgresClient:
+        """Acquire a concrete pooled physical connection lease."""
+        ...
+
+    def close(self) -> None:
+        """Drain and close the connection pool under close_timeout."""
+        ...
+
+    def validate_configuration(
+        self,
+        *,
+        user: str,
+        database: str,
+        host: str = "localhost",
+        port: int = 5432,
+        password: str | None = None,
+        unix_socket: str | None = None,
+        sslmode: str = "verify-full",
+        ca_pem: bytes | None = None,
+        client_cert_pem: bytes | None = None,
+        client_key_pem: bytes | None = None,
+        server_name: str | None = None,
+        channel_binding: str = "prefer",
+        connect_timeout: float = 10.0,
+        application_name: str = "vertebra",
+        session_gucs: Mapping[str, str] | None = None,
+        keepalives: bool = True,
+        keepalives_idle: int | None = None,
+        keepalives_interval: int | None = None,
+        keepalives_count: int | None = None,
+        cloud_sql_instance: str | None = None,
+        cloud_sql_ip_type: str = "PRIVATE",
+        alloydb_instance_uri: str | None = None,
+        alloydb_ip_type: str = "PRIVATE",
+        enable_iam_auth: bool = False,
+        cloud_auth_options: Mapping[str, str] | None = None,
+        iam_auth_options: Mapping[str, str] | None = None,
+        pooler_mode: str = "direct",
+        protocol_level_pooler_cache: bool = False,
+        statement_cache_size: int = 256,
+        min_size: int = 1,
+        max_size: int = 10,
+        acquire_timeout: float = 30.0,
+        reset_timeout: float = 10.0,
+        close_timeout: float = 30.0,
+    ) -> None:
+        """Validate candidate connection and preparation policy against this pool without I/O."""
+        ...
+
+    @property
+    def closed(self) -> bool:
+        """Return True if the pool has been closed or is draining."""
+        ...
+
+@final
+class AsyncPostgresPool:
+    """Asynchronous physical PostgreSQL Protocol 3.0 connection pool."""
+
+    def __new__(
+        cls,
+        *,
+        user: str,
+        database: str,
+        host: str = "localhost",
+        port: int = 5432,
+        password: str | None = None,
+        unix_socket: str | None = None,
+        sslmode: str = "verify-full",
+        ca_pem: bytes | None = None,
+        client_cert_pem: bytes | None = None,
+        client_key_pem: bytes | None = None,
+        server_name: str | None = None,
+        channel_binding: str = "prefer",
+        connect_timeout: float = 10.0,
+        application_name: str = "vertebra",
+        session_gucs: Mapping[str, str] | None = None,
+        keepalives: bool = True,
+        keepalives_idle: int | None = None,
+        keepalives_interval: int | None = None,
+        keepalives_count: int | None = None,
+        cloud_sql_instance: str | None = None,
+        cloud_sql_ip_type: str = "PRIVATE",
+        alloydb_instance_uri: str | None = None,
+        alloydb_ip_type: str = "PRIVATE",
+        enable_iam_auth: bool = False,
+        cloud_auth_options: Mapping[str, str] | None = None,
+        iam_auth_options: Mapping[str, str] | None = None,
+        pooler_mode: str = "direct",
+        protocol_level_pooler_cache: bool = False,
+        statement_cache_size: int = 256,
+        min_size: int = 1,
+        max_size: int = 10,
+        acquire_timeout: float = 30.0,
+        reset_timeout: float = 10.0,
+        close_timeout: float = 30.0,
+    ) -> AsyncPostgresPool:
+        """Validate connection and pool sizing options without network I/O."""
+        ...
+
+    def acquire(self) -> Awaitable[AsyncPostgresClient]:
+        """Acquire a concrete pooled physical connection lease asynchronously."""
+        ...
+
+    def close(self) -> Awaitable[None]:
+        """Drain and close the connection pool asynchronously under close_timeout."""
+        ...
+
+    def validate_configuration(
+        self,
+        *,
+        user: str,
+        database: str,
+        host: str = "localhost",
+        port: int = 5432,
+        password: str | None = None,
+        unix_socket: str | None = None,
+        sslmode: str = "verify-full",
+        ca_pem: bytes | None = None,
+        client_cert_pem: bytes | None = None,
+        client_key_pem: bytes | None = None,
+        server_name: str | None = None,
+        channel_binding: str = "prefer",
+        connect_timeout: float = 10.0,
+        application_name: str = "vertebra",
+        session_gucs: Mapping[str, str] | None = None,
+        keepalives: bool = True,
+        keepalives_idle: int | None = None,
+        keepalives_interval: int | None = None,
+        keepalives_count: int | None = None,
+        cloud_sql_instance: str | None = None,
+        cloud_sql_ip_type: str = "PRIVATE",
+        alloydb_instance_uri: str | None = None,
+        alloydb_ip_type: str = "PRIVATE",
+        enable_iam_auth: bool = False,
+        cloud_auth_options: Mapping[str, str] | None = None,
+        iam_auth_options: Mapping[str, str] | None = None,
+        pooler_mode: str = "direct",
+        protocol_level_pooler_cache: bool = False,
+        statement_cache_size: int = 256,
+        min_size: int = 1,
+        max_size: int = 10,
+        acquire_timeout: float = 30.0,
+        reset_timeout: float = 10.0,
+        close_timeout: float = 30.0,
+    ) -> None:
+        """Validate candidate connection and preparation policy against this pool without I/O."""
+        ...
+
+    @property
+    def closed(self) -> bool:
+        """Return True if the pool has been closed or is draining."""
+        ...
+
 __all__ = [
     "FREE_THREADED",
     "GIL_USED",
     "AsyncPostgresClient",
+    "AsyncPostgresPool",
     "SyncPostgresClient",
+    "SyncPostgresPool",
     "__version__",
 ]

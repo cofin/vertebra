@@ -373,6 +373,72 @@ fn infer_parameter_oid(
     }
 }
 
+/// Resolve parameter OIDs strictly from an in-memory [`TypeCatalog`] snapshot with zero wire I/O
+/// (used by single-`Sync` cold and warm pipeline batches).
+pub(crate) fn resolve_parameter_metadata_from_catalog<P: AsParameterInput>(
+    catalog: &TypeCatalog,
+    params: &[P],
+    parameter_oids: Option<&[u32]>,
+) -> Result<ResolvedParameters, PostgresError> {
+    if params.len() > i16::MAX as usize {
+        return Err(PostgresError::Data(format!(
+            "parameter count {} exceeds PostgreSQL Protocol 3.0 limit ({})",
+            params.len(),
+            i16::MAX
+        )));
+    }
+    if let Some(explicit) = parameter_oids
+        && explicit.len() != params.len()
+    {
+        return Err(PostgresError::Data(format!(
+            "parameter_oids length {} does not match parameters length {}",
+            explicit.len(),
+            params.len()
+        )));
+    }
+
+    let mut resolved_params = Vec::with_capacity(params.len());
+    let mut resolved_oids = Vec::with_capacity(params.len());
+    let mut all_formats_known = true;
+
+    for (idx, param) in params.iter().enumerate() {
+        ensure_no_temporal_text(param.value_ref())?;
+        let param_oid = param.type_oid_opt();
+        if param_oid == Some(0) {
+            return Err(PostgresError::Data(format!(
+                "parameter {idx} has invalid explicit type_oid 0 (use None for server inference)"
+            )));
+        }
+        let slice_oid = parameter_oids.map(|s| s[idx]).filter(|&o| o != 0);
+        if let (Some(a), Some(b)) = (param_oid, slice_oid)
+            && a != b
+        {
+            return Err(PostgresError::Data(format!(
+                "parameter {idx} explicit type_oid {a} conflicts with parameter_oids[{idx}] == {b}"
+            )));
+        }
+        let val = param.value_ref().clone();
+        let merged = param_oid.or(slice_oid);
+        let oid = infer_parameter_oid(&val, merged, catalog)?;
+        if !matches!(val, PgValue::Null)
+            && (oid == 0 || format_for_oid_with_catalog(oid, catalog) == Format::Text)
+        {
+            all_formats_known = false;
+        }
+        resolved_params.push(Parameter {
+            value: val,
+            type_oid: (oid != 0).then_some(oid),
+        });
+        resolved_oids.push(oid);
+    }
+
+    Ok(ResolvedParameters {
+        parameters: resolved_params,
+        parameter_oids: resolved_oids,
+        all_formats_known,
+    })
+}
+
 /// Resolve parameter OIDs and discover any required custom parameter metadata before `Parse` is emitted.
 pub async fn resolve_parameter_metadata<P: AsParameterInput>(
     conn: &mut PostgresConnection,

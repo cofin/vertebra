@@ -56,12 +56,30 @@ def test_postgres_column_and_query_result_invariants() -> None:
 @pytest.mark.parametrize(
     ("kwargs", "exc_type"),
     [
-        ({"name": "a", "type_oid": 0, "format": 0, "type_modifier": -1, "table_oid": 0, "attribute_number": 0}, ValueError),
-        ({"name": "a", "type_oid": True, "format": 0, "type_modifier": -1, "table_oid": 0, "attribute_number": 0}, TypeError),
-        ({"name": "a", "type_oid": 23, "format": True, "type_modifier": -1, "table_oid": 0, "attribute_number": 0}, TypeError),
-        ({"name": "a", "type_oid": 23, "format": 2, "type_modifier": -1, "table_oid": 0, "attribute_number": 0}, ValueError),
-        ({"name": "a", "type_oid": 23, "format": 0, "type_modifier": -1, "table_oid": -1, "attribute_number": 0}, ValueError),
-        ({"name": "a", "type_oid": 23, "format": 0, "type_modifier": -1, "table_oid": 0, "attribute_number": 40000}, ValueError),
+        (
+            {"name": "a", "type_oid": 0, "format": 0, "type_modifier": -1, "table_oid": 0, "attribute_number": 0},
+            ValueError,
+        ),
+        (
+            {"name": "a", "type_oid": True, "format": 0, "type_modifier": -1, "table_oid": 0, "attribute_number": 0},
+            TypeError,
+        ),
+        (
+            {"name": "a", "type_oid": 23, "format": True, "type_modifier": -1, "table_oid": 0, "attribute_number": 0},
+            TypeError,
+        ),
+        (
+            {"name": "a", "type_oid": 23, "format": 2, "type_modifier": -1, "table_oid": 0, "attribute_number": 0},
+            ValueError,
+        ),
+        (
+            {"name": "a", "type_oid": 23, "format": 0, "type_modifier": -1, "table_oid": -1, "attribute_number": 0},
+            ValueError,
+        ),
+        (
+            {"name": "a", "type_oid": 23, "format": 0, "type_modifier": -1, "table_oid": 0, "attribute_number": 40000},
+            ValueError,
+        ),
     ],
 )
 def test_postgres_column_rejects_invalid_fields(kwargs: dict[str, Any], exc_type: type[Exception]) -> None:
@@ -227,3 +245,62 @@ def test_pg_json_parameter_pipeline_and_public_row_projection() -> None:
     assert out_skip.failed_index == 0
     with pytest.raises(ValueError, match="earlier operation"):
         PostgresPipelineOutcome(index=0, status="skipped", failed_index=0)
+
+
+@pytest.mark.parametrize(
+    ("outcome_kwargs", "exc_type"),
+    [
+        ({"index": True, "status": "skipped", "failed_index": 0}, TypeError),
+        ({"index": -1, "status": "skipped", "failed_index": 0}, ValueError),
+        ({"index": 1, "status": "result", "result": None}, ValueError),
+        (
+            {
+                "index": 1,
+                "status": "result",
+                "result": PostgresQueryResult((), (), 0, "SELECT 0", "I"),
+                "failed_index": 0,
+            },
+            ValueError,
+        ),
+        ({"index": 1, "status": "error", "error": None}, ValueError),
+        (
+            {
+                "index": 1,
+                "status": "error",
+                "error": PostgresErrorInfo("23505", "dup", "ERROR", ()),
+                "failed_index": 0,
+            },
+            ValueError,
+        ),
+        (
+            {
+                "index": 2,
+                "status": "skipped",
+                "failed_index": 1,
+                "error": PostgresErrorInfo("23505", "dup", "ERROR", ()),
+            },
+            ValueError,
+        ),
+        ({"index": 1, "status": "skipped", "failed_index": 2}, ValueError),
+        ({"index": 1, "status": "skipped", "failed_index": False}, TypeError),
+    ],
+)
+def test_postgres_pipeline_outcome_rejects_invalid_discriminants_and_bools(
+    outcome_kwargs: dict[str, Any],
+    exc_type: type[Exception],
+) -> None:
+    """Verify PostgresPipelineOutcome enforces mutually exclusive payloads, index > failed_index, and non-bool ints."""
+    res_ok = PostgresPipelineOutcome(
+        index=0,
+        status="result",
+        result=PostgresQueryResult((), (), 0, "INSERT 0 1", "T"),
+    )
+    assert res_ok.status == "result"
+    assert res_ok.error is None
+    assert res_ok.failed_index is None
+
+    with pytest.raises(exc_type):
+        PostgresPipelineOutcome(**outcome_kwargs)
+
+    with pytest.raises(ValueError, match="parameter_oids length"):
+        PostgresPipelineOperation(sql="SELECT $1, $2", parameters=(1, 2), parameter_oids=(23,))

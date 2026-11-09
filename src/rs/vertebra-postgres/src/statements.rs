@@ -260,6 +260,16 @@ impl StatementCache {
         format!("vtb_s_{id}")
     }
 
+    /// Return the current statement ID seed without mutating the cache.
+    pub(crate) const fn peek_next_id_seed(&self) -> u64 {
+        self.next_statement_id
+    }
+
+    /// Advance the monotonic statement ID seed after reserving batch-scoped names.
+    pub(crate) fn advance_id_seed(&mut self, delta: u64) {
+        self.next_statement_id = self.next_statement_id.saturating_add(delta);
+    }
+
     /// Alias for [`StatementCache::allocate_statement_name`].
     pub fn next_statement_name(&mut self) -> String {
         self.allocate_statement_name()

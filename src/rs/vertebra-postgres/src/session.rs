@@ -99,10 +99,74 @@ pub enum ExchangeState {
     PipelineActive,
 }
 
+/// Async byte stream trait enabling instrumented duplex streams in deterministic wire tests.
+pub trait AsyncConnectionIo:
+    tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + std::fmt::Debug
+{
+}
+
+impl<T> AsyncConnectionIo for T where
+    T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + std::fmt::Debug
+{
+}
+
+/// Underlying session byte stream (`TransportStream` on all production dials, or custom `AsyncConnectionIo` in wire harnesses).
+#[derive(Debug)]
+pub(crate) enum ConnectionStream {
+    Transport(TransportStream),
+    Custom(Box<dyn AsyncConnectionIo>),
+}
+
+impl tokio::io::AsyncRead for ConnectionStream {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            Self::Transport(s) => std::pin::Pin::new(s).poll_read(cx, buf),
+            Self::Custom(s) => std::pin::Pin::new(s.as_mut()).poll_read(cx, buf),
+        }
+    }
+}
+
+impl tokio::io::AsyncWrite for ConnectionStream {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        match self.get_mut() {
+            Self::Transport(s) => std::pin::Pin::new(s).poll_write(cx, buf),
+            Self::Custom(s) => std::pin::Pin::new(s.as_mut()).poll_write(cx, buf),
+        }
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            Self::Transport(s) => std::pin::Pin::new(s).poll_flush(cx),
+            Self::Custom(s) => std::pin::Pin::new(s.as_mut()).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            Self::Transport(s) => std::pin::Pin::new(s).poll_shutdown(cx),
+            Self::Custom(s) => std::pin::Pin::new(s.as_mut()).poll_shutdown(cx),
+        }
+    }
+}
+
 /// Established, authenticated PostgreSQL wire connection at `ReadyForQuery(Idle)`.
 #[derive(Debug)]
 pub struct PostgresConnection {
-    pub(crate) stream: TransportStream,
+    pub(crate) stream: ConnectionStream,
     pub(crate) read_buf: BytesMut,
     pub(crate) write_buf: BytesMut,
     pub(crate) parameters: BTreeMap<String, String>,
@@ -158,9 +222,65 @@ impl PostgresConnection {
         self.tls_negotiated
     }
 
-    /// Borrow the underlying [`TransportStream`].
-    pub const fn stream(&self) -> &TransportStream {
-        &self.stream
+    /// Construct an authenticated [`PostgresConnection`] over a custom async duplex stream (used by protocol wire harnesses).
+    pub fn from_stream<S: AsyncConnectionIo + 'static>(
+        stream: S,
+        config: &PostgresConfig,
+        parameters: BTreeMap<String, String>,
+        backend_key: Option<BackendKey>,
+    ) -> Self {
+        let pooler_capabilities = PoolerCapabilities::resolve(
+            config.pooler_mode,
+            config.statement_cache_size,
+            config.protocol_level_pooler_cache,
+            &parameters,
+        );
+        let statement_cache = StatementCache::new(pooler_capabilities.effective_capacity);
+        let startup_parameters = parameters.clone();
+        let configured_session_gucs: BTreeMap<String, String> = config
+            .session_gucs
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        Self {
+            stream: ConnectionStream::Custom(Box::new(stream)),
+            read_buf: BytesMut::with_capacity(8192),
+            write_buf: BytesMut::with_capacity(1024),
+            parameters,
+            startup_parameters,
+            configured_session_gucs,
+            baseline_application_name: config.application_name.clone(),
+            backend_key,
+            transaction_status: TransactionStatus::Idle,
+            transaction_state: TransactionState::new(),
+            generation: 1,
+            tls_negotiated: false,
+            tls_server_end_point: None,
+            unnamed_statement_valid: false,
+            type_catalog: crate::types::TypeCatalog::new_with_builtins(),
+            exchange_state: ExchangeState::Idle,
+            statement_descriptions: std::collections::HashMap::new(),
+            pooler_capabilities,
+            statement_cache,
+            configured_pooler_mode: config.pooler_mode,
+            configured_statement_cache_size: config.statement_cache_size,
+            configured_protocol_level_pooler_cache: config.protocol_level_pooler_cache,
+            next_savepoint_token: 0,
+            next_portal_id: 0,
+            open_portals: Vec::new(),
+            notifications: Vec::new(),
+            closed: false,
+        }
+    }
+
+    /// Borrow the underlying [`TransportStream`] when backed by TCP, TLS, or Unix transport.
+    pub fn stream(&self) -> &TransportStream {
+        match &self.stream {
+            ConnectionStream::Transport(s) => s,
+            ConnectionStream::Custom(_) => {
+                panic!("PostgresConnection::stream() called on custom test duplex stream")
+            }
+        }
     }
 
     /// Verified peer leaf `tls-server-end-point` digest when available on a TLS connection.
@@ -2981,7 +3101,7 @@ pub(crate) async fn establish_postgres_connection(
                     .map(|(k, v)| (k.clone(), v.clone()))
                     .collect();
                 return Ok(PostgresConnection {
-                    stream,
+                    stream: ConnectionStream::Transport(stream),
                     read_buf,
                     write_buf,
                     parameters,
@@ -3213,5 +3333,17 @@ fn redact_session_error(
             source: Box::new(redact_session_error(*source, password, login_snapshot)),
             completed_result,
         },
+        PostgresError::PipelineValidation {
+            source,
+            failing_index,
+        } => PostgresError::PipelineValidation {
+            source: Box::new(redact_session_error(*source, password, login_snapshot)),
+            failing_index,
+        },
+        PostgresError::PipelineAborted(mut failure) => {
+            failure.first_error =
+                redact_session_error(failure.first_error, password, login_snapshot);
+            PostgresError::PipelineAborted(failure)
+        }
     }
 }

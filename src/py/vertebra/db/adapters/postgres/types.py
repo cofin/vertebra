@@ -39,9 +39,7 @@ type TemporalSpecial = Literal[
     "end_of_day",
     "wire_text",
 ]
-type PostgresJsonValue = (
-    None | bool | int | float | str | list[PostgresJsonValue] | dict[str, PostgresJsonValue]
-)
+type PostgresJsonValue = None | bool | int | float | str | list[PostgresJsonValue] | dict[str, PostgresJsonValue]
 
 _I16_MIN = -(1 << 15)
 _I16_MAX = (1 << 15) - 1
@@ -101,9 +99,7 @@ class PostgresQueryResult(msgspec.Struct, frozen=True, gc=False):
 
     def __post_init__(self) -> None:
         """Validate column/row tuple types, row width parity, and command metadata."""
-        if not isinstance(self.columns, tuple) or not all(
-            isinstance(col, PostgresColumn) for col in self.columns
-        ):
+        if not isinstance(self.columns, tuple) or not all(isinstance(col, PostgresColumn) for col in self.columns):
             msg = "PostgresQueryResult.columns must be a tuple of PostgresColumn"
             raise TypeError(msg)
         if not isinstance(self.rows, tuple):
@@ -262,11 +258,7 @@ class PgTemporal(msgspec.Struct, frozen=True, gc=False):
                 raise ValueError(msg)
             return
 
-        if (
-            self.wire_text is not None
-            or self.date_style is not None
-            or self.time_zone is not None
-        ):
+        if self.wire_text is not None or self.date_style is not None or self.time_zone is not None:
             msg = "Raw PgTemporal values must leave wire_text, date_style, and time_zone as None"
             raise ValueError(msg)
         if self.value is None:
@@ -290,9 +282,7 @@ class PgTemporal(msgspec.Struct, frozen=True, gc=False):
                 if not (_PG_DATE_MIN_FINITE <= self.value <= _PG_DATE_MAX_FINITE):
                     msg = "Finite PostgreSQL date value is outside server calendar range"
                     raise ValueError(msg)
-                if self.special == "out_of_range" and (
-                    _PY_DATE_MIN_PG_DAYS <= self.value <= _PY_DATE_MAX_PG_DAYS
-                ):
+                if self.special == "out_of_range" and (_PY_DATE_MIN_PG_DAYS <= self.value <= _PY_DATE_MAX_PG_DAYS):
                     msg = "date value inside Python date range cannot use special='out_of_range'"
                     raise ValueError(msg)
             return
@@ -323,9 +313,7 @@ class PgTemporal(msgspec.Struct, frozen=True, gc=False):
             if not (_PG_TS_MIN_FINITE <= self.value <= _PG_TS_MAX_FINITE):
                 msg = f"Finite PostgreSQL {self.kind} value is outside server range"
                 raise ValueError(msg)
-            if self.special == "out_of_range" and (
-                _PY_TS_MIN_PG_MICROS <= self.value < _PY_TS_MAX_PG_MICROS
-            ):
+            if self.special == "out_of_range" and (_PY_TS_MIN_PG_MICROS <= self.value < _PY_TS_MAX_PG_MICROS):
                 msg = f"{self.kind} value inside Python datetime range cannot use special='out_of_range'"
                 raise ValueError(msg)
 

@@ -5,7 +5,7 @@ chapter_id: ch15-pool-facades-and-single-sync-pipeline
 title: "Implement single-Sync cold and warm outbound pipeline submission"
 description: "Encode and flush N extended pipeline operations in one single-Sync batch with whole-batch SQL-head preflight and duplex read-while-writing backpressure."
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -119,10 +119,10 @@ Implement `PipelineOperation`, `PipelineBatch`, `PipelineLimits`, and `PostgresC
 
 ## Acceptance Criteria
 
-- [ ] Every non-empty cold or warm `PipelineBatch` emits all `N` operation sequences with zero `Flush` frames, **one** trailing `Sync`, and **one** logical `poll_flush` completion, with zero pre-batch catalog round trips (R17).
-- [ ] Whole-batch `validate_pipeline_commands` runs before encoding/sending operation `0`, producing zero operation frames, zero flushes, `outcomes = ()`, and exact `failing_index` when any operation head is forbidden (R13, R17).
-- [ ] Duplex read-while-writing prevents deadlocks under backpressure, bounds buffered bytes via `PipelineLimits`, and retires connections on partial-send failures (R17).
-- [ ] `pipeline_wire` integration tests, Clippy `-D warnings`, and `git diff --check` pass with zero warnings or diff hygiene errors.
+- [x] Every non-empty cold or warm `PipelineBatch` emits all `N` operation sequences with zero `Flush` frames, **one** trailing `Sync`, and **one** logical `poll_flush` completion, with zero pre-batch catalog round trips (R17).
+- [x] Whole-batch `validate_pipeline_commands` runs before encoding/sending operation `0`, producing zero operation frames, zero flushes, `outcomes = ()`, and exact `failing_index` when any operation head is forbidden (R13, R17).
+- [x] Duplex read-while-writing prevents deadlocks under backpressure, bounds buffered bytes via `PipelineLimits`, and retires connections on partial-send failures (R17).
+- [x] `pipeline_wire` integration tests, Clippy `-D warnings`, and `git diff --check` pass with zero warnings or diff hygiene errors.
 
 ## Notes & Discoveries
 

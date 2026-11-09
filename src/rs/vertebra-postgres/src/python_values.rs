@@ -41,6 +41,9 @@ struct CachedPythonTypes {
     pg_bit_string: Py<PyType>,
     pg_vector: Py<PyType>,
     pg_parameter: Py<PyType>,
+    postgres_error_info: Py<PyType>,
+    postgres_pipeline_operation: Py<PyType>,
+    postgres_pipeline_outcome: Py<PyType>,
     decimal: Py<PyType>,
     uuid: Py<PyType>,
     date: Py<PyType>,
@@ -77,6 +80,9 @@ fn resolve_python_types(py: Python<'_>) -> Result<&'static CachedPythonTypes, Po
                 pg_bit_string: get_ty(&pg_types, "PgBitString")?,
                 pg_vector: get_ty(&pg_types, "PgVector")?,
                 pg_parameter: get_ty(&pg_types, "PgParameter")?,
+                postgres_error_info: get_ty(&pg_types, "PostgresErrorInfo")?,
+                postgres_pipeline_operation: get_ty(&pg_types, "PostgresPipelineOperation")?,
+                postgres_pipeline_outcome: get_ty(&pg_types, "PostgresPipelineOutcome")?,
                 decimal: get_ty(&decimal_mod, "Decimal")?,
                 uuid: get_ty(&uuid_mod, "UUID")?,
                 date: get_ty(&dt_mod, "date")?,
@@ -1439,4 +1445,134 @@ pub fn query_result_to_python(py: Python<'_>, result: &QueryResult) -> PyResult<
         status_str,
     ))?;
     Ok(py_result.unbind())
+}
+
+/// Project a [`crate::errors::ServerError`] into `vertebra.db.adapters.postgres.types.PostgresErrorInfo`.
+pub fn server_error_to_python(
+    py: Python<'_>,
+    err: &crate::errors::ServerError,
+) -> PyResult<Py<PyAny>> {
+    let types = resolve_python_types(py).map_err(|e| crate::errors::postgres_error_to_py(py, e))?;
+    let mut diag_pairs = Vec::with_capacity(err.diagnostics.len());
+    for (tag, value) in &err.diagnostics {
+        let key = (*tag as char).to_string();
+        diag_pairs.push(PyTuple::new(
+            py,
+            [
+                PyString::new(py, &key).into_any(),
+                PyString::new(py, value).into_any(),
+            ],
+        )?);
+    }
+    let diag_tuple = PyTuple::new(py, diag_pairs)?;
+    let info = types.postgres_error_info.bind(py).call1((
+        err.sqlstate.as_str(),
+        err.message.as_str(),
+        err.severity.as_str(),
+        diag_tuple,
+    ))?;
+    Ok(info.unbind())
+}
+
+/// Project an ordered slice of [`crate::pipeline::PipelineOutcome`] records into a tuple of `PostgresPipelineOutcome`.
+pub fn pipeline_outcomes_to_python(
+    py: Python<'_>,
+    outcomes: &[crate::pipeline::PipelineOutcome],
+) -> PyResult<Py<PyAny>> {
+    let types = resolve_python_types(py).map_err(|e| crate::errors::postgres_error_to_py(py, e))?;
+    let out_cls = types.postgres_pipeline_outcome.bind(py);
+    let mut py_items = Vec::with_capacity(outcomes.len());
+    for (index, outcome) in outcomes.iter().enumerate() {
+        let py_item = match outcome {
+            crate::pipeline::PipelineOutcome::Result(res) => {
+                let py_res = query_result_to_python(py, res)?;
+                out_cls.call1((index, "result", py_res, py.None(), py.None()))?
+            }
+            crate::pipeline::PipelineOutcome::Error(srv) => {
+                let py_err = server_error_to_python(py, srv)?;
+                out_cls.call1((index, "error", py.None(), py_err, py.None()))?
+            }
+            crate::pipeline::PipelineOutcome::Skipped { failed_index } => {
+                out_cls.call1((index, "skipped", py.None(), py.None(), *failed_index))?
+            }
+        };
+        py_items.push(py_item);
+    }
+    Ok(PyTuple::new(py, py_items)?.into_any().unbind())
+}
+
+/// Extract a sequence of `PostgresPipelineOperation` items into owned [`crate::pipeline::PipelineOperation`] records before releasing the GIL.
+pub fn extract_pipeline_operations(
+    py: Python<'_>,
+    operations: &Bound<'_, PyAny>,
+) -> Result<Vec<crate::pipeline::PipelineOperation>, PostgresError> {
+    let types = resolve_python_types(py)?;
+    if operations.is_instance_of::<PyString>()
+        || operations.is_instance_of::<PyBytes>()
+        || operations.is_instance_of::<PyByteArray>()
+        || operations.is_instance_of::<PyDict>()
+    {
+        return Err(PostgresError::Interface(
+            "pipeline operations must be an ordered sequence of PostgresPipelineOperation"
+                .to_string(),
+        ));
+    }
+    let items: Vec<Bound<'_, PyAny>> = operations
+        .try_iter()
+        .map_err(|_| {
+            PostgresError::Interface(
+                "pipeline operations must be an iterable sequence of PostgresPipelineOperation"
+                    .to_string(),
+            )
+        })?
+        .collect::<PyResult<Vec<_>>>()
+        .map_err(|e| {
+            PostgresError::Interface(format!("failed to iterate pipeline operations: {e}"))
+        })?;
+
+    let op_ty = types.postgres_pipeline_operation.bind(py);
+    let mut out = Vec::with_capacity(items.len());
+    for (idx, item) in items.iter().enumerate() {
+        let is_op = item
+            .is_instance(op_ty)
+            .map_err(|e| PostgresError::Interface(e.to_string()))?;
+        if !is_op {
+            return Err(PostgresError::PipelineValidation {
+                source: Box::new(PostgresError::Interface(format!(
+                    "pipeline operation at index {idx} must be a PostgresPipelineOperation"
+                ))),
+                failing_index: idx,
+            });
+        }
+        let sql_obj = item
+            .getattr("sql")
+            .map_err(|e| PostgresError::Interface(e.to_string()))?;
+        let sql: String = sql_obj
+            .extract()
+            .map_err(|_| PostgresError::PipelineValidation {
+                source: Box::new(PostgresError::Interface(format!(
+                    "pipeline operation {idx} sql must be a str"
+                ))),
+                failing_index: idx,
+            })?;
+        let params_obj = item
+            .getattr("parameters")
+            .map_err(|e| PostgresError::Interface(e.to_string()))?;
+        let oids_obj = item
+            .getattr("parameter_oids")
+            .map_err(|e| PostgresError::Interface(e.to_string()))?;
+        let oids_opt = (!oids_obj.is_none()).then_some(&oids_obj);
+        let (params, oids) = extract_parameters(py, &params_obj, oids_opt).map_err(|err| {
+            PostgresError::PipelineValidation {
+                source: Box::new(err),
+                failing_index: idx,
+            }
+        })?;
+        out.push(crate::pipeline::PipelineOperation {
+            sql,
+            parameters: params,
+            parameter_oids: oids,
+        });
+    }
+    Ok(out)
 }
