@@ -5,12 +5,12 @@ chapter_id: ch12-pgvector-and-extended-query
 title: "Chapter 12: Validated pgvector/halfvec/Bit Codecs, Cold Metadata Normalization, and Mixed-Format Extended Queries"
 description: Repair shared pgvector/halfvec/bit CPU helpers, integrate dynamic extension vector and bitstring codecs, normalize cold-query parameter and result metadata at safe protocol boundaries, and execute mixed-format extended queries.
 status: stable
-state: planned
+state: completed
 planning_status: complete
 depends_on_chapters:
   - ch11-type-catalog-arrays-and-composites
 replan_trigger: null
-current_task: "native-postgres-driver:ch12:t01"
+current_task: null
 plan_revision: 5
 plan_commit: fd571e3a
 state_revision: 0
@@ -150,9 +150,9 @@ Parent roadmap: [spec.md](../../spec.md). Public interface authority: [contracts
 
 ## 5. Implementation Plan
 
-- [ ] native-postgres-driver:ch12:t01 — Repair shared pgvector/halfvec/bit CPU helpers and integrate dynamic vector and bitstring codecs (tasks/t01-pgvector-halfvec-and-bit.md)
-- [ ] native-postgres-driver:ch12:t02 — Implement cold-query pre-Parse parameter discovery and post-ReadyForQuery owned result normalization (tasks/t02-cold-query-metadata-normalization.md)
-- [ ] native-postgres-driver:ch12:t03 — Implement extended-query execution with typed NULLs and mixed binary/text format negotiation (tasks/t03-extended-query-mixed-formats.md)
+- [x] native-postgres-driver:ch12:t01 — Repair shared pgvector/halfvec/bit CPU helpers and integrate dynamic vector and bitstring codecs (tasks/t01-pgvector-halfvec-and-bit.md)
+- [x] native-postgres-driver:ch12:t02 — Implement cold-query pre-Parse parameter discovery and post-ReadyForQuery owned result normalization (tasks/t02-cold-query-metadata-normalization.md)
+- [x] native-postgres-driver:ch12:t03 — Implement extended-query execution with typed NULLs and mixed binary/text format negotiation (tasks/t03-extended-query-mixed-formats.md)
 
 **Chapter Recovery Checkpoint:** `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-db --lib postgres::tests && cargo test --manifest-path src/rs/Cargo.toml -p vertebra-db --test postgres_vector_tests && cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres && cargo check --manifest-path src/rs/Cargo.toml -p vertebra-postgres --locked && cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-db -p vertebra-postgres --all-targets -- -D warnings` exits `0`.
 

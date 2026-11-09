@@ -5,7 +5,7 @@ chapter_id: ch11-type-catalog-arrays-and-composites
 title: Implement escaped multidimensional text array codecs and bounded container scanning
 description: "Decode and encode PostgreSQL multidimensional text arrays ([lower:upper]= prefixes) with custom typdelim, exact NULL vs quoted NULL vs empty-string rules, and a bounded quoted-field scanner shared with composite codecs."
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -123,9 +123,9 @@ Implement PostgreSQL `array_out` / `array_in` text decoding and encoding in `src
 
 ## Acceptance Criteria
 
-- [ ] Multidimensional text arrays preserve rank (`0..=6`), `[lower:upper]=` bounds, and exact distinctions among SQL `NULL`, `"NULL"`, and `""`, producing `PgValue::Array` values identical to binary array decoding (R11).
-- [ ] `pg_type.typdelim` (`;` for `_box`, `,` otherwise) and PostgreSQL quote/backslash escaping match server `array_in`/`array_out` output (R11).
-- [ ] `scan_delimited_container` enforces bounded nesting, handles `CompositeEmptyUnquoted` leading/inner/trailing empty slots, `""` + `\"`/`\\` quote unescaping, and `0`-vs-`1`-attribute `"()"` via `expected_arity`, and rejects ragged or malformed syntax with `PostgresError::Data` (R11).
+- [x] Multidimensional text arrays preserve rank (`0..=6`), `[lower:upper]=` bounds, and exact distinctions among SQL `NULL`, `"NULL"`, and `""`, producing `PgValue::Array` values identical to binary array decoding (R11).
+- [x] `pg_type.typdelim` (`;` for `_box`, `,` otherwise) and PostgreSQL quote/backslash escaping match server `array_in`/`array_out` output (R11).
+- [x] `scan_delimited_container` enforces bounded nesting, handles `CompositeEmptyUnquoted` leading/inner/trailing empty slots, `""` + `\"`/`\\` quote unescaping, and `0`-vs-`1`-attribute `"()"` via `expected_arity`, and rejects ragged or malformed syntax with `PostgresError::Data` (R11).
 
 ## Notes & Discoveries
 

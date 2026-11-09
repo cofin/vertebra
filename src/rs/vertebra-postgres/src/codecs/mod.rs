@@ -1,13 +1,25 @@
 //! Central PostgreSQL wire codec dispatcher (`CodecContext`, `format_for_oid`, `decode_value`, `encode_value`).
 
 use std::collections::{BTreeMap, HashMap};
+use std::sync::LazyLock;
 
 use bytes::{BufMut, BytesMut};
 use postgres_protocol::types;
+use vertebra_db::postgres::{
+    PGVECTOR_MAX_DIM, decode_pgvector_bit, decode_pgvector_f16, decode_pgvector_f32,
+    encode_pgvector_bit, encode_pgvector_f16, encode_pgvector_f32,
+};
 
 use crate::errors::PostgresError;
-use crate::result::{Format, PgValue, TemporalKind};
+use crate::result::{Format, PgValue, TemporalKind, VectorKind};
+pub use crate::types::{
+    BIT_ARRAY_OID, BIT_OID, BOX_ARRAY_OID, BOX_OID, CompositeField, RECORD_ARRAY_OID, RECORD_OID,
+    TypeCatalog, TypeInfo, TypeKind, VARBIT_ARRAY_OID, VARBIT_OID,
+};
 
+pub mod array;
+pub mod array_text;
+pub mod composite;
 pub mod datetime_text;
 pub mod interval_text;
 pub mod json;
@@ -61,6 +73,8 @@ pub const JSONB_OID: u32 = json::JSONB_OID;
 pub const DEFAULT_MAX_FIELD_BYTES: usize = 16 * 1024 * 1024;
 /// Default container/JSON recursion ceiling (`32`).
 pub const DEFAULT_MAX_NESTING_DEPTH: usize = 32;
+
+static BUILTIN_CATALOG: LazyLock<TypeCatalog> = LazyLock::new(TypeCatalog::new_with_builtins);
 
 /// Trait abstracting session parameter lookups across `HashMap` and `BTreeMap`.
 pub trait ParameterMap {
@@ -134,14 +148,56 @@ impl CodecContext {
     }
 }
 
-/// Return the preferred wire [`Format`] for a PostgreSQL type `oid` (`Format::Text` for unknown OIDs).
+/// Return the preferred wire [`Format`] for a built-in PostgreSQL type `oid` (`Format::Text` for unknown OIDs).
 pub const fn format_for_oid(oid: u32) -> Format {
     match oid {
         BOOL_OID | BYTEA_OID | NAME_OID | INT8_OID | INT2_OID | INT4_OID | TEXT_OID | OID_OID
         | JSON_OID | FLOAT4_OID | FLOAT8_OID | BPCHAR_OID | VARCHAR_OID | DATE_OID | TIME_OID
-        | TIMESTAMP_OID | TIMESTAMPTZ_OID | INTERVAL_OID | NUMERIC_OID | UUID_OID | JSONB_OID => {
-            Format::Binary
+        | TIMESTAMP_OID | TIMESTAMPTZ_OID | INTERVAL_OID | BIT_OID | VARBIT_OID | NUMERIC_OID
+        | UUID_OID | JSONB_OID => Format::Binary,
+        _ => Format::Text,
+    }
+}
+
+/// Return the preferred wire [`Format`] for `oid` consulting the session [`TypeCatalog`].
+pub fn format_for_oid_with_catalog(oid: u32, catalog: &TypeCatalog) -> Format {
+    format_for_oid_with_catalog_depth(oid, catalog, 0)
+}
+
+fn format_for_oid_with_catalog_depth(oid: u32, catalog: &TypeCatalog, depth: usize) -> Format {
+    if depth > DEFAULT_MAX_NESTING_DEPTH {
+        return Format::Text;
+    }
+    let Ok(base_oid) = catalog.resolve_domain_base(oid) else {
+        return Format::Text;
+    };
+    if base_oid == RECORD_OID || base_oid == BOX_OID {
+        return Format::Text;
+    }
+    if format_for_oid(base_oid) == Format::Binary {
+        return Format::Binary;
+    }
+    match catalog.type_info(base_oid) {
+        Some(TypeInfo {
+            kind: TypeKind::Array { element_oid, .. },
+            ..
+        }) => format_for_oid_with_catalog_depth(*element_oid, catalog, depth + 1),
+        Some(TypeInfo {
+            kind: TypeKind::Composite { fields },
+            ..
+        }) => {
+            if fields.iter().all(|f| {
+                format_for_oid_with_catalog_depth(f.type_oid, catalog, depth + 1) == Format::Binary
+            }) {
+                Format::Binary
+            } else {
+                Format::Text
+            }
         }
+        Some(TypeInfo {
+            kind: TypeKind::Extension { name, .. },
+            ..
+        }) if name == "vector" || name == "halfvec" => Format::Binary,
         _ => Format::Text,
     }
 }
@@ -340,12 +396,172 @@ fn format_uuid_hyphenated(uuid: &[u8; 16]) -> String {
     )
 }
 
-/// Decode a single PostgreSQL cell payload into an owned [`PgValue`].
+fn decode_bitstring_text(s: &str) -> Result<PgValue, PostgresError> {
+    let bit_len = i32::try_from(s.len())
+        .map_err(|_| PostgresError::Data("bitstring length exceeds i32::MAX".to_string()))?;
+    let mut data = vec![0u8; s.len().div_ceil(8)];
+    for (idx, b) in s.bytes().enumerate() {
+        match b {
+            b'0' => {}
+            b'1' => {
+                data[idx / 8] |= 1u8 << (7 - (idx % 8));
+            }
+            other => {
+                return Err(PostgresError::Data(format!(
+                    "invalid character {:?} in PostgreSQL bitstring literal",
+                    other as char
+                )));
+            }
+        }
+    }
+    Ok(PgValue::BitString {
+        data,
+        bit_length: bit_len,
+    })
+}
+
+fn encode_bitstring_text(
+    data: &[u8],
+    bit_length: i32,
+    out: &mut BytesMut,
+) -> Result<(), PostgresError> {
+    if bit_length < 0 {
+        return Err(PostgresError::Data(format!(
+            "BitString bit_length must be >= 0, got {bit_length}"
+        )));
+    }
+    let bit_len = bit_length as usize;
+    let _ = encode_pgvector_bit(data, bit_len).map_err(PostgresError::Data)?;
+    out.reserve(bit_len);
+    for idx in 0..bit_len {
+        let bit = (data[idx / 8] >> (7 - (idx % 8))) & 1;
+        out.put_u8(if bit == 1 { b'1' } else { b'0' });
+    }
+    Ok(())
+}
+
+fn decode_vector_text(s: &str, kind: VectorKind) -> Result<PgValue, PostgresError> {
+    let trimmed = s.trim();
+    let Some(inner) = trimmed.strip_prefix('[').and_then(|t| t.strip_suffix(']')) else {
+        return Err(PostgresError::Data(format!(
+            "pgvector text literal {s:?} must be bracketed [v1,v2,...]"
+        )));
+    };
+    if inner.trim().is_empty() {
+        return Err(PostgresError::Data(
+            "pgvector text literal cannot be empty []".to_string(),
+        ));
+    }
+    let mut values = Vec::new();
+    for part in inner.split(',') {
+        let token = part.trim();
+        if token.is_empty() {
+            return Err(PostgresError::Data(format!(
+                "empty component in pgvector text literal {s:?}"
+            )));
+        }
+        let v: f32 = token.parse().map_err(|_| {
+            PostgresError::Data(format!("invalid float {token:?} in pgvector text"))
+        })?;
+        if !v.is_finite() {
+            return Err(PostgresError::Data(format!(
+                "non-finite float {token:?} in pgvector text"
+            )));
+        }
+        if kind == VectorKind::HalfVec {
+            let h = half::f16::from_f32(v);
+            if !h.is_finite() {
+                return Err(PostgresError::Data(format!(
+                    "halfvec text component {v} overflowed finite IEEE-754 binary16"
+                )));
+            }
+            values.push(h.to_f32());
+        } else {
+            values.push(v);
+        }
+    }
+    if !(1..=PGVECTOR_MAX_DIM).contains(&values.len()) {
+        return Err(PostgresError::Data(format!(
+            "pgvector text dimension {} outside valid range 1..={PGVECTOR_MAX_DIM}",
+            values.len()
+        )));
+    }
+    Ok(PgValue::Vector { values, kind })
+}
+
+fn encode_vector_text(
+    values: &[f32],
+    kind: VectorKind,
+    out: &mut BytesMut,
+) -> Result<(), PostgresError> {
+    if !(1..=PGVECTOR_MAX_DIM).contains(&values.len()) {
+        return Err(PostgresError::Data(format!(
+            "pgvector dimension {} outside valid range 1..={PGVECTOR_MAX_DIM}",
+            values.len()
+        )));
+    }
+    out.put_u8(b'[');
+    for (idx, &v) in values.iter().enumerate() {
+        if !v.is_finite() {
+            return Err(PostgresError::Data(
+                "pgvector does not allow NaN or infinite values".to_string(),
+            ));
+        }
+        if idx > 0 {
+            out.put_u8(b',');
+        }
+        let formatted = if kind == VectorKind::HalfVec {
+            let h = half::f16::from_f32(v);
+            if !h.is_finite() {
+                return Err(PostgresError::Data(format!(
+                    "halfvec value {v} overflowed finite IEEE-754 binary16"
+                )));
+            }
+            let q = h.to_f32();
+            if q == 0.0 && q.is_sign_negative() {
+                "-0".to_string()
+            } else {
+                q.to_string()
+            }
+        } else if v == 0.0 && v.is_sign_negative() {
+            "-0".to_string()
+        } else {
+            v.to_string()
+        };
+        out.put_slice(formatted.as_bytes());
+    }
+    out.put_u8(b']');
+    Ok(())
+}
+
+/// Decode a single PostgreSQL cell payload into an owned [`PgValue`] using built-in OID metadata.
 pub fn decode_value(
     oid: u32,
     format: Format,
     raw: Option<&[u8]>,
     ctx: &CodecContext,
+) -> Result<PgValue, PostgresError> {
+    decode_value_with_catalog(oid, format, raw, ctx, &BUILTIN_CATALOG)
+}
+
+/// Decode a single PostgreSQL cell payload into an owned [`PgValue`] consulting `catalog`.
+pub fn decode_value_with_catalog(
+    oid: u32,
+    format: Format,
+    raw: Option<&[u8]>,
+    ctx: &CodecContext,
+    catalog: &TypeCatalog,
+) -> Result<PgValue, PostgresError> {
+    decode_value_with_catalog_at_depth(oid, format, raw, ctx, catalog, 0)
+}
+
+pub(crate) fn decode_value_with_catalog_at_depth(
+    oid: u32,
+    format: Format,
+    raw: Option<&[u8]>,
+    ctx: &CodecContext,
+    catalog: &TypeCatalog,
+    depth: usize,
 ) -> Result<PgValue, PostgresError> {
     let Some(bytes) = raw else {
         return Ok(PgValue::Null);
@@ -357,8 +573,16 @@ pub fn decode_value(
             ctx.max_field_bytes
         )));
     }
+    if depth > ctx.max_nesting_depth {
+        return Err(PostgresError::Data(format!(
+            "value nesting depth {depth} exceeds max_nesting_depth {}",
+            ctx.max_nesting_depth
+        )));
+    }
 
-    match (oid, format) {
+    let base_oid = catalog.resolve_domain_base(oid)?;
+
+    match (base_oid, format) {
         (BOOL_OID, Format::Binary) => match bytes {
             [0] => Ok(PgValue::Bool(false)),
             [1] => Ok(PgValue::Bool(true)),
@@ -503,20 +727,109 @@ pub fn decode_value(
                 microseconds,
             })
         }
+        (BIT_OID | VARBIT_OID, Format::Binary) => {
+            let (data, bit_len) = decode_pgvector_bit(bytes).map_err(PostgresError::Data)?;
+            let bit_length = i32::try_from(bit_len).map_err(|_| {
+                PostgresError::Data(format!("bitstring bit_len {bit_len} exceeds i32::MAX"))
+            })?;
+            Ok(PgValue::BitString { data, bit_length })
+        }
+        (BIT_OID | VARBIT_OID, Format::Text) => {
+            let s = validate_no_nul_utf8(bytes)?;
+            decode_bitstring_text(&s)
+        }
         (JSON_OID, Format::Binary) => Ok(PgValue::Json(json::decode_json_binary(bytes, ctx)?)),
         (JSON_OID, Format::Text) => Ok(PgValue::Json(json::decode_json_text(bytes, ctx)?)),
         (JSONB_OID, Format::Binary) => Ok(PgValue::Json(json::decode_jsonb_binary(bytes, ctx)?)),
         (JSONB_OID, Format::Text) => Ok(PgValue::Json(json::decode_json_text(bytes, ctx)?)),
-        (_, Format::Text) => Ok(PgValue::Text(validate_no_nul_utf8(bytes)?)),
-        (unknown_oid, Format::Binary) => Err(PostgresError::Data(format!(
-            "cannot decode unknown PostgreSQL OID {unknown_oid} from binary format"
-        ))),
+        (RECORD_OID, Format::Binary) => {
+            composite::decode_composite_binary(RECORD_OID, bytes, ctx, catalog, depth)
+        }
+        (RECORD_OID, Format::Text) => Ok(PgValue::Text(validate_no_nul_utf8(bytes)?)),
+        _ => match catalog.type_info(base_oid) {
+            Some(TypeInfo {
+                kind:
+                    TypeKind::Array {
+                        element_oid,
+                        delimiter,
+                    },
+                ..
+            }) => match format {
+                Format::Binary => {
+                    array::decode_array_binary(base_oid, *element_oid, bytes, ctx, catalog, depth)
+                }
+                Format::Text => {
+                    let s = validate_no_nul_utf8(bytes)?;
+                    array_text::decode_array_text(
+                        base_oid,
+                        *element_oid,
+                        *delimiter,
+                        &s,
+                        ctx,
+                        catalog,
+                        depth,
+                    )
+                }
+            },
+            Some(TypeInfo {
+                kind: TypeKind::Composite { fields },
+                ..
+            }) => match format {
+                Format::Binary => {
+                    composite::decode_composite_binary(base_oid, bytes, ctx, catalog, depth)
+                }
+                Format::Text => {
+                    let s = validate_no_nul_utf8(bytes)?;
+                    composite::decode_composite_text(base_oid, fields, &s, ctx, catalog, depth)
+                }
+            },
+            Some(TypeInfo {
+                kind: TypeKind::Extension { name, .. },
+                ..
+            }) if name == "vector" => match format {
+                Format::Binary => {
+                    let values = decode_pgvector_f32(bytes).map_err(PostgresError::Data)?;
+                    Ok(PgValue::Vector {
+                        values,
+                        kind: VectorKind::Vector,
+                    })
+                }
+                Format::Text => {
+                    let s = validate_no_nul_utf8(bytes)?;
+                    decode_vector_text(&s, VectorKind::Vector)
+                }
+            },
+            Some(TypeInfo {
+                kind: TypeKind::Extension { name, .. },
+                ..
+            }) if name == "halfvec" => match format {
+                Format::Binary => {
+                    let values = decode_pgvector_f16(bytes).map_err(PostgresError::Data)?;
+                    Ok(PgValue::Vector {
+                        values,
+                        kind: VectorKind::HalfVec,
+                    })
+                }
+                Format::Text => {
+                    let s = validate_no_nul_utf8(bytes)?;
+                    decode_vector_text(&s, VectorKind::HalfVec)
+                }
+            },
+            Some(TypeInfo {
+                kind: TypeKind::Enum,
+                ..
+            }) => Ok(PgValue::Text(validate_no_nul_utf8(bytes)?)),
+            _ => match format {
+                Format::Text => Ok(PgValue::Text(validate_no_nul_utf8(bytes)?)),
+                Format::Binary => Err(PostgresError::Data(format!(
+                    "cannot decode unknown PostgreSQL OID {oid} from binary format"
+                ))),
+            },
+        },
     }
 }
 
-/// Encode an owned [`PgValue`] into `out` for `target_oid` and `format`.
-///
-/// Returns `Ok(false)` when `value` is [`PgValue::Null`], and `Ok(true)` when bytes were written.
+/// Encode an owned [`PgValue`] into `out` for `target_oid` and `format` using built-in OID metadata.
 pub fn encode_value(
     value: &PgValue,
     target_oid: u32,
@@ -524,19 +837,55 @@ pub fn encode_value(
     out: &mut BytesMut,
     ctx: &CodecContext,
 ) -> Result<bool, PostgresError> {
+    encode_value_with_catalog(value, target_oid, format, out, ctx, &BUILTIN_CATALOG)
+}
+
+/// Encode an owned [`PgValue`] into `out` for `target_oid` and `format` consulting `catalog`.
+pub fn encode_value_with_catalog(
+    value: &PgValue,
+    target_oid: u32,
+    format: Format,
+    out: &mut BytesMut,
+    ctx: &CodecContext,
+    catalog: &TypeCatalog,
+) -> Result<bool, PostgresError> {
+    encode_value_with_catalog_at_depth(value, target_oid, format, out, ctx, catalog, 0)
+}
+
+pub(crate) fn encode_value_with_catalog_at_depth(
+    value: &PgValue,
+    target_oid: u32,
+    format: Format,
+    out: &mut BytesMut,
+    ctx: &CodecContext,
+    catalog: &TypeCatalog,
+    depth: usize,
+) -> Result<bool, PostgresError> {
     if matches!(value, PgValue::Null) {
         return Ok(false);
+    }
+    if depth > ctx.max_nesting_depth {
+        return Err(PostgresError::Data(format!(
+            "value nesting depth {depth} exceeds max_nesting_depth {}",
+            ctx.max_nesting_depth
+        )));
     }
     if target_oid == 0 && format == Format::Binary {
         return Err(PostgresError::Data(
             "cannot encode binary parameter with unspecified target_oid == 0".to_string(),
         ));
     }
+
+    let resolved_target = if target_oid != 0 {
+        catalog.resolve_domain_base(target_oid)?
+    } else {
+        0
+    };
     let start_len = out.len();
 
     match (value, format) {
         (PgValue::Bool(v), Format::Binary) => {
-            if target_oid != BOOL_OID {
+            if resolved_target != BOOL_OID {
                 return Err(PostgresError::Data(format!(
                     "cannot encode Bool as binary OID {target_oid}"
                 )));
@@ -546,7 +895,7 @@ pub fn encode_value(
         (PgValue::Bool(v), Format::Text) => {
             out.put_slice(if *v { b"t" } else { b"f" });
         }
-        (PgValue::Int2(v), Format::Binary) => match target_oid {
+        (PgValue::Int2(v), Format::Binary) => match resolved_target {
             INT2_OID => types::int2_to_sql(*v, out),
             INT4_OID => types::int4_to_sql(i32::from(*v), out),
             INT8_OID => types::int8_to_sql(i64::from(*v), out),
@@ -559,7 +908,7 @@ pub fn encode_value(
         (PgValue::Int2(v), Format::Text) => {
             out.put_slice(v.to_string().as_bytes());
         }
-        (PgValue::Int4(v), Format::Binary) => match target_oid {
+        (PgValue::Int4(v), Format::Binary) => match resolved_target {
             INT2_OID => {
                 let n = i16::try_from(*v)
                     .map_err(|_| PostgresError::Data(format!("Int4 value {v} overflows INT2")))?;
@@ -582,7 +931,7 @@ pub fn encode_value(
         (PgValue::Int4(v), Format::Text) => {
             out.put_slice(v.to_string().as_bytes());
         }
-        (PgValue::Int8(v), Format::Binary) => match target_oid {
+        (PgValue::Int8(v), Format::Binary) => match resolved_target {
             INT2_OID => {
                 let n = i16::try_from(*v)
                     .map_err(|_| PostgresError::Data(format!("Int8 value {v} overflows INT2")))?;
@@ -607,7 +956,7 @@ pub fn encode_value(
             }
         },
         (PgValue::Int8(v), Format::Text) => {
-            if target_oid == OID_OID {
+            if resolved_target == OID_OID {
                 let u = u32::try_from(*v).map_err(|_| {
                     PostgresError::Data(format!("Int8 value {v} overflows unsigned 32-bit OID"))
                 })?;
@@ -616,7 +965,7 @@ pub fn encode_value(
                 out.put_slice(v.to_string().as_bytes());
             }
         }
-        (PgValue::Float4(v), Format::Binary) => match target_oid {
+        (PgValue::Float4(v), Format::Binary) => match resolved_target {
             FLOAT4_OID => types::float4_to_sql(*v, out),
             FLOAT8_OID => types::float8_to_sql(f64::from(*v), out),
             _ => {
@@ -639,7 +988,7 @@ pub fn encode_value(
             };
             out.put_slice(s.as_bytes());
         }
-        (PgValue::Float8(v), Format::Binary) => match target_oid {
+        (PgValue::Float8(v), Format::Binary) => match resolved_target {
             FLOAT8_OID => types::float8_to_sql(*v, out),
             FLOAT4_OID => {
                 let narrowed = *v as f32;
@@ -676,8 +1025,18 @@ pub fn encode_value(
                     "PostgreSQL text value cannot contain embedded NUL byte".to_string(),
                 ));
             }
-            match target_oid {
+            let is_enum = matches!(
+                catalog.type_info(resolved_target),
+                Some(TypeInfo {
+                    kind: TypeKind::Enum,
+                    ..
+                })
+            );
+            match resolved_target {
                 TEXT_OID | VARCHAR_OID | BPCHAR_OID | NAME_OID => {
+                    out.put_slice(s.as_bytes());
+                }
+                _ if is_enum => {
                     out.put_slice(s.as_bytes());
                 }
                 _ => {
@@ -696,7 +1055,7 @@ pub fn encode_value(
             out.put_slice(s.as_bytes());
         }
         (PgValue::Bytes(b), Format::Binary) => {
-            if target_oid != BYTEA_OID {
+            if resolved_target != BYTEA_OID {
                 return Err(PostgresError::Data(format!(
                     "cannot encode Bytes as binary OID {target_oid}"
                 )));
@@ -707,7 +1066,7 @@ pub fn encode_value(
             encode_bytea_hex(b, out);
         }
         (PgValue::Uuid(u), Format::Binary) => {
-            if target_oid != UUID_OID {
+            if resolved_target != UUID_OID {
                 return Err(PostgresError::Data(format!(
                     "cannot encode Uuid as binary OID {target_oid}"
                 )));
@@ -718,7 +1077,7 @@ pub fn encode_value(
             out.put_slice(format_uuid_hyphenated(u).as_bytes());
         }
         (PgValue::Numeric(n), Format::Binary) => {
-            if target_oid != NUMERIC_OID {
+            if resolved_target != NUMERIC_OID {
                 return Err(PostgresError::Data(format!(
                     "cannot encode Numeric as binary OID {target_oid}"
                 )));
@@ -729,7 +1088,7 @@ pub fn encode_value(
             out.put_slice(numeric::encode_numeric_text(n).as_bytes());
         }
         (PgValue::Date(days), Format::Binary) => {
-            if target_oid != DATE_OID {
+            if resolved_target != DATE_OID {
                 return Err(PostgresError::Data(format!(
                     "cannot encode Date as binary OID {target_oid}"
                 )));
@@ -737,7 +1096,7 @@ pub fn encode_value(
             temporal::encode_date_binary(*days, out)?;
         }
         (PgValue::Time(micros), Format::Binary) => {
-            if target_oid != TIME_OID {
+            if resolved_target != TIME_OID {
                 return Err(PostgresError::Data(format!(
                     "cannot encode Time as binary OID {target_oid}"
                 )));
@@ -745,7 +1104,7 @@ pub fn encode_value(
             temporal::encode_time_binary(*micros, out)?;
         }
         (PgValue::Timestamp(micros), Format::Binary) => {
-            if target_oid != TIMESTAMP_OID {
+            if resolved_target != TIMESTAMP_OID {
                 return Err(PostgresError::Data(format!(
                     "cannot encode naive Timestamp as binary OID {target_oid} (expected {TIMESTAMP_OID})"
                 )));
@@ -753,7 +1112,7 @@ pub fn encode_value(
             temporal::encode_timestamp_binary(*micros, out)?;
         }
         (PgValue::TimestampTz(micros), Format::Binary) => {
-            if target_oid != TIMESTAMPTZ_OID {
+            if resolved_target != TIMESTAMPTZ_OID {
                 return Err(PostgresError::Data(format!(
                     "cannot encode TimestampTz as binary OID {target_oid} (expected {TIMESTAMPTZ_OID})"
                 )));
@@ -769,16 +1128,16 @@ pub fn encode_value(
             Format::Text,
         ) => {
             if matches!(value, PgValue::Timestamp(_))
-                && target_oid != 0
-                && target_oid != TIMESTAMP_OID
+                && resolved_target != 0
+                && resolved_target != TIMESTAMP_OID
             {
                 return Err(PostgresError::Data(format!(
                     "cannot encode naive Timestamp as text OID {target_oid}"
                 )));
             }
             if matches!(value, PgValue::TimestampTz(_))
-                && target_oid != 0
-                && target_oid != TIMESTAMPTZ_OID
+                && resolved_target != 0
+                && resolved_target != TIMESTAMPTZ_OID
             {
                 return Err(PostgresError::Data(format!(
                     "cannot encode TimestampTz as text OID {target_oid}"
@@ -801,7 +1160,7 @@ pub fn encode_value(
             },
             Format::Binary,
         ) => {
-            if target_oid != INTERVAL_OID {
+            if resolved_target != INTERVAL_OID {
                 return Err(PostgresError::Data(format!(
                     "cannot encode Interval as binary OID {target_oid}"
                 )));
@@ -820,7 +1179,75 @@ pub fn encode_value(
             let s = interval_text::encode_interval_text(*months, *days, *microseconds);
             out.put_slice(s.as_bytes());
         }
-        (PgValue::Json(raw_json), Format::Binary) => match target_oid {
+        (PgValue::BitString { data, bit_length }, Format::Binary) => {
+            if resolved_target != BIT_OID && resolved_target != VARBIT_OID {
+                return Err(PostgresError::Data(format!(
+                    "cannot encode BitString as binary OID {target_oid}"
+                )));
+            }
+            if *bit_length < 0 {
+                return Err(PostgresError::Data(format!(
+                    "BitString bit_length must be >= 0, got {bit_length}"
+                )));
+            }
+            let encoded =
+                encode_pgvector_bit(data, *bit_length as usize).map_err(PostgresError::Data)?;
+            out.put_slice(&encoded);
+        }
+        (PgValue::BitString { data, bit_length }, Format::Text) => {
+            if resolved_target != 0 && resolved_target != BIT_OID && resolved_target != VARBIT_OID {
+                return Err(PostgresError::Data(format!(
+                    "cannot encode BitString as text OID {target_oid}"
+                )));
+            }
+            encode_bitstring_text(data, *bit_length, out)?;
+        }
+        (PgValue::Vector { values, kind }, Format::Binary) => {
+            let expected_ext = match kind {
+                VectorKind::Vector => "vector",
+                VectorKind::HalfVec => "halfvec",
+            };
+            let matches_ext = matches!(
+                catalog.type_info(resolved_target),
+                Some(TypeInfo {
+                    kind: TypeKind::Extension { name, .. },
+                    ..
+                }) if name == expected_ext
+            );
+            if !matches_ext {
+                return Err(PostgresError::Data(format!(
+                    "cannot encode {kind:?} as binary OID {target_oid} (expected discovered {expected_ext} OID)"
+                )));
+            }
+            let encoded = match kind {
+                VectorKind::Vector => encode_pgvector_f32(values),
+                VectorKind::HalfVec => encode_pgvector_f16(values),
+            }
+            .map_err(PostgresError::Data)?;
+            out.put_slice(&encoded);
+        }
+        (PgValue::Vector { values, kind }, Format::Text) => {
+            let expected_ext = match kind {
+                VectorKind::Vector => "vector",
+                VectorKind::HalfVec => "halfvec",
+            };
+            if resolved_target != 0 {
+                let matches_ext = matches!(
+                    catalog.type_info(resolved_target),
+                    Some(TypeInfo {
+                        kind: TypeKind::Extension { name, .. },
+                        ..
+                    }) if name == expected_ext
+                );
+                if !matches_ext {
+                    return Err(PostgresError::Data(format!(
+                        "cannot encode {kind:?} as text OID {target_oid} (expected {expected_ext})"
+                    )));
+                }
+            }
+            encode_vector_text(values, *kind, out)?;
+        }
+        (PgValue::Json(raw_json), Format::Binary) => match resolved_target {
             JSON_OID => json::encode_json_binary(raw_json, out, ctx)?,
             JSONB_OID => json::encode_jsonb_binary(raw_json, out, ctx)?,
             _ => {
@@ -830,14 +1257,76 @@ pub fn encode_value(
             }
         },
         (PgValue::Json(raw_json), Format::Text) => {
-            let for_jsonb = target_oid == JSONB_OID || target_oid == 0;
+            let for_jsonb = resolved_target == JSONB_OID || resolved_target == 0;
             json::encode_json_text(raw_json, for_jsonb, out, ctx)?;
         }
-        (other, fmt) => {
-            return Err(PostgresError::Data(format!(
-                "unsupported encode for value {other:?} in format {fmt:?}"
-            )));
+        (PgValue::Array { element_oid, .. }, Format::Binary) => {
+            let expected_elem_oid = if resolved_target != 0 {
+                match catalog.type_info(resolved_target) {
+                    Some(TypeInfo {
+                        kind: TypeKind::Array { element_oid: e, .. },
+                        ..
+                    }) => *e,
+                    _ => {
+                        return Err(PostgresError::Data(format!(
+                            "cannot encode Array as non-array binary OID {target_oid}"
+                        )));
+                    }
+                }
+            } else {
+                *element_oid
+            };
+            array::encode_array_binary(
+                value,
+                resolved_target,
+                expected_elem_oid,
+                out,
+                ctx,
+                catalog,
+                depth,
+            )?;
         }
+        (PgValue::Array { element_oid, .. }, Format::Text) => {
+            let (expected_elem_oid, delimiter) = if resolved_target != 0 {
+                match catalog.type_info(resolved_target) {
+                    Some(TypeInfo {
+                        kind:
+                            TypeKind::Array {
+                                element_oid: e,
+                                delimiter: d,
+                            },
+                        ..
+                    }) => (*e, *d),
+                    _ => {
+                        return Err(PostgresError::Data(format!(
+                            "cannot encode Array as non-array text OID {target_oid}"
+                        )));
+                    }
+                }
+            } else {
+                let delim = catalog
+                    .type_info(*element_oid)
+                    .map(|ti| ti.delimiter)
+                    .unwrap_or(b',');
+                (*element_oid, delim)
+            };
+            array_text::encode_array_text(
+                value,
+                expected_elem_oid,
+                delimiter,
+                out,
+                ctx,
+                catalog,
+                depth,
+            )?;
+        }
+        (PgValue::Composite { .. }, Format::Binary) => {
+            composite::encode_composite_binary(value, resolved_target, out, ctx, catalog, depth)?;
+        }
+        (PgValue::Composite { .. }, Format::Text) => {
+            composite::encode_composite_text(value, resolved_target, out, ctx, catalog, depth)?;
+        }
+        (PgValue::Null, _) => unreachable!("handled above"),
     }
 
     if out.len() - start_len > ctx.max_field_bytes {

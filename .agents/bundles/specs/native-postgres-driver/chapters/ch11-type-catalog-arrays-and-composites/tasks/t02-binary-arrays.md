@@ -5,7 +5,7 @@ chapter_id: ch11-type-catalog-arrays-and-composites
 title: Implement dimensioned binary array codecs preserving rank, lower bounds, and element OIDs
 description: Encode and decode PostgreSQL binary arrays (rank 0..=6) in codecs/array.rs with checked dimension products, arbitrary i32 lower bounds, element OID validation, and recursive value dispatch.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -115,9 +115,9 @@ Implement PostgreSQL `array_send` / `array_recv` binary codecs in `src/rs/verteb
 
 ## Acceptance Criteria
 
-- [ ] Binary array encode/decode preserves `0..=6` dimensions, negative/non-one `lower_bounds`, `PgValue::Null` elements, and `element_oid` across all supported scalar, numeric, temporal, JSON, and domain element types (R11).
-- [ ] Convenience sequence normalization infers `1`-based rectangular dimensions when a target array OID is known and rejects ragged or untyped-empty/all-null inputs with `PostgresError::Data` (R11).
-- [ ] Hostile dimension counts, `i32` bound overflows, invalid `has_null` flags, mismatched element OIDs, and truncated/trailing bytes fail before unbounded allocation (R11).
+- [x] Binary array encode/decode preserves `0..=6` dimensions, negative/non-one `lower_bounds`, `PgValue::Null` elements, and `element_oid` across all supported scalar, numeric, temporal, JSON, and domain element types (R11).
+- [x] Convenience sequence normalization infers `1`-based rectangular dimensions when a target array OID is known and rejects ragged or untyped-empty/all-null inputs with `PostgresError::Data` (R11).
+- [x] Hostile dimension counts, `i32` bound overflows, invalid `has_null` flags, mismatched element OIDs, and truncated/trailing bytes fail before unbounded allocation (R11).
 
 ## Notes & Discoveries
 

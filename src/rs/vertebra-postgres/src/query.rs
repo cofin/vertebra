@@ -1,11 +1,12 @@
 //! PostgreSQL Protocol 3.0 simple-query collector, command-tag parser, and `ErrorResponse` decoder.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use fallible_iterator::FallibleIterator;
 use postgres_protocol::message::backend::{DataRowBody, ErrorResponseBody, RowDescriptionBody};
 
-use crate::codecs::{CodecContext, ParameterMap, decode_value};
+use crate::codecs::{CodecContext, ParameterMap, TypeCatalog, decode_value_with_catalog};
 use crate::errors::{PostgresError, ServerError};
 use crate::protocol::parse_error_fields;
 use crate::result::{Column, Format, PgValue, QueryResult, TransactionStatus};
@@ -73,6 +74,7 @@ pub struct SimpleQueryCollector {
     current_columns: Option<Vec<Column>>,
     current_rows: Vec<Vec<PgValue>>,
     current_ctx: CodecContext,
+    catalog: Arc<TypeCatalog>,
     first_error: Option<PostgresError>,
 }
 
@@ -80,6 +82,14 @@ impl SimpleQueryCollector {
     /// Create a new empty [`SimpleQueryCollector`].
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Create a new [`SimpleQueryCollector`] bound to a session [`TypeCatalog`] snapshot.
+    pub fn with_catalog(catalog: Arc<TypeCatalog>) -> Self {
+        Self {
+            catalog,
+            ..Self::default()
+        }
     }
 
     /// Return `true` if a recoverable error has already been recorded during this exchange.
@@ -128,7 +138,13 @@ impl SimpleQueryCollector {
                 )));
             };
             let raw_slice = range_opt.map(|r| &buffer[r]);
-            match decode_value(col.type_oid, col.format, raw_slice, &self.current_ctx) {
+            match decode_value_with_catalog(
+                col.type_oid,
+                col.format,
+                raw_slice,
+                &self.current_ctx,
+                &self.catalog,
+            ) {
                 Ok(val) => row.push(val),
                 Err(err) => {
                     if self.first_error.is_none() {

@@ -5,7 +5,7 @@ chapter_id: ch12-pgvector-and-extended-query
 title: Repair shared pgvector/halfvec/bit CPU helpers and integrate dynamic vector and bitstring codecs
 description: Fix half 2.7.1 ties-to-even rounding, finite overflow, 1..=16000 dimension bounds, and 0-length/padding bit rules in vertebra-db, and wire TypeCatalog-resolved vector/halfvec and BIT/VARBIT codecs into vertebra-postgres.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: regression_tdd
 depends_on:
@@ -125,9 +125,9 @@ Reproduce and fix the rounding, finite-overflow, `1..=16000` dimension, and `bit
 
 ## Acceptance Criteria
 
-- [ ] `vertebra_db::postgres` `f32`/`f16`/`bit` helpers preserve their public signatures while enforcing `half` (`2.7.1`) ties-to-even rounding, finite-to-half overflow rejection, `1..=16000` vector dimensions, valid `0`-length `bit`/`varbit`, and zero unused low-bit padding with zero `Cargo.toml` or `Cargo.lock` modifications (R11).
-- [ ] `vertebra-postgres` selects `vector` and `halfvec` codecs strictly via session `TypeCatalog` extension identity, rejects wrapper/target-OID mismatches before send, and keeps undiscovered extension OIDs as `PgValue::Text` (R11).
-- [ ] Existing `vertebra-db` unit tests, new `postgres_vector_tests` + `vector_codecs` suites, and `--locked` workspace checks pass with zero warnings (R11).
+- [x] `vertebra_db::postgres` `f32`/`f16`/`bit` helpers preserve their public signatures while enforcing `half` (`2.7.1`) ties-to-even rounding, finite-to-half overflow rejection, `1..=16000` vector dimensions, valid `0`-length `bit`/`varbit`, and zero unused low-bit padding with zero `Cargo.toml` or `Cargo.lock` modifications (R11).
+- [x] `vertebra-postgres` selects `vector` and `halfvec` codecs strictly via session `TypeCatalog` extension identity, rejects wrapper/target-OID mismatches before send, and keeps undiscovered extension OIDs as `PgValue::Text` (R11).
+- [x] Existing `vertebra-db` unit tests, new `postgres_vector_tests` + `vector_codecs` suites, and `--locked` workspace checks pass with zero warnings (R11).
 
 ## Notes & Discoveries
 

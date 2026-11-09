@@ -5,7 +5,7 @@ chapter_id: ch12-pgvector-and-extended-query
 title: Implement cold-query pre-Parse parameter discovery and post-ReadyForQuery owned result normalization
 description: Resolve required custom parameter metadata before Parse, normalize owned cold text results after ReadyForQuery with ambient-transaction savepoint isolation, and attach AfterCompletion diagnostics on unrecoverable post-completion errors.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -123,9 +123,9 @@ Implement `metadata.rs::{ResolvedParameters, OwnedTextResult, OwnedTextField, re
 
 ## Acceptance Criteria
 
-- [ ] Required custom parameter metadata resolves before `Parse`, and cold result normalization runs strictly after `ReadyForQuery` using owned text fields and captured `Arc<CodecContext>` snapshots without re-executing or re-binding user SQL (R12, R13, R15).
-- [ ] Zero implicit `BEGIN` is emitted at `I`, and ambient `T` catalog lookups isolate recoverable errors inside an internal metadata savepoint while preserving exact `PgValue::Text` + `Column.type_oid` fallback (R12, R15).
-- [ ] Unrecoverable post-completion catalog/cleanup failures mark the session broken and surface `PostgresError::AfterCompletion` retaining the original `completed_result` without logging row contents in `Display` (R12, R13).
+- [x] Required custom parameter metadata resolves before `Parse`, and cold result normalization runs strictly after `ReadyForQuery` using owned text fields and captured `Arc<CodecContext>` snapshots without re-executing or re-binding user SQL (R12, R13, R15).
+- [x] Zero implicit `BEGIN` is emitted at `I`, and ambient `T` catalog lookups isolate recoverable errors inside an internal metadata savepoint while preserving exact `PgValue::Text` + `Column.type_oid` fallback (R12, R15).
+- [x] Unrecoverable post-completion catalog/cleanup failures mark the session broken and surface `PostgresError::AfterCompletion` retaining the original `completed_result` without logging row contents in `Display` (R12, R13).
 
 ## Notes & Discoveries
 

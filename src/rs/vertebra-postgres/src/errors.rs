@@ -23,7 +23,7 @@ impl fmt::Display for ServerError {
 }
 
 /// Canonical error categories emitted by `vertebra-postgres`.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum PostgresError {
     #[error("invalid PostgreSQL configuration: {0}")]
     Config(String),
@@ -43,6 +43,12 @@ pub enum PostgresError {
     Protocol(String),
     #[error("{0}")]
     Server(ServerError),
+    #[error("{source}")]
+    AfterCompletion {
+        #[source]
+        source: Box<PostgresError>,
+        completed_result: crate::result::QueryResult,
+    },
 }
 
 impl PostgresError {
@@ -70,7 +76,24 @@ impl PostgresError {
     pub fn sqlstate(&self) -> Option<&str> {
         match self {
             Self::Server(err) => Some(err.sqlstate.as_str()),
+            Self::AfterCompletion { source, .. } => source.sqlstate(),
             _ => None,
+        }
+    }
+
+    /// Return `true` when this error represents a transient transport or server condition.
+    pub fn is_transient(&self) -> bool {
+        match self {
+            Self::Transport(_) => true,
+            Self::Server(err) => {
+                err.sqlstate == "40001"
+                    || err.sqlstate == "40P01"
+                    || err.sqlstate.starts_with("08")
+                    || err.sqlstate == "53300"
+                    || err.sqlstate.starts_with("57P")
+            }
+            Self::AfterCompletion { source, .. } => source.is_transient(),
+            _ => false,
         }
     }
 }
@@ -168,5 +191,6 @@ pub fn postgres_error_to_py(py: Python<'_>, err: PostgresError) -> PyErr {
             };
             instantiate_exc(py, target_ty, &srv.message, Some(code))
         }
+        PostgresError::AfterCompletion { source, .. } => postgres_error_to_py(py, *source),
     }
 }

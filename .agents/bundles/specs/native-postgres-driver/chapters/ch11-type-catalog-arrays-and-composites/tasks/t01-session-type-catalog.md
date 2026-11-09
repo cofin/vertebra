@@ -5,7 +5,7 @@ chapter_id: ch11-type-catalog-arrays-and-composites
 title: Implement session-local PostgreSQL type discovery and format negotiation
 description: Seed built-in PostgreSQL OIDs and resolve transitive array, composite, domain, and extension metadata per physical session via PostgresConnection::simple_query at idle boundaries.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -120,9 +120,9 @@ Implement `TypeCatalog`, `TypeInfo`, `TypeKind`, and `CompositeField` in `src/rs
 
 ## Acceptance Criteria
 
-- [ ] `TypeCatalog` resolves built-ins, transitive custom arrays, non-dropped composite attributes, domains, and extension `vector`/`halfvec` OIDs under bounded `simple_query` discovery using only validated `u32` literals (R11, R15).
-- [ ] Catalog discovery is refused whenever an extended exchange, portal, `COPY`, or single-`Sync` pipeline is active, and every catalog `Query` invalidates local unnamed prepared-statement tracking (R11, R15).
-- [ ] Undiscovered custom OIDs negotiate `Format::Text` and preserve owned `PgValue::Text` without speculative binary decoding, and invalidation remains physical-session-local (R11, R15).
+- [x] `TypeCatalog` resolves built-ins, transitive custom arrays, non-dropped composite attributes, domains, and extension `vector`/`halfvec` OIDs under bounded `simple_query` discovery using only validated `u32` literals (R11, R15).
+- [x] Catalog discovery is refused whenever an extended exchange, portal, `COPY`, or single-`Sync` pipeline is active, and every catalog `Query` invalidates local unnamed prepared-statement tracking (R11, R15).
+- [x] Undiscovered custom OIDs negotiate `Format::Text` and preserve owned `PgValue::Text` without speculative binary decoding, and invalidation remains physical-session-local (R11, R15).
 
 ## Notes & Discoveries
 

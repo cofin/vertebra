@@ -62,6 +62,21 @@ pub struct NotificationEvent {
     pub payload: String,
 }
 
+/// Active protocol exchange state on a [`PostgresConnection`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExchangeState {
+    /// Connection is at a clean `ReadyForQuery` command boundary.
+    Idle,
+    /// Extended query (`Parse`..`ReadyForQuery`) is currently active.
+    InExtendedExchange,
+    /// Suspended portal is currently open on the connection.
+    PortalActive,
+    /// `COPY` (`CopyIn`, `CopyOut`, or `CopyBoth`) is currently active.
+    CopyActive,
+    /// Single-`Sync` pipeline batch is currently active.
+    PipelineActive,
+}
+
 /// Established, authenticated PostgreSQL wire connection at `ReadyForQuery(Idle)`.
 #[derive(Debug)]
 pub struct PostgresConnection {
@@ -75,6 +90,10 @@ pub struct PostgresConnection {
     pub(crate) tls_negotiated: bool,
     pub(crate) tls_server_end_point: Option<Vec<u8>>,
     pub(crate) unnamed_statement_valid: bool,
+    pub(crate) type_catalog: crate::types::TypeCatalog,
+    pub(crate) exchange_state: ExchangeState,
+    pub(crate) statement_descriptions:
+        std::collections::HashMap<String, crate::extended::PreparedDescription>,
     pub(crate) notifications: Vec<NotificationEvent>,
     pub(crate) closed: bool,
 }
@@ -140,9 +159,43 @@ impl PostgresConnection {
         self.unnamed_statement_valid
     }
 
+    /// Return `true` if a previously prepared unnamed statement (`""`) remains valid on the wire.
+    pub const fn unnamed_statement_valid(&self) -> bool {
+        self.unnamed_statement_valid
+    }
+
     /// Update the local validity state of the unnamed prepared statement (`""`).
     pub fn set_unnamed_statement_valid(&mut self, valid: bool) {
         self.unnamed_statement_valid = valid;
+    }
+
+    /// Borrow the session-local [`crate::types::TypeCatalog`].
+    pub const fn type_catalog(&self) -> &crate::types::TypeCatalog {
+        &self.type_catalog
+    }
+
+    /// Mutably borrow the session-local [`crate::types::TypeCatalog`].
+    pub fn type_catalog_mut(&mut self) -> &mut crate::types::TypeCatalog {
+        &mut self.type_catalog
+    }
+
+    /// Return the current protocol [`ExchangeState`].
+    pub const fn exchange_state(&self) -> ExchangeState {
+        self.exchange_state
+    }
+
+    /// Update the protocol [`ExchangeState`] guard.
+    pub fn set_exchange_state(&mut self, state: ExchangeState) {
+        self.exchange_state = state;
+    }
+
+    /// Register or update a warm [`crate::extended::PreparedDescription`] for `sql`.
+    pub fn register_prepared_description(
+        &mut self,
+        sql: impl Into<String>,
+        description: crate::extended::PreparedDescription,
+    ) {
+        self.statement_descriptions.insert(sql.into(), description);
     }
 
     /// Central hook invoked whenever a `NotificationResponse` frame is observed on the wire.
@@ -168,6 +221,12 @@ impl PostgresConnection {
             return Err(PostgresError::Interface(
                 "cannot execute simple_query on a closed PostgresConnection".to_string(),
             ));
+        }
+        if self.exchange_state != ExchangeState::Idle {
+            return Err(PostgresError::Interface(format!(
+                "cannot execute simple_query while exchange_state is {:?}",
+                self.exchange_state
+            )));
         }
         if sql.as_bytes().contains(&0) {
             return Err(PostgresError::Data(
@@ -196,7 +255,9 @@ impl PostgresConnection {
             )));
         }
 
-        let mut collector = crate::query::SimpleQueryCollector::new();
+        let mut collector = crate::query::SimpleQueryCollector::with_catalog(
+            self.type_catalog.snapshot_for_batch(),
+        );
         loop {
             let msg = match read_message(&mut self.stream, &mut self.read_buf, None).await {
                 Ok(m) => m,
@@ -266,6 +327,10 @@ impl PostgresConnection {
                             ))
                         })?
                         .to_owned();
+                    if name.eq_ignore_ascii_case("search_path") {
+                        self.type_catalog.invalidate_extension_names();
+                        self.statement_descriptions.clear();
+                    }
                     self.parameters.insert(name, val);
                 }
                 Message::NotificationResponse(body) => {
@@ -321,12 +386,954 @@ impl PostgresConnection {
         }
     }
 
+    /// Execute a single-statement extended query and stream each `DataRow` frame into `on_row` without materializing `Vec<Vec<PgValue>>`.
+    pub async fn query_with_row_sink<F>(
+        &mut self,
+        sql: &str,
+        params: &[crate::extended::Parameter],
+        result_formats: &[crate::result::Format],
+        on_columns: impl FnOnce(&[crate::result::Column]) -> Result<(), PostgresError>,
+        mut on_row: F,
+    ) -> Result<String, PostgresError>
+    where
+        F: FnMut(&crate::extended::RowBody) -> Result<(), PostgresError>,
+    {
+        if self.closed {
+            return Err(PostgresError::Interface(
+                "cannot execute query_with_row_sink on a closed PostgresConnection".to_string(),
+            ));
+        }
+        if self.exchange_state != ExchangeState::Idle {
+            return Err(PostgresError::Interface(format!(
+                "cannot execute query_with_row_sink while exchange_state is {:?}",
+                self.exchange_state
+            )));
+        }
+        if sql.as_bytes().contains(&0) {
+            return Err(PostgresError::Data(
+                "SQL query string cannot contain embedded NUL byte".to_string(),
+            ));
+        }
+
+        let resolved = crate::metadata::resolve_parameter_metadata(self, params, None).await?;
+        let param_formats: Vec<crate::result::Format> = resolved
+            .parameter_oids
+            .iter()
+            .map(|&oid| {
+                if !result_formats.is_empty() && oid != 0 {
+                    crate::codecs::format_for_oid_with_catalog(oid, &self.type_catalog)
+                } else {
+                    crate::result::Format::Text
+                }
+            })
+            .collect();
+        let req_result_formats: Vec<crate::result::Format> = if result_formats.is_empty() {
+            if let Some(desc) = self.statement_descriptions.get(sql) {
+                desc.result_columns
+                    .iter()
+                    .map(|c| {
+                        crate::codecs::format_for_oid_with_catalog(c.type_oid, &self.type_catalog)
+                    })
+                    .collect()
+            } else {
+                vec![crate::result::Format::Text]
+            }
+        } else {
+            result_formats.to_vec()
+        };
+
+        let ctx = crate::codecs::CodecContext::from_parameters(&self.parameters);
+        self.write_buf.clear();
+        postgres_protocol::message::frontend::parse(
+            "",
+            sql,
+            resolved.parameter_oids.iter().copied(),
+            &mut self.write_buf,
+        )
+        .map_err(|e| PostgresError::Protocol(format!("failed to encode Parse frame: {e}")))?;
+        postgres_protocol::message::frontend::describe(b'S', "", &mut self.write_buf)
+            .map_err(|e| PostgresError::Protocol(format!("failed to encode Describe(S): {e}")))?;
+        crate::extended::encode_bind(
+            "",
+            "",
+            &resolved.parameters,
+            &resolved.parameter_oids,
+            &param_formats,
+            &req_result_formats,
+            &ctx,
+            &self.type_catalog,
+            &mut self.write_buf,
+        )?;
+        postgres_protocol::message::frontend::describe(b'P', "", &mut self.write_buf)
+            .map_err(|e| PostgresError::Protocol(format!("failed to encode Describe(P): {e}")))?;
+        postgres_protocol::message::frontend::execute("", 0, &mut self.write_buf)
+            .map_err(|e| PostgresError::Protocol(format!("failed to encode Execute frame: {e}")))?;
+        postgres_protocol::message::frontend::close(b'P', "", &mut self.write_buf)
+            .map_err(|e| PostgresError::Protocol(format!("failed to encode Close(P): {e}")))?;
+        postgres_protocol::message::frontend::sync(&mut self.write_buf);
+
+        self.unnamed_statement_valid = true;
+        self.exchange_state = ExchangeState::InExtendedExchange;
+
+        if let Err(err) = self.stream.write_all(&self.write_buf).await {
+            self.write_buf.clear();
+            self.exchange_state = ExchangeState::Idle;
+            self.closed = true;
+            return Err(PostgresError::Transport(format!(
+                "extended query write failed: {err}"
+            )));
+        }
+        self.write_buf.clear();
+        if let Err(err) = self.stream.flush().await {
+            self.exchange_state = ExchangeState::Idle;
+            self.closed = true;
+            return Err(PostgresError::Transport(format!(
+                "extended query flush failed: {err}"
+            )));
+        }
+
+        let mut collector = crate::extended::ExtendedQueryCollector::new(
+            resolved.parameters.len(),
+            req_result_formats,
+            true,
+            true,
+        );
+        let mut on_columns_opt = Some(on_columns);
+        let mut command_tag: Option<String> = None;
+
+        loop {
+            let msg = match read_message(&mut self.stream, &mut self.read_buf, None).await {
+                Ok(m) => m,
+                Err(err) => {
+                    self.exchange_state = ExchangeState::Idle;
+                    self.closed = true;
+                    return Err(err);
+                }
+            };
+
+            match msg {
+                Message::ParseComplete => {
+                    if let Err(err) = collector.handle_parse_complete() {
+                        self.exchange_state = ExchangeState::Idle;
+                        self.closed = true;
+                        return Err(err);
+                    }
+                }
+                Message::ParameterDescription(body) => {
+                    if !collector.has_error()
+                        && let Err(err) = collector.handle_parameter_description(&body)
+                    {
+                        self.exchange_state = ExchangeState::Idle;
+                        self.closed = true;
+                        return Err(err);
+                    }
+                }
+                Message::BindComplete => {
+                    if let Err(err) = collector.handle_bind_complete() {
+                        self.exchange_state = ExchangeState::Idle;
+                        self.closed = true;
+                        return Err(err);
+                    }
+                }
+                Message::RowDescription(body) => {
+                    if !collector.has_error() {
+                        if let Err(err) = collector.handle_row_description(&body) {
+                            self.exchange_state = ExchangeState::Idle;
+                            self.closed = true;
+                            return Err(err);
+                        }
+                        if !collector.portal_columns().is_empty()
+                            && let Some(cb) = on_columns_opt.take()
+                            && let Err(err) = cb(collector.portal_columns())
+                        {
+                            collector.handle_error(err);
+                        }
+                    }
+                }
+                Message::NoData => {
+                    if !collector.has_error()
+                        && let Err(err) = collector.handle_no_data()
+                    {
+                        self.exchange_state = ExchangeState::Idle;
+                        self.closed = true;
+                        return Err(err);
+                    }
+                }
+                Message::DataRow(body) => {
+                    if !collector.has_error() {
+                        if let Some(cb) = on_columns_opt.take()
+                            && let Err(err) = cb(collector.portal_columns())
+                        {
+                            collector.handle_error(err);
+                        }
+                        if !collector.has_error()
+                            && let Err(err) = on_row(&body)
+                        {
+                            collector.handle_error(err);
+                        }
+                    }
+                }
+                Message::CommandComplete(body) => {
+                    let tag = body.tag().map_err(|e| {
+                        self.exchange_state = ExchangeState::Idle;
+                        self.closed = true;
+                        PostgresError::Protocol(format!("invalid CommandComplete tag UTF-8: {e}"))
+                    })?;
+                    if !collector.has_error()
+                        && let Some(cb) = on_columns_opt.take()
+                        && let Err(err) = cb(collector.portal_columns())
+                    {
+                        collector.handle_error(err);
+                    }
+                    if let Err(err) = collector.handle_command_complete(tag) {
+                        self.exchange_state = ExchangeState::Idle;
+                        self.closed = true;
+                        return Err(err);
+                    }
+                    command_tag = Some(tag.to_owned());
+                }
+                Message::EmptyQueryResponse => {
+                    if !collector.has_error()
+                        && let Some(cb) = on_columns_opt.take()
+                        && let Err(err) = cb(&[])
+                    {
+                        collector.handle_error(err);
+                    }
+                    if let Err(err) = collector.handle_empty_query() {
+                        self.exchange_state = ExchangeState::Idle;
+                        self.closed = true;
+                        return Err(err);
+                    }
+                    command_tag = Some(String::new());
+                }
+                Message::CloseComplete => {}
+                Message::ErrorResponse(body) => match crate::query::parse_error_response(&body) {
+                    Ok(server_err) => collector.handle_error_response(server_err),
+                    Err(err) => {
+                        self.exchange_state = ExchangeState::Idle;
+                        self.closed = true;
+                        return Err(err);
+                    }
+                },
+                Message::NoticeResponse(_) => {}
+                Message::ParameterStatus(body) => {
+                    let name = body
+                        .name()
+                        .map_err(|e| {
+                            self.exchange_state = ExchangeState::Idle;
+                            self.closed = true;
+                            PostgresError::Protocol(format!(
+                                "invalid ParameterStatus name UTF-8: {e}"
+                            ))
+                        })?
+                        .to_owned();
+                    let val = body
+                        .value()
+                        .map_err(|e| {
+                            self.exchange_state = ExchangeState::Idle;
+                            self.closed = true;
+                            PostgresError::Protocol(format!(
+                                "invalid ParameterStatus value UTF-8: {e}"
+                            ))
+                        })?
+                        .to_owned();
+                    if name.eq_ignore_ascii_case("search_path") {
+                        self.type_catalog.invalidate_extension_names();
+                        self.statement_descriptions.clear();
+                    }
+                    self.parameters.insert(name, val);
+                }
+                Message::NotificationResponse(body) => {
+                    let channel = body
+                        .channel()
+                        .map_err(|e| {
+                            self.exchange_state = ExchangeState::Idle;
+                            self.closed = true;
+                            PostgresError::Protocol(format!(
+                                "invalid NotificationResponse channel UTF-8: {e}"
+                            ))
+                        })?
+                        .to_owned();
+                    let payload = body
+                        .message()
+                        .map_err(|e| {
+                            self.exchange_state = ExchangeState::Idle;
+                            self.closed = true;
+                            PostgresError::Protocol(format!(
+                                "invalid NotificationResponse payload UTF-8: {e}"
+                            ))
+                        })?
+                        .to_owned();
+                    self.dispatch_notification(body.process_id(), channel, payload);
+                }
+                Message::ReadyForQuery(body) => {
+                    self.exchange_state = ExchangeState::Idle;
+                    let status = match TransactionStatus::from_wire_tag(body.status()) {
+                        Ok(s) => s,
+                        Err(err) => {
+                            self.closed = true;
+                            return Err(err);
+                        }
+                    };
+                    self.transaction_status = status;
+                    let desc = collector.prepared_description();
+                    match collector.finish(status) {
+                        Ok(_) => {
+                            self.statement_descriptions.insert(sql.to_owned(), desc);
+                            return Ok(command_tag.unwrap_or_default());
+                        }
+                        Err(err) => {
+                            if matches!(
+                                err,
+                                PostgresError::Protocol(_) | PostgresError::Transport(_)
+                            ) {
+                                self.closed = true;
+                            }
+                            return Err(err);
+                        }
+                    }
+                }
+                _ => {
+                    self.exchange_state = ExchangeState::Idle;
+                    self.closed = true;
+                    return Err(PostgresError::Protocol(
+                        "unexpected backend message frame during extended query".to_string(),
+                    ));
+                }
+            }
+        }
+    }
+
+    /// Execute a single-statement PostgreSQL Protocol 3.0 extended query (`Parse`/`Describe`/`Bind`/`Execute`/`Close`/`Sync`).
+    pub async fn query(
+        &mut self,
+        sql: &str,
+        parameters: &[crate::extended::Parameter],
+        parameter_oids: Option<&[u32]>,
+    ) -> Result<crate::result::QueryResult, PostgresError> {
+        if self.closed {
+            return Err(PostgresError::Interface(
+                "cannot execute query on a closed PostgresConnection".to_string(),
+            ));
+        }
+        if self.exchange_state != ExchangeState::Idle {
+            return Err(PostgresError::Interface(format!(
+                "cannot execute query while exchange_state is {:?}",
+                self.exchange_state
+            )));
+        }
+        if sql.as_bytes().contains(&0) {
+            return Err(PostgresError::Data(
+                "SQL query string cannot contain embedded NUL byte".to_string(),
+            ));
+        }
+
+        if let Some(warm_desc) = self.statement_descriptions.get(sql).cloned() {
+            return self
+                .query_with_description(sql, parameters, parameter_oids, &warm_desc)
+                .await;
+        }
+
+        let resolved =
+            crate::metadata::resolve_parameter_metadata(self, parameters, parameter_oids).await?;
+        let param_formats = vec![crate::result::Format::Text; resolved.parameters.len()];
+        let result_formats = vec![crate::result::Format::Text];
+        let captured_ctx = Arc::new(crate::codecs::CodecContext::from_parameters(
+            &self.parameters,
+        ));
+
+        self.write_buf.clear();
+        postgres_protocol::message::frontend::parse(
+            "",
+            sql,
+            resolved.parameter_oids.iter().copied(),
+            &mut self.write_buf,
+        )
+        .map_err(|e| PostgresError::Protocol(format!("failed to encode Parse frame: {e}")))?;
+        postgres_protocol::message::frontend::describe(b'S', "", &mut self.write_buf)
+            .map_err(|e| PostgresError::Protocol(format!("failed to encode Describe(S): {e}")))?;
+        crate::extended::encode_bind(
+            "",
+            "",
+            &resolved.parameters,
+            &resolved.parameter_oids,
+            &param_formats,
+            &result_formats,
+            &captured_ctx,
+            &self.type_catalog,
+            &mut self.write_buf,
+        )?;
+        postgres_protocol::message::frontend::describe(b'P', "", &mut self.write_buf)
+            .map_err(|e| PostgresError::Protocol(format!("failed to encode Describe(P): {e}")))?;
+        postgres_protocol::message::frontend::execute("", 0, &mut self.write_buf)
+            .map_err(|e| PostgresError::Protocol(format!("failed to encode Execute frame: {e}")))?;
+        postgres_protocol::message::frontend::close(b'P', "", &mut self.write_buf)
+            .map_err(|e| PostgresError::Protocol(format!("failed to encode Close(P): {e}")))?;
+        postgres_protocol::message::frontend::sync(&mut self.write_buf);
+
+        self.unnamed_statement_valid = true;
+        self.exchange_state = ExchangeState::InExtendedExchange;
+
+        if let Err(err) = self.stream.write_all(&self.write_buf).await {
+            self.write_buf.clear();
+            self.exchange_state = ExchangeState::Idle;
+            self.closed = true;
+            return Err(PostgresError::Transport(format!(
+                "extended query write failed: {err}"
+            )));
+        }
+        self.write_buf.clear();
+        if let Err(err) = self.stream.flush().await {
+            self.exchange_state = ExchangeState::Idle;
+            self.closed = true;
+            return Err(PostgresError::Transport(format!(
+                "extended query flush failed: {err}"
+            )));
+        }
+
+        let mut collector = crate::extended::ExtendedQueryCollector::new(
+            resolved.parameters.len(),
+            result_formats,
+            true,
+            true,
+        );
+        let mut raw_rows: Vec<Vec<crate::metadata::OwnedTextField>> = Vec::new();
+        let mut row_ctx = Arc::clone(&captured_ctx);
+        let mut command_tag: Option<String> = None;
+        let mut affected_rows = 0u64;
+
+        loop {
+            let msg = match read_message(&mut self.stream, &mut self.read_buf, None).await {
+                Ok(m) => m,
+                Err(err) => {
+                    self.exchange_state = ExchangeState::Idle;
+                    self.closed = true;
+                    return Err(err);
+                }
+            };
+
+            match msg {
+                Message::ParseComplete => {
+                    if let Err(err) = collector.handle_parse_complete() {
+                        self.exchange_state = ExchangeState::Idle;
+                        self.closed = true;
+                        return Err(err);
+                    }
+                }
+                Message::ParameterDescription(body) => {
+                    if !collector.has_error()
+                        && let Err(err) = collector.handle_parameter_description(&body)
+                    {
+                        self.exchange_state = ExchangeState::Idle;
+                        self.closed = true;
+                        return Err(err);
+                    }
+                }
+                Message::BindComplete => {
+                    if let Err(err) = collector.handle_bind_complete() {
+                        self.exchange_state = ExchangeState::Idle;
+                        self.closed = true;
+                        return Err(err);
+                    }
+                }
+                Message::RowDescription(body) => {
+                    if !collector.has_error() {
+                        row_ctx = Arc::new(crate::codecs::CodecContext::from_parameters(
+                            &self.parameters,
+                        ));
+                        if let Err(err) = collector.handle_row_description(&body) {
+                            self.exchange_state = ExchangeState::Idle;
+                            self.closed = true;
+                            return Err(err);
+                        }
+                    }
+                }
+                Message::NoData => {
+                    if !collector.has_error()
+                        && let Err(err) = collector.handle_no_data()
+                    {
+                        self.exchange_state = ExchangeState::Idle;
+                        self.closed = true;
+                        return Err(err);
+                    }
+                }
+                Message::DataRow(body) => {
+                    if !collector.has_error() {
+                        let cols = collector.portal_columns();
+                        if cols.is_empty() {
+                            self.exchange_state = ExchangeState::Idle;
+                            self.closed = true;
+                            return Err(PostgresError::Protocol(
+                                "received DataRow without preceding RowDescription".to_string(),
+                            ));
+                        }
+                        let buffer = body.buffer();
+                        let mut ranges = body.ranges();
+                        let mut owned_row = Vec::with_capacity(cols.len());
+                        use fallible_iterator::FallibleIterator;
+                        while let Some(range_opt) = ranges.next().map_err(|e| {
+                            self.exchange_state = ExchangeState::Idle;
+                            self.closed = true;
+                            PostgresError::Protocol(format!("malformed DataRow field range: {e}"))
+                        })? {
+                            owned_row.push(crate::metadata::OwnedTextField {
+                                bytes: range_opt.map(|r| buffer[r].to_vec()),
+                            });
+                        }
+                        if owned_row.len() != cols.len() {
+                            self.exchange_state = ExchangeState::Idle;
+                            self.closed = true;
+                            return Err(PostgresError::Protocol(format!(
+                                "DataRow field count {} does not match column count {}",
+                                owned_row.len(),
+                                cols.len()
+                            )));
+                        }
+                        raw_rows.push(owned_row);
+                    }
+                }
+                Message::CommandComplete(body) => {
+                    let tag = body.tag().map_err(|e| {
+                        self.exchange_state = ExchangeState::Idle;
+                        self.closed = true;
+                        PostgresError::Protocol(format!("invalid CommandComplete tag UTF-8: {e}"))
+                    })?;
+                    affected_rows = match crate::query::parse_command_tag_affected_rows(tag) {
+                        Ok(n) => n,
+                        Err(err) => {
+                            self.exchange_state = ExchangeState::Idle;
+                            self.closed = true;
+                            return Err(err);
+                        }
+                    };
+                    if let Err(err) = collector.handle_command_complete(tag) {
+                        self.exchange_state = ExchangeState::Idle;
+                        self.closed = true;
+                        return Err(err);
+                    }
+                    command_tag = Some(tag.to_owned());
+                }
+                Message::EmptyQueryResponse => {
+                    if let Err(err) = collector.handle_empty_query() {
+                        self.exchange_state = ExchangeState::Idle;
+                        self.closed = true;
+                        return Err(err);
+                    }
+                    affected_rows = 0;
+                    command_tag = Some(String::new());
+                }
+                Message::CloseComplete => {}
+                Message::ErrorResponse(body) => match crate::query::parse_error_response(&body) {
+                    Ok(server_err) => collector.handle_error_response(server_err),
+                    Err(err) => {
+                        self.exchange_state = ExchangeState::Idle;
+                        self.closed = true;
+                        return Err(err);
+                    }
+                },
+                Message::NoticeResponse(_) => {}
+                Message::ParameterStatus(body) => {
+                    let name = body
+                        .name()
+                        .map_err(|e| {
+                            self.exchange_state = ExchangeState::Idle;
+                            self.closed = true;
+                            PostgresError::Protocol(format!(
+                                "invalid ParameterStatus name UTF-8: {e}"
+                            ))
+                        })?
+                        .to_owned();
+                    let val = body
+                        .value()
+                        .map_err(|e| {
+                            self.exchange_state = ExchangeState::Idle;
+                            self.closed = true;
+                            PostgresError::Protocol(format!(
+                                "invalid ParameterStatus value UTF-8: {e}"
+                            ))
+                        })?
+                        .to_owned();
+                    if name.eq_ignore_ascii_case("search_path") {
+                        self.type_catalog.invalidate_extension_names();
+                        self.statement_descriptions.clear();
+                    }
+                    self.parameters.insert(name, val);
+                }
+                Message::NotificationResponse(body) => {
+                    let channel = body
+                        .channel()
+                        .map_err(|e| {
+                            self.exchange_state = ExchangeState::Idle;
+                            self.closed = true;
+                            PostgresError::Protocol(format!(
+                                "invalid NotificationResponse channel UTF-8: {e}"
+                            ))
+                        })?
+                        .to_owned();
+                    let payload = body
+                        .message()
+                        .map_err(|e| {
+                            self.exchange_state = ExchangeState::Idle;
+                            self.closed = true;
+                            PostgresError::Protocol(format!(
+                                "invalid NotificationResponse payload UTF-8: {e}"
+                            ))
+                        })?
+                        .to_owned();
+                    self.dispatch_notification(body.process_id(), channel, payload);
+                }
+                Message::ReadyForQuery(body) => {
+                    self.exchange_state = ExchangeState::Idle;
+                    let status = match TransactionStatus::from_wire_tag(body.status()) {
+                        Ok(s) => s,
+                        Err(err) => {
+                            self.closed = true;
+                            return Err(err);
+                        }
+                    };
+                    self.transaction_status = status;
+                    let desc = collector.prepared_description();
+                    let portal_cols = collector.portal_columns().to_vec();
+                    match collector.finish(status) {
+                        Ok(_) => {
+                            let tag = command_tag.unwrap_or_default();
+                            if tag.starts_with("ALTER ")
+                                || tag.starts_with("DROP ")
+                                || tag.starts_with("CREATE ")
+                            {
+                                self.statement_descriptions.clear();
+                            } else {
+                                self.statement_descriptions.insert(sql.to_owned(), desc);
+                            }
+                            let mut owned = crate::metadata::OwnedTextResult::new(
+                                portal_cols,
+                                raw_rows,
+                                affected_rows,
+                                tag,
+                                row_ctx,
+                            );
+                            owned.mark_completed(status);
+                            return crate::metadata::normalize_materialized_result(self, owned)
+                                .await;
+                        }
+                        Err(err) => {
+                            if matches!(
+                                err,
+                                PostgresError::Protocol(_) | PostgresError::Transport(_)
+                            ) {
+                                self.closed = true;
+                            }
+                            return Err(err);
+                        }
+                    }
+                }
+                _ => {
+                    self.exchange_state = ExchangeState::Idle;
+                    self.closed = true;
+                    return Err(PostgresError::Protocol(
+                        "unexpected backend message frame during extended query".to_string(),
+                    ));
+                }
+            }
+        }
+    }
+
+    /// Execute a warm extended query using known [`crate::extended::PreparedDescription`] metadata to negotiate mixed binary/text formats.
+    pub async fn query_with_description(
+        &mut self,
+        sql: &str,
+        parameters: &[crate::extended::Parameter],
+        parameter_oids: Option<&[u32]>,
+        description: &crate::extended::PreparedDescription,
+    ) -> Result<crate::result::QueryResult, PostgresError> {
+        if self.closed {
+            return Err(PostgresError::Interface(
+                "cannot execute query_with_description on a closed PostgresConnection".to_string(),
+            ));
+        }
+        if self.exchange_state != ExchangeState::Idle {
+            return Err(PostgresError::Interface(format!(
+                "cannot execute query_with_description while exchange_state is {:?}",
+                self.exchange_state
+            )));
+        }
+        if sql.as_bytes().contains(&0) {
+            return Err(PostgresError::Data(
+                "SQL query string cannot contain embedded NUL byte".to_string(),
+            ));
+        }
+
+        let resolved =
+            crate::metadata::resolve_parameter_metadata(self, parameters, parameter_oids).await?;
+        let effective_param_oids: Vec<u32> = resolved
+            .parameter_oids
+            .iter()
+            .enumerate()
+            .map(|(i, &oid)| {
+                if oid != 0 {
+                    oid
+                } else {
+                    description.parameter_oids.get(i).copied().unwrap_or(0)
+                }
+            })
+            .collect();
+        let param_formats: Vec<crate::result::Format> = effective_param_oids
+            .iter()
+            .map(|&oid| {
+                if oid != 0 {
+                    crate::codecs::format_for_oid_with_catalog(oid, &self.type_catalog)
+                } else {
+                    crate::result::Format::Text
+                }
+            })
+            .collect();
+        let result_formats: Vec<crate::result::Format> = description
+            .result_columns
+            .iter()
+            .map(|col| crate::codecs::format_for_oid_with_catalog(col.type_oid, &self.type_catalog))
+            .collect();
+
+        let ctx = crate::codecs::CodecContext::from_parameters(&self.parameters);
+        self.write_buf.clear();
+        postgres_protocol::message::frontend::parse(
+            "",
+            sql,
+            effective_param_oids.iter().copied(),
+            &mut self.write_buf,
+        )
+        .map_err(|e| PostgresError::Protocol(format!("failed to encode Parse frame: {e}")))?;
+        postgres_protocol::message::frontend::describe(b'S', "", &mut self.write_buf)
+            .map_err(|e| PostgresError::Protocol(format!("failed to encode Describe(S): {e}")))?;
+        crate::extended::encode_bind(
+            "",
+            "",
+            &resolved.parameters,
+            &effective_param_oids,
+            &param_formats,
+            &result_formats,
+            &ctx,
+            &self.type_catalog,
+            &mut self.write_buf,
+        )?;
+        postgres_protocol::message::frontend::describe(b'P', "", &mut self.write_buf)
+            .map_err(|e| PostgresError::Protocol(format!("failed to encode Describe(P): {e}")))?;
+        postgres_protocol::message::frontend::execute("", 0, &mut self.write_buf)
+            .map_err(|e| PostgresError::Protocol(format!("failed to encode Execute frame: {e}")))?;
+        postgres_protocol::message::frontend::close(b'P', "", &mut self.write_buf)
+            .map_err(|e| PostgresError::Protocol(format!("failed to encode Close(P): {e}")))?;
+        postgres_protocol::message::frontend::sync(&mut self.write_buf);
+
+        self.unnamed_statement_valid = true;
+        self.exchange_state = ExchangeState::InExtendedExchange;
+
+        if let Err(err) = self.stream.write_all(&self.write_buf).await {
+            self.write_buf.clear();
+            self.exchange_state = ExchangeState::Idle;
+            self.closed = true;
+            return Err(PostgresError::Transport(format!(
+                "warm extended query write failed: {err}"
+            )));
+        }
+        self.write_buf.clear();
+        if let Err(err) = self.stream.flush().await {
+            self.exchange_state = ExchangeState::Idle;
+            self.closed = true;
+            return Err(PostgresError::Transport(format!(
+                "warm extended query flush failed: {err}"
+            )));
+        }
+
+        let mut collector = crate::extended::ExtendedQueryCollector::new(
+            resolved.parameters.len(),
+            result_formats,
+            true,
+            true,
+        );
+        let mut row_ctx = ctx;
+
+        loop {
+            let msg = match read_message(&mut self.stream, &mut self.read_buf, None).await {
+                Ok(m) => m,
+                Err(err) => {
+                    self.exchange_state = ExchangeState::Idle;
+                    self.closed = true;
+                    return Err(err);
+                }
+            };
+
+            match msg {
+                Message::ParseComplete => {
+                    if let Err(err) = collector.handle_parse_complete() {
+                        self.exchange_state = ExchangeState::Idle;
+                        self.closed = true;
+                        return Err(err);
+                    }
+                }
+                Message::ParameterDescription(body) => {
+                    if !collector.has_error()
+                        && let Err(err) = collector.handle_parameter_description(&body)
+                    {
+                        self.exchange_state = ExchangeState::Idle;
+                        self.closed = true;
+                        return Err(err);
+                    }
+                }
+                Message::BindComplete => {
+                    if let Err(err) = collector.handle_bind_complete() {
+                        self.exchange_state = ExchangeState::Idle;
+                        self.closed = true;
+                        return Err(err);
+                    }
+                }
+                Message::RowDescription(body) => {
+                    if !collector.has_error() {
+                        row_ctx = crate::codecs::CodecContext::from_parameters(&self.parameters);
+                        if let Err(err) = collector.handle_row_description(&body) {
+                            self.exchange_state = ExchangeState::Idle;
+                            self.closed = true;
+                            return Err(err);
+                        }
+                    }
+                }
+                Message::NoData => {
+                    if !collector.has_error()
+                        && let Err(err) = collector.handle_no_data()
+                    {
+                        self.exchange_state = ExchangeState::Idle;
+                        self.closed = true;
+                        return Err(err);
+                    }
+                }
+                Message::DataRow(body) => {
+                    if !collector.has_error()
+                        && let Err(err) =
+                            collector.handle_data_row(&body, &row_ctx, &self.type_catalog)
+                    {
+                        self.exchange_state = ExchangeState::Idle;
+                        self.closed = true;
+                        return Err(err);
+                    }
+                }
+                Message::CommandComplete(body) => {
+                    let tag = body.tag().map_err(|e| {
+                        self.exchange_state = ExchangeState::Idle;
+                        self.closed = true;
+                        PostgresError::Protocol(format!("invalid CommandComplete tag UTF-8: {e}"))
+                    })?;
+                    if let Err(err) = collector.handle_command_complete(tag) {
+                        self.exchange_state = ExchangeState::Idle;
+                        self.closed = true;
+                        return Err(err);
+                    }
+                }
+                Message::EmptyQueryResponse => {
+                    if let Err(err) = collector.handle_empty_query() {
+                        self.exchange_state = ExchangeState::Idle;
+                        self.closed = true;
+                        return Err(err);
+                    }
+                }
+                Message::CloseComplete => {}
+                Message::ErrorResponse(body) => match crate::query::parse_error_response(&body) {
+                    Ok(server_err) => collector.handle_error_response(server_err),
+                    Err(err) => {
+                        self.exchange_state = ExchangeState::Idle;
+                        self.closed = true;
+                        return Err(err);
+                    }
+                },
+                Message::NoticeResponse(_) => {}
+                Message::ParameterStatus(body) => {
+                    let name = body
+                        .name()
+                        .map_err(|e| {
+                            self.exchange_state = ExchangeState::Idle;
+                            self.closed = true;
+                            PostgresError::Protocol(format!(
+                                "invalid ParameterStatus name UTF-8: {e}"
+                            ))
+                        })?
+                        .to_owned();
+                    let val = body
+                        .value()
+                        .map_err(|e| {
+                            self.exchange_state = ExchangeState::Idle;
+                            self.closed = true;
+                            PostgresError::Protocol(format!(
+                                "invalid ParameterStatus value UTF-8: {e}"
+                            ))
+                        })?
+                        .to_owned();
+                    if name.eq_ignore_ascii_case("search_path") {
+                        self.type_catalog.invalidate_extension_names();
+                        self.statement_descriptions.clear();
+                    }
+                    self.parameters.insert(name, val);
+                }
+                Message::NotificationResponse(body) => {
+                    let channel = body
+                        .channel()
+                        .map_err(|e| {
+                            self.exchange_state = ExchangeState::Idle;
+                            self.closed = true;
+                            PostgresError::Protocol(format!(
+                                "invalid NotificationResponse channel UTF-8: {e}"
+                            ))
+                        })?
+                        .to_owned();
+                    let payload = body
+                        .message()
+                        .map_err(|e| {
+                            self.exchange_state = ExchangeState::Idle;
+                            self.closed = true;
+                            PostgresError::Protocol(format!(
+                                "invalid NotificationResponse payload UTF-8: {e}"
+                            ))
+                        })?
+                        .to_owned();
+                    self.dispatch_notification(body.process_id(), channel, payload);
+                }
+                Message::ReadyForQuery(body) => {
+                    self.exchange_state = ExchangeState::Idle;
+                    let status = match TransactionStatus::from_wire_tag(body.status()) {
+                        Ok(s) => s,
+                        Err(err) => {
+                            self.closed = true;
+                            return Err(err);
+                        }
+                    };
+                    self.transaction_status = status;
+                    match collector.finish(status) {
+                        Ok(res) => return Ok(res),
+                        Err(err) => {
+                            if matches!(
+                                err,
+                                PostgresError::Protocol(_) | PostgresError::Transport(_)
+                            ) {
+                                self.closed = true;
+                            }
+                            return Err(err);
+                        }
+                    }
+                }
+                _ => {
+                    self.exchange_state = ExchangeState::Idle;
+                    self.closed = true;
+                    return Err(PostgresError::Protocol(
+                        "unexpected backend message frame during warm extended query".to_string(),
+                    ));
+                }
+            }
+        }
+    }
+
     /// Send a single 5-byte `Terminate` (`'X'`) frame and shut down the socket once.
     pub async fn close(&mut self) -> Result<(), PostgresError> {
         if self.closed {
             return Ok(());
         }
         self.closed = true;
+        self.exchange_state = ExchangeState::Idle;
         let _ = self.stream.write_all(&TERMINATE_FRAME).await;
         let _ = self.stream.flush().await;
         let _ = self.stream.shutdown().await;
@@ -335,6 +1342,7 @@ impl PostgresConnection {
 }
 
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
 enum SessionState {
     Disconnected,
     Connecting { generation: u64 },
@@ -716,6 +1724,9 @@ pub(crate) async fn establish_postgres_connection(
                     tls_negotiated,
                     tls_server_end_point,
                     unnamed_statement_valid: false,
+                    type_catalog: crate::types::TypeCatalog::new_with_builtins(),
+                    exchange_state: ExchangeState::Idle,
+                    statement_descriptions: std::collections::HashMap::new(),
                     notifications: Vec::new(),
                     closed: false,
                 });
@@ -763,6 +1774,7 @@ pub(crate) async fn establish_postgres_connection(
 }
 
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
 enum ClientSessionState {
     Configured,
     Connecting { generation: u64 },
@@ -1066,5 +2078,12 @@ fn redact_session_error(
                 .map(|(k, v)| (k, sanitize(v)))
                 .collect(),
         }),
+        PostgresError::AfterCompletion {
+            source,
+            completed_result,
+        } => PostgresError::AfterCompletion {
+            source: Box::new(redact_session_error(*source, password, login_snapshot)),
+            completed_result,
+        },
     }
 }

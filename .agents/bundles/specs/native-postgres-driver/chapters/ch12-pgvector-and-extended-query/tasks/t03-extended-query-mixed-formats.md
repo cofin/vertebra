@@ -5,7 +5,7 @@ chapter_id: ch12-pgvector-and-extended-query
 title: Implement extended-query execution with typed NULLs and mixed binary/text format negotiation
 description: Implement extended.rs (Parameter, PreparedDescription, encode_bind, ExtendedQueryCollector) and PostgresConnection::query plus query_with_row_sink with cold all-text single-group safety and warm mixed binary/text format negotiation.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -128,9 +128,9 @@ Implement `extended.rs::{RowBody, PreparedDescription, Parameter, encode_bind, E
 
 ## Acceptance Criteria
 
-- [ ] `PostgresConnection::query` and `pub(crate)` `PostgresConnection::query_with_row_sink` execute extended `Parse`/`Describe`/`Bind`/`Execute`/`Close`/`Sync` exchanges with validated parameter counts/OIDs, typed `NULL`s, canonical `42P18` / `42601` server error draining, and mixed binary/text column formats matching portal `RowDescription` without materializing `Vec<Vec<PgValue>>` on the streaming sink path (R12).
-- [ ] Cold queries emit one extended group with zero implicit `BEGIN` (`VACUUM`-compatible) and zero `Parse`->`Query`->`Bind` window, resolving custom parameter metadata before `Parse` and normalizing cold text results after `ReadyForQuery` without SQL replay (R12, R13, R15).
-- [ ] Every `PgValue::TemporalText` parameter is rejected with `PostgresError::Data` before submission regardless of session `DateStyle`/`TimeZone` (R11, R12).
+- [x] `PostgresConnection::query` and `pub(crate)` `PostgresConnection::query_with_row_sink` execute extended `Parse`/`Describe`/`Bind`/`Execute`/`Close`/`Sync` exchanges with validated parameter counts/OIDs, typed `NULL`s, canonical `42P18` / `42601` server error draining, and mixed binary/text column formats matching portal `RowDescription` without materializing `Vec<Vec<PgValue>>` on the streaming sink path (R12).
+- [x] Cold queries emit one extended group with zero implicit `BEGIN` (`VACUUM`-compatible) and zero `Parse`->`Query`->`Bind` window, resolving custom parameter metadata before `Parse` and normalizing cold text results after `ReadyForQuery` without SQL replay (R12, R13, R15).
+- [x] Every `PgValue::TemporalText` parameter is rejected with `PostgresError::Data` before submission regardless of session `DateStyle`/`TimeZone` (R11, R12).
 
 ## Notes & Discoveries
 

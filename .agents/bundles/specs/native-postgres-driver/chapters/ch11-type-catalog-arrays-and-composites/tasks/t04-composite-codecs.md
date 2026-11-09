@@ -5,7 +5,7 @@ chapter_id: ch11-type-catalog-arrays-and-composites
 title: Implement typed ordered composite binary and text codecs
 description: Encode and decode named PostgreSQL composite types and anonymous binary records (OID 2249) with ordered field metadata, composite NULL rules, and stale-schema invalidation.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -120,9 +120,9 @@ Implement PostgreSQL `record_send` / `record_recv` and `record_out` / `record_in
 
 ## Acceptance Criteria
 
-- [ ] Named composites preserve `type_oid`, ordered non-dropped `field_names`/`field_oids`, and exact parent `NULL` vs field `NULL` vs `""` distinctions across binary and text formats, including nested arrays and composites (R11).
-- [ ] Anonymous binary `record` (`OID 2249`) retains transmitted `field_oids` with `f1, f2, ...` names, while unknown named or anonymous text records stay `PgValue::Text` at their outer `Column.type_oid` without guessed CSV parsing (R11).
-- [ ] Stale or mismatched `PgComposite` schemas, invalid field counts/OIDs/lengths, trailing bytes, and excessive recursion fail explicitly with `PostgresError::Data` without replaying queries (R11).
+- [x] Named composites preserve `type_oid`, ordered non-dropped `field_names`/`field_oids`, and exact parent `NULL` vs field `NULL` vs `""` distinctions across binary and text formats, including nested arrays and composites (R11).
+- [x] Anonymous binary `record` (`OID 2249`) retains transmitted `field_oids` with `f1, f2, ...` names, while unknown named or anonymous text records stay `PgValue::Text` at their outer `Column.type_oid` without guessed CSV parsing (R11).
+- [x] Stale or mismatched `PgComposite` schemas, invalid field counts/OIDs/lengths, trailing bytes, and excessive recursion fail explicitly with `PostgresError::Data` without replaying queries (R11).
 
 ## Notes & Discoveries
 

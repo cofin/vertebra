@@ -5,12 +5,12 @@ chapter_id: ch11-type-catalog-arrays-and-composites
 title: "Chapter 11: Session Type Catalog, Dimensioned Arrays, and Ordered Composite Codecs"
 description: Implement session-local PostgreSQL pg_catalog type discovery and format negotiation alongside lossless binary and text codecs for multidimensional arrays and ordered composite records.
 status: stable
-state: planned
+state: completed
 planning_status: complete
 depends_on_chapters:
   - ch10-temporal-interval-and-json-codecs
 replan_trigger: null
-current_task: "native-postgres-driver:ch11:t01"
+current_task: null
 plan_revision: 5
 plan_commit: fd571e3a
 state_revision: 0
@@ -143,10 +143,10 @@ Parent roadmap: [spec.md](../../spec.md). Public interface authority: [contracts
 
 ## 5. Implementation Plan
 
-- [ ] native-postgres-driver:ch11:t01 — Implement session-local PostgreSQL type discovery and format negotiation (tasks/t01-session-type-catalog.md)
-- [ ] native-postgres-driver:ch11:t02 — Implement dimensioned binary array codecs preserving rank, lower bounds, and element OIDs (tasks/t02-binary-arrays.md)
-- [ ] native-postgres-driver:ch11:t03 — Implement escaped multidimensional text array codecs and bounded container scanning (tasks/t03-multidimensional-text-arrays.md)
-- [ ] native-postgres-driver:ch11:t04 — Implement typed ordered composite binary and text codecs (tasks/t04-composite-codecs.md)
+- [x] native-postgres-driver:ch11:t01 — Implement session-local PostgreSQL type discovery and format negotiation (tasks/t01-session-type-catalog.md)
+- [x] native-postgres-driver:ch11:t02 — Implement dimensioned binary array codecs preserving rank, lower bounds, and element OIDs (tasks/t02-binary-arrays.md)
+- [x] native-postgres-driver:ch11:t03 — Implement escaped multidimensional text array codecs and bounded container scanning (tasks/t03-multidimensional-text-arrays.md)
+- [x] native-postgres-driver:ch11:t04 — Implement typed ordered composite binary and text codecs (tasks/t04-composite-codecs.md)
 
 **Chapter Recovery Checkpoint:** `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres && cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-postgres --all-targets -- -D warnings` exits `0`.
 
