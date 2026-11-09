@@ -59,7 +59,7 @@ tags:
 ## Objective & Scope Boundary
 
 Update `src/py/vertebra/extensions/sqlspec/storage.py` [^py-sqlspec-storage] and `src/py/vertebra/extensions/alchemy/storage.py` [^py-alchemy-storage] (`2` files):
-1. In `extensions/sqlspec/storage.py`: delete `_IPCBuffer` (using `pa.BufferOutputStream()` directly), move all private `_...` methods on `ObjectStoreBackend` strictly below all public sync and async methods (`PY-01`), check `self._sync_store.supports_signing` consistently in `supports_signing`, and raise `ImproperConfigurationError` from `build_duckdb_gcs_secret_sql` when neither `token_cache` nor `access_token` yields a non-empty bearer token.
+1. In `extensions/sqlspec/storage.py`: delete `_IPCBuffer` (using `pa.BufferOutputStream()` directly), move all private `_...` methods on `ObjectStoreBackend` strictly below all public sync and async methods (`PY-01`), check `self._sync_store.supports_signing` consistently in `supports_signing`, and raise `ImproperConfigurationError` from `build_duckdb_gcs_secret_sql` when neither `bearer_token` nor `config.resolve_adc_token()` yields a non-empty bearer token.
 2. In `extensions/alchemy/storage.py`: preserve Advanced Alchemy's `key: str = "default", fs: SyncObjectStore | AsyncObjectStore | str | StorageConfig | None = None, *, store: ... = None, prefix: str = "", signing: SigningConfig | None = None, token_cache: SyncGcpTokenCache | AsyncGcpTokenCache | None = None, **kwargs: Any` signature on `ObjectStoreBackend.__init__` (popping/excluding `signing` and `token_cache` before `super().__init__`), forward `signing=signing, token_cache=token_cache` on both `_STORAGE_CONFIGS` (`SyncObjectStore(target, signing=signing, token_cache=token_cache)`) and `str` URI branches, forward `signing` and `token_cache` in `register_storage_backend`, check `self._sync_store.supports_signing` consistently, and ensure all private `_...` methods sit below public methods.
 
 Out of scope: Django storage adapter (`t02`).
@@ -72,13 +72,13 @@ Out of scope: Django storage adapter (`t02`).
 
 ## Symbol & Signature Contracts
 
-- `build_duckdb_gcs_secret_sql(...) -> str` raises `ImproperConfigurationError` on missing/blank bearer token.
+- `build_duckdb_gcs_secret_sql(secret_name: str = "vertebra_gcs", config: GCSConfig | None = None, *, bearer_token: str | None = None) -> str` raises `ImproperConfigurationError` on missing/blank bearer token.
 - `alchemy.storage.ObjectStoreBackend.__init__(self, key: str = "default", fs: SyncObjectStore | AsyncObjectStore | str | StorageConfig | None = None, *, store: SyncObjectStore | AsyncObjectStore | str | StorageConfig | None = None, prefix: str = "", signing: SigningConfig | None = None, token_cache: SyncGcpTokenCache | AsyncGcpTokenCache | None = None, **kwargs: Any) -> None`
 - `alchemy.storage.register_storage_backend(..., signing: SigningConfig | None = None, token_cache: SyncGcpTokenCache | AsyncGcpTokenCache | None = None) -> ObjectStoreBackend`
 
 ## Edge Cases & Error Semantics
 
-- Whitespace-only `access_token="   "` in `build_duckdb_gcs_secret_sql` raises `ImproperConfigurationError`.
+- Whitespace-only `bearer_token="   "` in `build_duckdb_gcs_secret_sql` raises `ImproperConfigurationError`; NUL/CR/LF in the token raise `ValueError`; `'` is doubled in the rendered literal.
 - Single quotes inside resolved bearer token or secret name are escaped / validated safely.
 
 ## Public-Seam Test Blueprint
@@ -89,7 +89,7 @@ Out of scope: Django storage adapter (`t02`).
 | Case | Concrete Input | Expected Output / Error |
 | --- | --- | --- |
 | `build_duckdb_gcs_secret_sql` without token | `build_duckdb_gcs_secret_sql("my_secret")` | Raises `ImproperConfigurationError`. |
-| Alchemy `ObjectStoreBackend` & `register_storage_backend` with `StorageConfig` + `signing` + `token_cache` | `ObjectStoreBackend("gcs", GCSConfig(bucket="b", endpoint=url, allow_http=True), signing=sign_cfg, token_cache=cache)` | `backend.sync_store._gcp_token_cache` and `backend.sync_store.supports_signing` reflect forwarded `token_cache` and `signing`. |
+| Alchemy `ObjectStoreBackend` & `register_storage_backend` with `StorageConfig` + `signing` + `token_cache` | `ObjectStoreBackend("gcs", GCSConfig(bucket="b", endpoint=url, allow_http=True), signing=sign_cfg, token_cache=cache)` | `backend.sync_store.token_cache` and `backend.sync_store.supports_signing` reflect forwarded `token_cache` and `signing`; passing them alongside a prebuilt store raises `ImproperConfigurationError`. |
 
 ## Verification
 

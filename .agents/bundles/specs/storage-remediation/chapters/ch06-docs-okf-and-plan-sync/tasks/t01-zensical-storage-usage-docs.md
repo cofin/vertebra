@@ -5,7 +5,7 @@ chapter_id: ch06-docs-okf-and-plan-sync
 title: Update Zensical storage usage guides (storage.md, storage-auth-and-signing.md, storage-parquet-and-orm.md)
 description: Document PreconditionError, bulk transfers (get_file, download_many, upload_many, staged_download), read-ahead open_reader, streaming open_writer, conditional copy, glob, server-side compose, Parquet dictionary/byte-stream-split options, explicit memory:// namespaces, shared token_cache=, and multiprocessing spawn guidance across docs/usage/storage*.md.
 status: stable
-state: in_progress
+state: completed
 priority: P1
 verification_strategy: documentation_validation
 depends_on: []
@@ -23,22 +23,25 @@ tests: []
 estimated_loc: 180
 plan_revision: 1
 plan_commit: fd571e3a
-state_revision: 1
+state_revision: 2
 claimed_by: executor
 claimed_at: "2026-11-09T01:27:00Z"
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-09T01:42:00Z"
+last_verified_commit: ac8532d3
+verification_evidence: "make docs + make docs-clean + make review-check exit 0; every documented behavior checked against the built extension"
 created_at: "2026-11-08T20:55:00Z"
-updated_at: "2026-11-09T01:27:00Z"
-commit: null
+updated_at: "2026-11-09T01:42:00Z"
+commit: ac8532d3
 generated:
   by: flow/0.28.0
   at: "2026-11-08T20:55:00Z"
-verified: []
+verified:
+  - by: executor
+    at: "2026-11-09T01:42:00Z"
+    commit: ac8532d3
 sources:
   - id: doc-usage-storage
     resource: docs/usage/storage.md
@@ -104,11 +107,12 @@ uv run --no-sync python -m tools.scripts.review_setup validate --rules privacy
 
 ## Acceptance Criteria
 
-- [ ] `docs/usage/storage.md`, `docs/usage/storage-auth-and-signing.md`, and `docs/usage/storage-parquet-and-orm.md` accurately document all remediated and newly added storage APIs with zero stale `memory://` or `pre_buffer=False` claims (R6.1).
-- [ ] `make docs && make docs-clean` and privacy validation exit `0` (R6.1).
+- [x] [ac8532d3] `docs/usage/storage.md`, `docs/usage/storage-auth-and-signing.md`, and `docs/usage/storage-parquet-and-orm.md` accurately document all remediated and newly added storage APIs with zero stale `memory://` or `pre_buffer=False` claims (R6.1).
+- [x] [ac8532d3] `make docs && make docs-clean` and privacy validation exit `0` (R6.1).
 
 ## Notes & Discoveries
 
+- [2026-11-09 01:42] Conditional docs follow the code: `if_match`/`if_none_match` failures raise `PreconditionError`, while `if_not_exists=True` and `copy(..., overwrite=False)` raise `FileExistsError`. Bare `memory://` remains valid, so examples use explicit namespaces without claiming the bare form fails. `iter_parquet_batches` keeps `pre_buffer=False` with `read_ahead=0`; only whole-table reads default to `pre_buffer=True`.
 - [2026-11-08 20:55] Keep code examples concise and omit internal `frozen=True, gc=False` boilerplate in user-facing snippets.
 
 [^doc-usage-storage]: `docs/usage/storage.md` — Zensical Object Storage usage guide.

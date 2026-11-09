@@ -215,13 +215,13 @@ Zero-context code and quality reviews of `feat/storage-updates` (`077a3fe9..fd57
 
 ## 3. Documentation & OKF Knowledge Plan
 
-- **Progress**: `[0/6 files documented]`
-- `[ ]` `docs/usage/storage.md` — Document `PreconditionError`, raw key semantics, `get_file`, `download_many`, `upload_many`, `staged_download`, `open_reader(..., read_ahead=...)`, `open_writer`, `copy(..., overwrite=False)`, `glob`, `compose`, backend config options, and `multiprocessing` `spawn` start-method guidance.
-- `[ ]` `docs/usage/storage-auth-and-signing.md` — Document cross-extension `token_cache=` sharing across GCS data plane, server-side `compose`, and IAM `signBlob`, plus custom `endpoint` presigning.
-- `[ ]` `docs/usage/storage-parquet-and-orm.md` — Replace `SyncObjectStore("memory://")` with explicit `SyncObjectStore("memory://documents")`, document `write_parquet(..., use_dictionary=..., use_byte_stream_split=...)`, and use clean-break `vertebra.storage` imports.
-- `[ ]` `docs/reference/storage.md` — Expand `mkdocstrings` `members:` allowlist to cover the complete `SyncObjectStore` / `AsyncObjectStore` surface (`get_file`, `download_many`, `upload_many`, `staged_download`, `open_writer`, `glob`, `compose`, etc.), `SyncWritableFile`, `AsyncWritableFile`, `PreconditionError`, `PutResult`, `StreamingStorageResponse`, `ByteRange`, and `parse_byte_range`.
-- `[ ]` `.agents/bundles/product/product.md` — Keep `<!-- truth: start -->` `<= 40` flat bullet lines (zero `##` headings) and align `vertebra._storage` vs `vertebra._vertebra` PyO3 class inventory.
-- `[ ]` `.agents/bundles/knowledge/domains/storage/object-storage.md` — Synthesize `GcpTokenCacheCapsule`, GCS conditional `version` / emulator static-bearer / server-side `compose` invariants, zero-copy immutable `PyBackedBytes`, `PreconditionError`, bulk file I/O, read-ahead/writable handles, streaming OCI, and zero-copy `read_arrow_shm` within `<= 200` lines.
+- **Progress**: `[6/6 files documented]`
+- `[x]` `docs/usage/storage.md` — Document `PreconditionError`, raw key semantics, `get_file`, `download_many`, `upload_many`, `staged_download`, `open_reader(..., read_ahead=...)`, `open_writer`, `copy(..., overwrite=False)`, `glob`, `compose`, backend config options, and `multiprocessing` `spawn` start-method guidance.
+- `[x]` `docs/usage/storage-auth-and-signing.md` — Document cross-extension `token_cache=` sharing across GCS data plane, server-side `compose`, and IAM `signBlob`, plus custom `endpoint` presigning.
+- `[x]` `docs/usage/storage-parquet-and-orm.md` — Replace `SyncObjectStore("memory://")` with explicit `SyncObjectStore("memory://documents")`, document `write_parquet(..., use_dictionary=..., use_byte_stream_split=...)`, and use clean-break `vertebra.storage` imports.
+- `[x]` `docs/reference/storage.md` — Expand `mkdocstrings` `members:` allowlist to cover the complete `SyncObjectStore` / `AsyncObjectStore` surface (`get_file`, `download_many`, `upload_many`, `staged_download`, `open_writer`, `glob`, `compose`, etc.), `SyncWritableFile`, `AsyncWritableFile`, `PreconditionError`, `PutResult`, `StreamingStorageResponse`, `ByteRange`, and `parse_byte_range`.
+- `[x]` `.agents/bundles/product/product.md` — Keep `<!-- truth: start -->` `<= 40` flat bullet lines (zero `##` headings) and align `vertebra._storage` vs `vertebra._vertebra` PyO3 class inventory.
+- `[x]` `.agents/bundles/knowledge/domains/storage/object-storage.md` — Synthesize `GcpTokenCacheCapsule`, GCS conditional `version` / emulator static-bearer / server-side `compose` invariants, zero-copy immutable `PyBackedBytes`, `PreconditionError`, bulk file I/O, read-ahead/writable handles, streaming OCI, and zero-copy `read_arrow_shm` within `<= 200` lines.
 
 ## 4. Requirement-to-Task Traceability Matrix
 
@@ -263,7 +263,7 @@ Zero-context code and quality reviews of `feat/storage-updates` (`077a3fe9..fd57
 - **Verified Baseline (`HEAD`)**: `85bff05a` — `4/6` chapters completed and reviewed (`ch01` `1ff643ec`, `ch02` `09970202`, `ch03` `46d39d95`, `ch04` `85bff05a`).
 - **Active Chapter**: `ch05-framework-adapters-and-test-hygiene` (`3/3` tasks completed: `t01` `3b24b0af`, `t02` `a04970be`, `t03` `cd7f66bf`; zero-context review in progress).
 - **Remaining Plan**: `ch05` (`t02`, `t03` + review) -> `ch06` (`t01`–`t02` + review) -> dual review, archive, push, and stacked PRs (`feat/storage-updates`, `feat/driver-fail-loud`, `feat/native-postgres-driver`).
-- **Documentation & OKF Sync**: `[0/6 files documented]`.
+- **Documentation & OKF Sync**: `[6/6 files documented]`.
 - **Active Invariants & Triggers**: Zero `planning_status: empirical_dependent` chapters; every chapter is decision-complete (`planning_status: complete`).
 
 [^core-gcp-auth]: `src/rs/vertebra-core/src/gcp_auth.rs::GcpTokenCache` — Core GCP OAuth2 token cache shared across PyO3 extensions.

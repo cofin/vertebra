@@ -51,7 +51,7 @@ tags:
 # Chapter 05: Framework Storage Adapters and Pytest Hygiene
 
 <!-- truth: start -->
-- **SQLSpec & Advanced Alchemy Storage Adapters**: `extensions/sqlspec/storage.py` deletes `_IPCBuffer`, groups all public methods strictly above private `_...` helpers on `ObjectStoreBackend`, checks `self._sync_store.supports_signing` consistently, and raises `ImproperConfigurationError` from `build_duckdb_gcs_secret_sql` when neither `token_cache` nor `access_token` provides a token; `extensions/alchemy/storage.py` forwards `signing=` and `token_cache=` when constructing `SyncObjectStore` / `AsyncObjectStore` from `StorageConfig` [^py-sqlspec-storage] [^py-alchemy-storage].
+- **SQLSpec & Advanced Alchemy Storage Adapters**: `extensions/sqlspec/storage.py` deletes `_IPCBuffer`, groups all public methods strictly above private `_...` helpers on `ObjectStoreBackend`, checks `self._sync_store.supports_signing` consistently, propagates native signing errors unchanged, rejects `signing`/`token_cache` alongside prebuilt stores, and renders `build_duckdb_gcs_secret_sql(secret_name, config, *, bearer_token) -> str` as a quote-escaped literal (`ImproperConfigurationError` on a missing/blank token, `ValueError` on control characters); `extensions/alchemy/storage.py` forwards `signing=` and `token_cache=` when constructing `SyncObjectStore` / `AsyncObjectStore` from `StorageConfig` and rejects them alongside prebuilt stores [^py-sqlspec-storage] [^py-alchemy-storage].
 - **Clean-Break Django Storage & `_store.py` Debloat (`PY-07`)**: `extensions/django/storage.py` and `extensions/django/__init__.py` drop re-exports of `vertebra.storage` symbols (`GCSConfig`, `LocalConfig`, `MemoryConfig`, `S3Config`, `SyncObjectStore`, `AsyncObjectStore`) while preserving `DjangoStorage`, `SyncStorageRegistry`, and `AsyncStorageRegistry`, and pass bytes/buffers directly in `DjangoStorage.save` without redundant `ContentFile(bytes(content))` copying; `storage/_store.py` deletes `open_readable_file` and `_get_native_module` [^py-django-storage] [^py-django-init] [^py-store].
 - **Pytest Top-Level Imports & Parameterization (`TST-01`..`TST-06`)**: `test_storage_store.py`, `test_signing.py`, `test_gcs_token_refresh.py`, `test_litestar_plugin.py`, and `test_pg_dataplane_and_datafusion.py` use module top-level imports, `@pytest.mark.parametrize` instead of subcase `for` loops, and `@pytest.mark.anyio` instead of `asyncio.run` [^py-store].
 <!-- truth: end -->
@@ -94,7 +94,7 @@ Zero-context code and quality reviews flagged adapter drift and test-hygiene vio
 
 ### 2.2 Full Public Type, Struct, Schema & Signature Contracts
 
-- `extensions/sqlspec/storage.py::build_duckdb_gcs_secret_sql(...) -> str` raises `ImproperConfigurationError` when no non-empty bearer token can be resolved.
+- `extensions/sqlspec/storage.py::build_duckdb_gcs_secret_sql(secret_name: str = "vertebra_gcs", config: GCSConfig | None = None, *, bearer_token: str | None = None) -> str` resolves the token from `bearer_token` or `config.resolve_adc_token()`, doubles `'` in the literal, raises `ImproperConfigurationError` when no non-empty token resolves, and raises `ValueError` on NUL/CR/LF.
 - `extensions/django/storage.py::__all__ = ("AsyncStorageRegistry", "DjangoStorage", "SyncStorageRegistry")` (and `extensions/django/__init__.py` exports those three storage symbols without `vertebra.storage` re-exports).
 
 ### 2.3 Caller -> Seam -> Collaborator Integration Map
@@ -106,7 +106,8 @@ Zero-context code and quality reviews flagged adapter drift and test-hygiene vio
 
 | Scenario / Boundary | Trigger / Input | Expected Behavior / Error Contract | Invariant Preserved |
 | --- | --- | --- | --- |
-| DuckDB GCS secret with no token | `build_duckdb_gcs_secret_sql("gcs_sec")` with `token_cache=None, access_token=None` | Raises `ImproperConfigurationError` | Fail-loud credential validation. |
+| DuckDB GCS secret with no token | `build_duckdb_gcs_secret_sql("gcs_sec")` with `config=None, bearer_token=None` | Raises `ImproperConfigurationError` | Fail-loud credential validation. |
+| Auth options with a prebuilt store | `ObjectStoreBackend(SyncObjectStore(...), signing=..., token_cache=...)` (SQLSpec or Alchemy) | Raises `ImproperConfigurationError` without mutating the caller's store | No silently ignored credentials. |
 | `ObjectStoreBackend(GCSConfig(...), signing=..., token_cache=...)` | Alchemy `ObjectStoreBackend` initialized with `StorageConfig` | Both sync and async stores receive `signing` and `token_cache` | Consistent auth/signing across ORM attachments. |
 | Deprecated aliases accessed | `hasattr(SyncObjectStore, "open_readable_file")` or `from vertebra.extensions.django import S3Config` | `False` / `ImportError` | Clean-break `PY-07` surface. |
 

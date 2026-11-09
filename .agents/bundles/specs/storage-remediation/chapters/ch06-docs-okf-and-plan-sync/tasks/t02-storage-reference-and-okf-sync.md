@@ -5,7 +5,7 @@ chapter_id: ch06-docs-okf-and-plan-sync
 title: Expand docs/reference/storage.md API coverage and synchronize product.md and object-storage.md OKF chapters
 description: Expand mkdocstrings member lists in docs/reference/storage.md to cover the full public vertebra.storage surface, flatten the truth block and fix vertebra._storage vs vertebra._vertebra attribution in .agents/bundles/product/product.md, and resynthesize .agents/bundles/knowledge/domains/storage/object-storage.md within <= 200 lines.
 status: stable
-state: in_progress
+state: completed
 priority: P1
 verification_strategy: documentation_validation
 depends_on:
@@ -24,22 +24,25 @@ tests: []
 estimated_loc: 220
 plan_revision: 1
 plan_commit: fd571e3a
-state_revision: 1
+state_revision: 2
 claimed_by: executor
 claimed_at: "2026-11-09T01:27:00Z"
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-09T01:42:00Z"
+last_verified_commit: 5d2fc5d7
+verification_evidence: "make docs + make docs-clean + make review-check + review_setup validate --rules bundles,privacy exit 0; object-storage.md 160 lines, product.md truth block 18 flat bullets"
 created_at: "2026-11-08T20:55:00Z"
-updated_at: "2026-11-09T01:27:00Z"
-commit: null
+updated_at: "2026-11-09T01:42:00Z"
+commit: 5d2fc5d7
 generated:
   by: flow/0.28.0
   at: "2026-11-08T20:55:00Z"
-verified: []
+verified:
+  - by: executor
+    at: "2026-11-09T01:42:00Z"
+    commit: 5d2fc5d7
 sources:
   - id: doc-ref-storage
     resource: docs/reference/storage.md
@@ -103,11 +106,12 @@ make review-check
 
 ## Acceptance Criteria
 
-- [ ] `docs/reference/storage.md` renders the complete `vertebra.storage` public API cleanly under `make docs` (R6.2).
-- [ ] `.agents/bundles/product/product.md` and `.agents/bundles/knowledge/domains/storage/object-storage.md` (`<= 200` lines) pass `make review-check` with `<= 40`-line flat-bullet truth blocks and accurate symbol attribution (R6.2).
+- [x] [5d2fc5d7] `docs/reference/storage.md` renders the complete `vertebra.storage` public API cleanly under `make docs` (R6.2).
+- [x] [5d2fc5d7] `.agents/bundles/product/product.md` and `.agents/bundles/knowledge/domains/storage/object-storage.md` (`<= 200` lines) pass `make review-check` with `<= 40`-line flat-bullet truth blocks and accurate symbol attribution (R6.2).
 
 ## Notes & Discoveries
 
+- [2026-11-09 01:42] `tools/docs/verify_docs_artifacts.py` caps the reference page at 120,000 bytes and 14 TOC items, so factories, properties, token-cache classes, and range helpers are described in prose rather than autodoc and non-store classes render at h4; the built page is 118,996 bytes, so future reference growth requires splitting the page via `zensical.toml` nav.
 - [2026-11-08 20:55] Stamp `verified.commit` with an ancestor commit SHA of `HEAD` so `ReviewSetupValidator._check_bundles` passes.
 
 [^doc-ref-storage]: `docs/reference/storage.md` — Zensical `vertebra.storage` API reference.
