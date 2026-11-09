@@ -6,7 +6,7 @@ chapter_id: ch03-bulk-file-io-compose-and-streams
 title: "Chapter 03: Bulk File I/O, Server-Side Compose, Glob, and Read-Ahead/Writable Streams"
 description: Stream Rust put_file (> 8 MiB multipart) and atomic get_file, drive bounded-concurrency get_files/put_files (download_many, upload_many, /dev/shm staged_download), add copy(..., overwrite=False), glob(), and server-side GCS compose() (<= 32-way tree fold + multipart fallback), pass immutable buffers directly without memoryview wrapping, and implement 4 MiB read-ahead open_reader plus streaming multipart open_writer (SyncWritableFile / AsyncWritableFile).
 status: stable
-state: planned
+state: active
 planning_status: complete
 depends_on_chapters:
   - ch01-native-gcs-plane-and-signing
@@ -15,11 +15,11 @@ replan_trigger: null
 current_task: "storage-remediation:ch03:t01"
 plan_revision: 1
 plan_commit: fd571e3a
-state_revision: 0
+state_revision: 1
 last_verified_checkpoint: null
 last_reviewed_commit: null
 created_at: "2026-11-08T20:55:00Z"
-updated_at: "2026-11-08T20:55:00Z"
+updated_at: "2026-11-09T00:22:30Z"
 generated:
   by: flow/0.28.0
   at: "2026-11-08T20:55:00Z"

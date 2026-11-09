@@ -6,23 +6,26 @@ chapter_id: ch02-zero-copy-ffi-keys-and-backends
 title: "Chapter 02: Zero-Copy FFI, Raw Object Keys, and Cloud/OCI Backends"
 description: Define PreconditionError and map conditional failures, wrap immutable PyBytes zero-copy via PyBackedBytes while copying mutable buffers synchronously, check get_range overflow and zero-length bounds, preserve raw object keys via StorePath::parse, wire S3 session_token and virtual_hosted_style, HTTP headers, file:// conditional metadata, and Litestar raw keys, and upgrade OciObjectStore to stream, conditionally write, confirm asynchronous copies, rename synchronously, and paginate.
 status: stable
-state: active
+state: completed
 planning_status: complete
 depends_on_chapters:
   - ch01-native-gcs-plane-and-signing
 replan_trigger: null
-current_task: "storage-remediation:ch02:t04"
+current_task: null
 plan_revision: 1
 plan_commit: fd571e3a
-state_revision: 8
-last_verified_checkpoint: 211c3161
-last_reviewed_commit: null
+state_revision: 9
+last_verified_checkpoint: 09970202
+last_reviewed_commit: 09970202
 created_at: "2026-11-08T20:55:00Z"
-updated_at: "2026-11-08T23:58:00Z"
+updated_at: "2026-11-09T00:22:30Z"
 generated:
   by: flow/0.28.0
   at: "2026-11-08T20:55:00Z"
-verified: []
+verified:
+  - by: agent:code-reviewer
+    at: "2026-11-09T00:22:30Z"
+    commit: 09970202
 sources:
   - id: py-typing
     resource: src/py/vertebra/_typing.py::VertebraError
@@ -154,9 +157,9 @@ tags:
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline (`HEAD`)**: `211c3161` — all `4/4` task implementations (`d889b958`, `fb8dde11`, `8eb43fb2`, `211c3161`) are committed and verified; the `ch02` zero-context chapter review (`1ff643ec..HEAD`) is in progress.
-- **Next Step**: Adjudicate review findings, stamp `ch02` `completed`, and advance to `ch03:t01`.
-- **Remaining Chapters**: `ch02`–`ch06`.
+- **Verified Baseline (`HEAD`)**: `09970202` — `4/4` tasks completed and the zero-context chapter review findings (async OCI copy confirmation, synchronous `renameObject`, `206`-required ranges, `e_tag`-required updates, IP-literal virtual-host rejection, signed-request coverage) are remediated.
+- **Remaining Tasks in Chapter**: None.
+- **Remaining Chapters**: `ch03`–`ch06`.
 
 [^py-typing]: `src/py/vertebra/_typing.py::VertebraError` — Internal exception and typing definitions re-exported by `vertebra.typing`.
 [^py-typing-facade]: `src/py/vertebra/typing.py::VertebraError` — Public `vertebra.typing` facade.
