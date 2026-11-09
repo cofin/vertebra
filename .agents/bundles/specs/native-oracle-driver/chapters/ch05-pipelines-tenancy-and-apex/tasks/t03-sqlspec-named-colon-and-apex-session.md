@@ -5,7 +5,7 @@ chapter_id: ch05-pipelines-tenancy-and-apex
 title: Wire SQLSpec NAMED_COLON parameter style and APEX OracleSessionManager tenancy
 description: Set _execution_parameter_style = ParameterStyle.NAMED_COLON on SQLSpec OracleSyncDriver and OracleAsyncDriver, wire driver tenant scope reset-or-evict hooks, and align OracleSessionManager with trusted VPD context procedures and TTC piggyback set_session_attrs.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -127,9 +127,9 @@ Commit as `feat(oracle): wire SQLSpec NAMED_COLON and APEX trusted VPD session m
 
 ## Acceptance Criteria
 
-- [ ] `OracleSyncDriver._execution_parameter_style` and `OracleAsyncDriver._execution_parameter_style` are set to `ParameterStyle.NAMED_COLON` in `src/py/vertebra/extensions/sqlspec/adapters.py` (R11).
-- [ ] `SyncOracleDriver`, `AsyncOracleDriver`, `OracleSyncDriver`, and `OracleAsyncDriver` wire tenant scope entry, exit reset, and failed-reset connection eviction (R10, R11).
-- [ ] `OracleSessionManager` supports `context_package_proc` and `context_clear_proc`, stages TTC `ECID` attributes via `set_session_attrs`, and evicts/closes the connection if detach fails (R11).
+- [x] `OracleSyncDriver._execution_parameter_style` and `OracleAsyncDriver._execution_parameter_style` are set to `ParameterStyle.NAMED_COLON` in `src/py/vertebra/extensions/sqlspec/adapters.py` (R11).
+- [x] `SyncOracleDriver`, `AsyncOracleDriver`, `OracleSyncDriver`, and `OracleAsyncDriver` wire tenant scope entry, exit reset, and failed-reset connection eviction (R10, R11).
+- [x] `OracleSessionManager` supports `context_package_proc` and `context_clear_proc`, stages TTC `ECID` attributes via `set_session_attrs`, and evicts/closes the connection if detach fails (R11).
 
 ## Notes & Discoveries
 

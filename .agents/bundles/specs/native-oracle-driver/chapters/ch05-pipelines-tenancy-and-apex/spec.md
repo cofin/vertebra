@@ -5,12 +5,12 @@ chapter_id: ch05-pipelines-tenancy-and-apex
 title: "Chapter 05: Delayed-Commit Pipelines, VPD Trusted Tenancy, and APEX Session Bridge"
 description: Implement delayed-commit SyncOraclePipeline and AsyncOraclePipeline with SAVEPOINT nesting, VPD trusted-package and DBMS_SESSION.SET_IDENTIFIER tenancy with mandatory reset-or-evict on pool release, SQLSpec ParameterStyle.NAMED_COLON adapters, and OracleSessionManager APEX session wiring.
 status: stable
-state: in_progress
+state: completed
 planning_status: complete
 depends_on_chapters:
   - ch04-pools-drcp-and-session-piggyback
 replan_trigger: null
-current_task: "native-oracle-driver:ch05:t03"
+current_task: null
 plan_revision: 3
 plan_commit: 769302bc
 state_revision: 0
@@ -169,7 +169,7 @@ Progress: `[0/6 files documented]` (public documentation in `docs/usage/database
 
 - [x] native-oracle-driver:ch05:t01 — Implement OraclePipelineOutcome and delayed-commit SyncOraclePipeline and AsyncOraclePipeline (tasks/t01-delayed-commit-sync-and-async-pipelines.md)
 - [x] native-oracle-driver:ch05:t02 — Implement VPD trusted-package and SET_IDENTIFIER tenancy with pool reset-or-evict (tasks/t02-vpd-trusted-tenancy-and-pool-reset.md)
-- [~] native-oracle-driver:ch05:t03 — Wire SQLSpec NAMED_COLON parameter style and APEX OracleSessionManager tenancy (tasks/t03-sqlspec-named-colon-and-apex-session.md)
+- [x] native-oracle-driver:ch05:t03 — Wire SQLSpec NAMED_COLON parameter style and APEX OracleSessionManager tenancy (tasks/t03-sqlspec-named-colon-and-apex-session.md)
 
 **Chapter Recovery Checkpoint:** `make dev && cargo test --manifest-path src/rs/Cargo.toml -p vertebra-oracle --locked && uv run --no-sync python -m mypy.stubtest vertebra._oracle && uv run --no-sync pytest src/py/tests/unit/db/test_oracle_adapter.py src/py/tests/unit/extensions/test_oracle_apex.py -q` exits `0`.
 

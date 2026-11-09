@@ -27,8 +27,11 @@ from vertebra.db.arrow import (
     _table_to_rows_and_cols,
 )
 from vertebra.db.driver import AsyncDatabaseDriver, InterfaceError, SyncDatabaseDriver
+from vertebra.db.rls import TenantScopeConfig
 from vertebra.utils.module_loader import ensure_module
 from vertebra.utils.text import validate_identifier
+
+_DEFAULT_TENANT_SCOPE = TenantScopeConfig()
 
 __all__ = (
     "AsyncOracleDriver",
@@ -1036,6 +1039,61 @@ class SyncOracleDriver(SyncDatabaseDriver[OracleConfig]):
                     self._release_pool_client(active_client, discard=False)
         self._client.close()
 
+    def enter_tenant_scope(
+        self,
+        tenant_value: str,
+        config: TenantScopeConfig = _DEFAULT_TENANT_SCOPE,
+    ) -> str:
+        """Enter a session-level VPD tenant scope using trusted package or `SET_IDENTIFIER`."""
+        namespace = self.config.context_namespace
+        sql, params = OracleCore.build_session_context_sql(
+            str(tenant_value),
+            config,
+            namespace=namespace,
+            context_package_proc=self.config.context_package_proc,
+        )
+        self.execute(sql, params)
+        attribute = config.setting_name.rsplit(".", 1)[-1]
+        self._session_context[(namespace, attribute)] = str(tenant_value)
+        return str(tenant_value)
+
+    def exit_tenant_scope(
+        self,
+        config: TenantScopeConfig = _DEFAULT_TENANT_SCOPE,
+    ) -> None:
+        """Reset session-level VPD tenant context using trusted clear procedure or `CLEAR_IDENTIFIER`."""
+        namespace = self.config.context_namespace
+        sql, params = OracleCore.build_clear_context_sql(
+            config,
+            namespace=namespace,
+            context_clear_proc=self.config.context_clear_proc,
+        )
+        try:
+            if params:
+                self.execute(sql, params)
+            else:
+                self.execute(sql)
+        except BaseException:
+            self.evict_connection()
+            raise
+        attribute = config.setting_name.rsplit(".", 1)[-1]
+        self._session_context.pop((namespace, attribute), None)
+
+    def evict_connection(self) -> None:
+        """Permanently evict or close the active physical session so tainted tenant state is never reused."""
+        self._session_context.clear()
+        self._in_transaction = False
+        entry = self._pop_pinned_entry()
+        if entry is not None:
+            _, _, active_client, from_pool = entry
+            if from_pool and self._pool is not None:
+                with suppress(Exception):
+                    self._release_pool_client(active_client, discard=True)
+                return
+        self._closed = True
+        with suppress(Exception):
+            self._client.close()
+
     def execute(
         self,
         sql: str,
@@ -1417,10 +1475,23 @@ class SyncOracleDriver(SyncDatabaseDriver[OracleConfig]):
         parameters: Sequence[Any] | Mapping[str, Any] | None,
     ) -> None:
         upper = sql.strip().upper()
-        if "SET_CONTEXT" in upper and isinstance(parameters, Mapping):
+        if "SET_IDENTIFIER" in upper and isinstance(parameters, Mapping):
             norm = {str(k).lstrip(":").lower(): v for k, v in parameters.items()}
-            if all(k in norm for k in ("namespace", "attribute", "value")):
-                self._session_context[(str(norm["namespace"]), str(norm["attribute"]))] = str(norm["value"])
+            val = norm.get("value", norm.get("identifier"))
+            if val is not None:
+                self._session_context[("USERENV", "CLIENT_IDENTIFIER")] = str(val)
+            return
+        if "CLEAR_IDENTIFIER" in upper:
+            self._session_context.pop(("USERENV", "CLIENT_IDENTIFIER"), None)
+            return
+        if isinstance(parameters, Mapping):
+            norm = {str(k).lstrip(":").lower(): v for k, v in parameters.items()}
+            if "namespace" in norm and "attribute" in norm:
+                key = (str(norm["namespace"]), str(norm["attribute"]))
+                if "value" in norm:
+                    self._session_context[key] = str(norm["value"])
+                else:
+                    self._session_context.pop(key, None)
 
     def _acquire_oracle_broker_lease(self, sql: str, param_count: int) -> Any:
         if self._broker is None:
@@ -1706,6 +1777,61 @@ class AsyncOracleDriver(AsyncDatabaseDriver[OracleConfig]):
                 with suppress(Exception):
                     await self._release_pool_client(active_client, discard=False)
         await self._client.close()
+
+    async def enter_tenant_scope(
+        self,
+        tenant_value: str,
+        config: TenantScopeConfig = _DEFAULT_TENANT_SCOPE,
+    ) -> str:
+        """Enter a session-level VPD tenant scope asynchronously using trusted package or `SET_IDENTIFIER`."""
+        namespace = self.config.context_namespace
+        sql, params = OracleCore.build_session_context_sql(
+            str(tenant_value),
+            config,
+            namespace=namespace,
+            context_package_proc=self.config.context_package_proc,
+        )
+        await self.execute(sql, params)
+        attribute = config.setting_name.rsplit(".", 1)[-1]
+        self._session_context[(namespace, attribute)] = str(tenant_value)
+        return str(tenant_value)
+
+    async def exit_tenant_scope(
+        self,
+        config: TenantScopeConfig = _DEFAULT_TENANT_SCOPE,
+    ) -> None:
+        """Reset session-level VPD tenant context asynchronously using trusted clear procedure or `CLEAR_IDENTIFIER`."""
+        namespace = self.config.context_namespace
+        sql, params = OracleCore.build_clear_context_sql(
+            config,
+            namespace=namespace,
+            context_clear_proc=self.config.context_clear_proc,
+        )
+        try:
+            if params:
+                await self.execute(sql, params)
+            else:
+                await self.execute(sql)
+        except BaseException:
+            await self.evict_connection()
+            raise
+        attribute = config.setting_name.rsplit(".", 1)[-1]
+        self._session_context.pop((namespace, attribute), None)
+
+    async def evict_connection(self) -> None:
+        """Permanently evict or close the active asynchronous physical session so tainted tenant state is never reused."""
+        self._session_context.clear()
+        self._in_transaction = False
+        entry = self._pop_pinned_entry()
+        if entry is not None:
+            _, _, active_client, from_pool = entry
+            if from_pool and self._pool is not None:
+                with suppress(Exception):
+                    await self._release_pool_client(active_client, discard=True)
+                return
+        self._closed = True
+        with suppress(Exception):
+            await self._client.close()
 
     async def execute(
         self,
@@ -2099,10 +2225,23 @@ class AsyncOracleDriver(AsyncDatabaseDriver[OracleConfig]):
         parameters: Sequence[Any] | Mapping[str, Any] | None,
     ) -> None:
         upper = sql.strip().upper()
-        if "SET_CONTEXT" in upper and isinstance(parameters, Mapping):
+        if "SET_IDENTIFIER" in upper and isinstance(parameters, Mapping):
             norm = {str(k).lstrip(":").lower(): v for k, v in parameters.items()}
-            if all(k in norm for k in ("namespace", "attribute", "value")):
-                self._session_context[(str(norm["namespace"]), str(norm["attribute"]))] = str(norm["value"])
+            val = norm.get("value", norm.get("identifier"))
+            if val is not None:
+                self._session_context[("USERENV", "CLIENT_IDENTIFIER")] = str(val)
+            return
+        if "CLEAR_IDENTIFIER" in upper:
+            self._session_context.pop(("USERENV", "CLIENT_IDENTIFIER"), None)
+            return
+        if isinstance(parameters, Mapping):
+            norm = {str(k).lstrip(":").lower(): v for k, v in parameters.items()}
+            if "namespace" in norm and "attribute" in norm:
+                key = (str(norm["namespace"]), str(norm["attribute"]))
+                if "value" in norm:
+                    self._session_context[key] = str(norm["value"])
+                else:
+                    self._session_context.pop(key, None)
 
     def _acquire_oracle_broker_lease(self, sql: str, param_count: int) -> Any:
         if self._broker is None:

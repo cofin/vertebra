@@ -416,3 +416,108 @@ def test_ords_openapi_and_duality_view_generator() -> None:
     assert tools[0].name == "get_employee"
     assert "parameters" in tools[0].input_schema
     assert tools[1].name == "duality_order_dv"
+
+
+@pytest.mark.anyio
+async def test_oracle_session_manager_trusted_package_and_evict_on_failed_detach() -> None:
+    """Verify OracleSessionManager supports trusted context procedures, set_session_attrs, and detach eviction."""
+
+    class _NativeLikeOracleConn:
+        def __init__(self, *, fail_detach: bool = False) -> None:
+            self.fail_detach = fail_detach
+            self.module: str | None = None
+            self.action: str | None = None
+            self.ecid: str | None = None
+            self.econtext_id: str | None = None
+            self.client_identifier: str | None = None
+            self.executed: list[tuple[str, Any]] = []
+            self.staged_attrs: list[dict[str, str | None]] = []
+            self.evicted = False
+
+        def set_session_attrs(
+            self,
+            *,
+            client_identifier: str | None = None,
+            module: str | None = None,
+            action: str | None = None,
+            ecid: str | None = None,
+        ) -> None:
+            self.staged_attrs.append(
+                {
+                    "client_identifier": client_identifier,
+                    "module": module,
+                    "action": action,
+                    "ecid": ecid,
+                }
+            )
+
+        async def execute(
+            self,
+            statement: str,
+            parameters: dict[str, Any] | list[Any] | None = None,
+        ) -> None:
+            self.executed.append((statement, parameters))
+            if self.fail_detach and "APEX_SESSION.DETACH" in statement:
+                raise RuntimeError("ORA-03113: detach failed")
+
+        async def evict_connection(self) -> None:
+            self.evicted = True
+
+    class _NativeLikePool:
+        def __init__(self, *, fail_detach: bool = False) -> None:
+            self.conn = _NativeLikeOracleConn(fail_detach=fail_detach)
+
+        @asynccontextmanager
+        async def acquire(self) -> AsyncIterator[_NativeLikeOracleConn]:
+            yield self.conn
+
+    ctx = ApexSessionContext(
+        app_id=200,
+        page_id=5,
+        session_id=123456,
+        app_user="ADMIN",
+        vpd_context={"APEX_TENANT_CTX": {"TENANT_ID": "ACME"}},
+    )
+    ok_pool = _NativeLikePool(fail_detach=False)
+    async with OracleSessionManager.acquire_scoped(
+        ok_pool,
+        ctx,
+        trace_id="trace-1",
+        span_id="span-2",
+        context_package_proc="APEX_CTX_PKG.SET_VAL",
+        context_clear_proc="APEX_CTX_PKG.CLEAR_VAL",
+    ):
+        assert ok_pool.conn.staged_attrs == [
+            {
+                "client_identifier": "ADMIN",
+                "module": "Vertebra",
+                "action": "apex.request",
+                "ecid": "trace-1:span-2",
+            }
+        ]
+    assert ok_pool.conn.evicted is False
+    assert len(ok_pool.conn.executed) == 2
+    attach_sql, attach_binds = ok_pool.conn.executed[0]
+    assert "APEX_CTX_PKG.SET_VAL(:vpd_ns_0, :vpd_attr_0, :vpd_val_0);" in attach_sql
+    assert "DBMS_SESSION.SET_CONTEXT" not in attach_sql
+    assert attach_binds["vpd_ns_0"] == "APEX_TENANT_CTX"
+    assert attach_binds["vpd_attr_0"] == "TENANT_ID"
+    assert attach_binds["vpd_val_0"] == "ACME"
+
+    detach_sql, detach_binds = ok_pool.conn.executed[1]
+    assert "APEX_CTX_PKG.CLEAR_VAL(:vpd_ns_0, :vpd_attr_0);" in detach_sql
+    assert detach_binds == {"vpd_ns_0": "APEX_TENANT_CTX", "vpd_attr_0": "TENANT_ID"}
+
+    bad_pool = _NativeLikePool(fail_detach=True)
+    with pytest.raises(RuntimeError, match="ORA-03113: detach failed"):
+        async with OracleSessionManager.acquire_scoped(
+            bad_pool,
+            ctx,
+            context_package_proc="APEX_CTX_PKG.SET_VAL",
+            context_clear_proc="APEX_CTX_PKG.CLEAR_VAL",
+        ):
+            pass
+    assert bad_pool.conn.evicted is True
+    assert bad_pool.conn.client_identifier is None
+    assert bad_pool.conn.ecid is None
+

@@ -8,12 +8,14 @@ import hmac
 import re
 import time
 from collections.abc import AsyncIterator, Mapping
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
+from inspect import isawaitable
 from typing import Any, Protocol
 
 import msgspec
 
 from vertebra.utils.serializers import decode_json, encode_json_bytes
+from vertebra.utils.text import validate_identifier
 
 __all__ = (
     "ApexHandoffClaims",
@@ -176,8 +178,14 @@ class OracleSessionManager:
     __slots__ = ()
 
     @staticmethod
-    def build_attach_plsql(context: ApexSessionContext) -> tuple[str, dict[str, Any]]:
+    def build_attach_plsql(
+        context: ApexSessionContext,
+        *,
+        context_package_proc: str | None = None,
+    ) -> tuple[str, dict[str, Any]]:
         """Build a single batched PL/SQL block to initialize VPD, client info, and APEX state."""
+        if context_package_proc is not None:
+            validate_identifier(context_package_proc, "context_package_proc", allow_dots=True)
         statements: list[str] = [
             "DBMS_SESSION.SET_IDENTIFIER(:app_user);",
         ]
@@ -202,7 +210,10 @@ class OracleSessionManager:
                 ns_bind = f"vpd_ns_{ctx_idx}"
                 attr_bind = f"vpd_attr_{ctx_idx}"
                 val_bind = f"vpd_val_{ctx_idx}"
-                statements.append(f"DBMS_SESSION.SET_CONTEXT(:{ns_bind}, :{attr_bind}, :{val_bind});")
+                if context_package_proc is not None:
+                    statements.append(f"{context_package_proc}(:{ns_bind}, :{attr_bind}, :{val_bind});")
+                else:
+                    statements.append(f"DBMS_SESSION.SET_CONTEXT(:{ns_bind}, :{attr_bind}, :{val_bind});")
                 binds[ns_bind] = namespace
                 binds[attr_bind] = attr_name
                 binds[val_bind] = attr_val
@@ -223,9 +234,32 @@ class OracleSessionManager:
         return f"BEGIN\n    {body}\nEND;", binds
 
     @staticmethod
-    def build_detach_plsql() -> str:
-        """Build the cleanup PL/SQL block that detaches APEX and clears VPD client identifier."""
-        return "BEGIN\n    APEX_SESSION.DETACH;\n    DBMS_SESSION.CLEAR_IDENTIFIER;\nEND;"
+    def build_detach_plsql(
+        context: ApexSessionContext | None = None,
+        *,
+        context_clear_proc: str | None = None,
+    ) -> str | tuple[str, dict[str, Any]]:
+        """Build the cleanup PL/SQL block that detaches APEX and clears VPD context and client identifier."""
+        if context_clear_proc is None:
+            return "BEGIN\n    APEX_SESSION.DETACH;\n    DBMS_SESSION.CLEAR_IDENTIFIER;\nEND;"
+        validate_identifier(context_clear_proc, "context_clear_proc", allow_dots=True)
+        statements: list[str] = [
+            "APEX_SESSION.DETACH;",
+            "DBMS_SESSION.CLEAR_IDENTIFIER;",
+        ]
+        binds: dict[str, Any] = {}
+        if context is not None:
+            ctx_idx = 0
+            for namespace, attrs in context.vpd_context.items():
+                for attr_name in attrs:
+                    ns_bind = f"vpd_ns_{ctx_idx}"
+                    attr_bind = f"vpd_attr_{ctx_idx}"
+                    statements.append(f"{context_clear_proc}(:{ns_bind}, :{attr_bind});")
+                    binds[ns_bind] = namespace
+                    binds[attr_bind] = attr_name
+                    ctx_idx += 1
+        body = "\n    ".join(statements)
+        return f"BEGIN\n    {body}\nEND;", binds
 
     @classmethod
     @asynccontextmanager
@@ -238,24 +272,58 @@ class OracleSessionManager:
         span_id: str | None = None,
         module: str = "Vertebra",
         action: str = "apex.request",
+        context_package_proc: str | None = None,
+        context_clear_proc: str | None = None,
     ) -> AsyncIterator[OracleConnectionLike]:
         """Acquire a pooled connection with APEX/VPD state attached and guaranteed teardown."""
         async with pool.acquire() as conn:
             conn.module = module[:48]
             conn.action = action[:64]
             conn.client_identifier = context.app_user[:64]
+            ecid_val: str | None = None
             if trace_id is not None:
                 ecid_val = (f"{trace_id}:{span_id}" if span_id else trace_id)[:64]
                 conn.ecid = ecid_val
                 if hasattr(conn, "econtext_id"):
                     conn.econtext_id = ecid_val
-            attach_sql, binds = cls.build_attach_plsql(context)
+            set_attrs_fn = getattr(conn, "set_session_attrs", None)
+            if callable(set_attrs_fn):
+                set_attrs_fn(
+                    client_identifier=conn.client_identifier,
+                    module=conn.module,
+                    action=conn.action,
+                    ecid=ecid_val,
+                )
+            attach_sql, binds = cls.build_attach_plsql(context, context_package_proc=context_package_proc)
             await conn.execute(attach_sql, binds)
             try:
                 yield conn
             finally:
                 try:
-                    await conn.execute(cls.build_detach_plsql())
+                    detach_spec = cls.build_detach_plsql(context, context_clear_proc=context_clear_proc)
+                    try:
+                        if isinstance(detach_spec, tuple):
+                            detach_sql, detach_binds = detach_spec
+                            if detach_binds:
+                                await conn.execute(detach_sql, detach_binds)
+                            else:
+                                await conn.execute(detach_sql)
+                        else:
+                            await conn.execute(detach_spec)
+                    except Exception:
+                        with suppress(Exception):
+                            evict_fn = getattr(conn, "evict_connection", getattr(conn, "evict", None))
+                            if callable(evict_fn):
+                                res = evict_fn()
+                                if isawaitable(res):
+                                    await res
+                            else:
+                                close_fn = getattr(conn, "close", None)
+                                if callable(close_fn):
+                                    res = close_fn()
+                                    if isawaitable(res):
+                                        await res
+                        raise
                 finally:
                     conn.client_identifier = None
                     conn.action = None

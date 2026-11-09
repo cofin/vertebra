@@ -15,6 +15,8 @@ from typing import TYPE_CHECKING, Any
 import msgspec
 import pyarrow as pa
 import pytest
+from sqlspec import StatementStack
+from sqlspec.core.parameters import ParameterStyle
 
 import vertebra._oracle as _oracle
 from vertebra._vertebra import VectorView
@@ -46,7 +48,8 @@ from vertebra.db.driver import (
     QueryCancelledError,
 )
 from vertebra.db.driver.capabilities import AsyncPipelineCapable, SyncPipelineCapable
-from vertebra.db.rls import AsyncTenantConnectionScope, TenantConnectionScope, TenantScopeConfig
+from vertebra.db.rls import AsyncTenantConnectionScope, TenantConnectionScope, TenantPredicate, TenantScopeConfig
+from vertebra.extensions.sqlspec.adapters import OracleAsyncDriver, OracleSyncDriver
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -1369,4 +1372,97 @@ async def test_tenant_connection_scope_resets_on_rollback_and_evicts_on_reset_er
             pass
     assert async_bad.evicted is True
     assert [e[0] for e in async_bad.events] == ["enter", "exit", "evict"]
+
+
+@pytest.mark.anyio
+async def test_sqlspec_oracle_drivers_declare_named_colon_and_compile_stack() -> None:
+    """Verify OracleSyncDriver and OracleAsyncDriver declare NAMED_COLON and execute_stack uses pipeline()."""
+    assert OracleSyncDriver._execution_parameter_style == ParameterStyle.NAMED_COLON
+    assert OracleAsyncDriver._execution_parameter_style == ParameterStyle.NAMED_COLON
+
+    with SyncOracleDriver() as native_sync:
+        native_sync.execute("CREATE TABLE items (id NUMBER PRIMARY KEY, label VARCHAR2(32))")
+        sync_adapter = OracleSyncDriver(native_sync)
+        stmt = sync_adapter.prepare_statement("SELECT id, label FROM items WHERE id = ?", (7,))
+        compiled_sql, compiled_params = stmt.compile()
+        assert "?" not in compiled_sql
+        assert ":" in compiled_sql
+        assert compiled_params
+
+        stack = (
+            StatementStack()
+            .push_execute("INSERT INTO items (id, label) VALUES (?, ?)", 7, "seven")
+            .push_execute("SELECT id, label FROM items WHERE id = ?", 7)
+        )
+        stack_results = sync_adapter.execute_stack(stack)
+        assert len(stack_results) == 2
+        assert stack_results[0].rows_affected == 1
+        assert stack_results[1].result is not None
+        assert stack_results[1].result.data == [{"id": 7, "label": "seven"}]
+
+    async with AsyncOracleDriver() as native_async:
+        await native_async.execute("CREATE TABLE items (id NUMBER PRIMARY KEY, label VARCHAR2(32))")
+        async_adapter = OracleAsyncDriver(native_async)
+        astack = (
+            StatementStack()
+            .push_execute("INSERT INTO items (id, label) VALUES (?, ?)", 9, "nine")
+            .push_execute("SELECT id, label FROM items WHERE id = ?", 9)
+        )
+        astack_results = await async_adapter.execute_stack(astack)
+        assert len(astack_results) == 2
+        assert astack_results[0].rows_affected == 1
+        assert astack_results[1].result is not None
+        assert astack_results[1].result.data == [{"id": 9, "label": "nine"}]
+
+
+@pytest.mark.anyio
+async def test_sqlspec_oracle_apply_tenant_predicate_uses_trusted_package_or_set_identifier() -> None:
+    """Verify apply_tenant_predicate and driver tenant scope hooks use SET_IDENTIFIER or trusted package."""
+    with SyncOracleDriver(OracleConfig(host="memory")) as sync_default:
+        sync_adapter_default = OracleSyncDriver(sync_default)
+        pred_sql = sync_adapter_default.apply_tenant_predicate(TenantPredicate(tenant_value="t-99"))
+        assert pred_sql == "tenant_id = :tenant_id"
+        assert sync_default.select_value("SELECT SYS_CONTEXT('USERENV', 'CLIENT_IDENTIFIER') FROM DUAL") == "t-99"
+
+        with TenantConnectionScope(sync_default, "scoped-sync"):
+            assert (
+                sync_default.select_value("SELECT SYS_CONTEXT('USERENV', 'CLIENT_IDENTIFIER') FROM DUAL")
+                == "scoped-sync"
+            )
+        assert sync_default.select_value("SELECT SYS_CONTEXT('USERENV', 'CLIENT_IDENTIFIER') FROM DUAL") is None
+
+    trusted_cfg = OracleConfig(
+        host="memory",
+        context_namespace="APP_CTX",
+        context_package_proc="SEC_PKG.SET_CTX",
+        context_clear_proc="SEC_PKG.CLEAR_CTX",
+    )
+    with SyncOracleDriver(trusted_cfg) as sync_trusted:
+        sync_adapter_trusted = OracleSyncDriver(sync_trusted)
+        pred_trusted = sync_adapter_trusted.apply_tenant_predicate(TenantPredicate(tenant_value="t-trusted"))
+        assert pred_trusted == "tenant_id = :tenant_id"
+        assert sync_trusted.select_value("SELECT SYS_CONTEXT('APP_CTX', 'TENANT_ID') FROM DUAL") == "t-trusted"
+
+        with TenantConnectionScope(sync_trusted, "scoped-trusted"):
+            assert (
+                sync_trusted.select_value("SELECT SYS_CONTEXT('APP_CTX', 'TENANT_ID') FROM DUAL")
+                == "scoped-trusted"
+            )
+        assert sync_trusted.select_value("SELECT SYS_CONTEXT('APP_CTX', 'TENANT_ID') FROM DUAL") is None
+
+    async with AsyncOracleDriver(trusted_cfg) as async_trusted:
+        async_adapter_trusted = OracleAsyncDriver(async_trusted)
+        apred = await async_adapter_trusted.apply_tenant_predicate(TenantPredicate(tenant_value="async-trusted"))
+        assert apred == "tenant_id = :tenant_id"
+        assert (
+            await async_trusted.select_value("SELECT SYS_CONTEXT('APP_CTX', 'TENANT_ID') FROM DUAL")
+            == "async-trusted"
+        )
+        async with AsyncTenantConnectionScope(async_trusted, "async-scoped"):
+            assert (
+                await async_trusted.select_value("SELECT SYS_CONTEXT('APP_CTX', 'TENANT_ID') FROM DUAL")
+                == "async-scoped"
+            )
+        assert await async_trusted.select_value("SELECT SYS_CONTEXT('APP_CTX', 'TENANT_ID') FROM DUAL") is None
+
 
