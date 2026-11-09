@@ -4,7 +4,7 @@ id: "native-duckdb-driver:t01"
 title: "Scaffold vertebra-duckdb crate, session pool, pragmas, interrupt cancellation, and DatabaseError mapping"
 description: "Create src/rs/vertebra-duckdb (vertebra._duckdb) with bundled duckdb =1.20000.1 and arrow 60.1.0, SyncDuckDBClient (SyncCompletionQueue) and AsyncDuckDBClient (AsyncCompletionQueue + Notifier), worker-thread session pool, DuckDB 2.0-safe pragmas, InterruptHandle cancellation, DatabaseError mapping, _duckdb.pyi stub, and workspace packaging."
 status: stable
-state: in_progress
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on: []
@@ -38,17 +38,17 @@ tests:
 estimated_loc: 750
 plan_revision: 3
 plan_commit: d7a629b1
-state_revision: 1
+state_revision: 2
 claimed_by: agent
 claimed_at: "2026-11-09T02:52:00Z"
 blocked_reason: null
 unblock_condition: null
-next_step: "Implement src/rs/vertebra-duckdb crate, _duckdb.pyi, and workspace wiring"
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+next_step: "Completed"
+last_verified_at: "2026-11-09T03:36:00Z"
+last_verified_commit: 7c9d8e1c
+verification_evidence: "cargo test -p vertebra-duckdb --locked, cargo clippy -p vertebra-duckdb --all-targets --locked -- -D warnings, mypy.stubtest vertebra._duckdb, pytest test_freethreaded_gil.py test_packaging_and_pgo.py, review_setup validate"
 created_at: "2026-11-09T02:52:00Z"
-updated_at: "2026-11-09T02:52:00Z"
+updated_at: "2026-11-09T03:36:00Z"
 commit: null
 sources:
   - id: duckdb-rs
@@ -91,10 +91,10 @@ Implement `SyncDuckDBClient` (`SyncCompletionQueue` with `py.detach`) and `Async
 
 ## Acceptance Criteria
 
-- [ ] `src/rs/vertebra-duckdb` compiles cleanly under `cargo test -p vertebra-duckdb --locked` and `cargo clippy -p vertebra-duckdb --all-targets --locked -- -D warnings`.
-- [ ] `mypy.stubtest vertebra._duckdb` passes with zero discrepancies against `src/py/vertebra/_duckdb.pyi`.
-- [ ] `SyncDuckDBClient` and `AsyncDuckDBClient` execute queries, positional/named binds, transactions, `interrupt()`/`cancel()`, and `DatabaseError` hierarchy mappings without holding the GIL.
-- [ ] `test_packaging_and_pgo.py`, `test_freethreaded_gil.py`, and `tools.scripts.review_setup validate` pass.
+- [x] `src/rs/vertebra-duckdb` compiles cleanly under `cargo test -p vertebra-duckdb --locked` and `cargo clippy -p vertebra-duckdb --all-targets --locked -- -D warnings`.
+- [x] `mypy.stubtest vertebra._duckdb` passes with zero discrepancies against `src/py/vertebra/_duckdb.pyi`.
+- [x] `SyncDuckDBClient` and `AsyncDuckDBClient` execute queries, positional/named binds, transactions, `interrupt()`/`cancel()`, and `DatabaseError` hierarchy mappings without holding the GIL.
+- [x] `test_packaging_and_pgo.py`, `test_freethreaded_gil.py`, and `tools.scripts.review_setup validate` pass.
 
 [^duckdb-rs]: `src/rs/vertebra-db/src/duckdb/mod.rs::DuckdbConfig` — DuckDB configuration and bootstrap pragma primitives in `vertebra-db`.
 [^py-async-rs]: `src/rs/vertebra-db/src/py_async.rs::spawn_rust_db_task_with_attr` — Shared `AsyncCompletionQueue`, `construct_py_arrow_cursor`, and independent event-loop drainer.

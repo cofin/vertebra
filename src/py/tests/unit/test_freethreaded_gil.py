@@ -36,6 +36,7 @@ def test_native_modules_declare_gil_used_false() -> None:
         "vertebra._bundler",
         "vertebra._bigquery",
         "vertebra._spanner",
+        "vertebra._duckdb",
     ):
         ext_mod = pytest.importorskip(mod_name)
         assert getattr(ext_mod, "GIL_USED", None) is False
@@ -99,6 +100,7 @@ def test_native_pyclasses_enforce_immutable_type() -> None:
     storage_mod = pytest.importorskip("vertebra._storage")
     bigquery_mod = pytest.importorskip("vertebra._bigquery")
     spanner_mod = pytest.importorskip("vertebra._spanner")
+    duckdb_mod = pytest.importorskip("vertebra._duckdb")
 
     raw_classes: list[object] = [
         Request,
@@ -123,6 +125,8 @@ def test_native_pyclasses_enforce_immutable_type() -> None:
         bigquery_mod.AsyncBigQueryClient,
         spanner_mod.SyncSpannerClient,
         spanner_mod.AsyncSpannerClient,
+        duckdb_mod.SyncDuckDBClient,
+        duckdb_mod.AsyncDuckDBClient,
     ]
     classes: list[type[object]] = [cls for cls in raw_classes if isinstance(cls, type)]
     attr_name = "_mutated_type_attr"

@@ -631,6 +631,7 @@ def test_pyproject_sqlalchemy_dialect_entry_points_resolve(engine: str, suffix: 
     [
         ("bigquery", "vertebra._bigquery"),
         ("bundler", "vertebra._bundler"),
+        ("duckdb", "vertebra._duckdb"),
         ("spanner", "vertebra._spanner"),
         ("storage", "vertebra._storage"),
     ],
@@ -653,7 +654,7 @@ def test_optional_extension_pyproject_isolation_and_bundler_extra(
     assert maturin_cfg["module-name"] == expected_module
     other_stubs = [
         f"**/py/vertebra/_{other}.pyi"
-        for other in ("bigquery", "bundler", "spanner", "storage", "vertebra")
+        for other in ("bigquery", "bundler", "duckdb", "spanner", "storage", "vertebra")
         if other != pkg_slug
     ]
     assert maturin_cfg["exclude"] == [

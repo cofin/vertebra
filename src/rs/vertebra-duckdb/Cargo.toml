@@ -1,0 +1,35 @@
+[package]
+name = "vertebra-duckdb"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "DuckDB 2.0 native client and Arrow SHM bridge for Vertebra"
+
+[lib]
+name = "_duckdb"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+extension-module = ["pyo3/extension-module"]
+
+[dependencies]
+arrow-array = { version = "=60.1.0", default-features = false }
+arrow-buffer = { version = "=60.1.0", default-features = false }
+arrow-ipc = { version = "=60.1.0", default-features = false }
+arrow-schema = { version = "=60.1.0", default-features = false }
+duckdb = { version = "=1.20000.1", default-features = false, features = ["bundled", "appender-arrow"] }
+pyo3 = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+vertebra-core = { path = "../vertebra-core" }
+vertebra-db = { path = "../vertebra-db", features = ["gcp", "pyo3"] }
+
+[build-dependencies]
+pyo3-build-config = { workspace = true }
+
+[dev-dependencies]
+pyo3 = { workspace = true, features = ["auto-initialize"] }
+tempfile = "3"

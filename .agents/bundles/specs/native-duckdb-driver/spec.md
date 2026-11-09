@@ -12,11 +12,11 @@ research:
   - ../integration-remediation/research/audit-findings_20261103.md
 plan_revision: 3
 plan_commit: 88c30004
-state_revision: 1
-current_task: "native-duckdb-driver:t01"
-last_verified_checkpoint: null
+state_revision: 2
+current_task: "native-duckdb-driver:t02"
+last_verified_checkpoint: "native-duckdb-driver:t01"
 created_at: "2026-11-03T04:05:00Z"
-updated_at: "2026-11-09T21:15:00Z"
+updated_at: "2026-11-09T21:17:00Z"
 generated:
   by: flow-plan
   at: "2026-11-09T02:52:00Z"
@@ -88,8 +88,8 @@ See [crate research](../native-data-platform/research/rust-driver-crates_2026110
 
 ## 3. Implementation Plan
 
-- [~] native-duckdb-driver:t01 — Scaffold vertebra-duckdb crate, session pool, pragmas, interrupt cancellation, and DatabaseError mapping (tasks/t01-vertebra-duckdb-crate-and-pool.md)
-- [ ] native-duckdb-driver:t02 — Implement Arrow 60 VTBARROW ShmCapsule streaming, Appender bulk load, GCS secret rotation, and DuckdbBrokerPool cleanup (tasks/t02-arrow-shm-appender-and-gcs-secret-rotation.md)
+- [x] native-duckdb-driver:t01 — Scaffold vertebra-duckdb crate, session pool, pragmas, interrupt cancellation, and DatabaseError mapping (tasks/t01-vertebra-duckdb-crate-and-pool.md)
+- [~] native-duckdb-driver:t02 — Implement Arrow 60 VTBARROW ShmCapsule streaming, Appender bulk load, GCS secret rotation, and DuckdbBrokerPool cleanup (tasks/t02-arrow-shm-appender-and-gcs-secret-rotation.md)
 - [ ] native-duckdb-driver:t03 — Cut over Python SyncDuckDBDriver and AsyncDuckDBDriver to vertebra._duckdb, activate conformance, and sync documentation (tasks/t03-python-duckdb-driver-cutover-and-docs.md)
 
 ## 4. Acceptance Boundary

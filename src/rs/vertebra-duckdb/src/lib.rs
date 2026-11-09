@@ -1,0 +1,3094 @@
+//! Native DuckDB 2.0 client extension for Vertebra (`vertebra._duckdb`).
+//!
+//! Provides [`SyncDuckDBClient`] (bridged through [`SyncCompletionQueue`]) and
+//! [`AsyncDuckDBClient`] (bridged through [`AsyncCompletionQueue`] + [`Notifier`]
+//! via `vertebra_db::py_async::spawn_rust_db_task_with_attr` with
+//! `"_vertebra_duckdb_completion_drainer"`), zero-copy `VTBARROW` shared-memory
+//! Arrow IPC cursors, native `duckdb::Appender` bulk ingestion, and Google Cloud
+//! Storage bearer-token secret rotation.
+
+pub mod errors;
+
+use std::collections::HashMap;
+use std::io::Cursor;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
+use std::thread::{self, JoinHandle};
+
+use arrow_array::RecordBatch;
+use arrow_ipc::reader::{FileReader, StreamReader};
+use arrow_ipc::writer::StreamWriter;
+use arrow_schema::{DataType, Field, Schema};
+use duckdb::types::{TimeUnit as DuckTimeUnit, Value as DuckValue};
+use duckdb::{AccessMode, Config, Connection, InterruptHandle, params_from_iter};
+use pyo3::buffer::PyBuffer;
+use pyo3::prelude::*;
+use pyo3::types::{
+    PyBool, PyByteArray, PyBytes, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple,
+};
+use vertebra_core::notify::SyncCompletionQueue;
+use vertebra_core::shm::ShmRegion;
+use vertebra_db::arrow_shm::{ShmArrowFrameHeader, ShmArrowStreamWriter};
+use vertebra_db::duckdb::DuckdbConfig;
+use vertebra_db::py_async::{
+    RustDbTaskAwaitable, construct_py_arrow_cursor, spawn_rust_db_task_with_attr,
+};
+
+use crate::errors::DuckDBClientError;
+
+const DUCKDB_COMPLETION_DRAINER_ATTR: &str = "_vertebra_duckdb_completion_drainer";
+static ARROW_SHM_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+/// Whether this build targets free-threaded Python (3.14t+).
+#[cfg(Py_GIL_DISABLED)]
+pub const FREE_THREADED: bool = true;
+#[cfg(not(Py_GIL_DISABLED))]
+pub const FREE_THREADED: bool = false;
+
+/// Parameter collection accepted by DuckDB statement execution.
+#[derive(Clone, Debug, Default)]
+pub enum BoundParams {
+    /// No bound parameters.
+    #[default]
+    Empty,
+    /// Positional parameters (`?`, `?1`, `$1`).
+    Positional(Vec<DuckValue>),
+    /// Named parameters (`$name` or `:name`).
+    Named(HashMap<String, DuckValue>),
+}
+
+impl BoundParams {
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        match self {
+            Self::Empty => true,
+            Self::Positional(v) => v.is_empty(),
+            Self::Named(m) => m.is_empty(),
+        }
+    }
+}
+
+/// Result row representation returned from worker threads before GIL re-acquisition.
+#[derive(Clone, Debug)]
+pub struct QueryResultSet {
+    /// Ordered column names.
+    pub columns: Vec<String>,
+    /// Row values aligned with `columns`.
+    pub rows: Vec<Vec<DuckValue>>,
+}
+
+/// Unregistered shared-memory Arrow IPC payload ready to wrap into `ArrowCursor`.
+#[derive(Clone, Debug)]
+pub struct ShmArrowPayload {
+    pub shm_name: String,
+    pub byte_len: usize,
+    pub row_count: usize,
+    pub region: Arc<ShmRegion>,
+}
+
+/// Bulk ingestion payload accepted by `load_from_arrow`.
+#[derive(Clone, Debug)]
+pub enum BulkLoadSource {
+    /// Encapsulated Arrow IPC stream or file bytes.
+    ArrowIpc(Vec<u8>),
+    /// Row-oriented fallback values (`(column_names, rows)`).
+    Rows {
+        columns: Vec<String>,
+        rows: Vec<Vec<DuckValue>>,
+    },
+}
+
+enum WorkerTask {
+    Run(Box<dyn FnOnce(&mut Connection) + Send + 'static>),
+    Shutdown,
+}
+
+struct WorkerSlot {
+    sender: mpsc::Sender<WorkerTask>,
+    interrupt_handle: Arc<InterruptHandle>,
+    busy: AtomicBool,
+    join_handle: Mutex<Option<JoinHandle<()>>>,
+}
+
+impl WorkerSlot {
+    fn spawn(mut conn: Connection) -> Self {
+        let interrupt_handle = conn.interrupt_handle();
+        let (tx, rx) = mpsc::channel::<WorkerTask>();
+        let join_handle = thread::Builder::new()
+            .name("vtb-duckdb-worker".to_string())
+            .spawn(move || {
+                while let Ok(task) = rx.recv() {
+                    match task {
+                        WorkerTask::Run(job) => job(&mut conn),
+                        WorkerTask::Shutdown => break,
+                    }
+                }
+            })
+            .expect("failed to spawn vtb-duckdb-worker thread");
+        Self {
+            sender: tx,
+            interrupt_handle,
+            busy: AtomicBool::new(false),
+            join_handle: Mutex::new(Some(join_handle)),
+        }
+    }
+
+    fn execute<T, F>(&self, cancel_flag: &Arc<AtomicBool>, f: F) -> Result<T, DuckDBClientError>
+    where
+        T: Send + 'static,
+        F: FnOnce(&mut Connection) -> Result<T, DuckDBClientError> + Send + 'static,
+    {
+        if cancel_flag.load(Ordering::Acquire) {
+            return Err(DuckDBClientError::QueryTimeout(
+                "DuckDB query cancelled before execution".to_string(),
+            ));
+        }
+        let completion = Arc::new(SyncCompletionQueue::<Result<T, DuckDBClientError>>::new());
+        let completion_writer = Arc::clone(&completion);
+        let flag_clone = Arc::clone(cancel_flag);
+        self.busy.store(true, Ordering::Release);
+        let send_res = self.sender.send(WorkerTask::Run(Box::new(move |conn| {
+            let outcome = if flag_clone.load(Ordering::Acquire) {
+                Err(DuckDBClientError::QueryTimeout(
+                    "DuckDB query interrupted".to_string(),
+                ))
+            } else {
+                f(conn)
+            };
+            completion_writer.push(outcome);
+        })));
+        if send_res.is_err() {
+            self.busy.store(false, Ordering::Release);
+            return Err(DuckDBClientError::Operational(
+                "DuckDB worker thread is closed".to_string(),
+            ));
+        }
+        let outcome = completion.pop_blocking();
+        self.busy.store(false, Ordering::Release);
+        if outcome.is_err() && cancel_flag.load(Ordering::Acquire) {
+            return Err(DuckDBClientError::QueryTimeout(
+                "DuckDB query interrupted".to_string(),
+            ));
+        }
+        outcome
+    }
+
+    fn shutdown(&self) {
+        self.interrupt_handle.interrupt();
+        let _ = self.sender.send(WorkerTask::Shutdown);
+        if let Some(handle) = self
+            .join_handle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            let _ = handle.join();
+        }
+    }
+}
+
+/// Shared multi-connection DuckDB session pool state.
+pub struct DuckDBInner {
+    database: String,
+    read_only: bool,
+    is_in_memory: bool,
+    max_connections: usize,
+    bootstrap_statements: Vec<String>,
+    workers: Vec<Arc<WorkerSlot>>,
+    reader_cursor: AtomicUsize,
+    in_transaction: AtomicBool,
+    closed: AtomicBool,
+    applied_token_generation: AtomicU64,
+    last_gcs_secret_sql: Mutex<String>,
+    active_cancels: Mutex<Vec<Arc<AtomicBool>>>,
+    secret_lock: Mutex<()>,
+}
+
+impl DuckDBInner {
+    #[allow(clippy::too_many_arguments)]
+    pub fn open(
+        database: &str,
+        read_only: bool,
+        max_connections: usize,
+        max_memory_bytes: Option<u64>,
+        threads: Option<usize>,
+        temp_directory: Option<String>,
+        parquet_metadata_cache: bool,
+        httpfs_connection_caching: bool,
+        enable_http_metadata_cache: bool,
+        custom_config: Option<HashMap<String, String>>,
+        extensions: Option<Vec<String>>,
+        init_statements: Option<Vec<String>>,
+    ) -> Result<Arc<Self>, DuckDBClientError> {
+        let trimmed = database.trim();
+        let normalized_db = if trimmed.is_empty() {
+            ":memory:".to_string()
+        } else {
+            trimmed.to_string()
+        };
+        let is_in_memory = normalized_db == ":memory:"
+            || normalized_db.eq_ignore_ascii_case("memory")
+            || normalized_db.starts_with(":memory:");
+        let pool_size = max_connections.max(1);
+
+        let memory_limit_mb = max_memory_bytes.map_or(2048, |bytes| {
+            usize::try_from((bytes / (1024 * 1024)).max(64)).unwrap_or(2048)
+        });
+        let worker_threads = threads.unwrap_or(4).max(1);
+
+        let duck_cfg = DuckdbConfig {
+            path: normalized_db.clone(),
+            memory_limit_mb,
+            threads: worker_threads,
+            parquet_metadata_cache,
+            httpfs_connection_caching,
+            enable_http_metadata_cache,
+        };
+
+        let mut bootstrap_stmts = duck_cfg.bootstrap_statements();
+        if let Some(ref temp_dir) = temp_directory {
+            let td = temp_dir.trim();
+            if !td.is_empty() {
+                let escaped = td.replace('\'', "''");
+                bootstrap_stmts.push(format!("SET temp_directory = '{escaped}'"));
+            }
+        }
+
+        let mut engine_config = Config::default();
+        if read_only && !is_in_memory {
+            engine_config = engine_config
+                .access_mode(AccessMode::ReadOnly)
+                .map_err(DuckDBClientError::from_duckdb)?;
+        }
+        if let Some(ref cfg_map) = custom_config {
+            for (k, v) in cfg_map {
+                let key_lower = k.trim().to_ascii_lowercase();
+                if key_lower == "access_mode" && is_in_memory {
+                    continue;
+                }
+                engine_config = engine_config
+                    .with(k.as_str(), v.as_str())
+                    .map_err(DuckDBClientError::from_duckdb)?;
+            }
+        }
+
+        let primary_conn = if is_in_memory {
+            Connection::open_in_memory_with_flags(engine_config)
+                .map_err(DuckDBClientError::from_duckdb)?
+        } else {
+            Connection::open_with_flags(&normalized_db, engine_config)
+                .map_err(DuckDBClientError::from_duckdb)?
+        };
+
+        let mut connections = Vec::with_capacity(pool_size);
+        connections.push(primary_conn);
+        for _ in 1..pool_size {
+            let cloned = connections[0]
+                .try_clone()
+                .map_err(DuckDBClientError::from_duckdb)?;
+            connections.push(cloned);
+        }
+
+        for conn in &mut connections {
+            apply_session_bootstrap(
+                conn,
+                &bootstrap_stmts,
+                extensions.as_deref(),
+                init_statements.as_deref(),
+            )?;
+        }
+
+        let workers = connections
+            .into_iter()
+            .map(|c| Arc::new(WorkerSlot::spawn(c)))
+            .collect();
+
+        Ok(Arc::new(Self {
+            database: normalized_db,
+            read_only,
+            is_in_memory,
+            max_connections: pool_size,
+            bootstrap_statements: bootstrap_stmts,
+            workers,
+            reader_cursor: AtomicUsize::new(0),
+            in_transaction: AtomicBool::new(false),
+            closed: AtomicBool::new(false),
+            applied_token_generation: AtomicU64::new(0),
+            last_gcs_secret_sql: Mutex::new(String::new()),
+            active_cancels: Mutex::new(Vec::new()),
+            secret_lock: Mutex::new(()),
+        }))
+    }
+
+    fn ensure_open(&self) -> Result<(), DuckDBClientError> {
+        if self.closed.load(Ordering::Acquire) {
+            return Err(DuckDBClientError::Operational(
+                "DuckDB client is closed".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn register_cancel_flag(&self) -> Arc<AtomicBool> {
+        let flag = Arc::new(AtomicBool::new(false));
+        let mut guard = self
+            .active_cancels
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.retain(|f| Arc::strong_count(f) > 1);
+        guard.push(Arc::clone(&flag));
+        flag
+    }
+
+    pub fn interrupt_all(&self) {
+        {
+            let guard = self
+                .active_cancels
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for flag in guard.iter() {
+                flag.store(true, Ordering::Release);
+            }
+        }
+        for worker in &self.workers {
+            worker.interrupt_handle.interrupt();
+        }
+    }
+
+    pub fn close_all(&self) {
+        if !self.closed.swap(true, Ordering::AcqRel) {
+            self.in_transaction.store(false, Ordering::Release);
+            self.interrupt_all();
+            for worker in &self.workers {
+                worker.shutdown();
+            }
+        }
+    }
+
+    fn select_worker(&self, is_read_only_query: bool) -> &Arc<WorkerSlot> {
+        if !is_read_only_query
+            || self.in_transaction.load(Ordering::Acquire)
+            || self.workers.len() == 1
+        {
+            return &self.workers[0];
+        }
+        if !self.workers[0].busy.load(Ordering::Acquire) {
+            return &self.workers[0];
+        }
+        let reader_count = self.workers.len() - 1;
+        let start = self.reader_cursor.fetch_add(1, Ordering::Relaxed) % reader_count;
+        for offset in 0..reader_count {
+            let idx = 1 + ((start + offset) % reader_count);
+            if !self.workers[idx].busy.load(Ordering::Acquire) {
+                return &self.workers[idx];
+            }
+        }
+        let fallback_idx = 1 + (start % reader_count);
+        &self.workers[fallback_idx]
+    }
+
+    pub fn run_on_pool<T, F>(
+        &self,
+        is_read_only_query: bool,
+        cancel_flag: &Arc<AtomicBool>,
+        f: F,
+    ) -> Result<T, DuckDBClientError>
+    where
+        T: Send + 'static,
+        F: FnOnce(&mut Connection) -> Result<T, DuckDBClientError> + Send + 'static,
+    {
+        self.ensure_open()?;
+        let worker = self.select_worker(is_read_only_query);
+        worker.execute(cancel_flag, f)
+    }
+
+    pub fn execute_sql(
+        &self,
+        sql: String,
+        params: BoundParams,
+        cancel_flag: &Arc<AtomicBool>,
+    ) -> Result<i64, DuckDBClientError> {
+        self.ensure_open()?;
+        if self.read_only && is_mutating_sql(&sql) {
+            return Err(DuckDBClientError::Programming(
+                "Cannot execute mutating SQL statement in read-only mode".to_string(),
+            ));
+        }
+        let trimmed_upper = sql.trim().to_ascii_uppercase();
+        if trimmed_upper == "BEGIN"
+            || trimmed_upper == "BEGIN TRANSACTION"
+            || trimmed_upper == "START TRANSACTION"
+        {
+            self.begin_tx(cancel_flag)?;
+            return Ok(0);
+        }
+        if trimmed_upper == "COMMIT" || trimmed_upper == "END TRANSACTION" {
+            self.commit_tx(cancel_flag)?;
+            return Ok(0);
+        }
+        if trimmed_upper == "ROLLBACK" || trimmed_upper == "ABORT" {
+            self.rollback_tx(cancel_flag)?;
+            return Ok(0);
+        }
+
+        let is_read = is_read_only_sql(&sql);
+        self.run_on_pool(is_read, cancel_flag, move |conn| {
+            execute_statement_on_conn(conn, &sql, &params)
+        })
+    }
+
+    pub fn execute_many_sql(
+        &self,
+        sql: String,
+        param_sets: Vec<BoundParams>,
+        cancel_flag: &Arc<AtomicBool>,
+    ) -> Result<i64, DuckDBClientError> {
+        self.ensure_open()?;
+        if self.read_only && is_mutating_sql(&sql) {
+            return Err(DuckDBClientError::Programming(
+                "Cannot execute mutating SQL statement in read-only mode".to_string(),
+            ));
+        }
+        if param_sets.is_empty() {
+            return Ok(0);
+        }
+        let flag_for_worker = Arc::clone(cancel_flag);
+        self.run_on_pool(false, cancel_flag, move |conn| {
+            let mut total: i64 = 0;
+            for params in &param_sets {
+                if flag_for_worker.load(Ordering::Acquire) {
+                    return Err(DuckDBClientError::QueryTimeout(
+                        "DuckDB execute_many interrupted".to_string(),
+                    ));
+                }
+                total += execute_statement_on_conn(conn, &sql, params)?;
+            }
+            Ok(total)
+        })
+    }
+
+    pub fn query_sql(
+        &self,
+        sql: String,
+        params: BoundParams,
+        cancel_flag: &Arc<AtomicBool>,
+    ) -> Result<QueryResultSet, DuckDBClientError> {
+        self.ensure_open()?;
+        if self.read_only && is_mutating_sql(&sql) {
+            return Err(DuckDBClientError::Programming(
+                "Cannot execute mutating SQL statement in read-only mode".to_string(),
+            ));
+        }
+        let is_read = is_read_only_sql(&sql);
+        let flag_for_worker = Arc::clone(cancel_flag);
+        self.run_on_pool(is_read, cancel_flag, move |conn| {
+            query_rows_on_conn(conn, &sql, &params, &flag_for_worker)
+        })
+    }
+
+    pub fn query_arrow_shm(
+        &self,
+        sql: String,
+        params: BoundParams,
+        batch_size: usize,
+        cancel_flag: &Arc<AtomicBool>,
+    ) -> Result<ShmArrowPayload, DuckDBClientError> {
+        self.ensure_open()?;
+        if self.read_only && is_mutating_sql(&sql) {
+            return Err(DuckDBClientError::Programming(
+                "Cannot execute mutating SQL statement in read-only mode".to_string(),
+            ));
+        }
+        let is_read = is_read_only_sql(&sql);
+        let flag_for_worker = Arc::clone(cancel_flag);
+        self.run_on_pool(is_read, cancel_flag, move |conn| {
+            query_arrow_shm_on_conn(conn, &sql, &params, batch_size, &flag_for_worker)
+        })
+    }
+
+    pub fn stream_arrow_shm_batches(
+        &self,
+        sql: String,
+        params: BoundParams,
+        batch_size: usize,
+        cancel_flag: &Arc<AtomicBool>,
+    ) -> Result<Vec<ShmArrowPayload>, DuckDBClientError> {
+        self.ensure_open()?;
+        if self.read_only && is_mutating_sql(&sql) {
+            return Err(DuckDBClientError::Programming(
+                "Cannot execute mutating SQL statement in read-only mode".to_string(),
+            ));
+        }
+        let is_read = is_read_only_sql(&sql);
+        let flag_for_worker = Arc::clone(cancel_flag);
+        self.run_on_pool(is_read, cancel_flag, move |conn| {
+            stream_arrow_shm_batches_on_conn(conn, &sql, &params, batch_size, &flag_for_worker)
+        })
+    }
+
+    pub fn load_arrow_bulk(
+        &self,
+        table: String,
+        source: BulkLoadSource,
+        columns: Option<Vec<String>>,
+        create_if_missing: bool,
+        cancel_flag: &Arc<AtomicBool>,
+    ) -> Result<i64, DuckDBClientError> {
+        self.ensure_open()?;
+        if self.read_only {
+            return Err(DuckDBClientError::Programming(
+                "Cannot bulk load in read-only mode".to_string(),
+            ));
+        }
+        let flag_for_worker = Arc::clone(cancel_flag);
+        self.run_on_pool(false, cancel_flag, move |conn| {
+            load_arrow_on_conn(
+                conn,
+                &table,
+                source,
+                columns.as_deref(),
+                create_if_missing,
+                &flag_for_worker,
+            )
+        })
+    }
+
+    pub fn begin_tx(&self, cancel_flag: &Arc<AtomicBool>) -> Result<(), DuckDBClientError> {
+        self.ensure_open()?;
+        if self.in_transaction.load(Ordering::Acquire) {
+            return Err(DuckDBClientError::Transaction(
+                "Cannot start a transaction within an active transaction".to_string(),
+            ));
+        }
+        self.workers[0].execute(cancel_flag, |conn| {
+            conn.execute_batch("BEGIN TRANSACTION")
+                .map_err(DuckDBClientError::from_duckdb)
+        })?;
+        self.in_transaction.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    pub fn commit_tx(&self, cancel_flag: &Arc<AtomicBool>) -> Result<(), DuckDBClientError> {
+        self.ensure_open()?;
+        let res = self.workers[0].execute(cancel_flag, |conn| {
+            conn.execute_batch("COMMIT")
+                .map_err(DuckDBClientError::from_duckdb)
+        });
+        self.in_transaction.store(false, Ordering::Release);
+        res
+    }
+
+    pub fn rollback_tx(&self, cancel_flag: &Arc<AtomicBool>) -> Result<(), DuckDBClientError> {
+        self.ensure_open()?;
+        let res = self.workers[0].execute(cancel_flag, |conn| {
+            conn.execute_batch("ROLLBACK")
+                .map_err(DuckDBClientError::from_duckdb)
+        });
+        self.in_transaction.store(false, Ordering::Release);
+        res
+    }
+
+    pub fn apply_gcs_secret_generation(
+        &self,
+        secret_name: &str,
+        bearer_token: &str,
+        generation: u64,
+        scope: Option<&str>,
+        cancel_flag: &Arc<AtomicBool>,
+    ) -> Result<(bool, u64), DuckDBClientError> {
+        self.ensure_open()?;
+        let _guard = self
+            .secret_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let current = self.applied_token_generation.load(Ordering::Acquire);
+        if generation != 0 && current == generation {
+            return Ok((false, current));
+        }
+        let sql = build_gcs_secret_ddl(secret_name, bearer_token, scope)?;
+        let next_gen = if generation == 0 {
+            current.wrapping_add(1)
+        } else {
+            generation
+        };
+        let ddl = sql.clone();
+        self.workers[0].execute(cancel_flag, move |conn| {
+            if let Err(err) = conn.execute_batch(&ddl) {
+                let msg = err.to_string().to_ascii_lowercase();
+                if !(msg.contains("secret type")
+                    || msg.contains("httpfs")
+                    || msg.contains("extension"))
+                {
+                    return Err(DuckDBClientError::from_duckdb(err));
+                }
+            }
+            Ok(())
+        })?;
+        *self
+            .last_gcs_secret_sql
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = sql;
+        self.applied_token_generation
+            .store(next_gen, Ordering::Release);
+        Ok((true, next_gen))
+    }
+
+    pub fn last_gcs_secret_sql(&self) -> String {
+        self.last_gcs_secret_sql
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+}
+
+impl Drop for DuckDBInner {
+    fn drop(&mut self) {
+        self.close_all();
+    }
+}
+
+fn apply_session_bootstrap(
+    conn: &mut Connection,
+    bootstrap_stmts: &[String],
+    extensions: Option<&[String]>,
+    init_statements: Option<&[String]>,
+) -> Result<(), DuckDBClientError> {
+    for stmt in bootstrap_stmts {
+        let lower = stmt.trim().to_ascii_lowercase();
+        if lower.contains("memory_limit")
+            || lower.contains("threads")
+            || lower.contains("temp_directory")
+        {
+            conn.execute_batch(stmt)
+                .map_err(DuckDBClientError::from_duckdb)?;
+        } else {
+            let _ = conn.execute_batch(stmt);
+        }
+    }
+    if let Some(exts) = extensions {
+        for ext in exts {
+            let clean = ext.trim();
+            if !clean.is_empty() {
+                validate_sql_identifier(clean, "extension")?;
+                conn.execute_batch(&format!("LOAD {clean}"))
+                    .map_err(DuckDBClientError::from_duckdb)?;
+            }
+        }
+    }
+    if let Some(inits) = init_statements {
+        for stmt in inits {
+            let clean = stmt.trim();
+            if !clean.is_empty() {
+                conn.execute_batch(clean)
+                    .map_err(DuckDBClientError::from_duckdb)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Validate a SQL identifier (`secret_name`, extension name, or table component) against injection.
+pub fn validate_sql_identifier(ident: &str, label: &str) -> Result<(), DuckDBClientError> {
+    let trimmed = ident.trim();
+    if trimmed.is_empty() {
+        return Err(DuckDBClientError::InvalidInput(format!(
+            "DuckDB {label} must not be empty"
+        )));
+    }
+    let mut chars = trimmed.chars();
+    let Some(first) = chars.next() else {
+        return Err(DuckDBClientError::InvalidInput(format!(
+            "DuckDB {label} must not be empty"
+        )));
+    };
+    if !(first.is_ascii_alphabetic() || first == '_')
+        || !chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+    {
+        return Err(DuckDBClientError::InvalidInput(format!(
+            "Invalid DuckDB {label}: {ident:?}"
+        )));
+    }
+    Ok(())
+}
+
+/// Build a DuckDB `CREATE OR REPLACE SECRET` DDL statement for a GCS OAuth2 bearer token.
+pub fn build_gcs_secret_ddl(
+    secret_name: &str,
+    bearer_token: &str,
+    scope: Option<&str>,
+) -> Result<String, DuckDBClientError> {
+    validate_sql_identifier(secret_name, "secret_name")?;
+    let trimmed_token = bearer_token.trim();
+    if trimmed_token.is_empty() {
+        return Err(DuckDBClientError::InvalidInput(
+            "GCS bearer_token must not be empty".to_string(),
+        ));
+    }
+    let escaped_token = trimmed_token.replace('\'', "''");
+    if let Some(raw_scope) = scope {
+        let clean_scope = raw_scope.trim();
+        if !clean_scope.is_empty() {
+            let escaped_scope = clean_scope.replace('\'', "''");
+            return Ok(format!(
+                "CREATE OR REPLACE SECRET {} (TYPE GCS, BEARER_TOKEN '{}', SCOPE '{}')",
+                secret_name.trim(),
+                escaped_token,
+                escaped_scope
+            ));
+        }
+    }
+    Ok(format!(
+        "CREATE OR REPLACE SECRET {} (TYPE GCS, BEARER_TOKEN '{}')",
+        secret_name.trim(),
+        escaped_token
+    ))
+}
+
+#[must_use]
+fn is_read_only_sql(sql: &str) -> bool {
+    let first_word = leading_sql_keyword(sql);
+    matches!(
+        first_word.as_str(),
+        "SELECT" | "WITH" | "SHOW" | "DESCRIBE" | "DESC" | "EXPLAIN" | "SUMMARIZE" | "VALUES"
+    )
+}
+
+#[must_use]
+fn is_mutating_sql(sql: &str) -> bool {
+    let first_word = leading_sql_keyword(sql);
+    matches!(
+        first_word.as_str(),
+        "INSERT"
+            | "UPDATE"
+            | "DELETE"
+            | "CREATE"
+            | "DROP"
+            | "ALTER"
+            | "TRUNCATE"
+            | "MERGE"
+            | "COPY"
+            | "VACUUM"
+            | "ATTACH"
+            | "DETACH"
+    )
+}
+
+fn leading_sql_keyword(sql: &str) -> String {
+    let bytes = sql.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i + 1 < bytes.len() && bytes[i] == b'-' && bytes[i + 1] == b'-' {
+            i += 2;
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+            i += 2;
+            while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                i += 1;
+            }
+            i = (i + 2).min(bytes.len());
+            continue;
+        }
+        break;
+    }
+    let start = i;
+    while i < bytes.len() && bytes[i].is_ascii_alphabetic() {
+        i += 1;
+    }
+    sql[start..i].to_ascii_uppercase()
+}
+
+/// Rewrite `:name` bind placeholders into `$name` outside string literals, quoted identifiers,
+/// comments, and `::` type casts so DuckDB's native `$name` parser handles both syntaxes.
+#[must_use]
+pub fn normalize_named_sql(sql: &str) -> String {
+    let bytes = sql.as_bytes();
+    let mut out = String::with_capacity(sql.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == b'\'' {
+            out.push('\'');
+            i += 1;
+            while i < bytes.len() {
+                let c = bytes[i];
+                out.push(c as char);
+                i += 1;
+                if c == b'\'' {
+                    if i < bytes.len() && bytes[i] == b'\'' {
+                        out.push('\'');
+                        i += 1;
+                    } else {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+        if b == b'"' {
+            out.push('"');
+            i += 1;
+            while i < bytes.len() {
+                let c = bytes[i];
+                out.push(c as char);
+                i += 1;
+                if c == b'"' {
+                    if i < bytes.len() && bytes[i] == b'"' {
+                        out.push('"');
+                        i += 1;
+                    } else {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+        if b == b'-' && i + 1 < bytes.len() && bytes[i + 1] == b'-' {
+            while i < bytes.len() && bytes[i] != b'\n' {
+                out.push(bytes[i] as char);
+                i += 1;
+            }
+            continue;
+        }
+        if b == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'*' {
+            out.push('/');
+            out.push('*');
+            i += 2;
+            while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                out.push(bytes[i] as char);
+                i += 1;
+            }
+            if i + 1 < bytes.len() {
+                out.push('*');
+                out.push('/');
+                i += 2;
+            }
+            continue;
+        }
+        if b == b':' {
+            if i + 1 < bytes.len() && (bytes[i + 1] == b':' || bytes[i + 1] == b'=') {
+                out.push(':');
+                out.push(bytes[i + 1] as char);
+                i += 2;
+                continue;
+            }
+            if i + 1 < bytes.len() && (bytes[i + 1].is_ascii_alphabetic() || bytes[i + 1] == b'_') {
+                out.push('$');
+                i += 1;
+                while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                    out.push(bytes[i] as char);
+                    i += 1;
+                }
+                continue;
+            }
+        }
+        let ch = sql[i..].chars().next().unwrap_or('\0');
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
+fn resolve_ordered_params<'a>(
+    stmt: &duckdb::Statement<'_>,
+    params: &'a BoundParams,
+) -> Result<Vec<&'a DuckValue>, DuckDBClientError> {
+    let expected = stmt.parameter_count();
+    match params {
+        BoundParams::Empty => {
+            if expected != 0 {
+                return Err(DuckDBClientError::Programming(format!(
+                    "Statement expects {expected} parameters, but none were supplied"
+                )));
+            }
+            Ok(Vec::new())
+        }
+        BoundParams::Positional(values) => {
+            if expected == 0 && values.is_empty() {
+                return Ok(Vec::new());
+            }
+            let mut has_explicit_indices = true;
+            let mut resolved = Vec::with_capacity(expected);
+            for idx in 1..=expected {
+                if let Ok(name) = stmt.parameter_name(idx)
+                    && let Ok(parsed_pos) = name.parse::<usize>()
+                    && parsed_pos >= 1
+                    && parsed_pos <= values.len()
+                {
+                    resolved.push(&values[parsed_pos - 1]);
+                } else {
+                    has_explicit_indices = false;
+                    break;
+                }
+            }
+            if has_explicit_indices && resolved.len() == expected {
+                return Ok(resolved);
+            }
+            if values.len() != expected {
+                return Err(DuckDBClientError::Programming(format!(
+                    "Invalid parameter count: passed {}, expected {expected}",
+                    values.len()
+                )));
+            }
+            Ok(values.iter().collect())
+        }
+        BoundParams::Named(map) => {
+            let mut ordered = Vec::with_capacity(expected);
+            for idx in 1..=expected {
+                let raw_name = stmt
+                    .parameter_name(idx)
+                    .map_err(DuckDBClientError::from_duckdb)?;
+                let clean = raw_name
+                    .strip_prefix('$')
+                    .or_else(|| raw_name.strip_prefix(':'))
+                    .unwrap_or(&raw_name);
+                let val = map
+                    .get(clean)
+                    .or_else(|| map.get(&format!("${clean}")))
+                    .or_else(|| map.get(&format!(":{clean}")))
+                    .ok_or_else(|| {
+                        DuckDBClientError::Programming(format!(
+                            "Missing named parameter {clean:?} for statement"
+                        ))
+                    })?;
+                ordered.push(val);
+            }
+            Ok(ordered)
+        }
+    }
+}
+
+fn execute_statement_on_conn(
+    conn: &mut Connection,
+    sql: &str,
+    params: &BoundParams,
+) -> Result<i64, DuckDBClientError> {
+    let effective_sql = match params {
+        BoundParams::Named(_) => normalize_named_sql(sql),
+        _ => sql.to_string(),
+    };
+    let mut stmt = match conn.prepare(&effective_sql) {
+        Ok(s) => s,
+        Err(duckdb::Error::MultipleStatement) if params.is_empty() => {
+            conn.execute_batch(&effective_sql)
+                .map_err(DuckDBClientError::from_duckdb)?;
+            return Ok(0);
+        }
+        Err(e) => return Err(DuckDBClientError::from_duckdb(e)),
+    };
+    let ordered = resolve_ordered_params(&stmt, params)?;
+    let changed = stmt
+        .execute(params_from_iter(ordered))
+        .map_err(DuckDBClientError::from_duckdb)?;
+    Ok(i64::try_from(changed).unwrap_or(i64::MAX))
+}
+
+fn query_rows_on_conn(
+    conn: &mut Connection,
+    sql: &str,
+    params: &BoundParams,
+    cancel_flag: &Arc<AtomicBool>,
+) -> Result<QueryResultSet, DuckDBClientError> {
+    let effective_sql = match params {
+        BoundParams::Named(_) => normalize_named_sql(sql),
+        _ => sql.to_string(),
+    };
+    let mut stmt = conn
+        .prepare(&effective_sql)
+        .map_err(DuckDBClientError::from_duckdb)?;
+    let ordered = resolve_ordered_params(&stmt, params)?;
+    let mut rows = stmt
+        .query(params_from_iter(ordered))
+        .map_err(DuckDBClientError::from_duckdb)?;
+
+    let col_count = rows.as_ref().map_or(0, duckdb::Statement::column_count);
+    let mut columns = Vec::with_capacity(col_count);
+    if let Some(stmt_ref) = rows.as_ref() {
+        for idx in 0..col_count {
+            let col_name = stmt_ref
+                .column_name(idx)
+                .map_or_else(|_| format!("col_{idx}"), ToString::to_string);
+            columns.push(col_name);
+        }
+    }
+
+    let mut out_rows = Vec::new();
+    while let Some(row) = rows.next().map_err(DuckDBClientError::from_duckdb)? {
+        if cancel_flag.load(Ordering::Acquire) {
+            return Err(DuckDBClientError::QueryTimeout(
+                "DuckDB query interrupted while fetching rows".to_string(),
+            ));
+        }
+        let mut row_vals = Vec::with_capacity(col_count);
+        for idx in 0..col_count {
+            let val: DuckValue = row.get(idx).map_err(DuckDBClientError::from_duckdb)?;
+            row_vals.push(val);
+        }
+        out_rows.push(row_vals);
+    }
+
+    Ok(QueryResultSet {
+        columns,
+        rows: out_rows,
+    })
+}
+
+fn serialize_batches_to_shm_payload(
+    schema: &Arc<Schema>,
+    batches: &[RecordBatch],
+) -> Result<ShmArrowPayload, DuckDBClientError> {
+    let total_rows: usize = batches.iter().map(RecordBatch::num_rows).sum();
+    let mut ipc_buf = Vec::new();
+    {
+        let mut writer = StreamWriter::try_new(&mut ipc_buf, schema)
+            .map_err(|e| DuckDBClientError::ShmArrow(e.to_string()))?;
+        for batch in batches {
+            writer
+                .write(batch)
+                .map_err(|e| DuckDBClientError::ShmArrow(e.to_string()))?;
+        }
+        writer
+            .finish()
+            .map_err(|e| DuckDBClientError::ShmArrow(e.to_string()))?;
+    }
+    let seq = ARROW_SHM_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let seg_name = format!("/vtb-duckdb-{}-{seq}", std::process::id());
+    let mut shm_writer = ShmArrowStreamWriter::create(&seg_name, ipc_buf.len() + 64, &[])
+        .map_err(DuckDBClientError::ShmArrow)?;
+    shm_writer
+        .append_raw_stream_chunk(&ipc_buf, total_rows)
+        .map_err(DuckDBClientError::ShmArrow)?;
+    let (shm_name, byte_len, region) = shm_writer
+        .finish_unregistered()
+        .map_err(DuckDBClientError::ShmArrow)?;
+    Ok(ShmArrowPayload {
+        shm_name,
+        byte_len,
+        row_count: total_rows,
+        region,
+    })
+}
+
+fn rechunk_record_batches(batches: Vec<RecordBatch>, target_batch_size: usize) -> Vec<RecordBatch> {
+    if target_batch_size == 0 || batches.is_empty() {
+        return batches;
+    }
+    let mut out = Vec::new();
+    for batch in batches {
+        let num_rows = batch.num_rows();
+        if num_rows <= target_batch_size {
+            out.push(batch);
+        } else {
+            let mut offset = 0;
+            while offset < num_rows {
+                let len = (num_rows - offset).min(target_batch_size);
+                out.push(batch.slice(offset, len));
+                offset += len;
+            }
+        }
+    }
+    out
+}
+
+fn query_arrow_shm_on_conn(
+    conn: &mut Connection,
+    sql: &str,
+    params: &BoundParams,
+    batch_size: usize,
+    cancel_flag: &Arc<AtomicBool>,
+) -> Result<ShmArrowPayload, DuckDBClientError> {
+    let effective_sql = match params {
+        BoundParams::Named(_) => normalize_named_sql(sql),
+        _ => sql.to_string(),
+    };
+    let mut stmt = conn
+        .prepare(&effective_sql)
+        .map_err(DuckDBClientError::from_duckdb)?;
+    let ordered = resolve_ordered_params(&stmt, params)?;
+    let arrow_iter = stmt
+        .query_arrow(params_from_iter(ordered))
+        .map_err(DuckDBClientError::from_duckdb)?;
+    let schema = arrow_iter.get_schema();
+    let mut raw_batches = Vec::new();
+    for batch in arrow_iter {
+        if cancel_flag.load(Ordering::Acquire) {
+            return Err(DuckDBClientError::QueryTimeout(
+                "DuckDB Arrow query interrupted".to_string(),
+            ));
+        }
+        raw_batches.push(batch);
+    }
+    let batches = rechunk_record_batches(raw_batches, batch_size);
+    serialize_batches_to_shm_payload(&schema, &batches)
+}
+
+fn stream_arrow_shm_batches_on_conn(
+    conn: &mut Connection,
+    sql: &str,
+    params: &BoundParams,
+    batch_size: usize,
+    cancel_flag: &Arc<AtomicBool>,
+) -> Result<Vec<ShmArrowPayload>, DuckDBClientError> {
+    let effective_sql = match params {
+        BoundParams::Named(_) => normalize_named_sql(sql),
+        _ => sql.to_string(),
+    };
+    let mut stmt = conn
+        .prepare(&effective_sql)
+        .map_err(DuckDBClientError::from_duckdb)?;
+    let ordered = resolve_ordered_params(&stmt, params)?;
+    let arrow_iter = stmt
+        .query_arrow(params_from_iter(ordered))
+        .map_err(DuckDBClientError::from_duckdb)?;
+    let schema = arrow_iter.get_schema();
+    let mut raw_batches = Vec::new();
+    for batch in arrow_iter {
+        if cancel_flag.load(Ordering::Acquire) {
+            return Err(DuckDBClientError::QueryTimeout(
+                "DuckDB Arrow stream interrupted".to_string(),
+            ));
+        }
+        raw_batches.push(batch);
+    }
+    let chunks = rechunk_record_batches(raw_batches, batch_size.max(1));
+    if chunks.is_empty() {
+        return Ok(vec![serialize_batches_to_shm_payload(&schema, &[])?]);
+    }
+    let mut payloads = Vec::with_capacity(chunks.len());
+    for chunk in chunks {
+        payloads.push(serialize_batches_to_shm_payload(
+            &schema,
+            std::slice::from_ref(&chunk),
+        )?);
+    }
+    Ok(payloads)
+}
+
+fn arrow_type_to_duckdb_ddl(dt: &DataType) -> String {
+    match dt {
+        DataType::Boolean => "BOOLEAN".to_string(),
+        DataType::Int8 => "TINYINT".to_string(),
+        DataType::Int16 => "SMALLINT".to_string(),
+        DataType::Int32 => "INTEGER".to_string(),
+        DataType::Int64 => "BIGINT".to_string(),
+        DataType::UInt8 => "UTINYINT".to_string(),
+        DataType::UInt16 => "USMALLINT".to_string(),
+        DataType::UInt32 => "UINTEGER".to_string(),
+        DataType::UInt64 => "UBIGINT".to_string(),
+        DataType::Float16 | DataType::Float32 => "FLOAT".to_string(),
+        DataType::Float64 => "DOUBLE".to_string(),
+        DataType::Decimal128(p, s) | DataType::Decimal256(p, s) => format!("DECIMAL({p}, {s})"),
+        DataType::Date32 | DataType::Date64 => "DATE".to_string(),
+        DataType::Time32(_) | DataType::Time64(_) => "TIME".to_string(),
+        DataType::Timestamp(_, Some(_)) => "TIMESTAMPTZ".to_string(),
+        DataType::Timestamp(_, None) => "TIMESTAMP".to_string(),
+        DataType::Binary
+        | DataType::LargeBinary
+        | DataType::BinaryView
+        | DataType::FixedSizeBinary(_) => "BLOB".to_string(),
+        _ => "VARCHAR".to_string(),
+    }
+}
+
+#[allow(clippy::type_complexity)]
+fn quote_qualified_table(
+    table: &str,
+) -> Result<(Option<String>, Option<String>, String, String), DuckDBClientError> {
+    let parts: Vec<&str> = table
+        .split('.')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    if parts.is_empty() || parts.len() > 3 {
+        return Err(DuckDBClientError::InvalidInput(format!(
+            "Invalid DuckDB table name: {table:?}"
+        )));
+    }
+    for part in &parts {
+        let unquoted = part.trim_matches('"');
+        validate_sql_identifier(unquoted, "table identifier")?;
+    }
+    let clean_parts: Vec<String> = parts
+        .iter()
+        .map(|p| p.trim_matches('"').to_string())
+        .collect();
+    let quoted_sql = clean_parts
+        .iter()
+        .map(|p| format!("\"{p}\""))
+        .collect::<Vec<_>>()
+        .join(".");
+    match clean_parts.len() {
+        1 => Ok((None, None, clean_parts[0].clone(), quoted_sql)),
+        2 => Ok((
+            None,
+            Some(clean_parts[0].clone()),
+            clean_parts[1].clone(),
+            quoted_sql,
+        )),
+        _ => Ok((
+            Some(clean_parts[0].clone()),
+            Some(clean_parts[1].clone()),
+            clean_parts[2].clone(),
+            quoted_sql,
+        )),
+    }
+}
+
+fn parse_arrow_ipc_batches(
+    bytes: &[u8],
+) -> Result<(Arc<Schema>, Vec<RecordBatch>), DuckDBClientError> {
+    let payload = if bytes.len() >= ShmArrowFrameHeader::SIZE && &bytes[..8] == b"VTBARROW" {
+        &bytes[ShmArrowFrameHeader::SIZE..]
+    } else {
+        bytes
+    };
+    if payload.is_empty() {
+        return Err(DuckDBClientError::InvalidInput(
+            "Arrow IPC payload is empty".to_string(),
+        ));
+    }
+    if payload.starts_with(b"ARROW1") {
+        let reader = FileReader::try_new(Cursor::new(payload), None)
+            .map_err(|e| DuckDBClientError::Data(format!("Invalid Arrow IPC file: {e}")))?;
+        let schema = reader.schema();
+        let mut batches = Vec::new();
+        for batch_res in reader {
+            let batch = batch_res
+                .map_err(|e| DuckDBClientError::Data(format!("Invalid Arrow IPC batch: {e}")))?;
+            batches.push(batch);
+        }
+        Ok((schema, batches))
+    } else {
+        let reader = StreamReader::try_new(Cursor::new(payload), None)
+            .map_err(|e| DuckDBClientError::Data(format!("Invalid Arrow IPC stream: {e}")))?;
+        let schema = reader.schema();
+        let mut batches = Vec::new();
+        for batch_res in reader {
+            let batch = batch_res
+                .map_err(|e| DuckDBClientError::Data(format!("Invalid Arrow IPC batch: {e}")))?;
+            batches.push(batch);
+        }
+        Ok((schema, batches))
+    }
+}
+
+fn project_batch_columns(
+    batch: &RecordBatch,
+    target_columns: &[String],
+) -> Result<RecordBatch, DuckDBClientError> {
+    let schema = batch.schema();
+    let mut indices = Vec::with_capacity(target_columns.len());
+    for col in target_columns {
+        let idx = schema.index_of(col).map_err(|_| {
+            DuckDBClientError::Programming(format!(
+                "Arrow RecordBatch does not contain requested column {col:?}"
+            ))
+        })?;
+        indices.push(idx);
+    }
+    batch
+        .project(&indices)
+        .map_err(|e| DuckDBClientError::Data(format!("Failed to project Arrow batch: {e}")))
+}
+
+fn load_arrow_on_conn(
+    conn: &mut Connection,
+    table: &str,
+    source: BulkLoadSource,
+    columns: Option<&[String]>,
+    create_if_missing: bool,
+    cancel_flag: &Arc<AtomicBool>,
+) -> Result<i64, DuckDBClientError> {
+    let (catalog_opt, schema_opt, table_name, quoted_table) = quote_qualified_table(table)?;
+
+    match source {
+        BulkLoadSource::ArrowIpc(ipc_bytes) => {
+            let (schema, batches) = parse_arrow_ipc_batches(&ipc_bytes)?;
+            let effective_fields: Vec<Field> = if let Some(cols) = columns {
+                let mut fields = Vec::with_capacity(cols.len());
+                for col in cols {
+                    let f = schema.field_with_name(col).map_err(|_| {
+                        DuckDBClientError::Programming(format!(
+                            "Arrow schema does not contain column {col:?}"
+                        ))
+                    })?;
+                    fields.push(f.clone());
+                }
+                fields
+            } else {
+                schema.fields().iter().map(|f| (**f).clone()).collect()
+            };
+
+            if create_if_missing && !effective_fields.is_empty() {
+                let col_defs = effective_fields
+                    .iter()
+                    .map(|f| {
+                        let clean_col = f.name().replace('"', "\"\"");
+                        let sql_ty = arrow_type_to_duckdb_ddl(f.data_type());
+                        format!("\"{clean_col}\" {sql_ty}")
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let ddl = format!("CREATE TABLE IF NOT EXISTS {quoted_table} ({col_defs})");
+                conn.execute_batch(&ddl)
+                    .map_err(DuckDBClientError::from_duckdb)?;
+            }
+
+            let col_names: Vec<&str> = effective_fields.iter().map(|f| f.name().as_str()).collect();
+            let mut appender = open_table_appender(
+                conn,
+                catalog_opt.as_deref(),
+                schema_opt.as_deref(),
+                &table_name,
+                if columns.is_some() {
+                    Some(col_names.as_slice())
+                } else {
+                    None
+                },
+            )?;
+
+            let mut total_rows: i64 = 0;
+            for batch in batches {
+                if cancel_flag.load(Ordering::Acquire) {
+                    return Err(DuckDBClientError::QueryTimeout(
+                        "DuckDB bulk load interrupted".to_string(),
+                    ));
+                }
+                if batch.num_rows() == 0 {
+                    continue;
+                }
+                let projected = if let Some(cols) = columns {
+                    project_batch_columns(&batch, cols)?
+                } else {
+                    batch
+                };
+                total_rows += i64::try_from(projected.num_rows()).unwrap_or(0);
+                appender
+                    .append_record_batch(projected)
+                    .map_err(DuckDBClientError::from_duckdb)?;
+            }
+            appender.flush().map_err(DuckDBClientError::from_duckdb)?;
+            Ok(total_rows)
+        }
+        BulkLoadSource::Rows {
+            columns: row_cols,
+            rows,
+        } => {
+            let active_cols: Vec<String> = if let Some(cols) = columns {
+                cols.to_vec()
+            } else {
+                row_cols
+            };
+            if create_if_missing && !active_cols.is_empty() {
+                let col_defs = active_cols
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, col_name)| {
+                        let clean_col = col_name.replace('"', "\"\"");
+                        let inferred_ty = rows
+                            .first()
+                            .and_then(|r| r.get(idx))
+                            .map_or("VARCHAR", infer_duck_value_ddl);
+                        format!("\"{clean_col}\" {inferred_ty}")
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let ddl = format!("CREATE TABLE IF NOT EXISTS {quoted_table} ({col_defs})");
+                conn.execute_batch(&ddl)
+                    .map_err(DuckDBClientError::from_duckdb)?;
+            }
+            if rows.is_empty() || active_cols.is_empty() {
+                return Ok(0);
+            }
+            let quoted_cols = active_cols
+                .iter()
+                .map(|c| format!("\"{}\"", c.replace('"', "\"\"")))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let placeholders = vec!["?"; active_cols.len()].join(", ");
+            let insert_sql =
+                format!("INSERT INTO {quoted_table} ({quoted_cols}) VALUES ({placeholders})");
+            let mut stmt = conn
+                .prepare(&insert_sql)
+                .map_err(DuckDBClientError::from_duckdb)?;
+            let mut count: i64 = 0;
+            for row in &rows {
+                if cancel_flag.load(Ordering::Acquire) {
+                    return Err(DuckDBClientError::QueryTimeout(
+                        "DuckDB bulk load interrupted".to_string(),
+                    ));
+                }
+                stmt.execute(params_from_iter(row.iter()))
+                    .map_err(DuckDBClientError::from_duckdb)?;
+                count += 1;
+            }
+            Ok(count)
+        }
+    }
+}
+
+fn open_table_appender<'a>(
+    conn: &'a Connection,
+    catalog: Option<&str>,
+    schema: Option<&str>,
+    table: &str,
+    columns: Option<&[&str]>,
+) -> Result<duckdb::Appender<'a>, DuckDBClientError> {
+    let res = match (catalog, schema, columns) {
+        (Some(cat), Some(sch), Some(cols)) => {
+            conn.appender_with_columns_to_catalog_and_db(table, cat, sch, cols)
+        }
+        (None, Some(sch), Some(cols)) => conn.appender_with_columns_to_db(table, sch, cols),
+        (None, None, Some(cols)) => conn.appender_with_columns(table, cols),
+        (Some(cat), Some(sch), None) => conn.appender_to_catalog_and_db(table, cat, sch),
+        (None, Some(sch), None) => conn.appender_to_db(table, sch),
+        _ => conn.appender(table),
+    };
+    res.map_err(DuckDBClientError::from_duckdb)
+}
+
+const fn infer_duck_value_ddl(val: &DuckValue) -> &'static str {
+    match val {
+        DuckValue::Boolean(_) => "BOOLEAN",
+        DuckValue::TinyInt(_)
+        | DuckValue::SmallInt(_)
+        | DuckValue::Int(_)
+        | DuckValue::BigInt(_) => "BIGINT",
+        DuckValue::UTinyInt(_)
+        | DuckValue::USmallInt(_)
+        | DuckValue::UInt(_)
+        | DuckValue::UBigInt(_) => "UBIGINT",
+        DuckValue::Float(_) | DuckValue::Double(_) => "DOUBLE",
+        DuckValue::Blob(_) => "BLOB",
+        _ => "VARCHAR",
+    }
+}
+
+fn py_to_duck_value(obj: &Bound<'_, PyAny>) -> Result<DuckValue, DuckDBClientError> {
+    if obj.is_none() {
+        return Ok(DuckValue::Null);
+    }
+    if obj.is_instance_of::<PyBool>() {
+        let b: bool = obj
+            .extract::<bool>()
+            .map_err(|e| DuckDBClientError::Data(e.to_string()))?;
+        return Ok(DuckValue::Boolean(b));
+    }
+    if obj.is_instance_of::<PyInt>() {
+        if let Ok(v) = obj.extract::<i64>() {
+            return Ok(DuckValue::BigInt(v));
+        }
+        if let Ok(v) = obj.extract::<i128>() {
+            return Ok(DuckValue::HugeInt(v));
+        }
+        if let Ok(v) = obj.extract::<u64>() {
+            return Ok(DuckValue::UBigInt(v));
+        }
+    }
+    if obj.is_instance_of::<PyFloat>() {
+        let v: f64 = obj
+            .extract::<f64>()
+            .map_err(|e| DuckDBClientError::Data(e.to_string()))?;
+        return Ok(DuckValue::Double(v));
+    }
+    if let Ok(b) = obj.cast::<PyBytes>() {
+        return Ok(DuckValue::Blob(b.as_bytes().to_vec()));
+    }
+    if let Ok(ba) = obj.cast::<PyByteArray>() {
+        return Ok(DuckValue::Blob(unsafe { ba.as_bytes() }.to_vec()));
+    }
+    if let Ok(s) = obj.cast::<PyString>() {
+        let text = s
+            .to_str()
+            .map_err(|e| DuckDBClientError::Data(e.to_string()))?;
+        return Ok(DuckValue::Text(text.to_string()));
+    }
+    if let Ok(list) = obj.cast::<PyList>() {
+        let mut items = Vec::with_capacity(list.len());
+        for item in list.iter() {
+            items.push(py_to_duck_value(&item)?);
+        }
+        return Ok(DuckValue::List(items));
+    }
+    if let Ok(tup) = obj.cast::<PyTuple>() {
+        let mut items = Vec::with_capacity(tup.len());
+        for item in tup.iter() {
+            items.push(py_to_duck_value(&item)?);
+        }
+        return Ok(DuckValue::List(items));
+    }
+    if obj.hasattr("isoformat").unwrap_or(false) {
+        let iso: String = obj
+            .call_method0("isoformat")
+            .and_then(|v| v.extract::<String>())
+            .map_err(|e: PyErr| DuckDBClientError::Data(e.to_string()))?;
+        return Ok(DuckValue::Text(iso));
+    }
+    let text: String = obj
+        .str()
+        .and_then(|s| s.extract::<String>())
+        .map_err(|e: PyErr| DuckDBClientError::Data(e.to_string()))?;
+    Ok(DuckValue::Text(text))
+}
+
+fn extract_bound_params(
+    parameters: Option<&Bound<'_, PyAny>>,
+) -> Result<BoundParams, DuckDBClientError> {
+    let Some(obj) = parameters else {
+        return Ok(BoundParams::Empty);
+    };
+    if obj.is_none() {
+        return Ok(BoundParams::Empty);
+    }
+    if let Ok(dict) = obj.cast::<PyDict>() {
+        if dict.is_empty() {
+            return Ok(BoundParams::Empty);
+        }
+        let mut map = HashMap::with_capacity(dict.len());
+        for (k, v) in dict.iter() {
+            let key: String = k
+                .extract::<String>()
+                .map_err(|e| DuckDBClientError::InvalidInput(e.to_string()))?;
+            map.insert(key, py_to_duck_value(&v)?);
+        }
+        return Ok(BoundParams::Named(map));
+    }
+    if let Ok(list) = obj.cast::<PyList>() {
+        let mut vals = Vec::with_capacity(list.len());
+        for item in list.iter() {
+            vals.push(py_to_duck_value(&item)?);
+        }
+        return Ok(BoundParams::Positional(vals));
+    }
+    if let Ok(tup) = obj.cast::<PyTuple>() {
+        let mut vals = Vec::with_capacity(tup.len());
+        for item in tup.iter() {
+            vals.push(py_to_duck_value(&item)?);
+        }
+        return Ok(BoundParams::Positional(vals));
+    }
+    let iter = obj.try_iter().map_err(|_| {
+        DuckDBClientError::InvalidInput(
+            "SQL parameters must be a sequence (list/tuple) or mapping (dict)".to_string(),
+        )
+    })?;
+    let mut vals = Vec::new();
+    for item_res in iter {
+        let item = item_res.map_err(|e| DuckDBClientError::InvalidInput(e.to_string()))?;
+        vals.push(py_to_duck_value(&item)?);
+    }
+    Ok(BoundParams::Positional(vals))
+}
+
+fn extract_parameter_sets(
+    parameter_sets: &Bound<'_, PyAny>,
+) -> Result<Vec<BoundParams>, DuckDBClientError> {
+    let iter = parameter_sets.try_iter().map_err(|_| {
+        DuckDBClientError::InvalidInput(
+            "execute_many parameter_sets must be an iterable of parameter sets".to_string(),
+        )
+    })?;
+    let mut sets = Vec::new();
+    for item_res in iter {
+        let item = item_res.map_err(|e| DuckDBClientError::InvalidInput(e.to_string()))?;
+        sets.push(extract_bound_params(Some(&item))?);
+    }
+    Ok(sets)
+}
+
+fn extract_bulk_load_source(
+    py: Python<'_>,
+    source: &Bound<'_, PyAny>,
+    columns: Option<&[String]>,
+) -> Result<BulkLoadSource, DuckDBClientError> {
+    if let Ok(b) = source.cast::<PyBytes>() {
+        return Ok(BulkLoadSource::ArrowIpc(b.as_bytes().to_vec()));
+    }
+    if let Ok(ba) = source.cast::<PyByteArray>() {
+        return Ok(BulkLoadSource::ArrowIpc(unsafe { ba.as_bytes() }.to_vec()));
+    }
+    if source.hasattr("read_bytes").unwrap_or(false) {
+        let raw: Vec<u8> = source
+            .call_method0("read_bytes")
+            .and_then(|b| b.extract::<Vec<u8>>())
+            .map_err(|e: PyErr| DuckDBClientError::Data(e.to_string()))?;
+        return Ok(BulkLoadSource::ArrowIpc(raw));
+    }
+    if let Ok(buf) = PyBuffer::<u8>::get(source) {
+        let bytes = buf
+            .to_vec(py)
+            .map_err(|e| DuckDBClientError::Data(e.to_string()))?;
+        return Ok(BulkLoadSource::ArrowIpc(bytes));
+    }
+    if source.hasattr("schema").unwrap_or(false)
+        && let Ok(pa_ipc) = py.import("pyarrow.ipc")
+        && let Ok(pa) = py.import("pyarrow")
+    {
+        let sink = pa
+            .call_method0("BufferOutputStream")
+            .map_err(|e| DuckDBClientError::Data(e.to_string()))?;
+        let schema = source
+            .getattr("schema")
+            .map_err(|e| DuckDBClientError::Data(e.to_string()))?;
+        let writer = pa_ipc
+            .call_method1("new_stream", (&sink, &schema))
+            .map_err(|e| DuckDBClientError::Data(e.to_string()))?;
+        if source.hasattr("to_batches").unwrap_or(false) {
+            writer
+                .call_method1("write_table", (source,))
+                .map_err(|e| DuckDBClientError::Data(e.to_string()))?;
+        } else if source.hasattr("read_next_batch").unwrap_or(false) {
+            let tbl = source
+                .call_method0("read_all")
+                .map_err(|e| DuckDBClientError::Data(e.to_string()))?;
+            writer
+                .call_method1("write_table", (tbl,))
+                .map_err(|e| DuckDBClientError::Data(e.to_string()))?;
+        } else {
+            writer
+                .call_method1("write_batch", (source,))
+                .map_err(|e| DuckDBClientError::Data(e.to_string()))?;
+        }
+        writer
+            .call_method0("close")
+            .map_err(|e| DuckDBClientError::Data(e.to_string()))?;
+        let py_buf = sink
+            .call_method0("getvalue")
+            .map_err(|e| DuckDBClientError::Data(e.to_string()))?;
+        let raw_bytes: Vec<u8> = py_buf
+            .call_method0("to_pybytes")
+            .and_then(|b| b.extract::<Vec<u8>>())
+            .map_err(|e: PyErr| DuckDBClientError::Data(e.to_string()))?;
+        return Ok(BulkLoadSource::ArrowIpc(raw_bytes));
+    }
+
+    let row_list_obj = if source.hasattr("to_pylist").unwrap_or(false) {
+        source
+            .call_method0("to_pylist")
+            .map_err(|e| DuckDBClientError::Data(e.to_string()))?
+    } else {
+        source.clone()
+    };
+
+    let iter = row_list_obj.try_iter().map_err(|_| {
+        DuckDBClientError::InvalidInput(
+            "load_from_arrow source must be an ArrowCursor, Arrow IPC bytes, PyArrow object, or sequence of dicts"
+                .to_string(),
+        )
+    })?;
+    let mut inferred_cols: Vec<String> = columns.map_or_else(Vec::new, <[String]>::to_vec);
+    let mut rows_out: Vec<Vec<DuckValue>> = Vec::new();
+    for item_res in iter {
+        let item = item_res.map_err(|e| DuckDBClientError::InvalidInput(e.to_string()))?;
+        if let Ok(dict) = item.cast::<PyDict>() {
+            if inferred_cols.is_empty() {
+                for k in dict.keys() {
+                    let col_name: String = k
+                        .extract::<String>()
+                        .map_err(|e| DuckDBClientError::InvalidInput(e.to_string()))?;
+                    inferred_cols.push(col_name);
+                }
+            }
+            let mut row_vals = Vec::with_capacity(inferred_cols.len());
+            for col in &inferred_cols {
+                match dict.get_item(col) {
+                    Ok(Some(v)) => row_vals.push(py_to_duck_value(&v)?),
+                    Ok(None) => row_vals.push(DuckValue::Null),
+                    Err(e) => return Err(DuckDBClientError::InvalidInput(e.to_string())),
+                }
+            }
+            rows_out.push(row_vals);
+        } else {
+            return Err(DuckDBClientError::InvalidInput(
+                "Row items in load_from_arrow must be dictionaries".to_string(),
+            ));
+        }
+    }
+    Ok(BulkLoadSource::Rows {
+        columns: inferred_cols,
+        rows: rows_out,
+    })
+}
+
+fn duck_value_to_py(py: Python<'_>, val: DuckValue) -> PyResult<Py<PyAny>> {
+    match val {
+        DuckValue::Null => Ok(py.None()),
+        DuckValue::Boolean(b) => Ok(PyBool::new(py, b).to_owned().into_any().unbind()),
+        DuckValue::TinyInt(v) => Ok(v.into_pyobject(py)?.into_any().unbind()),
+        DuckValue::SmallInt(v) => Ok(v.into_pyobject(py)?.into_any().unbind()),
+        DuckValue::Int(v) => Ok(v.into_pyobject(py)?.into_any().unbind()),
+        DuckValue::BigInt(v) => Ok(v.into_pyobject(py)?.into_any().unbind()),
+        DuckValue::HugeInt(v) => Ok(v.into_pyobject(py)?.into_any().unbind()),
+        DuckValue::UTinyInt(v) => Ok(v.into_pyobject(py)?.into_any().unbind()),
+        DuckValue::USmallInt(v) => Ok(v.into_pyobject(py)?.into_any().unbind()),
+        DuckValue::UInt(v) => Ok(v.into_pyobject(py)?.into_any().unbind()),
+        DuckValue::UBigInt(v) => Ok(v.into_pyobject(py)?.into_any().unbind()),
+        DuckValue::Float(v) => Ok(f64::from(v).into_pyobject(py)?.into_any().unbind()),
+        DuckValue::Double(v) => Ok(v.into_pyobject(py)?.into_any().unbind()),
+        DuckValue::Decimal(d) => {
+            let dec_mod = py.import("decimal")?;
+            let dec_obj = dec_mod.call_method1("Decimal", (d.to_string(),))?;
+            Ok(dec_obj.unbind())
+        }
+        DuckValue::Text(s) | DuckValue::Enum(s) => Ok(s.into_pyobject(py)?.into_any().unbind()),
+        DuckValue::Blob(b) => Ok(PyBytes::new(py, &b).into_any().unbind()),
+        DuckValue::Date32(days) => {
+            let dt_mod = py.import("datetime")?;
+            let ordinal = 719_163_i64 + i64::from(days);
+            let date_obj = dt_mod
+                .getattr("date")?
+                .call_method1("fromordinal", (ordinal,))?;
+            Ok(date_obj.unbind())
+        }
+        DuckValue::Time64(unit, raw) => {
+            let micros = match unit {
+                DuckTimeUnit::Second => raw.saturating_mul(1_000_000),
+                DuckTimeUnit::Millisecond => raw.saturating_mul(1_000),
+                DuckTimeUnit::Microsecond => raw,
+                DuckTimeUnit::Nanosecond => raw / 1_000,
+            };
+            let rem_day = micros.rem_euclid(86_400_000_000);
+            let hours = rem_day / 3_600_000_000;
+            let mins = (rem_day % 3_600_000_000) / 60_000_000;
+            let secs = (rem_day % 60_000_000) / 1_000_000;
+            let us = rem_day % 1_000_000;
+            let dt_mod = py.import("datetime")?;
+            let time_obj = dt_mod.call_method1("time", (hours, mins, secs, us))?;
+            Ok(time_obj.unbind())
+        }
+        DuckValue::Timestamp(unit, raw) => {
+            let micros = match unit {
+                DuckTimeUnit::Second => raw.saturating_mul(1_000_000),
+                DuckTimeUnit::Millisecond => raw.saturating_mul(1_000),
+                DuckTimeUnit::Microsecond => raw,
+                DuckTimeUnit::Nanosecond => raw / 1_000,
+            };
+            let dt_mod = py.import("datetime")?;
+            let epoch = dt_mod.call_method1("datetime", (1970, 1, 1))?;
+            let delta = dt_mod.getattr("timedelta")?.call1((0, 0, micros))?;
+            let ts_obj = epoch.call_method1("__add__", (delta,))?;
+            Ok(ts_obj.unbind())
+        }
+        DuckValue::Interval {
+            months,
+            days,
+            nanos,
+        } => {
+            let dt_mod = py.import("datetime")?;
+            let total_days = i64::from(months) * 30 + i64::from(days);
+            let micros = nanos / 1_000;
+            let delta = dt_mod
+                .getattr("timedelta")?
+                .call1((total_days, 0, micros))?;
+            Ok(delta.unbind())
+        }
+        DuckValue::List(items) | DuckValue::Array(items) => {
+            let py_list = PyList::empty(py);
+            for item in items {
+                py_list.append(duck_value_to_py(py, item)?)?;
+            }
+            Ok(py_list.into_any().unbind())
+        }
+        DuckValue::Struct(fields) => {
+            let py_dict = PyDict::new(py);
+            for (k, v) in fields.iter() {
+                py_dict.set_item(k, duck_value_to_py(py, v.clone())?)?;
+            }
+            Ok(py_dict.into_any().unbind())
+        }
+        DuckValue::Map(entries) => {
+            let py_dict = PyDict::new(py);
+            for (k, v) in entries.iter() {
+                let py_k = duck_value_to_py(py, k.clone())?;
+                let py_v = duck_value_to_py(py, v.clone())?;
+                py_dict.set_item(py_k, py_v)?;
+            }
+            Ok(py_dict.into_any().unbind())
+        }
+        DuckValue::Union(inner) => duck_value_to_py(py, *inner),
+        _ => Ok(format!("{val:?}").into_pyobject(py)?.into_any().unbind()),
+    }
+}
+
+fn result_set_to_py_dicts(py: Python<'_>, result: QueryResultSet) -> PyResult<Py<PyAny>> {
+    let py_list = PyList::empty(py);
+    let col_names: Vec<Bound<'_, PyString>> = result
+        .columns
+        .iter()
+        .map(|c| PyString::new(py, c))
+        .collect();
+    for row in result.rows {
+        let dict = PyDict::new(py);
+        for (idx, val) in row.into_iter().enumerate() {
+            if let Some(key) = col_names.get(idx) {
+                dict.set_item(key, duck_value_to_py(py, val)?)?;
+            }
+        }
+        py_list.append(dict)?;
+    }
+    Ok(py_list.into_any().unbind())
+}
+
+fn result_set_to_single_dict(
+    py: Python<'_>,
+    mut result: QueryResultSet,
+    optional: bool,
+) -> PyResult<Py<PyAny>> {
+    if result.rows.is_empty() {
+        if optional {
+            return Ok(py.None());
+        }
+        return Err(DuckDBClientError::Data("Query returned no rows".to_string()).into_py_err(py));
+    }
+    if result.rows.len() > 1 {
+        return Err(DuckDBClientError::Data(format!(
+            "Expected at most 1 row, got {}",
+            result.rows.len()
+        ))
+        .into_py_err(py));
+    }
+    let row = result.rows.swap_remove(0);
+    let dict = PyDict::new(py);
+    for (col, val) in result.columns.into_iter().zip(row) {
+        dict.set_item(col, duck_value_to_py(py, val)?)?;
+    }
+    Ok(dict.into_any().unbind())
+}
+
+struct CancelOnDropGuard {
+    inner: Arc<DuckDBInner>,
+    cancel_flag: Arc<AtomicBool>,
+    completed: bool,
+}
+
+impl CancelOnDropGuard {
+    fn new(inner: Arc<DuckDBInner>, cancel_flag: Arc<AtomicBool>) -> Self {
+        Self {
+            inner,
+            cancel_flag,
+            completed: false,
+        }
+    }
+
+    fn mark_completed(&mut self) {
+        self.completed = true;
+    }
+}
+
+impl Drop for CancelOnDropGuard {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.cancel_flag.store(true, Ordering::Release);
+            self.inner.interrupt_all();
+        }
+    }
+}
+
+fn extract_token_and_gen_from_py(
+    obj: &Bound<'_, PyAny>,
+) -> Result<(String, u64), DuckDBClientError> {
+    if let Ok((tok, gen_id)) = obj.extract::<(String, u64)>() {
+        return Ok((extract_bearer_token(&tok), gen_id));
+    }
+    if let Ok(tok) = obj
+        .getattr("access_token")
+        .and_then(|v| v.extract::<String>())
+    {
+        let gen_id = obj
+            .getattr("generation")
+            .and_then(|v| v.extract::<u64>())
+            .unwrap_or(1);
+        return Ok((extract_bearer_token(&tok), gen_id));
+    }
+    if obj.hasattr("get_token").unwrap_or(false) {
+        let snap = obj
+            .call_method0("get_token")
+            .map_err(|e| DuckDBClientError::Operational(e.to_string()))?;
+        return extract_token_and_gen_from_py(&snap);
+    }
+    Err(DuckDBClientError::InvalidInput(
+        "Unsupported token_cache object; expected SyncGcpTokenCache or GcpTokenSnapshot"
+            .to_string(),
+    ))
+}
+
+fn extract_bearer_token(header_or_token: &str) -> String {
+    let trimmed = header_or_token.trim();
+    if let Some(rest) = trimmed.strip_prefix("Bearer ") {
+        rest.trim().to_string()
+    } else if let Some(rest) = trimmed.strip_prefix("bearer ") {
+        rest.trim().to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// Native synchronous DuckDB 2.0 client bridged via [`SyncCompletionQueue`].
+#[pyclass(frozen, immutable_type)]
+pub struct SyncDuckDBClient {
+    inner: Arc<DuckDBInner>,
+}
+
+#[pymethods]
+impl SyncDuckDBClient {
+    #[new]
+    #[pyo3(signature = (
+        database = ":memory:",
+        *,
+        read_only = false,
+        max_connections = 4,
+        max_memory_bytes = None,
+        threads = None,
+        temp_directory = None,
+        parquet_metadata_cache = true,
+        httpfs_connection_caching = true,
+        enable_http_metadata_cache = true,
+        config = None,
+        extensions = None,
+        init_statements = None,
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        py: Python<'_>,
+        database: &str,
+        read_only: bool,
+        max_connections: usize,
+        max_memory_bytes: Option<u64>,
+        threads: Option<usize>,
+        temp_directory: Option<String>,
+        parquet_metadata_cache: bool,
+        httpfs_connection_caching: bool,
+        enable_http_metadata_cache: bool,
+        config: Option<HashMap<String, String>>,
+        extensions: Option<Vec<String>>,
+        init_statements: Option<Vec<String>>,
+    ) -> PyResult<Self> {
+        let db_str = database.to_string();
+        let inner = py
+            .detach(move || {
+                DuckDBInner::open(
+                    &db_str,
+                    read_only,
+                    max_connections,
+                    max_memory_bytes,
+                    threads,
+                    temp_directory,
+                    parquet_metadata_cache,
+                    httpfs_connection_caching,
+                    enable_http_metadata_cache,
+                    config,
+                    extensions,
+                    init_statements,
+                )
+            })
+            .map_err(|e| e.into_py_err(py))?;
+        Ok(Self { inner })
+    }
+
+    #[getter]
+    pub fn database(&self) -> &str {
+        &self.inner.database
+    }
+
+    #[getter]
+    pub fn read_only(&self) -> bool {
+        self.inner.read_only
+    }
+
+    #[getter]
+    pub fn is_in_memory(&self) -> bool {
+        self.inner.is_in_memory
+    }
+
+    #[getter]
+    pub fn max_connections(&self) -> usize {
+        self.inner.max_connections
+    }
+
+    #[getter]
+    pub fn in_transaction(&self) -> bool {
+        self.inner.in_transaction.load(Ordering::Acquire)
+    }
+
+    #[getter]
+    pub fn closed(&self) -> bool {
+        self.inner.closed.load(Ordering::Acquire)
+    }
+
+    #[getter]
+    pub fn applied_token_generation(&self) -> u64 {
+        self.inner.applied_token_generation.load(Ordering::Acquire)
+    }
+
+    #[getter]
+    pub fn last_gcs_secret_sql(&self) -> String {
+        self.inner.last_gcs_secret_sql()
+    }
+
+    #[getter]
+    pub fn bootstrap_statements(&self) -> Vec<String> {
+        self.inner.bootstrap_statements.clone()
+    }
+
+    #[pyo3(signature = (sql, parameters=None))]
+    pub fn execute(
+        &self,
+        py: Python<'_>,
+        sql: &str,
+        parameters: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<i64> {
+        let bound = extract_bound_params(parameters).map_err(|e| e.into_py_err(py))?;
+        let inner = Arc::clone(&self.inner);
+        let sql_owned = sql.to_string();
+        let cancel_flag = inner.register_cancel_flag();
+        py.detach(move || inner.execute_sql(sql_owned, bound, &cancel_flag))
+            .map_err(|e| e.into_py_err(py))
+    }
+
+    pub fn execute_many(
+        &self,
+        py: Python<'_>,
+        sql: &str,
+        parameter_sets: &Bound<'_, PyAny>,
+    ) -> PyResult<i64> {
+        let bound_sets = extract_parameter_sets(parameter_sets).map_err(|e| e.into_py_err(py))?;
+        let inner = Arc::clone(&self.inner);
+        let sql_owned = sql.to_string();
+        let cancel_flag = inner.register_cancel_flag();
+        py.detach(move || inner.execute_many_sql(sql_owned, bound_sets, &cancel_flag))
+            .map_err(|e| e.into_py_err(py))
+    }
+
+    #[pyo3(signature = (sql, parameters=None))]
+    pub fn fetch_all(
+        &self,
+        py: Python<'_>,
+        sql: &str,
+        parameters: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let bound = extract_bound_params(parameters).map_err(|e| e.into_py_err(py))?;
+        let inner = Arc::clone(&self.inner);
+        let sql_owned = sql.to_string();
+        let cancel_flag = inner.register_cancel_flag();
+        let res = py
+            .detach(move || inner.query_sql(sql_owned, bound, &cancel_flag))
+            .map_err(|e| e.into_py_err(py))?;
+        result_set_to_py_dicts(py, res)
+    }
+
+    #[pyo3(signature = (sql, parameters=None))]
+    pub fn fetch_one(
+        &self,
+        py: Python<'_>,
+        sql: &str,
+        parameters: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let bound = extract_bound_params(parameters).map_err(|e| e.into_py_err(py))?;
+        let inner = Arc::clone(&self.inner);
+        let sql_owned = sql.to_string();
+        let cancel_flag = inner.register_cancel_flag();
+        let res = py
+            .detach(move || inner.query_sql(sql_owned, bound, &cancel_flag))
+            .map_err(|e| e.into_py_err(py))?;
+        result_set_to_single_dict(py, res, false)
+    }
+
+    #[pyo3(signature = (sql, parameters=None))]
+    pub fn fetch_optional(
+        &self,
+        py: Python<'_>,
+        sql: &str,
+        parameters: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let bound = extract_bound_params(parameters).map_err(|e| e.into_py_err(py))?;
+        let inner = Arc::clone(&self.inner);
+        let sql_owned = sql.to_string();
+        let cancel_flag = inner.register_cancel_flag();
+        let res = py
+            .detach(move || inner.query_sql(sql_owned, bound, &cancel_flag))
+            .map_err(|e| e.into_py_err(py))?;
+        result_set_to_single_dict(py, res, true)
+    }
+
+    #[pyo3(signature = (sql, parameters=None))]
+    pub fn select_value(
+        &self,
+        py: Python<'_>,
+        sql: &str,
+        parameters: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let bound = extract_bound_params(parameters).map_err(|e| e.into_py_err(py))?;
+        let inner = Arc::clone(&self.inner);
+        let sql_owned = sql.to_string();
+        let cancel_flag = inner.register_cancel_flag();
+        let mut res = py
+            .detach(move || inner.query_sql(sql_owned, bound, &cancel_flag))
+            .map_err(|e| e.into_py_err(py))?;
+        if res.rows.is_empty() || res.rows[0].is_empty() {
+            return Err(
+                DuckDBClientError::Data("Query returned no scalar value".to_string())
+                    .into_py_err(py),
+            );
+        }
+        let val = res.rows.swap_remove(0).swap_remove(0);
+        duck_value_to_py(py, val)
+    }
+
+    #[pyo3(signature = (sql, parameters=None, *, batch_size=65536))]
+    pub fn select_to_arrow(
+        &self,
+        py: Python<'_>,
+        sql: &str,
+        parameters: Option<&Bound<'_, PyAny>>,
+        batch_size: usize,
+    ) -> PyResult<Py<PyAny>> {
+        let bound = extract_bound_params(parameters).map_err(|e| e.into_py_err(py))?;
+        let inner = Arc::clone(&self.inner);
+        let sql_owned = sql.to_string();
+        let cancel_flag = inner.register_cancel_flag();
+        let payload = py
+            .detach(move || inner.query_arrow_shm(sql_owned, bound, batch_size, &cancel_flag))
+            .map_err(|e| e.into_py_err(py))?;
+        construct_py_arrow_cursor(
+            py,
+            &payload.shm_name,
+            payload.byte_len,
+            payload.row_count,
+            payload.region,
+        )
+    }
+
+    #[pyo3(signature = (sql, parameters=None, *, batch_size=65536))]
+    pub fn stream_arrow_batches(
+        &self,
+        py: Python<'_>,
+        sql: &str,
+        parameters: Option<&Bound<'_, PyAny>>,
+        batch_size: usize,
+    ) -> PyResult<Py<PyAny>> {
+        let bound = extract_bound_params(parameters).map_err(|e| e.into_py_err(py))?;
+        let inner = Arc::clone(&self.inner);
+        let sql_owned = sql.to_string();
+        let cancel_flag = inner.register_cancel_flag();
+        let payloads = py
+            .detach(move || {
+                inner.stream_arrow_shm_batches(sql_owned, bound, batch_size, &cancel_flag)
+            })
+            .map_err(|e| e.into_py_err(py))?;
+        let out = PyList::empty(py);
+        for payload in payloads {
+            out.append(construct_py_arrow_cursor(
+                py,
+                &payload.shm_name,
+                payload.byte_len,
+                payload.row_count,
+                payload.region,
+            )?)?;
+        }
+        Ok(out.into_any().unbind())
+    }
+
+    #[pyo3(signature = (table, source, *, columns=None, create_if_missing=true))]
+    pub fn load_from_arrow(
+        &self,
+        py: Python<'_>,
+        table: &str,
+        source: &Bound<'_, PyAny>,
+        columns: Option<Vec<String>>,
+        create_if_missing: bool,
+    ) -> PyResult<i64> {
+        let load_source = extract_bulk_load_source(py, source, columns.as_deref())
+            .map_err(|e| e.into_py_err(py))?;
+        let inner = Arc::clone(&self.inner);
+        let table_owned = table.to_string();
+        let cancel_flag = inner.register_cancel_flag();
+        py.detach(move || {
+            inner.load_arrow_bulk(
+                table_owned,
+                load_source,
+                columns,
+                create_if_missing,
+                &cancel_flag,
+            )
+        })
+        .map_err(|e| e.into_py_err(py))
+    }
+
+    #[pyo3(signature = (*, secret_name="vtb_gcs_secret", token=None, generation=None, token_cache=None, scope=None))]
+    pub fn apply_gcs_secret(
+        &self,
+        py: Python<'_>,
+        secret_name: &str,
+        token: Option<String>,
+        generation: Option<u64>,
+        token_cache: Option<&Bound<'_, PyAny>>,
+        scope: Option<String>,
+    ) -> PyResult<(bool, u64)> {
+        let (resolved_token, resolved_gen) = if let Some(tok) = token {
+            (extract_bearer_token(&tok), generation.unwrap_or(0))
+        } else if let Some(cache_obj) = token_cache {
+            extract_token_and_gen_from_py(cache_obj).map_err(|e| e.into_py_err(py))?
+        } else {
+            return Err(DuckDBClientError::InvalidInput(
+                "apply_gcs_secret requires either token or token_cache".to_string(),
+            )
+            .into_py_err(py));
+        };
+        let inner = Arc::clone(&self.inner);
+        let secret_owned = secret_name.to_string();
+        let cancel_flag = inner.register_cancel_flag();
+        py.detach(move || {
+            inner.apply_gcs_secret_generation(
+                &secret_owned,
+                &resolved_token,
+                resolved_gen,
+                scope.as_deref(),
+                &cancel_flag,
+            )
+        })
+        .map_err(|e| e.into_py_err(py))
+    }
+
+    pub fn begin(&self, py: Python<'_>) -> PyResult<()> {
+        let inner = Arc::clone(&self.inner);
+        let cancel_flag = inner.register_cancel_flag();
+        py.detach(move || inner.begin_tx(&cancel_flag))
+            .map_err(|e| e.into_py_err(py))
+    }
+
+    pub fn commit(&self, py: Python<'_>) -> PyResult<()> {
+        let inner = Arc::clone(&self.inner);
+        let cancel_flag = inner.register_cancel_flag();
+        py.detach(move || inner.commit_tx(&cancel_flag))
+            .map_err(|e| e.into_py_err(py))
+    }
+
+    pub fn rollback(&self, py: Python<'_>) -> PyResult<()> {
+        let inner = Arc::clone(&self.inner);
+        let cancel_flag = inner.register_cancel_flag();
+        py.detach(move || inner.rollback_tx(&cancel_flag))
+            .map_err(|e| e.into_py_err(py))
+    }
+
+    pub fn interrupt(&self) {
+        self.inner.interrupt_all();
+    }
+
+    pub fn cancel(&self) {
+        self.inner.interrupt_all();
+    }
+
+    pub fn close(&self, py: Python<'_>) {
+        let inner = Arc::clone(&self.inner);
+        py.detach(move || inner.close_all());
+    }
+
+    pub fn to_async(&self) -> AsyncDuckDBClient {
+        AsyncDuckDBClient {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+
+    pub fn __enter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    #[pyo3(signature = (_exc_type=None, _exc_val=None, _exc_tb=None))]
+    pub fn __exit__(
+        &self,
+        py: Python<'_>,
+        _exc_type: Option<&Bound<'_, PyAny>>,
+        _exc_val: Option<&Bound<'_, PyAny>>,
+        _exc_tb: Option<&Bound<'_, PyAny>>,
+    ) {
+        self.close(py);
+    }
+}
+
+/// Native asynchronous DuckDB 2.0 client bridged via [`AsyncCompletionQueue`] + [`Notifier`].
+#[pyclass(frozen, immutable_type)]
+pub struct AsyncDuckDBClient {
+    inner: Arc<DuckDBInner>,
+}
+
+#[pymethods]
+impl AsyncDuckDBClient {
+    #[new]
+    #[pyo3(signature = (
+        database = ":memory:",
+        *,
+        read_only = false,
+        max_connections = 4,
+        max_memory_bytes = None,
+        threads = None,
+        temp_directory = None,
+        parquet_metadata_cache = true,
+        httpfs_connection_caching = true,
+        enable_http_metadata_cache = true,
+        config = None,
+        extensions = None,
+        init_statements = None,
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        py: Python<'_>,
+        database: &str,
+        read_only: bool,
+        max_connections: usize,
+        max_memory_bytes: Option<u64>,
+        threads: Option<usize>,
+        temp_directory: Option<String>,
+        parquet_metadata_cache: bool,
+        httpfs_connection_caching: bool,
+        enable_http_metadata_cache: bool,
+        config: Option<HashMap<String, String>>,
+        extensions: Option<Vec<String>>,
+        init_statements: Option<Vec<String>>,
+    ) -> PyResult<Self> {
+        let db_str = database.to_string();
+        let inner = py
+            .detach(move || {
+                DuckDBInner::open(
+                    &db_str,
+                    read_only,
+                    max_connections,
+                    max_memory_bytes,
+                    threads,
+                    temp_directory,
+                    parquet_metadata_cache,
+                    httpfs_connection_caching,
+                    enable_http_metadata_cache,
+                    config,
+                    extensions,
+                    init_statements,
+                )
+            })
+            .map_err(|e| e.into_py_err(py))?;
+        Ok(Self { inner })
+    }
+
+    #[getter]
+    pub fn database(&self) -> &str {
+        &self.inner.database
+    }
+
+    #[getter]
+    pub fn read_only(&self) -> bool {
+        self.inner.read_only
+    }
+
+    #[getter]
+    pub fn is_in_memory(&self) -> bool {
+        self.inner.is_in_memory
+    }
+
+    #[getter]
+    pub fn max_connections(&self) -> usize {
+        self.inner.max_connections
+    }
+
+    #[getter]
+    pub fn in_transaction(&self) -> bool {
+        self.inner.in_transaction.load(Ordering::Acquire)
+    }
+
+    #[getter]
+    pub fn closed(&self) -> bool {
+        self.inner.closed.load(Ordering::Acquire)
+    }
+
+    #[getter]
+    pub fn applied_token_generation(&self) -> u64 {
+        self.inner.applied_token_generation.load(Ordering::Acquire)
+    }
+
+    #[getter]
+    pub fn last_gcs_secret_sql(&self) -> String {
+        self.inner.last_gcs_secret_sql()
+    }
+
+    #[getter]
+    pub fn bootstrap_statements(&self) -> Vec<String> {
+        self.inner.bootstrap_statements.clone()
+    }
+
+    #[pyo3(signature = (sql, parameters=None))]
+    pub fn execute(
+        &self,
+        py: Python<'_>,
+        sql: &str,
+        parameters: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<RustDbTaskAwaitable> {
+        let bound = extract_bound_params(parameters).map_err(|e| e.into_py_err(py))?;
+        let inner = Arc::clone(&self.inner);
+        let sql_owned = sql.to_string();
+        let cancel_flag = inner.register_cancel_flag();
+        let mut drop_guard = CancelOnDropGuard::new(Arc::clone(&inner), Arc::clone(&cancel_flag));
+        spawn_rust_db_task_with_attr(
+            py,
+            async move {
+                let res = tokio::task::spawn_blocking(move || {
+                    inner.execute_sql(sql_owned, bound, &cancel_flag)
+                })
+                .await
+                .map_err(|e| DuckDBClientError::Operational(e.to_string()))?;
+                drop_guard.mark_completed();
+                res
+            },
+            |py, count| Ok(count.into_pyobject(py)?.into_any().unbind()),
+            |py, err| err.into_py_err(py),
+            DUCKDB_COMPLETION_DRAINER_ATTR,
+        )
+    }
+
+    pub fn execute_many(
+        &self,
+        py: Python<'_>,
+        sql: &str,
+        parameter_sets: &Bound<'_, PyAny>,
+    ) -> PyResult<RustDbTaskAwaitable> {
+        let bound_sets = extract_parameter_sets(parameter_sets).map_err(|e| e.into_py_err(py))?;
+        let inner = Arc::clone(&self.inner);
+        let sql_owned = sql.to_string();
+        let cancel_flag = inner.register_cancel_flag();
+        let mut drop_guard = CancelOnDropGuard::new(Arc::clone(&inner), Arc::clone(&cancel_flag));
+        spawn_rust_db_task_with_attr(
+            py,
+            async move {
+                let res = tokio::task::spawn_blocking(move || {
+                    inner.execute_many_sql(sql_owned, bound_sets, &cancel_flag)
+                })
+                .await
+                .map_err(|e| DuckDBClientError::Operational(e.to_string()))?;
+                drop_guard.mark_completed();
+                res
+            },
+            |py, count| Ok(count.into_pyobject(py)?.into_any().unbind()),
+            |py, err| err.into_py_err(py),
+            DUCKDB_COMPLETION_DRAINER_ATTR,
+        )
+    }
+
+    #[pyo3(signature = (sql, parameters=None))]
+    pub fn fetch_all(
+        &self,
+        py: Python<'_>,
+        sql: &str,
+        parameters: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<RustDbTaskAwaitable> {
+        let bound = extract_bound_params(parameters).map_err(|e| e.into_py_err(py))?;
+        let inner = Arc::clone(&self.inner);
+        let sql_owned = sql.to_string();
+        let cancel_flag = inner.register_cancel_flag();
+        let mut drop_guard = CancelOnDropGuard::new(Arc::clone(&inner), Arc::clone(&cancel_flag));
+        spawn_rust_db_task_with_attr(
+            py,
+            async move {
+                let res = tokio::task::spawn_blocking(move || {
+                    inner.query_sql(sql_owned, bound, &cancel_flag)
+                })
+                .await
+                .map_err(|e| DuckDBClientError::Operational(e.to_string()))?;
+                drop_guard.mark_completed();
+                res
+            },
+            result_set_to_py_dicts,
+            |py, err| err.into_py_err(py),
+            DUCKDB_COMPLETION_DRAINER_ATTR,
+        )
+    }
+
+    #[pyo3(signature = (sql, parameters=None))]
+    pub fn fetch_one(
+        &self,
+        py: Python<'_>,
+        sql: &str,
+        parameters: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<RustDbTaskAwaitable> {
+        let bound = extract_bound_params(parameters).map_err(|e| e.into_py_err(py))?;
+        let inner = Arc::clone(&self.inner);
+        let sql_owned = sql.to_string();
+        let cancel_flag = inner.register_cancel_flag();
+        let mut drop_guard = CancelOnDropGuard::new(Arc::clone(&inner), Arc::clone(&cancel_flag));
+        spawn_rust_db_task_with_attr(
+            py,
+            async move {
+                let res = tokio::task::spawn_blocking(move || {
+                    inner.query_sql(sql_owned, bound, &cancel_flag)
+                })
+                .await
+                .map_err(|e| DuckDBClientError::Operational(e.to_string()))?;
+                drop_guard.mark_completed();
+                res
+            },
+            |py, result_set| result_set_to_single_dict(py, result_set, false),
+            |py, err| err.into_py_err(py),
+            DUCKDB_COMPLETION_DRAINER_ATTR,
+        )
+    }
+
+    #[pyo3(signature = (sql, parameters=None))]
+    pub fn fetch_optional(
+        &self,
+        py: Python<'_>,
+        sql: &str,
+        parameters: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<RustDbTaskAwaitable> {
+        let bound = extract_bound_params(parameters).map_err(|e| e.into_py_err(py))?;
+        let inner = Arc::clone(&self.inner);
+        let sql_owned = sql.to_string();
+        let cancel_flag = inner.register_cancel_flag();
+        let mut drop_guard = CancelOnDropGuard::new(Arc::clone(&inner), Arc::clone(&cancel_flag));
+        spawn_rust_db_task_with_attr(
+            py,
+            async move {
+                let res = tokio::task::spawn_blocking(move || {
+                    inner.query_sql(sql_owned, bound, &cancel_flag)
+                })
+                .await
+                .map_err(|e| DuckDBClientError::Operational(e.to_string()))?;
+                drop_guard.mark_completed();
+                res
+            },
+            |py, result_set| result_set_to_single_dict(py, result_set, true),
+            |py, err| err.into_py_err(py),
+            DUCKDB_COMPLETION_DRAINER_ATTR,
+        )
+    }
+
+    #[pyo3(signature = (sql, parameters=None))]
+    pub fn select_value(
+        &self,
+        py: Python<'_>,
+        sql: &str,
+        parameters: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<RustDbTaskAwaitable> {
+        let bound = extract_bound_params(parameters).map_err(|e| e.into_py_err(py))?;
+        let inner = Arc::clone(&self.inner);
+        let sql_owned = sql.to_string();
+        let cancel_flag = inner.register_cancel_flag();
+        let mut drop_guard = CancelOnDropGuard::new(Arc::clone(&inner), Arc::clone(&cancel_flag));
+        spawn_rust_db_task_with_attr(
+            py,
+            async move {
+                let res = tokio::task::spawn_blocking(move || {
+                    inner.query_sql(sql_owned, bound, &cancel_flag)
+                })
+                .await
+                .map_err(|e| DuckDBClientError::Operational(e.to_string()))?;
+                drop_guard.mark_completed();
+                res
+            },
+            |py, mut result_set| {
+                if result_set.rows.is_empty() || result_set.rows[0].is_empty() {
+                    return Err(DuckDBClientError::Data(
+                        "Query returned no scalar value".to_string(),
+                    )
+                    .into_py_err(py));
+                }
+                let val = result_set.rows.swap_remove(0).swap_remove(0);
+                duck_value_to_py(py, val)
+            },
+            |py, err| err.into_py_err(py),
+            DUCKDB_COMPLETION_DRAINER_ATTR,
+        )
+    }
+
+    #[pyo3(signature = (sql, parameters=None, *, batch_size=65536))]
+    pub fn select_to_arrow(
+        &self,
+        py: Python<'_>,
+        sql: &str,
+        parameters: Option<&Bound<'_, PyAny>>,
+        batch_size: usize,
+    ) -> PyResult<RustDbTaskAwaitable> {
+        let bound = extract_bound_params(parameters).map_err(|e| e.into_py_err(py))?;
+        let inner = Arc::clone(&self.inner);
+        let sql_owned = sql.to_string();
+        let cancel_flag = inner.register_cancel_flag();
+        let mut drop_guard = CancelOnDropGuard::new(Arc::clone(&inner), Arc::clone(&cancel_flag));
+        spawn_rust_db_task_with_attr(
+            py,
+            async move {
+                let res = tokio::task::spawn_blocking(move || {
+                    inner.query_arrow_shm(sql_owned, bound, batch_size, &cancel_flag)
+                })
+                .await
+                .map_err(|e| DuckDBClientError::Operational(e.to_string()))?;
+                drop_guard.mark_completed();
+                res
+            },
+            |py, payload| {
+                construct_py_arrow_cursor(
+                    py,
+                    &payload.shm_name,
+                    payload.byte_len,
+                    payload.row_count,
+                    payload.region,
+                )
+            },
+            |py, err| err.into_py_err(py),
+            DUCKDB_COMPLETION_DRAINER_ATTR,
+        )
+    }
+
+    #[pyo3(signature = (sql, parameters=None, *, batch_size=65536))]
+    pub fn stream_arrow_batches(
+        &self,
+        py: Python<'_>,
+        sql: &str,
+        parameters: Option<&Bound<'_, PyAny>>,
+        batch_size: usize,
+    ) -> PyResult<RustDbTaskAwaitable> {
+        let bound = extract_bound_params(parameters).map_err(|e| e.into_py_err(py))?;
+        let inner = Arc::clone(&self.inner);
+        let sql_owned = sql.to_string();
+        let cancel_flag = inner.register_cancel_flag();
+        let mut drop_guard = CancelOnDropGuard::new(Arc::clone(&inner), Arc::clone(&cancel_flag));
+        spawn_rust_db_task_with_attr(
+            py,
+            async move {
+                let res = tokio::task::spawn_blocking(move || {
+                    inner.stream_arrow_shm_batches(sql_owned, bound, batch_size, &cancel_flag)
+                })
+                .await
+                .map_err(|e| DuckDBClientError::Operational(e.to_string()))?;
+                drop_guard.mark_completed();
+                res
+            },
+            |py, payloads| {
+                let out = PyList::empty(py);
+                for payload in payloads {
+                    out.append(construct_py_arrow_cursor(
+                        py,
+                        &payload.shm_name,
+                        payload.byte_len,
+                        payload.row_count,
+                        payload.region,
+                    )?)?;
+                }
+                Ok(out.into_any().unbind())
+            },
+            |py, err| err.into_py_err(py),
+            DUCKDB_COMPLETION_DRAINER_ATTR,
+        )
+    }
+
+    #[pyo3(signature = (table, source, *, columns=None, create_if_missing=true))]
+    pub fn load_from_arrow(
+        &self,
+        py: Python<'_>,
+        table: &str,
+        source: &Bound<'_, PyAny>,
+        columns: Option<Vec<String>>,
+        create_if_missing: bool,
+    ) -> PyResult<RustDbTaskAwaitable> {
+        let load_source = extract_bulk_load_source(py, source, columns.as_deref())
+            .map_err(|e| e.into_py_err(py))?;
+        let inner = Arc::clone(&self.inner);
+        let table_owned = table.to_string();
+        let cancel_flag = inner.register_cancel_flag();
+        let mut drop_guard = CancelOnDropGuard::new(Arc::clone(&inner), Arc::clone(&cancel_flag));
+        spawn_rust_db_task_with_attr(
+            py,
+            async move {
+                let res = tokio::task::spawn_blocking(move || {
+                    inner.load_arrow_bulk(
+                        table_owned,
+                        load_source,
+                        columns,
+                        create_if_missing,
+                        &cancel_flag,
+                    )
+                })
+                .await
+                .map_err(|e| DuckDBClientError::Operational(e.to_string()))?;
+                drop_guard.mark_completed();
+                res
+            },
+            |py, rows| Ok(rows.into_pyobject(py)?.into_any().unbind()),
+            |py, err| err.into_py_err(py),
+            DUCKDB_COMPLETION_DRAINER_ATTR,
+        )
+    }
+
+    #[pyo3(signature = (*, secret_name="vtb_gcs_secret", token=None, generation=None, token_cache=None, scope=None))]
+    pub fn apply_gcs_secret(
+        &self,
+        py: Python<'_>,
+        secret_name: &str,
+        token: Option<String>,
+        generation: Option<u64>,
+        token_cache: Option<&Bound<'_, PyAny>>,
+        scope: Option<String>,
+    ) -> PyResult<RustDbTaskAwaitable> {
+        let (resolved_tok, resolved_gen) = if let Some(tok) = token {
+            (extract_bearer_token(&tok), generation.unwrap_or(0))
+        } else if let Some(cache_obj) = token_cache {
+            extract_token_and_gen_from_py(cache_obj).map_err(|e| e.into_py_err(py))?
+        } else {
+            return Err(DuckDBClientError::InvalidInput(
+                "apply_gcs_secret requires either token or token_cache".to_string(),
+            )
+            .into_py_err(py));
+        };
+        let inner = Arc::clone(&self.inner);
+        let secret_owned = secret_name.to_string();
+        let cancel_flag = inner.register_cancel_flag();
+        let mut drop_guard = CancelOnDropGuard::new(Arc::clone(&inner), Arc::clone(&cancel_flag));
+        spawn_rust_db_task_with_attr(
+            py,
+            async move {
+                let res = tokio::task::spawn_blocking(move || {
+                    inner.apply_gcs_secret_generation(
+                        &secret_owned,
+                        &resolved_tok,
+                        resolved_gen,
+                        scope.as_deref(),
+                        &cancel_flag,
+                    )
+                })
+                .await
+                .map_err(|e| DuckDBClientError::Operational(e.to_string()))?;
+                drop_guard.mark_completed();
+                res
+            },
+            |py, pair| Ok(pair.into_pyobject(py)?.into_any().unbind()),
+            |py, err| err.into_py_err(py),
+            DUCKDB_COMPLETION_DRAINER_ATTR,
+        )
+    }
+
+    pub fn begin(&self, py: Python<'_>) -> PyResult<RustDbTaskAwaitable> {
+        let inner = Arc::clone(&self.inner);
+        let cancel_flag = inner.register_cancel_flag();
+        let mut drop_guard = CancelOnDropGuard::new(Arc::clone(&inner), Arc::clone(&cancel_flag));
+        spawn_rust_db_task_with_attr(
+            py,
+            async move {
+                let res = tokio::task::spawn_blocking(move || inner.begin_tx(&cancel_flag))
+                    .await
+                    .map_err(|e| DuckDBClientError::Operational(e.to_string()))?;
+                drop_guard.mark_completed();
+                res
+            },
+            |py, ()| Ok(py.None()),
+            |py, err| err.into_py_err(py),
+            DUCKDB_COMPLETION_DRAINER_ATTR,
+        )
+    }
+
+    pub fn commit(&self, py: Python<'_>) -> PyResult<RustDbTaskAwaitable> {
+        let inner = Arc::clone(&self.inner);
+        let cancel_flag = inner.register_cancel_flag();
+        let mut drop_guard = CancelOnDropGuard::new(Arc::clone(&inner), Arc::clone(&cancel_flag));
+        spawn_rust_db_task_with_attr(
+            py,
+            async move {
+                let res = tokio::task::spawn_blocking(move || inner.commit_tx(&cancel_flag))
+                    .await
+                    .map_err(|e| DuckDBClientError::Operational(e.to_string()))?;
+                drop_guard.mark_completed();
+                res
+            },
+            |py, ()| Ok(py.None()),
+            |py, err| err.into_py_err(py),
+            DUCKDB_COMPLETION_DRAINER_ATTR,
+        )
+    }
+
+    pub fn rollback(&self, py: Python<'_>) -> PyResult<RustDbTaskAwaitable> {
+        let inner = Arc::clone(&self.inner);
+        let cancel_flag = inner.register_cancel_flag();
+        let mut drop_guard = CancelOnDropGuard::new(Arc::clone(&inner), Arc::clone(&cancel_flag));
+        spawn_rust_db_task_with_attr(
+            py,
+            async move {
+                let res = tokio::task::spawn_blocking(move || inner.rollback_tx(&cancel_flag))
+                    .await
+                    .map_err(|e| DuckDBClientError::Operational(e.to_string()))?;
+                drop_guard.mark_completed();
+                res
+            },
+            |py, ()| Ok(py.None()),
+            |py, err| err.into_py_err(py),
+            DUCKDB_COMPLETION_DRAINER_ATTR,
+        )
+    }
+
+    pub fn interrupt(&self) {
+        self.inner.interrupt_all();
+    }
+
+    pub fn cancel(&self) {
+        self.inner.interrupt_all();
+    }
+
+    pub fn close(&self, py: Python<'_>) -> PyResult<RustDbTaskAwaitable> {
+        let inner = Arc::clone(&self.inner);
+        spawn_rust_db_task_with_attr(
+            py,
+            async move {
+                let _ = tokio::task::spawn_blocking(move || inner.close_all()).await;
+                Ok::<(), DuckDBClientError>(())
+            },
+            |py, ()| Ok(py.None()),
+            |py, err| err.into_py_err(py),
+            DUCKDB_COMPLETION_DRAINER_ATTR,
+        )
+    }
+
+    pub fn to_sync(&self) -> SyncDuckDBClient {
+        SyncDuckDBClient {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+}
+
+/// Native `vertebra._duckdb` Python extension module.
+#[pymodule(gil_used = false)]
+pub fn _duckdb(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add("__version__", env!("CARGO_PKG_VERSION"))?;
+    m.add("FREE_THREADED", FREE_THREADED)?;
+    m.add("GIL_USED", false)?;
+    m.add_class::<SyncDuckDBClient>()?;
+    m.add_class::<AsyncDuckDBClient>()?;
+    m.add(
+        "__all__",
+        vec![
+            "FREE_THREADED",
+            "GIL_USED",
+            "AsyncDuckDBClient",
+            "SyncDuckDBClient",
+            "__version__",
+        ],
+    )?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_pool(max_connections: usize) -> Arc<DuckDBInner> {
+        DuckDBInner::open(
+            ":memory:",
+            false,
+            max_connections,
+            Some(256 * 1024 * 1024),
+            Some(2),
+            None,
+            true,
+            true,
+            true,
+            None,
+            None,
+            None,
+        )
+        .expect("in-memory pool should open")
+    }
+
+    #[test]
+    fn test_pool_bootstrap_and_shared_catalog() {
+        let pool = make_pool(4);
+        assert!(pool.is_in_memory);
+        assert_eq!(pool.max_connections, 4);
+        assert!(
+            pool.bootstrap_statements
+                .iter()
+                .any(|s| s.contains("memory_limit"))
+        );
+
+        let flag = pool.register_cancel_flag();
+        pool.execute_sql(
+            "CREATE TABLE items (id INTEGER PRIMARY KEY, label VARCHAR, score DOUBLE)".to_string(),
+            BoundParams::Empty,
+            &flag,
+        )
+        .expect("DDL should succeed");
+
+        let sets = vec![
+            BoundParams::Positional(vec![
+                DuckValue::Int(1),
+                DuckValue::Text("alpha".to_string()),
+                DuckValue::Double(1.5),
+            ]),
+            BoundParams::Positional(vec![
+                DuckValue::Int(2),
+                DuckValue::Text("beta".to_string()),
+                DuckValue::Double(2.5),
+            ]),
+        ];
+        let inserted = pool
+            .execute_many_sql(
+                "INSERT INTO items VALUES (?, ?, ?)".to_string(),
+                sets,
+                &flag,
+            )
+            .expect("execute_many should succeed");
+        assert_eq!(inserted, 2);
+
+        let mut named = HashMap::new();
+        named.insert("min_score".to_string(), DuckValue::Double(2.0));
+        let res = pool
+            .query_sql(
+                "SELECT id, label FROM items WHERE score >= :min_score".to_string(),
+                BoundParams::Named(named),
+                &flag,
+            )
+            .expect("named query should succeed");
+        assert_eq!(res.columns, vec!["id", "label"]);
+        assert_eq!(res.rows.len(), 1);
+    }
+
+    #[test]
+    fn test_transactions_and_error_classification() {
+        let pool = make_pool(2);
+        let flag = pool.register_cancel_flag();
+        pool.execute_sql(
+            "CREATE TABLE accounts (id INTEGER PRIMARY KEY, balance INTEGER)".to_string(),
+            BoundParams::Empty,
+            &flag,
+        )
+        .unwrap();
+
+        pool.begin_tx(&flag).unwrap();
+        assert!(pool.in_transaction.load(Ordering::Acquire));
+        pool.execute_sql(
+            "INSERT INTO accounts VALUES (1, 100)".to_string(),
+            BoundParams::Empty,
+            &flag,
+        )
+        .unwrap();
+        pool.rollback_tx(&flag).unwrap();
+        assert!(!pool.in_transaction.load(Ordering::Acquire));
+
+        let res = pool
+            .query_sql(
+                "SELECT COUNT(*) AS cnt FROM accounts".to_string(),
+                BoundParams::Empty,
+                &flag,
+            )
+            .unwrap();
+        assert_eq!(res.rows[0][0], DuckValue::BigInt(0));
+
+        pool.begin_tx(&flag).unwrap();
+        pool.execute_sql(
+            "INSERT INTO accounts VALUES (1, 250)".to_string(),
+            BoundParams::Empty,
+            &flag,
+        )
+        .unwrap();
+        pool.commit_tx(&flag).unwrap();
+
+        let dup_err = pool
+            .execute_sql(
+                "INSERT INTO accounts VALUES (1, 500)".to_string(),
+                BoundParams::Empty,
+                &flag,
+            )
+            .unwrap_err();
+        assert!(matches!(dup_err, DuckDBClientError::Integrity(_)));
+
+        let syntax_err = pool
+            .execute_sql("SELEC BROKEN".to_string(), BoundParams::Empty, &flag)
+            .unwrap_err();
+        assert!(matches!(syntax_err, DuckDBClientError::Programming(_)));
+    }
+
+    #[test]
+    fn test_arrow_shm_and_appender_roundtrip() {
+        let pool = make_pool(2);
+        let flag = pool.register_cancel_flag();
+        pool.execute_sql(
+            "CREATE TABLE metrics (id INTEGER, name VARCHAR, val DOUBLE)".to_string(),
+            BoundParams::Empty,
+            &flag,
+        )
+        .unwrap();
+        pool.execute_sql(
+            "INSERT INTO metrics VALUES (1, 'cpu', 0.75), (2, 'mem', 0.50), (3, 'io', 0.25)"
+                .to_string(),
+            BoundParams::Empty,
+            &flag,
+        )
+        .unwrap();
+
+        let payload = pool
+            .query_arrow_shm(
+                "SELECT id, name, val FROM metrics ORDER BY id".to_string(),
+                BoundParams::Empty,
+                2,
+                &flag,
+            )
+            .expect("query_arrow_shm should succeed");
+        assert_eq!(payload.row_count, 3);
+        assert!(payload.byte_len > 0);
+
+        let slice = unsafe {
+            std::slice::from_raw_parts(
+                payload.region.as_ptr(),
+                ShmArrowFrameHeader::SIZE + payload.byte_len,
+            )
+        };
+        assert_eq!(&slice[..8], b"VTBARROW");
+
+        let loaded = pool
+            .load_arrow_bulk(
+                "metrics_copy".to_string(),
+                BulkLoadSource::ArrowIpc(slice.to_vec()),
+                None,
+                true,
+                &flag,
+            )
+            .expect("load_arrow_bulk should succeed");
+        assert_eq!(loaded, 3);
+
+        let verify = pool
+            .query_sql(
+                "SELECT COUNT(*) FROM metrics_copy".to_string(),
+                BoundParams::Empty,
+                &flag,
+            )
+            .unwrap();
+        assert_eq!(verify.rows[0][0], DuckValue::BigInt(3));
+    }
+
+    #[test]
+    fn test_gcs_secret_ddl_and_generation_dedup() {
+        let pool = make_pool(1);
+        let flag = pool.register_cancel_flag();
+        let (applied_first, gen_first) = pool
+            .apply_gcs_secret_generation("vtb_gcs_secret", "token_gen_1", 1, None, &flag)
+            .expect("first secret rotation should succeed");
+        assert!(applied_first);
+        assert_eq!(gen_first, 1);
+        assert_eq!(pool.applied_token_generation.load(Ordering::Acquire), 1);
+        assert!(pool.last_gcs_secret_sql().contains("token_gen_1"));
+
+        let (applied_same, gen_same) = pool
+            .apply_gcs_secret_generation("vtb_gcs_secret", "token_gen_1", 1, None, &flag)
+            .expect("duplicate generation should be a no-op");
+        assert!(!applied_same);
+        assert_eq!(gen_same, 1);
+
+        let (applied_next, gen_next) = pool
+            .apply_gcs_secret_generation(
+                "vtb_gcs_secret",
+                "token_gen_2",
+                2,
+                Some("gs://analytics-bucket/"),
+                &flag,
+            )
+            .expect("next generation should rotate secret");
+        assert!(applied_next);
+        assert_eq!(gen_next, 2);
+        assert!(pool.last_gcs_secret_sql().contains("token_gen_2"));
+    }
+}
