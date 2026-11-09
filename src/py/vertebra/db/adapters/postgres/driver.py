@@ -381,11 +381,7 @@ class SyncPostgreSQLDriver(SyncDatabaseDriver[PostgreSQLConfig]):
         """Ensure connection pool is initialized or raise MissingDependencyError."""
         if self._pool is not None:
             return self._pool
-        psycopg_pool = ensure_module(
-            "psycopg_pool",
-            install_package="psycopg[binary,pool]",
-            extra="postgres",
-        )
+        psycopg_pool = ensure_module("psycopg_pool", install_package="psycopg[binary,pool]")
 
         kwargs: dict[str, Any] = {
             "autocommit": False,
@@ -796,18 +792,14 @@ class AsyncPostgreSQLDriver(AsyncDatabaseDriver[PostgreSQLConfig]):
                 lease.release()
 
     def _ensure_async_pool(self) -> Any:
-        """Ensure async connection pool is initialized or raise MissingDependencyError."""
+        """Verify that psycopg_pool is installed before thread-offloaded query execution.
+
+        Raises:
+            MissingDependencyError: When psycopg_pool is not installed.
+        """
         if self._pool is not None:
             return self._pool
-        asyncpg_mod = import_optional("asyncpg")
-        if asyncpg_mod is not None:
-            return asyncpg_mod
-        return ensure_module(
-            "psycopg_pool",
-            package="asyncpg",
-            install_package="asyncpg",
-            extra="postgres",
-        )
+        return ensure_module("psycopg_pool", install_package="psycopg[binary,pool]")
 
 
 def _reject_memory_dsn(dsn: str) -> None:

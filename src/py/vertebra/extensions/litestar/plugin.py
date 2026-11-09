@@ -107,7 +107,7 @@ class VertebraPlugin:
             mcp_mod = import_optional("litestar_mcp")
             litestar_mcp_cls = getattr(mcp_mod, "LitestarMCP", None) if mcp_mod is not None else None
             if litestar_mcp_cls is None:
-                raise MissingDependencyError("litestar-mcp", install_package="vertebra[mcp]", extra="mcp")
+                raise MissingDependencyError("litestar-mcp", extra="mcp")
             mcp_plugin = litestar_mcp_cls(self._config.mcp_config)
             plugins = getattr(app_config, "plugins", None)
             if isinstance(plugins, list):
@@ -118,7 +118,7 @@ class VertebraPlugin:
             mcp_mod = import_optional("litestar_mcp")
             litestar_a2a_cls = getattr(mcp_mod, "LitestarA2A", None) if mcp_mod is not None else None
             if litestar_a2a_cls is None:
-                raise MissingDependencyError("litestar-mcp", install_package="vertebra[mcp]", extra="mcp")
+                raise MissingDependencyError("litestar-mcp", extra="mcp")
             a2a_plugin = litestar_a2a_cls(self._config.a2a_config)
             plugins = getattr(app_config, "plugins", None)
             if isinstance(plugins, list):

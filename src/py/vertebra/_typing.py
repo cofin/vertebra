@@ -94,7 +94,7 @@ class MissingDependencyError(VertebraError, ImportError):
         extra: str | None = None,
     ) -> None:
         self.package = package
-        self.install_package = install_package or (f"vtb[{extra}]" if extra else package)
+        self.install_package = install_package or (f"vertebra-core[{extra}]" if extra else package)
         self.message = f"Optional dependency '{package}' is required but not installed."
         self.hint = f"Install it with: uv add {self.install_package}"
         super().__init__(self.message)

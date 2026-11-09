@@ -133,7 +133,7 @@ class WASMPluginHost:
             return
 
         if _wasmtime is None:
-            raise MissingDependencyError("wasmtime", install_package="vertebra[wasm]", extra="wasm")
+            raise MissingDependencyError("wasmtime")
 
         wt_cfg = _wasmtime.Config()
         wt_cfg.consume_fuel = True

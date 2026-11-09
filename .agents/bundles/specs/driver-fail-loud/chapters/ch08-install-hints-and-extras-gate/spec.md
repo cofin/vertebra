@@ -6,19 +6,19 @@ chapter_id: ch08-install-hints-and-extras-gate
 title: "Chapter 08: Install Hints and Extras Gate"
 description: Default MissingDependencyError hints to vertebra-core extras and replace undeclared extras and sentence-valued package names with real pip packages behind an AST extras gate.
 status: stable
-state: planned
+state: completed
 planning_status: complete
 depends_on_chapters:
   - ch04-redis-valkey-memory-removal
 replan_trigger: null
-current_task: "driver-fail-loud:ch08:t01"
+current_task: null
 plan_revision: 2
 plan_commit: fd571e3a
-state_revision: 0
-last_verified_checkpoint: null
+state_revision: 1
+last_verified_checkpoint: 616de0f2
 last_reviewed_commit: null
 created_at: "2026-11-07T00:00:00Z"
-updated_at: "2026-11-08T00:00:00Z"
+updated_at: "2026-11-09T00:00:00Z"
 generated:
   by: flow/0.28.0
   at: "2026-11-07T00:00:00Z"
@@ -259,16 +259,16 @@ def _optional_dependency_violations(
 
 ## 5. Implementation Plan
 
-- [ ] driver-fail-loud:ch08:t01 — `MissingDependencyError` defaults to `vertebra-core[<extra>]`; loader and Litestar plugin hints name real packages (tasks/t01-missing-dependency-hint-default.md)
-- [ ] driver-fail-loud:ch08:t02 — PostgreSQL, MySQL, and WASM guards name pip packages without undeclared extras; async PostgreSQL guard checks `psycopg_pool` (tasks/t02-engine-and-wasm-install-hints.md)
-- [ ] driver-fail-loud:ch08:t03 — `create_saq_plugin` and `create_mcp_plugin` pass `litestar-saq` / `litestar-mcp` as `package=` (tasks/t03-saq-and-mcp-package-names.md)
-- [ ] driver-fail-loud:ch08:t04 — litestar-queues helpers and SHM backends pass `litestar-queues`; AST gate rejects undeclared extras and malformed package literals (tasks/t04-queues-package-names-and-extras-gate.md)
+- [x] [616de0f2] driver-fail-loud:ch08:t01 — `MissingDependencyError` defaults to `vertebra-core[<extra>]`; loader and Litestar plugin hints name real packages (tasks/t01-missing-dependency-hint-default.md)
+- [x] [616de0f2] driver-fail-loud:ch08:t02 — PostgreSQL, MySQL, and WASM guards name pip packages without undeclared extras; async PostgreSQL guard checks `psycopg_pool` (tasks/t02-engine-and-wasm-install-hints.md)
+- [x] [616de0f2] driver-fail-loud:ch08:t03 — `create_saq_plugin` and `create_mcp_plugin` pass `litestar-saq` / `litestar-mcp` as `package=` (tasks/t03-saq-and-mcp-package-names.md)
+- [x] [616de0f2] driver-fail-loud:ch08:t04 — litestar-queues helpers and SHM backends pass `litestar-queues`; AST gate rejects undeclared extras and malformed package literals (tasks/t04-queues-package-names-and-extras-gate.md)
 - **Chapter Recovery Checkpoint**: `make lint && uv run --no-sync pytest src/py/tests/unit/framework/test_typing.py src/py/tests/unit/framework/test_framework_subdomains.py src/py/tests/unit/db/test_postgres_driver.py src/py/tests/unit/db/test_mysql_driver.py src/py/tests/unit/extensions/test_grpc_service.py src/py/tests/unit/build/test_packaging_and_pgo.py src/py/tests/unit/extensions/test_litestar_ecosystem_queues.py src/py/tests/unit/extensions/test_litestar_ecosystem_frontend_and_saq.py src/py/tests/unit/extensions/test_litestar_ecosystem_mcp.py -q` exits `0`.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline (`HEAD`)**: `0acdf576` — chapter planned; `0/4` tasks completed; waits on `ch04-redis-valkey-memory-removal`.
-- **Remaining Tasks**: `t01`, `t02`, `t03` (depends on `t01`), `t04` (depends on `t01`, `t02`, `t03`).
+- **Verified Baseline (`HEAD`)**: `616de0f2` — chapter completed; `4/4` tasks completed.
+- **Remaining Tasks**: none.
 - **Documentation & OKF Sync**: none owned; `ch11-docs-and-okf` documents install hints.
 - **Active Invariants**: no engine extras in `pyproject.toml`; `install_package` overrides still win over `extra`; the gate stays green after every task from `t04` on; `test_engine_driver_resolution_and_provide_driver` stays owned by ch01 / ch02.
 

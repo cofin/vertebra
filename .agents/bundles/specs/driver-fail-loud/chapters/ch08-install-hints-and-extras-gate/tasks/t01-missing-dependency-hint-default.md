@@ -5,7 +5,7 @@ chapter_id: ch08-install-hints-and-extras-gate
 title: Default MissingDependencyError hints to vertebra-core extras and fix loader and Litestar plugin hints
 description: Change the MissingDependencyError default install hint from vtb[extra] to vertebra-core[extra], drop undeclared numpy and pandas extras from the module loader, and drop the vertebra[mcp] override in VertebraPlugin.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on: []
@@ -25,18 +25,18 @@ tests:
 estimated_loc: 60
 plan_revision: 2
 plan_commit: fd571e3a
-state_revision: 0
+state_revision: 1
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-09T00:00:00Z"
+last_verified_commit: 616de0f2
+verification_evidence: "pytest test_typing.py test_framework_subdomains.py passed"
 created_at: "2026-11-07T00:00:00Z"
-updated_at: "2026-11-07T00:00:00Z"
-commit: null
+updated_at: "2026-11-09T00:00:00Z"
+commit: 616de0f2
 sources:
   - id: missing-dep
     resource: src/py/vertebra/_typing.py::MissingDependencyError
@@ -106,11 +106,11 @@ Out of scope: `ensure_pyarrow` (its `install_package="pyarrow"` and declared `ar
 
 ## Acceptance Criteria
 
-- [ ] `MissingDependencyError` defaults `install_package` to `vertebra-core[<extra>]` and no `vtb[` string remains under `src/py/vertebra` (R10).
-- [ ] `ensure_numpy` and `ensure_pandas` pass no `extra=` and name `numpy` / `pandas` (R10).
-- [ ] `VertebraPlugin.on_app_init` raises with `install_package == "vertebra-core[mcp]"` (R10).
-- [ ] Existing `"<extra>" in exc.install_package` assertions under `src/py/tests/unit/extensions` stay green.
-- [ ] Zero inline `#` comments and no new `from __future__` imports in touched files.
+- [x] `MissingDependencyError` defaults `install_package` to `vertebra-core[<extra>]` and no `vtb[` string remains under `src/py/vertebra` (R10).
+- [x] `ensure_numpy` and `ensure_pandas` pass no `extra=` and name `numpy` / `pandas` (R10).
+- [x] `VertebraPlugin.on_app_init` raises with `install_package == "vertebra-core[mcp]"` (R10).
+- [x] Existing `"<extra>" in exc.install_package` assertions under `src/py/tests/unit/extensions` stay green.
+- [x] Zero inline `#` comments and no new `from __future__` imports in touched files.
 
 ## Notes & Discoveries
 

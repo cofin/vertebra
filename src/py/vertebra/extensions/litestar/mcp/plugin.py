@@ -35,11 +35,7 @@ def create_mcp_plugin(
     **kwargs: Any,
 ) -> LitestarMCP:
     """Create a LitestarMCP plugin instance pre-configured with Vertebra accelerations."""
-    ensure_module(
-        "litestar_mcp",
-        package="litestar-mcp is required for litestar mcp integration",
-        extra="mcp",
-    )
+    ensure_module("litestar_mcp", package="litestar-mcp", extra="mcp")
     if config is not None:
         resolved_config = config
     else:

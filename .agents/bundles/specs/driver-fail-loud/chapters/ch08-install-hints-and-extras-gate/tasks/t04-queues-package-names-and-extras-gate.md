@@ -5,7 +5,7 @@ chapter_id: ch08-install-hints-and-extras-gate
 title: Replace sentence-valued litestar-queues package arguments and add the optional-dependency AST gate
 description: Replace the six sentence-valued package= literals in the litestar-queues config helpers and SHM backends with litestar-queues, and add an AST unit gate that fails on undeclared extra= literals, whitespace in package or install_package literals, and bracketed distributions other than vertebra-core.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -26,18 +26,18 @@ tests:
 estimated_loc: 150
 plan_revision: 2
 plan_commit: fd571e3a
-state_revision: 0
+state_revision: 1
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-09T00:00:00Z"
+last_verified_commit: 616de0f2
+verification_evidence: "pytest test_packaging_and_pgo.py test_litestar_ecosystem_queues.py passed"
 created_at: "2026-11-07T00:00:00Z"
-updated_at: "2026-11-08T00:00:00Z"
-commit: null
+updated_at: "2026-11-09T00:00:00Z"
+commit: 616de0f2
 sources:
   - id: queues-config
     resource: src/py/vertebra/extensions/litestar/queues/config.py::create_shm_queue_config
@@ -174,11 +174,11 @@ Iterate `sorted(source_root.rglob("*.py"))`, parse with `ast.parse(text, filenam
 
 ## Acceptance Criteria
 
-- [ ] No `package=` or `install_package=` literal under `src/py/vertebra` passed to `ensure_module` / `MissingDependencyError` contains whitespace (R10).
-- [ ] `test_optional_dependency_literals_name_declared_extras` passes and fails when an undeclared `extra=` literal is introduced (R11).
-- [ ] `test_optional_dependency_gate_reports_each_malformed_literal` pins the exact five-entry list, including the `install_package=` whitespace entry (R11).
-- [ ] `pyproject.toml` is unchanged.
-- [ ] Zero inline `#` comments in touched files.
+- [x] No `package=` or `install_package=` literal under `src/py/vertebra` passed to `ensure_module` / `MissingDependencyError` contains whitespace (R10).
+- [x] `test_optional_dependency_literals_name_declared_extras` passes and fails when an undeclared `extra=` literal is introduced (R11).
+- [x] `test_optional_dependency_gate_reports_each_malformed_literal` pins the exact five-entry list, including the `install_package=` whitespace entry (R11).
+- [x] `pyproject.toml` is unchanged.
+- [x] Zero inline `#` comments in touched files.
 
 ## Notes & Discoveries
 

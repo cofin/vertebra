@@ -235,13 +235,16 @@ def test_sync_mysql_driver_cloudsql_socket_injection() -> None:
     assert captured_socks == [mock_sock]
 
 
-def test_sync_mysql_missing_dependency_refusal() -> None:
+def test_sync_mysql_missing_dependency_refusal(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify unmocked SyncMySQLDriver raises MissingDependencyError when pymysql is missing."""
+    monkeypatch.setitem(sys.modules, "pymysql", None)
+    reset_dependency_cache("pymysql")
     cfg = MySQLConfig(dsn="mysql://localhost:3306/app")
     driver = SyncMySQLDriver(cfg)
     with pytest.raises(MissingDependencyError) as exc_info:
         driver.execute_tuples("SELECT 1")
-    assert "pymysql" in str(exc_info.value)
+    assert exc_info.value.package == "pymysql"
+    assert exc_info.value.install_package == "pymysql"
 
 
 @pytest.mark.anyio
@@ -263,13 +266,16 @@ async def test_async_mysql_driver_lifecycle() -> None:
 
 
 @pytest.mark.anyio
-async def test_async_mysql_missing_dependency_refusal() -> None:
+async def test_async_mysql_missing_dependency_refusal(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify unmocked AsyncMySQLDriver raises MissingDependencyError when asyncmy is missing."""
+    monkeypatch.setitem(sys.modules, "asyncmy", None)
+    reset_dependency_cache("asyncmy")
     cfg = MySQLConfig(dsn="mysql://localhost:3306/app")
     driver = AsyncMySQLDriver(cfg)
     with pytest.raises(MissingDependencyError) as exc_info:
         await driver.execute_tuples("SELECT 1")
-    assert "asyncmy" in str(exc_info.value)
+    assert exc_info.value.package == "asyncmy"
+    assert exc_info.value.install_package == "asyncmy"
 
 
 def test_dbapi_connection_routes_mysql_and_dialect_compilation() -> None:

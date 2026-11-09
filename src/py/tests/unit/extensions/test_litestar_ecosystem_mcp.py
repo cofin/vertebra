@@ -93,6 +93,11 @@ def test_missing_dependency_error_on_missing_mcp(monkeypatch: pytest.MonkeyPatch
         ensure_module("litestar_mcp", extra="mcp")
     assert "mcp" in exc_info.value.install_package
 
+    with pytest.raises(MissingDependencyError) as plugin_exc:
+        create_mcp_plugin(name="Vertebra Agent MCP")
+    assert plugin_exc.value.package == "litestar-mcp"
+    assert plugin_exc.value.install_package == "vertebra-core[mcp]"
+
 
 def test_litestar_mcp_delegation_no_duplicate_opt_mcp_tool_and_canonical_well_known() -> None:
     """Litestar delegates /mcp to litestar-mcp without duplicate opt['mcp_tool'] entries and serves canonical /.well-known/mcp.json."""

@@ -1,6 +1,8 @@
 """Unit tests for vertebra.build (targets, standalone, onefile), CLI flags, and tools/pgo."""
 
+import ast
 import os
+import re
 import subprocess
 import sys
 import tomllib
@@ -881,3 +883,129 @@ def test_standalone_missing_server_binary_reports_error(tmp_path: Path) -> None:
     )
     assert missing_proc.returncode == 1
     assert "vertebra-server binary not found" in missing_proc.stderr
+
+
+_DEPENDENCY_CALLEES: frozenset[str] = frozenset({"ensure_module", "MissingDependencyError"})
+_BRACKETED_DISTRIBUTION = re.compile(r"^(?P<dist>[A-Za-z0-9_.-]+)\[(?P<extra>[^\]]+)\]$")
+
+
+def test_optional_dependency_literals_name_declared_extras() -> None:
+    """Every optional-dependency literal under src/py/vertebra names a declared extra and a real package."""
+    repo_root = Path(__file__).resolve().parents[5]
+    pyproject_data = tomllib.loads((repo_root / "pyproject.toml").read_text(encoding="utf-8"))
+    declared = frozenset(pyproject_data["project"]["optional-dependencies"])
+    violations = _optional_dependency_violations(
+        repo_root / "src" / "py" / "vertebra",
+        declared,
+        relative_to=repo_root,
+    )
+    assert violations == []
+
+
+def test_optional_dependency_gate_reports_each_malformed_literal(tmp_path: Path) -> None:
+    """The gate flags undeclared extras, sentence packages, and non-vertebra-core distributions only."""
+    mod_file = tmp_path / "pkg" / "mod.py"
+    mod_file.parent.mkdir(parents=True, exist_ok=True)
+    mod_file.write_text(
+        "\n".join(
+            [
+                'ensure_module("wasmtime", extra="wasm")',
+                'module_loader.ensure_module("numpy", package="numpy is required", extra="arrow")',
+                'MissingDependencyError("litestar-mcp", install_package="vertebra[mcp]", extra="mcp")',
+                'MissingDependencyError("x", extra="sqlspec")',
+                'ensure_module("y", extra=extra_name, install_package="psycopg[binary,pool]")',
+                'print("z", extra="wasm")',
+                'MissingDependencyError("pandas is required")',
+                'MissingDependencyError("redis", install_package="redis is required")',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    violations = _optional_dependency_violations(
+        tmp_path,
+        frozenset({"arrow", "mcp", "sqlspec"}),
+        relative_to=tmp_path,
+    )
+    assert violations == [
+        "pkg/mod.py:1::ensure_module extra='wasm'",
+        "pkg/mod.py:2::ensure_module package='numpy is required'",
+        "pkg/mod.py:3::MissingDependencyError install_package='vertebra[mcp]'",
+        "pkg/mod.py:7::MissingDependencyError package='pandas is required'",
+        "pkg/mod.py:8::MissingDependencyError install_package='redis is required'",
+    ]
+
+
+def _optional_dependency_violations(
+    source_root: Path,
+    declared: frozenset[str],
+    *,
+    relative_to: Path,
+) -> list[str]:
+    """Return malformed optional-dependency literals under ``source_root``.
+
+    Args:
+        source_root: Directory scanned recursively for ``*.py`` files.
+        declared: Keys of ``[project.optional-dependencies]``.
+        relative_to: Base directory for the reported paths.
+
+    Returns:
+        Sorted ``"<path>:<line>::<callee> <keyword>=<repr(value)>"`` entries, empty when every literal is valid.
+    """
+    entries: list[str] = []
+    for path in sorted(source_root.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        rel_path = path.relative_to(relative_to).as_posix()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                entries.extend(_call_dependency_violations(node, rel_path, declared))
+    return sorted(entries)
+
+
+def _call_dependency_violations(
+    node: ast.Call,
+    rel_path: str,
+    declared: frozenset[str],
+) -> list[str]:
+    """Check one ast.Call node for optional-dependency literal violations."""
+    callee = _callee_name(node.func)
+    if callee not in _DEPENDENCY_CALLEES:
+        return []
+    violations: list[str] = []
+    if (
+        callee == "MissingDependencyError"
+        and node.args
+        and isinstance(node.args[0], ast.Constant)
+        and isinstance(node.args[0].value, str)
+        and _is_invalid_package_literal(node.args[0].value)
+    ):
+        violations.append(f"{rel_path}:{node.lineno}::{callee} package={node.args[0].value!r}")
+    for kw in node.keywords:
+        if kw.arg is None or not isinstance(kw.value, ast.Constant) or not isinstance(kw.value.value, str):
+            continue
+        val = kw.value.value
+        if kw.arg == "extra" and val not in declared:
+            violations.append(f"{rel_path}:{node.lineno}::{callee} extra={val!r}")
+        elif kw.arg in {"package", "install_package"} and _is_invalid_package_literal(val):
+            violations.append(f"{rel_path}:{node.lineno}::{callee} {kw.arg}={val!r}")
+    return violations
+
+
+def _is_invalid_package_literal(value: str) -> bool:
+    """Return True if a package or install_package literal contains whitespace or a non-vertebra-core bracketed dist."""
+    if any(ch.isspace() for ch in value):
+        return True
+    match = _BRACKETED_DISTRIBUTION.match(value)
+    if match is None:
+        return False
+    dist = match.group("dist")
+    return (dist == "vtb" or dist.startswith("vertebra")) and dist != "vertebra-core"
+
+
+def _callee_name(func: ast.expr) -> str | None:
+    """Return the trailing name of a call target (``ast.Name.id`` or ``ast.Attribute.attr``)."""
+    if isinstance(func, ast.Name):
+        return func.id
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    return None

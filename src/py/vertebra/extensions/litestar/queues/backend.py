@@ -44,7 +44,7 @@ class SHMQueueBackend(InMemoryQueueBackend):
         """Initialize the shared-memory queue backend with adaptive wakeup clamping bounds."""
         ensure_module(
             "litestar_queues",
-            package="litestar-queues is required for litestar queue integration",
+            package="litestar-queues",
             extra="queues",
         )
         super().__init__(config=config)
@@ -86,7 +86,7 @@ class SHMExecutionBackend(BaseExecutionBackend):
         """Initialize the shared-memory execution backend."""
         ensure_module(
             "litestar_queues",
-            package="litestar-queues is required for litestar queue integration",
+            package="litestar-queues",
             extra="queues",
         )
         super().__init__()

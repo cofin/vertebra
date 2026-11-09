@@ -25,7 +25,7 @@ def create_saq_plugin(
     **kwargs: Any,
 ) -> SAQPlugin:
     """Create an SAQPlugin instance configured for Vertebra applications."""
-    ensure_module("litestar_saq", package="litestar-saq is required for litestar saq integration", extra="saq")
+    ensure_module("litestar_saq", package="litestar-saq", extra="saq")
     if config is not None:
         return SAQPlugin(config)
 

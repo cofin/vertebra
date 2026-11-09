@@ -5,7 +5,7 @@ chapter_id: ch08-install-hints-and-extras-gate
 title: Replace sentence-valued package arguments in the litestar-saq and litestar-mcp plugin factories
 description: Make create_saq_plugin and create_mcp_plugin pass litestar-saq and litestar-mcp as package= instead of a sentence, and pin the resulting MissingDependencyError package and install_package in the existing SAQ and MCP ecosystem tests.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -25,18 +25,18 @@ tests:
 estimated_loc: 30
 plan_revision: 2
 plan_commit: fd571e3a
-state_revision: 0
+state_revision: 1
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-09T00:00:00Z"
+last_verified_commit: 616de0f2
+verification_evidence: "pytest test_litestar_ecosystem_frontend_and_saq.py test_litestar_ecosystem_mcp.py passed"
 created_at: "2026-11-07T00:00:00Z"
-updated_at: "2026-11-08T00:00:00Z"
-commit: null
+updated_at: "2026-11-09T00:00:00Z"
+commit: 616de0f2
 sources:
   - id: saq-plugin
     resource: src/py/vertebra/extensions/litestar/saq/plugin.py::create_saq_plugin
@@ -130,10 +130,10 @@ Test additions (existing tests extended, no new test functions):
 
 ## Acceptance Criteria
 
-- [ ] `create_saq_plugin` and `create_mcp_plugin` pass `package="litestar-saq"` / `package="litestar-mcp"` (R10).
-- [ ] Both factories raise `MissingDependencyError` with `install_package == "vertebra-core[<extra>]"` when the module is absent, pinned in the existing ecosystem tests (R10).
-- [ ] Module-level `install_package="litestar-<x>"` hints are unchanged.
-- [ ] Zero inline `#` comments in touched files.
+- [x] `create_saq_plugin` and `create_mcp_plugin` pass `package="litestar-saq"` / `package="litestar-mcp"` (R10).
+- [x] Both factories raise `MissingDependencyError` with `install_package == "vertebra-core[<extra>]"` when the module is absent, pinned in the existing ecosystem tests (R10).
+- [x] Module-level `install_package="litestar-<x>"` hints are unchanged.
+- [x] Zero inline `#` comments in touched files.
 
 ## Notes & Discoveries
 

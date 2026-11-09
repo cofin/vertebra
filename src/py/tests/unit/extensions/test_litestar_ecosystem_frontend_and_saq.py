@@ -68,3 +68,8 @@ def test_missing_dependency_errors(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(MissingDependencyError) as saq_exc:
         ensure_module("litestar_saq", extra="saq")
     assert "saq" in saq_exc.value.install_package
+
+    with pytest.raises(MissingDependencyError) as saq_plugin_exc:
+        create_saq_plugin(redis_url="redis://localhost:6379")
+    assert saq_plugin_exc.value.package == "litestar-saq"
+    assert saq_plugin_exc.value.install_package == "vertebra-core[saq]"

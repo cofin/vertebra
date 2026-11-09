@@ -275,7 +275,7 @@ class SyncMySQLDriver(SyncDatabaseDriver[MySQLConfig]):
                     return self._connect_factory()
             return self._connect_factory()
 
-        pymysql: Any = ensure_module("pymysql", install_package="pymysql", extra="mysql")
+        pymysql: Any = ensure_module("pymysql")
 
         connect_kwargs: dict[str, Any] = {
             "host": params["host"],
@@ -574,7 +574,7 @@ class AsyncMySQLDriver(AsyncDatabaseDriver[MySQLConfig]):
         """Ensure connection pool is initialized or raise MissingDependencyError."""
         if self._pool is not None:
             return self._pool
-        asyncmy: Any = ensure_module("asyncmy", install_package="asyncmy", extra="mysql")
+        asyncmy: Any = ensure_module("asyncmy")
         params = await self.config.parse_dsn_params_async()
         pool_kwargs: dict[str, Any] = {
             "host": params["host"],

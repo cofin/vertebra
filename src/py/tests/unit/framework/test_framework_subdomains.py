@@ -293,8 +293,10 @@ def test_wasm_module_config_and_litestar_mcp_a2a_delegation(monkeypatch: pytest.
         on_app_init=[],
         plugins=[],
     )
-    with pytest.raises(MissingDependencyError, match="litestar-mcp"):
+    with pytest.raises(MissingDependencyError, match="litestar-mcp") as mcp_exc:
         plugin.on_app_init(fake_app_config)
+    assert mcp_exc.value.package == "litestar-mcp"
+    assert mcp_exc.value.install_package == "vertebra-core[mcp]"
 
     fake_mcp_mod = SimpleNamespace(
         LitestarMCP=lambda cfg_obj: ("LitestarMCP", cfg_obj),

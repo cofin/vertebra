@@ -86,3 +86,13 @@ def test_missing_dependency_error_on_missing_queues(monkeypatch: pytest.MonkeyPa
     with pytest.raises(MissingDependencyError) as exc_info:
         ensure_module("litestar_queues", package="litestar-queues", extra="queues")
     assert "queues" in exc_info.value.install_package
+
+    with pytest.raises(MissingDependencyError) as shm_cfg_exc:
+        create_shm_queue_config()
+    assert shm_cfg_exc.value.package == "litestar-queues"
+    assert shm_cfg_exc.value.install_package == "vertebra-core[queues]"
+
+    with pytest.raises(MissingDependencyError) as shm_exec_exc:
+        SHMExecutionBackend()
+    assert shm_exec_exc.value.package == "litestar-queues"
+    assert shm_exec_exc.value.install_package == "vertebra-core[queues]"
