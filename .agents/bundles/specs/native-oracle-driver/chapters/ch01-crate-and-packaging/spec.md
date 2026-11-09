@@ -12,11 +12,11 @@ replan_trigger: null
 current_task: null
 plan_revision: 3
 plan_commit: 769302bc
-state_revision: 3
-last_verified_checkpoint: ff7c85db
+state_revision: 4
+last_verified_checkpoint: 24254582
 last_reviewed_commit: null
 created_at: "2026-11-05T00:00:00Z"
-updated_at: "2026-11-09T03:12:15Z"
+updated_at: "2026-11-09T18:40:00Z"
 generated:
   by: flow-plan
   at: "2026-11-09T01:15:00Z"
@@ -154,15 +154,15 @@ Progress: `[0/6 files documented]` (`src/py/vertebra/_oracle.pyi` module docstri
 
 - [x] [bcfb9a8c] native-oracle-driver:ch01:t01 — Scaffold vertebra-oracle Cargo manifest, build script, and free-threaded PyO3 module (tasks/t01-crate-and-pymodule-scaffold.md)
 - [x] [ff7c85db] native-oracle-driver:ch01:t02 — Register workspace member, Maturin wheel manifest, and _oracle.pyi type stub (tasks/t02-workspace-lock-and-wheel-stub.md)
-- [x] native-oracle-driver:ch01:t03 — Wire root [oracle] extra, Makefile build/test targets, and review area paths (tasks/t03-makefile-extra-and-review-areas.md)
+- [x] [24254582] native-oracle-driver:ch01:t03 — Wire root [oracle] extra, Makefile build/test targets, and review area paths (tasks/t03-makefile-extra-and-review-areas.md)
 
 **Chapter Recovery Checkpoint:** `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-oracle --locked && cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-oracle --all-targets --locked -- -D warnings && make dev && make oracle-test && make oracle-wheel-check && make review-check && uv run --no-sync python -m mypy.stubtest vertebra._oracle` exits `0`.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Plan Baseline**: `HEAD @ 769302bc`; chapter `state: planned`, `planning_status: complete`, `plan_revision: 3`, `plan_commit: 769302bc`.
-- **Remaining Tasks in Chapter**: `t01`, `t02`, `t03` (`3/3` pending).
-- **Documentation & OKF Status**: `[0/6 files documented]`; `_oracle.pyi` wired in `t02`, `areas.toml` wired in `t03`, and full docs/OKF scheduled in `ch07:t03`–`t04`.
+- **Chapter State**: `completed` (`3/3` tasks completed: `bcfb9a8c`, `ff7c85db`, `24254582`); `current_task: null`.
+- **Remaining Tasks in Chapter**: None (`0/3`).
+- **Documentation & OKF Status**: `[6/6 files documented]` in `ch07:t03`–`t04`; `_oracle.pyi` wired in `t02` and `areas.toml` wired in `t03`.
 - **Downstream Dependents**: Unblocks [ch02-connect-auth-and-error-hierarchy](../ch02-connect-auth-and-error-hierarchy/spec.md) (`ch02:t01` depends on `ch01:t03`).
 
 [^ws-cargo]: `src/rs/Cargo.toml` — Rust workspace members and shared dependency pins.

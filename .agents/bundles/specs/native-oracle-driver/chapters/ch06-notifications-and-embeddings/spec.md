@@ -15,11 +15,11 @@ replan_trigger: null
 current_task: null
 plan_revision: 3
 plan_commit: 769302bc
-state_revision: 3
-last_verified_checkpoint: 2f0e7454
+state_revision: 4
+last_verified_checkpoint: 6ef7e4bc
 last_reviewed_commit: null
 created_at: "2026-11-09T00:48:00Z"
-updated_at: "2026-11-09T17:36:00Z"
+updated_at: "2026-11-09T18:40:00Z"
 generated:
   by: flow-plan
   at: "2026-11-09T01:15:00Z"
@@ -159,7 +159,7 @@ Progress: `[0/6 files documented]` (user documentation in `docs/usage/databases.
 
 - [x] [1232f10d] native-oracle-driver:ch06:t01 — Implement Rust and Python AQ / TxEventQ Notification Pump (tasks/t01-rust-and-python-aq-notification-pump.md)
 - [x] [2f0e7454] native-oracle-driver:ch06:t02 — Implement OracleNotificationSource and Reconnect Backoff (tasks/t02-oracle-notification-source-and-backoff.md)
-- [x] native-oracle-driver:ch06:t03 — Align OracleEmbeddingPushdown with Native VectorView (tasks/t03-oracle-embedding-pushdown-vector-view.md)
+- [x] [6ef7e4bc] native-oracle-driver:ch06:t03 — Align OracleEmbeddingPushdown with Native VectorView (tasks/t03-oracle-embedding-pushdown-vector-view.md)
 
 **Chapter Recovery Checkpoint:** `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-oracle && uv run pytest src/py/tests/unit/db/test_oracle_adapter.py && make lint-all` exits `0`.
 

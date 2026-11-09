@@ -41,8 +41,8 @@ verification_evidence: "make docs-check (docstring scan, CLI docs check, zensica
 created_at: "2026-11-09T00:48:00Z"
 updated_at: "2026-11-09T18:31:49Z"
 completed_at: "2026-11-09T18:31:49Z"
-commit_sha: null
-commit: null
+commit_sha: b3e55782
+commit: b3e55782
 generated:
   by: flow-plan
   at: "2026-11-09T01:15:00Z"

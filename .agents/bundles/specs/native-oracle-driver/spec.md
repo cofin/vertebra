@@ -14,20 +14,20 @@ chapters:
   - ch05-pipelines-tenancy-and-apex
   - ch06-notifications-and-embeddings
   - ch07-conformance-and-okf-synthesis
-current_chapter: ch07-conformance-and-okf-synthesis
-current_task: "native-oracle-driver:ch07:t01"
+current_chapter: null
+current_task: null
 parent_prd: native-data-platform
 research:
   - ../native-data-platform/research/rust-driver-crates_20261103.md
   - ../native-data-platform/research/gap-analysis_20261103.md
 plan_revision: 3
 plan_commit: 769302bc
-state_revision: 5
-last_verified_checkpoint: 2f0e7454
+state_revision: 6
+last_verified_checkpoint: 55ce2940
 last_reviewed_chapter: null
 last_reviewed_commit: null
 created_at: "2026-11-05T00:00:00Z"
-updated_at: "2026-11-09T17:36:00Z"
+updated_at: "2026-11-09T20:48:51Z"
 generated:
   by: flow-plan
   at: "2026-11-09T01:28:30Z"
@@ -177,7 +177,7 @@ flowchart LR
 
 ## 3. Documentation & OKF Knowledge Plan
 
-Progress: `[0/6 files documented]` (owned by [ch07-conformance-and-okf-synthesis](chapters/ch07-conformance-and-okf-synthesis/spec.md) tasks `ch07:t03` and `ch07:t04`).
+Progress: `[6/6 files documented]` (owned by [ch07-conformance-and-okf-synthesis](chapters/ch07-conformance-and-okf-synthesis/spec.md) tasks `ch07:t03` and `ch07:t04`).
 
 - `docs/usage/databases.md` (`ch07:t03`) — Document `vertebra-core[oracle]` installation, `OracleConfig` descriptor precedence, Autonomous Wallet mTLS, 26ai `VECTOR` and `OSON` usage, delayed-commit `pipeline()`, VPD trusted-package and `CLIENT_IDENTIFIER` tenancy, and `OracleNotificationSource`.
 - `README.md` (`ch07:t03`) — Register `vertebra-oracle` (`_oracle`), the `[oracle]` optional extra, and `oracle-test` / `oracle-wheel-check` Make targets.
@@ -215,17 +215,17 @@ Every worksheet (`22` total across `7` chapters) executes in one bounded invocat
 - [x] ch04-pools-drcp-and-session-piggyback — Native Sync/Async Pools, DRCP Purity/Tagging, and TTC Session Piggyback (chapters/ch04-pools-drcp-and-session-piggyback/spec.md)
 - [x] ch05-pipelines-tenancy-and-apex — Transaction/Savepoint Pipelines, VPD Trusted Tenancy, and APEX Session Bridge (chapters/ch05-pipelines-tenancy-and-apex/spec.md)
 - [x] ch06-notifications-and-embeddings — TxEventQ / AQ Notification Stream and Vector Embedding Pushdown (chapters/ch06-notifications-and-embeddings/spec.md)
-- [~] ch07-conformance-and-okf-synthesis — Live Oracle 26ai Free Conformance Suite, Wheel Isolation Gate, and OKF Synthesis (chapters/ch07-conformance-and-okf-synthesis/spec.md)
+- [x] ch07-conformance-and-okf-synthesis — Live Oracle 26ai Free Conformance Suite, Wheel Isolation Gate, and OKF Synthesis (chapters/ch07-conformance-and-okf-synthesis/spec.md)
 
 **Flow Recovery Checkpoint:** `uv lock --check && make lint-all && make rs-test && make py-test && make oracle-test && make oracle-wheel-check && make docs-check && make review-check && make review-route` exits `0` with zero Oracle skips or xfails, followed by clean correctness and fresh independent quality reviews before `/flow:finish native-oracle-driver` and `/flow:archive native-oracle-driver`.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Plan Baseline**: `HEAD @ 769302bc`; `state: planned`, `has_chapters: true`, `plan_revision: 3`, `plan_commit: 769302bc`.
-- **Upstream Flow Dependency**: [`driver-fail-loud`](../driver-fail-loud/spec.md) (`plan_commit: fd571e3a`) completes before `ch01` starts [^fail-loud-baseline].
-- **Active Chapter & Next Task**: [ch01-crate-and-packaging](chapters/ch01-crate-and-packaging/spec.md) (`native-oracle-driver:ch01:t01`); all `7` chapters (`22` vertical-slice tasks) are authored upfront (`0/22` completed).
-- **Documentation & OKF Status**: `[0/6 files documented]`, scheduled in [ch07-conformance-and-okf-synthesis](chapters/ch07-conformance-and-okf-synthesis/spec.md) (`ch07:t03`–`t04`).
-- **Delivery & Next Action**: Complete single-PR delivery on `feat/native-oracle-driver`.
+- **Plan Baseline**: `HEAD @ 769302bc`; `state: in_progress` (pending closeout review and archive), `has_chapters: true`, `plan_revision: 3`, `plan_commit: 769302bc`, `last_verified_checkpoint: 55ce2940`.
+- **Upstream Flow Dependency**: [`driver-fail-loud`](../driver-fail-loud/spec.md) (`plan_commit: fd571e3a`) fail-loud `vertebra._oracle` contract replaced with live native execution [^fail-loud-baseline].
+- **Active Chapter & Next Task**: None (`current_chapter: null`, `current_task: null`; `7/7` chapters and `22/22` vertical-slice tasks completed on `feat/native-oracle-driver`).
+- **Documentation & OKF Status**: `[6/6 files documented]` across user guides and OKF v0.2 knowledge chapters (`ch07:t03`–`t04`).
+- **Delivery & Next Action**: Ready for `/flow:review`, `/flow:finish native-oracle-driver`, and `/flow:archive native-oracle-driver` on `feat/native-oracle-driver`.
 
 [^fail-loud-baseline]: `.agents/bundles/specs/driver-fail-loud/spec.md` — Upstream flow removing Oracle `sqlite3` stand-in and dead `vertebra-db` TNS/pool stubs.
 [^crate-research]: `.agents/bundles/specs/native-data-platform/research/rust-driver-crates_20261103.md` — Primary-source evaluation of official pure-Rust `oracledb =26.0.0-beta.5` crate.

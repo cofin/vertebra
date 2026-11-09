@@ -6,7 +6,7 @@ chapter_id: ch07-conformance-and-okf-synthesis
 title: "Task 04: Synchronize OKF Data Domain Chapters and Tech Stack"
 description: Update database-drivers-and-dialers.md, query-pipeline-cdc-and-tenancy.md, and tech-stack.md with the shipped vertebra-oracle architecture, crate-local Arrow 59 SHM boundary, delayed-commit pipelines, and VPD reset-or-evict tenancy.
 status: stable
-state: pending
+state: completed
 priority: P1
 owner: null
 depends_on:
@@ -26,18 +26,18 @@ verification_strategy: documentation_validation
 estimated_loc: 140
 plan_revision: 3
 plan_commit: 769302bc
-state_revision: 0
+state_revision: 1
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-09T20:48:51Z"
+last_verified_commit: 55ce2940
+verification_evidence: "tools.scripts.review_setup validate (OKF v0.2 frontmatter, <=200-line budgets, <=40-line truth blocks, sources/footnote parity, privacy gate), 44/44 live Oracle 26ai Free conformance/native tests, 274/274 offline unit tests, verify_oracle_wheel.py, mypy, ruff, and docstring gates exited 0"
 created_at: "2026-11-09T00:48:00Z"
-updated_at: "2026-11-09T01:28:30Z"
-completed_at: null
+updated_at: "2026-11-09T20:48:51Z"
+completed_at: "2026-11-09T20:48:51Z"
 commit_sha: null
 commit: null
 generated:
@@ -115,13 +115,13 @@ make lint-all
 
 ## Acceptance Criteria
 
-- [ ] `.agents/bundles/knowledge/domains/data/database-drivers-and-dialers.md` documents `vertebra-oracle`, worker-thread completion, crate-local `arrow 59` SHM transfer, Wallet mTLS, and DRCP pooling within `<= 200` lines [^okf-drivers].
-- [ ] `.agents/bundles/knowledge/domains/data/query-pipeline-cdc-and-tenancy.md` documents Oracle delayed-commit pipelines, VPD trusted-package + `SET_IDENTIFIER` reset-or-evict tenancy, and `OracleNotificationSource` within `<= 200` lines [^okf-pipeline].
-- [ ] `.agents/bundles/product/tech-stack.md` registers `vertebra-oracle` (`vertebra._oracle`, `oracledb = "=26.0.0-beta.5"`, crate-local `arrow 59`) within `<= 200` lines, and `make review-check` exits `0` [^okf-tech-stack].
+- [x] `.agents/bundles/knowledge/domains/data/database-drivers-and-dialers.md` documents `vertebra-oracle`, worker-thread completion, crate-local `arrow 59` SHM transfer, Wallet mTLS, and DRCP pooling within `<= 200` lines [^okf-drivers].
+- [x] `.agents/bundles/knowledge/domains/data/query-pipeline-cdc-and-tenancy.md` documents Oracle delayed-commit pipelines, VPD trusted-package + `SET_IDENTIFIER` reset-or-evict tenancy, and `OracleNotificationSource` within `<= 200` lines [^okf-pipeline].
+- [x] `.agents/bundles/product/tech-stack.md` registers `vertebra-oracle` (`vertebra._oracle`, `oracledb = "=26.0.0-beta.5"`, crate-local `arrow 59`) within `<= 200` lines, and `make review-check` exits `0` [^okf-tech-stack].
 
 ## Notes & Discoveries
 
-None yet.
+- Verified against live Oracle Database 26ai Free (`23.26.3.0.0`): `oracledb` `26.0.0-beta.5` wraps its `TcpStream` unilaterally without exposing `Connection::break_execution()`, uses 32-bit TNS header lengths after `Accept`, drops unsolicited server `MARKER_TYPE_RESET` packets unless echoed back, and carries an upstream `todo!()` inside `ErrorInfo::deserialize` when cancelling PL/SQL `DBMS_AQ.DEQUEUE`. Documented `OracleBreakHandle`'s out-of-band `ALTER SYSTEM CANCEL SQL` + single-host TCP TNS `MARKER_TYPE_RESET` relay (`dialer.rs`) + socket-shutdown fallback, 1s-sliced server-blocking `DBMS_AQ.DEQUEUE` waits (`notify.rs`), session `TIME_ZONE = '+00:00'` UTC normalization, and row-decoded Arrow 59 builders for named binds, `JSON`, and `VECTOR` across both data domain OKF chapters.
 
 [^ora-contracts]: `.agents/bundles/specs/native-oracle-driver/contracts.md` — Public contracts for `vertebra-oracle`, Arrow 59 SHM, pipelines, and VPD tenancy.
 [^okf-drivers]: `.agents/bundles/knowledge/domains/data/database-drivers-and-dialers.md` — OKF data domain chapter for database drivers and dialers.

@@ -13,11 +13,11 @@ replan_trigger: null
 current_task: null
 plan_revision: 3
 plan_commit: 769302bc
-state_revision: 0
-last_verified_checkpoint: null
+state_revision: 3
+last_verified_checkpoint: 5de83256
 last_reviewed_commit: null
 created_at: "2026-11-05T00:00:00Z"
-updated_at: "2026-11-09T01:28:30Z"
+updated_at: "2026-11-09T18:40:00Z"
 generated:
   by: flow-plan
   at: "2026-11-09T01:15:00Z"
@@ -167,16 +167,16 @@ Progress: `[0/6 files documented]` (public documentation in `docs/usage/database
 
 ## 5. Implementation Plan
 
-- [x] native-oracle-driver:ch05:t01 — Implement OraclePipelineOutcome and delayed-commit SyncOraclePipeline and AsyncOraclePipeline (tasks/t01-delayed-commit-sync-and-async-pipelines.md)
-- [x] native-oracle-driver:ch05:t02 — Implement VPD trusted-package and SET_IDENTIFIER tenancy with pool reset-or-evict (tasks/t02-vpd-trusted-tenancy-and-pool-reset.md)
-- [x] native-oracle-driver:ch05:t03 — Wire SQLSpec NAMED_COLON parameter style and APEX OracleSessionManager tenancy (tasks/t03-sqlspec-named-colon-and-apex-session.md)
+- [x] [90121042] native-oracle-driver:ch05:t01 — Implement OraclePipelineOutcome and delayed-commit SyncOraclePipeline and AsyncOraclePipeline (tasks/t01-delayed-commit-sync-and-async-pipelines.md)
+- [x] [197d82cc] native-oracle-driver:ch05:t02 — Implement VPD trusted-package and SET_IDENTIFIER tenancy with pool reset-or-evict (tasks/t02-vpd-trusted-tenancy-and-pool-reset.md)
+- [x] [5de83256] native-oracle-driver:ch05:t03 — Wire SQLSpec NAMED_COLON parameter style and APEX OracleSessionManager tenancy (tasks/t03-sqlspec-named-colon-and-apex-session.md)
 
 **Chapter Recovery Checkpoint:** `make dev && cargo test --manifest-path src/rs/Cargo.toml -p vertebra-oracle --locked && uv run --no-sync python -m mypy.stubtest vertebra._oracle && uv run --no-sync pytest src/py/tests/unit/db/test_oracle_adapter.py src/py/tests/unit/extensions/test_oracle_apex.py -q` exits `0`.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Plan Baseline**: `HEAD @ 769302bc`; `state: planned`, `planning_status: complete`, `plan_revision: 3`, `plan_commit: 769302bc`.
-- **Remaining Tasks in Chapter**: `t01`, `t02`, `t03` (`3/3` pending).
+- **Chapter State**: `completed` (`3/3` tasks completed: `90121042`, `197d82cc`, `5de83256`); `current_task: null`.
+- **Remaining Tasks in Chapter**: None (`0/3`).
 - **Downstream Dependents**: Unblocks [ch06-notifications-and-embeddings](../ch06-notifications-and-embeddings/spec.md) (`ch06:t01` depends on `ch05:t03`).
 
 [^ora-contracts]: `.agents/bundles/specs/native-oracle-driver/contracts.md` — Public `OraclePipelineOutcome`, `SyncOraclePipeline`, VPD tenancy, and extension contracts.

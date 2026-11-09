@@ -13,11 +13,11 @@ replan_trigger: null
 current_task: null
 plan_revision: 3
 plan_commit: 769302bc
-state_revision: 3
-last_verified_checkpoint: 95be1327
+state_revision: 4
+last_verified_checkpoint: 3519d07b
 last_reviewed_commit: null
 created_at: "2026-11-09T00:56:00Z"
-updated_at: "2026-11-09T15:45:00Z"
+updated_at: "2026-11-09T18:40:00Z"
 generated:
   by: flow-plan
   at: "2026-11-09T01:15:00Z"
@@ -202,7 +202,7 @@ Progress: `[0/6 files documented]` (all user documentation and OKF v0.2 knowledg
 
 - [x] [a08e5f62] native-oracle-driver:ch03:t01 — Implement OracleColumn, OracleQueryResult, and scalar, temporal, inline LOB, OSON, and VECTOR codecs across Rust and Python (tasks/t01-scalar-lob-oson-and-vector-codecs.md)
 - [x] [95be1327] native-oracle-driver:ch03:t02 — Implement positional and named bind lowering, single-round-trip DML RETURNING out-bind capture, execute_many batching, and enable_lowercase_column_names normalization (tasks/t02-binds-returning-and-lowercase-columns.md)
-- [x] native-oracle-driver:ch03:t03 — Implement crate-local arrow 59 batches_to_arrow_ipc to construct_py_arrow_cursor SHM bridge and wire select_to_arrow, stream_arrow_batches, and load_from_arrow (tasks/t03-arrow59-shm-and-load-from-arrow.md)
+- [x] [3519d07b] native-oracle-driver:ch03:t03 — Implement crate-local arrow 59 batches_to_arrow_ipc to construct_py_arrow_cursor SHM bridge and wire select_to_arrow, stream_arrow_batches, and load_from_arrow (tasks/t03-arrow59-shm-and-load-from-arrow.md)
 
 **Chapter Recovery Checkpoint:**
 ```bash
@@ -214,10 +214,10 @@ uv run --no-sync pytest src/py/tests/unit/db/test_oracle_adapter.py -q
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Completed Tasks**: None (`0/3`).
-- **Active Frontier**: [t01](tasks/t01-scalar-lob-oson-and-vector-codecs.md) (`native-oracle-driver:ch03:t01`, waiting on `ch02-connect-auth-and-error-hierarchy`).
-- **Remaining Tasks**: [t01](tasks/t01-scalar-lob-oson-and-vector-codecs.md), [t02](tasks/t02-binds-returning-and-lowercase-columns.md), and [t03](tasks/t03-arrow59-shm-and-load-from-arrow.md).
-- **Documentation & OKF Status**: `[0/6 files documented]`, scheduled in [ch07-conformance-and-okf-synthesis](../ch07-conformance-and-okf-synthesis/spec.md) (`ch07:t03`–`t04`).
+- **Completed Tasks**: [t01](tasks/t01-scalar-lob-oson-and-vector-codecs.md) (`a08e5f62`), [t02](tasks/t02-binds-returning-and-lowercase-columns.md) (`95be1327`), and [t03](tasks/t03-arrow59-shm-and-load-from-arrow.md) (`3519d07b`) (`3/3`).
+- **Active Frontier**: None (`ch03-types-bind-and-arrow-shm` complete).
+- **Remaining Tasks**: None (`0/3`).
+- **Documentation & OKF Status**: `[6/6 files documented]` in [ch07-conformance-and-okf-synthesis](../ch07-conformance-and-okf-synthesis/spec.md) (`ch07:t03`–`t04`).
 
 [^ora-contracts]: `.agents/bundles/specs/native-oracle-driver/contracts.md` — Public interface, FFI, type, pooling, tenancy, and ownership contracts.
 [^ora-core]: `src/py/vertebra/db/adapters/oracle/core.py::OracleCore` — Oracle OSON, VECTOR, TNS, and session context helpers.

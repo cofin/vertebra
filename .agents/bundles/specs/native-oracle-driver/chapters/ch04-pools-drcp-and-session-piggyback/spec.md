@@ -13,11 +13,11 @@ replan_trigger: null
 current_task: null
 plan_revision: 3
 plan_commit: 769302bc
-state_revision: 3
-last_verified_checkpoint: 0f100bd2
+state_revision: 4
+last_verified_checkpoint: 07f60db5
 last_reviewed_commit: null
 created_at: "2026-11-09T00:58:00Z"
-updated_at: "2026-11-09T16:17:00Z"
+updated_at: "2026-11-09T18:40:00Z"
 generated:
   by: flow-plan
   at: "2026-11-09T01:15:00Z"
@@ -242,7 +242,7 @@ Progress: `[0/6 files documented]` (all user documentation and OKF v0.2 knowledg
 
 - [x] [efe63ae5] native-oracle-driver:ch04:t01 — Implement native Rust SyncOraclePool and AsyncOraclePool in src/rs/vertebra-oracle/src/pool.rs, register them in lib.rs, and update _oracle.pyi (tasks/t01-rust-physical-connection-pool.md)
 - [x] [0f100bd2] native-oracle-driver:ch04:t02 — Implement DRCP cclass, purity (SELF vs NEW), and connection_tag tracking plus zero-extra-round-trip TTC piggyback (OracleSessionAttrs) in pool.rs, client.rs, and _oracle.pyi (tasks/t02-drcp-purity-tagging-and-ttc-piggyback.md)
-- [x] [pending] native-oracle-driver:ch04:t03 — Wire Python SyncOraclePool, AsyncOraclePool, SyncOracleDriver, and AsyncOracleDriver lease management, native set_session_attrs/last_piggyback_frame, ContextVar transaction pinning, and savepoint methods (tasks/t03-python-pool-and-driver-lease-facades.md)
+- [x] [07f60db5] native-oracle-driver:ch04:t03 — Wire Python SyncOraclePool, AsyncOraclePool, SyncOracleDriver, and AsyncOracleDriver lease management, native set_session_attrs/last_piggyback_frame, ContextVar transaction pinning, and savepoint methods (tasks/t03-python-pool-and-driver-lease-facades.md)
 
 **Chapter Recovery Checkpoint:**
 ```bash
