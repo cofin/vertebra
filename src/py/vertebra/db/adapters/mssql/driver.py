@@ -14,6 +14,7 @@ from vertebra.db.adapters.mssql.core import (
     MSSQL_DIALECT_TAG,
     MSSQLCore,
 )
+from vertebra.db.adapters.mssql.pipeline import AsyncMSSQLPipeline, SyncMSSQLPipeline
 from vertebra.db.arrow import (
     ARROW_SHM_THRESHOLD_ROWS,
     ArrowCursor,
@@ -95,9 +96,11 @@ class SyncMSSQLDriver(SyncDatabaseDriver[MSSQLConfig]):
     @property
     def in_transaction(self) -> bool:
         """Return whether an explicit transaction is currently open."""
+        if self._in_transaction:
+            return True
         if hasattr(self._client, "in_transaction"):
             return bool(self._client.in_transaction)
-        return self._in_transaction
+        return False
 
     @property
     def routing_destination(self) -> tuple[str, int] | None:
@@ -106,6 +109,10 @@ class SyncMSSQLDriver(SyncDatabaseDriver[MSSQLConfig]):
         if dest is not None and isinstance(dest, tuple) and len(dest) == 2:
             return str(dest[0]), int(dest[1])
         return None
+
+    def pipeline(self) -> SyncMSSQLPipeline:
+        """Create a synchronous transactional query pipeline bound to this driver."""
+        return SyncMSSQLPipeline(self)
 
     def connect(self) -> Self:
         """Ensure the underlying native `SyncMSSQLClient` is ready."""
@@ -120,8 +127,8 @@ class SyncMSSQLDriver(SyncDatabaseDriver[MSSQLConfig]):
 
     def begin(self, isolation_level: str | None = None) -> None:
         """Begin an explicit SQL Server transaction."""
-        if isolation_level is not None and hasattr(self._client, "begin_transaction"):
-            self._client.begin_transaction(isolation_level)
+        if isolation_level is not None:
+            self._client.begin(isolation_level)
         else:
             self._client.begin()
         self._in_transaction = True
@@ -236,6 +243,12 @@ class SyncMSSQLDriver(SyncDatabaseDriver[MSSQLConfig]):
         _ = kwargs
         grant = self._prepare_and_lease(sql)
         try:
+            if hasattr(self._client, "execute_with_description"):
+                rows, cols = self._client.execute_with_description(
+                    self._last_rewritten_sql,
+                    parameters,
+                )
+                return list(rows), tuple(cols)
             raw = self._client.query(self._last_rewritten_sql, parameters)
             cols = tuple(str(c) for c in raw.get("columns", ()))
             rows = [tuple(r) for r in raw.get("rows", ())]
@@ -496,9 +509,11 @@ class AsyncMSSQLDriver(AsyncDatabaseDriver[MSSQLConfig]):
     @property
     def in_transaction(self) -> bool:
         """Return whether an explicit transaction is currently open."""
+        if self._in_transaction:
+            return True
         if hasattr(self._client, "in_transaction"):
             return bool(self._client.in_transaction)
-        return self._in_transaction
+        return False
 
     @property
     def routing_destination(self) -> tuple[str, int] | None:
@@ -507,6 +522,10 @@ class AsyncMSSQLDriver(AsyncDatabaseDriver[MSSQLConfig]):
         if dest is not None and isinstance(dest, tuple) and len(dest) == 2:
             return str(dest[0]), int(dest[1])
         return None
+
+    def pipeline(self) -> AsyncMSSQLPipeline:
+        """Create an asynchronous transactional query pipeline bound to this driver."""
+        return AsyncMSSQLPipeline(self)
 
     async def connect(self) -> Self:
         """Ensure the underlying native `AsyncMSSQLClient` is ready."""
@@ -521,8 +540,8 @@ class AsyncMSSQLDriver(AsyncDatabaseDriver[MSSQLConfig]):
 
     async def begin(self, isolation_level: str | None = None) -> None:
         """Begin an explicit SQL Server transaction."""
-        if isolation_level is not None and hasattr(self._client, "begin_transaction"):
-            await self._client.begin_transaction(isolation_level)
+        if isolation_level is not None:
+            await self._client.begin(isolation_level)
         else:
             await self._client.begin()
         self._in_transaction = True
@@ -617,6 +636,12 @@ class AsyncMSSQLDriver(AsyncDatabaseDriver[MSSQLConfig]):
         _ = kwargs
         grant = self._prepare_and_lease(sql)
         try:
+            if hasattr(self._client, "execute_with_description"):
+                rows, cols = await self._client.execute_with_description(
+                    self._last_rewritten_sql,
+                    parameters,
+                )
+                return list(rows), tuple(cols)
             raw = await self._client.query(self._last_rewritten_sql, parameters)
             cols = tuple(str(c) for c in raw.get("columns", ()))
             rows = [tuple(r) for r in raw.get("rows", ())]

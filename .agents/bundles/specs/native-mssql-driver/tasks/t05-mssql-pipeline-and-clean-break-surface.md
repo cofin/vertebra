@@ -5,17 +5,17 @@ flow_id: native-mssql-driver
 title: "Implement SyncMSSQLPipeline / AsyncMSSQLPipeline and clean-break PyO3 method surface (PY-07)"
 description: "Remove duplicate begin_transaction / commit_transaction / rollback_transaction aliases on SyncMSSQLClient and AsyncMSSQLClient, add execute_with_description (preserving 0-row COLMETADATA column names), connect, and __repr__, complete src/py/vertebra/_mssql.pyi for zero-error mypy.stubtest, and implement SyncMSSQLPipeline and AsyncMSSQLPipeline in src/py/vertebra/db/adapters/mssql/pipeline.py with SAVE TRANSACTION savepoint nesting."
 status: stable
-state: pending
+state: completed
 verification_strategy: tdd
 depends_on:
   - t04
 plan_revision: 1
-state_revision: 1
+state_revision: 2
 commit_sha: null
-claimed_at: null
-completed_at: null
+claimed_at: "2026-11-09T16:03:00Z"
+completed_at: "2026-11-09T16:12:00Z"
 created_at: "2026-11-09T15:36:00Z"
-updated_at: "2026-11-09T15:36:00Z"
+updated_at: "2026-11-09T16:12:00Z"
 reads:
   - src/rs/vertebra-mssql/src/lib.rs
   - src/py/vertebra/_mssql.pyi
@@ -65,8 +65,8 @@ Aligns `vertebra._mssql` with `PY-07` clean-break method naming (removing `begin
 
 ## Acceptance Criteria
 
-- [ ] `mypy.stubtest vertebra._mssql` passes with 0 errors.
-- [ ] `pytest src/py/tests/unit/db/test_mssql_driver.py src/py/tests/integration/db/test_driver_conformance.py` passes.
+- [x] `mypy.stubtest vertebra._mssql` passes with 0 errors.
+- [x] `pytest src/py/tests/unit/db/test_mssql_driver.py src/py/tests/integration/db/test_driver_conformance.py` passes.
 
 [^mssql-lib]: `src/rs/vertebra-mssql/src/lib.rs` — PyO3 module bindings for vertebra._mssql.
 [^capabilities-py]: `src/py/vertebra/db/driver/capabilities.py` — SyncPipeline, AsyncPipeline, SyncPipelineCapable, and AsyncPipelineCapable protocols.

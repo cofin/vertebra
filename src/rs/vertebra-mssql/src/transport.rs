@@ -85,6 +85,7 @@ pub struct MssqlSession {
     cancel_state: Arc<MssqlCancelState>,
     broken: bool,
     in_transaction: bool,
+    routed: bool,
     routed_host: String,
     routed_port: u16,
     query_timeout: Duration,
@@ -117,6 +118,7 @@ impl MssqlSession {
                         cancel_state: Arc::new(MssqlCancelState::new()),
                         broken: false,
                         in_transaction: false,
+                        routed: hop > 0,
                         routed_host: target_host,
                         routed_port: target_port,
                         query_timeout: config.query_timeout,
@@ -175,6 +177,15 @@ impl MssqlSession {
     /// Return `true` when this session has an open transaction.
     pub const fn in_transaction(&self) -> bool {
         self.in_transaction
+    }
+
+    /// Return `Some((host, port))` when this session followed a TDS `ENVCHANGE` routing redirect.
+    pub fn routing_destination(&self) -> Option<(String, u16)> {
+        if self.routed {
+            Some((self.routed_host.clone(), self.routed_port))
+        } else {
+            None
+        }
     }
 
     /// Return a cloneable [`MssqlCancelHandle`] for out-of-band `ATTENTION` cancellation.

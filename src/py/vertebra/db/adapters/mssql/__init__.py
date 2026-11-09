@@ -12,15 +12,18 @@ if TYPE_CHECKING:
         rewrite_mssql_placeholders,
     )
     from vertebra.db.adapters.mssql.driver import AsyncMSSQLDriver, SyncMSSQLDriver
+    from vertebra.db.adapters.mssql.pipeline import AsyncMSSQLPipeline, SyncMSSQLPipeline
     from vertebra.db.arrow import ArrowCursor
 
 __all__ = (
     "MSSQL_DIALECT_TAG",
     "ArrowCursor",
     "AsyncMSSQLDriver",
+    "AsyncMSSQLPipeline",
     "MSSQLConfig",
     "MSSQLCore",
     "SyncMSSQLDriver",
+    "SyncMSSQLPipeline",
     "rewrite_mssql_placeholders",
 )
 
@@ -28,6 +31,7 @@ __lazy_modules__ = [
     "vertebra.db.adapters.mssql.config",
     "vertebra.db.adapters.mssql.core",
     "vertebra.db.adapters.mssql.driver",
+    "vertebra.db.adapters.mssql.pipeline",
     "vertebra.db.arrow",
 ]
 
@@ -35,9 +39,11 @@ _EXPORT_MAP: dict[str, tuple[str, str]] = {
     "MSSQL_DIALECT_TAG": ("vertebra.db.adapters.mssql.core", "MSSQL_DIALECT_TAG"),
     "ArrowCursor": ("vertebra.db.arrow", "ArrowCursor"),
     "AsyncMSSQLDriver": ("vertebra.db.adapters.mssql.driver", "AsyncMSSQLDriver"),
+    "AsyncMSSQLPipeline": ("vertebra.db.adapters.mssql.pipeline", "AsyncMSSQLPipeline"),
     "MSSQLConfig": ("vertebra.db.adapters.mssql.config", "MSSQLConfig"),
     "MSSQLCore": ("vertebra.db.adapters.mssql.core", "MSSQLCore"),
     "SyncMSSQLDriver": ("vertebra.db.adapters.mssql.driver", "SyncMSSQLDriver"),
+    "SyncMSSQLPipeline": ("vertebra.db.adapters.mssql.pipeline", "SyncMSSQLPipeline"),
     "rewrite_mssql_placeholders": ("vertebra.db.adapters.mssql.core", "rewrite_mssql_placeholders"),
 }
 

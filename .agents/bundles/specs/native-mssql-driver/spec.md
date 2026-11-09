@@ -14,11 +14,11 @@ research:
   - ../integration-remediation/research/audit-findings_20261103.md
 plan_revision: 4
 plan_commit: fd571e3a
-state_revision: 5
-current_task: "native-mssql-driver:t05"
-last_verified_checkpoint: 62548e1e
+state_revision: 6
+current_task: "native-mssql-driver:t06"
+last_verified_checkpoint: 974501d1
 created_at: "2026-11-03T04:05:00Z"
-updated_at: "2026-11-09T15:48:00Z"
+updated_at: "2026-11-09T16:12:00Z"
 generated:
   by: flow-setup
   at: "2026-11-07T04:15:00Z"
@@ -99,9 +99,9 @@ See [crate research](../native-data-platform/research/rust-driver-crates_2026110
 - [x] [3b57e70f] [t01: Scaffold `vertebra-mssql` crate, TDS `PRELOGIN`/TLS/`LOGIN7`, and Cloud SQL `:3307` mTLS](tasks/t01-vertebra-mssql-crate-prelogin-and-tls.md)
 - [x] [5d194452] [t02: Implement MSSQL SQL batch, `sp_executesql` RPC, transactions, `ATTENTION` cancellation, and `DatabaseError` mapping](tasks/t02-mssql-rpc-transactions-attention-and-errors.md)
 - [x] [62548e1e] [t03: Implement MSSQL codecs, `VTBARROW` `ShmCapsule` export, `BulkLoad` `load_from_arrow`, and `BrokerEngineBackend` registration](tasks/t03-mssql-codecs-vtbarrow-and-bulk-load.md)
-- [x] [t04: Cut Python `SyncMSSQLDriver` and `AsyncMSSQLDriver` over to `vertebra._mssql`, update tests, and refresh docs](tasks/t04-python-mssql-driver-cutover-and-docs.md)
-- [~] [t05: Implement `SyncMSSQLPipeline` / `AsyncMSSQLPipeline` and clean-break PyO3 method surface (`PY-07`)](tasks/t05-mssql-pipeline-and-clean-break-surface.md)
-- [ ] [t06: Harden in-memory config validation, Cloud SQL `:3307` dialer wiring, secret redaction, and wheel/GIL test parity](tasks/t06-mssql-config-hardening-dialer-and-wheel-parity.md)
+- [x] [974501d1] [t04: Cut Python `SyncMSSQLDriver` and `AsyncMSSQLDriver` over to `vertebra._mssql`, update tests, and refresh docs](tasks/t04-python-mssql-driver-cutover-and-docs.md)
+- [x] [t05: Implement `SyncMSSQLPipeline` / `AsyncMSSQLPipeline` and clean-break PyO3 method surface (`PY-07`)](tasks/t05-mssql-pipeline-and-clean-break-surface.md)
+- [~] [t06: Harden in-memory config validation, Cloud SQL `:3307` dialer wiring, secret redaction, and wheel/GIL test parity](tasks/t06-mssql-config-hardening-dialer-and-wheel-parity.md)
 
 [^mssql-rs]: `src/rs/vertebra-db/src/mssql/mod.rs::rewrite_mssql_placeholders` — `@P1` placeholder rewrite helper, the surviving MSSQL codec in vertebra-db.
 [^fail-loud-baseline]: `.agents/bundles/specs/driver-fail-loud/spec.md` — Upstream flow that replaces the MSSQL `sqlite3` stand-in with a `MissingDependencyError` guard and deletes TDS framing.

@@ -25,14 +25,20 @@ from vertebra._vertebra import (
 from vertebra.db import (
     ArrowCursor,
     AsyncCloudSQLDialer,
+    AsyncPipeline,
+    AsyncPipelineCapable,
     DatabaseRegistry,
     SyncCloudSQLDialer,
+    SyncPipeline,
+    SyncPipelineCapable,
 )
 from vertebra.db.adapters.mssql import (
     AsyncMSSQLDriver,
+    AsyncMSSQLPipeline,
     MSSQLConfig,
     MSSQLCore,
     SyncMSSQLDriver,
+    SyncMSSQLPipeline,
     rewrite_mssql_placeholders,
 )
 from vertebra.typing import MissingDependencyError
@@ -548,6 +554,122 @@ async def test_async_mssql_driver_loopback_execution_arrow_and_cancel() -> None:
         table = pa.Table.from_pydict({"id": [100, 200], "label": ["one", "two"]})
         loaded = await driver.load_from_arrow("dbo.items", table, columns=["id", "label"])
         assert loaded == 2
+    finally:
+        await driver.close()
+        server.close()
+
+
+def test_mssql_clean_break_surface_and_zero_row_colmetadata() -> None:
+    """Verify PY-07 clean-break method surface (no *_transaction aliases) and 0-row COLMETADATA preservation."""
+    assert not hasattr(mssql_native.SyncMSSQLClient, "begin_transaction")
+    assert not hasattr(mssql_native.SyncMSSQLClient, "commit_transaction")
+    assert not hasattr(mssql_native.SyncMSSQLClient, "rollback_transaction")
+    assert not hasattr(mssql_native.AsyncMSSQLClient, "begin_transaction")
+    assert not hasattr(mssql_native.AsyncMSSQLClient, "commit_transaction")
+    assert not hasattr(mssql_native.AsyncMSSQLClient, "rollback_transaction")
+
+    server = _LoopbackTdsServer()
+    driver = SyncMSSQLDriver(server.dsn)
+    try:
+        assert "[REDACTED]" in repr(driver._client)
+        assert "Passw0rd" not in repr(driver._client)
+
+        rows, cols = driver.execute_with_description("SELECT_EMPTY")
+        assert rows == []
+        assert cols == ("id", "label")
+    finally:
+        driver.close()
+        server.close()
+
+
+def test_sync_mssql_pipeline_commit_rollback_and_savepoint_nesting() -> None:
+    """Verify `SyncMSSQLPipeline` delayed commit, rollback on error/unflushed queue, and nested savepoints."""
+    server = _LoopbackTdsServer()
+    driver = SyncMSSQLDriver(server.dsn)
+    try:
+        assert isinstance(driver, SyncPipelineCapable)
+        with driver.pipeline() as pipe:
+            assert isinstance(pipe, SyncPipeline)
+            assert isinstance(pipe, SyncMSSQLPipeline)
+            pipe.execute("INSERT INTO items (id, label) VALUES (?, ?)", (1, "alpha"))
+            pipe.select("SELECT_ITEMS")
+            out = pipe.results()
+        assert out == [1, [{"id": 1, "label": "alpha"}, {"id": 2, "label": "beta"}]]
+        assert driver.in_transaction is False
+
+        with pytest.raises(IntegrityError), driver.pipeline() as pipe:
+            pipe.execute("INSERT INTO items (id, label) VALUES (?, ?)", (1, "alpha"))
+            pipe.execute("RAISE_DUP")
+            pipe.results()
+        assert driver.in_transaction is False
+
+        with pytest.raises(RuntimeError, match="abort after results"), driver.pipeline() as pipe:
+            pipe.execute("INSERT INTO items (id, label) VALUES (?, ?)", (2, "beta"))
+            pipe.results()
+            raise RuntimeError("abort after results")
+        assert driver.in_transaction is False
+
+        with driver.pipeline() as pipe:
+            pipe.execute("INSERT INTO items (id, label) VALUES (?, ?)", (3, "gamma"))
+            pipe.results()
+            pipe.execute("INSERT INTO items (id, label) VALUES (?, ?)", (4, "unflushed"))
+        assert driver.in_transaction is False
+
+        with driver.transaction():
+            assert driver.in_transaction is True
+            with driver.pipeline() as nested_pipe:
+                nested_pipe.execute("INSERT INTO items (id, label) VALUES (?, ?)", (5, "nested"))
+                nested_res = nested_pipe.results()
+            assert nested_res == [1]
+            assert driver.in_transaction is True
+        assert driver.in_transaction is False
+    finally:
+        driver.close()
+        server.close()
+
+
+@pytest.mark.anyio
+async def test_async_mssql_pipeline_commit_rollback_and_savepoint_nesting() -> None:
+    """Verify `AsyncMSSQLPipeline` delayed commit, rollback on error/unflushed queue, and nested savepoints."""
+    server = _LoopbackTdsServer()
+    driver = AsyncMSSQLDriver(server.dsn)
+    try:
+        assert isinstance(driver, AsyncPipelineCapable)
+        rows, cols = await driver.execute_with_description("SELECT_EMPTY")
+        assert rows == []
+        assert cols == ("id", "label")
+
+        async with driver.pipeline() as pipe:
+            assert isinstance(pipe, AsyncPipeline)
+            assert isinstance(pipe, AsyncMSSQLPipeline)
+            pipe.execute("INSERT INTO items (id, label) VALUES (?, ?)", (1, "alpha"))
+            pipe.select("SELECT_ITEMS")
+            out = await pipe.results()
+        assert out == [1, [{"id": 1, "label": "alpha"}, {"id": 2, "label": "beta"}]]
+        assert driver.in_transaction is False
+
+        with pytest.raises(IntegrityError):
+            async with driver.pipeline() as pipe:
+                pipe.execute("INSERT INTO items (id, label) VALUES (?, ?)", (1, "alpha"))
+                pipe.execute("RAISE_DUP")
+                await pipe.results()
+        assert driver.in_transaction is False
+
+        with pytest.raises(RuntimeError, match="abort async after results"):
+            async with driver.pipeline() as pipe:
+                pipe.execute("INSERT INTO items (id, label) VALUES (?, ?)", (2, "beta"))
+                await pipe.results()
+                raise RuntimeError("abort async after results")
+        assert driver.in_transaction is False
+
+        async with driver.transaction():
+            assert driver.in_transaction is True
+            async with driver.pipeline() as nested_pipe:
+                nested_pipe.execute("INSERT INTO items (id, label) VALUES (?, ?)", (5, "nested"))
+                nested_res = await nested_pipe.results()
+            assert nested_res == [1]
+            assert driver.in_transaction is True
+        assert driver.in_transaction is False
     finally:
         await driver.close()
         server.close()

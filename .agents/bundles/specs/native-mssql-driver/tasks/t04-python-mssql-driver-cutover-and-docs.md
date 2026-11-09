@@ -10,8 +10,8 @@ verification_strategy: tdd
 depends_on:
   - t03
 plan_revision: 1
-state_revision: 2
-commit_sha: null
+state_revision: 3
+commit_sha: 974501d1
 claimed_at: "2026-11-09T15:15:00Z"
 completed_at: "2026-11-09T15:48:00Z"
 created_at: "2026-11-09T03:20:00Z"

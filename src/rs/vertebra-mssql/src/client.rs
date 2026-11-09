@@ -26,6 +26,8 @@ pub struct MssqlClient {
     broker: MssqlBrokerBackend,
     session: AsyncMutex<Option<MssqlSession>>,
     active_cancel: StdMutex<Option<MssqlCancelHandle>>,
+    routing_destination: StdMutex<Option<(String, u16)>>,
+    in_transaction: AtomicBool,
     closed: AtomicBool,
 }
 
@@ -42,6 +44,8 @@ impl MssqlClient {
             broker,
             session: AsyncMutex::new(None),
             active_cancel: StdMutex::new(None),
+            routing_destination: StdMutex::new(None),
+            in_transaction: AtomicBool::new(false),
             closed: AtomicBool::new(false),
         })
     }
@@ -59,6 +63,19 @@ impl MssqlClient {
     /// Return `true` if `close()` has been called on this client.
     pub fn is_closed(&self) -> bool {
         self.closed.load(Ordering::Acquire)
+    }
+
+    /// Return `true` if an explicit transaction is currently open on this client's session.
+    pub fn in_transaction(&self) -> bool {
+        self.in_transaction.load(Ordering::Acquire)
+    }
+
+    /// Return the latest `(host, port)` received via TDS `ENVCHANGE` routing, if any.
+    pub fn routing_destination(&self) -> Option<(String, u16)> {
+        self.routing_destination
+            .lock()
+            .ok()
+            .and_then(|g| g.clone())
     }
 
     fn ensure_open(&self) -> Result<(), MssqlError> {
@@ -97,8 +114,15 @@ impl MssqlClient {
                 *cancel_guard = Some(sess.mssql_cancel_handle());
             }
             let res = f(sess).await;
+            if let Ok(mut route_guard) = self.routing_destination.lock() {
+                *route_guard = sess.routing_destination();
+            }
             if sess.is_broken() {
+                self.in_transaction.store(false, Ordering::Release);
                 *guard = None;
+            } else {
+                self.in_transaction
+                    .store(sess.in_transaction(), Ordering::Release);
             }
             res
         }
@@ -106,6 +130,11 @@ impl MssqlClient {
 
         let _ = self.broker.release_lease(grant);
         result
+    }
+
+    /// Establish a wire session if not already connected.
+    pub async fn connect(&self) -> Result<(), MssqlError> {
+        self.with_session(|_| Box::pin(async { Ok(()) })).await
     }
 
     /// Trigger out-of-band TDS `ATTENTION` cancellation on the active session.
@@ -129,6 +158,7 @@ impl MssqlClient {
     /// Close the active TDS session and mark the client closed.
     pub async fn close(&self) -> Result<(), MssqlError> {
         self.closed.store(true, Ordering::Release);
+        self.in_transaction.store(false, Ordering::Release);
         let mut guard = self.session.lock().await;
         if let Some(sess) = guard.take() {
             let _ = sess.close().await;

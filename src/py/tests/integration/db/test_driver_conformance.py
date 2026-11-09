@@ -430,6 +430,7 @@ ENGINE_SPECS: tuple[EngineConformanceSpec, ...] = (
         placeholder_style="at_upper_p",
         items_ddl=_MSSQL_ITEMS_DDL,
         types_ddl=_MSSQL_TYPES_DDL,
+        supports_pipeline=True,
         native_extension_module="vertebra._mssql",
         pending_flow_id=None,
         env_dsn_vars=("VERTEBRA_CONFORMANCE_MSSQL_DSN",),

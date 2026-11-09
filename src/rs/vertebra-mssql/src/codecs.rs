@@ -342,6 +342,26 @@ pub fn query_result_to_py_envelope(py: Python<'_>, res: MssqlQueryResult) -> PyR
     Ok(dict.into_any().unbind())
 }
 
+/// Convert a full [`MssqlQueryResult`] into `(rows, column_names)` where `rows` is `list[tuple[Any, ...]]`
+/// and `column_names` is `tuple[str, ...]`, preserving `COLMETADATA` column names even when `0` rows match.
+pub fn query_result_to_py_rows_and_cols(
+    py: Python<'_>,
+    res: MssqlQueryResult,
+) -> PyResult<Py<PyAny>> {
+    let col_names: Vec<&str> = res.columns.iter().map(|c| c.name.as_str()).collect();
+    let cols_tuple = PyTuple::new(py, col_names)?;
+    let rows_list = PyList::empty(py);
+    for row in &res.rows {
+        let cells_py: Vec<Py<PyAny>> = row
+            .iter()
+            .map(|c| cell_to_py(py, c))
+            .collect::<PyResult<Vec<_>>>()?;
+        rows_list.append(PyTuple::new(py, cells_py)?)?;
+    }
+    let pair = PyTuple::new(py, [rows_list.into_any(), cols_tuple.into_any()])?;
+    Ok(pair.into_any().unbind())
+}
+
 #[cfg(test)]
 mod tests {
     use std::str::FromStr;
