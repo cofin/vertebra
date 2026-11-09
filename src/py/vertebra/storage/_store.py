@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import contextlib
+import fnmatch
 import io
 import os
 import re
+import shutil
+import tempfile
 import time
 from collections.abc import AsyncIterable, AsyncIterator, Buffer, Iterable, Iterator, Mapping, Sequence
 from pathlib import Path
@@ -72,6 +75,8 @@ _SUPPORTED_SCHEMES: Final[frozenset[str]] = frozenset(
 )
 
 _OCI_PAR_PREFIX_RE: Final[re.Pattern[str]] = re.compile(r"^(https?://[^/]+)/p/([^/]+)/n/([^/]+)/b/([^/]+)/o/?$")
+_GLOB_WILDCARD_RE: Final[re.Pattern[str]] = re.compile(r"[*?\[]")
+_SHM_STAGING_DIR: Final[Path] = Path("/dev/shm")
 
 
 class LocalConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
@@ -121,6 +126,8 @@ class S3Config(msgspec.Struct, frozen=True, gc=False, kw_only=True):
             opts["secret_access_key"] = self.secret_access_key
         if self.session_token:
             opts["session_token"] = self.session_token
+        if self.virtual_hosted_style:
+            opts["virtual_hosted_style"] = "true"
         if self.allow_http:
             opts["allow_http"] = "true"
         return f"s3://{self.bucket}", opts
@@ -457,7 +464,11 @@ class R2Config(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     jurisdiction: Literal["eu", "fedramp"] | str | None = None
     """Optional R2 data-locality jurisdiction subdomain (`"eu"` or `"fedramp"`)."""
     custom_domain: str | None = None
-    """Optional public custom domain bound to the R2 bucket."""
+    """Optional public custom domain bound to the R2 bucket.
+
+    The domain is forwarded as the `custom_domain` store option. SigV4 presigned URLs stay on the
+    R2 S3 API endpoint because Cloudflare does not authenticate presigned requests on custom domains.
+    """
     endpoint: str | None = None
     """Optional explicit R2 endpoint URL override."""
     allow_http: bool = False
@@ -490,6 +501,8 @@ class R2Config(msgspec.Struct, frozen=True, gc=False, kw_only=True):
             opts["secret_access_key"] = self.secret_access_key
         if self.jurisdiction:
             opts["jurisdiction"] = str(self.jurisdiction)
+        if self.custom_domain:
+            opts["custom_domain"] = self.custom_domain
         if self.allow_http:
             opts["allow_http"] = "true"
         return f"r2://{self.bucket}", opts
@@ -584,6 +597,8 @@ class SigningConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Optional full OCI Pre-Authenticated Request URL prefix ending in `/o/`."""
     endpoint: str | None = None
     """Optional custom origin URL overriding the default cloud storage hostname."""
+    virtual_hosted_style: bool = False
+    """When True, S3 SigV4 presigned URLs address the bucket as a host subdomain (`<bucket>.<endpoint host>`)."""
 
     @staticmethod
     def sign_oci_headers(
@@ -967,6 +982,8 @@ class _BaseObjectStore:
                 self._options.setdefault("endpoint", self._signing.endpoint)
                 if self._signing.endpoint.startswith("http://"):
                     self._options.setdefault("allow_http", "true")
+            if self._signing.virtual_hosted_style:
+                self._options.setdefault("virtual_hosted_style", "true")
         elif self._scheme in {"az", "azure", "abfs"} and self._signing.provider == "azure":
             if self._signing.account:
                 self._options.setdefault("account", self._signing.account)
@@ -1019,6 +1036,7 @@ class _BaseObjectStore:
                 access_key_id=config.access_key_id,
                 secret_access_key=config.secret_access_key,
                 endpoint=config.endpoint,
+                virtual_hosted_style=config.virtual_hosted_style,
             )
         if isinstance(config, R2Config) and config.access_key_id and config.secret_access_key:
             return SigningConfig(
@@ -1249,6 +1267,7 @@ class _BaseObjectStore:
                 expires_in_secs,
                 now_ts,
                 self._signing.endpoint,
+                virtual_hosted_style=self._signing.virtual_hosted_style,
             )
         )
 
@@ -1265,6 +1284,7 @@ class _BaseObjectStore:
                 signed_url,
                 now_ts,
                 self._signing.endpoint,
+                virtual_hosted_style=self._signing.virtual_hosted_style,
             )
         )
 
@@ -1449,6 +1469,108 @@ class _BaseObjectStore:
             raise ValueError(msg)
         return cleaned
 
+    @staticmethod
+    def _staging_base_dir() -> Path:
+        """Return `/dev/shm` when it is a writable directory, otherwise the system temporary directory."""
+        if _SHM_STAGING_DIR.is_dir() and os.access(_SHM_STAGING_DIR, os.W_OK):
+            return _SHM_STAGING_DIR
+        return Path(tempfile.gettempdir())
+
+    @staticmethod
+    def _discard_staged(staged: Sequence[Path], staging_dir: Path | None) -> None:
+        """Remove a temporary staging directory, or exactly the staged files inside a caller-owned directory."""
+        if staging_dir is not None:
+            shutil.rmtree(staging_dir, ignore_errors=True)
+            return
+        for staged_path in staged:
+            staged_path.unlink(missing_ok=True)
+
+    @staticmethod
+    def _glob_matches(items: Iterable[ObjectMeta], key_pattern: str) -> list[ObjectMeta]:
+        """Filter listed objects with case-sensitive `fnmatch`, skipping trailing-`/` directory placeholders."""
+        return [meta for meta in items if not meta.path.endswith("/") and fnmatch.fnmatchcase(meta.path, key_pattern)]
+
+    def _download_targets(self, keys: Sequence[str]) -> list[tuple[str, str]]:
+        """Return `(key, file_name)` pairs, rejecting keys without a basename or with duplicate basenames.
+
+        Raises:
+            ValueError: If a key has no file name or two keys share a basename.
+        """
+        targets: dict[str, str] = {}
+        for raw_key in keys:
+            key = self._normalize_key(raw_key)
+            if self._local_root is not None:
+                self._resolve_local(key)
+            name = key.rsplit("/", 1)[-1]
+            if not name:
+                msg = f"Storage key has no file name to download into: {raw_key!r}"
+                raise ValueError(msg)
+            if name in targets:
+                msg = f"Duplicate destination file name {name!r} for keys {targets[name]!r} and {key!r}"
+                raise ValueError(msg)
+            targets[name] = key
+        return [(key, name) for name, key in targets.items()]
+
+    def _upload_sources(self, paths: Sequence[str | Path], destination_prefix: str) -> list[tuple[str, Path]]:
+        """Return `(key, local_path)` pairs keyed by `destination_prefix` joined with each file name.
+
+        Raises:
+            ValueError: If two local files map to the same object key.
+            FileNotFoundError: If a local source file does not exist.
+        """
+        prefix = destination_prefix.strip().strip("/")
+        sources: dict[str, Path] = {}
+        for raw_path in paths:
+            local = Path(raw_path)
+            key = self._normalize_key(f"{prefix}/{local.name}" if prefix else local.name)
+            if key in sources:
+                msg = f"Duplicate object key {key!r} for files {str(sources[key])!r} and {str(local)!r}"
+                raise ValueError(msg)
+            if not local.is_file():
+                msg = f"Source file not found: {local}"
+                raise FileNotFoundError(msg)
+            if self._local_root is not None:
+                self._resolve_local(key)
+            sources[key] = local
+        return list(sources.items())
+
+    def _glob_query(self, pattern: str) -> tuple[str, str | None]:
+        """Return the normalized key pattern and its segment-aligned list prefix, or `None` for literal keys.
+
+        A leading store URL is stripped. The list prefix ends at the last `/` before the first wildcard
+        because native listings match whole path segments.
+
+        Raises:
+            ValueError: If the pattern is empty after normalization.
+        """
+        base = self._url.rstrip("/")
+        relative = pattern[len(base) + 1 :] if pattern.startswith(f"{base}/") else pattern
+        key_pattern = self._normalize_key(relative)
+        if not key_pattern:
+            msg = "glob pattern must not be empty"
+            raise ValueError(msg)
+        wildcard = _GLOB_WILDCARD_RE.search(key_pattern)
+        if wildcard is None:
+            return key_pattern, None
+        literal = key_pattern[: wildcard.start()]
+        return key_pattern, literal[: literal.rfind("/") + 1]
+
+    def _compose_keys(self, sources: Sequence[str], dst: str) -> tuple[list[str], str]:
+        """Normalize compose source keys and destination key.
+
+        Raises:
+            ValueError: If `sources` is empty.
+        """
+        if not sources:
+            msg = "compose requires at least one source object"
+            raise ValueError(msg)
+        source_keys = [self._normalize_key(source) for source in sources]
+        dst_key = self._normalize_key(dst)
+        if self._local_root is not None:
+            for key in (*source_keys, dst_key):
+                self._resolve_local(key)
+        return source_keys, dst_key
+
 
 class SyncObjectStore(_BaseObjectStore):
     """Synchronous object store supporting zero-copy buffers, blocking I/O, and multi-cloud URL signing."""
@@ -1560,6 +1682,27 @@ class SyncObjectStore(_BaseObjectStore):
         native_meta = native.put_file(key, str(resolved_src))
         return self._native_to_put_result(native_meta, f"{int(native_meta.size):016x}")
 
+    def upload_many(
+        self,
+        paths: Sequence[str | Path],
+        destination_prefix: str = "",
+        *,
+        concurrency: int = 16,
+    ) -> list[PutResult]:
+        """Upload local files concurrently to keys formed from `destination_prefix` and each file name.
+
+        Raises:
+            ValueError: If two files map to the same key; raised before any transfer starts.
+            FileNotFoundError: If a local source file does not exist.
+        """
+        sources = self._upload_sources(paths, destination_prefix)
+        if not sources:
+            return []
+        native_metas = self._require_native().put_files(
+            [(key, str(local)) for key, local in sources], concurrency=concurrency
+        )
+        return [self._native_to_put_result(meta, f"{int(meta.size):016x}") for meta in native_metas]
+
     def put_multipart(self, path: str, parts: Sequence[Buffer]) -> PutResult:
         """Concatenate and upload multiple buffer parts atomically."""
         key = self._normalize_key(path)
@@ -1567,6 +1710,16 @@ class SyncObjectStore(_BaseObjectStore):
             self._resolve_local(key)
         native = self._require_native()
         native_meta = native.put_multipart(key, [self._native_payload(part) for part in parts])
+        return self._native_to_put_result(native_meta, f"{int(native_meta.size):016x}")
+
+    def compose(self, sources: Sequence[str], dst: str, *, content_type: str | None = None) -> PutResult:
+        """Concatenate `sources` in order into `dst` through the backend's native compose path.
+
+        Raises:
+            ValueError: If `sources` is empty.
+        """
+        source_keys, dst_key = self._compose_keys(sources, dst)
+        native_meta = self._require_native().compose(source_keys, dst_key, content_type=content_type)
         return self._native_to_put_result(native_meta, f"{int(native_meta.size):016x}")
 
     def put_stream(
@@ -1611,6 +1764,63 @@ class SyncObjectStore(_BaseObjectStore):
         if self._local_root is not None:
             self._resolve_local(key)
         return bytes(self._require_native().get(key))
+
+    def get_file(self, path: str, file_path: str | Path) -> ObjectMeta:
+        """Stream the object at the given key into a local file and return its metadata."""
+        key = self._normalize_key(path)
+        if self._local_root is not None:
+            self._resolve_local(key)
+        return self._native_to_object_meta(self._require_native().get_file(key, str(Path(file_path))))
+
+    def download_many(self, keys: Sequence[str], destination: str | Path, *, concurrency: int = 16) -> list[Path]:
+        """Download objects concurrently into `destination`, naming each file after its key basename.
+
+        Raises:
+            ValueError: If two keys share a basename; raised before any transfer starts.
+        """
+        targets = self._download_targets(keys)
+        if not targets:
+            return []
+        root = Path(destination)
+        local_paths = [root / name for _, name in targets]
+        root.mkdir(parents=True, exist_ok=True)
+        self._require_native().get_files(
+            [(key, str(local)) for (key, _), local in zip(targets, local_paths, strict=True)],
+            concurrency=concurrency,
+        )
+        return local_paths
+
+    @contextlib.contextmanager
+    def staged_download(
+        self,
+        keys: Sequence[str],
+        destination: str | Path | None = None,
+        *,
+        concurrency: int = 16,
+    ) -> Iterator[list[Path]]:
+        """Download objects into a staging directory and remove the staged files when the context exits.
+
+        Without `destination`, files stage in a unique directory under `/dev/shm` (when writable) or the
+        system temporary directory, and that directory is removed on exit. With `destination`, exactly
+        the staged files are unlinked on exit and the directory is kept.
+
+        Raises:
+            ValueError: If two keys share a basename; raised before any transfer starts.
+        """
+        targets = self._download_targets(keys)
+        owned_dir = (
+            Path(tempfile.mkdtemp(prefix="vertebra-staged-", dir=self._staging_base_dir()))
+            if destination is None
+            else None
+        )
+        staging_dir = owned_dir if owned_dir is not None else Path(str(destination))
+        staged = [staging_dir / name for _, name in targets]
+        try:
+            if targets:
+                self.download_many([key for key, _ in targets], staging_dir, concurrency=concurrency)
+            yield staged
+        finally:
+            self._discard_staged(staged, owned_dir)
 
     def get_view(self, path: str) -> memoryview:
         """Return a zero-copy memoryview over the object payload."""
@@ -1662,14 +1872,18 @@ class SyncObjectStore(_BaseObjectStore):
         with contextlib.suppress(FileNotFoundError):
             self._require_native().delete(key)
 
-    def copy(self, src: str, dst: str) -> None:
-        """Copy an object within the store from src to dst."""
+    def copy(self, src: str, dst: str, *, overwrite: bool = True) -> None:
+        """Copy an object within the store from src to dst.
+
+        Raises:
+            FileExistsError: If `overwrite` is False and `dst` already exists.
+        """
         src_key = self._normalize_key(src)
         dst_key = self._normalize_key(dst)
         if self._local_root is not None:
             self._resolve_local(src_key)
             self._resolve_local(dst_key)
-        self._require_native().copy(src_key, dst_key)
+        self._require_native().copy(src_key, dst_key, if_not_exists=not overwrite)
 
     def rename(self, src: str, dst: str, *, overwrite: bool = True) -> None:
         """Atomically rename or move an object from src to dst within the store."""
@@ -1700,6 +1914,22 @@ class SyncObjectStore(_BaseObjectStore):
         norm_prefix = self._normalize_key(prefix) if prefix else ""
         items, prefixes = self._require_native().list_with_delimiter(norm_prefix or None)
         return [self._native_to_object_meta(item) for item in items], [str(p) for p in prefixes]
+
+    def glob(self, pattern: str) -> list[ObjectMeta]:
+        """Return objects whose keys match a shell-style `*`, `?`, or `[...]` pattern.
+
+        Literal patterns resolve with a single `head` call; wildcard patterns list the segment-aligned
+        literal prefix and filter keys with `fnmatch.fnmatchcase`. Keys ending in `/` are never returned.
+        """
+        key_pattern, list_prefix = self._glob_query(pattern)
+        if list_prefix is not None:
+            return self._glob_matches(self.list(list_prefix), key_pattern)
+        if key_pattern.endswith("/"):
+            return []
+        try:
+            return [self.head(key_pattern)]
+        except FileNotFoundError:
+            return []
 
     def list(self, prefix: str = "") -> list[ObjectMeta]:
         """List objects matching prefix."""
@@ -1938,6 +2168,27 @@ class AsyncObjectStore(_BaseObjectStore):
         native_meta = await native.put_file(key, str(resolved_src))
         return self._native_to_put_result(native_meta, f"{int(native_meta.size):016x}")
 
+    async def upload_many(
+        self,
+        paths: Sequence[str | Path],
+        destination_prefix: str = "",
+        *,
+        concurrency: int = 16,
+    ) -> list[PutResult]:
+        """Asynchronously upload local files to keys formed from `destination_prefix` and each file name.
+
+        Raises:
+            ValueError: If two files map to the same key; raised before any transfer starts.
+            FileNotFoundError: If a local source file does not exist.
+        """
+        sources = self._upload_sources(paths, destination_prefix)
+        if not sources:
+            return []
+        native_metas = await self._require_native().put_files(
+            [(key, str(local)) for key, local in sources], concurrency=concurrency
+        )
+        return [self._native_to_put_result(meta, f"{int(meta.size):016x}") for meta in native_metas]
+
     async def put_multipart(self, path: str, parts: Sequence[Buffer]) -> PutResult:
         """Asynchronously upload multiple buffer parts atomically."""
         key = self._normalize_key(path)
@@ -1945,6 +2196,16 @@ class AsyncObjectStore(_BaseObjectStore):
             self._resolve_local(key)
         native = self._require_native()
         native_meta = await native.put_multipart(key, [self._native_payload(part) for part in parts])
+        return self._native_to_put_result(native_meta, f"{int(native_meta.size):016x}")
+
+    async def compose(self, sources: Sequence[str], dst: str, *, content_type: str | None = None) -> PutResult:
+        """Asynchronously concatenate `sources` in order into `dst` through the backend's native compose path.
+
+        Raises:
+            ValueError: If `sources` is empty.
+        """
+        source_keys, dst_key = self._compose_keys(sources, dst)
+        native_meta = await self._require_native().compose(source_keys, dst_key, content_type=content_type)
         return self._native_to_put_result(native_meta, f"{int(native_meta.size):016x}")
 
     async def put_stream(
@@ -1993,6 +2254,64 @@ class AsyncObjectStore(_BaseObjectStore):
         if self._local_root is not None:
             self._resolve_local(key)
         return bytes(await self._require_native().get(key))
+
+    async def get_file(self, path: str, file_path: str | Path) -> ObjectMeta:
+        """Asynchronously stream the object at the given key into a local file and return its metadata."""
+        key = self._normalize_key(path)
+        if self._local_root is not None:
+            self._resolve_local(key)
+        return self._native_to_object_meta(await self._require_native().get_file(key, str(Path(file_path))))
+
+    async def download_many(self, keys: Sequence[str], destination: str | Path, *, concurrency: int = 16) -> list[Path]:
+        """Asynchronously download objects into `destination`, naming each file after its key basename.
+
+        Raises:
+            ValueError: If two keys share a basename; raised before any transfer starts.
+        """
+        targets = self._download_targets(keys)
+        if not targets:
+            return []
+        root = Path(destination)
+        local_paths = [root / name for _, name in targets]
+        root.mkdir(parents=True, exist_ok=True)
+        await self._require_native().get_files(
+            [(key, str(local)) for (key, _), local in zip(targets, local_paths, strict=True)],
+            concurrency=concurrency,
+        )
+        return local_paths
+
+    @contextlib.asynccontextmanager
+    async def staged_download(
+        self,
+        keys: Sequence[str],
+        destination: str | Path | None = None,
+        *,
+        concurrency: int = 16,
+    ) -> AsyncIterator[list[Path]]:
+        """Asynchronously download objects into a staging directory and remove the staged files on exit.
+
+        Without `destination`, files stage in a unique directory under `/dev/shm` (when writable) or the
+        system temporary directory, and that directory is removed on exit. With `destination`, exactly
+        the staged files are unlinked on exit and the directory is kept. Cleanup runs inline on the
+        local or tmpfs filesystem.
+
+        Raises:
+            ValueError: If two keys share a basename; raised before any transfer starts.
+        """
+        targets = self._download_targets(keys)
+        owned_dir = (
+            Path(tempfile.mkdtemp(prefix="vertebra-staged-", dir=self._staging_base_dir()))
+            if destination is None
+            else None
+        )
+        staging_dir = owned_dir if owned_dir is not None else Path(str(destination))
+        staged = [staging_dir / name for _, name in targets]
+        try:
+            if targets:
+                await self.download_many([key for key, _ in targets], staging_dir, concurrency=concurrency)
+            yield staged
+        finally:
+            self._discard_staged(staged, owned_dir)
 
     async def get_view(self, path: str) -> memoryview:
         """Asynchronously read a zero-copy memoryview over an object payload."""
@@ -2046,14 +2365,18 @@ class AsyncObjectStore(_BaseObjectStore):
         with contextlib.suppress(FileNotFoundError):
             await self._require_native().delete(key)
 
-    async def copy(self, src: str, dst: str) -> None:
-        """Asynchronously copy an object within the store via Rust Tokio awaitable."""
+    async def copy(self, src: str, dst: str, *, overwrite: bool = True) -> None:
+        """Asynchronously copy an object within the store via Rust Tokio awaitable.
+
+        Raises:
+            FileExistsError: If `overwrite` is False and `dst` already exists.
+        """
         src_key = self._normalize_key(src)
         dst_key = self._normalize_key(dst)
         if self._local_root is not None:
             self._resolve_local(src_key)
             self._resolve_local(dst_key)
-        await self._require_native().copy(src_key, dst_key)
+        await self._require_native().copy(src_key, dst_key, if_not_exists=not overwrite)
 
     async def rename(self, src: str, dst: str, *, overwrite: bool = True) -> None:
         """Asynchronously rename or move an object from src to dst within the store."""
@@ -2084,6 +2407,22 @@ class AsyncObjectStore(_BaseObjectStore):
         norm_prefix = self._normalize_key(prefix) if prefix else ""
         items, prefixes = await self._require_native().list_with_delimiter(norm_prefix or None)
         return [self._native_to_object_meta(item) for item in items], [str(p) for p in prefixes]
+
+    async def glob(self, pattern: str) -> list[ObjectMeta]:
+        """Asynchronously return objects whose keys match a shell-style `*`, `?`, or `[...]` pattern.
+
+        Literal patterns resolve with a single `head` call; wildcard patterns list the segment-aligned
+        literal prefix and filter keys with `fnmatch.fnmatchcase`. Keys ending in `/` are never returned.
+        """
+        key_pattern, list_prefix = self._glob_query(pattern)
+        if list_prefix is not None:
+            return self._glob_matches(await self.list(list_prefix), key_pattern)
+        if key_pattern.endswith("/"):
+            return []
+        try:
+            return [await self.head(key_pattern)]
+        except FileNotFoundError:
+            return []
 
     async def list(self, prefix: str = "") -> list[ObjectMeta]:
         """Asynchronously list objects matching prefix via Rust Tokio awaitable."""

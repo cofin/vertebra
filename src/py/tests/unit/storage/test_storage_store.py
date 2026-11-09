@@ -6,7 +6,9 @@ import asyncio
 import contextlib
 import gzip
 import io
+import os
 import sys
+import tempfile
 import threading
 from collections.abc import AsyncIterator, Iterator
 from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
@@ -1945,3 +1947,271 @@ async def test_native_async_bulk_file_io_conditional_copy_and_compose(tmp_path: 
     assert await store.get("a/all") == b"part-0;part-1;part-2;"
     with pytest.raises(ValueError, match="concurrency"):
         await store.get_files(downloads, concurrency=0)
+
+
+def _bulk_store(namespace: str, asynchronous: bool) -> Any:
+    """Build a sync or async memory store isolated by namespace."""
+    config = MemoryConfig(namespace=namespace)
+    return AsyncObjectStore(config) if asynchronous else SyncObjectStore(config)
+
+
+async def _resolve(value: Any) -> Any:
+    """Await coroutine results from async stores and pass sync results through."""
+    return await value if asyncio.iscoroutine(value) else value
+
+
+def _write_bulk_sources(root: Path) -> list[Path]:
+    """Write five local files with distinct payloads for bulk transfer tests."""
+    root.mkdir(parents=True, exist_ok=True)
+    paths = []
+    for idx in range(5):
+        local = root / f"file-{idx}.bin"
+        local.write_bytes(f"payload-{idx}-".encode() * (idx + 1))
+        paths.append(local)
+    return paths
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+async def test_upload_many_download_many_and_get_file_roundtrip(tmp_path: Path, asynchronous: bool) -> None:
+    """upload_many writes prefixed keys, download_many restores basenames, and get_file streams one object."""
+    store = _bulk_store(f"bulk-roundtrip-{asynchronous}", asynchronous)
+    sources = _write_bulk_sources(tmp_path / "src")
+    results = await _resolve(store.upload_many(sources, "bulk/run", concurrency=2))
+    assert all(isinstance(result, PutResult) for result in results)
+    assert [result.path for result in results] == [f"bulk/run/file-{idx}.bin" for idx in range(5)]
+    assert [result.size for result in results] == [source.stat().st_size for source in sources]
+    assert all(result.etag for result in results)
+
+    keys = [result.path for result in results]
+    downloaded = await _resolve(store.download_many(keys, tmp_path / "down", concurrency=3))
+    assert downloaded == [tmp_path / "down" / f"file-{idx}.bin" for idx in range(5)]
+    assert [path.read_bytes() for path in downloaded] == [source.read_bytes() for source in sources]
+
+    meta = await _resolve(store.get_file("bulk/run/file-3.bin", tmp_path / "single.bin"))
+    assert isinstance(meta, ObjectMeta)
+    assert meta.path == "bulk/run/file-3.bin"
+    assert meta.size == sources[3].stat().st_size
+    assert (tmp_path / "single.bin").read_bytes() == sources[3].read_bytes()
+
+    unprefixed = await _resolve(store.upload_many([sources[0]]))
+    assert [result.path for result in unprefixed] == ["file-0.bin"]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("explicit_destination", [False, True])
+@pytest.mark.parametrize("fail", [False, True])
+async def test_staged_download_removes_staged_files_on_exit(
+    tmp_path: Path, asynchronous: bool, explicit_destination: bool, fail: bool
+) -> None:
+    """staged_download stages every key and deletes exactly the staged files on normal and exceptional exit."""
+    store = _bulk_store(f"bulk-staged-{asynchronous}-{explicit_destination}-{fail}", asynchronous)
+    sources = _write_bulk_sources(tmp_path / "src")
+    keys = [result.path for result in await _resolve(store.upload_many(sources, "staged"))]
+    destination = tmp_path / "stage" if explicit_destination else None
+    if destination is not None:
+        destination.mkdir()
+        (destination / "keep.txt").write_bytes(b"unrelated")
+    staged: list[Path] = []
+
+    async def stage() -> None:
+        if asynchronous:
+            async with store.staged_download(keys, destination, concurrency=2) as paths:
+                staged.extend(paths)
+                assert [path.read_bytes() for path in paths] == [source.read_bytes() for source in sources]
+                if fail:
+                    raise RuntimeError("consumer failed")
+        else:
+            with store.staged_download(keys, destination, concurrency=2) as paths:
+                staged.extend(paths)
+                assert [path.read_bytes() for path in paths] == [source.read_bytes() for source in sources]
+                if fail:
+                    raise RuntimeError("consumer failed")
+
+    if fail:
+        with pytest.raises(RuntimeError, match="consumer failed"):
+            await stage()
+    else:
+        await stage()
+
+    assert [path.name for path in staged] == [f"file-{idx}.bin" for idx in range(5)]
+    assert not any(path.exists() for path in staged)
+    if destination is None:
+        assert not staged[0].parent.exists()
+    else:
+        assert staged[0].parent == destination
+        assert sorted(child.name for child in destination.iterdir()) == ["keep.txt"]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+async def test_staged_download_defaults_to_dev_shm_or_tempdir(asynchronous: bool) -> None:
+    """Without a destination, staged files land in a unique directory under /dev/shm or the system temp dir."""
+    store = _bulk_store(f"bulk-staged-base-{asynchronous}", asynchronous)
+    await _resolve(store.put("base/one.bin", b"one"))
+    shm = Path("/dev/shm")
+    expected_base = shm if shm.is_dir() and os.access(shm, os.W_OK) else Path(tempfile.gettempdir())
+    if asynchronous:
+        async with store.staged_download(["base/one.bin"]) as paths:
+            staged = list(paths)
+            assert staged[0].read_bytes() == b"one"
+    else:
+        with store.staged_download(["base/one.bin"]) as paths:
+            staged = list(paths)
+            assert staged[0].read_bytes() == b"one"
+    assert staged[0].parent.parent == expected_base
+    assert not staged[0].parent.exists()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+async def test_bulk_transfers_reject_duplicates_before_io_and_accept_empty(tmp_path: Path, asynchronous: bool) -> None:
+    """Duplicate basenames or keys raise ValueError before any transfer, and empty inputs return []."""
+    store = _bulk_store(f"bulk-dupes-{asynchronous}", asynchronous)
+    await _resolve(store.put("a/x.bin", b"a"))
+    await _resolve(store.put("b/x.bin", b"b"))
+    destination = tmp_path / "dupes"
+    with pytest.raises(ValueError, match="x.bin"):
+        await _resolve(store.download_many(["a/x.bin", "b/x.bin"], destination))
+    assert not destination.exists()
+
+    (tmp_path / "one").mkdir()
+    (tmp_path / "two").mkdir()
+    (tmp_path / "one" / "same.bin").write_bytes(b"1")
+    (tmp_path / "two" / "same.bin").write_bytes(b"2")
+    with pytest.raises(ValueError, match="same.bin"):
+        await _resolve(store.upload_many([tmp_path / "one" / "same.bin", tmp_path / "two" / "same.bin"], "up"))
+    assert await _resolve(store.list("up")) == []
+
+    if asynchronous:
+        with pytest.raises(ValueError, match="x.bin"):
+            async with store.staged_download(["a/x.bin", "b/x.bin"], destination):
+                pytest.fail("duplicate staged keys must not enter the context")
+    else:
+        with pytest.raises(ValueError, match="x.bin"), store.staged_download(["a/x.bin", "b/x.bin"], destination):
+            pytest.fail("duplicate staged keys must not enter the context")
+    assert not destination.exists()
+
+    assert await _resolve(store.download_many([], destination)) == []
+    assert await _resolve(store.upload_many([])) == []
+    if asynchronous:
+        async with store.staged_download([]) as paths:
+            assert paths == []
+    else:
+        with store.staged_download([]) as paths:
+            assert paths == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+async def test_copy_overwrite_false_raises_file_exists(asynchronous: bool) -> None:
+    """copy(..., overwrite=False) refuses to replace an existing destination and keeps its payload."""
+    store = _bulk_store(f"copy-overwrite-{asynchronous}", asynchronous)
+    await _resolve(store.put("a", b"1"))
+    await _resolve(store.put("b", b"2"))
+    with pytest.raises(FileExistsError):
+        await _resolve(store.copy("a", "b", overwrite=False))
+    assert await _resolve(store.get("b")) == b"2"
+    await _resolve(store.copy("a", "c", overwrite=False))
+    assert await _resolve(store.get("c")) == b"1"
+    await _resolve(store.copy("a", "b"))
+    assert await _resolve(store.get("b")) == b"1"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize(
+    ("pattern", "expected"),
+    [
+        ("runs/2026/*.parquet", ["runs/2026/part-00.parquet", "runs/2026/part-01.parquet"]),
+        ("runs/2026/part-0[1].parquet", ["runs/2026/part-01.parquet"]),
+        ("runs/202?/notes.*", ["runs/2026/notes.txt"]),
+        ("runs/2026/notes.txt", ["runs/2026/notes.txt"]),
+        ("runs/2026/missing.txt", []),
+        ("runs/2027/*.parquet", []),
+    ],
+)
+async def test_glob_wildcards_literal_fast_path_and_missing(
+    asynchronous: bool, pattern: str, expected: list[str]
+) -> None:
+    """glob filters listed keys with fnmatch, uses head for literal keys, and returns [] when nothing matches."""
+    store = _bulk_store(f"glob-{asynchronous}-{abs(hash(pattern))}", asynchronous)
+    for key in ("runs/2026/part-00.parquet", "runs/2026/part-01.parquet", "runs/2026/notes.txt", "runs/20x.txt"):
+        await _resolve(store.put(key, key.encode()))
+    matched = await _resolve(store.glob(pattern))
+    assert all(isinstance(meta, ObjectMeta) for meta in matched)
+    assert [meta.path for meta in matched] == expected
+    assert [meta.size for meta in matched] == [len(path) for path in expected]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+async def test_glob_strips_store_uri_prefix(tmp_path: Path, asynchronous: bool) -> None:
+    """glob accepts patterns prefixed with the store URL and resolves them relative to the store root."""
+    config = LocalConfig(root=tmp_path / f"glob-root-{asynchronous}")
+    store: Any = AsyncObjectStore(config) if asynchronous else SyncObjectStore(config)
+    await _resolve(store.put("logs/a.json", b"{}"))
+    await _resolve(store.put("logs/b.txt", b"b"))
+    matched = await _resolve(store.glob(f"{store.url}/logs/*.json"))
+    assert [meta.path for meta in matched] == ["logs/a.json"]
+    literal = await _resolve(store.glob(f"{store.url}/logs/b.txt"))
+    assert [meta.path for meta in literal] == ["logs/b.txt"]
+
+
+class _PlaceholderListingNative:
+    """Delegate to a real native store while injecting a trailing-`/` directory placeholder into listings."""
+
+    def __init__(self, native: Any, asynchronous: bool, placeholder: str) -> None:
+        self.native = native
+        self.asynchronous = asynchronous
+        self.placeholder = ObjectMeta(path=placeholder, size=0)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.native, name)
+
+    def list(self, prefix: str | None) -> Any:
+        listed = self.native.list(prefix)
+        if self.asynchronous:
+
+            async def resolve() -> Any:
+                return [*(await listed), self.placeholder]
+
+            return resolve()
+        return [*listed, self.placeholder]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+async def test_glob_skips_trailing_slash_directory_placeholders(asynchronous: bool) -> None:
+    """glob never returns keys ending in `/` even when the pattern matches them."""
+    namespace = f"glob-placeholder-{asynchronous}"
+    base = SyncObjectStore(MemoryConfig(namespace=namespace))
+    base.put("runs/2026/part-00.parquet", b"p")
+    paired = base.to_async() if asynchronous else base
+    native = _PlaceholderListingNative(paired._require_native(), asynchronous, "runs/2026/")
+    config = MemoryConfig(namespace=namespace)
+    store: Any = (
+        AsyncObjectStore(config, _native_instance=native)
+        if asynchronous
+        else SyncObjectStore(config, _native_instance=native)
+    )
+    matched = await _resolve(store.glob("runs/*"))
+    assert [meta.path for meta in matched] == ["runs/2026/part-00.parquet"]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+async def test_compose_concatenates_sources_and_rejects_empty(asynchronous: bool) -> None:
+    """compose writes the concatenation of its sources and rejects an empty source list before I/O."""
+    store = _bulk_store(f"compose-{asynchronous}", asynchronous)
+    for idx, payload in enumerate((b"alpha-", b"beta-", b"gamma")):
+        await _resolve(store.put(f"p{idx + 1}", payload))
+    result = await _resolve(store.compose(["p1", "p2", "p3"], "merged.bin", content_type="application/octet-stream"))
+    assert isinstance(result, PutResult)
+    assert result.path == "merged.bin"
+    assert result.size == len(b"alpha-beta-gamma")
+    assert await _resolve(store.get("merged.bin")) == b"alpha-beta-gamma"
+    with pytest.raises(ValueError, match="source"):
+        await _resolve(store.compose([], "empty.bin"))
+    assert not await _resolve(store.exists("empty.bin"))

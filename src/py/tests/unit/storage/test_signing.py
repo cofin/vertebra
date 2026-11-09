@@ -746,3 +746,96 @@ def test_s3_sigv4_virtual_hosted_style_py_bindings(endpoint: str | None, expecte
         endpoint,
         virtual_hosted_style=False,
     )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+async def test_s3_config_virtual_hosted_style_forwards_option_and_presigns_bucket_host(asynchronous: bool) -> None:
+    """S3Config(virtual_hosted_style=True) forwards the builder option and presigns `{bucket}.s3.{region}` URLs."""
+    cfg = S3Config(
+        bucket="vh-analytics",
+        region="us-west-2",
+        access_key_id="AKIAIOSFODNN7EXAMPLE",
+        secret_access_key="wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+        virtual_hosted_style=True,
+    )
+    ts = 1_794_009_600
+    if asynchronous:
+        async_store = AsyncObjectStore(cfg)
+        options = async_store.options
+        signed = await async_store.sign("reports/q4.parquet", expires_in=600, timestamp=ts)
+        verifier: SyncObjectStore | AsyncObjectStore = async_store
+    else:
+        sync_store = SyncObjectStore(cfg)
+        options = sync_store.options
+        signed = sync_store.sign("reports/q4.parquet", expires_in=600, timestamp=ts)
+        verifier = sync_store
+    assert options["virtual_hosted_style"] == "true"
+    assert signed.startswith("https://vh-analytics.s3.us-west-2.amazonaws.com/reports/q4.parquet?")
+    assert "X-Amz-Algorithm=AWS4-HMAC-SHA256" in signed
+    assert verifier.verify_presigned_url(signed, method="GET", timestamp=ts + 10)
+    assert not verifier.verify_presigned_url(signed, method="PUT", timestamp=ts + 10)
+
+    path_style = SyncObjectStore(
+        S3Config(
+            bucket="vh-analytics",
+            region="us-west-2",
+            access_key_id="AKIAIOSFODNN7EXAMPLE",
+            secret_access_key="wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+        )
+    )
+    assert "virtual_hosted_style" not in path_style.options
+    assert not path_style.verify_presigned_url(signed, method="GET", timestamp=ts + 10)
+
+
+def test_signing_config_virtual_hosted_style_drives_explicit_s3_presigning() -> None:
+    """An explicit SigningConfig(virtual_hosted_style=True) presigns bucket-subdomain URLs on custom endpoints."""
+    store = SyncObjectStore(
+        "s3://media-bucket",
+        signing=SigningConfig(
+            provider="s3",
+            bucket="media-bucket",
+            region="us-east-1",
+            access_key_id="AKIAIOSFODNN7EXAMPLE",
+            secret_access_key="wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+            endpoint="https://s3.example.com",
+            virtual_hosted_style=True,
+        ),
+    )
+    assert store.options["virtual_hosted_style"] == "true"
+    signed = store.presign_get("videos/clip.mp4", expires_in_secs=900, timestamp=1_700_000_000)
+    assert signed.startswith("https://media-bucket.s3.example.com/videos/clip.mp4?")
+    assert store.verify_presigned_url(signed, method="GET", timestamp=1_700_000_060)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+async def test_r2_config_custom_domain_forwards_option_and_presigns_on_s3_api_host(asynchronous: bool) -> None:
+    """R2Config(custom_domain=...) forwards the domain while SigV4 presigning stays on the R2 S3 API host.
+
+    Cloudflare R2 rejects SigV4 presigned requests on custom domains, so presigned URLs keep the
+    `<account_id>.r2.cloudflarestorage.com` origin that R2 can authenticate.
+    """
+    cfg = R2Config(
+        bucket="r2-assets",
+        account_id="acct123456",
+        access_key_id="r2-ak",
+        secret_access_key="r2-sk",
+        custom_domain="assets.example.com",
+    )
+    ts = 1_794_009_600
+    if asynchronous:
+        async_store = AsyncObjectStore(cfg)
+        options = async_store.options
+        signed = await async_store.sign("reports/q4.parquet", expires_in=600, timestamp=ts)
+        verifier: SyncObjectStore | AsyncObjectStore = async_store
+    else:
+        sync_store = SyncObjectStore(cfg)
+        options = sync_store.options
+        signed = sync_store.sign("reports/q4.parquet", expires_in=600, timestamp=ts)
+        verifier = sync_store
+    assert options["custom_domain"] == "assets.example.com"
+    assert options["endpoint"] == "https://acct123456.r2.cloudflarestorage.com"
+    assert signed.startswith("https://acct123456.r2.cloudflarestorage.com/r2-assets/reports/q4.parquet?")
+    assert "assets.example.com" not in signed
+    assert verifier.verify_presigned_url(signed, method="GET", timestamp=ts + 10)
