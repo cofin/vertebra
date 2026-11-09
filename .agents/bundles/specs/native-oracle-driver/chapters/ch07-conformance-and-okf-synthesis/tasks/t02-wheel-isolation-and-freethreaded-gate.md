@@ -39,8 +39,8 @@ verification_evidence: "verify_oracle_wheel.py passed, pytest test_freethreaded_
 created_at: "2026-11-09T00:48:00Z"
 updated_at: "2026-11-09T18:22:17Z"
 completed_at: "2026-11-09T18:22:17Z"
-commit_sha: null
-commit: null
+commit_sha: 549fdf73
+commit: 549fdf73
 generated:
   by: flow-plan
   at: "2026-11-09T01:15:00Z"

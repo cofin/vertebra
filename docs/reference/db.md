@@ -9,7 +9,7 @@ Native database configurations, synchronous and asynchronous drivers (`SyncDatab
 | **Capability Protocols** | `SyncPipelineCapable`, `AsyncPipelineCapable`, `NotificationSource`, `SyncChangeSource`, `AsyncChangeSource`, `QueueStore`, `EmbeddingPushdown` | `@runtime_checkable` structural protocols for query pipelining, pub/sub notifications, CDC streams, `SKIP LOCKED` job queues, and in-database embedding pushdown |
 | **Relational & OLAP Configs** | `PostgreSQLConfig`, `MySQLConfig`, `SQLiteConfig`, `OracleConfig`, `MSSQLConfig`, `DuckDBConfig`, `BigQueryConfig`, `SpannerConfig` | Pooler-aware statement caching, WAL/mmap pragmas, Oracle 26ai `VECTOR`/`OSON` & Cloud Wallets, SQL Server `@P1` placeholder rewriting, DuckDB Arrow streaming (`vertebra-core[duckdb]`), BigQuery Storage Read/Write v1 + Object Tables, and Cloud Spanner Multiplexed Sessions + `BatchWrite` |
 | **RESP3 & Federated SQL** | `RedisConfig`, `ValkeyConfig`, `DataFusionConfig`, `DataFusionEngine` | RESP3 `HELLO 3` client-side cache invalidation, Cluster/Sentinel routing, and cross-engine SQL federation |
-| **Cloud Dialers, CDC & RLS** | `AlloyDBConfig`, `SyncAlloyDBDialer`, `AsyncAlloyDBDialer`, `CloudSQLConfig`, `SyncCloudSQLDialer`, `AsyncCloudSQLDialer`, `CDCConfig`, `ChangeFeed`, `PostgresNotifyConfig`, `PostgresNotificationSource`, `SyncSpannerChangeStreamSource`, `AsyncSpannerChangeStreamSource`, `TenantScopeConfig`, `TenantPredicate` | Direct TCP/TLS IAM OAuth2 token password resolution (`:5432`, `:3306`), zero-sidecar `:5433` AlloyDB and `:3307` Cloud SQL mTLS connectors, logical replication / Spanner change-stream streaming, and index-friendly tenant isolation |
+| **Cloud Dialers, CDC & RLS** | `AlloyDBConfig`, `SyncAlloyDBDialer`, `AsyncAlloyDBDialer`, `CloudSQLConfig`, `SyncCloudSQLDialer`, `AsyncCloudSQLDialer`, `CDCConfig`, `ChangeFeed`, `PostgresNotifyConfig`, `PostgresNotificationSource`, `OracleNotifyConfig`, `OracleNotificationSource`, `SyncSpannerChangeStreamSource`, `AsyncSpannerChangeStreamSource`, `TenantScopeConfig`, `TenantPredicate`, `TenantConnectionScope`, `AsyncTenantConnectionScope` | Direct TCP/TLS IAM OAuth2 token password resolution (`:5432`, `:3306`), zero-sidecar `:5433` AlloyDB and `:3307` Cloud SQL mTLS connectors, logical replication / Oracle TxEventQ / Spanner change-stream streaming, and reset-or-evict tenant isolation |
 
 ## Database Registry, Driver Contracts & Native Pipelines
 
@@ -93,6 +93,7 @@ Native database configurations, synchronous and asynchronous drivers (`SyncDatab
     options:
       heading_level: 4
       members: false
+      summary: false
 
 ::: vertebra.db.adapters.mssql.MSSQLConfig
     options:
@@ -177,9 +178,9 @@ Native database configurations, synchronous and asynchronous drivers (`SyncDatab
 placeholders and optional `CAST`, while PostgreSQL and Oracle cores own session
 SQL. SQLSpec supports the declared PostgreSQL/Oracle setters and refuses other
 engines. BigQuery/Spanner constructors reject non-None `tenant_predicate` before
-initialization. `OracleCore.build_session_context_sql()` returns the
-`DBMS_SESSION.SET_CONTEXT` block and named binds; Oracle drivers raise
-`MissingDependencyError`, so no Vertebra session executes it.
+initialization. Oracle VPD scopes (`TenantConnectionScope` / `AsyncTenantConnectionScope`)
+support trusted context package procedures alongside `DBMS_SESSION.SET_IDENTIFIER` with
+mandatory reset-or-evict pool release.
 
 See [Database Capabilities](database-capabilities.md) for notification, change-stream,
 tenant-scope, and tool-provider APIs.

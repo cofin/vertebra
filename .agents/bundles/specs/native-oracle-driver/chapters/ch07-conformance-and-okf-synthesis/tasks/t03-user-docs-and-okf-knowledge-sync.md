@@ -6,13 +6,16 @@ chapter_id: ch07-conformance-and-okf-synthesis
 title: "Task 03: Synchronize User Documentation, README, and AGENTS.md"
 description: Update docs/usage/databases.md, README.md, and AGENTS.md to document vertebra-core[oracle], vertebra-oracle (_oracle), Oracle 26ai codecs, Autonomous Wallet mTLS, delayed-commit pipelines, VPD tenancy, and Make targets.
 status: stable
-state: pending
+state: completed
 priority: P1
 owner: null
 depends_on:
   - "native-oracle-driver:ch07:t02"
 files:
   - docs/usage/databases.md
+  - docs/reference/db.md
+  - docs/reference/database-capabilities.md
+  - docs/reference/native-stubs.md
   - README.md
   - AGENTS.md
 tests: []
@@ -26,18 +29,18 @@ verification_strategy: documentation_validation
 estimated_loc: 150
 plan_revision: 3
 plan_commit: 769302bc
-state_revision: 0
+state_revision: 1
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-09T18:31:49Z"
+last_verified_commit: 549fdf73
+verification_evidence: "make docs-check (docstring scan, CLI docs check, zensical build, postbuild, verify_docs_artifacts, live zensical serve HTTP 200), wc -l AGENTS.md (65 <= 100), and review_setup validate passed"
 created_at: "2026-11-09T00:48:00Z"
-updated_at: "2026-11-09T01:28:30Z"
-completed_at: null
+updated_at: "2026-11-09T18:31:49Z"
+completed_at: "2026-11-09T18:31:49Z"
 commit_sha: null
 commit: null
 generated:
@@ -115,13 +118,13 @@ make review-check
 
 ## Acceptance Criteria
 
-- [ ] `docs/usage/databases.md` documents `vertebra-core[oracle]` with `pymdownx.tabbed` install tabs, concise inline `OracleConfig` / `SyncOracleDriver` / `AsyncOracleDriver` / `SyncOraclePool` / `pipeline()` / VPD tenancy / `OracleNotificationSource` examples, and a `4`–`6`-node conceptual Mermaid diagram [^docs-db].
-- [ ] `README.md` and `AGENTS.md` (`<= 100` lines) list `vertebra-oracle` (`_oracle`) and its verification targets [^repo-readme] [^repo-agents].
-- [ ] `make docs-check` and `make review-check` exit `0`.
+- [x] `docs/usage/databases.md` documents `vertebra-core[oracle]` with `pymdownx.tabbed` install tabs, concise inline `OracleConfig` / `SyncOracleDriver` / `AsyncOracleDriver` / `SyncOraclePool` / `pipeline()` / VPD tenancy / `OracleNotificationSource` examples, and a `4`–`6`-node conceptual Mermaid diagram [^docs-db].
+- [x] `README.md` and `AGENTS.md` (`<= 100` lines) list `vertebra-oracle` (`_oracle`) and its verification targets [^repo-readme] [^repo-agents].
+- [x] `make docs-check` and `make review-check` exit `0`.
 
 ## Notes & Discoveries
 
-None yet.
+Also synchronized `docs/reference/db.md` (`summary: false` on `OracleConfig` to keep `reference/db/index.html` under the 120 KB reference artifact budget and updated the Oracle VPD tenancy note), `docs/reference/database-capabilities.md` (`TenantConnectionScope`, `AsyncTenantConnectionScope`, `OracleNotifyConfig`, `OracleNotificationSource`), and `docs/reference/native-stubs.md` (`vertebra._oracle` row).
 
 [^ora-contracts]: `.agents/bundles/specs/native-oracle-driver/contracts.md` — Public contracts for `vertebra-oracle` and Python Oracle adapters.
 [^docs-db]: `docs/usage/databases.md` — User-facing database drivers and adapters guide.

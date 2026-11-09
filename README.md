@@ -14,12 +14,13 @@ Vertebra is one unified runtime for Python and TypeScript across backend, fronte
 - **Python Framework & Server**: Type-safe APIs (`App`, `Controller`, `Router`, `Route`, `Procedure`, `ProcedureRouter`, `Provide`, `Inject`, `QueueService`, Inertia v3, SSR, and MCP/A2A agent protocols) plus native, ASGI, WSGI, and RSGI support.
 - **Worker Runtime (`vertebra-core`, `vertebra-py`)**: Runs Python in-process or across multiple worker processes over shared memory.
 - **HTTP Server & Bundler (`vertebra-http`, `vertebra-bundler`)**: HTTP/1.1, HTTP/2, HTTP/3, gRPC, WebSockets, SSE, TLS, compression, static files, JavaScript bundling, and QuickJS SSR.
-- **Storage, Databases & TypeScript Client (`vertebra-storage`, `vertebra-db`, `vertebra-bigquery`, `vertebra-spanner`, `@vertebra/client`)**: Multicloud object storage (S3, GCS, Azure, R2, OCI, HTTP, local), database drivers (Postgres, MySQL, SQLite, DuckDB, Google BigQuery, Google Cloud Spanner, Redis, Valkey, DataFusion; Oracle 26ai and SQL Server configs ship while their native drivers are pending), native `driver.pipeline()` batching (`SyncPipelineCapable`, `AsyncPipelineCapable`), Cloud SQL/AlloyDB dialers, and a typed TypeScript client for React, Vue, Svelte, Angular, HTMX, and Vite.
+- **Storage, Databases & TypeScript Client (`vertebra-storage`, `vertebra-db`, `vertebra-bigquery`, `vertebra-oracle`, `vertebra-spanner`, `@vertebra/client`)**: Multicloud object storage (S3, GCS, Azure, R2, OCI, HTTP, local), database drivers (Postgres, MySQL, SQLite, Oracle 26ai, DuckDB, Google BigQuery, Google Cloud Spanner, Redis, Valkey, DataFusion; SQL Server configs ship while its native driver is pending), native `driver.pipeline()` batching (`SyncPipelineCapable`, `AsyncPipelineCapable`), Cloud SQL/AlloyDB dialers, and a typed TypeScript client for React, Vue, Svelte, Angular, HTMX, and Vite.
 
 ## Quickstart
 
 ```bash
 uv add vertebra-core
+uv add "vertebra-core[oracle]"   # Optional: BigQuery [bigquery], Oracle 26ai [oracle], Spanner [spanner]
 ```
 
 ## CLI Usage (`vtb`)
@@ -41,6 +42,8 @@ make build       # Build TS client, release Rust binaries, and wheel
 make test        # Run all tests (Rust + Python + TypeScript)
 make rs-test     # Run Rust workspace tests (tls, compression, and gcp features)
 make py-test     # Run Python test suite
+make oracle-test # Run Oracle 26ai Rust tests, stubtest, and Python unit tests
+make oracle-wheel-check # Verify standalone vertebra-oracle wheel isolation and fail-loud contract
 make ts-test     # Run TypeScript client tests (Vitest)
 make lint        # Format and lint Python, Rust, and TypeScript
 make check       # Run full lint, type checks, all tests, and coverage
@@ -64,6 +67,7 @@ src/
     vertebra-storage/  # Cloud and local object storage (_storage)
     vertebra-db/       # DB wire codecs, cloud dialers, and Arrow SHM framing
     vertebra-bigquery/ # BigQuery REST v2 and Storage Read/Write (_bigquery)
+    vertebra-oracle/   # Oracle 26ai Thin client, DRCP pool, and Arrow SHM (_oracle)
     vertebra-spanner/  # Spanner v1 gRPC and DatabaseAdmin (_spanner)
   ts/
     vertebra-client/   # @vertebra/client TypeScript SDK

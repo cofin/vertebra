@@ -12,14 +12,14 @@ chapter_order: 7
 depends_on_chapters:
   - ch06-notifications-and-embeddings
 replan_trigger: null
-current_task: "native-oracle-driver:ch07:t03"
+current_task: "native-oracle-driver:ch07:t04"
 plan_revision: 3
 plan_commit: 769302bc
-state_revision: 2
-last_verified_checkpoint: 1e0fc5b5
+state_revision: 3
+last_verified_checkpoint: 549fdf73
 last_reviewed_commit: null
 created_at: "2026-11-09T00:48:00Z"
-updated_at: "2026-11-09T18:22:17Z"
+updated_at: "2026-11-09T18:31:49Z"
 generated:
   by: flow-plan
   at: "2026-11-09T01:15:00Z"
@@ -171,7 +171,7 @@ In `.github/workflows/release.yaml`:
 
 ## 3. Documentation & OKF Knowledge Plan
 
-Progress: `[0/6 files documented]` (owned by `ch07:t03` and `ch07:t04`).
+Progress: `[3/6 files documented]` (owned by `ch07:t03` and `ch07:t04`).
 
 - `docs/usage/databases.md` (`ch07:t03`) — Document `vertebra-core[oracle]` installation, `OracleConfig` descriptor precedence, Autonomous Wallet mTLS, 26ai `VECTOR` and `OSON` codecs, delayed-commit `pipeline()`, VPD trusted-package and `CLIENT_IDENTIFIER` tenancy, and `OracleNotificationSource`.
 - `README.md` (`ch07:t03`) — Register `vertebra-oracle` (`_oracle`), the `[oracle]` optional extra, and `oracle-test` / `oracle-wheel-check` Make targets.
@@ -192,15 +192,15 @@ Progress: `[0/6 files documented]` (owned by `ch07:t03` and `ch07:t04`).
 ## 5. Implementation Plan
 
 - [x] [1e0fc5b5] native-oracle-driver:ch07:t01 — Wire Live Oracle 26ai Conformance Matrix and Native Integration Suite (tasks/t01-live-oracle-26ai-conformance-matrix.md)
-- [x] native-oracle-driver:ch07:t02 — Implement Standalone Wheel Isolation and Free-Threaded Gate (tasks/t02-wheel-isolation-and-freethreaded-gate.md)
-- [~] native-oracle-driver:ch07:t03 — Synchronize User Documentation, README, and AGENTS.md (tasks/t03-user-docs-and-okf-knowledge-sync.md)
-- [ ] native-oracle-driver:ch07:t04 — Synchronize OKF Data Domain Chapters and Tech Stack (tasks/t04-okf-domain-and-tech-stack-sync.md)
+- [x] [549fdf73] native-oracle-driver:ch07:t02 — Implement Standalone Wheel Isolation and Free-Threaded Gate (tasks/t02-wheel-isolation-and-freethreaded-gate.md)
+- [x] native-oracle-driver:ch07:t03 — Synchronize User Documentation, README, and AGENTS.md (tasks/t03-user-docs-and-okf-knowledge-sync.md)
+- [~] native-oracle-driver:ch07:t04 — Synchronize OKF Data Domain Chapters and Tech Stack (tasks/t04-okf-domain-and-tech-stack-sync.md)
 
 **Chapter Recovery Checkpoint:** `make lint-all && make rs-test && make py-test && make oracle-test && make oracle-wheel-check && make docs-check && make review-check && make review-route` exits `0`.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Chapter State**: `in_progress` (`2/4` tasks completed); `current_task: "native-oracle-driver:ch07:t03"`.
+- **Chapter State**: `in_progress` (`3/4` tasks completed); `current_task: "native-oracle-driver:ch07:t04"`.
 - **Upstream Prerequisite**: [Chapter 06 (`ch06-notifications-and-embeddings`)](../ch06-notifications-and-embeddings/spec.md) (`native-oracle-driver:ch06:t03`).
 - **Downstream Consumer**: Flow closeout (`/flow:review`, `/flow:finish native-oracle-driver`, `/flow:archive native-oracle-driver`).
 

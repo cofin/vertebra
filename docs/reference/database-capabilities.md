@@ -28,6 +28,18 @@ agent bridge. Creating providers and registering their tools opens no database c
       members: false
       summary: false
 
+::: vertebra.db.rls.TenantConnectionScope
+    options:
+      heading_level: 4
+      members: false
+      summary: false
+
+::: vertebra.db.rls.AsyncTenantConnectionScope
+    options:
+      heading_level: 4
+      members: false
+      summary: false
+
 ::: vertebra.db.adapters.postgres.notify.PostgresNotifyConfig
     options:
       heading_level: 4
@@ -35,6 +47,18 @@ agent bridge. Creating providers and registering their tools opens no database c
       summary: false
 
 ::: vertebra.db.adapters.postgres.notify.PostgresNotificationSource
+    options:
+      heading_level: 4
+      members: false
+      summary: false
+
+::: vertebra.db.adapters.oracle.notify.OracleNotifyConfig
+    options:
+      heading_level: 4
+      members: false
+      summary: false
+
+::: vertebra.db.adapters.oracle.notify.OracleNotificationSource
     options:
       heading_level: 4
       members: false

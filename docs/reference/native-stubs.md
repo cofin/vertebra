@@ -1,6 +1,6 @@
-# PyO3 Native Extension Stubs (`_vertebra`, `_bundler`, `_storage`, `_bigquery`, `_spanner`, `_duckdb`)
+# PyO3 Native Extension Stubs (`_vertebra`, `_bundler`, `_storage`, `_bigquery`, `_oracle`, `_spanner`, `_duckdb`)
 
-Low-level Rust/PyO3 classes and functions declared in PEP 561 `.pyi` stub files (`src/py/vertebra/_vertebra.pyi`, `_bundler.pyi`, `_storage.pyi`, `_bigquery.pyi`, `_spanner.pyi`, `_duckdb.pyi`) and compiled with `gil_used = false` for free-threaded Python `3.14t`/`3.15t`. Most applications interact with these primitives through the higher-level [`vertebra`](vertebra.md), [`vertebra.server`](server.md), [`vertebra.db`](db.md), and [`vertebra.storage`](storage.md) facades.
+Low-level Rust/PyO3 classes and functions declared in PEP 561 `.pyi` stub files (`src/py/vertebra/_vertebra.pyi`, `_bundler.pyi`, `_storage.pyi`, `_bigquery.pyi`, `_oracle.pyi`, `_spanner.pyi`, `_duckdb.pyi`) and compiled with `gil_used = false` for free-threaded Python `3.14t`/`3.15t`. Most applications interact with these primitives through the higher-level [`vertebra`](vertebra.md), [`vertebra.server`](server.md), [`vertebra.db`](db.md), and [`vertebra.storage`](storage.md) facades.
 
 | Native Module | Key Stub Classes | Backing Rust Crate |
 | --- | --- | --- |
@@ -8,6 +8,7 @@ Low-level Rust/PyO3 classes and functions declared in PEP 561 `.pyi` stub files 
 | **`vertebra._bundler`** | `BundleConfig`, `BuildResult`, `Bundler`, `SSRPool`, `IsolatedDeclarationsGenerator` | `vertebra-bundler` (Oxc, Rolldown, QuickJS) |
 | **`vertebra._storage`** | `StorageBuffer`, `ObjectMeta`, `SyncObjectStore`, `AsyncObjectStore` | `vertebra-storage` (Rust `object_store` + Tokio) |
 | **`vertebra._bigquery`** | `SyncBigQueryClient`, `AsyncBigQueryClient` | `vertebra-bigquery` (REST v2 + Storage Read/Write gRPC) |
+| **`vertebra._oracle`** | `SyncOracleClient`, `AsyncOracleClient`, `SyncOraclePool`, `AsyncOraclePool`, `AsyncOracleListener` | `vertebra-oracle` (Oracle 26ai Thin TNS/TTC + Arrow SHM) |
 | **`vertebra._spanner`** | `SyncSpannerClient`, `AsyncSpannerClient` | `vertebra-spanner` (Cloud Spanner Data + DatabaseAdmin) |
 | **`vertebra._duckdb`** | `SyncDuckDBClient`, `AsyncDuckDBClient` | `vertebra-duckdb` (Bundled DuckDB 2.0 + `VTBARROW` SHM) |
 
