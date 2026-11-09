@@ -46,12 +46,9 @@ from vertebra.db.adapters.duckdb import (
     duckdb_bootstrap_statements,
 )
 from vertebra.db.adapters.mssql import (
-    TDS_PKT_PRE_LOGIN,
     AsyncMSSQLDriver,
     MSSQLConfig,
     SyncMSSQLDriver,
-    decode_tds_packet,
-    encode_tds_packet,
     rewrite_mssql_placeholders,
 )
 from vertebra.db.adapters.mysql import (
@@ -459,14 +456,7 @@ def test_oracle_26ai_vector_oson_and_ttc_piggyback_codecs() -> None:
 
 
 def test_mssql_tds_framing_and_placeholder_rewriter() -> None:
-    """Verify TDS packet framing and single-pass @P1 placeholder rewriting."""
-    pkt = encode_tds_packet(TDS_PKT_PRE_LOGIN, 1, True, b"\x00\x00\x1a\x00\x06\x04")
-    pkt_type, is_eom, pkt_id, payload = decode_tds_packet(pkt)
-    assert pkt_type == TDS_PKT_PRE_LOGIN
-    assert is_eom is True
-    assert pkt_id == 1
-    assert payload == b"\x00\x00\x1a\x00\x06\x04"
-
+    """Verify single-pass @P1 placeholder rewriting and broker statement cache integration."""
     sql = (
         "SELECT 'a?b''$1', \"col?name\", [col$2?], * FROM t "
         "WHERE a = ? AND b = $2 -- ? $3 comment\n AND /* ? $4 */ c = ?"

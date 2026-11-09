@@ -5,16 +5,16 @@ flow_id: native-mssql-driver
 title: "Scaffold vertebra-mssql crate, TDS PRELOGIN/TLS/LOGIN7, and Cloud SQL :3307 mTLS"
 description: "Create standalone PyO3 crate src/rs/vertebra-mssql (vertebra._mssql + vertebra-core[mssql]), clean up legacy TDS framing helpers in vertebra-db/vertebra-py, and implement SyncMSSQLClient/AsyncMSSQLClient connection, PRELOGIN, TLS negotiation, LOGIN7 SQL auth, ENVCHANGE routing, and Cloud SQL :3307 mTLS."
 status: stable
-state: in_progress
+state: completed
 verification_strategy: tdd
 depends_on: []
 plan_revision: 1
-state_revision: 1
+state_revision: 2
 commit_sha: null
 claimed_at: "2026-11-09T03:20:00Z"
-completed_at: null
+completed_at: "2026-11-09T14:58:00Z"
 created_at: "2026-11-09T03:20:00Z"
-updated_at: "2026-11-09T03:20:00Z"
+updated_at: "2026-11-09T14:58:00Z"
 reads:
   - src/rs/Cargo.toml
   - src/rs/vertebra-spanner/Cargo.toml
@@ -88,10 +88,10 @@ sources:
 
 ## Acceptance Criteria
 
-- [ ] `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-mssql -p vertebra-db --locked` passes.
-- [ ] `cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-mssql --all-targets --locked -- -D warnings` passes.
-- [ ] `mypy.stubtest vertebra._mssql` and `mypy.stubtest vertebra._vertebra` pass.
-- [ ] `pytest src/py/tests/unit/build/test_packaging_and_pgo.py` and `review_setup validate` pass.
+- [x] `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-mssql -p vertebra-db --locked` passes.
+- [x] `cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-mssql --all-targets --locked -- -D warnings` passes.
+- [x] `mypy.stubtest vertebra._mssql` and `mypy.stubtest vertebra._vertebra` pass.
+- [x] `pytest src/py/tests/unit/build/test_packaging_and_pgo.py` and `review_setup validate` pass.
 
 [^mssql-rs]: `src/rs/vertebra-db/src/mssql/mod.rs::rewrite_mssql_placeholders` — Surviving `@P1` placeholder rewrite helper in vertebra-db.
 [^py-async-rs]: `src/rs/vertebra-db/src/py_async.rs` — Shared AsyncCompletionQueue + Notifier PyO3 bridge.

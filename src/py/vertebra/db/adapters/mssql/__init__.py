@@ -8,17 +8,7 @@ if TYPE_CHECKING:
     from vertebra.db.adapters.mssql.config import MSSQLConfig
     from vertebra.db.adapters.mssql.core import (
         MSSQL_DIALECT_TAG,
-        TDS_PKT_ATTENTION,
-        TDS_PKT_BULK_LOAD,
-        TDS_PKT_PRE_LOGIN,
-        TDS_PKT_RPC,
-        TDS_PKT_SQL_BATCH,
-        TDS_PKT_TABULAR_RESULT,
-        TDS_PKT_TDS7_LOGIN,
-        TDS_PKT_TRANS_MGR_REQ,
         MSSQLCore,
-        decode_tds_packet,
-        encode_tds_packet,
         rewrite_mssql_placeholders,
     )
     from vertebra.db.adapters.mssql.driver import AsyncMSSQLDriver, SyncMSSQLDriver
@@ -26,21 +16,11 @@ if TYPE_CHECKING:
 
 __all__ = (
     "MSSQL_DIALECT_TAG",
-    "TDS_PKT_ATTENTION",
-    "TDS_PKT_BULK_LOAD",
-    "TDS_PKT_PRE_LOGIN",
-    "TDS_PKT_RPC",
-    "TDS_PKT_SQL_BATCH",
-    "TDS_PKT_TABULAR_RESULT",
-    "TDS_PKT_TDS7_LOGIN",
-    "TDS_PKT_TRANS_MGR_REQ",
     "ArrowCursor",
     "AsyncMSSQLDriver",
     "MSSQLConfig",
     "MSSQLCore",
     "SyncMSSQLDriver",
-    "decode_tds_packet",
-    "encode_tds_packet",
     "rewrite_mssql_placeholders",
 )
 
@@ -53,21 +33,11 @@ __lazy_modules__ = [
 
 _EXPORT_MAP: dict[str, tuple[str, str]] = {
     "MSSQL_DIALECT_TAG": ("vertebra.db.adapters.mssql.core", "MSSQL_DIALECT_TAG"),
-    "TDS_PKT_ATTENTION": ("vertebra.db.adapters.mssql.core", "TDS_PKT_ATTENTION"),
-    "TDS_PKT_BULK_LOAD": ("vertebra.db.adapters.mssql.core", "TDS_PKT_BULK_LOAD"),
-    "TDS_PKT_PRE_LOGIN": ("vertebra.db.adapters.mssql.core", "TDS_PKT_PRE_LOGIN"),
-    "TDS_PKT_RPC": ("vertebra.db.adapters.mssql.core", "TDS_PKT_RPC"),
-    "TDS_PKT_SQL_BATCH": ("vertebra.db.adapters.mssql.core", "TDS_PKT_SQL_BATCH"),
-    "TDS_PKT_TABULAR_RESULT": ("vertebra.db.adapters.mssql.core", "TDS_PKT_TABULAR_RESULT"),
-    "TDS_PKT_TDS7_LOGIN": ("vertebra.db.adapters.mssql.core", "TDS_PKT_TDS7_LOGIN"),
-    "TDS_PKT_TRANS_MGR_REQ": ("vertebra.db.adapters.mssql.core", "TDS_PKT_TRANS_MGR_REQ"),
     "ArrowCursor": ("vertebra.db.arrow", "ArrowCursor"),
     "AsyncMSSQLDriver": ("vertebra.db.adapters.mssql.driver", "AsyncMSSQLDriver"),
     "MSSQLConfig": ("vertebra.db.adapters.mssql.config", "MSSQLConfig"),
     "MSSQLCore": ("vertebra.db.adapters.mssql.core", "MSSQLCore"),
     "SyncMSSQLDriver": ("vertebra.db.adapters.mssql.driver", "SyncMSSQLDriver"),
-    "decode_tds_packet": ("vertebra.db.adapters.mssql.core", "decode_tds_packet"),
-    "encode_tds_packet": ("vertebra.db.adapters.mssql.core", "encode_tds_packet"),
     "rewrite_mssql_placeholders": ("vertebra.db.adapters.mssql.core", "rewrite_mssql_placeholders"),
 }
 

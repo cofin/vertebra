@@ -1,0 +1,43 @@
+[package]
+name = "vertebra-mssql"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Native pure-Rust Microsoft SQL Server (TDS 7.3+) client extension for Vertebra"
+
+[lib]
+name = "_mssql"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+extension-module = ["pyo3/extension-module"]
+
+[dependencies]
+arrow-array = { workspace = true }
+arrow-buffer = { workspace = true }
+arrow-ipc = { workspace = true }
+arrow-schema = { workspace = true }
+chrono = { workspace = true }
+futures-util = { workspace = true }
+pyo3 = { workspace = true }
+rust_decimal = { workspace = true }
+rustls = { workspace = true }
+thiserror = { workspace = true }
+tiberius = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+uuid = { workspace = true }
+vertebra-core = { path = "../vertebra-core" }
+vertebra-db = { path = "../vertebra-db", features = ["gcp", "pyo3"] }
+
+[build-dependencies]
+pyo3-build-config = { workspace = true }
+
+[dev-dependencies]
+bytes = { workspace = true }
+pyo3 = { workspace = true, features = ["auto-initialize"] }
+rcgen = { workspace = true }
+tokio-rustls = { workspace = true }

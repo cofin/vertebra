@@ -5,17 +5,17 @@ flow_id: native-mssql-driver
 title: "Implement MSSQL SQL batch, sp_executesql RPC, transactions, ATTENTION cancellation, and DatabaseError mapping"
 description: "Implement SQL batch and sp_executesql RPC execution with @P1 parameter rewriting, execute/execute_many/fetch_all/fetch_one/fetch_optional/select_value, transaction lifecycle and savepoints, out-of-band ATTENTION cancellation, and TDS error number to DatabaseError hierarchy mapping."
 status: stable
-state: pending
+state: in_progress
 verification_strategy: tdd
 depends_on:
   - t01
 plan_revision: 1
-state_revision: 0
+state_revision: 1
 commit_sha: null
-claimed_at: null
+claimed_at: "2026-11-09T14:58:00Z"
 completed_at: null
 created_at: "2026-11-09T03:20:00Z"
-updated_at: "2026-11-09T03:20:00Z"
+updated_at: "2026-11-09T14:58:00Z"
 reads:
   - src/rs/vertebra-mssql/src/lib.rs
   - src/rs/vertebra-mssql/src/client.rs

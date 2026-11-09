@@ -1,79 +1,23 @@
-"""SQL Server TDS packet helpers and `@P1` placeholder rewriter."""
+"""SQL Server `@P1` placeholder rewriter."""
 
-import struct
+from __future__ import annotations
+
+import re
+from collections.abc import Mapping, Sequence
+from typing import Any
 
 from vertebra.db.driver._common import MSSQL_DIALECT_TAG
-from vertebra.typing import VertebraError
 from vertebra.utils.module_loader import import_optional
 
 __all__ = (
     "MSSQL_DIALECT_TAG",
-    "TDS_PKT_ATTENTION",
-    "TDS_PKT_BULK_LOAD",
-    "TDS_PKT_PRE_LOGIN",
-    "TDS_PKT_RPC",
-    "TDS_PKT_SQL_BATCH",
-    "TDS_PKT_TABULAR_RESULT",
-    "TDS_PKT_TDS7_LOGIN",
-    "TDS_PKT_TRANS_MGR_REQ",
     "MSSQLCore",
-    "decode_tds_packet",
-    "encode_tds_packet",
     "rewrite_mssql_placeholders",
-)
-
-TDS_PKT_SQL_BATCH = 0x01
-TDS_PKT_RPC = 0x03
-TDS_PKT_TABULAR_RESULT = 0x04
-TDS_PKT_ATTENTION = 0x06
-TDS_PKT_BULK_LOAD = 0x07
-TDS_PKT_TRANS_MGR_REQ = 0x0E
-TDS_PKT_TDS7_LOGIN = 0x10
-TDS_PKT_PRE_LOGIN = 0x12
-
-_VALID_TDS_PACKET_TYPES = frozenset(
-    {
-        TDS_PKT_SQL_BATCH,
-        TDS_PKT_RPC,
-        TDS_PKT_TABULAR_RESULT,
-        TDS_PKT_ATTENTION,
-        TDS_PKT_BULK_LOAD,
-        TDS_PKT_TRANS_MGR_REQ,
-        TDS_PKT_TDS7_LOGIN,
-        TDS_PKT_PRE_LOGIN,
-    }
 )
 
 
 class MSSQLCore:
-    """TDS 7.4 packet framing and T-SQL placeholder translation."""
-
-    @staticmethod
-    def encode_tds_packet(
-        packet_type: int,
-        packet_id: int,
-        is_eom: bool,
-        payload: bytes,
-    ) -> bytes:
-        """Encode an 8-byte TDS packet header (`[type, status, len_be_u16, spid_be_u16, packet_id, window]`) + payload."""
-        total_len = 8 + len(payload)
-        status = 0x01 if is_eom else 0x00
-        header = struct.pack(">BBHHBB", packet_type & 0xFF, status, total_len & 0xFFFF, 0, packet_id & 0xFF, 0)
-        return header + payload
-
-    @staticmethod
-    def decode_tds_packet(buf: bytes | bytearray | memoryview) -> tuple[int, bool, int, bytes]:
-        """Decode a TDS packet into `(packet_type, is_eom, packet_id, payload)`."""
-        raw = bytes(buf)
-        if len(raw) < 8:
-            raise VertebraError("Buffer too short for 8-byte TDS packet header")
-        pkt_type, status, total_len, _spid, packet_id, _window = struct.unpack(">BBHHBB", raw[:8])
-        if pkt_type not in _VALID_TDS_PACKET_TYPES:
-            raise VertebraError(f"Unsupported TDS packet type byte: 0x{pkt_type:02x}")
-        if total_len < 8 or len(raw) < total_len:
-            raise VertebraError(f"Invalid or truncated TDS packet length: expected {total_len}, got {len(raw)}")
-        is_eom = (status & 0x01) != 0
-        return (pkt_type, is_eom, packet_id, raw[8:total_len])
+    """T-SQL placeholder translation."""
 
     @staticmethod
     def rewrite_placeholders(sql: str) -> tuple[str, int]:
@@ -180,6 +124,4 @@ class MSSQLCore:
         return "".join(out), max_param
 
 
-encode_tds_packet = MSSQLCore.encode_tds_packet
-decode_tds_packet = MSSQLCore.decode_tds_packet
 rewrite_mssql_placeholders = MSSQLCore.rewrite_placeholders
