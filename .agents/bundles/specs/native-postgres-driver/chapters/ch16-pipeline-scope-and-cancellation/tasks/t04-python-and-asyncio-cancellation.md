@@ -5,7 +5,7 @@ chapter_id: ch16-pipeline-scope-and-cancellation
 title: "Expose explicit and asyncio client cancellation with independent native cleanup"
 description: "Expose out-of-band SyncPostgresClient.cancel and AsyncPostgresClient.cancel and route asyncio Future cancellation through protocol CancelRequest and native session retirement."
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -26,15 +26,15 @@ tests:
 estimated_loc: 230
 plan_revision: 5
 plan_commit: fd571e3a
-state_revision: 0
+state_revision: 1
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-09T19:32:00Z"
+last_verified_commit: c2d362c6
+verification_evidence: "pytest test_postgres_native_cancel.py (4 passed) + mypy.stubtest vertebra._postgres + ruff/clippy exit 0"
 created_at: "2026-11-05T18:25:07Z"
 updated_at: "2026-11-08T02:05:22Z"
 commit: null

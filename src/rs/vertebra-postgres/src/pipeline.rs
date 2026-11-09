@@ -759,7 +759,7 @@ impl PostgresConnection {
         if used_unnamed_stmt {
             self.unnamed_statement_valid = true;
         }
-        self.exchange_state = ExchangeState::PipelineActive;
+        self.set_exchange_state(ExchangeState::PipelineActive);
 
         let mut prefetched_frames = VecDeque::new();
         let mut prefetched_bytes = 0usize;
@@ -912,7 +912,7 @@ impl PostgresConnection {
                     continue;
                 }
                 Message::ReadyForQuery(body) => {
-                    self.exchange_state = ExchangeState::Idle;
+                    self.set_exchange_state(ExchangeState::Idle);
                     let status = match TransactionStatus::from_wire_tag(body.status()) {
                         Ok(s) => s,
                         Err(err) => {

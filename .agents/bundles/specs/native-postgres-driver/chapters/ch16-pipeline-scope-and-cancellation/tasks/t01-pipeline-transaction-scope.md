@@ -5,7 +5,7 @@ chapter_id: ch16-pipeline-scope-and-cancellation
 title: "Implement retained pipeline transaction scope and Python pipeline context classes"
 description: "Enforce SessionAccess::Pipeline transaction/savepoint scope across result conversion in vertebra-postgres and implement SyncPostgresPipeline and AsyncPostgresPipeline with enqueue-time snapshots."
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -27,15 +27,15 @@ tests:
 estimated_loc: 250
 plan_revision: 5
 plan_commit: fd571e3a
-state_revision: 0
+state_revision: 1
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-09T19:32:00Z"
+last_verified_commit: c2d362c6
+verification_evidence: "cargo test -p vertebra-postgres --test pipeline_scope (4 passed) + pytest test_postgres_native_pipeline.py (9 passed) + mypy/ruff exit 0"
 created_at: "2026-11-05T18:25:07Z"
 updated_at: "2026-11-08T02:05:22Z"
 commit: null

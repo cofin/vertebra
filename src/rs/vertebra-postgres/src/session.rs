@@ -34,6 +34,20 @@ use crate::transaction::{
 #[path = "statements.rs"]
 pub mod statements;
 
+/// Retained pipeline transaction/savepoint scopes (`crate::session::pipeline_scope`).
+#[path = "pipeline_scope.rs"]
+pub mod pipeline_scope;
+pub use self::pipeline_scope::PipelineScopeToken;
+
+/// Generation-fenced PostgreSQL `CancelRequest` engine (`crate::session::cancel`).
+#[path = "cancel.rs"]
+pub mod cancel;
+pub use self::cancel::{
+    CancelDisposition, CancelSecret, OperationGeneration, PostgresCancelHandle,
+};
+
+use self::cancel::{CancelKeyData, StandaloneCancelState};
+use self::pipeline_scope::ActivePipelineScope;
 use self::statements::{PoolerCapabilities, PoolerMode, StatementCache, StatementKey};
 
 /// Default maximum materialized result / portal chunk byte budget (`64 MiB`).
@@ -174,6 +188,8 @@ pub struct PostgresConnection {
     pub(crate) configured_session_gucs: BTreeMap<String, String>,
     pub(crate) baseline_application_name: String,
     pub(crate) backend_key: Option<BackendKey>,
+    pub(crate) cancel_key: Option<CancelKeyData>,
+    pub(crate) standalone_cancel: Arc<StandaloneCancelState>,
     pub(crate) transaction_status: TransactionStatus,
     pub(crate) transaction_state: TransactionState,
     pub(crate) generation: u64,
@@ -242,6 +258,14 @@ impl PostgresConnection {
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
+        let cancel_key = backend_key.map(CancelKeyData::from);
+        let standalone_cancel = Arc::new(StandaloneCancelState {
+            config: config.clone(),
+            cloud_connector: Arc::new(CloudConnector::new()),
+            key: cancel_key.clone(),
+            in_exchange: std::sync::atomic::AtomicBool::new(false),
+            cancel_sent: std::sync::atomic::AtomicBool::new(false),
+        });
         Self {
             stream: ConnectionStream::Custom(Box::new(stream)),
             read_buf: BytesMut::with_capacity(8192),
@@ -251,6 +275,8 @@ impl PostgresConnection {
             configured_session_gucs,
             baseline_application_name: config.application_name.clone(),
             backend_key,
+            cancel_key,
+            standalone_cancel,
             transaction_status: TransactionStatus::Idle,
             transaction_state: TransactionState::new(),
             generation: 1,
@@ -312,6 +338,55 @@ impl PostgresConnection {
     pub fn mark_closed(&mut self) {
         self.closed = true;
         self.exchange_state = ExchangeState::Idle;
+        self.standalone_cancel
+            .in_exchange
+            .store(false, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Return a typed [`PostgresCancelHandle`] targeting this physical connection.
+    pub fn postgres_cancel_handle(&self) -> PostgresCancelHandle {
+        PostgresCancelHandle::from_standalone(Arc::clone(&self.standalone_cancel))
+    }
+
+    /// Return `true` when a standalone [`PostgresCancelHandle`] sent a `CancelRequest` for this connection.
+    pub fn has_cancel_sent(&self) -> bool {
+        self.standalone_cancel
+            .cancel_sent
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Override the connection's Rust-private cancellation key with a variable-length Protocol 3.2
+    /// secret (`1..=256` bytes) without exposing `process_id` or key bytes to Python.
+    pub fn set_variable_cancel_secret(
+        &mut self,
+        process_id: i32,
+        secret: impl Into<Box<[u8]>>,
+    ) -> Result<(), PostgresError> {
+        let secret_box = secret.into();
+        if secret_box.is_empty()
+            || secret_box.len() > self::cancel::MAX_VARIABLE_CANCEL_SECRET_BYTES
+        {
+            return Err(PostgresError::Protocol(format!(
+                "variable-length cancellation key must be 1..={} bytes",
+                self::cancel::MAX_VARIABLE_CANCEL_SECRET_BYTES
+            )));
+        }
+        let key = CancelKeyData {
+            process_id,
+            secret: CancelSecret::Variable(secret_box),
+        };
+        let new_standalone = Arc::new(StandaloneCancelState {
+            config: self.standalone_cancel.config.clone(),
+            cloud_connector: Arc::clone(&self.standalone_cancel.cloud_connector),
+            key: Some(key.clone()),
+            in_exchange: std::sync::atomic::AtomicBool::new(
+                !matches!(self.exchange_state, ExchangeState::Idle) && !self.closed,
+            ),
+            cancel_sent: std::sync::atomic::AtomicBool::new(self.has_cancel_sent()),
+        });
+        self.cancel_key = Some(key);
+        self.standalone_cancel = new_standalone;
+        Ok(())
     }
 
     /// Synchronize both `transaction_status` and `transaction_state` from a `ReadyForQuery` status byte.
@@ -397,6 +472,10 @@ impl PostgresConnection {
     /// Update the protocol [`ExchangeState`] guard.
     pub fn set_exchange_state(&mut self, state: ExchangeState) {
         self.exchange_state = state;
+        self.standalone_cancel.in_exchange.store(
+            !matches!(state, ExchangeState::Idle) && !self.closed,
+            std::sync::atomic::Ordering::Release,
+        );
     }
 
     /// Register or update a warm [`crate::extended::PreparedDescription`] for `sql`.
@@ -638,7 +717,7 @@ impl PostgresConnection {
                     PostgresError::Protocol(format!("failed to encode Close(P): {e}"))
                 })?;
                 frontend::sync(&mut self.write_buf);
-                self.exchange_state = ExchangeState::InExtendedExchange;
+                self.set_exchange_state(ExchangeState::InExtendedExchange);
                 if let Err(err) = self.stream.write_all(&self.write_buf).await {
                     self.write_buf.clear();
                     self.mark_closed();
@@ -750,7 +829,7 @@ impl PostgresConnection {
                     self.handle_notification_frame(&body)?;
                 }
                 Message::ReadyForQuery(body) => {
-                    self.exchange_state = ExchangeState::Idle;
+                    self.set_exchange_state(ExchangeState::Idle);
                     let status = match TransactionStatus::from_wire_tag(body.status()) {
                         Ok(s) => s,
                         Err(err) => {
@@ -800,6 +879,9 @@ impl PostgresConnection {
             PostgresError::Protocol(format!("failed to encode simple Query frame: {e}"))
         })?;
 
+        self.standalone_cancel
+            .in_exchange
+            .store(true, std::sync::atomic::Ordering::Release);
         if let Err(err) = self.stream.write_all(&self.write_buf).await {
             self.write_buf.clear();
             self.mark_closed();
@@ -884,6 +966,9 @@ impl PostgresConnection {
                     self.handle_notification_frame(&body)?;
                 }
                 Message::ReadyForQuery(body) => {
+                    self.standalone_cancel
+                        .in_exchange
+                        .store(false, std::sync::atomic::Ordering::Release);
                     let status = match TransactionStatus::from_wire_tag(body.status()) {
                         Ok(s) => s,
                         Err(err) => {
@@ -1002,7 +1087,7 @@ impl PostgresConnection {
         postgres_protocol::message::frontend::sync(&mut self.write_buf);
 
         self.unnamed_statement_valid = true;
-        self.exchange_state = ExchangeState::InExtendedExchange;
+        self.set_exchange_state(ExchangeState::InExtendedExchange);
 
         if let Err(err) = self.stream.write_all(&self.write_buf).await {
             self.write_buf.clear();
@@ -1140,7 +1225,7 @@ impl PostgresConnection {
                     self.handle_notification_frame(&body)?;
                 }
                 Message::ReadyForQuery(body) => {
-                    self.exchange_state = ExchangeState::Idle;
+                    self.set_exchange_state(ExchangeState::Idle);
                     let status = match TransactionStatus::from_wire_tag(body.status()) {
                         Ok(s) => s,
                         Err(err) => {
@@ -1263,7 +1348,7 @@ impl PostgresConnection {
             .map_err(|e| PostgresError::Protocol(format!("failed to encode Close(P): {e}")))?;
         frontend::sync(&mut self.write_buf);
 
-        self.exchange_state = ExchangeState::InExtendedExchange;
+        self.set_exchange_state(ExchangeState::InExtendedExchange);
 
         if let Err(err) = self.stream.write_all(&self.write_buf).await {
             self.write_buf.clear();
@@ -1419,7 +1504,7 @@ impl PostgresConnection {
                     self.handle_notification_frame(&body)?;
                 }
                 Message::ReadyForQuery(body) => {
-                    self.exchange_state = ExchangeState::Idle;
+                    self.set_exchange_state(ExchangeState::Idle);
                     let status = match TransactionStatus::from_wire_tag(body.status()) {
                         Ok(s) => s,
                         Err(err) => {
@@ -1546,7 +1631,7 @@ impl PostgresConnection {
             .map_err(|e| PostgresError::Protocol(format!("failed to encode Close(P): {e}")))?;
         frontend::sync(&mut self.write_buf);
 
-        self.exchange_state = ExchangeState::InExtendedExchange;
+        self.set_exchange_state(ExchangeState::InExtendedExchange);
 
         if let Err(err) = self.stream.write_all(&self.write_buf).await {
             self.write_buf.clear();
@@ -1660,7 +1745,7 @@ impl PostgresConnection {
                     self.handle_notification_frame(&body)?;
                 }
                 Message::ReadyForQuery(body) => {
-                    self.exchange_state = ExchangeState::Idle;
+                    self.set_exchange_state(ExchangeState::Idle);
                     let status = match TransactionStatus::from_wire_tag(body.status()) {
                         Ok(s) => s,
                         Err(err) => {
@@ -1778,7 +1863,7 @@ impl PostgresConnection {
         postgres_protocol::message::frontend::sync(&mut self.write_buf);
 
         self.unnamed_statement_valid = true;
-        self.exchange_state = ExchangeState::InExtendedExchange;
+        self.set_exchange_state(ExchangeState::InExtendedExchange);
 
         if let Err(err) = self.stream.write_all(&self.write_buf).await {
             self.write_buf.clear();
@@ -1891,7 +1976,7 @@ impl PostgresConnection {
                     self.handle_notification_frame(&body)?;
                 }
                 Message::ReadyForQuery(body) => {
-                    self.exchange_state = ExchangeState::Idle;
+                    self.set_exchange_state(ExchangeState::Idle);
                     let status = match TransactionStatus::from_wire_tag(body.status()) {
                         Ok(s) => s,
                         Err(err) => {
@@ -1928,8 +2013,7 @@ impl PostgresConnection {
         if self.closed {
             return Ok(());
         }
-        self.closed = true;
-        self.exchange_state = ExchangeState::Idle;
+        self.mark_closed();
         let _ = self.stream.write_all(&TERMINATE_FRAME).await;
         let _ = self.stream.flush().await;
         let _ = self.stream.shutdown().await;
@@ -1955,6 +2039,24 @@ impl SessionBacking {
             Self::Pooled(lease) => lease.release().await,
         }
     }
+
+    pub(crate) fn mark_retire(&mut self) {
+        if let Self::Pooled(lease) = self {
+            lease.mark_retire();
+        }
+    }
+
+    pub(crate) async fn retire_physical_socket(&mut self) {
+        match self {
+            Self::Direct(conn) => {
+                let _ = conn.close().await;
+            }
+            Self::Pooled(lease) => {
+                lease.mark_retire();
+                let _ = PostgresConnection::close(lease).await;
+            }
+        }
+    }
 }
 
 impl Deref for SessionBacking {
@@ -1977,6 +2079,23 @@ impl DerefMut for SessionBacking {
     }
 }
 
+/// Centralized session access discriminant preventing ordinary raw escapes during active
+/// pipeline scopes or failed-by-cancellation ambient transactions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(crate) enum SessionAccess {
+    Ordinary,
+    Pipeline(PipelineScopeToken),
+    Portal,
+    RollbackAllowed,
+    Cancel,
+    ForcedCleanup,
+}
+
+/// Optional synchronous test hook executed on a blocking thread immediately before dialing a
+/// fresh `CancelRequest` socket (used by deterministic delayed-cancel barrier tests).
+pub(crate) type CancelDialHook = Arc<dyn Fn() + Send + Sync>;
+
 #[derive(Debug)]
 #[allow(clippy::large_enum_variant)]
 enum SessionState {
@@ -1988,13 +2107,204 @@ enum SessionState {
 }
 
 #[derive(Debug)]
-struct SessionInner {
+struct ActiveOpState {
+    op_gen: OperationGeneration,
+    key: Option<CancelKeyData>,
+    had_ambient_tx: bool,
+    cancel_claimed: bool,
+    retire_on_finish: bool,
+    cancel_notify: Arc<tokio::sync::Notify>,
+}
+
+#[derive(Debug)]
+pub(crate) struct OperationMeta {
+    pub(crate) next_pipeline_token: u64,
+    pub(crate) pre_pinned_owner: Option<TransactionOwner>,
+    pub(crate) install_pipeline_scope: Option<ActivePipelineScope>,
+    pub(crate) pipeline_already_submitted: bool,
+    pub(crate) pipeline_already_failed: bool,
+    pub(crate) mark_pipeline_submitted: bool,
+    pub(crate) mark_pipeline_failed: Option<PostgresError>,
+    pub(crate) finish_pipeline_scope: Option<ActivePipelineScope>,
+    pub(crate) clear_pipeline_scope: Option<(bool, Option<TransactionOwner>)>,
+    pub(crate) retire_pending: bool,
+    pub(crate) ambient_cancel_failed: bool,
+    pub(crate) force_retire_now: bool,
+    pub(crate) clear_ambient_cancel_failed: bool,
+    pub(crate) pin_owner_on_ok: Option<TransactionOwner>,
+}
+
+#[derive(Debug)]
+pub(crate) struct SessionInner {
     state: SessionState,
     next_generation: u64,
+    next_op_generation: u64,
+    reserved_generations: std::collections::BTreeSet<u64>,
+    pre_cancelled_generations: std::collections::BTreeSet<u64>,
+    active_op: Option<ActiveOpState>,
+    closing_inflight: bool,
+    close_after_inflight: bool,
     parameters: BTreeMap<String, String>,
     last_transaction_status: TransactionStatus,
     pinned_owner: Option<TransactionOwner>,
     active_portal: Option<(TransactionOwner, String)>,
+    next_pipeline_token: u64,
+    pub(crate) active_pipeline: Option<ActivePipelineScope>,
+    retire_pending: bool,
+    ambient_cancel_failed: bool,
+}
+
+impl SessionInner {
+    fn new_disconnected() -> Self {
+        Self {
+            state: SessionState::Disconnected,
+            next_generation: 0,
+            next_op_generation: 0,
+            reserved_generations: std::collections::BTreeSet::new(),
+            pre_cancelled_generations: std::collections::BTreeSet::new(),
+            active_op: None,
+            closing_inflight: false,
+            close_after_inflight: false,
+            parameters: BTreeMap::new(),
+            last_transaction_status: TransactionStatus::Idle,
+            pinned_owner: None,
+            active_portal: None,
+            next_pipeline_token: 0,
+            active_pipeline: None,
+            retire_pending: false,
+            ambient_cancel_failed: false,
+        }
+    }
+
+    fn new_ready(backing: SessionBacking) -> Self {
+        let generation = backing.generation();
+        let parameters = backing.parameters.clone();
+        let status = backing.transaction_status();
+        Self {
+            state: SessionState::Ready(backing),
+            next_generation: generation,
+            next_op_generation: 0,
+            reserved_generations: std::collections::BTreeSet::new(),
+            pre_cancelled_generations: std::collections::BTreeSet::new(),
+            active_op: None,
+            closing_inflight: false,
+            close_after_inflight: false,
+            parameters,
+            last_transaction_status: status,
+            pinned_owner: None,
+            active_portal: None,
+            next_pipeline_token: 0,
+            active_pipeline: None,
+            retire_pending: false,
+            ambient_cancel_failed: false,
+        }
+    }
+
+    fn prune_generation_sets(&mut self) {
+        let floor = self.next_op_generation.saturating_sub(4096);
+        self.reserved_generations.retain(|&g| g >= floor);
+        self.pre_cancelled_generations.retain(|&g| g >= floor);
+    }
+}
+
+pub(crate) struct SessionShared {
+    pub(crate) config: PostgresConfig,
+    pub(crate) cloud_connector: Arc<CloudConnector>,
+    pub(crate) inner: std::sync::Mutex<SessionInner>,
+    pub(crate) cancel_dial_hook: std::sync::Mutex<Option<CancelDialHook>>,
+    pub(crate) inflight_done_notify: Arc<tokio::sync::Notify>,
+}
+
+impl Drop for SessionShared {
+    fn drop(&mut self) {
+        let inner = match self.inner.get_mut() {
+            Ok(g) => g,
+            Err(e) => e.into_inner(),
+        };
+        let active_pipe = inner.active_pipeline.take();
+        let retire_pending = inner.retire_pending || inner.ambient_cancel_failed;
+        if active_pipe.is_none() && !retire_pending {
+            return;
+        }
+        let prev = std::mem::replace(
+            &mut inner.state,
+            SessionState::Closed {
+                generation: inner.next_generation,
+            },
+        );
+        let SessionState::Ready(mut backing) = prev else {
+            return;
+        };
+        let _access = SessionAccess::ForcedCleanup;
+        if retire_pending {
+            backing.mark_retire();
+        }
+        let timeout = self.config.connect_timeout;
+        let cleanup = async move {
+            if let Some(pipe) = active_pipe {
+                let rb = tokio::time::timeout(
+                    timeout,
+                    self::pipeline_scope::rollback_pipeline_scope(&mut backing, &pipe.scope),
+                )
+                .await;
+                if !matches!(rb, Ok(Ok(()))) || retire_pending {
+                    backing.retire_physical_socket().await;
+                }
+            } else if retire_pending {
+                backing.retire_physical_socket().await;
+            }
+            let _ = tokio::time::timeout(timeout, backing.close()).await;
+        };
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(cleanup);
+        } else {
+            vertebra_db::py_async::db_runtime_handle().spawn(cleanup);
+        }
+    }
+}
+
+#[allow(clippy::large_enum_variant)]
+pub(crate) enum CloseAction {
+    Immediate(Option<SessionBacking>),
+    WaitInFlight(std::pin::Pin<Box<tokio::sync::futures::OwnedNotified>>),
+}
+
+struct InFlightDropGuard<'a> {
+    shared: &'a Arc<SessionShared>,
+    backing: Option<SessionBacking>,
+    disarmed: bool,
+}
+
+impl Drop for InFlightDropGuard<'_> {
+    fn drop(&mut self) {
+        if self.disarmed {
+            return;
+        }
+        if let Some(mut backing) = self.backing.take() {
+            backing.mark_closed();
+            backing.mark_retire();
+            let generation = backing.generation();
+            let timeout = self.shared.config.connect_timeout;
+            {
+                let mut guard = self.shared.inner.lock().unwrap_or_else(|e| e.into_inner());
+                guard.active_op = None;
+                guard.closing_inflight = false;
+                guard.close_after_inflight = false;
+                guard.active_pipeline = None;
+                guard.pinned_owner = None;
+                guard.state = SessionState::Closed { generation };
+            }
+            self.shared.inflight_done_notify.notify_waiters();
+            let cleanup = async move {
+                let _ = tokio::time::timeout(timeout, backing.close()).await;
+            };
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                handle.spawn(cleanup);
+            } else {
+                vertebra_db::py_async::db_runtime_handle().spawn(cleanup);
+            }
+        }
+    }
 }
 
 /// Lock-free operation guard checking out [`SessionBacking`] without holding a `Mutex` across `.await`, Python conversion, or GIL reacquisition.
@@ -2019,30 +2329,64 @@ impl Drop for SessionOperationGuard<'_> {
         if !self.portal_mode && backing.exchange_state != ExchangeState::Idle {
             backing.mark_closed();
         }
-        let mut guard = self
-            .handle
-            .inner
-            .lock()
-            .expect("SessionHandle lock poisoned");
-        guard.parameters = backing.parameters.clone();
-        guard.last_transaction_status = backing.transaction_status();
-        if backing.transaction_status() == TransactionStatus::Idle && guard.active_portal.is_none()
-        {
-            guard.pinned_owner = None;
-        }
-        if matches!(guard.state, SessionState::InFlight { .. }) {
-            guard.state = SessionState::Ready(backing);
+        let close_now = {
+            let mut guard = self
+                .handle
+                .shared
+                .inner
+                .lock()
+                .expect("SessionHandle lock poisoned");
+            guard.active_op = None;
+            guard.closing_inflight = false;
+            let close_requested = guard.close_after_inflight;
+            guard.close_after_inflight = false;
+            guard.parameters = backing.parameters.clone();
+            guard.last_transaction_status = backing.transaction_status();
+            if backing.transaction_status() == TransactionStatus::Idle
+                && guard.active_portal.is_none()
+                && guard.active_pipeline.is_none()
+                && !guard.ambient_cancel_failed
+            {
+                guard.pinned_owner = None;
+            }
+            if guard.retire_pending {
+                backing.mark_retire();
+            }
+            if close_requested {
+                guard.state = SessionState::Closed {
+                    generation: backing.generation(),
+                };
+                Some(backing)
+            } else {
+                if matches!(guard.state, SessionState::InFlight { .. }) {
+                    guard.state = SessionState::Ready(backing);
+                }
+                None
+            }
+        };
+        if let Some(b) = close_now {
+            let timeout = self.handle.shared.config.connect_timeout;
+            let notify = Arc::clone(&self.handle.shared.inflight_done_notify);
+            let task = async move {
+                let _ = tokio::time::timeout(timeout, b.close()).await;
+                notify.notify_waiters();
+            };
+            if let Ok(h) = tokio::runtime::Handle::try_current() {
+                h.spawn(task);
+            } else {
+                vertebra_db::py_async::db_runtime_handle().spawn(task);
+            }
+        } else {
+            self.handle.shared.inflight_done_notify.notify_waiters();
         }
     }
 }
 
 /// Explicit PostgreSQL session lifecycle handle (`Disconnected -> Connecting -> Ready -> Closed`).
 pub struct SessionHandle {
-    config: PostgresConfig,
-    cloud_connector: Arc<CloudConnector>,
+    pub(crate) shared: Arc<SessionShared>,
     token_provider: ScopedTokenProvider,
     clock: Arc<dyn Clock>,
-    inner: std::sync::Mutex<SessionInner>,
 }
 
 /// Type alias uniting [`ClientSession`] and [`SessionHandle`].
@@ -2051,7 +2395,7 @@ pub type ClientSession = SessionHandle;
 impl std::fmt::Debug for SessionHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SessionHandle")
-            .field("config", &self.config)
+            .field("config", &self.shared.config)
             .field("is_ready", &self.is_ready())
             .field("is_closed", &self.is_closed())
             .field("generation", &self.generation())
@@ -2085,25 +2429,22 @@ impl SessionHandle {
             (!config.iam_auth_options.is_empty()).then(|| config.iam_auth_options.clone()),
             Arc::clone(&clock),
         );
-        Self {
+        let shared = Arc::new(SessionShared {
             config,
             cloud_connector,
+            inner: std::sync::Mutex::new(SessionInner::new_disconnected()),
+            cancel_dial_hook: std::sync::Mutex::new(None),
+            inflight_done_notify: Arc::new(tokio::sync::Notify::new()),
+        });
+        Self {
+            shared,
             token_provider,
             clock,
-            inner: std::sync::Mutex::new(SessionInner {
-                state: SessionState::Disconnected,
-                next_generation: 0,
-                parameters: BTreeMap::new(),
-                last_transaction_status: TransactionStatus::Idle,
-                pinned_owner: None,
-                active_portal: None,
-            }),
         }
     }
 
-    /// Construct a ready [`SessionHandle`] backed by a checked-out [`crate::pool::PooledConnection`] lease.
-    pub fn from_pooled(lease: crate::pool::PooledConnection) -> Self {
-        let config = lease.pool().config().clone();
+    /// Construct a ready [`SessionHandle`] directly wrapping an established [`PostgresConnection`] (used by deterministic protocol wire harnesses).
+    pub fn from_direct(config: PostgresConfig, conn: PostgresConnection) -> Self {
         let clock: Arc<dyn Clock> = Arc::new(SystemClock);
         let cloud_connector = Arc::new(CloudConnector::with_clock(Arc::clone(&clock)));
         let token_provider = ScopedTokenProvider::new(
@@ -2111,37 +2452,191 @@ impl SessionHandle {
             (!config.iam_auth_options.is_empty()).then(|| config.iam_auth_options.clone()),
             Arc::clone(&clock),
         );
-        let generation = lease.generation();
-        let parameters = lease.parameters.clone();
-        let status = lease.transaction_status();
-        Self {
+        let shared = Arc::new(SessionShared {
             config,
             cloud_connector,
+            inner: std::sync::Mutex::new(SessionInner::new_ready(SessionBacking::Direct(conn))),
+            cancel_dial_hook: std::sync::Mutex::new(None),
+            inflight_done_notify: Arc::new(tokio::sync::Notify::new()),
+        });
+        Self {
+            shared,
             token_provider,
             clock,
-            inner: std::sync::Mutex::new(SessionInner {
-                state: SessionState::Ready(SessionBacking::Pooled(lease)),
-                next_generation: generation,
-                parameters,
-                last_transaction_status: status,
-                pinned_owner: None,
-                active_portal: None,
-            }),
         }
     }
 
+    /// Construct a ready [`SessionHandle`] backed by a checked-out [`crate::pool::PooledConnection`] lease.
+    pub fn from_pooled(lease: crate::pool::PooledConnection) -> Self {
+        let config = lease.pool().config().clone();
+        let clock: Arc<dyn Clock> = Arc::new(SystemClock);
+        let cloud_connector = Arc::clone(lease.pool().cloud_connector());
+        let token_provider = ScopedTokenProvider::new(
+            Some(config.cloud_auth_options.clone()),
+            (!config.iam_auth_options.is_empty()).then(|| config.iam_auth_options.clone()),
+            Arc::clone(&clock),
+        );
+        let shared = Arc::new(SessionShared {
+            config,
+            cloud_connector,
+            inner: std::sync::Mutex::new(SessionInner::new_ready(SessionBacking::Pooled(lease))),
+            cancel_dial_hook: std::sync::Mutex::new(None),
+            inflight_done_notify: Arc::new(tokio::sync::Notify::new()),
+        });
+        Self {
+            shared,
+            token_provider,
+            clock,
+        }
+    }
+
+    /// Install an optional pre-dial barrier/hook invoked before opening any fresh `CancelRequest` socket on this session.
+    pub fn set_cancel_dial_hook(&self, hook: Option<Arc<dyn Fn() + Send + Sync>>) {
+        let mut guard = self
+            .shared
+            .cancel_dial_hook
+            .lock()
+            .expect("cancel_dial_hook poisoned");
+        *guard = hook;
+    }
+
     /// Borrow the validated [`PostgresConfig`].
-    pub const fn config(&self) -> &PostgresConfig {
-        &self.config
+    pub fn config(&self) -> &PostgresConfig {
+        &self.shared.config
+    }
+
+    /// Return `true` when this session has claimed a `CancelRequest` and is scheduled to retire its physical socket.
+    pub fn will_retire(&self) -> bool {
+        let guard = self
+            .shared
+            .inner
+            .lock()
+            .expect("SessionHandle lock poisoned");
+        guard.retire_pending
+    }
+
+    /// Return an out-of-band generation-fenced [`PostgresCancelHandle`] targeting this session's active operation.
+    pub fn postgres_cancel_handle(&self) -> PostgresCancelHandle {
+        PostgresCancelHandle::from_session(Arc::clone(&self.shared), None)
+    }
+
+    /// Return a [`PostgresCancelHandle`] fenced to one specific [`OperationGeneration`].
+    pub fn fenced_cancel_handle(&self, op_gen: OperationGeneration) -> PostgresCancelHandle {
+        PostgresCancelHandle::from_session(Arc::clone(&self.shared), Some(op_gen))
+    }
+
+    /// Cancel the currently active operation (if any) out-of-band without acquiring the session execution lock.
+    pub async fn cancel(&self) -> CancelDisposition {
+        self.postgres_cancel_handle()
+            .cancel_with_disposition()
+            .await
+    }
+
+    /// Reserve a monotonic [`OperationGeneration`] before scheduling or running a session operation.
+    pub fn reserve_operation_generation(&self) -> OperationGeneration {
+        let mut guard = self
+            .shared
+            .inner
+            .lock()
+            .expect("SessionHandle lock poisoned");
+        guard.next_op_generation = guard.next_op_generation.saturating_add(1);
+        let id = guard.next_op_generation;
+        guard.prune_generation_sets();
+        guard.reserved_generations.insert(id);
+        OperationGeneration(id)
+    }
+
+    pub(crate) fn unreserve_operation_generation(&self, op_gen: OperationGeneration) {
+        let mut guard = self
+            .shared
+            .inner
+            .lock()
+            .expect("SessionHandle lock poisoned");
+        guard.reserved_generations.remove(&op_gen.0);
+        guard.pre_cancelled_generations.remove(&op_gen.0);
+    }
+
+    pub(crate) fn claim_cancel_on_shared(
+        shared: &Arc<SessionShared>,
+        fenced_generation: Option<OperationGeneration>,
+    ) -> self::cancel::SessionCancelClaim {
+        let hook = shared
+            .cancel_dial_hook
+            .lock()
+            .expect("cancel_dial_hook poisoned")
+            .clone();
+        let (key_opt, notify) = {
+            let mut guard = shared.inner.lock().expect("SessionHandle lock poisoned");
+            if let Some(target) = fenced_generation {
+                if guard.reserved_generations.remove(&target.0) {
+                    guard.pre_cancelled_generations.insert(target.0);
+                    return self::cancel::SessionCancelClaim::CancelledBeforeSend;
+                }
+                if guard.pre_cancelled_generations.contains(&target.0) {
+                    return self::cancel::SessionCancelClaim::IdleNoOp;
+                }
+            }
+            let Some(ref mut active) = guard.active_op else {
+                return self::cancel::SessionCancelClaim::IdleNoOp;
+            };
+            if let Some(target) = fenced_generation
+                && active.op_gen != target
+            {
+                return self::cancel::SessionCancelClaim::IdleNoOp;
+            }
+            if active.cancel_claimed {
+                return self::cancel::SessionCancelClaim::IdleNoOp;
+            }
+            active.cancel_claimed = true;
+            active.retire_on_finish = true;
+            let had_ambient = active.had_ambient_tx;
+            let key_opt = active.key.clone();
+            let notify = Arc::clone(&active.cancel_notify);
+            guard.retire_pending = true;
+            if had_ambient {
+                guard.ambient_cancel_failed = true;
+            }
+            if let Some(ref mut pipe) = guard.active_pipeline {
+                pipe.failed = true;
+            }
+            (key_opt, notify)
+        };
+        notify.notify_one();
+        match key_opt {
+            Some(key) => self::cancel::SessionCancelClaim::Send { key, hook },
+            None => self::cancel::SessionCancelClaim::MissingBackendKey,
+        }
+    }
+
+    /// Synchronously claim `op_gen` inside a Python `asyncio.Future` cancellation callback and spawn
+    /// a fresh-socket `CancelRequest` only when `op_gen` is currently in flight on the wire.
+    pub fn trigger_async_cancel(&self, op_gen: OperationGeneration) {
+        if let self::cancel::SessionCancelClaim::Send { key, hook } =
+            Self::claim_cancel_on_shared(&self.shared, Some(op_gen))
+        {
+            let config = self.shared.config.clone();
+            let connector = Arc::clone(&self.shared.cloud_connector);
+            let deadline = Instant::now() + config.connect_timeout;
+            vertebra_db::py_async::db_runtime_handle().spawn(async move {
+                let _ = self::cancel::send_cancel_request_until(
+                    &config, &connector, &key, deadline, hook,
+                )
+                .await;
+            });
+        }
     }
 
     /// Return `true` only when an authenticated [`PostgresConnection`] has been published.
     pub fn is_ready(&self) -> bool {
-        let guard = self.inner.lock().expect("SessionHandle lock poisoned");
+        let guard = self
+            .shared
+            .inner
+            .lock()
+            .expect("SessionHandle lock poisoned");
         matches!(
             guard.state,
             SessionState::Ready(ref b) if !b.is_closed()
-        ) || matches!(guard.state, SessionState::InFlight { .. })
+        ) || (matches!(guard.state, SessionState::InFlight { .. }) && !guard.close_after_inflight)
     }
 
     /// Return `true` when the session is not currently active (`Disconnected`, `Connecting`, or `Closed`), matching Python `client.closed`.
@@ -2151,17 +2646,26 @@ impl SessionHandle {
 
     /// Return `true` when the session is in the terminal or post-failure `Closed` state.
     pub fn is_closed(&self) -> bool {
-        let guard = self.inner.lock().expect("SessionHandle lock poisoned");
+        let guard = self
+            .shared
+            .inner
+            .lock()
+            .expect("SessionHandle lock poisoned");
         match &guard.state {
             SessionState::Closed { .. } => true,
             SessionState::Ready(b) => b.is_closed(),
+            SessionState::InFlight { .. } => guard.close_after_inflight,
             _ => false,
         }
     }
 
     /// Return the current or most recent connection generation (`0` before the first connect attempt).
     pub fn generation(&self) -> u64 {
-        let guard = self.inner.lock().expect("SessionHandle lock poisoned");
+        let guard = self
+            .shared
+            .inner
+            .lock()
+            .expect("SessionHandle lock poisoned");
         match &guard.state {
             SessionState::Disconnected => guard.next_generation,
             SessionState::Connecting { generation }
@@ -2173,7 +2677,11 @@ impl SessionHandle {
 
     /// Return the most recently synchronized [`TransactionStatus`].
     pub fn transaction_status(&self) -> TransactionStatus {
-        let guard = self.inner.lock().expect("SessionHandle lock poisoned");
+        let guard = self
+            .shared
+            .inner
+            .lock()
+            .expect("SessionHandle lock poisoned");
         match &guard.state {
             SessionState::Ready(conn) => conn.transaction_status(),
             _ => guard.last_transaction_status,
@@ -2182,16 +2690,24 @@ impl SessionHandle {
 
     /// Return a cloned snapshot of retained `ParameterStatus` entries.
     pub fn parameters(&self) -> BTreeMap<String, String> {
-        let guard = self.inner.lock().expect("SessionHandle lock poisoned");
+        let guard = self
+            .shared
+            .inner
+            .lock()
+            .expect("SessionHandle lock poisoned");
         match &guard.state {
             SessionState::Ready(conn) => conn.parameters.clone(),
             _ => guard.parameters.clone(),
         }
     }
 
-    /// Mutably borrow the established [`PostgresConnection`] if `Ready`.
+    /// Mutably borrow the established [`PostgresConnection`] if `Ready` and uniquely owned.
     pub fn connection_mut(&mut self) -> Option<&mut PostgresConnection> {
-        let inner = self.inner.get_mut().expect("SessionHandle lock poisoned");
+        let shared = Arc::get_mut(&mut self.shared)?;
+        let inner = shared.inner.get_mut().expect("SessionHandle lock poisoned");
+        if inner.active_pipeline.is_some() || inner.active_portal.is_some() {
+            return None;
+        }
         match &mut inner.state {
             SessionState::Ready(backing) => Some(&mut **backing),
             _ => None,
@@ -2200,22 +2716,32 @@ impl SessionHandle {
 
     /// Begin a new connection attempt, returning a drop-safe [`ConnectAttempt`].
     pub fn begin_connect(&mut self) -> Result<ConnectAttempt<'_>, PostgresError> {
-        let inner = self.inner.get_mut().expect("SessionHandle lock poisoned");
-        if matches!(
-            inner.state,
-            SessionState::Ready(_)
-                | SessionState::InFlight { .. }
-                | SessionState::Connecting { .. }
-        ) {
-            return Err(PostgresError::Interface(
-                "cannot call connect on an already connected or connecting SessionHandle"
-                    .to_string(),
-            ));
-        }
-        inner.next_generation = inner.next_generation.saturating_add(1);
-        let generation = inner.next_generation;
-        inner.state = SessionState::Connecting { generation };
-        let deadline = Instant::now() + self.config.connect_timeout;
+        let generation = {
+            let mut guard = self
+                .shared
+                .inner
+                .lock()
+                .expect("SessionHandle lock poisoned");
+            if matches!(
+                guard.state,
+                SessionState::Ready(_)
+                    | SessionState::InFlight { .. }
+                    | SessionState::Connecting { .. }
+            ) {
+                return Err(PostgresError::Interface(
+                    "cannot call connect on an already connected or connecting SessionHandle"
+                        .to_string(),
+                ));
+            }
+            guard.next_generation = guard.next_generation.saturating_add(1);
+            let generation = guard.next_generation;
+            guard.state = SessionState::Connecting { generation };
+            guard.retire_pending = false;
+            guard.ambient_cancel_failed = false;
+            guard.active_pipeline = None;
+            generation
+        };
+        let deadline = Instant::now() + self.shared.config.connect_timeout;
         Ok(ConnectAttempt {
             pending: PendingSession {
                 handle: Some(self),
@@ -2233,45 +2759,143 @@ impl SessionHandle {
 
     /// Close the active connection (sending `Terminate` once if direct `Ready`, or releasing if pooled) and mark `Closed`.
     pub async fn close(&mut self) -> Result<(), PostgresError> {
-        if let Some(backing) = self.begin_close()? {
-            backing.close().await?;
+        self.close_shared().await
+    }
+
+    /// Close the session on a shared handle, awaiting bounded in-flight drain/retirement when a cancelled task is cleaning up.
+    pub async fn close_shared(&self) -> Result<(), PostgresError> {
+        match self.begin_close_action()? {
+            CloseAction::Immediate(Some(backing)) => backing.close().await,
+            CloseAction::Immediate(None) => Ok(()),
+            CloseAction::WaitInFlight(notified) => {
+                let _ = tokio::time::timeout(self.shared.config.connect_timeout, notified).await;
+                Ok(())
+            }
         }
-        Ok(())
     }
 
     /// Reserve a startup transition (`Disconnected -> Connecting`) on an `Arc<SessionHandle>`, return `AlreadyReady` if `Ready`, or reject `Connecting`/`Closed`.
     pub fn begin_client_connect(self: &Arc<Self>) -> Result<ClientBeginConnect, PostgresError> {
-        let mut guard = self.inner.lock().expect("SessionHandle lock poisoned");
+        let mut guard = self
+            .shared
+            .inner
+            .lock()
+            .expect("SessionHandle lock poisoned");
         match guard.state {
             SessionState::Disconnected => {
                 guard.next_generation = guard.next_generation.saturating_add(1);
                 let generation = guard.next_generation;
                 guard.state = SessionState::Connecting { generation };
-                let deadline = Instant::now() + self.config.connect_timeout;
+                let deadline = Instant::now() + self.shared.config.connect_timeout;
                 Ok(ClientBeginConnect::Attempt(ClientConnectAttempt {
                     session: Some(Arc::clone(self)),
                     generation,
                     deadline,
                 }))
             }
-            SessionState::Ready(_) | SessionState::InFlight { .. } => {
+            SessionState::Ready(ref b) if !b.is_closed() => Ok(ClientBeginConnect::AlreadyReady),
+            SessionState::InFlight { .. } if !guard.close_after_inflight => {
                 Ok(ClientBeginConnect::AlreadyReady)
             }
             SessionState::Connecting { .. } => Err(PostgresError::Interface(
                 "connection attempt is already in progress".to_string(),
             )),
-            SessionState::Closed { .. } => Err(PostgresError::Interface(
+            SessionState::Ready(_)
+            | SessionState::InFlight { .. }
+            | SessionState::Closed { .. } => Err(PostgresError::Interface(
                 "cannot connect a closed client".to_string(),
             )),
         }
     }
 
-    /// Synchronously transition to `Closed` and extract any live [`SessionBacking`] for shutdown or pool return.
-    pub fn begin_close(&self) -> Result<Option<SessionBacking>, PostgresError> {
-        let mut guard = self.inner.lock().expect("SessionHandle lock poisoned");
+    pub(crate) fn begin_close_action(&self) -> Result<CloseAction, PostgresError> {
+        let notify_arc = Arc::clone(&self.shared.inflight_done_notify);
+        let mut guard = self
+            .shared
+            .inner
+            .lock()
+            .expect("SessionHandle lock poisoned");
         if guard.active_portal.is_some() {
             return Err(PostgresError::Interface(
                 "cannot close session while a Portal is active".to_string(),
+            ));
+        }
+        if guard.active_pipeline.is_some() && !guard.retire_pending {
+            return Err(PostgresError::Interface(
+                "cannot close session while a pipeline scope is active".to_string(),
+            ));
+        }
+        match guard.state {
+            SessionState::Connecting { .. } => Err(PostgresError::Interface(
+                "cannot close client while an operation or connect is in progress".to_string(),
+            )),
+            SessionState::InFlight { .. } => {
+                let cancelling = guard.retire_pending
+                    || guard.closing_inflight
+                    || guard.active_op.as_ref().is_some_and(|op| op.cancel_claimed);
+                if !cancelling {
+                    return Err(PostgresError::Interface(
+                        "cannot close client while an operation or connect is in progress"
+                            .to_string(),
+                    ));
+                }
+                guard.close_after_inflight = true;
+                let notified = notify_arc.notified_owned();
+                let mut pinned = Box::pin(notified);
+                pinned.as_mut().enable();
+                Ok(CloseAction::WaitInFlight(pinned))
+            }
+            SessionState::Disconnected => {
+                let generation = guard.next_generation;
+                guard.state = SessionState::Closed { generation };
+                Ok(CloseAction::Immediate(None))
+            }
+            SessionState::Closed { .. } => Ok(CloseAction::Immediate(None)),
+            SessionState::Ready(_) => {
+                if guard.active_pipeline.is_some() {
+                    return Err(PostgresError::Interface(
+                        "cannot close session while a pipeline scope is active".to_string(),
+                    ));
+                }
+                let next_gen = guard.next_generation;
+                let prev = std::mem::replace(
+                    &mut guard.state,
+                    SessionState::Closed {
+                        generation: next_gen,
+                    },
+                );
+                guard.pinned_owner = None;
+                guard.ambient_cancel_failed = false;
+                if let SessionState::Ready(mut backing) = prev {
+                    if guard.retire_pending {
+                        backing.mark_retire();
+                    }
+                    guard.state = SessionState::Closed {
+                        generation: backing.generation(),
+                    };
+                    Ok(CloseAction::Immediate(Some(backing)))
+                } else {
+                    unreachable!("checked Ready")
+                }
+            }
+        }
+    }
+
+    /// Synchronously transition to `Closed` and extract any live [`SessionBacking`] for shutdown or pool return.
+    pub fn begin_close(&self) -> Result<Option<SessionBacking>, PostgresError> {
+        let mut guard = self
+            .shared
+            .inner
+            .lock()
+            .expect("SessionHandle lock poisoned");
+        if guard.active_portal.is_some() {
+            return Err(PostgresError::Interface(
+                "cannot close session while a Portal is active".to_string(),
+            ));
+        }
+        if guard.active_pipeline.is_some() {
+            return Err(PostgresError::Interface(
+                "cannot close session while a pipeline scope is active".to_string(),
             ));
         }
         match guard.state {
@@ -2295,7 +2919,11 @@ impl SessionHandle {
                     },
                 );
                 guard.pinned_owner = None;
-                if let SessionState::Ready(backing) = prev {
+                guard.ambient_cancel_failed = false;
+                if let SessionState::Ready(mut backing) = prev {
+                    if guard.retire_pending {
+                        backing.mark_retire();
+                    }
                     guard.state = SessionState::Closed {
                         generation: backing.generation(),
                     };
@@ -2305,6 +2933,400 @@ impl SessionHandle {
                 }
             }
         }
+    }
+
+    fn validate_pinned_owner(
+        guard: &SessionInner,
+        owner: Option<TransactionOwner>,
+    ) -> Result<(), PostgresError> {
+        if let Some(pinned) = guard.pinned_owner {
+            match owner {
+                Some(req) if req == pinned => Ok(()),
+                Some(_) => Err(PostgresError::Interface(
+                    "session is pinned by another TransactionOwner".to_string(),
+                )),
+                None if pinned.id != 0 => Err(PostgresError::Interface(
+                    "session is pinned by an explicit TransactionOwner".to_string(),
+                )),
+                None => Ok(()),
+            }
+        } else if let Some(req) = owner
+            && let SessionState::Ready(ref b) = guard.state
+            && req.generation != b.generation()
+        {
+            Err(PostgresError::Interface(format!(
+                "TransactionOwner generation {} does not match session generation {}",
+                req.generation,
+                b.generation()
+            )))
+        } else {
+            Ok(())
+        }
+    }
+
+    pub(crate) async fn run_cancellable_operation<T, F>(
+        &self,
+        op_gen: OperationGeneration,
+        access: SessionAccess,
+        owner: Option<TransactionOwner>,
+        f: F,
+    ) -> Result<T, PostgresError>
+    where
+        F: for<'c> FnOnce(
+            &'c mut PostgresConnection,
+            &'c mut OperationMeta,
+        )
+            -> vertebra_db::connection::BoxFuture<'c, Result<T, PostgresError>>,
+    {
+        let (backing, mut meta, cancel_notify) = {
+            let mut guard = self
+                .shared
+                .inner
+                .lock()
+                .expect("SessionHandle lock poisoned");
+            guard.reserved_generations.remove(&op_gen.0);
+            if guard.pre_cancelled_generations.remove(&op_gen.0) {
+                return Err(PostgresError::Interface(
+                    "operation was cancelled before wire submission".to_string(),
+                ));
+            }
+            if guard.active_portal.is_some() {
+                return Err(PostgresError::Interface(
+                    "cannot execute operation while a Portal is active on this session".to_string(),
+                ));
+            }
+            match access {
+                SessionAccess::Ordinary => {
+                    if guard.active_pipeline.is_some() {
+                        return Err(PostgresError::Interface(
+                            "cannot execute ordinary session operation while a pipeline scope is active"
+                                .to_string(),
+                        ));
+                    }
+                    if guard.ambient_cancel_failed {
+                        return Err(PostgresError::Interface(
+                            "ambient transaction failed due to cancellation; call rollback() first"
+                                .to_string(),
+                        ));
+                    }
+                    Self::validate_pinned_owner(&guard, owner)?;
+                }
+                SessionAccess::RollbackAllowed => {
+                    if guard.active_pipeline.is_some() {
+                        return Err(PostgresError::Interface(
+                            "cannot execute raw rollback while a pipeline scope is active"
+                                .to_string(),
+                        ));
+                    }
+                    Self::validate_pinned_owner(&guard, owner)?;
+                }
+                SessionAccess::Pipeline(token) => {
+                    let Some(ref active) = guard.active_pipeline else {
+                        return Err(PostgresError::Interface(
+                            "no active pipeline scope on this session".to_string(),
+                        ));
+                    };
+                    if active.token != token {
+                        return Err(PostgresError::Interface(format!(
+                            "pipeline scope token {} does not match active scope {}",
+                            token.0, active.token.0
+                        )));
+                    }
+                }
+                SessionAccess::Portal | SessionAccess::Cancel | SessionAccess::ForcedCleanup => {
+                    return Err(PostgresError::Interface(
+                        "invalid direct SessionAccess entry".to_string(),
+                    ));
+                }
+            }
+
+            let allow_closed_cleanup = matches!(access, SessionAccess::Pipeline(_))
+                || (matches!(access, SessionAccess::RollbackAllowed)
+                    && (guard.ambient_cancel_failed || guard.retire_pending));
+
+            match guard.state {
+                SessionState::Ready(_) => {
+                    let next_gen = guard.next_generation;
+                    let prev = std::mem::replace(
+                        &mut guard.state,
+                        SessionState::InFlight {
+                            generation: next_gen,
+                        },
+                    );
+                    let SessionState::Ready(backing) = prev else {
+                        unreachable!("checked Ready")
+                    };
+                    if backing.is_closed() && !allow_closed_cleanup {
+                        if matches!(backing, SessionBacking::Pooled(_)) {
+                            guard.state = SessionState::Ready(backing);
+                        } else {
+                            guard.state = SessionState::Closed {
+                                generation: backing.generation(),
+                            };
+                        }
+                        return Err(PostgresError::Interface(
+                            "session connection is closed".to_string(),
+                        ));
+                    }
+                    let conn_gen = backing.generation();
+                    let had_ambient_tx = if let Some(ref pipe) = guard.active_pipeline {
+                        pipe.had_ambient_tx
+                    } else if matches!(access, SessionAccess::RollbackAllowed) {
+                        false
+                    } else {
+                        backing.transaction_status() != TransactionStatus::Idle
+                    };
+                    let meta = OperationMeta {
+                        next_pipeline_token: guard.next_pipeline_token.saturating_add(1),
+                        pre_pinned_owner: guard.pinned_owner,
+                        install_pipeline_scope: None,
+                        pipeline_already_submitted: guard
+                            .active_pipeline
+                            .as_ref()
+                            .is_some_and(|p| p.submitted),
+                        pipeline_already_failed: guard
+                            .active_pipeline
+                            .as_ref()
+                            .is_some_and(|p| p.failed),
+                        mark_pipeline_submitted: false,
+                        mark_pipeline_failed: None,
+                        finish_pipeline_scope: if matches!(access, SessionAccess::Pipeline(_)) {
+                            guard.active_pipeline.clone()
+                        } else {
+                            None
+                        },
+                        clear_pipeline_scope: None,
+                        retire_pending: guard.retire_pending,
+                        ambient_cancel_failed: guard.ambient_cancel_failed,
+                        force_retire_now: false,
+                        clear_ambient_cancel_failed: matches!(
+                            access,
+                            SessionAccess::RollbackAllowed
+                        ),
+                        pin_owner_on_ok: None,
+                    };
+                    let cancel_notify = Arc::new(tokio::sync::Notify::new());
+                    guard.active_op = Some(ActiveOpState {
+                        op_gen,
+                        key: backing.cancel_key.clone(),
+                        had_ambient_tx,
+                        cancel_claimed: false,
+                        retire_on_finish: guard.retire_pending,
+                        cancel_notify: Arc::clone(&cancel_notify),
+                    });
+                    guard.state = SessionState::InFlight {
+                        generation: conn_gen,
+                    };
+                    (backing, meta, cancel_notify)
+                }
+                SessionState::InFlight { .. } => {
+                    return Err(PostgresError::Interface(
+                        "another operation is already in flight on this session".to_string(),
+                    ));
+                }
+                SessionState::Connecting { .. } => {
+                    return Err(PostgresError::Interface(
+                        "session connection is still in progress".to_string(),
+                    ));
+                }
+                SessionState::Disconnected | SessionState::Closed { .. } => {
+                    return Err(PostgresError::Interface(
+                        "session is not connected".to_string(),
+                    ));
+                }
+            }
+        };
+
+        let mut drop_guard = InFlightDropGuard {
+            shared: &self.shared,
+            backing: Some(backing),
+            disarmed: false,
+        };
+        let connect_timeout = self.shared.config.connect_timeout;
+
+        let timed_res = {
+            let conn: &mut PostgresConnection = drop_guard
+                .backing
+                .as_mut()
+                .expect("InFlightDropGuard holds backing");
+            let mut op_fut = f(conn, &mut meta);
+            let cancel_drain_timeout = async {
+                cancel_notify.notified().await;
+                tokio::time::sleep(connect_timeout).await;
+            };
+            tokio::pin!(cancel_drain_timeout);
+            tokio::select! {
+                biased;
+                res = &mut op_fut => Ok(res),
+                () = &mut cancel_drain_timeout => Err(()),
+            }
+        };
+
+        drop_guard.disarmed = true;
+        let mut backing = drop_guard
+            .backing
+            .take()
+            .expect("InFlightDropGuard disarmed with backing");
+
+        let result = match timed_res {
+            Ok(res) => res,
+            Err(()) => {
+                backing.mark_closed();
+                Err(PostgresError::Operational(
+                    "cancelled PostgreSQL operation timed out while draining wire response"
+                        .to_string(),
+                ))
+            }
+        };
+
+        if backing.exchange_state != ExchangeState::Idle {
+            backing.mark_closed();
+        }
+
+        let (retire_socket_now, close_after_first) = {
+            let mut guard = self
+                .shared
+                .inner
+                .lock()
+                .expect("SessionHandle lock poisoned");
+            let op_state = guard.active_op.take();
+            let op_cancel_claimed = op_state.as_ref().is_some_and(|op| op.cancel_claimed);
+            let op_retire = op_state.as_ref().is_some_and(|op| op.retire_on_finish);
+
+            guard.parameters = backing.parameters.clone();
+            guard.last_transaction_status = backing.transaction_status();
+
+            if meta.clear_ambient_cancel_failed {
+                guard.ambient_cancel_failed = false;
+            }
+
+            if let Some((_had_ambient, prev_owner)) = meta.clear_pipeline_scope.take() {
+                guard.active_pipeline = None;
+                if backing.transaction_status() == TransactionStatus::Idle
+                    && !guard.ambient_cancel_failed
+                {
+                    guard.pinned_owner = None;
+                } else {
+                    guard.pinned_owner = prev_owner;
+                }
+            } else if result.is_ok()
+                && let Some(mut installed) = meta.install_pipeline_scope.take()
+            {
+                if op_cancel_claimed || guard.retire_pending {
+                    installed.failed = true;
+                }
+                guard.next_pipeline_token = installed.token.0;
+                guard.pinned_owner = Some(installed.scope.owner);
+                guard.active_pipeline = Some(installed);
+            } else if let Some(ref mut active) = guard.active_pipeline {
+                if meta.mark_pipeline_submitted {
+                    active.submitted = true;
+                }
+                if let Some(err) = meta.mark_pipeline_failed.take() {
+                    active.failed = true;
+                    if active.primary_error.is_none() {
+                        active.primary_error = Some(err);
+                    }
+                }
+                if op_cancel_claimed {
+                    active.failed = true;
+                }
+            }
+
+            if result.is_ok()
+                && let Some(pin) = meta.pin_owner_on_ok
+            {
+                guard.pinned_owner = Some(pin);
+            } else if backing.transaction_status() == TransactionStatus::Idle
+                && guard.active_portal.is_none()
+                && guard.active_pipeline.is_none()
+                && !guard.ambient_cancel_failed
+            {
+                guard.pinned_owner = None;
+            }
+
+            let retire_requested = guard.retire_pending || op_retire || meta.force_retire_now;
+            if retire_requested {
+                guard.retire_pending = true;
+                backing.mark_retire();
+            }
+
+            let still_in_pipeline = guard.active_pipeline.is_some();
+            let still_ambient_failed = guard.ambient_cancel_failed;
+            let retire_socket_now = retire_requested && !still_in_pipeline && !still_ambient_failed;
+
+            if retire_socket_now || guard.close_after_inflight {
+                guard.closing_inflight = true;
+            }
+            (retire_socket_now, guard.close_after_inflight)
+        };
+
+        if retire_socket_now {
+            let _ = tokio::time::timeout(connect_timeout, backing.retire_physical_socket()).await;
+        }
+
+        let close_lease_now = close_after_first || {
+            let guard = self
+                .shared
+                .inner
+                .lock()
+                .expect("SessionHandle lock poisoned");
+            guard.close_after_inflight
+        };
+
+        let mut remaining_backing = Some(backing);
+        if close_lease_now && let Some(b) = remaining_backing.take() {
+            let _ = tokio::time::timeout(connect_timeout, b.close()).await;
+        }
+
+        let late_close_backing = {
+            let mut guard = self
+                .shared
+                .inner
+                .lock()
+                .expect("SessionHandle lock poisoned");
+            guard.closing_inflight = false;
+            let final_close = guard.close_after_inflight || remaining_backing.is_none();
+            guard.close_after_inflight = false;
+
+            match remaining_backing.take() {
+                None => {
+                    guard.pinned_owner = None;
+                    guard.active_pipeline = None;
+                    guard.ambient_cancel_failed = false;
+                    let generation = guard.next_generation;
+                    guard.state = SessionState::Closed { generation };
+                    None
+                }
+                Some(b) if final_close => {
+                    let generation = b.generation();
+                    guard.pinned_owner = None;
+                    guard.active_pipeline = None;
+                    guard.ambient_cancel_failed = false;
+                    guard.state = SessionState::Closed { generation };
+                    Some(b)
+                }
+                Some(SessionBacking::Direct(c))
+                    if c.is_closed()
+                        && !guard.ambient_cancel_failed
+                        && guard.active_pipeline.is_none() =>
+                {
+                    let generation = c.generation();
+                    guard.pinned_owner = None;
+                    guard.state = SessionState::Closed { generation };
+                    None
+                }
+                Some(b) => {
+                    guard.state = SessionState::Ready(b);
+                    None
+                }
+            }
+        };
+        if let Some(b) = late_close_backing {
+            let _ = tokio::time::timeout(connect_timeout, b.close()).await;
+        }
+        self.shared.inflight_done_notify.notify_waiters();
+        result
     }
 
     /// Reserve exclusive operation ownership without holding a `Mutex` across `.await`.
@@ -2319,37 +3341,28 @@ impl SessionHandle {
         &self,
         owner: Option<TransactionOwner>,
     ) -> Result<SessionOperationGuard<'_>, PostgresError> {
-        let mut guard = self.inner.lock().expect("SessionHandle lock poisoned");
+        let mut guard = self
+            .shared
+            .inner
+            .lock()
+            .expect("SessionHandle lock poisoned");
         if guard.active_portal.is_some() {
             return Err(PostgresError::Interface(
                 "cannot execute operation while a Portal is active on this session".to_string(),
             ));
         }
-        if let Some(pinned) = guard.pinned_owner {
-            match owner {
-                Some(req) if req == pinned => {}
-                Some(_) => {
-                    return Err(PostgresError::Interface(
-                        "session is pinned by another TransactionOwner".to_string(),
-                    ));
-                }
-                None if pinned.id != 0 => {
-                    return Err(PostgresError::Interface(
-                        "session is pinned by an explicit TransactionOwner".to_string(),
-                    ));
-                }
-                None => {}
-            }
-        } else if let Some(req) = owner
-            && let SessionState::Ready(ref b) = guard.state
-            && req.generation != b.generation()
-        {
-            return Err(PostgresError::Interface(format!(
-                "TransactionOwner generation {} does not match session generation {}",
-                req.generation,
-                b.generation()
-            )));
+        if guard.active_pipeline.is_some() {
+            return Err(PostgresError::Interface(
+                "cannot execute ordinary session operation while a pipeline scope is active"
+                    .to_string(),
+            ));
         }
+        if guard.ambient_cancel_failed {
+            return Err(PostgresError::Interface(
+                "ambient transaction failed due to cancellation; call rollback() first".to_string(),
+            ));
+        }
+        Self::validate_pinned_owner(&guard, owner)?;
 
         match guard.state {
             SessionState::Ready(_) => {
@@ -2358,9 +3371,13 @@ impl SessionHandle {
                     std::mem::replace(&mut guard.state, SessionState::InFlight { generation });
                 if let SessionState::Ready(backing) = prev {
                     if backing.is_closed() {
-                        guard.state = SessionState::Closed {
-                            generation: backing.generation(),
-                        };
+                        if matches!(backing, SessionBacking::Pooled(_)) {
+                            guard.state = SessionState::Ready(backing);
+                        } else {
+                            guard.state = SessionState::Closed {
+                                generation: backing.generation(),
+                            };
+                        }
                         return Err(PostgresError::Interface(
                             "session connection is closed".to_string(),
                         ));
@@ -2395,7 +3412,17 @@ impl SessionHandle {
         owner: TransactionOwner,
         portal_name: &str,
     ) -> Result<SessionOperationGuard<'_>, PostgresError> {
-        let mut guard = self.inner.lock().expect("SessionHandle lock poisoned");
+        let _access = SessionAccess::Portal;
+        let mut guard = self
+            .shared
+            .inner
+            .lock()
+            .expect("SessionHandle lock poisoned");
+        if guard.active_pipeline.is_some() {
+            return Err(PostgresError::Interface(
+                "cannot execute portal operation while a pipeline scope is active".to_string(),
+            ));
+        }
         match &guard.active_portal {
             Some((active_owner, active_name))
                 if *active_owner == owner && active_name == portal_name => {}
@@ -2412,13 +3439,28 @@ impl SessionHandle {
                     std::mem::replace(&mut guard.state, SessionState::InFlight { generation });
                 if let SessionState::Ready(backing) = prev {
                     if backing.is_closed() {
-                        guard.state = SessionState::Closed {
-                            generation: backing.generation(),
-                        };
+                        if matches!(backing, SessionBacking::Pooled(_)) {
+                            guard.state = SessionState::Ready(backing);
+                        } else {
+                            guard.state = SessionState::Closed {
+                                generation: backing.generation(),
+                            };
+                        }
                         return Err(PostgresError::Interface(
                             "session connection is closed".to_string(),
                         ));
                     }
+                    guard.next_op_generation = guard.next_op_generation.saturating_add(1);
+                    let op_gen = OperationGeneration(guard.next_op_generation);
+                    let had_ambient = backing.transaction_status() != TransactionStatus::Idle;
+                    guard.active_op = Some(ActiveOpState {
+                        op_gen,
+                        key: backing.cancel_key.clone(),
+                        had_ambient_tx: had_ambient,
+                        cancel_claimed: false,
+                        retire_on_finish: guard.retire_pending,
+                        cancel_notify: Arc::new(tokio::sync::Notify::new()),
+                    });
                     guard.state = SessionState::InFlight {
                         generation: backing.generation(),
                     };
@@ -2442,7 +3484,11 @@ impl SessionHandle {
 
     /// Unpin an active [`Portal`] when it completes or closes.
     pub(crate) fn unpin_portal(&self, portal_name: &str, owner: TransactionOwner) {
-        let mut guard = self.inner.lock().expect("SessionHandle lock poisoned");
+        let mut guard = self
+            .shared
+            .inner
+            .lock()
+            .expect("SessionHandle lock poisoned");
         if let SessionState::Ready(ref mut backing) = guard.state {
             backing.unregister_portal_name(portal_name);
             guard.last_transaction_status = backing.transaction_status();
@@ -2452,7 +3498,9 @@ impl SessionHandle {
             Some((active_owner, active_name)) if *active_owner == owner && active_name == portal_name
         ) {
             guard.active_portal = None;
-            if guard.last_transaction_status == TransactionStatus::Idle {
+            if guard.last_transaction_status == TransactionStatus::Idle
+                && !guard.ambient_cancel_failed
+            {
                 guard.pinned_owner = None;
             } else if let Some(pinned) = guard.pinned_owner
                 && pinned == owner
@@ -2479,12 +3527,25 @@ impl SessionHandle {
         &self,
         owner: TransactionOwner,
     ) -> Result<TransactionDisposition, PostgresError> {
-        let mut op = self.acquire_operation_for(Some(owner)).await?;
-        let disp = op.connection_mut().begin().await?;
-        drop(op);
-        let mut guard = self.inner.lock().expect("SessionHandle lock poisoned");
-        guard.pinned_owner = Some(owner);
-        Ok(disp)
+        let op_gen = self.reserve_operation_generation();
+        self.begin_as_with_generation(op_gen, Some(owner)).await
+    }
+
+    pub(crate) async fn begin_as_with_generation(
+        &self,
+        op_gen: OperationGeneration,
+        owner: Option<TransactionOwner>,
+    ) -> Result<TransactionDisposition, PostgresError> {
+        self.run_cancellable_operation(op_gen, SessionAccess::Ordinary, owner, move |conn, meta| {
+            Box::pin(async move {
+                let disp = conn.begin().await?;
+                if let Some(pin) = owner {
+                    meta.pin_owner_on_ok = Some(pin);
+                }
+                Ok(disp)
+            })
+        })
+        .await
     }
 
     /// Commit an active transaction (`COMMIT`) pinned to `owner`.
@@ -2492,8 +3553,19 @@ impl SessionHandle {
         &self,
         owner: TransactionOwner,
     ) -> Result<TransactionDisposition, PostgresError> {
-        let mut op = self.acquire_operation_for(Some(owner)).await?;
-        op.connection_mut().commit().await
+        let op_gen = self.reserve_operation_generation();
+        self.commit_as_with_generation(op_gen, Some(owner)).await
+    }
+
+    pub(crate) async fn commit_as_with_generation(
+        &self,
+        op_gen: OperationGeneration,
+        owner: Option<TransactionOwner>,
+    ) -> Result<TransactionDisposition, PostgresError> {
+        self.run_cancellable_operation(op_gen, SessionAccess::Ordinary, owner, |conn, _meta| {
+            Box::pin(async move { conn.commit().await })
+        })
+        .await
     }
 
     /// Roll back an active transaction (`ROLLBACK`) pinned to `owner`.
@@ -2501,8 +3573,50 @@ impl SessionHandle {
         &self,
         owner: TransactionOwner,
     ) -> Result<TransactionDisposition, PostgresError> {
-        let mut op = self.acquire_operation_for(Some(owner)).await?;
-        op.connection_mut().rollback().await
+        let op_gen = self.reserve_operation_generation();
+        self.rollback_as_with_generation(op_gen, Some(owner)).await
+    }
+
+    /// Roll back the unpinned client transaction (`ROLLBACK`), clearing any ambient cancellation failure and retiring cancel-sent sockets.
+    pub async fn rollback_client(&self) -> Result<TransactionDisposition, PostgresError> {
+        let op_gen = self.reserve_operation_generation();
+        self.rollback_as_with_generation(op_gen, None).await
+    }
+
+    pub(crate) async fn rollback_as_with_generation(
+        &self,
+        op_gen: OperationGeneration,
+        owner: Option<TransactionOwner>,
+    ) -> Result<TransactionDisposition, PostgresError> {
+        self.run_cancellable_operation(
+            op_gen,
+            SessionAccess::RollbackAllowed,
+            owner,
+            |conn, meta| {
+                Box::pin(async move {
+                    if conn.is_closed() && (meta.ambient_cancel_failed || meta.retire_pending) {
+                        meta.force_retire_now = true;
+                        return Ok(TransactionDisposition::RolledBack);
+                    }
+                    if (meta.ambient_cancel_failed || meta.retire_pending)
+                        && conn.transaction_status() == TransactionStatus::Idle
+                    {
+                        meta.force_retire_now = true;
+                        return Ok(TransactionDisposition::RolledBack);
+                    }
+                    let res = conn.rollback().await;
+                    if meta.ambient_cancel_failed || meta.retire_pending {
+                        meta.force_retire_now = true;
+                        if res.is_err() && meta.retire_pending {
+                            conn.mark_closed();
+                            return Ok(TransactionDisposition::RolledBack);
+                        }
+                    }
+                    res
+                })
+            },
+        )
+        .await
     }
 
     /// Create a numeric savepoint (`SAVEPOINT vtb_sp_<token>`) under `owner`.
@@ -2511,8 +3625,24 @@ impl SessionHandle {
         owner: TransactionOwner,
         token: u64,
     ) -> Result<TransactionDisposition, PostgresError> {
-        let mut op = self.acquire_operation_for(Some(owner)).await?;
-        op.connection_mut().savepoint(token).await
+        let op_gen = self.reserve_operation_generation();
+        self.savepoint_as_with_generation(op_gen, Some(owner), token)
+            .await
+    }
+
+    pub(crate) async fn savepoint_as_with_generation(
+        &self,
+        op_gen: OperationGeneration,
+        owner: Option<TransactionOwner>,
+        token: u64,
+    ) -> Result<TransactionDisposition, PostgresError> {
+        self.run_cancellable_operation(
+            op_gen,
+            SessionAccess::Ordinary,
+            owner,
+            move |conn, _meta| Box::pin(async move { conn.savepoint(token).await }),
+        )
+        .await
     }
 
     /// Release a numeric savepoint (`RELEASE SAVEPOINT vtb_sp_<token>`) under `owner`.
@@ -2521,8 +3651,24 @@ impl SessionHandle {
         owner: TransactionOwner,
         token: u64,
     ) -> Result<TransactionDisposition, PostgresError> {
-        let mut op = self.acquire_operation_for(Some(owner)).await?;
-        op.connection_mut().release_savepoint(token).await
+        let op_gen = self.reserve_operation_generation();
+        self.release_savepoint_as_with_generation(op_gen, Some(owner), token)
+            .await
+    }
+
+    pub(crate) async fn release_savepoint_as_with_generation(
+        &self,
+        op_gen: OperationGeneration,
+        owner: Option<TransactionOwner>,
+        token: u64,
+    ) -> Result<TransactionDisposition, PostgresError> {
+        self.run_cancellable_operation(
+            op_gen,
+            SessionAccess::Ordinary,
+            owner,
+            move |conn, _meta| Box::pin(async move { conn.release_savepoint(token).await }),
+        )
+        .await
     }
 
     /// Roll back to a numeric savepoint (`ROLLBACK TO SAVEPOINT vtb_sp_<token>`) under `owner`.
@@ -2531,8 +3677,24 @@ impl SessionHandle {
         owner: TransactionOwner,
         token: u64,
     ) -> Result<TransactionDisposition, PostgresError> {
-        let mut op = self.acquire_operation_for(Some(owner)).await?;
-        op.connection_mut().rollback_to_savepoint(token).await
+        let op_gen = self.reserve_operation_generation();
+        self.rollback_to_savepoint_as_with_generation(op_gen, Some(owner), token)
+            .await
+    }
+
+    pub(crate) async fn rollback_to_savepoint_as_with_generation(
+        &self,
+        op_gen: OperationGeneration,
+        owner: Option<TransactionOwner>,
+        token: u64,
+    ) -> Result<TransactionDisposition, PostgresError> {
+        self.run_cancellable_operation(
+            op_gen,
+            SessionAccess::Ordinary,
+            owner,
+            move |conn, _meta| Box::pin(async move { conn.rollback_to_savepoint(token).await }),
+        )
+        .await
     }
 
     /// Execute an extended query under `owner`.
@@ -2543,10 +3705,34 @@ impl SessionHandle {
         parameters: &[crate::extended::Parameter],
         parameter_oids: Option<&[u32]>,
     ) -> Result<crate::result::QueryResult, PostgresError> {
-        let mut op = self.acquire_operation_for(owner).await?;
-        op.connection_mut()
-            .query(sql, parameters, parameter_oids)
+        let op_gen = self.reserve_operation_generation();
+        self.query_as_with_generation(op_gen, owner, sql, parameters, parameter_oids)
             .await
+    }
+
+    pub(crate) async fn query_as_with_generation(
+        &self,
+        op_gen: OperationGeneration,
+        owner: Option<TransactionOwner>,
+        sql: &str,
+        parameters: &[crate::extended::Parameter],
+        parameter_oids: Option<&[u32]>,
+    ) -> Result<crate::result::QueryResult, PostgresError> {
+        let sql_owned = sql.to_owned();
+        let params_owned = parameters.to_vec();
+        let oids_owned = parameter_oids.map(ToOwned::to_owned);
+        self.run_cancellable_operation(
+            op_gen,
+            SessionAccess::Ordinary,
+            owner,
+            move |conn, _meta| {
+                Box::pin(async move {
+                    conn.query(&sql_owned, &params_owned, oids_owned.as_deref())
+                        .await
+                })
+            },
+        )
+        .await
     }
 
     /// Execute an extended query on the shared session without holding a `Mutex` across `.await`.
@@ -2564,8 +3750,20 @@ impl SessionHandle {
         &self,
         sql: &str,
     ) -> Result<Vec<crate::result::QueryResult>, PostgresError> {
-        let mut op = self.acquire_operation().await?;
-        op.connection_mut().simple_query(sql).await
+        let op_gen = self.reserve_operation_generation();
+        self.simple_query_with_generation(op_gen, sql).await
+    }
+
+    pub(crate) async fn simple_query_with_generation(
+        &self,
+        op_gen: OperationGeneration,
+        sql: &str,
+    ) -> Result<Vec<crate::result::QueryResult>, PostgresError> {
+        let sql_owned = sql.to_owned();
+        self.run_cancellable_operation(op_gen, SessionAccess::Ordinary, None, move |conn, _meta| {
+            Box::pin(async move { conn.simple_query(&sql_owned).await })
+        })
+        .await
     }
 
     /// Open a session-retaining named [`Portal`] inside an owned `BEGIN` or nested savepoint [`TransactionScope`].
@@ -2632,7 +3830,11 @@ impl SessionHandle {
                 let generation = conn.generation();
                 drop(op);
                 {
-                    let mut guard = self.inner.lock().expect("SessionHandle lock poisoned");
+                    let mut guard = self
+                        .shared
+                        .inner
+                        .lock()
+                        .expect("SessionHandle lock poisoned");
                     guard.active_portal = Some((owner, portal_name.clone()));
                     if guard.pinned_owner.is_none() {
                         guard.pinned_owner = Some(owner);
@@ -2664,7 +3866,11 @@ impl SessionHandle {
     }
 
     fn rollback_connecting(&self, generation: u64) {
-        let mut guard = self.inner.lock().expect("SessionHandle lock poisoned");
+        let mut guard = self
+            .shared
+            .inner
+            .lock()
+            .expect("SessionHandle lock poisoned");
         if matches!(
             guard.state,
             SessionState::Connecting { generation: g } if g == generation
@@ -2729,7 +3935,7 @@ async fn setup_named_portal_on_conn(
     frontend::sync(&mut conn.write_buf);
 
     conn.unnamed_statement_valid = true;
-    conn.exchange_state = ExchangeState::InExtendedExchange;
+    conn.set_exchange_state(ExchangeState::InExtendedExchange);
 
     if let Err(err) = conn.stream.write_all(&conn.write_buf).await {
         conn.write_buf.clear();
@@ -2821,7 +4027,7 @@ async fn setup_named_portal_on_conn(
                 conn.handle_notification_frame(&body)?;
             }
             Message::ReadyForQuery(body) => {
-                conn.exchange_state = ExchangeState::Idle;
+                conn.set_exchange_state(ExchangeState::Idle);
                 let status = match TransactionStatus::from_wire_tag(body.status()) {
                     Ok(s) => s,
                     Err(err) => {
@@ -2867,7 +4073,12 @@ pub struct PendingSession<'a> {
 
 impl<'a> PendingSession<'a> {
     fn config(&self) -> &PostgresConfig {
-        &self.handle.as_ref().expect("PendingSession armed").config
+        &self
+            .handle
+            .as_ref()
+            .expect("PendingSession armed")
+            .shared
+            .config
     }
 
     fn cloud_connector(&self) -> Arc<CloudConnector> {
@@ -2876,6 +4087,7 @@ impl<'a> PendingSession<'a> {
                 .handle
                 .as_ref()
                 .expect("PendingSession armed")
+                .shared
                 .cloud_connector,
         )
     }
@@ -2894,9 +4106,14 @@ impl<'a> PendingSession<'a> {
 
     fn commit(mut self, conn: PostgresConnection) -> &'a mut PostgresConnection {
         let handle = self.handle.take().expect("PendingSession armed");
-        let inner = handle.inner.get_mut().expect("SessionHandle lock poisoned");
+        let shared = Arc::get_mut(&mut handle.shared)
+            .expect("SessionHandle::connect requires unique ownership before commit");
+        let inner = shared.inner.get_mut().expect("SessionHandle lock poisoned");
         inner.parameters = conn.parameters.clone();
         inner.last_transaction_status = conn.transaction_status();
+        inner.retire_pending = false;
+        inner.ambient_cancel_failed = false;
+        inner.active_pipeline = None;
         inner.state = SessionState::Ready(SessionBacking::Direct(conn));
         match &mut inner.state {
             SessionState::Ready(backing) => backing,
@@ -2908,8 +4125,12 @@ impl<'a> PendingSession<'a> {
 impl Drop for PendingSession<'_> {
     fn drop(&mut self) {
         if let Some(handle) = self.handle.take() {
-            let inner = handle.inner.get_mut().expect("SessionHandle lock poisoned");
-            inner.state = SessionState::Closed {
+            let mut guard = handle
+                .shared
+                .inner
+                .lock()
+                .expect("SessionHandle lock poisoned");
+            guard.state = SessionState::Closed {
                 generation: self.generation,
             };
         }
@@ -2947,7 +4168,7 @@ impl<'a> ConnectAttempt<'a> {
 
 pub(crate) async fn establish_postgres_connection(
     config: &PostgresConfig,
-    connector: &CloudConnector,
+    connector: &Arc<CloudConnector>,
     token_provider: &ScopedTokenProvider,
     clock: &dyn Clock,
     generation: u64,
@@ -3100,6 +4321,14 @@ pub(crate) async fn establish_postgres_connection(
                     .iter()
                     .map(|(k, v)| (k.clone(), v.clone()))
                     .collect();
+                let cancel_key = backend_key.map(CancelKeyData::from);
+                let standalone_cancel = Arc::new(StandaloneCancelState {
+                    config: config.clone(),
+                    cloud_connector: Arc::clone(connector),
+                    key: cancel_key.clone(),
+                    in_exchange: std::sync::atomic::AtomicBool::new(false),
+                    cancel_sent: std::sync::atomic::AtomicBool::new(false),
+                });
                 return Ok(PostgresConnection {
                     stream: ConnectionStream::Transport(stream),
                     read_buf,
@@ -3109,6 +4338,8 @@ pub(crate) async fn establish_postgres_connection(
                     configured_session_gucs,
                     baseline_application_name: config.application_name.clone(),
                     backend_key,
+                    cancel_key,
+                    standalone_cancel,
                     transaction_status: status,
                     transaction_state: TransactionState::new(),
                     generation,
@@ -3199,8 +4430,8 @@ impl ClientConnectAttempt {
             deadline,
         };
         let conn = establish_postgres_connection(
-            &session.config,
-            &session.cloud_connector,
+            &session.shared.config,
+            &session.shared.cloud_connector,
             &session.token_provider,
             session.clock.as_ref(),
             generation,
@@ -3228,11 +4459,18 @@ impl ClientPendingSession {
     pub fn commit(mut self) -> Result<(), PostgresError> {
         let session = self.session.take().expect("ClientPendingSession armed");
         let conn = self.conn.take().expect("ClientPendingSession connection");
-        let mut guard = session.inner.lock().expect("SessionHandle lock poisoned");
+        let mut guard = session
+            .shared
+            .inner
+            .lock()
+            .expect("SessionHandle lock poisoned");
         match guard.state {
             SessionState::Connecting { generation } if generation == self.generation => {
                 guard.parameters = conn.parameters.clone();
                 guard.last_transaction_status = conn.transaction_status();
+                guard.retire_pending = false;
+                guard.ambient_cancel_failed = false;
+                guard.active_pipeline = None;
                 guard.state = SessionState::Ready(SessionBacking::Direct(conn));
                 Ok(())
             }
@@ -3259,7 +4497,10 @@ fn format_set_guc_sql(key: &str, value: &str) -> String {
 }
 
 #[cfg(unix)]
-async fn dial_unix_socket(path: &str, deadline: Instant) -> Result<TransportStream, PostgresError> {
+pub(crate) async fn dial_unix_socket(
+    path: &str,
+    deadline: Instant,
+) -> Result<TransportStream, PostgresError> {
     let now = Instant::now();
     if now >= deadline {
         return Err(PostgresError::Transport(
@@ -3279,7 +4520,7 @@ async fn dial_unix_socket(path: &str, deadline: Instant) -> Result<TransportStre
 }
 
 #[cfg(not(unix))]
-async fn dial_unix_socket(
+pub(crate) async fn dial_unix_socket(
     _path: &str,
     _deadline: Instant,
 ) -> Result<TransportStream, PostgresError> {

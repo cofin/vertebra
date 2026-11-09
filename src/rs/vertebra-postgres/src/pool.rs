@@ -235,6 +235,10 @@ impl PostgresPool {
         &self.config
     }
 
+    pub(crate) const fn cloud_connector(&self) -> &Arc<CloudConnector> {
+        &self.cloud_connector
+    }
+
     /// Borrow the pool's validated [`PostgresPoolOptions`].
     pub const fn options(&self) -> &PostgresPoolOptions {
         &self.options

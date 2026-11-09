@@ -11,7 +11,10 @@ use vertebra_db::py_async::block_on_db;
 use crate::config::{PostgresConfig, RawPostgresOptions};
 use crate::errors::{PostgresError, postgres_error_to_py};
 use crate::python_values::{extract_parameters, query_result_to_python};
-use crate::session::{ClientBeginConnect, SessionHandle};
+use crate::session::pipeline_scope::{
+    PipelineScopeToken, extract_pipeline_batch, outcomes_to_python, pipeline_error_to_py,
+};
+use crate::session::{ClientBeginConnect, CloseAction, SessionHandle};
 
 /// Extract a `Mapping[str, str]` snapshot while attached to the Python runtime.
 pub(crate) fn extract_string_map(
@@ -97,6 +100,35 @@ pub(crate) fn extract_strict_f64(obj: &Bound<'_, PyAny>) -> PyResult<f64> {
     }
     obj.extract::<f64>()
         .map_err(|_| PyTypeError::new_err("expected float or int"))
+}
+
+pub(crate) fn extract_strict_bool(obj: &Bound<'_, PyAny>) -> PyResult<bool> {
+    if !obj.is_instance_of::<PyBool>() {
+        return Err(PyTypeError::new_err("expected bool"));
+    }
+    obj.extract::<bool>()
+}
+
+pub(crate) fn extract_scope_id(obj: &Bound<'_, PyAny>) -> PyResult<PipelineScopeToken> {
+    if obj.is_instance_of::<PyBool>() {
+        return Err(PyTypeError::new_err("expected int scope_id, not bool"));
+    }
+    let val = obj
+        .extract::<i128>()
+        .map_err(|_| PyTypeError::new_err("expected int scope_id"))?;
+    if val <= 0 {
+        return Err(postgres_error_to_py(
+            obj.py(),
+            PostgresError::Interface("pipeline scope_id must be >= 1".to_string()),
+        ));
+    }
+    let raw = u64::try_from(val).map_err(|_| {
+        postgres_error_to_py(
+            obj.py(),
+            PostgresError::Interface("pipeline scope_id overflowed u64".to_string()),
+        )
+    })?;
+    Ok(PipelineScopeToken(raw))
 }
 
 pub(crate) fn extract_session_gucs(
@@ -336,14 +368,35 @@ impl PySyncPostgresClient {
 
     /// Close the physical PostgreSQL session idempotently, sending `Terminate` (`'X'`) once if direct or releasing if pooled.
     pub fn close(&self, py: Python<'_>) -> PyResult<()> {
-        let maybe_backing = self
+        let action = self
             .session
-            .begin_close()
+            .begin_close_action()
             .map_err(|e| postgres_error_to_py(py, e))?;
-        if let Some(backing) = maybe_backing {
-            py.detach(|| block_on_db(async move { backing.close().await }))
-                .map_err(|e| postgres_error_to_py(py, e))?;
+        match action {
+            CloseAction::Immediate(Some(backing)) => py
+                .detach(|| block_on_db(async move { backing.close().await }))
+                .map_err(|e| postgres_error_to_py(py, e))?,
+            CloseAction::Immediate(None) => {}
+            CloseAction::WaitInFlight(notified) => {
+                let timeout = self.session.config().connect_timeout;
+                py.detach(|| {
+                    block_on_db(async move {
+                        let _ = tokio::time::timeout(timeout, notified).await;
+                    })
+                });
+            }
         }
+        Ok(())
+    }
+
+    /// Trigger an out-of-band generation-fenced protocol `CancelRequest` for any currently active operation without waiting on the session execution lock.
+    pub fn cancel(&self, py: Python<'_>) -> PyResult<()> {
+        let session = Arc::clone(&self.session);
+        py.detach(move || {
+            block_on_db(async move {
+                let _ = session.cancel().await;
+            });
+        });
         Ok(())
     }
 
@@ -390,13 +443,61 @@ impl PySyncPostgresClient {
         Ok(PyTuple::new(py, py_results)?.into_any().unbind())
     }
 
+    /// Open a retained pipeline transaction (`BEGIN` at `'I'`) or savepoint (`SAVEPOINT` at `'T'`) and return its integer scope identifier.
+    pub fn pipeline_begin(&self, py: Python<'_>) -> PyResult<u64> {
+        let session = Arc::clone(&self.session);
+        let token = py
+            .detach(move || block_on_db(async move { session.pipeline_begin().await }))
+            .map_err(|e| postgres_error_to_py(py, e))?;
+        Ok(token.0)
+    }
+
+    /// Submit `operations` inside `scope_id` as one single-`Sync` extended pipeline batch while retaining the open transaction/savepoint scope.
+    pub fn pipeline_results(
+        &self,
+        py: Python<'_>,
+        #[pyo3(from_py_with = extract_scope_id)] scope_id: PipelineScopeToken,
+        operations: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyAny>> {
+        let batch = match extract_pipeline_batch(py, operations) {
+            Ok(b) => b,
+            Err(err) => {
+                let _ = self
+                    .session
+                    .mark_pipeline_scope_failed(scope_id, err.clone());
+                return Err(pipeline_error_to_py(py, err));
+            }
+        };
+        let session = Arc::clone(&self.session);
+        let outcomes = py
+            .detach(move || {
+                block_on_db(async move { session.pipeline_results(scope_id, batch).await })
+            })
+            .map_err(|e| pipeline_error_to_py(py, e))?;
+        outcomes_to_python(py, &outcomes)
+    }
+
+    /// Commit/release (`success=True` with no prior failure) or roll back (`success=False` or persistent failure) the retained pipeline scope `scope_id`.
+    pub fn pipeline_finish(
+        &self,
+        py: Python<'_>,
+        #[pyo3(from_py_with = extract_scope_id)] scope_id: PipelineScopeToken,
+        #[pyo3(from_py_with = extract_strict_bool)] success: bool,
+    ) -> PyResult<()> {
+        let session = Arc::clone(&self.session);
+        py.detach(move || {
+            block_on_db(async move { session.pipeline_finish(scope_id, success).await })
+        })
+        .map_err(|e| pipeline_error_to_py(py, e))
+    }
+
     /// Start an explicit transaction (`BEGIN`).
     pub fn begin(&self, py: Python<'_>) -> PyResult<()> {
         let session = Arc::clone(&self.session);
+        let op_gen = session.reserve_operation_generation();
         py.detach(move || {
             block_on_db(async move {
-                let mut op = session.acquire_operation().await?;
-                op.connection_mut().begin().await?;
+                session.begin_as_with_generation(op_gen, None).await?;
                 Ok::<(), PostgresError>(())
             })
         })
@@ -406,10 +507,10 @@ impl PySyncPostgresClient {
     /// Commit the current transaction (`COMMIT`).
     pub fn commit(&self, py: Python<'_>) -> PyResult<()> {
         let session = Arc::clone(&self.session);
+        let op_gen = session.reserve_operation_generation();
         py.detach(move || {
             block_on_db(async move {
-                let mut op = session.acquire_operation().await?;
-                op.connection_mut().commit().await?;
+                session.commit_as_with_generation(op_gen, None).await?;
                 Ok::<(), PostgresError>(())
             })
         })
@@ -421,8 +522,7 @@ impl PySyncPostgresClient {
         let session = Arc::clone(&self.session);
         py.detach(move || {
             block_on_db(async move {
-                let mut op = session.acquire_operation().await?;
-                op.connection_mut().rollback().await?;
+                session.rollback_client().await?;
                 Ok::<(), PostgresError>(())
             })
         })
@@ -436,10 +536,12 @@ impl PySyncPostgresClient {
         #[pyo3(from_py_with = extract_strict_u64)] token: u64,
     ) -> PyResult<()> {
         let session = Arc::clone(&self.session);
+        let op_gen = session.reserve_operation_generation();
         py.detach(move || {
             block_on_db(async move {
-                let mut op = session.acquire_operation().await?;
-                op.connection_mut().savepoint(token).await?;
+                session
+                    .savepoint_as_with_generation(op_gen, None, token)
+                    .await?;
                 Ok::<(), PostgresError>(())
             })
         })
@@ -453,10 +555,12 @@ impl PySyncPostgresClient {
         #[pyo3(from_py_with = extract_strict_u64)] token: u64,
     ) -> PyResult<()> {
         let session = Arc::clone(&self.session);
+        let op_gen = session.reserve_operation_generation();
         py.detach(move || {
             block_on_db(async move {
-                let mut op = session.acquire_operation().await?;
-                op.connection_mut().release_savepoint(token).await?;
+                session
+                    .release_savepoint_as_with_generation(op_gen, None, token)
+                    .await?;
                 Ok::<(), PostgresError>(())
             })
         })
@@ -470,10 +574,12 @@ impl PySyncPostgresClient {
         #[pyo3(from_py_with = extract_strict_u64)] token: u64,
     ) -> PyResult<()> {
         let session = Arc::clone(&self.session);
+        let op_gen = session.reserve_operation_generation();
         py.detach(move || {
             block_on_db(async move {
-                let mut op = session.acquire_operation().await?;
-                op.connection_mut().rollback_to_savepoint(token).await?;
+                session
+                    .rollback_to_savepoint_as_with_generation(op_gen, None, token)
+                    .await?;
                 Ok::<(), PostgresError>(())
             })
         })

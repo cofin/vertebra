@@ -156,10 +156,9 @@ impl Portal {
             .map_err(|e| PostgresError::Protocol(format!("failed to encode Execute frame: {e}")))?;
         frontend::sync(&mut conn.write_buf);
 
-        conn.exchange_state = ExchangeState::InExtendedExchange;
+        conn.set_exchange_state(ExchangeState::InExtendedExchange);
         if let Err(err) = conn.stream.write_all(&conn.write_buf).await {
             conn.write_buf.clear();
-            conn.exchange_state = ExchangeState::Idle;
             conn.mark_closed();
             drop(guard);
             self.mark_closed_and_unpin();
@@ -169,7 +168,6 @@ impl Portal {
         }
         conn.write_buf.clear();
         if let Err(err) = conn.stream.flush().await {
-            conn.exchange_state = ExchangeState::Idle;
             conn.mark_closed();
             drop(guard);
             self.mark_closed_and_unpin();
@@ -548,13 +546,12 @@ async fn drain_until_ready_for_query(conn: &mut PostgresConnection) -> Result<()
                 conn.handle_notification_frame(&body)?;
             }
             Message::ReadyForQuery(body) => {
-                conn.exchange_state = ExchangeState::Idle;
+                conn.set_exchange_state(ExchangeState::Idle);
                 let status = TransactionStatus::from_wire_tag(body.status())?;
                 conn.set_transaction_status_from_wire(status);
                 return Ok(());
             }
             other => {
-                conn.exchange_state = ExchangeState::Idle;
                 conn.mark_closed();
                 return Err(PostgresError::Protocol(format!(
                     "unexpected frame while draining portal to ReadyForQuery: {}",
@@ -576,10 +573,9 @@ async fn send_close_portal(
     frontend::close(b'P', portal_name, &mut conn.write_buf)
         .map_err(|e| PostgresError::Protocol(format!("failed to encode Close(P): {e}")))?;
     frontend::sync(&mut conn.write_buf);
-    conn.exchange_state = ExchangeState::InExtendedExchange;
+    conn.set_exchange_state(ExchangeState::InExtendedExchange);
     if let Err(err) = conn.stream.write_all(&conn.write_buf).await {
         conn.write_buf.clear();
-        conn.exchange_state = ExchangeState::Idle;
         conn.mark_closed();
         return Err(PostgresError::Transport(format!(
             "Close(P) write failed: {err}"
@@ -587,7 +583,6 @@ async fn send_close_portal(
     }
     conn.write_buf.clear();
     if let Err(err) = conn.stream.flush().await {
-        conn.exchange_state = ExchangeState::Idle;
         conn.mark_closed();
         return Err(PostgresError::Transport(format!(
             "Close(P) flush failed: {err}"

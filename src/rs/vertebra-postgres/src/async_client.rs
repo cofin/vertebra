@@ -1,23 +1,63 @@
 //! Asynchronous physical PostgreSQL session client (`vertebra._postgres.AsyncPostgresClient`).
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::Arc;
 
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple};
-use vertebra_db::py_async::{RustDbTaskAwaitable, spawn_rust_db_task_with_attr};
+use vertebra_db::py_async::{
+    RustDbTaskAwaitable, spawn_rust_db_task_with_attr, spawn_rust_db_task_with_attr_and_cancel,
+};
 
 use crate::errors::{PostgresError, postgres_error_to_py};
 use crate::python_values::{extract_parameters, query_result_to_python};
-use crate::session::{ClientBeginConnect, SessionHandle};
+use crate::session::cancel::OperationGeneration;
+use crate::session::pipeline_scope::{
+    PipelineScopeToken, extract_pipeline_batch, outcomes_to_python, pipeline_error_to_py,
+};
+use crate::session::{ClientBeginConnect, CloseAction, SessionHandle};
 use crate::sync_client::{
-    build_validated_config, extract_cloud_auth_options, extract_iam_auth_options,
-    extract_session_gucs, extract_strict_f64, extract_strict_i64, extract_strict_opt_i64,
-    extract_strict_u64,
+    build_validated_config, extract_cloud_auth_options, extract_iam_auth_options, extract_scope_id,
+    extract_session_gucs, extract_strict_bool, extract_strict_f64, extract_strict_i64,
+    extract_strict_opt_i64, extract_strict_u64,
 };
 
 /// Event-loop attribute name isolating the `vertebra._postgres` completion drainer from sibling extensions.
 pub const POSTGRES_COMPLETION_DRAINER_ATTR: &str = "_vertebra_postgres_completion_drainer";
+
+fn spawn_cancellable_op<'py, F, T, MapOk, MapErr>(
+    py: Python<'py>,
+    session: &Arc<SessionHandle>,
+    op_gen: OperationGeneration,
+    fut: F,
+    map_ok: MapOk,
+    map_err: MapErr,
+) -> PyResult<Bound<'py, RustDbTaskAwaitable>>
+where
+    F: Future<Output = Result<T, PostgresError>> + Send + 'static,
+    T: Send + 'static,
+    MapOk: FnOnce(Python<'_>, T) -> PyResult<Py<PyAny>> + Send + 'static,
+    MapErr: FnOnce(Python<'_>, PostgresError) -> PyErr + Send + 'static,
+{
+    let cancel_session = Arc::clone(session);
+    match spawn_rust_db_task_with_attr_and_cancel(
+        py,
+        fut,
+        map_ok,
+        map_err,
+        move || {
+            cancel_session.trigger_async_cancel(op_gen);
+        },
+        POSTGRES_COMPLETION_DRAINER_ATTR,
+    ) {
+        Ok(awaitable) => Ok(awaitable),
+        Err(err) => {
+            session.unreserve_operation_generation(op_gen);
+            Err(err)
+        }
+    }
+}
 
 /// Physical asynchronous native PostgreSQL client (`vertebra._postgres.AsyncPostgresClient`).
 #[cfg_attr(
@@ -184,15 +224,22 @@ impl PyAsyncPostgresClient {
 
     /// Synchronously mark the session `Closed` and schedule asynchronous `Terminate` (`'X'`) or pool return shutdown.
     pub fn close(&self, py: Python<'_>) -> PyResult<RustDbTaskAwaitable> {
-        let maybe_backing = self
+        let action = self
             .session
-            .begin_close()
+            .begin_close_action()
             .map_err(|e| postgres_error_to_py(py, e))?;
+        let timeout = self.session.config().connect_timeout;
         spawn_rust_db_task_with_attr(
             py,
             async move {
-                if let Some(backing) = maybe_backing {
-                    backing.close().await?;
+                match action {
+                    CloseAction::Immediate(Some(backing)) => {
+                        backing.close().await?;
+                    }
+                    CloseAction::Immediate(None) => {}
+                    CloseAction::WaitInFlight(notified) => {
+                        let _ = tokio::time::timeout(timeout, notified).await;
+                    }
                 }
                 Ok::<(), PostgresError>(())
             },
@@ -202,41 +249,70 @@ impl PyAsyncPostgresClient {
         )
     }
 
+    /// Trigger an out-of-band generation-fenced protocol `CancelRequest` asynchronously without waiting on the session execution lock.
+    pub fn cancel<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+        let session = Arc::clone(&self.session);
+        let awaitable = spawn_rust_db_task_with_attr(
+            py,
+            async move {
+                let _ = session.cancel().await;
+                Ok::<(), PostgresError>(())
+            },
+            |py, ()| Ok(py.None()),
+            postgres_error_to_py,
+            POSTGRES_COMPLETION_DRAINER_ATTR,
+        )?;
+        Bound::new(py, awaitable)
+    }
+
     /// Execute a single-statement PostgreSQL Protocol 3.0 extended query asynchronously, resolving to `PostgresQueryResult`.
     #[pyo3(signature = (sql, parameters = None, *, parameter_oids = None))]
-    pub fn query(
+    pub fn query<'py>(
         &self,
-        py: Python<'_>,
+        py: Python<'py>,
         sql: &str,
-        parameters: Option<&Bound<'_, PyAny>>,
-        parameter_oids: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<RustDbTaskAwaitable> {
+        parameters: Option<&Bound<'py, PyAny>>,
+        parameter_oids: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
         let none_bound = py.None().into_bound(py);
         let params_ref = parameters.unwrap_or(&none_bound);
         let (params, oids) = extract_parameters(py, params_ref, parameter_oids)
             .map_err(|e| postgres_error_to_py(py, e))?;
         let session = Arc::clone(&self.session);
+        let op_gen = session.reserve_operation_generation();
         let sql_owned = sql.to_owned();
-        spawn_rust_db_task_with_attr(
+        spawn_cancellable_op(
             py,
+            &self.session,
+            op_gen,
             async move {
                 session
-                    .query_shared(&sql_owned, &params, oids.as_deref())
+                    .query_as_with_generation(op_gen, None, &sql_owned, &params, oids.as_deref())
                     .await
             },
             |py, res| query_result_to_python(py, &res),
             postgres_error_to_py,
-            POSTGRES_COMPLETION_DRAINER_ATTR,
         )
     }
 
     /// Execute a multi-statement PostgreSQL Protocol 3.0 simple query (`'Q'`) asynchronously, resolving to `tuple[PostgresQueryResult, ...]`.
-    pub fn query_multi(&self, py: Python<'_>, sql: &str) -> PyResult<RustDbTaskAwaitable> {
+    pub fn query_multi<'py>(
+        &self,
+        py: Python<'py>,
+        sql: &str,
+    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
         let session = Arc::clone(&self.session);
+        let op_gen = session.reserve_operation_generation();
         let sql_owned = sql.to_owned();
-        spawn_rust_db_task_with_attr(
+        spawn_cancellable_op(
             py,
-            async move { session.simple_query_shared(&sql_owned).await },
+            &self.session,
+            op_gen,
+            async move {
+                session
+                    .simple_query_with_generation(op_gen, &sql_owned)
+                    .await
+            },
             |py, results| {
                 let mut py_results = Vec::with_capacity(results.len());
                 for res in &results {
@@ -245,115 +321,198 @@ impl PyAsyncPostgresClient {
                 Ok(PyTuple::new(py, py_results)?.into_any().unbind())
             },
             postgres_error_to_py,
-            POSTGRES_COMPLETION_DRAINER_ATTR,
+        )
+    }
+
+    /// Open a retained pipeline transaction (`BEGIN` at `'I'`) or savepoint (`SAVEPOINT` at `'T'`) asynchronously and resolve to its integer scope identifier.
+    pub fn pipeline_begin<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+        let session = Arc::clone(&self.session);
+        let op_gen = session.reserve_operation_generation();
+        spawn_cancellable_op(
+            py,
+            &self.session,
+            op_gen,
+            async move { session.pipeline_begin_with_generation(op_gen).await },
+            |py, token| Ok(token.0.into_pyobject(py)?.into_any().unbind()),
+            postgres_error_to_py,
+        )
+    }
+
+    /// Submit `operations` inside `scope_id` asynchronously as one single-`Sync` extended pipeline batch while retaining the open transaction/savepoint scope.
+    pub fn pipeline_results<'py>(
+        &self,
+        py: Python<'py>,
+        #[pyo3(from_py_with = extract_scope_id)] scope_id: PipelineScopeToken,
+        operations: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+        let batch = match extract_pipeline_batch(py, operations) {
+            Ok(b) => b,
+            Err(err) => {
+                let _ = self
+                    .session
+                    .mark_pipeline_scope_failed(scope_id, err.clone());
+                return Err(pipeline_error_to_py(py, err));
+            }
+        };
+        let session = Arc::clone(&self.session);
+        let op_gen = session.reserve_operation_generation();
+        spawn_cancellable_op(
+            py,
+            &self.session,
+            op_gen,
+            async move {
+                session
+                    .pipeline_results_with_generation(op_gen, scope_id, batch)
+                    .await
+            },
+            |py, outcomes| outcomes_to_python(py, &outcomes),
+            pipeline_error_to_py,
+        )
+    }
+
+    /// Commit/release (`success=True` with no prior failure) or roll back (`success=False` or persistent failure) the retained pipeline scope `scope_id` asynchronously.
+    pub fn pipeline_finish<'py>(
+        &self,
+        py: Python<'py>,
+        #[pyo3(from_py_with = extract_scope_id)] scope_id: PipelineScopeToken,
+        #[pyo3(from_py_with = extract_strict_bool)] success: bool,
+    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+        let session = Arc::clone(&self.session);
+        let op_gen = session.reserve_operation_generation();
+        spawn_cancellable_op(
+            py,
+            &self.session,
+            op_gen,
+            async move {
+                session
+                    .pipeline_finish_with_generation(op_gen, scope_id, success)
+                    .await
+            },
+            |py, ()| Ok(py.None()),
+            pipeline_error_to_py,
         )
     }
 
     /// Start an explicit transaction (`BEGIN`) asynchronously.
-    pub fn begin(&self, py: Python<'_>) -> PyResult<RustDbTaskAwaitable> {
+    pub fn begin<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
         let session = Arc::clone(&self.session);
-        spawn_rust_db_task_with_attr(
+        let op_gen = session.reserve_operation_generation();
+        spawn_cancellable_op(
             py,
+            &self.session,
+            op_gen,
             async move {
-                let mut op = session.acquire_operation().await?;
-                op.connection_mut().begin().await?;
+                session.begin_as_with_generation(op_gen, None).await?;
                 Ok::<(), PostgresError>(())
             },
             |py, ()| Ok(py.None()),
             postgres_error_to_py,
-            POSTGRES_COMPLETION_DRAINER_ATTR,
         )
     }
 
     /// Commit the current transaction (`COMMIT`) asynchronously.
-    pub fn commit(&self, py: Python<'_>) -> PyResult<RustDbTaskAwaitable> {
+    pub fn commit<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
         let session = Arc::clone(&self.session);
-        spawn_rust_db_task_with_attr(
+        let op_gen = session.reserve_operation_generation();
+        spawn_cancellable_op(
             py,
+            &self.session,
+            op_gen,
             async move {
-                let mut op = session.acquire_operation().await?;
-                op.connection_mut().commit().await?;
+                session.commit_as_with_generation(op_gen, None).await?;
                 Ok::<(), PostgresError>(())
             },
             |py, ()| Ok(py.None()),
             postgres_error_to_py,
-            POSTGRES_COMPLETION_DRAINER_ATTR,
         )
     }
 
     /// Roll back the current transaction (`ROLLBACK`) asynchronously.
-    pub fn rollback(&self, py: Python<'_>) -> PyResult<RustDbTaskAwaitable> {
+    pub fn rollback<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
         let session = Arc::clone(&self.session);
-        spawn_rust_db_task_with_attr(
+        let op_gen = session.reserve_operation_generation();
+        spawn_cancellable_op(
             py,
+            &self.session,
+            op_gen,
             async move {
-                let mut op = session.acquire_operation().await?;
-                op.connection_mut().rollback().await?;
+                session.rollback_as_with_generation(op_gen, None).await?;
                 Ok::<(), PostgresError>(())
             },
             |py, ()| Ok(py.None()),
             postgres_error_to_py,
-            POSTGRES_COMPLETION_DRAINER_ATTR,
         )
     }
 
     /// Create a numeric savepoint (`SAVEPOINT vtb_sp_<token>`) asynchronously.
-    pub fn savepoint(
+    pub fn savepoint<'py>(
         &self,
-        py: Python<'_>,
+        py: Python<'py>,
         #[pyo3(from_py_with = extract_strict_u64)] token: u64,
-    ) -> PyResult<RustDbTaskAwaitable> {
+    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
         let session = Arc::clone(&self.session);
-        spawn_rust_db_task_with_attr(
+        let op_gen = session.reserve_operation_generation();
+        spawn_cancellable_op(
             py,
+            &self.session,
+            op_gen,
             async move {
-                let mut op = session.acquire_operation().await?;
-                op.connection_mut().savepoint(token).await?;
+                session
+                    .savepoint_as_with_generation(op_gen, None, token)
+                    .await?;
                 Ok::<(), PostgresError>(())
             },
             |py, ()| Ok(py.None()),
             postgres_error_to_py,
-            POSTGRES_COMPLETION_DRAINER_ATTR,
         )
     }
 
     /// Release an active numeric savepoint (`RELEASE SAVEPOINT vtb_sp_<token>`) asynchronously.
-    pub fn release_savepoint(
+    pub fn release_savepoint<'py>(
         &self,
-        py: Python<'_>,
+        py: Python<'py>,
         #[pyo3(from_py_with = extract_strict_u64)] token: u64,
-    ) -> PyResult<RustDbTaskAwaitable> {
+    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
         let session = Arc::clone(&self.session);
-        spawn_rust_db_task_with_attr(
+        let op_gen = session.reserve_operation_generation();
+        spawn_cancellable_op(
             py,
+            &self.session,
+            op_gen,
             async move {
-                let mut op = session.acquire_operation().await?;
-                op.connection_mut().release_savepoint(token).await?;
+                session
+                    .release_savepoint_as_with_generation(op_gen, None, token)
+                    .await?;
                 Ok::<(), PostgresError>(())
             },
             |py, ()| Ok(py.None()),
             postgres_error_to_py,
-            POSTGRES_COMPLETION_DRAINER_ATTR,
         )
     }
 
     /// Roll back to an active numeric savepoint (`ROLLBACK TO SAVEPOINT vtb_sp_<token>`) asynchronously.
-    pub fn rollback_to_savepoint(
+    pub fn rollback_to_savepoint<'py>(
         &self,
-        py: Python<'_>,
+        py: Python<'py>,
         #[pyo3(from_py_with = extract_strict_u64)] token: u64,
-    ) -> PyResult<RustDbTaskAwaitable> {
+    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
         let session = Arc::clone(&self.session);
-        spawn_rust_db_task_with_attr(
+        let op_gen = session.reserve_operation_generation();
+        spawn_cancellable_op(
             py,
+            &self.session,
+            op_gen,
             async move {
-                let mut op = session.acquire_operation().await?;
-                op.connection_mut().rollback_to_savepoint(token).await?;
+                session
+                    .rollback_to_savepoint_as_with_generation(op_gen, None, token)
+                    .await?;
                 Ok::<(), PostgresError>(())
             },
             |py, ()| Ok(py.None()),
             postgres_error_to_py,
-            POSTGRES_COMPLETION_DRAINER_ATTR,
         )
     }
 

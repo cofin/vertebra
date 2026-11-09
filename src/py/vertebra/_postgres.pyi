@@ -5,6 +5,8 @@ from typing import final
 
 from vertebra.db.adapters.postgres.types import (
     PgParameter,
+    PostgresPipelineOperation,
+    PostgresPipelineOutcome,
     PostgresQueryResult,
     PostgresValue,
 )
@@ -58,6 +60,10 @@ class SyncPostgresClient:
         """Close the physical PostgreSQL session idempotently."""
         ...
 
+    def cancel(self) -> None:
+        """Trigger an out-of-band generation-fenced protocol CancelRequest for any active operation."""
+        ...
+
     def query(
         self,
         sql: str,
@@ -70,6 +76,22 @@ class SyncPostgresClient:
 
     def query_multi(self, sql: str) -> tuple[PostgresQueryResult, ...]:
         """Execute a multi-statement PostgreSQL Protocol 3.0 simple query ('Q')."""
+        ...
+
+    def pipeline_begin(self) -> int:
+        """Open a retained pipeline transaction or savepoint scope and return its scope_id."""
+        ...
+
+    def pipeline_results(
+        self,
+        scope_id: int,
+        operations: Sequence[PostgresPipelineOperation],
+    ) -> tuple[PostgresPipelineOutcome, ...]:
+        """Submit operations as one single-Sync extended batch inside scope_id while retaining the open scope."""
+        ...
+
+    def pipeline_finish(self, scope_id: int, success: bool) -> None:
+        """Commit/release (success=True) or roll back (success=False or persistent failure) scope_id."""
         ...
 
     def begin(self) -> None:
@@ -151,6 +173,10 @@ class AsyncPostgresClient:
         """Mark the session closed and schedule asynchronous Terminate shutdown."""
         ...
 
+    def cancel(self) -> Awaitable[None]:
+        """Trigger an out-of-band generation-fenced protocol CancelRequest asynchronously."""
+        ...
+
     def query(
         self,
         sql: str,
@@ -163,6 +189,22 @@ class AsyncPostgresClient:
 
     def query_multi(self, sql: str) -> Awaitable[tuple[PostgresQueryResult, ...]]:
         """Execute a multi-statement PostgreSQL Protocol 3.0 simple query ('Q') asynchronously."""
+        ...
+
+    def pipeline_begin(self) -> Awaitable[int]:
+        """Open a retained pipeline transaction or savepoint scope asynchronously and return its scope_id."""
+        ...
+
+    def pipeline_results(
+        self,
+        scope_id: int,
+        operations: Sequence[PostgresPipelineOperation],
+    ) -> Awaitable[tuple[PostgresPipelineOutcome, ...]]:
+        """Submit operations asynchronously as one single-Sync extended batch inside scope_id."""
+        ...
+
+    def pipeline_finish(self, scope_id: int, success: bool) -> Awaitable[None]:
+        """Commit/release (success=True) or roll back (success=False or persistent failure) scope_id asynchronously."""
         ...
 
     def begin(self) -> Awaitable[None]:

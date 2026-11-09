@@ -5,7 +5,7 @@ chapter_id: ch16-pipeline-scope-and-cancellation
 title: "Implement protocol CancelRequest engine, connection retirement, and non-aborting async cancel callback"
 description: "Implement generation-fenced protocol CancelRequest dialing and mandatory cancel-sent connection retirement in vertebra-postgres plus spawn_rust_db_task_with_attr_and_cancel in vertebra-db."
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -27,15 +27,15 @@ tests:
 estimated_loc: 250
 plan_revision: 5
 plan_commit: fd571e3a
-state_revision: 0
+state_revision: 1
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-09T19:32:00Z"
+last_verified_commit: c2d362c6
+verification_evidence: "cargo test -p vertebra-db --features pyo3 (49 passed) + cargo test -p vertebra-postgres --test cancellation_protocol (6 passed)"
 created_at: "2026-11-05T18:25:07Z"
 updated_at: "2026-11-08T02:05:22Z"
 commit: null

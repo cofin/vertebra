@@ -5,16 +5,16 @@ chapter_id: ch16-pipeline-scope-and-cancellation
 title: "Chapter 16: Transactional Pipeline Contexts, Protocol Cancellation, and Session Retirement"
 description: Retain transaction or savepoint scopes across Python pipeline result conversion, expose SyncPostgresPipeline and AsyncPostgresPipeline, and implement generation-fenced protocol CancelRequest cancellation with mandatory connection retirement.
 status: stable
-state: planned
+state: completed
 planning_status: complete
 depends_on_chapters:
   - ch15-pool-facades-and-single-sync-pipeline
 replan_trigger: null
-current_task: "native-postgres-driver:ch16:t01"
+current_task: null
 plan_revision: 5
 plan_commit: fd571e3a
-state_revision: 0
-last_verified_checkpoint: null
+state_revision: 1
+last_verified_checkpoint: c2d362c6
 last_reviewed_commit: null
 created_at: "2026-11-05T00:00:00Z"
 updated_at: "2026-11-08T02:05:22Z"
@@ -108,7 +108,7 @@ Parent roadmap: [spec.md](../../spec.md) and frozen contracts: [contracts.md](..
 
 ## 3. Documentation & OKF Knowledge Plan
 
-Progress: `[0/2 files documented in ch16]` (`src/py/vertebra/db/adapters/postgres/pipeline.py` and `src/py/vertebra/_postgres.pyi` docstrings land in `ch16:t01`, `ch16:t02`, and `ch16:t04`; user/OKF guides consolidate in `ch30`).
+Progress: `[2/2 files documented in ch16]` (`src/py/vertebra/db/adapters/postgres/pipeline.py` and `src/py/vertebra/_postgres.pyi` docstrings land in `ch16:t01`, `ch16:t02`, and `ch16:t04`; user/OKF guides consolidate in `ch30`).
 
 ## 4. Requirement-to-Task Traceability Matrix
 
@@ -121,17 +121,17 @@ Progress: `[0/2 files documented in ch16]` (`src/py/vertebra/db/adapters/postgre
 
 ## 5. Implementation Plan
 
-- [ ] native-postgres-driver:ch16:t01 — Implement retained pipeline transaction scope and Python pipeline context classes (tasks/t01-pipeline-transaction-scope.md)
-- [ ] native-postgres-driver:ch16:t02 — Wire PyO3 client pipeline scope methods and end-to-end transactional pipeline tests (tasks/t02-python-pipeline-contexts.md)
-- [ ] native-postgres-driver:ch16:t03 — Implement protocol CancelRequest engine, connection retirement, and non-aborting async cancel callback (tasks/t03-cancel-engine-and-retirement.md)
-- [ ] native-postgres-driver:ch16:t04 — Expose explicit and asyncio client cancellation with independent native cleanup (tasks/t04-python-and-asyncio-cancellation.md)
+- [x] native-postgres-driver:ch16:t01 — Implement retained pipeline transaction scope and Python pipeline context classes (tasks/t01-pipeline-transaction-scope.md)
+- [x] native-postgres-driver:ch16:t02 — Wire PyO3 client pipeline scope methods and end-to-end transactional pipeline tests (tasks/t02-python-pipeline-contexts.md)
+- [x] native-postgres-driver:ch16:t03 — Implement protocol CancelRequest engine, connection retirement, and non-aborting async cancel callback (tasks/t03-cancel-engine-and-retirement.md)
+- [x] native-postgres-driver:ch16:t04 — Expose explicit and asyncio client cancellation with independent native cleanup (tasks/t04-python-and-asyncio-cancellation.md)
 
 **Chapter Recovery Checkpoint:** `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-db --features pyo3 --lib py_async::tests && cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --test pipeline_scope --test cancellation_protocol && make dev && uv run --no-sync pytest src/py/tests/unit/db/test_postgres_native_pipeline.py src/py/tests/unit/db/test_postgres_native_cancel.py -q && uv run --no-sync python -m mypy.stubtest vertebra._postgres` exits `0`.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Plan Baseline**: `e8901de4`; chapter `state: planned`, `planning_status: complete`.
-- **Remaining Tasks in Chapter**: `t01`, `t02`, `t03`, `t04` (`4/4` pending).
+- **Verified Plan Baseline**: `fd571e3a`; chapter `state: completed`, `planning_status: complete`.
+- **Remaining Tasks in Chapter**: None (`4/4` completed).
 - **Downstream Dependents**: Unblocks `ch17-command-deadlines-portals-and-tz-fallback` (command I/O deadlines reusing `OperationGeneration` + `PostgresCancelHandle`, Python portals, and `jiff` timezone fallback) and `ch26:t02` (permanent driver `.pipeline()` factories).
 
 [^pg-contracts]: `.agents/bundles/specs/native-postgres-driver/contracts.md` — Frozen pipeline transaction scope, `SyncPostgresPipeline` / `AsyncPostgresPipeline`, and cancellation retirement contracts.
