@@ -8,6 +8,7 @@ pub mod binding;
 pub mod cloud;
 pub mod codecs;
 pub mod config;
+pub mod copy;
 pub mod credentials;
 pub mod errors;
 pub mod extended;
@@ -36,6 +37,11 @@ pub use crate::sync_client::PySyncPostgresPortal;
 pub use codecs::{
     CodecContext, decode_value, decode_value_with_catalog, encode_value, encode_value_with_catalog,
     format_for_oid, format_for_oid_with_catalog,
+};
+pub use copy::{
+    BinaryCopyDecoder, BinaryCopyEncoder, COPY_DATA_CHUNK_BYTES, CopyFromStream, CopyOut,
+    DEFAULT_MAX_COPY_EXTENSION_BYTES, DEFAULT_MAX_COPY_FIELD_BYTES, DEFAULT_MAX_COPY_ROW_BYTES,
+    MAX_COPY_FAIL_REASON_BYTES, PGCOPY_SIGNATURE,
 };
 pub use extended::{ExtendedQueryCollector, Parameter, PreparedDescription, encode_bind};
 pub use metadata::{

@@ -5,7 +5,7 @@ chapter_id: ch18-binary-copy-streaming
 title: Implement duplex COPY FROM STDIN chunked backpressure and CopyFail abort recovery
 description: Add PostgresConnection::start_copy_in, SessionHandle::copy_from, and CopyFromStream in vertebra-postgres with <= 64 KiB CopyData chunking, concurrent ErrorResponse read polling, finish row counts, and sanitized CopyFail abort recovery.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -121,9 +121,9 @@ Implement `PostgresConnection::start_copy_in`, `SessionHandle::copy_from`, and `
 
 ## Acceptance Criteria
 
-- [ ] `CopyFromStream` validates binary `CopyInResponse`, splits outbound `CopyData` frames to `<= 64 KiB`, retains at most 1 row buffer + 2 chunks, and polls backend `ErrorResponse` frames concurrently while writes block (R19).
-- [ ] `finish()` emits exactly one `-1i16` trailer + `CopyDone`, returns the server `COPY <n>` count, and commits only COPY-owned transactions (R19).
-- [ ] `abort(reason)`, encoder/constraint errors, and `Drop` send sanitized `frontend::copy_fail`, drain or retire boundedly, preserve original producer/server errors, keep ambient transactions caller-owned, and never commit partial input (R13, R19).
+- [x] `CopyFromStream` validates binary `CopyInResponse`, splits outbound `CopyData` frames to `<= 64 KiB`, retains at most 1 row buffer + 2 chunks, and polls backend `ErrorResponse` frames concurrently while writes block (R19).
+- [x] `finish()` emits exactly one `-1i16` trailer + `CopyDone`, returns the server `COPY <n>` count, and commits only COPY-owned transactions (R19).
+- [x] `abort(reason)`, encoder/constraint errors, and `Drop` send sanitized `frontend::copy_fail`, drain or retire boundedly, preserve original producer/server errors, keep ambient transactions caller-owned, and never commit partial input (R13, R19).
 
 ## Notes & Discoveries
 

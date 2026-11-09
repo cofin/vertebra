@@ -5,7 +5,7 @@ chapter_id: ch18-binary-copy-streaming
 title: Frame binary COPY rows incrementally with bounded decoder and encoder state machines
 description: Implement incremental BinaryCopyDecoder and BinaryCopyEncoder in vertebra-postgres with 16 MiB row/field caps, 64 KiB extension caps, critical flag rejection, and shared binary value encoding.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -127,9 +127,9 @@ Implement `BinaryCopyDecoder` and `BinaryCopyEncoder` in `src/rs/vertebra-postgr
 
 ## Acceptance Criteria
 
-- [ ] `BinaryCopyDecoder` decodes binary `PGCOPY` frames incrementally across arbitrary split and 1-byte boundaries while retaining at most one incomplete row (R19).
-- [ ] Critical header flags (`16..=31`, including OID bit `16`), oversize extensions (`> 64 KiB`), oversize fields/rows (`> 16 MiB`), mismatched column counts, truncated trailers, and post-trailer bytes fail closed before allocation (R19).
-- [ ] `BinaryCopyEncoder` writes `PGCOPY` headers, exact `Format::Binary` PostgreSQL send payloads, and one `-1i16` trailer without `DataRow` framing or whole-buffer CPU helper delegation (R19).
+- [x] `BinaryCopyDecoder` decodes binary `PGCOPY` frames incrementally across arbitrary split and 1-byte boundaries while retaining at most one incomplete row (R19).
+- [x] Critical header flags (`16..=31`, including OID bit `16`), oversize extensions (`> 64 KiB`), oversize fields/rows (`> 16 MiB`), mismatched column counts, truncated trailers, and post-trailer bytes fail closed before allocation (R19).
+- [x] `BinaryCopyEncoder` writes `PGCOPY` headers, exact `Format::Binary` PostgreSQL send payloads, and one `-1i16` trailer without `DataRow` framing or whole-buffer CPU helper delegation (R19).
 
 ## Notes & Discoveries
 

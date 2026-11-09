@@ -5,15 +5,15 @@ chapter_id: ch18-binary-copy-streaming
 title: "Chapter 18: Incremental Binary COPY Codec, COPY TO Streaming, and COPY FROM Backpressure Recovery"
 description: Implement incremental PostgreSQL binary COPY framing, exclusive COPY TO STDOUT row streaming with CancelRequest drain recovery, and duplex COPY FROM STDIN chunked transmission with CopyFail abort semantics in vertebra-postgres.
 status: stable
-state: planned
+state: completed
 planning_status: complete
 depends_on_chapters:
   - ch17-command-deadlines-portals-and-tz-fallback
 replan_trigger: null
-current_task: "native-postgres-driver:ch18:t01"
+current_task: null
 plan_revision: 5
 plan_commit: fd571e3a
-state_revision: 0
+state_revision: 1
 last_verified_checkpoint: null
 last_reviewed_commit: null
 created_at: "2026-11-05T00:00:00Z"
@@ -140,16 +140,16 @@ Progress: `[0/0 files documented in ch18]` (user-facing `COPY` documentation in 
 
 ## 5. Implementation Plan
 
-- [ ] native-postgres-driver:ch18:t01 — Frame binary COPY rows incrementally with bounded decoder and encoder state machines (tasks/t01-incremental-binary-copy-codec.md)
-- [ ] native-postgres-driver:ch18:t02 — Implement exclusive COPY TO STDOUT streaming and CancelRequest recovery (tasks/t02-copy-to-streaming.md)
-- [ ] native-postgres-driver:ch18:t03 — Implement duplex COPY FROM STDIN chunked backpressure and CopyFail abort recovery (tasks/t03-copy-from-backpressure-and-abort.md)
+- [x] native-postgres-driver:ch18:t01 — Frame binary COPY rows incrementally with bounded decoder and encoder state machines (tasks/t01-incremental-binary-copy-codec.md)
+- [x] native-postgres-driver:ch18:t02 — Implement exclusive COPY TO STDOUT streaming and CancelRequest recovery (tasks/t02-copy-to-streaming.md)
+- [x] native-postgres-driver:ch18:t03 — Implement duplex COPY FROM STDIN chunked backpressure and CopyFail abort recovery (tasks/t03-copy-from-backpressure-and-abort.md)
 
 **Chapter Recovery Checkpoint:** `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --test postgres_copy_codec_tests && cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --test postgres_copy_wire_tests && cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-postgres --all-targets -- -D warnings` exits `0`.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `plan_commit: e8901de4`; chapter `state: planned`, `planning_status: complete`.
-- **Remaining Tasks in Chapter**: `t01`, `t02`, `t03` (`3/3` pending).
+- **Verified Baseline**: `plan_commit: fd571e3a`; chapter `state: completed`, `planning_status: complete`.
+- **Remaining Tasks in Chapter**: None (`3/3` completed).
 - **Downstream Dependents**: Unblocks `ch19-native-arrow-batches-and-shm` and `ch20-arrow-copy-import-and-portals` (which wires Arrow `COPY` plans and PyO3 `copy_to` / `copy_from` / `copy_from_arrow` handles).
 
 [^pg-contracts]: `.agents/bundles/specs/native-postgres-driver/contracts.md` — Native PostgreSQL public value, COPY, and error contracts.

@@ -328,6 +328,7 @@ pub struct PostgresConnection {
     pub(crate) deadline_timed_out: bool,
     pub(crate) deadline_write_uncertain: bool,
     pub(crate) defer_deadline_read_close: bool,
+    pub(crate) copy_in_owned_tx: bool,
     pub(crate) closed: bool,
 }
 
@@ -419,6 +420,7 @@ impl PostgresConnection {
             deadline_timed_out: false,
             deadline_write_uncertain: false,
             defer_deadline_read_close: false,
+            copy_in_owned_tx: false,
             closed: false,
         }
     }
@@ -612,6 +614,7 @@ impl PostgresConnection {
     /// Mark the connection closed and reset `exchange_state` to `Idle`.
     pub fn mark_closed(&mut self) {
         self.closed = true;
+        self.copy_in_owned_tx = false;
         self.exchange_state = ExchangeState::Idle;
         self.standalone_cancel
             .in_exchange
@@ -795,6 +798,11 @@ impl PostgresConnection {
                 PostgresError::Protocol(format!("invalid ParameterStatus value UTF-8: {e}"))
             })?
             .to_owned();
+        self.apply_parameter_status_kv(name, val);
+        Ok(())
+    }
+
+    pub(crate) fn apply_parameter_status_kv(&mut self, name: String, val: String) {
         if name.eq_ignore_ascii_case("search_path") {
             self.type_catalog.invalidate_extension_names();
             self.statement_descriptions.clear();
@@ -812,7 +820,6 @@ impl PostgresConnection {
             self.statement_cache
                 .set_capacity(self.pooler_capabilities.effective_capacity);
         }
-        Ok(())
     }
 
     /// Handle an asynchronous `NotificationResponse` frame.
@@ -1026,6 +1033,7 @@ impl PostgresConnection {
         self.statement_descriptions.clear();
         self.type_catalog.invalidate_all();
         self.unnamed_statement_valid = false;
+        self.copy_in_owned_tx = false;
         self.notifications.clear();
 
         if matches!(
@@ -1093,6 +1101,10 @@ impl PostgresConnection {
             };
             match msg {
                 Message::DataRow(_)
+                | Message::CopyData(_)
+                | Message::CopyDone
+                | Message::CopyOutResponse(_)
+                | Message::CopyInResponse(_)
                 | Message::PortalSuspended
                 | Message::CommandComplete(_)
                 | Message::EmptyQueryResponse
@@ -2221,6 +2233,306 @@ impl PostgresConnection {
         }
     }
 
+    /// Initiate `COPY ... TO STDOUT (FORMAT binary)`, validating single-statement SQL, active
+    /// exchange/pipeline guards, and binary `CopyOutResponse` overall + per-column format codes.
+    pub async fn start_copy_out(&mut self, sql: &str) -> Result<usize, PostgresError> {
+        if self.closed {
+            return Err(PostgresError::Interface(
+                "cannot execute COPY TO on a closed PostgresConnection".to_string(),
+            ));
+        }
+        if self.exchange_state == ExchangeState::PipelineActive {
+            return Err(PostgresError::UnsupportedFeature(
+                "COPY TO is not supported while a PostgreSQL pipeline scope is active".to_string(),
+            ));
+        }
+        if self.exchange_state != ExchangeState::Idle {
+            return Err(PostgresError::Interface(format!(
+                "cannot execute COPY TO while exchange_state is {:?}",
+                self.exchange_state
+            )));
+        }
+        validate_single_copy_sql(sql)?;
+
+        self.unnamed_statement_valid = false;
+        self.write_buf.clear();
+        frontend::query(sql, &mut self.write_buf).map_err(|e| {
+            PostgresError::Protocol(format!("failed to encode COPY TO Query frame: {e}"))
+        })?;
+        self.set_exchange_state(ExchangeState::CopyActive);
+        self.write_command_buf("start_copy_out", false).await?;
+
+        let mut pre_err: Option<PostgresError> = None;
+        let mut unexpected_non_copy = false;
+        loop {
+            let msg = self.read_command_frame().await?;
+            match msg {
+                Message::CopyOutResponse(body) => {
+                    let overall = body.format();
+                    let mut col_formats = Vec::new();
+                    let mut iter = body.column_formats();
+                    while let Some(fmt) = iter.next().map_err(|e| {
+                        self.mark_closed();
+                        PostgresError::Protocol(format!(
+                            "malformed CopyOutResponse column_formats: {e}"
+                        ))
+                    })? {
+                        col_formats.push(fmt);
+                    }
+                    if overall != 1 || col_formats.iter().any(|&f| f != 1) {
+                        let cancel = self.postgres_cancel_handle();
+                        let deadline =
+                            Instant::now() + self.standalone_cancel.config.connect_timeout;
+                        let _ = cancel.cancel_until(deadline).await;
+                        let _ = self.drain_to_ready_for_query_until(Some(deadline)).await;
+                        self.mark_closed();
+                        return Err(PostgresError::Data(
+                            "COPY TO requires FORMAT binary (received text CopyOutResponse)"
+                                .to_string(),
+                        ));
+                    }
+                    return Ok(col_formats.len());
+                }
+                Message::CopyInResponse(_) => {
+                    let deadline = Instant::now() + self.standalone_cancel.config.connect_timeout;
+                    let _ = crate::copy::abort_copy_in_on_connection(
+                        self,
+                        "copy_to expected COPY TO STDOUT, got COPY FROM STDIN",
+                        deadline,
+                    )
+                    .await;
+                    return Err(PostgresError::Interface(
+                        "copy_to statement entered COPY FROM STDIN mode; use copy_from instead"
+                            .to_string(),
+                    ));
+                }
+                Message::ErrorResponse(body) => match crate::query::parse_error_response(&body) {
+                    Ok(srv) => {
+                        if pre_err.is_none() {
+                            pre_err = Some(PostgresError::Server(srv));
+                        }
+                    }
+                    Err(e) => {
+                        self.mark_closed();
+                        return Err(e);
+                    }
+                },
+                Message::RowDescription(_)
+                | Message::DataRow(_)
+                | Message::CommandComplete(_)
+                | Message::EmptyQueryResponse => {
+                    unexpected_non_copy = true;
+                }
+                Message::NoticeResponse(_) => {}
+                Message::ParameterStatus(body) => {
+                    self.handle_parameter_status_frame(&body)?;
+                }
+                Message::NotificationResponse(body) => {
+                    self.handle_notification_frame(&body)?;
+                }
+                Message::ReadyForQuery(body) => {
+                    self.set_exchange_state(ExchangeState::Idle);
+                    let status = match TransactionStatus::from_wire_tag(body.status()) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            self.mark_closed();
+                            return Err(e);
+                        }
+                    };
+                    self.set_transaction_status_from_wire(status);
+                    if let Some(err) = pre_err {
+                        return Err(err);
+                    }
+                    if unexpected_non_copy {
+                        return Err(PostgresError::Interface(
+                            "statement passed to copy_to did not enter COPY TO STDOUT mode"
+                                .to_string(),
+                        ));
+                    }
+                    return Err(PostgresError::Protocol(
+                        "received ReadyForQuery without CopyOutResponse or ErrorResponse"
+                            .to_string(),
+                    ));
+                }
+                _ => {
+                    self.mark_closed();
+                    return Err(PostgresError::Protocol(
+                        "unexpected backend message frame during start_copy_out".to_string(),
+                    ));
+                }
+            }
+        }
+    }
+
+    /// Initiate `COPY ... FROM STDIN (FORMAT binary)`, opening a COPY-owned `BEGIN` when idle (`'I'`),
+    /// preserving caller ownership when already in `'T'`, and validating binary `CopyInResponse` formats.
+    pub async fn start_copy_in(&mut self, sql: &str) -> Result<usize, PostgresError> {
+        if self.closed {
+            return Err(PostgresError::Interface(
+                "cannot execute COPY FROM on a closed PostgresConnection".to_string(),
+            ));
+        }
+        if self.exchange_state == ExchangeState::PipelineActive {
+            return Err(PostgresError::UnsupportedFeature(
+                "COPY FROM is not supported while a PostgreSQL pipeline scope is active"
+                    .to_string(),
+            ));
+        }
+        if self.exchange_state != ExchangeState::Idle {
+            return Err(PostgresError::Interface(format!(
+                "cannot execute COPY FROM while exchange_state is {:?}",
+                self.exchange_state
+            )));
+        }
+        validate_single_copy_sql(sql)?;
+        if self.transaction_status == TransactionStatus::Failed {
+            return Err(PostgresError::Interface(
+                "cannot start COPY FROM while transaction is aborted ('E')".to_string(),
+            ));
+        }
+
+        let started_owned_tx = if self.transaction_status == TransactionStatus::Idle {
+            self.begin().await?;
+            true
+        } else {
+            false
+        };
+
+        self.unnamed_statement_valid = false;
+        self.copy_in_owned_tx = false;
+        self.write_buf.clear();
+        frontend::query(sql, &mut self.write_buf).map_err(|e| {
+            PostgresError::Protocol(format!("failed to encode COPY FROM Query frame: {e}"))
+        })?;
+        self.set_exchange_state(ExchangeState::CopyActive);
+        if let Err(err) = self.write_command_buf("start_copy_in", false).await {
+            if started_owned_tx
+                && !self.closed
+                && self.transaction_status != TransactionStatus::Idle
+            {
+                let _ = self.rollback().await;
+            }
+            return Err(err);
+        }
+
+        let mut pre_err: Option<PostgresError> = None;
+        let mut unexpected_non_copy = false;
+        loop {
+            let msg = match self.read_command_frame().await {
+                Ok(m) => m,
+                Err(err) => {
+                    self.mark_closed();
+                    return Err(err);
+                }
+            };
+            match msg {
+                Message::CopyInResponse(body) => {
+                    let overall = body.format();
+                    let mut col_formats = Vec::new();
+                    let mut iter = body.column_formats();
+                    while let Some(fmt) = iter.next().map_err(|e| {
+                        self.mark_closed();
+                        PostgresError::Protocol(format!(
+                            "malformed CopyInResponse column_formats: {e}"
+                        ))
+                    })? {
+                        col_formats.push(fmt);
+                    }
+                    if overall != 1 || col_formats.iter().any(|&f| f != 1) {
+                        let deadline =
+                            Instant::now() + self.standalone_cancel.config.connect_timeout;
+                        let _ = crate::copy::abort_copy_in_on_connection(
+                            self,
+                            "COPY FROM requires FORMAT binary",
+                            deadline,
+                        )
+                        .await;
+                        if started_owned_tx
+                            && !self.closed
+                            && self.transaction_status != TransactionStatus::Idle
+                        {
+                            let _ = self.rollback().await;
+                        }
+                        return Err(PostgresError::Data(
+                            "COPY FROM requires FORMAT binary (received text CopyInResponse)"
+                                .to_string(),
+                        ));
+                    }
+                    self.copy_in_owned_tx = started_owned_tx;
+                    return Ok(col_formats.len());
+                }
+                Message::CopyOutResponse(_) => {
+                    let cancel = self.postgres_cancel_handle();
+                    let deadline = Instant::now() + self.standalone_cancel.config.connect_timeout;
+                    let _ = cancel.cancel_until(deadline).await;
+                    let _ = self.drain_to_ready_for_query_until(Some(deadline)).await;
+                    self.mark_closed();
+                    return Err(PostgresError::Interface(
+                        "copy_from statement entered COPY TO STDOUT mode; use copy_to instead"
+                            .to_string(),
+                    ));
+                }
+                Message::ErrorResponse(body) => match crate::query::parse_error_response(&body) {
+                    Ok(srv) => {
+                        if pre_err.is_none() {
+                            pre_err = Some(PostgresError::Server(srv));
+                        }
+                    }
+                    Err(e) => {
+                        self.mark_closed();
+                        return Err(e);
+                    }
+                },
+                Message::RowDescription(_)
+                | Message::DataRow(_)
+                | Message::CommandComplete(_)
+                | Message::EmptyQueryResponse => {
+                    unexpected_non_copy = true;
+                }
+                Message::NoticeResponse(_) => {}
+                Message::ParameterStatus(body) => {
+                    self.handle_parameter_status_frame(&body)?;
+                }
+                Message::NotificationResponse(body) => {
+                    self.handle_notification_frame(&body)?;
+                }
+                Message::ReadyForQuery(body) => {
+                    self.set_exchange_state(ExchangeState::Idle);
+                    let status = match TransactionStatus::from_wire_tag(body.status()) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            self.mark_closed();
+                            return Err(e);
+                        }
+                    };
+                    self.set_transaction_status_from_wire(status);
+                    if started_owned_tx && status != TransactionStatus::Idle {
+                        let _ = self.rollback().await;
+                    }
+                    if let Some(err) = pre_err {
+                        return Err(err);
+                    }
+                    if unexpected_non_copy {
+                        return Err(PostgresError::Interface(
+                            "statement passed to copy_from did not enter COPY FROM STDIN mode"
+                                .to_string(),
+                        ));
+                    }
+                    return Err(PostgresError::Protocol(
+                        "received ReadyForQuery without CopyInResponse or ErrorResponse"
+                            .to_string(),
+                    ));
+                }
+                _ => {
+                    self.mark_closed();
+                    return Err(PostgresError::Protocol(
+                        "unexpected backend message frame during start_copy_in".to_string(),
+                    ));
+                }
+            }
+        }
+    }
+
     /// Send a single 5-byte `Terminate` (`'X'`) frame and shut down the socket once.
     pub async fn close(&mut self) -> Result<(), PostgresError> {
         if self.closed {
@@ -2360,6 +2672,8 @@ pub(crate) struct SessionInner {
     closing_inflight: bool,
     close_after_inflight: bool,
     portal_cleanup_inflight: bool,
+    copy_cleanup_inflight: bool,
+    active_copy: bool,
     parameters: BTreeMap<String, String>,
     last_transaction_status: TransactionStatus,
     pinned_owner: Option<TransactionOwner>,
@@ -2382,6 +2696,8 @@ impl SessionInner {
             closing_inflight: false,
             close_after_inflight: false,
             portal_cleanup_inflight: false,
+            copy_cleanup_inflight: false,
+            active_copy: false,
             parameters: BTreeMap::new(),
             last_transaction_status: TransactionStatus::Idle,
             pinned_owner: None,
@@ -2407,6 +2723,8 @@ impl SessionInner {
             closing_inflight: false,
             close_after_inflight: false,
             portal_cleanup_inflight: false,
+            copy_cleanup_inflight: false,
+            active_copy: false,
             parameters,
             last_transaction_status: status,
             pinned_owner: None,
@@ -2618,6 +2936,227 @@ impl Drop for SessionOperationGuard<'_> {
             .portal_cleanup_inflight
         {
             self.handle.shared.inflight_done_notify.notify_waiters();
+        }
+    }
+}
+
+/// Owned `'static` exclusive session lease held across multi-step `CopyOut` / `CopyFromStream` lifecycles.
+pub(crate) struct CopySessionLease {
+    session: Arc<SessionHandle>,
+    backing: Option<SessionBacking>,
+    op_gen: OperationGeneration,
+    cancel_notify: Arc<tokio::sync::Notify>,
+    ambient_failed_on_retire: bool,
+}
+
+impl CopySessionLease {
+    pub(crate) fn cancel_notify(&self) -> Arc<tokio::sync::Notify> {
+        Arc::clone(&self.cancel_notify)
+    }
+
+    pub(crate) fn connect_timeout(&self) -> Duration {
+        self.session.shared.config.connect_timeout
+    }
+
+    pub(crate) fn connection_mut(&mut self) -> &mut PostgresConnection {
+        self.backing.as_mut().expect("CopySessionLease active")
+    }
+
+    pub(crate) fn cancel_claimed(&self) -> bool {
+        self.session.did_op_claim_cancel(self.op_gen)
+    }
+
+    pub(crate) fn mark_ambient_failed_on_retire(&mut self) {
+        self.ambient_failed_on_retire = true;
+    }
+
+    pub(crate) fn begin_drop_cleanup(&self) {
+        let mut guard = self
+            .session
+            .shared
+            .inner
+            .lock()
+            .expect("SessionHandle lock poisoned");
+        guard.copy_cleanup_inflight = true;
+    }
+
+    pub(crate) async fn finish_clean(mut self) {
+        let Some(mut backing) = self.backing.take() else {
+            return;
+        };
+        if backing.exchange_state != ExchangeState::Idle {
+            backing.mark_closed();
+        }
+        let sole_owner = Arc::strong_count(&self.session) == 1;
+        let close_backing = {
+            let mut guard = self
+                .session
+                .shared
+                .inner
+                .lock()
+                .expect("SessionHandle lock poisoned");
+            let op_state = guard.active_op.take();
+            let op_retire = op_state
+                .as_ref()
+                .is_some_and(|op| op.cancel_claimed || op.retire_on_finish);
+            guard.active_copy = false;
+            guard.copy_cleanup_inflight = false;
+            guard.closing_inflight = false;
+            guard.parameters = backing.parameters.clone();
+            guard.last_transaction_status = backing.transaction_status();
+            if self.ambient_failed_on_retire {
+                guard.ambient_cancel_failed = true;
+            }
+            if backing.transaction_status() == TransactionStatus::Idle
+                && guard.active_portal.is_none()
+                && guard.active_pipeline.is_none()
+                && !guard.ambient_cancel_failed
+            {
+                guard.pinned_owner = None;
+            }
+            if guard.retire_pending || op_retire {
+                guard.retire_pending = true;
+                backing.mark_retire();
+            }
+            let close_now = guard.close_after_inflight || sole_owner;
+            guard.close_after_inflight = false;
+            if close_now {
+                guard.pinned_owner = None;
+                guard.ambient_cancel_failed = false;
+                guard.state = SessionState::Closed {
+                    generation: backing.generation(),
+                };
+                Some(backing)
+            } else if matches!(backing, SessionBacking::Direct(ref c) if c.is_closed())
+                && !guard.ambient_cancel_failed
+            {
+                guard.pinned_owner = None;
+                guard.state = SessionState::Closed {
+                    generation: backing.generation(),
+                };
+                None
+            } else {
+                guard.state = SessionState::Ready(backing);
+                None
+            }
+        };
+        let timeout = self.session.shared.config.connect_timeout;
+        if let Some(b) = close_backing {
+            let _ = tokio::time::timeout(timeout, b.close()).await;
+        }
+        self.session.shared.inflight_done_notify.notify_waiters();
+    }
+
+    pub(crate) async fn finish_retired(mut self) {
+        let Some(mut backing) = self.backing.take() else {
+            return;
+        };
+        backing.mark_retire();
+        let timeout = self.session.shared.config.connect_timeout;
+        let _ = tokio::time::timeout(timeout, backing.retire_physical_socket()).await;
+        let sole_owner = Arc::strong_count(&self.session) == 1;
+        let close_backing = {
+            let mut guard = self
+                .session
+                .shared
+                .inner
+                .lock()
+                .expect("SessionHandle lock poisoned");
+            guard.active_op = None;
+            guard.active_copy = false;
+            guard.copy_cleanup_inflight = false;
+            guard.closing_inflight = false;
+            guard.retire_pending = true;
+            guard.parameters = backing.parameters.clone();
+            guard.last_transaction_status = backing.transaction_status();
+            if self.ambient_failed_on_retire {
+                guard.ambient_cancel_failed = true;
+            }
+            let close_now = guard.close_after_inflight || sole_owner;
+            guard.close_after_inflight = false;
+            if close_now {
+                guard.pinned_owner = None;
+                guard.ambient_cancel_failed = false;
+                guard.state = SessionState::Closed {
+                    generation: backing.generation(),
+                };
+                Some(backing)
+            } else if matches!(backing, SessionBacking::Direct(_)) && !guard.ambient_cancel_failed {
+                guard.pinned_owner = None;
+                guard.state = SessionState::Closed {
+                    generation: backing.generation(),
+                };
+                None
+            } else {
+                guard.state = SessionState::Ready(backing);
+                None
+            }
+        };
+        if let Some(b) = close_backing {
+            let _ = tokio::time::timeout(timeout, b.close()).await;
+        }
+        self.session.shared.inflight_done_notify.notify_waiters();
+    }
+
+    pub(crate) async fn cancel_drain_and_retire(mut self) {
+        let deadline = Instant::now() + self.connect_timeout();
+        let cancel_handle = self.session.fenced_cancel_handle(self.op_gen);
+        let _ = cancel_handle.cancel_until(deadline).await;
+        if let Some(ref mut backing) = self.backing
+            && !backing.is_closed()
+            && Instant::now() < deadline
+        {
+            let _ = backing.drain_to_ready_for_query_until(Some(deadline)).await;
+        }
+        self.finish_retired().await;
+    }
+
+    pub(crate) fn spawn_cancel_and_retire_on_drop(self) {
+        self.begin_drop_cleanup();
+        let task = async move {
+            self.cancel_drain_and_retire().await;
+        };
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(task);
+        } else {
+            vertebra_db::py_async::db_runtime_handle().spawn(task);
+        }
+    }
+}
+
+impl Drop for CopySessionLease {
+    fn drop(&mut self) {
+        let Some(mut backing) = self.backing.take() else {
+            return;
+        };
+        backing.mark_closed();
+        backing.mark_retire();
+        let generation = backing.generation();
+        let timeout = self.session.shared.config.connect_timeout;
+        {
+            let mut guard = self
+                .session
+                .shared
+                .inner
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            guard.active_op = None;
+            guard.active_copy = false;
+            guard.copy_cleanup_inflight = false;
+            guard.closing_inflight = false;
+            guard.close_after_inflight = false;
+            guard.retire_pending = true;
+            guard.state = SessionState::Closed { generation };
+        }
+        let notify = Arc::clone(&self.session.shared.inflight_done_notify);
+        let cleanup = async move {
+            let _ = tokio::time::timeout(timeout, backing.close()).await;
+            notify.notify_waiters();
+        };
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(cleanup);
+        } else {
+            vertebra_db::py_async::db_runtime_handle().spawn(cleanup);
         }
     }
 }
@@ -2902,7 +3441,7 @@ impl SessionHandle {
                 .inner
                 .lock()
                 .expect("SessionHandle lock poisoned");
-            if !guard.portal_cleanup_inflight {
+            if !guard.portal_cleanup_inflight && !guard.copy_cleanup_inflight {
                 None
             } else {
                 let notified = notify_arc.notified_owned();
@@ -2927,6 +3466,12 @@ impl SessionHandle {
         if guard.active_portal.is_some() && !guard.portal_cleanup_inflight {
             return Err(PostgresError::Interface(
                 "cannot execute operation while a Portal is active on this session".to_string(),
+            ));
+        }
+        if guard.active_copy && !guard.copy_cleanup_inflight {
+            return Err(PostgresError::Interface(
+                "cannot execute operation while a COPY stream is active on this session"
+                    .to_string(),
             ));
         }
         if guard.active_pipeline.is_some() {
@@ -3035,7 +3580,7 @@ impl SessionHandle {
     pub fn connection_mut(&mut self) -> Option<&mut PostgresConnection> {
         let shared = Arc::get_mut(&mut self.shared)?;
         let inner = shared.inner.get_mut().expect("SessionHandle lock poisoned");
-        if inner.active_pipeline.is_some() || inner.active_portal.is_some() {
+        if inner.active_pipeline.is_some() || inner.active_portal.is_some() || inner.active_copy {
             return None;
         }
         match &mut inner.state {
@@ -3145,12 +3690,17 @@ impl SessionHandle {
             .inner
             .lock()
             .expect("SessionHandle lock poisoned");
-        if guard.portal_cleanup_inflight {
+        if guard.portal_cleanup_inflight || guard.copy_cleanup_inflight {
             guard.close_after_inflight = true;
             let notified = notify_arc.notified_owned();
             let mut pinned = Box::pin(notified);
             pinned.as_mut().enable();
             return Ok(CloseAction::WaitInFlight(pinned));
+        }
+        if guard.active_copy && !guard.retire_pending {
+            return Err(PostgresError::Interface(
+                "cannot close session while a COPY stream is active".to_string(),
+            ));
         }
         if guard.active_portal.is_some() && !guard.retire_pending {
             return Err(PostgresError::Interface(
@@ -3228,6 +3778,11 @@ impl SessionHandle {
         if guard.active_portal.is_some() {
             return Err(PostgresError::Interface(
                 "cannot close session while a Portal is active".to_string(),
+            ));
+        }
+        if guard.active_copy {
+            return Err(PostgresError::Interface(
+                "cannot close session while a COPY stream is active".to_string(),
             ));
         }
         if guard.active_pipeline.is_some() {
@@ -3331,6 +3886,12 @@ impl SessionHandle {
             if guard.active_portal.is_some() {
                 return Err(PostgresError::Interface(
                     "cannot execute operation while a Portal is active on this session".to_string(),
+                ));
+            }
+            if guard.active_copy {
+                return Err(PostgresError::Interface(
+                    "cannot execute operation while a COPY stream is active on this session"
+                        .to_string(),
                 ));
             }
             match access {
@@ -3717,6 +4278,12 @@ impl SessionHandle {
         if guard.active_portal.is_some() {
             return Err(PostgresError::Interface(
                 "cannot execute operation while a Portal is active on this session".to_string(),
+            ));
+        }
+        if guard.active_copy {
+            return Err(PostgresError::Interface(
+                "cannot execute operation while a COPY stream is active on this session"
+                    .to_string(),
             ));
         }
         if guard.active_pipeline.is_some() {
@@ -4526,6 +5093,259 @@ impl SessionHandle {
         .await
     }
 
+    /// Acquire exclusive session ownership and open a streaming binary `COPY ... TO STDOUT` handle.
+    pub async fn copy_to(
+        self: &Arc<Self>,
+        sql: &str,
+    ) -> Result<crate::copy::CopyOut, PostgresError> {
+        validate_single_copy_sql(sql)?;
+        let op_gen = self.reserve_operation_generation();
+        self.copy_to_with_generation_as(op_gen, sql, None).await
+    }
+
+    /// Open a streaming binary `COPY ... TO STDOUT` handle inside an optional explicit [`TransactionOwner`].
+    pub async fn copy_to_as(
+        self: &Arc<Self>,
+        sql: &str,
+        owner: Option<TransactionOwner>,
+    ) -> Result<crate::copy::CopyOut, PostgresError> {
+        validate_single_copy_sql(sql)?;
+        let op_gen = self.reserve_operation_generation();
+        self.copy_to_with_generation_as(op_gen, sql, owner).await
+    }
+
+    pub(crate) async fn copy_to_with_generation_as(
+        self: &Arc<Self>,
+        op_gen: OperationGeneration,
+        sql: &str,
+        owner: Option<TransactionOwner>,
+    ) -> Result<crate::copy::CopyOut, PostgresError> {
+        if let Err(err) = validate_single_copy_sql(sql) {
+            self.unreserve_operation_generation(op_gen);
+            return Err(err);
+        }
+        let mut lease = self.checkout_for_copy(op_gen, owner).await?;
+        let start_res = {
+            let cancel_notify = lease.cancel_notify();
+            let timeout = lease.connect_timeout();
+            let conn = lease.connection_mut();
+            let start_fut = conn.start_copy_out(sql);
+            tokio::pin!(start_fut);
+            let cancel_timeout = async {
+                cancel_notify.notified().await;
+                tokio::time::sleep(timeout).await;
+            };
+            tokio::pin!(cancel_timeout);
+            tokio::select! {
+                biased;
+                res = &mut start_fut => res,
+                () = &mut cancel_timeout => Err(PostgresError::Operational(
+                    "cancelled COPY TO start timed out while draining wire response".to_string(),
+                )),
+            }
+        };
+        match start_res {
+            Ok(cols) => {
+                if lease.cancel_claimed() {
+                    lease.cancel_drain_and_retire().await;
+                    return Err(PostgresError::Operational(
+                        "COPY TO was cancelled during start".to_string(),
+                    ));
+                }
+                Ok(crate::copy::CopyOut::new(lease, cols))
+            }
+            Err(err) => {
+                if lease.connection_mut().is_closed() || lease.cancel_claimed() {
+                    lease.finish_retired().await;
+                } else {
+                    lease.finish_clean().await;
+                }
+                Err(err)
+            }
+        }
+    }
+
+    /// Acquire exclusive session ownership and open a duplex binary `COPY ... FROM STDIN` handle.
+    pub async fn copy_from(
+        self: &Arc<Self>,
+        sql: &str,
+    ) -> Result<crate::copy::CopyFromStream, PostgresError> {
+        validate_single_copy_sql(sql)?;
+        let op_gen = self.reserve_operation_generation();
+        self.copy_from_with_generation_as(op_gen, sql, None).await
+    }
+
+    /// Open a duplex binary `COPY ... FROM STDIN` handle inside an optional explicit [`TransactionOwner`].
+    pub async fn copy_from_as(
+        self: &Arc<Self>,
+        sql: &str,
+        owner: Option<TransactionOwner>,
+    ) -> Result<crate::copy::CopyFromStream, PostgresError> {
+        validate_single_copy_sql(sql)?;
+        let op_gen = self.reserve_operation_generation();
+        self.copy_from_with_generation_as(op_gen, sql, owner).await
+    }
+
+    pub(crate) async fn copy_from_with_generation_as(
+        self: &Arc<Self>,
+        op_gen: OperationGeneration,
+        sql: &str,
+        owner: Option<TransactionOwner>,
+    ) -> Result<crate::copy::CopyFromStream, PostgresError> {
+        if let Err(err) = validate_single_copy_sql(sql) {
+            self.unreserve_operation_generation(op_gen);
+            return Err(err);
+        }
+        let mut lease = self.checkout_for_copy(op_gen, owner).await?;
+        let start_res = {
+            let cancel_notify = lease.cancel_notify();
+            let timeout = lease.connect_timeout();
+            let conn = lease.connection_mut();
+            let start_fut = conn.start_copy_in(sql);
+            tokio::pin!(start_fut);
+            let cancel_timeout = async {
+                cancel_notify.notified().await;
+                tokio::time::sleep(timeout).await;
+            };
+            tokio::pin!(cancel_timeout);
+            tokio::select! {
+                biased;
+                res = &mut start_fut => res,
+                () = &mut cancel_timeout => Err(PostgresError::Operational(
+                    "cancelled COPY FROM start timed out while draining wire response".to_string(),
+                )),
+            }
+        };
+        match start_res {
+            Ok(cols) => {
+                let (owns_tx, ctx, catalog) = {
+                    let conn = lease.connection_mut();
+                    let owns = conn.copy_in_owned_tx;
+                    conn.copy_in_owned_tx = false;
+                    let ctx = crate::codecs::CodecContext::from_parameters(&conn.parameters);
+                    let cat = conn.type_catalog.clone();
+                    (owns, ctx, cat)
+                };
+                if lease.cancel_claimed() {
+                    crate::copy::abort_copy_in_lease(lease, owns_tx, "COPY FROM cancelled").await;
+                    return Err(PostgresError::Operational(
+                        "COPY FROM was cancelled during start".to_string(),
+                    ));
+                }
+                match crate::copy::CopyFromStream::new(lease, cols, owns_tx, ctx, catalog) {
+                    Ok(stream) => Ok(stream),
+                    Err(err) => Err(err),
+                }
+            }
+            Err(err) => {
+                if lease.connection_mut().is_closed() || lease.cancel_claimed() {
+                    lease.finish_retired().await;
+                } else {
+                    lease.finish_clean().await;
+                }
+                Err(err)
+            }
+        }
+    }
+
+    async fn checkout_for_copy(
+        self: &Arc<Self>,
+        op_gen: OperationGeneration,
+        owner: Option<TransactionOwner>,
+    ) -> Result<CopySessionLease, PostgresError> {
+        self.wait_portal_drop_cleanup_if_needed().await;
+        let mut guard = self
+            .shared
+            .inner
+            .lock()
+            .expect("SessionHandle lock poisoned");
+        guard.reserved_generations.remove(&op_gen.0);
+        if guard.pre_cancelled_generations.remove(&op_gen.0) {
+            return Err(PostgresError::Interface(
+                "COPY operation was cancelled before wire submission".to_string(),
+            ));
+        }
+        if guard.active_pipeline.is_some() {
+            return Err(PostgresError::UnsupportedFeature(
+                "COPY is not supported while a PostgreSQL pipeline scope is active".to_string(),
+            ));
+        }
+        if guard.active_portal.is_some() {
+            return Err(PostgresError::Interface(
+                "cannot execute COPY while a Portal is active on this session".to_string(),
+            ));
+        }
+        if guard.active_copy {
+            return Err(PostgresError::Interface(
+                "another COPY stream is already active on this session".to_string(),
+            ));
+        }
+        if guard.ambient_cancel_failed {
+            return Err(PostgresError::Interface(
+                "ambient transaction failed due to cancellation; call rollback() first".to_string(),
+            ));
+        }
+        Self::validate_pinned_owner(&guard, owner)?;
+
+        match guard.state {
+            SessionState::Ready(_) => {
+                let next_gen = guard.next_generation;
+                let prev = std::mem::replace(
+                    &mut guard.state,
+                    SessionState::InFlight {
+                        generation: next_gen,
+                    },
+                );
+                let SessionState::Ready(backing) = prev else {
+                    unreachable!("checked Ready")
+                };
+                if backing.is_closed() {
+                    if matches!(backing, SessionBacking::Pooled(_)) {
+                        guard.state = SessionState::Ready(backing);
+                    } else {
+                        guard.state = SessionState::Closed {
+                            generation: backing.generation(),
+                        };
+                    }
+                    return Err(PostgresError::Interface(
+                        "session connection is closed".to_string(),
+                    ));
+                }
+                let conn_gen = backing.generation();
+                let had_ambient_tx = backing.transaction_status() != TransactionStatus::Idle;
+                let cancel_notify = Arc::new(tokio::sync::Notify::new());
+                guard.active_op = Some(ActiveOpState {
+                    op_gen,
+                    key: backing.cancel_key.clone(),
+                    had_ambient_tx,
+                    cancel_claimed: false,
+                    retire_on_finish: guard.retire_pending,
+                    cancel_notify: Arc::clone(&cancel_notify),
+                });
+                guard.active_copy = true;
+                guard.state = SessionState::InFlight {
+                    generation: conn_gen,
+                };
+                Ok(CopySessionLease {
+                    session: Arc::clone(self),
+                    backing: Some(backing),
+                    op_gen,
+                    cancel_notify,
+                    ambient_failed_on_retire: false,
+                })
+            }
+            SessionState::InFlight { .. } => Err(PostgresError::Interface(
+                "another operation is already in flight on this session".to_string(),
+            )),
+            SessionState::Connecting { .. } => Err(PostgresError::Interface(
+                "session connection is still in progress".to_string(),
+            )),
+            SessionState::Disconnected | SessionState::Closed { .. } => Err(
+                PostgresError::Interface("session is not connected".to_string()),
+            ),
+        }
+    }
+
     fn rollback_connecting(&self, generation: u64) {
         let mut guard = self
             .shared
@@ -5024,6 +5844,7 @@ pub(crate) async fn establish_postgres_connection(
                     deadline_timed_out: false,
                     deadline_write_uncertain: false,
                     defer_deadline_read_close: false,
+                    copy_in_owned_tx: false,
                     closed: false,
                 });
             }
@@ -5164,6 +5985,157 @@ fn format_set_guc_sql(key: &str, value: &str) -> String {
     let escaped_ident = key.replace('"', "\"\"");
     let escaped_val = value.replace('\'', "''");
     format!("SET \"{escaped_ident}\" = '{escaped_val}'")
+}
+
+/// Validate that `sql` contains zero NUL bytes and represents exactly one SQL statement
+/// (permitting semicolons inside quotes/comments/dollar-quotes and optional trailing `;` + trivia).
+pub(crate) fn validate_single_copy_sql(sql: &str) -> Result<(), PostgresError> {
+    if sql.as_bytes().contains(&0) {
+        return Err(PostgresError::Data(
+            "SQL query string cannot contain embedded NUL byte".to_string(),
+        ));
+    }
+    let bytes = sql.as_bytes();
+    let len = bytes.len();
+    let mut pos = 0usize;
+    let mut saw_token = false;
+    let mut saw_top_semicolon = false;
+
+    while pos < len {
+        let b = bytes[pos];
+        if b.is_ascii_whitespace() {
+            pos += 1;
+            continue;
+        }
+        if b == b'-' && pos + 1 < len && bytes[pos + 1] == b'-' {
+            pos += 2;
+            while pos < len && bytes[pos] != b'\n' && bytes[pos] != b'\r' {
+                pos += 1;
+            }
+            continue;
+        }
+        if b == b'/' && pos + 1 < len && bytes[pos + 1] == b'*' {
+            pos += 2;
+            let mut depth = 1usize;
+            while pos < len && depth > 0 {
+                if pos + 1 < len && bytes[pos] == b'/' && bytes[pos + 1] == b'*' {
+                    depth += 1;
+                    pos += 2;
+                } else if pos + 1 < len && bytes[pos] == b'*' && bytes[pos + 1] == b'/' {
+                    depth -= 1;
+                    pos += 2;
+                } else {
+                    pos += 1;
+                }
+            }
+            continue;
+        }
+        if saw_top_semicolon {
+            return Err(PostgresError::Interface(
+                "COPY statement cannot contain multiple SQL commands".to_string(),
+            ));
+        }
+        if b == b';' {
+            if !saw_token {
+                return Err(PostgresError::Interface(
+                    "COPY statement cannot start with an empty `;` command".to_string(),
+                ));
+            }
+            saw_top_semicolon = true;
+            pos += 1;
+            continue;
+        }
+        saw_token = true;
+        if b == b'\'' {
+            let escaped_string = pos > 0
+                && (bytes[pos - 1] == b'E' || bytes[pos - 1] == b'e')
+                && (pos < 2 || {
+                    let prev = bytes[pos - 2];
+                    !(prev.is_ascii_alphanumeric() || prev == b'_' || prev == b'$' || prev >= 0x80)
+                });
+            pos += 1;
+            while pos < len {
+                if escaped_string && bytes[pos] == b'\\' {
+                    pos = (pos + 2).min(len);
+                    continue;
+                }
+                if bytes[pos] == b'\'' {
+                    pos += 1;
+                    if pos < len && bytes[pos] == b'\'' {
+                        pos += 1;
+                        continue;
+                    }
+                    break;
+                }
+                pos += 1;
+            }
+            continue;
+        }
+        if b == b'"' {
+            pos += 1;
+            while pos < len {
+                if bytes[pos] == b'"' {
+                    pos += 1;
+                    if pos < len && bytes[pos] == b'"' {
+                        pos += 1;
+                        continue;
+                    }
+                    break;
+                }
+                pos += 1;
+            }
+            continue;
+        }
+        if b == b'$'
+            && let Some(tag_end) = parse_dollar_quote_tag(bytes, pos)
+        {
+            let tag = &bytes[pos..tag_end];
+            pos = tag_end;
+            while pos + tag.len() <= len {
+                if &bytes[pos..pos + tag.len()] == tag {
+                    pos += tag.len();
+                    break;
+                }
+                pos += 1;
+            }
+            if pos + tag.len() > len && !bytes[..len].ends_with(tag) {
+                pos = len;
+            }
+            continue;
+        }
+        pos += 1;
+    }
+
+    if !saw_token {
+        return Err(PostgresError::Interface(
+            "COPY SQL statement cannot be empty".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn parse_dollar_quote_tag(bytes: &[u8], start: usize) -> Option<usize> {
+    debug_assert_eq!(bytes[start], b'$');
+    let mut idx = start + 1;
+    if idx < bytes.len() && bytes[idx] == b'$' {
+        return Some(idx + 1);
+    }
+    let first = *bytes.get(idx)?;
+    if !(first.is_ascii_alphabetic() || first == b'_' || first >= 0x80) {
+        return None;
+    }
+    idx += 1;
+    while idx < bytes.len() {
+        let c = bytes[idx];
+        if c == b'$' {
+            return Some(idx + 1);
+        }
+        if !(c.is_ascii_alphanumeric() || c == b'_' || c >= 0x80) {
+            return None;
+        }
+        idx += 1;
+    }
+    None
 }
 
 #[cfg(unix)]

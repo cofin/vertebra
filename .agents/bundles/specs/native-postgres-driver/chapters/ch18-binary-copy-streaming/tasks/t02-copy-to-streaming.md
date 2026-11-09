@@ -5,7 +5,7 @@ chapter_id: ch18-binary-copy-streaming
 title: Implement exclusive COPY TO STDOUT streaming and CancelRequest recovery
 description: Add PostgresConnection::start_copy_out, SessionHandle::copy_to, and CopyOut streaming in vertebra-postgres with binary format validation, row-count verification, and CancelRequest drain/retirement on early close.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -120,9 +120,9 @@ Implement `PostgresConnection::start_copy_out`, `SessionHandle::copy_to`, and `C
 
 ## Acceptance Criteria
 
-- [ ] `SessionHandle::copy_to` and `CopyOut` pin the physical session and active transaction, reject pipeline `COPY` before writes, validate binary `CopyOutResponse` formats, and yield rows incrementally before `CopyDone` (R19).
-- [ ] `CopyOut` verifies `CommandComplete("COPY <n>")` count parity and processes interleaved `NoticeResponse` / `ParameterStatus` and pre/midstream `ErrorResponse` frames cleanly (R19).
-- [ ] Early `close()` and `Drop` issue generation-fenced `CancelRequest`, drain or discard within `connect_timeout`, and retire any cancelled physical socket before pool permit release (R18, R19).
+- [x] `SessionHandle::copy_to` and `CopyOut` pin the physical session and active transaction, reject pipeline `COPY` before writes, validate binary `CopyOutResponse` formats, and yield rows incrementally before `CopyDone` (R19).
+- [x] `CopyOut` verifies `CommandComplete("COPY <n>")` count parity and processes interleaved `NoticeResponse` / `ParameterStatus` and pre/midstream `ErrorResponse` frames cleanly (R19).
+- [x] Early `close()` and `Drop` issue generation-fenced `CancelRequest`, drain or discard within `connect_timeout`, and retire any cancelled physical socket before pool permit release (R18, R19).
 
 ## Notes & Discoveries
 
