@@ -10,11 +10,11 @@ planning_status: complete
 depends_on_chapters:
   - ch01-crate-and-packaging
 replan_trigger: null
-current_task: "native-oracle-driver:ch02:t01"
+current_task: "native-oracle-driver:ch02:t03"
 plan_revision: 3
 plan_commit: 769302bc
-state_revision: 1
-last_verified_checkpoint: null
+state_revision: 3
+last_verified_checkpoint: 1ad8a82b
 last_reviewed_commit: null
 created_at: "2026-11-05T00:00:00Z"
 updated_at: "2026-11-09T01:28:30Z"
@@ -160,9 +160,9 @@ Progress: `[0/6 files documented]` (`src/py/vertebra/_oracle.pyi` is updated in 
 
 ## 5. Implementation Plan
 
-- [ ] native-oracle-driver:ch02:t01 — Implement NativeOracleConfig validation and ORA-xxxxx to DbExceptionTypes SQLSTATE error mapping (tasks/t01-descriptor-precedence-and-error-hierarchy.md)
-- [ ] native-oracle-driver:ch02:t02 — Fix OracleConfig.connect_descriptor() precedence and implement TNS, Autonomous Wallet mTLS, and GcpTokenCache dialer (tasks/t02-tns-wallet-and-token-dialer.md)
-- [ ] native-oracle-driver:ch02:t03 — Implement per-connection worker bridge, SyncOracleClient/AsyncOracleClient lifecycle, and out-of-band break_execution cancellation (tasks/t03-worker-bridge-and-break-cancellation.md)
+- [x] [1ad8a82b] native-oracle-driver:ch02:t01 — Implement NativeOracleConfig validation and ORA-xxxxx to DbExceptionTypes SQLSTATE error mapping (tasks/t01-descriptor-precedence-and-error-hierarchy.md)
+- [x] native-oracle-driver:ch02:t02 — Fix OracleConfig.connect_descriptor() precedence and implement TNS, Autonomous Wallet mTLS, and GcpTokenCache dialer (tasks/t02-tns-wallet-and-token-dialer.md)
+- [~] native-oracle-driver:ch02:t03 — Implement per-connection worker bridge, SyncOracleClient/AsyncOracleClient lifecycle, and out-of-band break_execution cancellation (tasks/t03-worker-bridge-and-break-cancellation.md)
 
 **Chapter Recovery Checkpoint:** `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-oracle --locked && cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-oracle --all-targets --locked -- -D warnings && make dev && uv run --no-sync python -m mypy.stubtest vertebra._oracle && uv run --no-sync pytest src/py/tests/unit/db/test_oracle_adapter.py -v` exits `0`.
 

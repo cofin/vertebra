@@ -5,7 +5,7 @@ chapter_id: ch02-connect-auth-and-error-hierarchy
 title: Fix OracleConfig.connect_descriptor() precedence and implement TNS, Autonomous Wallet mTLS, and GcpTokenCache dialer
 description: Fix OracleConfig.connect_descriptor() priority (using OracleTopologyConfig.to_tns_descriptor()) and add OracleDrcpConfig in src/py/vertebra/db/adapters/oracle/config.py, implement src/rs/vertebra-oracle/src/dialer.rs with self-contained OracleWalletMaterial, vertebra_db::oracle::tns alias resolution, and vertebra_core::gcp_auth::GcpTokenCache token auth, and register pub mod dialer; in src/rs/vertebra-oracle/src/lib.rs.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -26,17 +26,17 @@ tests:
 estimated_loc: 235
 plan_revision: 3
 plan_commit: 769302bc
-state_revision: 0
-claimed_by: null
-claimed_at: null
+state_revision: 2
+claimed_by: agent:executor
+claimed_at: "2026-11-09T03:21:00Z"
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-09T03:25:00Z"
+last_verified_commit: 1ad8a82b
+verification_evidence: "cargo test -p vertebra-oracle --locked --offline (9 passed), cargo clippy -p vertebra-oracle --all-targets --locked --offline -- -D warnings (0 warnings), pytest src/py/tests/unit/db/test_oracle_adapter.py -v (6 passed)"
 created_at: "2026-11-09T00:55:00Z"
-updated_at: "2026-11-09T01:28:30Z"
+updated_at: "2026-11-09T03:25:00Z"
 commit: null
 sources:
   - id: ora-config-py
@@ -133,9 +133,9 @@ Commit as `feat(oracle): fix descriptor precedence and implement TNS, wallet mTL
 
 ## Acceptance Criteria
 
-- [ ] `OracleConfig.connect_descriptor()` returns `OracleConnectDescriptor(host="db.internal", port=1530, service_name="ORCLPDB1")` when `host="db.internal"`, `port=1530`, `service_name="ORCLPDB1"` are supplied without overriding `dsn`, and uses `self.topology.to_tns_descriptor()` when `topology` is set (R2).
-- [ ] `src/rs/vertebra-oracle/src/dialer.rs` defines a self-contained `OracleWalletMaterial` struct that extracts `.zip` archives and wallet directories in memory and validates PEM material via `rustls-pemfile` without importing `OracleWalletMaterial` from `vertebra_db::oracle::tns` (R2).
-- [ ] `resolve_endpoint` resolves `tnsnames.ora` aliases via `vertebra_db::oracle::tns`, supports O5LOGON password and `vertebra_core::gcp_auth::GcpTokenCache` (`GcpAuthSource::from_ADC()`) bearer token auth, and raises `ORA-12154` (`ConnectionFailure`, `is_transient=False`) on unknown TNS aliases (R2, R4).
+- [x] `OracleConfig.connect_descriptor()` returns `OracleConnectDescriptor(host="db.internal", port=1530, service_name="ORCLPDB1")` when `host="db.internal"`, `port=1530`, `service_name="ORCLPDB1"` are supplied without overriding `dsn`, and uses `self.topology.to_tns_descriptor()` when `topology` is set (R2).
+- [x] `src/rs/vertebra-oracle/src/dialer.rs` defines a self-contained `OracleWalletMaterial` struct that extracts `.zip` archives and wallet directories in memory and validates PEM material via `rustls-pemfile` without importing `OracleWalletMaterial` from `vertebra_db::oracle::tns` (R2).
+- [x] `resolve_endpoint` resolves `tnsnames.ora` aliases via `vertebra_db::oracle::tns`, supports O5LOGON password and `vertebra_core::gcp_auth::GcpTokenCache` (`GcpAuthSource::from_ADC()`) bearer token auth, and raises `ORA-12154` (`ConnectionFailure`, `is_transient=False`) on unknown TNS aliases (R2, R4).
 
 ## Notes & Discoveries
 

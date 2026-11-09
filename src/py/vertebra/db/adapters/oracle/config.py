@@ -3,7 +3,7 @@
 import io
 import zipfile
 from pathlib import Path
-from typing import Any, ClassVar, Self
+from typing import Any, ClassVar, Final, Self
 
 import msgspec
 
@@ -15,8 +15,10 @@ from vertebra.db.driver._common import BaseDatabaseConfig
 from vertebra.typing import FrozenBaseStruct, ImproperConfigurationError
 
 __all__ = (
+    "DEFAULT_ORACLE_DSN",
     "OracleConfig",
     "OracleConnectDescriptor",
+    "OracleDrcpConfig",
     "OracleDriverFeatures",
     "OracleSessionAttrs",
     "OracleTopologyConfig",
@@ -24,6 +26,8 @@ __all__ = (
     "parse_tnsnames_ora",
     "resolve_tns_alias",
 )
+
+DEFAULT_ORACLE_DSN: Final[str] = "oracle://localhost:1521/FREEPDB1"
 
 
 class OracleConnectDescriptor(FrozenBaseStruct, frozen=True, gc=False):
@@ -257,6 +261,17 @@ class OracleDriverFeatures(FrozenBaseStruct, frozen=True, gc=False):
     """When True, piggyback `CLIENT_IDENTIFIER`, `MODULE`, `ACTION`, and `ECID` on TTC frames."""
 
 
+class OracleDrcpConfig(FrozenBaseStruct, frozen=True, gc=False):
+    """Database Resident Connection Pooling (DRCP) session tagging and purity configuration."""
+
+    cclass: str | None = None
+    """DRCP connection class name (`ATTR_CONNECTION_CLASS`) isolating session pools."""
+    purity: str = "SELF"
+    """DRCP session purity (`"SELF"` to reuse pooled sessions or `"NEW"` for a clean process)."""
+    connection_tag: str | None = None
+    """Optional session state tag (`"KEY=VALUE;..."`) requested on pool checkout."""
+
+
 class OracleConfig(BaseDatabaseConfig, frozen=True, gc=False):
     """Configuration for the Oracle driver backed by the native `vertebra._oracle` module."""
 
@@ -267,7 +282,7 @@ class OracleConfig(BaseDatabaseConfig, frozen=True, gc=False):
     sync_driver_name: ClassVar[str] = "SyncOracleDriver"
     async_driver_name: ClassVar[str] = "AsyncOracleDriver"
 
-    dsn: str = "oracle://localhost:1521/FREEPDB1"
+    dsn: str = DEFAULT_ORACLE_DSN
     """Easy Connect string, TNS `(DESCRIPTION=...)` descriptor, or `oracle://` URI."""
     host: str = "localhost"
     """Oracle Net Listener hostname when `dsn` or `wallet_path` is not used."""
@@ -275,6 +290,10 @@ class OracleConfig(BaseDatabaseConfig, frozen=True, gc=False):
     """Oracle Net Listener port (`1521` TCP, `1522` TCPS wallet)."""
     service_name: str = "FREEPDB1"
     """Target Oracle Pluggable Database (PDB) or service name."""
+    sid: str | None = None
+    """Optional legacy Oracle System Identifier (`SID`) when `service_name` is not used."""
+    connect_descriptor_str: str | None = None
+    """Optional explicit TNS `(DESCRIPTION=...)` connect descriptor overriding `dsn` and `host`."""
     user: str = "system"
     """Database username for O5LOGON authentication."""
     password: str = ""
@@ -289,6 +308,14 @@ class OracleConfig(BaseDatabaseConfig, frozen=True, gc=False):
     """Optional Oracle Edition-Based Redefinition (`ORA$BASE`) edition name."""
     topology: OracleTopologyConfig | None = None
     """Optional multi-host RAC or Data Guard `(ADDRESS_LIST=...)` topology configuration."""
+    drcp: OracleDrcpConfig = msgspec.field(default_factory=OracleDrcpConfig)
+    """Database Resident Connection Pooling (`cclass`, `purity`, `connection_tag`) settings."""
+    auth_mode: str = "password"
+    """Authentication mode (`"password"` for O5LOGON or `"token"` for IAM/OAuth2 bearer tokens)."""
+    access_token: str | None = None
+    """Optional static IAM or OAuth2 bearer access token when `auth_mode="token"`."""
+    token_auth_options: dict[str, str] | None = None
+    """Optional token provider options passed to `GcpTokenCache` when `auth_mode="token"`."""
     driver_features: OracleDriverFeatures = msgspec.field(default_factory=OracleDriverFeatures)
     """Oracle 26ai `VECTOR`, `OSON`, Arrow, and Direct Path driver feature configuration."""
     client_identifier: str | None = None
@@ -309,7 +336,9 @@ class OracleConfig(BaseDatabaseConfig, frozen=True, gc=False):
     """Optional shared-memory `DatabaseBroker` coordinating cross-worker connection and statement leases."""
 
     def connect_descriptor(self) -> OracleConnectDescriptor:
-        """Resolve the effective `OracleConnectDescriptor` from wallet, topology, TNS alias, or DSN."""
+        """Resolve the effective `OracleConnectDescriptor` in strict 4-tier priority order."""
+        if self.connect_descriptor_str:
+            return OracleConnectDescriptor.from_tns_descriptor(self.connect_descriptor_str)
         if isinstance(self.wallet_zip, (bytes, bytearray)):
             wallet = OracleWallet.from_zip_bytes(bytes(self.wallet_zip))
             alias = self.tns_alias or self.service_name
@@ -330,12 +359,22 @@ class OracleConfig(BaseDatabaseConfig, frozen=True, gc=False):
                 return resolved
         if self.topology is not None:
             return OracleConnectDescriptor.from_tns_descriptor(self.topology.to_tns_descriptor())
-        if self.dsn:
+        has_host_or_service_override = (
+            self.host != "localhost"
+            or self.port != 1521
+            or self.service_name != "FREEPDB1"
+            or self.sid is not None
+        )
+        if self.dsn and (self.dsn != DEFAULT_ORACLE_DSN or not has_host_or_service_override):
             return OracleConnectDescriptor.from_tns_descriptor(self.dsn)
+        effective_service_name: str | None = (
+            None if (self.sid is not None and self.service_name == "FREEPDB1") else self.service_name
+        )
         return OracleConnectDescriptor(
             host=self.host,
             port=self.port,
-            service_name=self.service_name,
+            service_name=effective_service_name,
+            sid=self.sid,
         )
 
     def derive_pool(

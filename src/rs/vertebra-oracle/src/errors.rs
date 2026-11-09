@@ -315,6 +315,37 @@ impl OracleError {
     #[must_use]
     pub fn from_oracledb(err: &oracledb::Error) -> Self {
         let message = err.to_string();
+        match err.kind() {
+            oracledb::ErrorKind::DbError(db_err) => {
+                let code = db_err.code() as i32;
+                if code == 1013 {
+                    return Self::Cancelled(message);
+                }
+                return Self::Server { code, message };
+            }
+            oracledb::ErrorKind::CallTimeoutExceeded => {
+                return Self::Cancelled(format!("ORA-01013: {message}"));
+            }
+            oracledb::ErrorKind::TnsAliasNotFound(_, _) => {
+                return Self::Server {
+                    code: 12154,
+                    message: format!("ORA-12154: {message}"),
+                };
+            }
+            oracledb::ErrorKind::InvalidServiceName(_, _, _, _) => {
+                return Self::Server {
+                    code: 12514,
+                    message: format!("ORA-12514: {message}"),
+                };
+            }
+            oracledb::ErrorKind::ListenerRefusedConnection(_, _, _, err_num) => {
+                return Self::Server {
+                    code: *err_num as i32,
+                    message,
+                };
+            }
+            _ => {}
+        }
         if let Some(code) = extract_ora_code(&message) {
             if code == 1013 {
                 return Self::Cancelled(message);

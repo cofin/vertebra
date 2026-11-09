@@ -1,6 +1,7 @@
 //! `vertebra-oracle` crate and `vertebra._oracle` PyO3 extension module.
 
 pub mod config;
+pub mod dialer;
 pub mod errors;
 
 use pyo3::prelude::*;
