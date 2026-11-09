@@ -13,6 +13,9 @@ generated:
   by: flow/0.26.0
   at: "2026-11-04T04:33:00Z"
 verified:
+  - by: agent:flow-sync
+    at: "2026-11-09T21:46:00Z"
+    commit: a1af802c
   - by: agent:flow-executor
     at: "2026-11-09T15:06:00Z"
     commit: 6035aff2
@@ -50,6 +53,9 @@ sources:
 - id: src-extensions-sqlspec-adapters-py
   resource: src/py/vertebra/extensions/sqlspec/adapters.py
   title: SQLSpec native pipeline dispatch and sequential stack execution
+- id: src-db-duckdb-pipeline-py
+  resource: src/py/vertebra/db/adapters/duckdb/pipeline.py
+  title: Delayed-commit SyncDuckDBPipeline and AsyncDuckDBPipeline with savepoint nesting
 - id: src-db-cdc-py
   resource: src/py/vertebra/db/cdc.py
   title: Python implementation module (src/py/vertebra/db/cdc.py)
@@ -116,7 +122,7 @@ Batch stack operations compile batched parameters through SQLSpec's `is_many` pr
 
 Arrow stack execution separates the owning driver's public execution options from bind values before SQLSpec preparation. BigQuery retains `selected_fields`, `row_restriction`, and `max_streams`; Spanner retains `data_boost`, `max_partitions`, and `staleness`, alongside the standard Arrow options. These private class-owned declarations preserve native calls without engine-name dispatch or per-operation reflection.
 
-Single-operation stacks, non-pipeline drivers, stacks containing `execute_many`, `execute_script`, or `execute_arrow`, and `continue_on_error=True` use adapter primitives sequentially. Fail-fast execution uses one transaction and rolls back on failure. Continue-on-error execution commits or rolls back each operation, retains an error result at the failed operation's position, and continues. Raw Spanner all-DML stacks retain `execute_batch_dml`, and raw BigQuery stacks retain session transactions.
+Single-operation stacks, non-pipeline drivers, stacks containing `execute_many`, `execute_script`, or `execute_arrow`, and `continue_on_error=True` use adapter primitives sequentially. Fail-fast execution uses one transaction and rolls back on failure. Continue-on-error execution commits or rolls back each operation, retains an error result at the failed operation's position, and continues. Raw Spanner all-DML stacks retain `execute_batch_dml`, raw BigQuery stacks retain session transactions, and [`SyncDuckDBPipeline` / `AsyncDuckDBPipeline`](../../../../../src/py/vertebra/db/adapters/duckdb/pipeline.py)[^src-db-duckdb-pipeline-py] batch queued `execute`/`select` operations atomically with delayed commit on normal context exit or `_vtb_pipe_<n>` savepoint isolation when `driver.in_transaction` is already `True`.
 
 ## 2. Tenant Isolation (`rls.py`)
 
@@ -172,6 +178,7 @@ Store keys use `spill_prefix.rstrip("/")`: a non-empty normalized prefix yields 
 Provenance sources: [^src-tests-unit-db-test-pg-dataplane-and-datafusion-py], [^src-tests-unit-db-test-pg-gateway-py], [^src-tests-unit-extensions-test-data-storage-integrations-py].
 
 [^src-extensions-sqlspec-adapters-py]: `src/py/vertebra/extensions/sqlspec/adapters.py` — SQLSpec native pipeline dispatch and sequential stack execution.
+[^src-db-duckdb-pipeline-py]: `src/py/vertebra/db/adapters/duckdb/pipeline.py` — Delayed-commit SyncDuckDBPipeline and AsyncDuckDBPipeline with savepoint nesting.
 [^src-db-cdc-py]: `src/py/vertebra/db/cdc.py` — Python implementation module (src/py/vertebra/db/cdc.py).
 [^src-db-rls-py]: `src/py/vertebra/db/rls.py` — Python implementation module (src/py/vertebra/db/rls.py).
 [^src-db-datafusion-py]: `src/py/vertebra/db/adapters/datafusion/__init__.py` — Python implementation module (src/py/vertebra/db/adapters/datafusion/__init__.py).

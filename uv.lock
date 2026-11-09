@@ -3450,6 +3450,7 @@ all = [
     { name = "starlette" },
     { name = "vertebra-bigquery" },
     { name = "vertebra-bundler" },
+    { name = "vertebra-duckdb" },
     { name = "vertebra-spanner" },
     { name = "vertebra-storage" },
 ]
@@ -3473,6 +3474,9 @@ bundler = [
 ]
 django = [
     { name = "django" },
+]
+duckdb = [
+    { name = "vertebra-duckdb" },
 ]
 email = [
     { name = "litestar-email" },
@@ -3683,13 +3687,15 @@ requires-dist = [
     { name = "vertebra-bigquery", marker = "extra == 'bigquery'", editable = "src/rs/vertebra-bigquery" },
     { name = "vertebra-bundler", marker = "extra == 'all'", editable = "src/rs/vertebra-bundler" },
     { name = "vertebra-bundler", marker = "extra == 'bundler'", editable = "src/rs/vertebra-bundler" },
+    { name = "vertebra-duckdb", marker = "extra == 'all'", editable = "src/rs/vertebra-duckdb" },
+    { name = "vertebra-duckdb", marker = "extra == 'duckdb'", editable = "src/rs/vertebra-duckdb" },
     { name = "vertebra-spanner", marker = "extra == 'all'", editable = "src/rs/vertebra-spanner" },
     { name = "vertebra-spanner", marker = "extra == 'spanner'", editable = "src/rs/vertebra-spanner" },
     { name = "vertebra-storage", marker = "extra == 'all'", editable = "src/rs/vertebra-storage" },
     { name = "vertebra-storage", marker = "extra == 'storage'", editable = "src/rs/vertebra-storage" },
     { name = "winloop", marker = "sys_platform == 'win32'", specifier = ">=0.8.1" },
 ]
-provides-extras = ["sqlspec", "alchemy", "arrow", "pydantic", "attrs", "polars", "litestar", "starlette", "fastapi", "flask", "django", "queues", "security", "autowire", "email", "mcp", "vite", "asyncapi", "htmx", "saq", "embeddings", "bigquery", "bundler", "spanner", "storage", "rloop", "all"]
+provides-extras = ["sqlspec", "alchemy", "arrow", "pydantic", "attrs", "polars", "litestar", "starlette", "fastapi", "flask", "django", "queues", "security", "autowire", "email", "mcp", "vite", "asyncapi", "htmx", "saq", "embeddings", "bigquery", "bundler", "duckdb", "spanner", "storage", "rloop", "all"]
 
 [package.metadata.requires-dev]
 bench = [
@@ -3781,6 +3787,11 @@ test = [
     { name = "sqlspec", specifier = ">=0.69.0" },
     { name = "starlette", specifier = ">=0.40.0" },
 ]
+
+[[package]]
+name = "vertebra-duckdb"
+version = "0.3.0"
+source = { editable = "src/rs/vertebra-duckdb" }
 
 [[package]]
 name = "vertebra-spanner"
