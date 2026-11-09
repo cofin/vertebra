@@ -936,6 +936,56 @@ impl SyncOraclePool {
             .map_err(|e| e.to_py_err(py))
     }
 
+    #[pyo3(signature = (
+        *,
+        timeout=None,
+        connection_tag=None,
+        purity=None,
+        client_identifier=None,
+        module=None,
+        action=None,
+        ecid=None,
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    pub fn acquire_from_pool(
+        &self,
+        py: Python<'_>,
+        timeout: Option<f64>,
+        connection_tag: Option<String>,
+        purity: Option<String>,
+        client_identifier: Option<String>,
+        module: Option<String>,
+        action: Option<String>,
+        ecid: Option<String>,
+    ) -> PyResult<SyncOracleClient> {
+        self.acquire(
+            py,
+            timeout,
+            connection_tag,
+            purity,
+            client_identifier,
+            module,
+            action,
+            ecid,
+        )
+    }
+
+    #[pyo3(signature = (
+        client,
+        *,
+        connection_tag=None,
+        discard=false,
+    ))]
+    pub fn release_to_pool(
+        &self,
+        py: Python<'_>,
+        client: &SyncOracleClient,
+        connection_tag: Option<String>,
+        discard: bool,
+    ) -> PyResult<()> {
+        self.release(py, client, connection_tag, discard)
+    }
+
     pub fn evict(&self, py: Python<'_>, client: &SyncOracleClient) -> PyResult<()> {
         let inner = Arc::clone(&self.inner);
         let worker = Arc::clone(client.worker());
@@ -1208,6 +1258,56 @@ impl AsyncOraclePool {
             |py, err| err.to_py_err(py),
             ORACLE_COMPLETION_DRAINER_ATTR,
         )
+    }
+
+    #[pyo3(signature = (
+        *,
+        timeout=None,
+        connection_tag=None,
+        purity=None,
+        client_identifier=None,
+        module=None,
+        action=None,
+        ecid=None,
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    pub fn acquire_from_pool(
+        &self,
+        py: Python<'_>,
+        timeout: Option<f64>,
+        connection_tag: Option<String>,
+        purity: Option<String>,
+        client_identifier: Option<String>,
+        module: Option<String>,
+        action: Option<String>,
+        ecid: Option<String>,
+    ) -> PyResult<RustDbTaskAwaitable> {
+        self.acquire(
+            py,
+            timeout,
+            connection_tag,
+            purity,
+            client_identifier,
+            module,
+            action,
+            ecid,
+        )
+    }
+
+    #[pyo3(signature = (
+        client,
+        *,
+        connection_tag=None,
+        discard=false,
+    ))]
+    pub fn release_to_pool(
+        &self,
+        py: Python<'_>,
+        client: &AsyncOracleClient,
+        connection_tag: Option<String>,
+        discard: bool,
+    ) -> PyResult<RustDbTaskAwaitable> {
+        self.release(py, client, connection_tag, discard)
     }
 
     pub fn evict(&self, py: Python<'_>, client: &AsyncOracleClient) -> PyResult<RustDbTaskAwaitable> {

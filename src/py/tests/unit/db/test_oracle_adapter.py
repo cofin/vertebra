@@ -801,3 +801,133 @@ def test_oracle_pool_max_lifetime_and_idle_timeout_eviction() -> None:
     pool.close()
 
 
+@pytest.mark.anyio
+async def test_oracle_drcp_purity_validation_and_tag_matching() -> None:
+    """Verify DRCP cclass, purity (SELF vs NEW), and connection_tag matching on pool checkout."""
+    pool = _oracle.SyncOraclePool(
+        host="memory",
+        cclass="VTB_POOL",
+        purity="SELF",
+        min_size=0,
+        max_size=2,
+    )
+    c_a = pool.acquire_from_pool()
+    c_b = pool.acquire_from_pool()
+    assert c_a.cclass == "VTB_POOL"
+    assert c_a.purity == "SELF"
+    assert c_a.tag_matched is False
+    pool.release_to_pool(c_a, connection_tag="TAG_A")
+    pool.release_to_pool(c_b, connection_tag="TAG_B")
+
+    matched = pool.acquire_from_pool(connection_tag="TAG_B", purity="SELF")
+    assert matched.connection_tag == "TAG_B"
+    assert matched.tag_matched is True
+    pool.release_to_pool(matched, connection_tag="TAG_B")
+
+    fresh = pool.acquire_from_pool(connection_tag="TAG_B", purity="NEW")
+    assert fresh.purity == "NEW"
+    assert fresh.tag_matched is False
+    assert fresh.connection_tag is None
+    pool.release_to_pool(fresh)
+
+    with pytest.raises((InterfaceError, ValueError)):
+        pool.acquire(purity="BOGUS")
+    pool.close()
+
+    apool = _oracle.AsyncOraclePool(
+        host="memory",
+        cclass="VTB_ASYNC_POOL",
+        purity="SELF",
+        min_size=0,
+        max_size=2,
+    )
+    ac1 = await apool.acquire_from_pool()
+    await apool.release_to_pool(ac1, connection_tag="ASYNC_TAG")
+    ac_matched = await apool.acquire_from_pool(connection_tag="ASYNC_TAG", purity="SELF")
+    assert ac_matched.tag_matched is True
+    assert ac_matched.connection_tag == "ASYNC_TAG"
+    await apool.release_to_pool(ac_matched)
+    await apool.close()
+
+
+@pytest.mark.anyio
+async def test_oracle_ttc_piggyback_stages_on_checkout_and_flushes_on_first_query() -> None:
+    """Verify OracleSessionAttrs stages on checkout and flushes [0x11, 0x6e] on the first statement."""
+    pool = _oracle.SyncOraclePool(host="memory", min_size=0, max_size=2)
+    client = pool.acquire(
+        client_identifier="tenant-42",
+        module="billing",
+        action="invoice",
+        ecid="req-99",
+    )
+    assert client.pending_session_attrs == {
+        "client_identifier": "tenant-42",
+        "module": "billing",
+        "action": "invoice",
+        "ecid": "req-99",
+    }
+    assert client.last_piggyback_frame is None
+
+    res = client.query("SELECT SYS_CONTEXT('USERENV', 'CLIENT_IDENTIFIER') AS CID FROM DUAL")
+    assert res.rows == [("tenant-42",)]
+    assert client.pending_session_attrs is None
+    assert client.active_session_attrs == {
+        "client_identifier": "tenant-42",
+        "module": "billing",
+        "action": "invoice",
+        "ecid": "req-99",
+    }
+    frame = client.last_piggyback_frame
+    assert frame is not None
+    assert frame.startswith(b"\x11\x6e\x04")
+    pool.release(client)
+    pool.close()
+
+    apool = _oracle.AsyncOraclePool(host="memory", min_size=0, max_size=2)
+    aclient = await apool.acquire(
+        client_identifier="tenant-async",
+        module="orders",
+        action="checkout",
+        ecid="req-100",
+    )
+    assert aclient.pending_session_attrs == {
+        "client_identifier": "tenant-async",
+        "module": "orders",
+        "action": "checkout",
+        "ecid": "req-100",
+    }
+    await aclient.query("SELECT 1 FROM DUAL")
+    assert aclient.pending_session_attrs is None
+    assert aclient.active_session_attrs["client_identifier"] == "tenant-async"
+    assert aclient.last_piggyback_frame is not None
+    assert aclient.last_piggyback_frame.startswith(b"\x11\x6e\x04")
+    await apool.release(aclient)
+    await apool.close()
+
+
+def test_oracle_multiple_set_session_attrs_coalesce_before_statement() -> None:
+    """Verify multiple set_session_attrs calls coalesce into a single [0x11, 0x6e] frame before execute."""
+    client = _oracle.SyncOracleClient(host="memory")
+    client.execute("CREATE TABLE t_piggy (x NUMBER)")
+    client.set_session_attrs(client_identifier="t1", module="m1")
+    client.set_session_attrs(action="a1")
+    assert client.pending_session_attrs == {
+        "client_identifier": "t1",
+        "module": "m1",
+        "action": "a1",
+        "ecid": None,
+    }
+    client.execute("UPDATE t_piggy SET x = 1")
+    assert client.pending_session_attrs is None
+    assert client.active_session_attrs == {
+        "client_identifier": "t1",
+        "module": "m1",
+        "action": "a1",
+        "ecid": None,
+    }
+    assert client.last_piggyback_frame is not None
+    assert client.last_piggyback_frame.startswith(b"\x11\x6e\x03")
+    client.close()
+
+
+

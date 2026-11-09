@@ -3380,6 +3380,15 @@ pub(crate) fn build_raw_oracle_options(
     }
 }
 
+fn session_attrs_to_py_dict(py: Python<'_>, attrs: &OracleSessionAttrs) -> PyResult<Py<PyDict>> {
+    let dict = PyDict::new(py);
+    dict.set_item("client_identifier", attrs.client_identifier.as_deref())?;
+    dict.set_item("module", attrs.module.as_deref())?;
+    dict.set_item("action", attrs.action.as_deref())?;
+    dict.set_item("ecid", attrs.ecid.as_deref())?;
+    Ok(dict.unbind())
+}
+
 /// Synchronous physical Oracle session client (`vertebra._oracle.SyncOracleClient`).
 #[derive(Clone)]
 #[pyclass(
@@ -3529,6 +3538,65 @@ impl SyncOracleClient {
     #[getter]
     pub fn in_transaction(&self) -> bool {
         self.worker.is_in_transaction()
+    }
+
+    #[getter]
+    pub fn cclass(&self) -> Option<String> {
+        self.worker.cclass()
+    }
+
+    #[getter]
+    pub fn purity(&self) -> String {
+        self.worker.purity()
+    }
+
+    #[getter]
+    pub fn connection_tag(&self) -> Option<String> {
+        self.worker.connection_tag()
+    }
+
+    #[getter]
+    pub fn tag_matched(&self) -> bool {
+        self.worker.tag_matched()
+    }
+
+    #[getter]
+    pub fn pending_session_attrs(&self, py: Python<'_>) -> PyResult<Option<Py<PyDict>>> {
+        match self.worker.pending_session_attrs() {
+            Some(attrs) => Ok(Some(session_attrs_to_py_dict(py, &attrs)?)),
+            None => Ok(None),
+        }
+    }
+
+    #[getter]
+    pub fn active_session_attrs(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
+        let attrs = self.worker.active_session_attrs();
+        session_attrs_to_py_dict(py, &attrs)
+    }
+
+    #[getter]
+    pub fn last_piggyback_frame(&self, py: Python<'_>) -> Option<Py<PyBytes>> {
+        self.worker
+            .last_piggyback_frame()
+            .map(|bytes| PyBytes::new(py, &bytes).unbind())
+    }
+
+    #[pyo3(signature = (
+        *,
+        client_identifier=None,
+        module=None,
+        action=None,
+        ecid=None,
+    ))]
+    pub fn set_session_attrs(
+        &self,
+        client_identifier: Option<String>,
+        module: Option<String>,
+        action: Option<String>,
+        ecid: Option<String>,
+    ) {
+        self.worker
+            .stage_session_attrs(client_identifier, module, action, ecid);
     }
 
     pub fn connect(&self, py: Python<'_>) -> PyResult<()> {
@@ -3927,6 +3995,65 @@ impl AsyncOracleClient {
     #[getter]
     pub fn in_transaction(&self) -> bool {
         self.worker.is_in_transaction()
+    }
+
+    #[getter]
+    pub fn cclass(&self) -> Option<String> {
+        self.worker.cclass()
+    }
+
+    #[getter]
+    pub fn purity(&self) -> String {
+        self.worker.purity()
+    }
+
+    #[getter]
+    pub fn connection_tag(&self) -> Option<String> {
+        self.worker.connection_tag()
+    }
+
+    #[getter]
+    pub fn tag_matched(&self) -> bool {
+        self.worker.tag_matched()
+    }
+
+    #[getter]
+    pub fn pending_session_attrs(&self, py: Python<'_>) -> PyResult<Option<Py<PyDict>>> {
+        match self.worker.pending_session_attrs() {
+            Some(attrs) => Ok(Some(session_attrs_to_py_dict(py, &attrs)?)),
+            None => Ok(None),
+        }
+    }
+
+    #[getter]
+    pub fn active_session_attrs(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
+        let attrs = self.worker.active_session_attrs();
+        session_attrs_to_py_dict(py, &attrs)
+    }
+
+    #[getter]
+    pub fn last_piggyback_frame(&self, py: Python<'_>) -> Option<Py<PyBytes>> {
+        self.worker
+            .last_piggyback_frame()
+            .map(|bytes| PyBytes::new(py, &bytes).unbind())
+    }
+
+    #[pyo3(signature = (
+        *,
+        client_identifier=None,
+        module=None,
+        action=None,
+        ecid=None,
+    ))]
+    pub fn set_session_attrs(
+        &self,
+        client_identifier: Option<String>,
+        module: Option<String>,
+        action: Option<String>,
+        ecid: Option<String>,
+    ) {
+        self.worker
+            .stage_session_attrs(client_identifier, module, action, ecid);
     }
 
     pub fn connect(&self, py: Python<'_>) -> PyResult<RustDbTaskAwaitable> {

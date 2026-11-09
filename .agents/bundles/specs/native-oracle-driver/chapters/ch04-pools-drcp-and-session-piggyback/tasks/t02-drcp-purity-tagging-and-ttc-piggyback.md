@@ -6,7 +6,7 @@ id: "native-oracle-driver:ch04:t02"
 title: "Implement DRCP purity, connection tagging, and zero-extra-round-trip TTC session piggyback"
 description: "Implement DRCP cclass, purity (SELF vs NEW), and connection_tag state tracking (acquire_from_pool, release_to_pool) plus zero-extra-round-trip TTC piggyback ([0x11, 0x6e, count, ...] via vertebra_db::oracle::OracleSessionAttrs) in pool.rs, client.rs, and _oracle.pyi."
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -25,11 +25,11 @@ tests:
 estimated_loc: 220
 plan_revision: 3
 plan_commit: 769302bc
-state_revision: 0
-commit_sha: null
-completed_at: null
+state_revision: 1
+commit_sha: pending
+completed_at: "2026-11-09T16:05:00Z"
 created_at: "2026-11-09T00:58:00Z"
-updated_at: "2026-11-09T01:28:30Z"
+updated_at: "2026-11-09T16:05:00Z"
 generated:
   by: flow-plan
   at: "2026-11-09T01:15:00Z"
@@ -212,10 +212,10 @@ uv run --no-sync pytest src/py/tests/unit/db/test_oracle_adapter.py -k "drcp or 
 
 ## 7. Acceptance Criteria
 
-- [ ] `SyncOraclePool`, `AsyncOraclePool`, `SyncOracleClient`, and `AsyncOracleClient` track DRCP `cclass`, `purity` (`"SELF"` vs `"NEW"`), `connection_tag`, and `tag_matched` (`acquire_from_pool` / `release_to_pool`).
-- [ ] `set_session_attrs` and `pool.acquire(...)` stage `OracleSessionAttrs` in memory and flush `[0x11, 0x6e, count, ...]` (`CLIENT_IDENTIFIER`, `MODULE`, `ACTION`, `ECID`) on the first outbound statement with zero extra round-trips.
-- [ ] `src/py/vertebra/_oracle.pyi` declares all DRCP and piggyback properties/methods and passes `uv run --no-sync python -m mypy.stubtest vertebra._oracle`.
-- [ ] All DRCP and TTC piggyback tests in `src/py/tests/unit/db/test_oracle_adapter.py` pass.
+- [x] `SyncOraclePool`, `AsyncOraclePool`, `SyncOracleClient`, and `AsyncOracleClient` track DRCP `cclass`, `purity` (`"SELF"` vs `"NEW"`), `connection_tag`, and `tag_matched` (`acquire_from_pool` / `release_to_pool`).
+- [x] `set_session_attrs` and `pool.acquire(...)` stage `OracleSessionAttrs` in memory and flush `[0x11, 0x6e, count, ...]` (`CLIENT_IDENTIFIER`, `MODULE`, `ACTION`, `ECID`) on the first outbound statement with zero extra round-trips.
+- [x] `src/py/vertebra/_oracle.pyi` declares all DRCP and piggyback properties/methods and passes `uv run --no-sync python -m mypy.stubtest vertebra._oracle`.
+- [x] All DRCP and TTC piggyback tests in `src/py/tests/unit/db/test_oracle_adapter.py` pass.
 
 ## 8. Notes & Discoveries
 
