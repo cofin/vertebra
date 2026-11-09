@@ -13,9 +13,9 @@ depends_on_chapters:
 replan_trigger: null
 current_task: null
 plan_revision: 2
-plan_commit: fd571e3a
+plan_commit: c2b09b9b
 state_revision: 1
-last_verified_checkpoint: 616de0f2
+last_verified_checkpoint: 9a60db2c
 last_reviewed_commit: null
 created_at: "2026-11-07T00:00:00Z"
 updated_at: "2026-11-09T00:00:00Z"
@@ -259,10 +259,10 @@ def _optional_dependency_violations(
 
 ## 5. Implementation Plan
 
-- [x] [616de0f2] driver-fail-loud:ch08:t01 — `MissingDependencyError` defaults to `vertebra-core[<extra>]`; loader and Litestar plugin hints name real packages (tasks/t01-missing-dependency-hint-default.md)
-- [x] [616de0f2] driver-fail-loud:ch08:t02 — PostgreSQL, MySQL, and WASM guards name pip packages without undeclared extras; async PostgreSQL guard checks `psycopg_pool` (tasks/t02-engine-and-wasm-install-hints.md)
-- [x] [616de0f2] driver-fail-loud:ch08:t03 — `create_saq_plugin` and `create_mcp_plugin` pass `litestar-saq` / `litestar-mcp` as `package=` (tasks/t03-saq-and-mcp-package-names.md)
-- [x] [616de0f2] driver-fail-loud:ch08:t04 — litestar-queues helpers and SHM backends pass `litestar-queues`; AST gate rejects undeclared extras and malformed package literals (tasks/t04-queues-package-names-and-extras-gate.md)
+- [x] [9a60db2c] driver-fail-loud:ch08:t01 — `MissingDependencyError` defaults to `vertebra-core[<extra>]`; loader and Litestar plugin hints name real packages (tasks/t01-missing-dependency-hint-default.md)
+- [x] [9a60db2c] driver-fail-loud:ch08:t02 — PostgreSQL, MySQL, and WASM guards name pip packages without undeclared extras; async PostgreSQL guard checks `psycopg_pool` (tasks/t02-engine-and-wasm-install-hints.md)
+- [x] [9a60db2c] driver-fail-loud:ch08:t03 — `create_saq_plugin` and `create_mcp_plugin` pass `litestar-saq` / `litestar-mcp` as `package=` (tasks/t03-saq-and-mcp-package-names.md)
+- [x] [9a60db2c] driver-fail-loud:ch08:t04 — litestar-queues helpers and SHM backends pass `litestar-queues`; AST gate rejects undeclared extras and malformed package literals (tasks/t04-queues-package-names-and-extras-gate.md)
 - **Chapter Recovery Checkpoint**: `make lint && uv run --no-sync pytest src/py/tests/unit/framework/test_typing.py src/py/tests/unit/framework/test_framework_subdomains.py src/py/tests/unit/db/test_postgres_driver.py src/py/tests/unit/db/test_mysql_driver.py src/py/tests/unit/extensions/test_grpc_service.py src/py/tests/unit/build/test_packaging_and_pgo.py src/py/tests/unit/extensions/test_litestar_ecosystem_queues.py src/py/tests/unit/extensions/test_litestar_ecosystem_frontend_and_saq.py src/py/tests/unit/extensions/test_litestar_ecosystem_mcp.py -q` exits `0`.
 
 ## 6. Current State & Remaining Plan Snapshot

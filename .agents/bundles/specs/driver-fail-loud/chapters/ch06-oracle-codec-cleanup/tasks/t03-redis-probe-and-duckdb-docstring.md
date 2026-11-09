@@ -22,7 +22,7 @@ tests:
   - src/py/tests/unit/db/test_enterprise_olap_drivers.py
 estimated_loc: 5
 plan_revision: 2
-plan_commit: fd571e3a
+plan_commit: c2b09b9b
 state_revision: 1
 claimed_by: null
 claimed_at: null
@@ -30,11 +30,11 @@ blocked_reason: null
 unblock_condition: null
 next_step: null
 last_verified_at: "2026-11-09T14:32:00Z"
-last_verified_commit: 63e91e84
+last_verified_commit: ef6be9a5
 verification_evidence: "pytest test_redis_valkey_resp3.py test_enterprise_olap_drivers.py, ruff, mypy"
 created_at: "2026-11-08T00:00:00Z"
 updated_at: "2026-11-09T14:32:00Z"
-commit: 63e91e84
+commit: ef6be9a5
 sources:
   - id: redis-core
     resource: src/py/vertebra/db/adapters/redis/core.py::RedisCore.hash_slot

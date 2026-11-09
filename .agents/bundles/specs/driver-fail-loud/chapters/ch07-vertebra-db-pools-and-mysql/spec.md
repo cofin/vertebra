@@ -13,9 +13,9 @@ depends_on_chapters:
 replan_trigger: null
 current_task: null
 plan_revision: 2
-plan_commit: fd571e3a
+plan_commit: c2b09b9b
 state_revision: 1
-last_verified_checkpoint: ccd45c42
+last_verified_checkpoint: b20f9d30
 last_reviewed_commit: null
 created_at: "2026-11-08T00:00:00Z"
 updated_at: "2026-11-09T14:38:00Z"
@@ -249,10 +249,10 @@ No Python surface changes in this chapter; `_vertebra.pyi` is untouched.
 
 ## 5. Implementation Plan
 
-- [x] [ccd45c42] driver-fail-loud:ch07:t01 — Delete PostgresPool and DuckdbBrokerPool (tasks/t01-rust-postgres-duckdb-pools.md)
-- [x] [ccd45c42] driver-fail-loud:ch07:t02 — Delete SqlitePool and rmp-serde (tasks/t02-rust-sqlite-pool-and-rmp-serde.md)
-- [x] [ccd45c42] driver-fail-loud:ch07:t03 — Delete MysqlPool, MysqlPoolConfig, and OracleWalletMaterial (tasks/t03-rust-mysql-pool-and-oracle-wallet.md)
-- [x] [ccd45c42] driver-fail-loud:ch07:t04 — Delete the mysql module and sha2 and rewrite the crate doc and Cargo description (tasks/t04-rust-mysql-module-and-crate-docs.md)
+- [x] [b20f9d30] driver-fail-loud:ch07:t01 — Delete PostgresPool and DuckdbBrokerPool (tasks/t01-rust-postgres-duckdb-pools.md)
+- [x] [b20f9d30] driver-fail-loud:ch07:t02 — Delete SqlitePool and rmp-serde (tasks/t02-rust-sqlite-pool-and-rmp-serde.md)
+- [x] [b20f9d30] driver-fail-loud:ch07:t03 — Delete MysqlPool, MysqlPoolConfig, and OracleWalletMaterial (tasks/t03-rust-mysql-pool-and-oracle-wallet.md)
+- [x] [b20f9d30] driver-fail-loud:ch07:t04 — Delete the mysql module and sha2 and rewrite the crate doc and Cargo description (tasks/t04-rust-mysql-module-and-crate-docs.md)
 - **Chapter Recovery Checkpoint**: `make lint-all && make rs-test && make py-test` exits `0`.
 
 ## 6. Current State & Remaining Plan Snapshot

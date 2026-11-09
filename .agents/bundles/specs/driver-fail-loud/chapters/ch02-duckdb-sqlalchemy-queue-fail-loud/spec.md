@@ -13,9 +13,9 @@ depends_on_chapters:
 replan_trigger: null
 current_task: null
 plan_revision: 2
-plan_commit: fd571e3a
+plan_commit: c2b09b9b
 state_revision: 1
-last_verified_checkpoint: af67511d
+last_verified_checkpoint: 235425bd
 last_reviewed_commit: null
 created_at: "2026-11-07T00:00:00Z"
 updated_at: "2026-11-09T03:08:00Z"
@@ -279,10 +279,10 @@ Test guard in each module with DuckDB-executing tests: `_DUCKDB_SKIP_REASON = "d
 
 ## 5. Implementation Plan
 
-- [x] [af67511d] driver-fail-loud:ch02:t01 — `duckdb` dependency group installed on GIL interpreters by `make install`, `make py-test`, and `make coverage` (tasks/t01-duckdb-dependency-group.md)
-- [x] [af67511d] driver-fail-loud:ch02:t02 — DB-API connections raise `InterfaceError` on unparsable URLs (tasks/t02-sqlalchemy-parse-error.md)
-- [x] [af67511d] driver-fail-loud:ch02:t03 — `OracleQueueBackend` requires `oracledb` and an injected executor (tasks/t03-oracle-queue-requires-oracledb.md)
-- [x] [af67511d] driver-fail-loud:ch02:t04 — DuckDB driver requires `duckdb`; DuckDB tests skip through `pytest.importorskip` without it (tasks/t04-duckdb-requires-duckdb.md)
+- [x] [235425bd] driver-fail-loud:ch02:t01 — `duckdb` dependency group installed on GIL interpreters by `make install`, `make py-test`, and `make coverage` (tasks/t01-duckdb-dependency-group.md)
+- [x] [235425bd] driver-fail-loud:ch02:t02 — DB-API connections raise `InterfaceError` on unparsable URLs (tasks/t02-sqlalchemy-parse-error.md)
+- [x] [235425bd] driver-fail-loud:ch02:t03 — `OracleQueueBackend` requires `oracledb` and an injected executor (tasks/t03-oracle-queue-requires-oracledb.md)
+- [x] [235425bd] driver-fail-loud:ch02:t04 — DuckDB driver requires `duckdb`; DuckDB tests skip through `pytest.importorskip` without it (tasks/t04-duckdb-requires-duckdb.md)
 - **Chapter / Phase Recovery Checkpoint**: `uv run ruff check src/py/vertebra/db/adapters/duckdb/driver.py src/py/vertebra/extensions/sqlalchemy/dialects.py src/py/vertebra/framework/queues/oracle.py && uv run mypy src/py/vertebra/db/adapters/duckdb/driver.py src/py/vertebra/extensions/sqlalchemy/dialects.py src/py/vertebra/framework/queues/oracle.py && make py-test`
 
 ## 6. Current State & Remaining Plan Snapshot

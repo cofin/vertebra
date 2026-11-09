@@ -25,7 +25,7 @@ tests:
   - src/py/tests/integration/db/test_driver_conformance.py
 estimated_loc: 230
 plan_revision: 2
-plan_commit: fd571e3a
+plan_commit: c2b09b9b
 state_revision: 1
 claimed_by: null
 claimed_at: null
@@ -33,11 +33,11 @@ blocked_reason: null
 unblock_condition: null
 next_step: null
 last_verified_at: "2026-11-09T02:53:00Z"
-last_verified_commit: d7a629b1
+last_verified_commit: 06762e64
 verification_evidence: "pytest src/py/tests/unit/db/test_enterprise_olap_drivers.py src/py/tests/unit/db/test_native_db_drivers.py -q (348 passed)"
 created_at: "2026-11-07T00:00:00Z"
 updated_at: "2026-11-09T02:53:00Z"
-commit: d7a629b1
+commit: 06762e64
 sources:
   - id: oracle-driver
     resource: src/py/vertebra/db/adapters/oracle/driver.py::SyncOracleDriver

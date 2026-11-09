@@ -23,7 +23,7 @@ files:
 tests: []
 estimated_loc: 90
 plan_revision: 2
-plan_commit: fd571e3a
+plan_commit: c2b09b9b
 state_revision: 1
 claimed_by: agent:flow-executor
 claimed_at: "2026-11-09T15:14:30Z"
@@ -31,11 +31,11 @@ blocked_reason: null
 unblock_condition: null
 next_step: null
 last_verified_at: "2026-11-09T15:16:39Z"
-last_verified_commit: 3cee2a23
+last_verified_commit: adaf1243
 verification_evidence: "stale-claim grep, required-claim grep, OKF pairing check (11 sources), relative-link check, make docs, make review-check, and pytest src/py/tests/unit/tools/test_docs_tooling.py -q (28 passed)"
 created_at: "2026-11-07T00:00:00Z"
 updated_at: "2026-11-09T15:16:39Z"
-commit: 3cee2a23
+commit: adaf1243
 generated:
   by: flow/0.28.0
   at: "2026-11-07T00:00:00Z"

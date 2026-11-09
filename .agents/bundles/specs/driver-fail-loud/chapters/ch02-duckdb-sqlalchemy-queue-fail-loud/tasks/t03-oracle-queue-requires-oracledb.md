@@ -21,7 +21,7 @@ tests:
   - src/py/tests/unit/framework/test_distributed_queues.py
 estimated_loc: 230
 plan_revision: 2
-plan_commit: fd571e3a
+plan_commit: c2b09b9b
 state_revision: 1
 claimed_by: null
 claimed_at: null
@@ -29,11 +29,11 @@ blocked_reason: null
 unblock_condition: null
 next_step: null
 last_verified_at: "2026-11-09T03:08:00Z"
-last_verified_commit: af67511d
+last_verified_commit: 235425bd
 verification_evidence: "pytest test_distributed_queues.py (74 passed); ruff and mypy passed"
 created_at: "2026-11-07T00:00:00Z"
 updated_at: "2026-11-09T03:08:00Z"
-commit: af67511d
+commit: 235425bd
 sources:
   - id: oracle-queue
     resource: src/py/vertebra/framework/queues/oracle.py::OracleQueueBackend

@@ -27,7 +27,7 @@ research:
   - research/driver-restructure_20261107.md
   - research/change-surface_20261107.md
 plan_revision: 2
-plan_commit: fd571e3a
+plan_commit: c2b09b9b
 state_revision: 13
 created_at: "2026-11-07T00:00:00Z"
 updated_at: "2026-11-09T15:25:00Z"
@@ -141,7 +141,7 @@ This flow makes every unsupported path raise, deletes dead native code, corrects
 
 ### 1.2 Upstream Execution Baseline
 
-- Branch `feat/storage-updates` at `fd571e3a` (stacked immediately after [`storage-remediation`](../storage-remediation/spec.md)); parent PRD [`native-data-platform`](../native-data-platform/spec.md).
+- Branch `feat/storage-updates` at `d2b168dc` (stacked immediately after [`storage-remediation`](../../knowledge/domains/storage/object-storage.md)); parent PRD [`native-data-platform`](../native-data-platform/spec.md).
 - Runs ahead of `native-postgres-driver`, `broker-pool-sharing`, and the per-engine driver flows, which consume its baseline.
 
 ### 1.3 Code Analysis & Seam Summary
@@ -362,24 +362,24 @@ unexport PY_GIL_DISABLED PY_TEST_GROUPS
 
 ## 5. Implementation Plan
 
-- [x] [d7a629b1] ch01-oracle-mssql-fail-loud — Oracle and MSSQL drivers raise `MissingDependencyError` with no SQLite path; `AsyncMSSQLDriver` forwards `dialer` ([spec](chapters/ch01-oracle-mssql-fail-loud/spec.md))
-- [x] [af67511d] ch02-duckdb-sqlalchemy-queue-fail-loud — GIL-only `duckdb` group, DuckDB requires `duckdb`, SQLAlchemy raises `InterfaceError`, Oracle queue requires an executor ([spec](chapters/ch02-duckdb-sqlalchemy-queue-fail-loud/spec.md))
-- [x] [ea07cb21] ch03-remove-memory-fakes — PostgreSQL and MySQL drivers reject `memory://`; Redis and Valkey consumer tests move onto the `resp3_server` loopback fixture ([spec](chapters/ch03-remove-memory-fakes/spec.md))
-- [x] [20c535e3] ch04-redis-valkey-memory-removal — `RedisConfig` drops the `memory` scheme; Redis and Valkey drivers and store factories reject `memory://` ([spec](chapters/ch04-redis-valkey-memory-removal/spec.md))
-- [x] [c87687c0] ch05-mssql-codec-cleanup — MSSQL Python batch wrappers, the `encode_tds_sql_batch` binding and stub, Rust TDS framing, `MSSQL_DIALECT_TAG`, and `MssqlPool` removed; the placeholder rewriter stays ([spec](chapters/ch05-mssql-codec-cleanup/spec.md))
-- [x] [63e91e84] ch06-oracle-codec-cleanup — Rust TNS framing, `TnsPacketType`, `ORACLE_DIALECT_TAG`, and `OraclePool` removed; Oracle TNS and Redis hash-slot probes for unexported natives deleted; Oracle and DuckDB docs describe codecs ([spec](chapters/ch06-oracle-codec-cleanup/spec.md))
-- [x] [ccd45c42] ch07-vertebra-db-pools-and-mysql — PostgreSQL, DuckDB, SQLite, and MySQL pools and dialect tags, the `OracleWalletMaterial` struct, the `mysql` module, and the `sha2` / `rmp-serde` dependencies removed; crate docs describe codecs ([spec](chapters/ch07-vertebra-db-pools-and-mysql/spec.md))
-- [x] [616de0f2] ch08-install-hints-and-extras-gate — `MissingDependencyError` hints default to `vertebra-core[<extra>]`; undeclared extras and sentence-valued package names are replaced behind an AST extras gate ([spec](chapters/ch08-install-hints-and-extras-gate/spec.md))
-- [x] [cd6e5ae6] ch09-conformance-outcomes — Conformance skips a missing native module, fails under Docker only for non-pending engines, and applies strict `xfail` only when a pending engine's module imports ([spec](chapters/ch09-conformance-outcomes/spec.md))
-- [x] [f4d9361d] ch10-queue-backend-fail-loud — PostgreSQL, Redis/Valkey, and Spanner queue backends require a live executor or client ([spec](chapters/ch10-queue-backend-fail-loud/spec.md))
-- [x] [f2b328dc] ch11-docs-and-okf — Database user docs and OKF knowledge match the fail-loud baseline ([spec](chapters/ch11-docs-and-okf/spec.md))
-- [x] [3cee2a23] ch12-queue-docs-and-knowledge — Queue docs and OKF knowledge state executor-or-raise and client-or-raise rules ([spec](chapters/ch12-queue-docs-and-knowledge/spec.md))
-- [x] [5dac3083] ch13-agent-knowledge-and-embeddings-docs — Agent instructions, tech stack, test matrix, dialect knowledge, landing pages, and Oracle embedding docs match the baseline ([spec](chapters/ch13-agent-knowledge-and-embeddings-docs/spec.md))
+- [x] [06762e64] ch01-oracle-mssql-fail-loud — Oracle and MSSQL drivers raise `MissingDependencyError` with no SQLite path; `AsyncMSSQLDriver` forwards `dialer` ([spec](chapters/ch01-oracle-mssql-fail-loud/spec.md))
+- [x] [235425bd] ch02-duckdb-sqlalchemy-queue-fail-loud — GIL-only `duckdb` group, DuckDB requires `duckdb`, SQLAlchemy raises `InterfaceError`, Oracle queue requires an executor ([spec](chapters/ch02-duckdb-sqlalchemy-queue-fail-loud/spec.md))
+- [x] [b04ded81] ch03-remove-memory-fakes — PostgreSQL and MySQL drivers reject `memory://`; Redis and Valkey consumer tests move onto the `resp3_server` loopback fixture ([spec](chapters/ch03-remove-memory-fakes/spec.md))
+- [x] [1ce63eaa] ch04-redis-valkey-memory-removal — `RedisConfig` drops the `memory` scheme; Redis and Valkey drivers and store factories reject `memory://` ([spec](chapters/ch04-redis-valkey-memory-removal/spec.md))
+- [x] [9e7ad81c] ch05-mssql-codec-cleanup — MSSQL Python batch wrappers, the `encode_tds_sql_batch` binding and stub, Rust TDS framing, `MSSQL_DIALECT_TAG`, and `MssqlPool` removed; the placeholder rewriter stays ([spec](chapters/ch05-mssql-codec-cleanup/spec.md))
+- [x] [ef6be9a5] ch06-oracle-codec-cleanup — Rust TNS framing, `TnsPacketType`, `ORACLE_DIALECT_TAG`, and `OraclePool` removed; Oracle TNS and Redis hash-slot probes for unexported natives deleted; Oracle and DuckDB docs describe codecs ([spec](chapters/ch06-oracle-codec-cleanup/spec.md))
+- [x] [b20f9d30] ch07-vertebra-db-pools-and-mysql — PostgreSQL, DuckDB, SQLite, and MySQL pools and dialect tags, the `OracleWalletMaterial` struct, the `mysql` module, and the `sha2` / `rmp-serde` dependencies removed; crate docs describe codecs ([spec](chapters/ch07-vertebra-db-pools-and-mysql/spec.md))
+- [x] [9a60db2c] ch08-install-hints-and-extras-gate — `MissingDependencyError` hints default to `vertebra-core[<extra>]`; undeclared extras and sentence-valued package names are replaced behind an AST extras gate ([spec](chapters/ch08-install-hints-and-extras-gate/spec.md))
+- [x] [e75daadf] ch09-conformance-outcomes — Conformance skips a missing native module, fails under Docker only for non-pending engines, and applies strict `xfail` only when a pending engine's module imports ([spec](chapters/ch09-conformance-outcomes/spec.md))
+- [x] [186438f3] ch10-queue-backend-fail-loud — PostgreSQL, Redis/Valkey, and Spanner queue backends require a live executor or client ([spec](chapters/ch10-queue-backend-fail-loud/spec.md))
+- [x] [30bc516e] ch11-docs-and-okf — Database user docs and OKF knowledge match the fail-loud baseline ([spec](chapters/ch11-docs-and-okf/spec.md))
+- [x] [adaf1243] ch12-queue-docs-and-knowledge — Queue docs and OKF knowledge state executor-or-raise and client-or-raise rules ([spec](chapters/ch12-queue-docs-and-knowledge/spec.md))
+- [x] [5c95a733] ch13-agent-knowledge-and-embeddings-docs — Agent instructions, tech stack, test matrix, dialect knowledge, landing pages, and Oracle embedding docs match the baseline ([spec](chapters/ch13-agent-knowledge-and-embeddings-docs/spec.md))
 - **Chapter / Phase Recovery Checkpoint**: `make lint && make py-test` (ch05, ch06, and ch07 add `make rs-test`; ch11, ch12, and ch13 add `make docs`)
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline (`HEAD`)**: `5dac3083` — `13/13` chapters and `38/38` tasks completed.
+- **Verified Baseline (`HEAD`)**: `5c95a733` — `13/13` chapters and `38/38` tasks completed.
 - **Active Chapter**: None (`13/13` chapters completed).
 - **Remaining Plan**: None (`13/13` chapters completed).
 - **Documentation & OKF Sync**: `[33/33 files documented]`.

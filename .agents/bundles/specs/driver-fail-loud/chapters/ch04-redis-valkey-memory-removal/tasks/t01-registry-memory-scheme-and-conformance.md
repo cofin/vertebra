@@ -24,7 +24,7 @@ tests:
   - src/py/tests/integration/db/test_driver_conformance.py
 estimated_loc: 110
 plan_revision: 2
-plan_commit: fd571e3a
+plan_commit: c2b09b9b
 state_revision: 1
 claimed_by: agent:executor
 claimed_at: "2026-11-09T03:20:00Z"
@@ -32,11 +32,11 @@ blocked_reason: null
 unblock_condition: null
 next_step: null
 last_verified_at: "2026-11-09T03:27:00Z"
-last_verified_commit: 20c535e3
+last_verified_commit: 1ce63eaa
 verification_evidence: "pytest test_native_db_drivers.py test_redis_valkey_resp3.py test_driver_conformance.py passed; ruff and mypy exited 0"
 created_at: "2026-11-07T00:00:00Z"
 updated_at: "2026-11-09T03:27:00Z"
-commit: 20c535e3
+commit: 1ce63eaa
 sources:
   - id: redis-config
     resource: src/py/vertebra/db/adapters/redis/config.py::RedisConfig

@@ -14,9 +14,9 @@ depends_on_chapters:
 replan_trigger: null
 current_task: null
 plan_revision: 2
-plan_commit: fd571e3a
+plan_commit: c2b09b9b
 state_revision: 1
-last_verified_checkpoint: f4d9361d
+last_verified_checkpoint: 186438f3
 last_reviewed_commit: null
 created_at: "2026-11-08T00:00:00Z"
 updated_at: "2026-11-09T15:00:30Z"
@@ -297,9 +297,9 @@ Accepted Spanner schemes: `""`, `spanner`, `spanner+googlesql`, `spangres`, `spa
 
 ## 5. Implementation Plan
 
-- [x] [f4d9361d] driver-fail-loud:ch10:t01 — `PostgreSQLQueueBackend` requires `psycopg` and an injected executor (tasks/t01-postgres-queue-requires-executor.md)
-- [x] [f4d9361d] driver-fail-loud:ch10:t02 — `RedisQueueBackend` binds a live `redis.asyncio` client or raises (tasks/t02-redis-queue-requires-live-client.md)
-- [x] [f4d9361d] driver-fail-loud:ch10:t03 — `SpannerQueueBackend` requires the Spanner extension and an injected executor; `QueueConfig` docstring names every backend (tasks/t03-spanner-queue-requires-executor.md)
+- [x] [186438f3] driver-fail-loud:ch10:t01 — `PostgreSQLQueueBackend` requires `psycopg` and an injected executor (tasks/t01-postgres-queue-requires-executor.md)
+- [x] [186438f3] driver-fail-loud:ch10:t02 — `RedisQueueBackend` binds a live `redis.asyncio` client or raises (tasks/t02-redis-queue-requires-live-client.md)
+- [x] [186438f3] driver-fail-loud:ch10:t03 — `SpannerQueueBackend` requires the Spanner extension and an injected executor; `QueueConfig` docstring names every backend (tasks/t03-spanner-queue-requires-executor.md)
 - **Size counting rule**: `estimated_loc` on every task in this chapter counts net-new lines only. Each fake class (`_InMemoryPostgreSQLQueueExecutor`, `_InMemoryRedisStreamClient`, `_InMemorySpannerQueueExecutor`, roughly 210–220 lines each) moves verbatim from its production module into the queue test module and is not counted; the moved body keeps its methods unchanged and takes a test-side name and docstring.
 - **Chapter / Phase Recovery Checkpoint**: `uv run ruff check src/py/vertebra/framework/queues/ src/py/tests/unit/framework/test_distributed_queues.py src/py/tests/unit/framework/test_email_providers.py src/py/tests/unit/db/test_spanner_queue_and_cdc.py && uv run mypy src/py/vertebra/framework/queues/postgres.py src/py/vertebra/framework/queues/redis.py src/py/vertebra/framework/queues/spanner.py src/py/vertebra/framework/queues/base.py && make py-test`
 

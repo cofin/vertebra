@@ -14,9 +14,9 @@ depends_on_chapters:
 replan_trigger: null
 current_task: null
 plan_revision: 2
-plan_commit: fd571e3a
+plan_commit: c2b09b9b
 state_revision: 1
-last_verified_checkpoint: 3cee2a23
+last_verified_checkpoint: adaf1243
 last_reviewed_commit: null
 created_at: "2026-11-07T00:00:00Z"
 updated_at: "2026-11-09T15:16:39Z"
@@ -197,7 +197,7 @@ Error contract quoted in docs (from ch02 t03 and ch10):[^ch02-oracle-contract][^
 
 ## 5. Implementation Plan
 
-- [x] [3cee2a23] driver-fail-loud:ch12:t01 — Queue usage guide, queue reference, and OKF queues chapter state executor/client requirements and drop unshipped mechanics (tasks/t01-queue-docs-and-knowledge.md)
+- [x] [adaf1243] driver-fail-loud:ch12:t01 — Queue usage guide, queue reference, and OKF queues chapter state executor/client requirements and drop unshipped mechanics (tasks/t01-queue-docs-and-knowledge.md)
 - **Chapter / Phase Recovery Checkpoint**: `make review-check && make docs && uv run --no-sync pytest src/py/tests/unit/tools/test_docs_tooling.py -q`
 
 ## 6. Current State & Remaining Plan Snapshot

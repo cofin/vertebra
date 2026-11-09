@@ -24,7 +24,7 @@ files:
 tests: []
 estimated_loc: 50
 plan_revision: 2
-plan_commit: fd571e3a
+plan_commit: c2b09b9b
 state_revision: 1
 claimed_by: agent:flow-executor
 claimed_at: "2026-11-09T15:09:00Z"
@@ -32,11 +32,11 @@ blocked_reason: null
 unblock_condition: null
 next_step: null
 last_verified_at: "2026-11-09T15:11:12Z"
-last_verified_commit: f2b328dc
+last_verified_commit: 30bc516e
 verification_evidence: "OKF provenance pairing check, stale-claim grep, relative-link check, and tools.scripts.review_setup validate"
 created_at: "2026-11-07T00:00:00Z"
 updated_at: "2026-11-09T15:11:12Z"
-commit: f2b328dc
+commit: 30bc516e
 sources:
   - id: okf-tenancy
     resource: .agents/bundles/knowledge/domains/data/query-pipeline-cdc-and-tenancy.md

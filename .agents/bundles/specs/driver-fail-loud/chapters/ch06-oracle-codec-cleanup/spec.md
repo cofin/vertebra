@@ -13,9 +13,9 @@ depends_on_chapters:
 replan_trigger: null
 current_task: null
 plan_revision: 2
-plan_commit: fd571e3a
+plan_commit: c2b09b9b
 state_revision: 1
-last_verified_checkpoint: 63e91e84
+last_verified_checkpoint: ef6be9a5
 last_reviewed_commit: null
 created_at: "2026-11-08T00:00:00Z"
 updated_at: "2026-11-09T14:32:00Z"
@@ -210,9 +210,9 @@ class RedisCore:
 
 ## 5. Implementation Plan
 
-- [x] [63e91e84] driver-fail-loud:ch06:t01 — Reduce the Rust oracle module to TTC, VECTOR, and OSON codecs (tasks/t01-rust-oracle-codecs-only.md)
-- [x] [63e91e84] driver-fail-loud:ch06:t02 — Remove Oracle TNS probes and rewrite Oracle adapter docstrings (tasks/t02-oracle-python-cleanup.md)
-- [x] [63e91e84] driver-fail-loud:ch06:t03 — Remove the redis_hash_slot_native probe and rewrite the DuckDB package docstring (tasks/t03-redis-probe-and-duckdb-docstring.md)
+- [x] [ef6be9a5] driver-fail-loud:ch06:t01 — Reduce the Rust oracle module to TTC, VECTOR, and OSON codecs (tasks/t01-rust-oracle-codecs-only.md)
+- [x] [ef6be9a5] driver-fail-loud:ch06:t02 — Remove Oracle TNS probes and rewrite Oracle adapter docstrings (tasks/t02-oracle-python-cleanup.md)
+- [x] [ef6be9a5] driver-fail-loud:ch06:t03 — Remove the redis_hash_slot_native probe and rewrite the DuckDB package docstring (tasks/t03-redis-probe-and-duckdb-docstring.md)
 - **Chapter Recovery Checkpoint**: `make lint-all && make rs-test && make py-test` exits `0`.
 
 ## 6. Current State & Remaining Plan Snapshot

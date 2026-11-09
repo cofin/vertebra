@@ -24,7 +24,7 @@ tests:
   - src/py/tests/unit/db/test_enterprise_olap_drivers.py
 estimated_loc: 165
 plan_revision: 2
-plan_commit: fd571e3a
+plan_commit: c2b09b9b
 state_revision: 1
 claimed_by: driver-fail-loud-engineer
 claimed_at: "2026-11-09T03:05:00Z"
@@ -32,11 +32,11 @@ blocked_reason: null
 unblock_condition: null
 next_step: null
 last_verified_at: "2026-11-09T03:19:43Z"
-last_verified_commit: ea07cb21
+last_verified_commit: b04ded81
 verification_evidence: "pytest test_native_db_drivers.py test_postgres_driver.py test_pg_dataplane_and_datafusion.py test_sqlalchemy_and_sqlspec_vtb.py test_enterprise_olap_drivers.py passed; ruff + mypy + review_setup validate exited 0"
 created_at: "2026-11-07T00:00:00Z"
 updated_at: "2026-11-09T03:19:43Z"
-commit: ea07cb21
+commit: b04ded81
 sources:
   - id: pg-driver
     resource: src/py/vertebra/db/adapters/postgres/driver.py::SyncPostgreSQLDriver

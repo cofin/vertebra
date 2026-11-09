@@ -24,7 +24,7 @@ tests:
   - src/py/tests/unit/extensions/test_litestar_ecosystem_mcp.py
 estimated_loc: 30
 plan_revision: 2
-plan_commit: fd571e3a
+plan_commit: c2b09b9b
 state_revision: 1
 claimed_by: null
 claimed_at: null
@@ -32,11 +32,11 @@ blocked_reason: null
 unblock_condition: null
 next_step: null
 last_verified_at: "2026-11-09T00:00:00Z"
-last_verified_commit: 616de0f2
+last_verified_commit: 9a60db2c
 verification_evidence: "pytest test_litestar_ecosystem_frontend_and_saq.py test_litestar_ecosystem_mcp.py passed"
 created_at: "2026-11-07T00:00:00Z"
 updated_at: "2026-11-09T00:00:00Z"
-commit: 616de0f2
+commit: 9a60db2c
 sources:
   - id: saq-plugin
     resource: src/py/vertebra/extensions/litestar/saq/plugin.py::create_saq_plugin

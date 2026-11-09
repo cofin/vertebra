@@ -21,7 +21,7 @@ files:
 tests: []
 estimated_loc: 30
 plan_revision: 2
-plan_commit: fd571e3a
+plan_commit: c2b09b9b
 state_revision: 1
 claimed_by: null
 claimed_at: null
@@ -29,11 +29,11 @@ blocked_reason: null
 unblock_condition: null
 next_step: null
 last_verified_at: "2026-11-09T03:08:00Z"
-last_verified_commit: af67511d
+last_verified_commit: 235425bd
 verification_evidence: "uv lock --check; make -n py-test / coverage / help probe checks passed"
 created_at: "2026-11-07T00:00:00Z"
 updated_at: "2026-11-09T03:08:00Z"
-commit: af67511d
+commit: 235425bd
 sources:
   - id: dep-groups
     resource: pyproject.toml::dependency-groups

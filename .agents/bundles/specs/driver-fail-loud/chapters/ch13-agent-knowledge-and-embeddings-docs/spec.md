@@ -14,9 +14,9 @@ depends_on_chapters:
 replan_trigger: null
 current_task: null
 plan_revision: 2
-plan_commit: fd571e3a
+plan_commit: c2b09b9b
 state_revision: 1
-last_verified_checkpoint: 5dac3083
+last_verified_checkpoint: 5c95a733
 last_reviewed_commit: null
 created_at: "2026-11-08T00:00:00Z"
 updated_at: "2026-11-09T15:25:00Z"
@@ -253,10 +253,10 @@ Facts used across all files (executors adapt sentence structure, not facts):
 
 ## 5. Implementation Plan
 
-- [x] [5dac3083] driver-fail-loud:ch13:t01 — AGENTS.md, workflow, and benchmark knowledge state the GIL-only DuckDB group and install command (tasks/t01-duckdb-group-agent-workflow.md)
-- [x] [5dac3083] driver-fail-loud:ch13:t02 — Tech stack and test matrix state vertebra-db deps, the DuckDB group, the importorskip rule, and resp3_server (tasks/t02-tech-stack-and-test-matrix.md)
-- [x] [5dac3083] driver-fail-loud:ch13:t03 — Dialect knowledge, domain index, and home page state InterfaceError and pending Oracle/SQL Server drivers (tasks/t03-dialect-knowledge-and-landing-pages.md)
-- [x] [5dac3083] driver-fail-loud:ch13:t04 — Embeddings guide, usage index, and OKF embeddings chapter state the Oracle pushdown requirement (tasks/t04-oracle-embedding-pushdown-docs.md)
+- [x] [5c95a733] driver-fail-loud:ch13:t01 — AGENTS.md, workflow, and benchmark knowledge state the GIL-only DuckDB group and install command (tasks/t01-duckdb-group-agent-workflow.md)
+- [x] [5c95a733] driver-fail-loud:ch13:t02 — Tech stack and test matrix state vertebra-db deps, the DuckDB group, the importorskip rule, and resp3_server (tasks/t02-tech-stack-and-test-matrix.md)
+- [x] [5c95a733] driver-fail-loud:ch13:t03 — Dialect knowledge, domain index, and home page state InterfaceError and pending Oracle/SQL Server drivers (tasks/t03-dialect-knowledge-and-landing-pages.md)
+- [x] [5c95a733] driver-fail-loud:ch13:t04 — Embeddings guide, usage index, and OKF embeddings chapter state the Oracle pushdown requirement (tasks/t04-oracle-embedding-pushdown-docs.md)
 - **Chapter / Phase Recovery Checkpoint**: `make review-check && make docs && uv run --no-sync pytest src/py/tests/unit/tools/test_docs_tooling.py -q`
 
 ## 6. Current State & Remaining Plan Snapshot

@@ -21,7 +21,7 @@ tests:
   - src/py/tests/unit/framework/test_distributed_queues.py
 estimated_loc: 230
 plan_revision: 2
-plan_commit: fd571e3a
+plan_commit: c2b09b9b
 state_revision: 1
 claimed_by: null
 claimed_at: null
@@ -29,11 +29,11 @@ blocked_reason: null
 unblock_condition: null
 next_step: null
 last_verified_at: "2026-11-09T15:00:30Z"
-last_verified_commit: f4d9361d
+last_verified_commit: 186438f3
 verification_evidence: "pytest src/py/tests/unit/framework/test_distributed_queues.py -q passed; ruff and mypy clean"
 created_at: "2026-11-08T00:00:00Z"
 updated_at: "2026-11-09T15:00:30Z"
-commit: f4d9361d
+commit: 186438f3
 sources:
   - id: pg-queue
     resource: src/py/vertebra/framework/queues/postgres.py::PostgreSQLQueueBackend

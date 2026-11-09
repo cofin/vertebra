@@ -10,7 +10,7 @@ generated:
 verified:
   - by: agent:flow-executor
     at: "2026-11-09T15:21:00Z"
-    commit: 5dac3083
+    commit: 5c95a733
   - by: agent:docs-okf-specialist
     at: "2026-11-08T14:48:48Z"
     commit: 43a61a56

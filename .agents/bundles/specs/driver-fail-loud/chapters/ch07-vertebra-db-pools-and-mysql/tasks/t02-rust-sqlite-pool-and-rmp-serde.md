@@ -23,7 +23,7 @@ tests:
   - src/rs/vertebra-db/src/sqlite/mod.rs
 estimated_loc: 145
 plan_revision: 2
-plan_commit: fd571e3a
+plan_commit: c2b09b9b
 state_revision: 1
 claimed_by: null
 claimed_at: null
@@ -31,11 +31,11 @@ blocked_reason: null
 unblock_condition: null
 next_step: null
 last_verified_at: "2026-11-09T14:38:00Z"
-last_verified_commit: ccd45c42
+last_verified_commit: b20f9d30
 verification_evidence: "cargo test -p vertebra-db --features gcp and cargo check --workspace --locked passed"
 created_at: "2026-11-07T00:00:00Z"
 updated_at: "2026-11-09T14:38:00Z"
-commit: ccd45c42
+commit: b20f9d30
 sources:
   - id: sqlite-rs
     resource: src/rs/vertebra-db/src/sqlite/mod.rs::SqlitePool

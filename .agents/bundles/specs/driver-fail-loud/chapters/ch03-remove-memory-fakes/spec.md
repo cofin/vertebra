@@ -14,9 +14,9 @@ depends_on_chapters:
 replan_trigger: null
 current_task: null
 plan_revision: 2
-plan_commit: fd571e3a
+plan_commit: c2b09b9b
 state_revision: 1
-last_verified_checkpoint: ea07cb21
+last_verified_checkpoint: b04ded81
 last_reviewed_commit: null
 created_at: "2026-11-07T00:00:00Z"
 updated_at: "2026-11-09T03:19:43Z"
@@ -232,9 +232,9 @@ def resp3_server() -> Iterator[Resp3FakeServer]:
 
 ## 5. Implementation Plan
 
-- [x] [ea07cb21] driver-fail-loud:ch03:t01 — PostgreSQL and MySQL drivers reject memory:// and lose in-memory rows ([tasks/t01-postgres-mysql-memory-removal.md](tasks/t01-postgres-mysql-memory-removal.md))
-- [x] [ea07cb21] driver-fail-loud:ch03:t02 — Loopback RESP3 fixture core and key-value driver tests over the wire ([tasks/t02-resp3-fixture-core-and-key-value-retarget.md](tasks/t02-resp3-fixture-core-and-key-value-retarget.md))
-- [x] [ea07cb21] driver-fail-loud:ch03:t03 — Loopback RESP3 pub/sub and scripting surface and consumer tests over the wire ([tasks/t03-resp3-pubsub-scripting-and-consumer-retarget.md](tasks/t03-resp3-pubsub-scripting-and-consumer-retarget.md))
+- [x] [b04ded81] driver-fail-loud:ch03:t01 — PostgreSQL and MySQL drivers reject memory:// and lose in-memory rows ([tasks/t01-postgres-mysql-memory-removal.md](tasks/t01-postgres-mysql-memory-removal.md))
+- [x] [b04ded81] driver-fail-loud:ch03:t02 — Loopback RESP3 fixture core and key-value driver tests over the wire ([tasks/t02-resp3-fixture-core-and-key-value-retarget.md](tasks/t02-resp3-fixture-core-and-key-value-retarget.md))
+- [x] [b04ded81] driver-fail-loud:ch03:t03 — Loopback RESP3 pub/sub and scripting surface and consumer tests over the wire ([tasks/t03-resp3-pubsub-scripting-and-consumer-retarget.md](tasks/t03-resp3-pubsub-scripting-and-consumer-retarget.md))
 - **Chapter Recovery Checkpoint**: `uv run --no-sync pytest src/py/tests/unit/db/test_native_db_drivers.py src/py/tests/unit/db/test_postgres_driver.py src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py src/py/tests/unit/db/test_enterprise_olap_drivers.py src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py src/py/tests/unit/db/test_redis_valkey_driver.py src/py/tests/unit/db/test_redis_valkey_resp3.py src/py/tests/unit/extensions/test_alchemy_cache_backend.py src/py/tests/unit/extensions/test_starlette_plugin.py src/py/tests/unit/framework/test_framework_subdomains.py -q && make lint` exits `0`.
 
 ## 6. Current State & Remaining Plan Snapshot

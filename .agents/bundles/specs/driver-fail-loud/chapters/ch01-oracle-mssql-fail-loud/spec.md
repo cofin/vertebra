@@ -12,9 +12,9 @@ depends_on_chapters: []
 replan_trigger: null
 current_task: null
 plan_revision: 2
-plan_commit: fd571e3a
+plan_commit: c2b09b9b
 state_revision: 1
-last_verified_checkpoint: d7a629b1
+last_verified_checkpoint: 06762e64
 last_reviewed_commit: null
 created_at: "2026-11-07T00:00:00Z"
 updated_at: "2026-11-09T02:53:00Z"
@@ -248,8 +248,8 @@ Deleted symbols: `SyncOracleDriver.{_conn, _in_transaction, _session_context, _p
 
 ## 5. Implementation Plan
 
-- [x] [d7a629b1] driver-fail-loud:ch01:t01 — Oracle drivers resolve `vertebra._oracle` on every entry point with the SQLite stand-in and `normalize_sql` deleted (tasks/t01-oracle-native-guard.md)
-- [x] [d7a629b1] driver-fail-loud:ch01:t02 — MSSQL drivers resolve `vertebra._mssql` on every entry point, `normalize_for_sqlite` deleted, and `AsyncMSSQLDriver` forwards its sync dialer (tasks/t02-mssql-native-guard.md)
+- [x] [06762e64] driver-fail-loud:ch01:t01 — Oracle drivers resolve `vertebra._oracle` on every entry point with the SQLite stand-in and `normalize_sql` deleted (tasks/t01-oracle-native-guard.md)
+- [x] [06762e64] driver-fail-loud:ch01:t02 — MSSQL drivers resolve `vertebra._mssql` on every entry point, `normalize_for_sqlite` deleted, and `AsyncMSSQLDriver` forwards its sync dialer (tasks/t02-mssql-native-guard.md)
 - **Chapter Recovery Checkpoint**: `uv run --no-sync pytest src/py/tests/unit/db/test_enterprise_olap_drivers.py src/py/tests/unit/db/test_native_db_drivers.py src/py/tests/unit/db/test_pg_gateway.py src/py/tests/unit/extensions/test_django_plugin.py "src/py/tests/integration/db/test_driver_conformance.py::test_engine_driver_resolution_and_provide_driver" -q && uv run --no-sync ruff check src/py/vertebra/db/adapters/oracle src/py/vertebra/db/adapters/mssql && uv run --no-sync mypy src/py/vertebra/db/adapters/oracle src/py/vertebra/db/adapters/mssql` exits `0`.
 
 ## 6. Current State & Remaining Plan Snapshot

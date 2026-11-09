@@ -22,7 +22,7 @@ tests:
   - src/py/tests/unit/db/test_enterprise_olap_drivers.py
 estimated_loc: 55
 plan_revision: 2
-plan_commit: fd571e3a
+plan_commit: c2b09b9b
 state_revision: 1
 claimed_by: null
 claimed_at: null
@@ -30,11 +30,11 @@ blocked_reason: null
 unblock_condition: null
 next_step: null
 last_verified_at: "2026-11-09T03:35:00Z"
-last_verified_commit: c87687c0
+last_verified_commit: 9e7ad81c
 verification_evidence: "pytest test_enterprise_olap_drivers.py (90 passed), ruff, mypy, stubtest"
 created_at: "2026-11-07T00:00:00Z"
 updated_at: "2026-11-09T03:35:00Z"
-commit: c87687c0
+commit: 9e7ad81c
 sources:
   - id: mssql-core
     resource: src/py/vertebra/db/adapters/mssql/core.py::MSSQLCore

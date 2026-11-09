@@ -21,7 +21,7 @@ tests:
   - src/rs/vertebra-db/src/mssql/mod.rs
 estimated_loc: 225
 plan_revision: 2
-plan_commit: fd571e3a
+plan_commit: c2b09b9b
 state_revision: 1
 claimed_by: null
 claimed_at: null
@@ -29,11 +29,11 @@ blocked_reason: null
 unblock_condition: null
 next_step: null
 last_verified_at: "2026-11-09T03:35:00Z"
-last_verified_commit: c87687c0
+last_verified_commit: 9e7ad81c
 verification_evidence: "cargo test -p vertebra-db --lib mssql:: (1 passed)"
 created_at: "2026-11-07T00:00:00Z"
 updated_at: "2026-11-09T03:35:00Z"
-commit: c87687c0
+commit: 9e7ad81c
 sources:
   - id: mssql-rs
     resource: src/rs/vertebra-db/src/mssql/mod.rs::rewrite_mssql_placeholders

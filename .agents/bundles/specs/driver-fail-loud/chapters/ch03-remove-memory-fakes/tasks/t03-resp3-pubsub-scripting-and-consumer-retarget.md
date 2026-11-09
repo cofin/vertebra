@@ -26,7 +26,7 @@ tests:
   - src/py/tests/unit/extensions/test_starlette_plugin.py
 estimated_loc: 125
 plan_revision: 2
-plan_commit: fd571e3a
+plan_commit: c2b09b9b
 state_revision: 1
 claimed_by: driver-fail-loud-engineer
 claimed_at: "2026-11-09T03:12:00Z"
@@ -34,11 +34,11 @@ blocked_reason: null
 unblock_condition: null
 next_step: null
 last_verified_at: "2026-11-09T03:19:43Z"
-last_verified_commit: ea07cb21
+last_verified_commit: b04ded81
 verification_evidence: "pytest test_redis_valkey_driver.py test_alchemy_cache_backend.py test_framework_subdomains.py test_starlette_plugin.py passed; ruff + mypy + review_setup validate exited 0"
 created_at: "2026-11-08T00:00:00Z"
 updated_at: "2026-11-09T03:19:43Z"
-commit: ea07cb21
+commit: b04ded81
 sources:
   - id: redis-driver
     resource: src/py/vertebra/db/adapters/redis/driver.py::SyncRedisDriver

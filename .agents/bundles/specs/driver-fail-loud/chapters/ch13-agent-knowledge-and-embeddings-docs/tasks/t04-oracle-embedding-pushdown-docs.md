@@ -23,7 +23,7 @@ files:
 tests: []
 estimated_loc: 25
 plan_revision: 2
-plan_commit: fd571e3a
+plan_commit: c2b09b9b
 state_revision: 1
 claimed_by: null
 claimed_at: null
@@ -31,11 +31,11 @@ blocked_reason: null
 unblock_condition: null
 next_step: null
 last_verified_at: "2026-11-09T15:25:00Z"
-last_verified_commit: 5dac3083
+last_verified_commit: 5c95a733
 verification_evidence: "grepok, okf provenance ok, relative-links ok, make docs ok, review_setup validate ok, pytest test_docs_tooling.py 28 passed"
 created_at: "2026-11-08T00:00:00Z"
 updated_at: "2026-11-09T15:25:00Z"
-commit: 5dac3083
+commit: 5c95a733
 sources:
   - id: docs-embeddings
     resource: docs/usage/embeddings-and-vectors.md

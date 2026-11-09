@@ -21,9 +21,9 @@ depends_on_chapters:
 replan_trigger: null
 current_task: null
 plan_revision: 2
-plan_commit: fd571e3a
+plan_commit: c2b09b9b
 state_revision: 1
-last_verified_checkpoint: f2b328dc
+last_verified_checkpoint: 30bc516e
 last_reviewed_commit: null
 created_at: "2026-11-07T00:00:00Z"
 updated_at: "2026-11-09T15:11:12Z"
@@ -221,10 +221,10 @@ Install-hint contract quoted in OKF only: `MissingDependencyError(package, *, in
 
 ## 5. Implementation Plan
 
-- [x] [f2b328dc] driver-fail-loud:ch11:t01 — README, databases guide, and extensions guide state engine status, DuckDB requirement, and memory:// scope (tasks/t01-user-guides.md)
-- [x] [f2b328dc] driver-fail-loud:ch11:t02 — Reference pages and analytics guide drop stand-in and TDS claims (tasks/t02-reference-and-analytics-docs.md)
-- [x] [f2b328dc] driver-fail-loud:ch11:t03 — OKF drivers chapter and test matrix describe status, codecs, install hints, and conformance outcomes (tasks/t03-driver-and-conformance-knowledge.md)
-- [x] [f2b328dc] driver-fail-loud:ch11:t04 — OKF tenancy, product, and ADR-002 chapters drop stand-in and deleted exports (tasks/t04-tenancy-product-and-adr-knowledge.md)
+- [x] [30bc516e] driver-fail-loud:ch11:t01 — README, databases guide, and extensions guide state engine status, DuckDB requirement, and memory:// scope (tasks/t01-user-guides.md)
+- [x] [30bc516e] driver-fail-loud:ch11:t02 — Reference pages and analytics guide drop stand-in and TDS claims (tasks/t02-reference-and-analytics-docs.md)
+- [x] [30bc516e] driver-fail-loud:ch11:t03 — OKF drivers chapter and test matrix describe status, codecs, install hints, and conformance outcomes (tasks/t03-driver-and-conformance-knowledge.md)
+- [x] [30bc516e] driver-fail-loud:ch11:t04 — OKF tenancy, product, and ADR-002 chapters drop stand-in and deleted exports (tasks/t04-tenancy-product-and-adr-knowledge.md)
 - **Chapter / Phase Recovery Checkpoint**: `make review-check && make docs-check && uv run --no-sync pytest src/py/tests/unit/tools/test_docs_tooling.py -q`
 
 ## 6. Current State & Remaining Plan Snapshot

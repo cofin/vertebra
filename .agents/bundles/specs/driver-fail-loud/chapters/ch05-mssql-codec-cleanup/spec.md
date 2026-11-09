@@ -13,9 +13,9 @@ depends_on_chapters:
 replan_trigger: null
 current_task: null
 plan_revision: 2
-plan_commit: fd571e3a
+plan_commit: c2b09b9b
 state_revision: 1
-last_verified_checkpoint: c87687c0
+last_verified_checkpoint: 9e7ad81c
 last_reviewed_commit: null
 created_at: "2026-11-07T00:00:00Z"
 updated_at: "2026-11-09T03:35:00Z"
@@ -193,9 +193,9 @@ class MSSQLCore:
 
 ## 5. Implementation Plan
 
-- [x] [c87687c0] driver-fail-loud:ch05:t01 — Remove the MSSQL Python batch wrappers and encode_tds_packet probe (tasks/t01-mssql-python-batch-wrappers.md)
-- [x] [c87687c0] driver-fail-loud:ch05:t02 — Remove the encode_tds_sql_batch binding and stub (tasks/t02-tds-batch-binding-and-stub.md)
-- [x] [c87687c0] driver-fail-loud:ch05:t03 — Reduce the Rust mssql module to the placeholder rewriter (tasks/t03-rust-mssql-rewriter-only.md)
+- [x] [9e7ad81c] driver-fail-loud:ch05:t01 — Remove the MSSQL Python batch wrappers and encode_tds_packet probe (tasks/t01-mssql-python-batch-wrappers.md)
+- [x] [9e7ad81c] driver-fail-loud:ch05:t02 — Remove the encode_tds_sql_batch binding and stub (tasks/t02-tds-batch-binding-and-stub.md)
+- [x] [9e7ad81c] driver-fail-loud:ch05:t03 — Reduce the Rust mssql module to the placeholder rewriter (tasks/t03-rust-mssql-rewriter-only.md)
 - **Chapter Recovery Checkpoint**: `make lint-all && make rs-test && make py-test` exits `0`.
 
 ## 6. Current State & Remaining Plan Snapshot

@@ -13,9 +13,9 @@ depends_on_chapters:
 replan_trigger: null
 current_task: null
 plan_revision: 2
-plan_commit: fd571e3a
+plan_commit: c2b09b9b
 state_revision: 1
-last_verified_checkpoint: 20c535e3
+last_verified_checkpoint: 1ce63eaa
 last_reviewed_commit: null
 created_at: "2026-11-08T00:00:00Z"
 updated_at: "2026-11-09T03:27:00Z"
@@ -215,8 +215,8 @@ def _resolve_cache_config(cache_spec: CacheConformanceSpec, request: pytest.Fixt
 
 ## 5. Implementation Plan
 
-- [x] [20c535e3] driver-fail-loud:ch04:t01 — Registry drops memory scheme; remaining cache tests use the fixture or live servers ([tasks/t01-registry-memory-scheme-and-conformance.md](tasks/t01-registry-memory-scheme-and-conformance.md))
-- [x] [20c535e3] driver-fail-loud:ch04:t02 — Redis and Valkey drivers delete memory execution and reject memory:// ([tasks/t02-redis-valkey-memory-removal.md](tasks/t02-redis-valkey-memory-removal.md))
+- [x] [1ce63eaa] driver-fail-loud:ch04:t01 — Registry drops memory scheme; remaining cache tests use the fixture or live servers ([tasks/t01-registry-memory-scheme-and-conformance.md](tasks/t01-registry-memory-scheme-and-conformance.md))
+- [x] [1ce63eaa] driver-fail-loud:ch04:t02 — Redis and Valkey drivers delete memory execution and reject memory:// ([tasks/t02-redis-valkey-memory-removal.md](tasks/t02-redis-valkey-memory-removal.md))
 - **Chapter Recovery Checkpoint**: `uv run --no-sync pytest src/py/tests/unit/db/test_native_db_drivers.py src/py/tests/unit/db/test_redis_valkey_driver.py src/py/tests/unit/db/test_redis_valkey_resp3.py src/py/tests/unit/extensions/test_alchemy_cache_backend.py src/py/tests/unit/extensions/test_starlette_plugin.py src/py/tests/unit/framework/test_framework_subdomains.py src/py/tests/integration/db/test_driver_conformance.py -q && make lint` exits `0`.
 
 ## 6. Current State & Remaining Plan Snapshot
