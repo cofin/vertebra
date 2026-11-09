@@ -5,7 +5,7 @@ chapter_id: ch05-framework-adapters-and-test-hygiene
 title: Enforce clean-break vertebra.extensions.django storage exports, stream DjangoStorage.save, and remove _store.py shims
 description: Drop vertebra.storage config/store re-exports from extensions/django/storage.py and __init__.py, stream multi-chunk files and avoid redundant bytes copies in DjangoStorage.save, and delete open_readable_file and _get_native_module from storage/_store.py.
 status: stable
-state: in_progress
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -28,22 +28,25 @@ tests:
 estimated_loc: 120
 plan_revision: 1
 plan_commit: fd571e3a
-state_revision: 1
+state_revision: 2
 claimed_by: executor
 claimed_at: "2026-11-09T01:19:30Z"
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-09T01:26:10Z"
+last_verified_commit: a04970be
+verification_evidence: "pytest src/py/tests/unit/storage + extensions (954 passed); ruff check/format and mypy (402 files) clean"
 created_at: "2026-11-08T20:55:00Z"
-updated_at: "2026-11-09T01:19:30Z"
-commit: null
+updated_at: "2026-11-09T01:26:10Z"
+commit: a04970be
 generated:
   by: flow/0.28.0
   at: "2026-11-08T20:55:00Z"
-verified: []
+verified:
+  - by: executor
+    at: "2026-11-09T01:26:10Z"
+    commit: a04970be
 sources:
   - id: py-django-storage
     resource: src/py/vertebra/extensions/django/storage.py::DjangoStorage
@@ -111,8 +114,8 @@ uv run --no-sync pytest src/py/tests/unit/extensions/test_django_plugin.py src/p
 
 ## Acceptance Criteria
 
-- [ ] `extensions/django` exports `DjangoStorage` cleanly without duplicating `vertebra.storage`, and `DjangoStorage.save` streams multi-chunk uploads without redundant `bytes(...)` copies (R5.2).
-- [ ] `open_readable_file` and `_get_native_module` are deleted from `storage/_store.py` (R5.2).
+- [x] [a04970be] `extensions/django` exports `DjangoStorage` cleanly without duplicating `vertebra.storage`, and `DjangoStorage.save` streams multi-chunk uploads without redundant `bytes(...)` copies (R5.2).
+- [x] [a04970be] `open_readable_file` and `_get_native_module` are deleted from `storage/_store.py` (R5.2).
 
 ## Notes & Discoveries
 

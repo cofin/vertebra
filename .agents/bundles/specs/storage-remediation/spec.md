@@ -14,7 +14,7 @@ chapters:
   - ch05-framework-adapters-and-test-hygiene
   - ch06-docs-okf-and-plan-sync
 current_chapter: ch05-framework-adapters-and-test-hygiene
-current_task: "storage-remediation:ch05:t02"
+current_task: "storage-remediation:ch05:t03"
 parent_prd: native-data-platform
 research: []
 plan_revision: 1
