@@ -5,7 +5,7 @@ chapter_id: ch04-streaming-arrow-parquet-and-shm
 title: Make read_arrow_shm zero-copy over memoryview, keep ArrowCursor.__len__ lazy, and transpose _table_to_rows_and_cols column-wise
 description: Retain memoryview slices via pyarrow.py_buffer in read_arrow_shm without bytes() copying, return self._table.num_rows from ArrowCursor.__len__ without materializing tuples, and convert Arrow tables to row tuples via columnar to_pydict() transposition.
 status: stable
-state: pending
+state: in_progress
 priority: P1
 verification_strategy: behavior_tdd
 depends_on: []
@@ -19,9 +19,9 @@ tests:
 estimated_loc: 85
 plan_revision: 1
 plan_commit: fd571e3a
-state_revision: 0
-claimed_by: null
-claimed_at: null
+state_revision: 1
+claimed_by: executor
+claimed_at: "2026-11-09T00:46:30Z"
 blocked_reason: null
 unblock_condition: null
 next_step: null
@@ -29,7 +29,7 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: "2026-11-08T20:55:00Z"
-updated_at: "2026-11-08T20:55:00Z"
+updated_at: "2026-11-09T00:46:30Z"
 commit: null
 generated:
   by: flow/0.28.0
