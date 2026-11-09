@@ -24,9 +24,9 @@ generated:
   by: flow/0.28.0
   at: "2026-11-08T00:00:00Z"
 verified:
-  - by: agent:plan-generator
-    at: "2026-11-08T00:00:00Z"
-    commit: 0acdf576
+  - by: agent:flow-executor
+    at: "2026-11-09T15:25:00Z"
+    commit: 5c95a733
 sources:
   - id: agents-md
     resource: AGENTS.md
@@ -115,22 +115,19 @@ tags:
 
 ### 1.1 Problem Statement & Objectives
 
-Chapters 01, 02, 03, and 07 change facts that eleven files outside the ch11 and ch12 ownership still state the old way:
+Agent instructions, OKF knowledge chapters, and user landing/embeddings pages reflect the fail-loud dependency groups, test seams, dialect error handling, and pending driver status across eleven files:
 
-- `AGENTS.md`, `workflow.md`, `benchmarks-and-free-threaded.md`, and `tech-stack.md` describe `make install` as `uv sync --all-extras --dev --group doc` and keep `duckdb` inside `[dependency-groups].bench`; ch02 t01 moves it into a dedicated `duckdb` group that `bench` includes and that the Makefile installs on GIL interpreters only.[^agents-md][^okf-workflow][^okf-benchmarks][^okf-tech-stack][^duckdb-group-task]
-- `tech-stack.md` lists `sha2 0.10` and `rmp-serde 1.3` as `vertebra-db` dependencies; ch07 removes both.[^okf-tech-stack][^db-cargo]
-- `polyglot-test-matrix.md` describes neither the GIL-only DuckDB group with its `pytest.importorskip("duckdb")` guard nor the `resp3_server` loopback fixture that ch03 t02 creates and ch03 t03 extends with pub/sub and scripting commands.[^okf-test-matrix][^resp3-fixture-task][^resp3-pubsub-task]
-- `sqlspec-alchemy-and-dialects.md` says unsupported URLs raise `UnsupportedBackendError` and that the Oracle SQLSpec drivers execute `OracleCore.build_session_context_sql`; after ch01 and ch02 the DB-API raises `InterfaceError` and Oracle sessions raise `MissingDependencyError`.[^okf-dialects][^sqla-dialects][^oracle-driver]
-- `docs/usage/embeddings-and-vectors.md`, `docs/usage/index.md`, the OKF embeddings chapter, and the OKF domain index present `OracleEmbeddingPushdown` as usable, but it requires an Oracle driver that raises `MissingDependencyError`.[^docs-embeddings][^docs-usage-index][^okf-embeddings][^okf-domains-index][^oracle-embeddings]
-- `docs/index.md` advertises "Nine native database drivers".[^docs-index]
-
-This chapter rewrites those passages in present tense so agent instructions, OKF knowledge, and user docs describe the code at the ch12 closing commit.
+- `AGENTS.md`, `workflow.md`, `benchmarks-and-free-threaded.md`, and `tech-stack.md` document the dedicated GIL-only `[dependency-groups].duckdb` (`duckdb>=1.0`), included by `bench`, excluded from `dev`, synced by `make install`, and passed to `make py-test`, `make coverage`, and `make upgrade` on GIL interpreters only.[^agents-md][^okf-workflow][^okf-benchmarks][^okf-tech-stack][^duckdb-group-task][^makefile][^pyproject]
+- `tech-stack.md` reflects the `vertebra-db` dependency list without `sha2` or `rmp-serde`.[^okf-tech-stack][^db-cargo]
+- `polyglot-test-matrix.md` documents the GIL-only `duckdb` group, the `pytest.importorskip("duckdb")` test guard, and the `resp3_server` loopback fixture covering Redis/Valkey key-value, pub/sub, and scripting unit tests.[^okf-test-matrix][^resp3-fixture-task][^resp3-pubsub-task]
+- `sqlspec-alchemy-and-dialects.md` states that unparsable `+vtb` URLs raise PEP 249 `InterfaceError`, `duckdb+vtb` requires `duckdb`, and Oracle/MSSQL SQLSpec sessions raise `MissingDependencyError`.[^okf-dialects][^sqla-dialects][^oracle-driver]
+- `docs/usage/embeddings-and-vectors.md`, `docs/usage/index.md`, `embeddings-and-vectors.md`, `domains/index.md`, and `docs/index.md` describe available drivers without an engine count and state that `OracleEmbeddingPushdown` and Oracle/SQL Server drivers require unpublished native driver packages (`MissingDependencyError`).[^docs-embeddings][^docs-usage-index][^okf-embeddings][^okf-domains-index][^oracle-embeddings][^docs-index]
 
 **Non-goals**: files owned by ch11 (`README.md`, databases/extensions/reference/analytics docs, OKF drivers, tenancy, product, ADR-002, and the "Database driver conformance" section of `polyglot-test-matrix.md`) and ch12 (queue docs and knowledge); `.github/workflows/ci.yml` (unchanged by ch02 t01); the changelog; Python docstrings and Rust crate docs; `AGENTS.md` lines other than the `make install` entry.
 
 ### 1.2 Upstream Execution Baseline
 
-- Branch `feat/storage-updates`, plan anchored at `0acdf576`; parent roadmap [`spec.md`](../../spec.md).
+- Branch `feat/driver-fail-loud` stacked on `feat/storage-updates` (`d2b168dc`); parent roadmap [`spec.md`](../../spec.md).
 - Depends on `ch11-docs-and-okf` (t02 edits `polyglot-test-matrix.md` after ch11 t03 rewrites its conformance section, and user-doc phrasing for pending engines follows ch11 t01) and `ch12-queue-docs-and-knowledge` (serializes the documentation chapters). Transitively requires ch01, ch02, ch03, ch04, and ch07 `completed`.
 - Executors read the post-ch12 files named in each worksheet and document the code as found.
 
@@ -261,7 +258,7 @@ Facts used across all files (executors adapt sentence structure, not facts):
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline (`HEAD`)**: `5dac3083` — chapter completed (`4/4` tasks completed).
+- **Verified Baseline (`HEAD`)**: `5c95a733` — chapter completed (`4/4` tasks completed).
 - **Remaining Tasks**: None (`4/4` completed).
 - **Documentation & OKF Sync**: `[11/11 files documented]`.
 - **Active Invariants**: `AGENTS.md` changes only on the `make install` line; the `polyglot-test-matrix.md` conformance section stays as ch11 leaves it; changelog untouched; no internal identifiers or planned-extra commands in user docs.

@@ -23,9 +23,9 @@ generated:
   by: flow/0.28.0
   at: "2026-11-08T00:00:00Z"
 verified:
-  - by: agent:plan-generator
-    at: "2026-11-08T00:00:00Z"
-    commit: 0acdf576
+  - by: agent:flow-executor
+    at: "2026-11-09T14:52:00Z"
+    commit: e75daadf
 sources:
   - id: conformance
     resource: src/py/tests/integration/db/test_driver_conformance.py::_resolve_live_config
@@ -62,15 +62,13 @@ tags:
 
 ### 1.1 Problem Statement & Objectives
 
-The conformance suite calls `ensure_module` for each spec's native module at the top of `_resolve_live_config` and lets `MissingDependencyError` escape.[^conformance][^missing-dep] Non-pending engines (BigQuery, Spanner) report a setup ERROR; pending engines report `xfailed` under their strict `xfail` mark for the wrong reason.[^conformance-params] `src/py/tests/integration/conftest.py` keeps `vtb_oracle_driver` and `vtb_mssql_driver` fixtures that no test requests and that construct pure-Python drivers ch01 makes fail loud.[^integration-conftest]
-
-This chapter maps a missing native module to an explicit skip, or to an explicit failure in Docker conformance mode for engines that are not pending a native flow, and removes the dead conftest fixtures.
+`_resolve_live_config` probes each engine's native extension module via `import_optional` before credential checks, skipping pending engines in both local and `VERTEBRA_CONFORMANCE_DOCKER=1` runs while skipping non-pending engines (`bigquery`, `spanner`) locally and failing them under `VERTEBRA_CONFORMANCE_DOCKER=1`.[^conformance][^module-loader][^missing-dep] `_build_live_engine_params` attaches strict `xfail` only when a pending engine's native module imports, keeping missing-module skips distinct from `xfailed` conformance gaps.[^conformance-params] `src/py/tests/integration/conftest.py` omits `from __future__ import annotations`, quotes `TYPE_CHECKING`-only service types, and excludes unused Oracle and MSSQL pure-Python driver fixtures.[^integration-conftest]
 
 **Non-goals**: install hints and the extras gate (owned by [ch08-install-hints-and-extras-gate](../ch08-install-hints-and-extras-gate/spec.md)); `test_engine_driver_resolution_and_provide_driver` Oracle/MSSQL assertions (owned by ch01 and ch02); `CACHE_SPECS` and cache fixtures (owned by ch04); removing `from __future__ import annotations` from `test_driver_conformance.py`; OKF and user docs for conformance outcomes (owned by [ch11-docs-and-okf](../ch11-docs-and-okf/spec.md)).
 
 ### 1.2 Upstream Execution Baseline
 
-- Branch `feat/storage-updates` at `0acdf576`; parent roadmap [spec.md](../../spec.md); catalog [chapters/index.md](../index.md).
+- Branch `feat/driver-fail-loud` stacked on `feat/storage-updates` (`d2b168dc`); parent roadmap [spec.md](../../spec.md); catalog [chapters/index.md](../index.md).
 - Depends on [ch04-redis-valkey-memory-removal](../ch04-redis-valkey-memory-removal/spec.md), which reaches ch01, ch02, and ch03 transitively. ch01 `t01` / `t02`, ch02 `t04`, and ch04 `t01` each edit `test_driver_conformance.py` (driver-resolution assertions, DuckDB spec, cache helpers); `t01` edits `_resolve_live_config` and `_build_live_engine_params` in the same file afterward. ch01 makes the Oracle and MSSQL pure-Python drivers fail loud, which is why their conftest fixtures are deleted here.
 - No file overlap with [ch08-install-hints-and-extras-gate](../ch08-install-hints-and-extras-gate/spec.md), ch05, ch06, ch07, or [ch10-queue-backend-fail-loud](../ch10-queue-backend-fail-loud/spec.md); this chapter runs in parallel with them.
 - Research: [change-surface](../../research/change-surface_20261107.md) section "Conformance".
@@ -178,7 +176,7 @@ def _require_native_module(spec: EngineConformanceSpec) -> None:
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline (`HEAD`)**: `cd6e5ae6` — chapter completed; `1/1` tasks completed.
+- **Verified Baseline (`HEAD`)**: `e75daadf` — chapter completed; `1/1` tasks completed.
 - **Remaining Tasks**: none.
 - **Documentation & OKF Sync**: none owned; `ch11-docs-and-okf` documents conformance outcomes.
 - **Active Invariants**: strict `xfail` remains for pending engines whose native module imports; pending engines skip a missing module in Docker mode; `test_engine_driver_resolution_and_provide_driver` stays owned by ch01 / ch02.

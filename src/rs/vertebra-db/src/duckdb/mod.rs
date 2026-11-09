@@ -9,7 +9,7 @@ pub use crate::arrow_shm::{
     write_shm_arrow_region,
 };
 
-/// Configuration for the SHM-brokered DuckDB analytical engine.
+/// Configuration for DuckDB 2.0-safe post-initialization `SET` statements.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DuckdbConfig {
     pub path: String,

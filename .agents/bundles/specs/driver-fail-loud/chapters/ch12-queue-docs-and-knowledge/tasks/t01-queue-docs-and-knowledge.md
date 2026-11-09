@@ -40,9 +40,9 @@ generated:
   by: flow/0.28.0
   at: "2026-11-07T00:00:00Z"
 verified:
-  - by: agent:plan-generator
-    at: "2026-11-08T00:00:00Z"
-    commit: 0acdf576
+  - by: agent:flow-executor
+    at: "2026-11-09T15:16:39Z"
+    commit: adaf1243
 sources:
   - id: docs-queues-usage
     resource: docs/usage/queues-and-realtime.md
@@ -295,8 +295,8 @@ uv run --no-sync pytest src/py/tests/unit/tools/test_docs_tooling.py -q
 
 ## Notes & Discoveries
 
-- [2026-11-07 00:00] At `0acdf576` no queue backend defines `claim`; `docs/reference/queues.md` lists it in four `members:` blocks. The claim method is `dequeue`.
-- [2026-11-07 00:00] At `0acdf576` `oracle.py` has no `DBMS_AQ` usage and `ValkeyQueueBackend` only changes the default `stream_prefix`; the OKF chapter's Advanced Queuing and client-side tracking rows describe no code.
+- [2026-11-07 00:00] At `d2b168dc` no queue backend defined `claim`; `docs/reference/queues.md` listed it in four `members:` blocks while the claim method is `dequeue`.
+- [2026-11-07 00:00] At `d2b168dc` `oracle.py` had no `DBMS_AQ` usage and `ValkeyQueueBackend` only changed the default `stream_prefix`; the OKF chapter's Advanced Queuing and client-side tracking rows described unshipped mechanics.
 - [2026-11-07 00:00] Update `[k/3 files documented]` in the chapter spec and root spec when closing this task.
 
 [^docs-queues-usage]: `docs/usage/queues-and-realtime.md` — Queues usage guide backend table.

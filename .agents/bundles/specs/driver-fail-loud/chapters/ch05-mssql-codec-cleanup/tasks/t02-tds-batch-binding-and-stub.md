@@ -35,11 +35,11 @@ updated_at: "2026-11-09T03:35:00Z"
 commit: 9e7ad81c
 sources:
   - id: db-bindings
-    resource: src/rs/vertebra-py/src/db.rs::encode_tds_sql_batch
-    title: encode_tds_sql_batch pyfunction and register_db_bindings
+    resource: src/rs/vertebra-py/src/db.rs::register_db_bindings
+    title: Python database codec binding registry on vertebra._vertebra
   - id: vertebra-pyi
-    resource: src/py/vertebra/_vertebra.pyi::encode_tds_sql_batch
-    title: Stub definition and __all__ entry
+    resource: src/py/vertebra/_vertebra.pyi
+    title: Stubtest-gated type stub for vertebra._vertebra
 tags:
   - pyo3
   - mssql
@@ -108,5 +108,5 @@ Grep-only verification: `grep -rn "encode_tds_sql_batch" src/py src/rs/vertebra-
 
 - [2026-11-07 00:00] `parse_cluster_redirect` in `db.rs` stays; it is the live caller of `vertebra_db::resp3::{ClusterRedirect, RedirectKind}`.
 
-[^db-bindings]: `src/rs/vertebra-py/src/db.rs::encode_tds_sql_batch` — encode_tds_sql_batch pyfunction and register_db_bindings.
-[^vertebra-pyi]: `src/py/vertebra/_vertebra.pyi::encode_tds_sql_batch` — Stub definition and __all__ entry.
+[^db-bindings]: `src/rs/vertebra-py/src/db.rs::register_db_bindings` — Python database codec binding registry on vertebra._vertebra.
+[^vertebra-pyi]: `src/py/vertebra/_vertebra.pyi` — Stubtest-gated type stub for vertebra._vertebra.

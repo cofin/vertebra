@@ -41,10 +41,10 @@ commit: 06762e64
 sources:
   - id: oracle-driver
     resource: src/py/vertebra/db/adapters/oracle/driver.py::SyncOracleDriver
-    title: Oracle sync and async drivers backed by sqlite3
+    title: Oracle sync and async drivers guarded on vertebra._oracle
   - id: oracle-core
-    resource: src/py/vertebra/db/adapters/oracle/core.py::OracleCore.normalize_sql
-    title: SQLite-only Oracle placeholder normalizer
+    resource: src/py/vertebra/db/adapters/oracle/core.py::OracleCore
+    title: Oracle VECTOR/OSON codecs and session context SQL builder
   - id: module-loader
     resource: src/py/vertebra/utils/module_loader.py::ensure_module
     title: Optional module loader raising MissingDependencyError
@@ -236,8 +236,8 @@ Changes:
 - [2026-11-07 00:00] `OracleSyncDriver` (SQLSpec) stores any object as `native_driver`[^sqlspec-oracle]; `BaseSyncDriver._normalize_params` passes a single mapping through unchanged, so the port receives the dict from `OracleCore.build_session_context_sql`.
 - [2026-11-07 00:00] `integration/conftest.py::vtb_oracle_driver` has no consumers; ch09/t01 deletes it, so this task leaves `integration/conftest.py` untouched.
 
-[^oracle-driver]: `src/py/vertebra/db/adapters/oracle/driver.py::SyncOracleDriver` — Oracle sync and async drivers backed by sqlite3.
-[^oracle-core]: `src/py/vertebra/db/adapters/oracle/core.py::OracleCore.normalize_sql` — SQLite-only Oracle placeholder normalizer.
+[^oracle-driver]: `src/py/vertebra/db/adapters/oracle/driver.py::SyncOracleDriver` — Oracle sync and async drivers guarded on vertebra._oracle.
+[^oracle-core]: `src/py/vertebra/db/adapters/oracle/core.py::OracleCore` — Oracle VECTOR/OSON codecs and session context SQL builder.
 [^module-loader]: `src/py/vertebra/utils/module_loader.py::ensure_module` — Optional module loader raising MissingDependencyError.
 [^sync-base]: `src/py/vertebra/db/driver/_sync.py::SyncDatabaseDriver` — Base sync driver routing through execute_with_description.
 [^sqlspec-oracle]: `src/py/vertebra/extensions/sqlspec/adapters.py::OracleSyncDriver.apply_tenant_predicate` — SQLSpec Oracle tenant predicate over an injected native port.

@@ -25,10 +25,10 @@ generated:
 sources:
   - id: redis-driver
     resource: src/py/vertebra/db/adapters/redis/driver.py::SyncRedisDriver
-    title: Redis sync and async RESP3 drivers with memory command emulation
+    title: Redis sync and async RESP3 drivers rejecting memory:// URLs
   - id: redis-config
     resource: src/py/vertebra/db/adapters/redis/config.py::RedisConfig
-    title: Redis config whose url_schemes include memory
+    title: Redis config accepting redis and rediss schemes only
   - id: valkey-config
     resource: src/py/vertebra/db/adapters/valkey/config.py::ValkeyConfig
     title: Valkey config subclassing RedisConfig
@@ -81,15 +81,13 @@ tags:
 
 ### 1.1 Problem Statement & Objectives
 
-`RedisConfig.url_schemes` includes `memory`, and the Redis driver emulates `GET`, `SET`, `DEL`, `PTTL`, `SCAN`, `UNLINK`, `PUBLISH`, `EVAL`, and `EVALSHA` against Python dictionaries across roughly 40 branches.[^redis-config][^redis-driver] Store factories (`KeyValueStore.from_valkey`, Litestar `MemoryStore.from_valkey`, Starlette `CacheStore.from_valkey`, Advanced Alchemy `SQLAlchemyCacheBackend.from_valkey`, and their `from_redis` twins) pass the URL straight to `ValkeyConfig(url=...)` or `RedisConfig(url=...)`, so `memory://` reaches the driver without passing through the registry.[^kv-store][^litestar-store][^starlette-store][^alchemy-cache]
+`RedisConfig.url_schemes` registers only `("redis", "rediss")`, and `SyncRedisDriver` and `AsyncRedisDriver` carry no in-process dictionary store (`_kv`, `_ttls`, `_scripts`) or memory command emulation.[^redis-config][^redis-driver] Because store factories (`KeyValueStore.from_valkey`, Litestar `MemoryStore.from_valkey`, Starlette `CacheStore.from_valkey`, Advanced Alchemy `SQLAlchemyCacheBackend.from_valkey`, and their `from_redis` twins) pass URLs directly to `ValkeyConfig(url=...)` or `RedisConfig(url=...)`, both Redis driver constructors reject `memory://` directly with `ImproperConfigurationError` while `DatabaseRegistry.parse_url("memory://")` raises `ValueError`.[^kv-store][^litestar-store][^starlette-store][^alchemy-cache][^registry][^improper-config] Conformance cache cases run solely against live servers (`VERTEBRA_CONFORMANCE_<ENGINE>_DSN` or `VERTEBRA_CONFORMANCE_DOCKER=1`), and `ValkeyConfig` inherits the constructor rejection without changing its `("valkey", "valkeys")` schemes.[^conformance-cache][^valkey-config] Preserved: queue and object storage `memory://` and `SQLAlchemyCacheBackend.from_url("memory://")`.
 
-This chapter removes `memory` from the registry, makes conformance cache cases live-only, deletes the driver emulation, and makes both Redis driver constructors raise `ImproperConfigurationError` (a `ValueError` subclass) for `memory://`.[^registry][^conformance-cache][^improper-config] `ValkeyConfig` inherits the behavior without its own scheme change.[^valkey-config] Preserved: queue and object storage `memory://` and `SQLAlchemyCacheBackend.from_url("memory://")`.
-
-**Non-goals**: the `resp3_server` fixture and the consumer test retargets (owned by `ch03-remove-memory-fakes`); Redis queue `_InMemoryRedisStreamClient` fallback in `framework/queues/redis.py` (owned by `ch10-queue-backend-fail-loud`); RESP3 codec removal (owned by `native-redis-driver`); `test_driver_conformance.py::_resolve_live_config` (owned by `driver-fail-loud:ch09:t01`); documentation and OKF edits (owned by `ch11-docs-and-okf`).
+**Non-goals**: the `resp3_server` fixture and the consumer test retargets (owned by `ch03-remove-memory-fakes`); Redis queue `_InMemoryRedisStreamClient` removal in `framework/queues/redis.py` (owned by `ch10-queue-backend-fail-loud`); RESP3 codec removal (owned by `native-redis-driver`); `test_driver_conformance.py::_resolve_live_config` (owned by `driver-fail-loud:ch09:t01`); documentation and OKF edits (owned by `ch11-docs-and-okf`).
 
 ### 1.2 Upstream Execution Baseline
 
-- Branch `feat/storage-updates` at `0acdf576`; parent roadmap [spec.md](../../spec.md).
+- Branch `feat/driver-fail-loud` stacked on `feat/storage-updates` (`d2b168dc`); parent roadmap [spec.md](../../spec.md).
 - Runs after `ch03-remove-memory-fakes`, which provides `src/py/tests/unit/conftest.py::resp3_server` with the key-value, pub/sub, shard pub/sub, and scripting surface and leaves no `memory://` Redis or Valkey construction in `test_redis_valkey_driver.py`, `test_alchemy_cache_backend.py`, `test_framework_subdomains.py`, or `test_starlette_plugin.py`.
 - `driver-fail-loud:ch09:t01` edits `test_driver_conformance.py::_resolve_live_config` after `t01` edits the cache helpers in the same file.
 
@@ -221,13 +219,13 @@ def _resolve_cache_config(cache_spec: CacheConformanceSpec, request: pytest.Fixt
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `HEAD @ 20c535e3`; `state: completed`; depends on `ch03-remove-memory-fakes` for the `resp3_server` fixture and the consumer test retargets.
+- **Verified Baseline**: `HEAD @ 1ce63eaa`; `state: completed`; depends on `ch03-remove-memory-fakes` for the `resp3_server` fixture and the consumer test retargets.
 - **Remaining Tasks in Chapter**: none (`2/2` completed).
 - **Documentation & OKF Sync**: `[0/0]` in this chapter; two OKF claims handed to `ch11`.
 - **Active Invariants**: queue, object storage, and Advanced Alchemy `from_url("memory://")` local cache unchanged; `test_registry_parse_url_executes_zero_eager_driver_imports` stays green; no inline `#` comments in touched Python.
 
-[^redis-driver]: `src/py/vertebra/db/adapters/redis/driver.py::SyncRedisDriver` — Redis sync and async RESP3 drivers with memory command emulation.
-[^redis-config]: `src/py/vertebra/db/adapters/redis/config.py::RedisConfig` — Redis config whose url_schemes include memory.
+[^redis-driver]: `src/py/vertebra/db/adapters/redis/driver.py::SyncRedisDriver` — Redis sync and async RESP3 drivers rejecting memory:// URLs.
+[^redis-config]: `src/py/vertebra/db/adapters/redis/config.py::RedisConfig` — Redis config accepting redis and rediss schemes only.
 [^valkey-config]: `src/py/vertebra/db/adapters/valkey/config.py::ValkeyConfig` — Valkey config subclassing RedisConfig.
 [^registry]: `src/py/vertebra/db/registry.py::DatabaseRegistry.parse_url` — Scheme dispatch raising ValueError for unregistered schemes.
 [^improper-config]: `src/py/vertebra/_typing.py::ImproperConfigurationError` — Configuration error subclassing VertebraError and ValueError.

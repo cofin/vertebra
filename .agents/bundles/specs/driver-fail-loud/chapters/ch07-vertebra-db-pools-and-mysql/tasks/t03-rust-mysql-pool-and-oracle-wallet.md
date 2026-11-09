@@ -11,15 +11,12 @@ verification_strategy: static_validation
 depends_on:
   - "driver-fail-loud:ch07:t02"
 read_set:
-  - src/rs/vertebra-db/src/mysql/mod.rs
   - src/rs/vertebra-db/src/lib.rs
   - src/rs/vertebra-db/src/oracle/tns.rs
 files:
-  - src/rs/vertebra-db/src/mysql/mod.rs
   - src/rs/vertebra-db/src/lib.rs
   - src/rs/vertebra-db/src/oracle/tns.rs
 tests:
-  - src/rs/vertebra-db/src/mysql/mod.rs
   - src/rs/vertebra-db/src/oracle/tns.rs
 estimated_loc: 215
 plan_revision: 2
@@ -38,14 +35,14 @@ updated_at: "2026-11-09T14:38:00Z"
 commit: b20f9d30
 sources:
   - id: mysql-rs
-    resource: src/rs/vertebra-db/src/mysql/mod.rs::MysqlPool
-    title: MySQL framing, scramble, and MysqlPool
+    resource: src/rs/vertebra-db/Cargo.toml
+    title: vertebra-db package metadata and dependencies after mysql removal
   - id: db-lib
     resource: src/rs/vertebra-db/src/lib.rs
-    title: mysql re-export
+    title: vertebra-db crate module registry and re-exports
   - id: tns-rs
-    resource: src/rs/vertebra-db/src/oracle/tns.rs::OracleWalletMaterial
-    title: tnsnames.ora parser and wallet directory loader
+    resource: src/rs/vertebra-db/src/oracle/tns.rs::parse_tnsnames_ora
+    title: Oracle tnsnames.ora parser and alias resolver
 tags:
   - vertebra-db
   - rust
@@ -125,6 +122,6 @@ Grep-only verification: `grep -rnE "MysqlPool|MYSQL_DIALECT_TAG" src/rs --includ
 - [2026-11-07 00:00] Root R8 names `OracleWalletMaterial::from_directory`; this task deletes the struct too because it has no other constructor or caller.
 - [2026-11-08 00:00] `broker-pool-sharing` already assumes this chapter deletes the `vertebra-db` pools.
 
-[^mysql-rs]: `src/rs/vertebra-db/src/mysql/mod.rs::MysqlPool` — MySQL framing, scramble, and MysqlPool.
-[^db-lib]: `src/rs/vertebra-db/src/lib.rs` — mysql re-export.
-[^tns-rs]: `src/rs/vertebra-db/src/oracle/tns.rs::OracleWalletMaterial` — tnsnames.ora parser and wallet directory loader.
+[^mysql-rs]: `src/rs/vertebra-db/Cargo.toml` — vertebra-db package metadata and dependencies after mysql removal.
+[^db-lib]: `src/rs/vertebra-db/src/lib.rs` — vertebra-db crate module registry and re-exports.
+[^tns-rs]: `src/rs/vertebra-db/src/oracle/tns.rs::parse_tnsnames_ora` — Oracle tnsnames.ora parser and alias resolver.

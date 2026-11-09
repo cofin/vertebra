@@ -4,7 +4,7 @@ flow_id: driver-fail-loud
 title: Fail-Loud Database Drivers
 description: Replace the Oracle, MSSQL, and DuckDB SQLite stand-ins, the SQLAlchemy SQLite parse fallback, the in-memory queue executors and clients, and memory:// engine fakes with MissingDependencyError or configuration errors, delete dead vertebra-db pools and superseded codecs, correct install hints behind an extras gate, make conformance outcomes explicit when a native module is absent, and align user docs, agent instructions, and OKF knowledge with the result.
 status: stable
-state: in_progress
+state: active
 has_chapters: true
 chapters:
   - ch01-oracle-mssql-fail-loud
@@ -30,14 +30,14 @@ plan_revision: 2
 plan_commit: c2b09b9b
 state_revision: 13
 created_at: "2026-11-07T00:00:00Z"
-updated_at: "2026-11-09T15:25:00Z"
+updated_at: "2026-11-09T19:25:00Z"
 verified:
   - by: agent:flow-executor
-    at: "2026-11-09T15:25:00Z"
-    commit: 5dac3083
-  - by: agent:code-reviewer
-    at: "2026-11-08T00:00:00Z"
-    commit: 1e1f028a
+    at: "2026-11-09T19:25:00Z"
+    commit: 5c95a733
+  - by: agent:flow-plan
+    at: "2026-11-09T02:30:00Z"
+    commit: c2b09b9b
 generated:
   by: flow/0.28.0
   at: "2026-11-07T00:00:00Z"
@@ -50,49 +50,49 @@ sources:
     title: Missing dependency error and install hint
   - id: oracle-driver
     resource: src/py/vertebra/db/adapters/oracle/driver.py::SyncOracleDriver
-    title: Oracle driver backed by sqlite3
+    title: Oracle driver raising MissingDependencyError for vertebra._oracle
   - id: mssql-driver
     resource: src/py/vertebra/db/adapters/mssql/driver.py::SyncMSSQLDriver
-    title: MSSQL driver backed by sqlite3
+    title: MSSQL driver raising MissingDependencyError for vertebra._mssql
   - id: duckdb-driver
     resource: src/py/vertebra/db/adapters/duckdb/driver.py::SyncDuckDBDriver
-    title: DuckDB driver with sqlite3 fallback
+    title: DuckDB driver requiring the duckdb package
   - id: dep-groups
     resource: pyproject.toml::dependency-groups
-    title: Dependency groups; duckdb only in bench
+    title: Dependency groups including the GIL-only duckdb group
   - id: sqla-dbapi
     resource: src/py/vertebra/extensions/sqlalchemy/dialects.py::SyncDBAPIConnection
-    title: SQLAlchemy DB-API connection with SQLite parse fallback
+    title: SQLAlchemy DB-API connection raising InterfaceError on URL parse failure
   - id: oracle-queue
     resource: src/py/vertebra/framework/queues/oracle.py::OracleQueueBackend
-    title: Oracle queue backend with in-memory executor fallback
+    title: Oracle queue backend requiring an injected executor
   - id: pg-queue
     resource: src/py/vertebra/framework/queues/postgres.py::PostgreSQLQueueBackend
-    title: PostgreSQL queue backend with in-memory executor fallback
+    title: PostgreSQL queue backend requiring an injected executor
   - id: redis-queue
     resource: src/py/vertebra/framework/queues/redis.py::RedisQueueBackend
-    title: Redis and Valkey queue backend with in-memory stream client fallback
+    title: Redis and Valkey queue backend requiring a live or injected stream client
   - id: spanner-queue
     resource: src/py/vertebra/framework/queues/spanner.py::SpannerQueueBackend
-    title: Spanner queue backend with in-memory executor fallback
+    title: Spanner queue backend requiring an injected executor
   - id: redis-config
     resource: src/py/vertebra/db/adapters/redis/config.py::RedisConfig
-    title: Redis config accepting the memory scheme
+    title: Redis config and driver rejecting memory:// URLs
   - id: litestar-store
     resource: src/py/vertebra/extensions/litestar/store.py::MemoryStore
     title: Litestar store with from_valkey and from_redis factories
   - id: db-lib
     resource: src/rs/vertebra-db/src/lib.rs
-    title: vertebra-db re-exports of pools and codecs
+    title: vertebra-db live codec, dialer, transport, and Arrow SHM re-exports
   - id: db-bindings
     resource: src/rs/vertebra-py/src/db.rs::register_db_bindings
     title: Python codec bindings on vertebra._vertebra
   - id: conformance
     resource: src/py/tests/integration/db/test_driver_conformance.py::_resolve_live_config
-    title: Conformance live config resolution
+    title: Conformance live config and native module resolution
   - id: packaging-test
     resource: src/py/tests/unit/build/test_packaging_and_pgo.py
-    title: Packaging extras assertions
+    title: Packaging extras and install-hint AST gate
 tags:
   - database
   - drivers
@@ -118,11 +118,9 @@ tags:
 
 ### 1.1 Problem Statement & Objectives
 
-Vertebra's Oracle and MSSQL drivers accept host, user, and password, then execute every statement against an in-memory SQLite database. DuckDB silently becomes SQLite when the `duckdb` package is absent, and the SQLAlchemy DB-API becomes an in-memory SQLite connection when a URL fails to parse. The Oracle, PostgreSQL, and Spanner queue backends substitute in-process executors and the Redis/Valkey queue backend an in-process stream client when no live collaborator is supplied. PostgreSQL, MySQL, Redis, and Valkey drivers accept `memory://` and return rows from a dictionary. Each path returns plausible results from the wrong engine.
+Database drivers, DB-API bridges, and network queue backends must raise typed configuration or missing-dependency errors rather than substituting an in-memory SQLite connection or dictionary emulator. Oracle and MSSQL drivers resolve `vertebra._oracle` and `vertebra._mssql` via `ensure_module` and raise `MissingDependencyError` until their standalone Rust wheels ship; DuckDB requires the `duckdb` package (installed via the GIL-only `duckdb` dependency group and skipped cleanly on free-threaded `3.14t`/`3.15t` interpreters); `SyncDBAPIConnection` and `AsyncDBAPIConnection` raise `InterfaceError` when `DatabaseRegistry.parse_url` fails; Oracle, PostgreSQL, and Spanner queue backends require an injected `executor=`; Redis and Valkey queue backends require an injected `client=` or a hosted `redis://`/`rediss://` URL backed by `redis.asyncio`; and PostgreSQL, MySQL, Redis, and Valkey drivers reject `memory://` URLs with `ImproperConfigurationError`.
 
-`vertebra-db` carries connectionless `*Pool` lease tables and MySQL, TDS, and TNS framing that the selected client crates (`mysql_async`, `tiberius`, `oracledb`) replace. Install hints point at `vtb[...]` and at extras that `pyproject.toml` does not declare. The conformance suite errors, or hides failures behind strict xfail, when a native module is absent.
-
-This flow makes every unsupported path raise, deletes dead native code, corrects install hints, makes conformance outcomes explicit, and brings user docs and OKF knowledge in line, so the per-engine native driver flows start from a truthful baseline.
+`vertebra-db` retains only live codecs, dialers, transport traits, and `ShmRegion` Arrow IPC framing, removing unused `*Pool` lease tables and MySQL, TDS, and TNS framing superseded by per-engine client crates (`mysql_async`, `tiberius`, `oracledb`). `MissingDependencyError` defaults install hints to `vertebra-core[<extra>]` enforced by an AST packaging gate, conformance resolves native modules before credential skips with explicit skip/fail/strict-xfail semantics, and user documentation, agent instructions, and OKF knowledge match the fail-loud contract ahead of the per-engine native driver flows.
 
 **Non-goals** (each with its owner):
 
@@ -388,18 +386,18 @@ unexport PY_GIL_DISABLED PY_TEST_GROUPS
 
 [^module-loader]: `src/py/vertebra/utils/module_loader.py::ensure_module` — Optional module loader raising MissingDependencyError.
 [^missing-dep]: `src/py/vertebra/_typing.py::MissingDependencyError` — Missing dependency error and install hint.
-[^oracle-driver]: `src/py/vertebra/db/adapters/oracle/driver.py::SyncOracleDriver` — Oracle driver backed by sqlite3.
-[^mssql-driver]: `src/py/vertebra/db/adapters/mssql/driver.py::SyncMSSQLDriver` — MSSQL driver backed by sqlite3.
-[^duckdb-driver]: `src/py/vertebra/db/adapters/duckdb/driver.py::SyncDuckDBDriver` — DuckDB driver with sqlite3 fallback.
-[^dep-groups]: `pyproject.toml::dependency-groups` — Dependency groups; `duckdb` only in `bench`.
-[^sqla-dbapi]: `src/py/vertebra/extensions/sqlalchemy/dialects.py::SyncDBAPIConnection` — SQLAlchemy DB-API connection with SQLite parse fallback.
-[^oracle-queue]: `src/py/vertebra/framework/queues/oracle.py::OracleQueueBackend` — Oracle queue backend with in-memory executor fallback.
-[^pg-queue]: `src/py/vertebra/framework/queues/postgres.py::PostgreSQLQueueBackend` — PostgreSQL queue backend with in-memory executor fallback.
-[^redis-queue]: `src/py/vertebra/framework/queues/redis.py::RedisQueueBackend` — Redis and Valkey queue backend with in-memory stream client fallback.
-[^spanner-queue]: `src/py/vertebra/framework/queues/spanner.py::SpannerQueueBackend` — Spanner queue backend with in-memory executor fallback.
-[^redis-config]: `src/py/vertebra/db/adapters/redis/config.py::RedisConfig` — Redis config accepting the memory scheme.
+[^oracle-driver]: `src/py/vertebra/db/adapters/oracle/driver.py::SyncOracleDriver` — Oracle driver raising MissingDependencyError for vertebra._oracle.
+[^mssql-driver]: `src/py/vertebra/db/adapters/mssql/driver.py::SyncMSSQLDriver` — MSSQL driver raising MissingDependencyError for vertebra._mssql.
+[^duckdb-driver]: `src/py/vertebra/db/adapters/duckdb/driver.py::SyncDuckDBDriver` — DuckDB driver requiring the duckdb package.
+[^dep-groups]: `pyproject.toml::dependency-groups` — Dependency groups including the GIL-only `duckdb` group.
+[^sqla-dbapi]: `src/py/vertebra/extensions/sqlalchemy/dialects.py::SyncDBAPIConnection` — SQLAlchemy DB-API connection raising InterfaceError on URL parse failure.
+[^oracle-queue]: `src/py/vertebra/framework/queues/oracle.py::OracleQueueBackend` — Oracle queue backend requiring an injected executor.
+[^pg-queue]: `src/py/vertebra/framework/queues/postgres.py::PostgreSQLQueueBackend` — PostgreSQL queue backend requiring an injected executor.
+[^redis-queue]: `src/py/vertebra/framework/queues/redis.py::RedisQueueBackend` — Redis and Valkey queue backend requiring a live or injected stream client.
+[^spanner-queue]: `src/py/vertebra/framework/queues/spanner.py::SpannerQueueBackend` — Spanner queue backend requiring an injected executor.
+[^redis-config]: `src/py/vertebra/db/adapters/redis/config.py::RedisConfig` — Redis config and driver rejecting memory:// URLs.
 [^litestar-store]: `src/py/vertebra/extensions/litestar/store.py::MemoryStore` — Litestar store with from_valkey and from_redis factories.
-[^db-lib]: `src/rs/vertebra-db/src/lib.rs` — vertebra-db re-exports of pools and codecs.
+[^db-lib]: `src/rs/vertebra-db/src/lib.rs` — vertebra-db live codec, dialer, transport, and Arrow SHM re-exports.
 [^db-bindings]: `src/rs/vertebra-py/src/db.rs::register_db_bindings` — Python codec bindings on vertebra._vertebra.
-[^conformance]: `src/py/tests/integration/db/test_driver_conformance.py::_resolve_live_config` — Conformance live config resolution.
-[^packaging-test]: `src/py/tests/unit/build/test_packaging_and_pgo.py` — Packaging extras assertions.
+[^conformance]: `src/py/tests/integration/db/test_driver_conformance.py::_resolve_live_config` — Conformance live config and native module resolution.
+[^packaging-test]: `src/py/tests/unit/build/test_packaging_and_pgo.py` — Packaging extras and install-hint AST gate.

@@ -35,13 +35,13 @@ sources:
     title: Stubtest-gated type stub for vertebra._vertebra
   - id: mssql-rs
     resource: src/rs/vertebra-db/src/mssql/mod.rs::rewrite_mssql_placeholders
-    title: MSSQL placeholder rewriter, TDS framing, and MssqlPool
+    title: SQL Server single-pass @P1 placeholder rewriter
   - id: mssql-core
     resource: src/py/vertebra/db/adapters/mssql/core.py::MSSQLCore
-    title: Python MSSQL TDS helpers, batch wrapper, and placeholder rewriter
+    title: Python MSSQL TDS packet helpers and @P1 placeholder rewriter
   - id: mssql-config
-    resource: src/py/vertebra/db/adapters/mssql/config.py::MSSQLConfig.encode_sql_batch
-    title: Config helper wrapping MSSQLCore.encode_tds_sql_batch
+    resource: src/py/vertebra/db/adapters/mssql/config.py::MSSQLConfig
+    title: SQL Server connection configuration and placeholder rewrite helper
   - id: olap-test
     resource: src/py/tests/unit/db/test_enterprise_olap_drivers.py::test_mssql_tds_framing_and_placeholder_rewriter
     title: TDS framing and placeholder rewriter test
@@ -71,9 +71,7 @@ tags:
 
 ### 1.1 Problem Statement & Objectives
 
-The PyO3 layer exposes `encode_tds_sql_batch` solely so the MSSQL SQLite stand-in could record a TDS batch it never sent.[^db-bindings] Python wraps that binding three times (`MSSQLCore.encode_tds_sql_batch`, a module alias re-exported from the package, and `MSSQLConfig.encode_sql_batch`).[^mssql-core][^mssql-config] `vertebra-db` carries TDS packet framing and a connectionless `MssqlPool` lease table that no Rust or Python caller uses.[^mssql-rs] `MSSQLCore.encode_tds_packet` probes `_vertebra` for a function it never exports. The `tiberius` client selected by `native-mssql-driver` frames batches itself.
-
-This chapter deletes that MSSQL surface and rewrites the MSSQL module and adapter docs so they describe what remains: the `@P1` placeholder rewriter (Rust and binding) and the pure-Python TDS packet helpers.
+`vertebra_db::mssql` exposes only the single-pass `@P1` placeholder rewriter (`rewrite_mssql_placeholders`), wired into Python through `vertebra._vertebra.rewrite_mssql_placeholders`, while Python `MSSQLCore` retains only `rewrite_placeholders` and pure-Python TDS packet framing helpers without `encode_tds_sql_batch` wrappers, unexported native probes, Rust TDS framing, or connectionless `MssqlPool` lease tables.[^db-bindings][^mssql-core][^mssql-config][^mssql-rs] Module and adapter docstrings across `vertebra_db::mssql` and `vertebra.db.adapters.mssql` describe the surviving `@P1` rewriter and TDS packet helpers while leaving live TDS batch framing to `native-mssql-driver`.[^db-lib]
 
 **Non-goals**:
 
@@ -85,7 +83,7 @@ This chapter deletes that MSSQL surface and rewrites the MSSQL module and adapte
 
 ### 1.2 Upstream Execution Baseline
 
-- Branch `feat/storage-updates` at `0acdf576`; parent roadmap [spec.md](../../spec.md).
+- Branch `feat/driver-fail-loud` stacked on `feat/storage-updates` (`d2b168dc`); parent roadmap [spec.md](../../spec.md).
 - Depends on [ch04-redis-valkey-memory-removal](../ch04-redis-valkey-memory-removal/spec.md), which depends on [ch03-remove-memory-fakes](../ch03-remove-memory-fakes/spec.md), which depends on [ch01-oracle-mssql-fail-loud](../ch01-oracle-mssql-fail-loud/spec.md) and [ch02-duckdb-sqlalchemy-queue-fail-loud](../ch02-duckdb-sqlalchemy-queue-fail-loud/spec.md):
   - ch01 removes `_last_tds_batch` from `src/py/vertebra/db/adapters/mssql/driver.py` (the last production caller of `MSSQLCore.encode_tds_sql_batch`) and `normalize_for_sqlite` from `mssql/core.py`.
   - ch01, ch02 t04, and ch03 t01 edit `src/py/tests/unit/db/test_enterprise_olap_drivers.py`, which t01 edits next.
@@ -95,9 +93,9 @@ This chapter deletes that MSSQL surface and rewrites the MSSQL module and adapte
 
 | Area | Files Examined (`path/to/file::Symbol`) | Public Seam, Dependency Category & Integration |
 | --- | --- | --- |
-| Python adapter | `mssql/core.py::MSSQLCore`[^mssql-core], `mssql/config.py::MSSQLConfig.encode_sql_batch`[^mssql-config], `mssql/__init__.py` | Lazy exports via `vertebra.utils.module_loader.lazy_exports`; `MSSQLCore.encode_tds_sql_batch` calls the binding through `import_optional("vertebra._vertebra")` plus `hasattr`, with a pure-Python fallback |
+| Python adapter | `mssql/core.py::MSSQLCore`[^mssql-core], `mssql/config.py::MSSQLConfig`[^mssql-config], `mssql/__init__.py` | Lazy exports via `vertebra.utils.module_loader.lazy_exports`; `MSSQLCore` keeps pure-Python TDS packet framing and `@P1` placeholder rewriting |
 | PyO3 binding | `vertebra-py/src/db.rs::register_db_bindings`[^db-bindings], `_vertebra.pyi`[^vertebra-pyi] | `mypy.stubtest vertebra._vertebra` gates parity in `make py-test`, `make lint`, `make lint-all` |
-| Rust MSSQL | `vertebra-db/src/mssql/mod.rs::rewrite_mssql_placeholders`[^mssql-rs] | `db.rs` imports `rewrite_mssql_placeholders` and `encode_tds_sql_batch`; every other symbol is reached only through the `lib.rs` re-export, which no crate imports |
+| Rust MSSQL | `vertebra-db/src/mssql/mod.rs::rewrite_mssql_placeholders`[^mssql-rs] | `db.rs` and `lib.rs` re-export `rewrite_mssql_placeholders` only |
 | Crate root | `vertebra-db/src/lib.rs`[^db-lib] | Consumers `vertebra-py`, `vertebra-bigquery`, `vertebra-spanner` import no TDS or `MssqlPool` symbol |
 | Test | `test_enterprise_olap_drivers.py::test_mssql_tds_framing_and_placeholder_rewriter`[^olap-test] | Only test that calls `encode_tds_sql_batch`; it also imports `TDS_PKT_SQL_BATCH` for that block only |
 
@@ -200,7 +198,7 @@ class MSSQLCore:
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `HEAD @ c87687c0`; `depends_on_chapters: [ch04-redis-valkey-memory-removal]` (transitively ch01, ch02, ch03); `state: completed`.
+- **Verified Baseline**: `HEAD @ 9e7ad81c`; `depends_on_chapters: [ch04-redis-valkey-memory-removal]` (transitively ch01, ch02, ch03); `state: completed`.
 - **Remaining Tasks in Chapter**: `0/3` remaining (`3/3` completed).
 - **Downstream**: [ch06-oracle-codec-cleanup](../ch06-oracle-codec-cleanup/spec.md) depends on this chapter and edits the same `lib.rs`; [ch07-vertebra-db-pools-and-mysql](../ch07-vertebra-db-pools-and-mysql/spec.md) follows ch06.
 - **Open Doc/OKF Items**: none in this chapter; ch11 owns user docs and OKF.
@@ -209,7 +207,7 @@ class MSSQLCore:
 [^db-lib]: `src/rs/vertebra-db/src/lib.rs` — vertebra-db crate doc, module list, and re-exports.
 [^db-bindings]: `src/rs/vertebra-py/src/db.rs::register_db_bindings` — Python codec bindings on vertebra._vertebra.
 [^vertebra-pyi]: `src/py/vertebra/_vertebra.pyi` — Stubtest-gated type stub for vertebra._vertebra.
-[^mssql-rs]: `src/rs/vertebra-db/src/mssql/mod.rs::rewrite_mssql_placeholders` — MSSQL placeholder rewriter, TDS framing, and MssqlPool.
-[^mssql-core]: `src/py/vertebra/db/adapters/mssql/core.py::MSSQLCore` — Python MSSQL TDS helpers, batch wrapper, and placeholder rewriter.
-[^mssql-config]: `src/py/vertebra/db/adapters/mssql/config.py::MSSQLConfig.encode_sql_batch` — Config helper wrapping MSSQLCore.encode_tds_sql_batch.
+[^mssql-rs]: `src/rs/vertebra-db/src/mssql/mod.rs::rewrite_mssql_placeholders` — SQL Server single-pass @P1 placeholder rewriter.
+[^mssql-core]: `src/py/vertebra/db/adapters/mssql/core.py::MSSQLCore` — Python MSSQL TDS packet helpers and @P1 placeholder rewriter.
+[^mssql-config]: `src/py/vertebra/db/adapters/mssql/config.py::MSSQLConfig` — SQL Server connection configuration and placeholder rewrite helper.
 [^olap-test]: `src/py/tests/unit/db/test_enterprise_olap_drivers.py::test_mssql_tds_framing_and_placeholder_rewriter` — TDS framing and placeholder rewriter test.

@@ -43,10 +43,10 @@ commit: 06762e64
 sources:
   - id: mssql-driver
     resource: src/py/vertebra/db/adapters/mssql/driver.py::SyncMSSQLDriver
-    title: MSSQL sync and async drivers backed by sqlite3
+    title: MSSQL sync and async drivers guarded on vertebra._mssql
   - id: mssql-core
-    resource: src/py/vertebra/db/adapters/mssql/core.py::MSSQLCore.normalize_for_sqlite
-    title: SQLite-only MSSQL placeholder normalizer
+    resource: src/py/vertebra/db/adapters/mssql/core.py::MSSQLCore
+    title: TDS packet helpers and @P1 placeholder rewriter
   - id: mssql-config
     resource: src/py/vertebra/db/adapters/mssql/config.py::MSSQLConfig.build_async_driver
     title: Async driver construction with a Cloud SQL dialer
@@ -224,11 +224,11 @@ Seam category: external boundary (native module) simulated through `sys.modules`
 
 ## Notes & Discoveries
 
-- [2026-11-07 00:00] At `0acdf576` the async driver stores an `AsyncCloudSQLDialer` while its sync driver, which performs every call on a worker thread, holds none; the sync dialer is the only type that thread can drive.
+- [2026-11-07 00:00] At `d2b168dc` the async driver stored an `AsyncCloudSQLDialer` while its sync driver, which performs every call on a worker thread, held none; forwarding `SyncCloudSQLDialer` aligns the thread-offload boundary.
 - [2026-11-07 00:00] For ch05: once the driver stops calling it, `MSSQLCore.encode_tds_sql_batch` is reached only through `MSSQLConfig.encode_sql_batch`, the `vertebra.db.adapters.mssql.encode_tds_sql_batch` lazy export, and `test_mssql_tds_framing_and_placeholder_rewriter`.
 
-[^mssql-driver]: `src/py/vertebra/db/adapters/mssql/driver.py::SyncMSSQLDriver` — MSSQL sync and async drivers backed by sqlite3.
-[^mssql-core]: `src/py/vertebra/db/adapters/mssql/core.py::MSSQLCore.normalize_for_sqlite` — SQLite-only MSSQL placeholder normalizer.
+[^mssql-driver]: `src/py/vertebra/db/adapters/mssql/driver.py::SyncMSSQLDriver` — MSSQL sync and async drivers guarded on vertebra._mssql.
+[^mssql-core]: `src/py/vertebra/db/adapters/mssql/core.py::MSSQLCore` — TDS packet helpers and @P1 placeholder rewriter.
 [^mssql-config]: `src/py/vertebra/db/adapters/mssql/config.py::MSSQLConfig.build_async_driver` — Async driver construction with a Cloud SQL dialer.
 [^offload-base]: `src/py/vertebra/db/driver/_async.py::ThreadOffloadAsyncDatabaseDriver` — Async driver delegating to a paired sync driver on a worker thread.
 [^registry-dialer-test]: `src/py/tests/unit/db/test_native_db_drivers.py::test_registry_get_dialer_sync_async_caching_mssql_wiring_and_provide_driver_type_error` — Registry Cloud SQL dialer wiring test.

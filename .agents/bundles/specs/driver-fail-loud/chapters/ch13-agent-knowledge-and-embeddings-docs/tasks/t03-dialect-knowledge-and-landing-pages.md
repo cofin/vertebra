@@ -97,12 +97,12 @@ Target text (adapt wording; keep every fact):
 - **Dialect chapter, `SyncDBAPIModule` row**: replace the sentence "Non-supported URLs raise `UnsupportedBackendError`" (and its link to `vertebra/typing.py`) with: when `DatabaseRegistry.parse_url` raises `ValueError`, `SyncDBAPIConnection` / `AsyncDBAPIConnection` raise the module's PEP 249 `InterfaceError` (`Cannot parse Vertebra database URL: …`) chained from it, with no SQLite substitution; `oracle+vtb` / `mssql+vtb` connections raise `MissingDependencyError`; `duckdb+vtb` requires the `duckdb` package. Remove the `typing.py` link.
 - **Dialect chapter frontmatter**: prepend `{by: agent:flow-executor, at: <UTC now>, commit: <HEAD short sha>}` as the first `verified:` entry, keeping earlier entries; add source `src-oracle-driver-py` (`src/py/vertebra/db/adapters/oracle/driver.py::SyncOracleDriver`, "Oracle driver native-module guard") with a matching `[^src-oracle-driver-py]:` footnote in the existing `` `resource` — title. `` format.
 - **Domain index, embeddings entry**: after `OracleEmbeddingPushdown` add `(requires the pending native Oracle driver)`.
-- **Domain index, drivers entry**: the driver list reads `` `SyncPostgreSQLDriver`, `AsyncPostgreSQLDriver`, MySQL, SQLite, DuckDB (requires `duckdb`), BigQuery, Spanner, Redis, and Valkey drivers, Oracle and MSSQL drivers (native drivers pending; construction raises `MissingDependencyError`) ``, followed by the unchanged `ArrowCursor` … `DatabaseRegistry`, `UnsupportedBackendError` symbols. `UnsupportedBackendError` stays: `src/py/vertebra/_typing.py::UnsupportedBackendError` exists at `0acdf576` and no chapter removes it.
+- **Domain index, drivers entry**: the driver list reads `` `SyncPostgreSQLDriver`, `AsyncPostgreSQLDriver`, MySQL, SQLite, DuckDB (requires `duckdb`), BigQuery, Spanner, Redis, and Valkey drivers, Oracle and MSSQL drivers (native drivers pending; construction raises `MissingDependencyError`) ``, followed by the unchanged `ArrowCursor` … `DatabaseRegistry`, `UnsupportedBackendError` symbols. `UnsupportedBackendError` stays: `src/py/vertebra/_typing.py::UnsupportedBackendError` exists at `d2b168dc` and no chapter removes it.
 - **docs/index.md "Databases & Analytics" row**: replace "Nine native database drivers" with "PostgreSQL, MySQL, SQLite, DuckDB, BigQuery, Spanner, Redis, and Valkey drivers (native Oracle and SQL Server drivers are not yet published)"; keep the rest of the cell.
 
 ## Edge Cases & Error Semantics
 
-- If `SyncDBAPIConnection.__init__` still substitutes `SQLiteConfig` on a parse failure (ch02 t02 incomplete), stop and set `blocked_reason`.
+- If `SyncDBAPIConnection.__init__` lacks the `InterfaceError` URL-parse guard (ch02 t02 incomplete), stop and set `blocked_reason`.
 - `domains/index.md` is a reserved subdirectory index: no frontmatter, no footnotes; edit list text only.
 - `docs/index.md`: no `vertebra-core[oracle]` / `[mssql]` command, no internal identifiers, no exclamation marks.
 - Dialect chapter truth block stays unchanged (it states pool sharing and entry-point counts only).
@@ -197,7 +197,7 @@ uv run --no-sync pytest src/py/tests/unit/tools/test_docs_tooling.py -q
 
 ## Notes & Discoveries
 
-- [2026-11-08 00:00] At `0acdf576` `src/py/vertebra/extensions/sqlalchemy/dialects.py` contains no `UnsupportedBackendError`; the dialect chapter's claim already describes no code.
+- [2026-11-08 00:00] At `d2b168dc` `src/py/vertebra/extensions/sqlalchemy/dialects.py` contained no `UnsupportedBackendError`; the dialect chapter replaces that stale claim with `InterfaceError`.
 - [2026-11-08 00:00] Update `[k/11 files documented]` in the chapter spec and root spec when closing this task.
 
 [^okf-dialects]: `.agents/bundles/knowledge/domains/extensions/sqlspec-alchemy-and-dialects.md` — OKF SQLSpec, Advanced Alchemy, and SQLAlchemy dialect chapter.

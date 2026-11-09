@@ -24,9 +24,9 @@ generated:
   by: flow/0.28.0
   at: "2026-11-07T00:00:00Z"
 verified:
-  - by: agent:plan-generator
-    at: "2026-11-08T00:00:00Z"
-    commit: 0acdf576
+  - by: agent:flow-executor
+    at: "2026-11-09T15:16:39Z"
+    commit: adaf1243
 sources:
   - id: docs-queues-usage
     resource: docs/usage/queues-and-realtime.md
@@ -82,19 +82,17 @@ tags:
 
 ### 1.1 Problem Statement & Objectives
 
-Chapter 02 task t03 makes `OracleQueueBackend` raise when no executor is injected, and chapter 10 applies the same contract to `PostgreSQLQueueBackend` and `SpannerQueueBackend` and a client-or-raise contract to `RedisQueueBackend` / `ValkeyQueueBackend`.[^ch02-oracle-contract][^ch10-contract] The three documents that describe queue backends still present every network backend as usable from a URL alone and carry mechanics no shipped code implements:
+`docs/usage/queues-and-realtime.md`, `docs/reference/queues.md`, and `.agents/bundles/knowledge/domains/framework/distributed-queues-and-email.md` document the executor-or-raise and client-or-raise queue contracts delivered by chapters 02 and 10:[^ch02-oracle-contract][^ch10-contract][^docs-queues-usage][^docs-queues-reference][^okf-queues]
 
-- `docs/usage/queues-and-realtime.md` lists PostgreSQL, Redis, Valkey, Oracle, and Cloud Spanner rows with no executor, client, or install requirement, and the Cloud Spanner row claims "Wound-wait claim transactions".[^docs-queues-usage]
-- `docs/reference/queues.md` omits `SpannerQueueBackend` from its intro sentence, Storage Backends row, and Queue Backends autodoc blocks; the row claims "RESP3 streams" and "Oracle AQ/table queues"; every backend block lists a `claim` member that no backend defines (the method is `dequeue`).[^docs-queues-reference]
-- `.agents/bundles/knowledge/domains/framework/distributed-queues-and-email.md` describes Redis as list plus `ZADD`/`ZPOPMIN`, Valkey as client-side tracking, PostgreSQL as a `vertebra_tasks` table, Oracle as `DBMS_AQ`, and Spanner as multiplexed-session leasing, and states no executor or client rule.[^okf-queues]
+- PostgreSQL (`psycopg[binary,pool]`), Oracle (`oracledb`), and Cloud Spanner (`vertebra-core[spanner]`) backends require an injected `executor=` over `vertebra_queue_jobs`, raising `MissingDependencyError` or `ImproperConfigurationError` when invoked from a URL alone without claiming wound-wait transactions, multiplexed sessions, `DBMS_AQ`, or `vertebra_tasks`.[^pg-queue][^oracle-queue][^spanner-queue]
+- Redis and Valkey (`redis`) backends bind an injected `client=` or construct `redis.asyncio.from_url` for hosted `redis://` / `rediss://` URLs (`valkey://`, `valkeys://`, and Unix sockets require `client=`), operating over per-lane Redis Streams consumer groups and a Lua-promoted scheduled sorted set.[^redis-queue]
+- `docs/reference/queues.md` includes `SpannerQueueBackend` across its overview, storage row, and autodoc blocks using the defined `[enqueue, dequeue, ack, nack]` methods.[^docs-queues-reference]
 
-This chapter rewrites those passages in present tense so user docs and agent knowledge describe the queue backends at the chapter 10 closing commit.
-
-**Non-goals**: `valkey://` / `valkeys://` URL support in `RedisQueueBackend` (follow-up spec); live `oracledb`, `psycopg`, or Spanner executors (owned by the `native-<engine>-driver` flows); database driver docs (owned by `ch11-docs-and-okf`); Python docstrings in `src/py/vertebra/framework/queues/*.py` (owned by ch02 t03 and ch10); `docs/examples/background_queues.py`, `docs/usage/testing.md`, and the changelog.
+**Non-goals**: native `valkey://` / `valkeys://` URL rewriting inside `RedisQueueBackend` (follow-up spec; documented explicitly as requiring `client=` or `redis://` / `rediss://`); live `oracledb`, `psycopg`, or Spanner executors (owned by `queues-tasks-and-channels` and a Spanner queue follow-up); database driver docs (owned by `ch11-docs-and-okf`); `docs/examples/background_queues.py`, `docs/usage/testing.md`, and the changelog.
 
 ### 1.2 Upstream Execution Baseline
 
-- Branch `feat/storage-updates`, plan anchored at `0acdf576`; parent roadmap [`spec.md`](../../spec.md).
+- Branch `feat/driver-fail-loud` stacked on `feat/storage-updates` (`d2b168dc`); parent roadmap [`spec.md`](../../spec.md).
 - Depends on `ch10-queue-backend-fail-loud` (PostgreSQL, Redis/Valkey, Spanner contracts) and transitively on `ch02-duckdb-sqlalchemy-queue-fail-loud` t03 (Oracle contract) and `ch08-install-hints-and-extras-gate` (`MissingDependencyError` hint defaults to `vertebra-core[<extra>]`).[^ch10-contract][^ch02-oracle-contract]
 - Depends on `ch11-docs-and-okf` so the two documentation chapters never edit concurrently and the user-doc phrasing for `MissingDependencyError` stays consistent.
 - Executors read the post-ch10 source named in the worksheet and document the code as found.
@@ -202,7 +200,7 @@ Error contract quoted in docs (from ch02 t03 and ch10):[^ch02-oracle-contract][^
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline (`HEAD`)**: `3cee2a23` — chapter completed and verified (`1/1` tasks completed).
+- **Verified Baseline (`HEAD`)**: `adaf1243` — chapter completed and verified (`1/1` tasks completed).
 - **Remaining Tasks**: None (`1/1` completed).
 - **Documentation & OKF Sync**: `[3/3 files documented]`.
 - **Active Invariants**: `memory://` queue docs unchanged; changelog untouched; no internal identifiers in user docs.

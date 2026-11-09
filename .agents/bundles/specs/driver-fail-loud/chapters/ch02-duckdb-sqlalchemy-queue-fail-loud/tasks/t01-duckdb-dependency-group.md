@@ -37,7 +37,7 @@ commit: 235425bd
 sources:
   - id: dep-groups
     resource: pyproject.toml::dependency-groups
-    title: dev, test, and bench dependency groups; duckdb only in bench
+    title: GIL-only duckdb dependency group included by bench and excluded from dev
   - id: make-install
     resource: Makefile::install
     title: Fresh install pinning Python 3.12 and running uv sync --all-extras --dev --group doc
@@ -169,7 +169,7 @@ Recipe lines after the change:
 
 - [2026-11-07 00:00] `duckdb` 2.0.0 publishes only `cp312-abi3` wheels; `uv pip install --dry-run --no-build --python 3.14t duckdb==2.0.0` fails. The CI `test-python` matrix includes `3.14t` and `3.15t`.
 
-[^dep-groups]: `pyproject.toml::dependency-groups` — dev, test, and bench dependency groups; `duckdb` only in `bench`.
+[^dep-groups]: `pyproject.toml::dependency-groups` — GIL-only `duckdb` dependency group included by `bench` and excluded from `dev`.
 [^make-install]: `Makefile::install` — Fresh install pinning Python 3.12 and running `uv sync --all-extras --dev --group doc`.
 [^make-py-test]: `Makefile::py-test` — Python test target running stubtest and `uv run pytest`.
 [^make-coverage]: `Makefile::coverage` — Coverage target running `uv run pytest --cov`.

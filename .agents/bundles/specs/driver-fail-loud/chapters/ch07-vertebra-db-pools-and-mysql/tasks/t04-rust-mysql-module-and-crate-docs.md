@@ -11,11 +11,9 @@ verification_strategy: static_validation
 depends_on:
   - "driver-fail-loud:ch07:t03"
 read_set:
-  - src/rs/vertebra-db/src/mysql/mod.rs
   - src/rs/vertebra-db/src/lib.rs
   - src/rs/vertebra-db/Cargo.toml
 files:
-  - src/rs/vertebra-db/src/mysql/mod.rs
   - src/rs/vertebra-db/src/lib.rs
   - src/rs/vertebra-db/Cargo.toml
 tests:
@@ -37,8 +35,8 @@ updated_at: "2026-11-09T14:38:00Z"
 commit: b20f9d30
 sources:
   - id: mysql-rs
-    resource: src/rs/vertebra-db/src/mysql/mod.rs::compute_caching_sha2_scramble
-    title: MySQL framing and caching_sha2 scramble, the sole sha2 user
+    resource: src/rs/Cargo.toml
+    title: Workspace Cargo dependency manifest keeping sha2 for core and storage
   - id: db-lib
     resource: src/rs/vertebra-db/src/lib.rs
     title: Crate doc, module list, and re-exports
@@ -142,6 +140,6 @@ Grep-only verification: `grep -rn "vertebra_db::mysql\|mysql::" src/rs --include
 
 - [2026-11-07 00:00] A grep of `vertebra-db/src` and `tests` finds no direct use of `base64`, `chrono`, `futures`, `hex`, `hmac`, `http-body-util`, `hyper`, `hyper-util`, `lz4_flex`, `reqwest`, `serde_json`, `url`, or `zstd`; they are candidates for a `cargo machete` follow-up outside this chapter.
 
-[^mysql-rs]: `src/rs/vertebra-db/src/mysql/mod.rs::compute_caching_sha2_scramble` — MySQL framing and caching_sha2 scramble, the sole sha2 user.
+[^mysql-rs]: `src/rs/Cargo.toml` — Workspace Cargo dependency manifest keeping sha2 for core and storage.
 [^db-lib]: `src/rs/vertebra-db/src/lib.rs` — Crate doc, module list, and re-exports.
 [^db-cargo]: `src/rs/vertebra-db/Cargo.toml` — Package description and dependencies.

@@ -84,7 +84,7 @@ Out of scope: user docs (t01, t02); tenancy, product, and ADR chapters (t04); Bi
 - `src/py/tests/integration/db/test_driver_conformance.py::_resolve_live_config` and `::_resolve_cache_config` — post-ch09 skip/fail logic, the Redis/Valkey live-only rule, env vars.[^conformance][^conformance-cache]
 - `src/py/tests/unit/build/test_packaging_and_pgo.py` — the extras-gate test name and what it scans.[^packaging-test]
 
-Fact outside the read set, verified at `0acdf576` and unchanged by ch01–ch09: `src/py/vertebra/db/adapters/oracle/config.py::OracleWallet` parses Autonomous Database wallets (`from_zip_bytes`, `from_path`, `resolve_alias`); after ch07 deletes the `OracleWalletMaterial` struct with `from_directory`, Rust `src/rs/vertebra-db/src/oracle/tns.rs` keeps `parse_tnsnames_ora`, `resolve_tns_alias`, and `OracleConnectDescriptor` only.[^oracle-wallet]
+Fact outside the read set, verified at `d2b168dc` and unchanged by ch01–ch09: `src/py/vertebra/db/adapters/oracle/config.py::OracleWallet` parses Autonomous Database wallets (`from_zip_bytes`, `from_path`, `resolve_alias`); after ch07 deletes the `OracleWalletMaterial` struct with `from_directory`, Rust `src/rs/vertebra-db/src/oracle/tns.rs` keeps `parse_tnsnames_ora`, `resolve_tns_alias`, and `OracleConnectDescriptor` only.[^oracle-wallet]
 
 ## Symbol & Signature Contracts
 

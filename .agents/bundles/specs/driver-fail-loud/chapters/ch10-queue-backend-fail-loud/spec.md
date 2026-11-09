@@ -24,31 +24,31 @@ generated:
   by: flow/0.28.0
   at: "2026-11-08T00:00:00Z"
 verified:
-  - by: agent:plan-generator
-    at: "2026-11-08T00:00:00Z"
-    commit: 0acdf576
+  - by: agent:flow-executor
+    at: "2026-11-09T15:00:30Z"
+    commit: 186438f3
 sources:
   - id: pg-queue
     resource: src/py/vertebra/framework/queues/postgres.py::PostgreSQLQueueBackend
-    title: PostgreSQL queue backend whose _build_executor always returns the in-memory executor
+    title: PostgreSQL queue backend requiring psycopg and an injected PostgreSQLQueueExecutor
   - id: pg-fake
-    resource: src/py/vertebra/framework/queues/postgres.py::_InMemoryPostgreSQLQueueExecutor
-    title: In-memory simulation of PostgreSQL queue SQL, SKIP LOCKED, and LISTEN/NOTIFY
+    resource: src/py/vertebra/framework/queues/postgres.py::PostgreSQLQueueExecutor
+    title: Runtime-checkable PostgreSQL queue executor protocol
   - id: redis-queue
     resource: src/py/vertebra/framework/queues/redis.py::RedisQueueBackend._build_client
-    title: Redis client factory that substitutes the in-memory client when redis.asyncio is missing or the URL has no host
+    title: Redis client factory requiring redis.asyncio and a hosted backend_url
   - id: redis-fake
-    resource: src/py/vertebra/framework/queues/redis.py::_InMemoryRedisStreamClient
-    title: In-memory emulator of Redis Streams, sorted sets, and the queue Lua scripts
+    resource: src/py/vertebra/framework/queues/redis.py::RedisStreamClient
+    title: Runtime-checkable Redis Streams client protocol
   - id: spanner-queue
     resource: src/py/vertebra/framework/queues/spanner.py::SpannerQueueBackend
-    title: Spanner queue backend selecting an injected, driver-wrapped, or in-memory executor
+    title: Spanner queue backend requiring vertebra._spanner and an injected SpannerQueueExecutor
   - id: spanner-fake
-    resource: src/py/vertebra/framework/queues/spanner.py::_InMemorySpannerQueueExecutor
-    title: In-memory simulation of hash-sharded Spanner queue SQL
+    resource: src/py/vertebra/framework/queues/spanner.py::SpannerQueueExecutor
+    title: Runtime-checkable Spanner queue executor protocol
   - id: spanner-driver-exec
-    resource: src/py/vertebra/framework/queues/spanner.py::_DriverSpannerQueueExecutor
-    title: Driver wrapper that runs DDL once and routes every DML and query to an in-memory mirror
+    resource: src/py/vertebra/framework/queues/base.py::QueueConfig
+    title: Queue configuration across memory, Redis, Valkey, PostgreSQL, Oracle, and Spanner backends
   - id: queue-factory
     resource: src/py/vertebra/framework/queues/base.py::QueueService._build_backend
     title: Queue URL scheme routing to backend constructors without an executor or client
@@ -66,10 +66,10 @@ sources:
     title: Queue contract test backend factory
   - id: email-tests
     resource: src/py/tests/unit/framework/test_email_providers.py::test_email_service_enqueue_and_enqueue_batch_via_queue_service
-    title: Email service queue test parametrized over memory:// and redis://
+    title: Email service queue test injecting FakeRedisStreamClient for redis://
   - id: spanner-tests
     resource: src/py/tests/unit/db/test_spanner_queue_and_cdc.py::test_spanner_queue_backend_lifecycle_dlq_and_leases
-    title: Spanner queue lifecycle test using driver= and a spanner+googlesql QueueService
+    title: Spanner queue lifecycle test injecting _FakeSpannerQueueExecutor
   - id: oracle-task
     resource: .agents/bundles/specs/driver-fail-loud/chapters/ch02-duckdb-sqlalchemy-queue-fail-loud/tasks/t03-oracle-queue-requires-oracledb.md
     title: Oracle queue fail-loud worksheet whose executor-or-raise contract this chapter mirrors
@@ -107,26 +107,26 @@ tags:
 
 ### 1.1 Problem Statement & Objectives
 
-Three queue backends substitute an in-process simulation when their live dependency or configuration is missing, so a production `QueueConfig(backend_url=...)` can run on a dictionary that loses every task at process exit:
+`PostgreSQLQueueBackend`, `RedisQueueBackend` / `ValkeyQueueBackend`, and `SpannerQueueBackend` carry no production in-memory executors or stream clients and enforce explicit fail-loud construction:
 
-- `PostgreSQLQueueBackend._build_executor` imports `psycopg`, discards it (`if psycopg is not None and "localhost" not in self._direct_dsn: pass`), and returns `_InMemoryPostgreSQLQueueExecutor()` on every path.[^pg-queue][^pg-fake]
-- `RedisQueueBackend._build_client` returns `redis.asyncio.from_url(backend_url)` only when `redis.asyncio` imports and the URL has a hostname; otherwise it returns `_InMemoryRedisStreamClient()`. `ValkeyQueueBackend` inherits this, and its default `QueueConfig` (`backend_url="memory://"`) always selects the emulator.[^redis-queue][^redis-fake]
-- `SpannerQueueBackend` uses `_InMemorySpannerQueueExecutor` when neither `executor=` nor `driver=` is given. With `driver=`, it uses `_DriverSpannerQueueExecutor`, which issues DDL once (swallowing every exception), runs a discarded `SELECT` inside `run_in_transaction` for claims (swallowing every exception), and routes every `execute`, `fetch_all`, and `fetch_one` result to an embedded `_InMemorySpannerQueueExecutor`. No row reaches Spanner.[^spanner-queue][^spanner-fake][^spanner-driver-exec]
+- `PostgreSQLQueueBackend` binds an injected `PostgreSQLQueueExecutor` (`executor=`) and otherwise resolves `psycopg` (`install_package="psycopg[binary,pool]"`) before raising `ImproperConfigurationError`.[^pg-queue][^pg-fake]
+- `RedisQueueBackend` (and its `ValkeyQueueBackend` subclass) binds an injected `RedisStreamClient` (`client=`) and otherwise resolves `redis.asyncio` (`install_package="redis"`), raises `ImproperConfigurationError` when `backend_url` has no hostname, and delegates hosted `redis://` / `rediss://` URLs to `redis.asyncio.from_url`.[^redis-queue][^redis-fake]
+- `SpannerQueueBackend` validates a Spanner URL scheme, binds an injected `SpannerQueueExecutor` (`executor=`), and otherwise resolves `vertebra._spanner` (`extra="spanner"`) before raising `ImproperConfigurationError`, with no `driver=` mirror or `memory://` scheme allowance.[^spanner-queue][^spanner-fake][^spanner-driver-exec]
 
-`QueueService._build_backend` constructs each backend from the URL alone, so `postgresql://`, `redis://`, `valkey://`, and `spanner://` queue URLs reach these substitutes.[^queue-factory] This chapter applies the `ch02` Oracle queue contract to all three: bind what the caller injects, otherwise raise `MissingDependencyError` for the missing package and `ImproperConfigurationError` for the missing executor or host.[^oracle-task] Redis keeps its live `redis.asyncio` path; PostgreSQL and Spanner have no live executor, so `executor=` becomes mandatory.
+`QueueService._build_backend` routes `postgresql://`, `redis://`, `valkey://`, and `spanner://` URLs directly into those fail-loud constructors while keeping `""` and `memory://` routed to `MemoryQueueBackend`, matching the `ch02` Oracle queue contract; unit test doubles (`_FakePostgreSQLQueueExecutor`, `FakeRedisStreamClient`, `_FakeSpannerQueueExecutor`) reside solely in the test modules.[^queue-factory][^oracle-task][^queue-tests]
 
 ### 1.2 Non-Goals
 
 - Live PostgreSQL and Oracle queue executors: the `queues-tasks-and-channels` flow owns them as `PostgresQueueStore` (`vertebra/db/adapters/postgres/queue.py`) and `OracleQueueStore` (`vertebra/db/adapters/oracle/queue.py`).[^queues-flow]
 - A live Spanner queue executor over `SyncSpannerDriver` / `AsyncSpannerDriver` transactions: no flow owns it; it is a follow-up spec opened with `/flow:plan spanner-queue-executor`.
-- Mapping `valkey://` / `valkeys://` to schemes `redis.asyncio.from_url` accepts, and `unix://` socket URLs for `RedisQueueBackend` (recorded in `t02` Notes as a follow-up).
+- Mapping `valkey://` / `valkeys://` to schemes `redis.asyncio.from_url` accepts, and `unix://` socket URLs for `RedisQueueBackend` (documented in `redis.py`, `docs/reference/queues.md`, and `distributed-queues-and-email.md`).
 - `OracleQueueBackend` fail-loud construction (owned by `ch02 / t03`) and `MemoryQueueBackend` (`memory://`, preserved).
 - Removing `from __future__ import annotations` from touched modules (separate cleanup; `TYPE_CHECKING`-only annotations need quoting first).
 - User docs and OKF prose (owned by [ch12-queue-docs-and-knowledge](../ch12-queue-docs-and-knowledge/spec.md); see Section 3).
 
 ### 1.3 Upstream Execution Baseline
 
-- Branch `feat/storage-updates` at `0acdf576`; parent flow [`driver-fail-loud`](../../spec.md).
+- Branch `feat/driver-fail-loud` stacked on `feat/storage-updates` (`d2b168dc`); parent flow [`driver-fail-loud`](../../spec.md).
 - Depends on `ch02-duckdb-sqlalchemy-queue-fail-loud`: `ch02 / t03` adds `_FakeOracleQueueExecutor`, `import sys`, `import types`, `import uuid`, and the `ImproperConfigurationError` / `MissingDependencyError` / `reset_dependency_cache` imports to `test_distributed_queues.py`, which `t01` and `t02` extend.[^oracle-task]
 - Depends on [ch08-install-hints-and-extras-gate](../ch08-install-hints-and-extras-gate/spec.md): `ch08 / t01` defaults `MissingDependencyError.install_package` to `vertebra-core[<extra>]`, and the `ch08 / t04` extras gate in `test_packaging_and_pgo.py` rejects undeclared `extra=` literals and whitespace in `package=` / `install_package=` literals under `src/py/vertebra`, so every literal this chapter adds runs through that gate.[^errors][^extras]
 - Does not depend on `ch09-conformance-outcomes`: no file overlaps; this chapter edits no conformance or integration fixture file.
@@ -305,26 +305,26 @@ Accepted Spanner schemes: `""`, `spanner`, `spanner+googlesql`, `spangres`, `spa
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline (`HEAD`)**: `f4d9361d` — chapter completed; `3/3` tasks completed.
+- **Verified Baseline (`HEAD`)**: `186438f3` — chapter completed; `3/3` tasks completed.
 - **Active Task**: `null`
 - **Remaining Plan**: none (`3/3` tasks completed).
 - **Documentation & OKF Sync**: `[4/4 files documented]`; user docs and OKF rows go to `ch12-queue-docs-and-knowledge`.
 - **Active Invariants & Triggers**: `MemoryQueueBackend` and `memory://` routing are untouched; no queue module imports `psycopg`, `redis`, or `vertebra._spanner` at module level; no new `extra=` literal other than the declared `spanner`.
 
-[^pg-queue]: `src/py/vertebra/framework/queues/postgres.py::PostgreSQLQueueBackend` — PostgreSQL queue backend whose `_build_executor` always returns the in-memory executor.
-[^pg-fake]: `src/py/vertebra/framework/queues/postgres.py::_InMemoryPostgreSQLQueueExecutor` — In-memory simulation of PostgreSQL queue SQL, SKIP LOCKED, and LISTEN/NOTIFY.
-[^redis-queue]: `src/py/vertebra/framework/queues/redis.py::RedisQueueBackend._build_client` — Redis client factory that substitutes the in-memory client when `redis.asyncio` is missing or the URL has no host.
-[^redis-fake]: `src/py/vertebra/framework/queues/redis.py::_InMemoryRedisStreamClient` — In-memory emulator of Redis Streams, sorted sets, and the queue Lua scripts.
-[^spanner-queue]: `src/py/vertebra/framework/queues/spanner.py::SpannerQueueBackend` — Spanner queue backend selecting an injected, driver-wrapped, or in-memory executor.
-[^spanner-fake]: `src/py/vertebra/framework/queues/spanner.py::_InMemorySpannerQueueExecutor` — In-memory simulation of hash-sharded Spanner queue SQL.
-[^spanner-driver-exec]: `src/py/vertebra/framework/queues/spanner.py::_DriverSpannerQueueExecutor` — Driver wrapper that runs DDL once and routes every DML and query to an in-memory mirror.
+[^pg-queue]: `src/py/vertebra/framework/queues/postgres.py::PostgreSQLQueueBackend` — PostgreSQL queue backend requiring `psycopg` and an injected `PostgreSQLQueueExecutor`.
+[^pg-fake]: `src/py/vertebra/framework/queues/postgres.py::PostgreSQLQueueExecutor` — Runtime-checkable PostgreSQL queue executor protocol.
+[^redis-queue]: `src/py/vertebra/framework/queues/redis.py::RedisQueueBackend._build_client` — Redis client factory requiring `redis.asyncio` and a hosted `backend_url`.
+[^redis-fake]: `src/py/vertebra/framework/queues/redis.py::RedisStreamClient` — Runtime-checkable Redis Streams client protocol.
+[^spanner-queue]: `src/py/vertebra/framework/queues/spanner.py::SpannerQueueBackend` — Spanner queue backend requiring `vertebra._spanner` and an injected `SpannerQueueExecutor`.
+[^spanner-fake]: `src/py/vertebra/framework/queues/spanner.py::SpannerQueueExecutor` — Runtime-checkable Spanner queue executor protocol.
+[^spanner-driver-exec]: `src/py/vertebra/framework/queues/base.py::QueueConfig` — Queue configuration across memory, Redis, Valkey, PostgreSQL, Oracle, and Spanner backends.
 [^queue-factory]: `src/py/vertebra/framework/queues/base.py::QueueService._build_backend` — Queue URL scheme routing to backend constructors without an executor or client.
 [^module-loader]: `src/py/vertebra/utils/module_loader.py::ensure_module` — Optional module loader raising `MissingDependencyError`.
 [^errors]: `src/py/vertebra/_typing.py::MissingDependencyError` — Missing dependency error and `ImproperConfigurationError` exported from `vertebra.typing`.
 [^extras]: `pyproject.toml::project.optional-dependencies` — Declared extras; `spanner` is declared, `redis` and `postgres` are not.
 [^queue-tests]: `src/py/tests/unit/framework/test_distributed_queues.py::_create_backend_by_url` — Queue contract test backend factory.
-[^email-tests]: `src/py/tests/unit/framework/test_email_providers.py::test_email_service_enqueue_and_enqueue_batch_via_queue_service` — Email service queue test parametrized over `memory://` and `redis://`.
-[^spanner-tests]: `src/py/tests/unit/db/test_spanner_queue_and_cdc.py::test_spanner_queue_backend_lifecycle_dlq_and_leases` — Spanner queue lifecycle test using `driver=` and a `spanner+googlesql` `QueueService`.
+[^email-tests]: `src/py/tests/unit/framework/test_email_providers.py::test_email_service_enqueue_and_enqueue_batch_via_queue_service` — Email service queue test injecting `FakeRedisStreamClient` for `redis://`.
+[^spanner-tests]: `src/py/tests/unit/db/test_spanner_queue_and_cdc.py::test_spanner_queue_backend_lifecycle_dlq_and_leases` — Spanner queue lifecycle test injecting `_FakeSpannerQueueExecutor`.
 [^oracle-task]: `.agents/bundles/specs/driver-fail-loud/chapters/ch02-duckdb-sqlalchemy-queue-fail-loud/tasks/t03-oracle-queue-requires-oracledb.md` — Oracle queue fail-loud worksheet whose executor-or-raise contract this chapter mirrors.
 [^queue-docs]: `docs/usage/queues-and-realtime.md` — Queue backend table listing PostgreSQL, Redis, Valkey, Oracle, and Cloud Spanner.
 [^queues-flow]: `.agents/bundles/specs/queues-tasks-and-channels/spec.md` — Native queue flow owning `PostgresQueueStore` and `OracleQueueStore` live queue executors.

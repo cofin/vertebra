@@ -15,8 +15,8 @@ verified:
     commit: 9af810f5
 sources:
   - id: pg-core-rs
-    resource: src/rs/vertebra-db/src/postgres/mod.rs::PostgresPool
-    title: Shared PostgreSQL wire frame helpers in vertebra-db
+    resource: src/rs/vertebra-db/src/postgres/mod.rs::PoolerMode
+    title: Shared PostgreSQL wire frame and pooler helpers in vertebra-db
   - id: pg-driver-py
     resource: src/py/vertebra/db/adapters/postgres/driver.py::SyncPostgreSQLDriver
     title: Python PostgreSQL driver target cutover seam
@@ -79,5 +79,5 @@ Plan state is `planned` at `plan_revision: 2` and `plan_commit: 9af810f5`. The n
 [t01](tasks/t01-package-scaffold.md). This document claims no production build,
 native/live service, installed-wheel, free-threaded or performance acceptance.
 
-[^pg-core-rs]: `src/rs/vertebra-db/src/postgres/mod.rs::PostgresPool` — Shared PostgreSQL wire frame helpers in vertebra-db.
+[^pg-core-rs]: `src/rs/vertebra-db/src/postgres/mod.rs::PoolerMode` — Shared PostgreSQL wire frame and pooler helpers in vertebra-db.
 [^pg-driver-py]: `src/py/vertebra/db/adapters/postgres/driver.py::SyncPostgreSQLDriver` — Python PostgreSQL driver target cutover seam.

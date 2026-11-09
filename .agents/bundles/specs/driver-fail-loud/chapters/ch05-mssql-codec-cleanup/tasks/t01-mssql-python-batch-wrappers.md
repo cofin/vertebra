@@ -38,10 +38,10 @@ commit: 9e7ad81c
 sources:
   - id: mssql-core
     resource: src/py/vertebra/db/adapters/mssql/core.py::MSSQLCore
-    title: MSSQL TDS helpers, batch wrapper, and native probes
+    title: MSSQL TDS packet helpers and @P1 placeholder rewriter
   - id: mssql-config
-    resource: src/py/vertebra/db/adapters/mssql/config.py::MSSQLConfig.encode_sql_batch
-    title: Config helper wrapping MSSQLCore.encode_tds_sql_batch
+    resource: src/py/vertebra/db/adapters/mssql/config.py::MSSQLConfig
+    title: SQL Server connection configuration and placeholder rewrite helper
   - id: mssql-init
     resource: src/py/vertebra/db/adapters/mssql/__init__.py
     title: MSSQL package lazy exports
@@ -131,7 +131,7 @@ Grep-only verification (no full read): `grep -rn "encode_tds_sql_batch\|encode_s
 
 - [2026-11-08 00:00] `MSSQLCore.encode_tds_sql_batch` reaches the binding through `import_optional` plus `hasattr` with a pure-Python fallback, so wrappers and binding land in separate commits without an import error.
 
-[^mssql-core]: `src/py/vertebra/db/adapters/mssql/core.py::MSSQLCore` — MSSQL TDS helpers, batch wrapper, and native probes.
-[^mssql-config]: `src/py/vertebra/db/adapters/mssql/config.py::MSSQLConfig.encode_sql_batch` — Config helper wrapping MSSQLCore.encode_tds_sql_batch.
+[^mssql-core]: `src/py/vertebra/db/adapters/mssql/core.py::MSSQLCore` — MSSQL TDS packet helpers and @P1 placeholder rewriter.
+[^mssql-config]: `src/py/vertebra/db/adapters/mssql/config.py::MSSQLConfig` — SQL Server connection configuration and placeholder rewrite helper.
 [^mssql-init]: `src/py/vertebra/db/adapters/mssql/__init__.py` — MSSQL package lazy exports.
 [^olap-test]: `src/py/tests/unit/db/test_enterprise_olap_drivers.py::test_mssql_tds_framing_and_placeholder_rewriter` — TDS framing and placeholder rewriter test.

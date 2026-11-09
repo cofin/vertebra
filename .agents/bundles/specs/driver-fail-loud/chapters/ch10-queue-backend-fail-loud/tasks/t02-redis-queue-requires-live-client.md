@@ -40,10 +40,10 @@ commit: 186438f3
 sources:
   - id: redis-queue
     resource: src/py/vertebra/framework/queues/redis.py::RedisQueueBackend._build_client
-    title: Redis client factory that substitutes the in-memory client when redis.asyncio is missing or the URL has no host
+    title: Redis client factory requiring redis.asyncio and a hosted backend_url
   - id: redis-fake
-    resource: src/py/vertebra/framework/queues/redis.py::_InMemoryRedisStreamClient
-    title: In-memory emulator of Redis Streams, sorted sets, and the queue Lua scripts
+    resource: src/py/vertebra/framework/queues/redis.py::RedisStreamClient
+    title: Runtime-checkable Redis Streams client protocol
   - id: valkey-queue
     resource: src/py/vertebra/framework/queues/redis.py::ValkeyQueueBackend
     title: Valkey subclass whose default QueueConfig has backend_url memory://
@@ -188,8 +188,8 @@ q_service = (
 - [2026-11-08 00:00] `redis.asyncio.from_url` parses URLs with `redis.connection.parse_url`, which accepts `redis://`, `rediss://`, and `unix://` only; `valkey://` and `valkeys://` URLs routed by `QueueService._build_backend` raise `ValueError` from `redis-py` once the emulator no longer intercepts them. Scheme rewriting is a follow-up for `/flow:plan`; `redis` is not installed locally, so this is sourced from `redis-py`, not executed.
 - [2026-11-08 00:00] `unix:///path/redis.sock` has no hostname and raises `ImproperConfigurationError`; `QueueService` never routes `unix://` to `RedisQueueBackend`, so only direct construction is affected.
 
-[^redis-queue]: `src/py/vertebra/framework/queues/redis.py::RedisQueueBackend._build_client` — Redis client factory that substitutes the in-memory client when `redis.asyncio` is missing or the URL has no host.
-[^redis-fake]: `src/py/vertebra/framework/queues/redis.py::_InMemoryRedisStreamClient` — In-memory emulator of Redis Streams, sorted sets, and the queue Lua scripts.
+[^redis-queue]: `src/py/vertebra/framework/queues/redis.py::RedisQueueBackend._build_client` — Redis client factory requiring `redis.asyncio` and a hosted `backend_url`.
+[^redis-fake]: `src/py/vertebra/framework/queues/redis.py::RedisStreamClient` — Runtime-checkable Redis Streams client protocol.
 [^valkey-queue]: `src/py/vertebra/framework/queues/redis.py::ValkeyQueueBackend` — Valkey subclass whose default `QueueConfig` has `backend_url` `memory://`.
 [^queue-factory]: `src/py/vertebra/framework/queues/base.py::QueueService._build_backend` — `redis`, `rediss`, `valkey`, and `valkeys` queue URLs route to `RedisQueueBackend` / `ValkeyQueueBackend(config)`.
 [^module-loader]: `src/py/vertebra/utils/module_loader.py::ensure_module` — Optional module loader raising `MissingDependencyError`.

@@ -183,12 +183,13 @@ class RedisQueueBackend:
         """Bind the queue backend to a Redis Streams client.
 
         Args:
-            config: Queue configuration; ``backend_url`` names the Redis or Valkey server when ``client`` is None.
+            config: Queue configuration; when ``client`` is None, ``backend_url`` must carry a ``redis://`` or ``rediss://`` host URL accepted by ``redis.asyncio.from_url`` (pass ``client=`` for ``valkey://``, ``valkeys://``, or ``unix://`` endpoints).
             client: Pre-built ``RedisStreamClient`` bound as given.
 
         Raises:
             MissingDependencyError: When ``client`` is None and ``redis`` is not installed.
-            ImproperConfigurationError: When ``client`` is None and ``config.backend_url`` has no host.
+            ImproperConfigurationError: When ``client`` is None and ``config.backend_url`` has no hostname (including ``unix://`` URLs).
+            ValueError: When ``client`` is None and ``redis.asyncio.from_url`` rejects the URL scheme (such as ``valkey://`` or ``valkeys://``).
         """
         self._config = config or QueueConfig()
         self._prefix = self._config.stream_prefix

@@ -11,11 +11,10 @@ The completed database foundation is documented in [driver contracts and adapter
 
 ## 2. Active Feature Specifications (`state: active`)
 
-None.
+- [`driver-fail-loud`](driver-fail-loud/spec.md) — Fail-loud database drivers and queue backends removing SQLite and `memory://` stand-ins, dead `vertebra-db` pools/codecs, and stale install hints across 13 completed chapters and 38 completed tasks ([`chapters/index.md`](driver-fail-loud/chapters/index.md)).
 
 ## 3. Planned Feature Specifications (`state: planned`)
 
-- [`driver-fail-loud`](driver-fail-loud/spec.md) — Fail-loud database drivers and queue backends removing SQLite and `memory://` stand-ins, dead `vertebra-db` pools/codecs, and stale install hints across 13 chapters and 38 tasks ([`chapters/index.md`](driver-fail-loud/chapters/index.md)).
 - [`native-postgres-driver`](native-postgres-driver/spec.md) — Standalone Rust PostgreSQL wheel (`vertebra-postgres`) covering wire authentication, cloud mTLS/IAM, pools, single-Sync pipelines, binary COPY, SHM Arrow, notifications, logical replication, and native adapter cutover (`t01`–`t102`).
 
 ## 4. Draft Child Flow Charters (`state: draft`)

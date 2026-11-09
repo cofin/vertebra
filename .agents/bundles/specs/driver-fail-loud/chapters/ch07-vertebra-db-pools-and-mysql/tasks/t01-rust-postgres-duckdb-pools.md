@@ -37,11 +37,11 @@ updated_at: "2026-11-09T14:38:00Z"
 commit: b20f9d30
 sources:
   - id: postgres-rs
-    resource: src/rs/vertebra-db/src/postgres/mod.rs::PostgresPool
-    title: PostgreSQL codecs and PostgresPool
+    resource: src/rs/vertebra-db/src/postgres/mod.rs::PoolerMode
+    title: PostgreSQL codecs and PoolerMode
   - id: duckdb-rs
-    resource: src/rs/vertebra-db/src/duckdb/mod.rs::DuckdbBrokerPool
-    title: DuckDB bootstrap statements and DuckdbBrokerPool
+    resource: src/rs/vertebra-db/src/duckdb/mod.rs::DuckdbConfig
+    title: DuckDB SET bootstrap statements and Arrow SHM frame re-exports
   - id: db-lib
     resource: src/rs/vertebra-db/src/lib.rs
     title: Crate doc bullets and re-exports
@@ -129,6 +129,6 @@ Grep-only verification: `grep -rnE "PostgresPool|POSTGRES_DIALECT_TAG|DuckdbBrok
 
 - [2026-11-08 00:00] `native-postgres-driver` and `broker-pool-sharing` already assume this chapter deletes `PostgresPool`.
 
-[^postgres-rs]: `src/rs/vertebra-db/src/postgres/mod.rs::PostgresPool` — PostgreSQL codecs and PostgresPool.
-[^duckdb-rs]: `src/rs/vertebra-db/src/duckdb/mod.rs::DuckdbBrokerPool` — DuckDB bootstrap statements and DuckdbBrokerPool.
+[^postgres-rs]: `src/rs/vertebra-db/src/postgres/mod.rs::PoolerMode` — PostgreSQL codecs and PoolerMode.
+[^duckdb-rs]: `src/rs/vertebra-db/src/duckdb/mod.rs::DuckdbConfig` — DuckDB SET bootstrap statements and Arrow SHM frame re-exports.
 [^db-lib]: `src/rs/vertebra-db/src/lib.rs` — Crate doc bullets and re-exports.

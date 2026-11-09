@@ -23,22 +23,22 @@ generated:
   by: flow/0.28.0
   at: "2026-11-07T00:00:00Z"
 verified:
-  - by: agent:plan-generator
-    at: "2026-11-08T00:00:00Z"
-    commit: 0acdf576
+  - by: agent:flow-executor
+    at: "2026-11-09T14:45:00Z"
+    commit: 9a60db2c
 sources:
   - id: missing-dep
     resource: src/py/vertebra/_typing.py::MissingDependencyError
-    title: Missing dependency error and install hint default
+    title: Missing dependency error and vertebra-core[extra] install hint default
   - id: module-loader
     resource: src/py/vertebra/utils/module_loader.py::ensure_module
     title: Optional module loader and ensure_numpy / ensure_pandas helpers
   - id: litestar-plugin
     resource: src/py/vertebra/extensions/litestar/plugin.py::VertebraPlugin
-    title: Litestar plugin raising MissingDependencyError with vertebra[mcp]
+    title: Litestar plugin raising MissingDependencyError with vertebra-core[mcp]
   - id: postgres-driver
     resource: src/py/vertebra/db/adapters/postgres/driver.py::AsyncPostgreSQLDriver
-    title: PostgreSQL _ensure_pool and _ensure_async_pool dependency guards
+    title: PostgreSQL _ensure_pool and _ensure_async_pool psycopg[binary,pool] guards
   - id: mysql-driver
     resource: src/py/vertebra/db/adapters/mysql/driver.py::SyncMySQLDriver
     title: MySQL pymysql and asyncmy dependency guards
@@ -47,16 +47,16 @@ sources:
     title: WASM plugin host wasmtime dependency guard
   - id: queues-config
     resource: src/py/vertebra/extensions/litestar/queues/config.py::create_sqlspec_queue_config
-    title: litestar-queues config helpers with sentence-valued package arguments
+    title: litestar-queues config helpers naming litestar-queues as package
   - id: queues-backend
     resource: src/py/vertebra/extensions/litestar/queues/backend.py::SHMQueueBackend
-    title: litestar-queues SHM backends with sentence-valued package arguments
+    title: litestar-queues SHM backends naming litestar-queues as package
   - id: saq-plugin
     resource: src/py/vertebra/extensions/litestar/saq/plugin.py::create_saq_plugin
-    title: litestar-saq plugin factory with sentence-valued package argument
+    title: litestar-saq plugin factory naming litestar-saq as package
   - id: mcp-plugin
     resource: src/py/vertebra/extensions/litestar/mcp/plugin.py::create_mcp_plugin
-    title: litestar-mcp plugin factory with sentence-valued package argument
+    title: litestar-mcp plugin factory naming litestar-mcp as package
   - id: pyproject
     resource: pyproject.toml
     title: Declared project optional-dependencies
@@ -85,7 +85,7 @@ tags:
 - `package=` and `install_package=` literals are package names: no whitespace, and any bracketed Vertebra distribution is `vertebra-core`, never `vtb` or `vertebra`.[^queues-config][^queues-backend][^saq-plugin][^mcp-plugin][^litestar-plugin]
 - `AsyncPostgreSQLDriver._ensure_async_pool` requires `psycopg_pool` with hint `psycopg[binary,pool]`, matching the sync thread-offload path it guards.[^postgres-driver]
 - `create_saq_plugin` and `create_mcp_plugin` raise `MissingDependencyError` with `package == "litestar-saq"` / `"litestar-mcp"` when their module is absent.[^saq-tests][^mcp-tests]
-- `test_optional_dependency_literals_name_declared_extras` walks every `src/py/vertebra/**/*.py` AST and reports `[]`; its self-test pins a five-entry violation list.[^packaging-test]
+- `test_optional_dependency_literals_name_declared_extras` walks every `src/py/vertebra/**/*.py` AST and reports `[]`; its self-test pins expected violations including undeclared extras, malformed package literals, and unhinted `vertebra._*` companion extension imports.[^packaging-test]
 - No engine extras (`postgres`, `mysql`, `oracle`, `mssql`, `sqlite`, `duckdb`, `redis`, `valkey`) are added to `pyproject.toml`; the native driver flows own them.[^pyproject]
 <!-- truth: end -->
 
@@ -93,15 +93,13 @@ tags:
 
 ### 1.1 Problem Statement & Objectives
 
-`MissingDependencyError` defaults its install hint to `vtb[<extra>]`, but the distribution is `vertebra-core`, so every hint built from `extra=` alone tells users to install a package that does not exist.[^missing-dep] Seven `extra=` literals name five undeclared extras: `postgres` (`SyncPostgreSQLDriver._ensure_pool`, `AsyncPostgreSQLDriver._ensure_async_pool`) and `mysql` (`SyncMySQLDriver._create_connection`, `AsyncMySQLDriver._ensure_pool`) in the engine drivers, `wasm` in the WASM host, and `numpy` and `pandas` in the module loader.[^pyproject][^postgres-driver][^mysql-driver][^wasm-host][^module-loader] `WASMPluginHost.register_module` and `VertebraPlugin.on_app_init` hard-code `vertebra[wasm]` and `vertebra[mcp]`. Eight call sites pass a sentence such as `"litestar-queues is required for litestar queue integration"` as `package=`, which renders as `Optional dependency 'litestar-queues is required for litestar queue integration' is required but not installed.`[^queues-config][^queues-backend][^saq-plugin][^mcp-plugin] `AsyncPostgreSQLDriver._ensure_async_pool` returns the `asyncpg` module when it imports and otherwise raises for module `psycopg_pool` with package `asyncpg`, while the path it guards runs the sync psycopg pool in a worker thread.[^postgres-driver]
-
-This chapter makes every hint name an installable package and adds a unit gate that fails on any undeclared extra or malformed package literal.
+`MissingDependencyError` defaults `install_package` to `vertebra-core[<extra>]` when `extra=` is supplied, and every `ensure_module` and `MissingDependencyError` call site under `src/py/vertebra` names either a declared `[project.optional-dependencies]` extra or an installable pip package (`psycopg[binary,pool]`, `pymysql`, `asyncmy`, `wasmtime`, `numpy`, `pandas`, `litestar-queues`, `litestar-saq`, `litestar-mcp`, `vertebra-core[mcp]`, `vertebra-core[bundler]`) without sentence-valued `package=` strings or `vtb[...]` / `vertebra[...]` distribution names.[^missing-dep][^pyproject][^postgres-driver][^mysql-driver][^wasm-host][^module-loader][^queues-config][^queues-backend][^saq-plugin][^mcp-plugin][^litestar-plugin] `AsyncPostgreSQLDriver._ensure_async_pool` resolves `psycopg_pool` with `install_package="psycopg[binary,pool]"`, matching the sync thread-offload pool path it guards, and `test_optional_dependency_literals_name_declared_extras` enforces these constraints across every `src/py/vertebra/**/*.py` AST.[^postgres-driver][^packaging-test]
 
 **Non-goals**: adding engine extras to `pyproject.toml` (owned by each `native-<engine>-driver` flow); changing explicit `install_package="litestar-<x>"` module-level hints that already name real packages; removing redundant function-level `ensure_module` guards in the Litestar integrations; removing `from __future__ import annotations` outside `src/py/tests/integration/conftest.py`; `test_engine_driver_resolution_and_provide_driver` Oracle/MSSQL assertions (owned by ch01 and ch02); memory-branch deletion inside `_ensure_pool` / `_ensure_async_pool` (owned by ch03); conformance outcomes for missing native modules and the integration conftest cleanup (owned by [ch09-conformance-outcomes](../ch09-conformance-outcomes/spec.md)); OKF and user docs for hints and conformance (owned by [ch11-docs-and-okf](../ch11-docs-and-okf/spec.md)).
 
 ### 1.2 Upstream Execution Baseline
 
-- Branch `feat/storage-updates` at `0acdf576`; parent roadmap [spec.md](../../spec.md); catalog [chapters/index.md](../index.md).
+- Branch `feat/driver-fail-loud` stacked on `feat/storage-updates` (`d2b168dc`); parent roadmap [spec.md](../../spec.md); catalog [chapters/index.md](../index.md).
 - Depends on [ch04-redis-valkey-memory-removal](../ch04-redis-valkey-memory-removal/spec.md), which depends on [ch03-remove-memory-fakes](../ch03-remove-memory-fakes/spec.md). The file overlap is with ch03: ch03 `t01` deletes the `memory://` early returns in `SyncPostgreSQLDriver._ensure_pool`, `AsyncPostgreSQLDriver._ensure_async_pool`, and the MySQL drivers, which `t02` edits afterward; ch03 `t03` retargets `test_framework_subdomains.py`, which `t01` extends afterward. Declaring ch04 keeps the whole memory-removal sequence ahead of this chapter.
 - No file overlap with ch05, ch06, ch07, or [ch09-conformance-outcomes](../ch09-conformance-outcomes/spec.md); those chapters do not wait on this one. [ch10-queue-backend-fail-loud](../ch10-queue-backend-fail-loud/spec.md) depends on this chapter for the hint default and the gate.
 - Research: [change-surface](../../research/change-surface_20261107.md) sections "Install Hints and Extras" and "Conformance".
@@ -112,7 +110,7 @@ This chapter makes every hint name an installable package and adds a unit gate t
 | --- | --- | --- |
 | Error type | `src/py/vertebra/_typing.py::MissingDependencyError`[^missing-dep] | In-process; `ImportError` subclass re-exported from `vertebra.typing`; `install_package`, `hint`, `package` attributes |
 | Loader | `src/py/vertebra/utils/module_loader.py::ensure_module`, `ensure_numpy`, `ensure_pandas`[^module-loader] | In-process; `ensure_module` forwards `package`, `extra`, `install_package` to the error |
-| Litestar plugin | `src/py/vertebra/extensions/litestar/plugin.py::VertebraPlugin.on_app_init`[^litestar-plugin] | Raises with `install_package="vertebra[mcp]"` when `litestar_mcp` lacks `LitestarMCP` / `LitestarA2A` |
+| Litestar plugin | `src/py/vertebra/extensions/litestar/plugin.py::VertebraPlugin.on_app_init`[^litestar-plugin] | Raises with `install_package="vertebra-core[mcp]"` when `litestar_mcp` lacks `LitestarMCP` / `LitestarA2A` |
 | PostgreSQL | `src/py/vertebra/db/adapters/postgres/driver.py::SyncPostgreSQLDriver._ensure_pool`, `AsyncPostgreSQLDriver._ensure_async_pool`[^postgres-driver] | External boundary (`psycopg_pool`); async guard return value is discarded by `AsyncPostgreSQLDriver._run_async_query`, which then calls `self._sync._run_sync_query` in a thread |
 | MySQL | `src/py/vertebra/db/adapters/mysql/driver.py::SyncMySQLDriver._create_connection`, `AsyncMySQLDriver._ensure_pool`[^mysql-driver] | External boundary (`pymysql`, `asyncmy`) |
 | WASM | `src/py/vertebra/wasm/__init__.py::WASMPluginHost.register_module`[^wasm-host] | External boundary (`wasmtime`, resolved at import through `import_optional`) |
@@ -212,7 +210,7 @@ def _optional_dependency_violations(
 | Explicit package wins | `MissingDependencyError("x", install_package="pkg", extra="sqlspec")` | `install_package == "pkg"` | Explicit override unchanged |
 | Neither | `MissingDependencyError("x")` | `install_package == "x"` | Package fallback unchanged |
 | `numpy` absent | `sys.modules["numpy"] = None`, `ensure_numpy()` | `MissingDependencyError`, `install_package == "numpy"` | No undeclared extra |
-| Async PostgreSQL without `asyncpg` or `psycopg_pool` | `sys.modules["asyncpg"] = None`, `sys.modules["psycopg_pool"] = None`; `AsyncPostgreSQLDriver(cfg).execute_tuples("SELECT 1")` | `MissingDependencyError`, `package == "psycopg_pool"`, `install_package == "psycopg[binary,pool]"` (today `package == "asyncpg"`) | Guard names the module the thread-offload path imports |
+| Async PostgreSQL without `asyncpg` or `psycopg_pool` | `sys.modules["asyncpg"] = None`, `sys.modules["psycopg_pool"] = None`; `AsyncPostgreSQLDriver(cfg).execute_tuples("SELECT 1")` | `MissingDependencyError`, `package == "psycopg_pool"`, `install_package == "psycopg[binary,pool]"` | Guard names the module the thread-offload path imports |
 | Async PostgreSQL with `asyncpg` but no `psycopg_pool` | `AsyncPostgreSQLDriver(cfg).execute_tuples("SELECT 1")` with `SyncPostgreSQLDriver._run_sync_query` patched to raise `AssertionError` | `MissingDependencyError`, `package == "psycopg_pool"`, `install_package == "psycopg[binary,pool]"`, raised by `_ensure_async_pool` before thread offload | Guard checks the module before the offload, not inside the thread |
 | `wasmtime` absent | `wasm_mod._wasmtime = None`, `register_module(cfg)` without exports | `install_package == "wasmtime"` | No `vertebra[` hint |
 | Sentence package | `ensure_module("litestar_queues", package="litestar-queues is required ...")` in source | Gate reports `<path>:<line>::ensure_module package='litestar-queues is required ...'` | Gate catches whitespace in package literals |
@@ -267,21 +265,21 @@ def _optional_dependency_violations(
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline (`HEAD`)**: `616de0f2` — chapter completed; `4/4` tasks completed.
+- **Verified Baseline (`HEAD`)**: `9a60db2c` — chapter completed; `4/4` tasks completed.
 - **Remaining Tasks**: none.
 - **Documentation & OKF Sync**: none owned; `ch11-docs-and-okf` documents install hints.
 - **Active Invariants**: no engine extras in `pyproject.toml`; `install_package` overrides still win over `extra`; the gate stays green after every task from `t04` on; `test_engine_driver_resolution_and_provide_driver` stays owned by ch01 / ch02.
 
-[^missing-dep]: `src/py/vertebra/_typing.py::MissingDependencyError` — Missing dependency error and install hint default.
+[^missing-dep]: `src/py/vertebra/_typing.py::MissingDependencyError` — Missing dependency error and vertebra-core[extra] install hint default.
 [^module-loader]: `src/py/vertebra/utils/module_loader.py::ensure_module` — Optional module loader and ensure_numpy / ensure_pandas helpers.
-[^litestar-plugin]: `src/py/vertebra/extensions/litestar/plugin.py::VertebraPlugin` — Litestar plugin raising MissingDependencyError with vertebra[mcp].
-[^postgres-driver]: `src/py/vertebra/db/adapters/postgres/driver.py::AsyncPostgreSQLDriver` — PostgreSQL _ensure_pool and _ensure_async_pool dependency guards.
+[^litestar-plugin]: `src/py/vertebra/extensions/litestar/plugin.py::VertebraPlugin` — Litestar plugin raising MissingDependencyError with vertebra-core[mcp].
+[^postgres-driver]: `src/py/vertebra/db/adapters/postgres/driver.py::AsyncPostgreSQLDriver` — PostgreSQL _ensure_pool and _ensure_async_pool psycopg[binary,pool] guards.
 [^mysql-driver]: `src/py/vertebra/db/adapters/mysql/driver.py::SyncMySQLDriver` — MySQL pymysql and asyncmy dependency guards.
 [^wasm-host]: `src/py/vertebra/wasm/__init__.py::WASMPluginHost` — WASM plugin host wasmtime dependency guard.
-[^queues-config]: `src/py/vertebra/extensions/litestar/queues/config.py::create_sqlspec_queue_config` — litestar-queues config helpers with sentence-valued package arguments.
-[^queues-backend]: `src/py/vertebra/extensions/litestar/queues/backend.py::SHMQueueBackend` — litestar-queues SHM backends with sentence-valued package arguments.
-[^saq-plugin]: `src/py/vertebra/extensions/litestar/saq/plugin.py::create_saq_plugin` — litestar-saq plugin factory with sentence-valued package argument.
-[^mcp-plugin]: `src/py/vertebra/extensions/litestar/mcp/plugin.py::create_mcp_plugin` — litestar-mcp plugin factory with sentence-valued package argument.
+[^queues-config]: `src/py/vertebra/extensions/litestar/queues/config.py::create_sqlspec_queue_config` — litestar-queues config helpers naming litestar-queues as package.
+[^queues-backend]: `src/py/vertebra/extensions/litestar/queues/backend.py::SHMQueueBackend` — litestar-queues SHM backends naming litestar-queues as package.
+[^saq-plugin]: `src/py/vertebra/extensions/litestar/saq/plugin.py::create_saq_plugin` — litestar-saq plugin factory naming litestar-saq as package.
+[^mcp-plugin]: `src/py/vertebra/extensions/litestar/mcp/plugin.py::create_mcp_plugin` — litestar-mcp plugin factory naming litestar-mcp as package.
 [^pyproject]: `pyproject.toml` — Declared project optional-dependencies.
 [^packaging-test]: `src/py/tests/unit/build/test_packaging_and_pgo.py` — Packaging and extras assertions.
 [^saq-tests]: `src/py/tests/unit/extensions/test_litestar_ecosystem_frontend_and_saq.py::test_missing_dependency_errors` — SAQ missing-dependency test extended with a create_saq_plugin assertion.

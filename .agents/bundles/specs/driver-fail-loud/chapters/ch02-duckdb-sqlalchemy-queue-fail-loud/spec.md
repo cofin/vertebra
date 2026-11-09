@@ -23,13 +23,13 @@ generated:
   by: flow/0.28.0
   at: "2026-11-07T00:00:00Z"
 verified:
-  - by: agent:plan-generator
-    at: "2026-11-07T00:00:00Z"
-    commit: 0acdf576
+  - by: agent:flow-executor
+    at: "2026-11-09T03:08:00Z"
+    commit: 235425bd
 sources:
   - id: duckdb-driver
     resource: src/py/vertebra/db/adapters/duckdb/driver.py::SyncDuckDBDriver
-    title: DuckDB driver with sqlite3 fallback and _using_native_duckdb branches
+    title: DuckDB driver guarded on the duckdb package
   - id: duckdb-config
     resource: src/py/vertebra/db/adapters/duckdb/config.py::DuckDBConfig.resolved_path
     title: DuckDB path resolution passed to duckdb.connect
@@ -41,7 +41,7 @@ sources:
     title: Missing dependency error, package, install_package, and hint
   - id: dep-groups
     resource: pyproject.toml::dependency-groups
-    title: test and bench dependency groups; duckdb only in bench
+    title: GIL-only duckdb dependency group included by bench and excluded from dev
   - id: makefile
     resource: Makefile::py-test
     title: install, py-test, coverage, and upgrade targets that sync and run the Python suite
@@ -50,7 +50,7 @@ sources:
     title: CI Python matrix including 3.14t and 3.15t running make py-test
   - id: sqla-dbapi
     resource: src/py/vertebra/extensions/sqlalchemy/dialects.py::SyncDBAPIConnection
-    title: Sync and async DB-API connections with SQLite parse fallback
+    title: Sync and async DB-API connections raising InterfaceError on URL parse failure
   - id: sqla-errors
     resource: src/py/vertebra/extensions/sqlalchemy/dialects.py::InterfaceError
     title: PEP 249 InterfaceError exposed as SyncDBAPIModule.InterfaceError and AsyncDBAPIModule.InterfaceError
@@ -59,13 +59,13 @@ sources:
     title: URL parser raising ValueError for unsupported schemes
   - id: oracle-queue
     resource: src/py/vertebra/framework/queues/oracle.py::OracleQueueBackend
-    title: Oracle queue backend whose _build_executor always returns the in-memory executor
+    title: Oracle queue backend requiring an injected OracleQueueExecutor
   - id: queue-factory
     resource: src/py/vertebra/framework/queues/base.py::QueueService._build_backend
     title: oracle:// queue URL routes to OracleQueueBackend(config) without an executor
   - id: queue-tests
     resource: src/py/tests/unit/framework/test_distributed_queues.py::_create_backend_by_url
-    title: Queue contract tests that construct OracleQueueBackend on the in-memory executor
+    title: Queue contract tests injecting _FakeOracleQueueExecutor
 tags:
   - database
   - duckdb
@@ -90,9 +90,7 @@ tags:
 
 ### 1.1 Problem Statement & Objectives
 
-`SyncDuckDBDriver` imports `duckdb` through `import_optional` and opens `sqlite3.connect` when the package is absent; every write method branches on `_using_native_duckdb`.[^duckdb-driver] `duckdb` sits only in the `bench` dependency group, so every DuckDB unit test runs on SQLite today.[^dep-groups] `duckdb` publishes only `cp312-abi3` wheels, which free-threaded CPython cannot load, and the CI `test-python` matrix includes `3.14t` and `3.15t`.[^ci-test-python] `SyncDBAPIConnection` and `AsyncDBAPIConnection` catch any exception from `DatabaseRegistry.parse_url` and substitute `SQLiteConfig(":memory:")`, so a typo in a URL produces a working in-memory SQLite connection.[^sqla-dbapi] `OracleQueueBackend._build_executor` returns `_InMemoryOracleQueueExecutor` whether or not `oracledb` is installed, so `QueueConfig(backend_url="oracle://...")` silently runs an in-process dictionary queue.[^oracle-queue][^queue-factory]
-
-This chapter makes all three paths raise: DuckDB raises `MissingDependencyError`, the DB-API raises its PEP 249 `InterfaceError`, and the Oracle queue raises `MissingDependencyError` or `ImproperConfigurationError`. A dedicated `duckdb` dependency group installs the package on GIL interpreters; DuckDB tests run on the real engine there and skip on free-threaded interpreters. Oracle queue tests move to a test-owned executor fake.
+`SyncDuckDBDriver` resolves `duckdb` through `ensure_module` with no `sqlite3` fallback or `_using_native_duckdb` branches, propagating `MissingDependencyError` when the package is absent and propagating `duckdb.Error` from bootstrap and GCS secret statements.[^duckdb-driver] A dedicated `duckdb` dependency group installs `duckdb>=1.0` on GIL interpreters (`3.12`–`3.15`) while skipping installation and DuckDB unit tests on free-threaded interpreters (`3.14t`, `3.15t`), since PyPI `duckdb` ships only `cp312-abi3` wheels.[^dep-groups][^ci-test-python] `SyncDBAPIConnection` and `AsyncDBAPIConnection` chain PEP 249 `InterfaceError` from any `DatabaseRegistry.parse_url` `ValueError` without substituting `:memory:` SQLite.[^sqla-dbapi] `OracleQueueBackend` binds an injected `OracleQueueExecutor` and otherwise raises `MissingDependencyError` (when `oracledb` is absent) or `ImproperConfigurationError` (when `oracledb` is present without `executor=`), keeping queue test fakes inside the test module.[^oracle-queue][^queue-factory][^queue-tests]
 
 **Non-goals**:
 
@@ -106,7 +104,7 @@ This chapter makes all three paths raise: DuckDB raises `MissingDependencyError`
 
 ### 1.2 Upstream Execution Baseline
 
-- Branch `feat/storage-updates` at `0acdf576`; parent flow [`driver-fail-loud`](../../spec.md).
+- Branch `feat/driver-fail-loud` stacked on `feat/storage-updates` (`d2b168dc`); parent flow [`driver-fail-loud`](../../spec.md).
 - Depends on `ch01-oracle-mssql-fail-loud`: both chapters edit `src/py/tests/unit/db/test_enterprise_olap_drivers.py`, whose identifier-rejection and DB-API broker tests parametrize Oracle, MSSQL, and DuckDB together.
 - `uv.lock` already resolves `duckdb` `2.0.0` through the `bench` group; `oracledb` is not in `uv.lock`.
 
@@ -287,22 +285,22 @@ Test guard in each module with DuckDB-executing tests: `_DUCKDB_SKIP_REASON = "d
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline (`HEAD`)**: `af67511d` — chapter completed; `4/4` tasks completed.
+- **Verified Baseline (`HEAD`)**: `235425bd` — chapter completed; `4/4` tasks completed.
 - **Active Task**: `null`.
 - **Remaining Plan**: none (`ch02` complete).
 - **Documentation & OKF Sync**: `[3/3 files documented]`; user docs and OKF prose go to `ch11-docs-and-okf` and queue docs to `ch12-queue-docs-and-knowledge`.
 - **Active Invariants & Triggers**: registry import stays free of `duckdb` / `oracledb`; the SQLite `_sqlite_conn` path and `MemoryQueueBackend` are untouched; free-threaded interpreters never install `duckdb`.
 
-[^duckdb-driver]: `src/py/vertebra/db/adapters/duckdb/driver.py::SyncDuckDBDriver` — DuckDB driver with sqlite3 fallback and `_using_native_duckdb` branches.
+[^duckdb-driver]: `src/py/vertebra/db/adapters/duckdb/driver.py::SyncDuckDBDriver` — DuckDB driver guarded on the `duckdb` package.
 [^duckdb-config]: `src/py/vertebra/db/adapters/duckdb/config.py::DuckDBConfig.resolved_path` — DuckDB path resolution passed to `duckdb.connect`.
 [^module-loader]: `src/py/vertebra/utils/module_loader.py::ensure_module` — Optional module loader raising `MissingDependencyError`.
 [^missing-dep]: `src/py/vertebra/_typing.py::MissingDependencyError` — Missing dependency error, package, install_package, and hint.
-[^dep-groups]: `pyproject.toml::dependency-groups` — `test` and `bench` dependency groups; `duckdb` only in `bench`.
+[^dep-groups]: `pyproject.toml::dependency-groups` — GIL-only `duckdb` dependency group included by `bench` and excluded from `dev`.
 [^makefile]: `Makefile::py-test` — install, py-test, coverage, and upgrade targets that sync and run the Python suite.
 [^ci-test-python]: `.github/workflows/ci.yml::test-python` — CI Python matrix including 3.14t and 3.15t running `make py-test`.
-[^sqla-dbapi]: `src/py/vertebra/extensions/sqlalchemy/dialects.py::SyncDBAPIConnection` — Sync and async DB-API connections with SQLite parse fallback.
+[^sqla-dbapi]: `src/py/vertebra/extensions/sqlalchemy/dialects.py::SyncDBAPIConnection` — Sync and async DB-API connections raising `InterfaceError` on URL parse failure.
 [^sqla-errors]: `src/py/vertebra/extensions/sqlalchemy/dialects.py::InterfaceError` — PEP 249 `InterfaceError` exposed as `SyncDBAPIModule.InterfaceError` and `AsyncDBAPIModule.InterfaceError`.
 [^registry-parse]: `src/py/vertebra/db/registry.py::DatabaseRegistry.parse_url` — URL parser raising `ValueError` for unsupported schemes.
-[^oracle-queue]: `src/py/vertebra/framework/queues/oracle.py::OracleQueueBackend` — Oracle queue backend whose `_build_executor` always returns the in-memory executor.
+[^oracle-queue]: `src/py/vertebra/framework/queues/oracle.py::OracleQueueBackend` — Oracle queue backend requiring an injected `OracleQueueExecutor`.
 [^queue-factory]: `src/py/vertebra/framework/queues/base.py::QueueService._build_backend` — `oracle://` queue URL routes to `OracleQueueBackend(config)` without an executor.
-[^queue-tests]: `src/py/tests/unit/framework/test_distributed_queues.py::_create_backend_by_url` — Queue contract tests that construct `OracleQueueBackend` on the in-memory executor.
+[^queue-tests]: `src/py/tests/unit/framework/test_distributed_queues.py::_create_backend_by_url` — Queue contract tests injecting `_FakeOracleQueueExecutor`.

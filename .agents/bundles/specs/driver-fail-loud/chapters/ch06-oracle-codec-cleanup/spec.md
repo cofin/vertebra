@@ -32,7 +32,7 @@ sources:
     title: Python codec bindings on vertebra._vertebra
   - id: oracle-rs
     resource: src/rs/vertebra-db/src/oracle/mod.rs::OracleSessionAttrs
-    title: Oracle TTC, VECTOR, OSON codecs, TNS framing, and OraclePool
+    title: Oracle TTC session attributes and VECTOR/OSON codecs
   - id: tns-rs
     resource: src/rs/vertebra-db/src/oracle/tns.rs::parse_tnsnames_ora
     title: tnsnames.ora parser and alias resolver kept by this chapter
@@ -50,7 +50,7 @@ sources:
     title: Oracle configuration, connect descriptors, and wallets
   - id: redis-core
     resource: src/py/vertebra/db/adapters/redis/core.py::RedisCore.hash_slot
-    title: Python Redis hash slot with native probe
+    title: Python Redis CRC16 hash slot backed by redis_hash_slot
   - id: duckdb-init
     resource: src/py/vertebra/db/adapters/duckdb/__init__.py
     title: DuckDB adapter package docstring
@@ -81,9 +81,7 @@ tags:
 
 ### 1.1 Problem Statement & Objectives
 
-`vertebra-db` carries Oracle TNS Connect/Data packet framing and a connectionless `OraclePool` lease table that no Rust or Python caller uses.[^oracle-rs] Python `OracleCore` probes `_vertebra` for `encode_tns_connect_packet` and `encode_tns_data_packet`, and `RedisCore.hash_slot` falls back to probing `redis_hash_slot_native`; `_vertebra` exports none of the three.[^oracle-core][^redis-core] The Oracle adapter docstrings describe a native Thin TNS/TTC driver, and the DuckDB package docstring describes SHM single-writer/multi-reader coordination that ch02 replaces with a `duckdb`-package driver.[^oracle-config][^duckdb-init] The `oracledb` client selected by `native-oracle-driver` frames TNS itself.
-
-This chapter deletes that Oracle surface and the dead probes, and rewrites the Oracle and DuckDB docs so they describe what remains: TTC session attributes, `VECTOR`/`OSON` codecs, TNS parsing, and pure-Python TNS packet helpers.
+`vertebra_db::oracle` exposes only TTC piggybacked session attributes (`OracleSessionAttrs`), 26ai `VECTOR` and `OSON` codecs, and the `oracle::tns` descriptor parser without TNS Connect/Data packet framing or connectionless `OraclePool` lease tables.[^oracle-rs][^tns-rs] Python `OracleCore` frames TNS packets directly in Python without probing unexported `_vertebra` symbols, and `RedisCore.hash_slot` calls only the exported `redis_hash_slot` binding before its Python CRC16 fallback.[^oracle-core][^redis-core] Oracle and DuckDB module and class docstrings describe the surviving codecs, TNS parsing, and `duckdb`-package adapter without claiming Thin TNS/TTC wire execution or SHM-brokered DuckDB coordination.[^oracle-config][^duckdb-init]
 
 **Non-goals**:
 
@@ -95,7 +93,7 @@ This chapter deletes that Oracle surface and the dead probes, and rewrites the O
 
 ### 1.2 Upstream Execution Baseline
 
-- Branch `feat/storage-updates` at `0acdf576`; parent roadmap [spec.md](../../spec.md).
+- Branch `feat/driver-fail-loud` stacked on `feat/storage-updates` (`d2b168dc`); parent roadmap [spec.md](../../spec.md).
 - Depends on [ch05-mssql-codec-cleanup](../ch05-mssql-codec-cleanup/spec.md), which depends on [ch04-redis-valkey-memory-removal](../ch04-redis-valkey-memory-removal/spec.md) and transitively ch01, ch02, and ch03:
   - ch05 t03 rewrites the `mssql` re-export and crate-doc bullet in `lib.rs`, which t01 edits next.
   - ch01 removes `OracleCore.normalize_sql` and the `Mapping` import from `oracle/core.py`, which t02 edits next.
@@ -217,7 +215,7 @@ class RedisCore:
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `HEAD @ 63e91e84`; `depends_on_chapters: [ch05-mssql-codec-cleanup]` (transitively ch01 through ch04); `state: completed`.
+- **Verified Baseline**: `HEAD @ ef6be9a5`; `depends_on_chapters: [ch05-mssql-codec-cleanup]` (transitively ch01 through ch04); `state: completed`.
 - **Remaining Tasks in Chapter**: `0/3` remaining (`3/3` completed).
 - **Downstream**: [ch07-vertebra-db-pools-and-mysql](../ch07-vertebra-db-pools-and-mysql/spec.md) depends on this chapter, edits the same `lib.rs`, and deletes `OracleWalletMaterial` from `oracle/tns.rs`.
 - **Open Doc/OKF Items**: none in this chapter; ch11 owns user docs and OKF.
@@ -225,11 +223,11 @@ class RedisCore:
 
 [^db-lib]: `src/rs/vertebra-db/src/lib.rs` — vertebra-db crate doc, module list, and re-exports.
 [^db-bindings]: `src/rs/vertebra-py/src/db.rs::register_db_bindings` — Python codec bindings on vertebra._vertebra.
-[^oracle-rs]: `src/rs/vertebra-db/src/oracle/mod.rs::OracleSessionAttrs` — Oracle TTC, VECTOR, OSON codecs, TNS framing, and OraclePool.
+[^oracle-rs]: `src/rs/vertebra-db/src/oracle/mod.rs::OracleSessionAttrs` — Oracle TTC session attributes and VECTOR/OSON codecs.
 [^tns-rs]: `src/rs/vertebra-db/src/oracle/tns.rs::parse_tnsnames_ora` — tnsnames.ora parser and alias resolver kept by this chapter.
 [^vector-rs]: `src/rs/vertebra-py/src/vector.rs` — PyO3 vector bindings importing Oracle VECTOR encoders.
 [^resp3-rs]: `src/rs/vertebra-db/src/resp3/mod.rs::redis_hash_slot` — RESP3 codecs and Redis hash slot kept for the Python Redis driver.
 [^oracle-core]: `src/py/vertebra/db/adapters/oracle/core.py::OracleCore` — Python Oracle TNS helpers and VECTOR/OSON codecs.
 [^oracle-config]: `src/py/vertebra/db/adapters/oracle/config.py::OracleConfig` — Oracle configuration, connect descriptors, and wallets.
-[^redis-core]: `src/py/vertebra/db/adapters/redis/core.py::RedisCore.hash_slot` — Python Redis hash slot with native probe.
+[^redis-core]: `src/py/vertebra/db/adapters/redis/core.py::RedisCore.hash_slot` — Python Redis CRC16 hash slot backed by redis_hash_slot.
 [^duckdb-init]: `src/py/vertebra/db/adapters/duckdb/__init__.py` — DuckDB adapter package docstring.

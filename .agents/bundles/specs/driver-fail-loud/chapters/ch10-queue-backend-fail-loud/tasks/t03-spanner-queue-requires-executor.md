@@ -38,13 +38,13 @@ commit: 186438f3
 sources:
   - id: spanner-queue
     resource: src/py/vertebra/framework/queues/spanner.py::SpannerQueueBackend
-    title: Spanner queue backend selecting an injected, driver-wrapped, or in-memory executor
+    title: Spanner queue backend requiring vertebra._spanner and an injected SpannerQueueExecutor
   - id: spanner-fake
-    resource: src/py/vertebra/framework/queues/spanner.py::_InMemorySpannerQueueExecutor
-    title: In-memory simulation of hash-sharded Spanner queue SQL
+    resource: src/py/vertebra/framework/queues/spanner.py::SpannerQueueExecutor
+    title: Runtime-checkable Spanner queue executor protocol
   - id: spanner-driver-exec
-    resource: src/py/vertebra/framework/queues/spanner.py::_DriverSpannerQueueExecutor
-    title: Driver wrapper that runs DDL once and routes every DML and query to an in-memory mirror
+    resource: src/py/vertebra/framework/queues/spanner.py::TaskEnvelope
+    title: Queue task envelope handled by SpannerQueueBackend
   - id: queue-factory
     resource: src/py/vertebra/framework/queues/base.py::QueueService._build_backend
     title: spanner, spanner+googlesql, spangres, and spanner+spangres queue URLs route to SpannerQueueBackend(config)
@@ -181,9 +181,9 @@ self._executor: SpannerQueueExecutor = executor
 - [2026-11-08 00:00] `_DriverSpannerQueueExecutor.fetch_all` runs `SELECT shard_id, task_id ... LIMIT @limit` inside `run_in_transaction`, discards the rows, and returns the in-memory mirror's claim; `execute` and `fetch_one` never call the driver. Passing `driver=` produced in-process queue semantics identical to passing nothing.
 - [2026-11-08 00:00] `test_spanner_queue_backend_lifecycle_dlq_and_leases` built `SyncSpannerDriver(SpannerConfig(), client=FakeSpannerClient())` only to satisfy `driver=`; the CDC test in the same module keeps those imports.
 
-[^spanner-queue]: `src/py/vertebra/framework/queues/spanner.py::SpannerQueueBackend` — Spanner queue backend selecting an injected, driver-wrapped, or in-memory executor.
-[^spanner-fake]: `src/py/vertebra/framework/queues/spanner.py::_InMemorySpannerQueueExecutor` — In-memory simulation of hash-sharded Spanner queue SQL.
-[^spanner-driver-exec]: `src/py/vertebra/framework/queues/spanner.py::_DriverSpannerQueueExecutor` — Driver wrapper that runs DDL once and routes every DML and query to an in-memory mirror.
+[^spanner-queue]: `src/py/vertebra/framework/queues/spanner.py::SpannerQueueBackend` — Spanner queue backend requiring `vertebra._spanner` and an injected `SpannerQueueExecutor`.
+[^spanner-fake]: `src/py/vertebra/framework/queues/spanner.py::SpannerQueueExecutor` — Runtime-checkable Spanner queue executor protocol.
+[^spanner-driver-exec]: `src/py/vertebra/framework/queues/spanner.py::TaskEnvelope` — Queue task envelope handled by `SpannerQueueBackend`.
 [^queue-factory]: `src/py/vertebra/framework/queues/base.py::QueueService._build_backend` — `spanner`, `spanner+googlesql`, `spangres`, and `spanner+spangres` queue URLs route to `SpannerQueueBackend(config)`.
 [^queue-config]: `src/py/vertebra/framework/queues/base.py::QueueConfig` — Queue configuration struct whose docstring `docs/reference/queues.md` renders.
 [^module-loader]: `src/py/vertebra/utils/module_loader.py::ensure_module` — Optional module loader raising `MissingDependencyError`.

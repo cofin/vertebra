@@ -37,10 +37,10 @@ commit: 186438f3
 sources:
   - id: pg-queue
     resource: src/py/vertebra/framework/queues/postgres.py::PostgreSQLQueueBackend
-    title: PostgreSQL queue backend whose _build_executor always returns the in-memory executor
+    title: PostgreSQL queue backend requiring psycopg and an injected PostgreSQLQueueExecutor
   - id: pg-fake
-    resource: src/py/vertebra/framework/queues/postgres.py::_InMemoryPostgreSQLQueueExecutor
-    title: In-memory simulation of PostgreSQL queue SQL, SKIP LOCKED, and LISTEN/NOTIFY
+    resource: src/py/vertebra/framework/queues/postgres.py::PostgreSQLQueueExecutor
+    title: Runtime-checkable PostgreSQL queue executor protocol
   - id: queue-factory
     resource: src/py/vertebra/framework/queues/base.py::QueueService._build_backend
     title: postgresql:// and postgres:// queue URLs route to PostgreSQLQueueBackend(config)
@@ -157,8 +157,8 @@ self._executor: PostgreSQLQueueExecutor = executor
 - [2026-11-08 00:00] `PostgreSQLQueueBackend._build_executor` contains `if psycopg is not None and "localhost" not in self._direct_dsn: pass` and returns `_InMemoryPostgreSQLQueueExecutor()` on every branch; no live PostgreSQL queue executor exists in the repository.
 - [2026-11-08 00:00] `postgres.py` keeps `from __future__ import annotations`; `PostgreSQLConfig` is a `TYPE_CHECKING`-only annotation, so removal is a separate cleanup.
 
-[^pg-queue]: `src/py/vertebra/framework/queues/postgres.py::PostgreSQLQueueBackend` — PostgreSQL queue backend whose `_build_executor` always returns the in-memory executor.
-[^pg-fake]: `src/py/vertebra/framework/queues/postgres.py::_InMemoryPostgreSQLQueueExecutor` — In-memory simulation of PostgreSQL queue SQL, SKIP LOCKED, and LISTEN/NOTIFY.
+[^pg-queue]: `src/py/vertebra/framework/queues/postgres.py::PostgreSQLQueueBackend` — PostgreSQL queue backend requiring `psycopg` and an injected `PostgreSQLQueueExecutor`.
+[^pg-fake]: `src/py/vertebra/framework/queues/postgres.py::PostgreSQLQueueExecutor` — Runtime-checkable PostgreSQL queue executor protocol.
 [^queue-factory]: `src/py/vertebra/framework/queues/base.py::QueueService._build_backend` — `postgresql://` and `postgres://` queue URLs route to `PostgreSQLQueueBackend(config)`.
 [^module-loader]: `src/py/vertebra/utils/module_loader.py::ensure_module` — Optional module loader raising `MissingDependencyError`.
 [^errors]: `src/py/vertebra/_typing.py::ImproperConfigurationError` — Configuration error (`ValueError` subclass) exported from `vertebra.typing`.

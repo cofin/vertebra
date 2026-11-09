@@ -37,10 +37,10 @@ commit: 235425bd
 sources:
   - id: oracle-queue
     resource: src/py/vertebra/framework/queues/oracle.py::OracleQueueBackend
-    title: Oracle queue backend with in-memory executor fallback
+    title: Oracle queue backend requiring an injected OracleQueueExecutor
   - id: oracle-fake
-    resource: src/py/vertebra/framework/queues/oracle.py::_InMemoryOracleQueueExecutor
-    title: In-memory simulation of the Oracle queue SQL used as the fallback executor
+    resource: src/py/vertebra/framework/queues/oracle.py::OracleQueueExecutor
+    title: Runtime-checkable Oracle queue executor protocol
   - id: queue-factory
     resource: src/py/vertebra/framework/queues/base.py::QueueService._build_backend
     title: oracle:// queue URL routes to OracleQueueBackend(config)
@@ -145,10 +145,10 @@ self._executor: OracleQueueExecutor = executor
 ## Notes & Discoveries
 
 - [2026-11-07 00:00] `OracleQueueBackend._build_executor` contains `if oracledb is not None: pass` and returns `_InMemoryOracleQueueExecutor()` on both branches; no live `oracledb` executor exists in the repository.
-- [2026-11-07 00:00] `src/py/vertebra/framework/queues/postgres.py::PostgreSQLQueueBackend._build_executor`, `redis.py::RedisQueueBackend`, and `spanner.py::SpannerQueueBackend` carry the same in-memory fallback pattern; [ch10-queue-backend-fail-loud](../../ch10-queue-backend-fail-loud/spec.md) removes them with the same executor-or-raise contract.
+- [2026-11-07 00:00] [ch10-queue-backend-fail-loud](../../ch10-queue-backend-fail-loud/spec.md) applies the same executor-or-raise and client-or-raise pattern to `PostgreSQLQueueBackend`, `RedisQueueBackend`, and `SpannerQueueBackend`.
 
-[^oracle-queue]: `src/py/vertebra/framework/queues/oracle.py::OracleQueueBackend` — Oracle queue backend with in-memory executor fallback.
-[^oracle-fake]: `src/py/vertebra/framework/queues/oracle.py::_InMemoryOracleQueueExecutor` — In-memory simulation of the Oracle queue SQL used as the fallback executor.
+[^oracle-queue]: `src/py/vertebra/framework/queues/oracle.py::OracleQueueBackend` — Oracle queue backend requiring an injected `OracleQueueExecutor`.
+[^oracle-fake]: `src/py/vertebra/framework/queues/oracle.py::OracleQueueExecutor` — Runtime-checkable Oracle queue executor protocol.
 [^queue-factory]: `src/py/vertebra/framework/queues/base.py::QueueService._build_backend` — `oracle://` queue URL routes to `OracleQueueBackend(config)`.
 [^module-loader]: `src/py/vertebra/utils/module_loader.py::ensure_module` — Optional module loader raising `MissingDependencyError`.
 [^errors]: `src/py/vertebra/_typing.py::ImproperConfigurationError` — Configuration error (`ValueError` subclass) exported from `vertebra.typing`.

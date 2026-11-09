@@ -31,9 +31,9 @@ generated:
   by: flow/0.28.0
   at: "2026-11-07T00:00:00Z"
 verified:
-  - by: agent:plan-generator
-    at: "2026-11-08T00:00:00Z"
-    commit: 0acdf576
+  - by: agent:flow-executor
+    at: "2026-11-09T15:11:12Z"
+    commit: 30bc516e
 sources:
   - id: readme
     resource: README.md
@@ -96,15 +96,13 @@ tags:
 
 ### 1.1 Problem Statement & Objectives
 
-Chapters 01 through 09 change what the database layer does: Oracle and MSSQL drivers raise `MissingDependencyError`, DuckDB requires `duckdb`, the SQLAlchemy DB-API raises `InterfaceError` on unparsable URLs, PostgreSQL/MySQL/Redis/Valkey reject `memory://`, `vertebra-db` loses its TDS framing (ch05), TNS framing (ch06), and its `*Pool` types, MySQL module, and `OracleWalletMaterial` struct (ch07), install hints name real packages behind an extras unit gate (ch08; Oracle and MSSQL hints name the planned `vertebra-core[oracle]` / `vertebra-core[mssql]` native extras), and conformance (ch09) skips a missing native module, failing it under Docker conformance only for non-pending engines. The README, five `docs/**` pages, and five OKF chapters still describe Oracle Thin TNS/TTC execution, TDS 7.4 framing, an Oracle SQLite stand-in, `redis`/`memory` registry schemes, strict-xfail conformance, `*Pool` exports, and `vertebra-db` as a set of native shared-memory database drivers.
-
-This chapter rewrites those passages in present tense so user docs and agent knowledge describe the code once chapters 01 through 09 are complete.
+`README.md`, five `docs/**` database and extension pages, and five OKF knowledge and product chapters match the fail-loud driver baseline delivered across chapters 01 through 09: Oracle and SQL Server drivers raise `MissingDependencyError` until their native driver wheels ship, DuckDB requires `duckdb` (omitted on free-threaded `3.14t` / `3.15t`), the SQLAlchemy DB-API raises PEP 249 `InterfaceError` on unparsable URLs, PostgreSQL/MySQL/Redis/Valkey reject `memory://`, `vertebra-db` exposes shared codecs, dialers, transport, and `VTBARROW` framing without `*Pool` lease tables, `mysql`, or `OracleWalletMaterial`, `MissingDependencyError` install hints default to `vertebra-core[<extra>]` behind the AST packaging gate, and conformance skips missing native modules while failing non-pending engines under `VERTEBRA_CONFORMANCE_DOCKER=1`.[^readme][^docs-databases][^okf-drivers][^okf-test-matrix][^okf-product]
 
 **Non-goals**: changelog entries (owned by `/flow:finish`); Rust crate `//!` docs and Python docstrings (owned by ch01, ch05, ch06, and ch07); documenting per-engine extras that do not exist yet; agent instructions, workflow, benchmark, tech-stack, SQLAlchemy-dialect, embeddings, and landing-page docs, owned by [ch13-agent-knowledge-and-embeddings-docs](../ch13-agent-knowledge-and-embeddings-docs/spec.md), including the DuckDB dependency-group and `resp3_server` additions to `polyglot-test-matrix.md`; queue backend docs and knowledge (`docs/usage/queues-and-realtime.md`, `docs/reference/queues.md`, `knowledge/domains/framework/distributed-queues-and-email.md`), owned by [ch12-queue-docs-and-knowledge](../ch12-queue-docs-and-knowledge/spec.md); `docs/usage/testing.md`, `docs/examples/background_queues.py`, and object-storage docs, whose `memory://` usage is the queue and object-storage backend and stays valid.
 
 ### 1.2 Upstream Execution Baseline
 
-- Branch `feat/storage-updates`, plan anchored at `0acdf576`; parent roadmap [`spec.md`](../../spec.md).
+- Branch `feat/driver-fail-loud` stacked on `feat/storage-updates` (`d2b168dc`); parent roadmap [`spec.md`](../../spec.md).
 - Depends on all of `ch01-oracle-mssql-fail-loud`, `ch02-duckdb-sqlalchemy-queue-fail-loud`, `ch03-remove-memory-fakes`, `ch04-redis-valkey-memory-removal`, `ch05-mssql-codec-cleanup`, `ch06-oracle-codec-cleanup`, `ch07-vertebra-db-pools-and-mysql`, `ch08-install-hints-and-extras-gate`, and `ch09-conformance-outcomes` being `completed`; `ch10-queue-backend-fail-loud` is not a prerequisite (its docs belong to ch12). Executors read the post-ch09 source files named in each worksheet; they never document planned behavior.
 
 ### 1.3 Code Analysis & Seam Summary
@@ -229,7 +227,7 @@ Install-hint contract quoted in OKF only: `MissingDependencyError(package, *, in
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline (`HEAD`)**: `f2b328dc` — chapter completed and verified (`4/4` tasks completed).
+- **Verified Baseline (`HEAD`)**: `30bc516e` — chapter completed and verified (`4/4` tasks completed).
 - **Remaining Tasks**: None (`4/4` completed).
 - **Documentation & OKF Sync**: `[11/11 files documented]`.
 - **Active Invariants**: queue, object-storage, and Alchemy L1 cache `memory://` docs unchanged; changelog untouched; no internal identifiers in user docs; no planned-extra install command in user docs.

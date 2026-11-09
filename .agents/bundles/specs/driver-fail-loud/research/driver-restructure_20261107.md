@@ -29,10 +29,10 @@ sources:
     title: Codec and dialer exposure on vertebra._vertebra
   - id: oracle-driver
     resource: src/py/vertebra/db/adapters/oracle/driver.py::SyncOracleDriver
-    title: Oracle driver backed by sqlite3 in-memory connection
+    title: Oracle driver module audited for pre-fail-loud stand-in removal
   - id: mssql-driver
     resource: src/py/vertebra/db/adapters/mssql/driver.py::SyncMSSQLDriver
-    title: MSSQL driver backed by sqlite3 in-memory connection
+    title: MSSQL driver module audited for pre-fail-loud stand-in removal
   - id: duckdb-driver
     resource: src/py/vertebra/db/adapters/duckdb/driver.py::SyncDuckDBDriver
     title: DuckDB driver with silent sqlite3 fallback
@@ -123,8 +123,8 @@ Applications typically load one or two engines, so the duplicated cost is roughl
 [^db-connection]: `src/rs/vertebra-db/src/connection.rs` — Transport stream, TLS, Connection and CancelHandle traits.
 [^db-arrow-shm]: `src/rs/vertebra-db/src/arrow_shm.rs::ACTIVE_ARROW_SHM_REGIONS` — Per-binary VTBARROW region registry.
 [^py-db-bindings]: `src/rs/vertebra-py/src/db.rs::register_db_bindings` — Codec and dialer exposure on vertebra._vertebra.
-[^oracle-driver]: `src/py/vertebra/db/adapters/oracle/driver.py::SyncOracleDriver` — Oracle driver backed by sqlite3 in-memory connection.
-[^mssql-driver]: `src/py/vertebra/db/adapters/mssql/driver.py::SyncMSSQLDriver` — MSSQL driver backed by sqlite3 in-memory connection.
+[^oracle-driver]: `src/py/vertebra/db/adapters/oracle/driver.py::SyncOracleDriver` — Oracle driver module audited for pre-fail-loud stand-in removal.
+[^mssql-driver]: `src/py/vertebra/db/adapters/mssql/driver.py::SyncMSSQLDriver` — MSSQL driver module audited for pre-fail-loud stand-in removal.
 [^duckdb-driver]: `src/py/vertebra/db/adapters/duckdb/driver.py::SyncDuckDBDriver` — DuckDB driver with silent sqlite3 fallback.
 [^sqla-dialect]: `src/py/vertebra/extensions/sqlalchemy/dialects.py` — DB-API shim with SQLite fallback on URL parse failure.
 [^registry]: `src/py/vertebra/db/registry.py::REGISTERED_CONFIG_TYPES` — Closed config registry.

@@ -34,20 +34,20 @@ sources:
     resource: src/rs/Cargo.toml
     title: Workspace dependency table
   - id: postgres-rs
-    resource: src/rs/vertebra-db/src/postgres/mod.rs::PostgresPool
-    title: PostgreSQL frame, COPY, JSONB, pgvector codecs, and PostgresPool
+    resource: src/rs/vertebra-db/src/postgres/mod.rs::PoolerMode
+    title: PostgreSQL frame, COPY, JSONB, pgvector codecs, and PoolerMode
   - id: duckdb-rs
-    resource: src/rs/vertebra-db/src/duckdb/mod.rs::DuckdbBrokerPool
-    title: DuckDB bootstrap statements and DuckdbBrokerPool
+    resource: src/rs/vertebra-db/src/duckdb/mod.rs::DuckdbConfig
+    title: DuckDB SET bootstrap statements and ShmRegion Arrow frame re-exports
   - id: sqlite-rs
-    resource: src/rs/vertebra-db/src/sqlite/mod.rs::SqlitePool
-    title: SQLite pragmas and SqlitePool with msgpack helpers
+    resource: src/rs/vertebra-db/src/sqlite/mod.rs::SqliteConfig
+    title: SQLite WAL, mmap_size, and busy_timeout initialization pragmas
   - id: tns-rs
-    resource: src/rs/vertebra-db/src/oracle/tns.rs::OracleWalletMaterial
-    title: tnsnames.ora parser and wallet directory loader
+    resource: src/rs/vertebra-db/src/oracle/tns.rs::parse_tnsnames_ora
+    title: Oracle tnsnames.ora parser and alias resolver
   - id: mysql-rs
-    resource: src/rs/vertebra-db/src/mysql/mod.rs::MysqlPool
-    title: MySQL packet framing, caching_sha2 scramble, and MysqlPool
+    resource: src/rs/vertebra-db/src/lib.rs
+    title: vertebra-db module registry omitting the removed mysql module
   - id: resp3-rs
     resource: src/rs/vertebra-db/src/resp3/mod.rs::parse_cluster_redirect
     title: RESP3 codecs and cluster redirect parser kept for the Python Redis driver
@@ -79,9 +79,7 @@ tags:
 
 ### 1.1 Problem Statement & Objectives
 
-`vertebra-db` advertises itself as "native Rust database wire protocols" and carries shared-memory `*Pool` lease tables that never open a connection, a complete MySQL module, and an Oracle wallet directory loader that nothing constructs.[^db-lib][^mysql-rs][^tns-rs] The engine client crates selected by the per-engine driver flows replace that code. Two dependencies, `sha2` and `rmp-serde`, exist in `vertebra-db` only for the MySQL scramble and the `SqlitePool` msgpack helpers.[^db-cargo]
-
-This chapter deletes the PostgreSQL, DuckDB, SQLite, and MySQL pools, the MySQL module, the `OracleWalletMaterial` struct, and the two dependencies, then rewrites the crate doc and Cargo `description` so the crate describes what remains: codecs, dialers, transport, and shared-memory Arrow framing.
+`vertebra-db` holds shared database wire codecs, Cloud SQL and AlloyDB mTLS dialers, shared transport, and `VTBARROW` shared-memory Arrow framing without connectionless `*Pool` lease tables (`PostgresPool`, `DuckdbBrokerPool`, `SqlitePool`, `MysqlPool`), the `mysql` module, `OracleWalletMaterial`, or the `sha2` and `rmp-serde` crate dependencies.[^db-lib][^mysql-rs][^tns-rs][^db-cargo] Crate and module documentation and the Cargo `description` describe those codecs, dialers, transport, and Arrow framing while per-engine driver crates own live client connections and pooling.
 
 **Non-goals**:
 
@@ -92,7 +90,7 @@ This chapter deletes the PostgreSQL, DuckDB, SQLite, and MySQL pools, the MySQL 
 
 ### 1.2 Upstream Execution Baseline
 
-- Branch `feat/storage-updates` at `0acdf576`; parent roadmap [spec.md](../../spec.md).
+- Branch `feat/driver-fail-loud` stacked on `feat/storage-updates` (`d2b168dc`); parent roadmap [spec.md](../../spec.md).
 - Depends on [ch06-oracle-codec-cleanup](../ch06-oracle-codec-cleanup/spec.md), which depends on [ch05-mssql-codec-cleanup](../ch05-mssql-codec-cleanup/spec.md): ch05 reduces the `mssql` module and ch06 the `oracle` module, with their `lib.rs` re-exports and crate-doc bullets, so this chapter edits a `lib.rs` that no longer carries `MssqlPool`, `OraclePool`, or TDS/TNS framing.
 - Precondition check before t01: `grep -rnE "MssqlPool|OraclePool|TdsPacketType|TnsPacketType" src/rs --include=*.rs` prints nothing.
 
@@ -101,10 +99,10 @@ This chapter deletes the PostgreSQL, DuckDB, SQLite, and MySQL pools, the MySQL 
 | Area | Files Examined (`path/to/file::Symbol`) | Public Seam, Dependency Category & Integration |
 | --- | --- | --- |
 | Crate root | `src/rs/vertebra-db/src/lib.rs`[^db-lib], `Cargo.toml`[^db-cargo], workspace `src/rs/Cargo.toml`[^ws-cargo] | In-process Rust; consumers are `vertebra-py`, `vertebra-bigquery`, `vertebra-spanner`; none imports a pool, MySQL, or wallet symbol |
-| PostgreSQL / DuckDB | `postgres/mod.rs::PostgresPool`[^postgres-rs], `duckdb/mod.rs::DuckdbBrokerPool`[^duckdb-rs] | `db.rs` and `vector.rs` use codecs and `DuckdbConfig` only |
-| SQLite | `sqlite/mod.rs::SqlitePool`[^sqlite-rs] | `db.rs` uses `SqliteConfig` only; `SqlitePool` is the sole `rmp-serde` user |
-| Oracle wallet | `oracle/tns.rs::OracleWalletMaterial`[^tns-rs] | No caller; t03 deletes the whole struct, including its only constructor `from_directory`. Kept TNS parsing is `parse_tnsnames_ora` and `resolve_tns_alias`. Python wallet handling lives in `src/py/vertebra/db/adapters/oracle/config.py::OracleWallet` and does not call the Rust struct |
-| MySQL | `mysql/mod.rs::MysqlPool`[^mysql-rs] | Only `lib.rs` re-exports it; sole `sha2` user in `vertebra-db` |
+| PostgreSQL / DuckDB | `postgres/mod.rs::PoolerMode`[^postgres-rs], `duckdb/mod.rs::DuckdbConfig`[^duckdb-rs] | `db.rs` and `vector.rs` consume codecs, `PoolerMode`, and `DuckdbConfig` only |
+| SQLite | `sqlite/mod.rs::SqliteConfig`[^sqlite-rs] | `db.rs` consumes `SqliteConfig` pragmas only; `rmp-serde` leaves with `SqlitePool` |
+| Oracle wallet | `oracle/tns.rs::parse_tnsnames_ora`[^tns-rs] | Kept TNS parsing is `parse_tnsnames_ora`, `resolve_tns_alias`, and `OracleConnectDescriptor`; Python wallet handling lives in `src/py/vertebra/db/adapters/oracle/config.py::OracleWallet` |
+| MySQL | `vertebra-db/src/lib.rs`[^mysql-rs] | Removed `mysql` module and `sha2` crate dependency |
 | RESP3 | `resp3/mod.rs::parse_cluster_redirect`[^resp3-rs] | Kept whole; `db.rs::parse_cluster_redirect` reads `ClusterRedirect.kind.as_str()` |
 | PyO3 binding | `vertebra-py/src/db.rs::register_db_bindings`[^db-bindings] | Unchanged by this chapter; `duckdb_bootstrap_statements`, `sqlite_initialization_pragmas`, `parse_tnsnames_ora` keep working |
 
@@ -257,19 +255,19 @@ No Python surface changes in this chapter; `_vertebra.pyi` is untouched.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `HEAD @ 0acdf576`; `depends_on_chapters: [ch06-oracle-codec-cleanup]` (transitively ch05); `state: planned`.
-- **Remaining Tasks in Chapter**: `t01` through `t04` (`0/4` completed). Tasks run in order: t02 requires t01 (the `SqlitePool` re-export leaves first); t03 and t04 edit `lib.rs` after t01; t04 requires t03 (the pool half leaves before the module).
+- **Verified Baseline**: `HEAD @ b20f9d30`; `depends_on_chapters: [ch06-oracle-codec-cleanup]` (transitively ch05); `state: completed`.
+- **Remaining Tasks in Chapter**: none (`4/4` completed).
 - **Open Doc/OKF Items**: none in this chapter; ch11 owns user docs and OKF.
 - **Active Invariants**: every commit builds the workspace and passes `make rs-test`; lockfile changes ship with manifest changes; RESP3, TNS parsing, VECTOR/OSON, pgvector, PostgreSQL codecs, `SqliteConfig`, and `DuckdbConfig` stay.
-- **Sibling flows**: `native-postgres-driver` and `broker-pool-sharing` already assume this chapter deletes the `vertebra-db` pools.
+- **Sibling flows**: `native-postgres-driver` and `broker-pool-sharing` build atop this pool-free `vertebra-db` baseline.
 
 [^db-lib]: `src/rs/vertebra-db/src/lib.rs` — vertebra-db crate doc, module list, and re-exports.
 [^db-cargo]: `src/rs/vertebra-db/Cargo.toml` — vertebra-db package description and dependencies.
 [^ws-cargo]: `src/rs/Cargo.toml` — Workspace dependency table.
-[^postgres-rs]: `src/rs/vertebra-db/src/postgres/mod.rs::PostgresPool` — PostgreSQL frame, COPY, JSONB, pgvector codecs, and PostgresPool.
-[^duckdb-rs]: `src/rs/vertebra-db/src/duckdb/mod.rs::DuckdbBrokerPool` — DuckDB bootstrap statements and DuckdbBrokerPool.
-[^sqlite-rs]: `src/rs/vertebra-db/src/sqlite/mod.rs::SqlitePool` — SQLite pragmas and SqlitePool with msgpack helpers.
-[^tns-rs]: `src/rs/vertebra-db/src/oracle/tns.rs::OracleWalletMaterial` — tnsnames.ora parser and wallet directory loader.
-[^mysql-rs]: `src/rs/vertebra-db/src/mysql/mod.rs::MysqlPool` — MySQL packet framing, caching_sha2 scramble, and MysqlPool.
+[^postgres-rs]: `src/rs/vertebra-db/src/postgres/mod.rs::PoolerMode` — PostgreSQL frame, COPY, JSONB, pgvector codecs, and PoolerMode.
+[^duckdb-rs]: `src/rs/vertebra-db/src/duckdb/mod.rs::DuckdbConfig` — DuckDB SET bootstrap statements and ShmRegion Arrow frame re-exports.
+[^sqlite-rs]: `src/rs/vertebra-db/src/sqlite/mod.rs::SqliteConfig` — SQLite WAL, mmap_size, and busy_timeout initialization pragmas.
+[^tns-rs]: `src/rs/vertebra-db/src/oracle/tns.rs::parse_tnsnames_ora` — Oracle tnsnames.ora parser and alias resolver.
+[^mysql-rs]: `src/rs/vertebra-db/src/lib.rs` — vertebra-db module registry omitting the removed mysql module.
 [^resp3-rs]: `src/rs/vertebra-db/src/resp3/mod.rs::parse_cluster_redirect` — RESP3 codecs and cluster redirect parser kept for the Python Redis driver.
 [^db-bindings]: `src/rs/vertebra-py/src/db.rs::register_db_bindings` — Python codec bindings that consume SqliteConfig, DuckdbConfig, and RESP3.

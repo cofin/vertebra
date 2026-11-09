@@ -26,10 +26,10 @@ generated:
 sources:
   - id: pg-driver
     resource: src/py/vertebra/db/adapters/postgres/driver.py::SyncPostgreSQLDriver
-    title: PostgreSQL sync and async drivers with _in_memory_rows branches
+    title: PostgreSQL sync and async drivers rejecting memory:// DSNs
   - id: mysql-driver
     resource: src/py/vertebra/db/adapters/mysql/driver.py::SyncMySQLDriver
-    title: MySQL sync and async drivers with _in_memory_rows branches
+    title: MySQL sync and async drivers rejecting memory:// DSNs
   - id: improper-config
     resource: src/py/vertebra/_typing.py::ImproperConfigurationError
     title: Configuration error subclassing VertebraError and ValueError
@@ -74,7 +74,7 @@ tags:
 - **Loopback RESP3 fixture**: `src/py/tests/unit/conftest.py::resp3_server` yields a `Resp3FakeServer` on `127.0.0.1` that parses frames with `Resp3Parser`, serves sync and async drivers from one thread-based server, sends every reply and push frame under one state lock, and answers unknown commands with `-ERR unknown command`.[^resp3-parser][^redis-driver]
 - **Fixture command surface**: handshake (`HELLO`, `CLIENT`, `PING`), key-value and TTL (`GET`, `SET`, `DEL`, `UNLINK`, `PTTL`, `SCAN`, `FLUSHDB`), pub/sub (`SUBSCRIBE`, `PSUBSCRIBE`, `SSUBSCRIBE`, `UNSUBSCRIBE`, `PUBLISH`, `SPUBLISH`), and scripting (`EVAL`, `EVALSHA`); `PUBLISH` never reaches `smessage` subscribers.
 - **Consumer tests use the wire**: no test in `test_redis_valkey_driver.py`, `test_alchemy_cache_backend.py`, `test_framework_subdomains.py`, or `test_starlette_plugin.py` constructs a `memory://` Redis or Valkey config.[^kv-store][^litestar-store][^starlette-store]
-- **Redis production code is unchanged in this chapter**: the Redis driver memory emulation and `RedisConfig.url_schemes` stay as they are until `ch04-redis-valkey-memory-removal`.[^redis-driver]
+- **Redis production code removed in ch04**: this chapter retargets consumer unit tests onto `resp3_server` first while `ch04-redis-valkey-memory-removal` removes `RedisConfig.url_schemes` `memory` and the Redis driver emulation.[^redis-driver]
 - **Preserved memory backends**: `SQLAlchemyCacheBackend.from_url("memory://")` local L1 cache (asserted by a new test), the SQLite dialect `memory://` StaticPool alias (`get_pool_class`), and SQLite `:memory:` are unchanged.[^alchemy-cache][^sqlite-dialect]
 <!-- truth: end -->
 
@@ -82,17 +82,17 @@ tags:
 
 ### 1.1 Problem Statement & Objectives
 
-PostgreSQL and MySQL drivers accept a `memory://` DSN and answer every query from a `_in_memory_rows` list, so a typo in a DSN returns empty result sets instead of an error.[^pg-driver][^mysql-driver] This chapter deletes those fakes and makes both drivers raise `ImproperConfigurationError` (a `ValueError` subclass) for `memory://`.[^improper-config]
+`SyncPostgreSQLDriver`, `AsyncPostgreSQLDriver`, `SyncMySQLDriver`, and `AsyncMySQLDriver` reject `memory://` DSNs in `__init__` with `ImproperConfigurationError` (a `ValueError` subclass) and carry no `_in_memory_rows` or `_tx_snapshot` result lists.[^pg-driver][^mysql-driver][^improper-config]
 
-The Redis and Valkey unit tests construct `memory://` configs and depend on the driver's in-process command emulation.[^redis-driver] Before `ch04-redis-valkey-memory-removal` deletes that emulation, this chapter adds a threaded loopback RESP3 server fixture and moves every such test in `test_redis_valkey_driver.py`, `test_alchemy_cache_backend.py`, `test_framework_subdomains.py`, and `test_starlette_plugin.py` onto it, so the tests exercise the real encoding and parsing path of `SyncRedisDriver` and `AsyncRedisDriver`.[^resp3-parser] The store factories under test (`KeyValueStore.from_valkey`, Litestar `MemoryStore.from_valkey`, Starlette `CacheStore`) are unchanged.[^kv-store][^litestar-store][^starlette-store]
+A threaded loopback RESP3 server fixture (`resp3_server`) serves Redis and Valkey unit tests in `test_redis_valkey_driver.py`, `test_alchemy_cache_backend.py`, `test_framework_subdomains.py`, and `test_starlette_plugin.py` over real TCP sockets and `Resp3Parser` frames so `ch04-redis-valkey-memory-removal` deletes the Redis driver memory emulation without breaking consumer tests.[^redis-driver][^resp3-parser] The store factories under test (`KeyValueStore.from_valkey`, Litestar `MemoryStore.from_valkey`, Starlette `CacheStore`) remain unchanged.[^kv-store][^litestar-store][^starlette-store]
 
 Preserved: the SQLite dialect `memory://` StaticPool alias (`get_pool_class`), SQLite `:memory:`, queue and object storage `memory://`, and `SQLAlchemyCacheBackend.from_url("memory://")`.[^sqlite-dialect][^alchemy-cache]
 
-**Non-goals**: Redis and Valkey driver memory removal, `RedisConfig.url_schemes`, `test_redis_valkey_resp3.py`, `test_native_db_drivers.py` Redis cases, and conformance cache cases (owned by `ch04-redis-valkey-memory-removal`); Redis queue `_InMemoryRedisStreamClient` fallback in `framework/queues/redis.py` (owned by `ch10-queue-backend-fail-loud`); RESP3 codec removal (owned by `native-redis-driver`); removing `from __future__ import annotations` from touched modules (requires quoting `TYPE_CHECKING`-only annotations and is a separate cleanup); documentation and OKF edits (owned by `ch11-docs-and-okf` and `ch13-agent-knowledge-and-embeddings-docs`).
+**Non-goals**: Redis and Valkey driver memory removal, `RedisConfig.url_schemes`, `test_redis_valkey_resp3.py`, `test_native_db_drivers.py` Redis cases, and conformance cache cases (owned by `ch04-redis-valkey-memory-removal`); Redis queue `_InMemoryRedisStreamClient` removal in `framework/queues/redis.py` (owned by `ch10-queue-backend-fail-loud`); RESP3 codec removal (owned by `native-redis-driver`); removing `from __future__ import annotations` from touched modules (requires quoting `TYPE_CHECKING`-only annotations and is a separate cleanup); documentation and OKF edits (owned by `ch11-docs-and-okf` and `ch13-agent-knowledge-and-embeddings-docs`).
 
 ### 1.2 Upstream Execution Baseline
 
-- Branch `feat/storage-updates` at `0acdf576`; parent roadmap [spec.md](../../spec.md).
+- Branch `feat/driver-fail-loud` stacked on `feat/storage-updates` (`d2b168dc`); parent roadmap [spec.md](../../spec.md).
 - Runs after `ch01-oracle-mssql-fail-loud` and `ch02-duckdb-sqlalchemy-queue-fail-loud` because those chapters edit `src/py/tests/unit/db/test_enterprise_olap_drivers.py` and `src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py`, which `t01` also edits.
 - `ch04-redis-valkey-memory-removal` depends on this chapter: it retargets `test_redis_valkey_resp3.py` and `test_native_db_drivers.py` onto `resp3_server` and then deletes the emulation these tests no longer use.
 
@@ -239,14 +239,14 @@ def resp3_server() -> Iterator[Resp3FakeServer]:
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `HEAD @ ea07cb21`; `state: completed`; depends on `ch01` and `ch02` for shared test files.
+- **Verified Baseline**: `HEAD @ b04ded81`; `state: completed`; depends on `ch01` and `ch02` for shared test files.
 - **Remaining Tasks in Chapter**: None (`3/3` completed).
-- **Downstream**: `ch04-redis-valkey-memory-removal` starts after `t03`, when no consumer unit test depends on the Redis memory emulation.
+- **Downstream**: `ch04-redis-valkey-memory-removal` removes the Redis and Valkey driver memory emulation after `t03` retargets consumer unit tests onto `resp3_server`.
 - **Documentation & OKF Sync**: `[0/0]` in this chapter; the `resp3_server` entry in `polyglot-test-matrix.md` is owned by `driver-fail-loud:ch13:t02`.
-- **Active Invariants**: queue, object storage, Advanced Alchemy `from_url("memory://")` local cache, the SQLite dialect `memory://` StaticPool alias (`get_pool_class`), and SQLite `:memory:` paths unchanged; Redis production code unchanged; no inline `#` comments in touched Python.
+- **Active Invariants**: queue, object storage, Advanced Alchemy `from_url("memory://")` local cache, the SQLite dialect `memory://` StaticPool alias (`get_pool_class`), and SQLite `:memory:` paths remain preserved; `ch04` owns Redis driver memory removal; no inline `#` comments in touched Python.
 
-[^pg-driver]: `src/py/vertebra/db/adapters/postgres/driver.py::SyncPostgreSQLDriver` — PostgreSQL sync and async drivers with _in_memory_rows branches.
-[^mysql-driver]: `src/py/vertebra/db/adapters/mysql/driver.py::SyncMySQLDriver` — MySQL sync and async drivers with _in_memory_rows branches.
+[^pg-driver]: `src/py/vertebra/db/adapters/postgres/driver.py::SyncPostgreSQLDriver` — PostgreSQL sync and async drivers rejecting memory:// DSNs.
+[^mysql-driver]: `src/py/vertebra/db/adapters/mysql/driver.py::SyncMySQLDriver` — MySQL sync and async drivers rejecting memory:// DSNs.
 [^improper-config]: `src/py/vertebra/_typing.py::ImproperConfigurationError` — Configuration error subclassing VertebraError and ValueError.
 [^redis-driver]: `src/py/vertebra/db/adapters/redis/driver.py::SyncRedisDriver` — Redis sync and async RESP3 drivers whose wire commands the loopback fixture serves.
 [^resp3-parser]: `src/py/vertebra/db/adapters/redis/core.py::Resp3Parser` — RESP3 frame parser reused by the loopback test server.

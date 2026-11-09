@@ -38,8 +38,8 @@ updated_at: "2026-11-09T14:38:00Z"
 commit: b20f9d30
 sources:
   - id: sqlite-rs
-    resource: src/rs/vertebra-db/src/sqlite/mod.rs::SqlitePool
-    title: SQLite pragmas and SqlitePool with msgpack helpers
+    resource: src/rs/vertebra-db/src/sqlite/mod.rs::SqliteConfig
+    title: SQLite WAL, mmap_size, and busy_timeout initialization pragmas
   - id: db-cargo
     resource: src/rs/vertebra-db/Cargo.toml
     title: vertebra-db dependencies
@@ -126,7 +126,7 @@ Grep-only verification: `grep -rn "rmp-serde\|rmp_serde" src/rs --include=*.rs -
 
 - [2026-11-07 00:00] `SqlitePool` msgpack helpers are the only `rmp_serde` users in the workspace.
 
-[^sqlite-rs]: `src/rs/vertebra-db/src/sqlite/mod.rs::SqlitePool` — SQLite pragmas and SqlitePool with msgpack helpers.
+[^sqlite-rs]: `src/rs/vertebra-db/src/sqlite/mod.rs::SqliteConfig` — SQLite WAL, mmap_size, and busy_timeout initialization pragmas.
 [^db-cargo]: `src/rs/vertebra-db/Cargo.toml` — vertebra-db dependencies.
 [^ws-cargo]: `src/rs/Cargo.toml` — Workspace dependency table.
 [^db-lib]: `src/rs/vertebra-db/src/lib.rs` — sqlite re-export narrowed by t01.

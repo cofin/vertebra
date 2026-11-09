@@ -28,16 +28,16 @@ sources:
     title: Optional module loader raising MissingDependencyError
   - id: oracle-driver
     resource: src/py/vertebra/db/adapters/oracle/driver.py::SyncOracleDriver
-    title: Oracle sync and async drivers backed by sqlite3
+    title: Oracle sync and async drivers guarded on vertebra._oracle
   - id: mssql-driver
     resource: src/py/vertebra/db/adapters/mssql/driver.py::SyncMSSQLDriver
-    title: MSSQL sync and async drivers backed by sqlite3
+    title: MSSQL sync and async drivers guarded on vertebra._mssql
   - id: oracle-core
     resource: src/py/vertebra/db/adapters/oracle/core.py::OracleCore
-    title: Oracle codecs and the SQLite-only normalize_sql helper
+    title: Oracle VECTOR/OSON codecs and session context SQL builder
   - id: mssql-core
     resource: src/py/vertebra/db/adapters/mssql/core.py::MSSQLCore
-    title: TDS codecs, placeholder rewriter, and the SQLite-only normalize_for_sqlite helper
+    title: TDS packet helpers and @P1 placeholder rewriter
   - id: mssql-config
     resource: src/py/vertebra/db/adapters/mssql/config.py::MSSQLConfig
     title: MSSQL config building sync and async drivers with Cloud SQL dialers
@@ -77,16 +77,14 @@ tags:
 - **Error contract**: a missing module raises `MissingDependencyError` (an `ImportError`) whose `package` is `vertebra-core[oracle]` / `vertebra-core[mssql]` and whose `hint` is `Install it with: uv add vertebra-core[<engine>]`; never `TypeError`.[^module-loader]
 - **Import safety**: importing either `driver.py`, `vertebra.db.registry`, or `vertebra.extensions.sqlspec.adapters`, and constructing `OracleConfig`, `MSSQLConfig`, `OracleSyncConfig`, or `MSSQLSyncConfig`, never calls a resolver.[^sqlspec-adapters]
 - **Dialer forwarding**: `AsyncMSSQLDriver` accepts `SyncCloudSQLDialer | None`, passes it to its `SyncMSSQLDriver`, and its `dialer` property returns `self._sync.dialer`; `MSSQLConfig.build_async_driver` requests `registry.get_dialer(cfg, sync=True)`.[^mssql-config][^offload-base]
-- **Codecs stay**: TNS/TTC/VECTOR/OSON codecs, `OracleCore.build_session_context_sql`, `MSSQLCore.rewrite_placeholders`, `MSSQLCore.encode_tds_sql_batch`, and the `encode_tds_sql_batch` Rust binding are untouched in this chapter.[^oracle-core][^mssql-core]
+- **Codecs stay in ch01**: TNS/TTC/VECTOR/OSON codecs, `OracleCore.build_session_context_sql`, and `MSSQLCore.rewrite_placeholders` stay in place here while ch05 removes `MSSQLCore.encode_tds_sql_batch` and the `encode_tds_sql_batch` Rust binding.[^oracle-core][^mssql-core]
 <!-- truth: end -->
 
 ## 1. Specification, Context & Provenance
 
 ### 1.1 Problem Statement & Objectives
 
-`SyncOracleDriver` and `SyncMSSQLDriver` accept host, user, and password, then open `sqlite3.connect(":memory:")` in `__init__` and run every statement against it after rewriting `:1` / `:name` / `@P1` placeholders to `?`.[^oracle-driver][^mssql-driver] Callers that build an Oracle or SQL Server driver through `DatabaseRegistry`, a SQLSpec session, a Django backend, or a SQLAlchemy `+vtb` URL receive rows from SQLite. The async drivers wrap the same stand-in through `ThreadOffloadAsyncDatabaseDriver`.[^offload-base] `AsyncMSSQLDriver` stores its dialer on itself and builds its sync driver without one, so the thread that would perform I/O never sees the Cloud SQL dialer.[^mssql-driver]
-
-This chapter makes both drivers resolve their native extension module (`vertebra._oracle`, `vertebra._mssql`) on construction and on every public method, deletes the SQLite stand-in and the helpers that exist only to feed it, and forwards the MSSQL dialer to the sync driver that owns I/O. Until the native wheels ship, constructing any of the four driver classes raises `MissingDependencyError`.
+`SyncOracleDriver`, `AsyncOracleDriver`, `SyncMSSQLDriver`, and `AsyncMSSQLDriver` resolve their native extension modules (`vertebra._oracle`, `vertebra._mssql`) on construction and on every public method through `ensure_module`, raising `MissingDependencyError` across direct construction, `DatabaseRegistry`, SQLSpec sessions, Django backends, and SQLAlchemy `+vtb` URLs until the native driver wheels ship.[^oracle-driver][^mssql-driver][^module-loader] Neither adapter carries an in-memory `sqlite3` connection or SQLite placeholder normalizers (`OracleCore.normalize_sql`, `MSSQLCore.normalize_for_sqlite`).[^oracle-core][^mssql-core] `AsyncMSSQLDriver` wraps `SyncMSSQLDriver` through `ThreadOffloadAsyncDatabaseDriver` and forwards its `SyncCloudSQLDialer` directly to the sync driver that executes on the worker thread.[^offload-base][^mssql-config]
 
 **Non-goals**:
 
@@ -100,7 +98,7 @@ This chapter makes both drivers resolve their native extension module (`vertebra
 
 ### 1.2 Upstream Execution Baseline
 
-- Branch `feat/storage-updates` at `0acdf576`; parent roadmap [spec.md](../../spec.md); catalog [chapters/index.md](../index.md).
+- Branch `feat/driver-fail-loud` stacked on `feat/storage-updates` (`d2b168dc`); parent roadmap [spec.md](../../spec.md); catalog [chapters/index.md](../index.md).
 - `depends_on_chapters: []`; ch02 through ch13 start from this chapter's baseline.
 - Research: [change-surface](../../research/change-surface_20261107.md).
 
@@ -254,17 +252,17 @@ Deleted symbols: `SyncOracleDriver.{_conn, _in_transaction, _session_context, _p
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `HEAD @ d7a629b1`; `state: completed`, `depends_on_chapters: []`.
+- **Verified Baseline**: `HEAD @ 06762e64`; `state: completed`, `depends_on_chapters: []`.
 - **Remaining Tasks in Chapter**: none (`2/2` completed).
 - **Documentation & OKF Sync**: `[2/2 files documented in ch01]`.
-- **Handoffs to ch05**: after `t02`, `MSSQLCore.encode_tds_sql_batch` keeps callers in `MSSQLConfig.encode_sql_batch`, the `mssql/__init__.py` lazy export, and `test_mssql_tds_framing_and_placeholder_rewriter`; ch05 removes them with the binding. `OracleCore.build_session_context_sql` still says "or the Oracle stand-in" in its docstring.
+- **Follow-on Chapters**: ch05 removes `MSSQLCore.encode_tds_sql_batch`, `MSSQLConfig.encode_sql_batch`, the `mssql/__init__.py` batch export, and the `encode_tds_sql_batch` binding; ch06 updates the `OracleCore.build_session_context_sql` docstring and Oracle module docstrings.
 - **Active Invariants**: registry and SQLSpec adapter imports stay free of resolver calls; tests restore the dependency cache in `finally`; no new test files.
 
 [^module-loader]: `src/py/vertebra/utils/module_loader.py::ensure_module` — Optional module loader raising MissingDependencyError.
-[^oracle-driver]: `src/py/vertebra/db/adapters/oracle/driver.py::SyncOracleDriver` — Oracle sync and async drivers backed by sqlite3.
-[^mssql-driver]: `src/py/vertebra/db/adapters/mssql/driver.py::SyncMSSQLDriver` — MSSQL sync and async drivers backed by sqlite3.
-[^oracle-core]: `src/py/vertebra/db/adapters/oracle/core.py::OracleCore` — Oracle codecs and the SQLite-only normalize_sql helper.
-[^mssql-core]: `src/py/vertebra/db/adapters/mssql/core.py::MSSQLCore` — TDS codecs, placeholder rewriter, and the SQLite-only normalize_for_sqlite helper.
+[^oracle-driver]: `src/py/vertebra/db/adapters/oracle/driver.py::SyncOracleDriver` — Oracle sync and async drivers guarded on vertebra._oracle.
+[^mssql-driver]: `src/py/vertebra/db/adapters/mssql/driver.py::SyncMSSQLDriver` — MSSQL sync and async drivers guarded on vertebra._mssql.
+[^oracle-core]: `src/py/vertebra/db/adapters/oracle/core.py::OracleCore` — Oracle VECTOR/OSON codecs and session context SQL builder.
+[^mssql-core]: `src/py/vertebra/db/adapters/mssql/core.py::MSSQLCore` — TDS packet helpers and @P1 placeholder rewriter.
 [^mssql-config]: `src/py/vertebra/db/adapters/mssql/config.py::MSSQLConfig` — MSSQL config building sync and async drivers with Cloud SQL dialers.
 [^sync-base]: `src/py/vertebra/db/driver/_sync.py::SyncDatabaseDriver` — Base sync driver whose execute paths route through execute_with_description.
 [^offload-base]: `src/py/vertebra/db/driver/_async.py::ThreadOffloadAsyncDatabaseDriver` — Async driver delegating every call to a paired sync driver on a worker thread.

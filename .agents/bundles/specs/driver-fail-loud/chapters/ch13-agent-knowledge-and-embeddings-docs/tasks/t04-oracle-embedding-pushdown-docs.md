@@ -192,7 +192,7 @@ uv run --no-sync pytest src/py/tests/unit/tools/test_docs_tooling.py -q
 
 ## Notes & Discoveries
 
-- [2026-11-08 00:00] At `0acdf576` `OracleEmbeddingPushdown.__init__` takes `driver: AsyncOracleDriver | SyncOracleDriver` and constructs no driver.
+- [2026-11-08 00:00] At `d2b168dc` `OracleEmbeddingPushdown.__init__` takes `driver: AsyncOracleDriver | SyncOracleDriver` and constructs no driver.
 - [2026-11-08 00:00] Update `[k/11 files documented]` in the chapter spec and root spec when closing this task.
 
 [^docs-embeddings]: `docs/usage/embeddings-and-vectors.md` — Vector embeddings and SQL pushdown usage guide.

@@ -886,7 +886,7 @@ def test_standalone_missing_server_binary_reports_error(tmp_path: Path) -> None:
 
 
 _DEPENDENCY_CALLEES: frozenset[str] = frozenset({"ensure_module", "MissingDependencyError"})
-_BRACKETED_DISTRIBUTION = re.compile(r"^(?P<dist>[A-Za-z0-9_.-]+)\[(?P<extra>[^\]]+)\]$")
+_BRACKETED_DISTRIBUTION = re.compile(r"^(?P<dist>[A-Za-z0-9_.-]+)\[[^\]]+\]$")
 
 
 def test_optional_dependency_literals_name_declared_extras() -> None:
@@ -903,7 +903,7 @@ def test_optional_dependency_literals_name_declared_extras() -> None:
 
 
 def test_optional_dependency_gate_reports_each_malformed_literal(tmp_path: Path) -> None:
-    """The gate flags undeclared extras, sentence packages, and non-vertebra-core distributions only."""
+    """The gate flags undeclared extras, sentence packages, non-vertebra-core distributions, and bare extensions."""
     mod_file = tmp_path / "pkg" / "mod.py"
     mod_file.parent.mkdir(parents=True, exist_ok=True)
     mod_file.write_text(
@@ -917,6 +917,14 @@ def test_optional_dependency_gate_reports_each_malformed_literal(tmp_path: Path)
                 'print("z", extra="wasm")',
                 'MissingDependencyError("pandas is required")',
                 'MissingDependencyError("redis", install_package="redis is required")',
+                'ensure_module("vertebra.agent.tools")',
+                'ensure_module("vertebra._bundler", package="vertebra-core[bundler]", extra="bundler")',
+                'MissingDependencyError("vertebra._storage", install_package="vertebra-core[storage]", extra="storage")',
+                'MissingDependencyError("vertebra._vertebra.ArrowCursor", install_package="vertebra-core")',
+                'ensure_module("pandas is required")',
+                'ensure_module("vtb[mcp]")',
+                'ensure_module("vertebra._bundler")',
+                'MissingDependencyError("vertebra._storage")',
             ]
         )
         + "\n",
@@ -924,10 +932,14 @@ def test_optional_dependency_gate_reports_each_malformed_literal(tmp_path: Path)
     )
     violations = _optional_dependency_violations(
         tmp_path,
-        frozenset({"arrow", "mcp", "sqlspec"}),
+        frozenset({"arrow", "bundler", "mcp", "sqlspec", "storage"}),
         relative_to=tmp_path,
     )
     assert violations == [
+        "pkg/mod.py:13::ensure_module module_name='pandas is required'",
+        "pkg/mod.py:14::ensure_module module_name='vtb[mcp]'",
+        "pkg/mod.py:15::ensure_module module_name='vertebra._bundler'",
+        "pkg/mod.py:16::MissingDependencyError package='vertebra._storage'",
         "pkg/mod.py:1::ensure_module extra='wasm'",
         "pkg/mod.py:2::ensure_module package='numpy is required'",
         "pkg/mod.py:3::MissingDependencyError install_package='vertebra[mcp]'",
@@ -972,22 +984,32 @@ def _call_dependency_violations(
     if callee not in _DEPENDENCY_CALLEES:
         return []
     violations: list[str] = []
-    if (
-        callee == "MissingDependencyError"
-        and node.args
-        and isinstance(node.args[0], ast.Constant)
-        and isinstance(node.args[0].value, str)
-        and _is_invalid_package_literal(node.args[0].value)
-    ):
-        violations.append(f"{rel_path}:{node.lineno}::{callee} package={node.args[0].value!r}")
+    has_install_override = any(kw.arg in {"install_package", "extra"} for kw in node.keywords)
+    has_hint_override = has_install_override or any(kw.arg == "package" for kw in node.keywords)
+    if node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str):
+        pos_val = node.args[0].value
+        if callee == "MissingDependencyError" and (
+            _is_invalid_package_literal(pos_val) or (pos_val.startswith("vertebra._") and not has_install_override)
+        ):
+            violations.append(f"{rel_path}:{node.lineno}::{callee} package={pos_val!r}")
+        elif (
+            callee == "ensure_module"
+            and not has_hint_override
+            and (_is_invalid_package_literal(pos_val) or pos_val.startswith("vertebra._"))
+        ):
+            violations.append(f"{rel_path}:{node.lineno}::{callee} module_name={pos_val!r}")
     for kw in node.keywords:
         if kw.arg is None or not isinstance(kw.value, ast.Constant) or not isinstance(kw.value.value, str):
             continue
         val = kw.value.value
         if kw.arg == "extra" and val not in declared:
             violations.append(f"{rel_path}:{node.lineno}::{callee} extra={val!r}")
-        elif kw.arg in {"package", "install_package"} and _is_invalid_package_literal(val):
-            violations.append(f"{rel_path}:{node.lineno}::{callee} {kw.arg}={val!r}")
+        elif kw.arg == "install_package" and (_is_invalid_package_literal(val) or val.startswith("vertebra._")):
+            violations.append(f"{rel_path}:{node.lineno}::{callee} install_package={val!r}")
+        elif kw.arg == "package" and (
+            _is_invalid_package_literal(val) or (val.startswith("vertebra._") and not has_install_override)
+        ):
+            violations.append(f"{rel_path}:{node.lineno}::{callee} package={val!r}")
     return violations
 
 

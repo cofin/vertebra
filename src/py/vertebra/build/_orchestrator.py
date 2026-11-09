@@ -171,7 +171,7 @@ class BuildOrchestrator:
             self._run_vite_fallback(dev=dev)
 
     def _run_native(self, *, dev: bool) -> None:
-        bundler_mod = ensure_module("vertebra._bundler")
+        bundler_mod = ensure_module("vertebra._bundler", package="vertebra-core[bundler]", extra="bundler")
         bundler = bundler_mod.Bundler()
         bundle_config = bundler_mod.BundleConfig(
             entry=str(self.project_dir / self.config.entry),
