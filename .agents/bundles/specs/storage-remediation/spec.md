@@ -13,18 +13,18 @@ chapters:
   - ch04-streaming-arrow-parquet-and-shm
   - ch05-framework-adapters-and-test-hygiene
   - ch06-docs-okf-and-plan-sync
-current_chapter: ch05-framework-adapters-and-test-hygiene
+current_chapter: ch06-docs-okf-and-plan-sync
 current_task: null
 parent_prd: native-data-platform
 research: []
 plan_revision: 1
 plan_commit: fd571e3a
-state_revision: 14
-last_verified_checkpoint: 85bff05a
-last_reviewed_chapter: ch04-streaming-arrow-parquet-and-shm
-last_reviewed_commit: 85bff05a
+state_revision: 15
+last_verified_checkpoint: 465a1a72
+last_reviewed_chapter: ch06-docs-okf-and-plan-sync
+last_reviewed_commit: 465a1a72
 created_at: "2026-11-08T20:30:00Z"
-updated_at: "2026-11-09T01:19:00Z"
+updated_at: "2026-11-09T01:54:00Z"
 generated:
   by: flow/0.28.0
   at: "2026-11-08T20:55:00Z"
@@ -254,15 +254,15 @@ Zero-context code and quality reviews of `feat/storage-updates` (`077a3fe9..fd57
 - [x] [09970202] ch02-zero-copy-ffi-keys-and-backends — Zero-copy `PyBackedBytes` FFI, checked `get_range`, raw `StorePath::parse` keys, `PreconditionError`, S3/HTTP backend options, Litestar raw keys, and streaming/conditional/paginated `OciObjectStore` (chapters/ch02-zero-copy-ffi-keys-and-backends/spec.md)
 - [x] [46d39d95] ch03-bulk-file-io-compose-and-streams — Streaming `put_file`/`get_file`, bounded-concurrency `download_many`/`upload_many`/`staged_download`, conditional `copy`, `glob`, server-side GCS `compose`, read-ahead `open_reader`, and streaming `open_writer` (chapters/ch03-bulk-file-io-compose-and-streams/spec.md)
 - [x] [85bff05a] ch04-streaming-arrow-parquet-and-shm — True streaming `StreamingStorageResponse`, bounded `_arrow.py` layout/readinto/pre-buffer + Parquet dictionary/encoding options, and zero-copy `read_arrow_shm` + columnar Arrow hydration (chapters/ch04-streaming-arrow-parquet-and-shm/spec.md)
-- [~] ch05-framework-adapters-and-test-hygiene — SQLSpec, Advanced Alchemy, and Django storage adapter cleanups, `_store.py` alias removal, and pytest top-level import / parameterization hygiene (chapters/ch05-framework-adapters-and-test-hygiene/spec.md)
-- [ ] ch06-docs-okf-and-plan-sync — Zensical storage usage/reference docs and OKF `product.md` + `object-storage.md` synchronization (chapters/ch06-docs-okf-and-plan-sync/spec.md)
+- [x] [41d6d8c1] ch05-framework-adapters-and-test-hygiene — SQLSpec, Advanced Alchemy, and Django storage adapter cleanups, `_store.py` alias removal, and pytest top-level import / parameterization hygiene (chapters/ch05-framework-adapters-and-test-hygiene/spec.md)
+- [x] [465a1a72] ch06-docs-okf-and-plan-sync — Zensical storage usage/reference docs and OKF `product.md` + `object-storage.md` synchronization (chapters/ch06-docs-okf-and-plan-sync/spec.md)
 - **Chapter / Phase Recovery Checkpoint**: `make lint-all && make rs-test && uv run --no-sync pytest src/py/tests/unit/storage src/py/tests/unit/extensions src/py/tests/unit/db -q`
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline (`HEAD`)**: `85bff05a` — `4/6` chapters completed and reviewed (`ch01` `1ff643ec`, `ch02` `09970202`, `ch03` `46d39d95`, `ch04` `85bff05a`).
-- **Active Chapter**: `ch05-framework-adapters-and-test-hygiene` (`3/3` tasks completed: `t01` `3b24b0af`, `t02` `a04970be`, `t03` `cd7f66bf`; zero-context review in progress).
-- **Remaining Plan**: `ch05` (`t02`, `t03` + review) -> `ch06` (`t01`–`t02` + review) -> dual review, archive, push, and stacked PRs (`feat/storage-updates`, `feat/driver-fail-loud`, `feat/native-postgres-driver`).
+- **Verified Baseline (`HEAD`)**: `465a1a72` — `6/6` chapters completed and reviewed (`ch01` `1ff643ec`, `ch02` `09970202`, `ch03` `46d39d95`, `ch04` `85bff05a`, `ch05` `41d6d8c1`, `ch06` `465a1a72`).
+- **Active Chapter**: None; all chapters closed.
+- **Remaining Plan**: Full polyglot verification gate, flow-wide dual review (`077a3fe9..HEAD`), archive, push `feat/storage-updates`, and open the storage pull request, then continue the stacked flows (`driver-fail-loud`, `native-postgres-driver`).
 - **Documentation & OKF Sync**: `[6/6 files documented]`.
 - **Active Invariants & Triggers**: Zero `planning_status: empirical_dependent` chapters; every chapter is decision-complete (`planning_status: complete`).
 

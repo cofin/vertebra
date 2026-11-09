@@ -6,7 +6,7 @@ chapter_id: ch05-framework-adapters-and-test-hygiene
 title: "Chapter 05: Framework Storage Adapters and Pytest Hygiene"
 description: Clean up SQLSpec, Advanced Alchemy, and Django storage adapters (remove _IPCBuffer and duplicate re-exports, enforce public-before-private method ordering, raise ImproperConfigurationError on missing DuckDB GCS tokens, check supports_signing, forward signing and token_cache on StorageConfig, and avoid extra bytes copies in DjangoStorage.save), drop open_readable_file and _get_native_module shims in _store.py, and enforce pytest top-level imports, parametrize, and anyio across storage/extension/db tests.
 status: stable
-state: active
+state: completed
 planning_status: complete
 depends_on_chapters:
   - ch04-streaming-arrow-parquet-and-shm
@@ -14,15 +14,18 @@ replan_trigger: null
 current_task: null
 plan_revision: 1
 plan_commit: fd571e3a
-state_revision: 0
-last_verified_checkpoint: null
-last_reviewed_commit: null
+state_revision: 1
+last_verified_checkpoint: 41d6d8c1
+last_reviewed_commit: 41d6d8c1
 created_at: "2026-11-08T20:55:00Z"
-updated_at: "2026-11-08T20:55:00Z"
+updated_at: "2026-11-09T01:54:00Z"
 generated:
   by: flow/0.28.0
   at: "2026-11-08T20:55:00Z"
-verified: []
+verified:
+  - by: agent:code-reviewer
+    at: "2026-11-09T01:54:00Z"
+    commit: 41d6d8c1
 sources:
   - id: py-sqlspec-storage
     resource: src/py/vertebra/extensions/sqlspec/storage.py::ObjectStoreBackend
@@ -142,9 +145,9 @@ Zero-context code and quality reviews flagged adapter drift and test-hygiene vio
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline (`HEAD`)**: `fd571e3a` — `0/3` tasks completed in `ch05`.
-- **Remaining Tasks in Chapter**: `t01`, `t02`, `t03`.
-- **Remaining Chapters**: `ch01`–`ch06`.
+- **Verified Baseline (`HEAD`)**: `41d6d8c1` — `3/3` tasks completed (`3b24b0af`, `a04970be`, `cd7f66bf`) and the zero-context review findings remediated: native signing errors propagate, auth options with prebuilt stores raise `ImproperConfigurationError` in both adapters, `build_duckdb_gcs_secret_sql` renders a quote-escaped literal, Litestar tests run against real Litestar primitives, and optional dependencies are resolved at module level.
+- **Remaining Tasks in Chapter**: None.
+- **Remaining Chapters**: `ch06`.
 
 [^py-sqlspec-storage]: `src/py/vertebra/extensions/sqlspec/storage.py::ObjectStoreBackend` — SQLSpec `ObjectStoreBackend` and `build_duckdb_gcs_secret_sql`.
 [^py-alchemy-storage]: `src/py/vertebra/extensions/alchemy/storage.py::ObjectStoreBackend` — Advanced Alchemy `ObjectStoreBackend` adapter.

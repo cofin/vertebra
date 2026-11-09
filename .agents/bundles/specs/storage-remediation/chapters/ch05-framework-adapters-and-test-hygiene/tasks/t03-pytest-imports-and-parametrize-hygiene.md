@@ -112,6 +112,7 @@ uv run --no-sync pytest src/py/tests/unit/storage src/py/tests/unit/extensions/t
 
 ## Notes & Discoveries
 
+- [2026-11-09 01:54] `test_vertebra_plugin_overrides_litestar_cli_run_command` exercises `run --help` before `run --workers ...` within one `CliRunner` because Click resolves `run` before Litestar's group callback loads the app in a fresh in-process invocation; a fresh-process `litestar --app ... run --workers 2 --topology shm` resolves Vertebra's `run` override correctly, so the ordering is a `CliRunner` artifact only.
 - [2026-11-09 01:34] Remaining `for` loops in the target files are fixture seeding, repetition counters, or helper-double internals rather than assertion subcases, so they stay as loops.
 - [2026-11-08 20:55] In `test_litestar_plugin.py`, if a test intentionally verifies sync execution outside an active event loop, keep it synchronous without `asyncio.run`; convert coroutine tests to `@pytest.mark.anyio`.
 
