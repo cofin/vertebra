@@ -38,18 +38,35 @@ __all__ = (
 def _resolve_mssql_config(
     config: MSSQLConfig | str | None,
     overrides: dict[str, Any],
+    dialer: Any = None,
 ) -> MSSQLConfig:
-    """Resolve `config` and keyword `overrides` into an `MSSQLConfig` instance."""
+    """Resolve `config`, keyword `overrides`, and optional `dialer` into an `MSSQLConfig` instance."""
     if isinstance(config, str):
-        return MSSQLConfig.from_url(config, **overrides)
-    if isinstance(config, MSSQLConfig):
-        return msgspec.structs.replace(config, **overrides) if overrides else config
-    dsn = overrides.pop("dsn", None)
-    if isinstance(dsn, str) and dsn.startswith(("mssql://", "sqlserver://")):
-        return MSSQLConfig.from_url(dsn, **overrides)
-    if dsn is not None:
-        overrides["dsn"] = dsn
-    return MSSQLConfig(**overrides)
+        resolved = MSSQLConfig.from_url(config, **overrides)
+    elif isinstance(config, MSSQLConfig):
+        resolved = msgspec.structs.replace(config, **overrides) if overrides else config
+    else:
+        dsn = overrides.pop("dsn", None)
+        if isinstance(dsn, str) and dsn.startswith(("mssql://", "sqlserver://")):
+            resolved = MSSQLConfig.from_url(dsn, **overrides)
+        else:
+            if dsn is not None:
+                overrides["dsn"] = dsn
+            resolved = MSSQLConfig(**overrides)
+
+    if dialer is not None and not resolved.cloud_sql_instance:
+        dialer_cfg = getattr(dialer, "config", None)
+        instance_name = getattr(dialer_cfg, "instance_connection_name", None) if dialer_cfg is not None else None
+        if instance_name:
+            ip_type = str(getattr(dialer_cfg, "ip_type", resolved.cloudsql_ip_type))
+            auth_type = "IAM" if getattr(dialer_cfg, "enable_iam_auth", False) else resolved.cloudsql_auth_type
+            resolved = msgspec.structs.replace(
+                resolved,
+                cloud_sql_instance=str(instance_name),
+                cloudsql_ip_type=ip_type,
+                cloudsql_auth_type=auth_type,
+            )
+    return resolved
 
 
 class SyncMSSQLDriver(SyncDatabaseDriver[MSSQLConfig]):
@@ -74,11 +91,11 @@ class SyncMSSQLDriver(SyncDatabaseDriver[MSSQLConfig]):
         client: SyncMSSQLClient | Any | None = None,
         **overrides: Any,
     ) -> None:
-        resolved = _resolve_mssql_config(config, overrides)
+        resolved = _resolve_mssql_config(config, overrides, dialer)
         super().__init__(resolved, broker=broker)
         self._dialer = dialer
         self._client: SyncMSSQLClient | Any = (
-            client if client is not None else MSSQLCore.create_sync_rust_client(resolved)
+            client if client is not None else MSSQLCore.create_sync_rust_client(resolved, dialer=dialer)
         )
         self._in_transaction: bool = False
         self._last_rewritten_sql: str = ""
@@ -117,7 +134,7 @@ class SyncMSSQLDriver(SyncDatabaseDriver[MSSQLConfig]):
     def connect(self) -> Self:
         """Ensure the underlying native `SyncMSSQLClient` is ready."""
         if self._client is None:
-            self._client = MSSQLCore.create_sync_rust_client(self.config)
+            self._client = MSSQLCore.create_sync_rust_client(self.config, dialer=self._dialer)
         self._closed = False
         return self
 
@@ -487,11 +504,11 @@ class AsyncMSSQLDriver(AsyncDatabaseDriver[MSSQLConfig]):
         client: AsyncMSSQLClient | Any | None = None,
         **overrides: Any,
     ) -> None:
-        resolved = _resolve_mssql_config(config, overrides)
+        resolved = _resolve_mssql_config(config, overrides, dialer)
         super().__init__(resolved, broker=broker)
         self._dialer = dialer
         self._client: AsyncMSSQLClient | Any = (
-            client if client is not None else MSSQLCore.create_async_rust_client(resolved)
+            client if client is not None else MSSQLCore.create_async_rust_client(resolved, dialer=dialer)
         )
         self._in_transaction: bool = False
         self._last_rewritten_sql: str = ""
@@ -530,7 +547,7 @@ class AsyncMSSQLDriver(AsyncDatabaseDriver[MSSQLConfig]):
     async def connect(self) -> Self:
         """Ensure the underlying native `AsyncMSSQLClient` is ready."""
         if self._client is None:
-            self._client = MSSQLCore.create_async_rust_client(self.config)
+            self._client = MSSQLCore.create_async_rust_client(self.config, dialer=self._dialer)
         self._closed = False
         return self
 

@@ -241,6 +241,22 @@ mysql-wheel-check:                                  ## Build vertebra-mysql whee
 	@uv run python -c 'import glob, zipfile; whls = glob.glob("/tmp/vtb-wheels-mysql/vertebra_mysql-*.whl"); assert whls, "No vertebra-mysql wheel built"; zf = zipfile.ZipFile(whls[0]); names = zf.namelist(); assert any(n.startswith("vertebra/_mysql") and n.endswith((".so", ".pyd", ".dylib")) for n in names), names; assert "vertebra/__init__.py" not in names, names; assert not any(n.endswith(".py") for n in names), names'
 	@echo "${OK} vertebra-mysql wheel isolation verified"
 
+.PHONY: mssql-test
+mssql-test:                                         ## Run Rust and Python SQL Server (vertebra-mssql) tests
+	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
+	@cd src/rs && cargo test -p vertebra-mssql --locked
+	@uv run python -m mypy.stubtest vertebra._mssql
+	@uv run pytest src/py/tests/unit/db/test_mssql_driver.py -v
+	@echo "${OK} MSSQL tests passed"
+
+.PHONY: mssql-wheel-check
+mssql-wheel-check:                                  ## Build vertebra-mssql wheel and verify isolated archive layout
+	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
+	@rm -rf /tmp/vtb-wheels-mssql && mkdir -p /tmp/vtb-wheels-mssql
+	@uv run maturin build --manifest-path src/rs/vertebra-mssql/Cargo.toml --out /tmp/vtb-wheels-mssql
+	@uv run python -c 'import glob, zipfile; wheels = sorted(glob.glob("/tmp/vtb-wheels-mssql/vertebra_mssql-*.whl")); assert wheels, "No vertebra-mssql wheel produced"; zf = zipfile.ZipFile(wheels[-1]); names = zf.namelist(); assert any(n.startswith("vertebra/_mssql") and n.endswith((".so", ".pyd", ".dylib")) for n in names), names; assert not any(n.endswith(".py") and n.startswith("vertebra/") for n in names), names; assert not any(n.startswith("vertebra/_") and not n.startswith("vertebra/_mssql") for n in names), names'
+	@echo "${OK} vertebra-mssql wheel layout verified"
+
 .PHONY: test
 test: rs-test py-test ts-test                       ## Run all tests (Rust, Python, TypeScript)
 	@echo "${OK} All tests passed"

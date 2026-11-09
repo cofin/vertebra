@@ -17,6 +17,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[5]
 
 SIBLING_WHEEL_MANIFESTS: tuple[tuple[str, str, str], ...] = (
     ("vertebra-duckdb", "src/rs/vertebra-duckdb/pyproject.toml", "_duckdb.pyi"),
+    ("vertebra-mssql", "src/rs/vertebra-mssql/pyproject.toml", "_mssql.pyi"),
     ("vertebra-mysql", "src/rs/vertebra-mysql/pyproject.toml", "_mysql.pyi"),
     ("vertebra-bigquery", "src/rs/vertebra-bigquery/pyproject.toml", "_bigquery.pyi"),
     ("vertebra-spanner", "src/rs/vertebra-spanner/pyproject.toml", "_spanner.pyi"),
@@ -63,6 +64,7 @@ def test_vertebra_duckdb_wheel_pyproject_includes_only_duckdb_stub() -> None:
     assert "**/py/vertebra/_vertebra.pyi" in excludes
     assert "**/py/vertebra/_bigquery.pyi" in excludes
     assert "**/py/vertebra/_bundler.pyi" in excludes
+    assert "**/py/vertebra/_mssql.pyi" in excludes
     assert "**/py/vertebra/_mysql.pyi" in excludes
     assert "**/py/vertebra/_spanner.pyi" in excludes
     assert "**/py/vertebra/_storage.pyi" in excludes
@@ -73,6 +75,7 @@ def test_vertebra_duckdb_wheel_pyproject_includes_only_duckdb_stub() -> None:
     [
         "vertebra-bigquery",
         "vertebra-bundler",
+        "vertebra-mssql",
         "vertebra-mysql",
         "vertebra-spanner",
         "vertebra-storage",
@@ -122,11 +125,13 @@ def test_optional_wheel_pyproject_isolation_and_exclusions(
     maturin_cfg = data["tool"]["maturin"]
     assert maturin_cfg["python-source"] == "../../py"
     excludes = set(maturin_cfg.get("exclude", []))
+    assert f"**/py/vertebra/{own_stub}" not in excludes
     assert "**/py/vertebra/**/*.py" in excludes
     assert "**/py/vertebra/**/*.so" in excludes
     assert "**/py/vertebra/_vertebra.pyi" in excludes
     sibling_stubs = {
         "_duckdb.pyi",
+        "_mssql.pyi",
         "_mysql.pyi",
         "_bigquery.pyi",
         "_spanner.pyi",
@@ -134,16 +139,20 @@ def test_optional_wheel_pyproject_isolation_and_exclusions(
         "_bundler.pyi",
     } - {own_stub}
     assert all(f"**/py/vertebra/{stub}" in excludes for stub in sibling_stubs)
+    stub_file = _REPO_ROOT / "src" / "py" / "vertebra" / own_stub
+    assert stub_file.is_file()
 
 
-def test_root_pyproject_declares_vertebra_mysql_optional_extra() -> None:
-    """Root `pyproject.toml` maps the `mysql` optional extra to `vertebra-mysql`."""
+@pytest.mark.parametrize("extra_name", ["mysql", "mssql"])
+def test_root_pyproject_declares_optional_driver_extra(extra_name: str) -> None:
+    """Root `pyproject.toml` maps each optional SQL driver extra to its matching workspace crate."""
     root_toml = tomllib.loads((_REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    pkg_name = f"vertebra-{extra_name}"
     optional_deps = root_toml["project"]["optional-dependencies"]
-    assert any(dep.startswith("vertebra-mysql") for dep in optional_deps["mysql"])
-    assert any(dep.startswith("vertebra-mysql") for dep in optional_deps["all"])
+    assert any(dep.startswith(pkg_name) for dep in optional_deps[extra_name])
+    assert any(dep.startswith(pkg_name) for dep in optional_deps["all"])
     uv_sources = root_toml["tool"]["uv"]["sources"]
-    assert uv_sources["vertebra-mysql"] == {"path": "src/rs/vertebra-mysql", "editable": True}
+    assert uv_sources[pkg_name] == {"path": f"src/rs/{pkg_name}", "editable": True}
 
 
 def test_vertebra_mysql_runtime_module_surface() -> None:

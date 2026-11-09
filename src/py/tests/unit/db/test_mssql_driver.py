@@ -17,6 +17,7 @@ import vertebra._mssql as mssql_native
 from vertebra._vertebra import (
     DatabaseError,
     IntegrityError,
+    InterfaceError,
     NotFoundError,
     ProgrammingError,
     QueryCancelledError,
@@ -27,6 +28,7 @@ from vertebra.db import (
     AsyncCloudSQLDialer,
     AsyncPipeline,
     AsyncPipelineCapable,
+    CloudSQLConfig,
     DatabaseRegistry,
     SyncCloudSQLDialer,
     SyncPipeline,
@@ -41,7 +43,7 @@ from vertebra.db.adapters.mssql import (
     SyncMSSQLPipeline,
     rewrite_mssql_placeholders,
 )
-from vertebra.typing import MissingDependencyError
+from vertebra.typing import ImproperConfigurationError, MissingDependencyError
 from vertebra.utils.module_loader import reset_dependency_cache
 
 
@@ -180,7 +182,9 @@ class _TdsWireBuilder:
             _ = fd_len
             row_tokens[-1:] = struct.pack("<H", len(utf16))
             row_tokens.extend(utf16)
-        tokens = colmeta + bytes(row_tokens) + cls.doneinproc_token(0x0010, 0xC1, len(rows)) + cls.doneproc_token(0, 0, 0)
+        tokens = (
+            colmeta + bytes(row_tokens) + cls.doneinproc_token(0x0010, 0xC1, len(rows)) + cls.doneproc_token(0, 0, 0)
+        )
         return cls.build_packet(0x04, 0x01, tokens)
 
 
@@ -673,3 +677,75 @@ async def test_async_mssql_pipeline_commit_rollback_and_savepoint_nesting() -> N
     finally:
         await driver.close()
         server.close()
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "match_pattern"),
+    [
+        ({"port": 0}, "port"),
+        ({"port": 70000}, "port"),
+        ({"host": ""}, "host"),
+        ({"host": "bad\x00host"}, "NUL"),
+        ({"user": "bad\x00user"}, "NUL"),
+        ({"database": "bad\x00db"}, "NUL"),
+        ({"encryption": "bogus-mode"}, "encryption"),
+        ({"ca_pem": b"not-a-valid-pem"}, "PEM"),
+        ({"client_cert_pem": b"not-a-valid-pem"}, "PEM"),
+        ({"client_key_pem": b"not-a-valid-pem"}, "PEM"),
+    ],
+)
+def test_mssql_config_in_memory_validation(
+    kwargs: dict[str, object],
+    match_pattern: str,
+) -> None:
+    """Verify `MSSQLConfig` and native `SyncMSSQLClient` reject invalid port, NUL, encryption, and PEM inputs."""
+    with pytest.raises(ImproperConfigurationError, match=match_pattern):
+        MSSQLConfig(**kwargs)
+    with pytest.raises(InterfaceError, match=match_pattern):
+        mssql_native.SyncMSSQLClient("mssql://127.0.0.1:1433/master", **kwargs)
+
+
+def test_mssql_secret_redaction_in_repr() -> None:
+    """Verify `MSSQLConfig`, `SyncMSSQLClient`, and `AsyncMSSQLClient` redact passwords in `repr()`."""
+    secret = "SuperSecretTdsPassword99"
+    cfg = MSSQLConfig.from_url(f"mssql://sa:{secret}@127.0.0.1:1433/appdb?encrypt=optional")
+    assert secret not in repr(cfg)
+    assert "[REDACTED]" in repr(cfg)
+
+    sync_client = MSSQLCore.create_sync_rust_client(cfg)
+    async_client = MSSQLCore.create_async_rust_client(cfg)
+    assert secret not in repr(sync_client)
+    assert "[REDACTED]" in repr(sync_client)
+    assert secret not in repr(async_client)
+    assert "[REDACTED]" in repr(async_client)
+
+
+@pytest.mark.anyio
+async def test_mssql_cloudsql_dialer_wiring_to_driver_and_client() -> None:
+    """Verify `SyncCloudSQLDialer` and `AsyncCloudSQLDialer` wire instance metadata through to the native client."""
+    dialer_cfg = CloudSQLConfig(
+        instance_connection_name="proj:us-central1:sqlserver-prod",
+        enable_iam_auth=True,
+        ip_type="PRIVATE",
+    )
+    sync_dialer = SyncCloudSQLDialer(dialer_cfg)
+    sync_driver = SyncMSSQLDriver("mssql://127.0.0.1:1433/master?encrypt=not_supported", dialer=sync_dialer)
+    try:
+        assert sync_driver.dialer is sync_dialer
+        assert sync_driver.config.cloud_sql_instance == "proj:us-central1:sqlserver-prod"
+        assert sync_driver.config.cloudsql_ip_type == "PRIVATE"
+        assert sync_driver.config.cloudsql_auth_type == "IAM"
+        assert "proj:us-central1:sqlserver-prod" in repr(sync_driver._client)
+    finally:
+        sync_driver.close()
+
+    async_dialer = AsyncCloudSQLDialer(dialer_cfg)
+    async_driver = AsyncMSSQLDriver("mssql://127.0.0.1:1433/master?encrypt=not_supported", dialer=async_dialer)
+    try:
+        assert async_driver.dialer is async_dialer
+        assert async_driver.config.cloud_sql_instance == "proj:us-central1:sqlserver-prod"
+        assert async_driver.config.cloudsql_ip_type == "PRIVATE"
+        assert async_driver.config.cloudsql_auth_type == "IAM"
+        assert "proj:us-central1:sqlserver-prod" in repr(async_driver._client)
+    finally:
+        await async_driver.close()

@@ -246,8 +246,9 @@ pub fn rows_to_record_batch(
 pub fn encode_batch_to_ipc_stream(batch: &RecordBatch) -> Result<Vec<u8>, MssqlError> {
     let mut buf = Vec::with_capacity(4096);
     {
-        let mut writer = StreamWriter::try_new(&mut buf, batch.schema_ref())
-            .map_err(|e| MssqlError::data(format!("failed to initialize Arrow StreamWriter: {e}")))?;
+        let mut writer = StreamWriter::try_new(&mut buf, batch.schema_ref()).map_err(|e| {
+            MssqlError::data(format!("failed to initialize Arrow StreamWriter: {e}"))
+        })?;
         writer
             .write(batch)
             .map_err(|e| MssqlError::data(format!("failed to write Arrow RecordBatch: {e}")))?;
@@ -260,9 +261,7 @@ pub fn encode_batch_to_ipc_stream(batch: &RecordBatch) -> Result<Vec<u8>, MssqlE
 
 /// Materialize an [`MssqlQueryResult`] into an unregistered `VTBARROW` POSIX shared-memory
 /// [`ShmRegion`], returning `(shm_name, payload_len, row_count, Arc<ShmRegion>)`.
-pub fn query_result_to_shm_arrow(
-    res: &MssqlQueryResult,
-) -> Result<ShmArrowBatchPart, MssqlError> {
+pub fn query_result_to_shm_arrow(res: &MssqlQueryResult) -> Result<ShmArrowBatchPart, MssqlError> {
     let schema = build_arrow_schema(&res.columns, &res.rows);
     let batch = rows_to_record_batch(schema, &res.rows)?;
     let ipc_bytes = encode_batch_to_ipc_stream(&batch)?;
@@ -306,8 +305,12 @@ pub fn open_mssql_shm_stream_writer(
     schema_ipc_frame: &[u8],
 ) -> Result<ShmArrowStreamWriter, MssqlError> {
     let shm_name = next_mssql_shm_name();
-    ShmArrowStreamWriter::create(&shm_name, DEFAULT_MSSQL_ARROW_SHM_CAPACITY, schema_ipc_frame)
-        .map_err(MssqlError::data)
+    ShmArrowStreamWriter::create(
+        &shm_name,
+        DEFAULT_MSSQL_ARROW_SHM_CAPACITY,
+        schema_ipc_frame,
+    )
+    .map_err(MssqlError::data)
 }
 
 #[cfg(test)]

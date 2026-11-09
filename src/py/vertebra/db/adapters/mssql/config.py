@@ -1,7 +1,7 @@
 """SQL Server connection configuration."""
 
-from typing import Any, ClassVar, Self
-from urllib.parse import parse_qsl, urlparse
+from typing import Any, ClassVar, Final, Self
+from urllib.parse import parse_qsl, urlparse, urlunparse
 
 from vertebra.db.adapters.mssql.core import (
     MSSQL_DIALECT_TAG,
@@ -9,8 +9,56 @@ from vertebra.db.adapters.mssql.core import (
 )
 from vertebra.db.dialer.cloudsql import CloudSQLConfig
 from vertebra.db.driver._common import BaseDatabaseConfig
+from vertebra.typing import ImproperConfigurationError
 
 __all__ = ("MSSQLConfig",)
+
+_VALID_ENCRYPTION_MODES: Final[frozenset[str]] = frozenset(
+    {
+        "required",
+        "require",
+        "true",
+        "on",
+        "yes",
+        "mandatory",
+        "optional",
+        "login_only",
+        "login-only",
+        "prefer",
+        "strict",
+        "verify-full",
+        "verify_full",
+        "verify-ca",
+        "verify_ca",
+        "not_supported",
+        "disabled",
+        "disable",
+        "false",
+        "off",
+        "no",
+    }
+)
+
+
+def _redact_dsn(dsn: str) -> str:
+    """Return `dsn` with any embedded URI password replaced by `[REDACTED]`."""
+    parsed = urlparse(dsn)
+    if parsed.password is None:
+        return dsn
+    host_part = f"[{parsed.hostname}]" if parsed.hostname and ":" in parsed.hostname else (parsed.hostname or "")
+    if parsed.port is not None:
+        host_part = f"{host_part}:{parsed.port}"
+    user_part = f"{parsed.username}:[REDACTED]@" if parsed.username is not None else ":[REDACTED]@"
+    return urlunparse(parsed._replace(netloc=f"{user_part}{host_part}"))
+
+
+def _validate_pem_bytes(pem: bytes | None, field_name: str) -> None:
+    """Validate that optional PEM bytes contain PEM header and footer markers."""
+    if pem is None:
+        return
+    if not isinstance(pem, (bytes, bytearray, memoryview)) or b"-----BEGIN " not in pem or b"-----END " not in pem:
+        msg = f"Invalid PEM bundle in MSSQLConfig.{field_name}: missing PEM header/footer"
+        raise ImproperConfigurationError(msg)
 
 
 class MSSQLConfig(BaseDatabaseConfig, frozen=True, gc=False):
@@ -72,6 +120,40 @@ class MSSQLConfig(BaseDatabaseConfig, frozen=True, gc=False):
     broker: Any = None
     """Optional shared-memory `DatabaseBroker` coordinating cross-worker connection and statement leases."""
 
+    def __post_init__(self) -> None:
+        for field_name, value in (
+            ("dsn", self.dsn),
+            ("host", self.host),
+            ("database", self.database),
+            ("user", self.user),
+            ("application_name", self.application_name),
+            ("server_name", self.server_name),
+        ):
+            if value is not None and "\x00" in value:
+                msg = f"MSSQLConfig.{field_name} must not contain NUL bytes"
+                raise ImproperConfigurationError(msg)
+        if not self.host or not self.host.strip():
+            msg = "MSSQLConfig.host must not be empty"
+            raise ImproperConfigurationError(msg)
+        if int(self.port) < 1 or int(self.port) > 65535:
+            msg = f"MSSQLConfig.port must be in 1..=65535 (got {self.port})"
+            raise ImproperConfigurationError(msg)
+        if self.encryption.strip().lower() not in _VALID_ENCRYPTION_MODES:
+            msg = f"Unsupported MSSQLConfig.encryption mode: {self.encryption!r}"
+            raise ImproperConfigurationError(msg)
+        _validate_pem_bytes(self.ca_pem, "ca_pem")
+        _validate_pem_bytes(self.client_cert_pem, "client_cert_pem")
+        _validate_pem_bytes(self.client_key_pem, "client_key_pem")
+
+    def __repr__(self) -> str:
+        redacted_dsn = _redact_dsn(self.dsn)
+        return (
+            f"MSSQLConfig(dsn={redacted_dsn!r}, host={self.host!r}, port={self.port!r}, "
+            f"database={self.database!r}, user={self.user!r}, password='[REDACTED]', "
+            f"encryption={self.encryption!r}, trust_server_certificate={self.trust_server_certificate!r}, "
+            f"read_only_intent={self.read_only_intent!r}, cloud_sql_instance={self.cloud_sql_instance!r})"
+        )
+
     @staticmethod
     def rewrite_placeholders(sql: str) -> tuple[str, int]:
         """Rewrite `?` and `$1` placeholders into T-SQL `@P1, @P2, ...` parameters."""
@@ -80,7 +162,13 @@ class MSSQLConfig(BaseDatabaseConfig, frozen=True, gc=False):
     def to_cloud_dialer_config(self) -> CloudSQLConfig | None:
         """Return `CloudSQLConfig` when `cloud_sql_instance` is set."""
         if self.cloud_sql_instance:
-            return CloudSQLConfig(instance_connection_name=self.cloud_sql_instance)
+            ip_raw = self.cloudsql_ip_type.strip().upper()
+            ip_type: Any = ip_raw if ip_raw in {"PUBLIC", "PRIVATE", "PSC"} else "PUBLIC"
+            return CloudSQLConfig(
+                instance_connection_name=self.cloud_sql_instance,
+                enable_iam_auth=(self.cloudsql_auth_type.strip().upper() == "IAM"),
+                ip_type=ip_type,
+            )
         return None
 
     @classmethod
@@ -105,9 +193,7 @@ class MSSQLConfig(BaseDatabaseConfig, frozen=True, gc=False):
         if "encrypt" in query_params or "encryption" in query_params:
             kwargs["encryption"] = query_params.get("encryption") or query_params["encrypt"]
         if "trust_server_certificate" in query_params or "TrustServerCertificate" in query_params:
-            raw_trust = (
-                query_params.get("trust_server_certificate") or query_params["TrustServerCertificate"]
-            ).lower()
+            raw_trust = (query_params.get("trust_server_certificate") or query_params["TrustServerCertificate"]).lower()
             kwargs["trust_server_certificate"] = raw_trust in {"1", "true", "yes"}
         if "application_intent" in query_params or "ApplicationIntent" in query_params:
             raw_intent = (query_params.get("application_intent") or query_params["ApplicationIntent"]).lower()

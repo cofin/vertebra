@@ -24,11 +24,7 @@ pub struct MssqlBrokerBackend {
 
 impl MssqlBrokerBackend {
     /// Initialize a new in-process/shared-memory [`MssqlBrokerBackend`].
-    pub fn new(
-        pool_size: u32,
-        max_overflow: u32,
-        stmt_capacity: u32,
-    ) -> Result<Self, MssqlError> {
+    pub fn new(pool_size: u32, max_overflow: u32, stmt_capacity: u32) -> Result<Self, MssqlError> {
         let eff_pool = pool_size.max(1);
         let req_size =
             ShmLeaseTable::required_size_with_statements(eff_pool, max_overflow, stmt_capacity);
@@ -121,13 +117,16 @@ mod tests {
     #[test]
     fn broker_backend_caches_rewritten_mssql_statements_and_tracks_leases() {
         let broker = MssqlBrokerBackend::new(2, 1, 16).expect("create broker");
-        let (sql1, count1) =
-            broker.resolve_or_rewrite_sql("SELECT id, name FROM users WHERE id = $1 AND active = ?");
-        assert_eq!(sql1, "SELECT id, name FROM users WHERE id = @P1 AND active = @P2");
+        let (sql1, count1) = broker
+            .resolve_or_rewrite_sql("SELECT id, name FROM users WHERE id = $1 AND active = ?");
+        assert_eq!(
+            sql1,
+            "SELECT id, name FROM users WHERE id = @P1 AND active = @P2"
+        );
         assert_eq!(count1, 2);
 
-        let (sql2, count2) =
-            broker.resolve_or_rewrite_sql("SELECT id, name FROM users WHERE id = $1 AND active = ?");
+        let (sql2, count2) = broker
+            .resolve_or_rewrite_sql("SELECT id, name FROM users WHERE id = $1 AND active = ?");
         assert_eq!(sql2, sql1);
         assert_eq!(count2, 2);
 

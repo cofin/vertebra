@@ -67,12 +67,24 @@ impl MssqlError {
 
     /// Construct a configuration/interface error (`InterfaceError`).
     pub fn config(message: impl Into<String>) -> Self {
-        Self::new(MssqlErrorKind::Interface, message, Some("08000"), None, false)
+        Self::new(
+            MssqlErrorKind::Interface,
+            message,
+            Some("08000"),
+            None,
+            false,
+        )
     }
 
     /// Construct a programming/syntax error (`ProgrammingError`).
     pub fn programming(message: impl Into<String>) -> Self {
-        Self::new(MssqlErrorKind::Programming, message, Some("42000"), None, false)
+        Self::new(
+            MssqlErrorKind::Programming,
+            message,
+            Some("42000"),
+            None,
+            false,
+        )
     }
 
     /// Construct a data conversion/range error (`DataError`).
@@ -82,26 +94,39 @@ impl MssqlError {
 
     /// Construct a `NotFoundError` (`NO_DATA_FOUND` / `02000`).
     pub fn not_found(message: impl Into<String>) -> Self {
-        Self::new(MssqlErrorKind::NotFound, message, Some("02000"), None, false)
+        Self::new(
+            MssqlErrorKind::NotFound,
+            message,
+            Some("02000"),
+            None,
+            false,
+        )
     }
 
     /// Construct a query timeout or cancellation error (`QueryCancelledError`, SQLSTATE `57014`).
     pub fn cancelled(message: impl Into<String>) -> Self {
-        Self::new(MssqlErrorKind::QueryCancelled, message, Some("57014"), None, true)
+        Self::new(
+            MssqlErrorKind::QueryCancelled,
+            message,
+            Some("57014"),
+            None,
+            true,
+        )
     }
 
     /// Construct a pool exhaustion error (`PoolExhaustedError`, SQLSTATE `53300`).
     pub fn pool_exhausted(message: impl Into<String>) -> Self {
-        Self::new(MssqlErrorKind::PoolExhausted, message, Some("53300"), None, true)
+        Self::new(
+            MssqlErrorKind::PoolExhausted,
+            message,
+            Some("53300"),
+            None,
+            true,
+        )
     }
 
     /// Classify a SQL Server error number (`sys.messages.message_id`) and severity class.
-    pub fn from_tds_code(
-        code: u32,
-        class: u8,
-        state: u8,
-        message: impl Into<String>,
-    ) -> Self {
+    pub fn from_tds_code(code: u32, class: u8, state: u8, message: impl Into<String>) -> Self {
         let (kind, sqlstate, is_transient) = classify_tds_error_code(code, class);
         Self {
             kind,
@@ -429,7 +454,13 @@ mod tests {
                 (2627, 14, MssqlErrorKind::Integrity, "23505", false),
                 (547, 16, MssqlErrorKind::Integrity, "23503", false),
                 (515, 16, MssqlErrorKind::Integrity, "23502", false),
-                (1205, 13, MssqlErrorKind::SerializationFailure, "40001", true),
+                (
+                    1205,
+                    13,
+                    MssqlErrorKind::SerializationFailure,
+                    "40001",
+                    true,
+                ),
                 (18456, 14, MssqlErrorKind::ConnectionFailure, "28000", false),
                 (8152, 16, MssqlErrorKind::Data, "22001", false),
                 (208, 16, MssqlErrorKind::Programming, "42P01", false),
@@ -443,15 +474,25 @@ mod tests {
                 let py_err = mssql_error_to_py(py, err);
                 let val = py_err.value(py);
                 assert_eq!(
-                    val.getattr("vendor_code").unwrap().extract::<Option<i64>>().unwrap(),
+                    val.getattr("vendor_code")
+                        .unwrap()
+                        .extract::<Option<i64>>()
+                        .unwrap(),
                     Some(i64::from(code))
                 );
                 assert_eq!(
-                    val.getattr("sqlstate").unwrap().extract::<Option<String>>().unwrap().as_deref(),
+                    val.getattr("sqlstate")
+                        .unwrap()
+                        .extract::<Option<String>>()
+                        .unwrap()
+                        .as_deref(),
                     Some(expected_sqlstate)
                 );
                 assert_eq!(
-                    val.getattr("is_transient").unwrap().extract::<bool>().unwrap(),
+                    val.getattr("is_transient")
+                        .unwrap()
+                        .extract::<bool>()
+                        .unwrap(),
                     expected_transient
                 );
                 assert!(

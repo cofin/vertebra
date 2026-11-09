@@ -13,8 +13,8 @@ use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
 use pyo3::types::{PyBytes, PyDict, PyList, PyTuple};
 use rust_decimal::Decimal;
-use tiberius::{ColumnType, Row};
 use tiberius::xml::XmlData;
+use tiberius::{ColumnType, Row};
 use uuid::Uuid;
 
 use crate::errors::MssqlError;
@@ -106,10 +106,14 @@ fn decode_column_cell(
                 return Ok(opt.map_or(MssqlCellValue::Null, MssqlCellValue::Int64));
             }
             if let Ok(opt) = row.try_get::<i32, usize>(idx) {
-                return Ok(opt.map_or(MssqlCellValue::Null, |v| MssqlCellValue::Int64(i64::from(v))));
+                return Ok(opt.map_or(MssqlCellValue::Null, |v| {
+                    MssqlCellValue::Int64(i64::from(v))
+                }));
             }
             if let Ok(opt) = row.try_get::<i16, usize>(idx) {
-                return Ok(opt.map_or(MssqlCellValue::Null, |v| MssqlCellValue::Int64(i64::from(v))));
+                return Ok(opt.map_or(MssqlCellValue::Null, |v| {
+                    MssqlCellValue::Int64(i64::from(v))
+                }));
             }
             match row.try_get::<u8, usize>(idx)? {
                 Some(v) => Ok(MssqlCellValue::Int64(i64::from(v))),
@@ -156,12 +160,10 @@ fn decode_column_cell(
             Some(dt) => Ok(MssqlCellValue::DateTime(dt)),
             None => Ok(MssqlCellValue::Null),
         },
-        ColumnType::DatetimeOffsetn => {
-            match row.try_get::<DateTime<FixedOffset>, usize>(idx)? {
-                Some(dto) => Ok(MssqlCellValue::DateTimeOffset(dto)),
-                None => Ok(MssqlCellValue::Null),
-            }
-        }
+        ColumnType::DatetimeOffsetn => match row.try_get::<DateTime<FixedOffset>, usize>(idx)? {
+            Some(dto) => Ok(MssqlCellValue::DateTimeOffset(dto)),
+            None => Ok(MssqlCellValue::Null),
+        },
         ColumnType::Xml => match row.try_get::<&XmlData, usize>(idx)? {
             Some(xml) => Ok(MssqlCellValue::Xml(xml.as_ref().to_string())),
             None => Ok(MssqlCellValue::Null),
@@ -374,7 +376,10 @@ mod tests {
         Python::attach(|py| {
             let dec = MssqlCellValue::Decimal(Decimal::from_str("12345.6789").unwrap());
             let py_dec = cell_to_py(py, &dec).unwrap();
-            assert_eq!(py_dec.bind(py).str().unwrap().to_str().unwrap(), "12345.6789");
+            assert_eq!(
+                py_dec.bind(py).str().unwrap().to_str().unwrap(),
+                "12345.6789"
+            );
 
             let uid = MssqlCellValue::Uuid(Uuid::nil());
             let py_uid = cell_to_py(py, &uid).unwrap();
@@ -391,7 +396,12 @@ mod tests {
             );
             let py_dt = cell_to_py(py, &dt).unwrap();
             assert_eq!(
-                py_dt.bind(py).call_method0("isoformat").unwrap().extract::<String>().unwrap(),
+                py_dt
+                    .bind(py)
+                    .call_method0("isoformat")
+                    .unwrap()
+                    .extract::<String>()
+                    .unwrap(),
                 "2026-11-09T14:30:00.123456"
             );
         });

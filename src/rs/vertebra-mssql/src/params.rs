@@ -6,7 +6,7 @@ use std::str::FromStr;
 
 use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
 use pyo3::prelude::*;
-use pyo3::types::{PyBool, PyBytes, PyByteArray, PyDict, PyFloat, PyInt, PySequence, PyString};
+use pyo3::types::{PyBool, PyByteArray, PyBytes, PyDict, PyFloat, PyInt, PySequence, PyString};
 use rust_decimal::Decimal;
 use tiberius::ToSql;
 use tiberius::xml::XmlData;
@@ -74,7 +74,9 @@ pub fn py_any_to_mssql_param(obj: &Bound<'_, PyAny>) -> Result<MssqlParam, Mssql
         return Ok(MssqlParam::I64(val));
     }
     if let Ok(f) = obj.cast::<PyFloat>() {
-        let val = f.extract::<f64>().map_err(|e| MssqlError::data(e.to_string()))?;
+        let val = f
+            .extract::<f64>()
+            .map_err(|e| MssqlError::data(e.to_string()))?;
         return Ok(MssqlParam::F64(val));
     }
     if let Ok(s) = obj.cast::<PyString>() {
@@ -120,32 +122,59 @@ pub fn py_any_to_mssql_param(obj: &Bound<'_, PyAny>) -> Result<MssqlParam, Mssql
     }
 
     if type_name == "datetime"
-        || (module_name == "datetime" && obj.hasattr("hour").unwrap_or(false) && obj.hasattr("year").unwrap_or(false))
+        || (module_name == "datetime"
+            && obj.hasattr("hour").unwrap_or(false)
+            && obj.hasattr("year").unwrap_or(false))
     {
         return extract_py_datetime(obj);
     }
 
     if type_name == "date" || (module_name == "datetime" && obj.hasattr("year").unwrap_or(false)) {
-        let year: i32 = obj.getattr("year").and_then(|v| v.extract()).map_err(|e| MssqlError::data(e.to_string()))?;
-        let month: u32 = obj.getattr("month").and_then(|v| v.extract()).map_err(|e| MssqlError::data(e.to_string()))?;
-        let day: u32 = obj.getattr("day").and_then(|v| v.extract()).map_err(|e| MssqlError::data(e.to_string()))?;
-        let date = NaiveDate::from_ymd_opt(year, month, day)
-            .ok_or_else(|| MssqlError::data(format!("invalid date {year:04}-{month:02}-{day:02}")))?;
+        let year: i32 = obj
+            .getattr("year")
+            .and_then(|v| v.extract())
+            .map_err(|e| MssqlError::data(e.to_string()))?;
+        let month: u32 = obj
+            .getattr("month")
+            .and_then(|v| v.extract())
+            .map_err(|e| MssqlError::data(e.to_string()))?;
+        let day: u32 = obj
+            .getattr("day")
+            .and_then(|v| v.extract())
+            .map_err(|e| MssqlError::data(e.to_string()))?;
+        let date = NaiveDate::from_ymd_opt(year, month, day).ok_or_else(|| {
+            MssqlError::data(format!("invalid date {year:04}-{month:02}-{day:02}"))
+        })?;
         return Ok(MssqlParam::Date(date));
     }
 
     if type_name == "time" || (module_name == "datetime" && obj.hasattr("hour").unwrap_or(false)) {
-        let hour: u32 = obj.getattr("hour").and_then(|v| v.extract()).map_err(|e| MssqlError::data(e.to_string()))?;
-        let minute: u32 = obj.getattr("minute").and_then(|v| v.extract()).map_err(|e| MssqlError::data(e.to_string()))?;
-        let second: u32 = obj.getattr("second").and_then(|v| v.extract()).map_err(|e| MssqlError::data(e.to_string()))?;
-        let micro: u32 = obj.getattr("microsecond").and_then(|v| v.extract()).map_err(|e| MssqlError::data(e.to_string()))?;
+        let hour: u32 = obj
+            .getattr("hour")
+            .and_then(|v| v.extract())
+            .map_err(|e| MssqlError::data(e.to_string()))?;
+        let minute: u32 = obj
+            .getattr("minute")
+            .and_then(|v| v.extract())
+            .map_err(|e| MssqlError::data(e.to_string()))?;
+        let second: u32 = obj
+            .getattr("second")
+            .and_then(|v| v.extract())
+            .map_err(|e| MssqlError::data(e.to_string()))?;
+        let micro: u32 = obj
+            .getattr("microsecond")
+            .and_then(|v| v.extract())
+            .map_err(|e| MssqlError::data(e.to_string()))?;
         let time = NaiveTime::from_hms_micro_opt(hour, minute, second, micro)
             .ok_or_else(|| MssqlError::data("invalid time value"))?;
         return Ok(MssqlParam::Time(time));
     }
 
     if obj.cast::<PyDict>().is_ok() || obj.cast::<PySequence>().is_ok() {
-        let json_mod = obj.py().import("json").map_err(|e| MssqlError::data(e.to_string()))?;
+        let json_mod = obj
+            .py()
+            .import("json")
+            .map_err(|e| MssqlError::data(e.to_string()))?;
         let serialized: String = json_mod
             .call_method1("dumps", (obj,))
             .and_then(|v| v.extract())
@@ -161,16 +190,40 @@ pub fn py_any_to_mssql_param(obj: &Bound<'_, PyAny>) -> Result<MssqlParam, Mssql
 }
 
 fn extract_py_datetime(obj: &Bound<'_, PyAny>) -> Result<MssqlParam, MssqlError> {
-    let year: i32 = obj.getattr("year").and_then(|v| v.extract()).map_err(|e| MssqlError::data(e.to_string()))?;
-    let month: u32 = obj.getattr("month").and_then(|v| v.extract()).map_err(|e| MssqlError::data(e.to_string()))?;
-    let day: u32 = obj.getattr("day").and_then(|v| v.extract()).map_err(|e| MssqlError::data(e.to_string()))?;
-    let hour: u32 = obj.getattr("hour").and_then(|v| v.extract()).map_err(|e| MssqlError::data(e.to_string()))?;
-    let minute: u32 = obj.getattr("minute").and_then(|v| v.extract()).map_err(|e| MssqlError::data(e.to_string()))?;
-    let second: u32 = obj.getattr("second").and_then(|v| v.extract()).map_err(|e| MssqlError::data(e.to_string()))?;
-    let micro: u32 = obj.getattr("microsecond").and_then(|v| v.extract()).map_err(|e| MssqlError::data(e.to_string()))?;
+    let year: i32 = obj
+        .getattr("year")
+        .and_then(|v| v.extract())
+        .map_err(|e| MssqlError::data(e.to_string()))?;
+    let month: u32 = obj
+        .getattr("month")
+        .and_then(|v| v.extract())
+        .map_err(|e| MssqlError::data(e.to_string()))?;
+    let day: u32 = obj
+        .getattr("day")
+        .and_then(|v| v.extract())
+        .map_err(|e| MssqlError::data(e.to_string()))?;
+    let hour: u32 = obj
+        .getattr("hour")
+        .and_then(|v| v.extract())
+        .map_err(|e| MssqlError::data(e.to_string()))?;
+    let minute: u32 = obj
+        .getattr("minute")
+        .and_then(|v| v.extract())
+        .map_err(|e| MssqlError::data(e.to_string()))?;
+    let second: u32 = obj
+        .getattr("second")
+        .and_then(|v| v.extract())
+        .map_err(|e| MssqlError::data(e.to_string()))?;
+    let micro: u32 = obj
+        .getattr("microsecond")
+        .and_then(|v| v.extract())
+        .map_err(|e| MssqlError::data(e.to_string()))?;
 
-    let date = NaiveDate::from_ymd_opt(year, month, day)
-        .ok_or_else(|| MssqlError::data(format!("invalid datetime date {year:04}-{month:02}-{day:02}")))?;
+    let date = NaiveDate::from_ymd_opt(year, month, day).ok_or_else(|| {
+        MssqlError::data(format!(
+            "invalid datetime date {year:04}-{month:02}-{day:02}"
+        ))
+    })?;
     let time = NaiveTime::from_hms_micro_opt(hour, minute, second, micro)
         .ok_or_else(|| MssqlError::data("invalid datetime time component"))?;
     let naive = NaiveDateTime::new(date, time);
@@ -180,7 +233,9 @@ fn extract_py_datetime(obj: &Bound<'_, PyAny>) -> Result<MssqlParam, MssqlError>
         && !tz.is_none()
         && let Ok(offset_obj) = obj.call_method0("utcoffset")
         && !offset_obj.is_none()
-        && let Ok(total_seconds) = offset_obj.call_method0("total_seconds").and_then(|v| v.extract::<f64>())
+        && let Ok(total_seconds) = offset_obj
+            .call_method0("total_seconds")
+            .and_then(|v| v.extract::<f64>())
     {
         let secs = total_seconds.round() as i32;
         let offset = FixedOffset::east_opt(secs)
@@ -228,10 +283,14 @@ pub fn prepare_sql_and_params(
     }
 
     if let Ok(seq) = params_obj.cast::<PySequence>() {
-        let len = seq.len().map_err(|e| MssqlError::programming(e.to_string()))?;
+        let len = seq
+            .len()
+            .map_err(|e| MssqlError::programming(e.to_string()))?;
         let mut out = Vec::with_capacity(len);
         for idx in 0..len {
-            let item = seq.get_item(idx).map_err(|e| MssqlError::programming(e.to_string()))?;
+            let item = seq
+                .get_item(idx)
+                .map_err(|e| MssqlError::programming(e.to_string()))?;
             out.push(py_any_to_mssql_param(&item)?);
         }
         let (rewritten, _) = rewrite_mssql_placeholders(sql);
@@ -251,10 +310,14 @@ pub fn prepare_many_sql_and_params(
     let seq = param_sets.cast::<PySequence>().map_err(|_| {
         MssqlError::programming("execute_many parameters must be a sequence of parameter sets")
     })?;
-    let len = seq.len().map_err(|e| MssqlError::programming(e.to_string()))?;
+    let len = seq
+        .len()
+        .map_err(|e| MssqlError::programming(e.to_string()))?;
     let mut batches = Vec::with_capacity(len);
     for idx in 0..len {
-        let item = seq.get_item(idx).map_err(|e| MssqlError::programming(e.to_string()))?;
+        let item = seq
+            .get_item(idx)
+            .map_err(|e| MssqlError::programming(e.to_string()))?;
         batches.push(prepare_sql_and_params(sql, Some(&item))?);
     }
     Ok(batches)
@@ -375,7 +438,10 @@ mod tests {
     fn named_placeholder_rewriting_reuses_parameter_index() {
         let mut map = HashMap::new();
         map.insert("tenant_id".to_string(), MssqlParam::I64(42));
-        map.insert("status".to_string(), MssqlParam::String("active".to_string()));
+        map.insert(
+            "status".to_string(),
+            MssqlParam::String("active".to_string()),
+        );
 
         let (sql, params) = rewrite_named_mssql_placeholders(
             "SELECT * FROM orders WHERE tenant_id = :tenant_id AND status = @status AND parent_tenant = :tenant_id",

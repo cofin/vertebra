@@ -34,6 +34,7 @@ pub struct MssqlClient {
 impl MssqlClient {
     /// Construct a new [`MssqlClient`] with an initialized [`MssqlBrokerBackend`].
     pub fn new(config: MssqlClientConfig) -> Result<Self, MssqlError> {
+        config.validate()?;
         let broker = MssqlBrokerBackend::new(
             config.pool_size,
             config.max_overflow,
@@ -72,10 +73,7 @@ impl MssqlClient {
 
     /// Return the latest `(host, port)` received via TDS `ENVCHANGE` routing, if any.
     pub fn routing_destination(&self) -> Option<(String, u16)> {
-        self.routing_destination
-            .lock()
-            .ok()
-            .and_then(|g| g.clone())
+        self.routing_destination.lock().ok().and_then(|g| g.clone())
     }
 
     fn ensure_open(&self) -> Result<(), MssqlError> {
@@ -236,9 +234,7 @@ impl MssqlClient {
     ) -> Result<MssqlQueryResult, MssqlError> {
         let mut res = self.query(sql, params).await?;
         if res.rows.is_empty() {
-            return Err(MssqlError::not_found(
-                "fetch_one query returned zero rows",
-            ));
+            return Err(MssqlError::not_found("fetch_one query returned zero rows"));
         }
         res.rows.truncate(1);
         Ok(res)

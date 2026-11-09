@@ -98,7 +98,7 @@ fn extract_arrow_ingest_source(source: &Bound<'_, PyAny>) -> Result<ArrowIngestS
 fn build_mssql_config(
     dsn: &str,
     host: Option<String>,
-    port: Option<u16>,
+    port: Option<i64>,
     database: Option<String>,
     user: Option<String>,
     password: Option<String>,
@@ -126,11 +126,19 @@ fn build_mssql_config(
         MssqlClientConfig::from_dsn(dsn)?
     };
 
-    if let Some(h) = host.filter(|s| !s.trim().is_empty()) {
+    if let Some(h) = host {
+        if h.trim().is_empty() {
+            return Err(MssqlError::config("MSSQL host must not be empty"));
+        }
         cfg.host = h;
     }
     if let Some(p) = port {
-        cfg.port = p;
+        let parsed_port = u16::try_from(p).ok().filter(|v| *v >= 1).ok_or_else(|| {
+            MssqlError::config(format!(
+                "MSSQL TCP port `{p}` is out of bounds; expected 1..=65535"
+            ))
+        })?;
+        cfg.port = parsed_port;
     }
     if let Some(db) = database.filter(|s| !s.trim().is_empty()) {
         cfg.database = db;
@@ -181,9 +189,7 @@ fn build_mssql_config(
         let auth_type = AuthType::parse(cloudsql_auth_type);
         let proxy_addr = match cloudsql_proxy_addr.filter(|s| !s.trim().is_empty()) {
             Some(raw_addr) => Some(raw_addr.parse::<SocketAddr>().map_err(|e| {
-                MssqlError::config(format!(
-                    "invalid cloudsql_proxy_addr `{raw_addr}`: {e}"
-                ))
+                MssqlError::config(format!("invalid cloudsql_proxy_addr `{raw_addr}`: {e}"))
             })?),
             None => None,
         };
@@ -198,6 +204,7 @@ fn build_mssql_config(
         });
     }
 
+    cfg.validate()?;
     Ok(cfg)
 }
 
@@ -283,7 +290,7 @@ impl PySyncMSSQLClient {
         py: Python<'_>,
         dsn: &str,
         host: Option<String>,
-        port: Option<u16>,
+        port: Option<i64>,
         database: Option<String>,
         user: Option<String>,
         password: Option<String>,
@@ -425,12 +432,13 @@ impl PySyncMSSQLClient {
     fn __repr__(&self) -> String {
         let cfg = self.inner.config();
         format!(
-            "SyncMSSQLClient(host={:?}, port={}, database={:?}, user={:?}, password=\"[REDACTED]\", encryption={:?}, closed={})",
+            "SyncMSSQLClient(dsn={cfg}, host={:?}, port={}, database={:?}, user={:?}, password=\"[REDACTED]\", encryption={:?}, cloudsql_instance={:?}, closed={})",
             cfg.host,
             cfg.port,
             cfg.database,
             cfg.user,
             cfg.encryption.as_str(),
+            self.cloudsql_instance(),
             self.inner.is_closed()
         )
     }
@@ -496,10 +504,12 @@ impl PySyncMSSQLClient {
         let (rewritten, params) =
             prepare_sql_and_params(sql, parameters).map_err(|e| mssql_error_to_py(py, e))?;
         let client = Arc::clone(&self.inner);
-        let res = run_sync_with_completion_queue(py, async move {
-            client.query(rewritten, params).await
-        })
-        .map_err(|e| mssql_error_to_py(py, e))?;
+        let res =
+            run_sync_with_completion_queue(
+                py,
+                async move { client.query(rewritten, params).await },
+            )
+            .map_err(|e| mssql_error_to_py(py, e))?;
         query_result_to_py_rows_and_cols(py, res)
     }
 
@@ -513,10 +523,12 @@ impl PySyncMSSQLClient {
         let (rewritten, params) =
             prepare_sql_and_params(sql, parameters).map_err(|e| mssql_error_to_py(py, e))?;
         let client = Arc::clone(&self.inner);
-        let res = run_sync_with_completion_queue(py, async move {
-            client.query(rewritten, params).await
-        })
-        .map_err(|e| mssql_error_to_py(py, e))?;
+        let res =
+            run_sync_with_completion_queue(
+                py,
+                async move { client.query(rewritten, params).await },
+            )
+            .map_err(|e| mssql_error_to_py(py, e))?;
         query_result_to_py_envelope(py, res)
     }
 
@@ -530,10 +542,12 @@ impl PySyncMSSQLClient {
         let (rewritten, params) =
             prepare_sql_and_params(sql, parameters).map_err(|e| mssql_error_to_py(py, e))?;
         let client = Arc::clone(&self.inner);
-        let res = run_sync_with_completion_queue(py, async move {
-            client.query(rewritten, params).await
-        })
-        .map_err(|e| mssql_error_to_py(py, e))?;
+        let res =
+            run_sync_with_completion_queue(
+                py,
+                async move { client.query(rewritten, params).await },
+            )
+            .map_err(|e| mssql_error_to_py(py, e))?;
         rows_to_py_dicts(py, &res)
     }
 
@@ -547,10 +561,12 @@ impl PySyncMSSQLClient {
         let (rewritten, params) =
             prepare_sql_and_params(sql, parameters).map_err(|e| mssql_error_to_py(py, e))?;
         let client = Arc::clone(&self.inner);
-        let res = run_sync_with_completion_queue(py, async move {
-            client.fetch_one(rewritten, params).await
-        })
-        .map_err(|e| mssql_error_to_py(py, e))?;
+        let res =
+            run_sync_with_completion_queue(
+                py,
+                async move { client.fetch_one(rewritten, params).await },
+            )
+            .map_err(|e| mssql_error_to_py(py, e))?;
         first_row_to_py_dict(py, &res)
     }
 
@@ -756,7 +772,7 @@ impl PyAsyncMSSQLClient {
         py: Python<'_>,
         dsn: &str,
         host: Option<String>,
-        port: Option<u16>,
+        port: Option<i64>,
         database: Option<String>,
         user: Option<String>,
         password: Option<String>,
@@ -898,12 +914,13 @@ impl PyAsyncMSSQLClient {
     fn __repr__(&self) -> String {
         let cfg = self.inner.config();
         format!(
-            "AsyncMSSQLClient(host={:?}, port={}, database={:?}, user={:?}, password=\"[REDACTED]\", encryption={:?}, closed={})",
+            "AsyncMSSQLClient(dsn={cfg}, host={:?}, port={}, database={:?}, user={:?}, password=\"[REDACTED]\", encryption={:?}, cloudsql_instance={:?}, closed={})",
             cfg.host,
             cfg.port,
             cfg.database,
             cfg.user,
             cfg.encryption.as_str(),
+            self.cloudsql_instance(),
             self.inner.is_closed()
         )
     }

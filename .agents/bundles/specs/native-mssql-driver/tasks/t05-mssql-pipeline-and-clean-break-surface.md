@@ -11,7 +11,7 @@ depends_on:
   - t04
 plan_revision: 1
 state_revision: 2
-commit_sha: null
+commit_sha: 4e2f9930
 claimed_at: "2026-11-09T16:03:00Z"
 completed_at: "2026-11-09T16:12:00Z"
 created_at: "2026-11-09T15:36:00Z"

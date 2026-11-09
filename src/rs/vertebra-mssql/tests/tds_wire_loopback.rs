@@ -10,13 +10,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use pyo3::prelude::*;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
 use _mssql::client::MssqlClient;
 use _mssql::config::{MssqlClientConfig, MssqlEncryptionMode};
 use _mssql::errors::{MssqlErrorKind, mssql_error_to_py};
 use _mssql::params::MssqlParam;
+use pyo3::prelude::*;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
 
 const PKT_SQL_BATCH: u8 = 0x01;
 const PKT_RPC: u8 = 0x03;
@@ -532,10 +532,18 @@ async fn tds_attention_cancellation_and_server_error_hierarchy_mapping() {
     // 2. Connection remains reusable after ATTENTION drain!
     let error_cases = [
         (2627u32, MssqlErrorKind::Integrity, "IntegrityError"),
-        (1205u32, MssqlErrorKind::SerializationFailure, "SerializationFailure"),
+        (
+            1205u32,
+            MssqlErrorKind::SerializationFailure,
+            "SerializationFailure",
+        ),
         (208u32, MssqlErrorKind::Programming, "ProgrammingError"),
         (8115u32, MssqlErrorKind::Data, "DataError"),
-        (1222u32, MssqlErrorKind::QueryCancelled, "QueryCancelledError"),
+        (
+            1222u32,
+            MssqlErrorKind::QueryCancelled,
+            "QueryCancelledError",
+        ),
     ];
 
     Python::initialize();
@@ -550,11 +558,7 @@ async fn tds_attention_cancellation_and_server_error_hierarchy_mapping() {
         Python::attach(|py| {
             let py_err = mssql_error_to_py(py, err);
             let exc_val = py_err.value(py);
-            let cls_name = exc_val
-                .get_type()
-                .name()
-                .expect("type name")
-                .to_string();
+            let cls_name = exc_val.get_type().name().expect("type name").to_string();
             assert_eq!(cls_name, expected_py_class);
         });
     }
@@ -603,4 +607,3 @@ async fn tds_vtbarrow_shm_export_and_bulk_load_roundtrip() {
     assert_eq!(chunks[0].2, 1);
     assert_eq!(chunks[1].2, 1);
 }
-

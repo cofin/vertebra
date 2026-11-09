@@ -36,6 +36,7 @@ def test_native_modules_declare_gil_used_false() -> None:
         "vertebra._bundler",
         "vertebra._mysql",
         "vertebra._bigquery",
+        "vertebra._mssql",
         "vertebra._spanner",
         "vertebra._duckdb",
     ):
@@ -101,6 +102,7 @@ def test_native_pyclasses_enforce_immutable_type() -> None:
     storage_mod = pytest.importorskip("vertebra._storage")
     mysql_mod = pytest.importorskip("vertebra._mysql")
     bigquery_mod = pytest.importorskip("vertebra._bigquery")
+    mssql_mod = pytest.importorskip("vertebra._mssql")
     spanner_mod = pytest.importorskip("vertebra._spanner")
     duckdb_mod = pytest.importorskip("vertebra._duckdb")
 
@@ -128,6 +130,8 @@ def test_native_pyclasses_enforce_immutable_type() -> None:
         mysql_mod.MySQLWireTestServer,
         bigquery_mod.SyncBigQueryClient,
         bigquery_mod.AsyncBigQueryClient,
+        mssql_mod.SyncMSSQLClient,
+        mssql_mod.AsyncMSSQLClient,
         spanner_mod.SyncSpannerClient,
         spanner_mod.AsyncSpannerClient,
         duckdb_mod.SyncDuckDBClient,

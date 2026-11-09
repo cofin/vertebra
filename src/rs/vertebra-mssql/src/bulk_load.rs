@@ -24,7 +24,9 @@ const UNIX_EPOCH_CE_DAYS: i32 = 719_163;
 /// Decode an Arrow IPC stream byte slice into a vector of [`RecordBatch`]es.
 pub fn decode_arrow_ipc_batches(ipc_bytes: &[u8]) -> Result<Vec<RecordBatch>, MssqlError> {
     let reader = StreamReader::try_new(Cursor::new(ipc_bytes), None).map_err(|e| {
-        MssqlError::data(format!("failed to decode Arrow IPC stream for bulk load: {e}"))
+        MssqlError::data(format!(
+            "failed to decode Arrow IPC stream for bulk load: {e}"
+        ))
     })?;
     let mut batches = Vec::new();
     for item in reader {
@@ -38,13 +40,14 @@ pub fn decode_arrow_ipc_batches(ipc_bytes: &[u8]) -> Result<Vec<RecordBatch>, Ms
 
 /// Read an Arrow IPC stream from a `VTBARROW` shared-memory segment (`shm_name`) and decode its [`RecordBatch`]es.
 pub fn decode_shm_arrow_batches(shm_name: &str) -> Result<Vec<RecordBatch>, MssqlError> {
-    read_shm_arrow_frame_with(shm_name, decode_arrow_ipc_batches)
-        .map_err(MssqlError::data)?
+    read_shm_arrow_frame_with(shm_name, decode_arrow_ipc_batches).map_err(MssqlError::data)?
 }
 
 /// Convert an Arrow [`RecordBatch`] into owned [`TokenRow<'static>`] rows suitable for
 /// `tiberius::BulkLoadRequest::send`.
-pub fn record_batch_to_token_rows(batch: &RecordBatch) -> Result<Vec<TokenRow<'static>>, MssqlError> {
+pub fn record_batch_to_token_rows(
+    batch: &RecordBatch,
+) -> Result<Vec<TokenRow<'static>>, MssqlError> {
     let num_rows = batch.num_rows();
     let num_cols = batch.num_columns();
     let mut rows: Vec<TokenRow<'static>> = (0..num_rows)
@@ -156,10 +159,20 @@ fn arrow_cell_to_column_data(
         }
         DataType::Timestamp(unit, _) => {
             let micros = match unit {
-                TimeUnit::Second => col.as_primitive::<TimestampSecondType>().value(row_idx) * 1_000_000,
-                TimeUnit::Millisecond => col.as_primitive::<TimestampMillisecondType>().value(row_idx) * 1_000,
-                TimeUnit::Microsecond => col.as_primitive::<TimestampMicrosecondType>().value(row_idx),
-                TimeUnit::Nanosecond => col.as_primitive::<TimestampNanosecondType>().value(row_idx) / 1_000,
+                TimeUnit::Second => {
+                    col.as_primitive::<TimestampSecondType>().value(row_idx) * 1_000_000
+                }
+                TimeUnit::Millisecond => {
+                    col.as_primitive::<TimestampMillisecondType>()
+                        .value(row_idx)
+                        * 1_000
+                }
+                TimeUnit::Microsecond => col
+                    .as_primitive::<TimestampMicrosecondType>()
+                    .value(row_idx),
+                TimeUnit::Nanosecond => {
+                    col.as_primitive::<TimestampNanosecondType>().value(row_idx) / 1_000
+                }
             };
             let dt = DateTime::from_timestamp_micros(micros)
                 .ok_or_else(|| MssqlError::data("Timestamp out of range"))?;
@@ -233,10 +246,20 @@ fn arrow_cell_to_param(col: &dyn Array, row_idx: usize) -> Result<MssqlParam, Ms
         }
         DataType::Timestamp(unit, _) => {
             let micros = match unit {
-                TimeUnit::Second => col.as_primitive::<TimestampSecondType>().value(row_idx) * 1_000_000,
-                TimeUnit::Millisecond => col.as_primitive::<TimestampMillisecondType>().value(row_idx) * 1_000,
-                TimeUnit::Microsecond => col.as_primitive::<TimestampMicrosecondType>().value(row_idx),
-                TimeUnit::Nanosecond => col.as_primitive::<TimestampNanosecondType>().value(row_idx) / 1_000,
+                TimeUnit::Second => {
+                    col.as_primitive::<TimestampSecondType>().value(row_idx) * 1_000_000
+                }
+                TimeUnit::Millisecond => {
+                    col.as_primitive::<TimestampMillisecondType>()
+                        .value(row_idx)
+                        * 1_000
+                }
+                TimeUnit::Microsecond => col
+                    .as_primitive::<TimestampMicrosecondType>()
+                    .value(row_idx),
+                TimeUnit::Nanosecond => {
+                    col.as_primitive::<TimestampNanosecondType>().value(row_idx) / 1_000
+                }
             };
             let dt = DateTime::from_timestamp_micros(micros)
                 .ok_or_else(|| MssqlError::data("Timestamp out of range"))?;

@@ -5,17 +5,17 @@ flow_id: native-mssql-driver
 title: "Harden in-memory config validation, Cloud SQL :3307 dialer wiring, secret redaction, and wheel/GIL test parity"
 description: "Enforce port bounds (1..=65535), NUL-byte rejection, encryption/PEM validation, and password redaction in Rust MssqlClientConfig and Python MSSQLConfig, wire SyncCloudSQLDialer / AsyncCloudSQLDialer through MSSQLCore into the native client connection path, and add mssql-test / mssql-wheel-check Makefile targets plus free-threaded GIL and wheel isolation unit tests."
 status: stable
-state: pending
+state: completed
 verification_strategy: tdd
 depends_on:
   - t05
 plan_revision: 1
-state_revision: 1
-commit_sha: null
-claimed_at: null
-completed_at: null
+state_revision: 2
+commit_sha: d6e15596
+claimed_at: "2026-11-09T16:12:00Z"
+completed_at: "2026-11-09T16:31:00Z"
 created_at: "2026-11-09T15:36:00Z"
-updated_at: "2026-11-09T15:36:00Z"
+updated_at: "2026-11-09T16:31:00Z"
 reads:
   - src/rs/vertebra-mssql/src/config.rs
   - src/rs/vertebra-mssql/src/lib.rs
@@ -71,9 +71,9 @@ Completes full parity across configuration hardening, secret redaction, Cloud SQ
 
 ## Acceptance Criteria
 
-- [ ] `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-mssql --locked` and `cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-mssql --all-targets --locked -- -D warnings` pass.
-- [ ] `pytest src/py/tests/unit/db/test_mssql_driver.py src/py/tests/unit/test_freethreaded_gil.py src/py/tests/unit/db/test_freethreaded_gil.py src/py/tests/unit/db/test_optional_driver_wheels.py` passes.
-- [ ] Wheel build into `/tmp/vtb-wheels-mssql` and `review_setup validate` pass.
+- [x] `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-mssql --locked` and `cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-mssql --all-targets --locked -- -D warnings` pass.
+- [x] `pytest src/py/tests/unit/db/test_mssql_driver.py src/py/tests/unit/test_freethreaded_gil.py src/py/tests/unit/db/test_freethreaded_gil.py src/py/tests/unit/db/test_optional_driver_wheels.py` passes.
+- [x] Wheel build into `/tmp/vtb-wheels-mssql` and `review_setup validate` pass.
 
 [^mssql-config-rs]: `src/rs/vertebra-mssql/src/config.rs` — Rust MssqlClientConfig DSN parser, validation, and TLS/Cloud SQL options.
 [^mssql-config-py]: `src/py/vertebra/db/adapters/mssql/config.py` — Python MSSQLConfig and Cloud SQL dialer integration.

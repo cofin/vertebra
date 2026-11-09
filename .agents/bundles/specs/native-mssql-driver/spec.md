@@ -4,7 +4,7 @@ flow_id: native-mssql-driver
 title: "Standalone Rust SQL Server Wheel (vertebra-mssql)"
 description: "Standalone PyO3 crate src/rs/vertebra-mssql (vertebra._mssql + vertebra-core[mssql]) built on tiberius (rustls, TDS 7.4/8.0, sp_executesql RPC, token stream, BulkLoad, ATTENTION cancellation, VTBARROW ShmCapsule ArrowCursor), replacing the MissingDependencyError guard with the native client."
 status: stable
-state: in_progress
+state: completed
 has_chapters: false
 parent_prd: native-data-platform
 depends_on_flows:
@@ -14,11 +14,11 @@ research:
   - ../integration-remediation/research/audit-findings_20261103.md
 plan_revision: 4
 plan_commit: fd571e3a
-state_revision: 6
-current_task: "native-mssql-driver:t06"
-last_verified_checkpoint: 974501d1
+state_revision: 7
+current_task: null
+last_verified_checkpoint: d6e15596
 created_at: "2026-11-03T04:05:00Z"
-updated_at: "2026-11-09T16:12:00Z"
+updated_at: "2026-11-09T16:31:00Z"
 generated:
   by: flow-setup
   at: "2026-11-07T04:15:00Z"
@@ -100,8 +100,8 @@ See [crate research](../native-data-platform/research/rust-driver-crates_2026110
 - [x] [5d194452] [t02: Implement MSSQL SQL batch, `sp_executesql` RPC, transactions, `ATTENTION` cancellation, and `DatabaseError` mapping](tasks/t02-mssql-rpc-transactions-attention-and-errors.md)
 - [x] [62548e1e] [t03: Implement MSSQL codecs, `VTBARROW` `ShmCapsule` export, `BulkLoad` `load_from_arrow`, and `BrokerEngineBackend` registration](tasks/t03-mssql-codecs-vtbarrow-and-bulk-load.md)
 - [x] [974501d1] [t04: Cut Python `SyncMSSQLDriver` and `AsyncMSSQLDriver` over to `vertebra._mssql`, update tests, and refresh docs](tasks/t04-python-mssql-driver-cutover-and-docs.md)
-- [x] [t05: Implement `SyncMSSQLPipeline` / `AsyncMSSQLPipeline` and clean-break PyO3 method surface (`PY-07`)](tasks/t05-mssql-pipeline-and-clean-break-surface.md)
-- [~] [t06: Harden in-memory config validation, Cloud SQL `:3307` dialer wiring, secret redaction, and wheel/GIL test parity](tasks/t06-mssql-config-hardening-dialer-and-wheel-parity.md)
+- [x] [4e2f9930] [t05: Implement `SyncMSSQLPipeline` / `AsyncMSSQLPipeline` and clean-break PyO3 method surface (`PY-07`)](tasks/t05-mssql-pipeline-and-clean-break-surface.md)
+- [x] [d6e15596] [t06: Harden in-memory config validation, Cloud SQL `:3307` dialer wiring, secret redaction, and wheel/GIL test parity](tasks/t06-mssql-config-hardening-dialer-and-wheel-parity.md)
 
 [^mssql-rs]: `src/rs/vertebra-db/src/mssql/mod.rs::rewrite_mssql_placeholders` — `@P1` placeholder rewrite helper, the surviving MSSQL codec in vertebra-db.
 [^fail-loud-baseline]: `.agents/bundles/specs/driver-fail-loud/spec.md` — Upstream flow that replaces the MSSQL `sqlite3` stand-in with a `MissingDependencyError` guard and deletes TDS framing.

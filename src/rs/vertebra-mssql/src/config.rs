@@ -5,7 +5,9 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use tiberius::{AuthMethod, Config as TiberiusConfig, EncryptionLevel, IsolationLevel};
-use vertebra_db::{AuthType, CloudSqlDialer, CloudSqlInstanceUri, ConnectOptions, EndpointTarget, IpType, TlsMode};
+use vertebra_db::{
+    AuthType, CloudSqlDialer, CloudSqlInstanceUri, ConnectOptions, EndpointTarget, IpType, TlsMode,
+};
 
 use crate::errors::{MssqlError, MssqlErrorKind};
 
@@ -33,15 +35,17 @@ pub enum MssqlEncryptionMode {
 }
 
 impl MssqlEncryptionMode {
-    /// Parse an encryption mode string (`"required"`, `"true"`, `"strict"`, `"login_only"`, `"false"`, `"disable"`).
+    /// Parse an encryption mode string (`"required"`, `"optional"`, `"strict"`, `"login_only"`, `"not_supported"`, `"disabled"`).
     pub fn parse(raw: &str) -> Result<Self, MssqlError> {
         match raw.trim().to_ascii_lowercase().as_str() {
             "required" | "require" | "true" | "on" | "yes" | "mandatory" => Ok(Self::Required),
-            "strict" | "verify-full" | "verify_full" | "verify-ca" | "verify_ca" => Ok(Self::Strict),
-            "login_only" | "login-only" | "prefer" => Ok(Self::LoginOnly),
+            "strict" | "verify-full" | "verify_full" | "verify-ca" | "verify_ca" => {
+                Ok(Self::Strict)
+            }
+            "login_only" | "login-only" | "prefer" | "optional" => Ok(Self::LoginOnly),
             "disabled" | "disable" | "false" | "off" | "no" | "not_supported" => Ok(Self::Disabled),
             other => Err(MssqlError::config(format!(
-                "unsupported MSSQL encryption mode `{other}`; expected required, strict, login_only, or disabled"
+                "unsupported MSSQL encryption mode `{other}`; expected required, optional, strict, login_only, or not_supported"
             ))),
         }
     }
@@ -148,7 +152,7 @@ impl MssqlCloudSqlConfig {
 }
 
 /// Validated configuration for a native `vertebra._mssql` client.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct MssqlClientConfig {
     pub dsn: String,
     pub host: String,
@@ -170,6 +174,39 @@ pub struct MssqlClientConfig {
     pub statement_cache_capacity: u32,
     pub read_only_intent: bool,
     pub cloudsql: Option<MssqlCloudSqlConfig>,
+}
+
+impl std::fmt::Debug for MssqlClientConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MssqlClientConfig")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("database", &self.database)
+            .field("user", &self.user)
+            .field("password", &"[REDACTED]")
+            .field("application_name", &self.application_name)
+            .field("encryption", &self.encryption)
+            .field("trust_server_certificate", &self.trust_server_certificate)
+            .field("server_name", &self.server_name)
+            .field("connect_timeout", &self.connect_timeout)
+            .field("query_timeout", &self.query_timeout)
+            .field("pool_size", &self.pool_size)
+            .field("max_overflow", &self.max_overflow)
+            .field("statement_cache_capacity", &self.statement_cache_capacity)
+            .field("read_only_intent", &self.read_only_intent)
+            .field("cloudsql", &self.cloudsql.as_ref().map(|c| &c.instance_uri))
+            .finish()
+    }
+}
+
+impl std::fmt::Display for MssqlClientConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "mssql://{}:[REDACTED]@{}:{}/{}",
+            self.user, self.host, self.port, self.database
+        )
+    }
 }
 
 impl Default for MssqlClientConfig {
@@ -200,8 +237,54 @@ impl Default for MssqlClientConfig {
 }
 
 impl MssqlClientConfig {
+    /// Validate port bounds (`1..=65535`), NUL-byte invariants, and PEM inputs.
+    pub fn validate(&self) -> Result<(), MssqlError> {
+        if self.port == 0 {
+            return Err(MssqlError::config(
+                "MSSQL TCP port must be between 1 and 65535",
+            ));
+        }
+        for (field, value) in [
+            ("dsn", self.dsn.as_str()),
+            ("host", self.host.as_str()),
+            ("database", self.database.as_str()),
+            ("user", self.user.as_str()),
+            ("application_name", self.application_name.as_str()),
+            ("server_name", self.server_name.as_deref().unwrap_or("")),
+        ] {
+            if value.contains('\0') {
+                return Err(MssqlError::config(format!(
+                    "MSSQL `{field}` must not contain NUL bytes"
+                )));
+            }
+        }
+        if self.host.trim().is_empty() {
+            return Err(MssqlError::config("MSSQL host must not be empty"));
+        }
+        if let Some(ref ca) = self.ca_pem {
+            validate_pem_bytes("ca_pem", ca)?;
+        }
+        if let Some(ref cert) = self.client_cert_pem {
+            validate_pem_bytes("client_cert_pem", cert)?;
+        }
+        if let Some(ref key) = self.client_key_pem {
+            validate_pem_bytes("client_key_pem", key)?;
+        }
+        if self.client_cert_pem.is_some() != self.client_key_pem.is_some() {
+            return Err(MssqlError::config(
+                "MSSQL mTLS requires both client_cert_pem and client_key_pem",
+            ));
+        }
+        Ok(())
+    }
+
     /// Build a [`tiberius::Config`] for the given target host/port and stream encryption state.
-    pub fn to_tiberius_config(&self, host: &str, port: u16, pre_encrypted_stream: bool) -> TiberiusConfig {
+    pub fn to_tiberius_config(
+        &self,
+        host: &str,
+        port: u16,
+        pre_encrypted_stream: bool,
+    ) -> TiberiusConfig {
         let mut cfg = TiberiusConfig::new();
         cfg.host(host);
         cfg.port(port);
@@ -223,15 +306,19 @@ impl MssqlClientConfig {
         if let Some(ref csql) = self.cloudsql
             && let Some(addr) = csql.proxy_addr
         {
-            let server_ca = csql.server_ca_pem.clone().or_else(|| self.ca_pem.clone()).ok_or_else(|| {
-                MssqlError::new(
-                    MssqlErrorKind::ConnectionFailure,
-                    "Cloud SQL for SQL Server mTLS requires server_ca_pem",
-                    Some("08001"),
-                    None,
-                    false,
-                )
-            })?;
+            let server_ca = csql
+                .server_ca_pem
+                .clone()
+                .or_else(|| self.ca_pem.clone())
+                .ok_or_else(|| {
+                    MssqlError::new(
+                        MssqlErrorKind::ConnectionFailure,
+                        "Cloud SQL for SQL Server mTLS requires server_ca_pem",
+                        Some("08001"),
+                        None,
+                        false,
+                    )
+                })?;
             let (client_cert, client_key) = match (&csql.client_cert_pem, &csql.client_key_pem) {
                 (Some(c), Some(k)) => (c.clone(), k.clone()),
                 _ => {
@@ -416,8 +503,23 @@ impl MssqlClientConfig {
             }
         }
 
+        cfg.validate()?;
         Ok(cfg)
     }
+}
+
+fn validate_pem_bytes(field: &str, bytes: &[u8]) -> Result<(), MssqlError> {
+    let text = std::str::from_utf8(bytes).map_err(|_| {
+        MssqlError::config(format!(
+            "invalid MSSQL `{field}`: expected UTF-8 PEM-encoded block"
+        ))
+    })?;
+    if !text.contains("-----BEGIN ") || !text.contains("-----END ") {
+        return Err(MssqlError::config(format!(
+            "invalid MSSQL `{field}`: expected PEM header/footer (`-----BEGIN ...`)"
+        )));
+    }
+    Ok(())
 }
 
 fn percent_decode(input: &str) -> String {
@@ -470,5 +572,18 @@ mod tests {
 
         assert!(MssqlClientConfig::from_dsn("memory://mssql").is_err());
         assert!(MssqlClientConfig::from_dsn(":memory:").is_err());
+        assert!(MssqlClientConfig::from_dsn("mssql://sa:pw@127.0.0.1:0/master").is_err());
+        assert!(MssqlClientConfig::from_dsn("mssql://sa:pw@127.0.0.1:1433/mas\0ter").is_err());
+        assert_eq!(
+            MssqlEncryptionMode::parse("optional").unwrap(),
+            MssqlEncryptionMode::LoginOnly
+        );
+
+        let dbg_str = format!("{cfg:?}");
+        let disp_str = format!("{cfg}");
+        assert!(dbg_str.contains("[REDACTED]"));
+        assert!(!dbg_str.contains("Str0ng!Pass"));
+        assert!(disp_str.contains("[REDACTED]"));
+        assert!(!disp_str.contains("Str0ng!Pass"));
     }
 }

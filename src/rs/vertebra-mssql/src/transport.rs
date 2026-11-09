@@ -203,12 +203,11 @@ impl MssqlSession {
         Ok(())
     }
 
-    async fn run_cancellable<T, F>(
-        &mut self,
-        op: F,
-    ) -> Result<T, MssqlError>
+    async fn run_cancellable<T, F>(&mut self, op: F) -> Result<T, MssqlError>
     where
-        F: FnOnce(&mut TiberiusClient<Compat<TransportStream>>) -> BoxFuture<'_, Result<T, MssqlError>>,
+        F: FnOnce(
+            &mut TiberiusClient<Compat<TransportStream>>,
+        ) -> BoxFuture<'_, Result<T, MssqlError>>,
     {
         if self.cancel_state.take_armed() {
             let _ = self.client.cancel_query().await;
@@ -270,7 +269,8 @@ impl MssqlSession {
         let params_owned = params.to_vec();
         self.run_cancellable(|client| {
             Box::pin(async move {
-                let refs: Vec<&dyn ToSql> = params_owned.iter().map(MssqlParam::as_to_sql).collect();
+                let refs: Vec<&dyn ToSql> =
+                    params_owned.iter().map(MssqlParam::as_to_sql).collect();
                 let res = client.execute(sql_owned, &refs).await?;
                 Ok(res.rows_affected().iter().sum())
             })
@@ -288,7 +288,8 @@ impl MssqlSession {
         let params_owned = params.to_vec();
         self.run_cancellable(|client| {
             Box::pin(async move {
-                let refs: Vec<&dyn ToSql> = params_owned.iter().map(MssqlParam::as_to_sql).collect();
+                let refs: Vec<&dyn ToSql> =
+                    params_owned.iter().map(MssqlParam::as_to_sql).collect();
                 let mut stream = client.query(sql_owned, &refs).await?;
                 let mut columns = Vec::new();
                 let mut rows = Vec::new();
@@ -412,7 +413,9 @@ impl MssqlSession {
         columns: Option<&[String]>,
     ) -> Result<u64, MssqlError> {
         if table.trim().is_empty() {
-            return Err(MssqlError::programming("bulk load target table name must not be empty"));
+            return Err(MssqlError::programming(
+                "bulk load target table name must not be empty",
+            ));
         }
         let mut token_rows = Vec::new();
         for batch in batches {
@@ -476,10 +479,15 @@ impl Connection for MssqlSession {
                 self.broken = true;
                 TransportError::Io(std::io::Error::other(e.to_string()))
             })?;
-            while stream.try_next().await.map_err(|e| {
-                self.broken = true;
-                TransportError::Io(std::io::Error::other(e.to_string()))
-            })?.is_some() {}
+            while stream
+                .try_next()
+                .await
+                .map_err(|e| {
+                    self.broken = true;
+                    TransportError::Io(std::io::Error::other(e.to_string()))
+                })?
+                .is_some()
+            {}
             Ok(())
         })
     }
