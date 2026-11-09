@@ -87,7 +87,11 @@ from vertebra.extensions.sqlspec.storage import ObjectStoreBackend
 from vertebra.storage import GCSConfig
 
 config = GCSConfig(bucket="app-exports")
-lake = ObjectStoreBackend(config, base_path="daily", token_cache=config.sync_token_cache())
+lake = ObjectStoreBackend(
+    config,
+    base_path="daily",
+    token_cache=config.sync_token_cache(),
+)
 ```
 
 See the [storage API reference](../reference/storage.md) for every store method.
