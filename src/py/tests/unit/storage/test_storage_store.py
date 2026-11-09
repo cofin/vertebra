@@ -4,12 +4,14 @@ import array
 import ast
 import asyncio
 import contextlib
+import gc
 import gzip
 import io
 import os
 import sys
 import tempfile
 import threading
+import warnings
 from collections.abc import AsyncIterator, Iterator
 from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from pathlib import Path
@@ -1978,6 +1980,149 @@ def test_open_writer_rejects_non_positive_part_size(asynchronous: bool, part_siz
     store: Any = AsyncObjectStore("memory://") if asynchronous else SyncObjectStore("memory://")
     with pytest.raises(ValueError, match="part_size"):
         store.open_writer("bad.bin", part_size=part_size)
+
+
+class _FailingUpload:
+    """Multipart upload double whose part writes raise a configured exception and record every call."""
+
+    def __init__(self, error: BaseException, asynchronous: bool) -> None:
+        self.error = error
+        self.asynchronous = asynchronous
+        self.calls: list[str] = []
+
+    def write_part(self, chunk: Any) -> Any:
+        self.calls.append("write_part")
+        if self.asynchronous:
+            return self._raise_async()
+        raise self.error
+
+    def complete(self) -> Any:
+        self.calls.append("complete")
+        return self.resolve(None)
+
+    def abort(self) -> Any:
+        self.calls.append("abort")
+        return self.resolve(None)
+
+    def resolve(self, value: Any) -> Any:
+        if not self.asynchronous:
+            return value
+
+        async def resolved() -> Any:
+            return value
+
+        return resolved()
+
+    async def _raise_async(self) -> None:
+        raise self.error
+
+
+class _FailingNative:
+    """Native store double that hands out a single failing multipart upload."""
+
+    def __init__(self, upload: _FailingUpload) -> None:
+        self.upload = upload
+
+    def create_multipart(self, *args: Any, **kwargs: Any) -> Any:
+        return self.upload.resolve(self.upload)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("asynchronous", "error"),
+    [
+        pytest.param(False, OSError("part upload failed"), id="sync-error"),
+        pytest.param(True, OSError("part upload failed"), id="async-error"),
+        pytest.param(True, asyncio.CancelledError(), id="async-cancelled"),
+    ],
+)
+async def test_writer_part_failure_aborts_and_blocks_later_commit(asynchronous: bool, error: BaseException) -> None:
+    """A failed or cancelled part write aborts the upload so a later close cannot commit a gapped object."""
+    namespace = f"writer-part-failure-{asynchronous}-{type(error).__name__}"
+    base = SyncObjectStore(MemoryConfig(namespace=namespace))
+    upload = _FailingUpload(error, asynchronous)
+    native = _FailingNative(upload)
+    store: Any = (
+        AsyncObjectStore(MemoryConfig(namespace=namespace), _native_instance=native)
+        if asynchronous
+        else SyncObjectStore(MemoryConfig(namespace=namespace), _native_instance=native)
+    )
+    wf = store.open_writer("failed.bin", part_size=4)
+    with pytest.raises(type(error)):
+        if asynchronous:
+            await wf.write(b"0123456789")
+        else:
+            wf.write(b"0123456789")
+    assert wf.closed
+    if asynchronous:
+        assert await wf.aclose() is None
+    else:
+        wf.close()
+    assert upload.calls == ["write_part", "abort"]
+    assert wf.result is None
+    assert not base.exists("failed.bin")
+
+
+@pytest.mark.anyio
+async def test_async_writer_flush_and_aclose_return_put_result() -> None:
+    """flush() keeps the tail pending, and aclose() returns the stored PutResult on every call."""
+    store = AsyncObjectStore(MemoryConfig(namespace="writer-aclose-result"))
+    wf = store.open_writer("done.bin", part_size=4)
+    await wf.write(b"abcdef")
+    await wf.flush()
+    assert wf.tell() == 6
+    assert wf.result is None
+    result = await wf.aclose()
+    assert isinstance(result, PutResult)
+    assert result is wf.result
+    assert result.size == 6
+    assert await wf.aclose() is result
+    with pytest.raises(ValueError, match="closed"):
+        await wf.flush()
+    assert await store.get("done.bin") == b"abcdef"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+async def test_put_stream_normalizes_typed_buffer_chunks(asynchronous: bool) -> None:
+    """put_stream uploads typed array chunks as raw bytes, matching put."""
+    store, base, native = _recording_store(f"put-stream-typed-{asynchronous}", asynchronous)
+    chunks = [array.array("I", [1, 2, 3]), array.array("I", [4, 5])]
+    if asynchronous:
+        meta = await store.put_stream("typed.bin", chunks)
+    else:
+        meta = store.put_stream("typed.bin", chunks)
+    expected = b"".join(chunk.tobytes() for chunk in chunks)
+    assert meta.size == len(expected)
+    assert native.parts == [len(chunk.tobytes()) for chunk in chunks]
+    assert base.get("typed.bin") == expected
+
+
+@pytest.mark.anyio
+async def test_async_writer_collected_open_emits_resource_warning() -> None:
+    """Collecting an open AsyncWritableFile warns about the uncompleted multipart upload."""
+    store = AsyncObjectStore(MemoryConfig(namespace="writer-unclosed"))
+    wf = store.open_writer("leaked.bin", part_size=4)
+    await wf.write(b"0123456789")
+    with pytest.warns(ResourceWarning, match="leaked.bin"):
+        del wf
+        gc.collect()
+    assert not await store.exists("leaked.bin")
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("finish", ["aclose", "abort"])
+async def test_async_writer_collected_after_finish_is_silent(finish: str) -> None:
+    """A completed or aborted AsyncWritableFile is collected without a ResourceWarning."""
+    store = AsyncObjectStore(MemoryConfig(namespace=f"writer-finished-{finish}"))
+    wf = store.open_writer("finished.bin", part_size=4)
+    await wf.write(b"0123456789")
+    await getattr(wf, finish)()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        del wf
+        gc.collect()
+    assert not [item for item in caught if issubclass(item.category, ResourceWarning)]
 
 
 def test_storage_exports_writers_and_precondition_error() -> None:

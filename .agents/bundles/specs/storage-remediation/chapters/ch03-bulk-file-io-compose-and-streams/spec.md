@@ -106,7 +106,7 @@ Analytical and pipeline workloads transferring multi-hundred-megabyte Parquet sh
   - `compose(self, sources: Sequence[str], dst: str, *, content_type: str | None = None) -> PutResult`
   - `open_reader(self, path: str, *, size: int | None = None, chunk_size: int = 65536, read_ahead: int = 4_194_304) -> SyncReadableFile | AsyncReadableFile`
   - `open_writer(self, path: str, *, content_type: str | None = None, attributes: Mapping[str, str] | None = None, part_size: int = 8_388_608, if_not_exists: bool = False, if_match: str | None = None, if_none_match: str | None = None) -> SyncWritableFile | AsyncWritableFile`
-- `SyncWritableFile(io.RawIOBase)` (`writable() -> True`, `write(b: Buffer) -> int`, `flush() -> None`, `close() -> None`, `abort() -> None`, `result: PutResult | None`, `__enter__`/`__exit__`) and `AsyncWritableFile` (`write(b: Buffer) -> int`, `flush() -> None`, `aclose() -> PutResult`, `abort() -> None`, `result: PutResult | None`, `__aenter__`/`__aexit__`).
+- `SyncWritableFile(io.RawIOBase)` (`writable() -> True`, `write(b: Buffer) -> int`, `flush() -> None`, `close() -> None`, `abort() -> None`, `result: PutResult | None`, `__enter__`/`__exit__`) and `AsyncWritableFile` (`write(b: Buffer) -> int`, `flush() -> None`, `aclose() -> PutResult | None` (`None` after `abort()`), `abort() -> None`, `result: PutResult | None`, `__aenter__`/`__aexit__`).
 
 ### 2.3 Caller -> Seam -> Collaborator Integration Map
 

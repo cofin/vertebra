@@ -10,6 +10,7 @@ import re
 import shutil
 import tempfile
 import time
+import warnings
 from collections.abc import AsyncIterable, AsyncIterator, Buffer, Iterable, Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, Literal, Self
@@ -466,8 +467,10 @@ class R2Config(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     custom_domain: str | None = None
     """Optional public custom domain bound to the R2 bucket.
 
-    The domain is forwarded as the `custom_domain` store option. SigV4 presigned URLs stay on the
-    R2 S3 API endpoint because Cloudflare does not authenticate presigned requests on custom domains.
+    The domain is forwarded only as the `custom_domain` store option and has no runtime effect on
+    presigned URLs: `sign`, `presign_get`, and `presign_put` always target the R2 S3 API endpoint
+    (`resolved_endpoint()`), because Cloudflare honors presigned URLs only on that domain and rejects
+    them on custom domains.
     """
     endpoint: str | None = None
     """Optional explicit R2 endpoint URL override."""
@@ -1733,7 +1736,11 @@ class SyncObjectStore(_BaseObjectStore):
         if_match: str | None = None,
         if_none_match: str | None = None,
     ) -> PutResult:
-        """Stream an iterable of buffer chunks into an incremental multipart upload."""
+        """Stream an iterable of buffer chunks into an incremental multipart upload.
+
+        Each chunk passes through the same buffer normalization as `put`, so typed buffers such as
+        `array("I")`, NumPy arrays, and `pyarrow.Buffer` upload as their raw bytes.
+        """
         key = self._normalize_key(path)
         if self._local_root is not None:
             self._resolve_local(key)
@@ -1749,7 +1756,7 @@ class SyncObjectStore(_BaseObjectStore):
         )
         try:
             for chunk in chunks:
-                upload.write_part(chunk)
+                upload.write_part(self._native_payload(chunk))
             native_meta = upload.complete()
         except BaseException:
             with contextlib.suppress(Exception):
@@ -1919,7 +1926,11 @@ class SyncObjectStore(_BaseObjectStore):
         """Return objects whose keys match a shell-style `*`, `?`, or `[...]` pattern.
 
         Literal patterns resolve with a single `head` call; wildcard patterns list the segment-aligned
-        literal prefix and filter keys with `fnmatch.fnmatchcase`. Keys ending in `/` are never returned.
+        literal prefix and filter full keys with `fnmatch.fnmatchcase`. Matching is not segment-aware:
+        `*` and `?` also match `/`, so `runs/*` matches nested keys such as `runs/a/b.json`. Narrow a
+        match with explicit literal segments (`runs/2024/part-*.json` lists only `runs/2024/` and
+        requires the `part-` and `.json` anchors), and use `list_with_delimiter` when exactly one level
+        is required. Keys ending in `/` are never returned.
         """
         key_pattern, list_prefix = self._glob_query(pattern)
         if list_prefix is not None:
@@ -2219,7 +2230,11 @@ class AsyncObjectStore(_BaseObjectStore):
         if_match: str | None = None,
         if_none_match: str | None = None,
     ) -> PutResult:
-        """Asynchronously stream sync or async buffer chunks into an incremental multipart upload."""
+        """Asynchronously stream sync or async buffer chunks into an incremental multipart upload.
+
+        Each chunk passes through the same buffer normalization as `put`, so typed buffers such as
+        `array("I")`, NumPy arrays, and `pyarrow.Buffer` upload as their raw bytes.
+        """
         key = self._normalize_key(path)
         if self._local_root is not None:
             self._resolve_local(key)
@@ -2236,10 +2251,10 @@ class AsyncObjectStore(_BaseObjectStore):
         try:
             if isinstance(chunks, AsyncIterable):
                 async for chunk in chunks:
-                    await upload.write_part(chunk)
+                    await upload.write_part(self._native_payload(chunk))
             else:
                 for chunk in chunks:
-                    await upload.write_part(chunk)
+                    await upload.write_part(self._native_payload(chunk))
             native_meta = await upload.complete()
         except BaseException:
             with contextlib.suppress(Exception):
@@ -2412,7 +2427,11 @@ class AsyncObjectStore(_BaseObjectStore):
         """Asynchronously return objects whose keys match a shell-style `*`, `?`, or `[...]` pattern.
 
         Literal patterns resolve with a single `head` call; wildcard patterns list the segment-aligned
-        literal prefix and filter keys with `fnmatch.fnmatchcase`. Keys ending in `/` are never returned.
+        literal prefix and filter full keys with `fnmatch.fnmatchcase`. Matching is not segment-aware:
+        `*` and `?` also match `/`, so `runs/*` matches nested keys such as `runs/a/b.json`. Narrow a
+        match with explicit literal segments (`runs/2024/part-*.json` lists only `runs/2024/` and
+        requires the `part-` and `.json` anchors), and use `list_with_delimiter` when exactly one level
+        is required. Keys ending in `/` are never returned.
         """
         key_pattern, list_prefix = self._glob_query(pattern)
         if list_prefix is not None:
@@ -3006,14 +3025,22 @@ class SyncWritableFile(io.RawIOBase):
         return self._written
 
     def write(self, b: Buffer, /) -> int:
-        """Copy a buffer into the rolling part buffer, upload every full part, and return the byte count."""
+        """Copy a buffer into the rolling part buffer, upload every full part, and return the byte count.
+
+        A failure while creating the upload or writing a part aborts the multipart upload and closes the
+        writer before re-raising, so a later ``close()`` cannot commit an object with a missing part.
+        """
         self._ensure_open()
         with memoryview(b) as view:
             count = view.nbytes
             self._buffer += view
         self._written += count
-        while len(self._buffer) >= self._part_size:
-            self._ensure_upload().write_part(self._take_part())
+        try:
+            while len(self._buffer) >= self._part_size:
+                self._ensure_upload().write_part(self._take_part())
+        except BaseException:
+            self.abort()
+            raise
         return count
 
     def close(self) -> None:
@@ -3082,7 +3109,8 @@ class AsyncWritableFile:
     immediately after ``await write(...)`` returns. The multipart upload is created on the first full
     part or on close; ``aclose()`` uploads the remaining tail and completes the object (a writer that
     received no bytes completes a valid zero-byte object), while ``abort()`` or an exception escaping
-    ``async with`` discards it.
+    ``async with`` discards it. A writer collected without being closed or aborted emits a
+    ``ResourceWarning`` because a finalizer cannot await the native abort.
     """
 
     __slots__ = (
@@ -3113,6 +3141,8 @@ class AsyncWritableFile:
         if_match: str | None = None,
         if_none_match: str | None = None,
     ) -> None:
+        self._closed = True
+        self._upload: Any = None
         if part_size <= 0:
             msg = "part_size must be > 0"
             raise ValueError(msg)
@@ -3128,7 +3158,6 @@ class AsyncWritableFile:
         self._if_none_match = if_none_match
         self._buffer = bytearray()
         self._written = 0
-        self._upload: Any = None
         self._result: PutResult | None = None
         self._closed = False
 
@@ -3154,6 +3183,21 @@ class AsyncWritableFile:
         else:
             await self.abort()
 
+    def __del__(self) -> None:
+        """Warn when an open writer is collected, since a finalizer cannot await the native abort.
+
+        The buffered bytes are never committed, and a multipart upload that was already created stays
+        incomplete on the backend until its lifecycle policy expires it.
+        """
+        if not self._closed:
+            warnings.warn(
+                f"AsyncWritableFile for {self._key!r} was garbage collected without aclose() or abort(); "
+                "the multipart upload was never completed or aborted",
+                ResourceWarning,
+                stacklevel=2,
+                source=self,
+            )
+
     def readable(self) -> bool:
         """Return False indicating this stream is write-only."""
         return False
@@ -3172,21 +3216,42 @@ class AsyncWritableFile:
         return self._written
 
     async def write(self, b: Buffer, /) -> int:
-        """Copy a buffer into the rolling part buffer, upload every full part, and return the byte count."""
+        """Copy a buffer into the rolling part buffer, upload every full part, and return the byte count.
+
+        A failure or cancellation while creating the upload or writing a part aborts the multipart upload
+        and closes the writer before re-raising, so a later ``aclose()`` cannot commit an object with a
+        missing part.
+        """
         self._ensure_open()
         with memoryview(b) as view:
             count = view.nbytes
             self._buffer += view
         self._written += count
-        while len(self._buffer) >= self._part_size:
-            upload = await self._ensure_upload()
-            await upload.write_part(self._take_part())
+        try:
+            while len(self._buffer) >= self._part_size:
+                upload = await self._ensure_upload()
+                await upload.write_part(self._take_part())
+        except BaseException:
+            await self.abort()
+            raise
         return count
 
-    async def aclose(self) -> None:
-        """Upload the buffered tail and complete the multipart upload, aborting it if completion fails."""
+    async def flush(self) -> None:
+        """Validate that the writer is open; buffered bytes stay pending until a full part or ``aclose()``.
+
+        ``write`` already uploads every full part, and multipart backends reject undersized non-final
+        parts, so the remaining tail is held back exactly as ``SyncWritableFile.flush`` does.
+        """
+        self._ensure_open()
+
+    async def aclose(self) -> PutResult | None:
+        """Upload the buffered tail, complete the multipart upload, and return its metadata.
+
+        Completion failures abort the upload and re-raise. A second call returns the stored ``result``;
+        a writer that was aborted returns None because no object was committed.
+        """
         if self._closed:
-            return
+            return self._result
         try:
             upload = await self._ensure_upload()
             if self._buffer:
@@ -3199,6 +3264,7 @@ class AsyncWritableFile:
         self._closed = True
         fallback_etag = "" if getattr(native_meta, "etag", None) else f"{int(native_meta.size):016x}"
         self._result = self._store._native_to_put_result(native_meta, fallback_etag)
+        return self._result
 
     async def abort(self) -> None:
         """Discard buffered bytes and abort the multipart upload without committing an object."""
