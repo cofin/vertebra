@@ -5,12 +5,12 @@ chapter_id: ch05-cloud-tls-and-scoped-iam
 title: "Chapter 05: Cloud TLS 1.3 Peer Identities, Scoped IAM Caches, and Cloud SQL Sessions"
 description: Enforce cloud TLS 1.3 and service-specific SAN/CN peer verification, validate static IAM login provenance and actual lifetime, propagate requested OAuth scopes across GCP token caches, and establish automatic Cloud SQL mTLS + IAM PostgreSQL sessions.
 status: stable
-state: planned
+state: completed
 planning_status: complete
 depends_on_chapters:
   - ch04-cloud-material-and-admin-discovery
 replan_trigger: null
-current_task: "native-postgres-driver:ch05:t01"
+current_task: null
 plan_revision: 5
 plan_commit: fd571e3a
 state_revision: 0
@@ -134,10 +134,10 @@ Progress: `[0/0 files documented in ch05]` (public user docs and OKF data-domain
 
 ## 5. Implementation Plan
 
-- [ ] native-postgres-driver:ch05:t01 — Enforce cloud TLS 1.3 and service-specific peer identities (tasks/t01-cloud-tls13-identities.md)
-- [ ] native-postgres-driver:ch05:t02 — Validate designated static login scope, actual lifetime, and core auth error mapping (tasks/t02-static-login-token-contract.md)
-- [ ] native-postgres-driver:ch05:t03 — Create scope-correct cloud Admin and login credential caches (tasks/t03-cloud-scoped-auth-caches.md)
-- [ ] native-postgres-driver:ch05:t04 — Authenticate automatic Cloud SQL mTLS endpoints with IAM tokens (tasks/t04-cloudsql-mtls-iam-sessions.md)
+- [x] native-postgres-driver:ch05:t01 — Enforce cloud TLS 1.3 and service-specific peer identities (tasks/t01-cloud-tls13-identities.md)
+- [x] native-postgres-driver:ch05:t02 — Validate designated static login scope, actual lifetime, and core auth error mapping (tasks/t02-static-login-token-contract.md)
+- [x] native-postgres-driver:ch05:t03 — Create scope-correct cloud Admin and login credential caches (tasks/t03-cloud-scoped-auth-caches.md)
+- [x] native-postgres-driver:ch05:t04 — Authenticate automatic Cloud SQL mTLS endpoints with IAM tokens (tasks/t04-cloudsql-mtls-iam-sessions.md)
 
 **Chapter Recovery Checkpoint:** `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-core --test it gcp_auth && cargo test --manifest-path src/rs/Cargo.toml -p vertebra-storage --lib gcp_auth && cargo test --manifest-path src/rs/Cargo.toml -p vertebra-db --lib cloud_peer_identities && cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres` exits `0`.
 

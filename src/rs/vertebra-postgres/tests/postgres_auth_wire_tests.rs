@@ -479,7 +479,9 @@ async fn scram_sha256_rejects_premature_auth_ok_out_of_order_sasl_and_missing_pa
 
 #[tokio::test]
 async fn scram_plus_channel_binding_matrix_and_require_policy_guards() {
-    // When channel_binding="require" on non-TLS (or unbound), reject Trust, Cleartext, MD5, and SASL before sending credentials
+    use tokio::io::AsyncWriteExt;
+
+    // When channel_binding="require" on non-TLS (sslmode="prefer" downgraded by 'N'), reject Trust, Cleartext, MD5, and SASL before sending credentials
     for challenge in [
         frame_auth_ok(),
         frame_auth_cleartext(),
@@ -487,6 +489,9 @@ async fn scram_plus_channel_binding_matrix_and_require_policy_guards() {
         frame_auth_sasl(&[b"SCRAM-SHA-256", b"SCRAM-SHA-256-PLUS"]),
     ] {
         let (addr, _, task) = spawn_scripted_server(move |mut stream| async move {
+            let mut ssl_req = [0u8; 8];
+            stream.read_exact(&mut ssl_req).await.unwrap();
+            stream.write_all(b"N").await.unwrap();
             let _ = read_startup_packet(&mut stream).await.unwrap();
             write_frames(&mut stream, &[challenge]).await.unwrap();
             let mut trailing = Vec::new();
@@ -500,7 +505,7 @@ async fn scram_plus_channel_binding_matrix_and_require_policy_guards() {
 
         let mut raw = RawPostgresOptions::new(addr.ip().to_string(), "user", "appdb");
         raw.port = i64::from(addr.port());
-        raw.sslmode = "disable".to_string();
+        raw.sslmode = "prefer".to_string();
         raw.channel_binding = "require".to_string();
         raw.password = Some("pencil".to_string());
         let mut h = SessionHandle::new(raw).unwrap();
@@ -512,3 +517,108 @@ async fn scram_plus_channel_binding_matrix_and_require_policy_guards() {
         task.await.unwrap();
     }
 }
+
+#[tokio::test]
+async fn direct_iam_refresh_invalidation_and_redaction_and_tls_expiry_guard() {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::TcpListener;
+
+    let token_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let token_addr = token_listener.local_addr().unwrap();
+    let token_calls = Arc::new(AtomicUsize::new(0));
+    let token_calls_srv = Arc::clone(&token_calls);
+
+    let token_task = tokio::spawn(async move {
+        while let Ok((mut stream, _)) = token_listener.accept().await {
+            let calls = Arc::clone(&token_calls_srv);
+            tokio::spawn(async move {
+                let mut buf = [0u8; 2048];
+                let _ = stream.read(&mut buf).await;
+                let n = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                let body = format!(
+                    r#"{{"access_token":"secret-iam-tok-{n}","expires_in":3600,"scope":"https://www.googleapis.com/auth/sqlservice.login"}}"#
+                );
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(resp.as_bytes()).await;
+            });
+        }
+    });
+
+    // First PG attempt returns 28P01 ErrorResponse -> must invalidate token and redact secret token
+    let (addr1, _, pg_task1) = spawn_scripted_server(|mut stream| async move {
+        let _ = read_startup_packet(&mut stream).await.unwrap();
+        write_frames(&mut stream, &[frame_auth_cleartext()])
+            .await
+            .unwrap();
+        let (tag, payload) = read_tagged_frontend_frame(&mut stream).await.unwrap();
+        assert_eq!(tag, b'p');
+        assert_eq!(payload, b"secret-iam-tok-1\0");
+        write_frames(
+            &mut stream,
+            &[frame_error_response(
+                "28P01",
+                "IAM token secret-iam-tok-1 rejected",
+                Some("detail secret-iam-tok-1"),
+            )],
+        )
+        .await
+        .unwrap();
+    })
+    .await;
+
+    let mut iam_opts = HashMap::new();
+    iam_opts.insert("client_id".to_string(), "cid".to_string());
+    iam_opts.insert("client_secret".to_string(), "csec".to_string());
+    iam_opts.insert("refresh_token".to_string(), "rtok".to_string());
+    iam_opts.insert(
+        "token_uri".to_string(),
+        format!("http://{token_addr}/token"),
+    );
+    iam_opts.insert("proxy_policy".to_string(), "direct".to_string());
+
+    let mut raw1 = RawPostgresOptions::new(addr1.ip().to_string(), "iam-user", "appdb");
+    raw1.port = i64::from(addr1.port());
+    raw1.sslmode = "disable".to_string();
+    raw1.enable_iam_auth = true;
+    raw1.iam_auth_options = iam_opts.clone();
+
+    let mut h1 = SessionHandle::new(raw1).unwrap();
+    let err1 = h1.connect().await.expect_err("28P01 must fail");
+    assert_eq!(err1.sqlstate(), Some("28P01"));
+    assert!(
+        !err1.to_string().contains("secret-iam-tok-1"),
+        "IAM token must be redacted from error message"
+    );
+    pg_task1.await.unwrap();
+
+    // Direct IAM with already-expired static token must fail AuthError before sending credentials
+    let (addr2, accepts2, _pg_task2) = spawn_scripted_server(|_stream| async move {}).await;
+    let mut expired_iam = HashMap::new();
+    expired_iam.insert("access_token".to_string(), "expired-secret-tok".to_string());
+    expired_iam.insert("expires_at_unix_ms".to_string(), "1000".to_string());
+    expired_iam.insert(
+        "scopes".to_string(),
+        "https://www.googleapis.com/auth/sqlservice.login".to_string(),
+    );
+    let mut raw2 = RawPostgresOptions::new(addr2.ip().to_string(), "iam-user", "appdb");
+    raw2.port = i64::from(addr2.port());
+    raw2.sslmode = "disable".to_string();
+    raw2.enable_iam_auth = true;
+    raw2.iam_auth_options = expired_iam;
+    let mut h2 = SessionHandle::new(raw2).unwrap();
+    let err2 = h2
+        .connect()
+        .await
+        .expect_err("expired static token must fail before TCP dial");
+    assert!(matches!(err2, PostgresError::Auth(_)));
+    assert_eq!(accepts2.load(std::sync::atomic::Ordering::SeqCst), 0);
+    token_task.abort();
+}
+

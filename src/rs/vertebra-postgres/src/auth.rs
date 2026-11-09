@@ -7,7 +7,9 @@ use postgres_protocol::authentication::sasl::{ChannelBinding, ScramSha256};
 use postgres_protocol::message::backend::Message;
 use postgres_protocol::message::frontend;
 
+use crate::cloud::material::{Clock, SystemClock};
 use crate::config::{ChannelBindingPolicy, PostgresConfig};
+use crate::credentials::ScopedLoginSnapshot;
 use crate::errors::PostgresError;
 
 /// Maximum permitted SCRAM-SHA-256 PBKDF2 iteration count (`100_000`).
@@ -76,6 +78,32 @@ impl Authentication {
         tls_server_end_point: Option<&[u8]>,
         out: &mut BytesMut,
     ) -> Result<bool, PostgresError> {
+        self.handle_message_with_login(msg, config, tls_server_end_point, None, &SystemClock, out)
+    }
+
+    /// Process one authentication [`Message`] with an optional pre-resolved [`ScopedLoginSnapshot`],
+    /// verifying `ScopedLoginSnapshot::ensure_usable` immediately before emitting password or SASL bytes.
+    pub(crate) fn handle_message_with_login(
+        &mut self,
+        msg: &Message,
+        config: &PostgresConfig,
+        tls_server_end_point: Option<&[u8]>,
+        login_snapshot: Option<&ScopedLoginSnapshot>,
+        clock: &dyn Clock,
+        out: &mut BytesMut,
+    ) -> Result<bool, PostgresError> {
+        let resolve_effective_password = || -> Result<&str, PostgresError> {
+            if let Some(snap) = login_snapshot {
+                snap.ensure_usable(clock.now_unix_ms())?;
+                return Ok(snap.access_token());
+            }
+            config.password.as_deref().ok_or_else(|| {
+                PostgresError::Config(
+                    "server requested password authentication, but password is None".to_string(),
+                )
+            })
+        };
+
         let phase = std::mem::replace(&mut self.phase, AuthPhase::Initial);
         match (phase, msg) {
             (
@@ -111,12 +139,7 @@ impl Authentication {
                             .to_string(),
                     ));
                 }
-                let password = config.password.as_deref().ok_or_else(|| {
-                    PostgresError::Config(
-                        "server requested cleartext password authentication, but password is None"
-                            .to_string(),
-                    )
-                })?;
+                let password = resolve_effective_password()?;
                 frontend::password_message(password.as_bytes(), out).map_err(|e| {
                     PostgresError::Protocol(format!("failed to encode PasswordMessage: {e}"))
                 })?;
@@ -129,12 +152,7 @@ impl Authentication {
                         "channel_binding='require' rejected MD5 password challenge".to_string(),
                     ));
                 }
-                let password = config.password.as_deref().ok_or_else(|| {
-                    PostgresError::Config(
-                        "server requested MD5 password authentication, but password is None"
-                            .to_string(),
-                    )
-                })?;
+                let password = resolve_effective_password()?;
                 let digest = md5_hash(config.user.as_bytes(), password.as_bytes(), body.salt());
                 frontend::password_message(digest.as_bytes(), out).map_err(|e| {
                     PostgresError::Protocol(format!("failed to encode MD5 PasswordMessage: {e}"))
@@ -211,11 +229,7 @@ impl Authentication {
                     }
                 };
 
-                let password = config.password.as_deref().ok_or_else(|| {
-                    PostgresError::Config(
-                        "server requested SCRAM authentication, but password is None".to_string(),
-                    )
-                })?;
+                let password = resolve_effective_password()?;
 
                 let scram = ScramSha256::new(password.as_bytes(), channel_binding);
                 let initial_msg = std::str::from_utf8(scram.message()).map_err(|_| {

@@ -5,7 +5,7 @@ chapter_id: ch05-cloud-tls-and-scoped-iam
 title: Enforce cloud TLS 1.3 and service-specific peer identities
 description: Enforce TLS 1.3 exclusively on cloud endpoints, verify AlloyDB IP/DNS SANs without CN/CA-only fallback, verify Cloud SQL DNS SAN before exact project:instance CN fallback, and retain verified leaf DER for channel binding.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -124,9 +124,9 @@ Repair shared cloud mTLS verification in `src/rs/vertebra-db/src/connection.rs` 
 
 ## Acceptance Criteria
 
-- [ ] `EndpointTarget::{CloudSql, AlloyDb}` carry explicit `CloudPeerIdentity`, enforcing TLS 1.3 only without altering direct TCP `sslmode` behavior (R4, R9).
-- [ ] AlloyDB requires verified CA plus exact IP or DNS SAN match with zero CN/CA-only fallback; Cloud SQL verifies CA first, tries normalized DNS SAN, falls back to exact `project:instance` CN, and rejects if both fail (R4, R9).
-- [ ] `TransportStream::peer_leaf_der()` exposes the verified peer leaf DER bytes from `PreparedCloudMaterial` connections for downstream `SCRAM-SHA-256-PLUS` binding, and commit `fix(db): verify cloud database peer identities` passes all canonical tests (R4, R9).
+- [x] `EndpointTarget::{CloudSql, AlloyDb}` carry explicit `CloudPeerIdentity`, enforcing TLS 1.3 only without altering direct TCP `sslmode` behavior (R4, R9).
+- [x] AlloyDB requires verified CA plus exact IP or DNS SAN match with zero CN/CA-only fallback; Cloud SQL verifies CA first, tries normalized DNS SAN, falls back to exact `project:instance` CN, and rejects if both fail (R4, R9).
+- [x] `TransportStream::peer_leaf_der()` exposes the verified peer leaf DER bytes from `PreparedCloudMaterial` connections for downstream `SCRAM-SHA-256-PLUS` binding, and commit `fix(db): verify cloud database peer identities` passes all canonical tests (R4, R9).
 
 ## Notes & Discoveries
 

@@ -2,16 +2,23 @@
 //! and authenticated `PostgresConnection` publication.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::time::Duration;
 
 use bytes::BytesMut;
 use postgres_protocol::message::backend::Message;
 use tokio::io::AsyncWriteExt;
 use tokio::time::Instant;
+#[cfg(unix)]
+use vertebra_db::connection::ConnectOptions;
 use vertebra_db::connection::TransportStream;
 
 use crate::auth::Authentication;
+use crate::cloud;
+use crate::cloud::material::{Clock, CloudConnector, SystemClock};
 use crate::config::{PostgresConfig, RawPostgresOptions};
-use crate::errors::PostgresError;
+use crate::credentials::{ScopedLoginSnapshot, ScopedTokenProvider};
+use crate::errors::{PostgresError, ServerError};
 use crate::protocol::{TERMINATE_FRAME, encode_startup_frame, parse_error_fields, read_message};
 use crate::tls;
 
@@ -83,6 +90,11 @@ impl PostgresConnection {
         self.tls_negotiated
     }
 
+    /// Borrow the underlying [`TransportStream`].
+    pub const fn stream(&self) -> &TransportStream {
+        &self.stream
+    }
+
     /// Verified peer leaf `tls-server-end-point` digest when available on a TLS connection.
     pub fn tls_server_end_point(&self) -> Option<&[u8]> {
         self.tls_server_end_point.as_deref()
@@ -135,11 +147,23 @@ enum SessionState {
 }
 
 /// Explicit PostgreSQL session lifecycle handle (`Disconnected -> Connecting -> Ready -> Closed`).
-#[derive(Debug)]
 pub struct SessionHandle {
     config: PostgresConfig,
     state: SessionState,
     next_generation: u64,
+    cloud_connector: Arc<CloudConnector>,
+    token_provider: ScopedTokenProvider,
+    clock: Arc<dyn Clock>,
+}
+
+impl std::fmt::Debug for SessionHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SessionHandle")
+            .field("config", &self.config)
+            .field("state", &self.state)
+            .field("next_generation", &self.next_generation)
+            .finish()
+    }
 }
 
 impl SessionHandle {
@@ -151,10 +175,24 @@ impl SessionHandle {
 
     /// Create a disconnected [`SessionHandle`] from a pre-validated [`PostgresConfig`].
     pub fn from_config(config: PostgresConfig) -> Self {
+        Self::with_clock(config, Arc::new(SystemClock))
+    }
+
+    /// Create a disconnected [`SessionHandle`] with an injected [`Clock`].
+    pub fn with_clock(config: PostgresConfig, clock: Arc<dyn Clock>) -> Self {
+        let cloud_connector = Arc::new(CloudConnector::with_clock(Arc::clone(&clock)));
+        let token_provider = ScopedTokenProvider::new(
+            Some(config.cloud_auth_options.clone()),
+            (!config.iam_auth_options.is_empty()).then(|| config.iam_auth_options.clone()),
+            Arc::clone(&clock),
+        );
         Self {
             config,
             state: SessionState::Disconnected,
             next_generation: 0,
+            cloud_connector,
+            token_provider,
+            clock,
         }
     }
 
@@ -258,6 +296,28 @@ impl<'a> PendingSession<'a> {
         &self.handle.as_ref().expect("PendingSession armed").config
     }
 
+    fn cloud_connector(&self) -> Arc<CloudConnector> {
+        Arc::clone(
+            &self
+                .handle
+                .as_ref()
+                .expect("PendingSession armed")
+                .cloud_connector,
+        )
+    }
+
+    fn token_provider(&self) -> ScopedTokenProvider {
+        self.handle
+            .as_ref()
+            .expect("PendingSession armed")
+            .token_provider
+            .clone()
+    }
+
+    fn clock(&self) -> Arc<dyn Clock> {
+        Arc::clone(&self.handle.as_ref().expect("PendingSession armed").clock)
+    }
+
     fn commit(mut self, conn: PostgresConnection) -> &'a mut PostgresConnection {
         let handle = self.handle.take().expect("PendingSession armed");
         handle.state = SessionState::Ready(conn);
@@ -285,16 +345,70 @@ pub struct ConnectAttempt<'a> {
 }
 
 impl<'a> ConnectAttempt<'a> {
-    /// Execute TCP/TLS dial, `StartupMessage`, authentication, and `ReadyForQuery(Idle)` verification.
+    /// Execute TCP/TLS/Unix/Cloud dial, TCP keepalive setup, `StartupMessage`, authentication, and `ReadyForQuery(Idle)` verification.
     pub async fn run(self) -> Result<&'a mut PostgresConnection, PostgresError> {
         let Self { pending, deadline } = self;
         let config = pending.config().clone();
+        let connector = pending.cloud_connector();
+        let token_provider = pending.token_provider();
+        let clock = pending.clock();
         let generation = pending.generation;
 
-        let dialed = tls::connect(&config, deadline).await?;
-        let mut stream = dialed.stream;
-        let tls_negotiated = dialed.tls_negotiated;
-        let tls_server_end_point = dialed.tls_server_end_point;
+        let (mut stream, tls_negotiated, tls_server_end_point, login_snapshot) =
+            if config.cloud_sql_instance.is_some() {
+                let dialed = cloud::dial_cloudsql(&config, &connector, deadline).await?;
+                (
+                    dialed.stream,
+                    true,
+                    dialed.tls_server_end_point,
+                    dialed.login_snapshot,
+                )
+            } else if config.alloydb_instance_uri.is_some() {
+                let dialed = cloud::dial_alloydb(&config, &connector, deadline).await?;
+                (
+                    dialed.stream,
+                    true,
+                    dialed.tls_server_end_point,
+                    dialed.login_snapshot,
+                )
+            } else if let Some(ref unix_path) = config.unix_socket {
+                let direct_login = if config.enable_iam_auth {
+                    let scopes = config.direct_iam_default_scopes();
+                    Some(
+                        token_provider
+                            .resolve_direct_login(&scopes, deadline)
+                            .await?,
+                    )
+                } else {
+                    None
+                };
+                let stream = dial_unix_socket(unix_path, deadline).await?;
+                (stream, false, None, direct_login)
+            } else {
+                let direct_login = if config.enable_iam_auth {
+                    let scopes = config.direct_iam_default_scopes();
+                    Some(
+                        token_provider
+                            .resolve_direct_login(&scopes, deadline)
+                            .await?,
+                    )
+                } else {
+                    None
+                };
+                let dialed = tls::connect(&config, deadline).await?;
+                (
+                    dialed.stream,
+                    dialed.tls_negotiated,
+                    dialed.tls_server_end_point,
+                    direct_login,
+                )
+            };
+
+        if !matches!(stream, TransportStream::Unix(_)) {
+            stream
+                .set_tcp_keepalive(config.tcp_keepalive())
+                .map_err(|e| PostgresError::Transport(e.to_string()))?;
+        }
 
         let mut read_buf = BytesMut::with_capacity(8192);
         let mut write_buf = BytesMut::with_capacity(1024);
@@ -317,7 +431,18 @@ impl<'a> ConnectAttempt<'a> {
             let msg = read_message(&mut stream, &mut read_buf, Some(deadline)).await?;
             match msg {
                 Message::ErrorResponse(body) => {
-                    return Err(parse_error_fields(body.fields())?);
+                    let err = parse_error_fields(body.fields())?;
+                    if let PostgresError::Server(ref srv) = err
+                        && srv.sqlstate.starts_with("28")
+                        && let Some(ref snap) = login_snapshot
+                    {
+                        snap.invalidate_generation();
+                    }
+                    return Err(redact_session_error(
+                        err,
+                        config.password.as_deref(),
+                        login_snapshot.as_ref(),
+                    ));
                 }
                 Message::NoticeResponse(_) => {}
                 Message::ParameterStatus(body) => {
@@ -378,12 +503,22 @@ impl<'a> ConnectAttempt<'a> {
                     return Ok(pending.commit(conn));
                 }
                 other => {
-                    let completed = auth.handle_message(
-                        &other,
-                        &config,
-                        tls_server_end_point.as_deref(),
-                        &mut write_buf,
-                    )?;
+                    let completed = auth
+                        .handle_message_with_login(
+                            &other,
+                            &config,
+                            tls_server_end_point.as_deref(),
+                            login_snapshot.as_ref(),
+                            clock.as_ref(),
+                            &mut write_buf,
+                        )
+                        .map_err(|e| {
+                            redact_session_error(
+                                e,
+                                config.password.as_deref(),
+                                login_snapshot.as_ref(),
+                            )
+                        })?;
                     if !write_buf.is_empty() {
                         if Instant::now() >= deadline {
                             return Err(PostgresError::Transport(
@@ -412,5 +547,75 @@ impl<'a> ConnectAttempt<'a> {
                 }
             }
         }
+    }
+}
+
+#[cfg(unix)]
+async fn dial_unix_socket(
+    path: &str,
+    deadline: Instant,
+) -> Result<TransportStream, PostgresError> {
+    let now = Instant::now();
+    if now >= deadline {
+        return Err(PostgresError::Transport(
+            "Unix domain socket connection deadline exceeded".to_string(),
+        ));
+    }
+    let remaining = deadline
+        .saturating_duration_since(now)
+        .max(Duration::from_millis(1));
+    let opts = ConnectOptions::unix(path).with_connect_timeout(remaining);
+    tokio::time::timeout_at(deadline, TransportStream::connect(&opts))
+        .await
+        .map_err(|_| PostgresError::Transport("Unix domain socket connection timed out".to_string()))?
+        .map_err(|e| PostgresError::Transport(e.to_string()))
+}
+
+#[cfg(not(unix))]
+async fn dial_unix_socket(
+    _path: &str,
+    _deadline: Instant,
+) -> Result<TransportStream, PostgresError> {
+    Err(PostgresError::UnsupportedFeature(
+        "Unix domain sockets are not supported on this platform".to_string(),
+    ))
+}
+
+fn redact_session_error(
+    err: PostgresError,
+    password: Option<&str>,
+    login_snapshot: Option<&ScopedLoginSnapshot>,
+) -> PostgresError {
+    let sanitize = |mut s: String| -> String {
+        if let Some(pw) = password.filter(|p| !p.is_empty()) {
+            s = s.replace(pw, "<redacted>");
+        }
+        if let Some(snap) = login_snapshot {
+            let tok = snap.access_token();
+            if !tok.is_empty() {
+                s = s.replace(tok, "<redacted>");
+            }
+        }
+        s
+    };
+    match err {
+        PostgresError::Config(m) => PostgresError::Config(sanitize(m)),
+        PostgresError::Interface(m) => PostgresError::Interface(sanitize(m)),
+        PostgresError::Data(m) => PostgresError::Data(sanitize(m)),
+        PostgresError::Auth(m) => PostgresError::Auth(sanitize(m)),
+        PostgresError::UnsupportedAuth(m) => PostgresError::UnsupportedAuth(sanitize(m)),
+        PostgresError::UnsupportedFeature(m) => PostgresError::UnsupportedFeature(sanitize(m)),
+        PostgresError::Transport(m) => PostgresError::Transport(sanitize(m)),
+        PostgresError::Protocol(m) => PostgresError::Protocol(sanitize(m)),
+        PostgresError::Server(srv) => PostgresError::Server(ServerError {
+            severity: srv.severity,
+            sqlstate: srv.sqlstate,
+            message: sanitize(srv.message),
+            diagnostics: srv
+                .diagnostics
+                .into_iter()
+                .map(|(k, v)| (k, sanitize(v)))
+                .collect(),
+        }),
     }
 }

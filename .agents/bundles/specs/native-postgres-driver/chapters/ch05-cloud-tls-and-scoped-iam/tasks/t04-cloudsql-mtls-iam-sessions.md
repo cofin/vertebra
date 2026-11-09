@@ -5,7 +5,7 @@ chapter_id: ch05-cloud-tls-and-scoped-iam
 title: Authenticate automatic Cloud SQL mTLS endpoints with IAM tokens
 description: Implement pre-startup dial_cloudsql returning DialedCloudTransport over automatic Cloud SQL :3307 mTLS, enforce pre-credential ScopedLoginSnapshot::ensure_usable guards in auth.rs and unified startup in session.rs, and verify IAM vs built-in password startup without SSLRequest.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -118,9 +118,9 @@ Wire automatic Cloud SQL `:3307` mTLS session establishment across `src/rs/verte
 
 ## Acceptance Criteria
 
-- [ ] `dial_cloudsql` prepares automatic ephemeral certificates and scoped tokens via `CloudConnector::prepare`, connects to `:3307` over verified TLS 1.3 without sending `SSLRequest` or falling back to direct TCP, and returns pre-startup `DialedCloudTransport` to `session.rs` (R5, R9).
-- [ ] `session.rs` and `auth.rs` drive `StartupMessage`, enforce `ScopedLoginSnapshot::ensure_usable` immediately before password/SASL transmission (`0` credential bytes emitted on expiry), and reach `TransactionStatus::Idle` (R5, R9).
-- [ ] Failed server authentication (`PostgresError::Server(err)` with `28xxx` `sqlstate`) is terminal without same-stream token retry, total `absolute_deadline` spans Admin + mTLS + startup, and commit `feat(postgres): connect automatic Cloud SQL IAM endpoints` passes all canonical wire tests (R5, R9).
+- [x] `dial_cloudsql` prepares automatic ephemeral certificates and scoped tokens via `CloudConnector::prepare`, connects to `:3307` over verified TLS 1.3 without sending `SSLRequest` or falling back to direct TCP, and returns pre-startup `DialedCloudTransport` to `session.rs` (R5, R9).
+- [x] `session.rs` and `auth.rs` drive `StartupMessage`, enforce `ScopedLoginSnapshot::ensure_usable` immediately before password/SASL transmission (`0` credential bytes emitted on expiry), and reach `TransactionStatus::Idle` (R5, R9).
+- [x] Failed server authentication (`PostgresError::Server(err)` with `28xxx` `sqlstate`) is terminal without same-stream token retry, total `absolute_deadline` spans Admin + mTLS + startup, and commit `feat(postgres): connect automatic Cloud SQL IAM endpoints` passes all canonical wire tests (R5, R9).
 
 ## Notes & Discoveries
 

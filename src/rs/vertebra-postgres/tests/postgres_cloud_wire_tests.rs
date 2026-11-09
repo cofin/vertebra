@@ -423,7 +423,12 @@ async fn material_refresh_lead_and_effective_expiry() {
     admin_opts.insert("access_token".to_string(), "admin-tok".to_string());
     let mut iam_opts = HashMap::new();
     iam_opts.insert("access_token".to_string(), "login-tok".to_string());
-    iam_opts.insert("expires_at_ms".to_string(), "2000000".to_string());
+    iam_opts.insert("expires_at_unix_ms".to_string(), "2500000".to_string());
+    iam_opts.insert("refresh_skew_ms".to_string(), "300000".to_string());
+    iam_opts.insert(
+        "scopes".to_string(),
+        "https://www.googleapis.com/auth/sqlservice.login".to_string(),
+    );
 
     let cfg = CloudConnectorConfig::new(
         CloudResourceTarget::CloudSql(uri),
@@ -440,24 +445,34 @@ async fn material_refresh_lead_and_effective_expiry() {
         .await
         .unwrap();
     assert_eq!(m1.signed_cert_not_after_ms, 4_600_000);
-    assert_eq!(m1.effective_expiry_ms, 2_000_000);
+    assert_eq!(m1.effective_expiry_ms, 2_500_000);
     assert_eq!(fetches.load(Ordering::SeqCst), 1);
 
-    // At t = 1_759s (1_759_000 + 240_000 = 1_999_000 < 2_000_000), cache hit
-    clock.set(1_759_000);
+    // At t = 2_259s (2_259_000 + 240_000 = 2_499_000 < 2_500_000), cache hit
+    clock.set(2_259_000);
     let _ = connector
         .prepare(&cfg, Instant::now() + Duration::from_secs(5))
         .await
         .unwrap();
     assert_eq!(fetches.load(Ordering::SeqCst), 1);
 
-    // At t = 1_760s (1_760_000 + 240_000 == 2_000_000), inside lead -> triggers renewal
-    clock.set(1_760_000);
+    // At t = 2_199s (2_199_000 + 240_000 = 2_439_000, wait: 2_260_000 + 240_000 == 2_500_000, and for ensure_usable with skew 100_000)
+    let mut cfg2 = cfg.clone();
+    if let Some(ref mut iam) = cfg2.iam_auth_options {
+        iam.insert("refresh_skew_ms".to_string(), "100000".to_string());
+    }
+    clock.set(1_000_000);
     let _ = connector
-        .prepare(&cfg, Instant::now() + Duration::from_secs(5))
+        .prepare(&cfg2, Instant::now() + Duration::from_secs(5))
         .await
         .unwrap();
-    assert_eq!(fetches.load(Ordering::SeqCst), 2);
+    let count_before = fetches.load(Ordering::SeqCst);
+    clock.set(2_260_000);
+    let _ = connector
+        .prepare(&cfg2, Instant::now() + Duration::from_secs(5))
+        .await
+        .unwrap();
+    assert_eq!(fetches.load(Ordering::SeqCst), count_before + 1);
     server_task.abort();
 }
 
@@ -731,7 +746,11 @@ async fn cloudsql_admin_iam_discovery_and_cert() {
     admin_opts.insert("access_token".to_string(), "vtb-admin-tok".to_string());
     let mut iam_opts = HashMap::new();
     iam_opts.insert("access_token".to_string(), "vtb-login-tok".to_string());
-    iam_opts.insert("expires_at_ms".to_string(), "1900000".to_string());
+    iam_opts.insert("expires_at_unix_ms".to_string(), "1900000".to_string());
+    iam_opts.insert(
+        "scopes".to_string(),
+        "https://www.googleapis.com/auth/sqlservice.login".to_string(),
+    );
 
     let cfg = CloudConnectorConfig::new(
         CloudResourceTarget::CloudSql(uri),
@@ -1081,7 +1100,11 @@ async fn alloydb_admin_v1alpha_paths_and_json_contract() {
     admin_opts.insert("access_token".to_string(), "vtb-admin-tok".to_string());
     let mut iam_opts = HashMap::new();
     iam_opts.insert("access_token".to_string(), "vtb-alloy-login".to_string());
-    iam_opts.insert("expires_at_ms".to_string(), "2200000".to_string());
+    iam_opts.insert("expires_at_unix_ms".to_string(), "2200000".to_string());
+    iam_opts.insert(
+        "scopes".to_string(),
+        "https://www.googleapis.com/auth/alloydb.login".to_string(),
+    );
 
     let cfg = CloudConnectorConfig::new(
         CloudResourceTarget::AlloyDb(uri),
@@ -1140,7 +1163,11 @@ async fn alloydb_admin_password_mode_still_fetches_login_token() {
     admin_opts.insert("access_token".to_string(), "admin-tok".to_string());
     let mut iam_opts = HashMap::new();
     iam_opts.insert("access_token".to_string(), "metadata-login-tok".to_string());
-    iam_opts.insert("expires_at_ms".to_string(), "2500000".to_string());
+    iam_opts.insert("expires_at_unix_ms".to_string(), "2500000".to_string());
+    iam_opts.insert(
+        "scopes".to_string(),
+        "https://www.googleapis.com/auth/alloydb.login".to_string(),
+    );
 
     let cfg = CloudConnectorConfig::new(
         CloudResourceTarget::AlloyDb(uri),
@@ -1204,6 +1231,13 @@ async fn alloydb_admin_psc_dns_and_missing_network_target() {
     .unwrap();
     let mut admin_opts = HashMap::new();
     admin_opts.insert("access_token".to_string(), "admin-tok".to_string());
+    let mut iam_opts = HashMap::new();
+    iam_opts.insert("access_token".to_string(), "alloy-tok".to_string());
+    iam_opts.insert("expires_at_unix_ms".to_string(), "3000000".to_string());
+    iam_opts.insert(
+        "scopes".to_string(),
+        "https://www.googleapis.com/auth/alloydb.login".to_string(),
+    );
 
     // (a) PSC selects stripped DNS name
     let cfg_psc = CloudConnectorConfig::new(
@@ -1213,7 +1247,8 @@ async fn alloydb_admin_psc_dns_and_missing_network_target() {
     )
     .with_admin_endpoint(format!("http://{addr}"))
     .unwrap()
-    .with_cloud_auth_options(admin_opts.clone());
+    .with_cloud_auth_options(admin_opts.clone())
+    .with_iam_auth_options(Some(iam_opts.clone()));
     let mat = connector
         .prepare(&cfg_psc, Instant::now() + Duration::from_secs(5))
         .await
@@ -1230,7 +1265,8 @@ async fn alloydb_admin_psc_dns_and_missing_network_target() {
     )
     .with_admin_endpoint(format!("http://{addr}"))
     .unwrap()
-    .with_cloud_auth_options(admin_opts);
+    .with_cloud_auth_options(admin_opts)
+    .with_iam_auth_options(Some(iam_opts));
     assert!(connector
         .prepare(&cfg_pub, Instant::now() + Duration::from_secs(5))
         .await
@@ -1285,6 +1321,13 @@ async fn alloydb_admin_missing_fields_key_mismatch_and_expired_chain() {
     let connector = CloudConnector::with_clock(clock);
     let mut admin_opts = HashMap::new();
     admin_opts.insert("access_token".to_string(), "admin-tok".to_string());
+    let mut iam_opts = HashMap::new();
+    iam_opts.insert("access_token".to_string(), "alloy-tok".to_string());
+    iam_opts.insert("expires_at_unix_ms".to_string(), "3000000".to_string());
+    iam_opts.insert(
+        "scopes".to_string(),
+        "https://www.googleapis.com/auth/alloydb.login".to_string(),
+    );
 
     for cluster in ["empty-chain", "empty-ca", "wrong-key", "expired-leaf"] {
         let uri = AlloyDbClusterUri::parse(&format!(
@@ -1298,11 +1341,316 @@ async fn alloydb_admin_missing_fields_key_mismatch_and_expired_chain() {
         )
         .with_admin_endpoint(format!("http://{addr}"))
         .unwrap()
-        .with_cloud_auth_options(admin_opts.clone());
+        .with_cloud_auth_options(admin_opts.clone())
+        .with_iam_auth_options(Some(iam_opts.clone()));
         assert!(connector
             .prepare(&cfg, Instant::now() + Duration::from_secs(5))
             .await
             .is_err());
     }
     server_task.abort();
+}
+
+#[tokio::test]
+async fn cloud_scoped_static_login_lifetime_and_scopes_contract() {
+    let clock = Arc::new(ManualClock::new(1_000_000));
+    let connector = CloudConnector::with_clock(clock.clone() as Arc<dyn Clock>);
+    let uri = CloudSqlInstanceUri::parse("proj-a:us-central1:inst-1").unwrap();
+
+    // Opaque static access_token in cloud_auth_options without iam_auth_options must fail for IAM
+    let mut admin_opts = HashMap::new();
+    admin_opts.insert("access_token".to_string(), "opaque-admin".to_string());
+    let cfg_opaque = CloudConnectorConfig::new(
+        CloudResourceTarget::CloudSql(uri.clone()),
+        IpType::Public,
+        AuthType::Iam,
+    )
+    .with_admin_endpoint("http://127.0.0.1:9")
+    .unwrap()
+    .with_cloud_auth_options(admin_opts.clone());
+    let err = connector
+        .prepare(&cfg_opaque, Instant::now() + Duration::from_secs(2))
+        .await
+        .expect_err("opaque static token must fail IAM login");
+    assert!(matches!(err, PostgresError::Auth(_)));
+
+    // Missing or wrong scope in iam_auth_options must fail before Admin API call
+    let mut bad_scope_iam = HashMap::new();
+    bad_scope_iam.insert("access_token".to_string(), "login-tok".to_string());
+    bad_scope_iam.insert("expires_at_unix_ms".to_string(), "2000000".to_string());
+    bad_scope_iam.insert(
+        "scopes".to_string(),
+        "https://www.googleapis.com/auth/cloud-platform".to_string(),
+    );
+    let cfg_bad_scope = CloudConnectorConfig::new(
+        CloudResourceTarget::CloudSql(uri),
+        IpType::Public,
+        AuthType::Iam,
+    )
+    .with_admin_endpoint("http://127.0.0.1:9")
+    .unwrap()
+    .with_cloud_auth_options(admin_opts)
+    .with_iam_auth_options(Some(bad_scope_iam));
+    let err_scope = connector
+        .prepare(&cfg_bad_scope, Instant::now() + Duration::from_secs(2))
+        .await
+        .expect_err("wrong scope must fail");
+    assert!(matches!(err_scope, PostgresError::Auth(_)));
+}
+
+#[tokio::test]
+async fn cloudsql_mtls_and_alloydb_end_to_end_dial_keepalive_and_token_expiry_guard() {
+    use _postgres::cloud::{dial_alloydb, dial_cloudsql};
+    use _postgres::config::{PostgresConfig, RawPostgresOptions};
+    use rcgen::{DnType, KeyUsagePurpose};
+    use rustls::ServerConfig;
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+    use rustls::server::WebPkiClientVerifier;
+    use tokio_rustls::TlsAcceptor;
+    use vertebra_db::dialer::encode_alloydb_metadata_response;
+
+    let ca = Arc::new(TestCa::new());
+    let issuer = Issuer::new(
+        ca.ca_params.clone(),
+        KeyPair::from_pem(&ca.ca_key.serialize_pem()).unwrap(),
+    );
+
+    // Build Cloud SQL server cert with CN="proj-a:inst-1" and SAN="db.csql.internal"
+    let mut csql_srv_params =
+        CertificateParams::new(vec!["db.csql.internal".to_string()]).unwrap();
+    csql_srv_params
+        .distinguished_name
+        .push(DnType::CommonName, "proj-a:inst-1");
+    csql_srv_params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+    let csql_srv_key = KeyPair::generate().unwrap();
+    let csql_srv_cert = csql_srv_params.signed_by(&csql_srv_key, &issuer).unwrap();
+
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let mut roots = rustls::RootCertStore::empty();
+    let ca_certs: Vec<CertificateDer<'static>> =
+        rustls_pemfile::certs(&mut std::io::BufReader::new(ca.ca_pem.as_bytes()))
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+    roots.add_parsable_certificates(ca_certs);
+    let client_verifier =
+        WebPkiClientVerifier::builder_with_provider(Arc::new(roots), Arc::clone(&provider))
+            .build()
+            .unwrap();
+    let srv_certs: Vec<CertificateDer<'static>> =
+        rustls_pemfile::certs(&mut std::io::BufReader::new(csql_srv_cert.pem().as_bytes()))
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+    let srv_key: PrivateKeyDer<'static> = rustls_pemfile::private_key(
+        &mut std::io::BufReader::new(csql_srv_key.serialize_pem().as_bytes()),
+    )
+    .unwrap()
+    .unwrap();
+    let srv_cfg = ServerConfig::builder_with_provider(Arc::clone(&provider))
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .unwrap()
+        .with_client_cert_verifier(client_verifier.clone())
+        .with_single_cert(srv_certs, srv_key)
+        .unwrap();
+    let csql_acceptor = TlsAcceptor::from(Arc::new(srv_cfg));
+
+    let csql_pg_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let csql_pg_addr = csql_pg_listener.local_addr().unwrap();
+    let csql_pg_task = tokio::spawn(async move {
+        let (sock, _) = csql_pg_listener.accept().await.unwrap();
+        let mut tls = csql_acceptor.accept(sock).await.unwrap();
+        tls.write_all(b"CSQL_OK").await.unwrap();
+    });
+
+    let ca_for_admin = Arc::clone(&ca);
+    let (csql_admin_addr, csql_admin_task) = spawn_http_mock(move |mut stream| {
+        let ca = Arc::clone(&ca_for_admin);
+        async move {
+            let (method, _, _, body) = read_http_request(&mut stream).await;
+            if method == "GET" {
+                let json = serde_json::json!({
+                    "region": "us-central1",
+                    "databaseVersion": "POSTGRES_16",
+                    "ipAddresses": [{"type": "PRIMARY", "ipAddress": "127.0.0.1"}],
+                    "serverCaCert": {"cert": ca.ca_pem},
+                    "dnsName": "db.csql.internal."
+                });
+                write_http_json(&mut stream, 200, &json.to_string()).await;
+            } else {
+                let req: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                let pub_key = req["public_key"].as_str().unwrap();
+                let leaf = ca.sign_rsa_public_key_pem(pub_key, 4_102_444_800);
+                let json = serde_json::json!({ "ephemeralCert": { "cert": leaf } });
+                write_http_json(&mut stream, 200, &json.to_string()).await;
+            }
+        }
+    })
+    .await;
+
+    let clock = Arc::new(ManualClock::new(1_000_000));
+    let connector = CloudConnector::with_clock(clock.clone() as Arc<dyn Clock>);
+    let mut raw_csql = RawPostgresOptions::new("127.0.0.1", "iam-user", "appdb");
+    raw_csql.cloud_sql_instance = Some("proj-a:us-central1:inst-1".to_string());
+    raw_csql.cloud_sql_ip_type = "PUBLIC".to_string();
+    raw_csql.enable_iam_auth = true;
+    raw_csql
+        .cloud_auth_options
+        .insert("admin_endpoint".to_string(), format!("http://{csql_admin_addr}"));
+    raw_csql
+        .cloud_auth_options
+        .insert("access_token".to_string(), "admin-tok".to_string());
+    raw_csql
+        .cloud_auth_options
+        .insert("proxy_port".to_string(), csql_pg_addr.port().to_string());
+    let mut csql_iam = HashMap::new();
+    csql_iam.insert("access_token".to_string(), "csql-login-tok".to_string());
+    csql_iam.insert("expires_at_unix_ms".to_string(), "2500000".to_string());
+    csql_iam.insert(
+        "scopes".to_string(),
+        "https://www.googleapis.com/auth/sqlservice.login".to_string(),
+    );
+    raw_csql.iam_auth_options = csql_iam;
+    let pg_cfg_csql = PostgresConfig::validate(raw_csql).unwrap();
+
+    let mut dialed_csql = dial_cloudsql(
+        &pg_cfg_csql,
+        &connector,
+        Instant::now() + Duration::from_secs(5),
+    )
+    .await
+    .expect("dial cloudsql");
+    dialed_csql
+        .stream
+        .set_tcp_keepalive(pg_cfg_csql.tcp_keepalive())
+        .expect("keepalive on cloudsql tls stream");
+    let mut csql_buf = [0u8; 7];
+    dialed_csql.stream.read_exact(&mut csql_buf).await.unwrap();
+    assert_eq!(&csql_buf, b"CSQL_OK");
+    csql_pg_task.await.unwrap();
+    csql_admin_task.abort();
+
+    // AlloyDB end-to-end dial + token expiry during TLS check
+    let mut alloy_srv_params = CertificateParams::new(vec!["127.0.0.1".to_string()]).unwrap();
+    alloy_srv_params
+        .distinguished_name
+        .push(DnType::CommonName, "alloydb-srv");
+    let alloy_srv_key = KeyPair::generate().unwrap();
+    let alloy_srv_cert = alloy_srv_params.signed_by(&alloy_srv_key, &issuer).unwrap();
+    let alloy_srv_certs: Vec<CertificateDer<'static>> =
+        rustls_pemfile::certs(&mut std::io::BufReader::new(alloy_srv_cert.pem().as_bytes()))
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+    let alloy_srv_pk: PrivateKeyDer<'static> = rustls_pemfile::private_key(
+        &mut std::io::BufReader::new(alloy_srv_key.serialize_pem().as_bytes()),
+    )
+    .unwrap()
+    .unwrap();
+    let alloy_srv_cfg = ServerConfig::builder_with_provider(provider)
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .unwrap()
+        .with_client_cert_verifier(client_verifier)
+        .with_single_cert(alloy_srv_certs, alloy_srv_pk)
+        .unwrap();
+    let alloy_acceptor = TlsAcceptor::from(Arc::new(alloy_srv_cfg));
+
+    let alloy_pg_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let alloy_pg_addr = alloy_pg_listener.local_addr().unwrap();
+    let clock_for_srv = Arc::clone(&clock);
+    let alloy_pg_task = tokio::spawn(async move {
+        // First connection: advance clock past token expiry during TLS handshake so metadata exchange is aborted!
+        let (sock1, _) = alloy_pg_listener.accept().await.unwrap();
+        clock_for_srv.set(2_600_000);
+        let mut tls1 = alloy_acceptor.accept(sock1).await.unwrap();
+        let mut unexpected = Vec::new();
+        let n = tls1.read_to_end(&mut unexpected).await.unwrap_or(0);
+        assert_eq!(n, 0, "expired token must abort before metadata exchange write");
+
+        // Second connection: valid token completes metadata exchange
+        let (sock2, _) = alloy_pg_listener.accept().await.unwrap();
+        let mut tls2 = alloy_acceptor.accept(sock2).await.unwrap();
+        let mut hdr = [0u8; 4];
+        tls2.read_exact(&mut hdr).await.unwrap();
+        let len = u32::from_be_bytes(hdr) as usize;
+        let mut body = vec![0u8; len];
+        tls2.read_exact(&mut body).await.unwrap();
+        let resp = encode_alloydb_metadata_response(1, "");
+        tls2.write_all(&resp).await.unwrap();
+        tls2.write_all(b"ALLOY_OK").await.unwrap();
+    });
+
+    let ca_for_alloy = Arc::clone(&ca);
+    let (alloy_admin_addr, alloy_admin_task) = spawn_http_mock(move |mut stream| {
+        let ca = Arc::clone(&ca_for_alloy);
+        async move {
+            let (method, _, _, body) = read_http_request(&mut stream).await;
+            if method == "GET" {
+                let json = serde_json::json!({
+                    "ipAddress": "127.0.0.1",
+                    "instanceUid": "uid-123"
+                });
+                write_http_json(&mut stream, 200, &json.to_string()).await;
+            } else {
+                let req: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                let pub_key = req["publicKey"].as_str().unwrap();
+                let leaf = ca.sign_rsa_public_key_pem(pub_key, 4_102_444_800);
+                let json = serde_json::json!({
+                    "pemCertificateChain": [leaf],
+                    "caCert": ca.ca_pem
+                });
+                write_http_json(&mut stream, 200, &json.to_string()).await;
+            }
+        }
+    })
+    .await;
+
+    let mut raw_alloy = RawPostgresOptions::new("127.0.0.1", "iam-user", "appdb");
+    raw_alloy.alloydb_instance_uri =
+        Some("projects/p1/locations/us-central1/clusters/c1/instances/i1".to_string());
+    raw_alloy.alloydb_ip_type = "PRIVATE".to_string();
+    raw_alloy.enable_iam_auth = true;
+    raw_alloy
+        .cloud_auth_options
+        .insert("admin_endpoint".to_string(), format!("http://{alloy_admin_addr}"));
+    raw_alloy
+        .cloud_auth_options
+        .insert("access_token".to_string(), "admin-tok".to_string());
+    raw_alloy
+        .cloud_auth_options
+        .insert("proxy_port".to_string(), alloy_pg_addr.port().to_string());
+    let mut alloy_iam = HashMap::new();
+    alloy_iam.insert("access_token".to_string(), "alloy-login-tok".to_string());
+    alloy_iam.insert("expires_at_unix_ms".to_string(), "2500000".to_string());
+    alloy_iam.insert(
+        "scopes".to_string(),
+        "https://www.googleapis.com/auth/alloydb.login".to_string(),
+    );
+    raw_alloy.iam_auth_options = alloy_iam;
+    let pg_cfg_alloy = PostgresConfig::validate(raw_alloy.clone()).unwrap();
+
+    let err_exp = dial_alloydb(
+        &pg_cfg_alloy,
+        &connector,
+        Instant::now() + Duration::from_secs(5),
+    )
+    .await
+    .expect_err("token expiring during TLS handshake must abort before metadata exchange");
+    assert!(matches!(err_exp, PostgresError::Auth(_)));
+
+    // Reset clock and retry with valid token
+    clock.set(1_000_000);
+    let mut dialed_alloy = dial_alloydb(
+        &pg_cfg_alloy,
+        &connector,
+        Instant::now() + Duration::from_secs(5),
+    )
+    .await
+    .expect("dial alloydb with valid token");
+    dialed_alloy
+        .stream
+        .set_tcp_keepalive(pg_cfg_alloy.tcp_keepalive())
+        .expect("keepalive on alloydb stream");
+    let mut alloy_buf = [0u8; 8];
+    dialed_alloy.stream.read_exact(&mut alloy_buf).await.unwrap();
+    assert_eq!(&alloy_buf, b"ALLOY_OK");
+    alloy_pg_task.await.unwrap();
+    alloy_admin_task.abort();
 }

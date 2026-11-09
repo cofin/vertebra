@@ -5,7 +5,7 @@ chapter_id: ch06-alloydb-keepalive-unix-and-direct-iam
 title: Project complete connection options and establish Unix domain socket startup
 description: Normalize all 25 constructor options into canonical endpoint, credential, keepalive, and startup GUC policies, project application_name and session_gucs into StartupMessage, and establish Unix socket sessions without SSLRequest.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -122,9 +122,9 @@ Complete pure validation and normalization of all 25 public constructor paramete
 
 ## Acceptance Criteria
 
-- [ ] All 25 constructor fields in `contracts.md` are validated purely and normalized into owned endpoint, TLS/binding, keepalive, IAM, and GUC policies without duplicate DSN parsing or I/O (R2, R3).
-- [ ] `session_gucs` overlays `application_name`, enforces `UTF8` `client_encoding`, rejects reserved keys and NUL bytes, and encodes directly into `StartupMessage` (R2, R3).
-- [ ] Unix domain socket connections establish without `SSLRequest` under `absolute_deadline` on Unix (`UnsupportedFeature` -> `NotSupportedError` on non-Unix), and commit `feat(postgres): project full options into Unix and startup sessions` passes all verification commands (R2, R3).
+- [x] All 25 constructor fields in `contracts.md` are validated purely and normalized into owned endpoint, TLS/binding, keepalive, IAM, and GUC policies without duplicate DSN parsing or I/O (R2, R3).
+- [x] `session_gucs` overlays `application_name`, enforces `UTF8` `client_encoding`, rejects reserved keys and NUL bytes, and encodes directly into `StartupMessage` (R2, R3).
+- [x] Unix domain socket connections establish without `SSLRequest` under `absolute_deadline` on Unix (`UnsupportedFeature` -> `NotSupportedError` on non-Unix), and commit `feat(postgres): project full options into Unix and startup sessions` passes all verification commands (R2, R3).
 
 ## Notes & Discoveries
 

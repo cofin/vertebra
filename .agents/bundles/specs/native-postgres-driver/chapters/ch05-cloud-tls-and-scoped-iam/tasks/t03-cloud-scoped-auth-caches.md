@@ -5,7 +5,7 @@ chapter_id: ch05-cloud-tls-and-scoped-iam
 title: Create scope-correct cloud Admin and login credential caches
 description: Propagate explicit requested OAuth scopes across vertebra-core GcpTokenCache sources without breaking vertebra-storage, implement ScopedTokenProvider and ScopedLoginSnapshot, and bound cloud material lifetime by login expiry.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -131,9 +131,9 @@ Extend `src/rs/vertebra-core/src/gcp_auth.rs` so `GcpTokenCache` propagates expl
 
 ## Acceptance Criteria
 
-- [ ] `vertebra_core::gcp_auth::GcpTokenCache` sends explicit requested scopes across Metadata, ServiceAccount, ImpersonatedServiceAccount, AuthorizedUser (with response `scope` grant check), and GcloudCli (`--scopes=...` without unscoped fallback) while keeping `vertebra-storage` green untouched (R5, R9).
-- [ ] `ScopedTokenProvider` lazily constructs separate Admin and login caches under `absolute_deadline`, delegates static login options to `StaticLoginCredential`, and rejects opaque static Admin tokens when `iam_auth_options` is absent (R5, R9).
-- [ ] `CloudMaterialCache` bounds `PreparedCloudMaterial.effective_expiry_ms` by login snapshot expiry and commit `fix(postgres): request scope-correct cloud login tokens` passes all four test commands (R5, R9).
+- [x] `vertebra_core::gcp_auth::GcpTokenCache` sends explicit requested scopes across Metadata, ServiceAccount, ImpersonatedServiceAccount, AuthorizedUser (with response `scope` grant check), and GcloudCli (`--scopes=...` without unscoped fallback) while keeping `vertebra-storage` green untouched (R5, R9).
+- [x] `ScopedTokenProvider` lazily constructs separate Admin and login caches under `absolute_deadline`, delegates static login options to `StaticLoginCredential`, and rejects opaque static Admin tokens when `iam_auth_options` is absent (R5, R9).
+- [x] `CloudMaterialCache` bounds `PreparedCloudMaterial.effective_expiry_ms` by login snapshot expiry and commit `fix(postgres): request scope-correct cloud login tokens` passes all four test commands (R5, R9).
 
 ## Notes & Discoveries
 

@@ -1,11 +1,15 @@
 //! Pure in-memory PostgreSQL connection configuration validation and secret redaction.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::time::Duration;
 
-use vertebra_db::connection::TlsMode;
+use vertebra_db::connection::{TcpKeepaliveConfig, TlsMode};
+use vertebra_db::dialer::{AlloyDbClusterUri, CloudSqlInstanceUri};
 
+use crate::credentials::{
+    CLOUDSQL_LOGIN_SCOPE, extract_explicit_scopes, has_static_token_key,
+};
 use crate::errors::PostgresError;
 
 /// SCRAM channel-binding negotiation policy (`disable`, `prefer`, `require`).
@@ -238,6 +242,11 @@ impl PostgresConfig {
 
         let sslmode = parse_strict_sslmode(&raw.sslmode)?;
         let channel_binding = ChannelBindingPolicy::parse(&raw.channel_binding)?;
+        if sslmode == TlsMode::Disable && channel_binding == ChannelBindingPolicy::Require {
+            return Err(PostgresError::Config(
+                "channel_binding='require' is incompatible with sslmode='disable'".to_string(),
+            ));
+        }
 
         if let Some(ref ca) = raw.ca_pem
             && ca.is_empty()
@@ -281,6 +290,19 @@ impl PostgresConfig {
             ));
         }
 
+        validate_keepalive_bound("keepalives_idle", raw.keepalives_idle)?;
+        validate_keepalive_bound("keepalives_interval", raw.keepalives_interval)?;
+        validate_keepalive_bound("keepalives_count", raw.keepalives_count)?;
+        if !raw.keepalives
+            && (raw.keepalives_idle.is_some()
+                || raw.keepalives_interval.is_some()
+                || raw.keepalives_count.is_some())
+        {
+            return Err(PostgresError::Config(
+                "keepalive tuning parameters cannot be set when keepalives is false".to_string(),
+            ));
+        }
+
         validate_non_empty_no_nul("application_name", &raw.application_name)?;
 
         for (k, v) in &raw.session_gucs {
@@ -290,16 +312,82 @@ impl PostgresConfig {
                     "session_gucs value for `{k}` must not contain NUL bytes"
                 )));
             }
+            let lower = k.to_ascii_lowercase();
+            if matches!(lower.as_str(), "user" | "database" | "options" | "replication") {
+                return Err(PostgresError::Config(format!(
+                    "reserved startup parameter `{k}` must not be set in session_gucs"
+                )));
+            }
+            if lower == "client_encoding" && !v.trim().eq_ignore_ascii_case("UTF8") {
+                return Err(PostgresError::Config(format!(
+                    "session_gucs client_encoding must be `UTF8`, got `{v}`"
+                )));
+            }
         }
 
-        validate_ip_type("cloud_sql_ip_type", &raw.cloud_sql_ip_type)?;
-        validate_ip_type("alloydb_ip_type", &raw.alloydb_ip_type)?;
+        let cloud_sql_ip_type = normalize_ip_type("cloud_sql_ip_type", &raw.cloud_sql_ip_type)?;
+        let alloydb_ip_type = normalize_ip_type("alloydb_ip_type", &raw.alloydb_ip_type)?;
 
         if let Some(ref inst) = raw.cloud_sql_instance {
             validate_non_empty_no_nul("cloud_sql_instance", inst)?;
+            CloudSqlInstanceUri::parse(inst)
+                .map_err(|e| PostgresError::Config(e.to_string()))?;
         }
         if let Some(ref uri) = raw.alloydb_instance_uri {
             validate_non_empty_no_nul("alloydb_instance_uri", uri)?;
+            AlloyDbClusterUri::parse(uri)
+                .map_err(|e| PostgresError::Config(e.to_string()))?;
+        }
+
+        let endpoint_count = u8::from(raw.unix_socket.is_some())
+            + u8::from(raw.cloud_sql_instance.is_some())
+            + u8::from(raw.alloydb_instance_uri.is_some());
+        if endpoint_count > 1 {
+            return Err(PostgresError::Config(
+                "unix_socket, cloud_sql_instance, and alloydb_instance_uri are mutually exclusive"
+                    .to_string(),
+            ));
+        }
+
+        if raw.unix_socket.is_some() {
+            if sslmode != TlsMode::Disable {
+                return Err(PostgresError::Config(
+                    "unix_socket requires sslmode='disable'".to_string(),
+                ));
+            }
+            if raw.ca_pem.is_some()
+                || raw.client_cert_pem.is_some()
+                || raw.client_key_pem.is_some()
+                || raw.server_name.is_some()
+            {
+                return Err(PostgresError::Config(
+                    "unix_socket is incompatible with TLS certificate or server_name options"
+                        .to_string(),
+                ));
+            }
+            if channel_binding == ChannelBindingPolicy::Require {
+                return Err(PostgresError::Config(
+                    "unix_socket is incompatible with channel_binding='require'".to_string(),
+                ));
+            }
+            if raw.keepalives_idle.is_some()
+                || raw.keepalives_interval.is_some()
+                || raw.keepalives_count.is_some()
+            {
+                return Err(PostgresError::Config(
+                    "unix_socket is incompatible with TCP keepalive tuning parameters".to_string(),
+                ));
+            }
+        }
+
+        let requires_login_token = raw.enable_iam_auth || raw.alloydb_instance_uri.is_some();
+        if requires_login_token
+            && raw.iam_auth_options.is_empty()
+            && has_static_token_key(&raw.cloud_auth_options)
+        {
+            return Err(PostgresError::Config(
+                "opaque static access_token in cloud_auth_options cannot satisfy database IAM or AlloyDB login without designated iam_auth_options".to_string(),
+            ));
         }
 
         Ok(Self {
@@ -323,13 +411,48 @@ impl PostgresConfig {
             keepalives_interval: raw.keepalives_interval,
             keepalives_count: raw.keepalives_count,
             cloud_sql_instance: raw.cloud_sql_instance,
-            cloud_sql_ip_type: raw.cloud_sql_ip_type,
+            cloud_sql_ip_type,
             alloydb_instance_uri: raw.alloydb_instance_uri,
-            alloydb_ip_type: raw.alloydb_ip_type,
+            alloydb_ip_type,
             enable_iam_auth: raw.enable_iam_auth,
             cloud_auth_options: raw.cloud_auth_options,
             iam_auth_options: raw.iam_auth_options,
         })
+    }
+
+    /// Return the validated [`TcpKeepaliveConfig`] for physical TCP/TLS sockets.
+    pub fn tcp_keepalive(&self) -> TcpKeepaliveConfig {
+        TcpKeepaliveConfig {
+            enabled: self.keepalives,
+            idle: self.keepalives_idle.map(|s| Duration::from_secs(s as u64)),
+            interval: self
+                .keepalives_interval
+                .map(|s| Duration::from_secs(s as u64)),
+            retries: self.keepalives_count.map(|c| c as u32),
+        }
+    }
+
+    /// Build the deterministic startup parameter map (`application_name` overlaid by `session_gucs`, excluding `client_encoding`).
+    pub fn startup_gucs(&self) -> BTreeMap<String, String> {
+        let mut out = BTreeMap::new();
+        out.insert("application_name".to_string(), self.application_name.clone());
+        for (k, v) in &self.session_gucs {
+            if k.eq_ignore_ascii_case("client_encoding") {
+                continue;
+            }
+            if k.eq_ignore_ascii_case("application_name") {
+                out.insert("application_name".to_string(), v.clone());
+            } else {
+                out.insert(k.clone(), v.clone());
+            }
+        }
+        out
+    }
+
+    /// Return the authoritative direct-host IAM OAuth scopes (`sqlservice.login` by default or explicit `iam_auth_options["scopes"]`).
+    pub fn direct_iam_default_scopes(&self) -> Vec<String> {
+        extract_explicit_scopes(&self.iam_auth_options)
+            .unwrap_or_else(|| vec![CLOUDSQL_LOGIN_SCOPE.to_string()])
     }
 }
 
@@ -384,11 +507,129 @@ fn validate_non_empty_no_nul(field: &str, value: &str) -> Result<(), PostgresErr
     Ok(())
 }
 
-fn validate_ip_type(field: &str, value: &str) -> Result<(), PostgresError> {
-    match value {
-        "PUBLIC" | "PRIVATE" | "PSC" => Ok(()),
-        other => Err(PostgresError::Config(format!(
-            "unsupported {field} `{other}` (expected `PUBLIC`, `PRIVATE`, or `PSC`)"
+fn validate_keepalive_bound(field: &str, value: Option<i64>) -> Result<(), PostgresError> {
+    if let Some(v) = value
+        && !(1..=i64::from(i32::MAX)).contains(&v)
+    {
+        return Err(PostgresError::Config(format!(
+            "{field} must lie in 1..={}, got {v}",
+            i32::MAX
+        )));
+    }
+    Ok(())
+}
+
+fn normalize_ip_type(field: &str, value: &str) -> Result<String, PostgresError> {
+    match value.trim().to_ascii_uppercase().as_str() {
+        "PUBLIC" => Ok("PUBLIC".to_string()),
+        "PRIVATE" => Ok("PRIVATE".to_string()),
+        "PSC" => Ok("PSC".to_string()),
+        _ => Err(PostgresError::Config(format!(
+            "unsupported {field} `{value}` (expected `PUBLIC`, `PRIVATE`, or `PSC`)"
         ))),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn complete_option_validation() {
+        let mut unix_tls = RawPostgresOptions::new("localhost", "postgres", "appdb");
+        unix_tls.unix_socket = Some("/tmp/.s.PGSQL.5432".to_string());
+        unix_tls.sslmode = "prefer".to_string();
+        assert!(matches!(
+            PostgresConfig::validate(unix_tls),
+            Err(PostgresError::Config(_))
+        ));
+
+        let mut unix_ca = RawPostgresOptions::new("localhost", "postgres", "appdb");
+        unix_ca.unix_socket = Some("/tmp/.s.PGSQL.5432".to_string());
+        unix_ca.sslmode = "disable".to_string();
+        unix_ca.ca_pem = Some(b"-----BEGIN CERTIFICATE-----\n".to_vec());
+        assert!(matches!(
+            PostgresConfig::validate(unix_ca),
+            Err(PostgresError::Config(_))
+        ));
+
+        let mut unix_ka = RawPostgresOptions::new("localhost", "postgres", "appdb");
+        unix_ka.unix_socket = Some("/tmp/.s.PGSQL.5432".to_string());
+        unix_ka.sslmode = "disable".to_string();
+        unix_ka.keepalives_idle = Some(10);
+        assert!(matches!(
+            PostgresConfig::validate(unix_ka),
+            Err(PostgresError::Config(_))
+        ));
+
+        let mut unix_cb = RawPostgresOptions::new("localhost", "postgres", "appdb");
+        unix_cb.unix_socket = Some("/tmp/.s.PGSQL.5432".to_string());
+        unix_cb.sslmode = "disable".to_string();
+        unix_cb.channel_binding = "require".to_string();
+        assert!(matches!(
+            PostgresConfig::validate(unix_cb),
+            Err(PostgresError::Config(_))
+        ));
+
+        let mut both_cloud = RawPostgresOptions::new("localhost", "postgres", "appdb");
+        both_cloud.cloud_sql_instance = Some("proj:us-central1:inst".to_string());
+        both_cloud.alloydb_instance_uri =
+            Some("projects/p/locations/r/clusters/c/instances/i".to_string());
+        assert!(matches!(
+            PostgresConfig::validate(both_cloud),
+            Err(PostgresError::Config(_))
+        ));
+
+        let mut opaque_admin_iam = RawPostgresOptions::new("localhost", "postgres", "appdb");
+        opaque_admin_iam.cloud_sql_instance = Some("proj:us-central1:inst".to_string());
+        opaque_admin_iam.enable_iam_auth = true;
+        opaque_admin_iam
+            .cloud_auth_options
+            .insert("access_token".to_string(), "opaque".to_string());
+        assert!(matches!(
+            PostgresConfig::validate(opaque_admin_iam),
+            Err(PostgresError::Config(_))
+        ));
+
+        for bad_guc in [
+            ("client_encoding", "LATIN1"),
+            ("replication", "database"),
+            ("user", "other"),
+            ("database", "other"),
+            ("options", "-c work_mem=4MB"),
+        ] {
+            let mut guc_raw = RawPostgresOptions::new("localhost", "postgres", "appdb");
+            guc_raw
+                .session_gucs
+                .insert(bad_guc.0.to_string(), bad_guc.1.to_string());
+            assert!(matches!(
+                PostgresConfig::validate(guc_raw),
+                Err(PostgresError::Config(_))
+            ));
+        }
+
+        let mut valid = RawPostgresOptions::new("localhost", "postgres", "appdb");
+        valid.application_name = "vtb-base".to_string();
+        valid
+            .session_gucs
+            .insert("application_name".to_string(), "vtb-override".to_string());
+        valid
+            .session_gucs
+            .insert("app.role".to_string(), "reader one".to_string());
+        valid
+            .session_gucs
+            .insert("client_encoding".to_string(), "UTF8".to_string());
+        let cfg = PostgresConfig::validate(valid).expect("valid option overlay");
+        let startup = cfg.startup_gucs();
+        assert_eq!(
+            startup.get("application_name").map(String::as_str),
+            Some("vtb-override")
+        );
+        assert_eq!(
+            startup.get("app.role").map(String::as_str),
+            Some("reader one")
+        );
+        assert!(!startup.contains_key("client_encoding"));
+    }
+}
+

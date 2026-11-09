@@ -5,7 +5,7 @@ chapter_id: ch06-alloydb-keepalive-unix-and-direct-iam
 title: Authenticate automatic AlloyDB metadata and IAM sessions across split TLS and metadata stages
 description: Extract TransportStream::connect_alloydb_tls and finish_alloydb_metadata in vertebra-db, verify ScopedLoginSnapshot::ensure_usable immediately after AlloyDB TLS before emitting metadata bytes, and establish AlloyDB :5433 built-in and IAM sessions.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -126,9 +126,9 @@ Extract `TransportStream::connect_alloydb_tls` and module-level `finish_alloydb_
 
 ## Acceptance Criteria
 
-- [ ] `TransportStream::connect_alloydb_tls` and `finish_alloydb_metadata` split AlloyDB TLS 1.3 SAN verification from `MetadataExchangeRequest` while `TransportStream::connect` composes both under one deadline (R5, R9).
-- [ ] `dial_alloydb` verifies `ScopedLoginSnapshot::ensure_usable` immediately after TLS (dropping expired/inside-skew streams with zero metadata bytes and `PostgresError::Auth`), completes `finish_alloydb_metadata`, and returns pre-startup `DialedCloudTransport` to `session.rs` (R5, R9).
-- [ ] Built-in (`AuthType::Password`) and IAM (`AuthType::Iam`) AlloyDB `:5433` sessions pass all `alloydb_*` wire tests without `SSLRequest` or `:5432` fallback, committed as `feat(postgres): guard AlloyDB credentials after shared TLS setup` (R5, R9).
+- [x] `TransportStream::connect_alloydb_tls` and `finish_alloydb_metadata` split AlloyDB TLS 1.3 SAN verification from `MetadataExchangeRequest` while `TransportStream::connect` composes both under one deadline (R5, R9).
+- [x] `dial_alloydb` verifies `ScopedLoginSnapshot::ensure_usable` immediately after TLS (dropping expired/inside-skew streams with zero metadata bytes and `PostgresError::Auth`), completes `finish_alloydb_metadata`, and returns pre-startup `DialedCloudTransport` to `session.rs` (R5, R9).
+- [x] Built-in (`AuthType::Password`) and IAM (`AuthType::Iam`) AlloyDB `:5433` sessions pass all `alloydb_*` wire tests without `SSLRequest` or `:5432` fallback, committed as `feat(postgres): guard AlloyDB credentials after shared TLS setup` (R5, R9).
 
 ## Notes & Discoveries
 

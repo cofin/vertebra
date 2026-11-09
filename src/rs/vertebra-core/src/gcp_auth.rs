@@ -121,6 +121,8 @@ struct OAuthTokenResponse {
     access_token: String,
     #[serde(default)]
     expires_in: Option<u64>,
+    #[serde(default)]
+    scope: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -359,16 +361,24 @@ async fn fetch_token_from_gcloud_cli(
     binary: &Path,
     timeout: Duration,
     impersonate_sa: Option<&str>,
+    requested_scopes: &[String],
 ) -> Result<String, String> {
-    let subcommands: &[&[&str]] = &[
-        &["auth", "application-default", "print-access-token"],
-        &["auth", "print-access-token"],
-    ];
+    let subcommands: &[&[&str]] = if requested_scopes.is_empty() {
+        &[
+            &["auth", "application-default", "print-access-token"],
+            &["auth", "print-access-token"],
+        ]
+    } else {
+        &[&["auth", "application-default", "print-access-token"]]
+    };
     let mut last_err = String::new();
     for args in subcommands {
         let mut cmd = tokio::process::Command::new(binary);
         cmd.args(*args);
         cmd.arg("--quiet");
+        if !requested_scopes.is_empty() {
+            cmd.arg(format!("--scopes={}", requested_scopes.join(",")));
+        }
         if let Some(sa) = impersonate_sa.filter(|s| !s.trim().is_empty()) {
             cmd.arg(format!("--impersonate-service-account={sa}"));
         }
@@ -462,6 +472,7 @@ pub struct GcpTokenCache {
     generation: AtomicU64,
     client: reqwest::Client,
     metadata_client: reqwest::Client,
+    requested_scopes: Vec<String>,
 }
 
 impl std::fmt::Debug for GcpTokenCache {
@@ -506,7 +517,57 @@ impl GcpTokenCache {
             generation: AtomicU64::new(0),
             client,
             metadata_client,
+            requested_scopes: Vec::new(),
         }
+    }
+
+    pub fn with_requested_scopes(mut self, scopes: Vec<String>) -> Self {
+        self.requested_scopes = scopes;
+        self
+    }
+
+    pub fn from_scoped_options(
+        raw_opts: Option<&HashMap<String, String>>,
+        default_scopes: &[String],
+    ) -> Result<Arc<Self>, String> {
+        let empty = HashMap::new();
+        let raw = raw_opts.unwrap_or(&empty);
+        let normalized = normalize_gcp_options(raw);
+        let custom_scopes = parse_scopes_option(&normalized);
+        let effective_scopes: Vec<String> = custom_scopes.unwrap_or_else(|| {
+            default_scopes
+                .iter()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        });
+
+        let mut merged = raw.clone();
+        if !effective_scopes.is_empty() && !merged.contains_key("scopes") {
+            merged.insert("scopes".to_string(), effective_scopes.join(","));
+        }
+
+        let scope_refs: Vec<&str> = effective_scopes.iter().map(String::as_str).collect();
+        let cache = Self::from_options(&merged, &scope_refs).ok_or_else(|| {
+            "unable to discover GCP credentials (checked gcp_options, GOOGLE_APPLICATION_CREDENTIALS, and ambient ADC)".to_string()
+        })?;
+        if matches!(cache.source, GcpAuthSource::Static { .. }) && !effective_scopes.is_empty() {
+            return Err(
+                "static access token cannot satisfy explicit non-empty OAuth scopes; configure a refreshable credential source (service_account, authorized_user, metadata_server, impersonated_service_account, or gcloud_cli)".to_string(),
+            );
+        }
+        let mut inner = Arc::try_unwrap(cache).unwrap_or_else(|arc| Self {
+            source: arc.source.clone(),
+            refresh_skew_ms: arc.refresh_skew_ms,
+            snapshot: RwLock::new(None),
+            refresh_lock: tokio::sync::Mutex::new(()),
+            generation: AtomicU64::new(0),
+            client: arc.client.clone(),
+            metadata_client: arc.metadata_client.clone(),
+            requested_scopes: Vec::new(),
+        });
+        inner.requested_scopes = effective_scopes;
+        Ok(Arc::new(inner))
     }
 
     pub fn from_options(
@@ -910,12 +971,18 @@ impl GcpTokenCache {
                     quota_project_id,
                     token_uri,
                 } => {
-                    let form_body = url::form_urlencoded::Serializer::new(String::new())
-                        .append_pair("client_id", client_id.as_str())
-                        .append_pair("client_secret", client_secret.as_str())
-                        .append_pair("refresh_token", refresh_token.as_str())
-                        .append_pair("grant_type", "refresh_token")
-                        .finish();
+                    let form_body = {
+                        let mut form_ser = url::form_urlencoded::Serializer::new(String::new());
+                        form_ser
+                            .append_pair("client_id", client_id.as_str())
+                            .append_pair("client_secret", client_secret.as_str())
+                            .append_pair("refresh_token", refresh_token.as_str())
+                            .append_pair("grant_type", "refresh_token");
+                        if !self.requested_scopes.is_empty() {
+                            form_ser.append_pair("scope", &self.requested_scopes.join(" "));
+                        }
+                        form_ser.finish()
+                    };
                     let mut req = self
                         .client
                         .post(token_uri)
@@ -930,11 +997,13 @@ impl GcpTokenCache {
                         .map_err(|e| format!("OAuth2 refresh request failed: {e}"))?;
                     if !resp.status().is_success() {
                         let status = resp.status();
-                        if token_uri == DEFAULT_OAUTH_TOKEN_URI
+                        if self.requested_scopes.is_empty()
+                            && token_uri == DEFAULT_OAUTH_TOKEN_URI
                             && let Ok(cli_tok) = fetch_token_from_gcloud_cli(
                                 &default_gcloud_binary(),
                                 GCLOUD_CLI_TIMEOUT,
                                 None,
+                                &[],
                             )
                             .await
                         {
@@ -950,6 +1019,18 @@ impl GcpTokenCache {
                         .json()
                         .await
                         .map_err(|e| format!("invalid OAuth2 token JSON: {e}"))?;
+                    if !self.requested_scopes.is_empty()
+                        && let Some(ref returned_scope) = parsed.scope
+                    {
+                        let granted: Vec<&str> = returned_scope.split_whitespace().collect();
+                        for req_scope in &self.requested_scopes {
+                            if !granted.contains(&req_scope.as_str()) {
+                                return Err(format!(
+                                    "OAuth2 refresh response omitted requested scope '{req_scope}' (granted: '{returned_scope}')"
+                                ));
+                            }
+                        }
+                    }
                     let ttl_ms = parsed
                         .expires_in
                         .map(|s| s.saturating_mul(1_000))
@@ -1114,6 +1195,7 @@ impl GcpTokenCache {
                         binary,
                         *timeout,
                         impersonate_service_account.as_deref(),
+                        &self.requested_scopes,
                     )
                     .await?;
                     Ok((

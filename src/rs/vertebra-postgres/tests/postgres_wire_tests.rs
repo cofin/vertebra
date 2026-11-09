@@ -472,3 +472,96 @@ async fn startup_cancellation_and_timeout_transition_handle_to_closed() {
     assert_eq!(handle2.generation(), 1);
     server_task2.await.unwrap();
 }
+
+#[tokio::test]
+async fn startup_session_gucs_and_tcp_keepalive_and_unix_domain_socket() {
+    let (addr, _, server_task) = spawn_scripted_server(|mut stream| async move {
+        let params = read_startup_packet(&mut stream).await.unwrap();
+        assert_eq!(
+            params.get("application_name").map(String::as_str),
+            Some("custom-app-from-gucs")
+        );
+        assert_eq!(
+            params.get("search_path").map(String::as_str),
+            Some("analytics,public")
+        );
+        assert_eq!(
+            params.get("client_encoding").map(String::as_str),
+            Some("UTF8")
+        );
+        write_frames(
+            &mut stream,
+            &[
+                frame_auth_ok(),
+                frame_backend_key_data(101, 202),
+                frame_ready_for_query(b'I'),
+            ],
+        )
+        .await
+        .unwrap();
+        let (tag, _) = read_tagged_frontend_frame(&mut stream).await.unwrap();
+        assert_eq!(tag, b'X');
+    })
+    .await;
+
+    let mut raw = RawPostgresOptions::new(addr.ip().to_string(), "alice", "appdb");
+    raw.port = i64::from(addr.port());
+    raw.sslmode = "disable".to_string();
+    raw.application_name = "default-app".to_string();
+    raw.session_gucs
+        .insert("search_path".to_string(), "analytics,public".to_string());
+    raw.session_gucs.insert(
+        "application_name".to_string(),
+        "custom-app-from-gucs".to_string(),
+    );
+    raw.keepalives = true;
+    raw.keepalives_idle = Some(30);
+    raw.keepalives_interval = Some(10);
+    raw.keepalives_count = Some(3);
+
+    let mut handle = SessionHandle::new(raw).unwrap();
+    let conn = handle.connect().await.expect("connect with gucs + keepalive");
+    assert_eq!(conn.generation(), 1);
+    handle.close().await.unwrap();
+    server_task.await.unwrap();
+
+    #[cfg(unix)]
+    {
+        let sock_path = std::env::temp_dir().join(format!(
+            "vtb-pg-unix-{}-{}.sock",
+            std::process::id(),
+            addr.port()
+        ));
+        let _ = std::fs::remove_file(&sock_path);
+        let listener = tokio::net::UnixListener::bind(&sock_path).unwrap();
+        let unix_task = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let params = read_startup_packet(&mut stream).await.unwrap();
+            assert_eq!(params.get("user").map(String::as_str), Some("unix-user"));
+            write_frames(
+                &mut stream,
+                &[
+                    frame_auth_ok(),
+                    frame_backend_key_data(303, 404),
+                    frame_ready_for_query(b'I'),
+                ],
+            )
+            .await
+            .unwrap();
+            let (tag, _) = read_tagged_frontend_frame(&mut stream).await.unwrap();
+            assert_eq!(tag, b'X');
+        });
+
+        let mut raw_unix = RawPostgresOptions::new("localhost", "unix-user", "appdb");
+        raw_unix.unix_socket = Some(sock_path.to_string_lossy().into_owned());
+        raw_unix.sslmode = "disable".to_string();
+        raw_unix.keepalives = false;
+        let mut h_unix = SessionHandle::new(raw_unix).unwrap();
+        let conn_unix = h_unix.connect().await.expect("unix socket connect");
+        assert!(!conn_unix.is_tls());
+        h_unix.close().await.unwrap();
+        unix_task.await.unwrap();
+        let _ = std::fs::remove_file(&sock_path);
+    }
+}
+

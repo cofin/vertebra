@@ -10,11 +10,14 @@ use std::sync::{Arc, Mutex};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tokio::time::Instant;
-use vertebra_core::gcp_auth::{GcpTokenCache, current_unix_ms};
-use vertebra_db::connection::EndpointTarget;
+use vertebra_core::gcp_auth::current_unix_ms;
+use vertebra_db::connection::{CloudPeerIdentity, EndpointTarget};
 use vertebra_db::dialer::{AlloyDbClusterUri, AuthType, CloudSqlInstanceUri, IpType};
 
 use crate::cloud::{alloydb, cloudsql};
+use crate::credentials::{
+    ALLOYDB_LOGIN_SCOPE, CLOUDSQL_LOGIN_SCOPE, ScopedLoginSnapshot, ScopedTokenProvider,
+};
 use crate::errors::PostgresError;
 
 /// Refresh lead window (`240_000 ms` = `240s`) before `effective_expiry_ms`.
@@ -163,6 +166,7 @@ pub struct PreparedCloudMaterial {
     pub signed_cert_not_after_ms: u64,
     pub effective_expiry_ms: u64,
     pub login_token: Option<LoginTokenSnapshot>,
+    pub(crate) login_snapshot: Option<ScopedLoginSnapshot>,
 }
 
 impl fmt::Debug for PreparedCloudMaterial {
@@ -314,6 +318,11 @@ impl CloudConnector {
         self.clock.now_unix_ms()
     }
 
+    /// Borrow the underlying [`Clock`].
+    pub fn clock(&self) -> &Arc<dyn Clock> {
+        &self.clock
+    }
+
     /// Borrow the underlying [`CloudMaterialCache`].
     pub const fn cache(&self) -> &CloudMaterialCache {
         &self.cache
@@ -362,29 +371,22 @@ impl CloudConnector {
         config: &CloudConnectorConfig,
         absolute_deadline: Instant,
     ) -> Result<PreparedCloudMaterial, PostgresError> {
+        let provider = ScopedTokenProvider::new(
+            Some(config.cloud_auth_options.clone()),
+            config.iam_auth_options.clone(),
+            Arc::clone(&self.clock),
+        );
+
         match &config.target {
             CloudResourceTarget::CloudSql(uri) => {
-                let admin_snap = resolve_token_snapshot(
-                    &config.cloud_auth_options,
-                    &["https://www.googleapis.com/auth/cloud-platform"],
-                    self.clock.now_unix_ms(),
-                    absolute_deadline,
-                )
-                .await?;
+                let admin_snap = provider.resolve_admin_token(absolute_deadline).await?;
                 let login_snap = if config.auth_type == AuthType::Iam {
-                    let login_opts = config
-                        .iam_auth_options
-                        .as_ref()
-                        .unwrap_or(&config.cloud_auth_options);
-                    Some(
-                        resolve_token_snapshot(
-                            login_opts,
-                            &["https://www.googleapis.com/auth/sqlservice.login"],
-                            self.clock.now_unix_ms(),
-                            absolute_deadline,
-                        )
-                        .await?,
-                    )
+                    let required = vec![CLOUDSQL_LOGIN_SCOPE.to_string()];
+                    let snap = provider
+                        .resolve_login_snapshot(&required, absolute_deadline)
+                        .await?;
+                    snap.ensure_usable(self.clock.now_unix_ms())?;
+                    Some(snap)
                 } else {
                     None
                 };
@@ -394,14 +396,17 @@ impl CloudConnector {
                     uri,
                     config.ip_type,
                     &config.admin_endpoint,
-                    &admin_snap.token,
-                    login_snap.as_ref().map(|s| s.token.as_str()),
+                    &admin_snap.access_token,
+                    login_snap.as_ref().map(ScopedLoginSnapshot::access_token),
                     absolute_deadline,
                 )
                 .await?;
 
                 let signed_not_after_ms = discovery.client_identity.signed_not_after_ms;
-                let effective_expiry_ms = match login_snap.as_ref().and_then(|s| s.expiry_ms) {
+                let effective_expiry_ms = match login_snap
+                    .as_ref()
+                    .map(|s| s.snapshot.expires_at_unix_ms)
+                {
                     Some(tok_exp) => signed_not_after_ms.min(tok_exp),
                     None => signed_not_after_ms,
                 };
@@ -419,7 +424,17 @@ impl CloudConnector {
                     server_ca_pem: discovery.server_ca_pem.clone(),
                     client_cert_pem: discovery.client_identity.cert_chain_pem.clone(),
                     client_key_pem: discovery.client_identity.private_key_pem.clone(),
+                    peer_identity: CloudPeerIdentity::CloudSql {
+                        server_name: discovery.peer_dns_name.clone(),
+                        expected_cn: discovery.expected_cn.clone(),
+                    },
                 };
+
+                let login_token = login_snap.as_ref().map(|s| LoginTokenSnapshot {
+                    token: s.snapshot.access_token.clone(),
+                    expiry_ms: Some(s.snapshot.expires_at_unix_ms),
+                    generation: s.snapshot.generation,
+                });
 
                 Ok(PreparedCloudMaterial {
                     host: discovery.host,
@@ -433,47 +448,31 @@ impl CloudConnector {
                     client_key_pem: discovery.client_identity.private_key_pem,
                     signed_cert_not_after_ms: signed_not_after_ms,
                     effective_expiry_ms,
-                    login_token: login_snap,
+                    login_token,
+                    login_snapshot: login_snap,
                 })
             }
             CloudResourceTarget::AlloyDb(uri) => {
-                let admin_snap = resolve_token_snapshot(
-                    &config.cloud_auth_options,
-                    &["https://www.googleapis.com/auth/cloud-platform"],
-                    self.clock.now_unix_ms(),
-                    absolute_deadline,
-                )
-                .await?;
-                let login_opts = config
-                    .iam_auth_options
-                    .as_ref()
-                    .unwrap_or(&config.cloud_auth_options);
-                let login_snap = resolve_token_snapshot(
-                    login_opts,
-                    &[
-                        "https://www.googleapis.com/auth/alloydb.login",
-                        "https://www.googleapis.com/auth/cloud-platform",
-                    ],
-                    self.clock.now_unix_ms(),
-                    absolute_deadline,
-                )
-                .await?;
+                let admin_snap = provider.resolve_admin_token(absolute_deadline).await?;
+                let required = vec![ALLOYDB_LOGIN_SCOPE.to_string()];
+                let login_snap = provider
+                    .resolve_login_snapshot(&required, absolute_deadline)
+                    .await?;
+                login_snap.ensure_usable(self.clock.now_unix_ms())?;
 
                 let discovery = alloydb::fetch_alloydb_discovery(
                     self,
                     uri,
                     config.ip_type,
                     &config.admin_endpoint,
-                    &admin_snap.token,
+                    &admin_snap.access_token,
                     absolute_deadline,
                 )
                 .await?;
 
                 let signed_not_after_ms = discovery.client_identity.signed_not_after_ms;
-                let effective_expiry_ms = match login_snap.expiry_ms {
-                    Some(tok_exp) => signed_not_after_ms.min(tok_exp),
-                    None => signed_not_after_ms,
-                };
+                let effective_expiry_ms =
+                    signed_not_after_ms.min(login_snap.snapshot.expires_at_unix_ms);
                 let now_after = self.clock.now_unix_ms();
                 if effective_expiry_ms <= now_after {
                     return Err(PostgresError::Transport(
@@ -482,6 +481,10 @@ impl CloudConnector {
                 }
 
                 let sock_addr = parse_or_placeholder_socket_addr(&discovery.host, discovery.port);
+                let expected_san = discovery
+                    .peer_dns_name
+                    .clone()
+                    .unwrap_or_else(|| discovery.host.clone());
                 let endpoint_target = EndpointTarget::AlloyDb {
                     cluster: uri.clone(),
                     addr: sock_addr,
@@ -489,8 +492,15 @@ impl CloudConnector {
                     client_cert_pem: discovery.client_identity.cert_chain_pem.clone(),
                     client_key_pem: discovery.client_identity.private_key_pem.clone(),
                     user_agent: format!("vertebra-postgres/{}", env!("CARGO_PKG_VERSION")),
-                    oauth2_token: login_snap.token.clone(),
+                    oauth2_token: login_snap.snapshot.access_token.clone(),
                     auth_type: config.auth_type,
+                    peer_identity: CloudPeerIdentity::AlloyDb { expected_san },
+                };
+
+                let login_token = LoginTokenSnapshot {
+                    token: login_snap.snapshot.access_token.clone(),
+                    expiry_ms: Some(login_snap.snapshot.expires_at_unix_ms),
+                    generation: login_snap.snapshot.generation,
                 };
 
                 Ok(PreparedCloudMaterial {
@@ -505,7 +515,8 @@ impl CloudConnector {
                     client_key_pem: discovery.client_identity.private_key_pem,
                     signed_cert_not_after_ms: signed_not_after_ms,
                     effective_expiry_ms,
-                    login_token: Some(login_snap),
+                    login_token: Some(login_token),
+                    login_snapshot: Some(login_snap),
                 })
             }
         }
@@ -668,59 +679,6 @@ pub fn encode_uri_segment(segment: &str) -> Result<String, PostgresError> {
         }
     }
     Ok(out)
-}
-
-async fn resolve_token_snapshot(
-    opts: &HashMap<String, String>,
-    default_scopes: &[&str],
-    now_ms: u64,
-    absolute_deadline: Instant,
-) -> Result<LoginTokenSnapshot, PostgresError> {
-    if let Some(tok) = opts
-        .get("access_token")
-        .or_else(|| opts.get("bearer_token"))
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-    {
-        let expiry_ms = opts
-            .get("expires_at_ms")
-            .or_else(|| opts.get("token_expiry_ms"))
-            .and_then(|v| v.trim().parse::<u64>().ok())
-            .or_else(|| {
-                opts.get("expires_in_secs")
-                    .and_then(|v| v.trim().parse::<u64>().ok())
-                    .map(|secs| now_ms.saturating_add(secs.saturating_mul(1_000)))
-            });
-        if let Some(exp) = expiry_ms
-            && exp <= now_ms
-        {
-            return Err(PostgresError::Config(
-                "static cloud OAuth2 token is already expired".to_string(),
-            ));
-        }
-        return Ok(LoginTokenSnapshot {
-            token: tok.to_string(),
-            expiry_ms,
-            generation: 1,
-        });
-    }
-
-    let cache = GcpTokenCache::from_options(opts, default_scopes).ok_or_else(|| {
-        PostgresError::Config(
-            "failed to initialize GCP credential source for cloud PostgreSQL connection"
-                .to_string(),
-        )
-    })?;
-    let snap = tokio::time::timeout_at(absolute_deadline, cache.get_or_refresh_with_force(false))
-        .await
-        .map_err(|_| PostgresError::Transport("GCP OAuth2 token acquisition timed out".to_string()))?
-        .map_err(PostgresError::Transport)?;
-
-    Ok(LoginTokenSnapshot {
-        token: snap.access_token.clone(),
-        expiry_ms: Some(snap.expires_at_unix_ms),
-        generation: snap.generation,
-    })
 }
 
 fn compute_credential_fingerprint(

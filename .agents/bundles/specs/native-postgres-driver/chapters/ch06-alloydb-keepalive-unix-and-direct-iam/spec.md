@@ -5,12 +5,12 @@ chapter_id: ch06-alloydb-keepalive-unix-and-direct-iam
 title: "Chapter 06: AlloyDB Split Metadata Sessions, TCP Keepalive, Unix Startup, and Direct-Host IAM"
 description: Split AlloyDB TLS 1.3 and MetadataExchangeRequest stages to guard scoped login expiry before metadata emission, configure physical socket2 TCP keepalive parameters, project complete connection options and Unix domain socket startup, and refresh direct-host IAM tokens without altering transport policy.
 status: stable
-state: planned
+state: completed
 planning_status: complete
 depends_on_chapters:
   - ch05-cloud-tls-and-scoped-iam
 replan_trigger: null
-current_task: "native-postgres-driver:ch06:t01"
+current_task: null
 plan_revision: 5
 plan_commit: fd571e3a
 state_revision: 0
@@ -127,10 +127,10 @@ Progress: `[0/0 files documented in ch06]` (public docs and OKF data-domain chap
 
 ## 5. Implementation Plan
 
-- [ ] native-postgres-driver:ch06:t01 — Authenticate automatic AlloyDB metadata and IAM sessions across split TLS and metadata stages (tasks/t01-alloydb-metadata-and-iam.md)
-- [ ] native-postgres-driver:ch06:t02 — Apply validated TCP keepalive controls to physical sessions (tasks/t02-tcp-keepalive-controls.md)
-- [ ] native-postgres-driver:ch06:t03 — Project complete connection options and establish Unix domain socket startup (tasks/t03-unix-socket-and-options-projection.md)
-- [ ] native-postgres-driver:ch06:t04 — Refresh direct-host IAM passwords without changing transport policy (tasks/t04-direct-host-iam-refresh.md)
+- [x] native-postgres-driver:ch06:t01 — Authenticate automatic AlloyDB metadata and IAM sessions across split TLS and metadata stages (tasks/t01-alloydb-metadata-and-iam.md)
+- [x] native-postgres-driver:ch06:t02 — Apply validated TCP keepalive controls to physical sessions (tasks/t02-tcp-keepalive-controls.md)
+- [x] native-postgres-driver:ch06:t03 — Project complete connection options and establish Unix domain socket startup (tasks/t03-unix-socket-and-options-projection.md)
+- [x] native-postgres-driver:ch06:t04 — Refresh direct-host IAM passwords without changing transport policy (tasks/t04-direct-host-iam-refresh.md)
 
 **Chapter Recovery Checkpoint:** `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-db --lib && cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres && cargo test --manifest-path src/rs/Cargo.toml -p vertebra-core --test it explicit_login_scopes` exits `0`.
 

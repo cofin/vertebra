@@ -5,7 +5,7 @@ chapter_id: ch06-alloydb-keepalive-unix-and-direct-iam
 title: Refresh direct-host IAM passwords without changing transport policy
 description: Resolve fresh scoped login tokens via ScopedTokenProvider for direct TCP and Unix sessions when enable_iam_auth is true without cloud URIs, superseding config.password while preserving direct TLS/Unix transport policy.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: regression_tdd
 depends_on:
@@ -115,9 +115,9 @@ Enable direct-host IAM password authentication (`enable_iam_auth = true` with `c
 
 ## Acceptance Criteria
 
-- [ ] Direct-host `enable_iam_auth = true` resolves fresh `sqlservice.login` (or authoritative explicit `iam_auth_options["scopes"]`) tokens lazily during `connect` under `absolute_deadline` and supersedes `config.password` without mutating `PostgresConfig` (R5).
-- [ ] Direct TCP `SSLRequest`/`sslmode` and Unix plaintext transport policies remain unchanged with zero Cloud Admin or certificate API calls (R5).
-- [ ] Grant/expiry failures abort before database dial (`PostgresError::Auth`), server `28xxx` failures close terminally without same-stream retry or secret leakage (`DatabaseError`), and commit `feat(postgres): preserve direct-host IAM token authentication` passes all tests (R5).
+- [x] Direct-host `enable_iam_auth = true` resolves fresh `sqlservice.login` (or authoritative explicit `iam_auth_options["scopes"]`) tokens lazily during `connect` under `absolute_deadline` and supersedes `config.password` without mutating `PostgresConfig` (R5).
+- [x] Direct TCP `SSLRequest`/`sslmode` and Unix plaintext transport policies remain unchanged with zero Cloud Admin or certificate API calls (R5).
+- [x] Grant/expiry failures abort before database dial (`PostgresError::Auth`), server `28xxx` failures close terminally without same-stream retry or secret leakage (`DatabaseError`), and commit `feat(postgres): preserve direct-host IAM token authentication` passes all tests (R5).
 
 ## Notes & Discoveries
 

@@ -22,21 +22,13 @@ pub fn encode_startup_frame(
     config: &PostgresConfig,
     out: &mut BytesMut,
 ) -> Result<(), PostgresError> {
-    let mut guc_keys: Vec<(&String, &String)> = config.session_gucs.iter().collect();
-    guc_keys.sort_by_key(|(a, _)| *a);
-
-    let mut params: Vec<(&str, &str)> = Vec::with_capacity(4 + guc_keys.len());
+    let gucs = config.startup_gucs();
+    let mut params: Vec<(&str, &str)> = Vec::with_capacity(3 + gucs.len());
     params.push(("user", config.user.as_str()));
     params.push(("database", config.database.as_str()));
     params.push(("client_encoding", "UTF8"));
-    params.push(("application_name", config.application_name.as_str()));
-    for (k, v) in guc_keys {
-        if !matches!(
-            k.as_str(),
-            "user" | "database" | "client_encoding" | "application_name"
-        ) {
-            params.push((k.as_str(), v.as_str()));
-        }
+    for (k, v) in &gucs {
+        params.push((k.as_str(), v.as_str()));
     }
     frontend::startup_message(params, out)
         .map_err(|e| PostgresError::Protocol(format!("failed to encode StartupMessage: {e}")))

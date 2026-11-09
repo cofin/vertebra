@@ -5,7 +5,7 @@ chapter_id: ch05-cloud-tls-and-scoped-iam
 title: Validate designated static login scope, actual lifetime, and core auth error mapping
 description: Implement StaticLoginCredential strict scope and unsigned decimal expiry validation, preserve actual supplied expiry in GcpAuthSource::Static, and add PostgresError::Auth with PyOnceLock mapping to vertebra._vertebra exceptions.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: regression_tdd
 depends_on:
@@ -125,9 +125,9 @@ Implement `StaticLoginCredential` in `src/rs/vertebra-postgres/src/credentials.r
 
 ## Acceptance Criteria
 
-- [ ] Designated static login credentials require matching `access_token`/`bearer_token`, canonical unsigned decimal `expires_at_unix_ms`, and explicit `scopes` covering every required login scope (R5, R9).
-- [ ] `ensure_usable(now_ms)` rejects expired, inside-skew, and exact-boundary timestamps via `PostgresError::Auth`, and `into_token_cache` preserves `Some(supplied_expiry)` without fabricating lifetime (R5, R9).
-- [ ] `errors.rs::postgres_error_to_py` resolves `vertebra._vertebra` exception classes via `PyOnceLock` (`PostgresError::Auth` -> `GoogleCloudAuthError`, `SQLSTATE` `28xxx` -> `DatabaseError`), and commit `fix(postgres): validate static login provenance and expiry` passes tests and Clippy (R5, R9).
+- [x] Designated static login credentials require matching `access_token`/`bearer_token`, canonical unsigned decimal `expires_at_unix_ms`, and explicit `scopes` covering every required login scope (R5, R9).
+- [x] `ensure_usable(now_ms)` rejects expired, inside-skew, and exact-boundary timestamps via `PostgresError::Auth`, and `into_token_cache` preserves `Some(supplied_expiry)` without fabricating lifetime (R5, R9).
+- [x] `errors.rs::postgres_error_to_py` resolves `vertebra._vertebra` exception classes via `PyOnceLock` (`PostgresError::Auth` -> `GoogleCloudAuthError`, `SQLSTATE` `28xxx` -> `DatabaseError`), and commit `fix(postgres): validate static login provenance and expiry` passes tests and Clippy (R5, R9).
 
 ## Notes & Discoveries
 

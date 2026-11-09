@@ -6,6 +6,7 @@ pub mod auth;
 pub mod binding;
 pub mod cloud;
 pub mod config;
+pub mod credentials;
 pub mod errors;
 pub mod protocol;
 pub mod session;

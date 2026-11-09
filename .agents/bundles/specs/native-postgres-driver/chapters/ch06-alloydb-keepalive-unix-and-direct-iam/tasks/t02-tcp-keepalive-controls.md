@@ -5,7 +5,7 @@ chapter_id: ch06-alloydb-keepalive-unix-and-direct-iam
 title: Apply validated TCP keepalive controls to physical sessions
 description: Validate keepalives, keepalives_idle, keepalives_interval, and keepalives_count in PostgresConfig, implement TransportStream::set_tcp_keepalive via socket2 on PlainTcp and TlsTcp sockets, and apply keepalive settings once before PostgreSQL startup.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -127,9 +127,9 @@ Implement `TcpKeepaliveConfig` and `TransportStream::set_tcp_keepalive` in `src/
 
 ## Acceptance Criteria
 
-- [ ] `PostgresConfig` validates `keepalives`, `keepalives_idle`, `keepalives_interval`, and `keepalives_count` purely against `contracts.md` bounds without accepting Python socket objects (R2, R3).
-- [ ] `TransportStream::set_tcp_keepalive` applies `socket2` keepalive parameters to `PlainTcp` and `TlsTcp` sockets and rejects disabled-with-tuning, zero/out-of-range values, or `Unix` streams via `TransportError::InvalidConfig` (R2, R3).
-- [ ] `session.rs` applies keepalive once before `StartupMessage` across direct TCP, direct TLS, Cloud SQL, and AlloyDB streams under `absolute_deadline` without touching `cloud/mod.rs`, and commit `feat(postgres): configure physical TCP keepalive` passes all `tcp_keepalive_*` tests (R2, R3).
+- [x] `PostgresConfig` validates `keepalives`, `keepalives_idle`, `keepalives_interval`, and `keepalives_count` purely against `contracts.md` bounds without accepting Python socket objects (R2, R3).
+- [x] `TransportStream::set_tcp_keepalive` applies `socket2` keepalive parameters to `PlainTcp` and `TlsTcp` sockets and rejects disabled-with-tuning, zero/out-of-range values, or `Unix` streams via `TransportError::InvalidConfig` (R2, R3).
+- [x] `session.rs` applies keepalive once before `StartupMessage` across direct TCP, direct TLS, Cloud SQL, and AlloyDB streams under `absolute_deadline` without touching `cloud/mod.rs`, and commit `feat(postgres): configure physical TCP keepalive` passes all `tcp_keepalive_*` tests (R2, R3).
 
 ## Notes & Discoveries
 
