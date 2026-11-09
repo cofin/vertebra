@@ -4,7 +4,7 @@ flow_id: driver-fail-loud
 title: Fail-Loud Database Drivers
 description: Replace the Oracle, MSSQL, and DuckDB SQLite stand-ins, the SQLAlchemy SQLite parse fallback, the in-memory queue executors and clients, and memory:// engine fakes with MissingDependencyError or configuration errors, delete dead vertebra-db pools and superseded codecs, correct install hints behind an extras gate, make conformance outcomes explicit when a native module is absent, and align user docs, agent instructions, and OKF knowledge with the result.
 status: stable
-state: planned
+state: in_progress
 has_chapters: true
 chapters:
   - ch01-oracle-mssql-fail-loud
@@ -20,17 +20,17 @@ chapters:
   - ch11-docs-and-okf
   - ch12-queue-docs-and-knowledge
   - ch13-agent-knowledge-and-embeddings-docs
-current_chapter: ch01-oracle-mssql-fail-loud
-current_task: "driver-fail-loud:ch01:t01"
+current_chapter: ch02-duckdb-sqlalchemy-queue-fail-loud
+current_task: "driver-fail-loud:ch02:t01"
 parent_prd: native-data-platform
 research:
   - research/driver-restructure_20261107.md
   - research/change-surface_20261107.md
 plan_revision: 2
 plan_commit: fd571e3a
-state_revision: 0
+state_revision: 1
 created_at: "2026-11-07T00:00:00Z"
-updated_at: "2026-11-08T00:00:00Z"
+updated_at: "2026-11-09T02:53:00Z"
 verified:
   - by: agent:code-reviewer
     at: "2026-11-08T00:00:00Z"
@@ -359,7 +359,7 @@ unexport PY_GIL_DISABLED PY_TEST_GROUPS
 
 ## 5. Implementation Plan
 
-- [ ] ch01-oracle-mssql-fail-loud — Oracle and MSSQL drivers raise `MissingDependencyError` with no SQLite path; `AsyncMSSQLDriver` forwards `dialer` ([spec](chapters/ch01-oracle-mssql-fail-loud/spec.md))
+- [x] [d7a629b1] ch01-oracle-mssql-fail-loud — Oracle and MSSQL drivers raise `MissingDependencyError` with no SQLite path; `AsyncMSSQLDriver` forwards `dialer` ([spec](chapters/ch01-oracle-mssql-fail-loud/spec.md))
 - [ ] ch02-duckdb-sqlalchemy-queue-fail-loud — GIL-only `duckdb` group, DuckDB requires `duckdb`, SQLAlchemy raises `InterfaceError`, Oracle queue requires an executor ([spec](chapters/ch02-duckdb-sqlalchemy-queue-fail-loud/spec.md))
 - [ ] ch03-remove-memory-fakes — PostgreSQL and MySQL drivers reject `memory://`; Redis and Valkey consumer tests move onto the `resp3_server` loopback fixture ([spec](chapters/ch03-remove-memory-fakes/spec.md))
 - [ ] ch04-redis-valkey-memory-removal — `RedisConfig` drops the `memory` scheme; Redis and Valkey drivers and store factories reject `memory://` ([spec](chapters/ch04-redis-valkey-memory-removal/spec.md))

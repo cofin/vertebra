@@ -5,7 +5,7 @@ chapter_id: ch01-oracle-mssql-fail-loud
 title: Guard MSSQL drivers on vertebra._mssql, delete the SQLite stand-in, and forward the sync dialer
 description: SyncMSSQLDriver and AsyncMSSQLDriver resolve vertebra._mssql in __init__ and every public method, raise MissingDependencyError when it is absent, carry no sqlite3 connection, normalize_for_sqlite helper, or stand-in inspection state, and AsyncMSSQLDriver forwards a SyncCloudSQLDialer to its sync driver.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -28,18 +28,18 @@ tests:
 estimated_loc: 220
 plan_revision: 2
 plan_commit: fd571e3a
-state_revision: 0
+state_revision: 1
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-09T02:53:00Z"
+last_verified_commit: d7a629b1
+verification_evidence: "pytest src/py/tests/unit/db/test_enterprise_olap_drivers.py src/py/tests/unit/db/test_native_db_drivers.py -q (348 passed)"
 created_at: "2026-11-07T00:00:00Z"
-updated_at: "2026-11-07T00:00:00Z"
-commit: null
+updated_at: "2026-11-09T02:53:00Z"
+commit: d7a629b1
 sources:
   - id: mssql-driver
     resource: src/py/vertebra/db/adapters/mssql/driver.py::SyncMSSQLDriver
@@ -214,13 +214,13 @@ Seam category: external boundary (native module) simulated through `sys.modules`
 
 ## Acceptance Criteria
 
-- [ ] `SyncMSSQLDriver()` and `AsyncMSSQLDriver()` raise `MissingDependencyError` naming `vertebra-core[mssql]` when `vertebra._mssql` is absent (R1).
-- [ ] Every public method defined on `SyncMSSQLDriver` calls `_require_mssql_native()` first (R1).
-- [ ] `mssql/driver.py` imports no `sqlite3` or `re`; `MSSQLCore.normalize_for_sqlite`, `last_tds_batch`, and `last_rewritten_sql` are deleted; `MSSQLCore.encode_tds_sql_batch` and the binding remain (R1).
-- [ ] `AsyncMSSQLDriver` forwards its `SyncCloudSQLDialer` to `SyncMSSQLDriver`, and `MSSQLConfig.build_async_driver` supplies the sync dialer (R2).
-- [ ] Registry, SQLSpec, SQLAlchemy DB-API, and conformance `provide_driver` paths surface `MissingDependencyError` for MSSQL (R1).
-- [ ] Driver module and class docstrings state the `vertebra._mssql` / `vertebra-core[mssql]` requirement (ch01 doc plan).
-- [ ] Zero inline `#` comments and zero new test files.
+- [x] `SyncMSSQLDriver()` and `AsyncMSSQLDriver()` raise `MissingDependencyError` naming `vertebra-core[mssql]` when `vertebra._mssql` is absent (R1).
+- [x] Every public method defined on `SyncMSSQLDriver` calls `_require_mssql_native()` first (R1).
+- [x] `mssql/driver.py` imports no `sqlite3` or `re`; `MSSQLCore.normalize_for_sqlite`, `last_tds_batch`, and `last_rewritten_sql` are deleted; `MSSQLCore.encode_tds_sql_batch` and the binding remain (R1).
+- [x] `AsyncMSSQLDriver` forwards its `SyncCloudSQLDialer` to `SyncMSSQLDriver`, and `MSSQLConfig.build_async_driver` supplies the sync dialer (R2).
+- [x] Registry, SQLSpec, SQLAlchemy DB-API, and conformance `provide_driver` paths surface `MissingDependencyError` for MSSQL (R1).
+- [x] Driver module and class docstrings state the `vertebra._mssql` / `vertebra-core[mssql]` requirement (ch01 doc plan).
+- [x] Zero inline `#` comments and zero new test files.
 
 ## Notes & Discoveries
 

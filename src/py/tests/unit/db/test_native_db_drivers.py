@@ -18,6 +18,7 @@ import uuid
 from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
 from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
+from types import ModuleType
 from typing import Any, Self, cast
 
 import pytest
@@ -59,7 +60,7 @@ from vertebra.db.adapters.datafusion import DataFusionConfig, DataFusionEngine
 from vertebra.db.adapters.duckdb import AsyncDuckDBDriver, DuckDBConfig, SyncDuckDBDriver
 from vertebra.db.adapters.mssql import AsyncMSSQLDriver, MSSQLConfig, SyncMSSQLDriver
 from vertebra.db.adapters.mysql import AsyncMySQLDriver, MySQLConfig, SyncMySQLDriver
-from vertebra.db.adapters.oracle import AsyncOracleDriver, OracleConfig, SyncOracleDriver
+from vertebra.db.adapters.oracle import OracleConfig
 from vertebra.db.adapters.postgres import AsyncPostgreSQLDriver, PostgreSQLConfig, SyncPostgreSQLDriver
 from vertebra.db.adapters.postgres.notify import PostgresNotificationSource
 from vertebra.db.adapters.redis import RedisConfig, SyncRedisDriver
@@ -1013,8 +1014,6 @@ def test_cargo_manifests_exclude_unconditional_gcp_and_tonic_dependencies() -> N
 _SQL_CONTRACT_ENGINES: tuple[str, ...] = (
     "sqlite",
     "duckdb",
-    "oracle",
-    "mssql",
     "postgres",
     "mysql",
     "bigquery",
@@ -1460,42 +1459,6 @@ def _make_contract_driver_pair(engine: str) -> tuple[Any, Any, str, Any, str, An
             "SELECT id, name FROM contract_items WHERE id = ?",
             lambda row_id: [row_id],
         )
-    if engine == "oracle":
-        sync_ora = SyncOracleDriver(OracleConfig(dsn=":memory:"))
-        async_ora = AsyncOracleDriver(OracleConfig(dsn=":memory:"))
-        sync_ora.execute(ddl)
-        sync_ora.execute(
-            "INSERT INTO contract_items (id, name, note) VALUES (:id, :name, :note)",
-            {"id": 1, "name": "seed", "note": None},
-        )
-        async_ora._sync.execute(ddl)
-        async_ora._sync.execute(
-            "INSERT INTO contract_items (id, name, note) VALUES (:id, :name, :note)",
-            {"id": 1, "name": "seed", "note": None},
-        )
-        return (
-            sync_ora,
-            async_ora,
-            "INSERT INTO contract_items (id, name, note) VALUES (:id, :name, :note)",
-            lambda row_id, name: {"id": row_id, "name": name, "note": None},
-            "SELECT id, name FROM contract_items WHERE id = :id",
-            lambda row_id: {"id": row_id},
-        )
-    if engine == "mssql":
-        sync_ms = SyncMSSQLDriver(MSSQLConfig(dsn=":memory:"))
-        async_ms = AsyncMSSQLDriver(MSSQLConfig(dsn=":memory:"))
-        sync_ms.execute(ddl)
-        sync_ms.execute("INSERT INTO contract_items (id, name, note) VALUES (?, ?, ?)", (1, "seed", None))
-        async_ms._sync.execute(ddl)
-        async_ms._sync.execute("INSERT INTO contract_items (id, name, note) VALUES (?, ?, ?)", (1, "seed", None))
-        return (
-            sync_ms,
-            async_ms,
-            "INSERT INTO contract_items (id, name, note) VALUES (?, ?, ?)",
-            lambda row_id, name: (row_id, name, None),
-            "SELECT id, name FROM contract_items WHERE id = ?",
-            lambda row_id: (row_id,),
-        )
     if engine == "postgres":
         sync_conn = sqlite3.connect(":memory:", check_same_thread=False)
         sync_conn.execute(ddl)
@@ -1591,8 +1554,8 @@ def _make_contract_driver_pair(engine: str) -> tuple[Any, Any, str, Any, str, An
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("engine", _SQL_CONTRACT_ENGINES)
-async def test_unified_driver_contract_across_all_eight_engines(engine: str) -> None:
-    """Verify R6 unified signatures, return types, NotFoundError, Arrow, transactions, and alias removal."""
+async def test_unified_driver_contract_across_sql_engines(engine: str) -> None:
+    """Verify unified signatures, return types, NotFoundError, Arrow, transactions, and alias removal."""
     for alias in _LEGACY_DRIVER_ALIASES:
         assert not hasattr(SyncDatabaseDriver, alias)
         assert not hasattr(AsyncDatabaseDriver, alias)
@@ -2475,8 +2438,10 @@ async def test_pool_key_memory_isolation_and_provide_driver_resolution(
                 await async_drv.close()
 
 
-def test_registry_get_dialer_sync_async_caching_mssql_wiring_and_provide_driver_type_error() -> None:
-    """Verify get_dialer caches sync/async dialers separately, wires PG/MySQL/MSSQL, and provide_driver rejects dialers."""
+def test_registry_get_dialer_sync_async_caching_mssql_wiring_and_provide_driver_type_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify get_dialer caching, PG/MySQL/MSSQL dialer wiring with MSSQL async drivers using the sync dialer, and provide_driver dialer rejection."""
     reg = DatabaseRegistry()
     csql_cfg = CloudSQLConfig(instance_connection_name="proj:us-central1:inst")
     alloy_cfg = AlloyDBConfig(instance_uri="/projects/p/locations/us-central1/clusters/c/instances/i")
@@ -2520,15 +2485,22 @@ def test_registry_get_dialer_sync_async_caching_mssql_wiring_and_provide_driver_
     pg_async = cast("AsyncPostgreSQLDriver", reg.get_shared_driver(pg_cfg))
     my_sync = cast("SyncMySQLDriver", reg.get_shared_sync_driver(my_cfg))
     my_async = cast("AsyncMySQLDriver", reg.get_shared_driver(my_cfg))
-    ms_sync = cast("SyncMSSQLDriver", reg.get_shared_sync_driver(ms_cfg))
-    ms_async = cast("AsyncMSSQLDriver", reg.get_shared_driver(ms_cfg))
 
     assert pg_sync.dialer is sync_csql
     assert pg_async.dialer is async_csql
     assert my_sync.dialer is sync_csql
     assert my_async.dialer is async_csql
-    assert ms_sync.dialer is sync_csql
-    assert ms_async.dialer is async_csql
+
+    monkeypatch.setitem(sys.modules, "vertebra._mssql", ModuleType("vertebra._mssql"))
+    reset_dependency_cache("vertebra._mssql")
+    try:
+        ms_sync = cast("SyncMSSQLDriver", reg.get_shared_sync_driver(ms_cfg))
+        ms_async = cast("AsyncMSSQLDriver", reg.get_shared_driver(ms_cfg))
+        assert ms_sync.dialer is sync_csql
+        assert ms_async.dialer is sync_csql
+        assert ms_async.sync_driver.dialer is sync_csql
+    finally:
+        reset_dependency_cache("vertebra._mssql")
 
     reg.register("dialer_only", csql_cfg)
     bad_targets: tuple[Any, ...] = (

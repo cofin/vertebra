@@ -6,18 +6,18 @@ chapter_id: ch01-oracle-mssql-fail-loud
 title: "Chapter 01: Oracle and MSSQL Fail-Loud Drivers"
 description: Oracle and MSSQL drivers resolve vertebra._oracle / vertebra._mssql on construction and on every public method, raise MissingDependencyError when the module is absent, carry no SQLite execution or SQLite-only helpers, and AsyncMSSQLDriver forwards its dialer to the paired sync driver.
 status: stable
-state: planned
+state: completed
 planning_status: complete
 depends_on_chapters: []
 replan_trigger: null
-current_task: "driver-fail-loud:ch01:t01"
+current_task: null
 plan_revision: 2
 plan_commit: fd571e3a
-state_revision: 0
-last_verified_checkpoint: null
+state_revision: 1
+last_verified_checkpoint: d7a629b1
 last_reviewed_commit: null
 created_at: "2026-11-07T00:00:00Z"
-updated_at: "2026-11-07T00:00:00Z"
+updated_at: "2026-11-09T02:53:00Z"
 generated:
   by: flow/0.28.0
   at: "2026-11-07T00:00:00Z"
@@ -232,9 +232,9 @@ Deleted symbols: `SyncOracleDriver.{_conn, _in_transaction, _session_context, _p
 
 ## 3. Documentation & OKF Knowledge Plan
 
-- **Progress**: `[0/2 files documented in ch01]` — driver module docstrings only; user docs and OKF chapters are documented in ch11.
-- `[ ]` `src/py/vertebra/db/adapters/oracle/driver.py` — Module and class docstrings state that the driver requires `vertebra._oracle` from `vertebra-core[oracle]` and raises `MissingDependencyError` without it (`t01`).
-- `[ ]` `src/py/vertebra/db/adapters/mssql/driver.py` — Module and class docstrings state the `vertebra._mssql` requirement; `AsyncMSSQLDriver` documents that its dialer runs on the sync driver (`t02`).
+- **Progress**: `[2/2 files documented in ch01]` — driver module docstrings only; user docs and OKF chapters are documented in ch11.
+- `[x]` `src/py/vertebra/db/adapters/oracle/driver.py` — Module and class docstrings state that the driver requires `vertebra._oracle` from `vertebra-core[oracle]` and raises `MissingDependencyError` without it (`t01`).
+- `[x]` `src/py/vertebra/db/adapters/mssql/driver.py` — Module and class docstrings state the `vertebra._mssql` requirement; `AsyncMSSQLDriver` documents that its dialer runs on the sync driver (`t02`).
 
 ## 4. Requirement-to-Task Traceability Matrix
 
@@ -248,15 +248,15 @@ Deleted symbols: `SyncOracleDriver.{_conn, _in_transaction, _session_context, _p
 
 ## 5. Implementation Plan
 
-- [ ] driver-fail-loud:ch01:t01 — Oracle drivers resolve `vertebra._oracle` on every entry point with the SQLite stand-in and `normalize_sql` deleted (tasks/t01-oracle-native-guard.md)
-- [ ] driver-fail-loud:ch01:t02 — MSSQL drivers resolve `vertebra._mssql` on every entry point, `normalize_for_sqlite` deleted, and `AsyncMSSQLDriver` forwards its sync dialer (tasks/t02-mssql-native-guard.md)
+- [x] [d7a629b1] driver-fail-loud:ch01:t01 — Oracle drivers resolve `vertebra._oracle` on every entry point with the SQLite stand-in and `normalize_sql` deleted (tasks/t01-oracle-native-guard.md)
+- [x] [d7a629b1] driver-fail-loud:ch01:t02 — MSSQL drivers resolve `vertebra._mssql` on every entry point, `normalize_for_sqlite` deleted, and `AsyncMSSQLDriver` forwards its sync dialer (tasks/t02-mssql-native-guard.md)
 - **Chapter Recovery Checkpoint**: `uv run --no-sync pytest src/py/tests/unit/db/test_enterprise_olap_drivers.py src/py/tests/unit/db/test_native_db_drivers.py src/py/tests/unit/db/test_pg_gateway.py src/py/tests/unit/extensions/test_django_plugin.py "src/py/tests/integration/db/test_driver_conformance.py::test_engine_driver_resolution_and_provide_driver" -q && uv run --no-sync ruff check src/py/vertebra/db/adapters/oracle src/py/vertebra/db/adapters/mssql && uv run --no-sync mypy src/py/vertebra/db/adapters/oracle src/py/vertebra/db/adapters/mssql` exits `0`.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `HEAD @ 0acdf576`; `state: planned`, `depends_on_chapters: []`.
-- **Remaining Tasks in Chapter**: `t01`, `t02` (`0/2` completed); `t02` depends on `t01` because both edit the same test functions.
-- **Documentation & OKF Sync**: `[0/2 files documented in ch01]`.
+- **Verified Baseline**: `HEAD @ d7a629b1`; `state: completed`, `depends_on_chapters: []`.
+- **Remaining Tasks in Chapter**: none (`2/2` completed).
+- **Documentation & OKF Sync**: `[2/2 files documented in ch01]`.
 - **Handoffs to ch05**: after `t02`, `MSSQLCore.encode_tds_sql_batch` keeps callers in `MSSQLConfig.encode_sql_batch`, the `mssql/__init__.py` lazy export, and `test_mssql_tds_framing_and_placeholder_rewriter`; ch05 removes them with the binding. `OracleCore.build_session_context_sql` still says "or the Oracle stand-in" in its docstring.
 - **Active Invariants**: registry and SQLSpec adapter imports stay free of resolver calls; tests restore the dependency cache in `finally`; no new test files.
 

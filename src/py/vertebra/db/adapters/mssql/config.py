@@ -117,7 +117,7 @@ class MSSQLConfig(BaseDatabaseConfig, frozen=True, gc=False):
         _, async_cls = self.resolve_driver_classes()
         broker = self.broker if self.broker is not None else getattr(registry, "_broker", None)
         dialer = (
-            registry.get_dialer(dialer_cfg, sync=False)
+            registry.get_dialer(dialer_cfg, sync=True)
             if registry is not None and (dialer_cfg := self.to_cloud_dialer_config()) is not None
             else None
         )

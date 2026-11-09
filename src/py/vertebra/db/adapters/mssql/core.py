@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-import re
 import struct
-from collections.abc import Mapping, Sequence
-from typing import Any
 
 from vertebra.db.driver._common import MSSQL_DIALECT_TAG
 from vertebra.typing import VertebraError
@@ -198,29 +195,6 @@ class MSSQLCore:
                     i += 1
 
         return "".join(out), max_param
-
-    @staticmethod
-    def normalize_for_sqlite(
-        sql: str,
-        params: Sequence[Any] | Mapping[str, Any] | None,
-    ) -> tuple[str, tuple[Any, ...]]:
-        """Convert `@P1` / `?` / `$1` placeholders into positional parameters."""
-        if not params:
-            return sql, ()
-        if isinstance(params, Mapping):
-            ordered: list[Any] = []
-
-            def _replace_named(match: re.Match[str]) -> str:
-                key = match.group(1)
-                ordered.append(params.get(key, params.get(f"@{key}")))
-                return "?"
-
-            return re.sub(r"@([a-zA-Z_][a-zA-Z0-9_]*)", _replace_named, sql), tuple(ordered)
-
-        seq = tuple(params)
-        rewritten, _ = MSSQLCore.rewrite_placeholders(sql)
-        sqlite_sql = re.sub(r"@P\d+", "?", rewritten)
-        return sqlite_sql, seq
 
 
 encode_tds_packet = MSSQLCore.encode_tds_packet

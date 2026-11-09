@@ -5,7 +5,7 @@ chapter_id: ch01-oracle-mssql-fail-loud
 title: Guard Oracle drivers on vertebra._oracle and delete the SQLite stand-in
 description: SyncOracleDriver and AsyncOracleDriver resolve vertebra._oracle in __init__ and every public method, raise MissingDependencyError when it is absent, and carry no sqlite3 connection, normalize_sql helper, piggyback state, or broker lease helpers.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on: []
@@ -26,18 +26,18 @@ tests:
 estimated_loc: 230
 plan_revision: 2
 plan_commit: fd571e3a
-state_revision: 0
+state_revision: 1
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-09T02:53:00Z"
+last_verified_commit: d7a629b1
+verification_evidence: "pytest src/py/tests/unit/db/test_enterprise_olap_drivers.py src/py/tests/unit/db/test_native_db_drivers.py -q (348 passed)"
 created_at: "2026-11-07T00:00:00Z"
-updated_at: "2026-11-07T00:00:00Z"
-commit: null
+updated_at: "2026-11-09T02:53:00Z"
+commit: d7a629b1
 sources:
   - id: oracle-driver
     resource: src/py/vertebra/db/adapters/oracle/driver.py::SyncOracleDriver
@@ -222,13 +222,13 @@ Changes:
 
 ## Acceptance Criteria
 
-- [ ] `SyncOracleDriver()` and `AsyncOracleDriver()` raise `MissingDependencyError` naming `vertebra-core[oracle]` when `vertebra._oracle` is absent (R1).
-- [ ] Every public method defined on `SyncOracleDriver` and `AsyncOracleDriver.load_from_arrow` calls `_require_oracle_native()` first (R1).
-- [ ] `oracle/driver.py` imports no `sqlite3`; `OracleCore.normalize_sql` and `_NAMED_PARAM_RE` are deleted (R1).
-- [ ] Registry, SQLSpec sync/async session, SQLAlchemy DB-API, and conformance `provide_driver` paths surface `MissingDependencyError` for Oracle (R1).
-- [ ] Oracle tenant predicate tests run against injected ports and assert the exact `DBMS_SESSION.SET_CONTEXT` call (R1).
-- [ ] Driver module and class docstrings state the `vertebra._oracle` / `vertebra-core[oracle]` requirement (ch01 doc plan).
-- [ ] Zero inline `#` comments and zero new test files.
+- [x] `SyncOracleDriver()` and `AsyncOracleDriver()` raise `MissingDependencyError` naming `vertebra-core[oracle]` when `vertebra._oracle` is absent (R1).
+- [x] Every public method defined on `SyncOracleDriver` and `AsyncOracleDriver.load_from_arrow` calls `_require_oracle_native()` first (R1).
+- [x] `oracle/driver.py` imports no `sqlite3`; `OracleCore.normalize_sql` and `_NAMED_PARAM_RE` are deleted (R1).
+- [x] Registry, SQLSpec sync/async session, SQLAlchemy DB-API, and conformance `provide_driver` paths surface `MissingDependencyError` for Oracle (R1).
+- [x] Oracle tenant predicate tests run against injected ports and assert the exact `DBMS_SESSION.SET_CONTEXT` call (R1).
+- [x] Driver module and class docstrings state the `vertebra._oracle` / `vertebra-core[oracle]` requirement (ch01 doc plan).
+- [x] Zero inline `#` comments and zero new test files.
 
 ## Notes & Discoveries
 

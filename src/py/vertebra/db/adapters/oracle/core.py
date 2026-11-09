@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 import struct
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from typing import Any
 
 import msgspec
@@ -63,7 +63,6 @@ _CERT_DN_RE = re.compile(r'\(\s*SSL_SERVER_CERT_DN\s*=\s*"?([^")]+)"?\s*\)', re.
 _RETRY_COUNT_RE = re.compile(r"\(\s*RETRY_COUNT\s*=\s*(\d+)\s*\)", re.IGNORECASE)
 _RETRY_DELAY_RE = re.compile(r"\(\s*RETRY_DELAY\s*=\s*(\d+)\s*\)", re.IGNORECASE)
 _CONNECT_TIMEOUT_RE = re.compile(r"\(\s*(?:TRANSPORT_)?CONNECT_TIMEOUT\s*=\s*(\d+)\s*\)", re.IGNORECASE)
-_NAMED_PARAM_RE = re.compile(r"(?<!:):([a-zA-Z_][a-zA-Z0-9_]*)")
 
 
 _DEFAULT_TENANT_SCOPE = TenantScopeConfig()
@@ -460,28 +459,6 @@ class OracleCore:
         if target_type is Any:
             return decoded
         return msgspec.convert(decoded, type=target_type)
-
-    @staticmethod
-    def normalize_sql(
-        sql: str,
-        params: Sequence[Any] | Mapping[str, Any] | None,
-    ) -> tuple[str, tuple[Any, ...]]:
-        """Normalize `:1` or `:name` placeholders into positional parameters."""
-        if not params:
-            return sql, ()
-        if isinstance(params, Mapping):
-            ordered: list[Any] = []
-
-            def _replace_named(match: re.Match[str]) -> str:
-                name = match.group(1)
-                ordered.append(params.get(name))
-                return "?"
-
-            return _NAMED_PARAM_RE.sub(_replace_named, sql), tuple(ordered)
-
-        seq = tuple(params)
-        rewritten = re.sub(r":(\d+)", "?", sql)
-        return rewritten, seq
 
     @staticmethod
     def _encode_vector_header(fmt: int, dims: int) -> bytes:

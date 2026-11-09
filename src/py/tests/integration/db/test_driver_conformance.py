@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -87,9 +88,11 @@ from vertebra.db.adapters.valkey import (
     SyncValkeyDriver,
     ValkeyConfig,
 )
-from vertebra.typing import FrozenBaseStruct, MissingDependencyError
+from vertebra.typing import FrozenBaseStruct, MissingDependencyError, reset_dependency_cache
 from vertebra.utils.module_loader import ensure_module
 from vertebra.utils.serializers import decode_json, encode_json
+
+_FAIL_LOUD_DRIVER_ENGINES: frozenset[str] = frozenset({"oracle", "mssql"})
 
 
 class _RollbackSentinelError(RuntimeError):
@@ -715,6 +718,7 @@ def test_engine_url_parsing_and_pool_key_contract(spec: EngineConformanceSpec) -
 async def test_engine_driver_resolution_and_provide_driver(
     spec: EngineConformanceSpec,
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Every SQL/analytical config resolves its paired sync/async driver classes and registers cleanly."""
     url = (
@@ -730,6 +734,18 @@ async def test_engine_driver_resolution_and_provide_driver(
 
     registry = DatabaseRegistry()
     registry.register(spec.engine, config)
+    if spec.engine in _FAIL_LOUD_DRIVER_ENGINES:
+        assert spec.native_extension_module is not None
+        monkeypatch.setitem(sys.modules, spec.native_extension_module, None)
+        reset_dependency_cache(spec.native_extension_module)
+        try:
+            with pytest.raises(MissingDependencyError, match=rf"vertebra-core\[{spec.engine}\]"):
+                provide_driver(spec.engine, sync=True, registry=registry)
+            with pytest.raises(MissingDependencyError, match=rf"vertebra-core\[{spec.engine}\]"):
+                provide_driver(spec.engine, sync=False, registry=registry)
+        finally:
+            reset_dependency_cache(spec.native_extension_module)
+        return
     sync_driver = provide_driver(spec.engine, sync=True, registry=registry)
     async_driver = provide_driver(spec.engine, sync=False, registry=registry)
     try:
