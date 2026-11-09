@@ -5,7 +5,7 @@ chapter_id: ch03-bulk-file-io-compose-and-streams
 title: Implement Python get_file, download_many, upload_many, staged_download, conditional copy, glob, compose, and S3/R2 config options
 description: Add get_file, download_many, upload_many, staged_download, copy(..., overwrite=True), glob, and compose on SyncObjectStore and AsyncObjectStore, and wire S3Config.virtual_hosted_style and R2Config.custom_domain in _store.py.
 status: stable
-state: pending
+state: in_progress
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -22,9 +22,9 @@ tests:
 estimated_loc: 235
 plan_revision: 1
 plan_commit: fd571e3a
-state_revision: 0
-claimed_by: null
-claimed_at: null
+state_revision: 1
+claimed_by: executor
+claimed_at: "2026-11-09T00:36:00Z"
 blocked_reason: null
 unblock_condition: null
 next_step: null
@@ -32,7 +32,7 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: "2026-11-08T20:55:00Z"
-updated_at: "2026-11-08T20:55:00Z"
+updated_at: "2026-11-09T00:36:00Z"
 commit: null
 generated:
   by: flow/0.28.0

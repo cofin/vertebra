@@ -5,7 +5,7 @@ chapter_id: ch03-bulk-file-io-compose-and-streams
 title: Expose PyO3 bindings and _storage.pyi stubs for get_file, get_files, put_files, conditional copy, and compose
 description: Add get_file, get_files, put_files, copy(..., *, if_not_exists=False), and compose to PySyncObjectStore and PyAsyncObjectStore in lib.rs and _storage.pyi.
 status: stable
-state: in_progress
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -22,22 +22,25 @@ tests:
 estimated_loc: 150
 plan_revision: 1
 plan_commit: fd571e3a
-state_revision: 1
+state_revision: 2
 claimed_by: executor
 claimed_at: "2026-11-09T00:33:00Z"
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-09T00:36:00Z"
+last_verified_commit: 62deb8c3
+verification_evidence: "maturin develop + mypy.stubtest vertebra._storage clean; pytest src/py/tests/unit/storage (196 passed); clippy, rustfmt, review-check clean"
 created_at: "2026-11-08T20:55:00Z"
-updated_at: "2026-11-09T00:33:00Z"
-commit: null
+updated_at: "2026-11-09T00:36:00Z"
+commit: 62deb8c3
 generated:
   by: flow/0.28.0
   at: "2026-11-08T20:55:00Z"
-verified: []
+verified:
+  - by: executor
+    at: "2026-11-09T00:36:00Z"
+    commit: 62deb8c3
 sources:
   - id: storage-lib-rs
     resource: src/rs/vertebra-storage/src/lib.rs::PySyncObjectStore
@@ -100,7 +103,7 @@ uv run --no-sync pytest src/py/tests/unit/storage/test_storage_store.py -q
 
 ## Acceptance Criteria
 
-- [ ] `PySyncObjectStore` and `PyAsyncObjectStore` expose `get_file`, `get_files`, `put_files`, `copy(..., if_not_exists=...)`, and `compose`, and `mypy.stubtest vertebra._storage` exits `0` (R3.2).
+- [x] [62deb8c3] `PySyncObjectStore` and `PyAsyncObjectStore` expose `get_file`, `get_files`, `put_files`, `copy(..., if_not_exists=...)`, and `compose`, and `mypy.stubtest vertebra._storage` exits `0` (R3.2).
 
 ## Notes & Discoveries
 

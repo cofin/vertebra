@@ -14,7 +14,7 @@ chapters:
   - ch05-framework-adapters-and-test-hygiene
   - ch06-docs-okf-and-plan-sync
 current_chapter: ch03-bulk-file-io-compose-and-streams
-current_task: "storage-remediation:ch03:t02"
+current_task: "storage-remediation:ch03:t03"
 parent_prd: native-data-platform
 research: []
 plan_revision: 1

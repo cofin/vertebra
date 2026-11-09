@@ -12,7 +12,7 @@ depends_on_chapters:
   - ch01-native-gcs-plane-and-signing
   - ch02-zero-copy-ffi-keys-and-backends
 replan_trigger: null
-current_task: "storage-remediation:ch03:t02"
+current_task: "storage-remediation:ch03:t03"
 plan_revision: 1
 plan_commit: fd571e3a
 state_revision: 1
@@ -150,8 +150,8 @@ Analytical and pipeline workloads transferring multi-hundred-megabyte Parquet sh
 ## 5. Implementation Plan
 
 - [x] [f8bf065c] storage-remediation:ch03:t01 — Implement Rust streaming `put_file`/`get_file`, bounded-concurrency `get_files`/`put_files`, conditional `copy`, and server-side GCS `compose` (tasks/t01-rust-bulk-file-io-copy-and-compose.md)
-- [~] storage-remediation:ch03:t02 — Expose PyO3 bindings and `_storage.pyi` stubs for `get_file`, `get_files`, `put_files`, conditional `copy`, and `compose` (tasks/t02-pyo3-bulk-io-copy-and-compose-bindings.md)
-- [ ] storage-remediation:ch03:t03 — Implement Python `get_file`, `download_many`, `upload_many`, `staged_download`, `copy(..., overwrite=...)`, `glob`, `compose`, and S3/R2 config options (tasks/t03-python-bulk-transfers-glob-and-compose.md)
+- [x] [62deb8c3] storage-remediation:ch03:t02 — Expose PyO3 bindings and `_storage.pyi` stubs for `get_file`, `get_files`, `put_files`, conditional `copy`, and `compose` (tasks/t02-pyo3-bulk-io-copy-and-compose-bindings.md)
+- [~] storage-remediation:ch03:t03 — Implement Python `get_file`, `download_many`, `upload_many`, `staged_download`, `copy(..., overwrite=...)`, `glob`, `compose`, and S3/R2 config options (tasks/t03-python-bulk-transfers-glob-and-compose.md)
 - [x] [19dac0d8] storage-remediation:ch03:t04 — Pass buffers zero-copy without `memoryview` wrapping, add `4 MiB` read-ahead `open_reader`, and add streaming `open_writer` (`SyncWritableFile` / `AsyncWritableFile`) (tasks/t04-read-ahead-reader-writable-streams-and-exports.md)
 - **Chapter / Phase Recovery Checkpoint**: `PATH="$PWD/.venv/bin:$PATH" PYO3_PYTHON="$PWD/.venv/bin/python" CARGO_TARGET_DIR=/tmp/vtb-cargo-target cargo test --manifest-path src/rs/Cargo.toml -p vertebra-storage && uv run --no-sync pytest src/py/tests/unit/storage -q`
 
