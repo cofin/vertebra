@@ -5,7 +5,7 @@ chapter_id: ch04-streaming-arrow-parquet-and-shm
 title: Reorganize storage/_arrow.py layout, __slots__, readinto, and Buffer IPC support, and wire Parquet/Arrow encoding options
 description: Enforce __all__, public-first layout, __slots__, zero-copy _StreamFile.readinto, and raw Buffer IPC support in storage/_arrow.py, and wire use_dictionary, use_byte_stream_split, and options through SyncObjectStore and AsyncObjectStore.
 status: stable
-state: pending
+state: in_progress
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -22,9 +22,9 @@ tests:
 estimated_loc: 215
 plan_revision: 1
 plan_commit: fd571e3a
-state_revision: 0
-claimed_by: null
-claimed_at: null
+state_revision: 1
+claimed_by: executor
+claimed_at: "2026-11-09T00:56:40Z"
 blocked_reason: null
 unblock_condition: null
 next_step: null
@@ -32,7 +32,7 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: "2026-11-08T20:55:00Z"
-updated_at: "2026-11-08T20:55:00Z"
+updated_at: "2026-11-09T00:56:40Z"
 commit: null
 generated:
   by: flow/0.28.0
