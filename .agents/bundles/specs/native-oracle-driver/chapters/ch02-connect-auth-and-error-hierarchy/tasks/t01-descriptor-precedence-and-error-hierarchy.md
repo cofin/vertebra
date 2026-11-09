@@ -5,7 +5,7 @@ chapter_id: ch02-connect-auth-and-error-hierarchy
 title: Implement NativeOracleConfig validation and ORA-xxxxx to DbExceptionTypes SQLSTATE error mapping
 description: Implement pure NativeOracleConfig validation with secret redaction in src/rs/vertebra-oracle/src/config.rs, map ORA-xxxxx codes deterministically to canonical DbExceptionTypes classes imported from vertebra.db.driver in src/rs/vertebra-oracle/src/errors.rs, and register pub mod config; pub mod errors; in src/rs/vertebra-oracle/src/lib.rs.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -24,17 +24,17 @@ tests: []
 estimated_loc: 230
 plan_revision: 3
 plan_commit: 769302bc
-state_revision: 0
-claimed_by: null
-claimed_at: null
+state_revision: 2
+claimed_by: agent:executor
+claimed_at: "2026-11-09T03:16:00Z"
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
+last_verified_at: "2026-11-09T03:19:11Z"
 last_verified_commit: null
-verification_evidence: null
+verification_evidence: "cargo test --manifest-path src/rs/Cargo.toml -p vertebra-oracle --locked --offline (6 passed); cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-oracle --all-targets --locked --offline -- -D warnings (0 warnings)"
 created_at: "2026-11-09T00:55:00Z"
-updated_at: "2026-11-09T01:28:30Z"
+updated_at: "2026-11-09T03:19:15Z"
 commit: null
 sources:
   - id: py-errors-rs
@@ -125,9 +125,9 @@ Commit as `feat(oracle): implement NativeOracleConfig and ORA SQLSTATE DbExcepti
 
 ## Acceptance Criteria
 
-- [ ] `src/rs/vertebra-oracle/src/lib.rs` registers `pub mod config; pub mod errors;` so `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-oracle --locked` compiles and runs all tests in `config.rs` and `errors.rs` (R2, R4).
-- [ ] `NativeOracleConfig::validate` enforces port, timeout, NUL-byte, `auth_mode`, and DRCP `purity` (`"SELF"` | `"NEW"`) invariants in memory and redacts secrets in `Debug` output (R2).
-- [ ] `OracleError::to_py_err` imports the canonical `DbExceptionTypes` classes (`IntegrityError`, `SerializationFailure`, `OperationalError`, `ConnectionFailure`, `QueryCancelledError`, `NotFoundError`, `DataError`, `ProgrammingError`, `InterfaceError`, `DatabaseError`) from `vertebra.db.driver` and attaches `.sqlstate`, `.vendor_code`, and `.is_transient` on every raised exception instance (R4).
+- [x] `src/rs/vertebra-oracle/src/lib.rs` registers `pub mod config; pub mod errors;` so `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-oracle --locked` compiles and runs all tests in `config.rs` and `errors.rs` (R2, R4).
+- [x] `NativeOracleConfig::validate` enforces port, timeout, NUL-byte, `auth_mode`, and DRCP `purity` (`"SELF"` | `"NEW"`) invariants in memory and redacts secrets in `Debug` output (R2).
+- [x] `OracleError::to_py_err` imports the canonical `DbExceptionTypes` classes (`IntegrityError`, `SerializationFailure`, `OperationalError`, `ConnectionFailure`, `QueryCancelledError`, `NotFoundError`, `DataError`, `ProgrammingError`, `InterfaceError`, `DatabaseError`) from `vertebra.db.driver` and attaches `.sqlstate`, `.vendor_code`, and `.is_transient` on every raised exception instance (R4).
 
 ## Notes & Discoveries
 

@@ -5,7 +5,7 @@ chapter_id: ch02-connect-auth-and-error-hierarchy
 title: "Chapter 02: TNS/Wallet/Token Dialer, Worker Bridge, and SQLSTATE Error Mapping"
 description: Implement NativeOracleConfig validation and ORA-xxxxx to SQLSTATE DbExceptionTypes error mapping, fix OracleConfig.connect_descriptor() precedence, build the TNS/Wallet mTLS and IAM token dialer, and wire dedicated per-connection worker threads over SyncCompletionQueue and AsyncCompletionQueue with out-of-band break_execution() cancellation.
 status: stable
-state: planned
+state: in_progress
 planning_status: complete
 depends_on_chapters:
   - ch01-crate-and-packaging
@@ -13,7 +13,7 @@ replan_trigger: null
 current_task: "native-oracle-driver:ch02:t01"
 plan_revision: 3
 plan_commit: 769302bc
-state_revision: 0
+state_revision: 1
 last_verified_checkpoint: null
 last_reviewed_commit: null
 created_at: "2026-11-05T00:00:00Z"

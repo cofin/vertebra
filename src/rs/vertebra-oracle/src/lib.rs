@@ -1,5 +1,8 @@
 //! `vertebra-oracle` crate and `vertebra._oracle` PyO3 extension module.
 
+pub mod config;
+pub mod errors;
+
 use pyo3::prelude::*;
 
 /// Whether this build targets free-threaded Python (3.14t+).
