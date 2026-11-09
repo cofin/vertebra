@@ -38,8 +38,8 @@ chapters:
   - ch29-wheel-ci-and-benchmarks
   - ch30-user-and-domain-docs
   - ch31-final-review-and-release-gate
-current_chapter: ch02-wire-codec-and-session-startup
-current_task: "native-postgres-driver:ch02:t01"
+current_chapter: ch03-scram-and-channel-binding
+current_task: "native-postgres-driver:ch03:t01"
 parent_prd: native-data-platform
 depends_on_flows:
   - driver-fail-loud

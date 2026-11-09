@@ -85,6 +85,22 @@ pub struct RawPostgresOptions {
     pub iam_auth_options: HashMap<String, String>,
 }
 
+impl RawPostgresOptions {
+    /// Construct options with `host`, `user`, and `database`, using contract defaults for all other fields.
+    pub fn new(
+        host: impl Into<String>,
+        user: impl Into<String>,
+        database: impl Into<String>,
+    ) -> Self {
+        Self {
+            host: host.into(),
+            user: user.into(),
+            database: database.into(),
+            ..Self::default()
+        }
+    }
+}
+
 impl Default for RawPostgresOptions {
     fn default() -> Self {
         Self {

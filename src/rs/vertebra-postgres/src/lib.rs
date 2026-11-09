@@ -1,17 +1,18 @@
-//! `vertebra-postgres` crate and `vertebra._postgres` PyO3 extension module.
-
-pub mod config;
-pub mod errors;
+//! Native Rust PostgreSQL Protocol 3.0 client and pool extension (`vertebra._postgres`).
 
 use pyo3::prelude::*;
 
-/// Whether this build targets free-threaded Python (3.14t+).
-#[cfg(Py_GIL_DISABLED)]
-pub const FREE_THREADED: bool = true;
-#[cfg(not(Py_GIL_DISABLED))]
-pub const FREE_THREADED: bool = false;
+pub mod auth;
+pub mod config;
+pub mod errors;
+pub mod protocol;
+pub mod session;
+pub mod tls;
 
-/// Whether the extension requires the Python GIL at module import time.
+/// Whether this build targets free-threaded CPython (`Py_GIL_DISABLED`).
+pub const FREE_THREADED: bool = cfg!(Py_GIL_DISABLED);
+
+/// Whether the `vertebra._postgres` module requires the GIL on import (`false`).
 pub const GIL_USED: bool = false;
 
 #[pymodule(gil_used = false)]

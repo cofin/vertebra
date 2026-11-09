@@ -6617,6 +6617,7 @@ dependencies = [
  "arrow-schema 60.1.0",
  "base64 0.22.1",
  "bytes",
+ "fallible-iterator",
  "half",
  "hex",
  "hmac 0.12.1",

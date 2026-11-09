@@ -4,8 +4,8 @@ id: "native-postgres-driver:ch02:t04"
 chapter_id: ch02-wire-codec-and-session-startup
 title: Authenticate cleartext password and MD5 startup exchanges
 description: Implement crate-private auth::Authentication state machine handling trust, cleartext password, and salted MD5 challenges via postgres-protocol 0.6.12 with strict phase ordering and secret redaction.
-status: stable
-state: pending
+status: done
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -122,9 +122,9 @@ Commit as `feat(postgres): authenticate password and MD5 connections`.
 
 ## Acceptance Criteria
 
-- [ ] `auth::Authentication` handles trust, cleartext, and MD5 challenges strictly from `Initial`, delegating framing and hashing to `postgres_protocol` without custom crypto (R5).
-- [ ] Missing passwords, `28P01` server rejections, duplicate challenges/OKs, and unsupported GSS/SSPI/Kerberos challenges fail terminally with redacted diagnostics and immediate socket closure (R5).
-- [ ] `session.rs` rejects `ParameterStatus`, `BackendKeyData`, and `ReadyForQuery` prior to `Authentication::is_complete()` while tolerating `NoticeResponse` in any phase (R3, R5).
+- [x] `auth::Authentication` handles trust, cleartext, and MD5 challenges strictly from `Initial`, delegating framing and hashing to `postgres_protocol` without custom crypto (R5).
+- [x] Missing passwords, `28P01` server rejections, duplicate challenges/OKs, and unsupported GSS/SSPI/Kerberos challenges fail terminally with redacted diagnostics and immediate socket closure (R5).
+- [x] `session.rs` rejects `ParameterStatus`, `BackendKeyData`, and `ReadyForQuery` prior to `Authentication::is_complete()` while tolerating `NoticeResponse` in any phase (R3, R5).
 
 ## Notes & Discoveries
 

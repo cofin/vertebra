@@ -4,8 +4,8 @@ id: "native-postgres-driver:ch02:t01"
 chapter_id: ch02-wire-codec-and-session-startup
 title: Implement bounded PostgreSQL Protocol 3.0 startup encoder and backend frame decoder
 description: Implement crate-private protocol::read_message enforcing 4..=16_777_216 byte frame bounds before allocation over postgres-protocol 0.6.12 and protocol::encode_startup_frame with Protocol 3.0 UTF8 parameters.
-status: stable
-state: pending
+status: done
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -115,9 +115,9 @@ Commit as `feat(postgres): bound wire message decoding and startup framing`.
 
 ## Acceptance Criteria
 
-- [ ] `protocol::read_message` validates `4..=16_777_216` header lengths before allocating body buffers and delegates frame parsing to `postgres_protocol::message::backend::Message::parse` with zero unconsumed trailing bytes (R3).
-- [ ] `protocol::encode_startup_frame` encodes Protocol 3.0 (`196608`) startup packets including `user`, `database`, `application_name`, and `client_encoding = "UTF8"` via `postgres_protocol::message::frontend::startup_message` (R3).
-- [ ] `protocol` remains `pub(crate)` with all unit tests and workspace Clippy checks exiting `0` (R3).
+- [x] `protocol::read_message` validates `4..=16_777_216` header lengths before allocating body buffers and delegates frame parsing to `postgres_protocol::message::backend::Message::parse` with zero unconsumed trailing bytes (R3).
+- [x] `protocol::encode_startup_frame` encodes Protocol 3.0 (`196608`) startup packets including `user`, `database`, `application_name`, and `client_encoding = "UTF8"` via `postgres_protocol::message::frontend::startup_message` (R3).
+- [x] `protocol` remains `pub(crate)` with all unit tests and workspace Clippy checks exiting `0` (R3).
 
 ## Notes & Discoveries
 

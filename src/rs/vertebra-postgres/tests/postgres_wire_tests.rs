@@ -1,3 +1,5 @@
+mod support;
+
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -5,7 +7,16 @@ use _postgres::config::{
     ChannelBindingPolicy, PostgresConfig, RawPostgresOptions, parse_strict_sslmode,
 };
 use _postgres::errors::{PostgresError, ServerError};
+use _postgres::protocol::TERMINATE_FRAME;
+use _postgres::session::{BackendKey, SessionHandle, TransactionStatus};
+use tokio::io::AsyncReadExt;
 use vertebra_db::connection::TlsMode;
+
+use support::{
+    frame_auth_ok, frame_backend_key_data, frame_error_response, frame_notice_response,
+    frame_parameter_status, frame_ready_for_query, read_startup_packet, read_tagged_frontend_frame,
+    spawn_scripted_server, write_frames,
+};
 
 fn base_raw_options() -> RawPostgresOptions {
     RawPostgresOptions {
@@ -255,4 +266,209 @@ fn debug_and_errors_redact_secrets_and_retain_server_diagnostics() {
         PostgresError::server("ERROR", "28", "short sqlstate", Vec::new()),
         Err(PostgresError::Protocol(_))
     ));
+}
+
+#[tokio::test]
+async fn startup_trust_publishes_ready_session_and_closes_once() {
+    let (addr, accepts, server_task) = spawn_scripted_server(|mut stream| async move {
+        let params = read_startup_packet(&mut stream)
+            .await
+            .expect("read startup");
+        assert_eq!(params.get("user").map(String::as_str), Some("alice"));
+        assert_eq!(params.get("database").map(String::as_str), Some("appdb"));
+        assert_eq!(
+            params.get("client_encoding").map(String::as_str),
+            Some("UTF8")
+        );
+        assert_eq!(
+            params.get("application_name").map(String::as_str),
+            Some("vtb-test")
+        );
+
+        write_frames(
+            &mut stream,
+            &[
+                frame_auth_ok(),
+                frame_notice_response("welcome notice"),
+                frame_parameter_status("server_version", "16.4"),
+                frame_parameter_status("TimeZone", "UTC"),
+                frame_backend_key_data(4242, 999_001),
+                frame_ready_for_query(b'I'),
+            ],
+        )
+        .await
+        .expect("write startup sequence");
+
+        let (tag, payload) = read_tagged_frontend_frame(&mut stream)
+            .await
+            .expect("read Terminate frame");
+        assert_eq!(tag, b'X');
+        assert!(payload.is_empty());
+
+        let mut trailing = Vec::new();
+        let n = stream
+            .read_to_end(&mut trailing)
+            .await
+            .expect("read EOF after Terminate");
+        assert_eq!(n, 0);
+    })
+    .await;
+
+    let mut raw = RawPostgresOptions::new(addr.ip().to_string(), "alice", "appdb");
+    raw.port = i64::from(addr.port());
+    raw.sslmode = "disable".to_string();
+    raw.application_name = "vtb-test".to_string();
+
+    let mut handle = SessionHandle::new(raw).expect("pure constructor");
+    assert_eq!(accepts.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert!(!handle.is_ready());
+    assert_eq!(handle.generation(), 0);
+
+    let conn = handle.connect().await.expect("trust connect");
+    assert_eq!(conn.generation(), 1);
+    assert_eq!(conn.transaction_status(), TransactionStatus::Idle);
+    assert_eq!(
+        conn.backend_key(),
+        Some(BackendKey {
+            process_id: 4242,
+            secret_key: 999_001,
+        })
+    );
+    assert_eq!(conn.parameter("server_version"), Some("16.4"));
+    assert_eq!(conn.parameter("TimeZone"), Some("UTC"));
+    assert!(!conn.is_tls());
+    assert!(handle.is_ready());
+
+    assert!(matches!(
+        handle.connect().await,
+        Err(PostgresError::Interface(_))
+    ));
+
+    handle.close().await.expect("first close");
+    assert!(handle.is_closed());
+    assert!(!handle.is_ready());
+    handle.close().await.expect("idempotent second close");
+
+    server_task.await.expect("server task clean exit");
+    assert_eq!(TERMINATE_FRAME, [b'X', 0, 0, 0, 4]);
+}
+
+#[tokio::test]
+async fn startup_rejects_server_error_and_protocol_order_violations() {
+    let (addr1, _, t1) = spawn_scripted_server(|mut stream| async move {
+        let _ = read_startup_packet(&mut stream).await.unwrap();
+        write_frames(
+            &mut stream,
+            &[frame_error_response(
+                "3D000",
+                "database \"missing\" does not exist",
+                Some("sensitive internal path"),
+            )],
+        )
+        .await
+        .unwrap();
+    })
+    .await;
+
+    let mut raw1 = RawPostgresOptions::new(addr1.ip().to_string(), "alice", "missing");
+    raw1.port = i64::from(addr1.port());
+    raw1.sslmode = "disable".to_string();
+    let mut h1 = SessionHandle::new(raw1).unwrap();
+    let err1 = h1.connect().await.expect_err("must fail with 3D000");
+    assert_eq!(err1.sqlstate(), Some("3D000"));
+    assert!(!err1.to_string().contains("sensitive internal path"));
+    assert!(h1.is_closed());
+    t1.await.unwrap();
+
+    let (addr2, _, t2) = spawn_scripted_server(|mut stream| async move {
+        let _ = read_startup_packet(&mut stream).await.unwrap();
+        write_frames(&mut stream, &[frame_ready_for_query(b'I')])
+            .await
+            .unwrap();
+    })
+    .await;
+
+    let mut raw2 = RawPostgresOptions::new(addr2.ip().to_string(), "alice", "appdb");
+    raw2.port = i64::from(addr2.port());
+    raw2.sslmode = "disable".to_string();
+    let mut h2 = SessionHandle::new(raw2).unwrap();
+    let err2 = h2
+        .connect()
+        .await
+        .expect_err("ReadyForQuery before AuthOk must fail");
+    assert!(matches!(err2, PostgresError::Protocol(_)));
+    assert!(h2.is_closed());
+    t2.await.unwrap();
+
+    for bad_status in *b"TE?" {
+        let (addr3, _, t3) = spawn_scripted_server(move |mut stream| async move {
+            let _ = read_startup_packet(&mut stream).await.unwrap();
+            write_frames(
+                &mut stream,
+                &[frame_auth_ok(), frame_ready_for_query(bad_status)],
+            )
+            .await
+            .unwrap();
+        })
+        .await;
+
+        let mut raw3 = RawPostgresOptions::new(addr3.ip().to_string(), "alice", "appdb");
+        raw3.port = i64::from(addr3.port());
+        raw3.sslmode = "disable".to_string();
+        let mut h3 = SessionHandle::new(raw3).unwrap();
+        let err3 = h3
+            .connect()
+            .await
+            .expect_err("non-Idle ReadyForQuery must fail");
+        assert!(matches!(err3, PostgresError::Protocol(_)));
+        assert!(h3.is_closed());
+        t3.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn startup_cancellation_and_timeout_transition_handle_to_closed() {
+    let (addr, _, server_task) = spawn_scripted_server(|mut stream| async move {
+        let _ = read_startup_packet(&mut stream).await.unwrap();
+        write_frames(&mut stream, &[frame_auth_ok()]).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(400)).await;
+    })
+    .await;
+
+    let mut raw = RawPostgresOptions::new(addr.ip().to_string(), "alice", "appdb");
+    raw.port = i64::from(addr.port());
+    raw.sslmode = "disable".to_string();
+    raw.connect_timeout = 0.08;
+
+    let mut handle = SessionHandle::new(raw).unwrap();
+    let err = handle
+        .connect()
+        .await
+        .expect_err("stalled server must time out");
+    assert!(matches!(err, PostgresError::Transport(_)));
+    assert!(handle.is_closed());
+    assert!(!handle.is_ready());
+    assert_eq!(handle.generation(), 1);
+    server_task.await.unwrap();
+
+    let (addr2, _, server_task2) = spawn_scripted_server(|mut stream| async move {
+        let _ = read_startup_packet(&mut stream).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    })
+    .await;
+
+    let mut raw2 = RawPostgresOptions::new(addr2.ip().to_string(), "alice", "appdb");
+    raw2.port = i64::from(addr2.port());
+    raw2.sslmode = "disable".to_string();
+    let mut handle2 = SessionHandle::new(raw2).unwrap();
+    {
+        let attempt = handle2.begin_connect().unwrap();
+        let fut = attempt.run();
+        tokio::pin!(fut);
+        let _ = tokio::time::timeout(Duration::from_millis(25), &mut fut).await;
+    }
+    assert!(handle2.is_closed());
+    assert!(!handle2.is_ready());
+    assert_eq!(handle2.generation(), 1);
+    server_task2.await.unwrap();
 }

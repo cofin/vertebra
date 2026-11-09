@@ -4,8 +4,8 @@ id: "native-postgres-driver:ch02:t02"
 chapter_id: ch02-wire-codec-and-session-startup
 title: Establish authenticated trust sessions with SessionHandle and PendingSession publication
 description: Implement PostgresConnection, SessionHandle, ConnectAttempt, and PendingSession enforcing strict Protocol 3.0 startup ordering, total deadline budgets, cancellation rollback, and bounded Terminate close.
-status: stable
-state: pending
+status: done
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -140,9 +140,9 @@ Commit as `feat(postgres): own startup session lifecycle and publication`.
 
 ## Acceptance Criteria
 
-- [ ] `SessionHandle` enforces `Configured -> Connecting -> Ready | Closed` under a short non-async mutex with `BeginConnect::AlreadyReady` idempotency and `<= 100ms` `Terminate` shutdown (R3, R7).
-- [ ] `ConnectAttempt` validates strict startup frame ordering, `client_encoding = "UTF8"`, `ReadyForQuery(b'I')`, sanitized `ErrorResponse` SQLSTATEs, and one outer `connect_timeout` deadline (R3).
-- [ ] Dropping `ConnectAttempt` or uncommitted `PendingSession` rolls `SessionHandle` to `Closed` and closes the underlying socket deterministically across all nine loopback tests (R7).
+- [x] `SessionHandle` enforces `Configured -> Connecting -> Ready | Closed` under a short non-async mutex with `BeginConnect::AlreadyReady` idempotency and `<= 100ms` `Terminate` shutdown (R3, R7).
+- [x] `ConnectAttempt` validates strict startup frame ordering, `client_encoding = "UTF8"`, `ReadyForQuery(b'I')`, sanitized `ErrorResponse` SQLSTATEs, and one outer `connect_timeout` deadline (R3).
+- [x] Dropping `ConnectAttempt` or uncommitted `PendingSession` rolls `SessionHandle` to `Closed` and closes the underlying socket deterministically across all nine loopback tests (R7).
 
 ## Notes & Discoveries
 

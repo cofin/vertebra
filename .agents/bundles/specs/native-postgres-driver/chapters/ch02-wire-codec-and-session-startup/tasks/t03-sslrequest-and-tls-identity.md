@@ -4,8 +4,8 @@ id: "native-postgres-driver:ch02:t03"
 chapter_id: ch02-wire-codec-and-session-startup
 title: Negotiate PostgreSQL SSLRequest and verify rustls peer TLS identities
 description: Implement tls::connect negotiating the 8-byte PostgreSQL SSLRequest preamble and upgrading via shared TransportStream::upgrade_tls across Disable, Prefer, Require, VerifyCa, and VerifyFull with CA, SNI, and mTLS verification.
-status: stable
-state: pending
+status: done
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -124,9 +124,9 @@ Commit as `feat(postgres): negotiate protocol TLS with shared transport`.
 
 ## Acceptance Criteria
 
-- [ ] `tls::connect` emits exact `[0, 0, 0, 8, 4, 210, 22, 47]` `SSLRequest` frames for enabled TLS modes and upgrades via `TransportStream::upgrade_tls` using the shared `ring` provider (R4).
-- [ ] `Disable`, `Prefer` (`S`/`N`), `Require` (with/without `ca_pem`), `VerifyCa`, `VerifyFull` (`server_name` override), and client mTLS behave strictly without post-`S` plaintext downgrade (R4).
-- [ ] `SSLRequest` and TLS handshakes share `ConnectAttempt`'s single outer deadline and transition `SessionHandle` to `Closed` on failure or expiry (R3, R4).
+- [x] `tls::connect` emits exact `[0, 0, 0, 8, 4, 210, 22, 47]` `SSLRequest` frames for enabled TLS modes and upgrades via `TransportStream::upgrade_tls` using the shared `ring` provider (R4).
+- [x] `Disable`, `Prefer` (`S`/`N`), `Require` (with/without `ca_pem`), `VerifyCa`, `VerifyFull` (`server_name` override), and client mTLS behave strictly without post-`S` plaintext downgrade (R4).
+- [x] `SSLRequest` and TLS handshakes share `ConnectAttempt`'s single outer deadline and transition `SessionHandle` to `Closed` on failure or expiry (R3, R4).
 
 ## Notes & Discoveries
 
