@@ -5,7 +5,7 @@ chapter_id: ch04-streaming-arrow-parquet-and-shm
 title: Reorganize storage/_arrow.py layout, __slots__, readinto, and Buffer IPC support, and wire Parquet/Arrow encoding options
 description: Enforce __all__, public-first layout, __slots__, zero-copy _StreamFile.readinto, and raw Buffer IPC support in storage/_arrow.py, and wire use_dictionary, use_byte_stream_split, and options through SyncObjectStore and AsyncObjectStore.
 status: stable
-state: in_progress
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -22,22 +22,25 @@ tests:
 estimated_loc: 215
 plan_revision: 1
 plan_commit: fd571e3a
-state_revision: 1
+state_revision: 2
 claimed_by: executor
 claimed_at: "2026-11-09T00:56:40Z"
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-09T01:03:30Z"
+last_verified_commit: f4606043
+verification_evidence: "pytest src/py/tests/unit/storage + test_data_storage_integrations.py (395 passed); ruff check/format and mypy on src/py/vertebra/storage clean"
 created_at: "2026-11-08T20:55:00Z"
-updated_at: "2026-11-09T00:56:40Z"
-commit: null
+updated_at: "2026-11-09T01:03:30Z"
+commit: f4606043
 generated:
   by: flow/0.28.0
   at: "2026-11-08T20:55:00Z"
-verified: []
+verified:
+  - by: executor
+    at: "2026-11-09T01:03:30Z"
+    commit: f4606043
 sources:
   - id: py-storage-arrow
     resource: src/py/vertebra/storage/_arrow.py::iter_batches_sync
@@ -102,8 +105,8 @@ uv run --no-sync pytest src/py/tests/unit/storage/test_storage_store.py -k "parq
 
 ## Acceptance Criteria
 
-- [ ] `storage/_arrow.py` declares `__all__`, defines public functions before private helpers/classes, uses `__slots__`, copies directly in `_StreamFile.readinto`, preserves demand-driven row-group reads on `iter_batches_*`, and supports raw `Buffer` IPC inputs in `_BatchWriter.open` (R4.2).
-- [ ] `use_dictionary`, `use_byte_stream_split`, and `options` work across sync and async `write_parquet`, `iter_parquet_batches`, `write_arrow`, and `iter_arrow_batches` (R4.2).
+- [x] [f4606043] `storage/_arrow.py` declares `__all__`, defines public functions before private helpers/classes, uses `__slots__`, copies directly in `_StreamFile.readinto`, preserves demand-driven row-group reads on `iter_batches_*`, and supports raw `Buffer` IPC inputs in `_BatchWriter.open` (R4.2).
+- [x] [f4606043] `use_dictionary`, `use_byte_stream_split`, and `options` work across sync and async `write_parquet`, `iter_parquet_batches`, `write_arrow`, and `iter_arrow_batches` (R4.2).
 
 ## Notes & Discoveries
 

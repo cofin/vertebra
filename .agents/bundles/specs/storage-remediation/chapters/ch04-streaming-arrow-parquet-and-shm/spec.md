@@ -11,7 +11,7 @@ planning_status: complete
 depends_on_chapters:
   - ch03-bulk-file-io-compose-and-streams
 replan_trigger: null
-current_task: "storage-remediation:ch04:t01"
+current_task: null
 plan_revision: 1
 plan_commit: fd571e3a
 state_revision: 0
@@ -135,7 +135,7 @@ Three hot-path serialization and streaming modules still copy or buffer full pay
 ## 5. Implementation Plan
 
 - [x] [2789bb63] storage-remediation:ch04:t01 — Stream `StreamingStorageResponse.iter_chunks()` and range-slice `to_fastpath_tuple()` without full-blob materialization (tasks/t01-streaming-storage-response.md)
-- [~] storage-remediation:ch04:t02 — Reorganize `storage/_arrow.py` layout, `__slots__`, `readinto`, and `Buffer` IPC support, and wire Parquet/Arrow encoding options (tasks/t02-arrow-parquet-layout-and-options.md)
+- [x] [f4606043] storage-remediation:ch04:t02 — Reorganize `storage/_arrow.py` layout, `__slots__`, `readinto`, and `Buffer` IPC support, and wire Parquet/Arrow encoding options (tasks/t02-arrow-parquet-layout-and-options.md)
 - [x] [113d25a5] storage-remediation:ch04:t03 — Make `read_arrow_shm` zero-copy over `memoryview`, keep `ArrowCursor.__len__` lazy, and transpose `_table_to_rows_and_cols` column-wise (tasks/t03-zero-copy-shm-arrow-cursor.md)
 - **Chapter / Phase Recovery Checkpoint**: `uv run --no-sync ruff check src/py/vertebra/storage src/py/vertebra/db/arrow.py && uv run --no-sync mypy src/py/vertebra/storage src/py/vertebra/db/arrow.py && uv run --no-sync pytest src/py/tests/unit/storage src/py/tests/unit/db/test_enterprise_olap_drivers.py -q`
 

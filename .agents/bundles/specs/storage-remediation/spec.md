@@ -14,7 +14,7 @@ chapters:
   - ch05-framework-adapters-and-test-hygiene
   - ch06-docs-okf-and-plan-sync
 current_chapter: ch04-streaming-arrow-parquet-and-shm
-current_task: "storage-remediation:ch04:t02"
+current_task: null
 parent_prd: native-data-platform
 research: []
 plan_revision: 1
@@ -261,7 +261,7 @@ Zero-context code and quality reviews of `feat/storage-updates` (`077a3fe9..fd57
 ## 6. Current State & Remaining Plan Snapshot
 
 - **Verified Baseline (`HEAD`)**: `46d39d95` — `3/6` chapters completed and reviewed (`ch01` at `1ff643ec`, `ch02` at `09970202`, `ch03` at `46d39d95`).
-- **Active Chapter**: `ch04-streaming-arrow-parquet-and-shm` (`2/3` tasks completed: `t01` `2789bb63`, `t03` `113d25a5`; `t02` in progress).
+- **Active Chapter**: `ch04-streaming-arrow-parquet-and-shm` (`3/3` tasks completed: `t01` `2789bb63`, `t02` `f4606043`, `t03` `113d25a5`; zero-context review in progress).
 - **Remaining Plan**: `ch04` (`t02` + review) -> `ch05` (`t01`–`t03`) -> `ch06` (`t01`–`t02`) -> dual review, archive, push, and stacked PRs (`feat/storage-updates`, `feat/driver-fail-loud`, `feat/native-postgres-driver`).
 - **Documentation & OKF Sync**: `[0/6 files documented]`.
 - **Active Invariants & Triggers**: Zero `planning_status: empirical_dependent` chapters; every chapter is decision-complete (`planning_status: complete`).
