@@ -96,6 +96,15 @@ class ArrowCursor:
         """Return a PEP 688 zero-copy memoryview over the serialized Arrow IPC payload."""
         return self.buffer_view()
 
+    def __arrow_c_stream__(self, requested_schema: Any = None) -> Any:
+        """Export the Arrow C Stream PyCapsule (`arrow_array_stream`) for zero-copy consumers."""
+        if self._shm_cursor is not None and hasattr(self._shm_cursor, "__arrow_c_stream__"):
+            return self._shm_cursor.__arrow_c_stream__(requested_schema=requested_schema)
+        tbl = self.to_arrow_table()
+        if tbl is not self and hasattr(tbl, "__arrow_c_stream__"):
+            return tbl.__arrow_c_stream__(requested_schema=requested_schema)
+        raise TypeError("ArrowCursor payload cannot be exported as an Arrow C Stream")
+
     def __enter__(self) -> Self:
         """Enter the context manager and return `self`."""
         return self
