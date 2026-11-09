@@ -49,7 +49,7 @@ last_verified_commit: 7c9d8e1c
 verification_evidence: "cargo test -p vertebra-duckdb --locked, cargo clippy -p vertebra-duckdb --all-targets --locked -- -D warnings, mypy.stubtest vertebra._duckdb, pytest test_freethreaded_gil.py test_packaging_and_pgo.py, review_setup validate"
 created_at: "2026-11-09T02:52:00Z"
 updated_at: "2026-11-09T03:36:00Z"
-commit: null
+commit: 088c2d30
 sources:
   - id: duckdb-rs
     resource: src/rs/vertebra-db/src/duckdb/mod.rs::DuckdbConfig

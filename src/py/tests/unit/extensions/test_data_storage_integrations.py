@@ -26,6 +26,7 @@ from sqlspec.storage.registry import StorageRegistry as SQLSpecStorageRegistry
 
 import vertebra.extensions.alchemy.storage as alchemy_storage_mod
 import vertebra.extensions.sqlspec.storage as sqlspec_storage_mod
+from vertebra.db.adapters.duckdb.core import DuckDBCore
 from vertebra.db.arrow import ArrowCursor
 from vertebra.db.cdc import CDCConfig
 from vertebra.extensions.alchemy.storage import ObjectStoreBackend as AlchemyObjectStoreBackend
@@ -54,7 +55,7 @@ from vertebra.typing import ImproperConfigurationError
 from vertebra.utils.module_loader import import_optional
 from vertebra.utils.serializers import decode_json
 
-duckdb = import_optional("duckdb")
+native_duckdb = import_optional("vertebra._duckdb")
 
 
 class _SQLSpecRangeServer:
@@ -1018,10 +1019,25 @@ async def test_sqlspec_object_store_backend_async_pipeline_and_arrow_streaming(t
 
 
 def test_duckdb_gcs_secret_sql_builder() -> None:
-    """build_duckdb_gcs_secret_sql renders DuckDB httpfs GCS secret DDL with a quoted token literal."""
+    """build_duckdb_gcs_secret_sql delegates to DuckDBCore.build_gcs_secret_sql with a quoted token literal."""
     cfg = GCSConfig(bucket="lakehouse", access_token="mock-adc-bearer-token")
     sql = build_duckdb_gcs_secret_sql("gcs_lake", cfg)
     assert sql == "CREATE OR REPLACE SECRET gcs_lake (TYPE gcs, BEARER_TOKEN 'mock-adc-bearer-token')"
+    assert DuckDBCore.build_gcs_secret_sql("gcs_lake", cfg) == sql
+    scoped_sql = DuckDBCore.build_gcs_secret_sql("gcs_lake", cfg, scope="gs://lakehouse/curated")
+    assert (
+        scoped_sql
+        == "CREATE OR REPLACE SECRET gcs_lake (TYPE gcs, BEARER_TOKEN 'mock-adc-bearer-token', SCOPE 'gs://lakehouse/curated')"
+    )
+    multi_scoped_sql = DuckDBCore.build_gcs_secret_sql(
+        "gcs_lake",
+        cfg,
+        scope=("gs://lakehouse/raw", "gcs://lakehouse/raw"),
+    )
+    assert (
+        multi_scoped_sql
+        == "CREATE OR REPLACE SECRET gcs_lake (TYPE gcs, BEARER_TOKEN 'mock-adc-bearer-token', SCOPE ['gs://lakehouse/raw', 'gcs://lakehouse/raw'])"
+    )
 
     with pytest.raises(ValueError, match="Invalid SQL identifier"):
         build_duckdb_gcs_secret_sql("bad-name;DROP TABLE x", cfg)
@@ -1056,22 +1072,26 @@ def test_duckdb_gcs_secret_sql_rejects_control_characters(token: str) -> None:
         build_duckdb_gcs_secret_sql("gcs_lake", bearer_token=token)
 
 
-@pytest.mark.skipif(duckdb is None, reason="duckdb is not installed")
+@pytest.mark.skipif(native_duckdb is None, reason="vertebra._duckdb is not installed")
 def test_duckdb_gcs_secret_sql_executes_against_duckdb() -> None:
-    """The rendered statement is accepted by DuckDB and stores the exact token, including embedded quotes."""
-    connection = duckdb.connect()
+    """The rendered statement is accepted by vertebra._duckdb and stores the exact token, including embedded quotes."""
+    assert native_duckdb is not None
+    client = native_duckdb.SyncDuckDBClient()
     try:
-        installed = connection.execute(
+        assert client.apply_gcs_secret(secret_name="gcs_lake", token="tok'en", generation=1) == (True, 1)
+        assert client.apply_gcs_secret(secret_name="gcs_lake", token="tok'en", generation=1) == (False, 1)
+        assert client.applied_token_generation == 1
+        assert client.last_gcs_secret_sql == "CREATE OR REPLACE SECRET gcs_lake (TYPE GCS, BEARER_TOKEN 'tok''en')"
+        installed_row = client.fetch_optional(
             "SELECT installed FROM duckdb_extensions() WHERE extension_name = 'httpfs'"
-        ).fetchone()
-        if installed is None or not installed[0]:
-            pytest.skip("DuckDB httpfs extension is not installed locally and is not downloaded offline")
-        connection.execute("LOAD httpfs")
-        connection.execute(build_duckdb_gcs_secret_sql("gcs_lake", bearer_token="tok'en"))
-        secret = connection.execute("SELECT name, type FROM duckdb_secrets() WHERE name = 'gcs_lake'").fetchone()
-        assert secret == ("gcs_lake", "gcs")
+        )
+        if installed_row is not None and installed_row.get("installed"):
+            client.execute("LOAD httpfs")
+            client.execute(build_duckdb_gcs_secret_sql("gcs_lake", bearer_token="tok'en"))
+            secret = client.fetch_optional("SELECT name, type FROM duckdb_secrets() WHERE name = 'gcs_lake'")
+            assert secret == {"name": "gcs_lake", "type": "gcs"}
     finally:
-        connection.close()
+        client.close()
 
 
 @pytest.mark.parametrize("target", [GCSConfig(bucket="lakehouse"), "gs://lakehouse"], ids=["config", "uri"])

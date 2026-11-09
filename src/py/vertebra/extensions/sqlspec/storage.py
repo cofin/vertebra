@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast, overload
 from urllib.parse import urlparse
 
+from vertebra.db.adapters.duckdb.core import DuckDBCore
 from vertebra.storage import (
     AsyncGcpTokenCache,
     AsyncObjectStore,
@@ -40,7 +41,6 @@ from vertebra.storage._arrow import (
 from vertebra.typing import ImproperConfigurationError
 from vertebra.utils.module_loader import ensure_module
 from vertebra.utils.serializers import decode_msgpack, encode_msgpack_bytes
-from vertebra.utils.text import validate_identifier
 
 if TYPE_CHECKING:
     from sqlspec.protocols import ObjectStoreProtocol
@@ -760,24 +760,10 @@ def build_duckdb_gcs_secret_sql(
 ) -> str:
     """Build a DuckDB `httpfs` GCS bearer-token `CREATE OR REPLACE SECRET` statement.
 
-    Resolves an OAuth2 bearer token via `GCSConfig.resolve_adc_token()` (including optional
-    `target_service_account` impersonation) when `bearer_token` is omitted. DuckDB `CREATE SECRET` DDL does not
-    accept prepared parameters, so the token is rendered as a single-quoted SQL literal with embedded quotes
-    doubled, and tokens containing NUL, CR, or LF characters are rejected before rendering.
-
-    Raises:
-        ImproperConfigurationError: When neither `bearer_token` nor `config` yields a non-blank bearer token.
-        ValueError: When `secret_name` is not a valid SQL identifier or the token contains NUL, CR, or LF.
+    Delegates to `DuckDBCore.build_gcs_secret_sql`.
     """
-    validate_identifier(secret_name, "DuckDB secret name", allow_dots=False)
-    token = bearer_token
-    if token is None and config is not None:
-        token = config.resolve_adc_token()
-    if token is None or not token.strip():
-        msg = "DuckDB GCS secret requires a non-empty bearer token from `bearer_token` or `GCSConfig` credentials"
-        raise ImproperConfigurationError(msg)
-    if any(char in token for char in ("\x00", "\r", "\n")):
-        msg = "DuckDB GCS bearer token must not contain NUL, CR, or LF characters"
-        raise ValueError(msg)
-    escaped = token.replace("'", "''")
-    return f"CREATE OR REPLACE SECRET {secret_name} (TYPE gcs, BEARER_TOKEN '{escaped}')"
+    return DuckDBCore.build_gcs_secret_sql(
+        secret_name,
+        config,
+        bearer_token=bearer_token,
+    )

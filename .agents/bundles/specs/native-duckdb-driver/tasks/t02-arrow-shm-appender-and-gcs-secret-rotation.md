@@ -4,7 +4,7 @@ id: "native-duckdb-driver:t02"
 title: "Implement Arrow 60 VTBARROW ShmCapsule streaming, Appender bulk load, GCS secret rotation, and DuckdbBrokerPool cleanup"
 description: "Implement zero-copy arrow 60 RecordBatch -> VTBARROW ShmCapsule (ArrowCursor / select_to_arrow / stream_arrow_batches), DuckDB Appender bulk ingestion (load_from_arrow / appender_load_arrow), DuckDBCore.build_gcs_secret_sql relocation with per-session applied_token_generation rotation, and DuckdbBrokerPool removal from vertebra-db."
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -26,21 +26,21 @@ files:
 tests:
   - src/rs/vertebra-duckdb/src/lib.rs
   - src/rs/vertebra-db/src/duckdb/mod.rs
-  - src/py/tests/unit/storage/test_gcs_token_refresh.py
+  - src/py/tests/unit/extensions/test_data_storage_integrations.py
 estimated_loc: 450
 plan_revision: 3
 plan_commit: d7a629b1
-state_revision: 0
-claimed_by: null
-claimed_at: null
+state_revision: 2
+claimed_by: agent
+claimed_at: "2026-11-09T03:38:00Z"
 blocked_reason: null
 unblock_condition: null
-next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+next_step: "Completed"
+last_verified_at: "2026-11-09T14:40:00Z"
+last_verified_commit: 088c2d30
+verification_evidence: "cargo test -p vertebra-db -p vertebra-duckdb --locked, cargo clippy -p vertebra-db -p vertebra-duckdb --all-targets --locked -- -D warnings, pytest test_data_storage_integrations.py -k duckdb, review_setup validate"
 created_at: "2026-11-09T02:52:00Z"
-updated_at: "2026-11-09T02:52:00Z"
+updated_at: "2026-11-09T14:40:00Z"
 commit: null
 sources:
   - id: arrow-shm-rs
@@ -85,10 +85,10 @@ Implement zero-copy `arrow 60` `RecordBatch` -> `VTBARROW` `ShmCapsule` (`ArrowC
 
 ## Acceptance Criteria
 
-- [ ] `select_to_arrow` and `stream_arrow_batches` serialize `arrow 60` `RecordBatch`es into `VTBARROW` `ShmCapsule` `ArrowCursor` objects (`used_shm` respected based on `threshold_rows`).
-- [ ] `Appender` bulk ingestion (`appender_load_arrow` and row batch append) writes Arrow IPC batches and row sequences with explicit `flush()` and maps constraint failures to `IntegrityError`.
-- [ ] `DuckDBCore.build_gcs_secret_sql` is canonical in `src/py/vertebra/db/adapters/duckdb/core.py`, `extensions/sqlspec/storage.py::build_duckdb_gcs_secret_sql` delegates to it, and per-session `applied_token_generation` rotation updates only when generation advances or `force=True`.
-- [ ] `DuckdbBrokerPool` is removed from `src/rs/vertebra-db/src/duckdb/mod.rs` and `src/rs/vertebra-db/src/lib.rs`.
+- [x] `select_to_arrow` and `stream_arrow_batches` serialize `arrow 60` `RecordBatch`es into `VTBARROW` `ShmCapsule` `ArrowCursor` objects (`used_shm` respected based on `threshold_rows`).
+- [x] `Appender` bulk ingestion (`appender_load_arrow` and row batch append) writes Arrow IPC batches and row sequences with explicit `flush()` and maps constraint failures to `IntegrityError`.
+- [x] `DuckDBCore.build_gcs_secret_sql` is canonical in `src/py/vertebra/db/adapters/duckdb/core.py`, `extensions/sqlspec/storage.py::build_duckdb_gcs_secret_sql` delegates to it, and per-session `applied_token_generation` rotation updates only when generation advances or `force=True`.
+- [x] `DuckdbBrokerPool` is removed from `src/rs/vertebra-db/src/duckdb/mod.rs` and `src/rs/vertebra-db/src/lib.rs`.
 
 [^arrow-shm-rs]: `src/rs/vertebra-db/src/arrow_shm.rs::ShmArrowStreamWriter` — Shared-memory Arrow IPC stream writer for `VTBARROW` capsules.
 [^duckdb-rs]: `src/rs/vertebra-db/src/duckdb/mod.rs::DuckdbConfig` — DuckDB configuration and bootstrap pragma primitives in `vertebra-db`.
