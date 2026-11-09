@@ -338,7 +338,8 @@ async def test_spanner_queue_backend_lifecycle_dlq_and_leases() -> None:
     await backend.close()
 
 
-def test_spanner_queue_backend_requires_spanner_extension_and_executor(
+@pytest.mark.anyio
+async def test_spanner_queue_backend_requires_spanner_extension_and_executor(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """SpannerQueueBackend requires vertebra._spanner and an injected SpannerQueueExecutor."""
@@ -357,12 +358,19 @@ def test_spanner_queue_backend_requires_spanner_extension_and_executor(
 
         fake = _FakeSpannerQueueExecutor()
         assert isinstance(fake, SpannerQueueExecutor)
-        injected = SpannerQueueBackend(
-            QueueConfig(backend_url="spangres://projects/p/instances/i/databases/d"),
-            executor=fake,
-        )
+        injected_cfg = QueueConfig(backend_url="spangres://projects/p/instances/i/databases/d")
+        injected = SpannerQueueBackend(injected_cfg, executor=fake)
         assert injected.dialect == "spangres"
-        assert injected._executor is fake
+        injected_svc = QueueService(injected_cfg, backend=injected)
+
+        @task(name="spangres_ping", lane="cpu")
+        def spangres_ping(x: int) -> int:
+            return x + 5
+
+        injected_svc.register(spangres_ping)
+        await injected_svc.enqueue("spangres_ping", 37)
+        assert await injected_svc.drain_once(("cpu",)) == [42]
+        await injected_svc.close()
 
         monkeypatch.setitem(sys.modules, "vertebra._spanner", types.ModuleType("vertebra._spanner"))
         reset_dependency_cache("vertebra._spanner")

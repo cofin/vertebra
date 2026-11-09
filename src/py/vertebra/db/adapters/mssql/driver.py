@@ -10,10 +10,6 @@ from typing import TYPE_CHECKING, Any, ClassVar, Self, cast
 
 from vertebra.db.adapters.mssql.config import MSSQLConfig
 from vertebra.db.adapters.mssql.core import MSSQL_DIALECT_TAG
-from vertebra.db.arrow import (
-    ARROW_SHM_THRESHOLD_ROWS,
-    ArrowCursor,
-)
 from vertebra.db.driver import SyncDatabaseDriver, ThreadOffloadAsyncDatabaseDriver
 from vertebra.utils.module_loader import ensure_module
 
@@ -30,6 +26,8 @@ __all__ = (
 
 class SyncMSSQLDriver(SyncDatabaseDriver[MSSQLConfig]):
     """Synchronous SQL Server driver backed by the native ``vertebra._mssql`` module from ``vertebra-core[mssql]``."""
+
+    __slots__ = ("_dialer",)
 
     dialect: ClassVar[str] = "mssql"
     dialect_tag: ClassVar[int] = MSSQL_DIALECT_TAG
@@ -80,25 +78,15 @@ class SyncMSSQLDriver(SyncDatabaseDriver[MSSQLConfig]):
         _require_mssql_native()
         super().cancel()
 
-    def execute(
+    def execute_many(
         self,
         sql: str,
-        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+        parameter_sets: Sequence[Sequence[Any] | Mapping[str, Any]],
         **kwargs: Any,
     ) -> int:
-        """Execute a DML or DDL statement; raises ``MissingDependencyError`` without ``vertebra._mssql``."""
+        """Execute a batch statement; raises ``MissingDependencyError`` without ``vertebra._mssql``."""
         _require_mssql_native()
-        return super().execute(sql, parameters, **kwargs)
-
-    def execute_tuples(
-        self,
-        sql: str,
-        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
-        **kwargs: Any,
-    ) -> list[tuple[Any, ...]]:
-        """Execute a query and return positional tuples; raises ``MissingDependencyError`` without ``vertebra._mssql``."""
-        _require_mssql_native()
-        return super().execute_tuples(sql, parameters, **kwargs)
+        return super().execute_many(sql, parameter_sets, **kwargs)
 
     def execute_with_description(
         self,
@@ -109,30 +97,6 @@ class SyncMSSQLDriver(SyncDatabaseDriver[MSSQLConfig]):
         """Execute SQL and return ``(rows, column_names)``; raises ``MissingDependencyError`` without ``vertebra._mssql``."""
         _require_mssql_native()
         return super().execute_with_description(sql, parameters, **kwargs)
-
-    def select(
-        self,
-        sql: str,
-        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
-        *,
-        schema_type: type[Any] | None = None,
-        **kwargs: Any,
-    ) -> list[Any]:
-        """Execute a ``SELECT`` query; raises ``MissingDependencyError`` without ``vertebra._mssql``."""
-        _require_mssql_native()
-        return super().select(sql, parameters, schema_type=schema_type, **kwargs)
-
-    def select_to_arrow(
-        self,
-        sql: str,
-        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
-        *,
-        threshold_rows: int = ARROW_SHM_THRESHOLD_ROWS,
-        **kwargs: Any,
-    ) -> ArrowCursor:
-        """Execute a query into an ``ArrowCursor``; raises ``MissingDependencyError`` without ``vertebra._mssql``."""
-        _require_mssql_native()
-        return super().select_to_arrow(sql, parameters, threshold_rows=threshold_rows, **kwargs)
 
     def load_from_arrow(
         self,
@@ -149,6 +113,8 @@ class SyncMSSQLDriver(SyncDatabaseDriver[MSSQLConfig]):
 
 class AsyncMSSQLDriver(ThreadOffloadAsyncDatabaseDriver[MSSQLConfig, SyncMSSQLDriver]):
     """Asynchronous SQL Server driver offloading to ``SyncMSSQLDriver``; requires ``vertebra._mssql`` from ``vertebra-core[mssql]``. The Cloud SQL dialer runs on the sync driver's worker thread."""
+
+    __slots__ = ()
 
     dialect: ClassVar[str] = "mssql"
     dialect_tag: ClassVar[int] = MSSQL_DIALECT_TAG

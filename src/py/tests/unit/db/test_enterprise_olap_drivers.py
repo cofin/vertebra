@@ -1224,6 +1224,7 @@ def test_oracle_driver_with_stub_native_module_raises_not_implemented(
         pytest.param(lambda drv: drv.rollback(), id="rollback"),
         pytest.param(lambda drv: drv.cancel(), id="cancel"),
         pytest.param(lambda drv: drv.execute("SELECT 1 FROM DUAL"), id="execute"),
+        pytest.param(lambda drv: drv.execute_many("INSERT INTO items VALUES (1)", []), id="execute_many_empty"),
         pytest.param(lambda drv: drv.execute_tuples("SELECT 1 FROM DUAL"), id="execute_tuples"),
         pytest.param(lambda drv: drv.execute_with_description("SELECT 1 FROM DUAL"), id="execute_with_description"),
         pytest.param(lambda drv: drv.select("SELECT 1 FROM DUAL"), id="select"),
@@ -1240,6 +1241,7 @@ def test_oracle_driver_methods_require_native_module(
         stub_ctx.setitem(sys.modules, "vertebra._oracle", ModuleType("vertebra._oracle"))
         reset_dependency_cache("vertebra._oracle")
         drv = SyncOracleDriver()
+    assert not hasattr(drv, "__dict__")
     monkeypatch.setitem(sys.modules, "vertebra._oracle", None)
     reset_dependency_cache("vertebra._oracle")
     try:
@@ -1253,11 +1255,12 @@ def test_oracle_driver_methods_require_native_module(
 async def test_async_oracle_driver_methods_require_native_module(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """AsyncOracleDriver.load_from_arrow and execute raise MissingDependencyError when vertebra._oracle is absent."""
+    """AsyncOracleDriver.load_from_arrow, execute, and empty execute_many raise MissingDependencyError when absent."""
     with pytest.MonkeyPatch.context() as stub_ctx:
         stub_ctx.setitem(sys.modules, "vertebra._oracle", ModuleType("vertebra._oracle"))
         reset_dependency_cache("vertebra._oracle")
         drv = AsyncOracleDriver()
+    assert not hasattr(drv, "__dict__")
     monkeypatch.setitem(sys.modules, "vertebra._oracle", None)
     reset_dependency_cache("vertebra._oracle")
     try:
@@ -1265,6 +1268,8 @@ async def test_async_oracle_driver_methods_require_native_module(
             await drv.load_from_arrow("items", [{"id": 1}])
         with pytest.raises(MissingDependencyError, match=r"vertebra-core\[oracle\]"):
             await drv.execute("SELECT 1 FROM DUAL")
+        with pytest.raises(MissingDependencyError, match=r"vertebra-core\[oracle\]"):
+            await drv.execute_many("INSERT INTO items VALUES (1)", [])
     finally:
         reset_dependency_cache("vertebra._oracle")
 
@@ -1343,6 +1348,7 @@ def test_mssql_driver_with_stub_native_module_raises_not_implemented(
         pytest.param(lambda drv: drv.rollback(), id="rollback"),
         pytest.param(lambda drv: drv.cancel(), id="cancel"),
         pytest.param(lambda drv: drv.execute("SELECT 1"), id="execute"),
+        pytest.param(lambda drv: drv.execute_many("INSERT INTO items VALUES (1)", []), id="execute_many_empty"),
         pytest.param(lambda drv: drv.execute_tuples("SELECT 1"), id="execute_tuples"),
         pytest.param(lambda drv: drv.execute_with_description("SELECT 1"), id="execute_with_description"),
         pytest.param(lambda drv: drv.select("SELECT 1"), id="select"),
@@ -1359,6 +1365,7 @@ def test_mssql_driver_methods_require_native_module(
         stub_ctx.setitem(sys.modules, "vertebra._mssql", ModuleType("vertebra._mssql"))
         reset_dependency_cache("vertebra._mssql")
         drv = SyncMSSQLDriver()
+    assert not hasattr(drv, "__dict__")
     monkeypatch.setitem(sys.modules, "vertebra._mssql", None)
     reset_dependency_cache("vertebra._mssql")
     try:
@@ -1372,16 +1379,19 @@ def test_mssql_driver_methods_require_native_module(
 async def test_async_mssql_driver_methods_require_native_module(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """AsyncMSSQLDriver.execute raises MissingDependencyError when vertebra._mssql is absent."""
+    """AsyncMSSQLDriver.execute and empty execute_many raise MissingDependencyError when vertebra._mssql is absent."""
     with pytest.MonkeyPatch.context() as stub_ctx:
         stub_ctx.setitem(sys.modules, "vertebra._mssql", ModuleType("vertebra._mssql"))
         reset_dependency_cache("vertebra._mssql")
         drv = AsyncMSSQLDriver()
+    assert not hasattr(drv, "__dict__")
     monkeypatch.setitem(sys.modules, "vertebra._mssql", None)
     reset_dependency_cache("vertebra._mssql")
     try:
         with pytest.raises(MissingDependencyError, match=r"vertebra-core\[mssql\]"):
             await drv.execute("SELECT 1")
+        with pytest.raises(MissingDependencyError, match=r"vertebra-core\[mssql\]"):
+            await drv.execute_many("INSERT INTO items VALUES (1)", [])
     finally:
         reset_dependency_cache("vertebra._mssql")
 

@@ -17,7 +17,43 @@
 
 Backends that need an executor raise `MissingDependencyError` when their package is missing and `ImproperConfigurationError` when it is installed but no `executor=` is passed. Vertebra does not ship these executors, so build the backend and pass it in: `QueueService(config, backend=PostgreSQLQueueBackend(config, executor=executor))`.
 
-`RedisQueueBackend` and `ValkeyQueueBackend` raise `MissingDependencyError` without the `redis` package and `ImproperConfigurationError` when `backend_url` has no host (the default `memory://` included), unless `client=` is passed. `valkey://` and `valkeys://` URLs route to `ValkeyQueueBackend`, but the backend accepts only `redis://` and `rediss://` URLs with a host; point a `redis://` URL at the Valkey server or pass `client=`. Install packages with `uv add "psycopg[binary,pool]"`, `uv add redis`, `uv add oracledb`, and `uv add "vertebra-core[spanner]"`.
+`RedisQueueBackend` and `ValkeyQueueBackend` raise `MissingDependencyError` without the `redis` package and `ImproperConfigurationError` when `backend_url` has no host (the default `memory://` included), unless `client=` is passed. `valkey://` and `valkeys://` URLs route to `ValkeyQueueBackend`, but the backend accepts only `redis://` and `rediss://` URLs with a host; point a `redis://` URL at the Valkey server or pass `client=`. Install the optional client package for your selected queue backend (`psycopg[binary,pool]`, `redis`, `oracledb`, or `vertebra-core[spanner]`):
+
+=== "uv"
+
+    ```bash
+    uv add "psycopg[binary,pool]"
+    uv add redis
+    uv add oracledb
+    uv add "vertebra-core[spanner]"
+    ```
+
+=== "pip"
+
+    ```bash
+    pip install "psycopg[binary,pool]"
+    pip install redis
+    pip install oracledb
+    pip install "vertebra-core[spanner]"
+    ```
+
+=== "pdm"
+
+    ```bash
+    pdm add "psycopg[binary,pool]"
+    pdm add redis
+    pdm add oracledb
+    pdm add "vertebra-core[spanner]"
+    ```
+
+=== "poetry"
+
+    ```bash
+    poetry add "psycopg[binary,pool]"
+    poetry add redis
+    poetry add oracledb
+    poetry add "vertebra-core[spanner]"
+    ```
 
 ```python
 from vertebra.framework.queues import (

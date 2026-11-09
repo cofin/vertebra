@@ -925,6 +925,9 @@ def test_optional_dependency_gate_reports_each_malformed_literal(tmp_path: Path)
                 'ensure_module("vtb[mcp]")',
                 'ensure_module("vertebra._bundler")',
                 'MissingDependencyError("vertebra._storage")',
+                'ensure_module(module_name="vertebra._bundler")',
+                'ensure_module("vertebra._bundler", package=None)',
+                'MissingDependencyError("vertebra._storage", install_package=None)',
             ]
         )
         + "\n",
@@ -940,6 +943,9 @@ def test_optional_dependency_gate_reports_each_malformed_literal(tmp_path: Path)
         "pkg/mod.py:14::ensure_module module_name='vtb[mcp]'",
         "pkg/mod.py:15::ensure_module module_name='vertebra._bundler'",
         "pkg/mod.py:16::MissingDependencyError package='vertebra._storage'",
+        "pkg/mod.py:17::ensure_module module_name='vertebra._bundler'",
+        "pkg/mod.py:18::ensure_module module_name='vertebra._bundler'",
+        "pkg/mod.py:19::MissingDependencyError package='vertebra._storage'",
         "pkg/mod.py:1::ensure_module extra='wasm'",
         "pkg/mod.py:2::ensure_module package='numpy is required'",
         "pkg/mod.py:3::MissingDependencyError install_package='vertebra[mcp]'",
@@ -974,6 +980,11 @@ def _optional_dependency_violations(
     return sorted(entries)
 
 
+def _is_non_none_kw(kw: ast.keyword, names: frozenset[str]) -> bool:
+    """Return True when ``kw`` names an override in ``names`` whose value is not a literal ``None``."""
+    return kw.arg in names and not (isinstance(kw.value, ast.Constant) and kw.value.value is None)
+
+
 def _call_dependency_violations(
     node: ast.Call,
     rel_path: str,
@@ -984,8 +995,8 @@ def _call_dependency_violations(
     if callee not in _DEPENDENCY_CALLEES:
         return []
     violations: list[str] = []
-    has_install_override = any(kw.arg in {"install_package", "extra"} for kw in node.keywords)
-    has_hint_override = has_install_override or any(kw.arg == "package" for kw in node.keywords)
+    has_install_override = any(_is_non_none_kw(kw, frozenset({"install_package", "extra"})) for kw in node.keywords)
+    has_hint_override = has_install_override or any(_is_non_none_kw(kw, frozenset({"package"})) for kw in node.keywords)
     if node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str):
         pos_val = node.args[0].value
         if callee == "MissingDependencyError" and (
@@ -1010,6 +1021,13 @@ def _call_dependency_violations(
             _is_invalid_package_literal(val) or (val.startswith("vertebra._") and not has_install_override)
         ):
             violations.append(f"{rel_path}:{node.lineno}::{callee} package={val!r}")
+        elif (
+            callee == "ensure_module"
+            and kw.arg == "module_name"
+            and not has_hint_override
+            and (_is_invalid_package_literal(val) or val.startswith("vertebra._"))
+        ):
+            violations.append(f"{rel_path}:{node.lineno}::{callee} module_name={val!r}")
     return violations
 
 

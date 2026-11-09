@@ -1080,7 +1080,8 @@ async def test_multi_lane_worker_runner_lame_duck_drain_and_otel_spans() -> None
     await backend.close()
 
 
-def test_oracle_queue_backend_requires_oracledb_and_executor(
+@pytest.mark.anyio
+async def test_oracle_queue_backend_requires_oracledb_and_executor(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """OracleQueueBackend raises MissingDependencyError when oracledb is absent and ImproperConfigurationError without executor."""
@@ -1098,8 +1099,18 @@ def test_oracle_queue_backend_requires_oracledb_and_executor(
 
         fake = _FakeOracleQueueExecutor()
         assert isinstance(fake, OracleQueueExecutor)
-        backend = OracleQueueBackend(QueueConfig(), executor=fake)
-        assert backend._executor is fake
+        cfg = QueueConfig(backend_url="oracle://localhost:1521/FREEPDB1")
+        backend = OracleQueueBackend(cfg, executor=fake)
+        service = QueueService(cfg, backend=backend)
+
+        @task(name="oracle_ping", lane="io")
+        def oracle_ping(val: int) -> int:
+            return val + 1
+
+        service.register(oracle_ping)
+        await service.enqueue("oracle_ping", 41)
+        assert await service.drain_once(("io",)) == [42]
+        await service.close()
 
         monkeypatch.setitem(sys.modules, "oracledb", types.ModuleType("oracledb"))
         reset_dependency_cache("oracledb")
@@ -1109,7 +1120,8 @@ def test_oracle_queue_backend_requires_oracledb_and_executor(
         reset_dependency_cache("oracledb")
 
 
-def test_postgres_queue_backend_requires_psycopg_and_executor(
+@pytest.mark.anyio
+async def test_postgres_queue_backend_requires_psycopg_and_executor(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """PostgreSQLQueueBackend raises MissingDependencyError when psycopg is absent and ImproperConfigurationError without executor."""
@@ -1132,9 +1144,19 @@ def test_postgres_queue_backend_requires_psycopg_and_executor(
             dsn="postgresql://pooler:6432/db",
             direct_dsn="postgresql://primary:5432/db",
         )
-        backend = PostgreSQLQueueBackend(postgres_config=pg_config, executor=fake)
+        qcfg = QueueConfig(backend_url="postgresql://pooler:6432/db")
+        backend = PostgreSQLQueueBackend(qcfg, postgres_config=pg_config, executor=fake)
         assert backend.direct_dsn == "postgresql://primary:5432/db"
-        assert backend._executor is fake
+        service = QueueService(qcfg, backend=backend)
+
+        @task(name="pg_ping", lane="io")
+        def pg_ping(val: int) -> int:
+            return val * 2
+
+        service.register(pg_ping)
+        await service.enqueue("pg_ping", 21)
+        assert await service.drain_once(("io",)) == [42]
+        await service.close()
 
         monkeypatch.setitem(sys.modules, "psycopg", types.ModuleType("psycopg"))
         reset_dependency_cache("psycopg")

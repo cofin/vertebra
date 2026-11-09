@@ -75,7 +75,7 @@ class OracleConnectDescriptor(FrozenBaseStruct, frozen=True, gc=False):
         return f"(DESCRIPTION={opts}{address}{connect_data}{security})"
 
     @classmethod
-    def from_tns_descriptor(cls, descriptor: str) -> "OracleConnectDescriptor":
+    def from_tns_descriptor(cls, descriptor: str) -> Self:
         """Parse a TNS `(DESCRIPTION=...)` string or Easy Connect string into `OracleConnectDescriptor`."""
         parsed = OracleCore.parse_tns_descriptor_fields(descriptor)
         return cls(**parsed)
@@ -86,7 +86,7 @@ class OracleConnectDescriptor(FrozenBaseStruct, frozen=True, gc=False):
         return OracleCore.parse_tnsnames_ora(contents)
 
     @classmethod
-    def resolve_tns_alias(cls, contents: str, alias: str) -> "OracleConnectDescriptor | None":
+    def resolve_tns_alias(cls, contents: str, alias: str) -> Self | None:
         """Resolve a TNS alias from `tnsnames.ora` contents into an `OracleConnectDescriptor`."""
         resolved = OracleCore.resolve_tns_alias_raw(contents, alias)
         if resolved is None:
@@ -123,7 +123,7 @@ class OracleWallet(FrozenBaseStruct, frozen=True, gc=False):
     """Parsed mapping of TNS alias names to canonical `(DESCRIPTION=...)` strings."""
 
     @classmethod
-    def from_zip_bytes(cls, data: bytes) -> "OracleWallet":
+    def from_zip_bytes(cls, data: bytes) -> Self:
         """Extract `tnsnames.ora`, `sqlnet.ora`, `ewallet.pem`, and `cwallet.sso` from a `.zip` byte buffer."""
         try:
             with zipfile.ZipFile(io.BytesIO(data), "r") as zf:
@@ -153,7 +153,7 @@ class OracleWallet(FrozenBaseStruct, frozen=True, gc=False):
             raise ImproperConfigurationError(f"Invalid Oracle wallet zip archive: {exc}") from exc
 
     @classmethod
-    def from_path(cls, path: str | Path) -> "OracleWallet":
+    def from_path(cls, path: str | Path) -> Self:
         """Load an Oracle wallet from a `.zip` file path or an extracted wallet directory."""
         resolved = Path(path)
         if not resolved.exists():
@@ -343,7 +343,7 @@ class OracleConfig(BaseDatabaseConfig, frozen=True, gc=False):
         *,
         service_name: str | None = None,
         edition: str | None = None,
-    ) -> "OracleConfig":
+    ) -> Self:
         """Derive a secondary `OracleConfig` targeting a sibling PDB service or EBR edition."""
         target_svc = service_name or self.service_name
         return msgspec.structs.replace(

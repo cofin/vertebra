@@ -11,10 +11,6 @@ from typing import TYPE_CHECKING, Any, ClassVar, Self, cast
 
 from vertebra.db.adapters.oracle.config import OracleConfig
 from vertebra.db.adapters.oracle.core import ORACLE_DIALECT_TAG
-from vertebra.db.arrow import (
-    ARROW_SHM_THRESHOLD_ROWS,
-    ArrowCursor,
-)
 from vertebra.db.driver import SyncDatabaseDriver, ThreadOffloadAsyncDatabaseDriver
 from vertebra.utils.module_loader import ensure_module
 
@@ -29,6 +25,8 @@ __all__ = (
 
 class SyncOracleDriver(SyncDatabaseDriver[OracleConfig]):
     """Synchronous Oracle driver backed by the native ``vertebra._oracle`` module from ``vertebra-core[oracle]``."""
+
+    __slots__ = ()
 
     dialect: ClassVar[str] = "oracle"
     dialect_tag: ClassVar[int] = ORACLE_DIALECT_TAG
@@ -67,25 +65,15 @@ class SyncOracleDriver(SyncDatabaseDriver[OracleConfig]):
         _require_oracle_native()
         super().cancel()
 
-    def execute(
+    def execute_many(
         self,
         sql: str,
-        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+        parameter_sets: Sequence[Sequence[Any] | Mapping[str, Any]],
         **kwargs: Any,
     ) -> int:
-        """Execute a DML or DDL statement; raises ``MissingDependencyError`` without ``vertebra._oracle``."""
+        """Execute a batch statement; raises ``MissingDependencyError`` without ``vertebra._oracle``."""
         _require_oracle_native()
-        return super().execute(sql, parameters, **kwargs)
-
-    def execute_tuples(
-        self,
-        sql: str,
-        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
-        **kwargs: Any,
-    ) -> list[tuple[Any, ...]]:
-        """Execute a query and return positional tuples; raises ``MissingDependencyError`` without ``vertebra._oracle``."""
-        _require_oracle_native()
-        return super().execute_tuples(sql, parameters, **kwargs)
+        return super().execute_many(sql, parameter_sets, **kwargs)
 
     def execute_with_description(
         self,
@@ -96,30 +84,6 @@ class SyncOracleDriver(SyncDatabaseDriver[OracleConfig]):
         """Execute SQL and return ``(rows, column_names)``; raises ``MissingDependencyError`` without ``vertebra._oracle``."""
         _require_oracle_native()
         return super().execute_with_description(sql, parameters, **kwargs)
-
-    def select(
-        self,
-        sql: str,
-        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
-        *,
-        schema_type: type[Any] | None = None,
-        **kwargs: Any,
-    ) -> list[Any]:
-        """Execute a ``SELECT`` query; raises ``MissingDependencyError`` without ``vertebra._oracle``."""
-        _require_oracle_native()
-        return super().select(sql, parameters, schema_type=schema_type, **kwargs)
-
-    def select_to_arrow(
-        self,
-        sql: str,
-        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
-        *,
-        threshold_rows: int = ARROW_SHM_THRESHOLD_ROWS,
-        **kwargs: Any,
-    ) -> ArrowCursor:
-        """Execute a query into an ``ArrowCursor``; raises ``MissingDependencyError`` without ``vertebra._oracle``."""
-        _require_oracle_native()
-        return super().select_to_arrow(sql, parameters, threshold_rows=threshold_rows, **kwargs)
 
     def load_from_arrow(
         self,
@@ -138,6 +102,8 @@ class SyncOracleDriver(SyncDatabaseDriver[OracleConfig]):
 
 class AsyncOracleDriver(ThreadOffloadAsyncDatabaseDriver[OracleConfig, SyncOracleDriver]):
     """Asynchronous Oracle driver offloading to ``SyncOracleDriver``; requires ``vertebra._oracle`` from ``vertebra-core[oracle]``."""
+
+    __slots__ = ()
 
     dialect: ClassVar[str] = "oracle"
     dialect_tag: ClassVar[int] = ORACLE_DIALECT_TAG
