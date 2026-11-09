@@ -15,6 +15,7 @@ None.
 
 ## 3. Planned Feature Specifications (`state: planned`)
 
+- [`driver-fail-loud`](driver-fail-loud/spec.md) — Fail-loud database drivers and queue backends removing SQLite and `memory://` stand-ins, dead `vertebra-db` pools/codecs, and stale install hints across 13 chapters and 38 tasks ([`chapters/index.md`](driver-fail-loud/chapters/index.md)).
 - [`native-postgres-driver`](native-postgres-driver/spec.md) — Standalone Rust PostgreSQL wheel (`vertebra-postgres`) covering wire authentication, cloud mTLS/IAM, pools, single-Sync pipelines, binary COPY, SHM Arrow, notifications, logical replication, and native adapter cutover (`t01`–`t102`).
 
 ## 4. Draft Child Flow Charters (`state: draft`)
@@ -34,6 +35,8 @@ None.
 
 - [`gap-analysis_20261103.md`](native-data-platform/research/gap-analysis_20261103.md) — Broker, native driver, and storage gap analysis (`native-data-platform`).
 - [`rust-driver-crates_20261103.md`](native-data-platform/research/rust-driver-crates_20261103.md) — Primary-source Rust client crate comparison and per-engine wheel packaging (`native-data-platform`).
+- [`driver-restructure_20261107.md`](driver-fail-loud/research/driver-restructure_20261107.md) — Fail-loud driver restructure and stand-in removal audit (`driver-fail-loud`).
+- [`change-surface_20261107.md`](driver-fail-loud/research/change-surface_20261107.md) — File-level change surface across drivers, queues, packaging, conformance, and docs (`driver-fail-loud`).
 - [`protocol-and-execution_20261105.md`](native-postgres-driver/research/protocol-and-execution_20261105.md) — PostgreSQL v3.0 extended query, single-Sync pipeline, COPY, and pgoutput v1 wire semantics (`native-postgres-driver`).
 - [`cloud-material_20261105.md`](native-postgres-driver/research/cloud-material_20261105.md) — Cloud SQL Admin and AlloyDB ephemeral mTLS certificate and IAM token lifecycle (`native-postgres-driver`).
 - [`audit-findings_20261103.md`](integration-remediation/research/audit-findings_20261103.md) — Audit findings across database extensions, framework, GCP drivers, MCP/WebMCP, and `vertebra.db` (`integration-remediation`).

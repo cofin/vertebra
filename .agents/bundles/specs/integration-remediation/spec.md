@@ -11,19 +11,19 @@ research:
   - research/audit-findings_20261103.md
   - research/google-cloud-rust_20261103.md
 plan_revision: 8
-plan_commit: 07ea4a4b
+plan_commit: fd571e3a
 state_revision: 3
 current_task: null
-last_verified_checkpoint: 07ea4a4b
+last_verified_checkpoint: fd571e3a
 created_at: "2026-11-03T03:30:00Z"
-updated_at: "2026-11-09T02:25:00Z"
+updated_at: "2026-11-08T20:15:00Z"
 generated:
   by: flow-setup
   at: "2026-11-07T04:15:00Z"
 verified:
-  - by: agent:flow-archive
-    at: "2026-11-09T02:25:00Z"
-    commit: 07ea4a4b
+  - by: agent:flow-revise
+    at: "2026-11-08T20:15:00Z"
+    commit: fd571e3a
   - by: agent:flow-setup
     at: "2026-11-07T04:15:00Z"
     commit: 9af810f5
@@ -55,7 +55,7 @@ tags:
 - **Remaining Open Child Flows**: `sqlspec-adapter-parity` (Ch4), `queues-tasks-and-channels` (Ch5), and `sqlalchemy-and-django-integration` (Ch6) remain in `draft` sequenced behind sibling [native-data-platform](../native-data-platform/spec.md) driver and broker cutovers [^sqlspec-adapters].
 <!-- truth: end -->
 
-Baseline: `main @ 077a3fe9` / `HEAD @ 07ea4a4b` (Chapters 1 `critical-correctness-fixes` [`364c7cbe`], 2 `gcp-wire-protocol-correctness` [`984ce732`], 9 `gcp-driver-resilience` [`abd33ab6`], the `Sync*` / `Async*` class split [`f7417015`], `db-layout-and-contract` [`21c99f95`], Chapter 3 `db-engine-primitives` [`80ff8a65`], post-merge review remediation [`2b737240`], Chapter 8 `runtime-structure-and-throughput` [`d2fa5072`], and Chapter 7 `mcp-webmcp-core` [`077a3fe9`] completed and merged onto `main`, and sibling `storage-completeness` [`77c6acfa`] and `storage-remediation` [`c8c8998a`] completed and archived on the feature branch). Verified audit findings live in [research/audit-findings_20261103.md](research/audit-findings_20261103.md).
+Baseline: `main @ 077a3fe9` / `HEAD @ fd571e3a` (Chapters 1 `critical-correctness-fixes` [`364c7cbe`], 2 `gcp-wire-protocol-correctness` [`984ce732`], 9 `gcp-driver-resilience` [`abd33ab6`], the `Sync*` / `Async*` class split [`f7417015`], `db-layout-and-contract` [`21c99f95`], Chapter 3 `db-engine-primitives` [`80ff8a65`], post-merge review remediation [`2b737240`], Chapter 8 `runtime-structure-and-throughput` [`d2fa5072`], and Chapter 7 `mcp-webmcp-core` [`077a3fe9`] completed and merged onto `main`, and sibling `storage-completeness` [`a2af5066`] completed and archived on the feature branch). Verified audit findings live in [research/audit-findings_20261103.md](research/audit-findings_20261103.md).
 
 ## 1. North Star Goal & Problem Framing
 
@@ -194,8 +194,8 @@ flowchart LR
 
 ## Continuity Snapshot
 
-- **Flow ID:** `integration-remediation` (`state: planned`, `plan_revision: 8`, `plan_commit: 07ea4a4b`, `last_verified_checkpoint: 07ea4a4b`)
-- **Active Focus:** Chapters 1, 2, 3, 7 (`077a3fe9`), 8 (`d2fa5072`), and 9 are merged onto `main @ 077a3fe9`, and sibling `storage-completeness` (`77c6acfa`) and `storage-remediation` (`c8c8998a`) are archived on the feature branch. Sibling `native-postgres-driver` and the remaining per-engine native driver flows execute next ahead of Chapters 4 (`sqlspec-adapter-parity`), 5 (`queues-tasks-and-channels`), and 6 (`sqlalchemy-and-django-integration`).
+- **Flow ID:** `integration-remediation` (`state: planned`, `plan_revision: 8`, `plan_commit: fd571e3a`, `last_verified_checkpoint: fd571e3a`)
+- **Active Focus:** Chapters 1, 2, 3, 7 (`077a3fe9`), 8 (`d2fa5072`), and 9 are merged onto `main @ 077a3fe9` (`HEAD @ fd571e3a`), and sibling `storage-completeness` (`a2af5066`) is archived on the feature branch. Sibling Wave 1 flows `storage-remediation`, `driver-fail-loud`, and `native-postgres-driver` execute next ahead of Chapters 4 (`sqlspec-adapter-parity`), 5 (`queues-tasks-and-channels`), and 6 (`sqlalchemy-and-django-integration`).
 - **Completed Checkpoints:** `critical-correctness-fixes` (`364c7cbe`), `gcp-wire-protocol-correctness` (`984ce732`), `gcp-driver-resilience` (`abd33ab6`), `db-engine-primitives` (`80ff8a65`), `runtime-structure-and-throughput` (`d2fa5072`), and `mcp-webmcp-core` (`077a3fe9`).
 - **Key decisions:**
   - Engine adapters and local primitives live under `vertebra/db/adapters/<engine>/` backed by per-engine PyO3 wheels `src/rs/vertebra-<engine>` (`vertebra._<engine>`); framework and agent integrations live under `vertebra.extensions.*`, `vertebra.framework.*`, and `vertebra.agent.tools`.

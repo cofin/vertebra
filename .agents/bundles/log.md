@@ -1,5 +1,9 @@
 # Bundle Activity Log
 
+## [2026-11-09T02:30:00Z] flow-plan | driver-fail-loud
+
+Approved `driver-fail-loud` at 13 chapters and 38 tasks ahead of the standalone native database driver flows, removing SQLite and `memory://` stand-ins across database drivers and SQLAlchemy DB-API, requiring live or injected collaborators across queue backends, deleting dead `vertebra-db` pools and superseded codecs, aligning `MissingDependencyError` install hints behind an AST extras gate, making conformance skip/fail outcomes explicit, and updating database, queue, and agent docs and OKF knowledge.
+
 ## [2026-11-09T02:25:00Z] flow-archive | storage-remediation
 
 Completed 6 chapters and 20 tasks on the feature branch; final correctness and fresh quality review `c8c8998a` have no unresolved findings. Source range `077a3fe9..c8c8998a` is preserved in Git. Full lint, locked Rust workspace, Python (2795 passed, 7 skipped), all-five native rebuild/stubtest, and documentation gates pass.
