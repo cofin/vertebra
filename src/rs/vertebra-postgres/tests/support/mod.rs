@@ -245,3 +245,122 @@ where
     }
     stream.flush().await
 }
+
+/// Parsed frontend `SASLInitialResponse` (`'p'`) payload.
+#[derive(Debug, Clone)]
+pub struct ParsedSaslInitial {
+    pub mechanism: String,
+    pub gs2_header: String,
+    pub client_first_bare: String,
+    pub client_nonce: String,
+}
+
+/// Parse a `SASLInitialResponse` (`'p'`) payload into mechanism, GS2 header, bare client-first, and nonce.
+pub fn parse_sasl_initial(payload: &[u8]) -> ParsedSaslInitial {
+    let nul_pos = payload
+        .iter()
+        .position(|b| *b == 0)
+        .expect("SASLInitialResponse mechanism NUL");
+    let mechanism = String::from_utf8(payload[..nul_pos].to_vec()).expect("SASL mechanism utf8");
+    let rest = &payload[nul_pos + 1..];
+    assert!(rest.len() >= 4, "SASLInitialResponse length prefix");
+    let data_len = u32::from_be_bytes([rest[0], rest[1], rest[2], rest[3]]) as usize;
+    assert_eq!(rest.len() - 4, data_len, "SASLInitialResponse data length");
+    let msg = String::from_utf8(rest[4..].to_vec()).expect("SASLInitialResponse utf8");
+    let bare_idx = msg
+        .find("n=,r=")
+        .expect("SCRAM client-first-message must contain n=,r=");
+    let gs2_header = msg[..bare_idx].to_string();
+    let client_first_bare = msg[bare_idx..].to_string();
+    let client_nonce = client_first_bare
+        .strip_prefix("n=,r=")
+        .expect("n=,r= prefix")
+        .to_string();
+    ParsedSaslInitial {
+        mechanism,
+        gs2_header,
+        client_first_bare,
+        client_nonce,
+    }
+}
+
+/// Compute PBKDF2-HMAC-SHA256 (`Hi`) and verify client `SASLResponse`, returning `v=<base64>` server-final.
+pub fn scram_verify_and_sign(
+    normalized_password: &[u8],
+    initial: &ParsedSaslInitial,
+    server_first: &str,
+    salt: &[u8],
+    iterations: u32,
+    expected_cbind_data: &[u8],
+    client_final: &str,
+) -> String {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD;
+    use hmac::{Hmac, Mac};
+    use sha2::{Digest, Sha256};
+
+    let (without_proof, proof_b64) = client_final
+        .rsplit_once(",p=")
+        .expect("client-final-message must end with ,p=");
+
+    let mut expected_c = initial.gs2_header.as_bytes().to_vec();
+    expected_c.extend_from_slice(expected_cbind_data);
+    let expected_c_prefix = format!("c={},r=", STANDARD.encode(&expected_c));
+    assert!(
+        without_proof.starts_with(&expected_c_prefix),
+        "unexpected channel binding prefix in {without_proof}, expected {expected_c_prefix}"
+    );
+
+    let mut u_prev = {
+        let mut mac = Hmac::<Sha256>::new_from_slice(normalized_password).unwrap();
+        mac.update(salt);
+        mac.update(&[0, 0, 0, 1]);
+        mac.finalize().into_bytes()
+    };
+    let mut salted_password = u_prev;
+    for _ in 1..iterations {
+        let mut mac = Hmac::<Sha256>::new_from_slice(normalized_password).unwrap();
+        mac.update(&u_prev);
+        u_prev = mac.finalize().into_bytes();
+        for (a, b) in salted_password.iter_mut().zip(u_prev.iter()) {
+            *a ^= *b;
+        }
+    }
+
+    let client_key = {
+        let mut mac = Hmac::<Sha256>::new_from_slice(&salted_password).unwrap();
+        mac.update(b"Client Key");
+        mac.finalize().into_bytes()
+    };
+    let stored_key = Sha256::digest(client_key);
+    let auth_message = format!(
+        "{},{},{}",
+        initial.client_first_bare, server_first, without_proof
+    );
+    let client_sig = {
+        let mut mac = Hmac::<Sha256>::new_from_slice(&stored_key).unwrap();
+        mac.update(auth_message.as_bytes());
+        mac.finalize().into_bytes()
+    };
+    let mut expected_proof = client_key;
+    for (p, s) in expected_proof.iter_mut().zip(client_sig.iter()) {
+        *p ^= *s;
+    }
+    assert_eq!(
+        proof_b64,
+        STANDARD.encode(expected_proof),
+        "client SCRAM proof mismatch"
+    );
+
+    let server_key = {
+        let mut mac = Hmac::<Sha256>::new_from_slice(&salted_password).unwrap();
+        mac.update(b"Server Key");
+        mac.finalize().into_bytes()
+    };
+    let server_sig = {
+        let mut mac = Hmac::<Sha256>::new_from_slice(&server_key).unwrap();
+        mac.update(auth_message.as_bytes());
+        mac.finalize().into_bytes()
+    };
+    format!("v={}", STANDARD.encode(server_sig))
+}

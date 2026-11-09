@@ -5,7 +5,7 @@ chapter_id: ch03-scram-and-channel-binding
 title: Derive RFC 5929 tls-server-end-point digests from verified peer certificates
 description: Implement binding::tls_server_end_point using x509-parser 0.18.1 and sha2 across RSA, ECDSA, DSA, RSA-PSS, SHA-1/MD5 substitution, and EdDSA unavailable-binding rules, and capture peer leaf digests in tls::connect.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:

@@ -378,7 +378,12 @@ impl<'a> ConnectAttempt<'a> {
                     return Ok(pending.commit(conn));
                 }
                 other => {
-                    let completed = auth.handle_message(&other, &config, &mut write_buf)?;
+                    let completed = auth.handle_message(
+                        &other,
+                        &config,
+                        tls_server_end_point.as_deref(),
+                        &mut write_buf,
+                    )?;
                     if !write_buf.is_empty() {
                         if Instant::now() >= deadline {
                             return Err(PostgresError::Transport(

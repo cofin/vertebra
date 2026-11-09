@@ -5,7 +5,7 @@ chapter_id: ch03-scram-and-channel-binding
 title: "Chapter 03: SCRAM-SHA-256 and Peer Certificate Channel Binding"
 description: Ordered SCRAM-SHA-256 SASL state machine, RFC 5929 X.509 leaf tls-server-end-point digest derivation, and policy-driven SCRAM-SHA-256-PLUS channel binding with downgrade signaling.
 status: stable
-state: planned
+state: completed
 planning_status: complete
 depends_on_chapters:
   - ch02-wire-codec-and-session-startup
@@ -133,9 +133,9 @@ Progress: `[0/0 files documented in ch03]`
 
 ## 5. Implementation Plan
 
-- [ ] native-postgres-driver:ch03:t01 — Authenticate ordered SCRAM-SHA-256 SASL exchanges (tasks/t01-scram-sha256.md)
-- [ ] native-postgres-driver:ch03:t02 — Derive RFC 5929 tls-server-end-point digests from verified peer certificates (tasks/t02-peer-certificate-binding.md)
-- [ ] native-postgres-driver:ch03:t03 — Enforce SCRAM-SHA-256-PLUS channel-binding policies and GS2 downgrade protection (tasks/t03-scram-sha256-plus.md)
+- [x] native-postgres-driver:ch03:t01 — Authenticate ordered SCRAM-SHA-256 SASL exchanges (tasks/t01-scram-sha256.md)
+- [x] native-postgres-driver:ch03:t02 — Derive RFC 5929 tls-server-end-point digests from verified peer certificates (tasks/t02-peer-certificate-binding.md)
+- [x] native-postgres-driver:ch03:t03 — Enforce SCRAM-SHA-256-PLUS channel-binding policies and GS2 downgrade protection (tasks/t03-scram-sha256-plus.md)
 
 **Chapter Recovery Checkpoint:** `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --locked && cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-postgres --all-targets --locked -- -D warnings` exits `0`.
 

@@ -103,10 +103,12 @@ pub async fn connect(
             .map_err(|_| PostgresError::Transport("TLS handshake timed out".to_string()))?
             .map_err(|e| PostgresError::Transport(e.to_string()))?;
 
+            let tls_server_end_point = extract_tls_server_end_point(&upgraded)?;
+
             Ok(DialedTransport {
                 stream: upgraded,
                 tls_negotiated: true,
-                tls_server_end_point: None,
+                tls_server_end_point,
             })
         }
         b'N' => {
@@ -126,6 +128,25 @@ pub async fn connect(
         other => Err(PostgresError::Protocol(format!(
             "unexpected SSLRequest response byte 0x{other:02x}"
         ))),
+    }
+}
+
+pub(crate) fn extract_tls_server_end_point(
+    stream: &TransportStream,
+) -> Result<Option<Vec<u8>>, PostgresError> {
+    match stream {
+        TransportStream::TlsTcp(tls) => {
+            if let Some(leaf) = tls.get_ref().1.peer_certificates().and_then(|c| c.first()) {
+                match crate::binding::tls_server_end_point(leaf.as_ref()) {
+                    Ok(digest) => Ok(Some(digest)),
+                    Err(PostgresError::UnsupportedAuth(_)) => Ok(None),
+                    Err(err) => Err(err),
+                }
+            } else {
+                Ok(None)
+            }
+        }
+        _ => Ok(None),
     }
 }
 

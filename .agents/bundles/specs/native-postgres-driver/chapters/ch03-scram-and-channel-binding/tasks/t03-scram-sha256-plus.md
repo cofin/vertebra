@@ -5,7 +5,7 @@ chapter_id: ch03-scram-and-channel-binding
 title: Enforce SCRAM-SHA-256-PLUS channel-binding policies and GS2 downgrade protection
 description: Select and verify SCRAM-SHA-256-PLUS across Disable, Prefer, and Require channel-binding policies, emitting RFC 5802 GS2 y,, on bound TLS plain-only offers and rejecting downgrade or replay.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:

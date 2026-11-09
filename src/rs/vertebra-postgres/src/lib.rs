@@ -3,6 +3,7 @@
 use pyo3::prelude::*;
 
 pub mod auth;
+pub mod binding;
 pub mod config;
 pub mod errors;
 pub mod protocol;

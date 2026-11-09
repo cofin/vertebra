@@ -5,7 +5,7 @@ chapter_id: ch03-scram-and-channel-binding
 title: Authenticate ordered SCRAM-SHA-256 SASL exchanges
 description: Extend auth::Authentication with ordered SCRAM-SHA-256 SASL phases over postgres-protocol 0.6.12, enforcing 1..=100_000 iteration bounds, strict server nonce extension, and post-PBKDF2 deadline checks.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
