@@ -8,6 +8,7 @@ from vertebra.db.arrow import ArrowCursor
 __version__: str
 FREE_THREADED: bool
 GIL_USED: bool
+ORACLESQL_NATIVE_TTC_PIPELINE_SUPPORTED: bool
 
 @final
 class OracleColumn:
@@ -61,6 +62,21 @@ class OracleQueryResult:
     def to_dicts(self) -> list[dict[str, Any]]: ...
     def __len__(self) -> int: ...
     def is_empty(self) -> bool: ...
+
+@final
+class OraclePipelineOutcome:
+    @property
+    def status(self) -> str: ...
+    @property
+    def result(self) -> OracleQueryResult | None: ...
+    @property
+    def error(self) -> Any | None: ...
+    def __new__(
+        cls,
+        status: str,
+        result: OracleQueryResult | None = None,
+        error: Any | None = None,
+    ) -> OraclePipelineOutcome: ...
 
 @final
 class SyncOracleClient:
@@ -175,6 +191,18 @@ class SyncOracleClient:
         force_shm: bool | None = None,
         enable_lowercase_column_names: bool | None = None,
     ) -> ArrowCursor: ...
+    def execute_pipeline_batch(
+        self,
+        operations: Sequence[tuple[Any, ...]],
+        *,
+        continue_on_error: bool = False,
+    ) -> list[OraclePipelineOutcome]: ...
+    def run_pipeline(
+        self,
+        operations: Sequence[tuple[Any, ...]],
+        *,
+        continue_on_error: bool = False,
+    ) -> list[OraclePipelineOutcome]: ...
 
 @final
 class AsyncOracleClient:
@@ -289,6 +317,18 @@ class AsyncOracleClient:
         force_shm: bool | None = None,
         enable_lowercase_column_names: bool | None = None,
     ) -> Awaitable[ArrowCursor]: ...
+    def execute_pipeline_batch(
+        self,
+        operations: Sequence[tuple[Any, ...]],
+        *,
+        continue_on_error: bool = False,
+    ) -> Awaitable[list[OraclePipelineOutcome]]: ...
+    def run_pipeline(
+        self,
+        operations: Sequence[tuple[Any, ...]],
+        *,
+        continue_on_error: bool = False,
+    ) -> Awaitable[list[OraclePipelineOutcome]]: ...
 
 @final
 class SyncOraclePool:
@@ -491,7 +531,9 @@ __all__ = [
     "AsyncOraclePool",
     "FREE_THREADED",
     "GIL_USED",
+    "ORACLESQL_NATIVE_TTC_PIPELINE_SUPPORTED",
     "OracleColumn",
+    "OraclePipelineOutcome",
     "OracleQueryResult",
     "SyncOracleClient",
     "SyncOraclePool",

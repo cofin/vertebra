@@ -20,8 +20,10 @@ import vertebra._oracle as _oracle
 from vertebra._vertebra import VectorView
 from vertebra.db.adapters.oracle import (
     AsyncOracleDriver,
+    AsyncOraclePipeline,
     AsyncOraclePool,
     SyncOracleDriver,
+    SyncOraclePipeline,
     SyncOraclePool,
 )
 from vertebra.db.adapters.oracle.config import (
@@ -36,11 +38,13 @@ from vertebra.db.adapters.oracle.config import (
 from vertebra.db.adapters.oracle.core import OracleCore
 from vertebra.db.driver import (
     DataError,
+    IntegrityError,
     InterfaceError,
     PoolExhaustedError,
     ProgrammingError,
     QueryCancelledError,
 )
+from vertebra.db.driver.capabilities import AsyncPipelineCapable, SyncPipelineCapable
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -1042,6 +1046,181 @@ async def test_oracle_driver_savepoint_and_rollback_to_savepoint() -> None:
             await async_driver.rollback_to_savepoint("bad;name")
         with pytest.raises(ValueError, match="savepoint"):
             await async_driver.release_savepoint("bad;name")
+
+
+@pytest.mark.anyio
+async def test_sync_and_async_pipeline_delayed_commit_on_clean_exit() -> None:
+    """Verify SyncOraclePipeline and AsyncOraclePipeline hold transaction across results() and commit on exit."""
+    with SyncOracleDriver() as driver:
+        assert isinstance(driver, SyncPipelineCapable)
+        driver.execute("CREATE TABLE items (id NUMBER PRIMARY KEY, label VARCHAR2(32))")
+        with driver.pipeline() as pipe:
+            assert isinstance(pipe, SyncOraclePipeline)
+            assert driver.in_transaction is True
+            with pytest.raises(InterfaceError, match="already active"):
+                driver.pipeline()
+            pipe.execute("INSERT INTO items (id, label) VALUES (:1, :2)", (1, "a"))
+            pipe.select("SELECT id, label FROM items WHERE id = :1", (1,))
+            res = pipe.results()
+            assert res == [1, [{"id": 1, "label": "a"}]]
+            assert driver.in_transaction is True
+            assert driver.transaction_events == ("BEGIN",)
+        assert driver.in_transaction is False
+        assert driver.transaction_events == ("BEGIN", "COMMIT")
+        assert driver.select("SELECT id, label FROM items") == [{"id": 1, "label": "a"}]
+
+    async with AsyncOracleDriver() as async_driver:
+        assert isinstance(async_driver, AsyncPipelineCapable)
+        await async_driver.execute("CREATE TABLE items (id NUMBER PRIMARY KEY, label VARCHAR2(32))")
+        async with async_driver.pipeline() as apipe:
+            assert isinstance(apipe, AsyncOraclePipeline)
+            assert async_driver.in_transaction is True
+            with pytest.raises(InterfaceError, match="already active"):
+                async_driver.pipeline()
+            apipe.execute("INSERT INTO items (id, label) VALUES (:1, :2)", (1, "a"))
+            apipe.select("SELECT id, label FROM items WHERE id = :1", (1,))
+            ares = await apipe.results()
+            assert ares == [1, [{"id": 1, "label": "a"}]]
+            assert async_driver.in_transaction is True
+            assert async_driver.transaction_events == ("BEGIN",)
+        assert async_driver.in_transaction is False
+        assert async_driver.transaction_events == ("BEGIN", "COMMIT")
+        assert await async_driver.select("SELECT id, label FROM items") == [{"id": 1, "label": "a"}]
+
+
+@pytest.mark.anyio
+async def test_pipeline_rolls_back_when_caller_raises_after_results() -> None:
+    """Verify raising an exception after pipe.results() inside the with block rolls back the batch."""
+    with SyncOracleDriver() as driver:
+        driver.execute("CREATE TABLE items (id NUMBER PRIMARY KEY, label VARCHAR2(32))")
+        with pytest.raises(ValueError, match="hydration failed"), driver.pipeline() as pipe:
+            pipe.execute("INSERT INTO items (id, label) VALUES (:1, :2)", (1, "transient"))
+            pipe.select("SELECT id, label FROM items WHERE id = :1", (1,))
+            res = pipe.results()
+            assert res == [1, [{"id": 1, "label": "transient"}]]
+            raise ValueError("hydration failed")
+        assert driver.in_transaction is False
+        assert driver.transaction_events == ("BEGIN", "ROLLBACK")
+        assert driver.select("SELECT id, label FROM items") == []
+
+        with pytest.raises(InterfaceError, match="unexecuted operations"), driver.pipeline() as pipe2:
+            pipe2.execute("INSERT INTO items (id, label) VALUES (:1, :2)", (2, "unflushed"))
+        assert driver.select("SELECT id, label FROM items") == []
+
+    async with AsyncOracleDriver() as async_driver:
+        await async_driver.execute("CREATE TABLE items (id NUMBER PRIMARY KEY, label VARCHAR2(32))")
+        with pytest.raises(ValueError, match="hydration failed"):
+            async with async_driver.pipeline() as apipe:
+                apipe.execute("INSERT INTO items (id, label) VALUES (:1, :2)", (1, "transient"))
+                apipe.select("SELECT id, label FROM items WHERE id = :1", (1,))
+                ares = await apipe.results()
+                assert ares == [1, [{"id": 1, "label": "transient"}]]
+                raise ValueError("hydration failed")
+        assert async_driver.in_transaction is False
+        assert async_driver.transaction_events == ("BEGIN", "ROLLBACK")
+        assert await async_driver.select("SELECT id, label FROM items") == []
+
+
+@pytest.mark.anyio
+async def test_pipeline_nested_inside_transaction_uses_oracle_savepoint_without_release() -> None:
+    """Verify nested pipeline inside transaction() uses SAVEPOINT _vtb_pipe_<n> without RELEASE SAVEPOINT."""
+    with SyncOracleDriver() as driver:
+        driver.execute("CREATE TABLE items (id NUMBER PRIMARY KEY, label VARCHAR2(32))")
+        with driver.transaction():
+            driver.execute("INSERT INTO items (id, label) VALUES (1, 'outer')")
+            with driver.pipeline() as pipe1:
+                pipe1.execute("INSERT INTO items (id, label) VALUES (2, 'inner_ok')")
+                assert pipe1.results() == [1]
+            assert driver.in_transaction is True
+            assert list(driver.transaction_events) == ["BEGIN", "SAVEPOINT _vtb_pipe_1"]
+
+            with pytest.raises(RuntimeError, match="inner abort"), driver.pipeline() as pipe2:
+                pipe2.execute("INSERT INTO items (id, label) VALUES (3, 'inner_bad')")
+                assert pipe2.results() == [1]
+                raise RuntimeError("inner abort")
+            assert driver.in_transaction is True
+            assert list(driver.transaction_events) == [
+                "BEGIN",
+                "SAVEPOINT _vtb_pipe_1",
+                "SAVEPOINT _vtb_pipe_2",
+                "ROLLBACK TO SAVEPOINT _vtb_pipe_2",
+            ]
+            assert driver.select("SELECT id, label FROM items ORDER BY id") == [
+                {"id": 1, "label": "outer"},
+                {"id": 2, "label": "inner_ok"},
+            ]
+        assert driver.in_transaction is False
+        assert list(driver.transaction_events) == [
+            "BEGIN",
+            "SAVEPOINT _vtb_pipe_1",
+            "SAVEPOINT _vtb_pipe_2",
+            "ROLLBACK TO SAVEPOINT _vtb_pipe_2",
+            "COMMIT",
+        ]
+
+    async with AsyncOracleDriver() as async_driver:
+        await async_driver.execute("CREATE TABLE items (id NUMBER PRIMARY KEY, label VARCHAR2(32))")
+        async with async_driver.transaction():
+            await async_driver.execute("INSERT INTO items (id, label) VALUES (1, 'outer')")
+            async with async_driver.pipeline() as apipe1:
+                apipe1.execute("INSERT INTO items (id, label) VALUES (2, 'inner_ok')")
+                assert await apipe1.results() == [1]
+            with pytest.raises(RuntimeError, match="inner abort"):
+                async with async_driver.pipeline() as apipe2:
+                    apipe2.execute("INSERT INTO items (id, label) VALUES (3, 'inner_bad')")
+                    assert await apipe2.results() == [1]
+                    raise RuntimeError("inner abort")
+            assert async_driver.transaction_events == (
+                "BEGIN",
+                "SAVEPOINT _vtb_pipe_1",
+                "SAVEPOINT _vtb_pipe_2",
+                "ROLLBACK TO SAVEPOINT _vtb_pipe_2",
+            )
+        assert await async_driver.select("SELECT id, label FROM items ORDER BY id") == [
+            {"id": 1, "label": "outer"},
+            {"id": 2, "label": "inner_ok"},
+        ]
+
+
+@pytest.mark.anyio
+async def test_pipeline_mid_batch_error_marks_subsequent_skipped_and_rolls_back() -> None:
+    """Verify mid-batch ORA-00001 failure marks later steps 'skipped', raises IntegrityError, and rolls back."""
+    with SyncOracleDriver() as driver:
+        driver.execute("CREATE TABLE items (id NUMBER PRIMARY KEY, label VARCHAR2(32))")
+        with pytest.raises(IntegrityError) as exc_info, driver.pipeline() as pipe:
+            pipe.execute("INSERT INTO items (id, label) VALUES (:1, :2)", (1, "first"))
+            pipe.execute("INSERT INTO items (id, label) VALUES (:1, :2)", (1, "duplicate"))
+            pipe.execute("INSERT INTO items (id, label) VALUES (:1, :2)", (2, "never_run"))
+            pipe.results()
+        assert exc_info.value.sqlstate == "23505"
+        assert exc_info.value.vendor_code == 1
+        statuses = tuple(o.status for o in driver.last_pipeline_outcomes)
+        assert statuses == ("completed", "error", "skipped")
+        assert driver.transaction_events == ("BEGIN", "ROLLBACK")
+        assert driver.select("SELECT id, label FROM items") == []
+
+    async with AsyncOracleDriver() as async_driver:
+        await async_driver.execute("CREATE TABLE items (id NUMBER PRIMARY KEY, label VARCHAR2(32))")
+        with pytest.raises(IntegrityError) as aexc_info:
+            async with async_driver.pipeline() as apipe:
+                apipe.execute("INSERT INTO items (id, label) VALUES (:1, :2)", (1, "first"))
+                apipe.execute("INSERT INTO items (id, label) VALUES (:1, :2)", (1, "duplicate"))
+                apipe.execute("INSERT INTO items (id, label) VALUES (:1, :2)", (2, "never_run"))
+                await apipe.results()
+        assert aexc_info.value.sqlstate == "23505"
+        assert tuple(o.status for o in async_driver.last_pipeline_outcomes) == (
+            "completed",
+            "error",
+            "skipped",
+        )
+        assert async_driver.transaction_events == ("BEGIN", "ROLLBACK")
+        assert await async_driver.select("SELECT id, label FROM items") == []
+
+
+def test_oracledb_crate_ttc_pipeline_capability_probe() -> None:
+    """Verify ORACLESQL_NATIVE_TTC_PIPELINE_SUPPORTED is False on oracledb =26.0.0-beta.5."""
+    assert _oracle.ORACLESQL_NATIVE_TTC_PIPELINE_SUPPORTED is False
+
 
 
 

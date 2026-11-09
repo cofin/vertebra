@@ -7,7 +7,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyByteArray, PyBytes, PyDict, PyString, PyTuple};
+use pyo3::types::{PyAny, PyByteArray, PyBytes, PyDict, PyList, PyString, PyTuple};
 use tokio::sync::oneshot;
 use vertebra_core::notify::SyncCompletionQueue;
 use vertebra_db::arrow_shm::write_shm_arrow_region_unregistered;
@@ -26,6 +26,9 @@ use crate::types::{
 
 /// Attribute name used to attach `vertebra._oracle`'s `AsyncCompletionQueue` drainer to an `asyncio` event loop.
 pub const ORACLE_COMPLETION_DRAINER_ATTR: &str = "_vertebra_oracle_completion_drainer";
+
+/// Capability constant indicating whether `oracledb` exposes non-blocking TTC wire pipelining (`false` on `=26.0.0-beta.5`).
+pub const ORACLESQL_NATIVE_TTC_PIPELINE_SUPPORTED: bool = false;
 
 const ARROW_SHM_THRESHOLD_ROWS: usize = 256;
 static NEXT_ARROW_SHM_SEQ: AtomicUsize = AtomicUsize::new(1);
@@ -318,6 +321,154 @@ impl WorkerQueryOutcome {
     }
 }
 
+/// Per-operation outcome returned by [`SyncOracleClient::execute_pipeline_batch`] and [`AsyncOracleClient::execute_pipeline_batch`].
+#[pyclass(
+    name = "OraclePipelineOutcome",
+    module = "vertebra._oracle",
+    frozen,
+    immutable_type
+)]
+pub struct OraclePipelineOutcome {
+    #[pyo3(get)]
+    pub status: String,
+    #[pyo3(get)]
+    pub result: Option<Py<OracleQueryResult>>,
+    #[pyo3(get)]
+    pub error: Option<Py<PyAny>>,
+}
+
+#[pymethods]
+impl OraclePipelineOutcome {
+    #[new]
+    #[pyo3(signature = (status, result=None, error=None))]
+    pub fn new(
+        status: String,
+        result: Option<Py<OracleQueryResult>>,
+        error: Option<Py<PyAny>>,
+    ) -> Self {
+        Self {
+            status,
+            result,
+            error,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct PipelineOpSpec {
+    pub sql: String,
+    pub params: BindArgs,
+    pub returns_rows: Option<bool>,
+    pub fetch_decimals: bool,
+    pub lowercase_column_names: bool,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum WorkerPipelineStepOutcome {
+    Completed(WorkerQueryOutcome),
+    Error(OracleError),
+    Skipped,
+}
+
+impl WorkerPipelineStepOutcome {
+    fn into_py_outcome(self, py: Python<'_>) -> PyResult<OraclePipelineOutcome> {
+        match self {
+            Self::Completed(outcome) => {
+                let qres = outcome.into_py_query_result(py)?;
+                Ok(OraclePipelineOutcome {
+                    status: "completed".to_owned(),
+                    result: Some(Py::new(py, qres)?),
+                    error: None,
+                })
+            }
+            Self::Error(err) => {
+                let py_err = err.to_py_err(py);
+                let exc_obj = py_err.value(py).clone().into_any().unbind();
+                Ok(OraclePipelineOutcome {
+                    status: "error".to_owned(),
+                    result: None,
+                    error: Some(exc_obj),
+                })
+            }
+            Self::Skipped => Ok(OraclePipelineOutcome {
+                status: "skipped".to_owned(),
+                result: None,
+                error: None,
+            }),
+        }
+    }
+}
+
+pub(crate) fn extract_pipeline_ops(
+    operations: &Bound<'_, PyAny>,
+    default_fetch_decimals: bool,
+    default_lowercase: bool,
+) -> Result<Vec<PipelineOpSpec>, OracleError> {
+    if operations.is_instance_of::<PyString>()
+        || operations.is_instance_of::<PyBytes>()
+        || operations.is_instance_of::<PyByteArray>()
+    {
+        return Err(OracleError::Interface(
+            "Oracle pipeline operations must be a Sequence of operation tuples".to_owned(),
+        ));
+    }
+    let iter = operations.try_iter().map_err(|_| {
+        OracleError::Interface(
+            "Oracle pipeline operations must be a Sequence of operation tuples".to_owned(),
+        )
+    })?;
+    let mut ops = Vec::new();
+    for item_res in iter {
+        let item = item_res.map_err(|e| OracleError::data_error(e.to_string()))?;
+        let item_len = item
+            .len()
+            .map_err(|_| OracleError::Interface("Each pipeline operation must be a tuple".to_owned()))?;
+        if item_len == 0 {
+            return Err(OracleError::Interface(
+                "Pipeline operation tuple cannot be empty".to_owned(),
+            ));
+        }
+        let sql_obj = item
+            .get_item(0)
+            .map_err(|e| OracleError::data_error(e.to_string()))?;
+        let sql = sql_obj
+            .extract::<String>()
+            .map_err(|e| OracleError::data_error(e.to_string()))?;
+        let params = if item_len >= 2 {
+            let p_obj = item
+                .get_item(1)
+                .map_err(|e| OracleError::data_error(e.to_string()))?;
+            extract_bind_args(Some(&p_obj))?
+        } else {
+            BindArgs::Positional(Vec::new())
+        };
+        let returns_rows = if item_len >= 3 {
+            let r_obj = item
+                .get_item(2)
+                .map_err(|e| OracleError::data_error(e.to_string()))?;
+            if r_obj.is_none() {
+                None
+            } else {
+                Some(
+                    r_obj
+                        .extract::<bool>()
+                        .map_err(|e| OracleError::data_error(e.to_string()))?,
+                )
+            }
+        } else {
+            None
+        };
+        ops.push(PipelineOpSpec {
+            sql,
+            params,
+            returns_rows,
+            fetch_decimals: default_fetch_decimals,
+            lowercase_column_names: default_lowercase,
+        });
+    }
+    Ok(ops)
+}
+
 pub(crate) fn extract_bind_args(params: Option<&Bound<'_, PyAny>>) -> Result<BindArgs, OracleError> {
     let Some(obj) = params else {
         return Ok(BindArgs::Positional(Vec::new()));
@@ -523,6 +674,10 @@ pub(crate) enum WorkerCommand {
         batch_size: usize,
         lowercase_column_names: bool,
     },
+    PipelineBatch {
+        ops: Vec<PipelineOpSpec>,
+        continue_on_error: bool,
+    },
     Close,
 }
 
@@ -531,6 +686,7 @@ pub(crate) enum WorkerReply {
     RowCount(usize),
     QueryOutcome(WorkerQueryOutcome),
     ArrowIpc { ipc_bytes: Vec<u8>, row_count: usize },
+    PipelineOutcomes(Vec<WorkerPipelineStepOutcome>),
 }
 
 enum ReplyChannel {
@@ -1322,6 +1478,9 @@ impl InMemoryOracleStore {
                 next_auto_id: 101,
             },
         );
+        if self.tx_baseline.is_some() {
+            self.tx_baseline = Some(self.tables.clone());
+        }
         Ok(())
     }
 
@@ -1345,6 +1504,9 @@ impl InMemoryOracleStore {
                 code: 942,
                 message: format!("ORA-00942: table or view `{tbl_name}` does not exist"),
             });
+        }
+        if self.tx_baseline.is_some() {
+            self.tx_baseline = Some(self.tables.clone());
         }
         Ok(())
     }
@@ -2556,6 +2718,40 @@ impl WorkerSession {
                     ipc_bytes,
                     row_count,
                 })
+            }
+            WorkerCommand::PipelineBatch {
+                ops,
+                continue_on_error,
+            } => {
+                let mut outcomes = Vec::with_capacity(ops.len());
+                let mut aborted = false;
+                for op in ops {
+                    if aborted && !continue_on_error {
+                        outcomes.push(WorkerPipelineStepOutcome::Skipped);
+                        continue;
+                    }
+                    let clean = strip_leading_sql_comments(&op.sql).trim();
+                    let upper = clean.to_ascii_uppercase();
+                    let is_query = op.returns_rows.unwrap_or_else(|| {
+                        upper.starts_with("SELECT") || upper.starts_with("WITH")
+                    });
+                    match self.run_query_or_execute(
+                        &op.sql,
+                        &op.params,
+                        &OutBindSpec::None,
+                        op.fetch_decimals,
+                        op.lowercase_column_names,
+                        None,
+                        is_query,
+                    ) {
+                        Ok(outcome) => outcomes.push(WorkerPipelineStepOutcome::Completed(outcome)),
+                        Err(err) => {
+                            outcomes.push(WorkerPipelineStepOutcome::Error(err));
+                            aborted = true;
+                        }
+                    }
+                }
+                Ok(WorkerReply::PipelineOutcomes(outcomes))
             }
             WorkerCommand::Close => {
                 if let Some(mut conn) = self.conn.take() {
@@ -3844,6 +4040,50 @@ impl SyncOracleClient {
             _ => build_py_arrow_cursor(py, Vec::new(), 0, force_shm),
         }
     }
+
+    #[pyo3(signature = (operations, *, continue_on_error=false))]
+    pub fn execute_pipeline_batch(
+        &self,
+        py: Python<'_>,
+        operations: &Bound<'_, PyAny>,
+        continue_on_error: bool,
+    ) -> PyResult<Vec<OraclePipelineOutcome>> {
+        self.worker.ensure_open().map_err(|e| e.to_py_err(py))?;
+        let lowercase = self.worker.config().enable_lowercase_column_names;
+        let ops = extract_pipeline_ops(operations, false, lowercase).map_err(|e| e.to_py_err(py))?;
+        if ops.is_empty() {
+            return Ok(Vec::new());
+        }
+        let worker = Arc::clone(&self.worker);
+        let reply = py
+            .detach(|| {
+                worker.dispatch_sync(WorkerCommand::PipelineBatch {
+                    ops,
+                    continue_on_error,
+                })
+            })
+            .map_err(|e| e.to_py_err(py))?;
+        match reply {
+            WorkerReply::PipelineOutcomes(steps) => {
+                let mut py_outcomes = Vec::with_capacity(steps.len());
+                for step in steps {
+                    py_outcomes.push(step.into_py_outcome(py)?);
+                }
+                Ok(py_outcomes)
+            }
+            _ => Ok(Vec::new()),
+        }
+    }
+
+    #[pyo3(signature = (operations, *, continue_on_error=false))]
+    pub fn run_pipeline(
+        &self,
+        py: Python<'_>,
+        operations: &Bound<'_, PyAny>,
+        continue_on_error: bool,
+    ) -> PyResult<Vec<OraclePipelineOutcome>> {
+        self.execute_pipeline_batch(py, operations, continue_on_error)
+    }
 }
 
 /// Asynchronous physical Oracle session client (`vertebra._oracle.AsyncOracleClient`).
@@ -4300,6 +4540,56 @@ impl AsyncOracleClient {
                 _ => build_py_arrow_cursor(py, Vec::new(), 0, force_shm),
             },
         )
+    }
+
+    #[pyo3(signature = (operations, *, continue_on_error=false))]
+    pub fn execute_pipeline_batch(
+        &self,
+        py: Python<'_>,
+        operations: &Bound<'_, PyAny>,
+        continue_on_error: bool,
+    ) -> PyResult<RustDbTaskAwaitable> {
+        self.worker.ensure_open().map_err(|e| e.to_py_err(py))?;
+        let lowercase = self.worker.config().enable_lowercase_column_names;
+        let ops = extract_pipeline_ops(operations, false, lowercase).map_err(|e| e.to_py_err(py))?;
+        if ops.is_empty() {
+            return spawn_rust_db_task_with_attr(
+                py,
+                async { Ok::<Vec<WorkerPipelineStepOutcome>, OracleError>(Vec::new()) },
+                |py, _| Ok(PyList::empty(py).into_any().unbind()),
+                |py, err| err.to_py_err(py),
+                ORACLE_COMPLETION_DRAINER_ATTR,
+            );
+        }
+        self.worker.dispatch_async(
+            py,
+            WorkerCommand::PipelineBatch {
+                ops,
+                continue_on_error,
+            },
+            |py, reply| match reply {
+                WorkerReply::PipelineOutcomes(steps) => {
+                    let mut py_outcomes = Vec::with_capacity(steps.len());
+                    for step in steps {
+                        let out = step.into_py_outcome(py)?;
+                        py_outcomes.push(Py::new(py, out)?);
+                    }
+                    let list = PyList::new(py, py_outcomes)?;
+                    Ok(list.into_any().unbind())
+                }
+                _ => Ok(PyList::empty(py).into_any().unbind()),
+            },
+        )
+    }
+
+    #[pyo3(signature = (operations, *, continue_on_error=false))]
+    pub fn run_pipeline(
+        &self,
+        py: Python<'_>,
+        operations: &Bound<'_, PyAny>,
+        continue_on_error: bool,
+    ) -> PyResult<RustDbTaskAwaitable> {
+        self.execute_pipeline_batch(py, operations, continue_on_error)
     }
 }
 

@@ -9,6 +9,7 @@ from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
 from contextlib import asynccontextmanager, contextmanager, suppress
 from contextvars import ContextVar
 from pathlib import Path
+from types import TracebackType
 from typing import Any, ClassVar, Self
 
 import msgspec
@@ -25,14 +26,16 @@ from vertebra.db.arrow import (
     _hydrate_rows_with_schema,
     _table_to_rows_and_cols,
 )
-from vertebra.db.driver import AsyncDatabaseDriver, SyncDatabaseDriver
+from vertebra.db.driver import AsyncDatabaseDriver, InterfaceError, SyncDatabaseDriver
 from vertebra.utils.module_loader import ensure_module
 from vertebra.utils.text import validate_identifier
 
 __all__ = (
     "AsyncOracleDriver",
+    "AsyncOraclePipeline",
     "AsyncOraclePool",
     "SyncOracleDriver",
+    "SyncOraclePipeline",
     "SyncOraclePool",
 )
 
@@ -529,6 +532,270 @@ class AsyncOraclePool:
         await self.close()
 
 
+class SyncOraclePipeline:
+    """Delayed-commit synchronous query pipeline bound to a `SyncOracleDriver`."""
+
+    __slots__ = (
+        "_driver",
+        "_entered",
+        "_failed",
+        "_flushed",
+        "_outcomes",
+        "_owns_transaction",
+        "_pending_ops",
+        "_savepoint_name",
+    )
+
+    def __init__(self, driver: SyncOracleDriver) -> None:
+        self._driver = driver
+        self._pending_ops: list[tuple[str, Sequence[Any] | Mapping[str, Any] | None, bool]] = []
+        self._outcomes: tuple[Any, ...] = ()
+        self._owns_transaction: bool = False
+        self._savepoint_name: str | None = None
+        self._entered: bool = False
+        self._flushed: bool = False
+        self._failed: bool = False
+
+    @property
+    def outcomes(self) -> tuple[Any, ...]:
+        """Return the `OraclePipelineOutcome` items produced by the most recent `results()` flush."""
+        return self._outcomes
+
+    def __enter__(self) -> Self:
+        """Pin a session and open a transaction or nested `SAVEPOINT _vtb_pipe_<n>`."""
+        if self._driver._pipeline_active:
+            raise InterfaceError("An Oracle pipeline is already active on this driver")
+        self._driver._pipeline_active = True
+        self._entered = True
+        try:
+            if self._driver.in_transaction:
+                self._owns_transaction = False
+                self._driver._pipe_savepoint_seq += 1
+                self._savepoint_name = f"_vtb_pipe_{self._driver._pipe_savepoint_seq}"
+                self._driver.savepoint(self._savepoint_name)
+            else:
+                self._owns_transaction = True
+                self._savepoint_name = None
+                self._driver.begin()
+        except BaseException:
+            self._driver._pipeline_active = False
+            self._entered = False
+            raise
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
+        """Commit on clean exit after `results()`, or roll back the transaction/savepoint on error."""
+        _ = (exc_val, exc_tb)
+        self._driver._pipeline_active = False
+        self._entered = False
+        unexecuted = bool(self._pending_ops)
+        self._pending_ops.clear()
+        should_rollback = exc_type is not None or self._failed or unexecuted
+        if should_rollback:
+            if self._savepoint_name is not None:
+                self._driver.rollback_to_savepoint(self._savepoint_name)
+            elif self._owns_transaction:
+                self._driver.rollback()
+            if exc_type is None and unexecuted:
+                raise InterfaceError("Oracle pipeline exited with unexecuted operations")
+            return
+        if self._owns_transaction:
+            self._driver.commit()
+
+    def execute(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+    ) -> None:
+        """Queue a DML, DDL, or PL/SQL statement for batched execution."""
+        self._pending_ops.append((sql, parameters, False))
+
+    def select(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+    ) -> None:
+        """Queue a row-returning query for batched selection."""
+        self._pending_ops.append((sql, parameters, True))
+
+    def results(self) -> list[Any]:
+        """Flush queued pipeline operations on the pinned worker thread without committing."""
+        if not self._entered:
+            raise InterfaceError("Oracle pipeline must be entered via 'with driver.pipeline() as pipe:'")
+        ops = list(self._pending_ops)
+        self._pending_ops.clear()
+        self._flushed = True
+        if not ops:
+            self._outcomes = ()
+            self._driver._last_pipeline_outcomes = ()
+            return []
+
+        batch_payload: list[tuple[str, Any, bool]] = []
+        for sql, params, returns_rows in ops:
+            coerced = self._driver._coerce_parameters(params)
+            self._driver._track_session_context_sql(sql, params)
+            batch_payload.append((sql, coerced, returns_rows))
+
+        with self._driver._checkout_client() as active_client:
+            raw_outcomes = tuple(
+                active_client.execute_pipeline_batch(batch_payload, continue_on_error=False)
+            )
+        self._outcomes = raw_outcomes
+        self._driver._last_pipeline_outcomes = raw_outcomes
+
+        for outcome in raw_outcomes:
+            if outcome.status == "error" and outcome.error is not None:
+                self._failed = True
+                raise outcome.error
+
+        hydrated: list[Any] = []
+        for (_, _, returns_rows), outcome in zip(ops, raw_outcomes, strict=True):
+            if returns_rows:
+                rows, cols = self._driver._coerce_result_rows_and_cols(outcome.result)
+                hydrated.append(_hydrate_rows_with_schema(rows, cols, None) if rows else [])
+            else:
+                rc = int(outcome.result.rowcount) if outcome.result is not None else 0
+                hydrated.append(max(rc, 0))
+        return hydrated
+
+
+class AsyncOraclePipeline:
+    """Delayed-commit asynchronous query pipeline bound to an `AsyncOracleDriver`."""
+
+    __slots__ = (
+        "_driver",
+        "_entered",
+        "_failed",
+        "_flushed",
+        "_outcomes",
+        "_owns_transaction",
+        "_pending_ops",
+        "_savepoint_name",
+    )
+
+    def __init__(self, driver: AsyncOracleDriver) -> None:
+        self._driver = driver
+        self._pending_ops: list[tuple[str, Sequence[Any] | Mapping[str, Any] | None, bool]] = []
+        self._outcomes: tuple[Any, ...] = ()
+        self._owns_transaction: bool = False
+        self._savepoint_name: str | None = None
+        self._entered: bool = False
+        self._flushed: bool = False
+        self._failed: bool = False
+
+    @property
+    def outcomes(self) -> tuple[Any, ...]:
+        """Return the `OraclePipelineOutcome` items produced by the most recent `results()` flush."""
+        return self._outcomes
+
+    async def __aenter__(self) -> Self:
+        """Pin a session and open an async transaction or nested `SAVEPOINT _vtb_pipe_<n>`."""
+        if self._driver._pipeline_active:
+            raise InterfaceError("An Oracle pipeline is already active on this driver")
+        self._driver._pipeline_active = True
+        self._entered = True
+        try:
+            if self._driver.in_transaction:
+                self._owns_transaction = False
+                self._driver._pipe_savepoint_seq += 1
+                self._savepoint_name = f"_vtb_pipe_{self._driver._pipe_savepoint_seq}"
+                await self._driver.savepoint(self._savepoint_name)
+            else:
+                self._owns_transaction = True
+                self._savepoint_name = None
+                await self._driver.begin()
+        except BaseException:
+            self._driver._pipeline_active = False
+            self._entered = False
+            raise
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
+        """Commit on clean exit after `results()`, or roll back the transaction/savepoint on error."""
+        _ = (exc_val, exc_tb)
+        self._driver._pipeline_active = False
+        self._entered = False
+        unexecuted = bool(self._pending_ops)
+        self._pending_ops.clear()
+        should_rollback = exc_type is not None or self._failed or unexecuted
+        if should_rollback:
+            if self._savepoint_name is not None:
+                await self._driver.rollback_to_savepoint(self._savepoint_name)
+            elif self._owns_transaction:
+                await self._driver.rollback()
+            if exc_type is None and unexecuted:
+                raise InterfaceError("Oracle pipeline exited with unexecuted operations")
+            return
+        if self._owns_transaction:
+            await self._driver.commit()
+
+    def execute(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+    ) -> None:
+        """Queue a DML, DDL, or PL/SQL statement for batched execution."""
+        self._pending_ops.append((sql, parameters, False))
+
+    def select(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+    ) -> None:
+        """Queue a row-returning query for batched selection."""
+        self._pending_ops.append((sql, parameters, True))
+
+    async def results(self) -> list[Any]:
+        """Flush queued pipeline operations asynchronously on the pinned worker thread without committing."""
+        if not self._entered:
+            raise InterfaceError("Oracle pipeline must be entered via 'async with driver.pipeline() as pipe:'")
+        ops = list(self._pending_ops)
+        self._pending_ops.clear()
+        self._flushed = True
+        if not ops:
+            self._outcomes = ()
+            self._driver._last_pipeline_outcomes = ()
+            return []
+
+        batch_payload: list[tuple[str, Any, bool]] = []
+        for sql, params, returns_rows in ops:
+            coerced = self._driver._coerce_parameters(params)
+            self._driver._track_session_context_sql(sql, params)
+            batch_payload.append((sql, coerced, returns_rows))
+
+        async with self._driver._checkout_client() as active_client:
+            raw_outcomes = tuple(
+                await active_client.execute_pipeline_batch(batch_payload, continue_on_error=False)
+            )
+        self._outcomes = raw_outcomes
+        self._driver._last_pipeline_outcomes = raw_outcomes
+
+        for outcome in raw_outcomes:
+            if outcome.status == "error" and outcome.error is not None:
+                self._failed = True
+                raise outcome.error
+
+        hydrated: list[Any] = []
+        for (_, _, returns_rows), outcome in zip(ops, raw_outcomes, strict=True):
+            if returns_rows:
+                rows, cols = self._driver._coerce_result_rows_and_cols(outcome.result)
+                hydrated.append(_hydrate_rows_with_schema(rows, cols, None) if rows else [])
+            else:
+                rc = int(outcome.result.rowcount) if outcome.result is not None else 0
+                hydrated.append(max(rc, 0))
+        return hydrated
+
+
 class SyncOracleDriver(SyncDatabaseDriver[OracleConfig]):
     """Synchronous Oracle 26ai Thin driver backed by `vertebra._oracle.SyncOracleClient`."""
 
@@ -560,6 +827,26 @@ class SyncOracleDriver(SyncDatabaseDriver[OracleConfig]):
             else None
         )
         self._last_piggyback_frame: bytes | None = None
+        self._pipe_savepoint_seq: int = 0
+        self._pipeline_active: bool = False
+        self._last_pipeline_outcomes: tuple[Any, ...] = ()
+        self._tx_events: list[str] = []
+
+    @property
+    def last_pipeline_outcomes(self) -> tuple[Any, ...]:
+        """Return the `OraclePipelineOutcome` items from the most recent pipeline `results()` flush."""
+        return self._last_pipeline_outcomes
+
+    @property
+    def transaction_events(self) -> tuple[str, ...]:
+        """Return the ordered history of transaction lifecycle commands issued on this driver."""
+        return tuple(self._tx_events)
+
+    def pipeline(self) -> SyncOraclePipeline:
+        """Create a delayed-commit synchronous query pipeline bound to this driver."""
+        if self._pipeline_active:
+            raise InterfaceError("An Oracle pipeline is already active on this driver")
+        return SyncOraclePipeline(self)
 
     @property
     def pool(self) -> SyncOraclePool | Any | None:
@@ -636,6 +923,7 @@ class SyncOracleDriver(SyncDatabaseDriver[OracleConfig]):
         if pinned is not None:
             pinned.begin()
             self._in_transaction = True
+            self._tx_events.append("BEGIN")
             return
 
         if self._pool is not None:
@@ -651,17 +939,20 @@ class SyncOracleDriver(SyncDatabaseDriver[OracleConfig]):
                 raise
             self._set_pinned_lease(lease, from_pool=True)
             self._in_transaction = True
+            self._tx_events.append("BEGIN")
             return
 
         self._apply_pending_session_attrs(self._client)
         self._client.begin()
         self._set_pinned_lease(self._client, from_pool=False)
         self._in_transaction = True
+        self._tx_events.append("BEGIN")
 
     def commit(self) -> None:
         """Commit the active Oracle transaction and release any pinned pool lease."""
         entry = self._pop_pinned_entry()
         self._in_transaction = False
+        self._tx_events.append("COMMIT")
         if entry is not None:
             _, _, active_client, from_pool = entry
             discard = False
@@ -686,6 +977,7 @@ class SyncOracleDriver(SyncDatabaseDriver[OracleConfig]):
         """Roll back the active Oracle transaction and release any pinned pool lease."""
         entry = self._pop_pinned_entry()
         self._in_transaction = False
+        self._tx_events.append("ROLLBACK")
         if entry is not None:
             _, _, active_client, from_pool = entry
             discard = False
@@ -712,6 +1004,7 @@ class SyncOracleDriver(SyncDatabaseDriver[OracleConfig]):
         active_client = self._get_pinned_lease() or self._client
         active_client.savepoint(name)
         self._in_transaction = True
+        self._tx_events.append(f"SAVEPOINT {name}")
 
     def release_savepoint(self, name: str = "sp") -> None:
         """Validate savepoint identifier (`RELEASE SAVEPOINT` is a validated no-op in Oracle SQL)."""
@@ -723,6 +1016,7 @@ class SyncOracleDriver(SyncDatabaseDriver[OracleConfig]):
         active_client = self._get_pinned_lease() or self._client
         active_client.rollback_to_savepoint(name)
         self._in_transaction = True
+        self._tx_events.append(f"ROLLBACK TO SAVEPOINT {name}")
 
     def cancel(self) -> None:
         """Trigger an out-of-band `break_execution()` on any in-flight command."""
@@ -1204,6 +1498,26 @@ class AsyncOracleDriver(AsyncDatabaseDriver[OracleConfig]):
             else None
         )
         self._last_piggyback_frame: bytes | None = None
+        self._pipe_savepoint_seq: int = 0
+        self._pipeline_active: bool = False
+        self._last_pipeline_outcomes: tuple[Any, ...] = ()
+        self._tx_events: list[str] = []
+
+    @property
+    def last_pipeline_outcomes(self) -> tuple[Any, ...]:
+        """Return the `OraclePipelineOutcome` items from the most recent pipeline `results()` flush."""
+        return self._last_pipeline_outcomes
+
+    @property
+    def transaction_events(self) -> tuple[str, ...]:
+        """Return the ordered history of transaction lifecycle commands issued on this driver."""
+        return tuple(self._tx_events)
+
+    def pipeline(self) -> AsyncOraclePipeline:
+        """Create a delayed-commit asynchronous query pipeline bound to this driver."""
+        if self._pipeline_active:
+            raise InterfaceError("An Oracle pipeline is already active on this driver")
+        return AsyncOraclePipeline(self)
 
     @property
     def pool(self) -> AsyncOraclePool | Any | None:
@@ -1280,6 +1594,7 @@ class AsyncOracleDriver(AsyncDatabaseDriver[OracleConfig]):
         if pinned is not None:
             await pinned.begin()
             self._in_transaction = True
+            self._tx_events.append("BEGIN")
             return
 
         if self._pool is not None:
@@ -1295,17 +1610,20 @@ class AsyncOracleDriver(AsyncDatabaseDriver[OracleConfig]):
                 raise
             self._set_pinned_lease(lease, from_pool=True)
             self._in_transaction = True
+            self._tx_events.append("BEGIN")
             return
 
         self._apply_pending_session_attrs(self._client)
         await self._client.begin()
         self._set_pinned_lease(self._client, from_pool=False)
         self._in_transaction = True
+        self._tx_events.append("BEGIN")
 
     async def commit(self) -> None:
         """Commit the active asynchronous Oracle transaction and release any pinned pool lease."""
         entry = self._pop_pinned_entry()
         self._in_transaction = False
+        self._tx_events.append("COMMIT")
         if entry is not None:
             _, _, active_client, from_pool = entry
             discard = False
@@ -1330,6 +1648,7 @@ class AsyncOracleDriver(AsyncDatabaseDriver[OracleConfig]):
         """Roll back the active asynchronous Oracle transaction and release any pinned pool lease."""
         entry = self._pop_pinned_entry()
         self._in_transaction = False
+        self._tx_events.append("ROLLBACK")
         if entry is not None:
             _, _, active_client, from_pool = entry
             discard = False
@@ -1356,6 +1675,7 @@ class AsyncOracleDriver(AsyncDatabaseDriver[OracleConfig]):
         active_client = self._get_pinned_lease() or self._client
         await active_client.savepoint(name)
         self._in_transaction = True
+        self._tx_events.append(f"SAVEPOINT {name}")
 
     async def release_savepoint(self, name: str = "sp") -> None:
         """Validate savepoint identifier asynchronously (`RELEASE SAVEPOINT` is a validated no-op in Oracle SQL)."""
@@ -1367,6 +1687,7 @@ class AsyncOracleDriver(AsyncDatabaseDriver[OracleConfig]):
         active_client = self._get_pinned_lease() or self._client
         await active_client.rollback_to_savepoint(name)
         self._in_transaction = True
+        self._tx_events.append(f"ROLLBACK TO SAVEPOINT {name}")
 
     async def cancel(self) -> None:
         """Trigger an out-of-band `break_execution()` on any in-flight command."""

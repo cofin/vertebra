@@ -45,8 +45,10 @@ if TYPE_CHECKING:
     )
     from vertebra.db.adapters.oracle.driver import (
         AsyncOracleDriver,
+        AsyncOraclePipeline,
         AsyncOraclePool,
         SyncOracleDriver,
+        SyncOraclePipeline,
         SyncOraclePool,
     )
     from vertebra.db.adapters.oracle.embeddings import OracleEmbeddingPushdown
@@ -64,6 +66,7 @@ __all__ = (
     "OSON_MAGIC",
     "ArrowCursor",
     "AsyncOracleDriver",
+    "AsyncOraclePipeline",
     "AsyncOraclePool",
     "OracleConfig",
     "OracleConnectDescriptor",
@@ -73,6 +76,7 @@ __all__ = (
     "OracleTopologyConfig",
     "OracleWallet",
     "SyncOracleDriver",
+    "SyncOraclePipeline",
     "SyncOraclePool",
     "decode_oson",
     "decode_oson_payload",
@@ -115,6 +119,7 @@ _EXPORT_MAP: dict[str, tuple[str, str]] = {
     "OSON_MAGIC": ("vertebra.db.adapters.oracle.core", "OSON_MAGIC"),
     "ArrowCursor": ("vertebra.db.arrow", "ArrowCursor"),
     "AsyncOracleDriver": ("vertebra.db.adapters.oracle.driver", "AsyncOracleDriver"),
+    "AsyncOraclePipeline": ("vertebra.db.adapters.oracle.driver", "AsyncOraclePipeline"),
     "AsyncOraclePool": ("vertebra.db.adapters.oracle.driver", "AsyncOraclePool"),
     "OracleConfig": ("vertebra.db.adapters.oracle.config", "OracleConfig"),
     "OracleConnectDescriptor": ("vertebra.db.adapters.oracle.config", "OracleConnectDescriptor"),
@@ -124,6 +129,7 @@ _EXPORT_MAP: dict[str, tuple[str, str]] = {
     "OracleTopologyConfig": ("vertebra.db.adapters.oracle.config", "OracleTopologyConfig"),
     "OracleWallet": ("vertebra.db.adapters.oracle.config", "OracleWallet"),
     "SyncOracleDriver": ("vertebra.db.adapters.oracle.driver", "SyncOracleDriver"),
+    "SyncOraclePipeline": ("vertebra.db.adapters.oracle.driver", "SyncOraclePipeline"),
     "SyncOraclePool": ("vertebra.db.adapters.oracle.driver", "SyncOraclePool"),
     "decode_oson": ("vertebra.db.adapters.oracle.core", "decode_oson"),
     "decode_oson_payload": ("vertebra.db.adapters.oracle.core", "decode_oson_payload"),

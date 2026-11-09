@@ -5,7 +5,7 @@ chapter_id: ch05-pipelines-tenancy-and-apex
 title: Implement OraclePipelineOutcome and delayed-commit SyncOraclePipeline and AsyncOraclePipeline
 description: Implement ORACLESQL_NATIVE_TTC_PIPELINE_SUPPORTED and OraclePipelineOutcome in vertebra._oracle and SyncOraclePipeline / AsyncOraclePipeline in vertebra.db.adapters.oracle.driver holding an open transaction or SAVEPOINT _vtb_pipe_<n> across results() and committing only on clean context exit.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -137,9 +137,9 @@ Commit as `feat(oracle): implement delayed-commit sync and async pipelines`.
 
 ## Acceptance Criteria
 
-- [ ] `ORACLESQL_NATIVE_TTC_PIPELINE_SUPPORTED`, `OraclePipelineOutcome`, and `execute_pipeline_batch` are exported on `vertebra._oracle` and typed in `src/py/vertebra/_oracle.pyi` (R9).
-- [ ] `SyncOracleDriver` and `AsyncOracleDriver` satisfy `SyncPipelineCapable` and `AsyncPipelineCapable`, holding a transaction or `SAVEPOINT _vtb_pipe_<n>` across `results()` and committing only on clean `__exit__`/`__aexit__` without emitting `RELEASE SAVEPOINT` (R9).
-- [ ] Post-`results()` caller exceptions and mid-batch `ORA-xxxxx` errors roll back the pipeline transaction/savepoint, and the `oracledb` crate TTC pipeline tracking test passes (R9).
+- [x] `ORACLESQL_NATIVE_TTC_PIPELINE_SUPPORTED`, `OraclePipelineOutcome`, and `execute_pipeline_batch` are exported on `vertebra._oracle` and typed in `src/py/vertebra/_oracle.pyi` (R9).
+- [x] `SyncOracleDriver` and `AsyncOracleDriver` satisfy `SyncPipelineCapable` and `AsyncPipelineCapable`, holding a transaction or `SAVEPOINT _vtb_pipe_<n>` across `results()` and committing only on clean `__exit__`/`__aexit__` without emitting `RELEASE SAVEPOINT` (R9).
+- [x] Post-`results()` caller exceptions and mid-batch `ORA-xxxxx` errors roll back the pipeline transaction/savepoint, and the `oracledb` crate TTC pipeline tracking test passes (R9).
 
 ## Notes & Discoveries
 
