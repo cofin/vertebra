@@ -70,6 +70,10 @@ Reviewed chapter checkpoints:
 ## [2026-11-09T02:30:00Z] flow-plan | driver-fail-loud
 
 Approved `driver-fail-loud` at 13 chapters and 38 tasks ahead of the standalone native database driver flows, removing SQLite and `memory://` stand-ins across database drivers and SQLAlchemy DB-API, requiring live or injected collaborators across queue backends, deleting dead `vertebra-db` pools and superseded codecs, aligning `MissingDependencyError` install hints behind an AST extras gate, making conformance skip/fail outcomes explicit, and updating database, queue, and agent docs and OKF knowledge.
+## [2026-11-09] plan | Approved native-oracle-driver at 7 chapters and 22 tasks (`769302bc`)
+
+- [`native-oracle-driver`](specs/native-oracle-driver/spec.md) (`plan_revision: 3`, `has_chapters: true`, `status: stable`, `state: planned`, `plan_commit: 769302bc`) and [`contracts.md`](specs/native-oracle-driver/contracts.md) are locked with frontmatter-free [`chapters/index.md`](specs/native-oracle-driver/chapters/index.md), `7` chapter specifications (`ch01`–`ch07`), and `22` vertical-slice 8-section task worksheets (`len(files) <= 3`, `len(read_set) <= 6`, `estimated_loc <= 250`) plus a `[0/6 files documented]` documentation and OKF synthesis plan (`ch07:t03`–`t04`).
+- Two rounds of isolated zero-context spec review across `ch01`–`ch07` resolved all `23` Round 1 findings in place (`0 Critical`, `0 Important`, `0 Minor` in Round 2).
 
 ## [2026-11-09T02:25:00Z] flow-archive | storage-remediation
 
