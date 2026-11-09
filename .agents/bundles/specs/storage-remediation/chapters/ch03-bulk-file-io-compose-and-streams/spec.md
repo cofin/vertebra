@@ -6,7 +6,7 @@ chapter_id: ch03-bulk-file-io-compose-and-streams
 title: "Chapter 03: Bulk File I/O, Server-Side Compose, Glob, and Read-Ahead/Writable Streams"
 description: Stream Rust put_file (> 8 MiB multipart) and atomic get_file, drive bounded-concurrency get_files/put_files (download_many, upload_many, /dev/shm staged_download), add copy(..., overwrite=False), glob(), and server-side GCS compose() (<= 32-way tree fold + multipart fallback), pass immutable buffers directly without memoryview wrapping, and implement 4 MiB read-ahead open_reader plus streaming multipart open_writer (SyncWritableFile / AsyncWritableFile).
 status: stable
-state: active
+state: completed
 planning_status: complete
 depends_on_chapters:
   - ch01-native-gcs-plane-and-signing
@@ -15,15 +15,18 @@ replan_trigger: null
 current_task: null
 plan_revision: 1
 plan_commit: fd571e3a
-state_revision: 2
-last_verified_checkpoint: 70c23f63
-last_reviewed_commit: null
+state_revision: 3
+last_verified_checkpoint: 46d39d95
+last_reviewed_commit: 46d39d95
 created_at: "2026-11-08T20:55:00Z"
-updated_at: "2026-11-09T00:22:30Z"
+updated_at: "2026-11-09T01:00:00Z"
 generated:
   by: flow/0.28.0
   at: "2026-11-08T20:55:00Z"
-verified: []
+verified:
+  - by: agent:code-reviewer
+    at: "2026-11-09T01:00:00Z"
+    commit: 46d39d95
 sources:
   - id: storage-store-rs
     resource: src/rs/vertebra-storage/src/store.rs::ObjectStoreEngine
@@ -157,8 +160,8 @@ Analytical and pipeline workloads transferring multi-hundred-megabyte Parquet sh
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline (`HEAD`)**: `70c23f63` — `4/4` tasks implemented and verified (`f8bf065c`, `62deb8c3`, `70c23f63`, `19dac0d8`); zero-context review findings (cancellation-safe cleanup, failed-part writer abort, framed compose fallback, unique compose temporaries, XML-consistent compose metadata, scoped batch cleanup, writer finalizers) are being remediated.
-- **Remaining Tasks in Chapter**: None; chapter closes after review remediation.
+- **Verified Baseline (`HEAD`)**: `46d39d95` — `4/4` tasks completed and the zero-context review findings remediated (`081d0163` Python, `46d39d95` Rust): cancellation-safe `.part`/multipart/compose cleanup, failed-part writer abort, 8 MiB framed compose fallback, unique compose temporaries, XML-consistent compose metadata, scoped batch cleanup, and writer finalizers.
+- **Remaining Tasks in Chapter**: None.
 - **Remaining Chapters**: `ch04`–`ch06`.
 
 [^storage-store-rs]: `src/rs/vertebra-storage/src/store.rs::ObjectStoreEngine` — Rust `ObjectStoreEngine` file I/O, conditional `copy`, and GCS `compose`.

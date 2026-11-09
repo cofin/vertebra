@@ -14,8 +14,8 @@ generated:
   at: "2026-11-09T00:44:30Z"
 verified:
 - by: agent:flow-implement
-  at: "2026-11-09T00:44:30Z"
-  commit: 70c23f63
+  at: "2026-11-09T01:00:00Z"
+  commit: 46d39d95
 sources:
 - id: py-store
   resource: src/py/vertebra/storage/_store.py::SyncObjectStore
@@ -39,6 +39,7 @@ sources:
 - Native `put` normalizes away trailing `/`, so directory placeholder keys cannot be created through `vertebra.storage`; `glob()` still skips placeholder keys returned by external writers [^py-store].
 - Native `extract_buffer_bytes` accepts only byte-format buffers (`B`, `b`, `c`); the Python facade casts typed buffers (`pyarrow.Buffer`, `array.array`, NumPy) to a flat `B` view before crossing FFI, while `bytes` and `StorageBuffer` stay zero-copy [^storage-lib-rs] [^py-store].
 - `ObjectStoreEngine::get_file` flushes and atomically renames the `.part` file but does not call `fsync`; durability across power loss depends on the filesystem [^storage-store-rs].
+- Cancellation cleanup (`PartFileGuard`, `CreatedFilesGuard`, `MultipartUploadSession` `Drop`, `ComposeTemporariesGuard`) runs when an aborted Tokio task drops its future; a `tokio::fs` open or rename already running on the blocking pool can still complete after the guard runs, so a `.part` or target file can survive that narrow window [^storage-store-rs].
 - `OciObjectStore::copy_opts` fails closed with `Generic` when `copyObject` returns `202` without an `opc-work-request-id` header because completion cannot be confirmed [^storage-oci-rs].
 - Pooled storage HTTP clients apply a `300 s` total request timeout that also bounds streamed response bodies, so single very large downloads on slow links must use `get_range` windows or `open_reader` [^storage-oci-rs] [^storage-store-rs].
 <!-- truth: end -->

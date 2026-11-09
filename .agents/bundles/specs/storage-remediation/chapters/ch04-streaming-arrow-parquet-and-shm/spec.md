@@ -6,7 +6,7 @@ chapter_id: ch04-streaming-arrow-parquet-and-shm
 title: "Chapter 04: Streaming HTTP, Parquet/Arrow Options, and Zero-Copy SHM Arrow"
 description: Stream StreamingStorageResponse.iter_chunks() and range-slice to_fastpath_tuple(), enforce storage/_arrow.py module layout, __slots__, zero-copy readinto, Buffer IPC writer support, and Parquet/Arrow encoding option passthrough (use_dictionary, use_byte_stream_split, options), and make read_arrow_shm zero-copy over memoryview with lazy ArrowCursor.__len__ and columnar _table_to_rows_and_cols.
 status: stable
-state: planned
+state: active
 planning_status: complete
 depends_on_chapters:
   - ch03-bulk-file-io-compose-and-streams
