@@ -4,7 +4,7 @@ flow_id: native-postgres-driver
 title: Complete Standalone Native PostgreSQL Driver
 description: One complete PR implementing native PostgreSQL transport/authentication, typed queries and pools, COPY/Arrow, pipelines/cancellation, notifications/replication, and production adapter cutover.
 status: stable
-state: planned
+state: in_progress
 has_chapters: true
 chapters:
   - ch01-wheel-scaffold-and-config
@@ -38,8 +38,8 @@ chapters:
   - ch29-wheel-ci-and-benchmarks
   - ch30-user-and-domain-docs
   - ch31-final-review-and-release-gate
-current_chapter: ch01-wheel-scaffold-and-config
-current_task: "native-postgres-driver:ch01:t01"
+current_chapter: ch02-wire-codec-and-session-startup
+current_task: "native-postgres-driver:ch02:t01"
 parent_prd: native-data-platform
 depends_on_flows:
   - driver-fail-loud

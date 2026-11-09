@@ -4,8 +4,8 @@ id: "native-postgres-driver:ch01:t02"
 chapter_id: ch01-wheel-scaffold-and-config
 title: Register workspace member, add vertebra-db socket2/half pins, and lock Cargo.lock
 description: Register vertebra-postgres in src/rs/Cargo.toml, add socket2 =0.6.5 and half =2.7.1 to src/rs/vertebra-db/Cargo.toml, and resolve src/rs/Cargo.lock so workspace builds pass with --locked.
-status: stable
-state: pending
+status: done
+state: completed
 priority: P1
 verification_strategy: static_validation
 depends_on:
@@ -114,8 +114,8 @@ Commit as `build(postgres): register workspace member and lock Cargo dependencie
 
 ## Acceptance Criteria
 
-- [ ] `src/rs/Cargo.toml` includes `"vertebra-postgres"` in `[workspace].members` and `src/rs/vertebra-db/Cargo.toml` pins `socket2 = { version = "=0.6.5", features = ["all"] }` and `half = "=2.7.1"` (R1).
-- [ ] `src/rs/Cargo.lock` is committed in sync such that `cargo check --manifest-path src/rs/Cargo.toml --workspace --locked` and `--locked` workspace Clippy exit `0` (R1).
+- [x] `src/rs/Cargo.toml` includes `"vertebra-postgres"` in `[workspace].members` and `src/rs/vertebra-db/Cargo.toml` pins `socket2 = { version = "=0.6.5", features = ["all"] }` and `half = "=2.7.1"` (R1).
+- [x] `src/rs/Cargo.lock` is committed in sync such that `cargo check --manifest-path src/rs/Cargo.toml --workspace --locked` and `--locked` workspace Clippy exit `0` (R1).
 
 ## Notes & Discoveries
 

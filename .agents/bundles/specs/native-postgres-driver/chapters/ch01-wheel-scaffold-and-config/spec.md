@@ -4,12 +4,12 @@ parent_flow: native-postgres-driver
 chapter_id: ch01-wheel-scaffold-and-config
 title: "Chapter 01: Standalone Optional Wheel Scaffold and Native Connection Configuration"
 description: Scaffold the standalone vertebra-postgres PyO3 crate, lock workspace and vertebra-db Cargo dependencies upfront, wire the vertebra._postgres wheel/stub/Makefile matrix, and implement pure PostgresConfig validation and ServerError categories.
-status: stable
-state: planned
+status: done
+state: completed
 planning_status: complete
 depends_on_chapters: []
 replan_trigger: null
-current_task: "native-postgres-driver:ch01:t01"
+current_task: null
 plan_revision: 5
 plan_commit: fd571e3a
 state_revision: 0
@@ -137,10 +137,10 @@ Progress: `[0/0 files documented in ch01]` (`src/py/vertebra/_postgres.pyi` modu
 
 ## 5. Implementation Plan
 
-- [ ] native-postgres-driver:ch01:t01 — Scaffold vertebra-postgres Cargo manifest, build script, and free-threaded PyO3 module (tasks/t01-crate-and-pymodule-scaffold.md)
-- [ ] native-postgres-driver:ch01:t02 — Register workspace member, add vertebra-db socket2/half pins, and lock Cargo.lock (tasks/t02-workspace-and-db-cargo-lock.md)
-- [ ] native-postgres-driver:ch01:t03 — Wire vertebra-postgres wheel, _postgres.pyi stub, and Makefile build/test targets (tasks/t03-wheel-stub-and-makefile-matrix.md)
-- [ ] native-postgres-driver:ch01:t04 — Implement pure PostgresConfig validation and sanitized PostgresError categories (tasks/t04-configuration-and-error-categories.md)
+- [x] native-postgres-driver:ch01:t01 — Scaffold vertebra-postgres Cargo manifest, build script, and free-threaded PyO3 module (tasks/t01-crate-and-pymodule-scaffold.md)
+- [x] native-postgres-driver:ch01:t02 — Register workspace member, add vertebra-db socket2/half pins, and lock Cargo.lock (tasks/t02-workspace-and-db-cargo-lock.md)
+- [x] native-postgres-driver:ch01:t03 — Wire vertebra-postgres wheel, _postgres.pyi stub, and Makefile build/test targets (tasks/t03-wheel-stub-and-makefile-matrix.md)
+- [x] native-postgres-driver:ch01:t04 — Implement pure PostgresConfig validation and sanitized PostgresError categories (tasks/t04-configuration-and-error-categories.md)
 
 **Chapter Recovery Checkpoint:** `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --locked && cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-postgres --all-targets --locked -- -D warnings && make dev && make postgres-wheel-check && make postgres-test && uv run --no-sync python -m mypy.stubtest vertebra._postgres` exits `0`.
 

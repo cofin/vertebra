@@ -4,8 +4,8 @@ id: "native-postgres-driver:ch01:t04"
 chapter_id: ch01-wheel-scaffold-and-config
 title: Implement pure PostgresConfig validation and sanitized PostgresError categories
 description: Declare the complete owned PostgresConfig option record matching contracts.md, enforce pure scalar/port/timeout/NUL/PEM/five-spelling TlsMode validation with secret redaction, and define ServerError and PostgresError categories.
-status: stable
-state: pending
+status: done
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -132,9 +132,9 @@ Commit as `feat(postgres): validate owned connection options and error categorie
 
 ## Acceptance Criteria
 
-- [ ] `PostgresConfig` owns every constructor field and default specified in `contracts.md` without exposing partial mutating setters or reparsing DSNs (R2, R3).
-- [ ] Pure validation rejects empty/NUL strings, out-of-range ports, non-finite/non-positive timeouts, mismatched PEM pairs, URI/path hosts, and non-canonical `sslmode` / `channel_binding` values without I/O (R2, R3).
-- [ ] `ServerError` (`severity`, `sqlstate`, `message`, `diagnostics`) and `PostgresError::Server(ServerError)` retain validated 5-byte ASCII SQLSTATE codes and structured diagnostic tuples upfront while redacting secrets and `D`/`H`/`W` details from formatted messages (R2, R3).
+- [x] `PostgresConfig` owns every constructor field and default specified in `contracts.md` without exposing partial mutating setters or reparsing DSNs (R2, R3).
+- [x] Pure validation rejects empty/NUL strings, out-of-range ports, non-finite/non-positive timeouts, mismatched PEM pairs, URI/path hosts, and non-canonical `sslmode` / `channel_binding` values without I/O (R2, R3).
+- [x] `ServerError` (`severity`, `sqlstate`, `message`, `diagnostics`) and `PostgresError::Server(ServerError)` retain validated 5-byte ASCII SQLSTATE codes and structured diagnostic tuples upfront while redacting secrets and `D`/`H`/`W` details from formatted messages (R2, R3).
 
 ## Notes & Discoveries
 

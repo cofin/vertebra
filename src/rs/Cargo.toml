@@ -13,6 +13,7 @@ members = [
     "vertebra-spanner",
     "vertebra-duckdb",
     "vertebra-oracle",
+    "vertebra-postgres",
 ]
 
 [workspace.package]

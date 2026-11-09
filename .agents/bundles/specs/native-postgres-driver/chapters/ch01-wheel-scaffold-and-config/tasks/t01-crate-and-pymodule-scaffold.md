@@ -4,8 +4,8 @@ id: "native-postgres-driver:ch01:t01"
 chapter_id: ch01-wheel-scaffold-and-config
 title: Scaffold vertebra-postgres Cargo manifest, build script, and free-threaded PyO3 module
 description: Create src/rs/vertebra-postgres/Cargo.toml with complete locked dependency pins, build.rs with PyO3 cfg/rpath setup, and src/lib.rs exporting gil_used=false vertebra._postgres metadata constants prior to workspace registration.
-status: stable
-state: pending
+status: done
+state: completed
 priority: P1
 verification_strategy: static_validation
 depends_on: []
@@ -168,9 +168,9 @@ Commit as `build(postgres): scaffold vertebra-postgres crate and pymodule`.
 
 ## Acceptance Criteria
 
-- [ ] `src/rs/vertebra-postgres/Cargo.toml` declares `_postgres` (`cdylib` + `rlib`), `postgres-protocol = "=0.6.12"`, `x509-parser = "=0.18.1"` (`default-features = false`), `rsa` `["pem", "sha2"]`, `rustls-pemfile`, `half = "=2.7.1"`, `arrow-{array,buffer,ipc,schema} = "=60.1.0"`, and dev-only `tokio-postgres = "=0.7.18"` (R1).
-- [ ] `src/rs/vertebra-postgres/build.rs` and `src/rs/vertebra-postgres/src/lib.rs` (`#[pymodule(gil_used = false)] fn _postgres` exporting `FREE_THREADED`, `GIL_USED`, `__version__`) pass `rustfmt --edition 2024 --check` (R1).
-- [ ] Existing workspace passes `cargo check --manifest-path src/rs/Cargo.toml --workspace --locked` with zero dirty lockfile changes (R1).
+- [x] `src/rs/vertebra-postgres/Cargo.toml` declares `_postgres` (`cdylib` + `rlib`), `postgres-protocol = "=0.6.12"`, `x509-parser = "=0.18.1"` (`default-features = false`), `rsa` `["pem", "sha2"]`, `rustls-pemfile`, `half = "=2.7.1"`, `arrow-{array,buffer,ipc,schema} = "=60.1.0"`, and dev-only `tokio-postgres = "=0.7.18"` (R1).
+- [x] `src/rs/vertebra-postgres/build.rs` and `src/rs/vertebra-postgres/src/lib.rs` (`#[pymodule(gil_used = false)] fn _postgres` exporting `FREE_THREADED`, `GIL_USED`, `__version__`) pass `rustfmt --edition 2024 --check` (R1).
+- [x] Existing workspace passes `cargo check --manifest-path src/rs/Cargo.toml --workspace --locked` with zero dirty lockfile changes (R1).
 
 ## Notes & Discoveries
 

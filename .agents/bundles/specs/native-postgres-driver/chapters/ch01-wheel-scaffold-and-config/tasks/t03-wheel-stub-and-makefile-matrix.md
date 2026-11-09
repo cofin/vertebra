@@ -4,8 +4,8 @@ id: "native-postgres-driver:ch01:t03"
 chapter_id: ch01-wheel-scaffold-and-config
 title: Wire vertebra-postgres wheel, _postgres.pyi stub, and Makefile build/test targets
 description: Author src/rs/vertebra-postgres/pyproject.toml, src/py/vertebra/_postgres.pyi, and Makefile dev/build/stubtest/postgres-test/postgres-wheel-check targets with wheel zipfile and sdist tarfile verification.
-status: stable
-state: pending
+status: done
+state: completed
 priority: P1
 verification_strategy: static_validation
 depends_on:
@@ -144,8 +144,8 @@ Commit as `build(postgres): wire vertebra-postgres wheel, stub, and Makefile tar
 
 ## Acceptance Criteria
 
-- [ ] `src/rs/vertebra-postgres/pyproject.toml` and `src/py/vertebra/_postgres.pyi` package only `vertebra/_postgres.<ext>` and `vertebra/_postgres.pyi` in `.whl` while retaining Cargo sources (`Cargo.toml`, `build.rs`, `src/lib.rs`) in `.tar.gz` sdist (R1).
-- [ ] `Makefile` integrates `vertebra-postgres` across `dev`, `build`, `py-test`, `lint`, `lint-all`, `postgres-test`, and `postgres-wheel-check`, and `mypy.stubtest vertebra._postgres` exits `0` (R1).
+- [x] `src/rs/vertebra-postgres/pyproject.toml` and `src/py/vertebra/_postgres.pyi` package only `vertebra/_postgres.<ext>` and `vertebra/_postgres.pyi` in `.whl` while retaining Cargo sources (`Cargo.toml`, `build.rs`, `src/lib.rs`) in `.tar.gz` sdist (R1).
+- [x] `Makefile` integrates `vertebra-postgres` across `dev`, `build`, `py-test`, `lint`, `lint-all`, `postgres-test`, and `postgres-wheel-check`, and `mypy.stubtest vertebra._postgres` exits `0` (R1).
 
 ## Notes & Discoveries
 

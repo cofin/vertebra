@@ -22,6 +22,7 @@ google-cloud-auth = { workspace = true, optional = true }
 google-cloud-gax = { workspace = true, optional = true }
 google-cloud-rpc = { workspace = true, optional = true }
 google-cloud-wkt = { workspace = true, optional = true }
+half = "=2.7.1"
 hex = { workspace = true }
 hmac = { workspace = true }
 http = { workspace = true }
@@ -37,6 +38,8 @@ rustls = { workspace = true }
 rustls-pemfile = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
+socket2 = { version = "=0.6.5", features = ["all"] }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-rustls = { workspace = true }
