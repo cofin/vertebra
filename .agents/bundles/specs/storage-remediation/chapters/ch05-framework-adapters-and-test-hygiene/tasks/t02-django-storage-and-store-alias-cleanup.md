@@ -5,7 +5,7 @@ chapter_id: ch05-framework-adapters-and-test-hygiene
 title: Enforce clean-break vertebra.extensions.django storage exports, stream DjangoStorage.save, and remove _store.py shims
 description: Drop vertebra.storage config/store re-exports from extensions/django/storage.py and __init__.py, stream multi-chunk files and avoid redundant bytes copies in DjangoStorage.save, and delete open_readable_file and _get_native_module from storage/_store.py.
 status: stable
-state: pending
+state: in_progress
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -28,9 +28,9 @@ tests:
 estimated_loc: 120
 plan_revision: 1
 plan_commit: fd571e3a
-state_revision: 0
-claimed_by: null
-claimed_at: null
+state_revision: 1
+claimed_by: executor
+claimed_at: "2026-11-09T01:19:30Z"
 blocked_reason: null
 unblock_condition: null
 next_step: null
@@ -38,7 +38,7 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: "2026-11-08T20:55:00Z"
-updated_at: "2026-11-08T20:55:00Z"
+updated_at: "2026-11-09T01:19:30Z"
 commit: null
 generated:
   by: flow/0.28.0
