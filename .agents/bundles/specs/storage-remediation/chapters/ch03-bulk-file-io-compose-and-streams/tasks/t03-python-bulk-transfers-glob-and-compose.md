@@ -5,7 +5,7 @@ chapter_id: ch03-bulk-file-io-compose-and-streams
 title: Implement Python get_file, download_many, upload_many, staged_download, conditional copy, glob, compose, and S3/R2 config options
 description: Add get_file, download_many, upload_many, staged_download, copy(..., overwrite=True), glob, and compose on SyncObjectStore and AsyncObjectStore, and wire S3Config.virtual_hosted_style and R2Config.custom_domain in _store.py.
 status: stable
-state: in_progress
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -22,22 +22,25 @@ tests:
 estimated_loc: 235
 plan_revision: 1
 plan_commit: fd571e3a
-state_revision: 1
+state_revision: 2
 claimed_by: executor
 claimed_at: "2026-11-09T00:36:00Z"
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-09T00:45:00Z"
+last_verified_commit: 70c23f63
+verification_evidence: "pytest src/py/tests/unit/storage (235 passed); ruff check/format, mypy, review-check clean"
 created_at: "2026-11-08T20:55:00Z"
-updated_at: "2026-11-09T00:36:00Z"
-commit: null
+updated_at: "2026-11-09T00:45:00Z"
+commit: 70c23f63
 generated:
   by: flow/0.28.0
   at: "2026-11-08T20:55:00Z"
-verified: []
+verified:
+  - by: executor
+    at: "2026-11-09T00:45:00Z"
+    commit: 70c23f63
 sources:
   - id: py-store
     resource: src/py/vertebra/storage/_store.py::SyncObjectStore
@@ -105,11 +108,12 @@ uv run --no-sync pytest src/py/tests/unit/storage/test_storage_store.py src/py/t
 
 ## Acceptance Criteria
 
-- [ ] `get_file`, `download_many`, `upload_many`, `staged_download`, `copy(..., overwrite=...)`, `glob`, and `compose` work across sync and async stores with zero `asyncio.to_thread` usage (R3.3).
-- [ ] `S3Config(virtual_hosted_style=True)` and `R2Config(custom_domain=...)` forward options and presign URLs accurately (R3.3).
+- [x] [70c23f63] `get_file`, `download_many`, `upload_many`, `staged_download`, `copy(..., overwrite=...)`, `glob`, and `compose` work across sync and async stores with zero `asyncio.to_thread` usage (R3.3).
+- [x] [70c23f63] `S3Config(virtual_hosted_style=True)` and `R2Config(custom_domain=...)` forward options and presign URLs accurately (R3.3).
 
 ## Notes & Discoveries
 
 - [2026-11-08 20:55] Use direct `Path.unlink(missing_ok=True)` / `shutil.rmtree(..., ignore_errors=True)` for staging cleanup on tmpfs/local directories so async `staged_download` remains non-`to_thread`.
+- [2026-11-09 00:45] `R2Config.custom_domain` is forwarded as a store option while presigned URLs stay on the R2 S3 API domain, because Cloudflare honors presigned URLs only on that domain; recorded in [`object-storage-limitations.md`](../../../../../knowledge/domains/storage/object-storage-limitations.md). `glob()` truncates the list prefix to the last `/` because native `list(prefix)` matches whole path segments.
 
 [^py-store]: `src/py/vertebra/storage/_store.py::SyncObjectStore` — Python `SyncObjectStore`, `AsyncObjectStore`, `S3Config`, and `R2Config`.
