@@ -4,15 +4,15 @@ use std::io::BufReader;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
+use _postgres::config::RawPostgresOptions;
+use _postgres::errors::PostgresError;
+use _postgres::session::SessionHandle;
 use rcgen::{BasicConstraints, CertificateParams, CertifiedKey, IsCa, Issuer, KeyPair};
 use rustls::ServerConfig;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::server::WebPkiClientVerifier;
 use tokio::io::AsyncWriteExt;
 use tokio_rustls::TlsAcceptor;
-use _postgres::config::RawPostgresOptions;
-use _postgres::errors::PostgresError;
-use _postgres::session::SessionHandle;
 
 use support::{
     frame_auth_ok, frame_auth_sasl, frame_auth_sasl_continue, frame_auth_sasl_final,
@@ -62,14 +62,13 @@ fn make_tls_acceptor(server_cert_pem: &[u8], server_key_pem: &[u8]) -> TlsAccept
         rustls_pemfile::private_key(&mut BufReader::new(server_key_pem))
             .expect("server key read")
             .expect("server key present");
-    let cfg = ServerConfig::builder_with_provider(Arc::new(
-        rustls::crypto::ring::default_provider(),
-    ))
-    .with_safe_default_protocol_versions()
-    .expect("versions")
-    .with_no_client_auth()
-    .with_single_cert(certs, key)
-    .expect("single cert");
+    let cfg =
+        ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions()
+            .expect("versions")
+            .with_no_client_auth()
+            .with_single_cert(certs, key)
+            .expect("single cert");
     TlsAcceptor::from(Arc::new(cfg))
 }
 
@@ -100,14 +99,13 @@ fn make_mtls_acceptor(
         rustls_pemfile::private_key(&mut BufReader::new(server_key_pem))
             .expect("server key read")
             .expect("server key present");
-    let cfg = ServerConfig::builder_with_provider(Arc::new(
-        rustls::crypto::ring::default_provider(),
-    ))
-    .with_safe_default_protocol_versions()
-    .expect("versions")
-    .with_client_cert_verifier(client_verifier)
-    .with_single_cert(certs, key)
-    .expect("single cert");
+    let cfg =
+        ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions()
+            .expect("versions")
+            .with_client_cert_verifier(client_verifier)
+            .with_single_cert(certs, key)
+            .expect("single cert");
     TlsAcceptor::from(Arc::new(cfg))
 }
 
@@ -590,10 +588,7 @@ async fn scram_plus_over_tls_verify_full_and_ed25519_prefer_vs_require() {
             .connect()
             .await
             .expect("SCRAM-SHA-256-PLUS verify-full");
-        assert_eq!(
-            conn.tls_server_end_point(),
-            Some(expected_cbind.as_slice())
-        );
+        assert_eq!(conn.tls_server_end_point(), Some(expected_cbind.as_slice()));
         task.await.unwrap();
     }
 

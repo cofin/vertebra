@@ -6,7 +6,8 @@ use std::time::Duration;
 
 use tokio::time::Instant;
 use vertebra_db::connection::{
-    ConnectOptions, EndpointTarget, TlsMode, TransportError, TransportStream, finish_alloydb_metadata,
+    ConnectOptions, EndpointTarget, TlsMode, TransportError, TransportStream,
+    finish_alloydb_metadata,
 };
 use vertebra_db::dialer::{AlloyDbClusterUri, AuthType, CloudSqlInstanceUri, IpType};
 
@@ -34,10 +35,7 @@ impl std::fmt::Debug for DialedCloudTransport {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DialedCloudTransport")
             .field("is_tls", &self.stream.is_tls())
-            .field(
-                "has_channel_binding",
-                &self.tls_server_end_point.is_some(),
-            )
+            .field("has_channel_binding", &self.tls_server_end_point.is_some())
             .finish()
     }
 }
@@ -75,10 +73,11 @@ pub async fn dial_cloudsql(
     }
 
     let connect_opts = build_cloud_connect_options(&prepared, config, absolute_deadline)?;
-    let stream = tokio::time::timeout_at(absolute_deadline, TransportStream::connect(&connect_opts))
-        .await
-        .map_err(|_| PostgresError::Transport("Cloud SQL mTLS dial timed out".to_string()))?
-        .map_err(map_transport_error)?;
+    let stream =
+        tokio::time::timeout_at(absolute_deadline, TransportStream::connect(&connect_opts))
+            .await
+            .map_err(|_| PostgresError::Transport("Cloud SQL mTLS dial timed out".to_string()))?
+            .map_err(map_transport_error)?;
 
     let tls_server_end_point = match stream.peer_leaf_der() {
         Some(der) => Some(tls_server_end_point(der)?),
@@ -106,8 +105,8 @@ pub async fn dial_alloydb(
     let uri_raw = config.alloydb_instance_uri.as_deref().ok_or_else(|| {
         PostgresError::Config("alloydb_instance_uri is required for dial_alloydb".to_string())
     })?;
-    let uri = AlloyDbClusterUri::parse(uri_raw)
-        .map_err(|e| PostgresError::Config(e.to_string()))?;
+    let uri =
+        AlloyDbClusterUri::parse(uri_raw).map_err(|e| PostgresError::Config(e.to_string()))?;
     let ip_type = parse_ip_type(&config.alloydb_ip_type)?;
     let auth_type = if config.enable_iam_auth {
         AuthType::Iam
@@ -123,7 +122,9 @@ pub async fn dial_alloydb(
     )?;
     let prepared = connector.prepare(&connector_cfg, absolute_deadline).await?;
     let login_snap = prepared.login_snapshot.clone().ok_or_else(|| {
-        PostgresError::Auth("AlloyDB prepared material is missing scoped login snapshot".to_string())
+        PostgresError::Auth(
+            "AlloyDB prepared material is missing scoped login snapshot".to_string(),
+        )
     })?;
     login_snap.ensure_usable(connector.now_unix_ms())?;
 
@@ -172,8 +173,8 @@ fn build_connector_config(
     let admin_ep_override = cloud_opts.remove("admin_endpoint");
     cloud_opts.remove("proxy_port");
 
-    let mut cfg = CloudConnectorConfig::new(target, ip_type, auth_type)
-        .with_cloud_auth_options(cloud_opts);
+    let mut cfg =
+        CloudConnectorConfig::new(target, ip_type, auth_type).with_cloud_auth_options(cloud_opts);
     if !config.iam_auth_options.is_empty() {
         cfg = cfg.with_iam_auth_options(Some(config.iam_auth_options.clone()));
     }

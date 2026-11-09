@@ -5,7 +5,7 @@ chapter_id: ch10-temporal-interval-and-json-codecs
 title: Implement lossless PostgreSQL 2000-01-01 epoch temporal and interval binary codecs
 description: Encode and decode binary DATE (1082), TIME (1083), TIMESTAMP (1114), TIMESTAMPTZ (1184), and INTERVAL (1186) values with exact PostgreSQL 2000-01-01 epoch units, 24:00 bounds, and infinity sentinels.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -114,9 +114,9 @@ Implement fixed-width big-endian binary codecs in `src/rs/vertebra-postgres/src/
 
 ## Acceptance Criteria
 
-- [ ] Binary `DATE`, `TIME`, `TIMESTAMP`, `TIMESTAMPTZ`, and `INTERVAL` codecs match PostgreSQL `2000-01-01` epoch units and wire byte layouts (R11).
-- [ ] `PgValue::Interval` preserves independent `(months, days, microseconds)` signs and PG18 infinity sentinels without `timedelta` or nanosecond conversion (R11).
-- [ ] `24:00:00`, `±infinity`, `BC`, and years `> 9999` round-trip while illegal finite ranges and wrong widths fail with `PostgresError::Data` (R11).
+- [x] Binary `DATE`, `TIME`, `TIMESTAMP`, `TIMESTAMPTZ`, and `INTERVAL` codecs match PostgreSQL `2000-01-01` epoch units and wire byte layouts (R11).
+- [x] `PgValue::Interval` preserves independent `(months, days, microseconds)` signs and PG18 infinity sentinels without `timedelta` or nanosecond conversion (R11).
+- [x] `24:00:00`, `±infinity`, `BC`, and years `> 9999` round-trip while illegal finite ranges and wrong widths fail with `PostgresError::Data` (R11).
 
 ## Notes & Discoveries
 

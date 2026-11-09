@@ -18,11 +18,7 @@ pub struct ServerError {
 
 impl fmt::Display for ServerError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{} ({}): {}",
-            self.severity, self.sqlstate, self.message
-        )
+        write!(f, "{} ({}): {}", self.severity, self.sqlstate, self.message)
     }
 }
 
@@ -174,5 +170,3 @@ pub fn postgres_error_to_py(py: Python<'_>, err: PostgresError) -> PyErr {
         }
     }
 }
-
-

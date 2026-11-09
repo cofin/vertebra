@@ -132,9 +132,7 @@ pub enum CloudPeerIdentity {
         expected_cn: String,
     },
     /// AlloyDB `:5433`: require SAN verification against `expected_san` (`instanceIp` or `pscDnsName`), never falling back to Subject `CN` or CA-only.
-    AlloyDb {
-        expected_san: String,
-    },
+    AlloyDb { expected_san: String },
 }
 
 /// TCP keepalive parameters applied to a socket before protocol startup.
@@ -568,7 +566,10 @@ pub async fn finish_alloydb_metadata(
     Ok(())
 }
 
-fn cloud_sni_server_name(peer_identity: &CloudPeerIdentity, addr: SocketAddr) -> ServerName<'static> {
+fn cloud_sni_server_name(
+    peer_identity: &CloudPeerIdentity,
+    addr: SocketAddr,
+) -> ServerName<'static> {
     let candidate = match peer_identity {
         CloudPeerIdentity::CloudSql { server_name, .. } => server_name.as_deref(),
         CloudPeerIdentity::AlloyDb { expected_san } => Some(expected_san.as_str()),

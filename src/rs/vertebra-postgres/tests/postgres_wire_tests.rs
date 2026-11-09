@@ -520,7 +520,10 @@ async fn startup_session_gucs_and_tcp_keepalive_and_unix_domain_socket() {
     raw.keepalives_count = Some(3);
 
     let mut handle = SessionHandle::new(raw).unwrap();
-    let conn = handle.connect().await.expect("connect with gucs + keepalive");
+    let conn = handle
+        .connect()
+        .await
+        .expect("connect with gucs + keepalive");
     assert_eq!(conn.generation(), 1);
     handle.close().await.unwrap();
     server_task.await.unwrap();
@@ -564,4 +567,3 @@ async fn startup_session_gucs_and_tcp_keepalive_and_unix_domain_socket() {
         let _ = std::fs::remove_file(&sock_path);
     }
 }
-

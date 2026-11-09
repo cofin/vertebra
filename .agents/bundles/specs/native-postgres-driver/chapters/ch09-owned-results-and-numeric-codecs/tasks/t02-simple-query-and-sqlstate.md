@@ -5,7 +5,7 @@ chapter_id: ch09-owned-results-and-numeric-codecs
 title: Implement multi-result simple query execution and canonical SQLSTATE error draining
 description: Mount pub mod query in lib.rs and execute PostgreSQL simple Query exchanges via SimpleQueryCollector and PostgresConnection::simple_query, parsing command-tag row counts and draining ServerError exchanges through ReadyForQuery.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -121,10 +121,10 @@ Mount `pub mod query;` directly in `src/rs/vertebra-postgres/src/lib.rs` and imp
 
 ## Acceptance Criteria
 
-- [ ] `src/rs/vertebra-postgres/src/lib.rs` mounts `pub mod query;` directly and `PostgresConnection::simple_query` executes multi-statement `Query` exchanges preserving ordered schemas, rows, command tags, `u64` affected counts, and `Idle`/`InTransaction`/`Failed` status (R10, R12).
-- [ ] Recoverable `ErrorResponse` frames drain cleanly through `ReadyForQuery` while malformed framing or premature EOF permanently retires the socket (R10, R12).
-- [ ] `ServerError` preserves SQLSTATE, severity, sanitized message, and diagnostic fields over the upfront `errors.rs` contract without duplicate exception hierarchies (R10).
-- [ ] Every `simple_query` emission invalidates local unnamed-prepared-statement state and routes asynchronous notifications through one central session hook (R12).
+- [x] `src/rs/vertebra-postgres/src/lib.rs` mounts `pub mod query;` directly and `PostgresConnection::simple_query` executes multi-statement `Query` exchanges preserving ordered schemas, rows, command tags, `u64` affected counts, and `Idle`/`InTransaction`/`Failed` status (R10, R12).
+- [x] Recoverable `ErrorResponse` frames drain cleanly through `ReadyForQuery` while malformed framing or premature EOF permanently retires the socket (R10, R12).
+- [x] `ServerError` preserves SQLSTATE, severity, sanitized message, and diagnostic fields over the upfront `errors.rs` contract without duplicate exception hierarchies (R10).
+- [x] Every `simple_query` emission invalidates local unnamed-prepared-statement state and routes asynchronous notifications through one central session hook (R12).
 
 ## Notes & Discoveries
 

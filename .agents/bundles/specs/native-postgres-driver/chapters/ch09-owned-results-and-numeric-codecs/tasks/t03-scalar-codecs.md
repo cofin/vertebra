@@ -5,7 +5,7 @@ chapter_id: ch09-owned-results-and-numeric-codecs
 title: Implement checked built-in scalar binary and text codecs with per-column fallback
 description: Build CodecContext, decode_value, encode_value, and format_for_oid in codecs/mod.rs for built-in PostgreSQL scalar types and wire per-column scalar decoding into SimpleQueryCollector.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -123,9 +123,9 @@ Create the central PostgreSQL codec dispatcher (`src/rs/vertebra-postgres/src/co
 
 ## Acceptance Criteria
 
-- [ ] Golden binary and text fixtures for `bool`, `int2`/`int4`/`int8`/`oid`, `float4`/`float8`, `text`/`varchar`/`bpchar`/`name`, `bytea`, and `uuid` round-trip losslessly and reject malformed widths/escapes/NULs (R11).
-- [ ] `SimpleQueryCollector` dispatches recognized scalar OIDs through `codecs::decode_value` using each column's own `Format` (R11).
-- [ ] Unknown OIDs negotiate `Format::Text` and remain `PgValue::Text` with `Column.type_oid` intact, while unexpected binary payloads for unknown OIDs fail explicitly with `PostgresError::Data` (R11).
+- [x] Golden binary and text fixtures for `bool`, `int2`/`int4`/`int8`/`oid`, `float4`/`float8`, `text`/`varchar`/`bpchar`/`name`, `bytea`, and `uuid` round-trip losslessly and reject malformed widths/escapes/NULs (R11).
+- [x] `SimpleQueryCollector` dispatches recognized scalar OIDs through `codecs::decode_value` using each column's own `Format` (R11).
+- [x] Unknown OIDs negotiate `Format::Text` and remain `PgValue::Text` with `Column.type_oid` intact, while unexpected binary payloads for unknown OIDs fail explicitly with `PostgresError::Data` (R11).
 
 ## Notes & Discoveries
 

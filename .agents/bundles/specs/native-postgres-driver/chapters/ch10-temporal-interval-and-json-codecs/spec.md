@@ -5,12 +5,12 @@ chapter_id: ch10-temporal-interval-and-json-codecs
 title: "Chapter 10: Lossless Temporal, Session-Style Datetime/Interval Text, and JSON/JSONB Codecs"
 description: Implement PostgreSQL 2000-01-01 epoch binary temporal and interval codecs, session-aware DateStyle and IntervalStyle text decoders, and strict JSON and version-checked JSONB wire codecs.
 status: stable
-state: planned
+state: completed
 planning_status: complete
 depends_on_chapters:
   - ch09-owned-results-and-numeric-codecs
 replan_trigger: null
-current_task: "native-postgres-driver:ch10:t01"
+current_task: null
 plan_revision: 5
 plan_commit: fd571e3a
 state_revision: 0
@@ -152,10 +152,10 @@ Parent roadmap: [spec.md](../../spec.md). Public interface authority: [contracts
 
 ## 5. Implementation Plan
 
-- [ ] native-postgres-driver:ch10:t01 — Implement lossless PostgreSQL 2000-01-01 epoch temporal and interval binary codecs (tasks/t01-temporal-and-interval-binary.md)
-- [ ] native-postgres-driver:ch10:t02 — Implement session-aware DateStyle and TimeZone temporal text codecs (tasks/t02-datetime-text-styles.md)
-- [ ] native-postgres-driver:ch10:t03 — Implement lossless interval text codecs across all four PostgreSQL IntervalStyle formats (tasks/t03-interval-text-styles.md)
-- [ ] native-postgres-driver:ch10:t04 — Implement strict JSON and version-validated JSONB binary and text codecs (tasks/t04-json-and-jsonb-codecs.md)
+- [x] native-postgres-driver:ch10:t01 — Implement lossless PostgreSQL 2000-01-01 epoch temporal and interval binary codecs (tasks/t01-temporal-and-interval-binary.md)
+- [x] native-postgres-driver:ch10:t02 — Implement session-aware DateStyle and TimeZone temporal text codecs (tasks/t02-datetime-text-styles.md)
+- [x] native-postgres-driver:ch10:t03 — Implement lossless interval text codecs across all four PostgreSQL IntervalStyle formats (tasks/t03-interval-text-styles.md)
+- [x] native-postgres-driver:ch10:t04 — Implement strict JSON and version-validated JSONB binary and text codecs (tasks/t04-json-and-jsonb-codecs.md)
 
 **Chapter Recovery Checkpoint:** `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres && cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-postgres --all-targets -- -D warnings` exits `0`.
 

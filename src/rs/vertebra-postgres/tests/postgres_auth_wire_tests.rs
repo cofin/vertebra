@@ -253,15 +253,8 @@ async fn scram_sha256_rfc7677_exchange_and_saslprep_normalization_succeed() {
         .unwrap();
         let (_, payload2) = read_tagged_frontend_frame(&mut stream).await.unwrap();
         let client_final = String::from_utf8(payload2).unwrap();
-        let server_final = scram_verify_and_sign(
-            b"IX",
-            &initial,
-            &server_first,
-            salt,
-            16,
-            &[],
-            &client_final,
-        );
+        let server_final =
+            scram_verify_and_sign(b"IX", &initial, &server_first, salt, 16, &[], &client_final);
         write_frames(
             &mut stream,
             &[
@@ -420,7 +413,10 @@ async fn scram_sha256_rejects_premature_auth_ok_out_of_order_sasl_and_missing_pa
             .unwrap();
         let mut trailing = Vec::new();
         let n = stream.read_to_end(&mut trailing).await.unwrap();
-        assert_eq!(n, 0, "must not emit SASLInitialResponse when password is None");
+        assert_eq!(
+            n, 0,
+            "must not emit SASLInitialResponse when password is None"
+        );
     })
     .await;
     let mut raw1 = RawPostgresOptions::new(addr1.ip().to_string(), "user", "appdb");
@@ -460,9 +456,12 @@ async fn scram_sha256_rejects_premature_auth_ok_out_of_order_sasl_and_missing_pa
     // 3. Out-of-order AuthenticationSASLContinue before AuthenticationSASL
     let (addr3, _, task3) = spawn_scripted_server(|mut stream| async move {
         let _ = read_startup_packet(&mut stream).await.unwrap();
-        write_frames(&mut stream, &[frame_auth_sasl_continue(b"r=abc,s=YWJj,i=4096")])
-            .await
-            .unwrap();
+        write_frames(
+            &mut stream,
+            &[frame_auth_sasl_continue(b"r=abc,s=YWJj,i=4096")],
+        )
+        .await
+        .unwrap();
     })
     .await;
     let mut raw3 = RawPostgresOptions::new(addr3.ip().to_string(), "user", "appdb");
@@ -621,4 +620,3 @@ async fn direct_iam_refresh_invalidation_and_redaction_and_tls_expiry_guard() {
     assert_eq!(accepts2.load(std::sync::atomic::Ordering::SeqCst), 0);
     token_task.abort();
 }
-

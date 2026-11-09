@@ -5,7 +5,7 @@ chapter_id: ch09-owned-results-and-numeric-codecs
 title: Implement arbitrary-precision base-10000 numeric binary and text codecs
 description: Implement PostgreSQL NUMERIC (OID 1700) binary base-10000 and text codecs preserving exact precision, declared dscale, NaN, and positive/negative infinity without float or fixed-width narrowing.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -113,9 +113,9 @@ Implement PostgreSQL `NUMERIC` (`OID 1700`) binary and text codecs in `src/rs/ve
 
 ## Acceptance Criteria
 
-- [ ] `NUMERIC` (`OID 1700`) binary and text codecs preserve arbitrary precision, declared `dscale`, `NaN`, `+Infinity`, and `-Infinity` without narrowing through `f64` or fixed-width decimals (R11).
-- [ ] Signaling `NaN` inputs are rejected with `PostgresError::Data` (`DataError`) before wire emission (R11).
-- [ ] Malformed headers, out-of-range base-10000 digits (`< 0` or `>= 10000`), invalid sign flags, `dscale > 16383`, and truncated/trailing frames fail cleanly within bounded allocation limits (R11).
+- [x] `NUMERIC` (`OID 1700`) binary and text codecs preserve arbitrary precision, declared `dscale`, `NaN`, `+Infinity`, and `-Infinity` without narrowing through `f64` or fixed-width decimals (R11).
+- [x] Signaling `NaN` inputs are rejected with `PostgresError::Data` (`DataError`) before wire emission (R11).
+- [x] Malformed headers, out-of-range base-10000 digits (`< 0` or `>= 10000`), invalid sign flags, `dscale > 16383`, and truncated/trailing frames fail cleanly within bounded allocation limits (R11).
 
 ## Notes & Discoveries
 

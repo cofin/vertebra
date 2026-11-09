@@ -4,9 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
-use _postgres::cloud::keys::{
-    generate_ephemeral_rsa_keypair, validate_issued_certificate_chain,
-};
+use _postgres::cloud::keys::{generate_ephemeral_rsa_keypair, validate_issued_certificate_chain};
 use _postgres::cloud::material::{
     Clock, CloudConnector, CloudConnectorConfig, CloudResourceTarget,
 };
@@ -103,7 +101,9 @@ impl TestCa {
     }
 }
 
-async fn read_http_request(stream: &mut TcpStream) -> (String, String, HashMap<String, String>, Vec<u8>) {
+async fn read_http_request(
+    stream: &mut TcpStream,
+) -> (String, String, HashMap<String, String>, Vec<u8>) {
     let mut buf = Vec::new();
     let mut tmp = [0u8; 4096];
     let header_end = loop {
@@ -208,8 +208,8 @@ async fn issued_key_valid_leaf_first_chain() {
     let leaf_pem = ca.sign_rsa_public_key_pem(keypair.public_key_pem(), 2_000_000_000);
     let chain = vec![leaf_pem.clone(), ca.ca_pem.clone()];
 
-    let identity =
-        validate_issued_certificate_chain(&chain, &keypair, 1_900_000_000_000).expect("valid chain");
+    let identity = validate_issued_certificate_chain(&chain, &keypair, 1_900_000_000_000)
+        .expect("valid chain");
     assert_eq!(identity.signed_not_after_ms, 2_000_000_000_000);
     let chain_str = String::from_utf8(identity.cert_chain_pem.clone()).unwrap();
     assert!(chain_str.starts_with(leaf_pem.trim()));
@@ -237,11 +237,7 @@ async fn issued_key_mismatched_spki_or_reversed_chain() {
 
     // (b) Reversed chain [intermediate_ca_pem, valid_leaf_pem]
     assert!(matches!(
-        validate_issued_certificate_chain(
-            &[ca.ca_pem.clone(), leaf_kp1],
-            &kp1,
-            1_900_000_000_000
-        ),
+        validate_issued_certificate_chain(&[ca.ca_pem.clone(), leaf_kp1], &kp1, 1_900_000_000_000),
         Err(PostgresError::Protocol(_))
     ));
 
@@ -281,9 +277,7 @@ async fn issued_key_malformed_pem_and_deadline_abort() {
         .await
         .unwrap();
     assert!(validate_issued_certificate_chain(&[], &kp, 1_000).is_err());
-    assert!(
-        validate_issued_certificate_chain(&["not a pem".to_string()], &kp, 1_000).is_err()
-    );
+    assert!(validate_issued_certificate_chain(&["not a pem".to_string()], &kp, 1_000).is_err());
     assert!(
         validate_issued_certificate_chain(
             &["-----BEGIN CERTIFICATE-----\n!!corrupt!!\n-----END CERTIFICATE-----".to_string()],
@@ -683,7 +677,11 @@ async fn material_endpoint_https_and_redaction() {
         base.clone().with_admin_endpoint("http://10.0.0.5:8080"),
         Err(PostgresError::Config(_))
     ));
-    assert!(base.clone().with_admin_endpoint("http://127.0.0.1:8080").is_ok());
+    assert!(
+        base.clone()
+            .with_admin_endpoint("http://127.0.0.1:8080")
+            .is_ok()
+    );
 
     let mut secret_opts = HashMap::new();
     secret_opts.insert(
@@ -897,10 +895,12 @@ async fn cloudsql_admin_psc_dns_selection_and_missing_ip() {
     .with_admin_endpoint(format!("http://{addr}"))
     .unwrap()
     .with_cloud_auth_options(admin_opts.clone());
-    assert!(connector
-        .prepare(&cfg_priv, Instant::now() + Duration::from_secs(5))
-        .await
-        .is_err());
+    assert!(
+        connector
+            .prepare(&cfg_priv, Instant::now() + Duration::from_secs(5))
+            .await
+            .is_err()
+    );
 
     // (c) PSC disabled -> fails
     psc_enabled.store(false, Ordering::SeqCst);
@@ -913,10 +913,12 @@ async fn cloudsql_admin_psc_dns_selection_and_missing_ip() {
     .with_admin_endpoint(format!("http://{addr}"))
     .unwrap()
     .with_cloud_auth_options(admin_opts);
-    assert!(connector
-        .prepare(&cfg_no_psc, Instant::now() + Duration::from_secs(5))
-        .await
-        .is_err());
+    assert!(
+        connector
+            .prepare(&cfg_no_psc, Instant::now() + Duration::from_secs(5))
+            .await
+            .is_err()
+    );
     server_task.abort();
 }
 
@@ -955,7 +957,10 @@ async fn cloudsql_admin_region_and_engine_guards() {
     let mut admin_opts = HashMap::new();
     admin_opts.insert("access_token".to_string(), "admin-tok".to_string());
 
-    for inst in ["proj:us-central1:wrong-region", "proj:us-central1:mysql-inst"] {
+    for inst in [
+        "proj:us-central1:wrong-region",
+        "proj:us-central1:mysql-inst",
+    ] {
         let uri = CloudSqlInstanceUri::parse(inst).unwrap();
         let cfg = CloudConnectorConfig::new(
             CloudResourceTarget::CloudSql(uri),
@@ -1035,10 +1040,12 @@ async fn cloudsql_admin_missing_ca_or_key_mismatch() {
         .unwrap()
         .with_cloud_auth_options(admin_opts.clone());
 
-        assert!(connector
-            .prepare(&cfg, Instant::now() + Duration::from_secs(5))
-            .await
-            .is_err());
+        assert!(
+            connector
+                .prepare(&cfg, Instant::now() + Duration::from_secs(5))
+                .await
+                .is_err()
+        );
     }
     server_task.abort();
 }
@@ -1092,10 +1099,9 @@ async fn alloydb_admin_v1alpha_paths_and_json_contract() {
 
     let clock = Arc::new(ManualClock::new(1_000_000));
     let connector = CloudConnector::with_clock(clock);
-    let uri = AlloyDbClusterUri::parse(
-        "projects/p1/locations/us-central1/clusters/c1/instances/i1",
-    )
-    .unwrap();
+    let uri =
+        AlloyDbClusterUri::parse("projects/p1/locations/us-central1/clusters/c1/instances/i1")
+            .unwrap();
     let mut admin_opts = HashMap::new();
     admin_opts.insert("access_token".to_string(), "vtb-admin-tok".to_string());
     let mut iam_opts = HashMap::new();
@@ -1155,10 +1161,9 @@ async fn alloydb_admin_password_mode_still_fetches_login_token() {
 
     let clock = Arc::new(ManualClock::new(1_000_000));
     let connector = CloudConnector::with_clock(clock);
-    let uri = AlloyDbClusterUri::parse(
-        "projects/p1/locations/us-central1/clusters/c1/instances/i1",
-    )
-    .unwrap();
+    let uri =
+        AlloyDbClusterUri::parse("projects/p1/locations/us-central1/clusters/c1/instances/i1")
+            .unwrap();
     let mut admin_opts = HashMap::new();
     admin_opts.insert("access_token".to_string(), "admin-tok".to_string());
     let mut iam_opts = HashMap::new();
@@ -1225,10 +1230,9 @@ async fn alloydb_admin_psc_dns_and_missing_network_target() {
 
     let clock = Arc::new(ManualClock::new(1_000_000));
     let connector = CloudConnector::with_clock(clock);
-    let uri = AlloyDbClusterUri::parse(
-        "projects/p1/locations/us-central1/clusters/c1/instances/i1",
-    )
-    .unwrap();
+    let uri =
+        AlloyDbClusterUri::parse("projects/p1/locations/us-central1/clusters/c1/instances/i1")
+            .unwrap();
     let mut admin_opts = HashMap::new();
     admin_opts.insert("access_token".to_string(), "admin-tok".to_string());
     let mut iam_opts = HashMap::new();
@@ -1267,10 +1271,12 @@ async fn alloydb_admin_psc_dns_and_missing_network_target() {
     .unwrap()
     .with_cloud_auth_options(admin_opts)
     .with_iam_auth_options(Some(iam_opts));
-    assert!(connector
-        .prepare(&cfg_pub, Instant::now() + Duration::from_secs(5))
-        .await
-        .is_err());
+    assert!(
+        connector
+            .prepare(&cfg_pub, Instant::now() + Duration::from_secs(5))
+            .await
+            .is_err()
+    );
     server_task.abort();
 }
 
@@ -1304,13 +1310,15 @@ async fn alloydb_admin_missing_fields_key_mismatch_and_expired_chain() {
                 write_http_json(&mut stream, 200, &json.to_string()).await;
             } else if path.contains("wrong-key") {
                 let leaf = ca.sign_rsa_public_key_pem(w_clone.public_key_pem(), 4_600);
-                let json = serde_json::json!({ "pemCertificateChain": [leaf], "caCert": ca.ca_pem });
+                let json =
+                    serde_json::json!({ "pemCertificateChain": [leaf], "caCert": ca.ca_pem });
                 write_http_json(&mut stream, 200, &json.to_string()).await;
             } else {
                 let req: serde_json::Value = serde_json::from_slice(&body).unwrap();
                 let pub_key = req["publicKey"].as_str().unwrap();
                 let leaf = ca.sign_rsa_public_key_pem(pub_key, 1_000);
-                let json = serde_json::json!({ "pemCertificateChain": [leaf], "caCert": ca.ca_pem });
+                let json =
+                    serde_json::json!({ "pemCertificateChain": [leaf], "caCert": ca.ca_pem });
                 write_http_json(&mut stream, 200, &json.to_string()).await;
             }
         }
@@ -1343,10 +1351,12 @@ async fn alloydb_admin_missing_fields_key_mismatch_and_expired_chain() {
         .unwrap()
         .with_cloud_auth_options(admin_opts.clone())
         .with_iam_auth_options(Some(iam_opts.clone()));
-        assert!(connector
-            .prepare(&cfg, Instant::now() + Duration::from_secs(5))
-            .await
-            .is_err());
+        assert!(
+            connector
+                .prepare(&cfg, Instant::now() + Duration::from_secs(5))
+                .await
+                .is_err()
+        );
     }
     server_task.abort();
 }
@@ -1416,8 +1426,7 @@ async fn cloudsql_mtls_and_alloydb_end_to_end_dial_keepalive_and_token_expiry_gu
     );
 
     // Build Cloud SQL server cert with CN="proj-a:inst-1" and SAN="db.csql.internal"
-    let mut csql_srv_params =
-        CertificateParams::new(vec!["db.csql.internal".to_string()]).unwrap();
+    let mut csql_srv_params = CertificateParams::new(vec!["db.csql.internal".to_string()]).unwrap();
     csql_srv_params
         .distinguished_name
         .push(DnType::CommonName, "proj-a:inst-1");
@@ -1492,9 +1501,10 @@ async fn cloudsql_mtls_and_alloydb_end_to_end_dial_keepalive_and_token_expiry_gu
     raw_csql.cloud_sql_instance = Some("proj-a:us-central1:inst-1".to_string());
     raw_csql.cloud_sql_ip_type = "PUBLIC".to_string();
     raw_csql.enable_iam_auth = true;
-    raw_csql
-        .cloud_auth_options
-        .insert("admin_endpoint".to_string(), format!("http://{csql_admin_addr}"));
+    raw_csql.cloud_auth_options.insert(
+        "admin_endpoint".to_string(),
+        format!("http://{csql_admin_addr}"),
+    );
     raw_csql
         .cloud_auth_options
         .insert("access_token".to_string(), "admin-tok".to_string());
@@ -1535,10 +1545,11 @@ async fn cloudsql_mtls_and_alloydb_end_to_end_dial_keepalive_and_token_expiry_gu
         .push(DnType::CommonName, "alloydb-srv");
     let alloy_srv_key = KeyPair::generate().unwrap();
     let alloy_srv_cert = alloy_srv_params.signed_by(&alloy_srv_key, &issuer).unwrap();
-    let alloy_srv_certs: Vec<CertificateDer<'static>> =
-        rustls_pemfile::certs(&mut std::io::BufReader::new(alloy_srv_cert.pem().as_bytes()))
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
+    let alloy_srv_certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(
+        &mut std::io::BufReader::new(alloy_srv_cert.pem().as_bytes()),
+    )
+    .collect::<Result<Vec<_>, _>>()
+    .unwrap();
     let alloy_srv_pk: PrivateKeyDer<'static> = rustls_pemfile::private_key(
         &mut std::io::BufReader::new(alloy_srv_key.serialize_pem().as_bytes()),
     )
@@ -1562,7 +1573,10 @@ async fn cloudsql_mtls_and_alloydb_end_to_end_dial_keepalive_and_token_expiry_gu
         let mut tls1 = alloy_acceptor.accept(sock1).await.unwrap();
         let mut unexpected = Vec::new();
         let n = tls1.read_to_end(&mut unexpected).await.unwrap_or(0);
-        assert_eq!(n, 0, "expired token must abort before metadata exchange write");
+        assert_eq!(
+            n, 0,
+            "expired token must abort before metadata exchange write"
+        );
 
         // Second connection: valid token completes metadata exchange
         let (sock2, _) = alloy_pg_listener.accept().await.unwrap();
@@ -1607,9 +1621,10 @@ async fn cloudsql_mtls_and_alloydb_end_to_end_dial_keepalive_and_token_expiry_gu
         Some("projects/p1/locations/us-central1/clusters/c1/instances/i1".to_string());
     raw_alloy.alloydb_ip_type = "PRIVATE".to_string();
     raw_alloy.enable_iam_auth = true;
-    raw_alloy
-        .cloud_auth_options
-        .insert("admin_endpoint".to_string(), format!("http://{alloy_admin_addr}"));
+    raw_alloy.cloud_auth_options.insert(
+        "admin_endpoint".to_string(),
+        format!("http://{alloy_admin_addr}"),
+    );
     raw_alloy
         .cloud_auth_options
         .insert("access_token".to_string(), "admin-tok".to_string());
@@ -1649,7 +1664,11 @@ async fn cloudsql_mtls_and_alloydb_end_to_end_dial_keepalive_and_token_expiry_gu
         .set_tcp_keepalive(pg_cfg_alloy.tcp_keepalive())
         .expect("keepalive on alloydb stream");
     let mut alloy_buf = [0u8; 8];
-    dialed_alloy.stream.read_exact(&mut alloy_buf).await.unwrap();
+    dialed_alloy
+        .stream
+        .read_exact(&mut alloy_buf)
+        .await
+        .unwrap();
     assert_eq!(&alloy_buf, b"ALLOY_OK");
     alloy_pg_task.await.unwrap();
     alloy_admin_task.abort();

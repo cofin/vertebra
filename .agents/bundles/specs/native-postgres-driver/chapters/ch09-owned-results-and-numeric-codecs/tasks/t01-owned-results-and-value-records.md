@@ -5,7 +5,7 @@ chapter_id: ch09-owned-results-and-numeric-codecs
 title: Define owned query results and lossless PostgreSQL value records
 description: Create owned Rust result/value models in result.rs and frozen gc=False msgspec value records in vertebra.db.adapters.postgres.types without eager native wheel imports.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -132,9 +132,9 @@ Define the single owned Rust (`src/rs/vertebra-postgres/src/result.rs`) and Pyth
 
 ## Acceptance Criteria
 
-- [ ] Owned Rust (`result.rs`) and Python (`types.py`) model fields, discriminants, and exact units match `contracts.md` verbatim (R10, R11).
-- [ ] Column order, duplicate/empty column names, `NUMERIC` `dscale`/specials, `PgInterval` months, `PgArray` lower bounds, `PgComposite` field OIDs, `PgBitString` zero padding, and `PgVector` `1..=16000` finiteness invariants survive without loss (R10, R11).
-- [ ] Importing and constructing `vertebra.db.adapters.postgres.types` works in pure Python without `vertebra._postgres` installed, with zero inline `#` comments in Python (R10, R11).
+- [x] Owned Rust (`result.rs`) and Python (`types.py`) model fields, discriminants, and exact units match `contracts.md` verbatim (R10, R11).
+- [x] Column order, duplicate/empty column names, `NUMERIC` `dscale`/specials, `PgInterval` months, `PgArray` lower bounds, `PgComposite` field OIDs, `PgBitString` zero padding, and `PgVector` `1..=16000` finiteness invariants survive without loss (R10, R11).
+- [x] Importing and constructing `vertebra.db.adapters.postgres.types` works in pure Python without `vertebra._postgres` installed, with zero inline `#` comments in Python (R10, R11).
 
 ## Notes & Discoveries
 

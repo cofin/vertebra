@@ -333,12 +333,13 @@ impl ScopedTokenProvider {
             return Ok((*snap).clone());
         }
 
-        let snap = tokio::time::timeout_at(absolute_deadline, cache.get_or_refresh_with_force(true))
-            .await
-            .map_err(|_| {
-                PostgresError::Transport("GCP Admin OAuth2 token refresh timed out".to_string())
-            })?
-            .map_err(PostgresError::Auth)?;
+        let snap =
+            tokio::time::timeout_at(absolute_deadline, cache.get_or_refresh_with_force(true))
+                .await
+                .map_err(|_| {
+                    PostgresError::Transport("GCP Admin OAuth2 token refresh timed out".to_string())
+                })?
+                .map_err(PostgresError::Auth)?;
         Ok((*snap).clone())
     }
 
@@ -354,14 +355,15 @@ impl ScopedTokenProvider {
         if let Some(iam_opts) = iam_non_empty {
             let skew_ms = parse_refresh_skew_ms(iam_opts);
             if has_static_token_key(iam_opts) {
-                let static_cred =
-                    StaticLoginCredential::from_options(iam_opts, required_scopes, now_ms, skew_ms)?;
+                let static_cred = StaticLoginCredential::from_options(
+                    iam_opts,
+                    required_scopes,
+                    now_ms,
+                    skew_ms,
+                )?;
                 let proxy = parse_proxy_policy(iam_opts);
                 let cache = Arc::new(static_cred.to_token_cache(proxy));
-                let snap = cache
-                    .get_or_refresh()
-                    .await
-                    .map_err(PostgresError::Auth)?;
+                let snap = cache.get_or_refresh().await.map_err(PostgresError::Auth)?;
                 let login_snap = ScopedLoginSnapshot::new(
                     (*snap).clone(),
                     required_scopes.to_vec(),
@@ -374,8 +376,8 @@ impl ScopedTokenProvider {
                 return Ok(login_snap);
             }
 
-            let effective_scopes = extract_explicit_scopes(iam_opts)
-                .unwrap_or_else(|| required_scopes.to_vec());
+            let effective_scopes =
+                extract_explicit_scopes(iam_opts).unwrap_or_else(|| required_scopes.to_vec());
             for req in required_scopes {
                 if !effective_scopes.iter().any(|s| s == req) {
                     return Err(PostgresError::Auth(format!(
@@ -384,7 +386,12 @@ impl ScopedTokenProvider {
                 }
             }
             return self
-                .resolve_dynamic_login_with_opts(iam_opts, &effective_scopes, skew_ms, absolute_deadline)
+                .resolve_dynamic_login_with_opts(
+                    iam_opts,
+                    &effective_scopes,
+                    skew_ms,
+                    absolute_deadline,
+                )
                 .await;
         }
 
@@ -572,10 +579,7 @@ fn parse_proxy_policy(opts: &HashMap<String, String>) -> ProxyPolicy {
     }
 }
 
-async fn run_blocking_until<F, T>(
-    absolute_deadline: Instant,
-    f: F,
-) -> Result<T, PostgresError>
+async fn run_blocking_until<F, T>(absolute_deadline: Instant, f: F) -> Result<T, PostgresError>
 where
     F: FnOnce() -> Result<T, PostgresError> + Send + 'static,
     T: Send + 'static,
@@ -588,9 +592,7 @@ where
     let handle = tokio::task::spawn_blocking(f);
     tokio::time::timeout_at(absolute_deadline, handle)
         .await
-        .map_err(|_| {
-            PostgresError::Transport("credential discovery timed out".to_string())
-        })?
+        .map_err(|_| PostgresError::Transport("credential discovery timed out".to_string()))?
         .map_err(|e| PostgresError::Auth(format!("credential discovery task panicked: {e}")))?
 }
 
@@ -687,9 +689,8 @@ mod tests {
             "expires_at_unix_ms".to_string(),
             "4102444800000".to_string(),
         );
-        let far_cred =
-            StaticLoginCredential::from_options(&far_future, &required, now_ms, skew_ms)
-                .expect("far future static cred");
+        let far_cred = StaticLoginCredential::from_options(&far_future, &required, now_ms, skew_ms)
+            .expect("far future static cred");
         let cache = far_cred.to_token_cache(ProxyPolicy::Direct);
         let snap1 = cache.get_or_refresh().await.expect("first refresh");
         let snap2 = cache.get_or_refresh().await.expect("second refresh");

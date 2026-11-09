@@ -87,7 +87,8 @@ pub(crate) async fn fetch_cloudsql_discovery(
     let base = admin_endpoint.trim_end_matches('/');
     let enc_project = encode_uri_segment(&uri.project)?;
     let enc_instance = encode_uri_segment(&uri.instance)?;
-    let instance_base = format!("{base}/sql/v1beta4/projects/{enc_project}/instances/{enc_instance}");
+    let instance_base =
+        format!("{base}/sql/v1beta4/projects/{enc_project}/instances/{enc_instance}");
 
     let settings_url = format!("{instance_base}/connectSettings");
     let settings: ConnectSettingsResponse = connector
@@ -121,7 +122,8 @@ pub(crate) async fn fetch_cloudsql_discovery(
         .dns_names
         .iter()
         .find(|d| {
-            d.connection_type.eq_ignore_ascii_case("PRIVATE_SERVICE_CONNECT")
+            d.connection_type
+                .eq_ignore_ascii_case("PRIVATE_SERVICE_CONNECT")
                 && !d.name.trim().is_empty()
         })
         .map(|d| d.name.trim().trim_end_matches('.').to_string())
@@ -166,7 +168,8 @@ pub(crate) async fn fetch_cloudsql_discovery(
                 .dns_names
                 .iter()
                 .find(|d| {
-                    d.connection_type.eq_ignore_ascii_case("PRIVATE_SERVICE_CONNECT")
+                    d.connection_type
+                        .eq_ignore_ascii_case("PRIVATE_SERVICE_CONNECT")
                         && !d.name.trim().is_empty()
                 })
                 .map(|d| d.name.trim().trim_end_matches('.').to_string())
@@ -208,7 +211,8 @@ pub(crate) async fn fetch_cloudsql_discovery(
         .filter(|s| !s.trim().is_empty())
         .ok_or_else(|| {
             PostgresError::Transport(
-                "Cloud SQL generateEphemeralCert response is missing ephemeralCert.cert".to_string(),
+                "Cloud SQL generateEphemeralCert response is missing ephemeralCert.cert"
+                    .to_string(),
             )
         })?;
 

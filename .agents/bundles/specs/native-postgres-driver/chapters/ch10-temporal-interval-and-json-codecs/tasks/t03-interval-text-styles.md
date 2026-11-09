@@ -5,7 +5,7 @@ chapter_id: ch10-temporal-interval-and-json-codecs
 title: Implement lossless interval text codecs across all four PostgreSQL IntervalStyle formats
 description: Decode and encode PostgreSQL INTERVAL (OID 1186) text across postgres, postgres_verbose, sql_standard, and iso_8601 session styles without month flattening or float rounding.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -113,9 +113,9 @@ Implement bounded, style-aware `INTERVAL` (`OID 1186`) text decoding and canonic
 
 ## Acceptance Criteria
 
-- [ ] `postgres`, `postgres_verbose`, `sql_standard`, and `iso_8601` `IntervalStyle` outputs preserve independent `(months, days, microseconds)` fields, mixed signs, negative sub-second fractions, and PG18 infinities (R11).
-- [ ] Warm binary and cold text interval paths produce identical `PgValue::Interval` tuples without `f64` or `timedelta` conversion (R11).
-- [ ] Malformed interval strings and integer overflows fail with `PostgresError::Data` (R11).
+- [x] `postgres`, `postgres_verbose`, `sql_standard`, and `iso_8601` `IntervalStyle` outputs preserve independent `(months, days, microseconds)` fields, mixed signs, negative sub-second fractions, and PG18 infinities (R11).
+- [x] Warm binary and cold text interval paths produce identical `PgValue::Interval` tuples without `f64` or `timedelta` conversion (R11).
+- [x] Malformed interval strings and integer overflows fail with `PostgresError::Data` (R11).
 
 ## Notes & Discoveries
 

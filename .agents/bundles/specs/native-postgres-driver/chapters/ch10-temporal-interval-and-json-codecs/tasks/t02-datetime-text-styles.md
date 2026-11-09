@@ -5,7 +5,7 @@ chapter_id: ch10-temporal-interval-and-json-codecs
 title: Implement session-aware DateStyle and TimeZone temporal text codecs
 description: Decode PostgreSQL date, time, timestamp, and timestamptz text across ISO, SQL, Postgres, and German DateStyle formats and MDY/DMY/YMD orderings, capturing unresolved abbreviation displays as TemporalText.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -113,9 +113,9 @@ Implement server-output temporal text decoding and canonical ISO text encoding i
 
 ## Acceptance Criteria
 
-- [ ] All four `DateStyle` output formats (`ISO`, `SQL`, `Postgres`, `German`) across `MDY`, `DMY`, and `YMD` decode to exact PostgreSQL `2000-01-01` epoch integers (R11).
-- [ ] Explicit numeric offsets (including seconds) and `UTC`/`GMT` resolve exact instants, while abbreviation-only `timestamptz` outputs remain tagged as `PgValue::TemporalText` with captured `DateStyle` and `TimeZone` (R11).
-- [ ] `ParameterStatus` updates take effect immediately per result set, `BC`/large-year calendar bounds work without `chrono` clipping, and `TemporalText` typed rebinds fail with `PostgresError::Data` (R11).
+- [x] All four `DateStyle` output formats (`ISO`, `SQL`, `Postgres`, `German`) across `MDY`, `DMY`, and `YMD` decode to exact PostgreSQL `2000-01-01` epoch integers (R11).
+- [x] Explicit numeric offsets (including seconds) and `UTC`/`GMT` resolve exact instants, while abbreviation-only `timestamptz` outputs remain tagged as `PgValue::TemporalText` with captured `DateStyle` and `TimeZone` (R11).
+- [x] `ParameterStatus` updates take effect immediately per result set, `BC`/large-year calendar bounds work without `chrono` clipping, and `TemporalText` typed rebinds fail with `PostgresError::Data` (R11).
 
 ## Notes & Discoveries
 

@@ -574,7 +574,9 @@ async fn from_scoped_options_enforces_scopes_for_authorized_user_and_rejects_sta
     static_opts.insert("access_token".to_string(), "static-tok".to_string());
     let static_err = GcpTokenCache::from_scoped_options(Some(&static_opts), &default_scopes)
         .expect_err("static token must reject explicit scopes");
-    assert!(static_err.contains("static access token cannot satisfy explicit non-empty OAuth scopes"));
+    assert!(
+        static_err.contains("static access token cannot satisfy explicit non-empty OAuth scopes")
+    );
 }
 
 #[tokio::test]
@@ -672,5 +674,3 @@ async fn explicit_login_scopes_passed_to_gcloud_without_unscoped_fallback() {
         .expect_err("must not fall back to unscoped gcloud auth print-access-token");
     assert!(err.contains("adc failed"));
 }
-
-

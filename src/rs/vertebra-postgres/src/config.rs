@@ -7,9 +7,7 @@ use std::time::Duration;
 use vertebra_db::connection::{TcpKeepaliveConfig, TlsMode};
 use vertebra_db::dialer::{AlloyDbClusterUri, CloudSqlInstanceUri};
 
-use crate::credentials::{
-    CLOUDSQL_LOGIN_SCOPE, extract_explicit_scopes, has_static_token_key,
-};
+use crate::credentials::{CLOUDSQL_LOGIN_SCOPE, extract_explicit_scopes, has_static_token_key};
 use crate::errors::PostgresError;
 
 /// SCRAM channel-binding negotiation policy (`disable`, `prefer`, `require`).
@@ -313,7 +311,10 @@ impl PostgresConfig {
                 )));
             }
             let lower = k.to_ascii_lowercase();
-            if matches!(lower.as_str(), "user" | "database" | "options" | "replication") {
+            if matches!(
+                lower.as_str(),
+                "user" | "database" | "options" | "replication"
+            ) {
                 return Err(PostgresError::Config(format!(
                     "reserved startup parameter `{k}` must not be set in session_gucs"
                 )));
@@ -330,13 +331,11 @@ impl PostgresConfig {
 
         if let Some(ref inst) = raw.cloud_sql_instance {
             validate_non_empty_no_nul("cloud_sql_instance", inst)?;
-            CloudSqlInstanceUri::parse(inst)
-                .map_err(|e| PostgresError::Config(e.to_string()))?;
+            CloudSqlInstanceUri::parse(inst).map_err(|e| PostgresError::Config(e.to_string()))?;
         }
         if let Some(ref uri) = raw.alloydb_instance_uri {
             validate_non_empty_no_nul("alloydb_instance_uri", uri)?;
-            AlloyDbClusterUri::parse(uri)
-                .map_err(|e| PostgresError::Config(e.to_string()))?;
+            AlloyDbClusterUri::parse(uri).map_err(|e| PostgresError::Config(e.to_string()))?;
         }
 
         let endpoint_count = u8::from(raw.unix_socket.is_some())
@@ -435,7 +434,10 @@ impl PostgresConfig {
     /// Build the deterministic startup parameter map (`application_name` overlaid by `session_gucs`, excluding `client_encoding`).
     pub fn startup_gucs(&self) -> BTreeMap<String, String> {
         let mut out = BTreeMap::new();
-        out.insert("application_name".to_string(), self.application_name.clone());
+        out.insert(
+            "application_name".to_string(),
+            self.application_name.clone(),
+        );
         for (k, v) in &self.session_gucs {
             if k.eq_ignore_ascii_case("client_encoding") {
                 continue;
@@ -632,4 +634,3 @@ mod tests {
         assert!(!startup.contains_key("client_encoding"));
     }
 }
-

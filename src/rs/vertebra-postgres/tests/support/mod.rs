@@ -210,11 +210,7 @@ where
 /// Spawn a single-accept loopback TCP server and return `(SocketAddr, Arc<AtomicUsize>, JoinHandle)`.
 pub async fn spawn_scripted_server<F, Fut>(
     handler: F,
-) -> (
-    SocketAddr,
-    Arc<AtomicUsize>,
-    tokio::task::JoinHandle<()>,
-)
+) -> (SocketAddr, Arc<AtomicUsize>, tokio::task::JoinHandle<()>)
 where
     F: FnOnce(TcpStream) -> Fut + Send + 'static,
     Fut: std::future::Future<Output = ()> + Send + 'static,

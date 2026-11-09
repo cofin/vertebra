@@ -5,7 +5,7 @@ chapter_id: ch10-temporal-interval-and-json-codecs
 title: Implement strict JSON and version-validated JSONB binary and text codecs
 description: Encode and decode PostgreSQL JSON (OID 114) and JSONB (OID 3802, version 0x01) values, preserving large integer precision and distinguishing JSON null from SQL NULL.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -114,9 +114,9 @@ Implement PostgreSQL `JSON` (`OID 114`) and `JSONB` (`OID 3802`) binary and text
 
 ## Acceptance Criteria
 
-- [ ] `JSON` (`OID 114`) and `JSONB` (`OID 3802`, `0x01` binary header) validate UTF-8 RFC 8259 JSON in both binary and text formats while keeping unknown extension OIDs as `PgValue::Text` (R11).
-- [ ] SQL `NULL`, top-level JSON `null`, and JSON string `"null"` remain distinct in `PgValue`, and integers exceeding `2^53` suffer zero `f64` precision loss (R11).
-- [ ] Empty/truncated `JSONB`, non-`0x01` version markers, invalid UTF-8, and malformed JSON fail explicitly with `PostgresError::Data` (R11).
+- [x] `JSON` (`OID 114`) and `JSONB` (`OID 3802`, `0x01` binary header) validate UTF-8 RFC 8259 JSON in both binary and text formats while keeping unknown extension OIDs as `PgValue::Text` (R11).
+- [x] SQL `NULL`, top-level JSON `null`, and JSON string `"null"` remain distinct in `PgValue`, and integers exceeding `2^53` suffer zero `f64` precision loss (R11).
+- [x] Empty/truncated `JSONB`, non-`0x01` version markers, invalid UTF-8, and malformed JSON fail explicitly with `PostgresError::Data` (R11).
 
 ## Notes & Discoveries
 

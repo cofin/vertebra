@@ -6,13 +6,22 @@ pub mod async_client;
 pub mod auth;
 pub mod binding;
 pub mod cloud;
+pub mod codecs;
 pub mod config;
 pub mod credentials;
 pub mod errors;
 pub mod protocol;
+pub mod query;
+pub mod result;
 pub mod session;
 pub mod sync_client;
 pub mod tls;
+
+pub use codecs::{CodecContext, decode_value, encode_value, format_for_oid};
+pub use query::SimpleQueryCollector;
+pub use result::{
+    Column, Format, PgNumeric, PgValue, QueryResult, TemporalKind, TransactionStatus, VectorKind,
+};
 
 /// Whether this build targets free-threaded CPython (`Py_GIL_DISABLED`).
 pub const FREE_THREADED: bool = cfg!(Py_GIL_DISABLED);

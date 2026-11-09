@@ -104,7 +104,10 @@ impl CloudConnectorConfig {
     }
 
     /// Override the Admin API base endpoint (must be `https://` or an explicit loopback `http://`).
-    pub fn with_admin_endpoint(mut self, endpoint: impl Into<String>) -> Result<Self, PostgresError> {
+    pub fn with_admin_endpoint(
+        mut self,
+        endpoint: impl Into<String>,
+    ) -> Result<Self, PostgresError> {
         let ep = endpoint.into();
         validate_admin_endpoint(&ep)?;
         self.admin_endpoint = ep.trim_end_matches('/').to_string();
@@ -132,7 +135,8 @@ impl CloudConnectorConfig {
 
 impl fmt::Debug for CloudConnectorConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut cloud_keys: Vec<&str> = self.cloud_auth_options.keys().map(String::as_str).collect();
+        let mut cloud_keys: Vec<&str> =
+            self.cloud_auth_options.keys().map(String::as_str).collect();
         cloud_keys.sort_unstable();
         let iam_keys: Option<Vec<&str>> = self.iam_auth_options.as_ref().map(|m| {
             let mut k: Vec<&str> = m.keys().map(String::as_str).collect();
@@ -178,7 +182,10 @@ impl fmt::Debug for PreparedCloudMaterial {
             .field("expected_cn", &self.expected_cn)
             .field("auth_type", &self.auth_type)
             .field("server_ca_pem_len", &self.server_ca_pem.len())
-            .field("client_cert_chain_pem_len", &self.client_cert_chain_pem.len())
+            .field(
+                "client_cert_chain_pem_len",
+                &self.client_cert_chain_pem.len(),
+            )
             .field("client_key_pem", &"<redacted>")
             .field("signed_cert_not_after_ms", &self.signed_cert_not_after_ms)
             .field("effective_expiry_ms", &self.effective_expiry_ms)
@@ -240,7 +247,10 @@ impl CloudMaterialCache {
     }
 
     pub(crate) fn slot_for(&self, key: CloudMaterialKey) -> KeySlot {
-        let mut guard = self.slots.lock().expect("CloudMaterialCache slots lock poisoned");
+        let mut guard = self
+            .slots
+            .lock()
+            .expect("CloudMaterialCache slots lock poisoned");
         Arc::clone(
             guard
                 .entry(key)
@@ -403,13 +413,11 @@ impl CloudConnector {
                 .await?;
 
                 let signed_not_after_ms = discovery.client_identity.signed_not_after_ms;
-                let effective_expiry_ms = match login_snap
-                    .as_ref()
-                    .map(|s| s.snapshot.expires_at_unix_ms)
-                {
-                    Some(tok_exp) => signed_not_after_ms.min(tok_exp),
-                    None => signed_not_after_ms,
-                };
+                let effective_expiry_ms =
+                    match login_snap.as_ref().map(|s| s.snapshot.expires_at_unix_ms) {
+                        Some(tok_exp) => signed_not_after_ms.min(tok_exp),
+                        None => signed_not_after_ms,
+                    };
                 let now_after = self.clock.now_unix_ms();
                 if effective_expiry_ms <= now_after {
                     return Err(PostgresError::Transport(
@@ -637,9 +645,9 @@ pub fn validate_admin_endpoint(raw: &str) -> Result<(), PostgresError> {
     match parsed.scheme() {
         "https" => Ok(()),
         "http" => {
-            let is_loopback = parsed.host_str().is_some_and(|h| {
-                matches!(h, "127.0.0.1" | "localhost" | "::1" | "[::1]")
-            });
+            let is_loopback = parsed
+                .host_str()
+                .is_some_and(|h| matches!(h, "127.0.0.1" | "localhost" | "::1" | "[::1]"));
             if is_loopback {
                 Ok(())
             } else {

@@ -106,10 +106,7 @@ impl Authentication {
 
         let phase = std::mem::replace(&mut self.phase, AuthPhase::Initial);
         match (phase, msg) {
-            (
-                AuthPhase::Initial | AuthPhase::PasswordSent,
-                Message::AuthenticationOk,
-            ) => {
+            (AuthPhase::Initial | AuthPhase::PasswordSent, Message::AuthenticationOk) => {
                 if config.channel_binding == ChannelBindingPolicy::Require {
                     return Err(PostgresError::UnsupportedAuth(
                         "channel_binding='require' requires SCRAM-SHA-256-PLUS authentication"
@@ -165,7 +162,9 @@ impl Authentication {
                 let mut has_scram_sha256_plus = false;
                 let mut mechs = body.mechanisms();
                 while let Some(mech) = mechs.next().map_err(|e| {
-                    PostgresError::Protocol(format!("invalid AuthenticationSASL mechanism list: {e}"))
+                    PostgresError::Protocol(format!(
+                        "invalid AuthenticationSASL mechanism list: {e}"
+                    ))
                 })? {
                     match mech {
                         "SCRAM-SHA-256" => has_scram_sha256 = true,

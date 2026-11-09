@@ -54,6 +54,14 @@ pub struct BackendKey {
     pub secret_key: i32,
 }
 
+/// Asynchronous notification delivered via `NotificationResponse` (`'A'`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NotificationEvent {
+    pub process_id: i32,
+    pub channel: String,
+    pub payload: String,
+}
+
 /// Established, authenticated PostgreSQL wire connection at `ReadyForQuery(Idle)`.
 #[derive(Debug)]
 pub struct PostgresConnection {
@@ -66,6 +74,8 @@ pub struct PostgresConnection {
     pub(crate) generation: u64,
     pub(crate) tls_negotiated: bool,
     pub(crate) tls_server_end_point: Option<Vec<u8>>,
+    pub(crate) unnamed_statement_valid: bool,
+    pub(crate) notifications: Vec<NotificationEvent>,
     pub(crate) closed: bool,
 }
 
@@ -123,6 +133,192 @@ impl PostgresConnection {
     /// Return the number of unflushed frontend bytes currently buffered.
     pub fn buffered_write_len(&self) -> usize {
         self.write_buf.len()
+    }
+
+    /// Return `true` if a previously prepared unnamed statement (`""`) remains valid on the wire.
+    pub const fn is_unnamed_statement_valid(&self) -> bool {
+        self.unnamed_statement_valid
+    }
+
+    /// Update the local validity state of the unnamed prepared statement (`""`).
+    pub fn set_unnamed_statement_valid(&mut self, valid: bool) {
+        self.unnamed_statement_valid = valid;
+    }
+
+    /// Central hook invoked whenever a `NotificationResponse` frame is observed on the wire.
+    pub fn dispatch_notification(&mut self, pid: i32, channel: String, payload: String) {
+        self.notifications.push(NotificationEvent {
+            process_id: pid,
+            channel,
+            payload,
+        });
+    }
+
+    /// Drain all buffered asynchronous `NotificationResponse` events in arrival order.
+    pub fn drain_notifications(&mut self) -> Vec<NotificationEvent> {
+        std::mem::take(&mut self.notifications)
+    }
+
+    /// Execute a PostgreSQL Protocol 3.0 simple `Query` (`'Q'`) and drain all frames through `ReadyForQuery`.
+    pub async fn simple_query(
+        &mut self,
+        sql: &str,
+    ) -> Result<Vec<crate::result::QueryResult>, PostgresError> {
+        if self.closed {
+            return Err(PostgresError::Interface(
+                "cannot execute simple_query on a closed PostgresConnection".to_string(),
+            ));
+        }
+        if sql.as_bytes().contains(&0) {
+            return Err(PostgresError::Data(
+                "SQL query string cannot contain embedded NUL byte".to_string(),
+            ));
+        }
+
+        self.unnamed_statement_valid = false;
+        self.write_buf.clear();
+        postgres_protocol::message::frontend::query(sql, &mut self.write_buf).map_err(|e| {
+            PostgresError::Protocol(format!("failed to encode simple Query frame: {e}"))
+        })?;
+
+        if let Err(err) = self.stream.write_all(&self.write_buf).await {
+            self.write_buf.clear();
+            self.closed = true;
+            return Err(PostgresError::Transport(format!(
+                "simple_query write failed: {err}"
+            )));
+        }
+        self.write_buf.clear();
+        if let Err(err) = self.stream.flush().await {
+            self.closed = true;
+            return Err(PostgresError::Transport(format!(
+                "simple_query flush failed: {err}"
+            )));
+        }
+
+        let mut collector = crate::query::SimpleQueryCollector::new();
+        loop {
+            let msg = match read_message(&mut self.stream, &mut self.read_buf, None).await {
+                Ok(m) => m,
+                Err(err) => {
+                    self.closed = true;
+                    return Err(err);
+                }
+            };
+
+            match msg {
+                Message::RowDescription(body) => {
+                    if !collector.has_error()
+                        && let Err(err) = collector.handle_row_description(&body, &self.parameters)
+                    {
+                        self.closed = true;
+                        return Err(err);
+                    }
+                }
+                Message::DataRow(body) => {
+                    if !collector.has_error()
+                        && let Err(err) = collector.handle_data_row(&body)
+                    {
+                        self.closed = true;
+                        return Err(err);
+                    }
+                }
+                Message::CommandComplete(body) => {
+                    let tag = body.tag().map_err(|e| {
+                        self.closed = true;
+                        PostgresError::Protocol(format!("invalid CommandComplete tag UTF-8: {e}"))
+                    })?;
+                    if let Err(err) = collector.handle_command_complete(tag) {
+                        self.closed = true;
+                        return Err(err);
+                    }
+                }
+                Message::EmptyQueryResponse => {
+                    if let Err(err) = collector.handle_empty_query() {
+                        self.closed = true;
+                        return Err(err);
+                    }
+                }
+                Message::ErrorResponse(body) => match crate::query::parse_error_response(&body) {
+                    Ok(server_err) => collector.handle_error_response(server_err),
+                    Err(err) => {
+                        self.closed = true;
+                        return Err(err);
+                    }
+                },
+                Message::NoticeResponse(_) => {}
+                Message::ParameterStatus(body) => {
+                    let name = body
+                        .name()
+                        .map_err(|e| {
+                            self.closed = true;
+                            PostgresError::Protocol(format!(
+                                "invalid ParameterStatus name UTF-8: {e}"
+                            ))
+                        })?
+                        .to_owned();
+                    let val = body
+                        .value()
+                        .map_err(|e| {
+                            self.closed = true;
+                            PostgresError::Protocol(format!(
+                                "invalid ParameterStatus value UTF-8: {e}"
+                            ))
+                        })?
+                        .to_owned();
+                    self.parameters.insert(name, val);
+                }
+                Message::NotificationResponse(body) => {
+                    let channel = body
+                        .channel()
+                        .map_err(|e| {
+                            self.closed = true;
+                            PostgresError::Protocol(format!(
+                                "invalid NotificationResponse channel UTF-8: {e}"
+                            ))
+                        })?
+                        .to_owned();
+                    let payload = body
+                        .message()
+                        .map_err(|e| {
+                            self.closed = true;
+                            PostgresError::Protocol(format!(
+                                "invalid NotificationResponse payload UTF-8: {e}"
+                            ))
+                        })?
+                        .to_owned();
+                    self.dispatch_notification(body.process_id(), channel, payload);
+                }
+                Message::ReadyForQuery(body) => {
+                    let status = match TransactionStatus::from_wire_tag(body.status()) {
+                        Ok(s) => s,
+                        Err(err) => {
+                            self.closed = true;
+                            return Err(err);
+                        }
+                    };
+                    self.transaction_status = status;
+                    match collector.finish(status) {
+                        Ok(results) => return Ok(results),
+                        Err(err) => {
+                            if matches!(
+                                err,
+                                PostgresError::Protocol(_) | PostgresError::Transport(_)
+                            ) {
+                                self.closed = true;
+                            }
+                            return Err(err);
+                        }
+                    }
+                }
+                _ => {
+                    self.closed = true;
+                    return Err(PostgresError::Protocol(
+                        "unexpected backend message frame during simple_query".to_string(),
+                    ));
+                }
+            }
+        }
     }
 
     /// Send a single 5-byte `Terminate` (`'X'`) frame and shut down the socket once.
@@ -519,6 +715,8 @@ pub(crate) async fn establish_postgres_connection(
                     generation,
                     tls_negotiated,
                     tls_server_end_point,
+                    unnamed_statement_valid: false,
+                    notifications: Vec::new(),
                     closed: false,
                 });
             }
@@ -533,11 +731,7 @@ pub(crate) async fn establish_postgres_connection(
                         &mut write_buf,
                     )
                     .map_err(|e| {
-                        redact_session_error(
-                            e,
-                            config.password.as_deref(),
-                            login_snapshot.as_ref(),
-                        )
+                        redact_session_error(e, config.password.as_deref(), login_snapshot.as_ref())
                     })?;
                 if !write_buf.is_empty() {
                     if Instant::now() >= deadline {
@@ -807,10 +1001,7 @@ impl Drop for ClientPendingSession {
 }
 
 #[cfg(unix)]
-async fn dial_unix_socket(
-    path: &str,
-    deadline: Instant,
-) -> Result<TransportStream, PostgresError> {
+async fn dial_unix_socket(path: &str, deadline: Instant) -> Result<TransportStream, PostgresError> {
     let now = Instant::now();
     if now >= deadline {
         return Err(PostgresError::Transport(
@@ -823,7 +1014,9 @@ async fn dial_unix_socket(
     let opts = ConnectOptions::unix(path).with_connect_timeout(remaining);
     tokio::time::timeout_at(deadline, TransportStream::connect(&opts))
         .await
-        .map_err(|_| PostgresError::Transport("Unix domain socket connection timed out".to_string()))?
+        .map_err(|_| {
+            PostgresError::Transport("Unix domain socket connection timed out".to_string())
+        })?
         .map_err(|e| PostgresError::Transport(e.to_string()))
 }
 

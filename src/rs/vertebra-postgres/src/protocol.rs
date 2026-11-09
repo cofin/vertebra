@@ -134,7 +134,8 @@ where
             None => stream.read_buf(buf).await,
         };
 
-        let n = read_res.map_err(|e| PostgresError::Transport(format!("socket read error: {e}")))?;
+        let n =
+            read_res.map_err(|e| PostgresError::Transport(format!("socket read error: {e}")))?;
         if n == 0 {
             return Err(PostgresError::Transport(
                 "unexpected EOF from PostgreSQL backend".to_string(),
@@ -302,7 +303,8 @@ mod tests {
     #[tokio::test]
     async fn parse_error_fields_extracts_diagnostics_and_rejects_missing_sqlstate() {
         let mut payload = Vec::new();
-        payload.extend_from_slice(b"SERROR\0VFATAL\0C28P01\0Mpassword auth failed\0Ddetail-line\0\0");
+        payload
+            .extend_from_slice(b"SERROR\0VFATAL\0C28P01\0Mpassword auth failed\0Ddetail-line\0\0");
         let mut frame = vec![b'E'];
         frame.extend_from_slice(&((4 + payload.len()) as u32).to_be_bytes());
         frame.extend_from_slice(&payload);

@@ -28,16 +28,14 @@ pub(crate) fn extract_string_map(
             "{field_name} must be a Mapping[str, str]"
         )));
     }
-    let items = mapping.call_method0("items").map_err(|_| {
-        PyTypeError::new_err(format!("{field_name} must be a Mapping[str, str]"))
-    })?;
+    let items = mapping
+        .call_method0("items")
+        .map_err(|_| PyTypeError::new_err(format!("{field_name} must be a Mapping[str, str]")))?;
     let mut out = HashMap::new();
     for entry in items.try_iter()? {
         let item = entry?;
         let pair = item.cast_into::<PyTuple>().map_err(|_| {
-            PyTypeError::new_err(format!(
-                "{field_name} items must be (str, str) pairs"
-            ))
+            PyTypeError::new_err(format!("{field_name} items must be (str, str) pairs"))
         })?;
         if pair.len() != 2 {
             return Err(PyTypeError::new_err(format!(

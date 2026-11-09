@@ -5,12 +5,12 @@ chapter_id: ch09-owned-results-and-numeric-codecs
 title: "Chapter 09: Owned Query Results, Value Records, Simple Query, and Scalar/Numeric Codecs"
 description: Define lossless Rust and Python PostgreSQL result and value models, simple-query protocol framing with SQLSTATE classification, and checked scalar and arbitrary-precision numeric codecs.
 status: stable
-state: planned
+state: completed
 planning_status: complete
 depends_on_chapters:
   - ch08-constructor-parity-and-wheel-gil
 replan_trigger: null
-current_task: "native-postgres-driver:ch09:t01"
+current_task: null
 plan_revision: 5
 plan_commit: fd571e3a
 state_revision: 0
@@ -156,10 +156,10 @@ Parent roadmap: [spec.md](../../spec.md). Public interface authority: [contracts
 
 ## 5. Implementation Plan
 
-- [ ] native-postgres-driver:ch09:t01 — Define owned query results and lossless PostgreSQL value records (tasks/t01-owned-results-and-value-records.md)
-- [ ] native-postgres-driver:ch09:t02 — Implement multi-result simple query execution and canonical SQLSTATE error draining (tasks/t02-simple-query-and-sqlstate.md)
-- [ ] native-postgres-driver:ch09:t03 — Implement checked built-in scalar binary and text codecs with per-column fallback (tasks/t03-scalar-codecs.md)
-- [ ] native-postgres-driver:ch09:t04 — Implement arbitrary-precision base-10000 numeric binary and text codecs (tasks/t04-numeric-codecs.md)
+- [x] native-postgres-driver:ch09:t01 — Define owned query results and lossless PostgreSQL value records (tasks/t01-owned-results-and-value-records.md)
+- [x] native-postgres-driver:ch09:t02 — Implement multi-result simple query execution and canonical SQLSTATE error draining (tasks/t02-simple-query-and-sqlstate.md)
+- [x] native-postgres-driver:ch09:t03 — Implement checked built-in scalar binary and text codecs with per-column fallback (tasks/t03-scalar-codecs.md)
+- [x] native-postgres-driver:ch09:t04 — Implement arbitrary-precision base-10000 numeric binary and text codecs (tasks/t04-numeric-codecs.md)
 
 **Chapter Recovery Checkpoint:** `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres && cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-postgres --all-targets -- -D warnings && uv run --no-sync pytest src/py/tests/unit/db/test_postgres_types.py -q` exits `0`.
 
