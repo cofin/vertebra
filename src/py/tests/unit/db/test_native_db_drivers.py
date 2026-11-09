@@ -15,7 +15,7 @@ import sys
 import time
 import tomllib
 import uuid
-from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Iterator, Mapping, Sequence
 from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from types import ModuleType
@@ -94,7 +94,7 @@ from vertebra.extensions.litestar import ChannelsBackend, MemoryStore
 from vertebra.extensions.sqlalchemy import dialects
 from vertebra.framework.channels import ChannelBus
 from vertebra.storage import GcpTokenSnapshot
-from vertebra.typing import MissingDependencyError, VertebraError, reset_dependency_cache
+from vertebra.typing import ImproperConfigurationError, MissingDependencyError, VertebraError, reset_dependency_cache
 from vertebra.utils.serializers import (
     decode_json,
     decode_msgpack,
@@ -485,6 +485,36 @@ def test_postgres_pooler_modes_and_jsonb_strip() -> None:
         SyncValkeyDriver(ValkeyConfig(url="valkey://127.0.0.1:1/0")).set("k", "v")
     with pytest.raises((MissingDependencyError, OSError)):
         SyncRedisDriver(RedisConfig(url="redis://127.0.0.1:1/0")).publish("chan", b"msg")
+
+
+@pytest.mark.parametrize(
+    "factory",
+    [
+        pytest.param(lambda: SyncPostgreSQLDriver(PostgreSQLConfig(dsn="memory://")), id="sync-postgres"),
+        pytest.param(lambda: AsyncPostgreSQLDriver(PostgreSQLConfig(dsn="MEMORY://")), id="async-postgres"),
+        pytest.param(lambda: SyncMySQLDriver(MySQLConfig(dsn="memory://")), id="sync-mysql"),
+        pytest.param(lambda: AsyncMySQLDriver(MySQLConfig(dsn="memory://")), id="async-mysql"),
+    ],
+)
+def test_postgres_and_mysql_drivers_reject_memory_dsn(factory: Callable[[], object]) -> None:
+    """PostgreSQL and MySQL sync and async drivers reject memory:// DSNs at construction."""
+    with pytest.raises(ImproperConfigurationError, match="memory://"):
+        factory()
+
+
+def test_postgres_pool_without_execution_surface_raises() -> None:
+    """SyncPostgreSQLDriver raises ImproperConfigurationError when its pool exposes no execution method."""
+    driver = SyncPostgreSQLDriver(PostgreSQLConfig(), pool=object())
+    with pytest.raises(ImproperConfigurationError, match="pool must provide"):
+        driver.execute_with_description("SELECT 1")
+
+
+@pytest.mark.anyio
+async def test_async_postgres_pool_without_execution_surface_raises() -> None:
+    """AsyncPostgreSQLDriver raises ImproperConfigurationError when its pool exposes no execution method."""
+    driver = AsyncPostgreSQLDriver(PostgreSQLConfig(), pool=object())
+    with pytest.raises(ImproperConfigurationError, match="pool must provide"):
+        await driver.execute_with_description("SELECT 1")
 
 
 @pytest.mark.anyio

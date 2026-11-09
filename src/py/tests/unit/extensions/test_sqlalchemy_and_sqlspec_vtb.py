@@ -445,14 +445,22 @@ def test_postgres_vtb_dialect_dbapi_and_compiler_features() -> None:
     assert SyncMySQLDialect.dbapi().paramstyle == "format"
     assert SyncOracleDialect.dbapi().paramstyle == "named"
 
-    driver = SyncPostgreSQLDriver(PostgreSQLConfig(dsn="memory://"))
-    driver._in_memory_rows = [(1, "item1"), (2, "item2")]
+    class Port:
+        def execute_with_description(
+            self,
+            sql: str,
+            parameters: Any,
+        ) -> tuple[list[tuple[int, str]], tuple[tuple[str], ...]]:
+            _ = (sql, parameters)
+            return [(1, "item1"), (2, "item2")], (("id",), ("name",))
+
+    driver = SyncPostgreSQLDriver(PostgreSQLConfig(dsn="postgresql://localhost:5432/app"), pool=Port())
 
     conn = pg_dbapi.connect("postgresql+vtb://localhost:5432/app", driver=driver)
     cur = conn.cursor()
     cur.execute("SELECT id, name FROM items")
     assert cur.description is not None
-    assert len(cur.description) == 2
+    assert [d[0] for d in cur.description] == ["id", "name"]
     assert cur.fetchall() == [(1, "item1"), (2, "item2")]
     conn.commit()
     conn.rollback()

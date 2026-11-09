@@ -5,7 +5,7 @@ chapter_id: ch03-remove-memory-fakes
 title: Loopback RESP3 fixture core and key-value driver tests over the wire
 description: Add the threaded loopback RESP3 server fixture with its transport, reply encoder, teardown, handshake, key-value, TTL, SCAN, and UNLINK commands to the unit test tree, and move the test_redis_valkey_driver.py tests that need only those commands off memory:// while the driver emulation still exists.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: static_validation
 depends_on:
@@ -22,18 +22,18 @@ tests:
 estimated_loc: 215
 plan_revision: 2
 plan_commit: fd571e3a
-state_revision: 0
-claimed_by: null
-claimed_at: null
+state_revision: 1
+claimed_by: driver-fail-loud-engineer
+claimed_at: "2026-11-09T03:08:00Z"
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-09T03:19:43Z"
+last_verified_commit: ea07cb21
+verification_evidence: "pytest test_redis_valkey_driver.py test_redis_valkey_resp3.py passed; ruff + mypy + review_setup validate exited 0"
 created_at: "2026-11-07T00:00:00Z"
-updated_at: "2026-11-08T00:00:00Z"
-commit: null
+updated_at: "2026-11-09T03:19:43Z"
+commit: ea07cb21
 sources:
   - id: resp3-parser
     resource: src/py/vertebra/db/adapters/redis/core.py::Resp3Parser
@@ -170,10 +170,10 @@ def resp3_server() -> Iterator[Resp3FakeServer]:
 
 ## Acceptance Criteria
 
-- [ ] `resp3_server` serves sync and async drivers over a real loopback socket (R7a).
-- [ ] The eight retargeted tests construct no `memory://` Redis or Valkey config (R7a).
-- [ ] Coverage diff loses only memory-emulation lines; vacuity probe goes red.
-- [ ] Zero inline `#` comments in touched Python files.
+- [x] `resp3_server` serves sync and async drivers over a real loopback socket (R7a).
+- [x] The eight retargeted tests construct no `memory://` Redis or Valkey config (R7a).
+- [x] Coverage diff loses only memory-emulation lines; vacuity probe goes red.
+- [x] Zero inline `#` comments in touched Python files.
 
 ## Notes & Discoveries
 

@@ -5,7 +5,7 @@ chapter_id: ch03-remove-memory-fakes
 title: Loopback RESP3 pub/sub and scripting surface and consumer tests over the wire
 description: Extend the loopback RESP3 fixture with subscribe, publish, shard publish, and EVAL/EVALSHA handling, then move the remaining memory:// constructions in the Redis driver, Advanced Alchemy, framework, and Starlette unit tests onto it and assert that SQLAlchemyCacheBackend.from_url("memory://") stays local.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: static_validation
 depends_on:
@@ -27,18 +27,18 @@ tests:
 estimated_loc: 125
 plan_revision: 2
 plan_commit: fd571e3a
-state_revision: 0
-claimed_by: null
-claimed_at: null
+state_revision: 1
+claimed_by: driver-fail-loud-engineer
+claimed_at: "2026-11-09T03:12:00Z"
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-09T03:19:43Z"
+last_verified_commit: ea07cb21
+verification_evidence: "pytest test_redis_valkey_driver.py test_alchemy_cache_backend.py test_framework_subdomains.py test_starlette_plugin.py passed; ruff + mypy + review_setup validate exited 0"
 created_at: "2026-11-08T00:00:00Z"
-updated_at: "2026-11-08T00:00:00Z"
-commit: null
+updated_at: "2026-11-09T03:19:43Z"
+commit: ea07cb21
 sources:
   - id: redis-driver
     resource: src/py/vertebra/db/adapters/redis/driver.py::SyncRedisDriver
@@ -136,10 +136,10 @@ Script result rule (`_script_result`): when the script text contains `KEYS[1]` a
 
 ## Acceptance Criteria
 
-- [ ] No test in the four files constructs a `memory://` Redis or Valkey config (R7a).
-- [ ] `SQLAlchemyCacheBackend.from_url("memory://")` is asserted local (preserved backend).
-- [ ] Coverage diff over the five files loses only pub/sub, scripting, and remaining memory-emulation lines; vacuity probe over the six retargeted fixture tests goes red.
-- [ ] Zero inline `#` comments in touched Python files.
+- [x] No test in the four files constructs a `memory://` Redis or Valkey config (R7a).
+- [x] `SQLAlchemyCacheBackend.from_url("memory://")` is asserted local (preserved backend).
+- [x] Coverage diff over the five files loses only pub/sub, scripting, and remaining memory-emulation lines; vacuity probe over the six retargeted fixture tests goes red.
+- [x] Zero inline `#` comments in touched Python files.
 
 ## Notes & Discoveries
 

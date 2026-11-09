@@ -6,7 +6,7 @@ from collections.abc import AsyncIterator, Iterator
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Annotated, Any, cast
+from typing import TYPE_CHECKING, Annotated, Any, cast
 
 import msgspec
 import pytest
@@ -41,6 +41,9 @@ from vertebra.framework.ssr import SSRFrame
 from vertebra.framework.stores import KeyValueStore, NamespacedStore
 from vertebra.typing import MissingDependencyError, UnsupportedBackendError
 from vertebra.wasm import WASM_MAGIC_HEADER, WASMModuleConfig, WASMSandboxPolicy
+
+if TYPE_CHECKING:
+    from tests.unit.conftest import Resp3FakeServer
 
 
 class ItemSchema(msgspec.Struct, frozen=True, gc=False):
@@ -478,9 +481,11 @@ async def test_queue_and_email_backend_validation_and_policies(monkeypatch: pyte
 
 
 @pytest.mark.anyio
-async def test_key_value_store_redis_invalidation_read_through_and_ttl_renewal() -> None:
+async def test_key_value_store_redis_invalidation_read_through_and_ttl_renewal(
+    resp3_server: Resp3FakeServer,
+) -> None:
     """KeyValueStore attaches AsyncRedisDriver invalidation, populates read-through pttl, and renews driver px TTL."""
-    driver = AsyncRedisDriver(RedisConfig(url="memory://"))
+    driver = AsyncRedisDriver(RedisConfig(url=resp3_server.redis_url))
     store = KeyValueStore(driver=driver)
     try:
         await store.set("session-1", b"tok", expires_in=10)

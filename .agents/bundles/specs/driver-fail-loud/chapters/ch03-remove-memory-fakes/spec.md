@@ -6,20 +6,20 @@ chapter_id: ch03-remove-memory-fakes
 title: "Chapter 03: PostgreSQL/MySQL memory:// Removal and RESP3 Loopback Test Fixture"
 description: PostgreSQL and MySQL drivers reject memory:// with ImproperConfigurationError and lose their in-process row fakes, and a threaded loopback RESP3 server fixture replaces every memory:// Redis and Valkey construction in the driver, store, Advanced Alchemy, framework, and Starlette unit tests.
 status: stable
-state: planned
+state: completed
 planning_status: complete
 depends_on_chapters:
   - ch01-oracle-mssql-fail-loud
   - ch02-duckdb-sqlalchemy-queue-fail-loud
 replan_trigger: null
-current_task: "driver-fail-loud:ch03:t01"
+current_task: null
 plan_revision: 2
 plan_commit: fd571e3a
-state_revision: 0
-last_verified_checkpoint: null
+state_revision: 1
+last_verified_checkpoint: ea07cb21
 last_reviewed_commit: null
 created_at: "2026-11-07T00:00:00Z"
-updated_at: "2026-11-08T00:00:00Z"
+updated_at: "2026-11-09T03:19:43Z"
 generated:
   by: flow/0.28.0
   at: "2026-11-08T00:00:00Z"
@@ -232,15 +232,15 @@ def resp3_server() -> Iterator[Resp3FakeServer]:
 
 ## 5. Implementation Plan
 
-- [ ] driver-fail-loud:ch03:t01 — PostgreSQL and MySQL drivers reject memory:// and lose in-memory rows ([tasks/t01-postgres-mysql-memory-removal.md](tasks/t01-postgres-mysql-memory-removal.md))
-- [ ] driver-fail-loud:ch03:t02 — Loopback RESP3 fixture core and key-value driver tests over the wire ([tasks/t02-resp3-fixture-core-and-key-value-retarget.md](tasks/t02-resp3-fixture-core-and-key-value-retarget.md))
-- [ ] driver-fail-loud:ch03:t03 — Loopback RESP3 pub/sub and scripting surface and consumer tests over the wire ([tasks/t03-resp3-pubsub-scripting-and-consumer-retarget.md](tasks/t03-resp3-pubsub-scripting-and-consumer-retarget.md))
+- [x] [ea07cb21] driver-fail-loud:ch03:t01 — PostgreSQL and MySQL drivers reject memory:// and lose in-memory rows ([tasks/t01-postgres-mysql-memory-removal.md](tasks/t01-postgres-mysql-memory-removal.md))
+- [x] [ea07cb21] driver-fail-loud:ch03:t02 — Loopback RESP3 fixture core and key-value driver tests over the wire ([tasks/t02-resp3-fixture-core-and-key-value-retarget.md](tasks/t02-resp3-fixture-core-and-key-value-retarget.md))
+- [x] [ea07cb21] driver-fail-loud:ch03:t03 — Loopback RESP3 pub/sub and scripting surface and consumer tests over the wire ([tasks/t03-resp3-pubsub-scripting-and-consumer-retarget.md](tasks/t03-resp3-pubsub-scripting-and-consumer-retarget.md))
 - **Chapter Recovery Checkpoint**: `uv run --no-sync pytest src/py/tests/unit/db/test_native_db_drivers.py src/py/tests/unit/db/test_postgres_driver.py src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py src/py/tests/unit/db/test_enterprise_olap_drivers.py src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py src/py/tests/unit/db/test_redis_valkey_driver.py src/py/tests/unit/db/test_redis_valkey_resp3.py src/py/tests/unit/extensions/test_alchemy_cache_backend.py src/py/tests/unit/extensions/test_starlette_plugin.py src/py/tests/unit/framework/test_framework_subdomains.py -q && make lint` exits `0`.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `HEAD @ 0acdf576`; `state: planned`; depends on `ch01` and `ch02` for shared test files.
-- **Remaining Tasks in Chapter**: `t01`, `t02`, `t03` (`0/3` completed). `t03` extends the fixture module `t02` creates.
+- **Verified Baseline**: `HEAD @ ea07cb21`; `state: completed`; depends on `ch01` and `ch02` for shared test files.
+- **Remaining Tasks in Chapter**: None (`3/3` completed).
 - **Downstream**: `ch04-redis-valkey-memory-removal` starts after `t03`, when no consumer unit test depends on the Redis memory emulation.
 - **Documentation & OKF Sync**: `[0/0]` in this chapter; the `resp3_server` entry in `polyglot-test-matrix.md` is owned by `driver-fail-loud:ch13:t02`.
 - **Active Invariants**: queue, object storage, Advanced Alchemy `from_url("memory://")` local cache, the SQLite dialect `memory://` StaticPool alias (`get_pool_class`), and SQLite `:memory:` paths unchanged; Redis production code unchanged; no inline `#` comments in touched Python.

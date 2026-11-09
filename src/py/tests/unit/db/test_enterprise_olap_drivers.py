@@ -999,7 +999,7 @@ def test_postgresql_tenant_session_prepares_psycopg_binds(config_defaults: bool)
             return []
 
     port = Port()
-    native = SyncPostgreSQLDriver(PostgreSQLConfig(dsn="memory://"), pool=port)
+    native = SyncPostgreSQLDriver(PostgreSQLConfig(dsn="postgresql://localhost:5432/app"), pool=port)
     config = PostgreSQLSyncConfig(native.config, broker=object(), share_pool=False)
     adapter = PostgreSQLSyncDriver(native, statement_config=config.statement_config if config_defaults else None)
     try:
@@ -1026,7 +1026,7 @@ async def test_postgresql_tenant_session_prepares_asyncpg_binds(config_defaults:
             return []
 
     port = Port()
-    native = AsyncPostgreSQLDriver(PostgreSQLConfig(dsn="memory://"), pool=port)
+    native = AsyncPostgreSQLDriver(PostgreSQLConfig(dsn="postgresql://localhost:5432/app"), pool=port)
     config = PostgreSQLAsyncConfig(native.config, broker=object(), share_pool=False)
     adapter = PostgreSQLAsyncDriver(native, statement_config=config.statement_config if config_defaults else None)
     try:

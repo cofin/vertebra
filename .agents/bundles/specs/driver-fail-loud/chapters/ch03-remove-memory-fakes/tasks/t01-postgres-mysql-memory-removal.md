@@ -5,7 +5,7 @@ chapter_id: ch03-remove-memory-fakes
 title: PostgreSQL and MySQL drivers reject memory:// and lose in-memory rows
 description: Delete _in_memory_rows, _tx_snapshot, and every memory branch from the sync and async PostgreSQL and MySQL drivers, raise ImproperConfigurationError for memory:// DSNs and for PostgreSQL pools with no execution method, and retarget tests to injected pool ports.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on: []
@@ -25,18 +25,18 @@ tests:
 estimated_loc: 165
 plan_revision: 2
 plan_commit: fd571e3a
-state_revision: 0
-claimed_by: null
-claimed_at: null
+state_revision: 1
+claimed_by: driver-fail-loud-engineer
+claimed_at: "2026-11-09T03:05:00Z"
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-09T03:19:43Z"
+last_verified_commit: ea07cb21
+verification_evidence: "pytest test_native_db_drivers.py test_postgres_driver.py test_pg_dataplane_and_datafusion.py test_sqlalchemy_and_sqlspec_vtb.py test_enterprise_olap_drivers.py passed; ruff + mypy + review_setup validate exited 0"
 created_at: "2026-11-07T00:00:00Z"
-updated_at: "2026-11-08T00:00:00Z"
-commit: null
+updated_at: "2026-11-09T03:19:43Z"
+commit: ea07cb21
 sources:
   - id: pg-driver
     resource: src/py/vertebra/db/adapters/postgres/driver.py::SyncPostgreSQLDriver
@@ -175,11 +175,11 @@ def test_postgres_and_mysql_drivers_reject_memory_dsn(factory: Callable[[], obje
 
 ## Acceptance Criteria
 
-- [ ] All four PostgreSQL/MySQL driver constructors raise `ImproperConfigurationError` for `memory://` DSNs, case-insensitively (R6).
-- [ ] `_in_memory_rows`, `_tx_snapshot`, and every `memory://` branch are gone from both modules (R6).
-- [ ] An opaque PostgreSQL pool raises `ImproperConfigurationError` instead of returning empty rows (R6).
-- [ ] Retargeted SQLAlchemy and tenant-session tests pass against injected ports.
-- [ ] Zero inline `#` comments in touched Python files.
+- [x] All four PostgreSQL/MySQL driver constructors raise `ImproperConfigurationError` for `memory://` DSNs, case-insensitively (R6).
+- [x] `_in_memory_rows`, `_tx_snapshot`, and every `memory://` branch are gone from both modules (R6).
+- [x] An opaque PostgreSQL pool raises `ImproperConfigurationError` instead of returning empty rows (R6).
+- [x] Retargeted SQLAlchemy and tenant-session tests pass against injected ports.
+- [x] Zero inline `#` comments in touched Python files.
 
 ## Notes & Discoveries
 
