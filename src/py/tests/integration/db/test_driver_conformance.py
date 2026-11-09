@@ -213,6 +213,24 @@ _MSSQL_TYPES_DDL = (
     ")"
 )
 
+_ORACLE_ITEMS_DDL = (
+    "CREATE TABLE vtb_conformance_items (id NUMBER(19) PRIMARY KEY, label VARCHAR2(255) NOT NULL, amount NUMBER(19))"
+)
+
+_ORACLE_TYPES_DDL = (
+    "CREATE TABLE vtb_conformance_types ("
+    "id NUMBER(19) PRIMARY KEY, "
+    "val_int NUMBER(19), "
+    "val_float BINARY_DOUBLE, "
+    "val_decimal NUMBER(18, 6), "
+    "val_bool BOOLEAN, "
+    "val_text CLOB, "
+    "val_bytes RAW(2000), "
+    "val_ts TIMESTAMP WITH TIME ZONE, "
+    "val_json JSON"
+    ")"
+)
+
 
 class EngineConformanceSpec(FrozenBaseStruct, frozen=True, gc=False):
     """Declarative specification for a synchronous/asynchronous SQL or analytical adapter pair."""
@@ -403,8 +421,11 @@ ENGINE_SPECS: tuple[EngineConformanceSpec, ...] = (
         sample_url="oracle://system:secret@127.0.0.1:1521/FREEPDB1",
         probe_sql="SELECT 1 FROM DUAL",
         placeholder_style="colon",
+        items_ddl=_ORACLE_ITEMS_DDL,
+        types_ddl=_ORACLE_TYPES_DDL,
+        supports_pipeline=True,
         native_extension_module="vertebra._oracle",
-        pending_flow_id="native-oracle-driver",
+        pending_flow_id=None,
         env_dsn_vars=("VERTEBRA_CONFORMANCE_ORACLE_DSN",),
         container_fixture="vtb_oracle_config",
     ),
@@ -695,6 +716,8 @@ def _resolve_live_config(
         loopback_server = mysql_mod.MySQLWireTestServer()
         request.addfinalizer(loopback_server.close)
         return MySQLConfig.from_url(loopback_server.dsn)
+    if spec.engine == "oracle":
+        return OracleConfig(host="memory", service_name=f"vtb_conf_{tmp_path.name}")
     return spec.config_cls.from_url(spec.sample_url)
 
 
@@ -766,6 +789,11 @@ def sync_sql_driver(
                     spec.types_ddl,
                 ]
             )
+        elif isinstance(driver, SyncOracleDriver):
+            driver.execute("DROP TABLE IF EXISTS vtb_conformance_items PURGE")
+            driver.execute("DROP TABLE IF EXISTS vtb_conformance_types PURGE")
+            driver.execute(spec.items_ddl)
+            driver.execute(spec.types_ddl)
         else:
             driver.execute("DROP TABLE IF EXISTS vtb_conformance_items")
             driver.execute("DROP TABLE IF EXISTS vtb_conformance_types")
@@ -799,6 +827,11 @@ async def async_sql_driver(
                     spec.types_ddl,
                 ]
             )
+        elif isinstance(driver, AsyncOracleDriver):
+            await driver.execute("DROP TABLE IF EXISTS vtb_conformance_items PURGE")
+            await driver.execute("DROP TABLE IF EXISTS vtb_conformance_types PURGE")
+            await driver.execute(spec.items_ddl)
+            await driver.execute(spec.types_ddl)
         else:
             await driver.execute("DROP TABLE IF EXISTS vtb_conformance_items")
             await driver.execute("DROP TABLE IF EXISTS vtb_conformance_types")

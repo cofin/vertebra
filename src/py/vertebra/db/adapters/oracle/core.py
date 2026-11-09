@@ -703,9 +703,7 @@ class OracleCore:
                 return OracleCore.decode_oson(raw)
             if len(raw) >= 8 and raw[:2] == OracleCore.ORACLE_VECTOR_MAGIC:
                 ret_fmt: Literal["vector_view", "list", "bytes"] = (
-                    "vector_view"
-                    if vec_fmt_raw == "vector_view"
-                    else ("bytes" if vec_fmt_raw == "bytes" else "list")
+                    "vector_view" if vec_fmt_raw == "vector_view" else ("bytes" if vec_fmt_raw == "bytes" else "list")
                 )
                 return OracleCore.decode_vector(raw, return_format=ret_fmt)
             if enable_uuid and len(raw) == 16 and ("RAW" in col_upper or not col_upper):

@@ -5,7 +5,9 @@ use std::io::Read;
 use std::str::FromStr;
 
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyBool, PyByteArray, PyBytes, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple};
+use pyo3::types::{
+    PyAny, PyBool, PyByteArray, PyBytes, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple,
+};
 use vertebra_db::oracle::{
     ORACLE_VECTOR_MAGIC, ORACLE_VECTOR_VERSION, OSON_MAGIC, decode_oracle_vector_binary,
     decode_oracle_vector_f32, decode_oracle_vector_f64, decode_oracle_vector_i8,
@@ -322,7 +324,10 @@ impl OracleVectorData {
     }
 
     /// Construct a `vertebra._vertebra.VectorView` (or Python fallback list/bytes) on the GIL thread.
-    pub fn into_py_vector_view<'py>(&self, py: Python<'py>) -> Result<Bound<'py, PyAny>, OracleError> {
+    pub fn into_py_vector_view<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> Result<Bound<'py, PyAny>, OracleError> {
         if let Ok(vtb_mod) = py.import("vertebra._vertebra")
             && let Ok(vv_cls) = vtb_mod.getattr("VectorView")
         {
@@ -761,9 +766,29 @@ pub fn extract_bind_value(obj: &Bound<'_, PyAny>) -> Result<OracleCellValue, Ora
     }
 
     if obj.is_instance_of::<PyList>() {
-        if let Ok(vals) = obj.extract::<Vec<f32>>() {
+        let list = obj
+            .cast::<PyList>()
+            .map_err(|e| OracleError::data_error(e.to_string()))?;
+        let is_numeric_vector = !list.is_empty()
+            && list.iter().all(|item| {
+                !item.is_instance_of::<PyBool>()
+                    && (item.is_instance_of::<PyFloat>() || item.is_instance_of::<PyInt>())
+            });
+        if is_numeric_vector && let Ok(vals) = obj.extract::<Vec<f32>>() {
             return Ok(OracleCellValue::Vector(OracleVectorData::Float32(vals)));
         }
+        let py = obj.py();
+        let ser_mod = py
+            .import("vertebra.utils.serializers")
+            .map_err(|e| OracleError::data_error(e.to_string()))?;
+        let json_bytes: Vec<u8> = ser_mod
+            .getattr("encode_json_bytes")
+            .and_then(|f| f.call1((obj,)))
+            .and_then(|b| b.extract())
+            .map_err(|e| OracleError::data_error(e.to_string()))?;
+        return Ok(OracleCellValue::Oson(
+            encode_oson_payload(&json_bytes).to_vec(),
+        ));
     }
 
     Err(OracleError::data_error(format!(
@@ -880,7 +905,10 @@ pub fn decode_oracledb_row(
                 .map_err(|e| OracleError::from_oracledb(&e))?
             {
                 Some(ts) => {
-                    if ts.hour() == 0 && ts.minute() == 0 && ts.second() == 0 && ts.nanoseconds() == 0
+                    if ts.hour() == 0
+                        && ts.minute() == 0
+                        && ts.second() == 0
+                        && ts.nanoseconds() == 0
                     {
                         OracleCellValue::Date {
                             year: i32::from(ts.year()),
@@ -1018,8 +1046,8 @@ pub fn cell_to_oracledb_bind(
         OracleCellValue::Int(i) => Ok(Box::new(*i)),
         OracleCellValue::Float(f) => Ok(Box::new(*f)),
         OracleCellValue::DecimalStr(s) => {
-            let num = oracledb::OracleNumber::from_str(s)
-                .map_err(|e| OracleError::from_oracledb(&e))?;
+            let num =
+                oracledb::OracleNumber::from_str(s).map_err(|e| OracleError::from_oracledb(&e))?;
             Ok(Box::new(num))
         }
         OracleCellValue::Str(s) => Ok(Box::new(s.clone())),
@@ -1062,8 +1090,7 @@ pub fn cell_to_oracledb_bind(
             Ok(Box::new(ts))
         }
         OracleCellValue::Oson(oson_bytes) => {
-            let json_slice =
-                decode_oson_payload(oson_bytes).map_err(OracleError::data_error)?;
+            let json_slice = decode_oson_payload(oson_bytes).map_err(OracleError::data_error)?;
             let text = std::str::from_utf8(json_slice)
                 .map_err(|e| OracleError::data_error(e.to_string()))?;
             Ok(Box::new(oracledb::JsonValue::String(text.to_owned())))
@@ -1073,9 +1100,7 @@ pub fn cell_to_oracledb_bind(
 }
 
 /// Build an output bind placeholder value for `DML RETURNING INTO` or PL/SQL `OUT` binds.
-pub fn out_bind_type_placeholder(
-    type_hint: &str,
-) -> Box<dyn oracledb::ToDbValue + Send + Sync> {
+pub fn out_bind_type_placeholder(type_hint: &str) -> Box<dyn oracledb::ToDbValue + Send + Sync> {
     let upper = type_hint.trim().to_ascii_uppercase();
     if upper.contains("NUMBER") || upper.contains("INT") {
         Box::new(oracledb::DB_TYPE_NUMBER)
@@ -1146,8 +1171,8 @@ mod tests {
             bin_vec
         );
 
-        let bad_err = OracleVectorData::decode_wire_bytes(b"\x00\x01\x02\x00\x00\x00\x00\x01")
-            .unwrap_err();
+        let bad_err =
+            OracleVectorData::decode_wire_bytes(b"\x00\x01\x02\x00\x00\x00\x00\x01").unwrap_err();
         assert_eq!(bad_err.classify().sqlstate, "22000");
     }
 }

@@ -244,9 +244,7 @@ class OracleNotificationSource(NotificationSource):
     async def listen(self) -> AsyncIterator[NotificationEvent]:
         """Yield ``NotificationEvent`` items across all subscribed channels with exponential reconnect backoff."""
         if not self._subscriptions:
-            err = ProgrammingError(
-                "At least one notification channel must be subscribed before calling listen()"
-            )
+            err = ProgrammingError("At least one notification channel must be subscribed before calling listen()")
             err.sqlstate = "42602"
             raise err
 

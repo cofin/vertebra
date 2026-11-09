@@ -653,9 +653,7 @@ class SyncOraclePipeline:
             batch_payload.append((sql, coerced, returns_rows))
 
         with self._driver._checkout_client() as active_client:
-            raw_outcomes = tuple(
-                active_client.execute_pipeline_batch(batch_payload, continue_on_error=False)
-            )
+            raw_outcomes = tuple(active_client.execute_pipeline_batch(batch_payload, continue_on_error=False))
         self._outcomes = raw_outcomes
         self._driver._last_pipeline_outcomes = raw_outcomes
 
@@ -785,9 +783,7 @@ class AsyncOraclePipeline:
             batch_payload.append((sql, coerced, returns_rows))
 
         async with self._driver._checkout_client() as active_client:
-            raw_outcomes = tuple(
-                await active_client.execute_pipeline_batch(batch_payload, continue_on_error=False)
-            )
+            raw_outcomes = tuple(await active_client.execute_pipeline_batch(batch_payload, continue_on_error=False))
         self._outcomes = raw_outcomes
         self._driver._last_pipeline_outcomes = raw_outcomes
 
@@ -901,7 +897,9 @@ class SyncOracleDriver(SyncDatabaseDriver[OracleConfig]):
         """Queue updated session tracing attributes to be piggybacked onto the next SQL round-trip."""
         prev = self._pending_session_attrs
         merged = OracleSessionAttrs(
-            client_identifier=client_identifier if client_identifier is not None else (prev.client_identifier if prev else None),
+            client_identifier=client_identifier
+            if client_identifier is not None
+            else (prev.client_identifier if prev else None),
             module=module if module is not None else (prev.module if prev else None),
             action=action if action is not None else (prev.action if prev else None),
             ecid=ecid if ecid is not None else (prev.ecid if prev else None),
@@ -1278,9 +1276,7 @@ class SyncOracleDriver(SyncDatabaseDriver[OracleConfig]):
         if not rows or not cols:
             return 0
         use_direct_path = (
-            self.config.driver_features.enable_direct_path_load
-            if direct_path is None
-            else bool(direct_path)
+            self.config.driver_features.enable_direct_path_load if direct_path is None else bool(direct_path)
         )
         hint = "/*+ APPEND_VALUES */ " if use_direct_path else ""
         placeholders = ", ".join(f":{i + 1}" for i in range(len(cols)))
@@ -1445,13 +1441,9 @@ class SyncOracleDriver(SyncDatabaseDriver[OracleConfig]):
         features = self.config.driver_features
         lowercase = features.enable_lowercase_column_names
         raw_columns = getattr(result, "columns", ()) or ()
-        cols = tuple(
-            str(col.name).lower() if lowercase else str(col.name)
-            for col in raw_columns
-        )
+        cols = tuple(str(col.name).lower() if lowercase else str(col.name) for col in raw_columns)
         col_types = tuple(
-            str(getattr(col, "oracle_type", getattr(col, "type_name", "VARCHAR2")))
-            for col in raw_columns
+            str(getattr(col, "oracle_type", getattr(col, "type_name", "VARCHAR2"))) for col in raw_columns
         )
         raw_rows = getattr(result, "rows", ()) or ()
         if raw_rows:
@@ -1472,8 +1464,7 @@ class SyncOracleDriver(SyncDatabaseDriver[OracleConfig]):
         if out_binds is not None:
             if isinstance(out_binds, Mapping):
                 out_cols = cols or tuple(
-                    str(k).lstrip(":").lower() if lowercase else str(k).lstrip(":")
-                    for k in out_binds
+                    str(k).lstrip(":").lower() if lowercase else str(k).lstrip(":") for k in out_binds
                 )
                 row_tuple = tuple(
                     OracleCore.coerce_row_cell(
@@ -1661,7 +1652,9 @@ class AsyncOracleDriver(AsyncDatabaseDriver[OracleConfig]):
         """Queue updated session tracing attributes for the next SQL round-trip."""
         prev = self._pending_session_attrs
         merged = OracleSessionAttrs(
-            client_identifier=client_identifier if client_identifier is not None else (prev.client_identifier if prev else None),
+            client_identifier=client_identifier
+            if client_identifier is not None
+            else (prev.client_identifier if prev else None),
             module=module if module is not None else (prev.module if prev else None),
             action=action if action is not None else (prev.action if prev else None),
             ecid=ecid if ecid is not None else (prev.ecid if prev else None),
@@ -2049,9 +2042,7 @@ class AsyncOracleDriver(AsyncDatabaseDriver[OracleConfig]):
         if not rows or not cols:
             return 0
         use_direct_path = (
-            self.config.driver_features.enable_direct_path_load
-            if direct_path is None
-            else bool(direct_path)
+            self.config.driver_features.enable_direct_path_load if direct_path is None else bool(direct_path)
         )
         hint = "/*+ APPEND_VALUES */ " if use_direct_path else ""
         placeholders = ", ".join(f":{i + 1}" for i in range(len(cols)))
@@ -2240,13 +2231,9 @@ class AsyncOracleDriver(AsyncDatabaseDriver[OracleConfig]):
         features = self.config.driver_features
         lowercase = features.enable_lowercase_column_names
         raw_columns = getattr(result, "columns", ()) or ()
-        cols = tuple(
-            str(col.name).lower() if lowercase else str(col.name)
-            for col in raw_columns
-        )
+        cols = tuple(str(col.name).lower() if lowercase else str(col.name) for col in raw_columns)
         col_types = tuple(
-            str(getattr(col, "oracle_type", getattr(col, "type_name", "VARCHAR2")))
-            for col in raw_columns
+            str(getattr(col, "oracle_type", getattr(col, "type_name", "VARCHAR2"))) for col in raw_columns
         )
         raw_rows = getattr(result, "rows", ()) or ()
         if raw_rows:
@@ -2267,8 +2254,7 @@ class AsyncOracleDriver(AsyncDatabaseDriver[OracleConfig]):
         if out_binds is not None:
             if isinstance(out_binds, Mapping):
                 out_cols = cols or tuple(
-                    str(k).lstrip(":").lower() if lowercase else str(k).lstrip(":")
-                    for k in out_binds
+                    str(k).lstrip(":").lower() if lowercase else str(k).lstrip(":") for k in out_binds
                 )
                 row_tuple = tuple(
                     OracleCore.coerce_row_cell(

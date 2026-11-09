@@ -6,7 +6,7 @@ chapter_id: ch07-conformance-and-okf-synthesis
 title: "Task 01: Wire Live Oracle 26ai Conformance Matrix and Native Integration Suite"
 description: Add _ORACLE_ITEMS_DDL and _ORACLE_TYPES_DDL to the Oracle EngineConformanceSpec in ENGINE_SPECS (test_driver_conformance.py) with supports_pipeline=True and pending_flow_id=None, and implement live Oracle 26ai Free integration tests in test_oracle_native.py.
 status: stable
-state: pending
+state: completed
 priority: P1
 owner: null
 depends_on:
@@ -27,18 +27,18 @@ verification_strategy: behavior_tdd
 estimated_loc: 240
 plan_revision: 3
 plan_commit: 769302bc
-state_revision: 0
+state_revision: 1
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-09T18:02:44Z"
+last_verified_commit: 6ef7e4bc
+verification_evidence: "pytest test_driver_conformance.py -k oracle (36 passed), pytest test_oracle_native.py (6 passed), cargo test -p vertebra-oracle (16 passed), ruff, and mypy passed"
 created_at: "2026-11-09T00:48:00Z"
-updated_at: "2026-11-09T01:28:30Z"
-completed_at: null
+updated_at: "2026-11-09T18:02:44Z"
+completed_at: "2026-11-09T18:02:44Z"
 commit_sha: null
 commit: null
 generated:
@@ -158,9 +158,9 @@ uv run pytest src/py/tests/integration/db/test_oracle_native.py
 
 ## Acceptance Criteria
 
-- [ ] The `"oracle"` `EngineConformanceSpec` in `ENGINE_SPECS` (`src/py/tests/integration/db/test_driver_conformance.py`) uses `_ORACLE_ITEMS_DDL` (`vtb_conformance_items`) and `_ORACLE_TYPES_DDL` (`vtb_conformance_types`) with `supports_pipeline=True` and `pending_flow_id=None` [^conformance-py].
-- [ ] `src/py/tests/integration/db/test_oracle_native.py` covers `JSON`/`OSON`, `VECTOR`, `VTBARROW` `ArrowCursor`, `DML RETURNING INTO`, delayed-commit pipelines, VPD reset-or-evict tenancy, and out-of-band `ORA-01013` cancellation [^ora-contracts].
-- [ ] Both integration suites pass with zero skips or xfails against Oracle 26ai Free (`127.0.0.1:5531/FREEPDB1`).
+- [x] The `"oracle"` `EngineConformanceSpec` in `ENGINE_SPECS` (`src/py/tests/integration/db/test_driver_conformance.py`) uses `_ORACLE_ITEMS_DDL` (`vtb_conformance_items`) and `_ORACLE_TYPES_DDL` (`vtb_conformance_types`) with `supports_pipeline=True` and `pending_flow_id=None` [^conformance-py].
+- [x] `src/py/tests/integration/db/test_oracle_native.py` covers `JSON`/`OSON`, `VECTOR`, `VTBARROW` `ArrowCursor`, `DML RETURNING INTO`, delayed-commit pipelines, VPD reset-or-evict tenancy, and out-of-band `ORA-01013` cancellation [^ora-contracts].
+- [x] Both integration suites pass with zero skips or xfails against Oracle 26ai Free (`127.0.0.1:5531/FREEPDB1`).
 
 ## Notes & Discoveries
 

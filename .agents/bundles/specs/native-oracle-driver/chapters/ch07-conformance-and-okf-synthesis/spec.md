@@ -6,16 +6,16 @@ chapter_id: ch07-conformance-and-okf-synthesis
 title: "Chapter 07: Live Oracle 26ai Free Conformance Suite, Wheel Isolation Gate, and OKF Synthesis"
 description: Wire Oracle 26ai DDL and pipeline conformance into test_driver_conformance.py, add live Oracle 26ai Free integration tests, verify wheel isolation and disabled-GIL execution, and synchronize user docs and OKF v0.2 knowledge chapters.
 status: stable
-state: planned
+state: in_progress
 planning_status: complete
 chapter_order: 7
 depends_on_chapters:
   - ch06-notifications-and-embeddings
 replan_trigger: null
-current_task: "native-oracle-driver:ch07:t01"
+current_task: "native-oracle-driver:ch07:t02"
 plan_revision: 3
 plan_commit: 769302bc
-state_revision: 0
+state_revision: 1
 last_verified_checkpoint: null
 last_reviewed_commit: null
 created_at: "2026-11-09T00:48:00Z"
@@ -191,8 +191,8 @@ Progress: `[0/6 files documented]` (owned by `ch07:t03` and `ch07:t04`).
 
 ## 5. Implementation Plan
 
-- [ ] native-oracle-driver:ch07:t01 — Wire Live Oracle 26ai Conformance Matrix and Native Integration Suite (tasks/t01-live-oracle-26ai-conformance-matrix.md)
-- [ ] native-oracle-driver:ch07:t02 — Implement Standalone Wheel Isolation and Free-Threaded Gate (tasks/t02-wheel-isolation-and-freethreaded-gate.md)
+- [x] native-oracle-driver:ch07:t01 — Wire Live Oracle 26ai Conformance Matrix and Native Integration Suite (tasks/t01-live-oracle-26ai-conformance-matrix.md)
+- [~] native-oracle-driver:ch07:t02 — Implement Standalone Wheel Isolation and Free-Threaded Gate (tasks/t02-wheel-isolation-and-freethreaded-gate.md)
 - [ ] native-oracle-driver:ch07:t03 — Synchronize User Documentation, README, and AGENTS.md (tasks/t03-user-docs-and-okf-knowledge-sync.md)
 - [ ] native-oracle-driver:ch07:t04 — Synchronize OKF Data Domain Chapters and Tech Stack (tasks/t04-okf-domain-and-tech-stack-sync.md)
 

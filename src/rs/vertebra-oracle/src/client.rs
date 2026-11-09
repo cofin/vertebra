@@ -246,8 +246,8 @@ impl OutBindsPayload {
                 for v in vals {
                     py_vals.push(v.into_py_object(py, fetch_decimals)?);
                 }
-                let tup =
-                    PyTuple::new(py, py_vals).map_err(|e| OracleError::data_error(e.to_string()))?;
+                let tup = PyTuple::new(py, py_vals)
+                    .map_err(|e| OracleError::data_error(e.to_string()))?;
                 Ok(Some(tup.into_any().unbind()))
             }
             Self::Named(pairs) => {
@@ -421,9 +421,9 @@ pub(crate) fn extract_pipeline_ops(
     let mut ops = Vec::new();
     for item_res in iter {
         let item = item_res.map_err(|e| OracleError::data_error(e.to_string()))?;
-        let item_len = item
-            .len()
-            .map_err(|_| OracleError::Interface("Each pipeline operation must be a tuple".to_owned()))?;
+        let item_len = item.len().map_err(|_| {
+            OracleError::Interface("Each pipeline operation must be a tuple".to_owned())
+        })?;
         if item_len == 0 {
             return Err(OracleError::Interface(
                 "Pipeline operation tuple cannot be empty".to_owned(),
@@ -470,7 +470,9 @@ pub(crate) fn extract_pipeline_ops(
     Ok(ops)
 }
 
-pub(crate) fn extract_bind_args(params: Option<&Bound<'_, PyAny>>) -> Result<BindArgs, OracleError> {
+pub(crate) fn extract_bind_args(
+    params: Option<&Bound<'_, PyAny>>,
+) -> Result<BindArgs, OracleError> {
     let Some(obj) = params else {
         return Ok(BindArgs::Positional(Vec::new()));
     };
@@ -518,9 +520,9 @@ pub(crate) fn extract_bind_args(params: Option<&Bound<'_, PyAny>>) -> Result<Bin
             "Oracle bind parameters must be a Sequence or Mapping, not str/bytes".to_owned(),
         ));
     }
-    let iter = obj
-        .try_iter()
-        .map_err(|_| OracleError::Interface("Oracle bind parameters must be a Sequence or Mapping".to_owned()))?;
+    let iter = obj.try_iter().map_err(|_| {
+        OracleError::Interface("Oracle bind parameters must be a Sequence or Mapping".to_owned())
+    })?;
     let mut vals = Vec::new();
     for item_res in iter {
         let item = item_res.map_err(|e| OracleError::data_error(e.to_string()))?;
@@ -572,9 +574,9 @@ pub(crate) fn extract_out_bind_spec(
         }
         return Ok(OutBindSpec::Named(pairs));
     }
-    let iter = obj
-        .try_iter()
-        .map_err(|_| OracleError::Interface("out_binds must be a Sequence or Mapping".to_owned()))?;
+    let iter = obj.try_iter().map_err(|_| {
+        OracleError::Interface("out_binds must be a Sequence or Mapping".to_owned())
+    })?;
     let mut hints = Vec::new();
     for item_res in iter {
         let item = item_res.map_err(|e| OracleError::data_error(e.to_string()))?;
@@ -686,7 +688,10 @@ pub(crate) enum WorkerReply {
     Unit,
     RowCount(usize),
     QueryOutcome(WorkerQueryOutcome),
-    ArrowIpc { ipc_bytes: Vec<u8>, row_count: usize },
+    ArrowIpc {
+        ipc_bytes: Vec<u8>,
+        row_count: usize,
+    },
     PipelineOutcomes(Vec<WorkerPipelineStepOutcome>),
 }
 
@@ -973,7 +978,10 @@ impl InMemoryOracleStore {
             return Ok((OracleCellValue::Int(level), "NUMBER".to_owned()));
         }
         if trimmed.eq_ignore_ascii_case("USER") {
-            return Ok((OracleCellValue::Str("SYSTEM".to_owned()), "VARCHAR2".to_owned()));
+            return Ok((
+                OracleCellValue::Str("SYSTEM".to_owned()),
+                "VARCHAR2".to_owned(),
+            ));
         }
         if trimmed.eq_ignore_ascii_case("SYSDATE") {
             return Ok((
@@ -1018,6 +1026,42 @@ impl InMemoryOracleStore {
             }
         }
 
+        if upper.starts_with("TO_VECTOR(") && trimmed.ends_with(')') {
+            let inner = &trimmed["TO_VECTOR(".len()..trimmed.len() - 1];
+            let args = split_top_level_commas(inner);
+            if let Some(first_arg) = args.first() {
+                let (val_cell, _) = self.eval_scalar_expr(first_arg, params, row_ctx, level)?;
+                let dtype_hint = args
+                    .get(2)
+                    .map(|s| s.trim().to_ascii_uppercase())
+                    .unwrap_or_else(|| "FLOAT32".to_owned());
+                let vec_data = match val_cell {
+                    OracleCellValue::Vector(v) => v,
+                    other => {
+                        let nums = parse_json_number_vec(&cell_as_string(&other))?;
+                        if dtype_hint.contains("INT8") {
+                            OracleVectorData::Int8(nums.into_iter().map(|x| x as i8).collect())
+                        } else if dtype_hint.contains("FLOAT64") {
+                            OracleVectorData::Float64(nums)
+                        } else {
+                            OracleVectorData::Float32(nums.into_iter().map(|x| x as f32).collect())
+                        }
+                    }
+                };
+                return Ok((OracleCellValue::Vector(vec_data), "VECTOR".to_owned()));
+            }
+        }
+
+        if upper.starts_with("JSON(") && trimmed.ends_with(')') {
+            let inner = &trimmed["JSON(".len()..trimmed.len() - 1];
+            let (val_cell, _) = self.eval_scalar_expr(inner, params, row_ctx, level)?;
+            let oson_bytes = match val_cell {
+                OracleCellValue::Oson(b) | OracleCellValue::Bytes(b) => b,
+                other => cell_as_string(&other).into_bytes(),
+            };
+            return Ok((OracleCellValue::Oson(oson_bytes), "JSON".to_owned()));
+        }
+
         if upper.starts_with("VECTOR_DISTANCE(") && trimmed.ends_with(')') {
             let inner = &trimmed["VECTOR_DISTANCE(".len()..trimmed.len() - 1];
             let args = split_top_level_commas(inner);
@@ -1039,7 +1083,10 @@ impl InMemoryOracleStore {
             let args = split_top_level_commas(inner);
             if let Some(first) = args.first() {
                 let (v, _) = self.eval_scalar_expr(first, params, row_ctx, level)?;
-                return Ok((OracleCellValue::Str(cell_as_string(&v)), "VARCHAR2".to_owned()));
+                return Ok((
+                    OracleCellValue::Str(cell_as_string(&v)),
+                    "VARCHAR2".to_owned(),
+                ));
             }
         }
 
@@ -1098,10 +1145,7 @@ impl InMemoryOracleStore {
                 .next()
                 .unwrap_or(trimmed);
             if let Some(idx) = tbl.find_col_idx(clean_col) {
-                return Ok((
-                    row[idx].clone(),
-                    tbl.columns[idx].type_name.clone(),
-                ));
+                return Ok((row[idx].clone(), tbl.columns[idx].type_name.clone()));
             }
         }
 
@@ -1120,7 +1164,10 @@ impl InMemoryOracleStore {
             }
         }
 
-        Ok((OracleCellValue::Str(trimmed.to_owned()), "VARCHAR2".to_owned()))
+        Ok((
+            OracleCellValue::Str(trimmed.to_owned()),
+            "VARCHAR2".to_owned(),
+        ))
     }
 
     fn eval_where_clause(
@@ -1190,7 +1237,10 @@ impl InMemoryOracleStore {
         lowercase_column_names: bool,
         max_rows: Option<usize>,
     ) -> Result<WorkerQueryOutcome, OracleError> {
-        let clean_sql = strip_leading_sql_comments(sql).trim().trim_end_matches(';').trim();
+        let clean_sql = strip_leading_sql_comments(sql)
+            .trim()
+            .trim_end_matches(';')
+            .trim();
         let upper = clean_sql.to_ascii_uppercase();
 
         if upper == "SELECT 1" || upper.starts_with("SELECT /*") && !upper.contains("FROM") {
@@ -1357,10 +1407,8 @@ impl InMemoryOracleStore {
                 .or_else(|| params.get_positional(1))
                 .map(cell_as_string)
                 .unwrap_or_default();
-            self.session_context.insert(
-                ("USERENV".to_owned(), "CLIENT_IDENTIFIER".to_owned()),
-                val,
-            );
+            self.session_context
+                .insert(("USERENV".to_owned(), "CLIENT_IDENTIFIER".to_owned()), val);
             return Ok(());
         }
         if upper.contains("DBMS_SESSION.CLEAR_IDENTIFIER") {
@@ -1527,18 +1575,16 @@ impl InMemoryOracleStore {
             .map_or(sql, |r| r.base_sql.as_str())
             .trim();
         let upper = stmt.to_ascii_uppercase();
-        let into_idx = find_keyword_outside_quotes(&upper, "INTO").ok_or_else(|| {
-            OracleError::Server {
+        let into_idx =
+            find_keyword_outside_quotes(&upper, "INTO").ok_or_else(|| OracleError::Server {
                 code: 925,
                 message: "ORA-00925: missing INTO keyword".to_owned(),
-            }
-        })?;
-        let values_idx = find_keyword_outside_quotes(&upper, "VALUES").ok_or_else(|| {
-            OracleError::Server {
+            })?;
+        let values_idx =
+            find_keyword_outside_quotes(&upper, "VALUES").ok_or_else(|| OracleError::Server {
                 code: 936,
                 message: "ORA-00936: missing VALUES keyword".to_owned(),
-            }
-        })?;
+            })?;
         let target_part = stmt[into_idx + "INTO".len()..values_idx].trim();
         let values_part = stmt[values_idx + "VALUES".len()..].trim();
         let val_open = values_part.find('(').ok_or_else(|| OracleError::Server {
@@ -1672,9 +1718,7 @@ impl InMemoryOracleStore {
             }
             if cdef.primary_key {
                 for existing in &tbl.rows {
-                    if compare_cells(&existing[cidx], &new_row[cidx])
-                        == std::cmp::Ordering::Equal
-                    {
+                    if compare_cells(&existing[cidx], &new_row[cidx]) == std::cmp::Ordering::Equal {
                         return Err(OracleError::Server {
                             code: 1,
                             message: format!(
@@ -1734,12 +1778,11 @@ impl InMemoryOracleStore {
             .map_or(sql, |r| r.base_sql.as_str())
             .trim();
         let upper = stmt.to_ascii_uppercase();
-        let set_idx = find_keyword_outside_quotes(&upper, "SET").ok_or_else(|| {
-            OracleError::Server {
+        let set_idx =
+            find_keyword_outside_quotes(&upper, "SET").ok_or_else(|| OracleError::Server {
                 code: 971,
                 message: "ORA-00971: missing SET keyword".to_owned(),
-            }
-        })?;
+            })?;
         let tbl_name = stmt["UPDATE".len()..set_idx]
             .trim()
             .split_whitespace()
@@ -1756,14 +1799,14 @@ impl InMemoryOracleStore {
                 (after_set, "")
             };
 
-        let tbl_snapshot = self
-            .tables
-            .get(&tbl_name)
-            .cloned()
-            .ok_or_else(|| OracleError::Server {
-                code: 942,
-                message: format!("ORA-00942: table or view `{tbl_name}` does not exist"),
-            })?;
+        let tbl_snapshot =
+            self.tables
+                .get(&tbl_name)
+                .cloned()
+                .ok_or_else(|| OracleError::Server {
+                    code: 942,
+                    message: format!("ORA-00942: table or view `{tbl_name}` does not exist"),
+                })?;
 
         let assignments: Vec<(usize, &str)> = split_top_level_commas(set_part)
             .into_iter()
@@ -1861,14 +1904,14 @@ impl InMemoryOracleStore {
             .trim_matches('"')
             .to_ascii_uppercase();
 
-        let tbl_snapshot = self
-            .tables
-            .get(&tbl_name)
-            .cloned()
-            .ok_or_else(|| OracleError::Server {
-                code: 942,
-                message: format!("ORA-00942: table or view `{tbl_name}` does not exist"),
-            })?;
+        let tbl_snapshot =
+            self.tables
+                .get(&tbl_name)
+                .cloned()
+                .ok_or_else(|| OracleError::Server {
+                    code: 942,
+                    message: format!("ORA-00942: table or view `{tbl_name}` does not exist"),
+                })?;
 
         let mut kept_rows = Vec::new();
         let mut deleted_rows = Vec::new();
@@ -1933,13 +1976,7 @@ impl InMemoryOracleStore {
                 .map(|i| tbl.columns[i].type_name.clone())
                 .unwrap_or_else(|| "VARCHAR2".to_owned());
             columns.push(OracleColumn::new(
-                col_name,
-                type_name,
-                0,
-                None,
-                None,
-                None,
-                true,
+                col_name, type_name, 0, None, None, None, true,
             ));
         }
 
@@ -1957,25 +1994,16 @@ impl InMemoryOracleStore {
         let is_named_out = match out_binds_spec {
             OutBindSpec::Named(_) => true,
             OutBindSpec::Positional(_) => false,
-            OutBindSpec::None => ret
-                .out_vars
-                .iter()
-                .any(|v| v.parse::<usize>().is_err()),
+            OutBindSpec::None => ret.out_vars.iter().any(|v| v.parse::<usize>().is_err()),
         };
         let out_binds = if first_proj.is_empty() {
             OutBindsPayload::None
         } else if is_named_out {
-            let pairs = ret
-                .out_vars
-                .iter()
-                .cloned()
-                .zip(first_proj)
-                .collect();
+            let pairs = ret.out_vars.iter().cloned().zip(first_proj).collect();
             OutBindsPayload::Named(pairs)
         } else {
             OutBindsPayload::Positional(first_proj)
-        }
-        ;
+        };
 
         Ok(WorkerQueryOutcome {
             columns,
@@ -1996,19 +2024,19 @@ impl InMemoryOracleStore {
         max_rows: Option<usize>,
     ) -> Result<WorkerQueryOutcome, OracleError> {
         let upper = sql.to_ascii_uppercase();
-        let from_idx = find_keyword_outside_quotes(&upper, "FROM").ok_or_else(|| {
-            OracleError::Server {
+        let from_idx =
+            find_keyword_outside_quotes(&upper, "FROM").ok_or_else(|| OracleError::Server {
                 code: 923,
                 message: "ORA-00923: FROM keyword not found where expected".to_owned(),
-            }
-        })?;
+            })?;
         let select_kw_end = if upper.starts_with("SELECT") {
             "SELECT".len()
         } else {
             0
         };
         let mut select_list_part = sql[select_kw_end..from_idx].trim();
-        if let Some(stripped) = strip_leading_sql_comments(select_list_part).strip_prefix("DISTINCT ")
+        if let Some(stripped) =
+            strip_leading_sql_comments(select_list_part).strip_prefix("DISTINCT ")
         {
             select_list_part = stripped.trim();
         } else {
@@ -2064,9 +2092,23 @@ impl InMemoryOracleStore {
 
         let mut fetch_limit = max_rows;
         if let Some(f_pos) = fetch_idx {
-            let f_tail = &after_from_up[f_pos..];
+            let f_tail = &after_from[f_pos..];
             for tok in f_tail.split_whitespace() {
-                if let Ok(n) = tok.parse::<usize>() {
+                if let Some(bind_k) = tok.strip_prefix(':') {
+                    let cell = if let Ok(p) = bind_k.parse::<usize>() {
+                        params.get_positional(p)
+                    } else {
+                        params.get_named(bind_k)
+                    };
+                    if let Some(c) = cell
+                        && let Some(iv) = cell_as_i64(c)
+                        && iv >= 0
+                    {
+                        let n = iv as usize;
+                        fetch_limit = Some(fetch_limit.map_or(n, |m| m.min(n)));
+                        break;
+                    }
+                } else if let Ok(n) = tok.parse::<usize>() {
                     fetch_limit = Some(fetch_limit.map_or(n, |m| m.min(n)));
                     break;
                 }
@@ -2094,15 +2136,7 @@ impl InMemoryOracleStore {
                             OracleCellValue::DecimalStr(_) => Some(2),
                             _ => None,
                         };
-                        columns.push(OracleColumn::new(
-                            cname,
-                            tname,
-                            0,
-                            None,
-                            None,
-                            scale,
-                            true,
-                        ));
+                        columns.push(OracleColumn::new(cname, tname, 0, None, None, scale, true));
                     }
                     row_cells.push(cell);
                 }
@@ -2145,9 +2179,7 @@ impl InMemoryOracleStore {
         };
 
         let order_part = if let Some(o_pos) = order_idx {
-            let o_end = fetch_idx
-                .filter(|&p| p > o_pos)
-                .unwrap_or(after_from.len());
+            let o_end = fetch_idx.filter(|&p| p > o_pos).unwrap_or(after_from.len());
             let raw_order = after_from[o_pos + "ORDER".len()..o_end].trim();
             let raw_order_up = raw_order.to_ascii_uppercase();
             if raw_order_up.starts_with("BY ") {
@@ -2166,7 +2198,11 @@ impl InMemoryOracleStore {
             }
         }
 
-        if select_list_part.trim().to_ascii_uppercase().starts_with("COUNT(") {
+        if select_list_part
+            .trim()
+            .to_ascii_uppercase()
+            .starts_with("COUNT(")
+        {
             let (_, alias) = split_expr_and_alias(select_list_part, 0);
             let cname = if lowercase_column_names {
                 alias.to_ascii_lowercase()
@@ -2192,21 +2228,21 @@ impl InMemoryOracleStore {
             });
         }
 
-        let select_items: Vec<(String, String)> = if select_list_part.trim() == "*" {
-            tbl.columns
-                .iter()
-                .map(|c| (c.name.clone(), c.name.clone()))
-                .collect()
-        } else {
-            split_top_level_commas(select_list_part)
-                .into_iter()
-                .enumerate()
-                .map(|(i, item)| {
-                    let (e, a) = split_expr_and_alias(item.trim(), i);
-                    (e.to_owned(), a)
-                })
-                .collect()
-        };
+        let mut select_items: Vec<(String, String)> = Vec::new();
+        for (i, raw_item) in split_top_level_commas(select_list_part)
+            .into_iter()
+            .enumerate()
+        {
+            let trimmed_item = raw_item.trim();
+            if trimmed_item == "*" || trimmed_item.ends_with(".*") {
+                for c in &tbl.columns {
+                    select_items.push((c.name.clone(), c.name.clone()));
+                }
+            } else {
+                let (e, a) = split_expr_and_alias(trimmed_item, i);
+                select_items.push((e.to_owned(), a));
+            }
+        }
 
         let mut columns = Vec::with_capacity(select_items.len());
         for (expr_str, alias_name) in &select_items {
@@ -2219,21 +2255,16 @@ impl InMemoryOracleStore {
                 .find_col_idx(expr_str)
                 .map(|i| tbl.columns[i].type_name.clone())
                 .unwrap_or_else(|| {
-                    if expr_str.to_ascii_uppercase().starts_with("VECTOR_DISTANCE(") {
+                    if expr_str
+                        .to_ascii_uppercase()
+                        .starts_with("VECTOR_DISTANCE(")
+                    {
                         "BINARY_DOUBLE".to_owned()
                     } else {
                         "VARCHAR2".to_owned()
                     }
                 });
-            columns.push(OracleColumn::new(
-                cname,
-                tname,
-                0,
-                None,
-                None,
-                None,
-                true,
-            ));
+            columns.push(OracleColumn::new(cname, tname, 0, None, None, None, true));
         }
 
         let mut projected: Vec<(Vec<OracleCellValue>, OracleCellValue)> =
@@ -2399,6 +2430,26 @@ fn infer_cell_oracle_type(cell: &OracleCellValue) -> String {
     }
 }
 
+fn parse_json_number_vec(input: &str) -> Result<Vec<f64>, OracleError> {
+    let trimmed = input.trim();
+    let inner = trimmed
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(trimmed)
+        .trim();
+    if inner.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::new();
+    for part in inner.split(',') {
+        let val = part.trim().parse::<f64>().map_err(|e| {
+            OracleError::data_error(format!("Invalid numeric vector element `{part}`: {e}"))
+        })?;
+        out.push(val);
+    }
+    Ok(out)
+}
+
 fn extract_f64_vector(cell: &OracleCellValue) -> Result<Vec<f64>, OracleError> {
     match cell {
         OracleCellValue::Vector(v) => match v {
@@ -2408,9 +2459,14 @@ fn extract_f64_vector(cell: &OracleCellValue) -> Result<Vec<f64>, OracleError> {
             OracleVectorData::Binary(vals) => Ok(vals.iter().map(|&x| f64::from(x)).collect()),
         },
         OracleCellValue::Bytes(raw) => {
-            let v = OracleVectorData::decode_wire_bytes(raw)?;
-            extract_f64_vector(&OracleCellValue::Vector(v))
+            if let Ok(v) = OracleVectorData::decode_wire_bytes(raw) {
+                extract_f64_vector(&OracleCellValue::Vector(v))
+            } else {
+                parse_json_number_vec(&String::from_utf8_lossy(raw))
+            }
         }
+        OracleCellValue::Oson(raw) => parse_json_number_vec(&String::from_utf8_lossy(raw)),
+        OracleCellValue::Str(s) => parse_json_number_vec(s),
         _ => Err(OracleError::data_error(
             "Expected Oracle VECTOR operand in VECTOR_DISTANCE",
         )),
@@ -2514,24 +2570,21 @@ impl WorkerSession {
             }
             if let Some(ref m) = attrs.module {
                 active_guard.module = Some(m.clone());
-                self.mem_store.session_context.insert(
-                    ("USERENV".to_owned(), "MODULE".to_owned()),
-                    m.clone(),
-                );
+                self.mem_store
+                    .session_context
+                    .insert(("USERENV".to_owned(), "MODULE".to_owned()), m.clone());
             }
             if let Some(ref a) = attrs.action {
                 active_guard.action = Some(a.clone());
-                self.mem_store.session_context.insert(
-                    ("USERENV".to_owned(), "ACTION".to_owned()),
-                    a.clone(),
-                );
+                self.mem_store
+                    .session_context
+                    .insert(("USERENV".to_owned(), "ACTION".to_owned()), a.clone());
             }
             if let Some(ref e) = attrs.ecid {
                 active_guard.ecid = Some(e.clone());
-                self.mem_store.session_context.insert(
-                    ("USERENV".to_owned(), "ECID".to_owned()),
-                    e.clone(),
-                );
+                self.mem_store
+                    .session_context
+                    .insert(("USERENV".to_owned(), "ECID".to_owned()), e.clone());
             }
         }
     }
@@ -2583,7 +2636,8 @@ impl WorkerSession {
             }
             WorkerCommand::Rollback => {
                 if let Some(ref conn) = self.conn {
-                    conn.rollback().map_err(|e| OracleError::from_oracledb(&e))?;
+                    conn.rollback()
+                        .map_err(|e| OracleError::from_oracledb(&e))?;
                 } else if self.is_memory_mode() {
                     self.mem_store.rollback();
                 }
@@ -2601,7 +2655,11 @@ impl WorkerSession {
                 } else if self.is_memory_mode() {
                     self.mem_store.savepoint(&name);
                 }
-                if !self.savepoints.iter().any(|s| s.eq_ignore_ascii_case(&name)) {
+                if !self
+                    .savepoints
+                    .iter()
+                    .any(|s| s.eq_ignore_ascii_case(&name))
+                {
                     self.savepoints.push(name);
                 }
                 Ok(WorkerReply::Unit)
@@ -2814,8 +2872,10 @@ impl WorkerSession {
                     for v in vals {
                         boxed.push(cell_to_oracledb_bind(v)?);
                     }
-                    let refs: Vec<&dyn oracledb::ToDbValue> =
-                        boxed.iter().map(|b| &**b as &dyn oracledb::ToDbValue).collect();
+                    let refs: Vec<&dyn oracledb::ToDbValue> = boxed
+                        .iter()
+                        .map(|b| &**b as &dyn oracledb::ToDbValue)
+                        .collect();
                     conn.query(sql, &refs)
                         .map_err(|e| OracleError::from_oracledb(&e))?
                 }
@@ -2876,8 +2936,10 @@ impl WorkerSession {
                         boxed.push(out_bind_type_placeholder("VARCHAR2"));
                     }
                 }
-                let refs: Vec<&dyn oracledb::ToDbValue> =
-                    boxed.iter().map(|b| &**b as &dyn oracledb::ToDbValue).collect();
+                let refs: Vec<&dyn oracledb::ToDbValue> = boxed
+                    .iter()
+                    .map(|b| &**b as &dyn oracledb::ToDbValue)
+                    .collect();
                 conn.execute(sql, &refs)
                     .map_err(|e| OracleError::from_oracledb(&e))?
             }
@@ -2894,10 +2956,7 @@ impl WorkerSession {
                 } else if let Some(ref ret) = returning {
                     for var_name in &ret.out_vars {
                         if !boxed.iter().any(|(k, _)| k.eq_ignore_ascii_case(var_name)) {
-                            boxed.push((
-                                var_name.clone(),
-                                out_bind_type_placeholder("VARCHAR2"),
-                            ));
+                            boxed.push((var_name.clone(), out_bind_type_placeholder("VARCHAR2")));
                         }
                     }
                 }
@@ -3220,11 +3279,7 @@ impl OracleWorkerHandle {
         action: Option<String>,
         ecid: Option<String>,
     ) {
-        if client_identifier.is_none()
-            && module.is_none()
-            && action.is_none()
-            && ecid.is_none()
-        {
+        if client_identifier.is_none() && module.is_none() && action.is_none() && ecid.is_none() {
             return;
         }
         let mut guard = self
@@ -3312,9 +3367,7 @@ impl OracleWorkerHandle {
 
     fn ensure_open(&self) -> Result<(), OracleError> {
         if self.is_closed() {
-            return Err(OracleError::Interface(
-                "Oracle client is closed".to_owned(),
-            ));
+            return Err(OracleError::Interface("Oracle client is closed".to_owned()));
         }
         Ok(())
     }
@@ -3333,9 +3386,7 @@ impl OracleWorkerHandle {
                 self.in_transaction.store(false, Ordering::Release);
                 return Ok(WorkerReply::Unit);
             }
-            return Err(OracleError::Interface(
-                "Oracle client is closed".to_owned(),
-            ));
+            return Err(OracleError::Interface("Oracle client is closed".to_owned()));
         };
 
         let queue = Arc::new(SyncCompletionQueue::new());
@@ -3439,9 +3490,7 @@ impl OracleWorkerHandle {
             guard.clone()
         };
         let Some(sender) = tx else {
-            return Err(OracleError::Interface(
-                "Oracle client is closed".to_owned(),
-            ));
+            return Err(OracleError::Interface("Oracle client is closed".to_owned()));
         };
         let queue = Arc::new(SyncCompletionQueue::new());
         self.break_handle.begin_operation();
@@ -3882,8 +3931,8 @@ impl SyncOracleClient {
     ) -> PyResult<OracleQueryResult> {
         let bind_args = extract_bind_args(params).map_err(|e| e.to_py_err(py))?;
         let out_spec = extract_out_bind_spec(out_binds).map_err(|e| e.to_py_err(py))?;
-        let lowercase =
-            enable_lowercase_column_names.unwrap_or(self.worker.config().enable_lowercase_column_names);
+        let lowercase = enable_lowercase_column_names
+            .unwrap_or(self.worker.config().enable_lowercase_column_names);
         let worker = Arc::clone(&self.worker);
         let reply = py
             .detach(|| {
@@ -3899,7 +3948,14 @@ impl SyncOracleClient {
             .map_err(|e| e.to_py_err(py))?;
         match reply {
             WorkerReply::QueryOutcome(outcome) => outcome.into_py_query_result(py),
-            _ => Ok(OracleQueryResult::new(py, Vec::new(), Vec::new(), 0, None, None)),
+            _ => Ok(OracleQueryResult::new(
+                py,
+                Vec::new(),
+                Vec::new(),
+                0,
+                None,
+                None,
+            )),
         }
     }
 
@@ -3919,8 +3975,8 @@ impl SyncOracleClient {
         enable_lowercase_column_names: Option<bool>,
     ) -> PyResult<Py<PyAny>> {
         let bind_args = extract_bind_args(params).map_err(|e| e.to_py_err(py))?;
-        let lowercase =
-            enable_lowercase_column_names.unwrap_or(self.worker.config().enable_lowercase_column_names);
+        let lowercase = enable_lowercase_column_names
+            .unwrap_or(self.worker.config().enable_lowercase_column_names);
         let worker = Arc::clone(&self.worker);
         let reply = py
             .detach(|| {
@@ -3959,8 +4015,8 @@ impl SyncOracleClient {
     ) -> PyResult<OracleQueryResult> {
         let bind_args = extract_bind_args(params).map_err(|e| e.to_py_err(py))?;
         let out_spec = extract_out_bind_spec(out_binds).map_err(|e| e.to_py_err(py))?;
-        let lowercase =
-            enable_lowercase_column_names.unwrap_or(self.worker.config().enable_lowercase_column_names);
+        let lowercase = enable_lowercase_column_names
+            .unwrap_or(self.worker.config().enable_lowercase_column_names);
         let worker = Arc::clone(&self.worker);
         let reply = py
             .detach(|| {
@@ -3975,10 +4031,22 @@ impl SyncOracleClient {
             .map_err(|e| e.to_py_err(py))?;
         match reply {
             WorkerReply::QueryOutcome(outcome) => outcome.into_py_query_result(py),
-            WorkerReply::RowCount(n) => {
-                Ok(OracleQueryResult::new(py, Vec::new(), Vec::new(), n, None, None))
-            }
-            _ => Ok(OracleQueryResult::new(py, Vec::new(), Vec::new(), 0, None, None)),
+            WorkerReply::RowCount(n) => Ok(OracleQueryResult::new(
+                py,
+                Vec::new(),
+                Vec::new(),
+                n,
+                None,
+                None,
+            )),
+            _ => Ok(OracleQueryResult::new(
+                py,
+                Vec::new(),
+                Vec::new(),
+                0,
+                None,
+                None,
+            )),
         }
     }
 
@@ -4026,8 +4094,8 @@ impl SyncOracleClient {
         enable_lowercase_column_names: Option<bool>,
     ) -> PyResult<Py<PyAny>> {
         let bind_args = extract_bind_args(params).map_err(|e| e.to_py_err(py))?;
-        let lowercase =
-            enable_lowercase_column_names.unwrap_or(self.worker.config().enable_lowercase_column_names);
+        let lowercase = enable_lowercase_column_names
+            .unwrap_or(self.worker.config().enable_lowercase_column_names);
         let worker = Arc::clone(&self.worker);
         let reply = py
             .detach(|| {
@@ -4057,7 +4125,8 @@ impl SyncOracleClient {
     ) -> PyResult<Vec<OraclePipelineOutcome>> {
         self.worker.ensure_open().map_err(|e| e.to_py_err(py))?;
         let lowercase = self.worker.config().enable_lowercase_column_names;
-        let ops = extract_pipeline_ops(operations, false, lowercase).map_err(|e| e.to_py_err(py))?;
+        let ops =
+            extract_pipeline_ops(operations, false, lowercase).map_err(|e| e.to_py_err(py))?;
         if ops.is_empty() {
             return Ok(Vec::new());
         }
@@ -4404,8 +4473,8 @@ impl AsyncOracleClient {
     ) -> PyResult<RustDbTaskAwaitable> {
         let bind_args = extract_bind_args(params).map_err(|e| e.to_py_err(py))?;
         let out_spec = extract_out_bind_spec(out_binds).map_err(|e| e.to_py_err(py))?;
-        let lowercase =
-            enable_lowercase_column_names.unwrap_or(self.worker.config().enable_lowercase_column_names);
+        let lowercase = enable_lowercase_column_names
+            .unwrap_or(self.worker.config().enable_lowercase_column_names);
         self.worker.dispatch_async(
             py,
             WorkerCommand::Query {
@@ -4445,8 +4514,8 @@ impl AsyncOracleClient {
         enable_lowercase_column_names: Option<bool>,
     ) -> PyResult<RustDbTaskAwaitable> {
         let bind_args = extract_bind_args(params).map_err(|e| e.to_py_err(py))?;
-        let lowercase =
-            enable_lowercase_column_names.unwrap_or(self.worker.config().enable_lowercase_column_names);
+        let lowercase = enable_lowercase_column_names
+            .unwrap_or(self.worker.config().enable_lowercase_column_names);
         self.worker.dispatch_async(
             py,
             WorkerCommand::Query {
@@ -4483,8 +4552,8 @@ impl AsyncOracleClient {
     ) -> PyResult<RustDbTaskAwaitable> {
         let bind_args = extract_bind_args(params).map_err(|e| e.to_py_err(py))?;
         let out_spec = extract_out_bind_spec(out_binds).map_err(|e| e.to_py_err(py))?;
-        let lowercase =
-            enable_lowercase_column_names.unwrap_or(self.worker.config().enable_lowercase_column_names);
+        let lowercase = enable_lowercase_column_names
+            .unwrap_or(self.worker.config().enable_lowercase_column_names);
         self.worker.dispatch_async(
             py,
             WorkerCommand::Execute {
@@ -4559,8 +4628,8 @@ impl AsyncOracleClient {
         enable_lowercase_column_names: Option<bool>,
     ) -> PyResult<RustDbTaskAwaitable> {
         let bind_args = extract_bind_args(params).map_err(|e| e.to_py_err(py))?;
-        let lowercase =
-            enable_lowercase_column_names.unwrap_or(self.worker.config().enable_lowercase_column_names);
+        let lowercase = enable_lowercase_column_names
+            .unwrap_or(self.worker.config().enable_lowercase_column_names);
         self.worker.dispatch_async(
             py,
             WorkerCommand::QueryArrow {
@@ -4588,7 +4657,8 @@ impl AsyncOracleClient {
     ) -> PyResult<RustDbTaskAwaitable> {
         self.worker.ensure_open().map_err(|e| e.to_py_err(py))?;
         let lowercase = self.worker.config().enable_lowercase_column_names;
-        let ops = extract_pipeline_ops(operations, false, lowercase).map_err(|e| e.to_py_err(py))?;
+        let ops =
+            extract_pipeline_ops(operations, false, lowercase).map_err(|e| e.to_py_err(py))?;
         if ops.is_empty() {
             return spawn_rust_db_task_with_attr(
                 py,

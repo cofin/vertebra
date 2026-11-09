@@ -4,6 +4,7 @@ import io
 import zipfile
 from pathlib import Path
 from typing import Any, ClassVar, Final, Self
+from urllib.parse import unquote, urlparse
 
 import msgspec
 
@@ -366,10 +367,7 @@ class OracleConfig(BaseDatabaseConfig, frozen=True, gc=False):
         if self.topology is not None:
             return OracleConnectDescriptor.from_tns_descriptor(self.topology.to_tns_descriptor())
         has_host_or_service_override = (
-            self.host != "localhost"
-            or self.port != 1521
-            or self.service_name != "FREEPDB1"
-            or self.sid is not None
+            self.host != "localhost" or self.port != 1521 or self.service_name != "FREEPDB1" or self.sid is not None
         )
         if self.dsn and (self.dsn != DEFAULT_ORACLE_DSN or not has_host_or_service_override):
             return OracleConnectDescriptor.from_tns_descriptor(self.dsn)
@@ -409,7 +407,22 @@ class OracleConfig(BaseDatabaseConfig, frozen=True, gc=False):
     @classmethod
     def from_url(cls, url: str, **overrides: Any) -> Self:
         """Construct an `OracleConfig` from an `oracle://` URI."""
-        return cls(dsn=url, **overrides)
+        kwargs: dict[str, Any] = {"dsn": url}
+        if "://" in url:
+            parsed = urlparse(url)
+            if parsed.username and "user" not in overrides:
+                kwargs["user"] = unquote(parsed.username)
+            if parsed.password is not None and "password" not in overrides:
+                kwargs["password"] = unquote(parsed.password)
+            if parsed.hostname and "host" not in overrides:
+                kwargs["host"] = parsed.hostname
+            if parsed.port is not None and "port" not in overrides:
+                kwargs["port"] = int(parsed.port)
+            svc = parsed.path.lstrip("/")
+            if svc and "service_name" not in overrides:
+                kwargs["service_name"] = svc
+        kwargs.update(overrides)
+        return cls(**kwargs)
 
     def pool_key(self) -> tuple[Any, ...]:
         """Return the canonical shared-pool fingerprint tuple."""
