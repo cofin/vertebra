@@ -5,7 +5,7 @@ chapter_id: ch01-crate-and-packaging
 title: Wire root [oracle] extra, Makefile build/test targets, and review area paths
 description: Add [project.optional-dependencies].oracle, uv.sources, and bumpversion entries in root pyproject.toml, wire vertebra-oracle into Makefile (dev, build, py-test, lint, lint-all, oracle-test, oracle-wheel-check), and register src/rs/vertebra-oracle/** and src/py/vertebra/_oracle.pyi under [areas.pyo3-bridge] in .agents/skills/review-core/references/areas.toml.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: static_validation
 depends_on:
@@ -25,18 +25,19 @@ tests: []
 estimated_loc: 95
 plan_revision: 3
 plan_commit: 769302bc
-state_revision: 0
+state_revision: 1
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-09T03:12:15Z"
+last_verified_commit: ff7c85db
+verification_evidence:
+  summary: "make oracle-test, make oracle-wheel-check, make review-check, and pyproject.toml/areas.toml assertions passed."
 created_at: "2026-11-09T00:55:00Z"
-updated_at: "2026-11-09T01:28:30Z"
-commit: null
+updated_at: "2026-11-09T03:12:15Z"
+commit: ff7c85db
 sources:
   - id: root-pyproject
     resource: pyproject.toml
@@ -132,9 +133,9 @@ Commit as `build(oracle): wire root [oracle] extra, Makefile targets, and review
 
 ## Acceptance Criteria
 
-- [ ] `pyproject.toml` declares `[project.optional-dependencies].oracle = ["vertebra-oracle==0.3.0"]`, includes `"vertebra-oracle==0.3.0"` in `all`, configures `[tool.uv.sources].vertebra-oracle`, and registers `[[tool.bumpversion.files]]` entries (R1).
-- [ ] `Makefile` wires `vertebra-oracle` into `dev`, `build`, `py-test`, `lint`, `lint-all`, `oracle-test`, and `oracle-wheel-check`, and `make oracle-wheel-check` exits `0` (R1).
-- [ ] `.agents/skills/review-core/references/areas.toml` includes `"src/rs/vertebra-oracle/**"` and `"src/py/vertebra/_oracle.pyi"` under `[areas.pyo3-bridge].paths`, and `make review-check` exits `0` (R1).
+- [x] `pyproject.toml` declares `[project.optional-dependencies].oracle = ["vertebra-oracle==0.3.0"]`, includes `"vertebra-oracle==0.3.0"` in `all`, configures `[tool.uv.sources].vertebra-oracle`, and registers `[[tool.bumpversion.files]]` entries (R1).
+- [x] `Makefile` wires `vertebra-oracle` into `dev`, `build`, `py-test`, `lint`, `lint-all`, `oracle-test`, and `oracle-wheel-check`, and `make oracle-wheel-check` exits `0` (R1).
+- [x] `.agents/skills/review-core/references/areas.toml` includes `"src/rs/vertebra-oracle/**"` and `"src/py/vertebra/_oracle.pyi"` under `[areas.pyo3-bridge].paths`, and `make review-check` exits `0` (R1).
 
 ## Notes & Discoveries
 

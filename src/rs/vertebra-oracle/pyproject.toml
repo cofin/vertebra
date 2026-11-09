@@ -13,6 +13,9 @@ license = { text = "MIT" }
 python-source = "../../py"
 module-name = "vertebra._oracle"
 features = ["extension-module"]
+include = [
+    { path = "vertebra/_oracle.pyi", format = ["sdist", "wheel"] },
+]
 exclude = [
     "**/py/vertebra/**/*.py",
     "**/py/vertebra/**/*.so",

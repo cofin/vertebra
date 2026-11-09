@@ -141,6 +141,9 @@ mssql = [
 mysql = [
     "vertebra-mysql==0.3.0",
 ]
+oracle = [
+    "vertebra-oracle==0.3.0",
+]
 spanner = [
     "vertebra-spanner==0.3.0",
 ]
@@ -179,6 +182,7 @@ all = [
     "vertebra-duckdb==0.3.0",
     "vertebra-mssql==0.3.0",
     "vertebra-mysql==0.3.0",
+    "vertebra-oracle==0.3.0",
     "vertebra-spanner==0.3.0",
     "vertebra-storage==0.3.0",
     "rloop>=0.5.0; sys_platform != 'win32'",
@@ -255,6 +259,7 @@ vertebra-bundler = { path = "src/rs/vertebra-bundler", editable = true }
 vertebra-duckdb = { path = "src/rs/vertebra-duckdb", editable = true }
 vertebra-mssql = { path = "src/rs/vertebra-mssql", editable = true }
 vertebra-mysql = { path = "src/rs/vertebra-mysql", editable = true }
+vertebra-oracle = { path = "src/rs/vertebra-oracle", editable = true }
 vertebra-spanner = { path = "src/rs/vertebra-spanner", editable = true }
 vertebra-storage = { path = "src/rs/vertebra-storage", editable = true }
 
@@ -418,6 +423,11 @@ replace = 'vertebra-mysql=={new_version}'
 
 [[tool.bumpversion.files]]
 filename = "pyproject.toml"
+search = 'vertebra-oracle=={current_version}'
+replace = 'vertebra-oracle=={new_version}'
+
+[[tool.bumpversion.files]]
+filename = "pyproject.toml"
 search = 'vertebra-spanner=={current_version}'
 replace = 'vertebra-spanner=={new_version}'
 
@@ -458,6 +468,11 @@ replace = 'version = "{new_version}"'
 
 [[tool.bumpversion.files]]
 filename = "src/rs/vertebra-mysql/pyproject.toml"
+search = 'version = "{current_version}"'
+replace = 'version = "{new_version}"'
+
+[[tool.bumpversion.files]]
+filename = "src/rs/vertebra-oracle/pyproject.toml"
 search = 'version = "{current_version}"'
 replace = 'version = "{new_version}"'
 

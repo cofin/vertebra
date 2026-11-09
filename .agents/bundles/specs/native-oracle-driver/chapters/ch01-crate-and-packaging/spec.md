@@ -5,18 +5,18 @@ chapter_id: ch01-crate-and-packaging
 title: "Chapter 01: Rust Crate Scaffold, Build Matrix, and Optional Wheel Wiring"
 description: Scaffold the standalone src/rs/vertebra-oracle PyO3 crate wrapping official pure-Rust oracledb =26.0.0-beta.5 and crate-local arrow 59, register the workspace member and vertebra._oracle wheel/stub, and wire root optional dependencies, Makefile targets, and review area manifests.
 status: stable
-state: in_progress
+state: completed
 planning_status: complete
 depends_on_chapters: []
 replan_trigger: null
-current_task: "native-oracle-driver:ch01:t03"
+current_task: null
 plan_revision: 3
 plan_commit: 769302bc
-state_revision: 2
-last_verified_checkpoint: null
+state_revision: 3
+last_verified_checkpoint: ff7c85db
 last_reviewed_commit: null
 created_at: "2026-11-05T00:00:00Z"
-updated_at: "2026-11-09T01:28:30Z"
+updated_at: "2026-11-09T03:12:15Z"
 generated:
   by: flow-plan
   at: "2026-11-09T01:15:00Z"
@@ -153,8 +153,8 @@ Progress: `[0/6 files documented]` (`src/py/vertebra/_oracle.pyi` module docstri
 ## 5. Implementation Plan
 
 - [x] [bcfb9a8c] native-oracle-driver:ch01:t01 — Scaffold vertebra-oracle Cargo manifest, build script, and free-threaded PyO3 module (tasks/t01-crate-and-pymodule-scaffold.md)
-- [x] native-oracle-driver:ch01:t02 — Register workspace member, Maturin wheel manifest, and _oracle.pyi type stub (tasks/t02-workspace-lock-and-wheel-stub.md)
-- [ ] native-oracle-driver:ch01:t03 — Wire root [oracle] extra, Makefile build/test targets, and review area paths (tasks/t03-makefile-extra-and-review-areas.md)
+- [x] [ff7c85db] native-oracle-driver:ch01:t02 — Register workspace member, Maturin wheel manifest, and _oracle.pyi type stub (tasks/t02-workspace-lock-and-wheel-stub.md)
+- [x] native-oracle-driver:ch01:t03 — Wire root [oracle] extra, Makefile build/test targets, and review area paths (tasks/t03-makefile-extra-and-review-areas.md)
 
 **Chapter Recovery Checkpoint:** `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-oracle --locked && cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-oracle --all-targets --locked -- -D warnings && make dev && make oracle-test && make oracle-wheel-check && make review-check && uv run --no-sync python -m mypy.stubtest vertebra._oracle` exits `0`.
 

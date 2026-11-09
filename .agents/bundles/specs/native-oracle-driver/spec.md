@@ -14,20 +14,20 @@ chapters:
   - ch05-pipelines-tenancy-and-apex
   - ch06-notifications-and-embeddings
   - ch07-conformance-and-okf-synthesis
-current_chapter: ch01-crate-and-packaging
-current_task: "native-oracle-driver:ch01:t03"
+current_chapter: ch02-connect-auth-and-error-hierarchy
+current_task: "native-oracle-driver:ch02:t01"
 parent_prd: native-data-platform
 research:
   - ../native-data-platform/research/rust-driver-crates_20261103.md
   - ../native-data-platform/research/gap-analysis_20261103.md
 plan_revision: 3
 plan_commit: 769302bc
-state_revision: 0
-last_verified_checkpoint: null
+state_revision: 1
+last_verified_checkpoint: ff7c85db
 last_reviewed_chapter: null
 last_reviewed_commit: null
 created_at: "2026-11-05T00:00:00Z"
-updated_at: "2026-11-09T01:28:30Z"
+updated_at: "2026-11-09T03:12:15Z"
 generated:
   by: flow-plan
   at: "2026-11-09T01:28:30Z"
@@ -209,8 +209,8 @@ Progress: `[0/6 files documented]` (owned by [ch07-conformance-and-okf-synthesis
 
 Every worksheet (`22` total across `7` chapters) executes in one bounded invocation and produces one signed local conventional commit (`<= 3` production files, `read_set <= 6`, `estimated_loc <= 250`).
 
-- [~] ch01-crate-and-packaging — Rust Crate Scaffold, Build Matrix, and Optional Wheel Wiring (chapters/ch01-crate-and-packaging/spec.md)
-- [ ] ch02-connect-auth-and-error-hierarchy — TNS/Wallet/Token Dialer, Worker Bridge, and SQLSTATE Error Mapping (chapters/ch02-connect-auth-and-error-hierarchy/spec.md)
+- [x] ch01-crate-and-packaging — Rust Crate Scaffold, Build Matrix, and Optional Wheel Wiring (chapters/ch01-crate-and-packaging/spec.md)
+- [~] ch02-connect-auth-and-error-hierarchy — TNS/Wallet/Token Dialer, Worker Bridge, and SQLSTATE Error Mapping (chapters/ch02-connect-auth-and-error-hierarchy/spec.md)
 - [ ] ch03-types-bind-and-arrow-shm — Type Codecs, Positional/Named Binds, RETURNING, and Arrow 59 SHM Bridge (chapters/ch03-types-bind-and-arrow-shm/spec.md)
 - [ ] ch04-pools-drcp-and-session-piggyback — Native Sync/Async Pools, DRCP Purity/Tagging, and TTC Session Piggyback (chapters/ch04-pools-drcp-and-session-piggyback/spec.md)
 - [ ] ch05-pipelines-tenancy-and-apex — Transaction/Savepoint Pipelines, VPD Trusted Tenancy, and APEX Session Bridge (chapters/ch05-pipelines-tenancy-and-apex/spec.md)
