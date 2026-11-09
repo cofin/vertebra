@@ -3,24 +3,31 @@
 from __future__ import annotations
 
 import asyncio
+import datetime
 import io
 import threading
 import time
+import uuid
 import zipfile
+from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 import pytest
 
 import vertebra._oracle as _oracle
+from vertebra._vertebra import VectorView
 from vertebra.db.adapters.oracle.config import (
     DEFAULT_ORACLE_DSN,
     OracleConfig,
     OracleConnectDescriptor,
     OracleDrcpConfig,
+    OracleDriverFeatures,
     OracleTopologyConfig,
     OracleWallet,
 )
+from vertebra.db.adapters.oracle.core import OracleCore
 from vertebra.db.driver import (
+    DataError,
     InterfaceError,
     ProgrammingError,
     QueryCancelledError,
@@ -287,4 +294,163 @@ async def test_async_oracle_client_drainer_cancel_and_lifecycle() -> None:
     assert client.closed is True
     with pytest.raises(InterfaceError, match="closed"):
         await client.execute("SELECT 1 FROM DUAL")
+
+
+def test_oracle_column_and_query_result_pyclasses() -> None:
+    """Verify OracleColumn and OracleQueryResult PyO3 classes, methods, and immutability."""
+    col = _oracle.OracleColumn("id", "NUMBER", 2, 22, 10, 0, False)
+    assert col.name == "id"
+    assert col.type_code == 2
+    assert col.type_name == "NUMBER"
+    assert col.oracle_type == "NUMBER"
+    assert col.db_size == 22
+    assert col.precision == 10
+    assert col.scale == 0
+    assert col.nullable is False
+
+    res = _oracle.OracleQueryResult([col], [(1,)], rowcount=1, out_binds=(42,), lastrowid="AAAR3sAAEAAAACXAAA")
+    assert len(res) == 1
+    assert res.is_empty() is False
+    assert res.rowcount == 1
+    assert res.lastrowid == "AAAR3sAAEAAAACXAAA"
+    assert res.out_binds == (42,)
+    assert len(res.columns) == 1
+    assert res.columns[0].name == "id"
+    assert res.rows == [(1,)]
+    assert res.to_dicts() == [{"id": 1}]
+
+    empty_res = _oracle.OracleQueryResult([col], [], rowcount=0)
+    assert len(empty_res) == 0
+    assert empty_res.is_empty() is True
+
+    attr_name = "name"
+    with pytest.raises(AttributeError):
+        setattr(col, attr_name, "x")
+
+
+@pytest.mark.parametrize(
+    ("raw_val", "col_type", "expected_val"),
+    [
+        (42, "NUMBER", 42),
+        (Decimal("12345.67"), "NUMBER", Decimal("12345.67")),
+        (3.14159, "BINARY_DOUBLE", 3.14159),
+        ("hello UTF-8 \u2603", "VARCHAR2", "hello UTF-8 \u2603"),
+        (b"\x00\x01\x02\xff", "RAW", b"\x00\x01\x02\xff"),
+        (True, "BOOLEAN", True),
+        (False, "BOOLEAN", False),
+        (datetime.date(2026, 11, 9), "DATE", datetime.date(2026, 11, 9)),
+        (
+            datetime.datetime(2026, 11, 9, 14, 30, 45, 123456),
+            "TIMESTAMP",
+            datetime.datetime(2026, 11, 9, 14, 30, 45, 123456),
+        ),
+        (
+            datetime.datetime(
+                2026,
+                11,
+                9,
+                14,
+                30,
+                45,
+                123000,
+                tzinfo=datetime.timezone(datetime.timedelta(hours=5, minutes=30)),
+            ),
+            "TIMESTAMP WITH TIME ZONE",
+            datetime.datetime(
+                2026,
+                11,
+                9,
+                14,
+                30,
+                45,
+                123000,
+                tzinfo=datetime.timezone(datetime.timedelta(hours=5, minutes=30)),
+            ),
+        ),
+        ("inline clob payload", "CLOB", "inline clob payload"),
+        (b"inline blob payload", "BLOB", b"inline blob payload"),
+    ],
+)
+def test_oracle_scalar_and_temporal_codecs_roundtrip(
+    raw_val: Any,
+    col_type: str,
+    expected_val: Any,
+) -> None:
+    """Verify scalar, temporal, boolean, and inline LOB round-trip coercion."""
+    features = OracleDriverFeatures(fetch_decimals=(col_type == "NUMBER" and isinstance(raw_val, Decimal)))
+    coerced_bind = OracleCore.coerce_bind_parameter(raw_val, features=features)
+    decoded_cell = OracleCore.coerce_row_cell(coerced_bind, col_type, features=features)
+    assert decoded_cell == expected_val
+    assert type(decoded_cell) is type(expected_val)
+    if isinstance(expected_val, datetime.datetime) and expected_val.tzinfo is not None:
+        assert decoded_cell.utcoffset() == datetime.timedelta(hours=5, minutes=30)
+
+
+def test_oracle_oson_codec_roundtrip_and_invalid_magic() -> None:
+    """Verify OSON 0xFF 'J' 'Z' 0x01 round-trip and DataError on corrupted header."""
+    payload = {"tenant": "acme", "scores": [1, 2, 3]}
+    encoded = OracleCore.encode_oson(payload)
+    assert encoded.startswith(b"\xffJZ\x01")
+    decoded = OracleCore.decode_oson(encoded)
+    assert decoded == payload
+
+    with pytest.raises((DataError, ValueError)):
+        OracleCore.decode_oson(b"\xffJZ\x99corrupted")
+
+
+@pytest.mark.parametrize(
+    ("dtype", "values", "expected_dtype_name", "expected_dims", "expected_list"),
+    [
+        ("FLOAT32", [1.5, -2.25, 3.0], "float32", 3, [1.5, -2.25, 3.0]),
+        ("FLOAT64", [1.125, -0.5], "float64", 2, [1.125, -0.5]),
+        ("INT8", [-128, 0, 127], "int8", 3, [-128, 0, 127]),
+        ("BINARY", b"\xaa\x55", "binary", 16, [170, 85]),
+    ],
+)
+def test_oracle_vector_codec_all_dtypes_and_return_formats(
+    dtype: Any,
+    values: Any,
+    expected_dtype_name: str,
+    expected_dims: int,
+    expected_list: list[Any],
+) -> None:
+    """Verify Oracle 26ai 0xDB 0x01 VECTOR codec across all dtypes and return formats."""
+    encoded = OracleCore.encode_vector(values, dtype=dtype)
+    assert encoded.startswith(OracleCore.ORACLE_VECTOR_MAGIC)
+    assert OracleCore.ORACLE_VECTOR_MAGIC == b"\xdb\x01"
+
+    vv = OracleCore.decode_vector(encoded, return_format="vector_view")
+    assert isinstance(vv, VectorView)
+    assert vv.dtype == expected_dtype_name
+    assert vv.dimensions == expected_dims
+    if expected_dtype_name in ("float32", "int8"):
+        assert vv.to_list() == expected_list
+
+    as_list = OracleCore.decode_vector(encoded, return_format="list")
+    assert as_list == expected_list
+
+    as_bytes = OracleCore.decode_vector(encoded, return_format="bytes")
+    assert isinstance(as_bytes, bytes)
+    assert len(as_bytes) > 0
+
+
+def test_oracle_uuid_raw16_feature_toggle() -> None:
+    """Verify RAW(16) <-> uuid.UUID conversion governed by enable_uuid_binary."""
+    u = uuid.uuid4()
+    enabled = OracleDriverFeatures(enable_uuid_binary=True)
+    disabled = OracleDriverFeatures(enable_uuid_binary=False)
+
+    bound_bytes = OracleCore.coerce_bind_parameter(u, features=enabled)
+    assert isinstance(bound_bytes, bytes)
+    assert len(bound_bytes) == 16
+    assert bound_bytes == u.bytes
+
+    hydrated = OracleCore.coerce_row_cell(u.bytes, "RAW", features=enabled)
+    assert isinstance(hydrated, uuid.UUID)
+    assert hydrated == u
+
+    raw_passthrough = OracleCore.coerce_row_cell(u.bytes, "RAW", features=disabled)
+    assert isinstance(raw_passthrough, bytes)
+    assert raw_passthrough == u.bytes
+
 

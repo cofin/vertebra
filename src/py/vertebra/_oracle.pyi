@@ -1,11 +1,64 @@
 """Type stubs for the vertebra._oracle native extension module."""
 
-from collections.abc import Awaitable, Mapping
-from typing import final
+from collections.abc import Awaitable, Mapping, Sequence
+from typing import Any, final
 
 __version__: str
 FREE_THREADED: bool
 GIL_USED: bool
+
+@final
+class OracleColumn:
+    @property
+    def name(self) -> str: ...
+    @property
+    def type_code(self) -> int: ...
+    @property
+    def type_name(self) -> str: ...
+    @property
+    def oracle_type(self) -> str: ...
+    @property
+    def db_size(self) -> int | None: ...
+    @property
+    def precision(self) -> int | None: ...
+    @property
+    def scale(self) -> int | None: ...
+    @property
+    def nullable(self) -> bool: ...
+    def __new__(
+        cls,
+        name: str,
+        type_name: str,
+        type_code: int = 0,
+        db_size: int | None = None,
+        precision: int | None = None,
+        scale: int | None = None,
+        nullable: bool = True,
+    ) -> OracleColumn: ...
+
+@final
+class OracleQueryResult:
+    @property
+    def columns(self) -> tuple[OracleColumn, ...]: ...
+    @property
+    def rows(self) -> list[tuple[Any, ...]]: ...
+    @property
+    def rowcount(self) -> int: ...
+    @property
+    def lastrowid(self) -> str | None: ...
+    @property
+    def out_binds(self) -> Any: ...
+    def __new__(
+        cls,
+        columns: Sequence[OracleColumn],
+        rows: Sequence[tuple[Any, ...]],
+        rowcount: int = 0,
+        out_binds: Any = None,
+        lastrowid: str | None = None,
+    ) -> OracleQueryResult: ...
+    def to_dicts(self) -> list[dict[str, Any]]: ...
+    def __len__(self) -> int: ...
+    def is_empty(self) -> bool: ...
 
 @final
 class SyncOracleClient:
@@ -117,6 +170,8 @@ __all__ = [
     "AsyncOracleClient",
     "FREE_THREADED",
     "GIL_USED",
+    "OracleColumn",
+    "OracleQueryResult",
     "SyncOracleClient",
     "__version__",
 ]

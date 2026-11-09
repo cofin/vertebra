@@ -5,19 +5,19 @@ chapter_id: ch03-types-bind-and-arrow-shm
 title: "Chapter 03: Type Codecs, Positional/Named Binds, RETURNING, and Arrow 59 SHM Bridge"
 description: "Implement scalar, temporal, LOB, OSON, and VECTOR codecs, positional and named bind lowering, single-round-trip DML RETURNING out-binds, lowercase column normalization, and the Arrow 59 to VTBARROW SHM data plane."
 status: stable
-state: planned
+state: in_progress
 planning_status: complete
 depends_on_chapters:
   - ch02-connect-auth-and-error-hierarchy
 replan_trigger: null
-current_task: "native-oracle-driver:ch03:t01"
+current_task: "native-oracle-driver:ch03:t02"
 plan_revision: 3
 plan_commit: 769302bc
-state_revision: 0
+state_revision: 1
 last_verified_checkpoint: null
 last_reviewed_commit: null
 created_at: "2026-11-09T00:56:00Z"
-updated_at: "2026-11-09T01:28:30Z"
+updated_at: "2026-11-09T14:51:30Z"
 generated:
   by: flow-plan
   at: "2026-11-09T01:15:00Z"
@@ -200,8 +200,8 @@ Progress: `[0/6 files documented]` (all user documentation and OKF v0.2 knowledg
 
 ## 5. Implementation Plan
 
-- [ ] native-oracle-driver:ch03:t01 — Implement OracleColumn, OracleQueryResult, and scalar, temporal, inline LOB, OSON, and VECTOR codecs across Rust and Python (tasks/t01-scalar-lob-oson-and-vector-codecs.md)
-- [ ] native-oracle-driver:ch03:t02 — Implement positional and named bind lowering, single-round-trip DML RETURNING out-bind capture, execute_many batching, and enable_lowercase_column_names normalization (tasks/t02-binds-returning-and-lowercase-columns.md)
+- [x] native-oracle-driver:ch03:t01 — Implement OracleColumn, OracleQueryResult, and scalar, temporal, inline LOB, OSON, and VECTOR codecs across Rust and Python (tasks/t01-scalar-lob-oson-and-vector-codecs.md)
+- [~] native-oracle-driver:ch03:t02 — Implement positional and named bind lowering, single-round-trip DML RETURNING out-bind capture, execute_many batching, and enable_lowercase_column_names normalization (tasks/t02-binds-returning-and-lowercase-columns.md)
 - [ ] native-oracle-driver:ch03:t03 — Implement crate-local arrow 59 batches_to_arrow_ipc to construct_py_arrow_cursor SHM bridge and wire select_to_arrow, stream_arrow_batches, and load_from_arrow (tasks/t03-arrow59-shm-and-load-from-arrow.md)
 
 **Chapter Recovery Checkpoint:**

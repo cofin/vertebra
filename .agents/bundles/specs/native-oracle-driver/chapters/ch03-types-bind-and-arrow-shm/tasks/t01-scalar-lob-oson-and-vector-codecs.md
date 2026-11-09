@@ -6,7 +6,7 @@ id: "native-oracle-driver:ch03:t01"
 title: "Implement scalar, temporal, LOB, OSON, and VECTOR codecs and export OracleColumn and OracleQueryResult"
 description: "Define OracleColumn and OracleQueryResult once in src/rs/vertebra-oracle/src/types.rs and implement bidirectional NUMBER, VARCHAR2/NVARCHAR2/CHAR, RAW, DATE/TIMESTAMP/TSTZ, BOOLEAN, inline CLOB/BLOB, OSON, and VECTOR (0xDB 0x01 FLOAT32, FLOAT64, INT8, BINARY) codecs across Rust and Python."
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -26,11 +26,11 @@ tests:
 estimated_loc: 225
 plan_revision: 3
 plan_commit: 769302bc
-state_revision: 0
+state_revision: 1
 commit_sha: null
-completed_at: null
+completed_at: "2026-11-09T14:51:30Z"
 created_at: "2026-11-09T00:56:00Z"
-updated_at: "2026-11-09T01:28:30Z"
+updated_at: "2026-11-09T14:51:30Z"
 generated:
   by: flow-plan
   at: "2026-11-09T01:15:00Z"
@@ -295,10 +295,10 @@ uv run --no-sync pytest src/py/tests/unit/db/test_oracle_adapter.py -k "column o
 
 ## 7. Acceptance Criteria
 
-- [ ] `OracleColumn` and `OracleQueryResult` are defined once in `src/rs/vertebra-oracle/src/types.rs` and registered on `vertebra._oracle` as `frozen, immutable_type` PyO3 classes with `to_dicts(py)`, `__len__`, and `is_empty()`.
-- [ ] `NUMBER` (`int`, `float`, `Decimal`), `VARCHAR2`/`NVARCHAR2`/`CHAR`, `RAW`, `DATE`, `TIMESTAMP`, `TIMESTAMP WITH TIME ZONE`, `BOOLEAN`, inline `CLOB`/`BLOB`, `OSON` (`0xFF 'J' 'Z' 0x01`), and `VECTOR` (`0xDB 0x01` `FLOAT32`, `FLOAT64`, `INT8`, `BINARY`) round-trip cleanly across Rust and Python.
-- [ ] Corrupted `OSON` or `VECTOR` binary frames raise deterministic `DataError` / `ValueError` exceptions without panicking.
-- [ ] All unit tests in `src/py/tests/unit/db/test_oracle_adapter.py` pass.
+- [x] `OracleColumn` and `OracleQueryResult` are defined once in `src/rs/vertebra-oracle/src/types.rs` and registered on `vertebra._oracle` as `frozen, immutable_type` PyO3 classes with `to_dicts(py)`, `__len__`, and `is_empty()`.
+- [x] `NUMBER` (`int`, `float`, `Decimal`), `VARCHAR2`/`NVARCHAR2`/`CHAR`, `RAW`, `DATE`, `TIMESTAMP`, `TIMESTAMP WITH TIME ZONE`, `BOOLEAN`, inline `CLOB`/`BLOB`, `OSON` (`0xFF 'J' 'Z' 0x01`), and `VECTOR` (`0xDB 0x01` `FLOAT32`, `FLOAT64`, `INT8`, `BINARY`) round-trip cleanly across Rust and Python.
+- [x] Corrupted `OSON` or `VECTOR` binary frames raise deterministic `DataError` / `ValueError` exceptions without panicking.
+- [x] All unit tests in `src/py/tests/unit/db/test_oracle_adapter.py` pass.
 
 ## 8. Notes & Discoveries
 

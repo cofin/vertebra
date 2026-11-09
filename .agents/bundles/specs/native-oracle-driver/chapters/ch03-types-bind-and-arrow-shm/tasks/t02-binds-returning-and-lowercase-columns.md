@@ -6,7 +6,7 @@ id: "native-oracle-driver:ch03:t02"
 title: "Implement positional and named bind lowering, DML RETURNING out-binds, execute_many, and lowercase column normalization"
 description: "Wire OracleColumn and OracleQueryResult into SyncOracleClient and AsyncOracleClient (execute, execute_many, query, query_one, query_arrow) and _oracle.pyi, implement positional (:1..:n) and named (:name) bind lowering, single-round-trip DML RETURNING INTO out-bind capture, and enable_lowercase_column_names (True default) normalization."
 status: stable
-state: pending
+state: in_progress
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:

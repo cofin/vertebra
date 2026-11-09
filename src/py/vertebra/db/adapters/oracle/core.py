@@ -1,18 +1,26 @@
 """Oracle TNS packet helpers, tnsnames.ora parsing, TTC session attributes, and 26ai VECTOR/OSON codecs."""
 
+import datetime
+import decimal
 import re
 import struct
-from collections.abc import Sequence
-from typing import Any
+import uuid
+from collections.abc import Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Final, Literal
 
 import msgspec
 
+from vertebra._vertebra import VectorView
+from vertebra.db.driver import DataError
 from vertebra.db.driver._common import ORACLE_DIALECT_TAG
 from vertebra.db.rls import TenantScopeConfig
 from vertebra.typing import VertebraError
 from vertebra.utils.module_loader import import_optional
 from vertebra.utils.serializers import decode_json, encode_json_bytes
 from vertebra.utils.text import validate_identifier
+
+if TYPE_CHECKING:
+    from vertebra.db.adapters.oracle.config import OracleDriverFeatures
 
 __all__ = (
     "ORACLE_DIALECT_TAG",
@@ -68,6 +76,8 @@ _DEFAULT_TENANT_SCOPE = TenantScopeConfig()
 
 class OracleCore:
     """TNS packet helpers, TTC session attributes, and Oracle 26ai `VECTOR` and `OSON` binary codecs."""
+
+    ORACLE_VECTOR_MAGIC: Final[bytes] = b"\xdb\x01"
 
     @staticmethod
     def build_session_context_sql(
@@ -332,10 +342,12 @@ class OracleCore:
             try:
                 return list(native.decode_oracle_vector_f32(raw))
             except ValueError as exc:
-                raise VertebraError(str(exc)) from exc
+                raise OracleCore._data_error(str(exc)) from exc
         dims, body = OracleCore._decode_vector_header(raw, ORACLE_VECTOR_FMT_F32)
         if len(body) != dims * 4:
-            raise VertebraError(f"Oracle FLOAT32 VECTOR payload length mismatch: expected {dims * 4}, got {len(body)}")
+            raise OracleCore._data_error(
+                f"Oracle FLOAT32 VECTOR payload length mismatch: expected {dims * 4}, got {len(body)}",
+            )
         return list(struct.unpack(f">{dims}f", body))
 
     @staticmethod
@@ -356,10 +368,12 @@ class OracleCore:
             try:
                 return list(native.decode_oracle_vector_f64(raw))
             except ValueError as exc:
-                raise VertebraError(str(exc)) from exc
+                raise OracleCore._data_error(str(exc)) from exc
         dims, body = OracleCore._decode_vector_header(raw, ORACLE_VECTOR_FMT_F64)
         if len(body) != dims * 8:
-            raise VertebraError(f"Oracle FLOAT64 VECTOR payload length mismatch: expected {dims * 8}, got {len(body)}")
+            raise OracleCore._data_error(
+                f"Oracle FLOAT64 VECTOR payload length mismatch: expected {dims * 8}, got {len(body)}",
+            )
         return list(struct.unpack(f">{dims}d", body))
 
     @staticmethod
@@ -380,10 +394,12 @@ class OracleCore:
             try:
                 return list(native.decode_oracle_vector_i8(raw))
             except ValueError as exc:
-                raise VertebraError(str(exc)) from exc
+                raise OracleCore._data_error(str(exc)) from exc
         dims, body = OracleCore._decode_vector_header(raw, ORACLE_VECTOR_FMT_I8)
         if len(body) != dims:
-            raise VertebraError(f"Oracle INT8 VECTOR payload length mismatch: expected {dims}, got {len(body)}")
+            raise OracleCore._data_error(
+                f"Oracle INT8 VECTOR payload length mismatch: expected {dims}, got {len(body)}",
+            )
         return list(struct.unpack(f">{dims}b", body))
 
     @staticmethod
@@ -405,12 +421,158 @@ class OracleCore:
             try:
                 return bytes(native.decode_oracle_vector_binary(raw))
             except ValueError as exc:
-                raise VertebraError(str(exc)) from exc
+                raise OracleCore._data_error(str(exc)) from exc
         dims, body = OracleCore._decode_vector_header(raw, ORACLE_VECTOR_FMT_BINARY)
         expected = dims // 8
         if len(body) != expected:
-            raise VertebraError(f"Oracle BINARY VECTOR payload length mismatch: expected {expected}, got {len(body)}")
+            raise OracleCore._data_error(
+                f"Oracle BINARY VECTOR payload length mismatch: expected {expected}, got {len(body)}",
+            )
         return bytes(body)
+
+    @staticmethod
+    def encode_vector(
+        values: Sequence[float | int] | bytes | VectorView,
+        *,
+        dtype: Literal["FLOAT32", "FLOAT64", "INT8", "BINARY"] = "FLOAT32",
+    ) -> bytes:
+        """Encode a `VectorView`, numeric sequence, or packed byte buffer into an Oracle `0xDB 0x01` frame."""
+        if isinstance(values, VectorView):
+            vv_dtype = values.dtype.lower()
+            raw_b = values.to_bytes()
+            dims = values.dimensions
+            if vv_dtype == "float32":
+                return OracleCore.encode_vector_f32(values.to_list())
+            if vv_dtype == "float64":
+                vals_f64 = struct.unpack(f"={dims}d", raw_b)
+                return OracleCore.encode_vector_f64(vals_f64)
+            if vv_dtype == "int8":
+                vals_i8 = struct.unpack(f"={dims}b", raw_b)
+                return OracleCore.encode_vector_i8(vals_i8)
+            if vv_dtype == "binary":
+                return OracleCore.encode_vector_binary(raw_b)
+            raise OracleCore._data_error(f"Unsupported VectorView dtype: {vv_dtype}")
+
+        dtype_upper = dtype.upper()
+        if dtype_upper == "FLOAT32":
+            if isinstance(values, (bytes, bytearray, memoryview)):
+                raw = bytes(values)
+                if raw.startswith(OracleCore.ORACLE_VECTOR_MAGIC):
+                    OracleCore.decode_vector_f32(raw)
+                    return raw
+                if len(raw) % 4 != 0:
+                    raise OracleCore._data_error("FLOAT32 byte buffer length must be a multiple of 4")
+                count = len(raw) // 4
+                return OracleCore.encode_vector_f32(struct.unpack(f"={count}f", raw))
+            return OracleCore.encode_vector_f32([float(v) for v in values])
+        if dtype_upper == "FLOAT64":
+            if isinstance(values, (bytes, bytearray, memoryview)):
+                raw = bytes(values)
+                if raw.startswith(OracleCore.ORACLE_VECTOR_MAGIC):
+                    OracleCore.decode_vector_f64(raw)
+                    return raw
+                if len(raw) % 8 != 0:
+                    raise OracleCore._data_error("FLOAT64 byte buffer length must be a multiple of 8")
+                count = len(raw) // 8
+                return OracleCore.encode_vector_f64(struct.unpack(f"={count}d", raw))
+            return OracleCore.encode_vector_f64([float(v) for v in values])
+        if dtype_upper == "INT8":
+            if isinstance(values, (bytes, bytearray, memoryview)):
+                raw = bytes(values)
+                if raw.startswith(OracleCore.ORACLE_VECTOR_MAGIC):
+                    OracleCore.decode_vector_i8(raw)
+                    return raw
+                return OracleCore.encode_vector_i8(struct.unpack(f"={len(raw)}b", raw))
+            return OracleCore.encode_vector_i8([int(v) for v in values])
+        if dtype_upper == "BINARY":
+            if isinstance(values, (bytes, bytearray, memoryview)):
+                raw = bytes(values)
+                if raw.startswith(OracleCore.ORACLE_VECTOR_MAGIC):
+                    OracleCore.decode_vector_binary(raw)
+                    return raw
+                return OracleCore.encode_vector_binary(raw)
+            return OracleCore.encode_vector_binary(bytes(int(v) & 0xFF for v in values))
+        raise OracleCore._data_error(f"Unsupported Oracle VECTOR dtype: {dtype}")
+
+    @staticmethod
+    def decode_vector(
+        payload: bytes | VectorView | Sequence[float | int],
+        *,
+        return_format: Literal["vector_view", "list", "bytes"] = "vector_view",
+    ) -> VectorView | list[float] | list[int] | bytes:
+        """Decode an Oracle `0xDB 0x01` `VECTOR` payload into a `VectorView`, `list`, or `bytes`."""
+        if isinstance(payload, VectorView):
+            if return_format == "vector_view":
+                return payload
+            if return_format == "bytes":
+                return payload.to_bytes()
+            if return_format == "list":
+                vv_dtype = payload.dtype.lower()
+                if vv_dtype == "float32":
+                    return payload.to_list()
+                raw_b = payload.to_bytes()
+                dims = payload.dimensions
+                if vv_dtype == "float64":
+                    return list(struct.unpack(f"={dims}d", raw_b))
+                if vv_dtype == "int8":
+                    return list(struct.unpack(f"={dims}b", raw_b))
+                if vv_dtype == "binary":
+                    return list(raw_b)
+                return list(memoryview(payload).tolist())
+            raise OracleCore._data_error(f"Unsupported vector return_format: {return_format}")
+
+        if isinstance(payload, (bytes, bytearray, memoryview)):
+            raw = bytes(payload)
+            if len(raw) < 8 or raw[:2] != OracleCore.ORACLE_VECTOR_MAGIC:
+                raise OracleCore._data_error("Invalid Oracle VECTOR 0xDB 0x01 header")
+            fmt = raw[2]
+            dims = struct.unpack(">I", raw[4:8])[0]
+            if fmt == ORACLE_VECTOR_FMT_F32:
+                vals_f32 = OracleCore.decode_vector_f32(raw)
+                if return_format == "list":
+                    return vals_f32
+                if return_format == "bytes":
+                    return raw[8:]
+                if return_format == "vector_view":
+                    return VectorView.from_f32(vals_f32, normalize=False)
+            elif fmt == ORACLE_VECTOR_FMT_F64:
+                vals_f64 = OracleCore.decode_vector_f64(raw)
+                if return_format == "list":
+                    return vals_f64
+                if return_format == "bytes":
+                    return raw[8:]
+                if return_format == "vector_view":
+                    native_f64 = struct.pack(f"={dims}d", *vals_f64)
+                    return VectorView.from_bytes(native_f64, dims, dtype="float64")
+            elif fmt == ORACLE_VECTOR_FMT_I8:
+                vals_i8 = OracleCore.decode_vector_i8(raw)
+                if return_format == "list":
+                    return vals_i8
+                if return_format == "bytes":
+                    return raw[8:]
+                if return_format == "vector_view":
+                    native_i8 = struct.pack(f"={dims}b", *vals_i8)
+                    return VectorView.from_bytes(native_i8, dims, dtype="int8", scale=1.0)
+            elif fmt == ORACLE_VECTOR_FMT_BINARY:
+                packed_bin = OracleCore.decode_vector_binary(raw)
+                if return_format == "list":
+                    return list(packed_bin)
+                if return_format == "bytes":
+                    return packed_bin
+                if return_format == "vector_view":
+                    return VectorView.from_bytes(packed_bin, dims, dtype="binary")
+            else:
+                raise OracleCore._data_error(f"Unsupported Oracle VECTOR format code: {fmt}")
+            raise OracleCore._data_error(f"Unsupported vector return_format: {return_format}")
+
+        seq_vals = [float(v) for v in payload]
+        if return_format == "list":
+            return seq_vals
+        if return_format == "bytes":
+            return struct.pack(f">{len(seq_vals)}f", *seq_vals)
+        if return_format == "vector_view":
+            return VectorView.from_f32(seq_vals, normalize=False)
+        raise OracleCore._data_error(f"Unsupported vector return_format: {return_format}")
 
     @staticmethod
     def encode_oson_payload(json_bytes: bytes) -> bytes:
@@ -422,19 +584,21 @@ class OracleCore:
 
     @staticmethod
     def decode_oson_payload(payload: bytes | bytearray | memoryview) -> bytes:
-        """Validate an Oracle 26ai `OSON` binary header and return the underlying JSON bytes."""
+        """Validate an Oracle 26ai `OSON` binary header (`\\xffJZ\\x01`) and return the underlying JSON bytes."""
         raw = bytes(payload)
+        if len(raw) < 8 or raw[:3] != OSON_MAGIC or raw[3] != 0x01:
+            raise OracleCore._data_error("Invalid Oracle OSON magic/version header (expected \\xff\\x4a\\x5a\\x01)")
         native = import_optional("vertebra._vertebra")
         if native is not None and hasattr(native, "decode_oson_payload"):
             try:
                 return bytes(native.decode_oson_payload(raw))
             except ValueError as exc:
-                raise VertebraError(str(exc)) from exc
-        if len(raw) < 8 or raw[:3] != OSON_MAGIC:
-            raise VertebraError("Invalid Oracle OSON magic header (expected \\xff\\x4a\\x5a)")
+                raise OracleCore._data_error(str(exc)) from exc
         length = struct.unpack(">I", raw[4:8])[0]
         if len(raw) < 8 + length:
-            raise VertebraError(f"Truncated Oracle OSON payload: expected {length} bytes, got {len(raw) - 8}")
+            raise OracleCore._data_error(
+                f"Truncated Oracle OSON payload: expected {length} bytes, got {len(raw) - 8}",
+            )
         return raw[8 : 8 + length]
 
     @staticmethod
@@ -447,10 +611,105 @@ class OracleCore:
     def decode_oson(payload: bytes | bytearray | memoryview, *, target_type: Any = Any) -> Any:
         """Decode an Oracle 26ai `OSON` binary frame into a Python value or `msgspec.Struct`."""
         json_bytes = OracleCore.decode_oson_payload(payload)
-        decoded = decode_json(json_bytes)
+        try:
+            decoded = decode_json(json_bytes)
+        except Exception as exc:
+            raise OracleCore._data_error(f"Invalid JSON payload inside OSON frame: {exc}") from exc
         if target_type is Any:
             return decoded
         return msgspec.convert(decoded, type=target_type)
+
+    @staticmethod
+    def coerce_bind_parameter(
+        value: Any,
+        *,
+        features: OracleDriverFeatures | None = None,
+    ) -> Any:
+        """Coerce a Python bind parameter according to `OracleDriverFeatures`."""
+        if value is None:
+            return None
+        if isinstance(value, uuid.UUID):
+            enable_uuid = True if features is None else features.enable_uuid_binary
+            return value.bytes if enable_uuid else str(value)
+        if isinstance(value, VectorView):
+            return OracleCore.encode_vector(value)
+        if isinstance(value, (dict, msgspec.Struct)):
+            return OracleCore.encode_oson(value)
+        return value
+
+    @staticmethod
+    def coerce_row_cell(
+        value: Any,
+        column_type: str | None = None,
+        *,
+        features: OracleDriverFeatures | None = None,
+    ) -> Any:
+        """Coerce a decoded Oracle row cell according to column metadata and `OracleDriverFeatures`."""
+        if value is None:
+            return None
+        col_upper = (column_type or "").upper()
+        enable_uuid = True if features is None else features.enable_uuid_binary
+        fetch_decimals = False if features is None else features.fetch_decimals
+        vec_fmt_raw = "list" if features is None else features.vector_return_format
+
+        if isinstance(value, (bytes, bytearray, memoryview)):
+            raw = bytes(value)
+            if len(raw) >= 8 and raw[:3] == OSON_MAGIC and raw[3] == 0x01:
+                return OracleCore.decode_oson(raw)
+            if len(raw) >= 8 and raw[:2] == OracleCore.ORACLE_VECTOR_MAGIC:
+                ret_fmt: Literal["vector_view", "list", "bytes"] = (
+                    "vector_view"
+                    if vec_fmt_raw == "vector_view"
+                    else ("bytes" if vec_fmt_raw == "bytes" else "list")
+                )
+                return OracleCore.decode_vector(raw, return_format=ret_fmt)
+            if enable_uuid and len(raw) == 16 and ("RAW" in col_upper or not col_upper):
+                return uuid.UUID(bytes=raw)
+            return raw
+
+        if isinstance(value, VectorView):
+            if vec_fmt_raw == "list":
+                return OracleCore.decode_vector(value, return_format="list")
+            if vec_fmt_raw == "bytes":
+                return value.to_bytes()
+            return value
+
+        if fetch_decimals and isinstance(value, (int, float)) and not isinstance(value, bool):
+            return decimal.Decimal(str(value))
+        if not fetch_decimals and isinstance(value, decimal.Decimal) and value == value.to_integral_value():
+            return int(value)
+        if isinstance(value, (datetime.datetime, datetime.date)):
+            return value
+        return value
+
+    @staticmethod
+    def normalize_sql(
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None,
+    ) -> tuple[str, tuple[Any, ...]]:
+        """Normalize `:1` or `:name` placeholders into positional parameters."""
+        if not params:
+            return sql, ()
+        if isinstance(params, Mapping):
+            cleaned_map = {str(k).lstrip(":"): v for k, v in params.items()}
+            ordered: list[Any] = []
+
+            def _replace_named(match: re.Match[str]) -> str:
+                name = match.group(1)
+                ordered.append(cleaned_map.get(name))
+                return "?"
+
+            return _NAMED_PARAM_RE.sub(_replace_named, sql), tuple(ordered)
+
+        seq = tuple(params)
+        rewritten = re.sub(r":(\d+)", "?", sql)
+        return rewritten, seq
+
+    @staticmethod
+    def _data_error(message: str) -> DataError:
+        err = DataError(message)
+        err.sqlstate = "22000"
+        return err
 
     @staticmethod
     def _encode_vector_header(fmt: int, dims: int) -> bytes:
@@ -459,14 +718,14 @@ class OracleCore:
     @staticmethod
     def _decode_vector_header(buf: bytes, expected_fmt: int) -> tuple[int, memoryview]:
         if len(buf) < 8:
-            raise VertebraError("Buffer too short for 8-byte Oracle VECTOR header")
+            raise OracleCore._data_error("Buffer too short for 8-byte Oracle VECTOR header")
         magic, version, fmt, _flags, dims = struct.unpack(">BBBBI", buf[:8])
         if magic != ORACLE_VECTOR_MAGIC:
-            raise VertebraError(f"Invalid Oracle VECTOR magic byte: 0x{magic:02x}")
+            raise OracleCore._data_error(f"Invalid Oracle VECTOR magic byte: 0x{magic:02x}")
         if version != ORACLE_VECTOR_VERSION:
-            raise VertebraError(f"Unsupported Oracle VECTOR version: {version}")
+            raise OracleCore._data_error(f"Unsupported Oracle VECTOR version: {version}")
         if fmt != expected_fmt:
-            raise VertebraError(f"Oracle VECTOR format mismatch: expected {expected_fmt}, got {fmt}")
+            raise OracleCore._data_error(f"Oracle VECTOR format mismatch: expected {expected_fmt}, got {fmt}")
         return dims, memoryview(buf)[8:]
 
 
