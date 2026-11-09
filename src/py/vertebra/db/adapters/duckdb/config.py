@@ -6,6 +6,9 @@ import os
 from typing import Any, ClassVar, Self
 from urllib.parse import urlparse
 
+import msgspec
+
+from vertebra._vertebra import InterfaceError
 from vertebra.db.driver._common import DUCKDB_DIALECT_TAG, BaseDatabaseConfig
 from vertebra.typing import FrozenBaseStruct
 from vertebra.utils.module_loader import import_optional
@@ -15,6 +18,14 @@ __all__ = (
     "DuckDBSecretConfig",
     "duckdb_bootstrap_statements",
 )
+
+
+def _reject_nul(value: str, field_name: str) -> str:
+    """Raise `InterfaceError` when `value` contains an embedded NUL byte."""
+    if "\0" in value:
+        msg = f"DuckDB {field_name} must not contain NUL bytes"
+        raise InterfaceError(msg)
+    return value
 
 
 class DuckDBSecretConfig(FrozenBaseStruct, frozen=True, gc=False):
@@ -33,8 +44,24 @@ class DuckDBSecretConfig(FrozenBaseStruct, frozen=True, gc=False):
     endpoint: str | None = None
     """Optional custom S3-compatible endpoint (`ENDPOINT`, e.g. RustFS or MinIO)."""
 
+    def __repr__(self) -> str:
+        """Render a debug representation with secret material redacted."""
+        redacted_secret = "<redacted>" if self.secret else ""
+        return (
+            f"DuckDBSecretConfig(name={self.name!r}, secret_type={self.secret_type!r}, "
+            f"key_id={self.key_id!r}, secret={redacted_secret!r}, "
+            f"region={self.region!r}, endpoint={self.endpoint!r})"
+        )
+
     def to_create_secret_sql(self) -> str:
         """Render a `CREATE OR REPLACE SECRET` SQL statement for DuckDB."""
+        _reject_nul(self.name, "secret.name")
+        _reject_nul(self.secret_type, "secret.secret_type")
+        _reject_nul(self.key_id, "secret.key_id")
+        _reject_nul(self.secret, "secret.secret")
+        _reject_nul(self.region, "secret.region")
+        if self.endpoint is not None:
+            _reject_nul(self.endpoint, "secret.endpoint")
         parts = [f"TYPE {self.secret_type}"]
         if self.key_id:
             parts.append(f"KEY_ID '{self.key_id}'")
@@ -66,6 +93,8 @@ class DuckDBConfig(BaseDatabaseConfig, frozen=True, gc=False):
     """Maximum buffer manager memory allowance in MiB (`SET memory_limit`)."""
     threads: int = 4
     """Number of DuckDB execution threads (`SET threads`)."""
+    temp_directory: str | None = None
+    """Optional spill directory configured via `SET temp_directory`."""
     parquet_metadata_cache: bool = True
     """When True, enable `SET parquet_metadata_cache = true` after connection bootstrap."""
     httpfs_connection_caching: bool = True
@@ -76,6 +105,12 @@ class DuckDBConfig(BaseDatabaseConfig, frozen=True, gc=False):
     """When True, open the DuckDB file in read-only mode allowing multi-process readers."""
     secrets: tuple[DuckDBSecretConfig, ...] = ()
     """Optional cloud storage secrets (`CREATE OR REPLACE SECRET`) executed at connection bootstrap."""
+    extensions: tuple[str, ...] = ()
+    """Optional DuckDB extensions (`"<ext>"` or `"<ext> FROM <repo>"`) loaded on every pooled session."""
+    init_statements: tuple[str, ...] = ()
+    """Optional SQL statements executed after bootstrap on every pooled session."""
+    config: dict[str, str] = msgspec.field(default_factory=dict)
+    """Optional DuckDB session `SET` key/value overrides."""
     pool_min_size: int = 1
     """Minimum number of pooled DuckDB cursors per worker."""
     pool_max_size: int = 10
@@ -89,16 +124,16 @@ class DuckDBConfig(BaseDatabaseConfig, frozen=True, gc=False):
 
     def resolved_path(self) -> str:
         """Resolve the effective database path from `path` or `database`."""
-        if self.path != ":memory:":
-            return self.path
-        return self.database
+        target = self.path if self.path != ":memory:" else self.database
+        return _reject_nul(target, "path")
 
     def bootstrap_statements(self) -> list[str]:
         """Return post-initialization `SET` statements (`parquet_metadata_cache` is always post-init SQL)."""
+        resolved = self.resolved_path()
         native = import_optional("vertebra._vertebra")
         if native is not None and hasattr(native, "duckdb_bootstrap_statements"):
             raw_stmts = native.duckdb_bootstrap_statements(
-                self.resolved_path(),
+                resolved,
                 self.memory_limit_mb,
                 self.threads,
                 self.parquet_metadata_cache,
@@ -117,13 +152,26 @@ class DuckDBConfig(BaseDatabaseConfig, frozen=True, gc=False):
                 f"SET http_keep_alive = {keep_alive_flag}",
                 f"SET enable_http_metadata_cache = {http_meta_flag}",
             ]
+        if self.temp_directory is not None:
+            _reject_nul(self.temp_directory, "temp_directory")
+            escaped = self.temp_directory.replace("'", "''")
+            stmts.append(f"SET temp_directory = '{escaped}'")
+        for key, val in self.config.items():
+            _reject_nul(str(key), "config.key")
+            _reject_nul(str(val), "config.value")
+            escaped_val = str(val).replace("'", "''")
+            stmts.append(f"SET {key} = '{escaped_val}'")
         for secret in self.secrets:
             stmts.append(secret.to_create_secret_sql())
+        for stmt in self.init_statements:
+            _reject_nul(stmt, "init_statements")
+            stmts.append(stmt)
         return stmts
 
     @classmethod
     def from_url(cls, url: str, **overrides: Any) -> Self:
         """Construct a `DuckDBConfig` from a `duckdb://` URI."""
+        _reject_nul(url, "url")
         parsed = urlparse(url)
         if parsed.netloc == ":memory:" or (not parsed.netloc and parsed.path in ("", "/", "/:memory:", ":memory:")):
             db_path = ":memory:"

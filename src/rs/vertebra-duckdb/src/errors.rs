@@ -9,10 +9,12 @@ use thiserror::Error;
 /// Cached Python exception types from `vertebra._vertebra`.
 pub struct DuckDBExceptionTypes {
     pub database: Py<PyType>,
+    pub interface: Py<PyType>,
     pub operational: Py<PyType>,
     pub integrity: Py<PyType>,
     pub programming: Py<PyType>,
     pub data: Py<PyType>,
+    pub not_found: Py<PyType>,
     pub transaction: Py<PyType>,
     pub query_timeout: Py<PyType>,
     pub pool_exhausted: Py<PyType>,
@@ -46,21 +48,26 @@ fn stand_in_exception_types(py: Python<'_>) -> PyResult<DuckDBExceptionTypes> {
     };
     let database = new_stand_in_class(py, "DatabaseError", &PyTuple::new(py, [&root])?)?;
     let db_base = PyTuple::new(py, [database.bind(py)])?;
+    let interface = new_stand_in_class(py, "InterfaceError", &db_base)?;
     let operational = new_stand_in_class(py, "OperationalError", &db_base)?;
     let op_base = PyTuple::new(py, [operational.bind(py)])?;
     let integrity = new_stand_in_class(py, "IntegrityError", &db_base)?;
     let programming = new_stand_in_class(py, "ProgrammingError", &db_base)?;
     let data = new_stand_in_class(py, "DataError", &db_base)?;
-    let transaction = new_stand_in_class(py, "TransactionError", &db_base)?;
-    let query_timeout = new_stand_in_class(py, "QueryTimeoutError", &op_base)?;
+    let data_base = PyTuple::new(py, [data.bind(py)])?;
+    let not_found = new_stand_in_class(py, "NotFoundError", &data_base)?;
+    let transaction = new_stand_in_class(py, "SerializationFailure", &op_base)?;
+    let query_timeout = new_stand_in_class(py, "QueryCancelledError", &op_base)?;
     let pool_exhausted = new_stand_in_class(py, "PoolExhaustedError", &op_base)?;
     let not_supported = new_stand_in_class(py, "NotSupportedError", &db_base)?;
     Ok(DuckDBExceptionTypes {
         database,
+        interface,
         operational,
         integrity,
         programming,
         data,
+        not_found,
         transaction,
         query_timeout,
         pool_exhausted,
@@ -73,6 +80,10 @@ fn resolve_exception_types(py: Python<'_>) -> PyResult<&'static DuckDBExceptionT
         Ok(core_mod) => Ok(DuckDBExceptionTypes {
             database: core_mod
                 .getattr("DatabaseError")?
+                .cast_into::<PyType>()?
+                .unbind(),
+            interface: core_mod
+                .getattr("InterfaceError")?
                 .cast_into::<PyType>()?
                 .unbind(),
             operational: core_mod
@@ -91,12 +102,16 @@ fn resolve_exception_types(py: Python<'_>) -> PyResult<&'static DuckDBExceptionT
                 .getattr("DataError")?
                 .cast_into::<PyType>()?
                 .unbind(),
+            not_found: core_mod
+                .getattr("NotFoundError")?
+                .cast_into::<PyType>()?
+                .unbind(),
             transaction: core_mod
-                .getattr("TransactionError")?
+                .getattr("SerializationFailure")?
                 .cast_into::<PyType>()?
                 .unbind(),
             query_timeout: core_mod
-                .getattr("QueryTimeoutError")?
+                .getattr("QueryCancelledError")?
                 .cast_into::<PyType>()?
                 .unbind(),
             pool_exhausted: core_mod
@@ -135,6 +150,10 @@ pub enum DuckDBClientError {
     #[error("{0}")]
     Data(String),
 
+    /// Expected row or resource not found.
+    #[error("{0}")]
+    NotFound(String),
+
     /// Transaction conflict or invalid transaction state error.
     #[error("{0}")]
     Transaction(String),
@@ -157,6 +176,38 @@ pub enum DuckDBClientError {
 }
 
 impl DuckDBClientError {
+    /// Return the canonical SQLSTATE code associated with this error variant.
+    #[must_use]
+    pub const fn sqlstate(&self) -> Option<&'static str> {
+        match self {
+            Self::InvalidInput(_) => Some("HY000"),
+            Self::Operational(_) | Self::ShmArrow(_) => Some("08000"),
+            Self::Programming(_) => Some("42000"),
+            Self::Integrity(_) => Some("23000"),
+            Self::Data(_) => Some("22000"),
+            Self::NotFound(_) => Some("02000"),
+            Self::Transaction(_) => Some("40001"),
+            Self::QueryTimeout(_) => Some("57014"),
+            Self::PoolExhausted(_) => Some("53300"),
+            Self::NotSupported(_) => Some("0A000"),
+        }
+    }
+
+    /// Return the vendor-specific error code if available.
+    #[must_use]
+    pub const fn vendor_code(&self) -> Option<i32> {
+        None
+    }
+
+    /// Return whether the error represents a transient condition eligible for retry.
+    #[must_use]
+    pub const fn is_transient(&self) -> bool {
+        matches!(
+            self,
+            Self::PoolExhausted(_) | Self::QueryTimeout(_) | Self::Transaction(_)
+        )
+    }
+
     /// Classify a [`duckdb::Error`] into [`DuckDBClientError`] by inspecting its variant and message.
     #[must_use]
     pub fn from_duckdb(err: duckdb::Error) -> Self {
@@ -173,7 +224,7 @@ impl DuckDBClientError {
             }
             duckdb::Error::Utf8Error(e) => Self::Data(format!("Invalid UTF-8 value: {e}")),
             duckdb::Error::NulError(e) => {
-                Self::Programming(format!("SQL string contains interior NUL byte: {e}"))
+                Self::InvalidInput(format!("SQL string contains interior NUL byte: {e}"))
             }
             duckdb::Error::InvalidParameterName(name) => {
                 Self::Programming(format!("Invalid or unknown SQL parameter name: {name}"))
@@ -185,7 +236,9 @@ impl DuckDBClientError {
                 "Execute called on a query that returns result rows; use fetch/select instead"
                     .to_string(),
             ),
-            duckdb::Error::QueryReturnedNoRows => Self::Data("Query returned no rows".to_string()),
+            duckdb::Error::QueryReturnedNoRows => {
+                Self::NotFound("Query returned no rows".to_string())
+            }
             duckdb::Error::InvalidColumnIndex(idx) => {
                 Self::Programming(format!("Invalid column index: {idx}"))
             }
@@ -279,20 +332,30 @@ impl DuckDBClientError {
     #[must_use]
     pub fn into_py_err(self, py: Python<'_>) -> PyErr {
         let msg = self.to_string();
+        let sqlstate = self.sqlstate();
+        let vendor_code = self.vendor_code();
+        let is_transient = self.is_transient();
         let Ok(types) = resolve_exception_types(py) else {
             return pyo3::exceptions::PyRuntimeError::new_err(msg);
         };
         let ty = match self {
-            Self::InvalidInput(_) | Self::Programming(_) => &types.programming,
+            Self::InvalidInput(_) => &types.interface,
+            Self::Programming(_) => &types.programming,
             Self::Operational(_) | Self::ShmArrow(_) => &types.operational,
             Self::Integrity(_) => &types.integrity,
             Self::Data(_) => &types.data,
+            Self::NotFound(_) => &types.not_found,
             Self::Transaction(_) => &types.transaction,
             Self::QueryTimeout(_) => &types.query_timeout,
             Self::PoolExhausted(_) => &types.pool_exhausted,
             Self::NotSupported(_) => &types.not_supported,
         };
-        PyErr::from_type(ty.bind(py).clone(), (msg,))
+        let py_err = PyErr::from_type(ty.bind(py).clone(), (msg,));
+        let inst = py_err.value(py);
+        let _ = inst.setattr("sqlstate", sqlstate);
+        let _ = inst.setattr("vendor_code", vendor_code);
+        let _ = inst.setattr("is_transient", is_transient);
+        py_err
     }
 }
 
