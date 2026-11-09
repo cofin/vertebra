@@ -209,6 +209,7 @@ py-test: dev                                        ## Run Python tests
 	@uv run $(PY_TEST_GROUPS) pytest src/py/tests -v
 	@echo "${OK} Python tests passed"
 
+<<<<<<< HEAD
 .PHONY: duckdb-test
 duckdb-test:                                        ## Run vertebra-duckdb Rust + Python unit and conformance tests
 	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
@@ -223,6 +224,21 @@ duckdb-wheel-check:                                 ## Build vertebra-duckdb whe
 	@uv run maturin build --manifest-path src/rs/vertebra-duckdb/Cargo.toml --out /tmp/vtb-wheels-duckdb
 	@uv run python -c 'import glob, zipfile; whl = sorted(glob.glob("/tmp/vtb-wheels-duckdb/vertebra_duckdb-*.whl"))[-1]; zf = zipfile.ZipFile(whl); names = zf.namelist(); assert any(n.startswith("vertebra/_duckdb") and (n.endswith(".so") or n.endswith(".pyd") or n.endswith(".dylib")) for n in names), names; bad = [n for n in names if n.startswith("vertebra/") and not n.startswith("vertebra/_duckdb")]; assert not bad, f"Unexpected files in vertebra-duckdb wheel: {bad}"'
 	@echo "${OK} vertebra-duckdb wheel isolation verified"
+
+.PHONY: mysql-test
+mysql-test:                                         ## Run MySQL Rust crate tests, stubtest, and Python MySQL test suites
+	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
+	@cd src/rs && cargo test -p vertebra-mysql -p vertebra-db --features gcp
+	@uv run python -m mypy.stubtest vertebra._mysql
+	@uv run pytest src/py/tests/unit/db/test_mysql_driver.py src/py/tests/unit/db/test_optional_driver_wheels.py src/py/tests/integration/db/test_driver_conformance.py -k "mysql" -v
+	@echo "${OK} MySQL tests passed"
+
+.PHONY: mysql-wheel-check
+mysql-wheel-check:                                  ## Build vertebra-mysql wheel and verify PEP 420 namespace isolation
+	@rm -rf /tmp/vtb-wheels-mysql && mkdir -p /tmp/vtb-wheels-mysql
+	@uv run maturin build --manifest-path src/rs/vertebra-mysql/Cargo.toml --out /tmp/vtb-wheels-mysql
+	@uv run python -c 'import glob, zipfile; whls = glob.glob("/tmp/vtb-wheels-mysql/vertebra_mysql-*.whl"); assert whls, "No vertebra-mysql wheel built"; zf = zipfile.ZipFile(whls[0]); names = zf.namelist(); assert any(n.startswith("vertebra/_mysql") and n.endswith((".so", ".pyd", ".dylib")) for n in names), names; assert "vertebra/__init__.py" not in names, names; assert not any(n.endswith(".py") for n in names), names'
+	@echo "${OK} vertebra-mysql wheel isolation verified"
 
 .PHONY: test
 test: rs-test py-test ts-test                       ## Run all tests (Rust, Python, TypeScript)

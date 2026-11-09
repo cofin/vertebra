@@ -34,6 +34,7 @@ def test_native_modules_declare_gil_used_false() -> None:
     assert getattr(_vertebra, "GIL_USED", None) is False
     for mod_name in (
         "vertebra._bundler",
+        "vertebra._mysql",
         "vertebra._bigquery",
         "vertebra._spanner",
         "vertebra._duckdb",
@@ -98,6 +99,7 @@ def test_native_pyclasses_enforce_immutable_type() -> None:
     """Verify non-subclassed native PyO3 types enforce Py_TPFLAGS_IMMUTABLETYPE."""
     bundler_mod = pytest.importorskip("vertebra._bundler")
     storage_mod = pytest.importorskip("vertebra._storage")
+    mysql_mod = pytest.importorskip("vertebra._mysql")
     bigquery_mod = pytest.importorskip("vertebra._bigquery")
     spanner_mod = pytest.importorskip("vertebra._spanner")
     duckdb_mod = pytest.importorskip("vertebra._duckdb")
@@ -121,6 +123,9 @@ def test_native_pyclasses_enforce_immutable_type() -> None:
         storage_mod.AsyncObjectStore,
         storage_mod.StorageBuffer,
         storage_mod.ObjectMeta,
+        mysql_mod.SyncMySQLClient,
+        mysql_mod.AsyncMySQLClient,
+        mysql_mod.MySQLWireTestServer,
         bigquery_mod.SyncBigQueryClient,
         bigquery_mod.AsyncBigQueryClient,
         spanner_mod.SyncSpannerClient,
