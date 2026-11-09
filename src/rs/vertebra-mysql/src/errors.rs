@@ -124,6 +124,10 @@ impl MySQLError {
         Self::new(MySQLErrorKind::OperationalError, message, None, None)
     }
 
+    pub fn protocol(message: impl Into<String>) -> Self {
+        Self::operational(message)
+    }
+
     pub fn programming(message: impl Into<String>) -> Self {
         Self::new(
             MySQLErrorKind::ProgrammingError,

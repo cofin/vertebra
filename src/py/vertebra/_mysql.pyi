@@ -11,6 +11,7 @@ __all__ = [
     "FREE_THREADED",
     "GIL_USED",
     "AsyncMySQLClient",
+    "MySQLWireTestServer",
     "SyncMySQLClient",
     "__version__",
     "compute_caching_sha2_scramble",
@@ -27,6 +28,32 @@ def map_mysql_error(
     sqlstate: str | None = None,
     message: str = "MySQL error",
 ) -> Exception: ...
+
+@final
+class MySQLWireTestServer:
+    def __new__(
+        cls,
+        auth_plugin: str = "caching_sha2_password",
+        require_rsa_full_auth: bool = False,
+        expected_password: str = "secret",
+    ) -> MySQLWireTestServer: ...
+    @property
+    def host(self) -> str: ...
+    @property
+    def port(self) -> int: ...
+    @property
+    def dsn(self) -> str: ...
+    @property
+    def prepare_count(self) -> int: ...
+    @property
+    def execute_count(self) -> int: ...
+    @property
+    def close_stmt_count(self) -> int: ...
+    @property
+    def kill_query_count(self) -> int: ...
+    @property
+    def query_count(self) -> int: ...
+    def close(self) -> None: ...
 
 @final
 class SyncMySQLClient:

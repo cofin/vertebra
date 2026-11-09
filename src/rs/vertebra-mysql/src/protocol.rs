@@ -52,6 +52,45 @@ pub fn decode_mysql_packet(buf: &[u8]) -> Option<(u8, &[u8], usize)> {
     Some((buf[3], &buf[4..total], total))
 }
 
+/// Encodes a MySQL 4.1+ OK packet payload (`0x00` header + lenenc `affected_rows` + lenenc `last_insert_id` + `status_flags` + `warnings`).
+pub fn encode_ok_packet(
+    affected_rows: u64,
+    last_insert_id: u64,
+    status_flags: u16,
+    warnings: u16,
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(16);
+    out.push(0x00);
+    crate::codecs::encode_lenenc_int(affected_rows, &mut out);
+    crate::codecs::encode_lenenc_int(last_insert_id, &mut out);
+    out.extend_from_slice(&status_flags.to_le_bytes());
+    out.extend_from_slice(&warnings.to_le_bytes());
+    out
+}
+
+/// Encodes a MySQL 4.1+ EOF packet payload (`0xFE` + `warnings` + `status_flags`).
+pub fn encode_eof_packet(warnings: u16, status_flags: u16) -> Vec<u8> {
+    let mut out = Vec::with_capacity(5);
+    out.push(0xFE);
+    out.extend_from_slice(&warnings.to_le_bytes());
+    out.extend_from_slice(&status_flags.to_le_bytes());
+    out
+}
+
+/// Encodes a MySQL 4.1+ ERR packet payload (`0xFF` + `errno` + `#` + 5-char `sqlstate` + `message`).
+pub fn encode_err_packet(errno: u16, sqlstate: &str, message: &str) -> Vec<u8> {
+    let mut out = Vec::with_capacity(9 + message.len());
+    out.push(0xFF);
+    out.extend_from_slice(&errno.to_le_bytes());
+    out.push(b'#');
+    let state_bytes = sqlstate.as_bytes();
+    for i in 0..5 {
+        out.push(*state_bytes.get(i).unwrap_or(&b'0'));
+    }
+    out.extend_from_slice(message.as_bytes());
+    out
+}
+
 /// Parsed MySQL Handshake v10 greeting packet.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HandshakeV10 {

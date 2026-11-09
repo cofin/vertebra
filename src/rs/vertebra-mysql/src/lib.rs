@@ -1,8 +1,10 @@
 //! `vertebra-mysql` — Standalone PyO3 extension (`vertebra._mysql`) for MySQL 8.4/9 and MariaDB.
 
 pub mod client;
+pub mod codecs;
 pub mod config;
 pub mod errors;
+pub mod loopback;
 pub mod protocol;
 
 use pyo3::prelude::*;
@@ -10,6 +12,7 @@ use pyo3::prelude::*;
 pub use client::{AsyncMySQLClient, MYSQL_COMPLETION_DRAINER_ATTR, SyncMySQLClient};
 pub use config::{MySQLConnectConfig, MySQLSslMode};
 pub use errors::{MySQLError, MySQLErrorKind, classify_mysql_error, map_mysql_error};
+pub use loopback::MySQLWireTestServer;
 pub use protocol::{
     HandshakeV10, compute_caching_sha2_scramble, compute_caching_sha2_scramble_bytes,
     compute_mysql_native_scramble, compute_mysql_native_scramble_bytes, decode_mysql_packet,
@@ -30,6 +33,7 @@ fn _mysql(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("GIL_USED", false)?;
     m.add_class::<SyncMySQLClient>()?;
     m.add_class::<AsyncMySQLClient>()?;
+    m.add_class::<MySQLWireTestServer>()?;
     m.add_function(wrap_pyfunction!(compute_caching_sha2_scramble, m)?)?;
     m.add_function(wrap_pyfunction!(compute_mysql_native_scramble, m)?)?;
     m.add_function(wrap_pyfunction!(encrypt_caching_sha2_rsa_password, m)?)?;

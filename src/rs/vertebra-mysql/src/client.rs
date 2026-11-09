@@ -26,7 +26,7 @@ pub const MYSQL_COMPLETION_DRAINER_ATTR: &str = "_vertebra_mysql_completion_drai
 /// Intermediate Rust representation of a decoded MySQL cell value that can be produced on a Tokio
 /// worker thread without holding the Python GIL and converted into a Python object inside the
 /// completion callback.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum DecodedCell {
     Null,
     Bool(bool),
@@ -71,7 +71,11 @@ impl DecodedCell {
             Self::DateTime(y, m, d, hh, mm, ss, us) => {
                 let dt_mod = py.import("datetime")?;
                 let dt_cls = dt_mod.getattr("datetime")?;
-                Ok(dt_cls.call1((y, m, d, hh, mm, ss, us))?.into_any().unbind())
+                let utc = dt_mod.getattr("timezone")?.getattr("utc")?;
+                Ok(dt_cls
+                    .call1((y, m, d, hh, mm, ss, us, utc))?
+                    .into_any()
+                    .unbind())
             }
             Self::Time(is_neg, days, hours, minutes, seconds, micros) => {
                 let dt_mod = py.import("datetime")?;
@@ -187,13 +191,38 @@ pub fn py_param_to_mysql_value(val: &Bound<'_, PyAny>) -> Result<Value, MySQLErr
         return Ok(Value::Bytes(s.into_bytes()));
     }
     if type_name == "datetime" {
-        let year: u16 = val.getattr("year").and_then(|v| v.extract()).unwrap_or(1970);
-        let month: u8 = val.getattr("month").and_then(|v| v.extract()).unwrap_or(1);
-        let day: u8 = val.getattr("day").and_then(|v| v.extract()).unwrap_or(1);
-        let hour: u8 = val.getattr("hour").and_then(|v| v.extract()).unwrap_or(0);
-        let minute: u8 = val.getattr("minute").and_then(|v| v.extract()).unwrap_or(0);
-        let second: u8 = val.getattr("second").and_then(|v| v.extract()).unwrap_or(0);
-        let micro: u32 = val
+        let dt_val = if let Ok(tz) = val.getattr("tzinfo")
+            && !tz.is_none()
+            && let Ok(dt_mod) = val.py().import("datetime")
+            && let Ok(utc) = dt_mod.getattr("timezone").and_then(|t| t.getattr("utc"))
+            && let Ok(converted) = val.call_method1("astimezone", (utc,))
+        {
+            converted
+        } else {
+            val.clone()
+        };
+        let year: u16 = dt_val
+            .getattr("year")
+            .and_then(|v| v.extract())
+            .unwrap_or(1970);
+        let month: u8 = dt_val
+            .getattr("month")
+            .and_then(|v| v.extract())
+            .unwrap_or(1);
+        let day: u8 = dt_val.getattr("day").and_then(|v| v.extract()).unwrap_or(1);
+        let hour: u8 = dt_val
+            .getattr("hour")
+            .and_then(|v| v.extract())
+            .unwrap_or(0);
+        let minute: u8 = dt_val
+            .getattr("minute")
+            .and_then(|v| v.extract())
+            .unwrap_or(0);
+        let second: u8 = dt_val
+            .getattr("second")
+            .and_then(|v| v.extract())
+            .unwrap_or(0);
+        let micro: u32 = dt_val
             .getattr("microsecond")
             .and_then(|v| v.extract())
             .unwrap_or(0);
@@ -235,9 +264,13 @@ pub fn py_param_to_mysql_value(val: &Bound<'_, PyAny>) -> Result<Value, MySQLErr
         let py = val.py();
         if let Ok(ser) = py.import("vertebra.utils.serializers")
             && let Ok(encoded) = ser.getattr("encode_json").and_then(|f| f.call1((val,)))
-            && let Ok(s) = encoded.extract::<String>()
         {
-            return Ok(Value::Bytes(s.into_bytes()));
+            if let Ok(b) = encoded.extract::<Vec<u8>>() {
+                return Ok(Value::Bytes(b));
+            }
+            if let Ok(s) = encoded.extract::<String>() {
+                return Ok(Value::Bytes(s.into_bytes()));
+            }
         }
     }
     let text = val
@@ -587,6 +620,8 @@ impl MySQLClientCore {
                 Box::pin(async move {
                     let columns: Vec<(String, u8)>;
                     let mut rows: Vec<Vec<DecodedCell>> = Vec::new();
+                    let res_affected: u64;
+                    let res_last_id: Option<u64>;
                     if use_text {
                         let mut result =
                             conn.query_iter(sql.as_str()).await.map_err(MySQLError::from)?;
@@ -601,6 +636,8 @@ impl MySQLClientCore {
                             .unwrap_or_default();
                         let raw_rows: Vec<Row> =
                             result.collect().await.map_err(MySQLError::from)?;
+                        res_affected = result.affected_rows();
+                        res_last_id = result.last_insert_id();
                         for row in raw_rows {
                             rows.push(decode_mysql_row(row, &columns)?);
                         }
@@ -621,12 +658,14 @@ impl MySQLClientCore {
                             .unwrap_or_default();
                         let raw_rows: Vec<Row> =
                             result.collect().await.map_err(MySQLError::from)?;
+                        res_affected = result.affected_rows();
+                        res_last_id = result.last_insert_id();
                         for row in raw_rows {
                             rows.push(decode_mysql_row(row, &columns)?);
                         }
                     }
-                    let affected = conn.affected_rows();
-                    let last_id = conn.last_insert_id();
+                    let affected = res_affected.max(conn.affected_rows());
+                    let last_id = res_last_id.or_else(|| conn.last_insert_id());
                     Ok(DecodedResultSet {
                         columns,
                         rows,
@@ -1853,5 +1892,207 @@ impl AsyncMySQLClient {
             |py, e: MySQLError| e.to_py_err(py),
             MYSQL_COMPLETION_DRAINER_ATTR,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::errors::MySQLErrorKind;
+    use crate::loopback::MySQLWireTestServer;
+
+    fn make_test_core(dsn: &str, stmt_cache_size: usize) -> Arc<MySQLClientCore> {
+        let config = MySQLConnectConfig::from_dsn_and_kwargs(
+            dsn,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("disable"),
+            None,
+            None,
+            None,
+            5_000,
+            5_000,
+            5_000,
+            1,
+            1,
+            stmt_cache_size,
+            "utf8mb4",
+            true,
+            None,
+            None,
+            "PUBLIC",
+            false,
+            None,
+            None,
+            None,
+        )
+        .expect("config");
+        MySQLClientCore::new(config)
+    }
+
+    #[test]
+    fn test_loopback_prepared_statement_lru_eviction_and_codecs() {
+        let server = MySQLWireTestServer::start_default().expect("server");
+        let core = make_test_core(&server.dsn(), 2);
+
+        block_on_db(async {
+            core.execute_result_set(
+                "CREATE TABLE t_codecs (
+                    id INT PRIMARY KEY AUTO_INCREMENT,
+                    dec_val DECIMAL(18, 4),
+                    dt_val DATETIME(6),
+                    d_val DATE,
+                    t_val TIME(6),
+                    j_val JSON,
+                    b_val VARBINARY(64)
+                )"
+                .to_string(),
+                Params::Empty,
+            )
+            .await
+            .expect("create table");
+
+            let ins = core
+                .execute_result_set(
+                    "INSERT INTO t_codecs (dec_val, dt_val, d_val, t_val, j_val, b_val) VALUES (?, ?, ?, ?, ?, ?)".to_string(),
+                    Params::Positional(vec![
+                        Value::Bytes(b"12345.6789".to_vec()),
+                        Value::Date(2026, 11, 4, 20, 30, 15, 654_321),
+                        Value::Date(2026, 11, 4, 0, 0, 0, 0),
+                        Value::Time(false, 0, 14, 22, 33, 125_000),
+                        Value::Bytes(b"{\"k\":42}".to_vec()),
+                        Value::Bytes(vec![0xDE, 0xAD, 0xBE, 0xEF]),
+                    ]),
+                )
+                .await
+                .expect("insert");
+            assert_eq!(ins.affected_rows, 1);
+            assert_eq!(core.lastrowid(), Some(1));
+
+            let sel = core
+                .execute_result_set(
+                    "SELECT dec_val, dt_val, d_val, t_val, j_val, b_val FROM t_codecs WHERE id = ?"
+                        .to_string(),
+                    Params::Positional(vec![Value::Int(1)]),
+                )
+                .await
+                .expect("select");
+            assert_eq!(sel.rows.len(), 1);
+            let r = &sel.rows[0];
+            assert!(matches!(&r[0], DecodedCell::Decimal(s) if s == "12345.6789"));
+            assert!(matches!(
+                r[1],
+                DecodedCell::DateTime(2026, 11, 4, 20, 30, 15, 654_321)
+            ));
+            assert!(matches!(r[2], DecodedCell::Date(2026, 11, 4)));
+            assert!(matches!(r[3], DecodedCell::Time(false, 0, 14, 22, 33, 125_000)));
+            assert!(matches!(&r[4], DecodedCell::Json(s) if s == "{\"k\":42}"));
+            assert!(matches!(&r[5], DecodedCell::Bytes(b) if b == &[0xDE, 0xAD, 0xBE, 0xEF]));
+
+            // Exceed statement_cache_size=2 to trigger COM_STMT_CLOSE on eviction
+            let _ = core
+                .execute_result_set(
+                    "SELECT id FROM t_codecs WHERE id = ?".to_string(),
+                    Params::Positional(vec![Value::Int(1)]),
+                )
+                .await
+                .expect("q2");
+            let _ = core
+                .execute_result_set(
+                    "SELECT dec_val FROM t_codecs WHERE id = ?".to_string(),
+                    Params::Positional(vec![Value::Int(1)]),
+                )
+                .await
+                .expect("q3");
+            assert_eq!(core.statement_cache_len(), 2);
+            assert!(server.prepare_count() >= 3);
+            assert!(server.close_stmt_count() >= 1);
+
+            core.close().await.expect("close");
+        });
+    }
+
+    #[test]
+    fn test_loopback_transactions_savepoints_errors_and_kill_query() {
+        let server = MySQLWireTestServer::start_default().expect("server");
+        let core = make_test_core(&server.dsn(), 16);
+
+        block_on_db(async {
+            core.execute_result_set(
+                "CREATE TABLE tx_items (id INT PRIMARY KEY, name VARCHAR(64) NOT NULL)".to_string(),
+                Params::Empty,
+            )
+            .await
+            .expect("create");
+
+            core.begin(Some("REPEATABLE READ".to_string()), false)
+                .await
+                .expect("begin");
+            core.execute_result_set(
+                "INSERT INTO tx_items (id, name) VALUES (?, ?)".to_string(),
+                Params::Positional(vec![Value::Int(1), Value::Bytes(b"first".to_vec())]),
+            )
+            .await
+            .expect("insert 1");
+
+            // Duplicate key -> 1062 IntegrityError
+            let dup_err = core
+                .execute_result_set(
+                    "INSERT INTO tx_items (id, name) VALUES (?, ?)".to_string(),
+                    Params::Positional(vec![Value::Int(1), Value::Bytes(b"dup".to_vec())]),
+                )
+                .await
+                .expect_err("duplicate key should fail");
+            assert_eq!(dup_err.kind, MySQLErrorKind::IntegrityError);
+
+            core.savepoint("sp1".to_string()).await.expect("sp1");
+            core.execute_result_set(
+                "INSERT INTO tx_items (id, name) VALUES (?, ?)".to_string(),
+                Params::Positional(vec![Value::Int(2), Value::Bytes(b"second".to_vec())]),
+            )
+            .await
+            .expect("insert 2");
+            core.rollback_to_savepoint("sp1".to_string())
+                .await
+                .expect("rollback sp1");
+            core.release_savepoint("sp1".to_string())
+                .await
+                .expect("release sp1");
+            core.commit().await.expect("commit");
+
+            let rows = core
+                .execute_result_set("SELECT id FROM tx_items".to_string(), Params::Empty)
+                .await
+                .expect("select");
+            assert_eq!(rows.rows.len(), 1);
+
+            // Multi-result set execution
+            let sets = core
+                .execute_all_sets("SELECT 1 AS a; SELECT 2 AS b".to_string(), Params::Empty)
+                .await
+                .expect("multi sets");
+            assert_eq!(sets.len(), 2);
+
+            // Out-of-band KILL QUERY cancellation
+            let core_cancel = Arc::clone(&core);
+            let cancel_handle = tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+                core_cancel.cancel_active_query().await
+            });
+            let sleep_err = core
+                .execute_result_set("SELECT SLEEP(5)".to_string(), Params::Empty)
+                .await
+                .expect_err("sleep should be interrupted by KILL QUERY");
+            assert_eq!(sleep_err.kind, MySQLErrorKind::QueryCancelled);
+            let cancelled = cancel_handle.await.expect("join").expect("cancel");
+            assert!(cancelled);
+            assert!(server.kill_query_count() >= 1);
+
+            core.close().await.expect("close");
+        });
     }
 }

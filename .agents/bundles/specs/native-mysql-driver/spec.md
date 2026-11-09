@@ -14,9 +14,9 @@ research:
   - ../integration-remediation/research/audit-findings_20261103.md
 plan_revision: 3
 plan_commit: fd571e3a
-state_revision: 2
-current_task: "native-mysql-driver:t02"
-last_verified_checkpoint: 25d0ac25
+state_revision: 3
+current_task: "native-mysql-driver:t03"
+last_verified_checkpoint: 1dd74556
 created_at: "2026-11-03T04:05:00Z"
 updated_at: "2026-11-09T03:25:00Z"
 generated:
@@ -105,9 +105,9 @@ tags:
 
 ## Tasks
 
-- [x] [t01](tasks/t01-vertebra-mysql-crate-auth-and-cancel.md) — Scaffold `src/rs/vertebra-mysql` (`vertebra._mysql`, `_mysql.pyi`, `[mysql]` extra), connection pool, Handshake v10, `caching_sha2_password` / `mysql_native_password`, `rustls` TLS, Cloud SQL `:3307` mTLS & IAM tokens, `KILL QUERY` cancellation, and remove `vertebra_db::mysql`
-- [~] [t02](tasks/t02-mysql-binary-protocol-codecs-and-errors.md) — Implement MySQL binary prepared-statement protocol (`COM_STMT_PREPARE`/`EXECUTE`/`CLOSE`), per-connection LRU statement cache, multi-result sets, binary/text codecs (`DECIMAL`, temporal, `JSON`, `BLOB`/`VECTOR`, `BIT`, `ENUM`/`SET`), and errno/SQLSTATE -> `DatabaseError` hierarchy mapping
-- [ ] [t03](tasks/t03-mysql-vtbarrow-shm-and-bulk-load.md) — Implement `VTBARROW` `ShmCapsule` `ArrowCursor` (`select_to_arrow`, `stream_arrow_batches`), batched `load_from_arrow` ingestion, and `BrokerEngineBackend` registration
+- [x] [1dd74556] [t01](tasks/t01-vertebra-mysql-crate-auth-and-cancel.md) — Scaffold `src/rs/vertebra-mysql` (`vertebra._mysql`, `_mysql.pyi`, `[mysql]` extra), connection pool, Handshake v10, `caching_sha2_password` / `mysql_native_password`, `rustls` TLS, Cloud SQL `:3307` mTLS & IAM tokens, `KILL QUERY` cancellation, and remove `vertebra_db::mysql`
+- [x] [t02](tasks/t02-mysql-binary-protocol-codecs-and-errors.md) — Implement MySQL binary prepared-statement protocol (`COM_STMT_PREPARE`/`EXECUTE`/`CLOSE`), per-connection LRU statement cache, multi-result sets, binary/text codecs (`DECIMAL`, temporal, `JSON`, `BLOB`/`VECTOR`, `BIT`, `ENUM`/`SET`), and errno/SQLSTATE -> `DatabaseError` hierarchy mapping
+- [~] [t03](tasks/t03-mysql-vtbarrow-shm-and-bulk-load.md) — Implement `VTBARROW` `ShmCapsule` `ArrowCursor` (`select_to_arrow`, `stream_arrow_batches`), batched `load_from_arrow` ingestion, and `BrokerEngineBackend` registration
 - [ ] [t04](tasks/t04-python-mysql-driver-cutover-and-docs.md) — Cut `SyncMySQLDriver` and `AsyncMySQLDriver` over to `vertebra._mysql`, remove `pymysql`/`asyncmy`/`memory://` paths, activate `mysql` in `test_driver_conformance.py`, and update docs and OKF knowledge chapters
 
 [^crate-research]: `.agents/bundles/specs/native-data-platform/research/rust-driver-crates_20261103.md` — Rust client crate selection including `mysql_async` 0.37.1.

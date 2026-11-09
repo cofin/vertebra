@@ -5,7 +5,7 @@ task_id: t02
 title: "Implement MySQL binary prepared-statement protocol, codecs, multi-result sets, and DatabaseError mapping"
 description: "Implement COM_QUERY and COM_STMT_PREPARE/EXECUTE/CLOSE execution, per-connection LRU statement cache, multi-result set iteration, full binary/text codecs (DECIMAL, fractional temporal types, JSON, BLOB/VECTOR, BIT, ENUM/SET), and MySQL errno/SQLSTATE to DatabaseError hierarchy mapping."
 status: stable
-state: in_progress
+state: completed
 verification_strategy: tdd
 Verification-Exempt-Reason: null
 dependencies:
@@ -13,6 +13,7 @@ dependencies:
 files_to_modify:
   - src/rs/vertebra-mysql/src/protocol.rs
   - src/rs/vertebra-mysql/src/codecs.rs
+  - src/rs/vertebra-mysql/src/loopback.rs
   - src/rs/vertebra-mysql/src/errors.rs
   - src/rs/vertebra-mysql/src/client.rs
   - src/rs/vertebra-mysql/src/lib.rs
@@ -66,11 +67,11 @@ Task `t02` completes the MySQL binary prepared-statement protocol, multi-result 
 
 ## Acceptance Criteria
 
-- [ ] Binary prepared statements (`COM_STMT_PREPARE`/`EXECUTE`/`CLOSE`) and per-connection LRU statement cache pass loopback wire tests, including `COM_STMT_CLOSE` eviction when capacity is exceeded.
-- [ ] All MySQL value types (`DECIMAL`, fractional `DATETIME`/`TIMESTAMP`/`TIME`, `DATE`, `JSON`, `BLOB`/`VECTOR`, `BIT`, `ENUM`/`SET`, signed/unsigned ints, floats, `NULL`) round-trip accurately in both binary and text protocols.
-- [ ] Multi-result sets and savepoint lifecycle methods (`begin`, `commit`, `rollback`, `savepoint`, `release_savepoint`, `rollback_to_savepoint`) pass.
-- [ ] MySQL `errno` and `SQLSTATE` codes map to the exact `vertebra.db.exceptions` subclasses with `sqlstate` and `vendor_code` populated.
-- [ ] `cargo test`, `cargo clippy`, `mypy.stubtest vertebra._mysql`, and `review_setup validate` pass.
+- [x] Binary prepared statements (`COM_STMT_PREPARE`/`EXECUTE`/`CLOSE`) and per-connection LRU statement cache pass loopback wire tests, including `COM_STMT_CLOSE` eviction when capacity is exceeded.
+- [x] All MySQL value types (`DECIMAL`, fractional `DATETIME`/`TIMESTAMP`/`TIME`, `DATE`, `JSON`, `BLOB`/`VECTOR`, `BIT`, `ENUM`/`SET`, signed/unsigned ints, floats, `NULL`) round-trip accurately in both binary and text protocols.
+- [x] Multi-result sets and savepoint lifecycle methods (`begin`, `commit`, `rollback`, `savepoint`, `release_savepoint`, `rollback_to_savepoint`) pass.
+- [x] MySQL `errno` and `SQLSTATE` codes map to the exact `vertebra.db.exceptions` subclasses with `sqlstate` and `vendor_code` populated.
+- [x] `cargo test`, `cargo clippy`, `mypy.stubtest vertebra._mysql`, and `review_setup validate` pass.
 
 [^mysql-spec]: `.agents/bundles/specs/native-mysql-driver/spec.md` — Native MySQL driver specification.
 [^py-exceptions]: `src/py/vertebra/db/exceptions.py` — Canonical Python DatabaseError exception hierarchy.

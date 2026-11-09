@@ -47,7 +47,7 @@ commands_to_run:
   - "uv run python -m mypy.stubtest vertebra._mysql"
   - "uv run pytest src/py/tests/unit/build/test_packaging_and_pgo.py -q"
   - "uv run python -m tools.scripts.review_setup validate"
-commit_sha: null
+commit_sha: 1dd74556
 created_at: "2026-11-09T03:25:00Z"
 updated_at: "2026-11-09T03:25:00Z"
 sources:

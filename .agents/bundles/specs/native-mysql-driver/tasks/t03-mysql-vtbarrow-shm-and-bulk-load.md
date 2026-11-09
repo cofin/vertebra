@@ -5,7 +5,7 @@ task_id: t03
 title: "Implement MySQL VTBARROW ShmCapsule ArrowCursor, load_from_arrow, and BrokerEngineBackend"
 description: "Implement binary-protocol row to arrow 60.1.0 RecordBatch to VTBARROW POSIX SHM ShmCapsule (select_to_arrow, stream_arrow_batches), batched load_from_arrow bulk ingestion, and BrokerEngineBackend registration in vertebra-db and vertebra-mysql."
 status: stable
-state: pending
+state: in_progress
 verification_strategy: tdd
 Verification-Exempt-Reason: null
 dependencies:
