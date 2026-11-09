@@ -6,6 +6,8 @@ import gc
 import io
 import mmap
 import os
+import re
+import sqlite3
 import struct
 import sys
 import zipfile
@@ -259,6 +261,58 @@ class _AsyncOracleSessionPort:
 
     async def close(self) -> None:
         """Release nothing; the stub holds no resources."""
+class _MockMSSQLClient:
+    """In-memory SQLite-backed SyncMSSQLClient test double for broker and DBAPI forwarding checks."""
+
+    def __init__(self) -> None:
+        self._conn = sqlite3.connect(":memory:", check_same_thread=False)
+
+    @staticmethod
+    def _adapt(sql: str, params: Any) -> tuple[str, tuple[Any, ...]]:
+        if not params:
+            return re.sub(r"@P\d+", "?", sql), ()
+        if isinstance(params, dict):
+            ordered: list[Any] = []
+
+            def _rep(m: re.Match[str]) -> str:
+                key = m.group(1)
+                ordered.append(params.get(key, params.get(f"@{key}")))
+                return "?"
+
+            return re.sub(r"@([A-Za-z_][A-Za-z0-9_]*)", _rep, sql), tuple(ordered)
+        return re.sub(r"@P\d+", "?", sql), tuple(params)
+
+    def begin(self, isolation_level: str | None = None) -> None:
+        _ = isolation_level
+
+    def commit(self) -> None:
+        self._conn.commit()
+
+    def rollback(self) -> None:
+        self._conn.rollback()
+
+    def execute(self, sql: str, params: Any = None) -> int:
+        adapted, bound = self._adapt(sql, params)
+        cur = self._conn.execute(adapted, bound)
+        self._conn.commit()
+        return max(0, int(cur.rowcount or 0))
+
+    def query(self, sql: str, params: Any = None) -> dict[str, Any]:
+        adapted, bound = self._adapt(sql, params)
+        cur = self._conn.execute(adapted, bound)
+        cols = [str(c[0]) for c in (cur.description or ())]
+        rows = [tuple(r) for r in cur.fetchall()] if cur.description is not None else []
+        if cur.description is None:
+            self._conn.commit()
+        return {"columns": cols, "rows": rows, "affected_rows": max(0, int(cur.rowcount or 0))}
+
+    def fetch_all(self, sql: str, params: Any = None) -> list[dict[str, Any]]:
+        raw = self.query(sql, params)
+        cols = raw["columns"]
+        return [dict(zip(cols, row, strict=False)) for row in raw["rows"]]
+
+    def close(self) -> None:
+        self._conn.close()
 
 
 def test_postgres_jsonb_pgcopy_and_arrow_shm_cursor() -> None:
@@ -468,6 +522,15 @@ def test_mssql_tds_framing_and_placeholder_rewriter() -> None:
     )
     assert count == 3
 
+    broker = _MockBroker()
+    mssql_driver = SyncMSSQLDriver(MSSQLConfig(), broker=broker, client=_MockMSSQLClient())
+    mssql_driver.execute("CREATE TABLE ledger (id INTEGER PRIMARY KEY, code TEXT)")
+    mssql_driver.execute("INSERT INTO ledger (id, code) VALUES (?, ?)", (7, "USD"))
+    assert mssql_driver.last_rewritten_sql == "INSERT INTO ledger (id, code) VALUES (@P1, @P2)"
+    assert mssql_driver.select("SELECT id, code FROM ledger WHERE id = ?", (7,)) == [{"id": 7, "code": "USD"}]
+    assert broker.statement_cache.hits >= 0
+    mssql_driver.close()
+
 
 def test_duckdb_post_init_bootstrap_and_arrow_shm_streaming() -> None:
     """Verify DuckDB post-init SET statements (`parquet_metadata_cache`) and zero-copy Arrow SHM streaming."""
@@ -591,7 +654,12 @@ def test_sqlalchemy_dbapi_broker_forwarding(url: str) -> None:
     if url.startswith("duckdb"):
         pytest.importorskip("vertebra._duckdb", reason=_DUCKDB_SKIP_REASON)
     broker = _MockBroker()
-    conn = SyncDBAPIConnection(url, broker=broker)
+    injected_driver = (
+        SyncMSSQLDriver(MSSQLConfig.from_url(url), broker=broker, client=_MockMSSQLClient())
+        if url.startswith("mssql+vtb")
+        else None
+    )
+    conn = SyncDBAPIConnection(url, driver=injected_driver, broker=broker)
     cur = conn.cursor()
     assert isinstance(cur, SyncDBAPICursor)
     cur.execute("CREATE TABLE items (id INTEGER, name TEXT)")

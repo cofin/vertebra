@@ -35,10 +35,34 @@ class MSSQLConfig(BaseDatabaseConfig, frozen=True, gc=False):
     """SQL Server login username."""
     password: str = ""
     """SQL Server login password."""
+    application_name: str = "vertebra-mssql"
+    """Application name reported in TDS7 `LOGIN7` client properties."""
+    encryption: str = "required"
+    """TDS encryption mode (`required`, `optional`, `not_supported`, or `strict`)."""
     trust_server_certificate: bool = False
     """When True, skip X.509 hostname and CA chain verification during TDS Pre-Login TLS negotiation."""
+    ca_pem: bytes | None = None
+    """Optional custom root CA certificate bundle in PEM format."""
+    client_cert_pem: bytes | None = None
+    """Optional mTLS client leaf certificate in PEM format."""
+    client_key_pem: bytes | None = None
+    """Optional mTLS client private key in PEM format."""
+    server_name: str | None = None
+    """Optional TLS SNI server name override."""
+    connect_timeout_ms: int = 10_000
+    """TCP and TDS handshake timeout in milliseconds."""
+    query_timeout_ms: int = 30_000
+    """Per-statement execution timeout in milliseconds before sending an out-of-band `ATTENTION` packet."""
+    read_only_intent: bool = False
+    """When True, set `ApplicationIntent=ReadOnly` in `LOGIN7` for Always On read-intent routing."""
     cloud_sql_instance: str | None = None
     """Optional Google Cloud SQL for SQL Server instance connection name (`project:region:instance`)."""
+    cloudsql_ip_type: str = "PUBLIC"
+    """Cloud SQL instance IP address type (`PUBLIC`, `PRIVATE`, or `PSC`)."""
+    cloudsql_auth_type: str = "PASSWORD"
+    """Cloud SQL authentication mode (`PASSWORD` or `IAM`)."""
+    cloudsql_proxy_addr: str | None = None
+    """Optional local address override for Cloud SQL Admin API mTLS `:3307` proxy testing."""
     pool_min_size: int = 1
     """Minimum number of pooled TDS sessions per worker."""
     pool_max_size: int = 10
@@ -76,12 +100,39 @@ class MSSQLConfig(BaseDatabaseConfig, frozen=True, gc=False):
             kwargs["user"] = parsed.username
         if parsed.password is not None:
             kwargs["password"] = parsed.password
+        if "application_name" in query_params or "appname" in query_params:
+            kwargs["application_name"] = query_params.get("application_name") or query_params["appname"]
+        if "encrypt" in query_params or "encryption" in query_params:
+            kwargs["encryption"] = query_params.get("encryption") or query_params["encrypt"]
+        if "trust_server_certificate" in query_params or "TrustServerCertificate" in query_params:
+            raw_trust = (
+                query_params.get("trust_server_certificate") or query_params["TrustServerCertificate"]
+            ).lower()
+            kwargs["trust_server_certificate"] = raw_trust in {"1", "true", "yes"}
+        if "application_intent" in query_params or "ApplicationIntent" in query_params:
+            raw_intent = (query_params.get("application_intent") or query_params["ApplicationIntent"]).lower()
+            kwargs["read_only_intent"] = raw_intent in {"readonly", "read_only"}
+        if "connect_timeout_ms" in query_params:
+            kwargs["connect_timeout_ms"] = int(query_params["connect_timeout_ms"])
+        if "query_timeout_ms" in query_params:
+            kwargs["query_timeout_ms"] = int(query_params["query_timeout_ms"])
         if "cloud_sql_instance" in query_params:
             kwargs["cloud_sql_instance"] = query_params["cloud_sql_instance"]
         elif "cloudsql_instance" in query_params:
             kwargs["cloud_sql_instance"] = query_params["cloudsql_instance"]
+        if "cloudsql_ip_type" in query_params:
+            kwargs["cloudsql_ip_type"] = query_params["cloudsql_ip_type"]
+        if "cloudsql_auth_type" in query_params:
+            kwargs["cloudsql_auth_type"] = query_params["cloudsql_auth_type"]
+        if "cloudsql_proxy_addr" in query_params:
+            kwargs["cloudsql_proxy_addr"] = query_params["cloudsql_proxy_addr"]
         kwargs.update(overrides)
         return cls(**kwargs)
+
+    @classmethod
+    def from_dsn(cls, dsn: str, **overrides: Any) -> Self:
+        """Construct an `MSSQLConfig` from an `mssql://` or `sqlserver://` DSN."""
+        return cls.from_url(dsn, **overrides)
 
     def pool_key(self) -> tuple[Any, ...]:
         """Return the canonical shared-pool fingerprint tuple."""
@@ -93,6 +144,16 @@ class MSSQLConfig(BaseDatabaseConfig, frozen=True, gc=False):
             self.user,
             self.cloud_sql_instance or "",
         )
+
+    def create_sync_driver(self, **kwargs: Any) -> Any:
+        """Instantiate `SyncMSSQLDriver` bound to this configuration."""
+        sync_cls, _ = self.resolve_driver_classes()
+        return sync_cls(self, **kwargs)
+
+    def create_async_driver(self, **kwargs: Any) -> Any:
+        """Instantiate `AsyncMSSQLDriver` bound to this configuration."""
+        _, async_cls = self.resolve_driver_classes()
+        return async_cls(self, **kwargs)
 
     def build_sync_driver(self, registry: Any) -> Any:
         """Instantiate `SyncMSSQLDriver` with shared `LeaseBroker` and optional Cloud SQL dialer."""

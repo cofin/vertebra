@@ -1,13 +1,18 @@
-"""SQL Server `@P1` placeholder rewriter."""
+"""SQL Server (TDS 7.4) `@P1` placeholder rewriter, client factory, and Arrow helpers."""
 
 from __future__ import annotations
 
-import re
-from collections.abc import Mapping, Sequence
-from typing import Any
+from collections.abc import Sequence
+from typing import TYPE_CHECKING, Any
 
+from vertebra.db.arrow import ArrowCursor, _table_to_rows_and_cols
 from vertebra.db.driver._common import MSSQL_DIALECT_TAG
-from vertebra.utils.module_loader import import_optional
+from vertebra.utils.module_loader import ensure_module, import_optional
+from vertebra.utils.text import validate_identifier
+
+if TYPE_CHECKING:
+    from vertebra._mssql import AsyncMSSQLClient, SyncMSSQLClient
+    from vertebra.db.adapters.mssql.config import MSSQLConfig
 
 __all__ = (
     "MSSQL_DIALECT_TAG",
@@ -17,11 +22,136 @@ __all__ = (
 
 
 class MSSQLCore:
-    """T-SQL placeholder translation."""
+    """T-SQL placeholder translation, native client construction, and Arrow coercion helpers."""
+
+    @staticmethod
+    def require_native_module() -> Any:
+        """Import and return `vertebra._mssql`, raising `MissingDependencyError` when absent."""
+        return ensure_module(
+            "vertebra._mssql",
+            package="vertebra-core[mssql]",
+            install_package="vertebra-core[mssql]",
+            extra="mssql",
+        )
+
+    @classmethod
+    def create_sync_rust_client(cls, config: MSSQLConfig) -> SyncMSSQLClient:
+        """Instantiate the native Rust `SyncMSSQLClient` from `config`."""
+        mssql_mod = cls.require_native_module()
+        max_overflow = max(0, int(config.pool_max_size) - max(1, int(config.pool_min_size)))
+        client: SyncMSSQLClient = mssql_mod.SyncMSSQLClient(
+            config.dsn,
+            host=config.host,
+            port=int(config.port),
+            database=config.database,
+            user=config.user,
+            password=config.password,
+            application_name=config.application_name,
+            encryption=config.encryption,
+            trust_server_certificate=config.trust_server_certificate,
+            ca_pem=config.ca_pem,
+            client_cert_pem=config.client_cert_pem,
+            client_key_pem=config.client_key_pem,
+            server_name=config.server_name,
+            connect_timeout_ms=max(1, int(config.connect_timeout_ms)),
+            query_timeout_ms=max(1, int(config.query_timeout_ms)),
+            pool_size=max(1, int(config.pool_min_size)),
+            max_overflow=max_overflow,
+            statement_cache_capacity=max(0, int(config.statement_cache_size)),
+            read_only_intent=bool(config.read_only_intent),
+            cloudsql_instance=config.cloud_sql_instance,
+            cloudsql_ip_type=config.cloudsql_ip_type,
+            cloudsql_auth_type=config.cloudsql_auth_type,
+            cloudsql_proxy_addr=config.cloudsql_proxy_addr,
+        )
+        return client
+
+    @classmethod
+    def create_async_rust_client(cls, config: MSSQLConfig) -> AsyncMSSQLClient:
+        """Instantiate the native Rust `AsyncMSSQLClient` from `config`."""
+        mssql_mod = cls.require_native_module()
+        max_overflow = max(0, int(config.pool_max_size) - max(1, int(config.pool_min_size)))
+        client: AsyncMSSQLClient = mssql_mod.AsyncMSSQLClient(
+            config.dsn,
+            host=config.host,
+            port=int(config.port),
+            database=config.database,
+            user=config.user,
+            password=config.password,
+            application_name=config.application_name,
+            encryption=config.encryption,
+            trust_server_certificate=config.trust_server_certificate,
+            ca_pem=config.ca_pem,
+            client_cert_pem=config.client_cert_pem,
+            client_key_pem=config.client_key_pem,
+            server_name=config.server_name,
+            connect_timeout_ms=max(1, int(config.connect_timeout_ms)),
+            query_timeout_ms=max(1, int(config.query_timeout_ms)),
+            pool_size=max(1, int(config.pool_min_size)),
+            max_overflow=max_overflow,
+            statement_cache_capacity=max(0, int(config.statement_cache_size)),
+            read_only_intent=bool(config.read_only_intent),
+            cloudsql_instance=config.cloud_sql_instance,
+            cloudsql_ip_type=config.cloudsql_ip_type,
+            cloudsql_auth_type=config.cloudsql_auth_type,
+            cloudsql_proxy_addr=config.cloudsql_proxy_addr,
+        )
+        return client
+
+    @staticmethod
+    def coerce_arrow_source(
+        data: Any,
+        columns: Sequence[str] | None = None,
+    ) -> tuple[Any, list[str] | None]:
+        """Coerce an `ArrowCursor`, Arrow IPC buffer, SHM segment name, or row sequence for `load_from_arrow`."""
+        col_list = [str(c) for c in columns] if columns is not None else None
+        if isinstance(data, str):
+            return (data if data.strip() else None), col_list
+        if isinstance(data, bytes):
+            return (data if len(data) > 0 else None), col_list
+        if isinstance(data, (bytearray, memoryview)):
+            raw = bytes(data)
+            return (raw if len(raw) > 0 else None), col_list
+        if isinstance(data, ArrowCursor):
+            for col in data._columns:
+                validate_identifier(str(col), "column", allow_dots=False)
+            if data._shm_cursor is not None:
+                return data._shm_cursor, col_list
+            view = data.buffer_view()
+            if len(view) > 0:
+                return bytes(view), col_list
+            if not data._rows:
+                return None, col_list
+            cur = ArrowCursor.from_rows(
+                data._rows,
+                col_list or data._columns,
+                threshold_rows=10_000_000,
+            )
+            return bytes(cur.buffer_view()), col_list
+        if hasattr(data, "shm_name") or hasattr(data, "to_ipc_bytes"):
+            return data, col_list
+
+        rows, inferred_cols = _table_to_rows_and_cols(data, columns)
+        for col in inferred_cols:
+            validate_identifier(str(col), "column", allow_dots=False)
+        if not rows or not inferred_cols:
+            return None, col_list
+        cur = ArrowCursor.from_rows(
+            rows,
+            inferred_cols,
+            threshold_rows=10_000_000,
+        )
+        effective_cols = col_list if col_list is not None else [str(c) for c in inferred_cols]
+        return bytes(cur.buffer_view()), effective_cols
 
     @staticmethod
     def rewrite_placeholders(sql: str) -> tuple[str, int]:
         """Rewrite `?` and `$1`/`$2` placeholders to T-SQL `@P1, @P2, ...` outside quotes, brackets, and comments."""
+        mssql_mod = import_optional("vertebra._mssql")
+        if mssql_mod is not None and hasattr(mssql_mod, "rewrite_mssql_placeholders"):
+            rewritten, count = mssql_mod.rewrite_mssql_placeholders(sql)
+            return str(rewritten), int(count)
+
         native = import_optional("vertebra._vertebra")
         if native is not None and hasattr(native, "rewrite_mssql_placeholders"):
             rewritten, count = native.rewrite_mssql_placeholders(sql)

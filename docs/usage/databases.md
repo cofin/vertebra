@@ -18,6 +18,7 @@ Core SQL and RESP3 configuration contracts ship in `vertebra-core`, while standa
 
     ```bash
     uv add "vertebra-core[mysql]"
+    uv add "vertebra-core[mssql]"
     uv add "vertebra-core[bigquery]"
     uv add "vertebra-core[duckdb]"
     uv add "vertebra-core[spanner]"
@@ -27,6 +28,7 @@ Core SQL and RESP3 configuration contracts ship in `vertebra-core`, while standa
 
     ```bash
     pip install "vertebra-core[mysql]"
+    pip install "vertebra-core[mssql]"
     pip install "vertebra-core[bigquery]"
     pip install "vertebra-core[duckdb]"
     pip install "vertebra-core[spanner]"
@@ -36,6 +38,7 @@ Core SQL and RESP3 configuration contracts ship in `vertebra-core`, while standa
 
     ```bash
     pdm add "vertebra-core[mysql]"
+    pdm add "vertebra-core[mssql]"
     pdm add "vertebra-core[bigquery]"
     pdm add "vertebra-core[duckdb]"
     pdm add "vertebra-core[spanner]"
@@ -45,6 +48,7 @@ Core SQL and RESP3 configuration contracts ship in `vertebra-core`, while standa
 
     ```bash
     poetry add "vertebra-core[mysql]"
+    poetry add "vertebra-core[mssql]"
     poetry add "vertebra-core[bigquery]"
     poetry add "vertebra-core[duckdb]"
     poetry add "vertebra-core[spanner]"
@@ -52,7 +56,7 @@ Core SQL and RESP3 configuration contracts ship in `vertebra-core`, while standa
 
 Installing `vertebra-core[duckdb]` provides the standalone `vertebra-duckdb` (`vertebra._duckdb`) native wheel across standard and free-threaded Python (`3.14t` / `3.15t`); without it `SyncDuckDBDriver` and `AsyncDuckDBDriver` raise `MissingDependencyError`.
 
-The native Oracle and SQL Server driver packages are not yet published. `OracleConfig` and `MSSQLConfig` import and parse URLs; constructing `SyncOracleDriver`, `AsyncOracleDriver`, `SyncMSSQLDriver`, or `AsyncMSSQLDriver` raises `MissingDependencyError`.
+The native Oracle driver package is not yet published. `OracleConfig` imports and parses URLs; constructing `SyncOracleDriver` or `AsyncOracleDriver` raises `MissingDependencyError`. SQL Server drivers execute through `vertebra._mssql` from the `mssql` extra and raise `MissingDependencyError` when it is absent.
 
 ## Unified Driver Contract & `provide_driver`
 
@@ -133,7 +137,7 @@ app = Litestar(
 | **MySQL / MariaDB** | `MySQLAsyncConfig`, `MySQLSyncConfig` | `MySQLConfig` | `SyncMySQLDriver`, `AsyncMySQLDriver` | Pure-Rust `vertebra._mysql` binary prepared statements (`COM_STMT_PREPARE` / `COM_STMT_EXECUTE`), `SyncMySQLPipeline` / `AsyncMySQLPipeline`, `VTBARROW` `ArrowCursor`, out-of-band `KILL QUERY` cancellation, direct `:3306` IAM OAuth2 token or Cloud SQL `:3307` mTLS dialer |
 | **SQLite / libSQL** | `SQLiteAsyncConfig`, `SQLiteSyncConfig` | `SQLiteConfig` | `SyncSQLiteDriver`, `AsyncSQLiteDriver` | WAL mode, `mmap_size`, SQLite 3.45+ binary `JSONB`, SHM single-writer/multi-reader leasing |
 | **Oracle 26ai** | `OracleAsyncConfig`, `OracleSyncConfig` | `OracleConfig` | `SyncOracleDriver`, `AsyncOracleDriver` | Native driver pending (drivers raise `MissingDependencyError`); Autonomous Database wallet and `tnsnames.ora` parsing, 26ai `VECTOR` and `OSON` codecs |
-| **SQL Server** | `MSSQLAsyncConfig`, `MSSQLSyncConfig` | `MSSQLConfig` | `SyncMSSQLDriver`, `AsyncMSSQLDriver` | Native driver pending (drivers raise `MissingDependencyError`); `?` / `$1` to `@P1` parameter rewriting |
+| **SQL Server** | `MSSQLAsyncConfig`, `MSSQLSyncConfig` | `MSSQLConfig` | `SyncMSSQLDriver`, `AsyncMSSQLDriver` | Pure-Rust TDS 7.4/8.0 (`vertebra._mssql`), `?` / `$1` to `@P1` `sp_executesql` RPC rewriter, `BulkLoad`, `ATTENTION` cancellation, `VTBARROW` `ArrowCursor`, `SyncMSSQLPipeline` / `AsyncMSSQLPipeline`, Cloud SQL `:3307` mTLS |
 | **DuckDB** | `DuckDBAsyncConfig`, `DuckDBSyncConfig` | `DuckDBConfig` | `SyncDuckDBDriver`, `AsyncDuckDBDriver` | Native `vertebra._duckdb` (`vertebra-core[duckdb]`), single-writer/multi-reader OLAP, savepoints, `SyncDuckDBPipeline` / `AsyncDuckDBPipeline`, active ADC `httpfs` secret rotation, zero-copy Arrow SHM + `Appender` |
 | **Google BigQuery** | `BigQueryAsyncConfig`, `BigQuerySyncConfig` | `BigQueryConfig` | `SyncBigQueryDriver`, `AsyncBigQueryDriver` | Pure-Rust REST v2 + Storage Read/Write v1 (`VTBARROW` zero-copy Arrow SHM via `select_to_arrow` / `load_from_arrow`), `ObjectTableConfig` (`ObjectRef`), `dry_run` cost ceiling, ADK/Litestar/Events/Artifact stores |
 | **Google Cloud Spanner** | `SpannerAsyncConfig`, `SpannerSyncConfig` | `SpannerConfig` | `SyncSpannerDriver`, `AsyncSpannerDriver` | Pure-Rust GoogleSQL + `Spangres`, cached `multiplexed = true` sessions, wound-wait `Aborted` retry, `BatchWrite`, Data Boost `PartitionQuery` (`select_to_arrow`), `SyncSpannerChangeStreamSource` / `AsyncSpannerChangeStreamSource` |

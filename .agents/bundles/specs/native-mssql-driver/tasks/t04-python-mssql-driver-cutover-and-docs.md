@@ -5,17 +5,17 @@ flow_id: native-mssql-driver
 title: "Cut Python SyncMSSQLDriver and AsyncMSSQLDriver over to vertebra._mssql, update tests, and refresh docs"
 description: "Cut src/py/vertebra/db/adapters/mssql/driver.py over to ensure_module('vertebra._mssql', package='vertebra-core[mssql]', extra='mssql') delegating to SyncMSSQLClient and AsyncMSSQLClient, remove all sqlite3/memory:// stand-in paths, update unit and conformance tests, verify wheel isolation, and update docs and OKF chapters."
 status: stable
-state: in_progress
+state: completed
 verification_strategy: tdd
 depends_on:
   - t03
 plan_revision: 1
-state_revision: 1
+state_revision: 2
 commit_sha: null
 claimed_at: "2026-11-09T15:15:00Z"
-completed_at: null
+completed_at: "2026-11-09T15:48:00Z"
 created_at: "2026-11-09T03:20:00Z"
-updated_at: "2026-11-09T15:15:00Z"
+updated_at: "2026-11-09T15:48:00Z"
 reads:
   - src/py/vertebra/db/adapters/mssql/driver.py
   - src/py/vertebra/db/adapters/mssql/config.py
@@ -73,9 +73,9 @@ Completes the Python-side cutover in `src/py/vertebra/db/adapters/mssql/driver.p
 
 ## Acceptance Criteria
 
-- [ ] `pytest src/py/tests/unit/db/test_mssql_driver.py src/py/tests/unit/db/test_enterprise_olap_drivers.py src/py/tests/unit/db/test_native_db_drivers.py src/py/tests/integration/db/test_driver_conformance.py` passes.
-- [ ] `mypy`, `ruff`, `mypy.stubtest vertebra._mssql`, and `review_setup validate` pass.
-- [ ] Wheel isolation check confirms zero leaked `vertebra/*.py` files in the built `vertebra_mssql` wheel.
+- [x] `pytest src/py/tests/unit/db/test_mssql_driver.py src/py/tests/unit/db/test_enterprise_olap_drivers.py src/py/tests/unit/db/test_native_db_drivers.py src/py/tests/integration/db/test_driver_conformance.py` passes.
+- [x] `mypy`, `ruff`, `mypy.stubtest vertebra._mssql`, and `review_setup validate` pass.
+- [x] Wheel isolation check confirms zero leaked `vertebra/*.py` files in the built `vertebra_mssql` wheel.
 
 [^mssql-py]: `src/py/vertebra/db/adapters/mssql/driver.py` — Python SyncMSSQLDriver and AsyncMSSQLDriver target cutover module.
 [^conformance-py]: `src/py/tests/integration/db/test_driver_conformance.py` — Cross-driver conformance test suite.

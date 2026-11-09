@@ -12,13 +12,13 @@ depends_on_flows:
 research:
   - ../native-data-platform/research/rust-driver-crates_20261103.md
   - ../integration-remediation/research/audit-findings_20261103.md
-plan_revision: 3
+plan_revision: 4
 plan_commit: fd571e3a
-state_revision: 4
-current_task: "native-mssql-driver:t04"
-last_verified_checkpoint: 5d194452
+state_revision: 5
+current_task: "native-mssql-driver:t05"
+last_verified_checkpoint: 62548e1e
 created_at: "2026-11-03T04:05:00Z"
-updated_at: "2026-11-09T15:15:00Z"
+updated_at: "2026-11-09T15:48:00Z"
 generated:
   by: flow-setup
   at: "2026-11-07T04:15:00Z"
@@ -74,10 +74,14 @@ See [crate research](../native-data-platform/research/rust-driver-crates_2026110
    - Codecs for `numeric`/`decimal`/`money`, `datetime`/`datetime2`/`datetimeoffset`/`date`/`time`, `uniqueidentifier` (`UUID`), `(n)varchar(max)` PLP, `varbinary`, `xml`, and `json`, plus `VTBARROW` `ShmCapsule` (`select_to_arrow`, `stream_arrow_batches`), `BulkLoadRequest` `load_from_arrow`, and `BrokerEngineBackend` registration.
 4. **Python driver cutover, conformance & documentation.**
    - Cut `src/py/vertebra/db/adapters/mssql/driver.py` (`SyncMSSQLDriver`, `AsyncMSSQLDriver`) over to `ensure_module("vertebra._mssql", package="vertebra-core[mssql]", extra="mssql")` delegating to `SyncMSSQLClient` and `AsyncMSSQLClient`, removing all `sqlite3` stand-in and `memory://` execution paths, forwarding `dialer` on `AsyncMSSQLDriver`, updating unit and conformance tests, and refreshing docs and OKF knowledge chapters.
+5. **Transactional statement pipelining & clean-break PyO3 surface (`PY-07`).**
+   - Implement `SyncMSSQLPipeline` and `AsyncMSSQLPipeline` in `src/py/vertebra/db/adapters/mssql/pipeline.py` (`SyncPipelineCapable` / `AsyncPipelineCapable` with `SAVE TRANSACTION` savepoint nesting), remove duplicate `*_transaction` method aliases on `SyncMSSQLClient` / `AsyncMSSQLClient`, preserve 0-row `COLMETADATA` column names in `execute_with_description`, and ensure 100% `mypy.stubtest vertebra._mssql` parity in `src/py/vertebra/_mssql.pyi`.
+6. **In-memory config validation, Cloud SQL `:3307` dialer wiring, secret redaction & wheel/GIL parity.**
+   - Validate port bounds (`1..=65535`), NUL bytes, `encryption` (`optional`, `required`, `not_supported`, `strict`), and PEM inputs, redact passwords in `Debug`/`Display`/`__repr__`, wire `SyncCloudSQLDialer` and `AsyncCloudSQLDialer` into `MSSQLCore` client creation, and add `mssql-test` / `mssql-wheel-check` `Makefile` targets plus free-threaded GIL and wheel isolation unit tests.
 
 ## Public Seams
 
-`vertebra._mssql` (`SyncMSSQLClient`, `AsyncMSSQLClient`), `SyncMSSQLDriver`, and `AsyncMSSQLDriver`.
+`vertebra._mssql` (`SyncMSSQLClient`, `AsyncMSSQLClient`), `SyncMSSQLDriver`, `AsyncMSSQLDriver`, `SyncMSSQLPipeline`, and `AsyncMSSQLPipeline`.
 
 ## Dependencies
 
@@ -94,8 +98,10 @@ See [crate research](../native-data-platform/research/rust-driver-crates_2026110
 
 - [x] [3b57e70f] [t01: Scaffold `vertebra-mssql` crate, TDS `PRELOGIN`/TLS/`LOGIN7`, and Cloud SQL `:3307` mTLS](tasks/t01-vertebra-mssql-crate-prelogin-and-tls.md)
 - [x] [5d194452] [t02: Implement MSSQL SQL batch, `sp_executesql` RPC, transactions, `ATTENTION` cancellation, and `DatabaseError` mapping](tasks/t02-mssql-rpc-transactions-attention-and-errors.md)
-- [x] [t03: Implement MSSQL codecs, `VTBARROW` `ShmCapsule` export, `BulkLoad` `load_from_arrow`, and `BrokerEngineBackend` registration](tasks/t03-mssql-codecs-vtbarrow-and-bulk-load.md)
-- [~] [t04: Cut Python `SyncMSSQLDriver` and `AsyncMSSQLDriver` over to `vertebra._mssql`, update tests, and refresh docs](tasks/t04-python-mssql-driver-cutover-and-docs.md)
+- [x] [62548e1e] [t03: Implement MSSQL codecs, `VTBARROW` `ShmCapsule` export, `BulkLoad` `load_from_arrow`, and `BrokerEngineBackend` registration](tasks/t03-mssql-codecs-vtbarrow-and-bulk-load.md)
+- [x] [t04: Cut Python `SyncMSSQLDriver` and `AsyncMSSQLDriver` over to `vertebra._mssql`, update tests, and refresh docs](tasks/t04-python-mssql-driver-cutover-and-docs.md)
+- [~] [t05: Implement `SyncMSSQLPipeline` / `AsyncMSSQLPipeline` and clean-break PyO3 method surface (`PY-07`)](tasks/t05-mssql-pipeline-and-clean-break-surface.md)
+- [ ] [t06: Harden in-memory config validation, Cloud SQL `:3307` dialer wiring, secret redaction, and wheel/GIL test parity](tasks/t06-mssql-config-hardening-dialer-and-wheel-parity.md)
 
 [^mssql-rs]: `src/rs/vertebra-db/src/mssql/mod.rs::rewrite_mssql_placeholders` — `@P1` placeholder rewrite helper, the surviving MSSQL codec in vertebra-db.
 [^fail-loud-baseline]: `.agents/bundles/specs/driver-fail-loud/spec.md` — Upstream flow that replaces the MSSQL `sqlite3` stand-in with a `MissingDependencyError` guard and deletes TDS framing.
