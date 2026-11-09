@@ -5,7 +5,7 @@ chapter_id: ch07-vertebra-db-pools-and-mysql
 title: Delete the mysql module and sha2 and rewrite the crate doc and Cargo description
 description: Delete src/rs/vertebra-db/src/mysql/mod.rs, its module declaration and re-exports, and the sha2 dependency, and rewrite the vertebra-db crate doc and Cargo description to describe codecs, dialers, transport, and shared-memory Arrow framing.
 status: stable
-state: pending
+state: completed
 priority: P2
 verification_strategy: static_validation
 depends_on:
@@ -23,18 +23,18 @@ tests:
 estimated_loc: 185
 plan_revision: 2
 plan_commit: fd571e3a
-state_revision: 0
+state_revision: 1
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-09T14:38:00Z"
+last_verified_commit: ccd45c42
+verification_evidence: "cargo test -p vertebra-db --features gcp and cargo doc -p vertebra-db --no-deps passed"
 created_at: "2026-11-07T00:00:00Z"
-updated_at: "2026-11-08T00:00:00Z"
-commit: null
+updated_at: "2026-11-09T14:38:00Z"
+commit: ccd45c42
 sources:
   - id: mysql-rs
     resource: src/rs/vertebra-db/src/mysql/mod.rs::compute_caching_sha2_scramble
@@ -133,10 +133,10 @@ Grep-only verification: `grep -rn "vertebra_db::mysql\|mysql::" src/rs --include
 
 ## Acceptance Criteria
 
-- [ ] `src/rs/vertebra-db/src/mysql/` no longer exists and `lib.rs` declares no `mysql` module (R8.6).
-- [ ] `vertebra-db/Cargo.toml` has no `sha2` dependency line and carries the new `description` (R8.6).
-- [ ] The crate doc matches the contract text; module list and re-exports match chapter spec §2.2 (R8.6).
-- [ ] Chapter Recovery Checkpoint exits 0.
+- [x] `src/rs/vertebra-db/src/mysql/` no longer exists and `lib.rs` declares no `mysql` module (R8.6).
+- [x] `vertebra-db/Cargo.toml` has no `sha2` dependency line and carries the new `description` (R8.6).
+- [x] The crate doc matches the contract text; module list and re-exports match chapter spec §2.2 (R8.6).
+- [x] Chapter Recovery Checkpoint exits 0.
 
 ## Notes & Discoveries
 

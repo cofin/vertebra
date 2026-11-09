@@ -5,7 +5,7 @@ chapter_id: ch07-vertebra-db-pools-and-mysql
 title: Delete PostgresPool and DuckdbBrokerPool
 description: Delete PostgresPool, PostgresPoolConfig, POSTGRES_DIALECT_TAG, the pool SHM test, and DuckdbBrokerPool from vertebra-db, and rewrite the postgres and duckdb module docs and crate-doc bullets.
 status: stable
-state: pending
+state: completed
 priority: P2
 verification_strategy: static_validation
 depends_on: []
@@ -23,18 +23,18 @@ tests:
 estimated_loc: 212
 plan_revision: 2
 plan_commit: fd571e3a
-state_revision: 0
+state_revision: 1
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-09T14:38:00Z"
+last_verified_commit: ccd45c42
+verification_evidence: "cargo test -p vertebra-db --features gcp passed"
 created_at: "2026-11-07T00:00:00Z"
-updated_at: "2026-11-08T00:00:00Z"
-commit: null
+updated_at: "2026-11-09T14:38:00Z"
+commit: ccd45c42
 sources:
   - id: postgres-rs
     resource: src/rs/vertebra-db/src/postgres/mod.rs::PostgresPool
@@ -120,10 +120,10 @@ Grep-only verification: `grep -rnE "PostgresPool|POSTGRES_DIALECT_TAG|DuckdbBrok
 
 ## Acceptance Criteria
 
-- [ ] `PostgresPool`, `PostgresPoolConfig`, `POSTGRES_DIALECT_TAG`, and `DuckdbBrokerPool` are gone from the workspace (R8.3).
-- [ ] PostgreSQL codecs, `PoolerMode`, `DuckdbConfig`, and their tests are unchanged and pass (R8.3).
-- [ ] Module docs and crate-doc bullets match the contract text, and `lib.rs` re-exports `SqliteConfig` only from `sqlite` (R8.3).
-- [ ] `make rs-test` and workspace clippy exit 0.
+- [x] `PostgresPool`, `PostgresPoolConfig`, `POSTGRES_DIALECT_TAG`, and `DuckdbBrokerPool` are gone from the workspace (R8.3).
+- [x] PostgreSQL codecs, `PoolerMode`, `DuckdbConfig`, and their tests are unchanged and pass (R8.3).
+- [x] Module docs and crate-doc bullets match the contract text, and `lib.rs` re-exports `SqliteConfig` only from `sqlite` (R8.3).
+- [x] `make rs-test` and workspace clippy exit 0.
 
 ## Notes & Discoveries
 

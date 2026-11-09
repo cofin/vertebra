@@ -5,7 +5,7 @@ chapter_id: ch07-vertebra-db-pools-and-mysql
 title: Delete MysqlPool, MysqlPoolConfig, and OracleWalletMaterial
 description: Delete MysqlPool, MysqlPoolConfig, MYSQL_DIALECT_TAG, the pool lease test, and their lib.rs re-exports from the vertebra-db mysql module, and delete the OracleWalletMaterial struct with from_directory and its test from oracle/tns.rs.
 status: stable
-state: pending
+state: completed
 priority: P2
 verification_strategy: static_validation
 depends_on:
@@ -24,18 +24,18 @@ tests:
 estimated_loc: 215
 plan_revision: 2
 plan_commit: fd571e3a
-state_revision: 0
+state_revision: 1
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-09T14:38:00Z"
+last_verified_commit: ccd45c42
+verification_evidence: "cargo test -p vertebra-db --features gcp passed"
 created_at: "2026-11-07T00:00:00Z"
-updated_at: "2026-11-08T00:00:00Z"
-commit: null
+updated_at: "2026-11-09T14:38:00Z"
+commit: ccd45c42
 sources:
   - id: mysql-rs
     resource: src/rs/vertebra-db/src/mysql/mod.rs::MysqlPool
@@ -115,10 +115,10 @@ Grep-only verification: `grep -rnE "MysqlPool|MYSQL_DIALECT_TAG" src/rs --includ
 
 ## Acceptance Criteria
 
-- [ ] `MysqlPool`, `MysqlPoolConfig`, and `MYSQL_DIALECT_TAG` are gone from the workspace (R8.5).
-- [ ] The `OracleWalletMaterial` struct, `from_directory`, and its test are gone; TNS parsing and alias resolution tests pass unchanged (R8.5).
-- [ ] `grep -rnE "ShmLeaseTable|ShmStatementCache" src/rs/vertebra-db/src` prints nothing: no `vertebra-db` module imports lease or statement-cache types (R8.5).
-- [ ] `make rs-test` and workspace clippy exit 0.
+- [x] `MysqlPool`, `MysqlPoolConfig`, and `MYSQL_DIALECT_TAG` are gone from the workspace (R8.5).
+- [x] The `OracleWalletMaterial` struct, `from_directory`, and its test are gone; TNS parsing and alias resolution tests pass unchanged (R8.5).
+- [x] `grep -rnE "ShmLeaseTable|ShmStatementCache" src/rs/vertebra-db/src` prints nothing: no `vertebra-db` module imports lease or statement-cache types (R8.5).
+- [x] `make rs-test` and workspace clippy exit 0.
 
 ## Notes & Discoveries
 

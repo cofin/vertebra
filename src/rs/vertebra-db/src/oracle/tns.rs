@@ -1,7 +1,6 @@
-//! Pure-Rust Oracle `tnsnames.ora`, `sqlnet.ora`, and Autonomous Database Wallet parser.
+//! Oracle `tnsnames.ora` parser, connect-descriptor model, and alias resolver.
 
 use std::collections::HashMap;
-use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
@@ -236,63 +235,6 @@ pub fn resolve_tns_alias(contents: &str, alias: &str) -> Option<OracleConnectDes
     OracleConnectDescriptor::from_descriptor_str(raw_desc)
 }
 
-/// Parsed Oracle Autonomous Database Wallet material (`tnsnames.ora`, `sqlnet.ora`, `ewallet.pem`).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct OracleWalletMaterial {
-    pub tnsnames_ora: String,
-    pub sqlnet_ora: String,
-    pub ewallet_pem: Option<String>,
-    pub aliases: HashMap<String, OracleConnectDescriptor>,
-}
-
-impl OracleWalletMaterial {
-    /// Load and parse an extracted Autonomous Database Wallet directory (`tnsnames.ora`, `sqlnet.ora`, `ewallet.pem`).
-    pub fn from_directory(path: &Path) -> Result<Self, String> {
-        let tns_path = path.join("tnsnames.ora");
-        if !tns_path.exists() {
-            return Err(format!(
-                "missing tnsnames.ora in wallet directory `{}`",
-                path.display()
-            ));
-        }
-        let tnsnames_ora = std::fs::read_to_string(&tns_path)
-            .map_err(|e| format!("failed to read `{}`: {e}", tns_path.display()))?;
-
-        let sqlnet_path = path.join("sqlnet.ora");
-        let sqlnet_ora = if sqlnet_path.exists() {
-            std::fs::read_to_string(&sqlnet_path)
-                .map_err(|e| format!("failed to read `{}`: {e}", sqlnet_path.display()))?
-        } else {
-            String::new()
-        };
-
-        let pem_path = path.join("ewallet.pem");
-        let ewallet_pem = if pem_path.exists() {
-            Some(
-                std::fs::read_to_string(&pem_path)
-                    .map_err(|e| format!("failed to read `{}`: {e}", pem_path.display()))?,
-            )
-        } else {
-            None
-        };
-
-        let raw_map = parse_tnsnames_ora(&tnsnames_ora);
-        let mut aliases = HashMap::with_capacity(raw_map.len());
-        for (alias, desc_str) in raw_map {
-            if let Some(desc) = OracleConnectDescriptor::from_descriptor_str(&desc_str) {
-                aliases.insert(alias, desc);
-            }
-        }
-
-        Ok(Self {
-            tnsnames_ora,
-            sqlnet_ora,
-            ewallet_pem,
-            aliases,
-        })
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -331,32 +273,5 @@ myatp_high, myatp_tp =
         let rendered = desc.to_tns_descriptor();
         assert!(rendered.contains("(PROTOCOL=TCPS)"));
         assert!(rendered.contains("(PORT=1522)"));
-    }
-
-    #[test]
-    fn test_oracle_wallet_from_directory() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            dir.path().join("tnsnames.ora"),
-            "db_tp = (DESCRIPTION=(ADDRESS=(PROTOCOL=TCPS)(HOST=adb.example.com)(PORT=1522))(CONNECT_DATA=(SERVICE_NAME=svc_tp)))",
-        )
-        .unwrap();
-        std::fs::write(
-            dir.path().join("sqlnet.ora"),
-            "WALLET_LOCATION = (SOURCE = (METHOD = file))",
-        )
-        .unwrap();
-        std::fs::write(
-            dir.path().join("ewallet.pem"),
-            "-----BEGIN CERTIFICATE-----\nMIIB...\n-----END CERTIFICATE-----\n",
-        )
-        .unwrap();
-
-        let wallet = OracleWalletMaterial::from_directory(dir.path()).unwrap();
-        assert!(wallet.ewallet_pem.is_some());
-        let desc = wallet.aliases.get("DB_TP").unwrap();
-        assert_eq!(desc.host, "adb.example.com");
-        assert_eq!(desc.port, 1522);
-        assert_eq!(desc.service_name.as_deref(), Some("svc_tp"));
     }
 }

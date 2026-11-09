@@ -5,7 +5,7 @@ chapter_id: ch07-vertebra-db-pools-and-mysql
 title: Delete SqlitePool and rmp-serde
 description: Delete SqlitePool with its msgpack helpers, SQLITE_DIALECT_TAG, and lease test from vertebra-db, and drop the rmp-serde dependency from the vertebra-db manifest and the workspace dependency table.
 status: stable
-state: pending
+state: completed
 priority: P2
 verification_strategy: static_validation
 depends_on:
@@ -24,18 +24,18 @@ tests:
 estimated_loc: 145
 plan_revision: 2
 plan_commit: fd571e3a
-state_revision: 0
+state_revision: 1
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-09T14:38:00Z"
+last_verified_commit: ccd45c42
+verification_evidence: "cargo test -p vertebra-db --features gcp and cargo check --workspace --locked passed"
 created_at: "2026-11-07T00:00:00Z"
-updated_at: "2026-11-08T00:00:00Z"
-commit: null
+updated_at: "2026-11-09T14:38:00Z"
+commit: ccd45c42
 sources:
   - id: sqlite-rs
     resource: src/rs/vertebra-db/src/sqlite/mod.rs::SqlitePool
@@ -117,10 +117,10 @@ Grep-only verification: `grep -rn "rmp-serde\|rmp_serde" src/rs --include=*.rs -
 
 ## Acceptance Criteria
 
-- [ ] `SqlitePool`, its msgpack helpers, and `SQLITE_DIALECT_TAG` are gone from the workspace (R8.4).
-- [ ] `rmp-serde` is absent from both manifests and from the regenerated `Cargo.lock` (R8.4).
-- [ ] `SqliteConfig` pragmas test passes unchanged (R8.4).
-- [ ] `make rs-test`, workspace clippy, and `cargo check --workspace --locked` exit 0.
+- [x] `SqlitePool`, its msgpack helpers, and `SQLITE_DIALECT_TAG` are gone from the workspace (R8.4).
+- [x] `rmp-serde` is absent from both manifests and from the regenerated `Cargo.lock` (R8.4).
+- [x] `SqliteConfig` pragmas test passes unchanged (R8.4).
+- [x] `make rs-test`, workspace clippy, and `cargo check --workspace --locked` exit 0.
 
 ## Notes & Discoveries
 

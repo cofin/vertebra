@@ -6,19 +6,19 @@ chapter_id: ch07-vertebra-db-pools-and-mysql
 title: "Chapter 07: vertebra-db Pools and MySQL Removal"
 description: Delete PostgresPool, DuckdbBrokerPool, SqlitePool, MysqlPool, their dialect tags, the OracleWalletMaterial struct, the mysql module, and the sha2 and rmp-serde dependencies from vertebra-db, and rewrite the crate doc, module docs, and Cargo description to describe codecs instead of drivers.
 status: stable
-state: planned
+state: completed
 planning_status: complete
 depends_on_chapters:
   - ch06-oracle-codec-cleanup
 replan_trigger: null
-current_task: "driver-fail-loud:ch07:t01"
+current_task: null
 plan_revision: 2
 plan_commit: fd571e3a
-state_revision: 0
-last_verified_checkpoint: null
+state_revision: 1
+last_verified_checkpoint: ccd45c42
 last_reviewed_commit: null
 created_at: "2026-11-08T00:00:00Z"
-updated_at: "2026-11-08T00:00:00Z"
+updated_at: "2026-11-09T14:38:00Z"
 generated:
   by: flow/0.28.0
   at: "2026-11-08T00:00:00Z"
@@ -249,10 +249,10 @@ No Python surface changes in this chapter; `_vertebra.pyi` is untouched.
 
 ## 5. Implementation Plan
 
-- [ ] driver-fail-loud:ch07:t01 — Delete PostgresPool and DuckdbBrokerPool (tasks/t01-rust-postgres-duckdb-pools.md)
-- [ ] driver-fail-loud:ch07:t02 — Delete SqlitePool and rmp-serde (tasks/t02-rust-sqlite-pool-and-rmp-serde.md)
-- [ ] driver-fail-loud:ch07:t03 — Delete MysqlPool, MysqlPoolConfig, and OracleWalletMaterial (tasks/t03-rust-mysql-pool-and-oracle-wallet.md)
-- [ ] driver-fail-loud:ch07:t04 — Delete the mysql module and sha2 and rewrite the crate doc and Cargo description (tasks/t04-rust-mysql-module-and-crate-docs.md)
+- [x] [ccd45c42] driver-fail-loud:ch07:t01 — Delete PostgresPool and DuckdbBrokerPool (tasks/t01-rust-postgres-duckdb-pools.md)
+- [x] [ccd45c42] driver-fail-loud:ch07:t02 — Delete SqlitePool and rmp-serde (tasks/t02-rust-sqlite-pool-and-rmp-serde.md)
+- [x] [ccd45c42] driver-fail-loud:ch07:t03 — Delete MysqlPool, MysqlPoolConfig, and OracleWalletMaterial (tasks/t03-rust-mysql-pool-and-oracle-wallet.md)
+- [x] [ccd45c42] driver-fail-loud:ch07:t04 — Delete the mysql module and sha2 and rewrite the crate doc and Cargo description (tasks/t04-rust-mysql-module-and-crate-docs.md)
 - **Chapter Recovery Checkpoint**: `make lint-all && make rs-test && make py-test` exits `0`.
 
 ## 6. Current State & Remaining Plan Snapshot

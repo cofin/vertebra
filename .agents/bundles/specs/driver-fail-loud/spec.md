@@ -20,17 +20,17 @@ chapters:
   - ch11-docs-and-okf
   - ch12-queue-docs-and-knowledge
   - ch13-agent-knowledge-and-embeddings-docs
-current_chapter: ch07-vertebra-db-pools-and-mysql
-current_task: "driver-fail-loud:ch07:t01"
+current_chapter: ch08-install-hints-and-extras-gate
+current_task: "driver-fail-loud:ch08:t01"
 parent_prd: native-data-platform
 research:
   - research/driver-restructure_20261107.md
   - research/change-surface_20261107.md
 plan_revision: 2
 plan_commit: fd571e3a
-state_revision: 6
+state_revision: 7
 created_at: "2026-11-07T00:00:00Z"
-updated_at: "2026-11-09T14:32:00Z"
+updated_at: "2026-11-09T14:38:00Z"
 verified:
   - by: agent:code-reviewer
     at: "2026-11-08T00:00:00Z"
@@ -365,7 +365,7 @@ unexport PY_GIL_DISABLED PY_TEST_GROUPS
 - [x] [20c535e3] ch04-redis-valkey-memory-removal — `RedisConfig` drops the `memory` scheme; Redis and Valkey drivers and store factories reject `memory://` ([spec](chapters/ch04-redis-valkey-memory-removal/spec.md))
 - [x] [c87687c0] ch05-mssql-codec-cleanup — MSSQL Python batch wrappers, the `encode_tds_sql_batch` binding and stub, Rust TDS framing, `MSSQL_DIALECT_TAG`, and `MssqlPool` removed; the placeholder rewriter stays ([spec](chapters/ch05-mssql-codec-cleanup/spec.md))
 - [x] [63e91e84] ch06-oracle-codec-cleanup — Rust TNS framing, `TnsPacketType`, `ORACLE_DIALECT_TAG`, and `OraclePool` removed; Oracle TNS and Redis hash-slot probes for unexported natives deleted; Oracle and DuckDB docs describe codecs ([spec](chapters/ch06-oracle-codec-cleanup/spec.md))
-- [ ] ch07-vertebra-db-pools-and-mysql — PostgreSQL, DuckDB, SQLite, and MySQL pools and dialect tags, the `OracleWalletMaterial` struct, the `mysql` module, and the `sha2` / `rmp-serde` dependencies removed; crate docs describe codecs ([spec](chapters/ch07-vertebra-db-pools-and-mysql/spec.md))
+- [x] [ccd45c42] ch07-vertebra-db-pools-and-mysql — PostgreSQL, DuckDB, SQLite, and MySQL pools and dialect tags, the `OracleWalletMaterial` struct, the `mysql` module, and the `sha2` / `rmp-serde` dependencies removed; crate docs describe codecs ([spec](chapters/ch07-vertebra-db-pools-and-mysql/spec.md))
 - [ ] ch08-install-hints-and-extras-gate — `MissingDependencyError` hints default to `vertebra-core[<extra>]`; undeclared extras and sentence-valued package names are replaced behind an AST extras gate ([spec](chapters/ch08-install-hints-and-extras-gate/spec.md))
 - [ ] ch09-conformance-outcomes — Conformance skips a missing native module, fails under Docker only for non-pending engines, and applies strict `xfail` only when a pending engine's module imports ([spec](chapters/ch09-conformance-outcomes/spec.md))
 - [ ] ch10-queue-backend-fail-loud — PostgreSQL, Redis/Valkey, and Spanner queue backends require a live executor or client ([spec](chapters/ch10-queue-backend-fail-loud/spec.md))
