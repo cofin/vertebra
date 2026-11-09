@@ -2952,6 +2952,59 @@ fn test_s3_virtual_hosted_style_rejects_ip_literal_endpoints() {
     }
 }
 
+#[derive(Debug, Default)]
+struct UploadProbes {
+    parts: std::sync::atomic::AtomicUsize,
+    completes: std::sync::atomic::AtomicUsize,
+    aborts: std::sync::atomic::AtomicUsize,
+    fail_parts: std::sync::atomic::AtomicBool,
+    fail_complete: std::sync::atomic::AtomicBool,
+}
+
+#[derive(Debug)]
+struct CountingUpload {
+    inner: Box<dyn object_store::MultipartUpload>,
+    probes: std::sync::Arc<UploadProbes>,
+}
+
+fn injected_failure(what: &str) -> object_store::Error {
+    object_store::Error::Generic {
+        store: "CountingStore",
+        source: format!("injected {what} failure").into(),
+    }
+}
+
+#[async_trait::async_trait]
+impl object_store::MultipartUpload for CountingUpload {
+    fn put_part(
+        &mut self,
+        data: object_store::PutPayload,
+    ) -> futures::future::BoxFuture<'static, object_store::Result<()>> {
+        use std::sync::atomic::Ordering;
+        self.probes.parts.fetch_add(1, Ordering::SeqCst);
+        if self.probes.fail_parts.load(Ordering::SeqCst) {
+            return Box::pin(async { Err(injected_failure("part")) });
+        }
+        self.inner.put_part(data)
+    }
+
+    async fn complete(&mut self) -> object_store::Result<object_store::PutResult> {
+        use std::sync::atomic::Ordering;
+        self.probes.completes.fetch_add(1, Ordering::SeqCst);
+        if self.probes.fail_complete.load(Ordering::SeqCst) {
+            return Err(injected_failure("complete"));
+        }
+        self.inner.complete().await
+    }
+
+    async fn abort(&mut self) -> object_store::Result<()> {
+        self.probes
+            .aborts
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.abort().await
+    }
+}
+
 #[derive(Debug)]
 struct CountingStore {
     inner: object_store::memory::InMemory,
@@ -2959,7 +3012,10 @@ struct CountingStore {
     multipart_calls: std::sync::atomic::AtomicUsize,
     get_in_flight: std::sync::atomic::AtomicUsize,
     get_max_in_flight: std::sync::atomic::AtomicUsize,
+    get_ok: std::sync::atomic::AtomicUsize,
     get_delay: std::time::Duration,
+    stream_stall: std::time::Duration,
+    uploads: std::sync::Arc<UploadProbes>,
 }
 
 impl CountingStore {
@@ -2970,8 +3026,17 @@ impl CountingStore {
             multipart_calls: std::sync::atomic::AtomicUsize::new(0),
             get_in_flight: std::sync::atomic::AtomicUsize::new(0),
             get_max_in_flight: std::sync::atomic::AtomicUsize::new(0),
+            get_ok: std::sync::atomic::AtomicUsize::new(0),
             get_delay,
+            stream_stall: std::time::Duration::ZERO,
+            uploads: std::sync::Arc::new(UploadProbes::default()),
         }
+    }
+
+    /// Deliver each object's first chunk, then stall the body stream for `stall`.
+    fn with_stream_stall(mut self, stall: std::time::Duration) -> Self {
+        self.stream_stall = stall;
+        self
     }
 }
 
@@ -3001,7 +3066,11 @@ impl object_store::ObjectStore for CountingStore {
     ) -> object_store::Result<Box<dyn object_store::MultipartUpload>> {
         self.multipart_calls
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        self.inner.put_multipart_opts(location, opts).await
+        let inner = self.inner.put_multipart_opts(location, opts).await?;
+        Ok(Box::new(CountingUpload {
+            inner,
+            probes: std::sync::Arc::clone(&self.uploads),
+        }))
     }
 
     async fn get_opts(
@@ -3021,7 +3090,21 @@ impl object_store::ObjectStore for CountingStore {
         let result = self.inner.get_opts(location, options).await;
         self.get_in_flight
             .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-        result
+        let mut result = result?;
+        self.get_ok
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if !self.stream_stall.is_zero()
+            && let object_store::GetResultPayload::Stream(body) = result.payload
+        {
+            use futures::StreamExt;
+            let stall = self.stream_stall;
+            let tail = futures::stream::once(async move {
+                tokio::time::sleep(stall).await;
+                Ok(Bytes::new())
+            });
+            result.payload = object_store::GetResultPayload::Stream(body.chain(tail).boxed());
+        }
+        Ok(result)
     }
 
     fn delete_stream(
@@ -3154,7 +3237,15 @@ struct GcsComposeEmulator {
     max_sources_per_call: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
-async fn spawn_gcs_compose_emulator(reject_bearer: Option<&'static str>) -> GcsComposeEmulator {
+/// Spawn a loopback GCS emulator serving JSON `compose`, XML `HEAD`, and XML `DELETE`.
+///
+/// `HEAD` reports an XML-API ETag (`"xml-{size}"`) distinct from the JSON `compose` ETag so
+/// tests can tell which API produced returned metadata. When `stall_compose_to` names a
+/// destination, compose calls targeting it hang for 30 seconds before responding.
+async fn spawn_gcs_compose_emulator(
+    reject_bearer: Option<&'static str>,
+    stall_compose_to: Option<&'static str>,
+) -> GcsComposeEmulator {
     use std::sync::atomic::Ordering;
     use std::sync::{Arc, Mutex};
     use tokio::io::AsyncWriteExt;
@@ -3184,6 +3275,12 @@ async fn spawn_gcs_compose_emulator(reject_bearer: Option<&'static str>) -> GcsC
                 let target = parts.next().unwrap_or_default().to_string();
                 let path_only = percent_decode_path(target.split('?').next().unwrap_or_default());
                 let lower = head.to_ascii_lowercase();
+                if method == "POST"
+                    && let Some(stalled) = stall_compose_to
+                    && path_only.ends_with(&format!("/o/{stalled}/compose"))
+                {
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                }
 
                 let resp = if let Some(rejected) = reject_bearer
                     && lower.contains(&format!("authorization: bearer {rejected}"))
@@ -3240,6 +3337,16 @@ async fn spawn_gcs_compose_emulator(reject_bearer: Option<&'static str>) -> GcsC
                                 r#"{{"kind":"storage#object","name":"{dst}","bucket":"emu-bucket","generation":"{generation}","contentType":"{content_type}","size":"{size}","etag":"etag-{generation}","updated":"2026-11-09T00:00:00.000Z"}}"#
                             ),
                         )
+                    }
+                } else if method == "HEAD"
+                    && let Some(key) = path_only.strip_prefix("/emu-bucket/")
+                {
+                    match objects.lock().expect("lock").get(key).map(Vec::len) {
+                        Some(size) => format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {size}\r\nETag: \"xml-{size}\"\r\nLast-Modified: Mon, 09 Nov 2026 00:00:00 GMT\r\nx-goog-generation: {size}\r\nConnection: close\r\n\r\n"
+                        ),
+                        None => "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                            .to_string(),
                     }
                 } else if method == "DELETE"
                     && let Some(key) = path_only.strip_prefix("/emu-bucket/")
@@ -3410,6 +3517,10 @@ async fn test_get_files_put_files_bounded_concurrency_order_and_cleanup() {
     );
 
     let fail_dir = tmp.path().join("dl-fail");
+    std::fs::create_dir_all(&fail_dir).expect("create fail dir");
+    let preexisting = fail_dir.join("obj-0.bin");
+    std::fs::write(&preexisting, b"stale").expect("write pre-existing destination");
+    counting.get_ok.store(0, Ordering::SeqCst);
     let failing_pairs: Vec<(String, String)> = (0..8)
         .map(|i| {
             let key = if i == 5 {
@@ -3431,12 +3542,25 @@ async fn test_get_files_put_files_bounded_concurrency_order_and_cleanup() {
         err,
         StorageError::ObjectStore(object_store::Error::NotFound { .. })
     ));
-    let leftovers: Vec<_> = std::fs::read_dir(&fail_dir)
-        .map(|rd| rd.flatten().map(|e| e.path()).collect())
-        .unwrap_or_default();
+    let completed_before_failure = counting.get_ok.load(Ordering::SeqCst);
     assert!(
-        leftovers.is_empty(),
-        "failed get_files must unlink files written in that batch: {leftovers:?}"
+        completed_before_failure >= 3,
+        "item 5 only starts after earlier downloads free a slot (observed {completed_before_failure})"
+    );
+    let leftovers: Vec<_> = std::fs::read_dir(&fail_dir)
+        .expect("fail dir survives cleanup")
+        .flatten()
+        .map(|e| e.path())
+        .collect();
+    assert_eq!(
+        leftovers,
+        vec![preexisting.clone()],
+        "failed get_files must unlink only destinations it created"
+    );
+    assert_eq!(
+        std::fs::read(&preexisting).expect("read replaced destination"),
+        patterned_payload(1000, 0),
+        "a pre-existing destination that was replaced stays replaced"
     );
 
     for zero in [
@@ -3508,7 +3632,7 @@ async fn test_gcs_compose_tree_fold_cleans_temporaries_and_retries_401() {
         SharedGcpTokenCacheHandle,
     };
 
-    let emu = spawn_gcs_compose_emulator(None).await;
+    let emu = spawn_gcs_compose_emulator(None, None).await;
     let mut expected = Vec::new();
     let mut shard_names = Vec::new();
     {
@@ -3545,7 +3669,17 @@ async fn test_gcs_compose_tree_fold_cleans_temporaries_and_retries_401() {
         meta.content_type.as_deref(),
         Some("application/octet-stream")
     );
-    assert!(meta.version.is_some());
+    let xml_etag = format!("\"xml-{}\"", expected.len());
+    assert_eq!(
+        meta.etag.as_deref(),
+        Some(xml_etag.as_str()),
+        "compose metadata must carry the XML-API ETag that head and put_opts use"
+    );
+    assert_eq!(
+        meta.etag,
+        engine.head("out/combined.bin").await.expect("head").etag
+    );
+    assert_eq!(meta.version, Some(expected.len().to_string()));
     assert!(emu.max_sources_per_call.load(Ordering::SeqCst) <= 32);
     {
         let guard = emu.objects.lock().expect("lock");
@@ -3561,6 +3695,29 @@ async fn test_gcs_compose_tree_fold_cleans_temporaries_and_retries_401() {
         .filter(|r| r.contains("/compose"))
         .count();
     assert_eq!(compose_calls, 4);
+
+    engine
+        .compose(shard_names.clone(), "out/combined.bin", None)
+        .await
+        .expect("repeat 70-shard compose");
+    let temp_names: std::collections::BTreeSet<String> = emu
+        .requests
+        .lock()
+        .expect("lock")
+        .iter()
+        .filter(|r| r.starts_with("POST "))
+        .map(|r| percent_decode_path(r))
+        .filter_map(|r| {
+            let start = r.find("out/combined.bin.compose-")?;
+            let end = r[start..].find("/compose ")? + start;
+            Some(r[start..end].to_string())
+        })
+        .collect();
+    assert_eq!(
+        temp_names.len(),
+        6,
+        "each compose call must fold through its own uniquely named temporaries: {temp_names:?}"
+    );
 
     emu.objects
         .lock()
@@ -3587,7 +3744,10 @@ async fn test_gcs_compose_tree_fold_cleans_temporaries_and_retries_401() {
         );
     }
     let deleted_temp = emu.requests.lock().expect("lock").iter().any(|r| {
-        r.starts_with("DELETE ") && percent_decode_path(r).contains("broken.bin.compose-0000")
+        let decoded = percent_decode_path(r);
+        r.starts_with("DELETE ")
+            && decoded.contains("broken.bin.compose-")
+            && decoded.contains("-0000 ")
     });
     assert!(
         deleted_temp,
@@ -3616,7 +3776,7 @@ async fn test_gcs_compose_tree_fold_cleans_temporaries_and_retries_401() {
             });
         }
     });
-    let authed_emu = spawn_gcs_compose_emulator(Some("tok_1")).await;
+    let authed_emu = spawn_gcs_compose_emulator(Some("tok_1"), None).await;
     authed_emu.objects.lock().expect("lock").extend([
         ("x/one".to_string(), b"one-".to_vec()),
         ("x/two".to_string(), b"two".to_vec()),
@@ -3667,7 +3827,8 @@ async fn test_gcs_compose_tree_fold_cleans_temporaries_and_retries_401() {
     );
     let authed_requests = authed_emu.requests.lock().expect("lock");
     let last = authed_requests
-        .last()
+        .iter()
+        .rfind(|r| r.contains("/compose"))
         .expect("captured compose request")
         .to_ascii_lowercase();
     assert!(last.contains("authorization: bearer tok_2"));
@@ -3749,4 +3910,245 @@ async fn test_compose_multipart_fallback_and_empty_sources() {
         ));
         assert!(!engine.exists("partial.txt").await.expect("exists partial"));
     }
+}
+
+#[tokio::test]
+async fn test_get_file_cancelled_mid_stream_removes_part_file() {
+    use std::sync::Arc;
+
+    let tmp = TempDir::new().expect("tempdir");
+    let counting = Arc::new(
+        CountingStore::new(std::time::Duration::ZERO)
+            .with_stream_stall(std::time::Duration::from_secs(30)),
+    );
+    let engine = ObjectStoreEngine::with_store(counting, "memory");
+    engine
+        .put(
+            "slow/object.bin",
+            Bytes::from(patterned_payload(64 * 1024, 9)),
+        )
+        .await
+        .expect("seed object");
+
+    let out_dir = tmp.path().join("cancel");
+    let target = out_dir.join("object.bin");
+    let task_engine = engine.clone();
+    let task_target = target.display().to_string();
+    let task =
+        tokio::spawn(async move { task_engine.get_file("slow/object.bin", &task_target).await });
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    while leftover_part_files(&out_dir).is_empty() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "get_file never created its .part file"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    task.abort();
+    let joined = task.await.expect_err("aborted download must not finish");
+    assert!(joined.is_cancelled());
+
+    assert!(
+        leftover_part_files(&out_dir).is_empty(),
+        "cancelled get_file must unlink its .part file: {:?}",
+        leftover_part_files(&out_dir)
+    );
+    assert!(!target.exists());
+}
+
+#[tokio::test]
+async fn test_multipart_compose_frames_parts_and_cancellation_aborts_upload() {
+    use std::sync::Arc;
+    use std::sync::atomic::Ordering;
+
+    let counting = Arc::new(CountingStore::new(std::time::Duration::ZERO));
+    let engine = ObjectStoreEngine::with_store(counting.clone(), "memory");
+    let chunk = 64 * 1024;
+    let mut sources = Vec::new();
+    let mut expected = Vec::new();
+    for i in 0..300u32 {
+        let data = patterned_payload(chunk, (i % 251) as u8);
+        expected.extend_from_slice(&data);
+        let key = format!("small/part-{i:04}");
+        engine
+            .put(&key, Bytes::from(data))
+            .await
+            .expect("seed part");
+        sources.push(key);
+    }
+    let total = expected.len();
+    let meta = engine
+        .compose(sources.clone(), "framed/out.bin", None)
+        .await
+        .expect("multipart compose");
+    assert_eq!(meta.size, total as u64);
+    let parts = counting.uploads.parts.load(Ordering::SeqCst);
+    let max_parts = total.div_ceil(8 * 1024 * 1024);
+    assert!(
+        parts <= max_parts,
+        "{} source chunks must be framed into at most {max_parts} parts, got {parts}",
+        sources.len()
+    );
+    assert!(engine.get("framed/out.bin").await.expect("get composed") == expected);
+
+    let stalled = Arc::new(
+        CountingStore::new(std::time::Duration::ZERO)
+            .with_stream_stall(std::time::Duration::from_secs(30)),
+    );
+    let stalled_engine = ObjectStoreEngine::with_store(stalled.clone(), "memory");
+    stalled_engine
+        .put("slow/a", Bytes::from_static(b"alpha"))
+        .await
+        .expect("seed slow source");
+    let task_engine = stalled_engine.clone();
+    let task = tokio::spawn(async move {
+        task_engine
+            .compose(vec!["slow/a".to_string()], "slow/out", None)
+            .await
+    });
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    while stalled.get_ok.load(Ordering::SeqCst) == 0 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "compose never started reading its source"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    assert_eq!(stalled.multipart_calls.load(Ordering::SeqCst), 1);
+    task.abort();
+    assert!(task.await.expect_err("aborted compose").is_cancelled());
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    while stalled.uploads.aborts.load(Ordering::SeqCst) == 0 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "dropped compose must abort its multipart upload"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    assert_eq!(stalled.uploads.completes.load(Ordering::SeqCst), 0);
+    assert!(!stalled_engine.exists("slow/out").await.expect("exists"));
+}
+
+#[tokio::test]
+async fn test_multipart_session_failed_part_or_commit_never_commits_and_stays_abortable() {
+    use _storage::store::PutConditionalOptions;
+    use std::sync::Arc;
+    use std::sync::atomic::Ordering;
+
+    let counting = Arc::new(CountingStore::new(std::time::Duration::ZERO));
+    let engine = ObjectStoreEngine::with_store(counting.clone(), "memory");
+    let probes = &counting.uploads;
+
+    probes.fail_parts.store(true, Ordering::SeqCst);
+    let mut session = engine
+        .create_multipart("mp/failed-part", PutConditionalOptions::default())
+        .await
+        .expect("create session");
+    session
+        .write_chunk(Bytes::from_static(b"payload"))
+        .await
+        .expect_err("injected part failure");
+    probes.fail_parts.store(false, Ordering::SeqCst);
+    session
+        .complete()
+        .await
+        .expect_err("a session with a failed part must not commit");
+    assert_eq!(probes.completes.load(Ordering::SeqCst), 0);
+    session.abort().await.expect("abort after failed part");
+    assert_eq!(probes.aborts.load(Ordering::SeqCst), 1);
+    assert!(!engine.exists("mp/failed-part").await.expect("exists"));
+
+    probes.fail_complete.store(true, Ordering::SeqCst);
+    let mut session = engine
+        .create_multipart("mp/failed-commit", PutConditionalOptions::default())
+        .await
+        .expect("create session");
+    session
+        .write_chunk(Bytes::from_static(b"payload"))
+        .await
+        .expect("write chunk");
+    session
+        .complete()
+        .await
+        .expect_err("injected commit failure");
+    assert_eq!(probes.completes.load(Ordering::SeqCst), 1);
+    session
+        .abort()
+        .await
+        .expect("abort reaches the upload whose commit failed");
+    assert_eq!(probes.aborts.load(Ordering::SeqCst), 2);
+    session.abort().await.expect("second abort is a no-op");
+    assert_eq!(probes.aborts.load(Ordering::SeqCst), 2);
+    assert!(!engine.exists("mp/failed-commit").await.expect("exists"));
+}
+
+#[tokio::test]
+async fn test_gcs_compose_cancellation_deletes_temporaries() {
+    let emu = spawn_gcs_compose_emulator(None, Some("out/cancelled.bin")).await;
+    let mut shard_names = Vec::new();
+    {
+        let mut guard = emu.objects.lock().expect("lock");
+        for i in 0..70u8 {
+            let name = format!("shards/part-{i:04}.bin");
+            guard.insert(name.clone(), patterned_payload(64, i));
+            shard_names.push(name);
+        }
+    }
+    let opts = HashMap::from([
+        (
+            "endpoint".to_string(),
+            format!("http://127.0.0.1:{}", emu.port),
+        ),
+        ("allow_http".to_string(), "true".to_string()),
+        ("skip_signature".to_string(), "true".to_string()),
+    ]);
+    let engine = ObjectStoreEngine::from_url("gs://emu-bucket", Some(&opts)).expect("gcs engine");
+    let task_engine = engine.clone();
+    let task = tokio::spawn(async move {
+        task_engine
+            .compose(shard_names, "out/cancelled.bin", None)
+            .await
+    });
+
+    let temp_count = || {
+        emu.objects
+            .lock()
+            .expect("lock")
+            .keys()
+            .filter(|k| k.contains(".compose-"))
+            .count()
+    };
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !emu.requests.lock().expect("lock").iter().any(|r| {
+        r.starts_with("POST ") && percent_decode_path(r).contains("/o/out/cancelled.bin/compose ")
+    }) {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "final compose call never started"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    assert_eq!(
+        temp_count(),
+        3,
+        "three folds must exist before the final compose"
+    );
+
+    task.abort();
+    assert!(task.await.expect_err("aborted compose").is_cancelled());
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    while temp_count() > 0 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "cancelled compose must delete its temporaries"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(
+        !emu.objects
+            .lock()
+            .expect("lock")
+            .contains_key("out/cancelled.bin")
+    );
 }

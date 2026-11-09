@@ -56,6 +56,9 @@ const DEFAULT_GCS_BASE_URL: &str = "https://storage.googleapis.com";
 
 static PART_FILE_SEQ: AtomicU64 = AtomicU64::new(0);
 
+/// Process-wide sequence that makes GCS compose temporary names unique per call.
+static COMPOSE_SEQ: AtomicU64 = AtomicU64::new(0);
+
 static GCS_LOOPBACK_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
     reqwest::Client::builder()
         .no_proxy()
@@ -325,17 +328,27 @@ impl MultipartUploadSession {
         Ok(())
     }
 
+    /// Flush any buffered tail and commit the upload.
+    ///
+    /// A session whose earlier part upload failed never commits: it returns an error and keeps
+    /// the upload so `abort` can release it. The upload stays owned by the session until the
+    /// commit succeeds, so a failed or cancelled commit can still be aborted.
     pub async fn complete(&mut self) -> Result<PutResult, ObjectStoreError> {
-        let mut upload = self.upload.take().ok_or_else(|| {
+        let upload = self.upload.as_mut().ok_or_else(|| {
             StorageError::InvalidInput("multipart upload session is already closed".to_string())
         })?;
+        if self.had_error {
+            return Err(StorageError::InvalidInput(format!(
+                "multipart upload for '{}' had a failed part and cannot be completed; abort it",
+                self.path
+            )));
+        }
         if let Some(ref mut acc) = self.accumulator
             && let Some(tail) = acc.finish()
         {
             let tail_len = tail.len();
             if let Err(err) = upload.put_part(PutPayload::from(tail)).await {
                 self.had_error = true;
-                self.upload = Some(upload);
                 return Err(err.into());
             }
             self.flushed_part_sizes.push(tail_len);
@@ -343,13 +356,13 @@ impl MultipartUploadSession {
         if self.flushed_part_sizes.is_empty() {
             if let Err(err) = upload.put_part(PutPayload::new()).await {
                 self.had_error = true;
-                self.upload = Some(upload);
                 return Err(err.into());
             }
             self.flushed_part_sizes.push(0);
         }
         match upload.complete().await {
             Ok(result) => {
+                self.upload = None;
                 if let Some(ref registry) = self.local_metadata {
                     let mut guard = registry.write().unwrap_or_else(|e| e.into_inner());
                     if self.content_type.is_some() || !self.attributes.is_empty() {
@@ -387,15 +400,105 @@ impl MultipartUploadSession {
         if let Some(ref mut acc) = self.accumulator {
             acc.clear();
         }
-        let Some(mut upload) = self.upload.take() else {
+        let Some(upload) = self.upload.as_mut() else {
             return Ok(());
         };
-        match upload.abort().await {
+        let outcome = upload.abort().await;
+        self.upload = None;
+        match outcome {
             Ok(()) => Ok(()),
             Err(object_store::Error::NotFound { .. }) => Ok(()),
             Err(_) if self.had_error => Ok(()),
             Err(err) => Err(err.into()),
         }
+    }
+}
+
+/// Abort an upload that was neither completed nor aborted before the session is dropped.
+///
+/// Cancelling a Python awaitable aborts the Tokio task and drops its future mid-`.await`, so
+/// explicit error-path aborts never run. The abort is detached onto the storage runtime
+/// because `Drop` cannot await.
+impl Drop for MultipartUploadSession {
+    fn drop(&mut self) {
+        if let Some(mut upload) = self.upload.take() {
+            drop(runtime_handle().spawn(async move {
+                let _ = upload.abort().await;
+            }));
+        }
+    }
+}
+
+/// Unlink a `.part` download file when dropped unless disarmed after the final rename.
+struct PartFileGuard {
+    path: PathBuf,
+    armed: bool,
+}
+
+impl Drop for PartFileGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+/// Unlink batch download destinations created by one `get_files` call unless disarmed.
+///
+/// Only destinations that did not exist before the call are recorded, so pre-existing files
+/// that were successfully replaced stay replaced.
+struct CreatedFilesGuard {
+    created: std::sync::Mutex<Vec<PathBuf>>,
+    armed: bool,
+}
+
+impl CreatedFilesGuard {
+    fn record(&self, path: &str) {
+        self.created
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(PathBuf::from(path));
+    }
+}
+
+impl Drop for CreatedFilesGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let created = self.created.get_mut().unwrap_or_else(|e| e.into_inner());
+            for path in created.iter() {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
+}
+
+/// Delete GCS compose temporaries on a detached runtime task when dropped with entries left.
+///
+/// The happy and error paths delete temporaries inline and then clear the list; entries only
+/// remain when the compose future is dropped mid-flight.
+struct ComposeTemporariesGuard {
+    store: Arc<dyn ObjectStore>,
+    temporaries: Vec<String>,
+}
+
+impl Drop for ComposeTemporariesGuard {
+    fn drop(&mut self) {
+        if self.temporaries.is_empty() {
+            return;
+        }
+        let store = Arc::clone(&self.store);
+        let temporaries = std::mem::take(&mut self.temporaries);
+        drop(runtime_handle().spawn(async move {
+            let deletions = temporaries.iter().map(|temp| {
+                let store = &store;
+                async move {
+                    if let Ok(location) = StorePath::parse(temp) {
+                        let _ = store.delete(&location).await;
+                    }
+                }
+            });
+            futures::future::join_all(deletions).await;
+        }));
     }
 }
 
@@ -1335,7 +1438,8 @@ impl ObjectStoreEngine {
     ///
     /// Chunks stream into a sibling `.{name}.{pid}.{seq}.part` file that is flushed and renamed
     /// over `file_path` only after the full payload arrives, so readers never observe a partial
-    /// file. The `.part` file is unlinked on any error. Parent directories are created.
+    /// file. A drop guard unlinks the `.part` file on any error and when the future is cancelled
+    /// mid-transfer. Parent directories are created.
     pub async fn get_file(
         &self,
         path: &str,
@@ -1357,44 +1461,62 @@ impl ObjectStoreEngine {
             StoredObjectMeta::from_meta_and_attributes(result.meta.clone(), &result.attributes);
         self.merge_local_metadata(&location, &mut meta);
         tokio::fs::create_dir_all(&parent).await?;
-        let part_path = parent.join(format!(
-            ".{}.{}.{}.part",
-            file_name.to_string_lossy(),
-            std::process::id(),
-            PART_FILE_SEQ.fetch_add(1, Ordering::Relaxed)
-        ));
-        let written = async {
-            Self::write_stream_to_file(result.into_stream(), &part_path).await?;
-            tokio::fs::rename(&part_path, target).await?;
-            Ok::<(), StorageError>(())
-        }
-        .await;
-        if let Err(err) = written {
-            let _ = tokio::fs::remove_file(&part_path).await;
-            return Err(err);
-        }
+        let mut part = PartFileGuard {
+            path: parent.join(format!(
+                ".{}.{}.{}.part",
+                file_name.to_string_lossy(),
+                std::process::id(),
+                PART_FILE_SEQ.fetch_add(1, Ordering::Relaxed)
+            )),
+            armed: true,
+        };
+        Self::write_stream_to_file(result.into_stream(), &part.path).await?;
+        tokio::fs::rename(&part.path, target).await?;
+        part.armed = false;
         Ok(meta)
     }
 
     /// Download `(key, file_path)` pairs with at most `concurrency` transfers in flight.
     ///
-    /// Results follow input order. After the first failure no new transfers start, and every
-    /// destination file written by this call is unlinked before the error is returned.
+    /// Results follow input order. After the first failure no new transfers start. On failure or
+    /// cancellation, destinations that did not exist before the call and were written by it are
+    /// unlinked; pre-existing destinations that were successfully replaced stay replaced.
     pub async fn get_files(
         &self,
         pairs: Vec<(String, String)>,
         concurrency: usize,
     ) -> Result<Vec<StoredObjectMeta>, StorageError> {
+        if concurrency == 0 {
+            return Err(StorageError::InvalidInput(
+                "concurrency must be >= 1".to_string(),
+            ));
+        }
+        let destinations: Vec<String> = pairs.iter().map(|pair| pair.1.clone()).collect();
+        let fresh: std::collections::HashSet<String> = futures::stream::iter(destinations)
+            .map(|file_path| async move {
+                let existed = tokio::fs::try_exists(&file_path).await.unwrap_or(true);
+                (!existed).then_some(file_path)
+            })
+            .buffer_unordered(concurrency)
+            .filter_map(std::future::ready)
+            .collect()
+            .await;
+        let mut created = CreatedFilesGuard {
+            created: std::sync::Mutex::new(Vec::new()),
+            armed: true,
+        };
+        let created_ref = &created;
+        let fresh_ref = &fresh;
         let outcomes = Self::run_file_batch(pairs, concurrency, |key, file_path| async move {
-            self.get_file(&key, &file_path).await
+            let meta = self.get_file(&key, &file_path).await?;
+            if fresh_ref.contains(&file_path) {
+                created_ref.record(&file_path);
+            }
+            Ok(meta)
         })
         .await?;
-        if outcomes.iter().any(|(_, o)| matches!(o, Some(Err(_)))) {
-            for (file_path, outcome) in &outcomes {
-                if matches!(outcome, Some(Ok(_))) {
-                    let _ = tokio::fs::remove_file(file_path).await;
-                }
-            }
+        if !outcomes.iter().any(|(_, o)| matches!(o, Some(Err(_)))) {
+            created.armed = false;
         }
         Self::collect_batch_outcomes(outcomes)
     }
@@ -1742,9 +1864,12 @@ impl ObjectStoreEngine {
     /// Concatenate `sources` in order into `dst`.
     ///
     /// On `gs` stores this uses the GCS JSON `compose` API, folding more than
-    /// [`GCS_COMPOSE_MAX_SOURCES`] inputs in layers through `{dst}.compose-{idx:04}` temporary
-    /// objects that are always deleted afterwards, even when a fold fails. Other stores stream
-    /// each source sequentially into one multipart upload, aborting it on error.
+    /// [`GCS_COMPOSE_MAX_SOURCES`] inputs in layers through `{dst}.compose-{unique}-{idx:04}`
+    /// temporary objects, where `unique` is the process id plus a per-call sequence in hex.
+    /// Temporaries are always deleted afterwards, even when a fold fails or the call is
+    /// cancelled. The returned metadata comes from a `head` of `dst` so its `etag` matches
+    /// `head` and conditional `put_opts`. Other stores stream each source sequentially into one
+    /// multipart upload in 8 MiB parts, aborting it on error or cancellation.
     pub async fn compose(
         &self,
         sources: Vec<String>,
@@ -1883,6 +2008,11 @@ impl ObjectStoreEngine {
             .collect()
     }
 
+    /// Stream `sources` sequentially into one multipart upload at `dst`.
+    ///
+    /// Network chunks are re-framed into [`FILE_TRANSFER_CHUNK_SIZE`] parts so many small source
+    /// chunks never become many tiny parts. Errors abort the upload inline; cancellation aborts it
+    /// through the session's drop handler.
     async fn multipart_compose(
         &self,
         sources: &[String],
@@ -1898,12 +2028,18 @@ impl ObjectStoreEngine {
                 },
             )
             .await?;
+        let mut frames = UniformPartAccumulator::new(FILE_TRANSFER_CHUNK_SIZE);
         let composed = async {
             for src in sources {
                 let mut stream = self.get_stream(src).await?;
                 while let Some(chunk) = stream.next().await {
-                    session.write_chunk(chunk?).await?;
+                    for frame in frames.push(chunk?) {
+                        session.write_chunk(frame).await?;
+                    }
                 }
+            }
+            if let Some(tail) = frames.finish() {
+                session.write_chunk(tail).await?;
             }
             session.complete_with_meta().await
         }
@@ -1921,32 +2057,50 @@ impl ObjectStoreEngine {
         dst: &str,
         content_type: Option<String>,
     ) -> Result<StoredObjectMeta, StorageError> {
-        let mut temporaries: Vec<String> = Vec::new();
+        let mut guard = ComposeTemporariesGuard {
+            store: Arc::clone(&self.inner),
+            temporaries: Vec::new(),
+        };
         let composed = async {
             let mut level = sources;
-            while level.len() > GCS_COMPOSE_MAX_SOURCES {
-                let mut next = Vec::with_capacity(level.len().div_ceil(GCS_COMPOSE_MAX_SOURCES));
-                for group in level.chunks(GCS_COMPOSE_MAX_SOURCES) {
-                    if let [single] = group {
-                        next.push(single.clone());
-                        continue;
+            if level.len() > GCS_COMPOSE_MAX_SOURCES {
+                let unique = format!(
+                    "{:x}{:012x}",
+                    std::process::id(),
+                    COMPOSE_SEQ.fetch_add(1, Ordering::Relaxed)
+                );
+                while level.len() > GCS_COMPOSE_MAX_SOURCES {
+                    let mut next =
+                        Vec::with_capacity(level.len().div_ceil(GCS_COMPOSE_MAX_SOURCES));
+                    for group in level.chunks(GCS_COMPOSE_MAX_SOURCES) {
+                        if let [single] = group {
+                            next.push(single.clone());
+                            continue;
+                        }
+                        let temp = format!("{dst}.compose-{unique}-{:04}", guard.temporaries.len());
+                        guard.temporaries.push(temp.clone());
+                        Self::gcs_compose_call(ctx, group, &temp, None).await?;
+                        next.push(temp);
                     }
-                    let temp = format!("{dst}.compose-{:04}", temporaries.len());
-                    temporaries.push(temp.clone());
-                    Self::gcs_compose_call(ctx, group, &temp, None).await?;
-                    next.push(temp);
+                    level = next;
                 }
-                level = next;
             }
-            Self::gcs_compose_call(ctx, &level, dst, content_type.as_deref()).await
+            let response =
+                Self::gcs_compose_call(ctx, &level, dst, content_type.as_deref()).await?;
+            let mut meta = self.head(dst).await?;
+            if meta.content_type.is_none() {
+                meta.content_type = response.content_type;
+            }
+            Ok(meta)
         }
         .await;
-        let deletions = temporaries.iter().map(|temp| async move {
+        let deletions = guard.temporaries.iter().map(|temp| async move {
             if let Ok(location) = StorePath::parse(temp) {
                 let _ = self.inner.delete(&location).await;
             }
         });
         futures::future::join_all(deletions).await;
+        guard.temporaries.clear();
         composed
     }
 
