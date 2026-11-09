@@ -945,6 +945,13 @@ fn prepare_sql_statement(
         let cols = infer_select_columns(&cleaned, shared, conn_state)?;
         return Ok((num_params, cols));
     }
+    if upper.starts_with("INSERT INTO ") && find_top_level_keyword(&upper, " RETURNING ").is_some()
+    {
+        return Ok((
+            num_params,
+            vec![("id".to_string(), ColumnType::MYSQL_TYPE_LONGLONG as u8, 0)],
+        ));
+    }
     Ok((num_params, Vec::new()))
 }
 
@@ -974,6 +981,10 @@ fn infer_select_columns(
     if let Some(from_idx) = find_top_level_keyword(&upper, " FROM ") {
         let proj_str = cleaned_sql[7..from_idx].trim();
         let after_from = cleaned_sql[from_idx + 6..].trim();
+        if after_from.starts_with('(') {
+            let alias = extract_select_alias(proj_str);
+            return Ok(vec![(alias, ColumnType::MYSQL_TYPE_LONGLONG as u8, 0)]);
+        }
         let table_token = after_from
             .split_whitespace()
             .next()
@@ -1277,11 +1288,8 @@ async fn execute_sql_statement(
     if upper.starts_with("INSERT INTO ") {
         let mut guard = shared.db.lock();
         let db = conn_state.tx_db.as_mut().unwrap_or(&mut *guard);
-        let (affected, last_id) = execute_insert(&cleaned, params, db)?;
-        return Ok(vec![ExecOutcome::Ok {
-            affected_rows: affected,
-            last_insert_id: last_id,
-        }]);
+        let outcome = execute_insert(&cleaned, params, db)?;
+        return Ok(vec![outcome]);
     }
 
     if upper.starts_with("DELETE FROM ") {
@@ -1910,11 +1918,23 @@ fn execute_insert(
     sql: &str,
     params: &[DecodedCell],
     db: &mut DatabaseState,
-) -> Result<(u64, u64), (u16, String, String)> {
+) -> Result<ExecOutcome, (u16, String, String)> {
     let upper = sql.to_ascii_uppercase();
-    let values_idx = find_top_level_keyword(&upper, " VALUES")
-        .or_else(|| find_top_level_keyword(&upper, ")VALUES"))
-        .map(|i| if upper.as_bytes()[i] == b')' { i + 1 } else { i })
+    let returning_idx = find_top_level_keyword(&upper, " RETURNING ");
+    let base_sql = match returning_idx {
+        Some(idx) => sql[..idx].trim(),
+        None => sql,
+    };
+    let returning_cols: Option<Vec<String>> = returning_idx.map(|idx| {
+        sql[idx + 11..]
+            .split(',')
+            .map(|c| strip_ident_quotes(c).to_ascii_lowercase())
+            .collect()
+    });
+    let base_upper = base_sql.to_ascii_uppercase();
+    let values_idx = find_top_level_keyword(&base_upper, " VALUES")
+        .or_else(|| find_top_level_keyword(&base_upper, ")VALUES"))
+        .map(|i| if base_upper.as_bytes()[i] == b')' { i + 1 } else { i })
         .ok_or_else(|| {
             (
                 1064,
@@ -1923,7 +1943,7 @@ fn execute_insert(
             )
         })?;
 
-    let prefix = sql[12..values_idx].trim();
+    let prefix = base_sql[12..values_idx].trim();
     let (raw_table, explicit_cols) = if let Some(open_p) = prefix.find('(') {
         let close_p = prefix.rfind(')').unwrap_or(prefix.len());
         let cols: Vec<String> = prefix[open_p + 1..close_p]
@@ -1944,17 +1964,18 @@ fn execute_insert(
         ));
     };
 
-    let values_part = sql[values_idx..]
+    let values_part = base_sql[values_idx..]
         .trim()
         .strip_prefix("VALUES")
-        .or_else(|| sql[values_idx..].trim().strip_prefix("values"))
-        .unwrap_or(&sql[values_idx + 6..])
+        .or_else(|| base_sql[values_idx..].trim().strip_prefix("values"))
+        .unwrap_or(&base_sql[values_idx + 6..])
         .trim();
 
     let tuple_strs = split_value_tuples(values_part);
     let mut param_iter = params.iter();
     let mut inserted_count = 0u64;
     let mut last_id = 0u64;
+    let mut inserted_rows = Vec::new();
 
     for tup_str in tuple_strs {
         let exprs = split_comma_top_level(tup_str);
@@ -2024,11 +2045,40 @@ fn execute_insert(
             }
         }
 
+        inserted_rows.push(row.clone());
         table.rows.push(row);
         inserted_count += 1;
     }
 
-    Ok((inserted_count, last_id))
+    if let Some(ret_cols) = returning_cols {
+        let mut out_cols = Vec::new();
+        let mut col_indices = Vec::new();
+        for rc in &ret_cols {
+            if let Some((idx, col_def)) = table
+                .columns
+                .iter()
+                .enumerate()
+                .find(|(_, c)| c.name.to_ascii_lowercase() == *rc)
+            {
+                out_cols.push((col_def.name.clone(), col_def.col_type, col_def.col_flags));
+                col_indices.push(idx);
+            }
+        }
+        let mut out_rows = Vec::new();
+        for r in inserted_rows {
+            let projected = col_indices.iter().map(|&idx| r[idx].clone()).collect();
+            out_rows.push(projected);
+        }
+        return Ok(ExecOutcome::Rows {
+            columns: out_cols,
+            rows: out_rows,
+        });
+    }
+
+    Ok(ExecOutcome::Ok {
+        affected_rows: inserted_count,
+        last_insert_id: last_id,
+    })
 }
 
 fn split_value_tuples(values_str: &str) -> Vec<&str> {
@@ -2283,6 +2333,18 @@ fn execute_select(
 
     let proj_str = sql[7..from_idx].trim();
     let after_from = &sql[from_idx + 6..];
+    let after_from_trimmed = after_from.trim();
+    if let Some(sub_rest) = after_from_trimmed.strip_prefix('(')
+        && let Some(close_idx) = sub_rest.rfind(')')
+    {
+        let inner_sql = sub_rest[..close_idx].trim();
+        let (_inner_cols, inner_rows) = execute_select(inner_sql, params, db, conn_id)?;
+        let alias = extract_select_alias(proj_str);
+        return Ok((
+            vec![(alias, ColumnType::MYSQL_TYPE_LONGLONG as u8, 0)],
+            vec![vec![DecodedCell::Int(inner_rows.len() as i64)]],
+        ));
+    }
     let after_from_upper = &upper[from_idx + 6..];
 
     let where_idx = find_top_level_keyword(after_from_upper, " WHERE ");

@@ -442,6 +442,10 @@ fn decode_bytes_by_column_type(bytes: Vec<u8>, col_type: u8) -> Result<DecodedCe
     }
     if col_type == ColumnType::MYSQL_TYPE_BIT as u8
         || col_type == ColumnType::MYSQL_TYPE_VECTOR as u8
+        || col_type == ColumnType::MYSQL_TYPE_BLOB as u8
+        || col_type == ColumnType::MYSQL_TYPE_TINY_BLOB as u8
+        || col_type == ColumnType::MYSQL_TYPE_MEDIUM_BLOB as u8
+        || col_type == ColumnType::MYSQL_TYPE_LONG_BLOB as u8
     {
         return Ok(DecodedCell::Bytes(bytes));
     }
@@ -1313,6 +1317,10 @@ impl SyncMySQLClient {
         self.core.statement_cache_len()
     }
 
+    pub fn __repr__(&self) -> String {
+        self.core.config.redacted_repr("SyncMySQLClient")
+    }
+
     #[pyo3(signature = (sql, parameters=None))]
     pub fn execute(
         &self,
@@ -1401,7 +1409,7 @@ impl SyncMySQLClient {
             core.execute_result_set(norm_sql, params).await
         }))?;
         if rs.rows.is_empty() {
-            return Ok(py.None());
+            return Err(MySQLError::not_found("Query returned no rows").to_py_err(py));
         }
         rs.rows.truncate(1);
         let list = rs.rows_to_py_dicts(py)?;
@@ -1415,7 +1423,17 @@ impl SyncMySQLClient {
         sql: &str,
         parameters: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Py<PyAny>> {
-        self.fetch_one(py, sql, parameters)
+        let (norm_sql, params) = prepare_sql_and_params(sql, parameters)?;
+        let core = Arc::clone(&self.core);
+        let mut rs = py.detach(|| block_on_db(async move {
+            core.execute_result_set(norm_sql, params).await
+        }))?;
+        if rs.rows.is_empty() {
+            return Ok(py.None());
+        }
+        rs.rows.truncate(1);
+        let list = rs.rows_to_py_dicts(py)?;
+        Ok(list.bind(py).get_item(0)?.unbind())
     }
 
     #[pyo3(signature = (sql, parameters=None, size=100))]
@@ -1448,7 +1466,7 @@ impl SyncMySQLClient {
             core.execute_result_set(norm_sql, params).await
         }))?;
         let Some(first_row) = rs.rows.into_iter().next() else {
-            return Ok(py.None());
+            return Err(MySQLError::not_found("Query returned no rows").to_py_err(py));
         };
         let Some(first_cell) = first_row.into_iter().next() else {
             return Ok(py.None());
@@ -1784,6 +1802,10 @@ impl AsyncMySQLClient {
         self.core.statement_cache_len()
     }
 
+    pub fn __repr__(&self) -> String {
+        self.core.config.redacted_repr("AsyncMySQLClient")
+    }
+
     #[pyo3(signature = (sql, parameters=None))]
     pub fn execute(
         &self,
@@ -1897,7 +1919,7 @@ impl AsyncMySQLClient {
             async move { core.execute_result_set(norm_sql, params).await },
             |py, mut r: DecodedResultSet| {
                 if r.rows.is_empty() {
-                    return Ok(py.None());
+                    return Err(MySQLError::not_found("Query returned no rows").to_py_err(py));
                 }
                 r.rows.truncate(1);
                 let list = r.rows_to_py_dicts(py)?;
@@ -1915,7 +1937,22 @@ impl AsyncMySQLClient {
         sql: &str,
         parameters: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<RustDbTaskAwaitable> {
-        self.fetch_one(py, sql, parameters)
+        let (norm_sql, params) = prepare_sql_and_params(sql, parameters)?;
+        let core = Arc::clone(&self.core);
+        spawn_rust_db_task_with_attr(
+            py,
+            async move { core.execute_result_set(norm_sql, params).await },
+            |py, mut r: DecodedResultSet| {
+                if r.rows.is_empty() {
+                    return Ok(py.None());
+                }
+                r.rows.truncate(1);
+                let list = r.rows_to_py_dicts(py)?;
+                Ok(list.bind(py).get_item(0)?.unbind())
+            },
+            |py, e: MySQLError| e.to_py_err(py),
+            MYSQL_COMPLETION_DRAINER_ATTR,
+        )
     }
 
     #[pyo3(signature = (sql, parameters=None, size=100))]
@@ -1954,7 +1991,7 @@ impl AsyncMySQLClient {
             async move { core.execute_result_set(norm_sql, params).await },
             |py, r: DecodedResultSet| {
                 let Some(first_row) = r.rows.into_iter().next() else {
-                    return Ok(py.None());
+                    return Err(MySQLError::not_found("Query returned no rows").to_py_err(py));
                 };
                 let Some(first_cell) = first_row.into_iter().next() else {
                     return Ok(py.None());

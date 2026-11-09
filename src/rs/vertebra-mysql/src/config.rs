@@ -100,6 +100,12 @@ impl std::fmt::Debug for MySQLConnectConfig {
     }
 }
 
+impl std::fmt::Display for MySQLConnectConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.redacted_repr("MySQLConnectConfig"))
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 impl MySQLConnectConfig {
     pub fn from_dsn_and_kwargs(
@@ -134,6 +140,29 @@ impl MySQLConnectConfig {
         let lower_dsn = trimmed_dsn.to_ascii_lowercase();
         if trimmed_dsn.is_empty() {
             return Err(MySQLError::config("MySQL DSN must not be empty"));
+        }
+        if dsn.contains('\0') {
+            return Err(MySQLError::config("MySQL DSN must not contain NUL bytes"));
+        }
+        if port == Some(0) {
+            return Err(MySQLError::config("MySQL port must be in 1..=65535"));
+        }
+        for (field_name, field_val) in [
+            ("host", host.as_deref()),
+            ("user", user.as_deref()),
+            ("database", database.as_deref()),
+            ("unix_socket", unix_socket.as_deref()),
+            ("ssl_ca", ssl_ca.as_deref()),
+            ("ssl_cert", ssl_cert.as_deref()),
+            ("ssl_key", ssl_key.as_deref()),
+            ("init_command", init_command.as_deref()),
+            ("cloud_sql_instance", cloud_sql_instance.as_deref()),
+        ] {
+            if field_val.is_some_and(|v| v.contains('\0')) {
+                return Err(MySQLError::config(format!(
+                    "MySQL {field_name} must not contain NUL bytes"
+                )));
+            }
         }
         if lower_dsn == "memory"
             || lower_dsn == ":memory:"
@@ -261,15 +290,28 @@ impl MySQLConnectConfig {
         }
 
         let final_ssl_mode = resolved_ssl_mode.unwrap_or(MySQLSslMode::Prefer);
-        if matches!(
-            final_ssl_mode,
-            MySQLSslMode::VerifyCa | MySQLSslMode::VerifyFull
-        ) && let Some(ref ca_path) = resolved_ssl_ca
-            && !PathBuf::from(ca_path).exists()
+        if let Some(ref ca_val) = resolved_ssl_ca {
+            if ca_val.trim_start().starts_with("-----BEGIN") {
+                validate_inline_pem_cert(ca_val, "ssl_ca")?;
+            } else if matches!(
+                final_ssl_mode,
+                MySQLSslMode::VerifyCa | MySQLSslMode::VerifyFull
+            ) && !PathBuf::from(ca_val).exists()
+            {
+                return Err(MySQLError::config(format!(
+                    "MySQL ssl_ca file does not exist: '{ca_val}'"
+                )));
+            }
+        }
+        if let Some(ref cert_val) = resolved_ssl_cert
+            && cert_val.trim_start().starts_with("-----BEGIN")
         {
-            return Err(MySQLError::config(format!(
-                "MySQL ssl_ca file does not exist: '{ca_path}'"
-            )));
+            validate_inline_pem_cert(cert_val, "ssl_cert")?;
+        }
+        if let Some(ref key_val) = resolved_ssl_key
+            && key_val.trim_start().starts_with("-----BEGIN")
+        {
+            validate_inline_pem_key(key_val, "ssl_key")?;
         }
 
         if let Some(ref inst) = resolved_cloud_sql {
@@ -289,8 +331,13 @@ impl MySQLConnectConfig {
             }
         };
 
-        let max_size = pool_max_size.max(1);
-        let min_size = pool_min_size.min(max_size);
+        if pool_min_size == 0 || pool_max_size < pool_min_size {
+            return Err(MySQLError::config(format!(
+                "Invalid MySQL pool bounds: pool_min_size={pool_min_size}, pool_max_size={pool_max_size}"
+            )));
+        }
+        let max_size = pool_max_size;
+        let min_size = pool_min_size;
 
         let token_cache = if resolved_iam_auth || resolved_cloud_sql.is_some() {
             let mut opts = HashMap::new();
@@ -502,6 +549,44 @@ impl MySQLConnectConfig {
         }
 
         Ok(ssl)
+    }
+
+    pub fn redacted_repr(&self, class_name: &str) -> String {
+        format!(
+            "{class_name}(host={:?}, port={}, user={:?}, database={:?}, ssl_mode={:?}, password='***')",
+            self.host,
+            self.port,
+            self.user,
+            self.database,
+            self.ssl_mode.as_str(),
+        )
+    }
+}
+
+fn validate_inline_pem_cert(pem: &str, field: &str) -> Result<(), MySQLError> {
+    let mut reader = std::io::BufReader::new(pem.as_bytes());
+    let certs: Result<Vec<_>, _> = rustls_pemfile::certs(&mut reader).collect();
+    match certs {
+        Ok(list) if !list.is_empty() => Ok(()),
+        Ok(_) => Err(MySQLError::config(format!(
+            "Invalid MySQL {field}: no PEM certificates found"
+        ))),
+        Err(e) => Err(MySQLError::config(format!(
+            "Invalid MySQL {field} PEM certificate: {e}"
+        ))),
+    }
+}
+
+fn validate_inline_pem_key(pem: &str, field: &str) -> Result<(), MySQLError> {
+    let mut reader = std::io::BufReader::new(pem.as_bytes());
+    match rustls_pemfile::private_key(&mut reader) {
+        Ok(Some(_)) => Ok(()),
+        Ok(None) => Err(MySQLError::config(format!(
+            "Invalid MySQL {field}: no PEM private key found"
+        ))),
+        Err(e) => Err(MySQLError::config(format!(
+            "Invalid MySQL {field} PEM private key: {e}"
+        ))),
     }
 }
 

@@ -129,6 +129,30 @@ class ArrowCursor:
         return self._used_shm
 
     @property
+    def shm_name(self) -> str:
+        """Return the POSIX shared-memory segment name when backed by a native `VTBARROW` cursor."""
+        if self._shm_cursor is not None and hasattr(self._shm_cursor, "shm_name"):
+            return str(self._shm_cursor.shm_name)
+        return ""
+
+    @property
+    def byte_len(self) -> int:
+        """Return the byte length of the serialized Arrow IPC payload."""
+        if self._shm_cursor is not None and hasattr(self._shm_cursor, "byte_len"):
+            return int(self._shm_cursor.byte_len)
+        return len(self.buffer_view())
+
+    def __arrow_c_stream__(self, requested_schema: Any = None) -> Any:
+        """Export an Arrow C Stream PyCapsule (`arrow_array_stream`) for zero-copy consumers."""
+        if self._shm_cursor is not None and hasattr(self._shm_cursor, "__arrow_c_stream__"):
+            return self._shm_cursor.__arrow_c_stream__(requested_schema)
+        tbl = self.to_arrow_table()
+        if tbl is not self and hasattr(tbl, "__arrow_c_stream__"):
+            return tbl.__arrow_c_stream__(requested_schema)
+        msg = "ArrowCursor does not have a valid Arrow IPC stream to export"
+        raise RuntimeError(msg)
+
+    @property
     def shm_region(self) -> Any:
         """Return the underlying shared-memory region or mmap object when SHM transfer is active."""
         if self._shm_cursor is not None:

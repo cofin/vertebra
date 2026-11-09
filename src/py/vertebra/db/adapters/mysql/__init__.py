@@ -1,4 +1,4 @@
-"""MySQL and MariaDB driver and Cloud SQL (:3307) configuration."""
+"""MySQL and MariaDB adapter package."""
 
 from __future__ import annotations
 
@@ -7,32 +7,59 @@ from typing import TYPE_CHECKING
 from vertebra.utils.module_loader import lazy_exports
 
 if TYPE_CHECKING:
-    from vertebra.db.adapters.mysql.config import MySQLConfig
-    from vertebra.db.adapters.mysql.core import MySQLCore
+    from vertebra.db.adapters.mysql.config import (
+        MySQLConfig,
+        MySQLPoolConfig,
+        MySQLStatementConfig,
+    )
+    from vertebra.db.adapters.mysql.core import (
+        MYSQL_TRANSIENT_ERRNOS,
+        build_mysql_connect_kwargs,
+        coerce_mysql_param,
+        compile_mysql_statement,
+        map_mysql_exception,
+        normalize_mysql_rows,
+    )
     from vertebra.db.adapters.mysql.driver import AsyncMySQLDriver, SyncMySQLDriver
-    from vertebra.db.arrow import ArrowCursor
+    from vertebra.db.adapters.mysql.pipeline import AsyncMySQLPipeline, SyncMySQLPipeline
 
 __all__ = (
-    "ArrowCursor",
+    "MYSQL_TRANSIENT_ERRNOS",
     "AsyncMySQLDriver",
+    "AsyncMySQLPipeline",
     "MySQLConfig",
-    "MySQLCore",
+    "MySQLPoolConfig",
+    "MySQLStatementConfig",
     "SyncMySQLDriver",
+    "SyncMySQLPipeline",
+    "build_mysql_connect_kwargs",
+    "coerce_mysql_param",
+    "compile_mysql_statement",
+    "map_mysql_exception",
+    "normalize_mysql_rows",
 )
 
 __lazy_modules__ = [
     "vertebra.db.adapters.mysql.config",
     "vertebra.db.adapters.mysql.core",
     "vertebra.db.adapters.mysql.driver",
-    "vertebra.db.arrow",
+    "vertebra.db.adapters.mysql.pipeline",
 ]
 
 _EXPORT_MAP: dict[str, tuple[str, str]] = {
-    "ArrowCursor": ("vertebra.db.arrow", "ArrowCursor"),
+    "MYSQL_TRANSIENT_ERRNOS": ("vertebra.db.adapters.mysql.core", "MYSQL_TRANSIENT_ERRNOS"),
     "AsyncMySQLDriver": ("vertebra.db.adapters.mysql.driver", "AsyncMySQLDriver"),
+    "AsyncMySQLPipeline": ("vertebra.db.adapters.mysql.pipeline", "AsyncMySQLPipeline"),
     "MySQLConfig": ("vertebra.db.adapters.mysql.config", "MySQLConfig"),
-    "MySQLCore": ("vertebra.db.adapters.mysql.core", "MySQLCore"),
+    "MySQLPoolConfig": ("vertebra.db.adapters.mysql.config", "MySQLPoolConfig"),
+    "MySQLStatementConfig": ("vertebra.db.adapters.mysql.config", "MySQLStatementConfig"),
     "SyncMySQLDriver": ("vertebra.db.adapters.mysql.driver", "SyncMySQLDriver"),
+    "SyncMySQLPipeline": ("vertebra.db.adapters.mysql.pipeline", "SyncMySQLPipeline"),
+    "build_mysql_connect_kwargs": ("vertebra.db.adapters.mysql.core", "build_mysql_connect_kwargs"),
+    "coerce_mysql_param": ("vertebra.db.adapters.mysql.core", "coerce_mysql_param"),
+    "compile_mysql_statement": ("vertebra.db.adapters.mysql.core", "compile_mysql_statement"),
+    "map_mysql_exception": ("vertebra.db.adapters.mysql.core", "map_mysql_exception"),
+    "normalize_mysql_rows": ("vertebra.db.adapters.mysql.core", "normalize_mysql_rows"),
 }
 
 __getattr__, __dir__ = lazy_exports(__name__, __all__, _EXPORT_MAP)

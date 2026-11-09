@@ -1,142 +1,304 @@
-"""Synchronous and asynchronous MySQL and MariaDB drivers."""
+"""Native MySQL 8.4/9 and MariaDB drivers backed by `vertebra._mysql` (`mysql_async` in Rust)."""
 
 from __future__ import annotations
 
-import collections
-import inspect
-import os
-from collections.abc import Mapping, Sequence
-from typing import TYPE_CHECKING, Any, ClassVar
+import datetime
+from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
+from contextlib import asynccontextmanager, contextmanager
+from typing import Any, ClassVar, Self
 
-from vertebra.db.adapters.mysql.config import MySQLConfig
-from vertebra.db.arrow import (
-    ARROW_SHM_THRESHOLD_ROWS,
-    ArrowCursor,
-    _table_to_rows_and_cols,
+from anyio import CancelScope
+
+from vertebra.db.adapters.mysql.config import (
+    MySQLConfig,
+    MySQLPoolConfig,
+    MySQLStatementConfig,
 )
-from vertebra.db.dialer.cloudsql import AsyncCloudSQLDialer, SyncCloudSQLDialer
+from vertebra.db.adapters.mysql.core import (
+    build_mysql_connect_kwargs,
+    coerce_mysql_param,
+    compile_mysql_statement,
+    map_mysql_exception,
+)
+from vertebra.db.adapters.mysql.pipeline import AsyncMySQLPipeline, SyncMySQLPipeline
+from vertebra.db.arrow import ARROW_SHM_THRESHOLD_ROWS, ArrowCursor
 from vertebra.db.driver import (
-    MYSQL_DIALECT_TAG,
     AsyncDatabaseDriver,
+    DatabaseError,
+    NotFoundError,
+    OperationalError,
     SyncDatabaseDriver,
 )
-from vertebra.typing import ImproperConfigurationError
-from vertebra.utils.module_loader import ensure_module
-from vertebra.utils.text import quote_dialect_identifier, validate_identifier
+from vertebra.db.driver._common import MYSQL_DIALECT_TAG
+from vertebra.utils.module_loader import ensure_module, import_optional
+from vertebra.utils.schema import to_value_type
 
-if TYPE_CHECKING:
-    import ssl
+_mysql_ext = import_optional("vertebra._mysql")
 
 __all__ = (
     "AsyncMySQLDriver",
+    "AsyncMySQLPipeline",
+    "MySQLConfig",
+    "MySQLPoolConfig",
+    "MySQLStatementConfig",
     "SyncMySQLDriver",
+    "SyncMySQLPipeline",
 )
 
 
+def _load_mysql_module() -> Any:
+    """Resolve `vertebra._mysql` or raise `MissingDependencyError` with install hint."""
+    if _mysql_ext is not None:
+        return _mysql_ext
+    return ensure_module("vertebra._mysql", package="vertebra-core[mysql]", extra="mysql")
+
+
+def _coerce_scalar_value(val: Any, value_type: type[Any] | None) -> Any:
+    """Coerce a scalar value to `value_type`, normalizing naive `datetime` values to UTC."""
+    if value_type is None or val is None:
+        return val
+    if value_type is datetime.datetime and isinstance(val, datetime.datetime) and val.tzinfo is None:
+        return val.replace(tzinfo=datetime.UTC)
+    return to_value_type(val, value_type)
+
+
 class SyncMySQLDriver(SyncDatabaseDriver[MySQLConfig]):
-    """Synchronous MySQL driver facade with bounded connection pooling and SHM broker integration."""
+    """Synchronous MySQL 8.4/9 and MariaDB driver backed by `vertebra._mysql.SyncMySQLClient`."""
 
     dialect: ClassVar[str] = "mysql"
     dialect_tag: ClassVar[int] = MYSQL_DIALECT_TAG
-
-    __slots__ = (
-        "_connect_factory",
-        "_dialer",
-        "_idle_conns",
-        "_in_transaction",
-        "_tx_conn",
-    )
 
     def __init__(
         self,
         config: MySQLConfig | None = None,
         *,
-        dialer: SyncCloudSQLDialer | None = None,
+        client: Any = None,
+        dialer: Any = None,
         broker: Any = None,
-        connect_factory: Any = None,
+        **kwargs: Any,
     ) -> None:
-        resolved = config or MySQLConfig()
-        _reject_memory_dsn(resolved.dsn)
-        super().__init__(resolved, broker=broker)
-        self._dialer = dialer
-        if self._dialer is None:
-            csql_cfg = self.config.to_cloud_dialer_config()
-            if csql_cfg is not None:
-                self._dialer = SyncCloudSQLDialer(csql_cfg)
-        self._connect_factory = connect_factory
-        self._idle_conns: collections.deque[Any] = collections.deque(maxlen=self.config.max_size)
-        self._in_transaction: bool = False
-        self._tx_conn: Any = None
+        if config is None:
+            config = MySQLConfig(**kwargs) if kwargs else MySQLConfig()
+        elif kwargs:
+            merged = {f: getattr(config, f) for f in config.__struct_fields__}
+            merged.update(kwargs)
+            config = MySQLConfig(**merged)
+
+        super().__init__(config, broker=broker if broker is not None else config.broker)
+        self._client: Any = client
+        self._dialer: Any = dialer
+        self._savepoint_seq: int = 0
+        self._closed: bool = False
 
     @property
-    def _config(self) -> MySQLConfig:
-        """Return the active MySQLConfig."""
-        return self.config
-
-    @property
-    def dialer(self) -> SyncCloudSQLDialer | None:
-        """Return the attached CloudSQLDialer if configured."""
+    def dialer(self) -> Any:
+        """Return the optional Cloud SQL dialer attached to this driver."""
         return self._dialer
 
-    def begin(self) -> None:
-        """Begin an explicit MySQL transaction and pin a pooled connection."""
-        if self._closed:
+    @property
+    def raw_client(self) -> Any:
+        """Return the underlying `vertebra._mysql.SyncMySQLClient` instance."""
+        return self._get_client()
+
+    @property
+    def in_transaction(self) -> bool:
+        """Return whether an explicit transaction is active on this client."""
+        if self._client is None:
+            return False
+        return bool(getattr(self._client, "in_transaction", False))
+
+    @property
+    def connection_id(self) -> int | None:
+        """Return the active MySQL server `CONNECTION_ID()` when connected."""
+        if self._client is None:
+            return None
+        cid = getattr(self._client, "connection_id", None)
+        return int(cid) if cid is not None else None
+
+    @property
+    def lastrowid(self) -> int | None:
+        """Return the `AUTO_INCREMENT` ID from the most recent `INSERT` statement."""
+        if self._client is None:
+            return None
+        lid = getattr(self._client, "lastrowid", None)
+        return int(lid) if lid is not None else None
+
+    def statement_cache_len(self) -> int:
+        """Return the number of binary prepared statements cached in the session LRU."""
+        if self._client is None:
+            return 0
+        fn = getattr(self._client, "statement_cache_len", None)
+        return int(fn()) if callable(fn) else 0
+
+    def _get_client(self) -> Any:
+        if self._closed or (self._client is not None and bool(getattr(self._client, "is_closed", False))):
             msg = "SyncMySQLDriver is closed"
-            raise RuntimeError(msg)
-        self._in_transaction = True
-        if self._tx_conn is None:
-            self._tx_conn = self._acquire()
-            if hasattr(self._tx_conn, "begin"):
-                self._tx_conn.begin()
+            raise OperationalError(msg)
+        if self._client is None:
+            mod = _load_mysql_module()
+            connect_kwargs = build_mysql_connect_kwargs(self.config)
+            self._client = mod.SyncMySQLClient(**connect_kwargs)
+        return self._client
 
-    def commit(self) -> None:
-        """Commit the active transaction."""
-        tx_conn = self._tx_conn
-        mru_conn = self._idle_conns.pop() if tx_conn is None and self._idle_conns else None
-        target = tx_conn if tx_conn is not None else mru_conn
-        try:
-            if target is not None:
-                if hasattr(target, "commit"):
-                    target.commit()
-            elif hasattr(self._connect_factory, "commit"):
-                self._connect_factory.commit()
-        finally:
-            self._tx_conn = None
-            self._in_transaction = False
-            if target is not None:
-                self._release(target)
+    def _compile(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+    ) -> tuple[str, tuple[Any, ...]]:
+        if not parameters:
+            return sql, ()
+        if isinstance(parameters, Mapping):
+            return compile_mysql_statement(sql, parameters, target_style="qmark")
+        return sql, tuple(coerce_mysql_param(v) for v in parameters)
 
-    def rollback(self) -> None:
-        """Roll back the active transaction."""
-        tx_conn = self._tx_conn
-        mru_conn = self._idle_conns.pop() if tx_conn is None and self._idle_conns else None
-        target = tx_conn if tx_conn is not None else mru_conn
-        try:
-            if target is not None:
-                if hasattr(target, "rollback"):
-                    target.rollback()
-            elif hasattr(self._connect_factory, "rollback"):
-                self._connect_factory.rollback()
-        finally:
-            self._tx_conn = None
-            self._in_transaction = False
-            if target is not None:
-                self._release(target)
+    def connect(self) -> Self:
+        """Initialize the underlying native MySQL client and return `self`."""
+        self._closed = False
+        self._get_client()
+        return self
 
     def close(self) -> None:
-        """Close the driver and release all pooled connections."""
+        """Close the underlying native MySQL pool and connections."""
+        if self._closed:
+            return
         self._closed = True
-        tx_conn = self._tx_conn
-        self._tx_conn = None
-        self._in_transaction = False
-        if tx_conn is not None and hasattr(tx_conn, "close"):
-            tx_conn.close()
-        while self._idle_conns:
-            conn = self._idle_conns.pop()
-            if hasattr(conn, "close"):
-                conn.close()
-        if hasattr(self._connect_factory, "close"):
-            self._connect_factory.close()
+        if self._client is not None:
+            close_fn = getattr(self._client, "close", None)
+            if callable(close_fn):
+                close_fn()
+
+    def begin(
+        self,
+        isolation_level: str | None = None,
+        *,
+        readonly: bool = False,
+    ) -> None:
+        """Start an explicit transaction on a pinned connection."""
+        client = self._get_client()
+        try:
+            client.begin(isolation_level, readonly)
+        except TypeError:
+            client.begin()
+        except BaseException as exc:
+            if isinstance(exc, DatabaseError):
+                raise
+            raise map_mysql_exception(exc) from exc
+
+    def commit(self) -> None:
+        """Commit the active transaction and return the connection to the pool."""
+        client = self._get_client()
+        try:
+            client.commit()
+        except BaseException as exc:
+            if isinstance(exc, DatabaseError):
+                raise
+            raise map_mysql_exception(exc) from exc
+
+    def rollback(self) -> None:
+        """Roll back the active transaction and return the connection to the pool."""
+        client = self._get_client()
+        try:
+            client.rollback()
+        except BaseException as exc:
+            if isinstance(exc, DatabaseError):
+                raise
+            raise map_mysql_exception(exc) from exc
+
+    def savepoint(self, name: str | None = None) -> str:
+        """Create a `SAVEPOINT` inside the current transaction and return its identifier."""
+        client = self._get_client()
+        if name is None:
+            self._savepoint_seq += 1
+            name = f"vtb_sp_{self._savepoint_seq}"
+        try:
+            return str(client.savepoint(name))
+        except BaseException as exc:
+            if isinstance(exc, DatabaseError):
+                raise
+            raise map_mysql_exception(exc) from exc
+
+    def rollback_to_savepoint(self, name: str) -> None:
+        """Roll back changes to savepoint `name`."""
+        client = self._get_client()
+        try:
+            client.rollback_to_savepoint(name)
+        except BaseException as exc:
+            if isinstance(exc, DatabaseError):
+                raise
+            raise map_mysql_exception(exc) from exc
+
+    def release_savepoint(self, name: str) -> None:
+        """Release savepoint `name`."""
+        client = self._get_client()
+        try:
+            client.release_savepoint(name)
+        except BaseException as exc:
+            if isinstance(exc, DatabaseError):
+                raise
+            raise map_mysql_exception(exc) from exc
+
+    @contextmanager
+    def transaction(
+        self,
+        isolation_level: str | None = None,
+        *,
+        readonly: bool = False,
+    ) -> Iterator[Self]:
+        """Context manager for transactions with automatic nested `SAVEPOINT` support."""
+        self._get_client()
+        if self.in_transaction:
+            sp_name = self.savepoint()
+            try:
+                yield self
+            except BaseException:
+                self.rollback_to_savepoint(sp_name)
+                self.release_savepoint(sp_name)
+                raise
+            else:
+                self.release_savepoint(sp_name)
+        else:
+            self.begin(isolation_level=isolation_level, readonly=readonly)
+            try:
+                yield self
+            except BaseException:
+                self.rollback()
+                raise
+            else:
+                self.commit()
+
+    def pipeline(self) -> SyncMySQLPipeline:
+        """Return a `SyncMySQLPipeline` context manager for batched transaction execution."""
+        self._get_client()
+        return SyncMySQLPipeline(self)
+
+    def ping(self) -> bool:
+        """Issue a MySQL `COM_PING` health check."""
+        if self._closed:
+            return False
+        client = self._get_client()
+        try:
+            return bool(client.ping())
+        except BaseException as exc:
+            if isinstance(exc, DatabaseError):
+                raise
+            raise map_mysql_exception(exc) from exc
+
+    def cancel_query(self, connection_id: int | None = None) -> bool:
+        """Issue an out-of-band `KILL QUERY <conn_id>` and return whether a target was signalled."""
+        if self._closed or self._client is None:
+            return False
+        try:
+            if connection_id is not None and hasattr(self._client, "cancel_query"):
+                return bool(self._client.cancel_query(int(connection_id)))
+            return bool(self._client.cancel())
+        except BaseException as exc:
+            if isinstance(exc, DatabaseError):
+                raise
+            raise map_mysql_exception(exc) from exc
+
+    def cancel(self, connection_id: int | None = None) -> None:
+        """Issue an out-of-band `KILL QUERY <conn_id>` on a separate control socket."""
+        self.cancel_query(connection_id=connection_id)
 
     def execute(
         self,
@@ -144,10 +306,66 @@ class SyncMySQLDriver(SyncDatabaseDriver[MySQLConfig]):
         parameters: Sequence[Any] | Mapping[str, Any] | None = None,
         **kwargs: Any,
     ) -> int:
-        """Execute a DML or DDL statement and return affected row count."""
-        _ = kwargs
-        _, _, rowcount = self._run_sync_query(sql, parameters, auto_commit_dml=True)
-        return rowcount
+        """Execute a DML or DDL statement and return the affected row count."""
+        client = self._get_client()
+        compiled_sql, params = self._compile(sql, parameters)
+        try:
+            count = client.execute(compiled_sql, params if params else None)
+            return int(count)
+        except BaseException as exc:
+            if isinstance(exc, DatabaseError):
+                raise
+            raise map_mysql_exception(exc) from exc
+
+    def execute_many(
+        self,
+        sql: str,
+        parameter_sets: Sequence[Sequence[Any] | Mapping[str, Any]],
+        **kwargs: Any,
+    ) -> int:
+        """Execute a statement repeatedly across `parameter_sets` and return total affected rows."""
+        client = self._get_client()
+        if not parameter_sets:
+            return 0
+        compiled_sets: list[tuple[Any, ...]] = []
+        compiled_sql = sql
+        for idx, param_set in enumerate(parameter_sets):
+            norm_sql, params = self._compile(sql, param_set)
+            if idx == 0:
+                compiled_sql = norm_sql
+            compiled_sets.append(params)
+        try:
+            count = client.execute_many(compiled_sql, compiled_sets)
+            return int(count)
+        except BaseException as exc:
+            if isinstance(exc, DatabaseError):
+                raise
+            raise map_mysql_exception(exc) from exc
+
+    def execute_script(self, sql: str) -> int:
+        """Execute a semicolon-delimited SQL script via `COM_QUERY` multi-statement mode."""
+        client = self._get_client()
+        try:
+            if hasattr(client, "execute_script"):
+                return int(client.execute_script(sql))
+            total = 0
+            for stmt in (part.strip() for part in sql.split(";") if part.strip()):
+                total += self.execute(stmt)
+            return total
+        except BaseException as exc:
+            if isinstance(exc, DatabaseError):
+                raise
+            raise map_mysql_exception(exc) from exc
+
+    def execute_tuples(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> list[tuple[Any, ...]]:
+        """Execute a query and return positional row tuples."""
+        rows, _cols = self.execute_with_description(sql, parameters, **kwargs)
+        return rows
 
     def execute_with_description(
         self,
@@ -155,10 +373,195 @@ class SyncMySQLDriver(SyncDatabaseDriver[MySQLConfig]):
         parameters: Sequence[Any] | Mapping[str, Any] | None = None,
         **kwargs: Any,
     ) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
-        """Execute a SQL statement and return plain tuple rows and column names."""
-        _ = kwargs
-        rows, cols, _ = self._run_sync_query(sql, parameters, auto_commit_dml=False)
-        return rows, cols
+        """Execute a statement and return `(tuple_rows, column_names)` preserving empty-result columns."""
+        client = self._get_client()
+        compiled_sql, params = self._compile(sql, parameters)
+        try:
+            if hasattr(client, "execute_with_description"):
+                raw = client.execute_with_description(compiled_sql, params if params else None)
+                dict_rows, raw_cols = raw[0], raw[1]
+                col_names = tuple(str(col[0]) if isinstance(col, (tuple, list)) else str(col) for col in raw_cols)
+                if not col_names and dict_rows:
+                    col_names = tuple(str(k) for k in dict_rows[0])
+                tuple_rows = [
+                    tuple(row.get(c) for c in col_names) if isinstance(row, Mapping) else tuple(row)
+                    for row in dict_rows
+                ]
+                return tuple_rows, col_names
+            rows = client.fetch_all(compiled_sql, params if params else None)
+            if rows:
+                col_names = tuple(str(k) for k in rows[0])
+                tuple_rows = [tuple(row[c] for c in col_names) for row in rows]
+                return tuple_rows, col_names
+            return [], ()
+        except BaseException as exc:
+            if isinstance(exc, DatabaseError):
+                raise
+            raise map_mysql_exception(exc) from exc
+
+    def select(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+        *,
+        schema_type: type[Any] | None = None,
+        **kwargs: Any,
+    ) -> list[Any]:
+        """Execute a `SELECT` query and return rows as `list[dict[str, Any]]` or hydrated `schema_type`."""
+        if schema_type is not None:
+            tuple_rows, cols = self.execute_with_description(sql, parameters, **kwargs)
+            return self.hydrate_rows(tuple_rows, cols, schema_type)
+        client = self._get_client()
+        compiled_sql, params = self._compile(sql, parameters)
+        try:
+            rows = client.fetch_all(compiled_sql, params if params else None)
+            return [dict(r) for r in rows]
+        except BaseException as exc:
+            if isinstance(exc, DatabaseError):
+                raise
+            raise map_mysql_exception(exc) from exc
+
+    def select_one(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+        *,
+        schema_type: type[Any] | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Execute a `SELECT` query and return the first row or raise `NotFoundError`."""
+        client = self._get_client()
+        compiled_sql, params = self._compile(sql, parameters)
+        try:
+            row = client.fetch_one(compiled_sql, params if params else None)
+        except BaseException as exc:
+            if isinstance(exc, DatabaseError):
+                raise
+            raise map_mysql_exception(exc) from exc
+        if row is None:
+            err = NotFoundError("Expected at least one row, got 0")
+            err.sqlstate = "02000"
+            raise err
+        row_dict = dict(row)
+        if schema_type is not None:
+            cols = tuple(row_dict.keys())
+            vals = (tuple(row_dict.values()),)
+            return self.hydrate_rows(vals, cols, schema_type)[0]
+        return row_dict
+
+    def select_one_or_none(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+        *,
+        schema_type: type[Any] | None = None,
+        **kwargs: Any,
+    ) -> Any | None:
+        """Execute a `SELECT` query and return the first row or `None` when empty."""
+        try:
+            return self.select_one(sql, parameters, schema_type=schema_type, **kwargs)
+        except NotFoundError:
+            return None
+
+    def select_many(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+        *,
+        size: int = 100,
+        schema_type: type[Any] | None = None,
+        **kwargs: Any,
+    ) -> list[Any]:
+        """Execute a `SELECT` query and return at most `size` rows."""
+        client = self._get_client()
+        compiled_sql, params = self._compile(sql, parameters)
+        try:
+            if hasattr(client, "fetch_many"):
+                rows = [dict(r) for r in client.fetch_many(compiled_sql, params if params else None, size)]
+            else:
+                rows = self.select(sql, parameters)[:size]
+        except BaseException as exc:
+            if isinstance(exc, DatabaseError):
+                raise
+            raise map_mysql_exception(exc) from exc
+        if schema_type is not None and rows:
+            cols = tuple(rows[0].keys())
+            tuple_rows = [tuple(r[c] for c in cols) for r in rows]
+            return self.hydrate_rows(tuple_rows, cols, schema_type)
+        return rows
+
+    def select_value(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+        *,
+        value_type: type[Any] | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Execute a `SELECT` query and return the first scalar value or raise `NotFoundError`."""
+        client = self._get_client()
+        compiled_sql, params = self._compile(sql, parameters)
+        try:
+            if hasattr(client, "select_value"):
+                val = client.select_value(compiled_sql, params if params else None)
+            else:
+                row = self.select_one(sql, parameters)
+                val = next(iter(row.values()), None)
+        except BaseException as exc:
+            if isinstance(exc, DatabaseError):
+                raise
+            raise map_mysql_exception(exc) from exc
+        return _coerce_scalar_value(val, value_type)
+
+    def select_value_or_none(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+        *,
+        value_type: type[Any] | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Execute a `SELECT` query and return the first scalar value or `None` when empty."""
+        try:
+            return self.select_value(sql, parameters, value_type=value_type, **kwargs)
+        except NotFoundError:
+            return None
+
+    def select_with_total(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+        *,
+        schema_type: type[Any] | None = None,
+        **kwargs: Any,
+    ) -> tuple[list[Any], int]:
+        """Execute a `SELECT` query and return `(rows, total_count)`."""
+        rows = self.select(sql, parameters, schema_type=schema_type, **kwargs)
+        cleaned = sql.strip().rstrip(";")
+        upper = cleaned.upper()
+        if " LIMIT " in upper:
+            limit_idx = upper.rfind(" LIMIT ")
+            base_sql = cleaned[:limit_idx]
+            count_sql = f"SELECT COUNT(*) AS total FROM ({base_sql}) AS _vtb_count_subq"
+            total_val = self.select_value(count_sql, parameters)
+            return rows, int(total_val or 0)
+        return rows, len(rows)
+
+    def fetch_all_sets(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+    ) -> list[list[dict[str, Any]]]:
+        """Execute a multi-result query or `CALL` procedure and return all result sets."""
+        client = self._get_client()
+        compiled_sql, params = self._compile(sql, parameters)
+        try:
+            sets = client.fetch_all_sets(compiled_sql, params if params else None)
+            return [[dict(r) for r in rs] for rs in sets]
+        except BaseException as exc:
+            if isinstance(exc, DatabaseError):
+                raise
+            raise map_mysql_exception(exc) from exc
 
     def select_to_arrow(
         self,
@@ -166,12 +569,52 @@ class SyncMySQLDriver(SyncDatabaseDriver[MySQLConfig]):
         parameters: Sequence[Any] | Mapping[str, Any] | None = None,
         *,
         threshold_rows: int = ARROW_SHM_THRESHOLD_ROWS,
+        batch_size: int = 65_536,
         **kwargs: Any,
     ) -> ArrowCursor:
-        """Execute a query and return an `ArrowCursor` backed by ShmRegion Arrow IPC."""
-        rows, cols = self.execute_with_description(sql, parameters, **kwargs)
-        col_list = list(cols) if cols else [f"col_{i}" for i in range(len(rows[0]) if rows else 0)]
-        return ArrowCursor.from_rows(rows, col_list, threshold_rows=threshold_rows)
+        """Execute a `SELECT` query and materialize results into a `VTBARROW` `ArrowCursor`."""
+        client = self._get_client()
+        compiled_sql, params = self._compile(sql, parameters)
+        try:
+            native_cursor = client.select_to_arrow(
+                compiled_sql,
+                params if params else None,
+                batch_size=batch_size,
+            )
+            if isinstance(native_cursor, ArrowCursor):
+                return native_cursor
+            return ArrowCursor(native_cursor, used_shm=True, shm_cursor=native_cursor)
+        except BaseException as exc:
+            if isinstance(exc, DatabaseError):
+                raise
+            raise map_mysql_exception(exc) from exc
+
+    def stream_arrow_batches(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+        *,
+        batch_size: int = 65_536,
+        **kwargs: Any,
+    ) -> Iterator[ArrowCursor]:
+        """Stream a `SELECT` query as bounded `VTBARROW` `ArrowCursor` chunks."""
+        client = self._get_client()
+        compiled_sql, params = self._compile(sql, parameters)
+        try:
+            batches = client.stream_arrow_batches(
+                compiled_sql,
+                params if params else None,
+                batch_size=batch_size,
+            )
+        except BaseException as exc:
+            if isinstance(exc, DatabaseError):
+                raise
+            raise map_mysql_exception(exc) from exc
+        for batch in batches:
+            if isinstance(batch, ArrowCursor):
+                yield batch
+            else:
+                yield ArrowCursor(batch, used_shm=True, shm_cursor=batch)
 
     def load_from_arrow(
         self,
@@ -179,244 +622,276 @@ class SyncMySQLDriver(SyncDatabaseDriver[MySQLConfig]):
         data: Any,
         *,
         columns: Sequence[str] | None = None,
+        batch_size: int = 1000,
         **kwargs: Any,
     ) -> int:
-        """Bulk-ingest an Arrow Table, `ArrowCursor`, or row sequence into `table_name`."""
-        _ = kwargs
-        validate_identifier(table_name, "table_name", allow_dots=True)
-        if columns is not None:
-            for col in columns:
-                validate_identifier(str(col), "column", allow_dots=False)
-        rows, cols = _table_to_rows_and_cols(data, columns)
-        for col in cols:
-            validate_identifier(str(col), "column", allow_dots=False)
-        if not rows or not cols:
-            return 0
-        placeholders = ", ".join("%s" for _ in cols)
-        quoted_table = quote_dialect_identifier(table_name, self.dialect)
-        col_list = ", ".join(quote_dialect_identifier(str(col), self.dialect) for col in cols)
-        sql = f"INSERT INTO {quoted_table} ({col_list}) VALUES ({placeholders})"
-        for row in rows:
-            self.execute(sql, row)
-        return len(rows)
-
-    def _run_sync_query(
-        self,
-        sql: str,
-        parameters: Sequence[Any] | Mapping[str, Any] | None,
-        *,
-        auto_commit_dml: bool,
-    ) -> tuple[list[tuple[Any, ...]], tuple[str, ...], int]:
-        if self._closed:
-            msg = "SyncMySQLDriver is closed"
-            raise RuntimeError(msg)
-
-        lease: Any = None
-        if self._broker is not None:
-            if hasattr(self._broker, "get_or_compile_statement"):
-                self._broker.get_or_compile_statement("mysql", sql, lambda s: (s, ()))
-            if hasattr(self._broker, "lease_table") and self._broker.lease_table is not None:
-                lease = self._broker.lease_table.acquire(os.getpid())
-            elif hasattr(self._broker, "acquire"):
-                try:
-                    lease = self._broker.acquire(bind_key="mysql")
-                except TypeError:
-                    lease = self._broker.acquire(os.getpid())
-
+        """Bulk-load an `ArrowCursor`, PyArrow Table/RecordBatch, or `__arrow_c_stream__` into `table_name`."""
+        client = self._get_client()
+        source = data._shm_cursor if isinstance(data, ArrowCursor) and data._shm_cursor is not None else data
         try:
-            pinned = self._tx_conn is not None
-            conn = self._tx_conn if pinned else self._acquire()
-            try:
-                if hasattr(conn, "execute_with_description"):
-                    raw_rows, raw_desc = conn.execute_with_description(sql, parameters or ())
-                    tuple_rows = [tuple(r) for r in raw_rows]
-                    return tuple_rows, self._extract_column_names(raw_desc), len(tuple_rows)
-                if hasattr(conn, "cursor"):
-                    cur = conn.cursor()
-                    try:
-                        cur.execute(sql, parameters if parameters else None)
-                        raw_desc = getattr(cur, "description", None)
-                        if raw_desc:
-                            rows = [tuple(r) for r in (cur.fetchall() if hasattr(cur, "fetchall") else ())]
-                            return rows, self._extract_column_names(raw_desc), len(rows)
-                        if auto_commit_dml and not self._in_transaction and hasattr(conn, "commit"):
-                            conn.commit()
-                        rowcount = getattr(cur, "rowcount", 0)
-                        return [], (), max(int(rowcount or 0), 0)
-                    finally:
-                        if hasattr(cur, "close"):
-                            cur.close()
-                if hasattr(conn, "execute"):
-                    exec_res = conn.execute(sql, parameters if parameters else None)
-                    raw_desc = getattr(exec_res, "description", None)
-                    raw_rows = exec_res.fetchall() if hasattr(exec_res, "fetchall") else list(exec_res)
-                    tuple_rows = [tuple(r) for r in raw_rows]
-                    return tuple_rows, self._extract_column_names(raw_desc), len(tuple_rows)
-                return [], (), 0
-            finally:
-                if not pinned:
-                    self._release(conn)
-        finally:
-            if lease is not None and hasattr(lease, "release"):
-                lease.release()
+            inserted = client.load_from_arrow(
+                table_name,
+                source,
+                columns=list(columns) if columns is not None else None,
+                batch_size=batch_size,
+            )
+            return int(inserted)
+        except BaseException as exc:
+            if isinstance(exc, DatabaseError):
+                raise
+            raise map_mysql_exception(exc) from exc
 
-    def _create_connection(self) -> Any:
-        """Create a new database connection or raise MissingDependencyError."""
-        params = self.config.parse_dsn_params()
-        tls_sock: ssl.SSLSocket | None = None
-        if self._dialer is not None:
-            tls_sock = self._dialer.connect(host=params["host"])
-
-        if self._connect_factory is not None:
-            if tls_sock is not None:
-                try:
-                    return self._connect_factory(sock=tls_sock)
-                except TypeError:
-                    return self._connect_factory()
-            return self._connect_factory()
-
-        pymysql: Any = ensure_module("pymysql")
-
-        connect_kwargs: dict[str, Any] = {
-            "host": params["host"],
-            "port": params["port"],
-            "user": params["user"],
-            "password": params["password"],
-            "database": params["database"],
-            "charset": params["charset"],
-            "autocommit": params["autocommit"],
-        }
-        if tls_sock is not None:
-            connect_kwargs["sock"] = tls_sock
-        return pymysql.connect(**connect_kwargs)
-
-    def _acquire(self) -> Any:
-        """Acquire an idle connection or create a new connection."""
-        if self._closed:
-            msg = "SyncMySQLDriver is closed"
-            raise RuntimeError(msg)
-        if self._idle_conns:
-            return self._idle_conns.pop()
-        return self._create_connection()
-
-    def _release(self, conn: Any) -> None:
-        """Release a connection back to the idle pool or close it."""
-        if self._closed or len(self._idle_conns) >= self.config.max_size:
-            if hasattr(conn, "close"):
-                conn.close()
-        else:
-            self._idle_conns.append(conn)
+    def __repr__(self) -> str:
+        """Return a redacted representation of the driver."""
+        return (
+            f"SyncMySQLDriver(host={self.config.host!r}, port={self.config.port}, "
+            f"user={self.config.user!r}, database={self.config.database!r}, "
+            f"ssl_mode={self.config.canonical_ssl_mode!r}, password='***')"
+        )
 
 
 class AsyncMySQLDriver(AsyncDatabaseDriver[MySQLConfig]):
-    """Asynchronous MySQL driver facade backed by asyncmy and SHM broker leasing."""
+    """Asynchronous MySQL 8.4/9 and MariaDB driver backed by `vertebra._mysql.AsyncMySQLClient`."""
 
     dialect: ClassVar[str] = "mysql"
     dialect_tag: ClassVar[int] = MYSQL_DIALECT_TAG
-
-    __slots__ = (
-        "_dialer",
-        "_in_transaction",
-        "_pool",
-        "_tx_conn",
-        "_tx_conn_ctx",
-    )
 
     def __init__(
         self,
         config: MySQLConfig | None = None,
         *,
-        dialer: AsyncCloudSQLDialer | None = None,
+        client: Any = None,
+        dialer: Any = None,
         broker: Any = None,
-        pool: Any = None,
+        **kwargs: Any,
     ) -> None:
-        resolved = config or MySQLConfig()
-        _reject_memory_dsn(resolved.dsn)
-        super().__init__(resolved, broker=broker)
-        self._dialer = dialer
-        if self._dialer is None:
-            csql_cfg = self.config.to_cloud_dialer_config()
-            if csql_cfg is not None:
-                self._dialer = AsyncCloudSQLDialer(csql_cfg)
-        self._pool = pool
-        self._in_transaction: bool = False
-        self._tx_conn: Any = None
-        self._tx_conn_ctx: Any = None
+        if config is None:
+            config = MySQLConfig(**kwargs) if kwargs else MySQLConfig()
+        elif kwargs:
+            merged = {f: getattr(config, f) for f in config.__struct_fields__}
+            merged.update(kwargs)
+            config = MySQLConfig(**merged)
+
+        super().__init__(config, broker=broker if broker is not None else config.broker)
+        self._client: Any = client
+        self._dialer: Any = dialer
+        self._savepoint_seq: int = 0
+        self._closed: bool = False
 
     @property
-    def _config(self) -> MySQLConfig:
-        """Return the active MySQLConfig."""
-        return self.config
-
-    @property
-    def dialer(self) -> AsyncCloudSQLDialer | None:
-        """Return the attached CloudSQLDialer if configured."""
+    def dialer(self) -> Any:
+        """Return the optional Cloud SQL dialer attached to this driver."""
         return self._dialer
 
-    async def begin(self) -> None:
-        """Begin an explicit async MySQL transaction and pin a pooled connection."""
-        if self._closed:
+    @property
+    def raw_client(self) -> Any:
+        """Return the underlying `vertebra._mysql.AsyncMySQLClient` instance."""
+        return self._get_client()
+
+    @property
+    def in_transaction(self) -> bool:
+        """Return whether an explicit transaction is active on this client."""
+        if self._client is None:
+            return False
+        return bool(getattr(self._client, "in_transaction", False))
+
+    @property
+    def connection_id(self) -> int | None:
+        """Return the active MySQL server `CONNECTION_ID()` when connected."""
+        if self._client is None:
+            return None
+        cid = getattr(self._client, "connection_id", None)
+        return int(cid) if cid is not None else None
+
+    @property
+    def lastrowid(self) -> int | None:
+        """Return the `AUTO_INCREMENT` ID from the most recent `INSERT` statement."""
+        if self._client is None:
+            return None
+        lid = getattr(self._client, "lastrowid", None)
+        return int(lid) if lid is not None else None
+
+    def statement_cache_len(self) -> int:
+        """Return the number of binary prepared statements cached in the session LRU."""
+        if self._client is None:
+            return 0
+        fn = getattr(self._client, "statement_cache_len", None)
+        return int(fn()) if callable(fn) else 0
+
+    def _get_client(self) -> Any:
+        if self._closed or (self._client is not None and bool(getattr(self._client, "is_closed", False))):
             msg = "AsyncMySQLDriver is closed"
-            raise RuntimeError(msg)
-        self._in_transaction = True
-        if self._tx_conn is not None:
-            return
-        pool = await self._ensure_pool()
-        if hasattr(pool, "acquire"):
-            ctx = pool.acquire()
-            self._tx_conn_ctx = ctx
-            self._tx_conn = await ctx.__aenter__()
-        elif hasattr(pool, "connection"):
-            conn_obj = pool.connection()
-            if hasattr(conn_obj, "__aenter__"):
-                self._tx_conn_ctx = conn_obj
-                self._tx_conn = await conn_obj.__aenter__()
-            else:
-                self._tx_conn = conn_obj
-        if self._tx_conn is not None and hasattr(self._tx_conn, "begin"):
-            res = self._tx_conn.begin()
-            if inspect.isawaitable(res):
-                await res
+            raise OperationalError(msg)
+        if self._client is None:
+            mod = _load_mysql_module()
+            connect_kwargs = build_mysql_connect_kwargs(self.config)
+            self._client = mod.AsyncMySQLClient(**connect_kwargs)
+        return self._client
 
-    async def commit(self) -> None:
-        """Commit the active async MySQL transaction."""
-        try:
-            if self._tx_conn is not None and hasattr(self._tx_conn, "commit"):
-                res = self._tx_conn.commit()
-                if inspect.isawaitable(res):
-                    await res
-            elif self._pool is not None and hasattr(self._pool, "commit"):
-                res = self._pool.commit()
-                if inspect.isawaitable(res):
-                    await res
-        finally:
-            await self._release_tx_conn()
+    def _compile(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+    ) -> tuple[str, tuple[Any, ...]]:
+        if not parameters:
+            return sql, ()
+        if isinstance(parameters, Mapping):
+            return compile_mysql_statement(sql, parameters, target_style="qmark")
+        return sql, tuple(coerce_mysql_param(v) for v in parameters)
 
-    async def rollback(self) -> None:
-        """Roll back the active async MySQL transaction."""
-        try:
-            if self._tx_conn is not None and hasattr(self._tx_conn, "rollback"):
-                res = self._tx_conn.rollback()
-                if inspect.isawaitable(res):
-                    await res
-            elif self._pool is not None and hasattr(self._pool, "rollback"):
-                res = self._pool.rollback()
-                if inspect.isawaitable(res):
-                    await res
-        finally:
-            await self._release_tx_conn()
+    async def connect(self) -> Self:
+        """Initialize the underlying native MySQL client and return `self`."""
+        self._closed = False
+        self._get_client()
+        return self
 
     async def close(self) -> None:
-        """Close the async driver pool."""
+        """Close the underlying native MySQL pool and connections."""
+        if self._closed:
+            return
         self._closed = True
-        await self._release_tx_conn()
-        if self._pool is not None:
-            if hasattr(self._pool, "close"):
-                res = self._pool.close()
+        if self._client is not None:
+            close_fn = getattr(self._client, "close", None)
+            if callable(close_fn):
+                res = close_fn()
                 if hasattr(res, "__await__"):
                     await res
-            if hasattr(self._pool, "wait_closed"):
-                await self._pool.wait_closed()
+
+    async def begin(
+        self,
+        isolation_level: str | None = None,
+        *,
+        readonly: bool = False,
+    ) -> None:
+        """Start an explicit transaction on a pinned connection."""
+        client = self._get_client()
+        try:
+            await client.begin(isolation_level, readonly)
+        except TypeError:
+            await client.begin()
+        except BaseException as exc:
+            if isinstance(exc, DatabaseError):
+                raise
+            raise map_mysql_exception(exc) from exc
+
+    async def commit(self) -> None:
+        """Commit the active transaction and return the connection to the pool."""
+        client = self._get_client()
+        try:
+            await client.commit()
+        except BaseException as exc:
+            if isinstance(exc, DatabaseError):
+                raise
+            raise map_mysql_exception(exc) from exc
+
+    async def rollback(self) -> None:
+        """Roll back the active transaction and return the connection to the pool."""
+        client = self._get_client()
+        try:
+            await client.rollback()
+        except BaseException as exc:
+            if isinstance(exc, DatabaseError):
+                raise
+            raise map_mysql_exception(exc) from exc
+
+    async def savepoint(self, name: str | None = None) -> str:
+        """Create a `SAVEPOINT` inside the current transaction and return its identifier."""
+        client = self._get_client()
+        if name is None:
+            self._savepoint_seq += 1
+            name = f"vtb_sp_{self._savepoint_seq}"
+        try:
+            sp = await client.savepoint(name)
+            return str(sp)
+        except BaseException as exc:
+            if isinstance(exc, DatabaseError):
+                raise
+            raise map_mysql_exception(exc) from exc
+
+    async def rollback_to_savepoint(self, name: str) -> None:
+        """Roll back changes to savepoint `name`."""
+        client = self._get_client()
+        try:
+            await client.rollback_to_savepoint(name)
+        except BaseException as exc:
+            if isinstance(exc, DatabaseError):
+                raise
+            raise map_mysql_exception(exc) from exc
+
+    async def release_savepoint(self, name: str) -> None:
+        """Release savepoint `name`."""
+        client = self._get_client()
+        try:
+            await client.release_savepoint(name)
+        except BaseException as exc:
+            if isinstance(exc, DatabaseError):
+                raise
+            raise map_mysql_exception(exc) from exc
+
+    @asynccontextmanager
+    async def transaction(
+        self,
+        isolation_level: str | None = None,
+        *,
+        readonly: bool = False,
+    ) -> AsyncIterator[Self]:
+        """Async context manager for transactions with shielded rollback and nested `SAVEPOINT` support."""
+        self._get_client()
+        if self.in_transaction:
+            sp_name = await self.savepoint()
+            try:
+                yield self
+            except BaseException:
+                with CancelScope(shield=True):
+                    await self.rollback_to_savepoint(sp_name)
+                    await self.release_savepoint(sp_name)
+                raise
+            else:
+                await self.release_savepoint(sp_name)
+        else:
+            await self.begin(isolation_level=isolation_level, readonly=readonly)
+            try:
+                yield self
+            except BaseException:
+                with CancelScope(shield=True):
+                    await self.rollback()
+                raise
+            else:
+                await self.commit()
+
+    def pipeline(self) -> AsyncMySQLPipeline:
+        """Return an `AsyncMySQLPipeline` context manager for batched transaction execution."""
+        self._get_client()
+        return AsyncMySQLPipeline(self)
+
+    async def ping(self) -> bool:
+        """Issue a MySQL `COM_PING` health check."""
+        if self._closed:
+            return False
+        client = self._get_client()
+        try:
+            return bool(await client.ping())
+        except BaseException as exc:
+            if isinstance(exc, DatabaseError):
+                raise
+            raise map_mysql_exception(exc) from exc
+
+    async def cancel_query(self, connection_id: int | None = None) -> bool:
+        """Issue an out-of-band `KILL QUERY <conn_id>` and return whether a target was signalled."""
+        if self._closed or self._client is None:
+            return False
+        try:
+            if connection_id is not None and hasattr(self._client, "cancel_query"):
+                return bool(await self._client.cancel_query(int(connection_id)))
+            return bool(await self._client.cancel())
+        except BaseException as exc:
+            if isinstance(exc, DatabaseError):
+                raise
+            raise map_mysql_exception(exc) from exc
+
+    async def cancel(self, connection_id: int | None = None) -> None:
+        """Issue an out-of-band `KILL QUERY <conn_id>` on a separate control socket."""
+        await self.cancel_query(connection_id=connection_id)
 
     async def execute(
         self,
@@ -424,10 +899,66 @@ class AsyncMySQLDriver(AsyncDatabaseDriver[MySQLConfig]):
         parameters: Sequence[Any] | Mapping[str, Any] | None = None,
         **kwargs: Any,
     ) -> int:
-        """Asynchronously execute a DML or DDL statement and return affected row count."""
-        _ = kwargs
-        _, _, rowcount = await self._run_async_query(sql, parameters, auto_commit_dml=True)
-        return rowcount
+        """Execute a DML or DDL statement and return the affected row count."""
+        client = self._get_client()
+        compiled_sql, params = self._compile(sql, parameters)
+        try:
+            count = await client.execute(compiled_sql, params if params else None)
+            return int(count)
+        except BaseException as exc:
+            if isinstance(exc, DatabaseError):
+                raise
+            raise map_mysql_exception(exc) from exc
+
+    async def execute_many(
+        self,
+        sql: str,
+        parameter_sets: Sequence[Sequence[Any] | Mapping[str, Any]],
+        **kwargs: Any,
+    ) -> int:
+        """Execute a statement repeatedly across `parameter_sets` and return total affected rows."""
+        client = self._get_client()
+        if not parameter_sets:
+            return 0
+        compiled_sets: list[tuple[Any, ...]] = []
+        compiled_sql = sql
+        for idx, param_set in enumerate(parameter_sets):
+            norm_sql, params = self._compile(sql, param_set)
+            if idx == 0:
+                compiled_sql = norm_sql
+            compiled_sets.append(params)
+        try:
+            count = await client.execute_many(compiled_sql, compiled_sets)
+            return int(count)
+        except BaseException as exc:
+            if isinstance(exc, DatabaseError):
+                raise
+            raise map_mysql_exception(exc) from exc
+
+    async def execute_script(self, sql: str) -> int:
+        """Execute a semicolon-delimited SQL script via `COM_QUERY` multi-statement mode."""
+        client = self._get_client()
+        try:
+            if hasattr(client, "execute_script"):
+                return int(await client.execute_script(sql))
+            total = 0
+            for stmt in (part.strip() for part in sql.split(";") if part.strip()):
+                total += await self.execute(stmt)
+            return total
+        except BaseException as exc:
+            if isinstance(exc, DatabaseError):
+                raise
+            raise map_mysql_exception(exc) from exc
+
+    async def execute_tuples(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> list[tuple[Any, ...]]:
+        """Execute a query and return positional row tuples."""
+        rows, _cols = await self.execute_with_description(sql, parameters, **kwargs)
+        return rows
 
     async def execute_with_description(
         self,
@@ -435,10 +966,196 @@ class AsyncMySQLDriver(AsyncDatabaseDriver[MySQLConfig]):
         parameters: Sequence[Any] | Mapping[str, Any] | None = None,
         **kwargs: Any,
     ) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
-        """Asynchronously execute a SQL statement and return tuple rows and column names."""
-        _ = kwargs
-        rows, cols, _ = await self._run_async_query(sql, parameters, auto_commit_dml=False)
-        return rows, cols
+        """Execute a statement and return `(tuple_rows, column_names)` preserving empty-result columns."""
+        client = self._get_client()
+        compiled_sql, params = self._compile(sql, parameters)
+        try:
+            if hasattr(client, "execute_with_description"):
+                raw = await client.execute_with_description(compiled_sql, params if params else None)
+                dict_rows, raw_cols = raw[0], raw[1]
+                col_names = tuple(str(col[0]) if isinstance(col, (tuple, list)) else str(col) for col in raw_cols)
+                if not col_names and dict_rows:
+                    col_names = tuple(str(k) for k in dict_rows[0])
+                tuple_rows = [
+                    tuple(row.get(c) for c in col_names) if isinstance(row, Mapping) else tuple(row)
+                    for row in dict_rows
+                ]
+                return tuple_rows, col_names
+            rows = await client.fetch_all(compiled_sql, params if params else None)
+            if rows:
+                col_names = tuple(str(k) for k in rows[0])
+                tuple_rows = [tuple(row[c] for c in col_names) for row in rows]
+                return tuple_rows, col_names
+            return [], ()
+        except BaseException as exc:
+            if isinstance(exc, DatabaseError):
+                raise
+            raise map_mysql_exception(exc) from exc
+
+    async def select(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+        *,
+        schema_type: type[Any] | None = None,
+        **kwargs: Any,
+    ) -> list[Any]:
+        """Execute a `SELECT` query and return rows as `list[dict[str, Any]]` or hydrated `schema_type`."""
+        if schema_type is not None:
+            tuple_rows, cols = await self.execute_with_description(sql, parameters, **kwargs)
+            return self.hydrate_rows(tuple_rows, cols, schema_type)
+        client = self._get_client()
+        compiled_sql, params = self._compile(sql, parameters)
+        try:
+            rows = await client.fetch_all(compiled_sql, params if params else None)
+            return [dict(r) for r in rows]
+        except BaseException as exc:
+            if isinstance(exc, DatabaseError):
+                raise
+            raise map_mysql_exception(exc) from exc
+
+    async def select_one(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+        *,
+        schema_type: type[Any] | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Execute a `SELECT` query and return the first row or raise `NotFoundError`."""
+        client = self._get_client()
+        compiled_sql, params = self._compile(sql, parameters)
+        try:
+            row = await client.fetch_one(compiled_sql, params if params else None)
+        except BaseException as exc:
+            if isinstance(exc, DatabaseError):
+                raise
+            raise map_mysql_exception(exc) from exc
+        if row is None:
+            err = NotFoundError("Expected at least one row, got 0")
+            err.sqlstate = "02000"
+            raise err
+        row_dict = dict(row)
+        if schema_type is not None:
+            cols = tuple(row_dict.keys())
+            vals = (tuple(row_dict.values()),)
+            return self.hydrate_rows(vals, cols, schema_type)[0]
+        return row_dict
+
+    async def select_one_or_none(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+        *,
+        schema_type: type[Any] | None = None,
+        **kwargs: Any,
+    ) -> Any | None:
+        """Execute a `SELECT` query and return the first row or `None` when empty."""
+        try:
+            return await self.select_one(sql, parameters, schema_type=schema_type, **kwargs)
+        except NotFoundError:
+            return None
+
+    async def select_many(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+        *,
+        size: int = 100,
+        schema_type: type[Any] | None = None,
+        **kwargs: Any,
+    ) -> list[Any]:
+        """Execute a `SELECT` query and return at most `size` rows."""
+        client = self._get_client()
+        compiled_sql, params = self._compile(sql, parameters)
+        try:
+            if hasattr(client, "fetch_many"):
+                raw_rows = await client.fetch_many(compiled_sql, params if params else None, size)
+                rows = [dict(r) for r in raw_rows]
+            else:
+                rows = (await self.select(sql, parameters))[:size]
+        except BaseException as exc:
+            if isinstance(exc, DatabaseError):
+                raise
+            raise map_mysql_exception(exc) from exc
+        if schema_type is not None and rows:
+            cols = tuple(rows[0].keys())
+            tuple_rows = [tuple(r[c] for c in cols) for r in rows]
+            return self.hydrate_rows(tuple_rows, cols, schema_type)
+        return rows
+
+    async def select_value(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+        *,
+        value_type: type[Any] | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Execute a `SELECT` query and return the first scalar value or raise `NotFoundError`."""
+        client = self._get_client()
+        compiled_sql, params = self._compile(sql, parameters)
+        try:
+            if hasattr(client, "select_value"):
+                val = await client.select_value(compiled_sql, params if params else None)
+            else:
+                row = await self.select_one(sql, parameters)
+                val = next(iter(row.values()), None)
+        except BaseException as exc:
+            if isinstance(exc, DatabaseError):
+                raise
+            raise map_mysql_exception(exc) from exc
+        return _coerce_scalar_value(val, value_type)
+
+    async def select_value_or_none(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+        *,
+        value_type: type[Any] | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Execute a `SELECT` query and return the first scalar value or `None` when empty."""
+        try:
+            return await self.select_value(sql, parameters, value_type=value_type, **kwargs)
+        except NotFoundError:
+            return None
+
+    async def select_with_total(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+        *,
+        schema_type: type[Any] | None = None,
+        **kwargs: Any,
+    ) -> tuple[list[Any], int]:
+        """Execute a `SELECT` query and return `(rows, total_count)`."""
+        rows = await self.select(sql, parameters, schema_type=schema_type, **kwargs)
+        cleaned = sql.strip().rstrip(";")
+        upper = cleaned.upper()
+        if " LIMIT " in upper:
+            limit_idx = upper.rfind(" LIMIT ")
+            base_sql = cleaned[:limit_idx]
+            count_sql = f"SELECT COUNT(*) AS total FROM ({base_sql}) AS _vtb_count_subq"
+            total_val = await self.select_value(count_sql, parameters)
+            return rows, int(total_val or 0)
+        return rows, len(rows)
+
+    async def fetch_all_sets(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+    ) -> list[list[dict[str, Any]]]:
+        """Execute a multi-result query or `CALL` procedure and return all result sets."""
+        client = self._get_client()
+        compiled_sql, params = self._compile(sql, parameters)
+        try:
+            sets = await client.fetch_all_sets(compiled_sql, params if params else None)
+            return [[dict(r) for r in rs] for rs in sets]
+        except BaseException as exc:
+            if isinstance(exc, DatabaseError):
+                raise
+            raise map_mysql_exception(exc) from exc
 
     async def select_to_arrow(
         self,
@@ -446,12 +1163,52 @@ class AsyncMySQLDriver(AsyncDatabaseDriver[MySQLConfig]):
         parameters: Sequence[Any] | Mapping[str, Any] | None = None,
         *,
         threshold_rows: int = ARROW_SHM_THRESHOLD_ROWS,
+        batch_size: int = 65_536,
         **kwargs: Any,
     ) -> ArrowCursor:
-        """Asynchronously execute a query and return an `ArrowCursor` over ShmRegion Arrow IPC."""
-        rows, cols = await self.execute_with_description(sql, parameters, **kwargs)
-        col_list = list(cols) if cols else [f"col_{i}" for i in range(len(rows[0]) if rows else 0)]
-        return ArrowCursor.from_rows(rows, col_list, threshold_rows=threshold_rows)
+        """Execute a `SELECT` query and materialize results into a `VTBARROW` `ArrowCursor`."""
+        client = self._get_client()
+        compiled_sql, params = self._compile(sql, parameters)
+        try:
+            native_cursor = await client.select_to_arrow(
+                compiled_sql,
+                params if params else None,
+                batch_size=batch_size,
+            )
+            if isinstance(native_cursor, ArrowCursor):
+                return native_cursor
+            return ArrowCursor(native_cursor, used_shm=True, shm_cursor=native_cursor)
+        except BaseException as exc:
+            if isinstance(exc, DatabaseError):
+                raise
+            raise map_mysql_exception(exc) from exc
+
+    async def stream_arrow_batches(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+        *,
+        batch_size: int = 65_536,
+        **kwargs: Any,
+    ) -> AsyncIterator[ArrowCursor]:
+        """Stream a `SELECT` query as bounded `VTBARROW` `ArrowCursor` chunks."""
+        client = self._get_client()
+        compiled_sql, params = self._compile(sql, parameters)
+        try:
+            batches = await client.stream_arrow_batches(
+                compiled_sql,
+                params if params else None,
+                batch_size=batch_size,
+            )
+        except BaseException as exc:
+            if isinstance(exc, DatabaseError):
+                raise
+            raise map_mysql_exception(exc) from exc
+        for batch in batches:
+            if isinstance(batch, ArrowCursor):
+                yield batch
+            else:
+                yield ArrowCursor(batch, used_shm=True, shm_cursor=batch)
 
     async def load_from_arrow(
         self,
@@ -459,147 +1216,29 @@ class AsyncMySQLDriver(AsyncDatabaseDriver[MySQLConfig]):
         data: Any,
         *,
         columns: Sequence[str] | None = None,
+        batch_size: int = 1000,
         **kwargs: Any,
     ) -> int:
-        """Asynchronously bulk-ingest an Arrow Table, `ArrowCursor`, or row sequence into `table_name`."""
-        _ = kwargs
-        validate_identifier(table_name, "table_name", allow_dots=True)
-        if columns is not None:
-            for col in columns:
-                validate_identifier(str(col), "column", allow_dots=False)
-        rows, cols = _table_to_rows_and_cols(data, columns)
-        for col in cols:
-            validate_identifier(str(col), "column", allow_dots=False)
-        if not rows or not cols:
-            return 0
-        placeholders = ", ".join("%s" for _ in cols)
-        quoted_table = quote_dialect_identifier(table_name, self.dialect)
-        col_list = ", ".join(quote_dialect_identifier(str(col), self.dialect) for col in cols)
-        sql = f"INSERT INTO {quoted_table} ({col_list}) VALUES ({placeholders})"
-        for row in rows:
-            await self.execute(sql, row)
-        return len(rows)
-
-    async def _release_tx_conn(self) -> None:
-        ctx = self._tx_conn_ctx
-        self._tx_conn = None
-        self._tx_conn_ctx = None
-        self._in_transaction = False
-        if ctx is not None:
-            await ctx.__aexit__(None, None, None)
-
-    async def _execute_on_async_connection(
-        self,
-        active_conn: Any,
-        sql: str,
-        parameters: Sequence[Any] | Mapping[str, Any] | None,
-        *,
-        auto_commit_dml: bool,
-    ) -> tuple[list[tuple[Any, ...]], tuple[str, ...], int]:
-        async with active_conn.cursor() as cur:
-            await cur.execute(sql, parameters if parameters else None)
-            raw_desc = getattr(cur, "description", None)
-            if raw_desc:
-                fetched = await cur.fetchall() if hasattr(cur, "fetchall") else []
-                rows = [tuple(r) for r in fetched]
-                return rows, self._extract_column_names(raw_desc), len(rows)
-            if auto_commit_dml and not self._in_transaction and hasattr(active_conn, "commit"):
-                commit_res = active_conn.commit()
-                if inspect.isawaitable(commit_res):
-                    await commit_res
-            rowcount = getattr(cur, "rowcount", 0)
-            return [], (), max(int(rowcount or 0), 0)
-
-    async def _run_async_query(
-        self,
-        sql: str,
-        parameters: Sequence[Any] | Mapping[str, Any] | None,
-        *,
-        auto_commit_dml: bool,
-    ) -> tuple[list[tuple[Any, ...]], tuple[str, ...], int]:
-        if self._closed:
-            msg = "AsyncMySQLDriver is closed"
-            raise RuntimeError(msg)
-
-        lease: Any = None
-        if self._broker is not None:
-            if hasattr(self._broker, "get_or_compile_statement"):
-                self._broker.get_or_compile_statement("mysql", sql, lambda s: (s, ()))
-            if hasattr(self._broker, "acquire_async"):
-                lease = await self._broker.acquire_async(bind_key="mysql")
-            elif hasattr(self._broker, "acquire"):
-                lease = self._broker.acquire(bind_key="mysql")
-
+        """Bulk-load an `ArrowCursor`, PyArrow Table/RecordBatch, or `__arrow_c_stream__` into `table_name`."""
+        client = self._get_client()
+        source = data._shm_cursor if isinstance(data, ArrowCursor) and data._shm_cursor is not None else data
         try:
-            if self._tx_conn is not None:
-                return await self._execute_on_async_connection(
-                    self._tx_conn,
-                    sql,
-                    parameters,
-                    auto_commit_dml=False,
-                )
+            inserted = await client.load_from_arrow(
+                table_name,
+                source,
+                columns=list(columns) if columns is not None else None,
+                batch_size=batch_size,
+            )
+            return int(inserted)
+        except BaseException as exc:
+            if isinstance(exc, DatabaseError):
+                raise
+            raise map_mysql_exception(exc) from exc
 
-            pool = await self._ensure_pool()
-            if hasattr(pool, "execute_with_description"):
-                raw_res = pool.execute_with_description(sql, parameters or ())
-                if hasattr(raw_res, "__await__"):
-                    raw_res = await raw_res
-                raw_rows, raw_desc = raw_res
-                tuple_rows = [tuple(r) for r in raw_rows]
-                return tuple_rows, self._extract_column_names(raw_desc), len(tuple_rows)
-            if hasattr(pool, "acquire"):
-                async with pool.acquire() as conn:
-                    return await self._execute_on_async_connection(
-                        conn,
-                        sql,
-                        parameters,
-                        auto_commit_dml=auto_commit_dml,
-                    )
-            if hasattr(pool, "connection"):
-                conn = pool.connection()
-                if hasattr(conn, "__aenter__"):
-                    async with conn as active_conn:
-                        return await self._execute_on_async_connection(
-                            active_conn,
-                            sql,
-                            parameters,
-                            auto_commit_dml=auto_commit_dml,
-                        )
-            return [], (), 0
-        finally:
-            if lease is not None and hasattr(lease, "release"):
-                lease.release()
-
-    async def _ensure_pool(self) -> Any:
-        """Ensure connection pool is initialized or raise MissingDependencyError."""
-        if self._pool is not None:
-            return self._pool
-        asyncmy: Any = ensure_module("asyncmy")
-        params = await self.config.parse_dsn_params_async()
-        pool_kwargs: dict[str, Any] = {
-            "host": params["host"],
-            "port": params["port"],
-            "user": params["user"],
-            "password": params["password"],
-            "db": params["database"],
-            "charset": params["charset"],
-            "autocommit": params["autocommit"],
-            "minsize": self.config.min_size,
-            "maxsize": self.config.max_size,
-        }
-        self._pool = await asyncmy.create_pool(**pool_kwargs)
-        return self._pool
-
-
-def _reject_memory_dsn(dsn: str) -> None:
-    """Reject in-process memory:// DSNs.
-
-    Args:
-        dsn: Configured MySQL DSN.
-
-    Raises:
-        ImproperConfigurationError: When ``dsn`` starts with ``memory://`` (case-insensitive).
-    """
-    if dsn.strip().lower().startswith("memory://"):
-        msg = "MySQL drivers do not support memory:// DSNs; pass a mysql:// DSN or inject connect_factory= or pool="
-        raise ImproperConfigurationError(msg)
+    def __repr__(self) -> str:
+        """Return a redacted representation of the driver."""
+        return (
+            f"AsyncMySQLDriver(host={self.config.host!r}, port={self.config.port}, "
+            f"user={self.config.user!r}, database={self.config.database!r}, "
+            f"ssl_mode={self.config.canonical_ssl_mode!r}, password='***')"
+        )

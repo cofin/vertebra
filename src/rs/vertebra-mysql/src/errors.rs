@@ -15,6 +15,7 @@ pub enum MySQLErrorKind {
     DataError,
     ProgrammingError,
     OperationalError,
+    NotFound,
 }
 
 impl MySQLErrorKind {
@@ -29,6 +30,7 @@ impl MySQLErrorKind {
             Self::DataError => "DataError",
             Self::ProgrammingError => "ProgrammingError",
             Self::OperationalError => "OperationalError",
+            Self::NotFound => "NotFoundError",
         }
     }
 }
@@ -155,6 +157,15 @@ impl MySQLError {
         )
     }
 
+    pub fn not_found(message: impl Into<String>) -> Self {
+        Self::new(
+            MySQLErrorKind::NotFound,
+            message,
+            None,
+            Some("02000".to_string()),
+        )
+    }
+
     pub fn from_server_error(errno: u16, sqlstate: Option<&str>, message: impl Into<String>) -> Self {
         let kind = classify_mysql_error(errno, sqlstate);
         Self {
@@ -165,14 +176,19 @@ impl MySQLError {
         }
     }
 
-    /// Converts this [`MySQLError`] into a Python `vertebra.db.exceptions` exception instance.
+    /// Converts this [`MySQLError`] into a Python `vertebra.db.driver` / `vertebra.typing` exception instance.
     pub fn to_py_err(&self, py: Python<'_>) -> PyErr {
         let exc_name = self.kind.python_exception_name();
-        match py
-            .import("vertebra.db.exceptions")
+        let target_mod = if self.kind == MySQLErrorKind::ImproperConfiguration {
+            "vertebra.typing"
+        } else {
+            "vertebra.db.driver"
+        };
+        let cls_res = py
+            .import(target_mod)
             .and_then(|m| m.getattr(exc_name))
-            .and_then(|cls| cls.call1((self.message.as_str(),)))
-        {
+            .or_else(|_| py.import("vertebra._vertebra").and_then(|m| m.getattr(exc_name)));
+        match cls_res.and_then(|cls| cls.call1((self.message.as_str(),))) {
             Ok(instance) => {
                 if let Some(ref state) = self.sqlstate {
                     let _ = instance.setattr("sqlstate", state.as_str());
@@ -181,6 +197,11 @@ impl MySQLError {
                     let _ = instance.setattr("vendor_code", code);
                     let _ = instance.setattr("errno", code);
                 }
+                let is_transient = matches!(
+                    self.kind,
+                    MySQLErrorKind::ConnectionFailure | MySQLErrorKind::SerializationFailure
+                );
+                let _ = instance.setattr("is_transient", is_transient);
                 PyErr::from_value(instance)
             }
             Err(_) => PyRuntimeError::new_err(self.message.clone()),
