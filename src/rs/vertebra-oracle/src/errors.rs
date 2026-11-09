@@ -12,6 +12,7 @@ pub enum OracleErrorKind {
     Operational,
     ConnectionFailure,
     QueryCancelled,
+    PoolExhausted,
     NotFound,
     Data,
     Programming,
@@ -51,6 +52,9 @@ pub enum OracleError {
     /// Statement cancelled via out-of-band `break_execution()` or future cancellation.
     #[error("{0}")]
     Cancelled(String),
+    /// Connection pool exhausted within `acquire_timeout` (`sqlstate="53300"`).
+    #[error("{0}")]
+    PoolExhausted(String),
 }
 
 /// Extract a numeric `ORA-xxxxx` vendor code from an Oracle error string if present.
@@ -198,6 +202,7 @@ struct CachedOracleExceptionTypes {
     operational: Py<PyType>,
     connection_failure: Py<PyType>,
     query_cancelled: Py<PyType>,
+    pool_exhausted: Py<PyType>,
     serialization_failure: Py<PyType>,
     integrity: Py<PyType>,
     programming: Py<PyType>,
@@ -236,6 +241,8 @@ fn build_stand_in_types(py: Python<'_>) -> PyResult<CachedOracleExceptionTypes> 
         new_stand_in_class(py, "ConnectionFailure", &PyTuple::new(py, [op_bound])?)?;
     let query_cancelled =
         new_stand_in_class(py, "QueryCancelledError", &PyTuple::new(py, [op_bound])?)?;
+    let pool_exhausted =
+        new_stand_in_class(py, "PoolExhaustedError", &PyTuple::new(py, [op_bound])?)?;
     let serialization_failure =
         new_stand_in_class(py, "SerializationFailure", &PyTuple::new(py, [op_bound])?)?;
     let integrity = new_stand_in_class(py, "IntegrityError", &PyTuple::new(py, [db_bound])?)?;
@@ -248,6 +255,7 @@ fn build_stand_in_types(py: Python<'_>) -> PyResult<CachedOracleExceptionTypes> 
         operational,
         connection_failure,
         query_cancelled,
+        pool_exhausted,
         serialization_failure,
         integrity,
         programming,
@@ -268,6 +276,7 @@ fn load_from_driver_module(
         operational: get("OperationalError")?,
         connection_failure: get("ConnectionFailure")?,
         query_cancelled: get("QueryCancelledError")?,
+        pool_exhausted: get("PoolExhaustedError")?,
         serialization_failure: get("SerializationFailure")?,
         integrity: get("IntegrityError")?,
         programming: get("ProgrammingError")?,
@@ -303,6 +312,7 @@ fn select_type_for_kind(
         OracleErrorKind::Operational => &types.operational,
         OracleErrorKind::ConnectionFailure => &types.connection_failure,
         OracleErrorKind::QueryCancelled => &types.query_cancelled,
+        OracleErrorKind::PoolExhausted => &types.pool_exhausted,
         OracleErrorKind::NotFound => &types.not_found,
         OracleErrorKind::Data => &types.data,
         OracleErrorKind::Programming => &types.programming,
@@ -373,6 +383,12 @@ impl OracleError {
                 sqlstate: "57014",
                 vendor_code: extract_ora_code(msg).or(Some(1013)),
                 is_transient: false,
+            },
+            Self::PoolExhausted(_) => OracleErrorClassification {
+                kind: OracleErrorKind::PoolExhausted,
+                sqlstate: "53300",
+                vendor_code: None,
+                is_transient: true,
             },
             Self::Server { code, message } => classify_oracle_error(Some(*code), message),
             Self::Transport { code, message } => classify_oracle_error(*code, message),

@@ -6,7 +6,7 @@ id: "native-oracle-driver:ch04:t01"
 title: "Implement native Rust SyncOraclePool and AsyncOraclePool"
 description: "Implement SyncOraclePool and AsyncOraclePool in src/rs/vertebra-oracle/src/pool.rs over crate::config::NativeOracleConfig and crate::errors::OracleError with min_size, max_size, acquire_timeout, reset_timeout, close_timeout, max_lifetime_seconds, idle_timeout_seconds, health_check_interval_seconds, stmtcachesize, rollback-on-release, and broken-session eviction."
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -26,11 +26,11 @@ tests:
 estimated_loc: 240
 plan_revision: 3
 plan_commit: 769302bc
-state_revision: 0
-commit_sha: null
-completed_at: null
+state_revision: 1
+commit_sha: pending
+completed_at: "2026-11-09T16:01:00Z"
 created_at: "2026-11-09T00:58:00Z"
-updated_at: "2026-11-09T01:28:30Z"
+updated_at: "2026-11-09T16:01:00Z"
 generated:
   by: flow-plan
   at: "2026-11-09T01:15:00Z"
@@ -276,10 +276,10 @@ uv run --no-sync pytest src/py/tests/unit/db/test_oracle_adapter.py -k "oracle_p
 
 ## 7. Acceptance Criteria
 
-- [ ] `SyncOraclePool` and `AsyncOraclePool` are exported from `vertebra._oracle` over `NativeOracleConfig` and `OracleError` and match `contracts.md` constructor and method signatures (`acquire`, `release`, `evict`, `stats`, `close`, `closed`).
-- [ ] Pool slot reservation enforces `opening + idle + borrowed <= max_size` and raises `PoolExhaustedError` (`sqlstate="53300"`) on acquire timeout.
-- [ ] `release()` rolls back uncommitted work within `reset_timeout` and permanently evicts broken, expired, or failed-reset connections.
-- [ ] `uv run --no-sync python -m mypy.stubtest vertebra._oracle` and all pool tests in `src/py/tests/unit/db/test_oracle_adapter.py` pass with zero allowlist overrides.
+- [x] `SyncOraclePool` and `AsyncOraclePool` are exported from `vertebra._oracle` over `NativeOracleConfig` and `OracleError` and match `contracts.md` constructor and method signatures (`acquire`, `release`, `evict`, `stats`, `close`, `closed`).
+- [x] Pool slot reservation enforces `opening + idle + borrowed <= max_size` and raises `PoolExhaustedError` (`sqlstate="53300"`) on acquire timeout.
+- [x] `release()` rolls back uncommitted work within `reset_timeout` and permanently evicts broken, expired, or failed-reset connections.
+- [x] `uv run --no-sync python -m mypy.stubtest vertebra._oracle` and all pool tests in `src/py/tests/unit/db/test_oracle_adapter.py` pass with zero allowlist overrides.
 
 ## 8. Notes & Discoveries
 

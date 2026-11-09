@@ -1,7 +1,7 @@
 //! Per-connection Rust worker thread, completion bridge, and out-of-band `break_execution()` cancellation.
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -11,6 +11,7 @@ use pyo3::types::{PyAny, PyByteArray, PyBytes, PyDict, PyString, PyTuple};
 use tokio::sync::oneshot;
 use vertebra_core::notify::SyncCompletionQueue;
 use vertebra_db::arrow_shm::write_shm_arrow_region_unregistered;
+use vertebra_db::oracle::OracleSessionAttrs;
 use vertebra_db::py_async::{
     RustDbTaskAwaitable, construct_py_arrow_cursor, spawn_rust_db_task_with_attr,
 };
@@ -28,6 +29,7 @@ pub const ORACLE_COMPLETION_DRAINER_ATTR: &str = "_vertebra_oracle_completion_dr
 
 const ARROW_SHM_THRESHOLD_ROWS: usize = 256;
 static NEXT_ARROW_SHM_SEQ: AtomicUsize = AtomicUsize::new(1);
+static NEXT_WORKER_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Validate an Oracle savepoint identifier against ASCII `[A-Za-z_][A-Za-z0-9_$#]*`.
 pub fn validate_savepoint_identifier(name: &str) -> Result<(), OracleError> {
@@ -2294,6 +2296,9 @@ struct WorkerSession {
     in_transaction: Arc<AtomicBool>,
     closed: Arc<AtomicBool>,
     break_handle: Arc<OracleBreakHandle>,
+    pending_session_attrs: Arc<Mutex<Option<OracleSessionAttrs>>>,
+    active_session_attrs: Arc<Mutex<OracleSessionAttrs>>,
+    last_piggyback_frame: Arc<Mutex<Option<Vec<u8>>>>,
 }
 
 impl WorkerSession {
@@ -2304,6 +2309,68 @@ impl WorkerSession {
                 .dsn
                 .as_deref()
                 .is_some_and(|d| d.eq_ignore_ascii_case(":memory:") || d.contains("://memory"))
+    }
+
+    fn flush_pending_session_attrs(&mut self) {
+        let staged = {
+            let mut guard = self
+                .pending_session_attrs
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            guard.take()
+        };
+        let Some(attrs) = staged else {
+            return;
+        };
+        if attrs.client_identifier.is_none()
+            && attrs.module.is_none()
+            && attrs.action.is_none()
+            && attrs.ecid.is_none()
+        {
+            return;
+        }
+        let frame = attrs.encode_ttc_piggyback_session_attrs();
+        {
+            let mut last_guard = self
+                .last_piggyback_frame
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            *last_guard = Some(frame.to_vec());
+        }
+        {
+            let mut active_guard = self
+                .active_session_attrs
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if let Some(ref cid) = attrs.client_identifier {
+                active_guard.client_identifier = Some(cid.clone());
+                self.mem_store.session_context.insert(
+                    ("USERENV".to_owned(), "CLIENT_IDENTIFIER".to_owned()),
+                    cid.clone(),
+                );
+            }
+            if let Some(ref m) = attrs.module {
+                active_guard.module = Some(m.clone());
+                self.mem_store.session_context.insert(
+                    ("USERENV".to_owned(), "MODULE".to_owned()),
+                    m.clone(),
+                );
+            }
+            if let Some(ref a) = attrs.action {
+                active_guard.action = Some(a.clone());
+                self.mem_store.session_context.insert(
+                    ("USERENV".to_owned(), "ACTION".to_owned()),
+                    a.clone(),
+                );
+            }
+            if let Some(ref e) = attrs.ecid {
+                active_guard.ecid = Some(e.clone());
+                self.mem_store.session_context.insert(
+                    ("USERENV".to_owned(), "ECID".to_owned()),
+                    e.clone(),
+                );
+            }
+        }
     }
 
     fn ensure_connected(&mut self) -> Result<&oracledb::Connection, OracleError> {
@@ -2513,6 +2580,7 @@ impl WorkerSession {
         max_rows: Option<usize>,
         is_query: bool,
     ) -> Result<WorkerQueryOutcome, OracleError> {
+        self.flush_pending_session_attrs();
         if self.conn.is_none()
             && let Some(sleep_ms) = parse_synthetic_sleep_ms(sql)
         {
@@ -2723,27 +2791,61 @@ impl Drop for CancelOnDrop {
 
 /// Handle to a dedicated `"vtb-ora-worker"` OS thread owning a single `oracledb::Connection`.
 pub struct OracleWorkerHandle {
+    id: u64,
     config: Arc<NativeOracleConfig>,
     sender: Mutex<Option<mpsc::Sender<WorkerEnvelope>>>,
     join_handle: Mutex<Option<JoinHandle<()>>>,
     break_handle: Arc<OracleBreakHandle>,
     closed: Arc<AtomicBool>,
     in_transaction: Arc<AtomicBool>,
+    created_at: Instant,
+    last_used_at: Mutex<Instant>,
+    last_health_check_at: Mutex<Instant>,
+    purity: Mutex<String>,
+    connection_tag: Mutex<Option<String>>,
+    tag_matched: AtomicBool,
+    pending_session_attrs: Arc<Mutex<Option<OracleSessionAttrs>>>,
+    active_session_attrs: Arc<Mutex<OracleSessionAttrs>>,
+    last_piggyback_frame: Arc<Mutex<Option<Vec<u8>>>>,
 }
 
 impl OracleWorkerHandle {
     /// Spawn a dedicated worker thread for `config` without opening a socket at construction time.
     pub fn spawn(config: NativeOracleConfig) -> Result<Self, OracleError> {
+        let id = NEXT_WORKER_ID.fetch_add(1, Ordering::Relaxed);
+        let now = Instant::now();
+        let initial_pending = if config.client_identifier.is_some()
+            || config.module.is_some()
+            || config.action.is_some()
+            || config.ecid.is_some()
+        {
+            Some(OracleSessionAttrs {
+                client_identifier: config.client_identifier.clone(),
+                module: config.module.clone(),
+                action: config.action.clone(),
+                ecid: config.ecid.clone(),
+            })
+        } else {
+            None
+        };
+        let initial_purity = config.purity.as_str().to_owned();
+        let initial_tag = config.connection_tag.clone();
         let cfg = Arc::new(config);
         let break_handle = Arc::new(OracleBreakHandle::new());
         let closed = Arc::new(AtomicBool::new(false));
         let in_transaction = Arc::new(AtomicBool::new(false));
+        let pending_session_attrs = Arc::new(Mutex::new(initial_pending));
+        let active_session_attrs = Arc::new(Mutex::new(OracleSessionAttrs::default()));
+        let last_piggyback_frame = Arc::new(Mutex::new(None));
         let (tx, rx) = mpsc::channel::<WorkerEnvelope>();
 
         let cfg_clone = Arc::clone(&cfg);
         let break_clone = Arc::clone(&break_handle);
         let closed_clone = Arc::clone(&closed);
         let in_tx_clone = Arc::clone(&in_transaction);
+        let pending_clone = Arc::clone(&pending_session_attrs);
+        let active_clone = Arc::clone(&active_session_attrs);
+        let last_frame_clone = Arc::clone(&last_piggyback_frame);
 
         let join_handle = thread::Builder::new()
             .name("vtb-ora-worker".to_owned())
@@ -2756,6 +2858,9 @@ impl OracleWorkerHandle {
                     in_transaction: in_tx_clone,
                     closed: closed_clone,
                     break_handle: break_clone,
+                    pending_session_attrs: pending_clone,
+                    active_session_attrs: active_clone,
+                    last_piggyback_frame: last_frame_clone,
                 };
                 while let Ok(envelope) = rx.recv() {
                     let is_close = matches!(envelope.cmd, WorkerCommand::Close);
@@ -2772,13 +2877,203 @@ impl OracleWorkerHandle {
             })?;
 
         Ok(Self {
+            id,
             config: cfg,
             sender: Mutex::new(Some(tx)),
             join_handle: Mutex::new(Some(join_handle)),
             break_handle,
             closed,
             in_transaction,
+            created_at: now,
+            last_used_at: Mutex::new(now),
+            last_health_check_at: Mutex::new(now),
+            purity: Mutex::new(initial_purity),
+            connection_tag: Mutex::new(initial_tag),
+            tag_matched: AtomicBool::new(false),
+            pending_session_attrs,
+            active_session_attrs,
+            last_piggyback_frame,
         })
+    }
+
+    /// Return the unique numeric ID of this worker handle.
+    #[must_use]
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    /// Return the timestamp when this worker session was created.
+    #[must_use]
+    pub fn created_at(&self) -> Instant {
+        self.created_at
+    }
+
+    /// Return the timestamp when this worker session was last returned to or checked out from a pool.
+    #[must_use]
+    pub fn last_used_at(&self) -> Instant {
+        *self.last_used_at.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Update the `last_used_at` timestamp to `Instant::now()`.
+    pub fn touch_last_used(&self) {
+        let mut guard = self.last_used_at.lock().unwrap_or_else(|e| e.into_inner());
+        *guard = Instant::now();
+    }
+
+    /// Return the timestamp when this worker session last passed a health check.
+    #[must_use]
+    pub fn last_health_check_at(&self) -> Instant {
+        *self
+            .last_health_check_at
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Update the `last_health_check_at` timestamp to `Instant::now()`.
+    pub fn touch_health_check(&self) {
+        let mut guard = self
+            .last_health_check_at
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        *guard = Instant::now();
+    }
+
+    /// Return the DRCP connection class (`cclass`) if configured.
+    #[must_use]
+    pub fn cclass(&self) -> Option<String> {
+        self.config.cclass.clone()
+    }
+
+    /// Return the active DRCP purity (`"SELF"` or `"NEW"`).
+    #[must_use]
+    pub fn purity(&self) -> String {
+        self.purity
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Set the active DRCP purity (`"SELF"` or `"NEW"`).
+    pub fn set_purity(&self, purity: String) {
+        let mut guard = self.purity.lock().unwrap_or_else(|e| e.into_inner());
+        *guard = purity;
+    }
+
+    /// Return the current DRCP connection tag.
+    #[must_use]
+    pub fn connection_tag(&self) -> Option<String> {
+        self.connection_tag
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Update the DRCP connection tag.
+    pub fn set_connection_tag(&self, tag: Option<String>) {
+        let mut guard = self
+            .connection_tag
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        *guard = tag;
+    }
+
+    /// Return `true` if the most recent pool checkout matched the requested `connection_tag`.
+    #[must_use]
+    pub fn tag_matched(&self) -> bool {
+        self.tag_matched.load(Ordering::Acquire)
+    }
+
+    /// Set whether the most recent pool checkout matched the requested `connection_tag`.
+    pub fn set_tag_matched(&self, matched: bool) {
+        self.tag_matched.store(matched, Ordering::Release);
+    }
+
+    /// Clear prior session tag and active session attributes when checked out with `purity="NEW"`.
+    pub fn reset_for_new_purity(&self) {
+        self.set_connection_tag(None);
+        self.set_tag_matched(false);
+        {
+            let mut pending = self
+                .pending_session_attrs
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            *pending = None;
+        }
+        {
+            let mut active = self
+                .active_session_attrs
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            *active = OracleSessionAttrs::default();
+        }
+        {
+            let mut frame = self
+                .last_piggyback_frame
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            *frame = None;
+        }
+    }
+
+    /// Stage end-to-end tracing and session attributes in memory to be flushed on the next statement.
+    pub fn stage_session_attrs(
+        &self,
+        client_identifier: Option<String>,
+        module: Option<String>,
+        action: Option<String>,
+        ecid: Option<String>,
+    ) {
+        if client_identifier.is_none()
+            && module.is_none()
+            && action.is_none()
+            && ecid.is_none()
+        {
+            return;
+        }
+        let mut guard = self
+            .pending_session_attrs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let entry = guard.get_or_insert_with(OracleSessionAttrs::default);
+        if let Some(cid) = client_identifier {
+            entry.client_identifier = Some(cid);
+        }
+        if let Some(m) = module {
+            entry.module = Some(m);
+        }
+        if let Some(a) = action {
+            entry.action = Some(a);
+        }
+        if let Some(e) = ecid {
+            entry.ecid = Some(e);
+        }
+    }
+
+    /// Return a snapshot of any staged `OracleSessionAttrs` awaiting flush.
+    #[must_use]
+    pub fn pending_session_attrs(&self) -> Option<OracleSessionAttrs> {
+        self.pending_session_attrs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Return a snapshot of the currently active `OracleSessionAttrs` on the session.
+    #[must_use]
+    pub fn active_session_attrs(&self) -> OracleSessionAttrs {
+        self.active_session_attrs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Return the raw bytes of the most recently flushed `[0x11, 0x6e, count, ...]` TTC piggyback frame.
+    #[must_use]
+    pub fn last_piggyback_frame(&self) -> Option<Vec<u8>> {
+        self.last_piggyback_frame
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// Return a reference to the validated [`NativeOracleConfig`].
@@ -2933,6 +3228,47 @@ impl OracleWorkerHandle {
         )
     }
 
+    /// Roll back any uncommitted transaction state within `timeout`, or close the worker if it times out.
+    pub fn rollback_with_timeout(&self, timeout: Duration) -> Result<(), OracleError> {
+        self.ensure_open()?;
+        let tx = {
+            let guard = self.sender.lock().unwrap_or_else(|e| e.into_inner());
+            guard.clone()
+        };
+        let Some(sender) = tx else {
+            return Err(OracleError::Interface(
+                "Oracle client is closed".to_owned(),
+            ));
+        };
+        let queue = Arc::new(SyncCompletionQueue::new());
+        self.break_handle.begin_operation();
+        if sender
+            .send(WorkerEnvelope {
+                cmd: WorkerCommand::Rollback,
+                reply: ReplyChannel::Sync(Arc::clone(&queue)),
+            })
+            .is_err()
+        {
+            self.break_handle.end_operation();
+            return Err(OracleError::Interface(
+                "Oracle worker thread terminated".to_owned(),
+            ));
+        }
+        match queue.pop_timeout(timeout) {
+            Some(Ok(_)) => Ok(()),
+            Some(Err(err)) => {
+                let _ = self.close_sync();
+                Err(err)
+            }
+            None => {
+                let _ = self.close_sync();
+                Err(OracleError::operational(
+                    "Oracle session reset timed out during rollback",
+                ))
+            }
+        }
+    }
+
     /// Synchronously close the worker session and join the worker thread.
     pub fn close_sync(&self) -> Result<(), OracleError> {
         if self.closed.swap(true, Ordering::AcqRel) {
@@ -2974,7 +3310,7 @@ impl Drop for OracleWorkerHandle {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn build_raw_oracle_options(
+pub(crate) fn build_raw_oracle_options(
     user: Option<String>,
     password: Option<String>,
     dsn: Option<String>,
@@ -3045,6 +3381,7 @@ fn build_raw_oracle_options(
 }
 
 /// Synchronous physical Oracle session client (`vertebra._oracle.SyncOracleClient`).
+#[derive(Clone)]
 #[pyclass(
     name = "SyncOracleClient",
     module = "vertebra._oracle",
@@ -3056,6 +3393,12 @@ pub struct SyncOracleClient {
 }
 
 impl SyncOracleClient {
+    /// Construct a [`SyncOracleClient`] wrapping an existing [`OracleWorkerHandle`].
+    #[must_use]
+    pub fn from_worker(worker: Arc<OracleWorkerHandle>) -> Self {
+        Self { worker }
+    }
+
     /// Return a reference to the underlying [`OracleWorkerHandle`].
     #[must_use]
     pub fn worker(&self) -> &Arc<OracleWorkerHandle> {
@@ -3436,6 +3779,7 @@ impl SyncOracleClient {
 }
 
 /// Asynchronous physical Oracle session client (`vertebra._oracle.AsyncOracleClient`).
+#[derive(Clone)]
 #[pyclass(
     name = "AsyncOracleClient",
     module = "vertebra._oracle",
@@ -3447,6 +3791,12 @@ pub struct AsyncOracleClient {
 }
 
 impl AsyncOracleClient {
+    /// Construct an [`AsyncOracleClient`] wrapping an existing [`OracleWorkerHandle`].
+    #[must_use]
+    pub fn from_worker(worker: Arc<OracleWorkerHandle>) -> Self {
+        Self { worker }
+    }
+
     /// Return a reference to the underlying [`OracleWorkerHandle`].
     #[must_use]
     pub fn worker(&self) -> &Arc<OracleWorkerHandle> {

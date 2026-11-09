@@ -32,6 +32,7 @@ from vertebra.db.adapters.oracle.driver import AsyncOracleDriver, SyncOracleDriv
 from vertebra.db.driver import (
     DataError,
     InterfaceError,
+    PoolExhaustedError,
     ProgrammingError,
     QueryCancelledError,
 )
@@ -674,4 +675,129 @@ async def test_oracle_load_from_arrow_direct_path_and_identifier_validation() ->
         assert async_loaded == 2
         with pytest.raises((ValueError, ProgrammingError)):
             await async_driver.load_from_arrow("bad;table", table)
+
+
+@pytest.mark.parametrize(
+    "bad_kwargs",
+    [
+        {"max_size": 0},
+        {"min_size": -1, "max_size": 4},
+        {"min_size": 5, "max_size": 2},
+        {"acquire_timeout": 0.0},
+        {"reset_timeout": -1.0},
+        {"close_timeout": 0.0},
+    ],
+)
+def test_oracle_pool_zero_io_init_and_bounds_validation(bad_kwargs: dict[str, Any]) -> None:
+    """Verify SyncOraclePool and AsyncOraclePool construct with zero I/O and reject invalid bounds."""
+    start = time.perf_counter()
+    pool = _oracle.SyncOraclePool(host="memory", min_size=1, max_size=4)
+    elapsed_ms = (time.perf_counter() - start) * 1000.0
+    assert elapsed_ms < 25.0
+    assert pool.min_size == 1
+    assert pool.max_size == 4
+    assert pool.size == 0
+    assert pool.idle_size == 0
+    assert pool.borrowed_size == 0
+    assert pool.closed is False
+    stats = pool.stats()
+    assert stats["min_size"] == 1
+    assert stats["max_size"] == 4
+    assert stats["size"] == 0
+    assert stats["idle_size"] == 0
+    assert stats["borrowed_size"] == 0
+    pool.close()
+    assert pool.closed is True
+
+    with pytest.raises((InterfaceError, ValueError)):
+        _oracle.SyncOraclePool(host="memory", **bad_kwargs)
+    with pytest.raises((InterfaceError, ValueError)):
+        _oracle.AsyncOraclePool(host="memory", **bad_kwargs)
+
+
+@pytest.mark.anyio
+async def test_oracle_pool_acquire_release_and_exhaustion_timeout() -> None:
+    """Verify bounded slot reservation and PoolExhaustedError (53300) on acquire timeout."""
+    pool = _oracle.SyncOraclePool(host="memory", min_size=0, max_size=1, acquire_timeout=0.04)
+    c1 = pool.acquire()
+    assert pool.size == 1
+    assert pool.borrowed_size == 1
+    assert pool.idle_size == 0
+
+    with pytest.raises(PoolExhaustedError) as exc_info:
+        pool.acquire(timeout=0.03)
+    assert getattr(exc_info.value, "sqlstate", None) == "53300"
+    assert getattr(exc_info.value, "is_transient", None) is True
+
+    pool.release(c1)
+    assert pool.borrowed_size == 0
+    assert pool.idle_size == 1
+    pool.close()
+    with pytest.raises(InterfaceError):
+        pool.acquire()
+
+    apool = _oracle.AsyncOraclePool(host="memory", min_size=0, max_size=1, acquire_timeout=0.04)
+    ac1 = await apool.acquire()
+    assert apool.borrowed_size == 1
+    with pytest.raises(PoolExhaustedError) as aexc:
+        await apool.acquire(timeout=0.03)
+    assert getattr(aexc.value, "sqlstate", None) == "53300"
+    assert getattr(aexc.value, "is_transient", None) is True
+    await apool.release(ac1)
+    assert apool.idle_size == 1
+    await apool.close()
+
+
+@pytest.mark.anyio
+async def test_oracle_pool_rollback_on_release_and_evict_on_broken_session() -> None:
+    """Verify release() rolls back dirty transactions and evicts closed or discarded sessions."""
+    pool = _oracle.SyncOraclePool(host="memory", min_size=0, max_size=2)
+    client = pool.acquire()
+    client.execute("CREATE TABLE t_pool (id NUMBER PRIMARY KEY, name VARCHAR2(32))")
+    client.begin()
+    client.execute("INSERT INTO t_pool (id, name) VALUES (1, 'uncommitted')")
+    assert client.in_transaction is True
+
+    pool.release(client)
+    assert pool.idle_size == 1
+    assert pool.borrowed_size == 0
+
+    reused = pool.acquire()
+    assert reused.in_transaction is False
+    assert reused.query("SELECT COUNT(*) FROM t_pool").rows[0][0] == 0
+
+    pool.release(reused, discard=True)
+    assert pool.size == 0
+    assert pool.idle_size == 0
+    assert reused.closed is True
+
+    c_evict = pool.acquire()
+    assert pool.size == 1
+    pool.evict(c_evict)
+    assert pool.size == 0
+    assert c_evict.closed is True
+    pool.close()
+
+
+def test_oracle_pool_max_lifetime_and_idle_timeout_eviction() -> None:
+    """Verify expired idle sessions are closed and replaced on subsequent checkout."""
+    pool = _oracle.SyncOraclePool(
+        host="memory",
+        min_size=0,
+        max_size=2,
+        idle_timeout_seconds=0.02,
+    )
+    first = pool.acquire()
+    pool.release(first)
+    assert pool.idle_size == 1
+
+    time.sleep(0.03)
+    second = pool.acquire()
+    assert first.closed is True
+    assert second.closed is False
+    assert pool.size == 1
+    assert pool.borrowed_size == 1
+    pool.release(second)
+    pool.close()
+
 

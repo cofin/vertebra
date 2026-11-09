@@ -5,11 +5,13 @@ pub mod client;
 pub mod config;
 pub mod dialer;
 pub mod errors;
+pub mod pool;
 pub mod types;
 
 use pyo3::prelude::*;
 
 use crate::client::{AsyncOracleClient, SyncOracleClient};
+use crate::pool::{AsyncOraclePool, SyncOraclePool};
 use crate::types::{OracleColumn, OracleQueryResult};
 
 /// Whether this build targets free-threaded Python (3.14t+).
@@ -30,5 +32,7 @@ pub fn _oracle(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<OracleQueryResult>()?;
     m.add_class::<SyncOracleClient>()?;
     m.add_class::<AsyncOracleClient>()?;
+    m.add_class::<SyncOraclePool>()?;
+    m.add_class::<AsyncOraclePool>()?;
     Ok(())
 }

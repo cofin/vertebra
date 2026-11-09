@@ -246,12 +246,174 @@ class AsyncOracleClient:
         enable_lowercase_column_names: bool | None = None,
     ) -> Awaitable[ArrowCursor]: ...
 
+@final
+class SyncOraclePool:
+    @property
+    def min_size(self) -> int: ...
+    @property
+    def max_size(self) -> int: ...
+    @property
+    def size(self) -> int: ...
+    @property
+    def idle_size(self) -> int: ...
+    @property
+    def borrowed_size(self) -> int: ...
+    @property
+    def closed(self) -> bool: ...
+    def __new__(
+        cls,
+        *,
+        user: str | None = None,
+        password: str | None = None,
+        dsn: str | None = None,
+        host: str = "localhost",
+        port: int = 1521,
+        service_name: str = "FREEPDB1",
+        sid: str | None = None,
+        tns_admin: str | None = None,
+        connect_descriptor: str | None = None,
+        protocol: str = "tcp",
+        ssl_server_dn_match: bool = True,
+        ssl_server_cert_dn: str | None = None,
+        wallet_location: str | None = None,
+        wallet_password: str | None = None,
+        pem_cert_data: bytes | None = None,
+        cwallet_sso_data: bytes | None = None,
+        auth_mode: str = "password",
+        access_token: str | None = None,
+        token_auth_options: Mapping[str, str] | None = None,
+        cclass: str | None = None,
+        purity: str = "SELF",
+        connection_tag: str | None = None,
+        stmtcachesize: int = 64,
+        prefetchrows: int = 256,
+        arraysize: int = 256,
+        call_timeout_ms: int | None = None,
+        connect_timeout: float = 10.0,
+        enable_lowercase_column_names: bool = True,
+        client_identifier: str | None = None,
+        module: str | None = None,
+        action: str | None = None,
+        ecid: str | None = None,
+        min_size: int = 1,
+        max_size: int = 10,
+        acquire_timeout: float = 30.0,
+        reset_timeout: float = 10.0,
+        close_timeout: float = 30.0,
+        max_lifetime_seconds: float = 3600.0,
+        idle_timeout_seconds: float = 600.0,
+        health_check_interval_seconds: float = 30.0,
+    ) -> SyncOraclePool: ...
+    def acquire(
+        self,
+        *,
+        timeout: float | None = None,
+        connection_tag: str | None = None,
+        purity: str | None = None,
+        client_identifier: str | None = None,
+        module: str | None = None,
+        action: str | None = None,
+        ecid: str | None = None,
+    ) -> SyncOracleClient: ...
+    def release(
+        self,
+        client: SyncOracleClient,
+        *,
+        connection_tag: str | None = None,
+        discard: bool = False,
+    ) -> None: ...
+    def evict(self, client: SyncOracleClient) -> None: ...
+    def stats(self) -> dict[str, int]: ...
+    def close(self) -> None: ...
+
+@final
+class AsyncOraclePool:
+    @property
+    def min_size(self) -> int: ...
+    @property
+    def max_size(self) -> int: ...
+    @property
+    def size(self) -> int: ...
+    @property
+    def idle_size(self) -> int: ...
+    @property
+    def borrowed_size(self) -> int: ...
+    @property
+    def closed(self) -> bool: ...
+    def __new__(
+        cls,
+        *,
+        user: str | None = None,
+        password: str | None = None,
+        dsn: str | None = None,
+        host: str = "localhost",
+        port: int = 1521,
+        service_name: str = "FREEPDB1",
+        sid: str | None = None,
+        tns_admin: str | None = None,
+        connect_descriptor: str | None = None,
+        protocol: str = "tcp",
+        ssl_server_dn_match: bool = True,
+        ssl_server_cert_dn: str | None = None,
+        wallet_location: str | None = None,
+        wallet_password: str | None = None,
+        pem_cert_data: bytes | None = None,
+        cwallet_sso_data: bytes | None = None,
+        auth_mode: str = "password",
+        access_token: str | None = None,
+        token_auth_options: Mapping[str, str] | None = None,
+        cclass: str | None = None,
+        purity: str = "SELF",
+        connection_tag: str | None = None,
+        stmtcachesize: int = 64,
+        prefetchrows: int = 256,
+        arraysize: int = 256,
+        call_timeout_ms: int | None = None,
+        connect_timeout: float = 10.0,
+        enable_lowercase_column_names: bool = True,
+        client_identifier: str | None = None,
+        module: str | None = None,
+        action: str | None = None,
+        ecid: str | None = None,
+        min_size: int = 1,
+        max_size: int = 10,
+        acquire_timeout: float = 30.0,
+        reset_timeout: float = 10.0,
+        close_timeout: float = 30.0,
+        max_lifetime_seconds: float = 3600.0,
+        idle_timeout_seconds: float = 600.0,
+        health_check_interval_seconds: float = 30.0,
+    ) -> AsyncOraclePool: ...
+    def acquire(
+        self,
+        *,
+        timeout: float | None = None,
+        connection_tag: str | None = None,
+        purity: str | None = None,
+        client_identifier: str | None = None,
+        module: str | None = None,
+        action: str | None = None,
+        ecid: str | None = None,
+    ) -> Awaitable[AsyncOracleClient]: ...
+    def release(
+        self,
+        client: AsyncOracleClient,
+        *,
+        connection_tag: str | None = None,
+        discard: bool = False,
+    ) -> Awaitable[None]: ...
+    def evict(self, client: AsyncOracleClient) -> Awaitable[None]: ...
+    def stats(self) -> dict[str, int]: ...
+    def close(self) -> Awaitable[None]: ...
+
 __all__ = [
     "AsyncOracleClient",
+    "AsyncOraclePool",
     "FREE_THREADED",
     "GIL_USED",
     "OracleColumn",
     "OracleQueryResult",
     "SyncOracleClient",
+    "SyncOraclePool",
     "__version__",
 ]
