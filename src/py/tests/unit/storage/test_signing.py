@@ -128,71 +128,72 @@ async def test_gcs_from_gcs_ambient_service_account_adc_presigns_zero_rtt(
     assert async_url == sync_url
 
 
-def test_gcs_keyless_presign_reuses_object_store_token_cache(
-    tmp_path: Path,
-) -> None:
-    """Verify keyless SyncObjectStore and AsyncObjectStore reuse token cache and retry IAM signBlob on HTTP 401."""
-    oauth_calls = 0
-    sign_blob_calls = 0
-    seen_auth_headers: list[str] = []
-    lock = threading.Lock()
+class _KeylessSignBlobServer:
+    """Loopback OAuth2 and IAM signBlob server returning HTTP 401 on the second signBlob call."""
 
-    class Handler(BaseHTTPRequestHandler):
-        def log_message(self, format: str, *args: Any) -> None:
-            _ = (format, args)
+    def __init__(self) -> None:
+        self.oauth_calls = 0
+        self.sign_blob_calls = 0
+        self.seen_auth_headers: list[str] = []
+        lock = threading.Lock()
+        owner = self
 
-        def do_POST(self) -> None:
-            nonlocal oauth_calls, sign_blob_calls
-            length = int(self.headers.get("Content-Length", "0"))
-            _ = self.rfile.read(length) if length > 0 else b""
-            with lock:
-                if self.path == "/token":
-                    oauth_calls += 1
-                    body = json.dumps(
-                        {
-                            "access_token": f"test-access-token-{oauth_calls}",
-                            "expires_in": 3600,
-                            "token_type": "Bearer",
-                        }
-                    ).encode("utf-8")
-                    self.send_response(200)
-                    self.send_header("Content-Type", "application/json")
-                    self.send_header("Content-Length", str(len(body)))
-                    self.end_headers()
-                    self.wfile.write(body)
-                    return
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, format: str, *args: Any) -> None:
+                _ = (format, args)
 
-                if ":signBlob" in self.path:
-                    sign_blob_calls += 1
-                    auth_hdr = self.headers.get("Authorization", "")
-                    seen_auth_headers.append(auth_hdr)
-                    if sign_blob_calls == 2:
-                        err = b'{"error":{"code":401,"message":"UNAUTHENTICATED"}}'
-                        self.send_response(401)
-                        self.send_header("Content-Type", "application/json")
-                        self.send_header("Content-Length", str(len(err)))
-                        self.end_headers()
-                        self.wfile.write(err)
+            def do_POST(self) -> None:
+                length = int(self.headers.get("Content-Length", "0"))
+                _ = self.rfile.read(length) if length > 0 else b""
+                with lock:
+                    if self.path == "/token":
+                        owner.oauth_calls += 1
+                        body = json.dumps(
+                            {
+                                "access_token": f"test-access-token-{owner.oauth_calls}",
+                                "expires_in": 3600,
+                                "token_type": "Bearer",
+                            }
+                        ).encode("utf-8")
+                        self._send(200, body)
                         return
-                    sig_b64 = base64.b64encode(f"sig-{sign_blob_calls}".encode()).decode("ascii")
-                    body = json.dumps({"keyId": "k1", "signedBlob": sig_b64}).encode("utf-8")
-                    self.send_response(200)
-                    self.send_header("Content-Type", "application/json")
-                    self.send_header("Content-Length", str(len(body)))
-                    self.end_headers()
-                    self.wfile.write(body)
-                    return
 
-            self.send_response(404)
-            self.end_headers()
+                    if ":signBlob" in self.path:
+                        owner.sign_blob_calls += 1
+                        owner.seen_auth_headers.append(self.headers.get("Authorization", ""))
+                        if owner.sign_blob_calls == 2:
+                            self._send(401, b'{"error":{"code":401,"message":"UNAUTHENTICATED"}}')
+                            return
+                        sig_b64 = base64.b64encode(f"sig-{owner.sign_blob_calls}".encode()).decode("ascii")
+                        self._send(200, json.dumps({"keyId": "k1", "signedBlob": sig_b64}).encode("utf-8"))
+                        return
 
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    base_url = f"http://127.0.0.1:{server.server_port}"
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
+                self.send_response(404)
+                self.end_headers()
 
-    try:
-        adc_file = tmp_path / "adc.json"
+            def _send(self, status: int, body: bytes) -> None:
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self.base_url = f"http://127.0.0.1:{self._server.server_port}"
+
+    def __enter__(self) -> _KeylessSignBlobServer:
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self._server.shutdown()
+        self._server.server_close()
+        self._thread.join(timeout=2.0)
+
+    def write_authorized_user_adc(self, directory: Path) -> Path:
+        """Write an authorized-user ADC file whose token URI targets this loopback server."""
+        adc_file = directory / "adc.json"
         adc_file.write_text(
             json.dumps(
                 {
@@ -200,41 +201,72 @@ def test_gcs_keyless_presign_reuses_object_store_token_cache(
                     "client_id": "cid",
                     "client_secret": "csec",
                     "refresh_token": "rtok",
-                    "token_uri": f"{base_url}/token",
+                    "token_uri": f"{self.base_url}/token",
                 }
             ),
             encoding="utf-8",
         )
+        return adc_file
+
+    def assert_call_counts(self, oauth_calls: int, sign_blob_calls: int) -> None:
+        """Assert the OAuth2 refresh and signBlob request counts observed so far."""
+        assert self.oauth_calls == oauth_calls
+        assert self.sign_blob_calls == sign_blob_calls
+
+
+_KEYLESS_EXPECTED_AUTH_HEADERS = [
+    "Bearer test-access-token-1",
+    "Bearer test-access-token-1",
+    "Bearer test-access-token-2",
+    "Bearer test-access-token-2",
+]
+
+
+def test_gcs_keyless_presign_reuses_object_store_token_cache(tmp_path: Path) -> None:
+    """Verify a keyless SyncObjectStore reuses its token cache and retries IAM signBlob once on HTTP 401."""
+    with _KeylessSignBlobServer() as server:
         store = SyncObjectStore.from_gcs(
             "test-bucket",
-            application_credentials=str(adc_file),
+            application_credentials=str(server.write_authorized_user_adc(tmp_path)),
             target_service_account="signer@proj.iam.gserviceaccount.com",
-            iam_endpoint=base_url,
+            iam_endpoint=server.base_url,
         )
         url1 = store.presign_get("dir/a.parquet", expires_in_secs=600, timestamp=1_700_000_000)
         assert "X-Goog-Signature=" in url1
-        assert oauth_calls == 1
-        assert sign_blob_calls == 1
+        server.assert_call_counts(oauth_calls=1, sign_blob_calls=1)
 
         url2 = store.presign_get("dir/b.parquet", expires_in_secs=600, timestamp=1_700_000_000)
         assert "X-Goog-Signature=" in url2
-        assert oauth_calls == 2
-        assert sign_blob_calls == 3
+        server.assert_call_counts(oauth_calls=2, sign_blob_calls=3)
 
         url3 = store.presign_get("dir/c.parquet", expires_in_secs=600, timestamp=1_700_000_000)
         assert "X-Goog-Signature=" in url3
-        assert oauth_calls == 2
-        assert sign_blob_calls == 4
-        assert seen_auth_headers == [
-            "Bearer test-access-token-1",
-            "Bearer test-access-token-1",
-            "Bearer test-access-token-2",
-            "Bearer test-access-token-2",
-        ]
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=2.0)
+        server.assert_call_counts(oauth_calls=2, sign_blob_calls=4)
+        assert server.seen_auth_headers == _KEYLESS_EXPECTED_AUTH_HEADERS
+
+
+@pytest.mark.anyio
+async def test_gcs_keyless_presign_reuses_async_object_store_token_cache(tmp_path: Path) -> None:
+    """Verify a keyless AsyncObjectStore reuses its token cache and retries IAM signBlob once on HTTP 401."""
+    with _KeylessSignBlobServer() as server:
+        store = AsyncObjectStore.from_gcs(
+            "test-bucket",
+            application_credentials=str(server.write_authorized_user_adc(tmp_path)),
+            target_service_account="signer@proj.iam.gserviceaccount.com",
+            iam_endpoint=server.base_url,
+        )
+        url1 = await store.presign_get("dir/a.parquet", expires_in_secs=600, timestamp=1_700_000_000)
+        assert "X-Goog-Signature=" in url1
+        server.assert_call_counts(oauth_calls=1, sign_blob_calls=1)
+
+        url2 = await store.presign_get("dir/b.parquet", expires_in_secs=600, timestamp=1_700_000_000)
+        assert "X-Goog-Signature=" in url2
+        server.assert_call_counts(oauth_calls=2, sign_blob_calls=3)
+
+        url3 = await store.presign_get("dir/c.parquet", expires_in_secs=600, timestamp=1_700_000_000)
+        assert "X-Goog-Signature=" in url3
+        server.assert_call_counts(oauth_calls=2, sign_blob_calls=4)
+        assert server.seen_auth_headers == _KEYLESS_EXPECTED_AUTH_HEADERS
 
 
 @pytest.mark.parametrize("bad_expiry", [0, 604_801])

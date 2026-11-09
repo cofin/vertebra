@@ -912,6 +912,19 @@ def test_django_storage_save_requires_name_for_buffer_payloads() -> None:
         storage.save(None, b"anonymous")
 
 
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "payload", [b"anonymous", bytearray(b"anonymous"), "anonymous"], ids=["bytes", "bytearray", "str"]
+)
+async def test_django_storage_asave_requires_name_for_buffer_payloads(payload: bytes | bytearray | str) -> None:
+    """Async anonymous buffer and text payloads fail with the same error as the sync path and write nothing."""
+    store = SyncObjectStore("memory://")
+    storage = DjangoStorage(store)
+    with pytest.raises(ValueError, match="file name is required"):
+        await storage.asave(None, payload)
+    assert store.list() == []
+
+
 def test_django_storage_save_streams_multi_chunk_uploads() -> None:
     """Multi-chunk uploads stream chunk by chunk and read back the exact concatenated bytes."""
     upload = _ChunkRecordingUpload(b"abcdefghijkl")

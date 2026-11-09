@@ -271,7 +271,8 @@ class ObjectStoreBackend(AAStorageBackend):
         """Generate presigned GET or PUT URLs for one or more object paths.
 
         Raises:
-            NotImplementedError: When the underlying store has no `SigningConfig` or native signing fails.
+            NotImplementedError: When the underlying store has no `SigningConfig`.
+            ValueError: When the native signer rejects the expiry or credentials.
         """
         ttl = 3600 if expires_in is None else expires_in
         if isinstance(paths, (str, Path, os.PathLike)):
@@ -288,7 +289,8 @@ class ObjectStoreBackend(AAStorageBackend):
         """Generate presigned GET or PUT URLs asynchronously.
 
         Raises:
-            NotImplementedError: When the underlying store has no `SigningConfig` or native signing fails.
+            NotImplementedError: When the underlying store has no `SigningConfig`.
+            ValueError: When the native signer rejects the expiry or credentials.
         """
         ttl = 3600 if expires_in is None else expires_in
         if isinstance(paths, (str, Path, os.PathLike)):
@@ -305,27 +307,19 @@ class ObjectStoreBackend(AAStorageBackend):
         """Sign a single path using the underlying SyncObjectStore presigner."""
         qualified = self._qualify(path)
         self._require_signing()
-        try:
-            if for_upload:
-                return self._sync_store.presign_put(qualified, expires_in_secs=expires_in)
-            return self._sync_store.presign_get(qualified, expires_in_secs=expires_in)
-        except (RuntimeError, ValueError) as exc:
-            msg = f"URL signing is not configured for backend {self.key!r}: {exc}"
-            raise NotImplementedError(msg) from exc
+        if for_upload:
+            return self._sync_store.presign_put(qualified, expires_in_secs=expires_in)
+        return self._sync_store.presign_get(qualified, expires_in_secs=expires_in)
 
     async def _sign_one_async(self, path: PathLike, *, expires_in: int, for_upload: bool) -> str:
         """Sign a single path using the underlying AsyncObjectStore presigner."""
         qualified = self._qualify(path)
         self._require_signing()
-        try:
-            if for_upload:
-                res = self._async_store.presign_put(qualified, expires_in_secs=expires_in)
-            else:
-                res = self._async_store.presign_get(qualified, expires_in_secs=expires_in)
-            return await res if inspect.isawaitable(res) else res
-        except (RuntimeError, ValueError) as exc:
-            msg = f"URL signing is not configured for backend {self.key!r}: {exc}"
-            raise NotImplementedError(msg) from exc
+        if for_upload:
+            res = self._async_store.presign_put(qualified, expires_in_secs=expires_in)
+        else:
+            res = self._async_store.presign_get(qualified, expires_in_secs=expires_in)
+        return await res if inspect.isawaitable(res) else res
 
     def _qualify(self, path: PathLike) -> str:
         """Normalize a PathLike key and prepend any configured namespace prefix."""

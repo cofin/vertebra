@@ -13,7 +13,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from urllib.parse import parse_qs
 
 import pytest
@@ -867,9 +867,9 @@ async def test_sync_and_async_object_store_share_token_cache_across_data_plane_a
     monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", str(ambient_sa_path))
 
     with pytest.raises(ImproperConfigurationError, match="token_cache"):
-        SyncObjectStore("gs://b", token_cache="not-a-cache")  # type: ignore[arg-type]
+        SyncObjectStore("gs://b", token_cache=cast(Any, "not-a-cache"))
     with pytest.raises(ImproperConfigurationError, match="token_cache"):
-        AsyncObjectStore("gs://b", token_cache="not-a-cache")  # type: ignore[arg-type]
+        AsyncObjectStore("gs://b", token_cache=cast(Any, "not-a-cache"))
 
     adc_path = tmp_path / "shared_adc.json"
     adc_path.write_text(

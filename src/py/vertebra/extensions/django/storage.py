@@ -154,7 +154,14 @@ class DjangoStorage(_StorageBase):
         return name
 
     async def asave(self, name: str | None, content: Any, max_length: int | None = None) -> str:
-        """Allocate a Django filename and stream content through the async store."""
+        """Allocate a Django filename and stream content through the async store.
+
+        Raises:
+            ValueError: If ``name`` is ``None`` for a buffer or text payload.
+        """
+        if name is None and isinstance(content, (Buffer, str)):
+            msg = "A file name is required"
+            raise ValueError(msg)
         name = self._validate_name(name if name is not None else content.name)
         name = await self._aget_available_name(name, max_length)
         key = self._qualified_name(name)

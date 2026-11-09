@@ -2,9 +2,8 @@
 
 import asyncio
 import contextlib
-import inspect
 import os
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Iterator
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,7 +11,6 @@ from typing import Any
 
 import anyio
 import click
-import msgspec
 import pytest
 from click.testing import CliRunner
 
@@ -33,202 +31,17 @@ from vertebra.server._dispatch import _schedule_coros
 from vertebra.storage import AsyncObjectStore, LocalConfig, MemoryConfig, StreamingStorageResponse
 from vertebra.typing import ImproperConfigurationError
 from vertebra.utils.module_loader import import_optional
-from vertebra.utils.serializers import decode_json, encode_json_bytes, encode_msgpack_bytes
+from vertebra.utils.serializers import decode_json, encode_msgpack_bytes
 
-
-def _load_litestar_plugin_test_primitives() -> tuple[
-    Any, Callable[..., Callable[[Callable[..., Any]], Any]], Any, Any, Any
-]:
-    """Load Litestar plugin test classes or fallback doubles when optional extra is absent."""
-    litestar_mod = import_optional("litestar")
-    comp_mod = import_optional("litestar.config.compression")
-    cors_mod = import_optional("litestar.config.cors")
-    plugins_mod = import_optional("litestar.plugins")
-    if litestar_mod is not None and comp_mod is not None and cors_mod is not None and plugins_mod is not None:
-        return (
-            litestar_mod.Litestar,
-            litestar_mod.get,
-            comp_mod.CompressionConfig,
-            cors_mod.CORSConfig,
-            plugins_mod.CLIPlugin,
-        )
-
-    class StateStub:
-        """Non-dict Litestar State double mirroring litestar.datastructures.State."""
-
-        __slots__ = ("_data",)
-
-        def __init__(self, initial: dict[str, Any] | None = None) -> None:
-            self._data: dict[str, Any] = dict(initial or {})
-
-        def __getitem__(self, key: str) -> Any:
-            return self._data[key]
-
-        def __setitem__(self, key: str, value: Any) -> None:
-            self._data[key] = value
-
-        def __contains__(self, key: object) -> bool:
-            return key in self._data
-
-        def __delitem__(self, key: str) -> None:
-            del self._data[key]
-
-        def __iter__(self) -> Iterator[str]:
-            return iter(self._data)
-
-        def __len__(self) -> int:
-            return len(self._data)
-
-        def get(self, key: str, default: Any = None) -> Any:
-            return self._data.get(key, default)
-
-        def keys(self) -> Any:
-            return self._data.keys()
-
-        def values(self) -> Any:
-            return self._data.values()
-
-        def items(self) -> Any:
-            return self._data.items()
-
-    class CompressionConfigStub(msgspec.Struct, frozen=True, gc=False):
-        backend: str = "gzip"
-        minimum_size: int = 500
-        gzip_compress_level: int = 6
-        brotli_quality: int = 4
-        zstd_level: int = 3
-        exclude: Sequence[str] | str | None = None
-        exclude_opt_key: str | None = None
-
-    class CORSConfigStub(msgspec.Struct, frozen=True, gc=False):
-        allow_origins: Sequence[str] = ("*",)
-        allow_methods: Sequence[str] = ("*",)
-        allow_headers: Sequence[str] = ("*",)
-        allow_credentials: bool = False
-        expose_headers: Sequence[str] = ()
-        max_age: int = 600
-        allow_origin_regex: str | None = None
-
-    class CLIPluginStub:
-        """Fallback CLIPlugin base class."""
-
-        __slots__ = ()
-
-    def get_stub(path: str, **_kwargs: Any) -> Callable[[Callable[..., Any]], Any]:
-        def wrap(fn: Callable[..., Any]) -> Any:
-            return SimpleNamespace(
-                paths={path},
-                http_methods={"GET"},
-                fn=fn,
-                guards=(),
-                middleware=(),
-                opt={},
-            )
-
-        return wrap
-
-    class LitestarStub:
-        __slots__ = (
-            "__vertebra_fastpath__",
-            "before_send",
-            "compression_config",
-            "cors_config",
-            "lifespan",
-            "openapi_config",
-            "openapi_schema",
-            "plugins",
-            "routes",
-            "state",
-        )
-
-        def __init__(
-            self,
-            route_handlers: Sequence[Any] | None = None,
-            *,
-            plugins: Sequence[Any] | None = None,
-            compression_config: Any = None,
-            cors_config: Any = None,
-            **_kwargs: Any,
-        ) -> None:
-            app_config = SimpleNamespace(
-                route_handlers=list(route_handlers or ()),
-                plugins=list(plugins or ()),
-                compression_config=compression_config,
-                cors_config=cors_config,
-                before_send=None,
-                state=StateStub(),
-                lifespan=[],
-            )
-            for plugin in app_config.plugins:
-                on_init = getattr(plugin, "on_app_init", None)
-                if callable(on_init):
-                    app_config = on_init(app_config)
-
-            self.__vertebra_fastpath__: Any = None
-            self.compression_config = app_config.compression_config
-            self.cors_config = app_config.cors_config
-            self.before_send = app_config.before_send
-            self.state = StateStub(app_config.state._data)
-            self.lifespan = list(app_config.lifespan)
-            self.plugins = SimpleNamespace(
-                plugins=list(app_config.plugins),
-                cli=[p for p in app_config.plugins if hasattr(p, "server_lifespan")],
-            )
-            by_path: dict[str, dict[str, Any]] = {}
-            for handler in app_config.route_handlers:
-                for path in getattr(handler, "paths", ("/",)):
-                    method_map = by_path.setdefault(path, {})
-                    for method in getattr(handler, "http_methods", ("GET",)):
-                        method_map[method] = handler
-            self.routes = [
-                SimpleNamespace(path=path, route_handler_map=method_map, path_parameters=())
-                for path, method_map in by_path.items()
-            ]
-            self.openapi_config = SimpleNamespace(path="/schema")
-            self.openapi_schema = SimpleNamespace(
-                to_schema=lambda: {
-                    "openapi": "3.1.0",
-                    "paths": {r.path: {} for r in self.routes},
-                }
-            )
-
-        async def __call__(self, scope: Any, _receive: Any, send: Any) -> None:
-            path = scope["path"]
-            method = scope["method"].upper()
-            for route in self.routes:
-                if route.path == path and method in route.route_handler_map:
-                    handler = route.route_handler_map[method]
-                    out = handler.fn()
-                    if inspect.isawaitable(out):
-                        out = await out
-                    body = bytes(encode_json_bytes(out))
-                    await send(
-                        {
-                            "type": "http.response.start",
-                            "status": 200,
-                            "headers": [(b"content-type", b"application/json")],
-                        }
-                    )
-                    await send({"type": "http.response.body", "body": body, "more_body": False})
-                    return
-            await send({"type": "http.response.start", "status": 404, "headers": []})
-            await send({"type": "http.response.body", "body": b"Not Found", "more_body": False})
-
-    return (
-        LitestarStub,
-        get_stub,
-        CompressionConfigStub,
-        CORSConfigStub,
-        CLIPluginStub,
-    )
-
-
-Litestar, get, CompressionConfig, CORSConfig, CLIPlugin = _load_litestar_plugin_test_primitives()
 litestar_mod = import_optional("litestar")
+litestar_cli_mod = import_optional("litestar.cli.main")
+litestar_compression_mod = import_optional("litestar.config.compression")
+litestar_cors_mod = import_optional("litestar.config.cors")
 litestar_response_mod = import_optional("litestar.response")
 litestar_static_files_mod = import_optional("litestar.static_files")
 litestar_testing_mod = import_optional("litestar.testing")
 requires_litestar = pytest.mark.skipif(litestar_mod is None, reason="litestar is not installed")
+requires_litestar_cli = pytest.mark.skipif(litestar_cli_mod is None, reason="litestar CLI is not installed")
 
 
 class _LifecycleTrackerPlugin:
@@ -252,6 +65,7 @@ class _LifecycleTrackerPlugin:
             self.exited = True
 
 
+@requires_litestar
 def test_litestar_plugin_on_app_init_and_server_lifespan(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify VertebraPlugin preserves standalone Python compression and strips it only when vertebra-server is active."""
     monkeypatch.delenv("LITESTAR_APP", raising=False)
@@ -260,15 +74,15 @@ def test_litestar_plugin_on_app_init_and_server_lifespan(monkeypatch: pytest.Mon
     tracker = _LifecycleTrackerPlugin()
     vtb_plugin = VertebraPlugin(VertebraConfig(enable_health_endpoint=True, health_path="/_vtb/healthz"))
 
-    @get("/ping", sync_to_thread=False)
+    @litestar_mod.get("/ping", sync_to_thread=False)
     def ping() -> dict[str, str]:
         return {"status": "pong"}
 
-    standalone_app = Litestar(
+    standalone_app = litestar_mod.Litestar(
         route_handlers=[ping],
         plugins=[vtb_plugin, tracker],
-        compression_config=CompressionConfig(backend="zstd", minimum_size=512),
-        cors_config=CORSConfig(allow_origins=["https://console.example.com"]),
+        compression_config=litestar_compression_mod.CompressionConfig(backend="zstd", minimum_size=512),
+        cors_config=litestar_cors_mod.CORSConfig(allow_origins=["https://console.example.com"]),
     )
 
     assert standalone_app.compression_config is not None
@@ -287,11 +101,11 @@ def test_litestar_plugin_on_app_init_and_server_lifespan(monkeypatch: pytest.Mon
 
     monkeypatch.setenv("VERTEBRA_SERVER_ACTIVE", "1")
     active_plugin = VertebraPlugin(VertebraConfig(enable_health_endpoint=True, health_path="/_vtb/healthz"))
-    active_app = Litestar(
+    active_app = litestar_mod.Litestar(
         route_handlers=[ping],
         plugins=[active_plugin],
-        compression_config=CompressionConfig(backend="zstd", minimum_size=512),
-        cors_config=CORSConfig(allow_origins=["https://console.example.com"]),
+        compression_config=litestar_compression_mod.CompressionConfig(backend="zstd", minimum_size=512),
+        cors_config=litestar_cors_mod.CORSConfig(allow_origins=["https://console.example.com"]),
     )
     assert active_app.compression_config is None
     assert active_plugin.offload_plan is not None
@@ -307,11 +121,11 @@ def test_litestar_plugin_on_app_init_and_server_lifespan(monkeypatch: pytest.Mon
             offload_openapi=False,
         )
     )
-    app_no_offload = Litestar(
+    app_no_offload = litestar_mod.Litestar(
         route_handlers=[ping],
         plugins=[disabled_plugin],
-        compression_config=CompressionConfig(backend="zstd", minimum_size=512),
-        cors_config=CORSConfig(allow_origins=["https://console.example.com"]),
+        compression_config=litestar_compression_mod.CompressionConfig(backend="zstd", minimum_size=512),
+        cors_config=litestar_cors_mod.CORSConfig(allow_origins=["https://console.example.com"]),
     )
     assert app_no_offload.compression_config is not None
     assert app_no_offload.cors_config is not None
@@ -322,16 +136,17 @@ def test_litestar_plugin_on_app_init_and_server_lifespan(monkeypatch: pytest.Mon
     assert disabled_plugin.offload_plan.openapi is None
 
 
+@requires_litestar
 def test_asgi_runner_invokes_attached_vertebra_fastpath(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify AsgiRunner invokes __vertebra_fastpath__ directly for eligible routes and falls back for unmatched paths."""
     monkeypatch.delenv("VERTEBRA_SERVER_ACTIVE", raising=False)
     vtb_plugin = VertebraPlugin()
 
-    @get("/accelerated", sync_to_thread=False)
+    @litestar_mod.get("/accelerated", sync_to_thread=False)
     def accelerated() -> dict[str, str]:
         return {"fast": "yes"}
 
-    litestar_app = Litestar(route_handlers=[accelerated], plugins=[vtb_plugin])
+    litestar_app = litestar_mod.Litestar(route_handlers=[accelerated], plugins=[vtb_plugin])
     bypass = litestar_app.state["vertebra_fastpath_bypass"]
 
     class _FastPathOnlyAsgiWrapper:
@@ -371,11 +186,12 @@ def test_asgi_runner_invokes_attached_vertebra_fastpath(monkeypatch: pytest.Monk
         runner.close()
 
 
+@requires_litestar
 def test_asgi_runner_supports_anyio_task_group() -> None:
     """Verify AsgiRunner executes handlers that spawn anyio.create_task_group() without RuntimeError."""
     results_log: list[str] = []
 
-    @get("/concurrent")
+    @litestar_mod.get("/concurrent")
     async def concurrent_handler() -> dict[str, int]:
         async def child_worker(label: str) -> None:
             await anyio.sleep(0)
@@ -386,7 +202,7 @@ def test_asgi_runner_supports_anyio_task_group() -> None:
             tg.start_soon(child_worker, "w2")
         return {"count": len(results_log)}
 
-    app = Litestar(route_handlers=[concurrent_handler])
+    app = litestar_mod.Litestar(route_handlers=[concurrent_handler])
 
     class _SimpleRequest:
         __slots__ = ("body", "handler_id", "headers", "method", "path", "query", "request_id")
@@ -414,19 +230,24 @@ def test_asgi_runner_supports_anyio_task_group() -> None:
 async def test_drive_coro_promotes_yielded_coroutine_to_asyncio_task() -> None:
     """Verify _drive_coro promotes a coroutine that yields into a real asyncio.Task for anyio compatibility."""
     observed: dict[str, Any] = {"has_task": False}
+    finished = asyncio.Event()
 
     async def yielded_then_anyio() -> None:
-        await asyncio.sleep(0)
-        async with anyio.create_task_group() as tg:
-            observed["has_task"] = asyncio.current_task() is not None
-            _ = tg
+        try:
+            await asyncio.sleep(0)
+            async with anyio.create_task_group() as tg:
+                observed["has_task"] = asyncio.current_task() is not None
+                _ = tg
+        finally:
+            finished.set()
 
     _schedule_coros(asyncio.get_running_loop(), [yielded_then_anyio()])
-    await asyncio.sleep(0.02)
+    await asyncio.wait_for(finished.wait(), 1)
 
     assert observed["has_task"] is True
 
 
+@requires_litestar
 def test_build_orchestrator_exports_litestar_vite_and_asyncapi(tmp_path: Path) -> None:
     """Verify BuildOrchestrator exports litestar-vite and litestar-asyncapi schemas when present on the app."""
 
@@ -442,11 +263,11 @@ def test_build_orchestrator_exports_litestar_vite_and_asyncapi(tmp_path: Path) -
         def export_asyncapi_schema(self) -> dict[str, Any]:
             return {"asyncapi": "3.0.0", "info": {"title": "Events", "version": "1.0.0"}}
 
-    @get("/status", sync_to_thread=False)
+    @litestar_mod.get("/status", sync_to_thread=False)
     def status_handler() -> dict[str, str]:
         return {"ok": "true"}
 
-    app = Litestar(route_handlers=[status_handler])
+    app = litestar_mod.Litestar(route_handlers=[status_handler])
     app.state["vite_plugin"] = _StubVitePlugin()
     app.state["asyncapi_plugin"] = _StubAsyncAPIPlugin()
 
@@ -459,6 +280,7 @@ def test_build_orchestrator_exports_litestar_vite_and_asyncapi(tmp_path: Path) -
     assert decode_json(exported["asyncapi"].read_text(encoding="utf-8"))["asyncapi"] == "3.0.0"
 
 
+@requires_litestar
 def test_litestar_plugin_ensure_finalized_populates_openapi_and_binds_asgi_runner(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -466,14 +288,14 @@ def test_litestar_plugin_ensure_finalized_populates_openapi_and_binds_asgi_runne
     monkeypatch.setenv("VERTEBRA_SERVER_ACTIVE", "1")
     plugin = VertebraPlugin()
 
-    @get("/ready-fast", sync_to_thread=False)
+    @litestar_mod.get("/ready-fast", sync_to_thread=False)
     def ready_fast() -> dict[str, str]:
         return {"mode": "direct"}
 
-    app = Litestar(
+    app = litestar_mod.Litestar(
         route_handlers=[ready_fast],
         plugins=[plugin],
-        compression_config=CompressionConfig(backend="br", minimum_size=256),
+        compression_config=litestar_compression_mod.CompressionConfig(backend="br", minimum_size=256),
     )
 
     runner = AsgiRunner(app)
@@ -489,11 +311,9 @@ def test_litestar_plugin_ensure_finalized_populates_openapi_and_binds_asgi_runne
         runner.close()
 
 
-def test_vertebra_plugin_overrides_litestar_cli_run_command(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Verify VertebraPlugin.on_cli_init overrides `litestar run` to launch the Vertebra supervisor."""
+@pytest.fixture
+def litestar_cli_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str, Any]]:
+    """Write a Litestar app module, stub the supervisor, and restore the global `run` command afterwards."""
     captured: dict[str, Any] = {}
 
     def fake_build_cmd() -> list[str]:
@@ -506,9 +326,7 @@ def test_vertebra_plugin_overrides_litestar_cli_run_command(
 
     monkeypatch.setattr(litestar_plugin_mod, "build_server_command", fake_build_cmd)
     monkeypatch.setattr(litestar_plugin_mod, "run_supervisor", fake_supervisor)
-
-    app_file = tmp_path / "ls_cli_app.py"
-    app_file.write_text(
+    (tmp_path / "ls_cli_app.py").write_text(
         "from litestar import Litestar, get\n"
         "from litestar.config.compression import CompressionConfig\n"
         "from vertebra.extensions.litestar import VertebraConfig, VertebraPlugin\n\n"
@@ -522,53 +340,53 @@ def test_vertebra_plugin_overrides_litestar_cli_run_command(
         ")\n",
         encoding="utf-8",
     )
+    litestar_group = litestar_cli_mod.litestar_group
+    original_run = litestar_group.commands.get("run")
+    try:
+        yield captured
+    finally:
+        if original_run is not None:
+            litestar_group.commands["run"] = original_run
 
-    litestar_cli_mod = import_optional("litestar.cli.main")
+
+@requires_litestar_cli
+def test_vertebra_plugin_overrides_litestar_cli_run_command(tmp_path: Path, litestar_cli_app: dict[str, Any]) -> None:
+    """Verify loading the app through `litestar` binds the Vertebra `run` command, which launches the supervisor."""
     runner = CliRunner()
-    if litestar_cli_mod is not None:
-        litestar_group = litestar_cli_mod.litestar_group
-        original_run = litestar_group.commands.get("run")
-        try:
-            help_res = runner.invoke(
-                litestar_group,
-                ["--app-dir", str(tmp_path), "--app", "ls_cli_app:app", "run", "--help"],
-            )
-            assert help_res.exit_code == 0, help_res.output
-            assert "--topology" in help_res.output
-            assert "--drain-timeout" in help_res.output
+    help_result = runner.invoke(
+        litestar_cli_mod.litestar_group,
+        ["--app-dir", str(tmp_path), "--app", "ls_cli_app:app", "run", "--help"],
+    )
+    assert help_result.exit_code == 0, help_result.output
+    assert "--topology" in help_result.output
+    assert "--drain-timeout" in help_result.output
+    assert litestar_cli_app == {}
 
-            run_res = runner.invoke(
-                litestar_group,
-                [
-                    "--app-dir",
-                    str(tmp_path),
-                    "--app",
-                    "ls_cli_app:app",
-                    "run",
-                    "--port",
-                    "8123",
-                    "--workers",
-                    "2",
-                    "--topology",
-                    "shm",
-                    "--no-banner",
-                ],
-            )
-            assert run_res.exit_code == 0, run_res.output
-            assert captured["env"]["VERTEBRA_APP"] == "ls_cli_app:app"
-            assert captured["env"]["VERTEBRA_PORT"] == "8123"
-            assert captured["env"]["VERTEBRA_WORKERS"] == "2"
-            assert captured["env"]["VERTEBRA_TOPOLOGY"] == "shm"
-            assert "VERTEBRA_OFFLOAD_CONFIG" in captured["env"]
-            offload = decode_json(captured["env"]["VERTEBRA_OFFLOAD_CONFIG"])
-            assert offload["compression"]["backend"] == "zstd"
-        finally:
-            if original_run is not None:
-                litestar_group.commands["run"] = original_run
-    else:
-        group = click.Group("litestar")
-        VertebraPlugin().on_cli_init(group)
-        assert "run" in group.commands
+    run_result = runner.invoke(
+        litestar_cli_mod.litestar_group,
+        [
+            "--app-dir",
+            str(tmp_path),
+            "--app",
+            "ls_cli_app:app",
+            "run",
+            "--port",
+            "8123",
+            "--workers",
+            "2",
+            "--topology",
+            "shm",
+            "--no-banner",
+        ],
+    )
+    assert run_result.exit_code == 0, run_result.output
+    env = litestar_cli_app["env"]
+    assert litestar_cli_app["cmd"] == ["/bin/true"]
+    assert env["VERTEBRA_APP"] == "ls_cli_app:app"
+    assert env["VERTEBRA_PORT"] == "8123"
+    assert env["VERTEBRA_WORKERS"] == "2"
+    assert env["VERTEBRA_TOPOLOGY"] == "shm"
+    assert decode_json(env["VERTEBRA_OFFLOAD_CONFIG"])["compression"]["backend"] == "zstd"
 
 
 def test_channels_backend_accepts_engine_neutral_bus() -> None:
@@ -628,24 +446,9 @@ async def test_channels_stream_disconnect_releases_queue() -> None:
     assert backend.channels == ()
 
 
-@pytest.mark.parametrize(
-    ("case", "expected_exit", "expected_error"),
-    [
-        ("only-certfile", 2, "Both --ssl-certfile and --ssl-keyfile must be provided together"),
-        ("only-keyfile", 2, "Both --ssl-certfile and --ssl-keyfile must be provided together"),
-        ("missing-certfile", 2, "SSL certificate file does not exist"),
-        ("missing-keyfile", 2, "SSL key file does not exist"),
-        ("self-signed-missing-files", 0, None),
-    ],
-)
-def test_litestar_cli_run_tls_cert_and_key_validation(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    case: str,
-    expected_exit: int,
-    expected_error: str | None,
-) -> None:
-    """Litestar run enforces mutual --ssl-certfile/--ssl-keyfile flags and file existence unless self-signed."""
+@pytest.fixture
+def litestar_tls_cli(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[click.Group, dict[str, str]]:
+    """Build a bare CLI group with the Vertebra `run` command and a capturing supervisor stub."""
     captured_env: dict[str, str] = {}
 
     def fake_build_cmd() -> list[str]:
@@ -658,32 +461,59 @@ def test_litestar_cli_run_tls_cert_and_key_validation(
 
     monkeypatch.setattr(litestar_plugin_mod, "build_server_command", fake_build_cmd)
     monkeypatch.setattr(litestar_plugin_mod, "run_supervisor", fake_supervisor)
+    (tmp_path / "present.crt").write_text("CERT", encoding="utf-8")
+    group = click.Group("litestar")
+    VertebraPlugin().on_cli_init(group)
+    return group, captured_env
 
-    existing_cert = tmp_path / "present.crt"
-    existing_cert.write_text("CERT", encoding="utf-8")
+
+@pytest.mark.parametrize(
+    ("tls_args", "expected_error"),
+    [
+        (
+            ["--ssl-certfile", "present.crt"],
+            "Both --ssl-certfile and --ssl-keyfile must be provided together",
+        ),
+        (
+            ["--ssl-keyfile", "missing.key"],
+            "Both --ssl-certfile and --ssl-keyfile must be provided together",
+        ),
+        (
+            ["--ssl-certfile", "missing.crt", "--ssl-keyfile", "missing.key"],
+            "SSL certificate file does not exist",
+        ),
+        (
+            ["--ssl-certfile", "present.crt", "--ssl-keyfile", "missing.key"],
+            "SSL key file does not exist",
+        ),
+    ],
+    ids=["only-certfile", "only-keyfile", "missing-certfile", "missing-keyfile"],
+)
+def test_litestar_cli_run_rejects_invalid_tls_cert_and_key(
+    tmp_path: Path,
+    litestar_tls_cli: tuple[click.Group, dict[str, str]],
+    tls_args: list[str],
+    expected_error: str,
+) -> None:
+    """Litestar run enforces mutual --ssl-certfile/--ssl-keyfile flags and file existence before launching."""
+    group, captured_env = litestar_tls_cli
+    resolved_args = [str(tmp_path / arg) if not arg.startswith("--") else arg for arg in tls_args]
+    result = CliRunner().invoke(group, ["run", "--no-banner", *resolved_args])
+    assert result.exit_code == 2, result.output
+    assert expected_error in result.output
+    assert captured_env == {}
+
+
+def test_litestar_cli_run_self_signed_accepts_missing_tls_files(
+    tmp_path: Path, litestar_tls_cli: tuple[click.Group, dict[str, str]]
+) -> None:
+    """Litestar run with --create-self-signed-cert accepts missing cert/key paths and exports them resolved."""
+    group, captured_env = litestar_tls_cli
     missing_cert = tmp_path / "missing.crt"
     missing_key = tmp_path / "missing.key"
-
-    cli_args_by_case: dict[str, list[str]] = {
-        "only-certfile": ["run", "--no-banner", "--ssl-certfile", str(existing_cert)],
-        "only-keyfile": ["run", "--no-banner", "--ssl-keyfile", str(missing_key)],
-        "missing-certfile": [
-            "run",
-            "--no-banner",
-            "--ssl-certfile",
-            str(missing_cert),
-            "--ssl-keyfile",
-            str(missing_key),
-        ],
-        "missing-keyfile": [
-            "run",
-            "--no-banner",
-            "--ssl-certfile",
-            str(existing_cert),
-            "--ssl-keyfile",
-            str(missing_key),
-        ],
-        "self-signed-missing-files": [
+    result = CliRunner().invoke(
+        group,
+        [
             "run",
             "--no-banner",
             "--ssl-certfile",
@@ -692,19 +522,11 @@ def test_litestar_cli_run_tls_cert_and_key_validation(
             str(missing_key),
             "--create-self-signed-cert",
         ],
-    }
-
-    group = click.Group("litestar")
-    VertebraPlugin().on_cli_init(group)
-    result = CliRunner().invoke(group, cli_args_by_case[case])
-    assert result.exit_code == expected_exit, result.output
-    if expected_error is not None:
-        assert expected_error in result.output
-        assert captured_env == {}
-    else:
-        assert captured_env["VERTEBRA_TLS_CERT"] == str(missing_cert.resolve())
-        assert captured_env["VERTEBRA_TLS_KEY"] == str(missing_key.resolve())
-        assert captured_env["VERTEBRA_SELF_SIGNED_CERT"] == "1"
+    )
+    assert result.exit_code == 0, result.output
+    assert captured_env["VERTEBRA_TLS_CERT"] == str(missing_cert.resolve())
+    assert captured_env["VERTEBRA_TLS_KEY"] == str(missing_key.resolve())
+    assert captured_env["VERTEBRA_SELF_SIGNED_CERT"] == "1"
 
 
 @pytest.mark.parametrize("config", [None, ""])
@@ -891,7 +713,7 @@ async def test_static_object_store_reader_and_routes() -> None:
     routes = litestar_static_files_mod.create_static_files_router(
         path="/assets", directories=["/"], file_system=adapter, resolve_symlinks=False
     )
-    async with litestar_testing_mod.AsyncTestClient(Litestar(route_handlers=[routes])) as client:
+    async with litestar_testing_mod.AsyncTestClient(litestar_mod.Litestar(route_handlers=[routes])) as client:
         response = await client.get("/assets/app.js")
         assert response.status_code == 200
         assert response.content == payload
@@ -911,7 +733,7 @@ async def test_static_object_store_explicit_range_handler() -> None:
     payload = b"0123456789abcdefghij"
     await storage.put("app.js", payload)
 
-    @get("/download")
+    @litestar_mod.get("/download")
     async def download(request: litestar_mod.Request[Any, Any, Any]) -> litestar_response_mod.Stream:
         response = await StreamingStorageResponse.from_async_store(
             storage, "app.js", range_header=request.headers.get("range")
@@ -931,7 +753,7 @@ async def test_static_object_store_explicit_range_handler() -> None:
             media_type=response.content_type or response.media_type,
         )
 
-    async with litestar_testing_mod.AsyncTestClient(Litestar(route_handlers=[download])) as client:
+    async with litestar_testing_mod.AsyncTestClient(litestar_mod.Litestar(route_handlers=[download])) as client:
         response = await client.get("/download")
         assert response.status_code == 200
         assert response.content == payload

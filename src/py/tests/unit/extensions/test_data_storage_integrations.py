@@ -54,7 +54,10 @@ from vertebra.storage import (
     StreamingStorageResponse as StorageStreamingStorageResponse,
 )
 from vertebra.typing import ImproperConfigurationError
+from vertebra.utils.module_loader import import_optional
 from vertebra.utils.serializers import decode_json
+
+duckdb = import_optional("duckdb")
 
 
 class _SQLSpecRangeServer:
@@ -849,6 +852,51 @@ async def test_sqlspec_unsupported_signing_preserves_adapter_error() -> None:
         await backend.sign_async(["object.bin"], for_upload=True)
 
 
+@pytest.mark.anyio
+@pytest.mark.parametrize("for_upload", [False, True], ids=["get", "put"])
+async def test_sqlspec_signing_propagates_native_argument_errors(for_upload: bool) -> None:
+    """Configured signing surfaces the native expiry error unchanged instead of reporting missing support."""
+    signing = SigningConfig(provider="hmac", hmac_secret="sqlspec-native-error", endpoint="https://signed.example.com")
+    backend = SQLSpecObjectStoreBackend("memory://", signing=signing)
+    assert backend.supports_signing is True
+    with pytest.raises(ValueError, match="expires_in_secs"):
+        backend.sign_sync("k", expires_in=0, for_upload=for_upload)
+    with pytest.raises(ValueError, match="expires_in_secs"):
+        await backend.sign_async("k", expires_in=0, for_upload=for_upload)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("for_upload", [False, True], ids=["get", "put"])
+async def test_alchemy_signing_propagates_native_argument_errors(for_upload: bool) -> None:
+    """Configured Advanced Alchemy signing surfaces the native expiry error unchanged."""
+    signing = SigningConfig(provider="hmac", hmac_secret="alchemy-native-error", endpoint="https://signed.example.com")
+    backend = AlchemyObjectStoreBackend(fs="memory://", signing=signing)
+    assert backend.supports_signing is True
+    with pytest.raises(ValueError, match="expires_in_secs"):
+        backend.sign("k", expires_in=0, for_upload=for_upload)
+    with pytest.raises(ValueError, match="expires_in_secs"):
+        await backend.sign_async("k", expires_in=0, for_upload=for_upload)
+
+
+@pytest.mark.parametrize("async_handle", [False, True], ids=["sync-store", "async-store"])
+@pytest.mark.parametrize(
+    "auth_kwargs",
+    [
+        {"signing": SigningConfig(provider="hmac", hmac_secret="ignored", endpoint="https://ignored.example.com")},
+        {"token_cache": SyncGcpTokenCache({"access_token": "ignored"}, allow_ambient_adc=False)},
+    ],
+    ids=["signing", "token-cache"],
+)
+def test_sqlspec_rejects_auth_options_with_prebuilt_store(async_handle: bool, auth_kwargs: dict[str, Any]) -> None:
+    """Auth options for a prebuilt store fail loudly and leave the caller's store untouched."""
+    sync_store = SyncObjectStore("memory://")
+    store = sync_store.to_async() if async_handle else sync_store
+    with pytest.raises(ImproperConfigurationError, match="StorageConfig or URI"):
+        SQLSpecObjectStoreBackend(store=store, **auth_kwargs)
+    assert store.token_cache is None
+    assert store.supports_signing is False
+
+
 def test_sqlspec_object_store_backend_protocol_arrow_and_sync_pipeline() -> None:
     """SQLSpec ObjectStoreBackend satisfies ObjectStoreProtocol and drives SyncStoragePipeline + PyArrow."""
     store = SyncObjectStore(
@@ -973,11 +1021,10 @@ async def test_sqlspec_object_store_backend_async_pipeline_and_arrow_streaming(t
 
 
 def test_duckdb_gcs_secret_sql_builder() -> None:
-    """build_duckdb_gcs_secret_sql emits parameterized DuckDB httpfs GCS secret DDL."""
+    """build_duckdb_gcs_secret_sql renders DuckDB httpfs GCS secret DDL with a quoted token literal."""
     cfg = GCSConfig(bucket="lakehouse", access_token="mock-adc-bearer-token")
-    sql, params = build_duckdb_gcs_secret_sql("gcs_lake", cfg)
-    assert sql == "CREATE OR REPLACE SECRET gcs_lake (TYPE gcs, BEARER_TOKEN ?)"
-    assert params == ("mock-adc-bearer-token",)
+    sql = build_duckdb_gcs_secret_sql("gcs_lake", cfg)
+    assert sql == "CREATE OR REPLACE SECRET gcs_lake (TYPE gcs, BEARER_TOKEN 'mock-adc-bearer-token')"
 
     with pytest.raises(ValueError, match="Invalid SQL identifier"):
         build_duckdb_gcs_secret_sql("bad-name;DROP TABLE x", cfg)
@@ -994,11 +1041,40 @@ def test_duckdb_gcs_secret_sql_requires_bearer_token(token_kwargs: dict[str, Any
         build_duckdb_gcs_secret_sql("my_secret", **token_kwargs)
 
 
-def test_duckdb_gcs_secret_sql_parameterizes_quoted_tokens() -> None:
-    """Quotes inside an explicit bearer token travel as a bound parameter, never as SQL text."""
-    sql, params = build_duckdb_gcs_secret_sql("gcs_lake", bearer_token="tok'en")
-    assert "tok'en" not in sql
-    assert params == ("tok'en",)
+@pytest.mark.parametrize(
+    ("token", "expected_literal"),
+    [("tok'en", "'tok''en'"), ("''", "''''''"), ("mock-oauth-token.a-b_c/d+e=", "'mock-oauth-token.a-b_c/d+e='")],
+    ids=["embedded-quote", "only-quotes", "oauth-charset"],
+)
+def test_duckdb_gcs_secret_sql_escapes_token_quotes(token: str, expected_literal: str) -> None:
+    """Single quotes inside a bearer token are doubled so the literal cannot terminate early."""
+    sql = build_duckdb_gcs_secret_sql("gcs_lake", bearer_token=token)
+    assert sql == f"CREATE OR REPLACE SECRET gcs_lake (TYPE gcs, BEARER_TOKEN {expected_literal})"
+
+
+@pytest.mark.parametrize("token", ["tok\x00en", "tok\ren", "tok\nen"], ids=["nul", "cr", "lf"])
+def test_duckdb_gcs_secret_sql_rejects_control_characters(token: str) -> None:
+    """Tokens carrying NUL, CR, or LF characters are rejected before any SQL is rendered."""
+    with pytest.raises(ValueError, match="NUL, CR, or LF"):
+        build_duckdb_gcs_secret_sql("gcs_lake", bearer_token=token)
+
+
+@pytest.mark.skipif(duckdb is None, reason="duckdb is not installed")
+def test_duckdb_gcs_secret_sql_executes_against_duckdb() -> None:
+    """The rendered statement is accepted by DuckDB and stores the exact token, including embedded quotes."""
+    connection = duckdb.connect()
+    try:
+        installed = connection.execute(
+            "SELECT installed FROM duckdb_extensions() WHERE extension_name = 'httpfs'"
+        ).fetchone()
+        if installed is None or not installed[0]:
+            pytest.skip("DuckDB httpfs extension is not installed locally and is not downloaded offline")
+        connection.execute("LOAD httpfs")
+        connection.execute(build_duckdb_gcs_secret_sql("gcs_lake", bearer_token="tok'en"))
+        secret = connection.execute("SELECT name, type FROM duckdb_secrets() WHERE name = 'gcs_lake'").fetchone()
+        assert secret == ("gcs_lake", "gcs")
+    finally:
+        connection.close()
 
 
 @pytest.mark.parametrize("target", [GCSConfig(bucket="lakehouse"), "gs://lakehouse"], ids=["config", "uri"])
@@ -1205,12 +1281,8 @@ async def test_object_store_backend_write_arrow_cursor_and_uri_qualified_globs(t
     assert ipc_table.to_pylist() == [{"id": 1, "region": "us"}, {"id": 2, "region": "eu"}]
 
     token_cache = SyncGcpTokenCache({"access_token": "initial-token"}, allow_ambient_adc=False)
-    gcs_sim_store = SyncObjectStore.from_local(tmp_path / "gcs-sim")
-    gcs_backend = SQLSpecObjectStoreBackend(
-        "gs://analytics-bucket",
-        store=gcs_sim_store,
-        token_cache=token_cache,
-    )
+    gcs_sim_store = SyncObjectStore(LocalConfig(root=tmp_path / "gcs-sim"), token_cache=token_cache)
+    gcs_backend = SQLSpecObjectStoreBackend("gs://analytics-bucket", store=gcs_sim_store)
     assert gcs_backend.store.token_cache is token_cache
     assert gcs_backend.async_store.token_cache is not None
     assert isinstance(gcs_backend.async_store.token_cache, AsyncGcpTokenCache)

@@ -107,8 +107,13 @@ class ObjectStoreBackend:
             prefix: Alias for `base_path` when configuring key namespaces directly.
             options: Optional string options passed to `ObjectStore` when constructed from a URI.
             signing: Optional `SigningConfig` for presigned GET/PUT URL generation.
-            token_cache: Optional shared `GcpTokenCache` for GCS OAuth2 bearer token refresh.
+            token_cache: Optional shared `GcpTokenCache` for GCS OAuth2 bearer token refresh when building a store
+                from a config or URI.
             **kwargs: Additional scalar backend options merged into `options`.
+
+        Raises:
+            ImproperConfigurationError: When no target is supplied, or `signing` / `token_cache` accompany a
+                prebuilt object store whose authentication is already fixed.
         """
         self._reject_traversal(base_path)
         self._reject_traversal(prefix)
@@ -121,22 +126,17 @@ class ObjectStoreBackend:
         if target is None or (isinstance(target, str) and not target.strip()):
             msg = "SQLSpec storage requires an explicit store, configuration, or URI"
             raise ImproperConfigurationError(msg)
+        if isinstance(target, (SyncObjectStore, AsyncObjectStore)) and (signing is not None or token_cache is not None):
+            msg = "signing and token_cache apply only when building a store from a StorageConfig or URI"
+            raise ImproperConfigurationError(msg)
         sync_store: SyncObjectStore
         async_store: AsyncObjectStore
 
         if isinstance(target, SyncObjectStore):
             sync_store = target
-            if token_cache is not None and getattr(sync_store, "_gcp_token_cache", None) is None:
-                sync_store._gcp_token_cache = (
-                    token_cache if isinstance(token_cache, SyncGcpTokenCache) else token_cache.to_sync()
-                )
             async_store = target.to_async()
         elif isinstance(target, AsyncObjectStore):
             async_store = target
-            if token_cache is not None and getattr(async_store, "_gcp_token_cache", None) is None:
-                async_store._gcp_token_cache = (
-                    token_cache if isinstance(token_cache, AsyncGcpTokenCache) else token_cache.to_async()
-                )
             sync_store = target.to_sync()
         elif isinstance(target, _STORAGE_CONFIGS):
             sync_store = SyncObjectStore.from_config(target, signing=signing, token_cache=token_cache)
@@ -414,7 +414,8 @@ class ObjectStoreBackend:
         """Generate presigned GET or PUT URLs synchronously.
 
         Raises:
-            NotImplementedError: When the underlying store has no `SigningConfig` or native signing fails.
+            NotImplementedError: When the underlying store has no `SigningConfig`.
+            ValueError: When the native signer rejects the expiry or credentials.
         """
         if isinstance(paths, str):
             return self._sign_single(paths, expires_in=expires_in, for_upload=for_upload)
@@ -572,7 +573,8 @@ class ObjectStoreBackend:
         """Generate presigned GET or PUT URLs asynchronously.
 
         Raises:
-            NotImplementedError: When the underlying store has no `SigningConfig` or native signing fails.
+            NotImplementedError: When the underlying store has no `SigningConfig`.
+            ValueError: When the native signer rejects the expiry or credentials.
         """
         if isinstance(paths, str):
             return await self._sign_single_async(paths, expires_in=expires_in, for_upload=for_upload)
@@ -614,25 +616,17 @@ class ObjectStoreBackend:
         """Sign a single object key using the underlying ObjectStore."""
         qualified = self._qualify(path)
         self._require_signing()
-        try:
-            if for_upload:
-                return self._sync_store.presign_put(qualified, expires_in_secs=expires_in)
-            return self._sync_store.presign_get(qualified, expires_in_secs=expires_in)
-        except (RuntimeError, ValueError) as exc:
-            msg = f"URL signing not supported by backend ({self.protocol}): {exc}"
-            raise NotImplementedError(msg) from exc
+        if for_upload:
+            return self._sync_store.presign_put(qualified, expires_in_secs=expires_in)
+        return self._sync_store.presign_get(qualified, expires_in_secs=expires_in)
 
     async def _sign_single_async(self, path: str, *, expires_in: int, for_upload: bool) -> str:
         """Sign a single object key asynchronously using the underlying AsyncObjectStore."""
         qualified = self._qualify(path)
         self._require_signing()
-        try:
-            if for_upload:
-                return await self._async_store.presign_put(qualified, expires_in_secs=expires_in)
-            return await self._async_store.presign_get(qualified, expires_in_secs=expires_in)
-        except (RuntimeError, ValueError) as exc:
-            msg = f"URL signing not supported by backend ({self.protocol}): {exc}"
-            raise NotImplementedError(msg) from exc
+        if for_upload:
+            return await self._async_store.presign_put(qualified, expires_in_secs=expires_in)
+        return await self._async_store.presign_get(qualified, expires_in_secs=expires_in)
 
     def _strip_matching_uri_prefix(self, raw_path_or_pattern: str) -> str:
         """Strip a scheme/bucket prefix when `raw_path_or_pattern` is a full URI matching `self.store_uri`."""
@@ -806,16 +800,17 @@ def build_duckdb_gcs_secret_sql(
     config: GCSConfig | None = None,
     *,
     bearer_token: str | None = None,
-) -> tuple[str, tuple[str]]:
-    """Build parameterized DuckDB `httpfs` GCS bearer-token `CREATE OR REPLACE SECRET` SQL and parameters.
+) -> str:
+    """Build a DuckDB `httpfs` GCS bearer-token `CREATE OR REPLACE SECRET` statement.
 
     Resolves an OAuth2 bearer token via `GCSConfig.resolve_adc_token()` (including optional
-    `target_service_account` impersonation) when `bearer_token` is omitted. The token travels as a bound
-    parameter so quotes inside it never reach the SQL text.
+    `target_service_account` impersonation) when `bearer_token` is omitted. DuckDB `CREATE SECRET` DDL does not
+    accept prepared parameters, so the token is rendered as a single-quoted SQL literal with embedded quotes
+    doubled, and tokens containing NUL, CR, or LF characters are rejected before rendering.
 
     Raises:
         ImproperConfigurationError: When neither `bearer_token` nor `config` yields a non-blank bearer token.
-        ValueError: When `secret_name` is not a valid SQL identifier.
+        ValueError: When `secret_name` is not a valid SQL identifier or the token contains NUL, CR, or LF.
     """
     validate_identifier(secret_name, "DuckDB secret name", allow_dots=False)
     token = bearer_token
@@ -824,5 +819,8 @@ def build_duckdb_gcs_secret_sql(
     if token is None or not token.strip():
         msg = "DuckDB GCS secret requires a non-empty bearer token from `bearer_token` or `GCSConfig` credentials"
         raise ImproperConfigurationError(msg)
-    sql = f"CREATE OR REPLACE SECRET {secret_name} (TYPE gcs, BEARER_TOKEN ?)"
-    return sql, (token,)
+    if any(char in token for char in ("\x00", "\r", "\n")):
+        msg = "DuckDB GCS bearer token must not contain NUL, CR, or LF characters"
+        raise ValueError(msg)
+    escaped = token.replace("'", "''")
+    return f"CREATE OR REPLACE SECRET {secret_name} (TYPE gcs, BEARER_TOKEN '{escaped}')"
