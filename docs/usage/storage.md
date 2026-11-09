@@ -58,7 +58,7 @@ Pass a URI or configuration as the constructor's required positional target. Emp
 | HTTP / WebDAV | `HTTPConfig(url="https://objects.example.com")` | `https://objects.example.com` |
 | Ephemeral tests | `MemoryConfig(namespace="tests")` | `memory://tests` |
 
-Import configurations from `vertebra.storage`. `from_config(config)` accepts the same configurations. Memory stores retain data only in their native engine; give each one an explicit namespace and use local or cloud storage for persistence. See [authentication and signing](storage-auth-and-signing.md) for provider credentials.
+Import configurations from `vertebra.storage`. `from_config(config)` accepts the same configurations. Each memory store owns a private in-memory backend: the namespace is a label, and two stores built from the same `memory://` URI or `MemoryConfig` do not see each other's objects. Only handles derived with `to_async()` or `to_sync()` share data. Use local or cloud storage for persistence or cross-store sharing. See [authentication and signing](storage-auth-and-signing.md) for provider credentials.
 
 A few backend options change addressing rather than credentials:
 
@@ -72,7 +72,7 @@ Keys are `/`-delimited strings. Leading and trailing `/` and surrounding whitesp
 
 ## Stream bytes and update objects
 
-`get()` returns complete bytes; `get_view()` returns a whole-object `memoryview` retaining its native `StorageBuffer` owner. Use `get_stream(key, chunk_size=65536)` for incremental `StorageBuffer` chunks and `put_stream(key, chunks)` for incremental uploads. Async stores accept sync or async upload iterables and expose async download iterators:
+`get()` returns complete bytes; `get_view()` returns a whole-object `memoryview` retaining its native `StorageBuffer` owner. Use `get_stream(key)` for incremental `StorageBuffer` chunks (backend chunks pass through unchanged unless you set `chunk_size` to cap each chunk) and `put_stream(key, chunks)` for incremental uploads. Async stores accept sync or async upload iterables and expose async download iterators:
 
 ```python
 import asyncio
@@ -100,6 +100,7 @@ The chunks contain `b'hello '` and `b'world'`. Close a stream explicitly when st
 | Condition | Succeeds when | Failure |
 | --- | --- | --- |
 | `if_not_exists=True` | The key does not exist | `FileExistsError` |
+| `if_none_match="*"` | The key does not exist (same as `if_not_exists=True`) | `FileExistsError` |
 | `if_match=etag` | The current ETag equals `etag` | `PreconditionError` |
 | `if_none_match=etag` | The current ETag differs from `etag`, or the key is missing | `PreconditionError` |
 | `copy(src, dst, overwrite=False)` | `dst` does not exist | `FileExistsError` |
@@ -161,7 +162,7 @@ store.compose(["upload/part-0", "upload/part-1"], "upload/final.txt")
 print(store.get("upload/final.txt"))
 ```
 
-Output: `b'hello world'`. GCS stores use the server-side compose API, folding more than 32 sources through temporary objects that are always deleted. Other backends stream each source into one multipart upload. An empty `sources` list raises `ValueError`.
+Output: `b'hello world'`. GCS stores use the server-side compose API, folding more than 32 sources through temporary objects that are deleted on success, failure, or cancellation. Other backends stream each source into one multipart upload. An empty `sources` list raises `ValueError`.
 
 ## Range reads and file-like access
 
@@ -210,7 +211,7 @@ asyncio.run(main())
 
 Output: `[100, 100, 50]`.
 
-`write_arrow(key, data, batch_size=65536)` writes IPC streams; `iter_arrow_batches(key)` reads them. Writers accept a Table, RecordBatch, ArrowCursor, or synchronous batch iterable; empty iterables require a schema. Writes return `PutResult`.
+`write_arrow(key, data, batch_size=65536)` writes IPC streams; `iter_arrow_batches(key)` reads them. Writers accept a Table, RecordBatch, ArrowCursor, or synchronous batch iterable and return `PutResult`. `write_arrow` raises `ValueError` on an empty iterable; `write_parquet` accepts one only together with `schema=...`.
 
 `write_parquet` accepts `schema`, `compression="zstd"`, `row_group_size=65536`, and two encoding controls:
 

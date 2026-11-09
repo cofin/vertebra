@@ -528,7 +528,12 @@ class MemoryConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Configuration for in-memory object storage."""
 
     namespace: str = "default"
-    """Logical namespace isolating in-memory object buckets inside the process."""
+    """Descriptive label for the in-memory store; it does not select or share storage.
+
+    Every store built from a `MemoryConfig` or `memory://` URI owns a private in-memory backend, so two
+    stores with the same namespace never see each other's objects. Only handles derived through
+    `to_async()` or `to_sync()` share data.
+    """
 
     def to_url_and_options(self) -> tuple[str, dict[str, str]]:
         """Convert configuration into a canonical URL and options dictionary."""

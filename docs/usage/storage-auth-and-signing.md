@@ -19,7 +19,7 @@ print(store.verify_presigned_url(download_url, method="GET"))
 
 Output: `True`. HMAC URLs require your application to serve the configured origin and validate the URL before serving an object. The memory store here makes signing locally reproducible.
 
-`presign_get` and `presign_put` return strings and take `expires_in_secs`; `sign(key, expires_in=900, method="GET")` is the general method. Async stores expose the same methods as awaitables. `verify_presigned_url` verifies HMAC and S3 SigV4 locally; GCS, Azure, and OCI verification raises `NotImplementedError`.
+`presign_get` and `presign_put` return strings and take `expires_in_secs`; `sign(key, expires_in=3600, method="GET")` is the general method; all three default to one-hour expiry. Async stores expose the same methods as awaitables. `verify_presigned_url` verifies HMAC and S3 SigV4 locally; GCS, Azure, and OCI verification raises `NotImplementedError`.
 
 ## Google Cloud credentials and token caches
 
@@ -39,13 +39,13 @@ store = SyncObjectStore(config)
 
 `application_credentials` accepts an ADC file. A service-account JSON key can instead be supplied through `service_account_path` or inline `service_account_key`. Without explicit credentials, ADC resolution uses the runtime's configured identity. `access_token` provides an explicit bearer token when the caller manages its lifecycle.
 
-The public cache types are shared native-core exports:
+The token cache types come from the core `vertebra._vertebra` extension and are re-exported from `vertebra.storage`:
 
 ```python
 from vertebra.storage import AsyncGcpTokenCache, GcpTokenSnapshot, SyncGcpTokenCache
 ```
 
-These types come from `vertebra._vertebra`. `GCSConfig.sync_token_cache()` and `async_token_cache()` build them with GCS scopes; both factories accept `allow_ambient_adc` and `scopes`. Without an explicit cache, each GCS store builds its own.
+`GCSConfig.sync_token_cache()` and `async_token_cache()` build them with GCS scopes; both factories accept `allow_ambient_adc` and `scopes`. Without an explicit cache, each GCS store builds its own.
 
 Pass one cache as `token_cache=` to several stores so they share a single token and refresh schedule:
 
@@ -62,9 +62,9 @@ assets = SyncObjectStore(config, token_cache=cache)
 reports = SyncObjectStore(GCSConfig(bucket="app-reports"), token_cache=cache)
 ```
 
-The cache lives in the core `vertebra._vertebra` extension and reaches the storage extension as a named C-ABI capsule, so both modules use the same native cache rather than copies. A store uses it for every GCS request: reads, writes, listings, server-side `compose`, and the IAM `signBlob` call behind keyless presigning. `cache.to_async()` and `cache.to_sync()` return handles over the same cache, and an `AsyncObjectStore` given a `SyncGcpTokenCache` converts it the same way. Converting a store with `.to_async()` / `.to_sync()` shares its engine and its cache.
+The cache reaches the storage extension as a named C-ABI capsule, so both modules use the same native cache rather than copies. A store uses it for every GCS request: reads, writes, listings, server-side `compose`, and the IAM `signBlob` call behind keyless presigning. `cache.to_async()` and `cache.to_sync()` return handles over the same cache, and an `AsyncObjectStore` given a `SyncGcpTokenCache` converts it the same way. Converting a store with `.to_async()` / `.to_sync()` shares its engine and its cache.
 
-Native `RefreshingGcpCredentialProvider` supplies fresh tokens to GCS. The cache refreshes before expiry using `refresh_skew_seconds` (default `300`) and coalesces concurrent refreshes. IAM signing and `compose` retry a `401` once after invalidating the observed token generation. `quota_project_id` is sent as the `x-goog-user-project` header on storage and IAM requests.
+The cache refreshes tokens before expiry using `refresh_skew_seconds` (default `300`) and coalesces concurrent refreshes. When IAM signing or `compose` receives a `401`, the store discards the rejected token and retries once with a fresh one. `quota_project_id` is sent as the `x-goog-user-project` header on storage and IAM requests.
 
 To stop the store from falling back to ambient credentials (environment variables, the gcloud ADC file, or the metadata server), pass `options={"allow_ambient_adc": "false"}`; only explicitly configured credentials are then used. `skip_signature=True` sends unauthenticated requests for public buckets and emulators. When `STORAGE_EMULATOR_HOST` is set and no `endpoint` or explicit credentials are configured, the store targets the emulator without signing.
 

@@ -149,6 +149,7 @@ Readers support `read`, `read_at`, `seek`, `tell`, and `close`; the async reader
 ## GCS token caches
 
 `vertebra.storage` re-exports `SyncGcpTokenCache`, `AsyncGcpTokenCache`, and `GcpTokenSnapshot` from the core `vertebra._vertebra` extension. One cache passed as `token_cache=` to several stores shares a single token and refresh schedule. `SyncGcpTokenCache.get_token(*, force_refresh=False)` returns a `GcpTokenSnapshot`; `AsyncGcpTokenCache` awaits the same call, and `to_async()` / `to_sync()` convert between handles over one native cache. The [authentication guide](../usage/storage-auth-and-signing.md#google-cloud-credentials-and-token-caches) covers construction and sharing.
+
 ## HTTP Range responses
 
 `parse_byte_range(range_header, total_size)` resolves one `Range` header into a `ByteRange(start, end_exclusive, total_size)`, whose `content_length` and `content_range_header` properties feed the response headers. It returns `None` when the header is missing or uses a unit other than `bytes`, and raises `RangeNotSatisfiableError` (a `ValueError` carrying `total_size`) for malformed or unsatisfiable ranges.
@@ -158,6 +159,7 @@ Readers support `read`, `read_at`, `seek`, `tell`, and `close`; the async reader
       heading_level: 4
       show_bases: false
       members: false
+
 ## Errors
 
 ::: vertebra.typing.PreconditionError
