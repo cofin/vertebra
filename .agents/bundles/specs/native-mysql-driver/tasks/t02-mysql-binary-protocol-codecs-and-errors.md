@@ -5,7 +5,7 @@ task_id: t02
 title: "Implement MySQL binary prepared-statement protocol, codecs, multi-result sets, and DatabaseError mapping"
 description: "Implement COM_QUERY and COM_STMT_PREPARE/EXECUTE/CLOSE execution, per-connection LRU statement cache, multi-result set iteration, full binary/text codecs (DECIMAL, fractional temporal types, JSON, BLOB/VECTOR, BIT, ENUM/SET), and MySQL errno/SQLSTATE to DatabaseError hierarchy mapping."
 status: stable
-state: pending
+state: in_progress
 verification_strategy: tdd
 Verification-Exempt-Reason: null
 dependencies:

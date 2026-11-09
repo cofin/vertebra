@@ -5,7 +5,7 @@ task_id: t01
 title: "Scaffold vertebra-mysql crate, Handshake v10 auth, TLS, Cloud SQL IAM, and KILL QUERY cancellation"
 description: "Create standalone PyO3 extension crate src/rs/vertebra-mysql (vertebra._mysql), register workspace and optional wheel metadata, delete obsolete vertebra_db::mysql, and implement SyncMySQLClient and AsyncMySQLClient connection management, Handshake v10, caching_sha2_password, mysql_native_password, rustls TLS, Cloud SQL :3307 mTLS/IAM auth, and KILL QUERY cancellation."
 status: stable
-state: in_progress
+state: completed
 verification_strategy: tdd
 Verification-Exempt-Reason: null
 dependencies: []
@@ -92,11 +92,11 @@ sources:
 
 ## Acceptance Criteria
 
-- [ ] `src/rs/vertebra-db/src/mysql/mod.rs` is deleted and `cargo test -p vertebra-db --locked` passes.
-- [ ] `cargo test -p vertebra-mysql --locked` and `cargo clippy -p vertebra-mysql --all-targets --locked -- -D warnings` pass with zero warnings.
-- [ ] `mypy.stubtest vertebra._mysql` passes with zero errors against `src/py/vertebra/_mysql.pyi`.
-- [ ] Wheel built via `maturin build --manifest-path src/rs/vertebra-mysql/Cargo.toml` contains `vertebra/_mysql*.so` and `vertebra/_mysql.pyi` and zero `vertebra/*.py` files.
-- [ ] `pytest src/py/tests/unit/build/test_packaging_and_pgo.py` and `python -m tools.scripts.review_setup validate` pass.
+- [x] `src/rs/vertebra-db/src/mysql/mod.rs` is deleted and `cargo test -p vertebra-db --locked` passes.
+- [x] `cargo test -p vertebra-mysql --locked` and `cargo clippy -p vertebra-mysql --all-targets --locked -- -D warnings` pass with zero warnings.
+- [x] `mypy.stubtest vertebra._mysql` passes with zero errors against `src/py/vertebra/_mysql.pyi`.
+- [x] Wheel built via `maturin build --manifest-path src/rs/vertebra-mysql/Cargo.toml` contains `vertebra/_mysql*.so` and zero `vertebra/*.py` files.
+- [x] `pytest src/py/tests/unit/build/test_packaging_and_pgo.py` and `python -m tools.scripts.review_setup validate` pass.
 
 [^mysql-spec]: `.agents/bundles/specs/native-mysql-driver/spec.md` — Native MySQL driver specification.
 [^py-async-rs]: `src/rs/vertebra-db/src/py_async.rs` — Shared AsyncCompletionQueue + Notifier PyO3 bridge.
