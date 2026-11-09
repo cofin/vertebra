@@ -24,6 +24,7 @@ import pytest
 import vertebra._storage as native_st
 import vertebra.storage as storage
 from vertebra._storage import StorageBuffer
+from vertebra.db.arrow import ArrowCursor
 from vertebra.storage import (
     AsyncObjectStore,
     AsyncReadableFile,
@@ -42,6 +43,13 @@ from vertebra.storage import (
     SyncWritableFile,
     _arrow,
     parse_byte_range,
+)
+from vertebra.storage._arrow import (
+    iter_batches_async,
+    read_table_async,
+    read_table_sync,
+    write_batches_async,
+    write_batches_sync,
 )
 from vertebra.typing import (
     ImproperConfigurationError,
@@ -580,24 +588,28 @@ def test_store_module_contains_zero_asyncio_to_thread_calls() -> None:
 
 
 def test_fail_closed_empty_or_missing_target_raises_improper_configuration() -> None:
-    """SyncObjectStore and AsyncObjectStore reject None, empty, and schemeless targets with ImproperConfigurationError."""
+    """SyncObjectStore and AsyncObjectStore reject a missing target with TypeError and None with ImproperConfigurationError."""
     with pytest.raises(TypeError):
         cast(Any, SyncObjectStore)()
 
     with pytest.raises(TypeError):
         cast(Any, AsyncObjectStore)()
 
-    for invalid_target in ("", "   ", "relative/path/without/scheme", "ftp://unsupported.example.com/bucket"):
-        with pytest.raises(ImproperConfigurationError):
-            SyncObjectStore(invalid_target)
-        with pytest.raises(ImproperConfigurationError):
-            AsyncObjectStore(invalid_target)
-
     with pytest.raises(ImproperConfigurationError):
         cast(Any, SyncObjectStore)(None)
 
     with pytest.raises(ImproperConfigurationError):
         cast(Any, AsyncObjectStore)(None)
+
+
+@pytest.mark.parametrize(
+    "invalid_target", ["", "   ", "relative/path/without/scheme", "ftp://unsupported.example.com/bucket"]
+)
+@pytest.mark.parametrize("store_type", [SyncObjectStore, AsyncObjectStore])
+def test_fail_closed_invalid_target_raises_improper_configuration(store_type: type[Any], invalid_target: str) -> None:
+    """Both stores reject empty, blank, schemeless, and unsupported-scheme targets with ImproperConfigurationError."""
+    with pytest.raises(ImproperConfigurationError):
+        store_type(invalid_target)
 
     with pytest.raises(ImproperConfigurationError):
         SyncObjectStore(HTTPConfig(url=""))
@@ -1017,8 +1029,6 @@ async def test_storage_arrow_batch_readers(file_format: str) -> None:
 @pytest.mark.parametrize("empty", [False, True])
 async def test_storage_arrow_ipc_file_table_fallback(empty: bool) -> None:
     """Seekable IPC file reads preserve data and zero-row schemas."""
-    from vertebra.storage._arrow import read_table_async, read_table_sync
-
     pa = pytest.importorskip("pyarrow")
     table = pa.table({"id": pa.array([] if empty else [1, 2], type=pa.int64())})
     sink = pa.BufferOutputStream()
@@ -1118,8 +1128,6 @@ async def test_storage_parquet_reader_native_range_demand(monkeypatch: pytest.Mo
 @pytest.mark.anyio
 async def test_storage_parquet_explicit_prefetch_option(monkeypatch: pytest.MonkeyPatch) -> None:
     """The private SQLSpec seam forwards an explicit prefetch opt-in."""
-    from vertebra.storage._arrow import iter_batches_async
-
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
     table = pa.table({"id": [1, 2]})
@@ -1593,8 +1601,6 @@ async def test_storage_arrow_native_network_barrier(
 @pytest.mark.parametrize("file_format", ["arrow-ipc", "parquet"])
 async def test_storage_arrow_schema_only_batches(file_format: str) -> None:
     """Schema-only streams yield no batches without losing full-Table schema."""
-    from vertebra.storage._arrow import read_table_async, read_table_sync
-
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
     table = pa.table({"id": pa.array([], type=pa.int64())})
@@ -1637,8 +1643,9 @@ async def test_storage_arrow_missing_codec_before_io(monkeypatch: pytest.MonkeyP
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("file_format", ["arrow-ipc", "parquet"])
-async def test_storage_arrow_writers_roundtrip(file_format: str) -> None:
-    """Public writers return native metadata and preserve batches and rowgroups."""
+@pytest.mark.parametrize("key", ["sync", "async"])
+async def test_storage_arrow_writers_roundtrip(file_format: str, key: str) -> None:
+    """Public writers return native metadata and preserve batches and rowgroups for each writer path."""
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
     table = pa.table({"id": range(250)})
@@ -1653,17 +1660,16 @@ async def test_storage_arrow_writers_roundtrip(file_format: str) -> None:
     assert isinstance(async_result, PutResult)
     assert result.size > 0
     assert async_result.size == result.size
-    for key in ("sync", "async"):
-        payload = pa.BufferReader(store.get(key))
-        if file_format == "parquet":
-            reader = pq.ParquetFile(payload)
-            assert [reader.metadata.row_group(i).num_rows for i in range(3)] == [100, 100, 50]
-            assert reader.read().equals(table)
-        else:
-            with pa.ipc.open_stream(payload) as reader:
-                batches = list(reader)
-            assert [batch.num_rows for batch in batches] == [100, 100, 50]
-            assert pa.Table.from_batches(batches).equals(table)
+    payload = pa.BufferReader(store.get(key))
+    if file_format == "parquet":
+        reader = pq.ParquetFile(payload)
+        assert [reader.metadata.row_group(i).num_rows for i in range(3)] == [100, 100, 50]
+        assert reader.read().equals(table)
+    else:
+        with pa.ipc.open_stream(payload) as reader:
+            batches = list(reader)
+        assert [batch.num_rows for batch in batches] == [100, 100, 50]
+        assert pa.Table.from_batches(batches).equals(table)
 
 
 class _ObservedArrowUpload:
@@ -1779,13 +1785,11 @@ async def test_storage_arrow_writer_demand_and_abort(file_format: str, asynchron
 @pytest.mark.anyio
 @pytest.mark.parametrize("file_format", ["arrow-ipc", "parquet"])
 @pytest.mark.parametrize("input_kind", ["empty-table", "batch", "cursor", "empty-iterable"])
+@pytest.mark.parametrize("key", ["sync", "async"])
 async def test_storage_arrow_writer_input_contracts(
-    file_format: str, input_kind: str, monkeypatch: pytest.MonkeyPatch
+    file_format: str, input_kind: str, key: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Tables, batches, cursors and explicit empty schemas retain Arrow values."""
-    from vertebra.db.arrow import ArrowCursor
-    from vertebra.storage._arrow import write_batches_async, write_batches_sync
-
+    """Tables, batches, cursors and explicit empty schemas retain Arrow values through each writer path."""
     pa = pytest.importorskip("pyarrow")
     table = pa.table({"id": pa.array([] if input_kind.startswith("empty") else [1, 2], type=pa.int64())})
     cursor = ArrowCursor.from_rows([{"id": 1}, {"id": 2}]) if input_kind == "cursor" else None
@@ -1811,9 +1815,8 @@ async def test_storage_arrow_writer_input_contracts(
         await write_batches_async(
             store.to_async(), "async", data, file_format=file_format, schema=table.schema, batch_size=1
         )
-        for key in ("sync", "async"):
-            batches = store.iter_parquet_batches(key) if file_format == "parquet" else store.iter_arrow_batches(key)
-            assert pa.Table.from_batches(list(batches), schema=table.schema).equals(table)
+        batches = store.iter_parquet_batches(key) if file_format == "parquet" else store.iter_arrow_batches(key)
+        assert pa.Table.from_batches(list(batches), schema=table.schema).equals(table)
     finally:
         if cursor is not None:
             cursor.close()
@@ -1827,8 +1830,6 @@ async def test_storage_arrow_writer_rejections(
     file_format: str, case: str, asynchronous: bool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Invalid inputs preserve their errors and never commit an object."""
-    from vertebra.storage._arrow import write_batches_async, write_batches_sync
-
     pa = pytest.importorskip("pyarrow")
     batch = pa.record_batch({"id": [1]})
     store = SyncObjectStore("memory://")

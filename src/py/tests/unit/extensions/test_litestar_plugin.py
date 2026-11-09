@@ -224,6 +224,11 @@ def _load_litestar_plugin_test_primitives() -> tuple[
 
 
 Litestar, get, CompressionConfig, CORSConfig, CLIPlugin = _load_litestar_plugin_test_primitives()
+litestar_mod = import_optional("litestar")
+litestar_response_mod = import_optional("litestar.response")
+litestar_static_files_mod = import_optional("litestar.static_files")
+litestar_testing_mod = import_optional("litestar.testing")
+requires_litestar = pytest.mark.skipif(litestar_mod is None, reason="litestar is not installed")
 
 
 class _LifecycleTrackerPlugin:
@@ -405,7 +410,8 @@ def test_asgi_runner_supports_anyio_task_group() -> None:
         runner.close()
 
 
-def test_drive_coro_promotes_yielded_coroutine_to_asyncio_task() -> None:
+@pytest.mark.anyio
+async def test_drive_coro_promotes_yielded_coroutine_to_asyncio_task() -> None:
     """Verify _drive_coro promotes a coroutine that yields into a real asyncio.Task for anyio compatibility."""
     observed: dict[str, Any] = {"has_task": False}
 
@@ -415,11 +421,8 @@ def test_drive_coro_promotes_yielded_coroutine_to_asyncio_task() -> None:
             observed["has_task"] = asyncio.current_task() is not None
             _ = tg
 
-    async def _run() -> None:
-        _schedule_coros(asyncio.get_running_loop(), [yielded_then_anyio()])
-        await asyncio.sleep(0.02)
-
-    asyncio.run(_run())
+    _schedule_coros(asyncio.get_running_loop(), [yielded_then_anyio()])
+    await asyncio.sleep(0.02)
 
     assert observed["has_task"] is True
 
@@ -708,8 +711,6 @@ def test_litestar_cli_run_tls_cert_and_key_validation(
 @pytest.mark.parametrize("adapter_name", ["ObjectStoreLitestarStore", "ObjectStoreFileSystemAdapter"])
 def test_object_store_requires_explicit_config(config: Any, adapter_name: str) -> None:
     """Both public adapters fail closed without an explicit storage configuration."""
-    from vertebra.extensions.litestar import ObjectStoreFileSystemAdapter, ObjectStoreLitestarStore
-
     adapter = {
         "ObjectStoreLitestarStore": ObjectStoreLitestarStore,
         "ObjectStoreFileSystemAdapter": ObjectStoreFileSystemAdapter,
@@ -721,8 +722,6 @@ def test_object_store_requires_explicit_config(config: Any, adapter_name: str) -
 @pytest.mark.parametrize("namespace", ["", "..", "a/b", "a\\b", "a.b", "équipe"])
 def test_object_store_rejects_invalid_namespace(namespace: str) -> None:
     """Each invalid namespace is rejected independently using a real native store."""
-    from vertebra.extensions.litestar import ObjectStoreLitestarStore
-
     root = ObjectStoreLitestarStore(AsyncObjectStore(MemoryConfig()))
     with pytest.raises(ValueError):
         root.with_namespace(namespace)
@@ -731,17 +730,13 @@ def test_object_store_rejects_invalid_namespace(namespace: str) -> None:
 @pytest.mark.anyio
 async def test_object_store_crud_and_namespace_deletion() -> None:
     """Logical keys and descendant namespaces stay confined through multiple delete pages."""
-    from vertebra.extensions.litestar import ObjectStoreLitestarStore
-
     storage = AsyncObjectStore(MemoryConfig())
     root = ObjectStoreLitestarStore(storage)
     child = root.with_namespace("s1")
     sibling = root.with_namespace("s10")
     descendant = child.with_namespace("child")
-    for key, value in (("", b""), ("../child/ü", b"\xff\x00"), ("text", "héllo")):
-        await child.set(key, value)
-        assert await child.get(key) == (value.encode() if isinstance(value, str) else value)
-        assert await child.exists(key)
+    await child.set("text", "héllo")
+    assert await child.get("text") == "héllo".encode()
     await child.set("text", b"replacement")
     assert await child.get("text") == b"replacement"
     await child.delete("text")
@@ -766,10 +761,25 @@ async def test_object_store_crud_and_namespace_deletion() -> None:
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("key", "value", "expected"),
+    [("", b"", b""), ("../child/ü", b"\xff\x00", b"\xff\x00"), ("text", "héllo", "héllo".encode())],
+    ids=["empty-key", "traversal-unicode-key", "text-value"],
+)
+async def test_object_store_round_trips_logical_keys(key: str, value: bytes | str, expected: bytes) -> None:
+    """Each logical key round-trips byte-exact inside its namespace and is removed by namespace deletion."""
+    root = ObjectStoreLitestarStore(AsyncObjectStore(MemoryConfig()))
+    child = root.with_namespace("s1")
+    await child.set(key, value)
+    assert await child.get(key) == expected
+    assert await child.exists(key)
+    await child.delete_all()
+    assert await child.get(key) is None
+
+
+@pytest.mark.anyio
 async def test_object_store_local_ttl_survives_reconstruction(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Wall-clock expiry and renewals persist even when Local discards object attributes."""
-    from vertebra.extensions.litestar import ObjectStoreLitestarStore
-
     clock = [1000.0]
     monkeypatch.setattr(litestar_store_mod.time, "time", lambda: clock[0])
     config = LocalConfig(root=tmp_path)
@@ -804,8 +814,6 @@ async def test_object_store_local_ttl_survives_reconstruction(tmp_path: Path, mo
 @pytest.mark.anyio
 async def test_object_store_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
     """Persistent metadata and the authoritative envelope are inspectable."""
-    from vertebra.extensions.litestar import ObjectStoreLitestarStore
-
     monkeypatch.setattr(litestar_store_mod.time, "time", lambda: 1000.0)
     storage = AsyncObjectStore(MemoryConfig())
     cache = ObjectStoreLitestarStore(storage)
@@ -820,8 +828,6 @@ async def test_object_store_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.mark.parametrize("ttl", [0, -1, timedelta(microseconds=-1)])
 async def test_object_store_immediate_expiry(tmp_path: Path, ttl: int | timedelta) -> None:
     """Each nonpositive duration immediately expires on the real Local backend."""
-    from vertebra.extensions.litestar import ObjectStoreLitestarStore
-
     cache = ObjectStoreLitestarStore(LocalConfig(root=tmp_path))
     await cache.set("immediate", b"expired", expires_in=ttl)
     assert await cache.get("immediate") is None
@@ -835,8 +841,6 @@ async def test_object_store_immediate_expiry(tmp_path: Path, ttl: int | timedelt
 )
 async def test_object_store_invalid_envelopes(corrupt: bytes) -> None:
     """Each malformed native payload fails explicitly at the public Store seam."""
-    from vertebra.extensions.litestar import ObjectStoreLitestarStore
-
     storage = AsyncObjectStore(MemoryConfig())
     cache = ObjectStoreLitestarStore(storage)
     await storage.put("vertebra-store/~74746c", corrupt)
@@ -849,8 +853,6 @@ async def test_object_store_invalid_envelopes(corrupt: bytes) -> None:
 @pytest.mark.parametrize("operation", ["info", "open"])
 async def test_static_object_store_rejects_traversal(path: str, operation: str) -> None:
     """Each path and operation independently rejects escape from the virtual root."""
-    from vertebra.extensions.litestar import ObjectStoreFileSystemAdapter
-
     storage = AsyncObjectStore(MemoryConfig())
     await storage.put("public/app.js", b"public")
     await storage.put("publicity/secret", b"secret")
@@ -859,15 +861,10 @@ async def test_static_object_store_rejects_traversal(path: str, operation: str) 
         await getattr(adapter, operation)(path)
 
 
+@requires_litestar
 @pytest.mark.anyio
 async def test_static_object_store_reader_and_routes() -> None:
     """Litestar consumes the native async reader for GET/HEAD with a confined virtual root."""
-    pytest.importorskip("litestar")
-    from litestar.static_files import create_static_files_router
-    from litestar.testing import AsyncTestClient
-
-    from vertebra.extensions.litestar import ObjectStoreFileSystemAdapter
-
     storage = AsyncObjectStore(MemoryConfig())
     payload = b"console.log('storage');"
     await storage.put("public/app.js", payload)
@@ -891,8 +888,10 @@ async def test_static_object_store_reader_and_routes() -> None:
         ObjectStoreFileSystemAdapter(storage, base_path="../public")
     with pytest.raises(FileNotFoundError):
         await adapter.info("missing")
-    routes = create_static_files_router(path="/assets", directories=["/"], file_system=adapter, resolve_symlinks=False)
-    async with AsyncTestClient(Litestar(route_handlers=[routes])) as client:
+    routes = litestar_static_files_mod.create_static_files_router(
+        path="/assets", directories=["/"], file_system=adapter, resolve_symlinks=False
+    )
+    async with litestar_testing_mod.AsyncTestClient(Litestar(route_handlers=[routes])) as client:
         response = await client.get("/assets/app.js")
         assert response.status_code == 200
         assert response.content == payload
@@ -904,20 +903,16 @@ async def test_static_object_store_reader_and_routes() -> None:
         assert (await client.get("/assets/missing")).status_code == 404
 
 
+@requires_litestar
 @pytest.mark.anyio
 async def test_static_object_store_explicit_range_handler() -> None:
     """A supported Litestar Stream bridges storage full, partial, and unsatisfiable responses."""
-    pytest.importorskip("litestar")
-    from litestar import Request
-    from litestar.response import Stream
-    from litestar.testing import AsyncTestClient
-
     storage = AsyncObjectStore(MemoryConfig())
     payload = b"0123456789abcdefghij"
     await storage.put("app.js", payload)
 
     @get("/download")
-    async def download(request: Request[Any, Any, Any]) -> Stream:
+    async def download(request: litestar_mod.Request[Any, Any, Any]) -> litestar_response_mod.Stream:
         response = await StreamingStorageResponse.from_async_store(
             storage, "app.js", range_header=request.headers.get("range")
         )
@@ -929,14 +924,14 @@ async def test_static_object_store_explicit_range_handler() -> None:
         headers = dict(response.headers)
         if response.content_range is not None:
             headers["content-range"] = response.content_range
-        return Stream(
+        return litestar_response_mod.Stream(
             chunks(),
             status_code=response.status_code,
             headers=headers,
             media_type=response.content_type or response.media_type,
         )
 
-    async with AsyncTestClient(Litestar(route_handlers=[download])) as client:
+    async with litestar_testing_mod.AsyncTestClient(Litestar(route_handlers=[download])) as client:
         response = await client.get("/download")
         assert response.status_code == 200
         assert response.content == payload

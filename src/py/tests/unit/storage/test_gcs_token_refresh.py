@@ -457,7 +457,8 @@ def test_duckdb_multi_session_token_generation_secret_rotation(
         driver_b.close()
 
 
-def test_async_duckdb_driver_token_generation_rotation(
+@pytest.mark.anyio
+async def test_async_duckdb_driver_token_generation_rotation(
     token_server: _MockTokenServer,
     tmp_path: Path,
 ) -> None:
@@ -478,33 +479,31 @@ def test_async_duckdb_driver_token_generation_rotation(
     cache = GCSConfig(bucket="b", application_credentials=str(adc_path)).sync_token_cache()
     async_cache = GCSConfig(bucket="b", application_credentials=str(adc_path)).async_token_cache()
 
-    async def _run() -> None:
-        drv = AsyncDuckDBDriver(DuckDBConfig(gcs_token_cache=cache))
-        try:
-            res = await drv.select("SELECT 1 AS ok")
-            assert res == [{"ok": 1}]
-            assert drv.applied_token_generation == 1
-            cache.get_token(force_refresh=True)
-            await drv.select("SELECT 1 AS ok")
-            assert drv.applied_token_generation == 2
-        finally:
-            await drv.close()
+    drv = AsyncDuckDBDriver(DuckDBConfig(gcs_token_cache=cache))
+    try:
+        res = await drv.select("SELECT 1 AS ok")
+        assert res == [{"ok": 1}]
+        assert drv.applied_token_generation == 1
+        cache.get_token(force_refresh=True)
+        await drv.select("SELECT 1 AS ok")
+        assert drv.applied_token_generation == 2
+    finally:
+        await drv.close()
 
-        async_drv = AsyncDuckDBDriver(DuckDBConfig(gcs_token_cache=async_cache))
-        try:
-            res_async = await async_drv.select("SELECT 1 AS ok")
-            assert res_async == [{"ok": 1}]
-            assert async_drv.applied_token_generation == 1
-            await async_cache.get_token(force_refresh=True)
-            await async_drv.select("SELECT 1 AS ok")
-            assert async_drv.applied_token_generation == 2
-        finally:
-            await async_drv.close()
-
-    asyncio.run(_run())
+    async_drv = AsyncDuckDBDriver(DuckDBConfig(gcs_token_cache=async_cache))
+    try:
+        res_async = await async_drv.select("SELECT 1 AS ok")
+        assert res_async == [{"ok": 1}]
+        assert async_drv.applied_token_generation == 1
+        await async_cache.get_token(force_refresh=True)
+        await async_drv.select("SELECT 1 AS ok")
+        assert async_drv.applied_token_generation == 2
+    finally:
+        await async_drv.close()
 
 
-def test_high_concurrency_async_storage_and_token_refresh_no_gil_blocking(
+@pytest.mark.anyio
+async def test_high_concurrency_async_storage_and_token_refresh_no_gil_blocking(
     token_server: _MockTokenServer,
     tmp_path: Path,
 ) -> None:
@@ -535,84 +534,80 @@ def test_high_concurrency_async_storage_and_token_refresh_no_gil_blocking(
         ),
     )
 
-    async def _run() -> None:
-        max_loop_lag_s = 0.0
-        stop_heartbeat = False
+    max_loop_lag_s = 0.0
+    stop_heartbeat = False
 
-        async def _heartbeat() -> None:
-            nonlocal max_loop_lag_s
-            loop = asyncio.get_running_loop()
-            interval = 0.005
-            expected = loop.time() + interval
-            while not stop_heartbeat:
-                await asyncio.sleep(interval)
-                now = loop.time()
-                lag = max(0.0, now - expected)
-                if lag > max_loop_lag_s:
-                    max_loop_lag_s = lag
-                expected = now + interval
+    async def _heartbeat() -> None:
+        nonlocal max_loop_lag_s
+        loop = asyncio.get_running_loop()
+        interval = 0.005
+        expected = loop.time() + interval
+        while not stop_heartbeat:
+            await asyncio.sleep(interval)
+            now = loop.time()
+            lag = max(0.0, now - expected)
+            if lag > max_loop_lag_s:
+                max_loop_lag_s = lag
+            expected = now + interval
 
-        hb_task = asyncio.create_task(_heartbeat())
-        try:
-            payload = b"x" * 65536
+    hb_task = asyncio.create_task(_heartbeat())
+    try:
+        payload = b"x" * 65536
 
-            async def _worker(idx: int) -> None:
-                key = f"shard/obj-{idx}.bin"
-                snap = await cache.get_token(force_refresh=(idx == 0))
-                assert snap.access_token.startswith("mock-oauth-token-user-")
-                meta = await local_store.put(key, payload)
-                assert meta.size == len(payload)
-                raw = await local_store.get(key)
-                assert len(raw) == len(payload)
-                view = await local_store.get_view(key)
-                assert len(memoryview(view)) == len(payload)
-                presigned = await local_store.presign_get(key, expires_in_secs=300)
-                assert key in presigned
+        async def _worker(idx: int) -> None:
+            key = f"shard/obj-{idx}.bin"
+            snap = await cache.get_token(force_refresh=(idx == 0))
+            assert snap.access_token.startswith("mock-oauth-token-user-")
+            meta = await local_store.put(key, payload)
+            assert meta.size == len(payload)
+            raw = await local_store.get(key)
+            assert len(raw) == len(payload)
+            view = await local_store.get_view(key)
+            assert len(memoryview(view)) == len(payload)
+            presigned = await local_store.presign_get(key, expires_in_secs=300)
+            assert key in presigned
 
-            await asyncio.gather(*(_worker(i) for i in range(200)))
-        finally:
-            stop_heartbeat = True
-            await hb_task
+        await asyncio.gather(*(_worker(i) for i in range(200)))
+    finally:
+        stop_heartbeat = True
+        await hb_task
 
-        assert max_loop_lag_s < 0.25
-
-    asyncio.run(_run())
+    assert max_loop_lag_s < 0.25
 
 
-def test_storage_completion_ring_eventfd_coalesced_wakeup(tmp_path: Path) -> None:
+@pytest.mark.anyio
+async def test_storage_completion_ring_eventfd_coalesced_wakeup(tmp_path: Path) -> None:
     """Verify AsyncObjectStore async operations use per-loop Notifier (eventfd/kqueue) + completion ring."""
     store = AsyncObjectStore(f"file://{tmp_path / 'ring_bucket'}")
     payload = b"completion-ring-payload" * 64
 
-    async def _run() -> None:
-        loop = asyncio.get_running_loop()
-        orig_csts = loop.call_soon_threadsafe
-        csts_calls = 0
+    loop = asyncio.get_running_loop()
+    orig_csts = loop.call_soon_threadsafe
+    csts_calls = 0
 
-        def tracked_csts(callback: Any, *args: Any, **kwargs: Any) -> Any:
-            nonlocal csts_calls
-            csts_calls += 1
-            return orig_csts(callback, *args, **kwargs)
+    def tracked_csts(callback: Any, *args: Any, **kwargs: Any) -> Any:
+        nonlocal csts_calls
+        csts_calls += 1
+        return orig_csts(callback, *args, **kwargs)
 
-        csts_attr = "call_soon_threadsafe"
-        setattr(loop, csts_attr, tracked_csts)
-        try:
-            metas = await asyncio.gather(*(store.put(f"k-{i}.bin", payload) for i in range(64)))
-            assert len(metas) == 64
-            assert all(m.size == len(payload) for m in metas)
+    csts_attr = "call_soon_threadsafe"
+    setattr(loop, csts_attr, tracked_csts)
+    try:
+        metas = await asyncio.gather(*(store.put(f"k-{i}.bin", payload) for i in range(64)))
+        assert len(metas) == 64
+        assert all(m.size == len(payload) for m in metas)
 
-            blobs = await asyncio.gather(*(store.get(f"k-{i}.bin") for i in range(64)))
-            assert len(blobs) == 64
-            assert all(b == payload for b in blobs)
-        finally:
-            setattr(loop, csts_attr, orig_csts)
+        blobs = await asyncio.gather(*(store.get(f"k-{i}.bin") for i in range(64)))
+        assert len(blobs) == 64
+        assert all(b == payload for b in blobs)
+    finally:
+        setattr(loop, csts_attr, orig_csts)
 
-        assert csts_calls == 0
-
-    asyncio.run(_run())
+    assert csts_calls == 0
 
 
-def test_vertebra_core_gcp_token_cache_service_account_and_audience_jwt(
+@pytest.mark.anyio
+async def test_vertebra_core_gcp_token_cache_service_account_and_audience_jwt(
     token_server: _MockTokenServer,
 ) -> None:
     """Verify vertebra._vertebra.SyncGcpTokenCache and AsyncGcpTokenCache exchange Service Account RS256 assertions."""
@@ -675,17 +670,14 @@ def test_vertebra_core_gcp_token_cache_service_account_and_audience_jwt(
         }
     )
 
-    async def _run_async() -> None:
-        snap3 = await async_cache.get_token()
-        assert snap3.access_token == "mock-oauth-token-user-3"
-        assert snap3.generation == 1
+    snap3 = await async_cache.get_token()
+    assert snap3.access_token == "mock-oauth-token-user-3"
+    assert snap3.generation == 1
 
-        async_cache.invalidate(1)
-        snap4 = await async_cache.get_token()
-        assert snap4.access_token == "mock-oauth-token-user-4"
-        assert snap4.generation == 2
-
-    asyncio.run(_run_async())
+    async_cache.invalidate(1)
+    snap4 = await async_cache.get_token()
+    assert snap4.access_token == "mock-oauth-token-user-4"
+    assert snap4.generation == 2
     assert token_server.oauth_calls == 4
 
 
@@ -797,7 +789,8 @@ def test_gcs_config_ambient_adc_precedence_and_isolation(
     assert token_server.metadata_calls == 0
 
 
-def test_gcs_config_resolve_adc_token_catches_google_cloud_auth_error(
+@pytest.mark.anyio
+async def test_gcs_config_resolve_adc_token_catches_google_cloud_auth_error(
     token_server: _MockTokenServer,
     tmp_path: Path,
 ) -> None:
@@ -822,7 +815,7 @@ def test_gcs_config_resolve_adc_token_catches_google_cloud_auth_error(
         cfg.sync_token_cache().get_token()
 
     assert cfg.resolve_adc_token() is None
-    assert asyncio.run(cfg.resolve_adc_token_async()) is None
+    assert await cfg.resolve_adc_token_async() is None
     assert token_server.oauth_calls == 3
 
 

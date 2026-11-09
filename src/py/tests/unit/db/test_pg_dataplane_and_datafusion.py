@@ -20,6 +20,7 @@ from vertebra.db import (
     TenantPredicate,
     TenantScopeConfig,
 )
+from vertebra.db import arrow as arrow_module
 from vertebra.db.adapters.datafusion import (
     ARROW_STREAM_MEDIA_TYPE,
     DataFusionConfig,
@@ -27,8 +28,10 @@ from vertebra.db.adapters.datafusion import (
     TableRegistration,
 )
 from vertebra.db.adapters.postgres import AsyncPostgreSQLDriver, PostgresEmbeddingPushdown, SyncPostgreSQLDriver
+from vertebra.db.adapters.postgres.core import PostgreSQLCore
 from vertebra.db.adapters.postgres.notify import PostgresNotificationSource, PostgresNotifyConfig
 from vertebra.db.driver import NotificationEvent, NotificationSource, NotSupportedError
+from vertebra.extensions.sqlspec.adapters import PostgreSQLSyncDriver
 from vertebra.server.platform import SHMAllocationPolicy
 from vertebra.typing import MissingDependencyError, reset_dependency_cache
 from vertebra.utils.module_loader import import_optional
@@ -81,8 +84,6 @@ class _DeterministicSessionContext:
 
 def test_rls_planner_unfenced_predicate_and_session_guc() -> None:
     """Tenant fragments use ANSI casts while PostgreSQL owns session SQL."""
-    from vertebra.db.adapters.postgres.core import PostgreSQLCore
-
     scope = TenantScopeConfig(setting_name="app.tenant_id", tenant_column="org_id", parameter_cast="UUID")
     predicate = TenantPredicate(table_alias="o", tenant_value="tenant-123", config=scope)
     assert predicate.column_reference() == "o.org_id"
@@ -99,14 +100,22 @@ def test_rls_planner_unfenced_predicate_and_session_guc() -> None:
     assert not hasattr(TenantPredicate, "build_session_guc_sql")
     with pytest.raises(TypeError):
         TenantScopeConfig(guc_name="app.tenant_id")
-    for bad in ("o; DROP", "a.b", ""):
-        if bad:
-            with pytest.raises(ValueError):
-                TenantPredicate(table_alias=bad, tenant_value="t1")
-        with pytest.raises(ValueError):
-            TenantScopeConfig(tenant_column=bad)
-        with pytest.raises(ValueError):
-            TenantScopeConfig(parameter_cast=bad)
+
+
+@pytest.mark.parametrize("bad", ["o; DROP", "a.b", ""])
+def test_tenant_scope_config_rejects_invalid_identifiers(bad: str) -> None:
+    """Injected, qualified, and empty identifiers are rejected for tenant columns and parameter casts."""
+    with pytest.raises(ValueError):
+        TenantScopeConfig(tenant_column=bad)
+    with pytest.raises(ValueError):
+        TenantScopeConfig(parameter_cast=bad)
+
+
+@pytest.mark.parametrize("bad", ["o; DROP", "a.b"])
+def test_tenant_predicate_rejects_invalid_table_alias(bad: str) -> None:
+    """Injected and qualified table aliases are rejected before SQL fragments are built."""
+    with pytest.raises(ValueError):
+        TenantPredicate(table_alias=bad, tenant_value="t1")
 
 
 def test_cdc_listen_notify_spill_and_logical_emit() -> None:
@@ -316,8 +325,6 @@ async def test_postgres_sync_primitives_bind_with_real_psycopg_converter(operati
     driver = SyncPostgreSQLDriver(pool=connection)
     try:
         if operation in {"rls", "rls-failure"}:
-            from vertebra.extensions.sqlspec.adapters import PostgreSQLSyncDriver
-
             adapter = PostgreSQLSyncDriver(driver)
             predicate = TenantPredicate(tenant_value="tenant-1")
             if operation == "rls-failure":
@@ -394,8 +401,6 @@ def test_arrow_cursor_propagates_real_named_allocation_failure(monkeypatch: pyte
 @pytest.mark.parametrize("missing", ["pyarrow", "vertebra._vertebra"])
 def test_arrow_cursor_requires_optional_dependencies(missing: str, monkeypatch: pytest.MonkeyPatch) -> None:
     """IPC requires its codec and threshold-selected SHM requires the native cursor."""
-    from vertebra.db import arrow as arrow_module
-
     original = arrow_module.import_optional
     monkeypatch.setattr(arrow_module, "import_optional", lambda name: None if name == missing else original(name))
     with pytest.raises(MissingDependencyError, match=missing):

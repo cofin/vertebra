@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import base64
 import calendar
 import json
@@ -91,7 +90,8 @@ def test_signing_functions_default_to_current_utc_timestamp() -> None:
     assert store.verify_presigned_url(presigned, method="GET")
 
 
-def test_gcs_from_gcs_ambient_service_account_adc_presigns_zero_rtt(
+@pytest.mark.anyio
+async def test_gcs_from_gcs_ambient_service_account_adc_presigns_zero_rtt(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -124,11 +124,7 @@ def test_gcs_from_gcs_ambient_service_account_adc_presigns_zero_rtt(
     assert "ambient-sa%40test-gcp-proj.iam.gserviceaccount.com" in sync_url
 
     async_store = AsyncObjectStore.from_gcs("test-bucket", iam_endpoint="http://127.0.0.1:9")
-
-    async def _run_async() -> str:
-        return await async_store.presign_get("dir/file.parquet", expires_in_secs=600, timestamp=1_700_000_000)
-
-    async_url = asyncio.run(_run_async())
+    async_url = await async_store.presign_get("dir/file.parquet", expires_in_secs=600, timestamp=1_700_000_000)
     assert async_url == sync_url
 
 
@@ -241,41 +237,44 @@ def test_gcs_keyless_presign_reuses_object_store_token_cache(
         thread.join(timeout=2.0)
 
 
-def test_signing_expiry_bounds_invalid_keys_and_rfc3986_paths() -> None:
-    """Verify out-of-bounds expiry and malformed keys raise ValueError and paths follow RFC 3986."""
+@pytest.mark.parametrize("bad_expiry", [0, 604_801])
+def test_signing_rejects_out_of_bounds_expiry(bad_expiry: int) -> None:
+    """Verify S3 V4, Azure SAS, and HMAC signers reject expiry below 1 second or above 7 days."""
     azure_key = base64.b64encode(b"0123456789abcdef0123456789abcdef").decode("ascii")
-    for bad_expiry in (0, 604_801):
-        with pytest.raises(ValueError, match="expires_in_secs"):
-            native_storage_mod.py_sign_s3_v4_url(
-                "assets",
-                "auto",
-                "r2-ak",
-                "r2-sk",
-                "GET",
-                "img/logo.png",
-                bad_expiry,
-                1_794_009_600,
-                "https://acct.r2.cloudflarestorage.com",
-            )
-        with pytest.raises(ValueError, match="expires_in_secs"):
-            native_storage_mod.py_sign_azure_sas_url(
-                "acct1",
-                "container",
-                azure_key,
-                "PUT",
-                "blob/file.csv",
-                bad_expiry,
-                1_794_009_600,
-            )
-        with pytest.raises(ValueError, match="expires_in_secs"):
-            native_storage_mod.py_sign_hmac_url(
-                "https://cdn.example.com/assets/file.bin",
-                "test-hmac-secret-key-32-bytes-ok",
-                "GET",
-                bad_expiry,
-                1_794_009_600,
-            )
+    with pytest.raises(ValueError, match="expires_in_secs"):
+        native_storage_mod.py_sign_s3_v4_url(
+            "assets",
+            "auto",
+            "r2-ak",
+            "r2-sk",
+            "GET",
+            "img/logo.png",
+            bad_expiry,
+            1_794_009_600,
+            "https://acct.r2.cloudflarestorage.com",
+        )
+    with pytest.raises(ValueError, match="expires_in_secs"):
+        native_storage_mod.py_sign_azure_sas_url(
+            "acct1",
+            "container",
+            azure_key,
+            "PUT",
+            "blob/file.csv",
+            bad_expiry,
+            1_794_009_600,
+        )
+    with pytest.raises(ValueError, match="expires_in_secs"):
+        native_storage_mod.py_sign_hmac_url(
+            "https://cdn.example.com/assets/file.bin",
+            "test-hmac-secret-key-32-bytes-ok",
+            "GET",
+            bad_expiry,
+            1_794_009_600,
+        )
 
+
+def test_signing_invalid_keys_and_rfc3986_paths() -> None:
+    """Verify malformed keys raise ValueError and paths follow RFC 3986."""
     with pytest.raises(ValueError, match="base64"):
         native_storage_mod.py_sign_azure_sas_url(
             "acct1",
@@ -486,7 +485,8 @@ async def test_native_gcs_custom_endpoint_presign_and_capsule_validation(tmp_pat
         srv_thread.join(timeout=2.0)
 
 
-def test_multicloud_store_sign_sync_and_async(tmp_path: Path) -> None:
+@pytest.mark.anyio
+async def test_multicloud_store_sign_sync_and_async(tmp_path: Path) -> None:
     """Verify store.sign across GCS (RSA + IAM signBlob), S3, R2, Azure SAS, and OCI PAR for sync and async stores."""
     ts = 1_794_009_600
     pem_key = subprocess.check_output(
@@ -633,21 +633,12 @@ def test_multicloud_store_sign_sync_and_async(tmp_path: Path) -> None:
             == "https://objectstorage.us-phoenix-1.oraclecloud.com/p/par-prefix-tok/n/ns2/b/oci-warehouse-2/o/reports%2Fq4.parquet"
         )
 
-        async def _verify_async() -> None:
-            assert (
-                await gcs_rsa_async.sign("reports/q4.parquet", expires_in=600, method="GET", timestamp=ts)
-                == gcs_rsa_url
-            )
-            assert (
-                await gcs_iam_async.sign("reports/q4.parquet", expires_in=600, method="GET", timestamp=ts)
-                == gcs_iam_url
-            )
-            assert await s3_async.sign("reports/q4.parquet", expires_in=600, method="GET", timestamp=ts) == s3_url
-            assert await r2_async.sign("reports/q4.parquet", expires_in=600, method="GET", timestamp=ts) == r2_url
-            assert await az_async.sign("reports/q4.parquet", expires_in=600, method="GET", timestamp=ts) == az_url
-            assert await oci_async.sign("reports/q4.parquet", expires_in=600, method="GET", timestamp=ts) == oci_url
-
-        asyncio.run(_verify_async())
+        assert await gcs_rsa_async.sign("reports/q4.parquet", expires_in=600, method="GET", timestamp=ts) == gcs_rsa_url
+        assert await gcs_iam_async.sign("reports/q4.parquet", expires_in=600, method="GET", timestamp=ts) == gcs_iam_url
+        assert await s3_async.sign("reports/q4.parquet", expires_in=600, method="GET", timestamp=ts) == s3_url
+        assert await r2_async.sign("reports/q4.parquet", expires_in=600, method="GET", timestamp=ts) == r2_url
+        assert await az_async.sign("reports/q4.parquet", expires_in=600, method="GET", timestamp=ts) == az_url
+        assert await oci_async.sign("reports/q4.parquet", expires_in=600, method="GET", timestamp=ts) == oci_url
     finally:
         server.shutdown()
         server.server_close()
