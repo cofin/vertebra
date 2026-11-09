@@ -376,6 +376,11 @@ fn resolve_s3_endpoint(
     }
     let mut parsed = Url::parse(&raw)
         .map_err(|e| StorageError::InvalidUrl(raw.clone(), format!("invalid S3 endpoint: {e}")))?;
+    if matches!(parsed.host(), Some(url::Host::Ipv4(_) | url::Host::Ipv6(_))) {
+        return Err(StorageError::InvalidInput(format!(
+            "virtual_hosted_style requires a DNS endpoint host; IP-literal endpoint `{raw}` cannot carry a bucket subdomain"
+        )));
+    }
     if let Some(url::Host::Domain(domain)) = parsed.host() {
         let bucket_dot = format!("{bucket}.");
         if !domain.starts_with(&bucket_dot) {

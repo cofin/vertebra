@@ -4,7 +4,7 @@ flow_id: storage-remediation
 parent_flow: storage-remediation
 chapter_id: ch02-zero-copy-ffi-keys-and-backends
 title: "Chapter 02: Zero-Copy FFI, Raw Object Keys, and Cloud/OCI Backends"
-description: Define PreconditionError and map conditional failures, wrap immutable PyBytes zero-copy via PyBackedBytes while copying mutable buffers synchronously, check get_range overflow and zero-length bounds, preserve raw object keys via StorePath::parse, wire S3 virtual_hosted_style, R2 custom_domain, HTTP headers, file:// conditional metadata, and Litestar raw keys, and upgrade OciObjectStore to stream, conditionally write, and paginate.
+description: Define PreconditionError and map conditional failures, wrap immutable PyBytes zero-copy via PyBackedBytes while copying mutable buffers synchronously, check get_range overflow and zero-length bounds, preserve raw object keys via StorePath::parse, wire S3 session_token and virtual_hosted_style, HTTP headers, file:// conditional metadata, and Litestar raw keys, and upgrade OciObjectStore to stream, conditionally write, confirm asynchronous copies, rename synchronously, and paginate.
 status: stable
 state: active
 planning_status: complete
@@ -61,7 +61,7 @@ tags:
 <!-- truth: start -->
 - **`PreconditionError` & Zero-Copy Immutable FFI (`FFI-05`)**: `vertebra.typing` exports `PreconditionError(VertebraError, OSError)` mapped from `StorageError::Precondition` and `object_store::Error::Precondition`; `extract_buffer_bytes` wraps `StorageBuffer` and immutable `PyBytes` zero-copy (`Bytes::from_owner(PyBackedBytes::from(...))`) while copying mutable `PyBuffer<u8>` (`bytearray`, `memoryview`, NumPy) synchronously before dropping `PyBuffer` so caller `bytearray.clear()` never hits `BufferError` [^py-typing] [^py-typing-facade] [^storage-lib-rs].
 - **Checked `get_range`, Raw `StorePath::parse` Keys, `file://` Conditional Metadata & Cloud Builders**: `ObjectStoreEngine::get_range` validates `offset.checked_add(length)` and returns empty `Bytes` after `head()` when `length == 0`; `StorePath::parse` preserves raw `~` and `%` sequences verbatim across `store.rs`, `oci.rs`, and `litestar/store.py`; `file://` conditional fallback preserves `content_type` and `attributes`; `BackendConfig::S3` wires `session_token` and `virtual_hosted_style` (paired with `S3SignConfig.virtual_hosted_style`); and `BackendConfig::Http` forwards custom `headers` [^storage-store-rs] [^storage-signing-rs] [^litestar-store].
-- **Streaming, Conditional & Paginated `OciObjectStore`**: `OciObjectStore` streams `get_opts` payloads via `resp.bytes_stream()`, honors `GetOptions` (`range`, `if_match`, `if_none_match`, `head`), `PutOptions` (`Create` -> `if-none-match: *`, `Update` -> `if-match`), and `CopyOptions` (`Create` -> `if-none-match: *`), and paginates `list` and `list_with_delimiter` (`delimiter=/` + `nextStartWith`) [^storage-oci-rs].
+- **Streaming, Conditional & Paginated `OciObjectStore`**: `OciObjectStore` streams `get_opts` payloads via `resp.bytes_stream()`, honors `GetOptions` (`range` requiring `206`, `if_match`, `if_none_match`, `head`), `PutOptions` (`Create` -> `if-none-match: *`, `Update` -> `if-match` on a required `e_tag`), and `CopyOptions` (`Create` -> `destinationObjectIfNoneMatchETag: "*"`), polls the asynchronous `copyObject` work request to a terminal state, renames synchronously via `renameObject`, and paginates `list` and `list_with_delimiter` (`delimiter=/` + `nextStartWith`) [^storage-oci-rs].
 <!-- truth: end -->
 
 ## 1. Specification, Context & Provenance

@@ -4,7 +4,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use std::ops::Range;
 use std::sync::{Arc, LazyLock, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use base64::Engine;
@@ -17,7 +17,8 @@ use object_store::path::Path as StorePath;
 use object_store::{
     Attribute, AttributeValue, Attributes, CopyMode, CopyOptions, GetOptions, GetRange, GetResult,
     GetResultPayload, ListResult, MultipartUpload, ObjectMeta, ObjectStore, PutMode,
-    PutMultipartOptions, PutOptions, PutPayload, PutResult, Result as StoreResult, UploadPart,
+    PutMultipartOptions, PutOptions, PutPayload, PutResult, RenameOptions, RenameTargetMode,
+    Result as StoreResult, UploadPart,
 };
 use rsa::RsaPrivateKey;
 use rsa::pkcs1v15::SigningKey;
@@ -307,6 +308,39 @@ struct OciCopyObjectRequest<'a> {
     destination_if_none_match_etag: Option<&'a str>,
 }
 
+#[derive(Serialize)]
+struct OciRenameObjectRequest<'a> {
+    #[serde(rename = "sourceName")]
+    source_name: &'a str,
+    #[serde(rename = "newName")]
+    new_name: &'a str,
+    #[serde(
+        rename = "newObjIfNoneMatchETag",
+        skip_serializing_if = "Option::is_none"
+    )]
+    new_obj_if_none_match_etag: Option<&'a str>,
+}
+
+#[derive(Deserialize)]
+struct OciWorkRequest {
+    status: String,
+}
+
+#[derive(Deserialize)]
+struct OciWorkRequestError {
+    #[serde(default)]
+    code: Option<String>,
+    #[serde(default)]
+    message: Option<String>,
+}
+
+/// Initial delay between OCI work request status polls.
+const OCI_WORK_REQUEST_INITIAL_BACKOFF: Duration = Duration::from_millis(50);
+/// Upper bound on the delay between OCI work request status polls.
+const OCI_WORK_REQUEST_MAX_BACKOFF: Duration = Duration::from_secs(1);
+/// Overall deadline for an OCI work request to reach a terminal state.
+const OCI_WORK_REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
+
 #[derive(Deserialize)]
 struct OciListObjectsResponse {
     #[serde(default)]
@@ -528,6 +562,152 @@ impl OciObjectStore {
         }
         Ok(builder)
     }
+
+    /// Poll an asynchronous OCI work request (`GET /workRequests/{id}`) until it reaches a terminal state.
+    ///
+    /// `copyObject` returns `202 Accepted` with `opc-work-request-id`; conditional failures such as
+    /// `destinationObjectIfNoneMatchETag: "*"` conflicts surface only when the work request ends
+    /// `FAILED`, so completion must be observed before reporting success.
+    async fn await_work_request(
+        &self,
+        work_request_id: &str,
+        destination: &StorePath,
+        is_create_only: bool,
+    ) -> StoreResult<()> {
+        let encoded_id = rfc3986_encode(work_request_id, true);
+        let status_url = format!("{}/workRequests/{encoded_id}", self.endpoint);
+        let deadline = Instant::now() + OCI_WORK_REQUEST_TIMEOUT;
+        let mut backoff = OCI_WORK_REQUEST_INITIAL_BACKOFF;
+        loop {
+            let req =
+                self.apply_signing(self.client.get(&status_url), "GET", &status_url, None, None)?;
+            let resp = req.send().await.map_err(|e| object_store::Error::Generic {
+                store: "OCI",
+                source: Box::new(e),
+            })?;
+            let status = resp.status();
+            if !status.is_success() {
+                return Err(object_store::Error::Generic {
+                    store: "OCI",
+                    source: format!(
+                        "OCI GetWorkRequest `{work_request_id}` failed with HTTP {status}"
+                    )
+                    .into(),
+                });
+            }
+            let parsed: OciWorkRequest =
+                resp.json()
+                    .await
+                    .map_err(|e| object_store::Error::Generic {
+                        store: "OCI",
+                        source: Box::new(e),
+                    })?;
+            match parsed.status.as_str() {
+                "COMPLETED" => return Ok(()),
+                "FAILED" | "CANCELED" => {
+                    return Err(self
+                        .work_request_failure(
+                            work_request_id,
+                            &parsed.status,
+                            destination,
+                            is_create_only,
+                        )
+                        .await);
+                }
+                _ => {}
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return Err(object_store::Error::Generic {
+                    store: "OCI",
+                    source: format!(
+                        "OCI work request `{work_request_id}` did not finish within {}s (last status {})",
+                        OCI_WORK_REQUEST_TIMEOUT.as_secs(),
+                        parsed.status
+                    )
+                    .into(),
+                });
+            }
+            tokio::time::sleep(backoff.min(deadline.saturating_duration_since(now))).await;
+            backoff = (backoff * 2).min(OCI_WORK_REQUEST_MAX_BACKOFF);
+        }
+    }
+
+    /// Map a `FAILED`/`CANCELED` OCI work request to an `object_store` error using `GET /workRequests/{id}/errors`.
+    async fn work_request_failure(
+        &self,
+        work_request_id: &str,
+        terminal_status: &str,
+        destination: &StorePath,
+        is_create_only: bool,
+    ) -> object_store::Error {
+        let errors = self.fetch_work_request_errors(work_request_id).await;
+        let detail = errors
+            .iter()
+            .map(|e| {
+                format!(
+                    "{}: {}",
+                    e.code.as_deref().unwrap_or("Unknown"),
+                    e.message.as_deref().unwrap_or("")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        let is_conflict = errors.iter().any(|e| {
+            let haystack = format!(
+                "{} {}",
+                e.code.as_deref().unwrap_or(""),
+                e.message.as_deref().unwrap_or("")
+            )
+            .to_ascii_lowercase();
+            [
+                "precondition",
+                "already exist",
+                "ifnonematch",
+                "if-none-match",
+                "conflict",
+            ]
+            .iter()
+            .any(|needle| haystack.contains(needle))
+        });
+        let summary = format!(
+            "OCI work request `{work_request_id}` ended {terminal_status}{}",
+            if detail.is_empty() {
+                String::new()
+            } else {
+                format!(": {detail}")
+            }
+        );
+        if is_create_only && terminal_status == "FAILED" && is_conflict {
+            return object_store::Error::AlreadyExists {
+                path: destination.to_string(),
+                source: summary.into(),
+            };
+        }
+        object_store::Error::Generic {
+            store: "OCI",
+            source: summary.into(),
+        }
+    }
+
+    async fn fetch_work_request_errors(&self, work_request_id: &str) -> Vec<OciWorkRequestError> {
+        let encoded_id = rfc3986_encode(work_request_id, true);
+        let errors_url = format!("{}/workRequests/{encoded_id}/errors", self.endpoint);
+        let Ok(req) =
+            self.apply_signing(self.client.get(&errors_url), "GET", &errors_url, None, None)
+        else {
+            return Vec::new();
+        };
+        let Ok(resp) = req.send().await else {
+            return Vec::new();
+        };
+        if !resp.status().is_success() {
+            return Vec::new();
+        }
+        resp.json::<Vec<OciWorkRequestError>>()
+            .await
+            .unwrap_or_default()
+    }
 }
 
 #[async_trait]
@@ -564,15 +744,10 @@ impl ObjectStore for OciObjectStore {
                 req = req.header("if-none-match", "*");
             }
             PutMode::Update(ref uv) => {
-                let Some(match_token) = uv
-                    .e_tag
-                    .as_deref()
-                    .or(uv.version.as_deref())
-                    .filter(|s| !s.is_empty())
-                else {
+                let Some(match_token) = uv.e_tag.as_deref().filter(|s| !s.is_empty()) else {
                     return Err(object_store::Error::Precondition {
                         path: location.to_string(),
-                        source: "OCI PutMode::Update requires non-empty e_tag or version".into(),
+                        source: "OCI PutMode::Update requires a non-empty e_tag".into(),
                     });
                 };
                 req = req.header("if-match", match_token);
@@ -588,6 +763,12 @@ impl ObjectStore for OciObjectStore {
                 source: Box::new(e),
             })?;
         let status = resp.status();
+        if is_create_only && status == reqwest::StatusCode::CONFLICT {
+            return Err(object_store::Error::AlreadyExists {
+                path: location.to_string(),
+                source: "OCI 409 object already exists".into(),
+            });
+        }
         if status == reqwest::StatusCode::PRECONDITION_FAILED {
             return if is_create_only {
                 Err(object_store::Error::AlreadyExists {
@@ -672,6 +853,50 @@ impl ObjectStore for OciObjectStore {
     }
 
     async fn get_opts(&self, location: &StorePath, options: GetOptions) -> StoreResult<GetResult> {
+        if let Some(GetRange::Bounded(ref range)) = options.range {
+            if range.start > range.end {
+                return Err(object_store::Error::Generic {
+                    store: "OCI",
+                    source: format!(
+                        "OCI invalid bounded range: start {} exceeds end {}",
+                        range.start, range.end
+                    )
+                    .into(),
+                });
+            }
+            if range.start == range.end {
+                let start = range.start;
+                let head = self
+                    .get_opts(
+                        location,
+                        GetOptions {
+                            range: None,
+                            head: true,
+                            ..options
+                        },
+                    )
+                    .await?;
+                if start > head.meta.size {
+                    return Err(object_store::Error::Generic {
+                        store: "OCI",
+                        source: format!(
+                            "OCI invalid bounded range: start {start} exceeds object size {}",
+                            head.meta.size
+                        )
+                        .into(),
+                    });
+                }
+                return Ok(GetResult {
+                    payload: GetResultPayload::Stream(
+                        futures::stream::empty::<StoreResult<Bytes>>().boxed(),
+                    ),
+                    meta: head.meta,
+                    range: start..start,
+                    attributes: head.attributes,
+                });
+            }
+        }
+
         let url_str = self.object_url(location);
         let (method, builder) = if options.head {
             ("HEAD", self.client.head(&url_str))
@@ -682,22 +907,6 @@ impl ObjectStore for OciObjectStore {
 
         let requested_bounded = match options.range {
             Some(GetRange::Bounded(ref range)) => {
-                if range.start >= range.end {
-                    return Ok(GetResult {
-                        payload: GetResultPayload::Stream(
-                            futures::stream::empty::<StoreResult<Bytes>>().boxed(),
-                        ),
-                        meta: ObjectMeta {
-                            location: location.clone(),
-                            last_modified: Utc::now(),
-                            size: range.start,
-                            e_tag: None,
-                            version: None,
-                        },
-                        range: range.start..range.start,
-                        attributes: Attributes::default(),
-                    });
-                }
                 req = req.header("Range", format!("bytes={}-{}", range.start, range.end - 1));
                 Some(range.clone())
             }
@@ -711,6 +920,7 @@ impl ObjectStore for OciObjectStore {
             }
             None => None,
         };
+        let range_requested = options.range.is_some() && !options.head;
 
         if let Some(ref etag) = options.if_match {
             req = req.header("if-match", etag);
@@ -754,6 +964,13 @@ impl ObjectStore for OciObjectStore {
                 source: format!("OCI {method} failed with HTTP {status}").into(),
             });
         }
+        if range_requested && status != reqwest::StatusCode::PARTIAL_CONTENT {
+            return Err(object_store::Error::Generic {
+                store: "OCI",
+                source: format!("OCI server ignored Range request (expected 206, got {status})")
+                    .into(),
+            });
+        }
 
         let headers = resp.headers();
         let content_len = headers
@@ -782,6 +999,11 @@ impl ObjectStore for OciObjectStore {
             let len = content_len.unwrap_or_else(|| bounded.end.saturating_sub(bounded.start));
             let end = bounded.start.saturating_add(len);
             (bounded.start..end, end)
+        } else if range_requested {
+            return Err(object_store::Error::Generic {
+                store: "OCI",
+                source: "OCI 206 response for offset/suffix range is missing Content-Range".into(),
+            });
         } else {
             let sz = content_len.unwrap_or(0);
             (0..sz, sz)
@@ -1116,6 +1338,87 @@ impl ObjectStore for OciObjectStore {
             return Err(object_store::Error::Generic {
                 store: "OCI",
                 source: format!("OCI copyObject failed with HTTP {status}").into(),
+            });
+        }
+        let work_request_id = resp
+            .headers()
+            .get("opc-work-request-id")
+            .and_then(|v| v.to_str().ok())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(ToString::to_string);
+        match work_request_id {
+            Some(id) => self.await_work_request(&id, to, is_create_only).await,
+            None if status == reqwest::StatusCode::OK => Ok(()),
+            None => Err(object_store::Error::Generic {
+                store: "OCI",
+                source: format!(
+                    "OCI copyObject returned HTTP {status} without opc-work-request-id; completion cannot be verified"
+                )
+                .into(),
+            }),
+        }
+    }
+
+    async fn rename_opts(
+        &self,
+        from: &StorePath,
+        to: &StorePath,
+        options: RenameOptions,
+    ) -> StoreResult<()> {
+        let rename_url = format!(
+            "{}/n/{}/b/{}/actions/renameObject",
+            self.endpoint, self.namespace, self.bucket
+        );
+        let is_create_only = matches!(options.target_mode, RenameTargetMode::Create);
+        let body_bytes = serde_json::to_vec(&OciRenameObjectRequest {
+            source_name: from.as_ref(),
+            new_name: to.as_ref(),
+            new_obj_if_none_match_etag: is_create_only.then_some("*"),
+        })
+        .map_err(|e| object_store::Error::Generic {
+            store: "OCI",
+            source: Box::new(e),
+        })?;
+        let mut req = self.apply_signing(
+            self.client.post(&rename_url),
+            "POST",
+            &rename_url,
+            Some(&body_bytes),
+            Some("application/json"),
+        )?;
+        if self.credentials.is_none() {
+            req = req.header("content-type", "application/json");
+        }
+        let resp = req
+            .body(body_bytes)
+            .send()
+            .await
+            .map_err(|e| object_store::Error::Generic {
+                store: "OCI",
+                source: Box::new(e),
+            })?;
+        let status = resp.status();
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Err(object_store::Error::NotFound {
+                path: from.to_string(),
+                source: "OCI renameObject 404 Not Found".into(),
+            });
+        }
+        if is_create_only
+            && (status == reqwest::StatusCode::CONFLICT
+                || status == reqwest::StatusCode::PRECONDITION_FAILED)
+        {
+            return Err(object_store::Error::AlreadyExists {
+                path: to.to_string(),
+                source: format!("OCI renameObject HTTP {status}: destination already exists")
+                    .into(),
+            });
+        }
+        if !status.is_success() {
+            return Err(object_store::Error::Generic {
+                store: "OCI",
+                source: format!("OCI renameObject failed with HTTP {status}").into(),
             });
         }
         Ok(())

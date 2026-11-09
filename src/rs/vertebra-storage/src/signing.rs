@@ -302,6 +302,7 @@ impl S3SignConfig {
         let base_url = Url::parse(&base_endpoint).map_err(|e| {
             SigningError::InvalidInput(format!("invalid S3 endpoint `{base_endpoint}`: {e}"))
         })?;
+        self.reject_ip_literal_virtual_host(&base_url)?;
         let host_only = base_url
             .host_str()
             .ok_or_else(|| SigningError::InvalidInput("missing S3 host".to_string()))?;
@@ -436,10 +437,16 @@ impl S3SignConfig {
         }
 
         let encoded_bucket = rfc3986_encode(self.bucket.trim(), true);
-        let endpoint_prefix = self
+        let parsed_endpoint = self
             .endpoint
             .as_deref()
-            .and_then(|ep| Url::parse(ep.trim()).ok())
+            .map(str::trim)
+            .filter(|ep| !ep.is_empty())
+            .and_then(|ep| Url::parse(ep).ok());
+        if let Some(ref endpoint_url) = parsed_endpoint {
+            self.reject_ip_literal_virtual_host(endpoint_url)?;
+        }
+        let endpoint_prefix = parsed_endpoint
             .map(|u| u.path().trim_matches('/').to_string())
             .unwrap_or_default();
         let path_prefix = if self.virtual_hosted_style {
@@ -485,6 +492,21 @@ impl S3SignConfig {
             signature.as_bytes(),
             expected_sig.as_bytes(),
         ))
+    }
+
+    /// Reject IPv4/IPv6 literal endpoint hosts when `virtual_hosted_style` is enabled, since a bucket subdomain cannot be prefixed to an IP address.
+    fn reject_ip_literal_virtual_host(&self, endpoint: &Url) -> Result<(), SigningError> {
+        if self.virtual_hosted_style
+            && matches!(
+                endpoint.host(),
+                Some(url::Host::Ipv4(_) | url::Host::Ipv6(_))
+            )
+        {
+            return Err(SigningError::InvalidInput(format!(
+                "virtual_hosted_style requires a DNS endpoint host; IP-literal endpoint `{endpoint}` cannot carry a bucket subdomain"
+            )));
+        }
+        Ok(())
     }
 }
 

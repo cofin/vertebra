@@ -203,39 +203,41 @@ fn test_r2_uniform_part_chunking_and_azure_sas_signing() {
     assert!(sas_url.contains("sig="));
 }
 
+/// RSA-2048 PKCS#8 test key shared by OCI Cavage signing tests.
+const TEST_OCI_RSA_PEM: &str = concat!(
+    "-----BEGIN PRIVATE KEY-----\n",
+    "MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQDJTl8KiBfisWRw\n",
+    "nP4tfbLiOa0io1rTfTen2IIYQgek3ET1isNNTWqeWSaD8mzOrVlLZlAaDZopzq4Z\n",
+    "jzLNq9uwIDWPuCzZIVMIAGDpcI+cAuofDs9FGRh3x5fO78Z0ch4tfwAh3SZpcu4P\n",
+    "LqPpU1FwvhfHftK5UdM0LHW57xhPPzu+lfVuBH8fRULmrqQJvDpcwb0QZtHCTs/z\n",
+    "VWbLGhl1XCLUEI/95CnOVctJHeckgJL5chUXxDoXpZGyFfv8qz832BgO3LN7Hnn1\n",
+    "w9gLsidb94Bmq/kA49esiXDECgcBSRgZmpYSOZOwibU9RI3nFtNGb6IpGiXhiqI9\n",
+    "ci5V3jtFAgMBAAECggEAAN/7ltGaSqh3xdB5tUlUQiEjhMQTGTHm+N2tuCA4FH8k\n",
+    "zL4XILBbjhAAgB2uQNvrY290Frm94gA2s5s2CpRGiTdT4pWABoGRTz1HE5r6sJls\n",
+    "v7SLgn96ekW+i2DCW9gMZOXOhDw3F/9/q3yXWwzjjKyhyFpLSQNVnBXqb5m1lwXy\n",
+    "M9Eej90qFDr3Or+Y+Met0LEvt3E+tYuPjVlLTmQFjZOTCB/Kqudq3mkUG8G9cV6Y\n",
+    "YNN+RXjsHj7xsL3Rp+V6vua3B3hWjSnsqpl1u0CD0fBDOrbie2yCmK4n7C/0Hi7H\n",
+    "wwZoSGXR+y0hdMEXuZXX0iXjv3pFBvr7+RQwxWggAQKBgQDo8f2xFAUIUVH7t6Rm\n",
+    "nSN2XbVqOl2vdR47yoYS5HOxjgQtmgMqHQ4eusVIVirSStyGMs49ZtVGiL4cYqxs\n",
+    "vECXDHyiL3dPCcSS8MkzYcGv5QjXsuQLHvp4my2REWNB9RVCADslTIetMEFoFm0T\n",
+    "GvQz+RMvyJoGZl26mchwFGldRQKBgQDdOsGlqtjSc+TQ5q5YtZ0+phIzPZ1usbN4\n",
+    "qdjEYp5SCGNU2/AFayqKSPgD/ulMtdiXzA2qK4I9h5xmRE/A/FJVhW66S29+6CAP\n",
+    "/EGtfAYdFozsaZpjxCpYszagGVBnvViv9Y4KWUeyhN1lwfkbTLZ0jIiICt4Vp3Ci\n",
+    "5k6Vp2RGAQKBgA/6IQtXMy0p3rSkGNuM5ZTFwp6hmDFjmApDzsRW9PR1qCW0jYkC\n",
+    "6ygCaWuXtWItDkkKDQk7F1+6G0f5IJhopQl3Ksk49jbulZP6feJPTyiQTfX1aBy3\n",
+    "KDjDc/GiPquUcrvPJj9dq2Seja3k8+A+lgdGiyFY4e+Ub9NPnubJD5z9AoGBALeA\n",
+    "2kmpykne2eixv+JTWwgxRp18OU8tVTn8YJKdXsear5IfERvdhZ7I4fimhCweFnfr\n",
+    "SVZi2phhGUj21tS0NzM7B9q9YdF5h8barjvRyVxtbR1YhzjD6YBDv0bTWI+ETsE9\n",
+    "xMEuxzr73I1gdVnAqwNH4qQ9p3N8vQBSWtLl01YBAoGBAND7MuyVNdG+9pGItdFt\n",
+    "k9pz3Vc9t+8Fn31K9HldC9ejmnBapfkgwLdJemLQaqAs6tkbG2ajlCqv7Y4ZAARc\n",
+    "qkcDJbfy9jP/h7kvb/UNP21SxDscrKTAczxEm7PiTk3HPNOwx3/N6tPc+5HhR8LR\n",
+    "8OwWavCVE6HreFLFfrEAgSgF\n",
+    "-----END PRIVATE KEY-----\n"
+);
+
 #[tokio::test]
 async fn test_oci_cavage_signing_and_native_rest_v2_crud() {
-    let pem = concat!(
-        "-----BEGIN PRIVATE KEY-----\n",
-        "MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQDJTl8KiBfisWRw\n",
-        "nP4tfbLiOa0io1rTfTen2IIYQgek3ET1isNNTWqeWSaD8mzOrVlLZlAaDZopzq4Z\n",
-        "jzLNq9uwIDWPuCzZIVMIAGDpcI+cAuofDs9FGRh3x5fO78Z0ch4tfwAh3SZpcu4P\n",
-        "LqPpU1FwvhfHftK5UdM0LHW57xhPPzu+lfVuBH8fRULmrqQJvDpcwb0QZtHCTs/z\n",
-        "VWbLGhl1XCLUEI/95CnOVctJHeckgJL5chUXxDoXpZGyFfv8qz832BgO3LN7Hnn1\n",
-        "w9gLsidb94Bmq/kA49esiXDECgcBSRgZmpYSOZOwibU9RI3nFtNGb6IpGiXhiqI9\n",
-        "ci5V3jtFAgMBAAECggEAAN/7ltGaSqh3xdB5tUlUQiEjhMQTGTHm+N2tuCA4FH8k\n",
-        "zL4XILBbjhAAgB2uQNvrY290Frm94gA2s5s2CpRGiTdT4pWABoGRTz1HE5r6sJls\n",
-        "v7SLgn96ekW+i2DCW9gMZOXOhDw3F/9/q3yXWwzjjKyhyFpLSQNVnBXqb5m1lwXy\n",
-        "M9Eej90qFDr3Or+Y+Met0LEvt3E+tYuPjVlLTmQFjZOTCB/Kqudq3mkUG8G9cV6Y\n",
-        "YNN+RXjsHj7xsL3Rp+V6vua3B3hWjSnsqpl1u0CD0fBDOrbie2yCmK4n7C/0Hi7H\n",
-        "wwZoSGXR+y0hdMEXuZXX0iXjv3pFBvr7+RQwxWggAQKBgQDo8f2xFAUIUVH7t6Rm\n",
-        "nSN2XbVqOl2vdR47yoYS5HOxjgQtmgMqHQ4eusVIVirSStyGMs49ZtVGiL4cYqxs\n",
-        "vECXDHyiL3dPCcSS8MkzYcGv5QjXsuQLHvp4my2REWNB9RVCADslTIetMEFoFm0T\n",
-        "GvQz+RMvyJoGZl26mchwFGldRQKBgQDdOsGlqtjSc+TQ5q5YtZ0+phIzPZ1usbN4\n",
-        "qdjEYp5SCGNU2/AFayqKSPgD/ulMtdiXzA2qK4I9h5xmRE/A/FJVhW66S29+6CAP\n",
-        "/EGtfAYdFozsaZpjxCpYszagGVBnvViv9Y4KWUeyhN1lwfkbTLZ0jIiICt4Vp3Ci\n",
-        "5k6Vp2RGAQKBgA/6IQtXMy0p3rSkGNuM5ZTFwp6hmDFjmApDzsRW9PR1qCW0jYkC\n",
-        "6ygCaWuXtWItDkkKDQk7F1+6G0f5IJhopQl3Ksk49jbulZP6feJPTyiQTfX1aBy3\n",
-        "KDjDc/GiPquUcrvPJj9dq2Seja3k8+A+lgdGiyFY4e+Ub9NPnubJD5z9AoGBALeA\n",
-        "2kmpykne2eixv+JTWwgxRp18OU8tVTn8YJKdXsear5IfERvdhZ7I4fimhCweFnfr\n",
-        "SVZi2phhGUj21tS0NzM7B9q9YdF5h8barjvRyVxtbR1YhzjD6YBDv0bTWI+ETsE9\n",
-        "xMEuxzr73I1gdVnAqwNH4qQ9p3N8vQBSWtLl01YBAoGBAND7MuyVNdG+9pGItdFt\n",
-        "k9pz3Vc9t+8Fn31K9HldC9ejmnBapfkgwLdJemLQaqAs6tkbG2ajlCqv7Y4ZAARc\n",
-        "qkcDJbfy9jP/h7kvb/UNP21SxDscrKTAczxEm7PiTk3HPNOwx3/N6tPc+5HhR8LR\n",
-        "8OwWavCVE6HreFLFfrEAgSgF\n",
-        "-----END PRIVATE KEY-----\n"
-    )
-    .to_string();
+    let pem = TEST_OCI_RSA_PEM.to_string();
 
     let creds = OciCavageCredentials {
         tenancy_ocid: "ocid1.tenancy.oc1..aaaa".to_string(),
@@ -2191,8 +2193,10 @@ async fn test_oci_streaming_get_opts_conditional_put_copy_and_paginated_list() {
     use object_store::path::Path as StorePath;
     use object_store::{
         Attribute, AttributeValue, Attributes, CopyMode, CopyOptions, GetOptions, GetRange,
-        ObjectStore, PutMode, PutOptions, PutPayload, UpdateVersion,
+        ObjectStore, PutMode, PutOptions, PutPayload, RenameOptions, RenameTargetMode,
+        UpdateVersion,
     };
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
@@ -2203,10 +2207,13 @@ async fn test_oci_streaming_get_opts_conditional_put_copy_and_paginated_list() {
     let addr = listener.local_addr().expect("oci addr");
     let captured_reqs: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let captured_srv = Arc::clone(&captured_reqs);
+    let wr_ok_polls = Arc::new(AtomicUsize::new(0));
+    let wr_ok_polls_srv = Arc::clone(&wr_ok_polls);
 
     tokio::spawn(async move {
         while let Ok((mut socket, _)) = listener.accept().await {
             let log = Arc::clone(&captured_srv);
+            let wr_polls = Arc::clone(&wr_ok_polls_srv);
             tokio::spawn(async move {
                 let mut buf = vec![0u8; 8192];
                 let mut total = 0usize;
@@ -2263,21 +2270,56 @@ async fn test_oci_streaming_get_opts_conditional_put_copy_and_paginated_list() {
                 }
 
                 if first_line.starts_with("POST /n/ns1/b/bkt1/actions/copyObject ") {
-                    if req.contains("\"destinationObjectIfNoneMatchETag\":\"*\"")
+                    let wr_id = if req.contains("\"destinationObjectIfNoneMatchETag\":\"*\"")
                         && req.contains("\"destinationObjectName\":\"dup.bin\"")
                     {
-                        let _ = socket
-                            .write_all(
-                                b"HTTP/1.1 412 Precondition Failed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-                            )
-                            .await;
-                        return;
-                    }
-                    let _ = socket
-                        .write_all(
-                            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+                        "wr-dup"
+                    } else {
+                        "wr-ok"
+                    };
+                    let resp = format!(
+                        "HTTP/1.1 202 Accepted\r\nopc-work-request-id: {wr_id}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    );
+                    let _ = socket.write_all(resp.as_bytes()).await;
+                    return;
+                }
+
+                if first_line.starts_with("GET /workRequests/") {
+                    let body = if first_line.starts_with("GET /workRequests/wr-dup/errors ") {
+                        r#"[{"code":"PreconditionFailed","message":"The destination object already exists","timestamp":"2026-11-06T12:00:00Z"}]"#.to_string()
+                    } else if first_line.starts_with("GET /workRequests/wr-dup ") {
+                        r#"{"id":"wr-dup","operationType":"COPY_OBJECT","status":"FAILED"}"#
+                            .to_string()
+                    } else {
+                        let status = if wr_polls.fetch_add(1, Ordering::SeqCst) == 0 {
+                            "IN_PROGRESS"
+                        } else {
+                            "COMPLETED"
+                        };
+                        format!(
+                            r#"{{"id":"wr-ok","operationType":"COPY_OBJECT","status":"{status}"}}"#
                         )
-                        .await;
+                    };
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = socket.write_all(resp.as_bytes()).await;
+                    return;
+                }
+
+                if first_line.starts_with("POST /n/ns1/b/bkt1/actions/renameObject ") {
+                    let resp: &[u8] = if req.contains("\"sourceName\":\"missing.bin\"") {
+                        b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    } else if req.contains("\"newObjIfNoneMatchETag\":\"*\"")
+                        && req.contains("\"newName\":\"taken.bin\"")
+                    {
+                        b"HTTP/1.1 409 Conflict\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    } else {
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    };
+                    let _ = socket.write_all(resp).await;
                     return;
                 }
 
@@ -2311,6 +2353,14 @@ async fn test_oci_streaming_get_opts_conditional_put_copy_and_paginated_list() {
                         let _ = socket
                             .write_all(
                                 b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 2-5/10\r\nContent-Length: 4\r\netag: \"oci-etag-1\"\r\nConnection: close\r\n\r\n2345",
+                            )
+                            .await;
+                        return;
+                    }
+                    if req_lower.contains("range: bytes=4-") {
+                        let _ = socket
+                            .write_all(
+                                b"HTTP/1.1 206 Partial Content\r\nContent-Length: 6\r\netag: \"oci-etag-1\"\r\nConnection: close\r\n\r\n456789",
                             )
                             .await;
                         return;
@@ -2436,7 +2486,26 @@ async fn test_oci_streaming_get_opts_conditional_put_copy_and_paginated_list() {
         .expect_err("empty UpdateVersion must fail");
     assert!(matches!(
         empty_uv_err,
-        object_store::Error::Precondition { .. } | object_store::Error::NotImplemented { .. }
+        object_store::Error::Precondition { .. }
+    ));
+
+    let version_only_err = oci
+        .put_opts(
+            &StorePath::parse("existing.json").expect("parse"),
+            PutPayload::from_static(b"{}"),
+            PutOptions {
+                mode: PutMode::Update(UpdateVersion {
+                    e_tag: None,
+                    version: Some("v-101".to_string()),
+                }),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("PutMode::Update without e_tag must not fall back to version");
+    assert!(matches!(
+        version_only_err,
+        object_store::Error::Precondition { .. }
     ));
 
     let stream_loc = StorePath::parse("stream.bin").expect("parse");
@@ -2471,6 +2540,76 @@ async fn test_oci_streaming_get_opts_conditional_put_copy_and_paginated_list() {
     assert_eq!(ranged.range, 2..6);
     assert_eq!(ranged.meta.size, 10);
     assert_eq!(&ranged.bytes().await.expect("ranged bytes")[..], b"2345");
+
+    let ignored_range = oci
+        .get_opts(
+            &stream_loc,
+            GetOptions {
+                range: Some(GetRange::Bounded(0..4)),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("200 response to a Range request must be rejected");
+    assert!(
+        matches!(&ignored_range, object_store::Error::Generic { source, .. } if source.to_string().contains("expected 206")),
+        "unexpected ignored range error: {ignored_range:?}"
+    );
+
+    let offset_no_cr = oci
+        .get_opts(
+            &stream_loc,
+            GetOptions {
+                range: Some(GetRange::Offset(4)),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("206 offset response without Content-Range must be rejected");
+    assert!(
+        matches!(&offset_no_cr, object_store::Error::Generic { source, .. } if source.to_string().contains("Content-Range")),
+        "unexpected offset error: {offset_no_cr:?}"
+    );
+
+    let (rev_start, rev_end) = (5u64, 2u64);
+    let reversed = oci
+        .get_opts(
+            &stream_loc,
+            GetOptions {
+                range: Some(GetRange::Bounded(rev_start..rev_end)),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("reversed bounded range must be rejected");
+    assert!(matches!(reversed, object_store::Error::Generic { .. }));
+
+    let empty_range = oci
+        .get_opts(
+            &stream_loc,
+            GetOptions {
+                range: Some(GetRange::Bounded(3..3)),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("empty bounded range verifies existence via HEAD");
+    assert_eq!(empty_range.range, 3..3);
+    assert_eq!(empty_range.meta.size, 10);
+    assert_eq!(empty_range.meta.e_tag.as_deref(), Some("\"oci-etag-1\""));
+    assert!(empty_range.bytes().await.expect("empty bytes").is_empty());
+
+    let past_end = oci
+        .get_opts(
+            &stream_loc,
+            GetOptions {
+                range: Some(GetRange::Bounded(11..11)),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("empty bounded range past object size must be rejected");
+    assert!(matches!(past_end, object_store::Error::Generic { .. }));
 
     let not_mod = oci
         .get_opts(
@@ -2542,10 +2681,48 @@ async fn test_oci_streaming_get_opts_conditional_put_copy_and_paginated_list() {
             },
         )
         .await
-        .expect_err("copy Create 412 must map to AlreadyExists");
+        .expect_err("copy Create work request FAILED must map to AlreadyExists");
     assert!(matches!(
         copy_dup,
         object_store::Error::AlreadyExists { .. }
+    ));
+    assert!(
+        wr_ok_polls.load(Ordering::SeqCst) >= 2,
+        "copyObject must poll the work request until COMPLETED"
+    );
+
+    oci.rename_opts(
+        &stream_loc,
+        &StorePath::parse("renamed.bin").expect("parse"),
+        RenameOptions::new().with_target_mode(RenameTargetMode::Overwrite),
+    )
+    .await
+    .expect("plain rename ok");
+
+    let rename_taken = oci
+        .rename_opts(
+            &stream_loc,
+            &StorePath::parse("taken.bin").expect("parse"),
+            RenameOptions::new().with_target_mode(RenameTargetMode::Create),
+        )
+        .await
+        .expect_err("rename Create conflict must map to AlreadyExists");
+    assert!(matches!(
+        rename_taken,
+        object_store::Error::AlreadyExists { .. }
+    ));
+
+    let rename_missing = oci
+        .rename_opts(
+            &StorePath::parse("missing.bin").expect("parse"),
+            &StorePath::parse("anywhere.bin").expect("parse"),
+            RenameOptions::new(),
+        )
+        .await
+        .expect_err("rename of missing source must map to NotFound");
+    assert!(matches!(
+        rename_missing,
+        object_store::Error::NotFound { .. }
     ));
 
     let all_items: Vec<_> = oci.list(None).try_collect().await.expect("paginated list");
@@ -2577,4 +2754,200 @@ async fn test_oci_streaming_get_opts_conditional_put_copy_and_paginated_list() {
     assert!(put_req.contains("if-none-match: *"));
     assert!(put_req.contains("content-type: application/json"));
     assert!(put_req.contains("opc-meta-owner: team-a"));
+    let rename_bodies: Vec<&String> = reqs
+        .iter()
+        .filter(|r| r.starts_with("POST /n/ns1/b/bkt1/actions/renameObject "))
+        .collect();
+    assert_eq!(rename_bodies.len(), 3);
+    assert!(rename_bodies[0].contains(r#"{"sourceName":"stream.bin","newName":"renamed.bin"}"#));
+    assert!(rename_bodies[1].contains(r#""newObjIfNoneMatchETag":"*""#));
+    assert!(
+        reqs.iter()
+            .any(|r| r.starts_with("GET /workRequests/wr-dup/errors "))
+    );
+}
+
+#[tokio::test]
+async fn test_oci_cavage_conditional_put_signs_only_canonical_headers() {
+    use _storage::oci::OciObjectStore;
+    use object_store::path::Path as StorePath;
+    use object_store::{
+        Attribute, AttributeValue, Attributes, ObjectStore, PutMode, PutOptions, PutPayload,
+    };
+    use std::sync::{Arc, Mutex};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind loopback oci");
+    let addr = listener.local_addr().expect("oci addr");
+    let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let captured_srv = Arc::clone(&captured);
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            let log = Arc::clone(&captured_srv);
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 8192];
+                let mut total = 0usize;
+                loop {
+                    let n = socket.read(&mut buf[total..]).await.unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    total += n;
+                    if let Some(hdr_end) = buf[..total].windows(4).position(|w| w == b"\r\n\r\n") {
+                        let hdr_str = String::from_utf8_lossy(&buf[..hdr_end]);
+                        let expected_cl = hdr_str
+                            .lines()
+                            .find_map(|l| {
+                                let (k, v) = l.split_once(':')?;
+                                k.trim()
+                                    .eq_ignore_ascii_case("content-length")
+                                    .then(|| v.trim().parse::<usize>().ok())?
+                            })
+                            .unwrap_or(0);
+                        if total >= hdr_end + 4 + expected_cl {
+                            break;
+                        }
+                    }
+                }
+                log.lock()
+                    .expect("lock")
+                    .push(String::from_utf8_lossy(&buf[..total]).into_owned());
+                let _ = socket
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\netag: \"signed-etag\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    )
+                    .await;
+            });
+        }
+    });
+
+    let creds = OciCavageCredentials {
+        tenancy_ocid: "ocid1.tenancy.oc1..aaaa".to_string(),
+        user_ocid: "ocid1.user.oc1..bbbb".to_string(),
+        fingerprint: "12:34:56:78:90:ab:cd:ef".to_string(),
+        private_key_pem: TEST_OCI_RSA_PEM.to_string(),
+    };
+    let oci = OciObjectStore::new(
+        "ns1".to_string(),
+        "bkt1".to_string(),
+        "us-ashburn-1".to_string(),
+        Some(format!("http://127.0.0.1:{}", addr.port())),
+        Some(creds),
+    )
+    .expect("build signed oci store");
+
+    let mut attrs = Attributes::new();
+    attrs.insert(
+        Attribute::ContentType,
+        AttributeValue::from("application/json"),
+    );
+    attrs.insert(
+        Attribute::Metadata("owner".into()),
+        AttributeValue::from("team-a"),
+    );
+    let res = oci
+        .put_opts(
+            &StorePath::parse("signed.json").expect("parse"),
+            PutPayload::from_static(b"{\"a\":1}"),
+            PutOptions {
+                mode: PutMode::Create,
+                attributes: attrs,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("signed PutMode::Create");
+    assert_eq!(res.e_tag.as_deref(), Some("\"signed-etag\""));
+
+    let reqs = captured.lock().expect("lock");
+    assert_eq!(reqs.len(), 1);
+    let req = &reqs[0];
+    let req_lower = req.to_ascii_lowercase();
+    let auth_line = req
+        .lines()
+        .find(|l| l.to_ascii_lowercase().starts_with("authorization:"))
+        .expect("Authorization header present");
+    let signed_headers = auth_line
+        .split_once("headers=\"")
+        .and_then(|(_, rest)| rest.split_once('"'))
+        .map(|(list, _)| list)
+        .expect("headers=\"...\" parameter");
+    assert_eq!(
+        signed_headers,
+        "(request-target) date host x-content-sha256 content-type content-length"
+    );
+    assert!(auth_line.contains("algorithm=\"rsa-sha256\""));
+    assert!(req_lower.contains("if-none-match: *"));
+    assert!(req_lower.contains("opc-meta-owner: team-a"));
+    assert!(req_lower.contains("content-type: application/json"));
+    assert!(req_lower.contains("content-length: 7"));
+    assert!(req_lower.contains(&format!(
+        "x-content-sha256: {}",
+        sha256_base64(b"{\"a\":1}").to_ascii_lowercase()
+    )));
+}
+
+#[test]
+fn test_s3_virtual_hosted_style_rejects_ip_literal_endpoints() {
+    use _storage::store::StorageError;
+
+    for endpoint in ["http://127.0.0.1:9000", "http://[::1]:9000"] {
+        let vhost_ip = S3SignConfig {
+            bucket: "assets".to_string(),
+            region: "us-east-1".to_string(),
+            access_key_id: "AKIAIOSFODNN7EXAMPLE".to_string(),
+            secret_access_key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".to_string(),
+            endpoint: Some(endpoint.to_string()),
+            virtual_hosted_style: true,
+        };
+        let sign_err = sign_s3_v4_url(&vhost_ip, "GET", "k/obj.bin", 900, 1_700_000_000)
+            .expect_err("virtual-hosted signing must reject IP-literal endpoints");
+        assert!(
+            matches!(sign_err, StorageError::InvalidInput(ref msg) if msg.contains("IP-literal")),
+            "unexpected sign error for {endpoint}: {sign_err:?}"
+        );
+
+        let path_style = S3SignConfig {
+            virtual_hosted_style: false,
+            ..vhost_ip.clone()
+        };
+        let signed_path = sign_s3_v4_url(&path_style, "GET", "k/obj.bin", 900, 1_700_000_000)
+            .expect("path-style signing accepts IP-literal endpoints");
+        let verify_err = verify_s3_v4_url(&vhost_ip, "GET", &signed_path, 1_700_000_100)
+            .expect_err("virtual-hosted verification must reject IP-literal endpoints");
+        assert!(
+            matches!(verify_err, StorageError::InvalidInput(ref msg) if msg.contains("IP-literal")),
+            "unexpected verify error for {endpoint}: {verify_err:?}"
+        );
+        assert!(
+            verify_s3_v4_url(&path_style, "GET", &signed_path, 1_700_000_100)
+                .expect("path-style verify")
+        );
+
+        let opts = HashMap::from([
+            ("region".to_string(), "us-east-1".to_string()),
+            ("access_key_id".to_string(), "ak".to_string()),
+            ("secret_access_key".to_string(), "sk".to_string()),
+            ("virtual_hosted_style".to_string(), "true".to_string()),
+            ("endpoint".to_string(), endpoint.to_string()),
+            ("allow_http".to_string(), "true".to_string()),
+        ]);
+        match ObjectStoreEngine::from_url("s3://bkt", Some(&opts)) {
+            Err(StorageError::InvalidInput(msg)) => assert!(msg.contains("IP-literal")),
+            Err(other) => panic!("unexpected engine error for {endpoint}: {other:?}"),
+            Ok(_) => panic!("virtual-hosted engine must reject IP-literal endpoint {endpoint}"),
+        }
+
+        let path_opts = HashMap::from([
+            ("region".to_string(), "us-east-1".to_string()),
+            ("access_key_id".to_string(), "ak".to_string()),
+            ("secret_access_key".to_string(), "sk".to_string()),
+            ("endpoint".to_string(), endpoint.to_string()),
+            ("allow_http".to_string(), "true".to_string()),
+        ]);
+        assert!(ObjectStoreEngine::from_url("s3://bkt", Some(&path_opts)).is_ok());
+    }
 }
