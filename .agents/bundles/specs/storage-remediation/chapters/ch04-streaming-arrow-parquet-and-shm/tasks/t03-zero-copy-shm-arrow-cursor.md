@@ -5,7 +5,7 @@ chapter_id: ch04-streaming-arrow-parquet-and-shm
 title: Make read_arrow_shm zero-copy over memoryview, keep ArrowCursor.__len__ lazy, and transpose _table_to_rows_and_cols column-wise
 description: Retain memoryview slices via pyarrow.py_buffer in read_arrow_shm without bytes() copying, return self._table.num_rows from ArrowCursor.__len__ without materializing tuples, and convert Arrow tables to row tuples via columnar to_pydict() transposition.
 status: stable
-state: in_progress
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on: []
@@ -19,22 +19,25 @@ tests:
 estimated_loc: 85
 plan_revision: 1
 plan_commit: fd571e3a
-state_revision: 1
+state_revision: 2
 claimed_by: executor
 claimed_at: "2026-11-09T00:46:30Z"
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-09T00:52:30Z"
+last_verified_commit: 113d25a5
+verification_evidence: "pytest src/py/tests/unit/db (514 passed, 5 skipped); ruff check/format and mypy on db/arrow.py clean"
 created_at: "2026-11-08T20:55:00Z"
-updated_at: "2026-11-09T00:46:30Z"
-commit: null
+updated_at: "2026-11-09T00:52:30Z"
+commit: 113d25a5
 generated:
   by: flow/0.28.0
   at: "2026-11-08T20:55:00Z"
-verified: []
+verified:
+  - by: executor
+    at: "2026-11-09T00:52:30Z"
+    commit: 113d25a5
 sources:
   - id: py-db-arrow
     resource: src/py/vertebra/db/arrow.py::read_arrow_shm
@@ -95,8 +98,8 @@ uv run --no-sync pytest src/py/tests/unit/db/test_enterprise_olap_drivers.py -k 
 
 ## Acceptance Criteria
 
-- [ ] `read_arrow_shm` opens Arrow IPC streams directly over `pa.py_buffer(payload_view)` with an SHM lifetime anchor and zero `bytes(...)` copy (R4.3).
-- [ ] `ArrowCursor.__len__` avoids `fetchall()` materialization and `_table_to_rows_and_cols` uses columnar `to_pydict()` transposition (R4.3).
+- [x] [113d25a5] `read_arrow_shm` opens Arrow IPC streams directly over `pa.py_buffer(payload_view)` with an SHM lifetime anchor and zero `bytes(...)` copy (R4.3).
+- [x] [113d25a5] `ArrowCursor.__len__` avoids `fetchall()` materialization and `_table_to_rows_and_cols` uses columnar `to_pydict()` transposition (R4.3).
 
 ## Notes & Discoveries
 

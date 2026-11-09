@@ -5,7 +5,7 @@ chapter_id: ch04-streaming-arrow-parquet-and-shm
 title: Stream StreamingStorageResponse.iter_chunks() and range-slice to_fastpath_tuple() without full-blob materialization
 description: Stream HTTP 200 responses via get_stream and HTTP 206 responses via bounded get_range chunks in StreamingStorageResponse.iter_chunks(), and slice HTTP 206 bodies via get_range in to_fastpath_tuple().
 status: stable
-state: in_progress
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on: []
@@ -20,22 +20,25 @@ tests:
 estimated_loc: 80
 plan_revision: 1
 plan_commit: fd571e3a
-state_revision: 1
+state_revision: 2
 claimed_by: executor
 claimed_at: "2026-11-09T00:46:30Z"
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-09T00:52:30Z"
+last_verified_commit: 2789bb63
+verification_evidence: "pytest src/py/tests/unit/storage + test_litestar_plugin.py (288 passed); ruff check/format and mypy on _streaming.py clean"
 created_at: "2026-11-08T20:55:00Z"
-updated_at: "2026-11-09T00:46:30Z"
-commit: null
+updated_at: "2026-11-09T00:52:30Z"
+commit: 2789bb63
 generated:
   by: flow/0.28.0
   at: "2026-11-08T20:55:00Z"
-verified: []
+verified:
+  - by: executor
+    at: "2026-11-09T00:52:30Z"
+    commit: 2789bb63
 sources:
   - id: py-streaming
     resource: src/py/vertebra/storage/_streaming.py::StreamingStorageResponse
@@ -91,7 +94,7 @@ uv run --no-sync pytest src/py/tests/unit/storage/test_storage_store.py -k strea
 
 ## Acceptance Criteria
 
-- [ ] `StreamingStorageResponse.iter_chunks()` and `to_fastpath_tuple()` never materialize full blobs for `206` range requests or streamed `200` responses (R4.1).
+- [x] [2789bb63] `StreamingStorageResponse.iter_chunks()` and `to_fastpath_tuple()` never materialize full blobs for `206` range requests or streamed `200` responses (R4.1).
 
 ## Notes & Discoveries
 

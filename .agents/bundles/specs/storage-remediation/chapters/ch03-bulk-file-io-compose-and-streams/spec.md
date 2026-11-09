@@ -157,9 +157,9 @@ Analytical and pipeline workloads transferring multi-hundred-megabyte Parquet sh
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline (`HEAD`)**: `fd571e3a` — `0/4` tasks completed in `ch03`.
-- **Remaining Tasks in Chapter**: `t01`, `t02`, `t03`, `t04`.
-- **Remaining Chapters**: `ch01`–`ch06`.
+- **Verified Baseline (`HEAD`)**: `70c23f63` — `4/4` tasks implemented and verified (`f8bf065c`, `62deb8c3`, `70c23f63`, `19dac0d8`); zero-context review findings (cancellation-safe cleanup, failed-part writer abort, framed compose fallback, unique compose temporaries, XML-consistent compose metadata, scoped batch cleanup, writer finalizers) are being remediated.
+- **Remaining Tasks in Chapter**: None; chapter closes after review remediation.
+- **Remaining Chapters**: `ch04`–`ch06`.
 
 [^storage-store-rs]: `src/rs/vertebra-storage/src/store.rs::ObjectStoreEngine` — Rust `ObjectStoreEngine` file I/O, conditional `copy`, and GCS `compose`.
 [^storage-lib-rs]: `src/rs/vertebra-storage/src/lib.rs::PySyncObjectStore` — PyO3 bindings for `SyncObjectStore` and `AsyncObjectStore`.
