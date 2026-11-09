@@ -1,8 +1,11 @@
 """Unit tests for vertebra.storage (SyncObjectStore, AsyncObjectStore, zero-copy memoryview, and V4 presigning)."""
 
+import array
 import ast
 import asyncio
 import contextlib
+import gzip
+import io
 import sys
 import threading
 from collections.abc import AsyncIterator, Iterator
@@ -20,6 +23,7 @@ from vertebra._storage import StorageBuffer
 from vertebra.storage import (
     AsyncObjectStore,
     AsyncReadableFile,
+    AsyncWritableFile,
     HTTPConfig,
     LocalConfig,
     MemoryConfig,
@@ -31,6 +35,7 @@ from vertebra.storage import (
     StreamingStorageResponse,
     SyncObjectStore,
     SyncReadableFile,
+    SyncWritableFile,
     parse_byte_range,
 )
 from vertebra.typing import (
@@ -1510,3 +1515,370 @@ async def test_storage_arrow_writer_waits_for_cancelled_codec_worker(file_format
             task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await task
+
+
+class _RecordingUpload:
+    """Record part lengths while delegating every multipart operation to a real native upload."""
+
+    def __init__(self, native: Any, parts: list[int]) -> None:
+        self.native = native
+        self.parts = parts
+
+    def write_part(self, chunk: Any) -> Any:
+        self.parts.append(memoryview(chunk).nbytes)
+        return self.native.write_part(chunk)
+
+    def complete(self) -> Any:
+        return self.native.complete()
+
+    def abort(self) -> Any:
+        return self.native.abort()
+
+
+class _RecordingNative:
+    """Record payload objects and multipart parts forwarded to a real native store."""
+
+    def __init__(self, native: Any, asynchronous: bool) -> None:
+        self.native = native
+        self.asynchronous = asynchronous
+        self.payloads: list[Any] = []
+        self.parts: list[int] = []
+        self.uploads = 0
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.native, name)
+
+    def put(self, key: str, data: Any, **kwargs: Any) -> Any:
+        self.payloads.append(data)
+        return self.native.put(key, data, **kwargs)
+
+    def put_multipart(self, key: str, parts: list[Any]) -> Any:
+        self.payloads.extend(parts)
+        return self.native.put_multipart(key, parts)
+
+    def create_multipart(self, *args: Any, **kwargs: Any) -> Any:
+        upload = self.native.create_multipart(*args, **kwargs)
+        self.uploads += 1
+        if self.asynchronous:
+
+            async def resolve() -> Any:
+                return _RecordingUpload(await upload, self.parts)
+
+            return resolve()
+        return _RecordingUpload(upload, self.parts)
+
+
+def _recording_store(namespace: str, asynchronous: bool) -> tuple[Any, SyncObjectStore, _RecordingNative]:
+    """Build a store whose native backend records forwarded payloads, plus a sync verifier on the same namespace."""
+    base = SyncObjectStore(MemoryConfig(namespace=namespace))
+    paired = base.to_async() if asynchronous else base
+    native = _RecordingNative(paired._require_native(), asynchronous)
+    store: Any = (
+        AsyncObjectStore(MemoryConfig(namespace=namespace), _native_instance=native)
+        if asynchronous
+        else SyncObjectStore(MemoryConfig(namespace=namespace), _native_instance=native)
+    )
+    return store, base, native
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+async def test_put_forwards_buffers_without_memoryview_wrapping(asynchronous: bool) -> None:
+    """put and put_multipart hand caller buffers straight to native so bytes stay zero-copy."""
+    store, base, native = _recording_store(f"passthrough-{asynchronous}", asynchronous)
+    payload = b"immutable-payload"
+    mutable = bytearray(b"mutable-payload")
+    parts = [b"part-a:", bytearray(b"part-b")]
+    typed = array.array("I", [1, 2, 3])
+
+    if asynchronous:
+        first = await store.put("imm.bin", payload)
+        await store.put("mut.bin", mutable)
+        mutable.clear()
+        multi = await store.put_multipart("multi.bin", parts)
+        typed_meta = await store.put("typed.bin", typed)
+    else:
+        first = store.put("imm.bin", payload)
+        store.put("mut.bin", mutable)
+        mutable.clear()
+        multi = store.put_multipart("multi.bin", parts)
+        typed_meta = store.put("typed.bin", typed)
+
+    assert native.payloads[0] is payload
+    assert native.payloads[2] is parts[0]
+    assert native.payloads[3] is parts[1]
+    assert not any(isinstance(item, memoryview) for item in native.payloads[:4])
+    assert first.size == len(payload)
+    assert first.etag
+    assert multi.size == 13
+    assert typed_meta.size == typed.itemsize * 3
+    assert mutable == bytearray()
+    assert base.get("mut.bin") == b"mutable-payload"
+    assert base.get("multi.bin") == b"part-a:part-b"
+    assert base.get("typed.bin") == typed.tobytes()
+
+
+_READ_AHEAD_OBJECT = bytes(range(256)) * 4096
+
+
+@pytest.mark.parametrize(("read_ahead", "after_reads", "after_seek"), [(4_194_304, 1, 1), (0, 16, 17)])
+def test_sync_reader_read_ahead_coalesces_range_calls(
+    monkeypatch: pytest.MonkeyPatch, read_ahead: int, after_reads: int, after_seek: int
+) -> None:
+    """Sixteen 4 KiB reads plus a backward seek share one cached window unless read-ahead is disabled."""
+    store = SyncObjectStore(MemoryConfig(namespace=f"read-ahead-sync-{read_ahead}"))
+    store.put("blob.bin", _READ_AHEAD_OBJECT)
+    calls: list[tuple[int, int]] = []
+    original = SyncObjectStore.get_range
+
+    def spy(self: SyncObjectStore, path: str, offset: int, length: int) -> bytes:
+        calls.append((offset, length))
+        return original(self, path, offset, length)
+
+    monkeypatch.setattr(SyncObjectStore, "get_range", spy)
+    with store.open_reader("blob.bin", read_ahead=read_ahead) as reader:
+        chunks = [reader.read(4096) for _ in range(16)]
+        assert b"".join(chunks) == _READ_AHEAD_OBJECT[:65536]
+        assert len(calls) == after_reads
+        assert reader.seek(1024) == 1024
+        assert reader.read(4096) == _READ_AHEAD_OBJECT[1024:5120]
+        assert reader.tell() == 5120
+    assert len(calls) == after_seek
+    if read_ahead:
+        assert calls == [(0, len(_READ_AHEAD_OBJECT))]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(("read_ahead", "after_reads", "after_seek"), [(4_194_304, 1, 1), (0, 16, 17)])
+async def test_async_reader_read_ahead_coalesces_range_calls(
+    monkeypatch: pytest.MonkeyPatch, read_ahead: int, after_reads: int, after_seek: int
+) -> None:
+    """AsyncReadableFile serves sub-window reads and backward seeks from one cached range."""
+    store = AsyncObjectStore(MemoryConfig(namespace=f"read-ahead-async-{read_ahead}"))
+    await store.put("blob.bin", _READ_AHEAD_OBJECT)
+    calls: list[tuple[int, int]] = []
+    original = AsyncObjectStore.get_range
+
+    async def spy(self: AsyncObjectStore, path: str, offset: int, length: int) -> bytes:
+        calls.append((offset, length))
+        return await original(self, path, offset, length)
+
+    monkeypatch.setattr(AsyncObjectStore, "get_range", spy)
+    async with store.open_reader("blob.bin", read_ahead=read_ahead) as reader:
+        chunks = [await reader.read(4096) for _ in range(16)]
+        assert b"".join(chunks) == _READ_AHEAD_OBJECT[:65536]
+        assert len(calls) == after_reads
+        assert reader.seek(1024) == 1024
+        assert await reader.read(4096) == _READ_AHEAD_OBJECT[1024:5120]
+    assert len(calls) == after_seek
+    if read_ahead:
+        assert calls == [(0, len(_READ_AHEAD_OBJECT))]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+async def test_reader_bypasses_cache_for_large_reads_and_refills_on_miss(
+    monkeypatch: pytest.MonkeyPatch, asynchronous: bool
+) -> None:
+    """Reads at least read_ahead long bypass the cache and window misses refetch bounded by EOF."""
+    calls: list[tuple[int, int]] = []
+    data = bytes(range(256)) * 16
+    if asynchronous:
+        async_store = AsyncObjectStore(MemoryConfig(namespace="bypass-async"))
+        await async_store.put("blob.bin", data)
+        async_original = AsyncObjectStore.get_range
+
+        async def async_spy(self: AsyncObjectStore, path: str, offset: int, length: int) -> bytes:
+            calls.append((offset, length))
+            return await async_original(self, path, offset, length)
+
+        monkeypatch.setattr(AsyncObjectStore, "get_range", async_spy)
+        async_reader = async_store.open_reader("blob.bin", size=len(data), read_ahead=1024)
+        assert await async_reader.read(1024) == data[:1024]
+        assert await async_reader.read(100) == data[1024:1124]
+        assert await async_reader.read(50) == data[1124:1174]
+        async_reader.seek(len(data) - 10)
+        assert await async_reader.read(100) == data[-10:]
+    else:
+        store = SyncObjectStore(MemoryConfig(namespace="bypass-sync"))
+        store.put("blob.bin", data)
+        original = SyncObjectStore.get_range
+
+        def spy(self: SyncObjectStore, path: str, offset: int, length: int) -> bytes:
+            calls.append((offset, length))
+            return original(self, path, offset, length)
+
+        monkeypatch.setattr(SyncObjectStore, "get_range", spy)
+        reader = store.open_reader("blob.bin", read_ahead=1024)
+        assert reader.read(1024) == data[:1024]
+        assert reader.read(100) == data[1024:1124]
+        assert reader.read(50) == data[1124:1174]
+        reader.seek(len(data) - 10)
+        assert reader.read(100) == data[-10:]
+    assert calls == [(0, 1024), (1024, 1024), (len(data) - 10, 10)]
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+def test_open_reader_rejects_negative_read_ahead(asynchronous: bool) -> None:
+    """read_ahead below zero raises ValueError on both reader flavors."""
+    store: Any = AsyncObjectStore("memory://") if asynchronous else SyncObjectStore("memory://")
+    with pytest.raises(ValueError, match="read_ahead"):
+        store.open_reader("missing.bin", size=10, read_ahead=-1)
+
+
+_WRITER_CHUNK = 1_048_576
+_WRITER_TOTAL = 20 * _WRITER_CHUNK
+
+
+def _writer_chunk(index: int) -> bytes:
+    """Return a deterministic 1 MiB chunk distinct per index."""
+    return bytes([index % 251]) * _WRITER_CHUNK
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+async def test_open_writer_streams_multipart_parts_from_reusable_bytearray(asynchronous: bool) -> None:
+    """A 20 MiB stream flushes 8 MiB parts, completes with an etag, and never pins the caller's bytearray."""
+    store, base, native = _recording_store(f"writer-20mib-{asynchronous}", asynchronous)
+    scratch = bytearray()
+    if asynchronous:
+        async with store.open_writer("big.bin", part_size=8_388_608, content_type="application/octet-stream") as wf:
+            assert isinstance(wf, AsyncWritableFile)
+            assert native.uploads == 0
+            for index in range(20):
+                scratch += _writer_chunk(index)
+                assert await wf.write(scratch) == _WRITER_CHUNK
+                scratch.clear()
+            assert wf.tell() == _WRITER_TOTAL
+    else:
+        with store.open_writer("big.bin", part_size=8_388_608, content_type="application/octet-stream") as wf:
+            assert isinstance(wf, SyncWritableFile)
+            assert native.uploads == 0
+            for index in range(20):
+                scratch += _writer_chunk(index)
+                assert wf.write(scratch) == _WRITER_CHUNK
+                scratch.clear()
+            assert wf.tell() == _WRITER_TOTAL
+    assert wf.closed
+    assert isinstance(wf.result, PutResult)
+    assert wf.result.etag
+    assert wf.result.size == _WRITER_TOTAL
+    assert native.uploads == 1
+    assert native.parts == [8_388_608, 8_388_608, 4_194_304]
+    assert base.get("big.bin") == b"".join(_writer_chunk(index) for index in range(20))
+    assert base.head("big.bin").content_type == "application/octet-stream"
+
+
+def test_sync_writer_supports_gzip_and_buffered_writer() -> None:
+    """SyncWritableFile is a RawIOBase usable by gzip.GzipFile and io.BufferedWriter."""
+    store = SyncObjectStore(MemoryConfig(namespace="writer-stdlib"))
+    payload = b"vertebra-streaming-writer\n" * 50_000
+
+    with store.open_writer("data.gz", part_size=65536) as wf, gzip.GzipFile(fileobj=wf, mode="wb") as gz:
+        gz.write(payload)
+    assert gzip.decompress(store.get("data.gz")) == payload
+
+    raw = store.open_writer("buffered.bin", part_size=65536)
+    with io.BufferedWriter(raw, buffer_size=4096) as buffered:
+        buffered.write(payload)
+    assert raw.closed
+    assert raw.result is not None
+    assert raw.result.size == len(payload)
+    assert store.get("buffered.bin") == payload
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("part_size", [8_388_608, 4])
+async def test_open_writer_aborts_on_exception(asynchronous: bool, part_size: int) -> None:
+    """An exception inside the writer context propagates and leaves no object behind."""
+    store, base, native = _recording_store(f"writer-abort-{asynchronous}-{part_size}", asynchronous)
+    with pytest.raises(ValueError, match="boom"):
+        if asynchronous:
+            async with store.open_writer("aborted.bin", part_size=part_size) as wf:
+                await wf.write(b"partial-payload")
+                raise ValueError("boom")
+        else:
+            with store.open_writer("aborted.bin", part_size=part_size) as wf:
+                wf.write(b"partial-payload")
+                raise ValueError("boom")
+    assert wf.closed
+    assert wf.result is None
+    assert not base.exists("aborted.bin")
+    assert native.parts == ([] if part_size > 4 else [4, 4, 4])
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+async def test_open_writer_explicit_abort_and_closed_writes(asynchronous: bool) -> None:
+    """abort() discards the upload and later writes fail as closed-file errors."""
+    store, base, _native = _recording_store(f"writer-explicit-abort-{asynchronous}", asynchronous)
+    wf = store.open_writer("dropped.bin", part_size=4)
+    if asynchronous:
+        await wf.write(b"0123456789")
+        await wf.abort()
+        with pytest.raises(ValueError, match="closed"):
+            await wf.write(b"more")
+        await wf.aclose()
+    else:
+        wf.write(b"0123456789")
+        wf.abort()
+        with pytest.raises(ValueError, match="closed"):
+            wf.write(b"more")
+        wf.close()
+    assert wf.closed
+    assert wf.result is None
+    assert not base.exists("dropped.bin")
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+async def test_open_writer_zero_bytes_creates_empty_object(asynchronous: bool) -> None:
+    """Closing a writer that received no bytes completes a valid zero-byte object."""
+    store, base, _native = _recording_store(f"writer-empty-{asynchronous}", asynchronous)
+    if asynchronous:
+        async with store.open_writer("empty.bin") as wf:
+            assert await wf.write(b"") == 0
+    else:
+        with store.open_writer("empty.bin") as wf:
+            assert wf.write(b"") == 0
+    assert isinstance(wf.result, PutResult)
+    assert wf.result.size == 0
+    assert base.get("empty.bin") == b""
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+async def test_open_writer_if_not_exists_preserves_existing_object(asynchronous: bool) -> None:
+    """if_not_exists rejects completion over an existing key and keeps the original payload."""
+    store, base, _native = _recording_store(f"writer-precondition-{asynchronous}", asynchronous)
+    base.put("taken.bin", b"original")
+    with pytest.raises(FileExistsError):
+        if asynchronous:
+            async with store.open_writer("taken.bin", if_not_exists=True) as wf:
+                await wf.write(b"replacement")
+        else:
+            with store.open_writer("taken.bin", if_not_exists=True) as wf:
+                wf.write(b"replacement")
+    assert wf.closed
+    assert wf.result is None
+    assert base.get("taken.bin") == b"original"
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("part_size", [0, -1])
+def test_open_writer_rejects_non_positive_part_size(asynchronous: bool, part_size: int) -> None:
+    """part_size must be positive on both writer flavors."""
+    store: Any = AsyncObjectStore("memory://") if asynchronous else SyncObjectStore("memory://")
+    with pytest.raises(ValueError, match="part_size"):
+        store.open_writer("bad.bin", part_size=part_size)
+
+
+def test_storage_exports_writers_and_precondition_error() -> None:
+    """vertebra.storage re-exports the streaming writers and PreconditionError in a sorted __all__."""
+    assert storage.PreconditionError is PreconditionError
+    assert storage.SyncWritableFile is SyncWritableFile
+    assert storage.AsyncWritableFile is AsyncWritableFile
+    assert {"AsyncWritableFile", "PreconditionError", "SyncWritableFile"} <= set(storage.__all__)
+    assert list(storage.__all__) == sorted(storage.__all__)
+    assert issubclass(SyncWritableFile, io.RawIOBase)

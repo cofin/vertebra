@@ -214,7 +214,7 @@ def iter_batches_sync(
     """Decode batches on demand using native synchronous streams or ranges."""
     _validate_batch_size(batch_size)
     stream = None if file_format == "parquet" else store.get_stream(key)
-    source = store.open_reader(key) if stream is None else _StreamFile(lambda: next(stream, None))
+    source = store.open_reader(key, read_ahead=0) if stream is None else _StreamFile(lambda: next(stream, None))
     reader = _BatchReader()
     try:
         reader.open(source, file_format, batch_size, columns, options)
@@ -245,7 +245,7 @@ async def iter_batches_async(
     _validate_batch_size(batch_size)
     bridge = _CodecBridge()
     stream = None if file_format == "parquet" else store.get_stream(key)
-    backing = store.open_reader(key, size=(await store.head(key)).size) if stream is None else None
+    backing = store.open_reader(key, size=(await store.head(key)).size, read_ahead=0) if stream is None else None
     source = _RangeFile(backing, bridge) if backing is not None else _StreamFile(lambda: bridge.io(anext, stream, None))
     reader = _BatchReader()
     try:

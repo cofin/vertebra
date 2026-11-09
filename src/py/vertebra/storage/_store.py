@@ -16,7 +16,7 @@ import msgspec
 
 from vertebra._vertebra import AsyncGcpTokenCache, GcpTokenSnapshot, GoogleCloudAuthError, SyncGcpTokenCache
 from vertebra.storage import _arrow
-from vertebra.typing import ImproperConfigurationError, MissingDependencyError
+from vertebra.typing import ImproperConfigurationError, MissingDependencyError, PreconditionError
 from vertebra.utils.module_loader import import_optional
 from vertebra.utils.serializers import decode_json
 
@@ -27,6 +27,7 @@ __all__ = (
     "AsyncGcpTokenCache",
     "AsyncObjectStore",
     "AsyncReadableFile",
+    "AsyncWritableFile",
     "AzureConfig",
     "GCSConfig",
     "GcpTokenSnapshot",
@@ -35,6 +36,7 @@ __all__ = (
     "MemoryConfig",
     "OCIConfig",
     "ObjectMeta",
+    "PreconditionError",
     "PutResult",
     "R2Config",
     "S3Config",
@@ -43,6 +45,7 @@ __all__ = (
     "SyncGcpTokenCache",
     "SyncObjectStore",
     "SyncReadableFile",
+    "SyncWritableFile",
 )
 
 GCS_DEFAULT_SCOPES: Final[tuple[str, str]] = (
@@ -1063,6 +1066,23 @@ class _BaseObjectStore:
         return None
 
     @staticmethod
+    def _native_payload(data: Buffer) -> Buffer:
+        """Return a buffer the native layer accepts as unsigned bytes without wrapping plain byte buffers.
+
+        ``bytes``, ``bytearray``, and ``"B"``-format buffers (``memoryview``, ``StorageBuffer``) pass through
+        unchanged so ``bytes`` and ``StorageBuffer`` stay zero-copy in native extraction. Typed buffers such as
+        ``pyarrow.Buffer`` (``"b"``) or NumPy arrays need a flat ``"B"`` view because native extraction only
+        accepts ``u8`` element formats.
+        """
+        if isinstance(data, bytes | bytearray):
+            return data
+        view = memoryview(data)
+        if view.format == "B":
+            view.release()
+            return data
+        return view.cast("B")
+
+    @staticmethod
     def _native_to_put_result(native_meta: Any, fallback_etag: str = "") -> PutResult:
         """Convert a native ObjectMeta instance into a PutResult."""
         etag = getattr(native_meta, "etag", None) or fallback_etag
@@ -1513,19 +1533,18 @@ class SyncObjectStore(_BaseObjectStore):
         key = self._normalize_key(path)
         if self._local_root is not None:
             self._resolve_local(key)
-        view = memoryview(data).cast("B")
         norm_attrs = {str(k): str(v) for k, v in attributes.items()} if attributes is not None else None
         native = self._require_native()
         native_meta = native.put(
             key,
-            view,
+            self._native_payload(data),
             content_type=content_type,
             attributes=norm_attrs,
             if_not_exists=if_not_exists,
             if_match=if_match,
             if_none_match=if_none_match,
         )
-        fallback_etag = "" if getattr(native_meta, "etag", None) else f"{view.nbytes:016x}"
+        fallback_etag = "" if getattr(native_meta, "etag", None) else f"{int(native_meta.size):016x}"
         return self._native_to_put_result(native_meta, fallback_etag)
 
     def put_file(self, path: str, file_path: str | Path) -> PutResult:
@@ -1547,8 +1566,7 @@ class SyncObjectStore(_BaseObjectStore):
         if self._local_root is not None:
             self._resolve_local(key)
         native = self._require_native()
-        views = [memoryview(part).cast("B") for part in parts]
-        native_meta = native.put_multipart(key, views)
+        native_meta = native.put_multipart(key, [self._native_payload(part) for part in parts])
         return self._native_to_put_result(native_meta, f"{int(native_meta.size):016x}")
 
     def put_stream(
@@ -1727,9 +1745,41 @@ class SyncObjectStore(_BaseObjectStore):
         *,
         size: int | None = None,
         chunk_size: int = 65536,
+        read_ahead: int = 4_194_304,
     ) -> SyncReadableFile:
-        """Open a seekable read-only SyncReadableFile stream over the given object key."""
-        return SyncReadableFile(self, path, size=size, chunk_size=chunk_size)
+        """Open a seekable read-only SyncReadableFile stream over the given object key.
+
+        Reads shorter than ``read_ahead`` are served from one cached ``read_ahead``-byte range window;
+        ``read_ahead=0`` issues one range request per read.
+        """
+        return SyncReadableFile(self, path, size=size, chunk_size=chunk_size, read_ahead=read_ahead)
+
+    def open_writer(
+        self,
+        path: str,
+        *,
+        content_type: str | None = None,
+        attributes: Mapping[str, str] | None = None,
+        part_size: int = 8_388_608,
+        if_not_exists: bool = False,
+        if_match: str | None = None,
+        if_none_match: str | None = None,
+    ) -> SyncWritableFile:
+        """Open a write-only SyncWritableFile that streams buffered ``part_size`` slices into a multipart upload.
+
+        The upload is created lazily on the first full part or on close, completed by closing the
+        writer, and aborted by ``abort()`` or an exception escaping the context manager.
+        """
+        return SyncWritableFile(
+            self,
+            path,
+            content_type=content_type,
+            attributes=attributes,
+            part_size=part_size,
+            if_not_exists=if_not_exists,
+            if_match=if_match,
+            if_none_match=if_none_match,
+        )
 
     def open_readable_file(
         self,
@@ -1737,9 +1787,14 @@ class SyncObjectStore(_BaseObjectStore):
         *,
         size: int | None = None,
         chunk_size: int = 65536,
+        read_ahead: int = 4_194_304,
     ) -> SyncReadableFile:
-        """Open a seekable read-only SyncReadableFile stream over the given object key."""
-        return SyncReadableFile(self, path, size=size, chunk_size=chunk_size)
+        """Open a seekable read-only SyncReadableFile stream over the given object key.
+
+        Reads shorter than ``read_ahead`` are served from one cached ``read_ahead``-byte range window;
+        ``read_ahead=0`` issues one range request per read.
+        """
+        return SyncReadableFile(self, path, size=size, chunk_size=chunk_size, read_ahead=read_ahead)
 
     def sign(
         self,
@@ -1856,19 +1911,18 @@ class AsyncObjectStore(_BaseObjectStore):
         key = self._normalize_key(path)
         if self._local_root is not None:
             self._resolve_local(key)
-        view = memoryview(data).cast("B")
         norm_attrs = {str(k): str(v) for k, v in attributes.items()} if attributes is not None else None
         native = self._require_native()
         native_meta = await native.put(
             key,
-            view,
+            self._native_payload(data),
             content_type=content_type,
             attributes=norm_attrs,
             if_not_exists=if_not_exists,
             if_match=if_match,
             if_none_match=if_none_match,
         )
-        fallback_etag = "" if getattr(native_meta, "etag", None) else f"{view.nbytes:016x}"
+        fallback_etag = "" if getattr(native_meta, "etag", None) else f"{int(native_meta.size):016x}"
         return self._native_to_put_result(native_meta, fallback_etag)
 
     async def put_file(self, path: str, file_path: str | Path) -> PutResult:
@@ -1890,8 +1944,7 @@ class AsyncObjectStore(_BaseObjectStore):
         if self._local_root is not None:
             self._resolve_local(key)
         native = self._require_native()
-        views = [memoryview(part).cast("B") for part in parts]
-        native_meta = await native.put_multipart(key, views)
+        native_meta = await native.put_multipart(key, [self._native_payload(part) for part in parts])
         return self._native_to_put_result(native_meta, f"{int(native_meta.size):016x}")
 
     async def put_stream(
@@ -2076,9 +2129,41 @@ class AsyncObjectStore(_BaseObjectStore):
         *,
         size: int | None = None,
         chunk_size: int = 65536,
+        read_ahead: int = 4_194_304,
     ) -> AsyncReadableFile:
-        """Open a seekable read-only AsyncReadableFile stream over the given object key."""
-        return AsyncReadableFile(self, path, size=size, chunk_size=chunk_size)
+        """Open a seekable read-only AsyncReadableFile stream over the given object key.
+
+        Reads shorter than ``read_ahead`` are served from one cached ``read_ahead``-byte range window;
+        ``read_ahead=0`` issues one range request per read.
+        """
+        return AsyncReadableFile(self, path, size=size, chunk_size=chunk_size, read_ahead=read_ahead)
+
+    def open_writer(
+        self,
+        path: str,
+        *,
+        content_type: str | None = None,
+        attributes: Mapping[str, str] | None = None,
+        part_size: int = 8_388_608,
+        if_not_exists: bool = False,
+        if_match: str | None = None,
+        if_none_match: str | None = None,
+    ) -> AsyncWritableFile:
+        """Open a write-only AsyncWritableFile that streams buffered ``part_size`` slices into a multipart upload.
+
+        The upload is created lazily on the first full part or on close, completed by closing the
+        writer, and aborted by ``abort()`` or an exception escaping the context manager.
+        """
+        return AsyncWritableFile(
+            self,
+            path,
+            content_type=content_type,
+            attributes=attributes,
+            part_size=part_size,
+            if_not_exists=if_not_exists,
+            if_match=if_match,
+            if_none_match=if_none_match,
+        )
 
     def open_readable_file(
         self,
@@ -2086,9 +2171,14 @@ class AsyncObjectStore(_BaseObjectStore):
         *,
         size: int | None = None,
         chunk_size: int = 65536,
+        read_ahead: int = 4_194_304,
     ) -> AsyncReadableFile:
-        """Open a seekable read-only AsyncReadableFile stream over the given object key."""
-        return AsyncReadableFile(self, path, size=size, chunk_size=chunk_size)
+        """Open a seekable read-only AsyncReadableFile stream over the given object key.
+
+        Reads shorter than ``read_ahead`` are served from one cached ``read_ahead``-byte range window;
+        ``read_ahead=0`` issues one range request per read.
+        """
+        return AsyncReadableFile(self, path, size=size, chunk_size=chunk_size, read_ahead=read_ahead)
 
     async def sign(
         self,
@@ -2126,10 +2216,12 @@ class SyncReadableFile(io.RawIOBase):
     """Seekable synchronous read-only file-like object backed by SyncObjectStore range and stream reads.
 
     Enables PyArrow, Polars, and DataFusion to inspect Parquet footer metadata and read
-    targeted row-group byte slices without downloading full multi-gigabyte blobs.
+    targeted row-group byte slices without downloading full multi-gigabyte blobs. Reads shorter
+    than ``read_ahead`` are served from one cached range window so small sequential and backward
+    reads within the window cost a single ``get_range`` call.
     """
 
-    __slots__ = ("_chunk_size", "_closed", "_key", "_pos", "_size", "_store")
+    __slots__ = ("_buf", "_buf_start", "_chunk_size", "_closed", "_key", "_pos", "_read_ahead", "_size", "_store")
 
     def __init__(
         self,
@@ -2138,15 +2230,22 @@ class SyncReadableFile(io.RawIOBase):
         *,
         size: int | None = None,
         chunk_size: int = 65536,
+        read_ahead: int = 4_194_304,
     ) -> None:
         super().__init__()
         if chunk_size < 1:
             msg = "chunk_size must be >= 1"
             raise ValueError(msg)
+        if read_ahead < 0:
+            msg = "read_ahead must be >= 0"
+            raise ValueError(msg)
         self._store = store
         self._key = key
         self._size = store.head(key).size if size is None else size
         self._chunk_size = chunk_size
+        self._read_ahead = read_ahead
+        self._buf = b""
+        self._buf_start = 0
         self._pos = 0
         self._closed = False
 
@@ -2204,7 +2303,10 @@ class SyncReadableFile(io.RawIOBase):
         return self._pos
 
     def seek(self, offset: int, whence: int = io.SEEK_SET) -> int:
-        """Move the read cursor to a new byte offset and return the updated position."""
+        """Move the read cursor to a new byte offset and return the updated position.
+
+        Seeking only moves the cursor, so a cached read-ahead window stays valid for later reads.
+        """
         self._ensure_open()
         if whence == io.SEEK_SET:
             target = offset
@@ -2230,7 +2332,15 @@ class SyncReadableFile(io.RawIOBase):
         length = remaining if (size is None or size < 0) else min(size, remaining)
         if length <= 0:
             return b""
-        data = self._store.get_range(self._key, self._pos, length)
+        offset = self._pos - self._buf_start
+        if self._read_ahead == 0 or length >= self._read_ahead:
+            data = self._store.get_range(self._key, self._pos, length)
+        elif offset >= 0 and offset + length <= len(self._buf):
+            data = self._buf[offset : offset + length]
+        else:
+            self._buf = self._store.get_range(self._key, self._pos, min(self._read_ahead, remaining))
+            self._buf_start = self._pos
+            data = self._buf[:length]
         self._pos += len(data)
         return data
 
@@ -2246,7 +2356,7 @@ class SyncReadableFile(io.RawIOBase):
         return count
 
     def read_at(self, offset: int, length: int) -> bytes:
-        """Read length bytes at offset without mutating the stream cursor."""
+        """Read length bytes at offset without mutating the stream cursor or read-ahead window."""
         self._ensure_open()
         if offset < 0 or length < 0:
             msg = "offset and length must be non-negative"
@@ -2257,8 +2367,9 @@ class SyncReadableFile(io.RawIOBase):
         return self._store.get_range(self._key, offset, bounded_len)
 
     def close(self) -> None:
-        """Mark the file handle as closed."""
+        """Mark the file handle as closed and release the read-ahead window."""
         self._closed = True
+        self._buf = b""
         super().close()
 
     def _ensure_open(self) -> None:
@@ -2268,9 +2379,13 @@ class SyncReadableFile(io.RawIOBase):
 
 
 class AsyncReadableFile:
-    """Seekable asynchronous read-only stream backed by AsyncObjectStore range and stream reads."""
+    """Seekable asynchronous read-only stream backed by AsyncObjectStore range and stream reads.
 
-    __slots__ = ("_chunk_size", "_closed", "_key", "_pos", "_size", "_store")
+    Reads shorter than ``read_ahead`` are served from one cached range window so small sequential
+    and backward reads within the window cost a single ``get_range`` call.
+    """
+
+    __slots__ = ("_buf", "_buf_start", "_chunk_size", "_closed", "_key", "_pos", "_read_ahead", "_size", "_store")
 
     def __init__(
         self,
@@ -2279,14 +2394,21 @@ class AsyncReadableFile:
         *,
         size: int | None = None,
         chunk_size: int = 65536,
+        read_ahead: int = 4_194_304,
     ) -> None:
         if chunk_size < 1:
             msg = "chunk_size must be >= 1"
+            raise ValueError(msg)
+        if read_ahead < 0:
+            msg = "read_ahead must be >= 0"
             raise ValueError(msg)
         self._store = store
         self._key = key
         self._size = size
         self._chunk_size = chunk_size
+        self._read_ahead = read_ahead
+        self._buf = b""
+        self._buf_start = 0
         self._pos = 0
         self._closed = False
 
@@ -2346,7 +2468,10 @@ class AsyncReadableFile:
         return self._pos
 
     def seek(self, offset: int, whence: int = io.SEEK_SET) -> int:
-        """Move the read cursor to a new byte offset and return the updated position."""
+        """Move the read cursor to a new byte offset and return the updated position.
+
+        Seeking only moves the cursor, so a cached read-ahead window stays valid for later reads.
+        """
         self._ensure_open()
         if whence == io.SEEK_SET:
             target = offset
@@ -2381,7 +2506,15 @@ class AsyncReadableFile:
         length = remaining if (size is None or size < 0) else min(size, remaining)
         if length <= 0:
             return b""
-        data = await self._store.get_range(self._key, self._pos, length)
+        offset = self._pos - self._buf_start
+        if self._read_ahead == 0 or length >= self._read_ahead:
+            data = await self._store.get_range(self._key, self._pos, length)
+        elif offset >= 0 and offset + length <= len(self._buf):
+            data = self._buf[offset : offset + length]
+        else:
+            self._buf = await self._store.get_range(self._key, self._pos, min(self._read_ahead, remaining))
+            self._buf_start = self._pos
+            data = self._buf[:length]
         self._pos += len(data)
         return data
 
@@ -2397,7 +2530,7 @@ class AsyncReadableFile:
         return count
 
     async def read_at(self, offset: int, length: int) -> bytes:
-        """Asynchronously read length bytes at offset without mutating the stream cursor."""
+        """Asynchronously read length bytes at offset without mutating the stream cursor or read-ahead window."""
         self._ensure_open()
         if offset < 0 or length < 0:
             msg = "offset and length must be non-negative"
@@ -2411,8 +2544,9 @@ class AsyncReadableFile:
         return await self._store.get_range(self._key, offset, bounded_len)
 
     def close(self) -> None:
-        """Mark the file handle as closed."""
+        """Mark the file handle as closed and release the read-ahead window."""
         self._closed = True
+        self._buf = b""
 
     def _ensure_open(self) -> None:
         if self._closed:
@@ -2424,3 +2558,344 @@ class AsyncReadableFile:
             meta = await self._store.head(self._key)
             self._size = meta.size
         return self._size
+
+
+class SyncWritableFile(io.RawIOBase):
+    """Write-only synchronous stream that uploads buffered ``part_size`` slices through a native multipart upload.
+
+    Written bytes are copied into a rolling buffer, so callers may reuse or clear their own buffers
+    immediately after ``write`` returns. The multipart upload is created on the first full part or on
+    close; ``close()`` uploads the remaining tail and completes the object (a writer that received no
+    bytes completes a valid zero-byte object), while ``abort()`` or an exception escaping the context
+    manager discards it. A writer collected without being closed aborts instead of committing a
+    partial object. Inheriting ``io.RawIOBase`` lets ``gzip.GzipFile`` and ``io.BufferedWriter``
+    wrap it directly.
+    """
+
+    __slots__ = (
+        "_attributes",
+        "_buffer",
+        "_closed",
+        "_content_type",
+        "_if_match",
+        "_if_none_match",
+        "_if_not_exists",
+        "_key",
+        "_part_size",
+        "_result",
+        "_store",
+        "_upload",
+        "_written",
+    )
+
+    def __init__(
+        self,
+        store: SyncObjectStore,
+        key: str,
+        *,
+        content_type: str | None = None,
+        attributes: Mapping[str, str] | None = None,
+        part_size: int = 8_388_608,
+        if_not_exists: bool = False,
+        if_match: str | None = None,
+        if_none_match: str | None = None,
+    ) -> None:
+        super().__init__()
+        self._closed = True
+        self._upload: Any = None
+        if part_size <= 0:
+            msg = "part_size must be > 0"
+            raise ValueError(msg)
+        self._store = store
+        self._key = store._normalize_key(key)
+        if store._local_root is not None:
+            store._resolve_local(self._key)
+        self._content_type = content_type
+        self._attributes = {str(k): str(v) for k, v in attributes.items()} if attributes is not None else None
+        self._part_size = part_size
+        self._if_not_exists = if_not_exists
+        self._if_match = if_match
+        self._if_none_match = if_none_match
+        self._buffer = bytearray()
+        self._written = 0
+        self._result: PutResult | None = None
+        self._closed = False
+
+    @property
+    def closed(self) -> bool:
+        """Return True once the writer has been completed or aborted."""
+        return self._closed
+
+    @property
+    def result(self) -> PutResult | None:
+        """Return the completed upload metadata, or None until a successful close."""
+        return self._result
+
+    def __enter__(self) -> Self:
+        """Enter the context manager and return self."""
+        return self
+
+    def __exit__(self, exc_type: object, exc_val: object, exc_tb: object) -> None:
+        """Complete the upload on success or abort it when an exception escapes, re-raising the exception."""
+        _ = (exc_val, exc_tb)
+        if exc_type is None:
+            self.close()
+        else:
+            self.abort()
+
+    def __del__(self) -> None:
+        """Abort an unclosed upload on collection so a partial object is never committed."""
+        if not self._closed:
+            with contextlib.suppress(Exception):
+                self.abort()
+
+    def readable(self) -> bool:
+        """Return False indicating this stream is write-only."""
+        return False
+
+    def seekable(self) -> bool:
+        """Return False indicating this stream only appends."""
+        return False
+
+    def writable(self) -> bool:
+        """Return True indicating this stream supports writing."""
+        return True
+
+    def tell(self) -> int:
+        """Return the total number of bytes accepted by ``write``."""
+        self._ensure_open()
+        return self._written
+
+    def write(self, b: Buffer, /) -> int:
+        """Copy a buffer into the rolling part buffer, upload every full part, and return the byte count."""
+        self._ensure_open()
+        with memoryview(b) as view:
+            count = view.nbytes
+            self._buffer += view
+        self._written += count
+        while len(self._buffer) >= self._part_size:
+            self._ensure_upload().write_part(self._take_part())
+        return count
+
+    def close(self) -> None:
+        """Upload the buffered tail and complete the multipart upload, aborting it if completion fails."""
+        if self._closed:
+            return
+        try:
+            upload = self._ensure_upload()
+            if self._buffer:
+                upload.write_part(self._take_part())
+            native_meta = upload.complete()
+        except BaseException:
+            self.abort()
+            raise
+        self._upload = None
+        self._closed = True
+        fallback_etag = "" if getattr(native_meta, "etag", None) else f"{int(native_meta.size):016x}"
+        self._result = self._store._native_to_put_result(native_meta, fallback_etag)
+        super().close()
+
+    def abort(self) -> None:
+        """Discard buffered bytes and abort the multipart upload without committing an object."""
+        if self._closed:
+            return
+        self._closed = True
+        self._buffer = bytearray()
+        upload, self._upload = self._upload, None
+        if upload is not None:
+            with contextlib.suppress(Exception):
+                upload.abort()
+        super().close()
+
+    def _ensure_open(self) -> None:
+        if self._closed:
+            msg = "I/O operation on closed SyncWritableFile"
+            raise ValueError(msg)
+
+    def _ensure_upload(self) -> Any:
+        if self._upload is None:
+            self._upload = self._store._require_native().create_multipart(
+                self._key,
+                content_type=self._content_type,
+                attributes=self._attributes,
+                if_not_exists=self._if_not_exists,
+                if_match=self._if_match,
+                if_none_match=self._if_none_match,
+            )
+        return self._upload
+
+    def _take_part(self) -> bytes:
+        """Copy the next part out of the rolling buffer as immutable bytes and drop it from the buffer.
+
+        Returning ``bytes`` keeps the native upload zero-copy over an object the writer never mutates.
+        """
+        size = min(self._part_size, len(self._buffer))
+        with memoryview(self._buffer) as view:
+            part = bytes(view[:size])
+        del self._buffer[:size]
+        return part
+
+
+class AsyncWritableFile:
+    """Write-only asynchronous stream that uploads buffered ``part_size`` slices through a native multipart upload.
+
+    Written bytes are copied into a rolling buffer, so callers may reuse or clear their own buffers
+    immediately after ``await write(...)`` returns. The multipart upload is created on the first full
+    part or on close; ``aclose()`` uploads the remaining tail and completes the object (a writer that
+    received no bytes completes a valid zero-byte object), while ``abort()`` or an exception escaping
+    ``async with`` discards it.
+    """
+
+    __slots__ = (
+        "_attributes",
+        "_buffer",
+        "_closed",
+        "_content_type",
+        "_if_match",
+        "_if_none_match",
+        "_if_not_exists",
+        "_key",
+        "_part_size",
+        "_result",
+        "_store",
+        "_upload",
+        "_written",
+    )
+
+    def __init__(
+        self,
+        store: AsyncObjectStore,
+        key: str,
+        *,
+        content_type: str | None = None,
+        attributes: Mapping[str, str] | None = None,
+        part_size: int = 8_388_608,
+        if_not_exists: bool = False,
+        if_match: str | None = None,
+        if_none_match: str | None = None,
+    ) -> None:
+        if part_size <= 0:
+            msg = "part_size must be > 0"
+            raise ValueError(msg)
+        self._store = store
+        self._key = store._normalize_key(key)
+        if store._local_root is not None:
+            store._resolve_local(self._key)
+        self._content_type = content_type
+        self._attributes = {str(k): str(v) for k, v in attributes.items()} if attributes is not None else None
+        self._part_size = part_size
+        self._if_not_exists = if_not_exists
+        self._if_match = if_match
+        self._if_none_match = if_none_match
+        self._buffer = bytearray()
+        self._written = 0
+        self._upload: Any = None
+        self._result: PutResult | None = None
+        self._closed = False
+
+    @property
+    def closed(self) -> bool:
+        """Return True once the writer has been completed or aborted."""
+        return self._closed
+
+    @property
+    def result(self) -> PutResult | None:
+        """Return the completed upload metadata, or None until a successful close."""
+        return self._result
+
+    async def __aenter__(self) -> Self:
+        """Enter the async context manager and return self."""
+        return self
+
+    async def __aexit__(self, exc_type: object, exc_val: object, exc_tb: object) -> None:
+        """Complete the upload on success or abort it when an exception escapes, re-raising the exception."""
+        _ = (exc_val, exc_tb)
+        if exc_type is None:
+            await self.aclose()
+        else:
+            await self.abort()
+
+    def readable(self) -> bool:
+        """Return False indicating this stream is write-only."""
+        return False
+
+    def seekable(self) -> bool:
+        """Return False indicating this stream only appends."""
+        return False
+
+    def writable(self) -> bool:
+        """Return True indicating this stream supports writing."""
+        return True
+
+    def tell(self) -> int:
+        """Return the total number of bytes accepted by ``write``."""
+        self._ensure_open()
+        return self._written
+
+    async def write(self, b: Buffer, /) -> int:
+        """Copy a buffer into the rolling part buffer, upload every full part, and return the byte count."""
+        self._ensure_open()
+        with memoryview(b) as view:
+            count = view.nbytes
+            self._buffer += view
+        self._written += count
+        while len(self._buffer) >= self._part_size:
+            upload = await self._ensure_upload()
+            await upload.write_part(self._take_part())
+        return count
+
+    async def aclose(self) -> None:
+        """Upload the buffered tail and complete the multipart upload, aborting it if completion fails."""
+        if self._closed:
+            return
+        try:
+            upload = await self._ensure_upload()
+            if self._buffer:
+                await upload.write_part(self._take_part())
+            native_meta = await upload.complete()
+        except BaseException:
+            await self.abort()
+            raise
+        self._upload = None
+        self._closed = True
+        fallback_etag = "" if getattr(native_meta, "etag", None) else f"{int(native_meta.size):016x}"
+        self._result = self._store._native_to_put_result(native_meta, fallback_etag)
+
+    async def abort(self) -> None:
+        """Discard buffered bytes and abort the multipart upload without committing an object."""
+        if self._closed:
+            return
+        self._closed = True
+        self._buffer = bytearray()
+        upload, self._upload = self._upload, None
+        if upload is not None:
+            with contextlib.suppress(Exception):
+                await upload.abort()
+
+    def _ensure_open(self) -> None:
+        if self._closed:
+            msg = "I/O operation on closed AsyncWritableFile"
+            raise ValueError(msg)
+
+    async def _ensure_upload(self) -> Any:
+        if self._upload is None:
+            self._upload = await self._store._require_native().create_multipart(
+                self._key,
+                content_type=self._content_type,
+                attributes=self._attributes,
+                if_not_exists=self._if_not_exists,
+                if_match=self._if_match,
+                if_none_match=self._if_none_match,
+            )
+        return self._upload
+
+    def _take_part(self) -> bytes:
+        """Copy the next part out of the rolling buffer as immutable bytes and drop it from the buffer.
+
+        Returning ``bytes`` keeps the native upload zero-copy over an object the writer never mutates.
+        """
+        size = min(self._part_size, len(self._buffer))
+        with memoryview(self._buffer) as view:
+            part = bytes(view[:size])
+        del self._buffer[:size]
+        return part

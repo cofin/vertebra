@@ -4,6 +4,7 @@ from vertebra.storage._store import (
     AsyncGcpTokenCache,
     AsyncObjectStore,
     AsyncReadableFile,
+    AsyncWritableFile,
     AzureConfig,
     GcpTokenSnapshot,
     GCSConfig,
@@ -12,6 +13,7 @@ from vertebra.storage._store import (
     MemoryConfig,
     ObjectMeta,
     OCIConfig,
+    PreconditionError,
     PutResult,
     R2Config,
     S3Config,
@@ -20,6 +22,7 @@ from vertebra.storage._store import (
     SyncGcpTokenCache,
     SyncObjectStore,
     SyncReadableFile,
+    SyncWritableFile,
 )
 from vertebra.storage._streaming import ByteRange, RangeNotSatisfiableError, StreamingStorageResponse, parse_byte_range
 
@@ -27,6 +30,7 @@ __all__ = (
     "AsyncGcpTokenCache",
     "AsyncObjectStore",
     "AsyncReadableFile",
+    "AsyncWritableFile",
     "AzureConfig",
     "ByteRange",
     "GCSConfig",
@@ -36,6 +40,7 @@ __all__ = (
     "MemoryConfig",
     "OCIConfig",
     "ObjectMeta",
+    "PreconditionError",
     "PutResult",
     "R2Config",
     "RangeNotSatisfiableError",
@@ -46,5 +51,6 @@ __all__ = (
     "SyncGcpTokenCache",
     "SyncObjectStore",
     "SyncReadableFile",
+    "SyncWritableFile",
     "parse_byte_range",
 )
