@@ -42,160 +42,6 @@ __all__ = (
 _TX_SAVEPOINT_COUNTER = itertools.count(1)
 
 
-class _SyncDuckDBCursor:
-    """Synchronous DBAPI-style cursor delegating to `SyncDuckDBDriver`."""
-
-    __slots__ = ("_driver", "_pos", "_rows", "arraysize", "description", "rowcount")
-
-    def __init__(self, driver: SyncDuckDBDriver) -> None:
-        self._driver = driver
-        self._rows: list[tuple[Any, ...]] = []
-        self._pos: int = 0
-        self.arraysize: int = 1
-        self.description: tuple[tuple[str, None, None, None, None, None, None], ...] | None = None
-        self.rowcount: int = -1
-
-    def __enter__(self) -> Self:
-        return self
-
-    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
-        self.close()
-
-    def execute(
-        self,
-        sql: str,
-        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
-    ) -> Self:
-        """Execute a statement or query and populate cursor state."""
-        if DuckDBCore.is_write_statement(sql):
-            self.rowcount = self._driver.execute(sql, parameters)
-            self._rows = []
-            self._pos = 0
-            self.description = None
-            return self
-        rows, cols = self._driver.execute_with_description(sql, parameters)
-        self._rows = rows
-        self._pos = 0
-        self.rowcount = len(rows)
-        self.description = tuple((col, None, None, None, None, None, None) for col in cols) if cols else None
-        return self
-
-    def executemany(
-        self,
-        sql: str,
-        parameter_sets: Sequence[Sequence[Any] | Mapping[str, Any]],
-    ) -> Self:
-        """Execute a statement across multiple parameter sets."""
-        self.rowcount = self._driver.execute_many(sql, parameter_sets)
-        self._rows = []
-        self._pos = 0
-        self.description = None
-        return self
-
-    def fetchone(self) -> tuple[Any, ...] | None:
-        """Return the next row tuple or `None` when exhausted."""
-        if self._pos >= len(self._rows):
-            return None
-        row = self._rows[self._pos]
-        self._pos += 1
-        return row
-
-    def fetchmany(self, size: int | None = None) -> list[tuple[Any, ...]]:
-        """Return up to `size` remaining row tuples."""
-        limit = self.arraysize if size is None else max(0, int(size))
-        batch = self._rows[self._pos : self._pos + limit]
-        self._pos += len(batch)
-        return batch
-
-    def fetchall(self) -> list[tuple[Any, ...]]:
-        """Return all remaining row tuples."""
-        rest = self._rows[self._pos :]
-        self._pos = len(self._rows)
-        return rest
-
-    def close(self) -> None:
-        """Clear buffered cursor rows."""
-        self._rows = []
-        self._pos = 0
-
-
-class _AsyncDuckDBCursor:
-    """Asynchronous cursor delegating to `AsyncDuckDBDriver`."""
-
-    __slots__ = ("_driver", "_pos", "_rows", "arraysize", "description", "rowcount")
-
-    def __init__(self, driver: AsyncDuckDBDriver) -> None:
-        self._driver = driver
-        self._rows: list[tuple[Any, ...]] = []
-        self._pos: int = 0
-        self.arraysize: int = 1
-        self.description: tuple[tuple[str, None, None, None, None, None, None], ...] | None = None
-        self.rowcount: int = -1
-
-    async def __aenter__(self) -> Self:
-        return self
-
-    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
-        await self.close()
-
-    async def execute(
-        self,
-        sql: str,
-        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
-    ) -> Self:
-        """Execute a statement or query asynchronously and populate cursor state."""
-        if DuckDBCore.is_write_statement(sql):
-            self.rowcount = await self._driver.execute(sql, parameters)
-            self._rows = []
-            self._pos = 0
-            self.description = None
-            return self
-        rows, cols = await self._driver.execute_with_description(sql, parameters)
-        self._rows = rows
-        self._pos = 0
-        self.rowcount = len(rows)
-        self.description = tuple((col, None, None, None, None, None, None) for col in cols) if cols else None
-        return self
-
-    async def executemany(
-        self,
-        sql: str,
-        parameter_sets: Sequence[Sequence[Any] | Mapping[str, Any]],
-    ) -> Self:
-        """Execute a statement across multiple parameter sets asynchronously."""
-        self.rowcount = await self._driver.execute_many(sql, parameter_sets)
-        self._rows = []
-        self._pos = 0
-        self.description = None
-        return self
-
-    async def fetchone(self) -> tuple[Any, ...] | None:
-        """Return the next row tuple or `None` when exhausted."""
-        if self._pos >= len(self._rows):
-            return None
-        row = self._rows[self._pos]
-        self._pos += 1
-        return row
-
-    async def fetchmany(self, size: int | None = None) -> list[tuple[Any, ...]]:
-        """Return up to `size` remaining row tuples."""
-        limit = self.arraysize if size is None else max(0, int(size))
-        batch = self._rows[self._pos : self._pos + limit]
-        self._pos += len(batch)
-        return batch
-
-    async def fetchall(self) -> list[tuple[Any, ...]]:
-        """Return all remaining row tuples."""
-        rest = self._rows[self._pos :]
-        self._pos = len(self._rows)
-        return rest
-
-    async def close(self) -> None:
-        """Clear buffered cursor rows."""
-        self._rows = []
-        self._pos = 0
-
-
 class SyncDuckDBDriver(SyncDatabaseDriver[DuckDBConfig]):
     """Synchronous DuckDB analytical driver backed by `vertebra._duckdb.SyncDuckDBClient`."""
 
@@ -1037,6 +883,160 @@ class AsyncDuckDBDriver(AsyncDatabaseDriver[DuckDBConfig]):
                         token=str(snapshot.access_token),
                         generation=int(snapshot.generation),
                     )
+
+
+class _SyncDuckDBCursor:
+    """Synchronous DBAPI-style cursor delegating to `SyncDuckDBDriver`."""
+
+    __slots__ = ("_driver", "_pos", "_rows", "arraysize", "description", "rowcount")
+
+    def __init__(self, driver: SyncDuckDBDriver) -> None:
+        self._driver = driver
+        self._rows: list[tuple[Any, ...]] = []
+        self._pos: int = 0
+        self.arraysize: int = 1
+        self.description: tuple[tuple[str, None, None, None, None, None, None], ...] | None = None
+        self.rowcount: int = -1
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        self.close()
+
+    def execute(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+    ) -> Self:
+        """Execute a statement or query and populate cursor state."""
+        if DuckDBCore.is_write_statement(sql):
+            self.rowcount = self._driver.execute(sql, parameters)
+            self._rows = []
+            self._pos = 0
+            self.description = None
+            return self
+        rows, cols = self._driver.execute_with_description(sql, parameters)
+        self._rows = rows
+        self._pos = 0
+        self.rowcount = len(rows)
+        self.description = tuple((col, None, None, None, None, None, None) for col in cols) if cols else None
+        return self
+
+    def executemany(
+        self,
+        sql: str,
+        parameter_sets: Sequence[Sequence[Any] | Mapping[str, Any]],
+    ) -> Self:
+        """Execute a statement across multiple parameter sets."""
+        self.rowcount = self._driver.execute_many(sql, parameter_sets)
+        self._rows = []
+        self._pos = 0
+        self.description = None
+        return self
+
+    def fetchone(self) -> tuple[Any, ...] | None:
+        """Return the next row tuple or `None` when exhausted."""
+        if self._pos >= len(self._rows):
+            return None
+        row = self._rows[self._pos]
+        self._pos += 1
+        return row
+
+    def fetchmany(self, size: int | None = None) -> list[tuple[Any, ...]]:
+        """Return up to `size` remaining row tuples."""
+        limit = self.arraysize if size is None else max(0, int(size))
+        batch = self._rows[self._pos : self._pos + limit]
+        self._pos += len(batch)
+        return batch
+
+    def fetchall(self) -> list[tuple[Any, ...]]:
+        """Return all remaining row tuples."""
+        rest = self._rows[self._pos :]
+        self._pos = len(self._rows)
+        return rest
+
+    def close(self) -> None:
+        """Clear buffered cursor rows."""
+        self._rows = []
+        self._pos = 0
+
+
+class _AsyncDuckDBCursor:
+    """Asynchronous cursor delegating to `AsyncDuckDBDriver`."""
+
+    __slots__ = ("_driver", "_pos", "_rows", "arraysize", "description", "rowcount")
+
+    def __init__(self, driver: AsyncDuckDBDriver) -> None:
+        self._driver = driver
+        self._rows: list[tuple[Any, ...]] = []
+        self._pos: int = 0
+        self.arraysize: int = 1
+        self.description: tuple[tuple[str, None, None, None, None, None, None], ...] | None = None
+        self.rowcount: int = -1
+
+    async def __aenter__(self) -> Self:
+        return self
+
+    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        await self.close()
+
+    async def execute(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+    ) -> Self:
+        """Execute a statement or query asynchronously and populate cursor state."""
+        if DuckDBCore.is_write_statement(sql):
+            self.rowcount = await self._driver.execute(sql, parameters)
+            self._rows = []
+            self._pos = 0
+            self.description = None
+            return self
+        rows, cols = await self._driver.execute_with_description(sql, parameters)
+        self._rows = rows
+        self._pos = 0
+        self.rowcount = len(rows)
+        self.description = tuple((col, None, None, None, None, None, None) for col in cols) if cols else None
+        return self
+
+    async def executemany(
+        self,
+        sql: str,
+        parameter_sets: Sequence[Sequence[Any] | Mapping[str, Any]],
+    ) -> Self:
+        """Execute a statement across multiple parameter sets asynchronously."""
+        self.rowcount = await self._driver.execute_many(sql, parameter_sets)
+        self._rows = []
+        self._pos = 0
+        self.description = None
+        return self
+
+    async def fetchone(self) -> tuple[Any, ...] | None:
+        """Return the next row tuple or `None` when exhausted."""
+        if self._pos >= len(self._rows):
+            return None
+        row = self._rows[self._pos]
+        self._pos += 1
+        return row
+
+    async def fetchmany(self, size: int | None = None) -> list[tuple[Any, ...]]:
+        """Return up to `size` remaining row tuples."""
+        limit = self.arraysize if size is None else max(0, int(size))
+        batch = self._rows[self._pos : self._pos + limit]
+        self._pos += len(batch)
+        return batch
+
+    async def fetchall(self) -> list[tuple[Any, ...]]:
+        """Return all remaining row tuples."""
+        rest = self._rows[self._pos :]
+        self._pos = len(self._rows)
+        return rest
+
+    async def close(self) -> None:
+        """Clear buffered cursor rows."""
+        self._rows = []
+        self._pos = 0
 
 
 def _normalize_duckdb_param(value: Any) -> Any:

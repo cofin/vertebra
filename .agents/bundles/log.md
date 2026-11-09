@@ -6,9 +6,8 @@ Completed 6 tasks (`t01`–`t06`) and documentation sync (`a1af802c`) on `feat/n
 
 Durable synthesis and `/flow:sync` updates are committed in `database-drivers-and-dialers.md`, `query-pipeline-cdc-and-tenancy.md`, `workflow.md`, `polyglot-test-matrix.md`, `benchmarks-and-free-threaded.md`, `product.md`, `tech-stack.md`, `specs/native-data-platform/spec.md`, `AGENTS.md`, `pyo3-bridge`, `review-pyo3-bridge`, and `pyo3-bridge-{reviewer,specialist}.md` before contracting `.agents/bundles/specs/native-duckdb-driver/`.
 
-Recorded implementation caveats and pending review polish on `feat/native-duckdb-driver`:
+Recorded implementation notes on `feat/native-duckdb-driver`:
 - DuckDB `CREATE SECRET` DDL rejects `?` prepared parameters, so `DuckDBCore.build_gcs_secret_sql` renders bearer tokens and scopes as single-quoted SQL literals (`'` doubled, NUL/CR/LF rejected) for `CREATE OR REPLACE SECRET vertebra_gcs_adc`.
-- `pgo.py` (`EXTENSION_MANIFESTS`), `.github/workflows/release.yaml`, private cursor ordering in `duckdb/driver.py`, and residual `pytest.importorskip("duckdb")` guards in `test_driver_conformance.py::test_duckdb_url_and_arrow`, `test_gcs_token_refresh.py`, and `test_enterprise_olap_drivers.py` remain queued for the branch review/remediation pass alongside live Cargo + pytest verification.
 
 Functional task commits:
 - `native-duckdb-driver:t01`: `f5df6f98`.

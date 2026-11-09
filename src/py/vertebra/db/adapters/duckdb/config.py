@@ -20,14 +20,6 @@ __all__ = (
 )
 
 
-def _reject_nul(value: str, field_name: str) -> str:
-    """Raise `InterfaceError` when `value` contains an embedded NUL byte."""
-    if "\0" in value:
-        msg = f"DuckDB {field_name} must not contain NUL bytes"
-        raise InterfaceError(msg)
-    return value
-
-
 class DuckDBSecretConfig(FrozenBaseStruct, frozen=True, gc=False):
     """Cloud storage secret configuration (`CREATE SECRET`) for DuckDB `httpfs` / S3 / GCS / R2."""
 
@@ -200,3 +192,11 @@ def duckdb_bootstrap_statements(config: DuckDBConfig | None = None) -> list[str]
     """Generate post-init DuckDB `SET` statements for the given `DuckDBConfig`."""
     cfg = config or DuckDBConfig()
     return cfg.bootstrap_statements()
+
+
+def _reject_nul(value: str, field_name: str) -> str:
+    """Raise `InterfaceError` when `value` contains an embedded NUL byte."""
+    if "\0" in value:
+        msg = f"DuckDB {field_name} must not contain NUL bytes"
+        raise InterfaceError(msg)
+    return value

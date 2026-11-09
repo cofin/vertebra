@@ -210,7 +210,7 @@ py-test: dev                                        ## Run Python tests
 .PHONY: duckdb-test
 duckdb-test:                                        ## Run vertebra-duckdb Rust + Python unit and conformance tests
 	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
-	@cd src/rs && cargo test -p vertebra-duckdb --locked
+	@(cd src/rs && cargo test -p vertebra-duckdb --locked)
 	@uv run python -m mypy.stubtest vertebra._duckdb
 	@uv run pytest src/py/tests/unit/db/test_duckdb_driver.py src/py/tests/unit/db/test_optional_driver_wheels.py src/py/tests/integration/db/test_driver_conformance.py -k duckdb -v
 	@echo "${OK} DuckDB tests passed"

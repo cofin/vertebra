@@ -37,6 +37,10 @@ jobs:
             path: src/rs/vertebra-bundler
             module: vertebra._bundler
             exports: Bundler BundleConfig minify_css
+          - name: duckdb
+            path: src/rs/vertebra-duckdb
+            module: vertebra._duckdb
+            exports: SyncDuckDBClient AsyncDuckDBClient
           - name: spanner
             path: src/rs/vertebra-spanner
             module: vertebra._spanner
@@ -111,7 +115,7 @@ jobs:
       - name: Build source distributions
         run: |
           uv build --sdist --out-dir dist
-          for package in bigquery bundler spanner storage; do
+          for package in bigquery bundler duckdb spanner storage; do
             uv build "src/rs/vertebra-$package" --sdist --out-dir dist
           done
       - uses: actions/upload-artifact@v7
@@ -136,8 +140,8 @@ jobs:
         run: |
           version=$(uv run --no-project --python 3.12 python -c "from pathlib import Path; print(next(Path('dist').glob('vertebra_core-*.whl')).name.split('-')[1])")
           uv venv --python 3.12 "$RUNNER_TEMP/wheel-smoke"
-          uv pip install --python "$RUNNER_TEMP/wheel-smoke/bin/python" --no-index --no-deps --find-links "$GITHUB_WORKSPACE/dist" vertebra-core vertebra-bigquery vertebra-bundler vertebra-spanner vertebra-storage
-          uv pip install --python "$RUNNER_TEMP/wheel-smoke/bin/python" --only-binary :all: --find-links "$GITHUB_WORKSPACE/dist" "vertebra-core[bigquery,bundler,spanner,storage]==$version"
+          uv pip install --python "$RUNNER_TEMP/wheel-smoke/bin/python" --no-index --no-deps --find-links "$GITHUB_WORKSPACE/dist" vertebra-core vertebra-bigquery vertebra-bundler vertebra-duckdb vertebra-spanner vertebra-storage
+          uv pip install --python "$RUNNER_TEMP/wheel-smoke/bin/python" --only-binary :all: --find-links "$GITHUB_WORKSPACE/dist" "vertebra-core[bigquery,bundler,duckdb,spanner,storage]==$version"
       - name: Check installed namespace and native exports
         shell: bash
         working-directory: ${{ runner.temp }}
@@ -154,6 +158,7 @@ jobs:
           for name, exports in {
               "bigquery": ("SyncBigQueryClient", "AsyncBigQueryClient"),
               "bundler": ("Bundler", "BundleConfig", "minify_css"),
+              "duckdb": ("SyncDuckDBClient", "AsyncDuckDBClient"),
               "spanner": ("SyncSpannerClient", "AsyncSpannerClient"),
               "storage": ("SyncObjectStore", "AsyncObjectStore"),
           }.items():
@@ -162,6 +167,7 @@ jobs:
               assert all(hasattr(module, export) for export in exports)
               assert importlib.metadata.version(f"vertebra-{name}") == vertebra.__version__
           assert not hasattr(_vertebra, "SyncBigQueryClient")
+          assert not hasattr(_vertebra, "SyncDuckDBClient")
           assert not hasattr(_vertebra, "SyncSpannerClient")
           assert pathlib.Path(vertebra.__file__).is_relative_to(sys.prefix)
           PY

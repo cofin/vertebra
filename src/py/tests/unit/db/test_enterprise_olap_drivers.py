@@ -141,13 +141,13 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
-_DUCKDB_SKIP_REASON = "duckdb publishes no free-threaded wheel; DuckDB tests run on GIL interpreters"
+_DUCKDB_SKIP_REASON = "vertebra._duckdb native extension is not built"
 
 
 @pytest.mark.anyio
 async def test_duckdb_execute_many_reports_affected_rows() -> None:
     """Batch counts reflect matching rows for sync and async UPDATE and DELETE."""
-    pytest.importorskip("duckdb", reason=_DUCKDB_SKIP_REASON)
+    pytest.importorskip("vertebra._duckdb", reason=_DUCKDB_SKIP_REASON)
     sync_driver = SyncDuckDBDriver()
     async_driver = AsyncDuckDBDriver()
     try:
@@ -481,7 +481,7 @@ def test_mssql_tds_framing_and_placeholder_rewriter() -> None:
 
 def test_duckdb_post_init_bootstrap_and_arrow_shm_streaming() -> None:
     """Verify DuckDB post-init SET statements (`parquet_metadata_cache`) and zero-copy Arrow SHM streaming."""
-    pytest.importorskip("duckdb", reason=_DUCKDB_SKIP_REASON)
+    pytest.importorskip("vertebra._duckdb", reason=_DUCKDB_SKIP_REASON)
     cfg = DuckDBConfig(
         path=":memory:",
         memory_limit_mb=1024,
@@ -518,7 +518,7 @@ def test_duckdb_post_init_bootstrap_and_arrow_shm_streaming() -> None:
             DuckDBSyncConfig,
             DuckDBAsyncConfig,
             AsyncDuckDBDriver,
-            marks=pytest.mark.skipif(not module_available("duckdb"), reason=_DUCKDB_SKIP_REASON),
+            marks=pytest.mark.skipif(not module_available("vertebra._duckdb"), reason=_DUCKDB_SKIP_REASON),
         ),
     ],
 )
@@ -557,7 +557,7 @@ async def test_sqlspec_adapters_and_async_drivers() -> None:
         assert session.select_value("SELECT v FROM t_sync WHERE k = ?", (1,)) == "one"
     sqlite_sync.close()
 
-    pytest.importorskip("duckdb", reason=_DUCKDB_SKIP_REASON)
+    pytest.importorskip("vertebra._duckdb", reason=_DUCKDB_SKIP_REASON)
     duck_async = DuckDBAsyncConfig(path=":memory:")
     async with duck_async.provide_session() as asession:
         await asession.execute("CREATE TABLE t_async (k INTEGER, v TEXT)")
@@ -599,7 +599,7 @@ def test_sqlalchemy_vtb_dialect_nullpool_selection(dialect_name: str) -> None:
 def test_sqlalchemy_dbapi_broker_forwarding(url: str) -> None:
     """Verify SyncDBAPIConnection forwards DBAPI operations through the SHM broker."""
     if url.startswith("duckdb"):
-        pytest.importorskip("duckdb", reason=_DUCKDB_SKIP_REASON)
+        pytest.importorskip("vertebra._duckdb", reason=_DUCKDB_SKIP_REASON)
     broker = _MockBroker()
     conn = SyncDBAPIConnection(url, broker=broker)
     cur = conn.cursor()
@@ -1080,7 +1080,7 @@ def test_enterprise_and_olap_sync_load_from_arrow_rejects_unsafe_identifiers(
     columns: tuple[str, ...],
 ) -> None:
     """SyncDuckDBDriver rejects unsafe table and column identifiers."""
-    pytest.importorskip("duckdb", reason=_DUCKDB_SKIP_REASON)
+    pytest.importorskip("vertebra._duckdb", reason=_DUCKDB_SKIP_REASON)
     driver = driver_cls()
     try:
         with pytest.raises(ValueError, match="Invalid"):
@@ -1109,7 +1109,7 @@ async def test_enterprise_and_olap_async_load_from_arrow_rejects_unsafe_identifi
     columns: tuple[str, ...],
 ) -> None:
     """AsyncDuckDBDriver rejects unsafe table and column identifiers."""
-    pytest.importorskip("duckdb", reason=_DUCKDB_SKIP_REASON)
+    pytest.importorskip("vertebra._duckdb", reason=_DUCKDB_SKIP_REASON)
     driver = driver_cls()
     try:
         with pytest.raises(ValueError, match="Invalid"):
@@ -1423,26 +1423,26 @@ def test_async_mssql_driver_forwards_sync_dialer_to_sync_driver(
 def test_duckdb_drivers_raise_missing_dependency_when_duckdb_absent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """SyncDuckDBDriver and AsyncDuckDBDriver raise MissingDependencyError naming duckdb when it is absent."""
-    monkeypatch.setitem(sys.modules, "duckdb", None)
-    reset_dependency_cache("duckdb")
+    """SyncDuckDBDriver and AsyncDuckDBDriver raise MissingDependencyError naming vertebra-core[duckdb] when absent."""
+    monkeypatch.setitem(sys.modules, "vertebra._duckdb", None)
+    reset_dependency_cache("vertebra._duckdb")
     try:
         with pytest.raises(MissingDependencyError) as exc_info:
             SyncDuckDBDriver()
-        assert exc_info.value.package == "duckdb"
-        assert exc_info.value.install_package == "duckdb"
-        assert exc_info.value.hint == "Install it with: uv add duckdb"
+        assert exc_info.value.package == "vertebra-core[duckdb]"
+        assert exc_info.value.install_package == "vertebra-core[duckdb]"
+        assert exc_info.value.hint == "Install it with: uv add vertebra-core[duckdb]"
 
         with pytest.raises(MissingDependencyError) as async_exc:
             AsyncDuckDBDriver(DuckDBConfig(path=":memory:"))
-        assert async_exc.value.package == "duckdb"
+        assert async_exc.value.package == "vertebra-core[duckdb]"
     finally:
-        reset_dependency_cache("duckdb")
+        reset_dependency_cache("vertebra._duckdb")
 
 
 def test_duckdb_driver_executes_on_duckdb_engine() -> None:
     """SyncDuckDBDriver executes DuckDB-specific SQL and honors explicit transaction commit/rollback."""
-    pytest.importorskip("duckdb", reason=_DUCKDB_SKIP_REASON)
+    pytest.importorskip("vertebra._duckdb", reason=_DUCKDB_SKIP_REASON)
     driver = SyncDuckDBDriver()
     try:
         assert driver.select("SELECT list_value(1, 2, 3) AS xs") == [{"xs": [1, 2, 3]}]
