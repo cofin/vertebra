@@ -143,6 +143,24 @@ _DUCKDB_TYPES_DDL = (
     ")"
 )
 
+_MYSQL_ITEMS_DDL = (
+    "CREATE TABLE vtb_conformance_items (id BIGINT PRIMARY KEY, label VARCHAR(255) NOT NULL, amount BIGINT)"
+)
+
+_MYSQL_TYPES_DDL = (
+    "CREATE TABLE vtb_conformance_types ("
+    "id BIGINT PRIMARY KEY, "
+    "val_int BIGINT, "
+    "val_float DOUBLE, "
+    "val_decimal DECIMAL(20, 4), "
+    "val_bool BOOLEAN, "
+    "val_text TEXT, "
+    "val_bytes BLOB, "
+    "val_ts DATETIME(6), "
+    "val_json JSON"
+    ")"
+)
+
 _BIGQUERY_ITEMS_DDL = "CREATE TABLE vtb_conformance_items (id INT64, label STRING NOT NULL, amount INT64)"
 
 _BIGQUERY_TYPES_DDL = (
@@ -379,8 +397,11 @@ ENGINE_SPECS: tuple[EngineConformanceSpec, ...] = (
         async_driver_cls=AsyncMySQLDriver,
         sample_url="mysql://vtb:secret@127.0.0.1:3306/vtb",
         placeholder_style="qmark",
+        items_ddl=_MYSQL_ITEMS_DDL,
+        types_ddl=_MYSQL_TYPES_DDL,
+        supports_pipeline=True,
         native_extension_module="vertebra._mysql",
-        pending_flow_id="native-mysql-mssql-drivers",
+        pending_flow_id=None,
         env_dsn_vars=("VERTEBRA_CONFORMANCE_MYSQL_DSN",),
         container_fixture="vtb_mysql_config",
     ),
@@ -639,6 +660,11 @@ def _resolve_live_config(
         fixture_cfg = request.getfixturevalue(spec.container_fixture)
         assert isinstance(fixture_cfg, BaseDatabaseConfig)
         return fixture_cfg
+    if spec.engine == "mysql":
+        mysql_mod = ensure_module("vertebra._mysql", package="vertebra-core[mysql]", extra="mysql")
+        loopback_server = mysql_mod.MySQLWireTestServer()
+        request.addfinalizer(loopback_server.close)
+        return MySQLConfig.from_url(loopback_server.dsn)
     return spec.config_cls.from_url(spec.sample_url)
 
 

@@ -17,6 +17,7 @@ Core SQL and RESP3 configuration contracts ship in `vertebra-core`, while standa
 === "uv"
 
     ```bash
+    uv add "vertebra-core[mysql]"
     uv add "vertebra-core[bigquery]"
     uv add "vertebra-core[duckdb]"
     uv add "vertebra-core[spanner]"
@@ -25,6 +26,7 @@ Core SQL and RESP3 configuration contracts ship in `vertebra-core`, while standa
 === "pip"
 
     ```bash
+    pip install "vertebra-core[mysql]"
     pip install "vertebra-core[bigquery]"
     pip install "vertebra-core[duckdb]"
     pip install "vertebra-core[spanner]"
@@ -33,6 +35,7 @@ Core SQL and RESP3 configuration contracts ship in `vertebra-core`, while standa
 === "pdm"
 
     ```bash
+    pdm add "vertebra-core[mysql]"
     pdm add "vertebra-core[bigquery]"
     pdm add "vertebra-core[duckdb]"
     pdm add "vertebra-core[spanner]"
@@ -41,6 +44,7 @@ Core SQL and RESP3 configuration contracts ship in `vertebra-core`, while standa
 === "poetry"
 
     ```bash
+    poetry add "vertebra-core[mysql]"
     poetry add "vertebra-core[bigquery]"
     poetry add "vertebra-core[duckdb]"
     poetry add "vertebra-core[spanner]"
@@ -126,7 +130,7 @@ app = Litestar(
 | Engine | SQLSpec Adapter Config | Native Config Class | Sync / Async Drivers | Key Capabilities |
 | --- | --- | --- | --- | --- |
 | **PostgreSQL** | `PostgreSQLAsyncConfig`, `PostgreSQLSyncConfig` | `PostgreSQLConfig` | `SyncPostgreSQLDriver`, `AsyncPostgreSQLDriver` | Binary `PGCOPY`, binary `pgvector` (`vector`/`halfvec`/`bit`), zero-copy `JSONB`, PgBouncer/PgCat/pgdog pooler modes, direct `:5432` IAM OAuth2 password or `:5433` AlloyDB / `:3307` Cloud SQL dialers |
-| **MySQL / MariaDB** | `MySQLAsyncConfig`, `MySQLSyncConfig` | `MySQLConfig` | `SyncMySQLDriver`, `AsyncMySQLDriver` | Bounded connection pools, binary prepared statements, direct `:3306` IAM OAuth2 password or Cloud SQL `:3307` dialer integration |
+| **MySQL / MariaDB** | `MySQLAsyncConfig`, `MySQLSyncConfig` | `MySQLConfig` | `SyncMySQLDriver`, `AsyncMySQLDriver` | Pure-Rust `vertebra._mysql` binary prepared statements (`COM_STMT_PREPARE` / `COM_STMT_EXECUTE`), `SyncMySQLPipeline` / `AsyncMySQLPipeline`, `VTBARROW` `ArrowCursor`, out-of-band `KILL QUERY` cancellation, direct `:3306` IAM OAuth2 token or Cloud SQL `:3307` mTLS dialer |
 | **SQLite / libSQL** | `SQLiteAsyncConfig`, `SQLiteSyncConfig` | `SQLiteConfig` | `SyncSQLiteDriver`, `AsyncSQLiteDriver` | WAL mode, `mmap_size`, SQLite 3.45+ binary `JSONB`, SHM single-writer/multi-reader leasing |
 | **Oracle 26ai** | `OracleAsyncConfig`, `OracleSyncConfig` | `OracleConfig` | `SyncOracleDriver`, `AsyncOracleDriver` | Native driver pending (drivers raise `MissingDependencyError`); Autonomous Database wallet and `tnsnames.ora` parsing, 26ai `VECTOR` and `OSON` codecs |
 | **SQL Server** | `MSSQLAsyncConfig`, `MSSQLSyncConfig` | `MSSQLConfig` | `SyncMSSQLDriver`, `AsyncMSSQLDriver` | Native driver pending (drivers raise `MissingDependencyError`); `?` / `$1` to `@P1` parameter rewriting |
