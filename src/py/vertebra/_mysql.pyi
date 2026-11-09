@@ -18,6 +18,7 @@ __all__ = [
     "compute_mysql_native_scramble",
     "encrypt_caching_sha2_rsa_password",
     "map_mysql_error",
+    "next_mysql_shm_name",
 ]
 
 def compute_caching_sha2_scramble(password: bytes, nonce: bytes) -> bytes: ...
@@ -28,6 +29,7 @@ def map_mysql_error(
     sqlstate: str | None = None,
     message: str = "MySQL error",
 ) -> Exception: ...
+def next_mysql_shm_name() -> str: ...
 
 @final
 class MySQLWireTestServer:
@@ -138,6 +140,28 @@ class SyncMySQLClient:
     def cancel(self) -> bool: ...
     def cancel_query(self, connection_id: int) -> bool: ...
     def close(self) -> None: ...
+    def select_to_arrow(
+        self,
+        sql: str,
+        parameters: Any = None,
+        *,
+        batch_size: int = 65536,
+    ) -> Any: ...
+    def stream_arrow_batches(
+        self,
+        sql: str,
+        parameters: Any = None,
+        *,
+        batch_size: int = 65536,
+    ) -> list[Any]: ...
+    def load_from_arrow(
+        self,
+        table_name: str,
+        source: Any,
+        *,
+        columns: Sequence[str] | None = None,
+        batch_size: int = 1000,
+    ) -> int: ...
 
 @final
 class AsyncMySQLClient:
@@ -226,3 +250,25 @@ class AsyncMySQLClient:
     def cancel(self) -> Awaitable[bool]: ...
     def cancel_query(self, connection_id: int) -> Awaitable[bool]: ...
     def close(self) -> Awaitable[None]: ...
+    def select_to_arrow(
+        self,
+        sql: str,
+        parameters: Any = None,
+        *,
+        batch_size: int = 65536,
+    ) -> Awaitable[Any]: ...
+    def stream_arrow_batches(
+        self,
+        sql: str,
+        parameters: Any = None,
+        *,
+        batch_size: int = 65536,
+    ) -> Awaitable[list[Any]]: ...
+    def load_from_arrow(
+        self,
+        table_name: str,
+        source: Any,
+        *,
+        columns: Sequence[str] | None = None,
+        batch_size: int = 1000,
+    ) -> Awaitable[int]: ...

@@ -12,9 +12,12 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyBytes, PyDict, PyFloat, PyList, PyString, PyTuple};
 use tokio::sync::Mutex as AsyncMutex;
 use vertebra_db::py_async::{
-    RustDbTaskAwaitable, block_on_db, spawn_rust_db_task_with_attr,
+    RustDbTaskAwaitable, block_on_db, construct_py_arrow_cursor, spawn_rust_db_task_with_attr,
 };
 
+use crate::arrow_ipc::{
+    decode_arrow_ipc_to_mysql_rows, encode_result_set_to_shm, encode_result_set_to_shm_batches,
+};
 use crate::config::MySQLConnectConfig;
 use crate::errors::MySQLError;
 use crate::protocol::{
@@ -958,6 +961,173 @@ impl MySQLClientCore {
         let _ = TxOpts::default();
         Ok(())
     }
+
+    pub async fn load_rows_batched(
+        &self,
+        table_name: String,
+        columns: Vec<String>,
+        rows: Vec<Vec<Value>>,
+        batch_size: usize,
+    ) -> Result<u64, MySQLError> {
+        if rows.is_empty() || columns.is_empty() {
+            return Ok(0);
+        }
+        let valid_table = validate_mysql_identifier(&table_name)?;
+        let mut quoted_cols = Vec::with_capacity(columns.len());
+        for col in &columns {
+            let valid_col = validate_mysql_identifier(col)?;
+            quoted_cols.push(format!("`{valid_col}`"));
+        }
+        let cols_clause = quoted_cols.join(", ");
+        let single_row_placeholders =
+            format!("({})", vec!["?"; columns.len()].join(", "));
+        let chunk_len = batch_size.max(1);
+
+        let mut total_inserted = 0u64;
+        for chunk in rows.chunks(chunk_len) {
+            let values_clause = vec![single_row_placeholders.as_str(); chunk.len()].join(", ");
+            let sql = format!("INSERT INTO `{valid_table}` ({cols_clause}) VALUES {values_clause}");
+            let mut flat_params = Vec::with_capacity(chunk.len() * columns.len());
+            for row in chunk {
+                for idx in 0..columns.len() {
+                    flat_params.push(row.get(idx).cloned().unwrap_or(Value::NULL));
+                }
+            }
+            let rs = self
+                .execute_result_set(sql, Params::Positional(flat_params))
+                .await?;
+            total_inserted += if rs.affected_rows > 0 {
+                rs.affected_rows
+            } else {
+                chunk.len() as u64
+            };
+        }
+        Ok(total_inserted)
+    }
+}
+
+fn validate_mysql_identifier(ident: &str) -> Result<String, MySQLError> {
+    let trimmed = ident.trim().trim_matches('`');
+    if trimmed.is_empty()
+        || !trimmed
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
+    {
+        return Err(MySQLError::programming(format!(
+            "Invalid MySQL identifier '{ident}'"
+        )));
+    }
+    Ok(trimmed.replace('.', "`.`"))
+}
+
+fn extract_arrow_load_payload(
+    py: Python<'_>,
+    source: &Bound<'_, PyAny>,
+    columns: Option<Vec<String>>,
+) -> Result<(Vec<String>, Vec<Vec<Value>>), MySQLError> {
+    if let Ok(raw_bytes) = source.extract::<Vec<u8>>() {
+        return decode_arrow_ipc_to_mysql_rows(&raw_bytes, columns.as_deref());
+    }
+    if let Ok(view_fn) = source.getattr("buffer_view")
+        && let Ok(view) = view_fn.call0()
+        && let Ok(raw_bytes) = view.extract::<Vec<u8>>()
+    {
+        return decode_arrow_ipc_to_mysql_rows(&raw_bytes, columns.as_deref());
+    }
+    if let Ok(inner_shm) = source.getattr("_shm_cursor")
+        && !inner_shm.is_none()
+        && let Ok(view_fn) = inner_shm.getattr("buffer_view")
+        && let Ok(view) = view_fn.call0()
+        && let Ok(raw_bytes) = view.extract::<Vec<u8>>()
+    {
+        return decode_arrow_ipc_to_mysql_rows(&raw_bytes, columns.as_deref());
+    }
+
+    if source.hasattr("schema").unwrap_or(false)
+        && source.hasattr("num_rows").unwrap_or(false)
+        && let Ok(pa_ipc) = py.import("pyarrow.ipc")
+        && let Ok(pa) = py.import("pyarrow")
+        && let Ok(sink) = pa.call_method0("BufferOutputStream")
+        && let Ok(schema) = source.getattr("schema")
+        && let Ok(writer) = pa_ipc.call_method1("new_stream", (&sink, schema))
+    {
+        let write_ok = writer
+            .call_method1("write", (source,))
+            .or_else(|_| writer.call_method1("write_table", (source,)))
+            .or_else(|_| writer.call_method1("write_batch", (source,)))
+            .is_ok();
+        let _ = writer.call_method0("close");
+        if write_ok
+            && let Ok(buf) = sink.call_method0("getvalue")
+            && let Ok(py_bytes) = buf.call_method0("to_pybytes")
+            && let Ok(raw_bytes) = py_bytes.extract::<Vec<u8>>()
+        {
+            return decode_arrow_ipc_to_mysql_rows(&raw_bytes, columns.as_deref());
+        }
+    }
+
+    let items: Vec<Bound<'_, PyAny>> = if let Ok(to_pylist) = source.getattr("to_pylist")
+        && let Ok(list_obj) = to_pylist.call0()
+    {
+        list_obj.extract::<Vec<Bound<'_, PyAny>>>().unwrap_or_default()
+    } else if let Ok(seq) = source.extract::<Vec<Bound<'_, PyAny>>>() {
+        seq
+    } else {
+        return Err(MySQLError::programming(
+            "load_from_arrow expects Arrow IPC bytes, ArrowCursor, pyarrow Table/RecordBatch, or a sequence of row dicts/tuples",
+        ));
+    };
+
+    if items.is_empty() {
+        return Ok((columns.unwrap_or_default(), Vec::new()));
+    }
+    if let Ok(first_dict) = items[0].cast::<PyDict>() {
+        let resolved_cols = if let Some(cols) = columns {
+            cols
+        } else {
+            let mut inferred = Vec::with_capacity(first_dict.len());
+            for (k, _) in first_dict.iter() {
+                inferred.push(k.extract::<String>().map_err(|e| {
+                    MySQLError::programming(format!("Column key must be str: {e}"))
+                })?);
+            }
+            inferred
+        };
+        let mut out_rows = Vec::with_capacity(items.len());
+        for item in &items {
+            let dict = item.cast::<PyDict>().map_err(|_| {
+                MySQLError::programming("Expected all rows in sequence to be mappings")
+            })?;
+            let mut row = Vec::with_capacity(resolved_cols.len());
+            for col in &resolved_cols {
+                match dict.get_item(col.as_str()).ok().flatten() {
+                    Some(v) => row.push(py_param_to_mysql_value(&v)?),
+                    None => row.push(Value::NULL),
+                }
+            }
+            out_rows.push(row);
+        }
+        return Ok((resolved_cols, out_rows));
+    }
+
+    let resolved_cols = columns.ok_or_else(|| {
+        MySQLError::programming("columns must be specified when loading positional row tuples")
+    })?;
+    let mut out_rows = Vec::with_capacity(items.len());
+    for item in &items {
+        let seq = item.extract::<Vec<Bound<'_, PyAny>>>().map_err(|_| {
+            MySQLError::programming("Row item must be a mapping or positional sequence")
+        })?;
+        let mut row = Vec::with_capacity(resolved_cols.len());
+        for idx in 0..resolved_cols.len() {
+            match seq.get(idx) {
+                Some(v) => row.push(py_param_to_mysql_value(v)?),
+                None => row.push(Value::NULL),
+            }
+        }
+        out_rows.push(row);
+    }
+    Ok((resolved_cols, out_rows))
 }
 
 fn validate_savepoint_identifier(name: &str) -> Result<String, MySQLError> {
@@ -1377,6 +1547,70 @@ impl SyncMySQLClient {
         let core = Arc::clone(&self.core);
         py.detach(|| block_on_db(async move { core.close().await }))?;
         Ok(())
+    }
+
+    #[pyo3(signature = (sql, parameters=None, *, batch_size=65536))]
+    pub fn select_to_arrow(
+        &self,
+        py: Python<'_>,
+        sql: &str,
+        parameters: Option<&Bound<'_, PyAny>>,
+        batch_size: usize,
+    ) -> PyResult<Py<PyAny>> {
+        let (norm_sql, params) = prepare_sql_and_params(sql, parameters)?;
+        let core = Arc::clone(&self.core);
+        let (shm_name, byte_len, row_count, region) = py.detach(|| {
+            block_on_db(async move {
+                let rs = core.execute_result_set(norm_sql, params).await?;
+                encode_result_set_to_shm(&rs.columns, &rs.rows, batch_size)
+            })
+        })?;
+        construct_py_arrow_cursor(py, &shm_name, byte_len, row_count, region)
+    }
+
+    #[pyo3(signature = (sql, parameters=None, *, batch_size=65536))]
+    pub fn stream_arrow_batches(
+        &self,
+        py: Python<'_>,
+        sql: &str,
+        parameters: Option<&Bound<'_, PyAny>>,
+        batch_size: usize,
+    ) -> PyResult<Py<PyAny>> {
+        let (norm_sql, params) = prepare_sql_and_params(sql, parameters)?;
+        let core = Arc::clone(&self.core);
+        let batches = py.detach(|| {
+            block_on_db(async move {
+                let rs = core.execute_result_set(norm_sql, params).await?;
+                encode_result_set_to_shm_batches(&rs.columns, &rs.rows, batch_size)
+            })
+        })?;
+        let out = PyList::empty(py);
+        for (shm_name, byte_len, row_count, region) in batches {
+            let cursor = construct_py_arrow_cursor(py, &shm_name, byte_len, row_count, region)?;
+            out.append(cursor.into_bound(py))?;
+        }
+        Ok(out.into_any().unbind())
+    }
+
+    #[pyo3(signature = (table_name, source, *, columns=None, batch_size=1000))]
+    pub fn load_from_arrow(
+        &self,
+        py: Python<'_>,
+        table_name: &str,
+        source: &Bound<'_, PyAny>,
+        columns: Option<Vec<String>>,
+        batch_size: usize,
+    ) -> PyResult<u64> {
+        let (resolved_cols, rows) = extract_arrow_load_payload(py, source, columns)?;
+        let table = table_name.to_string();
+        let core = Arc::clone(&self.core);
+        let inserted = py.detach(|| {
+            block_on_db(async move {
+                core.load_rows_batched(table, resolved_cols, rows, batch_size)
+                    .await
+            })
+        })?;
+        Ok(inserted)
     }
 }
 
@@ -1893,6 +2127,84 @@ impl AsyncMySQLClient {
             MYSQL_COMPLETION_DRAINER_ATTR,
         )
     }
+
+    #[pyo3(signature = (sql, parameters=None, *, batch_size=65536))]
+    pub fn select_to_arrow(
+        &self,
+        py: Python<'_>,
+        sql: &str,
+        parameters: Option<&Bound<'_, PyAny>>,
+        batch_size: usize,
+    ) -> PyResult<RustDbTaskAwaitable> {
+        let (norm_sql, params) = prepare_sql_and_params(sql, parameters)?;
+        let core = Arc::clone(&self.core);
+        spawn_rust_db_task_with_attr(
+            py,
+            async move {
+                let rs = core.execute_result_set(norm_sql, params).await?;
+                encode_result_set_to_shm(&rs.columns, &rs.rows, batch_size)
+            },
+            |py, (shm_name, byte_len, row_count, region)| {
+                construct_py_arrow_cursor(py, &shm_name, byte_len, row_count, region)
+            },
+            |py, e: MySQLError| e.to_py_err(py),
+            MYSQL_COMPLETION_DRAINER_ATTR,
+        )
+    }
+
+    #[pyo3(signature = (sql, parameters=None, *, batch_size=65536))]
+    pub fn stream_arrow_batches(
+        &self,
+        py: Python<'_>,
+        sql: &str,
+        parameters: Option<&Bound<'_, PyAny>>,
+        batch_size: usize,
+    ) -> PyResult<RustDbTaskAwaitable> {
+        let (norm_sql, params) = prepare_sql_and_params(sql, parameters)?;
+        let core = Arc::clone(&self.core);
+        spawn_rust_db_task_with_attr(
+            py,
+            async move {
+                let rs = core.execute_result_set(norm_sql, params).await?;
+                encode_result_set_to_shm_batches(&rs.columns, &rs.rows, batch_size)
+            },
+            |py, batches| {
+                let out = PyList::empty(py);
+                for (shm_name, byte_len, row_count, region) in batches {
+                    let cursor =
+                        construct_py_arrow_cursor(py, &shm_name, byte_len, row_count, region)?;
+                    out.append(cursor.into_bound(py))?;
+                }
+                Ok(out.into_any().unbind())
+            },
+            |py, e: MySQLError| e.to_py_err(py),
+            MYSQL_COMPLETION_DRAINER_ATTR,
+        )
+    }
+
+    #[pyo3(signature = (table_name, source, *, columns=None, batch_size=1000))]
+    pub fn load_from_arrow(
+        &self,
+        py: Python<'_>,
+        table_name: &str,
+        source: &Bound<'_, PyAny>,
+        columns: Option<Vec<String>>,
+        batch_size: usize,
+    ) -> PyResult<RustDbTaskAwaitable> {
+        let (resolved_cols, rows) = extract_arrow_load_payload(py, source, columns)?;
+        let table = table_name.to_string();
+        let core = Arc::clone(&self.core);
+        spawn_rust_db_task_with_attr(
+            py,
+            async move {
+                core.load_rows_batched(table, resolved_cols, rows, batch_size)
+                    .await
+            },
+            |py, n: u64| Ok(n.into_pyobject(py)?.into_any().unbind()),
+            |py, e: MySQLError| e.to_py_err(py),
+            MYSQL_COMPLETION_DRAINER_ATTR,
+        )
+    }
 }
 
 #[cfg(test)]
@@ -2091,6 +2403,86 @@ mod tests {
             let cancelled = cancel_handle.await.expect("join").expect("cancel");
             assert!(cancelled);
             assert!(server.kill_query_count() >= 1);
+
+            core.close().await.expect("close");
+        });
+    }
+
+    #[test]
+    fn test_loopback_arrow_shm_select_and_bulk_load_roundtrip() {
+        let server = MySQLWireTestServer::start_default().expect("server");
+        let core = make_test_core(&server.dsn(), 16);
+
+        block_on_db(async {
+            core.execute_result_set(
+                "CREATE TABLE t_arrow (id INT PRIMARY KEY, label VARCHAR(64), amount DECIMAL(12, 2))"
+                    .to_string(),
+                Params::Empty,
+            )
+            .await
+            .expect("create");
+
+            let inserted = core
+                .load_rows_batched(
+                    "t_arrow".to_string(),
+                    vec![
+                        "id".to_string(),
+                        "label".to_string(),
+                        "amount".to_string(),
+                    ],
+                    vec![
+                        vec![
+                            Value::Int(1),
+                            Value::Bytes(b"one".to_vec()),
+                            Value::Bytes(b"10.25".to_vec()),
+                        ],
+                        vec![
+                            Value::Int(2),
+                            Value::Bytes(b"two".to_vec()),
+                            Value::Bytes(b"20.50".to_vec()),
+                        ],
+                        vec![
+                            Value::Int(3),
+                            Value::Bytes(b"three".to_vec()),
+                            Value::Bytes(b"30.75".to_vec()),
+                        ],
+                    ],
+                    2,
+                )
+                .await
+                .expect("batched load");
+            assert_eq!(inserted, 3);
+
+            let rs = core
+                .execute_result_set(
+                    "SELECT id, label, amount FROM t_arrow ORDER BY id".to_string(),
+                    Params::Empty,
+                )
+                .await
+                .expect("select");
+            assert_eq!(rs.rows.len(), 3);
+
+            let (shm_name, byte_len, row_count, region) =
+                encode_result_set_to_shm(&rs.columns, &rs.rows, 2).expect("shm encode");
+            assert!(shm_name.starts_with("/vtb-my-"));
+            assert!(byte_len > 0);
+            assert_eq!(row_count, 3);
+
+            let batches =
+                encode_result_set_to_shm_batches(&rs.columns, &rs.rows, 2).expect("shm batches");
+            assert_eq!(batches.len(), 2);
+            assert_eq!(batches[0].2, 2);
+            assert_eq!(batches[1].2, 1);
+
+            // SAFETY: `region` is valid for `byte_len + ShmArrowFrameHeader::SIZE`.
+            let raw_slice = unsafe { region.as_slice() };
+            let (cols, decoded_rows) = decode_arrow_ipc_to_mysql_rows(
+                &raw_slice[..vertebra_db::arrow_shm::ShmArrowFrameHeader::SIZE + byte_len],
+                None,
+            )
+            .expect("decode");
+            assert_eq!(cols, vec!["id", "label", "amount"]);
+            assert_eq!(decoded_rows.len(), 3);
 
             core.close().await.expect("close");
         });

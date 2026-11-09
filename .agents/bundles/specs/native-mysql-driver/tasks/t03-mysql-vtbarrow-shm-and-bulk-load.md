@@ -5,7 +5,7 @@ task_id: t03
 title: "Implement MySQL VTBARROW ShmCapsule ArrowCursor, load_from_arrow, and BrokerEngineBackend"
 description: "Implement binary-protocol row to arrow 60.1.0 RecordBatch to VTBARROW POSIX SHM ShmCapsule (select_to_arrow, stream_arrow_batches), batched load_from_arrow bulk ingestion, and BrokerEngineBackend registration in vertebra-db and vertebra-mysql."
 status: stable
-state: in_progress
+state: completed
 verification_strategy: tdd
 Verification-Exempt-Reason: null
 dependencies:
@@ -69,10 +69,10 @@ Task `t03` connects MySQL query execution to Vertebra's zero-copy `VTBARROW` POS
 
 ## Acceptance Criteria
 
-- [ ] `select_to_arrow` and `stream_arrow_batches` on both `SyncMySQLClient` and `AsyncMySQLClient` return `ArrowCursor` instances backed by `VTBARROW` POSIX SHM `PyCapsule`s (`has_shm_capsule is True`).
-- [ ] `load_from_arrow` ingests `ArrowCursor` / `VTBARROW` SHM data in configurable batches and returns accurate inserted row counts.
-- [ ] `BrokerEngineBackend` is registered for `DIALECT_TAG_MYSQL` (`2`) when `vertebra._mysql` is initialized.
-- [ ] `cargo test`, `cargo clippy`, `mypy.stubtest vertebra._mysql`, and `review_setup validate` pass.
+- [x] `select_to_arrow` and `stream_arrow_batches` on both `SyncMySQLClient` and `AsyncMySQLClient` return `ArrowCursor` instances backed by `VTBARROW` POSIX SHM `PyCapsule`s (`has_shm_capsule is True`).
+- [x] `load_from_arrow` ingests `ArrowCursor` / `VTBARROW` SHM data in configurable batches and returns accurate inserted row counts.
+- [x] `BrokerEngineBackend` is registered for `DIALECT_TAG_MYSQL` (`2`) when `vertebra._mysql` is initialized.
+- [x] `cargo test`, `cargo clippy`, `mypy.stubtest vertebra._mysql`, and `review_setup validate` pass.
 
 [^mysql-spec]: `.agents/bundles/specs/native-mysql-driver/spec.md` — Native MySQL driver specification.
 [^arrow-shm-rs]: `src/rs/vertebra-db/src/arrow_shm.rs` — Shared VTBARROW POSIX SHM zero-copy frame writer and reader.

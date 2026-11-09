@@ -5,7 +5,7 @@ task_id: t04
 title: "Cut Python SyncMySQLDriver and AsyncMySQLDriver over to vertebra._mysql and update conformance and docs"
 description: "Cut src/py/vertebra/db/adapters/mysql/driver.py and config.py over to vertebra._mysql (SyncMySQLClient, AsyncMySQLClient), remove all pymysql, asyncmy, and memory:// execution paths, activate mysql in test_driver_conformance.py, and update documentation and OKF chapters."
 status: stable
-state: pending
+state: in_progress
 verification_strategy: tdd
 Verification-Exempt-Reason: null
 dependencies:
