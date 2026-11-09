@@ -1,5 +1,6 @@
 //! `vertebra-oracle` crate and `vertebra._oracle` PyO3 extension module.
 
+pub mod arrow;
 pub mod client;
 pub mod config;
 pub mod dialer;

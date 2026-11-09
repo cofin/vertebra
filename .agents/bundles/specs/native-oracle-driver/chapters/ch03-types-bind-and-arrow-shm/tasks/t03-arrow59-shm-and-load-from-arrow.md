@@ -6,7 +6,7 @@ id: "native-oracle-driver:ch03:t03"
 title: "Implement Arrow 59 to VTBARROW SHM bridge and wire select_to_arrow, stream_arrow_batches, and load_from_arrow"
 description: "Implement batches_to_arrow_ipc in src/rs/vertebra-oracle/src/arrow.rs returning (Vec<u8>, usize) to construct_py_arrow_cursor(py, ipc_bytes, row_count, force_shm), and wire select_to_arrow, stream_arrow_batches, and load_from_arrow on SyncOracleDriver and AsyncOracleDriver."
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -27,11 +27,11 @@ tests:
 estimated_loc: 235
 plan_revision: 3
 plan_commit: 769302bc
-state_revision: 0
-commit_sha: null
-completed_at: null
+state_revision: 1
+commit_sha: pending
+completed_at: "2026-11-09T15:45:00Z"
 created_at: "2026-11-09T00:56:00Z"
-updated_at: "2026-11-09T01:28:30Z"
+updated_at: "2026-11-09T15:45:00Z"
 generated:
   by: flow-plan
   at: "2026-11-09T01:15:00Z"
@@ -213,10 +213,10 @@ uv run --no-sync pytest src/py/tests/unit/db/test_oracle_adapter.py -k "arrow or
 
 ## 7. Acceptance Criteria
 
-- [ ] `src/rs/vertebra-oracle/src/arrow.rs` implements `batches_to_arrow_ipc(batches: &[RecordBatch], lowercase_column_names: bool) -> Result<(Vec<u8>, usize), OracleError>` without leaking `arrow 59` outside `vertebra-oracle`.
-- [ ] `SyncOracleClient.query_arrow` and `AsyncOracleClient.query_arrow` pass `(ipc_bytes, row_count, force_shm)` into `construct_py_arrow_cursor` and return `ArrowCursor` (`cursor.used_shm`, `cursor.buffer_view()`, `len(cursor)`).
-- [ ] `SyncOracleDriver` and `AsyncOracleDriver` (`AsyncDatabaseDriver[OracleConfig]`) implement `select_to_arrow`, `stream_arrow_batches`, and `load_from_arrow` with identifier validation and `APPEND_VALUES` direct-path support.
-- [ ] `uv run --no-sync python -m mypy.stubtest vertebra._oracle` and all unit tests in `src/py/tests/unit/db/test_oracle_adapter.py` pass.
+- [x] `src/rs/vertebra-oracle/src/arrow.rs` implements `batches_to_arrow_ipc(batches: &[RecordBatch], lowercase_column_names: bool) -> Result<(Vec<u8>, usize), OracleError>` without leaking `arrow 59` outside `vertebra-oracle`.
+- [x] `SyncOracleClient.query_arrow` and `AsyncOracleClient.query_arrow` pass `(ipc_bytes, row_count, force_shm)` into `construct_py_arrow_cursor` and return `ArrowCursor` (`cursor.used_shm`, `cursor.buffer_view()`, `len(cursor)`).
+- [x] `SyncOracleDriver` and `AsyncOracleDriver` (`AsyncDatabaseDriver[OracleConfig]`) implement `select_to_arrow`, `stream_arrow_batches`, and `load_from_arrow` with identifier validation and `APPEND_VALUES` direct-path support.
+- [x] `uv run --no-sync python -m mypy.stubtest vertebra._oracle` and all unit tests in `src/py/tests/unit/db/test_oracle_adapter.py` pass.
 
 ## 8. Notes & Discoveries
 

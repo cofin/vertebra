@@ -2467,7 +2467,7 @@ impl WorkerSession {
             WorkerCommand::QueryArrow {
                 sql,
                 params,
-                batch_size: _,
+                batch_size,
                 lowercase_column_names,
             } => {
                 let outcome = self.run_query_or_execute(
@@ -2479,9 +2479,14 @@ impl WorkerSession {
                     None,
                     true,
                 )?;
-                let row_count = outcome.rows.len();
+                let (ipc_bytes, row_count) = crate::arrow::rows_to_arrow_ipc_chunked(
+                    &outcome.columns,
+                    &outcome.rows,
+                    lowercase_column_names,
+                    batch_size,
+                )?;
                 Ok(WorkerReply::ArrowIpc {
-                    ipc_bytes: Vec::new(),
+                    ipc_bytes,
                     row_count,
                 })
             }

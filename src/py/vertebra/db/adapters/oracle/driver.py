@@ -341,7 +341,26 @@ class SyncOracleDriver(SyncDatabaseDriver[OracleConfig]):
         **kwargs: Any,
     ) -> ArrowCursor:
         """Execute a query and materialize the result set as a zero-copy `ArrowCursor`."""
-        _ = (batch_size, force_shm)
+        if hasattr(self._client, "query_arrow") and (
+            force_shm is not None or threshold_rows == ARROW_SHM_THRESHOLD_ROWS
+        ):
+            coerced = self._coerce_parameters(parameters)
+            param_count = len(coerced) if coerced is not None else 0
+            grant = self._acquire_oracle_broker_lease(sql, param_count)
+            try:
+                self._consume_piggyback()
+                self._track_session_context_sql(sql, parameters)
+                effective_batch = int(batch_size) if batch_size is not None and batch_size > 0 else 8192
+                cursor: ArrowCursor = self._client.query_arrow(
+                    sql,
+                    coerced,
+                    batch_size=effective_batch,
+                    force_shm=force_shm,
+                    enable_lowercase_column_names=self.config.driver_features.enable_lowercase_column_names,
+                )
+                return cursor
+            finally:
+                self._release_oracle_broker_lease(grant)
         rows, raw_cols = self.execute_with_description(sql, parameters, **kwargs)
         cols = [col.lower() if self.config.driver_features.enable_lowercase_column_names else col for col in raw_cols]
         return ArrowCursor.from_rows(rows, cols, threshold_rows=threshold_rows)
@@ -764,7 +783,26 @@ class AsyncOracleDriver(AsyncDatabaseDriver[OracleConfig]):
         **kwargs: Any,
     ) -> ArrowCursor:
         """Execute a query asynchronously and return a zero-copy `ArrowCursor`."""
-        _ = (batch_size, force_shm)
+        if hasattr(self._client, "query_arrow") and (
+            force_shm is not None or threshold_rows == ARROW_SHM_THRESHOLD_ROWS
+        ):
+            coerced = self._coerce_parameters(parameters)
+            param_count = len(coerced) if coerced is not None else 0
+            grant = self._acquire_oracle_broker_lease(sql, param_count)
+            try:
+                self._consume_piggyback()
+                self._track_session_context_sql(sql, parameters)
+                effective_batch = int(batch_size) if batch_size is not None and batch_size > 0 else 8192
+                cursor: ArrowCursor = await self._client.query_arrow(
+                    sql,
+                    coerced,
+                    batch_size=effective_batch,
+                    force_shm=force_shm,
+                    enable_lowercase_column_names=self.config.driver_features.enable_lowercase_column_names,
+                )
+                return cursor
+            finally:
+                self._release_oracle_broker_lease(grant)
         rows, raw_cols = await self.execute_with_description(sql, parameters, **kwargs)
         cols = [col.lower() if self.config.driver_features.enable_lowercase_column_names else col for col in raw_cols]
         return ArrowCursor.from_rows(rows, cols, threshold_rows=threshold_rows)

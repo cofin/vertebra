@@ -13,6 +13,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 import msgspec
+import pyarrow as pa
 import pytest
 
 import vertebra._oracle as _oracle
@@ -590,3 +591,87 @@ async def test_oracle_lowercase_column_names_toggle() -> None:
         _, acols_u = await async_upper.execute_with_description(query)
         assert acols_u == ("EMPLOYEE_ID", "FIRST_NAME")
         assert await async_upper.select(query) == [{"EMPLOYEE_ID": 1, "FIRST_NAME": "Ada"}]
+
+
+@pytest.mark.anyio
+async def test_oracle_arrow59_inline_and_shm_escalation() -> None:
+    """Verify Arrow 59 inline vs 16-byte VTBARROW SHM escalation across SyncOracleDriver and AsyncOracleDriver."""
+    query = "SELECT LEVEL AS ID, 'item_' AS NAME FROM DUAL CONNECT BY LEVEL <= 5"
+    with SyncOracleDriver() as sync_driver:
+        with sync_driver.select_to_arrow(query, force_shm=False) as inline_cur:
+            assert inline_cur.used_shm is False
+            assert len(inline_cur) == 5
+            inline_tbl = pa.ipc.open_stream(pa.py_buffer(inline_cur.buffer_view())).read_all()
+            assert inline_tbl.column_names == ["id", "name"]
+            assert inline_tbl.num_rows == 5
+
+        with sync_driver.select_to_arrow(query, force_shm=True) as shm_cur:
+            assert shm_cur.used_shm is True
+            assert len(shm_cur) == 5
+            shm_tbl = pa.ipc.open_stream(pa.py_buffer(shm_cur.buffer_view())).read_all()
+            assert shm_tbl.column_names == ["id", "name"]
+            assert shm_tbl.to_pydict()["id"] == [1, 2, 3, 4, 5]
+
+    async with AsyncOracleDriver() as async_driver:
+        with await async_driver.select_to_arrow(query, force_shm=False) as a_inline:
+            assert a_inline.used_shm is False
+            assert len(a_inline) == 5
+
+        with await async_driver.select_to_arrow(query, force_shm=True) as a_shm:
+            assert a_shm.used_shm is True
+            assert len(a_shm) == 5
+            ashm_tbl = pa.ipc.open_stream(pa.py_buffer(a_shm.buffer_view())).read_all()
+            assert ashm_tbl.column_names == ["id", "name"]
+            assert ashm_tbl.num_rows == 5
+
+
+@pytest.mark.anyio
+async def test_oracle_stream_arrow_batches_sync_and_async() -> None:
+    """Verify stream_arrow_batches yields chunked ArrowCursor batches with matching IPC streams."""
+    query = "SELECT LEVEL AS ID, 'item' AS NAME FROM DUAL CONNECT BY LEVEL <= 5"
+    with SyncOracleDriver() as sync_driver:
+        sync_batches = list(sync_driver.stream_arrow_batches(query, batch_size=2))
+        assert [len(b) for b in sync_batches] == [2, 2, 1]
+        assert sum(len(b.buffer_view()) for b in sync_batches) > 0
+
+    async with AsyncOracleDriver() as async_driver:
+        async_lengths: list[int] = []
+        async for batch in async_driver.stream_arrow_batches(query, batch_size=2):
+            with batch:
+                async_lengths.append(len(batch))
+                assert len(batch.buffer_view()) > 0
+        assert async_lengths == [2, 2, 1]
+
+
+@pytest.mark.anyio
+async def test_oracle_load_from_arrow_direct_path_and_identifier_validation() -> None:
+    """Verify load_from_arrow APPEND_VALUES hint precedence, empty short-circuit, and identifier validation."""
+    table = pa.Table.from_pydict({"id": [1, 2], "name": ["a", "b"]})
+    empty_table = pa.Table.from_pydict({"id": [], "name": []})
+
+    with SyncOracleDriver() as sync_driver:
+        sync_driver.execute("CREATE TABLE items (id NUMBER PRIMARY KEY, name VARCHAR2(64))")
+        assert sync_driver.load_from_arrow("items", empty_table) == 0
+        loaded = sync_driver.load_from_arrow("items", table, direct_path=True)
+        assert loaded == 2
+        loaded_std = sync_driver.load_from_arrow(
+            "items",
+            [{"id": 3, "name": "c"}],
+            direct_path=False,
+        )
+        assert loaded_std == 1
+        assert sync_driver.select_value("SELECT COUNT(*) FROM items") == 3
+
+        with pytest.raises((ValueError, ProgrammingError)):
+            sync_driver.load_from_arrow("bad;table", table)
+        with pytest.raises((ValueError, ProgrammingError)):
+            sync_driver.load_from_arrow("items", table, columns=("id", "bad;col"))
+
+    async with AsyncOracleDriver() as async_driver:
+        await async_driver.execute("CREATE TABLE items (id NUMBER PRIMARY KEY, name VARCHAR2(64))")
+        assert await async_driver.load_from_arrow("items", empty_table) == 0
+        async_loaded = await async_driver.load_from_arrow("items", table, direct_path=True)
+        assert async_loaded == 2
+        with pytest.raises((ValueError, ProgrammingError)):
+            await async_driver.load_from_arrow("bad;table", table)
+
