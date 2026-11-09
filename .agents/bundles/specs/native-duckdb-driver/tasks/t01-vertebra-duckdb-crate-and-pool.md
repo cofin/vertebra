@@ -36,8 +36,8 @@ tests:
   - src/py/tests/unit/build/test_packaging_and_pgo.py
   - src/py/tests/unit/test_freethreaded_gil.py
 estimated_loc: 750
-plan_revision: 3
-plan_commit: d7a629b1
+plan_revision: 4
+plan_commit: 88c30004
 state_revision: 2
 claimed_by: agent
 claimed_at: "2026-11-09T02:52:00Z"
@@ -45,11 +45,11 @@ blocked_reason: null
 unblock_condition: null
 next_step: "Completed"
 last_verified_at: "2026-11-09T03:36:00Z"
-last_verified_commit: 7c9d8e1c
+last_verified_commit: 544c6ed1
 verification_evidence: "cargo test -p vertebra-duckdb --locked, cargo clippy -p vertebra-duckdb --all-targets --locked -- -D warnings, mypy.stubtest vertebra._duckdb, pytest test_freethreaded_gil.py test_packaging_and_pgo.py, review_setup validate"
 created_at: "2026-11-09T02:52:00Z"
 updated_at: "2026-11-09T03:36:00Z"
-commit: 088c2d30
+commit: f5df6f98
 sources:
   - id: duckdb-rs
     resource: src/rs/vertebra-db/src/duckdb/mod.rs::DuckdbConfig

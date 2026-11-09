@@ -22,7 +22,7 @@ tests:
   - src/py/tests/integration/db/test_driver_conformance.py
 estimated_loc: 220
 plan_revision: 4
-plan_commit: d7a629b1
+plan_commit: 88c30004
 state_revision: 1
 claimed_by: agent
 claimed_at: "2026-11-09T15:55:00Z"
@@ -30,11 +30,11 @@ blocked_reason: null
 unblock_condition: null
 next_step: null
 last_verified_at: "2026-11-09T16:31:00Z"
-last_verified_commit: 1add9b98
+last_verified_commit: 8869f7c1
 verification_evidence: "pytest src/py/tests/unit/db/test_duckdb_driver.py src/py/tests/integration/db/test_driver_conformance.py -k duckdb"
 created_at: "2026-11-09T15:46:00Z"
-updated_at: "2026-11-09T16:31:00Z"
-commit: null
+updated_at: "2026-11-09T16:34:00Z"
+commit: bb4d2b59
 sources:
   - id: duckdb-pipeline-py
     resource: src/py/vertebra/db/adapters/duckdb/pipeline.py

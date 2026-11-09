@@ -24,7 +24,7 @@ tests:
   - src/py/tests/unit/db/test_duckdb_driver.py
 estimated_loc: 400
 plan_revision: 4
-plan_commit: d7a629b1
+plan_commit: 88c30004
 state_revision: 1
 claimed_by: agent
 claimed_at: "2026-11-09T15:50:00Z"
@@ -32,11 +32,11 @@ blocked_reason: null
 unblock_condition: null
 next_step: null
 last_verified_at: "2026-11-09T16:31:00Z"
-last_verified_commit: 3e4103c5
+last_verified_commit: 9c549ed1
 verification_evidence: "cargo test -p vertebra-duckdb --locked && python -m mypy.stubtest vertebra._duckdb --concise"
 created_at: "2026-11-09T15:46:00Z"
-updated_at: "2026-11-09T16:31:00Z"
-commit: null
+updated_at: "2026-11-09T16:34:00Z"
+commit: 8869f7c1
 sources:
   - id: duckdb-rs
     resource: src/rs/vertebra-db/src/duckdb/mod.rs::DuckdbConfig

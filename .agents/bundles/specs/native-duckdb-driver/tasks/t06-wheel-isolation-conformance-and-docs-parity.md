@@ -37,7 +37,7 @@ tests:
   - src/py/tests/unit/storage/test_gcs_token_refresh.py
 estimated_loc: 550
 plan_revision: 4
-plan_commit: d7a629b1
+plan_commit: 88c30004
 state_revision: 1
 claimed_by: agent
 claimed_at: "2026-11-09T16:00:00Z"
@@ -45,11 +45,11 @@ blocked_reason: null
 unblock_condition: null
 next_step: null
 last_verified_at: "2026-11-09T16:34:00Z"
-last_verified_commit: 47f54de9
+last_verified_commit: bb4d2b59
 verification_evidence: "pytest src/py/tests/unit/db/test_duckdb_driver.py src/py/tests/unit/db/test_optional_driver_wheels.py src/py/tests/integration/db/test_driver_conformance.py -k duckdb && python -m tools.scripts.review_setup validate"
 created_at: "2026-11-09T15:46:00Z"
-updated_at: "2026-11-09T16:34:00Z"
-commit: null
+updated_at: "2026-11-09T16:35:00Z"
+commit: 89de2b8c
 sources:
   - id: conformance-py
     resource: src/py/tests/integration/db/test_driver_conformance.py::ENGINE_SPECS
