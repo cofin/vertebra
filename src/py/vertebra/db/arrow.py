@@ -31,12 +31,28 @@ __all__ = (
 ARROW_SHM_THRESHOLD_ROWS: Final[int] = 256
 _SHM_SEQ_LOCK = threading.Lock()
 _SHM_SEQ_COUNTER = 0
+_VTBARROW_MAGIC: Final[bytes] = b"VTBARROW"
+_VTBARROW_HEADER_SIZE: Final[int] = 16
 
 
 class ArrowCursor:
-    """Zero-copy shared-memory Arrow IPC cursor for bulk analytical result sets."""
+    """Zero-copy shared-memory Arrow IPC cursor for bulk analytical result sets.
 
-    __slots__ = ("_buffer", "_columns", "_mmap", "_rows", "_shm_cursor", "_used_shm")
+    `_shm_anchor` pins the source region and memoryviews backing `_buffer` so Arrow buffers
+    decoded over the payload never outlive the mapping, and `_row_count_cache` memoizes the
+    batch row total counted lazily from the IPC stream.
+    """
+
+    __slots__ = (
+        "_buffer",
+        "_columns",
+        "_mmap",
+        "_row_count_cache",
+        "_rows",
+        "_shm_anchor",
+        "_shm_cursor",
+        "_used_shm",
+    )
 
     def __init__(
         self,
@@ -47,6 +63,7 @@ class ArrowCursor:
         used_shm: bool = False,
         mmap_obj: mmap.mmap | None = None,
         shm_cursor: Any = None,
+        shm_anchor: Any = None,
     ) -> None:
         if (
             shm_cursor is None
@@ -62,16 +79,20 @@ class ArrowCursor:
         self._used_shm = used_shm
         self._mmap = mmap_obj
         self._shm_cursor = shm_cursor
+        self._shm_anchor = shm_anchor
+        self._row_count_cache: int | None = None
 
     def __len__(self) -> int:
-        """Return the number of rows in the cursor."""
+        """Return the number of rows in the cursor without materializing row tuples."""
         if self._rows:
             return len(self._rows)
         if self._shm_cursor is not None and hasattr(self._shm_cursor, "row_count"):
             rc = int(self._shm_cursor.row_count)
             if rc > 0:
                 return rc
-        return 0
+        if self._row_count_cache is None:
+            self._row_count_cache = self._count_ipc_rows()
+        return self._row_count_cache
 
     def __buffer__(self, flags: int, /) -> memoryview:
         """Return a PEP 688 zero-copy memoryview over the serialized Arrow IPC payload."""
@@ -124,15 +145,10 @@ class ArrowCursor:
 
     def to_arrow_table(self) -> Any:
         """Deserialize the Arrow IPC buffer into a `pyarrow.Table` with zero copy."""
-        if self._shm_cursor is not None and hasattr(self._shm_cursor, "to_arrow_table"):
-            with contextlib.suppress(TypeError, ValueError, OSError, RuntimeError):
-                return self._shm_cursor.to_arrow_table()
+        ipc_table = self._ipc_table()
+        if ipc_table is not None:
+            return ipc_table
         pa = import_optional("pyarrow")
-        view = self.buffer_view()
-        if pa is not None and len(view) > 0:
-            with contextlib.suppress(TypeError, ValueError, OSError):
-                reader = pa.ipc.open_stream(pa.py_buffer(view))
-                return reader.read_all()
         if pa is not None:
             cols = self._columns or tuple(f"col_{i}" for i in range(len(self._rows[0]) if self._rows else 0))
             pydict = {col: [r[idx] if idx < len(r) else None for r in self._rows] for idx, col in enumerate(cols)}
@@ -244,6 +260,50 @@ class ArrowCursor:
             seq = _SHM_SEQ_COUNTER
         return f"/vtb-arrow-{os.getpid()}-{seq}"
 
+    @staticmethod
+    def _columnar_source(data: Any) -> Any:
+        """Return a `pyarrow.Table` or `RecordBatch` view of `data` for column-wise row extraction.
+
+        Returns `None` for inputs without a decodable Arrow representation, and for cursors whose
+        IPC payload is empty while buffered row tuples exist, matching `to_pylist()` precedence.
+        """
+        if isinstance(data, ArrowCursor):
+            ipc_table = data._ipc_table()
+            if ipc_table is None or (ipc_table.num_rows == 0 and data._rows):
+                return None
+            return ipc_table
+        pa = import_optional("pyarrow")
+        if pa is not None and isinstance(data, (pa.Table, pa.RecordBatch)):
+            return data
+        return None
+
+    def _ipc_table(self) -> Any:
+        """Decode the native SHM cursor or IPC buffer into a `pyarrow.Table`, or return `None` when not Arrow IPC."""
+        if self._shm_cursor is not None and hasattr(self._shm_cursor, "to_arrow_table"):
+            with contextlib.suppress(TypeError, ValueError, OSError, RuntimeError):
+                return self._shm_cursor.to_arrow_table()
+        pa = import_optional("pyarrow")
+        if pa is None:
+            return None
+        view = self.buffer_view()
+        if len(view) == 0:
+            return None
+        with contextlib.suppress(TypeError, ValueError, OSError):
+            return pa.ipc.open_stream(pa.py_buffer(view)).read_all()
+        return None
+
+    def _count_ipc_rows(self) -> int:
+        """Sum `RecordBatch.num_rows` across the IPC stream without decoding rows into Python objects."""
+        pa = import_optional("pyarrow")
+        if pa is None:
+            return 0
+        with contextlib.suppress(TypeError, ValueError, OSError, RuntimeError, BufferError):
+            view = self.buffer_view()
+            if len(view) == 0:
+                return 0
+            return sum(batch.num_rows for batch in pa.ipc.open_stream(pa.py_buffer(view)))
+        return 0
+
 
 def write_arrow_shm(table: Any) -> memoryview:
     """Serialize a PyArrow Table, RecordBatch, or row sequence into a shared-memory Arrow IPC buffer."""
@@ -282,33 +342,50 @@ def write_arrow_shm(table: Any) -> memoryview:
 
 
 def read_arrow_shm(region: Any, length: int | None = None) -> ArrowCursor:
-    """Wrap a shared-memory Arrow IPC buffer or memoryview in a zero-copy `ArrowCursor`."""
+    """Wrap a shared-memory Arrow IPC buffer or memoryview in a zero-copy `ArrowCursor`.
+
+    Accepts raw offset-0 Arrow IPC streams and `VTBARROW` frames (8-byte magic, `u64` little-endian
+    payload length, payload). Arrow buffers are decoded lazily over `pa.py_buffer(payload_view)`, and
+    the cursor anchors `(region, raw_view, payload_view)` so they never outlive the mapping. Non-IPC
+    payloads fall back to JSON row decoding.
+
+    Raises:
+        ValueError: When a `VTBARROW` header is shorter than `16` bytes or declares a payload
+            longer than the region.
+    """
     if isinstance(region, ArrowCursor):
         return region
     if hasattr(region, "shm_name") and hasattr(region, "byte_len") and hasattr(region, "buffer_view"):
         return ArrowCursor(region, used_shm=True, shm_cursor=region)
-    raw_view = memoryview(region)
+    raw_view = memoryview(region).cast("B")
     if length is not None:
         raw_view = raw_view[:length]
-    raw_bytes = bytes(raw_view)
+    payload_view = raw_view
+    if raw_view[: len(_VTBARROW_MAGIC)] == _VTBARROW_MAGIC:
+        if len(raw_view) < _VTBARROW_HEADER_SIZE:
+            msg = f"VTBARROW frame of {len(raw_view)} bytes is shorter than its {_VTBARROW_HEADER_SIZE}-byte header"
+            raise ValueError(msg)
+        byte_len = int.from_bytes(raw_view[len(_VTBARROW_MAGIC) : _VTBARROW_HEADER_SIZE], "little")
+        frame_end = _VTBARROW_HEADER_SIZE + byte_len
+        if frame_end > len(raw_view):
+            msg = f"VTBARROW frame declares {frame_end} bytes but the region holds {len(raw_view)}"
+            raise ValueError(msg)
+        payload_view = raw_view[_VTBARROW_HEADER_SIZE:frame_end]
+    anchor = (region, raw_view, payload_view)
+    pa = import_optional("pyarrow")
+    if pa is not None and len(payload_view) > 0:
+        with contextlib.suppress(TypeError, ValueError, OSError):
+            schema = pa.ipc.open_stream(pa.py_buffer(payload_view)).schema
+            return ArrowCursor(payload_view, columns=schema.names, used_shm=True, shm_anchor=anchor)
     rows: list[tuple[Any, ...]] = []
     cols: tuple[str, ...] = ()
-    pa = import_optional("pyarrow")
-    if pa is not None and len(raw_bytes) > 0:
-        with contextlib.suppress(TypeError, ValueError, OSError):
-            reader = pa.ipc.open_stream(pa.py_buffer(raw_view))
-            tbl = reader.read_all()
-            pylist = tbl.to_pylist()
-            if pylist:
-                cols = tuple(pylist[0].keys())
-                rows = [tuple(d.get(c) for c in cols) for d in pylist]
-    if not rows and len(raw_bytes) > 0:
+    if len(payload_view) > 0:
         with contextlib.suppress(TypeError, ValueError):
-            decoded = decode_json(raw_bytes)
+            decoded = decode_json(bytes(payload_view))
             if isinstance(decoded, list) and decoded and isinstance(decoded[0], dict):
                 cols = tuple(decoded[0].keys())
                 rows = [tuple(d.get(c) for c in cols) for d in decoded]
-    return ArrowCursor(raw_view, rows=rows, columns=cols, used_shm=True)
+    return ArrowCursor(payload_view, rows=rows, columns=cols, used_shm=True, shm_anchor=anchor)
 
 
 def _hydrate_rows_with_schema(
@@ -345,7 +422,21 @@ def _table_to_rows_and_cols(
     data: Any,
     columns: Sequence[str] | None = None,
 ) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
-    """Extract tuple rows and column names from a PyArrow Table, ArrowCursor, Polars DataFrame, or row sequence."""
+    """Extract tuple rows and column names from a PyArrow Table, ArrowCursor, Polars DataFrame, or row sequence.
+
+    Arrow tables, record batches, and IPC-backed cursors are transposed column-wise (one
+    `to_pylist()` per selected column zipped into row tuples) instead of allocating a dictionary
+    per row; requested columns absent from the schema yield `None` values.
+    """
+    table = ArrowCursor._columnar_source(data)
+    if table is not None:
+        cols = tuple(columns) if columns is not None else tuple(table.column_names)
+        num_rows = table.num_rows
+        if num_rows == 0 or not cols:
+            return [], cols
+        present = set(table.column_names)
+        column_values = (table.column(c).to_pylist() if c in present else [None] * num_rows for c in cols)
+        return list(zip(*column_values, strict=True)), cols
     if isinstance(data, ArrowCursor) or hasattr(data, "to_pylist") and callable(data.to_pylist):
         pylist = data.to_pylist()
     elif hasattr(data, "to_dicts") and callable(data.to_dicts):
