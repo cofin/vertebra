@@ -5,7 +5,7 @@ chapter_id: ch12-queue-docs-and-knowledge
 title: State queue backend executor and client requirements in the queues guide, reference, and OKF chapter
 description: Rewrite the queue backend table in the usage guide, the Storage Backends row and autodoc blocks in the queues reference, and the OKF distributed-queues backend section so each network backend states its executor-or-raise or client-or-raise rule and install package, and no file claims mechanics the code does not implement.
 status: stable
-state: pending
+state: completed
 priority: P2
 verification_strategy: documentation_validation
 depends_on: []
@@ -24,18 +24,18 @@ tests: []
 estimated_loc: 90
 plan_revision: 2
 plan_commit: fd571e3a
-state_revision: 0
-claimed_by: null
-claimed_at: null
+state_revision: 1
+claimed_by: agent:flow-executor
+claimed_at: "2026-11-09T15:14:30Z"
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-09T15:16:39Z"
+last_verified_commit: 3cee2a23
+verification_evidence: "stale-claim grep, required-claim grep, OKF pairing check (11 sources), relative-link check, make docs, make review-check, and pytest src/py/tests/unit/tools/test_docs_tooling.py -q (28 passed)"
 created_at: "2026-11-07T00:00:00Z"
-updated_at: "2026-11-08T00:00:00Z"
-commit: null
+updated_at: "2026-11-09T15:16:39Z"
+commit: 3cee2a23
 generated:
   by: flow/0.28.0
   at: "2026-11-07T00:00:00Z"
@@ -288,10 +288,10 @@ uv run --no-sync pytest src/py/tests/unit/tools/test_docs_tooling.py -q
 
 ## Acceptance Criteria
 
-- [ ] `docs/usage/queues-and-realtime.md` rows for Oracle, PostgreSQL, Redis, Valkey, and Cloud Spanner state the executor or client requirement and install package, and the wound-wait claim is gone (R17).
-- [ ] `docs/reference/queues.md` lists `SpannerQueueBackend` in the intro, Storage Backends row, and autodoc blocks, states the requirement, and lists only defined methods (R17).
-- [ ] `distributed-queues-and-email.md` describes Redis Streams plus sorted set, `vertebra_queue_jobs`, no multiplexed sessions or `DBMS_AQ`, and states the executor-or-raise and client-or-raise rules with 1:1 provenance (R17).
-- [ ] Every Verification command exits `0`.
+- [x] `docs/usage/queues-and-realtime.md` rows for Oracle, PostgreSQL, Redis, Valkey, and Cloud Spanner state the executor or client requirement and install package, and the wound-wait claim is gone (R17).
+- [x] `docs/reference/queues.md` lists `SpannerQueueBackend` in the intro, Storage Backends row, and autodoc blocks, states the requirement, and lists only defined methods (R17).
+- [x] `distributed-queues-and-email.md` describes Redis Streams plus sorted set, `vertebra_queue_jobs`, no multiplexed sessions or `DBMS_AQ`, and states the executor-or-raise and client-or-raise rules with 1:1 provenance (R17).
+- [x] Every Verification command exits `0`.
 
 ## Notes & Discoveries
 

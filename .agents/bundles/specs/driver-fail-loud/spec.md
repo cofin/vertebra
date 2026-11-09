@@ -20,17 +20,17 @@ chapters:
   - ch11-docs-and-okf
   - ch12-queue-docs-and-knowledge
   - ch13-agent-knowledge-and-embeddings-docs
-current_chapter: ch12-queue-docs-and-knowledge
-current_task: "driver-fail-loud:ch12:t01"
+current_chapter: ch13-agent-knowledge-and-embeddings-docs
+current_task: "driver-fail-loud:ch13:t01"
 parent_prd: native-data-platform
 research:
   - research/driver-restructure_20261107.md
   - research/change-surface_20261107.md
 plan_revision: 2
 plan_commit: fd571e3a
-state_revision: 11
+state_revision: 12
 created_at: "2026-11-07T00:00:00Z"
-updated_at: "2026-11-09T15:11:12Z"
+updated_at: "2026-11-09T15:16:39Z"
 verified:
   - by: agent:code-reviewer
     at: "2026-11-08T00:00:00Z"
@@ -288,7 +288,7 @@ unexport PY_GIL_DISABLED PY_TEST_GROUPS
 
 ## 3. Documentation & OKF Knowledge Plan
 
-- **Progress**: `[20/33 files documented]` — union of the chapter documentation plans; ch03 through ch09 document only in-code docstrings that ship with each production change.
+- **Progress**: `[23/33 files documented]` — union of the chapter documentation plans; ch03 through ch09 document only in-code docstrings that ship with each production change.
 - `[x]` `src/py/vertebra/db/adapters/oracle/driver.py` — Module and class docstrings state the `vertebra._oracle` requirement and `MissingDependencyError` (ch01 / t01).
 - `[x]` `src/py/vertebra/db/adapters/mssql/driver.py` — Module and class docstrings state the `vertebra._mssql` requirement; `AsyncMSSQLDriver` documents its sync dialer (ch01 / t02).
 - `[x]` `src/py/vertebra/extensions/sqlalchemy/dialects.py` — `SyncDBAPIConnection.__init__` / `AsyncDBAPIConnection.__init__` `Raises: InterfaceError` (ch02 / t02).
@@ -309,9 +309,9 @@ unexport PY_GIL_DISABLED PY_TEST_GROUPS
 - `[x]` `.agents/bundles/knowledge/domains/data/query-pipeline-cdc-and-tenancy.md` — Tenancy text without SQLite stand-in (ch11 / t04).
 - `[x]` `.agents/bundles/product/product.md` — `vertebra-db` component row (ch11 / t04).
 - `[x]` `.agents/bundles/knowledge/decisions/adr-002-two-tier-shm-database-and-arrow-data-plane.md` — Consequences without TNS/TDS framing (ch11 / t04).
-- `[ ]` `docs/usage/queues-and-realtime.md` — Backend requirements and install packages (ch12 / t01).
-- `[ ]` `docs/reference/queues.md` — Storage Backends row and autodoc blocks including Spanner (ch12 / t01).
-- `[ ]` `.agents/bundles/knowledge/domains/framework/distributed-queues-and-email.md` — Backend table and executor/client rules (ch12 / t01).
+- `[x]` `docs/usage/queues-and-realtime.md` — Backend requirements and install packages (ch12 / t01).
+- `[x]` `docs/reference/queues.md` — Storage Backends row and autodoc blocks including Spanner (ch12 / t01).
+- `[x]` `.agents/bundles/knowledge/domains/framework/distributed-queues-and-email.md` — Backend table and executor/client rules (ch12 / t01).
 - `[ ]` `AGENTS.md` — `make install` entry with `--group duckdb` (ch13 / t01).
 - `[ ]` `.agents/bundles/knowledge/workflow.md` — Install, test, coverage, and upgrade commands with the GIL-only `duckdb` group (ch13 / t01).
 - `[ ]` `.agents/bundles/knowledge/testing/benchmarks-and-free-threaded.md` — `bench` includes the `duckdb` group; free-threaded runs exclude it (ch13 / t01).
@@ -370,7 +370,7 @@ unexport PY_GIL_DISABLED PY_TEST_GROUPS
 - [x] [cd6e5ae6] ch09-conformance-outcomes — Conformance skips a missing native module, fails under Docker only for non-pending engines, and applies strict `xfail` only when a pending engine's module imports ([spec](chapters/ch09-conformance-outcomes/spec.md))
 - [x] [f4d9361d] ch10-queue-backend-fail-loud — PostgreSQL, Redis/Valkey, and Spanner queue backends require a live executor or client ([spec](chapters/ch10-queue-backend-fail-loud/spec.md))
 - [x] [f2b328dc] ch11-docs-and-okf — Database user docs and OKF knowledge match the fail-loud baseline ([spec](chapters/ch11-docs-and-okf/spec.md))
-- [ ] ch12-queue-docs-and-knowledge — Queue docs and OKF knowledge state executor-or-raise and client-or-raise rules ([spec](chapters/ch12-queue-docs-and-knowledge/spec.md))
+- [x] [3cee2a23] ch12-queue-docs-and-knowledge — Queue docs and OKF knowledge state executor-or-raise and client-or-raise rules ([spec](chapters/ch12-queue-docs-and-knowledge/spec.md))
 - [ ] ch13-agent-knowledge-and-embeddings-docs — Agent instructions, tech stack, test matrix, dialect knowledge, landing pages, and Oracle embedding docs match the baseline ([spec](chapters/ch13-agent-knowledge-and-embeddings-docs/spec.md))
 - **Chapter / Phase Recovery Checkpoint**: `make lint && make py-test` (ch05, ch06, and ch07 add `make rs-test`; ch11, ch12, and ch13 add `make docs`)
 

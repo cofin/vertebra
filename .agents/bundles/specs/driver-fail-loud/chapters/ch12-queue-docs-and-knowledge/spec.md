@@ -6,20 +6,20 @@ chapter_id: ch12-queue-docs-and-knowledge
 title: "Chapter 12: Queue Backend Docs and Knowledge"
 description: Align the queues usage guide, the queues API reference, and the OKF distributed-queues chapter with the executor-or-raise and client-or-raise queue backend contracts delivered by chapters 02 and 10.
 status: stable
-state: planned
+state: completed
 planning_status: complete
 depends_on_chapters:
   - ch10-queue-backend-fail-loud
   - ch11-docs-and-okf
 replan_trigger: null
-current_task: "driver-fail-loud:ch12:t01"
+current_task: null
 plan_revision: 2
 plan_commit: fd571e3a
-state_revision: 0
-last_verified_checkpoint: null
+state_revision: 1
+last_verified_checkpoint: 3cee2a23
 last_reviewed_commit: null
 created_at: "2026-11-07T00:00:00Z"
-updated_at: "2026-11-08T00:00:00Z"
+updated_at: "2026-11-09T15:16:39Z"
 generated:
   by: flow/0.28.0
   at: "2026-11-07T00:00:00Z"
@@ -184,10 +184,10 @@ Error contract quoted in docs (from ch02 t03 and ch10):[^ch02-oracle-contract][^
 
 ## 3. Documentation & OKF Knowledge Plan
 
-- **Progress**: `[0/3 files documented]`
-- `[ ]` `docs/usage/queues-and-realtime.md` — backend table requirement column, install packages, injection sentence; wound-wait claim removed (t01)
-- `[ ]` `docs/reference/queues.md` — Spanner in intro, Storage Backends row, and autodoc blocks; requirement clause; `claim` member replaced by `dequeue` (t01)
-- `[ ]` `.agents/bundles/knowledge/domains/framework/distributed-queues-and-email.md` — corrected backend table, executor-or-raise and client-or-raise rules, refreshed provenance (t01)
+- **Progress**: `[3/3 files documented]`
+- `[x]` `docs/usage/queues-and-realtime.md` — backend table requirement column, install packages, injection sentence; wound-wait claim removed (t01)
+- `[x]` `docs/reference/queues.md` — Spanner in intro, Storage Backends row, and autodoc blocks; requirement clause; `claim` member replaced by `dequeue` (t01)
+- `[x]` `.agents/bundles/knowledge/domains/framework/distributed-queues-and-email.md` — corrected backend table, executor-or-raise and client-or-raise rules, refreshed provenance (t01)
 
 ## 4. Requirement-to-Task Traceability Matrix
 
@@ -197,14 +197,14 @@ Error contract quoted in docs (from ch02 t03 and ch10):[^ch02-oracle-contract][^
 
 ## 5. Implementation Plan
 
-- [ ] driver-fail-loud:ch12:t01 — Queue usage guide, queue reference, and OKF queues chapter state executor/client requirements and drop unshipped mechanics (tasks/t01-queue-docs-and-knowledge.md)
+- [x] [3cee2a23] driver-fail-loud:ch12:t01 — Queue usage guide, queue reference, and OKF queues chapter state executor/client requirements and drop unshipped mechanics (tasks/t01-queue-docs-and-knowledge.md)
 - **Chapter / Phase Recovery Checkpoint**: `make review-check && make docs && uv run --no-sync pytest src/py/tests/unit/tools/test_docs_tooling.py -q`
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline (`HEAD`)**: `0acdf576` — chapter authored; blocked on `ch10` and `ch11`.
-- **Remaining Tasks**: `t01` (`0/1` completed).
-- **Documentation & OKF Sync**: `[0/3 files documented]`.
+- **Verified Baseline (`HEAD`)**: `3cee2a23` — chapter completed and verified (`1/1` tasks completed).
+- **Remaining Tasks**: None (`1/1` completed).
+- **Documentation & OKF Sync**: `[3/3 files documented]`.
 - **Active Invariants**: `memory://` queue docs unchanged; changelog untouched; no internal identifiers in user docs.
 
 [^docs-queues-usage]: `docs/usage/queues-and-realtime.md` — Queues, LiveState, email, and telemetry usage guide with the queue backend table.
