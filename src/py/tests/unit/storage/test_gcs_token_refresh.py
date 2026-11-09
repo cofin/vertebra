@@ -46,6 +46,8 @@ from vertebra.storage import (
 )
 from vertebra.typing import ImproperConfigurationError
 
+_DUCKDB_SKIP_REASON = "duckdb publishes no free-threaded wheel; DuckDB tests run on GIL interpreters"
+
 
 class _MockTokenServer:
     """Local HTTP server simulating OAuth2 token, Metadata Server, IAM, and GCS endpoints."""
@@ -414,6 +416,7 @@ def test_duckdb_multi_session_token_generation_secret_rotation(
     tmp_path: Path,
 ) -> None:
     """Verify multiple DuckDB sessions track applied_token_generation and all rotate secrets on refresh."""
+    pytest.importorskip("duckdb", reason=_DUCKDB_SKIP_REASON)
     adc_path = tmp_path / "adc.json"
     adc_path.write_text(
         json.dumps(
@@ -463,6 +466,7 @@ async def test_async_duckdb_driver_token_generation_rotation(
     tmp_path: Path,
 ) -> None:
     """Verify AsyncDuckDBDriver rotates GCS secrets when SyncGcpTokenCache generation advances."""
+    pytest.importorskip("duckdb", reason=_DUCKDB_SKIP_REASON)
     adc_path = tmp_path / "adc.json"
     adc_path.write_text(
         json.dumps(

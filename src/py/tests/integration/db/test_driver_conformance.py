@@ -93,6 +93,7 @@ from vertebra.utils.module_loader import ensure_module
 from vertebra.utils.serializers import decode_json, encode_json
 
 _FAIL_LOUD_DRIVER_ENGINES: frozenset[str] = frozenset({"oracle", "mssql"})
+_DUCKDB_SKIP_REASON = "duckdb publishes no free-threaded wheel; DuckDB tests run on GIL interpreters"
 
 
 class _RollbackSentinelError(RuntimeError):
@@ -734,6 +735,8 @@ async def test_engine_driver_resolution_and_provide_driver(
 
     registry = DatabaseRegistry()
     registry.register(spec.engine, config)
+    if spec.engine == "duckdb":
+        pytest.importorskip("duckdb", reason=_DUCKDB_SKIP_REASON)
     if spec.engine in _FAIL_LOUD_DRIVER_ENGINES:
         assert spec.native_extension_module is not None
         monkeypatch.setitem(sys.modules, spec.native_extension_module, None)

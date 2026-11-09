@@ -27,6 +27,10 @@ export CARGO_TARGET_DIR ?= $(if $(CI),$(CURDIR)/src/rs/target,/tmp/vtb-cargo-tar
 export PATH := $(CURDIR)/.venv/bin:$(CURDIR)/.venv/Scripts:$(HOME)/.bun/bin:$(HOME)/.local/bin:$(PATH)
 export PYO3_PYTHON ?= $(shell if [ -x "$(CURDIR)/.venv/bin/python" ]; then echo "$(CURDIR)/.venv/bin/python"; elif [ -x "$(CURDIR)/.venv/Scripts/python.exe" ]; then echo "$(CURDIR)/.venv/Scripts/python.exe"; else uv run which python 2>/dev/null || which python3; fi)
 
+PY_GIL_DISABLED = $(shell uv run --no-sync python -c "import sysconfig; print(int(bool(sysconfig.get_config_var('Py_GIL_DISABLED'))))" 2>/dev/null)
+PY_TEST_GROUPS = $(if $(filter 0,$(PY_GIL_DISABLED)),--group duckdb)
+unexport PY_GIL_DISABLED PY_TEST_GROUPS
+
 BLUE := $(shell printf "\033[1;34m")
 GREEN := $(shell printf "\033[1;32m")
 RED := $(shell printf "\033[1;31m")
@@ -84,7 +88,7 @@ install: destroy clean setup-env                    ## Install everything (Pytho
 	fi
 	@uv python pin 3.12 >/dev/null 2>&1
 	@uv venv --clear >/dev/null 2>&1
-	@uv sync --all-extras --dev --group doc
+	@uv sync --all-extras --dev --group doc --group duckdb
 	@$(MAKE) ts-install
 	@$(MAKE) ts-build
 	@$(MAKE) dev
@@ -112,7 +116,7 @@ destroy:                                            ## Destroy virtual environme
 .PHONY: upgrade
 upgrade: setup-env                                  ## Upgrade all dependencies (Python, Rust, TS, CI)
 	@echo "${INFO} Upgrading Python dependencies (uv)..."
-	@uv lock --upgrade && uv sync --all-extras --dev --group doc
+	@uv lock --upgrade && uv sync --all-extras --dev --group doc $(PY_TEST_GROUPS)
 	@echo "${INFO} Upgrading Rust dependencies (cargo)..."
 	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
 	@(cd src/rs && cargo update)
@@ -198,7 +202,7 @@ rs-test:                                            ## Run Rust tests (all featu
 .PHONY: py-test
 py-test: dev                                        ## Run Python tests
 	@uv run python -m mypy.stubtest vertebra._vertebra vertebra._bundler vertebra._storage vertebra._bigquery vertebra._spanner
-	@uv run pytest src/py/tests -v
+	@uv run $(PY_TEST_GROUPS) pytest src/py/tests -v
 	@echo "${OK} Python tests passed"
 
 .PHONY: test
@@ -207,7 +211,7 @@ test: rs-test py-test ts-test                       ## Run all tests (Rust, Pyth
 
 .PHONY: coverage
 coverage:                                           ## Run tests with coverage report
-	@uv run pytest src/py/tests --cov --quiet
+	@uv run $(PY_TEST_GROUPS) pytest src/py/tests --cov --quiet
 	@uv run coverage xml -i >/dev/null 2>&1
 	@uv run coverage html -i >/dev/null 2>&1
 	@echo "${OK} Coverage report: htmlcov/index.html"

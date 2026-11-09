@@ -5,7 +5,7 @@ chapter_id: ch02-duckdb-sqlalchemy-queue-fail-loud
 title: OracleQueueBackend requires oracledb and an injected executor
 description: Delete the production in-memory Oracle queue executor, raise MissingDependencyError when oracledb is absent and ImproperConfigurationError when no executor is supplied, and move the executor fake into the queue test module.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on: []
@@ -22,18 +22,18 @@ tests:
 estimated_loc: 230
 plan_revision: 2
 plan_commit: fd571e3a
-state_revision: 0
+state_revision: 1
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-09T03:08:00Z"
+last_verified_commit: af67511d
+verification_evidence: "pytest test_distributed_queues.py (74 passed); ruff and mypy passed"
 created_at: "2026-11-07T00:00:00Z"
-updated_at: "2026-11-07T00:00:00Z"
-commit: null
+updated_at: "2026-11-09T03:08:00Z"
+commit: af67511d
 sources:
   - id: oracle-queue
     resource: src/py/vertebra/framework/queues/oracle.py::OracleQueueBackend
@@ -137,10 +137,10 @@ self._executor: OracleQueueExecutor = executor
 
 ## Acceptance Criteria
 
-- [ ] `OracleQueueBackend` without `executor` raises `MissingDependencyError` naming `oracledb` when it is absent (R5).
-- [ ] `OracleQueueBackend` without `executor` raises `ImproperConfigurationError` when `oracledb` is present (R5.1).
-- [ ] `_InMemoryOracleQueueExecutor` and `_build_executor` are absent from `src/py/vertebra`; the fake lives in `test_distributed_queues.py` and every `oracle://` contract case passes (R5.1).
-- [ ] `OracleQueueBackend.__init__` has a Google docstring with `Raises:`; no inline `#` comments in touched Python files.
+- [x] `OracleQueueBackend` without `executor` raises `MissingDependencyError` naming `oracledb` when it is absent (R5).
+- [x] `OracleQueueBackend` without `executor` raises `ImproperConfigurationError` when `oracledb` is present (R5.1).
+- [x] `_InMemoryOracleQueueExecutor` and `_build_executor` are absent from `src/py/vertebra`; the fake lives in `test_distributed_queues.py` and every `oracle://` contract case passes (R5.1).
+- [x] `OracleQueueBackend.__init__` has a Google docstring with `Raises:`; no inline `#` comments in touched Python files.
 
 ## Notes & Discoveries
 

@@ -6,19 +6,19 @@ chapter_id: ch02-duckdb-sqlalchemy-queue-fail-loud
 title: "Chapter 02: DuckDB, SQLAlchemy, and Oracle Queue Fail-Loud Paths"
 description: DuckDB requires the duckdb package, installed through a GIL-only duckdb dependency group with DuckDB tests skipping on free-threaded interpreters, the SQLAlchemy DB-API raises InterfaceError on unparsable URLs, and OracleQueueBackend raises instead of substituting an in-memory executor.
 status: stable
-state: planned
+state: completed
 planning_status: complete
 depends_on_chapters:
   - ch01-oracle-mssql-fail-loud
 replan_trigger: null
-current_task: "driver-fail-loud:ch02:t01"
+current_task: null
 plan_revision: 2
 plan_commit: fd571e3a
-state_revision: 0
-last_verified_checkpoint: null
+state_revision: 1
+last_verified_checkpoint: af67511d
 last_reviewed_commit: null
 created_at: "2026-11-07T00:00:00Z"
-updated_at: "2026-11-07T00:00:00Z"
+updated_at: "2026-11-09T03:08:00Z"
 generated:
   by: flow/0.28.0
   at: "2026-11-07T00:00:00Z"
@@ -262,10 +262,10 @@ Test guard in each module with DuckDB-executing tests: `_DUCKDB_SKIP_REASON = "d
 
 ## 3. Documentation & OKF Knowledge Plan
 
-- **Progress**: `[0/3 files documented]`
-- `[ ]` `src/py/vertebra/db/adapters/duckdb/driver.py` — `SyncDuckDBDriver.__init__` Google docstring with `Raises:` (t04).
-- `[ ]` `src/py/vertebra/extensions/sqlalchemy/dialects.py` — `SyncDBAPIConnection.__init__` / `AsyncDBAPIConnection.__init__` `Raises: InterfaceError` (t02).
-- `[ ]` `src/py/vertebra/framework/queues/oracle.py` — `OracleQueueBackend.__init__` `Raises:` and class docstring naming the required `executor` (t03).
+- **Progress**: `[3/3 files documented]`
+- `[x]` `src/py/vertebra/db/adapters/duckdb/driver.py` — `SyncDuckDBDriver.__init__` Google docstring with `Raises:` (t04).
+- `[x]` `src/py/vertebra/extensions/sqlalchemy/dialects.py` — `SyncDBAPIConnection.__init__` / `AsyncDBAPIConnection.__init__` `Raises: InterfaceError` (t02).
+- `[x]` `src/py/vertebra/framework/queues/oracle.py` — `OracleQueueBackend.__init__` `Raises:` and class docstring naming the required `executor` (t03).
 - User docs and OKF prose (`docs/usage/databases.md` DuckDB requirement, `docs/usage/queues-and-realtime.md` Oracle row, `knowledge/domains/framework/distributed-queues-and-email.md` Oracle executor requirement) are handed to `ch11-docs-and-okf` (DuckDB) and `ch12-queue-docs-and-knowledge` (queues).
 
 ## 4. Requirement-to-Task Traceability Matrix
@@ -279,18 +279,18 @@ Test guard in each module with DuckDB-executing tests: `_DUCKDB_SKIP_REASON = "d
 
 ## 5. Implementation Plan
 
-- [ ] driver-fail-loud:ch02:t01 — `duckdb` dependency group installed on GIL interpreters by `make install`, `make py-test`, and `make coverage` (tasks/t01-duckdb-dependency-group.md)
-- [ ] driver-fail-loud:ch02:t02 — DB-API connections raise `InterfaceError` on unparsable URLs (tasks/t02-sqlalchemy-parse-error.md)
-- [ ] driver-fail-loud:ch02:t03 — `OracleQueueBackend` requires `oracledb` and an injected executor (tasks/t03-oracle-queue-requires-oracledb.md)
-- [ ] driver-fail-loud:ch02:t04 — DuckDB driver requires `duckdb`; DuckDB tests skip through `pytest.importorskip` without it (tasks/t04-duckdb-requires-duckdb.md)
+- [x] [af67511d] driver-fail-loud:ch02:t01 — `duckdb` dependency group installed on GIL interpreters by `make install`, `make py-test`, and `make coverage` (tasks/t01-duckdb-dependency-group.md)
+- [x] [af67511d] driver-fail-loud:ch02:t02 — DB-API connections raise `InterfaceError` on unparsable URLs (tasks/t02-sqlalchemy-parse-error.md)
+- [x] [af67511d] driver-fail-loud:ch02:t03 — `OracleQueueBackend` requires `oracledb` and an injected executor (tasks/t03-oracle-queue-requires-oracledb.md)
+- [x] [af67511d] driver-fail-loud:ch02:t04 — DuckDB driver requires `duckdb`; DuckDB tests skip through `pytest.importorskip` without it (tasks/t04-duckdb-requires-duckdb.md)
 - **Chapter / Phase Recovery Checkpoint**: `uv run ruff check src/py/vertebra/db/adapters/duckdb/driver.py src/py/vertebra/extensions/sqlalchemy/dialects.py src/py/vertebra/framework/queues/oracle.py && uv run mypy src/py/vertebra/db/adapters/duckdb/driver.py src/py/vertebra/extensions/sqlalchemy/dialects.py src/py/vertebra/framework/queues/oracle.py && make py-test`
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline (`HEAD`)**: `0acdf576` — chapter planned; `0/4` tasks completed.
-- **Active Task**: `driver-fail-loud:ch02:t01`.
-- **Remaining Plan**: t01, t02, t03, t04; t04 depends on t01; t02 and t03 are independent of t01, t04, and each other.
-- **Documentation & OKF Sync**: `[0/3 files documented]`; user docs and OKF prose go to `ch11-docs-and-okf` and queue docs to `ch12-queue-docs-and-knowledge`.
+- **Verified Baseline (`HEAD`)**: `af67511d` — chapter completed; `4/4` tasks completed.
+- **Active Task**: `null`.
+- **Remaining Plan**: none (`ch02` complete).
+- **Documentation & OKF Sync**: `[3/3 files documented]`; user docs and OKF prose go to `ch11-docs-and-okf` and queue docs to `ch12-queue-docs-and-knowledge`.
 - **Active Invariants & Triggers**: registry import stays free of `duckdb` / `oracledb`; the SQLite `_sqlite_conn` path and `MemoryQueueBackend` are untouched; free-threaded interpreters never install `duckdb`.
 
 [^duckdb-driver]: `src/py/vertebra/db/adapters/duckdb/driver.py::SyncDuckDBDriver` — DuckDB driver with sqlite3 fallback and `_using_native_duckdb` branches.

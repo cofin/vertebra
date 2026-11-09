@@ -43,6 +43,7 @@ from vertebra.extensions.sqlalchemy import (
     DeleteUsingClause,
     DropVectorIndexOp,
     InsertSentinelSpec,
+    InterfaceError,
     MySQLAlembicImpl,
     OracleAlembicImpl,
     ParameterizedSQL,
@@ -1443,3 +1444,43 @@ async def test_async_dbapi_connection_driver_ownership_broker_isolation_and_clos
     assert sqlite_drv._sync._closed is False
     assert await sqlite_drv.select_value("SELECT COUNT(*) FROM close_tx_items") == 0
     await sqlite_drv.close()
+
+
+def test_sync_dbapi_connection_rejects_unparsable_url() -> None:
+    """SyncDBAPIConnection and SyncDBAPIModule.connect raise PEP 249 InterfaceError on unparsable URLs."""
+    with pytest.raises(
+        InterfaceError,
+        match=r"Cannot parse Vertebra database URL: Unsupported database URL scheme: 'nonsense\+vtb'",
+    ) as exc_info:
+        SyncDBAPIConnection("nonsense+vtb://host/db", share_pool=False)
+    assert isinstance(exc_info.value.__cause__, ValueError)
+
+    assert SyncDBAPIModule.InterfaceError is InterfaceError
+    with pytest.raises(InterfaceError):
+        SyncDBAPIModule().connect("nonsense+vtb://host/db")
+
+    with pytest.raises(InterfaceError) as empty_exc:
+        SyncDBAPIConnection("", share_pool=False)
+    assert isinstance(empty_exc.value.__cause__, ValueError)
+    assert str(empty_exc.value.__cause__) == "Unsupported database URL scheme: ''"
+
+    driver = SyncSQLiteDriver()
+    try:
+        with pytest.raises(InterfaceError):
+            SyncDBAPIConnection("nonsense+vtb://host/db", driver=driver, share_pool=False)
+    finally:
+        driver.close()
+
+
+def test_async_dbapi_connection_rejects_unparsable_url() -> None:
+    """AsyncDBAPIConnection and AsyncDBAPIModule.connect raise PEP 249 InterfaceError on unparsable URLs."""
+    with pytest.raises(
+        InterfaceError,
+        match=r"'nonsense\+vtb_async'",
+    ) as exc_info:
+        AsyncDBAPIConnection("nonsense+vtb_async://host/db", share_pool=False)
+    assert isinstance(exc_info.value.__cause__, ValueError)
+
+    assert dialects.AsyncDBAPIModule.InterfaceError is InterfaceError
+    with pytest.raises(InterfaceError):
+        dialects.AsyncDBAPIModule().connect("nonsense+vtb_async://host/db")

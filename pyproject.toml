@@ -226,12 +226,15 @@ build = [
     "maturin>=1.5,<2",
 ]
 bench = [
-    "duckdb>=1.0",
+    { include-group = "duckdb" },
     "uvicorn[standard]>=0.30",
     "httptools>=0.6",
     "uvloop>=0.23.0; sys_platform != 'win32'",
     "granian>=1.6",
     "spikard>=0.12",
+]
+duckdb = [
+    "duckdb>=1.0",
 ]
 
 [tool.uv.sources]

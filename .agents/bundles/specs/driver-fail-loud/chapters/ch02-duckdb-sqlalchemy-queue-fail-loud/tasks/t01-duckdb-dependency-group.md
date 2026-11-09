@@ -5,7 +5,7 @@ chapter_id: ch02-duckdb-sqlalchemy-queue-fail-loud
 title: DuckDB dependency group installed on GIL interpreters
 description: Add a dedicated duckdb dependency group, install it from make install and from the py-test and coverage targets only when the interpreter has the GIL, and regenerate uv.lock.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: static_validation
 depends_on: []
@@ -22,18 +22,18 @@ tests: []
 estimated_loc: 30
 plan_revision: 2
 plan_commit: fd571e3a
-state_revision: 0
+state_revision: 1
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-09T03:08:00Z"
+last_verified_commit: af67511d
+verification_evidence: "uv lock --check; make -n py-test / coverage / help probe checks passed"
 created_at: "2026-11-07T00:00:00Z"
-updated_at: "2026-11-07T00:00:00Z"
-commit: null
+updated_at: "2026-11-09T03:08:00Z"
+commit: af67511d
 sources:
   - id: dep-groups
     resource: pyproject.toml::dependency-groups
@@ -159,11 +159,11 @@ Recipe lines after the change:
 
 ## Acceptance Criteria
 
-- [ ] `pyproject.toml` declares `duckdb = ["duckdb>=1.0"]`; `bench` includes it; `dev` does not (R3).
-- [ ] `make install` syncs `--group duckdb`; `make py-test`, `make coverage`, and `make upgrade` add it only when the probe prints `0`, and add nothing when the probe prints `1` or nothing (R3).
-- [ ] `unexport PY_GIL_DISABLED PY_TEST_GROUPS` follows the definitions, and `make help` runs the probe zero times.
-- [ ] `uv lock --check` exits `0`.
-- [ ] `.github/workflows/ci.yml` is unchanged and its non-free-threaded `test-python` jobs install `duckdb` through `make py-test` (R3).
+- [x] `pyproject.toml` declares `duckdb = ["duckdb>=1.0"]`; `bench` includes it; `dev` does not (R3).
+- [x] `make install` syncs `--group duckdb`; `make py-test`, `make coverage`, and `make upgrade` add it only when the probe prints `0`, and add nothing when the probe prints `1` or nothing (R3).
+- [x] `unexport PY_GIL_DISABLED PY_TEST_GROUPS` follows the definitions, and `make help` runs the probe zero times.
+- [x] `uv lock --check` exits `0`.
+- [x] `.github/workflows/ci.yml` is unchanged and its non-free-threaded `test-python` jobs install `duckdb` through `make py-test` (R3).
 
 ## Notes & Discoveries
 

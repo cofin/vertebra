@@ -5,7 +5,7 @@ chapter_id: ch02-duckdb-sqlalchemy-queue-fail-loud
 title: DuckDB driver requires the duckdb package and DuckDB tests skip without it
 description: Resolve duckdb through ensure_module in SyncDuckDBDriver, delete the sqlite3 fallback and every _using_native_duckdb branch, and guard DuckDB-executing tests with pytest.importorskip so free-threaded runs skip them.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -27,18 +27,18 @@ tests:
 estimated_loc: 190
 plan_revision: 2
 plan_commit: fd571e3a
-state_revision: 0
+state_revision: 1
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-09T03:08:00Z"
+last_verified_commit: af67511d
+verification_evidence: "pytest test_enterprise_olap_drivers.py, test_gcs_token_refresh.py, test_native_db_drivers.py, test_driver_conformance.py and free-threaded simulation passed"
 created_at: "2026-11-07T00:00:00Z"
-updated_at: "2026-11-07T00:00:00Z"
-commit: null
+updated_at: "2026-11-09T03:08:00Z"
+commit: af67511d
 sources:
   - id: duckdb-driver
     resource: src/py/vertebra/db/adapters/duckdb/driver.py::SyncDuckDBDriver
@@ -158,10 +158,10 @@ _DUCKDB_SKIP_REASON = "duckdb publishes no free-threaded wheel; DuckDB tests run
 
 ## Acceptance Criteria
 
-- [ ] `SyncDuckDBDriver()` and `AsyncDuckDBDriver()` raise `MissingDependencyError` naming `duckdb` when it is absent (R3).
-- [ ] `src/py/vertebra/db/adapters/duckdb/driver.py` has no `sqlite3`, `_using_native_duckdb`, `contextlib.suppress`, or `import_optional` (R3.1).
-- [ ] DuckDB tests in `test_enterprise_olap_drivers.py`, `test_gcs_token_refresh.py`, `test_native_db_drivers.py`, and the conformance resolution `duckdb` case pass on DuckDB with `--group duckdb` and skip through `pytest.importorskip` when `duckdb` is absent (R3).
-- [ ] `SyncDuckDBDriver.__init__` has a Google docstring with `Raises:`; no inline `#` comments in touched Python files.
+- [x] `SyncDuckDBDriver()` and `AsyncDuckDBDriver()` raise `MissingDependencyError` naming `duckdb` when it is absent (R3).
+- [x] `src/py/vertebra/db/adapters/duckdb/driver.py` has no `sqlite3`, `_using_native_duckdb`, `contextlib.suppress`, or `import_optional` (R3.1).
+- [x] DuckDB tests in `test_enterprise_olap_drivers.py`, `test_gcs_token_refresh.py`, `test_native_db_drivers.py`, and the conformance resolution `duckdb` case pass on DuckDB with `--group duckdb` and skip through `pytest.importorskip` when `duckdb` is absent (R3).
+- [x] `SyncDuckDBDriver.__init__` has a Google docstring with `Raises:`; no inline `#` comments in touched Python files.
 
 ## Notes & Discoveries
 

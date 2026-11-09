@@ -104,6 +104,8 @@ from vertebra.utils.serializers import (
 )
 from vertebra.utils.sync_tools import SyncPool
 
+_DUCKDB_SKIP_REASON = "duckdb publishes no free-threaded wheel; DuckDB tests run on GIL interpreters"
+
 
 def test_sync_transaction_rolls_back_base_exception() -> None:
     """An interrupted transaction discards its writes and permits the next transaction."""
@@ -1445,6 +1447,7 @@ def _make_contract_driver_pair(engine: str) -> tuple[Any, Any, str, Any, str, An
             lambda row_id: (row_id,),
         )
     if engine == "duckdb":
+        pytest.importorskip("duckdb", reason=_DUCKDB_SKIP_REASON)
         sync_dd = SyncDuckDBDriver(DuckDBConfig(database=":memory:"))
         async_dd = AsyncDuckDBDriver(DuckDBConfig(database=":memory:"))
         sync_dd.execute(ddl)

@@ -20,17 +20,17 @@ chapters:
   - ch11-docs-and-okf
   - ch12-queue-docs-and-knowledge
   - ch13-agent-knowledge-and-embeddings-docs
-current_chapter: ch02-duckdb-sqlalchemy-queue-fail-loud
-current_task: "driver-fail-loud:ch02:t01"
+current_chapter: ch03-remove-memory-fakes
+current_task: "driver-fail-loud:ch03:t01"
 parent_prd: native-data-platform
 research:
   - research/driver-restructure_20261107.md
   - research/change-surface_20261107.md
 plan_revision: 2
 plan_commit: fd571e3a
-state_revision: 1
+state_revision: 2
 created_at: "2026-11-07T00:00:00Z"
-updated_at: "2026-11-09T02:53:00Z"
+updated_at: "2026-11-09T03:08:00Z"
 verified:
   - by: agent:code-reviewer
     at: "2026-11-08T00:00:00Z"
@@ -288,12 +288,12 @@ unexport PY_GIL_DISABLED PY_TEST_GROUPS
 
 ## 3. Documentation & OKF Knowledge Plan
 
-- **Progress**: `[0/33 files documented]` — union of the chapter documentation plans; ch03 through ch09 document only in-code docstrings that ship with each production change.
-- `[ ]` `src/py/vertebra/db/adapters/oracle/driver.py` — Module and class docstrings state the `vertebra._oracle` requirement and `MissingDependencyError` (ch01 / t01).
-- `[ ]` `src/py/vertebra/db/adapters/mssql/driver.py` — Module and class docstrings state the `vertebra._mssql` requirement; `AsyncMSSQLDriver` documents its sync dialer (ch01 / t02).
-- `[ ]` `src/py/vertebra/extensions/sqlalchemy/dialects.py` — `SyncDBAPIConnection.__init__` / `AsyncDBAPIConnection.__init__` `Raises: InterfaceError` (ch02 / t02).
-- `[ ]` `src/py/vertebra/framework/queues/oracle.py` — `OracleQueueBackend` class docstring names the required `executor`; `__init__` `Raises:` (ch02 / t03).
-- `[ ]` `src/py/vertebra/db/adapters/duckdb/driver.py` — `SyncDuckDBDriver.__init__` Google docstring with `Raises:` (ch02 / t04).
+- **Progress**: `[5/33 files documented]` — union of the chapter documentation plans; ch03 through ch09 document only in-code docstrings that ship with each production change.
+- `[x]` `src/py/vertebra/db/adapters/oracle/driver.py` — Module and class docstrings state the `vertebra._oracle` requirement and `MissingDependencyError` (ch01 / t01).
+- `[x]` `src/py/vertebra/db/adapters/mssql/driver.py` — Module and class docstrings state the `vertebra._mssql` requirement; `AsyncMSSQLDriver` documents its sync dialer (ch01 / t02).
+- `[x]` `src/py/vertebra/extensions/sqlalchemy/dialects.py` — `SyncDBAPIConnection.__init__` / `AsyncDBAPIConnection.__init__` `Raises: InterfaceError` (ch02 / t02).
+- `[x]` `src/py/vertebra/framework/queues/oracle.py` — `OracleQueueBackend` class docstring names the required `executor`; `__init__` `Raises:` (ch02 / t03).
+- `[x]` `src/py/vertebra/db/adapters/duckdb/driver.py` — `SyncDuckDBDriver.__init__` Google docstring with `Raises:` (ch02 / t04).
 - `[ ]` `src/py/vertebra/framework/queues/postgres.py` — `PostgreSQLQueueBackend` class docstring and `__init__` `Args:` / `Raises:` (ch10 / t01).
 - `[ ]` `src/py/vertebra/framework/queues/redis.py` — `RedisQueueBackend.__init__` `Args:` / `Raises:`; `_build_client` summary (ch10 / t02).
 - `[ ]` `src/py/vertebra/framework/queues/spanner.py` — `SpannerQueueBackend.__init__` `Args:` without `driver` and `Raises:` (ch10 / t03).
@@ -360,7 +360,7 @@ unexport PY_GIL_DISABLED PY_TEST_GROUPS
 ## 5. Implementation Plan
 
 - [x] [d7a629b1] ch01-oracle-mssql-fail-loud — Oracle and MSSQL drivers raise `MissingDependencyError` with no SQLite path; `AsyncMSSQLDriver` forwards `dialer` ([spec](chapters/ch01-oracle-mssql-fail-loud/spec.md))
-- [ ] ch02-duckdb-sqlalchemy-queue-fail-loud — GIL-only `duckdb` group, DuckDB requires `duckdb`, SQLAlchemy raises `InterfaceError`, Oracle queue requires an executor ([spec](chapters/ch02-duckdb-sqlalchemy-queue-fail-loud/spec.md))
+- [x] [af67511d] ch02-duckdb-sqlalchemy-queue-fail-loud — GIL-only `duckdb` group, DuckDB requires `duckdb`, SQLAlchemy raises `InterfaceError`, Oracle queue requires an executor ([spec](chapters/ch02-duckdb-sqlalchemy-queue-fail-loud/spec.md))
 - [ ] ch03-remove-memory-fakes — PostgreSQL and MySQL drivers reject `memory://`; Redis and Valkey consumer tests move onto the `resp3_server` loopback fixture ([spec](chapters/ch03-remove-memory-fakes/spec.md))
 - [ ] ch04-redis-valkey-memory-removal — `RedisConfig` drops the `memory` scheme; Redis and Valkey drivers and store factories reject `memory://` ([spec](chapters/ch04-redis-valkey-memory-removal/spec.md))
 - [ ] ch05-mssql-codec-cleanup — MSSQL Python batch wrappers, the `encode_tds_sql_batch` binding and stub, Rust TDS framing, `MSSQL_DIALECT_TAG`, and `MssqlPool` removed; the placeholder rewriter stays ([spec](chapters/ch05-mssql-codec-cleanup/spec.md))
