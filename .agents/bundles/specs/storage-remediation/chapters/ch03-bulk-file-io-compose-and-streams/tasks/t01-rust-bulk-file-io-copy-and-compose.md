@@ -5,7 +5,7 @@ chapter_id: ch03-bulk-file-io-compose-and-streams
 title: Implement Rust streaming put_file and get_file, bounded-concurrency get_files and put_files, conditional copy, and server-side GCS compose
 description: Stream put_file (> 8 MiB multipart) and atomic .part get_file, add buffer_unordered get_files and put_files, add conditional copy(..., if_not_exists), and implement native GCS JSON /compose (<= 32-way tree fold with temp cleanup) plus multipart fallback in store.rs.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on: []
@@ -21,22 +21,25 @@ tests:
 estimated_loc: 245
 plan_revision: 1
 plan_commit: fd571e3a
-state_revision: 0
-claimed_by: null
-claimed_at: null
+state_revision: 2
+claimed_by: executor
+claimed_at: "2026-11-09T00:23:00Z"
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-09T00:33:00Z"
+last_verified_commit: f8bf065c
+verification_evidence: "cargo test -p vertebra-storage (3 unit + 33 integration passed), clippy -D warnings, rustfmt --check, review-check clean"
 created_at: "2026-11-08T20:55:00Z"
-updated_at: "2026-11-08T20:55:00Z"
-commit: null
+updated_at: "2026-11-09T00:33:00Z"
+commit: f8bf065c
 generated:
   by: flow/0.28.0
   at: "2026-11-08T20:55:00Z"
-verified: []
+verified:
+  - by: executor
+    at: "2026-11-09T00:33:00Z"
+    commit: f8bf065c
 sources:
   - id: storage-store-rs
     resource: src/rs/vertebra-storage/src/store.rs::ObjectStoreEngine
@@ -105,11 +108,12 @@ PATH="$PWD/.venv/bin:$PATH" PYO3_PYTHON="$PWD/.venv/bin/python" CARGO_TARGET_DIR
 
 ## Acceptance Criteria
 
-- [ ] `put_file`, `get_file`, `get_files`, `put_files`, `copy(..., if_not_exists)`, and `compose` (`gs://` `/compose` tree fold + multipart fallback) pass Rust integration tests (R3.1).
+- [x] [f8bf065c] `put_file`, `get_file`, `get_files`, `put_files`, `copy(..., if_not_exists)`, and `compose` (`gs://` `/compose` tree fold + multipart fallback) pass Rust integration tests (R3.1).
 
 ## Notes & Discoveries
 
 - [2026-11-08 20:55] Percent-encode object names in `/storage/v1/b/{bucket}/o/{encoded_dst}/compose` with `crate::signing::rfc3986_encode(dst, true)` so `/` in `dst` is encoded as `%2F` per the GCS JSON API contract without adding new crate dependencies.
+- [2026-11-09 00:33] `GcsComposeContext` carries the built store's `GcpCredentialProvider` (covering static tokens, service-account keys, and ADC) alongside the shared token cache, which is preferred so `401` invalidate-and-retry works. The `file://` `copy(..., if_not_exists=true)` fallback is a create-only put because `LocalFileSystem` already implements `copy_if_not_exists` via `hard_link`; the fallback serves only custom stores registered through `with_store(.., "file")`. `get_files`/`put_files` stop launching new items after the first failure and let in-flight items finish so no cancelled future leaves a `.part` file.
 
 [^storage-store-rs]: `src/rs/vertebra-storage/src/store.rs::ObjectStoreEngine` — `ObjectStoreEngine` file I/O, `copy`, and GCS `compose` implementation.
 [^storage-lib-rs]: `src/rs/vertebra-storage/src/lib.rs::PySyncObjectStore` — Existing `copy` call sites in `lib.rs`.

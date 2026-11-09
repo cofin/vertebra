@@ -5,7 +5,7 @@ chapter_id: ch03-bulk-file-io-compose-and-streams
 title: Pass buffers zero-copy without memoryview wrapping, add 4 MiB read-ahead open_reader, and add streaming open_writer
 description: Pass payloads directly into native put and put_multipart in _store.py so PyBytes stays zero-copy, add read_ahead=4_194_304 block caching to SyncReadableFile and AsyncReadableFile, implement SyncWritableFile and AsyncWritableFile (open_writer), and export PreconditionError, SyncWritableFile, and AsyncWritableFile in vertebra.storage.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -22,22 +22,25 @@ tests:
 estimated_loc: 230
 plan_revision: 1
 plan_commit: fd571e3a
-state_revision: 0
-claimed_by: null
-claimed_at: null
+state_revision: 2
+claimed_by: executor
+claimed_at: "2026-11-09T00:23:20Z"
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-09T00:32:30Z"
+last_verified_commit: 19dac0d8
+verification_evidence: "pytest src/py/tests/unit/storage (193 passed); ruff check/format and mypy on src/py/vertebra/storage clean"
 created_at: "2026-11-08T20:55:00Z"
-updated_at: "2026-11-08T20:55:00Z"
-commit: null
+updated_at: "2026-11-09T00:32:30Z"
+commit: 19dac0d8
 generated:
   by: flow/0.28.0
   at: "2026-11-08T20:55:00Z"
-verified: []
+verified:
+  - by: executor
+    at: "2026-11-09T00:32:30Z"
+    commit: 19dac0d8
 sources:
   - id: py-store
     resource: src/py/vertebra/storage/_store.py::SyncReadableFile
@@ -104,11 +107,13 @@ uv run --no-sync pytest src/py/tests/unit/storage/test_storage_store.py -q
 
 ## Acceptance Criteria
 
-- [ ] `put` and `put_multipart` forward buffers directly without `memoryview` wrapping (R3.4).
-- [ ] `open_reader` caches `read_ahead` range windows, `open_writer` streams multipart writes with automatic abort-on-error, and `PreconditionError`, `SyncWritableFile`, and `AsyncWritableFile` are exported in `vertebra.storage` (R3.4).
+- [x] [19dac0d8] `put` and `put_multipart` forward buffers directly without `memoryview` wrapping (R3.4).
+- [x] [19dac0d8] `open_reader` caches `read_ahead` range windows, `open_writer` streams multipart writes with automatic abort-on-error, and `PreconditionError`, `SyncWritableFile`, and `AsyncWritableFile` are exported in `vertebra.storage` (R3.4).
 
 ## Notes & Discoveries
 
+- [2026-11-09 00:23] Executes in parallel with `t01` ahead of `t02`/`t03` because it touches only Python reader/writer/export seams with no dependency on the new native bulk-I/O bindings.
+- [2026-11-09 00:32] Native `extract_buffer_bytes` accepts only byte-format (`B`/`b`/`c`) buffers, so `_BaseObjectStore._native_payload` passes `bytes`, `bytearray`, and `B`-format views unchanged and casts typed buffers (`pyarrow.Buffer`, `array.array`, NumPy) to a flat `B` view. `_arrow.py` Parquet batch readers pass `read_ahead=0` because pyarrow issues exact range reads and row-group demand paging must stay bounded.
 - [2026-11-08 20:55] `SyncWritableFile` inherits `io.RawIOBase` (`writable() -> True`) so standard library `gzip.GzipFile(fileobj=wf, mode="wb")` and `io.TextIOWrapper(io.BufferedWriter(wf))` work out of the box.
 
 [^py-store]: `src/py/vertebra/storage/_store.py::SyncReadableFile` — `SyncReadableFile`, `AsyncReadableFile`, and `SyncObjectStore`/`AsyncObjectStore` stream helpers.
