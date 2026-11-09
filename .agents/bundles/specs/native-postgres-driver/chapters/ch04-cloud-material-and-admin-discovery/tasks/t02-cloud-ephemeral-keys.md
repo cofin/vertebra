@@ -5,7 +5,7 @@ chapter_id: ch04-cloud-material-and-admin-discovery
 title: Generate PKCS#1 RSA-2048 ephemeral keys and validate issued X.509 chains
 description: Implement cloud::keys generating off-GIL PKCS#1 RSA-2048 PEM keypairs via rsa 0.9 and validating Admin-issued X.509 leaf certificates for exact SPKI key match, leaf-first chain order, and signed NotAfter expiry.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -120,9 +120,9 @@ Commit as `feat(postgres): validate issued cloud client identities`.
 
 ## Acceptance Criteria
 
-- [ ] `generate_ephemeral_rsa_keypair` runs RSA-2048 generation off-GIL in `spawn_blocking` under `deadline` and emits LF-normalized PKCS#1 `RSA PUBLIC KEY` and `RSA PRIVATE KEY` PEMs (R4, R9).
-- [ ] `validate_issued_certificate_chain` enforces leaf-first ordering, zero trailing DER, exact RSA `(n, e)` SPKI equality against the generated keypair, and `signed_not_after_ms > now_unix_ms` (R4, R9).
-- [ ] Private keys are redacted across all `Debug` and error formatting paths (R5, R9).
+- [x] `generate_ephemeral_rsa_keypair` runs RSA-2048 generation off-GIL in `spawn_blocking` under `deadline` and emits LF-normalized PKCS#1 `RSA PUBLIC KEY` and `RSA PRIVATE KEY` PEMs (R4, R9).
+- [x] `validate_issued_certificate_chain` enforces leaf-first ordering, zero trailing DER, exact RSA `(n, e)` SPKI equality against the generated keypair, and `signed_not_after_ms > now_unix_ms` (R4, R9).
+- [x] Private keys are redacted across all `Debug` and error formatting paths (R5, R9).
 
 ## Notes & Discoveries
 

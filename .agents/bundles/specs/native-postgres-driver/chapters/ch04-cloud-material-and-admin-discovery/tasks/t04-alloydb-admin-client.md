@@ -5,7 +5,7 @@ chapter_id: ch04-cloud-material-and-admin-discovery
 title: Discover AlloyDB v1alpha targets and issue metadata-enabled client certificates
 description: Implement cloud::alloydb calling coherent AlloyDB v1alpha connectionInfo and generateClientCertificate endpoints with PKCS#1 RSA keys, useMetadataExchange=true, alloydb.login token resolution across both auth modes, and port 5433 SAN targets.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -123,9 +123,9 @@ Commit as `feat(postgres): issue AlloyDB connection credentials`.
 
 ## Acceptance Criteria
 
-- [ ] `cloud::alloydb` calls coherent `v1alpha` `connectionInfo` (instance path) and `:generateClientCertificate` (cluster path) with exact `{"publicKey", "certDuration": "3600s", "useMetadataExchange": true}` JSON and percent-encoded path segments, returning raw `AlloyDbDiscovery` to `cloud/material.rs` (R9).
-- [ ] Both `AuthType::Iam` (`2`) and `AuthType::Password` (`1`) resolve `alloydb.login` tokens separately from `cloud-platform` Admin bearer tokens inside `cloud/material.rs`, and `effective_expiry_ms` honors signed leaf `NotAfter` and login token expiry over `"3600s"` (R5, R9).
-- [ ] Leaf-first multi-certificate chains, RSA key matching, and requested `PUBLIC`/`PRIVATE`/`PSC` port `5433` SAN targets are validated before cache publication (R4, R9).
+- [x] `cloud::alloydb` calls coherent `v1alpha` `connectionInfo` (instance path) and `:generateClientCertificate` (cluster path) with exact `{"publicKey", "certDuration": "3600s", "useMetadataExchange": true}` JSON and percent-encoded path segments, returning raw `AlloyDbDiscovery` to `cloud/material.rs` (R9).
+- [x] Both `AuthType::Iam` (`2`) and `AuthType::Password` (`1`) resolve `alloydb.login` tokens separately from `cloud-platform` Admin bearer tokens inside `cloud/material.rs`, and `effective_expiry_ms` honors signed leaf `NotAfter` and login token expiry over `"3600s"` (R5, R9).
+- [x] Leaf-first multi-certificate chains, RSA key matching, and requested `PUBLIC`/`PRIVATE`/`PSC` port `5433` SAN targets are validated before cache publication (R4, R9).
 
 ## Notes & Discoveries
 

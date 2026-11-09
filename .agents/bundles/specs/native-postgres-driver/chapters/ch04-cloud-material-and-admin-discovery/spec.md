@@ -5,12 +5,12 @@ chapter_id: ch04-cloud-material-and-admin-discovery
 title: "Chapter 04: Cloud Material Cache, Ephemeral Keys, and Admin API Discovery"
 description: Single-flight deadline-bounded cloud material cache, off-GIL PKCS#1 RSA-2048 ephemeral key generation with X.509 leaf validation, and Cloud SQL v1beta4 plus AlloyDB v1alpha Admin discovery clients.
 status: stable
-state: planned
+state: completed
 planning_status: complete
 depends_on_chapters:
   - ch03-scram-and-channel-binding
 replan_trigger: null
-current_task: "native-postgres-driver:ch04:t01"
+current_task: null
 plan_revision: 5
 plan_commit: fd571e3a
 state_revision: 0
@@ -148,10 +148,10 @@ Progress: `[0/0 files documented in ch04]`
 
 ## 5. Implementation Plan
 
-- [ ] native-postgres-driver:ch04:t01 — Cache expiring cloud connection material under one total deadline (tasks/t01-cloud-material-cache.md)
-- [ ] native-postgres-driver:ch04:t02 — Generate PKCS#1 RSA-2048 ephemeral keys and validate issued X.509 chains (tasks/t02-cloud-ephemeral-keys.md)
-- [ ] native-postgres-driver:ch04:t03 — Discover Cloud SQL v1beta4 addresses and issue scoped ephemeral certificates (tasks/t03-cloudsql-admin-client.md)
-- [ ] native-postgres-driver:ch04:t04 — Discover AlloyDB v1alpha targets and issue metadata-enabled client certificates (tasks/t04-alloydb-admin-client.md)
+- [x] native-postgres-driver:ch04:t01 — Cache expiring cloud connection material under one total deadline (tasks/t01-cloud-material-cache.md)
+- [x] native-postgres-driver:ch04:t02 — Generate PKCS#1 RSA-2048 ephemeral keys and validate issued X.509 chains (tasks/t02-cloud-ephemeral-keys.md)
+- [x] native-postgres-driver:ch04:t03 — Discover Cloud SQL v1beta4 addresses and issue scoped ephemeral certificates (tasks/t03-cloudsql-admin-client.md)
+- [x] native-postgres-driver:ch04:t04 — Discover AlloyDB v1alpha targets and issue metadata-enabled client certificates (tasks/t04-alloydb-admin-client.md)
 
 **Chapter Recovery Checkpoint:** `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --locked && cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-postgres --all-targets --locked -- -D warnings` exits `0`.
 

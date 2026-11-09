@@ -5,7 +5,7 @@ chapter_id: ch04-cloud-material-and-admin-discovery
 title: Discover Cloud SQL v1beta4 addresses and issue scoped ephemeral certificates
 description: Implement cloud::cloudsql calling Cloud SQL Admin v1beta4 connectSettings and generateEphemeralCert with separate Admin vs sqlservice.login tokens, strict engine/region/IP validation, and validated port 3307 mTLS material.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -124,9 +124,9 @@ Commit as `feat(postgres): issue Cloud SQL connection credentials`.
 
 ## Acceptance Criteria
 
-- [ ] `cloud::cloudsql` calls exact `v1beta4` `connectSettings` and `:generateEphemeralCert` paths with percent-encoded segments, returning raw `CloudSqlDiscovery` to `cloud/material.rs` while `cloud/material.rs` enforces strict Admin bearer vs `sqlservice.login` body token separation and constructs `PreparedCloudMaterial` (R5, R9).
-- [ ] `region`, `POSTGRES*` `databaseVersion`, requested `PUBLIC`/`PRIVATE`/`PSC` endpoint availability, non-empty server CA, and issued RSA leaf identity/expiry are all verified before caching (R4, R9).
-- [ ] Returned `PreparedCloudMaterial` targets port `3307` with metadata DNS + exact `project:instance` CN identity metadata for `ch05:t01` (R4, R9).
+- [x] `cloud::cloudsql` calls exact `v1beta4` `connectSettings` and `:generateEphemeralCert` paths with percent-encoded segments, returning raw `CloudSqlDiscovery` to `cloud/material.rs` while `cloud/material.rs` enforces strict Admin bearer vs `sqlservice.login` body token separation and constructs `PreparedCloudMaterial` (R5, R9).
+- [x] `region`, `POSTGRES*` `databaseVersion`, requested `PUBLIC`/`PRIVATE`/`PSC` endpoint availability, non-empty server CA, and issued RSA leaf identity/expiry are all verified before caching (R4, R9).
+- [x] Returned `PreparedCloudMaterial` targets port `3307` with metadata DNS + exact `project:instance` CN identity metadata for `ch05:t01` (R4, R9).
 
 ## Notes & Discoveries
 

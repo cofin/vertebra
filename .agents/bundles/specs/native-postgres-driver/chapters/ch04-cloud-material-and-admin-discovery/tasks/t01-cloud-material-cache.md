@@ -5,7 +5,7 @@ chapter_id: ch04-cloud-material-and-admin-discovery
 title: Cache expiring cloud connection material under one total deadline
 description: Implement CloudConnectorConfig, PreparedCloudMaterial, singleflight CloudMaterialCache (240s refresh lead), and bounded 1 MiB reqwest HTTP helpers under a single absolute deadline.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -130,9 +130,9 @@ Commit as `feat(postgres): cache expiring cloud connection material`.
 
 ## Acceptance Criteria
 
-- [ ] `CloudMaterialCache` enforces singleflight refresh per `(credential, resource, ip_type, endpoint, auth_mode)` key with `now + 240s < min(signed_not_after, cert_bound_token_expiry)` reuse and clean lock release on cancellation (R5, R9).
-- [ ] Bounded `reqwest` helpers enforce `absolute_deadline`, `1 MiB` response caps, URI segment percent-encoding, non-loopback HTTPS validation, and secret redaction (R5, R9).
-- [ ] Credential caches are constructed inside `vertebra-postgres` from owned primitive option maps without cross-`cdylib` PyO3 extraction (R1, R5, R9).
+- [x] `CloudMaterialCache` enforces singleflight refresh per `(credential, resource, ip_type, endpoint, auth_mode)` key with `now + 240s < min(signed_not_after, cert_bound_token_expiry)` reuse and clean lock release on cancellation (R5, R9).
+- [x] Bounded `reqwest` helpers enforce `absolute_deadline`, `1 MiB` response caps, URI segment percent-encoding, non-loopback HTTPS validation, and secret redaction (R5, R9).
+- [x] Credential caches are constructed inside `vertebra-postgres` from owned primitive option maps without cross-`cdylib` PyO3 extraction (R1, R5, R9).
 
 ## Notes & Discoveries
 
