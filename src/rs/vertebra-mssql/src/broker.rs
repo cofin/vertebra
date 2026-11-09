@@ -6,9 +6,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+pub use vertebra_core::broker::DIALECT_TAG_MSSQL;
 use vertebra_core::broker::{
-    DIALECT_TAG_MSSQL, LeaseGrant, LeaseTableStats, ShmLeaseTable, ShmStatementCache,
-    StatementCacheStats,
+    LeaseGrant, LeaseTableStats, ShmLeaseTable, ShmStatementCache, StatementCacheStats,
 };
 use vertebra_core::shm::ShmRegion;
 use vertebra_db::rewrite_mssql_placeholders;
@@ -101,6 +101,16 @@ impl MssqlBrokerBackend {
     /// Return current statement cache telemetry counters, if statement caching is enabled.
     pub fn statement_cache_stats(&self) -> Option<StatementCacheStats> {
         self.stmt_cache.as_ref().map(|c| c.stats())
+    }
+
+    /// Return the broker dialect tag (`DIALECT_TAG_MSSQL = 5`).
+    pub const fn dialect_tag(&self) -> u16 {
+        DIALECT_TAG_MSSQL
+    }
+
+    /// Return the broker dialect name (`"mssql"`).
+    pub const fn dialect(&self) -> &'static str {
+        "mssql"
     }
 }
 

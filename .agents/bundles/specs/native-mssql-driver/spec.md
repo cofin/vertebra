@@ -14,11 +14,11 @@ research:
   - ../integration-remediation/research/audit-findings_20261103.md
 plan_revision: 3
 plan_commit: fd571e3a
-state_revision: 3
-current_task: "native-mssql-driver:t03"
-last_verified_checkpoint: 3b57e70f
+state_revision: 4
+current_task: "native-mssql-driver:t04"
+last_verified_checkpoint: 5d194452
 created_at: "2026-11-03T04:05:00Z"
-updated_at: "2026-11-09T15:10:00Z"
+updated_at: "2026-11-09T15:15:00Z"
 generated:
   by: flow-setup
   at: "2026-11-07T04:15:00Z"
@@ -93,9 +93,9 @@ See [crate research](../native-data-platform/research/rust-driver-crates_2026110
 ## Tasks
 
 - [x] [3b57e70f] [t01: Scaffold `vertebra-mssql` crate, TDS `PRELOGIN`/TLS/`LOGIN7`, and Cloud SQL `:3307` mTLS](tasks/t01-vertebra-mssql-crate-prelogin-and-tls.md)
-- [x] [t02: Implement MSSQL SQL batch, `sp_executesql` RPC, transactions, `ATTENTION` cancellation, and `DatabaseError` mapping](tasks/t02-mssql-rpc-transactions-attention-and-errors.md)
-- [~] [t03: Implement MSSQL codecs, `VTBARROW` `ShmCapsule` export, `BulkLoad` `load_from_arrow`, and `BrokerEngineBackend` registration](tasks/t03-mssql-codecs-vtbarrow-and-bulk-load.md)
-- [ ] [t04: Cut Python `SyncMSSQLDriver` and `AsyncMSSQLDriver` over to `vertebra._mssql`, update tests, and refresh docs](tasks/t04-python-mssql-driver-cutover-and-docs.md)
+- [x] [5d194452] [t02: Implement MSSQL SQL batch, `sp_executesql` RPC, transactions, `ATTENTION` cancellation, and `DatabaseError` mapping](tasks/t02-mssql-rpc-transactions-attention-and-errors.md)
+- [x] [t03: Implement MSSQL codecs, `VTBARROW` `ShmCapsule` export, `BulkLoad` `load_from_arrow`, and `BrokerEngineBackend` registration](tasks/t03-mssql-codecs-vtbarrow-and-bulk-load.md)
+- [~] [t04: Cut Python `SyncMSSQLDriver` and `AsyncMSSQLDriver` over to `vertebra._mssql`, update tests, and refresh docs](tasks/t04-python-mssql-driver-cutover-and-docs.md)
 
 [^mssql-rs]: `src/rs/vertebra-db/src/mssql/mod.rs::rewrite_mssql_placeholders` — `@P1` placeholder rewrite helper, the surviving MSSQL codec in vertebra-db.
 [^fail-loud-baseline]: `.agents/bundles/specs/driver-fail-loud/spec.md` — Upstream flow that replaces the MSSQL `sqlite3` stand-in with a `MissingDependencyError` guard and deletes TDS framing.

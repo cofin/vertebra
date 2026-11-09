@@ -5,17 +5,17 @@ flow_id: native-mssql-driver
 title: "Cut Python SyncMSSQLDriver and AsyncMSSQLDriver over to vertebra._mssql, update tests, and refresh docs"
 description: "Cut src/py/vertebra/db/adapters/mssql/driver.py over to ensure_module('vertebra._mssql', package='vertebra-core[mssql]', extra='mssql') delegating to SyncMSSQLClient and AsyncMSSQLClient, remove all sqlite3/memory:// stand-in paths, update unit and conformance tests, verify wheel isolation, and update docs and OKF chapters."
 status: stable
-state: pending
+state: in_progress
 verification_strategy: tdd
 depends_on:
   - t03
 plan_revision: 1
-state_revision: 0
+state_revision: 1
 commit_sha: null
-claimed_at: null
+claimed_at: "2026-11-09T15:15:00Z"
 completed_at: null
 created_at: "2026-11-09T03:20:00Z"
-updated_at: "2026-11-09T03:20:00Z"
+updated_at: "2026-11-09T15:15:00Z"
 reads:
   - src/py/vertebra/db/adapters/mssql/driver.py
   - src/py/vertebra/db/adapters/mssql/config.py

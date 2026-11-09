@@ -22,6 +22,7 @@ const PKT_SQL_BATCH: u8 = 0x01;
 const PKT_RPC: u8 = 0x03;
 const PKT_TABULAR_RESULT: u8 = 0x04;
 const PKT_ATTENTION: u8 = 0x06;
+const PKT_BULK_LOAD: u8 = 0x07;
 const PKT_TRANS_MGR: u8 = 0x0E;
 const PKT_LOGIN7: u8 = 0x10;
 const PKT_PRELOGIN: u8 = 0x12;
@@ -246,8 +247,35 @@ async fn spawn_mock_tds_server(
                 while let Ok((cmd_ty, payload)) = read_tds_message(&mut stream).await {
                     match cmd_ty {
                         PKT_SQL_BATCH => {
+                            let ascii_text = decode_utf16le_ascii_lossy(&payload);
                             let mut resp = Vec::new();
+                            if ascii_text.contains("SELECT TOP 0") {
+                                // Emit COLMETADATA for bulk insert target: `id` BIGINT (Int8 0x7F) + `name` NVARCHAR(256)
+                                resp.push(0x81);
+                                resp.extend_from_slice(&2u16.to_le_bytes());
+
+                                // Col 0: `id` BIGINT (`FixedLenType::Int8 = 0x7F`, Updateable)
+                                resp.extend_from_slice(&0u32.to_le_bytes());
+                                resp.extend_from_slice(&0x0008u16.to_le_bytes());
+                                resp.push(0x7F);
+                                put_b_varchar(&mut resp, "id");
+
+                                // Col 1: `name` NVARCHAR(256) (`0xE7`, Nullable | Updateable)
+                                resp.extend_from_slice(&0u32.to_le_bytes());
+                                resp.extend_from_slice(&0x0009u16.to_le_bytes());
+                                resp.push(0xE7);
+                                resp.extend_from_slice(&256u16.to_le_bytes());
+                                resp.extend_from_slice(&[0x09, 0x04, 0xD0, 0x00, 0x34]);
+                                put_b_varchar(&mut resp, "name");
+                            }
                             append_done_token(&mut resp, 0xFD, 0, 0, 0);
+                            let _ = stream
+                                .write_all(&wrap_tds_packet(PKT_TABULAR_RESULT, &resp))
+                                .await;
+                        }
+                        PKT_BULK_LOAD => {
+                            let mut resp = Vec::new();
+                            append_done_token(&mut resp, 0xFD, 0x0010, 0xF0, 2);
                             let _ = stream
                                 .write_all(&wrap_tds_packet(PKT_TABULAR_RESULT, &resp))
                                 .await;
@@ -531,3 +559,48 @@ async fn tds_attention_cancellation_and_server_error_hierarchy_mapping() {
         });
     }
 }
+
+#[tokio::test]
+async fn tds_vtbarrow_shm_export_and_bulk_load_roundtrip() {
+    use _mssql::broker::{DIALECT_TAG_MSSQL, MssqlBrokerBackend};
+    use _mssql::bulk_load::decode_shm_arrow_batches;
+
+    let attn_counter = Arc::new(AtomicUsize::new(0));
+    let addr = spawn_mock_tds_server(None, Arc::clone(&attn_counter)).await;
+    let client = MssqlClient::new(loopback_config(addr)).expect("client");
+
+    // Verify MssqlBrokerBackend dialect contract
+    let backend: &MssqlBrokerBackend = client.broker();
+    assert_eq!(backend.dialect_tag(), DIALECT_TAG_MSSQL);
+    assert_eq!(backend.dialect(), "mssql");
+
+    // 1. select_to_arrow exports result set into a VTBARROW POSIX SHM segment
+    let (shm_name, byte_len, row_count, region) = client
+        .select_to_arrow("SELECT id, name FROM users".to_string(), vec![])
+        .await
+        .expect("select_to_arrow");
+    assert_eq!(row_count, 2);
+    assert!(byte_len > 64);
+
+    // 2. load_from_arrow_shm reads the VTBARROW SHM segment and streams it over TDS 0x07 BulkLoad
+    let decoded_batches = decode_shm_arrow_batches(&shm_name).expect("decode_shm_arrow_batches");
+    assert_eq!(decoded_batches.len(), 1);
+    assert_eq!(decoded_batches[0].num_rows(), 2);
+
+    let loaded = client
+        .load_from_arrow_shm("bulk_target".to_string(), shm_name.clone(), None)
+        .await
+        .expect("load_from_arrow_shm");
+    assert_eq!(loaded, 2);
+    drop(region);
+
+    // 3. stream_arrow_batches chunks rows into VTBARROW SHM segments
+    let chunks = client
+        .stream_arrow_batches("SELECT id, name FROM users".to_string(), vec![], 1)
+        .await
+        .expect("stream_arrow_batches");
+    assert_eq!(chunks.len(), 2);
+    assert_eq!(chunks[0].2, 1);
+    assert_eq!(chunks[1].2, 1);
+}
+

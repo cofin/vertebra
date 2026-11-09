@@ -5,17 +5,17 @@ flow_id: native-mssql-driver
 title: "Implement MSSQL codecs, VTBARROW ShmCapsule export, BulkLoad load_from_arrow, and BrokerEngineBackend registration"
 description: "Implement rich MSSQL column/parameter codecs (numeric/decimal/money, datetime/datetime2/datetimeoffset/date/time, uniqueidentifier, PLP varchar(max)/nvarchar(max)/varbinary(max), xml, json), VTBARROW ShmCapsule (select_to_arrow, stream_arrow_batches), BulkLoadRequest load_from_arrow, and BrokerEngineBackend."
 status: stable
-state: in_progress
+state: completed
 verification_strategy: tdd
 depends_on:
   - t02
 plan_revision: 1
-state_revision: 1
+state_revision: 2
 commit_sha: null
 claimed_at: "2026-11-09T15:10:00Z"
-completed_at: null
+completed_at: "2026-11-09T15:15:00Z"
 created_at: "2026-11-09T03:20:00Z"
-updated_at: "2026-11-09T15:10:00Z"
+updated_at: "2026-11-09T15:15:00Z"
 reads:
   - src/rs/vertebra-db/src/arrow_shm.rs
   - src/rs/vertebra-core/src/broker.rs
@@ -68,9 +68,9 @@ Completes the data-plane capabilities of `vertebra-mssql`: rich Python/Arrow typ
 
 ## Acceptance Criteria
 
-- [ ] `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-mssql --locked` passes including codec round-trip, `VTBARROW` `ShmCapsule`, `BulkLoad`, and `MssqlBrokerBackend` tests.
-- [ ] `cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-mssql --all-targets --locked -- -D warnings` passes.
-- [ ] `mypy.stubtest vertebra._mssql` passes.
+- [x] `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-mssql --locked` passes including codec round-trip, `VTBARROW` `ShmCapsule`, `BulkLoad`, and `MssqlBrokerBackend` tests.
+- [x] `cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-mssql --all-targets --locked -- -D warnings` passes.
+- [x] `mypy.stubtest vertebra._mssql` passes.
 
 [^arrow-shm]: `src/rs/vertebra-db/src/arrow_shm.rs` — VTBARROW ShmCapsule and Arrow IPC decoder/encoder in vertebra-db.
 [^broker-rs]: `src/rs/vertebra-core/src/broker.rs` — BrokerEngineBackend trait for SHM DB broker registration.
