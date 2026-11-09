@@ -22,8 +22,6 @@ from vertebra.utils.type_guards import get_msgspec_rename_config
 __all__ = (
     "ARROW_SHM_THRESHOLD_ROWS",
     "ArrowCursor",
-    "_hydrate_rows_with_schema",
-    "_table_to_rows_and_cols",
     "read_arrow_shm",
     "write_arrow_shm",
 )

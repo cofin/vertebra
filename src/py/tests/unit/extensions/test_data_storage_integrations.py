@@ -33,7 +33,6 @@ from vertebra.extensions.alchemy.storage import register_storage_backend
 from vertebra.extensions.sqlspec.events import ChangeFeedAsyncEventBackend, ChangeFeedSyncEventBackend
 from vertebra.extensions.sqlspec.storage import (
     ArrowFlightSerializer,
-    StreamingStorageResponse,
     build_duckdb_gcs_secret_sql,
     register_storage_alias,
 )
@@ -47,11 +46,9 @@ from vertebra.storage import (
     MemoryConfig,
     S3Config,
     SigningConfig,
+    StreamingStorageResponse,
     SyncGcpTokenCache,
     SyncObjectStore,
-)
-from vertebra.storage import (
-    StreamingStorageResponse as StorageStreamingStorageResponse,
 )
 from vertebra.typing import ImproperConfigurationError
 from vertebra.utils.module_loader import import_optional
@@ -686,7 +683,7 @@ async def test_sqlspec_shared_store_conditional_writes_and_rename(tmp_path: Path
     backend.move_sync("c.txt", "d.txt")
     assert not await backend.exists_async("c.txt")
     assert await backend.read_text_async("d.txt") == "sync"
-    assert backend.store.get("tenant-a/b.bin") == b"123"
+    assert backend.sync_store.get("tenant-a/b.bin") == b"123"
 
 
 @pytest.mark.anyio
@@ -1251,12 +1248,11 @@ async def test_alchemy_storage_backend_file_object_and_session_tracker_rollback(
 
 
 @pytest.mark.anyio
-async def test_streaming_storage_response_exported_from_vertebra_storage() -> None:
-    """Verify StreamingStorageResponse is canonically exported from vertebra.storage and re-exported in sqlspec."""
-    assert StorageStreamingStorageResponse is StreamingStorageResponse
+async def test_streaming_storage_response_chunks_match_across_sync_and_async_iteration() -> None:
+    """A store-backed StreamingStorageResponse yields identical bounded chunks through sync and async iteration."""
     store = SyncObjectStore.from_memory("streaming-export-test")
     store.put("blobs/sample.bin", b"abcdefghij")
-    resp = StorageStreamingStorageResponse(store=store, key="blobs/sample.bin", total_size=10, chunk_size=4)
+    resp = StreamingStorageResponse(store=store, key="blobs/sample.bin", total_size=10, chunk_size=4)
     sync_chunks = [bytes(c) for c in resp.iter_chunks()]
     async_chunks = [bytes(c) async for c in resp.aiter_chunks()]
     assert sync_chunks == [b"abcd", b"efgh", b"ij"]
@@ -1283,7 +1279,7 @@ async def test_object_store_backend_write_arrow_cursor_and_uri_qualified_globs(t
     token_cache = SyncGcpTokenCache({"access_token": "initial-token"}, allow_ambient_adc=False)
     gcs_sim_store = SyncObjectStore(LocalConfig(root=tmp_path / "gcs-sim"), token_cache=token_cache)
     gcs_backend = SQLSpecObjectStoreBackend("gs://analytics-bucket", store=gcs_sim_store)
-    assert gcs_backend.store.token_cache is token_cache
+    assert gcs_backend.sync_store.token_cache is token_cache
     assert gcs_backend.async_store.token_cache is not None
     assert isinstance(gcs_backend.async_store.token_cache, AsyncGcpTokenCache)
 

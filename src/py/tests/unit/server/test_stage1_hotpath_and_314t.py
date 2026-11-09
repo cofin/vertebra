@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import importlib
 import importlib.util
-import inspect
 import os
 import socket
 import sys
@@ -17,7 +16,6 @@ from advanced_alchemy.types.file_object import FileObject
 
 import vertebra
 import vertebra.framework as vertebra_framework
-import vertebra.storage._store as store_mod
 from vertebra._vertebra import Request, init_transport
 from vertebra.build import BuildOrchestrator
 from vertebra.build.codegen import (
@@ -107,12 +105,9 @@ def test_subdomain_consolidation_and_shims() -> None:
 
 
 @pytest.mark.anyio
-async def test_storage_and_alchemy_zero_to_thread(tmp_path: Path) -> None:
-    """Verify ObjectStore and ObjectStoreBackend execute without asyncio.to_thread."""
+async def test_storage_and_alchemy_native_async_roundtrip(tmp_path: Path) -> None:
+    """AsyncObjectStore and the Advanced Alchemy ObjectStoreBackend round-trip file payloads through native async I/O."""
     alchemy_storage_mod = _load_alchemy_storage_module()
-
-    assert "to_thread" not in inspect.getsource(store_mod)
-    assert "to_thread" not in inspect.getsource(alchemy_storage_mod)
 
     store = AsyncObjectStore("memory://")
     sample_file = tmp_path / "sample.bin"

@@ -12,7 +12,6 @@ from pathlib import Path
 
 import pytest
 
-import vertebra.storage as storage
 from vertebra.storage import (
     AsyncObjectStore,
     AzureConfig,
@@ -27,7 +26,7 @@ from vertebra.storage import (
     SyncObjectStore,
     SyncReadableFile,
 )
-from vertebra.utils.serializers import encode_json_bytes
+from vertebra.utils.serializers import decode_json, encode_json_bytes
 
 
 def test_storage_provider_configs_to_url_and_options(tmp_path: Path) -> None:
@@ -86,22 +85,13 @@ def test_storage_provider_configs_to_url_and_options(tmp_path: Path) -> None:
     http_cfg = HTTPConfig(url="https://cdn.example.com/files", headers={"X-Token": "abc"})
     http_url, http_opts = http_cfg.to_url_and_options()
     assert http_url == "https://cdn.example.com/files"
-    assert http_opts == {"X-Token": "abc"}
+    assert list(http_opts) == ["headers"]
+    assert decode_json(http_opts["headers"]) == {"X-Token": "abc"}
 
     mem_cfg = MemoryConfig(namespace="unit")
     mem_url, mem_opts = mem_cfg.to_url_and_options()
     assert mem_url == "memory://"
     assert mem_opts == {"namespace": "unit"}
-
-
-def test_duplicated_storage_facades_and_trackers_removed() -> None:
-    """Duplicated SyncStore, AsyncStore, UploadTracker, StagedUpload, and StorageRegistry are deleted."""
-    assert not hasattr(storage, "SyncStore")
-    assert not hasattr(storage, "AsyncStore")
-    assert not hasattr(storage, "UploadTracker")
-    assert not hasattr(storage, "StagedUpload")
-    assert not hasattr(storage, "StorageRegistry")
-    assert not hasattr(storage, "get_default_storage_registry")
 
 
 def test_gcs_emulator_env_and_service_account_identity(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

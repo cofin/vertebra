@@ -146,11 +146,12 @@ class StreamingStorageResponse(msgspec.Struct, frozen=True, gc=False):
         return cls._from_meta(store, key, store.head(key), range_header, content_type, headers, chunk_size)
 
     def iter_chunks(self, chunk_size: int | None = None) -> Iterator[memoryview]:
-        """Yield zero-copy memoryview chunks of at most `chunk_size` bytes.
+        """Yield memoryview chunks of at most `chunk_size` bytes.
 
         Full responses stream through `SyncObjectStore.get_stream`; byte-range responses read
-        `SyncObjectStore.get_range` windows of `max(chunk_size, RANGE_WINDOW_BYTES)` bytes and
-        slice them into chunks, so memory stays bounded by one window. A direct descriptor without
+        bounded `SyncObjectStore.get_range` windows of `max(chunk_size, RANGE_WINDOW_BYTES)` bytes and
+        slice each window into `memoryview` chunks without further copies, so memory stays bounded by
+        one window. A direct descriptor without
         `total_size` resolves the object size with one HEAD; unsatisfiable ranges yield nothing.
 
         Args:

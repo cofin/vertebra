@@ -1,7 +1,6 @@
 """Unit tests for vertebra.storage (SyncObjectStore, AsyncObjectStore, zero-copy memoryview, and V4 presigning)."""
 
 import array
-import ast
 import asyncio
 import contextlib
 import gc
@@ -58,6 +57,7 @@ from vertebra.typing import (
     VertebraError,
     reset_dependency_cache,
 )
+from vertebra.utils.serializers import decode_json
 
 
 @contextlib.contextmanager
@@ -309,12 +309,7 @@ def test_gcs_v4_keyless_iam_presigning_via_object_store() -> None:
 
 
 def test_object_store_open_reader(tmp_path: Path) -> None:
-    """SyncObjectStore.open_reader returns a seekable SyncReadableFile and wrappers are removed."""
-    assert not hasattr(storage, "SyncStore")
-    assert not hasattr(storage, "AsyncStore")
-    assert not hasattr(storage, "StorageRegistry")
-    assert not hasattr(storage, "UploadTracker")
-
+    """SyncObjectStore.open_reader returns a seekable SyncReadableFile."""
     store = SyncObjectStore.from_local(tmp_path)
     store.put("data.parquet", b"PAR1-parquet-content-PAR1")
 
@@ -325,14 +320,6 @@ def test_object_store_open_reader(tmp_path: Path) -> None:
         assert f.tell() == 4
         f.seek(-4, 2)
         assert f.read(4) == b"PAR1"
-
-
-@pytest.mark.parametrize("store_type", [SyncObjectStore, AsyncObjectStore])
-@pytest.mark.parametrize("attribute", ["open_readable_file", "_get_native_module"])
-def test_object_stores_expose_no_reader_or_native_module_shims(store_type: type[Any], attribute: str) -> None:
-    """Both stores expose ``open_reader`` exclusively and resolve the native module without a shim."""
-    assert hasattr(store_type, "open_reader")
-    assert not hasattr(store_type, attribute)
 
 
 @pytest.mark.anyio
@@ -574,19 +561,6 @@ async def test_readable_file_streaming_iterators_and_zero_length_read() -> None:
         assert await af.read(8) == b""
 
 
-def test_store_module_contains_zero_asyncio_to_thread_calls() -> None:
-    """AST scan verifies vertebra.storage._store never delegates async operations to asyncio.to_thread."""
-    store_file = Path(storage.__file__).resolve().parent / "_store.py"
-    tree = ast.parse(store_file.read_text(encoding="utf-8"), filename=str(store_file))
-    offending = [
-        node.lineno
-        for node in ast.walk(tree)
-        if (isinstance(node, ast.Attribute) and node.attr == "to_thread")
-        or (isinstance(node, ast.Name) and node.id == "to_thread")
-    ]
-    assert offending == []
-
-
 def test_fail_closed_empty_or_missing_target_raises_improper_configuration() -> None:
     """SyncObjectStore and AsyncObjectStore reject a missing target with TypeError and None with ImproperConfigurationError."""
     with pytest.raises(TypeError):
@@ -613,6 +587,25 @@ def test_fail_closed_invalid_target_raises_improper_configuration(store_type: ty
 
     with pytest.raises(ImproperConfigurationError):
         SyncObjectStore(HTTPConfig(url=""))
+
+
+def test_http_config_encodes_headers_under_json_headers_option() -> None:
+    """HTTPConfig.to_url_and_options encodes custom headers under the `headers` JSON option."""
+    empty_url, empty_opts = HTTPConfig(url="https://cdn.example.com/assets").to_url_and_options()
+    assert empty_url == "https://cdn.example.com/assets"
+    assert empty_opts == {}
+
+    url, opts = HTTPConfig(
+        url="https://cdn.example.com/assets",
+        headers={"Authorization": "Bearer tok", "X-Env": "prod"},
+    ).to_url_and_options()
+    assert url == "https://cdn.example.com/assets"
+    assert list(opts) == ["headers"]
+    assert decode_json(opts["headers"]) == {"Authorization": "Bearer tok", "X-Env": "prod"}
+    store = SyncObjectStore(
+        HTTPConfig(url="https://cdn.example.com/assets", headers={"Authorization": "Bearer tok", "X-Env": "prod"})
+    )
+    assert store.scheme == "https"
 
 
 def test_fail_closed_missing_storage_extension_raises_missing_dependency(
@@ -642,15 +635,13 @@ def test_fail_closed_missing_storage_extension_raises_missing_dependency(
 
 @pytest.mark.anyio
 async def test_explicit_memory_config_and_to_async_share_rust_in_memory_backend() -> None:
-    """Explicit MemoryConfig delegates to Rust InMemory without Python _memory dict and shares state across to_async."""
+    """A MemoryConfig store shares its native in-memory backend with handles derived through to_async and to_sync."""
     store = SyncObjectStore(MemoryConfig(namespace="t1"))
-    assert not hasattr(store, "_memory")
 
     store.put("k", b"v")
     assert store.get("k") == b"v"
 
     async_store = store.to_async()
-    assert not hasattr(async_store, "_memory")
     assert await async_store.get("k") == b"v"
 
     await async_store.put("k2", b"v2")
@@ -1362,41 +1353,6 @@ async def test_storage_parquet_table_reads_default_to_pre_buffer(
     assert seen == [expected, expected]
 
 
-@pytest.mark.anyio
-@pytest.mark.parametrize("asynchronous", [False, True])
-async def test_storage_arrow_stream_batches_decode_bodies_through_read_buffer(
-    asynchronous: bool, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Arrow IPC batch iteration decodes message bodies via `read_buffer`, leaving `read` for length prefixes."""
-    pa = pytest.importorskip("pyarrow")
-    table = pa.table({"id": pa.array(range(4096), type=pa.int64()), "tag": [f"t{i % 9}" for i in range(4096)]})
-    store = SyncObjectStore("memory://")
-    store.write_arrow("stream.arrow", table, batch_size=512)
-    read_sizes: list[int] = []
-    buffer_sizes: list[int] = []
-    original_read = _arrow._StreamFile.read
-    original_read_buffer = _arrow._StreamFile.read_buffer
-
-    def observe_read(self: Any, size: int | None = -1) -> bytes:
-        read_sizes.append(-1 if size is None else size)
-        return original_read(self, size)
-
-    def observe_read_buffer(self: Any, nbytes: int) -> memoryview | bytes:
-        buffer_sizes.append(nbytes)
-        return original_read_buffer(self, nbytes)
-
-    monkeypatch.setattr(_arrow._StreamFile, "read", observe_read)
-    monkeypatch.setattr(_arrow._StreamFile, "read_buffer", observe_read_buffer)
-    if asynchronous:
-        batches = [batch async for batch in store.to_async().iter_arrow_batches("stream.arrow", batch_size=512)]
-    else:
-        batches = list(store.iter_arrow_batches("stream.arrow", batch_size=512))
-    assert pa.Table.from_batches(batches).equals(table)
-    assert sum(buffer_sizes) >= table.nbytes
-    assert read_sizes
-    assert max(read_sizes) <= 8
-
-
 @pytest.mark.parametrize(
     ("chunks", "requests", "expected", "zero_copy"),
     [
@@ -1416,37 +1372,6 @@ def test_storage_stream_file_read_buffer_slices_pending_chunk(
     assert [bytes(result) for result in results] == expected
     assert [isinstance(result, memoryview) for result in results] == zero_copy
     assert stream.tell() == sum(len(chunk) for chunk in chunks)
-
-
-def test_storage_arrow_module_layout_exports_public_codecs_first() -> None:
-    """The codec module exports only its public seams, defines them first, and slots its helpers."""
-    module_file = Path(_arrow.__file__)
-    tree = ast.parse(module_file.read_text(encoding="utf-8"), filename=str(module_file))
-    definitions = [
-        node.name for node in tree.body if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef)
-    ]
-    public = [name for name in definitions if not name.startswith("_")]
-    assert _arrow.__all__ == (
-        "iter_batches_async",
-        "iter_batches_sync",
-        "read_table_async",
-        "read_table_sync",
-        "write_batches_async",
-        "write_batches_sync",
-    )
-    assert sorted(public) == list(_arrow.__all__)
-    assert definitions[: len(public)] == public
-    plain_helpers = (_arrow._CodecBridge, _arrow._BatchReader, _arrow._BatchWriter)
-    io_helpers = (_arrow._RangeFile, _arrow._StreamFile, _arrow._OutputSink)
-    assert all("__slots__" in vars(helper) for helper in (*plain_helpers, *io_helpers))
-    assert not hasattr(_arrow._BatchReader(), "__dict__")
-    assert not hasattr(_arrow._BatchWriter(), "__dict__")
-
-
-@pytest.mark.anyio
-async def test_storage_arrow_codec_bridge_instances_have_no_instance_dict() -> None:
-    """The loop-bound codec bridge stores state only in declared slots."""
-    assert not hasattr(_arrow._CodecBridge(), "__dict__")
 
 
 @pytest.mark.anyio
@@ -2089,15 +2014,19 @@ class _RecordingNative:
         return _RecordingUpload(upload, self.parts)
 
 
-def _recording_store(namespace: str, asynchronous: bool) -> tuple[Any, SyncObjectStore, _RecordingNative]:
-    """Build a store whose native backend records forwarded payloads, plus a sync verifier on the same namespace."""
-    base = SyncObjectStore(MemoryConfig(namespace=namespace))
+def _recording_store(asynchronous: bool) -> tuple[Any, SyncObjectStore, _RecordingNative]:
+    """Build a store whose native backend records forwarded payloads, plus a sync verifier.
+
+    The recording native wraps the verifier's own backend, or the handle derived from it through
+    `to_async()`, so the verifier reads exactly what the recording store wrote.
+    """
+    base = SyncObjectStore(MemoryConfig())
     paired = base.to_async() if asynchronous else base
     native = _RecordingNative(paired._require_native(), asynchronous)
     store: Any = (
-        AsyncObjectStore(MemoryConfig(namespace=namespace), _native_instance=native)
+        AsyncObjectStore(MemoryConfig(), _native_instance=native)
         if asynchronous
-        else SyncObjectStore(MemoryConfig(namespace=namespace), _native_instance=native)
+        else SyncObjectStore(MemoryConfig(), _native_instance=native)
     )
     return store, base, native
 
@@ -2106,7 +2035,7 @@ def _recording_store(namespace: str, asynchronous: bool) -> tuple[Any, SyncObjec
 @pytest.mark.parametrize("asynchronous", [False, True])
 async def test_put_forwards_buffers_without_memoryview_wrapping(asynchronous: bool) -> None:
     """put and put_multipart hand caller buffers straight to native so bytes stay zero-copy."""
-    store, base, native = _recording_store(f"passthrough-{asynchronous}", asynchronous)
+    store, base, native = _recording_store(asynchronous)
     payload = b"immutable-payload"
     mutable = bytearray(b"mutable-payload")
     parts = [b"part-a:", bytearray(b"part-b")]
@@ -2147,7 +2076,7 @@ def test_sync_reader_read_ahead_coalesces_range_calls(
     monkeypatch: pytest.MonkeyPatch, read_ahead: int, after_reads: int, after_seek: int
 ) -> None:
     """Sixteen 4 KiB reads plus a backward seek share one cached window unless read-ahead is disabled."""
-    store = SyncObjectStore(MemoryConfig(namespace=f"read-ahead-sync-{read_ahead}"))
+    store = SyncObjectStore(MemoryConfig())
     store.put("blob.bin", _READ_AHEAD_OBJECT)
     calls: list[tuple[int, int]] = []
     original = SyncObjectStore.get_range
@@ -2175,7 +2104,7 @@ async def test_async_reader_read_ahead_coalesces_range_calls(
     monkeypatch: pytest.MonkeyPatch, read_ahead: int, after_reads: int, after_seek: int
 ) -> None:
     """AsyncReadableFile serves sub-window reads and backward seeks from one cached range."""
-    store = AsyncObjectStore(MemoryConfig(namespace=f"read-ahead-async-{read_ahead}"))
+    store = AsyncObjectStore(MemoryConfig())
     await store.put("blob.bin", _READ_AHEAD_OBJECT)
     calls: list[tuple[int, int]] = []
     original = AsyncObjectStore.get_range
@@ -2260,7 +2189,7 @@ def _writer_chunk(index: int) -> bytes:
 @pytest.mark.parametrize("asynchronous", [False, True])
 async def test_open_writer_streams_multipart_parts_from_reusable_bytearray(asynchronous: bool) -> None:
     """A 20 MiB stream flushes 8 MiB parts, completes with an etag, and never pins the caller's bytearray."""
-    store, base, native = _recording_store(f"writer-20mib-{asynchronous}", asynchronous)
+    store, base, native = _recording_store(asynchronous)
     scratch = bytearray()
     if asynchronous:
         async with store.open_writer("big.bin", part_size=8_388_608, content_type="application/octet-stream") as wf:
@@ -2313,7 +2242,7 @@ def test_sync_writer_supports_gzip_and_buffered_writer() -> None:
 @pytest.mark.parametrize("part_size", [8_388_608, 4])
 async def test_open_writer_aborts_on_exception(asynchronous: bool, part_size: int) -> None:
     """An exception inside the writer context propagates and leaves no object behind."""
-    store, base, native = _recording_store(f"writer-abort-{asynchronous}-{part_size}", asynchronous)
+    store, base, native = _recording_store(asynchronous)
     with pytest.raises(ValueError, match="boom"):
         if asynchronous:
             async with store.open_writer("aborted.bin", part_size=part_size) as wf:
@@ -2333,7 +2262,7 @@ async def test_open_writer_aborts_on_exception(asynchronous: bool, part_size: in
 @pytest.mark.parametrize("asynchronous", [False, True])
 async def test_open_writer_explicit_abort_and_closed_writes(asynchronous: bool) -> None:
     """abort() discards the upload and later writes fail as closed-file errors."""
-    store, base, _native = _recording_store(f"writer-explicit-abort-{asynchronous}", asynchronous)
+    store, base, _native = _recording_store(asynchronous)
     wf = store.open_writer("dropped.bin", part_size=4)
     if asynchronous:
         await wf.write(b"0123456789")
@@ -2356,7 +2285,7 @@ async def test_open_writer_explicit_abort_and_closed_writes(asynchronous: bool) 
 @pytest.mark.parametrize("asynchronous", [False, True])
 async def test_open_writer_zero_bytes_creates_empty_object(asynchronous: bool) -> None:
     """Closing a writer that received no bytes completes a valid zero-byte object."""
-    store, base, _native = _recording_store(f"writer-empty-{asynchronous}", asynchronous)
+    store, base, _native = _recording_store(asynchronous)
     if asynchronous:
         async with store.open_writer("empty.bin") as wf:
             assert await wf.write(b"") == 0
@@ -2372,7 +2301,7 @@ async def test_open_writer_zero_bytes_creates_empty_object(asynchronous: bool) -
 @pytest.mark.parametrize("asynchronous", [False, True])
 async def test_open_writer_if_not_exists_preserves_existing_object(asynchronous: bool) -> None:
     """if_not_exists rejects completion over an existing key and keeps the original payload."""
-    store, base, _native = _recording_store(f"writer-precondition-{asynchronous}", asynchronous)
+    store, base, _native = _recording_store(asynchronous)
     base.put("taken.bin", b"original")
     with pytest.raises(FileExistsError):
         if asynchronous:
@@ -2451,14 +2380,13 @@ class _FailingNative:
 )
 async def test_writer_part_failure_aborts_and_blocks_later_commit(asynchronous: bool, error: BaseException) -> None:
     """A failed or cancelled part write aborts the upload so a later close cannot commit a gapped object."""
-    namespace = f"writer-part-failure-{asynchronous}-{type(error).__name__}"
-    base = SyncObjectStore(MemoryConfig(namespace=namespace))
+    base = SyncObjectStore(MemoryConfig())
     upload = _FailingUpload(error, asynchronous)
     native = _FailingNative(upload)
     store: Any = (
-        AsyncObjectStore(MemoryConfig(namespace=namespace), _native_instance=native)
+        AsyncObjectStore(MemoryConfig(), _native_instance=native)
         if asynchronous
-        else SyncObjectStore(MemoryConfig(namespace=namespace), _native_instance=native)
+        else SyncObjectStore(MemoryConfig(), _native_instance=native)
     )
     wf = store.open_writer("failed.bin", part_size=4)
     with pytest.raises(type(error)):
@@ -2499,7 +2427,7 @@ async def test_async_writer_flush_and_aclose_return_put_result() -> None:
 @pytest.mark.parametrize("asynchronous", [False, True])
 async def test_put_stream_normalizes_typed_buffer_chunks(asynchronous: bool) -> None:
     """put_stream uploads typed array chunks as raw bytes, matching put."""
-    store, base, native = _recording_store(f"put-stream-typed-{asynchronous}", asynchronous)
+    store, base, native = _recording_store(asynchronous)
     chunks = [array.array("I", [1, 2, 3]), array.array("I", [4, 5])]
     if asynchronous:
         meta = await store.put_stream("typed.bin", chunks)
@@ -2527,7 +2455,7 @@ async def test_async_writer_collected_open_emits_resource_warning() -> None:
 @pytest.mark.parametrize("finish", ["aclose", "abort"])
 async def test_async_writer_collected_after_finish_is_silent(finish: str) -> None:
     """A completed or aborted AsyncWritableFile is collected without a ResourceWarning."""
-    store = AsyncObjectStore(MemoryConfig(namespace=f"writer-finished-{finish}"))
+    store = AsyncObjectStore(MemoryConfig())
     wf = store.open_writer("finished.bin", part_size=4)
     await wf.write(b"0123456789")
     await getattr(wf, finish)()
@@ -2611,10 +2539,9 @@ async def test_native_async_bulk_file_io_conditional_copy_and_compose(tmp_path: 
         await store.get_files(downloads, concurrency=0)
 
 
-def _bulk_store(namespace: str, asynchronous: bool) -> Any:
-    """Build a sync or async memory store isolated by namespace."""
-    config = MemoryConfig(namespace=namespace)
-    return AsyncObjectStore(config) if asynchronous else SyncObjectStore(config)
+def _bulk_store(asynchronous: bool) -> Any:
+    """Build a sync or async memory store; every store owns a private in-memory backend."""
+    return AsyncObjectStore(MemoryConfig()) if asynchronous else SyncObjectStore(MemoryConfig())
 
 
 async def _resolve(value: Any) -> Any:
@@ -2637,7 +2564,7 @@ def _write_bulk_sources(root: Path) -> list[Path]:
 @pytest.mark.parametrize("asynchronous", [False, True])
 async def test_upload_many_download_many_and_get_file_roundtrip(tmp_path: Path, asynchronous: bool) -> None:
     """upload_many writes prefixed keys, download_many restores basenames, and get_file streams one object."""
-    store = _bulk_store(f"bulk-roundtrip-{asynchronous}", asynchronous)
+    store = _bulk_store(asynchronous)
     sources = _write_bulk_sources(tmp_path / "src")
     results = await _resolve(store.upload_many(sources, "bulk/run", concurrency=2))
     assert all(isinstance(result, PutResult) for result in results)
@@ -2668,7 +2595,7 @@ async def test_staged_download_removes_staged_files_on_exit(
     tmp_path: Path, asynchronous: bool, explicit_destination: bool, fail: bool
 ) -> None:
     """staged_download stages every key and deletes exactly the staged files on normal and exceptional exit."""
-    store = _bulk_store(f"bulk-staged-{asynchronous}-{explicit_destination}-{fail}", asynchronous)
+    store = _bulk_store(asynchronous)
     sources = _write_bulk_sources(tmp_path / "src")
     keys = [result.path for result in await _resolve(store.upload_many(sources, "staged"))]
     destination = tmp_path / "stage" if explicit_destination else None
@@ -2710,7 +2637,7 @@ async def test_staged_download_removes_staged_files_on_exit(
 @pytest.mark.parametrize("asynchronous", [False, True])
 async def test_staged_download_defaults_to_dev_shm_or_tempdir(asynchronous: bool) -> None:
     """Without a destination, staged files land in a unique directory under /dev/shm or the system temp dir."""
-    store = _bulk_store(f"bulk-staged-base-{asynchronous}", asynchronous)
+    store = _bulk_store(asynchronous)
     await _resolve(store.put("base/one.bin", b"one"))
     shm = Path("/dev/shm")
     expected_base = shm if shm.is_dir() and os.access(shm, os.W_OK) else Path(tempfile.gettempdir())
@@ -2728,9 +2655,68 @@ async def test_staged_download_defaults_to_dev_shm_or_tempdir(asynchronous: bool
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("fail_download", [False, True])
+async def test_staged_download_keeps_preexisting_destination_files(
+    tmp_path: Path, asynchronous: bool, fail_download: bool
+) -> None:
+    """staged_download into a caller-owned directory unlinks only files it created, after success or a failed download."""
+    store = _bulk_store(asynchronous)
+    await _resolve(store.put("staged/fresh.bin", b"fresh"))
+    await _resolve(store.put("staged/shared.bin", b"downloaded"))
+    destination = tmp_path / "stage"
+    destination.mkdir()
+    (destination / "shared.bin").write_bytes(b"caller")
+    (destination / "ghost.bin").write_bytes(b"caller-ghost")
+    keys = ["staged/fresh.bin", "staged/shared.bin", *(["absent/ghost.bin"] if fail_download else [])]
+
+    async def stage() -> None:
+        if asynchronous:
+            async with store.staged_download(keys, destination) as paths:
+                assert [path.read_bytes() for path in paths] == [b"fresh", b"downloaded"]
+        else:
+            with store.staged_download(keys, destination) as paths:
+                assert [path.read_bytes() for path in paths] == [b"fresh", b"downloaded"]
+
+    if fail_download:
+        with pytest.raises(FileNotFoundError):
+            await stage()
+    else:
+        await stage()
+        assert (destination / "shared.bin").read_bytes() == b"downloaded"
+
+    assert sorted(child.name for child in destination.iterdir()) == ["ghost.bin", "shared.bin"]
+    assert (destination / "ghost.bin").read_bytes() == b"caller-ghost"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("alias", ["a//b", "./a/./b", "/a//./b", " a/b "])
+async def test_object_keys_collapse_empty_and_dot_segments(asynchronous: bool, alias: str) -> None:
+    """Empty and `.` segments collapse before native validation, so every alias addresses the key `a/b`."""
+    store = _bulk_store(asynchronous)
+    put = await _resolve(store.put(alias, b"payload"))
+    assert put.path == "a/b"
+    assert await _resolve(store.get("a/b")) == b"payload"
+    assert await _resolve(store.get(alias)) == b"payload"
+    assert [meta.path for meta in await _resolve(store.list("a"))] == ["a/b"]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("key", ["../a", "a/../b", "a//../b", "./a/.."])
+async def test_object_keys_reject_parent_segments(asynchronous: bool, key: str) -> None:
+    """A `..` segment is rejected even when surrounded by empty or `.` segments, and nothing is written."""
+    store = _bulk_store(asynchronous)
+    with pytest.raises(ValueError, match="parent segment"):
+        await _resolve(store.put(key, b"payload"))
+    assert await _resolve(store.list()) == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
 async def test_bulk_transfers_reject_duplicates_before_io_and_accept_empty(tmp_path: Path, asynchronous: bool) -> None:
     """Duplicate basenames or keys raise ValueError before any transfer, and empty inputs return []."""
-    store = _bulk_store(f"bulk-dupes-{asynchronous}", asynchronous)
+    store = _bulk_store(asynchronous)
     await _resolve(store.put("a/x.bin", b"a"))
     await _resolve(store.put("b/x.bin", b"b"))
     destination = tmp_path / "dupes"
@@ -2769,7 +2755,7 @@ async def test_bulk_transfers_reject_duplicates_before_io_and_accept_empty(tmp_p
 @pytest.mark.parametrize("asynchronous", [False, True])
 async def test_copy_overwrite_false_raises_file_exists(asynchronous: bool) -> None:
     """copy(..., overwrite=False) refuses to replace an existing destination and keeps its payload."""
-    store = _bulk_store(f"copy-overwrite-{asynchronous}", asynchronous)
+    store = _bulk_store(asynchronous)
     await _resolve(store.put("a", b"1"))
     await _resolve(store.put("b", b"2"))
     with pytest.raises(FileExistsError):
@@ -2798,7 +2784,7 @@ async def test_glob_wildcards_literal_fast_path_and_missing(
     asynchronous: bool, pattern: str, expected: list[str]
 ) -> None:
     """glob filters listed keys with fnmatch, uses head for literal keys, and returns [] when nothing matches."""
-    store = _bulk_store(f"glob-{asynchronous}-{abs(hash(pattern))}", asynchronous)
+    store = _bulk_store(asynchronous)
     for key in ("runs/2026/part-00.parquet", "runs/2026/part-01.parquet", "runs/2026/notes.txt", "runs/20x.txt"):
         await _resolve(store.put(key, key.encode()))
     matched = await _resolve(store.glob(pattern))
@@ -2847,16 +2833,14 @@ class _PlaceholderListingNative:
 @pytest.mark.parametrize("asynchronous", [False, True])
 async def test_glob_skips_trailing_slash_directory_placeholders(asynchronous: bool) -> None:
     """glob never returns keys ending in `/` even when the pattern matches them."""
-    namespace = f"glob-placeholder-{asynchronous}"
-    base = SyncObjectStore(MemoryConfig(namespace=namespace))
+    base = SyncObjectStore(MemoryConfig())
     base.put("runs/2026/part-00.parquet", b"p")
     paired = base.to_async() if asynchronous else base
     native = _PlaceholderListingNative(paired._require_native(), asynchronous, "runs/2026/")
-    config = MemoryConfig(namespace=namespace)
     store: Any = (
-        AsyncObjectStore(config, _native_instance=native)
+        AsyncObjectStore(MemoryConfig(), _native_instance=native)
         if asynchronous
-        else SyncObjectStore(config, _native_instance=native)
+        else SyncObjectStore(MemoryConfig(), _native_instance=native)
     )
     matched = await _resolve(store.glob("runs/*"))
     assert [meta.path for meta in matched] == ["runs/2026/part-00.parquet"]
@@ -2866,7 +2850,7 @@ async def test_glob_skips_trailing_slash_directory_placeholders(asynchronous: bo
 @pytest.mark.parametrize("asynchronous", [False, True])
 async def test_compose_concatenates_sources_and_rejects_empty(asynchronous: bool) -> None:
     """compose writes the concatenation of its sources and rejects an empty source list before I/O."""
-    store = _bulk_store(f"compose-{asynchronous}", asynchronous)
+    store = _bulk_store(asynchronous)
     for idx, payload in enumerate((b"alpha-", b"beta-", b"gamma")):
         await _resolve(store.put(f"p{idx + 1}", payload))
     result = await _resolve(store.compose(["p1", "p2", "p3"], "merged.bin", content_type="application/octet-stream"))

@@ -1987,6 +1987,12 @@ class ReviewSetupValidator:
                 continue
 
             in_vertebra_pkg = rel_file.startswith("src/py/vertebra/")
+            in_storage_async_plane = rel_file.startswith("src/py/vertebra/storage/") or rel_file in {
+                "src/py/vertebra/extensions/alchemy/storage.py",
+                "src/py/vertebra/extensions/sqlspec/storage.py",
+                "src/py/vertebra/extensions/django/storage.py",
+                "src/py/vertebra/extensions/litestar/store.py",
+            }
             if in_vertebra_pkg:
                 for stmt in tree.body:
                     if (
@@ -2089,6 +2095,18 @@ class ReviewSetupValidator:
                             rel_file,
                             node.lineno,
                             "use vertebra.utils.module_loader.{import_optional,ensure_module} instead of importlib.import_module (PY-08)",
+                        )
+                    )
+                elif in_storage_async_plane and (
+                    (isinstance(node, ast.Attribute) and node.attr == "to_thread")
+                    or (isinstance(node, ast.Name) and node.id == "to_thread")
+                ):
+                    issues.append(
+                        ReviewIssue(
+                            "python_imports",
+                            rel_file,
+                            node.lineno,
+                            "storage and framework storage adapters must use native Rust Tokio awaitables instead of to_thread (PYO3-01)",
                         )
                     )
 

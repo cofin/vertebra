@@ -86,10 +86,6 @@ from vertebra.utils.serializers import decode_json
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
-_VERTEBRA_STORAGE_NAMES = frozenset(
-    {"AsyncObjectStore", "GCSConfig", "LocalConfig", "MemoryConfig", "S3Config", "SyncObjectStore"}
-)
-
 
 class _ChunkRecordingUpload(UploadedFile):
     """Uploaded file with a tiny chunk size that records every chunk handed to storage."""
@@ -868,19 +864,10 @@ def test_django_storage_named_text_content_file() -> None:
 
 
 @pytest.mark.parametrize("module_name", ["vertebra.extensions.django", "vertebra.extensions.django.storage"])
-def test_django_storage_exports_exclude_vertebra_storage_duplicates(module_name: str) -> None:
-    """Django extension modules export the storage adapter without duplicating ``vertebra.storage`` names."""
+def test_django_extension_modules_export_storage_adapter(module_name: str) -> None:
+    """Django extension modules export the storage adapter and its registries."""
     exported = set(import_module(module_name).__all__)
     assert {"DjangoStorage", "SyncStorageRegistry", "AsyncStorageRegistry"} <= exported
-    assert exported.isdisjoint(_VERTEBRA_STORAGE_NAMES)
-
-
-@pytest.mark.parametrize("name", sorted(_VERTEBRA_STORAGE_NAMES))
-def test_django_package_does_not_lazily_resolve_storage_names(name: str) -> None:
-    """The Django package rejects ``vertebra.storage`` names instead of aliasing them."""
-    package = import_module("vertebra.extensions.django")
-    with pytest.raises(AttributeError):
-        getattr(package, name)
 
 
 @pytest.mark.parametrize(

@@ -22,7 +22,7 @@ from vertebra._vertebra import AsyncGcpTokenCache, GcpTokenSnapshot, GoogleCloud
 from vertebra.storage import _arrow
 from vertebra.typing import ImproperConfigurationError, MissingDependencyError, PreconditionError
 from vertebra.utils.module_loader import import_optional
-from vertebra.utils.serializers import decode_json
+from vertebra.utils.serializers import decode_json, encode_json
 
 if TYPE_CHECKING:
     from vertebra._storage import StorageBuffer
@@ -520,8 +520,13 @@ class HTTPConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Optional static HTTP headers included on every outbound storage request."""
 
     def to_url_and_options(self) -> tuple[str, dict[str, str]]:
-        """Convert configuration into a canonical URL and options dictionary."""
-        return self.url, dict(self.headers or {})
+        """Convert configuration into a canonical URL and options dictionary.
+
+        Custom headers travel as one JSON object under the `headers` option.
+        """
+        if not self.headers:
+            return self.url, {}
+        return self.url, {"headers": encode_json(self.headers)}
 
 
 class MemoryConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
@@ -1149,7 +1154,7 @@ class _BaseObjectStore:
             msg = "SigningConfig is required for presigned URL generation"
             raise RuntimeError(msg)
         now_ts = int(time.time()) if timestamp is None else timestamp
-        key = self._normalize_key(path)
+        key = self._key(path)
         if self._signing.provider == "gcs":
             return self._sign_gcs_v4_iam(key, method=method, expires_in_secs=expires_in_secs, now_ts=now_ts)
         if self._signing.provider == "s3":
@@ -1181,7 +1186,7 @@ class _BaseObjectStore:
             msg = "SigningConfig is required for presigned URL generation"
             raise RuntimeError(msg)
         now_ts = int(time.time()) if timestamp is None else timestamp
-        key = self._normalize_key(path)
+        key = self._key(path)
         if self._signing.provider == "gcs":
             return await self._sign_gcs_v4_iam_async(
                 key,
@@ -1347,36 +1352,6 @@ class _BaseObjectStore:
             )
         return self._gcp_token_cache
 
-    def _execute_gcs_v4_iam_sign(
-        self,
-        key: str,
-        *,
-        effective_email: str,
-        method: str,
-        expires_in_secs: int,
-        now_ts: int,
-        access_token: str | None,
-        private_key_pem: str | None,
-        token_cache_capsule: object | None = None,
-    ) -> str:
-        assert self._signing is not None
-        native_mod = self._ensure_native_module()
-        return str(
-            native_mod.py_sign_gcs_v4_iam_url(
-                self._signing.bucket,
-                effective_email,
-                method,
-                key,
-                expires_in_secs,
-                now_ts,
-                self._signing.iam_endpoint,
-                access_token,
-                private_key_pem,
-                self._signing.endpoint,
-                token_cache_capsule,
-            )
-        )
-
     def _sign_gcs_v4_iam(
         self,
         key: str,
@@ -1397,15 +1372,21 @@ class _BaseObjectStore:
             cache = self._ensure_sync_gcs_token_cache(effective_email)
             capsule = cache._capsule()
 
-        return self._execute_gcs_v4_iam_sign(
-            key,
-            effective_email=effective_email,
-            method=method,
-            expires_in_secs=expires_in_secs,
-            now_ts=now_ts,
-            access_token=access_token,
-            private_key_pem=private_key_pem,
-            token_cache_capsule=capsule,
+        native_mod = self._ensure_native_module()
+        return str(
+            native_mod.py_sign_gcs_v4_iam_url(
+                self._signing.bucket,
+                effective_email,
+                method,
+                key,
+                expires_in_secs,
+                now_ts,
+                self._signing.iam_endpoint,
+                access_token,
+                private_key_pem,
+                self._signing.endpoint,
+                capsule,
+            )
         )
 
     async def _sign_gcs_v4_iam_async(
@@ -1467,11 +1448,23 @@ class _BaseObjectStore:
 
     @staticmethod
     def _normalize_key(path: str) -> str:
-        cleaned = path.strip().lstrip("/")
-        if ".." in Path(cleaned).parts:
+        """Strip surrounding whitespace and leading `/`, collapse empty segments, and drop `.` segments.
+
+        A trailing `/` is kept so directory-placeholder keys and list prefixes keep their meaning; `~`
+        and `%` pass through unchanged for native validation.
+
+        Raises:
+            ValueError: If the key contains a `..` segment.
+        """
+        cleaned = path.strip()
+        segments = cleaned.split("/")
+        if ".." in segments:
             msg = f"Invalid relative parent segment in storage key: {path}"
             raise ValueError(msg)
-        return cleaned
+        normalized = "/".join(segment for segment in segments if segment and segment != ".")
+        if normalized and cleaned.endswith("/"):
+            return f"{normalized}/"
+        return normalized
 
     @staticmethod
     def _staging_base_dir() -> Path:
@@ -1481,13 +1474,13 @@ class _BaseObjectStore:
         return Path(tempfile.gettempdir())
 
     @staticmethod
-    def _discard_staged(staged: Sequence[Path], staging_dir: Path | None) -> None:
-        """Remove a temporary staging directory, or exactly the staged files inside a caller-owned directory."""
+    def _discard_staged(created: Sequence[Path], staging_dir: Path | None) -> None:
+        """Remove a temporary staging directory, or only the files the call created in a caller-owned directory."""
         if staging_dir is not None:
             shutil.rmtree(staging_dir, ignore_errors=True)
             return
-        for staged_path in staged:
-            staged_path.unlink(missing_ok=True)
+        for created_path in created:
+            created_path.unlink(missing_ok=True)
 
     @staticmethod
     def _glob_matches(items: Iterable[ObjectMeta], key_pattern: str) -> list[ObjectMeta]:
@@ -1516,6 +1509,17 @@ class _BaseObjectStore:
             **(options or {}),
         }
 
+    def _key(self, path: str) -> str:
+        """Return the normalized object key, rejecting keys that escape a local storage root.
+
+        Raises:
+            ValueError: If the key contains a `..` segment or resolves outside the local root.
+        """
+        key = self._normalize_key(path)
+        if self._local_root is not None:
+            self._resolve_local(key)
+        return key
+
     def _download_targets(self, keys: Sequence[str]) -> list[tuple[str, str]]:
         """Return `(key, file_name)` pairs, rejecting keys without a basename or with duplicate basenames.
 
@@ -1524,9 +1528,7 @@ class _BaseObjectStore:
         """
         targets: dict[str, str] = {}
         for raw_key in keys:
-            key = self._normalize_key(raw_key)
-            if self._local_root is not None:
-                self._resolve_local(key)
+            key = self._key(raw_key)
             name = key.rsplit("/", 1)[-1]
             if not name:
                 msg = f"Storage key has no file name to download into: {raw_key!r}"
@@ -1548,15 +1550,13 @@ class _BaseObjectStore:
         sources: dict[str, Path] = {}
         for raw_path in paths:
             local = Path(raw_path)
-            key = self._normalize_key(f"{prefix}/{local.name}" if prefix else local.name)
+            key = self._key(f"{prefix}/{local.name}" if prefix else local.name)
             if key in sources:
                 msg = f"Duplicate object key {key!r} for files {str(sources[key])!r} and {str(local)!r}"
                 raise ValueError(msg)
             if not local.is_file():
                 msg = f"Source file not found: {local}"
                 raise FileNotFoundError(msg)
-            if self._local_root is not None:
-                self._resolve_local(key)
             sources[key] = local
         return list(sources.items())
 
@@ -1590,12 +1590,7 @@ class _BaseObjectStore:
         if not sources:
             msg = "compose requires at least one source object"
             raise ValueError(msg)
-        source_keys = [self._normalize_key(source) for source in sources]
-        dst_key = self._normalize_key(dst)
-        if self._local_root is not None:
-            for key in (*source_keys, dst_key):
-                self._resolve_local(key)
-        return source_keys, dst_key
+        return [self._key(source) for source in sources], self._key(dst)
 
 
 class SyncObjectStore(_BaseObjectStore):
@@ -1678,9 +1673,7 @@ class SyncObjectStore(_BaseObjectStore):
         if_none_match: str | None = None,
     ) -> PutResult:
         """Write any Buffer (bytes, bytearray, memoryview) to the given object key."""
-        key = self._normalize_key(path)
-        if self._local_root is not None:
-            self._resolve_local(key)
+        key = self._key(path)
         norm_attrs = {str(k): str(v) for k, v in attributes.items()} if attributes is not None else None
         native = self._require_native()
         native_meta = native.put(
@@ -1697,9 +1690,7 @@ class SyncObjectStore(_BaseObjectStore):
 
     def put_file(self, path: str, file_path: str | Path) -> PutResult:
         """Read a local file and upload it to the given object key."""
-        key = self._normalize_key(path)
-        if self._local_root is not None:
-            self._resolve_local(key)
+        key = self._key(path)
         resolved_src = Path(file_path)
         if not resolved_src.exists():
             msg = f"Source file not found: {resolved_src}"
@@ -1731,9 +1722,7 @@ class SyncObjectStore(_BaseObjectStore):
 
     def put_multipart(self, path: str, parts: Sequence[Buffer]) -> PutResult:
         """Concatenate and upload multiple buffer parts atomically."""
-        key = self._normalize_key(path)
-        if self._local_root is not None:
-            self._resolve_local(key)
+        key = self._key(path)
         native = self._require_native()
         native_meta = native.put_multipart(key, [self._native_payload(part) for part in parts])
         return self._native_to_put_result(native_meta, f"{int(native_meta.size):016x}")
@@ -1764,9 +1753,7 @@ class SyncObjectStore(_BaseObjectStore):
         Each chunk passes through the same buffer normalization as `put`, so typed buffers such as
         `array("I")`, NumPy arrays, and `pyarrow.Buffer` upload as their raw bytes.
         """
-        key = self._normalize_key(path)
-        if self._local_root is not None:
-            self._resolve_local(key)
+        key = self._key(path)
         norm_attrs = {str(k): str(v) for k, v in attributes.items()} if attributes is not None else None
         native = self._require_native()
         upload = native.create_multipart(
@@ -1790,16 +1777,12 @@ class SyncObjectStore(_BaseObjectStore):
 
     def get(self, path: str) -> bytes:
         """Read full object bytes for the given key."""
-        key = self._normalize_key(path)
-        if self._local_root is not None:
-            self._resolve_local(key)
+        key = self._key(path)
         return bytes(self._require_native().get(key))
 
     def get_file(self, path: str, file_path: str | Path) -> ObjectMeta:
         """Stream the object at the given key into a local file and return its metadata."""
-        key = self._normalize_key(path)
-        if self._local_root is not None:
-            self._resolve_local(key)
+        key = self._key(path)
         return self._native_to_object_meta(self._require_native().get_file(key, str(Path(file_path))))
 
     def download_many(self, keys: Sequence[str], destination: str | Path, *, concurrency: int = 16) -> list[Path]:
@@ -1831,8 +1814,9 @@ class SyncObjectStore(_BaseObjectStore):
         """Download objects into a staging directory and remove the staged files when the context exits.
 
         Without `destination`, files stage in a unique directory under `/dev/shm` (when writable) or the
-        system temporary directory, and that directory is removed on exit. With `destination`, exactly
-        the staged files are unlinked on exit and the directory is kept.
+        system temporary directory, and that directory is removed on exit. With `destination`, the
+        directory is kept and only staged paths that did not exist before the call are unlinked on exit,
+        so pre-existing files with the same names survive.
 
         Raises:
             ValueError: If two keys share a basename; raised before any transfer starts.
@@ -1845,25 +1829,22 @@ class SyncObjectStore(_BaseObjectStore):
         )
         staging_dir = owned_dir if owned_dir is not None else Path(str(destination))
         staged = [staging_dir / name for _, name in targets]
+        created = [path for path in staged if not path.exists(follow_symlinks=False)]
         try:
             if targets:
                 self.download_many([key for key, _ in targets], staging_dir, concurrency=concurrency)
             yield staged
         finally:
-            self._discard_staged(staged, owned_dir)
+            self._discard_staged(created, owned_dir)
 
     def get_view(self, path: str) -> memoryview:
         """Return a zero-copy memoryview over the object payload."""
-        key = self._normalize_key(path)
-        if self._local_root is not None:
-            self._resolve_local(key)
+        key = self._key(path)
         return memoryview(self._require_native().get_buffer(key))
 
     def get_stream(self, path: str, *, chunk_size: int | None = None) -> Iterator[StorageBuffer]:
         """Stream object payload chunks as zero-copy StorageBuffer instances."""
-        key = self._normalize_key(path)
-        if self._local_root is not None:
-            self._resolve_local(key)
+        key = self._key(path)
         if chunk_size is not None and chunk_size < 1:
             msg = "chunk_size must be >= 1"
             raise ValueError(msg)
@@ -1875,30 +1856,22 @@ class SyncObjectStore(_BaseObjectStore):
 
     def get_range(self, path: str, offset: int, length: int) -> bytes:
         """Read a byte slice of length bytes starting at offset."""
-        key = self._normalize_key(path)
-        if self._local_root is not None:
-            self._resolve_local(key)
+        key = self._key(path)
         return bytes(self._require_native().get_range(key, offset, length))
 
     def head(self, path: str) -> ObjectMeta:
         """Return object metadata without transferring the full payload."""
-        key = self._normalize_key(path)
-        if self._local_root is not None:
-            self._resolve_local(key)
+        key = self._key(path)
         return self._native_to_object_meta(self._require_native().head(key))
 
     def exists(self, path: str) -> bool:
         """Return True if the object key exists."""
-        key = self._normalize_key(path)
-        if self._local_root is not None:
-            self._resolve_local(key)
+        key = self._key(path)
         return bool(self._require_native().exists(key))
 
     def delete(self, path: str) -> None:
         """Delete the object at the given key."""
-        key = self._normalize_key(path)
-        if self._local_root is not None:
-            self._resolve_local(key)
+        key = self._key(path)
         with contextlib.suppress(FileNotFoundError):
             self._require_native().delete(key)
 
@@ -1908,20 +1881,14 @@ class SyncObjectStore(_BaseObjectStore):
         Raises:
             FileExistsError: If `overwrite` is False and `dst` already exists.
         """
-        src_key = self._normalize_key(src)
-        dst_key = self._normalize_key(dst)
-        if self._local_root is not None:
-            self._resolve_local(src_key)
-            self._resolve_local(dst_key)
+        src_key = self._key(src)
+        dst_key = self._key(dst)
         self._require_native().copy(src_key, dst_key, if_not_exists=not overwrite)
 
     def rename(self, src: str, dst: str, *, overwrite: bool = True) -> None:
         """Atomically rename or move an object from src to dst within the store."""
-        src_key = self._normalize_key(src)
-        dst_key = self._normalize_key(dst)
-        if self._local_root is not None:
-            self._resolve_local(src_key)
-            self._resolve_local(dst_key)
+        src_key = self._key(src)
+        dst_key = self._key(dst)
         self._require_native().rename(src_key, dst_key, if_not_exists=not overwrite)
 
     def list_page(
@@ -2194,9 +2161,7 @@ class AsyncObjectStore(_BaseObjectStore):
         if_none_match: str | None = None,
     ) -> PutResult:
         """Asynchronously write any Buffer to the given object key."""
-        key = self._normalize_key(path)
-        if self._local_root is not None:
-            self._resolve_local(key)
+        key = self._key(path)
         norm_attrs = {str(k): str(v) for k, v in attributes.items()} if attributes is not None else None
         native = self._require_native()
         native_meta = await native.put(
@@ -2213,9 +2178,7 @@ class AsyncObjectStore(_BaseObjectStore):
 
     async def put_file(self, path: str, file_path: str | Path) -> PutResult:
         """Asynchronously read a local file and upload it to the given object key."""
-        key = self._normalize_key(path)
-        if self._local_root is not None:
-            self._resolve_local(key)
+        key = self._key(path)
         resolved_src = Path(file_path)
         if not resolved_src.exists():
             msg = f"Source file not found: {resolved_src}"
@@ -2247,9 +2210,7 @@ class AsyncObjectStore(_BaseObjectStore):
 
     async def put_multipart(self, path: str, parts: Sequence[Buffer]) -> PutResult:
         """Asynchronously upload multiple buffer parts atomically."""
-        key = self._normalize_key(path)
-        if self._local_root is not None:
-            self._resolve_local(key)
+        key = self._key(path)
         native = self._require_native()
         native_meta = await native.put_multipart(key, [self._native_payload(part) for part in parts])
         return self._native_to_put_result(native_meta, f"{int(native_meta.size):016x}")
@@ -2280,9 +2241,7 @@ class AsyncObjectStore(_BaseObjectStore):
         Each chunk passes through the same buffer normalization as `put`, so typed buffers such as
         `array("I")`, NumPy arrays, and `pyarrow.Buffer` upload as their raw bytes.
         """
-        key = self._normalize_key(path)
-        if self._local_root is not None:
-            self._resolve_local(key)
+        key = self._key(path)
         norm_attrs = {str(k): str(v) for k, v in attributes.items()} if attributes is not None else None
         native = self._require_native()
         upload = await native.create_multipart(
@@ -2310,16 +2269,12 @@ class AsyncObjectStore(_BaseObjectStore):
 
     async def get(self, path: str) -> bytes:
         """Asynchronously read an object from the store via Rust Tokio awaitable."""
-        key = self._normalize_key(path)
-        if self._local_root is not None:
-            self._resolve_local(key)
+        key = self._key(path)
         return bytes(await self._require_native().get(key))
 
     async def get_file(self, path: str, file_path: str | Path) -> ObjectMeta:
         """Asynchronously stream the object at the given key into a local file and return its metadata."""
-        key = self._normalize_key(path)
-        if self._local_root is not None:
-            self._resolve_local(key)
+        key = self._key(path)
         return self._native_to_object_meta(await self._require_native().get_file(key, str(Path(file_path))))
 
     async def download_many(self, keys: Sequence[str], destination: str | Path, *, concurrency: int = 16) -> list[Path]:
@@ -2351,9 +2306,10 @@ class AsyncObjectStore(_BaseObjectStore):
         """Asynchronously download objects into a staging directory and remove the staged files on exit.
 
         Without `destination`, files stage in a unique directory under `/dev/shm` (when writable) or the
-        system temporary directory, and that directory is removed on exit. With `destination`, exactly
-        the staged files are unlinked on exit and the directory is kept. Cleanup runs inline on the
-        local or tmpfs filesystem.
+        system temporary directory, and that directory is removed on exit. With `destination`, the
+        directory is kept and only staged paths that did not exist before the call are unlinked on exit,
+        so pre-existing files with the same names survive. Cleanup runs inline on the local or tmpfs
+        filesystem.
 
         Raises:
             ValueError: If two keys share a basename; raised before any transfer starts.
@@ -2366,25 +2322,22 @@ class AsyncObjectStore(_BaseObjectStore):
         )
         staging_dir = owned_dir if owned_dir is not None else Path(str(destination))
         staged = [staging_dir / name for _, name in targets]
+        created = [path for path in staged if not path.exists(follow_symlinks=False)]
         try:
             if targets:
                 await self.download_many([key for key, _ in targets], staging_dir, concurrency=concurrency)
             yield staged
         finally:
-            self._discard_staged(staged, owned_dir)
+            self._discard_staged(created, owned_dir)
 
     async def get_view(self, path: str) -> memoryview:
         """Asynchronously read a zero-copy memoryview over an object payload."""
-        key = self._normalize_key(path)
-        if self._local_root is not None:
-            self._resolve_local(key)
+        key = self._key(path)
         return memoryview(await self._require_native().get_buffer(key))
 
     async def get_stream(self, path: str, *, chunk_size: int | None = None) -> AsyncIterator[StorageBuffer]:
         """Asynchronously stream object payload chunks as zero-copy StorageBuffer instances."""
-        key = self._normalize_key(path)
-        if self._local_root is not None:
-            self._resolve_local(key)
+        key = self._key(path)
         if chunk_size is not None and chunk_size < 1:
             msg = "chunk_size must be >= 1"
             raise ValueError(msg)
@@ -2398,30 +2351,22 @@ class AsyncObjectStore(_BaseObjectStore):
 
     async def get_range(self, path: str, offset: int, length: int) -> bytes:
         """Asynchronously read a byte range from the store via Rust Tokio awaitable."""
-        key = self._normalize_key(path)
-        if self._local_root is not None:
-            self._resolve_local(key)
+        key = self._key(path)
         return bytes(await self._require_native().get_range(key, offset, length))
 
     async def head(self, path: str) -> ObjectMeta:
         """Asynchronously read object metadata via Rust Tokio awaitable."""
-        key = self._normalize_key(path)
-        if self._local_root is not None:
-            self._resolve_local(key)
+        key = self._key(path)
         return self._native_to_object_meta(await self._require_native().head(key))
 
     async def exists(self, path: str) -> bool:
         """Asynchronously check whether an object exists via Rust Tokio awaitable."""
-        key = self._normalize_key(path)
-        if self._local_root is not None:
-            self._resolve_local(key)
+        key = self._key(path)
         return bool(await self._require_native().exists(key))
 
     async def delete(self, path: str) -> None:
         """Asynchronously delete an object via Rust Tokio awaitable."""
-        key = self._normalize_key(path)
-        if self._local_root is not None:
-            self._resolve_local(key)
+        key = self._key(path)
         with contextlib.suppress(FileNotFoundError):
             await self._require_native().delete(key)
 
@@ -2431,20 +2376,14 @@ class AsyncObjectStore(_BaseObjectStore):
         Raises:
             FileExistsError: If `overwrite` is False and `dst` already exists.
         """
-        src_key = self._normalize_key(src)
-        dst_key = self._normalize_key(dst)
-        if self._local_root is not None:
-            self._resolve_local(src_key)
-            self._resolve_local(dst_key)
+        src_key = self._key(src)
+        dst_key = self._key(dst)
         await self._require_native().copy(src_key, dst_key, if_not_exists=not overwrite)
 
     async def rename(self, src: str, dst: str, *, overwrite: bool = True) -> None:
         """Asynchronously rename or move an object from src to dst within the store."""
-        src_key = self._normalize_key(src)
-        dst_key = self._normalize_key(dst)
-        if self._local_root is not None:
-            self._resolve_local(src_key)
-            self._resolve_local(dst_key)
+        src_key = self._key(src)
+        dst_key = self._key(dst)
         await self._require_native().rename(src_key, dst_key, if_not_exists=not overwrite)
 
     async def list_page(
@@ -3032,9 +2971,7 @@ class SyncWritableFile(io.RawIOBase):
             msg = "part_size must be > 0"
             raise ValueError(msg)
         self._store = store
-        self._key = store._normalize_key(key)
-        if store._local_root is not None:
-            store._resolve_local(self._key)
+        self._key = store._key(key)
         self._content_type = content_type
         self._attributes = {str(k): str(v) for k, v in attributes.items()} if attributes is not None else None
         self._part_size = part_size
@@ -3104,7 +3041,7 @@ class SyncWritableFile(io.RawIOBase):
         self._written += count
         try:
             while len(self._buffer) >= self._part_size:
-                self._ensure_upload().write_part(self._take_part())
+                self._ensure_upload().write_part(_take_part(self._buffer, self._part_size))
         except BaseException:
             self.abort()
             raise
@@ -3117,7 +3054,7 @@ class SyncWritableFile(io.RawIOBase):
         try:
             upload = self._ensure_upload()
             if self._buffer:
-                upload.write_part(self._take_part())
+                upload.write_part(_take_part(self._buffer, self._part_size))
             native_meta = upload.complete()
         except BaseException:
             self.abort()
@@ -3156,17 +3093,6 @@ class SyncWritableFile(io.RawIOBase):
                 if_none_match=self._if_none_match,
             )
         return self._upload
-
-    def _take_part(self) -> bytes:
-        """Copy the next part out of the rolling buffer as immutable bytes and drop it from the buffer.
-
-        Returning ``bytes`` keeps the native upload zero-copy over an object the writer never mutates.
-        """
-        size = min(self._part_size, len(self._buffer))
-        with memoryview(self._buffer) as view:
-            part = bytes(view[:size])
-        del self._buffer[:size]
-        return part
 
 
 class AsyncWritableFile:
@@ -3214,9 +3140,7 @@ class AsyncWritableFile:
             msg = "part_size must be > 0"
             raise ValueError(msg)
         self._store = store
-        self._key = store._normalize_key(key)
-        if store._local_root is not None:
-            store._resolve_local(self._key)
+        self._key = store._key(key)
         self._content_type = content_type
         self._attributes = {str(k): str(v) for k, v in attributes.items()} if attributes is not None else None
         self._part_size = part_size
@@ -3297,7 +3221,7 @@ class AsyncWritableFile:
         try:
             while len(self._buffer) >= self._part_size:
                 upload = await self._ensure_upload()
-                await upload.write_part(self._take_part())
+                await upload.write_part(_take_part(self._buffer, self._part_size))
         except BaseException:
             await self.abort()
             raise
@@ -3322,7 +3246,7 @@ class AsyncWritableFile:
         try:
             upload = await self._ensure_upload()
             if self._buffer:
-                await upload.write_part(self._take_part())
+                await upload.write_part(_take_part(self._buffer, self._part_size))
             native_meta = await upload.complete()
         except BaseException:
             await self.abort()
@@ -3361,13 +3285,15 @@ class AsyncWritableFile:
             )
         return self._upload
 
-    def _take_part(self) -> bytes:
-        """Copy the next part out of the rolling buffer as immutable bytes and drop it from the buffer.
 
-        Returning ``bytes`` keeps the native upload zero-copy over an object the writer never mutates.
-        """
-        size = min(self._part_size, len(self._buffer))
-        with memoryview(self._buffer) as view:
-            part = bytes(view[:size])
-        del self._buffer[:size]
-        return part
+def _take_part(buffer: bytearray, part_size: int) -> bytes:
+    """Copy the next part out of a writer's rolling buffer as immutable bytes and drop it from the buffer.
+
+    Shared by `SyncWritableFile` and `AsyncWritableFile`. Returning ``bytes`` keeps the native upload
+    zero-copy over an object the writer never mutates.
+    """
+    size = min(part_size, len(buffer))
+    with memoryview(buffer) as view:
+        part = bytes(view[:size])
+    del buffer[:size]
+    return part

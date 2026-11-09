@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import contextlib
-import fnmatch
-import re
 from collections.abc import AsyncGenerator, AsyncIterable, AsyncIterator, Buffer, Iterable, Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast, overload
@@ -55,12 +53,10 @@ if TYPE_CHECKING:
 __all__ = (
     "ArrowFlightSerializer",
     "ObjectStoreBackend",
-    "StreamingStorageResponse",
     "build_duckdb_gcs_secret_sql",
     "register_storage_alias",
 )
 
-_GLOB_CHARS_RE = re.compile(r"[*?[]")
 _STORAGE_CONFIGS = (LocalConfig, S3Config, GCSConfig, AzureConfig, OCIConfig, R2Config, HTTPConfig, MemoryConfig)
 
 
@@ -164,11 +160,6 @@ class ObjectStoreBackend:
             self.protocol = self._normalize_protocol(sync_store.scheme)
 
     @property
-    def store(self) -> SyncObjectStore:
-        """Return the underlying SyncObjectStore instance."""
-        return self._sync_store
-
-    @property
     def sync_store(self) -> SyncObjectStore:
         """Return the underlying SyncObjectStore instance."""
         return self._sync_store
@@ -187,34 +178,6 @@ class ObjectStoreBackend:
     def supports_signing(self) -> bool:
         """Return True when presigned URL generation is configured on the underlying store."""
         return self._sync_store.supports_signing
-
-    @classmethod
-    def register_alias(
-        cls,
-        alias: str,
-        uri_or_store: str | SyncObjectStore | AsyncObjectStore,
-        *,
-        registry: StorageRegistry | None = None,
-        base_path: str = "",
-        **kwargs: Any,
-    ) -> None:
-        """Register this backend under a named alias in SQLSpec's `storage_registry`."""
-        reg_mod = ensure_module("sqlspec.storage.registry", package="sqlspec", extra="sqlspec")
-        target_registry = reg_mod.storage_registry if registry is None else registry
-        backend_config: dict[str, Any] = dict(kwargs)
-        if base_path:
-            backend_config["base_path"] = base_path
-        if isinstance(uri_or_store, (SyncObjectStore, AsyncObjectStore)):
-            stored_uri = uri_or_store.url
-            backend_config["store"] = uri_or_store
-        else:
-            stored_uri = uri_or_store
-        target_registry._alias_configs[alias] = (
-            cast("type[ObjectStoreProtocol]", cls),
-            stored_uri,
-            backend_config,
-        )
-        target_registry.clear_cache(alias)
 
     def resolve_uri(self, path: str | Path) -> str:
         """Resolve a backend-relative path to its unsigned canonical address."""
@@ -275,16 +238,15 @@ class ObjectStoreBackend:
         return self._filter_recursive(rel_paths, prefix=prefix, recursive=recursive)
 
     def glob_sync(self, pattern: str, **kwargs: Any) -> list[str]:
-        """Match relative object keys against a shell-style or URI-qualified glob pattern synchronously."""
+        """Match relative object keys against a shell-style or URI-qualified glob pattern synchronously.
+
+        The pattern is qualified with `base_path` and matched against full keys by `SyncObjectStore.glob`;
+        returned keys are relative to `base_path`. An empty pattern matches nothing.
+        """
         _ = kwargs
-        cleaned_pattern, static_prefix = self._normalize_glob_pattern(pattern)
-        candidates = self.list_objects_sync(static_prefix, recursive=True)
-        return [
-            candidate
-            for candidate in candidates
-            if fnmatch.fnmatch(candidate, cleaned_pattern)
-            or fnmatch.fnmatch(candidate.rsplit("/", 1)[-1], cleaned_pattern)
-        ]
+        if not pattern.strip():
+            return []
+        return [self._unqualify(meta.path) for meta in self._sync_store.glob(self._qualify(pattern))]
 
     def is_object_sync(self, path: str | Path) -> bool:
         """Return True when `path` points to a stored object."""
@@ -528,16 +490,15 @@ class ObjectStoreBackend:
         )
 
     async def glob_async(self, pattern: str, **kwargs: Any) -> list[str]:
-        """Match relative object keys against a shell-style or URI-qualified glob pattern asynchronously."""
+        """Match relative object keys against a shell-style or URI-qualified glob pattern asynchronously.
+
+        The pattern is qualified with `base_path` and matched against full keys by `AsyncObjectStore.glob`;
+        returned keys are relative to `base_path`. An empty pattern matches nothing.
+        """
         _ = kwargs
-        cleaned_pattern, static_prefix = self._normalize_glob_pattern(pattern)
-        candidates = await self.list_objects_async(static_prefix, recursive=True)
-        return [
-            candidate
-            for candidate in candidates
-            if fnmatch.fnmatch(candidate, cleaned_pattern)
-            or fnmatch.fnmatch(candidate.rsplit("/", 1)[-1], cleaned_pattern)
-        ]
+        if not pattern.strip():
+            return []
+        return [self._unqualify(meta.path) for meta in await self._async_store.glob(self._qualify(pattern))]
 
     def get_stream_async(self, path: str | Path, *, chunk_size: int | None = None) -> AsyncIterator[StorageBuffer]:
         """Return an asynchronous native buffer iterator."""
@@ -659,19 +620,6 @@ class ObjectStoreBackend:
             rel_path = ""
         return rel_path
 
-    def _normalize_glob_pattern(self, pattern: str) -> tuple[str, str]:
-        """Normalize a relative or URI-qualified glob pattern and extract its static prefix."""
-        rel_pattern = self._strip_matching_uri_prefix(pattern).strip().lstrip("/")
-        if self._base_path and rel_pattern.startswith(f"{self._base_path}/"):
-            rel_pattern = rel_pattern[len(self._base_path) + 1 :]
-        match = _GLOB_CHARS_RE.search(rel_pattern)
-        if match is None:
-            static_prefix = rel_pattern.rsplit("/", 1)[0] if "/" in rel_pattern else ""
-        else:
-            before_wildcard = rel_pattern[: match.start()]
-            static_prefix = before_wildcard.rsplit("/", 1)[0] if "/" in before_wildcard else ""
-        return rel_pattern, static_prefix
-
     def _resolve_pattern_matches_sync(self, pattern: str) -> list[str]:
         """Resolve either a glob wildcard pattern or an exact object key."""
         normalized = self._strip_matching_uri_prefix(pattern)
@@ -786,13 +734,22 @@ def register_storage_alias(
     **kwargs: Any,
 ) -> None:
     """Register `ObjectStoreBackend` under `alias` in SQLSpec's `storage_registry`."""
-    ObjectStoreBackend.register_alias(
-        alias,
-        uri_or_store,
-        registry=registry,
-        base_path=base_path,
-        **kwargs,
+    reg_mod = ensure_module("sqlspec.storage.registry", package="sqlspec", extra="sqlspec")
+    target_registry = reg_mod.storage_registry if registry is None else registry
+    backend_config: dict[str, Any] = dict(kwargs)
+    if base_path:
+        backend_config["base_path"] = base_path
+    if isinstance(uri_or_store, (SyncObjectStore, AsyncObjectStore)):
+        stored_uri = uri_or_store.url
+        backend_config["store"] = uri_or_store
+    else:
+        stored_uri = uri_or_store
+    target_registry._alias_configs[alias] = (
+        cast("type[ObjectStoreProtocol]", ObjectStoreBackend),
+        stored_uri,
+        backend_config,
     )
+    target_registry.clear_cache(alias)
 
 
 def build_duckdb_gcs_secret_sql(

@@ -339,7 +339,8 @@ class _StreamFile(io.RawIOBase):
     """Read exact codec requests with at most one unfinished native stream chunk.
 
     Arrow's Python file adapter decodes message bodies through ``read_buffer`` and reads
-    only small length prefixes through ``read``; it never calls ``readinto``.
+    only small length prefixes through ``read``, so ``readinto`` keeps the unsupported
+    ``io.RawIOBase`` default.
     """
 
     __slots__ = ("_next_chunk", "_pos", "_remaining")
@@ -368,20 +369,6 @@ class _StreamFile(io.RawIOBase):
         """
         pieces = self._take(nbytes)
         return pieces[0] if len(pieces) == 1 else b"".join(pieces)
-
-    def readinto(self, buffer: Buffer) -> int:
-        """Copy pending native chunks straight into ``buffer`` without intermediate bytes."""
-        target = memoryview(buffer).cast("B")
-        filled = 0
-        while filled < len(target):
-            if not self._next_ready():
-                break
-            count = min(len(target) - filled, len(self._remaining))
-            target[filled : filled + count] = self._remaining[:count]
-            self._remaining = self._remaining[count:]
-            filled += count
-        self._pos += filled
-        return filled
 
     def _take(self, size: int | None) -> list[memoryview]:
         """Detach zero-copy slices totalling up to ``size`` bytes from pending native chunks."""
