@@ -4,7 +4,7 @@ flow_id: native-mysql-driver
 title: "Standalone Rust MySQL and MariaDB Wheel (vertebra-mysql)"
 description: "Standalone PyO3 crate src/rs/vertebra-mysql (vertebra._mysql + vertebra-core[mysql]) built on mysql_async (rustls+ring, binary protocol, Cloud SQL IAM, KILL QUERY cancellation, VTBARROW ShmCapsule ArrowCursor), replacing pymysql and asyncmy execution."
 status: stable
-state: in_progress
+state: completed
 has_chapters: false
 parent_prd: native-data-platform
 depends_on_flows:
@@ -12,11 +12,11 @@ depends_on_flows:
 research:
   - ../native-data-platform/research/rust-driver-crates_20261103.md
   - ../integration-remediation/research/audit-findings_20261103.md
-plan_revision: 3
-plan_commit: fd571e3a
-state_revision: 4
-current_task: "native-mysql-driver:t04"
-last_verified_checkpoint: b325bce6
+plan_revision: 4
+plan_commit: 25d0ac25
+state_revision: 7
+current_task: null
+last_verified_checkpoint: 3700e5d0
 created_at: "2026-11-03T04:05:00Z"
 updated_at: "2026-11-09T03:25:00Z"
 generated:
@@ -97,18 +97,24 @@ tags:
 - `load_from_arrow(table, source, columns=None, batch_size=1000)` reads `VTBARROW` SHM capsules, `ArrowCursor` instances, Arrow IPC bytes, or tabular mappings and executes chunked multi-row `INSERT INTO <table> (<cols>) VALUES ...` batches inside a transaction, returning total affected rows.
 - `vertebra-db` exposes a `BrokerEngineBackend` registration hook for dialect tag `DIALECT_TAG_MYSQL` (`2`), and `vertebra-mysql` registers its native MySQL backend when imported.
 
-### 5. Python `SyncMySQLDriver` / `AsyncMySQLDriver` Cutover and Conformance (`t04`)
-- `src/py/vertebra/db/adapters/mysql/driver.py` (`SyncMySQLDriver`, `AsyncMySQLDriver`) loads `vertebra._mysql` via `ensure_module("vertebra._mysql", package="vertebra-core[mysql]", extra="mysql")` and delegates all query, script, transaction, savepoint, Arrow (`select_to_arrow`, `stream_arrow_batches`, `load_from_arrow`), schema inspection, and cancellation operations to `SyncMySQLClient` and `AsyncMySQLClient` [^mysql-py].
-- All `pymysql`, `asyncmy`, and `memory://` fallback paths are removed from `src/py/vertebra/db/adapters/mysql/`; `memory://` DSNs raise `ImproperConfigurationError` at configuration and connection boundaries [^fail-loud-baseline].
-- `src/py/tests/integration/db/test_driver_conformance.py` sets `pending_flow_id=None` for `mysql` and passes all 7 conformance categories (`crud_and_Select`, `arrow_roundtrip`, `transactions_and_savepoints`, `error_mapping`, `cancellation`, `pool_concurrency`, `schema_hydration`) across both sync and async modes.
-- Documentation in `docs/usage/databases.md`, `docs/reference/database-capabilities.md`, and `.agents/bundles/knowledge/domains/data/database-drivers-and-dialers.md` reflects the standalone `vertebra._mysql` (`vertebra-core[mysql]`) architecture.
+### 5. Python `SyncMySQLDriver` / `AsyncMySQLDriver` Cutover, Pipelines, and Config Validation (`t04`)
+- `src/py/vertebra/db/adapters/mysql/driver.py` (`SyncMySQLDriver`, `AsyncMySQLDriver`) loads `vertebra._mysql` via `ensure_module("vertebra._mysql", package="vertebra-core[mysql]", extra="mysql")` and delegates all query, script, transaction, savepoint, pipeline, Arrow (`select_to_arrow`, `stream_arrow_batches`, `load_from_arrow`), schema inspection, and cancellation operations directly to `SyncMySQLClient` and `AsyncMySQLClient` with zero `asyncio.to_thread` [^mysql-py].
+- `SyncMySQLPipeline` and `AsyncMySQLPipeline` (`src/py/vertebra/db/adapters/mysql/pipeline.py`) implement `SyncPipeline` and `AsyncPipeline` with automatic `SAVEPOINT` nesting when executed inside an active transaction.
+- All `pymysql`, `asyncmy`, and `memory://` fallback paths are removed from `src/py/vertebra/db/adapters/mysql/`; `memory://` DSNs, out-of-range ports (`1..=65535`), NUL bytes, and invalid `ssl_mode` values fail loud at configuration and connection boundaries, and passwords/IAM tokens are redacted in `Debug`/`Display`/`repr` [^fail-loud-baseline].
+
+### 6. Wheel Isolation, Free-Threaded GIL, Build Gates, Conformance Matrix, and Docs (`t05`, `t06`)
+- `Makefile` defines `mysql-test` and `mysql-wheel-check` and wires `vertebra-mysql` into `dev`, `build`, `py-test` (`mypy.stubtest vertebra._mysql`), `lint`, and `lint-all`, while `src/py/tests/unit/test_freethreaded_gil.py` and `src/py/tests/unit/db/test_optional_driver_wheels.py` verify `gil_used = false` and wheel isolation.
+- `src/py/tests/integration/db/test_driver_conformance.py` sets `pending_flow_id=None` and `supports_pipeline=True` for `mysql` (`_MYSQL_ITEMS_DDL`, `_MYSQL_TYPES_DDL`) and passes all 36 sync and async conformance tests.
+- Documentation in `docs/usage/databases.md` and `.agents/bundles/knowledge/domains/data/database-drivers-and-dialers.md` reflects the standalone `vertebra._mysql` (`vertebra-core[mysql]`) architecture.
 
 ## Tasks
 
 - [x] [1dd74556] [t01](tasks/t01-vertebra-mysql-crate-auth-and-cancel.md) — Scaffold `src/rs/vertebra-mysql` (`vertebra._mysql`, `_mysql.pyi`, `[mysql]` extra), connection pool, Handshake v10, `caching_sha2_password` / `mysql_native_password`, `rustls` TLS, Cloud SQL `:3307` mTLS & IAM tokens, `KILL QUERY` cancellation, and remove `vertebra_db::mysql`
 - [x] [b325bce6] [t02](tasks/t02-mysql-binary-protocol-codecs-and-errors.md) — Implement MySQL binary prepared-statement protocol (`COM_STMT_PREPARE`/`EXECUTE`/`CLOSE`), per-connection LRU statement cache, multi-result sets, binary/text codecs (`DECIMAL`, temporal, `JSON`, `BLOB`/`VECTOR`, `BIT`, `ENUM`/`SET`), and errno/SQLSTATE -> `DatabaseError` hierarchy mapping
-- [x] [t03](tasks/t03-mysql-vtbarrow-shm-and-bulk-load.md) — Implement `VTBARROW` `ShmCapsule` `ArrowCursor` (`select_to_arrow`, `stream_arrow_batches`), batched `load_from_arrow` ingestion, and `BrokerEngineBackend` registration
-- [~] [t04](tasks/t04-python-mysql-driver-cutover-and-docs.md) — Cut `SyncMySQLDriver` and `AsyncMySQLDriver` over to `vertebra._mysql`, remove `pymysql`/`asyncmy`/`memory://` paths, activate `mysql` in `test_driver_conformance.py`, and update docs and OKF knowledge chapters
+- [x] [384da75a] [t03](tasks/t03-mysql-vtbarrow-shm-and-bulk-load.md) — Implement `VTBARROW` `ShmCapsule` `ArrowCursor` (`select_to_arrow`, `stream_arrow_batches`), batched `load_from_arrow` ingestion, and `BrokerEngineBackend` registration
+- [x] [71c7513c] [t04](tasks/t04-python-mysql-driver-cutover-and-docs.md) — Cut `SyncMySQLDriver` and `AsyncMySQLDriver` over to `vertebra._mysql`, implement `SyncMySQLPipeline` and `AsyncMySQLPipeline`, enforce strict `_mysql.pyi` `ArrowCursor` and `NotFoundError` semantics, and validate `MySQLConfig` bounds and secret redaction
+- [x] [18138e92] [t05](tasks/t05-wheel-isolation-freethreaded-gil-and-build-gates.md) — Wire `vertebra-mysql` into `Makefile` (`mysql-test`, `mysql-wheel-check`), `test_freethreaded_gil.py`, and `test_optional_driver_wheels.py`
+- [x] [3700e5d0] [t06](tasks/t06-mysql-conformance-matrix-and-docs.md) — Activate `mysql` (`pending_flow_id=None`, `supports_pipeline=True`) in `test_driver_conformance.py`, update `test_mysql_driver.py`, `test_native_db_drivers.py`, `test_sqlalchemy_and_sqlspec_vtb.py`, and `wire_conformance.rs`, and update docs and OKF knowledge chapters
 
 [^crate-research]: `.agents/bundles/specs/native-data-platform/research/rust-driver-crates_20261103.md` — Rust client crate selection including `mysql_async` 0.37.1.
 [^fail-loud-baseline]: `.agents/bundles/specs/driver-fail-loud/spec.md` — Upstream flow that deletes `vertebra_db::mysql` and MySQL `memory://` paths.

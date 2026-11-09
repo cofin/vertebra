@@ -27,7 +27,7 @@ commands_to_run:
   - "cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-mysql -p vertebra-db --all-targets --locked -- -D warnings"
   - "uv run python -m mypy.stubtest vertebra._mysql"
   - "uv run python -m tools.scripts.review_setup validate"
-commit_sha: null
+commit_sha: 384da75a
 created_at: "2026-11-09T03:25:00Z"
 updated_at: "2026-11-09T03:25:00Z"
 sources:
