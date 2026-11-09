@@ -1882,3 +1882,66 @@ def test_storage_exports_writers_and_precondition_error() -> None:
     assert {"AsyncWritableFile", "PreconditionError", "SyncWritableFile"} <= set(storage.__all__)
     assert list(storage.__all__) == sorted(storage.__all__)
     assert issubclass(SyncWritableFile, io.RawIOBase)
+
+
+@pytest.mark.parametrize("scheme", ["memory", "file"])
+def test_native_sync_bulk_file_io_conditional_copy_and_compose(tmp_path: Path, scheme: str) -> None:
+    """Native SyncObjectStore round-trips files in bulk, enforces conditional copy, and composes objects."""
+    url = "memory://bulk" if scheme == "memory" else f"file://{tmp_path / 'root'}"
+    store = native_st.SyncObjectStore(url)
+    sources: list[tuple[str, str]] = []
+    for idx in range(5):
+        local = tmp_path / f"up-{idx}.bin"
+        local.write_bytes(bytes([idx]) * (idx + 1))
+        sources.append((f"bulk/k{idx}.bin", str(local)))
+    put_metas = store.put_files(sources, concurrency=2)
+    assert [m.path for m in put_metas] == [key for key, _ in sources]
+    downloads = [(key, str(tmp_path / "down" / f"d{idx}.bin")) for idx, (key, _) in enumerate(sources)]
+    get_metas = store.get_files(downloads, concurrency=3)
+    assert [m.size for m in get_metas] == [1, 2, 3, 4, 5]
+    assert [Path(dst).read_bytes() for _, dst in downloads] == [bytes([i]) * (i + 1) for i in range(5)]
+    single = store.get_file("bulk/k4.bin", str(tmp_path / "single.bin"))
+    assert single.size == 5
+    assert (tmp_path / "single.bin").read_bytes() == b"\x04" * 5
+    with pytest.raises(FileExistsError):
+        store.copy("bulk/k0.bin", "bulk/k1.bin", if_not_exists=True)
+    assert store.get("bulk/k1.bin") == b"\x01\x01"
+    store.copy("bulk/k0.bin", "bulk/k1.bin")
+    assert store.get("bulk/k1.bin") == b"\x00"
+    composed = store.compose(["bulk/k2.bin", "bulk/k3.bin"], "bulk/merged.bin", content_type="application/octet-stream")
+    assert composed.size == 7
+    assert store.get("bulk/merged.bin") == b"\x02" * 3 + b"\x03" * 4
+    with pytest.raises(ValueError, match="concurrency"):
+        store.get_files(downloads, concurrency=0)
+    with pytest.raises(ValueError, match="concurrency"):
+        store.put_files(sources, concurrency=-1)
+    with pytest.raises(ValueError):
+        store.compose([], "bulk/empty.bin")
+
+
+@pytest.mark.anyio
+async def test_native_async_bulk_file_io_conditional_copy_and_compose(tmp_path: Path) -> None:
+    """Native AsyncObjectStore exposes awaitable bulk file I/O, conditional copy, and compose."""
+    store = native_st.AsyncObjectStore("memory://bulk-async")
+    sources: list[tuple[str, str]] = []
+    for idx in range(3):
+        local = tmp_path / f"a-{idx}.bin"
+        local.write_bytes(f"part-{idx};".encode())
+        sources.append((f"a/k{idx}", str(local)))
+    put_metas = await store.put_files(sources, concurrency=2)
+    assert [m.path for m in put_metas] == ["a/k0", "a/k1", "a/k2"]
+    downloads = [(key, str(tmp_path / "out" / f"o{idx}")) for idx, (key, _) in enumerate(sources)]
+    get_metas = await store.get_files(downloads)
+    assert [m.size for m in get_metas] == [7, 7, 7]
+    meta = await store.get_file("a/k1", str(tmp_path / "one.bin"))
+    assert meta.size == 7
+    assert (tmp_path / "one.bin").read_bytes() == b"part-1;"
+    with pytest.raises(FileExistsError):
+        await store.copy("a/k0", "a/k1", if_not_exists=True)
+    await store.copy("a/k0", "a/fresh", if_not_exists=True)
+    assert await store.get("a/fresh") == b"part-0;"
+    composed = await store.compose(["a/k0", "a/k1", "a/k2"], "a/all")
+    assert composed.size == 21
+    assert await store.get("a/all") == b"part-0;part-1;part-2;"
+    with pytest.raises(ValueError, match="concurrency"):
+        await store.get_files(downloads, concurrency=0)

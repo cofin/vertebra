@@ -89,6 +89,18 @@ fn validate_chunk_size(chunk_size: Option<usize>) -> PyResult<Option<usize>> {
     Ok(chunk_size)
 }
 
+fn validate_concurrency(concurrency: i64) -> PyResult<usize> {
+    if concurrency < 1 {
+        return Err(PyValueError::new_err("concurrency must be >= 1"));
+    }
+    usize::try_from(concurrency).map_err(|_| PyValueError::new_err("concurrency is too large"))
+}
+
+fn metas_to_py_list(py: Python<'_>, metas: Vec<StoredObjectMeta>) -> PyResult<Py<PyAny>> {
+    let converted: Vec<PyObjectMeta> = metas.into_iter().map(PyObjectMeta::from).collect();
+    Ok(converted.into_pyobject(py)?.into_any().unbind())
+}
+
 fn extract_token_cache_capsule(
     capsule_any: &Bound<'_, PyAny>,
 ) -> PyResult<SharedGcpTokenCacheHandle> {
@@ -844,6 +856,61 @@ impl PySyncObjectStore {
         Ok(PyObjectMeta::from(meta))
     }
 
+    fn get_file(&self, py: Python<'_>, path: &str, file_path: &str) -> PyResult<PyObjectMeta> {
+        let engine = self.engine.clone();
+        let meta = py
+            .detach(|| block_on_storage(async move { engine.get_file(path, file_path).await }))
+            .map_err(to_py_err)?;
+        Ok(PyObjectMeta::from(meta))
+    }
+
+    #[pyo3(signature = (pairs, *, concurrency=16))]
+    fn get_files(
+        &self,
+        py: Python<'_>,
+        pairs: Vec<(String, String)>,
+        concurrency: i64,
+    ) -> PyResult<Vec<PyObjectMeta>> {
+        let concurrency = validate_concurrency(concurrency)?;
+        let engine = self.engine.clone();
+        let metas = py
+            .detach(|| block_on_storage(async move { engine.get_files(pairs, concurrency).await }))
+            .map_err(to_py_err)?;
+        Ok(metas.into_iter().map(PyObjectMeta::from).collect())
+    }
+
+    #[pyo3(signature = (pairs, *, concurrency=16))]
+    fn put_files(
+        &self,
+        py: Python<'_>,
+        pairs: Vec<(String, String)>,
+        concurrency: i64,
+    ) -> PyResult<Vec<PyObjectMeta>> {
+        let concurrency = validate_concurrency(concurrency)?;
+        let engine = self.engine.clone();
+        let metas = py
+            .detach(|| block_on_storage(async move { engine.put_files(pairs, concurrency).await }))
+            .map_err(to_py_err)?;
+        Ok(metas.into_iter().map(PyObjectMeta::from).collect())
+    }
+
+    #[pyo3(signature = (sources, dst, *, content_type=None))]
+    fn compose(
+        &self,
+        py: Python<'_>,
+        sources: Vec<String>,
+        dst: &str,
+        content_type: Option<String>,
+    ) -> PyResult<PyObjectMeta> {
+        let engine = self.engine.clone();
+        let meta = py
+            .detach(|| {
+                block_on_storage(async move { engine.compose(sources, dst, content_type).await })
+            })
+            .map_err(to_py_err)?;
+        Ok(PyObjectMeta::from(meta))
+    }
+
     #[pyo3(signature = (path, *, content_type=None, attributes=None, if_not_exists=false, if_match=None, if_none_match=None))]
     #[allow(clippy::too_many_arguments)]
     fn create_multipart(
@@ -962,9 +1029,10 @@ impl PySyncObjectStore {
             .map_err(to_py_err)
     }
 
-    fn copy(&self, py: Python<'_>, src: &str, dst: &str) -> PyResult<()> {
+    #[pyo3(signature = (src, dst, *, if_not_exists=false))]
+    fn copy(&self, py: Python<'_>, src: &str, dst: &str, if_not_exists: bool) -> PyResult<()> {
         let engine = self.engine.clone();
-        py.detach(|| block_on_storage(async move { engine.copy(src, dst, false).await }))
+        py.detach(|| block_on_storage(async move { engine.copy(src, dst, if_not_exists).await }))
             .map_err(to_py_err)
     }
 
@@ -1104,6 +1172,68 @@ impl PyAsyncObjectStore {
         )
     }
 
+    fn get_file(
+        &self,
+        py: Python<'_>,
+        path: String,
+        file_path: String,
+    ) -> PyResult<RustTaskAwaitable> {
+        let engine = self.engine.clone();
+        spawn_rust_task(
+            py,
+            async move { engine.get_file(&path, &file_path).await },
+            |py, meta| Ok(Py::new(py, PyObjectMeta::from(meta))?.into_any()),
+        )
+    }
+
+    #[pyo3(signature = (pairs, *, concurrency=16))]
+    fn get_files(
+        &self,
+        py: Python<'_>,
+        pairs: Vec<(String, String)>,
+        concurrency: i64,
+    ) -> PyResult<RustTaskAwaitable> {
+        let concurrency = validate_concurrency(concurrency)?;
+        let engine = self.engine.clone();
+        spawn_rust_task(
+            py,
+            async move { engine.get_files(pairs, concurrency).await },
+            metas_to_py_list,
+        )
+    }
+
+    #[pyo3(signature = (pairs, *, concurrency=16))]
+    fn put_files(
+        &self,
+        py: Python<'_>,
+        pairs: Vec<(String, String)>,
+        concurrency: i64,
+    ) -> PyResult<RustTaskAwaitable> {
+        let concurrency = validate_concurrency(concurrency)?;
+        let engine = self.engine.clone();
+        spawn_rust_task(
+            py,
+            async move { engine.put_files(pairs, concurrency).await },
+            metas_to_py_list,
+        )
+    }
+
+    #[pyo3(signature = (sources, dst, *, content_type=None))]
+    fn compose(
+        &self,
+        py: Python<'_>,
+        sources: Vec<String>,
+        dst: String,
+        content_type: Option<String>,
+    ) -> PyResult<RustTaskAwaitable> {
+        let engine = self.engine.clone();
+        spawn_rust_task(
+            py,
+            async move { engine.compose(sources, &dst, content_type).await },
+            |py, meta| Ok(Py::new(py, PyObjectMeta::from(meta))?.into_any()),
+        )
+    }
+
     #[pyo3(signature = (path, *, content_type=None, attributes=None, if_not_exists=false, if_match=None, if_none_match=None))]
     #[allow(clippy::too_many_arguments)]
     fn create_multipart(
@@ -1224,11 +1354,18 @@ impl PyAsyncObjectStore {
         })
     }
 
-    fn copy(&self, py: Python<'_>, src: String, dst: String) -> PyResult<RustTaskAwaitable> {
+    #[pyo3(signature = (src, dst, *, if_not_exists=false))]
+    fn copy(
+        &self,
+        py: Python<'_>,
+        src: String,
+        dst: String,
+        if_not_exists: bool,
+    ) -> PyResult<RustTaskAwaitable> {
         let engine = self.engine.clone();
         spawn_rust_task(
             py,
-            async move { engine.copy(&src, &dst, false).await },
+            async move { engine.copy(&src, &dst, if_not_exists).await },
             |py, ()| Ok(py.None()),
         )
     }
