@@ -220,7 +220,7 @@ impl ShmRegion {
     /// This handles stale files from previous crashed runs.
     #[cfg(unix)]
     pub fn create_named(name: &str, size: usize) -> Result<Self, ShmError> {
-        validate_name(name)?;
+        validate_shm_name(name)?;
         let size = align_to_page(size)?;
         let cname = CString::new(name)?;
 
@@ -310,7 +310,10 @@ impl ShmRegion {
     /// Create a file-backed shared memory region under `/tmp/vtb-*` (Unix only).
     #[cfg(unix)]
     pub fn create_file_backed(path: &str, size: usize) -> Result<Self, ShmError> {
-        if !path.starts_with("/tmp/vtb-") || path.len() > 255 {
+        let Some(rest) = path.strip_prefix("/tmp/vtb-") else {
+            return Err(ShmError::InvalidName);
+        };
+        if rest.is_empty() || rest.contains('/') || rest.contains('\0') || path.len() > 255 {
             return Err(ShmError::InvalidName);
         }
         let size = align_to_page(size)?;
@@ -679,14 +682,25 @@ unsafe fn map_windows_region(handle: RawHandle, size: usize) -> Result<ShmRegion
 }
 
 #[cfg(unix)]
-fn validate_name(name: &str) -> Result<(), ShmError> {
-    if !name.starts_with('/') {
+fn validate_shm_name(name: &str) -> Result<(), ShmError> {
+    let Some(rest) = name.strip_prefix('/') else {
         return Err(ShmError::InvalidName);
-    }
-    if name.len() > 255 {
+    };
+    if rest.is_empty() || rest.contains('/') || rest.contains('\0') || name.len() > 255 {
         return Err(ShmError::InvalidName);
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn validate_name(name: &str) -> Result<(), ShmError> {
+    if let Some(rest) = name.strip_prefix("/tmp/vtb-") {
+        if rest.is_empty() || rest.contains('/') || rest.contains('\0') || name.len() > 255 {
+            return Err(ShmError::InvalidName);
+        }
+        return Ok(());
+    }
+    validate_shm_name(name)
 }
 
 /// Return `true` when `/dev/shm` has at least `min_free_bytes` available (or on non-Linux hosts).
@@ -796,8 +810,18 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn invalid_name_rejected() {
-        let err = ShmRegion::create_named("vertebra", 1024).unwrap_err();
-        assert!(matches!(err, ShmError::InvalidName));
+        for bad in ["vertebra", "/", "/bad/nested/seg", "/tmp/vtb-nested/seg"] {
+            let err = ShmRegion::create_named(bad, 1024).unwrap_err();
+            assert!(
+                matches!(err, ShmError::InvalidName),
+                "expected InvalidName for {bad:?}: {err:?}"
+            );
+            let open_err = ShmRegion::open_named(bad, 1024).unwrap_err();
+            assert!(
+                matches!(open_err, ShmError::InvalidName),
+                "expected InvalidName for {bad:?}: {open_err:?}"
+            );
+        }
     }
 
     #[cfg(unix)]

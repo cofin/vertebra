@@ -85,6 +85,12 @@ fn page_align(size: usize) -> Result<usize, String> {
 
 #[inline]
 fn allocate_shm_region(norm_name: &str, alloc_size: usize) -> Result<ShmRegion, String> {
+    let Some(rest) = norm_name.strip_prefix('/') else {
+        return Err(format!("invalid Arrow ShmRegion name `{norm_name}`"));
+    };
+    if rest.is_empty() || rest.contains('/') || rest.contains('\0') || norm_name.len() > 255 {
+        return Err(format!("invalid Arrow ShmRegion name `{norm_name}`"));
+    }
     #[cfg(unix)]
     {
         ShmRegion::create_named(norm_name, alloc_size)

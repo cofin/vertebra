@@ -1923,6 +1923,31 @@ fn test_pyo3_sync_and_async_streaming_multipart_conditional_pagination_and_renam
             c_str!(
                 r#"
 import asyncio
+import sys
+import vertebra._storage as st
+
+_saved_msgspec = sys.modules.get("msgspec", ...)
+sys.modules["msgspec"] = None
+sys.modules.pop("vertebra.typing", None)
+sys.modules.pop("vertebra._typing", None)
+try:
+    from vertebra.typing import PreconditionError
+finally:
+    if _saved_msgspec is ...:
+        sys.modules.pop("msgspec", None)
+    else:
+        sys.modules["msgspec"] = _saved_msgspec
+"#
+            ),
+            None,
+            None,
+        )
+        .expect("import vertebra.typing without msgspec installed");
+
+        py.run(
+            c_str!(
+                r#"
+import asyncio
 import vertebra._storage as st
 from vertebra.typing import PreconditionError
 

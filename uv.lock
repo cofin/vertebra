@@ -2729,12 +2729,16 @@ wheels = [
 
 [[package]]
 name = "pytest-databases"
-version = "0.19.0"
-source = { git = "https://github.com/litestar-org/pytest-databases.git?branch=test%2Fclientless-all#1001c5d30160f5fd529ea8603c206db3db33e340" }
+version = "0.20.0b1"
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "docker" },
     { name = "filelock" },
     { name = "pytest" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/89/93/f8856358a2070f4edf7023f72bb4c7a4c6c88851338544369afb00cec07b/pytest_databases-0.20.0b1.tar.gz", hash = "sha256:d63422b8e0610d23c1d78f8d430495cd160a47ab0d3c3858430dd98d67d6b0e0", size = 495110, upload-time = "2026-11-09T01:12:49.529Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/4d/b1/6e93f308201505b2f5b56e0b2468657a64d7f036be3747d6483c873f5c55/pytest_databases-0.20.0b1-py3-none-any.whl", hash = "sha256:15c444f84ef35a3078ffc273f4f337a0df89f65009b540e650ec7b02fa0f0539", size = 141805, upload-time = "2026-11-09T01:12:48.239Z" },
 ]
 
 [[package]]
@@ -3723,7 +3727,7 @@ dev = [
     { name = "pydantic", specifier = ">=2.9.0" },
     { name = "pytest" },
     { name = "pytest-cov", specifier = ">=5.0" },
-    { name = "pytest-databases", git = "https://github.com/litestar-org/pytest-databases.git?branch=test%2Fclientless-all" },
+    { name = "pytest-databases", specifier = ">=0.20.0b1" },
     { name = "pytest-xdist", specifier = ">=3.6.1" },
     { name = "ruff" },
     { name = "sqlalchemy", specifier = ">=2.0.36" },
@@ -3767,7 +3771,7 @@ test = [
     { name = "pydantic", specifier = ">=2.9.0" },
     { name = "pytest" },
     { name = "pytest-cov", specifier = ">=5.0" },
-    { name = "pytest-databases", git = "https://github.com/litestar-org/pytest-databases.git?branch=test%2Fclientless-all" },
+    { name = "pytest-databases", specifier = ">=0.20.0b1" },
     { name = "pytest-xdist", specifier = ">=3.6.1" },
     { name = "sqlalchemy", specifier = ">=2.0.36" },
     { name = "sqlspec", specifier = ">=0.69.0" },

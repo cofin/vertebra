@@ -167,3 +167,29 @@ def test_tool_provider_contract_and_policy_error_exports() -> None:
     error = ToolPolicyError("denied")
     assert isinstance(error, VertebraError)
     assert isinstance(error, PermissionError)
+
+
+def test_public_typing_imports_exceptions_and_sentinels_without_msgspec() -> None:
+    """Verify vertebra.typing imports exceptions and sentinels when msgspec is absent."""
+    code = (
+        "import importlib.abc, sys\n"
+        "class BlockMsgspec(importlib.abc.MetaPathFinder):\n"
+        "    def find_spec(self, fullname, path, target=None):\n"
+        "        if fullname == 'msgspec' or fullname.startswith('msgspec.'):\n"
+        "            raise ModuleNotFoundError(\"No module named 'msgspec'\")\n"
+        "        return None\n"
+        "blocker = BlockMsgspec()\n"
+        "sys.meta_path.insert(0, blocker)\n"
+        "from vertebra.typing import Empty, EmptyType, PreconditionError, VertebraError\n"
+        "assert issubclass(PreconditionError, VertebraError)\n"
+        "assert Empty is EmptyType.Empty\n"
+        "assert 'msgspec' not in sys.modules\n"
+        "sys.meta_path.remove(blocker)\n"
+        "from vertebra.typing import BaseStruct, CamelizedBaseStruct, FrozenBaseStruct, FrozenCamelizedStruct, Struct\n"
+        "assert issubclass(BaseStruct, Struct)\n"
+        "assert issubclass(CamelizedBaseStruct, BaseStruct)\n"
+        "assert issubclass(FrozenBaseStruct, Struct)\n"
+        "assert issubclass(FrozenCamelizedStruct, FrozenBaseStruct)\n"
+    )
+    res = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=False)
+    assert res.returncode == 0, res.stderr

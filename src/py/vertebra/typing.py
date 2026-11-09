@@ -19,13 +19,9 @@ from vertebra._typing import (
     UUID_UTILS_INSTALLED,
     UVLOOP_INSTALLED,
     BaseModelStub,
-    BaseStruct,
-    CamelizedBaseStruct,
     DataclassProtocol,
     Empty,
     EmptyType,
-    FrozenBaseStruct,
-    FrozenCamelizedStruct,
     HandlerID,
     ImproperConfigurationError,
     LifecycleHook,
@@ -33,7 +29,6 @@ from vertebra._typing import (
     OptionalDependency,
     PreconditionError,
     RawHeaders,
-    Struct,
     ToolPolicyError,
     ToolProvider,
     UnsupportedBackendError,
@@ -49,7 +44,12 @@ if TYPE_CHECKING:
     from vertebra._typing import (
         AttrsInstance,
         BaseModel,
+        BaseStruct,
+        CamelizedBaseStruct,
+        FrozenBaseStruct,
+        FrozenCamelizedStruct,
         NumpyArray,
+        Struct,
         attrs_asdict,
         attrs_has,
     )
@@ -105,7 +105,19 @@ __all__ = (
 
 
 _LAZY_OPTIONAL_TYPES = frozenset({"BaseModel", "ndarray", "NDArray", "Table", "RecordBatch"})
-_DELEGATED_TYPING_ATTRS = frozenset({"AttrsInstance", "attrs_asdict", "attrs_has", "NumpyArray"})
+_DELEGATED_TYPING_ATTRS = frozenset(
+    {
+        "AttrsInstance",
+        "BaseStruct",
+        "CamelizedBaseStruct",
+        "FrozenBaseStruct",
+        "FrozenCamelizedStruct",
+        "NumpyArray",
+        "Struct",
+        "attrs_asdict",
+        "attrs_has",
+    }
+)
 
 
 def __getattr__(name: str) -> Any:
