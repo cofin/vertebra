@@ -5,7 +5,7 @@ chapter_id: ch02-zero-copy-ffi-keys-and-backends
 title: Upgrade OciObjectStore to stream get_opts, honor conditional and copy headers, and paginate list and list_with_delimiter
 description: Stream OCI GET bodies via resp.bytes_stream(), enforce GetOptions, PutOptions, and CopyOptions HTTP headers and 304/412 mappings, parse list keys with StorePath::parse, and paginate list and list_with_delimiter using nextStartWith and delimiter=/.
 status: stable
-state: in_progress
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -20,17 +20,17 @@ tests:
 estimated_loc: 235
 plan_revision: 1
 plan_commit: fd571e3a
-state_revision: 3
+state_revision: 4
 claimed_by: executor
 claimed_at: "2026-11-08T23:50:15Z"
 blocked_reason: null
 unblock_condition: null
-next_step: "Implementation committed at 211c3161 and verified; paused per user request before ch02 zero-context chapter review (1ff643ec..HEAD)"
+next_step: null
 last_verified_at: "2026-11-08T23:53:48Z"
 last_verified_commit: 211c3161
 verification_evidence: "cargo test -p vertebra-storage (29 passed including test_oci_streaming_get_opts_conditional_put_copy_and_paginated_list), clippy, rustfmt, review-check passed"
 created_at: "2026-11-08T20:55:00Z"
-updated_at: "2026-11-08T23:58:00Z"
+updated_at: "2026-11-09T00:09:30Z"
 commit: 211c3161
 generated:
   by: flow/0.28.0
