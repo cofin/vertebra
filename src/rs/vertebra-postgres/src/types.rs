@@ -4,9 +4,10 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::codecs::{
-    BOOL_OID, BPCHAR_OID, BYTEA_OID, DATE_OID, FLOAT4_OID, FLOAT8_OID, INT2_OID, INT4_OID,
-    INT8_OID, INTERVAL_OID, JSON_OID, JSONB_OID, NAME_OID, NUMERIC_OID, OID_OID, TEXT_OID,
-    TIME_OID, TIMESTAMP_OID, TIMESTAMPTZ_OID, UUID_OID, VARCHAR_OID,
+    BOOL_OID, BPCHAR_OID, BYTEA_OID, CID_OID, DATE_OID, FLOAT4_OID, FLOAT8_OID, INT2_OID, INT4_OID,
+    INT8_OID, INTERVAL_OID, JSON_OID, JSONB_OID, NAME_OID, NUMERIC_OID, OID_OID, REGPROC_OID,
+    TEXT_OID, TIME_OID, TIMESTAMP_OID, TIMESTAMPTZ_OID, UNKNOWN_OID, UUID_OID, VARCHAR_OID,
+    XID_OID, XML_OID,
 };
 use crate::errors::PostgresError;
 use crate::result::PgValue;
@@ -21,6 +22,8 @@ pub const BOX_OID: u32 = 603;
 /// PostgreSQL anonymous `record` type OID (`2249`).
 pub const RECORD_OID: u32 = 2249;
 
+/// PostgreSQL `_xml` array OID (`143`).
+pub const XML_ARRAY_OID: u32 = 143;
 /// PostgreSQL `_bool` array OID (`1000`).
 pub const BOOL_ARRAY_OID: u32 = 1000;
 /// PostgreSQL `_bytea` array OID (`1001`).
@@ -33,8 +36,14 @@ pub const NAME_ARRAY_OID: u32 = 1003;
 pub const INT2_ARRAY_OID: u32 = 1005;
 /// PostgreSQL `_int4` array OID (`1007`).
 pub const INT4_ARRAY_OID: u32 = 1007;
+/// PostgreSQL `_regproc` array OID (`1008`).
+pub const REGPROC_ARRAY_OID: u32 = 1008;
 /// PostgreSQL `_text` array OID (`1009`).
 pub const TEXT_ARRAY_OID: u32 = 1009;
+/// PostgreSQL `_xid` array OID (`1011`).
+pub const XID_ARRAY_OID: u32 = 1011;
+/// PostgreSQL `_cid` array OID (`1012`).
+pub const CID_ARRAY_OID: u32 = 1012;
 /// PostgreSQL `_bpchar` array OID (`1014`).
 pub const BPCHAR_ARRAY_OID: u32 = 1014;
 /// PostgreSQL `_varchar` array OID (`1015`).
@@ -167,12 +176,17 @@ impl TypeCatalog {
         add_scalar(INT8_OID, "int8", b',');
         add_scalar(INT2_OID, "int2", b',');
         add_scalar(INT4_OID, "int4", b',');
+        add_scalar(REGPROC_OID, "regproc", b',');
         add_scalar(TEXT_OID, "text", b',');
         add_scalar(OID_OID, "oid", b',');
+        add_scalar(XID_OID, "xid", b',');
+        add_scalar(CID_OID, "cid", b',');
         add_scalar(JSON_OID, "json", b',');
+        add_scalar(XML_OID, "xml", b',');
         add_scalar(BOX_OID, "box", b';');
         add_scalar(FLOAT4_OID, "float4", b',');
         add_scalar(FLOAT8_OID, "float8", b',');
+        add_scalar(UNKNOWN_OID, "unknown", b',');
         add_scalar(BPCHAR_OID, "bpchar", b',');
         add_scalar(VARCHAR_OID, "varchar", b',');
         add_scalar(DATE_OID, "date", b',');
@@ -215,13 +229,17 @@ impl TypeCatalog {
             );
         };
 
+        add_array(XML_ARRAY_OID, "_xml", XML_OID, b',');
         add_array(BOOL_ARRAY_OID, "_bool", BOOL_OID, b',');
         add_array(BYTEA_ARRAY_OID, "_bytea", BYTEA_OID, b',');
         add_array(CHAR_ARRAY_OID, "_char", NAME_OID, b',');
         add_array(NAME_ARRAY_OID, "_name", NAME_OID, b',');
         add_array(INT2_ARRAY_OID, "_int2", INT2_OID, b',');
         add_array(INT4_ARRAY_OID, "_int4", INT4_OID, b',');
+        add_array(REGPROC_ARRAY_OID, "_regproc", REGPROC_OID, b',');
         add_array(TEXT_ARRAY_OID, "_text", TEXT_OID, b',');
+        add_array(XID_ARRAY_OID, "_xid", XID_OID, b',');
+        add_array(CID_ARRAY_OID, "_cid", CID_OID, b',');
         add_array(OID_ARRAY_OID, "_oid", OID_OID, b',');
         add_array(JSON_ARRAY_OID, "_json", JSON_OID, b',');
         add_array(BOX_ARRAY_OID, "_box", BOX_OID, b';');

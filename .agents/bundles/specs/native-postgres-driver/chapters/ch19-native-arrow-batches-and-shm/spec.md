@@ -115,7 +115,7 @@ Raw DataRow / Portal PgValue stream
 
 | Failure / Edge Condition | Expected Behavior |
 | --- | --- |
-| Unknown extension OID returned in binary format (`format == 1`) | `PostgresArrowSchema::from_columns` rejects with `PostgresError::Data` instead of guessing UTF-8 over opaque binary bytes; text format (`format == 0`) maps to `Utf8` with exact OID metadata. |
+| Unknown extension OID returned in binary format (`format == 1`) or `regproc` (`24`) returned in symbolic text format (`format == 0`) | `PostgresArrowSchema::from_columns` rejects with `PostgresError::Data` instead of guessing UTF-8 over opaque binary bytes or losing overloaded `regproc` OIDs (`regproc` negotiates binary format `1` -> `UInt32`); unknown OIDs in text format (`format == 0`) map to `Utf8` with exact OID metadata. |
 | Recursive composite/array/domain catalog cycle or depth `> 32` | Fails closed with `PostgresError::Data` before query execution or builder allocation. |
 | `numeric` scale `1000`, `12.3400`, `NaN`, `Infinity`, `-Infinity` | Stored in canonical decimal `Utf8` (`"postgres.encoding" = "numeric-decimal"`), preserving exact trailing zeros and specials without float or `Decimal128` overflow. |
 | Temporal `±infinity`, BC/far-future out-of-Python range, `24:00:00`, or `wire_text` | Preserved in full-range PostgreSQL `Struct` (`kind = -1/0/1` with PG epoch integer, or `kind = 2` + null `value` + `wire_text`/`date_style`/`time_zone`); `time` `Int64` keeps `86_400_000_000`. |

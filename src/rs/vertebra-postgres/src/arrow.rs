@@ -13,7 +13,6 @@ use arrow_array::{ArrayRef, FixedSizeListArray, ListArray, RecordBatch, StructAr
 use arrow_buffer::OffsetBuffer;
 use arrow_ipc::writer::StreamWriter;
 use arrow_schema::{DataType, Field, FieldRef, Fields, Schema};
-use postgres_protocol::types as protocol_types;
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
 use pyo3::types::{PyBytes, PyTuple, PyType};
@@ -31,23 +30,13 @@ use crate::codecs::{
     NUMERIC_OID, OID_OID, RECORD_OID, TEXT_OID, TIME_OID, TIMESTAMP_OID, TIMESTAMPTZ_OID, UUID_OID,
     VARBIT_OID, VARCHAR_OID, decode_value_with_catalog,
 };
+pub use crate::codecs::{CID_OID, REGPROC_OID, UNKNOWN_OID, XID_OID, XML_OID};
 use crate::errors::PostgresError;
 use crate::result::{
     Column, Format, PG_DATE_NEG_INF, PG_DATE_POS_INF, PG_TS_NEG_INF, PG_TS_POS_INF, PgValue,
     TemporalKind, VectorKind,
 };
 use crate::types::{CompositeField, MAX_DOMAIN_DEPTH, TypeCatalog, TypeInfo, TypeKind};
-
-/// PostgreSQL `regproc` scalar OID (`24`, unsigned 32-bit procedure OID).
-pub const REGPROC_OID: u32 = 24;
-/// PostgreSQL `xid` scalar OID (`28`, unsigned 32-bit transaction ID).
-pub const XID_OID: u32 = 28;
-/// PostgreSQL `cid` scalar OID (`29`, unsigned 32-bit command ID).
-pub const CID_OID: u32 = 29;
-/// PostgreSQL `xml` scalar OID (`142`, UTF-8 XML document).
-pub const XML_OID: u32 = 142;
-/// PostgreSQL `unknown` literal OID (`705`, UTF-8 string literal).
-pub const UNKNOWN_OID: u32 = 705;
 
 /// Arrow `Schema::metadata` key stamping the lossless PostgreSQL Arrow contract version.
 pub const POSTGRES_ARROW_VERSION_KEY: &str = "postgres.arrow.version";
@@ -265,7 +254,13 @@ fn resolve_base_type(
         INT4_OID => Ok((DataType::Int32, "int4".to_string(), "scalar")),
         INT8_OID => Ok((DataType::Int64, "int8".to_string(), "scalar")),
         OID_OID => Ok((DataType::UInt32, "oid".to_string(), "scalar")),
-        REGPROC_OID => Ok((DataType::UInt32, "regproc".to_string(), "scalar")),
+        REGPROC_OID => match format {
+            Format::Binary => Ok((DataType::UInt32, "regproc".to_string(), "scalar")),
+            Format::Text => Err(PostgresError::Data(
+                "PostgreSQL regproc (OID 24) requires binary format (1) for lossless UInt32 Arrow projection"
+                    .to_string(),
+            )),
+        },
         XID_OID => Ok((DataType::UInt32, "xid".to_string(), "scalar")),
         CID_OID => Ok((DataType::UInt32, "cid".to_string(), "scalar")),
         FLOAT4_OID => Ok((DataType::Float32, "float4".to_string(), "scalar")),
@@ -990,13 +985,13 @@ impl ArrowColumnBuilder {
                 let parsed = match val {
                     PgValue::Int8(v) => u32::try_from(*v).map_err(|_| {
                         PostgresError::Data(format!(
-                            "PostgreSQL unsigned 32-bit OID/xid/cid value {v} outside 0..={}",
+                            "PostgreSQL unsigned 32-bit OID/regproc/xid/cid value {v} outside 0..={}",
                             u32::MAX
                         ))
                     })?,
                     PgValue::Text(s) => s.trim().parse::<u32>().map_err(|_| {
                         PostgresError::Data(format!(
-                            "invalid PostgreSQL unsigned 32-bit OID/xid/cid text {s:?}"
+                            "invalid PostgreSQL unsigned 32-bit OID/regproc/xid/cid text {s:?}"
                         ))
                     })?,
                     other => {
@@ -2206,17 +2201,6 @@ fn pg_value_tag(val: &PgValue) -> &'static str {
     }
 }
 
-fn validate_wire_utf8_no_nul(raw: &[u8]) -> Result<String, PostgresError> {
-    if raw.contains(&0) {
-        return Err(PostgresError::Data(
-            "PostgreSQL text payload cannot contain embedded NUL bytes".to_string(),
-        ));
-    }
-    std::str::from_utf8(raw)
-        .map(str::to_owned)
-        .map_err(|e| PostgresError::Data(format!("invalid UTF-8 in PostgreSQL text field: {e}")))
-}
-
 fn decode_wire_cell_for_arrow(
     wire: &ColumnWireMeta,
     raw: Option<&[u8]>,
@@ -2227,13 +2211,10 @@ fn decode_wire_cell_for_arrow(
     let Some(bytes) = raw else {
         return Ok(PgValue::Null);
     };
-    let effective_field_cap = ctx
-        .max_field_bytes
-        .min(max_bytes.saturating_mul(2).max(max_bytes));
     if matches!(
         wire.base_oid,
         TEXT_OID | VARCHAR_OID | BPCHAR_OID | NAME_OID | XML_OID | UNKNOWN_OID | BYTEA_OID
-    ) && wire.format == Format::Binary
+    ) && (wire.format == Format::Binary || wire.base_oid != BYTEA_OID)
         && bytes.len() > max_bytes
     {
         return Err(PostgresError::Data(format!(
@@ -2241,80 +2222,19 @@ fn decode_wire_cell_for_arrow(
             bytes.len()
         )));
     }
-    if bytes.len() > ctx.max_field_bytes && bytes.len() > effective_field_cap {
+    if bytes.len() > ctx.max_field_bytes {
         return Err(PostgresError::Data(format!(
             "field length {} exceeds max_field_bytes {}",
             bytes.len(),
             ctx.max_field_bytes
         )));
     }
-
-    match (wire.base_oid, wire.format) {
-        (REGPROC_OID | XID_OID | CID_OID, Format::Binary) => {
-            if bytes.len() > ctx.max_field_bytes {
-                return Err(PostgresError::Data(format!(
-                    "field length {} exceeds max_field_bytes {}",
-                    bytes.len(),
-                    ctx.max_field_bytes
-                )));
-            }
-            let u = protocol_types::oid_from_sql(bytes).map_err(|e| {
-                PostgresError::Data(format!(
-                    "invalid binary unsigned 32-bit OID {} payload: {e}",
-                    wire.base_oid
-                ))
-            })?;
-            Ok(PgValue::Int8(i64::from(u)))
-        }
-        (REGPROC_OID | XID_OID | CID_OID, Format::Text) => {
-            if bytes.len() > ctx.max_field_bytes {
-                return Err(PostgresError::Data(format!(
-                    "field length {} exceeds max_field_bytes {}",
-                    bytes.len(),
-                    ctx.max_field_bytes
-                )));
-            }
-            let s = validate_wire_utf8_no_nul(bytes)?;
-            let u = s.trim().parse::<u32>().map_err(|_| {
-                PostgresError::Data(format!(
-                    "invalid unsigned 32-bit text {s:?} for OID {}",
-                    wire.base_oid
-                ))
-            })?;
-            Ok(PgValue::Int8(i64::from(u)))
-        }
-        (XML_OID | UNKNOWN_OID, Format::Binary | Format::Text) => {
-            if bytes.len() > ctx.max_field_bytes {
-                return Err(PostgresError::Data(format!(
-                    "field length {} exceeds max_field_bytes {}",
-                    bytes.len(),
-                    ctx.max_field_bytes
-                )));
-            }
-            let s = validate_wire_utf8_no_nul(bytes)?;
-            if s.len() > max_bytes {
-                return Err(PostgresError::Data(format!(
-                    "text value of {} bytes exceeds Arrow batch max_bytes ({max_bytes})",
-                    s.len()
-                )));
-            }
-            Ok(PgValue::Text(s))
-        }
-        _ => {
-            if ctx.max_nesting_depth > MAX_ARROW_NESTING_DEPTH {
-                let mut clamped = ctx.clone();
-                clamped.max_nesting_depth = MAX_ARROW_NESTING_DEPTH;
-                decode_value_with_catalog(
-                    wire.type_oid,
-                    wire.format,
-                    Some(bytes),
-                    &clamped,
-                    catalog,
-                )
-            } else {
-                decode_value_with_catalog(wire.type_oid, wire.format, Some(bytes), ctx, catalog)
-            }
-        }
+    if ctx.max_nesting_depth > MAX_ARROW_NESTING_DEPTH {
+        let mut clamped = ctx.clone();
+        clamped.max_nesting_depth = MAX_ARROW_NESTING_DEPTH;
+        decode_value_with_catalog(wire.type_oid, wire.format, Some(bytes), &clamped, catalog)
+    } else {
+        decode_value_with_catalog(wire.type_oid, wire.format, Some(bytes), ctx, catalog)
     }
 }
 

@@ -13,8 +13,9 @@ use vertebra_db::postgres::{
 use crate::errors::PostgresError;
 use crate::result::{Format, PgValue, TemporalKind, VectorKind};
 pub use crate::types::{
-    BIT_ARRAY_OID, BIT_OID, BOX_ARRAY_OID, BOX_OID, CompositeField, RECORD_ARRAY_OID, RECORD_OID,
-    TypeCatalog, TypeInfo, TypeKind, VARBIT_ARRAY_OID, VARBIT_OID,
+    BIT_ARRAY_OID, BIT_OID, BOX_ARRAY_OID, BOX_OID, CID_ARRAY_OID, CompositeField,
+    RECORD_ARRAY_OID, RECORD_OID, REGPROC_ARRAY_OID, TypeCatalog, TypeInfo, TypeKind,
+    VARBIT_ARRAY_OID, VARBIT_OID, XID_ARRAY_OID, XML_ARRAY_OID,
 };
 
 pub mod array;
@@ -38,16 +39,26 @@ pub const INT8_OID: u32 = 20;
 pub const INT2_OID: u32 = 21;
 /// PostgreSQL `INT4` (`INTEGER`) type OID (`23`).
 pub const INT4_OID: u32 = 23;
+/// PostgreSQL `REGPROC` procedure OID (`24`, unsigned 32-bit in binary format).
+pub const REGPROC_OID: u32 = 24;
 /// PostgreSQL `TEXT` type OID (`25`).
 pub const TEXT_OID: u32 = 25;
 /// PostgreSQL `OID` type OID (`26`).
 pub const OID_OID: u32 = 26;
+/// PostgreSQL `XID` transaction ID OID (`28`, unsigned 32-bit).
+pub const XID_OID: u32 = 28;
+/// PostgreSQL `CID` command ID OID (`29`, unsigned 32-bit).
+pub const CID_OID: u32 = 29;
 /// PostgreSQL `JSON` type OID (`114`).
 pub const JSON_OID: u32 = json::JSON_OID;
+/// PostgreSQL `XML` type OID (`142`, UTF-8 XML document).
+pub const XML_OID: u32 = 142;
 /// PostgreSQL `FLOAT4` (`REAL`) type OID (`700`).
 pub const FLOAT4_OID: u32 = 700;
 /// PostgreSQL `FLOAT8` (`DOUBLE PRECISION`) type OID (`701`).
 pub const FLOAT8_OID: u32 = 701;
+/// PostgreSQL `UNKNOWN` literal type OID (`705`, UTF-8 string literal).
+pub const UNKNOWN_OID: u32 = 705;
 /// PostgreSQL `BPCHAR` (`CHAR(n)`) type OID (`1042`).
 pub const BPCHAR_OID: u32 = 1042;
 /// PostgreSQL `VARCHAR` type OID (`1043`).
@@ -151,10 +162,11 @@ impl CodecContext {
 /// Return the preferred wire [`Format`] for a built-in PostgreSQL type `oid` (`Format::Text` for unknown OIDs).
 pub const fn format_for_oid(oid: u32) -> Format {
     match oid {
-        BOOL_OID | BYTEA_OID | NAME_OID | INT8_OID | INT2_OID | INT4_OID | TEXT_OID | OID_OID
-        | JSON_OID | FLOAT4_OID | FLOAT8_OID | BPCHAR_OID | VARCHAR_OID | DATE_OID | TIME_OID
-        | TIMESTAMP_OID | TIMESTAMPTZ_OID | INTERVAL_OID | BIT_OID | VARBIT_OID | NUMERIC_OID
-        | UUID_OID | JSONB_OID => Format::Binary,
+        BOOL_OID | BYTEA_OID | NAME_OID | INT8_OID | INT2_OID | INT4_OID | REGPROC_OID
+        | TEXT_OID | OID_OID | XID_OID | CID_OID | JSON_OID | XML_OID | FLOAT4_OID | FLOAT8_OID
+        | UNKNOWN_OID | BPCHAR_OID | VARCHAR_OID | DATE_OID | TIME_OID | TIMESTAMP_OID
+        | TIMESTAMPTZ_OID | INTERVAL_OID | BIT_OID | VARBIT_OID | NUMERIC_OID | UUID_OID
+        | JSONB_OID => Format::Binary,
         _ => Format::Text,
     }
 }
@@ -633,19 +645,24 @@ pub(crate) fn decode_value_with_catalog_at_depth(
                 .map_err(|_| PostgresError::Data(format!("invalid int8 text {s:?}")))?;
             Ok(PgValue::Int8(v))
         }
-        (OID_OID, Format::Binary) => {
-            let v = types::oid_from_sql(bytes)
-                .map_err(|e| PostgresError::Data(format!("invalid binary oid: {e}")))?;
+        (OID_OID | REGPROC_OID | XID_OID | CID_OID, Format::Binary) => {
+            let v = types::oid_from_sql(bytes).map_err(|e| {
+                PostgresError::Data(format!(
+                    "invalid binary unsigned 32-bit OID {base_oid} payload: {e}"
+                ))
+            })?;
             Ok(PgValue::Int8(i64::from(v)))
         }
-        (OID_OID, Format::Text) => {
+        (OID_OID | XID_OID | CID_OID, Format::Text) => {
             let s = validate_no_nul_utf8(bytes)?;
-            let v: u32 = s
-                .trim()
-                .parse()
-                .map_err(|_| PostgresError::Data(format!("invalid oid text {s:?}")))?;
+            let v: u32 = s.trim().parse().map_err(|_| {
+                PostgresError::Data(format!(
+                    "invalid unsigned 32-bit text {s:?} for OID {base_oid}"
+                ))
+            })?;
             Ok(PgValue::Int8(i64::from(v)))
         }
+        (REGPROC_OID, Format::Text) => Ok(PgValue::Text(validate_no_nul_utf8(bytes)?)),
         (FLOAT4_OID, Format::Binary) => {
             let v = types::float4_from_sql(bytes)
                 .map_err(|e| PostgresError::Data(format!("invalid binary float4: {e}")))?;
@@ -664,9 +681,10 @@ pub(crate) fn decode_value_with_catalog_at_depth(
             let s = validate_no_nul_utf8(bytes)?;
             Ok(PgValue::Float8(decode_float8_text(&s)?))
         }
-        (TEXT_OID | VARCHAR_OID | BPCHAR_OID | NAME_OID, Format::Binary | Format::Text) => {
-            Ok(PgValue::Text(validate_no_nul_utf8(bytes)?))
-        }
+        (
+            TEXT_OID | VARCHAR_OID | BPCHAR_OID | NAME_OID | XML_OID | UNKNOWN_OID,
+            Format::Binary | Format::Text,
+        ) => Ok(PgValue::Text(validate_no_nul_utf8(bytes)?)),
         (BYTEA_OID, Format::Binary) => Ok(PgValue::Bytes(bytes.to_vec())),
         (BYTEA_OID, Format::Text) => Ok(PgValue::Bytes(decode_bytea_text(bytes)?)),
         (UUID_OID, Format::Binary) => {
@@ -916,9 +934,11 @@ pub(crate) fn encode_value_with_catalog_at_depth(
             }
             INT4_OID => types::int4_to_sql(*v, out),
             INT8_OID => types::int8_to_sql(i64::from(*v), out),
-            OID_OID => {
+            OID_OID | REGPROC_OID | XID_OID | CID_OID => {
                 let u = u32::try_from(*v).map_err(|_| {
-                    PostgresError::Data(format!("Int4 value {v} is invalid for OID"))
+                    PostgresError::Data(format!(
+                        "Int4 value {v} is invalid for unsigned 32-bit OID target {target_oid}"
+                    ))
                 })?;
                 types::oid_to_sql(u, out);
             }
@@ -929,6 +949,11 @@ pub(crate) fn encode_value_with_catalog_at_depth(
             }
         },
         (PgValue::Int4(v), Format::Text) => {
+            if matches!(resolved_target, OID_OID | REGPROC_OID | XID_OID | CID_OID) && *v < 0 {
+                return Err(PostgresError::Data(format!(
+                    "Int4 value {v} is invalid for unsigned 32-bit OID target {target_oid}"
+                )));
+            }
             out.put_slice(v.to_string().as_bytes());
         }
         (PgValue::Int8(v), Format::Binary) => match resolved_target {
@@ -943,9 +968,11 @@ pub(crate) fn encode_value_with_catalog_at_depth(
                 types::int4_to_sql(n, out);
             }
             INT8_OID => types::int8_to_sql(*v, out),
-            OID_OID => {
+            OID_OID | REGPROC_OID | XID_OID | CID_OID => {
                 let u = u32::try_from(*v).map_err(|_| {
-                    PostgresError::Data(format!("Int8 value {v} overflows unsigned 32-bit OID"))
+                    PostgresError::Data(format!(
+                        "Int8 value {v} overflows unsigned 32-bit OID target {target_oid}"
+                    ))
                 })?;
                 types::oid_to_sql(u, out);
             }
@@ -956,9 +983,11 @@ pub(crate) fn encode_value_with_catalog_at_depth(
             }
         },
         (PgValue::Int8(v), Format::Text) => {
-            if resolved_target == OID_OID {
+            if matches!(resolved_target, OID_OID | REGPROC_OID | XID_OID | CID_OID) {
                 let u = u32::try_from(*v).map_err(|_| {
-                    PostgresError::Data(format!("Int8 value {v} overflows unsigned 32-bit OID"))
+                    PostgresError::Data(format!(
+                        "Int8 value {v} overflows unsigned 32-bit OID target {target_oid}"
+                    ))
                 })?;
                 out.put_slice(u.to_string().as_bytes());
             } else {
@@ -1033,7 +1062,7 @@ pub(crate) fn encode_value_with_catalog_at_depth(
                 })
             );
             match resolved_target {
-                TEXT_OID | VARCHAR_OID | BPCHAR_OID | NAME_OID => {
+                TEXT_OID | VARCHAR_OID | BPCHAR_OID | NAME_OID | XML_OID | UNKNOWN_OID => {
                     out.put_slice(s.as_bytes());
                 }
                 _ if is_enum => {
