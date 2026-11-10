@@ -5,7 +5,7 @@ chapter_id: ch19-native-arrow-batches-and-shm
 title: Define lossless PostgreSQL Arrow schemas over locked workspace Arrow crates
 description: Implement PostgresArrowSchema::from_columns in vertebra-postgres over the locked arrow-* (=60.1.0) and half (=2.7.1) dependencies from ch01 with full-range PostgreSQL metadata and recursion guards.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -25,17 +25,17 @@ tests:
 estimated_loc: 215
 plan_revision: 5
 plan_commit: fd571e3a
-state_revision: 0
+state_revision: 2
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-10T03:23:31Z"
+last_verified_commit: ccda0281
+verification_evidence: "cargo test -p vertebra-postgres --test postgres_arrow_tests schema_ (5 passed), cargo tree -p vertebra-postgres -i arrow-array (arrow-array v60.1.0), cargo clippy -p vertebra-postgres --all-targets -- -D warnings, and make review-check exited 0"
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-08T02:05:22Z"
+updated_at: "2026-11-10T03:23:31Z"
 commit: null
 sources:
   - id: pg-contracts
@@ -127,9 +127,9 @@ Implement `PostgresArrowSchema::from_columns` in `src/rs/vertebra-postgres/src/a
 
 ## Acceptance Criteria
 
-- [ ] `cargo tree -p vertebra-postgres -i arrow-array` resolves exclusively to `arrow-array v60.1.0` with zero duplicate Arrow major versions or Python FFI Arrow crates (R20).
-- [ ] `PostgresArrowSchema::from_columns` produces lossless `postgres.arrow.version = "1"` schemas for every scalar, `numeric`, full-range temporal/interval, array, composite, domain, enum, `vector`/`halfvec`, `bit`/`varbit`, and text-format unknown OID while preserving duplicate/empty column names (R20).
-- [ ] Unknown binary OIDs, invalid vector dimensions, catalog cycles, and nesting depths `> 32` fail closed with `PostgresError::Data` before execution (R20).
+- [x] `cargo tree -p vertebra-postgres -i arrow-array` resolves exclusively to `arrow-array v60.1.0` with zero duplicate Arrow major versions or Python FFI Arrow crates (R20).
+- [x] `PostgresArrowSchema::from_columns` produces lossless `postgres.arrow.version = "1"` schemas for every scalar, `numeric`, full-range temporal/interval, array, composite, domain, enum, `vector`/`halfvec`, `bit`/`varbit`, and text-format unknown OID while preserving duplicate/empty column names (R20).
+- [x] Unknown binary OIDs, invalid vector dimensions, catalog cycles, and nesting depths `> 32` fail closed with `PostgresError::Data` before execution (R20).
 
 ## Notes & Discoveries
 

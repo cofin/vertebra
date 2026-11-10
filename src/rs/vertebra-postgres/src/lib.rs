@@ -2,6 +2,7 @@
 
 use pyo3::prelude::*;
 
+pub mod arrow;
 pub mod async_client;
 pub mod auth;
 pub mod binding;

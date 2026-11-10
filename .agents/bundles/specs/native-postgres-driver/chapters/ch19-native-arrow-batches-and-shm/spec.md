@@ -5,19 +5,19 @@ chapter_id: ch19-native-arrow-batches-and-shm
 title: "Chapter 19: Lossless Native Arrow Schemas, Bounded RecordBatches, and Zero-Copy VTBARROW SHM"
 description: Define lossless PostgreSQL-to-Arrow schemas, build bounded scalar and nested RecordBatches directly in Rust, and serialize adaptive inline or zero-copy VTBARROW shared-memory IPC streams without Python row materialization.
 status: stable
-state: planned
+state: active
 planning_status: complete
 depends_on_chapters:
   - ch18-binary-copy-streaming
 replan_trigger: null
-current_task: "native-postgres-driver:ch19:t01"
+current_task: "native-postgres-driver:ch19:t02"
 plan_revision: 5
 plan_commit: fd571e3a
-state_revision: 0
+state_revision: 2
 last_verified_checkpoint: null
 last_reviewed_commit: null
 created_at: "2026-11-05T00:00:00Z"
-updated_at: "2026-11-08T02:05:22Z"
+updated_at: "2026-11-10T03:23:31Z"
 generated:
   by: flow-setup
   at: "2026-11-07T05:00:00Z"
@@ -146,7 +146,7 @@ Progress: `[0/0 files documented in ch19]` (public Arrow data-plane docs in `doc
 
 ## 5. Implementation Plan
 
-- [ ] native-postgres-driver:ch19:t01 — Define lossless PostgreSQL Arrow schemas over locked workspace Arrow crates (tasks/t01-lossless-arrow-schemas.md)
+- [x] native-postgres-driver:ch19:t01 — Define lossless PostgreSQL Arrow schemas over locked workspace Arrow crates (tasks/t01-lossless-arrow-schemas.md)
 - [ ] native-postgres-driver:ch19:t02 — Build bounded native Arrow scalar RecordBatches in Rust (tasks/t02-bounded-arrow-scalar-batches.md)
 - [ ] native-postgres-driver:ch19:t03 — Build recursive Arrow builders for arrays, composites, pgvector, and bitstrings (tasks/t03-nested-arrow-arrays-composites-vectors.md)
 - [ ] native-postgres-driver:ch19:t04 — Serialize adaptive inline and VTBARROW SHM IPC streams with validated ArrowCursor counts (tasks/t04-arrow-ipc-to-shm.md)
