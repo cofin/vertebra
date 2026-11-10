@@ -6,7 +6,6 @@ import contextlib
 import inspect
 from typing import TYPE_CHECKING, Any, Final
 
-from vertebra.db.arrow import ArrowCursor
 from vertebra.db.driver import DataError
 from vertebra.utils.module_loader import ensure_pyarrow
 
@@ -87,15 +86,15 @@ async def aiter_arrow_ipc_batches(
         inferred_schema: Any = getattr(source, "schema", None)
         try:
             async for item in ait:
+                item_schema = getattr(item, "schema", None)
+                if inferred_schema is None and item_schema is not None:
+                    inferred_schema = item_schema
+                if isinstance(item, (pa.RecordBatch, pa.Table)) and int(item.num_rows) == 0:
+                    continue
                 with contextlib.closing(
                     _iter_sync_chunks(pa, item, max_rows=max_rows, max_bytes=max_bytes)
                 ) as sub_chunks:
-                    item_schema = getattr(item, "schema", None)
-                    if inferred_schema is None and item_schema is not None:
-                        inferred_schema = item_schema
                     for chunk in sub_chunks:
-                        if isinstance(item, (pa.RecordBatch, pa.Table)) and int(item.num_rows) == 0:
-                            continue
                         emitted_any = True
                         yield chunk
             if not emitted_any:
@@ -310,24 +309,16 @@ def _unwrap_vtbarrow_view(raw_bytes_view: memoryview) -> memoryview:
 def _extract_ipc_buffer_view(source: Any) -> tuple[Any, memoryview] | None:
     """Return an anchored buffer and byte memoryview when source exposes an IPC byte buffer."""
     buffer_view_fn = getattr(source, "buffer_view", None)
-    if isinstance(source, ArrowCursor):
-        buf_obj: Any = source.buffer_view()
-        base_view = buf_obj if isinstance(buf_obj, memoryview) else memoryview(buf_obj)
-        byte_view = base_view if base_view.ndim == 1 and base_view.format == "B" else base_view.cast("B")
-        payload_view = _unwrap_vtbarrow_view(byte_view)
-        return (source, buf_obj, base_view, byte_view), payload_view
     if callable(buffer_view_fn):
-        buf_obj = buffer_view_fn()
-        base_view = buf_obj if isinstance(buf_obj, memoryview) else memoryview(buf_obj)
-        byte_view = base_view if base_view.ndim == 1 and base_view.format == "B" else base_view.cast("B")
-        payload_view = _unwrap_vtbarrow_view(byte_view)
-        return (source, buf_obj, base_view, byte_view), payload_view
-    if isinstance(source, (bytes, bytearray, memoryview)):
-        base_view = source if isinstance(source, memoryview) else memoryview(source)
-        byte_view = base_view if base_view.ndim == 1 and base_view.format == "B" else base_view.cast("B")
-        payload_view = _unwrap_vtbarrow_view(byte_view)
-        return (source, base_view, byte_view), payload_view
-    return None
+        buf_obj: Any = buffer_view_fn()
+    elif isinstance(source, (bytes, bytearray, memoryview)):
+        buf_obj = source
+    else:
+        return None
+    base_view = buf_obj if isinstance(buf_obj, memoryview) else memoryview(buf_obj)
+    byte_view = base_view if base_view.ndim == 1 and base_view.format == "B" else base_view.cast("B")
+    payload_view = _unwrap_vtbarrow_view(byte_view)
+    return (source, buf_obj, base_view, byte_view), payload_view
 
 
 def _open_ipc_stream_reader(pa: Any, payload_view: memoryview) -> Any:
