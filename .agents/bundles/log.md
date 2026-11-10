@@ -1,5 +1,16 @@
 # Bundle Activity Log
 
+## [2026-11-10T03:00:00Z] flow-archive | native-oracle-driver
+
+Finished and archived 7 chapters and 22 tasks on `feat/native-oracle-driver` stacked on `feat/native-mssql-driver`. Base alignment checkpoint: `c21a2169`.
+
+Durable synthesis is committed in `database-drivers-and-dialers.md`, `query-pipeline-cdc-and-tenancy.md`, `sqlspec-alchemy-and-dialects.md`, `embeddings-and-vectors.md`, `domains/index.md`, `product.md`, `tech-stack.md`, `README.md`, `AGENTS.md`, the database, extensions, analytics, embeddings, and reference docs, and `specs/native-data-platform/spec.md` before contracting `.agents/bundles/specs/native-oracle-driver/`.
+
+Recorded implementation notes on `feat/native-oracle-driver`:
+- `SyncOracleDriver` and `AsyncOracleDriver` raise `MissingDependencyError` with `package` and `install_package` set to `vertebra-core[oracle]` only when the wheel is absent; `make oracle-wheel-check` verifies the contract in an isolated venv.
+- `OracleCore.build_session_context_sql` defaults to the `USERENV` namespace (`DBMS_SESSION.SET_IDENTIFIER`); custom namespaces use `DBMS_SESSION.SET_CONTEXT`, and `context_package_proc` routes through a trusted package.
+- PGO extension discovery stays outside this flow; the hardcoded `EXTENSION_MANIFESTS` list is unchanged.
+
 ## [2026-11-10T02:35:00Z] flow-archive | native-mssql-driver
 
 Completed 6 tasks (`t01`–`t06`) on `feat/native-mssql-driver` stacked on `feat/native-mysql-driver`.
@@ -7,7 +18,7 @@ Completed 6 tasks (`t01`–`t06`) on `feat/native-mssql-driver` stacked on `feat
 Durable synthesis is committed in `database-drivers-and-dialers.md`, `domains/index.md`, `product.md`, `docs/usage/databases.md`, `docs/usage/extensions.md`, `docs/index.md`, `docs/reference/db.md`, `docs/reference/index.md`, `review-core/references/areas.toml`, and `specs/native-data-platform/spec.md` before contracting `.agents/bundles/specs/native-mssql-driver/`.
 
 Recorded implementation notes on `feat/native-mssql-driver`:
-- `SyncMSSQLDriver` and `AsyncMSSQLDriver` raise `MissingDependencyError` only when the `vertebra._mssql` wheel is absent; the Oracle driver remains the only fail-loud engine guard in the conformance suite.
+- `SyncMSSQLDriver` and `AsyncMSSQLDriver` raise `MissingDependencyError` only when the `vertebra._mssql` wheel is absent.
 - `AsyncMSSQLDriver` owns its own `AsyncMSSQLClient` and `AsyncCloudSQLDialer`; `MSSQLConfig.build_async_driver` resolves the async dialer from the registry.
 
 Functional task commits:
