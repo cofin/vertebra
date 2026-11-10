@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any, ClassVar, Self
 from urllib.parse import urlparse
 
@@ -10,8 +11,9 @@ import msgspec
 
 from vertebra._vertebra import InterfaceError
 from vertebra.db.driver._common import DUCKDB_DIALECT_TAG, BaseDatabaseConfig
-from vertebra.typing import FrozenBaseStruct
+from vertebra.typing import FrozenBaseStruct, ImproperConfigurationError
 from vertebra.utils.module_loader import import_optional
+from vertebra.utils.text import validate_identifier
 
 __all__ = (
     "DuckDBConfig",
@@ -19,52 +21,135 @@ __all__ = (
     "duckdb_bootstrap_statements",
 )
 
+_SENSITIVE_SECRET_KEYS: frozenset[str] = frozenset(
+    {
+        "access_token",
+        "account_key",
+        "api_key",
+        "bearer_token",
+        "client_secret",
+        "connection_string",
+        "key",
+        "password",
+        "private_key",
+        "refresh_token",
+        "secret",
+        "session_token",
+        "token",
+    }
+)
 
-class DuckDBSecretConfig(FrozenBaseStruct, frozen=True, gc=False):
-    """Cloud storage secret configuration (`CREATE SECRET`) for DuckDB `httpfs` / S3 / GCS / R2."""
 
-    name: str = "default_s3"
-    """Unique DuckDB secret identifier."""
-    secret_type: str = "S3"
-    """DuckDB secret type (`"S3"`, `"GCS"`, `"R2"`, or `"AZURE"`)."""
-    key_id: str = ""
-    """Cloud storage access key ID (`KEY_ID`)."""
-    secret: str = ""
-    """Cloud storage secret access key (`SECRET`)."""
-    region: str = "us-east-1"
-    """Cloud storage region (`REGION`)."""
-    endpoint: str | None = None
-    """Optional custom S3-compatible endpoint (`ENDPOINT`, e.g. RustFS or MinIO)."""
+class DuckDBSecretConfig(FrozenBaseStruct, frozen=True, gc=True):
+    """Cloud-agnostic DuckDB `CREATE SECRET` declaration aligned with `sqlspec`."""
+
+    name: str
+    """Secret name matched case-insensitively by DuckDB."""
+    secret_type: str = "s3"
+    """DuckDB secret type (`"s3"`, `"gcs"`, `"r2"`, `"azure"`, `"http"`, `"bearer"`, `"iceberg"`, etc.)."""
+    value: dict[str, Any] = msgspec.field(default_factory=dict)
+    """Static secret key/value settings (such as `key_id`, `secret`, `region`, `endpoint`, or `bearer_token`)."""
+    value_provider: Callable[[], Mapping[str, Any] | Awaitable[Mapping[str, Any]]] | None = None
+    """Optional sync or async callable returning dynamic secret key/value settings on bootstrap and refresh."""
+    refresh_interval_seconds: float | None = None
+    """Optional interval in seconds after which `value_provider` is re-evaluated (`1800.0` default when `value_provider` is set)."""
+    provider: str | None = None
+    """Optional DuckDB secret provider (such as `"config"` or `"credential_chain"`)."""
+    scope: str | tuple[str, ...] | None = None
+    """Optional URI prefix or tuple of URI prefixes restricting where the secret applies."""
+    persistent: bool = False
+    """When True, create a `PERSISTENT SECRET` stored in DuckDB's configured secret directory."""
+    replace: bool = True
+    """When True, emit `CREATE OR REPLACE` so rotated credentials overwrite existing secrets."""
+    required: bool = True
+    """When True, fail loudly when secret creation or `value_provider` resolution fails."""
 
     def __repr__(self) -> str:
-        """Render a debug representation with secret material redacted."""
-        redacted_secret = "<redacted>" if self.secret else ""
+        """Render a debug representation with sensitive secret values redacted."""
+        redacted_value = {
+            k: ("<redacted>" if _is_sensitive_secret_key(k) and v not in ("", None) else v)
+            for k, v in self.value.items()
+        }
+        has_provider = self.value_provider is not None
         return (
             f"DuckDBSecretConfig(name={self.name!r}, secret_type={self.secret_type!r}, "
-            f"key_id={self.key_id!r}, secret={redacted_secret!r}, "
-            f"region={self.region!r}, endpoint={self.endpoint!r})"
+            f"value={redacted_value!r}, has_value_provider={has_provider!r}, "
+            f"refresh_interval_seconds={self.refresh_interval_seconds!r}, provider={self.provider!r}, "
+            f"scope={self.scope!r}, persistent={self.persistent!r}, replace={self.replace!r}, "
+            f"required={self.required!r})"
         )
 
-    def to_create_secret_sql(self) -> str:
-        """Render a `CREATE OR REPLACE SECRET` SQL statement for DuckDB."""
-        _reject_nul(self.name, "secret.name")
-        _reject_nul(self.secret_type, "secret.secret_type")
-        _reject_nul(self.key_id, "secret.key_id")
-        _reject_nul(self.secret, "secret.secret")
-        _reject_nul(self.region, "secret.region")
-        if self.endpoint is not None:
-            _reject_nul(self.endpoint, "secret.endpoint")
-        parts = [f"TYPE {self.secret_type}"]
-        if self.key_id:
-            parts.append(f"KEY_ID '{self.key_id}'")
-        if self.secret:
-            parts.append(f"SECRET '{self.secret}'")
-        if self.region:
-            parts.append(f"REGION '{self.region}'")
-        if self.endpoint:
-            parts.append(f"ENDPOINT '{self.endpoint}'")
+    @classmethod
+    def from_mapping(cls, raw: DuckDBSecretConfig | Mapping[str, Any]) -> Self:
+        """Normalize a `DuckDBSecretConfig` or `sqlspec`-compatible mapping into `DuckDBSecretConfig`."""
+        if isinstance(raw, cls):
+            return raw
+        if not isinstance(raw, Mapping):
+            msg = "DuckDB secret configuration must be a DuckDBSecretConfig or mapping"
+            raise ImproperConfigurationError(msg)
+        data = dict(raw)
+        raw_scope = data.get("scope")
+        if isinstance(raw_scope, Sequence) and not isinstance(raw_scope, (str, bytes, bytearray)):
+            data["scope"] = tuple(str(item) for item in raw_scope)
+        raw_value = data.get("value")
+        if raw_value is None:
+            data["value"] = {}
+        elif isinstance(raw_value, Mapping):
+            data["value"] = {str(k): v for k, v in raw_value.items()}
+        else:
+            msg = "DuckDB secret `value` must be a mapping"
+            raise ImproperConfigurationError(msg)
+        if "name" not in data or "secret_type" not in data:
+            msg = "DuckDB secret mapping requires both `name` and `secret_type`"
+            raise ImproperConfigurationError(msg)
+        return cls(**data)
+
+    def effective_refresh_interval(self) -> float:
+        """Return the active refresh interval in seconds when `value_provider` is configured."""
+        if self.refresh_interval_seconds is not None:
+            return max(0.0, float(self.refresh_interval_seconds))
+        return 1800.0
+
+    def to_create_secret_sql(self, dynamic_values: Mapping[str, Any] | None = None) -> str:
+        """Render a DuckDB `CREATE [OR REPLACE] [PERSISTENT] SECRET` DDL statement."""
+        secret_name = _validate_duckdb_identifier(self.name, "secret.name")
+        secret_type = _validate_duckdb_identifier(self.secret_type, "secret.secret_type")
+        parts = [f"TYPE {secret_type}"]
+        if self.provider is not None:
+            provider_ident = _validate_duckdb_identifier(self.provider, "secret.provider")
+            parts.append(f"PROVIDER {provider_ident}")
+
+        merged_values: dict[str, Any] = dict(self.value)
+        if dynamic_values is not None:
+            if not isinstance(dynamic_values, Mapping):
+                msg = "DuckDB secret `value_provider` must return a mapping of secret options"
+                raise ImproperConfigurationError(msg)
+            for key, val in dynamic_values.items():
+                merged_values[str(key)] = val
+
+        for raw_key, raw_val in merged_values.items():
+            if raw_val is None:
+                continue
+            option_key = _validate_duckdb_identifier(str(raw_key), "secret.value_key").upper()
+            if isinstance(raw_val, str) and not raw_val.strip() and _is_sensitive_secret_key(raw_key):
+                msg = f"DuckDB secret {secret_name!r} option {option_key} must not be empty or whitespace"
+                raise ImproperConfigurationError(msg)
+            parts.append(f"{option_key} {_format_secret_literal(raw_val, f'secret.{raw_key}')}")
+
+        if self.scope is not None:
+            formatted_scope = _format_secret_scope(self.scope)
+            if formatted_scope is not None:
+                parts.append(f"SCOPE {formatted_scope}")
+
+        kind = "PERSISTENT SECRET" if self.persistent else "SECRET"
+        should_replace = self.replace or self.value_provider is not None
+        header = (
+            f"CREATE OR REPLACE {kind} {secret_name}"
+            if should_replace
+            else f"CREATE {kind} IF NOT EXISTS {secret_name}"
+        )
         inner = ", ".join(parts)
-        return f"CREATE OR REPLACE SECRET {self.name} ({inner})"
+        return f"{header} ({inner})"
 
 
 class DuckDBConfig(BaseDatabaseConfig, frozen=True, gc=False):
@@ -90,13 +175,13 @@ class DuckDBConfig(BaseDatabaseConfig, frozen=True, gc=False):
     parquet_metadata_cache: bool = True
     """When True, enable `SET parquet_metadata_cache = true` after connection bootstrap."""
     httpfs_connection_caching: bool = True
-    """When True, keep remote HTTP/S3 object storage connections warm (`SET http_keep_alive = true`)."""
+    """When True, keep remote HTTP/object-storage connections warm (`SET http_keep_alive = true`)."""
     enable_http_metadata_cache: bool = True
     """When True, cache remote HTTP/Parquet `HEAD` metadata (`SET enable_http_metadata_cache = true`)."""
     read_only: bool = False
     """When True, open the DuckDB file in read-only mode allowing multi-process readers."""
-    secrets: tuple[DuckDBSecretConfig, ...] = ()
-    """Optional cloud storage secrets (`CREATE OR REPLACE SECRET`) executed at connection bootstrap."""
+    secrets: tuple[DuckDBSecretConfig | Mapping[str, Any], ...] = ()
+    """Optional DuckDB secrets (`DuckDBSecretConfig` or `sqlspec`-compatible secret mappings) provisioned on sessions."""
     extensions: tuple[str, ...] = ()
     """Optional DuckDB extensions (`"<ext>"` or `"<ext> FROM <repo>"`) loaded on every pooled session."""
     init_statements: tuple[str, ...] = ()
@@ -111,8 +196,10 @@ class DuckDBConfig(BaseDatabaseConfig, frozen=True, gc=False):
     """Maximum number of prepared analytical statements cached per worker."""
     broker: Any = None
     """Optional shared-memory `DatabaseBroker` coordinating single-writer/multi-reader leases."""
-    gcs_token_cache: Any = None
-    """Optional `SyncGcpTokenCache` or `AsyncGcpTokenCache` used to rotate session-local GCS `BEARER_TOKEN` secrets on token refresh."""
+
+    def normalized_secrets(self) -> tuple[DuckDBSecretConfig, ...]:
+        """Return all configured secrets normalized as `DuckDBSecretConfig` structs."""
+        return tuple(DuckDBSecretConfig.from_mapping(item) for item in self.secrets)
 
     def resolved_path(self) -> str:
         """Resolve the effective database path from `path` or `database`."""
@@ -120,7 +207,7 @@ class DuckDBConfig(BaseDatabaseConfig, frozen=True, gc=False):
         return _reject_nul(target, "path")
 
     def bootstrap_statements(self) -> list[str]:
-        """Return post-initialization `SET` statements (`parquet_metadata_cache` is always post-init SQL)."""
+        """Return post-initialization `SET` and static `CREATE SECRET` statements."""
         resolved = self.resolved_path()
         native = import_optional("vertebra._vertebra")
         if native is not None and hasattr(native, "duckdb_bootstrap_statements"):
@@ -145,16 +232,15 @@ class DuckDBConfig(BaseDatabaseConfig, frozen=True, gc=False):
                 f"SET enable_http_metadata_cache = {http_meta_flag}",
             ]
         if self.temp_directory is not None:
-            _reject_nul(self.temp_directory, "temp_directory")
-            escaped = self.temp_directory.replace("'", "''")
-            stmts.append(f"SET temp_directory = '{escaped}'")
+            escaped_dir = _escape_sql_literal(self.temp_directory, "temp_directory")
+            stmts.append(f"SET temp_directory = '{escaped_dir}'")
         for key, val in self.config.items():
-            _reject_nul(str(key), "config.key")
-            _reject_nul(str(val), "config.value")
-            escaped_val = str(val).replace("'", "''")
-            stmts.append(f"SET {key} = '{escaped_val}'")
-        for secret in self.secrets:
-            stmts.append(secret.to_create_secret_sql())
+            clean_key = _validate_duckdb_identifier(str(key), "config.key")
+            escaped_val = _escape_sql_literal(str(val), "config.value")
+            stmts.append(f"SET {clean_key} = '{escaped_val}'")
+        for secret in self.normalized_secrets():
+            if secret.value_provider is None:
+                stmts.append(secret.to_create_secret_sql())
         for stmt in self.init_statements:
             _reject_nul(stmt, "init_statements")
             stmts.append(stmt)
@@ -194,9 +280,59 @@ def duckdb_bootstrap_statements(config: DuckDBConfig | None = None) -> list[str]
     return cfg.bootstrap_statements()
 
 
+def _is_sensitive_secret_key(key: str) -> bool:
+    """Return True when `key` represents credential material that must be redacted and non-blank."""
+    lowered = key.strip().lower()
+    return lowered in _SENSITIVE_SECRET_KEYS or lowered.endswith(("_secret", "_token", "_password", "_key"))
+
+
 def _reject_nul(value: str, field_name: str) -> str:
     """Raise `InterfaceError` when `value` contains an embedded NUL byte."""
     if "\0" in value:
         msg = f"DuckDB {field_name} must not contain NUL bytes"
         raise InterfaceError(msg)
     return value
+
+
+def _validate_duckdb_identifier(value: str, field_name: str) -> str:
+    """Validate a single SQL identifier for DuckDB DDL/SET configuration."""
+    _reject_nul(value, field_name)
+    cleaned = value.strip()
+    try:
+        return validate_identifier(cleaned, f"DuckDB {field_name}", allow_dots=False)
+    except ValueError as exc:
+        raise InterfaceError(str(exc)) from exc
+
+
+def _escape_sql_literal(value: str, field_name: str) -> str:
+    """Reject NUL, CR, and LF characters and double single quotes for SQL literals."""
+    _reject_nul(value, field_name)
+    if "\r" in value or "\n" in value:
+        msg = f"DuckDB {field_name} must not contain CR or LF characters"
+        raise InterfaceError(msg)
+    return value.replace("'", "''")
+
+
+def _format_secret_literal(value: Any, field_name: str) -> str:
+    """Format a scalar or sequence DuckDB secret option literal safely."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        items = [f"'{_escape_sql_literal(str(item), field_name)}'" for item in value]
+        return f"[{', '.join(items)}]"
+    return f"'{_escape_sql_literal(str(value), field_name)}'"
+
+
+def _format_secret_scope(scope: str | Sequence[str]) -> str | None:
+    """Format a single URI prefix or sequence of URI prefixes for `SCOPE`."""
+    if isinstance(scope, str):
+        escaped = _escape_sql_literal(scope, "secret.scope")
+        return f"'{escaped}'" if scope else None
+    items = [f"'{_escape_sql_literal(str(item), 'secret.scope')}'" for item in scope if str(item)]
+    if not items:
+        return None
+    if len(items) == 1:
+        return items[0]
+    return f"[{', '.join(items)}]"

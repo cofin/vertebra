@@ -4,8 +4,7 @@
 //! [`AsyncDuckDBClient`] (bridged through [`AsyncCompletionQueue`] + [`Notifier`]
 //! via `vertebra_db::py_async::spawn_rust_db_task_with_attr` with
 //! `"_vertebra_duckdb_completion_drainer"`), zero-copy `VTBARROW` shared-memory
-//! Arrow IPC cursors, native `duckdb::Appender` bulk ingestion, and Google Cloud
-//! Storage bearer-token secret rotation.
+//! Arrow IPC cursors, and native `duckdb::Appender` bulk ingestion.
 
 pub mod errors;
 
@@ -26,15 +25,12 @@ use pyo3::prelude::*;
 use pyo3::types::{
     PyBool, PyByteArray, PyBytes, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple,
 };
-use vertebra_core::gcp_auth::{
-    GCP_TOKEN_CACHE_CAPSULE_NAME, GcpTokenCacheCapsule, SharedGcpTokenCacheHandle,
-};
 use vertebra_core::notify::SyncCompletionQueue;
 use vertebra_core::shm::ShmRegion;
 use vertebra_db::arrow_shm::{ShmArrowFrameHeader, ShmArrowStreamWriter};
 use vertebra_db::duckdb::DuckdbConfig;
 use vertebra_db::py_async::{
-    RustDbTaskAwaitable, block_on_db, construct_py_arrow_cursor, spawn_rust_db_task_with_attr,
+    RustDbTaskAwaitable, construct_py_arrow_cursor, spawn_rust_db_task_with_attr,
 };
 
 use crate::errors::DuckDBClientError;
@@ -80,6 +76,24 @@ pub struct QueryResultSet {
     pub rows: Vec<Vec<DuckValue>>,
 }
 
+/// Unregistered or inline Arrow IPC payload ready to wrap into `ArrowCursor`.
+#[derive(Clone, Debug)]
+pub enum ArrowResultPayload {
+    /// Zero-copy `VTBARROW` shared-memory frame.
+    Shm {
+        shm_name: String,
+        byte_len: usize,
+        row_count: usize,
+        region: Arc<ShmRegion>,
+    },
+    /// In-memory Arrow IPC stream bytes (used below `threshold_rows`).
+    Inline {
+        ipc_bytes: Vec<u8>,
+        row_count: usize,
+        columns: Vec<String>,
+    },
+}
+
 /// Unregistered shared-memory Arrow IPC payload ready to wrap into `ArrowCursor`.
 #[derive(Clone, Debug)]
 pub struct ShmArrowPayload {
@@ -110,6 +124,7 @@ struct WorkerSlot {
     sender: mpsc::Sender<WorkerTask>,
     interrupt_handle: Arc<InterruptHandle>,
     busy: AtomicBool,
+    active_cancel: Mutex<Option<Arc<AtomicBool>>>,
     join_handle: Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -132,7 +147,34 @@ impl WorkerSlot {
             sender: tx,
             interrupt_handle,
             busy: AtomicBool::new(false),
+            active_cancel: Mutex::new(None),
             join_handle: Mutex::new(Some(join_handle)),
+        }
+    }
+
+    fn interrupt_if_matching(&self, cancel_flag: &Arc<AtomicBool>) -> bool {
+        let matches = self
+            .active_cancel
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .is_some_and(|active| Arc::ptr_eq(active, cancel_flag));
+        if matches {
+            self.interrupt_handle.interrupt();
+        }
+        matches
+    }
+
+    fn clear_active_cancel(&self, cancel_flag: &Arc<AtomicBool>) {
+        let mut active = self
+            .active_cancel
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if active
+            .as_ref()
+            .is_some_and(|cur| Arc::ptr_eq(cur, cancel_flag))
+        {
+            *active = None;
         }
     }
 
@@ -150,6 +192,10 @@ impl WorkerSlot {
         let completion_writer = Arc::clone(&completion);
         let flag_clone = Arc::clone(cancel_flag);
         self.busy.store(true, Ordering::Release);
+        *self
+            .active_cancel
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(cancel_flag));
         let send_res = self.sender.send(WorkerTask::Run(Box::new(move |conn| {
             let outcome = if flag_clone.load(Ordering::Acquire) {
                 Err(DuckDBClientError::QueryTimeout(
@@ -161,12 +207,14 @@ impl WorkerSlot {
             completion_writer.push(outcome);
         })));
         if send_res.is_err() {
+            self.clear_active_cancel(cancel_flag);
             self.busy.store(false, Ordering::Release);
             return Err(DuckDBClientError::Operational(
                 "DuckDB worker thread is closed".to_string(),
             ));
         }
         let outcome = completion.pop_blocking();
+        self.clear_active_cancel(cancel_flag);
         self.busy.store(false, Ordering::Release);
         if outcome.is_err() && cancel_flag.load(Ordering::Acquire) {
             return Err(DuckDBClientError::QueryTimeout(
@@ -225,10 +273,7 @@ pub struct DuckDBInner {
     reader_cursor: AtomicUsize,
     in_transaction: AtomicBool,
     closed: AtomicBool,
-    applied_token_generation: AtomicU64,
-    last_gcs_secret_sql: Mutex<String>,
     active_cancels: Mutex<Vec<Arc<AtomicBool>>>,
-    secret_lock: Mutex<()>,
     tx_journal: Mutex<TxJournal>,
 }
 
@@ -244,11 +289,6 @@ impl std::fmt::Debug for DuckDBInner {
                 &self.in_transaction.load(Ordering::Acquire),
             )
             .field("closed", &self.closed.load(Ordering::Acquire))
-            .field(
-                "applied_token_generation",
-                &self.applied_token_generation.load(Ordering::Acquire),
-            )
-            .field("last_gcs_secret_sql", &"<redacted>")
             .finish()
     }
 }
@@ -408,10 +448,7 @@ impl DuckDBInner {
             reader_cursor: AtomicUsize::new(0),
             in_transaction: AtomicBool::new(false),
             closed: AtomicBool::new(false),
-            applied_token_generation: AtomicU64::new(0),
-            last_gcs_secret_sql: Mutex::new(String::new()),
             active_cancels: Mutex::new(Vec::new()),
-            secret_lock: Mutex::new(()),
             tx_journal: Mutex::new(TxJournal::default()),
         }))
     }
@@ -453,6 +490,13 @@ impl DuckDBInner {
         guard.retain(|f| Arc::strong_count(f) > 1);
         guard.push(Arc::clone(&flag));
         flag
+    }
+
+    pub fn interrupt_matching(&self, cancel_flag: &Arc<AtomicBool>) {
+        cancel_flag.store(true, Ordering::Release);
+        for worker in &self.workers {
+            worker.interrupt_if_matching(cancel_flag);
+        }
     }
 
     pub fn interrupt_all(&self) {
@@ -552,17 +596,15 @@ impl DuckDBInner {
             self.rollback_tx(cancel_flag)?;
             return Ok(0);
         }
-        if let Some(rest) = trimmed
-            .strip_prefix("SAVEPOINT ")
-            .or_else(|| trimmed.strip_prefix("savepoint "))
-        {
-            self.savepoint_tx(rest.trim())?;
+        if trimmed_upper.starts_with("SAVEPOINT ") {
+            let sp_name = trimmed["SAVEPOINT ".len()..].trim();
+            self.savepoint_tx(sp_name)?;
             return Ok(0);
         }
         if trimmed_upper.starts_with("ROLLBACK TO ") {
-            let after_to = &trimmed["ROLLBACK TO ".len()..].trim();
+            let after_to = trimmed["ROLLBACK TO ".len()..].trim();
             let sp_name = if after_to.to_ascii_uppercase().starts_with("SAVEPOINT ") {
-                &after_to["SAVEPOINT ".len()..].trim()
+                after_to["SAVEPOINT ".len()..].trim()
             } else {
                 after_to
             };
@@ -570,9 +612,9 @@ impl DuckDBInner {
             return Ok(0);
         }
         if trimmed_upper.starts_with("RELEASE ") {
-            let after_rel = &trimmed["RELEASE ".len()..].trim();
+            let after_rel = trimmed["RELEASE ".len()..].trim();
             let sp_name = if after_rel.to_ascii_uppercase().starts_with("SAVEPOINT ") {
-                &after_rel["SAVEPOINT ".len()..].trim()
+                after_rel["SAVEPOINT ".len()..].trim()
             } else {
                 after_rel
             };
@@ -581,12 +623,13 @@ impl DuckDBInner {
         }
 
         let is_read = is_read_only_sql(&sql);
+        let is_mut = is_mutating_sql(&sql);
         let log_sql = sql.clone();
         let log_params = params.clone();
         let changed = self.run_on_pool(is_read, cancel_flag, move |conn| {
             execute_statement_on_conn(conn, &sql, &params)
         })?;
-        if !is_read {
+        if is_mut || !is_read {
             self.record_tx_op(TxLogOp::Execute {
                 sql: log_sql,
                 params: log_params,
@@ -671,6 +714,49 @@ impl DuckDBInner {
         Ok(res)
     }
 
+    pub fn query_arrow_payload(
+        &self,
+        sql: String,
+        params: BoundParams,
+        batch_size: usize,
+        threshold_rows: usize,
+        cancel_flag: &Arc<AtomicBool>,
+    ) -> Result<ArrowResultPayload, DuckDBClientError> {
+        self.ensure_open()?;
+        if sql.contains('\0') {
+            return Err(DuckDBClientError::InvalidInput(
+                "SQL statement must not contain NUL bytes".to_string(),
+            ));
+        }
+        let is_mut = is_mutating_sql(&sql);
+        if self.read_only && is_mut {
+            return Err(DuckDBClientError::Programming(
+                "Cannot execute mutating SQL statement in read-only mode".to_string(),
+            ));
+        }
+        let is_read = is_read_only_sql(&sql);
+        let log_sql = sql.clone();
+        let log_params = params.clone();
+        let flag_for_worker = Arc::clone(cancel_flag);
+        let payload = self.run_on_pool(is_read, cancel_flag, move |conn| {
+            query_arrow_payload_on_conn(
+                conn,
+                &sql,
+                &params,
+                batch_size,
+                threshold_rows,
+                &flag_for_worker,
+            )
+        })?;
+        if is_mut {
+            self.record_tx_op(TxLogOp::Execute {
+                sql: log_sql,
+                params: log_params,
+            });
+        }
+        Ok(payload)
+    }
+
     pub fn query_arrow_shm(
         &self,
         sql: String,
@@ -678,22 +764,22 @@ impl DuckDBInner {
         batch_size: usize,
         cancel_flag: &Arc<AtomicBool>,
     ) -> Result<ShmArrowPayload, DuckDBClientError> {
-        self.ensure_open()?;
-        if sql.contains('\0') {
-            return Err(DuckDBClientError::InvalidInput(
-                "SQL statement must not contain NUL bytes".to_string(),
-            ));
+        match self.query_arrow_payload(sql, params, batch_size, 0, cancel_flag)? {
+            ArrowResultPayload::Shm {
+                shm_name,
+                byte_len,
+                row_count,
+                region,
+            } => Ok(ShmArrowPayload {
+                shm_name,
+                byte_len,
+                row_count,
+                region,
+            }),
+            ArrowResultPayload::Inline { .. } => Err(DuckDBClientError::ShmArrow(
+                "Expected shared-memory VTBARROW payload".to_string(),
+            )),
         }
-        if self.read_only && is_mutating_sql(&sql) {
-            return Err(DuckDBClientError::Programming(
-                "Cannot execute mutating SQL statement in read-only mode".to_string(),
-            ));
-        }
-        let is_read = is_read_only_sql(&sql);
-        let flag_for_worker = Arc::clone(cancel_flag);
-        self.run_on_pool(is_read, cancel_flag, move |conn| {
-            query_arrow_shm_on_conn(conn, &sql, &params, batch_size, &flag_for_worker)
-        })
     }
 
     pub fn stream_arrow_shm_batches(
@@ -709,16 +795,26 @@ impl DuckDBInner {
                 "SQL statement must not contain NUL bytes".to_string(),
             ));
         }
-        if self.read_only && is_mutating_sql(&sql) {
+        let is_mut = is_mutating_sql(&sql);
+        if self.read_only && is_mut {
             return Err(DuckDBClientError::Programming(
                 "Cannot execute mutating SQL statement in read-only mode".to_string(),
             ));
         }
         let is_read = is_read_only_sql(&sql);
+        let log_sql = sql.clone();
+        let log_params = params.clone();
         let flag_for_worker = Arc::clone(cancel_flag);
-        self.run_on_pool(is_read, cancel_flag, move |conn| {
+        let payloads = self.run_on_pool(is_read, cancel_flag, move |conn| {
             stream_arrow_shm_batches_on_conn(conn, &sql, &params, batch_size, &flag_for_worker)
-        })
+        })?;
+        if is_mut {
+            self.record_tx_op(TxLogOp::Execute {
+                sql: log_sql,
+                params: log_params,
+            });
+        }
+        Ok(payloads)
     }
 
     pub fn load_arrow_bulk(
@@ -785,8 +881,17 @@ impl DuckDBInner {
             conn.execute_batch("COMMIT")
                 .map_err(DuckDBClientError::from_duckdb)
         });
-        self.clear_tx_journal();
-        self.in_transaction.store(false, Ordering::Release);
+        let should_clear = match &res {
+            Ok(()) => true,
+            Err(err) => err
+                .to_string()
+                .to_ascii_lowercase()
+                .contains("no transaction is active"),
+        };
+        if should_clear {
+            self.clear_tx_journal();
+            self.in_transaction.store(false, Ordering::Release);
+        }
         res
     }
 
@@ -796,8 +901,17 @@ impl DuckDBInner {
             conn.execute_batch("ROLLBACK")
                 .map_err(DuckDBClientError::from_duckdb)
         });
-        self.clear_tx_journal();
-        self.in_transaction.store(false, Ordering::Release);
+        let should_clear = match &res {
+            Ok(()) => true,
+            Err(err) => err
+                .to_string()
+                .to_ascii_lowercase()
+                .contains("no transaction is active"),
+        };
+        if should_clear {
+            self.clear_tx_journal();
+            self.in_transaction.store(false, Ordering::Release);
+        }
         res
     }
 
@@ -911,58 +1025,6 @@ impl DuckDBInner {
             Ok(())
         })
     }
-
-    pub fn apply_gcs_secret_generation(
-        &self,
-        secret_name: &str,
-        bearer_token: &str,
-        generation: u64,
-        scope: Option<&str>,
-        cancel_flag: &Arc<AtomicBool>,
-    ) -> Result<(bool, u64), DuckDBClientError> {
-        self.ensure_open()?;
-        let _guard = self
-            .secret_lock
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let current = self.applied_token_generation.load(Ordering::Acquire);
-        if generation != 0 && current == generation {
-            return Ok((false, current));
-        }
-        let sql = build_gcs_secret_ddl(secret_name, bearer_token, scope)?;
-        let next_gen = if generation == 0 {
-            current.wrapping_add(1)
-        } else {
-            generation
-        };
-        let ddl = sql.clone();
-        self.workers[0].execute(cancel_flag, move |conn| {
-            if let Err(err) = conn.execute_batch(&ddl) {
-                let msg = err.to_string().to_ascii_lowercase();
-                if !(msg.contains("secret type")
-                    || msg.contains("httpfs")
-                    || msg.contains("extension"))
-                {
-                    return Err(DuckDBClientError::from_duckdb(err));
-                }
-            }
-            Ok(())
-        })?;
-        *self
-            .last_gcs_secret_sql
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = sql;
-        self.applied_token_generation
-            .store(next_gen, Ordering::Release);
-        Ok((true, next_gen))
-    }
-
-    pub fn last_gcs_secret_sql(&self) -> String {
-        self.last_gcs_secret_sql
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
-    }
 }
 
 impl Drop for DuckDBInner {
@@ -1023,7 +1085,7 @@ fn apply_session_bootstrap(
     Ok(())
 }
 
-/// Validate a SQL identifier (`secret_name`, extension name, or table component) against injection.
+/// Validate a SQL identifier (extension name, savepoint, or table component) against injection.
 pub fn validate_sql_identifier(ident: &str, label: &str) -> Result<(), DuckDBClientError> {
     if ident.contains('\0') {
         return Err(DuckDBClientError::InvalidInput(format!(
@@ -1052,51 +1114,11 @@ pub fn validate_sql_identifier(ident: &str, label: &str) -> Result<(), DuckDBCli
     Ok(())
 }
 
-/// Build a DuckDB `CREATE OR REPLACE SECRET` DDL statement for a GCS OAuth2 bearer token.
-pub fn build_gcs_secret_ddl(
-    secret_name: &str,
-    bearer_token: &str,
-    scope: Option<&str>,
-) -> Result<String, DuckDBClientError> {
-    validate_sql_identifier(secret_name, "secret_name")?;
-    if bearer_token.contains('\0') {
-        return Err(DuckDBClientError::InvalidInput(
-            "GCS bearer_token must not contain NUL bytes".to_string(),
-        ));
-    }
-    let trimmed_token = bearer_token.trim();
-    if trimmed_token.is_empty() {
-        return Err(DuckDBClientError::InvalidInput(
-            "GCS bearer_token must not be empty".to_string(),
-        ));
-    }
-    let escaped_token = trimmed_token.replace('\'', "''");
-    if let Some(raw_scope) = scope {
-        if raw_scope.contains('\0') {
-            return Err(DuckDBClientError::InvalidInput(
-                "GCS secret scope must not contain NUL bytes".to_string(),
-            ));
-        }
-        let clean_scope = raw_scope.trim();
-        if !clean_scope.is_empty() {
-            let escaped_scope = clean_scope.replace('\'', "''");
-            return Ok(format!(
-                "CREATE OR REPLACE SECRET {} (TYPE GCS, BEARER_TOKEN '{}', SCOPE '{}')",
-                secret_name.trim(),
-                escaped_token,
-                escaped_scope
-            ));
-        }
-    }
-    Ok(format!(
-        "CREATE OR REPLACE SECRET {} (TYPE GCS, BEARER_TOKEN '{}')",
-        secret_name.trim(),
-        escaped_token
-    ))
-}
-
 #[must_use]
 fn is_read_only_sql(sql: &str) -> bool {
+    if is_mutating_sql(sql) {
+        return false;
+    }
     let first_word = leading_sql_keyword(sql);
     matches!(
         first_word.as_str(),
@@ -1106,9 +1128,23 @@ fn is_read_only_sql(sql: &str) -> bool {
 
 #[must_use]
 fn is_mutating_sql(sql: &str) -> bool {
-    let first_word = leading_sql_keyword(sql);
+    let tokens = scan_sql_keywords_outside_literals(sql);
+    let Some(first) = tokens.first().map(String::as_str) else {
+        return false;
+    };
+    if is_mutating_verb(first) {
+        return true;
+    }
+    if first == "WITH" {
+        return tokens.iter().skip(1).any(|tok| is_mutating_verb(tok));
+    }
+    false
+}
+
+#[must_use]
+fn is_mutating_verb(word: &str) -> bool {
     matches!(
-        first_word.as_str(),
+        word,
         "INSERT"
             | "UPDATE"
             | "DELETE"
@@ -1125,20 +1161,30 @@ fn is_mutating_sql(sql: &str) -> bool {
 }
 
 fn leading_sql_keyword(sql: &str) -> String {
+    scan_sql_keywords_outside_literals(sql)
+        .into_iter()
+        .next()
+        .unwrap_or_default()
+}
+
+fn scan_sql_keywords_outside_literals(sql: &str) -> Vec<String> {
     let bytes = sql.as_bytes();
+    let mut tokens = Vec::new();
     let mut i = 0;
     while i < bytes.len() {
-        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+        let b = bytes[i];
+        if b.is_ascii_whitespace() {
             i += 1;
+            continue;
         }
-        if i + 1 < bytes.len() && bytes[i] == b'-' && bytes[i + 1] == b'-' {
+        if b == b'-' && i + 1 < bytes.len() && bytes[i + 1] == b'-' {
             i += 2;
             while i < bytes.len() && bytes[i] != b'\n' {
                 i += 1;
             }
             continue;
         }
-        if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+        if b == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'*' {
             i += 2;
             while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
                 i += 1;
@@ -1146,13 +1192,50 @@ fn leading_sql_keyword(sql: &str) -> String {
             i = (i + 2).min(bytes.len());
             continue;
         }
-        break;
-    }
-    let start = i;
-    while i < bytes.len() && bytes[i].is_ascii_alphabetic() {
+        if b == b'\'' {
+            i += 1;
+            while i < bytes.len() {
+                if bytes[i] == b'\'' {
+                    i += 1;
+                    if i < bytes.len() && bytes[i] == b'\'' {
+                        i += 1;
+                    } else {
+                        break;
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+            continue;
+        }
+        if b == b'"' {
+            i += 1;
+            while i < bytes.len() {
+                if bytes[i] == b'"' {
+                    i += 1;
+                    if i < bytes.len() && bytes[i] == b'"' {
+                        i += 1;
+                    } else {
+                        break;
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+            continue;
+        }
+        if b.is_ascii_alphabetic() || b == b'_' {
+            let start = i;
+            i += 1;
+            while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                i += 1;
+            }
+            tokens.push(sql[start..i].to_ascii_uppercase());
+            continue;
+        }
         i += 1;
     }
-    sql[start..i].to_ascii_uppercase()
+    tokens
 }
 
 /// Rewrite `:name` bind placeholders into `$name` outside string literals, quoted identifiers,
@@ -1403,10 +1486,10 @@ fn query_rows_on_conn(
     })
 }
 
-fn serialize_batches_to_shm_payload(
+fn serialize_batches_to_ipc_bytes(
     schema: &Arc<Schema>,
     batches: &[RecordBatch],
-) -> Result<ShmArrowPayload, DuckDBClientError> {
+) -> Result<(Vec<u8>, usize), DuckDBClientError> {
     let total_rows: usize = batches.iter().map(RecordBatch::num_rows).sum();
     let mut ipc_buf = Vec::new();
     {
@@ -1421,8 +1504,16 @@ fn serialize_batches_to_shm_payload(
             .finish()
             .map_err(|e| DuckDBClientError::ShmArrow(e.to_string()))?;
     }
+    Ok((ipc_buf, total_rows))
+}
+
+fn serialize_batches_to_shm_payload(
+    schema: &Arc<Schema>,
+    batches: &[RecordBatch],
+) -> Result<ShmArrowPayload, DuckDBClientError> {
+    let (ipc_buf, total_rows) = serialize_batches_to_ipc_bytes(schema, batches)?;
     let seq = ARROW_SHM_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let seg_name = format!("/vtb-duckdb-{}-{seq}", std::process::id());
+    let seg_name = format!("/vtb-dd-{:x}-{seq:x}", std::process::id());
     let mut shm_writer = ShmArrowStreamWriter::create(&seg_name, ipc_buf.len() + 64, &[])
         .map_err(DuckDBClientError::ShmArrow)?;
     shm_writer
@@ -1460,13 +1551,14 @@ fn rechunk_record_batches(batches: Vec<RecordBatch>, target_batch_size: usize) -
     out
 }
 
-fn query_arrow_shm_on_conn(
+fn query_arrow_payload_on_conn(
     conn: &mut Connection,
     sql: &str,
     params: &BoundParams,
     batch_size: usize,
+    threshold_rows: usize,
     cancel_flag: &Arc<AtomicBool>,
-) -> Result<ShmArrowPayload, DuckDBClientError> {
+) -> Result<ArrowResultPayload, DuckDBClientError> {
     let effective_sql = match params {
         BoundParams::Named(_) => normalize_named_sql(sql),
         _ => sql.to_string(),
@@ -1489,7 +1581,31 @@ fn query_arrow_shm_on_conn(
         raw_batches.push(batch);
     }
     let batches = rechunk_record_batches(raw_batches, batch_size);
-    serialize_batches_to_shm_payload(&schema, &batches)
+    let (ipc_buf, total_rows) = serialize_batches_to_ipc_bytes(&schema, &batches)?;
+    if threshold_rows > 0 && total_rows < threshold_rows && ipc_buf.len() < 65_536 {
+        let columns = schema.fields().iter().map(|f| f.name().clone()).collect();
+        return Ok(ArrowResultPayload::Inline {
+            ipc_bytes: ipc_buf,
+            row_count: total_rows,
+            columns,
+        });
+    }
+    let seq = ARROW_SHM_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let seg_name = format!("/vtb-dd-{:x}-{seq:x}", std::process::id());
+    let mut shm_writer = ShmArrowStreamWriter::create(&seg_name, ipc_buf.len() + 64, &[])
+        .map_err(DuckDBClientError::ShmArrow)?;
+    shm_writer
+        .append_raw_stream_chunk(&ipc_buf, total_rows)
+        .map_err(DuckDBClientError::ShmArrow)?;
+    let (shm_name, byte_len, region) = shm_writer
+        .finish_unregistered()
+        .map_err(DuckDBClientError::ShmArrow)?;
+    Ok(ArrowResultPayload::Shm {
+        shm_name,
+        byte_len,
+        row_count: total_rows,
+        region,
+    })
 }
 
 fn stream_arrow_shm_batches_on_conn(
@@ -1607,8 +1723,22 @@ fn quote_qualified_table(
 fn parse_arrow_ipc_batches(
     bytes: &[u8],
 ) -> Result<(Arc<Schema>, Vec<RecordBatch>), DuckDBClientError> {
-    let payload = if bytes.len() >= ShmArrowFrameHeader::SIZE && &bytes[..8] == b"VTBARROW" {
-        &bytes[ShmArrowFrameHeader::SIZE..]
+    let payload = if bytes.len() >= 8 && &bytes[..8] == b"VTBARROW" {
+        let header = ShmArrowFrameHeader::from_slice(bytes).map_err(DuckDBClientError::Data)?;
+        let byte_len = usize::try_from(header.byte_len).map_err(|_| {
+            DuckDBClientError::Data("VTBARROW frame byte_len overflows usize".to_string())
+        })?;
+        let frame_end = ShmArrowFrameHeader::SIZE
+            .checked_add(byte_len)
+            .ok_or_else(|| DuckDBClientError::Data("VTBARROW frame size overflow".to_string()))?;
+        bytes
+            .get(ShmArrowFrameHeader::SIZE..frame_end)
+            .ok_or_else(|| {
+                DuckDBClientError::Data(format!(
+                    "VTBARROW frame declares {frame_end} bytes but buffer holds {}",
+                    bytes.len()
+                ))
+            })?
     } else {
         bytes
     };
@@ -1865,7 +1995,12 @@ fn py_to_duck_value(obj: &Bound<'_, PyAny>) -> Result<DuckValue, DuckDBClientErr
         return Ok(DuckValue::Blob(b.as_bytes().to_vec()));
     }
     if let Ok(ba) = obj.cast::<PyByteArray>() {
-        return Ok(DuckValue::Blob(unsafe { ba.as_bytes() }.to_vec()));
+        let bytes = pyo3::sync::critical_section::with_critical_section(ba.as_any(), || {
+            // SAFETY: `with_critical_section` locks `PyByteArray` on free-threaded Python and we
+            // hold the GIL on standard builds while copying the buffer synchronously.
+            unsafe { ba.as_bytes() }.to_vec()
+        });
+        return Ok(DuckValue::Blob(bytes));
     }
     if let Ok(s) = obj.cast::<PyString>() {
         let text = s
@@ -1883,13 +2018,20 @@ fn py_to_duck_value(obj: &Bound<'_, PyAny>) -> Result<DuckValue, DuckDBClientErr
         || obj.is_instance_of::<PyTuple>()
     {
         let py = obj.py();
-        let json_mod = py
-            .import("json")
-            .map_err(|e| DuckDBClientError::Data(e.to_string()))?;
-        let serialized: String = json_mod
-            .call_method1("dumps", (obj,))
-            .and_then(|v| v.extract::<String>())
-            .map_err(|e: PyErr| DuckDBClientError::Data(e.to_string()))?;
+        let serialized = if let Ok(serializers_mod) = py.import("vertebra.utils.serializers") {
+            serializers_mod
+                .call_method1("encode_json", (obj,))
+                .and_then(|v| v.extract::<String>())
+                .map_err(|e: PyErr| DuckDBClientError::Data(e.to_string()))?
+        } else {
+            let json_mod = py
+                .import("json")
+                .map_err(|e| DuckDBClientError::Data(e.to_string()))?;
+            json_mod
+                .call_method1("dumps", (obj,))
+                .and_then(|v| v.extract::<String>())
+                .map_err(|e: PyErr| DuckDBClientError::Data(e.to_string()))?
+        };
         return Ok(DuckValue::Text(serialized));
     }
     if obj.hasattr("isoformat").unwrap_or(false) {
@@ -1980,7 +2122,12 @@ fn extract_bulk_load_source(
         return Ok(BulkLoadSource::ArrowIpc(b.as_bytes().to_vec()));
     }
     if let Ok(ba) = source.cast::<PyByteArray>() {
-        return Ok(BulkLoadSource::ArrowIpc(unsafe { ba.as_bytes() }.to_vec()));
+        let bytes = pyo3::sync::critical_section::with_critical_section(ba.as_any(), || {
+            // SAFETY: `with_critical_section` locks `PyByteArray` on free-threaded Python and we
+            // hold the GIL on standard builds while copying the buffer synchronously.
+            unsafe { ba.as_bytes() }.to_vec()
+        });
+        return Ok(BulkLoadSource::ArrowIpc(bytes));
     }
     if source.hasattr("read_bytes").unwrap_or(false) {
         let raw: Vec<u8> = source
@@ -2240,7 +2387,9 @@ fn result_set_to_single_dict(
         if optional {
             return Ok(py.None());
         }
-        return Err(DuckDBClientError::Data("Query returned no rows".to_string()).into_py_err(py));
+        return Err(
+            DuckDBClientError::NotFound("Query returned no rows".to_string()).into_py_err(py),
+        );
     }
     if result.rows.len() > 1 {
         return Err(DuckDBClientError::Data(format!(
@@ -2255,6 +2404,37 @@ fn result_set_to_single_dict(
         dict.set_item(col, duck_value_to_py(py, val)?)?;
     }
     Ok(dict.into_any().unbind())
+}
+
+fn arrow_result_payload_to_py_cursor(
+    py: Python<'_>,
+    payload: ArrowResultPayload,
+) -> PyResult<Py<PyAny>> {
+    match payload {
+        ArrowResultPayload::Shm {
+            shm_name,
+            byte_len,
+            row_count,
+            region,
+        } => construct_py_arrow_cursor(py, &shm_name, byte_len, row_count, region),
+        ArrowResultPayload::Inline {
+            ipc_bytes,
+            row_count: _,
+            columns,
+        } => {
+            let py_bytes = PyBytes::new(py, &ipc_bytes);
+            if let Ok(arrow_mod) = py.import("vertebra.db.arrow")
+                && let Ok(cursor_cls) = arrow_mod.getattr("ArrowCursor")
+            {
+                let kwargs = PyDict::new(py);
+                kwargs.set_item("columns", PyTuple::new(py, &columns)?)?;
+                kwargs.set_item("used_shm", false)?;
+                let cursor = cursor_cls.call((py_bytes,), Some(&kwargs))?;
+                return Ok(cursor.unbind());
+            }
+            Ok(py_bytes.into_any().unbind())
+        }
+    }
 }
 
 struct CancelOnDropGuard {
@@ -2280,89 +2460,8 @@ impl CancelOnDropGuard {
 impl Drop for CancelOnDropGuard {
     fn drop(&mut self) {
         if !self.completed {
-            self.cancel_flag.store(true, Ordering::Release);
-            self.inner.interrupt_all();
+            self.inner.interrupt_matching(&self.cancel_flag);
         }
-    }
-}
-
-fn extract_token_from_capsule_obj(
-    capsule_obj: &Bound<'_, PyAny>,
-) -> Result<Option<(String, u64)>, DuckDBClientError> {
-    let ptr = unsafe {
-        pyo3::ffi::PyCapsule_GetPointer(capsule_obj.as_ptr(), GCP_TOKEN_CACHE_CAPSULE_NAME.as_ptr())
-    };
-    if ptr.is_null() {
-        unsafe {
-            pyo3::ffi::PyErr_Clear();
-        }
-        return Ok(None);
-    }
-    let handle =
-        unsafe { SharedGcpTokenCacheHandle::from_capsule_ptr(ptr.cast::<GcpTokenCacheCapsule>()) }
-            .map_err(DuckDBClientError::InvalidInput)?;
-    let snap = block_on_db(async move { handle.get_or_refresh().await })
-        .map_err(DuckDBClientError::Operational)?;
-    Ok(Some((
-        extract_bearer_token(&snap.access_token),
-        snap.generation,
-    )))
-}
-
-fn extract_token_and_gen_from_py(
-    obj: &Bound<'_, PyAny>,
-) -> Result<(String, u64), DuckDBClientError> {
-    if let Ok((tok, gen_id)) = obj.extract::<(String, u64)>() {
-        return Ok((extract_bearer_token(&tok), gen_id));
-    }
-    if let Ok(tok) = obj
-        .getattr("access_token")
-        .and_then(|v| v.extract::<String>())
-    {
-        let gen_id = obj
-            .getattr("generation")
-            .and_then(|v| v.extract::<u64>())
-            .unwrap_or(1);
-        return Ok((extract_bearer_token(&tok), gen_id));
-    }
-    if let Some(pair) = extract_token_from_capsule_obj(obj)? {
-        return Ok(pair);
-    }
-    if obj.hasattr("_capsule").unwrap_or(false)
-        && let Ok(cap) = obj.call_method0("_capsule")
-        && let Some(pair) = extract_token_from_capsule_obj(&cap)?
-    {
-        return Ok(pair);
-    }
-    if obj.hasattr("to_sync").unwrap_or(false)
-        && let Ok(sync_cache) = obj.call_method0("to_sync")
-        && sync_cache.hasattr("get_token").unwrap_or(false)
-    {
-        let snap = sync_cache
-            .call_method0("get_token")
-            .map_err(|e| DuckDBClientError::Operational(e.to_string()))?;
-        return extract_token_and_gen_from_py(&snap);
-    }
-    if obj.hasattr("get_token").unwrap_or(false) {
-        let snap = obj
-            .call_method0("get_token")
-            .map_err(|e| DuckDBClientError::Operational(e.to_string()))?;
-        return extract_token_and_gen_from_py(&snap);
-    }
-    Err(DuckDBClientError::InvalidInput(
-        "Unsupported token_cache object; expected SyncGcpTokenCache, AsyncGcpTokenCache, GcpTokenCacheCapsule, or GcpTokenSnapshot"
-            .to_string(),
-    ))
-}
-
-fn extract_bearer_token(header_or_token: &str) -> String {
-    let trimmed = header_or_token.trim();
-    if let Some(rest) = trimmed.strip_prefix("Bearer ") {
-        rest.trim().to_string()
-    } else if let Some(rest) = trimmed.strip_prefix("bearer ") {
-        rest.trim().to_string()
-    } else {
-        trimmed.to_string()
     }
 }
 
@@ -2456,16 +2555,6 @@ impl SyncDuckDBClient {
     #[getter]
     pub fn closed(&self) -> bool {
         self.inner.closed.load(Ordering::Acquire)
-    }
-
-    #[getter]
-    pub fn applied_token_generation(&self) -> u64 {
-        self.inner.applied_token_generation.load(Ordering::Acquire)
-    }
-
-    #[getter]
-    pub fn last_gcs_secret_sql(&self) -> String {
-        self.inner.last_gcs_secret_sql()
     }
 
     #[getter]
@@ -2603,7 +2692,7 @@ impl SyncDuckDBClient {
             .map_err(|e| e.into_py_err(py))?;
         if res.rows.is_empty() || res.rows[0].is_empty() {
             return Err(
-                DuckDBClientError::Data("Query returned no scalar value".to_string())
+                DuckDBClientError::NotFound("Query returned no scalar value".to_string())
                     .into_py_err(py),
             );
         }
@@ -2611,28 +2700,31 @@ impl SyncDuckDBClient {
         duck_value_to_py(py, val)
     }
 
-    #[pyo3(signature = (sql, parameters=None, *, batch_size=65536))]
+    #[pyo3(signature = (sql, parameters=None, *, batch_size=65536, threshold_rows=0))]
     pub fn select_to_arrow(
         &self,
         py: Python<'_>,
         sql: &str,
         parameters: Option<&Bound<'_, PyAny>>,
         batch_size: usize,
+        threshold_rows: usize,
     ) -> PyResult<Py<PyAny>> {
         let bound = extract_bound_params(parameters).map_err(|e| e.into_py_err(py))?;
         let inner = Arc::clone(&self.inner);
         let sql_owned = sql.to_string();
         let cancel_flag = inner.register_cancel_flag();
         let payload = py
-            .detach(move || inner.query_arrow_shm(sql_owned, bound, batch_size, &cancel_flag))
+            .detach(move || {
+                inner.query_arrow_payload(
+                    sql_owned,
+                    bound,
+                    batch_size,
+                    threshold_rows,
+                    &cancel_flag,
+                )
+            })
             .map_err(|e| e.into_py_err(py))?;
-        construct_py_arrow_cursor(
-            py,
-            &payload.shm_name,
-            payload.byte_len,
-            payload.row_count,
-            payload.region,
-        )
+        arrow_result_payload_to_py_cursor(py, payload)
     }
 
     #[pyo3(signature = (sql, parameters=None, *, batch_size=65536))]
@@ -2685,41 +2777,6 @@ impl SyncDuckDBClient {
                 load_source,
                 columns,
                 create_if_missing,
-                &cancel_flag,
-            )
-        })
-        .map_err(|e| e.into_py_err(py))
-    }
-
-    #[pyo3(signature = (*, secret_name="vtb_gcs_secret", token=None, generation=None, token_cache=None, scope=None))]
-    pub fn apply_gcs_secret(
-        &self,
-        py: Python<'_>,
-        secret_name: &str,
-        token: Option<String>,
-        generation: Option<u64>,
-        token_cache: Option<&Bound<'_, PyAny>>,
-        scope: Option<String>,
-    ) -> PyResult<(bool, u64)> {
-        let (resolved_token, resolved_gen) = if let Some(tok) = token {
-            (extract_bearer_token(&tok), generation.unwrap_or(0))
-        } else if let Some(cache_obj) = token_cache {
-            extract_token_and_gen_from_py(cache_obj).map_err(|e| e.into_py_err(py))?
-        } else {
-            return Err(DuckDBClientError::InvalidInput(
-                "apply_gcs_secret requires either token or token_cache".to_string(),
-            )
-            .into_py_err(py));
-        };
-        let inner = Arc::clone(&self.inner);
-        let secret_owned = secret_name.to_string();
-        let cancel_flag = inner.register_cancel_flag();
-        py.detach(move || {
-            inner.apply_gcs_secret_generation(
-                &secret_owned,
-                &resolved_token,
-                resolved_gen,
-                scope.as_deref(),
                 &cancel_flag,
             )
         })
@@ -2905,16 +2962,6 @@ impl AsyncDuckDBClient {
     #[getter]
     pub fn closed(&self) -> bool {
         self.inner.closed.load(Ordering::Acquire)
-    }
-
-    #[getter]
-    pub fn applied_token_generation(&self) -> u64 {
-        self.inner.applied_token_generation.load(Ordering::Acquire)
-    }
-
-    #[getter]
-    pub fn last_gcs_secret_sql(&self) -> String {
-        self.inner.last_gcs_secret_sql()
     }
 
     #[getter]
@@ -3149,7 +3196,7 @@ impl AsyncDuckDBClient {
             },
             |py, mut result_set| {
                 if result_set.rows.is_empty() || result_set.rows[0].is_empty() {
-                    return Err(DuckDBClientError::Data(
+                    return Err(DuckDBClientError::NotFound(
                         "Query returned no scalar value".to_string(),
                     )
                     .into_py_err(py));
@@ -3162,13 +3209,14 @@ impl AsyncDuckDBClient {
         )
     }
 
-    #[pyo3(signature = (sql, parameters=None, *, batch_size=65536))]
+    #[pyo3(signature = (sql, parameters=None, *, batch_size=65536, threshold_rows=0))]
     pub fn select_to_arrow(
         &self,
         py: Python<'_>,
         sql: &str,
         parameters: Option<&Bound<'_, PyAny>>,
         batch_size: usize,
+        threshold_rows: usize,
     ) -> PyResult<RustDbTaskAwaitable> {
         let bound = extract_bound_params(parameters).map_err(|e| e.into_py_err(py))?;
         let inner = Arc::clone(&self.inner);
@@ -3179,22 +3227,20 @@ impl AsyncDuckDBClient {
             py,
             async move {
                 let res = tokio::task::spawn_blocking(move || {
-                    inner.query_arrow_shm(sql_owned, bound, batch_size, &cancel_flag)
+                    inner.query_arrow_payload(
+                        sql_owned,
+                        bound,
+                        batch_size,
+                        threshold_rows,
+                        &cancel_flag,
+                    )
                 })
                 .await
                 .map_err(|e| DuckDBClientError::Operational(e.to_string()))?;
                 drop_guard.mark_completed();
                 res
             },
-            |py, payload| {
-                construct_py_arrow_cursor(
-                    py,
-                    &payload.shm_name,
-                    payload.byte_len,
-                    payload.row_count,
-                    payload.region,
-                )
-            },
+            arrow_result_payload_to_py_cursor,
             |py, err| err.into_py_err(py),
             DUCKDB_COMPLETION_DRAINER_ATTR,
         )
@@ -3275,53 +3321,6 @@ impl AsyncDuckDBClient {
                 res
             },
             |py, rows| Ok(rows.into_pyobject(py)?.into_any().unbind()),
-            |py, err| err.into_py_err(py),
-            DUCKDB_COMPLETION_DRAINER_ATTR,
-        )
-    }
-
-    #[pyo3(signature = (*, secret_name="vtb_gcs_secret", token=None, generation=None, token_cache=None, scope=None))]
-    pub fn apply_gcs_secret(
-        &self,
-        py: Python<'_>,
-        secret_name: &str,
-        token: Option<String>,
-        generation: Option<u64>,
-        token_cache: Option<&Bound<'_, PyAny>>,
-        scope: Option<String>,
-    ) -> PyResult<RustDbTaskAwaitable> {
-        let (resolved_tok, resolved_gen) = if let Some(tok) = token {
-            (extract_bearer_token(&tok), generation.unwrap_or(0))
-        } else if let Some(cache_obj) = token_cache {
-            extract_token_and_gen_from_py(cache_obj).map_err(|e| e.into_py_err(py))?
-        } else {
-            return Err(DuckDBClientError::InvalidInput(
-                "apply_gcs_secret requires either token or token_cache".to_string(),
-            )
-            .into_py_err(py));
-        };
-        let inner = Arc::clone(&self.inner);
-        let secret_owned = secret_name.to_string();
-        let cancel_flag = inner.register_cancel_flag();
-        let mut drop_guard = CancelOnDropGuard::new(Arc::clone(&inner), Arc::clone(&cancel_flag));
-        spawn_rust_db_task_with_attr(
-            py,
-            async move {
-                let res = tokio::task::spawn_blocking(move || {
-                    inner.apply_gcs_secret_generation(
-                        &secret_owned,
-                        &resolved_tok,
-                        resolved_gen,
-                        scope.as_deref(),
-                        &cancel_flag,
-                    )
-                })
-                .await
-                .map_err(|e| DuckDBClientError::Operational(e.to_string()))?;
-                drop_guard.mark_completed();
-                res
-            },
-            |py, pair| Ok(pair.into_pyobject(py)?.into_any().unbind()),
             |py, err| err.into_py_err(py),
             DUCKDB_COMPLETION_DRAINER_ATTR,
         )
@@ -3683,23 +3682,23 @@ mod tests {
         assert_eq!(payload.row_count, 3);
         assert!(payload.byte_len > 0);
 
-        let slice = unsafe {
-            std::slice::from_raw_parts(
-                payload.region.as_ptr(),
-                ShmArrowFrameHeader::SIZE + payload.byte_len,
-            )
-        };
-        assert_eq!(&slice[..8], b"VTBARROW");
+        assert!(payload.shm_name.len() <= 31);
+        let full_region_len = payload.region.len();
+        assert!(full_region_len >= ShmArrowFrameHeader::SIZE + payload.byte_len);
+        // SAFETY: `payload.region` maps `full_region_len` readable bytes immobilized by `Arc`.
+        let full_slice =
+            unsafe { std::slice::from_raw_parts(payload.region.as_ptr(), full_region_len) };
+        assert_eq!(&full_slice[..8], b"VTBARROW");
 
         let loaded = pool
             .load_arrow_bulk(
                 "metrics_copy".to_string(),
-                BulkLoadSource::ArrowIpc(slice.to_vec()),
+                BulkLoadSource::ArrowIpc(full_slice.to_vec()),
                 None,
                 true,
                 &flag,
             )
-            .expect("load_arrow_bulk should succeed");
+            .expect("load_arrow_bulk should succeed on page-padded VTBARROW slice");
         assert_eq!(loaded, 3);
 
         let verify = pool
@@ -3713,34 +3712,100 @@ mod tests {
     }
 
     #[test]
-    fn test_gcs_secret_ddl_and_generation_dedup() {
-        let pool = make_pool(1);
+    fn test_mutating_cte_journal_and_arrow_ipc_file_padding() {
+        let pool = make_pool(2);
         let flag = pool.register_cancel_flag();
-        let (applied_first, gen_first) = pool
-            .apply_gcs_secret_generation("vtb_gcs_secret", "token_gen_1", 1, None, &flag)
-            .expect("first secret rotation should succeed");
-        assert!(applied_first);
-        assert_eq!(gen_first, 1);
-        assert_eq!(pool.applied_token_generation.load(Ordering::Acquire), 1);
-        assert!(pool.last_gcs_secret_sql().contains("token_gen_1"));
+        pool.execute_sql(
+            "CREATE TABLE cte_tbl (id INTEGER PRIMARY KEY, label VARCHAR)".to_string(),
+            BoundParams::Empty,
+            &flag,
+        )
+        .unwrap();
 
-        let (applied_same, gen_same) = pool
-            .apply_gcs_secret_generation("vtb_gcs_secret", "token_gen_1", 1, None, &flag)
-            .expect("duplicate generation should be a no-op");
-        assert!(!applied_same);
-        assert_eq!(gen_same, 1);
-
-        let (applied_next, gen_next) = pool
-            .apply_gcs_secret_generation(
-                "vtb_gcs_secret",
-                "token_gen_2",
-                2,
-                Some("gs://analytics-bucket/"),
+        pool.begin_tx(&flag).unwrap();
+        pool.savepoint_tx("sp_before_cte").unwrap();
+        let cte_res = pool
+            .query_sql(
+                "/* lead comment */ WITH src AS (SELECT 10 AS id, 'cte_row' AS label) INSERT INTO cte_tbl SELECT * FROM src RETURNING id".to_string(),
+                BoundParams::Empty,
                 &flag,
             )
-            .expect("next generation should rotate secret");
-        assert!(applied_next);
-        assert_eq!(gen_next, 2);
-        assert!(pool.last_gcs_secret_sql().contains("token_gen_2"));
+            .unwrap();
+        assert_eq!(cte_res.rows.len(), 1);
+        pool.savepoint_tx("sp_after_cte").unwrap();
+        pool.execute_sql(
+            "INSERT INTO cte_tbl VALUES (20, 'discarded')".to_string(),
+            BoundParams::Empty,
+            &flag,
+        )
+        .unwrap();
+        pool.rollback_to_savepoint_tx("sp_after_cte", &flag)
+            .unwrap();
+        pool.commit_tx(&flag).unwrap();
+
+        let kept = pool
+            .query_sql(
+                "SELECT id, label FROM cte_tbl ORDER BY id".to_string(),
+                BoundParams::Empty,
+                &flag,
+            )
+            .unwrap();
+        assert_eq!(kept.rows.len(), 1);
+        assert_eq!(kept.rows[0][0], DuckValue::Int(10));
+
+        let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Int32, false)]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![Arc::new(arrow_array::Int32Array::from(vec![7, 8]))],
+        )
+        .unwrap();
+        let mut file_bytes = Vec::new();
+        {
+            let mut fw = arrow_ipc::writer::FileWriter::try_new(&mut file_bytes, &schema).unwrap();
+            fw.write(&batch).unwrap();
+            fw.finish().unwrap();
+        }
+        let header = ShmArrowFrameHeader {
+            magic: *b"VTBARROW",
+            byte_len: file_bytes.len() as u64,
+        };
+        let mut padded_frame = Vec::with_capacity(4096);
+        padded_frame.extend_from_slice(&header.to_bytes());
+        padded_frame.extend_from_slice(&file_bytes);
+        padded_frame.resize(4096, 0);
+        let (parsed_schema, parsed_batches) = parse_arrow_ipc_batches(&padded_frame)
+            .expect("page-padded VTBARROW wrapping Arrow IPC File should parse");
+        assert_eq!(parsed_schema.fields().len(), 1);
+        assert_eq!(parsed_batches[0].num_rows(), 2);
+    }
+
+    #[test]
+    fn test_shared_secret_catalog_across_pooled_workers() {
+        let pool = make_pool(3);
+        let flag = pool.register_cancel_flag();
+        pool.execute_sql(
+            "CREATE OR REPLACE SECRET test_http_secret (TYPE http, BEARER_TOKEN 'tok_v1')"
+                .to_string(),
+            BoundParams::Empty,
+            &flag,
+        )
+        .expect("CREATE OR REPLACE SECRET TYPE http should succeed");
+
+        for _ in 0..4 {
+            let res = pool
+                .query_sql(
+                    "SELECT name, type FROM duckdb_secrets() WHERE name = 'test_http_secret'"
+                        .to_string(),
+                    BoundParams::Empty,
+                    &flag,
+                )
+                .expect("reader worker should see shared SecretManager catalog");
+            assert_eq!(res.rows.len(), 1);
+            assert_eq!(
+                res.rows[0][0],
+                DuckValue::Text("test_http_secret".to_string())
+            );
+            assert_eq!(res.rows[0][1], DuckValue::Text("http".to_string()));
+        }
     }
 }

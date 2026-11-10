@@ -111,7 +111,7 @@ sources:
   title: Loopback RESP3 server fixture for Redis and Valkey unit tests
 - id: src-tests-unit-db-enterprise-olap-py
   resource: src/py/tests/unit/db/test_enterprise_olap_drivers.py
-  title: DuckDB driver tests guarded by pytest.importorskip
+  title: DuckDB driver tests guarded by vertebra._duckdb availability
 ---
 
 # Polyglot Test Matrix & Environment Setup
@@ -158,7 +158,7 @@ CI runs on pushes to `main` and on every pull request. A `changes` job (`dorny/p
 | Job | Runs When | Command | Matrix |
 |---|---|---|---|
 | `lint` | always | `make ts-install` + `make lint-all` | `ubuntu-latest` |
-| `test-python` | `python`, `rust`, or `ci` changed | `make py-test`; on 3.12 also `make coverage` and uploads `coverage.xml` | Python `3.12`, `3.13`, `3.14`, `3.14t`, `3.15`, `3.15t` (`3.15`/`3.15t` pre-release matrix entries; `3.14t` and `3.15t` install no `duckdb`, so DuckDB tests skip there) |
+| `test-python` | `python`, `rust`, or `ci` changed | `make py-test`; on 3.12 also `make coverage` and uploads `coverage.xml` | Python `3.12`, `3.13`, `3.14`, `3.14t`, `3.15`, `3.15t` (`3.15`/`3.15t` pre-release matrix entries; `make dev` compiles `vertebra._duckdb` across standard and free-threaded `3.14t`/`3.15t` builds) |
 | `test-rust` | `rust` or `ci` changed | `make rs-test` | `ubuntu-latest` |
 | `test-rust-features` | `rust` or `ci` changed | `cargo test --workspace --features "$CARGO_FEATURES"` | `ubuntu-latest` `tls,compression`; `macos-latest` `tls,compression,macos-ulock` |
 | `test-typescript` | `typescript` or `ci` changed | `make ts-install` + `make ts-build` + `make ts-test` | `ubuntu-latest` |
@@ -171,7 +171,7 @@ CI runs on pushes to `main` and on every pull request. A `changes` job (`dorny/p
 - **1:1 Module-Mirrored Layout**: Every directory under `src/py/tests/unit/` mirrors `src/py/vertebra/` (`unit/server/`, `unit/supervisor/`, `unit/framework/`, `unit/extensions/`, `unit/db/`, `unit/storage/`, `unit/telemetry/`, `unit/codegen/`, `unit/build/`, `unit/cli/`, `unit/ffi/`, `unit/native/`, `unit/utils/`, `unit/agent/`) and contains an `__init__.py` so `ruff` (`INP001`) and `pytest` resolve package namespaces cleanly.
 - **Top-Level Imports (`PLC0415`) & Server Suite Coverage**: All test files place imports at module top level (`PLC0415` enforced) across `src/py/tests/unit/server/` ([`test_stage1_hotpath_and_314t.py`](../../../../src/py/tests/unit/server/test_stage1_hotpath_and_314t.py)[^src-tests-unit-server-stage1-hotpath-py], `test_runtime_tuning.py`, `test_runner.py`, `test_asgi.py`, `test_wsgi.py`, `test_rsgi_protocol.py`, and `test_litestar_direct_fastpath.py`).
 - **Strong vs. Weak Assertions**: Assert exact observable outputs (status codes, wire bytes, SQL strings + bind tuples, round-trip decoded frames, state transitions, and negative error paths with `pytest.raises(SpecificException, match=...)`) rather than `assert x is not None` or `hasattr` checks.
-- **DuckDB Test Guard**: `test_duckdb_driver.py` and parameterized `test_driver_conformance.py` guard on `vertebra._duckdb` (`gil_used = false`, running across standard and free-threaded `3.14t`/`3.15t` interpreters once `make dev` installs `_duckdb`), while older cases in `test_enterprise_olap_drivers.py`, `test_gcs_token_refresh.py`, and `test_duckdb_url_and_arrow` still call `pytest.importorskip("duckdb")` pending alignment; config-only DuckDB tests carry no guard.[^src-tests-unit-db-enterprise-olap-py]
+- **DuckDB Test Guard**: `test_duckdb_driver.py`, `test_enterprise_olap_drivers.py`, `test_native_db_drivers.py`, `test_gcs_token_refresh.py`, and parameterized `test_driver_conformance.py` guard on `vertebra._duckdb` (`gil_used = false`, running across standard and free-threaded `3.14t`/`3.15t` interpreters once `make dev` installs `_duckdb`); config-only DuckDB tests carry no guard.[^src-tests-unit-db-enterprise-olap-py]
 
 **Rust**: Single-binary integration harnesses (`tests/it/main.rs`) in `vertebra-core` (`tests/it/{shm,spsc,mpmc,streaming,tiered_ring}.rs`) and `vertebra-http` (`tests/it/{server,routing,batcher,dispatcher,backpressure,tls,h2c_mtls,http3,grpc,sse,pubsub,websocket,fastpaths,discovery,streaming}.rs`), plus `vertebra-storage/tests/storage_engine_tests.rs` and `vertebra-db/tests/gcp_credentials_tests.rs` (`--features gcp`). `vertebra-py`, `vertebra-bundler`, `vertebra-db`, `vertebra-bigquery`, `vertebra-spanner`, and `vertebra-duckdb` run crate unit tests (`#[cfg(test)]`) and integration suites under `cargo test --workspace --features tls,compression,gcp`.
 
@@ -240,4 +240,4 @@ Provenance sources: [^src-pyproject-toml], [^src-cargo-toml], [^src-package-json
 [^src-storage-shm-tests]: `src/rs/vertebra-db/src/arrow_shm.rs` — Named Arrow allocation rejection tests.
 [^src-storage-cursor-view-tests]: `src/py/tests/unit/db/test_enterprise_olap_drivers.py` — Retained native cursor views after release.
 [^src-tests-unit-conftest-py]: `src/py/tests/unit/conftest.py::resp3_server` — Loopback RESP3 server fixture for Redis and Valkey unit tests.
-[^src-tests-unit-db-enterprise-olap-py]: `src/py/tests/unit/db/test_enterprise_olap_drivers.py` — DuckDB driver tests guarded by pytest.importorskip.
+[^src-tests-unit-db-enterprise-olap-py]: `src/py/tests/unit/db/test_enterprise_olap_drivers.py` — DuckDB driver tests guarded by vertebra._duckdb availability.

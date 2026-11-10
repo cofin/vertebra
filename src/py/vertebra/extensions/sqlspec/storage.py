@@ -1,4 +1,4 @@
-"""SQLSpec ObjectStoreProtocol backend, Arrow Flight codec, and DuckDB GCS ADC helpers."""
+"""SQLSpec ObjectStoreProtocol backend and Arrow Flight codec."""
 
 from __future__ import annotations
 
@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast, overload
 from urllib.parse import urlparse
 
-from vertebra.db.adapters.duckdb.core import DuckDBCore
 from vertebra.storage import (
     AsyncGcpTokenCache,
     AsyncObjectStore,
@@ -53,7 +52,6 @@ if TYPE_CHECKING:
 __all__ = (
     "ArrowFlightSerializer",
     "ObjectStoreBackend",
-    "build_duckdb_gcs_secret_sql",
     "register_storage_alias",
 )
 
@@ -750,20 +748,3 @@ def register_storage_alias(
         backend_config,
     )
     target_registry.clear_cache(alias)
-
-
-def build_duckdb_gcs_secret_sql(
-    secret_name: str = "vertebra_gcs",
-    config: GCSConfig | None = None,
-    *,
-    bearer_token: str | None = None,
-) -> str:
-    """Build a DuckDB `httpfs` GCS bearer-token `CREATE OR REPLACE SECRET` statement.
-
-    Delegates to `DuckDBCore.build_gcs_secret_sql`.
-    """
-    return DuckDBCore.build_gcs_secret_sql(
-        secret_name,
-        config,
-        bearer_token=bearer_token,
-    )

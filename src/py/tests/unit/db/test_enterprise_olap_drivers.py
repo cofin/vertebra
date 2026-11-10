@@ -153,8 +153,8 @@ async def test_duckdb_execute_many_reports_affected_rows() -> None:
     try:
         sync_driver.execute("CREATE TABLE affected_rows (value INTEGER)")
         sync_driver.execute_many("INSERT INTO affected_rows VALUES (?)", [(1,), (2,), (3,)])
-        async_driver.sync_driver.execute("CREATE TABLE affected_rows (value INTEGER)")
-        async_driver.sync_driver.execute_many("INSERT INTO affected_rows VALUES (?)", [(1,), (2,), (3,)])
+        await async_driver.execute("CREATE TABLE affected_rows (value INTEGER)")
+        await async_driver.execute_many("INSERT INTO affected_rows VALUES (?)", [(1,), (2,), (3,)])
         assert (
             sync_driver.execute_many("UPDATE affected_rows SET value = value + 1 WHERE value >= ?", [(0,), (0,)]) == 6
         )
@@ -668,11 +668,13 @@ def test_driver_schema_hydration_load_from_arrow_and_topologies() -> None:
 
     secret = DuckDBSecretConfig(
         name="s3_prod",
-        secret_type="S3",
-        key_id="key1",
-        secret="sec1",
-        region="us-west-2",
-        endpoint="127.0.0.1:9000",
+        secret_type="s3",
+        value={
+            "key_id": "key1",
+            "secret": "sec1",
+            "region": "us-west-2",
+            "endpoint": "127.0.0.1:9000",
+        },
     )
     duck_cfg = DuckDBConfig(secrets=(secret,))
     stmts = duck_cfg.bootstrap_statements()

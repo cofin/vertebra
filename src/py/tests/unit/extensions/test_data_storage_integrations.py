@@ -26,7 +26,8 @@ from sqlspec.storage.registry import StorageRegistry as SQLSpecStorageRegistry
 
 import vertebra.extensions.alchemy.storage as alchemy_storage_mod
 import vertebra.extensions.sqlspec.storage as sqlspec_storage_mod
-from vertebra.db.adapters.duckdb.core import DuckDBCore
+from vertebra._vertebra import InterfaceError
+from vertebra.db.adapters.duckdb import DuckDBSecretConfig
 from vertebra.db.arrow import ArrowCursor
 from vertebra.db.cdc import CDCConfig
 from vertebra.extensions.alchemy.storage import ObjectStoreBackend as AlchemyObjectStoreBackend
@@ -34,7 +35,6 @@ from vertebra.extensions.alchemy.storage import register_storage_backend
 from vertebra.extensions.sqlspec.events import ChangeFeedAsyncEventBackend, ChangeFeedSyncEventBackend
 from vertebra.extensions.sqlspec.storage import (
     ArrowFlightSerializer,
-    build_duckdb_gcs_secret_sql,
     register_storage_alias,
 )
 from vertebra.extensions.sqlspec.storage import ObjectStoreBackend as SQLSpecObjectStoreBackend
@@ -1018,40 +1018,62 @@ async def test_sqlspec_object_store_backend_async_pipeline_and_arrow_streaming(t
     assert not await backend.exists_async("notes/plain_moved.txt")
 
 
-def test_duckdb_gcs_secret_sql_builder() -> None:
-    """build_duckdb_gcs_secret_sql delegates to DuckDBCore.build_gcs_secret_sql with a quoted token literal."""
+def test_duckdb_secret_config_sql_builder() -> None:
+    """DuckDBSecretConfig renders cloud-agnostic CREATE OR REPLACE SECRET statements with escaped literals."""
     cfg = GCSConfig(bucket="lakehouse", access_token="mock-adc-bearer-token")
-    sql = build_duckdb_gcs_secret_sql("gcs_lake", cfg)
+    token = cfg.resolve_adc_token()
+    assert token == "mock-adc-bearer-token"
+
+    sql = DuckDBSecretConfig(
+        name="gcs_lake",
+        secret_type="gcs",
+        value={"bearer_token": token},
+    ).to_create_secret_sql()
     assert sql == "CREATE OR REPLACE SECRET gcs_lake (TYPE gcs, BEARER_TOKEN 'mock-adc-bearer-token')"
-    assert DuckDBCore.build_gcs_secret_sql("gcs_lake", cfg) == sql
-    scoped_sql = DuckDBCore.build_gcs_secret_sql("gcs_lake", cfg, scope="gs://lakehouse/curated")
+
+    scoped_sql = DuckDBSecretConfig(
+        name="gcs_lake",
+        secret_type="gcs",
+        value={"bearer_token": token},
+        scope="gs://lakehouse/curated",
+    ).to_create_secret_sql()
     assert (
         scoped_sql
         == "CREATE OR REPLACE SECRET gcs_lake (TYPE gcs, BEARER_TOKEN 'mock-adc-bearer-token', SCOPE 'gs://lakehouse/curated')"
     )
-    multi_scoped_sql = DuckDBCore.build_gcs_secret_sql(
-        "gcs_lake",
-        cfg,
+
+    multi_scoped_sql = DuckDBSecretConfig(
+        name="gcs_lake",
+        secret_type="gcs",
+        value={"bearer_token": token},
         scope=("gs://lakehouse/raw", "gcs://lakehouse/raw"),
-    )
+    ).to_create_secret_sql()
     assert (
         multi_scoped_sql
         == "CREATE OR REPLACE SECRET gcs_lake (TYPE gcs, BEARER_TOKEN 'mock-adc-bearer-token', SCOPE ['gs://lakehouse/raw', 'gcs://lakehouse/raw'])"
     )
 
-    with pytest.raises(ValueError, match="Invalid SQL identifier"):
-        build_duckdb_gcs_secret_sql("bad-name;DROP TABLE x", cfg)
+    with pytest.raises(InterfaceError, match="Invalid SQL identifier"):
+        DuckDBSecretConfig(
+            name="bad-name;DROP TABLE x",
+            secret_type="gcs",
+            value={"bearer_token": token},
+        ).to_create_secret_sql()
 
 
 @pytest.mark.parametrize(
-    "token_kwargs",
-    [{}, {"bearer_token": ""}, {"bearer_token": "   "}, {"config": GCSConfig(bucket="lakehouse"), "bearer_token": " "}],
-    ids=["no-token", "empty-token", "blank-token", "blank-token-with-config"],
+    "token_val",
+    ["", "   "],
+    ids=["empty-token", "blank-token"],
 )
-def test_duckdb_gcs_secret_sql_requires_bearer_token(token_kwargs: dict[str, Any]) -> None:
-    """Missing or blank bearer tokens fail loudly instead of emitting a broken DuckDB secret."""
-    with pytest.raises(ImproperConfigurationError, match="bearer token"):
-        build_duckdb_gcs_secret_sql("my_secret", **token_kwargs)
+def test_duckdb_secret_config_rejects_blank_sensitive_values(token_val: str) -> None:
+    """Blank credential strings fail loudly instead of emitting a broken DuckDB secret."""
+    with pytest.raises(ImproperConfigurationError, match="must not be empty"):
+        DuckDBSecretConfig(
+            name="my_secret",
+            secret_type="gcs",
+            value={"bearer_token": token_val},
+        ).to_create_secret_sql()
 
 
 @pytest.mark.parametrize(
@@ -1059,37 +1081,41 @@ def test_duckdb_gcs_secret_sql_requires_bearer_token(token_kwargs: dict[str, Any
     [("tok'en", "'tok''en'"), ("''", "''''''"), ("mock-oauth-token.a-b_c/d+e=", "'mock-oauth-token.a-b_c/d+e='")],
     ids=["embedded-quote", "only-quotes", "oauth-charset"],
 )
-def test_duckdb_gcs_secret_sql_escapes_token_quotes(token: str, expected_literal: str) -> None:
-    """Single quotes inside a bearer token are doubled so the literal cannot terminate early."""
-    sql = build_duckdb_gcs_secret_sql("gcs_lake", bearer_token=token)
+def test_duckdb_secret_config_escapes_quotes(token: str, expected_literal: str) -> None:
+    """Single quotes inside secret values are doubled so the literal cannot terminate early."""
+    sql = DuckDBSecretConfig(
+        name="gcs_lake",
+        secret_type="gcs",
+        value={"bearer_token": token},
+    ).to_create_secret_sql()
     assert sql == f"CREATE OR REPLACE SECRET gcs_lake (TYPE gcs, BEARER_TOKEN {expected_literal})"
 
 
 @pytest.mark.parametrize("token", ["tok\x00en", "tok\ren", "tok\nen"], ids=["nul", "cr", "lf"])
-def test_duckdb_gcs_secret_sql_rejects_control_characters(token: str) -> None:
-    """Tokens carrying NUL, CR, or LF characters are rejected before any SQL is rendered."""
-    with pytest.raises(ValueError, match="NUL, CR, or LF"):
-        build_duckdb_gcs_secret_sql("gcs_lake", bearer_token=token)
+def test_duckdb_secret_config_rejects_control_characters(token: str) -> None:
+    """Secret values carrying NUL, CR, or LF characters are rejected before any SQL is rendered."""
+    with pytest.raises(InterfaceError):
+        DuckDBSecretConfig(
+            name="gcs_lake",
+            secret_type="gcs",
+            value={"bearer_token": token},
+        ).to_create_secret_sql()
 
 
 @pytest.mark.skipif(native_duckdb is None, reason="vertebra._duckdb is not installed")
-def test_duckdb_gcs_secret_sql_executes_against_duckdb() -> None:
-    """The rendered statement is accepted by vertebra._duckdb and stores the exact token, including embedded quotes."""
+def test_duckdb_secret_config_executes_against_duckdb() -> None:
+    """Rendered cloud-agnostic secrets execute cleanly against vertebra._duckdb."""
     assert native_duckdb is not None
     client = native_duckdb.SyncDuckDBClient()
     try:
-        assert client.apply_gcs_secret(secret_name="gcs_lake", token="tok'en", generation=1) == (True, 1)
-        assert client.apply_gcs_secret(secret_name="gcs_lake", token="tok'en", generation=1) == (False, 1)
-        assert client.applied_token_generation == 1
-        assert client.last_gcs_secret_sql == "CREATE OR REPLACE SECRET gcs_lake (TYPE GCS, BEARER_TOKEN 'tok''en')"
-        installed_row = client.fetch_optional(
-            "SELECT installed FROM duckdb_extensions() WHERE extension_name = 'httpfs'"
-        )
-        if installed_row is not None and installed_row.get("installed"):
-            client.execute("LOAD httpfs")
-            client.execute(build_duckdb_gcs_secret_sql("gcs_lake", bearer_token="tok'en"))
-            secret = client.fetch_optional("SELECT name, type FROM duckdb_secrets() WHERE name = 'gcs_lake'")
-            assert secret == {"name": "gcs_lake", "type": "gcs"}
+        ddl = DuckDBSecretConfig(
+            name="http_lake",
+            secret_type="http",
+            value={"bearer_token": "tok'en"},
+        ).to_create_secret_sql()
+        client.execute(ddl)
+        secret = client.fetch_optional("SELECT name, type FROM duckdb_secrets() WHERE name = 'http_lake'")
+        assert secret == {"name": "http_lake", "type": "http"}
     finally:
         client.close()
 

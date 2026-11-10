@@ -29,7 +29,7 @@ class SyncDuckDBPipeline:
         self._transaction = bool(transaction)
         self._opened_transaction = False
         self._savepoint: str | None = None
-        self._ops: list[tuple[str, str, Sequence[Any] | Mapping[str, Any] | None]] = []
+        self._ops: list[tuple[str, str, Sequence[Any] | Mapping[str, Any] | None, type[Any] | None]] = []
 
     def __enter__(self) -> Self:
         """Enter the synchronous pipeline context, opening a transaction or nested savepoint."""
@@ -79,20 +79,26 @@ class SyncDuckDBPipeline:
 
     def execute(self, sql: str, parameters: Sequence[Any] | Mapping[str, Any] | None = None) -> None:
         """Queue a DML or DDL statement for ordered execution."""
-        self._ops.append(("execute", sql, parameters))
+        self._ops.append(("execute", sql, parameters, None))
 
-    def select(self, sql: str, parameters: Sequence[Any] | Mapping[str, Any] | None = None) -> None:
+    def select(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+        *,
+        schema_type: type[Any] | None = None,
+    ) -> None:
         """Queue a `SELECT` query for ordered execution."""
-        self._ops.append(("select", sql, parameters))
+        self._ops.append(("select", sql, parameters, schema_type))
 
     def results(self) -> list[Any]:
         """Execute all queued operations in FIFO order and return their results."""
         queued = list(self._ops)
         self._ops.clear()
         out: list[Any] = []
-        for kind, sql, params in queued:
+        for kind, sql, params, schema_type in queued:
             if kind == "select":
-                out.append(self._driver.select(sql, params))
+                out.append(self._driver.select(sql, params, schema_type=schema_type))
             else:
                 out.append(self._driver.execute(sql, params))
         return out
@@ -108,7 +114,7 @@ class AsyncDuckDBPipeline:
         self._transaction = bool(transaction)
         self._opened_transaction = False
         self._savepoint: str | None = None
-        self._ops: list[tuple[str, str, Sequence[Any] | Mapping[str, Any] | None]] = []
+        self._ops: list[tuple[str, str, Sequence[Any] | Mapping[str, Any] | None, type[Any] | None]] = []
 
     async def __aenter__(self) -> Self:
         """Enter the asynchronous pipeline context, opening a transaction or nested savepoint."""
@@ -160,20 +166,26 @@ class AsyncDuckDBPipeline:
 
     def execute(self, sql: str, parameters: Sequence[Any] | Mapping[str, Any] | None = None) -> None:
         """Queue a DML or DDL statement for ordered execution."""
-        self._ops.append(("execute", sql, parameters))
+        self._ops.append(("execute", sql, parameters, None))
 
-    def select(self, sql: str, parameters: Sequence[Any] | Mapping[str, Any] | None = None) -> None:
+    def select(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+        *,
+        schema_type: type[Any] | None = None,
+    ) -> None:
         """Queue a `SELECT` query for ordered execution."""
-        self._ops.append(("select", sql, parameters))
+        self._ops.append(("select", sql, parameters, schema_type))
 
     async def results(self) -> list[Any]:
         """Execute all queued operations asynchronously in FIFO order and return their results."""
         queued = list(self._ops)
         self._ops.clear()
         out: list[Any] = []
-        for kind, sql, params in queued:
+        for kind, sql, params, schema_type in queued:
             if kind == "select":
-                out.append(await self._driver.select(sql, params))
+                out.append(await self._driver.select(sql, params, schema_type=schema_type))
             else:
                 out.append(await self._driver.execute(sql, params))
         return out

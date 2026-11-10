@@ -7,7 +7,7 @@ Completed 6 tasks (`t01`–`t06`) and documentation sync (`a1af802c`) on `feat/n
 Durable synthesis and `/flow:sync` updates are committed in `database-drivers-and-dialers.md`, `query-pipeline-cdc-and-tenancy.md`, `workflow.md`, `polyglot-test-matrix.md`, `benchmarks-and-free-threaded.md`, `product.md`, `tech-stack.md`, `specs/native-data-platform/spec.md`, `AGENTS.md`, `pyo3-bridge`, `review-pyo3-bridge`, and `pyo3-bridge-{reviewer,specialist}.md` before contracting `.agents/bundles/specs/native-duckdb-driver/`.
 
 Recorded implementation notes on `feat/native-duckdb-driver`:
-- DuckDB `CREATE SECRET` DDL rejects `?` prepared parameters, so `DuckDBCore.build_gcs_secret_sql` renders bearer tokens and scopes as single-quoted SQL literals (`'` doubled, NUL/CR/LF rejected) for `CREATE OR REPLACE SECRET vertebra_gcs_adc`.
+- DuckDB `CREATE SECRET` DDL rejects `?` prepared parameters, so cloud-agnostic `DuckDBSecretConfig` (`value` + sync/async `value_provider`) renders secret options and scopes as single-quoted SQL literals (`'` doubled, NUL/CR/LF rejected) for `CREATE [OR REPLACE] [PERSISTENT] SECRET`.
 
 Functional task commits:
 - `native-duckdb-driver:t01`: `f5df6f98`.

@@ -1,4 +1,4 @@
-"""DuckDB driver over the `duckdb` package with bootstrap statements and shared-memory Arrow IPC helpers."""
+"""Native DuckDB 2.0 adapter (`vertebra._duckdb`) with bootstrap statements and shared-memory Arrow IPC helpers."""
 
 from typing import TYPE_CHECKING
 

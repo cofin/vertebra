@@ -25,7 +25,7 @@ pyo3 = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 vertebra-core = { path = "../vertebra-core" }
-vertebra-db = { path = "../vertebra-db", features = ["gcp", "pyo3"] }
+vertebra-db = { path = "../vertebra-db", features = ["pyo3"] }
 
 [build-dependencies]
 pyo3-build-config = { workspace = true }

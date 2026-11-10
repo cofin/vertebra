@@ -2,32 +2,42 @@
 
 from __future__ import annotations
 
+import sys
 import tomllib
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-import vertebra.db.adapters.duckdb.driver as duckdb_driver_mod
 from vertebra.db.adapters.duckdb import AsyncDuckDBDriver, DuckDBConfig, SyncDuckDBDriver
 from vertebra.typing import MissingDependencyError
-from vertebra.utils.module_loader import ensure_module
+from vertebra.utils.module_loader import reset_dependency_cache
 
 _REPO_ROOT = Path(__file__).resolve().parents[5]
 
 
-def test_root_pyproject_declares_vertebra_duckdb_extra_and_no_pypi_duckdb() -> None:
-    """Root `pyproject.toml` declares `vertebra-core[duckdb]` and omits PyPI `duckdb` from dependency groups."""
+def test_root_pyproject_omits_pypi_duckdb_from_core_and_non_duckdb_groups() -> None:
+    """Root `pyproject.toml` declares `vertebra-core[duckdb]` matching project version and isolates PyPI `duckdb`."""
     data = tomllib.loads((_REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    version = data["project"]["version"]
+    pinned = f"vertebra-duckdb=={version}"
     opt_deps = data["project"]["optional-dependencies"]
-    assert opt_deps["duckdb"] == ["vertebra-duckdb==0.3.0"]
-    assert "vertebra-duckdb==0.3.0" in opt_deps["all"]
+    assert opt_deps["duckdb"] == [pinned]
+    assert pinned in opt_deps["all"]
 
     uv_sources = data["tool"]["uv"]["sources"]
     assert uv_sources["vertebra-duckdb"] == {"path": "src/rs/vertebra-duckdb", "editable": True}
 
-    bench_group = data["dependency-groups"]["bench"]
-    assert not any(str(dep).startswith("duckdb") for dep in bench_group)
+    core_deps = data["project"].get("dependencies", [])
+    assert not any(str(dep).startswith("duckdb") and not str(dep).startswith("vertebra-duckdb") for dep in core_deps)
+
+    for group_name, group_deps in data.get("dependency-groups", {}).items():
+        if group_name == "duckdb":
+            continue
+        assert not any(
+            isinstance(dep, str) and dep.startswith("duckdb") and not dep.startswith("vertebra-duckdb")
+            for dep in group_deps
+        ), f"dependency-groups.{group_name} unexpectedly contains PyPI duckdb"
 
 
 def test_vertebra_duckdb_wheel_pyproject_includes_only_duckdb_stub() -> None:
@@ -75,12 +85,10 @@ def test_duckdb_drivers_raise_missing_dependency_error_when_wheel_absent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """`SyncDuckDBDriver` and `AsyncDuckDBDriver` raise `MissingDependencyError` naming `vertebra-core[duckdb]`."""
-
-    def _raise_missing(module_name: str, *, package: str | None = None, extra: str | None = None) -> Any:
-        if module_name == "vertebra._duckdb":
-            raise MissingDependencyError(package or "vertebra-core[duckdb]", extra=extra)
-        return ensure_module(module_name, package=package, extra=extra)
-
-    monkeypatch.setattr(duckdb_driver_mod, "ensure_module", _raise_missing)
-    with pytest.raises(MissingDependencyError, match=r"vertebra-core\[duckdb\]"):
-        driver_cls(DuckDBConfig())
+    monkeypatch.setitem(sys.modules, "vertebra._duckdb", None)
+    reset_dependency_cache("vertebra._duckdb")
+    try:
+        with pytest.raises(MissingDependencyError, match=r"vertebra-core\[duckdb\]"):
+            driver_cls(DuckDBConfig())
+    finally:
+        reset_dependency_cache("vertebra._duckdb")

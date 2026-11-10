@@ -107,7 +107,6 @@ from vertebra.extensions.sqlspec.spanner import (
 from vertebra.extensions.sqlspec.storage import (
     ArrowFlightSerializer,
     ObjectStoreBackend,
-    build_duckdb_gcs_secret_sql,
     register_storage_alias,
 )
 
@@ -203,7 +202,6 @@ __all__ = (
     "SyncAdapterConfig",
     "SyncDriverAdapterBase",
     "TenantPredicate",
-    "build_duckdb_gcs_secret_sql",
     "create_sqlspec_plugin",
     "register_storage_alias",
 )

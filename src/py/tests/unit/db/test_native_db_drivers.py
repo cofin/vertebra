@@ -1488,8 +1488,9 @@ def _make_contract_driver_pair(engine: str) -> tuple[Any, Any, str, Any, str, An
         async_dd = AsyncDuckDBDriver(DuckDBConfig(database=":memory:"))
         sync_dd.execute(ddl)
         sync_dd.execute("INSERT INTO contract_items (id, name, note) VALUES (?, ?, ?)", [1, "seed", None])
-        async_dd._sync.execute(ddl)
-        async_dd._sync.execute("INSERT INTO contract_items (id, name, note) VALUES (?, ?, ?)", [1, "seed", None])
+        sync_for_async = async_dd._client.to_sync()
+        sync_for_async.execute(ddl)
+        sync_for_async.execute("INSERT INTO contract_items (id, name, note) VALUES (?, ?, ?)", [1, "seed", None])
         return (
             sync_dd,
             async_dd,
