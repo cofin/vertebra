@@ -5,7 +5,7 @@ chapter_id: ch20-arrow-copy-import-and-portals
 title: Expose PyO3 COPY handles and stream Arrow IPC input buffers into native COPY
 description: Expose SyncPostgresCopyOut, AsyncPostgresCopyOut, SyncPostgresCopyIn, AsyncPostgresCopyIn, copy_to, copy_from, copy_from_arrow, and write_arrow_ipc across sync_client.rs, async_client.rs, and _postgres.pyi.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -18,26 +18,28 @@ read_set:
   - src/py/vertebra/_postgres.pyi
   - src/py/vertebra/db/adapters/postgres/arrow.py
 files:
+  - src/rs/vertebra-postgres/src/lib.rs
   - src/rs/vertebra-postgres/src/sync_client.rs
   - src/rs/vertebra-postgres/src/async_client.rs
   - src/py/vertebra/_postgres.pyi
+  - src/py/vertebra/db/adapters/postgres/arrow.py
 tests:
   - src/py/tests/unit/db/test_postgres_native_data.py
 estimated_loc: 240
 plan_revision: 6
 plan_commit: ef86844f
-state_revision: 0
+state_revision: 1
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-10T17:57:27Z"
+last_verified_commit: 1fb9b77f
+verification_evidence: "make dev, ruff, mypy, mypy.stubtest vertebra._postgres, pytest test_postgres_native_data.py (57 passed), cargo test postgres_arrow_import_tests (10 passed), and cargo clippy exited 0"
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-10T14:45:00Z"
-commit: null
+updated_at: "2026-11-10T17:57:27Z"
+commit: 1fb9b77f
 verified:
   - by: agent:plan-generator
     at: "2026-11-10T14:45:00Z"
@@ -130,13 +132,13 @@ Expose PyO3 `SyncPostgresCopyOut`, `AsyncPostgresCopyOut`, `SyncPostgresCopyIn`,
 
 ## Acceptance Criteria
 
-- [ ] `SyncPostgresClient` and `AsyncPostgresClient` expose `copy_to`, `copy_from`, and `copy_from_arrow(..., *, columns=None, schema_name=None)` with `SyncPostgresCopyOut`, `AsyncPostgresCopyOut`, `SyncPostgresCopyIn` (`write_arrow_ipc(self, batch_ipc: Buffer)`), and `AsyncPostgresCopyIn` (`write_arrow_ipc(self, batch_ipc: Buffer)`) passing `ruff`, `mypy`, and `mypy.stubtest vertebra._postgres` (R19, R20).
-- [ ] `load_arrow_sync` and `load_arrow_async` forward `columns` and `schema_name`, join ambient transactions, and stream `Table`, `RecordBatch`, `RecordBatchReader`, `__arrow_c_stream__`, and `ArrowCursor` inputs one bounded IPC batch at a time with a single `PGCOPY` header and zero Python row/dict conversion, transmitting batch 1 before pulling batch 2 (R20).
-- [ ] Oversize/malformed IPC, mid-stream source errors, server errors, early closes, and `asyncio` cancellations clean up via `CopyFail` / `CancelRequest` and close input readers without leaking pooled sessions or committing partial batches (R19, R20).
+- [x] `SyncPostgresClient` and `AsyncPostgresClient` expose `copy_to`, `copy_from`, and `copy_from_arrow(..., *, columns=None, schema_name=None)` with `SyncPostgresCopyOut`, `AsyncPostgresCopyOut`, `SyncPostgresCopyIn` (`write_arrow_ipc(self, batch_ipc: Buffer)`), and `AsyncPostgresCopyIn` (`write_arrow_ipc(self, batch_ipc: Buffer)`) passing `ruff`, `mypy`, and `mypy.stubtest vertebra._postgres` (R19, R20).
+- [x] `load_arrow_sync` and `load_arrow_async` forward `columns` and `schema_name`, join ambient transactions, and stream `Table`, `RecordBatch`, `RecordBatchReader`, `__arrow_c_stream__`, and `ArrowCursor` inputs one bounded IPC batch at a time with a single `PGCOPY` header and zero Python row/dict conversion, transmitting batch 1 before pulling batch 2 (R20).
+- [x] Oversize/malformed IPC, mid-stream source errors, server errors, early closes, and `asyncio` cancellations clean up via `CopyFail` / `CancelRequest` and close input readers without leaking pooled sessions or committing partial batches (R19, R20).
 
 ## Notes & Discoveries
 
-None.
+`extract_ipc_buffer_bytes` uses `PyBytes` fast-path inspection and `PyObject_GetBuffer(..., PyBUF_CONTIG_RO)` with a stack-local RAII `PyBuffer_Release` guard so buffer mutation under free-threaded Python `3.14t`/`3.15t` cannot resize backing storage while checking the `16 MiB` call limit and copying into owned `Vec<u8>`.
 
 [^pg-contracts]: `.agents/bundles/specs/native-postgres-driver/contracts.md` — Native PostgreSQL COPY, Arrow input, and free-threaded PyO3 bridge contracts.
 [^pg-protocol-research]: `.agents/bundles/specs/native-postgres-driver/research/protocol-and-execution_20261105.md` — PostgreSQL COPY TO CancelRequest drain and COPY FROM CopyFail abort semantics.

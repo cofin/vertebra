@@ -5,7 +5,7 @@ chapter_id: ch20-arrow-copy-import-and-portals
 title: Expose synchronous select_to_arrow and pinned Arrow portal batch streams
 description: Implement cold-discovery execute_select_to_arrow and single-scope generation-fenced ArrowPortalStream in portal.rs, and expose SyncPostgresClient.select_to_arrow and stream_arrow_batches with parameter_oids and timeout support.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -18,7 +18,9 @@ read_set:
   - src/rs/vertebra-postgres/src/sync_client.rs
   - .agents/bundles/specs/native-postgres-driver/contracts.md
 files:
+  - src/rs/vertebra-postgres/src/lib.rs
   - src/rs/vertebra-postgres/src/portal.rs
+  - src/rs/vertebra-postgres/src/session.rs
   - src/rs/vertebra-postgres/src/sync_client.rs
   - src/py/vertebra/_postgres.pyi
 tests:
@@ -26,18 +28,18 @@ tests:
 estimated_loc: 240
 plan_revision: 6
 plan_commit: ef86844f
-state_revision: 0
+state_revision: 1
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-10T18:46:12Z"
+last_verified_commit: e5da5da5
+verification_evidence: "make dev, ruff, mypy, mypy.stubtest vertebra._postgres, pytest test_postgres_native_data.py (92 passed), cargo test postgres_arrow_tests (17 passed), and cargo clippy exited 0"
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-10T14:45:00Z"
-commit: null
+updated_at: "2026-11-10T18:46:12Z"
+commit: e5da5da5
 verified:
   - by: agent:plan-generator
     at: "2026-11-10T14:45:00Z"
@@ -130,13 +132,13 @@ Implement `execute_select_to_arrow` and `ArrowPortalStream` in `src/rs/vertebra-
 
 ## Acceptance Criteria
 
-- [ ] `execute_select_to_arrow` in `portal.rs` and `SyncPostgresClient.select_to_arrow` support `parameter_oids` and `timeout` (`CommandBudget`), discover cold custom OIDs via non-executing `Parse + Describe + Sync` without double-executing volatile SQL, and build inline or `VTBARROW` SHM `PostgresArrowResult` without Python row conversion (R20).
-- [ ] `ArrowPortalStream` and `SyncPostgresClient.stream_arrow_batches(..., *, parameter_oids=None, batch_size=65536, columns=None)` build schemas from `Portal::type_catalog()` (`Format::Text` rows including `"regproc-text"` and `TemporalText` `kind = 2`), delegate strictly to `Portal`'s single transaction/savepoint scope without duplicate `BEGIN`, and pause mid-`Execute` at the `8 MiB` byte cap (R16, R20).
-- [ ] Exhaustion, mid-`Execute` `close()`, command timeouts, errors, and `Drop` run under fenced `OperationGeneration` (`CancelRequest` + `connect_timeout` bounded drain/retirement when mid-`Execute`), pass `ruff`/`mypy`/`stubtest`, and return clean sessions to `max_size = 1` pools while detaching the GIL (R16, R20).
+- [x] `execute_select_to_arrow` in `portal.rs` and `SyncPostgresClient.select_to_arrow` support `parameter_oids` and `timeout` (`CommandBudget`), discover cold custom OIDs via non-executing `Parse + Describe + Sync` without double-executing volatile SQL, and build inline or `VTBARROW` SHM `PostgresArrowResult` without Python row conversion (R20).
+- [x] `ArrowPortalStream` and `SyncPostgresClient.stream_arrow_batches(..., *, parameter_oids=None, batch_size=65536, columns=None)` build schemas from `Portal::type_catalog()` (`Format::Text` rows including `"regproc-text"` and `TemporalText` `kind = 2`), delegate strictly to `Portal`'s single transaction/savepoint scope without duplicate `BEGIN`, and pause mid-`Execute` at the `8 MiB` byte cap (R16, R20).
+- [x] Exhaustion, mid-`Execute` `close()`, command timeouts, errors, and `Drop` run under fenced `OperationGeneration` (`CancelRequest` + `connect_timeout` bounded drain/retirement when mid-`Execute`), pass `ruff`/`mypy`/`stubtest`, and return clean sessions to `max_size = 1` pools while detaching the GIL (R16, R20).
 
 ## Notes & Discoveries
 
-None.
+PyO3 `#[pyo3(signature = (...))]` declarations on `select_to_arrow` and `stream_arrow_batches` use literal integer defaults (`256`, `268435456`, `65536`) backed by compile-time `const` assertions so `__text_signature__` satisfies `mypy.stubtest` without emitting `Ellipsis`.
 
 [^pg-contracts]: `.agents/bundles/specs/native-postgres-driver/contracts.md` — PostgresArrowResult, select_to_arrow bounds, `parameter_oids`/`timeout`, and pinned portal transaction contracts.
 [^portal-rs]: `src/rs/vertebra-postgres/src/portal.rs::Portal` — Portal single-scope `BEGIN`/`SAVEPOINT` ownership, `Format::Text` rows, and generation-fenced portal execution.

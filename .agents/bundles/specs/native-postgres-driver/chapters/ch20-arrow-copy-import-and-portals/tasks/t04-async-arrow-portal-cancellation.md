@@ -5,7 +5,7 @@ chapter_id: ch20-arrow-copy-import-and-portals
 title: Expose asynchronous select_to_arrow and cancellation-safe Arrow portal streams
 description: Add AsyncPostgresClient.select_to_arrow and synchronous-factory AsyncPostgresClient.stream_arrow_batches returning AsyncPostgresArrowStream with pending-completion SHM and portal cancellation cleanup guards.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -18,6 +18,7 @@ read_set:
   - src/rs/vertebra-db/src/py_async.rs
   - src/py/vertebra/_postgres.pyi
 files:
+  - src/rs/vertebra-postgres/src/lib.rs
   - src/rs/vertebra-postgres/src/portal.rs
   - src/rs/vertebra-postgres/src/async_client.rs
   - src/py/vertebra/_postgres.pyi
@@ -26,18 +27,18 @@ tests:
 estimated_loc: 235
 plan_revision: 6
 plan_commit: ef86844f
-state_revision: 0
+state_revision: 1
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-10T19:25:26Z"
+last_verified_commit: 5cbf832b
+verification_evidence: "make lint-all, make dev, cargo test postgres_arrow_import_tests (10 passed) & postgres_arrow_tests (17 passed), mypy.stubtest vertebra._postgres, and pytest test_postgres_native_data.py (129 passed) exited 0"
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-10T14:45:00Z"
-commit: null
+updated_at: "2026-11-10T19:25:26Z"
+commit: 5cbf832b
 verified:
   - by: agent:plan-generator
     at: "2026-11-10T14:45:00Z"
@@ -128,13 +129,13 @@ Expose `AsyncPostgresClient.select_to_arrow` and synchronous-factory `AsyncPostg
 
 ## Acceptance Criteria
 
-- [ ] `AsyncPostgresClient.select_to_arrow(..., *, parameter_oids=None, timeout=None, ...)` and synchronous-factory `AsyncPostgresClient.stream_arrow_batches(..., *, parameter_oids=None, batch_size=65536, columns=None)` pass `ruff`, `mypy`, and `mypy.stubtest vertebra._postgres` while keeping the `asyncio` loop unblocked during network waits (R16, R20).
-- [ ] `Unopened` / `Fetching` / `Open` / `Closing` / `Closed` state guards reject overlapping `__anext__` with `InterfaceError`, delegate strictly to `Portal`'s single transaction/savepoint scope, and keep `aclose()` idempotent across every state including mid-`Execute` `8 MiB` pauses (R16, R20).
-- [ ] Generation-fenced cancellation during portal open, in-flight fetch, mid-`Execute` pause, or queued drainer publication drops undelivered `ShmRegion` mappings and closes/retires the portal session while already-yielded `ArrowCursor` / `memoryview` views remain valid after stream closure (R16, R20).
+- [x] `AsyncPostgresClient.select_to_arrow(..., *, parameter_oids=None, timeout=None, ...)` and synchronous-factory `AsyncPostgresClient.stream_arrow_batches(..., *, parameter_oids=None, batch_size=65536, columns=None)` pass `ruff`, `mypy`, and `mypy.stubtest vertebra._postgres` while keeping the `asyncio` loop unblocked during network waits (R16, R20).
+- [x] `Unopened` / `Fetching` / `Open` / `Closing` / `Closed` state guards reject overlapping `__anext__` with `InterfaceError`, delegate strictly to `Portal`'s single transaction/savepoint scope, and keep `aclose()` idempotent across every state including mid-`Execute` `8 MiB` pauses (R16, R20).
+- [x] Generation-fenced cancellation during portal open, in-flight fetch, mid-`Execute` pause, or queued drainer publication drops undelivered `ShmRegion` mappings and closes/retires the portal session while already-yielded `ArrowCursor` / `memoryview` views remain valid after stream closure (R16, R20).
 
 ## Notes & Discoveries
 
-None.
+`PendingArrowBatchGuard` and `cancel_fetch` pair `SessionHandle::begin_portal_drop_cleanup` with `finish_portal_drop_cleanup` so immediate `await client.close()` after task cancellation waits for background portal rollback/retirement and returns clean leases to `max_size = 1` pools.
 
 [^pg-contracts]: `.agents/bundles/specs/native-postgres-driver/contracts.md` — Async Arrow selection, `parameter_oids`/`timeout`, portal cancellation, and retained SHM view lifetime contracts.
 [^portal-rs]: `src/rs/vertebra-postgres/src/portal.rs::ArrowPortalStream` — Generation-fenced `execute_select_to_arrow`, `ArrowPortalStream` single-scope lifecycle, and mid-`Execute` `CancelRequest` retirement.

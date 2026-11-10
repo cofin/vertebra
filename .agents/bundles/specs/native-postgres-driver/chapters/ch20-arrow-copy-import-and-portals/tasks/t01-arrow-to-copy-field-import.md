@@ -5,7 +5,7 @@ chapter_id: ch20-arrow-copy-import-and-portals
 title: Convert Arrow RecordBatches into binary COPY fields with prevalidated target plans and IPC batch iterators
 description: Implement parse_postgres_qualified_table, post-ch19 PostgresArrowImportPlan, generation-fenced SessionHandle::copy_from_arrow_with_generation_as preserving BinaryCopyEncoder header state, CopyFromStream::write_arrow_ipc, and schema_name-aware Python Arrow IPC batch iterators without Python row materialization.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -20,24 +20,25 @@ read_set:
 files:
   - src/rs/vertebra-postgres/src/arrow.rs
   - src/rs/vertebra-postgres/src/copy.rs
+  - src/rs/vertebra-postgres/src/session.rs
   - src/py/vertebra/db/adapters/postgres/arrow.py
 tests:
   - src/rs/vertebra-postgres/tests/postgres_arrow_import_tests.rs
 estimated_loc: 245
 plan_revision: 6
 plan_commit: ef86844f
-state_revision: 0
+state_revision: 1
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-10T16:58:55Z"
+last_verified_commit: 34a428d7
+verification_evidence: "cargo test -p vertebra-postgres --test postgres_arrow_import_tests (10 passed), cargo clippy -p vertebra-postgres --all-targets -- -D warnings, ruff check, and mypy on postgres/arrow.py exited 0"
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-10T14:45:00Z"
-commit: null
+updated_at: "2026-11-10T16:58:55Z"
+commit: 34a428d7
 verified:
   - by: agent:plan-generator
     at: "2026-11-10T14:45:00Z"
@@ -140,13 +141,13 @@ Implement `parse_postgres_qualified_table` and post-`ch19` `PostgresArrowImportP
 
 ## Acceptance Criteria
 
-- [ ] `PostgresArrowImportPlan` discovers custom target OIDs and domain bases, roundtrips post-`ch19` `postgres.arrow.version = "1"` schemas (including `"pg-enum"`, `UInt32` `oid`/`regproc`/`xid`/`cid`, `xml`, and `"unknown"` -> text-family targets) plus ordinary Arrow types, and rejects `"regproc-text"`, `"pg-range"`, `"record-text"`, `"unknown-text"`, `BOX_OID`, `RECORD_OID`, target `705`, non-binary `"pg-array"`/`"pg-composite"`, and `"pg-timestamptz"` `kind = 2` before `COPY` startup (R20).
-- [ ] `parse_postgres_qualified_table`, the single bound `pg_catalog` `JOIN` query (zero correlated subqueries), `SessionHandle::copy_from_arrow_with_generation_as`, and the encoder-preserving `CopyFromStream` constructor fence async cancellation + ambient `TransactionOwner`, support literal `schema_name` with dotted table names, emit exactly one `19`-byte `PGCOPY` header across batches via `flush_encoded_slice_internal(&payload, false)`, and abort batch `>= 2` errors via `CopyFail` (R19, R20).
-- [ ] `src/py/vertebra/db/adapters/postgres/arrow.py` passes `ruff` and `mypy`, accepts and forwards `schema_name: str | None = None`, and serializes bounded `<= 8 MiB` self-contained IPC streams from `Table`, `RecordBatch`, `ArrowCursor`, and `__arrow_c_stream__` sources without calling `to_pylist()` or `to_pydict()` (R20).
+- [x] `PostgresArrowImportPlan` discovers custom target OIDs and domain bases, roundtrips post-`ch19` `postgres.arrow.version = "1"` schemas (including `"pg-enum"`, `UInt32` `oid`/`regproc`/`xid`/`cid`, `xml`, and `"unknown"` -> text-family targets) plus ordinary Arrow types, and rejects `"regproc-text"`, `"pg-range"`, `"record-text"`, `"unknown-text"`, `BOX_OID`, `RECORD_OID`, target `705`, non-binary `"pg-array"`/`"pg-composite"`, and `"pg-timestamptz"` `kind = 2` before `COPY` startup (R20).
+- [x] `parse_postgres_qualified_table`, the single bound `pg_catalog` `JOIN` query (zero correlated subqueries), `SessionHandle::copy_from_arrow_with_generation_as`, and the encoder-preserving `CopyFromStream` constructor fence async cancellation + ambient `TransactionOwner`, support literal `schema_name` with dotted table names, emit exactly one `19`-byte `PGCOPY` header across batches via `flush_encoded_slice_internal(&payload, false)`, and abort batch `>= 2` errors via `CopyFail` (R19, R20).
+- [x] `src/py/vertebra/db/adapters/postgres/arrow.py` passes `ruff` and `mypy`, accepts and forwards `schema_name: str | None = None`, and serializes bounded `<= 8 MiB` self-contained IPC streams from `Table`, `RecordBatch`, `ArrowCursor`, and `__arrow_c_stream__` sources without calling `to_pylist()` or `to_pydict()` (R20).
 
 ## Notes & Discoveries
 
-None.
+`OperationMeta::rereserve_op_gen_on_ok` atomically re-reserves `op_gen` inside `run_cancellable_operation`'s completion lock block so `copy_from_arrow_with_generation_as` bridges the bound `pg_catalog` resolution query into `CopySessionLease` checkout with zero cancellation gap.
 
 [^pg-contracts]: `.agents/bundles/specs/native-postgres-driver/contracts.md` — PostgreSQL binary COPY, temporal wire_text refusal, numeric, array, composite, and vector contracts.
 [^pg-protocol-research]: `.agents/bundles/specs/native-postgres-driver/research/protocol-and-execution_20261105.md` — Bound pg_catalog column discovery, identifier quoting, and CopyFail rollback rules.

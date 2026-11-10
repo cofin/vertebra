@@ -5,19 +5,19 @@ chapter_id: ch20-arrow-copy-import-and-portals
 title: "Chapter 20: Arrow-to-COPY Bulk Import, Streaming Input Bridges, and Sync/Async Arrow Portal Streams"
 description: Convert Arrow RecordBatches into binary COPY frames, expose PyO3 COPY and Arrow input bridges without Python row conversion, and deliver synchronous and cancellation-safe asynchronous Arrow selection and portal batch streams.
 status: stable
-state: planned
+state: in_progress
 planning_status: complete
 depends_on_chapters:
   - ch19-native-arrow-batches-and-shm
 replan_trigger: null
-current_task: "native-postgres-driver:ch20:t01"
+current_task: null
 plan_revision: 6
 plan_commit: ef86844f
-state_revision: 0
-last_verified_checkpoint: null
+state_revision: 1
+last_verified_checkpoint: 5cbf832b
 last_reviewed_commit: null
 created_at: "2026-11-05T00:00:00Z"
-updated_at: "2026-11-10T14:45:00Z"
+updated_at: "2026-11-10T19:28:00Z"
 generated:
   by: flow-setup
   at: "2026-11-07T05:00:00Z"
@@ -158,17 +158,17 @@ Progress: `[0/0 files documented in ch20]` (repository-wide public docs and OKF 
 
 ## 5. Implementation Plan
 
-- [ ] native-postgres-driver:ch20:t01 — Convert Arrow RecordBatches into binary COPY fields with prevalidated target plans and IPC batch iterators (tasks/t01-arrow-to-copy-field-import.md)
-- [ ] native-postgres-driver:ch20:t02 — Expose PyO3 COPY handles and stream Arrow IPC input buffers into native COPY (tasks/t02-streaming-arrow-input-bridge.md)
-- [ ] native-postgres-driver:ch20:t03 — Expose synchronous select_to_arrow and pinned Arrow portal batch streams (tasks/t03-sync-arrow-selection-and-portals.md)
-- [ ] native-postgres-driver:ch20:t04 — Expose asynchronous select_to_arrow and cancellation-safe Arrow portal streams (tasks/t04-async-arrow-portal-cancellation.md)
+- [x] [34a428d7] native-postgres-driver:ch20:t01 — Convert Arrow RecordBatches into binary COPY fields with prevalidated target plans and IPC batch iterators (tasks/t01-arrow-to-copy-field-import.md)
+- [x] [1fb9b77f] native-postgres-driver:ch20:t02 — Expose PyO3 COPY handles and stream Arrow IPC input buffers into native COPY (tasks/t02-streaming-arrow-input-bridge.md)
+- [x] [e5da5da5] native-postgres-driver:ch20:t03 — Expose synchronous select_to_arrow and pinned Arrow portal batch streams (tasks/t03-sync-arrow-selection-and-portals.md)
+- [x] [5cbf832b] native-postgres-driver:ch20:t04 — Expose asynchronous select_to_arrow and cancellation-safe Arrow portal streams (tasks/t04-async-arrow-portal-cancellation.md)
 
-**Chapter Recovery Checkpoint:** `make dev && PYTHONPATH="$(pwd)/src/py" cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --test postgres_arrow_import_tests && PYTHONPATH="$(pwd)/src/py" cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --test postgres_arrow_tests && uv run --no-sync ruff check src/py/vertebra/_postgres.pyi src/py/vertebra/db/adapters/postgres/arrow.py src/py/tests/unit/db/test_postgres_native_data.py && uv run --no-sync mypy src/py/vertebra/_postgres.pyi src/py/vertebra/db/adapters/postgres/arrow.py src/py/tests/unit/db/test_postgres_native_data.py && uv run --no-sync python -m mypy.stubtest vertebra._postgres && uv run --no-sync python -m pytest src/py/tests/unit/db/test_postgres_native_data.py -q` exits `0`.
+**Chapter Recovery Checkpoint:** `make dev && PYTHONPATH="$(pwd)/src/py:$(pwd)/.venv/lib/python3.12/site-packages" cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --test postgres_arrow_import_tests && PYTHONPATH="$(pwd)/src/py:$(pwd)/.venv/lib/python3.12/site-packages" cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --test postgres_arrow_tests && uv run --no-sync ruff check src/py/vertebra/_postgres.pyi src/py/vertebra/db/adapters/postgres/arrow.py src/py/tests/unit/db/test_postgres_native_data.py && uv run --no-sync mypy src/py/vertebra/_postgres.pyi src/py/vertebra/db/adapters/postgres/arrow.py src/py/tests/unit/db/test_postgres_native_data.py && uv run --no-sync python -m mypy.stubtest vertebra._postgres && uv run --no-sync python -m pytest src/py/tests/unit/db/test_postgres_native_data.py -q` exits `0`.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `plan_revision: 6`, `plan_commit: ef86844f`; chapter `state: planned`, `planning_status: complete` (flow baseline: `ch01`–`ch19` / `71` of `118` tasks completed across `33` chapters).
-- **Remaining Tasks in Chapter**: `t01`, `t02`, `t03`, `t04` (`4/4` pending).
+- **Verified Baseline**: `plan_revision: 6`, `plan_commit: ef86844f`; chapter `state: in_progress` awaiting zero-context chapter review (`last_verified_checkpoint: 5cbf832b`; `make lint-all`, `postgres_arrow_import_tests` `10 passed`, `postgres_arrow_tests` `17 passed`, `test_postgres_native_data.py` `129 passed` -> exit `0`).
+- **Remaining Tasks in Chapter**: None (`4/4` completed: `t01` `34a428d7`, `t02` `1fb9b77f`, `t03` `e5da5da5`, `t04` `5cbf832b`).
 - **Downstream Dependents**: Unblocks `ch21-live-notifications` and `ch26:t03` (`driver-arrow-and-owned-binds`).
 
 [^pg-contracts]: `.agents/bundles/specs/native-postgres-driver/contracts.md` — Native PostgreSQL Arrow selection, COPY, portal, and cancellation contracts.

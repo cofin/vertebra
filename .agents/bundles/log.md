@@ -1,5 +1,15 @@
 # Bundle Activity Log
 
+## [2026-11-10T19:28:00Z] flow-implement | native-postgres-driver (ch20-arrow-copy-import-and-portals)
+
+Implemented Chapter 20 (`ch20-arrow-copy-import-and-portals`, `4/4` tasks verified through `5cbf832b`, raising flow progress to `75/118` tasks across `33` chapters on `feat/native-postgres-driver`): `parse_postgres_qualified_table`, `PostgresArrowImportPlan` with pre-`COPY` domain/OID/codec validation and single-`PGCOPY`-header preservation across batches, bounded `<= 8 MiB` Python Arrow IPC chunking (`iter_arrow_ipc_batches`, `load_arrow_sync`, `load_arrow_async`) without row materialization, PyO3 `SyncPostgresCopyOut`/`AsyncPostgresCopyOut`/`SyncPostgresCopyIn`/`AsyncPostgresCopyIn` and `copy_from_arrow` bridges with RAII contiguous buffer locks, cold-OID-discovering `execute_select_to_arrow`, and single-scope generation-fenced `SyncPostgresArrowStream` and `AsyncPostgresArrowStream` (`PendingArrowBatchGuard`) over `VTBARROW` SHM cursors.
+
+Functional task commits:
+- `native-postgres-driver:ch20:t01`: `34a428d7` — `PostgresArrowImportPlan`, `copy_from_arrow_with_generation_as`, single-header `CopyFromStream`, and Python IPC chunking.
+- `native-postgres-driver:ch20:t02`: `1fb9b77f` — PyO3 sync/async `COPY` handles and `copy_from_arrow` streaming input bridge.
+- `native-postgres-driver:ch20:t03`: `e5da5da5` — cold-safe `execute_select_to_arrow`, `ArrowPortalStream`, and `SyncPostgresClient` Arrow streams.
+- `native-postgres-driver:ch20:t04`: `5cbf832b` — `AsyncPostgresClient.select_to_arrow`, `AsyncPostgresArrowStream`, and SHM/portal cancellation cleanup.
+
 ## [2026-11-10T15:35:00Z] flow-revise | native-postgres-driver
 
 Revised remaining `native-postgres-driver` roadmap at `plan_revision: 6` (`plan_commit: ef86844f`, `state: active`, `19/33` chapters and `71/118` tasks completed through `ch19-native-arrow-batches-and-shm` at `3c7a9355`): expanded final documentation, OKF knowledge synchronization, review routing, and release sign-off from `ch30`–`ch31` into `ch30`–`ch33` across `33` chapters / `118` tasks with `[0/33 files documented]`, synchronized root and specification bundle indexes, reconciled `ch20`–`ch29` contracts covering raw client `copy_from_arrow` vs Python driver `load_from_arrow`, `select_to_arrow(..., threshold_rows=256)` and `stream_arrow_batches` `ArrowCursor` wrapping, dedicated `CopyBoth` / `LISTEN` `PoolerMode::Direct | PoolerMode::Session` validation and `PendingDeliveryGuard` cancelled-read retention, unified `sqlspec` `ParameterStyle.NUMERIC` and `sqlalchemy` `numeric_dollar` compilation, preserved `postgres/__init__.py` exports and caller-injected `PostgreSQLQueueExecutor` (`vertebra._postgres`) guards, strict zero-skip Docker conformance gating, `PgBouncer` SCRAM `pg_authid.rolpassword` extraction, and Python `3.12`-scoped `[dependency-groups].postgres-bench` wheel/GIL checks, and curated `native-stubs.md`, `postgres-native-driver.md`, `postgres-limitations.md`, and `areas.toml` review routing targets.
