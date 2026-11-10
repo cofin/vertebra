@@ -15,19 +15,16 @@ plan_revision: 10
 plan_commit: 62a29db7
 state_revision: 6
 current_task: null
-last_verified_checkpoint: ae76f187
+last_verified_checkpoint: 1dcf3bb4
 created_at: "2026-11-03T04:05:00Z"
-updated_at: "2026-11-10T01:45:00Z"
+updated_at: "2026-11-10T02:35:00Z"
 generated:
   by: flow-setup
   at: "2026-11-07T04:15:00Z"
 verified:
-  - by: agent:flow-sync
-    at: "2026-11-09T21:46:00Z"
-    commit: 84959389
   - by: agent:flow-archive
-    at: "2026-11-10T01:45:00Z"
-    commit: ae76f187
+    at: "2026-11-10T02:35:00Z"
+    commit: 1dcf3bb4
   - by: agent:flow-archive
     at: "2026-11-09T20:56:00Z"
     commit: 62a29db7
@@ -66,10 +63,10 @@ tags:
 <!-- truth: start -->
 - **Per-Engine Optional PyO3 Wheels**: Each database engine compiles as an isolated optional PyO3 extension (`src/rs/vertebra-<engine>` -> `vertebra._<engine>`, `vertebra-core[<engine>]`) sharing pure-Rust `vertebra-db` (`rlib`) codecs, keeping `vertebra-core` (`vertebra._vertebra`) and `vertebra-http` free of engine SDKs [^db-registry].
 - **Shared Broker Pools & `VTBARROW` Plane**: The broker process owns server connections partitioned by `BaseDatabaseConfig.pool_key()`, and workers lease sessions over SHM rings with zero-copy `VTBARROW` result transfer [^core-broker] [^arrow-shm].
-- **Execution Stack on `main @ 077a3fe9`**: Chapter 1 (`db-layout-and-contract` [`21c99f95`]) and sibling `db-engine-primitives` (`80ff8a65`), `runtime-structure-and-throughput` (`d2fa5072`), and `mcp-webmcp-core` (`077a3fe9`) are merged on `main`; `storage-completeness` (Ch10 [`77c6acfa`]) and `storage-remediation` (Ch10a [`c8c8998a`]) are archived on `feat/storage-updates`, `driver-fail-loud` (Ch11 [`62a29db7`]) is archived on `feat/driver-fail-loud`, `native-duckdb-driver` (Ch8 [`aeed1dc7`]) is archived on `feat/native-duckdb-driver`, and `native-mysql-driver` (Ch5 [`7e0c5deb`]) is archived on `feat/native-mysql-driver` ahead of `native-postgres-driver` (Ch2) and the remaining per-engine driver flows [^fail-loud] [^mysql].
+- **Execution Stack on `main @ 077a3fe9`**: Chapter 1 (`db-layout-and-contract` [`21c99f95`]) and sibling `db-engine-primitives` (`80ff8a65`), `runtime-structure-and-throughput` (`d2fa5072`), and `mcp-webmcp-core` (`077a3fe9`) are merged on `main`; `storage-completeness` (Ch10 [`77c6acfa`]) and `storage-remediation` (Ch10a [`c8c8998a`]) are archived on `feat/storage-updates`, `driver-fail-loud` (Ch11 [`62a29db7`]) is archived on `feat/driver-fail-loud`, `native-duckdb-driver` (Ch8 [`aeed1dc7`]) is archived on `feat/native-duckdb-driver`, `native-mysql-driver` (Ch5 [`7e0c5deb`]) is archived on `feat/native-mysql-driver`, and `native-mssql-driver` (Ch6 [`d9ffc3e4`]) is archived on `feat/native-mssql-driver` ahead of `native-postgres-driver` (Ch2) and the remaining per-engine driver flows [^fail-loud] [^mysql] [^mssql].
 <!-- truth: end -->
 
-Baseline: `main @ 077a3fe9` / `HEAD @ ae76f187` (incorporating completed flows `critical-correctness-fixes` [`364c7cbe`], `gcp-wire-protocol-correctness` [`984ce732`], `gcp-driver-resilience` [`abd33ab6`], the `Sync*` / `Async*` class split [`f7417015`], `db-layout-and-contract` [`21c99f95`], `db-engine-primitives` [`80ff8a65`], post-merge review remediation [`2b737240`], `runtime-structure-and-throughput` [`d2fa5072`], `mcp-webmcp-core` [`077a3fe9`], `storage-completeness` [`77c6acfa`], `storage-remediation` [`c8c8998a`], `driver-fail-loud` [`62a29db7`], `native-duckdb-driver` [`aeed1dc7`], and `native-mysql-driver` [`7e0c5deb`]). Sibling PRD: [integration-remediation](../integration-remediation/spec.md), which consumes this platform.
+Baseline: `main @ 077a3fe9` / `HEAD @ 1dcf3bb4` (incorporating completed flows `critical-correctness-fixes` [`364c7cbe`], `gcp-wire-protocol-correctness` [`984ce732`], `gcp-driver-resilience` [`abd33ab6`], the `Sync*` / `Async*` class split [`f7417015`], `db-layout-and-contract` [`21c99f95`], `db-engine-primitives` [`80ff8a65`], post-merge review remediation [`2b737240`], `runtime-structure-and-throughput` [`d2fa5072`], `mcp-webmcp-core` [`077a3fe9`], `storage-completeness` [`77c6acfa`], `storage-remediation` [`c8c8998a`], `driver-fail-loud` [`62a29db7`], `native-duckdb-driver` [`aeed1dc7`], `native-mysql-driver` [`7e0c5deb`], and `native-mssql-driver` [`d9ffc3e4`]). Sibling PRD: [integration-remediation](../integration-remediation/spec.md), which consumes this platform.
 
 ## 1. North Star Goal & Problem Framing
 
@@ -83,7 +80,7 @@ Two product commitments, both feature complete:
 - **PostgreSQL.** Rust `vertebra-db/src/postgres/mod.rs` encodes frames (`encode_parse_frame`, `encode_bind_frame`, `encode_execute_frame`, `encode_sync_frame`, `pgcopy`, `pgvector`, JSONB, `PoolerMode`) with no socket connection, authentication, TLS, or result decoding. The Python driver executes through `psycopg` / `psycopg_pool` and rejects `memory://` DSNs with `ImproperConfigurationError`.
 - **MySQL.** `SyncMySQLDriver` and `AsyncMySQLDriver` execute through standalone `vertebra._mysql` (`mysql_async` rustls + `ring`, binary prepared protocol, Cloud SQL IAM, `KILL QUERY` cancel, `VTBARROW` `ArrowCursor`, `load_from_arrow`, delayed-commit `SyncMySQLPipeline` / `AsyncMySQLPipeline`) and reject `memory://` DSNs with `ImproperConfigurationError` [^mysql].
 - **Oracle.** `oracle/mod.rs` and `oracle/tns.rs` hold TTC session attribute, 26ai `OSON`/`VECTOR`, and `tnsnames.ora` descriptor codecs (`parse_tnsnames_ora`, `resolve_tns_alias`), while Python `OracleWallet` parses Autonomous Database wallets. `SyncOracleDriver` and `AsyncOracleDriver` guard every entry point with `ensure_module("vertebra._oracle")` and raise `MissingDependencyError` until `native-oracle-driver` lands.
-- **MSSQL.** `mssql/mod.rs` provides `rewrite_mssql_placeholders` (`?` and `$1` -> `@P1..@Pn`), while Python `mssql/config.py` defines `MSSQLConfig`. `SyncMSSQLDriver` and `AsyncMSSQLDriver` guard every entry point with `ensure_module("vertebra._mssql")` and raise `MissingDependencyError` until `native-mssql-driver` lands.
+- **MSSQL.** `SyncMSSQLDriver` and `AsyncMSSQLDriver` execute through standalone `vertebra._mssql` (`tiberius` rustls, TDS 7.4/8.0, `sp_executesql` RPC, `BulkLoad`, `ATTENTION` cancel, `VTBARROW` `ArrowCursor`, Cloud SQL `:3307` mTLS, delayed-commit `SyncMSSQLPipeline` / `AsyncMSSQLPipeline`), while `mssql/mod.rs` keeps `rewrite_mssql_placeholders` (`?` and `$1` -> `@P1..@Pn`) [^mssql].
 - **SQLite, DuckDB, and DataFusion.** SQLite uses Python `sqlite3` (`native-sqlite-driver`). DuckDB executes on the standalone Rust wheel `vertebra._duckdb` (`vertebra-core[duckdb]`, supporting standard and free-threaded `3.14t`/`3.15t` interpreters and raising `MissingDependencyError` when absent) [^fail-loud]. `DataFusionEngine` requires DataFusion for execution and propagates missing-dependency and query failures.
 - **BigQuery and Spanner.** `vertebra._bigquery` and `vertebra._spanner` provide standalone client bindings with official Google Cloud Rust SDKs, Arrow SHM transfer, panic/cancel-safe completion, and canonical `GoogleCloudError` / `DatabaseError` exceptions. The [database foundation](../../knowledge/domains/data/database-drivers-and-dialers.md) defines the shared contract, and [ADR-004](../../knowledge/decisions/adr-004-optional-driver-wheels-and-shm-ownership.md) records the wheel and ownership boundary.
 - **Redis/Valkey.** RESP3 wire codec in `vertebra-db`; the Python drivers execute over Python sockets/parsers and reject `memory://` URLs with `ImproperConfigurationError` ahead of `native-redis-driver`.
@@ -143,7 +140,7 @@ Two product commitments, both feature complete:
 | 3 | `broker-pool-sharing` | Shared pools for any SQLSpec, Advanced Alchemy, or SQLAlchemy config | Broker-owned pools, `dbrpc` SHM frames, session/transaction affinity, `VTBARROW` streaming, `ProxySync/AsyncConfig` for upstream configs, `db/dbapi/` (`SyncDBAPI*`/`AsyncDBAPI*`) with SQLAlchemy-owned `extensions/sqlalchemy/{async_adapter,pool}.py`, crash reclamation | 1, 2, 11; integration-remediation `db-engine-primitives` | draft |
 | 4 | `native-oracle-driver` | Rust Oracle thin client (`vertebra-oracle`) | `src/rs/vertebra-oracle` (`vertebra._oracle`, `[oracle]` extra): `oracledb =26.0.0-beta.5` on worker threads over `SyncCompletionQueue`/`AsyncCompletionQueue`, TNS/wallets/TLS, TTC binds/defines, LOBs, OSON/VECTOR, DRCP, sequential `pipeline()`, `arrow-ipc 59` -> `VTBARROW`, TxEventQ `NotificationSource`; `MissingDependencyError` guard replaced by the native client | 1, 11; integration-remediation `db-engine-primitives` | draft |
 | 5 | `native-mysql-driver` | Rust MySQL and MariaDB client (`vertebra-mysql`) | `src/rs/vertebra-mysql` (`vertebra._mysql`, `[mysql]` extra, `mysql_async` rustls + `ring`, binary protocol, Cloud SQL IAM, `KILL QUERY` cancel, `VTBARROW`); `pymysql` and `asyncmy` removed | 1, 11; integration-remediation `db-engine-primitives` | completed |
-| 6 | `native-mssql-driver` | Rust SQL Server client (`vertebra-mssql`) | `src/rs/vertebra-mssql` (`vertebra._mssql`, `[mssql]` extra, `tiberius` rustls, TDS 7.4/8.0, `sp_executesql` RPC, `BulkLoad`, `ATTENTION` cancel, `VTBARROW`); `MissingDependencyError` guard replaced by the native client | 1, 11; integration-remediation `db-engine-primitives` | draft |
+| 6 | `native-mssql-driver` | Rust SQL Server client (`vertebra-mssql`) | `src/rs/vertebra-mssql` (`vertebra._mssql`, `[mssql]` extra, `tiberius` rustls, TDS 7.4/8.0, `sp_executesql` RPC, `BulkLoad`, `ATTENTION` cancel, `VTBARROW`); `MissingDependencyError` guard replaced by the native client | 1, 11; integration-remediation `db-engine-primitives` | completed |
 | 7 | `native-sqlite-driver` | Rust SQLite client (`vertebra-sqlite`) | `src/rs/vertebra-sqlite` (`vertebra._sqlite`, `[sqlite]` extra, bundled `rusqlite`, worker threads, WAL/mmap pragmas, `sqlite3_interrupt` cancel, `VTBARROW`); stdlib `sqlite3` removed | 1, 11; integration-remediation `db-engine-primitives` | draft |
 | 8 | `native-duckdb-driver` | Rust DuckDB client (`vertebra-duckdb`) | `src/rs/vertebra-duckdb` (`vertebra._duckdb`, `[duckdb]` extra, bundled `duckdb` + `arrow-ipc 60` -> `VTBARROW`, `Appender`, cloud-agnostic `DuckDBSecretConfig`); PyPI `duckdb` replaced by `vertebra._duckdb` | 1, 11; integration-remediation `db-engine-primitives` | completed |
 | 9 | `native-redis-driver` | Rust Redis and Valkey client (`vertebra-redis`) | `src/rs/vertebra-redis` (`vertebra._redis`, `[redis]`/`[valkey]` extras, `redis` 1.8 RESP3 client with cluster, Sentinel, pub/sub `NotificationSource`, client tracking); Python sockets and `vertebra_db::resp3` bindings removed | 1, 11; integration-remediation `db-engine-primitives` | draft |
@@ -152,9 +149,9 @@ Two product commitments, both feature complete:
 | 11 | `driver-fail-loud` | Fail-loud driver baseline | Oracle/MSSQL `MissingDependencyError` guards, DuckDB requires PyPI `duckdb`, SQLAlchemy DB-API `InterfaceError` on parse failure, `memory://` engine fakes removed, dead `vertebra-db` pools and superseded codecs deleted, truthful install hints with an extras gate, explicit conformance skip/fail outcomes, Oracle/PostgreSQL/Redis/Valkey/Spanner queue backends require a live executor or client, database, queue, and agent docs and OKF knowledge synchronized (13 chapters, 38 tasks) | 1 | completed |
 
 ### Cross-PRD execution order
-1. **Completed on `main @ 077a3fe9` & Stacked Base Branches**: `integration-remediation` `critical-correctness-fixes` (`364c7cbe`), `gcp-wire-protocol-correctness` (`984ce732`), `gcp-driver-resilience` (`abd33ab6`), `Sync*` / `Async*` split (`f7417015`), `db-layout-and-contract` (`21c99f95`), `db-engine-primitives` (`80ff8a65`), `runtime-structure-and-throughput` (`d2fa5072`), and `mcp-webmcp-core` (`077a3fe9`) are merged on `main`; `storage-completeness` (`77c6acfa`) and `storage-remediation` (`c8c8998a`) are completed and archived on `feat/storage-updates`; `driver-fail-loud` (Ch11 [`62a29db7`]) is completed and archived on `feat/driver-fail-loud` [^fail-loud]; `native-mysql-driver` (Ch5 [`f0c32ec9`]) is completed and archived on `feat/native-mysql-driver` [^mysql].
+1. **Completed on `main @ 077a3fe9` & Stacked Base Branches**: `integration-remediation` `critical-correctness-fixes` (`364c7cbe`), `gcp-wire-protocol-correctness` (`984ce732`), `gcp-driver-resilience` (`abd33ab6`), `Sync*` / `Async*` split (`f7417015`), `db-layout-and-contract` (`21c99f95`), `db-engine-primitives` (`80ff8a65`), `runtime-structure-and-throughput` (`d2fa5072`), and `mcp-webmcp-core` (`077a3fe9`) are merged on `main`; `storage-completeness` (`77c6acfa`) and `storage-remediation` (`c8c8998a`) are completed and archived on `feat/storage-updates`; `driver-fail-loud` (Ch11 [`62a29db7`]) is completed and archived on `feat/driver-fail-loud` [^fail-loud]; `native-duckdb-driver` (Ch8 [`aeed1dc7`]) is completed and archived on `feat/native-duckdb-driver`; `native-mysql-driver` (Ch5 [`7e0c5deb`]) is completed and archived on `feat/native-mysql-driver` [^mysql]; `native-mssql-driver` (Ch6 [`d9ffc3e4`]) is completed and archived on `feat/native-mssql-driver` [^mssql].
 2. **Wave 1 (Planned)**: `native-postgres-driver` (Ch2) and `broker-pool-sharing` (Ch3), consuming the fail-loud baseline from `driver-fail-loud` [^fail-loud].
-3. **Per-Engine Driver Stack (1 PR per engine)**: `native-oracle-driver` (Ch4), `native-mssql-driver` (Ch6), `native-sqlite-driver` (Ch7), `native-duckdb-driver` (Ch8), and `native-redis-driver` (Ch9), followed by `sqlalchemy-and-django-integration`, `sqlspec-adapter-parity`, and `queues-tasks-and-channels`.
+3. **Per-Engine Driver Stack (1 PR per engine)**: `native-oracle-driver` (Ch4), `native-sqlite-driver` (Ch7), and `native-redis-driver` (Ch9), followed by `sqlalchemy-and-django-integration`, `sqlspec-adapter-parity`, and `queues-tasks-and-channels`.
 
 ## 4. Global Constraints
 
@@ -199,7 +196,7 @@ The global constraints from [integration-remediation](../integration-remediation
 - [ ] broker-pool-sharing — Shared pools for any SQLSpec, Advanced Alchemy, or SQLAlchemy config ([spec.md](../broker-pool-sharing/spec.md))
 - [ ] native-oracle-driver — Rust Oracle thin client ([spec.md](../native-oracle-driver/spec.md))
 - [x] [7e0c5deb] native-mysql-driver — Rust MySQL and MariaDB client ([drivers](../../knowledge/domains/data/database-drivers-and-dialers.md))
-- [ ] native-mssql-driver — Rust SQL Server client ([spec.md](../native-mssql-driver/spec.md))
+- [x] [d9ffc3e4] native-mssql-driver — Rust SQL Server client ([drivers](../../knowledge/domains/data/database-drivers-and-dialers.md))
 - [ ] native-sqlite-driver — Rust SQLite client ([spec.md](../native-sqlite-driver/spec.md))
 - [x] [aeed1dc7] native-duckdb-driver — Rust DuckDB client ([drivers](../../knowledge/domains/data/database-drivers-and-dialers.md), [pipelines](../../knowledge/domains/data/query-pipeline-cdc-and-tenancy.md))
 - [ ] native-redis-driver — Rust Redis and Valkey client ([spec.md](../native-redis-driver/spec.md))
@@ -208,8 +205,8 @@ The global constraints from [integration-remediation](../integration-remediation
 
 ## Continuity Snapshot
 
-- **Flow ID:** `native-data-platform` (`state: planned`, `plan_revision: 10`, `plan_commit: 62a29db7`, `last_verified_checkpoint: ae76f187`)
-- **Active Focus:** `db-layout-and-contract` (`21c99f95`), `db-engine-primitives` (`80ff8a65`), `runtime-structure-and-throughput` (`d2fa5072`), and `mcp-webmcp-core` (`077a3fe9`) are merged on `main @ 077a3fe9`. `storage-completeness` (`77c6acfa`) and `storage-remediation` (`c8c8998a`) are archived into durable knowledge on `feat/storage-updates`, `driver-fail-loud` (`62a29db7`, 13 chapters / 38 tasks) is archived on `feat/driver-fail-loud`, `native-duckdb-driver` (`aeed1dc7`) is archived on `feat/native-duckdb-driver`, and `native-mysql-driver` (`7e0c5deb`, 6 tasks) is archived on `feat/native-mysql-driver` alongside `native-postgres-driver` and the remaining per-engine standalone PRs.
+- **Flow ID:** `native-data-platform` (`state: planned`, `plan_revision: 10`, `plan_commit: 62a29db7`, `last_verified_checkpoint: 1dcf3bb4`)
+- **Active Focus:** `db-layout-and-contract` (`21c99f95`), `db-engine-primitives` (`80ff8a65`), `runtime-structure-and-throughput` (`d2fa5072`), and `mcp-webmcp-core` (`077a3fe9`) are merged on `main @ 077a3fe9`. `storage-completeness` (`77c6acfa`) and `storage-remediation` (`c8c8998a`) are archived into durable knowledge on `feat/storage-updates`, `driver-fail-loud` (`62a29db7`, 13 chapters / 38 tasks) is archived on `feat/driver-fail-loud`, `native-duckdb-driver` (`aeed1dc7`) is archived on `feat/native-duckdb-driver`, `native-mysql-driver` (`7e0c5deb`, 6 tasks) is archived on `feat/native-mysql-driver`, and `native-mssql-driver` (`d9ffc3e4`, 6 tasks) is archived on `feat/native-mssql-driver` alongside `native-postgres-driver` and the remaining per-engine standalone PRs.
 - **Key decisions** *(user, 2026-11-03 – 2026-11-04)*:
   - Shared broker pools for Advanced Alchemy / SQLSpec configs and native Rust drivers across all engines remain required acceptance targets for their owning child flows.
   - Layout: `vertebra/db/adapters/<engine>/` for Python engine code, `vertebra/db/*` for engine-agnostic code, shared `vertebra-db` (`rlib`) for Rust primitives/codecs, and standalone PyO3 extension crates `src/rs/vertebra-<engine>` (`vertebra._<engine>`) + `[project.optional-dependencies].<engine>` per database engine.
@@ -221,3 +218,4 @@ The global constraints from [integration-remediation](../integration-remediation
 [^db-registry]: `src/py/vertebra/db/registry.py::DatabaseRegistry` — Polymorphic database registry and driver loader.
 [^fail-loud]: `.agents/bundles/knowledge/domains/data/database-drivers-and-dialers.md` — Completed fail-loud driver, codec, and install-hint baseline.
 [^mysql]: `src/rs/vertebra-mysql/src/lib.rs` — Standalone `vertebra._mysql` PyO3 module backing `SyncMySQLDriver` and `AsyncMySQLDriver`.
+[^mssql]: `src/rs/vertebra-mssql/src/lib.rs` — Standalone `vertebra._mssql` PyO3 module backing `SyncMSSQLDriver` and `AsyncMSSQLDriver`.

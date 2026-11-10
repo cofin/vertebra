@@ -1,5 +1,23 @@
 # Bundle Activity Log
 
+## [2026-11-10T02:35:00Z] flow-archive | native-mssql-driver
+
+Completed 6 tasks (`t01`–`t06`) on `feat/native-mssql-driver` stacked on `feat/native-mysql-driver`.
+
+Durable synthesis is committed in `database-drivers-and-dialers.md`, `domains/index.md`, `product.md`, `docs/usage/databases.md`, `docs/usage/extensions.md`, `docs/index.md`, `docs/reference/db.md`, `docs/reference/index.md`, `review-core/references/areas.toml`, and `specs/native-data-platform/spec.md` before contracting `.agents/bundles/specs/native-mssql-driver/`.
+
+Recorded implementation notes on `feat/native-mssql-driver`:
+- `SyncMSSQLDriver` and `AsyncMSSQLDriver` raise `MissingDependencyError` only when the `vertebra._mssql` wheel is absent; the Oracle driver remains the only fail-loud engine guard in the conformance suite.
+- `AsyncMSSQLDriver` owns its own `AsyncMSSQLClient` and `AsyncCloudSQLDialer`; `MSSQLConfig.build_async_driver` resolves the async dialer from the registry.
+
+Functional task commits:
+- `native-mssql-driver:t01`: `31b58fc0`.
+- `native-mssql-driver:t02`: `6108f4d4`.
+- `native-mssql-driver:t03`: `d29591a4`.
+- `native-mssql-driver:t04`: `6ccd57a9`.
+- `native-mssql-driver:t05`: `d9905a5e`.
+- `native-mssql-driver:t06`: `9abef6d2`.
+
 ## [2026-11-10T01:45:00Z] flow-archive | native-mysql-driver
 
 Completed 6 tasks (`t01`–`t06`) on `feat/native-mysql-driver` stacked on `feat/native-duckdb-driver`.
