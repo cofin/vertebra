@@ -12,9 +12,13 @@ use vertebra_db::py_async::{
     RustDbTaskAwaitable, spawn_rust_db_task_with_attr, spawn_rust_db_task_with_attr_and_cancel,
 };
 
+use crate::arrow::arrow_output_into_py_result;
 use crate::copy::{CopyFromStream, CopyOut};
 use crate::errors::{PostgresError, postgres_error_to_py};
-use crate::portal::Portal;
+use crate::portal::{
+    AsyncArrowCloseStart, AsyncArrowFetchStart, AsyncArrowPortalShared, Portal,
+    UnopenedArrowPortalArgs, execute_select_to_arrow,
+};
 use crate::python_values::{extract_parameters, query_result_to_python};
 use crate::session::cancel::OperationGeneration;
 use crate::session::pipeline_scope::{
@@ -22,11 +26,12 @@ use crate::session::pipeline_scope::{
 };
 use crate::session::{ClientBeginConnect, CloseAction, CommandBudget, SessionHandle};
 use crate::sync_client::{
-    OwnedBusyGuard, build_validated_config, copy_out_row_to_python, extract_batch_size,
-    extract_cloud_auth_options, extract_copy_rows_and_oids, extract_iam_auth_options,
-    extract_ipc_buffer_bytes, extract_max_rows, extract_opt_copy_columns, extract_scope_id,
-    extract_session_gucs, extract_strict_bool, extract_strict_f64, extract_strict_i64,
-    extract_strict_opt_f64, extract_strict_opt_i64, extract_strict_u64,
+    OwnedBusyGuard, build_validated_config, copy_out_row_to_python, extract_arrow_batch_size,
+    extract_batch_size, extract_cloud_auth_options, extract_copy_rows_and_oids,
+    extract_iam_auth_options, extract_ipc_buffer_bytes, extract_max_result_bytes, extract_max_rows,
+    extract_opt_copy_columns, extract_scope_id, extract_session_gucs, extract_strict_bool,
+    extract_strict_f64, extract_strict_i64, extract_strict_opt_f64, extract_strict_opt_i64,
+    extract_strict_u64, extract_threshold_rows,
 };
 
 /// Event-loop attribute name isolating the `vertebra._postgres` completion drainer from sibling extensions.
@@ -95,10 +100,11 @@ impl PyAsyncPostgresClient {
         Self { session }
     }
 
-    /// Register asynchronous client, portal, and COPY types on the `vertebra._postgres` module.
+    /// Register asynchronous client, portal, Arrow stream, and COPY types on the `vertebra._postgres` module.
     pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_class::<Self>()?;
         m.add_class::<PyAsyncPostgresPortal>()?;
+        m.add_class::<PyAsyncPostgresArrowStream>()?;
         m.add_class::<PyAsyncPostgresCopyOut>()?;
         m.add_class::<PyAsyncPostgresCopyIn>()
     }
@@ -720,6 +726,165 @@ impl PyAsyncPostgresPortal {
     }
 }
 
+/// Cancellation-safe asynchronous `VTBARROW` shared-memory Arrow IPC portal batch iterator
+/// (`vertebra._postgres.AsyncPostgresArrowStream`).
+#[pyclass(
+    name = "AsyncPostgresArrowStream",
+    module = "vertebra._postgres",
+    frozen,
+    immutable_type
+)]
+pub struct PyAsyncPostgresArrowStream {
+    shared: Arc<AsyncArrowPortalShared>,
+}
+
+impl PyAsyncPostgresArrowStream {
+    pub(crate) fn new_unopened(session: Arc<SessionHandle>, args: UnopenedArrowPortalArgs) -> Self {
+        Self {
+            shared: Arc::new(AsyncArrowPortalShared::new_unopened(session, args)),
+        }
+    }
+
+    fn spawn_aclose_inner<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+        let _ = py.import("asyncio")?.call_method0("get_running_loop")?;
+        match self.shared.begin_aclose() {
+            AsyncArrowCloseStart::ImmediateNoOp => {
+                let awaitable = spawn_rust_db_task_with_attr(
+                    py,
+                    async { Ok::<(), PostgresError>(()) },
+                    |py, ()| Ok(py.None()),
+                    postgres_error_to_py,
+                    POSTGRES_COMPLETION_DRAINER_ATTR,
+                )?;
+                Bound::new(py, awaitable)
+            }
+            AsyncArrowCloseStart::RunClose {
+                stream,
+                close_gen,
+                cleanup_reg,
+            } => {
+                let run_shared = Arc::clone(&self.shared);
+                let cancel_shared = Arc::clone(&self.shared);
+                spawn_rust_db_task_with_attr_and_cancel(
+                    py,
+                    async move {
+                        run_shared
+                            .run_explicit_close(*stream, close_gen, cleanup_reg)
+                            .await
+                    },
+                    |py, ()| Ok(py.None()),
+                    postgres_error_to_py,
+                    move || {
+                        cancel_shared.cancel_active_close();
+                    },
+                    POSTGRES_COMPLETION_DRAINER_ATTR,
+                )
+            }
+            AsyncArrowCloseStart::WaitUntilClosed(waiter) => {
+                let wait_shared = Arc::clone(&self.shared);
+                let cancel_shared = Arc::clone(&self.shared);
+                spawn_rust_db_task_with_attr_and_cancel(
+                    py,
+                    async move { wait_shared.wait_until_closed(waiter).await },
+                    |py, ()| Ok(py.None()),
+                    postgres_error_to_py,
+                    move || {
+                        cancel_shared.cancel_active_close();
+                    },
+                    POSTGRES_COMPLETION_DRAINER_ATTR,
+                )
+            }
+        }
+    }
+}
+
+#[pymethods]
+impl PyAsyncPostgresArrowStream {
+    /// Return the stream itself as an asynchronous `ArrowCursor` batch iterator.
+    pub fn __aiter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    /// Reserve an `OperationGeneration`, advance the portal off the event loop, and resolve to the next `vertebra._vertebra.ArrowCursor` batch.
+    pub fn __anext__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+        let _ = py.import("asyncio")?.call_method0("get_running_loop")?;
+        let start = self
+            .shared
+            .begin_fetch_step()
+            .map_err(|e| postgres_error_to_py(py, e))?;
+        let reserved_op = match &start {
+            AsyncArrowFetchStart::OpenAndFetch { op_gen, .. }
+            | AsyncArrowFetchStart::FetchNext { op_gen, .. } => Some(*op_gen),
+            AsyncArrowFetchStart::Exhausted => None,
+        };
+        let drive_shared = Arc::clone(&self.shared);
+        let cancel_shared = Arc::clone(&self.shared);
+        match spawn_rust_db_task_with_attr_and_cancel(
+            py,
+            async move { drive_shared.drive_fetch_step(start).await },
+            |py, opt_guard| match opt_guard {
+                Some(batch_guard) => batch_guard.into_py_cursor(py),
+                None => Err(PyStopAsyncIteration::new_err(())),
+            },
+            postgres_error_to_py,
+            move || {
+                cancel_shared.cancel_fetch(false);
+            },
+            POSTGRES_COMPLETION_DRAINER_ATTR,
+        ) {
+            Ok(awaitable) => Ok(awaitable),
+            Err(err) => {
+                if let Some(op_gen) = reserved_op {
+                    self.shared.abort_unspawned_fetch(op_gen);
+                }
+                Err(err)
+            }
+        }
+    }
+
+    /// Idempotently close the Arrow portal stream across `Unopened`, `Fetching`, `Open`, `Closing`, and `Closed` states.
+    pub fn aclose<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+        self.spawn_aclose_inner(py)
+    }
+
+    /// Enter an `async with` scope resolving to this `AsyncPostgresArrowStream`.
+    pub fn __aenter__<'py>(slf: PyRef<'py, Self>) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+        let py = slf.py();
+        let py_self: Py<Self> = slf.into_pyobject(py)?.unbind();
+        let awaitable = spawn_rust_db_task_with_attr(
+            py,
+            async { Ok::<(), PostgresError>(()) },
+            move |_py, ()| Ok(py_self.into_any()),
+            postgres_error_to_py,
+            POSTGRES_COMPLETION_DRAINER_ATTR,
+        )?;
+        Bound::new(py, awaitable)
+    }
+
+    /// Idempotently close the stream on `async with` exit without suppressing exceptions.
+    #[pyo3(signature = (exc_type = None, exc_val = None, exc_tb = None))]
+    pub fn __aexit__<'py>(
+        &self,
+        py: Python<'py>,
+        exc_type: Option<&Bound<'py, PyAny>>,
+        exc_val: Option<&Bound<'py, PyAny>>,
+        exc_tb: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+        let _ = (exc_type, exc_val, exc_tb);
+        self.spawn_aclose_inner(py)
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "AsyncPostgresArrowStream(state={:?})",
+            self.shared.state_label()
+        )
+    }
+}
+
 #[pymethods]
 impl PyAsyncPostgresClient {
     #[new]
@@ -1023,6 +1188,124 @@ impl PyAsyncPostgresClient {
             |py, portal| Ok(Py::new(py, PyAsyncPostgresPortal::from_portal(portal))?.into_any()),
             postgres_error_to_py,
         )
+    }
+
+    /// Execute a single-statement query directly into a frozen `PostgresArrowResult` asynchronously without building Python rows.
+    #[pyo3(signature = (
+        sql,
+        parameters = None,
+        *,
+        parameter_oids = None,
+        timeout = None,
+        threshold_rows = 256,
+        max_result_bytes = 268435456
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    pub fn select_to_arrow<'py>(
+        &self,
+        py: Python<'py>,
+        sql: &str,
+        parameters: Option<&Bound<'py, PyAny>>,
+        parameter_oids: Option<&Bound<'py, PyAny>>,
+        timeout: Option<&Bound<'py, PyAny>>,
+        #[pyo3(from_py_with = extract_threshold_rows)] threshold_rows: usize,
+        #[pyo3(from_py_with = extract_max_result_bytes)] max_result_bytes: usize,
+    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+        let timeout_secs = extract_strict_opt_f64(timeout)?;
+        let timeout_dur = CommandBudget::validate_optional_seconds(timeout_secs)
+            .map_err(|e| postgres_error_to_py(py, e))?;
+        if sql.as_bytes().contains(&0) {
+            return Err(postgres_error_to_py(
+                py,
+                PostgresError::Data(
+                    "SQL query string cannot contain embedded NUL byte".to_string(),
+                ),
+            ));
+        }
+        self.session
+            .ensure_ordinary_reservable()
+            .map_err(|e| postgres_error_to_py(py, e))?;
+        let none_bound = py.None().into_bound(py);
+        let params_ref = parameters.unwrap_or(&none_bound);
+        let (params, oids) = extract_parameters(py, params_ref, parameter_oids)
+            .map_err(|e| postgres_error_to_py(py, e))?;
+        let session = Arc::clone(&self.session);
+        let op_gen = session.reserve_operation_generation();
+        let budget = match CommandBudget::start_from_duration(timeout_dur) {
+            Ok(b) => b,
+            Err(err) => {
+                session.unreserve_operation_generation(op_gen);
+                return Err(postgres_error_to_py(py, err));
+            }
+        };
+        let sql_owned = sql.to_owned();
+        spawn_cancellable_op(
+            py,
+            &self.session,
+            op_gen,
+            async move {
+                execute_select_to_arrow(
+                    &session,
+                    op_gen,
+                    &sql_owned,
+                    &params,
+                    oids.as_deref(),
+                    None,
+                    budget,
+                    threshold_rows,
+                    max_result_bytes,
+                )
+                .await
+            },
+            arrow_output_into_py_result,
+            postgres_error_to_py,
+        )
+    }
+
+    /// Synchronously validate options and construct a cancellation-safe `AsyncPostgresArrowStream` that lazily opens a portal on first `__anext__`.
+    #[pyo3(signature = (
+        sql,
+        parameters = None,
+        *,
+        parameter_oids = None,
+        batch_size = 65536,
+        columns = None
+    ))]
+    pub fn stream_arrow_batches(
+        &self,
+        py: Python<'_>,
+        sql: &str,
+        parameters: Option<&Bound<'_, PyAny>>,
+        parameter_oids: Option<&Bound<'_, PyAny>>,
+        #[pyo3(from_py_with = extract_arrow_batch_size)] batch_size: i32,
+        columns: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyAsyncPostgresArrowStream> {
+        let cols_owned = extract_opt_copy_columns(columns)?;
+        if sql.as_bytes().contains(&0) {
+            return Err(postgres_error_to_py(
+                py,
+                PostgresError::Data(
+                    "SQL query string cannot contain embedded NUL byte".to_string(),
+                ),
+            ));
+        }
+        let none_bound = py.None().into_bound(py);
+        let params_ref = parameters.unwrap_or(&none_bound);
+        let (params, oids) = extract_parameters(py, params_ref, parameter_oids)
+            .map_err(|e| postgres_error_to_py(py, e))?;
+        self.session
+            .ensure_ordinary_reservable()
+            .map_err(|e| postgres_error_to_py(py, e))?;
+        Ok(PyAsyncPostgresArrowStream::new_unopened(
+            Arc::clone(&self.session),
+            UnopenedArrowPortalArgs {
+                sql: sql.to_owned(),
+                parameters: params,
+                parameter_oids: oids,
+                batch_size,
+                columns: cols_owned,
+            },
+        ))
     }
 
     /// Asynchronously open an exclusive binary `COPY ... TO STDOUT (FORMAT binary)` streaming iterator.

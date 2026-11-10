@@ -292,6 +292,31 @@ class AsyncPostgresClient:
         """Open a session-pinned row-limited PostgreSQL portal asynchronously over sql."""
         ...
 
+    def select_to_arrow(
+        self,
+        sql: str,
+        parameters: Sequence[PostgresValue | PgParameter] | None = None,
+        *,
+        parameter_oids: Sequence[int] | None = None,
+        timeout: float | None = None,
+        threshold_rows: int = 256,
+        max_result_bytes: int = 268435456,
+    ) -> Awaitable[PostgresArrowResult]:
+        """Execute a single-statement query directly into inline or VTBARROW SHM Arrow IPC asynchronously."""
+        ...
+
+    def stream_arrow_batches(
+        self,
+        sql: str,
+        parameters: Sequence[PostgresValue | PgParameter] | None = None,
+        *,
+        parameter_oids: Sequence[int] | None = None,
+        batch_size: int = 65536,
+        columns: Sequence[str] | None = None,
+    ) -> AsyncPostgresArrowStream:
+        """Validate options synchronously and return a cancellation-safe AsyncPostgresArrowStream."""
+        ...
+
     def copy_to(self, sql: str) -> Awaitable[AsyncPostgresCopyOut]:
         """Open an exclusive binary COPY ... TO STDOUT streaming iterator asynchronously."""
         ...
@@ -633,6 +658,35 @@ class SyncPostgresArrowStream:
         ...
 
 @final
+class AsyncPostgresArrowStream:
+    """Cancellation-safe asynchronous VTBARROW shared-memory Arrow IPC batch iterator."""
+
+    def __aiter__(self) -> AsyncPostgresArrowStream:
+        """Return self as an asynchronous ArrowCursor batch iterator."""
+        ...
+
+    def __anext__(self) -> Awaitable[_NativeArrowCursor]:
+        """Advance the server portal off the event loop and resolve to the next SHM ArrowCursor batch."""
+        ...
+
+    def aclose(self) -> Awaitable[None]:
+        """Idempotently close or cancel and retire the pinned Arrow portal stream."""
+        ...
+
+    def __aenter__(self) -> Awaitable[AsyncPostgresArrowStream]:
+        """Enter an async with block resolving to this AsyncPostgresArrowStream."""
+        ...
+
+    def __aexit__(
+        self,
+        exc_type: type[BaseException] | None = None,
+        exc_val: BaseException | None = None,
+        exc_tb: TracebackType | None = None,
+    ) -> Awaitable[None]:
+        """Close the stream on async context exit without suppressing exceptions."""
+        ...
+
+@final
 class SyncPostgresCopyOut:
     """Exclusive synchronous binary COPY ... TO STDOUT row iterator."""
 
@@ -767,6 +821,7 @@ class AsyncPostgresCopyIn:
 __all__ = [
     "FREE_THREADED",
     "GIL_USED",
+    "AsyncPostgresArrowStream",
     "AsyncPostgresClient",
     "AsyncPostgresCopyIn",
     "AsyncPostgresCopyOut",

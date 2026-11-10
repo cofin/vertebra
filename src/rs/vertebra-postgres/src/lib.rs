@@ -30,7 +30,8 @@ pub mod transaction;
 pub mod types;
 
 pub use crate::async_client::{
-    PyAsyncPostgresCopyIn, PyAsyncPostgresCopyOut, PyAsyncPostgresPortal,
+    PyAsyncPostgresArrowStream, PyAsyncPostgresCopyIn, PyAsyncPostgresCopyOut,
+    PyAsyncPostgresPortal,
 };
 pub use crate::session::statements::{
     CachedStatement, PoolerCapabilities, PoolerMode, StatementCache, StatementKey,

@@ -1750,6 +1750,29 @@ impl ArrowPortalStream {
         columns: Option<Vec<String>>,
     ) -> Result<Self, PostgresError> {
         let op_gen = session.reserve_operation_generation();
+        Self::open_with_generation(
+            session,
+            op_gen,
+            sql,
+            parameters,
+            parameter_oids,
+            batch_size,
+            columns,
+        )
+        .await
+    }
+
+    /// Open a session-pinned [`ArrowPortalStream`] under a fenced [`OperationGeneration`] inside
+    /// [`Portal`]'s single `BEGIN` or nested `SAVEPOINT` scope.
+    pub(crate) async fn open_with_generation(
+        session: &Arc<SessionHandle>,
+        op_gen: OperationGeneration,
+        sql: &str,
+        parameters: &[Parameter],
+        parameter_oids: Option<&[u32]>,
+        batch_size: i32,
+        columns: Option<Vec<String>>,
+    ) -> Result<Self, PostgresError> {
         Self::open_as_with_generation(
             session,
             op_gen,
@@ -1872,6 +1895,13 @@ impl ArrowPortalStream {
     /// Borrow the pinned [`SessionHandle`] while the stream remains active.
     pub fn session(&self) -> Option<&Arc<SessionHandle>> {
         self.portal.as_ref().map(Portal::session)
+    }
+
+    pub(crate) fn portal_identity(&self) -> Option<(String, TransactionOwner)> {
+        self.portal
+            .as_ref()
+            .filter(|p| !p.is_closed())
+            .map(|p| (p.portal_name.clone(), p.scope.owner))
     }
 
     /// Advance the portal incrementally and emit the next `VTBARROW` shared-memory Arrow IPC batch,
@@ -2087,7 +2117,7 @@ impl ArrowPortalStream {
         let had_caller_ambient = matches!(scope.kind, TransactionScopeKind::NestedSavepoint { .. });
         let connect_timeout = session.config().connect_timeout;
 
-        let (mut guard, cancel_notify) = match session
+        let (mut guard, _cancel_notify) = match session
             .acquire_portal_operation_with_generation(
                 Some(op_gen),
                 scope.owner,
@@ -2125,15 +2155,12 @@ impl ArrowPortalStream {
             let conn = guard.connection_mut();
             let close_fut = close_and_rollback_portal_on_conn(conn, &portal_name, &scope, true);
             tokio::pin!(close_fut);
-            let cancel_drain_timeout = async {
-                cancel_notify.notified().await;
-                tokio::time::sleep(connect_timeout).await;
-            };
-            tokio::pin!(cancel_drain_timeout);
+            let close_deadline = tokio::time::sleep(connect_timeout);
+            tokio::pin!(close_deadline);
             tokio::select! {
                 biased;
                 res = &mut close_fut => Ok(res),
-                () = &mut cancel_drain_timeout => Err(()),
+                () = &mut close_deadline => Err(()),
             }
         };
 
@@ -2537,4 +2564,755 @@ fn serialize_record_batch_to_shm(
     )?;
     writer.write_batch(batch)?;
     writer.finish()
+}
+
+/// Deferred configuration held by an `AsyncPostgresArrowStream` before its first `__anext__` opens a server portal.
+pub(crate) struct UnopenedArrowPortalArgs {
+    pub(crate) sql: String,
+    pub(crate) parameters: Vec<Parameter>,
+    pub(crate) parameter_oids: Option<Vec<u32>>,
+    pub(crate) batch_size: i32,
+    pub(crate) columns: Option<Vec<String>>,
+}
+
+type SharedArrowOutputSlot = Arc<std::sync::Mutex<Option<ArrowOutput>>>;
+pub(crate) type PortalCleanupRegistration = (String, TransactionOwner);
+
+struct DetachedPortalCleanup {
+    stream: ArrowPortalStream,
+    close_gen: OperationGeneration,
+    reg: Option<PortalCleanupRegistration>,
+}
+
+/// Explicit non-blocking state machine (`Unopened -> Fetching -> Open -> Closing -> Closed`)
+/// governing `AsyncPostgresArrowStream` across event-loop and Tokio worker threads.
+pub(crate) enum AsyncArrowPortalState {
+    Unopened(Option<UnopenedArrowPortalArgs>),
+    Fetching {
+        active_op_gen: OperationGeneration,
+        cancel_requested: bool,
+        close_requested: bool,
+        completed_waiting_drainer: bool,
+        portal_identity: Option<PortalCleanupRegistration>,
+        cleanup_registered: Option<PortalCleanupRegistration>,
+        stream: Option<ArrowPortalStream>,
+        pending_output: Option<SharedArrowOutputSlot>,
+        pending_exhausted: bool,
+    },
+    Open(ArrowPortalStream),
+    Closing {
+        active_op_gen: Option<OperationGeneration>,
+    },
+    Closed {
+        exhausted: bool,
+    },
+}
+
+pub(crate) enum AsyncArrowFetchStart {
+    OpenAndFetch {
+        args: UnopenedArrowPortalArgs,
+        op_gen: OperationGeneration,
+    },
+    FetchNext {
+        stream: Box<ArrowPortalStream>,
+        op_gen: OperationGeneration,
+    },
+    Exhausted,
+}
+
+pub(crate) enum AsyncArrowCloseStart {
+    ImmediateNoOp,
+    RunClose {
+        stream: Box<ArrowPortalStream>,
+        close_gen: OperationGeneration,
+        cleanup_reg: Option<PortalCleanupRegistration>,
+    },
+    WaitUntilClosed(std::pin::Pin<Box<tokio::sync::futures::OwnedNotified>>),
+}
+
+/// Shared synchronization block coordinating `AsyncPostgresArrowStream` and [`PendingArrowBatchGuard`].
+pub(crate) struct AsyncArrowPortalShared {
+    session: Arc<SessionHandle>,
+    state: std::sync::Mutex<AsyncArrowPortalState>,
+    step_done_notify: Arc<tokio::sync::Notify>,
+}
+
+impl AsyncArrowPortalShared {
+    pub(crate) fn new_unopened(session: Arc<SessionHandle>, args: UnopenedArrowPortalArgs) -> Self {
+        Self {
+            session,
+            state: std::sync::Mutex::new(AsyncArrowPortalState::Unopened(Some(args))),
+            step_done_notify: Arc::new(tokio::sync::Notify::new()),
+        }
+    }
+
+    pub(crate) fn state_label(&self) -> &'static str {
+        let guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        match &*guard {
+            AsyncArrowPortalState::Unopened(_) => "unopened",
+            AsyncArrowPortalState::Fetching { .. } => "fetching",
+            AsyncArrowPortalState::Open(_) => "open",
+            AsyncArrowPortalState::Closing { .. } => "closing",
+            AsyncArrowPortalState::Closed { exhausted: true } => "exhausted",
+            AsyncArrowPortalState::Closed { exhausted: false } => "closed",
+        }
+    }
+
+    pub(crate) fn begin_fetch_step(&self) -> Result<AsyncArrowFetchStart, PostgresError> {
+        let mut guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let next = match &mut *guard {
+            AsyncArrowPortalState::Unopened(args_opt) => {
+                let args = args_opt.take().ok_or_else(|| {
+                    PostgresError::Interface("Arrow portal stream already initialized".to_string())
+                })?;
+                let op_gen = self.session.reserve_operation_generation();
+                *guard = AsyncArrowPortalState::Fetching {
+                    active_op_gen: op_gen,
+                    cancel_requested: false,
+                    close_requested: false,
+                    completed_waiting_drainer: false,
+                    portal_identity: None,
+                    cleanup_registered: None,
+                    stream: None,
+                    pending_output: None,
+                    pending_exhausted: false,
+                };
+                AsyncArrowFetchStart::OpenAndFetch { args, op_gen }
+            }
+            AsyncArrowPortalState::Open(_) => {
+                let op_gen = self.session.reserve_operation_generation();
+                let prev = std::mem::replace(
+                    &mut *guard,
+                    AsyncArrowPortalState::Closed { exhausted: false },
+                );
+                let AsyncArrowPortalState::Open(stream) = prev else {
+                    unreachable!("checked Open state");
+                };
+                let portal_identity = stream.portal_identity();
+                *guard = AsyncArrowPortalState::Fetching {
+                    active_op_gen: op_gen,
+                    cancel_requested: false,
+                    close_requested: false,
+                    completed_waiting_drainer: false,
+                    portal_identity,
+                    cleanup_registered: None,
+                    stream: None,
+                    pending_output: None,
+                    pending_exhausted: false,
+                };
+                AsyncArrowFetchStart::FetchNext {
+                    stream: Box::new(stream),
+                    op_gen,
+                }
+            }
+            AsyncArrowPortalState::Fetching { .. } => {
+                return Err(PostgresError::Interface(
+                    "another __anext__ fetch is already in flight on AsyncPostgresArrowStream"
+                        .to_string(),
+                ));
+            }
+            AsyncArrowPortalState::Closing { .. } => {
+                return Err(PostgresError::Interface(
+                    "cannot call __anext__ while AsyncPostgresArrowStream is closing".to_string(),
+                ));
+            }
+            AsyncArrowPortalState::Closed { exhausted: true } => AsyncArrowFetchStart::Exhausted,
+            AsyncArrowPortalState::Closed { exhausted: false } => {
+                return Err(PostgresError::Interface(
+                    "cannot fetch from a closed AsyncPostgresArrowStream".to_string(),
+                ));
+            }
+        };
+        Ok(next)
+    }
+
+    pub(crate) fn abort_unspawned_fetch(&self, op_gen: OperationGeneration) {
+        self.session.unreserve_operation_generation(op_gen);
+        {
+            let mut guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            *guard = AsyncArrowPortalState::Closed { exhausted: false };
+        }
+        self.step_done_notify.notify_waiters();
+    }
+
+    fn arm_step_waiter(&self) -> std::pin::Pin<Box<tokio::sync::futures::OwnedNotified>> {
+        let notified = Arc::clone(&self.step_done_notify).notified_owned();
+        let mut pinned = Box::pin(notified);
+        pinned.as_mut().enable();
+        pinned
+    }
+
+    fn spawn_stream_cleanup_detached(self: &Arc<Self>, mut cleanup: DetachedPortalCleanup) {
+        let session = Arc::clone(&self.session);
+        let shared = Arc::clone(self);
+        vertebra_db::py_async::db_runtime_handle().spawn(async move {
+            let _ = cleanup
+                .stream
+                .close_with_generation(cleanup.close_gen)
+                .await;
+            if let Some((pname, powner)) = cleanup.reg {
+                session.finish_portal_drop_cleanup(&pname, powner).await;
+            }
+            {
+                let mut guard = shared.state.lock().unwrap_or_else(|e| e.into_inner());
+                *guard = AsyncArrowPortalState::Closed { exhausted: false };
+            }
+            shared.step_done_notify.notify_waiters();
+        });
+    }
+
+    /// Cancel an in-flight fetch or reclaim an undelivered SHM batch queued on the completion drainer.
+    pub(crate) fn cancel_fetch(self: &Arc<Self>, close_requested_flag: bool) {
+        let mut dropped_output: Option<ArrowOutput> = None;
+        let mut detached_cleanup: Option<DetachedPortalCleanup> = None;
+        let mut op_to_cancel: Option<OperationGeneration> = None;
+        let mut notify_closed = false;
+
+        {
+            let mut guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            if let AsyncArrowPortalState::Fetching {
+                active_op_gen,
+                cancel_requested,
+                close_requested,
+                completed_waiting_drainer,
+                portal_identity,
+                cleanup_registered,
+                stream,
+                pending_output,
+                ..
+            } = &mut *guard
+            {
+                *cancel_requested = true;
+                if close_requested_flag {
+                    *close_requested = true;
+                }
+                if *completed_waiting_drainer {
+                    if let Some(slot) = pending_output.take() {
+                        dropped_output = slot.lock().unwrap_or_else(|e| e.into_inner()).take();
+                    }
+                    let live_stream = stream.take();
+                    let prior_reg = cleanup_registered.take();
+                    match live_stream {
+                        Some(s) if !s.is_closed() => {
+                            let reg = prior_reg.or_else(|| {
+                                let id = s.portal_identity()?;
+                                self.session.begin_portal_drop_cleanup(&id.0, id.1);
+                                Some(id)
+                            });
+                            let close_gen = self.session.reserve_operation_generation();
+                            *guard = AsyncArrowPortalState::Closing {
+                                active_op_gen: Some(close_gen),
+                            };
+                            detached_cleanup = Some(DetachedPortalCleanup {
+                                stream: s,
+                                close_gen,
+                                reg,
+                            });
+                        }
+                        _ => {
+                            if let Some((pname, powner)) = prior_reg {
+                                let session = Arc::clone(&self.session);
+                                let shared = Arc::clone(self);
+                                *guard = AsyncArrowPortalState::Closing {
+                                    active_op_gen: None,
+                                };
+                                vertebra_db::py_async::db_runtime_handle().spawn(async move {
+                                    session.finish_portal_drop_cleanup(&pname, powner).await;
+                                    {
+                                        let mut g =
+                                            shared.state.lock().unwrap_or_else(|e| e.into_inner());
+                                        *g = AsyncArrowPortalState::Closed { exhausted: false };
+                                    }
+                                    shared.step_done_notify.notify_waiters();
+                                });
+                            } else {
+                                *guard = AsyncArrowPortalState::Closed { exhausted: false };
+                                notify_closed = true;
+                            }
+                        }
+                    }
+                } else {
+                    if cleanup_registered.is_none()
+                        && let Some((pname, powner)) = portal_identity.clone()
+                    {
+                        self.session.begin_portal_drop_cleanup(&pname, powner);
+                        *cleanup_registered = Some((pname, powner));
+                    }
+                    op_to_cancel = Some(*active_op_gen);
+                }
+            }
+        }
+
+        drop(dropped_output);
+        if let Some(op_gen) = op_to_cancel {
+            self.session.trigger_async_cancel(op_gen);
+        }
+        if let Some(cleanup) = detached_cleanup {
+            self.spawn_stream_cleanup_detached(cleanup);
+        }
+        if notify_closed {
+            self.step_done_notify.notify_waiters();
+        }
+    }
+
+    pub(crate) fn cancel_active_close(&self) {
+        let op_opt = {
+            let guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            match &*guard {
+                AsyncArrowPortalState::Closing { active_op_gen } => *active_op_gen,
+                _ => None,
+            }
+        };
+        if let Some(op_gen) = op_opt {
+            self.session.trigger_async_cancel(op_gen);
+        }
+    }
+
+    pub(crate) fn begin_aclose(self: &Arc<Self>) -> AsyncArrowCloseStart {
+        let mut guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        match &*guard {
+            AsyncArrowPortalState::Unopened(_) => {
+                *guard = AsyncArrowPortalState::Closed { exhausted: false };
+                drop(guard);
+                self.step_done_notify.notify_waiters();
+                AsyncArrowCloseStart::ImmediateNoOp
+            }
+            AsyncArrowPortalState::Closed { .. } => AsyncArrowCloseStart::ImmediateNoOp,
+            AsyncArrowPortalState::Open(_) => {
+                let prev = std::mem::replace(
+                    &mut *guard,
+                    AsyncArrowPortalState::Closing {
+                        active_op_gen: None,
+                    },
+                );
+                let AsyncArrowPortalState::Open(stream) = prev else {
+                    unreachable!("checked Open state");
+                };
+                if stream.is_closed() {
+                    *guard = AsyncArrowPortalState::Closed { exhausted: false };
+                    drop(guard);
+                    self.step_done_notify.notify_waiters();
+                    return AsyncArrowCloseStart::ImmediateNoOp;
+                }
+                let cleanup_reg = stream.portal_identity();
+                if let Some((ref pname, powner)) = cleanup_reg {
+                    self.session.begin_portal_drop_cleanup(pname, powner);
+                }
+                let close_gen = self.session.reserve_operation_generation();
+                *guard = AsyncArrowPortalState::Closing {
+                    active_op_gen: Some(close_gen),
+                };
+                AsyncArrowCloseStart::RunClose {
+                    stream: Box::new(stream),
+                    close_gen,
+                    cleanup_reg,
+                }
+            }
+            AsyncArrowPortalState::Closing { .. } => {
+                let waiter = self.arm_step_waiter();
+                AsyncArrowCloseStart::WaitUntilClosed(waiter)
+            }
+            AsyncArrowPortalState::Fetching { .. } => {
+                let waiter = self.arm_step_waiter();
+                drop(guard);
+                self.cancel_fetch(true);
+                let guard_after = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                if matches!(&*guard_after, AsyncArrowPortalState::Closed { .. }) {
+                    AsyncArrowCloseStart::ImmediateNoOp
+                } else {
+                    AsyncArrowCloseStart::WaitUntilClosed(waiter)
+                }
+            }
+        }
+    }
+
+    pub(crate) async fn run_explicit_close(
+        self: Arc<Self>,
+        mut stream: ArrowPortalStream,
+        close_gen: OperationGeneration,
+        cleanup_reg: Option<(String, TransactionOwner)>,
+    ) -> Result<(), PostgresError> {
+        let res = stream.close_with_generation(close_gen).await;
+        if let Some((pname, powner)) = cleanup_reg {
+            self.session
+                .finish_portal_drop_cleanup(&pname, powner)
+                .await;
+        }
+        {
+            let mut guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            *guard = AsyncArrowPortalState::Closed { exhausted: false };
+        }
+        self.step_done_notify.notify_waiters();
+        res
+    }
+
+    pub(crate) async fn wait_until_closed(
+        self: Arc<Self>,
+        mut first_waiter: std::pin::Pin<Box<tokio::sync::futures::OwnedNotified>>,
+    ) -> Result<(), PostgresError> {
+        loop {
+            first_waiter.await;
+            let next_waiter = {
+                let guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                if matches!(&*guard, AsyncArrowPortalState::Closed { .. }) {
+                    return Ok(());
+                }
+                self.arm_step_waiter()
+            };
+            first_waiter = next_waiter;
+        }
+    }
+
+    async fn finish_cancelled_or_failed_stream(&self, mut stream_opt: Option<ArrowPortalStream>) {
+        let action = {
+            let mut guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            let prior_reg = match &mut *guard {
+                AsyncArrowPortalState::Fetching {
+                    cleanup_registered, ..
+                } => cleanup_registered.take(),
+                _ => None,
+            };
+            match stream_opt.as_ref().filter(|s| !s.is_closed()) {
+                Some(live) => {
+                    let reg = prior_reg.or_else(|| {
+                        let id = live.portal_identity()?;
+                        self.session.begin_portal_drop_cleanup(&id.0, id.1);
+                        Some(id)
+                    });
+                    let close_gen = self.session.reserve_operation_generation();
+                    *guard = AsyncArrowPortalState::Closing {
+                        active_op_gen: Some(close_gen),
+                    };
+                    Some((Some(close_gen), reg))
+                }
+                None => {
+                    if let Some(reg) = prior_reg {
+                        *guard = AsyncArrowPortalState::Closing {
+                            active_op_gen: None,
+                        };
+                        Some((None, Some(reg)))
+                    } else {
+                        *guard = AsyncArrowPortalState::Closed { exhausted: false };
+                        None
+                    }
+                }
+            }
+        };
+
+        let Some((close_gen_opt, reg_opt)) = action else {
+            self.step_done_notify.notify_waiters();
+            return;
+        };
+
+        if let (Some(close_gen), Some(mut s)) = (close_gen_opt, stream_opt.take()) {
+            let _ = s.close_with_generation(close_gen).await;
+        }
+        if let Some((pname, powner)) = reg_opt {
+            self.session
+                .finish_portal_drop_cleanup(&pname, powner)
+                .await;
+        }
+        {
+            let mut guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            *guard = AsyncArrowPortalState::Closed { exhausted: false };
+        }
+        self.step_done_notify.notify_waiters();
+    }
+
+    pub(crate) async fn drive_fetch_step(
+        self: Arc<Self>,
+        start: AsyncArrowFetchStart,
+    ) -> Result<Option<PendingArrowBatchGuard>, PostgresError> {
+        let (mut stream, fetch_gen) = match start {
+            AsyncArrowFetchStart::Exhausted => return Ok(None),
+            AsyncArrowFetchStart::FetchNext { stream, op_gen } => (*stream, op_gen),
+            AsyncArrowFetchStart::OpenAndFetch { args, op_gen } => {
+                let opened = match ArrowPortalStream::open_with_generation(
+                    &self.session,
+                    op_gen,
+                    &args.sql,
+                    &args.parameters,
+                    args.parameter_oids.as_deref(),
+                    args.batch_size,
+                    args.columns,
+                )
+                .await
+                {
+                    Ok(s) => s,
+                    Err(err) => {
+                        self.finish_cancelled_or_failed_stream(None).await;
+                        return Err(err);
+                    }
+                };
+
+                let post_open = {
+                    let mut guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                    match &mut *guard {
+                        AsyncArrowPortalState::Fetching {
+                            active_op_gen,
+                            cancel_requested,
+                            close_requested,
+                            portal_identity,
+                            ..
+                        } => {
+                            if *cancel_requested || *close_requested || self.session.will_retire() {
+                                None
+                            } else {
+                                let next_gen = self.session.reserve_operation_generation();
+                                *active_op_gen = next_gen;
+                                *portal_identity = opened.portal_identity();
+                                Some(next_gen)
+                            }
+                        }
+                        _ => None,
+                    }
+                };
+
+                match post_open {
+                    Some(next_gen) => (opened, next_gen),
+                    None => {
+                        self.finish_cancelled_or_failed_stream(Some(opened)).await;
+                        return Err(PostgresError::Operational(
+                            "Arrow portal stream was cancelled during portal open".to_string(),
+                        ));
+                    }
+                }
+            }
+        };
+
+        match stream.next_batch_shm_with_generation(fetch_gen).await {
+            Err(err) => {
+                self.finish_cancelled_or_failed_stream(Some(stream)).await;
+                Err(err)
+            }
+            Ok(None) => {
+                let (was_cancelled, prior_reg) = {
+                    let mut guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                    match &mut *guard {
+                        AsyncArrowPortalState::Fetching {
+                            cancel_requested,
+                            close_requested,
+                            cleanup_registered,
+                            ..
+                        } => {
+                            let c = *cancel_requested || *close_requested;
+                            let r = cleanup_registered.take();
+                            if r.is_some() {
+                                *guard = AsyncArrowPortalState::Closing {
+                                    active_op_gen: None,
+                                };
+                            } else {
+                                *guard = AsyncArrowPortalState::Closed { exhausted: !c };
+                            }
+                            (c, r)
+                        }
+                        _ => (true, None),
+                    }
+                };
+                if let Some((pname, powner)) = prior_reg {
+                    self.session
+                        .finish_portal_drop_cleanup(&pname, powner)
+                        .await;
+                    let mut guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                    *guard = AsyncArrowPortalState::Closed {
+                        exhausted: !was_cancelled,
+                    };
+                }
+                self.step_done_notify.notify_waiters();
+                if was_cancelled {
+                    Err(PostgresError::Operational(
+                        "Arrow portal stream was cancelled".to_string(),
+                    ))
+                } else {
+                    Ok(None)
+                }
+            }
+            Ok(Some(arrow_out)) => {
+                let stream_exhausted = stream.is_exhausted() && stream.is_closed();
+                let output_slot: SharedArrowOutputSlot =
+                    Arc::new(std::sync::Mutex::new(Some(arrow_out)));
+
+                let parked = {
+                    let mut guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                    match &mut *guard {
+                        AsyncArrowPortalState::Fetching {
+                            cancel_requested,
+                            close_requested,
+                            completed_waiting_drainer,
+                            stream: slot_stream,
+                            pending_output,
+                            pending_exhausted,
+                            ..
+                        } if !*cancel_requested && !*close_requested => {
+                            *completed_waiting_drainer = true;
+                            *pending_output = Some(Arc::clone(&output_slot));
+                            *pending_exhausted = stream_exhausted;
+                            if !stream_exhausted {
+                                *slot_stream = Some(stream);
+                            }
+                            Ok(())
+                        }
+                        _ => Err(stream),
+                    }
+                };
+
+                match parked {
+                    Ok(()) => Ok(Some(PendingArrowBatchGuard::new(output_slot, self))),
+                    Err(unparked_stream) => {
+                        let reclaimed =
+                            output_slot.lock().unwrap_or_else(|e| e.into_inner()).take();
+                        drop(reclaimed);
+                        self.finish_cancelled_or_failed_stream(Some(unparked_stream))
+                            .await;
+                        Err(PostgresError::Operational(
+                            "Arrow portal stream was cancelled".to_string(),
+                        ))
+                    }
+                }
+            }
+        }
+    }
+
+    fn abort_after_cursor_error(self: &Arc<Self>) {
+        let mut to_close = None;
+        {
+            let mut guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            if matches!(&*guard, AsyncArrowPortalState::Open(_)) {
+                let prev = std::mem::replace(
+                    &mut *guard,
+                    AsyncArrowPortalState::Closed { exhausted: false },
+                );
+                if let AsyncArrowPortalState::Open(s) = prev
+                    && !s.is_closed()
+                {
+                    let reg = s.portal_identity();
+                    if let Some((ref pname, powner)) = reg {
+                        self.session.begin_portal_drop_cleanup(pname, powner);
+                    }
+                    let close_gen = self.session.reserve_operation_generation();
+                    *guard = AsyncArrowPortalState::Closing {
+                        active_op_gen: Some(close_gen),
+                    };
+                    to_close = Some(DetachedPortalCleanup {
+                        stream: s,
+                        close_gen,
+                        reg,
+                    });
+                }
+            }
+        }
+        if let Some(cleanup) = to_close {
+            self.spawn_stream_cleanup_detached(cleanup);
+        } else {
+            self.step_done_notify.notify_waiters();
+        }
+    }
+}
+
+/// Drop-safe completion guard wrapping a produced `ArrowOutput::Shm` and shared
+/// [`AsyncArrowPortalShared`] state inside `DbCompletionDrainer`'s `map_ok` closure.
+///
+/// When the awaiting `asyncio.Future` is not cancelled, [`PendingArrowBatchGuard::into_py_cursor`]
+/// disarms the guard, transitions `Fetching -> Open` (or `Closed` on final completion), and hands
+/// only the batch `Arc<ShmRegion>` into `vertebra._vertebra.ArrowCursor`. When the future was
+/// cancelled before `DbCompletionDrainer` runs `map_ok`, `Drop` immediately drops the undelivered
+/// `ArrowOutput::Shm` and spawns bounded generation-fenced portal close/cancel/retirement on
+/// `db_runtime_handle()`.
+pub(crate) struct PendingArrowBatchGuard {
+    output_slot: SharedArrowOutputSlot,
+    shared: Arc<AsyncArrowPortalShared>,
+    disarmed: bool,
+}
+
+impl PendingArrowBatchGuard {
+    fn new(output_slot: SharedArrowOutputSlot, shared: Arc<AsyncArrowPortalShared>) -> Self {
+        Self {
+            output_slot,
+            shared,
+            disarmed: false,
+        }
+    }
+
+    pub(crate) fn into_py_cursor(
+        mut self,
+        py: pyo3::Python<'_>,
+    ) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        self.disarmed = true;
+        let output_opt = self
+            .output_slot
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+
+        let transitioned = {
+            let mut guard = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
+            match &mut *guard {
+                AsyncArrowPortalState::Fetching {
+                    cancel_requested,
+                    close_requested,
+                    stream,
+                    pending_output,
+                    pending_exhausted,
+                    ..
+                } if !*cancel_requested && !*close_requested => {
+                    let _ = pending_output.take();
+                    let exhausted = *pending_exhausted;
+                    if exhausted {
+                        *guard = AsyncArrowPortalState::Closed { exhausted: true };
+                        true
+                    } else if let Some(s) = stream.take() {
+                        *guard = AsyncArrowPortalState::Open(s);
+                        true
+                    } else {
+                        *guard = AsyncArrowPortalState::Closed { exhausted: false };
+                        false
+                    }
+                }
+                _ => false,
+            }
+        };
+
+        if !transitioned {
+            drop(output_opt);
+            self.shared.cancel_fetch(false);
+            return Err(crate::errors::postgres_error_to_py(
+                py,
+                PostgresError::Operational("Arrow portal stream was cancelled".to_string()),
+            ));
+        }
+
+        self.shared.step_done_notify.notify_waiters();
+        let Some(output) = output_opt else {
+            self.shared.abort_after_cursor_error();
+            return Err(crate::errors::postgres_error_to_py(
+                py,
+                PostgresError::Operational(
+                    "Arrow portal batch was reclaimed on cancellation".to_string(),
+                ),
+            ));
+        };
+
+        match crate::arrow::shm_output_into_py_cursor(py, output) {
+            Ok(cursor) => Ok(cursor),
+            Err(py_err) => {
+                self.shared.abort_after_cursor_error();
+                Err(py_err)
+            }
+        }
+    }
+}
+
+impl Drop for PendingArrowBatchGuard {
+    fn drop(&mut self) {
+        if self.disarmed {
+            return;
+        }
+        let undelivered = self
+            .output_slot
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        drop(undelivered);
+        self.shared.cancel_fetch(false);
+    }
 }
