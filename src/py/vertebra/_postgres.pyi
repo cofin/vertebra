@@ -192,6 +192,16 @@ class SyncPostgresClient:
         """Roll back to an active numeric savepoint ('ROLLBACK TO SAVEPOINT vtb_sp_<token>')."""
         ...
 
+    def open_listener(
+        self,
+        channels: Sequence[str],
+        *,
+        queue_capacity: int = 1024,
+        reconnect: bool = False,
+    ) -> Awaitable[AsyncPostgresListener]:
+        """Open a dedicated non-pooled Direct/Session PostgreSQL LISTEN/NOTIFY session asynchronously."""
+        ...
+
     @property
     def closed(self) -> bool:
         """Return True unless an authenticated session is currently active."""
@@ -374,6 +384,16 @@ class AsyncPostgresClient:
 
     def rollback_to_savepoint(self, token: int) -> Awaitable[None]:
         """Roll back to an active numeric savepoint ('ROLLBACK TO SAVEPOINT vtb_sp_<token>') asynchronously."""
+        ...
+
+    def open_listener(
+        self,
+        channels: Sequence[str],
+        *,
+        queue_capacity: int = 1024,
+        reconnect: bool = False,
+    ) -> Awaitable[AsyncPostgresListener]:
+        """Open a dedicated non-pooled Direct/Session PostgreSQL LISTEN/NOTIFY session asynchronously."""
         ...
 
     @property
@@ -818,6 +838,44 @@ class AsyncPostgresCopyIn:
         """Abort via aclose() if unfinished or on exception without suppressing exceptions."""
         ...
 
+@final
+class AsyncPostgresListener:
+    """Dedicated non-pooled asynchronous PostgreSQL LISTEN/NOTIFY listener handle."""
+
+    @property
+    def closed(self) -> bool:
+        """Return a read-only zero-I/O snapshot of whether the listener has permanently closed."""
+        ...
+
+    def next(self) -> Awaitable[tuple[int, str, bytes, bool] | None]:
+        """Resolve to (pid, channel, payload_bytes, reconnected_gap) or None after aclose()."""
+        ...
+
+    def subscribe(self, channels: Sequence[str]) -> Awaitable[None]:
+        """Issue LISTEN for channels and resolve once ReadyForQuery arrives."""
+        ...
+
+    def unsubscribe(self, channels: Sequence[str]) -> Awaitable[None]:
+        """Issue UNLISTEN for channels and resolve once ReadyForQuery arrives."""
+        ...
+
+    def aclose(self) -> Awaitable[None]:
+        """Idempotently close the listener, wake any pending next() with None, and stop reconnect sleeps."""
+        ...
+
+    def __aenter__(self) -> Awaitable[AsyncPostgresListener]:
+        """Enter an async with block resolving to this AsyncPostgresListener."""
+        ...
+
+    def __aexit__(
+        self,
+        exc_type: type[BaseException] | None = None,
+        exc_val: BaseException | None = None,
+        exc_tb: TracebackType | None = None,
+    ) -> Awaitable[None]:
+        """Idempotently close the listener on async context exit without suppressing exceptions."""
+        ...
+
 __all__ = [
     "FREE_THREADED",
     "GIL_USED",
@@ -825,6 +883,7 @@ __all__ = [
     "AsyncPostgresClient",
     "AsyncPostgresCopyIn",
     "AsyncPostgresCopyOut",
+    "AsyncPostgresListener",
     "AsyncPostgresPool",
     "AsyncPostgresPortal",
     "SyncPostgresArrowStream",

@@ -7,14 +7,20 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use pyo3::exceptions::PyStopAsyncIteration;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyTuple};
+use pyo3::types::{PyBytes, PyDict, PyTuple};
+use tokio::sync::Notify;
 use vertebra_db::py_async::{
-    RustDbTaskAwaitable, spawn_rust_db_task_with_attr, spawn_rust_db_task_with_attr_and_cancel,
+    RustDbTaskAwaitable, db_runtime_handle, spawn_rust_db_task_with_attr,
+    spawn_rust_db_task_with_attr_and_cancel,
 };
 
 use crate::arrow::arrow_output_into_py_result;
 use crate::copy::{CopyFromStream, CopyOut};
 use crate::errors::{PostgresError, postgres_error_to_py};
+use crate::notifications::{
+    DEFAULT_NOTIFICATION_MAX_BYTES, DEFAULT_NOTIFICATION_QUEUE_CAPACITY, ListenerOptions,
+    NotificationFrame, PostgresListener,
+};
 use crate::portal::{
     AsyncArrowCloseStart, AsyncArrowFetchStart, AsyncArrowPortalShared, Portal,
     UnopenedArrowPortalArgs, execute_select_to_arrow,
@@ -24,17 +30,21 @@ use crate::session::cancel::OperationGeneration;
 use crate::session::pipeline_scope::{
     PipelineScopeToken, extract_pipeline_batch, outcomes_to_python, pipeline_error_to_py,
 };
+use crate::session::statements::PoolerMode;
 use crate::session::{
     ClientBeginConnect, CloseAction, CommandBudget, CopyTaskCleanupGuard, SessionHandle,
 };
 use crate::sync_client::{
     OwnedBusyGuard, build_validated_config, copy_out_row_to_python, extract_arrow_batch_size,
     extract_batch_size, extract_cloud_auth_options, extract_copy_rows_and_oids,
-    extract_iam_auth_options, extract_ipc_buffer_bytes, extract_max_result_bytes, extract_max_rows,
-    extract_opt_copy_columns, extract_scope_id, extract_session_gucs, extract_strict_bool,
-    extract_strict_f64, extract_strict_i64, extract_strict_opt_f64, extract_strict_opt_i64,
-    extract_strict_u64, extract_threshold_rows,
+    extract_iam_auth_options, extract_ipc_buffer_bytes, extract_listener_channels,
+    extract_max_result_bytes, extract_max_rows, extract_opt_copy_columns, extract_queue_capacity,
+    extract_scope_id, extract_session_gucs, extract_strict_bool, extract_strict_f64,
+    extract_strict_i64, extract_strict_opt_f64, extract_strict_opt_i64, extract_strict_u64,
+    extract_threshold_rows,
 };
+
+const _: () = assert!(DEFAULT_NOTIFICATION_QUEUE_CAPACITY == 1024);
 
 /// Event-loop attribute name isolating the `vertebra._postgres` completion drainer from sibling extensions.
 pub const POSTGRES_COMPLETION_DRAINER_ATTR: &str = "_vertebra_postgres_completion_drainer";
@@ -102,13 +112,14 @@ impl PyAsyncPostgresClient {
         Self { session }
     }
 
-    /// Register asynchronous client, portal, Arrow stream, and COPY types on the `vertebra._postgres` module.
+    /// Register asynchronous client, portal, Arrow stream, COPY, and listener types on `vertebra._postgres`.
     pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_class::<Self>()?;
         m.add_class::<PyAsyncPostgresPortal>()?;
         m.add_class::<PyAsyncPostgresArrowStream>()?;
         m.add_class::<PyAsyncPostgresCopyOut>()?;
-        m.add_class::<PyAsyncPostgresCopyIn>()
+        m.add_class::<PyAsyncPostgresCopyIn>()?;
+        m.add_class::<PyAsyncPostgresListener>()
     }
 }
 
@@ -965,6 +976,624 @@ impl PyAsyncPostgresArrowStream {
     }
 }
 
+struct PendingOpenListenerGuard {
+    listener: Option<PostgresListener>,
+}
+
+impl PendingOpenListenerGuard {
+    fn new(listener: PostgresListener) -> Self {
+        Self {
+            listener: Some(listener),
+        }
+    }
+
+    fn take_into_py_listener(&mut self) -> PyAsyncPostgresListener {
+        let listener = self
+            .listener
+            .take()
+            .expect("PendingOpenListenerGuard consumed exactly once");
+        PyAsyncPostgresListener::from_listener(listener)
+    }
+}
+
+impl Drop for PendingOpenListenerGuard {
+    fn drop(&mut self) {
+        if let Some(listener) = self.listener.take() {
+            db_runtime_handle().spawn(async move {
+                let _ = listener.close().await;
+            });
+        }
+    }
+}
+
+pub(crate) fn spawn_open_listener<'py>(
+    py: Python<'py>,
+    session: &Arc<SessionHandle>,
+    channels: &Bound<'py, PyAny>,
+    queue_capacity: usize,
+    reconnect: bool,
+) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    let validated_channels = extract_listener_channels(py, channels)?;
+    if session.is_closed() {
+        return Err(postgres_error_to_py(
+            py,
+            PostgresError::Interface(
+                "cannot call open_listener() on a closed PostgreSQL client".to_string(),
+            ),
+        ));
+    }
+    let config = session.config().clone();
+    if !matches!(config.pooler_mode, PoolerMode::Direct | PoolerMode::Session) {
+        return Err(postgres_error_to_py(
+            py,
+            PostgresError::Interface(format!(
+                "PostgreSQL LISTEN/NOTIFY requires explicit pooler_mode `direct` or `session`, got `{}`",
+                config.pooler_mode.as_str()
+            )),
+        ));
+    }
+    let options = ListenerOptions {
+        queue_capacity,
+        max_queue_bytes: DEFAULT_NOTIFICATION_MAX_BYTES,
+        reconnect,
+    };
+    let awaitable = spawn_rust_db_task_with_attr(
+        py,
+        async move {
+            let listener = PostgresListener::open(config, validated_channels, options).await?;
+            Ok::<PendingOpenListenerGuard, PostgresError>(PendingOpenListenerGuard::new(listener))
+        },
+        |py, mut open_guard| {
+            let py_listener = open_guard.take_into_py_listener();
+            Ok(Py::new(py, py_listener)?.into_any())
+        },
+        postgres_error_to_py,
+        POSTGRES_COMPLETION_DRAINER_ATTR,
+    )?;
+    Bound::new(py, awaitable)
+}
+
+struct ClaimedNextCall {
+    id: u64,
+    worker_running: bool,
+    staged: Option<NotificationFrame>,
+}
+
+struct NextControlState {
+    next_id: u64,
+    claimed: Option<ClaimedNextCall>,
+    retiring_workers: usize,
+}
+
+struct ActiveNextCall {
+    id: u64,
+    cancelled: AtomicBool,
+    cancel_notify: Notify,
+}
+
+impl ActiveNextCall {
+    fn new(id: u64) -> Arc<Self> {
+        Arc::new(Self {
+            id,
+            cancelled: AtomicBool::new(false),
+            cancel_notify: Notify::new(),
+        })
+    }
+
+    async fn wait_cancelled(&self) {
+        loop {
+            let notified = self.cancel_notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.cancelled.load(Ordering::Acquire) {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
+struct NextControl {
+    state: std::sync::Mutex<NextControlState>,
+    retire_done: Notify,
+}
+
+enum NextReleaseAction {
+    None,
+    CancelRunningWorker,
+    RestoreStaged(NotificationFrame),
+}
+
+struct RetireSlotGuard<'a> {
+    ctl: &'a NextControl,
+}
+
+impl Drop for RetireSlotGuard<'_> {
+    fn drop(&mut self) {
+        let wake = {
+            let mut st = self.ctl.state.lock().unwrap_or_else(|e| e.into_inner());
+            st.retiring_workers = st.retiring_workers.saturating_sub(1);
+            st.retiring_workers == 0
+        };
+        if wake {
+            self.ctl.retire_done.notify_waiters();
+        }
+    }
+}
+
+impl NextControl {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            state: std::sync::Mutex::new(NextControlState {
+                next_id: 0,
+                claimed: None,
+                retiring_workers: 0,
+            }),
+            retire_done: Notify::new(),
+        })
+    }
+
+    fn try_claim(&self) -> Result<u64, PostgresError> {
+        let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if st.claimed.is_some() {
+            return Err(PostgresError::Interface(
+                "concurrent AsyncPostgresListener.next() calls are not permitted".to_string(),
+            ));
+        }
+        st.next_id = st.next_id.wrapping_add(1);
+        let id = st.next_id;
+        st.claimed = Some(ClaimedNextCall {
+            id,
+            worker_running: true,
+            staged: None,
+        });
+        Ok(id)
+    }
+
+    fn restore_frame(&self, listener: &PostgresListener, frame: NotificationFrame) {
+        {
+            let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            st.retiring_workers += 1;
+        }
+        let _retire = RetireSlotGuard { ctl: self };
+        listener.push_front_unconsumed(frame);
+    }
+
+    fn cancel_or_release(
+        &self,
+        listener: &PostgresListener,
+        id: u64,
+        call: Option<&ActiveNextCall>,
+    ) {
+        let action = {
+            let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            if st.claimed.as_ref().is_some_and(|c| c.id == id) {
+                let claimed = st.claimed.take().expect("verified claimed Some");
+                if claimed.worker_running {
+                    st.retiring_workers += 1;
+                    NextReleaseAction::CancelRunningWorker
+                } else if let Some(frame) = claimed.staged {
+                    st.retiring_workers += 1;
+                    NextReleaseAction::RestoreStaged(frame)
+                } else {
+                    NextReleaseAction::None
+                }
+            } else {
+                NextReleaseAction::None
+            }
+        };
+        match action {
+            NextReleaseAction::None => {}
+            NextReleaseAction::CancelRunningWorker => {
+                if let Some(active_call) = call {
+                    active_call.cancelled.store(true, Ordering::Release);
+                    active_call.cancel_notify.notify_waiters();
+                }
+            }
+            NextReleaseAction::RestoreStaged(frame) => {
+                let _retire = RetireSlotGuard { ctl: self };
+                listener.push_front_unconsumed(frame);
+            }
+        }
+    }
+}
+
+struct WorkerRunGuard {
+    ctl: Arc<NextControl>,
+    id: u64,
+    active: bool,
+}
+
+impl WorkerRunGuard {
+    fn new(ctl: Arc<NextControl>, id: u64) -> Self {
+        Self {
+            ctl,
+            id,
+            active: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.active = false;
+    }
+}
+
+impl Drop for WorkerRunGuard {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        let wake = {
+            let mut st = self.ctl.state.lock().unwrap_or_else(|e| e.into_inner());
+            if st
+                .claimed
+                .as_ref()
+                .is_some_and(|c| c.id == self.id && c.worker_running)
+            {
+                st.claimed = None;
+                false
+            } else {
+                st.retiring_workers = st.retiring_workers.saturating_sub(1);
+                st.retiring_workers == 0
+            }
+        };
+        if wake {
+            self.ctl.retire_done.notify_waiters();
+        }
+    }
+}
+
+/// RAII delivery guard preserving an unconsumed [`NotificationFrame`] across cancelled
+/// `_vertebra_postgres_completion_drainer` `DbOutcomeProducer` closures.
+struct PendingDeliveryGuard {
+    ctl: Arc<NextControl>,
+    listener: Arc<PostgresListener>,
+    id: u64,
+    armed: bool,
+}
+
+impl PendingDeliveryGuard {
+    fn armed(ctl: Arc<NextControl>, listener: Arc<PostgresListener>, id: u64) -> Self {
+        Self {
+            ctl,
+            listener,
+            id,
+            armed: true,
+        }
+    }
+
+    fn into_py_outcome(mut self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.armed = false;
+        let taken = {
+            let mut st = self.ctl.state.lock().unwrap_or_else(|e| e.into_inner());
+            if st.claimed.as_ref().is_some_and(|c| c.id == self.id) {
+                Some(st.claimed.take().expect("verified claimed Some").staged)
+            } else {
+                None
+            }
+        };
+        match taken {
+            None => Err(pyo3::exceptions::asyncio::CancelledError::new_err(
+                "AsyncPostgresListener.next() was cancelled",
+            )),
+            Some(None) => Ok(py.None()),
+            Some(Some(frame)) => match frame_to_py_tuple(py, &frame) {
+                Ok(tuple_obj) => Ok(tuple_obj),
+                Err(py_err) => {
+                    self.ctl.restore_frame(&self.listener, frame);
+                    Err(py_err)
+                }
+            },
+        }
+    }
+}
+
+impl Drop for PendingDeliveryGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            self.ctl.cancel_or_release(&self.listener, self.id, None);
+        }
+    }
+}
+
+struct PendingNextError {
+    ctl: Option<Arc<NextControl>>,
+    listener: Option<Arc<PostgresListener>>,
+    id: u64,
+    err: Option<PostgresError>,
+}
+
+impl PendingNextError {
+    fn cancelled() -> Self {
+        Self {
+            ctl: None,
+            listener: None,
+            id: 0,
+            err: None,
+        }
+    }
+
+    fn from_postgres(
+        ctl: Arc<NextControl>,
+        listener: Arc<PostgresListener>,
+        id: u64,
+        err: PostgresError,
+    ) -> Self {
+        Self {
+            ctl: Some(ctl),
+            listener: Some(listener),
+            id,
+            err: Some(err),
+        }
+    }
+
+    fn into_py_err(mut self, py: Python<'_>) -> PyErr {
+        if let (Some(ctl), Some(listener)) = (self.ctl.take(), self.listener.take()) {
+            ctl.cancel_or_release(&listener, self.id, None);
+        }
+        match self.err.take() {
+            Some(pg_err) => postgres_error_to_py(py, pg_err),
+            None => pyo3::exceptions::asyncio::CancelledError::new_err(
+                "AsyncPostgresListener.next() was cancelled",
+            ),
+        }
+    }
+}
+
+impl Drop for PendingNextError {
+    fn drop(&mut self) {
+        if let (Some(ctl), Some(listener)) = (self.ctl.take(), self.listener.take()) {
+            ctl.cancel_or_release(&listener, self.id, None);
+        }
+    }
+}
+
+fn frame_to_py_tuple(py: Python<'_>, frame: &NotificationFrame) -> PyResult<Py<PyAny>> {
+    let py_pid = frame.pid.into_pyobject(py)?.into_any();
+    let py_channel = frame.channel.as_str().into_pyobject(py)?.into_any();
+    let py_payload = PyBytes::new(py, frame.payload.as_ref()).into_any();
+    let py_gap = frame
+        .reconnected_gap
+        .into_pyobject(py)?
+        .to_owned()
+        .into_any();
+    let tup = PyTuple::new(py, [py_pid, py_channel, py_payload, py_gap])?;
+    Ok(tup.into_any().unbind())
+}
+
+/// Dedicated non-pooled asynchronous PostgreSQL `LISTEN`/`NOTIFY` handle
+/// (`vertebra._postgres.AsyncPostgresListener`).
+#[pyclass(
+    name = "AsyncPostgresListener",
+    module = "vertebra._postgres",
+    frozen,
+    immutable_type
+)]
+pub struct PyAsyncPostgresListener {
+    listener: Arc<PostgresListener>,
+    next_ctl: Arc<NextControl>,
+}
+
+impl PyAsyncPostgresListener {
+    pub(crate) fn from_listener(listener: PostgresListener) -> Self {
+        Self {
+            listener: Arc::new(listener),
+            next_ctl: NextControl::new(),
+        }
+    }
+
+    fn spawn_aclose_inner<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+        let listener = Arc::clone(&self.listener);
+        spawn_rust_db_task_with_attr_and_cancel(
+            py,
+            async move { listener.close().await },
+            |py, ()| Ok(py.None()),
+            postgres_error_to_py,
+            move || {},
+            POSTGRES_COMPLETION_DRAINER_ATTR,
+        )
+    }
+}
+
+#[pymethods]
+impl PyAsyncPostgresListener {
+    /// Return a read-only zero-I/O snapshot of whether the listener has permanently closed (`False` during reconnect backoff).
+    #[getter]
+    pub fn closed(&self) -> bool {
+        self.listener.is_closed()
+    }
+
+    /// Await the next `(pid, channel, payload_bytes, reconnected_gap)` notification tuple or `None` after `aclose()`.
+    pub fn next<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+        let _ = py.import("asyncio")?.call_method0("get_running_loop")?;
+        let call_id = self
+            .next_ctl
+            .try_claim()
+            .map_err(|e| postgres_error_to_py(py, e))?;
+        let call = ActiveNextCall::new(call_id);
+        let cancel_call = Arc::clone(&call);
+        let cancel_ctl = Arc::clone(&self.next_ctl);
+        let cancel_listener = Arc::clone(&self.listener);
+        let worker_ctl = Arc::clone(&self.next_ctl);
+        let worker_listener = Arc::clone(&self.listener);
+        let run_guard = WorkerRunGuard::new(Arc::clone(&self.next_ctl), call_id);
+
+        spawn_rust_db_task_with_attr_and_cancel(
+            py,
+            async move {
+                let mut run_guard = run_guard;
+                loop {
+                    let retired = worker_ctl.retire_done.notified();
+                    tokio::pin!(retired);
+                    retired.as_mut().enable();
+                    let should_wait = {
+                        let st = worker_ctl.state.lock().unwrap_or_else(|e| e.into_inner());
+                        let still_ours = st
+                            .claimed
+                            .as_ref()
+                            .is_some_and(|c| c.id == call.id && c.worker_running);
+                        if !still_ours {
+                            return Err(PendingNextError::cancelled());
+                        }
+                        st.retiring_workers > 0
+                    };
+                    if !should_wait {
+                        break;
+                    }
+                    tokio::select! {
+                        biased;
+                        () = call.wait_cancelled() => return Err(PendingNextError::cancelled()),
+                        () = &mut retired => {}
+                    }
+                }
+
+                let polled = tokio::select! {
+                    biased;
+                    () = call.wait_cancelled() => return Err(PendingNextError::cancelled()),
+                    res = worker_listener.next() => res,
+                };
+
+                match polled {
+                    Ok(opt_frame) => {
+                        let restore = {
+                            let mut st = worker_ctl.state.lock().unwrap_or_else(|e| e.into_inner());
+                            if let Some(claimed) = st.claimed.as_mut()
+                                && claimed.id == call.id
+                                && claimed.worker_running
+                            {
+                                claimed.worker_running = false;
+                                claimed.staged = opt_frame;
+                                run_guard.disarm();
+                                None
+                            } else {
+                                opt_frame
+                            }
+                        };
+                        if let Some(frame) = restore {
+                            worker_listener.push_front_unconsumed(frame);
+                            return Err(PendingNextError::cancelled());
+                        }
+                        Ok(PendingDeliveryGuard::armed(
+                            Arc::clone(&worker_ctl),
+                            Arc::clone(&worker_listener),
+                            call.id,
+                        ))
+                    }
+                    Err(pg_err) => {
+                        let committed = {
+                            let mut st = worker_ctl.state.lock().unwrap_or_else(|e| e.into_inner());
+                            if let Some(claimed) = st.claimed.as_mut()
+                                && claimed.id == call.id
+                                && claimed.worker_running
+                            {
+                                claimed.worker_running = false;
+                                run_guard.disarm();
+                                true
+                            } else {
+                                false
+                            }
+                        };
+                        if committed {
+                            Err(PendingNextError::from_postgres(
+                                Arc::clone(&worker_ctl),
+                                Arc::clone(&worker_listener),
+                                call.id,
+                                pg_err,
+                            ))
+                        } else {
+                            Err(PendingNextError::cancelled())
+                        }
+                    }
+                }
+            },
+            |py, delivery_guard| delivery_guard.into_py_outcome(py),
+            |py, pending_err| pending_err.into_py_err(py),
+            move || {
+                cancel_ctl.cancel_or_release(&cancel_listener, call_id, Some(&cancel_call));
+            },
+            POSTGRES_COMPLETION_DRAINER_ATTR,
+        )
+    }
+
+    /// Issue `LISTEN "<channel>"` for newly added channels and resolve once `ReadyForQuery` arrives.
+    pub fn subscribe<'py>(
+        &self,
+        py: Python<'py>,
+        channels: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+        let validated = extract_listener_channels(py, channels)?;
+        let listener = Arc::clone(&self.listener);
+        let awaitable = spawn_rust_db_task_with_attr(
+            py,
+            async move { listener.subscribe(validated).await },
+            |py, ()| Ok(py.None()),
+            postgres_error_to_py,
+            POSTGRES_COMPLETION_DRAINER_ATTR,
+        )?;
+        Bound::new(py, awaitable)
+    }
+
+    /// Issue `UNLISTEN "<channel>"` for active channels and resolve once `ReadyForQuery` arrives.
+    pub fn unsubscribe<'py>(
+        &self,
+        py: Python<'py>,
+        channels: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+        let validated = extract_listener_channels(py, channels)?;
+        let listener = Arc::clone(&self.listener);
+        let awaitable = spawn_rust_db_task_with_attr(
+            py,
+            async move { listener.unsubscribe(validated).await },
+            |py, ()| Ok(py.None()),
+            postgres_error_to_py,
+            POSTGRES_COMPLETION_DRAINER_ATTR,
+        )?;
+        Bound::new(py, awaitable)
+    }
+
+    /// Idempotently shut down the dedicated listener, waking any pending `next()` with `None` and cancelling reconnect sleeps.
+    pub fn aclose<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+        self.spawn_aclose_inner(py)
+    }
+
+    /// Enter an `async with` scope resolving to this `AsyncPostgresListener`.
+    pub fn __aenter__<'py>(slf: PyRef<'py, Self>) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+        let py = slf.py();
+        let py_self: Py<Self> = slf.into_pyobject(py)?.unbind();
+        let awaitable = spawn_rust_db_task_with_attr(
+            py,
+            async { Ok::<(), PostgresError>(()) },
+            move |_py, ()| Ok(py_self.into_any()),
+            postgres_error_to_py,
+            POSTGRES_COMPLETION_DRAINER_ATTR,
+        )?;
+        Bound::new(py, awaitable)
+    }
+
+    /// Idempotently close the listener on `async with` exit without suppressing exceptions.
+    #[pyo3(signature = (exc_type = None, exc_val = None, exc_tb = None))]
+    pub fn __aexit__<'py>(
+        &self,
+        py: Python<'py>,
+        exc_type: Option<&Bound<'py, PyAny>>,
+        exc_val: Option<&Bound<'py, PyAny>>,
+        exc_tb: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+        let _ = (exc_type, exc_val, exc_tb);
+        self.spawn_aclose_inner(py)
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "AsyncPostgresListener(closed={})",
+            self.listener.is_closed()
+        )
+    }
+}
+
 #[pymethods]
 impl PyAsyncPostgresClient {
     #[new]
@@ -1682,6 +2311,19 @@ impl PyAsyncPostgresClient {
             |py, ()| Ok(py.None()),
             postgres_error_to_py,
         )
+    }
+
+    /// Open a dedicated non-pooled `Direct`/`Session` PostgreSQL `LISTEN`/`NOTIFY` session asynchronously
+    /// via `_vertebra_postgres_completion_drainer`.
+    #[pyo3(signature = (channels, *, queue_capacity = 1024, reconnect = false))]
+    pub fn open_listener<'py>(
+        &self,
+        py: Python<'py>,
+        channels: &Bound<'py, PyAny>,
+        #[pyo3(from_py_with = extract_queue_capacity)] queue_capacity: usize,
+        #[pyo3(from_py_with = extract_strict_bool)] reconnect: bool,
+    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+        spawn_open_listener(py, &self.session, channels, queue_capacity, reconnect)
     }
 
     /// Return `True` unless an authenticated session has reached `ReadyForQuery(Idle)` and has not been closed.

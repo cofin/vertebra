@@ -20,6 +20,7 @@ use crate::arrow::{
 
 const _: () = assert!(DEFAULT_MAX_ARROW_RESULT_BYTES == 268_435_456);
 const _: () = assert!(DEFAULT_ARROW_BATCH_ROWS == 65_536);
+const _: () = assert!(crate::notifications::DEFAULT_NOTIFICATION_QUEUE_CAPACITY == 1024);
 use crate::config::{PostgresConfig, RawPostgresOptions};
 use crate::copy::{CopyFromStream, CopyOut};
 use crate::errors::{PostgresError, postgres_error_to_py};
@@ -212,6 +213,33 @@ pub(crate) fn extract_strict_bool(obj: &Bound<'_, PyAny>) -> PyResult<bool> {
         return Err(PyTypeError::new_err("expected bool"));
     }
     obj.extract::<bool>()
+}
+
+pub(crate) fn extract_queue_capacity(obj: &Bound<'_, PyAny>) -> PyResult<usize> {
+    if obj.is_instance_of::<PyBool>() {
+        return Err(PyTypeError::new_err(
+            "expected int queue_capacity, not bool",
+        ));
+    }
+    let val = obj
+        .extract::<i128>()
+        .map_err(|_| PyTypeError::new_err("expected int queue_capacity"))?;
+    if val <= 0 {
+        return Err(postgres_error_to_py(
+            obj.py(),
+            PostgresError::Interface(format!(
+                "notification listener queue_capacity must be >= 1, got {val}"
+            )),
+        ));
+    }
+    usize::try_from(val).map_err(|_| {
+        postgres_error_to_py(
+            obj.py(),
+            PostgresError::Interface(format!(
+                "notification listener queue_capacity {val} exceeds usize::MAX"
+            )),
+        )
+    })
 }
 
 pub(crate) fn extract_scope_id(obj: &Bound<'_, PyAny>) -> PyResult<PipelineScopeToken> {
@@ -421,6 +449,27 @@ pub(crate) fn extract_opt_copy_columns(
         cols.push(item.extract::<String>()?);
     }
     Ok(Some(cols))
+}
+
+/// Extract and validate `channels: Sequence[str]` against PostgreSQL identifier and 63-byte bounds
+/// synchronously before spawning a listener or control task.
+pub(crate) fn extract_listener_channels(
+    py: Python<'_>,
+    obj: &Bound<'_, PyAny>,
+) -> PyResult<Vec<String>> {
+    ensure_python_sequence(obj, "channels")?;
+    let mut out = Vec::new();
+    for entry in obj.try_iter()? {
+        let item = entry?;
+        if !item.is_instance_of::<PyString>() {
+            return Err(PyTypeError::new_err("channels entries must be str"));
+        }
+        let ch = item.extract::<String>()?;
+        crate::notifications::validate_and_quote_channel(&ch)
+            .map_err(|e| postgres_error_to_py(py, e))?;
+        out.push(ch);
+    }
+    Ok(out)
 }
 
 /// Extract `(column_oids, rows)` for binary `COPY ... FROM STDIN` while attached on the caller thread.
@@ -1684,6 +1733,25 @@ impl PySyncPostgresClient {
             })
         })
         .map_err(|e| postgres_error_to_py(py, e))
+    }
+
+    /// Open a dedicated non-pooled `Direct`/`Session` PostgreSQL `LISTEN`/`NOTIFY` session asynchronously
+    /// via `_vertebra_postgres_completion_drainer` without blocking the calling event loop.
+    #[pyo3(signature = (channels, *, queue_capacity = 1024, reconnect = false))]
+    pub fn open_listener<'py>(
+        &self,
+        py: Python<'py>,
+        channels: &Bound<'py, PyAny>,
+        #[pyo3(from_py_with = extract_queue_capacity)] queue_capacity: usize,
+        #[pyo3(from_py_with = extract_strict_bool)] reconnect: bool,
+    ) -> PyResult<Bound<'py, vertebra_db::py_async::RustDbTaskAwaitable>> {
+        crate::async_client::spawn_open_listener(
+            py,
+            &self.session,
+            channels,
+            queue_capacity,
+            reconnect,
+        )
     }
 
     /// Return `True` unless an authenticated session has reached `ReadyForQuery(Idle)` and has not been closed.
