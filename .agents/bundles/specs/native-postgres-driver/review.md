@@ -2,21 +2,27 @@
 type: Review
 flow_id: native-postgres-driver
 title: Native PostgreSQL planning review
-description: Adjudication and validation of the complete-driver implementation plan.
+description: Adjudication and validation of the nested 31-chapter complete-driver implementation plan.
 status: stable
 created_at: "2026-11-05T00:00:00Z"
-updated_at: "2026-11-07T04:15:00Z"
+updated_at: "2026-11-07T18:00:00Z"
 generated:
-  by: flow-setup
-  at: "2026-11-07T04:15:00Z"
+  by: flow-revise
+  at: "2026-11-07T16:40:00Z"
 verified:
+  - by: agent:plan-generator
+    at: "2026-11-07T16:40:00Z"
+    commit: e8901de4
   - by: agent:flow-setup
     at: "2026-11-07T04:15:00Z"
     commit: 9af810f5
 sources:
   - id: pg-core-rs
-    resource: src/rs/vertebra-db/src/postgres/mod.rs::PoolerMode
-    title: Shared PostgreSQL wire frame and pooler helpers in vertebra-db
+    resource: src/rs/vertebra-db/src/postgres/mod.rs::encode_query_frame
+    title: Shared PostgreSQL wire frame helpers in vertebra-db
+  - id: fail-loud-baseline
+    resource: .agents/bundles/knowledge/domains/data/database-drivers-and-dialers.md
+    title: Upstream flow that deletes PostgreSQL memory:// paths and vertebra_db::postgres::PostgresPool
   - id: pg-driver-py
     resource: src/py/vertebra/db/adapters/postgres/driver.py::SyncPostgreSQLDriver
     title: Python PostgreSQL driver target cutover seam
@@ -29,13 +35,14 @@ tags:
 # Planning review
 
 <!-- truth: start -->
-- **Adjudicated Plan Baseline**: All 22 planning review findings are adopted across `spec.md`, `contracts.md`, and `t01`–`t102` at `state: planned`, `plan_revision: 2`, and `plan_commit: 9af810f5` [^pg-core-rs] [^pg-driver-py].
-- **Scope of Evidence**: Planning review validates contracts, dependency order, and worksheet completeness; runtime, live-service, wheel, and benchmark evidence are produced during `/flow:implement native-postgres-driver`.
+- **Adjudicated Plan Baseline**: All planning and zero-context specification review findings are adopted across `spec.md`, `contracts.md`, and `31` nested chapters (`ch01`–`ch31`, `111` vertical-slice worksheets) at `state: planned`, `has_chapters: true`, `plan_revision: 5`, and `plan_commit: fd571e3a` [^pg-core-rs] [^pg-driver-py].
+- **Scope of Evidence**: Planning review validates contracts, chapter/task dependency order, `<= 3`-file worksheet ownership bounds, cross-chapter `depends_on` edges, and OKF v0.2 schema compliance; runtime, live-service, wheel, and benchmark evidence are produced during `/flow:implement native-postgres-driver`.
 <!-- truth: end -->
 
-This review covers the specification and worksheets. Runtime, wheel, live-service
-and performance acceptance remain pending until implementation. The complete
-driver is delivered in one PR; worksheets define individual local commits.
+This review covers the root specification, chapter catalog, chapter specifications,
+and task worksheets. Runtime, wheel, live-service, and performance acceptance remain
+pending until implementation. The complete driver ships in one PR; individual
+worksheets define atomic local signed commits.
 
 ## Adjudication
 
@@ -43,41 +50,38 @@ All findings below are ADOPT. No product decision remains escalated.
 
 | Finding | Correction and verification contract |
 | --- | --- |
-| Cold statement and backend lifetime | Resolve required parameter metadata before Parse; execute cold text results before optional enrichment; retain completed results on later failure and never replay SQL. Named preflight pins or re-Parses. |
-| SCRAM downgrade detection | Prefer uses GS2 y when binding is usable but PLUS is absent; actual wire assertions verify downgrade rejection. |
-| Pipeline depended on future driver helpers | Early native pipeline takes explicit preparation/release callbacks; later adapter supplies its compiler. |
-| Incomplete public value records | Contracts freeze units, discriminants, array bounds, vector/bit carriers, JSON null and nested conversion. |
-| Static login token expiry | Require supplied real expiry and declared scopes; reject unusable credentials before transmission. |
-| Feature-gated cancellation test could run empty | Register the target with required pyo3 features and verify named behavioral tests actually execute. |
-| Pool constructor inventory | Enumerate cache, pooler, limits and timeout options with canonical configuration identity tests. |
-| Pipeline could commit before context exit | Validate every operation before frames; reject transaction controls and raw same-scope API escapes; caught errors retain rollback disposition. |
-| AlloyDB token expiry check was unreachable | Split verified TLS from metadata exchange; check scoped login material between those stages and test held-TLS expiry. |
-| Missing production event hook owner | Specify dedicated-client hooks, structural protocols, uniform async publication and bounded registry cleanup on both driver facades. |
-| Durable checkpoint diverged from reconnect state | Fence yields while saving/acknowledging; reconcile uncertain outcomes from the durable LSN and event counter together. |
-| pgvector version was not pinned | Own fixtures use verified versioned image digests rather than floating built-in tags. |
-| Local services contradicted TLS default | Explicitly disable TLS for owned local fixtures; retain separate certificate and identity acceptance. |
-| Session-dependent bind lexing | Reject ambiguous ordinary backslash-quote forms during emulation; require E strings and respect numeric-token identifier boundaries. |
-| Numeric passthrough contradicted pre-I/O coverage validation | Pass numeric-only SQL and ordered values unchanged; validate sequence shape/resource limits locally and leave SQL syntax and parameter coverage to the server. |
-| Benchmark acceptance was unresolved | Freeze reference versions, capture schema, owned service lifecycle, sample counts and numerical comparison thresholds. |
-| DSN defaults were unresolved | Freeze environment/OS precedence, explicit-empty behavior, strict percent decoding and adapter TLS defaults. |
-| Python cutover broke the legacy async driver | Implement permanent private modules, switch both public exports atomically, then delete characterized legacy classes before conformance. |
-| Command timeout forwarding lacked a native owner | Add one optional native command I/O deadline and bounded cancellation retirement; forward it per command and explicitly bound notification publication. |
-| Cancellation acceptance conflated caller outcomes | Explicit cancel verifies actual server QueryCancelledError/57014; task cancellation verifies asyncio.CancelledError plus independent native cleanup and physical retirement. |
-| Unresolved temporal display text was unsafe to rebind | Preserve output text/context; reject typed unresolved binds before submission. Input abbreviation configuration is independent of output settings. |
-| Stale IDs and review-only prerequisites | Renumber the dependency graph, regenerate requirement/checklist links and remove staging notes from normative worksheets. |
+| Cold statement and backend lifetime | Resolve required parameter metadata before Parse; execute cold text results before optional enrichment; retain completed results on later failure and never replay SQL. Named preflight pins or re-Parses (`ch12:t02`). |
+| SCRAM downgrade detection | Prefer uses GS2 `y` when binding is usable but PLUS is absent; actual wire assertions verify downgrade rejection (`ch03:t03`). |
+| Pipeline depended on future driver helpers | Early native pipeline (`ch15`–`ch16`) takes explicit preparation/release callbacks; later adapter (`ch25`–`ch26`) supplies its compiler. |
+| Incomplete public value records | Contracts freeze units, discriminants, array bounds, vector/bit carriers, JSON null, and nested conversion (`contracts.md`, `ch09`–`ch12`, `ch14:t03`). |
+| Static login token expiry | Require supplied real expiry and declared scopes; reject unusable credentials before transmission (`ch05:t02`). |
+| Feature-gated cancellation test could run empty | Register the target with required PyO3 features and verify named behavioral tests execute (`ch16:t04`). |
+| Pool constructor inventory | Enumerate cache, pooler, limits, and timeout options with canonical configuration identity tests (`ch14`–`ch15:t01`). |
+| Pipeline could commit before context exit | Validate every operation before frames (`ch15:t02`); reject transaction controls and raw same-scope API escapes; caught errors retain rollback disposition (`ch16:t01`–`t02`). |
+| AlloyDB token expiry check & cloud keepalive seam | Split verified TLS from metadata exchange via `DialedCloudTransport` preserving socket TCP keepalive configuration across direct and cloud paths; check scoped login material between stages and test held-TLS expiry (`ch06:t01`–`t02`). |
+| Missing production event hook owner & `notify.py` parity | Specify dedicated-client hooks and structural protocols (`vertebra.db.adapters.postgres.events`) on both driver facades (`ch26:t04`), complete `PostgresNotificationSource` migration in `ch21:t03`, and verify public-import parity in `ch27:t02` without duplicate `notify.py` edits. |
+| Durable checkpoint & `change_stream.py` module alignment | Standardize CDC contracts, `_EXPORT_MAP` barrel entries, and documentation references on `vertebra.db.adapters.postgres.change_stream` (`PostgresChangeSource`, `PostgresCheckpointStore`), `vertebra.db.adapters.postgres.types` (`PostgresArrowResult`, `PostgresReplicationIdentity`), and `vertebra.db.adapters.postgres.events` (`ch24`, `ch27:t01`, `ch30`). |
+| `pgvector` version was not pinned | Integration fixtures use verified multi-arch OCI image digests (`0.8.1-pg14`, `0.8.1-pg18`) rather than floating tags (`ch28:t03`). |
+| Local services contradicted TLS default | Explicitly disable TLS (`sslmode="disable"`) for test-owned local fixtures while retaining separate certificate and identity acceptance (`ch28`–`ch29`). |
+| Session-dependent bind lexing & numeric passthrough | Reject ambiguous ordinary backslash-quote forms during emulation; require `E'...'` strings, respect numeric-token identifier boundaries, and pass numeric-only SQL unchanged (`ch25:t02`). |
+| Benchmark harness & `[tool.mypy]` strict overrides | Freeze reference versions (`psycopg[binary]==3.2.13`, `asyncpg==0.31.0`), `schema_version=1` capture schema, `[tool.mypy].files` registration for `tools/benchmarks/postgres.py`, and `ignore_missing_imports = true` overrides for `asyncpg`/`psycopg` so `make lint-all` passes without `--group bench` (`ch29:t02`–`t03`). |
+| DSN defaults were unresolved | Freeze environment/OS precedence, explicit-empty behavior, strict percent decoding, and adapter TLS defaults (`ch25:t01`). |
+| Python cutover & Griffe docstring readiness | Implement permanent private `_sync.py` and `_async.py` modules (`ch25`–`ch26`), switch public exports atomically with `tools.docs.scan_public_docstrings` verification (`ch27:t01`–`t02`), and delete unreachable legacy async (`ch27:t03`) and sync (`ch27:t04`) bodies before conformance (`ch28`). |
+| Cargo lockfile, `PostgresError::Data`/`ServerError`/`TransactionStatus`, Arrow sink, & `session.rs` deadlines | Lock `vertebra-postgres` and `vertebra-db` Cargo pins upfront (`ch01:t01`–`t02`), keep `PostgresConfig`, `PostgresError::Data`, `ServerError`, canonical SQLSTATE subclass mapping (`ch05:t02`), and `TransactionStatus` shapes stable from `ch01:t04`–`ch05`, stream Arrow batches directly via `query_with_row_sink` (`ch19`–`ch20`), and anchor command deadlines in `session.rs` (`ch17:t01`–`t02`). |
+| Packaging split, wheel script ownership, & cross-chapter DAG edges | Split root `[postgres]` extra, `areas.toml`, and all four sibling wheel `_postgres.pyi` exclusions into `ch08` (`4` tasks), create `tools/scripts/verify_postgres_wheel.py` cleanly in `ch29:t01`, and populate explicit cross-chapter entry `depends_on` edges across `ch02`–`ch31`. |
+| Unresolved temporal display text was unsafe to rebind | Preserve output text/context (`PgTemporal(special="wire_text")`); reject typed unresolved binds before submission (`ch17:t04`). |
+| Overlap with `driver-fail-loud` | `driver-fail-loud` deletes `_in_memory_rows`, PostgreSQL `memory://` branches, and `vertebra_db::postgres::PostgresPool` before `ch01`; `ch27` and `ch30` assume them absent, and `ch14` and `ch22` cite only surviving `vertebra-db` frame and codec helpers [^fail-loud-baseline]. |
+| `11`-file `DOC-04`/`DOC-08` documentation & OKF synchronization | Expand documentation and OKF synchronization to all `11` invalidated user, workflow, agent, domain, extension, benchmark, and tech-stack files in `ch30-user-and-domain-docs` (`ch30:t01`–`t04`) within `DOC-08` line budgets (`AGENTS.md <= 100`, `knowledge/** <= 200`), followed by final complete-driver reviews in `ch31-final-review-and-release-gate` (`ch31:t01`). |
 
 ## Review and validation evidence
 
-- Core correctness review: three bounded rounds; all six original Important findings, two second-round Important findings and associated reference/signature issues are resolved in the normalized worksheets.
-- Data and acceptance correctness review: two rounds; all seven original Important findings and final lexer/activation-reference corrections are resolved.
-- Fresh quality review: cancellation caller outcomes, strict static-token construction and researched cross-extension ownership prose are reconciled with the public contracts.
-- Structural validation passes: 102 pending worksheets, `state: planned` anchors (`plan_revision: 2`, `plan_commit: 9af810f5`), a serial dependency graph, 27 covered requirements, seven phase checkpoints, matching checklist/files, resolved document references and 103 shell blocks checked with bash -n.
-- Repository make review-check and git diff --check pass after installation. All new planning documents also pass whitespace checks. These checks validate planning material and repository review configuration; implementation acceptance remains pending.
+- Core correctness review: three bounded rounds; all original and follow-up Important findings and signature/reference issues are resolved across the normalized contracts and worksheets.
+- Data and acceptance correctness review: two rounds; all seven original Important findings and lexer/activation-reference corrections are resolved.
+- Zero-context chaptered specification review (`plan_revision: 4`, `plan_commit: e8901de4`): all `ADOPT` findings across Cargo/lockfile ownership, `DialedCloudTransport` keepalives, `PostgresConfig`/`ServerError`/`TransactionStatus` stability, `query_with_row_sink` Arrow streaming, `session.rs` command deadlines, `vertebra.db.adapters.postgres.change_stream` barrel/docs alignment, `PostgresNotificationSource` `ch21:t03` parity, cross-chapter `depends_on` edges, `ch08` 4-task packaging split, `[tool.mypy]` benchmark overrides, `ch27:t01` `tools.docs` docstring scan, and `11`-file `DOC-04`/`DOC-08` coverage are integrated across `31` planned chapters (`ch01`–`ch31`, `111` pending vertical-slice worksheets), `27` traced requirements (`R1`–`R27`), and `[0/11 files documented]` in `ch30`.
+- Repository `make review-check` validates review capabilities, multi-line YAML frontmatter, source-to-footnote parity, clickable relative Bounded Read Manifest links, and privacy rules; runtime implementation acceptance remains pending (`ch31:t01`).
 
-Plan state is `planned` at `plan_revision: 2` and `plan_commit: 9af810f5`. The next canonical command is
-`/flow:implement native-postgres-driver`, starting with
-[t01](tasks/t01-package-scaffold.md). This document claims no production build,
-native/live service, installed-wheel, free-threaded or performance acceptance.
+Plan state is `planned` at `plan_revision: 5` and `plan_commit: fd571e3a` (`has_chapters: true`, `depends_on_flows: [driver-fail-loud]`). Once `storage-remediation` and `driver-fail-loud` complete, the next canonical command for this flow is `/flow:implement native-postgres-driver`, starting with [ch01-wheel-scaffold-and-config](chapters/ch01-wheel-scaffold-and-config/spec.md) (`native-postgres-driver:ch01:t01`). This document claims no production build, native/live service, installed-wheel, free-threaded, or performance acceptance prior to implementation.
 
-[^pg-core-rs]: `src/rs/vertebra-db/src/postgres/mod.rs::PoolerMode` — Shared PostgreSQL wire frame and pooler helpers in vertebra-db.
+[^pg-core-rs]: `src/rs/vertebra-db/src/postgres/mod.rs::encode_query_frame` — Shared PostgreSQL wire frame helpers in `vertebra-db`.
+[^fail-loud-baseline]: `.agents/bundles/knowledge/domains/data/database-drivers-and-dialers.md` — Completed upstream flow that deletes PostgreSQL `memory://` paths and `vertebra_db::postgres::PostgresPool`.
 [^pg-driver-py]: `src/py/vertebra/db/adapters/postgres/driver.py::SyncPostgreSQLDriver` — Python PostgreSQL driver target cutover seam.
