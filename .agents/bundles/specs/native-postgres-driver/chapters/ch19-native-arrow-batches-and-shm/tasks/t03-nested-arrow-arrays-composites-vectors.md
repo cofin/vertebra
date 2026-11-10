@@ -5,7 +5,7 @@ chapter_id: ch19-native-arrow-batches-and-shm
 title: Build recursive Arrow builders for arrays, composites, pgvector, and bitstrings
 description: Extend PostgresArrowBatchBuilder in vertebra-postgres with recursive depth-32 builders for multidimensional PostgreSQL arrays, catalog composites, domains, enums, vector/halfvec, and bit/varbit columns.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -24,17 +24,17 @@ tests:
 estimated_loc: 235
 plan_revision: 5
 plan_commit: fd571e3a
-state_revision: 0
+state_revision: 2
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-10T03:44:09Z"
+last_verified_commit: 1102e7f6
+verification_evidence: "cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --test postgres_arrow_tests (13 passed); cargo fmt --check; cargo clippy -p vertebra-postgres --all-targets -- -D warnings; make review-check"
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-08T02:05:22Z"
+updated_at: "2026-11-10T03:44:09Z"
 commit: null
 sources:
   - id: pg-contracts
@@ -113,9 +113,9 @@ Extend `PostgresArrowBatchBuilder` in `src/rs/vertebra-postgres/src/arrow.rs` to
 
 ## Acceptance Criteria
 
-- [ ] Multidimensional PostgreSQL arrays (including `0`-D empty, `NULL` elements, and negative lower bounds) and ordered catalog composites preserve exact child values and parent/child validity bitmaps across multi-batch flushes and `arrow-ipc` roundtrips (R20).
-- [ ] `vector` and `halfvec` use `FixedSizeList<Float32>` only when typmod specifies dimension `1..=16_000` (otherwise `List<Float32>`), reject dimension mismatches, and preserve exact `f16`-widened `f32` values and metadata (R20).
-- [ ] `bit`/`varbit` bitstrings validate byte length and zeroed padding bits, and nested builders enforce depth `<= 32` and aggregate `max_bytes` caps without opaque binary fallbacks (R20).
+- [x] Multidimensional PostgreSQL arrays (including `0`-D empty, `NULL` elements, and negative lower bounds) and ordered catalog composites preserve exact child values and parent/child validity bitmaps across multi-batch flushes and `arrow-ipc` roundtrips (R20).
+- [x] `vector` and `halfvec` use `FixedSizeList<Float32>` only when typmod specifies dimension `1..=16_000` (otherwise `List<Float32>`), reject dimension mismatches, and preserve exact `f16`-widened `f32` values and metadata (R20).
+- [x] `bit`/`varbit` bitstrings validate byte length and zeroed padding bits, and nested builders enforce depth `<= 32` and aggregate `max_bytes` caps without opaque binary fallbacks (R20).
 
 ## Notes & Discoveries
 

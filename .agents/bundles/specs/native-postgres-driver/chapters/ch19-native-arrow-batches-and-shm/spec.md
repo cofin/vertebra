@@ -10,14 +10,14 @@ planning_status: complete
 depends_on_chapters:
   - ch18-binary-copy-streaming
 replan_trigger: null
-current_task: "native-postgres-driver:ch19:t03"
+current_task: "native-postgres-driver:ch19:t04"
 plan_revision: 5
 plan_commit: fd571e3a
-state_revision: 3
+state_revision: 4
 last_verified_checkpoint: null
 last_reviewed_commit: null
 created_at: "2026-11-05T00:00:00Z"
-updated_at: "2026-11-10T03:33:33Z"
+updated_at: "2026-11-10T03:44:09Z"
 generated:
   by: flow-setup
   at: "2026-11-07T05:00:00Z"
@@ -147,8 +147,8 @@ Progress: `[0/0 files documented in ch19]` (public Arrow data-plane docs in `doc
 ## 5. Implementation Plan
 
 - [x] [8e430386] native-postgres-driver:ch19:t01 — Define lossless PostgreSQL Arrow schemas over locked workspace Arrow crates (tasks/t01-lossless-arrow-schemas.md)
-- [x] native-postgres-driver:ch19:t02 — Build bounded native Arrow scalar RecordBatches in Rust (tasks/t02-bounded-arrow-scalar-batches.md)
-- [ ] native-postgres-driver:ch19:t03 — Build recursive Arrow builders for arrays, composites, pgvector, and bitstrings (tasks/t03-nested-arrow-arrays-composites-vectors.md)
+- [x] [1102e7f6] native-postgres-driver:ch19:t02 — Build bounded native Arrow scalar RecordBatches in Rust (tasks/t02-bounded-arrow-scalar-batches.md)
+- [x] native-postgres-driver:ch19:t03 — Build recursive Arrow builders for arrays, composites, pgvector, and bitstrings (tasks/t03-nested-arrow-arrays-composites-vectors.md)
 - [ ] native-postgres-driver:ch19:t04 — Serialize adaptive inline and VTBARROW SHM IPC streams with validated ArrowCursor counts (tasks/t04-arrow-ipc-to-shm.md)
 
 **Chapter Recovery Checkpoint:** `make dev && cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --test postgres_arrow_tests && uv run --no-sync python -m mypy.stubtest vertebra._postgres && uv run --no-sync python -m pytest src/py/tests/unit/db/test_postgres_native_data.py -k arrow_count -q` exits `0`.

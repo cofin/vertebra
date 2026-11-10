@@ -3,11 +3,16 @@
 extern crate _postgres as vertebra_postgres;
 
 use arrow_array::{
-    Array, BinaryArray, BooleanArray, FixedSizeBinaryArray, Float32Array, Float64Array, Int8Array,
-    Int16Array, Int32Array, Int64Array, RecordBatch, StringArray, StructArray, UInt32Array,
+    Array, BinaryArray, BooleanArray, FixedSizeBinaryArray, FixedSizeListArray, Float32Array,
+    Float64Array, Int8Array, Int16Array, Int32Array, Int64Array, ListArray, RecordBatch,
+    StringArray, StructArray, UInt32Array,
 };
+use arrow_ipc::reader::StreamReader;
+use arrow_ipc::writer::StreamWriter;
 use arrow_schema::DataType;
 use bytes::BytesMut;
+use std::io::Cursor;
+use vertebra_db::postgres::{encode_pgvector_bit, encode_pgvector_f16, encode_pgvector_f32};
 use vertebra_postgres::arrow::{
     CID_OID, DEFAULT_ARROW_BATCH_BYTES, DEFAULT_ARROW_BATCH_ROWS, MAX_ARROW_NESTING_DEPTH,
     POSTGRES_ARROW_VERSION_KEY, PostgresArrowBatchBuilder, PostgresArrowSchema, REGPROC_OID,
@@ -19,15 +24,16 @@ use vertebra_postgres::codecs::{
     BIT_OID, BOOL_OID, BPCHAR_OID, BYTEA_OID, CodecContext, DATE_OID, FLOAT4_OID, FLOAT8_OID,
     INT2_OID, INT4_OID, INT8_OID, INTERVAL_OID, JSON_OID, JSONB_OID, NAME_OID, NUMERIC_OID,
     OID_OID, RECORD_OID, TEXT_OID, TIME_OID, TIMESTAMP_OID, TIMESTAMPTZ_OID, UUID_OID, VARBIT_OID,
-    VARCHAR_OID,
+    VARCHAR_OID, encode_value_with_catalog,
 };
 use vertebra_postgres::errors::PostgresError;
 use vertebra_postgres::result::{
     Column, Format, PG_DATE_NEG_INF, PG_INTERVAL_POS_INF, PG_TIME_MAX_MICROS, PG_TS_NEG_INF,
-    PG_TS_POS_INF, PgNumeric, PgValue, TemporalKind,
+    PG_TS_POS_INF, PgNumeric, PgValue, TemporalKind, VectorKind,
 };
 use vertebra_postgres::types::{
-    CompositeField, NUMERIC_ARRAY_OID, TypeCatalog, TypeInfo, TypeKind,
+    CompositeField, INT4_ARRAY_OID, NUMERIC_ARRAY_OID, TEXT_ARRAY_OID, TypeCatalog, TypeInfo,
+    TypeKind,
 };
 
 fn col(name: &str, type_oid: u32, format: Format, type_modifier: i32) -> Column {
@@ -1421,4 +1427,988 @@ fn batch_bounds_flush_by_row_count_byte_budget_reject_oversize_and_preserve_empt
             .value(0),
         "keep-me"
     );
+}
+
+#[test]
+fn nested_builds_pg_arrays_null_empty_null_elements_and_2d_negative_lower_bounds() {
+    let catalog = TypeCatalog::new_with_builtins();
+    let ctx = CodecContext::default();
+    let columns = vec![
+        col("arr_bin", INT4_ARRAY_OID, Format::Binary, -1),
+        col("arr_txt", INT4_ARRAY_OID, Format::Text, -1),
+    ];
+    let mut builder =
+        PostgresArrowBatchBuilder::try_new(&columns, &catalog, 64, 1024 * 1024).unwrap();
+
+    let encode_bin = |v: &PgValue| -> Vec<u8> {
+        let mut out = BytesMut::new();
+        assert!(
+            encode_value_with_catalog(v, INT4_ARRAY_OID, Format::Binary, &mut out, &ctx, &catalog)
+                .unwrap()
+        );
+        out.to_vec()
+    };
+
+    let arr_empty = PgValue::Array {
+        values: vec![],
+        dimensions: vec![],
+        lower_bounds: vec![],
+        element_oid: INT4_OID,
+    };
+    let arr_with_null = PgValue::Array {
+        values: vec![PgValue::Null, PgValue::Int4(7)],
+        dimensions: vec![2],
+        lower_bounds: vec![1],
+        element_oid: INT4_OID,
+    };
+    let arr_2d_neg_lb = PgValue::Array {
+        values: vec![
+            PgValue::Int4(10),
+            PgValue::Int4(20),
+            PgValue::Int4(30),
+            PgValue::Int4(40),
+        ],
+        dimensions: vec![2, 2],
+        lower_bounds: vec![-2, 3],
+        element_oid: INT4_OID,
+    };
+
+    let b_empty = encode_bin(&arr_empty);
+    let b_with_null = encode_bin(&arr_with_null);
+    let b_2d = encode_bin(&arr_2d_neg_lb);
+
+    builder
+        .append_data_row(&[None, None], &ctx, &catalog)
+        .unwrap();
+    builder
+        .append_data_row(&[Some(b_empty.as_slice()), Some(b"{}")], &ctx, &catalog)
+        .unwrap();
+    builder
+        .append_data_row(
+            &[Some(b_with_null.as_slice()), Some(b"{NULL,7}")],
+            &ctx,
+            &catalog,
+        )
+        .unwrap();
+    builder
+        .append_data_row(
+            &[
+                Some(b_2d.as_slice()),
+                Some(b"[-2:-1][3:4]={{10,20},{30,40}}"),
+            ],
+            &ctx,
+            &catalog,
+        )
+        .unwrap();
+
+    for bad_arr in [
+        PgValue::Array {
+            values: vec![PgValue::Int4(1)],
+            dimensions: vec![1, 1],
+            lower_bounds: vec![1],
+            element_oid: INT4_OID,
+        },
+        PgValue::Array {
+            values: vec![PgValue::Int4(1)],
+            dimensions: vec![1; 7],
+            lower_bounds: vec![1; 7],
+            element_oid: INT4_OID,
+        },
+        PgValue::Array {
+            values: vec![PgValue::Int4(1), PgValue::Int4(2), PgValue::Int4(3)],
+            dimensions: vec![2, 2],
+            lower_bounds: vec![1, 1],
+            element_oid: INT4_OID,
+        },
+        PgValue::Array {
+            values: vec![],
+            dimensions: vec![0],
+            lower_bounds: vec![1],
+            element_oid: INT4_OID,
+        },
+        PgValue::Array {
+            values: vec![PgValue::Int4(1), PgValue::Int4(2)],
+            dimensions: vec![2],
+            lower_bounds: vec![i32::MAX],
+            element_oid: INT4_OID,
+        },
+    ] {
+        assert!(matches!(
+            builder.append_pg_row(&[bad_arr, PgValue::Null]),
+            Err(PostgresError::Data(_))
+        ));
+    }
+    assert_eq!(builder.buffered_rows(), 4);
+
+    let batch = builder.flush_batch().unwrap().unwrap();
+    assert_eq!(batch.num_rows(), 4);
+
+    for col_idx in [0, 1] {
+        let s = batch
+            .column(col_idx)
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .unwrap();
+        assert!(s.is_null(0));
+        assert!(s.is_valid(1));
+        assert!(s.is_valid(2));
+        assert!(s.is_valid(3));
+
+        let dims = s
+            .column_by_name("dimensions")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .unwrap();
+        let lbs = s
+            .column_by_name("lower_bounds")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .unwrap();
+        let vals = s
+            .column_by_name("values")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .unwrap();
+
+        assert!(dims.is_null(0));
+        assert!(lbs.is_null(0));
+        assert!(vals.is_null(0));
+
+        assert!(dims.is_valid(1));
+        assert_eq!(dims.value(1).len(), 0);
+        assert_eq!(lbs.value(1).len(), 0);
+        assert_eq!(vals.value(1).len(), 0);
+
+        let d2 = dims.value(2);
+        let d2_i = d2.as_any().downcast_ref::<Int32Array>().unwrap();
+        assert_eq!(d2_i.values().as_ref(), &[2]);
+        let lb2 = lbs.value(2);
+        let lb2_i = lb2.as_any().downcast_ref::<Int32Array>().unwrap();
+        assert_eq!(lb2_i.values().as_ref(), &[1]);
+        let v2 = vals.value(2);
+        let v2_i = v2.as_any().downcast_ref::<Int32Array>().unwrap();
+        assert_eq!(v2_i.len(), 2);
+        assert!(v2_i.is_null(0));
+        assert_eq!(v2_i.value(1), 7);
+
+        let d3 = dims.value(3);
+        let d3_i = d3.as_any().downcast_ref::<Int32Array>().unwrap();
+        assert_eq!(d3_i.values().as_ref(), &[2, 2]);
+        let lb3 = lbs.value(3);
+        let lb3_i = lb3.as_any().downcast_ref::<Int32Array>().unwrap();
+        assert_eq!(lb3_i.values().as_ref(), &[-2, 3]);
+        let v3 = vals.value(3);
+        let v3_i = v3.as_any().downcast_ref::<Int32Array>().unwrap();
+        assert_eq!(v3_i.values().as_ref(), &[10, 20, 30, 40]);
+    }
+}
+
+#[test]
+fn nested_preserves_composite_null_vs_all_null_fields_domains_enums_across_batches_and_ipc() {
+    let mut catalog = TypeCatalog::new_with_builtins();
+    catalog.insert_custom_type(TypeInfo {
+        oid: 50010,
+        schema: "public".to_string(),
+        name: "mood".to_string(),
+        kind: TypeKind::Enum,
+        delimiter: b',',
+    });
+    catalog.insert_custom_type(TypeInfo {
+        oid: 50020,
+        schema: "public".to_string(),
+        name: "user_uuid".to_string(),
+        kind: TypeKind::Domain { base_oid: UUID_OID },
+        delimiter: b',',
+    });
+    catalog.insert_custom_type(TypeInfo {
+        oid: 50021,
+        schema: "public".to_string(),
+        name: "price_list".to_string(),
+        kind: TypeKind::Domain {
+            base_oid: NUMERIC_ARRAY_OID,
+        },
+        delimiter: b',',
+    });
+    catalog.insert_custom_type(TypeInfo {
+        oid: 50001,
+        schema: "public".to_string(),
+        name: "pair_t".to_string(),
+        kind: TypeKind::Composite {
+            fields: vec![
+                CompositeField {
+                    name: "label".to_string(),
+                    type_oid: TEXT_OID,
+                    type_modifier: -1,
+                },
+                CompositeField {
+                    name: "score".to_string(),
+                    type_oid: INT4_OID,
+                    type_modifier: -1,
+                },
+            ],
+        },
+        delimiter: b',',
+    });
+    catalog.insert_custom_type(TypeInfo {
+        oid: 50002,
+        schema: "public".to_string(),
+        name: "_pair_t".to_string(),
+        kind: TypeKind::Array {
+            element_oid: 50001,
+            delimiter: b',',
+        },
+        delimiter: b',',
+    });
+    catalog.insert_custom_type(TypeInfo {
+        oid: 50003,
+        schema: "public".to_string(),
+        name: "audit_t".to_string(),
+        kind: TypeKind::Composite {
+            fields: vec![
+                CompositeField {
+                    name: "prices".to_string(),
+                    type_oid: 50021,
+                    type_modifier: ((12 << 16) | 2) + 4,
+                },
+                CompositeField {
+                    name: "status".to_string(),
+                    type_oid: 50010,
+                    type_modifier: -1,
+                },
+                CompositeField {
+                    name: "actor".to_string(),
+                    type_oid: 50020,
+                    type_modifier: -1,
+                },
+                CompositeField {
+                    name: "pairs".to_string(),
+                    type_oid: 50002,
+                    type_modifier: -1,
+                },
+            ],
+        },
+        delimiter: b',',
+    });
+
+    let columns = vec![
+        col("pair", 50001, Format::Binary, -1),
+        col("audit", 50003, Format::Text, -1),
+    ];
+    let mut builder =
+        PostgresArrowBatchBuilder::try_new(&columns, &catalog, 2, 1024 * 1024).unwrap();
+    let expected_schema = builder.schema().clone();
+    let ctx = CodecContext::default();
+
+    let encode_comp = |val: &PgValue, oid: u32, fmt: Format| -> Vec<u8> {
+        let mut out = BytesMut::new();
+        assert!(encode_value_with_catalog(val, oid, fmt, &mut out, &ctx, &catalog).unwrap());
+        out.to_vec()
+    };
+
+    let uuid_a: [u8; 16] = [0xAA; 16];
+    let audit_row0 = PgValue::Composite {
+        type_oid: 50003,
+        field_names: vec![
+            "prices".to_string(),
+            "status".to_string(),
+            "actor".to_string(),
+            "pairs".to_string(),
+        ],
+        field_oids: vec![50021, 50010, 50020, 50002],
+        values: vec![
+            PgValue::Array {
+                values: vec![
+                    PgValue::Numeric(decode_numeric_text("12.30").unwrap()),
+                    PgValue::Numeric(PgNumeric::NaN),
+                ],
+                dimensions: vec![2],
+                lower_bounds: vec![1],
+                element_oid: NUMERIC_OID,
+            },
+            PgValue::Text("happy".to_string()),
+            PgValue::Uuid(uuid_a),
+            PgValue::Array {
+                values: vec![
+                    PgValue::Composite {
+                        type_oid: 50001,
+                        field_names: vec!["label".to_string(), "score".to_string()],
+                        field_oids: vec![TEXT_OID, INT4_OID],
+                        values: vec![PgValue::Text("a".to_string()), PgValue::Int4(1)],
+                    },
+                    PgValue::Null,
+                    PgValue::Composite {
+                        type_oid: 50001,
+                        field_names: vec!["label".to_string(), "score".to_string()],
+                        field_oids: vec![TEXT_OID, INT4_OID],
+                        values: vec![PgValue::Null, PgValue::Null],
+                    },
+                ],
+                dimensions: vec![3],
+                lower_bounds: vec![0],
+                element_oid: 50001,
+            },
+        ],
+    };
+    let pair_all_null = PgValue::Composite {
+        type_oid: 50001,
+        field_names: vec!["label".to_string(), "score".to_string()],
+        field_oids: vec![TEXT_OID, INT4_OID],
+        values: vec![PgValue::Null, PgValue::Null],
+    };
+    let audit_all_null = PgValue::Composite {
+        type_oid: 50003,
+        field_names: vec![
+            "prices".to_string(),
+            "status".to_string(),
+            "actor".to_string(),
+            "pairs".to_string(),
+        ],
+        field_oids: vec![50021, 50010, 50020, 50002],
+        values: vec![PgValue::Null, PgValue::Null, PgValue::Null, PgValue::Null],
+    };
+
+    let b_audit0 = encode_comp(&audit_row0, 50003, Format::Text);
+    let b_pair_all_null = encode_comp(&pair_all_null, 50001, Format::Binary);
+    let b_audit_all_null = encode_comp(&audit_all_null, 50003, Format::Text);
+
+    assert!(
+        builder
+            .append_data_row(&[None, Some(b_audit0.as_slice())], &ctx, &catalog)
+            .unwrap()
+            .is_none()
+    );
+
+    assert!(matches!(
+        builder.append_pg_row(&[
+            PgValue::Composite {
+                type_oid: 50001,
+                field_names: vec!["label".to_string()],
+                field_oids: vec![TEXT_OID],
+                values: vec![PgValue::Text("wrong_arity".to_string())],
+            },
+            PgValue::Null,
+        ]),
+        Err(PostgresError::Data(_))
+    ));
+    assert_eq!(builder.buffered_rows(), 1);
+
+    let batch1 = builder
+        .append_data_row(
+            &[
+                Some(b_pair_all_null.as_slice()),
+                Some(b_audit_all_null.as_slice()),
+            ],
+            &ctx,
+            &catalog,
+        )
+        .unwrap()
+        .expect("max_rows=2 must flush batch 1");
+
+    assert!(
+        builder
+            .append_pg_row(&[
+                PgValue::Composite {
+                    type_oid: 50001,
+                    field_names: vec!["label".to_string(), "score".to_string()],
+                    field_oids: vec![TEXT_OID, INT4_OID],
+                    values: vec![PgValue::Text("z".to_string()), PgValue::Int4(-9)],
+                },
+                PgValue::Null,
+            ])
+            .unwrap()
+            .is_none()
+    );
+    let batch2 = builder.finish_empty_or_tail().unwrap().unwrap();
+
+    let mut ipc_buf = Vec::new();
+    {
+        let mut writer = StreamWriter::try_new(&mut ipc_buf, &expected_schema).unwrap();
+        writer.write(&batch1).unwrap();
+        writer.write(&batch2).unwrap();
+        writer.finish().unwrap();
+    }
+
+    let reader = StreamReader::try_new(Cursor::new(ipc_buf), None).unwrap();
+    assert_eq!(reader.schema(), expected_schema);
+    let decoded_batches: Vec<RecordBatch> = reader.map(Result::unwrap).collect();
+    assert_eq!(decoded_batches.len(), 2);
+    assert_eq!(decoded_batches[0].num_rows(), 2);
+    assert_eq!(decoded_batches[1].num_rows(), 1);
+
+    let b0_pair = decoded_batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .unwrap();
+    assert!(b0_pair.is_null(0));
+    assert!(b0_pair.is_valid(1));
+    assert!(b0_pair.column_by_name("label").unwrap().is_null(1));
+    assert!(b0_pair.column_by_name("score").unwrap().is_null(1));
+
+    let b0_audit = decoded_batches[0]
+        .column(1)
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .unwrap();
+    assert!(b0_audit.is_valid(0));
+    assert!(b0_audit.is_valid(1));
+    for attr_name in ["prices", "status", "actor", "pairs"] {
+        assert!(b0_audit.column_by_name(attr_name).unwrap().is_null(1));
+    }
+
+    let prices_struct = b0_audit
+        .column_by_name("prices")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .unwrap();
+    let prices_vals = prices_struct
+        .column_by_name("values")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .unwrap()
+        .value(0);
+    let prices_str = prices_vals.as_any().downcast_ref::<StringArray>().unwrap();
+    assert_eq!(prices_str.value(0), "12.30");
+    assert_eq!(prices_str.value(1), "NaN");
+
+    let status_arr = b0_audit
+        .column_by_name("status")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    assert_eq!(status_arr.value(0), "happy");
+
+    let actor_arr = b0_audit
+        .column_by_name("actor")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<FixedSizeBinaryArray>()
+        .unwrap();
+    assert_eq!(actor_arr.value(0), uuid_a.as_slice());
+
+    let pairs_arr = b0_audit
+        .column_by_name("pairs")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .unwrap();
+    let pairs_lbs = pairs_arr
+        .column_by_name("lower_bounds")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .unwrap()
+        .value(0);
+    assert_eq!(
+        pairs_lbs
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap()
+            .values()
+            .as_ref(),
+        &[0]
+    );
+    let pairs_items_ref = pairs_arr
+        .column_by_name("values")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .unwrap()
+        .value(0);
+    let pairs_items = pairs_items_ref
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .unwrap();
+    assert_eq!(pairs_items.len(), 3);
+    assert!(pairs_items.is_valid(0));
+    assert!(pairs_items.is_null(1));
+    assert!(pairs_items.is_valid(2));
+    assert_eq!(
+        pairs_items
+            .column_by_name("label")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap()
+            .value(0),
+        "a"
+    );
+    assert_eq!(
+        pairs_items
+            .column_by_name("score")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap()
+            .value(0),
+        1
+    );
+    assert!(pairs_items.column_by_name("label").unwrap().is_null(2));
+    assert!(pairs_items.column_by_name("score").unwrap().is_null(2));
+
+    let b1_pair = decoded_batches[1]
+        .column(0)
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .unwrap();
+    assert!(b1_pair.is_valid(0));
+    assert_eq!(
+        b1_pair
+            .column_by_name("label")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap()
+            .value(0),
+        "z"
+    );
+    assert_eq!(
+        b1_pair
+            .column_by_name("score")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap()
+            .value(0),
+        -9
+    );
+    let b1_audit = decoded_batches[1]
+        .column(1)
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .unwrap();
+    assert!(b1_audit.is_null(0));
+}
+
+#[test]
+fn vector_enforces_fixed_and_dynamic_pgvector_and_halfvec_dimensions_and_f16_fidelity() {
+    let mut catalog = TypeCatalog::new_with_builtins();
+    catalog.insert_custom_type(TypeInfo {
+        oid: 42001,
+        schema: "public".to_string(),
+        name: "vector".to_string(),
+        kind: TypeKind::Extension {
+            schema: "public".to_string(),
+            name: "vector".to_string(),
+        },
+        delimiter: b',',
+    });
+    catalog.insert_custom_type(TypeInfo {
+        oid: 42002,
+        schema: "public".to_string(),
+        name: "halfvec".to_string(),
+        kind: TypeKind::Extension {
+            schema: "public".to_string(),
+            name: "halfvec".to_string(),
+        },
+        delimiter: b',',
+    });
+    catalog.insert_custom_type(TypeInfo {
+        oid: 42003,
+        schema: "public".to_string(),
+        name: "_vector".to_string(),
+        kind: TypeKind::Array {
+            element_oid: 42001,
+            delimiter: b',',
+        },
+        delimiter: b',',
+    });
+
+    let columns = vec![
+        col("v_fixed", 42001, Format::Binary, 3),
+        col("v_dyn", 42001, Format::Binary, -1),
+        col("h_fixed", 42002, Format::Binary, 2),
+        col("h_dyn", 42002, Format::Binary, -1),
+        col("v_arr", 42003, Format::Binary, 2),
+    ];
+    let mut builder =
+        PostgresArrowBatchBuilder::try_new(&columns, &catalog, 16, 1024 * 1024).unwrap();
+    let ctx = CodecContext::default();
+
+    let f16_max = 65504.0f32;
+    let f16_min_pos = f32::from_bits(0x3880_0000);
+    let f16_subnormal = f32::from_bits(0x3380_0000);
+
+    let wf_v0 = encode_pgvector_f32(&[1.0, -0.0, 0.5]).unwrap();
+    let wd_v0 = encode_pgvector_f32(&[42.25]).unwrap();
+    let hf_v0 = encode_pgvector_f16(&[f16_max, f16_min_pos]).unwrap();
+    let hd_v0 = encode_pgvector_f16(&[-0.0, f16_subnormal]).unwrap();
+    let mut varr_buf = BytesMut::new();
+    encode_value_with_catalog(
+        &PgValue::Array {
+            values: vec![
+                PgValue::Vector {
+                    values: vec![1.0, 2.0],
+                    kind: VectorKind::Vector,
+                },
+                PgValue::Vector {
+                    values: vec![3.0, 4.0],
+                    kind: VectorKind::Vector,
+                },
+            ],
+            dimensions: vec![2],
+            lower_bounds: vec![1],
+            element_oid: 42001,
+        },
+        42003,
+        Format::Binary,
+        &mut varr_buf,
+        &ctx,
+        &catalog,
+    )
+    .unwrap();
+
+    builder
+        .append_data_row(
+            &[
+                Some(wf_v0.as_slice()),
+                Some(wd_v0.as_slice()),
+                Some(hf_v0.as_slice()),
+                Some(hd_v0.as_slice()),
+                Some(varr_buf.as_ref()),
+            ],
+            &ctx,
+            &catalog,
+        )
+        .unwrap();
+
+    builder
+        .append_pg_row(&[
+            PgValue::Null,
+            PgValue::Vector {
+                values: vec![1.0, 2.0, 3.0, 4.0],
+                kind: VectorKind::Vector,
+            },
+            PgValue::Null,
+            PgValue::Vector {
+                values: vec![1.5, -2.5, 3.25],
+                kind: VectorKind::HalfVec,
+            },
+            PgValue::Null,
+        ])
+        .unwrap();
+
+    for bad_row in [
+        vec![
+            PgValue::Vector {
+                values: vec![1.0, 2.0],
+                kind: VectorKind::Vector,
+            },
+            PgValue::Null,
+            PgValue::Null,
+            PgValue::Null,
+            PgValue::Null,
+        ],
+        vec![
+            PgValue::Vector {
+                values: vec![1.0, f32::NAN, 0.0],
+                kind: VectorKind::Vector,
+            },
+            PgValue::Null,
+            PgValue::Null,
+            PgValue::Null,
+            PgValue::Null,
+        ],
+        vec![
+            PgValue::Null,
+            PgValue::Vector {
+                values: vec![],
+                kind: VectorKind::Vector,
+            },
+            PgValue::Null,
+            PgValue::Null,
+            PgValue::Null,
+        ],
+        vec![
+            PgValue::Null,
+            PgValue::Vector {
+                values: vec![0.0; 16_001],
+                kind: VectorKind::Vector,
+            },
+            PgValue::Null,
+            PgValue::Null,
+            PgValue::Null,
+        ],
+        vec![
+            PgValue::Null,
+            PgValue::Null,
+            PgValue::Null,
+            PgValue::Vector {
+                values: vec![70_000.0],
+                kind: VectorKind::HalfVec,
+            },
+            PgValue::Null,
+        ],
+        vec![
+            PgValue::Null,
+            PgValue::Null,
+            PgValue::Null,
+            PgValue::Vector {
+                values: vec![1.0],
+                kind: VectorKind::Vector,
+            },
+            PgValue::Null,
+        ],
+    ] {
+        assert!(matches!(
+            builder.append_pg_row(&bad_row),
+            Err(PostgresError::Data(_))
+        ));
+    }
+    assert_eq!(builder.buffered_rows(), 2);
+
+    let batch = builder.flush_batch().unwrap().unwrap();
+    assert_eq!(
+        batch
+            .schema()
+            .field(3)
+            .metadata()
+            .get("postgres.encoding")
+            .map(String::as_str),
+        Some("pghalfvec")
+    );
+
+    let vf = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<FixedSizeListArray>()
+        .unwrap();
+    assert!(vf.is_valid(0));
+    assert!(vf.is_null(1));
+    let vf0 = vf.value(0);
+    let vf0_f = vf0.as_any().downcast_ref::<Float32Array>().unwrap();
+    assert_eq!(vf0_f.value(0), 1.0);
+    assert_eq!(vf0_f.value(1), 0.0);
+    assert!(vf0_f.value(1).is_sign_negative());
+    assert_eq!(vf0_f.value(2), 0.5);
+
+    let vd = batch
+        .column(1)
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .unwrap();
+    assert_eq!(
+        vd.value(0)
+            .as_any()
+            .downcast_ref::<Float32Array>()
+            .unwrap()
+            .values()
+            .as_ref(),
+        &[42.25]
+    );
+    assert_eq!(
+        vd.value(1)
+            .as_any()
+            .downcast_ref::<Float32Array>()
+            .unwrap()
+            .values()
+            .as_ref(),
+        &[1.0, 2.0, 3.0, 4.0]
+    );
+
+    let hf = batch
+        .column(2)
+        .as_any()
+        .downcast_ref::<FixedSizeListArray>()
+        .unwrap();
+    assert!(hf.is_valid(0));
+    assert!(hf.is_null(1));
+    assert_eq!(
+        hf.value(0)
+            .as_any()
+            .downcast_ref::<Float32Array>()
+            .unwrap()
+            .values()
+            .as_ref(),
+        &[f16_max, f16_min_pos]
+    );
+
+    let hd = batch
+        .column(3)
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .unwrap();
+    let hd0 = hd.value(0);
+    let hd0_f = hd0.as_any().downcast_ref::<Float32Array>().unwrap();
+    assert_eq!(hd0_f.value(0), 0.0);
+    assert!(hd0_f.value(0).is_sign_negative());
+    assert_eq!(hd0_f.value(1), f16_subnormal);
+    assert_eq!(
+        hd.value(1)
+            .as_any()
+            .downcast_ref::<Float32Array>()
+            .unwrap()
+            .values()
+            .as_ref(),
+        &[1.5, -2.5, 3.25]
+    );
+}
+
+#[test]
+fn nested_validates_bit_and_varbit_lengths_and_rejects_nonzero_padding_and_oversize_nested_rows() {
+    let catalog = TypeCatalog::new_with_builtins();
+    let ctx = CodecContext::default();
+    let columns = vec![
+        col("b_col", BIT_OID, Format::Binary, 9),
+        col("vb_col", VARBIT_OID, Format::Text, -1),
+    ];
+    let mut builder =
+        PostgresArrowBatchBuilder::try_new(&columns, &catalog, 16, 1024 * 1024).unwrap();
+
+    let b0 = encode_pgvector_bit(b"", 0).unwrap();
+    let b1 = encode_pgvector_bit(b"\x80", 1).unwrap();
+    let b9 = encode_pgvector_bit(b"\xff\x80", 9).unwrap();
+
+    builder
+        .append_data_row(&[Some(b0.as_slice()), Some(b"")], &ctx, &catalog)
+        .unwrap();
+    builder
+        .append_data_row(&[Some(b1.as_slice()), Some(b"1")], &ctx, &catalog)
+        .unwrap();
+    builder
+        .append_data_row(&[Some(b9.as_slice()), Some(b"111111111")], &ctx, &catalog)
+        .unwrap();
+    builder
+        .append_pg_row(&[PgValue::Null, PgValue::Null])
+        .unwrap();
+
+    for bad_bits in [
+        PgValue::BitString {
+            data: vec![0x81],
+            bit_length: 1,
+        },
+        PgValue::BitString {
+            data: vec![0x80, 0x00],
+            bit_length: 1,
+        },
+        PgValue::BitString {
+            data: vec![],
+            bit_length: -1,
+        },
+    ] {
+        assert!(matches!(
+            builder.append_pg_row(&[bad_bits, PgValue::Null]),
+            Err(PostgresError::Data(_))
+        ));
+    }
+    assert_eq!(builder.buffered_rows(), 4);
+
+    let batch = builder.flush_batch().unwrap().unwrap();
+    for col_idx in [0, 1] {
+        let bs = batch
+            .column(col_idx)
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .unwrap();
+        assert!(bs.is_valid(0));
+        assert!(bs.is_valid(1));
+        assert!(bs.is_valid(2));
+        assert!(bs.is_null(3));
+
+        let bytes_col = bs
+            .column_by_name("bytes")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<BinaryArray>()
+            .unwrap();
+        let len_col = bs
+            .column_by_name("bit_length")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap();
+
+        assert_eq!(bytes_col.value(0), b"");
+        assert_eq!(len_col.value(0), 0);
+        assert_eq!(bytes_col.value(1), b"\x80");
+        assert_eq!(len_col.value(1), 1);
+        assert_eq!(bytes_col.value(2), b"\xff\x80");
+        assert_eq!(len_col.value(2), 9);
+    }
+
+    let mut small_arr_builder = PostgresArrowBatchBuilder::try_new(
+        &[col("tags", TEXT_ARRAY_OID, Format::Binary, -1)],
+        &catalog,
+        16,
+        256,
+    )
+    .unwrap();
+    let big_arr = PgValue::Array {
+        values: (0..8)
+            .map(|_| PgValue::Text("x".repeat(64)))
+            .collect::<Vec<_>>(),
+        dimensions: vec![8],
+        lower_bounds: vec![1],
+        element_oid: TEXT_OID,
+    };
+    assert!(matches!(
+        small_arr_builder.append_pg_row(&[big_arr]),
+        Err(PostgresError::Data(_))
+    ));
+    assert_eq!(small_arr_builder.buffered_rows(), 0);
+
+    let mut deep_cat = TypeCatalog::new_with_builtins();
+    let mut cur_oid = INT4_OID;
+    let mut cur_val = PgValue::Int4(99);
+    for step in 0..MAX_ARROW_NESTING_DEPTH {
+        let oid = 75_000 + step as u32;
+        if step % 2 == 0 {
+            deep_cat.insert_custom_type(TypeInfo {
+                oid,
+                schema: "public".to_string(),
+                name: format!("c_{step}"),
+                kind: TypeKind::Composite {
+                    fields: vec![CompositeField {
+                        name: "v".to_string(),
+                        type_oid: cur_oid,
+                        type_modifier: -1,
+                    }],
+                },
+                delimiter: b',',
+            });
+            cur_val = PgValue::Composite {
+                type_oid: oid,
+                field_names: vec!["v".to_string()],
+                field_oids: vec![cur_oid],
+                values: vec![cur_val],
+            };
+        } else {
+            deep_cat.insert_custom_type(TypeInfo {
+                oid,
+                schema: "public".to_string(),
+                name: format!("_c_{step}"),
+                kind: TypeKind::Array {
+                    element_oid: cur_oid,
+                    delimiter: b',',
+                },
+                delimiter: b',',
+            });
+            cur_val = PgValue::Array {
+                values: vec![cur_val],
+                dimensions: vec![1],
+                lower_bounds: vec![1],
+                element_oid: cur_oid,
+            };
+        }
+        cur_oid = oid;
+    }
+    let mut deep_builder = PostgresArrowBatchBuilder::try_new(
+        &[col("deep32", cur_oid, Format::Binary, -1)],
+        &deep_cat,
+        8,
+        64 * 1024,
+    )
+    .unwrap();
+    deep_builder.append_pg_row(&[cur_val]).unwrap();
+    deep_builder.append_pg_row(&[PgValue::Null]).unwrap();
+    let deep_batch = deep_builder.flush_batch().unwrap().unwrap();
+    assert_eq!(deep_batch.num_rows(), 2);
+    assert!(deep_batch.column(0).is_valid(0));
+    assert!(deep_batch.column(0).is_null(1));
 }

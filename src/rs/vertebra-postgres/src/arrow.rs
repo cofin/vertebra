@@ -8,10 +8,12 @@ use arrow_array::builder::{
     Int8Builder, Int16Builder, Int32Builder, Int64Builder, NullBufferBuilder, StringBuilder,
     UInt32Builder,
 };
-use arrow_array::{ArrayRef, RecordBatch, StructArray};
+use arrow_array::{ArrayRef, FixedSizeListArray, ListArray, RecordBatch, StructArray};
+use arrow_buffer::OffsetBuffer;
 use arrow_schema::{DataType, Field, FieldRef, Fields, Schema};
 use postgres_protocol::types as protocol_types;
 
+use crate::codecs::array::MAX_ARRAY_DIMS;
 use crate::codecs::temporal::{
     validate_date_days, validate_interval_parts, validate_time_micros, validate_timestamp_micros,
 };
@@ -24,7 +26,7 @@ use crate::codecs::{
 use crate::errors::PostgresError;
 use crate::result::{
     Column, Format, PG_DATE_NEG_INF, PG_DATE_POS_INF, PG_TS_NEG_INF, PG_TS_POS_INF, PgValue,
-    TemporalKind,
+    TemporalKind, VectorKind,
 };
 use crate::types::{CompositeField, MAX_DOMAIN_DEPTH, TypeCatalog, TypeInfo, TypeKind};
 
@@ -477,6 +479,17 @@ enum PreparedArrowCell {
         days: i32,
         microseconds: i64,
     },
+    BitString {
+        data: Vec<u8>,
+        bit_length: i32,
+    },
+    Vector(Vec<f32>),
+    Array {
+        dimensions: Vec<i32>,
+        lower_bounds: Vec<i32>,
+        values: Vec<PreparedArrowCell>,
+    },
+    Composite(Vec<PreparedArrowCell>),
 }
 
 enum ArrowColumnBuilder {
@@ -535,14 +548,166 @@ enum ArrowColumnBuilder {
         days: Int32Builder,
         microseconds: Int64Builder,
     },
-    UnsupportedNested {
-        field_name: String,
-        encoding: String,
+    BitString {
+        fields: Fields,
+        nulls: NullBufferBuilder,
+        bytes: BinaryBuilder,
+        bytes_offset: usize,
+        bit_length: Int32Builder,
+    },
+    VectorFixed {
+        item_field: FieldRef,
+        dim: i32,
+        expected_kind: VectorKind,
+        nulls: NullBufferBuilder,
+        values: Float32Builder,
+    },
+    VectorDynamic {
+        item_field: FieldRef,
+        expected_kind: VectorKind,
+        nulls: NullBufferBuilder,
+        offsets: Vec<i32>,
+        values: Float32Builder,
+        elem_count: usize,
+    },
+    PgArray {
+        fields: Fields,
+        dim_item_field: FieldRef,
+        lb_item_field: FieldRef,
+        val_item_field: FieldRef,
+        nulls: NullBufferBuilder,
+        dim_nulls: NullBufferBuilder,
+        dim_offsets: Vec<i32>,
+        dim_values: Int32Builder,
+        dim_count: usize,
+        lb_nulls: NullBufferBuilder,
+        lb_offsets: Vec<i32>,
+        lb_values: Int32Builder,
+        lb_count: usize,
+        val_nulls: NullBufferBuilder,
+        val_offsets: Vec<i32>,
+        val_builder: Box<ArrowColumnBuilder>,
+        val_count: usize,
+    },
+    Composite {
+        fields: Fields,
+        nulls: NullBufferBuilder,
+        children: Vec<ArrowColumnBuilder>,
     },
 }
 
+fn validate_bitstring_payload(
+    data: &[u8],
+    bit_length: i32,
+    max_bytes: usize,
+) -> Result<usize, PostgresError> {
+    if bit_length < 0 {
+        return Err(PostgresError::Data(format!(
+            "PostgreSQL bit/varbit bit_length must be >= 0, got {bit_length}"
+        )));
+    }
+    let bit_len = bit_length as usize;
+    let expected_bytes = bit_len.div_ceil(8);
+    if data.len() != expected_bytes {
+        return Err(PostgresError::Data(format!(
+            "PostgreSQL bit/varbit byte length {} does not match bit_length {bit_length} (expected {expected_bytes})",
+            data.len()
+        )));
+    }
+    let rem = bit_len % 8;
+    if rem != 0
+        && let Some(&last) = data.last()
+        && (last & ((1u8 << (8 - rem)) - 1)) != 0
+    {
+        return Err(PostgresError::Data(format!(
+            "PostgreSQL bit/varbit has nonzero unused low-order padding bits in 0x{last:02x} for bit_length {bit_length}"
+        )));
+    }
+    if data.len() > MAX_I32_OFFSET_BYTES {
+        return Err(PostgresError::Data(format!(
+            "bitstring bytes exceed 32-bit Arrow i32 offset ceiling ({MAX_I32_OFFSET_BYTES} bytes)"
+        )));
+    }
+    let cell_bytes = data.len().saturating_add(4);
+    if cell_bytes > max_bytes {
+        return Err(PostgresError::Data(format!(
+            "bit/varbit value of {cell_bytes} bytes exceeds Arrow batch max_bytes ({max_bytes})"
+        )));
+    }
+    Ok(cell_bytes)
+}
+
+fn validate_vector_payload(
+    values: &[f32],
+    kind: VectorKind,
+    expected_kind: VectorKind,
+    fixed_dim: Option<i32>,
+    max_bytes: usize,
+) -> Result<(Vec<f32>, usize), PostgresError> {
+    let type_label = match expected_kind {
+        VectorKind::Vector => "vector",
+        VectorKind::HalfVec => "halfvec",
+    };
+    if kind != expected_kind {
+        return Err(PostgresError::Data(format!(
+            "PgValue::Vector kind {kind:?} does not match Arrow `{type_label}` column ({expected_kind:?})"
+        )));
+    }
+    let max_dim = MAX_PGVECTOR_ARROW_DIM as usize;
+    if !(1..=max_dim).contains(&values.len()) {
+        return Err(PostgresError::Data(format!(
+            "{type_label} dimension {} outside valid range 1..={max_dim}",
+            values.len()
+        )));
+    }
+    if let Some(dim) = fixed_dim
+        && values.len() != dim as usize
+    {
+        return Err(PostgresError::Data(format!(
+            "{type_label}({dim}) column rejected vector of mismatched dimension {}",
+            values.len()
+        )));
+    }
+    let cell_bytes = values
+        .len()
+        .checked_mul(4)
+        .ok_or_else(|| PostgresError::Data(format!("{type_label} byte length overflow")))?;
+    if cell_bytes > max_bytes {
+        return Err(PostgresError::Data(format!(
+            "{type_label} value of {cell_bytes} bytes exceeds Arrow batch max_bytes ({max_bytes})"
+        )));
+    }
+
+    let mut normalized = Vec::with_capacity(values.len());
+    for (idx, &v) in values.iter().enumerate() {
+        if !v.is_finite() {
+            return Err(PostgresError::Data(format!(
+                "{type_label} element [{idx}] must be finite (got {v})"
+            )));
+        }
+        match expected_kind {
+            VectorKind::Vector => normalized.push(v),
+            VectorKind::HalfVec => {
+                let h = half::f16::from_f32(v);
+                if !h.is_finite() {
+                    return Err(PostgresError::Data(format!(
+                        "halfvec element [{idx}] value {v} overflows finite IEEE 754 binary16"
+                    )));
+                }
+                normalized.push(h.to_f32());
+            }
+        }
+    }
+    Ok((normalized, cell_bytes))
+}
+
 impl ArrowColumnBuilder {
-    fn from_field(field: &Field, row_cap: usize) -> Result<Self, PostgresError> {
+    fn from_field(field: &Field, row_cap: usize, depth: usize) -> Result<Self, PostgresError> {
+        if depth > MAX_ARROW_NESTING_DEPTH {
+            return Err(PostgresError::Data(format!(
+                "PostgreSQL Arrow builder nesting depth {depth} exceeds maximum {MAX_ARROW_NESTING_DEPTH}"
+            )));
+        }
         let encoding = field
             .metadata()
             .get(POSTGRES_FIELD_ENCODING_KEY)
@@ -609,10 +774,123 @@ impl ArrowColumnBuilder {
                 days: Int32Builder::with_capacity(row_cap),
                 microseconds: Int64Builder::with_capacity(row_cap),
             }),
-            _ => Ok(Self::UnsupportedNested {
-                field_name: field.name().clone(),
-                encoding,
+            (DataType::Struct(fields), "pg-bits") => Ok(Self::BitString {
+                fields: fields.clone(),
+                nulls: NullBufferBuilder::new(row_cap),
+                bytes: BinaryBuilder::with_capacity(row_cap, row_cap.saturating_mul(8)),
+                bytes_offset: 0,
+                bit_length: Int32Builder::with_capacity(row_cap),
             }),
+            (DataType::FixedSizeList(item_field, dim), enc @ ("pgvector" | "pghalfvec")) => {
+                if !(1..=MAX_PGVECTOR_ARROW_DIM).contains(dim) {
+                    return Err(PostgresError::Data(format!(
+                        "invalid fixed {enc} Arrow dimension {dim} on field `{}`",
+                        field.name()
+                    )));
+                }
+                let expected_kind = if enc == "pghalfvec" {
+                    VectorKind::HalfVec
+                } else {
+                    VectorKind::Vector
+                };
+                let elem_cap = row_cap.saturating_mul((*dim as usize).min(64));
+                Ok(Self::VectorFixed {
+                    item_field: Arc::clone(item_field),
+                    dim: *dim,
+                    expected_kind,
+                    nulls: NullBufferBuilder::new(row_cap),
+                    values: Float32Builder::with_capacity(elem_cap),
+                })
+            }
+            (DataType::List(item_field), enc @ ("pgvector" | "pghalfvec")) => {
+                let expected_kind = if enc == "pghalfvec" {
+                    VectorKind::HalfVec
+                } else {
+                    VectorKind::Vector
+                };
+                let mut offsets = Vec::with_capacity(row_cap.saturating_add(1));
+                offsets.push(0);
+                Ok(Self::VectorDynamic {
+                    item_field: Arc::clone(item_field),
+                    expected_kind,
+                    nulls: NullBufferBuilder::new(row_cap),
+                    offsets,
+                    values: Float32Builder::with_capacity(row_cap.saturating_mul(8)),
+                    elem_count: 0,
+                })
+            }
+            (DataType::Struct(fields), "pg-array") => {
+                if fields.len() != 3 {
+                    return Err(PostgresError::Data(format!(
+                        "invalid pg-array Struct field count {} on `{}` (expected 3)",
+                        fields.len(),
+                        field.name()
+                    )));
+                }
+                let DataType::List(dim_item_field) = fields[0].data_type() else {
+                    return Err(PostgresError::Data(format!(
+                        "pg-array `{}` dimensions field must be List<Int32>",
+                        field.name()
+                    )));
+                };
+                let DataType::List(lb_item_field) = fields[1].data_type() else {
+                    return Err(PostgresError::Data(format!(
+                        "pg-array `{}` lower_bounds field must be List<Int32>",
+                        field.name()
+                    )));
+                };
+                let DataType::List(val_item_field) = fields[2].data_type() else {
+                    return Err(PostgresError::Data(format!(
+                        "pg-array `{}` values field must be List",
+                        field.name()
+                    )));
+                };
+                let val_builder = Box::new(Self::from_field(
+                    val_item_field.as_ref(),
+                    row_cap,
+                    depth + 1,
+                )?);
+                let mut dim_offsets = Vec::with_capacity(row_cap.saturating_add(1));
+                dim_offsets.push(0);
+                let mut lb_offsets = Vec::with_capacity(row_cap.saturating_add(1));
+                lb_offsets.push(0);
+                let mut val_offsets = Vec::with_capacity(row_cap.saturating_add(1));
+                val_offsets.push(0);
+                Ok(Self::PgArray {
+                    fields: fields.clone(),
+                    dim_item_field: Arc::clone(dim_item_field),
+                    lb_item_field: Arc::clone(lb_item_field),
+                    val_item_field: Arc::clone(val_item_field),
+                    nulls: NullBufferBuilder::new(row_cap),
+                    dim_nulls: NullBufferBuilder::new(row_cap),
+                    dim_offsets,
+                    dim_values: Int32Builder::with_capacity(row_cap),
+                    dim_count: 0,
+                    lb_nulls: NullBufferBuilder::new(row_cap),
+                    lb_offsets,
+                    lb_values: Int32Builder::with_capacity(row_cap),
+                    lb_count: 0,
+                    val_nulls: NullBufferBuilder::new(row_cap),
+                    val_offsets,
+                    val_builder,
+                    val_count: 0,
+                })
+            }
+            (DataType::Struct(fields), "pg-composite") => {
+                let mut children = Vec::with_capacity(fields.len());
+                for child_field in fields {
+                    children.push(Self::from_field(child_field.as_ref(), row_cap, depth + 1)?);
+                }
+                Ok(Self::Composite {
+                    fields: fields.clone(),
+                    nulls: NullBufferBuilder::new(row_cap),
+                    children,
+                })
+            }
+            (dt, enc) => Err(PostgresError::Data(format!(
+                "unsupported PostgreSQL Arrow column `{}` ({dt:?}, encoding `{enc}`)",
+                field.name()
+            ))),
         }
     }
 
@@ -622,15 +900,6 @@ impl ArrowColumnBuilder {
         max_bytes: usize,
     ) -> Result<(PreparedArrowCell, usize), PostgresError> {
         if matches!(val, PgValue::Null) {
-            if let Self::UnsupportedNested {
-                field_name,
-                encoding,
-            } = self
-            {
-                return Err(PostgresError::Data(format!(
-                    "nested PostgreSQL Arrow column `{field_name}` ({encoding}) builder is not supported"
-                )));
-            }
             return Ok((PreparedArrowCell::Null, 0));
         }
 
@@ -925,64 +1194,331 @@ impl ArrowColumnBuilder {
                     pg_value_tag(other)
                 ))),
             },
-            Self::UnsupportedNested {
-                field_name,
-                encoding,
-            } => Err(PostgresError::Data(format!(
-                "nested PostgreSQL Arrow column `{field_name}` ({encoding}) builder is not supported"
-            ))),
+            Self::BitString { .. } => match val {
+                PgValue::BitString { data, bit_length } => {
+                    let bytes = validate_bitstring_payload(data, *bit_length, max_bytes)?;
+                    Ok((
+                        PreparedArrowCell::BitString {
+                            data: data.clone(),
+                            bit_length: *bit_length,
+                        },
+                        bytes,
+                    ))
+                }
+                other => Err(PostgresError::Data(format!(
+                    "expected PgValue::BitString for pg-bits column, got {}",
+                    pg_value_tag(other)
+                ))),
+            },
+            Self::VectorFixed {
+                dim, expected_kind, ..
+            } => match val {
+                PgValue::Vector { values, kind } => {
+                    let (normalized, bytes) = validate_vector_payload(
+                        values,
+                        *kind,
+                        *expected_kind,
+                        Some(*dim),
+                        max_bytes,
+                    )?;
+                    Ok((PreparedArrowCell::Vector(normalized), bytes))
+                }
+                other => Err(PostgresError::Data(format!(
+                    "expected PgValue::Vector for fixed pgvector/halfvec column, got {}",
+                    pg_value_tag(other)
+                ))),
+            },
+            Self::VectorDynamic { expected_kind, .. } => match val {
+                PgValue::Vector { values, kind } => {
+                    let (normalized, bytes) =
+                        validate_vector_payload(values, *kind, *expected_kind, None, max_bytes)?;
+                    Ok((PreparedArrowCell::Vector(normalized), bytes))
+                }
+                other => Err(PostgresError::Data(format!(
+                    "expected PgValue::Vector for dynamic pgvector/halfvec column, got {}",
+                    pg_value_tag(other)
+                ))),
+            },
+            Self::PgArray { val_builder, .. } => match val {
+                PgValue::Array {
+                    values,
+                    dimensions,
+                    lower_bounds,
+                    element_oid,
+                } => {
+                    if *element_oid == 0 {
+                        return Err(PostgresError::Data(
+                            "PostgreSQL array element_oid must be >= 1".to_string(),
+                        ));
+                    }
+                    if dimensions.len() != lower_bounds.len() {
+                        return Err(PostgresError::Data(format!(
+                            "PostgreSQL array dimensions length {} does not match lower_bounds length {}",
+                            dimensions.len(),
+                            lower_bounds.len()
+                        )));
+                    }
+                    if dimensions.len() > MAX_ARRAY_DIMS {
+                        return Err(PostgresError::Data(format!(
+                            "PostgreSQL array rank {} exceeds maximum {MAX_ARRAY_DIMS}",
+                            dimensions.len()
+                        )));
+                    }
+                    if dimensions.is_empty() {
+                        if !values.is_empty() {
+                            return Err(PostgresError::Data(
+                                "0D PostgreSQL array must contain zero elements".to_string(),
+                            ));
+                        }
+                        return Ok((
+                            PreparedArrowCell::Array {
+                                dimensions: Vec::new(),
+                                lower_bounds: Vec::new(),
+                                values: Vec::new(),
+                            },
+                            0,
+                        ));
+                    }
+
+                    let mut expected_len = 1usize;
+                    for (&dim, &lb) in dimensions.iter().zip(lower_bounds.iter()) {
+                        if dim < 1 {
+                            return Err(PostgresError::Data(format!(
+                                "PostgreSQL array dimension must be >= 1, got {dim}"
+                            )));
+                        }
+                        if lb.checked_add(dim - 1).is_none() {
+                            return Err(PostgresError::Data(format!(
+                                "PostgreSQL array upper bound overflows i32 (lower_bound={lb}, dim={dim})"
+                            )));
+                        }
+                        expected_len = expected_len.checked_mul(dim as usize).ok_or_else(|| {
+                            PostgresError::Data(
+                                "PostgreSQL array dimensions product overflow".to_string(),
+                            )
+                        })?;
+                    }
+                    if expected_len != values.len() {
+                        return Err(PostgresError::Data(format!(
+                            "PostgreSQL array values length {} does not match dimensions product {expected_len}",
+                            values.len()
+                        )));
+                    }
+                    check_i32_offset(values.len(), "pg-array element list")?;
+
+                    let mut total_bytes =
+                        dimensions.len().saturating_mul(8).min(MAX_I32_OFFSET_BYTES);
+                    check_single_cap(total_bytes, "pg-array header")?;
+
+                    let mut prepared_vals = Vec::with_capacity(values.len());
+                    for elem in values {
+                        let (p_elem, elem_bytes) = val_builder.prepare_cell(elem, max_bytes)?;
+                        total_bytes = total_bytes.checked_add(elem_bytes).ok_or_else(|| {
+                            PostgresError::Data(
+                                "pg-array aggregate byte count overflow".to_string(),
+                            )
+                        })?;
+                        check_single_cap(total_bytes, "pg-array")?;
+                        prepared_vals.push(p_elem);
+                    }
+                    Ok((
+                        PreparedArrowCell::Array {
+                            dimensions: dimensions.clone(),
+                            lower_bounds: lower_bounds.clone(),
+                            values: prepared_vals,
+                        },
+                        total_bytes,
+                    ))
+                }
+                other => Err(PostgresError::Data(format!(
+                    "expected PgValue::Array for pg-array column, got {}",
+                    pg_value_tag(other)
+                ))),
+            },
+            Self::Composite {
+                fields, children, ..
+            } => match val {
+                PgValue::Composite {
+                    field_names,
+                    values,
+                    ..
+                } => {
+                    if values.len() != children.len() {
+                        return Err(PostgresError::Data(format!(
+                            "PgValue::Composite attribute count {} does not match catalog composite field count {}",
+                            values.len(),
+                            children.len()
+                        )));
+                    }
+                    if !field_names.is_empty() && field_names.len() != fields.len() {
+                        return Err(PostgresError::Data(format!(
+                            "PgValue::Composite field_names length {} does not match catalog composite field count {}",
+                            field_names.len(),
+                            fields.len()
+                        )));
+                    }
+                    let mut total_bytes = 0usize;
+                    let mut prepared_children = Vec::with_capacity(children.len());
+                    for (child_builder, child_val) in children.iter().zip(values.iter()) {
+                        let (p_child, child_bytes) =
+                            child_builder.prepare_cell(child_val, max_bytes)?;
+                        total_bytes = total_bytes.checked_add(child_bytes).ok_or_else(|| {
+                            PostgresError::Data(
+                                "pg-composite aggregate byte count overflow".to_string(),
+                            )
+                        })?;
+                        check_single_cap(total_bytes, "pg-composite")?;
+                        prepared_children.push(p_child);
+                    }
+                    Ok((PreparedArrowCell::Composite(prepared_children), total_bytes))
+                }
+                other => Err(PostgresError::Data(format!(
+                    "expected PgValue::Composite for pg-composite column, got {}",
+                    pg_value_tag(other)
+                ))),
+            },
         }
     }
 
-    fn validate_in_flight_offsets(&self, cell: &PreparedArrowCell) -> Result<(), PostgresError> {
-        let check = |cur: usize, add: usize, label: &str| -> Result<(), PostgresError> {
-            match cur.checked_add(add) {
-                Some(sum) if sum <= MAX_I32_OFFSET_BYTES => Ok(()),
+    fn validate_cells_offsets(
+        &self,
+        cells: &[&PreparedArrowCell],
+        reset_current: bool,
+    ) -> Result<(), PostgresError> {
+        let check_sum = |base: usize, add: usize, label: &str| -> Result<usize, PostgresError> {
+            match base.checked_add(add) {
+                Some(sum) if sum <= MAX_I32_OFFSET_BYTES => Ok(sum),
                 _ => Err(PostgresError::Data(format!(
                     "{label} buffer exceeds 32-bit Arrow i32 offset ceiling ({MAX_I32_OFFSET_BYTES} bytes)"
                 ))),
             }
         };
-        match (self, cell) {
-            (Self::Utf8 { offset_bytes, .. }, PreparedArrowCell::Utf8(s)) => {
-                check(*offset_bytes, s.len(), "Utf8")
+
+        match self {
+            Self::Utf8 { offset_bytes, .. } => {
+                let mut cur = if reset_current { 0 } else { *offset_bytes };
+                for c in cells {
+                    if let PreparedArrowCell::Utf8(s) = c {
+                        cur = check_sum(cur, s.len(), "Utf8")?;
+                    }
+                }
+                Ok(())
             }
-            (Self::Binary { offset_bytes, .. }, PreparedArrowCell::Binary(b)) => {
-                check(*offset_bytes, b.len(), "Binary")
+            Self::Binary { offset_bytes, .. } => {
+                let mut cur = if reset_current { 0 } else { *offset_bytes };
+                for c in cells {
+                    if let PreparedArrowCell::Binary(b) = c {
+                        cur = check_sum(cur, b.len(), "Binary")?;
+                    }
+                }
+                Ok(())
             }
-            (
-                Self::Date {
-                    wt_bytes,
-                    ds_bytes,
-                    tz_bytes,
-                    ..
-                },
-                PreparedArrowCell::Date(PreparedTemporalValue::WireText {
-                    wire_text,
-                    date_style,
-                    time_zone,
-                }),
-            ) => {
-                check(*wt_bytes, wire_text.len(), "date wire_text")?;
-                check(*ds_bytes, date_style.len(), "date date_style")?;
-                check(*tz_bytes, time_zone.len(), "date time_zone")
+            Self::Date {
+                wt_bytes,
+                ds_bytes,
+                tz_bytes,
+                ..
+            } => {
+                let mut wt = if reset_current { 0 } else { *wt_bytes };
+                let mut ds = if reset_current { 0 } else { *ds_bytes };
+                let mut tz = if reset_current { 0 } else { *tz_bytes };
+                for c in cells {
+                    if let PreparedArrowCell::Date(PreparedTemporalValue::WireText {
+                        wire_text,
+                        date_style,
+                        time_zone,
+                    }) = c
+                    {
+                        wt = check_sum(wt, wire_text.len(), "date wire_text")?;
+                        ds = check_sum(ds, date_style.len(), "date date_style")?;
+                        tz = check_sum(tz, time_zone.len(), "date time_zone")?;
+                    }
+                }
+                Ok(())
             }
-            (
-                Self::Timestamp {
-                    wt_bytes,
-                    ds_bytes,
-                    tz_bytes,
-                    ..
-                },
-                PreparedArrowCell::Timestamp(PreparedTemporalValue::WireText {
-                    wire_text,
-                    date_style,
-                    time_zone,
-                }),
-            ) => {
-                check(*wt_bytes, wire_text.len(), "timestamp wire_text")?;
-                check(*ds_bytes, date_style.len(), "timestamp date_style")?;
-                check(*tz_bytes, time_zone.len(), "timestamp time_zone")
+            Self::Timestamp {
+                wt_bytes,
+                ds_bytes,
+                tz_bytes,
+                ..
+            } => {
+                let mut wt = if reset_current { 0 } else { *wt_bytes };
+                let mut ds = if reset_current { 0 } else { *ds_bytes };
+                let mut tz = if reset_current { 0 } else { *tz_bytes };
+                for c in cells {
+                    if let PreparedArrowCell::Timestamp(PreparedTemporalValue::WireText {
+                        wire_text,
+                        date_style,
+                        time_zone,
+                    }) = c
+                    {
+                        wt = check_sum(wt, wire_text.len(), "timestamp wire_text")?;
+                        ds = check_sum(ds, date_style.len(), "timestamp date_style")?;
+                        tz = check_sum(tz, time_zone.len(), "timestamp time_zone")?;
+                    }
+                }
+                Ok(())
+            }
+            Self::BitString { bytes_offset, .. } => {
+                let mut cur = if reset_current { 0 } else { *bytes_offset };
+                for c in cells {
+                    if let PreparedArrowCell::BitString { data, .. } = c {
+                        cur = check_sum(cur, data.len(), "bitstring bytes")?;
+                    }
+                }
+                Ok(())
+            }
+            Self::VectorDynamic { elem_count, .. } => {
+                let mut cur = if reset_current { 0 } else { *elem_count };
+                for c in cells {
+                    if let PreparedArrowCell::Vector(v) = c {
+                        cur = check_sum(cur, v.len(), "dynamic vector list")?;
+                    }
+                }
+                Ok(())
+            }
+            Self::PgArray {
+                dim_count,
+                lb_count,
+                val_count,
+                val_builder,
+                ..
+            } => {
+                let mut dc = if reset_current { 0 } else { *dim_count };
+                let mut lc = if reset_current { 0 } else { *lb_count };
+                let mut vc = if reset_current { 0 } else { *val_count };
+                let mut flat_refs: Vec<&PreparedArrowCell> = Vec::new();
+                for c in cells {
+                    if let PreparedArrowCell::Array {
+                        dimensions,
+                        lower_bounds,
+                        values,
+                    } = c
+                    {
+                        dc = check_sum(dc, dimensions.len(), "pg-array dimensions")?;
+                        lc = check_sum(lc, lower_bounds.len(), "pg-array lower_bounds")?;
+                        vc = check_sum(vc, values.len(), "pg-array values")?;
+                        flat_refs.extend(values.iter());
+                    }
+                }
+                if !flat_refs.is_empty() {
+                    val_builder.validate_cells_offsets(&flat_refs, reset_current)?;
+                }
+                Ok(())
+            }
+            Self::Composite { children, .. } => {
+                for (idx, cb) in children.iter().enumerate() {
+                    let mut col_refs: Vec<&PreparedArrowCell> = Vec::new();
+                    for c in cells {
+                        if let PreparedArrowCell::Composite(attrs) = c {
+                            col_refs.push(&attrs[idx]);
+                        }
+                    }
+                    if !col_refs.is_empty() {
+                        cb.validate_cells_offsets(&col_refs, reset_current)?;
+                    }
+                }
+                Ok(())
             }
             _ => Ok(()),
         }
@@ -1194,6 +1730,171 @@ impl ArrowColumnBuilder {
                 microseconds.append_value(us);
             }
 
+            (
+                Self::BitString {
+                    nulls,
+                    bytes,
+                    bit_length,
+                    ..
+                },
+                PreparedArrowCell::Null,
+            ) => {
+                nulls.append_null();
+                bytes.append_null();
+                bit_length.append_null();
+            }
+            (
+                Self::BitString {
+                    nulls,
+                    bytes,
+                    bytes_offset,
+                    bit_length,
+                    ..
+                },
+                PreparedArrowCell::BitString {
+                    data,
+                    bit_length: bl,
+                },
+            ) => {
+                nulls.append_non_null();
+                *bytes_offset += data.len();
+                bytes.append_value(&data);
+                bit_length.append_value(bl);
+            }
+
+            (
+                Self::VectorFixed {
+                    dim, nulls, values, ..
+                },
+                PreparedArrowCell::Null,
+            ) => {
+                nulls.append_null();
+                for _ in 0..*dim {
+                    values.append_null();
+                }
+            }
+            (Self::VectorFixed { nulls, values, .. }, PreparedArrowCell::Vector(vec)) => {
+                nulls.append_non_null();
+                values.append_slice(&vec);
+            }
+
+            (
+                Self::VectorDynamic {
+                    nulls,
+                    offsets,
+                    elem_count,
+                    ..
+                },
+                PreparedArrowCell::Null,
+            ) => {
+                nulls.append_null();
+                offsets.push(*elem_count as i32);
+            }
+            (
+                Self::VectorDynamic {
+                    nulls,
+                    offsets,
+                    values,
+                    elem_count,
+                    ..
+                },
+                PreparedArrowCell::Vector(vec),
+            ) => {
+                nulls.append_non_null();
+                *elem_count += vec.len();
+                offsets.push(*elem_count as i32);
+                values.append_slice(&vec);
+            }
+
+            (
+                Self::PgArray {
+                    nulls,
+                    dim_nulls,
+                    dim_offsets,
+                    dim_count,
+                    lb_nulls,
+                    lb_offsets,
+                    lb_count,
+                    val_nulls,
+                    val_offsets,
+                    val_count,
+                    ..
+                },
+                PreparedArrowCell::Null,
+            ) => {
+                nulls.append_null();
+                dim_nulls.append_null();
+                dim_offsets.push(*dim_count as i32);
+                lb_nulls.append_null();
+                lb_offsets.push(*lb_count as i32);
+                val_nulls.append_null();
+                val_offsets.push(*val_count as i32);
+            }
+            (
+                Self::PgArray {
+                    nulls,
+                    dim_nulls,
+                    dim_offsets,
+                    dim_values,
+                    dim_count,
+                    lb_nulls,
+                    lb_offsets,
+                    lb_values,
+                    lb_count,
+                    val_nulls,
+                    val_offsets,
+                    val_builder,
+                    val_count,
+                    ..
+                },
+                PreparedArrowCell::Array {
+                    dimensions,
+                    lower_bounds,
+                    values,
+                },
+            ) => {
+                nulls.append_non_null();
+                dim_nulls.append_non_null();
+                *dim_count += dimensions.len();
+                dim_offsets.push(*dim_count as i32);
+                dim_values.append_slice(&dimensions);
+
+                lb_nulls.append_non_null();
+                *lb_count += lower_bounds.len();
+                lb_offsets.push(*lb_count as i32);
+                lb_values.append_slice(&lower_bounds);
+
+                val_nulls.append_non_null();
+                *val_count += values.len();
+                val_offsets.push(*val_count as i32);
+                for v in values {
+                    val_builder.append_prepared(v);
+                }
+            }
+
+            (
+                Self::Composite {
+                    nulls, children, ..
+                },
+                PreparedArrowCell::Null,
+            ) => {
+                nulls.append_null();
+                for child in children {
+                    child.append_prepared(PreparedArrowCell::Null);
+                }
+            }
+            (
+                Self::Composite {
+                    nulls, children, ..
+                },
+                PreparedArrowCell::Composite(attrs),
+            ) => {
+                nulls.append_non_null();
+                for (child, attr) in children.iter_mut().zip(attrs) {
+                    child.append_prepared(attr);
+                }
+            }
+
             _ => unreachable!("prepared cell variant matches ArrowColumnBuilder variant"),
         }
     }
@@ -1317,12 +2018,153 @@ impl ArrowColumnBuilder {
                 })?;
                 Ok(Arc::new(arr))
             }
-            Self::UnsupportedNested {
-                field_name,
-                encoding,
-            } => Err(PostgresError::Data(format!(
-                "nested PostgreSQL Arrow column `{field_name}` ({encoding}) builder is not supported"
-            ))),
+            Self::BitString {
+                fields,
+                nulls,
+                bytes,
+                bytes_offset,
+                bit_length,
+            } => {
+                *bytes_offset = 0;
+                let children: Vec<ArrayRef> =
+                    vec![Arc::new(bytes.finish()), Arc::new(bit_length.finish())];
+                let arr = StructArray::try_new_with_length(
+                    fields.clone(),
+                    children,
+                    nulls.finish(),
+                    row_count,
+                )
+                .map_err(|e| {
+                    PostgresError::Data(format!("failed to build bitstring StructArray: {e}"))
+                })?;
+                Ok(Arc::new(arr))
+            }
+            Self::VectorFixed {
+                item_field,
+                dim,
+                nulls,
+                values,
+                ..
+            } => {
+                let vals_arr: ArrayRef = Arc::new(values.finish());
+                let arr = FixedSizeListArray::try_new(
+                    Arc::clone(item_field),
+                    *dim,
+                    vals_arr,
+                    nulls.finish(),
+                )
+                .map_err(|e| {
+                    PostgresError::Data(format!("failed to build vector FixedSizeListArray: {e}"))
+                })?;
+                Ok(Arc::new(arr))
+            }
+            Self::VectorDynamic {
+                item_field,
+                nulls,
+                offsets,
+                values,
+                elem_count,
+                ..
+            } => {
+                *elem_count = 0;
+                let offsets_vec = std::mem::replace(offsets, vec![0]);
+                let vals_arr: ArrayRef = Arc::new(values.finish());
+                let arr = ListArray::try_new(
+                    Arc::clone(item_field),
+                    OffsetBuffer::new(offsets_vec.into()),
+                    vals_arr,
+                    nulls.finish(),
+                )
+                .map_err(|e| {
+                    PostgresError::Data(format!("failed to build dynamic vector ListArray: {e}"))
+                })?;
+                Ok(Arc::new(arr))
+            }
+            Self::PgArray {
+                fields,
+                dim_item_field,
+                lb_item_field,
+                val_item_field,
+                nulls,
+                dim_nulls,
+                dim_offsets,
+                dim_values,
+                dim_count,
+                lb_nulls,
+                lb_offsets,
+                lb_values,
+                lb_count,
+                val_nulls,
+                val_offsets,
+                val_builder,
+                val_count,
+            } => {
+                *dim_count = 0;
+                *lb_count = 0;
+                let cur_vals = std::mem::replace(val_count, 0);
+
+                let dims_arr = ListArray::try_new(
+                    Arc::clone(dim_item_field),
+                    OffsetBuffer::new(std::mem::replace(dim_offsets, vec![0]).into()),
+                    Arc::new(dim_values.finish()),
+                    dim_nulls.finish(),
+                )
+                .map_err(|e| {
+                    PostgresError::Data(format!("failed to build pg-array dimensions: {e}"))
+                })?;
+
+                let lbs_arr = ListArray::try_new(
+                    Arc::clone(lb_item_field),
+                    OffsetBuffer::new(std::mem::replace(lb_offsets, vec![0]).into()),
+                    Arc::new(lb_values.finish()),
+                    lb_nulls.finish(),
+                )
+                .map_err(|e| {
+                    PostgresError::Data(format!("failed to build pg-array lower_bounds: {e}"))
+                })?;
+
+                let elem_arr = val_builder.finish_array(cur_vals)?;
+                let vals_arr = ListArray::try_new(
+                    Arc::clone(val_item_field),
+                    OffsetBuffer::new(std::mem::replace(val_offsets, vec![0]).into()),
+                    elem_arr,
+                    val_nulls.finish(),
+                )
+                .map_err(|e| {
+                    PostgresError::Data(format!("failed to build pg-array values: {e}"))
+                })?;
+
+                let arr = StructArray::try_new_with_length(
+                    fields.clone(),
+                    vec![Arc::new(dims_arr), Arc::new(lbs_arr), Arc::new(vals_arr)],
+                    nulls.finish(),
+                    row_count,
+                )
+                .map_err(|e| {
+                    PostgresError::Data(format!("failed to build pg-array StructArray: {e}"))
+                })?;
+                Ok(Arc::new(arr))
+            }
+            Self::Composite {
+                fields,
+                nulls,
+                children,
+            } => {
+                let mut child_arrays = Vec::with_capacity(children.len());
+                for child in children {
+                    child_arrays.push(child.finish_array(row_count)?);
+                }
+                let arr = StructArray::try_new_with_length(
+                    fields.clone(),
+                    child_arrays,
+                    nulls.finish(),
+                    row_count,
+                )
+                .map_err(|e| {
+                    PostgresError::Data(format!("failed to build pg-composite StructArray: {e}"))
+                })?;
+                Ok(Arc::new(arr))
+            }
         }
     }
 }
@@ -1448,7 +2290,21 @@ fn decode_wire_cell_for_arrow(
             }
             Ok(PgValue::Text(s))
         }
-        _ => decode_value_with_catalog(wire.type_oid, wire.format, Some(bytes), ctx, catalog),
+        _ => {
+            if ctx.max_nesting_depth > MAX_ARROW_NESTING_DEPTH {
+                let mut clamped = ctx.clone();
+                clamped.max_nesting_depth = MAX_ARROW_NESTING_DEPTH;
+                decode_value_with_catalog(
+                    wire.type_oid,
+                    wire.format,
+                    Some(bytes),
+                    &clamped,
+                    catalog,
+                )
+            } else {
+                decode_value_with_catalog(wire.type_oid, wire.format, Some(bytes), ctx, catalog)
+            }
+        }
     }
 }
 
@@ -1494,7 +2350,7 @@ impl PostgresArrowBatchBuilder {
                 base_oid,
                 format: col.format,
             });
-            builders.push(ArrowColumnBuilder::from_field(field.as_ref(), row_cap)?);
+            builders.push(ArrowColumnBuilder::from_field(field.as_ref(), row_cap, 0)?);
         }
 
         Ok(Self {
@@ -1590,10 +2446,8 @@ impl PostgresArrowBatchBuilder {
         }
 
         let flush_first = self.would_exceed_bytes(row_bytes)?;
-        if !flush_first {
-            for (builder, cell) in self.builders.iter().zip(prepared.iter()) {
-                builder.validate_in_flight_offsets(cell)?;
-            }
+        for (builder, cell) in self.builders.iter().zip(prepared.iter()) {
+            builder.validate_cells_offsets(&[cell], flush_first)?;
         }
 
         let prior_flushed = if flush_first {
