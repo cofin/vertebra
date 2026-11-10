@@ -26,7 +26,7 @@ tests:
   - src/py/tests/unit/db/test_postgres_native_queries.py
 estimated_loc: 230
 plan_revision: 5
-plan_commit: fd571e3a
+plan_commit: 73c8a6ff
 state_revision: 1
 claimed_by: null
 claimed_at: null
@@ -38,7 +38,7 @@ last_verified_commit: 94caf47a
 verification_evidence: "cargo test -p vertebra-postgres --test timezone_text --test datetime_text --locked (10 passed), pytest test_postgres_native_queries.py (2 passed), and cargo check --locked passed"
 created_at: "2026-11-05T18:25:07Z"
 updated_at: "2026-11-08T02:05:22Z"
-commit: null
+commit: 7db43548
 sources:
   - id: pg-contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md

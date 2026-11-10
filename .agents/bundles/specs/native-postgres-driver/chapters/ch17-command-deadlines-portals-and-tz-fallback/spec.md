@@ -12,10 +12,10 @@ depends_on_chapters:
 replan_trigger: null
 current_task: null
 plan_revision: 5
-plan_commit: fd571e3a
+plan_commit: 73c8a6ff
 state_revision: 1
-last_verified_checkpoint: 94caf47a
-last_reviewed_commit: null
+last_verified_checkpoint: 7db43548
+last_reviewed_commit: 7db43548
 created_at: "2026-11-05T00:00:00Z"
 updated_at: "2026-11-09T20:22:04Z"
 generated:
@@ -24,7 +24,7 @@ generated:
 verified:
   - by: agent:flow-setup
     at: "2026-11-07T05:00:00Z"
-    commit: dd432f18
+    commit: 73c8a6ff
 sources:
   - id: pg-contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md
@@ -122,17 +122,17 @@ Progress: `[1/1 files documented in ch17]` (`src/py/vertebra/_postgres.pyi` stub
 
 ## 5. Implementation Plan
 
-- [x] native-postgres-driver:ch17:t01 — Implement absolute Rust command I/O deadlines and bounded cancel retirement (tasks/t01-rust-command-deadlines.md)
-- [x] native-postgres-driver:ch17:t02 — Forward Python query and query_multi command deadlines and verify live SQLSTATE precedence (tasks/t02-python-command-deadline-forwarding.md)
-- [x] native-postgres-driver:ch17:t03 — Expose session-pinned SyncPostgresPortal and AsyncPostgresPortal facades (tasks/t03-python-portal-facades.md)
-- [x] native-postgres-driver:ch17:t04 — Resolve vetted jiff timezone text and enforce output-only ambiguous temporal fallback (tasks/t04-timezone-text-and-ambiguous-fallback.md)
+- [x] [7db43548] native-postgres-driver:ch17:t01 — Implement absolute Rust command I/O deadlines and bounded cancel retirement (tasks/t01-rust-command-deadlines.md)
+- [x] [7db43548] native-postgres-driver:ch17:t02 — Forward Python query and query_multi command deadlines and verify live SQLSTATE precedence (tasks/t02-python-command-deadline-forwarding.md)
+- [x] [7db43548] native-postgres-driver:ch17:t03 — Expose session-pinned SyncPostgresPortal and AsyncPostgresPortal facades (tasks/t03-python-portal-facades.md)
+- [x] [7db43548] native-postgres-driver:ch17:t04 — Resolve vetted jiff timezone text and enforce output-only ambiguous temporal fallback (tasks/t04-timezone-text-and-ambiguous-fallback.md)
 
 **Chapter Recovery Checkpoint:** `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --test command_deadlines --test timezone_text && cargo check --manifest-path src/rs/Cargo.toml -p vertebra-postgres --locked && make dev && uv run --no-sync pytest src/py/tests/unit/db/test_postgres_native_portals.py src/py/tests/unit/db/test_postgres_native_queries.py src/py/tests/integration/db/test_postgres_command_deadlines.py -q && uv run --no-sync python -m mypy.stubtest vertebra._postgres` exits `0`.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Plan Baseline**: `fd571e3a`; chapter `state: completed`, `planning_status: complete`.
-- **Remaining Tasks in Chapter**: None (`4/4` completed).
+- **Verified Baseline**: `plan_commit: 73c8a6ff`; chapter `state: completed` at `7db43548`, `planning_status: complete`.
+- **Remaining Tasks in Chapter**: None (`4/4` completed at `7db43548`).
 - **Downstream Dependents**: Completes Phase 3 and unblocks `ch18-binary-copy-streaming` (`ch18:t01` incremental binary COPY codec), `ch20:t03`–`t04` (Arrow portal streaming), and `ch25`–`ch26` (permanent driver `timeout=` forwarding and `_publish_notification(..., timeout=10.0)`).
 
 [^pg-contracts]: `.agents/bundles/specs/native-postgres-driver/contracts.md` — Frozen command deadline, Python portal, and `PgTemporal` `wire_text` contracts.

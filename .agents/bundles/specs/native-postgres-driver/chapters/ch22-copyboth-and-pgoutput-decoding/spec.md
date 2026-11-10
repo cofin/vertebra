@@ -12,7 +12,7 @@ depends_on_chapters:
 replan_trigger: null
 current_task: "native-postgres-driver:ch22:t01"
 plan_revision: 5
-plan_commit: fd571e3a
+plan_commit: 73c8a6ff
 state_revision: 0
 last_verified_checkpoint: null
 last_reviewed_commit: null
@@ -24,7 +24,7 @@ generated:
 verified:
   - by: agent:plan-generator
     at: "2026-11-07T05:00:00Z"
-    commit: dd432f18
+    commit: 73c8a6ff
 sources:
   - id: npd-contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md
@@ -141,7 +141,7 @@ Progress: `[0/0 files documented in ch22]` (user guides and OKF domain chapters 
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Plan Baseline**: `e8901de4`; chapter `state: planned`, `planning_status: complete`, `plan_revision: 4`.
+- **Verified Plan Baseline**: `73c8a6ff`; chapter `state: planned`, `planning_status: complete`, `plan_revision: 4`.
 - **Remaining Tasks in Chapter**: `t01`, `t02`, `t03` (`3/3` pending).
 - **Downstream Dependents**: Unblocks `ch23-replication-feedback-resume-and-bridge` and `ch24-change-source-and-checkpoints`.
 

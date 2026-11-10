@@ -1,5 +1,15 @@
 # Bundle Activity Log
 
+## [2026-11-10T04:10:58Z] flow-implement | native-postgres-driver (ch19-native-arrow-batches-and-shm)
+
+Completed Chapter 19 (`ch19-native-arrow-batches-and-shm`, `4/4` tasks, raising flow progress to `19/31` chapters and `71/111` tasks on `feat/native-postgres-driver`): lossless `PostgresArrowSchema` (`postgres.arrow.version = "1"`), bounded `PostgresArrowBatchBuilder` scalar and depth-`32` nested array/composite/`pgvector`/bitstring column builders, single-stream `PostgresArrowIpcWriter` with adaptive inline and `VTBARROW` `ShmArrowStreamWriter::finish_unregistered()` promotion, cross-extension `ShmCapsule` `PostgresArrowResult` conversion, and engine-agnostic `ArrowCursor` `row_count` validation.
+
+Functional task commits:
+- `native-postgres-driver:ch19:t01`: `8e430386` — lossless PostgreSQL Arrow schemas (`PostgresArrowSchema::from_columns`).
+- `native-postgres-driver:ch19:t02`: `1102e7f6` — bounded native Arrow scalar `RecordBatch` builders (`PostgresArrowBatchBuilder`).
+- `native-postgres-driver:ch19:t03`: `2ca96efb` — recursive Arrow builders for multidimensional arrays, composites, `vector`/`halfvec`, and `bit`/`varbit`.
+- `native-postgres-driver:ch19:t04`: `98ec4527` — adaptive inline and `VTBARROW` SHM IPC writer, `PostgresArrowResult`, and `ArrowCursor` `row_count` metadata.
+
 ## [2026-11-10T03:00:00Z] flow-archive | native-oracle-driver
 
 Finished and archived 7 chapters and 22 tasks on `feat/native-oracle-driver` stacked on `feat/native-mssql-driver`. Base alignment checkpoint: `c21a2169`.

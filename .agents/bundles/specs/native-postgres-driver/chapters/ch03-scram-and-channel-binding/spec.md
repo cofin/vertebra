@@ -12,10 +12,10 @@ depends_on_chapters:
 replan_trigger: null
 current_task: "native-postgres-driver:ch03:t01"
 plan_revision: 5
-plan_commit: fd571e3a
+plan_commit: 73c8a6ff
 state_revision: 0
-last_verified_checkpoint: null
-last_reviewed_commit: null
+last_verified_checkpoint: 02af81ee
+last_reviewed_commit: 02af81ee
 created_at: "2026-11-05T00:00:00Z"
 updated_at: "2026-11-08T02:05:22Z"
 generated:
@@ -24,7 +24,7 @@ generated:
 verified:
   - by: agent:plan-generator
     at: "2026-11-07T16:40:00Z"
-    commit: dd432f18
+    commit: 73c8a6ff
 sources:
   - id: pg-contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md
@@ -133,16 +133,16 @@ Progress: `[0/0 files documented in ch03]`
 
 ## 5. Implementation Plan
 
-- [x] native-postgres-driver:ch03:t01 — Authenticate ordered SCRAM-SHA-256 SASL exchanges (tasks/t01-scram-sha256.md)
-- [x] native-postgres-driver:ch03:t02 — Derive RFC 5929 tls-server-end-point digests from verified peer certificates (tasks/t02-peer-certificate-binding.md)
-- [x] native-postgres-driver:ch03:t03 — Enforce SCRAM-SHA-256-PLUS channel-binding policies and GS2 downgrade protection (tasks/t03-scram-sha256-plus.md)
+- [x] [02af81ee] native-postgres-driver:ch03:t01 — Authenticate ordered SCRAM-SHA-256 SASL exchanges (tasks/t01-scram-sha256.md)
+- [x] [02af81ee] native-postgres-driver:ch03:t02 — Derive RFC 5929 tls-server-end-point digests from verified peer certificates (tasks/t02-peer-certificate-binding.md)
+- [x] [02af81ee] native-postgres-driver:ch03:t03 — Enforce SCRAM-SHA-256-PLUS channel-binding policies and GS2 downgrade protection (tasks/t03-scram-sha256-plus.md)
 
 **Chapter Recovery Checkpoint:** `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --locked && cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-postgres --all-targets --locked -- -D warnings` exits `0`.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Plan Baseline**: `e8901de4`; chapter `state: planned`, `planning_status: complete`, depends on `ch02-wire-codec-and-session-startup`.
-- **Remaining Tasks in Chapter**: `t01`, `t02`, `t03` (`3/3` pending), awaiting `native-postgres-driver:ch02:t04`.
+- **Verified Baseline**: `plan_commit: 73c8a6ff`; chapter `state: completed` at `02af81ee`, `planning_status: complete`.
+- **Remaining Tasks in Chapter**: None (`3/3` completed at `02af81ee`).
 - **Documentation & OKF Status**: `[0/0 files documented in ch03]`; RFC 5929 channel-binding OKF curation scheduled in `ch30:t02`.
 - **Downstream Dependents**: Unblocks `ch04-cloud-material-and-admin-discovery` (`ch04:t01` depends on `ch03:t03`).
 

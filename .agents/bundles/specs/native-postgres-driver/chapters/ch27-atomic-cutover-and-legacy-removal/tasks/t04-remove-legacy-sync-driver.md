@@ -24,7 +24,7 @@ tests:
   - src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py
 estimated_loc: 210
 plan_revision: 5
-plan_commit: fd571e3a
+plan_commit: 73c8a6ff
 state_revision: 0
 claimed_by: null
 claimed_at: null

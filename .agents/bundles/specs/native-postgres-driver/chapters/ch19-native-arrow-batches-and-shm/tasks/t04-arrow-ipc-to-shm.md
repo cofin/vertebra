@@ -26,7 +26,7 @@ tests:
   - src/py/tests/unit/db/test_postgres_native_data.py
 estimated_loc: 245
 plan_revision: 5
-plan_commit: fd571e3a
+plan_commit: 73c8a6ff
 state_revision: 2
 claimed_by: null
 claimed_at: null
@@ -37,8 +37,8 @@ last_verified_at: "2026-11-10T04:06:23Z"
 last_verified_commit: 2ca96efb
 verification_evidence: "make postgres-test -> 0; cargo clippy -p vertebra-postgres --all-targets -- -D warnings -> 0; uv run --no-sync python -m pytest src/py/tests/unit/db/test_postgres_native_data.py -k arrow_count -q -> 28 passed; uv run --no-sync python -m mypy.stubtest vertebra._postgres -> 0"
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-10T04:06:23Z"
-commit: null
+updated_at: "2026-11-10T04:10:58Z"
+commit: 98ec4527
 sources:
   - id: pg-contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md
@@ -89,8 +89,8 @@ Implement `PostgresArrowIpcWriter` and cross-extension `ArrowOutput` conversion 
     - `pub fn try_new(schema: Arc<Schema>, columns: Vec<String>, mode: ArrowStorageMode, max_result_bytes: usize) -> Result<Self, PostgresError>` (validates `max_result_bytes > 0`, initializes `StreamWriter::try_new(Vec::new(), &schema)`, drains complete `schema_ipc_frame`; in `AlwaysShm` mode immediately creates `ShmArrowStreamWriter::create` with unique `/vtb-pg-arrow-...` name, while `Adaptive` buffers `schema_ipc_frame` + complete batch groups inline while `total_rows <= threshold_rows`)
     - `pub fn write_batch(&mut self, batch: &RecordBatch) -> Result<(), PostgresError>` (writes `batch` into `StreamWriter`, drains complete batch message group, enforces `total_ipc_bytes <= max_result_bytes` before copying/promoting, promotes already-encoded schema + batch groups to `ShmArrowStreamWriter` as soon as `total_rows > threshold_rows`, then appends subsequent complete groups via `append_ipc_frame`)
     - `pub fn finish(self) -> Result<ArrowOutput, PostgresError>` (calls `StreamWriter::finish()` once; inline retains `StreamWriter`'s single 8-byte EOS marker, whereas SHM discards `StreamWriter`'s trailing EOS and calls `ShmArrowStreamWriter::finish_unregistered()` so `VTBARROW` header + sole EOS are written once without touching `ACTIVE_ARROW_SHM_REGIONS`)
-  - `pub fn arrow_output_into_py_result(py: Python<'_>, output: ArrowOutput) -> PyResult<Py<PyAny>>`:
-    - Imports `PostgresArrowResult` from `vertebra.db.adapters.postgres.types`; for `Inline`, passes `PyBytes` + `used_shm = false`; for `Shm`, constructs `vertebra._vertebra.ArrowCursor` via `vertebra_db::py_async::construct_py_arrow_cursor` (`ShmCapsule` producer drop callback, cleaning up mapping on conversion/drop error) and passes `used_shm = true` [^shm-core-rs].
+  - `pub fn arrow_output_into_py_result(py: Python<'_>, output: ArrowOutput) -> PyResult<Py<PyAny>>` and `pub fn shm_output_into_py_cursor(py: Python<'_>, output: ArrowOutput) -> PyResult<Py<PyAny>>`:
+    - `arrow_output_into_py_result` imports `PostgresArrowResult` from `vertebra.db.adapters.postgres.types`; for `Inline`, passes `PyBytes` + `used_shm = false`; for `Shm`, delegates SHM handoff to `shm_output_into_py_cursor`, which constructs `vertebra._vertebra.ArrowCursor` via `vertebra_db::py_async::construct_py_arrow_cursor` (`ShmCapsule` producer drop callback, cleaning up mapping on conversion/drop error and rejecting `ArrowOutput::Inline`), and passes `used_shm = true` [^shm-core-rs].
 - `src/py/vertebra/db/adapters/postgres/types.py`:
   - Add `PostgresArrowResult` to `__all__`:
     ```python

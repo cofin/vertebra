@@ -24,7 +24,7 @@ tests:
   - src/rs/vertebra-postgres/tests/postgres_tls_wire_tests.rs
 estimated_loc: 225
 plan_revision: 5
-plan_commit: fd571e3a
+plan_commit: 73c8a6ff
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -36,7 +36,7 @@ last_verified_commit: null
 verification_evidence: null
 created_at: "2026-11-05T18:25:07Z"
 updated_at: "2026-11-08T02:05:22Z"
-commit: null
+commit: 02af81ee
 sources:
   - id: proto-research
     resource: .agents/bundles/specs/native-postgres-driver/research/protocol-and-execution_20261105.md

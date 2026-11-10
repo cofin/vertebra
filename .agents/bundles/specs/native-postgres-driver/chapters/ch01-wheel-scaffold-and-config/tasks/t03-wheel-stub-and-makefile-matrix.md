@@ -24,7 +24,7 @@ files:
 tests: []
 estimated_loc: 110
 plan_revision: 5
-plan_commit: fd571e3a
+plan_commit: 73c8a6ff
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -36,7 +36,7 @@ last_verified_commit: null
 verification_evidence: null
 created_at: "2026-11-05T18:25:07Z"
 updated_at: "2026-11-08T02:05:22Z"
-commit: null
+commit: b973f800
 sources:
   - id: spanner-pyproject
     resource: src/rs/vertebra-spanner/pyproject.toml

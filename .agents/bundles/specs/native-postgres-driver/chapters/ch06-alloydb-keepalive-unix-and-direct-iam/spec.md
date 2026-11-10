@@ -12,10 +12,10 @@ depends_on_chapters:
 replan_trigger: null
 current_task: null
 plan_revision: 5
-plan_commit: fd571e3a
+plan_commit: 73c8a6ff
 state_revision: 0
-last_verified_checkpoint: null
-last_reviewed_commit: null
+last_verified_checkpoint: eb48155b
+last_reviewed_commit: eb48155b
 created_at: "2026-11-05T00:00:00Z"
 updated_at: "2026-11-08T02:05:22Z"
 generated:
@@ -24,7 +24,7 @@ generated:
 verified:
   - by: agent:plan-generator
     at: "2026-11-07T05:00:00Z"
-    commit: dd432f18
+    commit: 73c8a6ff
 sources:
   - id: db-conn
     resource: src/rs/vertebra-db/src/connection.rs::TransportStream
@@ -127,17 +127,17 @@ Progress: `[0/0 files documented in ch06]` (public docs and OKF data-domain chap
 
 ## 5. Implementation Plan
 
-- [x] native-postgres-driver:ch06:t01 — Authenticate automatic AlloyDB metadata and IAM sessions across split TLS and metadata stages (tasks/t01-alloydb-metadata-and-iam.md)
-- [x] native-postgres-driver:ch06:t02 — Apply validated TCP keepalive controls to physical sessions (tasks/t02-tcp-keepalive-controls.md)
-- [x] native-postgres-driver:ch06:t03 — Project complete connection options and establish Unix domain socket startup (tasks/t03-unix-socket-and-options-projection.md)
-- [x] native-postgres-driver:ch06:t04 — Refresh direct-host IAM passwords without changing transport policy (tasks/t04-direct-host-iam-refresh.md)
+- [x] [eb48155b] native-postgres-driver:ch06:t01 — Authenticate automatic AlloyDB metadata and IAM sessions across split TLS and metadata stages (tasks/t01-alloydb-metadata-and-iam.md)
+- [x] [eb48155b] native-postgres-driver:ch06:t02 — Apply validated TCP keepalive controls to physical sessions (tasks/t02-tcp-keepalive-controls.md)
+- [x] [eb48155b] native-postgres-driver:ch06:t03 — Project complete connection options and establish Unix domain socket startup (tasks/t03-unix-socket-and-options-projection.md)
+- [x] [eb48155b] native-postgres-driver:ch06:t04 — Refresh direct-host IAM passwords without changing transport policy (tasks/t04-direct-host-iam-refresh.md)
 
 **Chapter Recovery Checkpoint:** `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-db --lib && cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres && cargo test --manifest-path src/rs/Cargo.toml -p vertebra-core --test it explicit_login_scopes` exits `0`.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Plan Baseline**: `e8901de4`; chapter `state: planned`, `planning_status: complete`.
-- **Remaining Tasks in Chapter**: `t01`, `t02`, `t03`, `t04` (`4/4` pending).
+- **Verified Baseline**: `plan_commit: 73c8a6ff`; chapter `state: completed` at `eb48155b`, `planning_status: complete`.
+- **Remaining Tasks in Chapter**: None (`4/4` completed at `eb48155b`).
 - **Downstream Dependents**: Unblocks `ch07-async-bridge-and-client-sessions`.
 
 [^db-conn]: `src/rs/vertebra-db/src/connection.rs::TransportStream` — Shared TCP, Unix, Cloud SQL, and AlloyDB transport stream.

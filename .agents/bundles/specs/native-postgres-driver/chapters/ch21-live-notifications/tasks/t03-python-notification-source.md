@@ -26,7 +26,7 @@ tests:
   - src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py
 estimated_loc: 225
 plan_revision: 5
-plan_commit: fd571e3a
+plan_commit: 73c8a6ff
 state_revision: 0
 claimed_by: null
 claimed_at: null

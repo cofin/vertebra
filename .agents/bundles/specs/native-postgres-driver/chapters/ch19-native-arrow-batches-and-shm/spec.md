@@ -12,19 +12,19 @@ depends_on_chapters:
 replan_trigger: null
 current_task: null
 plan_revision: 5
-plan_commit: fd571e3a
-state_revision: 5
-last_verified_checkpoint: null
+plan_commit: 73c8a6ff
+state_revision: 6
+last_verified_checkpoint: 98ec4527
 last_reviewed_commit: null
 created_at: "2026-11-05T00:00:00Z"
-updated_at: "2026-11-10T04:06:23Z"
+updated_at: "2026-11-10T04:10:58Z"
 generated:
   by: flow-setup
   at: "2026-11-07T05:00:00Z"
 verified:
   - by: agent:flow-setup
     at: "2026-11-07T05:00:00Z"
-    commit: dd432f18
+    commit: 73c8a6ff
 sources:
   - id: pg-contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md
@@ -89,7 +89,7 @@ Parent roadmap: [spec.md](../../spec.md) and [contracts.md](../../contracts.md).
   - `pub const DEFAULT_MAX_ARROW_RESULT_BYTES: usize = 256 * 1024 * 1024;`
   - `pub const MAX_ARROW_NESTING_DEPTH: usize = 32;`
   - `pub struct PostgresArrowSchema` with `pub fn from_columns(columns: &[crate::result::Column], catalog: &TypeCatalog) -> Result<Arc<Schema>, PostgresError>` (`PostgresColumn` is Python-only in `types.py`).
-  - `pub struct PostgresArrowBatchBuilder` with `pub fn try_new(columns: &[crate::result::Column], catalog: &TypeCatalog, max_rows: usize, max_bytes: usize) -> Result<Self, PostgresError>`, `pub fn append_data_row(&mut self, fields: &[Option<&[u8]>], ctx: &CodecContext, catalog: &TypeCatalog) -> Result<Option<RecordBatch>, PostgresError>`, `pub fn append_pg_row(&mut self, row: &[PgValue]) -> Result<Option<RecordBatch>, PostgresError>`, `pub fn flush_batch(&mut self) -> Result<Option<RecordBatch>, PostgresError>`, and `pub fn finish_empty_or_tail(&mut self) -> Result<Option<RecordBatch>, PostgresError>`.
+  - `pub struct PostgresArrowBatchBuilder` with `pub fn try_new(columns: &[crate::result::Column], catalog: &TypeCatalog, max_rows: usize, max_bytes: usize) -> Result<Self, PostgresError>`, `pub fn append_data_row(&mut self, fields: &[Option<&[u8]>], ctx: &CodecContext, catalog: &TypeCatalog) -> Result<Option<RecordBatch>, PostgresError>`, `pub fn append_pg_row(&mut self, row: &[PgValue]) -> Result<Option<RecordBatch>, PostgresError>`, `pub fn flush_batch(&mut self) -> Result<Option<RecordBatch>, PostgresError>`, `pub fn finish_empty(&self) -> RecordBatch`, and `pub fn finish_empty_or_tail(&mut self) -> Result<Option<RecordBatch>, PostgresError>`.
   - `pub enum ArrowStorageMode { Adaptive { threshold_rows: usize }, AlwaysShm }`
   - `pub enum ArrowOutput { Inline { ipc_bytes: Vec<u8>, row_count: usize, columns: Vec<String> }, Shm { shm_name: String, byte_len: usize, row_count: usize, columns: Vec<String>, region: Arc<ShmRegion> } }`
   - `pub struct PostgresArrowIpcWriter` with `pub fn try_new(schema: Arc<Schema>, columns: Vec<String>, mode: ArrowStorageMode, max_result_bytes: usize) -> Result<Self, PostgresError>`, `pub fn write_batch(&mut self, batch: &RecordBatch) -> Result<(), PostgresError>`, and `pub fn finish(self) -> Result<ArrowOutput, PostgresError>`.
@@ -97,7 +97,7 @@ Parent roadmap: [spec.md](../../spec.md) and [contracts.md](../../contracts.md).
 - `src/py/vertebra/db/adapters/postgres/types.py`:
   - `class PostgresArrowResult(msgspec.Struct, frozen=True, gc=False): buffer: bytes | Any; row_count: int; columns: tuple[str, ...]; used_shm: bool` (where `buffer` is `bytes` when `used_shm` is `False` and `vertebra._vertebra.ArrowCursor` when `used_shm` is `True`).
 - `src/py/vertebra/db/arrow.py`:
-  - `ArrowCursor.__init__(self, buffer: Buffer | Any, *, rows: Sequence[tuple[Any, ...]] = (), columns: Sequence[str] = (), used_shm: bool = False, mmap_obj: mmap.mmap | None = None, shm_cursor: Any = None, row_count: int | None = None) -> None`.
+  - `ArrowCursor.__init__(self, buffer: Buffer | Any, *, rows: Sequence[tuple[Any, ...]] = (), columns: Sequence[str] = (), used_shm: bool = False, mmap_obj: mmap.mmap | None = None, shm_cursor: Any = None, shm_anchor: Any = None, row_count: int | None = None) -> None`.
 
 ### 2.3 Caller -> Seam -> Collaborator Map
 
@@ -121,7 +121,7 @@ Raw DataRow / Portal PgValue stream
 | Temporal `±infinity`, BC/far-future out-of-Python range, `24:00:00`, or `wire_text` | Preserved in full-range PostgreSQL `Struct` (`kind = -1/0/1` with PG epoch integer, or `kind = 2` + null `value` + `wire_text`/`date_style`/`time_zone`); `time` `Int64` keeps `86_400_000_000`. |
 | Unaligned variable-width batch frames written into `VTBARROW` SHM | `StreamWriter<Vec<u8>>` emits complete 8-byte-aligned schema and dictionary+batch groups drained via `get_mut()`, avoiding arbitrary `Write` fragment padding corruption in `ShmArrowStreamWriter`. |
 | Retained `memoryview` / `pyarrow.Table` after `ArrowCursor.close()` or `del cursor` | `ShmCapsule` transfers `Arc<ShmRegion>` ownership to `vertebra._vertebra.ArrowCursor`, keeping the mmap alive until all exported buffer views release and then dropping the producer mapping cleanly. |
-| Negative, `bool`, or conflicting `row_count` passed to `vertebra.db.arrow.ArrowCursor` | Raises `ValueError` immediately (including `row_count=0` when native `_shm_cursor.row_count > 0` or `len(rows) > 0`). |
+| Negative, `bool`, non-`int`, or conflicting `row_count` passed to `vertebra.db.arrow.ArrowCursor` | Raises `TypeError` (`bool` or non-`int`) or `ValueError` (negative or conflicting count, including `row_count=0` when native `_shm_cursor.row_count > 0` or `len(rows) > 0`). |
 
 ### 2.5 Alternatives Considered
 
@@ -149,14 +149,14 @@ Progress: `[0/0 files documented in ch19]` (public Arrow data-plane docs in `doc
 - [x] [8e430386] native-postgres-driver:ch19:t01 — Define lossless PostgreSQL Arrow schemas over locked workspace Arrow crates (tasks/t01-lossless-arrow-schemas.md)
 - [x] [1102e7f6] native-postgres-driver:ch19:t02 — Build bounded native Arrow scalar RecordBatches in Rust (tasks/t02-bounded-arrow-scalar-batches.md)
 - [x] [2ca96efb] native-postgres-driver:ch19:t03 — Build recursive Arrow builders for arrays, composites, pgvector, and bitstrings (tasks/t03-nested-arrow-arrays-composites-vectors.md)
-- [x] native-postgres-driver:ch19:t04 — Serialize adaptive inline and VTBARROW SHM IPC streams with validated ArrowCursor counts (tasks/t04-arrow-ipc-to-shm.md)
+- [x] [98ec4527] native-postgres-driver:ch19:t04 — Serialize adaptive inline and VTBARROW SHM IPC streams with validated ArrowCursor counts (tasks/t04-arrow-ipc-to-shm.md)
 
 **Chapter Recovery Checkpoint:** `make dev && cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --test postgres_arrow_tests && uv run --no-sync python -m mypy.stubtest vertebra._postgres && uv run --no-sync python -m pytest src/py/tests/unit/db/test_postgres_native_data.py -k arrow_count -q` exits `0`.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `plan_commit: e8901de4`; chapter `state: planned`, `planning_status: complete`.
-- **Remaining Tasks in Chapter**: `t01`, `t02`, `t03`, `t04` (`4/4` pending).
+- **Verified Baseline**: `plan_commit: 73c8a6ff`; `last_verified_checkpoint: 98ec4527` (`make postgres-test`, `pytest src/py/tests/unit/db -k "postgres or pg_dataplane or arrow"` -> `273 passed`, `make lint-all` -> `0`).
+- **Remaining Tasks in Chapter**: None (`4/4` completed: `t01` `8e430386`, `t02` `1102e7f6`, `t03` `2ca96efb`, `t04` `98ec4527`).
 - **Downstream Dependents**: Unblocks `ch20-arrow-copy-import-and-portals` (Arrow `COPY` import plans, streaming `COPY` input bridges, and sync/async Arrow selection and portal streams).
 
 [^pg-contracts]: `.agents/bundles/specs/native-postgres-driver/contracts.md` — Lossless PostgreSQL value, Arrow result, and VTBARROW capsule contracts.

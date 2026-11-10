@@ -12,7 +12,7 @@ depends_on_chapters:
 replan_trigger: null
 current_task: "native-postgres-driver:ch31:t01"
 plan_revision: 5
-plan_commit: fd571e3a
+plan_commit: 73c8a6ff
 state_revision: 0
 last_verified_checkpoint: null
 last_reviewed_commit: null
@@ -24,7 +24,7 @@ generated:
 verified:
   - by: agent:plan-generator
     at: "2026-11-07T16:45:00Z"
-    commit: dd432f18
+    commit: 73c8a6ff
 sources:
   - id: root-spec
     resource: .agents/bundles/specs/native-postgres-driver/spec.md
@@ -115,7 +115,7 @@ Progress: `[0/0 files documented in this chapter]` (`ch31:t01` verifies that all
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Plan Baseline**: `e8901de4`; `depends_on_chapters: [ch30-user-and-domain-docs]`, `state: planned`, `plan_revision: 4`.
+- **Verified Plan Baseline**: `73c8a6ff`; `depends_on_chapters: [ch30-user-and-domain-docs]`, `state: planned`, `plan_revision: 4`.
 - **Remaining Tasks in Chapter**: `t01` (`1/1` pending).
 - **Active Invariants**: `/flow:finish native-postgres-driver` and `/flow:archive native-postgres-driver` run only after `ch31:t01` records complete verified evidence across all `31` chapters (`111` tasks) on the local feature branch.
 

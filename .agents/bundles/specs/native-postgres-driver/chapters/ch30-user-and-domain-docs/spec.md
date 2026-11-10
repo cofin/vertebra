@@ -12,7 +12,7 @@ depends_on_chapters:
 replan_trigger: null
 current_task: "native-postgres-driver:ch30:t01"
 plan_revision: 5
-plan_commit: fd571e3a
+plan_commit: 73c8a6ff
 state_revision: 0
 last_verified_checkpoint: null
 last_reviewed_commit: null
@@ -24,7 +24,7 @@ generated:
 verified:
   - by: agent:plan-generator
     at: "2026-11-07T16:45:00Z"
-    commit: dd432f18
+    commit: 73c8a6ff
 sources:
   - id: doc-databases
     resource: docs/usage/databases.md
@@ -146,7 +146,7 @@ Progress: `[0/11 files documented]`
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Plan Baseline**: `e8901de4`; `depends_on_chapters: [ch29-wheel-ci-and-benchmarks]`, `state: planned`, `plan_revision: 4`.
+- **Verified Plan Baseline**: `73c8a6ff`; `depends_on_chapters: [ch29-wheel-ci-and-benchmarks]`, `state: planned`, `plan_revision: 4`.
 - **Remaining Tasks in Chapter**: `t01`, `t02`, `t03`, `t04` (`4/4` pending); `[0/11 files documented]`.
 - **Downstream Dependents**: Unblocks [ch31-final-review-and-release-gate](../ch31-final-review-and-release-gate/spec.md) (`ch31:t01`) for final routed correctness review, fresh quality review, and complete-driver sign-off.
 

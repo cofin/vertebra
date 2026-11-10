@@ -12,10 +12,10 @@ depends_on_chapters:
 replan_trigger: null
 current_task: null
 plan_revision: 5
-plan_commit: fd571e3a
+plan_commit: 73c8a6ff
 state_revision: 1
-last_verified_checkpoint: 7b67a4ed
-last_reviewed_commit: null
+last_verified_checkpoint: 94caf47a
+last_reviewed_commit: 94caf47a
 created_at: "2026-11-05T00:00:00Z"
 updated_at: "2026-11-08T02:05:22Z"
 generated:
@@ -24,7 +24,7 @@ generated:
 verified:
   - by: agent:flow-setup
     at: "2026-11-07T05:00:00Z"
-    commit: dd432f18
+    commit: 73c8a6ff
 sources:
   - id: pg-contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md
@@ -130,8 +130,8 @@ Progress: `[2/2 files documented in ch16]` (`src/py/vertebra/db/adapters/postgre
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Plan Baseline**: `fd571e3a`; chapter `state: completed`, `planning_status: complete`.
-- **Remaining Tasks in Chapter**: None (`4/4` completed).
+- **Verified Baseline**: `plan_commit: 73c8a6ff`; chapter `state: completed` at `94caf47a`, `planning_status: complete`.
+- **Remaining Tasks in Chapter**: None (`4/4` completed at `94caf47a`).
 - **Downstream Dependents**: Unblocks `ch17-command-deadlines-portals-and-tz-fallback` (command I/O deadlines reusing `OperationGeneration` + `PostgresCancelHandle`, Python portals, and `jiff` timezone fallback) and `ch26:t02` (permanent driver `.pipeline()` factories).
 
 [^pg-contracts]: `.agents/bundles/specs/native-postgres-driver/contracts.md` — Frozen pipeline transaction scope, `SyncPostgresPipeline` / `AsyncPostgresPipeline`, and cancellation retirement contracts.

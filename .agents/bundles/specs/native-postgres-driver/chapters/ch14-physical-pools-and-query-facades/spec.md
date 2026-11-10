@@ -12,10 +12,10 @@ depends_on_chapters:
 replan_trigger: null
 current_task: null
 plan_revision: 5
-plan_commit: fd571e3a
+plan_commit: 73c8a6ff
 state_revision: 0
-last_verified_checkpoint: null
-last_reviewed_commit: null
+last_verified_checkpoint: fa38544c
+last_reviewed_commit: fa38544c
 created_at: "2026-11-05T00:00:00Z"
 updated_at: "2026-11-08T02:05:22Z"
 generated:
@@ -24,7 +24,7 @@ generated:
 verified:
   - by: agent:flow-setup
     at: "2026-11-07T05:00:00Z"
-    commit: dd432f18
+    commit: 73c8a6ff
 sources:
   - id: pg-contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md
@@ -123,17 +123,17 @@ Progress: `[0/1 files documented in ch14]` (`src/py/vertebra/_postgres.pyi` type
 
 ## 5. Implementation Plan
 
-- [x] native-postgres-driver:ch14:t01 — Implement concrete Rust physical connection pool and bounded leases (tasks/t01-rust-physical-pool.md)
-- [x] native-postgres-driver:ch14:t02 — Implement rollback/DISCARD ALL pool reset and draining shutdown (tasks/t02-pool-reset-and-drain.md)
-- [x] native-postgres-driver:ch14:t03 — Bridge lossless native PostgreSQL values and SQLSTATE errors to Python (tasks/t03-python-value-extraction-bridge.md)
-- [x] native-postgres-driver:ch14:t04 — Expose typed sync and async query and transaction client facades (tasks/t04-python-query-and-transaction-facades.md)
+- [x] [fa38544c] native-postgres-driver:ch14:t01 — Implement concrete Rust physical connection pool and bounded leases (tasks/t01-rust-physical-pool.md)
+- [x] [fa38544c] native-postgres-driver:ch14:t02 — Implement rollback/DISCARD ALL pool reset and draining shutdown (tasks/t02-pool-reset-and-drain.md)
+- [x] [fa38544c] native-postgres-driver:ch14:t03 — Bridge lossless native PostgreSQL values and SQLSTATE errors to Python (tasks/t03-python-value-extraction-bridge.md)
+- [x] [fa38544c] native-postgres-driver:ch14:t04 — Expose typed sync and async query and transaction client facades (tasks/t04-python-query-and-transaction-facades.md)
 
 **Chapter Recovery Checkpoint:** `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --test physical_pool --test pool_reset --test python_value_contract && make dev && uv run --no-sync pytest src/py/tests/unit/db/test_postgres_native_queries.py -q && uv run --no-sync python -m mypy.stubtest vertebra._postgres` exits `0`.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Plan Baseline**: `e8901de4`; chapter `state: planned`, `planning_status: complete`, `plan_revision: 4`; upstream `driver-fail-loud` removes `vertebra_db::postgres::PostgresPool` before this chapter runs.
-- **Remaining Tasks in Chapter**: `t01`, `t02`, `t03`, `t04` (`4/4` pending).
+- **Verified Baseline**: `plan_commit: 73c8a6ff`; chapter `state: completed` at `fa38544c`, `planning_status: complete`.
+- **Remaining Tasks in Chapter**: None (`4/4` completed at `fa38544c`).
 - **Downstream Dependents**: Unblocks `ch15-pool-facades-and-single-sync-pipeline` (`SyncPostgresPool` / `AsyncPostgresPool` and single-`Sync` pipelines), `ch16`–`ch17` (pipeline contexts, cancellation, deadlines, portals), and `ch18`–`ch26` (COPY, Arrow, and permanent Python drivers).
 
 [^pg-contracts]: `.agents/bundles/specs/native-postgres-driver/contracts.md` — Frozen pool options, `PostgresQueryResult`, lossless `Pg*` value records, and error diagnostics.

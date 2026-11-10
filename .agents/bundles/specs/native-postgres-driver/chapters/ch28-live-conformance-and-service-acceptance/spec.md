@@ -12,7 +12,7 @@ depends_on_chapters:
 replan_trigger: null
 current_task: "native-postgres-driver:ch28:t01"
 plan_revision: 5
-plan_commit: fd571e3a
+plan_commit: 73c8a6ff
 state_revision: 0
 last_verified_checkpoint: null
 last_reviewed_commit: null
@@ -24,7 +24,7 @@ generated:
 verified:
   - by: agent:plan-generator
     at: "2026-11-07T16:45:00Z"
-    commit: dd432f18
+    commit: 73c8a6ff
 sources:
   - id: int-conftest
     resource: src/py/tests/integration/conftest.py::vtb_postgres_config
@@ -136,7 +136,7 @@ Progress: `[0/0 files documented in this chapter]` (live server capabilities and
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Plan Baseline**: `e8901de4`; `depends_on_chapters: [ch27-atomic-cutover-and-legacy-removal]`, `state: planned`, `plan_revision: 4`.
+- **Verified Plan Baseline**: `73c8a6ff`; `depends_on_chapters: [ch27-atomic-cutover-and-legacy-removal]`, `state: planned`, `plan_revision: 4`.
 - **Remaining Tasks in Chapter**: `t01`, `t02`, `t03`, `t04` (`4/4` pending).
 - **Active Invariants**: All local Docker PostgreSQL fixtures pass `sslmode="disable"` explicitly; every test-created schema, database, replication slot, publication, and container is cleaned up deterministically in `finally` / fixture teardown.
 
