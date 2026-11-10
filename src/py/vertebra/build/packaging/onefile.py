@@ -3,6 +3,7 @@
 import hashlib
 import inspect
 import io
+import os
 import tarfile
 import zlib
 from pathlib import Path
@@ -78,12 +79,29 @@ class OnefileBuilder:
         return extract_payload_archive(binary_path, destination)
 
     def _create_compressed_archive(self) -> bytes:
+        """Archive the distribution with normalized tar headers so identical trees yield identical payloads."""
         tar_buffer = io.BytesIO()
         with tarfile.open(fileobj=tar_buffer, mode="w") as tar:
             for item in sorted(self.dist_dir.iterdir()):
-                tar.add(item, arcname=item.name)
+                tar.add(item, arcname=item.name, filter=self._normalize_tar_member)
         tar_bytes = tar_buffer.getvalue()
         return self._compress_payload(tar_bytes)
+
+    @classmethod
+    def _normalize_tar_member(cls, info: tarfile.TarInfo) -> tarfile.TarInfo:
+        """Strip ownership and pin mtimes to `SOURCE_DATE_EPOCH` (or `0`) for reproducible archives."""
+        info.uid = 0
+        info.gid = 0
+        info.uname = ""
+        info.gname = ""
+        info.mtime = cls._source_date_epoch()
+        return info
+
+    @staticmethod
+    def _source_date_epoch() -> int:
+        """Return the `SOURCE_DATE_EPOCH` timestamp, or `0` when unset or invalid."""
+        raw = os.environ.get("SOURCE_DATE_EPOCH", "").strip()
+        return int(raw) if raw.isdigit() else 0
 
     @classmethod
     def _compress_payload(cls, raw_tar: bytes) -> bytes:

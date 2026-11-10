@@ -53,7 +53,14 @@ class StandaloneBuilder:
         self.profile = profile
 
     def build(self, output_dir: Path) -> Path:
-        """Stage application sources, compile .pyc files, and write manifest.json and __main__.py."""
+        """Stage application sources, compile hash-checked .pyc files, and write manifest.json and __main__.py.
+
+        Bytecode uses `PycInvalidationMode.CHECKED_HASH` and app-relative source paths, so `.pyc`
+        files carry neither mtimes nor build-machine paths and repeated builds of the same tree
+        produce identical bytes.
+        Lockfiles (`*.lock`, `pylock.toml`, `pyproject.toml`) are staged as-is for whichever
+        package manager the project uses.
+        """
         project_root = self.project_dir.resolve()
         if not project_root.exists():
             msg = f"Project directory does not exist: {project_root}"
@@ -88,7 +95,13 @@ class StandaloneBuilder:
         compiled_count = 0
         for py_file in sorted(app_stage.rglob("*.py")):
             cfile = py_file.with_suffix(".pyc")
-            py_compile.compile(str(py_file), cfile=str(cfile), doraise=True)
+            py_compile.compile(
+                str(py_file),
+                cfile=str(cfile),
+                dfile=py_file.relative_to(app_stage).as_posix(),
+                doraise=True,
+                invalidation_mode=py_compile.PycInvalidationMode.CHECKED_HASH,
+            )
             compiled_count += 1
 
         staged_binary_rel: str | None = None

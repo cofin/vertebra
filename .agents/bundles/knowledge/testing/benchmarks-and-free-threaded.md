@@ -41,9 +41,6 @@ sources:
   - id: src-tools-benchmarks-store-py
     resource: tools/benchmarks/store.py
     title: "Repository tooling module (tools/benchmarks/store.py)"
-  - id: src-build-packaging-pgo-py
-    resource: src/py/vertebra/build/packaging/pgo.py
-    title: "Python implementation module (src/py/vertebra/build/packaging/pgo.py)"
   - id: src-tools-pgo-init-py
     resource: tools/pgo/__init__.py
     title: "Repository tooling module (tools/pgo/__init__.py)"
@@ -102,12 +99,12 @@ Vertebra has Rust Criterion microbenchmarks (`src/rs/vertebra-core/benches/`, `s
 
 The workflow runs on `workflow_dispatch` (input `full_benchmark`), on published releases, and weekly (`cron: '0 6 * * 1'`). It installs `oha` with `cargo install oha`, runs `make install` and `make build`, then `make bench` (or `make bench-all` when `full_benchmark` is true), uploads `tools/benchmarks/results/` with 90-day retention, and on `main` commits `tools/benchmarks/results/*.duckdb`.
 
-## 4. Profile-Guided Optimization (`build/packaging/pgo.py`, `tools/pgo/`)
+## 4. Profile-Guided Optimization (`tools/pgo/`)
 
-- [`pgo.py`](../../../../src/py/vertebra/build/packaging/pgo.py)[^src-build-packaging-pgo-py] & [`rust_pgo.py`](../../../../tools/pgo/rust_pgo.py)[^src-tools-pgo-rust-pgo-py]: `RustPGOConfig` (`PGOMode` `generate | use | baseline`), `EXTENSION_MANIFESTS`, `PGOPipelineResult`, `resolve_cargo_release_dir` (`CARGO_TARGET_DIR`), `build_instrumented`, `build_instrumented_extension`, `build_instrumented_extensions`, `run_default_pgo_workload`, `merge_profiles`, `weighted_merge_profiles`, `find_llvm_profdata`, `validate_profdata`, `check_profdata_size`, `build_optimized`, `build_optimized_extension`, `build_optimized_extensions`, and `run_pgo_pipeline` (`python -m tools.pgo.rust_pgo`).
+- [`rust_pgo.py`](../../../../tools/pgo/rust_pgo.py)[^src-tools-pgo-rust-pgo-py]: `RustPGOConfig` (`PGOMode` `generate | use | baseline`), `EXTENSION_MANIFESTS` (`discover_extension_manifests`), `extension_module_name`, `PGOPipelineResult`, `resolve_cargo_release_dir` (`CARGO_TARGET_DIR`), `build_instrumented`, `build_instrumented_extension`, `build_instrumented_extensions`, `run_default_pgo_workload`, `merge_profiles`, `weighted_merge_profiles`, `find_llvm_profdata`, `validate_profdata`, `check_profdata_size`, `build_optimized`, `build_optimized_extension`, `build_optimized_extensions`, and `run_pgo_pipeline` (`python -m tools.pgo.rust_pgo`).
 - [`python_pgo.py`](../../../../tools/pgo/python_pgo.py)[^src-tools-pgo-python-pgo-py]: `PythonBuildInfo`, `PlatformSupport`, `PLATFORM_MATRIX`, `detect_python_build`, `check_pgo_availability`, and `get_platform_support`.
 
-`make build-pgo` invokes `uv run python -m tools.pgo.rust_pgo` for two-phase instrumented and profile-use release builds across `vertebra-http` and all five PyO3 extensions (`_vertebra`, `_bundler`, `_storage`, `_bigquery`, `_spanner`), or `PROFDATA=<path> make build-pgo` to reuse an existing profile. `src/py/tests/unit/build/test_packaging_and_pgo.py` exercises both modules, and `vtb build [--server-binary <path>]` bundles a pre-built `bin/vertebra-server` into standalone and onefile artifacts.
+`make build-pgo` invokes `uv run python -m tools.pgo.rust_pgo` for two-phase instrumented and profile-use release builds across `vertebra-http` and every discovered PyO3 extension (root-configured `_vertebra` plus each `src/rs/vertebra-*` crate with its own `pyproject.toml`), or `PROFDATA=<path> make build-pgo` to reuse an existing profile. The PGO tooling ships only in the repository; `vertebra.build.packaging` exposes no PGO API. `src/py/tests/unit/build/test_packaging_and_pgo.py` exercises both modules, and `vtb build [--server-binary <path>]` bundles a pre-built `bin/vertebra-server` into standalone and onefile artifacts.
 
 ## 5. Isolating `--group bench` and `--group duckdb` Dependencies (`pyproject.toml`)
 
@@ -142,7 +139,6 @@ Provenance sources: [^src-makefile], [^src-tools-benchmarks-runner-py], [^src-to
 [^src-tools-benchmarks-scenarios-py]: `tools/benchmarks/scenarios.py` — Repository tooling module (tools/benchmarks/scenarios.py).
 [^src-tools-benchmarks-targets-py]: `tools/benchmarks/targets.py` — Repository tooling module (tools/benchmarks/targets.py).
 [^src-tools-benchmarks-store-py]: `tools/benchmarks/store.py` — Repository tooling module (tools/benchmarks/store.py).
-[^src-build-packaging-pgo-py]: `src/py/vertebra/build/packaging/pgo.py` — Python implementation module (src/py/vertebra/build/packaging/pgo.py).
 [^src-tools-pgo-init-py]: `tools/pgo/__init__.py` — Repository tooling module (tools/pgo/__init__.py).
 [^src-tools-pgo-rust-pgo-py]: `tools/pgo/rust_pgo.py` — Repository tooling module (tools/pgo/rust_pgo.py).
 [^src-tools-pgo-python-pgo-py]: `tools/pgo/python_pgo.py` — Repository tooling module (tools/pgo/python_pgo.py).

@@ -1,26 +1,14 @@
-"""Standalone, onefile, and PGO packaging subpackage for Vertebra."""
+"""Standalone directory and single-file executable packaging for production Vertebra deployments.
+
+Builds relocatable application bundles independent of the project's package manager: the
+builders stage sources and lockfiles from the project tree as-is, so projects managed with
+pip/venv, uv, pdm, poetry, or conda package the same way.
+"""
 
 from vertebra.build.packaging.onefile import (
     ONEFILE_MAGIC,
     ONEFILE_TRAILER_SIZE,
     OnefileBuilder,
-)
-from vertebra.build.packaging.pgo import (
-    EXTENSION_MANIFESTS,
-    PGOPipelineResult,
-    PlatformSupport,
-    PythonBuildInfo,
-    RustPGOConfig,
-    build_cargo_pgo_env,
-    build_instrumented_extensions,
-    build_optimized_extensions,
-    detect_python_pgo_lto,
-    find_llvm_profdata,
-    merge_profdata_command,
-    resolve_cargo_release_dir,
-    run_default_pgo_workload,
-    run_pgo_pipeline,
-    validate_pgo_support,
 )
 from vertebra.build.packaging.standalone import StandaloneBuilder
 from vertebra.build.packaging.targets import (
@@ -32,7 +20,6 @@ from vertebra.build.packaging.targets import (
 )
 
 __all__ = (
-    "EXTENSION_MANIFESTS",
     "KNOWN_TARGETS",
     "ONEFILE_MAGIC",
     "ONEFILE_TRAILER_SIZE",
@@ -41,19 +28,5 @@ __all__ = (
     "SUPPORTED_PYTHON_VERSIONS",
     "BuildTarget",
     "OnefileBuilder",
-    "PGOPipelineResult",
-    "PlatformSupport",
-    "PythonBuildInfo",
-    "RustPGOConfig",
     "StandaloneBuilder",
-    "build_cargo_pgo_env",
-    "build_instrumented_extensions",
-    "build_optimized_extensions",
-    "detect_python_pgo_lto",
-    "find_llvm_profdata",
-    "merge_profdata_command",
-    "resolve_cargo_release_dir",
-    "run_default_pgo_workload",
-    "run_pgo_pipeline",
-    "validate_pgo_support",
 )

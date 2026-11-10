@@ -8,45 +8,48 @@ import sys
 import tomllib
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
 
 import pytest
 from click.testing import CliRunner
 from sqlalchemy.engine.interfaces import Dialect
 from tools.pgo import python_pgo as tools_python_pgo
 from tools.pgo import rust_pgo as tools_rust_pgo
-
-from vertebra.build.packaging import (
-    EXTENSION_MANIFESTS,
-    ONEFILE_MAGIC,
-    ONEFILE_TRAILER_SIZE,
-    SUPPORTED_PYTHON_VERSIONS,
-    BuildTarget,
-    OnefileBuilder,
-    PGOPipelineResult,
-    StandaloneBuilder,
-    find_llvm_profdata,
-    resolve_cargo_release_dir,
-    run_default_pgo_workload,
-    run_pgo_pipeline,
-)
-from vertebra.build.packaging import pgo as packaging_pgo
-from vertebra.build.packaging.pgo import (
+from tools.pgo.python_pgo import (
     CPYTHON_PGO_FLAGS,
     PLATFORM_MATRIX,
     PythonBuildInfo,
+    check_pgo_availability,
+    detect_python_build,
+    get_platform_support,
+)
+from tools.pgo.rust_pgo import (
+    EXTENSION_MANIFESTS,
+    PGOPipelineResult,
     RustPGOConfig,
     build_flags,
     build_instrumented_extensions,
     build_optimized,
     build_optimized_extension,
     build_optimized_extensions,
-    check_pgo_availability,
     check_profdata_size,
-    detect_python_build,
-    get_platform_support,
+    discover_extension_manifests,
+    extension_module_name,
+    find_llvm_profdata,
     merge_profiles,
+    resolve_cargo_release_dir,
+    run_default_pgo_workload,
+    run_pgo_pipeline,
     validate_profdata,
+)
+
+import vertebra.build.packaging as packaging_mod
+from vertebra.build.packaging import (
+    ONEFILE_MAGIC,
+    ONEFILE_TRAILER_SIZE,
+    SUPPORTED_PYTHON_VERSIONS,
+    BuildTarget,
+    OnefileBuilder,
+    StandaloneBuilder,
 )
 from vertebra.cli import cli
 from vertebra.cli.build import build as build_command
@@ -113,6 +116,18 @@ def test_standalone_and_onefile_builder_roundtrip(tmp_path: Path) -> None:
     env["XDG_CACHE_HOME"] = str(cache_home)
     proc = subprocess.run([str(binary_path)], env=env, capture_output=True, text=True, check=False)
     assert proc.returncode == 42, proc.stderr
+
+    sample_pyc = staged / "app" / "app" / "main.pyc"
+    pyc_flags = int.from_bytes(sample_pyc.read_bytes()[4:8], "little")
+    assert pyc_flags == 0b11
+
+    os.utime(pkg_dir / "main.py", (1_000_000_000, 1_000_000_000))
+    rebuilt = StandaloneBuilder(project_dir=project_dir, target=target, entrypoint="app.main:run").build(
+        tmp_path / "dist" / "standalone-rebuild"
+    )
+    rebuilt_binary = OnefileBuilder(dist_dir=rebuilt, target=target).build(tmp_path / "dist" / "sample-app-bin-2")
+    assert (rebuilt / "app" / "app" / "main.pyc").read_bytes() == sample_pyc.read_bytes()
+    assert rebuilt_binary.read_bytes() == raw_bytes
 
 
 def test_cli_build_standalone_onefile_and_target_flags(tmp_path: Path) -> None:
@@ -209,12 +224,11 @@ def test_rust_and_python_pgo_tooling(tmp_path: Path) -> None:
     assert support.cpython_pgo is True
 
 
-@pytest.mark.parametrize("mod", [packaging_pgo, tools_python_pgo])
 def test_python_build_info_detects_315_tail_call_jit_freethreaded_and_frame_pointers(
     monkeypatch: pytest.MonkeyPatch,
-    mod: Any,
 ) -> None:
     """Verify PythonBuildInfo detects Python 3.15 tail-call interpreter, JIT, free-threading, and frame pointers."""
+    mod = tools_python_pgo
     synthetic_vars = {
         "CONFIG_ARGS": "'--enable-optimizations' '--with-lto' '--with-tail-call-interp' '--enable-experimental-jit'",
         "Py_TAIL_CALL_INTERP": "1",
@@ -252,14 +266,27 @@ def test_resolve_cargo_release_dir_and_multi_extension_manifests(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verify CARGO_TARGET_DIR resolution, real workspace manifests, and multi-extension maturin invocations."""
+    """Verify CARGO_TARGET_DIR resolution, discovered workspace manifests, and multi-extension maturin invocations."""
     cfg = RustPGOConfig(profile_dir=tmp_path / "raw")
     assert cfg.manifest_path.is_file()
-    assert len(EXTENSION_MANIFESTS) == 5
+    repo_root = Path(__file__).resolve().parents[5]
+    rs_root = repo_root / "src" / "rs"
+    expected_optional = sorted(
+        p.parent / "Cargo.toml"
+        for p in rs_root.glob("vertebra-*/pyproject.toml")
+        if (p.parent / "Cargo.toml").is_file()
+    )
+    assert expected_optional
+    assert (rs_root / "vertebra-py" / "Cargo.toml", *expected_optional) == EXTENSION_MANIFESTS
+    assert discover_extension_manifests(rs_root) == EXTENSION_MANIFESTS
     assert all(manifest.is_file() for manifest in EXTENSION_MANIFESTS)
-    assert not hasattr(packaging_pgo, "resolve_llvm_profdata")
-    assert tools_rust_pgo.RustPGOConfig is RustPGOConfig
-    assert tools_rust_pgo.run_pgo_pipeline is run_pgo_pipeline
+    assert extension_module_name(rs_root / "vertebra-py" / "Cargo.toml") == "vertebra._vertebra"
+    assert extension_module_name(rs_root / "vertebra-storage" / "Cargo.toml") == "vertebra._storage"
+    for name in ("pgo", "RustPGOConfig", "run_pgo_pipeline", "EXTENSION_MANIFESTS", "PythonBuildInfo"):
+        assert not hasattr(packaging_mod, name)
+        assert name not in packaging_mod.__all__
+    assert not (repo_root / "src" / "py" / "vertebra" / "build" / "packaging" / "pgo.py").exists()
+    extension_count = len(EXTENSION_MANIFESTS)
 
     monkeypatch.delenv("CARGO_TARGET_DIR", raising=False)
     default_rel = resolve_cargo_release_dir(cfg)
@@ -289,21 +316,24 @@ def test_resolve_cargo_release_dir_and_multi_extension_manifests(
         assert cwd is not None
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
-    monkeypatch.setattr(packaging_pgo.subprocess, "run", fake_run)
+    monkeypatch.setattr(tools_rust_pgo.subprocess, "run", fake_run)
     build_instrumented_extensions(cfg)
-    assert len(recorded_cmds) == 5
+    assert len(recorded_cmds) == extension_count
     assert "-m" not in recorded_cmds[0][0]
     assert "--features" in recorded_cmds[0][0]
     assert "extension-module" in recorded_cmds[0][0]
     assert f"-Cprofile-generate={cfg.profile_dir}" in recorded_cmds[0][1]
-    assert all("-m" in recorded_cmds[i][0] and str(EXTENSION_MANIFESTS[i]) in recorded_cmds[i][0] for i in range(1, 5))
+    assert all(
+        "-m" in recorded_cmds[i][0] and str(EXTENSION_MANIFESTS[i]) in recorded_cmds[i][0]
+        for i in range(1, extension_count)
+    )
 
     recorded_cmds.clear()
     valid_profdata = tmp_path / "valid.profdata"
     valid_profdata.write_bytes(b"PROFDATA")
     cfg_with_bin = RustPGOConfig(profile_dir=tmp_path / "raw", llvm_profdata_bin="llvm-profdata")
     build_optimized_extensions(cfg_with_bin, valid_profdata)
-    assert len(recorded_cmds) == 5
+    assert len(recorded_cmds) == extension_count
     assert all(f"-Cprofile-use={valid_profdata}" in flags for _, flags in recorded_cmds)
 
 
@@ -339,7 +369,7 @@ def test_build_optimized_falls_back_when_profdata_invalid(
         executed.append((list(cmd), env))
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
-    monkeypatch.setattr(packaging_pgo.subprocess, "run", fake_run)
+    monkeypatch.setattr(tools_rust_pgo.subprocess, "run", fake_run)
     monkeypatch.setenv("CARGO_TARGET_DIR", str(tmp_path / "target-dir"))
     cfg = RustPGOConfig(profile_dir=tmp_path / "raw", llvm_profdata_bin="llvm-profdata")
 
@@ -398,7 +428,7 @@ def test_two_phase_pgo_pipeline_and_cli_orchestration(
                 out_file.write_bytes(b"MERGED_LLVM_PROFDATA")
         return subprocess.CompletedProcess(cmd, 0, stdout="Total functions: 12\n", stderr="")
 
-    monkeypatch.setattr(packaging_pgo.subprocess, "run", fake_run)
+    monkeypatch.setattr(tools_rust_pgo.subprocess, "run", fake_run)
 
     observed_profile_env: list[str] = []
 
@@ -414,30 +444,23 @@ def test_two_phase_pgo_pipeline_and_cli_orchestration(
         baseline_profdata=baseline_prof,
         workload_runner=fake_workload,
     )
+    extension_count = len(EXTENSION_MANIFESTS)
     assert isinstance(result, PGOPipelineResult)
     assert result.used_pgo is True
     assert result.profdata_valid is True
     assert result.profdata_bytes == len(b"MERGED_LLVM_PROFDATA")
     assert result.release_dir == tmp_path / "rs-target" / "release"
-    assert len(result.extension_manifests) == 5
+    assert result.extension_manifests == EXTENSION_MANIFESTS
     assert observed_profile_env and observed_profile_env[0].endswith(".profraw")
     assert phases == [
         "cargo:gen",
-        "maturin:gen",
-        "maturin:gen",
-        "maturin:gen",
-        "maturin:gen",
-        "maturin:gen",
+        *["maturin:gen"] * extension_count,
         "workload",
         "profdata:merge",
         "profdata:merge",
         "profdata:show",
         "cargo:use",
-        "maturin:use",
-        "maturin:use",
-        "maturin:use",
-        "maturin:use",
-        "maturin:use",
+        *["maturin:use"] * extension_count,
     ]
 
     phases.clear()
@@ -453,15 +476,7 @@ def test_two_phase_pgo_pipeline_and_cli_orchestration(
         ]
     )
     assert exit_code == 0
-    assert phases == [
-        "profdata:show",
-        "cargo:use",
-        "maturin:use",
-        "maturin:use",
-        "maturin:use",
-        "maturin:use",
-        "maturin:use",
-    ]
+    assert phases == ["profdata:show", "cargo:use", *["maturin:use"] * extension_count]
 
 
 def test_live_llvm_profdata_rejects_corrupt_data_when_installed(tmp_path: Path) -> None:
