@@ -4,8 +4,10 @@ from collections.abc import Awaitable, Buffer, Mapping, Sequence
 from types import TracebackType
 from typing import final
 
+from vertebra._vertebra import ArrowCursor as _NativeArrowCursor
 from vertebra.db.adapters.postgres.types import (
     PgParameter,
+    PostgresArrowResult,
     PostgresPipelineOperation,
     PostgresPipelineOutcome,
     PostgresQueryResult,
@@ -104,6 +106,31 @@ class SyncPostgresClient:
         batch_size: int = 65536,
     ) -> SyncPostgresPortal:
         """Open a session-pinned row-limited PostgreSQL portal over sql."""
+        ...
+
+    def select_to_arrow(
+        self,
+        sql: str,
+        parameters: Sequence[PostgresValue | PgParameter] | None = None,
+        *,
+        parameter_oids: Sequence[int] | None = None,
+        timeout: float | None = None,
+        threshold_rows: int = 256,
+        max_result_bytes: int = 268435456,
+    ) -> PostgresArrowResult:
+        """Execute sql directly into an inline or VTBARROW shared-memory PostgresArrowResult."""
+        ...
+
+    def stream_arrow_batches(
+        self,
+        sql: str,
+        parameters: Sequence[PostgresValue | PgParameter] | None = None,
+        *,
+        parameter_oids: Sequence[int] | None = None,
+        batch_size: int = 65536,
+        columns: Sequence[str] | None = None,
+    ) -> SyncPostgresArrowStream:
+        """Open a session-pinned portal stream yielding VTBARROW shared-memory ArrowCursor batches."""
         ...
 
     def copy_to(self, sql: str) -> SyncPostgresCopyOut:
@@ -577,6 +604,35 @@ class AsyncPostgresPortal:
         ...
 
 @final
+class SyncPostgresArrowStream:
+    """Session-pinned synchronous VTBARROW shared-memory Arrow IPC batch iterator."""
+
+    def __iter__(self) -> SyncPostgresArrowStream:
+        """Return self as a synchronous ArrowCursor batch iterator."""
+        ...
+
+    def __next__(self) -> _NativeArrowCursor:
+        """Advance the server portal and return the next native SHM ArrowCursor batch."""
+        ...
+
+    def close(self) -> None:
+        """Close the pinned Arrow portal stream idempotently."""
+        ...
+
+    def __enter__(self) -> SyncPostgresArrowStream:
+        """Enter a with block returning this SyncPostgresArrowStream."""
+        ...
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None = None,
+        exc_val: BaseException | None = None,
+        exc_tb: TracebackType | None = None,
+    ) -> bool:
+        """Close the stream on context exit without suppressing exceptions."""
+        ...
+
+@final
 class SyncPostgresCopyOut:
     """Exclusive synchronous binary COPY ... TO STDOUT row iterator."""
 
@@ -716,6 +772,7 @@ __all__ = [
     "AsyncPostgresCopyOut",
     "AsyncPostgresPool",
     "AsyncPostgresPortal",
+    "SyncPostgresArrowStream",
     "SyncPostgresClient",
     "SyncPostgresCopyIn",
     "SyncPostgresCopyOut",

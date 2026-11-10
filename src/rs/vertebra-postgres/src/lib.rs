@@ -36,7 +36,9 @@ pub use crate::session::statements::{
     CachedStatement, PoolerCapabilities, PoolerMode, StatementCache, StatementKey,
 };
 pub use crate::session::{CommandBudget, CommandDeadlineGuard};
-pub use crate::sync_client::{PySyncPostgresCopyIn, PySyncPostgresCopyOut, PySyncPostgresPortal};
+pub use crate::sync_client::{
+    PySyncPostgresArrowStream, PySyncPostgresCopyIn, PySyncPostgresCopyOut, PySyncPostgresPortal,
+};
 pub use codecs::{
     CodecContext, decode_value, decode_value_with_catalog, encode_value, encode_value_with_catalog,
     format_for_oid, format_for_oid_with_catalog,
@@ -56,7 +58,7 @@ pub use pipeline::{
     SubmittedPipeline,
 };
 pub use pool::{PoolStats, PooledConnection, PostgresPool, PostgresPoolOptions};
-pub use portal::{Portal, PortalEvent};
+pub use portal::{ArrowPortalStream, Portal, PortalEvent};
 pub use python_pool::{PyAsyncPostgresPool, PySyncPostgresPool};
 pub use python_values::{
     extract_parameters, extract_pg_value, extract_pipeline_operations, pg_value_to_python,

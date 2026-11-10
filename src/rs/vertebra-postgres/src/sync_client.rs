@@ -6,17 +6,23 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use bytes::Bytes;
-use pyo3::exceptions::PyTypeError;
+use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::ffi;
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyByteArray, PyBytes, PyDict, PyString, PyTuple};
 use vertebra_db::py_async::block_on_db;
 
-use crate::arrow::MAX_ARROW_COPY_CALL_BYTES;
+use crate::arrow::{
+    DEFAULT_ARROW_BATCH_ROWS, DEFAULT_MAX_ARROW_RESULT_BYTES, MAX_ARROW_COPY_CALL_BYTES,
+    arrow_output_into_py_result, shm_output_into_py_cursor,
+};
+
+const _: () = assert!(DEFAULT_MAX_ARROW_RESULT_BYTES == 268_435_456);
+const _: () = assert!(DEFAULT_ARROW_BATCH_ROWS == 65_536);
 use crate::config::{PostgresConfig, RawPostgresOptions};
 use crate::copy::{CopyFromStream, CopyOut};
 use crate::errors::{PostgresError, postgres_error_to_py};
-use crate::portal::Portal;
+use crate::portal::{ArrowPortalStream, Portal, execute_select_to_arrow};
 use crate::python_values::{extract_parameters, extract_pg_value, query_result_to_python};
 use crate::result::PgValue;
 use crate::session::pipeline_scope::{
@@ -146,6 +152,58 @@ pub(crate) fn extract_max_rows(obj: &Bound<'_, PyAny>) -> PyResult<i32> {
 
 pub(crate) fn extract_batch_size(obj: &Bound<'_, PyAny>) -> PyResult<i32> {
     extract_positive_i32(obj, "batch_size")
+}
+
+pub(crate) fn extract_threshold_rows(obj: &Bound<'_, PyAny>) -> PyResult<usize> {
+    if obj.is_instance_of::<PyBool>() {
+        return Err(PyTypeError::new_err(
+            "expected int threshold_rows, not bool",
+        ));
+    }
+    let val = obj
+        .extract::<i128>()
+        .map_err(|_| PyTypeError::new_err("expected int threshold_rows"))?;
+    if val < 0 {
+        return Err(PyValueError::new_err(format!(
+            "threshold_rows must be >= 0, got {val}"
+        )));
+    }
+    usize::try_from(val)
+        .map_err(|_| PyValueError::new_err(format!("threshold_rows {val} exceeds usize::MAX")))
+}
+
+pub(crate) fn extract_max_result_bytes(obj: &Bound<'_, PyAny>) -> PyResult<usize> {
+    if obj.is_instance_of::<PyBool>() {
+        return Err(PyTypeError::new_err(
+            "expected int max_result_bytes, not bool",
+        ));
+    }
+    let val = obj
+        .extract::<i128>()
+        .map_err(|_| PyTypeError::new_err("expected int max_result_bytes"))?;
+    if val <= 0 {
+        return Err(PyValueError::new_err(format!(
+            "max_result_bytes must be >= 1, got {val}"
+        )));
+    }
+    usize::try_from(val)
+        .map_err(|_| PyValueError::new_err(format!("max_result_bytes {val} exceeds usize::MAX")))
+}
+
+pub(crate) fn extract_arrow_batch_size(obj: &Bound<'_, PyAny>) -> PyResult<i32> {
+    if obj.is_instance_of::<PyBool>() {
+        return Err(PyTypeError::new_err("expected int batch_size, not bool"));
+    }
+    let val = obj
+        .extract::<i128>()
+        .map_err(|_| PyTypeError::new_err("expected int batch_size"))?;
+    if val <= 0 {
+        return Err(PyValueError::new_err(format!(
+            "batch_size must be >= 1, got {val}"
+        )));
+    }
+    i32::try_from(val)
+        .map_err(|_| PyValueError::new_err(format!("batch_size {val} exceeds i32::MAX")))
 }
 
 pub(crate) fn extract_strict_bool(obj: &Bound<'_, PyAny>) -> PyResult<bool> {
@@ -536,10 +594,11 @@ impl PySyncPostgresClient {
         Self { session }
     }
 
-    /// Register synchronous client, portal, and COPY types on the `vertebra._postgres` module.
+    /// Register synchronous client, portal, Arrow stream, and COPY types on `vertebra._postgres`.
     pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_class::<Self>()?;
         m.add_class::<PySyncPostgresPortal>()?;
+        m.add_class::<PySyncPostgresArrowStream>()?;
         m.add_class::<PySyncPostgresCopyOut>()?;
         m.add_class::<PySyncPostgresCopyIn>()
     }
@@ -866,6 +925,96 @@ impl PySyncPostgresPortal {
     }
 }
 
+/// Pinned synchronous `VTBARROW` shared-memory Arrow IPC batch iterator (`vertebra._postgres.SyncPostgresArrowStream`).
+#[pyclass(
+    name = "SyncPostgresArrowStream",
+    module = "vertebra._postgres",
+    frozen,
+    immutable_type
+)]
+pub struct PySyncPostgresArrowStream {
+    stream: tokio::sync::Mutex<ArrowPortalStream>,
+    exhausted_flag: Arc<AtomicBool>,
+    closed_flag: Arc<AtomicBool>,
+    busy: AtomicBool,
+}
+
+impl PySyncPostgresArrowStream {
+    pub(crate) fn from_stream(stream: ArrowPortalStream) -> Self {
+        let (exhausted_flag, closed_flag) = stream.status_flags();
+        Self {
+            stream: tokio::sync::Mutex::new(stream),
+            exhausted_flag,
+            closed_flag,
+            busy: AtomicBool::new(false),
+        }
+    }
+}
+
+#[pymethods]
+impl PySyncPostgresArrowStream {
+    /// Return the stream itself as a synchronous iterator of `ArrowCursor` batches.
+    pub fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    /// Advance the server portal and return the next `vertebra._vertebra.ArrowCursor` SHM batch.
+    pub fn __next__(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        let _busy = BorrowedBusyGuard::try_enter(py, &self.busy, "Arrow portal stream")?;
+        let next = py
+            .detach(|| {
+                block_on_db(async {
+                    let mut guard = self.stream.lock().await;
+                    guard.next_batch_shm().await
+                })
+            })
+            .map_err(|e| postgres_error_to_py(py, e))?;
+        match next {
+            Some(shm_out) => shm_output_into_py_cursor(py, shm_out).map(Some),
+            None => Ok(None),
+        }
+    }
+
+    /// Close the pinned Arrow portal stream idempotently, rolling back unfinished scopes or cancelling mid-`Execute` pauses.
+    pub fn close(&self, py: Python<'_>) -> PyResult<()> {
+        let _busy = BorrowedBusyGuard::try_enter(py, &self.busy, "Arrow portal stream")?;
+        py.detach(|| {
+            block_on_db(async {
+                let mut guard = self.stream.lock().await;
+                guard.close().await
+            })
+        })
+        .map_err(|e| postgres_error_to_py(py, e))
+    }
+
+    /// Enter a synchronous context-manager scope returning this `SyncPostgresArrowStream`.
+    pub fn __enter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    /// Idempotently close the stream on context exit without suppressing exceptions.
+    #[pyo3(signature = (exc_type = None, exc_val = None, exc_tb = None))]
+    pub fn __exit__(
+        &self,
+        py: Python<'_>,
+        exc_type: Option<&Bound<'_, PyAny>>,
+        exc_val: Option<&Bound<'_, PyAny>>,
+        exc_tb: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<bool> {
+        let _ = (exc_type, exc_val, exc_tb);
+        self.close(py)?;
+        Ok(false)
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "SyncPostgresArrowStream(exhausted={}, closed={})",
+            self.exhausted_flag.load(Ordering::Acquire),
+            self.closed_flag.load(Ordering::Acquire),
+        )
+    }
+}
+
 #[pymethods]
 impl PySyncPostgresClient {
     #[new]
@@ -1142,6 +1291,133 @@ impl PySyncPostgresClient {
             })
             .map_err(|e| postgres_error_to_py(py, e))?;
         Ok(PySyncPostgresPortal::from_portal(portal))
+    }
+
+    /// Execute `sql` directly into an inline or `VTBARROW` shared-memory `PostgresArrowResult` without materializing Python rows.
+    #[pyo3(signature = (
+        sql,
+        parameters = None,
+        *,
+        parameter_oids = None,
+        timeout = None,
+        threshold_rows = 256,
+        max_result_bytes = 268435456
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    pub fn select_to_arrow(
+        &self,
+        py: Python<'_>,
+        sql: &str,
+        parameters: Option<&Bound<'_, PyAny>>,
+        parameter_oids: Option<&Bound<'_, PyAny>>,
+        timeout: Option<&Bound<'_, PyAny>>,
+        #[pyo3(from_py_with = extract_threshold_rows)] threshold_rows: usize,
+        #[pyo3(from_py_with = extract_max_result_bytes)] max_result_bytes: usize,
+    ) -> PyResult<Py<PyAny>> {
+        let timeout_secs = extract_strict_opt_f64(timeout)?;
+        let timeout_dur = CommandBudget::validate_optional_seconds(timeout_secs)
+            .map_err(|e| postgres_error_to_py(py, e))?;
+        if sql.as_bytes().contains(&0) {
+            return Err(postgres_error_to_py(
+                py,
+                PostgresError::Data(
+                    "SQL query string cannot contain embedded NUL byte".to_string(),
+                ),
+            ));
+        }
+        self.session
+            .ensure_ordinary_reservable()
+            .map_err(|e| postgres_error_to_py(py, e))?;
+        let none_bound = py.None().into_bound(py);
+        let params_ref = parameters.unwrap_or(&none_bound);
+        let (params, oids) = extract_parameters(py, params_ref, parameter_oids)
+            .map_err(|e| postgres_error_to_py(py, e))?;
+        let session = Arc::clone(&self.session);
+        let op_gen = session.reserve_operation_generation();
+        let budget = match CommandBudget::start_from_duration(timeout_dur) {
+            Ok(b) => b,
+            Err(err) => {
+                session.unreserve_operation_generation(op_gen);
+                return Err(postgres_error_to_py(py, err));
+            }
+        };
+        let sql_owned = sql.to_owned();
+        let output = py
+            .detach(move || {
+                block_on_db(async move {
+                    execute_select_to_arrow(
+                        &session,
+                        op_gen,
+                        &sql_owned,
+                        &params,
+                        oids.as_deref(),
+                        None,
+                        budget,
+                        threshold_rows,
+                        max_result_bytes,
+                    )
+                    .await
+                })
+            })
+            .map_err(|e| postgres_error_to_py(py, e))?;
+        arrow_output_into_py_result(py, output)
+    }
+
+    /// Open a session-pinned `SyncPostgresArrowStream` yielding `VTBARROW` shared-memory `ArrowCursor` batches inside a single portal `TransactionScope`.
+    #[pyo3(signature = (
+        sql,
+        parameters = None,
+        *,
+        parameter_oids = None,
+        batch_size = 65536,
+        columns = None
+    ))]
+    pub fn stream_arrow_batches(
+        &self,
+        py: Python<'_>,
+        sql: &str,
+        parameters: Option<&Bound<'_, PyAny>>,
+        parameter_oids: Option<&Bound<'_, PyAny>>,
+        #[pyo3(from_py_with = extract_arrow_batch_size)] batch_size: i32,
+        columns: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PySyncPostgresArrowStream> {
+        let cols_owned = extract_opt_copy_columns(columns)?;
+        if sql.as_bytes().contains(&0) {
+            return Err(postgres_error_to_py(
+                py,
+                PostgresError::Data(
+                    "SQL query string cannot contain embedded NUL byte".to_string(),
+                ),
+            ));
+        }
+        self.session
+            .ensure_ordinary_reservable()
+            .map_err(|e| postgres_error_to_py(py, e))?;
+        let none_bound = py.None().into_bound(py);
+        let params_ref = parameters.unwrap_or(&none_bound);
+        let (params, oids) = extract_parameters(py, params_ref, parameter_oids)
+            .map_err(|e| postgres_error_to_py(py, e))?;
+        let session = Arc::clone(&self.session);
+        let op_gen = session.reserve_operation_generation();
+        let sql_owned = sql.to_owned();
+        let stream = py
+            .detach(move || {
+                block_on_db(async move {
+                    ArrowPortalStream::open_as_with_generation(
+                        &session,
+                        op_gen,
+                        None,
+                        &sql_owned,
+                        &params,
+                        oids.as_deref(),
+                        batch_size,
+                        cols_owned,
+                    )
+                    .await
+                })
+            })
+            .map_err(|e| postgres_error_to_py(py, e))?;
+        Ok(PySyncPostgresArrowStream::from_stream(stream))
     }
 
     /// Open an exclusive binary `COPY ... TO STDOUT (FORMAT binary)` streaming iterator.

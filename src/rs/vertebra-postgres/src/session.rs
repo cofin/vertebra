@@ -506,7 +506,7 @@ impl PostgresConnection {
         guard.simple_query(sql).await
     }
 
-    async fn write_command_buf(
+    pub(crate) async fn write_command_buf(
         &mut self,
         op_label: &str,
         was_unnamed_pre_marked: bool,
@@ -550,7 +550,7 @@ impl PostgresConnection {
         }
     }
 
-    async fn read_command_frame(&mut self) -> Result<Message, PostgresError> {
+    pub(crate) async fn read_command_frame(&mut self) -> Result<Message, PostgresError> {
         self.deadline_wire_started = true;
         match crate::query::read_command_message(
             &mut self.stream,
@@ -4762,7 +4762,7 @@ impl SessionHandle {
         .await
     }
 
-    async fn cleanup_deadline_expired_command(
+    pub(crate) async fn cleanup_deadline_expired_command(
         shared: &Arc<SessionShared>,
         op_gen: OperationGeneration,
         wire_started: bool,
@@ -5015,6 +5015,26 @@ impl SessionHandle {
         parameter_oids: Option<&[u32]>,
         batch_size: i32,
     ) -> Result<Portal, PostgresError> {
+        self.open_portal_as_with_generation(
+            op_gen,
+            None,
+            sql,
+            parameters,
+            parameter_oids,
+            batch_size,
+        )
+        .await
+    }
+
+    pub(crate) async fn open_portal_as_with_generation(
+        self: &Arc<Self>,
+        op_gen: OperationGeneration,
+        caller_owner: Option<TransactionOwner>,
+        sql: &str,
+        parameters: &[crate::extended::Parameter],
+        parameter_oids: Option<&[u32]>,
+        batch_size: i32,
+    ) -> Result<Portal, PostgresError> {
         if batch_size <= 0 {
             self.unreserve_operation_generation(op_gen);
             return Err(PostgresError::Interface(
@@ -5032,89 +5052,94 @@ impl SessionHandle {
         let oids_owned = parameter_oids.map(ToOwned::to_owned);
         let session_arc = Arc::clone(self);
         let _ = batch_size;
-        self.run_cancellable_operation(op_gen, SessionAccess::Ordinary, None, move |conn, meta| {
-            Box::pin(async move {
-                if !conn.pooler_capabilities.supports_scoped_state() {
-                    return Err(PostgresError::Interface(
-                        "cannot open_portal in PoolerMode::Statement".to_string(),
-                    ));
-                }
-                if conn.transaction_status() == TransactionStatus::Failed {
-                    return Err(PostgresError::Interface(
-                        "cannot open_portal while transaction is aborted ('E')".to_string(),
-                    ));
-                }
-
-                let resolved = crate::metadata::resolve_parameter_metadata(
-                    conn,
-                    &params_owned,
-                    oids_owned.as_deref(),
-                )
-                .await?;
-
-                let portal_name = conn.next_portal_name();
-                let owner = TransactionOwner::new(
-                    0x8000_0000_0000_0000 | conn.next_portal_id,
-                    conn.generation(),
-                );
-                let scope = match conn.transaction_status() {
-                    TransactionStatus::Idle => {
-                        if let Err(err) = conn.begin().await {
-                            conn.unregister_portal_name(&portal_name);
-                            return Err(err);
-                        }
-                        TransactionScope::new(owner, TransactionScopeKind::ExplicitTransaction)
+        self.run_cancellable_operation(
+            op_gen,
+            SessionAccess::Ordinary,
+            caller_owner,
+            move |conn, meta| {
+                Box::pin(async move {
+                    if !conn.pooler_capabilities.supports_scoped_state() {
+                        return Err(PostgresError::Interface(
+                            "cannot open_portal in PoolerMode::Statement".to_string(),
+                        ));
                     }
-                    TransactionStatus::InTransaction => {
-                        let token = conn.next_savepoint_token();
-                        if let Err(err) = conn.savepoint(token).await {
-                            conn.unregister_portal_name(&portal_name);
-                            return Err(err);
-                        }
-                        TransactionScope::new(
-                            owner,
-                            TransactionScopeKind::NestedSavepoint { token },
-                        )
-                    }
-                    TransactionStatus::Failed => {
-                        conn.unregister_portal_name(&portal_name);
+                    if conn.transaction_status() == TransactionStatus::Failed {
                         return Err(PostgresError::Interface(
                             "cannot open_portal while transaction is aborted ('E')".to_string(),
                         ));
                     }
-                };
 
-                let setup_res =
-                    setup_named_portal_on_conn(conn, &portal_name, &sql_owned, &resolved).await;
-                match setup_res {
-                    Ok((columns, codec_ctx, catalog_snapshot)) => {
-                        let generation = conn.generation();
-                        meta.install_portal_on_ok = Some((owner, portal_name.clone()));
-                        Ok(Portal::new(
-                            session_arc,
-                            portal_name,
-                            generation,
-                            scope,
-                            columns,
-                            codec_ctx,
-                            catalog_snapshot,
-                            DEFAULT_MAX_RESULT_BYTES,
-                        ))
+                    let resolved = crate::metadata::resolve_parameter_metadata(
+                        conn,
+                        &params_owned,
+                        oids_owned.as_deref(),
+                    )
+                    .await?;
+
+                    let portal_name = conn.next_portal_name();
+                    let owner = TransactionOwner::new(
+                        0x8000_0000_0000_0000 | conn.next_portal_id,
+                        conn.generation(),
+                    );
+                    let scope = match conn.transaction_status() {
+                        TransactionStatus::Idle => {
+                            if let Err(err) = conn.begin().await {
+                                conn.unregister_portal_name(&portal_name);
+                                return Err(err);
+                            }
+                            TransactionScope::new(owner, TransactionScopeKind::ExplicitTransaction)
+                        }
+                        TransactionStatus::InTransaction => {
+                            let token = conn.next_savepoint_token();
+                            if let Err(err) = conn.savepoint(token).await {
+                                conn.unregister_portal_name(&portal_name);
+                                return Err(err);
+                            }
+                            TransactionScope::new(
+                                owner,
+                                TransactionScopeKind::NestedSavepoint { token },
+                            )
+                        }
+                        TransactionStatus::Failed => {
+                            conn.unregister_portal_name(&portal_name);
+                            return Err(PostgresError::Interface(
+                                "cannot open_portal while transaction is aborted ('E')".to_string(),
+                            ));
+                        }
+                    };
+
+                    let setup_res =
+                        setup_named_portal_on_conn(conn, &portal_name, &sql_owned, &resolved).await;
+                    match setup_res {
+                        Ok((columns, codec_ctx, catalog_snapshot)) => {
+                            let generation = conn.generation();
+                            meta.install_portal_on_ok = Some((owner, portal_name.clone()));
+                            Ok(Portal::new(
+                                session_arc,
+                                portal_name,
+                                generation,
+                                scope,
+                                columns,
+                                codec_ctx,
+                                catalog_snapshot,
+                                DEFAULT_MAX_RESULT_BYTES,
+                            ))
+                        }
+                        Err(err) => {
+                            conn.unregister_portal_name(&portal_name);
+                            let _ = crate::portal::close_and_rollback_portal_on_conn(
+                                conn,
+                                &portal_name,
+                                &scope,
+                                false,
+                            )
+                            .await;
+                            Err(err)
+                        }
                     }
-                    Err(err) => {
-                        conn.unregister_portal_name(&portal_name);
-                        let _ = crate::portal::close_and_rollback_portal_on_conn(
-                            conn,
-                            &portal_name,
-                            &scope,
-                            false,
-                        )
-                        .await;
-                        Err(err)
-                    }
-                }
-            })
-        })
+                })
+            },
+        )
         .await
     }
 
