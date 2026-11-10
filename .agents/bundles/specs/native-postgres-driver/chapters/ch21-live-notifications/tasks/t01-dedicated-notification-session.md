@@ -5,7 +5,7 @@ chapter_id: ch21-live-notifications
 title: Pump PostgreSQL notifications on a dedicated bounded session with reconnect gap state
 description: Implement PostgresListener in vertebra-postgres/src/notifications.rs owning a dedicated PostgresConnection, single receive/control pump, 1024-frame and 8 MiB overflow termination, quoted LISTEN/UNLISTEN commands, and optional reconnect gap tracking.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -26,18 +26,18 @@ tests:
 estimated_loc: 235
 plan_revision: 6
 plan_commit: ef86844f
-state_revision: 0
+state_revision: 1
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-10T22:35:18Z"
+last_verified_commit: 356e79c1
+verification_evidence: "cargo test -p vertebra-postgres --test postgres_notification_wire_tests (11 passed), cargo test --lib (12 passed), cargo fmt --check, and cargo clippy --all-targets -- -D warnings exited 0"
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-10T14:45:00Z"
-commit: null
+updated_at: "2026-11-10T22:35:18Z"
+commit: 356e79c1
 verified:
   - by: agent:plan-generator
     at: "2026-11-10T14:45:00Z"
@@ -131,13 +131,13 @@ Implement `PostgresListener` in `src/rs/vertebra-postgres/src/notifications.rs` 
 
 ## Acceptance Criteria
 
-- [ ] `session::establish_standalone_connection(config, replication_database)` supports both ordinary standalone sessions and `replication=database` startup, and `PostgresListener::open` rejects `PoolerMode::Transaction | PoolerMode::Statement | PoolerMode::Auto` (requiring explicit `PoolerMode::Direct | PoolerMode::Session`) with `PostgresError::Interface`, enforces `1..=63` UTF-8 channel bytes + double-quoting, and pumps `Message::NotificationResponse` without starving `max_size = 1` pools (R21).
-- [ ] Bounded `1024`-frame and `8 MiB` byte queues terminate with explicit `PostgresError::Operational` on overflow, `push_front_unconsumed` preserves cancelled/unconsumed frames in order while open, and `close()` / `Drop` shut down the socket and pump task boundedly (R21).
-- [ ] `is_closed()`, single-waiter `next()`, and optional `reconnect = true` (`0.1s..5.0s` jitter, max `8` attempts, refreshed credentials, active-channel resubscribe through `ReadyForQuery`, and `reconnected_gap = true`) satisfy all state and wire invariants (R21).
+- [x] `session::establish_standalone_connection(config, replication_database)` supports both ordinary standalone sessions and `replication=database` startup, and `PostgresListener::open` rejects `PoolerMode::Transaction | PoolerMode::Statement | PoolerMode::Auto` (requiring explicit `PoolerMode::Direct | PoolerMode::Session`) with `PostgresError::Interface`, enforces `1..=63` UTF-8 channel bytes + double-quoting, and pumps `Message::NotificationResponse` without starving `max_size = 1` pools (R21).
+- [x] Bounded `1024`-frame and `8 MiB` byte queues terminate with explicit `PostgresError::Operational` on overflow, `push_front_unconsumed` preserves cancelled/unconsumed frames in order while open, and `close()` / `Drop` shut down the socket and pump task boundedly (R21).
+- [x] `is_closed()`, single-waiter `next()`, and optional `reconnect = true` (`0.1s..5.0s` jitter, max `8` attempts, refreshed credentials, active-channel resubscribe through `ReadyForQuery`, and `reconnected_gap = true`) satisfy all state and wire invariants (R21).
 
 ## Notes & Discoveries
 
-None.
+`establish_standalone_connection(config, replication_database)` omits session GUC parameters and post-authentication `SET` commands when `replication_database == true`, providing the shared dialer seam for `ch22` logical replication alongside `ch21` standalone listeners.
 
 [^pg-contracts]: `.agents/bundles/specs/native-postgres-driver/contracts.md` — Dedicated notification session ownership, closed snapshot, and at-most-once reconnect rules.
 [^pg-protocol-research]: `.agents/bundles/specs/native-postgres-driver/research/protocol-and-execution_20261105.md` — PostgreSQL NotificationResponse wire framing and LISTEN/UNLISTEN ReadyForQuery lifecycle.

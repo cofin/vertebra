@@ -5,7 +5,7 @@ chapter_id: ch21-live-notifications
 title: Wire PostgresNotificationSource over typed adapter protocols and active subscriptions
 description: Define permanent PostgresNotificationDriver in events.py, add real _publish_notification methods on legacy driver.py classes, and upgrade PostgresNotificationSource with live listener subscriptions and ChangeFeed hydration.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -27,18 +27,18 @@ tests:
 estimated_loc: 225
 plan_revision: 6
 plan_commit: ef86844f
-state_revision: 0
+state_revision: 1
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-10T23:43:28Z"
+last_verified_commit: 2a575ce3
+verification_evidence: "make lint-all, make dev, cargo test postgres_notification_wire_tests (11 passed), mypy.stubtest vertebra._postgres, and pytest test_postgres_native_notifications.py + test_pg_dataplane_and_datafusion.py + test_postgres_driver.py (184 passed) exited 0"
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-10T14:45:00Z"
-commit: null
+updated_at: "2026-11-10T23:43:28Z"
+commit: 2a575ce3
 verified:
   - by: agent:plan-generator
     at: "2026-11-10T14:45:00Z"
@@ -159,13 +159,13 @@ Create the permanent adapter-owned `PostgresNotificationDriver` protocol in `src
 
 ## Acceptance Criteria
 
-- [ ] `events.py::PostgresNotificationDriver` types `PostgresNotificationSource` cleanly under `ruff` and `mypy` without eager `vertebra._postgres` imports, and `notify.py` keeps explicit empty `_subscribed_channels = {}` until `subscribe()` and routes `publish()` uniformly through `await self._driver._publish_notification(...)` (R21).
-- [ ] `PostgresNotificationSource` validates channel syntax and `1..=63` UTF-8 bytes atomically before I/O, updates active `AsyncPostgresListener` subscriptions awaiting `ReadyForQuery`, rejects `transaction`/`statement` poolers lacking `direct_dsn`, decodes `text = raw_payload.decode("utf-8")` before hydrating `ChangeFeed`/`b64:` payloads with `reconnected` + `at_most_once` metadata, and closes listeners idempotently on exit/cancel (R21).
-- [ ] `NativeNotificationDriverPort` exercises real `SyncPostgresClient` + `AsyncPostgresClient` wire sessions while `test_pg_dataplane_and_datafusion.py` verifies real bound legacy `_publish_notification` execution and `NotSupportedError` fallback without dummy hooks (R21).
+- [x] `events.py::PostgresNotificationDriver` types `PostgresNotificationSource` cleanly under `ruff` and `mypy` without eager `vertebra._postgres` imports, and `notify.py` keeps explicit empty `_subscribed_channels = {}` until `subscribe()` and routes `publish()` uniformly through `await self._driver._publish_notification(...)` (R21).
+- [x] `PostgresNotificationSource` validates channel syntax and `1..=63` UTF-8 bytes atomically before I/O, updates active `AsyncPostgresListener` subscriptions awaiting `ReadyForQuery`, rejects `transaction`/`statement` poolers lacking `direct_dsn`, decodes `text = raw_payload.decode("utf-8")` before hydrating `ChangeFeed`/`b64:` payloads with `reconnected` + `at_most_once` metadata, and closes listeners idempotently on exit/cancel (R21).
+- [x] `NativeNotificationDriverPort` exercises real `SyncPostgresClient` + `AsyncPostgresClient` wire sessions while `test_pg_dataplane_and_datafusion.py` verifies real bound legacy `_publish_notification` execution and `NotSupportedError` fallback without dummy hooks (R21).
 
 ## Notes & Discoveries
 
-None.
+`PostgresNotificationSource.listen()` returns an explicit generation-fenced `_PostgresNotificationStream` `AsyncIterator` so synchronous `async for ...: break` exits on CPython 3.12 reclaim the stream slot immediately without racing deferred `agen.aclose()` scheduling.
 
 [^pg-contracts]: `.agents/bundles/specs/native-postgres-driver/contracts.md` — PostgresNotificationDriver protocol, uniform publish seam, and dedicated listener rules.
 [^pg-notify-py]: `src/py/vertebra/db/adapters/postgres/notify.py::PostgresNotificationSource` — Existing PostgresNotificationSource and PostgresNotifyConfig implementation.

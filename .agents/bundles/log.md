@@ -1,5 +1,14 @@
 # Bundle Activity Log
 
+## [2026-11-10T23:44:00Z] flow-implement | native-postgres-driver (ch21-live-notifications)
+
+Implemented Chapter 21 (`ch21-live-notifications`, `3/3` tasks verified through `2a575ce3`, raising flow progress to `78/118` tasks across `33` chapters on `feat/native-postgres-driver`): `session::establish_standalone_connection(config, replication_database)` shared standalone dialer, `PostgresListener` with bounded `1024`-frame + `8 MiB` overflow fail-closed termination, `push_front_unconsumed` retention, `PoolerMode` direct/session enforcement, `1..=63` UTF-8 byte channel validation, and optional `reconnect = true` credential refresh / `reconnected_gap` tracking, `SyncPostgresClient`/`AsyncPostgresClient.open_listener` and `AsyncPostgresListener` with `PendingDeliveryGuard` and read-only `closed`, `events.py::PostgresNotificationDriver`, legacy `driver.py::_publish_notification`, and live `PostgresNotificationSource` subscription updates and `ChangeFeed` hydration.
+
+Functional task commits:
+- `native-postgres-driver:ch21:t01`: `356e79c1` — `establish_standalone_connection`, `PostgresListener`, bounded pump, and reconnect gap state.
+- `native-postgres-driver:ch21:t02`: `fa483036` — PyO3 `AsyncPostgresListener`, `open_listener`, `PendingDeliveryGuard`, and `closed` state.
+- `native-postgres-driver:ch21:t03`: `2a575ce3` — `PostgresNotificationDriver` protocol, legacy `_publish_notification`, and live `PostgresNotificationSource`.
+
 ## [2026-11-10T21:55:00Z] flow-implement | native-postgres-driver (ch20-arrow-copy-import-and-portals)
 
 Completed and reviewed Chapter 20 (`ch20-arrow-copy-import-and-portals`, `4/4` tasks, reviewed checkpoint `e5366213`, raising flow progress to `20/33` chapters and `75/118` tasks on `feat/native-postgres-driver`): `parse_postgres_qualified_table`, `PostgresArrowImportPlan` with pre-`COPY` domain/OID/codec validation and single-`PGCOPY`-header preservation across batches, bounded `<= 8 MiB` Python Arrow IPC chunking (`iter_arrow_ipc_batches`, `load_arrow_sync`, `load_arrow_async`) without row materialization, PyO3 `SyncPostgresCopyOut`/`AsyncPostgresCopyOut`/`SyncPostgresCopyIn`/`AsyncPostgresCopyIn` and `copy_from_arrow` bridges with critical-section + `AtomicU8` writable-buffer extraction and non-aborting `CopyTaskCleanupGuard` / stall-timeout retirement, cold-OID-discovering `execute_select_to_arrow`, and single-scope generation-fenced `SyncPostgresArrowStream` and `AsyncPostgresArrowStream` (`PendingArrowBatchGuard`) over `VTBARROW` SHM cursors.

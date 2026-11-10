@@ -5,7 +5,7 @@ chapter_id: ch21-live-notifications
 title: Expose AsyncPostgresListener across sync and async native clients
 description: Expose AsyncPostgresListener and open_listener on both SyncPostgresClient and AsyncPostgresClient via _vertebra_postgres_completion_drainer with PoolerMode rejection, read-only closed state, PendingDeliveryGuard cancelled-next retention, and reconnect gap tuples.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -18,6 +18,7 @@ read_set:
   - src/rs/vertebra-db/src/py_async.rs
   - src/py/vertebra/_postgres.pyi
 files:
+  - src/rs/vertebra-postgres/src/lib.rs
   - src/rs/vertebra-postgres/src/sync_client.rs
   - src/rs/vertebra-postgres/src/async_client.rs
   - src/py/vertebra/_postgres.pyi
@@ -26,18 +27,18 @@ tests:
 estimated_loc: 215
 plan_revision: 6
 plan_commit: ef86844f
-state_revision: 0
+state_revision: 1
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-10T23:08:35Z"
+last_verified_commit: fa483036
+verification_evidence: "make dev, ruff, mypy, mypy.stubtest vertebra._postgres, pytest test_postgres_native_notifications.py (47 passed), cargo test postgres_notification_wire_tests (11 passed), and cargo clippy exited 0"
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-10T14:45:00Z"
-commit: null
+updated_at: "2026-11-10T23:08:35Z"
+commit: fa483036
 verified:
   - by: agent:plan-generator
     at: "2026-11-10T14:45:00Z"
@@ -126,13 +127,13 @@ Expose `AsyncPostgresListener` and `open_listener(channels, *, queue_capacity=10
 
 ## Acceptance Criteria
 
-- [ ] Both `SyncPostgresClient` and `AsyncPostgresClient` reject `PoolerMode::Transaction | PoolerMode::Statement | PoolerMode::Auto` (requiring `PoolerMode::Direct | PoolerMode::Session`, verified via `SyncPostgresPool`/`AsyncPostgresPool`-acquired clients with `0` standalone listener socket accepts) with `InterfaceError` and expose `open_listener(...) -> Awaitable[AsyncPostgresListener]` with `next`, `subscribe`, `unsubscribe`, `aclose`, async context methods, and read-only `closed: bool` passing `ruff`, `mypy`, and `mypy.stubtest vertebra._postgres` (R21).
-- [ ] `test_native_listener_closed_state` verifies `closed` across active (`False`), recoverable reconnect (`False`), terminal EOF/error/`aclose` (`True`), and repeated `aclose` (`True`) with zero I/O (R21).
-- [ ] Duplicate `next()` raises `InterfaceError`, `PendingDeliveryGuard` + `push_front_unconsumed` restore unconsumed frames on cancelled `next()` so the following `await listener.next()` receives that exact frame in order, reconnect restoration flags `reconnected_gap=True`, and task cancellation during `open_listener` or backoff leaves zero orphaned sessions (R21).
+- [x] Both `SyncPostgresClient` and `AsyncPostgresClient` reject `PoolerMode::Transaction | PoolerMode::Statement | PoolerMode::Auto` (requiring `PoolerMode::Direct | PoolerMode::Session`, verified via `SyncPostgresPool`/`AsyncPostgresPool`-acquired clients with `0` standalone listener socket accepts) with `InterfaceError` and expose `open_listener(...) -> Awaitable[AsyncPostgresListener]` with `next`, `subscribe`, `unsubscribe`, `aclose`, async context methods, and read-only `closed: bool` passing `ruff`, `mypy`, and `mypy.stubtest vertebra._postgres` (R21).
+- [x] `test_native_listener_closed_state` verifies `closed` across active (`False`), recoverable reconnect (`False`), terminal EOF/error/`aclose` (`True`), and repeated `aclose` (`True`) with zero I/O (R21).
+- [x] Duplicate `next()` raises `InterfaceError`, `PendingDeliveryGuard` + `push_front_unconsumed` restore unconsumed frames on cancelled `next()` so the following `await listener.next()` receives that exact frame in order, reconnect restoration flags `reconnected_gap=True`, and task cancellation during `open_listener` or backoff leaves zero orphaned sessions (R21).
 
 ## Notes & Discoveries
 
-None.
+`AsyncPostgresListener.next()` combines a retiring-worker barrier (`NextControl` + `WorkerRunGuard`) with `PendingDeliveryGuard` so Tokio-wait cancellation, paused-drainer cancellation, and dropped unawaited futures restore unconsumed `NotificationFrame` items before releasing the single-waiter slot, while `aclose()` / `__aexit__()` run through a non-aborting task cancel callback.
 
 [^pg-contracts]: `.agents/bundles/specs/native-postgres-driver/contracts.md` — AsyncPostgresListener closed property, open_listener signature, and reconnect contracts.
 [^py-async-rs]: `src/rs/vertebra-db/src/py_async.rs::spawn_rust_db_task_with_attr` — Event-loop AsyncCompletionQueue bridge and cancelled-future cleanup.

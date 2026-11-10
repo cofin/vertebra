@@ -41,7 +41,7 @@ chapters:
   - ch32-ffi-okf-and-review-routing-sync
   - ch33-final-review-and-release-gate
 current_chapter: ch21-live-notifications
-current_task: "native-postgres-driver:ch21:t01"
+current_task: null
 parent_prd: native-data-platform
 depends_on_flows:
   - driver-fail-loud
@@ -50,12 +50,12 @@ research:
   - research/cloud-material_20261105.md
 plan_revision: 6
 plan_commit: ef86844f
-state_revision: 4
-last_verified_checkpoint: e5366213
+state_revision: 5
+last_verified_checkpoint: 2a575ce3
 last_reviewed_chapter: ch20-arrow-copy-import-and-portals
 last_reviewed_commit: e5366213
 created_at: "2026-11-03T04:05:00Z"
-updated_at: "2026-11-10T21:55:00Z"
+updated_at: "2026-11-10T23:44:00Z"
 generated:
   by: flow-revise
   at: "2026-11-10T14:45:00Z"
@@ -333,7 +333,7 @@ Every worksheet (`118` total across `33` chapters) executes in one bounded invoc
 - [x] [03e9b772] ch18-binary-copy-streaming — Incremental Binary COPY Framing, COPY TO Streaming, and Duplex Backpressured COPY FROM Recovery (chapters/ch18-binary-copy-streaming/spec.md)
 - [x] [3c7a9355] ch19-native-arrow-batches-and-shm — Lossless PostgreSQL Arrow Schemas, Bounded Scalar/Nested Batch Builders, and IPC-to-SHM Capsules (chapters/ch19-native-arrow-batches-and-shm/spec.md)
 - [x] [e5366213] ch20-arrow-copy-import-and-portals — Arrow-to-COPY Field Import, Schema-Qualified Streaming Writers, and Sync/Async Arrow Portal Cancellation (chapters/ch20-arrow-copy-import-and-portals/spec.md)
-- [ ] ch21-live-notifications — Dedicated Notification Session Pump, PendingDeliveryGuard Async Bridge, and Python PostgresNotificationSource (chapters/ch21-live-notifications/spec.md)
+- [~] ch21-live-notifications — Dedicated Notification Session Pump, PendingDeliveryGuard Async Bridge, and Python PostgresNotificationSource (chapters/ch21-live-notifications/spec.md)
 - [ ] ch22-copyboth-and-pgoutput-decoding — Dedicated Standalone CopyBoth Logical Replication Sessions and Lossless pgoutput v1 Decoding (chapters/ch22-copyboth-and-pgoutput-decoding/spec.md)
 - [ ] ch23-replication-feedback-resume-and-bridge — Durable Commit-Boundary Feedback, Checkpoint-Verified Reconnect Resume, and Cancellation-Safe Replication Bridge (chapters/ch23-replication-feedback-resume-and-bridge/spec.md)
 - [ ] ch24-change-source-and-checkpoints — PostgresChangeSource, PostgresCheckpointStore, Serialized CAS Ack Reconciliation, and Replay/Shutdown Semantics (chapters/ch24-change-source-and-checkpoints/spec.md)
@@ -351,9 +351,9 @@ Every worksheet (`118` total across `33` chapters) executes in one bounded invoc
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Plan Baseline**: `plan_commit: ef86844f` above `feat/driver-fail-loud` (`88c30004`) and `main @ 077a3fe9`; `state: active`, `has_chapters: true`, `plan_revision: 6`, `last_verified_checkpoint: e5366213`, `last_reviewed_chapter: ch20-arrow-copy-import-and-portals` (`e5366213`).
+- **Verified Plan Baseline**: `plan_commit: ef86844f` above `feat/driver-fail-loud` (`88c30004`) and `main @ 077a3fe9`; `state: active`, `has_chapters: true`, `plan_revision: 6`, `last_verified_checkpoint: 2a575ce3`, `last_reviewed_chapter: ch20-arrow-copy-import-and-portals` (`e5366213`).
 - **Upstream Flow Dependency**: [`driver-fail-loud`](../../knowledge/domains/data/database-drivers-and-dialers.md) is completed at `88c30004`, deleting PostgreSQL `memory://` execution and `vertebra_db::postgres::PostgresPool` [^fail-loud-baseline].
-- **Active Chapter & Next Task**: [ch21-live-notifications](chapters/ch21-live-notifications/spec.md) (`native-postgres-driver:ch21:t01`); `20/33` chapters (`ch01`–`ch20`, `75/118` tasks) are completed through `e5366213`, and `13/33` chapters (`ch21`–`ch33`, `43/118` tasks) remain planned.
+- **Active Chapter & Next Task**: [ch21-live-notifications](chapters/ch21-live-notifications/spec.md) (`3/3` tasks verified through `2a575ce3`, awaiting chapter review); `20/33` chapters (`ch01`–`ch20`) are review-completed, `78/118` tasks are completed, and `12/33` chapters (`ch22`–`ch33`, `40/118` tasks) remain planned.
 - **Documentation & OKF Status**: `[0/33 files documented]`, scheduled across [ch30-user-and-workflow-docs](chapters/ch30-user-and-workflow-docs/spec.md) (`12` files), [ch31-data-and-testing-okf-sync](chapters/ch31-data-and-testing-okf-sync/spec.md) (`12` files), and [ch32-ffi-okf-and-review-routing-sync](chapters/ch32-ffi-okf-and-review-routing-sync/spec.md) (`9` files), followed by final verification and `88c30004..HEAD` review in [ch33-final-review-and-release-gate](chapters/ch33-final-review-and-release-gate/spec.md) (`ch33:t01`, keeping `state: active` and `current_task: null` for `DOC-07` before finish/archive).
 - **Delivery & Next Action**: Complete single-PR delivery on `feat/native-postgres-driver`; intermediate chapters never trigger early `/flow:finish` or `/flow:archive`. Next canonical command: `/flow:implement native-postgres-driver ch21`.
 
