@@ -7,7 +7,7 @@ Active specifications and promoted research notes under `.agents/bundles/specs/`
 - [`native-data-platform`](native-data-platform/spec.md) — Shared connection pools across worker processes via the shared-memory ring broker and per-engine standalone Rust PyO3 driver wheels (`vertebra-<engine>`).
 - [`integration-remediation`](integration-remediation/spec.md) — Driver layering, SQLSpec adapter parity, SQLAlchemy/Advanced Alchemy/Django integration, native queues/channels/stores, MCP `2026-07-28` core, and runtime fastpath consolidation.
 
-The completed database foundation, fail-loud baseline, and standalone DuckDB wheel (`vertebra-duckdb`) are documented in [driver contracts, native DuckDB client, and adapter layout](../knowledge/domains/data/database-drivers-and-dialers.md), [delayed-commit pipelines](../knowledge/domains/data/query-pipeline-cdc-and-tenancy.md), [collaborator-required queue backends](../knowledge/domains/framework/distributed-queues-and-email.md), and [ADR-004](../knowledge/decisions/adr-004-optional-driver-wheels-and-shm-ownership.md).
+The completed database foundation, fail-loud baseline, and standalone DuckDB and MySQL wheels (`vertebra-duckdb`, `vertebra-mysql`) are documented in [driver contracts, native clients, and adapter layout](../knowledge/domains/data/database-drivers-and-dialers.md), [delayed-commit pipelines](../knowledge/domains/data/query-pipeline-cdc-and-tenancy.md), [collaborator-required queue backends](../knowledge/domains/framework/distributed-queues-and-email.md), and [ADR-004](../knowledge/decisions/adr-004-optional-driver-wheels-and-shm-ownership.md).
 
 ## 2. Planned Feature Specifications (`state: planned`)
 
@@ -17,7 +17,6 @@ The completed database foundation, fail-loud baseline, and standalone DuckDB whe
 
 - [`broker-pool-sharing`](broker-pool-sharing/spec.md) — Shared broker-owned pools for any SQLSpec, Advanced Alchemy, or SQLAlchemy config.
 - [`native-oracle-driver`](native-oracle-driver/spec.md) — Standalone Rust Oracle Thin wheel (`vertebra-oracle`).
-- [`native-mysql-driver`](native-mysql-driver/spec.md) — Standalone Rust MySQL and MariaDB wheel (`vertebra-mysql`).
 - [`native-mssql-driver`](native-mssql-driver/spec.md) — Standalone Rust SQL Server TDS wheel (`vertebra-mssql`).
 - [`native-sqlite-driver`](native-sqlite-driver/spec.md) — Standalone Rust SQLite wheel (`vertebra-sqlite`).
 - [`native-redis-driver`](native-redis-driver/spec.md) — Standalone Rust Redis and Valkey RESP3 wheel (`vertebra-redis`).
