@@ -528,10 +528,13 @@ def test_post_results_caller_exception_rolls_back_before_release_and_preserves_e
         order.append(f"release_saw_queries:{len(srv.simple_queries)}")
 
     try:
-        with pytest.raises(ValueError, match="post-results validation failed"), SyncPostgresPipeline(
-            client,
-            release=_release,
-        ) as pipe:
+        with (
+            pytest.raises(ValueError, match="post-results validation failed"),
+            SyncPostgresPipeline(
+                client,
+                release=_release,
+            ) as pipe,
+        ):
             pipe.execute("INSERT INTO items(name) VALUES ($1)", ["a"])
             pipe.execute("UPDATE items SET name = $1", ["updated"])
             pipe.select("SELECT name FROM items")

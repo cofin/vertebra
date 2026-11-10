@@ -483,13 +483,7 @@ def _pg_trust_greeting_frames(server_version: str = "17.2") -> bytes:
 
 def _pg_error_frame(sqlstate: str, message: str) -> bytes:
     """Build a PostgreSQL ErrorResponse wire frame."""
-    body = (
-        b"SERROR\x00VERROR\x00C"
-        + sqlstate.encode("ascii")
-        + b"\x00M"
-        + message.encode("utf-8")
-        + b"\x00\x00"
-    )
+    body = b"SERROR\x00VERROR\x00C" + sqlstate.encode("ascii") + b"\x00M" + message.encode("utf-8") + b"\x00\x00"
     return _pg_frame(b"E", body)
 
 
@@ -732,6 +726,7 @@ async def test_native_async_lifecycle_and_concurrent_progress() -> None:
             )
             for idx in range(8)
         ]
+
         async def _connect_client(c: AsyncPostgresClient) -> None:
             await c.connect()
 
