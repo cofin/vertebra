@@ -5,7 +5,7 @@ chapter_id: ch20-arrow-copy-import-and-portals
 title: "Chapter 20: Arrow-to-COPY Bulk Import, Streaming Input Bridges, and Sync/Async Arrow Portal Streams"
 description: Convert Arrow RecordBatches into binary COPY frames, expose PyO3 COPY and Arrow input bridges without Python row conversion, and deliver synchronous and cancellation-safe asynchronous Arrow selection and portal batch streams.
 status: stable
-state: in_progress
+state: completed
 planning_status: complete
 depends_on_chapters:
   - ch19-native-arrow-batches-and-shm
@@ -13,11 +13,11 @@ replan_trigger: null
 current_task: null
 plan_revision: 6
 plan_commit: ef86844f
-state_revision: 1
-last_verified_checkpoint: 5cbf832b
-last_reviewed_commit: null
+state_revision: 2
+last_verified_checkpoint: e5366213
+last_reviewed_commit: e5366213
 created_at: "2026-11-05T00:00:00Z"
-updated_at: "2026-11-10T19:28:00Z"
+updated_at: "2026-11-10T21:55:00Z"
 generated:
   by: flow-setup
   at: "2026-11-07T05:00:00Z"
@@ -28,6 +28,12 @@ verified:
   - by: agent:flow-setup
     at: "2026-11-07T05:00:00Z"
     commit: 73c8a6ff
+  - by: agent:code-reviewer
+    at: "2026-11-10T21:55:00Z"
+    commit: e5366213
+  - by: agent:quality-reviewer
+    at: "2026-11-10T21:55:00Z"
+    commit: e5366213
 sources:
   - id: pg-contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md
@@ -167,7 +173,7 @@ Progress: `[0/0 files documented in ch20]` (repository-wide public docs and OKF 
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `plan_revision: 6`, `plan_commit: ef86844f`; chapter `state: in_progress` awaiting zero-context chapter review (`last_verified_checkpoint: 5cbf832b`; `make lint-all`, `postgres_arrow_import_tests` `10 passed`, `postgres_arrow_tests` `17 passed`, `test_postgres_native_data.py` `129 passed` -> exit `0`).
+- **Verified Baseline**: `plan_revision: 6`, `plan_commit: ef86844f`; chapter `state: completed` at `e5366213` (`last_reviewed_commit: e5366213`, `last_verified_checkpoint: e5366213`; `make lint-all`, `cargo test -p vertebra-postgres` `186 passed`, `test_postgres_native_data.py` `162 passed` -> exit `0`).
 - **Remaining Tasks in Chapter**: None (`4/4` completed: `t01` `34a428d7`, `t02` `1fb9b77f`, `t03` `e5da5da5`, `t04` `5cbf832b`).
 - **Downstream Dependents**: Unblocks `ch21-live-notifications` and `ch26:t03` (`driver-arrow-and-owned-binds`).
 

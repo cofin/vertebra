@@ -1,14 +1,15 @@
 # Bundle Activity Log
 
-## [2026-11-10T19:28:00Z] flow-implement | native-postgres-driver (ch20-arrow-copy-import-and-portals)
+## [2026-11-10T21:55:00Z] flow-implement | native-postgres-driver (ch20-arrow-copy-import-and-portals)
 
-Implemented Chapter 20 (`ch20-arrow-copy-import-and-portals`, `4/4` tasks verified through `5cbf832b`, raising flow progress to `75/118` tasks across `33` chapters on `feat/native-postgres-driver`): `parse_postgres_qualified_table`, `PostgresArrowImportPlan` with pre-`COPY` domain/OID/codec validation and single-`PGCOPY`-header preservation across batches, bounded `<= 8 MiB` Python Arrow IPC chunking (`iter_arrow_ipc_batches`, `load_arrow_sync`, `load_arrow_async`) without row materialization, PyO3 `SyncPostgresCopyOut`/`AsyncPostgresCopyOut`/`SyncPostgresCopyIn`/`AsyncPostgresCopyIn` and `copy_from_arrow` bridges with RAII contiguous buffer locks, cold-OID-discovering `execute_select_to_arrow`, and single-scope generation-fenced `SyncPostgresArrowStream` and `AsyncPostgresArrowStream` (`PendingArrowBatchGuard`) over `VTBARROW` SHM cursors.
+Completed and reviewed Chapter 20 (`ch20-arrow-copy-import-and-portals`, `4/4` tasks, reviewed checkpoint `e5366213`, raising flow progress to `20/33` chapters and `75/118` tasks on `feat/native-postgres-driver`): `parse_postgres_qualified_table`, `PostgresArrowImportPlan` with pre-`COPY` domain/OID/codec validation and single-`PGCOPY`-header preservation across batches, bounded `<= 8 MiB` Python Arrow IPC chunking (`iter_arrow_ipc_batches`, `load_arrow_sync`, `load_arrow_async`) without row materialization, PyO3 `SyncPostgresCopyOut`/`AsyncPostgresCopyOut`/`SyncPostgresCopyIn`/`AsyncPostgresCopyIn` and `copy_from_arrow` bridges with critical-section + `AtomicU8` writable-buffer extraction and non-aborting `CopyTaskCleanupGuard` / stall-timeout retirement, cold-OID-discovering `execute_select_to_arrow`, and single-scope generation-fenced `SyncPostgresArrowStream` and `AsyncPostgresArrowStream` (`PendingArrowBatchGuard`) over `VTBARROW` SHM cursors.
 
-Functional task commits:
+Functional task and review commits:
 - `native-postgres-driver:ch20:t01`: `34a428d7` — `PostgresArrowImportPlan`, `copy_from_arrow_with_generation_as`, single-header `CopyFromStream`, and Python IPC chunking.
 - `native-postgres-driver:ch20:t02`: `1fb9b77f` — PyO3 sync/async `COPY` handles and `copy_from_arrow` streaming input bridge.
 - `native-postgres-driver:ch20:t03`: `e5da5da5` — cold-safe `execute_select_to_arrow`, `ArrowPortalStream`, and `SyncPostgresClient` Arrow streams.
 - `native-postgres-driver:ch20:t04`: `5cbf832b` — `AsyncPostgresClient.select_to_arrow`, `AsyncPostgresArrowStream`, and SHM/portal cancellation cleanup.
+- Chapter 20 review checkpoints: `627ecd64`, `e5366213` (correctness and independent quality reviews passed with zero unresolved findings; advancing to `ch21-live-notifications`).
 
 ## [2026-11-10T15:35:00Z] flow-revise | native-postgres-driver
 
