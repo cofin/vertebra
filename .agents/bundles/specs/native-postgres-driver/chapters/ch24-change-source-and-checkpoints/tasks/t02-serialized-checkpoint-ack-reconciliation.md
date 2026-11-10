@@ -22,8 +22,8 @@ files:
 tests:
   - src/py/tests/unit/db/test_postgres_change_source.py
 estimated_loc: 235
-plan_revision: 5
-plan_commit: 73c8a6ff
+plan_revision: 6
+plan_commit: ef86844f
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -34,8 +34,15 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-08T02:05:22Z"
+updated_at: "2026-11-10T14:45:00Z"
 commit: null
+generated:
+  by: flow-revise
+  at: "2026-11-10T14:45:00Z"
+verified:
+  - by: agent:plan-generator
+    at: "2026-11-10T14:45:00Z"
+    commit: ef86844f
 sources:
   - id: npd-contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md
@@ -107,13 +114,14 @@ Add `PostgresReplicationGapError(OperationalError)` and `PostgresChangeSource.ac
 
 ## Verification
 
-- Initial Red baseline: `uv run --no-sync pytest src/py/tests/unit/db/test_postgres_change_source.py -k 'ack_ or checkpoint_save' -q`
-- Final Green + Stubtest + Typecheck gate:
+- Initial Red baseline: `uv run --no-sync python -m pytest src/py/tests/unit/db/test_postgres_change_source.py -k 'ack_ or checkpoint_save' -q`
+- Final Green + Lint + Stubtest + Typecheck gate:
   ```bash
   make dev
   uv run --no-sync python -m mypy.stubtest vertebra._postgres
+  uv run --no-sync ruff check src/py/vertebra/db/adapters/postgres/change_stream.py src/py/vertebra/db/adapters/postgres/__init__.py src/py/tests/unit/db/test_postgres_change_source.py
+  uv run --no-sync mypy src/py/vertebra/db/adapters/postgres/change_stream.py src/py/vertebra/db/adapters/postgres/__init__.py src/py/tests/unit/db/test_postgres_change_source.py
   uv run --no-sync python -m pytest src/py/tests/unit/db/test_postgres_change_source.py -k 'ack_ or checkpoint_save' -q
-  uv run --no-sync mypy src/py/vertebra/db/adapters/postgres/change_stream.py src/py/tests/unit/db/test_postgres_change_source.py
   ```
 
 ## Acceptance Criteria

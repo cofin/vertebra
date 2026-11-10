@@ -24,8 +24,8 @@ files:
 tests:
   - src/rs/vertebra-postgres/tests/postgres_pgoutput_tests.rs
 estimated_loc: 240
-plan_revision: 5
-plan_commit: 73c8a6ff
+plan_revision: 6
+plan_commit: ef86844f
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -36,15 +36,15 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-08T02:05:22Z"
+updated_at: "2026-11-10T14:45:00Z"
 commit: null
 generated:
   by: flow-revise
-  at: "2026-11-07T05:00:00Z"
+  at: "2026-11-10T14:45:00Z"
 verified:
   - by: agent:plan-generator
-    at: "2026-11-07T05:00:00Z"
-    commit: e8901de4
+    at: "2026-11-10T14:45:00Z"
+    commit: ef86844f
 sources:
   - id: npd-contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md
@@ -91,16 +91,16 @@ Implement `PgOutputDecoder` in `src/rs/vertebra-postgres/src/replication/pgoutpu
     - `pub fn reset_on_disconnect(&mut self)` — clears partial buffered bytes and in-flight state on transport EOF without raising corruption errors so `ch23:t02` can reconnect and replay cleanly.
     - `pub fn finish_clean_eof(&self) -> Result<(), crate::errors::PostgresError>` — returns `ProtocolError` if unread partial record bytes remain when a clean `CopyDone` arrives.
 - `src/rs/vertebra-postgres/src/replication/mod.rs`:
-  - Preload user-defined array/composite OIDs referenced by published relations into `crate::types::TypeCatalog` on the ordinary metadata connection before `START_REPLICATION` (never issuing SQL on the `CopyBoth` socket); expose replication-only Python conversion mapping `PgOutputTupleValue::UnchangedToast` -> `vertebra.db.adapters.postgres.types.PG_UNCHANGED_TOAST` without adding `UnchangedToast` to SQL `PgValue`.
-- `src/py/vertebra/db/adapters/postgres/types.py`:
+  - Preload `(namespace, name)` alongside `TypeInfo` for every custom `vector`, `halfvec`, `enum`, `domain`, `range`, `array`, and `composite` OID referenced by published relations (recursively resolving element, domain-base, range-subtype, and composite-field OIDs via bound `pg_catalog.pg_type` + `pg_catalog.pg_namespace` joins, zero correlated scalar subqueries) into `crate::types::TypeCatalog` plus a `HashMap<u32, (String, String)>` type-identity map on the ordinary preflight connection before `START_REPLICATION` (never issuing SQL on the `CopyBoth` socket); expose replication-only Python conversion mapping `PgOutputTupleValue::UnchangedToast` -> `vertebra.db.adapters.postgres.types.PG_UNCHANGED_TOAST` without adding `UnchangedToast` to SQL `PgValue`.
+- `src/py/vertebra/db/adapters/postgres/types.py` (module top-level imports only, strict class member ordering, Google-style docstrings, zero inline `#` comments):
   - `class PgUnchangedToast(msgspec.Struct, frozen=True, gc=False):` (zero fields; singleton `PG_UNCHANGED_TOAST: Final[PgUnchangedToast] = PgUnchangedToast()`, explicitly excluded from the `PostgresValue` bind union).
-  - `class PostgresReplicationIdentity(msgspec.Struct, frozen=True, gc=False): system_identifier: str; database: str; slot: str; publication_fingerprint: str` (validates non-empty strings in `__post_init__`; `@property def identity_key(self) -> tuple[str, str, str, str]`).
-  - `class PostgresReplicationRecord(msgspec.Struct, frozen=True, gc=False): kind: Literal["control", "begin", "insert", "update", "delete", "truncate", "message", "commit"]; payload: dict[str, Any]; commit_end_lsn: int | None = None; generation: int = 0` (validates non-bool `int` bounds `0 <= generation` and `0 <= commit_end_lsn < 2**64` when set).
+  - `class PostgresReplicationIdentity(msgspec.Struct, frozen=True, gc=False): system_identifier: str; database: str; slot: str; publication_fingerprint: str` (validates non-empty scalar strings in `__post_init__`; `@property def identity_key(self) -> tuple[str, str, str, str]`).
+  - `class PostgresReplicationRecord(msgspec.Struct, frozen=True): kind: Literal["control", "begin", "insert", "update", "delete", "truncate", "message", "commit"]; payload: dict[str, Any]; commit_end_lsn: int | None = None; generation: int = 0` (`gc=False` intentionally omitted because `payload` stores mutable `dict`/`list`/`PgJson` containers that must stay tracked by Python's cyclic garbage collector; validates non-bool `int` bounds `0 <= generation` and `0 <= commit_end_lsn < 2**64` when set).
 
 ## Edge Cases & Error Semantics
 
 - `Relation` (`'R'`) update for an existing `relation_oid` replaces the map entry with a fresh `Arc<PgOutputRelationSchema>` so already decoded events keep their captured schema snapshot immutable; inserting a `4097`th distinct relation into a `4096`-cap cache fails explicitly with `OperationalError`.
-- `Type` (`'Y'`) frame records `(type_oid, namespace, name)` and invalidates any stale `TypeCatalog` entry for `type_oid`; unknown OIDs in `'t'` tuple cells remain lossless tagged text (`PgValue` text + column `type_oid`) rather than failing or issuing mid-stream SQL.
+- `Type` (`'Y'`: `type_oid: u32`, `namespace: cstring`, `name: cstring`) compares incoming `(namespace, name)` against the preloaded `(type_oid, namespace, name)` metadata: when `(namespace, name)` matches, the preloaded `TypeCatalog` entry (`vector`, `halfvec`, `enum`, `domain`, `range`, `array`, or `composite`) stays intact so standard `pgoutput` `'Y'` messages preceding the first custom tuple preserve full rich decoding; `type_oid` is removed from `TypeCatalog` ONLY when `(namespace, name)` mismatches the preloaded identity (for example after DDL rename/drop-recreate), causing subsequent `'t'` cells of that OID to fall back to lossless tagged text (`PgValue` text + column `type_oid`) without failing or issuing mid-stream SQL.
 - `TupleData` strictly distinguishes missing/dropped columns (absent from `Relation` column list), `'n'` (`PgOutputTupleValue::Null`), `'u'` (`PgOutputTupleValue::UnchangedToast`), `'t'` (UTF-8 text decoded via shared codec for `type_oid`/`type_modifier`), and `'b'` (binary payload decoded via shared binary codec even though `binary='false'` was requested).
 - Unknown `TupleData` column tag, column count mismatch against `PgOutputRelationSchema.columns.len()`, unknown `relation_oid`, invalid UTF-8 in `cstring` / `'t'`, invalid `replica_identity` (`not in b"dfni"`), or truncated trailing bytes on clean `CopyDone` returns `ProtocolError`.
 
@@ -112,6 +112,7 @@ Implement `PgOutputDecoder` in `src/rs/vertebra-postgres/src/replication/pgoutpu
 | Case | Input | Expected Output / Error |
 | --- | --- | --- |
 | Four-state `TupleData` fidelity | Golden `'R'` (`public.accounts`, `replident = b'd'`, cols `id int8 key`, `bio text`, `meta jsonb`, `amount numeric`) + tuple with `'t'("42")`, `'u'` (TOAST), `'n'` (`NULL`), `'b'` (binary numeric `1.2300`) | Decodes `id = 42`, `bio = UnchangedToast`, `meta = Null`, `amount = Decimal("1.2300")` with exact scale preserved; missing dropped attribute omitted. |
+| `Type` (`'Y'`) matching preservation vs mismatch invalidation | Preload `(namespace, name)` + `TypeInfo` for `vector`, `enum`, `domain`, `range`, `array`, and `composite` OIDs; feed matching `'Y'` frames before tuples, then feed mismatching `'Y'` (`"public"`, `"renamed_composite"`) + tuple; also verify `gc.is_tracked(PostgresReplicationRecord(...))` | Matching `'Y'` retains preloaded `TypeCatalog` entries and decodes rich values (`PgVector`, composite dict, typed array, enum/range); mismatching `'Y'` invalidates only that `type_oid` to lossless tagged text; `PostgresReplicationRecord` stays GC-tracked while `PgUnchangedToast` and `PostgresReplicationIdentity` use `gc=False`. |
 | Arbitrary byte-split & coalesced frames | Concatenate `'Y'` + `'R'` + tuple frame (`N` bytes) and feed `push()` at every `1`-byte split `0..N` as well as in one coalesced slice | Identical decoded frames in both single-slice and `1`-byte incremental feeds; buffer empty afterward (`finish_clean_eof().is_ok()`). |
 | Atomic `Relation` schema evolution | Emit `'R'` (`rel_oid = 16384`, 2 cols), capture `Arc<PgOutputRelationSchema>`, then emit updated `'R'` (`rel_oid = 16384`, 3 cols) | Earlier captured `Arc` still has `2` columns; subsequent tuples require `3` columns (`2`-col tuple after update fails `ProtocolError`). |
 | `RelationCache` cap & unknown relation | Insert `4096` relations then `4097`th `'R'`; separately feed tuple referencing unregistered `rel_oid = 99999` | `4097`th relation returns resource-limit `OperationalError`; unregistered `rel_oid` returns `ProtocolError`. |
@@ -119,18 +120,19 @@ Implement `PgOutputDecoder` in `src/rs/vertebra-postgres/src/replication/pgoutpu
 
 ## Verification
 
-- Initial Red baseline: `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --test postgres_pgoutput_tests`
-- Final Green + Clippy + Mypy gate:
+- Initial Red baseline: `PYTHONPATH="$(pwd)/src/py" cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --test postgres_pgoutput_tests`
+- Final Green + Clippy + Lint + Mypy gate:
   ```bash
-  cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --test postgres_pgoutput_tests
+  PYTHONPATH="$(pwd)/src/py" cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --test postgres_pgoutput_tests
   cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-postgres --all-targets -- -D warnings
+  uv run --no-sync ruff check src/py/vertebra/db/adapters/postgres/types.py
   uv run --no-sync mypy src/py/vertebra/db/adapters/postgres/types.py
   ```
 
 ## Acceptance Criteria
 
-- [ ] `PgOutputDecoder` parses `'R'`, `'Y'`, and four-state `TupleData` (`'n'`, `'u'`, `'t'`, `'b'`) incrementally across arbitrary splits and coalesced frames using shared `vertebra-postgres` value codecs (R22).
-- [ ] `RelationCache` enforces the `4096`-relation cap and immutable `Arc` schema snapshots, while `types.py` defines `PgUnchangedToast` (`PG_UNCHANGED_TOAST`), `PostgresReplicationIdentity`, and `PostgresReplicationRecord` without optional native wheel imports (R22).
+- [ ] `PgOutputDecoder` parses `'R'`, mismatch-aware `'Y'` (retaining matching preloaded `vector`/`halfvec`/`enum`/`domain`/`range`/`array`/`composite` entries), and four-state `TupleData` (`'n'`, `'u'`, `'t'`, `'b'`) incrementally across arbitrary splits and coalesced frames using shared `vertebra-postgres` value codecs (R22).
+- [ ] `RelationCache` enforces the `4096`-relation cap and immutable `Arc` schema snapshots, while `types.py` defines `PgUnchangedToast` (`PG_UNCHANGED_TOAST`), `PostgresReplicationIdentity`, and GC-tracked `PostgresReplicationRecord` (`frozen=True`, without `gc=False`) without optional native wheel imports (R22).
 - [ ] Commit message follows `feat(postgres): decode pgoutput relations and tuples` once verified.
 
 ## Notes & Discoveries

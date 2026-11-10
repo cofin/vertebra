@@ -11,20 +11,20 @@ depends_on_chapters:
   - ch23-replication-feedback-resume-and-bridge
 replan_trigger: null
 current_task: "native-postgres-driver:ch24:t01"
-plan_revision: 5
-plan_commit: 73c8a6ff
+plan_revision: 6
+plan_commit: ef86844f
 state_revision: 0
 last_verified_checkpoint: null
 last_reviewed_commit: null
 created_at: "2026-11-05T00:00:00Z"
-updated_at: "2026-11-08T02:05:22Z"
+updated_at: "2026-11-10T14:45:00Z"
 generated:
   by: flow-revise
-  at: "2026-11-07T05:00:00Z"
+  at: "2026-11-10T14:45:00Z"
 verified:
   - by: agent:plan-generator
-    at: "2026-11-07T05:00:00Z"
-    commit: 73c8a6ff
+    at: "2026-11-10T14:45:00Z"
+    commit: ef86844f
 sources:
   - id: npd-contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md
@@ -73,7 +73,7 @@ Parent roadmap: [spec.md](../../spec.md) and [contracts.md](../../contracts.md).
 
 ### 2.1 Chapter Requirements
 
-- **R22.7 & R23.2 (`ch24:t01`)**: Add `PostgresReplicationDriver(Protocol)` to `events.py`; implement `PostgresChangeConfig`, `PostgresCheckpoint`, `PostgresCheckpointConflictError`, `PostgresCheckpointStore`, `MemoryPostgresCheckpointStore`, and `PostgresChangeSource.stream()` (identity preflight -> `store.load` -> `reconnect=False` open -> signed-int64 `ChangeEvent` projection + `1024`-entry commit snapshot tracking) in `change_stream.py` and lazy `__init__.py` exports.
+- **R22.7 & R23.2 (`ch24:t01`)**: Add `PostgresReplicationDriver(Protocol)` to `events.py`; implement `PostgresChangeConfig`, `PostgresCheckpoint`, `PostgresCheckpointConflictError`, `PostgresCheckpointStore`, `MemoryPostgresCheckpointStore` (checking matching `checkpoint.identity_key` vs `expected.identity_key` before CAS and monotonic validation), and `PostgresChangeSource.stream()` (identity preflight -> `store.load` -> `reconnect=False` open -> signed-int64 `ChangeEvent` projection carrying `dict(record.payload)` + `"generation"` + `"commit_end_lsn"` on `"COMMIT"` + `1024`-entry commit snapshot tracking) in `change_stream.py` and lazy `__init__.py` exports with top-level `FrozenBaseStruct` imports and strict class member ordering.
 - **R22.8 & R23.3 (`ch24:t02`)**: Add `PostgresReplicationGapError` and `PostgresChangeSource.acknowledge(commit_end_lsn)` with single-flight state-lock validation, yield-gate barrier, `asyncio.shield` tracked CAS-then-native-ack execution, and `KnownClosed` reload reconciliation on any ambiguous store/native failure or cancellation.
 - **R22.9 & R23.4 (`ch24:t03`)**: Implement source-owned reconnect (`max 8` attempts, `0.1s..5.0s` jitter when `config.reconnect=True`) over `reconnect=False` native handles, exact `(commit_end_lsn, next_event_id)` replay ID restoration across post-yield ack failures, and absolute-deadline `aclose()` failing closed with `PostgresReplicationGapError(reason="checkpoint_uncertain")` if reconciliation remains unresolved.
 
@@ -115,7 +115,7 @@ Parent roadmap: [spec.md](../../spec.md) and [contracts.md](../../contracts.md).
 
 ## 3. Documentation & OKF Knowledge Plan
 
-Progress: `[0/0 files documented in ch24]` (consolidated in `ch30:t01`–`ch30:t04`; Google-style module/class/method docstrings in `events.py` and `change_stream.py` explicitly document `MemoryPostgresCheckpointStore` non-durability and commit-only acknowledgement semantics).
+Progress: `[0/0 files documented in ch24]` (project documentation and OKF chapters `[0/33 files documented]` consolidate across `ch30`–`ch32` with final review gates in `ch33-final-review-and-release-gate`; Google-style module/class/method docstrings in `events.py` and `change_stream.py` explicitly document `MemoryPostgresCheckpointStore` non-durability and commit-only acknowledgement semantics).
 
 ## 4. Requirement-to-Task Traceability Matrix
 
@@ -131,11 +131,11 @@ Progress: `[0/0 files documented in ch24]` (consolidated in `ch30:t01`–`ch30:t
 - [ ] native-postgres-driver:ch24:t02 — Serialize checkpoint acknowledgements and uncertain outcomes (tasks/t02-serialized-checkpoint-ack-reconciliation.md)
 - [ ] native-postgres-driver:ch24:t03 — Preserve change-source replay identity and shutdown semantics (tasks/t03-change-source-replay-and-shutdown.md)
 
-**Chapter Recovery Checkpoint:** `make dev && uv run --no-sync python -m mypy.stubtest vertebra._postgres && uv run --no-sync pytest src/py/tests/unit/db/test_postgres_change_source.py src/py/tests/unit/db/test_spanner_queue_and_cdc.py -q && uv run --no-sync mypy src/py/vertebra/db/adapters/postgres/events.py src/py/vertebra/db/adapters/postgres/change_stream.py src/py/tests/unit/db/test_postgres_change_source.py` exits `0`.
+**Chapter Recovery Checkpoint:** `make dev && uv run --no-sync python -m mypy.stubtest vertebra._postgres && uv run --no-sync ruff check src/py/vertebra/db/adapters/postgres/events.py src/py/vertebra/db/adapters/postgres/change_stream.py src/py/vertebra/db/adapters/postgres/__init__.py src/py/tests/unit/db/test_postgres_change_source.py && uv run --no-sync mypy src/py/vertebra/db/adapters/postgres/events.py src/py/vertebra/db/adapters/postgres/change_stream.py src/py/vertebra/db/adapters/postgres/__init__.py src/py/tests/unit/db/test_postgres_change_source.py && uv run --no-sync python -m pytest src/py/tests/unit/db/test_postgres_change_source.py src/py/tests/unit/db/test_spanner_queue_and_cdc.py -q` exits `0`.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Plan Baseline**: `73c8a6ff`; chapter `state: planned`, `planning_status: complete`.
+- **Verified Plan Baseline**: `ef86844f`; chapter `state: planned`, `planning_status: complete`, `plan_revision: 6`, `plan_commit: ef86844f`.
 - **Remaining Tasks in Chapter**: `t01`, `t02`, `t03` (`3/3` pending).
 - **Downstream Dependents**: Unblocks `ch25-dsn-bridge-lexer-and-permanent-drivers` and `ch26-compiler-pipeline-arrow-and-event-hooks`.
 

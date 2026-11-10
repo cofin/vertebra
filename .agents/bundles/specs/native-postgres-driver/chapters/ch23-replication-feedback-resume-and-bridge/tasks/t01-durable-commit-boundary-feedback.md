@@ -22,8 +22,8 @@ files:
 tests:
   - src/rs/vertebra-postgres/tests/postgres_replication_wire_tests.rs
 estimated_loc: 235
-plan_revision: 5
-plan_commit: 73c8a6ff
+plan_revision: 6
+plan_commit: ef86844f
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -34,8 +34,15 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-08T02:05:22Z"
+updated_at: "2026-11-10T14:45:00Z"
 commit: null
+generated:
+  by: flow-revise
+  at: "2026-11-10T14:45:00Z"
+verified:
+  - by: agent:plan-generator
+    at: "2026-11-10T14:45:00Z"
+    commit: ef86844f
 sources:
   - id: npd-contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md
@@ -81,16 +88,18 @@ Implement `src/rs/vertebra-postgres/src/replication/feedback.rs` and wire split 
     - `pub fn acknowledge(&mut self, commit_end_lsn: u64) -> Result<u64, crate::errors::PostgresError>` — returns `Ok(acknowledged_commit_lsn)` idempotently when `commit_end_lsn == acknowledged_commit_lsn`; drains contiguous entries `<= commit_end_lsn` up to an exact match in `published_commits`, updating `acknowledged_commit_lsn = commit_end_lsn`; rejects `< acknowledged_commit_lsn`, unknown non-commit LSNs, and future/unemitted LSNs.
     - `pub fn status_positions(&self) -> (u64, u64, u64)` — returns `(write_lsn = max(received_complete_lsn, acknowledged_commit_lsn), flush_lsn = acknowledged_commit_lsn, apply_lsn = acknowledged_commit_lsn)`.
 - `src/rs/vertebra-postgres/src/replication/mod.rs`:
-  - Split `TransportStream` via `tokio::io::split` after `CopyBothResponse` into `ReplicationReadTask` and `ReplicationWriteTask` coordinated via a bounded `tokio::sync::watch::channel` (zero per-heartbeat allocations or spawned tasks):
+  - Destructure `(conn.stream, conn.read_buf)` after `CopyBothResponse` (`'W'`), split `conn.stream` via `tokio::io::split` into `(read_half, write_half)`, and move `(read_half, conn.read_buf)` into `ReplicationReadTask` alongside `write_half` in `ReplicationWriteTask` coordinated via a bounded `tokio::sync::watch::channel` (zero per-heartbeat allocations or spawned tasks):
+    - `ReplicationReadTask` passes `&mut read_buf` into `protocol::read_replication_message` on every loop iteration so any `PrimaryKeepalive` (`'k'`) or `XLogData` (`'w'`) bytes coalesced into the same TCP read as `CopyBothResponse` (`'W'`) inside `conn.read_buf` are drained losslessly in exact wire order before waiting on `read_half`.
     - When `BoundedReplicationQueue` (`1024` records / `8 MiB`) or `published_commits.len() >= 1024` is full, `ReplicationReadTask` stops reading further socket WAL frames (retaining at most `1` decoded pending record), while `ReplicationWriteTask` continues firing `StandbyStatusUpdate` on `compute_status_interval` with `flush_lsn = apply_lsn = acknowledged_commit_lsn`.
     - On `'k'` with `reply_requested == true`, `ReplicationReadTask` signals the watch channel so `ReplicationWriteTask` flushes a `StandbyStatusUpdate` immediately using current `acknowledged_commit_lsn` (never server `wal_end`).
     - On close/cancellation, `ReplicationWriteTask` sends one final `StandbyStatusUpdate` with current `acknowledged_commit_lsn` then `CopyDone` under deadline without advancing `acknowledged_commit_lsn`.
 
 ## Edge Cases & Error Semantics
 
+- Coalesced startup packets where PostgreSQL transmits `'W'` (`CopyBothResponse`) immediately followed by `'k'` and `'w'` frames in a single TCP segment MUST drain from `conn.read_buf` first without losing trailing bytes or blocking indefinitely on `read_half`.
 - Server `wal_end` in `'w'` or `'k'` frequently leads delivered transactions (e.g. `wal_end = 0x1_0000_9000` while last acknowledged commit is `0x1_0000_0440`); `flush_lsn` and `apply_lsn` MUST remain `0x1_0000_0440`.
 - Keepalive frames sitting behind unread TCP WAL while the bounded reader is paused on consumer backpressure are processed once consumer capacity drains; meanwhile the independent periodic timer in `ReplicationWriteTask` keeps the PostgreSQL WAL sender alive without parsing ahead or buffering unbounded WAL.
-- Short `'w'` (`< 25` bytes), wrong-length `'k'` (`!= 18` bytes), `reply_requested` outside `{0, 1}`, or unknown `CopyData` tag returns `ProtocolError` and terminates the session without advancing feedback.
+- Short `'w'` (`< 25` bytes), wrong-length `'k'` (anything other than exact `18` bytes), `reply_requested` outside `{0, 1}`, or unknown `CopyData` tag returns `ProtocolError` and terminates the session without advancing feedback.
 
 ## Public-Seam Test Blueprint
 
@@ -99,6 +108,7 @@ Implement `src/rs/vertebra-postgres/src/replication/feedback.rs` and wire split 
 
 | Case | Input | Expected Output / Error |
 | --- | --- | --- |
+| Coalesced `'W' + 'k' + 'w'` single-segment startup drain | Peer writes `CopyBothResponse('W') + CopyData('k', reply_requested=1) + CopyData('w', Begin + Relation + Insert + Commit)` in one `write_all` call | Moving `(read_half, conn.read_buf)` into `ReplicationReadTask` drains all coalesced frames without stalling, sends immediate `'r'` reply with initial `acknowledged_commit_lsn`, and emits `Begin`, `Insert`, and `Commit` in exact wire order. |
 | Golden `'w'`, `'k'`, & `'r'` wire layout | Peer sends `'k'` (`wal_end = 0x2_0000_1000`, `reply_requested = 1`) before any acknowledged commit (`initial_lsn = 0x2_0000_0100`) | Client immediately replies with `34`-byte `'r'` payload inside `CopyData`: `write_lsn = 0x2_0000_0100`, `flush_lsn = 0x2_0000_0100`, `apply_lsn = 0x2_0000_0100`, valid PG-epoch timestamp, `reply_requested = 0` (never `0x2_0000_1000`). |
 | Monotonic contiguous commit fencing | Publish `Commit(0x2_0000_0200)` and `Commit(0x2_0000_0350)`; call `acknowledge(0x2_0000_0250)` (non-commit), `acknowledge(0x2_0000_0999)` (future), `acknowledge(0x2_0000_0350)` (valid cumulative), `acknowledge(0x2_0000_0350)` (idempotent), `acknowledge(0x2_0000_0200)` (regression) | Non-commit, future, and regression calls fail without mutating state; `0x2_0000_0350` advances `flush_lsn = apply_lsn = 0x2_0000_0350`; duplicate `0x2_0000_0350` succeeds idempotently. |
 | Heartbeat survival under stalled consumer backpressure | Fill `BoundedReplicationQueue` (`capacity = 4` in test), pause consumer, advance Tokio clock by `30s` (`3 * 10s` intervals) | Reader pauses socket WAL consumption with `<= 1` pending frame; writer still emits `3` periodic `'r'` status frames carrying unchanged `flush_lsn = apply_lsn`. |
@@ -107,17 +117,17 @@ Implement `src/rs/vertebra-postgres/src/replication/feedback.rs` and wire split 
 
 ## Verification
 
-- Initial Red baseline: `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --test postgres_replication_wire_tests feedback`
+- Initial Red baseline: `PYTHONPATH="$(pwd)/src/py" cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --test postgres_replication_wire_tests feedback`
 - Final Green + Clippy gate:
   ```bash
-  cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --test postgres_replication_wire_tests feedback
+  PYTHONPATH="$(pwd)/src/py" cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --test postgres_replication_wire_tests feedback
   cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-postgres --all-targets -- -D warnings
   ```
 
 ## Acceptance Criteria
 
 - [ ] `feedback.rs` decodes `'w'` / `'k'`, encodes `34`-byte `'r'` `StandbyStatusUpdate` frames, and enforces monotonic published-commit acknowledgement (`<= 1024` unacked commits) without echoing server `wal_end` into `flush_lsn`/`apply_lsn` (R22).
-- [ ] Split read/write ownership answers `reply_requested` keepalives promptly and sustains periodic `StandbyStatusUpdate` heartbeats under paused Tokio clock while the reader is backpressured (R22).
+- [ ] Split read/write ownership moves `(read_half, conn.read_buf)` into `ReplicationReadTask` to drain coalesced post-`'W'` frames losslessly, answers `reply_requested` keepalives promptly, and sustains periodic `StandbyStatusUpdate` heartbeats under paused Tokio clock while the reader is backpressured (R22).
 - [ ] Commit message follows `feat(postgres): fence durable replication acknowledgements` once verified.
 
 ## Notes & Discoveries

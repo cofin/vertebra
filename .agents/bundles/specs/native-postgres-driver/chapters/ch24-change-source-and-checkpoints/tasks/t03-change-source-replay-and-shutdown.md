@@ -21,8 +21,8 @@ files:
 tests:
   - src/py/tests/unit/db/test_postgres_change_source.py
 estimated_loc: 235
-plan_revision: 5
-plan_commit: 73c8a6ff
+plan_revision: 6
+plan_commit: ef86844f
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -33,8 +33,15 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-08T02:05:22Z"
+updated_at: "2026-11-10T14:45:00Z"
 commit: null
+generated:
+  by: flow-revise
+  at: "2026-11-10T14:45:00Z"
+verified:
+  - by: agent:plan-generator
+    at: "2026-11-10T14:45:00Z"
+    commit: ef86844f
 sources:
   - id: npd-contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md
@@ -105,15 +112,16 @@ Complete `PostgresChangeSource` in `src/py/vertebra/db/adapters/postgres/change_
 
 ## Verification
 
-- Initial Red baseline: `uv run --no-sync pytest src/py/tests/unit/db/test_postgres_change_source.py -q`
-- Final Green + Mypy + Rust gate:
+- Initial Red baseline: `uv run --no-sync python -m pytest src/py/tests/unit/db/test_postgres_change_source.py -q`
+- Final Green + Lint + Mypy + Rust gate:
   ```bash
   make dev
   uv run --no-sync python -m mypy.stubtest vertebra._postgres
-  uv run --no-sync python -m pytest src/py/tests/unit/db/test_postgres_change_source.py -q
+  uv run --no-sync ruff check src/py/vertebra/db/adapters/postgres/events.py src/py/vertebra/db/adapters/postgres/change_stream.py src/py/tests/unit/db/test_postgres_change_source.py
   uv run --no-sync mypy src/py/vertebra/db/adapters/postgres/events.py src/py/vertebra/db/adapters/postgres/change_stream.py src/py/tests/unit/db/test_postgres_change_source.py
+  uv run --no-sync python -m pytest src/py/tests/unit/db/test_postgres_change_source.py -q
   uv run --no-sync python -m pytest src/py/tests/unit/db/test_postgres_native_notifications.py -k notification_source -q
-  cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --test postgres_replication_wire_tests
+  PYTHONPATH="$(pwd)/src/py" cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --test postgres_replication_wire_tests
   ```
 
 ## Acceptance Criteria

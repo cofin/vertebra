@@ -11,17 +11,20 @@ depends_on_chapters:
   - ch20-arrow-copy-import-and-portals
 replan_trigger: null
 current_task: "native-postgres-driver:ch21:t01"
-plan_revision: 5
-plan_commit: 73c8a6ff
+plan_revision: 6
+plan_commit: ef86844f
 state_revision: 0
 last_verified_checkpoint: null
 last_reviewed_commit: null
 created_at: "2026-11-05T00:00:00Z"
-updated_at: "2026-11-08T02:05:22Z"
+updated_at: "2026-11-10T14:45:00Z"
 generated:
   by: flow-setup
   at: "2026-11-07T05:00:00Z"
 verified:
+  - by: agent:plan-generator
+    at: "2026-11-10T14:45:00Z"
+    commit: ef86844f
   - by: agent:flow-setup
     at: "2026-11-07T05:00:00Z"
     commit: 73c8a6ff
@@ -52,7 +55,7 @@ tags:
 # Chapter 21: Dedicated LISTEN/NOTIFY Sessions, Async Listener Bridges, and Active Notification Sources
 
 <!-- truth: start -->
-- **Dedicated Non-Pooled `LISTEN`/`NOTIFY` Session**: `PostgresListener` owns an independent direct/session `PostgresConnection` and sole Tokio receive/control pump (never a query-pool lease or transaction/statement-pooler socket), enforcing `1024`-frame + `8 MiB` queue caps that fail closed with `OperationalError` on overflow rather than silently dropping events [^pg-contracts] [^pg-protocol-research].
+- **Dedicated Non-Pooled `LISTEN`/`NOTIFY` Session**: `PostgresListener` owns an independent explicit `Direct`/`Session` `PostgresConnection` and sole Tokio receive/control pump (never a query-pool lease or `Transaction`/`Statement`/`Auto` pooler socket), enforcing `1024`-frame + `8 MiB` queue caps that fail closed with `OperationalError` on overflow rather than silently dropping events [^pg-contracts] [^pg-protocol-research].
 - **At-Most-Once Reconnect Gap & `closed` Snapshot**: `AsyncPostgresListener` exposes read-only `closed: bool` with zero I/O and `(pid, channel, payload, reconnected_gap)` tuples; optional `reconnect=True` retries recoverable transport drops (`0.1s..5.0s` jitter, max `8` attempts) with fresh IAM/direct credentials, resubscribes active channels through `ReadyForQuery`, and flags `reconnected_gap=True` [^pg-contracts] [^py-async-rs].
 - **Protocol-Typed `PostgresNotificationSource`**: `events.py::PostgresNotificationDriver` decouples `notify.py` from driver mode checks, routes `publish()` through uniform `await _driver._publish_notification(...)`, updates live `LISTEN`/`UNLISTEN` sets dynamically, and hydrates raw/`b64:`/`ChangeFeed` spills [^pg-notify-py] [^pg-config-py].
 <!-- truth: end -->
@@ -76,18 +79,18 @@ Parent roadmap: [spec.md](../../spec.md) and [contracts.md](../../contracts.md).
 
 ### 2.1 Chapter Requirements
 
-- **R21.1 (`ch21:t01`)**: Implement `PostgresListener` in `src/rs/vertebra-postgres/src/notifications.rs` owning a dedicated `PostgresConnection` and single Tokio socket pump, validating and double-quoting `LISTEN` / `UNLISTEN` channel identifiers, routing `NotificationResponse` frames arriving both while idle and during `LISTEN`/`UNLISTEN` command responses into a bounded `1024`-frame + `8 MiB` queue (failing closed with `PostgresError::Operational` on overflow), servicing `subscribe`/`unsubscribe`/`close` over a separate bounded control channel without starvation, and supporting optional recoverable transport reconnect (`0.1s..5.0s` jitter, max `8` attempts, refreshed direct/IAM credentials, full resubscribe before delivery, and `reconnected_gap = true`).
-- **R21.2 (`ch21:t02`)**: Expose `AsyncPostgresListener` (`next`, `subscribe`, `unsubscribe`, `aclose`, `__aenter__`, `__aexit__`, read-only `@property def closed -> bool`) and `open_listener(channels, *, queue_capacity=1024, reconnect=False) -> Awaitable[AsyncPostgresListener]` on both `SyncPostgresClient` and `AsyncPostgresClient` in `sync_client.rs`, `async_client.rs`, and `src/py/vertebra/_postgres.pyi` with single-pending `next()` enforcement (`InterfaceError` on overlap) and cancellation-safe session cleanup.
-- **R21.3 (`ch21:t03`)**: Add permanent `PostgresNotificationDriver(Protocol)` in `src/py/vertebra/db/adapters/postgres/events.py`, add real `_publish_notification` methods to the two legacy classes in `src/py/vertebra/db/adapters/postgres/driver.py`, and upgrade `src/py/vertebra/db/adapters/postgres/notify.py::PostgresNotificationSource` with uniform `await _driver._publish_notification(...)`, live `subscribe`/`unsubscribe` synchronization, `pooler_mode` direct-session validation, raw/`b64:`/`ChangeFeed` hydration, and idempotent `aclose()` / async context management.
+- **R21.1 (`ch21:t01`)**: Expose `pub(crate) async fn establish_standalone_connection(config: &PostgresConfig, replication_database: bool) -> Result<PostgresConnection, PostgresError>` in `src/rs/vertebra-postgres/src/session.rs` and implement `PostgresListener` in `src/rs/vertebra-postgres/src/notifications.rs` rejecting `PoolerMode::Transaction | PoolerMode::Statement | PoolerMode::Auto` (requiring explicit `PoolerMode::Direct | PoolerMode::Session`, matching `derive_direct_config()`) with `PostgresError::Interface` before dialing, validating `1 <= channel.len() <= 63` UTF-8 bytes (`NAMEDATALEN - 1`) and double-quoting `LISTEN` / `UNLISTEN` identifiers, pumping `postgres_protocol::message::backend::Message::NotificationResponse` frames into a bounded `1024`-frame + `8 MiB` queue with a `1`-slot unconsumed front buffer (`push_front_unconsumed`) and fail-closed `PostgresError::Operational` overflow, servicing `subscribe`/`unsubscribe`/`close` on a separate control channel, and supporting optional recoverable reconnect (`0.1s..5.0s` jitter, max `8` attempts, refreshed direct/IAM credentials, full resubscribe before delivery, and `reconnected_gap = true`).
+- **R21.2 (`ch21:t02`)**: Expose `AsyncPostgresListener` (`next`, `subscribe`, `unsubscribe`, `aclose`, `__aenter__`, `__aexit__`, read-only `@property def closed -> bool`) and `open_listener(channels, *, queue_capacity=1024, reconnect=False) -> Awaitable[AsyncPostgresListener]` on both `SyncPostgresClient` and `AsyncPostgresClient` in `sync_client.rs`, `async_client.rs`, and `src/py/vertebra/_postgres.pyi`, rejecting `PoolerMode::Transaction | PoolerMode::Statement | PoolerMode::Auto` (requiring explicit `PoolerMode::Direct | PoolerMode::Session`), enforcing single-pending `next()` (`InterfaceError` on overlap), and wrapping popped frames in an RAII `PendingDeliveryGuard` so cancelled Tokio waiters or cancelled `asyncio.Future` completions dropped by `DbCompletionDrainer` restore the unconsumed frame to the front of the queue for the next `await next()`.
+- **R21.3 (`ch21:t03`)**: Add permanent `PostgresNotificationDriver(Protocol)` in `src/py/vertebra/db/adapters/postgres/events.py`, add real `_publish_notification` methods to the two legacy classes in `src/py/vertebra/db/adapters/postgres/driver.py`, and upgrade `src/py/vertebra/db/adapters/postgres/notify.py::PostgresNotificationSource` with explicit `self._subscribed_channels = {}` (`[]` until `subscribe()`), `1..=63` UTF-8 byte channel validation, uniform `await _driver._publish_notification(...)`, live `subscribe`/`unsubscribe` synchronization, `pooler_mode` direct-session validation, UTF-8-decoded raw/`b64:`/`ChangeFeed` hydration, and idempotent `aclose()` / async context management.
 
 ### 2.2 Concrete Type & Signature Contracts
 
-- `src/rs/vertebra-postgres/src/notifications.rs`:
-  - `pub const DEFAULT_NOTIFICATION_QUEUE_CAPACITY: usize = 1024;`
-  - `pub const DEFAULT_NOTIFICATION_MAX_BYTES: usize = 8 * 1024 * 1024;`
+- `src/rs/vertebra-postgres/src/session.rs` & `notifications.rs`:
+  - `pub(crate) async fn establish_standalone_connection(config: &PostgresConfig, replication_database: bool) -> Result<PostgresConnection, PostgresError>` (reuses full Cloud SQL / AlloyDB / direct-IAM / TLS / SCRAM-SHA-256-PLUS / Unix / `connect_timeout` startup, encoding `"replication" => "database"` in `StartupMessage` and skipping post-auth `SET` GUC queries incompatible with walsender startup when `replication_database == true`).
+  - `pub const DEFAULT_NOTIFICATION_QUEUE_CAPACITY: usize = 1024;`, `pub const DEFAULT_NOTIFICATION_MAX_BYTES: usize = 8 * 1024 * 1024;`, and `pub const MAX_CHANNEL_BYTES: usize = 63;`
   - `pub struct NotificationFrame { pub pid: i32, pub channel: String, pub payload: Bytes, pub reconnected_gap: bool }`
   - `pub struct ListenerOptions { pub queue_capacity: usize, pub max_queue_bytes: usize, pub reconnect: bool }`
-  - `pub struct PostgresListener` with `pub async fn open(config: crate::config::PostgresConfig, initial_channels: Vec<String>, options: ListenerOptions) -> Result<Self, crate::errors::PostgresError>` (raw `PostgresConfig` does not carry `pooler_mode` because `PoolerMode` lives in `crate::session::statements::PoolerMode` / `SessionHandle`, so `PoolerMode` rejection on listeners happens on pooled `SessionHandle` and Python `PostgreSQLConfig.derive_direct_config()` in `ch21:t03`), `pub async fn next(&self) -> Result<Option<NotificationFrame>, crate::errors::PostgresError>`, `pub async fn subscribe(&self, channels: Vec<String>) -> Result<(), crate::errors::PostgresError>`, `pub async fn unsubscribe(&self, channels: Vec<String>) -> Result<(), crate::errors::PostgresError>`, `pub async fn close(&self) -> Result<(), crate::errors::PostgresError>`, and `pub fn is_closed(&self) -> bool`.
+  - `pub struct PostgresListener` with `pub async fn open(config: crate::config::PostgresConfig, initial_channels: Vec<String>, options: ListenerOptions) -> Result<Self, crate::errors::PostgresError>` (explicitly rejecting `PoolerMode::Transaction | PoolerMode::Statement | PoolerMode::Auto` on `config.pooler_mode` — requiring `PoolerMode::Direct | PoolerMode::Session` — with `PostgresError::Interface` before dialing via `establish_standalone_connection(&config, false)`), `pub async fn next(&self) -> Result<Option<NotificationFrame>, crate::errors::PostgresError>`, `pub(crate) fn push_front_unconsumed(&self, frame: NotificationFrame)`, `pub async fn subscribe(&self, channels: Vec<String>) -> Result<(), crate::errors::PostgresError>`, `pub async fn unsubscribe(&self, channels: Vec<String>) -> Result<(), crate::errors::PostgresError>`, `pub async fn close(&self) -> Result<(), crate::errors::PostgresError>`, and `pub fn is_closed(&self) -> bool`.
 - `src/py/vertebra/_postgres.pyi`:
   - `class AsyncPostgresListener`:
     - `@property def closed(self) -> bool: ...` (read-only, no setter)
@@ -107,21 +110,22 @@ Parent roadmap: [spec.md](../../spec.md) and [contracts.md](../../contracts.md).
 ```
 PostgresNotificationSource (src/py/vertebra/db/adapters/postgres/notify.py)
   -> PostgresNotificationDriver protocol (src/py/vertebra/db/adapters/postgres/events.py)
-    -> Sync/AsyncPostgresClient.open_listener -> AsyncPostgresListener (sync_client.rs / async_client.rs)
+    -> Sync/AsyncPostgresClient.open_listener -> AsyncPostgresListener + PendingDeliveryGuard (sync_client.rs / async_client.rs)
       -> _vertebra_postgres_completion_drainer (non-blocking asyncio Future bridge)
-        -> PostgresListener (src/rs/vertebra-postgres/src/notifications.rs)
-          -> Dedicated direct PostgresConnection (crate::config::PostgresConfig + protocol.rs) + sole Tokio socket/control pump
+        -> PostgresListener + push_front_unconsumed (src/rs/vertebra-postgres/src/notifications.rs)
+          -> session::establish_standalone_connection(config, false) + protocol::read_message(Message::NotificationResponse)
 ```
 
 ### 2.4 Edge-Case & Failure-Mode Matrix
 
 | Failure / Edge Condition | Expected Behavior |
 | --- | --- |
-| Listener idle on a client whose query pool has `max_size = 1` | Listener uses its own dedicated `PostgresConnection`, leaving the `max_size = 1` query pool completely unblocked for concurrent queries/transactions. |
+| Listener idle on a client whose query pool has `max_size = 1` | Listener opens a standalone `PostgresConnection` via `establish_standalone_connection(config, false)`, leaving the `max_size = 1` query pool completely unblocked for concurrent queries/transactions. |
+| Cancelled `await listener.next()` while handle stays open (either during Tokio wait or after worker pops frame before `DbCompletionDrainer` runs `DbOutcomeProducer`) | RAII `PendingDeliveryGuard` calls `push_front_unconsumed` on `Drop`, restoring the unconsumed `NotificationFrame` to the front of the queue so the next `await listener.next()` receives that exact frame in order without loss. |
 | Bounded queue exceeds `queue_capacity` (`1024`) or `8 MiB` payload bytes | Pump closes the socket, marks `closed = true`, and surfaces explicit `OperationalError` loss failure rather than silently dropping oldest or newest notifications. |
-| `NotificationResponse` arrives mid-`LISTEN` / `UNLISTEN` before `ReadyForQuery` | Sole socket pump enqueues the notification in wire arrival order while `subscribe`/`unsubscribe` resolves only after server `ReadyForQuery`. |
-| Recoverable transport drop with `reconnect=True` vs auth/protocol/overflow error | Transport drop retries up to `8` times (`0.1s..5.0s` jitter) keeping `closed == False`, refreshes IAM/direct config, resubscribes all active channels, and sets `reconnected_gap = True` on the next delivered event; auth/protocol/overflow errors terminate immediately with `closed == True`. |
-| `pooler_mode in ("transaction", "statement")` without `direct_dsn` | Rejected on pooled `SessionHandle` (`crate::session::statements::PoolerMode`) and in Python `PostgreSQLConfig.derive_direct_config()` (`ch21:t03`, raising `ImproperConfigurationError`) before opening a listener, since raw `crate::config::PostgresConfig` does not carry `pooler_mode`. |
+| `NotificationResponse` arrives mid-`LISTEN` / `UNLISTEN` before `ReadyForQuery` | Sole socket pump enqueues `Message::NotificationResponse` in wire arrival order while `subscribe`/`unsubscribe` resolves only after server `ReadyForQuery`. |
+| Recoverable transport drop with `reconnect=True` vs auth/protocol/overflow error | Transport drop retries up to `8` times (`0.1s..5.0s` jitter) keeping `closed == False`, refreshes IAM/direct credentials via `establish_standalone_connection`, resubscribes active channels, and sets `reconnected_gap = True` on the next delivered event; auth/protocol/overflow errors terminate immediately with `closed == True`. |
+| `config.pooler_mode` is `Transaction`, `Statement`, or `Auto` without `direct_dsn`, or channel UTF-8 length `> 63` bytes | Rejected before dialing in `PostgresListener::open` / client `open_listener` (`InterfaceError`, requiring explicit `PoolerMode::Direct | PoolerMode::Session`) and in Python `PostgreSQLConfig.derive_direct_config()` (`ImproperConfigurationError`); channel names outside `1..=63` UTF-8 bytes fail atomically before emitting SQL. |
 
 ### 2.5 Alternatives Considered
 
@@ -133,7 +137,7 @@ PostgresNotificationSource (src/py/vertebra/db/adapters/postgres/notify.py)
 
 ## 3. Documentation & OKF Knowledge Plan
 
-Progress: `[0/0 files documented in ch21]` (user-facing `LISTEN`/`NOTIFY` and `ChangeFeed` spill guides in `docs/usage/databases.md` and `.agents/bundles/knowledge/domains/data/query-pipeline-cdc-and-tenancy.md` land in `ch30:t01` and `ch30:t02`; inline docstrings and `_postgres.pyi` annotations land in `ch21:t01`–`t03`).
+Progress: `[0/0 files documented in ch21]` (repository-wide public docs and OKF knowledge chapters (`[0/33 files documented]`) are owned by `ch30`–`ch32`, with final reviews in `ch33-final-review-and-release-gate`; inline docstrings and `_postgres.pyi` annotations land in `ch21:t01`–`t03`).
 
 ## 4. Requirement-to-Task Traceability Matrix
 
@@ -149,13 +153,13 @@ Progress: `[0/0 files documented in ch21]` (user-facing `LISTEN`/`NOTIFY` and `C
 - [ ] native-postgres-driver:ch21:t02 — Expose AsyncPostgresListener across sync and async native clients (tasks/t02-async-notification-bridge.md)
 - [ ] native-postgres-driver:ch21:t03 — Wire PostgresNotificationSource over typed adapter protocols and active subscriptions (tasks/t03-python-notification-source.md)
 
-**Chapter Recovery Checkpoint:** `make dev && cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --test postgres_notification_wire_tests && uv run --no-sync python -m mypy.stubtest vertebra._postgres && uv run --no-sync python -m pytest src/py/tests/unit/db/test_postgres_native_notifications.py src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py -k "native_listener or notification_source or notif" -q && uv run --no-sync mypy src/py/vertebra/db/adapters/postgres/events.py src/py/vertebra/db/adapters/postgres/notify.py src/py/tests/unit/db/test_postgres_native_notifications.py` exits `0`.
+**Chapter Recovery Checkpoint:** `make dev && PYTHONPATH="$(pwd)/src/py" cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --test postgres_notification_wire_tests && uv run --no-sync ruff check src/py/vertebra/_postgres.pyi src/py/vertebra/db/adapters/postgres/events.py src/py/vertebra/db/adapters/postgres/driver.py src/py/vertebra/db/adapters/postgres/notify.py src/py/tests/unit/db/test_postgres_native_notifications.py src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py && uv run --no-sync mypy src/py/vertebra/_postgres.pyi src/py/vertebra/db/adapters/postgres/events.py src/py/vertebra/db/adapters/postgres/driver.py src/py/vertebra/db/adapters/postgres/notify.py src/py/tests/unit/db/test_postgres_native_notifications.py src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py && uv run --no-sync python -m mypy.stubtest vertebra._postgres && uv run --no-sync python -m pytest src/py/tests/unit/db/test_postgres_native_notifications.py src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py -k "native_listener or notification_source or notif" -q` exits `0`.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `plan_commit: 73c8a6ff`; chapter `state: planned`, `planning_status: complete`.
+- **Verified Baseline**: `plan_revision: 6`, `plan_commit: ef86844f`; chapter `state: planned`, `planning_status: complete` (flow baseline: `ch01`–`ch19` / `71` of `118` tasks completed across `33` chapters).
 - **Remaining Tasks in Chapter**: `t01`, `t02`, `t03` (`3/3` pending).
-- **Downstream Dependents**: Unblocks `ch22-copyboth-and-pgoutput-decoding` (`CopyBoth` logical replication), `ch24:t01` (`events.py` replication protocol), and `ch26:t04` (`dedicated-driver-event-hooks`).
+- **Downstream Dependents**: Unblocks `ch22-copyboth-and-pgoutput-decoding` (`CopyBoth` logical replication reusing `establish_standalone_connection`), `ch24:t01` (`events.py` replication protocol), and `ch26:t04` (`dedicated-driver-event-hooks`).
 
 [^pg-contracts]: `.agents/bundles/specs/native-postgres-driver/contracts.md` — Dedicated PostgreSQL notification handle, closed snapshot, and protocol contracts.
 [^pg-protocol-research]: `.agents/bundles/specs/native-postgres-driver/research/protocol-and-execution_20261105.md` — PostgreSQL NotificationResponse push pump, LISTEN/UNLISTEN quoting, and pooler exclusions.

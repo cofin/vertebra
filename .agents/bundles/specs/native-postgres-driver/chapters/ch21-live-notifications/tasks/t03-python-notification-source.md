@@ -25,8 +25,8 @@ tests:
   - src/py/tests/unit/db/test_postgres_native_notifications.py
   - src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py
 estimated_loc: 225
-plan_revision: 5
-plan_commit: 73c8a6ff
+plan_revision: 6
+plan_commit: ef86844f
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -37,8 +37,12 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-08T02:05:22Z"
+updated_at: "2026-11-10T14:45:00Z"
 commit: null
+verified:
+  - by: agent:plan-generator
+    at: "2026-11-10T14:45:00Z"
+    commit: ef86844f
 sources:
   - id: pg-contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md
@@ -106,23 +110,24 @@ Create the permanent adapter-owned `PostgresNotificationDriver` protocol in `src
     - `AsyncPostgreSQLDriver._publish_notification`: `await self.execute("SELECT pg_notify($1, $2)", (channel, payload))`
     - Do NOT add any dummy `_open_notification_listener` hook on legacy classes.
 - `src/py/vertebra/db/adapters/postgres/notify.py`:
-  - Annotate `driver: PostgresNotificationDriver` (imported under `TYPE_CHECKING`), replacing `AsyncPostgreSQLDriver | SyncPostgreSQLDriver` and removing `AsyncDatabaseDriver` / `isinstance` / `asyncio.to_thread` from `notify.py`.
-  - Extend `PostgresNotificationSource.__init__` with keyword-only `queue_capacity: int = 1024` (validating non-`bool` `queue_capacity > 0`) and `reconnect: bool = False`, plus active `_listener: AsyncPostgresListener | None` and `_listening: bool` slots.
-  - `publish(self, channel: str, payload: bytes | str) -> None`: validates `channel`, wraps raw/`b64:`/`ChangeFeed` envelope identically, and awaits `self._driver._publish_notification(channel, wire_payload)`.
-  - `subscribe(self, channels: Sequence[str]) -> None` and `unsubscribe(self, channels: Sequence[str]) -> None`: validate ALL channel identifiers before mutating state or performing I/O; update `self._subscribed_channels` snapshot AND, when `self._listener is not None and not self._listener.closed`, await `self._listener.subscribe(validated)` / `self._listener.unsubscribe(validated)`.
+  - Module top-level imports, strict class ordering (`fields/__slots__ -> __init__/__post_init__ -> properties -> public methods -> private _methods`), and zero inline `#` comments; annotate `driver: PostgresNotificationDriver` (imported under `TYPE_CHECKING`), replacing `AsyncPostgreSQLDriver | SyncPostgreSQLDriver` and removing `AsyncDatabaseDriver` / `isinstance` / `asyncio.to_thread` from `notify.py`.
+  - Validate channel names across `PostgresNotifyConfig.__post_init__`, `publish`, `subscribe`, and `unsubscribe` using both `validate_identifier(..., allow_dots=False)` AND `1 <= len(channel.encode("utf-8")) <= 63` (`NAMEDATALEN - 1`, raising `ValueError` on violation before mutating state or performing I/O).
+  - Extend `PostgresNotificationSource.__init__` with keyword-only `queue_capacity: int = 1024` (validating non-`bool` `queue_capacity > 0`) and `reconnect: bool = False`, keeping explicit `self._subscribed_channels: dict[str, None] = {}` (`subscribed_channels` stays `[]` until `subscribe()` is called, never auto-subscribing `self._config.channel`), plus active `_listener: AsyncPostgresListener | None` and `_listening: bool` slots.
+  - `publish(self, channel: str, payload: bytes | str) -> None`: validates `channel` (syntax + `<= 63` UTF-8 bytes), wraps raw/`b64:`/`ChangeFeed` envelope identically, and awaits `self._driver._publish_notification(channel, wire_payload)`.
+  - `subscribe(self, channels: Sequence[str]) -> None` and `unsubscribe(self, channels: Sequence[str]) -> None`: validate ALL channel identifiers (`validate_identifier` + `<= 63` UTF-8 bytes) before mutating state or performing I/O; update `self._subscribed_channels` snapshot AND, when `self._listener is not None and not self._listener.closed`, await `self._listener.subscribe(validated)` / `self._listener.unsubscribe(validated)`.
   - `listen(self) -> AsyncIterator[NotificationEvent]`:
     - Raises `InterfaceError` if `self._listening` is already `True` (concurrent `listen()`).
     - Inspects `getattr(self._driver, "config", None)`: when a `PostgreSQLConfig` is present, calls `direct_cfg = cfg.derive_direct_config()` and raises `ImproperConfigurationError` if `direct_cfg.pooler_mode in ("transaction", "statement")` or `direct_cfg.pgbouncer`.
     - Looks up `open_listener = getattr(self._driver, "_open_notification_listener", None)`; if `None`, raises `NotSupportedError("Live PostgreSQL LISTEN streaming requires the native Rust PostgreSQL driver")`.
-    - Opens `listener = await open_listener(tuple(self._subscribed_channels), queue_capacity=self._queue_capacity, reconnect=self._reconnect)` (including default `self._config.channel` only when explicitly subscribed or preserving existing explicit `_subscribed_channels` contract) and loops `await listener.next()` until `None`:
-      - Hydrates payload: if `self._change_feed is not None`, calls `evt = self._change_feed.hydrate_notification(raw_payload)` (propagating evicted/store spill errors!) and decodes `base64.b64decode(evt.payload["data_b64"])`; else if UTF-8 string starts with `"b64:"`, base64-decodes bytes; else preserves raw `bytes` payload.
+    - Opens `listener = await open_listener(tuple(self._subscribed_channels), queue_capacity=self._queue_capacity, reconnect=self._reconnect)` (with `tuple(self._subscribed_channels)` remaining `()` unless `subscribe()` was called) and loops `await listener.next()` until `None`:
+      - Decodes `text = raw_payload.decode("utf-8")` first: if `self._change_feed is not None`, calls `evt = self._change_feed.hydrate_notification(text)` (propagating evicted or missing spill store errors directly) and decodes `base64.b64decode(evt.payload["data_b64"])`; else if `text.startswith("b64:")`, base64-decodes `text[4:]`; else preserves `raw_payload` `bytes`.
       - Yields `NotificationEvent(channel=ch, payload=hydrated_bytes, sender_id=str(pid), metadata={"reconnected": gap, "delivery": "at_most_once"})`.
     - `finally:` clears `self._listening = False` / `self._listener = None` and awaits `listener.aclose()`.
   - Add idempotent `async def aclose(self) -> None`, `async def __aenter__(self) -> Self`, and `async def __aexit__(...) -> None`.
 
 ## Edge Cases & Error Semantics
 
-- Invalid channel inside `subscribe(["orders", "bad;sql"])` raises `ValueError` before mutating `_subscribed_channels` or sending `LISTEN "orders"` to an active listener.
+- Invalid or `> 63`-UTF-8-byte channel inside `PostgresNotifyConfig(channel=...)`, `publish(...)`, or `subscribe(["orders", "a" * 64])` raises `ValueError` before mutating `_subscribed_channels` or sending `LISTEN "orders"` to an active listener; `source.subscribed_channels` starts as `[]` until `subscribe()` is called.
 - Breaking out of `async for event in source.listen():`, raising inside consumer body, or cancelling the consumer task closes the underlying `AsyncPostgresListener` in `finally` so `source.listen()` can be reused cleanly on a subsequent iteration.
 
 ## Public-Seam Test Blueprint
@@ -135,26 +140,27 @@ Create the permanent adapter-owned `PostgresNotificationDriver` protocol in `src
 | Case | Input | Expected Output / Error |
 | --- | --- | --- |
 | Typed `NativeNotificationDriverPort` end-to-end `publish` + live `subscribe`/`unsubscribe` + `ChangeFeed` spill hydration | `port: PostgresNotificationDriver = NativeNotificationDriverPort(...)` (real `SyncPostgresClient` query in `asyncio.to_thread` for `_publish_notification` + real `AsyncPostgresClient.open_listener` against scripted server); publish `str`, binary `b"\x00\xff"`, and spilled `ChangeFeed` payload; dynamic `subscribe`/`unsubscribe` mid-stream | Yields exact `NotificationEvent(payload=b"...", sender_id=str(pid), metadata={"reconnected": False, "delivery": "at_most_once"})`, hydrates spilled `ChangeFeed` bytes, propagates missing spill `KeyError`, does not starve `max_size = 1` pool, and closes listener on `break`/cancel allowing source reuse. |
-| Pooler mode & concurrent `listen()` guards | (a) `PostgreSQLConfig(dsn=..., pooler_mode="transaction")` without `direct_dsn` vs with `direct_dsn="postgresql://localhost:5432/app"`; (b) second `source.listen()` while first is active | (a) Without `direct_dsn` raises `ImproperConfigurationError`; with `direct_dsn` succeeds via `derive_direct_config()`; (b) second `listen()` raises `InterfaceError`. |
+| Pooler mode, `<= 63`-byte channel bounds, explicit empty `_subscribed_channels`, & concurrent `listen()` guards | (a) `PostgreSQLConfig(dsn=..., pooler_mode="transaction")` without vs with `direct_dsn`; (b) fresh `source.subscribed_channels` + `"é" * 32` (`64` UTF-8 bytes) to `subscribe`/`publish`; (c) second `source.listen()` while first is active | (a) Without `direct_dsn` raises `ImproperConfigurationError`, with `direct_dsn` succeeds; (b) `subscribed_channels == []` before `subscribe()`, `64`-byte channel raises `ValueError` with zero I/O; (c) second `listen()` raises `InterfaceError`. |
 | Legacy `driver.py` `_publish_notification` & unsupported listener in `test_pg_dataplane_and_datafusion.py` | Bind `driver._publish_notification.side_effect = driver_type._publish_notification.__get__(driver, driver_type)` in `test_postgres_notify_publish`; run `test_postgres_notify_listen_without_native_stream` | Sync `driver.execute` runs off-loop with `"SELECT pg_notify(%s, %s)"`; async `driver.execute` is awaited with `"SELECT pg_notify($1, $2)"`; legacy driver without `_open_notification_listener` raises `NotSupportedError`. |
 
 ## Verification
 
 - Initial Red baseline: `uv run --no-sync python -m pytest src/py/tests/unit/db/test_postgres_native_notifications.py -k notification_source -q`
-- Final Green + stubtest + pytest + Mypy gate:
+- Final Green + lint + stubtest + pytest + Mypy gate:
   ```bash
   make dev
+  uv run --no-sync ruff check src/py/vertebra/db/adapters/postgres/events.py src/py/vertebra/db/adapters/postgres/driver.py src/py/vertebra/db/adapters/postgres/notify.py src/py/tests/unit/db/test_postgres_native_notifications.py src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py
+  uv run --no-sync mypy src/py/vertebra/db/adapters/postgres/events.py src/py/vertebra/db/adapters/postgres/driver.py src/py/vertebra/db/adapters/postgres/notify.py src/py/tests/unit/db/test_postgres_native_notifications.py src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py
   uv run --no-sync python -m mypy.stubtest vertebra._postgres
   uv run --no-sync python -m pytest src/py/tests/unit/db/test_postgres_native_notifications.py -k notification_source -q
   uv run --no-sync python -m pytest src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py -k notif -q
-  uv run --no-sync mypy src/py/vertebra/db/adapters/postgres/events.py src/py/vertebra/db/adapters/postgres/notify.py src/py/tests/unit/db/test_postgres_native_notifications.py
   ```
 - Planned local commit: `feat(postgres): wire typed active notification sources`
 
 ## Acceptance Criteria
 
-- [ ] `events.py::PostgresNotificationDriver` types `PostgresNotificationSource` cleanly under `mypy` without eager `vertebra._postgres` imports, and `notify.py` routes `publish()` uniformly through `await self._driver._publish_notification(...)` (R21).
-- [ ] `PostgresNotificationSource` validates channel lists atomically before I/O, updates active `AsyncPostgresListener` subscriptions awaiting `ReadyForQuery`, rejects `transaction`/`statement` poolers lacking `direct_dsn`, hydrates raw/`b64:`/`ChangeFeed` payloads with `reconnected` + `at_most_once` metadata, and closes listeners idempotently on exit/cancel (R21).
+- [ ] `events.py::PostgresNotificationDriver` types `PostgresNotificationSource` cleanly under `ruff` and `mypy` without eager `vertebra._postgres` imports, and `notify.py` keeps explicit empty `_subscribed_channels = {}` until `subscribe()` and routes `publish()` uniformly through `await self._driver._publish_notification(...)` (R21).
+- [ ] `PostgresNotificationSource` validates channel syntax and `1..=63` UTF-8 bytes atomically before I/O, updates active `AsyncPostgresListener` subscriptions awaiting `ReadyForQuery`, rejects `transaction`/`statement` poolers lacking `direct_dsn`, decodes `text = raw_payload.decode("utf-8")` before hydrating `ChangeFeed`/`b64:` payloads with `reconnected` + `at_most_once` metadata, and closes listeners idempotently on exit/cancel (R21).
 - [ ] `NativeNotificationDriverPort` exercises real `SyncPostgresClient` + `AsyncPostgresClient` wire sessions while `test_pg_dataplane_and_datafusion.py` verifies real bound legacy `_publish_notification` execution and `NotSupportedError` fallback without dummy hooks (R21).
 
 ## Notes & Discoveries

@@ -22,8 +22,8 @@ files:
 tests:
   - src/rs/vertebra-postgres/tests/postgres_pgoutput_tests.rs
 estimated_loc: 235
-plan_revision: 5
-plan_commit: 73c8a6ff
+plan_revision: 6
+plan_commit: ef86844f
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -34,8 +34,15 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-08T02:05:22Z"
+updated_at: "2026-11-10T14:45:00Z"
 commit: null
+generated:
+  by: flow-revise
+  at: "2026-11-10T14:45:00Z"
+verified:
+  - by: agent:plan-generator
+    at: "2026-11-10T14:45:00Z"
+    commit: ef86844f
 sources:
   - id: npd-contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md
@@ -71,6 +78,12 @@ Extend `PgOutputDecoder` and `src/rs/vertebra-postgres/src/replication/mod.rs` t
 
 - `src/rs/vertebra-postgres/src/replication/pgoutput.rs`:
   - `pub const DEFAULT_MAX_QUEUE_RECORDS: usize = 1024;` and `pub const DEFAULT_MAX_QUEUE_BYTES: usize = 8 * 1024 * 1024;`
+  - Exact PostgreSQL `proto.c` `pgoutput` v1 network-endian wire layouts:
+    - `'B'` (`Begin`): `final_lsn: u64`, `commit_time_pg_us: i64` (microseconds since `2000-01-01T00:00:00Z`), `xid: u32`.
+    - `'O'` (`Origin`): `origin_lsn: u64` followed by `origin_name: cstring` (valid only inside an active transaction; sets `active_tx.origin_lsn` and `active_tx.origin_name` without emitting a standalone record).
+    - `'T'` (`Truncate`): `nrelids: u32` first, then `options: u8` (`0x01` cascade, `0x02` restart_identity), followed by `[rel_oid: u32; nrelids]`.
+    - `'M'` (`Message`): `flags: u8` (`0` non-transactional, `1` transactional), `message_lsn: u64`, `prefix: cstring`, `content_len: u32`, `content: [u8; content_len]`.
+    - `'C'` (`Commit`): `flags: u8` (`0`), `commit_lsn: u64`, `commit_end_lsn: u64`, `commit_time_pg_us: i64`.
   - `pub struct ActiveLogicalTx { pub xid: u32, pub begin_final_lsn: u64, pub commit_time_pg_us: i64, pub origin_name: Option<String>, pub origin_lsn: Option<u64>, pub next_ordinal: u64 }`
   - `pub struct ReplicationDedupKey { pub system_identifier: String, pub slot: String, pub begin_final_lsn: u64, pub transaction_ordinal: u64 }`
   - `pub enum ReplicationRecord`:
@@ -80,17 +93,17 @@ Extend `PgOutputDecoder` and `src/rs/vertebra-postgres/src/replication/mod.rs` t
     - `Delete { dedup: ReplicationDedupKey, xid: u32, relation: Arc<PgOutputRelationSchema>, old_kind: OldTupleKind, old_tuple: Vec<PgOutputTupleValue> }`
     - `Truncate { dedup: ReplicationDedupKey, xid: u32, relations: Vec<Arc<PgOutputRelationSchema>>, cascade: bool, restart_identity: bool }`
     - `Message { dedup: Option<ReplicationDedupKey>, xid: Option<u32>, transactional: bool, message_lsn: u64, prefix: String, content: Bytes }`
-    - `Commit { dedup: ReplicationDedupKey, xid: u32, flags: u8, commit_lsn: u64, commit_end_lsn: u64, commit_time_pg_us: i64 }`
+    - `Commit { dedup: ReplicationDedupKey, xid: u32, flags: u8, commit_lsn: u64, commit_end_lsn: u64, commit_time_pg_us: i64, origin_name: Option<String>, origin_lsn: Option<u64> }`
   - `pub struct BoundedReplicationQueue` enforcing `max_records` (`1024`) and `max_bytes` (`8 MiB`) with backpressure check `can_accept(approx_bytes: usize) -> bool` (never silently dropping records; always allowing at least `1` record `<= max_record_bytes` when empty so large valid rows up to `16 MiB` do not deadlock).
 - `src/rs/vertebra-postgres/src/replication/mod.rs`:
-  - Re-export `ReplicationRecord`, `OldTupleKind`, `ReplicationDedupKey`, and `BoundedReplicationQueue`, and wire transaction reset on disconnect (`reset_on_disconnect()` drops any uncommitted `ActiveLogicalTx`).
+  - Re-export `ReplicationRecord`, `OldTupleKind`, `ReplicationDedupKey`, and `BoundedReplicationQueue`, surface `origin_name` and `origin_lsn` in the Python `"commit"` record payload dict (ensuring every `ActiveLogicalTx` field is consumed cleanly under `clippy -D warnings`), and wire transaction reset on disconnect (`reset_on_disconnect()` drops any uncommitted `ActiveLogicalTx`).
 
 ## Edge Cases & Error Semantics
 
 - Reject `Insert` (`'I'`), `Update` (`'U'`), `Delete` (`'D'`), `Truncate` (`'T'`), `Origin` (`'O'`), `Commit` (`'C'`), or transactional `Message` (`'M'` with `flags == 1`) when `active_tx` is `None` (`ProtocolError`).
-- Reject nested `Begin` (`'B'`) while `active_tx.is_some()`, nonzero reserved `Commit` flags (`flags != 0`), unknown `Truncate` option bits (`(options & !0x03) != 0`), `Message` flags outside `{0, 1}`, and unnegotiated v2–v4 streaming/two-phase tags (`'S'`, `'E'`, `'A'`, `'c'`, `'b'`, `'P'`, `'K'`, `'r'`) with `ProtocolError`.
-- Non-transactional `Message` (`'M'` with `flags == 0`) is valid both inside and outside an active transaction: it emits immediately with `commit_end_lsn = None` (and `xid = active_tx.map(|t| t.xid)`) and never creates an acknowledgeable commit boundary on its own.
-- `Commit` verifies `commit_lsn == active_tx.begin_final_lsn` and `commit_end_lsn >= commit_lsn`, clears `active_tx`, and exposes `commit_end_lsn` as the sole protocol-acknowledgeable LSN boundary.
+- Reject nested `Begin` (`'B'`) while `active_tx.is_some()`, nonzero reserved `Commit` flags (`flags > 0`), unknown `Truncate` option bits (`options > 0x03`), `Truncate` with `nrelids == 0`, `Message` flags outside `{0, 1}`, and unnegotiated v2–v4 streaming/two-phase tags (`'S'`, `'E'`, `'A'`, `'c'`, `'b'`, `'P'`, `'K'`, `'r'`) with `ProtocolError`.
+- Non-transactional `Message` (`'M'` with `flags == 0`) is valid both inside and outside an active transaction: it emits immediately with `commit_end_lsn = None` (and `xid = active_tx.as_ref().map(|t| t.xid)`) and never creates an acknowledgeable commit boundary on its own.
+- `Commit` verifies `commit_lsn == active_tx.begin_final_lsn` and `commit_end_lsn >= commit_lsn`, transfers `origin_name` and `origin_lsn` from `active_tx` into `ReplicationRecord::Commit`, clears `active_tx`, and exposes `commit_end_lsn` as the sole protocol-acknowledgeable LSN boundary.
 - A single record exceeding `16 MiB` fails immediately with resource-limit `OperationalError` without acknowledging prior uncommitted records; mid-transaction socket EOF discards `active_tx` cleanly for replay.
 
 ## Public-Seam Test Blueprint
@@ -100,24 +113,24 @@ Extend `PgOutputDecoder` and `src/rs/vertebra-postgres/src/replication/mod.rs` t
 
 | Case | Input | Expected Output / Error |
 | --- | --- | --- |
-| Full multi-relation `Begin`..`Commit` envelope sequence | `'O'`/`'B'` (`xid = 701`, `final_lsn = 0x1_0000_0400`) -> `'I'` -> `'U'` (`'K'` key + `'N'` new with `'u'` TOAST) -> `'U'` (`'O'` full old + `'N'` new) -> `'D'` (`'K'`) -> `'T'` (`2` relations, `options = 0x03` cascade + restart identity) -> transactional `'M'` -> `'C'` (`commit_end_lsn = 0x1_0000_0440`) | Emits `7` ordered `ReplicationRecord`s with `transaction_ordinal` `0..=6`, exact `OldTupleKind::{Key, Full}`, `cascade == true`, `restart_identity == true`, and `Commit.commit_end_lsn == 0x1_0000_0440`; never buffers prior DML waiting for `'C'`. |
-| Standalone non-transactional `Message` (`'M'`) | `'M'` with `flags = 0`, `lsn = 0x1_0000_0500`, `prefix = "hb"`, `content = b"\xde\xad"` outside `Begin` | Emits `ReplicationRecord::Message { transactional: false, xid: None, ... }` immediately with no commit boundary advancement. |
-| Out-of-order DML, nested `Begin`, & v2 streaming tags | `'I'` before `'B'`; `'B'` followed by `'B'`; `'S'` (`StreamStart`) tag; `'C'` with `flags = 1` or mismatched `commit_lsn` | Each case returns `ProtocolError` immediately. |
+| Full multi-relation `Begin`..`Commit` envelope sequence | `'B'` (`xid = 701`, `final_lsn = 0x1_0000_0400`) -> `'O'` (`origin_lsn = 0x0_5000_0100`, `origin_name = "peer_a"`) -> `'I'` -> `'U'` (`'K'` key + `'N'` new with `'u'` TOAST) -> `'U'` (`'O'` full old + `'N'` new) -> `'D'` (`'K'`) -> `'T'` (`nrelids = 2`, `options = 0x03` cascade + restart identity, `[rel_a, rel_b]`) -> transactional `'M'` (`flags = 1`) -> `'C'` (`commit_lsn = 0x1_0000_0400`, `commit_end_lsn = 0x1_0000_0440`) | Emits `8` ordered `ReplicationRecord`s (`Begin`, `Insert`, `Update`, `Update`, `Delete`, `Truncate`, `Message`, `Commit`) with `transaction_ordinal` `0..=7`, exact `OldTupleKind::{Key, Full}`, `cascade == true`, `restart_identity == true`, `Commit.origin_lsn == Some(0x0_5000_0100)`, `Commit.origin_name.as_deref() == Some("peer_a")`, and `Commit.commit_end_lsn == 0x1_0000_0440`; never buffers prior DML waiting for `'C'`. |
+| Standalone non-transactional `Message` (`'M'`) | `'M'` with `flags = 0`, `message_lsn = 0x1_0000_0500`, `prefix = "hb"`, `content = b"\xde\xad"` outside `Begin` | Emits `ReplicationRecord::Message { transactional: false, xid: None, ... }` immediately with no commit boundary advancement. |
+| Out-of-order `'O'` / DML, nested `Begin`, & v2 streaming tags | `'O'` or `'I'` before `'B'`; `'B'` followed by `'B'`; `'S'` (`StreamStart`) tag; `'T'` with `options = 0x04`; `'C'` with `flags = 1` or mismatched `commit_lsn` | Each case returns `ProtocolError` immediately. |
 | Oversized `16 MiB + 1` record & `1024` / `8 MiB` queue backpressure | Push `'M'` with `content.len() == 16 * 1024 * 1024 + 1`; fill `BoundedReplicationQueue` to `1024` records or `8 MiB` | Oversized record fails with `OperationalError`; full queue reports `can_accept == false` without dropping any queued record. |
 | Mid-transaction disconnect reset | Emit `'B'` + `'I'` without `'C'`, call `reset_on_disconnect()`, then feed fresh `'B'` (`xid = 702`) + `'C'` | Uncommitted `xid = 701` state is discarded; `xid = 702` decodes cleanly from `ordinal = 0`. |
 
 ## Verification
 
-- Initial Red baseline: `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --test postgres_pgoutput_tests`
+- Initial Red baseline: `PYTHONPATH="$(pwd)/src/py" cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --test postgres_pgoutput_tests`
 - Final Green + Clippy gate:
   ```bash
-  cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --test postgres_pgoutput_tests
+  PYTHONPATH="$(pwd)/src/py" cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --test postgres_pgoutput_tests
   cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-postgres --all-targets -- -D warnings
   ```
 
 ## Acceptance Criteria
 
-- [ ] `PgOutputDecoder` emits ordered `Begin`, `Insert`, `Update`, `Delete`, `Truncate`, `Message`, and `Commit` envelopes with `(system_identifier, slot, begin_final_lsn, transaction_ordinal)` dedup coordinates and zero whole-transaction buffering (R22).
+- [ ] `PgOutputDecoder` decodes exact `proto.c` v1 `'B'`, `'O'`, `'I'`, `'U'`, `'D'`, `'T'`, `'M'`, and `'C'` layouts into ordered `ReplicationRecord` envelopes carrying `(system_identifier, slot, begin_final_lsn, transaction_ordinal)` dedup coordinates plus `origin_name`/`origin_lsn` on `Commit`, with zero whole-transaction buffering (R22).
 - [ ] Out-of-order DML, nested `Begin`, nonzero reserved flags, unnegotiated v2+ tags, and `> 16 MiB` records fail explicitly, and `BoundedReplicationQueue` enforces `1024` records / `8 MiB` without silent drops (R22).
 - [ ] Commit message follows `feat(postgres): order pgoutput transaction records` once verified.
 

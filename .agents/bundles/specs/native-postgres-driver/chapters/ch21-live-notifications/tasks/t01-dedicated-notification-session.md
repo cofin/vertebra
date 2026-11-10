@@ -24,8 +24,8 @@ files:
 tests:
   - src/rs/vertebra-postgres/tests/postgres_notification_wire_tests.rs
 estimated_loc: 235
-plan_revision: 5
-plan_commit: 73c8a6ff
+plan_revision: 6
+plan_commit: ef86844f
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -36,8 +36,12 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-08T02:05:22Z"
+updated_at: "2026-11-10T14:45:00Z"
 commit: null
+verified:
+  - by: agent:plan-generator
+    at: "2026-11-10T14:45:00Z"
+    commit: ef86844f
 sources:
   - id: pg-contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md
@@ -65,35 +69,38 @@ Implement `PostgresListener` in `src/rs/vertebra-postgres/src/notifications.rs` 
 ## Bounded Read Manifest
 
 - [spec.md](../spec.md) — Chapter 21 dedicated notification session, bounded overflow, and reconnect contracts.
-- `src/rs/vertebra-postgres/src/session.rs` — Direct `PostgresConnection::connect` (including Cloud SQL / AlloyDB / direct-IAM refresh), `SessionHandle` (carrying `PoolerMode` from `crate::session::statements::PoolerMode`), and `NoticeResponse`/`ParameterStatus` handling (`ch02`–`ch06`, `ch13:t03`).
-- `src/rs/vertebra-postgres/src/protocol.rs` — Bounded `NotificationResponse` (`'A'`, `{ pid: i32, channel: String, payload: Bytes }`) wire frame decoder (`ch02:t01`).
-- `src/rs/vertebra-postgres/src/config.rs` — `crate::config::PostgresConfig` direct connection configuration (raw `PostgresConfig` does not carry `pooler_mode`) (`ch01:t04`).
-- [contracts.md](../../../contracts.md) — Dedicated event session ownership, `closed` snapshot, and reconnect rules [^pg-contracts].
-- [protocol-and-execution_20261105.md](../../../research/protocol-and-execution_20261105.md) — `NotificationResponse` push delivery and identifier quoting [^pg-protocol-research].
+- `src/rs/vertebra-postgres/src/session.rs` — `establish_postgres_connection` (Cloud SQL / AlloyDB / direct-IAM / TLS / SCRAM-SHA-256-PLUS / Unix / `connect_timeout`), `PoolerMode`, and `NoticeResponse`/`ParameterStatus` handling (`ch02`–`ch06`, `ch13:t03`).
+- `src/rs/vertebra-postgres/src/protocol.rs` — `protocol::read_message` decoding `postgres_protocol::message::backend::Message::NotificationResponse` (`'A'`) with `connect_timeout` deadlines (`ch02:t01`).
+- `src/rs/vertebra-postgres/src/config.rs` — `crate::config::PostgresConfig` carrying `pub pooler_mode: PoolerMode` (`ch01:t04`).
+- [contracts.md](../../../contracts.md) — Dedicated event session ownership, `PoolerMode` exclusion, `closed` snapshot, and reconnect rules [^pg-contracts].
+- [protocol-and-execution_20261105.md](../../../research/protocol-and-execution_20261105.md) — `NotificationResponse` push delivery, `NAMEDATALEN - 1` (`63`-byte) channel bounds, and identifier quoting [^pg-protocol-research].
 
 ## Symbol & Signature Contracts
 
 - `src/rs/vertebra-postgres/src/lib.rs`:
   - Export `pub mod notifications;`.
 - `src/rs/vertebra-postgres/src/session.rs`:
-  - Expose internal raw-frame read/simple-command helper on `PostgresConnection` (decoded via `src/rs/vertebra-postgres/src/protocol.rs`) so `notifications::PostgresListener` drives the sole socket reader without borrowing any `PhysicalPool` lease.
+  - Expose `pub(crate) async fn establish_standalone_connection(config: &PostgresConfig, replication_database: bool) -> Result<PostgresConnection, PostgresError>`: reuses full Cloud SQL / AlloyDB / direct-IAM token refresh / TLS / SCRAM-SHA-256-PLUS / Unix / `connect_timeout` startup, encoding `"replication" => "database"` in `StartupMessage` (`postgres_protocol::message::frontend::startup_message`) and skipping post-authentication `SET` GUC queries incompatible with walsender startup when `replication_database == true` (so both `ch21` notifications with `false` and `ch22` replication preflight/stream with `false`/`true` share one standalone dialer).
+  - Expose internal raw-frame read/simple-command accessors on `PostgresConnection` (reading `postgres_protocol::message::backend::Message::NotificationResponse` via `protocol::read_message`) so `notifications::PostgresListener` drives the sole socket reader without borrowing any `PhysicalPool` lease.
 - `src/rs/vertebra-postgres/src/notifications.rs`:
   - `pub const DEFAULT_NOTIFICATION_QUEUE_CAPACITY: usize = 1024;`
   - `pub const DEFAULT_NOTIFICATION_MAX_BYTES: usize = 8 * 1024 * 1024;`
+  - `pub const MAX_CHANNEL_BYTES: usize = 63;`
   - `pub const MAX_RECONNECT_ATTEMPTS: u32 = 8;`
   - `#[derive(Clone, Debug, PartialEq, Eq)] pub struct NotificationFrame { pub pid: i32, pub channel: String, pub payload: Bytes, pub reconnected_gap: bool }`
   - `#[derive(Clone, Copy, Debug)] pub struct ListenerOptions { pub queue_capacity: usize, pub max_queue_bytes: usize, pub reconnect: bool }`
   - `pub fn validate_and_quote_channel(channel: &str) -> Result<String, crate::errors::PostgresError>`:
-    - Rejects empty strings, embedded `\0`, dots/whitespace/invalid identifier syntax (`crate::errors::PostgresError::Data`), and returns `"\"<escaped>\""` (`"` -> `""`) with zero SQL value interpolation.
+    - Enforces PostgreSQL identifier syntax AND `1 <= channel.len() <= 63` UTF-8 bytes (`NAMEDATALEN - 1`, rejecting empty strings, `> 63`-byte UTF-8 names, embedded `\0`, dots/whitespace/invalid syntax with `crate::errors::PostgresError::Data`), and returns `"\"<escaped>\""` (`"` -> `""`) with zero SQL value interpolation.
   - `pub struct PostgresListener`:
-    - Validates positive `queue_capacity > 0` and `max_queue_bytes > 0` before connecting via `crate::config::PostgresConfig` (note `PoolerMode` lives in `crate::session::statements::PoolerMode` / `SessionHandle` rather than raw `PostgresConfig`, so `PoolerMode::Transaction` / `PoolerMode::Statement` rejection on listeners happens on pooled `SessionHandle` and Python `PostgreSQLConfig.derive_direct_config()` in `ch21:t03`).
-    - Opens its own `PostgresConnection` (empty initial channel list sends zero `LISTEN` commands and remains cleanly closable; non-empty deduplicated list issues `LISTEN "<ch>"` and awaits `ReadyForQuery` before resolving `open`).
-    - Spawns ONE Tokio pump task selecting over socket reads and a separate bounded control `mpsc::channel` (`Subscribe`, `Unsubscribe`, `Close`) so high-rate notifications cannot starve control commands or vice versa; `NotificationResponse` frames arriving during `LISTEN`/`UNLISTEN` responses enqueue through the same pump in wire order; duplicated `subscribe`/`unsubscribe` calls for already-subscribed or unsubscribed channels are idempotent.
+    - Validates `queue_capacity > 0`, `max_queue_bytes > 0`, and explicit `PoolerMode::Direct | PoolerMode::Session` on `config.pooler_mode` (returning `Err(PostgresError::Interface)` immediately before dialing when `config.pooler_mode` is `PoolerMode::Transaction`, `PoolerMode::Statement`, or `PoolerMode::Auto`, matching `derive_direct_config()`), then connects via `crate::session::establish_standalone_connection(&config, false)`.
+    - Empty initial channel list sends zero `LISTEN` commands and remains cleanly closable; non-empty deduplicated list issues `LISTEN "<ch>"` and awaits `ReadyForQuery` before resolving `open`.
+    - Spawns ONE Tokio pump task selecting over socket reads (`Message::NotificationResponse`) and a separate bounded control `mpsc::channel` (`Subscribe`, `Unsubscribe`, `Close`) so high-rate notifications never starve control commands; `Message::NotificationResponse` frames arriving during `LISTEN`/`UNLISTEN` responses enqueue in wire order; duplicated `subscribe`/`unsubscribe` calls for already-subscribed or unsubscribed channels are idempotent.
+    - Maintains a `1`-slot unconsumed front buffer (`pub(crate) fn push_front_unconsumed(&self, frame: NotificationFrame)`) in front of the bounded `VecDeque<NotificationFrame>`: if a Tokio `next()` waiter drops after popping/receiving a frame or an async PyO3 `PendingDeliveryGuard` (`ch21:t02`) drops before Python receives the tuple while the listener remains open, the unconsumed `NotificationFrame` (including `reconnected_gap`) returns to the front slot and is yielded first on the next `next()` call without overflow or reorder (`close()` clears both the front slot and queue).
     - Enforces both `queued_frames <= queue_capacity` and `queued_payload_bytes <= max_queue_bytes`: on breach, discards the socket, sets `closed = true` (`AtomicBool`), and terminates `next()` with explicit `crate::errors::PostgresError::Operational("notification queue overflow")` — never silently dropping oldest or newest frames.
     - Single-waiter guard on `pub async fn next(&self) -> Result<Option<NotificationFrame>, crate::errors::PostgresError>`: concurrent `next()` calls return `Err(crate::errors::PostgresError::Interface)` immediately.
-    - Optional `reconnect = true`: retries recoverable I/O / unexpected EOF drops only (never authentication `28*`, protocol, SQL error, or overflow failures) with bounded exponential backoff `100ms..5000ms` + jitter up to `8` attempts, reconnecting via `crate::config::PostgresConfig` (refreshing IAM login tokens/cloud certs when configured), resubscribing the current active channel snapshot through `ReadyForQuery` (preserving existing queued count/byte caps and rejecting stale-generation responses), and marking the next delivered `NotificationFrame` with `reconnected_gap = true`.
+    - Optional `reconnect = true`: retries recoverable I/O / unexpected EOF drops only (never authentication `28*`, protocol, SQL error, or overflow failures) with bounded exponential backoff `100ms..5000ms` + jitter up to `8` attempts via `establish_standalone_connection(&config, false)` (refreshing IAM login tokens/cloud certs when configured), resubscribing the current active channel snapshot through `ReadyForQuery` and marking the next delivered `NotificationFrame` with `reconnected_gap = true`.
     - `pub fn is_closed(&self) -> bool` (non-blocking `AtomicBool` snapshot: `false` while active or in recoverable reconnect backoff; `true` after clean EOF with `reconnect = false`, terminal error, exhausted retries, or `close()`).
-    - `pub async fn close(&self) -> Result<(), crate::errors::PostgresError>` and `Drop`: cancels receive/backoff/control waits immediately, closes socket (`Terminate` best-effort), wakes any pending `next()` with `Ok(None)`, clears queued frames, sets `closed = true`, and joins the pump task within `connect_timeout` with zero Python callbacks on Tokio workers.
+    - `pub async fn close(&self) -> Result<(), crate::errors::PostgresError>` and `Drop`: cancels receive/backoff/control waits immediately, closes socket (`Terminate` best-effort), wakes any pending `next()` with `Ok(None)`, clears front slot and queued frames, sets `closed = true`, and joins the pump task within `connect_timeout` with zero Python callbacks on Tokio workers.
 
 ## Edge Cases & Error Semantics
 
@@ -108,24 +115,24 @@ Implement `PostgresListener` in `src/rs/vertebra-postgres/src/notifications.rs` 
 | Case | Input | Expected Output / Error |
 | --- | --- | --- |
 | Idle push delivery, byte-by-byte framing, interleaved `NoticeResponse` / `ParameterStatus`, and `max_size = 1` query pool independence | Listener open on `"orders"` while a `max_size = 1` `PhysicalPool` runs concurrent `SELECT 1`; peer pushes byte-split `NotificationResponse` (empty `b""`, UTF-8 `"{\"id\":42}"`, and duplicate frames) + `NoticeResponse` | `next()` yields exact ordered `NotificationFrame`s (`reconnected_gap == false`) without client queries; `max_size = 1` pool executes queries with zero contention. |
-| Notification arriving mid-`LISTEN` handshake, empty initial channels, and idempotent/invalid channels | (a) Open with `[]`, `subscribe(["a", "a"])` while peer sends `NotificationResponse` before `CommandComplete` + `ReadyForQuery`; (b) `subscribe(["good", "bad;drop"])` | (a) `open([])` sends no `LISTEN`, `subscribe` sends one `LISTEN "a"`, resolves after `ReadyForQuery`, and delivers the interleaved notification; (b) fails before writing any bytes. |
-| Bounded frame/byte overflow fail-closed termination | Configure `queue_capacity = 3` (or `max_queue_bytes = 64`), push `4` frames without calling `next()` | Listener closes socket, sets `is_closed() == true`, and `next()` returns `Err(PostgresError::Operational)` (never silently dropping frames). |
+| Notification arriving mid-`LISTEN` handshake, `PoolerMode` rejection, `63`-byte channel cap, and `push_front_unconsumed` retention | (a) Open with `[]`, `subscribe(["a", "a"])` while peer sends `Message::NotificationResponse` before `CommandComplete` + `ReadyForQuery`, plus `push_front_unconsumed` / cancelled `next()` retention; (b) `config.pooler_mode = PoolerMode::Transaction | Statement | Auto`, `"a".repeat(64)`, or `subscribe(["good", "bad;drop"])` | (a) `open([])` sends no `LISTEN`, `subscribe` sends one `LISTEN "a"`, resolves after `ReadyForQuery`, and retained/interleaved frame yields first on next `next()`; (b) rejects with `PostgresError::Interface` (`PoolerMode::Transaction | Statement | Auto`, `0` listener dials) or `PostgresError::Data` (`> 63` bytes / syntax) before dialing or writing SQL. |
+| Bounded frame/byte overflow fail-closed termination & `replication_database` startup helper | (a) Configure `queue_capacity = 3` (or `max_queue_bytes = 64`), push `4` frames without calling `next()`; (b) call `establish_standalone_connection(&cfg, true)` against scripted peer | (a) Listener closes socket, sets `is_closed() == true`, and `next()` returns `Err(PostgresError::Operational)`; (b) StartupMessage includes `"replication" => "database"` and skips post-auth `SET` GUCs. |
 | `reconnect = false` EOF vs `reconnect = true` backoff, resubscribe, `reconnected_gap`, and `close()` during backoff | (a) Peer drops idle socket with `reconnect = false`; (b) peer drops idle/subscribe socket with `reconnect = true`, accepts 2nd attempt, receives `LISTEN` for active channels, then pushes event; (c) call `close()` mid-backoff | (a) Surfaces transport error immediately and sets `is_closed() == true`; (b) `is_closed()` stays `false` during backoff, resubscribes active set, and yields next frame with `reconnected_gap == true`; (c) `close()` aborts backoff within `100ms` and sets `is_closed() == true`. |
 
 ## Verification
 
-- Initial Red baseline: `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --test postgres_notification_wire_tests`
+- Initial Red baseline: `PYTHONPATH="$(pwd)/src/py" cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --test postgres_notification_wire_tests`
 - Final Green + Clippy gate:
   ```bash
-  cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --test postgres_notification_wire_tests
+  PYTHONPATH="$(pwd)/src/py" cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --test postgres_notification_wire_tests
   cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-postgres --all-targets -- -D warnings
   ```
 - Planned local commit: `feat(postgres): own dedicated notification receive sessions`
 
 ## Acceptance Criteria
 
-- [ ] `PostgresListener` owns a dedicated non-pooled `PostgresConnection` and sole Tokio receive/control task, validates and double-quotes channel identifiers, and delivers idle and interleaved `NotificationResponse` frames without starving `max_size = 1` query pools (R21).
-- [ ] Bounded `1024`-frame and `8 MiB` byte queues terminate with explicit `PostgresError::Operational` on overflow rather than silently dropping events, and `close()` / `Drop` shut down the socket and pump task boundedly (R21).
+- [ ] `session::establish_standalone_connection(config, replication_database)` supports both ordinary standalone sessions and `replication=database` startup, and `PostgresListener::open` rejects `PoolerMode::Transaction | PoolerMode::Statement | PoolerMode::Auto` (requiring explicit `PoolerMode::Direct | PoolerMode::Session`) with `PostgresError::Interface`, enforces `1..=63` UTF-8 channel bytes + double-quoting, and pumps `Message::NotificationResponse` without starving `max_size = 1` pools (R21).
+- [ ] Bounded `1024`-frame and `8 MiB` byte queues terminate with explicit `PostgresError::Operational` on overflow, `push_front_unconsumed` preserves cancelled/unconsumed frames in order while open, and `close()` / `Drop` shut down the socket and pump task boundedly (R21).
 - [ ] `is_closed()`, single-waiter `next()`, and optional `reconnect = true` (`0.1s..5.0s` jitter, max `8` attempts, refreshed credentials, active-channel resubscribe through `ReadyForQuery`, and `reconnected_gap = true`) satisfy all state and wire invariants (R21).
 
 ## Notes & Discoveries

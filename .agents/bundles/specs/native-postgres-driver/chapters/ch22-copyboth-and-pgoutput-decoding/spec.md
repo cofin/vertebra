@@ -11,20 +11,20 @@ depends_on_chapters:
   - ch21-live-notifications
 replan_trigger: null
 current_task: "native-postgres-driver:ch22:t01"
-plan_revision: 5
-plan_commit: 73c8a6ff
+plan_revision: 6
+plan_commit: ef86844f
 state_revision: 0
 last_verified_checkpoint: null
 last_reviewed_commit: null
 created_at: "2026-11-05T00:00:00Z"
-updated_at: "2026-11-08T02:05:22Z"
+updated_at: "2026-11-10T14:45:00Z"
 generated:
   by: flow-revise
-  at: "2026-11-07T05:00:00Z"
+  at: "2026-11-10T14:45:00Z"
 verified:
   - by: agent:plan-generator
-    at: "2026-11-07T05:00:00Z"
-    commit: 73c8a6ff
+    at: "2026-11-10T14:45:00Z"
+    commit: ef86844f
 sources:
   - id: npd-contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md
@@ -74,41 +74,44 @@ Parent roadmap: [spec.md](../../spec.md) and [contracts.md](../../contracts.md).
 
 ### 2.1 Chapter Requirements
 
-- **R22.1 (`ch22:t01`)**: Factor `protocol.rs` framing into one bounded `read_frame` with replication-only `'W'` (`CopyBothResponse`) decoding; implement `PostgresReplicationConnection` over a dedicated `replication=database` socket, separate ordinary-session slot/publication preflight (`plugin = 'pgoutput'`, inactive slot, valid `restart_lsn` / `confirmed_flush_lsn` window), `IDENTIFY_SYSTEM`, and `START_REPLICATION SLOT ... LOGICAL ...` startup/shutdown.
-- **R22.2 (`ch22:t02`)**: Implement incremental `PgOutputDecoder` (`push`, `next_record`) with atomic `Arc<PgOutputRelationSchema>` replacement in a bounded `4096`-entry `RelationCache`, `Type` (`'Y'`) invalidation, metadata-session publication type preloading, shared scalar/container value decoding, and adapter-owned pure-Python `PgUnchangedToast`, `PostgresReplicationIdentity`, and `PostgresReplicationRecord` structs in `src/py/vertebra/db/adapters/postgres/types.py`.
-- **R22.3 (`ch22:t03`)**: Implement transaction state machine and bounded `ReplicationRecord` envelopes across `Begin` (`'B'`), `Origin` (`'O'`), `Insert` (`'I'`), `Update` (`'U'` with `'K'`/`'O'`/`'N'`), `Delete` (`'D'`), `Truncate` (`'T'`), transactional/non-transactional `Message` (`'M'`), and `Commit` (`'C'`), enforcing `16 MiB` max record bytes and `1024`-record / `8 MiB` queue bounds plus stable `(system_identifier, slot, begin_final_lsn, transaction_ordinal)` deduplication coordinates.
+- **R22.1 (`ch22:t01`)**: Factor `protocol.rs` framing into one deadline-aware bounded `read_frame` with replication-only `'W'` (`CopyBothResponse`) decoding; reject `PoolerMode::Transaction`, `PoolerMode::Statement`, and `PoolerMode::Auto` on `PostgresConfig.pooler_mode` (requiring explicit `PoolerMode::Direct | PoolerMode::Session`) with `PostgresError::Interface` before dialing; implement `PostgresReplicationConnection` reusing `session::establish_standalone_connection(config, false)` for ordinary-session slot/publication preflight (`plugin = 'pgoutput'`, inactive slot, valid `restart_lsn` / `confirmed_flush_lsn` window, single `LEFT JOIN` SHA-256 `publication_fingerprint`) and `session::establish_standalone_connection(config, true)` for the dedicated `replication=database` socket (`IDENTIFY_SYSTEM`, `START_REPLICATION SLOT ... LOGICAL ...`, bounded `CopyDone` shutdown).
+- **R22.2 (`ch22:t02`)**: Implement incremental `PgOutputDecoder` (`push`, `decode_next_frame`) with atomic `Arc<PgOutputRelationSchema>` replacement in a bounded `4096`-entry `RelationCache`, ordinary-preflight `(namespace, name)` + `TypeInfo` preloading across `vector`, `halfvec`, `enum`, `domain`, `range`, `array`, and `composite` OIDs, mismatch-only `Type` (`'Y'`) invalidation, shared scalar/container value decoding, and adapter-owned pure-Python `PgUnchangedToast`, `PostgresReplicationIdentity`, and GC-tracked `PostgresReplicationRecord` structs in `src/py/vertebra/db/adapters/postgres/types.py`.
+- **R22.3 (`ch22:t03`)**: Implement transaction state machine and bounded `ReplicationRecord` envelopes across exact `proto.c` v1 layouts for `Begin` (`'B'`), `Origin` (`'O'`), `Insert` (`'I'`), `Update` (`'U'` with `'K'`/`'O'`/`'N'`), `Delete` (`'D'`), `Truncate` (`'T'`), transactional/non-transactional `Message` (`'M'`), and `Commit` (`'C'`, carrying `origin_name` and `origin_lsn`), enforcing `16 MiB` max record bytes and `1024`-record / `8 MiB` queue bounds plus stable `(system_identifier, slot, begin_final_lsn, transaction_ordinal)` deduplication coordinates.
 
 ### 2.2 Concrete Type & Signature Contracts
 
 - Rust (`src/rs/vertebra-postgres/src/protocol.rs` & `src/rs/vertebra-postgres/src/replication/mod.rs`):
+  - `pub async fn read_frame<R: AsyncRead + Unpin>(reader: &mut R, scratch: &mut BytesMut, max_frame_bytes: usize, deadline: Option<Instant>) -> Result<(u8, BytesMut), crate::errors::PostgresError>` and `pub async fn read_replication_message<R: AsyncRead + Unpin>(reader: &mut R, scratch: &mut BytesMut, max_frame_bytes: usize, deadline: Option<Instant>) -> Result<ReplicationBackendMessage, crate::errors::PostgresError>`
   - `pub enum ReplicationBackendMessage { CopyBothResponse { format: u8, column_formats: Vec<u16> }, Standard(postgres_protocol::message::backend::Message) }`
   - `pub struct VerifiedReplicationIdentity { pub system_identifier: String, pub timeline: i32, pub database: String, pub slot: String, pub publication_fingerprint: String, pub confirmed_flush_lsn: u64, pub restart_lsn: u64 }`
   - `pub fn format_pg_lsn(lsn: u64) -> String` and `pub fn parse_pg_lsn(text: &str) -> Result<u64, crate::errors::PostgresError>`
-  - `impl PostgresReplicationConnection { pub async fn probe_identity(config: &crate::config::PostgresConfig, slot: &str, publication: &str) -> Result<VerifiedReplicationIdentity, crate::errors::PostgresError>; pub async fn connect_logical(config: &crate::config::PostgresConfig, slot: &str, publication: &str, start_lsn: Option<u64>) -> Result<Self, crate::errors::PostgresError>; pub async fn shutdown(&mut self, deadline: Instant) -> Result<(), crate::errors::PostgresError>; }` (raw `crate::config::PostgresConfig` carries no `pooler_mode` field and always dials a dedicated non-pooled `replication=database` connection; `PoolerMode` lives in `crate::session::statements::PoolerMode` / `SessionHandle` and Python `PostgreSQLConfig.derive_direct_config()`, which reject non-direct/session pooler modes before opening replication).
+  - `impl PostgresReplicationConnection { pub async fn probe_identity(config: &crate::config::PostgresConfig, slot: &str, publication: &str) -> Result<VerifiedReplicationIdentity, crate::errors::PostgresError>; pub async fn connect_logical(config: &crate::config::PostgresConfig, slot: &str, publication: &str, start_lsn: Option<u64>) -> Result<Self, crate::errors::PostgresError>; pub async fn shutdown(&mut self, deadline: Instant) -> Result<(), crate::errors::PostgresError>; }` — rejects `PoolerMode::Transaction | PoolerMode::Statement | PoolerMode::Auto` on `config.pooler_mode` (requiring explicit `PoolerMode::Direct | PoolerMode::Session`) with `PostgresError::Interface` before dialing (matching Python `PostgreSQLConfig.derive_direct_config()`), dials ordinary preflight via `crate::session::establish_standalone_connection(config, false)` and the logical replication session via `crate::session::establish_standalone_connection(config, true)`, and hashes `publication_fingerprint` from a single parameterized `pg_publication LEFT JOIN pg_publication_tables` query.
 - Rust (`src/rs/vertebra-postgres/src/replication/pgoutput.rs`):
   - `pub enum PgOutputTupleValue { Null, UnchangedToast, Value(PgValue) }`
-  - `pub struct PgOutputDecoder { ... }` with `pub fn new(max_relations: usize, max_record_bytes: usize) -> Self`, `pub fn push(&mut self, payload: &[u8]) -> Result<(), crate::errors::PostgresError>`, `pub fn next_record(&mut self, identity: &VerifiedReplicationIdentity, catalog: &crate::types::TypeCatalog) -> Result<Option<ReplicationRecord>, crate::errors::PostgresError>`, `pub fn reset_on_disconnect(&mut self)`, and `pub fn finish_clean_eof(&self) -> Result<(), crate::errors::PostgresError>`.
-  - `pub enum ReplicationRecord { Begin { ... }, Insert { ... }, Update { ... }, Delete { ... }, Truncate { ... }, Message { ... }, Commit { ... } }`
+  - `pub struct PgOutputDecoder { ... }` with `pub fn new(max_relations: usize, max_record_bytes: usize) -> Self`, `pub fn push(&mut self, payload: &[u8]) -> Result<(), crate::errors::PostgresError>`, `pub fn next_record(&mut self, identity: &VerifiedReplicationIdentity, catalog: &mut crate::types::TypeCatalog, codec_ctx: &CodecContext) -> Result<Option<ReplicationRecord>, crate::errors::PostgresError>`, `pub fn reset_on_disconnect(&mut self)`, and `pub fn finish_clean_eof(&self) -> Result<(), crate::errors::PostgresError>`.
+  - `pub enum ReplicationRecord { Begin { ... }, Insert { ... }, Update { ... }, Delete { ... }, Truncate { ... }, Message { ... }, Commit { dedup: ReplicationDedupKey, xid: u32, flags: u8, commit_lsn: u64, commit_end_lsn: u64, commit_time_pg_us: i64, origin_name: Option<String>, origin_lsn: Option<u64> } }`
 - Python (`src/py/vertebra/db/adapters/postgres/types.py`):
   - `class PgUnchangedToast(msgspec.Struct, frozen=True, gc=False): pass` (`PG_UNCHANGED_TOAST: Final = PgUnchangedToast()`)
   - `class PostgresReplicationIdentity(msgspec.Struct, frozen=True, gc=False): system_identifier: str; database: str; slot: str; publication_fingerprint: str` with `@property def identity_key(self) -> tuple[str, str, str, str]`
-  - `class PostgresReplicationRecord(msgspec.Struct, frozen=True, gc=False): kind: Literal["control", "begin", "insert", "update", "delete", "truncate", "message", "commit"]; payload: dict[str, Any]; commit_end_lsn: int | None = None; generation: int = 0`
+  - `class PostgresReplicationRecord(msgspec.Struct, frozen=True): kind: Literal["control", "begin", "insert", "update", "delete", "truncate", "message", "commit"]; payload: dict[str, Any]; commit_end_lsn: int | None = None; generation: int = 0` (`gc=False` intentionally omitted because `payload` holds mutable `dict`/`list`/`PgJson` containers requiring cyclic GC traversal).
 
 ### 2.3 Caller -> Seam -> Collaborator Map
 
-- `AsyncPostgresClient` (`ch23:t03`) -> `PostgresReplicationConnection::{probe_identity, connect_logical}` -> ordinary preflight `PostgresConnection` (`pg_replication_slots`, `pg_publication`, `crate::types::TypeCatalog` preload) + dedicated non-pooled `replication=database` `PostgresConnection` (`IDENTIFY_SYSTEM`, `START_REPLICATION`, `protocol::read_replication_message`).
+- `AsyncPostgresClient` (`ch23:t03`) -> `PostgresReplicationConnection::{probe_identity, connect_logical}` -> `crate::session::establish_standalone_connection(config, false)` preflight (`pg_replication_slots`, `pg_publication LEFT JOIN pg_publication_tables`, `(namespace, name)` + `crate::types::TypeCatalog` preload) + dedicated `crate::session::establish_standalone_connection(config, true)` (`IDENTIFY_SYSTEM`, `START_REPLICATION`, `protocol::read_replication_message`).
 - Replication stream reader (`ch23:t01`) -> `PgOutputDecoder::{push, next_record}` -> `RelationCache` (`Arc<PgOutputRelationSchema>`) + `crate::codecs::decode_value_with_catalog` (`src/rs/vertebra-postgres/src/codecs/mod.rs`) + `crate::types::TypeCatalog` (`src/rs/vertebra-postgres/src/types.rs`) + `types.py::{PgUnchangedToast, PostgresReplicationRecord}`.
 
 ### 2.4 Edge-Case & Failure-Mode Matrix
 
 | Condition | Required Behavior |
 | --- | --- |
-| Missing slot/publication, `plugin != "pgoutput"`, wrong database, or active slot (`55006`) | Reject during preflight or `START_REPLICATION` preserving exact server SQLSTATE or typed `OperationalError`; never create or alter slots. |
+| `config.pooler_mode` is `PoolerMode::Transaction`, `PoolerMode::Statement`, or `PoolerMode::Auto` | Reject before dialing any socket with `PostgresError::Interface` (`InterfaceError`), requiring explicit `PoolerMode::Direct | PoolerMode::Session`. |
+| Missing slot/publication, non-`pgoutput` slot plugin, wrong database, or active slot (`55006`) | Reject during preflight or `START_REPLICATION` preserving exact server SQLSTATE or typed `OperationalError`; never create or alter slots. |
 | Requested `start_lsn < restart_lsn` or `start_lsn < confirmed_flush_lsn` | Fail closed with `OperationalError` (`wal_unavailable` / invalid resume) before streaming. |
-| `CopyBothResponse` (`'W'`) with `format != 0` or `num_columns != 0` | Reject boundedly as `ProtocolError` and close dedicated socket. |
+| `CopyBothResponse` (`'W'`) with nonzero `format` or nonzero `num_columns` | Reject boundedly as `ProtocolError` and close dedicated socket. |
+| `Type` (`'Y'`) frame matches preloaded `(type_oid, namespace, name)` vs mismatches | Retain matching `TypeCatalog` entries (`vector`, `halfvec`, `enum`, `domain`, `range`, `array`, `composite`) intact; invalidate `type_oid` to lossless text fallback only on `(namespace, name)` mismatch. |
 | `TupleData` with `'u'` (unchanged TOAST) vs `'n'` (SQL `NULL`) vs dropped column | Emit `PgOutputTupleValue::UnchangedToast` (`PgUnchangedToast`), `Null` (`None`), and omit dropped attributes respectively; reject `PgUnchangedToast` if passed as a SQL query bind. |
 | `Relation` (`'R'`) schema update mid-stream or `> 4096` relations | Atomically swap new `Arc<PgOutputRelationSchema>` without mutating already emitted records; fail explicitly with resource-limit `OperationalError` above `4096`. |
-| DML outside `Begin`..`Commit`, nested `Begin`, or v2+ streaming/two-phase tags | Fail immediately with `ProtocolError` without advancing LSN feedback. |
+| DML/`Origin` outside `Begin`..`Commit`, nested `Begin`, or v2+ streaming/two-phase tags | Fail immediately with `ProtocolError` without advancing LSN feedback. |
 | Clean `CopyDone` with partial buffered record vs transport EOF mid-transaction | Clean `CopyDone` with trailing bytes raises `ProtocolError`; transport EOF calls `reset_on_disconnect()` discarding partial record/transaction state for reconnect replay. |
 
 ### 2.5 Mandatory Alternatives Comparison
@@ -121,7 +124,7 @@ Parent roadmap: [spec.md](../../spec.md) and [contracts.md](../../contracts.md).
 
 ## 3. Documentation & OKF Knowledge Plan
 
-Progress: `[0/0 files documented in ch22]` (user guides and OKF domain chapters consolidate in `ch30:t01` and `ch30:t02`; Google-style docstrings on `PgUnchangedToast`, `PostgresReplicationIdentity`, and `PostgresReplicationRecord` in `src/py/vertebra/db/adapters/postgres/types.py` land in `ch22:t02`).
+Progress: `[0/0 files documented in ch22]` (project documentation and OKF chapters `[0/33 files documented]` consolidate across `ch30`–`ch32` with final review gates in `ch33-final-review-and-release-gate`; Google-style docstrings on `PgUnchangedToast`, `PostgresReplicationIdentity`, and `PostgresReplicationRecord` in `src/py/vertebra/db/adapters/postgres/types.py` land in `ch22:t02`).
 
 ## 4. Requirement-to-Task Traceability Matrix
 
@@ -137,11 +140,11 @@ Progress: `[0/0 files documented in ch22]` (user guides and OKF domain chapters 
 - [ ] native-postgres-driver:ch22:t02 — Decode pgoutput relation metadata and lossless tuples (tasks/t02-pgoutput-relation-and-tuple-decoding.md)
 - [ ] native-postgres-driver:ch22:t03 — Order logical transactions and change envelopes (tasks/t03-pgoutput-transaction-envelopes.md)
 
-**Chapter Recovery Checkpoint:** `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --test postgres_replication_wire_tests --test postgres_pgoutput_tests && cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-postgres --all-targets -- -D warnings` exits `0`.
+**Chapter Recovery Checkpoint:** `PYTHONPATH="$(pwd)/src/py" cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --test postgres_replication_wire_tests --test postgres_pgoutput_tests && cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-postgres --all-targets -- -D warnings && uv run --no-sync ruff check src/py/vertebra/db/adapters/postgres/types.py && uv run --no-sync mypy src/py/vertebra/db/adapters/postgres/types.py` exits `0`.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Plan Baseline**: `73c8a6ff`; chapter `state: planned`, `planning_status: complete`, `plan_revision: 4`.
+- **Verified Plan Baseline**: `ef86844f`; chapter `state: planned`, `planning_status: complete`, `plan_revision: 6`, `plan_commit: ef86844f`.
 - **Remaining Tasks in Chapter**: `t01`, `t02`, `t03` (`3/3` pending).
 - **Downstream Dependents**: Unblocks `ch23-replication-feedback-resume-and-bridge` and `ch24-change-source-and-checkpoints`.
 

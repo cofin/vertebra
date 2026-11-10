@@ -24,8 +24,8 @@ files:
 tests:
   - src/py/tests/unit/db/test_postgres_change_source.py
 estimated_loc: 240
-plan_revision: 5
-plan_commit: 73c8a6ff
+plan_revision: 6
+plan_commit: ef86844f
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -36,8 +36,15 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-08T02:05:22Z"
+updated_at: "2026-11-10T14:45:00Z"
 commit: null
+generated:
+  by: flow-revise
+  at: "2026-11-10T14:45:00Z"
+verified:
+  - by: agent:plan-generator
+    at: "2026-11-10T14:45:00Z"
+    commit: ef86844f
 sources:
   - id: npd-contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md
@@ -80,7 +87,7 @@ Extend `src/py/vertebra/db/adapters/postgres/events.py` with `PostgresReplicatio
     - `@property def config(self) -> PostgreSQLConfig: ...`
     - `async def _replication_identity(self, slot: str, publication: str) -> PostgresReplicationIdentity: ...`
     - `async def _open_replication_stream(self, config: PostgresChangeConfig, *, start_lsn: int | None = None, reconnect: bool = False) -> AsyncPostgresReplication: ...`
-- `src/py/vertebra/db/adapters/postgres/change_stream.py`:
+- `src/py/vertebra/db/adapters/postgres/change_stream.py` (module top-level imports only — importing `FrozenBaseStruct` from `vertebra.typing` with zero function-scoped imports — `__all__`, strict class member ordering `fields/__slots__ -> __init__/__post_init__ -> properties -> public methods -> private _methods`, zero standalone single-class `_helper` functions, zero inline `#` comments):
   - `class PostgresCheckpointConflictError(OperationalError):` — raised on CAS `expected` mismatch without mutating stored state.
   - `class PostgresChangeConfig(FrozenBaseStruct, frozen=True, gc=False, kw_only=True):`
     - `slot: str`
@@ -98,22 +105,22 @@ Extend `src/py/vertebra/db/adapters/postgres/events.py` with `PostgresReplicatio
   - `class PostgresCheckpointStore(Protocol):`
     - `async def load(self, identity_key: tuple[str, str, str, str]) -> PostgresCheckpoint | None: ...`
     - `async def save(self, checkpoint: PostgresCheckpoint, *, expected: PostgresCheckpoint | None) -> None: ...`
-  - `class MemoryPostgresCheckpointStore:` — explicitly non-durable in-memory CAS store guarded by `asyncio.Lock`: verifies `current == expected`, checks monotonic `commit_end_lsn >= expected.commit_end_lsn` and `next_event_id >= expected.next_event_id` (requiring `next_event_id == expected.next_event_id` whenever `commit_end_lsn == expected.commit_end_lsn`), and raises `PostgresCheckpointConflictError` or `ValueError` before mutating on violation.
+  - `class MemoryPostgresCheckpointStore:` — explicitly non-durable in-memory CAS store guarded by `asyncio.Lock`: checks FIRST that when `expected is not None`, `checkpoint.identity_key == expected.identity_key` (raising `ValueError` immediately on mismatch before touching the map), then verifies `current == expected` (raising `PostgresCheckpointConflictError` on mismatch), and enforces monotonic `commit_end_lsn >= expected.commit_end_lsn` and `next_event_id >= expected.next_event_id` (requiring `next_event_id == expected.next_event_id` whenever `commit_end_lsn == expected.commit_end_lsn`, raising `ValueError` on violation) before mutating.
   - `class PostgresChangeSource:` (structurally satisfies `AsyncChangeSource`):
     - `def __init__(self, driver: PostgresReplicationDriver, config: PostgresChangeConfig, *, checkpoint_store: PostgresCheckpointStore | None = None) -> None` — sets `self._checkpoint_store: PostgresCheckpointStore = checkpoint_store if checkpoint_store is not None else MemoryPostgresCheckpointStore()`.
     - `async def stream(self) -> AsyncIterator[ChangeEvent]`:
       1. Resolves `identity = await self._driver._replication_identity(self._config.slot, self._config.publication)`.
       2. Loads `loaded = await asyncio.wait_for(self._checkpoint_store.load(identity.identity_key), timeout=self._config.checkpoint_timeout)`.
       3. Opens `handle = await self._driver._open_replication_stream(self._config, start_lsn=loaded.commit_end_lsn if loaded is not None else self._config.start_lsn, reconnect=False)` (never forwarding `checkpoint_timeout` as a native kwarg).
-      4. Validates initial `kind == "control"` record matches `identity.identity_key`, seeds `_next_event_id = loaded.next_event_id if loaded is not None else 1`, yields `ChangeEvent(event_id=..., channel=self._config.channel, operation=record.kind.upper(), payload=...)` for `begin`/`insert`/`update`/`delete`/`truncate`/`message`/`commit` (checking `_next_event_id <= 2**63 - 1` before yield, never routing through `ChangeFeed` or auto-acknowledging), records bounded `commit_end_lsn -> post_commit_next_event_id` snapshots (`<= 1024`), and closes `handle.aclose()` in `finally`.
+      4. Validates initial `kind == "control"` record matches `identity.identity_key`, seeds `_next_event_id = loaded.next_event_id if loaded is not None else 1`, builds canonical `payload = dict(record.payload)` augmented with `"generation": record.generation` (plus `"commit_end_lsn": record.commit_end_lsn` whenever `record.kind == "commit"` so consumers pass `event.payload["commit_end_lsn"]` directly to `acknowledge`), yields `ChangeEvent(event_id=..., channel=self._config.channel, operation=record.kind.upper(), payload=payload)` for `begin`/`insert`/`update`/`delete`/`truncate`/`message`/`commit` (checking `_next_event_id <= 2**63 - 1` before yield, never routing through `ChangeFeed` or auto-acknowledging), records bounded `commit_end_lsn -> post_commit_next_event_id` snapshots (`<= 1024`), and closes `handle.aclose()` in `finally`.
   - Document `PostgresChangeConfig`, `PostgresCheckpoint`, `PostgresCheckpointStore`, `MemoryPostgresCheckpointStore`, `PostgresCheckpointConflictError`, and `PostgresChangeSource` with Google-style class/method docstrings and per-field PEP 257 trailing docstrings on `FrozenBaseStruct` fields (no duplicate `Attributes:` headers on structs, zero internal leak terms) for Griffe `mkdocstrings`.
 - `src/py/vertebra/db/adapters/postgres/__init__.py`:
-  - Lazily export `PG_UNCHANGED_TOAST`, `PgUnchangedToast`, `PostgresReplicationIdentity`, `PostgresReplicationRecord`, `PostgresReplicationDriver`, `PostgresChangeConfig`, `PostgresCheckpoint`, `PostgresCheckpointConflictError`, `PostgresCheckpointStore`, `MemoryPostgresCheckpointStore`, and `PostgresChangeSource` (zero inline `#` comments).
+  - Lazily export `PG_UNCHANGED_TOAST`, `PgUnchangedToast`, `PostgresReplicationIdentity`, `PostgresReplicationRecord`, `PostgresReplicationDriver`, `PostgresChangeConfig`, `PostgresCheckpoint`, `PostgresCheckpointConflictError`, `PostgresCheckpointStore`, `MemoryPostgresCheckpointStore`, and `PostgresChangeSource` (module top-level imports only, zero inline `#` comments).
 
 ## Edge Cases & Error Semantics
 
 - `identity_key` is strictly a 4-tuple of strings, never a delimiter-joined string; checkpoints with differing `publication_fingerprint` or `system_identifier` remain isolated in `MemoryPostgresCheckpointStore`.
-- `MemoryPostgresCheckpointStore.save` rejects decreasing `commit_end_lsn`, decreasing `next_event_id`, or `commit_end_lsn == expected.commit_end_lsn` with `next_event_id != expected.next_event_id` (`ValueError`), and raises `PostgresCheckpointConflictError` without mutation when `current != expected`.
+- `MemoryPostgresCheckpointStore.save` rejects mismatched `checkpoint.identity_key` vs `expected.identity_key` FIRST (`ValueError`), raises `PostgresCheckpointConflictError` without mutation when stored `current` differs from `expected`, and raises `ValueError` on decreasing `commit_end_lsn`, decreasing `next_event_id`, or equal `commit_end_lsn` with differing `next_event_id`.
 - `ChangeEvent.event_id` stays strictly in `1..2**63 - 1` so `ChangeFeed.flush_to_parquet` Arrow `int64` serialization succeeds; attempting to allocate past `2**63 - 1` raises `OverflowError` / `OperationalError` before yielding.
 - Never use `getattr`, `Any` casts, or fake legacy driver hooks in tests: define a typed `NativeReplicationDriverPort` implementing `PostgresReplicationDriver` over real `AsyncPostgresClient.replication_identity` and `AsyncPostgresClient.open_replication`.
 
@@ -124,28 +131,29 @@ Extend `src/py/vertebra/db/adapters/postgres/events.py` with `PostgresReplicatio
 
 | Case | Input | Expected Output / Error |
 | --- | --- | --- |
-| Identity-before-load & `ChangeEvent` envelope stream | Seed `MemoryPostgresCheckpointStore` with `PostgresCheckpoint(..., commit_end_lsn=0x1_0000_0200, next_event_id=41)`; stream `Begin`, `Update` (`PG_UNCHANGED_TOAST`, `NULL`, `key`, `new`), standalone `Message`, `Commit(0x1_0000_0300)` via `NativeReplicationDriverPort` | `_replication_identity` executes before `store.load`; `_open_replication_stream` receives `start_lsn=0x1_0000_0200, reconnect=False`; yields `4` `ChangeEvent`s with `event_id = 41, 42, 43, 44`, `PG_UNCHANGED_TOAST` intact, and zero automatic wire `StandbyStatusUpdate` advancement; `handle.closed is True` on exit. |
+| Identity-before-load & canonical `ChangeEvent.payload` keys | Seed `MemoryPostgresCheckpointStore` with `PostgresCheckpoint(..., commit_end_lsn=0x1_0000_0200, next_event_id=41)`; stream `Begin`, `Update` (`PG_UNCHANGED_TOAST`, `NULL`, `key`, `new`), standalone `Message`, `Commit(0x1_0000_0300)` via `NativeReplicationDriverPort` | `_replication_identity` executes before `store.load`; `_open_replication_stream` receives `start_lsn=0x1_0000_0200, reconnect=False`; yields `4` `ChangeEvent`s with `event_id = 41, 42, 43, 44`, `payload["generation"] == 0` on all `4`, `payload["commit_end_lsn"] == 0x1_0000_0300` on `"COMMIT"`, `PG_UNCHANGED_TOAST` intact, and zero automatic wire `StandbyStatusUpdate` advancement; `handle.closed is True` on exit. |
 | Default `MemoryPostgresCheckpointStore` & concurrent CAS writers | Construct `PostgresChangeSource(port, cfg)` with `checkpoint_store=None`; separately run two coroutines concurrently calling `save` from the same `expected = cp0` | `checkpoint_store=None` initializes an isolated `MemoryPostgresCheckpointStore()`; concurrent `save` allows one winner and raises `PostgresCheckpointConflictError` to the loser without mutating stored state. |
-| Equal-LSN & regression validation | `save(cp(lsn=200, next_id=12), expected=cp(lsn=200, next_id=10))` or `save(cp(lsn=150, next_id=12), expected=cp(lsn=200, next_id=10))` | Both raise `ValueError` without mutating stored checkpoint; `save(cp(lsn=200, next_id=10), expected=cp(lsn=200, next_id=10))` succeeds. |
+| Mismatched `identity_key`, equal-LSN, & regression validation | `save(cp_slot_a, expected=cp_slot_b)`; `save(cp(lsn=200, next_id=12), expected=cp(lsn=200, next_id=10))`; `save(cp(lsn=150, next_id=12), expected=cp(lsn=200, next_id=10))` | Mismatched `identity_key` raises `ValueError` before CAS lookup; equal-LSN mismatch and LSN/ID regressions raise `ValueError` without mutating stored checkpoint; exact `save(cp(lsn=200, next_id=10), expected=cp(lsn=200, next_id=10))` succeeds. |
 | 4-tuple `identity_key` collision resistance & signed64 Parquet compatibility | Keys `("sys:1", "db", "slot", "pub")` vs `("sys", "1:db", "slot", "pub")`; flush emitted `ChangeEvent` with `event_id = 2**62` through Arrow/Parquet | Store keeps both keys distinct; Arrow/Parquet `int64` serialization round-trips `event_id` losslessly. |
 
 ## Verification
 
-- Initial Red baseline: `uv run --no-sync pytest src/py/tests/unit/db/test_postgres_change_source.py -k 'change_source or checkpoint_' -q`
-- Final Green + Docstring + Typecheck gate:
+- Initial Red baseline: `uv run --no-sync python -m pytest src/py/tests/unit/db/test_postgres_change_source.py -k 'change_source or checkpoint_' -q`
+- Final Green + Lint + Docstring + Typecheck gate:
   ```bash
   make dev
   uv run --no-sync python -m mypy.stubtest vertebra._postgres
+  uv run --no-sync ruff check src/py/vertebra/db/adapters/postgres/events.py src/py/vertebra/db/adapters/postgres/change_stream.py src/py/vertebra/db/adapters/postgres/__init__.py src/py/tests/unit/db/test_postgres_change_source.py
+  uv run --no-sync mypy src/py/vertebra/db/adapters/postgres/events.py src/py/vertebra/db/adapters/postgres/change_stream.py src/py/vertebra/db/adapters/postgres/__init__.py src/py/tests/unit/db/test_postgres_change_source.py
   uv run --no-sync python -m pytest src/py/tests/unit/db/test_postgres_change_source.py -k 'change_source or checkpoint_' -q
   uv run --no-sync python -m pytest src/py/tests/unit/db/test_spanner_queue_and_cdc.py -q
   PYTHONPATH="src/py:." uv run --no-sync python -m tools.docs.scan_public_docstrings --check-leaks --check-overloads --check-typeddicts src/py/vertebra/db/adapters/postgres/change_stream.py src/py/vertebra/db/adapters/postgres/events.py
-  uv run --no-sync mypy src/py/vertebra/db/adapters/postgres/events.py src/py/vertebra/db/adapters/postgres/change_stream.py src/py/tests/unit/db/test_postgres_change_source.py
   ```
 
 ## Acceptance Criteria
 
-- [ ] `events.py`, `change_stream.py`, and `__init__.py` define and export `PostgresReplicationDriver`, `PostgresChangeConfig`, `PostgresCheckpoint`, `PostgresCheckpointConflictError`, `PostgresCheckpointStore`, `MemoryPostgresCheckpointStore`, and `PostgresChangeSource` (defaulting `checkpoint_store=None` to `MemoryPostgresCheckpointStore()`), passing `tools.docs.scan_public_docstrings` and `mypy` with zero inline `#` comments (R22, R23).
-- [ ] `PostgresChangeSource.stream()` resolves identity before loading checkpoints, opens native streams with `reconnect=False`, preserves `PG_UNCHANGED_TOAST` and signed-int64 `event_id`s, and never auto-acknowledges on yield (R22, R23).
+- [ ] `events.py`, `change_stream.py`, and `__init__.py` define and export `PostgresReplicationDriver`, `PostgresChangeConfig`, `PostgresCheckpoint`, `PostgresCheckpointConflictError`, `PostgresCheckpointStore`, `MemoryPostgresCheckpointStore` (rejecting mismatched `expected.identity_key` first), and `PostgresChangeSource` (defaulting `checkpoint_store=None` to `MemoryPostgresCheckpointStore()`), adhering to top-level `FrozenBaseStruct` imports, strict class ordering, `ruff`, `mypy`, and `tools.docs.scan_public_docstrings` with zero inline `#` comments (R22, R23).
+- [ ] `PostgresChangeSource.stream()` resolves identity before loading checkpoints, opens native streams with `reconnect=False`, projects canonical `ChangeEvent.payload` (`"generation"` plus `"commit_end_lsn"` on `"COMMIT"`), preserves `PG_UNCHANGED_TOAST` and signed-int64 `event_id`s, and never auto-acknowledges on yield (R22, R23).
 - [ ] Commit message follows `feat(postgres): define atomic checkpoint stores and change envelopes` once verified.
 
 ## Notes & Discoveries

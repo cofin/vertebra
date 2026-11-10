@@ -22,8 +22,8 @@ files:
 tests:
   - src/rs/vertebra-postgres/tests/postgres_replication_wire_tests.rs
 estimated_loc: 230
-plan_revision: 5
-plan_commit: 73c8a6ff
+plan_revision: 6
+plan_commit: ef86844f
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -34,8 +34,15 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-08T02:05:22Z"
+updated_at: "2026-11-10T14:45:00Z"
 commit: null
+generated:
+  by: flow-revise
+  at: "2026-11-10T14:45:00Z"
+verified:
+  - by: agent:plan-generator
+    at: "2026-11-10T14:45:00Z"
+    commit: ef86844f
 sources:
   - id: npd-contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md
@@ -74,11 +81,12 @@ Implement `PostgresReplicationResume` and generation-fenced stream supervision i
   - `pub struct PostgresReplicationResume { pub identity: VerifiedReplicationIdentity, pub acknowledged_lsn: u64, pub generation: u64 }`
   - `pub enum ReplicationStreamEvent { Control { identity: VerifiedReplicationIdentity, acknowledged_lsn: u64, generation: u64 }, Record { record: ReplicationRecord, generation: u64 } }`
   - `pub struct ReplicationSupervisor`:
-    - `pub async fn open(config: crate::config::PostgresConfig, slot: String, publication: String, start_lsn: Option<u64>, queue_capacity: usize, reconnect: bool) -> Result<Self, crate::errors::PostgresError>` (raw `crate::config::PostgresConfig` carries no `pooler_mode` field and dials dedicated non-pooled `replication=database` sessions; pooled `SessionHandle` / `AsyncPostgresClient` `crate::session::statements::PoolerMode` and Python `PostgreSQLConfig.derive_direct_config()` reject non-direct/session pooler modes before opening replication).
+    - `pub async fn open(config: crate::config::PostgresConfig, slot: String, publication: String, start_lsn: Option<u64>, queue_capacity: usize, reconnect: bool) -> Result<Self, crate::errors::PostgresError>` — explicitly checks `config.pooler_mode` first and rejects `PoolerMode::Transaction`, `PoolerMode::Statement`, and `PoolerMode::Auto` (requiring explicit `PoolerMode::Direct | PoolerMode::Session`) with `PostgresError::Interface` before dialing any socket (matching `PostgresReplicationConnection::connect_logical` and Python `PostgreSQLConfig.derive_direct_config()`).
+    - Maintains a `1`-slot generation-fenced unconsumed front buffer (`pub(crate) fn push_front_unconsumed(&self, event: ReplicationStreamEvent)` checked first by `next_event()`, cleared on generation advance or `shutdown()`) so `ch23:t03` can restore events from cancelled Python `next()` futures in exact wire order without advancing `ReplicationFeedback::record_published_commit`.
     - Emits `ReplicationStreamEvent::Control` at the start of generation `0` (and each replacement generation `1..` when `reconnect == true`) carrying verified identity and `acknowledged_lsn` before any `ReplicationStreamEvent::Record`.
     - On transient transport EOF/reset when `reconnect == true`:
-      1. Fence out old generation (`generation += 1`) so late completions or `acknowledge` calls targeting prior generations cannot publish or advance feedback.
-      2. Reset `PgOutputDecoder` (`reset_on_disconnect()`), clear unacked `published_commits` from the dead generation while preserving `acknowledged_commit_lsn`, refresh IAM/cloud material via `crate::config::PostgresConfig`, and wait under cancellable exponential backoff (`0.1s..5.0s`, max `8` attempts).
+      1. Fence out old generation (`generation += 1`) and clear any stale unconsumed front-slot entry so late completions or `acknowledge` calls targeting prior generations cannot publish or advance feedback.
+      2. Reset `PgOutputDecoder` (`reset_on_disconnect()`), clear unacked `published_commits` from the dead generation while preserving `acknowledged_commit_lsn`, refresh IAM/cloud material via `crate::session::establish_standalone_connection` over `crate::config::PostgresConfig`, and wait under cancellable exponential backoff (`0.1s..5.0s`, max `8` attempts).
       3. Re-run `IDENTIFY_SYSTEM` + slot/publication preflight, verify `(system_identifier, database, slot, publication_fingerprint)` matches initial `identity` (allowing `timeline` increase only when `system_identifier` matches and `acknowledged_lsn >= restart_lsn` and `acknowledged_lsn >= confirmed_flush_lsn`), and issue `START_REPLICATION ... LOGICAL <acknowledged_lsn>`.
     - When `reconnect == false`, any transport loss immediately marks the supervisor terminal and returns the transport `OperationalError` / `ConnectionFailure` with zero follow-up socket opens.
 
@@ -100,21 +108,21 @@ Implement `PostgresReplicationResume` and generation-fenced stream supervision i
 | Identity / publication / WAL-gap refusal on reconnect | On reconnect, peer reports different `system_identifier`, modified `publication_fingerprint`, or `restart_lsn = "1/500" > acknowledged_lsn = "1/200"` | Fails closed immediately with `OperationalError` (`identity_mismatch` / `wal_unavailable`) without `START_REPLICATION` or further retries. |
 | Valid timeline switch on failover | Peer keeps identical `system_identifier`, valid slot `restart_lsn <= acknowledged_lsn`, and `timeline = 2` (was `1`) | Reconnect succeeds on `generation = 1` from `acknowledged_lsn`. |
 | `reconnect=false` strict single-socket contract | Open with `reconnect = false`, drop peer socket after Tx1 | Stream returns transport `ConnectionFailure`; server listener observes exact connection count `1` (zero reconnect attempts). |
-| IAM refresh & backoff cancellation | Expired initial IAM token refreshed on reconnect; separately invoke `shutdown()` mid-backoff under paused clock | Reconnect uses refreshed IAM token; `shutdown()` cancels backoff immediately without waiting `5s`. |
+| IAM refresh, `PoolerMode` rejection, & backoff cancellation | `ReplicationSupervisor::open` with `PoolerMode::Transaction | Statement | Auto`; expired initial IAM token refreshed on reconnect; separately invoke `shutdown()` mid-backoff under paused clock | `Transaction`/`Statement`/`Auto` rejected before dialing with `PostgresError::Interface` (`0` replication socket accepts); reconnect uses refreshed IAM token; `shutdown()` cancels backoff immediately without waiting `5s`. | |
 
 ## Verification
 
-- Initial Red baseline: `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --test postgres_replication_wire_tests reconnect`
+- Initial Red baseline: `PYTHONPATH="$(pwd)/src/py" cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --test postgres_replication_wire_tests reconnect`
 - Final Green + Clippy gate:
   ```bash
-  cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --test postgres_replication_wire_tests reconnect
-  cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --test postgres_replication_wire_tests checkpoint_
+  PYTHONPATH="$(pwd)/src/py" cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --test postgres_replication_wire_tests reconnect
+  PYTHONPATH="$(pwd)/src/py" cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --test postgres_replication_wire_tests checkpoint_
   cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-postgres --all-targets -- -D warnings
   ```
 
 ## Acceptance Criteria
 
-- [ ] `ReplicationSupervisor` resumes strictly from `acknowledged_commit_lsn` (never `wal_end`), fences generations, rebuilds `RelationCache`/`TypeCatalog`, and re-verifies `(system_identifier, database, slot, publication_fingerprint)` and WAL bounds on every reconnect (R22).
+- [ ] `ReplicationSupervisor` rejects `PoolerMode::Transaction | Statement | Auto` (requiring explicit `PoolerMode::Direct | Session`) before dialing, resumes strictly from `acknowledged_commit_lsn` (never `wal_end`), fences generations (including `push_front_unconsumed`), rebuilds `RelationCache`/`TypeCatalog`, and re-verifies `(system_identifier, database, slot, publication_fingerprint)` and WAL bounds on every reconnect (R22).
 - [ ] `reconnect=false` opens zero replacement sockets on transport loss, leaving checkpoint store reload and retry exclusively to Python `PostgresChangeSource` (R22).
 - [ ] Commit message follows `feat(postgres): resume raw logical streams with explicit ownership` once verified.
 

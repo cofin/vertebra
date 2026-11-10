@@ -3,7 +3,7 @@ type: Task
 id: "native-postgres-driver:ch26:t02"
 chapter_id: ch26-compiler-pipeline-arrow-and-event-hooks
 title: Bind permanent native driver pipeline factories to transaction ownership
-description: Implement pipeline() factories on permanent SyncPostgreSQLDriver and AsyncPostgreSQLDriver binding SyncPostgresPipeline and AsyncPostgresPipeline to owned transaction or savepoint scopes.
+description: Implement synchronous pipeline() factories on permanent SyncPostgreSQLDriver and AsyncPostgreSQLDriver lazily wrapping SyncPostgresPipeline and AsyncPostgresPipeline over a single native pipeline_begin/pipeline_results/pipeline_finish lifecycle.
 status: stable
 state: pending
 priority: P1
@@ -22,9 +22,9 @@ files:
   - src/py/vertebra/db/adapters/postgres/_async.py
 tests:
   - src/py/tests/unit/db/test_postgres_native_adapter_pipeline.py
-estimated_loc: 215
-plan_revision: 5
-plan_commit: 73c8a6ff
+estimated_loc: 225
+plan_revision: 6
+plan_commit: ef86844f
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -35,12 +35,19 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-08T02:05:22Z"
+updated_at: "2026-11-10T14:45:00Z"
 commit: null
+verified:
+  - by: agent:plan-generator
+    at: "2026-11-10T14:45:00Z"
+    commit: ef86844f
 sources:
   - id: npd-contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md
-    title: Single-Sync pipeline outcomes, delayed context commit, and caught-error rollback invariants
+    title: Single-lifecycle native pipeline delegation, delayed context commit, and caught-error rollback invariants
+  - id: pg-pipe-py
+    resource: src/py/vertebra/db/adapters/postgres/pipeline.py::SyncPostgresPipeline
+    title: SyncPostgresPipeline, AsyncPostgresPipeline, SyncPipelineClientProtocol, and AsyncPipelineClientProtocol
   - id: db-caps
     resource: src/py/vertebra/db/driver/capabilities.py::SyncPipelineCapable
     title: SyncPipeline, AsyncPipeline, SyncPipelineCapable, and AsyncPipelineCapable protocols
@@ -58,47 +65,49 @@ tags:
 
 ## Objective & Scope Boundary
 
-Add `pipeline(self) -> SyncPipeline` to `src/py/vertebra/db/adapters/postgres/_sync.py::SyncPostgreSQLDriver` and `pipeline(self) -> AsyncPipeline` to `src/py/vertebra/db/adapters/postgres/_async.py::AsyncPostgreSQLDriver`, binding `SyncPostgresPipeline` and `AsyncPostgresPipeline` to an owned `BEGIN` transaction or ambient savepoint so `results()` flushes a single-`Sync` batch without early commit and `__exit__` / `__aexit__` commits or rolls back after caller conversion and SQLSpec `execute_stack` validation [^npd-contracts] [^db-caps] [^sqlspec-py]. Public `driver.py` remains untouched until `ch27:t01`.
+Add synchronous `pipeline(self) -> SyncPipeline` to `src/py/vertebra/db/adapters/postgres/_sync.py::SyncPostgreSQLDriver` and synchronous `pipeline(self) -> AsyncPipeline` to `src/py/vertebra/db/adapters/postgres/_async.py::AsyncPostgreSQLDriver`, wrapping `SyncPostgresPipeline` and `AsyncPostgresPipeline` over a lazy driver-owned `SyncPipelineClientProtocol` / `AsyncPipelineClientProtocol` adapter so pool leases acquire inside `__enter__` / `__aenter__`, `BEGIN` / `SAVEPOINT` / `COMMIT` / `ROLLBACK` execute via a single native `pipeline_begin` / `pipeline_results` / `pipeline_finish` lifecycle without duplicate Python-side `BEGIN`, active native calls register in `driver.cancel()`, and transient leases release cleanly after `pipeline_finish` [^npd-contracts] [^pg-pipe-py] [^db-caps] [^sqlspec-py]. Public `driver.py` remains untouched until `ch27:t01`.
 
 ## Bounded Read Manifest
 
-- [spec.md](../spec.md) & [contracts.md](../../../contracts.md) — Pipeline transaction/savepoint scope, `_project_public_row` select projection, `.outcomes` / `.failing_index`, and caught-error rollback rules [^npd-contracts].
-- `src/py/vertebra/db/adapters/postgres/_sync.py` — Permanent `SyncPostgreSQLDriver` and `ContextVar` scope management from `ch25:t03`.
-- `src/py/vertebra/db/adapters/postgres/_async.py` — Permanent `AsyncPostgreSQLDriver` and `ContextVar` scope management from `ch25:t04`.
-- `src/py/vertebra/db/adapters/postgres/pipeline.py` — `SyncPostgresPipeline` and `AsyncPostgresPipeline` from `ch16:t02`.
-- `src/py/vertebra/db/driver/capabilities.py` — `SyncPipeline`, `AsyncPipeline`, `SyncPipelineCapable`, and `AsyncPipelineCapable` signatures [^db-caps].
+- [spec.md](../spec.md) & [contracts.md](../../../contracts.md) — Lazy lease acquisition, single native pipeline scope lifecycle, `_project_public_row` select projection, `.outcomes` / `.failing_index`, `cancel()` registration, and caught-error rollback rules [^npd-contracts].
+- `src/py/vertebra/db/adapters/postgres/_sync.py` — Permanent `SyncPostgreSQLDriver`, `ContextVar` scope state, and active-operation `cancel()` registry from `ch25:t03`.
+- `src/py/vertebra/db/adapters/postgres/_async.py` — Permanent `AsyncPostgreSQLDriver`, `ContextVar` scope state, and async `cancel()` registry from `ch25:t04`.
+- `src/py/vertebra/db/adapters/postgres/pipeline.py` — `SyncPostgresPipeline`, `AsyncPostgresPipeline`, `SyncPipelineClientProtocol`, `AsyncPipelineClientProtocol`, `prepare`, and `release` hooks [^pg-pipe-py].
+- `src/py/vertebra/db/driver/capabilities.py` — `SyncPipeline`, `AsyncPipeline`, `SyncPipelineCapable`, and `AsyncPipelineCapable` synchronous factory signatures [^db-caps].
 - `src/py/vertebra/extensions/sqlspec/adapters.py` — `BaseSyncDriver.execute_stack` and `BaseAsyncDriver.execute_stack` [^sqlspec-py].
 
 ## Symbol & Signature Contracts
 
 - `src/py/vertebra/db/adapters/postgres/_sync.py`:
-  - `def pipeline(self) -> SyncPipeline` on `SyncPostgreSQLDriver` (structurally satisfying `SyncPipelineCapable`):
-    - Reuses `self._prepare_native_query(sql, parameters)` when `pipeline.execute(...)` / `pipeline.select(...)` queues operations (`None`-returning queue calls).
-    - On `__enter__`: if no ambient `ContextVar` transaction exists, acquires one `SyncPostgresClient` lease and executes `BEGIN`; if an ambient transaction exists on the current `(thread_id, task_id)`, borrows its pinned lease and opens a native savepoint (rejecting wrong-thread/task inherited scopes or overlapping re-entrant pipeline entry while another pipeline is unflushed with `InterfaceError`).
-    - On `results() -> list[Any]`: emits the queued batch as a single-`Sync` / single-logical-flush native pipeline call, projects `execute` entries as `int` (`affected_rows`) and `select` entries as `list[dict[str, Any]]` via `types._project_public_row` (mapping top-level `PgJson(None)` -> `None` and preserving rightmost duplicate column labels per Python dict construction), and leaves the transaction/savepoint OPEN so caller hydration and cardinality checks execute inside the atomic scope.
-    - On `__exit__`: commits or releases the savepoint ONLY when `exc_type is None` AND the batch had zero server/validation errors; otherwise rolls back (preserving original exception) and releases any transient lease.
+  - `def pipeline(self) -> SyncPipeline` on `SyncPostgreSQLDriver` (synchronous zero-I/O factory structurally satisfying `SyncPipelineCapable`):
+    - Returns `SyncPostgresPipeline(adapter, prepare=self._prepare_native_query, release=adapter.release)` backed by a private driver-owned `SyncPipelineClientProtocol` adapter.
+    - Inside `__enter__` -> `adapter.pipeline_begin() -> int`: validates closed/failed driver state and `(thread_id, task_id)` `ContextVar` ownership (raising `InterfaceError` on cross-thread/task inherited ambient transactions OR overlapping/re-entrant active pipeline entry on the same scope); if no ambient transaction exists, lazily acquires one transient `SyncPostgresClient` pool lease, otherwise borrows the pinned ambient client; then delegates `BEGIN` (standalone) or `SAVEPOINT` (ambient transaction) directly to a **single** native `client.pipeline_begin()` call (**never** issuing a separate Python-side `client.begin()` / `BEGIN` ahead of `pipeline_begin()`).
+    - Inside `results() -> list[Any]` -> `adapter.pipeline_results(scope_id, ops)`: runs `client.pipeline_results(scope_id, ops)` wrapped in the driver's active-operation `cancel()` registry, producing one single-`Sync` flush and keeping the native transaction/savepoint scope open across caller hydration and `execute_stack` cardinality checks (`select` rows map top-level `PgJson(None)` -> `None` via `types._project_public_row`, preserving rightmost duplicate column labels; ensure `pipeline.py` / adapter projection aligns with public `select` semantics).
+    - Inside `__exit__` -> `adapter.pipeline_finish(scope_id, commit_ok)` + `adapter.release()`: registers `client.pipeline_finish(scope_id, commit_ok)` in the active-operation `cancel()` registry (`commit_ok=True` commits or releases savepoint only when zero batch/validation/caller errors occurred; `commit_ok=False` rolls back transaction or savepoint while preserving original exception), marks any ambient transaction failed if cancelled/corrupted, clears the active-pipeline flag, and releases any transient pool lease in `release()` after `pipeline_finish` completes.
 - `src/py/vertebra/db/adapters/postgres/_async.py`:
-  - `def pipeline(self) -> AsyncPipeline` on `AsyncPostgreSQLDriver` (structurally satisfying `AsyncPipelineCapable`) with exact async counterparts (`__aenter__`, `execute`, `select`, `async def results(self) -> list[Any]`, shielded `__aexit__` rollback).
+  - `def pipeline(self) -> AsyncPipeline` on `AsyncPostgreSQLDriver` (synchronous zero-I/O factory structurally satisfying `AsyncPipelineCapable`, returning `AsyncPostgresPipeline(adapter, prepare=self._prepare_native_query, release=adapter.aclose_lease)`):
+    - Exact async counterpart lazily acquiring any transient `AsyncPostgresClient` lease inside `__aenter__` -> `await adapter.pipeline_begin()`, delegating `BEGIN`/`SAVEPOINT`/`COMMIT`/`ROLLBACK` to a single native `await client.pipeline_begin()` / `await client.pipeline_results(...)` / shielded `await client.pipeline_finish(...)` lifecycle, enforcing `(thread_id, task_id)` ownership and overlapping-pipeline `InterfaceError`, registering each native call in `AsyncPostgreSQLDriver`'s active-operation `cancel()` registry, and releasing any transient lease after `pipeline_finish` inside `CancelScope(shield=True)`.
 
 ## Edge Cases & Error Semantics
 
-- If a batch command fails on the server (raising first canonical `DatabaseError` subclass carrying `.outcomes` and `.failing_index`) and the caller catches that exception inside `with driver.pipeline():`, the pipeline scope remains marked failed and `__exit__` / `__aexit__` MUST roll back (never commit partial preceding statements).
-- Calling `results()` a second time or calling `execute()` / `select()` after `results()` has flushed raises `InterfaceError` and marks an unexited scope failed on uncaught propagation.
-- Exiting `with driver.pipeline():` without calling `results()` rolls back any owned `BEGIN` / savepoint without flushing queued statements unless documented auto-flush is absent (`results()` is explicit; un-flushed exit rolls back cleanly and releases the lease).
-- Real `BaseSyncDriver.execute_stack` and `BaseAsyncDriver.execute_stack` over explicitly injected `_sync.SyncPostgreSQLDriver` / `_async.AsyncPostgreSQLDriver` roll back the entire batch when post-`results()` strict zip/cardinality check or `SQLResult` construction raises.
+- Constructing `pipe = driver.pipeline()` without entering `with pipe:` / `async with pipe:` acquires zero pool leases and performs zero I/O.
+- Entering a second `with driver.pipeline():` inside an already-open `with driver.pipeline():` on the same driver scope raises `InterfaceError` without touching the active scope's socket.
+- If `pipeline_begin()` fails after acquiring a transient pool lease, the adapter releases/retires that lease immediately before propagating the error so `in_use` never leaks.
+- Calling `driver.cancel()` from a parent thread/task while `pipe.results()` is blocked in native wire I/O sends `1` `CancelRequest` to that pinned client, retires the socket, marks any ambient transaction failed until `rollback()`, and releases the pool slot once drained.
+- Server error caught inside `with driver.pipeline():` or caller exception raised after `results()` before `__exit__`/`__aexit__` passes `commit_ok=False` to `pipeline_finish` and rolls back all batch mutations.
 
 ## Public-Seam Test Blueprint
 
-- **Canonical test file**: `src/py/tests/unit/db/test_postgres_native_adapter_pipeline.py` (direct-importing `SyncPostgreSQLDriver` from `_sync` and `AsyncPostgreSQLDriver` from `_async`).
+- **Canonical test file**: `src/py/tests/unit/db/test_postgres_native_adapter_pipeline.py` (direct-importing `SyncPostgreSQLDriver` from `_sync` and `AsyncPostgreSQLDriver` from `_async` over `postgres_ports.py`).
 - **Worked Test Matrix**:
 
 | Case | Input | Expected Output / Error |
 | --- | --- | --- |
-| Mixed `execute` + `select` pipeline & delayed commit | Queue `INSERT` (`1`), `UPDATE` (`2`), `SELECT id, meta` (`PgJson(None)` + duplicate label); inspect store visibility before vs after `__exit__` | Queue methods return `None`; `results()` returns `[1, 2, [{"id": 1, "meta": None}]]` over `1` data `Sync`; uncommitted until `__exit__`, committed + lease released (`in_use == 0`) after `__exit__`. |
-| Caught server failure & caller post-`results()` exception | (a) Batch op `1` succeeds, op `2` raises `IntegrityError` (`23505`), caller catches `IntegrityError` inside `with`; (b) `results()` succeeds then caller raises `ValueError("hydration failed")` before `__exit__` | Both (a) and (b) roll back op `1`'s mutation in observable store state and release the lease cleanly; (a) carries `.failing_index == 1` and ordered `.outcomes`. |
-| Ambient transaction savepoint nesting & wrong-owner refusal | Enter `driver.transaction()`, write outer row, enter `driver.pipeline()` that fails, catch outside inner `with`, then commit outer transaction; separately access ambient scope from child task/thread | Failed inner pipeline rolls back only its savepoint so outer row commits cleanly; child task/thread `pipeline().__enter__` raises `InterfaceError`. |
-| Second `results()` / queue-after-flush refusal | Call `pipe.results()` twice or `pipe.execute(...)` after `pipe.results()` | Raises `InterfaceError`. |
-| SQLSpec `execute_stack` rollback on result-count / hydration error | Inject `_sync` / `_async` driver into `PostgreSQLSyncDriver` / `PostgreSQLAsyncDriver` (with `ch26:t01` numeric profile); induce post-`results()` mismatch/error, plus `continue_on_error=True` sequential fallback | Post-`results()` error rolls back batch transaction before lease release; `continue_on_error=True` preserves per-op behavior. |
+| Lazy factory, single `pipeline_begin`/`results`/`finish` lifecycle, & delayed commit | Call `p = driver.pipeline()` (`in_use == 0`), enter `with p:`, queue `%s`/`%(k)s`/`$1` `execute` + `select` (`PgJson(None)` + duplicate label), inspect calls & visibility before/after exit | Zero duplicate `client.begin()` calls (`pipeline_begin` called once on enter, `pipeline_results` once on `results()`, `pipeline_finish(..., True)` once on clean exit); uncommitted before exit, committed + `in_use == 0` after exit. |
+| Caught server failure & post-`results()` caller exception | (a) Op `1` succeeds, op `2` raises `IntegrityError` (`23505`), caught inside `with`; (b) `results()` succeeds then caller raises `ValueError("hydration failed")` before exit | Both invoke `pipeline_finish(scope_id, False)`, roll back op `1`, and release lease; (a) carries `.failing_index == 1` and ordered `.outcomes`. |
+| Ambient transaction savepoint, overlapping pipeline refusal, & cross-task/thread refusal | Enter `driver.transaction()`, write outer row, run failing `driver.pipeline()` caught outside inner `with`, commit outer; separately nest `with driver.pipeline():` inside `with driver.pipeline():` and access from child thread/task | Ambient client delegates savepoint via `pipeline_begin()` without acquiring a second lease; failed inner pipeline rolls back only savepoint so outer row commits; nested overlapping pipeline and wrong-owner access both raise `InterfaceError`. |
+| Active-operation `driver.cancel()` during in-flight `pipeline_results` & failed `pipeline_begin` | Trigger `driver.cancel()` while `pipe.results()` awaits slow query; separately fail `client.pipeline_begin()` on transient lease | `cancel()` sends `1` `CancelRequest`, retires socket, and restores pool `in_use == 0`; failed `pipeline_begin` releases transient lease immediately (`in_use == 0`). |
+| SQLSpec `execute_stack` rollback on post-`results()` cardinality/hydration error | Inject `_sync`/`_async` driver into `PostgreSQLSyncDriver`/`PostgreSQLAsyncDriver` (using `ch26:t01` numeric transport); induce post-`results()` error and test `continue_on_error=True` sequential path | Post-`results()` error triggers `pipeline_finish(..., False)` rolling back batch before lease release; `continue_on_error=True` preserves per-op results. |
 
 ## Verification
 
@@ -106,21 +115,22 @@ Add `pipeline(self) -> SyncPipeline` to `src/py/vertebra/db/adapters/postgres/_s
 - Final Green + SQLSpec Regression + Lint/Typecheck gate:
   ```bash
   make dev
-  uv run --no-sync pytest src/py/tests/unit/db/test_postgres_native_adapter_pipeline.py src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py -q
+  uv run --no-sync pytest src/py/tests/unit/db/test_postgres_native_adapter_pipeline.py src/py/tests/unit/db/test_postgres_pipeline.py src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py -q
   uv run --no-sync ruff check src/py/vertebra/db/adapters/postgres/_sync.py src/py/vertebra/db/adapters/postgres/_async.py src/py/tests/unit/db/test_postgres_native_adapter_pipeline.py
   uv run --no-sync mypy src/py/vertebra/db/adapters/postgres src/py/vertebra/extensions/sqlspec
   ```
 
 ## Acceptance Criteria
 
-- [ ] `_sync.py::SyncPostgreSQLDriver` and `_async.py::AsyncPostgreSQLDriver` satisfy `SyncPipelineCapable` and `AsyncPipelineCapable`, reusing `_prepare_native_query` and `SyncPostgresPipeline` / `AsyncPostgresPipeline` (R13, R17, R24).
-- [ ] Pipeline transactions and nested savepoints stay pinned across caller `results()` conversion and `execute_stack` checks, rolling back on caught server errors or caller conversion exceptions (R13, R17, R24).
+- [ ] `SyncPostgreSQLDriver.pipeline() -> SyncPipeline` and `AsyncPostgreSQLDriver.pipeline() -> AsyncPipeline` remain synchronous factories lazily acquiring transient leases in `__enter__`/`__aenter__` and delegating `BEGIN`/`SAVEPOINT`/`COMMIT`/`ROLLBACK` to a single native `pipeline_begin`/`pipeline_results`/`pipeline_finish` lifecycle (zero duplicate Python `BEGIN`) (R13, R17, R24).
+- [ ] Overlapping pipelines and wrong-owner `(thread_id, task_id)` scopes raise `InterfaceError`, in-flight pipeline calls integrate with `driver.cancel()`, caught/caller errors roll back cleanly, and transient leases release after `pipeline_finish` (R13, R17, R24).
 - [ ] Commit message follows `feat(postgres): bind native pipeline factories to owned scopes` once verified.
 
 ## Notes & Discoveries
 
-- One data `Sync` and one logical flush cover all queued batch operations; `BEGIN` / `COMMIT` / `SAVEPOINT` control frames bracket the batch scope cleanly [^npd-contracts].
+- Delegating transaction/savepoint brackets directly to `client.pipeline_begin()` and `client.pipeline_finish()` aligns the Python adapter 1:1 with the Rust single-`Sync` pipeline state machine implemented in `ch16` [^npd-contracts] [^pg-pipe-py].
 
-[^npd-contracts]: `.agents/bundles/specs/native-postgres-driver/contracts.md` — Single-Sync pipeline outcomes, delayed context commit, and caught-error rollback invariants.
+[^npd-contracts]: `.agents/bundles/specs/native-postgres-driver/contracts.md` — Single-lifecycle native pipeline delegation, delayed context commit, and caught-error rollback invariants.
+[^pg-pipe-py]: `src/py/vertebra/db/adapters/postgres/pipeline.py::SyncPostgresPipeline` — SyncPostgresPipeline, AsyncPostgresPipeline, SyncPipelineClientProtocol, and AsyncPipelineClientProtocol.
 [^db-caps]: `src/py/vertebra/db/driver/capabilities.py::SyncPipelineCapable` — SyncPipeline, AsyncPipeline, SyncPipelineCapable, and AsyncPipelineCapable protocols.
 [^sqlspec-py]: `src/py/vertebra/extensions/sqlspec/adapters.py::BaseSyncDriver` — BaseSyncDriver.execute_stack and BaseAsyncDriver.execute_stack caller conversion inside pipeline context.
