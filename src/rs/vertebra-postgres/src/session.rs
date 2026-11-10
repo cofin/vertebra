@@ -2659,6 +2659,7 @@ pub(crate) struct OperationMeta {
     pub(crate) clear_ambient_cancel_failed: bool,
     pub(crate) pin_owner_on_ok: Option<TransactionOwner>,
     pub(crate) install_portal_on_ok: Option<(TransactionOwner, String)>,
+    pub(crate) rereserve_op_gen_on_ok: bool,
 }
 
 #[derive(Debug)]
@@ -4005,6 +4006,7 @@ impl SessionHandle {
                         ),
                         pin_owner_on_ok: None,
                         install_portal_on_ok: None,
+                        rereserve_op_gen_on_ok: false,
                     };
                     let cancel_notify = Arc::new(tokio::sync::Notify::new());
                     guard.active_op = Some(ActiveOpState {
@@ -4069,7 +4071,7 @@ impl SessionHandle {
             .take()
             .expect("InFlightDropGuard disarmed with backing");
 
-        let result = match timed_res {
+        let mut result = match timed_res {
             Ok(res) => res,
             Err(()) => {
                 backing.mark_closed();
@@ -4160,6 +4162,19 @@ impl SessionHandle {
                 guard.retire_pending = true;
                 backing.mark_retire();
             }
+            if meta.rereserve_op_gen_on_ok && result.is_ok() {
+                if op_cancel_claimed
+                    || retire_requested
+                    || guard.close_after_inflight
+                    || backing.is_closed()
+                {
+                    result = Err(PostgresError::Operational(
+                        "COPY FROM Arrow was cancelled during target catalog discovery".to_string(),
+                    ));
+                } else {
+                    guard.reserved_generations.insert(op_gen.0);
+                }
+            }
 
             let still_in_pipeline = guard.active_pipeline.is_some();
             let still_ambient_failed = guard.ambient_cancel_failed;
@@ -4217,7 +4232,7 @@ impl SessionHandle {
             let final_close = guard.close_after_inflight || remaining_backing.is_none();
             guard.close_after_inflight = false;
 
-            match remaining_backing.take() {
+            let late_res = match remaining_backing.take() {
                 None => {
                     guard.pinned_owner = None;
                     guard.active_pipeline = None;
@@ -4248,7 +4263,17 @@ impl SessionHandle {
                     guard.state = SessionState::Ready(b);
                     None
                 }
+            };
+            if meta.rereserve_op_gen_on_ok && !matches!(guard.state, SessionState::Ready(_)) {
+                guard.reserved_generations.remove(&op_gen.0);
+                guard.pre_cancelled_generations.remove(&op_gen.0);
+                if result.is_ok() {
+                    result = Err(PostgresError::Interface(
+                        "session connection is closed".to_string(),
+                    ));
+                }
             }
+            late_res
         };
         if let Some(b) = late_close_backing {
             let _ = tokio::time::timeout(connect_timeout, b.close()).await;
@@ -5248,7 +5273,21 @@ impl SessionHandle {
         }
     }
 
-    async fn checkout_for_copy(
+    pub(crate) fn ensure_not_in_pipeline_for_copy(&self) -> Result<(), PostgresError> {
+        let guard = self
+            .shared
+            .inner
+            .lock()
+            .expect("SessionHandle lock poisoned");
+        if guard.active_pipeline.is_some() {
+            return Err(PostgresError::UnsupportedFeature(
+                "COPY is not supported while a PostgreSQL pipeline scope is active".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn checkout_for_copy(
         self: &Arc<Self>,
         op_gen: OperationGeneration,
         owner: Option<TransactionOwner>,

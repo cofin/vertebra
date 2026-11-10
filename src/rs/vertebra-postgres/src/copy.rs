@@ -15,12 +15,17 @@ use postgres_protocol::message::frontend;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::time::Instant;
 
-use crate::codecs::{CodecContext, encode_value_with_catalog};
+use crate::codecs::{CodecContext, TEXT_OID, encode_value_with_catalog};
 use crate::errors::PostgresError;
+use crate::extended::Parameter;
 use crate::protocol::{MAX_BACKEND_FRAME_LENGTH, read_message};
 use crate::query::parse_error_response;
-use crate::result::{Format, PgValue, TransactionStatus};
-use crate::session::{CopySessionLease, ExchangeState, PostgresConnection};
+use crate::result::{Column, Format, PgValue, TransactionStatus};
+use crate::session::{
+    CopySessionLease, ExchangeState, OperationGeneration, PostgresConnection, SessionAccess,
+    SessionHandle, validate_single_copy_sql,
+};
+use crate::transaction::TransactionOwner;
 use crate::types::TypeCatalog;
 
 /// Canonical 11-byte PostgreSQL binary `COPY` file signature (`PGCOPY\n\xff\r\n\0`).
@@ -662,6 +667,14 @@ impl BinaryCopyEncoder {
         out.put_i16(-1);
         self.finished = true;
         Ok(())
+    }
+
+    pub(crate) const fn is_header_written(&self) -> bool {
+        self.header_written
+    }
+
+    pub(crate) fn set_header_written(&mut self, written: bool) {
+        self.header_written = written;
     }
 }
 
@@ -1332,6 +1345,7 @@ async fn write_frame_duplex(
 pub struct CopyFromStream {
     lease: Option<CopySessionLease>,
     encoder: BinaryCopyEncoder,
+    arrow_plan: Option<crate::arrow::PostgresArrowImportPlan>,
     column_count: usize,
     owns_transaction: bool,
     codec_context: CodecContext,
@@ -1347,6 +1361,7 @@ impl std::fmt::Debug for CopyFromStream {
         f.debug_struct("CopyFromStream")
             .field("column_count", &self.column_count)
             .field("owns_transaction", &self.owns_transaction)
+            .field("has_arrow_plan", &self.arrow_plan.is_some())
             .field("closed", &self.is_closed())
             .finish()
     }
@@ -1361,9 +1376,30 @@ impl CopyFromStream {
         type_catalog: TypeCatalog,
     ) -> Result<Self, PostgresError> {
         let encoder = BinaryCopyEncoder::new(column_count)?;
-        Ok(Self {
+        Ok(Self::new_with_encoder_and_plan(
+            lease,
+            column_count,
+            owns_transaction,
+            codec_context,
+            type_catalog,
+            encoder,
+            None,
+        ))
+    }
+
+    pub(crate) fn new_with_encoder_and_plan(
+        lease: CopySessionLease,
+        column_count: usize,
+        owns_transaction: bool,
+        codec_context: CodecContext,
+        type_catalog: TypeCatalog,
+        encoder: BinaryCopyEncoder,
+        arrow_plan: Option<crate::arrow::PostgresArrowImportPlan>,
+    ) -> Self {
+        Self {
             lease: Some(lease),
             encoder,
+            arrow_plan,
             column_count,
             owns_transaction,
             codec_context,
@@ -1372,7 +1408,7 @@ impl CopyFromStream {
             chunk_frame_buf: BytesMut::with_capacity(5 + COPY_DATA_CHUNK_BYTES),
             closed: Arc::new(AtomicBool::new(false)),
             busy: Arc::new(AtomicBool::new(false)),
-        })
+        }
     }
 
     /// Number of binary columns reported by `CopyInResponse`.
@@ -1461,6 +1497,79 @@ impl CopyFromStream {
 
         if !stage.is_empty() {
             self.flush_encoded_slice_internal(&stage, true).await?;
+        }
+        Ok(())
+    }
+
+    /// Decode a self-contained Arrow IPC stream chunk (`<= 16 MiB` call, `<= 8 MiB` per batch),
+    /// encode rows against the prevalidated [`crate::arrow::PostgresArrowImportPlan`] preserving
+    /// `PGCOPY` header state, and flush via `CopyData`; aborts via `CopyFail` on any error.
+    pub async fn write_arrow_ipc(&mut self, batch_ipc: &[u8]) -> Result<(), PostgresError> {
+        let _busy = self.enter_busy()?;
+        if self.is_closed() || self.lease.is_none() {
+            return Err(PostgresError::Interface(
+                "cannot call write_arrow_ipc on a closed COPY FROM stream".to_string(),
+            ));
+        }
+        if self.arrow_plan.is_none() {
+            let _ = self
+                .abort_internal("write_arrow_ipc called on non-Arrow COPY stream")
+                .await;
+            return Err(PostgresError::Interface(
+                "write_arrow_ipc requires a CopyFromStream opened via copy_from_arrow".to_string(),
+            ));
+        }
+
+        let (schema, batches) = match crate::arrow::decode_bounded_ipc_batches(batch_ipc) {
+            Ok(decoded) => decoded,
+            Err(err) => {
+                let _ = self
+                    .abort_internal("COPY FROM Arrow IPC decode failed")
+                    .await;
+                return Err(err);
+            }
+        };
+
+        let mut payload = BytesMut::new();
+        let encode_res: Result<(), PostgresError> = {
+            let plan = self.arrow_plan.as_ref().expect("checked arrow_plan");
+            if batches.is_empty() {
+                let empty = arrow_array::RecordBatch::new_empty(schema);
+                plan.encode_batch(
+                    &empty,
+                    &mut self.encoder,
+                    &self.codec_context,
+                    &self.type_catalog,
+                    &mut payload,
+                )
+            } else {
+                let mut status = Ok(());
+                for batch in &batches {
+                    if let Err(err) = plan.encode_batch(
+                        batch,
+                        &mut self.encoder,
+                        &self.codec_context,
+                        &self.type_catalog,
+                        &mut payload,
+                    ) {
+                        status = Err(err);
+                        break;
+                    }
+                }
+                status
+            }
+        };
+
+        if let Err(err) = encode_res {
+            payload.clear();
+            let _ = self
+                .abort_internal("COPY FROM Arrow batch encoding failed")
+                .await;
+            return Err(err);
+        }
+
+        if !payload.is_empty() {
+            self.flush_encoded_slice_internal(&payload, false).await?;
         }
         Ok(())
     }
@@ -1904,5 +2013,418 @@ pub(crate) async fn abort_copy_in_on_connection(
                 "CopyFail write timed out".to_string(),
             ))
         }
+    }
+}
+
+const QUALIFIED_COPY_COLUMNS_SQL: &str = "SELECT n.nspname, c.oid, a.attname, a.atttypid, a.atttypmod, a.attnum \
+FROM pg_catalog.pg_class c \
+JOIN pg_catalog.pg_namespace n ON c.relnamespace = n.oid \
+JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid \
+WHERE n.nspname = $1 AND c.relname = $2 \
+AND c.relkind IN ('r', 'p', 'v', 'm', 'f') \
+AND a.attnum > 0 AND NOT a.attisdropped \
+ORDER BY c.oid, a.attnum";
+
+const UNQUALIFIED_COPY_COLUMNS_SQL: &str = "SELECT n.nspname, c.oid, a.attname, a.atttypid, a.atttypmod, a.attnum \
+FROM pg_catalog.pg_class c \
+JOIN pg_catalog.pg_namespace n ON c.relnamespace = n.oid \
+JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid \
+WHERE c.relname = $1 \
+AND n.nspname = ANY(pg_catalog.current_schemas(false)) \
+AND c.relkind IN ('r', 'p', 'v', 'm', 'f') \
+AND a.attnum > 0 AND NOT a.attisdropped \
+ORDER BY array_position(pg_catalog.current_schemas(false), n.nspname), c.oid, a.attnum";
+
+fn validate_requested_copy_columns(
+    columns: Option<&[String]>,
+) -> Result<Option<Vec<String>>, PostgresError> {
+    let Some(cols) = columns else {
+        return Ok(None);
+    };
+    if cols.is_empty() {
+        return Err(PostgresError::Data(
+            "COPY FROM Arrow explicit column list cannot be empty".to_string(),
+        ));
+    }
+    if i16::try_from(cols.len()).is_err() {
+        return Err(PostgresError::Data(format!(
+            "COPY FROM Arrow column list length {} exceeds i16::MAX ({})",
+            cols.len(),
+            i16::MAX
+        )));
+    }
+    let mut seen = std::collections::HashSet::with_capacity(cols.len());
+    for col_name in cols {
+        let _ = crate::arrow::quote_postgres_identifier(col_name)?;
+        if !seen.insert(col_name.as_str()) {
+            return Err(PostgresError::Data(format!(
+                "duplicate column `{col_name}` in COPY FROM Arrow column list"
+            )));
+        }
+    }
+    Ok(Some(cols.to_vec()))
+}
+
+fn extract_pg_oid_cell(val: &PgValue, label: &str) -> Result<u32, PostgresError> {
+    match val {
+        PgValue::Int8(n) => u32::try_from(*n).map_err(|_| {
+            PostgresError::Protocol(format!("invalid {label} OID {n} in pg_catalog response"))
+        }),
+        PgValue::Int4(n) => u32::try_from(*n).map_err(|_| {
+            PostgresError::Protocol(format!("invalid {label} OID {n} in pg_catalog response"))
+        }),
+        PgValue::Text(s) => s.parse::<u32>().map_err(|_| {
+            PostgresError::Protocol(format!("invalid {label} OID {s:?} in pg_catalog response"))
+        }),
+        other => Err(PostgresError::Protocol(format!(
+            "unexpected {label} cell {other:?} in pg_catalog response"
+        ))),
+    }
+}
+
+fn extract_pg_i32_cell(val: &PgValue, label: &str) -> Result<i32, PostgresError> {
+    match val {
+        PgValue::Int4(n) => Ok(*n),
+        PgValue::Int2(n) => Ok(i32::from(*n)),
+        PgValue::Int8(n) => i32::try_from(*n).map_err(|_| {
+            PostgresError::Protocol(format!("overflowing {label} {n} in pg_catalog response"))
+        }),
+        PgValue::Text(s) => s.parse::<i32>().map_err(|_| {
+            PostgresError::Protocol(format!("invalid {label} {s:?} in pg_catalog response"))
+        }),
+        other => Err(PostgresError::Protocol(format!(
+            "unexpected {label} cell {other:?} in pg_catalog response"
+        ))),
+    }
+}
+
+async fn resolve_arrow_copy_target_columns(
+    conn: &mut PostgresConnection,
+    parsed_schema: Option<&str>,
+    parsed_table: &str,
+    requested_columns: Option<&[String]>,
+) -> Result<(String, Vec<Column>), PostgresError> {
+    let qr = if let Some(schema) = parsed_schema {
+        let params = [
+            Parameter::with_oid(PgValue::Text(schema.to_owned()), TEXT_OID)?,
+            Parameter::with_oid(PgValue::Text(parsed_table.to_owned()), TEXT_OID)?,
+        ];
+        let oids = [TEXT_OID, TEXT_OID];
+        conn.query(QUALIFIED_COPY_COLUMNS_SQL, &params, Some(&oids))
+            .await?
+    } else {
+        let params = [Parameter::with_oid(
+            PgValue::Text(parsed_table.to_owned()),
+            TEXT_OID,
+        )?];
+        let oids = [TEXT_OID];
+        conn.query(UNQUALIFIED_COPY_COLUMNS_SQL, &params, Some(&oids))
+            .await?
+    };
+
+    if qr.rows.is_empty() {
+        return Err(PostgresError::Data(match parsed_schema {
+            Some(sch) => format!(
+                "PostgreSQL COPY target relation `{sch}`.`{parsed_table}` was not found or has zero columns"
+            ),
+            None => format!(
+                "PostgreSQL COPY target relation `{parsed_table}` was not found on current_schemas(false) or has zero columns"
+            ),
+        }));
+    }
+
+    let mut chosen_schema: Option<String> = None;
+    let mut chosen_rel_oid: Option<u32> = None;
+    let mut table_cols: Vec<Column> = Vec::with_capacity(qr.rows.len());
+
+    for row in &qr.rows {
+        if row.len() != 6 {
+            return Err(PostgresError::Protocol(format!(
+                "expected 6 columns from pg_catalog COPY lookup, got {}",
+                row.len()
+            )));
+        }
+        let PgValue::Text(ref nsp) = row[0] else {
+            return Err(PostgresError::Protocol(
+                "expected Text nspname in pg_catalog COPY lookup".to_string(),
+            ));
+        };
+        let rel_oid = extract_pg_oid_cell(&row[1], "pg_class.oid")?;
+        if let Some(first_oid) = chosen_rel_oid {
+            if rel_oid != first_oid {
+                continue;
+            }
+        } else {
+            chosen_rel_oid = Some(rel_oid);
+            chosen_schema = Some(nsp.clone());
+        }
+        let PgValue::Text(ref attname) = row[2] else {
+            return Err(PostgresError::Protocol(
+                "expected Text attname in pg_catalog COPY lookup".to_string(),
+            ));
+        };
+        let atttypid = extract_pg_oid_cell(&row[3], "pg_attribute.atttypid")?;
+        let atttypmod = extract_pg_i32_cell(&row[4], "pg_attribute.atttypmod")?;
+        let attnum_i32 = extract_pg_i32_cell(&row[5], "pg_attribute.attnum")?;
+        let attnum = i16::try_from(attnum_i32).unwrap_or(0);
+        table_cols.push(Column::try_new(
+            attname.clone(),
+            atttypid,
+            Format::Binary,
+            atttypmod,
+            rel_oid,
+            attnum,
+        )?);
+    }
+
+    let resolved_schema = chosen_schema.ok_or_else(|| {
+        PostgresError::Data("pg_catalog COPY lookup resolved no relation".to_string())
+    })?;
+
+    let selected_cols = if let Some(req) = requested_columns {
+        let mut ordered = Vec::with_capacity(req.len());
+        for want in req {
+            let found = table_cols.iter().find(|c| c.name == *want).ok_or_else(|| {
+                PostgresError::Data(format!(
+                    "column `{want}` does not exist on PostgreSQL relation `{resolved_schema}`.`{parsed_table}`"
+                ))
+            })?;
+            ordered.push(found.clone());
+        }
+        ordered
+    } else {
+        table_cols
+    };
+
+    let mut missing_oids: Vec<u32> = Vec::new();
+    for col in &selected_cols {
+        if conn.type_catalog.type_info(col.type_oid).is_none()
+            && !missing_oids.contains(&col.type_oid)
+        {
+            missing_oids.push(col.type_oid);
+        }
+    }
+    if !missing_oids.is_empty() {
+        let mut catalog = conn.type_catalog.clone();
+        catalog.discover(conn, &missing_oids, &[]).await?;
+        conn.type_catalog = catalog;
+    }
+
+    let quoted_schema = crate::arrow::quote_postgres_identifier(&resolved_schema)?;
+    let quoted_table = crate::arrow::quote_postgres_identifier(parsed_table)?;
+    let mut quoted_cols = Vec::with_capacity(selected_cols.len());
+    for col in &selected_cols {
+        quoted_cols.push(crate::arrow::quote_postgres_identifier(&col.name)?);
+    }
+    let copy_sql = format!(
+        "COPY {quoted_schema}.{quoted_table} ({}) FROM STDIN (FORMAT binary)",
+        quoted_cols.join(", ")
+    );
+    validate_single_copy_sql(&copy_sql)?;
+    Ok((copy_sql, selected_cols))
+}
+
+impl SessionHandle {
+    /// Resolve target PostgreSQL columns via a single bound `pg_catalog` join, compile a
+    /// [`crate::arrow::PostgresArrowImportPlan`], pre-encode `first_batch_ipc` before starting
+    /// `COPY ... FROM STDIN (FORMAT binary)`, and return an active [`CopyFromStream`].
+    pub async fn copy_from_arrow(
+        self: &Arc<Self>,
+        table_name: &str,
+        schema_name: Option<&str>,
+        first_batch_ipc: &[u8],
+        columns: Option<&[String]>,
+    ) -> Result<CopyFromStream, PostgresError> {
+        let op_gen = self.reserve_operation_generation();
+        self.copy_from_arrow_with_generation_as(
+            op_gen,
+            table_name,
+            schema_name,
+            first_batch_ipc,
+            columns,
+            None,
+        )
+        .await
+    }
+
+    /// Open a binary `COPY FROM STDIN` Arrow import stream inside an optional explicit [`TransactionOwner`].
+    pub async fn copy_from_arrow_as(
+        self: &Arc<Self>,
+        table_name: &str,
+        schema_name: Option<&str>,
+        first_batch_ipc: &[u8],
+        columns: Option<&[String]>,
+        owner: Option<TransactionOwner>,
+    ) -> Result<CopyFromStream, PostgresError> {
+        let op_gen = self.reserve_operation_generation();
+        self.copy_from_arrow_with_generation_as(
+            op_gen,
+            table_name,
+            schema_name,
+            first_batch_ipc,
+            columns,
+            owner,
+        )
+        .await
+    }
+
+    /// Generation-fenced implementation of [`SessionHandle::copy_from_arrow_as`] fencing both the
+    /// bound `pg_catalog` + [`TypeCatalog::discover`] preflight and `CopySessionLease` startup.
+    pub async fn copy_from_arrow_with_generation_as(
+        self: &Arc<Self>,
+        op_gen: OperationGeneration,
+        table_name: &str,
+        schema_name: Option<&str>,
+        first_batch_ipc: &[u8],
+        columns: Option<&[String]>,
+        owner: Option<TransactionOwner>,
+    ) -> Result<CopyFromStream, PostgresError> {
+        if let Err(err) = self.ensure_not_in_pipeline_for_copy() {
+            self.unreserve_operation_generation(op_gen);
+            return Err(err);
+        }
+        let (parsed_schema, parsed_table) =
+            match crate::arrow::parse_postgres_qualified_table(table_name, schema_name) {
+                Ok(parsed) => parsed,
+                Err(err) => {
+                    self.unreserve_operation_generation(op_gen);
+                    return Err(err);
+                }
+            };
+        let requested_cols = match validate_requested_copy_columns(columns) {
+            Ok(cols) => cols,
+            Err(err) => {
+                self.unreserve_operation_generation(op_gen);
+                return Err(err);
+            }
+        };
+        let (arrow_schema, first_batches) =
+            match crate::arrow::decode_bounded_ipc_batches(first_batch_ipc) {
+                Ok(decoded) => decoded,
+                Err(err) => {
+                    self.unreserve_operation_generation(op_gen);
+                    return Err(err);
+                }
+            };
+
+        let (copy_sql, expected_cols, plan, encoder, first_payload) = self
+            .run_cancellable_operation(op_gen, SessionAccess::Ordinary, owner, move |conn, meta| {
+                Box::pin(async move {
+                    if conn.transaction_status() == TransactionStatus::Failed {
+                        return Err(PostgresError::Interface(
+                            "cannot start COPY FROM Arrow while transaction is aborted ('E')"
+                                .to_string(),
+                        ));
+                    }
+                    let (sql, target_cols) = resolve_arrow_copy_target_columns(
+                        conn,
+                        parsed_schema.as_deref(),
+                        &parsed_table,
+                        requested_cols.as_deref(),
+                    )
+                    .await?;
+                    let plan = crate::arrow::PostgresArrowImportPlan::from_schema(
+                        &arrow_schema,
+                        &target_cols,
+                        &conn.type_catalog,
+                    )?;
+                    let mut encoder = BinaryCopyEncoder::new(target_cols.len())?;
+                    let ctx = CodecContext::from_parameters(&conn.parameters);
+                    let mut payload = BytesMut::new();
+                    for batch in &first_batches {
+                        plan.encode_batch(
+                            batch,
+                            &mut encoder,
+                            &ctx,
+                            &conn.type_catalog,
+                            &mut payload,
+                        )?;
+                    }
+                    meta.rereserve_op_gen_on_ok = true;
+                    Ok((sql, target_cols.len(), plan, encoder, payload))
+                })
+            })
+            .await?;
+
+        let mut lease = self.checkout_for_copy(op_gen, owner).await?;
+        let start_res = {
+            let cancel_notify = lease.cancel_notify();
+            let timeout = lease.connect_timeout();
+            let conn = lease.connection_mut();
+            let start_fut = conn.start_copy_in(&copy_sql);
+            tokio::pin!(start_fut);
+            let cancel_timeout = async {
+                cancel_notify.notified().await;
+                tokio::time::sleep(timeout).await;
+            };
+            tokio::pin!(cancel_timeout);
+            tokio::select! {
+                biased;
+                res = &mut start_fut => res,
+                () = &mut cancel_timeout => Err(PostgresError::Operational(
+                    "cancelled COPY FROM Arrow start timed out while draining wire response"
+                        .to_string(),
+                )),
+            }
+        };
+
+        let mut stream = match start_res {
+            Ok(wire_cols) => {
+                let (owns_tx, ctx, catalog) = {
+                    let conn = lease.connection_mut();
+                    let owns = conn.copy_in_owned_tx;
+                    conn.copy_in_owned_tx = false;
+                    let ctx = CodecContext::from_parameters(&conn.parameters);
+                    let cat = conn.type_catalog.clone();
+                    (owns, ctx, cat)
+                };
+                if lease.cancel_claimed() {
+                    abort_copy_in_lease(lease, owns_tx, "COPY FROM cancelled").await;
+                    return Err(PostgresError::Operational(
+                        "COPY FROM Arrow was cancelled during start".to_string(),
+                    ));
+                }
+                if wire_cols != expected_cols {
+                    abort_copy_in_lease(lease, owns_tx, "COPY FROM column count mismatch").await;
+                    return Err(PostgresError::Protocol(format!(
+                        "CopyInResponse column count {wire_cols} does not match expected {expected_cols}"
+                    )));
+                }
+                CopyFromStream::new_with_encoder_and_plan(
+                    lease,
+                    wire_cols,
+                    owns_tx,
+                    ctx,
+                    catalog,
+                    encoder,
+                    Some(plan),
+                )
+            }
+            Err(err) => {
+                if lease.connection_mut().is_closed() || lease.cancel_claimed() {
+                    lease.finish_retired().await;
+                } else {
+                    lease.finish_clean().await;
+                }
+                return Err(err);
+            }
+        };
+
+        if !first_payload.is_empty() {
+            stream
+                .flush_encoded_slice_internal(&first_payload, false)
+                .await?;
+            if stream
+                .lease
+                .as_ref()
+                .is_some_and(CopySessionLease::cancel_claimed)
+            {
+                let _ = stream.abort_internal("COPY FROM cancelled").await;
+                return Err(PostgresError::Operational(
+                    "COPY FROM Arrow was cancelled during initial batch flush".to_string(),
+                ));
+            }
+        }
+        Ok(stream)
     }
 }
