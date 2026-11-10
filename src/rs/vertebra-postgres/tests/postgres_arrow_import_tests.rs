@@ -2115,3 +2115,149 @@ finally:
             });
     });
 }
+
+#[tokio::test]
+async fn pooled_copy_from_dropped_finish_retains_pool_slot_and_marks_ambient_failed() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let copy_done_seen = Arc::new(Notify::new());
+    let copy_done_srv = Arc::clone(&copy_done_seen);
+    let release_srv = Arc::new(Notify::new());
+    let release_srv_clone = Arc::clone(&release_srv);
+    let startups = Arc::new(AtomicUsize::new(0));
+    let startups_srv = Arc::clone(&startups);
+
+    let server = tokio::spawn(async move {
+        let (mut sock1, _) = listener.accept().await.unwrap();
+        startups_srv.fetch_add(1, Ordering::SeqCst);
+        let _ = read_initial_packet(&mut sock1).await.unwrap();
+        sock1
+            .write_all(&auth_ok_and_ready(8101, 9101))
+            .await
+            .unwrap();
+
+        let (b_tag, b_body) = read_frontend_frame(&mut sock1).await.unwrap();
+        assert_eq!(b_tag, b'Q');
+        assert_eq!(query_sql(&b_body), "BEGIN");
+        let mut b_resp = command_complete("BEGIN");
+        b_resp.extend_from_slice(&wire_frame(b'Z', b"T"));
+        sock1.write_all(&b_resp).await.unwrap();
+
+        let _ = read_extended_batch(&mut sock1).await;
+        let cat_resp = pg_catalog_columns_response(
+            &[TEXT_OID, TEXT_OID],
+            &[("public", "81001", "v", INT4_OID, -1, 1)],
+            b'T',
+        );
+        sock1.write_all(&cat_resp).await.unwrap();
+
+        let (c_tag, _) = read_frontend_frame(&mut sock1).await.unwrap();
+        assert_eq!(c_tag, b'Q');
+        sock1.write_all(&copy_in_response(1)).await.unwrap();
+        sock1.flush().await.unwrap();
+
+        loop {
+            let (tag, _) = read_frontend_frame(&mut sock1).await.unwrap();
+            if tag == b'c' {
+                copy_done_srv.notify_one();
+                break;
+            }
+            assert_eq!(tag, b'd');
+        }
+        release_srv_clone.notified().await;
+        drop(sock1);
+
+        let (mut sock2, _) = listener.accept().await.unwrap();
+        startups_srv.fetch_add(1, Ordering::SeqCst);
+        let _ = read_initial_packet(&mut sock2).await.unwrap();
+        sock2
+            .write_all(&auth_ok_and_ready(8102, 9102))
+            .await
+            .unwrap();
+        loop {
+            let Ok((tag2, body2)) = read_frontend_frame(&mut sock2).await else {
+                break;
+            };
+            if tag2 == b'X' {
+                break;
+            }
+            assert_eq!(tag2, b'Q');
+            let sql2 = query_sql(&body2);
+            let mut resp2 = command_complete(sql2.split_whitespace().next().unwrap_or("OK"));
+            resp2.extend_from_slice(&wire_frame(b'Z', b"I"));
+            sock2.write_all(&resp2).await.unwrap();
+            sock2.flush().await.unwrap();
+        }
+    });
+
+    let mut raw = RawPostgresOptions::new("127.0.0.1", "postgres", "appdb");
+    raw.port = i64::from(port);
+    raw.sslmode = "disable".to_string();
+    raw.channel_binding = "disable".to_string();
+    raw.connect_timeout = 0.15;
+    let config = PostgresConfig::validate(raw).unwrap();
+    let pool_opts = vertebra_postgres::pool::PostgresPoolOptions {
+        min_size: 0,
+        max_size: 1,
+        acquire_timeout: Duration::from_millis(60),
+        reset_timeout: Duration::from_millis(150),
+        close_timeout: Duration::from_millis(300),
+        ..Default::default()
+    };
+    let pool = vertebra_postgres::pool::PostgresPool::new(config, pool_opts).unwrap();
+
+    let s1 = Arc::new(SessionHandle::from_pooled(pool.acquire().await.unwrap()));
+    let owner = TransactionOwner::new(1, s1.generation());
+    s1.begin_as(owner).await.unwrap();
+
+    let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Int32, true)]));
+    let batch = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![Arc::new(Int32Array::from(vec![Some(42)]))],
+    )
+    .unwrap();
+    let ipc = serialize_ipc_batches(&schema, &[batch]);
+
+    let mut stream = s1
+        .copy_from_arrow_as("items", Some("public"), &ipc, None, Some(owner))
+        .await
+        .unwrap();
+    let finish_timed = {
+        let finish_fut = stream.finish();
+        tokio::pin!(finish_fut);
+        tokio::select! {
+            res = &mut finish_fut => panic!("unexpected finish completion: {res:?}"),
+            () = async {
+                copy_done_seen.notified().await;
+                tokio::time::sleep(Duration::from_millis(15)).await;
+            } => false,
+        }
+    };
+    assert!(!finish_timed);
+    drop(stream);
+
+    assert!(matches!(
+        pool.acquire().await,
+        Err(PostgresError::PoolExhausted(_))
+    ));
+    let commit_err = s1.commit_as(owner).await.unwrap_err();
+    assert!(
+        matches!(&commit_err, PostgresError::Interface(msg) if msg.contains("ambient transaction failed")),
+        "expected ambient_cancel_failed error, got {commit_err:?}"
+    );
+    s1.rollback_as(owner).await.unwrap();
+    assert!(matches!(
+        pool.acquire().await,
+        Err(PostgresError::PoolExhausted(_))
+    ));
+
+    s1.close_shared().await.unwrap();
+    release_srv.notify_one();
+
+    let s2 = Arc::new(SessionHandle::from_pooled(pool.acquire().await.unwrap()));
+    assert_eq!(s2.generation(), 2);
+    s2.close_shared().await.unwrap();
+    pool.close(Duration::from_millis(300)).await.unwrap();
+    server.await.unwrap();
+    assert_eq!(startups.load(Ordering::SeqCst), 2);
+}

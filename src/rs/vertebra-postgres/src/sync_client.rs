@@ -2,11 +2,12 @@
 
 use std::collections::HashMap;
 use std::mem::MaybeUninit;
+use std::os::raw::c_char;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use bytes::Bytes;
-use pyo3::exceptions::{PyTypeError, PyValueError};
+use pyo3::exceptions::{PyBufferError, PyTypeError, PyValueError};
 use pyo3::ffi;
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyByteArray, PyBytes, PyDict, PyString, PyTuple};
@@ -265,8 +266,9 @@ impl Drop for PyRawBufferGuard {
     }
 }
 
-/// Validate and copy a contiguous read-only Python `Buffer` (`<= 16 MiB`) into owned Rust bytes
-/// while attached on the caller thread, checking length before allocating.
+/// Validate and copy a contiguous Python `Buffer` (`<= 16 MiB`) into owned Rust bytes while
+/// attached on the caller thread, checking length before allocating and protecting writable
+/// buffer exports under free-threaded Python (`Py_GIL_DISABLED`).
 pub(crate) fn extract_ipc_buffer_bytes(
     py: Python<'_>,
     obj: &Bound<'_, PyAny>,
@@ -286,9 +288,30 @@ pub(crate) fn extract_ipc_buffer_bytes(
         return Ok(slice.to_vec());
     }
 
+    if let Ok(ba) = obj.cast::<PyByteArray>() {
+        let copied = pyo3::sync::critical_section::with_critical_section(ba.as_any(), || {
+            let len = ba.len();
+            if len > MAX_ARROW_COPY_CALL_BYTES {
+                return Err(len);
+            }
+            // SAFETY: Holding CPython's per-object critical section on `ba` serializes against
+            // concurrent `bytearray` resize or in-place mutation under `Py_GIL_DISABLED` (and
+            // the GIL serializes standard builds) across both the length check and immediate copy.
+            Ok(unsafe { ba.as_bytes() }.to_vec())
+        });
+        return copied.map_err(|len| {
+            postgres_error_to_py(
+                py,
+                PostgresError::Data(format!(
+                    "{field_name} byte length {len} exceeds maximum Arrow COPY call limit ({MAX_ARROW_COPY_CALL_BYTES} bytes)"
+                )),
+            )
+        });
+    }
+
     let mut raw_view = MaybeUninit::<ffi::Py_buffer>::zeroed();
     // SAFETY: `obj.as_ptr()` is a live borrowed PyObject while attached to `py`, and
-    // `PyBUF_CONTIG_RO` requests a C-contiguous read-only byte export without mutating data.
+    // `PyBUF_CONTIG_RO` requests a C-contiguous byte export without mutating data.
     let rc = unsafe {
         ffi::PyObject_GetBuffer(obj.as_ptr(), raw_view.as_mut_ptr(), ffi::PyBUF_CONTIG_RO)
     };
@@ -299,6 +322,12 @@ pub(crate) fn extract_ipc_buffer_bytes(
     let guard = PyRawBufferGuard {
         view: unsafe { raw_view.assume_init() },
     };
+    // SAFETY: `guard.view` is an initialized `Py_buffer` checked before reading `guard.view.buf`.
+    if unsafe { ffi::PyBuffer_IsContiguous(&raw const guard.view, b'C' as c_char) } == 0 {
+        return Err(PyBufferError::new_err(format!(
+            "{field_name} must be a C-contiguous buffer"
+        )));
+    }
     let len = usize::try_from(guard.view.len).map_err(|_| {
         postgres_error_to_py(
             py,
@@ -327,9 +356,34 @@ pub(crate) fn extract_ipc_buffer_bytes(
             )),
         ));
     }
-    // SAFETY: `PyBUF_CONTIG_RO` guarantees a contiguous readable region of `len > 0` bytes at a
-    // non-null `guard.view.buf` kept alive and export-locked until `guard` drops below.
-    let owned = unsafe { std::slice::from_raw_parts(guard.view.buf.cast::<u8>(), len) }.to_vec();
+    let owned = if guard.view.readonly != 0 {
+        // SAFETY: `PyBUF_CONTIG_RO`, `PyBuffer_IsContiguous('C')`, and `readonly != 0` guarantee
+        // an immutable C-contiguous `len`-byte region at non-null `guard.view.buf` pinned until
+        // `PyBuffer_Release` runs in `drop(guard)`.
+        unsafe { std::slice::from_raw_parts(guard.view.buf.cast::<u8>(), len) }.to_vec()
+    } else {
+        let cs_target: Borrowed<'_, '_, PyAny> = if !guard.view.obj.is_null() {
+            // SAFETY: A non-null `guard.view.obj` holds a strong exporter reference owned by
+            // `guard.view` until `PyBuffer_Release` runs in `drop(guard)` below.
+            unsafe { Borrowed::from_ptr(py, guard.view.obj) }
+        } else {
+            obj.as_borrowed()
+        };
+        let base = guard.view.buf.cast::<AtomicU8>().cast_const();
+        pyo3::sync::critical_section::with_critical_section(&cs_target, || {
+            let mut out = Vec::with_capacity(len);
+            for idx in 0..len {
+                // SAFETY: `guard` pins a valid C-contiguous `len`-byte buffer at non-null `base`
+                // (`AtomicU8` has identical size and 1-byte alignment to `u8`). Copying via
+                // relaxed atomic byte loads inside `cs_target`'s per-object critical section never
+                // forms `&[u8]` over writable memory, avoiding Rust aliasing/data-race UB even if
+                // external code mutates unlocked backing bytes under `Py_GIL_DISABLED`.
+                let byte = unsafe { &*base.add(idx) }.load(Ordering::Relaxed);
+                out.push(byte);
+            }
+            out
+        })
+    };
     drop(guard);
     Ok(owned)
 }

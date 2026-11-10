@@ -803,22 +803,35 @@ impl CopyOut {
         loop {
             let msg = {
                 let lease = self.lease.as_mut().expect("checked lease active");
+                let already_cancelled = lease.cancel_claimed();
                 let cancel_notify = lease.cancel_notify();
                 let connect_timeout = lease.connect_timeout();
                 let conn = lease.connection_mut();
-                let read_fut = read_message(&mut conn.stream, &mut conn.read_buf, None);
-                tokio::pin!(read_fut);
-                let cancel_timeout = async {
-                    cancel_notify.notified().await;
-                    tokio::time::sleep(connect_timeout).await;
+                let timed = {
+                    let read_fut = read_message(&mut conn.stream, &mut conn.read_buf, None);
+                    tokio::pin!(read_fut);
+                    let cancel_timeout = async move {
+                        if !already_cancelled {
+                            cancel_notify.notified().await;
+                        }
+                        tokio::time::sleep(connect_timeout).await;
+                    };
+                    tokio::pin!(cancel_timeout);
+                    tokio::select! {
+                        biased;
+                        res = &mut read_fut => Some(res),
+                        () = &mut cancel_timeout => None,
+                    }
                 };
-                tokio::pin!(cancel_timeout);
-                tokio::select! {
-                    biased;
-                    res = &mut read_fut => res,
-                    () = &mut cancel_timeout => Err(PostgresError::Operational(
-                        "cancelled COPY TO stream timed out while draining wire response".to_string(),
-                    )),
+                match timed {
+                    Some(res) => res,
+                    None => {
+                        conn.mark_closed();
+                        Err(PostgresError::Operational(
+                            "cancelled COPY TO stream timed out while draining wire response"
+                                .to_string(),
+                        ))
+                    }
                 }
             };
 
@@ -1388,7 +1401,7 @@ impl CopyFromStream {
     }
 
     pub(crate) fn new_with_encoder_and_plan(
-        lease: CopySessionLease,
+        mut lease: CopySessionLease,
         column_count: usize,
         owns_transaction: bool,
         codec_context: CodecContext,
@@ -1396,6 +1409,9 @@ impl CopyFromStream {
         encoder: BinaryCopyEncoder,
         arrow_plan: Option<crate::arrow::PostgresArrowImportPlan>,
     ) -> Self {
+        if !owns_transaction {
+            lease.mark_ambient_failed_on_retire();
+        }
         Self {
             lease: Some(lease),
             encoder,
@@ -1450,6 +1466,16 @@ impl CopyFromStream {
                 "cannot call write_rows on a closed COPY FROM stream".to_string(),
             ));
         }
+        if self
+            .lease
+            .as_ref()
+            .is_some_and(CopySessionLease::cancel_claimed)
+        {
+            let _ = self.abort_internal("COPY FROM cancelled").await;
+            return Err(PostgresError::Operational(
+                "COPY FROM write was cancelled".to_string(),
+            ));
+        }
         if column_oids.len() != self.column_count {
             let err = PostgresError::Data(format!(
                 "COPY FROM column_oids length {} does not match column_count {}",
@@ -1498,6 +1524,16 @@ impl CopyFromStream {
         if !stage.is_empty() {
             self.flush_encoded_slice_internal(&stage, true).await?;
         }
+        if self
+            .lease
+            .as_ref()
+            .is_some_and(CopySessionLease::cancel_claimed)
+        {
+            let _ = self.abort_internal("COPY FROM cancelled").await;
+            return Err(PostgresError::Operational(
+                "COPY FROM write was cancelled".to_string(),
+            ));
+        }
         Ok(())
     }
 
@@ -1509,6 +1545,16 @@ impl CopyFromStream {
         if self.is_closed() || self.lease.is_none() {
             return Err(PostgresError::Interface(
                 "cannot call write_arrow_ipc on a closed COPY FROM stream".to_string(),
+            ));
+        }
+        if self
+            .lease
+            .as_ref()
+            .is_some_and(CopySessionLease::cancel_claimed)
+        {
+            let _ = self.abort_internal("COPY FROM Arrow cancelled").await;
+            return Err(PostgresError::Operational(
+                "COPY FROM Arrow write was cancelled".to_string(),
             ));
         }
         if self.arrow_plan.is_none() {
@@ -1571,6 +1617,16 @@ impl CopyFromStream {
         if !payload.is_empty() {
             self.flush_encoded_slice_internal(&payload, false).await?;
         }
+        if self
+            .lease
+            .as_ref()
+            .is_some_and(CopySessionLease::cancel_claimed)
+        {
+            let _ = self.abort_internal("COPY FROM Arrow cancelled").await;
+            return Err(PostgresError::Operational(
+                "COPY FROM Arrow write was cancelled".to_string(),
+            ));
+        }
         Ok(())
     }
 
@@ -1593,12 +1649,37 @@ impl CopyFromStream {
 
             let outcome = {
                 let lease = self.lease.as_mut().expect("checked lease active");
-                write_frame_duplex(
-                    lease.connection_mut(),
-                    &self.chunk_frame_buf,
-                    flush_end && is_last,
-                )
-                .await
+                let already_cancelled = lease.cancel_claimed();
+                let cancel_notify = lease.cancel_notify();
+                let connect_timeout = lease.connect_timeout();
+                let flush_now = flush_end && is_last;
+                let conn = lease.connection_mut();
+                let timed = {
+                    let write_fut = write_frame_duplex(conn, &self.chunk_frame_buf, flush_now);
+                    tokio::pin!(write_fut);
+                    let cancel_timeout = async move {
+                        if !already_cancelled {
+                            cancel_notify.notified().await;
+                        }
+                        tokio::time::sleep(connect_timeout).await;
+                    };
+                    tokio::pin!(cancel_timeout);
+                    tokio::select! {
+                        biased;
+                        res = &mut write_fut => Some(res),
+                        () = &mut cancel_timeout => None,
+                    }
+                };
+                match timed {
+                    Some(res) => res,
+                    None => {
+                        conn.mark_closed();
+                        Err(PostgresError::Operational(
+                            "cancelled COPY FROM write timed out while awaiting backend response"
+                                .to_string(),
+                        ))
+                    }
+                }
             };
             self.chunk_frame_buf.clear();
 
@@ -1677,6 +1758,16 @@ impl CopyFromStream {
                 "cannot call finish() on a closed COPY FROM stream".to_string(),
             ));
         }
+        if self
+            .lease
+            .as_ref()
+            .is_some_and(CopySessionLease::cancel_claimed)
+        {
+            let _ = self.abort_internal("COPY FROM finish cancelled").await;
+            return Err(PostgresError::Operational(
+                "COPY FROM finish was cancelled".to_string(),
+            ));
+        }
 
         let mut trailer_payload = BytesMut::with_capacity(PGCOPY_HEADER_BYTES + 2);
         self.encoder.finish_trailer(&mut trailer_payload)?;
@@ -1691,7 +1782,35 @@ impl CopyFromStream {
 
         let write_outcome = {
             let lease = self.lease.as_mut().expect("checked lease");
-            write_frame_duplex(lease.connection_mut(), &self.chunk_frame_buf, true).await
+            let already_cancelled = lease.cancel_claimed();
+            let cancel_notify = lease.cancel_notify();
+            let connect_timeout = lease.connect_timeout();
+            let conn = lease.connection_mut();
+            let timed = {
+                let write_fut = write_frame_duplex(conn, &self.chunk_frame_buf, true);
+                tokio::pin!(write_fut);
+                let cancel_timeout = async move {
+                    if !already_cancelled {
+                        cancel_notify.notified().await;
+                    }
+                    tokio::time::sleep(connect_timeout).await;
+                };
+                tokio::pin!(cancel_timeout);
+                tokio::select! {
+                    biased;
+                    res = &mut write_fut => Some(res),
+                    () = &mut cancel_timeout => None,
+                }
+            };
+            match timed {
+                Some(res) => res,
+                None => {
+                    conn.mark_closed();
+                    Err(PostgresError::Operational(
+                        "cancelled COPY FROM finish timed out while flushing CopyDone".to_string(),
+                    ))
+                }
+            }
         };
         self.chunk_frame_buf.clear();
 
@@ -1714,79 +1833,78 @@ impl CopyFromStream {
         let mut server_err: Option<PostgresError> = None;
         let mut proto_err: Option<PostgresError> = None;
 
-        {
+        let drain_res: Result<(), PostgresError> = {
+            let already_cancelled = lease.cancel_claimed();
+            let cancel_notify = lease.cancel_notify();
+            let connect_timeout = lease.connect_timeout();
             let conn = lease.connection_mut();
-            loop {
-                let msg = match read_message(&mut conn.stream, &mut conn.read_buf, None).await {
-                    Ok(m) => m,
-                    Err(err) => {
-                        conn.mark_closed();
-                        if !self.owns_transaction {
-                            lease.mark_ambient_failed_on_retire();
-                        }
-                        lease.finish_retired().await;
-                        return Err(err);
-                    }
-                };
-                match msg {
-                    Message::CommandComplete(body) => match body.tag() {
-                        Ok(tag) => match parse_copy_command_tag(tag) {
-                            Ok(n) => copy_rows = Some(n),
-                            Err(e) => proto_err = Some(e),
+            let drain_fut = async {
+                loop {
+                    let msg = read_message(&mut conn.stream, &mut conn.read_buf, None).await?;
+                    match msg {
+                        Message::CommandComplete(body) => match body.tag() {
+                            Ok(tag) => match parse_copy_command_tag(tag) {
+                                Ok(n) => copy_rows = Some(n),
+                                Err(e) => proto_err = Some(e),
+                            },
+                            Err(e) => {
+                                proto_err = Some(PostgresError::Protocol(format!(
+                                    "invalid COPY FROM CommandComplete UTF-8: {e}"
+                                )));
+                            }
                         },
-                        Err(e) => {
-                            proto_err = Some(PostgresError::Protocol(format!(
-                                "invalid COPY FROM CommandComplete UTF-8: {e}"
-                            )));
-                        }
-                    },
-                    Message::ErrorResponse(body) => match parse_error_response(&body) {
-                        Ok(srv) => {
+                        Message::ErrorResponse(body) => {
+                            let srv = parse_error_response(&body)?;
                             if server_err.is_none() {
                                 server_err = Some(PostgresError::Server(srv));
                             }
                         }
-                        Err(e) => {
-                            conn.mark_closed();
-                            lease.finish_retired().await;
-                            return Err(e);
+                        Message::NoticeResponse(_) => {}
+                        Message::ParameterStatus(body) => {
+                            conn.handle_parameter_status_frame(&body)?;
                         }
-                    },
-                    Message::NoticeResponse(_) => {}
-                    Message::ParameterStatus(body) => {
-                        if let Err(e) = conn.handle_parameter_status_frame(&body) {
-                            lease.finish_retired().await;
-                            return Err(e);
+                        Message::NotificationResponse(body) => {
+                            conn.handle_notification_frame(&body)?;
                         }
-                    }
-                    Message::NotificationResponse(body) => {
-                        if let Err(e) = conn.handle_notification_frame(&body) {
-                            lease.finish_retired().await;
-                            return Err(e);
+                        Message::ReadyForQuery(body) => {
+                            conn.set_exchange_state(ExchangeState::Idle);
+                            let status = TransactionStatus::from_wire_tag(body.status())?;
+                            conn.set_transaction_status_from_wire(status);
+                            break Ok(());
                         }
-                    }
-                    Message::ReadyForQuery(body) => {
-                        conn.set_exchange_state(ExchangeState::Idle);
-                        let status = match TransactionStatus::from_wire_tag(body.status()) {
-                            Ok(s) => s,
-                            Err(e) => {
-                                conn.mark_closed();
-                                lease.finish_retired().await;
-                                return Err(e);
-                            }
-                        };
-                        conn.set_transaction_status_from_wire(status);
-                        break;
-                    }
-                    _ => {
-                        conn.mark_closed();
-                        lease.finish_retired().await;
-                        return Err(PostgresError::Protocol(
-                            "unexpected backend frame after COPY FROM CopyDone".to_string(),
-                        ));
+                        _ => {
+                            break Err(PostgresError::Protocol(
+                                "unexpected backend frame after COPY FROM CopyDone".to_string(),
+                            ));
+                        }
                     }
                 }
+            };
+            tokio::pin!(drain_fut);
+            let cancel_timeout = async move {
+                if !already_cancelled {
+                    cancel_notify.notified().await;
+                }
+                tokio::time::sleep(connect_timeout).await;
+            };
+            tokio::pin!(cancel_timeout);
+            tokio::select! {
+                biased;
+                res = &mut drain_fut => res,
+                () = &mut cancel_timeout => Err(PostgresError::Operational(
+                    "cancelled COPY FROM finish timed out while awaiting server completion"
+                        .to_string(),
+                )),
             }
+        };
+
+        if let Err(drain_err) = drain_res {
+            lease.connection_mut().mark_closed();
+            if !self.owns_transaction {
+                lease.mark_ambient_failed_on_retire();
+            }
+            lease.finish_retired().await;
+            return Err(drain_err);
         }
 
         if let Some(err) = server_err {
@@ -1796,18 +1914,21 @@ impl CopyFromStream {
                 }
                 lease.finish_retired().await;
             } else if self.owns_transaction {
-                let rolled_back = {
-                    let conn = lease.connection_mut();
-                    if conn.transaction_status() != TransactionStatus::Idle {
-                        if conn.rollback().await.is_ok() {
-                            true
-                        } else {
-                            conn.mark_closed();
-                            false
-                        }
-                    } else {
+                let rolled_back = if lease.connection_mut().transaction_status()
+                    != TransactionStatus::Idle
+                {
+                    if run_lease_tx_step(&mut lease, false, "COPY FROM error rollback timed out")
+                        .await
+                        .is_ok()
+                        && !lease.cancel_claimed()
+                    {
                         true
+                    } else {
+                        lease.connection_mut().mark_closed();
+                        false
                     }
+                } else {
+                    true
                 };
                 if rolled_back {
                     lease.finish_clean().await;
@@ -1821,24 +1942,40 @@ impl CopyFromStream {
         }
 
         if let Some(err) = proto_err {
+            if self.owns_transaction
+                && !lease.cancel_claimed()
+                && lease.connection_mut().transaction_status() != TransactionStatus::Idle
             {
-                let conn = lease.connection_mut();
-                if self.owns_transaction && conn.transaction_status() != TransactionStatus::Idle {
-                    let _ = conn.rollback().await;
-                }
-                conn.mark_closed();
+                let _ = run_lease_tx_step(
+                    &mut lease,
+                    false,
+                    "COPY FROM protocol error rollback timed out",
+                )
+                .await;
+            }
+            lease.connection_mut().mark_closed();
+            if !self.owns_transaction {
+                lease.mark_ambient_failed_on_retire();
             }
             lease.finish_retired().await;
             return Err(err);
         }
 
         let Some(rows) = copy_rows else {
+            if self.owns_transaction
+                && !lease.cancel_claimed()
+                && lease.connection_mut().transaction_status() != TransactionStatus::Idle
             {
-                let conn = lease.connection_mut();
-                if self.owns_transaction && conn.transaction_status() != TransactionStatus::Idle {
-                    let _ = conn.rollback().await;
-                }
-                conn.mark_closed();
+                let _ = run_lease_tx_step(
+                    &mut lease,
+                    false,
+                    "COPY FROM missing CommandComplete rollback timed out",
+                )
+                .await;
+            }
+            lease.connection_mut().mark_closed();
+            if !self.owns_transaction {
+                lease.mark_ambient_failed_on_retire();
             }
             lease.finish_retired().await;
             return Err(PostgresError::Protocol(
@@ -1847,20 +1984,42 @@ impl CopyFromStream {
         };
 
         if self.owns_transaction {
-            let commit_res = lease.connection_mut().commit().await;
+            let commit_res = run_lease_tx_step(
+                &mut lease,
+                true,
+                "cancelled COPY FROM commit timed out while awaiting server completion",
+            )
+            .await;
             if let Err(commit_err) = commit_res {
                 let is_closed = lease.connection_mut().is_closed();
                 if is_closed || lease.cancel_claimed() {
                     lease.finish_retired().await;
-                } else {
-                    let _ = lease.connection_mut().rollback().await;
+                } else if run_lease_tx_step(
+                    &mut lease,
+                    false,
+                    "COPY FROM post-commit-error rollback timed out",
+                )
+                .await
+                .is_ok()
+                    && !lease.cancel_claimed()
+                {
                     lease.finish_clean().await;
+                } else {
+                    lease.connection_mut().mark_closed();
+                    lease.finish_retired().await;
                 }
                 return Err(commit_err);
             }
         }
 
         if lease.cancel_claimed() {
+            if !self.owns_transaction {
+                lease.mark_ambient_failed_on_retire();
+                lease.finish_retired().await;
+                return Err(PostgresError::Operational(
+                    "COPY FROM finish was cancelled".to_string(),
+                ));
+            }
             lease.finish_retired().await;
         } else {
             lease.finish_clean().await;
@@ -1914,6 +2073,48 @@ struct BusyResetGuard {
 impl Drop for BusyResetGuard {
     fn drop(&mut self) {
         self.flag.store(false, Ordering::Release);
+    }
+}
+
+async fn run_lease_tx_step(
+    lease: &mut CopySessionLease,
+    is_commit: bool,
+    timeout_msg: &'static str,
+) -> Result<crate::TransactionDisposition, PostgresError> {
+    let already_cancelled = lease.cancel_claimed();
+    let cancel_notify = lease.cancel_notify();
+    let connect_timeout = lease.connect_timeout();
+    let conn = lease.connection_mut();
+    let cancel_timeout = async move {
+        if !already_cancelled {
+            cancel_notify.notified().await;
+        }
+        tokio::time::sleep(connect_timeout).await;
+    };
+    tokio::pin!(cancel_timeout);
+    let timed = if is_commit {
+        let fut = conn.commit();
+        tokio::pin!(fut);
+        tokio::select! {
+            biased;
+            res = &mut fut => Some(res),
+            () = &mut cancel_timeout => None,
+        }
+    } else {
+        let fut = tokio::time::timeout(connect_timeout, conn.rollback());
+        tokio::pin!(fut);
+        tokio::select! {
+            biased;
+            res = &mut fut => res.ok(),
+            () = &mut cancel_timeout => None,
+        }
+    };
+    match timed {
+        Some(res) => res,
+        None => {
+            conn.mark_closed();
+            Err(PostgresError::Operational(timeout_msg.to_string()))
+        }
     }
 }
 
@@ -2348,23 +2549,35 @@ impl SessionHandle {
 
         let mut lease = self.checkout_for_copy(op_gen, owner).await?;
         let start_res = {
+            let already_cancelled = lease.cancel_claimed();
             let cancel_notify = lease.cancel_notify();
             let timeout = lease.connect_timeout();
             let conn = lease.connection_mut();
-            let start_fut = conn.start_copy_in(&copy_sql);
-            tokio::pin!(start_fut);
-            let cancel_timeout = async {
-                cancel_notify.notified().await;
-                tokio::time::sleep(timeout).await;
+            let timed = {
+                let start_fut = conn.start_copy_in(&copy_sql);
+                tokio::pin!(start_fut);
+                let cancel_timeout = async move {
+                    if !already_cancelled {
+                        cancel_notify.notified().await;
+                    }
+                    tokio::time::sleep(timeout).await;
+                };
+                tokio::pin!(cancel_timeout);
+                tokio::select! {
+                    biased;
+                    res = &mut start_fut => Some(res),
+                    () = &mut cancel_timeout => None,
+                }
             };
-            tokio::pin!(cancel_timeout);
-            tokio::select! {
-                biased;
-                res = &mut start_fut => res,
-                () = &mut cancel_timeout => Err(PostgresError::Operational(
-                    "cancelled COPY FROM Arrow start timed out while draining wire response"
-                        .to_string(),
-                )),
+            match timed {
+                Some(res) => res,
+                None => {
+                    conn.mark_closed();
+                    Err(PostgresError::Operational(
+                        "cancelled COPY FROM Arrow start timed out while draining wire response"
+                            .to_string(),
+                    ))
+                }
             }
         };
 

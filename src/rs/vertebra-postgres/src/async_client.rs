@@ -24,7 +24,9 @@ use crate::session::cancel::OperationGeneration;
 use crate::session::pipeline_scope::{
     PipelineScopeToken, extract_pipeline_batch, outcomes_to_python, pipeline_error_to_py,
 };
-use crate::session::{ClientBeginConnect, CloseAction, CommandBudget, SessionHandle};
+use crate::session::{
+    ClientBeginConnect, CloseAction, CommandBudget, CopyTaskCleanupGuard, SessionHandle,
+};
 use crate::sync_client::{
     OwnedBusyGuard, build_validated_config, copy_out_row_to_python, extract_arrow_batch_size,
     extract_batch_size, extract_cloud_auth_options, extract_copy_rows_and_oids,
@@ -110,6 +112,95 @@ impl PyAsyncPostgresClient {
     }
 }
 
+struct ActiveCopyStepState {
+    running: bool,
+    cancelled: bool,
+    cleanup_guard: Option<CopyTaskCleanupGuard>,
+}
+
+struct ActiveCopyStepCancel {
+    session: Arc<SessionHandle>,
+    lease_op_gen: OperationGeneration,
+    inner: std::sync::Mutex<ActiveCopyStepState>,
+}
+
+struct ActiveCopyStepGuard {
+    shared: Arc<ActiveCopyStepCancel>,
+    disarmed: bool,
+}
+
+impl ActiveCopyStepCancel {
+    fn new_pair(
+        session: &Arc<SessionHandle>,
+        lease_op_gen: OperationGeneration,
+    ) -> (Arc<Self>, ActiveCopyStepGuard) {
+        let shared = Arc::new(Self {
+            session: Arc::clone(session),
+            lease_op_gen,
+            inner: std::sync::Mutex::new(ActiveCopyStepState {
+                running: true,
+                cancelled: false,
+                cleanup_guard: None,
+            }),
+        });
+        let guard = ActiveCopyStepGuard {
+            shared: Arc::clone(&shared),
+            disarmed: false,
+        };
+        (shared, guard)
+    }
+
+    fn request_cancel(&self) {
+        let should_trigger = {
+            let mut st = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            if !st.running || st.cancelled {
+                false
+            } else {
+                st.cancelled = true;
+                st.cleanup_guard = self.session.begin_copy_task_cleanup(self.lease_op_gen);
+                true
+            }
+        };
+        if should_trigger {
+            self.session.trigger_async_cancel(self.lease_op_gen);
+        }
+    }
+
+    fn was_cancelled(&self) -> bool {
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .cancelled
+    }
+
+    fn take_on_finish(&self) -> Option<CopyTaskCleanupGuard> {
+        let mut st = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        st.running = false;
+        st.cleanup_guard.take()
+    }
+}
+
+impl ActiveCopyStepGuard {
+    fn was_cancelled(&self) -> bool {
+        self.shared.was_cancelled()
+    }
+
+    async fn finish(mut self) {
+        self.disarmed = true;
+        if let Some(cg) = self.shared.take_on_finish() {
+            cg.finish().await;
+        }
+    }
+}
+
+impl Drop for ActiveCopyStepGuard {
+    fn drop(&mut self) {
+        if !self.disarmed {
+            let _ = self.shared.take_on_finish();
+        }
+    }
+}
+
 /// Exclusive asynchronous binary `COPY ... TO STDOUT` iterator (`vertebra._postgres.AsyncPostgresCopyOut`).
 #[pyclass(
     name = "AsyncPostgresCopyOut",
@@ -151,12 +242,21 @@ impl PyAsyncPostgresCopyOut {
         if !self.closed_flag.load(Ordering::Acquire) && self.busy.load(Ordering::Acquire) {
             self.session.trigger_async_cancel(self.lease_op_gen);
         }
+        let cleanup_guard = self.session.begin_copy_task_cleanup(self.lease_op_gen);
         let stream = Arc::clone(&self.stream);
-        let awaitable = spawn_rust_db_task_with_attr(
+        let cancel_session = Arc::clone(&self.session);
+        let lease_op_gen = self.lease_op_gen;
+        spawn_rust_db_task_with_attr_and_cancel(
             py,
             async move {
-                let mut guard = stream.lock().await;
-                guard.close().await
+                let res = {
+                    let mut guard = stream.lock().await;
+                    guard.close().await
+                };
+                if let Some(cg) = cleanup_guard {
+                    cg.finish().await;
+                }
+                res
             },
             move |py, ()| {
                 if return_false {
@@ -166,9 +266,11 @@ impl PyAsyncPostgresCopyOut {
                 }
             },
             postgres_error_to_py,
+            move || {
+                cancel_session.trigger_async_cancel(lease_op_gen);
+            },
             POSTGRES_COMPLETION_DRAINER_ATTR,
-        )?;
-        Bound::new(py, awaitable)
+        )
     }
 }
 
@@ -192,28 +294,39 @@ impl PyAsyncPostgresCopyOut {
                 PostgresError::Interface("cannot read from a closed COPY TO stream".to_string()),
             ));
         }
+        let (cancel_ctl, step_guard) =
+            ActiveCopyStepCancel::new_pair(&self.session, self.lease_op_gen);
         let stream = Arc::clone(&self.stream);
         let session = Arc::clone(&self.session);
-        let cancel_session = Arc::clone(&self.session);
         let lease_op_gen = self.lease_op_gen;
         let awaitable = spawn_rust_db_task_with_attr_and_cancel(
             py,
             async move {
                 let _keep_busy = busy_guard;
-                let mut guard = stream.lock().await;
-                if session.did_op_claim_cancel(lease_op_gen) && !guard.is_closed() {
-                    let _ = guard.close().await;
-                    return Err(PostgresError::Operational(
-                        "COPY TO stream was cancelled".to_string(),
-                    ));
-                }
-                let res = guard.next_row().await;
-                if session.did_op_claim_cancel(lease_op_gen) && !guard.is_closed() {
-                    let _ = guard.close().await;
-                    return Err(PostgresError::Operational(
-                        "COPY TO stream was cancelled".to_string(),
-                    ));
-                }
+                let res = {
+                    let mut guard = stream.lock().await;
+                    if (step_guard.was_cancelled() || session.did_op_claim_cancel(lease_op_gen))
+                        && !guard.is_closed()
+                    {
+                        let _ = guard.close().await;
+                        Err(PostgresError::Operational(
+                            "COPY TO stream was cancelled".to_string(),
+                        ))
+                    } else {
+                        let r = guard.next_row().await;
+                        if (step_guard.was_cancelled() || session.did_op_claim_cancel(lease_op_gen))
+                            && !guard.is_closed()
+                        {
+                            let _ = guard.close().await;
+                            Err(PostgresError::Operational(
+                                "COPY TO stream was cancelled".to_string(),
+                            ))
+                        } else {
+                            r
+                        }
+                    }
+                };
+                step_guard.finish().await;
                 res
             },
             |py, opt_row| match opt_row {
@@ -222,7 +335,7 @@ impl PyAsyncPostgresCopyOut {
             },
             postgres_error_to_py,
             move || {
-                cancel_session.trigger_async_cancel(lease_op_gen);
+                cancel_ctl.request_cancel();
             },
             POSTGRES_COMPLETION_DRAINER_ATTR,
         )?;
@@ -308,20 +421,30 @@ impl PyAsyncPostgresCopyIn {
         reason: &'static str,
         err: PyErr,
     ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+        let cleanup_guard = self.session.begin_copy_task_cleanup(self.lease_op_gen);
         let stream = Arc::clone(&self.stream);
-        let awaitable = spawn_rust_db_task_with_attr(
+        let cancel_session = Arc::clone(&self.session);
+        let lease_op_gen = self.lease_op_gen;
+        spawn_rust_db_task_with_attr_and_cancel(
             py,
             async move {
                 let _keep_busy = busy_guard;
-                let mut guard = stream.lock().await;
-                let _ = guard.abort(reason).await;
+                {
+                    let mut guard = stream.lock().await;
+                    let _ = guard.abort(reason).await;
+                }
+                if let Some(cg) = cleanup_guard {
+                    cg.finish().await;
+                }
                 Ok::<(), PostgresError>(())
             },
             move |_py, ()| Err(err),
             postgres_error_to_py,
+            move || {
+                cancel_session.trigger_async_cancel(lease_op_gen);
+            },
             POSTGRES_COMPLETION_DRAINER_ATTR,
-        )?;
-        Bound::new(py, awaitable)
+        )
     }
 
     fn spawn_close<'py>(
@@ -332,12 +455,21 @@ impl PyAsyncPostgresCopyIn {
         if !self.closed_flag.load(Ordering::Acquire) && self.busy.load(Ordering::Acquire) {
             self.session.trigger_async_cancel(self.lease_op_gen);
         }
+        let cleanup_guard = self.session.begin_copy_task_cleanup(self.lease_op_gen);
         let stream = Arc::clone(&self.stream);
-        let awaitable = spawn_rust_db_task_with_attr(
+        let cancel_session = Arc::clone(&self.session);
+        let lease_op_gen = self.lease_op_gen;
+        spawn_rust_db_task_with_attr_and_cancel(
             py,
             async move {
-                let mut guard = stream.lock().await;
-                guard.abort("COPY FROM closed before finish").await
+                let res = {
+                    let mut guard = stream.lock().await;
+                    guard.abort("COPY FROM closed before finish").await
+                };
+                if let Some(cg) = cleanup_guard {
+                    cg.finish().await;
+                }
+                res
             },
             move |py, ()| {
                 if return_false {
@@ -347,9 +479,11 @@ impl PyAsyncPostgresCopyIn {
                 }
             },
             postgres_error_to_py,
+            move || {
+                cancel_session.trigger_async_cancel(lease_op_gen);
+            },
             POSTGRES_COMPLETION_DRAINER_ATTR,
-        )?;
-        Bound::new(py, awaitable)
+        )
     }
 }
 
@@ -382,67 +516,47 @@ impl PyAsyncPostgresCopyIn {
                 );
             }
         };
+        let (cancel_ctl, step_guard) =
+            ActiveCopyStepCancel::new_pair(&self.session, self.lease_op_gen);
         let stream = Arc::clone(&self.stream);
         let session = Arc::clone(&self.session);
-        let cancel_session = Arc::clone(&self.session);
         let lease_op_gen = self.lease_op_gen;
-        let timeout = session.config().connect_timeout;
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let cancelled_cb = Arc::clone(&cancelled);
-        let cancel_notify = Arc::new(tokio::sync::Notify::new());
-        let cancel_notify_cb = Arc::clone(&cancel_notify);
         spawn_rust_db_task_with_attr_and_cancel(
             py,
             async move {
                 let _keep_busy = busy_guard;
-                let mut guard = stream.lock().await;
-                if cancelled.load(Ordering::Acquire) || session.did_op_claim_cancel(lease_op_gen) {
-                    let _ = guard.abort("COPY FROM cancelled").await;
-                    return Err(PostgresError::Operational(
-                        "COPY FROM write was cancelled".to_string(),
-                    ));
-                }
-                let write_res = {
-                    let write_fut = guard.write_rows(&oids, &pg_rows);
-                    tokio::pin!(write_fut);
-                    let stall_timeout = async {
-                        cancel_notify.notified().await;
-                        tokio::time::sleep(timeout).await;
-                    };
-                    tokio::pin!(stall_timeout);
-                    tokio::select! {
-                        biased;
-                        res = &mut write_fut => Some(res),
-                        () = &mut stall_timeout => None,
-                    }
-                };
-                match write_res {
-                    Some(Ok(())) => {
-                        if cancelled.load(Ordering::Acquire)
-                            || session.did_op_claim_cancel(lease_op_gen)
-                        {
-                            let _ = guard.abort("COPY FROM cancelled").await;
-                            return Err(PostgresError::Operational(
-                                "COPY FROM write was cancelled".to_string(),
-                            ));
-                        }
-                        Ok(())
-                    }
-                    Some(Err(err)) => Err(err),
-                    None => {
+                let res = {
+                    let mut guard = stream.lock().await;
+                    if (step_guard.was_cancelled() || session.did_op_claim_cancel(lease_op_gen))
+                        && !guard.is_closed()
+                    {
                         let _ = guard.abort("COPY FROM cancelled").await;
                         Err(PostgresError::Operational(
-                            "cancelled COPY FROM write timed out".to_string(),
+                            "COPY FROM write was cancelled".to_string(),
                         ))
+                    } else {
+                        let wres = guard.write_rows(&oids, &pg_rows).await;
+                        if wres.is_ok()
+                            && (step_guard.was_cancelled()
+                                || session.did_op_claim_cancel(lease_op_gen))
+                            && !guard.is_closed()
+                        {
+                            let _ = guard.abort("COPY FROM cancelled").await;
+                            Err(PostgresError::Operational(
+                                "COPY FROM write was cancelled".to_string(),
+                            ))
+                        } else {
+                            wres
+                        }
                     }
-                }
+                };
+                step_guard.finish().await;
+                res
             },
             |py, ()| Ok(py.None()),
             postgres_error_to_py,
             move || {
-                cancelled_cb.store(true, Ordering::Release);
-                cancel_session.trigger_async_cancel(lease_op_gen);
-                cancel_notify_cb.notify_waiters();
+                cancel_ctl.request_cancel();
             },
             POSTGRES_COMPLETION_DRAINER_ATTR,
         )
@@ -474,67 +588,47 @@ impl PyAsyncPostgresCopyIn {
                 );
             }
         };
+        let (cancel_ctl, step_guard) =
+            ActiveCopyStepCancel::new_pair(&self.session, self.lease_op_gen);
         let stream = Arc::clone(&self.stream);
         let session = Arc::clone(&self.session);
-        let cancel_session = Arc::clone(&self.session);
         let lease_op_gen = self.lease_op_gen;
-        let timeout = session.config().connect_timeout;
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let cancelled_cb = Arc::clone(&cancelled);
-        let cancel_notify = Arc::new(tokio::sync::Notify::new());
-        let cancel_notify_cb = Arc::clone(&cancel_notify);
         spawn_rust_db_task_with_attr_and_cancel(
             py,
             async move {
                 let _keep_busy = busy_guard;
-                let mut guard = stream.lock().await;
-                if cancelled.load(Ordering::Acquire) || session.did_op_claim_cancel(lease_op_gen) {
-                    let _ = guard.abort("COPY FROM Arrow cancelled").await;
-                    return Err(PostgresError::Operational(
-                        "COPY FROM Arrow write was cancelled".to_string(),
-                    ));
-                }
-                let write_res = {
-                    let write_fut = guard.write_arrow_ipc(&ipc_bytes);
-                    tokio::pin!(write_fut);
-                    let stall_timeout = async {
-                        cancel_notify.notified().await;
-                        tokio::time::sleep(timeout).await;
-                    };
-                    tokio::pin!(stall_timeout);
-                    tokio::select! {
-                        biased;
-                        res = &mut write_fut => Some(res),
-                        () = &mut stall_timeout => None,
-                    }
-                };
-                match write_res {
-                    Some(Ok(())) => {
-                        if cancelled.load(Ordering::Acquire)
-                            || session.did_op_claim_cancel(lease_op_gen)
-                        {
-                            let _ = guard.abort("COPY FROM Arrow cancelled").await;
-                            return Err(PostgresError::Operational(
-                                "COPY FROM Arrow write was cancelled".to_string(),
-                            ));
-                        }
-                        Ok(())
-                    }
-                    Some(Err(err)) => Err(err),
-                    None => {
+                let res = {
+                    let mut guard = stream.lock().await;
+                    if (step_guard.was_cancelled() || session.did_op_claim_cancel(lease_op_gen))
+                        && !guard.is_closed()
+                    {
                         let _ = guard.abort("COPY FROM Arrow cancelled").await;
                         Err(PostgresError::Operational(
-                            "cancelled COPY FROM Arrow write timed out".to_string(),
+                            "COPY FROM Arrow write was cancelled".to_string(),
                         ))
+                    } else {
+                        let wres = guard.write_arrow_ipc(&ipc_bytes).await;
+                        if wres.is_ok()
+                            && (step_guard.was_cancelled()
+                                || session.did_op_claim_cancel(lease_op_gen))
+                            && !guard.is_closed()
+                        {
+                            let _ = guard.abort("COPY FROM Arrow cancelled").await;
+                            Err(PostgresError::Operational(
+                                "COPY FROM Arrow write was cancelled".to_string(),
+                            ))
+                        } else {
+                            wres
+                        }
                     }
-                }
+                };
+                step_guard.finish().await;
+                res
             },
             |py, ()| Ok(py.None()),
             postgres_error_to_py,
             move || {
-                cancelled_cb.store(true, Ordering::Release);
-                cancel_session.trigger_async_cancel(lease_op_gen);
-                cancel_notify_cb.notify_waiters();
+                cancel_ctl.request_cancel();
             },
             POSTGRES_COMPLETION_DRAINER_ATTR,
         )
@@ -551,49 +645,35 @@ impl PyAsyncPostgresCopyIn {
                 ),
             ));
         }
+        let (cancel_ctl, step_guard) =
+            ActiveCopyStepCancel::new_pair(&self.session, self.lease_op_gen);
         let stream = Arc::clone(&self.stream);
         let session = Arc::clone(&self.session);
-        let cancel_session = Arc::clone(&self.session);
-        let closed_flag = Arc::clone(&self.closed_flag);
         let lease_op_gen = self.lease_op_gen;
-        let timeout = session.config().connect_timeout;
-        let cancel_notify = Arc::new(tokio::sync::Notify::new());
-        let cancel_notify_cb = Arc::clone(&cancel_notify);
         spawn_rust_db_task_with_attr_and_cancel(
             py,
             async move {
                 let _keep_busy = busy_guard;
-                let mut guard = stream.lock().await;
-                if session.did_op_claim_cancel(lease_op_gen) && !guard.is_closed() {
-                    let _ = guard.abort("COPY FROM finish cancelled").await;
-                    return Err(PostgresError::Operational(
-                        "COPY FROM finish was cancelled".to_string(),
-                    ));
-                }
-                let finish_fut = guard.finish();
-                tokio::pin!(finish_fut);
-                let stall_timeout = async {
-                    cancel_notify.notified().await;
-                    tokio::time::sleep(timeout).await;
-                };
-                tokio::pin!(stall_timeout);
-                tokio::select! {
-                    biased;
-                    res = &mut finish_fut => res,
-                    () = &mut stall_timeout => {
-                        closed_flag.store(true, Ordering::Release);
+                let res = {
+                    let mut guard = stream.lock().await;
+                    if (step_guard.was_cancelled() || session.did_op_claim_cancel(lease_op_gen))
+                        && !guard.is_closed()
+                    {
+                        let _ = guard.abort("COPY FROM finish cancelled").await;
                         Err(PostgresError::Operational(
-                            "cancelled COPY FROM finish timed out while awaiting server completion"
-                                .to_string(),
+                            "COPY FROM finish was cancelled".to_string(),
                         ))
+                    } else {
+                        guard.finish().await
                     }
-                }
+                };
+                step_guard.finish().await;
+                res
             },
             |py, rows| Ok(rows.into_pyobject(py)?.into_any().unbind()),
             postgres_error_to_py,
             move || {
-                cancel_session.trigger_async_cancel(lease_op_gen);
-                cancel_notify_cb.notify_waiters();
+                cancel_ctl.request_cancel();
             },
             POSTGRES_COMPLETION_DRAINER_ATTR,
         )
@@ -1018,7 +1098,7 @@ impl PyAsyncPostgresClient {
             .session
             .begin_close_action()
             .map_err(|e| postgres_error_to_py(py, e))?;
-        let timeout = self.session.config().connect_timeout;
+        let session = Arc::clone(&self.session);
         spawn_rust_db_task_with_attr(
             py,
             async move {
@@ -1028,7 +1108,7 @@ impl PyAsyncPostgresClient {
                     }
                     CloseAction::Immediate(None) => {}
                     CloseAction::WaitInFlight(notified) => {
-                        let _ = tokio::time::timeout(timeout, notified).await;
+                        session.wait_close_inflight(notified).await;
                     }
                 }
                 Ok::<(), PostgresError>(())

@@ -27,6 +27,202 @@ __all__ = (
 
 DEFAULT_ARROW_COPY_MAX_ROWS: Final[int] = 65_536
 DEFAULT_ARROW_COPY_MAX_BYTES: Final[int] = 8 * 1024 * 1024
+
+
+def iter_arrow_ipc_batches(
+    source: Any,
+    *,
+    max_rows: int = DEFAULT_ARROW_COPY_MAX_ROWS,
+    max_bytes: int = DEFAULT_ARROW_COPY_MAX_BYTES,
+) -> Iterator[bytes]:
+    """Yield bounded self-contained Arrow IPC stream chunks without materializing Python rows.
+
+    Args:
+        source: Input `pyarrow.Table`, `pyarrow.RecordBatch`, `pyarrow.RecordBatchReader`,
+            `ArrowCursor`, Arrow IPC buffer, or `__arrow_c_stream__` object.
+        max_rows: Maximum number of rows serialized into a single IPC chunk before splitting.
+        max_bytes: Maximum serialized IPC stream byte length per yielded chunk.
+
+    Returns:
+        An iterator yielding self-contained Arrow IPC stream payloads (`<= max_bytes`), or a
+        single zero-row schema-only IPC stream when `source` contains zero rows.
+
+    Raises:
+        MissingDependencyError: When `pyarrow` is not installed.
+        DataError: When `source` is invalid or a single row exceeds `max_bytes`.
+    """
+    _validate_limits(max_rows, max_bytes)
+    pa = ensure_pyarrow()
+    return _iter_sync_chunks(pa, source, max_rows=max_rows, max_bytes=max_bytes)
+
+
+async def aiter_arrow_ipc_batches(
+    source: Any,
+    *,
+    max_rows: int = DEFAULT_ARROW_COPY_MAX_ROWS,
+    max_bytes: int = DEFAULT_ARROW_COPY_MAX_BYTES,
+) -> AsyncIterator[bytes]:
+    """Asynchronously yield bounded self-contained Arrow IPC stream chunks without row materialization.
+
+    Args:
+        source: Input Arrow source supported by `iter_arrow_ipc_batches`, or an async iterable
+            of Arrow sources / `RecordBatch` values.
+        max_rows: Maximum number of rows serialized into a single IPC chunk before splitting.
+        max_bytes: Maximum serialized IPC stream byte length per yielded chunk.
+
+    Yields:
+        Self-contained Arrow IPC stream payloads (`<= max_bytes`), or one zero-row schema-only
+        IPC stream when `source` yields zero rows.
+
+    Raises:
+        MissingDependencyError: When `pyarrow` is not installed.
+        DataError: When `source` is invalid, lacks a schema when empty, or exceeds `max_bytes`
+            for a single row.
+    """
+    _validate_limits(max_rows, max_bytes)
+    pa = ensure_pyarrow()
+    if hasattr(source, "__aiter__"):
+        ait = source.__aiter__()
+        emitted_any = False
+        inferred_schema: Any = getattr(source, "schema", None)
+        try:
+            async for item in ait:
+                with contextlib.closing(
+                    _iter_sync_chunks(pa, item, max_rows=max_rows, max_bytes=max_bytes)
+                ) as sub_chunks:
+                    item_schema = getattr(item, "schema", None)
+                    if inferred_schema is None and item_schema is not None:
+                        inferred_schema = item_schema
+                    for chunk in sub_chunks:
+                        if isinstance(item, (pa.RecordBatch, pa.Table)) and int(item.num_rows) == 0:
+                            continue
+                        emitted_any = True
+                        yield chunk
+            if not emitted_any:
+                if isinstance(inferred_schema, pa.Schema):
+                    yield _serialize_empty_schema_ipc(pa, inferred_schema, max_bytes=max_bytes)
+                else:
+                    msg = "empty asynchronous Arrow source does not expose a pyarrow.Schema"
+                    raise DataError(msg)
+        finally:
+            aclose_fn = getattr(ait, "aclose", None)
+            if callable(aclose_fn):
+                with contextlib.suppress(Exception):
+                    maybe_awaitable = aclose_fn()
+                    if inspect.isawaitable(maybe_awaitable):
+                        await maybe_awaitable
+        return
+
+    with contextlib.closing(_iter_sync_chunks(pa, source, max_rows=max_rows, max_bytes=max_bytes)) as chunks:
+        for chunk in chunks:
+            yield chunk
+
+
+def load_arrow_sync(
+    client: SyncPostgresClient,
+    table_name: str,
+    source: Any,
+    *,
+    columns: Sequence[str] | None = None,
+    schema_name: str | None = None,
+) -> int:
+    """Stream an Arrow source into PostgreSQL binary `COPY ... FROM STDIN` synchronously.
+
+    Args:
+        client: Synchronous native PostgreSQL client exposing `copy_from_arrow`.
+        table_name: Target PostgreSQL table identifier (literal when `schema_name` is supplied,
+            otherwise validated `table` or `schema.table`).
+        source: Arrow table, batch, reader, `ArrowCursor`, IPC buffer, or C-stream provider.
+        columns: Optional explicit ordered sequence of target column names.
+        schema_name: Optional literal target PostgreSQL schema name.
+
+    Returns:
+        Number of copied rows reported by PostgreSQL `CommandComplete`.
+    """
+    batches = iter_arrow_ipc_batches(source)
+    try:
+        try:
+            first_batch_ipc = next(batches)
+        except StopIteration as exc:
+            msg = "Arrow IPC batch iterator produced no schema payload"
+            raise DataError(msg) from exc
+
+        copy_in = client.copy_from_arrow(
+            table_name,
+            first_batch_ipc,
+            columns=columns,
+            schema_name=schema_name,
+        )
+        try:
+            for batch_ipc in batches:
+                copy_in.write_arrow_ipc(batch_ipc)
+            row_count = copy_in.finish()
+        except BaseException:
+            with contextlib.suppress(Exception):
+                copy_in.close()
+            raise
+        return int(row_count)
+    finally:
+        close_fn = getattr(batches, "close", None)
+        if callable(close_fn):
+            with contextlib.suppress(Exception):
+                close_fn()
+
+
+async def load_arrow_async(
+    client: AsyncPostgresClient,
+    table_name: str,
+    source: Any,
+    *,
+    columns: Sequence[str] | None = None,
+    schema_name: str | None = None,
+) -> int:
+    """Stream an Arrow source into PostgreSQL binary `COPY ... FROM STDIN` asynchronously.
+
+    Args:
+        client: Asynchronous native PostgreSQL client exposing `copy_from_arrow`.
+        table_name: Target PostgreSQL table identifier (literal when `schema_name` is supplied,
+            otherwise validated `table` or `schema.table`).
+        source: Arrow table, batch, reader, `ArrowCursor`, IPC buffer, C-stream provider, or
+            async batch iterable.
+        columns: Optional explicit ordered sequence of target column names.
+        schema_name: Optional literal target PostgreSQL schema name.
+
+    Returns:
+        Number of copied rows reported by PostgreSQL `CommandComplete`.
+    """
+    batches = aiter_arrow_ipc_batches(source)
+    try:
+        try:
+            first_batch_ipc = await anext(batches)
+        except StopAsyncIteration as exc:
+            msg = "Arrow IPC batch iterator produced no schema payload"
+            raise DataError(msg) from exc
+
+        copy_in = await client.copy_from_arrow(
+            table_name,
+            first_batch_ipc,
+            columns=columns,
+            schema_name=schema_name,
+        )
+        try:
+            async for batch_ipc in batches:
+                await copy_in.write_arrow_ipc(batch_ipc)
+            row_count = await copy_in.finish()
+        except BaseException:
+            with contextlib.suppress(Exception):
+                await copy_in.aclose()
+            raise
+        return int(row_count)
+    finally:
+        aclose_fn = getattr(batches, "aclose", None)
+        if callable(aclose_fn):
+            with contextlib.suppress(Exception):
+                maybe_awaitable = aclose_fn()
+                if inspect.isawaitable(maybe_awaitable):
+                    await maybe_awaitable
+
+
 _VTBARROW_MAGIC: Final[bytes] = b"VTBARROW"
 _VTBARROW_HEADER_SIZE: Final[int] = 16
 
@@ -237,197 +433,3 @@ def _iter_sync_chunks(
         "pyarrow.RecordBatchReader, ArrowCursor, Arrow IPC buffer, or __arrow_c_stream__ provider"
     )
     raise DataError(msg)
-
-
-def iter_arrow_ipc_batches(
-    source: Any,
-    *,
-    max_rows: int = DEFAULT_ARROW_COPY_MAX_ROWS,
-    max_bytes: int = DEFAULT_ARROW_COPY_MAX_BYTES,
-) -> Iterator[bytes]:
-    """Yield bounded self-contained Arrow IPC stream chunks without materializing Python rows.
-
-    Args:
-        source: Input `pyarrow.Table`, `pyarrow.RecordBatch`, `pyarrow.RecordBatchReader`,
-            `ArrowCursor`, Arrow IPC buffer, or `__arrow_c_stream__` object.
-        max_rows: Maximum number of rows serialized into a single IPC chunk before splitting.
-        max_bytes: Maximum serialized IPC stream byte length per yielded chunk.
-
-    Returns:
-        An iterator yielding self-contained Arrow IPC stream payloads (`<= max_bytes`), or a
-        single zero-row schema-only IPC stream when `source` contains zero rows.
-
-    Raises:
-        MissingDependencyError: When `pyarrow` is not installed.
-        DataError: When `source` is invalid or a single row exceeds `max_bytes`.
-    """
-    _validate_limits(max_rows, max_bytes)
-    pa = ensure_pyarrow()
-    return _iter_sync_chunks(pa, source, max_rows=max_rows, max_bytes=max_bytes)
-
-
-async def aiter_arrow_ipc_batches(
-    source: Any,
-    *,
-    max_rows: int = DEFAULT_ARROW_COPY_MAX_ROWS,
-    max_bytes: int = DEFAULT_ARROW_COPY_MAX_BYTES,
-) -> AsyncIterator[bytes]:
-    """Asynchronously yield bounded self-contained Arrow IPC stream chunks without row materialization.
-
-    Args:
-        source: Input Arrow source supported by `iter_arrow_ipc_batches`, or an async iterable
-            of Arrow sources / `RecordBatch` values.
-        max_rows: Maximum number of rows serialized into a single IPC chunk before splitting.
-        max_bytes: Maximum serialized IPC stream byte length per yielded chunk.
-
-    Yields:
-        Self-contained Arrow IPC stream payloads (`<= max_bytes`), or one zero-row schema-only
-        IPC stream when `source` yields zero rows.
-
-    Raises:
-        MissingDependencyError: When `pyarrow` is not installed.
-        DataError: When `source` is invalid, lacks a schema when empty, or exceeds `max_bytes`
-            for a single row.
-    """
-    _validate_limits(max_rows, max_bytes)
-    pa = ensure_pyarrow()
-    if hasattr(source, "__aiter__"):
-        ait = source.__aiter__()
-        emitted_any = False
-        inferred_schema: Any = getattr(source, "schema", None)
-        try:
-            async for item in ait:
-                with contextlib.closing(
-                    _iter_sync_chunks(pa, item, max_rows=max_rows, max_bytes=max_bytes)
-                ) as sub_chunks:
-                    item_schema = getattr(item, "schema", None)
-                    if inferred_schema is None and item_schema is not None:
-                        inferred_schema = item_schema
-                    for chunk in sub_chunks:
-                        if isinstance(item, (pa.RecordBatch, pa.Table)) and int(item.num_rows) == 0:
-                            continue
-                        emitted_any = True
-                        yield chunk
-            if not emitted_any:
-                if isinstance(inferred_schema, pa.Schema):
-                    yield _serialize_empty_schema_ipc(pa, inferred_schema, max_bytes=max_bytes)
-                else:
-                    msg = "empty asynchronous Arrow source does not expose a pyarrow.Schema"
-                    raise DataError(msg)
-        finally:
-            aclose_fn = getattr(ait, "aclose", None)
-            if callable(aclose_fn):
-                with contextlib.suppress(Exception):
-                    maybe_awaitable = aclose_fn()
-                    if inspect.isawaitable(maybe_awaitable):
-                        await maybe_awaitable
-        return
-
-    with contextlib.closing(_iter_sync_chunks(pa, source, max_rows=max_rows, max_bytes=max_bytes)) as chunks:
-        for chunk in chunks:
-            yield chunk
-
-
-def load_arrow_sync(
-    client: SyncPostgresClient,
-    table_name: str,
-    source: Any,
-    *,
-    columns: Sequence[str] | None = None,
-    schema_name: str | None = None,
-) -> int:
-    """Stream an Arrow source into PostgreSQL binary `COPY ... FROM STDIN` synchronously.
-
-    Args:
-        client: Synchronous native PostgreSQL client exposing `copy_from_arrow`.
-        table_name: Target PostgreSQL table identifier (literal when `schema_name` is supplied,
-            otherwise validated `table` or `schema.table`).
-        source: Arrow table, batch, reader, `ArrowCursor`, IPC buffer, or C-stream provider.
-        columns: Optional explicit ordered sequence of target column names.
-        schema_name: Optional literal target PostgreSQL schema name.
-
-    Returns:
-        Number of copied rows reported by PostgreSQL `CommandComplete`.
-    """
-    batches = iter_arrow_ipc_batches(source)
-    try:
-        try:
-            first_batch_ipc = next(batches)
-        except StopIteration as exc:
-            msg = "Arrow IPC batch iterator produced no schema payload"
-            raise DataError(msg) from exc
-
-        copy_in = client.copy_from_arrow(
-            table_name,
-            first_batch_ipc,
-            columns=columns,
-            schema_name=schema_name,
-        )
-        try:
-            for batch_ipc in batches:
-                copy_in.write_arrow_ipc(batch_ipc)
-            row_count = copy_in.finish()
-        except BaseException:
-            with contextlib.suppress(Exception):
-                copy_in.close()
-            raise
-        return int(row_count)
-    finally:
-        close_fn = getattr(batches, "close", None)
-        if callable(close_fn):
-            with contextlib.suppress(Exception):
-                close_fn()
-
-
-async def load_arrow_async(
-    client: AsyncPostgresClient,
-    table_name: str,
-    source: Any,
-    *,
-    columns: Sequence[str] | None = None,
-    schema_name: str | None = None,
-) -> int:
-    """Stream an Arrow source into PostgreSQL binary `COPY ... FROM STDIN` asynchronously.
-
-    Args:
-        client: Asynchronous native PostgreSQL client exposing `copy_from_arrow`.
-        table_name: Target PostgreSQL table identifier (literal when `schema_name` is supplied,
-            otherwise validated `table` or `schema.table`).
-        source: Arrow table, batch, reader, `ArrowCursor`, IPC buffer, C-stream provider, or
-            async batch iterable.
-        columns: Optional explicit ordered sequence of target column names.
-        schema_name: Optional literal target PostgreSQL schema name.
-
-    Returns:
-        Number of copied rows reported by PostgreSQL `CommandComplete`.
-    """
-    batches = aiter_arrow_ipc_batches(source)
-    try:
-        try:
-            first_batch_ipc = await anext(batches)
-        except StopAsyncIteration as exc:
-            msg = "Arrow IPC batch iterator produced no schema payload"
-            raise DataError(msg) from exc
-
-        copy_in = await client.copy_from_arrow(
-            table_name,
-            first_batch_ipc,
-            columns=columns,
-            schema_name=schema_name,
-        )
-        try:
-            async for batch_ipc in batches:
-                await copy_in.write_arrow_ipc(batch_ipc)
-            row_count = await copy_in.finish()
-        except BaseException:
-            with contextlib.suppress(Exception):
-                await copy_in.aclose()
-            raise
-        return int(row_count)
-    finally:
-        aclose_fn = getattr(batches, "aclose", None)
-        if callable(aclose_fn):
-            with contextlib.suppress(Exception):
-                maybe_awaitable = aclose_fn()
-                if inspect.isawaitable(maybe_awaitable):
-                    await maybe_awaitable

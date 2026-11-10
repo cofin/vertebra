@@ -12,6 +12,7 @@ import socket
 import struct
 import sys
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -488,12 +489,20 @@ class _CopyPeerState:
     copy_in_entered: threading.Event = field(default_factory=threading.Event)
     copy_out_row1_sent: threading.Event = field(default_factory=threading.Event)
     copy_in_ready: threading.Event = field(default_factory=threading.Event)
+    copy_data_stalled: threading.Event = field(default_factory=threading.Event)
+    copy_fail_entered: threading.Event = field(default_factory=threading.Event)
     finish_entered: threading.Event = field(default_factory=threading.Event)
+    commit_entered: threading.Event = field(default_factory=threading.Event)
     release_finish: threading.Event = field(default_factory=threading.Event)
     stall_first_preflight: bool = False
     stall_first_copy_in: bool = False
     stall_copy_out_after_row1: bool = False
+    stall_copy_data_after_frames: int | None = None
     hold_finish_until_released: bool = False
+    hold_commit_until_released: bool = False
+    hold_copy_fail_until_cancel: bool = False
+    ignore_cancel_request: bool = False
+    delay_copy_out_cancel_reply_s: float = 0.0
     lock: threading.Lock = field(default_factory=threading.Lock)
 
 
@@ -547,6 +556,17 @@ def _serve_copy_connection(
                     conn.sendall(_pg_frame(b"C", b"BEGIN\x00") + _pg_frame(b"Z", b"T"))
                     continue
                 if sql in ("COMMIT", "ROLLBACK", "DISCARD ALL"):
+                    if sql == "COMMIT":
+                        should_hold_commit = False
+                        with state.lock:
+                            if state.hold_commit_until_released:
+                                state.hold_commit_until_released = False
+                                should_hold_commit = True
+                        if should_hold_commit:
+                            state.commit_entered.set()
+                            if state.ignore_cancel_request:
+                                state.release_finish.wait(timeout=5.0)
+                                return
                     in_tx = False
                     tx_failed = False
                     conn.sendall(_pg_frame(b"C", sql.encode("ascii") + b"\x00") + _pg_frame(b"Z", b"I"))
@@ -555,25 +575,47 @@ def _serve_copy_connection(
                     was_ambient = in_tx
                     ncols = _count_quoted_copy_cols(sql)
                     should_stall_start = False
+                    stall_data_limit: int | None = None
                     with state.lock:
                         if state.stall_first_copy_in:
                             state.stall_first_copy_in = False
                             should_stall_start = True
+                        if state.stall_copy_data_after_frames is not None:
+                            stall_data_limit = state.stall_copy_data_after_frames
+                            state.stall_copy_data_after_frames = None
                     if should_stall_start:
                         state.copy_in_entered.set()
                         state.cancel_received.wait(timeout=3.0)
                     conn.sendall(_pg_copy_in_binary(ncols))
                     state.copy_in_ready.set()
+                    if stall_data_limit == 0:
+                        state.copy_data_stalled.set()
+                        state.release_finish.wait(timeout=5.0)
+                        return
                     copy_buf = bytearray()
+                    copy_frames_seen = 0
                     while True:
-                        ctag, cbody = _read_frame(conn)
+                        try:
+                            ctag, cbody = _read_frame(conn)
+                        except (EOFError, OSError):
+                            return
                         if ctag == b"d":
                             copy_buf.extend(cbody)
+                            copy_frames_seen += 1
                             if len(copy_buf) > len(_PGCOPY_HEADER):
                                 state.first_tuple_on_wire.set()
+                            if stall_data_limit is not None and copy_frames_seen >= stall_data_limit:
+                                state.copy_data_stalled.set()
+                                state.release_finish.wait(timeout=5.0)
+                                return
                         elif ctag == b"c":
                             if state.hold_finish_until_released:
                                 state.finish_entered.set()
+                                if state.ignore_cancel_request:
+                                    with state.lock:
+                                        state.hold_finish_until_released = False
+                                    state.release_finish.wait(timeout=5.0)
+                                    return
                                 while not state.release_finish.is_set() and not state.cancel_received.is_set():
                                     state.release_finish.wait(timeout=0.02)
                                 if state.cancel_received.is_set() and not state.release_finish.is_set():
@@ -597,13 +639,22 @@ def _serve_copy_connection(
                             break
                         elif ctag == b"f":
                             reason = cbody.rstrip(b"\x00").decode("utf-8", errors="replace")
+                            hold_fail = False
                             with state.lock:
                                 state.aborted_copies.append((sql, bytes(copy_buf), reason))
                                 state.events.append(f"COPY_FAIL:{reason}")
+                                if state.hold_copy_fail_until_cancel:
+                                    state.hold_copy_fail_until_cancel = False
+                                    hold_fail = True
+                            state.copy_fail_entered.set()
+                            if hold_fail:
+                                state.cancel_received.wait(timeout=2.0)
+                                time.sleep(0.03)
                             if in_tx:
                                 tx_failed = True
                             tx_byte = b"E" if tx_failed else (b"T" if in_tx else b"I")
-                            conn.sendall(_pg_error("57014", reason) + _pg_frame(b"Z", tx_byte))
+                            with contextlib.suppress(OSError):
+                                conn.sendall(_pg_error("57014", reason) + _pg_frame(b"Z", tx_byte))
                             break
                     continue
 
@@ -611,11 +662,20 @@ def _serve_copy_connection(
                     rows_out = list(state.copy_out_rows)
                     ncols = len(rows_out[0]) if rows_out else 1
                     conn.sendall(_pg_copy_out_binary(ncols))
-                    if state.stall_copy_out_after_row1 and rows_out:
+                    should_stall_out = False
+                    delay_cancel_s = 0.0
+                    with state.lock:
+                        if state.stall_copy_out_after_row1 and rows_out:
+                            should_stall_out = True
+                            delay_cancel_s = state.delay_copy_out_cancel_reply_s
+                            state.delay_copy_out_cancel_reply_s = 0.0
+                    if should_stall_out:
                         first_chunk = _PGCOPY_HEADER + _encode_binary_tuple(rows_out[0])
                         conn.sendall(_pg_frame(b"d", first_chunk))
                         state.copy_out_row1_sent.set()
                         cancelled = state.cancel_received.wait(timeout=3.0)
+                        if cancelled and delay_cancel_s > 0.0:
+                            time.sleep(delay_cancel_s)
                         tx_byte = b"E" if (cancelled and in_tx) else (b"T" if in_tx else b"I")
                         if cancelled:
                             with contextlib.suppress(OSError):
@@ -736,6 +796,8 @@ def _running_copy_peer(state: _CopyPeerState | None = None) -> Iterator[tuple[in
     peer_state = state if state is not None else _CopyPeerState()
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    if peer_state.stall_copy_data_after_frames is not None:
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
     srv.bind(("127.0.0.1", 0))
     srv.listen(16)
     srv.settimeout(0.1)
@@ -3652,3 +3714,562 @@ def test_async_arrow_stream_cancellation_open_execute_and_queued_drainer_zero_sh
     else:
         assert "Q:ROLLBACK" in state.events
         assert any(ev.startswith("Close(P:") for ev in state.events)
+
+
+def _single_row_arrow_ipc(row_id: int = 1, label: str = "seed") -> bytes:
+    """Serialize a 1-row `(id: int32, label: utf8)` RecordBatch into an Arrow IPC stream."""
+    schema = pa.schema([("id", pa.int32()), ("label", pa.string())])
+    batch = pa.record_batch(
+        [pa.array([row_id], type=pa.int32()), pa.array([label], type=pa.string())],
+        schema=schema,
+    )
+    sink = pa.BufferOutputStream()
+    with pa.ipc.new_stream(sink, schema) as writer:
+        writer.write_batch(batch)
+    return bytes(sink.getvalue())
+
+
+def _large_arrow_ipc_batch() -> bytes:
+    """Build a 12 MiB (`<= 16 MiB`) multi-batch Arrow IPC stream with each batch `<= 8 MiB` to stall TCP send buffers."""
+    row_text = "w" * 32768
+    row_count = 64
+    schema = pa.schema([("id", pa.int32()), ("label", pa.string())])
+    unit_batch = pa.record_batch(
+        [
+            pa.array(list(range(row_count)), type=pa.int32()),
+            pa.array([row_text] * row_count, type=pa.string()),
+        ],
+        schema=schema,
+    )
+    sink = pa.BufferOutputStream()
+    with pa.ipc.new_stream(sink, schema) as writer:
+        writer.write_batch(unit_batch)
+        writer.write_batch(unit_batch)
+        writer.write_batch(unit_batch)
+        writer.write_batch(unit_batch)
+        writer.write_batch(unit_batch)
+        writer.write_batch(unit_batch)
+    return bytes(sink.getvalue())
+
+
+def _wrap_ipc_buffer(raw: bytes, kind: str) -> tuple[Any, Any]:
+    """Wrap raw Arrow IPC bytes into a read-only or writable buffer exporter returning (anchor, buf)."""
+    if kind == "bytes":
+        return raw, raw
+    if kind == "bytearray":
+        ba = bytearray(raw)
+        return ba, ba
+    if kind == "writable_mv":
+        ba = bytearray(raw)
+        return ba, memoryview(ba)
+    if kind == "sliced_writable_mv":
+        padded = bytearray(b"HEAD" + raw + b"TAIL")
+        full_mv = memoryview(padded)
+        return (padded, full_mv), full_mv[4 : 4 + len(raw)]
+    if kind == "readonly_mv":
+        return raw, memoryview(raw)
+    if kind == "writable_pa_buffer":
+        ba = bytearray(raw)
+        return ba, pa.py_buffer(ba)
+    msg = f"unexpected buffer kind {kind!r}"
+    raise AssertionError(msg)
+
+
+@pytest.mark.parametrize(
+    "blocked_step",
+    ("write_arrow_ipc", "write_rows", "finish_copy_done", "finish_commit"),
+)
+def test_async_copy_from_unresponsive_cancel_retains_pool_slot_until_close(
+    blocked_step: str,
+) -> None:
+    """Verify unresponsive CancelRequest during async CopyIn retires socket cleanly while retaining max_size=1 pool permit until close()."""
+    first_ipc = _single_row_arrow_ipc()
+    large_ipc = _large_arrow_ipc_batch() if blocked_step == "write_arrow_ipc" else b""
+    large_rows = [(idx, "r" * 32768) for idx in range(384)] if blocked_step == "write_rows" else []
+    stall_frames: int | None = None
+    if blocked_step == "write_arrow_ipc":
+        stall_frames = 1
+    elif blocked_step == "write_rows":
+        stall_frames = 0
+
+    peer_state = _CopyPeerState(
+        ignore_cancel_request=True,
+        stall_copy_data_after_frames=stall_frames,
+        hold_finish_until_released=(blocked_step == "finish_copy_done"),
+        hold_commit_until_released=(blocked_step == "finish_commit"),
+    )
+
+    async def _run(port: int, state: _CopyPeerState) -> None:
+        pool = AsyncPostgresPool(
+            host="127.0.0.1",
+            port=port,
+            user="postgres",
+            database="appdb",
+            sslmode="disable",
+            channel_binding="disable",
+            connect_timeout=0.15,
+            acquire_timeout=0.06,
+            min_size=0,
+            max_size=1,
+        )
+        try:
+            ac1 = await pool.acquire()
+            try:
+                if blocked_step == "write_rows":
+                    copy_in = await ac1.copy_from('COPY "public"."items" ("id", "label") FROM STDIN (FORMAT binary)')
+                    blocked_task: asyncio.Task[Any] = asyncio.create_task(
+                        _as_coro(copy_in.write(large_rows, [_INT4_OID, _TEXT_OID])),
+                    )
+                    assert await asyncio.to_thread(state.copy_data_stalled.wait, 2.0)
+                    await asyncio.sleep(0.03)
+                    assert not blocked_task.done()
+                elif blocked_step == "write_arrow_ipc":
+                    copy_in = await ac1.copy_from_arrow("items", first_ipc)
+                    assert await asyncio.to_thread(state.copy_data_stalled.wait, 2.0)
+                    blocked_task = asyncio.create_task(_as_coro(copy_in.write_arrow_ipc(large_ipc)))
+                    await asyncio.sleep(0.03)
+                    assert not blocked_task.done()
+                elif blocked_step == "finish_copy_done":
+                    copy_in = await ac1.copy_from_arrow("items", first_ipc)
+                    blocked_task = asyncio.create_task(_as_coro(copy_in.finish()))
+                    assert await asyncio.to_thread(state.finish_entered.wait, 2.0)
+                else:
+                    copy_in = await ac1.copy_from_arrow("items", first_ipc)
+                    blocked_task = asyncio.create_task(_as_coro(copy_in.finish()))
+                    assert await asyncio.to_thread(state.commit_entered.wait, 2.0)
+
+                blocked_task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await blocked_task
+                assert await asyncio.to_thread(state.cancel_received.wait, 1.0)
+
+                await asyncio.sleep(0.24)
+                with pytest.raises(InterfaceError):
+                    await copy_in.finish()
+                with pytest.raises(OperationalError):
+                    await pool.acquire()
+            finally:
+                await ac1.close()
+
+            ac2 = await pool.acquire()
+            try:
+                assert (await ac2.query("SELECT 1")).rows == ((1,),)
+            finally:
+                await ac2.close()
+        finally:
+            state.release_finish.set()
+            await pool.close()
+
+    with _running_copy_peer(peer_state) as (port, state):
+        asyncio.run(_run(port, state))
+
+    assert len(state.cancels) == 1
+    assert state.aborted_copies == []
+    assert state.startup_connections == 2
+
+
+@pytest.mark.parametrize(
+    ("blocked_step", "recovery"),
+    [
+        ("finish", "rollback_then_close"),
+        ("finish", "close_directly"),
+        ("write_arrow_ipc", "rollback_then_close"),
+    ],
+)
+def test_async_copy_from_ambient_tx_unresponsive_cancel_marks_ambient_failed(
+    blocked_step: str,
+    recovery: str,
+) -> None:
+    """Verify cancelled CopyIn inside ambient begin() with ignored CancelRequest enforces ambient_cancel_failed until rollback/close."""
+    first_ipc = _single_row_arrow_ipc()
+    large_ipc = _large_arrow_ipc_batch() if blocked_step == "write_arrow_ipc" else b""
+    peer_state = _CopyPeerState(
+        ignore_cancel_request=True,
+        stall_copy_data_after_frames=1 if blocked_step == "write_arrow_ipc" else None,
+        hold_finish_until_released=(blocked_step == "finish"),
+    )
+
+    async def _run(port: int, state: _CopyPeerState) -> None:
+        pool = AsyncPostgresPool(
+            host="127.0.0.1",
+            port=port,
+            user="postgres",
+            database="appdb",
+            sslmode="disable",
+            channel_binding="disable",
+            connect_timeout=0.15,
+            acquire_timeout=0.06,
+            min_size=0,
+            max_size=1,
+        )
+        try:
+            ac1 = await pool.acquire()
+            try:
+                await ac1.begin()
+                copy_in = await ac1.copy_from_arrow("items", first_ipc)
+                if blocked_step == "finish":
+                    task: asyncio.Task[Any] = asyncio.create_task(_as_coro(copy_in.finish()))
+                    assert await asyncio.to_thread(state.finish_entered.wait, 2.0)
+                else:
+                    assert await asyncio.to_thread(state.copy_data_stalled.wait, 2.0)
+                    task = asyncio.create_task(_as_coro(copy_in.write_arrow_ipc(large_ipc)))
+                    await asyncio.sleep(0.03)
+                    assert not task.done()
+
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+
+                with pytest.raises(InterfaceError, match="ambient transaction failed"):
+                    await ac1.commit()
+                with pytest.raises(InterfaceError, match="ambient transaction failed"):
+                    await ac1.query("SELECT 1")
+                with pytest.raises(OperationalError):
+                    await pool.acquire()
+
+                if recovery == "rollback_then_close":
+                    await ac1.rollback()
+                    with pytest.raises(OperationalError):
+                        await pool.acquire()
+            finally:
+                await ac1.close()
+
+            ac2 = await pool.acquire()
+            try:
+                assert (await ac2.query("SELECT 1")).rows == ((1,),)
+            finally:
+                await ac2.close()
+        finally:
+            state.release_finish.set()
+            await pool.close()
+
+    with _running_copy_peer(peer_state) as (port, state):
+        asyncio.run(_run(port, state))
+
+    assert len(state.cancels) == 1
+    assert state.aborted_copies == []
+    assert "Q:COMMIT" not in state.events
+    assert state.startup_connections == 2
+
+
+@pytest.mark.parametrize(
+    ("blocked_step", "ambient_tx"),
+    [
+        ("finish_copy_done", False),
+        ("finish_copy_done", True),
+        ("finish_commit", False),
+        ("write_arrow_ipc", False),
+    ],
+)
+def test_sync_copy_from_out_of_band_cancel_unresponsive_peer_bounds_and_retires(
+    blocked_step: str,
+    ambient_tx: bool,
+) -> None:
+    """Verify SyncPostgresClient.cancel() unblocks SyncPostgresCopyIn within connect_timeout when peer ignores CancelRequest."""
+    first_ipc = _single_row_arrow_ipc()
+    large_ipc = _large_arrow_ipc_batch() if blocked_step == "write_arrow_ipc" else b""
+    peer_state = _CopyPeerState(
+        ignore_cancel_request=True,
+        stall_copy_data_after_frames=1 if blocked_step == "write_arrow_ipc" else None,
+        hold_finish_until_released=(blocked_step == "finish_copy_done"),
+        hold_commit_until_released=(blocked_step == "finish_commit"),
+    )
+
+    with _running_copy_peer(peer_state) as (port, state):
+        pool = SyncPostgresPool(
+            host="127.0.0.1",
+            port=port,
+            user="postgres",
+            database="appdb",
+            sslmode="disable",
+            channel_binding="disable",
+            connect_timeout=0.15,
+            acquire_timeout=0.06,
+            min_size=0,
+            max_size=1,
+        )
+        try:
+            c1 = pool.acquire()
+            canceller: threading.Thread | None = None
+            try:
+                if ambient_tx:
+                    c1.begin()
+                copy_in = c1.copy_from_arrow("items", first_ipc)
+
+                def _cancel_when_blocked() -> None:
+                    if blocked_step == "finish_copy_done":
+                        assert state.finish_entered.wait(timeout=2.0)
+                    elif blocked_step == "finish_commit":
+                        assert state.commit_entered.wait(timeout=2.0)
+                    else:
+                        assert state.copy_data_stalled.wait(timeout=2.0)
+                        time.sleep(0.03)
+                    c1.cancel()
+
+                canceller = threading.Thread(target=_cancel_when_blocked, daemon=True)
+                canceller.start()
+                started = time.monotonic()
+                with pytest.raises(OperationalError):
+                    if blocked_step == "write_arrow_ipc":
+                        copy_in.write_arrow_ipc(large_ipc)
+                    else:
+                        copy_in.finish()
+                elapsed = time.monotonic() - started
+                assert elapsed < 1.5
+                canceller.join(timeout=2.0)
+
+                with pytest.raises(OperationalError):
+                    pool.acquire()
+
+                if ambient_tx:
+                    with pytest.raises(InterfaceError, match="ambient transaction failed"):
+                        c1.commit()
+                    with pytest.raises(InterfaceError, match="ambient transaction failed"):
+                        c1.query("SELECT 1")
+                    c1.rollback()
+            finally:
+                c1.close()
+                if canceller is not None:
+                    canceller.join(timeout=2.0)
+
+            c2 = pool.acquire()
+            try:
+                assert c2.query("SELECT 1").rows == ((1,),)
+            finally:
+                c2.close()
+        finally:
+            state.release_finish.set()
+            pool.close()
+
+    assert len(state.cancels) == 1
+    assert state.aborted_copies == []
+    assert state.startup_connections == 2
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    (
+        "copy_in_aclose",
+        "copy_in_aexit",
+        "copy_out_aclose",
+        "unawaited_bad_ipc_bytes",
+        "unawaited_bad_ipc_type",
+        "unawaited_bad_write_rows",
+    ),
+)
+def test_async_copy_cancelled_aclose_and_unawaited_bad_write_sync_with_client_close(
+    scenario: str,
+) -> None:
+    """Verify cancelled CopyIn/CopyOut aclose/__aexit__ and dropped unawaited bad write awaitables do not abort cleanup before client.close()."""
+    first_ipc = _single_row_arrow_ipc()
+    copy_out_rows: list[tuple[bytes | None, ...]] = [
+        (struct.pack("!i", 1), b"a"),
+        (struct.pack("!i", 2), b"b"),
+    ]
+    peer_state = _CopyPeerState(
+        copy_out_rows=copy_out_rows,
+        hold_copy_fail_until_cancel=scenario in ("copy_in_aclose", "copy_in_aexit"),
+        stall_copy_out_after_row1=(scenario == "copy_out_aclose"),
+        delay_copy_out_cancel_reply_s=0.05 if scenario == "copy_out_aclose" else 0.0,
+    )
+
+    async def _run(port: int, state: _CopyPeerState) -> None:
+        pool = AsyncPostgresPool(
+            host="127.0.0.1",
+            port=port,
+            user="postgres",
+            database="appdb",
+            sslmode="disable",
+            channel_binding="disable",
+            connect_timeout=0.35,
+            acquire_timeout=0.5,
+            min_size=0,
+            max_size=1,
+        )
+        try:
+            ac1 = await pool.acquire()
+            try:
+                if scenario == "copy_in_aclose":
+                    copy_in = await ac1.copy_from_arrow("items", first_ipc)
+                    t_close = asyncio.create_task(_as_coro(copy_in.aclose()))
+                    assert await asyncio.to_thread(state.copy_fail_entered.wait, 2.0)
+                    t_close.cancel()
+                    with pytest.raises(asyncio.CancelledError):
+                        await t_close
+                elif scenario == "copy_in_aexit":
+                    copy_in = await ac1.copy_from_arrow("items", first_ipc)
+
+                    async def _exit_scope() -> None:
+                        async with copy_in:
+                            pass
+
+                    t_exit = asyncio.create_task(_exit_scope())
+                    assert await asyncio.to_thread(state.copy_fail_entered.wait, 2.0)
+                    t_exit.cancel()
+                    with pytest.raises(asyncio.CancelledError):
+                        await t_exit
+                elif scenario == "copy_out_aclose":
+                    copy_out = await ac1.copy_to("COPY items TO STDOUT (FORMAT binary)")
+                    row1 = await anext(copy_out)
+                    assert row1 == copy_out_rows[0]
+                    t_out_close = asyncio.create_task(_as_coro(copy_out.aclose()))
+                    assert await asyncio.to_thread(state.cancel_received.wait, 2.0)
+                    t_out_close.cancel()
+                    with pytest.raises(asyncio.CancelledError):
+                        await t_out_close
+                elif scenario == "unawaited_bad_ipc_bytes":
+                    copy_in = await ac1.copy_from_arrow("items", first_ipc)
+                    unawaited_ipc = copy_in.write_arrow_ipc(b"bad")
+                    del unawaited_ipc
+                elif scenario == "unawaited_bad_ipc_type":
+                    copy_in = await ac1.copy_from_arrow("items", first_ipc)
+                    bad_arg: Any = 12345
+                    unawaited_type = copy_in.write_arrow_ipc(bad_arg)
+                    del unawaited_type
+                else:
+                    copy_in = await ac1.copy_from('COPY "public"."items" ("id", "label") FROM STDIN (FORMAT binary)')
+                    bad_rows: Any = "not_rows"
+                    unawaited_rows = copy_in.write(bad_rows, [_INT4_OID, _TEXT_OID])
+                    del unawaited_rows
+            finally:
+                await ac1.close()
+
+            ac2 = await pool.acquire()
+            try:
+                assert (await ac2.query("SELECT 1")).rows == ((1,),)
+            finally:
+                await ac2.close()
+        finally:
+            await pool.close()
+
+    with _running_copy_peer(peer_state) as (port, state):
+        asyncio.run(_run(port, state))
+
+    if scenario == "copy_out_aclose":
+        assert len(state.cancels) >= 1
+        assert state.startup_connections == 2
+    else:
+        assert len(state.aborted_copies) == 1
+        assert ("Q:ROLLBACK" in state.events) or (state.startup_connections == 2)
+
+
+@pytest.mark.parametrize("is_async", (False, True))
+@pytest.mark.parametrize(
+    "buf_kind",
+    ("bytes", "bytearray", "writable_mv", "sliced_writable_mv", "readonly_mv", "writable_pa_buffer"),
+)
+def test_copy_from_arrow_writable_and_readonly_buffers_roundtrip(
+    is_async: bool,
+    buf_kind: str,
+) -> None:
+    """Verify copy_from_arrow and write_arrow_ipc safely extract bytes, bytearray, read-only, and writable buffer views."""
+    schema, batches = _three_arrow_batches()
+    sink1 = pa.BufferOutputStream()
+    with pa.ipc.new_stream(sink1, schema) as w1:
+        w1.write_batch(batches[0])
+    sink2 = pa.BufferOutputStream()
+    with pa.ipc.new_stream(sink2, schema) as w2:
+        w2.write_batch(batches[1])
+        w2.write_batch(batches[2])
+    raw1 = bytes(sink1.getvalue())
+    raw2 = bytes(sink2.getvalue())
+
+    anchor1, buf1 = _wrap_ipc_buffer(raw1, buf_kind)
+    anchor2, buf2 = _wrap_ipc_buffer(raw2, buf_kind)
+
+    with _running_copy_peer() as (port, state):
+        if not is_async:
+            client = SyncPostgresClient(
+                host="127.0.0.1",
+                port=port,
+                user="postgres",
+                database="appdb",
+                sslmode="disable",
+                channel_binding="disable",
+            )
+            client.connect()
+            try:
+                copy_in = client.copy_from_arrow("items", buf1)
+                copy_in.write_arrow_ipc(buf2)
+                assert copy_in.finish() == 6
+            finally:
+                client.close()
+        else:
+
+            async def _run_async() -> int:
+                aclient = AsyncPostgresClient(
+                    host="127.0.0.1",
+                    port=port,
+                    user="postgres",
+                    database="appdb",
+                    sslmode="disable",
+                    channel_binding="disable",
+                )
+                await aclient.connect()
+                try:
+                    acopy = await aclient.copy_from_arrow("items", buf1)
+                    await acopy.write_arrow_ipc(buf2)
+                    return await acopy.finish()
+                finally:
+                    await aclient.close()
+
+            assert asyncio.run(_run_async()) == 6
+
+    _ = (anchor1, anchor2)
+    assert len(state.completed_copies) == 1
+    assert PostgreSQLCore.decode_pgcopy_rows(state.completed_copies[0][1]) == _expected_six_binary_tuples()
+
+
+@pytest.mark.parametrize(
+    ("bad_kind", "expected_exc"),
+    [
+        ("oversized_bytearray", DataError),
+        ("oversized_writable_mv", DataError),
+        ("oversized_writable_pa_buffer", DataError),
+        ("strided_writable_mv", BufferError),
+    ],
+)
+def test_copy_from_arrow_writable_buffer_size_cap_and_strided_rejection(
+    bad_kind: str,
+    expected_exc: type[BaseException],
+) -> None:
+    """Verify >16 MiB bytearray/writable buffer views raise DataError and strided writable views raise BufferError with zero initial frames."""
+    first_ipc = _single_row_arrow_ipc()
+    oversized_len = 16 * 1024 * 1024 + 1
+    if bad_kind == "oversized_bytearray":
+        anchor: Any = bytearray(oversized_len)
+        bad_buf: Any = anchor
+    elif bad_kind == "oversized_writable_mv":
+        anchor = bytearray(oversized_len)
+        bad_buf = memoryview(anchor)
+    elif bad_kind == "oversized_writable_pa_buffer":
+        anchor = bytearray(oversized_len)
+        bad_buf = pa.py_buffer(anchor)
+    else:
+        anchor = bytearray(b"abcdefgh")
+        bad_buf = memoryview(anchor)[::2]
+
+    with _running_copy_peer() as (port, state):
+        client = SyncPostgresClient(
+            host="127.0.0.1",
+            port=port,
+            user="postgres",
+            database="appdb",
+            sslmode="disable",
+            channel_binding="disable",
+        )
+        client.connect()
+        try:
+            with pytest.raises(expected_exc):
+                client.copy_from_arrow("items", bad_buf)
+            assert state.post_ready_frames == 0
+
+            copy_in = client.copy_from_arrow("items", first_ipc)
+            with pytest.raises(expected_exc):
+                copy_in.write_arrow_ipc(bad_buf)
+            assert client.query("SELECT 1").rows == ((1,),)
+        finally:
+            client.close()
+
+    _ = anchor
+    assert len(state.aborted_copies) == 1

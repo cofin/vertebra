@@ -2674,6 +2674,7 @@ pub(crate) struct SessionInner {
     close_after_inflight: bool,
     portal_cleanup_inflight: bool,
     copy_cleanup_inflight: bool,
+    copy_cleanup_tasks: usize,
     active_copy: bool,
     parameters: BTreeMap<String, String>,
     last_transaction_status: TransactionStatus,
@@ -2698,6 +2699,7 @@ impl SessionInner {
             close_after_inflight: false,
             portal_cleanup_inflight: false,
             copy_cleanup_inflight: false,
+            copy_cleanup_tasks: 0,
             active_copy: false,
             parameters: BTreeMap::new(),
             last_transaction_status: TransactionStatus::Idle,
@@ -2725,6 +2727,7 @@ impl SessionInner {
             close_after_inflight: false,
             portal_cleanup_inflight: false,
             copy_cleanup_inflight: false,
+            copy_cleanup_tasks: 0,
             active_copy: false,
             parameters,
             last_transaction_status: status,
@@ -2741,6 +2744,10 @@ impl SessionInner {
         let floor = self.next_op_generation.saturating_sub(4096);
         self.reserved_generations.retain(|&g| g >= floor);
         self.pre_cancelled_generations.retain(|&g| g >= floor);
+    }
+
+    const fn has_copy_cleanup(&self) -> bool {
+        self.copy_cleanup_inflight || self.copy_cleanup_tasks > 0
     }
 }
 
@@ -2989,7 +2996,7 @@ impl CopySessionLease {
             backing.mark_closed();
         }
         let sole_owner = Arc::strong_count(&self.session) == 1;
-        let close_backing = {
+        let (close_backing, drop_direct) = {
             let mut guard = self
                 .session
                 .shared
@@ -3002,12 +3009,8 @@ impl CopySessionLease {
                 .is_some_and(|op| op.cancel_claimed || op.retire_on_finish);
             guard.active_copy = false;
             guard.copy_cleanup_inflight = false;
-            guard.closing_inflight = false;
             guard.parameters = backing.parameters.clone();
             guard.last_transaction_status = backing.transaction_status();
-            if self.ambient_failed_on_retire {
-                guard.ambient_cancel_failed = true;
-            }
             if backing.transaction_status() == TransactionStatus::Idle
                 && guard.active_portal.is_none()
                 && guard.active_pipeline.is_none()
@@ -3022,28 +3025,39 @@ impl CopySessionLease {
             let close_now = guard.close_after_inflight || sole_owner;
             guard.close_after_inflight = false;
             if close_now {
+                guard.closing_inflight = true;
                 guard.pinned_owner = None;
                 guard.ambient_cancel_failed = false;
                 guard.state = SessionState::Closed {
                     generation: backing.generation(),
                 };
-                Some(backing)
+                (Some(backing), None)
             } else if matches!(backing, SessionBacking::Direct(ref c) if c.is_closed())
                 && !guard.ambient_cancel_failed
             {
+                guard.closing_inflight = false;
                 guard.pinned_owner = None;
                 guard.state = SessionState::Closed {
                     generation: backing.generation(),
                 };
-                None
+                (None, Some(backing))
             } else {
+                guard.closing_inflight = false;
                 guard.state = SessionState::Ready(backing);
-                None
+                (None, None)
             }
         };
+        drop(drop_direct);
         let timeout = self.session.shared.config.connect_timeout;
         if let Some(b) = close_backing {
             let _ = tokio::time::timeout(timeout, b.close()).await;
+            let mut guard = self
+                .session
+                .shared
+                .inner
+                .lock()
+                .expect("SessionHandle lock poisoned");
+            guard.closing_inflight = false;
         }
         self.session.shared.inflight_done_notify.notify_waiters();
     }
@@ -3056,7 +3070,7 @@ impl CopySessionLease {
         let timeout = self.session.shared.config.connect_timeout;
         let _ = tokio::time::timeout(timeout, backing.retire_physical_socket()).await;
         let sole_owner = Arc::strong_count(&self.session) == 1;
-        let close_backing = {
+        let (close_backing, drop_direct) = {
             let mut guard = self
                 .session
                 .shared
@@ -3066,7 +3080,6 @@ impl CopySessionLease {
             guard.active_op = None;
             guard.active_copy = false;
             guard.copy_cleanup_inflight = false;
-            guard.closing_inflight = false;
             guard.retire_pending = true;
             guard.parameters = backing.parameters.clone();
             guard.last_transaction_status = backing.transaction_status();
@@ -3076,25 +3089,36 @@ impl CopySessionLease {
             let close_now = guard.close_after_inflight || sole_owner;
             guard.close_after_inflight = false;
             if close_now {
+                guard.closing_inflight = true;
                 guard.pinned_owner = None;
                 guard.ambient_cancel_failed = false;
                 guard.state = SessionState::Closed {
                     generation: backing.generation(),
                 };
-                Some(backing)
+                (Some(backing), None)
             } else if matches!(backing, SessionBacking::Direct(_)) && !guard.ambient_cancel_failed {
+                guard.closing_inflight = false;
                 guard.pinned_owner = None;
                 guard.state = SessionState::Closed {
                     generation: backing.generation(),
                 };
-                None
+                (None, Some(backing))
             } else {
+                guard.closing_inflight = false;
                 guard.state = SessionState::Ready(backing);
-                None
+                (None, None)
             }
         };
+        drop(drop_direct);
         if let Some(b) = close_backing {
             let _ = tokio::time::timeout(timeout, b.close()).await;
+            let mut guard = self
+                .session
+                .shared
+                .inner
+                .lock()
+                .expect("SessionHandle lock poisoned");
+            guard.closing_inflight = false;
         }
         self.session.shared.inflight_done_notify.notify_waiters();
     }
@@ -3132,9 +3156,9 @@ impl Drop for CopySessionLease {
         };
         backing.mark_closed();
         backing.mark_retire();
-        let generation = backing.generation();
+        let sole_owner = Arc::strong_count(&self.session) == 1;
         let timeout = self.session.shared.config.connect_timeout;
-        {
+        let (close_backing, drop_direct) = {
             let mut guard = self
                 .session
                 .shared
@@ -3144,21 +3168,81 @@ impl Drop for CopySessionLease {
             guard.active_op = None;
             guard.active_copy = false;
             guard.copy_cleanup_inflight = false;
-            guard.closing_inflight = false;
-            guard.close_after_inflight = false;
             guard.retire_pending = true;
-            guard.state = SessionState::Closed { generation };
-        }
-        let notify = Arc::clone(&self.session.shared.inflight_done_notify);
-        let cleanup = async move {
-            let _ = tokio::time::timeout(timeout, backing.close()).await;
-            notify.notify_waiters();
+            guard.parameters = backing.parameters.clone();
+            guard.last_transaction_status = backing.transaction_status();
+            if self.ambient_failed_on_retire {
+                guard.ambient_cancel_failed = true;
+            }
+            let close_now = guard.close_after_inflight || sole_owner;
+            guard.close_after_inflight = false;
+            if close_now {
+                guard.closing_inflight = true;
+                guard.pinned_owner = None;
+                guard.ambient_cancel_failed = false;
+                guard.state = SessionState::Closed {
+                    generation: backing.generation(),
+                };
+                (Some(backing), None)
+            } else if matches!(backing, SessionBacking::Direct(_)) && !guard.ambient_cancel_failed {
+                guard.closing_inflight = false;
+                guard.pinned_owner = None;
+                guard.state = SessionState::Closed {
+                    generation: backing.generation(),
+                };
+                (None, Some(backing))
+            } else {
+                guard.closing_inflight = false;
+                guard.state = SessionState::Ready(backing);
+                (None, None)
+            }
         };
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            handle.spawn(cleanup);
+        drop(drop_direct);
+        if let Some(b) = close_backing {
+            let shared = Arc::clone(&self.session.shared);
+            let cleanup = async move {
+                let _ = tokio::time::timeout(timeout, b.close()).await;
+                {
+                    let mut guard = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
+                    guard.closing_inflight = false;
+                }
+                shared.inflight_done_notify.notify_waiters();
+            };
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                handle.spawn(cleanup);
+            } else {
+                vertebra_db::py_async::db_runtime_handle().spawn(cleanup);
+            }
         } else {
-            vertebra_db::py_async::db_runtime_handle().spawn(cleanup);
+            self.session.shared.inflight_done_notify.notify_waiters();
         }
+    }
+}
+
+/// Generation-fenced RAII tracker keeping [`SessionHandle`] cleanup/close barriers engaged while a
+/// non-aborted background COPY close/abort/cancelled step finishes draining or retiring its lease.
+pub(crate) struct CopyTaskCleanupGuard {
+    session: Arc<SessionHandle>,
+    armed: bool,
+}
+
+impl CopyTaskCleanupGuard {
+    pub(crate) async fn finish(mut self) {
+        if !self.armed {
+            return;
+        }
+        self.armed = false;
+        self.session.finish_copy_task_cleanup_async().await;
+    }
+}
+
+impl Drop for CopyTaskCleanupGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        self.armed = false;
+        self.session.finish_copy_task_cleanup_sync();
     }
 }
 
@@ -3434,25 +3518,226 @@ impl SessionHandle {
             .is_some_and(|op| op.op_gen == op_gen && op.cancel_claimed)
     }
 
-    async fn wait_portal_drop_cleanup_if_needed(&self) {
-        let wait_fut = {
-            let notify_arc = Arc::clone(&self.shared.inflight_done_notify);
-            let guard = self
+    fn cleanup_wait_budget(&self) -> Duration {
+        let base = self.shared.config.connect_timeout;
+        base.saturating_mul(2)
+            .max(base.saturating_add(Duration::from_millis(250)))
+    }
+
+    pub(crate) fn begin_copy_task_cleanup(
+        self: &Arc<Self>,
+        op_gen: OperationGeneration,
+    ) -> Option<CopyTaskCleanupGuard> {
+        let mut guard = self
+            .shared
+            .inner
+            .lock()
+            .expect("SessionHandle lock poisoned");
+        let matches_active_copy = guard.active_copy
+            && guard
+                .active_op
+                .as_ref()
+                .is_some_and(|op| op.op_gen == op_gen);
+        if !matches_active_copy {
+            return None;
+        }
+        guard.copy_cleanup_tasks = guard.copy_cleanup_tasks.saturating_add(1);
+        Some(CopyTaskCleanupGuard {
+            session: Arc::clone(self),
+            armed: true,
+        })
+    }
+
+    fn take_close_backing_on_last_copy_cleanup(&self) -> (bool, Option<SessionBacking>) {
+        let mut guard = self.shared.inner.lock().unwrap_or_else(|e| e.into_inner());
+        guard.copy_cleanup_tasks = guard.copy_cleanup_tasks.saturating_sub(1);
+        if guard.has_copy_cleanup() {
+            return (false, None);
+        }
+        if guard.close_after_inflight
+            && !guard.active_copy
+            && !guard.portal_cleanup_inflight
+            && !guard.closing_inflight
+            && matches!(guard.state, SessionState::Ready(_))
+        {
+            guard.close_after_inflight = false;
+            guard.closing_inflight = true;
+            guard.pinned_owner = None;
+            guard.ambient_cancel_failed = false;
+            let next_gen = guard.next_generation;
+            let prev = std::mem::replace(
+                &mut guard.state,
+                SessionState::Closed {
+                    generation: next_gen,
+                },
+            );
+            if let SessionState::Ready(mut backing) = prev {
+                if guard.retire_pending {
+                    backing.mark_retire();
+                }
+                guard.state = SessionState::Closed {
+                    generation: backing.generation(),
+                };
+                return (true, Some(backing));
+            }
+        }
+        (true, None)
+    }
+
+    async fn finish_copy_task_cleanup_async(&self) {
+        let (last_done, close_backing) = self.take_close_backing_on_last_copy_cleanup();
+        if let Some(b) = close_backing {
+            let _ = tokio::time::timeout(self.shared.config.connect_timeout, b.close()).await;
+            let mut guard = self
                 .shared
                 .inner
                 .lock()
                 .expect("SessionHandle lock poisoned");
-            if !guard.portal_cleanup_inflight && !guard.copy_cleanup_inflight {
-                None
+            guard.closing_inflight = false;
+        }
+        if last_done {
+            self.shared.inflight_done_notify.notify_waiters();
+        }
+    }
+
+    fn finish_copy_task_cleanup_sync(&self) {
+        let (last_done, close_backing) = self.take_close_backing_on_last_copy_cleanup();
+        if let Some(b) = close_backing {
+            let timeout = self.shared.config.connect_timeout;
+            let shared = Arc::clone(&self.shared);
+            let cleanup = async move {
+                let _ = tokio::time::timeout(timeout, b.close()).await;
+                {
+                    let mut guard = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
+                    guard.closing_inflight = false;
+                }
+                shared.inflight_done_notify.notify_waiters();
+            };
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                handle.spawn(cleanup);
             } else {
-                let notified = notify_arc.notified_owned();
-                let mut pinned = Box::pin(notified);
-                pinned.as_mut().enable();
-                Some(pinned)
+                vertebra_db::py_async::db_runtime_handle().spawn(cleanup);
             }
-        };
-        if let Some(pinned) = wait_fut {
-            let _ = tokio::time::timeout(self.shared.config.connect_timeout, pinned).await;
+        } else if last_done {
+            self.shared.inflight_done_notify.notify_waiters();
+        }
+    }
+
+    async fn wait_portal_drop_cleanup_if_needed(&self) {
+        let deadline = Instant::now() + self.cleanup_wait_budget();
+        loop {
+            if Instant::now() >= deadline {
+                break;
+            }
+            let wait_fut = {
+                let notify_arc = Arc::clone(&self.shared.inflight_done_notify);
+                let guard = self
+                    .shared
+                    .inner
+                    .lock()
+                    .expect("SessionHandle lock poisoned");
+                if !guard.portal_cleanup_inflight
+                    && !guard.has_copy_cleanup()
+                    && !guard.closing_inflight
+                {
+                    None
+                } else {
+                    let notified = notify_arc.notified_owned();
+                    let mut pinned = Box::pin(notified);
+                    pinned.as_mut().enable();
+                    Some(pinned)
+                }
+            };
+            let Some(pinned) = wait_fut else {
+                break;
+            };
+            if tokio::time::timeout_at(deadline, pinned).await.is_err() {
+                break;
+            }
+        }
+    }
+
+    pub(crate) async fn wait_close_inflight(
+        &self,
+        mut pending: std::pin::Pin<Box<tokio::sync::futures::OwnedNotified>>,
+    ) {
+        let deadline = Instant::now() + self.cleanup_wait_budget();
+        loop {
+            if Instant::now() >= deadline {
+                break;
+            }
+            if tokio::time::timeout_at(deadline, &mut pending)
+                .await
+                .is_err()
+            {
+                break;
+            }
+            let next_step = {
+                let notify_arc = Arc::clone(&self.shared.inflight_done_notify);
+                let mut guard = self
+                    .shared
+                    .inner
+                    .lock()
+                    .expect("SessionHandle lock poisoned");
+                let still_busy = guard.portal_cleanup_inflight
+                    || guard.has_copy_cleanup()
+                    || guard.closing_inflight
+                    || matches!(guard.state, SessionState::InFlight { .. });
+                if still_busy {
+                    let notified = notify_arc.notified_owned();
+                    let mut pinned = Box::pin(notified);
+                    pinned.as_mut().enable();
+                    Ok(pinned)
+                } else if matches!(guard.state, SessionState::Ready(_)) {
+                    guard.close_after_inflight = false;
+                    guard.closing_inflight = true;
+                    guard.pinned_owner = None;
+                    guard.ambient_cancel_failed = false;
+                    let next_gen = guard.next_generation;
+                    let prev = std::mem::replace(
+                        &mut guard.state,
+                        SessionState::Closed {
+                            generation: next_gen,
+                        },
+                    );
+                    if let SessionState::Ready(mut backing) = prev {
+                        if guard.retire_pending {
+                            backing.mark_retire();
+                        }
+                        guard.state = SessionState::Closed {
+                            generation: backing.generation(),
+                        };
+                        Err(Some(backing))
+                    } else {
+                        guard.closing_inflight = false;
+                        Err(None)
+                    }
+                } else {
+                    guard.close_after_inflight = false;
+                    Err(None)
+                }
+            };
+            match next_step {
+                Ok(next_pinned) => {
+                    pending = next_pinned;
+                }
+                Err(Some(backing)) => {
+                    let _ =
+                        tokio::time::timeout(self.shared.config.connect_timeout, backing.close())
+                            .await;
+                    {
+                        let mut guard = self
+                            .shared
+                            .inner
+                            .lock()
+                            .expect("SessionHandle lock poisoned");
+                        guard.closing_inflight = false;
+                    }
+                    self.shared.inflight_done_notify.notify_waiters();
+                    break;
+                }
+                Err(None) => break,
+            }
         }
     }
 
@@ -3469,7 +3754,7 @@ impl SessionHandle {
                 "cannot execute operation while a Portal is active on this session".to_string(),
             ));
         }
-        if guard.active_copy && !guard.copy_cleanup_inflight {
+        if guard.active_copy && !guard.has_copy_cleanup() {
             return Err(PostgresError::Interface(
                 "cannot execute operation while a COPY stream is active on this session"
                     .to_string(),
@@ -3644,7 +3929,7 @@ impl SessionHandle {
             CloseAction::Immediate(Some(backing)) => backing.close().await,
             CloseAction::Immediate(None) => Ok(()),
             CloseAction::WaitInFlight(notified) => {
-                let _ = tokio::time::timeout(self.shared.config.connect_timeout, notified).await;
+                self.wait_close_inflight(notified).await;
                 Ok(())
             }
         }
@@ -3691,7 +3976,7 @@ impl SessionHandle {
             .inner
             .lock()
             .expect("SessionHandle lock poisoned");
-        if guard.portal_cleanup_inflight || guard.copy_cleanup_inflight {
+        if guard.portal_cleanup_inflight || guard.has_copy_cleanup() || guard.closing_inflight {
             guard.close_after_inflight = true;
             let notified = notify_arc.notified_owned();
             let mut pinned = Box::pin(notified);
@@ -4528,6 +4813,7 @@ impl SessionHandle {
                     if guard.retire_pending {
                         backing.mark_retire();
                     }
+                    guard.closing_inflight = true;
                     guard.pinned_owner = None;
                     guard.ambient_cancel_failed = false;
                     guard.state = SessionState::Closed {
@@ -4543,6 +4829,12 @@ impl SessionHandle {
         };
         if let Some(b) = close_backing {
             let _ = tokio::time::timeout(self.shared.config.connect_timeout, b.close()).await;
+            let mut guard = self
+                .shared
+                .inner
+                .lock()
+                .expect("SessionHandle lock poisoned");
+            guard.closing_inflight = false;
         }
         self.shared.inflight_done_notify.notify_waiters();
     }
@@ -5176,22 +5468,35 @@ impl SessionHandle {
         }
         let mut lease = self.checkout_for_copy(op_gen, owner).await?;
         let start_res = {
+            let already_cancelled = lease.cancel_claimed();
             let cancel_notify = lease.cancel_notify();
             let timeout = lease.connect_timeout();
             let conn = lease.connection_mut();
-            let start_fut = conn.start_copy_out(sql);
-            tokio::pin!(start_fut);
-            let cancel_timeout = async {
-                cancel_notify.notified().await;
-                tokio::time::sleep(timeout).await;
+            let timed = {
+                let start_fut = conn.start_copy_out(sql);
+                tokio::pin!(start_fut);
+                let cancel_timeout = async move {
+                    if !already_cancelled {
+                        cancel_notify.notified().await;
+                    }
+                    tokio::time::sleep(timeout).await;
+                };
+                tokio::pin!(cancel_timeout);
+                tokio::select! {
+                    biased;
+                    res = &mut start_fut => Some(res),
+                    () = &mut cancel_timeout => None,
+                }
             };
-            tokio::pin!(cancel_timeout);
-            tokio::select! {
-                biased;
-                res = &mut start_fut => res,
-                () = &mut cancel_timeout => Err(PostgresError::Operational(
-                    "cancelled COPY TO start timed out while draining wire response".to_string(),
-                )),
+            match timed {
+                Some(res) => res,
+                None => {
+                    conn.mark_closed();
+                    Err(PostgresError::Operational(
+                        "cancelled COPY TO start timed out while draining wire response"
+                            .to_string(),
+                    ))
+                }
             }
         };
         match start_res {
@@ -5248,22 +5553,35 @@ impl SessionHandle {
         }
         let mut lease = self.checkout_for_copy(op_gen, owner).await?;
         let start_res = {
+            let already_cancelled = lease.cancel_claimed();
             let cancel_notify = lease.cancel_notify();
             let timeout = lease.connect_timeout();
             let conn = lease.connection_mut();
-            let start_fut = conn.start_copy_in(sql);
-            tokio::pin!(start_fut);
-            let cancel_timeout = async {
-                cancel_notify.notified().await;
-                tokio::time::sleep(timeout).await;
+            let timed = {
+                let start_fut = conn.start_copy_in(sql);
+                tokio::pin!(start_fut);
+                let cancel_timeout = async move {
+                    if !already_cancelled {
+                        cancel_notify.notified().await;
+                    }
+                    tokio::time::sleep(timeout).await;
+                };
+                tokio::pin!(cancel_timeout);
+                tokio::select! {
+                    biased;
+                    res = &mut start_fut => Some(res),
+                    () = &mut cancel_timeout => None,
+                }
             };
-            tokio::pin!(cancel_timeout);
-            tokio::select! {
-                biased;
-                res = &mut start_fut => res,
-                () = &mut cancel_timeout => Err(PostgresError::Operational(
-                    "cancelled COPY FROM start timed out while draining wire response".to_string(),
-                )),
+            match timed {
+                Some(res) => res,
+                None => {
+                    conn.mark_closed();
+                    Err(PostgresError::Operational(
+                        "cancelled COPY FROM start timed out while draining wire response"
+                            .to_string(),
+                    ))
+                }
             }
         };
         match start_res {
