@@ -576,6 +576,97 @@ impl PostgresConnection {
         }
     }
 
+    /// Read and decode the next raw PostgreSQL backend [`Message`] frame from the dedicated socket.
+    ///
+    /// Safe to cancel at `deadline == None` inside a `tokio::select!` pump loop because partial
+    /// frame bytes remain buffered inside `self.read_buf` until a complete bounded frame arrives.
+    pub(crate) async fn read_raw_message(
+        &mut self,
+        deadline: Option<Instant>,
+    ) -> Result<Message, PostgresError> {
+        if self.closed {
+            return Err(PostgresError::Transport(
+                "PostgreSQL connection is closed".to_string(),
+            ));
+        }
+        match read_message(&mut self.stream, &mut self.read_buf, deadline).await {
+            Ok(msg) => Ok(msg),
+            Err(err) => {
+                self.mark_closed();
+                Err(err)
+            }
+        }
+    }
+
+    /// Encode and flush a single simple `Query` (`'Q'`) command frame without consuming backend replies,
+    /// allowing a dedicated notification or replication pump to drive response framing directly.
+    pub(crate) async fn send_simple_command(
+        &mut self,
+        sql: &str,
+        deadline: Option<Instant>,
+    ) -> Result<(), PostgresError> {
+        if self.closed {
+            return Err(PostgresError::Transport(
+                "PostgreSQL connection is closed".to_string(),
+            ));
+        }
+        if sql.as_bytes().contains(&0) {
+            return Err(PostgresError::Data(
+                "SQL query string cannot contain embedded NUL byte".to_string(),
+            ));
+        }
+        self.unnamed_statement_valid = false;
+        self.write_buf.clear();
+        if let Err(err) = frontend::query(sql, &mut self.write_buf) {
+            self.write_buf.clear();
+            return Err(PostgresError::Protocol(format!(
+                "failed to encode simple Query frame: {err}"
+            )));
+        }
+        let write_res = match deadline {
+            Some(dl) => {
+                if Instant::now() >= dl {
+                    self.write_buf.clear();
+                    self.mark_closed();
+                    return Err(PostgresError::Transport(
+                        "PostgreSQL simple command write timed out".to_string(),
+                    ));
+                }
+                tokio::time::timeout_at(dl, async {
+                    self.stream.write_all(&self.write_buf).await?;
+                    self.stream.flush().await
+                })
+                .await
+                .map_err(|_| {
+                    PostgresError::Transport(
+                        "PostgreSQL simple command write timed out".to_string(),
+                    )
+                })
+                .and_then(|res| {
+                    res.map_err(|e| {
+                        PostgresError::Transport(format!(
+                            "PostgreSQL simple command write failed: {e}"
+                        ))
+                    })
+                })
+            }
+            None => async {
+                self.stream.write_all(&self.write_buf).await?;
+                self.stream.flush().await
+            }
+            .await
+            .map_err(|e| {
+                PostgresError::Transport(format!("PostgreSQL simple command write failed: {e}"))
+            }),
+        };
+        self.write_buf.clear();
+        if let Err(err) = write_res {
+            self.mark_closed();
+            return Err(err);
+        }
+        Ok(())
+    }
+
     /// Borrow the underlying [`TransportStream`] when backed by TCP, TLS, or Unix transport.
     pub fn stream(&self) -> &TransportStream {
         match &self.stream {
@@ -6029,6 +6120,62 @@ impl<'a> ConnectAttempt<'a> {
     }
 }
 
+/// Dial and authenticate an unpooled standalone [`PostgresConnection`] reusing the full Cloud SQL,
+/// AlloyDB, direct-IAM token refresh, TLS, SCRAM-SHA-256-PLUS, Unix socket, and `connect_timeout`
+/// startup path.
+///
+/// When `replication_database` is `true`, the `StartupMessage` includes `"replication" => "database"`
+/// and omits arbitrary session GUC parameters and post-authentication `SET` GUC commands that are
+/// incompatible with PostgreSQL walsender startup.
+pub async fn establish_standalone_connection(
+    config: &PostgresConfig,
+    replication_database: bool,
+) -> Result<PostgresConnection, PostgresError> {
+    let clock: Arc<dyn Clock> = Arc::new(SystemClock);
+    let connector = Arc::new(CloudConnector::with_clock(Arc::clone(&clock)));
+    let token_provider = ScopedTokenProvider::new(
+        Some(config.cloud_auth_options.clone()),
+        (!config.iam_auth_options.is_empty()).then(|| config.iam_auth_options.clone()),
+        Arc::clone(&clock),
+    );
+    let deadline = Instant::now() + config.connect_timeout;
+    establish_postgres_connection_with_mode(
+        config,
+        &connector,
+        &token_provider,
+        clock.as_ref(),
+        1,
+        deadline,
+        replication_database,
+    )
+    .await
+}
+
+fn encode_replication_startup_frame(
+    config: &PostgresConfig,
+    out: &mut BytesMut,
+) -> Result<(), PostgresError> {
+    let app_name = config
+        .session_gucs
+        .iter()
+        .find_map(|(k, v)| {
+            k.eq_ignore_ascii_case("application_name")
+                .then_some(v.as_str())
+        })
+        .unwrap_or(config.application_name.as_str());
+    let mut params: Vec<(&str, &str)> = Vec::with_capacity(5);
+    params.push(("user", config.user.as_str()));
+    params.push(("database", config.database.as_str()));
+    params.push(("client_encoding", "UTF8"));
+    params.push(("replication", "database"));
+    if !app_name.is_empty() {
+        params.push(("application_name", app_name));
+    }
+    frontend::startup_message(params, out).map_err(|e| {
+        PostgresError::Protocol(format!("failed to encode replication StartupMessage: {e}"))
+    })
+}
+
 pub(crate) async fn establish_postgres_connection(
     config: &PostgresConfig,
     connector: &Arc<CloudConnector>,
@@ -6036,6 +6183,27 @@ pub(crate) async fn establish_postgres_connection(
     clock: &dyn Clock,
     generation: u64,
     deadline: Instant,
+) -> Result<PostgresConnection, PostgresError> {
+    establish_postgres_connection_with_mode(
+        config,
+        connector,
+        token_provider,
+        clock,
+        generation,
+        deadline,
+        false,
+    )
+    .await
+}
+
+async fn establish_postgres_connection_with_mode(
+    config: &PostgresConfig,
+    connector: &Arc<CloudConnector>,
+    token_provider: &ScopedTokenProvider,
+    clock: &dyn Clock,
+    generation: u64,
+    deadline: Instant,
+    replication_database: bool,
 ) -> Result<PostgresConnection, PostgresError> {
     let (mut stream, tls_negotiated, tls_server_end_point, login_snapshot) =
         if config.cloud_sql_instance.is_some() {
@@ -6095,7 +6263,11 @@ pub(crate) async fn establish_postgres_connection(
 
     let mut read_buf = BytesMut::with_capacity(8192);
     let mut write_buf = BytesMut::with_capacity(1024);
-    encode_startup_frame(config, &mut write_buf)?;
+    if replication_database {
+        encode_replication_startup_frame(config, &mut write_buf)?;
+    } else {
+        encode_startup_frame(config, &mut write_buf)?;
+    }
 
     tokio::time::timeout_at(deadline, async {
         stream.write_all(&write_buf).await?;
@@ -6179,11 +6351,15 @@ pub(crate) async fn establish_postgres_connection(
                 );
                 let statement_cache = StatementCache::new(pooler_capabilities.effective_capacity);
                 let startup_parameters = parameters.clone();
-                let configured_session_gucs: BTreeMap<String, String> = config
-                    .session_gucs
-                    .iter()
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect();
+                let configured_session_gucs: BTreeMap<String, String> = if replication_database {
+                    BTreeMap::new()
+                } else {
+                    config
+                        .session_gucs
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect()
+                };
                 let cancel_key = backend_key.map(CancelKeyData::from);
                 let standalone_cancel = Arc::new(StandaloneCancelState {
                     config: config.clone(),

@@ -14,6 +14,7 @@ pub mod credentials;
 pub mod errors;
 pub mod extended;
 pub mod metadata;
+pub mod notifications;
 pub mod pipeline;
 mod pipeline_guard;
 pub mod pool;
