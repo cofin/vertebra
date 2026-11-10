@@ -43,8 +43,7 @@ pub fn decode_mysql_packet(buf: &[u8]) -> Option<(u8, &[u8], usize)> {
     if buf.len() < 4 {
         return None;
     }
-    let payload_len =
-        (buf[0] as usize) | ((buf[1] as usize) << 8) | ((buf[2] as usize) << 16);
+    let payload_len = (buf[0] as usize) | ((buf[1] as usize) << 8) | ((buf[2] as usize) << 16);
     let total = 4 + payload_len;
     if buf.len() < total {
         return None;
@@ -140,8 +139,7 @@ impl HandshakeV10 {
             .iter()
             .position(|&b| b == 0)
             .ok_or_else(|| MySQLError::connection("Truncated server version in HandshakeV10"))?;
-        let server_version =
-            String::from_utf8_lossy(&payload[1..1 + nul_pos]).into_owned();
+        let server_version = String::from_utf8_lossy(&payload[1..1 + nul_pos]).into_owned();
         let mut pos = 1 + nul_pos + 1;
         if payload.len() < pos + 4 + 8 + 1 + 2 + 1 + 2 + 2 + 1 + 10 + 13 {
             return Err(MySQLError::connection("Truncated HandshakeV10 packet"));
@@ -176,8 +174,7 @@ impl HandshakeV10 {
             .position(|&b| b == 0)
             .map(|idx| pos + idx)
             .unwrap_or(payload.len());
-        let auth_plugin_name =
-            String::from_utf8_lossy(&payload[pos..plugin_end]).into_owned();
+        let auth_plugin_name = String::from_utf8_lossy(&payload[pos..plugin_end]).into_owned();
 
         Ok(Self {
             protocol_version: 10,
@@ -218,11 +215,7 @@ pub fn compute_caching_sha2_scramble_bytes(
 }
 
 /// Verifies a client's 32-byte `caching_sha2_password` scramble against a known password and 20-byte nonce.
-pub fn verify_caching_sha2_scramble(
-    scramble: &[u8],
-    password: &[u8],
-    nonce: &[u8],
-) -> bool {
+pub fn verify_caching_sha2_scramble(scramble: &[u8], password: &[u8], nonce: &[u8]) -> bool {
     if scramble.len() != 32 || nonce.len() < 20 {
         return false;
     }
@@ -258,11 +251,7 @@ pub fn compute_mysql_native_scramble_bytes(
 }
 
 /// Verifies a client's 20-byte `mysql_native_password` scramble against a known password and 20-byte nonce.
-pub fn verify_mysql_native_scramble(
-    scramble: &[u8],
-    password: &[u8],
-    nonce: &[u8],
-) -> bool {
+pub fn verify_mysql_native_scramble(scramble: &[u8], password: &[u8], nonce: &[u8]) -> bool {
     if scramble.len() != 20 || nonce.len() < 20 {
         return false;
     }
@@ -281,9 +270,15 @@ pub fn encrypt_caching_sha2_rsa(
     public_key_pem: &str,
 ) -> Result<Vec<u8>, MySQLError> {
     if nonce.is_empty() {
-        return Err(MySQLError::programming("RSA scramble nonce must not be empty"));
+        return Err(MySQLError::programming(
+            "RSA scramble nonce must not be empty",
+        ));
     }
-    let nonce_slice = if nonce.len() >= 20 { &nonce[..20] } else { nonce };
+    let nonce_slice = if nonce.len() >= 20 {
+        &nonce[..20]
+    } else {
+        nonce
+    };
     let mut plain = Vec::with_capacity(password.len() + 1);
     plain.extend_from_slice(password);
     plain.push(0);
@@ -307,7 +302,11 @@ pub fn decrypt_caching_sha2_rsa(
     nonce: &[u8],
     private_key: &RsaPrivateKey,
 ) -> Result<Vec<u8>, MySQLError> {
-    let nonce_slice = if nonce.len() >= 20 { &nonce[..20] } else { nonce };
+    let nonce_slice = if nonce.len() >= 20 {
+        &nonce[..20]
+    } else {
+        nonce
+    };
     let mut decrypted = private_key
         .decrypt(Oaep::new::<Sha1>(), ciphertext)
         .map_err(|e| MySQLError::connection(format!("RSA-OAEP-SHA1 decryption failed: {e}")))?;
@@ -470,9 +469,7 @@ pub fn normalize_mysql_placeholders(sql: &str) -> (String, PlaceholderPlan) {
             if next.is_ascii_alphabetic() || next == b'_' {
                 let start = i + 1;
                 let mut end = start;
-                while end < len
-                    && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_')
-                {
+                while end < len && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_') {
                     end += 1;
                 }
                 let name = &sql[start..end];
@@ -669,13 +666,29 @@ mod tests {
 
         let sha2_scramble = compute_caching_sha2_scramble_bytes(password, nonce).unwrap();
         assert_eq!(sha2_scramble.len(), 32);
-        assert!(verify_caching_sha2_scramble(&sha2_scramble, password, nonce));
-        assert!(!verify_caching_sha2_scramble(&sha2_scramble, b"wrong", nonce));
+        assert!(verify_caching_sha2_scramble(
+            &sha2_scramble,
+            password,
+            nonce
+        ));
+        assert!(!verify_caching_sha2_scramble(
+            &sha2_scramble,
+            b"wrong",
+            nonce
+        ));
 
         let native_scramble = compute_mysql_native_scramble_bytes(password, nonce).unwrap();
         assert_eq!(native_scramble.len(), 20);
-        assert!(verify_mysql_native_scramble(&native_scramble, password, nonce));
-        assert!(!verify_mysql_native_scramble(&native_scramble, b"wrong", nonce));
+        assert!(verify_mysql_native_scramble(
+            &native_scramble,
+            password,
+            nonce
+        ));
+        assert!(!verify_mysql_native_scramble(
+            &native_scramble,
+            b"wrong",
+            nonce
+        ));
 
         let mut rng = rsa::rand_core::OsRng;
         let priv_key = RsaPrivateKey::new(&mut rng, 2048).unwrap();

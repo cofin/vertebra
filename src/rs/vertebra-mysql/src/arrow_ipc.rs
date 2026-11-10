@@ -450,7 +450,9 @@ fn build_record_batch(
                         DecodedCell::Int(i) => builder.append_value(i.to_string()),
                         DecodedCell::UInt(u) => builder.append_value(u.to_string()),
                         DecodedCell::Float(f) => builder.append_value(f.to_string()),
-                        DecodedCell::Bool(b) => builder.append_value(if *b { "true" } else { "false" }),
+                        DecodedCell::Bool(b) => {
+                            builder.append_value(if *b { "true" } else { "false" })
+                        }
                         DecodedCell::Bytes(b) => {
                             builder.append_value(String::from_utf8_lossy(b));
                         }
@@ -476,7 +478,8 @@ fn build_record_batch(
                                     "{sign}{total_hh:02}:{mm:02}:{ss:02}.{us:06}"
                                 ));
                             } else {
-                                builder.append_value(format!("{sign}{total_hh:02}:{mm:02}:{ss:02}"));
+                                builder
+                                    .append_value(format!("{sign}{total_hh:02}:{mm:02}:{ss:02}"));
                             }
                         }
                     }
@@ -523,9 +526,9 @@ pub fn encode_result_set_to_arrow_ipc(
                 })?;
             }
         }
-        writer.finish().map_err(|e| {
-            MySQLError::protocol(format!("Failed to finish Arrow IPC stream: {e}"))
-        })?;
+        writer
+            .finish()
+            .map_err(|e| MySQLError::protocol(format!("Failed to finish Arrow IPC stream: {e}")))?;
     }
     Ok(ipc_bytes)
 }
@@ -577,9 +580,7 @@ fn extract_cell_from_arrow_array(col: &dyn Array, row_idx: usize) -> Value {
         DataType::UInt16 => Value::UInt(col.as_primitive::<UInt16Type>().value(row_idx) as u64),
         DataType::UInt32 => Value::UInt(col.as_primitive::<UInt32Type>().value(row_idx) as u64),
         DataType::UInt64 => Value::UInt(col.as_primitive::<UInt64Type>().value(row_idx)),
-        DataType::Float32 => {
-            Value::Double(col.as_primitive::<Float32Type>().value(row_idx) as f64)
-        }
+        DataType::Float32 => Value::Double(col.as_primitive::<Float32Type>().value(row_idx) as f64),
         DataType::Float64 => Value::Double(col.as_primitive::<Float64Type>().value(row_idx)),
         DataType::Decimal128(_, scale) => {
             let raw = col.as_primitive::<Decimal128Type>().value(row_idx);
@@ -592,7 +593,9 @@ fn extract_cell_from_arrow_array(col: &dyn Array, row_idx: usize) -> Value {
             Value::Date(y.max(0) as u16, m as u8, d as u8, 0, 0, 0, 0)
         }
         DataType::Timestamp(TimeUnit::Microsecond, _) => {
-            let total_us = col.as_primitive::<TimestampMicrosecondType>().value(row_idx);
+            let total_us = col
+                .as_primitive::<TimestampMicrosecondType>()
+                .value(row_idx);
             let secs = total_us.div_euclid(1_000_000);
             let us = total_us.rem_euclid(1_000_000) as u32;
             let days = secs.div_euclid(86_400) as i32;
@@ -702,7 +705,12 @@ mod tests {
     fn test_shm_name_length_and_prefix() {
         let name = next_mysql_shm_name();
         assert!(name.starts_with("/vtb-my-"));
-        assert!(name.len() <= 31, "SHM name too long: {} ({})", name, name.len());
+        assert!(
+            name.len() <= 31,
+            "SHM name too long: {} ({})",
+            name,
+            name.len()
+        );
     }
 
     #[test]
@@ -712,21 +720,12 @@ mod tests {
             ("flag".to_string(), ColumnType::MYSQL_TYPE_TINY as u8),
             ("big_u".to_string(), ColumnType::MYSQL_TYPE_LONGLONG as u8),
             ("score".to_string(), ColumnType::MYSQL_TYPE_DOUBLE as u8),
-            (
-                "price".to_string(),
-                ColumnType::MYSQL_TYPE_NEWDECIMAL as u8,
-            ),
+            ("price".to_string(), ColumnType::MYSQL_TYPE_NEWDECIMAL as u8),
             ("d_val".to_string(), ColumnType::MYSQL_TYPE_DATE as u8),
-            (
-                "dt_val".to_string(),
-                ColumnType::MYSQL_TYPE_DATETIME as u8,
-            ),
+            ("dt_val".to_string(), ColumnType::MYSQL_TYPE_DATETIME as u8),
             ("t_val".to_string(), ColumnType::MYSQL_TYPE_TIME as u8),
             ("raw_bin".to_string(), ColumnType::MYSQL_TYPE_BLOB as u8),
-            (
-                "label".to_string(),
-                ColumnType::MYSQL_TYPE_VAR_STRING as u8,
-            ),
+            ("label".to_string(), ColumnType::MYSQL_TYPE_VAR_STRING as u8),
         ];
         let rows = vec![
             vec![

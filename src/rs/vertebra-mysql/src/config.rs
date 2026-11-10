@@ -169,9 +169,9 @@ impl MySQLConnectConfig {
             || lower_dsn.starts_with("memory://")
             || lower_dsn.contains("://memory")
             || lower_dsn.contains("/:memory:")
-            || database
-                .as_deref()
-                .is_some_and(|db| db.eq_ignore_ascii_case(":memory:") || db.eq_ignore_ascii_case("memory"))
+            || database.as_deref().is_some_and(|db| {
+                db.eq_ignore_ascii_case(":memory:") || db.eq_ignore_ascii_case("memory")
+            })
         {
             return Err(MySQLError::config(
                 "MySQL does not support in-memory ('memory://') execution; configure a MySQL or MariaDB server endpoint",
@@ -223,8 +223,9 @@ impl MySQLConnectConfig {
             }
         } else {
             let normalized = normalize_mysql_scheme(trimmed_dsn)?;
-            let parsed = Url::parse(&normalized)
-                .map_err(|e| MySQLError::config(format!("Invalid MySQL DSN '{trimmed_dsn}': {e}")))?;
+            let parsed = Url::parse(&normalized).map_err(|e| {
+                MySQLError::config(format!("Invalid MySQL DSN '{trimmed_dsn}': {e}"))
+            })?;
 
             if let Some(h) = parsed.host_str()
                 && !h.is_empty()
@@ -422,8 +423,10 @@ impl MySQLConnectConfig {
         } else {
             AuthType::Password
         };
-        let dialer = CloudSqlDialer::new(inst_str, self.cloud_sql_ip_type, auth_type)
-            .map_err(|e| MySQLError::config(format!("Invalid Cloud SQL instance '{inst_str}': {e}")))?;
+        let dialer =
+            CloudSqlDialer::new(inst_str, self.cloud_sql_ip_type, auth_type).map_err(|e| {
+                MySQLError::config(format!("Invalid Cloud SQL instance '{inst_str}': {e}"))
+            })?;
         Ok(Some(dialer))
     }
 
@@ -494,8 +497,8 @@ impl MySQLConnectConfig {
                 .with_reset_connection(false);
             builder = builder.pool_opts(pool_opts);
         } else {
-            let constraints = PoolConstraints::new(0, 1)
-                .expect("single-connection control pool constraints");
+            let constraints =
+                PoolConstraints::new(0, 1).expect("single-connection control pool constraints");
             let pool_opts = PoolOpts::default()
                 .with_constraints(constraints)
                 .with_reset_connection(false);
@@ -512,9 +515,7 @@ impl MySQLConnectConfig {
                 if self.ssl_ca.is_none() && self.ssl_cert.is_none() && is_local_host(&self.host) {
                     Ok(None)
                 } else {
-                    Ok(Some(
-                        self.configure_ssl_opts(true, true)?,
-                    ))
+                    Ok(Some(self.configure_ssl_opts(true, true)?))
                 }
             }
             MySQLSslMode::Require => Ok(Some(self.configure_ssl_opts(true, true)?)),
@@ -540,7 +541,8 @@ impl MySQLConnectConfig {
         }
 
         if let (Some(cert), Some(key)) = (&self.ssl_cert, &self.ssl_key) {
-            let identity = ClientIdentity::new(PathBuf::from(cert).into(), PathBuf::from(key).into());
+            let identity =
+                ClientIdentity::new(PathBuf::from(cert).into(), PathBuf::from(key).into());
             ssl = ssl.with_client_identity(Some(identity));
         }
 
@@ -684,35 +686,14 @@ mod tests {
             "memory://",
         ] {
             let err = MySQLConnectConfig::from_dsn_and_kwargs(
-                bad,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                5000,
-                5000,
-                5000,
-                1,
-                5,
-                64,
-                "utf8mb4",
-                true,
-                None,
-                None,
-                "PUBLIC",
-                false,
-                None,
-                None,
-                None,
+                bad, None, None, None, None, None, None, None, None, None, None, 5000, 5000, 5000,
+                1, 5, 64, "utf8mb4", true, None, None, "PUBLIC", false, None, None, None,
             )
             .unwrap_err();
-            assert_eq!(err.kind, crate::errors::MySQLErrorKind::ImproperConfiguration);
+            assert_eq!(
+                err.kind,
+                crate::errors::MySQLErrorKind::ImproperConfiguration
+            );
         }
     }
 

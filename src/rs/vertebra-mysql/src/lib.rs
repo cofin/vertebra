@@ -27,8 +27,8 @@ pub use loopback::MySQLWireTestServer;
 pub use protocol::{
     HandshakeV10, PlaceholderPlan, compute_caching_sha2_scramble,
     compute_caching_sha2_scramble_bytes, compute_mysql_native_scramble,
-    compute_mysql_native_scramble_bytes, decode_mysql_packet, encrypt_caching_sha2_rsa,
-    encrypt_caching_sha2_rsa_password, encode_mysql_packet, normalize_mysql_placeholders,
+    compute_mysql_native_scramble_bytes, decode_mysql_packet, encode_mysql_packet,
+    encrypt_caching_sha2_rsa, encrypt_caching_sha2_rsa_password, normalize_mysql_placeholders,
     split_sql_statements,
 };
 

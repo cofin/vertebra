@@ -22,9 +22,11 @@ if TYPE_CHECKING:
     )
     from vertebra.db.adapters.mysql.driver import AsyncMySQLDriver, SyncMySQLDriver
     from vertebra.db.adapters.mysql.pipeline import AsyncMySQLPipeline, SyncMySQLPipeline
+    from vertebra.db.arrow import ArrowCursor
 
 __all__ = (
     "MYSQL_TRANSIENT_ERRNOS",
+    "ArrowCursor",
     "AsyncMySQLDriver",
     "AsyncMySQLPipeline",
     "MySQLConfig",
@@ -44,10 +46,12 @@ __lazy_modules__ = [
     "vertebra.db.adapters.mysql.core",
     "vertebra.db.adapters.mysql.driver",
     "vertebra.db.adapters.mysql.pipeline",
+    "vertebra.db.arrow",
 ]
 
 _EXPORT_MAP: dict[str, tuple[str, str]] = {
     "MYSQL_TRANSIENT_ERRNOS": ("vertebra.db.adapters.mysql.core", "MYSQL_TRANSIENT_ERRNOS"),
+    "ArrowCursor": ("vertebra.db.arrow", "ArrowCursor"),
     "AsyncMySQLDriver": ("vertebra.db.adapters.mysql.driver", "AsyncMySQLDriver"),
     "AsyncMySQLPipeline": ("vertebra.db.adapters.mysql.pipeline", "AsyncMySQLPipeline"),
     "MySQLConfig": ("vertebra.db.adapters.mysql.config", "MySQLConfig"),

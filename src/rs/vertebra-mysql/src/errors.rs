@@ -166,7 +166,11 @@ impl MySQLError {
         )
     }
 
-    pub fn from_server_error(errno: u16, sqlstate: Option<&str>, message: impl Into<String>) -> Self {
+    pub fn from_server_error(
+        errno: u16,
+        sqlstate: Option<&str>,
+        message: impl Into<String>,
+    ) -> Self {
         let kind = classify_mysql_error(errno, sqlstate);
         Self {
             kind,
@@ -187,7 +191,10 @@ impl MySQLError {
         let cls_res = py
             .import(target_mod)
             .and_then(|m| m.getattr(exc_name))
-            .or_else(|_| py.import("vertebra._vertebra").and_then(|m| m.getattr(exc_name)));
+            .or_else(|_| {
+                py.import("vertebra._vertebra")
+                    .and_then(|m| m.getattr(exc_name))
+            });
         match cls_res.and_then(|cls| cls.call1((self.message.as_str(),))) {
             Ok(instance) => {
                 if let Some(ref state) = self.sqlstate {
@@ -215,10 +222,7 @@ impl From<mysql_async::Error> for MySQLError {
             mysql_async::Error::Server(server_err) => {
                 let code = server_err.code;
                 let state = server_err.state.clone();
-                let msg = format!(
-                    "ERROR {} ({}): {}",
-                    code, state, server_err.message
-                );
+                let msg = format!("ERROR {} ({}): {}", code, state, server_err.message);
                 Self::from_server_error(code, Some(state.as_str()), msg)
             }
             mysql_async::Error::Io(io_err) => {

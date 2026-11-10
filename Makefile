@@ -228,7 +228,7 @@ duckdb-wheel-check:                                 ## Build vertebra-duckdb whe
 .PHONY: mysql-test
 mysql-test:                                         ## Run MySQL Rust crate tests, stubtest, and Python MySQL test suites
 	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
-	@cd src/rs && cargo test -p vertebra-mysql -p vertebra-db --features gcp
+	@(cd src/rs && cargo test -p vertebra-mysql -p vertebra-db --features gcp)
 	@uv run python -m mypy.stubtest vertebra._mysql
 	@uv run pytest src/py/tests/unit/db/test_mysql_driver.py src/py/tests/unit/db/test_optional_driver_wheels.py src/py/tests/integration/db/test_driver_conformance.py -k "mysql" -v
 	@echo "${OK} MySQL tests passed"

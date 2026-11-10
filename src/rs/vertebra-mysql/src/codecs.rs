@@ -379,12 +379,16 @@ pub fn decode_binary_cell(
         || col_type == ColumnType::MYSQL_TYPE_TIMESTAMP2 as u8
     {
         if buf.is_empty() {
-            return Err(MySQLError::protocol("Truncated binary DATE/DATETIME length"));
+            return Err(MySQLError::protocol(
+                "Truncated binary DATE/DATETIME length",
+            ));
         }
         let len = buf[0] as usize;
         *buf = &buf[1..];
         if buf.len() < len {
-            return Err(MySQLError::protocol("Truncated binary DATE/DATETIME payload"));
+            return Err(MySQLError::protocol(
+                "Truncated binary DATE/DATETIME payload",
+            ));
         }
         let data = &buf[..len];
         *buf = &buf[len..];
@@ -715,7 +719,10 @@ mod tests {
             ("c_blob".to_string(), ColumnType::MYSQL_TYPE_BLOB as u8),
             ("c_vector".to_string(), ColumnType::MYSQL_TYPE_VECTOR as u8),
             ("c_bit".to_string(), ColumnType::MYSQL_TYPE_BIT as u8),
-            ("c_enum".to_string(), ColumnType::MYSQL_TYPE_VAR_STRING as u8),
+            (
+                "c_enum".to_string(),
+                ColumnType::MYSQL_TYPE_VAR_STRING as u8,
+            ),
         ];
 
         let cells = vec![

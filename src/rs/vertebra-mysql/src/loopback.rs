@@ -122,11 +122,12 @@ impl MySQLWireTestServer {
         require_rsa_full_auth: bool,
         expected_password: &str,
     ) -> Result<Self, MySQLError> {
-        let std_listener = std::net::TcpListener::bind("127.0.0.1:0")
-            .map_err(|e| MySQLError::connection(format!("Failed to bind loopback TCP port: {e}")))?;
-        std_listener
-            .set_nonblocking(true)
-            .map_err(|e| MySQLError::connection(format!("Failed to set nonblocking listener: {e}")))?;
+        let std_listener = std::net::TcpListener::bind("127.0.0.1:0").map_err(|e| {
+            MySQLError::connection(format!("Failed to bind loopback TCP port: {e}"))
+        })?;
+        std_listener.set_nonblocking(true).map_err(|e| {
+            MySQLError::connection(format!("Failed to set nonblocking listener: {e}"))
+        })?;
         let addr = std_listener
             .local_addr()
             .map_err(|e| MySQLError::connection(format!("Failed to read local_addr: {e}")))?;
@@ -324,34 +325,33 @@ async fn handle_connection(
         .unwrap_or(resp.len());
     pos = (user_end + 1).min(resp.len());
 
-    let auth_data = if (client_caps & CapabilityFlags::CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA.bits())
-        != 0
-    {
-        let mut slice = &resp[pos..];
-        let v = crate::codecs::decode_lenenc_bytes(&mut slice).unwrap_or_default();
-        pos = resp.len() - slice.len();
-        v
-    } else if (client_caps & CapabilityFlags::CLIENT_SECURE_CONNECTION.bits()) != 0 {
-        if pos < resp.len() {
-            let len = resp[pos] as usize;
-            pos += 1;
-            let end = (pos + len).min(resp.len());
-            let v = resp[pos..end].to_vec();
-            pos = end;
+    let auth_data =
+        if (client_caps & CapabilityFlags::CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA.bits()) != 0 {
+            let mut slice = &resp[pos..];
+            let v = crate::codecs::decode_lenenc_bytes(&mut slice).unwrap_or_default();
+            pos = resp.len() - slice.len();
             v
+        } else if (client_caps & CapabilityFlags::CLIENT_SECURE_CONNECTION.bits()) != 0 {
+            if pos < resp.len() {
+                let len = resp[pos] as usize;
+                pos += 1;
+                let end = (pos + len).min(resp.len());
+                let v = resp[pos..end].to_vec();
+                pos = end;
+                v
+            } else {
+                Vec::new()
+            }
         } else {
-            Vec::new()
-        }
-    } else {
-        let end = resp[pos..]
-            .iter()
-            .position(|&b| b == 0)
-            .map(|i| pos + i)
-            .unwrap_or(resp.len());
-        let v = resp[pos..end].to_vec();
-        pos = (end + 1).min(resp.len());
-        v
-    };
+            let end = resp[pos..]
+                .iter()
+                .position(|&b| b == 0)
+                .map(|i| pos + i)
+                .unwrap_or(resp.len());
+            let v = resp[pos..end].to_vec();
+            pos = (end + 1).min(resp.len());
+            v
+        };
 
     if (client_caps & CapabilityFlags::CLIENT_CONNECT_WITH_DB.bits()) != 0
         && pos < resp.len()
@@ -359,18 +359,17 @@ async fn handle_connection(
     {
         pos += db_end + 1;
     }
-    let client_plugin = if (client_caps & CapabilityFlags::CLIENT_PLUGIN_AUTH.bits()) != 0
-        && pos < resp.len()
-    {
-        let end = resp[pos..]
-            .iter()
-            .position(|&b| b == 0)
-            .map(|i| pos + i)
-            .unwrap_or(resp.len());
-        String::from_utf8_lossy(&resp[pos..end]).into_owned()
-    } else {
-        shared.auth_plugin.clone()
-    };
+    let client_plugin =
+        if (client_caps & CapabilityFlags::CLIENT_PLUGIN_AUTH.bits()) != 0 && pos < resp.len() {
+            let end = resp[pos..]
+                .iter()
+                .position(|&b| b == 0)
+                .map(|i| pos + i)
+                .unwrap_or(resp.len());
+            String::from_utf8_lossy(&resp[pos..end]).into_owned()
+        } else {
+            shared.auth_plugin.clone()
+        };
 
     let expected_pw = shared.expected_password.as_bytes();
     if shared.auth_plugin == "mysql_native_password" {
@@ -555,12 +554,7 @@ async fn handle_connection(
                         if !columns.is_empty() {
                             for (name, col_type, col_flags) in &columns {
                                 let col_pkt = encode_column_definition_41(
-                                    "vtb",
-                                    "vtb",
-                                    name,
-                                    *col_type,
-                                    *col_flags,
-                                    0,
+                                    "vtb", "vtb", name, *col_type, *col_flags, 0,
                                 );
                                 write_packet(&mut stream, out_seq, &col_pkt).await?;
                                 out_seq = out_seq.wrapping_add(1);
@@ -583,8 +577,7 @@ async fn handle_connection(
                     write_packet(&mut stream, out_seq, &err).await?;
                     continue;
                 }
-                let stmt_id =
-                    u32::from_le_bytes([payload[1], payload[2], payload[3], payload[4]]);
+                let stmt_id = u32::from_le_bytes([payload[1], payload[2], payload[3], payload[4]]);
                 let Some(stmt_entry) = conn_state.prepared_stmts.get_mut(&stmt_id) else {
                     let err =
                         encode_err_packet(1243, "HY000", "Unknown prepared statement handler");
@@ -604,14 +597,8 @@ async fn handle_connection(
                     }
                 };
 
-                match execute_sql_statement(
-                    &sql,
-                    &params,
-                    &shared,
-                    &mut conn_state,
-                    &cancel_notify,
-                )
-                .await
+                match execute_sql_statement(&sql, &params, &shared, &mut conn_state, &cancel_notify)
+                    .await
                 {
                     Ok(mut result_sets) => {
                         if result_sets.is_empty() {
@@ -655,8 +642,7 @@ async fn handle_connection(
                                             write_packet(&mut stream, out_seq, &col_pkt).await?;
                                             out_seq = out_seq.wrapping_add(1);
                                         }
-                                        let eof1 =
-                                            encode_eof_packet(0, conn_state.status_flags());
+                                        let eof1 = encode_eof_packet(0, conn_state.status_flags());
                                         write_packet(&mut stream, out_seq, &eof1).await?;
                                         out_seq = out_seq.wrapping_add(1);
 
@@ -691,14 +677,8 @@ async fn handle_connection(
                 let mut all_outcomes = Vec::new();
                 let mut err_packet: Option<(u16, String, String)> = None;
                 for stmt in &stmts {
-                    match execute_sql_statement(
-                        stmt,
-                        &[],
-                        &shared,
-                        &mut conn_state,
-                        &cancel_notify,
-                    )
-                    .await
+                    match execute_sql_statement(stmt, &[], &shared, &mut conn_state, &cancel_notify)
+                        .await
                     {
                         Ok(outcomes) => all_outcomes.extend(outcomes),
                         Err(err) => {
@@ -962,7 +942,11 @@ fn infer_select_columns(
 ) -> Result<Vec<WireColumnMeta>, WireErrorTuple> {
     let upper = cleaned_sql.to_ascii_uppercase();
     if upper == "SELECT 1" || upper.starts_with("SELECT 1 ") {
-        return Ok(vec![("1".to_string(), ColumnType::MYSQL_TYPE_LONGLONG as u8, 0)]);
+        return Ok(vec![(
+            "1".to_string(),
+            ColumnType::MYSQL_TYPE_LONGLONG as u8,
+            0,
+        )]);
     }
     if upper.starts_with("SELECT CONNECTION_ID()") {
         return Ok(vec![(
@@ -1030,13 +1014,9 @@ fn infer_select_columns(
             if expr_upper.starts_with("COUNT(") {
                 cols.push((alias, ColumnType::MYSQL_TYPE_LONGLONG as u8, 0));
             } else {
-                let col_lookup = strip_ident_quotes(
-                    trimmed
-                        .split_whitespace()
-                        .next()
-                        .unwrap_or(trimmed),
-                )
-                .to_ascii_lowercase();
+                let col_lookup =
+                    strip_ident_quotes(trimmed.split_whitespace().next().unwrap_or(trimmed))
+                        .to_ascii_lowercase();
                 if let Some(col_def) = table
                     .columns
                     .iter()
@@ -1474,12 +1454,8 @@ fn parse_create_table(sql: &str) -> Result<TableDef, (u16, String, String)> {
     })?;
     let header = sql[..open_paren].trim();
     let raw_table_name = header.split_whitespace().last().unwrap_or("table");
-    let table_name = strip_ident_quotes(
-        raw_table_name
-            .rsplit('.')
-            .next()
-            .unwrap_or(raw_table_name),
-    );
+    let table_name =
+        strip_ident_quotes(raw_table_name.rsplit('.').next().unwrap_or(raw_table_name));
 
     let body = &sql[open_paren + 1..close_paren];
     let mut columns = Vec::new();
@@ -1517,8 +1493,7 @@ fn parse_create_table(sql: &str) -> Result<TableDef, (u16, String, String)> {
         let not_null = is_pk || rest_upper.contains("NOT NULL");
         let is_auto_inc = rest_upper.contains("AUTO_INCREMENT");
 
-        let (col_type, mut col_flags, is_boolean) =
-            infer_column_type(&col_name_lower, &rest_upper);
+        let (col_type, mut col_flags, is_boolean) = infer_column_type(&col_name_lower, &rest_upper);
         if is_unsigned {
             col_flags |= ColumnFlags::UNSIGNED_FLAG.bits();
         }
@@ -1639,9 +1614,7 @@ fn coerce_cell_for_column(cell: DecodedCell, col: &ColumnDef) -> DecodedCell {
     if ct == ColumnType::MYSQL_TYPE_NEWDECIMAL as u8 || ct == ColumnType::MYSQL_TYPE_DECIMAL as u8 {
         return match cell {
             DecodedCell::Decimal(s) | DecodedCell::Text(s) => DecodedCell::Decimal(s),
-            DecodedCell::Bytes(b) => {
-                DecodedCell::Decimal(String::from_utf8_lossy(&b).into_owned())
-            }
+            DecodedCell::Bytes(b) => DecodedCell::Decimal(String::from_utf8_lossy(&b).into_owned()),
             DecodedCell::Int(i) => DecodedCell::Decimal(i.to_string()),
             DecodedCell::UInt(u) => DecodedCell::Decimal(u.to_string()),
             DecodedCell::Float(f) => DecodedCell::Decimal(f.to_string()),
@@ -1934,7 +1907,13 @@ fn execute_insert(
     let base_upper = base_sql.to_ascii_uppercase();
     let values_idx = find_top_level_keyword(&base_upper, " VALUES")
         .or_else(|| find_top_level_keyword(&base_upper, ")VALUES"))
-        .map(|i| if base_upper.as_bytes()[i] == b')' { i + 1 } else { i })
+        .map(|i| {
+            if base_upper.as_bytes()[i] == b')' {
+                i + 1
+            } else {
+                i
+            }
+        })
         .ok_or_else(|| {
             (
                 1064,
@@ -2398,9 +2377,7 @@ fn execute_select(
     });
 
     let order_clause = order_idx.map(|o| {
-        let end = limit_idx
-            .filter(|&i| i > o)
-            .unwrap_or(after_from.len());
+        let end = limit_idx.filter(|&i| i > o).unwrap_or(after_from.len());
         after_from[o + 10..end].trim()
     });
 
@@ -2496,13 +2473,8 @@ fn execute_select(
         } else {
             trimmed
         };
-        let lookup = strip_ident_quotes(
-            expr_part
-                .rsplit('.')
-                .next()
-                .unwrap_or(expr_part),
-        )
-        .to_ascii_lowercase();
+        let lookup = strip_ident_quotes(expr_part.rsplit('.').next().unwrap_or(expr_part))
+            .to_ascii_lowercase();
 
         if let Some((idx, col_def)) = table
             .columns
@@ -2581,14 +2553,9 @@ fn eval_where_clause(
 
     for op in ["<=", ">=", "!=", "<>", "=", "<", ">"] {
         if let Some((lhs_raw, rhs_raw)) = trimmed.split_once(op) {
-            let col_name = strip_ident_quotes(
-                lhs_raw
-                    .trim()
-                    .rsplit('.')
-                    .next()
-                    .unwrap_or(lhs_raw.trim()),
-            )
-            .to_ascii_lowercase();
+            let col_name =
+                strip_ident_quotes(lhs_raw.trim().rsplit('.').next().unwrap_or(lhs_raw.trim()))
+                    .to_ascii_lowercase();
             let rhs_val = eval_sql_expr(rhs_raw, param_iter);
             if let Some((idx, col_def)) = cols
                 .iter()

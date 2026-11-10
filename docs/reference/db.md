@@ -82,6 +82,7 @@ Native database configurations, synchronous and asynchronous drivers (`SyncDatab
     options:
       heading_level: 4
       members: false
+      summary: false
 
 ::: vertebra.db.adapters.sqlite.SQLiteConfig
     options:

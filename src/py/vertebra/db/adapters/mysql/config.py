@@ -393,20 +393,26 @@ class MySQLConfig(BaseDatabaseConfig, frozen=True, gc=False):
         return str(snap.access_token)
 
     def build_sync_driver(self, registry: Any) -> Any:
-        """Build a `SyncMySQLDriver` wired with the registry's shared Cloud SQL dialer and broker."""
-        from vertebra.db.adapters.mysql.driver import SyncMySQLDriver
-
-        dialer_cfg = self.to_cloud_dialer_config()
-        dialer = registry.get_dialer(dialer_cfg, sync=True) if dialer_cfg is not None else None
-        return SyncMySQLDriver(self, dialer=dialer, broker=self.broker)
+        """Instantiate `SyncMySQLDriver` with shared `LeaseBroker` and optional Cloud SQL dialer."""
+        sync_cls, _ = self.resolve_driver_classes()
+        broker = self.broker if self.broker is not None else getattr(registry, "_broker", None)
+        dialer = (
+            registry.get_dialer(dialer_cfg, sync=True)
+            if registry is not None and (dialer_cfg := self.to_cloud_dialer_config()) is not None
+            else None
+        )
+        return sync_cls(self, dialer=dialer, broker=broker)
 
     def build_async_driver(self, registry: Any) -> Any:
-        """Build an `AsyncMySQLDriver` wired with the registry's shared Cloud SQL dialer and broker."""
-        from vertebra.db.adapters.mysql.driver import AsyncMySQLDriver
-
-        dialer_cfg = self.to_cloud_dialer_config()
-        dialer = registry.get_dialer(dialer_cfg, sync=False) if dialer_cfg is not None else None
-        return AsyncMySQLDriver(self, dialer=dialer, broker=self.broker)
+        """Instantiate `AsyncMySQLDriver` with shared `LeaseBroker` and optional Cloud SQL dialer."""
+        _, async_cls = self.resolve_driver_classes()
+        broker = self.broker if self.broker is not None else getattr(registry, "_broker", None)
+        dialer = (
+            registry.get_dialer(dialer_cfg, sync=False)
+            if registry is not None and (dialer_cfg := self.to_cloud_dialer_config()) is not None
+            else None
+        )
+        return async_cls(self, dialer=dialer, broker=broker)
 
     def __repr__(self) -> str:
         """Return a redacted representation that omits credentials and tokens."""

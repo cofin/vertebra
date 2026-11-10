@@ -918,7 +918,7 @@ async def test_direct_tcp_iam_auth_for_postgres_and_mysql() -> None:
     assert dsn_params["host"] == "10.128.0.11"
     assert dsn_params["port"] == 3306
     assert dsn_params["password"] == "oauth2-direct-mysql-3306-token"
-    mysql_driver = SyncMySQLDriver(mysql_cfg, connect_factory=lambda: None)
+    mysql_driver = SyncMySQLDriver(mysql_cfg)
     assert mysql_driver.dialer is None
 
 

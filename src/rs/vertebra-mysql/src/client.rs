@@ -232,7 +232,10 @@ pub fn py_param_to_mysql_value(val: &Bound<'_, PyAny>) -> Result<Value, MySQLErr
         return Ok(Value::Date(year, month, day, hour, minute, second, micro));
     }
     if type_name == "date" {
-        let year: u16 = val.getattr("year").and_then(|v| v.extract()).unwrap_or(1970);
+        let year: u16 = val
+            .getattr("year")
+            .and_then(|v| v.extract())
+            .unwrap_or(1970);
         let month: u8 = val.getattr("month").and_then(|v| v.extract()).unwrap_or(1);
         let day: u8 = val.getattr("day").and_then(|v| v.extract()).unwrap_or(1);
         return Ok(Value::Date(year, month, day, 0, 0, 0, 0));
@@ -306,9 +309,7 @@ pub fn prepare_sql_and_params(
                 let mut positional = Vec::with_capacity(names.len());
                 for name in names {
                     let item = dict.get_item(name.as_str()).ok().flatten().ok_or_else(|| {
-                        MySQLError::programming(format!(
-                            "Missing named SQL parameter '{name}'"
-                        ))
+                        MySQLError::programming(format!("Missing named SQL parameter '{name}'"))
                     })?;
                     positional.push(py_param_to_mysql_value(&item)?);
                 }
@@ -369,12 +370,7 @@ pub fn decode_mysql_value(val: Value, col_type: u8) -> Result<DecodedCell, MySQL
             }
         }
         Value::Time(is_neg, days, hh, mm, ss, us) => Ok(DecodedCell::Time(
-            is_neg,
-            days,
-            hh as u32,
-            mm as u32,
-            ss as u32,
-            us,
+            is_neg, days, hh as u32, mm as u32, ss as u32, us,
         )),
         Value::Bytes(bytes) => decode_bytes_by_column_type(bytes, col_type),
     }
@@ -566,7 +562,10 @@ impl MySQLClientCore {
         }
     }
 
-    async fn build_effective_opts(&self, include_pool_constraints: bool) -> Result<Opts, MySQLError> {
+    async fn build_effective_opts(
+        &self,
+        include_pool_constraints: bool,
+    ) -> Result<Opts, MySQLError> {
         let _dialer = self.config.build_cloud_sql_dialer()?;
         let pw = self.config.resolve_effective_password().await?;
         self.config
@@ -630,8 +629,10 @@ impl MySQLClientCore {
                     let res_affected: u64;
                     let res_last_id: Option<u64>;
                     if use_text {
-                        let mut result =
-                            conn.query_iter(sql.as_str()).await.map_err(MySQLError::from)?;
+                        let mut result = conn
+                            .query_iter(sql.as_str())
+                            .await
+                            .map_err(MySQLError::from)?;
                         columns = result
                             .columns()
                             .as_ref()
@@ -702,18 +703,24 @@ impl MySQLClientCore {
             Box::pin(async move {
                 let mut sets = Vec::new();
                 if use_text {
-                    let mut result = conn.query_iter(sql.as_str()).await.map_err(MySQLError::from)?;
+                    let mut result = conn
+                        .query_iter(sql.as_str())
+                        .await
+                        .map_err(MySQLError::from)?;
                     while !result.is_empty() {
                         let cols: Vec<(String, u8)> = result
                             .columns()
                             .as_ref()
                             .map(|c| {
                                 c.iter()
-                                    .map(|col| (col.name_str().into_owned(), col.column_type() as u8))
+                                    .map(|col| {
+                                        (col.name_str().into_owned(), col.column_type() as u8)
+                                    })
                                     .collect()
                             })
                             .unwrap_or_default();
-                        let raw_rows: Vec<Row> = result.collect().await.map_err(MySQLError::from)?;
+                        let raw_rows: Vec<Row> =
+                            result.collect().await.map_err(MySQLError::from)?;
                         let mut decoded_rows = Vec::with_capacity(raw_rows.len());
                         for r in raw_rows {
                             decoded_rows.push(decode_mysql_row(r, &cols)?);
@@ -727,18 +734,24 @@ impl MySQLClientCore {
                     }
                 } else {
                     let stmt = conn.prep(sql.as_str()).await.map_err(MySQLError::from)?;
-                    let mut result = conn.exec_iter(&stmt, params).await.map_err(MySQLError::from)?;
+                    let mut result = conn
+                        .exec_iter(&stmt, params)
+                        .await
+                        .map_err(MySQLError::from)?;
                     while !result.is_empty() {
                         let cols: Vec<(String, u8)> = result
                             .columns()
                             .as_ref()
                             .map(|c| {
                                 c.iter()
-                                    .map(|col| (col.name_str().into_owned(), col.column_type() as u8))
+                                    .map(|col| {
+                                        (col.name_str().into_owned(), col.column_type() as u8)
+                                    })
                                     .collect()
                             })
                             .unwrap_or_default();
-                        let raw_rows: Vec<Row> = result.collect().await.map_err(MySQLError::from)?;
+                        let raw_rows: Vec<Row> =
+                            result.collect().await.map_err(MySQLError::from)?;
                         let mut decoded_rows = Vec::with_capacity(raw_rows.len());
                         for r in raw_rows {
                             decoded_rows.push(decode_mysql_row(r, &cols)?);
@@ -773,7 +786,9 @@ impl MySQLClientCore {
                     let mut total_affected = 0u64;
                     let mut latest_id: Option<u64> = None;
                     for params in param_sets {
-                        conn.exec_drop(&stmt, params).await.map_err(MySQLError::from)?;
+                        conn.exec_drop(&stmt, params)
+                            .await
+                            .map_err(MySQLError::from)?;
                         total_affected += conn.affected_rows();
                         if let Some(id) = conn.last_insert_id().filter(|&id| id > 0) {
                             latest_id = Some(id);
@@ -983,8 +998,7 @@ impl MySQLClientCore {
             quoted_cols.push(format!("`{valid_col}`"));
         }
         let cols_clause = quoted_cols.join(", ");
-        let single_row_placeholders =
-            format!("({})", vec!["?"; columns.len()].join(", "));
+        let single_row_placeholders = format!("({})", vec!["?"; columns.len()].join(", "));
         let chunk_len = batch_size.max(1);
 
         let mut total_inserted = 0u64;
@@ -1073,7 +1087,9 @@ fn extract_arrow_load_payload(
     let items: Vec<Bound<'_, PyAny>> = if let Ok(to_pylist) = source.getattr("to_pylist")
         && let Ok(list_obj) = to_pylist.call0()
     {
-        list_obj.extract::<Vec<Bound<'_, PyAny>>>().unwrap_or_default()
+        list_obj
+            .extract::<Vec<Bound<'_, PyAny>>>()
+            .unwrap_or_default()
     } else if let Ok(seq) = source.extract::<Vec<Bound<'_, PyAny>>>() {
         seq
     } else {
@@ -1330,9 +1346,9 @@ impl SyncMySQLClient {
     ) -> PyResult<u64> {
         let (norm_sql, params) = prepare_sql_and_params(sql, parameters)?;
         let core = Arc::clone(&self.core);
-        let rs = py.detach(|| block_on_db(async move {
-            core.execute_result_set(norm_sql, params).await
-        }))?;
+        let rs = py.detach(|| {
+            block_on_db(async move { core.execute_result_set(norm_sql, params).await })
+        })?;
         Ok(rs.affected_rows)
     }
 
@@ -1353,16 +1369,17 @@ impl SyncMySQLClient {
             compiled_sets.push(params);
         }
         let core = Arc::clone(&self.core);
-        let affected = py.detach(|| block_on_db(async move {
-            core.execute_many_batch(normalized_sql, compiled_sets).await
-        }))?;
+        let affected = py.detach(|| {
+            block_on_db(async move { core.execute_many_batch(normalized_sql, compiled_sets).await })
+        })?;
         Ok(affected)
     }
 
     pub fn execute_script(&self, py: Python<'_>, sql: &str) -> PyResult<u64> {
         let script = sql.to_string();
         let core = Arc::clone(&self.core);
-        let affected = py.detach(|| block_on_db(async move { core.execute_script(script).await }))?;
+        let affected =
+            py.detach(|| block_on_db(async move { core.execute_script(script).await }))?;
         Ok(affected)
     }
 
@@ -1375,9 +1392,9 @@ impl SyncMySQLClient {
     ) -> PyResult<Py<PyAny>> {
         let (norm_sql, params) = prepare_sql_and_params(sql, parameters)?;
         let core = Arc::clone(&self.core);
-        let rs = py.detach(|| block_on_db(async move {
-            core.execute_result_set(norm_sql, params).await
-        }))?;
+        let rs = py.detach(|| {
+            block_on_db(async move { core.execute_result_set(norm_sql, params).await })
+        })?;
         rs.into_execute_with_description_py(py)
     }
 
@@ -1390,9 +1407,9 @@ impl SyncMySQLClient {
     ) -> PyResult<Py<PyAny>> {
         let (norm_sql, params) = prepare_sql_and_params(sql, parameters)?;
         let core = Arc::clone(&self.core);
-        let rs = py.detach(|| block_on_db(async move {
-            core.execute_result_set(norm_sql, params).await
-        }))?;
+        let rs = py.detach(|| {
+            block_on_db(async move { core.execute_result_set(norm_sql, params).await })
+        })?;
         rs.rows_to_py_dicts(py)
     }
 
@@ -1405,9 +1422,9 @@ impl SyncMySQLClient {
     ) -> PyResult<Py<PyAny>> {
         let (norm_sql, params) = prepare_sql_and_params(sql, parameters)?;
         let core = Arc::clone(&self.core);
-        let mut rs = py.detach(|| block_on_db(async move {
-            core.execute_result_set(norm_sql, params).await
-        }))?;
+        let mut rs = py.detach(|| {
+            block_on_db(async move { core.execute_result_set(norm_sql, params).await })
+        })?;
         if rs.rows.is_empty() {
             return Err(MySQLError::not_found("Query returned no rows").to_py_err(py));
         }
@@ -1425,9 +1442,9 @@ impl SyncMySQLClient {
     ) -> PyResult<Py<PyAny>> {
         let (norm_sql, params) = prepare_sql_and_params(sql, parameters)?;
         let core = Arc::clone(&self.core);
-        let mut rs = py.detach(|| block_on_db(async move {
-            core.execute_result_set(norm_sql, params).await
-        }))?;
+        let mut rs = py.detach(|| {
+            block_on_db(async move { core.execute_result_set(norm_sql, params).await })
+        })?;
         if rs.rows.is_empty() {
             return Ok(py.None());
         }
@@ -1446,9 +1463,9 @@ impl SyncMySQLClient {
     ) -> PyResult<Py<PyAny>> {
         let (norm_sql, params) = prepare_sql_and_params(sql, parameters)?;
         let core = Arc::clone(&self.core);
-        let mut rs = py.detach(|| block_on_db(async move {
-            core.execute_result_set(norm_sql, params).await
-        }))?;
+        let mut rs = py.detach(|| {
+            block_on_db(async move { core.execute_result_set(norm_sql, params).await })
+        })?;
         rs.rows.truncate(size);
         rs.rows_to_py_dicts(py)
     }
@@ -1462,9 +1479,9 @@ impl SyncMySQLClient {
     ) -> PyResult<Py<PyAny>> {
         let (norm_sql, params) = prepare_sql_and_params(sql, parameters)?;
         let core = Arc::clone(&self.core);
-        let rs = py.detach(|| block_on_db(async move {
-            core.execute_result_set(norm_sql, params).await
-        }))?;
+        let rs = py.detach(|| {
+            block_on_db(async move { core.execute_result_set(norm_sql, params).await })
+        })?;
         let Some(first_row) = rs.rows.into_iter().next() else {
             return Err(MySQLError::not_found("Query returned no rows").to_py_err(py));
         };
@@ -1483,9 +1500,8 @@ impl SyncMySQLClient {
     ) -> PyResult<Py<PyAny>> {
         let (norm_sql, params) = prepare_sql_and_params(sql, parameters)?;
         let core = Arc::clone(&self.core);
-        let sets = py.detach(|| block_on_db(async move {
-            core.execute_all_sets(norm_sql, params).await
-        }))?;
+        let sets = py
+            .detach(|| block_on_db(async move { core.execute_all_sets(norm_sql, params).await }))?;
         let outer = PyList::empty(py);
         for set in sets {
             outer.append(set.rows_to_py_dicts(py)?)?;
@@ -1549,15 +1565,15 @@ impl SyncMySQLClient {
 
     pub fn cancel(&self, py: Python<'_>) -> PyResult<bool> {
         let core = Arc::clone(&self.core);
-        let cancelled = py.detach(|| block_on_db(async move { core.cancel_active_query().await }))?;
+        let cancelled =
+            py.detach(|| block_on_db(async move { core.cancel_active_query().await }))?;
         Ok(cancelled)
     }
 
     pub fn cancel_query(&self, py: Python<'_>, connection_id: u32) -> PyResult<bool> {
         let core = Arc::clone(&self.core);
-        let cancelled = py.detach(|| block_on_db(async move {
-            core.cancel_query_by_id(connection_id).await
-        }))?;
+        let cancelled =
+            py.detach(|| block_on_db(async move { core.cancel_query_by_id(connection_id).await }))?;
         Ok(cancelled)
     }
 
@@ -1853,11 +1869,7 @@ impl AsyncMySQLClient {
         )
     }
 
-    pub fn execute_script(
-        &self,
-        py: Python<'_>,
-        sql: &str,
-    ) -> PyResult<RustDbTaskAwaitable> {
+    pub fn execute_script(&self, py: Python<'_>, sql: &str) -> PyResult<RustDbTaskAwaitable> {
         let script = sql.to_string();
         let core = Arc::clone(&self.core);
         spawn_rust_db_task_with_attr(
@@ -2067,11 +2079,7 @@ impl AsyncMySQLClient {
     }
 
     #[pyo3(signature = (name="vtb_sp"))]
-    pub fn savepoint(
-        &self,
-        py: Python<'_>,
-        name: &str,
-    ) -> PyResult<RustDbTaskAwaitable> {
+    pub fn savepoint(&self, py: Python<'_>, name: &str) -> PyResult<RustDbTaskAwaitable> {
         let core = Arc::clone(&self.core);
         let sp = name.to_string();
         spawn_rust_db_task_with_attr(
@@ -2084,11 +2092,7 @@ impl AsyncMySQLClient {
     }
 
     #[pyo3(signature = (name="vtb_sp"))]
-    pub fn release_savepoint(
-        &self,
-        py: Python<'_>,
-        name: &str,
-    ) -> PyResult<RustDbTaskAwaitable> {
+    pub fn release_savepoint(&self, py: Python<'_>, name: &str) -> PyResult<RustDbTaskAwaitable> {
         let core = Arc::clone(&self.core);
         let sp = name.to_string();
         spawn_rust_db_task_with_attr(
@@ -2338,7 +2342,10 @@ mod tests {
                 DecodedCell::DateTime(2026, 11, 4, 20, 30, 15, 654_321)
             ));
             assert!(matches!(r[2], DecodedCell::Date(2026, 11, 4)));
-            assert!(matches!(r[3], DecodedCell::Time(false, 0, 14, 22, 33, 125_000)));
+            assert!(matches!(
+                r[3],
+                DecodedCell::Time(false, 0, 14, 22, 33, 125_000)
+            ));
             assert!(matches!(&r[4], DecodedCell::Json(s) if s == "{\"k\":42}"));
             assert!(matches!(&r[5], DecodedCell::Bytes(b) if b == &[0xDE, 0xAD, 0xBE, 0xEF]));
 
@@ -2462,11 +2469,7 @@ mod tests {
             let inserted = core
                 .load_rows_batched(
                     "t_arrow".to_string(),
-                    vec![
-                        "id".to_string(),
-                        "label".to_string(),
-                        "amount".to_string(),
-                    ],
+                    vec!["id".to_string(), "label".to_string(), "amount".to_string()],
                     vec![
                         vec![
                             Value::Int(1),

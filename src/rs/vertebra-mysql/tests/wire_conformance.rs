@@ -87,32 +87,8 @@ fn test_wire_conformance_config_validation_and_secret_redaction() {
         "postgres://root@127.0.0.1:5432/db",
     ] {
         let err = MySQLConnectConfig::from_dsn_and_kwargs(
-            bad_dsn,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            5_000,
-            5_000,
-            5_000,
-            1,
-            4,
-            32,
-            "utf8mb4",
-            true,
-            None,
-            None,
-            "PUBLIC",
-            false,
-            None,
-            None,
-            None,
+            bad_dsn, None, None, None, None, None, None, None, None, None, None, 5_000, 5_000,
+            5_000, 1, 4, 32, "utf8mb4", true, None, None, "PUBLIC", false, None, None, None,
         )
         .expect_err("invalid DSN should fail");
         assert_eq!(err.kind, MySQLErrorKind::ImproperConfiguration);
@@ -158,7 +134,10 @@ fn test_wire_conformance_config_validation_and_secret_redaction() {
         None,
         None,
         Some("verify-ca"),
-        Some("-----BEGIN CERTIFICATE-----\nnot-valid-base64!!!\n-----END CERTIFICATE-----".to_string()),
+        Some(
+            "-----BEGIN CERTIFICATE-----\nnot-valid-base64!!!\n-----END CERTIFICATE-----"
+                .to_string(),
+        ),
         None,
         None,
         5_000,
