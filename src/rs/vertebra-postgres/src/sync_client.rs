@@ -1,18 +1,24 @@
 //! Synchronous physical PostgreSQL session client (`vertebra._postgres.SyncPostgresClient`).
 
 use std::collections::HashMap;
+use std::mem::MaybeUninit;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use bytes::Bytes;
 use pyo3::exceptions::PyTypeError;
+use pyo3::ffi;
 use pyo3::prelude::*;
-use pyo3::types::{PyBool, PyDict, PyString, PyTuple};
+use pyo3::types::{PyBool, PyByteArray, PyBytes, PyDict, PyString, PyTuple};
 use vertebra_db::py_async::block_on_db;
 
+use crate::arrow::MAX_ARROW_COPY_CALL_BYTES;
 use crate::config::{PostgresConfig, RawPostgresOptions};
+use crate::copy::{CopyFromStream, CopyOut};
 use crate::errors::{PostgresError, postgres_error_to_py};
 use crate::portal::Portal;
-use crate::python_values::{extract_parameters, query_result_to_python};
+use crate::python_values::{extract_parameters, extract_pg_value, query_result_to_python};
+use crate::result::PgValue;
 use crate::session::pipeline_scope::{
     PipelineScopeToken, extract_pipeline_batch, outcomes_to_python, pipeline_error_to_py,
 };
@@ -189,6 +195,253 @@ pub(crate) fn extract_iam_auth_options(
     extract_string_map(Some(obj), "iam_auth_options")
 }
 
+struct PyRawBufferGuard {
+    view: ffi::Py_buffer,
+}
+
+impl Drop for PyRawBufferGuard {
+    fn drop(&mut self) {
+        // SAFETY: `self.view` was initialized by a successful `PyObject_GetBuffer` call and is
+        // dropped strictly on the calling thread while attached to `Python<'_>`.
+        unsafe { ffi::PyBuffer_Release(&raw mut self.view) };
+    }
+}
+
+/// Validate and copy a contiguous read-only Python `Buffer` (`<= 16 MiB`) into owned Rust bytes
+/// while attached on the caller thread, checking length before allocating.
+pub(crate) fn extract_ipc_buffer_bytes(
+    py: Python<'_>,
+    obj: &Bound<'_, PyAny>,
+    field_name: &str,
+) -> PyResult<Vec<u8>> {
+    if let Ok(py_bytes) = obj.cast::<PyBytes>() {
+        let slice = py_bytes.as_bytes();
+        if slice.len() > MAX_ARROW_COPY_CALL_BYTES {
+            return Err(postgres_error_to_py(
+                py,
+                PostgresError::Data(format!(
+                    "{field_name} byte length {} exceeds maximum Arrow COPY call limit ({MAX_ARROW_COPY_CALL_BYTES} bytes)",
+                    slice.len()
+                )),
+            ));
+        }
+        return Ok(slice.to_vec());
+    }
+
+    let mut raw_view = MaybeUninit::<ffi::Py_buffer>::zeroed();
+    // SAFETY: `obj.as_ptr()` is a live borrowed PyObject while attached to `py`, and
+    // `PyBUF_CONTIG_RO` requests a C-contiguous read-only byte export without mutating data.
+    let rc = unsafe {
+        ffi::PyObject_GetBuffer(obj.as_ptr(), raw_view.as_mut_ptr(), ffi::PyBUF_CONTIG_RO)
+    };
+    if rc != 0 {
+        return Err(PyErr::fetch(py));
+    }
+    // SAFETY: `PyObject_GetBuffer` returned 0, fully initializing `raw_view`.
+    let guard = PyRawBufferGuard {
+        view: unsafe { raw_view.assume_init() },
+    };
+    let len = usize::try_from(guard.view.len).map_err(|_| {
+        postgres_error_to_py(
+            py,
+            PostgresError::Data(format!(
+                "{field_name} exported negative buffer length {}",
+                guard.view.len
+            )),
+        )
+    })?;
+    if len > MAX_ARROW_COPY_CALL_BYTES {
+        return Err(postgres_error_to_py(
+            py,
+            PostgresError::Data(format!(
+                "{field_name} byte length {len} exceeds maximum Arrow COPY call limit ({MAX_ARROW_COPY_CALL_BYTES} bytes)"
+            )),
+        ));
+    }
+    if len == 0 {
+        return Ok(Vec::new());
+    }
+    if guard.view.buf.is_null() {
+        return Err(postgres_error_to_py(
+            py,
+            PostgresError::Data(format!(
+                "{field_name} exported null buffer pointer for length {len}"
+            )),
+        ));
+    }
+    // SAFETY: `PyBUF_CONTIG_RO` guarantees a contiguous readable region of `len > 0` bytes at a
+    // non-null `guard.view.buf` kept alive and export-locked until `guard` drops below.
+    let owned = unsafe { std::slice::from_raw_parts(guard.view.buf.cast::<u8>(), len) }.to_vec();
+    drop(guard);
+    Ok(owned)
+}
+
+fn ensure_python_sequence(obj: &Bound<'_, PyAny>, field_name: &str) -> PyResult<()> {
+    if obj.is_instance_of::<PyString>()
+        || obj.is_instance_of::<PyBytes>()
+        || obj.is_instance_of::<PyByteArray>()
+        || obj.is_instance_of::<PyDict>()
+        || obj.hasattr("keys")?
+        || !obj.hasattr("__len__")?
+        || !obj.hasattr("__getitem__")?
+    {
+        return Err(PyTypeError::new_err(format!(
+            "{field_name} must be a sequence"
+        )));
+    }
+    Ok(())
+}
+
+/// Extract optional `columns: Sequence[str] | None` while attached on the caller thread.
+pub(crate) fn extract_opt_copy_columns(
+    obj: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Option<Vec<String>>> {
+    let Some(seq) = obj.filter(|v| !v.is_none()) else {
+        return Ok(None);
+    };
+    ensure_python_sequence(seq, "columns")?;
+    let mut cols = Vec::new();
+    for entry in seq.try_iter()? {
+        let item = entry?;
+        if !item.is_instance_of::<PyString>() {
+            return Err(PyTypeError::new_err("columns entries must be str"));
+        }
+        cols.push(item.extract::<String>()?);
+    }
+    Ok(Some(cols))
+}
+
+/// Extract `(column_oids, rows)` for binary `COPY ... FROM STDIN` while attached on the caller thread.
+pub(crate) fn extract_copy_rows_and_oids(
+    py: Python<'_>,
+    rows: &Bound<'_, PyAny>,
+    column_oids: &Bound<'_, PyAny>,
+) -> PyResult<(Vec<u32>, Vec<Vec<PgValue>>)> {
+    ensure_python_sequence(column_oids, "column_oids")?;
+    ensure_python_sequence(rows, "rows")?;
+
+    let mut oids = Vec::new();
+    for entry in column_oids.try_iter()? {
+        let item = entry?;
+        if item.is_instance_of::<PyBool>() {
+            return Err(PyTypeError::new_err(
+                "column_oids entries must be int, not bool",
+            ));
+        }
+        let raw = item
+            .extract::<i128>()
+            .map_err(|_| PyTypeError::new_err("column_oids entries must be int"))?;
+        let oid = u32::try_from(raw).ok().filter(|&v| v > 0).ok_or_else(|| {
+            postgres_error_to_py(
+                py,
+                PostgresError::Data(format!("column_oids entry {raw} must be in 1..=u32::MAX")),
+            )
+        })?;
+        oids.push(oid);
+    }
+    if oids.is_empty() {
+        return Err(postgres_error_to_py(
+            py,
+            PostgresError::Data("column_oids cannot be empty".to_string()),
+        ));
+    }
+
+    let mut pg_rows = Vec::new();
+    for row_entry in rows.try_iter()? {
+        let row_obj = row_entry?;
+        ensure_python_sequence(&row_obj, "COPY row")?;
+        let mut cells = Vec::with_capacity(oids.len());
+        for cell_entry in row_obj.try_iter()? {
+            cells.push(cell_entry?);
+        }
+        if cells.len() != oids.len() {
+            return Err(postgres_error_to_py(
+                py,
+                PostgresError::Data(format!(
+                    "COPY row length {} does not match column_oids length {}",
+                    cells.len(),
+                    oids.len()
+                )),
+            ));
+        }
+        let mut pg_row = Vec::with_capacity(oids.len());
+        for (cell, &oid) in cells.iter().zip(oids.iter()) {
+            let val =
+                extract_pg_value(py, cell, Some(oid)).map_err(|e| postgres_error_to_py(py, e))?;
+            pg_row.push(val);
+        }
+        pg_rows.push(pg_row);
+    }
+    Ok((oids, pg_rows))
+}
+
+/// Convert one decoded `CopyOut` binary tuple into `tuple[bytes | None, ...]`.
+pub(crate) fn copy_out_row_to_python(
+    py: Python<'_>,
+    fields: Vec<Option<Bytes>>,
+) -> PyResult<Py<PyAny>> {
+    let mut items = Vec::with_capacity(fields.len());
+    for cell in fields {
+        match cell {
+            Some(buf) => items.push(PyBytes::new(py, &buf).into_any()),
+            None => items.push(py.None().into_bound(py)),
+        }
+    }
+    Ok(PyTuple::new(py, items)?.into_any().unbind())
+}
+
+pub(crate) struct BorrowedBusyGuard<'a> {
+    flag: &'a AtomicBool,
+}
+
+impl<'a> BorrowedBusyGuard<'a> {
+    pub(crate) fn try_enter(py: Python<'_>, flag: &'a AtomicBool, kind: &str) -> PyResult<Self> {
+        if flag
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err(postgres_error_to_py(
+                py,
+                PostgresError::Interface(format!("overlapping {kind} operation is not allowed")),
+            ));
+        }
+        Ok(Self { flag })
+    }
+}
+
+impl Drop for BorrowedBusyGuard<'_> {
+    fn drop(&mut self) {
+        self.flag.store(false, Ordering::Release);
+    }
+}
+
+pub(crate) struct OwnedBusyGuard {
+    flag: Arc<AtomicBool>,
+}
+
+impl OwnedBusyGuard {
+    pub(crate) fn try_enter(py: Python<'_>, flag: &Arc<AtomicBool>, kind: &str) -> PyResult<Self> {
+        if flag
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err(postgres_error_to_py(
+                py,
+                PostgresError::Interface(format!("overlapping {kind} operation is not allowed")),
+            ));
+        }
+        Ok(Self {
+            flag: Arc::clone(flag),
+        })
+    }
+}
+
+impl Drop for OwnedBusyGuard {
+    fn drop(&mut self) {
+        self.flag.store(false, Ordering::Release);
+    }
+}
+
 /// Shared 25-parameter constructor validator used by both `SyncPostgresClient` and `AsyncPostgresClient`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_validated_config(
@@ -283,10 +536,258 @@ impl PySyncPostgresClient {
         Self { session }
     }
 
-    /// Register `SyncPostgresClient` and `SyncPostgresPortal` on the `vertebra._postgres` module.
+    /// Register synchronous client, portal, and COPY types on the `vertebra._postgres` module.
     pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_class::<Self>()?;
-        m.add_class::<PySyncPostgresPortal>()
+        m.add_class::<PySyncPostgresPortal>()?;
+        m.add_class::<PySyncPostgresCopyOut>()?;
+        m.add_class::<PySyncPostgresCopyIn>()
+    }
+}
+
+/// Exclusive synchronous binary `COPY ... TO STDOUT` iterator (`vertebra._postgres.SyncPostgresCopyOut`).
+#[pyclass(
+    name = "SyncPostgresCopyOut",
+    module = "vertebra._postgres",
+    frozen,
+    immutable_type
+)]
+pub struct PySyncPostgresCopyOut {
+    stream: tokio::sync::Mutex<CopyOut>,
+    exhausted_flag: Arc<AtomicBool>,
+    closed_flag: Arc<AtomicBool>,
+    busy: AtomicBool,
+}
+
+impl PySyncPostgresCopyOut {
+    pub(crate) fn from_stream(stream: CopyOut) -> Self {
+        let (exhausted_flag, closed_flag) = stream.status_flags();
+        Self {
+            stream: tokio::sync::Mutex::new(stream),
+            exhausted_flag,
+            closed_flag,
+            busy: AtomicBool::new(false),
+        }
+    }
+}
+
+#[pymethods]
+impl PySyncPostgresCopyOut {
+    /// Return the stream itself as a synchronous row iterator.
+    pub fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    /// Yield the next decoded binary row as `tuple[bytes | None, ...]`, or stop on `CopyDone`.
+    pub fn __next__(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        let _busy = BorrowedBusyGuard::try_enter(py, &self.busy, "COPY TO")?;
+        let next = py
+            .detach(|| {
+                block_on_db(async {
+                    let mut guard = self.stream.lock().await;
+                    guard.next_row().await
+                })
+            })
+            .map_err(|e| postgres_error_to_py(py, e))?;
+        match next {
+            Some(fields) => Ok(Some(copy_out_row_to_python(py, fields)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Close an unfinished `COPY TO` stream via `CancelRequest` drain/retire, or no-op when closed.
+    pub fn close(&self, py: Python<'_>) -> PyResult<()> {
+        py.detach(|| {
+            block_on_db(async {
+                let mut guard = self.stream.lock().await;
+                guard.close().await
+            })
+        })
+        .map_err(|e| postgres_error_to_py(py, e))
+    }
+
+    /// Enter a synchronous context-manager scope returning this `SyncPostgresCopyOut`.
+    pub fn __enter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    /// Idempotently close the stream when leaving a `with` block without suppressing exceptions.
+    #[pyo3(signature = (exc_type = None, exc_val = None, exc_tb = None))]
+    pub fn __exit__(
+        &self,
+        py: Python<'_>,
+        exc_type: Option<&Bound<'_, PyAny>>,
+        exc_val: Option<&Bound<'_, PyAny>>,
+        exc_tb: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<bool> {
+        let _ = (exc_type, exc_val, exc_tb);
+        self.close(py)?;
+        Ok(false)
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "SyncPostgresCopyOut(exhausted={}, closed={})",
+            self.exhausted_flag.load(Ordering::Acquire),
+            self.closed_flag.load(Ordering::Acquire),
+        )
+    }
+}
+
+/// Exclusive synchronous binary `COPY ... FROM STDIN` stream (`vertebra._postgres.SyncPostgresCopyIn`).
+#[pyclass(
+    name = "SyncPostgresCopyIn",
+    module = "vertebra._postgres",
+    frozen,
+    immutable_type
+)]
+pub struct PySyncPostgresCopyIn {
+    stream: tokio::sync::Mutex<CopyFromStream>,
+    closed_flag: Arc<AtomicBool>,
+    busy: AtomicBool,
+}
+
+impl PySyncPostgresCopyIn {
+    pub(crate) fn from_stream(stream: CopyFromStream) -> Self {
+        let closed_flag = stream.closed_flag();
+        Self {
+            stream: tokio::sync::Mutex::new(stream),
+            closed_flag,
+            busy: AtomicBool::new(false),
+        }
+    }
+}
+
+#[pymethods]
+impl PySyncPostgresCopyIn {
+    /// Encode and flush binary `COPY` rows against explicit PostgreSQL target `column_oids`.
+    pub fn write(
+        &self,
+        py: Python<'_>,
+        rows: &Bound<'_, PyAny>,
+        column_oids: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        let _busy = BorrowedBusyGuard::try_enter(py, &self.busy, "COPY FROM")?;
+        if self.closed_flag.load(Ordering::Acquire) {
+            return Err(postgres_error_to_py(
+                py,
+                PostgresError::Interface(
+                    "cannot call write() on a closed COPY FROM stream".to_string(),
+                ),
+            ));
+        }
+        let (oids, pg_rows) = match extract_copy_rows_and_oids(py, rows, column_oids) {
+            Ok(extracted) => extracted,
+            Err(err) => {
+                let _ = py.detach(|| {
+                    block_on_db(async {
+                        let mut guard = self.stream.lock().await;
+                        guard
+                            .abort("COPY FROM aborted due to invalid input rows")
+                            .await
+                    })
+                });
+                return Err(err);
+            }
+        };
+        py.detach(|| {
+            block_on_db(async {
+                let mut guard = self.stream.lock().await;
+                guard.write_rows(&oids, &pg_rows).await
+            })
+        })
+        .map_err(|e| postgres_error_to_py(py, e))
+    }
+
+    /// Encode and flush a bounded (`<= 16 MiB`) Arrow IPC stream chunk without materializing Python rows.
+    pub fn write_arrow_ipc(&self, py: Python<'_>, batch_ipc: &Bound<'_, PyAny>) -> PyResult<()> {
+        let _busy = BorrowedBusyGuard::try_enter(py, &self.busy, "COPY FROM")?;
+        if self.closed_flag.load(Ordering::Acquire) {
+            return Err(postgres_error_to_py(
+                py,
+                PostgresError::Interface(
+                    "cannot call write_arrow_ipc() on a closed COPY FROM stream".to_string(),
+                ),
+            ));
+        }
+        let ipc_bytes = match extract_ipc_buffer_bytes(py, batch_ipc, "batch_ipc") {
+            Ok(buf) => buf,
+            Err(err) => {
+                let _ = py.detach(|| {
+                    block_on_db(async {
+                        let mut guard = self.stream.lock().await;
+                        guard
+                            .abort("COPY FROM Arrow aborted due to invalid IPC buffer")
+                            .await
+                    })
+                });
+                return Err(err);
+            }
+        };
+        py.detach(|| {
+            block_on_db(async {
+                let mut guard = self.stream.lock().await;
+                guard.write_arrow_ipc(&ipc_bytes).await
+            })
+        })
+        .map_err(|e| postgres_error_to_py(py, e))
+    }
+
+    /// Emit the binary `-1i16` trailer and `CopyDone`, commit COPY-owned scope, and return row count.
+    pub fn finish(&self, py: Python<'_>) -> PyResult<u64> {
+        let _busy = BorrowedBusyGuard::try_enter(py, &self.busy, "COPY FROM")?;
+        if self.closed_flag.load(Ordering::Acquire) {
+            return Err(postgres_error_to_py(
+                py,
+                PostgresError::Interface(
+                    "cannot call finish() on a closed COPY FROM stream".to_string(),
+                ),
+            ));
+        }
+        py.detach(|| {
+            block_on_db(async {
+                let mut guard = self.stream.lock().await;
+                guard.finish().await
+            })
+        })
+        .map_err(|e| postgres_error_to_py(py, e))
+    }
+
+    /// Abort an unfinished `COPY FROM` stream via `CopyFail` + rollback, or no-op once finished/closed.
+    pub fn close(&self, py: Python<'_>) -> PyResult<()> {
+        py.detach(|| {
+            block_on_db(async {
+                let mut guard = self.stream.lock().await;
+                guard.abort("COPY FROM closed before finish").await
+            })
+        })
+        .map_err(|e| postgres_error_to_py(py, e))
+    }
+
+    /// Enter a synchronous context-manager scope returning this `SyncPostgresCopyIn`.
+    pub fn __enter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    /// Abort via `close()` if leaving `with` unfinished or on exception without suppressing exceptions.
+    #[pyo3(signature = (exc_type = None, exc_val = None, exc_tb = None))]
+    pub fn __exit__(
+        &self,
+        py: Python<'_>,
+        exc_type: Option<&Bound<'_, PyAny>>,
+        exc_val: Option<&Bound<'_, PyAny>>,
+        exc_tb: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<bool> {
+        let _ = (exc_type, exc_val, exc_tb);
+        self.close(py)?;
+        Ok(false)
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "SyncPostgresCopyIn(closed={})",
+            self.closed_flag.load(Ordering::Acquire),
+        )
     }
 }
 
@@ -641,6 +1142,75 @@ impl PySyncPostgresClient {
             })
             .map_err(|e| postgres_error_to_py(py, e))?;
         Ok(PySyncPostgresPortal::from_portal(portal))
+    }
+
+    /// Open an exclusive binary `COPY ... TO STDOUT (FORMAT binary)` streaming iterator.
+    pub fn copy_to(&self, py: Python<'_>, sql: &str) -> PyResult<PySyncPostgresCopyOut> {
+        let session = Arc::clone(&self.session);
+        let op_gen = session.reserve_operation_generation();
+        let sql_owned = sql.to_owned();
+        let stream = py
+            .detach(move || {
+                block_on_db(async move {
+                    session
+                        .copy_to_with_generation_as(op_gen, &sql_owned, None)
+                        .await
+                })
+            })
+            .map_err(|e| postgres_error_to_py(py, e))?;
+        Ok(PySyncPostgresCopyOut::from_stream(stream))
+    }
+
+    /// Open an exclusive binary `COPY ... FROM STDIN (FORMAT binary)` write stream.
+    pub fn copy_from(&self, py: Python<'_>, sql: &str) -> PyResult<PySyncPostgresCopyIn> {
+        let session = Arc::clone(&self.session);
+        let op_gen = session.reserve_operation_generation();
+        let sql_owned = sql.to_owned();
+        let stream = py
+            .detach(move || {
+                block_on_db(async move {
+                    session
+                        .copy_from_with_generation_as(op_gen, &sql_owned, None)
+                        .await
+                })
+            })
+            .map_err(|e| postgres_error_to_py(py, e))?;
+        Ok(PySyncPostgresCopyIn::from_stream(stream))
+    }
+
+    /// Validate schema against `pg_catalog`, open a binary `COPY ... FROM STDIN` stream, and flush `first_batch_ipc`.
+    #[pyo3(signature = (table_name, first_batch_ipc, *, columns = None, schema_name = None))]
+    pub fn copy_from_arrow(
+        &self,
+        py: Python<'_>,
+        table_name: &str,
+        first_batch_ipc: &Bound<'_, PyAny>,
+        columns: Option<&Bound<'_, PyAny>>,
+        schema_name: Option<&str>,
+    ) -> PyResult<PySyncPostgresCopyIn> {
+        let cols_owned = extract_opt_copy_columns(columns)?;
+        let ipc_owned = extract_ipc_buffer_bytes(py, first_batch_ipc, "first_batch_ipc")?;
+        let session = Arc::clone(&self.session);
+        let op_gen = session.reserve_operation_generation();
+        let table_owned = table_name.to_owned();
+        let schema_owned = schema_name.map(str::to_owned);
+        let stream = py
+            .detach(move || {
+                block_on_db(async move {
+                    session
+                        .copy_from_arrow_with_generation_as(
+                            op_gen,
+                            &table_owned,
+                            schema_owned.as_deref(),
+                            &ipc_owned,
+                            cols_owned.as_deref(),
+                            None,
+                        )
+                        .await
+                })
+            })
+            .map_err(|e| postgres_error_to_py(py, e))?;
+        Ok(PySyncPostgresCopyIn::from_stream(stream))
     }
 
     /// Open a retained pipeline transaction (`BEGIN` at `'I'`) or savepoint (`SAVEPOINT` at `'T'`) and return its integer scope identifier.

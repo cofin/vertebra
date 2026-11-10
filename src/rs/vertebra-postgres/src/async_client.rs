@@ -5,12 +5,14 @@ use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use pyo3::exceptions::PyStopAsyncIteration;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple};
 use vertebra_db::py_async::{
     RustDbTaskAwaitable, spawn_rust_db_task_with_attr, spawn_rust_db_task_with_attr_and_cancel,
 };
 
+use crate::copy::{CopyFromStream, CopyOut};
 use crate::errors::{PostgresError, postgres_error_to_py};
 use crate::portal::Portal;
 use crate::python_values::{extract_parameters, query_result_to_python};
@@ -20,10 +22,11 @@ use crate::session::pipeline_scope::{
 };
 use crate::session::{ClientBeginConnect, CloseAction, CommandBudget, SessionHandle};
 use crate::sync_client::{
-    build_validated_config, extract_batch_size, extract_cloud_auth_options,
-    extract_iam_auth_options, extract_max_rows, extract_scope_id, extract_session_gucs,
-    extract_strict_bool, extract_strict_f64, extract_strict_i64, extract_strict_opt_f64,
-    extract_strict_opt_i64, extract_strict_u64,
+    OwnedBusyGuard, build_validated_config, copy_out_row_to_python, extract_batch_size,
+    extract_cloud_auth_options, extract_copy_rows_and_oids, extract_iam_auth_options,
+    extract_ipc_buffer_bytes, extract_max_rows, extract_opt_copy_columns, extract_scope_id,
+    extract_session_gucs, extract_strict_bool, extract_strict_f64, extract_strict_i64,
+    extract_strict_opt_f64, extract_strict_opt_i64, extract_strict_u64,
 };
 
 /// Event-loop attribute name isolating the `vertebra._postgres` completion drainer from sibling extensions.
@@ -92,10 +95,541 @@ impl PyAsyncPostgresClient {
         Self { session }
     }
 
-    /// Register `AsyncPostgresClient` and `AsyncPostgresPortal` on the `vertebra._postgres` module.
+    /// Register asynchronous client, portal, and COPY types on the `vertebra._postgres` module.
     pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_class::<Self>()?;
-        m.add_class::<PyAsyncPostgresPortal>()
+        m.add_class::<PyAsyncPostgresPortal>()?;
+        m.add_class::<PyAsyncPostgresCopyOut>()?;
+        m.add_class::<PyAsyncPostgresCopyIn>()
+    }
+}
+
+/// Exclusive asynchronous binary `COPY ... TO STDOUT` iterator (`vertebra._postgres.AsyncPostgresCopyOut`).
+#[pyclass(
+    name = "AsyncPostgresCopyOut",
+    module = "vertebra._postgres",
+    frozen,
+    immutable_type
+)]
+pub struct PyAsyncPostgresCopyOut {
+    stream: Arc<tokio::sync::Mutex<CopyOut>>,
+    session: Arc<SessionHandle>,
+    lease_op_gen: OperationGeneration,
+    exhausted_flag: Arc<AtomicBool>,
+    closed_flag: Arc<AtomicBool>,
+    busy: Arc<AtomicBool>,
+}
+
+impl PyAsyncPostgresCopyOut {
+    pub(crate) fn from_stream(
+        stream: CopyOut,
+        session: Arc<SessionHandle>,
+        lease_op_gen: OperationGeneration,
+    ) -> Self {
+        let (exhausted_flag, closed_flag) = stream.status_flags();
+        Self {
+            stream: Arc::new(tokio::sync::Mutex::new(stream)),
+            session,
+            lease_op_gen,
+            exhausted_flag,
+            closed_flag,
+            busy: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    fn spawn_close<'py>(
+        &self,
+        py: Python<'py>,
+        return_false: bool,
+    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+        if !self.closed_flag.load(Ordering::Acquire) && self.busy.load(Ordering::Acquire) {
+            self.session.trigger_async_cancel(self.lease_op_gen);
+        }
+        let stream = Arc::clone(&self.stream);
+        let awaitable = spawn_rust_db_task_with_attr(
+            py,
+            async move {
+                let mut guard = stream.lock().await;
+                guard.close().await
+            },
+            move |py, ()| {
+                if return_false {
+                    Ok(false.into_pyobject(py)?.to_owned().into_any().unbind())
+                } else {
+                    Ok(py.None())
+                }
+            },
+            postgres_error_to_py,
+            POSTGRES_COMPLETION_DRAINER_ATTR,
+        )?;
+        Bound::new(py, awaitable)
+    }
+}
+
+#[pymethods]
+impl PyAsyncPostgresCopyOut {
+    /// Return the stream itself as an asynchronous row iterator.
+    pub fn __aiter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    /// Resolve to the next decoded binary row as `tuple[bytes | None, ...]`, or raise `StopAsyncIteration`.
+    pub fn __anext__<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Option<Bound<'py, RustDbTaskAwaitable>>> {
+        let busy_guard = OwnedBusyGuard::try_enter(py, &self.busy, "COPY TO")?;
+        if self.closed_flag.load(Ordering::Acquire) && !self.exhausted_flag.load(Ordering::Acquire)
+        {
+            return Err(postgres_error_to_py(
+                py,
+                PostgresError::Interface("cannot read from a closed COPY TO stream".to_string()),
+            ));
+        }
+        let stream = Arc::clone(&self.stream);
+        let session = Arc::clone(&self.session);
+        let cancel_session = Arc::clone(&self.session);
+        let lease_op_gen = self.lease_op_gen;
+        let awaitable = spawn_rust_db_task_with_attr_and_cancel(
+            py,
+            async move {
+                let _keep_busy = busy_guard;
+                let mut guard = stream.lock().await;
+                if session.did_op_claim_cancel(lease_op_gen) && !guard.is_closed() {
+                    let _ = guard.close().await;
+                    return Err(PostgresError::Operational(
+                        "COPY TO stream was cancelled".to_string(),
+                    ));
+                }
+                let res = guard.next_row().await;
+                if session.did_op_claim_cancel(lease_op_gen) && !guard.is_closed() {
+                    let _ = guard.close().await;
+                    return Err(PostgresError::Operational(
+                        "COPY TO stream was cancelled".to_string(),
+                    ));
+                }
+                res
+            },
+            |py, opt_row| match opt_row {
+                Some(fields) => copy_out_row_to_python(py, fields),
+                None => Err(PyStopAsyncIteration::new_err(())),
+            },
+            postgres_error_to_py,
+            move || {
+                cancel_session.trigger_async_cancel(lease_op_gen);
+            },
+            POSTGRES_COMPLETION_DRAINER_ATTR,
+        )?;
+        Ok(Some(awaitable))
+    }
+
+    /// Asynchronously close an unfinished `COPY TO` stream via `CancelRequest` drain/retire, or no-op if closed.
+    pub fn aclose<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+        self.spawn_close(py, false)
+    }
+
+    /// Enter an `async with` scope resolving to this `AsyncPostgresCopyOut`.
+    pub fn __aenter__<'py>(slf: PyRef<'py, Self>) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+        let py = slf.py();
+        let py_self: Py<Self> = slf.into_pyobject(py)?.unbind();
+        let awaitable = spawn_rust_db_task_with_attr(
+            py,
+            async { Ok::<(), PostgresError>(()) },
+            move |_py, ()| Ok(py_self.into_any()),
+            postgres_error_to_py,
+            POSTGRES_COMPLETION_DRAINER_ATTR,
+        )?;
+        Bound::new(py, awaitable)
+    }
+
+    /// Asynchronously close the stream when leaving `async with` without suppressing exceptions.
+    #[pyo3(signature = (exc_type = None, exc_val = None, exc_tb = None))]
+    pub fn __aexit__<'py>(
+        &self,
+        py: Python<'py>,
+        exc_type: Option<&Bound<'py, PyAny>>,
+        exc_val: Option<&Bound<'py, PyAny>>,
+        exc_tb: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+        let _ = (exc_type, exc_val, exc_tb);
+        self.spawn_close(py, true)
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "AsyncPostgresCopyOut(exhausted={}, closed={})",
+            self.exhausted_flag.load(Ordering::Acquire),
+            self.closed_flag.load(Ordering::Acquire),
+        )
+    }
+}
+
+/// Exclusive asynchronous binary `COPY ... FROM STDIN` stream (`vertebra._postgres.AsyncPostgresCopyIn`).
+#[pyclass(
+    name = "AsyncPostgresCopyIn",
+    module = "vertebra._postgres",
+    frozen,
+    immutable_type
+)]
+pub struct PyAsyncPostgresCopyIn {
+    stream: Arc<tokio::sync::Mutex<CopyFromStream>>,
+    session: Arc<SessionHandle>,
+    lease_op_gen: OperationGeneration,
+    closed_flag: Arc<AtomicBool>,
+    busy: Arc<AtomicBool>,
+}
+
+impl PyAsyncPostgresCopyIn {
+    pub(crate) fn from_stream(
+        stream: CopyFromStream,
+        session: Arc<SessionHandle>,
+        lease_op_gen: OperationGeneration,
+    ) -> Self {
+        let closed_flag = stream.closed_flag();
+        Self {
+            stream: Arc::new(tokio::sync::Mutex::new(stream)),
+            session,
+            lease_op_gen,
+            closed_flag,
+            busy: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    fn spawn_abort_with_py_err<'py>(
+        &self,
+        py: Python<'py>,
+        busy_guard: OwnedBusyGuard,
+        reason: &'static str,
+        err: PyErr,
+    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+        let stream = Arc::clone(&self.stream);
+        let awaitable = spawn_rust_db_task_with_attr(
+            py,
+            async move {
+                let _keep_busy = busy_guard;
+                let mut guard = stream.lock().await;
+                let _ = guard.abort(reason).await;
+                Ok::<(), PostgresError>(())
+            },
+            move |_py, ()| Err(err),
+            postgres_error_to_py,
+            POSTGRES_COMPLETION_DRAINER_ATTR,
+        )?;
+        Bound::new(py, awaitable)
+    }
+
+    fn spawn_close<'py>(
+        &self,
+        py: Python<'py>,
+        return_false: bool,
+    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+        if !self.closed_flag.load(Ordering::Acquire) && self.busy.load(Ordering::Acquire) {
+            self.session.trigger_async_cancel(self.lease_op_gen);
+        }
+        let stream = Arc::clone(&self.stream);
+        let awaitable = spawn_rust_db_task_with_attr(
+            py,
+            async move {
+                let mut guard = stream.lock().await;
+                guard.abort("COPY FROM closed before finish").await
+            },
+            move |py, ()| {
+                if return_false {
+                    Ok(false.into_pyobject(py)?.to_owned().into_any().unbind())
+                } else {
+                    Ok(py.None())
+                }
+            },
+            postgres_error_to_py,
+            POSTGRES_COMPLETION_DRAINER_ATTR,
+        )?;
+        Bound::new(py, awaitable)
+    }
+}
+
+#[pymethods]
+impl PyAsyncPostgresCopyIn {
+    /// Asynchronously encode and flush binary `COPY` rows against explicit PostgreSQL target `column_oids`.
+    pub fn write<'py>(
+        &self,
+        py: Python<'py>,
+        rows: &Bound<'py, PyAny>,
+        column_oids: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+        let busy_guard = OwnedBusyGuard::try_enter(py, &self.busy, "COPY FROM")?;
+        if self.closed_flag.load(Ordering::Acquire) {
+            return Err(postgres_error_to_py(
+                py,
+                PostgresError::Interface(
+                    "cannot call write() on a closed COPY FROM stream".to_string(),
+                ),
+            ));
+        }
+        let (oids, pg_rows) = match extract_copy_rows_and_oids(py, rows, column_oids) {
+            Ok(extracted) => extracted,
+            Err(err) => {
+                return self.spawn_abort_with_py_err(
+                    py,
+                    busy_guard,
+                    "COPY FROM aborted due to invalid input rows",
+                    err,
+                );
+            }
+        };
+        let stream = Arc::clone(&self.stream);
+        let session = Arc::clone(&self.session);
+        let cancel_session = Arc::clone(&self.session);
+        let lease_op_gen = self.lease_op_gen;
+        let timeout = session.config().connect_timeout;
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let cancelled_cb = Arc::clone(&cancelled);
+        let cancel_notify = Arc::new(tokio::sync::Notify::new());
+        let cancel_notify_cb = Arc::clone(&cancel_notify);
+        spawn_rust_db_task_with_attr_and_cancel(
+            py,
+            async move {
+                let _keep_busy = busy_guard;
+                let mut guard = stream.lock().await;
+                if cancelled.load(Ordering::Acquire) || session.did_op_claim_cancel(lease_op_gen) {
+                    let _ = guard.abort("COPY FROM cancelled").await;
+                    return Err(PostgresError::Operational(
+                        "COPY FROM write was cancelled".to_string(),
+                    ));
+                }
+                let write_res = {
+                    let write_fut = guard.write_rows(&oids, &pg_rows);
+                    tokio::pin!(write_fut);
+                    let stall_timeout = async {
+                        cancel_notify.notified().await;
+                        tokio::time::sleep(timeout).await;
+                    };
+                    tokio::pin!(stall_timeout);
+                    tokio::select! {
+                        biased;
+                        res = &mut write_fut => Some(res),
+                        () = &mut stall_timeout => None,
+                    }
+                };
+                match write_res {
+                    Some(Ok(())) => {
+                        if cancelled.load(Ordering::Acquire)
+                            || session.did_op_claim_cancel(lease_op_gen)
+                        {
+                            let _ = guard.abort("COPY FROM cancelled").await;
+                            return Err(PostgresError::Operational(
+                                "COPY FROM write was cancelled".to_string(),
+                            ));
+                        }
+                        Ok(())
+                    }
+                    Some(Err(err)) => Err(err),
+                    None => {
+                        let _ = guard.abort("COPY FROM cancelled").await;
+                        Err(PostgresError::Operational(
+                            "cancelled COPY FROM write timed out".to_string(),
+                        ))
+                    }
+                }
+            },
+            |py, ()| Ok(py.None()),
+            postgres_error_to_py,
+            move || {
+                cancelled_cb.store(true, Ordering::Release);
+                cancel_session.trigger_async_cancel(lease_op_gen);
+                cancel_notify_cb.notify_waiters();
+            },
+            POSTGRES_COMPLETION_DRAINER_ATTR,
+        )
+    }
+
+    /// Asynchronously encode and flush a bounded (`<= 16 MiB`) Arrow IPC stream chunk without materializing rows.
+    pub fn write_arrow_ipc<'py>(
+        &self,
+        py: Python<'py>,
+        batch_ipc: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+        let busy_guard = OwnedBusyGuard::try_enter(py, &self.busy, "COPY FROM")?;
+        if self.closed_flag.load(Ordering::Acquire) {
+            return Err(postgres_error_to_py(
+                py,
+                PostgresError::Interface(
+                    "cannot call write_arrow_ipc() on a closed COPY FROM stream".to_string(),
+                ),
+            ));
+        }
+        let ipc_bytes = match extract_ipc_buffer_bytes(py, batch_ipc, "batch_ipc") {
+            Ok(buf) => buf,
+            Err(err) => {
+                return self.spawn_abort_with_py_err(
+                    py,
+                    busy_guard,
+                    "COPY FROM Arrow aborted due to invalid IPC buffer",
+                    err,
+                );
+            }
+        };
+        let stream = Arc::clone(&self.stream);
+        let session = Arc::clone(&self.session);
+        let cancel_session = Arc::clone(&self.session);
+        let lease_op_gen = self.lease_op_gen;
+        let timeout = session.config().connect_timeout;
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let cancelled_cb = Arc::clone(&cancelled);
+        let cancel_notify = Arc::new(tokio::sync::Notify::new());
+        let cancel_notify_cb = Arc::clone(&cancel_notify);
+        spawn_rust_db_task_with_attr_and_cancel(
+            py,
+            async move {
+                let _keep_busy = busy_guard;
+                let mut guard = stream.lock().await;
+                if cancelled.load(Ordering::Acquire) || session.did_op_claim_cancel(lease_op_gen) {
+                    let _ = guard.abort("COPY FROM Arrow cancelled").await;
+                    return Err(PostgresError::Operational(
+                        "COPY FROM Arrow write was cancelled".to_string(),
+                    ));
+                }
+                let write_res = {
+                    let write_fut = guard.write_arrow_ipc(&ipc_bytes);
+                    tokio::pin!(write_fut);
+                    let stall_timeout = async {
+                        cancel_notify.notified().await;
+                        tokio::time::sleep(timeout).await;
+                    };
+                    tokio::pin!(stall_timeout);
+                    tokio::select! {
+                        biased;
+                        res = &mut write_fut => Some(res),
+                        () = &mut stall_timeout => None,
+                    }
+                };
+                match write_res {
+                    Some(Ok(())) => {
+                        if cancelled.load(Ordering::Acquire)
+                            || session.did_op_claim_cancel(lease_op_gen)
+                        {
+                            let _ = guard.abort("COPY FROM Arrow cancelled").await;
+                            return Err(PostgresError::Operational(
+                                "COPY FROM Arrow write was cancelled".to_string(),
+                            ));
+                        }
+                        Ok(())
+                    }
+                    Some(Err(err)) => Err(err),
+                    None => {
+                        let _ = guard.abort("COPY FROM Arrow cancelled").await;
+                        Err(PostgresError::Operational(
+                            "cancelled COPY FROM Arrow write timed out".to_string(),
+                        ))
+                    }
+                }
+            },
+            |py, ()| Ok(py.None()),
+            postgres_error_to_py,
+            move || {
+                cancelled_cb.store(true, Ordering::Release);
+                cancel_session.trigger_async_cancel(lease_op_gen);
+                cancel_notify_cb.notify_waiters();
+            },
+            POSTGRES_COMPLETION_DRAINER_ATTR,
+        )
+    }
+
+    /// Asynchronously emit the binary `-1i16` trailer and `CopyDone`, commit COPY-owned scope, and resolve row count.
+    pub fn finish<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+        let busy_guard = OwnedBusyGuard::try_enter(py, &self.busy, "COPY FROM")?;
+        if self.closed_flag.load(Ordering::Acquire) {
+            return Err(postgres_error_to_py(
+                py,
+                PostgresError::Interface(
+                    "cannot call finish() on a closed COPY FROM stream".to_string(),
+                ),
+            ));
+        }
+        let stream = Arc::clone(&self.stream);
+        let session = Arc::clone(&self.session);
+        let cancel_session = Arc::clone(&self.session);
+        let closed_flag = Arc::clone(&self.closed_flag);
+        let lease_op_gen = self.lease_op_gen;
+        let timeout = session.config().connect_timeout;
+        let cancel_notify = Arc::new(tokio::sync::Notify::new());
+        let cancel_notify_cb = Arc::clone(&cancel_notify);
+        spawn_rust_db_task_with_attr_and_cancel(
+            py,
+            async move {
+                let _keep_busy = busy_guard;
+                let mut guard = stream.lock().await;
+                if session.did_op_claim_cancel(lease_op_gen) && !guard.is_closed() {
+                    let _ = guard.abort("COPY FROM finish cancelled").await;
+                    return Err(PostgresError::Operational(
+                        "COPY FROM finish was cancelled".to_string(),
+                    ));
+                }
+                let finish_fut = guard.finish();
+                tokio::pin!(finish_fut);
+                let stall_timeout = async {
+                    cancel_notify.notified().await;
+                    tokio::time::sleep(timeout).await;
+                };
+                tokio::pin!(stall_timeout);
+                tokio::select! {
+                    biased;
+                    res = &mut finish_fut => res,
+                    () = &mut stall_timeout => {
+                        closed_flag.store(true, Ordering::Release);
+                        Err(PostgresError::Operational(
+                            "cancelled COPY FROM finish timed out while awaiting server completion"
+                                .to_string(),
+                        ))
+                    }
+                }
+            },
+            |py, rows| Ok(rows.into_pyobject(py)?.into_any().unbind()),
+            postgres_error_to_py,
+            move || {
+                cancel_session.trigger_async_cancel(lease_op_gen);
+                cancel_notify_cb.notify_waiters();
+            },
+            POSTGRES_COMPLETION_DRAINER_ATTR,
+        )
+    }
+
+    /// Asynchronously abort an unfinished `COPY FROM` stream via `CopyFail` + rollback, or no-op once closed.
+    pub fn aclose<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+        self.spawn_close(py, false)
+    }
+
+    /// Enter an `async with` scope resolving to this `AsyncPostgresCopyIn`.
+    pub fn __aenter__<'py>(slf: PyRef<'py, Self>) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+        let py = slf.py();
+        let py_self: Py<Self> = slf.into_pyobject(py)?.unbind();
+        let awaitable = spawn_rust_db_task_with_attr(
+            py,
+            async { Ok::<(), PostgresError>(()) },
+            move |_py, ()| Ok(py_self.into_any()),
+            postgres_error_to_py,
+            POSTGRES_COMPLETION_DRAINER_ATTR,
+        )?;
+        Bound::new(py, awaitable)
+    }
+
+    /// Abort via `aclose()` when leaving `async with` unfinished or on exception without suppressing exceptions.
+    #[pyo3(signature = (exc_type = None, exc_val = None, exc_tb = None))]
+    pub fn __aexit__<'py>(
+        &self,
+        py: Python<'py>,
+        exc_type: Option<&Bound<'py, PyAny>>,
+        exc_val: Option<&Bound<'py, PyAny>>,
+        exc_tb: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+        let _ = (exc_type, exc_val, exc_tb);
+        self.spawn_close(py, true)
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "AsyncPostgresCopyIn(closed={})",
+            self.closed_flag.load(Ordering::Acquire),
+        )
     }
 }
 
@@ -487,6 +1021,110 @@ impl PyAsyncPostgresClient {
                     .await
             },
             |py, portal| Ok(Py::new(py, PyAsyncPostgresPortal::from_portal(portal))?.into_any()),
+            postgres_error_to_py,
+        )
+    }
+
+    /// Asynchronously open an exclusive binary `COPY ... TO STDOUT (FORMAT binary)` streaming iterator.
+    pub fn copy_to<'py>(
+        &self,
+        py: Python<'py>,
+        sql: &str,
+    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+        let session = Arc::clone(&self.session);
+        let wrapper_session = Arc::clone(&self.session);
+        let op_gen = session.reserve_operation_generation();
+        let sql_owned = sql.to_owned();
+        spawn_cancellable_op(
+            py,
+            &self.session,
+            op_gen,
+            async move {
+                session
+                    .copy_to_with_generation_as(op_gen, &sql_owned, None)
+                    .await
+            },
+            move |py, stream| {
+                Ok(Py::new(
+                    py,
+                    PyAsyncPostgresCopyOut::from_stream(stream, wrapper_session, op_gen),
+                )?
+                .into_any())
+            },
+            postgres_error_to_py,
+        )
+    }
+
+    /// Asynchronously open an exclusive binary `COPY ... FROM STDIN (FORMAT binary)` write stream.
+    pub fn copy_from<'py>(
+        &self,
+        py: Python<'py>,
+        sql: &str,
+    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+        let session = Arc::clone(&self.session);
+        let wrapper_session = Arc::clone(&self.session);
+        let op_gen = session.reserve_operation_generation();
+        let sql_owned = sql.to_owned();
+        spawn_cancellable_op(
+            py,
+            &self.session,
+            op_gen,
+            async move {
+                session
+                    .copy_from_with_generation_as(op_gen, &sql_owned, None)
+                    .await
+            },
+            move |py, stream| {
+                Ok(Py::new(
+                    py,
+                    PyAsyncPostgresCopyIn::from_stream(stream, wrapper_session, op_gen),
+                )?
+                .into_any())
+            },
+            postgres_error_to_py,
+        )
+    }
+
+    /// Validate schema against `pg_catalog`, open an async binary `COPY ... FROM STDIN` stream, and flush `first_batch_ipc`.
+    #[pyo3(signature = (table_name, first_batch_ipc, *, columns = None, schema_name = None))]
+    pub fn copy_from_arrow<'py>(
+        &self,
+        py: Python<'py>,
+        table_name: &str,
+        first_batch_ipc: &Bound<'py, PyAny>,
+        columns: Option<&Bound<'py, PyAny>>,
+        schema_name: Option<&str>,
+    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+        let cols_owned = extract_opt_copy_columns(columns)?;
+        let ipc_owned = extract_ipc_buffer_bytes(py, first_batch_ipc, "first_batch_ipc")?;
+        let session = Arc::clone(&self.session);
+        let wrapper_session = Arc::clone(&self.session);
+        let op_gen = session.reserve_operation_generation();
+        let table_owned = table_name.to_owned();
+        let schema_owned = schema_name.map(str::to_owned);
+        spawn_cancellable_op(
+            py,
+            &self.session,
+            op_gen,
+            async move {
+                session
+                    .copy_from_arrow_with_generation_as(
+                        op_gen,
+                        &table_owned,
+                        schema_owned.as_deref(),
+                        &ipc_owned,
+                        cols_owned.as_deref(),
+                        None,
+                    )
+                    .await
+            },
+            move |py, stream| {
+                Ok(Py::new(
+                    py,
+                    PyAsyncPostgresCopyIn::from_stream(stream, wrapper_session, op_gen),
+                )?
+                .into_any())
+            },
             postgres_error_to_py,
         )
     }

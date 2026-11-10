@@ -1,6 +1,7 @@
 """Type stubs for the vertebra._postgres native extension module."""
 
-from collections.abc import Awaitable, Mapping, Sequence
+from collections.abc import Awaitable, Buffer, Mapping, Sequence
+from types import TracebackType
 from typing import final
 
 from vertebra.db.adapters.postgres.types import (
@@ -103,6 +104,25 @@ class SyncPostgresClient:
         batch_size: int = 65536,
     ) -> SyncPostgresPortal:
         """Open a session-pinned row-limited PostgreSQL portal over sql."""
+        ...
+
+    def copy_to(self, sql: str) -> SyncPostgresCopyOut:
+        """Open an exclusive binary COPY ... TO STDOUT streaming iterator."""
+        ...
+
+    def copy_from(self, sql: str) -> SyncPostgresCopyIn:
+        """Open an exclusive binary COPY ... FROM STDIN write stream."""
+        ...
+
+    def copy_from_arrow(
+        self,
+        table_name: str,
+        first_batch_ipc: Buffer,
+        *,
+        columns: Sequence[str] | None = None,
+        schema_name: str | None = None,
+    ) -> SyncPostgresCopyIn:
+        """Validate schema against pg_catalog and open a binary COPY ... FROM STDIN stream seeded with first_batch_ipc."""
         ...
 
     def pipeline_begin(self) -> int:
@@ -243,6 +263,25 @@ class AsyncPostgresClient:
         batch_size: int = 65536,
     ) -> Awaitable[AsyncPostgresPortal]:
         """Open a session-pinned row-limited PostgreSQL portal asynchronously over sql."""
+        ...
+
+    def copy_to(self, sql: str) -> Awaitable[AsyncPostgresCopyOut]:
+        """Open an exclusive binary COPY ... TO STDOUT streaming iterator asynchronously."""
+        ...
+
+    def copy_from(self, sql: str) -> Awaitable[AsyncPostgresCopyIn]:
+        """Open an exclusive binary COPY ... FROM STDIN write stream asynchronously."""
+        ...
+
+    def copy_from_arrow(
+        self,
+        table_name: str,
+        first_batch_ipc: Buffer,
+        *,
+        columns: Sequence[str] | None = None,
+        schema_name: str | None = None,
+    ) -> Awaitable[AsyncPostgresCopyIn]:
+        """Validate schema against pg_catalog and open an async binary COPY ... FROM STDIN stream seeded with first_batch_ipc."""
         ...
 
     def pipeline_begin(self) -> Awaitable[int]:
@@ -537,13 +576,149 @@ class AsyncPostgresPortal:
         """Return True once the portal has been closed or exhausted."""
         ...
 
+@final
+class SyncPostgresCopyOut:
+    """Exclusive synchronous binary COPY ... TO STDOUT row iterator."""
+
+    def __iter__(self) -> SyncPostgresCopyOut:
+        """Return self as a synchronous row iterator."""
+        ...
+
+    def __next__(self) -> tuple[bytes | None, ...]:
+        """Yield the next decoded binary row tuple or raise StopIteration."""
+        ...
+
+    def close(self) -> None:
+        """Close an unfinished COPY TO stream idempotently via CancelRequest drain."""
+        ...
+
+    def __enter__(self) -> SyncPostgresCopyOut:
+        """Enter a with block returning this SyncPostgresCopyOut."""
+        ...
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None = None,
+        exc_val: BaseException | None = None,
+        exc_tb: TracebackType | None = None,
+    ) -> bool:
+        """Close the stream on context exit without suppressing exceptions."""
+        ...
+
+@final
+class SyncPostgresCopyIn:
+    """Exclusive synchronous binary COPY ... FROM STDIN write stream."""
+
+    def write(
+        self,
+        rows: Sequence[Sequence[PostgresValue]],
+        column_oids: Sequence[int],
+    ) -> None:
+        """Encode and flush binary COPY rows against explicit PostgreSQL column OIDs."""
+        ...
+
+    def write_arrow_ipc(self, batch_ipc: Buffer) -> None:
+        """Encode and flush a bounded (<= 16 MiB) Arrow IPC stream chunk."""
+        ...
+
+    def finish(self) -> int:
+        """Emit the binary trailer and CopyDone and return the inserted row count."""
+        ...
+
+    def close(self) -> None:
+        """Abort an unfinished COPY FROM stream via CopyFail or no-op once closed."""
+        ...
+
+    def __enter__(self) -> SyncPostgresCopyIn:
+        """Enter a with block returning this SyncPostgresCopyIn."""
+        ...
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None = None,
+        exc_val: BaseException | None = None,
+        exc_tb: TracebackType | None = None,
+    ) -> bool:
+        """Abort via close() if unfinished or on exception without suppressing exceptions."""
+        ...
+
+@final
+class AsyncPostgresCopyOut:
+    """Exclusive asynchronous binary COPY ... TO STDOUT row iterator."""
+
+    def __aiter__(self) -> AsyncPostgresCopyOut:
+        """Return self as an asynchronous row iterator."""
+        ...
+
+    def __anext__(self) -> Awaitable[tuple[bytes | None, ...]]:
+        """Resolve to the next decoded binary row tuple or raise StopAsyncIteration."""
+        ...
+
+    def aclose(self) -> Awaitable[None]:
+        """Asynchronously close an unfinished COPY TO stream idempotently."""
+        ...
+
+    def __aenter__(self) -> Awaitable[AsyncPostgresCopyOut]:
+        """Enter an async with block resolving to this AsyncPostgresCopyOut."""
+        ...
+
+    def __aexit__(
+        self,
+        exc_type: type[BaseException] | None = None,
+        exc_val: BaseException | None = None,
+        exc_tb: TracebackType | None = None,
+    ) -> Awaitable[bool]:
+        """Asynchronously close the stream on context exit without suppressing exceptions."""
+        ...
+
+@final
+class AsyncPostgresCopyIn:
+    """Exclusive asynchronous binary COPY ... FROM STDIN write stream."""
+
+    def write(
+        self,
+        rows: Sequence[Sequence[PostgresValue]],
+        column_oids: Sequence[int],
+    ) -> Awaitable[None]:
+        """Asynchronously encode and flush binary COPY rows against PostgreSQL column OIDs."""
+        ...
+
+    def write_arrow_ipc(self, batch_ipc: Buffer) -> Awaitable[None]:
+        """Asynchronously encode and flush a bounded (<= 16 MiB) Arrow IPC stream chunk."""
+        ...
+
+    def finish(self) -> Awaitable[int]:
+        """Asynchronously emit the binary trailer and CopyDone and resolve the row count."""
+        ...
+
+    def aclose(self) -> Awaitable[None]:
+        """Asynchronously abort an unfinished COPY FROM stream via CopyFail or no-op once closed."""
+        ...
+
+    def __aenter__(self) -> Awaitable[AsyncPostgresCopyIn]:
+        """Enter an async with block resolving to this AsyncPostgresCopyIn."""
+        ...
+
+    def __aexit__(
+        self,
+        exc_type: type[BaseException] | None = None,
+        exc_val: BaseException | None = None,
+        exc_tb: TracebackType | None = None,
+    ) -> Awaitable[bool]:
+        """Abort via aclose() if unfinished or on exception without suppressing exceptions."""
+        ...
+
 __all__ = [
     "FREE_THREADED",
     "GIL_USED",
     "AsyncPostgresClient",
+    "AsyncPostgresCopyIn",
+    "AsyncPostgresCopyOut",
     "AsyncPostgresPool",
     "AsyncPostgresPortal",
     "SyncPostgresClient",
+    "SyncPostgresCopyIn",
+    "SyncPostgresCopyOut",
     "SyncPostgresPool",
     "SyncPostgresPortal",
     "__version__",

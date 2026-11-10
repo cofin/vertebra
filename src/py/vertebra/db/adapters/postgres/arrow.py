@@ -11,58 +11,9 @@ from vertebra.db.driver import DataError
 from vertebra.utils.module_loader import ensure_pyarrow
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Buffer, Generator, Iterator, Sequence
-    from typing import Protocol
+    from collections.abc import AsyncIterator, Generator, Iterator, Sequence
 
-    class SyncPostgresCopyIn(Protocol):
-        """Structural protocol for synchronous native PostgreSQL COPY IN streams."""
-
-        def write_arrow_ipc(self, batch_ipc: Buffer) -> None:
-            """Encode and flush a bounded Arrow IPC stream payload."""
-
-        def finish(self) -> int:
-            """Write the binary COPY trailer and return the server row count."""
-
-        def close(self) -> None:
-            """Abort an unfinished COPY IN stream and release the session lease."""
-
-    class SyncPostgresClient(Protocol):
-        """Structural protocol for synchronous native PostgreSQL Arrow COPY clients."""
-
-        def copy_from_arrow(
-            self,
-            table_name: str,
-            first_batch_ipc: Buffer,
-            *,
-            columns: Sequence[str] | None = None,
-            schema_name: str | None = None,
-        ) -> SyncPostgresCopyIn:
-            """Validate schema and open a binary COPY IN stream seeded with the first Arrow chunk."""
-
-    class AsyncPostgresCopyIn(Protocol):
-        """Structural protocol for asynchronous native PostgreSQL COPY IN streams."""
-
-        def write_arrow_ipc(self, batch_ipc: Buffer) -> Awaitable[None]:
-            """Encode and flush a bounded Arrow IPC stream payload asynchronously."""
-
-        def finish(self) -> Awaitable[int]:
-            """Write the binary COPY trailer and resolve the server row count."""
-
-        def aclose(self) -> Awaitable[None]:
-            """Abort an unfinished COPY IN stream asynchronously."""
-
-    class AsyncPostgresClient(Protocol):
-        """Structural protocol for asynchronous native PostgreSQL Arrow COPY clients."""
-
-        def copy_from_arrow(
-            self,
-            table_name: str,
-            first_batch_ipc: Buffer,
-            *,
-            columns: Sequence[str] | None = None,
-            schema_name: str | None = None,
-        ) -> Awaitable[AsyncPostgresCopyIn]:
-            """Validate schema and open an async binary COPY IN stream seeded with the first chunk."""
+    from vertebra._postgres import AsyncPostgresClient, SyncPostgresClient
 
 
 __all__ = (
