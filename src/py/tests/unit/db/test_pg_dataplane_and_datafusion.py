@@ -6,7 +6,7 @@ import os
 import re
 import socket
 import sys
-from collections.abc import AsyncIterator, Sequence
+import threading
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -30,7 +30,7 @@ from vertebra.db.adapters.datafusion import (
 from vertebra.db.adapters.postgres import AsyncPostgreSQLDriver, PostgresEmbeddingPushdown, SyncPostgreSQLDriver
 from vertebra.db.adapters.postgres.core import PostgreSQLCore
 from vertebra.db.adapters.postgres.notify import PostgresNotificationSource, PostgresNotifyConfig
-from vertebra.db.driver import NotificationEvent, NotificationSource, NotSupportedError
+from vertebra.db.driver import NotificationSource, NotSupportedError
 from vertebra.extensions.sqlspec.adapters import PostgreSQLSyncDriver
 from vertebra.server.platform import SHMAllocationPolicy
 from vertebra.typing import MissingDependencyError, reset_dependency_cache
@@ -43,50 +43,6 @@ psycopg_adapt = import_optional("psycopg.adapt")
 requires_psycopg = pytest.mark.skipif(
     psycopg_queries is None or psycopg_adapt is None, reason="psycopg is not installed"
 )
-
-
-class _DeterministicDataFrame:
-    """In-memory Arrow DataFrame stand-in for SessionContext contract tests."""
-
-    __slots__ = ("_table",)
-
-    def __init__(self, table: pa.Table) -> None:
-        self._table = table
-
-    def to_arrow_table(self) -> pa.Table:
-        """Return the underlying normalized PyArrow table."""
-        return self._table
-
-
-class _DeterministicSessionContext:
-    """Deterministic PyArrow-backed SessionContext double that fails closed on invalid SQL."""
-
-    __slots__ = ("tables",)
-
-    def __init__(self) -> None:
-        self.tables: dict[str, pa.Table] = {}
-
-    def register_table(self, name: str, table: Any) -> None:
-        """Require a normalized pyarrow.Table during registration."""
-        if not isinstance(table, pa.Table):
-            msg = f"Expected pyarrow.Table, got {type(table)!r}"
-            raise TypeError(msg)
-        self.tables[name] = table
-
-    def sql(self, query: str) -> _DeterministicDataFrame:
-        """Evaluate supported test projections against registered PyArrow tables or raise."""
-        normalized = " ".join(query.strip().split())
-        if normalized.upper() == "SELECT 1 AS OK":
-            return _DeterministicDataFrame(pa.Table.from_pylist([{"ok": 1}]))
-        select_all = re.fullmatch(r"SELECT \* FROM ([A-Za-z_][A-Za-z0-9_]*)", normalized, flags=re.IGNORECASE)
-        if select_all is not None:
-            tbl_name = select_all.group(1)
-            if tbl_name not in self.tables:
-                msg = f"Table {tbl_name!r} not found in SessionContext"
-                raise RuntimeError(msg)
-            return _DeterministicDataFrame(self.tables[tbl_name])
-        msg = f"Invalid or unsupported DataFusion SQL: {query}"
-        raise RuntimeError(msg)
 
 
 def test_rls_planner_unfenced_predicate_and_session_guc() -> None:
@@ -105,8 +61,9 @@ def test_rls_planner_unfenced_predicate_and_session_guc() -> None:
     assert plain.to_sql_fragment(":tenant_id") == "tenant_id = :tenant_id"
     assert PostgreSQLCore.build_tenant_predicate_sql(plain) == "tenant_id = $1"
     assert not hasattr(TenantPredicate, "build_session_guc_sql")
+    scope_cls: Any = TenantScopeConfig
     with pytest.raises(TypeError):
-        TenantScopeConfig(guc_name="app.tenant_id")
+        scope_cls(guc_name="app.tenant_id")
 
 
 @pytest.mark.parametrize("bad", ["o; DROP", "a.b", ""])
@@ -210,8 +167,9 @@ def test_postgres_notify_sql_builders(payload: str | bytes, transactional: bool)
 @pytest.mark.parametrize("invalid", ["bad; DROP TABLE orders", "bad.name", "", "has space"])
 def test_postgres_notify_config_rejects_invalid_identifiers(field: str, invalid: str) -> None:
     """PostgreSQL configuration accepts single SQL identifiers only."""
+    kwargs: dict[str, Any] = {field: invalid}
     with pytest.raises(ValueError, match=field):
-        PostgresNotifyConfig(**{field: invalid})
+        PostgresNotifyConfig(**kwargs)
 
 
 @pytest.mark.parametrize("driver_type", [SyncPostgreSQLDriver, AsyncPostgreSQLDriver])
@@ -225,12 +183,24 @@ async def test_postgres_notify_publish(
     with_feed: bool,
 ) -> None:
     """Both driver variants publish raw payloads or hydratable canonical CDC envelopes."""
+    loop_thread_id = threading.get_ident()
+    executed_threads: list[int] = []
+
+    def _record_sync_thread(*_args: Any, **_kwargs: Any) -> int:
+        executed_threads.append(threading.get_ident())
+        return 1
+
     driver = MagicMock(spec=driver_type)
+    driver._publish_notification.side_effect = driver_type._publish_notification.__get__(driver, driver_type)
+    if driver_type is SyncPostgreSQLDriver:
+        driver.execute.side_effect = _record_sync_thread
     feed = ChangeFeed(CDCConfig(spill_threshold_bytes=16)) if with_feed else None
     source = PostgresNotificationSource(driver, change_feed=feed)
     assert isinstance(source, NotificationSource)
     assert source.change_feed is feed
+    assert source.subscribed_channels == []
     await source.publish("orders", payload)
+    driver._publish_notification.assert_awaited_once()
     sql, parameters = driver.execute.call_args.args
     assert sql == ("SELECT pg_notify($1, $2)" if driver_type is AsyncPostgreSQLDriver else "SELECT pg_notify(%s, %s)")
     assert parameters[0] == "orders"
@@ -244,13 +214,16 @@ async def test_postgres_notify_publish(
         assert feed.replay_since(0) == [event]
     if driver_type is AsyncPostgreSQLDriver:
         driver.execute.assert_awaited_once()
+    else:
+        assert len(executed_threads) == 1
+        assert executed_threads[0] != loop_thread_id
 
 
 @pytest.mark.parametrize("action", ["publish", "subscribe", "unsubscribe"])
-@pytest.mark.parametrize("channel", ["bad;sql", "bad.name", ""])
+@pytest.mark.parametrize("channel", ["bad;sql", "bad.name", "", "a" * 64, "\u00e9" * 32])
 @pytest.mark.anyio
 async def test_postgres_notify_rejects_invalid_channels(action: str, channel: str) -> None:
-    """Every notification entry point rejects invalid channels before driver I/O."""
+    """Every notification entry point rejects invalid or >63-UTF-8-byte channels before driver I/O."""
     driver = MagicMock(spec=SyncPostgreSQLDriver)
     source = PostgresNotificationSource(driver)
     with pytest.raises(ValueError, match="channel"):
@@ -258,71 +231,22 @@ async def test_postgres_notify_rejects_invalid_channels(action: str, channel: st
             await source.publish(channel, "data")
         else:
             await getattr(source, action)([channel])
+    driver._publish_notification.assert_not_called()
     driver.execute.assert_not_called()
 
 
+@pytest.mark.parametrize("use_real_driver", [False, True])
 @pytest.mark.anyio
-async def test_postgres_notify_subscription_stream_delegates() -> None:
-    """Subscriptions are idempotent and listener frames pass through the driver boundary."""
-    driver = MagicMock(spec=SyncPostgreSQLDriver)
-    event = NotificationEvent(channel="orders", payload=b"hello")
-
-    async def frames(channels: Sequence[str]) -> AsyncIterator[NotificationEvent]:
-        assert tuple(channels) == ("orders",)
-        yield event
-
-    driver.listen_notifications = MagicMock(side_effect=frames)
-    source = PostgresNotificationSource(driver, PostgresNotifyConfig(channel="orders"))
-    await source.subscribe(["orders", "orders", "unused"])
-    await source.unsubscribe(["unused", "unknown"])
-    assert [frame async for frame in source.listen()] == [event]
-    driver.listen_notifications.assert_called_once_with(("orders",))
-
-
-@pytest.mark.anyio
-async def test_postgres_notify_listen_without_native_stream() -> None:
-    """Unimplemented native streaming fails explicitly on iteration."""
-    source = PostgresNotificationSource(MagicMock(spec=SyncPostgreSQLDriver))
+async def test_postgres_notify_listen_without_native_stream(use_real_driver: bool) -> None:
+    """Legacy PostgreSQL drivers without _open_notification_listener fail explicitly on iteration."""
+    driver: Any = (
+        SyncPostgreSQLDriver(executor=lambda _s, _p: []) if use_real_driver else MagicMock(spec=SyncPostgreSQLDriver)
+    )
+    assert not hasattr(SyncPostgreSQLDriver, "_open_notification_listener")
+    assert not hasattr(AsyncPostgreSQLDriver, "_open_notification_listener")
+    source = PostgresNotificationSource(driver)
     with pytest.raises(NotSupportedError, match="Live PostgreSQL LISTEN streaming requires"):
         await anext(source.listen())
-
-
-class _PsycopgConnectionPort:
-    """External connection port using psycopg's real SQL parameter converter."""
-
-    def __init__(
-        self, query_type: Any, transformer_type: Any, columns: tuple[str, ...], rows: list[tuple[Any, ...]]
-    ) -> None:
-        self.query_type = query_type
-        self.transformer_type = transformer_type
-        self.description = tuple((column,) for column in columns)
-        self.rows = rows
-        self.calls: list[tuple[str, Any]] = []
-        self.failure: RuntimeError | None = None
-
-    @classmethod
-    def with_installed_converter(cls, columns: tuple[str, ...], rows: list[tuple[Any, ...]]) -> _PsycopgConnectionPort:
-        """Build a port that validates SQL through the installed psycopg query converter."""
-        return cls(psycopg_queries.PostgresQuery, psycopg_adapt.Transformer, columns, rows)
-
-    def connection(self) -> _PsycopgConnectionPort:
-        return self
-
-    def cursor(self) -> _PsycopgConnectionPort:
-        return self
-
-    def execute(self, sql: str, parameters: Any = None) -> None:
-        query = self.query_type(self.transformer_type())
-        query.convert(sql, parameters)
-        self.calls.append((sql, parameters))
-        if self.failure is not None:
-            raise self.failure
-
-    def fetchall(self) -> list[tuple[Any, ...]]:
-        return self.rows
-
-    def close(self) -> None:
-        """Keep the externally owned connection port available for assertions."""
 
 
 @requires_psycopg
@@ -365,7 +289,8 @@ async def test_postgres_sync_notify_binds_with_real_psycopg_converter() -> None:
     connection = _PsycopgConnectionPort.with_installed_converter(("embedding",), [([3.0, 4.0],)])
     driver = SyncPostgreSQLDriver(pool=connection)
     try:
-        await PostgresNotificationSource(driver).publish("orders", "quote ' and % payload")
+        legacy_driver: Any = driver
+        await PostgresNotificationSource(legacy_driver).publish("orders", "quote ' and % payload")
         assert connection.calls == [("SELECT pg_notify(%s, %s)", ("orders", "quote ' and % payload"))]
     finally:
         driver.close()
@@ -449,7 +374,102 @@ def test_arrow_cursor_propagates_real_named_allocation_failure(monkeypatch: pyte
 @pytest.mark.parametrize("missing", ["pyarrow", "vertebra._vertebra"])
 def test_arrow_cursor_requires_optional_dependencies(missing: str, monkeypatch: pytest.MonkeyPatch) -> None:
     """IPC requires its codec and threshold-selected SHM requires the native cursor."""
-    original = arrow_module.import_optional
+    arrow_mod_any: Any = arrow_module
+    original = arrow_mod_any.import_optional
     monkeypatch.setattr(arrow_module, "import_optional", lambda name: None if name == missing else original(name))
     with pytest.raises(MissingDependencyError, match=missing):
         ArrowCursor.from_rows([{"id": 1}], threshold_rows=1)
+
+
+class _DeterministicDataFrame:
+    """In-memory Arrow DataFrame stand-in for SessionContext contract tests."""
+
+    __slots__ = ("_table",)
+
+    def __init__(self, table: pa.Table) -> None:
+        self._table = table
+
+    def to_arrow_table(self) -> pa.Table:
+        """Return the underlying normalized PyArrow table."""
+        return self._table
+
+
+class _DeterministicSessionContext:
+    """Deterministic PyArrow-backed SessionContext double that fails closed on invalid SQL."""
+
+    __slots__ = ("tables",)
+
+    def __init__(self) -> None:
+        self.tables: dict[str, pa.Table] = {}
+
+    def register_table(self, name: str, table: Any) -> None:
+        """Require a normalized pyarrow.Table during registration."""
+        if not isinstance(table, pa.Table):
+            msg = f"Expected pyarrow.Table, got {type(table)!r}"
+            raise TypeError(msg)
+        self.tables[name] = table
+
+    def sql(self, query: str) -> _DeterministicDataFrame:
+        """Evaluate supported test projections against registered PyArrow tables or raise."""
+        normalized = " ".join(query.strip().split())
+        if normalized.upper() == "SELECT 1 AS OK":
+            return _DeterministicDataFrame(pa.Table.from_pylist([{"ok": 1}]))
+        select_all = re.fullmatch(r"SELECT \* FROM ([A-Za-z_][A-Za-z0-9_]*)", normalized, flags=re.IGNORECASE)
+        if select_all is not None:
+            tbl_name = select_all.group(1)
+            if tbl_name not in self.tables:
+                msg = f"Table {tbl_name!r} not found in SessionContext"
+                raise RuntimeError(msg)
+            return _DeterministicDataFrame(self.tables[tbl_name])
+        msg = f"Invalid or unsupported DataFusion SQL: {query}"
+        raise RuntimeError(msg)
+
+
+class _PsycopgConnectionPort:
+    """External connection port using psycopg's real SQL parameter converter."""
+
+    __slots__ = ("calls", "description", "failure", "query_type", "rows", "transformer_type")
+
+    def __init__(
+        self,
+        query_type: Any,
+        transformer_type: Any,
+        columns: tuple[str, ...],
+        rows: list[tuple[Any, ...]],
+    ) -> None:
+        self.query_type = query_type
+        self.transformer_type = transformer_type
+        self.description = tuple((column,) for column in columns)
+        self.rows = rows
+        self.calls: list[tuple[str, Any]] = []
+        self.failure: RuntimeError | None = None
+
+    @classmethod
+    def with_installed_converter(cls, columns: tuple[str, ...], rows: list[tuple[Any, ...]]) -> _PsycopgConnectionPort:
+        """Build a port that validates SQL through the installed psycopg query converter."""
+        assert psycopg_queries is not None
+        assert psycopg_adapt is not None
+        return cls(psycopg_queries.PostgresQuery, psycopg_adapt.Transformer, columns, rows)
+
+    def connection(self) -> _PsycopgConnectionPort:
+        """Return self as an active connection object."""
+        return self
+
+    def cursor(self) -> _PsycopgConnectionPort:
+        """Return self as an active DB-API cursor."""
+        return self
+
+    def execute(self, sql: str, parameters: Any = None) -> None:
+        """Validate SQL parameter conversion through psycopg and record the call."""
+        query = self.query_type(self.transformer_type())
+        query.convert(sql, parameters)
+        self.calls.append((sql, parameters))
+        if self.failure is not None:
+            raise self.failure
+
+    def fetchall(self) -> list[tuple[Any, ...]]:
+        """Return the configured result rows."""
+        return self.rows
+
+    def close(self) -> None:
+        """Keep the externally owned connection port available for assertions."""

@@ -1,4 +1,4 @@
-"""Unit and scripted wire-protocol tests for AsyncPostgresListener and client open_listener."""
+"""Unit and scripted wire-protocol tests for PostgreSQL listeners and notification sources."""
 
 from __future__ import annotations
 
@@ -8,10 +8,14 @@ import gc
 import select
 import socket
 import struct
+import subprocess
+import sys
 import threading
 import time
-from collections.abc import Awaitable, Callable, Iterator
+from collections.abc import Awaitable, Callable, Iterator, Sequence
+from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import pytest
 
@@ -23,13 +27,111 @@ from vertebra._postgres import (
     SyncPostgresPool,
 )
 from vertebra.db import (
+    CDCConfig,
+    ChangeFeed,
     ConnectionFailure,
     DatabaseError,
     DataError,
     InterfaceError,
     OperationalError,
 )
+from vertebra.db.adapters.postgres.config import PoolerMode, PostgreSQLConfig
+from vertebra.db.adapters.postgres.events import PostgresNotificationDriver
+from vertebra.db.adapters.postgres.notify import PostgresNotificationSource, PostgresNotifyConfig
+from vertebra.db.driver import NotificationEvent, NotificationSource
+from vertebra.typing import ImproperConfigurationError
 from vertebra.utils.serializers import encode_json_bytes
+
+
+class NativeNotificationDriverPort:
+    """Typed notification driver port backed by real SyncPostgresPool and AsyncPostgresClient sessions."""
+
+    __slots__ = ("_config", "_listener_clients", "_publish_calls", "_query_pool")
+
+    def __init__(self, config: PostgreSQLConfig) -> None:
+        """Initialize a native SyncPostgresPool for pg_notify and standalone listener dial parameters."""
+        self._config = config
+        parsed = urlparse(config.dsn)
+        self._query_pool = SyncPostgresPool(
+            host=parsed.hostname or "127.0.0.1",
+            port=parsed.port or 5432,
+            user=parsed.username or "postgres",
+            database=parsed.path.lstrip("/") or "appdb",
+            sslmode="disable",
+            channel_binding="disable",
+            pooler_mode="transaction" if (config.pgbouncer or config.pgbouncer_mode) else config.pooler_mode,
+            min_size=0,
+            max_size=config.max_size,
+        )
+        self._listener_clients: list[AsyncPostgresClient] = []
+        self._publish_calls = 0
+
+    @property
+    def config(self) -> PostgreSQLConfig:
+        """Return the active PostgreSQLConfig inspected by PostgresNotificationSource."""
+        return self._config
+
+    @property
+    def publish_calls(self) -> int:
+        """Return the total count of _publish_notification executions."""
+        return self._publish_calls
+
+    def select_one(self) -> int:
+        """Execute SELECT 1 on the max_size-bounded query pool to verify non-starvation."""
+        leased = self._query_pool.acquire()
+        try:
+            res = leased.query("SELECT 1", timeout=5.0)
+            val = res.rows[0][0]
+            assert isinstance(val, int)
+            return val
+        finally:
+            leased.close()
+
+    async def aclose(self) -> None:
+        """Close all standalone listener clients and drain the synchronous query pool."""
+        clients = list(self._listener_clients)
+        self._listener_clients.clear()
+        for client in clients:
+            await client.close()
+        await asyncio.to_thread(self._query_pool.close)
+
+    async def _open_notification_listener(
+        self,
+        channels: Sequence[str],
+        *,
+        queue_capacity: int = 1024,
+        reconnect: bool = False,
+    ) -> AsyncPostgresListener:
+        """Derive direct connection coordinates and open a standalone AsyncPostgresListener."""
+        direct_cfg = self._config.derive_direct_config()
+        parsed = urlparse(direct_cfg.dsn)
+        client = AsyncPostgresClient(
+            host=parsed.hostname or "127.0.0.1",
+            port=parsed.port or 5432,
+            user=parsed.username or "postgres",
+            database=parsed.path.lstrip("/") or "appdb",
+            sslmode="disable",
+            channel_binding="disable",
+        )
+        self._listener_clients.append(client)
+        return await client.open_listener(
+            channels,
+            queue_capacity=queue_capacity,
+            reconnect=reconnect,
+        )
+
+    async def _publish_notification(self, channel: str, payload: str) -> None:
+        """Offload parameterized SELECT pg_notify($1, $2) execution onto SyncPostgresPool."""
+        self._publish_calls += 1
+        await asyncio.to_thread(self._publish_sync, channel, payload)
+
+    def _publish_sync(self, channel: str, payload: str) -> None:
+        """Acquire a transient SyncPostgresClient lease and emit parameterized pg_notify."""
+        leased = self._query_pool.acquire()
+        try:
+            leased.query("SELECT pg_notify($1, $2)", (channel, payload), timeout=10.0)
+        finally:
+            leased.close()
 
 
 @pytest.mark.parametrize("client_kind", ("sync", "async"))
@@ -693,6 +795,497 @@ def test_native_listener_reconnect_token_refresh_mid_subscribe_and_cancel_cleanu
         assert cancel_srv.wait_for_live_connections(0, timeout=2.0)
 
 
+def test_notification_source_end_to_end_publish_subscribe_reuse_and_reconnect() -> None:
+    """Verify protocol-typed publish, dynamic subscribe/unsubscribe, max_size=1 non-starvation, reuse, and reconnect."""
+    with _running_pg_server() as srv:
+
+        async def _run() -> None:
+            cfg = PostgreSQLConfig(
+                dsn=f"postgresql://postgres@127.0.0.1:{srv.port}/appdb",
+                max_size=1,
+            )
+            concrete_port = NativeNotificationDriverPort(cfg)
+            port: PostgresNotificationDriver = concrete_port
+            try:
+                async with PostgresNotificationSource(
+                    port,
+                    PostgresNotifyConfig(channel="default_events"),
+                    reconnect=True,
+                ) as source:
+                    assert isinstance(source, NotificationSource)
+                    assert source.subscribed_channels == []
+                    assert source.change_feed is None
+
+                    received: list[NotificationEvent] = []
+                    stream_opened = asyncio.Event()
+                    got_event = asyncio.Event()
+                    stop_after = 3
+
+                    async def _consume_three() -> None:
+                        stream = source.listen()
+                        stream_opened.set()
+                        async for evt in stream:
+                            received.append(evt)
+                            got_event.set()
+                            if len(received) >= stop_after:
+                                break
+
+                    consumer = asyncio.create_task(_consume_three())
+                    await stream_opened.wait()
+                    assert await srv.wait_for_accept_count_async(1, timeout=3.0)
+                    listener_sess = srv.session(0)
+                    assert listener_sess.queries == []
+
+                    assert await asyncio.to_thread(concrete_port.select_one) == 1
+                    publisher_pid = srv.session(1).pid
+
+                    await source.publish("default_events", "unsubscribed-default")
+                    await source.publish("orders", "unsubscribed-orders")
+
+                    await source.subscribe(["orders", "orders", "audit"])
+                    assert source.subscribed_channels == ["orders", "audit"]
+                    assert listener_sess.queries == ['LISTEN "orders"', 'LISTEN "audit"']
+
+                    got_event.clear()
+                    await source.publish("orders", "hello-utf8")
+                    await asyncio.wait_for(got_event.wait(), timeout=3.0)
+                    assert received[-1] == NotificationEvent(
+                        channel="orders",
+                        payload=b"hello-utf8",
+                        sender_id=str(publisher_pid),
+                        metadata={"reconnected": False, "delivery": "at_most_once"},
+                    )
+
+                    got_event.clear()
+                    await source.publish("audit", b"\x00\xff\xfe\x80")
+                    await asyncio.wait_for(got_event.wait(), timeout=3.0)
+                    assert received[-1] == NotificationEvent(
+                        channel="audit",
+                        payload=b"\x00\xff\xfe\x80",
+                        sender_id=str(publisher_pid),
+                        metadata={"reconnected": False, "delivery": "at_most_once"},
+                    )
+
+                    await source.unsubscribe(["orders", "never_seen"])
+                    assert source.subscribed_channels == ["audit"]
+                    assert listener_sess.queries[-1] == 'UNLISTEN "orders"'
+
+                    await source.publish("orders", "dropped-after-unlisten")
+                    await source.publish("audit", "audit-after-unlisten")
+                    await asyncio.wait_for(consumer, timeout=3.0)
+                    assert len(received) == 3
+                    assert received[-1] == NotificationEvent(
+                        channel="audit",
+                        payload=b"audit-after-unlisten",
+                        sender_id=str(publisher_pid),
+                        metadata={"reconnected": False, "delivery": "at_most_once"},
+                    )
+                    assert concrete_port.publish_calls == 6
+                    assert srv.wait_for_live_connections(1, timeout=2.0)
+
+                    reuse_events: list[NotificationEvent] = []
+                    reconnect_ready = asyncio.Event()
+
+                    async def _consume_reused_with_reconnect() -> None:
+                        reconnect_ready.set()
+                        async for evt in source.listen():
+                            reuse_events.append(evt)
+                            if len(reuse_events) >= 2:
+                                raise RuntimeError("consumer-body-abort")
+
+                    reuse_task = asyncio.create_task(_consume_reused_with_reconnect())
+                    await reconnect_ready.wait()
+                    assert await srv.wait_for_accept_count_async(3, timeout=3.0)
+                    second_listener = srv.session(2)
+                    assert await second_listener.wait_for_query_count_async(1, timeout=3.0)
+                    assert second_listener.queries == ['LISTEN "audit"']
+
+                    second_listener.close_from_peer()
+                    assert await srv.wait_for_accept_count_async(4, timeout=3.0)
+                    third_listener = srv.session(3)
+                    assert await third_listener.wait_for_query_count_async(1, timeout=3.0)
+                    assert third_listener.queries == ['LISTEN "audit"']
+
+                    await source.publish("audit", "gap-recovered")
+                    await source.publish("audit", "post-gap-steady")
+                    with pytest.raises(RuntimeError, match="consumer-body-abort"):
+                        await asyncio.wait_for(reuse_task, timeout=3.0)
+                    assert reuse_events == [
+                        NotificationEvent(
+                            channel="audit",
+                            payload=b"gap-recovered",
+                            sender_id=str(publisher_pid),
+                            metadata={"reconnected": True, "delivery": "at_most_once"},
+                        ),
+                        NotificationEvent(
+                            channel="audit",
+                            payload=b"post-gap-steady",
+                            sender_id=str(publisher_pid),
+                            metadata={"reconnected": False, "delivery": "at_most_once"},
+                        ),
+                    ]
+                    assert srv.wait_for_live_connections(1, timeout=2.0)
+
+                    async def _consume_until_cancelled() -> None:
+                        async for _ in source.listen():
+                            pass
+
+                    cancel_task = asyncio.create_task(_consume_until_cancelled())
+                    assert await srv.wait_for_accept_count_async(5, timeout=3.0)
+                    cancel_task.cancel()
+                    with pytest.raises(asyncio.CancelledError):
+                        await cancel_task
+                    assert srv.wait_for_live_connections(1, timeout=2.0)
+
+                    drained_on_aclose: list[NotificationEvent] = []
+
+                    async def _consume_until_source_aclose() -> None:
+                        async for evt in source.listen():
+                            drained_on_aclose.append(evt)
+
+                    aclose_waiter = asyncio.create_task(_consume_until_source_aclose())
+                    assert await srv.wait_for_accept_count_async(6, timeout=3.0)
+                    final_listener = srv.session(5)
+                    assert await final_listener.wait_for_query_count_async(1, timeout=3.0)
+                    await source.publish("audit", "before-aclose")
+                    deadline = time.monotonic() + 2.0
+                    while not drained_on_aclose and time.monotonic() < deadline:
+                        await asyncio.sleep(0.01)
+                    assert len(drained_on_aclose) == 1
+                    await source.aclose()
+                    await source.aclose()
+                    await asyncio.wait_for(aclose_waiter, timeout=3.0)
+                    assert srv.wait_for_live_connections(1, timeout=2.0)
+            finally:
+                await concrete_port.aclose()
+
+        asyncio.run(_run())
+        assert srv.wait_for_live_connections(0, timeout=2.0)
+
+
+def test_notification_source_change_feed_spill_hydration_and_missing_spill_error() -> None:
+    """Verify inline and spilled ChangeFeed hydration plus direct propagation of evicted spill KeyError."""
+    with _running_pg_server() as srv:
+
+        async def _run() -> None:
+            cfg = PostgreSQLConfig(
+                dsn=f"postgresql://postgres@127.0.0.1:{srv.port}/appdb",
+                max_size=1,
+            )
+            concrete_port = NativeNotificationDriverPort(cfg)
+            port: PostgresNotificationDriver = concrete_port
+            feed = ChangeFeed(
+                CDCConfig(
+                    channel="cdc_bus",
+                    spill_threshold_bytes=48,
+                    max_memory_spills=1,
+                )
+            )
+            try:
+                async with PostgresNotificationSource(port, change_feed=feed) as source:
+                    assert source.change_feed is feed
+                    await source.subscribe(["orders"])
+
+                    hydrated: list[NotificationEvent] = []
+                    ready = asyncio.Event()
+
+                    async def _read_two() -> None:
+                        ready.set()
+                        async for evt in source.listen():
+                            hydrated.append(evt)
+                            if len(hydrated) >= 2:
+                                break
+
+                    reader = asyncio.create_task(_read_two())
+                    await ready.wait()
+                    assert await srv.wait_for_accept_count_async(1, timeout=3.0)
+                    assert await srv.session(0).wait_for_query_count_async(1, timeout=3.0)
+
+                    await source.publish("orders", b"small")
+                    spilled_blob = b"\x00\xfe" + b"payload-" * 32
+                    await source.publish("orders", spilled_blob)
+                    await asyncio.wait_for(reader, timeout=3.0)
+
+                    publisher_pid = str(srv.session(1).pid)
+                    assert hydrated == [
+                        NotificationEvent(
+                            channel="orders",
+                            payload=b"small",
+                            sender_id=publisher_pid,
+                            metadata={"reconnected": False, "delivery": "at_most_once"},
+                        ),
+                        NotificationEvent(
+                            channel="orders",
+                            payload=spilled_blob,
+                            sender_id=publisher_pid,
+                            metadata={"reconnected": False, "delivery": "at_most_once"},
+                        ),
+                    ]
+                    assert feed.replay_since(0)[-1].spilled is True
+                    assert srv.wait_for_live_connections(1, timeout=2.0)
+
+                    evict_stream = source.listen()
+                    next_task = asyncio.create_task(_as_coro(anext(evict_stream)))
+                    assert await srv.wait_for_accept_count_async(3, timeout=3.0)
+                    evict_listener = srv.session(2)
+                    assert await evict_listener.wait_for_query_count_async(1, timeout=3.0)
+
+                    stale_envelope, stale_evt = feed.publish_event(
+                        "PUBLISH",
+                        {"channel": "orders", "data_b64": "c3RhbGU=" + ("A" * 80)},
+                    )
+                    assert stale_evt.spilled is True
+                    _, newer_evt = feed.publish_event(
+                        "PUBLISH",
+                        {"channel": "orders", "data_b64": "bmV3ZXI=" + ("B" * 80)},
+                    )
+                    assert newer_evt.spilled is True
+
+                    evict_listener.push_notification(7777, "orders", stale_envelope.encode("utf-8"))
+                    with pytest.raises(KeyError, match=str(stale_evt.event_id)):
+                        await asyncio.wait_for(next_task, timeout=3.0)
+                    assert srv.wait_for_live_connections(1, timeout=2.0)
+
+                    recovery_task = asyncio.create_task(_as_coro(anext(source.listen())))
+                    assert await srv.wait_for_accept_count_async(4, timeout=3.0)
+                    assert await srv.session(3).wait_for_query_count_async(1, timeout=3.0)
+                    await source.publish("orders", "recovered-after-evict")
+                    recovered_evt = await asyncio.wait_for(recovery_task, timeout=3.0)
+                    assert recovered_evt.payload == b"recovered-after-evict"
+            finally:
+                await concrete_port.aclose()
+
+        asyncio.run(_run())
+        assert srv.wait_for_live_connections(0, timeout=2.0)
+
+
+@pytest.mark.parametrize(
+    ("pooler_mode", "pgbouncer", "use_direct_dsn", "expect_ok"),
+    (
+        ("direct", False, False, True),
+        ("session", False, False, True),
+        ("transaction", False, False, False),
+        ("statement", False, False, False),
+        ("auto", False, False, False),
+        ("direct", True, False, False),
+        ("transaction", False, True, True),
+        ("statement", True, True, True),
+    ),
+)
+def test_notification_source_pooler_mode_and_direct_dsn_validation(
+    pooler_mode: PoolerMode,
+    pgbouncer: bool,
+    use_direct_dsn: bool,
+    expect_ok: bool,
+) -> None:
+    """Reject multiplexed pooler configs lacking direct_dsn before dialing while allowing derived direct_dsn."""
+    with _running_pg_server() as srv:
+
+        async def _run() -> None:
+            direct_uri = f"postgresql://postgres@127.0.0.1:{srv.port}/appdb"
+            cfg = PostgreSQLConfig(
+                dsn=direct_uri,
+                direct_dsn=direct_uri if use_direct_dsn else None,
+                pooler_mode=pooler_mode,
+                pgbouncer=pgbouncer,
+                max_size=1,
+            )
+            concrete_port = NativeNotificationDriverPort(cfg)
+            port: PostgresNotificationDriver = concrete_port
+            try:
+                async with PostgresNotificationSource(port) as source:
+                    await source.subscribe(["orders"])
+                    if not expect_ok:
+                        with pytest.raises(ImproperConfigurationError, match="LISTEN/NOTIFY"):
+                            await anext(source.listen())
+                        assert srv.accept_count == 0
+                        return
+
+                    waiter = asyncio.create_task(_as_coro(anext(source.listen())))
+                    assert await srv.wait_for_accept_count_async(1, timeout=3.0)
+                    assert await srv.session(0).wait_for_query_count_async(1, timeout=3.0)
+                    await source.publish("orders", "pooled-ok")
+                    evt = await asyncio.wait_for(waiter, timeout=3.0)
+                    assert evt.channel == "orders"
+                    assert evt.payload == b"pooled-ok"
+            finally:
+                await concrete_port.aclose()
+
+        asyncio.run(_run())
+        assert srv.wait_for_live_connections(0, timeout=2.0)
+
+
+@pytest.mark.parametrize(
+    "bad_channel",
+    (
+        "",
+        "bad;drop",
+        "bad.dot",
+        "has space",
+        "a" * 64,
+        "\u00e9" * 32,
+    ),
+)
+def test_notification_source_channel_bounds_are_atomic_without_io(bad_channel: str) -> None:
+    """Reject malformed and >63-UTF-8-byte channels across config, publish, subscribe, and unsubscribe with zero I/O."""
+    with pytest.raises(ValueError, match="channel"):
+        PostgresNotifyConfig(channel=bad_channel)
+    with pytest.raises(ValueError, match="channel"):
+        PostgresNotificationSource.build_notify_sql(bad_channel, "payload")
+
+    max_channel = "a" * 63
+    assert len(max_channel.encode("utf-8")) == 63
+    assert PostgresNotifyConfig(channel=max_channel).channel == max_channel
+
+    with _running_pg_server() as srv:
+
+        async def _run() -> None:
+            cfg = PostgreSQLConfig(
+                dsn=f"postgresql://postgres@127.0.0.1:{srv.port}/appdb",
+                max_size=1,
+            )
+            concrete_port = NativeNotificationDriverPort(cfg)
+            port: PostgresNotificationDriver = concrete_port
+            try:
+                async with PostgresNotificationSource(port) as source:
+                    assert source.subscribed_channels == []
+
+                    with pytest.raises(ValueError, match="channel"):
+                        await source.publish(bad_channel, "payload")
+                    assert concrete_port.publish_calls == 0
+                    assert srv.accept_count == 0
+
+                    with pytest.raises(ValueError, match="channel"):
+                        await source.subscribe(["orders", bad_channel])
+                    assert source.subscribed_channels == []
+                    assert srv.accept_count == 0
+
+                    await source.subscribe(["existing", max_channel])
+                    assert source.subscribed_channels == ["existing", max_channel]
+
+                    waiter = asyncio.create_task(_as_coro(anext(source.listen())))
+                    assert await srv.wait_for_accept_count_async(1, timeout=3.0)
+                    listener_sess = srv.session(0)
+                    assert await listener_sess.wait_for_query_count_async(2, timeout=3.0)
+                    baseline_queries = list(listener_sess.queries)
+
+                    with pytest.raises(ValueError, match="channel"):
+                        await source.subscribe(["orders", bad_channel])
+                    assert source.subscribed_channels == ["existing", max_channel]
+                    assert listener_sess.queries == baseline_queries
+
+                    with pytest.raises(ValueError, match="channel"):
+                        await source.unsubscribe(["existing", bad_channel])
+                    assert source.subscribed_channels == ["existing", max_channel]
+                    assert listener_sess.queries == baseline_queries
+
+                    await source.publish(max_channel, "boundary-63")
+                    evt = await asyncio.wait_for(waiter, timeout=3.0)
+                    assert evt.channel == max_channel
+                    assert evt.payload == b"boundary-63"
+            finally:
+                await concrete_port.aclose()
+
+        asyncio.run(_run())
+        assert srv.wait_for_live_connections(0, timeout=2.0)
+
+
+@pytest.mark.parametrize(
+    ("queue_capacity", "reconnect", "expected_exc"),
+    (
+        (True, False, TypeError),
+        (False, False, TypeError),
+        ("16", False, TypeError),
+        (0, False, ValueError),
+        (-5, False, ValueError),
+        (16, 1, TypeError),
+        (16, "yes", TypeError),
+    ),
+)
+def test_notification_source_rejects_invalid_constructor_options(
+    queue_capacity: Any,
+    reconnect: Any,
+    expected_exc: type[BaseException],
+) -> None:
+    """Validate non-bool positive queue_capacity and bool reconnect in PostgresNotificationSource.__init__."""
+    with _running_pg_server() as srv:
+        cfg = PostgreSQLConfig(dsn=f"postgresql://postgres@127.0.0.1:{srv.port}/appdb")
+        concrete_port = NativeNotificationDriverPort(cfg)
+        port: PostgresNotificationDriver = concrete_port
+        try:
+            with pytest.raises(expected_exc, match="queue_capacity|reconnect"):
+                PostgresNotificationSource(
+                    port,
+                    queue_capacity=queue_capacity,
+                    reconnect=reconnect,
+                )
+            assert srv.accept_count == 0
+        finally:
+            asyncio.run(concrete_port.aclose())
+
+
+def test_notification_source_concurrent_listen_guard_and_lazy_extension_imports() -> None:
+    """Reject concurrent source.listen() with InterfaceError and keep events/notify free of eager _postgres imports."""
+    src_py = str(Path(__file__).resolve().parents[3])
+    probe = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys; "
+                "import vertebra.db.adapters.postgres.events; "
+                "import vertebra.db.adapters.postgres.notify; "
+                "assert 'vertebra._postgres' not in sys.modules"
+            ),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={"PYTHONPATH": src_py, "PATH": ""},
+    )
+    assert probe.returncode == 0, probe.stderr
+
+    with _running_pg_server() as srv:
+
+        async def _run() -> None:
+            cfg = PostgreSQLConfig(
+                dsn=f"postgresql://postgres@127.0.0.1:{srv.port}/appdb",
+                max_size=1,
+            )
+            concrete_port = NativeNotificationDriverPort(cfg)
+            port: PostgresNotificationDriver = concrete_port
+            try:
+                async with PostgresNotificationSource(port, queue_capacity=16) as source:
+                    bad_source: Any = source
+                    with pytest.raises(TypeError):
+                        await bad_source.subscribe("orders")
+                    with pytest.raises(TypeError):
+                        await bad_source.unsubscribe(b"orders")
+
+                    await source.subscribe(["orders"])
+                    active_stream = source.listen()
+                    first_waiter = asyncio.create_task(_as_coro(anext(active_stream)))
+                    assert await srv.wait_for_accept_count_async(1, timeout=3.0)
+                    assert await srv.session(0).wait_for_query_count_async(1, timeout=3.0)
+
+                    with pytest.raises(InterfaceError, match="already active"):
+                        await anext(source.listen())
+                    assert srv.accept_count == 1
+                    assert not first_waiter.done()
+
+                    await source.publish("orders", "primary-stream-intact")
+                    evt = await asyncio.wait_for(first_waiter, timeout=3.0)
+                    assert evt.payload == b"primary-stream-intact"
+
+                    with pytest.raises(InterfaceError, match="already active"):
+                        await anext(source.listen())
+            finally:
+                await concrete_port.aclose()
+
+        asyncio.run(_run())
+        assert srv.wait_for_live_connections(0, timeout=2.0)
+
+
 async def _exercise_active_listener(
     client: SyncPostgresClient | AsyncPostgresClient,
     srv: _ScriptedNotificationServer,
@@ -860,44 +1453,94 @@ def _pg_auth_ready(pid: int) -> bytes:
     )
 
 
-def _pg_select_one_response(frames: list[tuple[bytes, bytes]]) -> bytes:
-    """Encode an extended-query SELECT 1 response supporting cold Parse and warm Bind paths."""
+def _unquote_pg_channel(token: str) -> str:
+    """Unquote a double-quoted or bare PostgreSQL channel identifier from LISTEN/UNLISTEN SQL."""
+    stripped = token.strip()
+    if len(stripped) >= 2 and stripped[0] == '"' and stripped[-1] == '"':
+        return stripped[1:-1].replace('""', '"')
+    return stripped
+
+
+def _pg_extended_response(
+    sess: _ServerSession,
+    frames: list[tuple[bytes, bytes]],
+) -> tuple[bytes, tuple[str, bytes] | None]:
+    """Encode an extended-query SELECT 1 or SELECT pg_notify($1, $2) wire response."""
     col_fmt = 0
+    bound_sql = ""
+    bound_params: list[bytes | None] = []
     for tag, body in frames:
-        if tag == b"B":
+        if tag == b"P":
+            stmt_end = body.index(b"\x00")
+            stmt_name = body[:stmt_end].decode("utf-8", errors="replace")
+            sql_end = body.index(b"\x00", stmt_end + 1)
+            parsed_sql = body[stmt_end + 1 : sql_end].decode("utf-8", errors="replace")
+            sess.record_prepared(stmt_name, parsed_sql)
+        elif tag == b"B":
             portal_end = body.index(b"\x00") + 1
-            stmt_end = body.index(b"\x00", portal_end) + 1
+            stmt_nul = body.index(b"\x00", portal_end)
+            stmt_name = body[portal_end:stmt_nul].decode("utf-8", errors="replace")
+            bound_sql = sess.lookup_prepared(stmt_name)
+            stmt_end = stmt_nul + 1
             (num_pfmt,) = struct.unpack_from("!h", body, stmt_end)
             offset = stmt_end + 2 + 2 * num_pfmt
             (num_params,) = struct.unpack_from("!h", body, offset)
             offset += 2
+            bound_params = []
             for _ in range(num_params):
                 (plen,) = struct.unpack_from("!i", body, offset)
-                offset += 4 + (0 if plen < 0 else plen)
+                offset += 4
+                if plen < 0:
+                    bound_params.append(None)
+                else:
+                    bound_params.append(body[offset : offset + plen])
+                    offset += plen
             (num_rfmt,) = struct.unpack_from("!h", body, offset)
             if num_rfmt >= 1:
                 (col_fmt,) = struct.unpack_from("!h", body, offset + 2)
-    col_desc = struct.pack("!h", 1) + b"one\x00" + struct.pack("!ihihih", 0, 0, 23, 4, -1, col_fmt)
-    row_val = struct.pack("!i", 1) if col_fmt == 1 else b"1"
-    row_frame = _pg_frame(b"D", struct.pack("!hi", 1, len(row_val)) + row_val)
+        elif tag == b"C" and body[:1] == b"S":
+            closed_name = body[1:].rstrip(b"\x00").decode("utf-8", errors="replace")
+            sess.drop_prepared(closed_name)
+
+    is_pg_notify = "pg_notify" in bound_sql.casefold()
+    notify_out: tuple[str, bytes] | None = None
+    if is_pg_notify:
+        stmt_col_desc = struct.pack("!h", 1) + b"pg_notify\x00" + struct.pack("!ihihih", 0, 0, 25, -1, -1, 0)
+        portal_col_desc = struct.pack("!h", 1) + b"pg_notify\x00" + struct.pack("!ihihih", 0, 0, 25, -1, -1, col_fmt)
+        row_frame = _pg_frame(b"D", struct.pack("!hi", 1, 0))
+        param_desc = _pg_frame(b"t", struct.pack("!hii", 2, 25, 25))
+        if (
+            any(t == b"E" for t, _ in frames)
+            and len(bound_params) == 2
+            and bound_params[0] is not None
+            and bound_params[1] is not None
+        ):
+            notify_out = (bound_params[0].decode("utf-8"), bound_params[1])
+    else:
+        stmt_col_desc = struct.pack("!h", 1) + b"one\x00" + struct.pack("!ihihih", 0, 0, 23, 4, -1, 0)
+        portal_col_desc = struct.pack("!h", 1) + b"one\x00" + struct.pack("!ihihih", 0, 0, 23, 4, -1, col_fmt)
+        row_val = struct.pack("!i", 1) if col_fmt == 1 else b"1"
+        row_frame = _pg_frame(b"D", struct.pack("!hi", 1, len(row_val)) + row_val)
+        param_desc = _pg_frame(b"t", struct.pack("!h", 0))
+
     out = bytearray()
     tags = {t for t, _ in frames}
     if b"P" in tags:
         out.extend(_pg_frame(b"1", b""))
     if b"D" in tags and any(t == b"D" and b[:1] == b"S" for t, b in frames):
-        out.extend(_pg_frame(b"t", struct.pack("!h", 0)))
-        out.extend(_pg_frame(b"T", col_desc))
+        out.extend(param_desc)
+        out.extend(_pg_frame(b"T", stmt_col_desc))
     if b"B" in tags:
         out.extend(_pg_frame(b"2", b""))
     if b"D" in tags and any(t == b"D" and b[:1] == b"P" for t, b in frames):
-        out.extend(_pg_frame(b"T", col_desc))
+        out.extend(_pg_frame(b"T", portal_col_desc))
     if b"E" in tags:
         out.extend(row_frame)
         out.extend(_pg_frame(b"C", b"SELECT 1\x00"))
     if any(t == b"C" for t, _ in frames):
         out.extend(_pg_frame(b"3", b""))
     out.extend(_pg_frame(b"Z", b"I"))
-    return bytes(out)
+    return bytes(out), notify_out
 
 
 class _DrainerController:
@@ -966,6 +1609,8 @@ class _ServerSession:
         self._write_lock = threading.Lock()
         self._state_lock = threading.Lock()
         self._queries: list[str] = []
+        self._prepared: dict[str, str] = {}
+        self._subscribed: set[str] = set()
         self._password: str | None = None
         self._closed = False
 
@@ -986,6 +1631,26 @@ class _ServerSession:
         """Return True once the session socket loop has exited and closed."""
         with self._state_lock:
             return self._closed
+
+    def is_subscribed_to(self, channel: str) -> bool:
+        """Return True when this live session currently holds LISTEN for channel."""
+        with self._state_lock:
+            return not self._closed and channel in self._subscribed
+
+    def record_prepared(self, name: str, sql: str) -> None:
+        """Store an extended-query Parse statement definition on this session."""
+        with self._state_lock:
+            self._prepared[name] = sql
+
+    def lookup_prepared(self, name: str) -> str:
+        """Return the SQL associated with prepared statement name, or empty string."""
+        with self._state_lock:
+            return self._prepared.get(name, "")
+
+    def drop_prepared(self, name: str) -> None:
+        """Remove a closed extended-query prepared statement entry."""
+        with self._state_lock:
+            self._prepared.pop(name, None)
 
     def send_raw(self, data: bytes) -> None:
         """Write raw backend frames synchronously under the session write lock."""
@@ -1019,14 +1684,27 @@ class _ServerSession:
             self._password = value
 
     def _record_query(self, sql: str) -> None:
-        """Append a decoded simple query string."""
+        """Append a decoded simple query string and update session LISTEN/prepared state."""
+        upper = sql.upper()
         with self._state_lock:
             self._queries.append(sql)
+            if upper.startswith("LISTEN "):
+                self._subscribed.add(_unquote_pg_channel(sql[7:]))
+            elif upper == "UNLISTEN *":
+                self._subscribed.clear()
+            elif upper.startswith("UNLISTEN "):
+                self._subscribed.discard(_unquote_pg_channel(sql[9:]))
+            elif upper == "DISCARD ALL":
+                self._subscribed.clear()
+                self._prepared = {k: v for k, v in self._prepared.items() if not k}
+            elif upper == "DEALLOCATE ALL":
+                self._prepared = {k: v for k, v in self._prepared.items() if not k}
 
     def _mark_closed(self) -> None:
         """Mark the session socket terminated."""
         with self._state_lock:
             self._closed = True
+            self._subscribed.clear()
 
 
 class _ScriptedNotificationServer:
@@ -1185,12 +1863,23 @@ class _ScriptedNotificationServer:
                         if ftag == b"X":
                             return
                         group.append((ftag, fbody))
-                    sess.send_raw(_pg_select_one_response(group))
+                    reply, notify_out = _pg_extended_response(sess, group)
+                    if notify_out is not None:
+                        self._broadcast_notification(sess.pid, notify_out[0], notify_out[1])
+                    sess.send_raw(reply)
         except (EOFError, OSError):
             return
         finally:
             sess.close_from_peer()
             sess._mark_closed()
+
+    def _broadcast_notification(self, sender_pid: int, channel: str, payload: bytes) -> None:
+        """Deliver a NotificationResponse frame to every live session subscribed to channel."""
+        with self._lock:
+            sessions = list(self._sessions)
+        for target in sessions:
+            if target.is_subscribed_to(channel):
+                target.push_notification(sender_pid, channel, payload)
 
     @staticmethod
     def _read_exact(conn: socket.socket, size: int) -> bytes:
