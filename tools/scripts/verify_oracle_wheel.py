@@ -142,10 +142,10 @@ def verify_isolated_venv_install_and_fail_loud_contract(
                 "    try:\n"
                 "        cls()\n"
                 "    except MissingDependencyError as exc:\n"
-                "        assert exc.package == 'vertebra._oracle', exc.package\n"
+                "        assert exc.package == 'vertebra-core[oracle]', exc.package\n"
                 "        assert exc.install_package == 'vertebra-core[oracle]', exc.install_package\n"
                 "        assert 'vertebra-core[oracle]' in exc.hint, exc.hint\n"
-                "        assert 'vertebra._oracle' in str(exc), str(exc)\n"
+                "        assert 'vertebra-core[oracle]' in str(exc), str(exc)\n"
                 "    else:\n"
                 "        raise AssertionError(f'{cls.__name__} did not raise MissingDependencyError')\n"
             ),

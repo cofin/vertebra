@@ -73,7 +73,7 @@ app = Litestar(
 
 ## SQLSpec Integration, Statement Stacks & SHM Proxy (`vertebra.extensions.sqlspec`)
 
-Vertebra provides first-class support for `sqlspec` (`>=0.69.0`) across 8 database engines (Oracle configs construct, while session acquisition raises `MissingDependencyError` because the native Oracle driver package is not yet published), native statement pipelining, and shared-memory connection pooling:
+Vertebra provides first-class support for `sqlspec` (`>=0.69.0`) across 8 database engines, native statement pipelining, and shared-memory connection pooling:
 
 - **Native Drivers**: Typed sync and async database configs across relational, analytical, and cloud-native engines (`PostgreSQLSyncConfig`, `PostgreSQLAsyncConfig`, `MySQLSyncConfig`, `MySQLAsyncConfig`, `SQLiteSyncConfig`, `SQLiteAsyncConfig`, `OracleSyncConfig`, `OracleAsyncConfig`, `MSSQLSyncConfig`, `MSSQLAsyncConfig`, `DuckDBSyncConfig`, `DuckDBAsyncConfig`, `BigQuerySyncConfig`, `BigQueryAsyncConfig`, `SpannerSyncConfig`, `SpannerAsyncConfig`).
 - **Shared-Memory Proxy**: `ProxySyncConfig` and `ProxyAsyncConfig` (`ProxySyncDriver`, `ProxyAsyncDriver`) lease pooled connections over shared memory from the parent process so multi-worker deployments never multiply connection counts.

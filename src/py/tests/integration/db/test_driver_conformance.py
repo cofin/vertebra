@@ -93,7 +93,8 @@ from vertebra.typing import FrozenBaseStruct, MissingDependencyError, reset_depe
 from vertebra.utils.module_loader import ensure_module, import_optional
 from vertebra.utils.serializers import decode_json, encode_json
 
-_FAIL_LOUD_DRIVER_ENGINES: frozenset[str] = frozenset({"oracle"})
+_FAIL_LOUD_DRIVER_ENGINES: frozenset[str] = frozenset()
+_DUCKDB_SKIP_REASON = "duckdb publishes no free-threaded wheel; DuckDB tests run on GIL interpreters"
 
 
 class _RollbackSentinelError(RuntimeError):

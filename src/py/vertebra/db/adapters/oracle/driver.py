@@ -83,7 +83,7 @@ def _load_oracle_module() -> Any:
     """Import and return the native `vertebra._oracle` extension module."""
     return ensure_module(
         "vertebra._oracle",
-        package="vertebra._oracle",
+        package="vertebra-core[oracle]",
         install_package="vertebra-core[oracle]",
         extra="oracle",
     )

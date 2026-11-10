@@ -20,7 +20,7 @@ Vertebra is one unified runtime for Python and TypeScript across backend, fronte
 
 ```bash
 uv add vertebra-core
-uv add "vertebra-core[oracle]"   # Optional: BigQuery [bigquery], Oracle 26ai [oracle], Spanner [spanner]
+uv add "vertebra-core[oracle]"   # Optional extras: bigquery, oracle, spanner
 ```
 
 ## CLI Usage (`vtb`)
@@ -43,7 +43,7 @@ make test        # Run all tests (Rust + Python + TypeScript)
 make rs-test     # Run Rust workspace tests (tls, compression, and gcp features)
 make py-test     # Run Python test suite
 make oracle-test # Run Oracle 26ai Rust tests, stubtest, and Python unit tests
-make oracle-wheel-check # Verify standalone vertebra-oracle wheel isolation and fail-loud contract
+make oracle-wheel-check # Verify vertebra-oracle wheel isolation
 make ts-test     # Run TypeScript client tests (Vitest)
 make lint        # Format and lint Python, Rust, and TypeScript
 make check       # Run full lint, type checks, all tests, and coverage

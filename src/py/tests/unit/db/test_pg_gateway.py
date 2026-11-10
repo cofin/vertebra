@@ -303,6 +303,10 @@ def test_oracle_tenant_context_builder_binds_values_and_validates_identifiers() 
 
     scope = TenantScopeConfig(setting_name="app.tenant_id")
     assert OracleCore.build_session_context_sql("tenant'; DROP", scope) == (
+        "BEGIN DBMS_SESSION.SET_IDENTIFIER(:value); END;",
+        {"value": "tenant'; DROP"},
+    )
+    assert OracleCore.build_session_context_sql("tenant'; DROP", scope, namespace="VERTEBRA_CTX") == (
         "BEGIN DBMS_SESSION.SET_CONTEXT(:namespace, :attribute, :value); END;",
         {"namespace": "VERTEBRA_CTX", "attribute": "tenant_id", "value": "tenant'; DROP"},
     )

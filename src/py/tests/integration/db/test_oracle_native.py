@@ -31,7 +31,7 @@ def _resolve_oracle_config(request: pytest.FixtureRequest) -> OracleConfig:
     """Resolve a live `OracleConfig` from `VERTEBRA_CONFORMANCE_ORACLE_DSN` or the Docker fixture."""
     ensure_module(
         "vertebra._oracle",
-        package="vertebra._oracle",
+        package="vertebra-core[oracle]",
         install_package="vertebra-core[oracle]",
         extra="oracle",
     )
