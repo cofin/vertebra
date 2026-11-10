@@ -5,7 +5,7 @@ chapter_id: ch19-native-arrow-batches-and-shm
 title: Build bounded native Arrow scalar RecordBatches in Rust
 description: Implement PostgresArrowBatchBuilder in vertebra-postgres to decode raw DataRow and PgValue scalar fields directly into Arrow columns with 65536-row and 8 MiB value-buffer flush bounds.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -24,17 +24,17 @@ tests:
 estimated_loc: 225
 plan_revision: 5
 plan_commit: fd571e3a
-state_revision: 0
+state_revision: 2
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-10T03:33:33Z"
+last_verified_commit: 8e430386
+verification_evidence: "cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --test postgres_arrow_tests (9 passed); cargo fmt --check; cargo clippy -p vertebra-postgres --all-targets -- -D warnings; make review-check"
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-08T02:05:22Z"
+updated_at: "2026-11-10T03:33:33Z"
 commit: null
 sources:
   - id: pg-contracts
@@ -116,9 +116,9 @@ Implement `PostgresArrowBatchBuilder` in `src/rs/vertebra-postgres/src/arrow.rs`
 
 ## Acceptance Criteria
 
-- [ ] `PostgresArrowBatchBuilder` decodes raw `DataRow` and `PgValue` scalar rows directly in Rust with zero Python object/tuple materialization, preserving duplicate column names and emitting explicit `0`-row batches for empty results (R20).
-- [ ] Numeric scale/specials, JSON `"null"` vs SQL `NULL`, full-range temporal `kind = -1/0/1/2` (`wire_text` context), `24:00:00` `time`, and signed `interval` triples roundtrip losslessly into their `ch19:t01` schemas (R20).
-- [ ] Batch flushes honor `max_rows` (`65_536` default) and `max_bytes` (`8 MiB` default), retaining at most one incomplete row and one active batch while rejecting single values above `max_bytes` before allocation (R20).
+- [x] `PostgresArrowBatchBuilder` decodes raw `DataRow` and `PgValue` scalar rows directly in Rust with zero Python object/tuple materialization, preserving duplicate column names and emitting explicit `0`-row batches for empty results (R20).
+- [x] Numeric scale/specials, JSON `"null"` vs SQL `NULL`, full-range temporal `kind = -1/0/1/2` (`wire_text` context), `24:00:00` `time`, and signed `interval` triples roundtrip losslessly into their `ch19:t01` schemas (R20).
+- [x] Batch flushes honor `max_rows` (`65_536` default) and `max_bytes` (`8 MiB` default), retaining at most one incomplete row and one active batch while rejecting single values above `max_bytes` before allocation (R20).
 
 ## Notes & Discoveries
 

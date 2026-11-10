@@ -39,7 +39,7 @@ chapters:
   - ch30-user-and-domain-docs
   - ch31-final-review-and-release-gate
 current_chapter: ch19-native-arrow-batches-and-shm
-current_task: "native-postgres-driver:ch19:t01"
+current_task: "native-postgres-driver:ch19:t03"
 parent_prd: native-data-platform
 depends_on_flows:
   - driver-fail-loud

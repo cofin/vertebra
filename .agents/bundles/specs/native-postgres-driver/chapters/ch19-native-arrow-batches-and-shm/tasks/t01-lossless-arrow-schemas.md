@@ -36,7 +36,7 @@ last_verified_commit: ccda0281
 verification_evidence: "cargo test -p vertebra-postgres --test postgres_arrow_tests schema_ (5 passed), cargo tree -p vertebra-postgres -i arrow-array (arrow-array v60.1.0), cargo clippy -p vertebra-postgres --all-targets -- -D warnings, and make review-check exited 0"
 created_at: "2026-11-05T18:25:07Z"
 updated_at: "2026-11-10T03:23:31Z"
-commit: null
+commit: 8e430386
 sources:
   - id: pg-contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md
