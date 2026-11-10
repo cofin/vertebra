@@ -80,7 +80,7 @@ Implement `PostgresArrowSchema::from_columns` in `src/rs/vertebra-postgres/src/a
   - `pub const MAX_ARROW_NESTING_DEPTH: usize = 32;`
   - `pub struct PostgresArrowSchema;` with `pub fn from_columns(columns: &[crate::result::Column], catalog: &TypeCatalog) -> Result<Arc<Schema>, PostgresError>`:
     - Preserves column order, duplicate names, and empty names (`""`) verbatim without `HashMap` deduplication; all fields are nullable (`true`) so empty and all-`NULL` results preserve exact `DataType` and metadata.
-    - Scalars: `bool` (`16`) -> `Boolean`; `int2` (`21`) -> `Int16`; `int4` (`23`) -> `Int32`; `int8` (`20`) -> `Int64`; `oid`/`xid`/`cid` (`26`, `28`, `29`) and binary `regproc` (`24`, `format == 1`) -> `UInt32`; `float4` (`700`) -> `Float32`; `float8` (`701`) -> `Float64`; `text`/`varchar`/`bpchar`/`name`/`xml`/`unknown` -> `Utf8`; `bytea` (`17`) -> `Binary`; `uuid` (`2950`) -> `FixedSizeBinary(16)`; `json` (`114`) / `jsonb` (`3802`) -> `Utf8` (`"postgres.encoding" = "json"` / `"jsonb"`).
+    - Scalars: `bool` (`16`) -> `Boolean`; `int2` (`21`) -> `Int16`; `int4` (`23`) -> `Int32`; `int8` (`20`) -> `Int64`; `oid`/`xid`/`cid` (`26`, `28`, `29`) -> `UInt32`; `regproc` (`24`) -> `Utf8` (`"postgres.encoding" = "regproc-text"`) in text format (`0`) and `UInt32` in explicit binary format (`1`); `float4` (`700`) -> `Float32`; `float8` (`701`) -> `Float64`; `text`/`varchar`/`bpchar`/`name`/`xml`/`unknown` -> `Utf8`; `bytea` (`17`) -> `Binary`; `uuid` (`2950`) -> `FixedSizeBinary(16)`; `json` (`114`) / `jsonb` (`3802`) -> `Utf8` (`"postgres.encoding" = "json"` / `"jsonb"`).
     - `numeric` (`1700`) -> `Utf8` with `"postgres.encoding" = "numeric-decimal"` (retaining canonical decimal digits, trailing scale zeros, and `NaN`/`Infinity`/`-Infinity`; never `Decimal128` or generic `str(value)`).
     - Deliberately PostgreSQL full-range temporal/interval schemas (not standard Arrow temporal arrays):
       - `date` (`1082`) -> `Struct(kind: Int8, value: Int32, wire_text: Utf8, date_style: Utf8, time_zone: Utf8)` (`kind`: `-1` negative infinity, `0` finite PG days since `2000-01-01`, `1` positive infinity, `2` `wire_text` with null `value`).
@@ -97,7 +97,7 @@ Implement `PostgresArrowSchema::from_columns` in `src/rs/vertebra-postgres/src/a
 
 ## Edge Cases & Error Semantics
 
-- Unknown OID with `column.format == 1` (binary) fails immediately with `PostgresError::Data` rather than guessing UTF-8 over binary wire bytes; `regproc` (`24`) with `column.format == 0` (symbolic `regprocout` text) also fails immediately with `PostgresError::Data` because lossless `UInt32` projection requires binary format (`1`).
+- Unknown OID with `column.format == 1` (binary) fails immediately with `PostgresError::Data` rather than guessing UTF-8 over binary wire bytes.
 - Invalid `vector` / `halfvec` typmod dimension (`<= 0` when present or `> 16_000`) fails with `PostgresError::Data`.
 - Recursive catalog resolution tracks active composite/domain/array lineage and current depth: cycles or nesting `> 32` fail closed with `PostgresError::Data` before execution.
 

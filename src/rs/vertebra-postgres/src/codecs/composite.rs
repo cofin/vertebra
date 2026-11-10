@@ -5,7 +5,7 @@ use bytes::{BufMut, BytesMut};
 use crate::codecs::array_text::{ContainerNullRule, ScannedToken, scan_delimited_container};
 use crate::codecs::{
     CodecContext, decode_value_with_catalog_at_depth, encode_value_with_catalog_at_depth,
-    format_for_oid_with_catalog,
+    supports_binary_with_catalog,
 };
 use crate::errors::PostgresError;
 use crate::result::{Format, PgValue};
@@ -268,7 +268,7 @@ pub fn encode_composite_binary(
 
     out.put_i32(fields.len() as i32);
     for (idx, (field, val)) in fields.iter().zip(values.iter()).enumerate() {
-        if format_for_oid_with_catalog(field.type_oid, catalog) != Format::Binary {
+        if !supports_binary_with_catalog(field.type_oid, catalog) {
             return Err(PostgresError::Data(format!(
                 "composite field {idx} (`{}`) OID {} does not support binary encoding",
                 field.name, field.type_oid

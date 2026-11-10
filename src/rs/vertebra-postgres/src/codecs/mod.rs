@@ -162,21 +162,31 @@ impl CodecContext {
 /// Return the preferred wire [`Format`] for a built-in PostgreSQL type `oid` (`Format::Text` for unknown OIDs).
 pub const fn format_for_oid(oid: u32) -> Format {
     match oid {
-        BOOL_OID | BYTEA_OID | NAME_OID | INT8_OID | INT2_OID | INT4_OID | REGPROC_OID
-        | TEXT_OID | OID_OID | XID_OID | CID_OID | JSON_OID | XML_OID | FLOAT4_OID | FLOAT8_OID
-        | UNKNOWN_OID | BPCHAR_OID | VARCHAR_OID | DATE_OID | TIME_OID | TIMESTAMP_OID
-        | TIMESTAMPTZ_OID | INTERVAL_OID | BIT_OID | VARBIT_OID | NUMERIC_OID | UUID_OID
-        | JSONB_OID => Format::Binary,
+        BOOL_OID | BYTEA_OID | NAME_OID | INT8_OID | INT2_OID | INT4_OID | TEXT_OID | OID_OID
+        | XID_OID | CID_OID | JSON_OID | XML_OID | FLOAT4_OID | FLOAT8_OID | UNKNOWN_OID
+        | BPCHAR_OID | VARCHAR_OID | DATE_OID | TIME_OID | TIMESTAMP_OID | TIMESTAMPTZ_OID
+        | INTERVAL_OID | BIT_OID | VARBIT_OID | NUMERIC_OID | UUID_OID | JSONB_OID => {
+            Format::Binary
+        }
         _ => Format::Text,
     }
 }
 
 /// Return the preferred wire [`Format`] for `oid` consulting the session [`TypeCatalog`].
 pub fn format_for_oid_with_catalog(oid: u32, catalog: &TypeCatalog) -> Format {
-    format_for_oid_with_catalog_depth(oid, catalog, 0)
+    format_for_oid_with_catalog_depth(oid, catalog, 0, false)
 }
 
-fn format_for_oid_with_catalog_depth(oid: u32, catalog: &TypeCatalog, depth: usize) -> Format {
+pub(crate) fn supports_binary_with_catalog(oid: u32, catalog: &TypeCatalog) -> bool {
+    format_for_oid_with_catalog_depth(oid, catalog, 0, true) == Format::Binary
+}
+
+fn format_for_oid_with_catalog_depth(
+    oid: u32,
+    catalog: &TypeCatalog,
+    depth: usize,
+    allow_explicit_regproc: bool,
+) -> Format {
     if depth > DEFAULT_MAX_NESTING_DEPTH {
         return Format::Text;
     }
@@ -186,20 +196,32 @@ fn format_for_oid_with_catalog_depth(oid: u32, catalog: &TypeCatalog, depth: usi
     if base_oid == RECORD_OID || base_oid == BOX_OID {
         return Format::Text;
     }
-    if format_for_oid(base_oid) == Format::Binary {
+    if format_for_oid(base_oid) == Format::Binary
+        || (allow_explicit_regproc && base_oid == REGPROC_OID)
+    {
         return Format::Binary;
     }
     match catalog.type_info(base_oid) {
         Some(TypeInfo {
             kind: TypeKind::Array { element_oid, .. },
             ..
-        }) => format_for_oid_with_catalog_depth(*element_oid, catalog, depth + 1),
+        }) => format_for_oid_with_catalog_depth(
+            *element_oid,
+            catalog,
+            depth + 1,
+            allow_explicit_regproc,
+        ),
         Some(TypeInfo {
             kind: TypeKind::Composite { fields },
             ..
         }) => {
             if fields.iter().all(|f| {
-                format_for_oid_with_catalog_depth(f.type_oid, catalog, depth + 1) == Format::Binary
+                format_for_oid_with_catalog_depth(
+                    f.type_oid,
+                    catalog,
+                    depth + 1,
+                    allow_explicit_regproc,
+                ) == Format::Binary
             }) {
                 Format::Binary
             } else {

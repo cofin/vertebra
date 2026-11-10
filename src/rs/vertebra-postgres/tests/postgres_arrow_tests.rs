@@ -163,6 +163,7 @@ fn schema_maps_scalars_numeric_json_and_full_range_temporals() {
         col("c_i8", INT8_OID, Format::Binary, -1),
         col("c_oid", OID_OID, Format::Binary, -1),
         col("c_regproc", 24, Format::Binary, -1),
+        col("c_regproc_txt", 24, Format::Text, -1),
         col("c_xid", 28, Format::Binary, -1),
         col("c_cid", 29, Format::Binary, -1),
         col("c_f4", FLOAT4_OID, Format::Binary, -1),
@@ -194,6 +195,21 @@ fn schema_maps_scalars_numeric_json_and_full_range_temporals() {
     assert_eq!(field_by_name("c_i8").data_type(), &DataType::Int64);
     assert_eq!(field_by_name("c_oid").data_type(), &DataType::UInt32);
     assert_eq!(field_by_name("c_regproc").data_type(), &DataType::UInt32);
+    assert_eq!(field_by_name("c_regproc_txt").data_type(), &DataType::Utf8);
+    assert_eq!(
+        field_by_name("c_regproc_txt")
+            .metadata()
+            .get("postgres.type_name")
+            .map(String::as_str),
+        Some("regproc")
+    );
+    assert_eq!(
+        field_by_name("c_regproc_txt")
+            .metadata()
+            .get("postgres.encoding")
+            .map(String::as_str),
+        Some("regproc-text")
+    );
     assert_eq!(field_by_name("c_xid").data_type(), &DataType::UInt32);
     assert_eq!(field_by_name("c_cid").data_type(), &DataType::UInt32);
     assert_eq!(field_by_name("c_f4").data_type(), &DataType::Float32);
@@ -588,8 +604,6 @@ fn schema_rejects_unknown_binary_oid_anonymous_binary_record_and_invalid_vector_
         col("bin_unk", 99_999, Format::Binary, -1),
         col("bin_unk_arr", 99_998, Format::Binary, -1),
         col("bin_rec", RECORD_OID, Format::Binary, -1),
-        col("text_regproc", REGPROC_OID, Format::Text, -1),
-        col("text_regproc_arr", REGPROC_ARRAY_OID, Format::Text, -1),
         col("zero_oid", 0, Format::Text, -1),
         col("vec_zero", 42001, Format::Binary, 0),
         col("vec_neg2", 42001, Format::Binary, -2),
@@ -1435,6 +1449,55 @@ fn batch_bounds_flush_by_row_count_byte_budget_reject_oversize_and_preserve_empt
             .value(0),
         "keep-me"
     );
+
+    let mut jsonb_cap = PostgresArrowBatchBuilder::try_new(
+        &[col("j", JSONB_OID, Format::Binary, -1)],
+        &catalog,
+        8,
+        16,
+    )
+    .unwrap();
+    let mut oversize_jsonb = vec![0x01u8, b'"'];
+    oversize_jsonb.extend_from_slice(&[b'a'; 32]);
+    oversize_jsonb.push(b'"');
+    assert!(matches!(
+        jsonb_cap.append_data_row(&[Some(oversize_jsonb.as_slice())], &ctx, &catalog),
+        Err(PostgresError::Data(_))
+    ));
+    assert_eq!(jsonb_cap.buffered_rows(), 0);
+
+    let mut bytea_cap = PostgresArrowBatchBuilder::try_new(
+        &[col("b", BYTEA_OID, Format::Text, -1)],
+        &catalog,
+        8,
+        8,
+    )
+    .unwrap();
+    assert!(matches!(
+        bytea_cap.append_data_row(&[Some(b"\\x001122334455667788")], &ctx, &catalog),
+        Err(PostgresError::Data(_))
+    ));
+    assert!(matches!(
+        bytea_cap.append_data_row(
+            &[Some(
+                b"\\000\\001\\002\\003\\004\\005\\006\\007\\010".as_slice()
+            )],
+            &ctx,
+            &catalog
+        ),
+        Err(PostgresError::Data(_))
+    ));
+    assert!(
+        bytea_cap
+            .append_data_row(
+                &[Some(b"\\000\\001\\002\\003\\004\\005\\006\\007".as_slice())],
+                &ctx,
+                &catalog,
+            )
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(bytea_cap.buffered_rows(), 1);
 }
 
 #[test]
@@ -2034,17 +2097,62 @@ fn nested_decodes_catalog_regproc_xid_cid_xml_and_unknown_across_arrays_composit
         delimiter: b',',
     });
 
+    catalog.insert_custom_type(TypeInfo {
+        oid: 50_201,
+        schema: "public".to_string(),
+        name: "bin_sys_meta_t".to_string(),
+        kind: TypeKind::Composite {
+            fields: vec![
+                CompositeField {
+                    name: "tx".to_string(),
+                    type_oid: XID_OID,
+                    type_modifier: -1,
+                },
+                CompositeField {
+                    name: "cmd".to_string(),
+                    type_oid: CID_OID,
+                    type_modifier: -1,
+                },
+                CompositeField {
+                    name: "doc".to_string(),
+                    type_oid: XML_OID,
+                    type_modifier: -1,
+                },
+                CompositeField {
+                    name: "lit".to_string(),
+                    type_oid: UNKNOWN_OID,
+                    type_modifier: -1,
+                },
+            ],
+        },
+        delimiter: b',',
+    });
+    catalog.insert_custom_type(TypeInfo {
+        oid: 50_202,
+        schema: "public".to_string(),
+        name: "regproc_dom_t".to_string(),
+        kind: TypeKind::Domain {
+            base_oid: REGPROC_OID,
+        },
+        delimiter: b',',
+    });
+
+    for oid in [REGPROC_OID, REGPROC_ARRAY_OID, 50_200, 50_202] {
+        assert_eq!(
+            format_for_oid_with_catalog(oid, &catalog),
+            Format::Text,
+            "OID {oid} must negotiate text format to preserve cold/warm and Portal parity"
+        );
+    }
     for oid in [
-        REGPROC_OID,
         XID_OID,
         CID_OID,
         XML_OID,
         UNKNOWN_OID,
-        REGPROC_ARRAY_OID,
         XID_ARRAY_OID,
         CID_ARRAY_OID,
         XML_ARRAY_OID,
-        50_200,
+        50_201,
     ] {
         assert_eq!(
             format_for_oid_with_catalog(oid, &catalog),
@@ -2054,10 +2162,24 @@ fn nested_decodes_catalog_regproc_xid_cid_xml_and_unknown_across_arrays_composit
     }
 
     let ctx = CodecContext::default();
+    let regproc_param_fmt = format_for_oid_with_catalog(REGPROC_OID, &catalog);
+    let mut param_buf = BytesMut::new();
+    assert!(
+        encode_value_with_catalog(
+            &PgValue::Text("pg_catalog.max".to_string()),
+            REGPROC_OID,
+            regproc_param_fmt,
+            &mut param_buf,
+            &ctx,
+            &catalog,
+        )
+        .unwrap()
+    );
+    assert_eq!(param_buf.as_ref(), b"pg_catalog.max");
     assert_eq!(
         decode_value_with_catalog(
             REGPROC_OID,
-            Format::Text,
+            regproc_param_fmt,
             Some(b"pg_catalog.max"),
             &ctx,
             &catalog,
@@ -2069,15 +2191,107 @@ fn nested_decodes_catalog_regproc_xid_cid_xml_and_unknown_across_arrays_composit
         decode_value_with_catalog(REGPROC_OID, Format::Text, Some(b"-"), &ctx, &catalog).unwrap(),
         PgValue::Text("-".to_string())
     );
-    assert!(matches!(
-        PostgresArrowBatchBuilder::try_new(
-            &[col("p", REGPROC_OID, Format::Text, -1)],
+
+    let text_cols = vec![
+        col("proc_txt", REGPROC_OID, Format::Text, -1),
+        col("procs_txt", REGPROC_ARRAY_OID, Format::Text, -1),
+        col("meta_txt", 50_200, Format::Text, -1),
+    ];
+    let mut txt_builder =
+        PostgresArrowBatchBuilder::try_new(&text_cols, &catalog, 8, 1024 * 1024).unwrap();
+    txt_builder
+        .append_data_row(
+            &[
+                Some(b"pg_catalog.max".as_slice()),
+                Some(b"{int4in,-}".as_slice()),
+                Some(b"(pg_catalog.max,4294967295,42,<ok/>,raw-unknown)".as_slice()),
+            ],
+            &ctx,
             &catalog,
-            8,
-            1024,
-        ),
-        Err(PostgresError::Data(_))
-    ));
+        )
+        .unwrap();
+    let txt_portal_row = [
+        decode_value_with_catalog(
+            REGPROC_OID,
+            Format::Text,
+            Some(b"pg_catalog.max"),
+            &ctx,
+            &catalog,
+        )
+        .unwrap(),
+        decode_value_with_catalog(
+            REGPROC_ARRAY_OID,
+            Format::Text,
+            Some(b"{int4in,-}"),
+            &ctx,
+            &catalog,
+        )
+        .unwrap(),
+        decode_value_with_catalog(
+            50_200,
+            Format::Text,
+            Some(b"(pg_catalog.max,4294967295,42,<ok/>,raw-unknown)"),
+            &ctx,
+            &catalog,
+        )
+        .unwrap(),
+    ];
+    txt_builder.append_pg_row(&txt_portal_row).unwrap();
+    let txt_batch = txt_builder.finish_empty_or_tail().unwrap().unwrap();
+    assert_eq!(txt_batch.num_rows(), 2);
+    for row_idx in 0..2 {
+        assert_eq!(
+            txt_batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap()
+                .value(row_idx),
+            "pg_catalog.max"
+        );
+        let procs_txt_arr = txt_batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .unwrap()
+            .column_by_name("values")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .unwrap()
+            .value(row_idx);
+        let procs_txt_str = procs_txt_arr
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(procs_txt_str.value(0), "int4in");
+        assert_eq!(procs_txt_str.value(1), "-");
+        let meta_txt_col = txt_batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .unwrap();
+        assert_eq!(
+            meta_txt_col
+                .column_by_name("proc")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap()
+                .value(row_idx),
+            "pg_catalog.max"
+        );
+        assert_eq!(
+            meta_txt_col
+                .column_by_name("tx")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<UInt32Array>()
+                .unwrap()
+                .value(row_idx),
+            u32::MAX
+        );
+    }
 
     let columns = vec![
         col("procs", REGPROC_ARRAY_OID, Format::Binary, -1),

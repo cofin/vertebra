@@ -4,7 +4,7 @@ use bytes::{BufMut, BytesMut};
 
 use crate::codecs::{
     CodecContext, decode_value_with_catalog_at_depth, encode_value_with_catalog_at_depth,
-    format_for_oid_with_catalog,
+    supports_binary_with_catalog,
 };
 use crate::errors::PostgresError;
 use crate::result::{Format, PgValue};
@@ -358,7 +358,7 @@ pub fn encode_array_binary(
         catalog,
     )?;
 
-    if format_for_oid_with_catalog(resolved_elem_oid, catalog) != Format::Binary {
+    if !supports_binary_with_catalog(resolved_elem_oid, catalog) {
         return Err(PostgresError::Data(format!(
             "array element OID {resolved_elem_oid} does not support binary encoding"
         )));

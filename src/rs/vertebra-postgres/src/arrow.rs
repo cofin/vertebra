@@ -1,5 +1,6 @@
 //! Lossless PostgreSQL-to-Arrow schemas, bounded `RecordBatch` builders, and `VTBARROW` SHM serialization.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -256,10 +257,7 @@ fn resolve_base_type(
         OID_OID => Ok((DataType::UInt32, "oid".to_string(), "scalar")),
         REGPROC_OID => match format {
             Format::Binary => Ok((DataType::UInt32, "regproc".to_string(), "scalar")),
-            Format::Text => Err(PostgresError::Data(
-                "PostgreSQL regproc (OID 24) requires binary format (1) for lossless UInt32 Arrow projection"
-                    .to_string(),
-            )),
+            Format::Text => Ok((DataType::Utf8, "regproc".to_string(), "regproc-text")),
         },
         XID_OID => Ok((DataType::UInt32, "xid".to_string(), "scalar")),
         CID_OID => Ok((DataType::UInt32, "cid".to_string(), "scalar")),
@@ -445,11 +443,190 @@ fn resolve_arrow_field(
     Ok(Field::new(field_name, data_type, true).with_metadata(metadata))
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WireCapKind {
+    ExactWireLen,
+    BinaryJsonb,
+    TextBytea,
+    BinaryBitString,
+    TextBitString,
+    PostDecode,
+}
+
 #[derive(Clone, Debug)]
 struct ColumnWireMeta {
     type_oid: u32,
-    base_oid: u32,
     format: Format,
+    wire_cap: WireCapKind,
+}
+
+impl ColumnWireMeta {
+    fn from_column_and_field(base_oid: u32, col: &Column, field: &Field) -> Self {
+        let enc = field
+            .metadata()
+            .get(POSTGRES_FIELD_ENCODING_KEY)
+            .map(String::as_str)
+            .unwrap_or("");
+        let wire_cap = match (field.data_type(), base_oid, col.format, enc) {
+            (_, JSONB_OID, Format::Binary, _) => WireCapKind::BinaryJsonb,
+            (_, BYTEA_OID, Format::Binary, _) => WireCapKind::ExactWireLen,
+            (_, BYTEA_OID, Format::Text, _) => WireCapKind::TextBytea,
+            (_, BIT_OID | VARBIT_OID, Format::Binary, _) => WireCapKind::BinaryBitString,
+            (_, BIT_OID | VARBIT_OID, Format::Text, _) => WireCapKind::TextBitString,
+            (DataType::Utf8, _, _, enc) if enc != "numeric-decimal" => WireCapKind::ExactWireLen,
+            _ => WireCapKind::PostDecode,
+        };
+        Self {
+            type_oid: col.type_oid,
+            format: col.format,
+            wire_cap,
+        }
+    }
+}
+
+fn checked_i32_offset_sum(base: usize, add: usize, label: &str) -> Result<usize, PostgresError> {
+    match base.checked_add(add) {
+        Some(sum) if sum <= MAX_I32_OFFSET_BYTES => Ok(sum),
+        _ => Err(PostgresError::Data(format!(
+            "{label} buffer exceeds 32-bit Arrow i32 offset ceiling ({MAX_I32_OFFSET_BYTES} bytes)"
+        ))),
+    }
+}
+
+struct TemporalMetaBuilders {
+    fields: Fields,
+    nulls: NullBufferBuilder,
+    kind: Int8Builder,
+    wire_text: StringBuilder,
+    date_style: StringBuilder,
+    time_zone: StringBuilder,
+    wt_bytes: usize,
+    ds_bytes: usize,
+    tz_bytes: usize,
+}
+
+impl TemporalMetaBuilders {
+    fn with_capacity(fields: Fields, row_cap: usize) -> Self {
+        Self {
+            fields,
+            nulls: NullBufferBuilder::new(row_cap),
+            kind: Int8Builder::with_capacity(row_cap),
+            wire_text: StringBuilder::with_capacity(row_cap, 0),
+            date_style: StringBuilder::with_capacity(row_cap, 0),
+            time_zone: StringBuilder::with_capacity(row_cap, 0),
+            wt_bytes: 0,
+            ds_bytes: 0,
+            tz_bytes: 0,
+        }
+    }
+
+    fn prepare_wire_text<T>(
+        base_overhead: usize,
+        wire_text: &str,
+        date_style: &str,
+        time_zone: &str,
+        max_bytes: usize,
+        labels: (&'static str, &'static str, &'static str),
+    ) -> Result<(PreparedTemporalValue<T>, usize), PostgresError> {
+        let bytes = base_overhead
+            .saturating_add(wire_text.len())
+            .saturating_add(date_style.len())
+            .saturating_add(time_zone.len());
+        if bytes > max_bytes {
+            return Err(PostgresError::Data(format!(
+                "{} value of {bytes} bytes exceeds Arrow batch max_bytes ({max_bytes})",
+                labels.0
+            )));
+        }
+        checked_i32_offset_sum(0, wire_text.len(), labels.0)?;
+        checked_i32_offset_sum(0, date_style.len(), labels.1)?;
+        checked_i32_offset_sum(0, time_zone.len(), labels.2)?;
+        Ok((
+            PreparedTemporalValue::WireText {
+                wire_text: wire_text.to_owned(),
+                date_style: date_style.to_owned(),
+                time_zone: time_zone.to_owned(),
+            },
+            bytes,
+        ))
+    }
+
+    fn validate_wire_text_offsets<'a, T: 'a>(
+        &self,
+        temporals: impl Iterator<Item = &'a PreparedTemporalValue<T>>,
+        reset_current: bool,
+        labels: (&'static str, &'static str, &'static str),
+    ) -> Result<(), PostgresError> {
+        let mut wt = if reset_current { 0 } else { self.wt_bytes };
+        let mut ds = if reset_current { 0 } else { self.ds_bytes };
+        let mut tz = if reset_current { 0 } else { self.tz_bytes };
+        for tv in temporals {
+            if let PreparedTemporalValue::WireText {
+                wire_text,
+                date_style,
+                time_zone,
+            } = tv
+            {
+                wt = checked_i32_offset_sum(wt, wire_text.len(), labels.0)?;
+                ds = checked_i32_offset_sum(ds, date_style.len(), labels.1)?;
+                tz = checked_i32_offset_sum(tz, time_zone.len(), labels.2)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn append_null(&mut self) {
+        self.nulls.append_null();
+        self.kind.append_null();
+        self.wire_text.append_null();
+        self.date_style.append_null();
+        self.time_zone.append_null();
+    }
+
+    fn append_epoch(&mut self, kind: i8) {
+        self.nulls.append_non_null();
+        self.kind.append_value(kind);
+        self.wire_text.append_null();
+        self.date_style.append_null();
+        self.time_zone.append_null();
+    }
+
+    fn append_wire_text(&mut self, wt: &str, ds: &str, tz: &str) {
+        self.nulls.append_non_null();
+        self.kind.append_value(2);
+        self.wt_bytes += wt.len();
+        self.ds_bytes += ds.len();
+        self.tz_bytes += tz.len();
+        self.wire_text.append_value(wt);
+        self.date_style.append_value(ds);
+        self.time_zone.append_value(tz);
+    }
+
+    fn finish_struct(
+        &mut self,
+        value_array: ArrayRef,
+        row_count: usize,
+        label: &str,
+    ) -> Result<ArrayRef, PostgresError> {
+        self.wt_bytes = 0;
+        self.ds_bytes = 0;
+        self.tz_bytes = 0;
+        let children: Vec<ArrayRef> = vec![
+            Arc::new(self.kind.finish()),
+            value_array,
+            Arc::new(self.wire_text.finish()),
+            Arc::new(self.date_style.finish()),
+            Arc::new(self.time_zone.finish()),
+        ];
+        let arr = StructArray::try_new_with_length(
+            self.fields.clone(),
+            children,
+            self.nulls.finish(),
+            row_count,
+        )
+        .map_err(|e| PostgresError::Data(format!("failed to build {label} StructArray: {e}")))?;
+        Ok(Arc::new(arr))
+    }
 }
 
 enum PreparedTemporalValue<T> {
@@ -522,29 +699,13 @@ enum ArrowColumnBuilder {
         row_cap: usize,
     },
     Date {
-        fields: Fields,
-        nulls: NullBufferBuilder,
-        kind: Int8Builder,
+        meta: TemporalMetaBuilders,
         value: Int32Builder,
-        wire_text: StringBuilder,
-        date_style: StringBuilder,
-        time_zone: StringBuilder,
-        wt_bytes: usize,
-        ds_bytes: usize,
-        tz_bytes: usize,
     },
     Timestamp {
-        fields: Fields,
+        meta: TemporalMetaBuilders,
         expected_kind: TemporalKind,
-        nulls: NullBufferBuilder,
-        kind: Int8Builder,
         value: Int64Builder,
-        wire_text: StringBuilder,
-        date_style: StringBuilder,
-        time_zone: StringBuilder,
-        wt_bytes: usize,
-        ds_bytes: usize,
-        tz_bytes: usize,
     },
     Interval {
         fields: Fields,
@@ -744,33 +905,17 @@ impl ArrowColumnBuilder {
                 row_cap,
             }),
             (DataType::Struct(fields), "pg-date") => Ok(Self::Date {
-                fields: fields.clone(),
-                nulls: NullBufferBuilder::new(row_cap),
-                kind: Int8Builder::with_capacity(row_cap),
+                meta: TemporalMetaBuilders::with_capacity(fields.clone(), row_cap),
                 value: Int32Builder::with_capacity(row_cap),
-                wire_text: StringBuilder::with_capacity(row_cap, 0),
-                date_style: StringBuilder::with_capacity(row_cap, 0),
-                time_zone: StringBuilder::with_capacity(row_cap, 0),
-                wt_bytes: 0,
-                ds_bytes: 0,
-                tz_bytes: 0,
             }),
             (DataType::Struct(fields), "pg-timestamp" | "pg-timestamptz") => Ok(Self::Timestamp {
-                fields: fields.clone(),
+                meta: TemporalMetaBuilders::with_capacity(fields.clone(), row_cap),
                 expected_kind: if encoding == "pg-timestamptz" {
                     TemporalKind::TimestampTz
                 } else {
                     TemporalKind::Timestamp
                 },
-                nulls: NullBufferBuilder::new(row_cap),
-                kind: Int8Builder::with_capacity(row_cap),
                 value: Int64Builder::with_capacity(row_cap),
-                wire_text: StringBuilder::with_capacity(row_cap, 0),
-                date_style: StringBuilder::with_capacity(row_cap, 0),
-                time_zone: StringBuilder::with_capacity(row_cap, 0),
-                wt_bytes: 0,
-                ds_bytes: 0,
-                tz_bytes: 0,
             }),
             (DataType::Struct(fields), "pg-interval") => Ok(Self::Interval {
                 fields: fields.clone(),
@@ -918,16 +1063,6 @@ impl ArrowColumnBuilder {
             }
         };
 
-        let check_i32_offset = |add: usize, label: &str| -> Result<(), PostgresError> {
-            if add <= MAX_I32_OFFSET_BYTES {
-                Ok(())
-            } else {
-                Err(PostgresError::Data(format!(
-                    "{label} buffer exceeds 32-bit Arrow i32 offset ceiling ({MAX_I32_OFFSET_BYTES} bytes)"
-                )))
-            }
-        };
-
         match self {
             Self::Boolean(_) => match val {
                 PgValue::Bool(v) => Ok((PreparedArrowCell::Bool(*v), check_single_cap(1, "bool")?)),
@@ -1057,14 +1192,14 @@ impl ArrowColumnBuilder {
                         )));
                     }
                 };
-                check_i32_offset(text.len(), "Utf8")?;
+                checked_i32_offset_sum(0, text.len(), "Utf8")?;
                 let len = text.len();
                 Ok((PreparedArrowCell::Utf8(text), len))
             }
             Self::Binary { .. } => match val {
                 PgValue::Bytes(raw) => {
                     check_single_cap(raw.len(), "bytea")?;
-                    check_i32_offset(raw.len(), "Binary")?;
+                    checked_i32_offset_sum(0, raw.len(), "Binary")?;
                     Ok((PreparedArrowCell::Binary(raw.clone()), raw.len()))
                 }
                 other => Err(PostgresError::Data(format!(
@@ -1106,22 +1241,15 @@ impl ArrowColumnBuilder {
                     date_style,
                     time_zone,
                 } => {
-                    let bytes = 5usize
-                        .saturating_add(wire_text.len())
-                        .saturating_add(date_style.len())
-                        .saturating_add(time_zone.len());
-                    check_single_cap(bytes, "date wire_text")?;
-                    check_i32_offset(wire_text.len(), "date wire_text")?;
-                    check_i32_offset(date_style.len(), "date date_style")?;
-                    check_i32_offset(time_zone.len(), "date time_zone")?;
-                    Ok((
-                        PreparedArrowCell::Date(PreparedTemporalValue::WireText {
-                            wire_text: wire_text.clone(),
-                            date_style: date_style.clone(),
-                            time_zone: time_zone.clone(),
-                        }),
-                        bytes,
-                    ))
+                    let (tv, bytes) = TemporalMetaBuilders::prepare_wire_text(
+                        5,
+                        wire_text,
+                        date_style,
+                        time_zone,
+                        max_bytes,
+                        ("date wire_text", "date date_style", "date time_zone"),
+                    )?;
+                    Ok((PreparedArrowCell::Date(tv), bytes))
                 }
                 other => Err(PostgresError::Data(format!(
                     "expected PgValue::Date or Date TemporalText for pg-date column, got {}",
@@ -1156,22 +1284,19 @@ impl ArrowColumnBuilder {
                         time_zone,
                     },
                 ) if exp == *kind => {
-                    let bytes = 9usize
-                        .saturating_add(wire_text.len())
-                        .saturating_add(date_style.len())
-                        .saturating_add(time_zone.len());
-                    check_single_cap(bytes, "timestamp wire_text")?;
-                    check_i32_offset(wire_text.len(), "timestamp wire_text")?;
-                    check_i32_offset(date_style.len(), "timestamp date_style")?;
-                    check_i32_offset(time_zone.len(), "timestamp time_zone")?;
-                    Ok((
-                        PreparedArrowCell::Timestamp(PreparedTemporalValue::WireText {
-                            wire_text: wire_text.clone(),
-                            date_style: date_style.clone(),
-                            time_zone: time_zone.clone(),
-                        }),
-                        bytes,
-                    ))
+                    let (tv, bytes) = TemporalMetaBuilders::prepare_wire_text(
+                        9,
+                        wire_text,
+                        date_style,
+                        time_zone,
+                        max_bytes,
+                        (
+                            "timestamp wire_text",
+                            "timestamp date_style",
+                            "timestamp time_zone",
+                        ),
+                    )?;
+                    Ok((PreparedArrowCell::Timestamp(tv), bytes))
                 }
                 (_, other) => Err(PostgresError::Data(format!(
                     "expected matching Timestamp/TemporalText ({expected_kind:?}), got {}",
@@ -1309,7 +1434,7 @@ impl ArrowColumnBuilder {
                             values.len()
                         )));
                     }
-                    check_i32_offset(values.len(), "pg-array element list")?;
+                    checked_i32_offset_sum(0, values.len(), "pg-array element list")?;
 
                     let mut total_bytes =
                         dimensions.len().saturating_mul(8).min(MAX_I32_OFFSET_BYTES);
@@ -1390,21 +1515,12 @@ impl ArrowColumnBuilder {
         cells: &[&PreparedArrowCell],
         reset_current: bool,
     ) -> Result<(), PostgresError> {
-        let check_sum = |base: usize, add: usize, label: &str| -> Result<usize, PostgresError> {
-            match base.checked_add(add) {
-                Some(sum) if sum <= MAX_I32_OFFSET_BYTES => Ok(sum),
-                _ => Err(PostgresError::Data(format!(
-                    "{label} buffer exceeds 32-bit Arrow i32 offset ceiling ({MAX_I32_OFFSET_BYTES} bytes)"
-                ))),
-            }
-        };
-
         match self {
             Self::Utf8 { offset_bytes, .. } => {
                 let mut cur = if reset_current { 0 } else { *offset_bytes };
                 for c in cells {
                     if let PreparedArrowCell::Utf8(s) = c {
-                        cur = check_sum(cur, s.len(), "Utf8")?;
+                        cur = checked_i32_offset_sum(cur, s.len(), "Utf8")?;
                     }
                 }
                 Ok(())
@@ -1413,62 +1529,36 @@ impl ArrowColumnBuilder {
                 let mut cur = if reset_current { 0 } else { *offset_bytes };
                 for c in cells {
                     if let PreparedArrowCell::Binary(b) = c {
-                        cur = check_sum(cur, b.len(), "Binary")?;
+                        cur = checked_i32_offset_sum(cur, b.len(), "Binary")?;
                     }
                 }
                 Ok(())
             }
-            Self::Date {
-                wt_bytes,
-                ds_bytes,
-                tz_bytes,
-                ..
-            } => {
-                let mut wt = if reset_current { 0 } else { *wt_bytes };
-                let mut ds = if reset_current { 0 } else { *ds_bytes };
-                let mut tz = if reset_current { 0 } else { *tz_bytes };
-                for c in cells {
-                    if let PreparedArrowCell::Date(PreparedTemporalValue::WireText {
-                        wire_text,
-                        date_style,
-                        time_zone,
-                    }) = c
-                    {
-                        wt = check_sum(wt, wire_text.len(), "date wire_text")?;
-                        ds = check_sum(ds, date_style.len(), "date date_style")?;
-                        tz = check_sum(tz, time_zone.len(), "date time_zone")?;
-                    }
-                }
-                Ok(())
-            }
-            Self::Timestamp {
-                wt_bytes,
-                ds_bytes,
-                tz_bytes,
-                ..
-            } => {
-                let mut wt = if reset_current { 0 } else { *wt_bytes };
-                let mut ds = if reset_current { 0 } else { *ds_bytes };
-                let mut tz = if reset_current { 0 } else { *tz_bytes };
-                for c in cells {
-                    if let PreparedArrowCell::Timestamp(PreparedTemporalValue::WireText {
-                        wire_text,
-                        date_style,
-                        time_zone,
-                    }) = c
-                    {
-                        wt = check_sum(wt, wire_text.len(), "timestamp wire_text")?;
-                        ds = check_sum(ds, date_style.len(), "timestamp date_style")?;
-                        tz = check_sum(tz, time_zone.len(), "timestamp time_zone")?;
-                    }
-                }
-                Ok(())
-            }
+            Self::Date { meta, .. } => meta.validate_wire_text_offsets(
+                cells.iter().filter_map(|c| match c {
+                    PreparedArrowCell::Date(tv) => Some(tv),
+                    _ => None,
+                }),
+                reset_current,
+                ("date wire_text", "date date_style", "date time_zone"),
+            ),
+            Self::Timestamp { meta, .. } => meta.validate_wire_text_offsets(
+                cells.iter().filter_map(|c| match c {
+                    PreparedArrowCell::Timestamp(tv) => Some(tv),
+                    _ => None,
+                }),
+                reset_current,
+                (
+                    "timestamp wire_text",
+                    "timestamp date_style",
+                    "timestamp time_zone",
+                ),
+            ),
             Self::BitString { bytes_offset, .. } => {
                 let mut cur = if reset_current { 0 } else { *bytes_offset };
                 for c in cells {
                     if let PreparedArrowCell::BitString { data, .. } = c {
-                        cur = check_sum(cur, data.len(), "bitstring bytes")?;
+                        cur = checked_i32_offset_sum(cur, data.len(), "bitstring bytes")?;
                     }
                 }
                 Ok(())
@@ -1477,7 +1567,7 @@ impl ArrowColumnBuilder {
                 let mut cur = if reset_current { 0 } else { *elem_count };
                 for c in cells {
                     if let PreparedArrowCell::Vector(v) = c {
-                        cur = check_sum(cur, v.len(), "dynamic vector list")?;
+                        cur = checked_i32_offset_sum(cur, v.len(), "dynamic vector list")?;
                     }
                 }
                 Ok(())
@@ -1500,9 +1590,13 @@ impl ArrowColumnBuilder {
                         values,
                     } = c
                     {
-                        dc = check_sum(dc, dimensions.len(), "pg-array dimensions")?;
-                        lc = check_sum(lc, lower_bounds.len(), "pg-array lower_bounds")?;
-                        vc = check_sum(vc, values.len(), "pg-array values")?;
+                        dc = checked_i32_offset_sum(dc, dimensions.len(), "pg-array dimensions")?;
+                        lc = checked_i32_offset_sum(
+                            lc,
+                            lower_bounds.len(),
+                            "pg-array lower_bounds",
+                        )?;
+                        vc = checked_i32_offset_sum(vc, values.len(), "pg-array values")?;
                         flat_refs.extend(values.iter());
                     }
                 }
@@ -1584,21 +1678,7 @@ impl ArrowColumnBuilder {
                     .expect("validated 16-byte UUID matches FixedSizeBinaryBuilder(16)");
             }
 
-            (
-                Self::Date {
-                    nulls,
-                    kind,
-                    value,
-                    wire_text,
-                    date_style,
-                    time_zone,
-                    wt_bytes,
-                    ds_bytes,
-                    tz_bytes,
-                    ..
-                },
-                cell,
-            ) => {
+            (Self::Date { meta, value }, cell) => {
                 let tv = match cell {
                     PreparedArrowCell::Null => PreparedTemporalValue::Null,
                     PreparedArrowCell::Date(t) => t,
@@ -1606,57 +1686,28 @@ impl ArrowColumnBuilder {
                 };
                 match tv {
                     PreparedTemporalValue::Null => {
-                        nulls.append_null();
-                        kind.append_null();
+                        meta.append_null();
                         value.append_null();
-                        wire_text.append_null();
-                        date_style.append_null();
-                        time_zone.append_null();
                     }
                     PreparedTemporalValue::Epoch {
                         kind: k,
                         value: raw,
                     } => {
-                        nulls.append_non_null();
-                        kind.append_value(k);
+                        meta.append_epoch(k);
                         value.append_value(raw);
-                        wire_text.append_null();
-                        date_style.append_null();
-                        time_zone.append_null();
                     }
                     PreparedTemporalValue::WireText {
                         wire_text: wt,
                         date_style: ds,
                         time_zone: tz,
                     } => {
-                        nulls.append_non_null();
-                        kind.append_value(2);
                         value.append_null();
-                        *wt_bytes += wt.len();
-                        *ds_bytes += ds.len();
-                        *tz_bytes += tz.len();
-                        wire_text.append_value(&wt);
-                        date_style.append_value(&ds);
-                        time_zone.append_value(&tz);
+                        meta.append_wire_text(&wt, &ds, &tz);
                     }
                 }
             }
 
-            (
-                Self::Timestamp {
-                    nulls,
-                    kind,
-                    value,
-                    wire_text,
-                    date_style,
-                    time_zone,
-                    wt_bytes,
-                    ds_bytes,
-                    tz_bytes,
-                    ..
-                },
-                cell,
-            ) => {
+            (Self::Timestamp { meta, value, .. }, cell) => {
                 let tv = match cell {
                     PreparedArrowCell::Null => PreparedTemporalValue::Null,
                     PreparedArrowCell::Timestamp(t) => t,
@@ -1664,38 +1715,23 @@ impl ArrowColumnBuilder {
                 };
                 match tv {
                     PreparedTemporalValue::Null => {
-                        nulls.append_null();
-                        kind.append_null();
+                        meta.append_null();
                         value.append_null();
-                        wire_text.append_null();
-                        date_style.append_null();
-                        time_zone.append_null();
                     }
                     PreparedTemporalValue::Epoch {
                         kind: k,
                         value: raw,
                     } => {
-                        nulls.append_non_null();
-                        kind.append_value(k);
+                        meta.append_epoch(k);
                         value.append_value(raw);
-                        wire_text.append_null();
-                        date_style.append_null();
-                        time_zone.append_null();
                     }
                     PreparedTemporalValue::WireText {
                         wire_text: wt,
                         date_style: ds,
                         time_zone: tz,
                     } => {
-                        nulls.append_non_null();
-                        kind.append_value(2);
                         value.append_null();
-                        *wt_bytes += wt.len();
-                        *ds_bytes += ds.len();
-                        *tz_bytes += tz.len();
-                        wire_text.append_value(&wt);
-                        date_style.append_value(&ds);
-                        time_zone.append_value(&tz);
+                        meta.append_wire_text(&wt, &ds, &tz);
                     }
                 }
             }
@@ -1933,72 +1969,11 @@ impl ArrowColumnBuilder {
                 let finished = std::mem::replace(builder, fresh).finish();
                 Ok(Arc::new(finished))
             }
-            Self::Date {
-                fields,
-                nulls,
-                kind,
-                value,
-                wire_text,
-                date_style,
-                time_zone,
-                wt_bytes,
-                ds_bytes,
-                tz_bytes,
-            } => {
-                *wt_bytes = 0;
-                *ds_bytes = 0;
-                *tz_bytes = 0;
-                let children: Vec<ArrayRef> = vec![
-                    Arc::new(kind.finish()),
-                    Arc::new(value.finish()),
-                    Arc::new(wire_text.finish()),
-                    Arc::new(date_style.finish()),
-                    Arc::new(time_zone.finish()),
-                ];
-                let arr = StructArray::try_new_with_length(
-                    fields.clone(),
-                    children,
-                    nulls.finish(),
-                    row_count,
-                )
-                .map_err(|e| {
-                    PostgresError::Data(format!("failed to build date StructArray: {e}"))
-                })?;
-                Ok(Arc::new(arr))
+            Self::Date { meta, value } => {
+                meta.finish_struct(Arc::new(value.finish()), row_count, "date")
             }
-            Self::Timestamp {
-                fields,
-                nulls,
-                kind,
-                value,
-                wire_text,
-                date_style,
-                time_zone,
-                wt_bytes,
-                ds_bytes,
-                tz_bytes,
-                ..
-            } => {
-                *wt_bytes = 0;
-                *ds_bytes = 0;
-                *tz_bytes = 0;
-                let children: Vec<ArrayRef> = vec![
-                    Arc::new(kind.finish()),
-                    Arc::new(value.finish()),
-                    Arc::new(wire_text.finish()),
-                    Arc::new(date_style.finish()),
-                    Arc::new(time_zone.finish()),
-                ];
-                let arr = StructArray::try_new_with_length(
-                    fields.clone(),
-                    children,
-                    nulls.finish(),
-                    row_count,
-                )
-                .map_err(|e| {
-                    PostgresError::Data(format!("failed to build timestamp StructArray: {e}"))
-                })?;
-                Ok(Arc::new(arr))
+            Self::Timestamp { meta, value, .. } => {
+                meta.finish_struct(Arc::new(value.finish()), row_count, "timestamp")
             }
             Self::Interval {
                 fields,
@@ -2201,6 +2176,27 @@ fn pg_value_tag(val: &PgValue) -> &'static str {
     }
 }
 
+fn wire_payload_exceeds_max_bytes(wire_cap: WireCapKind, bytes: &[u8], max_bytes: usize) -> bool {
+    match wire_cap {
+        WireCapKind::ExactWireLen => bytes.len() > max_bytes,
+        WireCapKind::BinaryJsonb => bytes.len().saturating_sub(1) > max_bytes,
+        WireCapKind::TextBytea => {
+            if let Some(hex_body) = bytes.strip_prefix(b"\\x") {
+                let hex_digits = hex_body
+                    .iter()
+                    .filter(|b| !matches!(b, b' ' | b'\t' | b'\r' | b'\n'))
+                    .count();
+                hex_digits / 2 > max_bytes
+            } else {
+                bytes.len().div_ceil(4) > max_bytes
+            }
+        }
+        WireCapKind::BinaryBitString => bytes.len() >= 4 && bytes.len() > max_bytes,
+        WireCapKind::TextBitString => bytes.len().div_ceil(8).saturating_add(4) > max_bytes,
+        WireCapKind::PostDecode => false,
+    }
+}
+
 fn decode_wire_cell_for_arrow(
     wire: &ColumnWireMeta,
     raw: Option<&[u8]>,
@@ -2211,31 +2207,13 @@ fn decode_wire_cell_for_arrow(
     let Some(bytes) = raw else {
         return Ok(PgValue::Null);
     };
-    if matches!(
-        wire.base_oid,
-        TEXT_OID | VARCHAR_OID | BPCHAR_OID | NAME_OID | XML_OID | UNKNOWN_OID | BYTEA_OID
-    ) && (wire.format == Format::Binary || wire.base_oid != BYTEA_OID)
-        && bytes.len() > max_bytes
-    {
+    if wire_payload_exceeds_max_bytes(wire.wire_cap, bytes, max_bytes) {
         return Err(PostgresError::Data(format!(
             "wire field of {} bytes exceeds Arrow batch max_bytes ({max_bytes})",
             bytes.len()
         )));
     }
-    if bytes.len() > ctx.max_field_bytes {
-        return Err(PostgresError::Data(format!(
-            "field length {} exceeds max_field_bytes {}",
-            bytes.len(),
-            ctx.max_field_bytes
-        )));
-    }
-    if ctx.max_nesting_depth > MAX_ARROW_NESTING_DEPTH {
-        let mut clamped = ctx.clone();
-        clamped.max_nesting_depth = MAX_ARROW_NESTING_DEPTH;
-        decode_value_with_catalog(wire.type_oid, wire.format, Some(bytes), &clamped, catalog)
-    } else {
-        decode_value_with_catalog(wire.type_oid, wire.format, Some(bytes), ctx, catalog)
-    }
+    decode_value_with_catalog(wire.type_oid, wire.format, Some(bytes), ctx, catalog)
 }
 
 /// Bounded pure-Rust PostgreSQL `RecordBatch` builder with zero Python row materialization.
@@ -2275,11 +2253,11 @@ impl PostgresArrowBatchBuilder {
         let mut builders = Vec::with_capacity(columns.len());
         for (col, field) in columns.iter().zip(schema.fields().iter()) {
             let base_oid = catalog.resolve_domain_base(col.type_oid)?;
-            wire_columns.push(ColumnWireMeta {
-                type_oid: col.type_oid,
+            wire_columns.push(ColumnWireMeta::from_column_and_field(
                 base_oid,
-                format: col.format,
-            });
+                col,
+                field.as_ref(),
+            ));
             builders.push(ArrowColumnBuilder::from_field(field.as_ref(), row_cap, 0)?);
         }
 
@@ -2342,12 +2320,19 @@ impl PostgresArrowBatchBuilder {
                 self.wire_columns.len()
             )));
         }
+        let clamped_ctx = if ctx.max_nesting_depth > MAX_ARROW_NESTING_DEPTH {
+            let mut c = ctx.clone();
+            c.max_nesting_depth = MAX_ARROW_NESTING_DEPTH;
+            Cow::Owned(c)
+        } else {
+            Cow::Borrowed(ctx)
+        };
         let mut decoded = Vec::with_capacity(fields.len());
         for (wire, raw) in self.wire_columns.iter().zip(fields.iter()) {
             decoded.push(decode_wire_cell_for_arrow(
                 wire,
                 *raw,
-                ctx,
+                clamped_ctx.as_ref(),
                 catalog,
                 self.max_bytes,
             )?);
