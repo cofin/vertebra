@@ -190,30 +190,10 @@ class SyncMSSQLDriver(SyncDatabaseDriver[MSSQLConfig]):
         self._in_transaction = False
         self._client.close()
 
-    def begin(self) -> None:
-        """Begin an explicit SQL Server transaction; raises ``MissingDependencyError`` without ``vertebra._mssql``."""
-        _require_mssql_native()
-        super().begin()
-
-    def commit(self) -> None:
-        """Commit the active SQL Server transaction; raises ``MissingDependencyError`` without ``vertebra._mssql``."""
-        _require_mssql_native()
-        super().commit()
-
-    def rollback(self) -> None:
-        """Roll back the active SQL Server transaction; raises ``MissingDependencyError`` without ``vertebra._mssql``."""
-        _require_mssql_native()
-        super().rollback()
-
-    def cancel(self) -> None:
-        """Cancel an in-flight SQL Server query; raises ``MissingDependencyError`` without ``vertebra._mssql``."""
-        _require_mssql_native()
-        super().cancel()
-
-    def execute_many(
+    def execute(
         self,
         sql: str,
-        parameter_sets: Sequence[Sequence[Any] | Mapping[str, Any]],
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
         **kwargs: Any,
     ) -> int:
         """Execute a DML or DDL statement and return affected row count."""
@@ -499,7 +479,7 @@ class AsyncMSSQLDriver(AsyncDatabaseDriver[MSSQLConfig]):
         self,
         config: MSSQLConfig | str | None = None,
         *,
-        dialer: SyncCloudSQLDialer | None = None,
+        dialer: AsyncCloudSQLDialer | None = None,
         broker: Any = None,
         client: AsyncMSSQLClient | Any | None = None,
         **overrides: Any,
@@ -514,9 +494,9 @@ class AsyncMSSQLDriver(AsyncDatabaseDriver[MSSQLConfig]):
         self._last_rewritten_sql: str = ""
 
     @property
-    def dialer(self) -> SyncCloudSQLDialer | None:
-        """Return the Cloud SQL dialer attached to the paired sync driver."""
-        return self._sync.dialer
+    def dialer(self) -> AsyncCloudSQLDialer | None:
+        """Return the attached asynchronous Cloud SQL dialer if present."""
+        return self._dialer
 
     @property
     def last_rewritten_sql(self) -> str:

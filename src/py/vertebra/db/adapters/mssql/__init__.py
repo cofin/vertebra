@@ -1,4 +1,6 @@
-"""SQL Server configuration, TDS packet helpers, and `@P1` placeholder rewriter; the driver requires the native `vertebra._mssql` module."""
+"""Pure-Rust-backed SQL Server (TDS 7.4) driver, `@P1` parameter rewriter, and Arrow cursor support."""
+
+from __future__ import annotations
 
 from typing import TYPE_CHECKING
 

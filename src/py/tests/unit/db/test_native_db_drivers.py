@@ -18,7 +18,6 @@ import uuid
 from collections.abc import AsyncIterator, Callable, Iterator, Mapping, Sequence
 from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
-from types import ModuleType
 from typing import TYPE_CHECKING, Any, Self, cast
 
 import pytest
@@ -2651,10 +2650,8 @@ async def test_pool_key_memory_isolation_and_provide_driver_resolution(
                 await async_drv.close()
 
 
-def test_registry_get_dialer_sync_async_caching_mssql_wiring_and_provide_driver_type_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Verify get_dialer caching, PG/MySQL/MSSQL dialer wiring with MSSQL async drivers using the sync dialer, and provide_driver dialer rejection."""
+def test_registry_get_dialer_sync_async_caching_mssql_wiring_and_provide_driver_type_error() -> None:
+    """Verify get_dialer caches sync/async dialers separately, wires PG/MySQL/MSSQL, and provide_driver rejects dialers."""
     reg = DatabaseRegistry()
     csql_cfg = CloudSQLConfig(instance_connection_name="proj:us-central1:inst")
     alloy_cfg = AlloyDBConfig(instance_uri="/projects/p/locations/us-central1/clusters/c/instances/i")
@@ -2698,22 +2695,15 @@ def test_registry_get_dialer_sync_async_caching_mssql_wiring_and_provide_driver_
     pg_async = cast("AsyncPostgreSQLDriver", reg.get_shared_driver(pg_cfg))
     my_sync = cast("SyncMySQLDriver", reg.get_shared_sync_driver(my_cfg))
     my_async = cast("AsyncMySQLDriver", reg.get_shared_driver(my_cfg))
+    ms_sync = cast("SyncMSSQLDriver", reg.get_shared_sync_driver(ms_cfg))
+    ms_async = cast("AsyncMSSQLDriver", reg.get_shared_driver(ms_cfg))
 
     assert pg_sync.dialer is sync_csql
     assert pg_async.dialer is async_csql
     assert my_sync.dialer is sync_csql
     assert my_async.dialer is async_csql
-
-    monkeypatch.setitem(sys.modules, "vertebra._mssql", ModuleType("vertebra._mssql"))
-    reset_dependency_cache("vertebra._mssql")
-    try:
-        ms_sync = cast("SyncMSSQLDriver", reg.get_shared_sync_driver(ms_cfg))
-        ms_async = cast("AsyncMSSQLDriver", reg.get_shared_driver(ms_cfg))
-        assert ms_sync.dialer is sync_csql
-        assert ms_async.dialer is sync_csql
-        assert ms_async.sync_driver.dialer is sync_csql
-    finally:
-        reset_dependency_cache("vertebra._mssql")
+    assert ms_sync.dialer is sync_csql
+    assert ms_async.dialer is async_csql
 
     reg.register("dialer_only", csql_cfg)
     bad_targets: tuple[Any, ...] = (

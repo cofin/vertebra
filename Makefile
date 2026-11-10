@@ -244,9 +244,9 @@ mysql-wheel-check:                                  ## Build vertebra-mysql whee
 .PHONY: mssql-test
 mssql-test:                                         ## Run Rust and Python SQL Server (vertebra-mssql) tests
 	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
-	@cd src/rs && cargo test -p vertebra-mssql --locked
+	@(cd src/rs && cargo test -p vertebra-mssql --locked)
 	@uv run python -m mypy.stubtest vertebra._mssql
-	@uv run pytest src/py/tests/unit/db/test_mssql_driver.py -v
+	@uv run pytest src/py/tests/unit/db/test_mssql_driver.py src/py/tests/unit/db/test_optional_driver_wheels.py src/py/tests/integration/db/test_driver_conformance.py -k "mssql" -v
 	@echo "${OK} MSSQL tests passed"
 
 .PHONY: mssql-wheel-check

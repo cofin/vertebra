@@ -1,4 +1,6 @@
-"""SQL Server connection configuration."""
+"""SQL Server (TDS 7.4) configuration."""
+
+from __future__ import annotations
 
 from typing import Any, ClassVar, Final, Self
 from urllib.parse import parse_qsl, urlparse, urlunparse
@@ -62,7 +64,7 @@ def _validate_pem_bytes(pem: bytes | None, field_name: str) -> None:
 
 
 class MSSQLConfig(BaseDatabaseConfig, frozen=True, gc=False):
-    """Configuration for the SQL Server driver backed by the native `vertebra._mssql` module."""
+    """Configuration for the native SQL Server (TDS 7.4) driver."""
 
     dialect: ClassVar[str] = "mssql"
     dialect_tag: ClassVar[int] = MSSQL_DIALECT_TAG
@@ -257,7 +259,7 @@ class MSSQLConfig(BaseDatabaseConfig, frozen=True, gc=False):
         _, async_cls = self.resolve_driver_classes()
         broker = self.broker if self.broker is not None else getattr(registry, "_broker", None)
         dialer = (
-            registry.get_dialer(dialer_cfg, sync=True)
+            registry.get_dialer(dialer_cfg, sync=False)
             if registry is not None and (dialer_cfg := self.to_cloud_dialer_config()) is not None
             else None
         )

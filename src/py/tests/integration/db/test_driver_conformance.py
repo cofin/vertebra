@@ -93,7 +93,7 @@ from vertebra.typing import FrozenBaseStruct, MissingDependencyError, reset_depe
 from vertebra.utils.module_loader import ensure_module, import_optional
 from vertebra.utils.serializers import decode_json, encode_json
 
-_FAIL_LOUD_DRIVER_ENGINES: frozenset[str] = frozenset({"oracle", "mssql"})
+_FAIL_LOUD_DRIVER_ENGINES: frozenset[str] = frozenset({"oracle"})
 
 
 class _RollbackSentinelError(RuntimeError):
@@ -195,7 +195,9 @@ _SPANNER_TYPES_DDL = (
     ") PRIMARY KEY (id)"
 )
 
-_MSSQL_ITEMS_DDL = "CREATE TABLE vtb_conformance_items (id BIGINT PRIMARY KEY, label NVARCHAR(255) NOT NULL, amount BIGINT)"
+_MSSQL_ITEMS_DDL = (
+    "CREATE TABLE vtb_conformance_items (id BIGINT PRIMARY KEY, label NVARCHAR(255) NOT NULL, amount BIGINT)"
+)
 
 _MSSQL_TYPES_DDL = (
     "CREATE TABLE vtb_conformance_types ("
@@ -1645,6 +1647,8 @@ def test_resolve_live_config_checks_native_module_before_credentials(
     with pytest.raises(pytest.skip.Exception) as skip_exc:
         _resolve_live_config(spec, tmp_path, request)
     assert str(skip_exc.value) == "bigquery conformance requires the vertebra._vtb_conformance_absent native module"
+
+
 def test_mssql_driver_raises_missing_dependency_when_wheel_absent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

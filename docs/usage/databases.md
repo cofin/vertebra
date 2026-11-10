@@ -129,7 +129,7 @@ app = Litestar(
 
 ## Native Database Drivers & Adapters Matrix
 
-`vertebra.db.adapters` and `vertebra.extensions.sqlspec` provide synchronous and asynchronous drivers across 11 relational, analytical, cloud-native, and key-value engines (the Oracle 26ai and SQL Server rows describe configuration and codecs only):
+`vertebra.db.adapters` and `vertebra.extensions.sqlspec` provide synchronous and asynchronous drivers across 11 relational, analytical, cloud-native, and key-value engines (the Oracle 26ai row describes configuration and codecs only):
 
 | Engine | SQLSpec Adapter Config | Native Config Class | Sync / Async Drivers | Key Capabilities |
 | --- | --- | --- | --- | --- |
