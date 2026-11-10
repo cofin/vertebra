@@ -5,7 +5,7 @@ chapter_id: ch19-native-arrow-batches-and-shm
 title: "Chapter 19: Lossless Native Arrow Schemas, Bounded RecordBatches, and Zero-Copy VTBARROW SHM"
 description: Define lossless PostgreSQL-to-Arrow schemas, build bounded scalar and nested RecordBatches directly in Rust, and serialize adaptive inline or zero-copy VTBARROW shared-memory IPC streams without Python row materialization.
 status: stable
-state: active
+state: completed
 planning_status: complete
 depends_on_chapters:
   - ch18-binary-copy-streaming
@@ -13,11 +13,11 @@ replan_trigger: null
 current_task: null
 plan_revision: 5
 plan_commit: 73c8a6ff
-state_revision: 6
-last_verified_checkpoint: 98ec4527
-last_reviewed_commit: null
+state_revision: 7
+last_verified_checkpoint: 3c7a9355
+last_reviewed_commit: 3c7a9355
 created_at: "2026-11-05T00:00:00Z"
-updated_at: "2026-11-10T04:10:58Z"
+updated_at: "2026-11-10T05:10:00Z"
 generated:
   by: flow-setup
   at: "2026-11-07T05:00:00Z"
@@ -25,6 +25,12 @@ verified:
   - by: agent:flow-setup
     at: "2026-11-07T05:00:00Z"
     commit: 73c8a6ff
+  - by: agent:code-reviewer
+    at: "2026-11-10T05:10:00Z"
+    commit: 3c7a9355
+  - by: agent:quality-reviewer
+    at: "2026-11-10T05:10:00Z"
+    commit: 3c7a9355
 sources:
   - id: pg-contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md
@@ -155,7 +161,7 @@ Progress: `[0/0 files documented in ch19]` (public Arrow data-plane docs in `doc
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `plan_commit: 73c8a6ff`; `last_verified_checkpoint: 98ec4527` (`make postgres-test`, `pytest src/py/tests/unit/db -k "postgres or pg_dataplane or arrow"` -> `273 passed`, `make lint-all` -> `0`).
+- **Verified Baseline**: `plan_commit: 73c8a6ff`; chapter `state: completed` at `3c7a9355` (`last_reviewed_commit: 3c7a9355`, `last_verified_checkpoint: 3c7a9355`; `make postgres-test`, `pytest src/py/tests/unit/db -k "postgres or pg_dataplane or arrow"` -> `273 passed`, `make lint-all` -> `0`).
 - **Remaining Tasks in Chapter**: None (`4/4` completed: `t01` `8e430386`, `t02` `1102e7f6`, `t03` `2ca96efb`, `t04` `98ec4527`).
 - **Downstream Dependents**: Unblocks `ch20-arrow-copy-import-and-portals` (Arrow `COPY` import plans, streaming `COPY` input bridges, and sync/async Arrow selection and portal streams).
 

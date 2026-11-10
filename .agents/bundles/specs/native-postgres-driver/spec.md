@@ -48,12 +48,12 @@ research:
   - research/cloud-material_20261105.md
 plan_revision: 5
 plan_commit: 73c8a6ff
-state_revision: 1
-last_verified_checkpoint: 98ec4527
-last_reviewed_chapter: ch18-binary-copy-streaming
-last_reviewed_commit: 03e9b772
+state_revision: 2
+last_verified_checkpoint: 3c7a9355
+last_reviewed_chapter: ch19-native-arrow-batches-and-shm
+last_reviewed_commit: 3c7a9355
 created_at: "2026-11-03T04:05:00Z"
-updated_at: "2026-11-10T04:10:58Z"
+updated_at: "2026-11-10T05:10:00Z"
 generated:
   by: flow-revise
   at: "2026-11-07T16:40:00Z"
@@ -110,7 +110,7 @@ tags:
 - **Standalone Optional Wheel**: `src/rs/vertebra-postgres` (`vertebra._postgres`, `vertebra-core[postgres]`) owns live PostgreSQL Protocol 3.0 sockets over `postgres-protocol =0.6.12` and `rustls` (`ring`) without linking database clients into `vertebra-core` [^pg-conn-rs] [^pg-core-rs].
 - **Complete Single-PR Delivery**: Authentication (`SCRAM-SHA-256`, `SCRAM-SHA-256-PLUS`, Cloud SQL / AlloyDB Admin discovery + mTLS + IAM), lossless codecs, statement caching, single-`Sync` `pipeline()`, binary `COPY`, native `VTBARROW`, `CancelRequest`, `LISTEN`/`NOTIFY`, and `pgoutput` v1 logical replication ship together with full `psycopg`/`asyncpg` removal [^py-async-rs] [^arrow-shm-rs] [^pg-driver-py] [^sqlspec-py].
 - **Fail-Loud Baseline**: `driver-fail-loud` lands first and deletes `_in_memory_rows`, every PostgreSQL `memory://` branch, and `vertebra_db::postgres::PostgresPool`; this flow starts from that baseline and adds no memory or SHM-admission pool paths [^fail-loud-baseline].
-- **Nested Chapter Roadmap (`plan_revision: 5`)**: Decomposed into `31` dependency-ordered chapters (`ch01`–`ch31`, `111` vertical-slice tasks, each owning `<= 3` production files) anchored at `plan_commit: 73c8a6ff`; `19/31` chapters (`71/111` tasks) are completed through `ch19-native-arrow-batches-and-shm` (`98ec4527`), with `current_chapter: ch20-arrow-copy-import-and-portals` (`native-postgres-driver:ch20:t01`).
+- **Nested Chapter Roadmap (`plan_revision: 5`)**: Decomposed into `31` dependency-ordered chapters (`ch01`–`ch31`, `111` vertical-slice tasks, each owning `<= 3` production files) anchored at `plan_commit: 73c8a6ff`; `19/31` chapters (`71/111` tasks) are completed through `ch19-native-arrow-batches-and-shm` (`3c7a9355`), with `current_chapter: ch20-arrow-copy-import-and-portals` (`native-postgres-driver:ch20:t01`).
 <!-- truth: end -->
 
 ## 1. Specification, Context & Provenance
@@ -307,7 +307,7 @@ Every worksheet (`111` total across `31` chapters) executes in one bounded invoc
 - [x] [94caf47a] ch16-pipeline-scope-and-cancellation — Delayed-Commit Pipeline Transaction Scope, Python Pipeline Contexts, and Backend-Key Cancellation Retirement (chapters/ch16-pipeline-scope-and-cancellation/spec.md)
 - [x] [7db43548] ch17-command-deadlines-portals-and-tz-fallback — Native Per-Command I/O Deadlines, Python Portal Facades, and Ambiguous Timezone Text Fallback (chapters/ch17-command-deadlines-portals-and-tz-fallback/spec.md)
 - [x] [03e9b772] ch18-binary-copy-streaming — Incremental Binary COPY Framing, COPY TO Streaming, and Duplex Backpressured COPY FROM Recovery (chapters/ch18-binary-copy-streaming/spec.md)
-- [x] [98ec4527] ch19-native-arrow-batches-and-shm — Lossless PostgreSQL Arrow Schemas, Bounded Scalar/Nested Batch Builders, and IPC-to-SHM Capsules (chapters/ch19-native-arrow-batches-and-shm/spec.md)
+- [x] [3c7a9355] ch19-native-arrow-batches-and-shm — Lossless PostgreSQL Arrow Schemas, Bounded Scalar/Nested Batch Builders, and IPC-to-SHM Capsules (chapters/ch19-native-arrow-batches-and-shm/spec.md)
 - [ ] ch20-arrow-copy-import-and-portals — Arrow-to-COPY Field Import, Streaming Input Bridge, and Sync/Async Arrow Portal Cancellation (chapters/ch20-arrow-copy-import-and-portals/spec.md)
 - [ ] ch21-live-notifications — Dedicated Notification Session Pump, Reconnect-Aware Async Bridge, and Python PostgresNotificationSource (chapters/ch21-live-notifications/spec.md)
 - [ ] ch22-copyboth-and-pgoutput-decoding — Dedicated CopyBoth Logical Replication Sessions and Lossless pgoutput v1 Relation/Tuple/Transaction Decoding (chapters/ch22-copyboth-and-pgoutput-decoding/spec.md)
@@ -325,9 +325,9 @@ Every worksheet (`111` total across `31` chapters) executes in one bounded invoc
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Plan Baseline**: `plan_commit: 73c8a6ff` above `feat/driver-fail-loud` (`88c30004`) and `main @ 077a3fe9`; `state: active`, `has_chapters: true`, `plan_revision: 5`, `last_verified_checkpoint: 98ec4527`.
+- **Verified Plan Baseline**: `plan_commit: 73c8a6ff` above `feat/driver-fail-loud` (`88c30004`) and `main @ 077a3fe9`; `state: active`, `has_chapters: true`, `plan_revision: 5`, `last_verified_checkpoint: 3c7a9355`, `last_reviewed_chapter: ch19-native-arrow-batches-and-shm` (`3c7a9355`).
 - **Upstream Flow Dependency**: [`driver-fail-loud`](../../knowledge/domains/data/database-drivers-and-dialers.md) is completed at `88c30004`, deleting PostgreSQL `memory://` execution and `vertebra_db::postgres::PostgresPool` [^fail-loud-baseline].
-- **Active Chapter & Next Task**: [ch20-arrow-copy-import-and-portals](chapters/ch20-arrow-copy-import-and-portals/spec.md) (`native-postgres-driver:ch20:t01`); `19/31` chapters (`ch01`–`ch19`, `71/111` tasks) are completed through `98ec4527`, and `12/31` chapters (`ch20`–`ch31`, `40/111` tasks) remain planned.
+- **Active Chapter & Next Task**: [ch20-arrow-copy-import-and-portals](chapters/ch20-arrow-copy-import-and-portals/spec.md) (`native-postgres-driver:ch20:t01`); `19/31` chapters (`ch01`–`ch19`, `71/111` tasks) are completed through `3c7a9355`, and `12/31` chapters (`ch20`–`ch31`, `40/111` tasks) remain planned.
 - **Documentation & OKF Status**: `[0/11 files documented]`, scheduled in [ch30-user-and-domain-docs](chapters/ch30-user-and-domain-docs/spec.md) (`ch30:t01`–`ch30:t04`), followed by final complete-driver review and acceptance in [ch31-final-review-and-release-gate](chapters/ch31-final-review-and-release-gate/spec.md) (`ch31:t01`).
 - **Delivery & Next Action**: Complete single-PR delivery on `feat/native-postgres-driver`; intermediate chapters never trigger early `/flow:finish` or `/flow:archive`. Next canonical command: `/flow:implement native-postgres-driver ch20`.
 
