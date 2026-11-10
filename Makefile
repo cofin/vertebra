@@ -282,7 +282,7 @@ oracle-wheel-check:                                 ## Build vertebra-core and v
 .PHONY: postgres-test
 postgres-test:                                      ## Run vertebra-postgres Rust tests and _postgres stubtest
 	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
-	@cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --locked
+	@PYTHONPATH="$(CURDIR)/src/py" cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --locked
 	@uv run --no-sync python -m mypy.stubtest vertebra._postgres
 	@echo "${OK} PostgreSQL extension tests passed"
 

@@ -34,7 +34,7 @@ blocked_reason: null
 unblock_condition: null
 next_step: null
 last_verified_at: "2026-11-09T19:32:00Z"
-last_verified_commit: c2d362c6
+last_verified_commit: 7b67a4ed
 verification_evidence: "cargo test -p vertebra-db --features pyo3 (49 passed) + cargo test -p vertebra-postgres --test cancellation_protocol (6 passed)"
 created_at: "2026-11-05T18:25:07Z"
 updated_at: "2026-11-08T02:05:22Z"

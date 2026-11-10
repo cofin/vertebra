@@ -34,7 +34,7 @@ blocked_reason: null
 unblock_condition: null
 next_step: null
 last_verified_at: "2026-11-09T20:21:59Z"
-last_verified_commit: c87ca833
+last_verified_commit: 94caf47a
 verification_evidence: "cargo test -p vertebra-postgres --test timezone_text --test datetime_text --locked (10 passed), pytest test_postgres_native_queries.py (2 passed), and cargo check --locked passed"
 created_at: "2026-11-05T18:25:07Z"
 updated_at: "2026-11-08T02:05:22Z"
