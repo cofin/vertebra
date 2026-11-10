@@ -5,7 +5,7 @@ chapter_id: ch19-native-arrow-batches-and-shm
 title: Serialize adaptive inline and VTBARROW SHM IPC streams with validated ArrowCursor counts
 description: Implement PostgresArrowIpcWriter over a single StreamWriter<Vec<u8>> with ShmArrowStreamWriter promotion, cross-extension ShmCapsule PostgresArrowResult conversion, and validated row_count metadata on vertebra.db.arrow.ArrowCursor.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -27,17 +27,17 @@ tests:
 estimated_loc: 245
 plan_revision: 5
 plan_commit: fd571e3a
-state_revision: 0
+state_revision: 2
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-10T04:06:23Z"
+last_verified_commit: 2ca96efb
+verification_evidence: "make postgres-test -> 0; cargo clippy -p vertebra-postgres --all-targets -- -D warnings -> 0; uv run --no-sync python -m pytest src/py/tests/unit/db/test_postgres_native_data.py -k arrow_count -q -> 28 passed; uv run --no-sync python -m mypy.stubtest vertebra._postgres -> 0"
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-08T02:05:22Z"
+updated_at: "2026-11-10T04:06:23Z"
 commit: null
 sources:
   - id: pg-contracts
@@ -143,9 +143,9 @@ Implement `PostgresArrowIpcWriter` and cross-extension `ArrowOutput` conversion 
 
 ## Acceptance Criteria
 
-- [ ] `PostgresArrowIpcWriter` owns one `StreamWriter<Vec<u8>>`, promotes complete aligned IPC message groups into `ShmArrowStreamWriter::finish_unregistered()` above `threshold_rows` (or in `AlwaysShm` mode), enforces `max_result_bytes`, and emits a single EOS marker (R20).
-- [ ] `arrow_output_into_py_result` constructs frozen `PostgresArrowResult` on the Python thread using `construct_py_arrow_cursor` (`c"vertebra.ShmCapsule"`), keeping retained `memoryview` / `pyarrow` views readable after cursor release and freeing the producer mapping on final drop (R20).
-- [ ] `vertebra.db.arrow.ArrowCursor` remains engine-agnostic, supports validated keyword-only `row_count: int | None = None` for inline IPC buffers without decoding rows, and rejects negative, `bool`, or conflicting row/native counts (R20).
+- [x] `PostgresArrowIpcWriter` owns one `StreamWriter<Vec<u8>>`, promotes complete aligned IPC message groups into `ShmArrowStreamWriter::finish_unregistered()` above `threshold_rows` (or in `AlwaysShm` mode), enforces `max_result_bytes`, and emits a single EOS marker (R20).
+- [x] `arrow_output_into_py_result` constructs frozen `PostgresArrowResult` on the Python thread using `construct_py_arrow_cursor` (`c"vertebra.ShmCapsule"`), keeping retained `memoryview` / `pyarrow` views readable after cursor release and freeing the producer mapping on final drop (R20).
+- [x] `vertebra.db.arrow.ArrowCursor` remains engine-agnostic, supports validated keyword-only `row_count: int | None = None` for inline IPC buffers without decoding rows, and rejects negative, `bool`, or conflicting row/native counts (R20).
 
 ## Notes & Discoveries
 

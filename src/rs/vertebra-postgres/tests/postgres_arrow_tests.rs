@@ -9,14 +9,20 @@ use arrow_array::{
 };
 use arrow_ipc::reader::StreamReader;
 use arrow_ipc::writer::StreamWriter;
-use arrow_schema::DataType;
+use arrow_schema::{DataType, Field, Schema};
 use bytes::BytesMut;
+use pyo3::types::PyDictMethods;
 use std::io::Cursor;
+use std::sync::Arc;
+use vertebra_db::arrow_shm::{
+    ACTIVE_ARROW_SHM_REGIONS, ARROW_IPC_EOS_MARKER, SHM_ARROW_MAGIC, ShmArrowFrameHeader,
+};
 use vertebra_db::postgres::{encode_pgvector_bit, encode_pgvector_f16, encode_pgvector_f32};
 use vertebra_postgres::arrow::{
-    CID_OID, DEFAULT_ARROW_BATCH_BYTES, DEFAULT_ARROW_BATCH_ROWS, MAX_ARROW_NESTING_DEPTH,
-    POSTGRES_ARROW_VERSION_KEY, PostgresArrowBatchBuilder, PostgresArrowSchema, REGPROC_OID,
-    UNKNOWN_OID, XID_OID, XML_OID,
+    ArrowOutput, ArrowStorageMode, CID_OID, DEFAULT_ARROW_BATCH_BYTES, DEFAULT_ARROW_BATCH_ROWS,
+    DEFAULT_MAX_ARROW_RESULT_BYTES, MAX_ARROW_NESTING_DEPTH, POSTGRES_ARROW_VERSION_KEY,
+    PostgresArrowBatchBuilder, PostgresArrowIpcWriter, PostgresArrowSchema, REGPROC_OID,
+    UNKNOWN_OID, XID_OID, XML_OID, arrow_output_into_py_result, shm_output_into_py_cursor,
 };
 use vertebra_postgres::codecs::numeric::{decode_numeric_text, encode_numeric_binary};
 use vertebra_postgres::codecs::temporal::{PG_DATE_MIN_FINITE, PG_TS_MAX_FINITE, PG_TS_MIN_FINITE};
@@ -2411,4 +2417,649 @@ fn nested_validates_bit_and_varbit_lengths_and_rejects_nonzero_padding_and_overs
     assert_eq!(deep_batch.num_rows(), 2);
     assert!(deep_batch.column(0).is_valid(0));
     assert!(deep_batch.column(0).is_null(1));
+}
+
+#[cfg(target_os = "linux")]
+fn pid_pg_shm_entries() -> std::collections::BTreeSet<String> {
+    let prefix = format!("vtb-pg-{:x}-", std::process::id());
+    let Ok(entries) = std::fs::read_dir("/dev/shm") else {
+        return std::collections::BTreeSet::new();
+    };
+    entries
+        .filter_map(|e| e.ok())
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|name| name.starts_with(&prefix))
+        .collect()
+}
+
+fn assert_single_trailing_eos(stream: &[u8]) {
+    assert!(
+        stream.len() >= 16,
+        "IPC stream must hold at least schema + 8-byte EOS"
+    );
+    assert_eq!(stream.len() % 8, 0, "IPC stream must be 8-byte aligned");
+    assert_eq!(
+        &stream[stream.len() - ARROW_IPC_EOS_MARKER.len()..],
+        &ARROW_IPC_EOS_MARKER
+    );
+    assert_ne!(
+        &stream[stream.len() - 2 * ARROW_IPC_EOS_MARKER.len()
+            ..stream.len() - ARROW_IPC_EOS_MARKER.len()],
+        &ARROW_IPC_EOS_MARKER,
+        "IPC stream must emit EOS exactly once"
+    );
+}
+
+static IPC_SHM_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[test]
+fn ipc_serializes_zero_and_multibatch_unaligned_streams_and_forced_shm_growth() {
+    let _ipc_shm_guard = IPC_SHM_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    assert_eq!(DEFAULT_MAX_ARROW_RESULT_BYTES, 256 * 1024 * 1024);
+
+    let catalog = TypeCatalog::new_with_builtins();
+    let columns = vec![
+        col("s", TEXT_OID, Format::Binary, -1),
+        col("s", TEXT_OID, Format::Binary, -1),
+        col("blob", BYTEA_OID, Format::Binary, -1),
+    ];
+    let col_names = vec!["s".to_string(), "s".to_string(), "blob".to_string()];
+    let schema = PostgresArrowSchema::from_columns(&columns, &catalog).unwrap();
+
+    for (zero_batches, mode, expect_shm) in [
+        (
+            true,
+            ArrowStorageMode::Adaptive { threshold_rows: 0 },
+            false,
+        ),
+        (
+            false,
+            ArrowStorageMode::Adaptive { threshold_rows: 0 },
+            false,
+        ),
+        (true, ArrowStorageMode::AlwaysShm, true),
+        (false, ArrowStorageMode::AlwaysShm, true),
+    ] {
+        let mut writer = PostgresArrowIpcWriter::try_new(
+            Arc::clone(&schema),
+            col_names.clone(),
+            mode,
+            DEFAULT_MAX_ARROW_RESULT_BYTES,
+        )
+        .unwrap();
+        if !zero_batches {
+            let empty_batch = RecordBatch::new_empty(Arc::clone(&schema));
+            writer.write_batch(&empty_batch).unwrap();
+        }
+        let out = writer.finish().unwrap();
+        match out {
+            ArrowOutput::Inline {
+                ipc_bytes,
+                row_count,
+                columns: out_cols,
+            } => {
+                assert!(!expect_shm);
+                assert_eq!(row_count, 0);
+                assert_eq!(out_cols, col_names);
+                assert_single_trailing_eos(&ipc_bytes);
+                let reader = StreamReader::try_new(Cursor::new(&ipc_bytes), None).unwrap();
+                assert_eq!(
+                    reader
+                        .schema()
+                        .metadata()
+                        .get(POSTGRES_ARROW_VERSION_KEY)
+                        .map(String::as_str),
+                    Some("1")
+                );
+                let rdr_schema = reader.schema();
+                let field_names: Vec<&str> = rdr_schema
+                    .fields()
+                    .iter()
+                    .map(|f| f.name().as_str())
+                    .collect();
+                assert_eq!(field_names, vec!["s", "s", "blob"]);
+                let total_rows: usize = reader.map(|b| b.unwrap().num_rows()).sum();
+                assert_eq!(total_rows, 0);
+            }
+            ArrowOutput::Shm {
+                shm_name,
+                byte_len,
+                row_count,
+                columns: out_cols,
+                region,
+            } => {
+                assert!(expect_shm);
+                assert!(shm_name.starts_with("/vtb-pg-"));
+                assert!(
+                    shm_name.len() <= 31,
+                    "macOS shm_open limit violated: {shm_name}"
+                );
+                assert!(!ACTIVE_ARROW_SHM_REGIONS.contains_key(&shm_name));
+                assert_eq!(row_count, 0);
+                assert_eq!(out_cols, col_names);
+
+                // SAFETY: `region` was finalized before returning from `finish()` and is immutable.
+                let raw = unsafe { region.as_slice() };
+                let hdr = ShmArrowFrameHeader::from_slice(raw).unwrap();
+                assert_eq!(&hdr.magic, SHM_ARROW_MAGIC);
+                assert_eq!(hdr.byte_len as usize, byte_len);
+                let payload = &raw[ShmArrowFrameHeader::SIZE..ShmArrowFrameHeader::SIZE + byte_len];
+                assert_single_trailing_eos(payload);
+                let reader = StreamReader::try_new(Cursor::new(payload), None).unwrap();
+                assert_eq!(reader.schema().fields().len(), 3);
+                let total_rows: usize = reader.map(|b| b.unwrap().num_rows()).sum();
+                assert_eq!(total_rows, 0);
+            }
+        }
+    }
+
+    let big_blob: Vec<u8> = (0..(128 * 1024 + 3)).map(|i| (i % 251) as u8).collect();
+    let mut b_in =
+        PostgresArrowBatchBuilder::try_new(&columns, &catalog, 16, DEFAULT_ARROW_BATCH_BYTES)
+            .unwrap();
+
+    b_in.append_pg_row(&[
+        PgValue::Text("a".to_string()),
+        PgValue::Text("bcd".to_string()),
+        PgValue::Bytes(vec![1]),
+    ])
+    .unwrap();
+    b_in.append_pg_row(&[
+        PgValue::Text("efghijk".to_string()),
+        PgValue::Null,
+        PgValue::Bytes(vec![2, 3, 4]),
+    ])
+    .unwrap();
+    let batch1 = b_in.flush_batch().unwrap().unwrap();
+
+    b_in.append_pg_row(&[
+        PgValue::Null,
+        PgValue::Text("x".to_string()),
+        PgValue::Bytes(vec![5, 6, 7, 8, 9, 10, 11]),
+    ])
+    .unwrap();
+    let batch2 = b_in.flush_batch().unwrap().unwrap();
+
+    b_in.append_pg_row(&[
+        PgValue::Text("".to_string()),
+        PgValue::Text("zzz".to_string()),
+        PgValue::Bytes(big_blob.clone()),
+    ])
+    .unwrap();
+    b_in.append_pg_row(&[
+        PgValue::Text("tail777".to_string()),
+        PgValue::Text("ok".to_string()),
+        PgValue::Null,
+    ])
+    .unwrap();
+    let batch3 = b_in.flush_batch().unwrap().unwrap();
+
+    b_in.append_pg_row(&[
+        PgValue::Text("z".to_string()),
+        PgValue::Text("999".to_string()),
+        PgValue::Bytes(vec![0xFE, 0xED, 0xFA]),
+    ])
+    .unwrap();
+    let batch4 = b_in.flush_batch().unwrap().unwrap();
+
+    for mode in [
+        ArrowStorageMode::Adaptive { threshold_rows: 2 },
+        ArrowStorageMode::AlwaysShm,
+    ] {
+        let mut writer = PostgresArrowIpcWriter::try_new(
+            Arc::clone(&schema),
+            col_names.clone(),
+            mode,
+            DEFAULT_MAX_ARROW_RESULT_BYTES,
+        )
+        .unwrap();
+        for batch in [&batch1, &batch2, &batch3, &batch4] {
+            writer.write_batch(batch).unwrap();
+        }
+        let ArrowOutput::Shm {
+            shm_name,
+            byte_len,
+            row_count,
+            columns: out_cols,
+            region,
+        } = writer.finish().unwrap()
+        else {
+            panic!("expected VTBARROW SHM output for {mode:?}");
+        };
+        assert!(shm_name.starts_with("/vtb-pg-"));
+        assert!(shm_name.len() <= 31);
+        assert!(!ACTIVE_ARROW_SHM_REGIONS.contains_key(&shm_name));
+        assert_eq!(row_count, 6);
+        assert_eq!(out_cols, col_names);
+        assert!(byte_len > 128 * 1024);
+        assert!(region.len() >= ShmArrowFrameHeader::SIZE + byte_len);
+
+        // SAFETY: `region` holds an immutable finalized `VTBARROW` stream.
+        let raw = unsafe { region.as_slice() };
+        let hdr = ShmArrowFrameHeader::from_slice(raw).unwrap();
+        assert_eq!(&hdr.magic, SHM_ARROW_MAGIC);
+        assert_eq!(hdr.byte_len as usize, byte_len);
+        let payload = &raw[ShmArrowFrameHeader::SIZE..ShmArrowFrameHeader::SIZE + byte_len];
+        assert_single_trailing_eos(payload);
+
+        let reader = StreamReader::try_new(Cursor::new(payload), None).unwrap();
+        let decoded: Vec<RecordBatch> = reader.map(|r| r.unwrap()).collect();
+        assert_eq!(decoded.len(), 4);
+        assert_eq!(
+            decoded
+                .iter()
+                .map(RecordBatch::num_rows)
+                .collect::<Vec<_>>(),
+            vec![2, 1, 2, 1]
+        );
+        let c0_b0 = decoded[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(c0_b0.value(0), "a");
+        assert_eq!(c0_b0.value(1), "efghijk");
+        let c2_b2 = decoded[2]
+            .column(2)
+            .as_any()
+            .downcast_ref::<BinaryArray>()
+            .unwrap();
+        assert_eq!(c2_b2.value(0), big_blob.as_slice());
+        assert!(c2_b2.is_null(1));
+        let c2_b3 = decoded[3]
+            .column(2)
+            .as_any()
+            .downcast_ref::<BinaryArray>()
+            .unwrap();
+        assert_eq!(c2_b3.value(0), &[0xFE, 0xED, 0xFA]);
+    }
+
+    let dict_schema = Arc::new(Schema::new(vec![Field::new(
+        "tag",
+        DataType::Dictionary(Box::new(DataType::Int8), Box::new(DataType::Utf8)),
+        true,
+    )]));
+    let make_dict_batch = |vals: &[Option<&str>]| -> RecordBatch {
+        let mut b =
+            arrow_array::builder::StringDictionaryBuilder::<arrow_array::types::Int8Type>::new();
+        for item in vals {
+            match item {
+                Some(s) => {
+                    b.append(s).unwrap();
+                }
+                None => b.append_null(),
+            }
+        }
+        RecordBatch::try_new(Arc::clone(&dict_schema), vec![Arc::new(b.finish())]).unwrap()
+    };
+    let db1 = make_dict_batch(&[Some("alpha"), Some("beta")]);
+    let db2 = make_dict_batch(&[Some("gamma"), None, Some("alpha")]);
+    let mut dict_writer = PostgresArrowIpcWriter::try_new(
+        Arc::clone(&dict_schema),
+        vec!["tag".to_string()],
+        ArrowStorageMode::Adaptive { threshold_rows: 2 },
+        DEFAULT_MAX_ARROW_RESULT_BYTES,
+    )
+    .unwrap();
+    dict_writer.write_batch(&db1).unwrap();
+    dict_writer.write_batch(&db2).unwrap();
+    let ArrowOutput::Shm {
+        byte_len: dict_len,
+        row_count: dict_rows,
+        region: dict_reg,
+        ..
+    } = dict_writer.finish().unwrap()
+    else {
+        panic!("expected promoted SHM dictionary stream");
+    };
+    assert_eq!(dict_rows, 5);
+    // SAFETY: `dict_reg` is finalized and immutable.
+    let dict_slice = unsafe { dict_reg.as_slice() };
+    let dict_payload = &dict_slice[ShmArrowFrameHeader::SIZE..ShmArrowFrameHeader::SIZE + dict_len];
+    assert_single_trailing_eos(dict_payload);
+    let dict_batches: Vec<RecordBatch> = StreamReader::try_new(Cursor::new(dict_payload), None)
+        .unwrap()
+        .map(|b| b.unwrap())
+        .collect();
+    assert_eq!(dict_batches.len(), 2);
+    assert_eq!(dict_batches[0].num_rows() + dict_batches[1].num_rows(), 5);
+}
+
+#[test]
+fn ipc_enforces_adaptive_threshold_boundaries_max_result_bytes_and_cleans_up_shm() {
+    let _ipc_shm_guard = IPC_SHM_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    #[cfg(target_os = "linux")]
+    let baseline_shm = pid_pg_shm_entries();
+
+    let catalog = TypeCatalog::new_with_builtins();
+    let columns = vec![col("payload", TEXT_OID, Format::Binary, -1)];
+    let col_names = vec!["payload".to_string()];
+    let schema = PostgresArrowSchema::from_columns(&columns, &catalog).unwrap();
+
+    let build_text_batch = |rows: &[&str]| -> RecordBatch {
+        let mut b = PostgresArrowBatchBuilder::try_new(
+            &columns,
+            &catalog,
+            rows.len().max(1),
+            DEFAULT_ARROW_BATCH_BYTES,
+        )
+        .unwrap();
+        for s in rows {
+            if let Some(flushed) = b.append_pg_row(&[PgValue::Text((*s).to_string())]).unwrap() {
+                return flushed;
+            }
+        }
+        b.finish_empty_or_tail().unwrap().unwrap()
+    };
+
+    {
+        let w0 = PostgresArrowIpcWriter::try_new(
+            Arc::clone(&schema),
+            col_names.clone(),
+            ArrowStorageMode::Adaptive { threshold_rows: 0 },
+            DEFAULT_MAX_ARROW_RESULT_BYTES,
+        )
+        .unwrap();
+        assert!(matches!(
+            w0.finish().unwrap(),
+            ArrowOutput::Inline { row_count: 0, .. }
+        ));
+
+        let mut w1 = PostgresArrowIpcWriter::try_new(
+            Arc::clone(&schema),
+            col_names.clone(),
+            ArrowStorageMode::Adaptive { threshold_rows: 0 },
+            DEFAULT_MAX_ARROW_RESULT_BYTES,
+        )
+        .unwrap();
+        w1.write_batch(&build_text_batch(&["one"])).unwrap();
+        assert!(matches!(
+            w1.finish().unwrap(),
+            ArrowOutput::Shm { row_count: 1, .. }
+        ));
+
+        let mut w4 = PostgresArrowIpcWriter::try_new(
+            Arc::clone(&schema),
+            col_names.clone(),
+            ArrowStorageMode::Adaptive { threshold_rows: 4 },
+            DEFAULT_MAX_ARROW_RESULT_BYTES,
+        )
+        .unwrap();
+        w4.write_batch(&build_text_batch(&["r1", "r2"])).unwrap();
+        w4.write_batch(&build_text_batch(&["r3", "r4"])).unwrap();
+        let ArrowOutput::Inline {
+            ipc_bytes,
+            row_count,
+            ..
+        } = w4.finish().unwrap()
+        else {
+            panic!("exact threshold_rows == 4 must remain inline");
+        };
+        assert_eq!(row_count, 4);
+        assert_single_trailing_eos(&ipc_bytes);
+
+        let mut w5 = PostgresArrowIpcWriter::try_new(
+            Arc::clone(&schema),
+            col_names.clone(),
+            ArrowStorageMode::Adaptive { threshold_rows: 4 },
+            DEFAULT_MAX_ARROW_RESULT_BYTES,
+        )
+        .unwrap();
+        w5.write_batch(&build_text_batch(&["r1", "r2"])).unwrap();
+        w5.write_batch(&build_text_batch(&["r3", "r4"])).unwrap();
+        w5.write_batch(&build_text_batch(&["r5"])).unwrap();
+        let ArrowOutput::Shm {
+            byte_len,
+            row_count,
+            region,
+            ..
+        } = w5.finish().unwrap()
+        else {
+            panic!("threshold_rows + 1 == 5 must promote to SHM");
+        };
+        assert_eq!(row_count, 5);
+        // SAFETY: `region` holds an immutable finalized `VTBARROW` stream.
+        let raw = unsafe { region.as_slice() };
+        let payload = &raw[ShmArrowFrameHeader::SIZE..ShmArrowFrameHeader::SIZE + byte_len];
+        let total: usize = StreamReader::try_new(Cursor::new(payload), None)
+            .unwrap()
+            .map(|b| b.unwrap().num_rows())
+            .sum();
+        assert_eq!(total, 5);
+    }
+
+    for mode in [
+        ArrowStorageMode::Adaptive { threshold_rows: 4 },
+        ArrowStorageMode::AlwaysShm,
+    ] {
+        assert!(matches!(
+            PostgresArrowIpcWriter::try_new(Arc::clone(&schema), col_names.clone(), mode, 0),
+            Err(PostgresError::Data(_))
+        ));
+        assert!(matches!(
+            PostgresArrowIpcWriter::try_new(Arc::clone(&schema), col_names.clone(), mode, 16),
+            Err(PostgresError::Data(_) | PostgresError::Operational(_))
+        ));
+    }
+
+    let chunk_4k = "q".repeat(4096);
+    let batch_4k = build_text_batch(&[chunk_4k.as_str(), "second"]);
+    let batch_small = build_text_batch(&["tiny"]);
+
+    for mode in [
+        ArrowStorageMode::Adaptive {
+            threshold_rows: 100,
+        },
+        ArrowStorageMode::Adaptive { threshold_rows: 1 },
+        ArrowStorageMode::AlwaysShm,
+    ] {
+        let mut writer =
+            PostgresArrowIpcWriter::try_new(Arc::clone(&schema), col_names.clone(), mode, 1024)
+                .unwrap();
+        writer.write_batch(&batch_small).unwrap();
+        let err = writer.write_batch(&batch_4k).unwrap_err();
+        assert!(
+            matches!(err, PostgresError::Data(_) | PostgresError::Operational(_)),
+            "unexpected overflow error variant: {err:?}"
+        );
+        #[cfg(target_os = "linux")]
+        assert_eq!(
+            pid_pg_shm_entries(),
+            baseline_shm,
+            "failed write_batch leaked /dev/shm segment before writer drop in {mode:?}"
+        );
+        assert!(writer.finish().is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    assert_eq!(pid_pg_shm_entries(), baseline_shm);
+}
+
+#[test]
+fn ipc_transfers_shm_capsule_into_frozen_py_result_and_keeps_views_alive_past_release() {
+    let _ipc_shm_guard = IPC_SHM_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let catalog = TypeCatalog::new_with_builtins();
+    let columns = vec![
+        col("id", INT8_OID, Format::Binary, -1),
+        col("label", TEXT_OID, Format::Binary, -1),
+    ];
+    let col_names = vec!["id".to_string(), "label".to_string()];
+    let schema = PostgresArrowSchema::from_columns(&columns, &catalog).unwrap();
+
+    let make_batch = |rows: &[(i64, &str)]| -> RecordBatch {
+        let mut b = PostgresArrowBatchBuilder::try_new(
+            &columns,
+            &catalog,
+            rows.len().max(1),
+            DEFAULT_ARROW_BATCH_BYTES,
+        )
+        .unwrap();
+        for (id, label) in rows {
+            if let Some(batch) = b
+                .append_pg_row(&[PgValue::Int8(*id), PgValue::Text((*label).to_string())])
+                .unwrap()
+            {
+                return batch;
+            }
+        }
+        b.finish_empty_or_tail().unwrap().unwrap()
+    };
+
+    let mut inline_writer = PostgresArrowIpcWriter::try_new(
+        Arc::clone(&schema),
+        col_names.clone(),
+        ArrowStorageMode::Adaptive { threshold_rows: 4 },
+        DEFAULT_MAX_ARROW_RESULT_BYTES,
+    )
+    .unwrap();
+    inline_writer
+        .write_batch(&make_batch(&[(1, "one"), (2, "two")]))
+        .unwrap();
+    let inline_out = inline_writer.finish().unwrap();
+
+    let mut shm_writer = PostgresArrowIpcWriter::try_new(
+        Arc::clone(&schema),
+        col_names.clone(),
+        ArrowStorageMode::Adaptive { threshold_rows: 2 },
+        DEFAULT_MAX_ARROW_RESULT_BYTES,
+    )
+    .unwrap();
+    shm_writer
+        .write_batch(&make_batch(&[(10, "x"), (20, "yz")]))
+        .unwrap();
+    shm_writer.write_batch(&make_batch(&[(30, "w")])).unwrap();
+    let shm_out = shm_writer.finish().unwrap();
+    let (shm_name_1, weak_1) = match &shm_out {
+        ArrowOutput::Shm {
+            shm_name, region, ..
+        } => (shm_name.clone(), Arc::downgrade(region)),
+        ArrowOutput::Inline { .. } => panic!("expected Shm output"),
+    };
+
+    let mut stream_writer = PostgresArrowIpcWriter::try_new(
+        Arc::clone(&schema),
+        col_names.clone(),
+        ArrowStorageMode::AlwaysShm,
+        DEFAULT_MAX_ARROW_RESULT_BYTES,
+    )
+    .unwrap();
+    stream_writer
+        .write_batch(&make_batch(&[(100, "p"), (200, "q")]))
+        .unwrap();
+    let stream_out = stream_writer.finish().unwrap();
+    let weak_2 = match &stream_out {
+        ArrowOutput::Shm { region, .. } => Arc::downgrade(region),
+        ArrowOutput::Inline { .. } => panic!("expected AlwaysShm output"),
+    };
+
+    pyo3::Python::initialize();
+    pyo3::Python::attach(|py| {
+        let bad_inline = ArrowOutput::Inline {
+            ipc_bytes: Vec::new(),
+            row_count: 0,
+            columns: vec![],
+        };
+        assert!(shm_output_into_py_cursor(py, bad_inline).is_err());
+
+        let py_inline = arrow_output_into_py_result(py, inline_out).unwrap();
+        let py_shm = arrow_output_into_py_result(py, shm_out).unwrap();
+        let py_cur = shm_output_into_py_cursor(py, stream_out).unwrap();
+
+        let locals = pyo3::types::PyDict::new(py);
+        locals.set_item("inline_res", py_inline).unwrap();
+        locals.set_item("shm_res", py_shm).unwrap();
+        locals.set_item("stream_cur", py_cur).unwrap();
+
+        let step1 = std::ffi::CString::new(concat!(
+            "import gc\n",
+            "import pyarrow as pa\n",
+            "import vertebra._vertebra as native_vtb\n",
+            "from vertebra.db.adapters.postgres.types import PostgresArrowResult\n",
+            "from vertebra.db.arrow import ArrowCursor\n",
+            "assert isinstance(inline_res, PostgresArrowResult)\n",
+            "assert inline_res.used_shm is False\n",
+            "assert inline_res.row_count == 2\n",
+            "assert inline_res.columns == ('id', 'label')\n",
+            "assert type(inline_res.buffer) is bytes\n",
+            "inline_tbl = pa.ipc.open_stream(inline_res.buffer).read_all()\n",
+            "assert inline_tbl.to_pylist() == [{'id': 1, 'label': 'one'}, {'id': 2, 'label': 'two'}]\n",
+            "try:\n",
+            "    inline_res.used_shm = True\n",
+            "    raise AssertionError('PostgresArrowResult must be frozen')\n",
+            "except AttributeError:\n",
+            "    pass\n",
+            "assert isinstance(shm_res, PostgresArrowResult)\n",
+            "assert shm_res.used_shm is True\n",
+            "assert shm_res.row_count == 3\n",
+            "assert shm_res.columns == ('id', 'label')\n",
+            "assert isinstance(shm_res.buffer, native_vtb.ArrowCursor)\n",
+            "assert isinstance(stream_cur, native_vtb.ArrowCursor)\n",
+            "mv = shm_res.buffer.buffer_view()\n",
+            "tbl = pa.ipc.open_stream(pa.py_buffer(mv)).read_all()\n",
+            "assert shm_res.buffer.release() is True\n",
+            "del shm_res\n",
+            "gc.collect()\n",
+            "wrapped = ArrowCursor(stream_cur, columns=('id', 'label'), used_shm=True, row_count=2)\n",
+            "assert len(wrapped) == 2\n",
+            "mv2 = wrapped.buffer_view()\n",
+            "wrapped.close()\n",
+            "del wrapped\n",
+            "del stream_cur\n",
+            "gc.collect()\n",
+        ))
+        .unwrap();
+        py.run(step1.as_c_str(), Some(&locals), Some(&locals))
+            .unwrap_or_else(|err| {
+                err.print(py);
+                panic!("Python step1 failed: {err}");
+            });
+
+        #[cfg(target_os = "linux")]
+        {
+            let shm_file = format!("/dev/shm{shm_name_1}");
+            assert!(
+                !std::path::Path::new(&shm_file).exists(),
+                "release() must unlink {shm_file} immediately while mapping stays readable"
+            );
+        }
+        let _ = &shm_name_1;
+
+        assert!(
+            weak_1.upgrade().is_some(),
+            "producer Arc<ShmRegion> dropped while memoryview and pyarrow.Table are still alive"
+        );
+        assert!(
+            weak_2.upgrade().is_some(),
+            "stream Arc<ShmRegion> dropped while retained memoryview is still alive"
+        );
+
+        let step2 = std::ffi::CString::new(concat!(
+            "assert tbl.to_pylist() == [\n",
+            "    {'id': 10, 'label': 'x'},\n",
+            "    {'id': 20, 'label': 'yz'},\n",
+            "    {'id': 30, 'label': 'w'},\n",
+            "]\n",
+            "re_read = pa.ipc.open_stream(pa.py_buffer(mv)).read_all()\n",
+            "assert re_read.to_pylist() == tbl.to_pylist()\n",
+            "re_read2 = pa.ipc.open_stream(pa.py_buffer(mv2)).read_all()\n",
+            "assert re_read2.to_pylist() == [{'id': 100, 'label': 'p'}, {'id': 200, 'label': 'q'}]\n",
+            "del re_read, re_read2, tbl, mv, mv2\n",
+            "gc.collect()\n",
+        ))
+        .unwrap();
+        py.run(step2.as_c_str(), Some(&locals), Some(&locals))
+            .unwrap_or_else(|err| {
+                err.print(py);
+                panic!("Python step2 failed: {err}");
+            });
+    });
+
+    assert!(
+        weak_1.upgrade().is_none(),
+        "ShmCapsule drop callback failed to release producer Arc<ShmRegion> after all views dropped"
+    );
+    assert!(
+        weak_2.upgrade().is_none(),
+        "ShmCapsule drop callback failed to release stream Arc<ShmRegion> after all views dropped"
+    );
 }

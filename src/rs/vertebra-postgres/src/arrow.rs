@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use arrow_array::builder::{
     BinaryBuilder, BooleanBuilder, FixedSizeBinaryBuilder, Float32Builder, Float64Builder,
@@ -10,8 +11,15 @@ use arrow_array::builder::{
 };
 use arrow_array::{ArrayRef, FixedSizeListArray, ListArray, RecordBatch, StructArray};
 use arrow_buffer::OffsetBuffer;
+use arrow_ipc::writer::StreamWriter;
 use arrow_schema::{DataType, Field, FieldRef, Fields, Schema};
 use postgres_protocol::types as protocol_types;
+use pyo3::prelude::*;
+use pyo3::sync::PyOnceLock;
+use pyo3::types::{PyBytes, PyTuple, PyType};
+use vertebra_core::shm::ShmRegion;
+use vertebra_db::arrow_shm::{ARROW_IPC_EOS_MARKER, ShmArrowFrameHeader, ShmArrowStreamWriter};
+use vertebra_db::py_async::construct_py_arrow_cursor;
 
 use crate::codecs::array::MAX_ARRAY_DIMS;
 use crate::codecs::temporal::{
@@ -60,6 +68,8 @@ pub const POSTGRES_FIELD_BASE_OID_KEY: &str = "postgres.base_oid";
 pub const DEFAULT_ARROW_BATCH_ROWS: usize = 65_536;
 /// Default bounded `RecordBatch` decoded value byte budget (`8 MiB`).
 pub const DEFAULT_ARROW_BATCH_BYTES: usize = 8 * 1024 * 1024;
+/// Default bounded Arrow IPC stream result ceiling (`256 MiB`).
+pub const DEFAULT_MAX_ARROW_RESULT_BYTES: usize = 256 * 1024 * 1024;
 /// Maximum recursive catalog composite/array/domain nesting depth (`32`).
 pub const MAX_ARROW_NESTING_DEPTH: usize = 32;
 /// Maximum `pgvector` `vector` / `halfvec` fixed dimension (`16_000`).
@@ -2512,5 +2522,341 @@ impl PostgresArrowBatchBuilder {
             return Ok(Some(self.finish_empty()));
         }
         Ok(None)
+    }
+}
+
+static PG_ARROW_SHM_COUNTER: AtomicU64 = AtomicU64::new(1);
+static POSTGRES_ARROW_RESULT_TYPE: PyOnceLock<Py<PyType>> = PyOnceLock::new();
+
+#[inline]
+fn next_postgres_arrow_shm_name() -> String {
+    let seq = PG_ARROW_SHM_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let pid = std::process::id();
+    format!("/vtb-pg-{pid:x}-{seq:x}")
+}
+
+#[inline]
+fn checked_align8(len: usize) -> Result<usize, PostgresError> {
+    len.checked_add(7)
+        .map(|n| n & !7)
+        .ok_or_else(|| PostgresError::Data("Arrow IPC 8-byte frame alignment overflow".to_string()))
+}
+
+fn resolve_postgres_arrow_result_type(py: Python<'_>) -> PyResult<&Bound<'_, PyType>> {
+    let cls = POSTGRES_ARROW_RESULT_TYPE.get_or_try_init(py, || -> PyResult<Py<PyType>> {
+        let mod_types = py.import("vertebra.db.adapters.postgres.types")?;
+        Ok(mod_types
+            .getattr("PostgresArrowResult")?
+            .cast_into::<PyType>()?
+            .unbind())
+    })?;
+    Ok(cls.bind(py))
+}
+
+/// Adaptive inline vs forced `VTBARROW` shared-memory output mode for [`PostgresArrowIpcWriter`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ArrowStorageMode {
+    /// Buffer serialized IPC frames inline while `total_rows <= threshold_rows`, promoting the
+    /// accumulated schema and batch groups to a `VTBARROW` shared-memory segment once exceeded.
+    Adaptive { threshold_rows: usize },
+    /// Immediately stream the schema and every batch group into a `VTBARROW` shared-memory segment.
+    AlwaysShm,
+}
+
+/// Completed Arrow IPC payload produced by [`PostgresArrowIpcWriter::finish`].
+#[derive(Debug)]
+pub enum ArrowOutput {
+    /// Self-contained Arrow IPC stream buffered inline (`total_rows <= threshold_rows`).
+    Inline {
+        ipc_bytes: Vec<u8>,
+        row_count: usize,
+        columns: Vec<String>,
+    },
+    /// Unregistered `VTBARROW` POSIX shared-memory mapping ready for `ShmCapsule` handoff.
+    Shm {
+        shm_name: String,
+        byte_len: usize,
+        row_count: usize,
+        columns: Vec<String>,
+        region: Arc<ShmRegion>,
+    },
+}
+
+enum ArrowIpcSink {
+    Inline { buf: Vec<u8>, threshold_rows: usize },
+    Shm(ShmArrowStreamWriter),
+    Poisoned,
+}
+
+/// Single-stream Arrow IPC serializer promoting complete 8-byte-aligned message groups into
+/// unregistered `VTBARROW` shared memory without splitting FlatBuffers message boundaries.
+pub struct PostgresArrowIpcWriter {
+    stream_writer: StreamWriter<Vec<u8>>,
+    columns: Vec<String>,
+    sink: ArrowIpcSink,
+    max_result_bytes: usize,
+    committed_ipc_bytes: usize,
+    row_count: usize,
+}
+
+impl PostgresArrowIpcWriter {
+    /// Initialize a single [`StreamWriter<Vec<u8>>`] for `schema`, validating `max_result_bytes`
+    /// before buffering inline or creating an unregistered `VTBARROW` shared-memory writer.
+    pub fn try_new(
+        schema: Arc<Schema>,
+        columns: Vec<String>,
+        mode: ArrowStorageMode,
+        max_result_bytes: usize,
+    ) -> Result<Self, PostgresError> {
+        if max_result_bytes == 0 {
+            return Err(PostgresError::Data(
+                "max_result_bytes must be >= 1".to_string(),
+            ));
+        }
+
+        let mut stream_writer =
+            StreamWriter::try_new(Vec::new(), schema.as_ref()).map_err(|e| {
+                PostgresError::Data(format!("failed to initialize Arrow IPC StreamWriter: {e}"))
+            })?;
+        let mut schema_frame = std::mem::take(stream_writer.get_mut());
+        let padded_schema = checked_align8(schema_frame.len())?;
+        let min_stream_bytes = padded_schema
+            .checked_add(ARROW_IPC_EOS_MARKER.len())
+            .ok_or_else(|| PostgresError::Data("Arrow IPC stream size overflow".to_string()))?;
+        if min_stream_bytes > max_result_bytes {
+            return Err(PostgresError::Data(format!(
+                "Arrow IPC minimum stream size {min_stream_bytes} bytes exceeds max_result_bytes ({max_result_bytes})"
+            )));
+        }
+
+        let sink = match mode {
+            ArrowStorageMode::Adaptive { threshold_rows } => {
+                if padded_schema > schema_frame.len() {
+                    schema_frame.resize(padded_schema, 0);
+                }
+                ArrowIpcSink::Inline {
+                    buf: schema_frame,
+                    threshold_rows,
+                }
+            }
+            ArrowStorageMode::AlwaysShm => {
+                let shm_name = next_postgres_arrow_shm_name();
+                let shm_writer = ShmArrowStreamWriter::create(&shm_name, 0, &schema_frame)
+                    .map_err(PostgresError::Operational)?;
+                ArrowIpcSink::Shm(shm_writer)
+            }
+        };
+
+        Ok(Self {
+            stream_writer,
+            columns,
+            sink,
+            max_result_bytes,
+            committed_ipc_bytes: padded_schema,
+            row_count: 0,
+        })
+    }
+
+    /// Encode `batch` through the shared [`StreamWriter`], enforce `max_result_bytes`, and either
+    /// append inline or promote/append the complete message group into `VTBARROW` shared memory.
+    pub fn write_batch(&mut self, batch: &RecordBatch) -> Result<(), PostgresError> {
+        if matches!(self.sink, ArrowIpcSink::Poisoned) {
+            return Err(PostgresError::Operational(
+                "PostgresArrowIpcWriter cannot write after a previous error".to_string(),
+            ));
+        }
+        let res = self.write_batch_inner(batch);
+        if res.is_err() {
+            self.sink = ArrowIpcSink::Poisoned;
+            self.stream_writer.get_mut().clear();
+        }
+        res
+    }
+
+    fn write_batch_inner(&mut self, batch: &RecordBatch) -> Result<(), PostgresError> {
+        let batch_rows = batch.num_rows();
+        let next_rows = self
+            .row_count
+            .checked_add(batch_rows)
+            .ok_or_else(|| PostgresError::Data("Arrow IPC row count overflow".to_string()))?;
+
+        self.stream_writer.write(batch).map_err(|e| {
+            PostgresError::Data(format!(
+                "failed to encode Arrow RecordBatch into IPC stream: {e}"
+            ))
+        })?;
+        let mut frame = std::mem::take(self.stream_writer.get_mut());
+        let padded_len = checked_align8(frame.len())?;
+        let next_committed = self
+            .committed_ipc_bytes
+            .checked_add(padded_len)
+            .ok_or_else(|| {
+                PostgresError::Data("Arrow IPC stream byte size overflow".to_string())
+            })?;
+        let total_with_eos = next_committed
+            .checked_add(ARROW_IPC_EOS_MARKER.len())
+            .ok_or_else(|| {
+                PostgresError::Data("Arrow IPC stream byte size overflow".to_string())
+            })?;
+        if total_with_eos > self.max_result_bytes {
+            return Err(PostgresError::Data(format!(
+                "Arrow IPC result size {total_with_eos} bytes exceeds max_result_bytes ({})",
+                self.max_result_bytes
+            )));
+        }
+
+        match &mut self.sink {
+            ArrowIpcSink::Inline {
+                buf,
+                threshold_rows,
+            } => {
+                if next_rows <= *threshold_rows {
+                    if padded_len > frame.len() {
+                        frame.resize(padded_len, 0);
+                    }
+                    buf.extend_from_slice(&frame);
+                } else {
+                    let shm_name = next_postgres_arrow_shm_name();
+                    let init_capacity = ShmArrowFrameHeader::SIZE.saturating_add(total_with_eos);
+                    let prior_inline = std::mem::take(buf);
+                    let mut shm_writer =
+                        ShmArrowStreamWriter::create(&shm_name, init_capacity, &prior_inline)
+                            .map_err(PostgresError::Operational)?;
+                    shm_writer
+                        .append_ipc_frame(&frame, batch_rows)
+                        .map_err(PostgresError::Operational)?;
+                    self.sink = ArrowIpcSink::Shm(shm_writer);
+                }
+            }
+            ArrowIpcSink::Shm(shm_writer) => {
+                shm_writer
+                    .append_ipc_frame(&frame, batch_rows)
+                    .map_err(PostgresError::Operational)?;
+            }
+            ArrowIpcSink::Poisoned => unreachable!("checked before write_batch_inner"),
+        }
+
+        self.committed_ipc_bytes = next_committed;
+        self.row_count = next_rows;
+        Ok(())
+    }
+
+    /// Finalize the single [`StreamWriter`] and emit either inline IPC bytes or an unregistered
+    /// `VTBARROW` [`ShmRegion`] terminated by exactly one 8-byte Arrow IPC EOS marker.
+    pub fn finish(mut self) -> Result<ArrowOutput, PostgresError> {
+        let sink = std::mem::replace(&mut self.sink, ArrowIpcSink::Poisoned);
+        match sink {
+            ArrowIpcSink::Poisoned => Err(PostgresError::Operational(
+                "PostgresArrowIpcWriter cannot finish after a previous error".to_string(),
+            )),
+            ArrowIpcSink::Inline { mut buf, .. } => {
+                self.stream_writer.finish().map_err(|e| {
+                    PostgresError::Data(format!("failed to finalize Arrow IPC StreamWriter: {e}"))
+                })?;
+                let eos_tail = self.stream_writer.into_inner().map_err(|e| {
+                    PostgresError::Data(format!("failed to drain Arrow IPC tail buffer: {e}"))
+                })?;
+                let final_len = buf.len().checked_add(eos_tail.len()).ok_or_else(|| {
+                    PostgresError::Data("Arrow IPC inline length overflow".to_string())
+                })?;
+                if final_len > self.max_result_bytes {
+                    return Err(PostgresError::Data(format!(
+                        "Arrow IPC result size {final_len} bytes exceeds max_result_bytes ({})",
+                        self.max_result_bytes
+                    )));
+                }
+                buf.extend_from_slice(&eos_tail);
+                Ok(ArrowOutput::Inline {
+                    ipc_bytes: buf,
+                    row_count: self.row_count,
+                    columns: self.columns,
+                })
+            }
+            ArrowIpcSink::Shm(mut shm_writer) => {
+                self.stream_writer.finish().map_err(|e| {
+                    PostgresError::Data(format!("failed to finalize Arrow IPC StreamWriter: {e}"))
+                })?;
+                let eos_tail = self.stream_writer.into_inner().map_err(|e| {
+                    PostgresError::Data(format!("failed to drain Arrow IPC tail buffer: {e}"))
+                })?;
+                let pre_eos = eos_tail
+                    .strip_suffix(&ARROW_IPC_EOS_MARKER)
+                    .unwrap_or(&eos_tail);
+                if !pre_eos.is_empty() {
+                    shm_writer
+                        .append_ipc_frame(pre_eos, 0)
+                        .map_err(PostgresError::Operational)?;
+                }
+                let (shm_name, byte_len, region) = shm_writer
+                    .finish_unregistered()
+                    .map_err(PostgresError::Operational)?;
+                if byte_len > self.max_result_bytes {
+                    return Err(PostgresError::Data(format!(
+                        "Arrow IPC result size {byte_len} bytes exceeds max_result_bytes ({})",
+                        self.max_result_bytes
+                    )));
+                }
+                Ok(ArrowOutput::Shm {
+                    shm_name,
+                    byte_len,
+                    row_count: self.row_count,
+                    columns: self.columns,
+                    region,
+                })
+            }
+        }
+    }
+}
+
+/// Transfer an [`ArrowOutput::Shm`] payload into a `vertebra._vertebra.ArrowCursor` via the C-ABI
+/// `c"vertebra.ShmCapsule"` producer drop callback contract on the caller's Python thread.
+pub fn shm_output_into_py_cursor(py: Python<'_>, output: ArrowOutput) -> PyResult<Py<PyAny>> {
+    match output {
+        ArrowOutput::Shm {
+            shm_name,
+            byte_len,
+            row_count,
+            region,
+            ..
+        } => construct_py_arrow_cursor(py, &shm_name, byte_len, row_count, region),
+        ArrowOutput::Inline { .. } => Err(crate::errors::postgres_error_to_py(
+            py,
+            PostgresError::Interface(
+                "shm_output_into_py_cursor requires ArrowOutput::Shm".to_string(),
+            ),
+        )),
+    }
+}
+
+/// Convert a finished [`ArrowOutput`] into a frozen `PostgresArrowResult` (`types.py`) on the
+/// caller's Python thread, transferring SHM ownership across `.so` boundaries via `ShmCapsule`.
+pub fn arrow_output_into_py_result(py: Python<'_>, output: ArrowOutput) -> PyResult<Py<PyAny>> {
+    let result_cls = resolve_postgres_arrow_result_type(py)?;
+    match output {
+        ArrowOutput::Inline {
+            ipc_bytes,
+            row_count,
+            columns,
+        } => {
+            let py_bytes = PyBytes::new_with(py, ipc_bytes.len(), |buf| {
+                buf.copy_from_slice(&ipc_bytes);
+                Ok(())
+            })?;
+            let py_cols = PyTuple::new(py, &columns)?;
+            let obj = result_cls.call1((py_bytes, row_count, py_cols, false))?;
+            Ok(obj.unbind())
+        }
+        ArrowOutput::Shm {
+            shm_name,
+            byte_len,
+            row_count,
+            columns,
+            region,
+        } => {
+            let py_cols = PyTuple::new(py, &columns)?;
+            let py_cursor = construct_py_arrow_cursor(py, &shm_name, byte_len, row_count, region)?;
+            let obj = result_cls.call1((py_cursor, row_count, py_cols, true))?;
+            Ok(obj.unbind())
+        }
     }
 }

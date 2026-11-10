@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from datetime import date, datetime, time
 from decimal import Decimal
-from typing import Literal
+from typing import Any, Literal
 from uuid import UUID
 
 import msgspec
@@ -19,6 +19,7 @@ __all__ = [
     "PgParameter",
     "PgTemporal",
     "PgVector",
+    "PostgresArrowResult",
     "PostgresColumn",
     "PostgresErrorInfo",
     "PostgresJsonValue",
@@ -122,6 +123,40 @@ class PostgresQueryResult(msgspec.Struct, frozen=True, gc=False):
         if self.transaction_status not in ("I", "T", "E"):
             msg = "PostgresQueryResult.transaction_status must be 'I', 'T', or 'E'"
             raise ValueError(msg)
+
+
+class PostgresArrowResult(msgspec.Struct, frozen=True, gc=False):
+    """Owned PostgreSQL Arrow selection result over inline IPC bytes or a VTBARROW SHM cursor."""
+
+    buffer: bytes | Any
+    row_count: int
+    columns: tuple[str, ...]
+    used_shm: bool
+
+    def __post_init__(self) -> None:
+        """Validate row_count bounds, column label tuple, and buffer/used_shm parity."""
+        _validate_int(self.row_count, "row_count", 0, _U64_MAX)
+        if not isinstance(self.used_shm, bool):
+            msg = "PostgresArrowResult.used_shm must be a bool"
+            raise TypeError(msg)
+        if not isinstance(self.columns, tuple) or not all(isinstance(col, str) for col in self.columns):
+            msg = "PostgresArrowResult.columns must be a tuple of str"
+            raise TypeError(msg)
+        if not self.used_shm:
+            if type(self.buffer) is not bytes:
+                msg = "PostgresArrowResult.buffer must be exact bytes when used_shm is False"
+                raise TypeError(msg)
+        elif (
+            self.buffer is None
+            or isinstance(self.buffer, (bytes, bytearray, memoryview))
+            or not (
+                hasattr(self.buffer, "shm_name")
+                and hasattr(self.buffer, "byte_len")
+                and hasattr(self.buffer, "buffer_view")
+            )
+        ):
+            msg = "PostgresArrowResult.buffer must be a native SHM ArrowCursor when used_shm is True"
+            raise TypeError(msg)
 
 
 class PgInterval(msgspec.Struct, frozen=True, gc=False):

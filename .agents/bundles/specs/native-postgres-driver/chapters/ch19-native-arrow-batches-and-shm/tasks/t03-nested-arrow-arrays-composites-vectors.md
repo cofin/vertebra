@@ -35,7 +35,7 @@ last_verified_commit: 1102e7f6
 verification_evidence: "cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --test postgres_arrow_tests (13 passed); cargo fmt --check; cargo clippy -p vertebra-postgres --all-targets -- -D warnings; make review-check"
 created_at: "2026-11-05T18:25:07Z"
 updated_at: "2026-11-10T03:44:09Z"
-commit: null
+commit: 2ca96efb
 sources:
   - id: pg-contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md
