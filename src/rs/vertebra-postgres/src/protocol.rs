@@ -74,6 +74,73 @@ pub fn into_server_error(err: ServerError) -> PostgresError {
     PostgresError::Server(err)
 }
 
+/// Backend message emitted on a PostgreSQL `replication=database` connection, extending standard
+/// Protocol 3.0 frames with `CopyBothResponse` (`'W'`).
+pub enum ReplicationBackendMessage {
+    /// Logical/streaming replication `CopyBothResponse` (`'W'`) frame.
+    CopyBothResponse {
+        /// Overall stream format code (`0` required for logical replication).
+        format: u8,
+        /// Per-column format codes (must be empty for logical replication).
+        column_formats: Vec<u16>,
+    },
+    /// Standard PostgreSQL Protocol 3.0 backend message decoded via `postgres-protocol`.
+    Standard(Message),
+}
+
+impl std::fmt::Debug for ReplicationBackendMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::CopyBothResponse {
+                format,
+                column_formats,
+            } => f
+                .debug_struct("CopyBothResponse")
+                .field("format", format)
+                .field("column_formats", column_formats)
+                .finish(),
+            Self::Standard(_) => f.write_str("Standard(..)"),
+        }
+    }
+}
+
+/// Read one bounded PostgreSQL backend frame `(tag, payload)` from `reader`.
+///
+/// Validates the 4-byte wire length (`4..=max_frame_bytes`, including the 4-byte length field
+/// itself) from the 5-byte `[tag, len_be_u32]` header before reserving payload capacity, enforces
+/// `deadline` with identical timeout semantics to [`read_message`], and leaves any coalesced
+/// trailing frames untouched in `scratch`.
+pub async fn read_frame<R: AsyncRead + Unpin>(
+    reader: &mut R,
+    scratch: &mut BytesMut,
+    max_frame_bytes: usize,
+    deadline: Option<Instant>,
+) -> Result<(u8, BytesMut), PostgresError> {
+    let mut raw_frame = read_bounded_raw_frame(reader, scratch, max_frame_bytes, deadline).await?;
+    let header = raw_frame.split_to(5);
+    Ok((header[0], raw_frame))
+}
+
+/// Read and decode one bounded replication backend message (`'W'` `CopyBothResponse` or standard
+/// Protocol 3.0 backend frame) from `reader`.
+///
+/// Logical replication requires `CopyBothResponse` (`'W'`) with `format == 0` and zero columns;
+/// truncated payloads, trailing bytes, nonzero formats, or nonzero column counts fail closed with
+/// [`PostgresError::Protocol`]. Every non-`'W'` tag delegates directly to `postgres-protocol`.
+pub async fn read_replication_message<R: AsyncRead + Unpin>(
+    reader: &mut R,
+    scratch: &mut BytesMut,
+    max_frame_bytes: usize,
+    deadline: Option<Instant>,
+) -> Result<ReplicationBackendMessage, PostgresError> {
+    let raw_frame = read_bounded_raw_frame(reader, scratch, max_frame_bytes, deadline).await?;
+    if raw_frame[0] == b'W' {
+        decode_copy_both_response(&raw_frame[5..])
+    } else {
+        parse_standard_frame(raw_frame).map(ReplicationBackendMessage::Standard)
+    }
+}
+
 /// Read and decode one bounded PostgreSQL backend [`Message`] from `stream`.
 ///
 /// Inspects the 5-byte `[tag, len_be_u32]` header in `buf` before reserving or reading the frame
@@ -87,35 +154,40 @@ pub async fn read_message<S>(
 where
     S: AsyncRead + Unpin,
 {
+    let raw_frame = read_bounded_raw_frame(stream, buf, MAX_BACKEND_FRAME_LENGTH, deadline).await?;
+    parse_standard_frame(raw_frame)
+}
+
+async fn read_bounded_raw_frame<R: AsyncRead + Unpin>(
+    reader: &mut R,
+    scratch: &mut BytesMut,
+    max_frame_bytes: usize,
+    deadline: Option<Instant>,
+) -> Result<BytesMut, PostgresError> {
+    if max_frame_bytes < 4 {
+        return Err(PostgresError::Protocol(format!(
+            "invalid max_frame_bytes {max_frame_bytes}; minimum PostgreSQL wire length is 4"
+        )));
+    }
     loop {
-        if buf.len() >= 5 {
-            let raw_len = u32::from_be_bytes([buf[1], buf[2], buf[3], buf[4]]) as usize;
-            if !(4..=MAX_BACKEND_FRAME_LENGTH).contains(&raw_len) {
+        if scratch.len() >= 5 {
+            let raw_len =
+                u32::from_be_bytes([scratch[1], scratch[2], scratch[3], scratch[4]]) as usize;
+            if !(4..=max_frame_bytes).contains(&raw_len) {
                 return Err(PostgresError::Protocol(format!(
-                    "backend frame length {raw_len} is outside valid bounds 4..={MAX_BACKEND_FRAME_LENGTH}"
+                    "backend frame length {raw_len} is outside valid bounds 4..={max_frame_bytes}"
                 )));
             }
-            let total_frame_bytes = 1 + raw_len;
-            if buf.len() >= total_frame_bytes {
-                match Message::parse(buf) {
-                    Ok(Some(msg)) => return Ok(msg),
-                    Ok(None) => {
-                        return Err(PostgresError::Protocol(
-                            "backend frame header matched buffered length but Message::parse returned None"
-                                .to_string(),
-                        ));
-                    }
-                    Err(err) => {
-                        return Err(PostgresError::Protocol(format!(
-                            "malformed backend frame: {err}"
-                        )));
-                    }
-                }
+            let total_frame_bytes = raw_len.checked_add(1).ok_or_else(|| {
+                PostgresError::Protocol("backend frame length overflowed usize".to_string())
+            })?;
+            if scratch.len() >= total_frame_bytes {
+                return Ok(scratch.split_to(total_frame_bytes));
             }
-            let missing = total_frame_bytes - buf.len();
-            buf.reserve(missing.min(64 * 1024));
+            let missing = total_frame_bytes - scratch.len();
+            scratch.reserve(missing.min(64 * 1024));
         } else {
-            buf.reserve(4096);
+            scratch.reserve(4096);
         }
 
         let read_res = match deadline {
@@ -125,13 +197,13 @@ where
                         "PostgreSQL frame read timed out".to_string(),
                     ));
                 }
-                tokio::time::timeout_at(dl, stream.read_buf(buf))
+                tokio::time::timeout_at(dl, reader.read_buf(scratch))
                     .await
                     .map_err(|_| {
                         PostgresError::Transport("PostgreSQL frame read timed out".to_string())
                     })?
             }
-            None => stream.read_buf(buf).await,
+            None => reader.read_buf(scratch).await,
         };
 
         let n =
@@ -142,6 +214,60 @@ where
             ));
         }
     }
+}
+
+fn parse_standard_frame(mut raw_frame: BytesMut) -> Result<Message, PostgresError> {
+    match Message::parse(&mut raw_frame) {
+        Ok(Some(msg)) if raw_frame.is_empty() => Ok(msg),
+        Ok(Some(_)) => Err(PostgresError::Protocol(
+            "backend frame contained unconsumed trailing bytes after Message::parse".to_string(),
+        )),
+        Ok(None) => Err(PostgresError::Protocol(
+            "backend frame header matched buffered length but Message::parse returned None"
+                .to_string(),
+        )),
+        Err(err) => Err(PostgresError::Protocol(format!(
+            "malformed backend frame: {err}"
+        ))),
+    }
+}
+
+fn decode_copy_both_response(payload: &[u8]) -> Result<ReplicationBackendMessage, PostgresError> {
+    if payload.len() < 3 {
+        return Err(PostgresError::Protocol(format!(
+            "truncated CopyBothResponse ('W') payload of {} bytes (expected >= 3)",
+            payload.len()
+        )));
+    }
+    let format = payload[0];
+    let raw_count = i16::from_be_bytes([payload[1], payload[2]]);
+    if raw_count < 0 {
+        return Err(PostgresError::Protocol(format!(
+            "negative CopyBothResponse ('W') column count {raw_count}"
+        )));
+    }
+    let count = raw_count as u16;
+    let expected_len = 3_usize.saturating_add(usize::from(count).saturating_mul(2));
+    if payload.len() != expected_len {
+        return Err(PostgresError::Protocol(format!(
+            "invalid CopyBothResponse ('W') payload length {} for {count} columns (expected {expected_len})",
+            payload.len()
+        )));
+    }
+    let mut column_formats = Vec::with_capacity(usize::from(count));
+    for &chunk in payload[3..].as_chunks::<2>().0 {
+        column_formats.push(u16::from_be_bytes(chunk));
+    }
+    if format != 0 || !column_formats.is_empty() {
+        return Err(PostgresError::Protocol(format!(
+            "logical replication CopyBothResponse ('W') requires format=0 and 0 columns, got format={format} columns={}",
+            column_formats.len()
+        )));
+    }
+    Ok(ReplicationBackendMessage::CopyBothResponse {
+        format,
+        column_formats,
+    })
 }
 
 #[cfg(test)]

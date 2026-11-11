@@ -23,6 +23,7 @@ pub mod protocol;
 pub mod python_pool;
 pub mod python_values;
 pub mod query;
+pub mod replication;
 pub mod result;
 pub mod session;
 pub mod sync_client;
@@ -90,5 +91,6 @@ fn _postgres(m: &Bound<'_, PyModule>) -> PyResult<()> {
     sync_client::PySyncPostgresClient::register(m)?;
     async_client::PyAsyncPostgresClient::register(m)?;
     python_pool::register(m)?;
+    replication::register_pymodule(m)?;
     Ok(())
 }
