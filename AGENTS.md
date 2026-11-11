@@ -1,6 +1,6 @@
 # Vertebra — Agent Instructions
 
-Vertebra is a Python web framework and server powered by a Rust runtime (`vertebra-core`, `vertebra-http`, `vertebra-py`, `vertebra-bundler`, `vertebra-storage`, `vertebra-db`, `vertebra-bigquery`, `vertebra-spanner`, `vertebra-duckdb`) and a TypeScript SDK (`@vertebra/client`), supporting Python 3.12–3.15 and free-threaded 3.14t/3.15t.
+Vertebra is a Python web framework and server powered by a Rust runtime (`vertebra-core`, `vertebra-http`, `vertebra-py`, `vertebra-bundler`, `vertebra-storage`, `vertebra-db`, `vertebra-bigquery`, `vertebra-oracle`, `vertebra-spanner`, `vertebra-duckdb`) and a TypeScript SDK (`@vertebra/client`), supporting Python 3.12–3.15 and free-threaded 3.14t/3.15t.
 
 ## Flow Operational Rule
 
@@ -33,7 +33,7 @@ Commits remain local unless the user explicitly asks for delivery. Never create,
 ```bash
 make setup-env   # Configure public uv, bun/npm, and cargo registries on hosts whose mirrors replace them; no-op elsewhere
 make install     # Fresh setup: destroy .venv + clean, setup-env, pin Python 3.12, uv sync --all-extras --dev --group doc --group duckdb, bun install/build, make dev
-make dev         # Build non-extension Rust crates and install debug PyO3 extensions (_vertebra, _bundler, _storage, _bigquery, _spanner, _duckdb)
+make dev         # Build non-extension Rust crates and install debug PyO3 extensions (_vertebra, _bundler, _storage, _bigquery, _mssql, _mysql, _oracle, _spanner, _duckdb)
 make lint        # Auto-fix TS (Biome), Python (Ruff), Rust (rustfmt + Clippy --features tls,compression,gcp), and run Mypy + stubtest + review-check
 make lint-all    # Read-only CI lint, type-check, Clippy (--features tls,compression,gcp), stubtest, and review-check gate across TS, Python, and Rust
 make review-check # Validate review capability manifests, skills, agents, and privacy constraints
@@ -41,6 +41,8 @@ make review-route # Route changed files to owning review areas and shards (BASE=
 make rs-test     # Remove /dev/shm/test-* and /dev/shm/*vertebra*, then run Rust workspace tests (--features tls,compression,gcp)
 make py-test     # Build debug extensions (make dev), verify mypy.stubtest across all 6 extensions, and run the Python pytest suite
 make duckdb-test # Run vertebra-duckdb Rust tests, stubtest, and Python unit/conformance suites (make duckdb-wheel-check verifies wheel payload isolation)
+make oracle-test # Run vertebra-oracle Rust unit tests, _oracle stubtest, and Python Oracle adapter tests
+make oracle-wheel-check # Verify standalone vertebra-oracle wheel isolation, pure-Rust linkage, and fail-loud contract
 make ts-test     # Run the TypeScript Vitest suite with isolated localstorage
 make test        # Run all Rust, Python, and TypeScript test suites
 make coverage    # Run pytest with coverage (coverage.xml, htmlcov/)

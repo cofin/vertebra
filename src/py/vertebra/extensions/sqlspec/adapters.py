@@ -1009,9 +1009,19 @@ class OracleSyncDriver(BaseSyncDriver):
 
     dialect: str = "oracle"
 
+    _execution_parameter_style = ParameterStyle.NAMED_COLON
+
     def apply_tenant_predicate(self, predicate: TenantPredicate) -> str:
         """Set the owning engine's tenant session value and return its predicate."""
-        sql, params = OracleCore.build_session_context_sql(str(predicate.tenant_value), predicate.config)
+        cfg = getattr(self.native_driver, "config", None)
+        namespace = str(getattr(cfg, "context_namespace", "USERENV"))
+        context_package_proc = getattr(cfg, "context_package_proc", None)
+        sql, params = OracleCore.build_session_context_sql(
+            str(predicate.tenant_value),
+            predicate.config,
+            namespace=namespace,
+            context_package_proc=context_package_proc,
+        )
         self.execute(sql, params)
         return predicate.to_sql_fragment(":tenant_id")
 
@@ -1021,9 +1031,19 @@ class OracleAsyncDriver(BaseAsyncDriver):
 
     dialect: str = "oracle"
 
+    _execution_parameter_style = ParameterStyle.NAMED_COLON
+
     async def apply_tenant_predicate(self, predicate: TenantPredicate) -> str:
         """Set the owning engine's tenant session value and return its predicate."""
-        sql, params = OracleCore.build_session_context_sql(str(predicate.tenant_value), predicate.config)
+        cfg = getattr(self.native_driver, "config", None)
+        namespace = str(getattr(cfg, "context_namespace", "USERENV"))
+        context_package_proc = getattr(cfg, "context_package_proc", None)
+        sql, params = OracleCore.build_session_context_sql(
+            str(predicate.tenant_value),
+            predicate.config,
+            namespace=namespace,
+            context_package_proc=context_package_proc,
+        )
         await self.execute(sql, params)
         return predicate.to_sql_fragment(":tenant_id")
 
@@ -1372,11 +1392,16 @@ def _prepare_postgres_tenant_session(
 def _native_statement_config(dialect: str, execution_style: ParameterStyle | None) -> StatementConfig:
     """Prepare native SQL with the owning driver's execution parameter format."""
     styles = tuple(ParameterStyle)
+    supported_input_styles = (
+        {ParameterStyle.QMARK, execution_style}
+        if execution_style == ParameterStyle.NAMED_COLON
+        else ({ParameterStyle.QMARK} if execution_style is not None else styles)
+    )
     return StatementConfig(
         dialect=dialect,
         parameter_config=ParameterStyleConfig(
             default_parameter_style=ParameterStyle.QMARK,
-            supported_parameter_styles={ParameterStyle.QMARK} if execution_style is not None else styles,
+            supported_parameter_styles=supported_input_styles,
             default_execution_parameter_style=execution_style,
             supported_execution_parameter_styles={execution_style} if execution_style is not None else styles,
             preserve_parameter_format=True,

@@ -24,7 +24,7 @@ verified:
 sources:
   - id: src-adapters-oracle-driver-py
     resource: src/py/vertebra/db/adapters/oracle/driver.py::SyncOracleDriver
-    title: "Oracle driver native-module guard"
+    title: "Oracle drivers over the standalone vertebra._oracle module"
   - id: src-adapters-oracle-embeddings-py
     resource: src/py/vertebra/db/adapters/oracle/embeddings.py
     title: "SQL embedding capability and facade"
@@ -205,4 +205,4 @@ Provenance sources: [^src-embeddings-pushdown-py], [^src-adapters-bigquery-embed
 
 [^src-adapters-oracle-embeddings-py]: `src/py/vertebra/db/adapters/oracle/embeddings.py` — SQL embedding capability and facade.
 
-[^src-adapters-oracle-driver-py]: `src/py/vertebra/db/adapters/oracle/driver.py::SyncOracleDriver` — Oracle driver native-module guard.
+[^src-adapters-oracle-driver-py]: `src/py/vertebra/db/adapters/oracle/driver.py::SyncOracleDriver` — Oracle drivers over the standalone `vertebra._oracle` module.

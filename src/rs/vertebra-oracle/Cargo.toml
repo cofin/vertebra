@@ -1,0 +1,41 @@
+[package]
+name = "vertebra-oracle"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Standalone native Oracle Thin 26ai client and pool extension for Vertebra"
+
+[lib]
+name = "_oracle"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+extension-module = ["pyo3/extension-module"]
+
+[dependencies]
+arrow-array = { version = "59", default-features = false }
+arrow-buffer = { version = "59", default-features = false }
+arrow-ipc = { version = "59", default-features = false }
+arrow-schema = { version = "59", default-features = false }
+chrono = { workspace = true }
+oracledb = { version = "=26.0.0-beta.5", features = ["arrow"] }
+pyo3 = { workspace = true }
+rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+url = { workspace = true }
+vertebra-core = { path = "../vertebra-core" }
+vertebra-db = { path = "../vertebra-db", features = ["pyo3"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[build-dependencies]
+pyo3-build-config = { workspace = true }
+
+[dev-dependencies]
+pyo3 = { workspace = true, features = ["auto-initialize"] }
+tokio = { workspace = true, features = ["test-util"] }

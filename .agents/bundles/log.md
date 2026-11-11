@@ -1,5 +1,16 @@
 # Bundle Activity Log
 
+## [2026-11-10T03:00:00Z] flow-archive | native-oracle-driver
+
+Finished and archived 7 chapters and 22 tasks on `feat/native-oracle-driver` stacked on `feat/native-mssql-driver`. Base alignment checkpoint: `c21a2169`.
+
+Durable synthesis is committed in `database-drivers-and-dialers.md`, `query-pipeline-cdc-and-tenancy.md`, `sqlspec-alchemy-and-dialects.md`, `embeddings-and-vectors.md`, `domains/index.md`, `product.md`, `tech-stack.md`, `README.md`, `AGENTS.md`, the database, extensions, analytics, embeddings, and reference docs, and `specs/native-data-platform/spec.md` before contracting `.agents/bundles/specs/native-oracle-driver/`.
+
+Recorded implementation notes on `feat/native-oracle-driver`:
+- `SyncOracleDriver` and `AsyncOracleDriver` raise `MissingDependencyError` with `package` and `install_package` set to `vertebra-core[oracle]` only when the wheel is absent; `make oracle-wheel-check` verifies the contract in an isolated venv.
+- `OracleCore.build_session_context_sql` defaults to the `USERENV` namespace (`DBMS_SESSION.SET_IDENTIFIER`); custom namespaces use `DBMS_SESSION.SET_CONTEXT`, and `context_package_proc` routes through a trusted package.
+- PGO extension discovery stays outside this flow; the hardcoded `EXTENSION_MANIFESTS` list is unchanged.
+
 ## [2026-11-10T02:35:00Z] flow-archive | native-mssql-driver
 
 Completed 6 tasks (`t01`–`t06`) on `feat/native-mssql-driver` stacked on `feat/native-mysql-driver`.
@@ -7,7 +18,7 @@ Completed 6 tasks (`t01`–`t06`) on `feat/native-mssql-driver` stacked on `feat
 Durable synthesis is committed in `database-drivers-and-dialers.md`, `domains/index.md`, `product.md`, `docs/usage/databases.md`, `docs/usage/extensions.md`, `docs/index.md`, `docs/reference/db.md`, `docs/reference/index.md`, `review-core/references/areas.toml`, and `specs/native-data-platform/spec.md` before contracting `.agents/bundles/specs/native-mssql-driver/`.
 
 Recorded implementation notes on `feat/native-mssql-driver`:
-- `SyncMSSQLDriver` and `AsyncMSSQLDriver` raise `MissingDependencyError` only when the `vertebra._mssql` wheel is absent; the Oracle driver remains the only fail-loud engine guard in the conformance suite.
+- `SyncMSSQLDriver` and `AsyncMSSQLDriver` raise `MissingDependencyError` only when the `vertebra._mssql` wheel is absent.
 - `AsyncMSSQLDriver` owns its own `AsyncMSSQLClient` and `AsyncCloudSQLDialer`; `MSSQLConfig.build_async_driver` resolves the async dialer from the registry.
 
 Functional task commits:
@@ -70,6 +81,10 @@ Reviewed chapter checkpoints:
 ## [2026-11-09T02:30:00Z] flow-plan | driver-fail-loud
 
 Approved `driver-fail-loud` at 13 chapters and 38 tasks ahead of the standalone native database driver flows, removing SQLite and `memory://` stand-ins across database drivers and SQLAlchemy DB-API, requiring live or injected collaborators across queue backends, deleting dead `vertebra-db` pools and superseded codecs, aligning `MissingDependencyError` install hints behind an AST extras gate, making conformance skip/fail outcomes explicit, and updating database, queue, and agent docs and OKF knowledge.
+## [2026-11-09] plan | Approved native-oracle-driver at 7 chapters and 22 tasks (`7b39ca3b`)
+
+- [`native-oracle-driver`](specs/native-oracle-driver/spec.md) (`plan_revision: 3`, `has_chapters: true`, `status: stable`, `state: planned`, `plan_commit: 7b39ca3b`) and [`contracts.md`](specs/native-oracle-driver/contracts.md) are locked with frontmatter-free [`chapters/index.md`](specs/native-oracle-driver/chapters/index.md), `7` chapter specifications (`ch01`–`ch07`), and `22` vertical-slice 8-section task worksheets (`len(files) <= 3`, `len(read_set) <= 6`, `estimated_loc <= 250`) plus a `[0/6 files documented]` documentation and OKF synthesis plan (`ch07:t03`–`t04`).
+- Two rounds of isolated zero-context spec review across `ch01`–`ch07` resolved all `23` Round 1 findings in place (`0 Critical`, `0 Important`, `0 Minor` in Round 2).
 
 ## [2026-11-09T02:25:00Z] flow-archive | storage-remediation
 

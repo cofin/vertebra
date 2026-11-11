@@ -21,6 +21,7 @@ Core SQL and RESP3 configuration contracts ship in `vertebra-core`, while standa
     uv add "vertebra-core[mssql]"
     uv add "vertebra-core[bigquery]"
     uv add "vertebra-core[duckdb]"
+    uv add "vertebra-core[oracle]"
     uv add "vertebra-core[spanner]"
     ```
 
@@ -31,6 +32,7 @@ Core SQL and RESP3 configuration contracts ship in `vertebra-core`, while standa
     pip install "vertebra-core[mssql]"
     pip install "vertebra-core[bigquery]"
     pip install "vertebra-core[duckdb]"
+    pip install "vertebra-core[oracle]"
     pip install "vertebra-core[spanner]"
     ```
 
@@ -41,6 +43,7 @@ Core SQL and RESP3 configuration contracts ship in `vertebra-core`, while standa
     pdm add "vertebra-core[mssql]"
     pdm add "vertebra-core[bigquery]"
     pdm add "vertebra-core[duckdb]"
+    pdm add "vertebra-core[oracle]"
     pdm add "vertebra-core[spanner]"
     ```
 
@@ -51,12 +54,13 @@ Core SQL and RESP3 configuration contracts ship in `vertebra-core`, while standa
     poetry add "vertebra-core[mssql]"
     poetry add "vertebra-core[bigquery]"
     poetry add "vertebra-core[duckdb]"
+    poetry add "vertebra-core[oracle]"
     poetry add "vertebra-core[spanner]"
     ```
 
 Installing `vertebra-core[duckdb]` provides the standalone `vertebra-duckdb` (`vertebra._duckdb`) native wheel across standard and free-threaded Python (`3.14t` / `3.15t`); without it `SyncDuckDBDriver` and `AsyncDuckDBDriver` raise `MissingDependencyError`.
 
-The native Oracle driver package is not yet published. `OracleConfig` imports and parses URLs; constructing `SyncOracleDriver` or `AsyncOracleDriver` raises `MissingDependencyError`. SQL Server drivers execute through `vertebra._mssql` from the `mssql` extra and raise `MissingDependencyError` when it is absent.
+Oracle drivers execute through `vertebra._oracle` from the `oracle` extra and raise `MissingDependencyError` when it is absent. SQL Server drivers execute through `vertebra._mssql` from the `mssql` extra and raise `MissingDependencyError` when it is absent.
 
 ## Unified Driver Contract & `provide_driver`
 
@@ -129,14 +133,14 @@ app = Litestar(
 
 ## Native Database Drivers & Adapters Matrix
 
-`vertebra.db.adapters` and `vertebra.extensions.sqlspec` provide synchronous and asynchronous drivers across 11 relational, analytical, cloud-native, and key-value engines (the Oracle 26ai row describes configuration and codecs only):
+`vertebra.db.adapters` and `vertebra.extensions.sqlspec` provide synchronous and asynchronous drivers across 11 relational, analytical, cloud-native, and key-value engines:
 
 | Engine | SQLSpec Adapter Config | Native Config Class | Sync / Async Drivers | Key Capabilities |
 | --- | --- | --- | --- | --- |
 | **PostgreSQL** | `PostgreSQLAsyncConfig`, `PostgreSQLSyncConfig` | `PostgreSQLConfig` | `SyncPostgreSQLDriver`, `AsyncPostgreSQLDriver` | Binary `PGCOPY`, binary `pgvector` (`vector`/`halfvec`/`bit`), zero-copy `JSONB`, PgBouncer/PgCat/pgdog pooler modes, direct `:5432` IAM OAuth2 password or `:5433` AlloyDB / `:3307` Cloud SQL dialers |
 | **MySQL / MariaDB** | `MySQLAsyncConfig`, `MySQLSyncConfig` | `MySQLConfig` | `SyncMySQLDriver`, `AsyncMySQLDriver` | Pure-Rust `vertebra._mysql` binary prepared statements (`COM_STMT_PREPARE` / `COM_STMT_EXECUTE`), `SyncMySQLPipeline` / `AsyncMySQLPipeline`, `VTBARROW` `ArrowCursor`, out-of-band `KILL QUERY` cancellation, direct `:3306` IAM OAuth2 token or Cloud SQL `:3307` mTLS dialer |
 | **SQLite / libSQL** | `SQLiteAsyncConfig`, `SQLiteSyncConfig` | `SQLiteConfig` | `SyncSQLiteDriver`, `AsyncSQLiteDriver` | WAL mode, `mmap_size`, SQLite 3.45+ binary `JSONB`, SHM single-writer/multi-reader leasing |
-| **Oracle 26ai** | `OracleAsyncConfig`, `OracleSyncConfig` | `OracleConfig` | `SyncOracleDriver`, `AsyncOracleDriver` | Native driver pending (drivers raise `MissingDependencyError`); Autonomous Database wallet and `tnsnames.ora` parsing, 26ai `VECTOR` and `OSON` codecs |
+| **Oracle 26ai** | `OracleAsyncConfig`, `OracleSyncConfig` | `OracleConfig` | `SyncOracleDriver`, `AsyncOracleDriver` | Pure-Rust Thin TNS/TTC (`vertebra._oracle`) with zero Instant Client dependency, `SyncOraclePool` / `AsyncOraclePool` + DRCP (`cclass`, `purity`, `connection_tag`), Autonomous Wallet mTLS & IAM token auth, 26ai `VECTOR` (`0xDB`) & `OSON` binary JSON, `VTBARROW` `ArrowCursor` (`select_to_arrow` / `load_from_arrow`), delayed-commit `pipeline()`, VPD tenancy, `OracleNotificationSource` |
 | **SQL Server** | `MSSQLAsyncConfig`, `MSSQLSyncConfig` | `MSSQLConfig` | `SyncMSSQLDriver`, `AsyncMSSQLDriver` | Pure-Rust TDS 7.4/8.0 (`vertebra._mssql`), `?` / `$1` to `@P1` `sp_executesql` RPC rewriter, `BulkLoad`, `ATTENTION` cancellation, `VTBARROW` `ArrowCursor`, `SyncMSSQLPipeline` / `AsyncMSSQLPipeline`, Cloud SQL `:3307` mTLS |
 | **DuckDB** | `DuckDBAsyncConfig`, `DuckDBSyncConfig` | `DuckDBConfig` | `SyncDuckDBDriver`, `AsyncDuckDBDriver` | Native `vertebra._duckdb` (`vertebra-core[duckdb]`), single-writer/multi-reader OLAP, savepoints, `SyncDuckDBPipeline` / `AsyncDuckDBPipeline`, active ADC `httpfs` secret rotation, zero-copy Arrow SHM + `Appender` |
 | **Google BigQuery** | `BigQueryAsyncConfig`, `BigQuerySyncConfig` | `BigQueryConfig` | `SyncBigQueryDriver`, `AsyncBigQueryDriver` | Pure-Rust REST v2 + Storage Read/Write v1 (`VTBARROW` zero-copy Arrow SHM via `select_to_arrow` / `load_from_arrow`), `ObjectTableConfig` (`ObjectRef`), `dry_run` cost ceiling, ADK/Litestar/Events/Artifact stores |
@@ -168,6 +172,88 @@ emulator_config = SpannerConfig(
     endpoint="http://localhost:9010",
 )
 driver = SyncSpannerDriver(emulator_config)
+```
+
+### Oracle 26ai Native Driver
+
+The native Oracle 26ai driver (`vertebra-core[oracle]`, backed by `vertebra._oracle`) speaks Oracle Thin TNS/TTC directly from Rust with zero Oracle Instant Client (`libclntsh` / ODPI-C) dependency and `GIL_USED == False` compatibility on free-threaded Python:
+
+```mermaid
+flowchart LR
+    A["OracleConfig & Wallet"] --> B["SyncOracleDriver / AsyncOracleDriver"]
+    B --> C["SyncOraclePool / AsyncOraclePool"]
+    C --> D["DRCP, TTC Piggyback & VPD Scope"]
+    D --> E[("Oracle Database 26ai")]
+```
+
+- **Connect Descriptor Precedence, Wallet mTLS & IAM Tokens**: `OracleConfig.connect_descriptor()` resolves targets in priority order: explicit `connect_descriptor_str`, Autonomous Database Cloud Wallet aliases (`wallet_zip` bytes/path or `wallet_path` + `tns_alias`, extracted in memory via `OracleWallet.from_zip_bytes` without temporary files), multi-host RAC/Data Guard `OracleTopologyConfig`, explicit `dsn`, and `host`/`port`/`service_name` (or `sid`). Set `auth_mode="token"` with `access_token` or `token_auth_options` for IAM/OAuth2 bearer authentication.
+- **Native Pools, DRCP & Zero-RTT Session Piggyback**: `SyncOraclePool` and `AsyncOraclePool` run each physical connection on a dedicated Rust worker thread with out-of-band `cancel()` (`ORA-01013` → `QueryCancelledError`), Database Resident Connection Pooling (`OracleDrcpConfig` with `cclass`, `purity="SELF"` or `"NEW"`, and `connection_tag`), and Two-Task Common (`TTC`) piggybacking for `client_identifier`, `module`, `action`, and `ecid`.
+- **Oracle 26ai `VECTOR`, `OSON`, `RETURNING` & Arrow SHM**: Decodes binary `OSON` JSON into Python objects and binary `0xDB` `VECTOR` (`FLOAT32`, `FLOAT64`, `INT8`, `BINARY`) embeddings alongside `OracleEmbeddingPushdown`, supports single-round-trip `DML ... RETURNING ... INTO` out-binds, streams large queries into shared-memory `ArrowCursor` (`VTBARROW`) via `select_to_arrow()`, and ingests Arrow batches via `load_from_arrow()`.
+- **Delayed-Commit Pipelines, VPD Tenancy & TxEventQ Notifications**: `driver.pipeline()` holds an ambient transaction (or nested `SAVEPOINT`) across `results()` and commits only when the `with` / `async with` block exits cleanly so post-fetch checks roll back the batch. `TenantConnectionScope` and `AsyncTenantConnectionScope` apply trusted VPD procedures (`context_package_proc` / `context_clear_proc`) or `DBMS_SESSION.SET_IDENTIFIER` and evict the pooled session if lease-exit reset fails. `OracleNotificationSource` (`OracleNotifyConfig`) publishes and streams Oracle 26ai TxEventQ / `DBMS_AQ` events with exponential reconnect backoff and optional `ChangeFeed` envelopes.
+
+```python
+import msgspec
+from vertebra.db.adapters.oracle import AsyncOraclePool, OracleConfig
+from vertebra.db.adapters.oracle.config import OracleDrcpConfig
+from vertebra.db.adapters.oracle.notify import OracleNotifyConfig
+from vertebra.db.rls import AsyncTenantConnectionScope, TenantScopeConfig
+
+
+class DocumentChunk(msgspec.Struct):
+    id: int
+    title: str
+    metadata: dict[str, str]
+
+
+async with AsyncOraclePool(
+    OracleConfig(
+        wallet_zip=wallet_bytes,
+        tns_alias="appdb_high",
+        user="app_user",
+        password="secret",
+        drcp=OracleDrcpConfig(cclass="APP_POOL", purity="SELF"),
+        context_namespace="APP_CTX",
+        context_package_proc="APP_SEC.CTX_PKG.SET_TENANT",
+        context_clear_proc="APP_SEC.CTX_PKG.CLEAR_TENANT",
+    ),
+    min_size=2,
+    max_size=16,
+) as pool:
+    async with (
+        pool.acquire() as driver,
+        AsyncTenantConnectionScope(
+            driver,
+            "tenant-acme",
+            TenantScopeConfig(setting_name="tenant_id"),
+        ),
+    ):
+        async with driver.pipeline() as pipe:
+            pipe.execute(
+                "INSERT INTO doc_chunks (id, title, metadata, embedding) "
+                "VALUES (:id, :title, :meta, :vec)",
+                {
+                    "id": 1,
+                    "title": "Vector Guide",
+                    "meta": {"tier": "prod"},
+                    "vec": [0.12, 0.48, 0.87],
+                },
+            )
+            pipe.select("SELECT COUNT(*) AS total FROM doc_chunks")
+            _, totals = await pipe.results()
+
+        top_chunks = await driver.select(
+            "SELECT id, title, metadata FROM doc_chunks "
+            "ORDER BY VECTOR_DISTANCE(embedding, :query_vec, COSINE) "
+            "FETCH FIRST 5 ROWS ONLY",
+            {"query_vec": [0.10, 0.50, 0.85]},
+            schema_type=DocumentChunk,
+        )
+        notifications = driver.notification_source(
+            OracleNotifyConfig(queue_prefix="VTB_AQ_", wait_timeout_seconds=5),
+        )
+        await notifications.subscribe(["doc_events"])
+        await notifications.publish("doc_events", b'{"doc_id": 1}')
+        await notifications.close()
 ```
 
 ### Typed `DatabaseError` Hierarchy & Google Cloud Exceptions

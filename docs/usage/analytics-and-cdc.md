@@ -49,9 +49,10 @@ Setter failures propagate unchanged. Other base SQLSpec adapters raise
 their existing query, script, Arrow, batch, and snapshot behavior.
 
 `OracleCore.build_session_context_sql()` validates the namespace and final segment
-of `setting_name`, then returns named context binds. Oracle drivers raise
-`MissingDependencyError` because the native Oracle driver package is not yet
-published, so no Vertebra session executes the block. Live
+of `setting_name`, then returns named binds: the default `USERENV` namespace runs
+`DBMS_SESSION.SET_IDENTIFIER`, a custom namespace runs `DBMS_SESSION.SET_CONTEXT`,
+and `context_package_proc` routes through a trusted package. Oracle drivers clear
+the context before pool release and evict the session if the reset fails. Live
 `DBMS_SESSION.SET_CONTEXT` requires a trusted package associated with
 `CREATE CONTEXT`. See the
 [Oracle DBMS_SESSION documentation](https://docs.oracle.com/en/database/oracle/oracle-database/26/arpls/DBMS_SESSION.html).

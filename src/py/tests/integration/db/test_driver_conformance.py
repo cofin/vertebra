@@ -93,7 +93,8 @@ from vertebra.typing import FrozenBaseStruct, MissingDependencyError, reset_depe
 from vertebra.utils.module_loader import ensure_module, import_optional
 from vertebra.utils.serializers import decode_json, encode_json
 
-_FAIL_LOUD_DRIVER_ENGINES: frozenset[str] = frozenset({"oracle"})
+_FAIL_LOUD_DRIVER_ENGINES: frozenset[str] = frozenset()
+_DUCKDB_SKIP_REASON = "duckdb publishes no free-threaded wheel; DuckDB tests run on GIL interpreters"
 
 
 class _RollbackSentinelError(RuntimeError):
@@ -210,6 +211,24 @@ _MSSQL_TYPES_DDL = (
     "val_bytes VARBINARY(MAX), "
     "val_ts DATETIMEOFFSET, "
     "val_json NVARCHAR(MAX)"
+    ")"
+)
+
+_ORACLE_ITEMS_DDL = (
+    "CREATE TABLE vtb_conformance_items (id NUMBER(19) PRIMARY KEY, label VARCHAR2(255) NOT NULL, amount NUMBER(19))"
+)
+
+_ORACLE_TYPES_DDL = (
+    "CREATE TABLE vtb_conformance_types ("
+    "id NUMBER(19) PRIMARY KEY, "
+    "val_int NUMBER(19), "
+    "val_float BINARY_DOUBLE, "
+    "val_decimal NUMBER(18, 6), "
+    "val_bool BOOLEAN, "
+    "val_text CLOB, "
+    "val_bytes RAW(2000), "
+    "val_ts TIMESTAMP WITH TIME ZONE, "
+    "val_json JSON"
     ")"
 )
 
@@ -403,8 +422,11 @@ ENGINE_SPECS: tuple[EngineConformanceSpec, ...] = (
         sample_url="oracle://system:secret@127.0.0.1:1521/FREEPDB1",
         probe_sql="SELECT 1 FROM DUAL",
         placeholder_style="colon",
+        items_ddl=_ORACLE_ITEMS_DDL,
+        types_ddl=_ORACLE_TYPES_DDL,
+        supports_pipeline=True,
         native_extension_module="vertebra._oracle",
-        pending_flow_id="native-oracle-driver",
+        pending_flow_id=None,
         env_dsn_vars=("VERTEBRA_CONFORMANCE_ORACLE_DSN",),
         container_fixture="vtb_oracle_config",
     ),
@@ -695,6 +717,8 @@ def _resolve_live_config(
         loopback_server = mysql_mod.MySQLWireTestServer()
         request.addfinalizer(loopback_server.close)
         return MySQLConfig.from_url(loopback_server.dsn)
+    if spec.engine == "oracle":
+        pytest.skip("Oracle conformance requires VERTEBRA_CONFORMANCE_ORACLE_DSN or VERTEBRA_CONFORMANCE_DOCKER=1")
     return spec.config_cls.from_url(spec.sample_url)
 
 
@@ -766,6 +790,11 @@ def sync_sql_driver(
                     spec.types_ddl,
                 ]
             )
+        elif isinstance(driver, SyncOracleDriver):
+            driver.execute("DROP TABLE IF EXISTS vtb_conformance_items PURGE")
+            driver.execute("DROP TABLE IF EXISTS vtb_conformance_types PURGE")
+            driver.execute(spec.items_ddl)
+            driver.execute(spec.types_ddl)
         else:
             driver.execute("DROP TABLE IF EXISTS vtb_conformance_items")
             driver.execute("DROP TABLE IF EXISTS vtb_conformance_types")
@@ -799,6 +828,11 @@ async def async_sql_driver(
                     spec.types_ddl,
                 ]
             )
+        elif isinstance(driver, AsyncOracleDriver):
+            await driver.execute("DROP TABLE IF EXISTS vtb_conformance_items PURGE")
+            await driver.execute("DROP TABLE IF EXISTS vtb_conformance_types PURGE")
+            await driver.execute(spec.items_ddl)
+            await driver.execute(spec.types_ddl)
         else:
             await driver.execute("DROP TABLE IF EXISTS vtb_conformance_items")
             await driver.execute("DROP TABLE IF EXISTS vtb_conformance_types")

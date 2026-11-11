@@ -178,6 +178,7 @@ paths = [
   "src/rs/vertebra-mssql/**",
   "src/rs/vertebra-spanner/**",
   "src/rs/vertebra-duckdb/**",
+  "src/rs/vertebra-oracle/**",
   "src/rs/vertebra-bundler/src/lib.rs",
   "src/rs/vertebra-storage/src/lib.rs",
   "src/py/vertebra/_vertebra.pyi",
@@ -187,7 +188,8 @@ paths = [
   "src/py/vertebra/_bigquery.pyi",
   "src/py/vertebra/_mssql.pyi",
   "src/py/vertebra/_spanner.pyi",
-  "src/py/vertebra/_duckdb.pyi"
+  "src/py/vertebra/_duckdb.pyi",
+  "src/py/vertebra/_oracle.pyi"
 ]
 knowledge = [
   ".agents/bundles/knowledge/architecture/worker/pyo3-ffi-and-batch-dispatch.md",

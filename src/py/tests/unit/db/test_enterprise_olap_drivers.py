@@ -11,7 +11,6 @@ import sqlite3
 import struct
 import sys
 import zipfile
-from types import ModuleType
 from typing import TYPE_CHECKING, Any
 
 import msgspec
@@ -137,7 +136,6 @@ from vertebra.typing import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
     from pathlib import Path
 
 _DUCKDB_SKIP_REASON = "vertebra._duckdb native extension is not built"
@@ -1092,8 +1090,8 @@ async def test_postgresql_tenant_session_prepares_asyncpg_binds(config_defaults:
         await native.close()
 
 
-def test_oracle_tenant_predicate_sets_session_context_through_native_port() -> None:
-    """OracleSyncDriver executes DBMS_SESSION.SET_CONTEXT against its native port."""
+def test_oracle_tenant_predicate_sets_session_identifier_through_native_port() -> None:
+    """OracleSyncDriver executes DBMS_SESSION.SET_IDENTIFIER against its native port."""
     port = _OracleSessionPort()
     adapter = OracleSyncDriver(port)
     assert adapter.apply_tenant_predicate(TenantPredicate(table_alias="o", tenant_value="acme")) == (
@@ -1101,15 +1099,15 @@ def test_oracle_tenant_predicate_sets_session_context_through_native_port() -> N
     )
     assert port.calls == [
         (
-            "BEGIN DBMS_SESSION.SET_CONTEXT(:namespace, :attribute, :value); END;",
-            {"namespace": "VERTEBRA_CTX", "attribute": "tenant_id", "value": "acme"},
+            "BEGIN DBMS_SESSION.SET_IDENTIFIER(:value); END;",
+            {"value": "acme"},
         )
     ]
 
 
 @pytest.mark.anyio
-async def test_async_oracle_tenant_predicate_sets_session_context_through_native_port() -> None:
-    """OracleAsyncDriver executes DBMS_SESSION.SET_CONTEXT against its async native port."""
+async def test_async_oracle_tenant_predicate_sets_session_identifier_through_native_port() -> None:
+    """OracleAsyncDriver executes DBMS_SESSION.SET_IDENTIFIER against its async native port."""
     port = _AsyncOracleSessionPort()
     adapter = OracleAsyncDriver(port)
     assert await adapter.apply_tenant_predicate(TenantPredicate(table_alias="o", tenant_value="acme")) == (
@@ -1117,8 +1115,8 @@ async def test_async_oracle_tenant_predicate_sets_session_context_through_native
     )
     assert port.calls == [
         (
-            "BEGIN DBMS_SESSION.SET_CONTEXT(:namespace, :attribute, :value); END;",
-            {"namespace": "VERTEBRA_CTX", "attribute": "tenant_id", "value": "acme"},
+            "BEGIN DBMS_SESSION.SET_IDENTIFIER(:value); END;",
+            {"value": "acme"},
         )
     ]
 
@@ -1262,80 +1260,6 @@ async def test_oracle_async_sqlspec_session_raises_missing_dependency(
         with pytest.raises(MissingDependencyError, match=r"vertebra-core\[oracle\]"):
             async with cfg.provide_session():
                 pass
-    finally:
-        reset_dependency_cache("vertebra._oracle")
-
-
-def test_oracle_driver_with_stub_native_module_raises_not_implemented(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """With a stub vertebra._oracle module, SyncOracleDriver.select raises NotImplementedError from the base class."""
-    monkeypatch.setitem(sys.modules, "vertebra._oracle", ModuleType("vertebra._oracle"))
-    reset_dependency_cache("vertebra._oracle")
-    try:
-        drv = SyncOracleDriver()
-        with pytest.raises(NotImplementedError):
-            drv.select("SELECT 42 AS x FROM DUAL")
-    finally:
-        reset_dependency_cache("vertebra._oracle")
-
-
-@pytest.mark.parametrize(
-    "call",
-    [
-        pytest.param(lambda drv: drv.connect(), id="connect"),
-        pytest.param(lambda drv: drv.close(), id="close"),
-        pytest.param(lambda drv: drv.begin(), id="begin"),
-        pytest.param(lambda drv: drv.commit(), id="commit"),
-        pytest.param(lambda drv: drv.rollback(), id="rollback"),
-        pytest.param(lambda drv: drv.cancel(), id="cancel"),
-        pytest.param(lambda drv: drv.execute("SELECT 1 FROM DUAL"), id="execute"),
-        pytest.param(lambda drv: drv.execute_many("INSERT INTO items VALUES (1)", []), id="execute_many_empty"),
-        pytest.param(lambda drv: drv.execute_tuples("SELECT 1 FROM DUAL"), id="execute_tuples"),
-        pytest.param(lambda drv: drv.execute_with_description("SELECT 1 FROM DUAL"), id="execute_with_description"),
-        pytest.param(lambda drv: drv.select("SELECT 1 FROM DUAL"), id="select"),
-        pytest.param(lambda drv: drv.select_to_arrow("SELECT 1 FROM DUAL"), id="select_to_arrow"),
-        pytest.param(lambda drv: drv.load_from_arrow("items", [{"id": 1}]), id="load_from_arrow"),
-    ],
-)
-def test_oracle_driver_methods_require_native_module(
-    monkeypatch: pytest.MonkeyPatch,
-    call: Callable[[SyncOracleDriver], object],
-) -> None:
-    """Every public method on SyncOracleDriver raises MissingDependencyError when vertebra._oracle is absent."""
-    with pytest.MonkeyPatch.context() as stub_ctx:
-        stub_ctx.setitem(sys.modules, "vertebra._oracle", ModuleType("vertebra._oracle"))
-        reset_dependency_cache("vertebra._oracle")
-        drv = SyncOracleDriver()
-    assert not hasattr(drv, "__dict__")
-    monkeypatch.setitem(sys.modules, "vertebra._oracle", None)
-    reset_dependency_cache("vertebra._oracle")
-    try:
-        with pytest.raises(MissingDependencyError, match=r"vertebra-core\[oracle\]"):
-            call(drv)
-    finally:
-        reset_dependency_cache("vertebra._oracle")
-
-
-@pytest.mark.anyio
-async def test_async_oracle_driver_methods_require_native_module(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """AsyncOracleDriver.load_from_arrow, execute, and empty execute_many raise MissingDependencyError when absent."""
-    with pytest.MonkeyPatch.context() as stub_ctx:
-        stub_ctx.setitem(sys.modules, "vertebra._oracle", ModuleType("vertebra._oracle"))
-        reset_dependency_cache("vertebra._oracle")
-        drv = AsyncOracleDriver()
-    assert not hasattr(drv, "__dict__")
-    monkeypatch.setitem(sys.modules, "vertebra._oracle", None)
-    reset_dependency_cache("vertebra._oracle")
-    try:
-        with pytest.raises(MissingDependencyError, match=r"vertebra-core\[oracle\]"):
-            await drv.load_from_arrow("items", [{"id": 1}])
-        with pytest.raises(MissingDependencyError, match=r"vertebra-core\[oracle\]"):
-            await drv.execute("SELECT 1 FROM DUAL")
-        with pytest.raises(MissingDependencyError, match=r"vertebra-core\[oracle\]"):
-            await drv.execute_many("INSERT INTO items VALUES (1)", [])
     finally:
         reset_dependency_cache("vertebra._oracle")
 

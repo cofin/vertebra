@@ -27,7 +27,7 @@ verified:
 sources:
 - id: src-oracle-driver-py
   resource: src/py/vertebra/db/adapters/oracle/driver.py::SyncOracleDriver
-  title: Oracle driver native-module guard
+  title: Oracle drivers over the standalone vertebra._oracle module
 - id: src-extensions-sqlspec-init-py
   resource: src/py/vertebra/extensions/sqlspec/__init__.py
   title: Python implementation module (src/py/vertebra/extensions/sqlspec/__init__.py)
@@ -165,4 +165,4 @@ Provenance sources: [^src-extensions-sqlspec-init-py], [^src-extensions-sqlspec-
 
 [^src-storage-arrow-codecs]: `src/py/vertebra/storage/_arrow.py` — Bounded codecs, format options, and resource ownership.
 
-[^src-oracle-driver-py]: `src/py/vertebra/db/adapters/oracle/driver.py::SyncOracleDriver` — Oracle driver native-module guard.
+[^src-oracle-driver-py]: `src/py/vertebra/db/adapters/oracle/driver.py::SyncOracleDriver` — Oracle drivers over the standalone `vertebra._oracle` module.
