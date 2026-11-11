@@ -13,11 +13,11 @@ replan_trigger: null
 current_task: null
 plan_revision: 6
 plan_commit: ef86844f
-state_revision: 1
-last_verified_checkpoint: 2a575ce3
+state_revision: 2
+last_verified_checkpoint: 99f80d07
 last_reviewed_commit: null
 created_at: "2026-11-05T00:00:00Z"
-updated_at: "2026-11-10T23:44:00Z"
+updated_at: "2026-11-11T00:36:00Z"
 generated:
   by: flow-setup
   at: "2026-11-07T05:00:00Z"
@@ -79,7 +79,7 @@ Parent roadmap: [spec.md](../../spec.md) and [contracts.md](../../contracts.md).
 
 ### 2.1 Chapter Requirements
 
-- **R21.1 (`ch21:t01`)**: Expose `pub(crate) async fn establish_standalone_connection(config: &PostgresConfig, replication_database: bool) -> Result<PostgresConnection, PostgresError>` in `src/rs/vertebra-postgres/src/session.rs` and implement `PostgresListener` in `src/rs/vertebra-postgres/src/notifications.rs` rejecting `PoolerMode::Transaction | PoolerMode::Statement | PoolerMode::Auto` (requiring explicit `PoolerMode::Direct | PoolerMode::Session`, matching `derive_direct_config()`) with `PostgresError::Interface` before dialing, validating `1 <= channel.len() <= 63` UTF-8 bytes (`NAMEDATALEN - 1`) and double-quoting `LISTEN` / `UNLISTEN` identifiers, pumping `postgres_protocol::message::backend::Message::NotificationResponse` frames into a bounded `1024`-frame + `8 MiB` queue with a `1`-slot unconsumed front buffer (`push_front_unconsumed`) and fail-closed `PostgresError::Operational` overflow, servicing `subscribe`/`unsubscribe`/`close` on a separate control channel, and supporting optional recoverable reconnect (`0.1s..5.0s` jitter, max `8` attempts, refreshed direct/IAM credentials, full resubscribe before delivery, and `reconnected_gap = true`).
+- **R21.1 (`ch21:t01`)**: Expose `pub(crate) async fn establish_standalone_connection(config: &PostgresConfig, replication_database: bool) -> Result<PostgresConnection, PostgresError>` in `src/rs/vertebra-postgres/src/session.rs` and implement `PostgresListener` in `src/rs/vertebra-postgres/src/notifications.rs` rejecting `PoolerMode::Transaction | PoolerMode::Statement | PoolerMode::Auto` (requiring explicit `PoolerMode::Direct | PoolerMode::Session`, matching `derive_direct_config()`) with `PostgresError::Interface` before dialing, validating `1 <= channel.len() <= 63` UTF-8 bytes (`NAMEDATALEN - 1`) and double-quoting `LISTEN` / `UNLISTEN` identifiers, pumping `postgres_protocol::message::backend::Message::NotificationResponse` frames into a bounded `1024`-frame + `8 MiB` queue with a `1`-slot unconsumed front buffer (`push_front_unconsumed`) and fail-closed `PostgresError::Operational` overflow, servicing `subscribe`/`unsubscribe` on a separate control channel alongside `close_notify` shutdown wakeups, and supporting optional recoverable reconnect (`0.1s..5.0s` jitter, max `8` attempts, refreshed direct/IAM credentials, full resubscribe before delivery, and `reconnected_gap = true`).
 - **R21.2 (`ch21:t02`)**: Expose `AsyncPostgresListener` (`next`, `subscribe`, `unsubscribe`, `aclose`, `__aenter__`, `__aexit__`, read-only `@property def closed -> bool`) and `open_listener(channels, *, queue_capacity=1024, reconnect=False) -> Awaitable[AsyncPostgresListener]` on both `SyncPostgresClient` and `AsyncPostgresClient` in `sync_client.rs`, `async_client.rs`, and `src/py/vertebra/_postgres.pyi`, rejecting `PoolerMode::Transaction | PoolerMode::Statement | PoolerMode::Auto` (requiring explicit `PoolerMode::Direct | PoolerMode::Session`), enforcing single-pending `next()` (`InterfaceError` on overlap), and wrapping popped frames in an RAII `PendingDeliveryGuard` so cancelled Tokio waiters or cancelled `asyncio.Future` completions dropped by `DbCompletionDrainer` restore the unconsumed frame to the front of the queue for the next `await next()`.
 - **R21.3 (`ch21:t03`)**: Add permanent `PostgresNotificationDriver(Protocol)` in `src/py/vertebra/db/adapters/postgres/events.py`, add real `_publish_notification` methods to the two legacy classes in `src/py/vertebra/db/adapters/postgres/driver.py`, and upgrade `src/py/vertebra/db/adapters/postgres/notify.py::PostgresNotificationSource` with explicit `self._subscribed_channels = {}` (`[]` until `subscribe()`), `1..=63` UTF-8 byte channel validation, uniform `await _driver._publish_notification(...)`, live `subscribe`/`unsubscribe` synchronization, `pooler_mode` direct-session validation, UTF-8-decoded raw/`b64:`/`ChangeFeed` hydration, and idempotent `aclose()` / async context management.
 
@@ -157,7 +157,7 @@ Progress: `[0/0 files documented in ch21]` (repository-wide public docs and OKF 
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `plan_revision: 6`, `plan_commit: ef86844f`; chapter `state: in_progress` awaiting zero-context chapter review (`last_verified_checkpoint: 2a575ce3`; `make lint-all`, `postgres_notification_wire_tests` `11 passed`, `test_postgres_native_notifications.py` `71 passed`, `test_pg_dataplane_and_datafusion.py -k notif` `47 passed` -> exit `0`).
+- **Verified Baseline**: `plan_revision: 6`, `plan_commit: ef86844f`; chapter `state: in_progress` awaiting zero-context chapter review (`last_verified_checkpoint: 99f80d07`; `make lint-all`, `postgres_notification_wire_tests` `11 passed`, `test_postgres_native_notifications.py` `72 passed`, `test_pg_dataplane_and_datafusion.py -k notif` `47 passed` -> exit `0`).
 - **Remaining Tasks in Chapter**: None (`3/3` completed: `t01` `356e79c1`, `t02` `fa483036`, `t03` `2a575ce3`).
 - **Downstream Dependents**: Unblocks `ch22-copyboth-and-pgoutput-decoding` (`CopyBoth` logical replication reusing `establish_standalone_connection`), `ch24:t01` (`events.py` replication protocol), and `ch26:t04` (`dedicated-driver-event-hooks`).
 
