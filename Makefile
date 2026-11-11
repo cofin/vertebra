@@ -209,7 +209,6 @@ py-test: dev                                        ## Run Python tests
 	@uv run $(PY_TEST_GROUPS) pytest src/py/tests -v
 	@echo "${OK} Python tests passed"
 
-<<<<<<< HEAD
 .PHONY: duckdb-test
 duckdb-test:                                        ## Run vertebra-duckdb Rust + Python unit and conformance tests
 	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
