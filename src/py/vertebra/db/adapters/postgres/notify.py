@@ -10,7 +10,13 @@ from types import TracebackType
 from typing import TYPE_CHECKING, Final, Self
 
 from vertebra.db.adapters.postgres.config import PostgreSQLConfig
-from vertebra.db.driver import InterfaceError, NotificationEvent, NotificationSource, NotSupportedError
+from vertebra.db.driver import (
+    DatabaseError,
+    InterfaceError,
+    NotificationEvent,
+    NotificationSource,
+    NotSupportedError,
+)
 from vertebra.typing import FrozenBaseStruct, ImproperConfigurationError
 from vertebra.utils.text import validate_identifier
 
@@ -244,22 +250,22 @@ class PostgresNotificationSource(NotificationSource):
             if self._generation != generation or listener.closed:
                 return
             self._listener = listener
-            applied = initial_channels
-            while True:
-                desired = tuple(self._subscribed_channels)
-                if desired == applied or self._generation != generation or listener.closed:
-                    return
-                applied_set = set(applied)
-                desired_set = set(desired)
-                added = tuple(ch for ch in desired if ch not in applied_set)
-                removed = tuple(ch for ch in applied if ch not in desired_set)
+            desired = tuple(self._subscribed_channels)
+            initial_set = set(initial_channels)
+            desired_set = set(desired)
+            if desired_set == initial_set:
+                return
+            added = tuple(ch for ch in desired if ch not in initial_set)
+            removed = tuple(ch for ch in initial_channels if ch not in desired_set)
+            try:
                 if added and self._generation == generation and not listener.closed:
                     await listener.subscribe(added)
-                    applied = tuple(dict.fromkeys((*applied, *added)))
                 if removed and self._generation == generation and not listener.closed:
                     await listener.unsubscribe(removed)
-                    removed_set = set(removed)
-                    applied = tuple(ch for ch in applied if ch not in removed_set)
+            except (InterfaceError, DatabaseError):
+                if self._generation != generation:
+                    return
+                raise
 
     def _hydrate_payload(self, raw_payload: bytes) -> bytes:
         """Decode UTF-8 notification text and hydrate ChangeFeed or b64-prefixed binary payloads."""

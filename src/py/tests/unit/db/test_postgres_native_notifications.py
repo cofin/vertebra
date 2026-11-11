@@ -1287,16 +1287,22 @@ def test_notification_source_concurrent_listen_guard_and_lazy_extension_imports(
 
 
 def test_notification_source_startup_reconciliation_and_concurrent_subscriptions() -> None:
-    """Converge subscribe/unsubscribe mutations raced across listener startup, LISTEN reconciliation, and steady state."""
+    """Converge subscribe/unsubscribe mutations, channel reorderings, and source.aclose() across startup and LISTEN."""
+    gate_lock = threading.Lock()
+    gated_startup_idx = 1
     entered_startup = threading.Event()
     release_startup = threading.Event()
     entered_listen_b = threading.Event()
     release_listen_b = threading.Event()
     entered_listen_c = threading.Event()
     release_listen_c = threading.Event()
+    entered_listen_aclose = threading.Event()
+    release_listen_aclose = threading.Event()
 
     def _startup_hook(idx: int, _conn: socket.socket) -> bytes | None:
-        if idx == 1:
+        with gate_lock:
+            should_gate = idx == gated_startup_idx
+        if should_gate:
             entered_startup.set()
             release_startup.wait(timeout=3.0)
         return None
@@ -1308,11 +1314,15 @@ def test_notification_source_startup_reconciliation_and_concurrent_subscriptions
         elif sql == 'LISTEN "c"' and not entered_listen_c.is_set():
             entered_listen_c.set()
             release_listen_c.wait(timeout=3.0)
+        elif sql == 'LISTEN "closing_ch"' and not entered_listen_aclose.is_set():
+            entered_listen_aclose.set()
+            release_listen_aclose.wait(timeout=3.0)
         return False
 
     with _running_pg_server(startup_hook=_startup_hook, query_hook=_query_hook) as srv:
 
         async def _run() -> None:
+            nonlocal gated_startup_idx
             cfg = PostgreSQLConfig(
                 dsn=f"postgresql://postgres@127.0.0.1:{srv.port}/appdb",
                 max_size=1,
@@ -1382,10 +1392,100 @@ def test_notification_source_startup_reconciliation_and_concurrent_subscriptions
                             first_waiter.cancel()
                             with contextlib.suppress(BaseException):
                                 await first_waiter
+
+                async with PostgresNotificationSource(port, queue_capacity=16) as reorder_source:
+                    await reorder_source.subscribe(["x", "y"])
+                    entered_startup.clear()
+                    release_startup.clear()
+                    with gate_lock:
+                        gated_startup_idx = srv.accept_count + 1
+                    reorder_stream = reorder_source.listen()
+                    reorder_waiter = asyncio.create_task(_as_coro(anext(reorder_stream)))
+                    try:
+                        assert await _wait_threading_event(entered_startup, timeout=3.0)
+                        await reorder_source.unsubscribe(["x"])
+                        await reorder_source.subscribe(["z", "x"])
+                        assert reorder_source.subscribed_channels == ["y", "z", "x"]
+                        release_startup.set()
+
+                        reorder_sess = srv.session(gated_startup_idx - 1)
+                        assert await reorder_sess.wait_for_query_count_async(3, timeout=3.0)
+                        assert reorder_sess.queries == ['LISTEN "x"', 'LISTEN "y"', 'LISTEN "z"']
+                        await reorder_source.publish("x", "reordered-x")
+                        evt_x = await asyncio.wait_for(reorder_waiter, timeout=1.0)
+                        assert evt_x.channel == "x"
+                        assert evt_x.payload == b"reordered-x"
+
+                        await reorder_source.publish("z", "added-z")
+                        evt_z = await asyncio.wait_for(_as_coro(anext(reorder_stream)), timeout=1.0)
+                        assert evt_z.channel == "z"
+                        assert evt_z.payload == b"added-z"
+                    finally:
+                        release_startup.set()
+                        if not reorder_waiter.done():
+                            reorder_waiter.cancel()
+                            with contextlib.suppress(BaseException):
+                                await reorder_waiter
+
+                async with PostgresNotificationSource(port, queue_capacity=16) as same_set_source:
+                    await same_set_source.subscribe(["m", "n"])
+                    entered_startup.clear()
+                    release_startup.clear()
+                    with gate_lock:
+                        gated_startup_idx = srv.accept_count + 1
+                    same_set_stream = same_set_source.listen()
+                    same_set_waiter = asyncio.create_task(_as_coro(anext(same_set_stream)))
+                    try:
+                        assert await _wait_threading_event(entered_startup, timeout=3.0)
+                        await same_set_source.unsubscribe(["m"])
+                        await same_set_source.subscribe(["m"])
+                        assert same_set_source.subscribed_channels == ["n", "m"]
+                        release_startup.set()
+
+                        same_set_sess = srv.session(gated_startup_idx - 1)
+                        assert await same_set_sess.wait_for_query_count_async(2, timeout=3.0)
+                        await same_set_source.publish("m", "same-set-m")
+                        evt_m = await asyncio.wait_for(same_set_waiter, timeout=1.0)
+                        assert evt_m.channel == "m"
+                        assert evt_m.payload == b"same-set-m"
+                        assert same_set_sess.queries == ['LISTEN "m"', 'LISTEN "n"']
+                    finally:
+                        release_startup.set()
+                        if not same_set_waiter.done():
+                            same_set_waiter.cancel()
+                            with contextlib.suppress(BaseException):
+                                await same_set_waiter
+
+                closing_source = PostgresNotificationSource(port, queue_capacity=16)
+                await closing_source.subscribe(["m"])
+                entered_startup.clear()
+                release_startup.clear()
+                with gate_lock:
+                    gated_startup_idx = srv.accept_count + 1
+                sentinel = object()
+                closing_stream = closing_source.listen()
+                closing_waiter = asyncio.create_task(_as_coro(anext(closing_stream, sentinel)))
+                try:
+                    assert await _wait_threading_event(entered_startup, timeout=3.0)
+                    await closing_source.subscribe(["closing_ch"])
+                    release_startup.set()
+                    assert await _wait_threading_event(entered_listen_aclose, timeout=3.0)
+
+                    await asyncio.wait_for(closing_source.aclose(), timeout=1.0)
+                    assert await asyncio.wait_for(closing_waiter, timeout=1.0) is sentinel
+                finally:
+                    release_startup.set()
+                    release_listen_aclose.set()
+                    await closing_source.aclose()
+                    if not closing_waiter.done():
+                        closing_waiter.cancel()
+                        with contextlib.suppress(BaseException):
+                            await closing_waiter
             finally:
                 release_startup.set()
                 release_listen_b.set()
                 release_listen_c.set()
+                release_listen_aclose.set()
                 await concrete_port.aclose()
 
         asyncio.run(_run())
