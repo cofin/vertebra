@@ -14,6 +14,9 @@ generated:
   by: flow/0.26.0
   at: "2026-11-04T04:33:00Z"
 verified:
+  - by: agent:flow-archive
+    at: "2026-11-09T20:56:00Z"
+    commit: 62a29db7
   - by: agent:flow-setup
     at: "2026-11-07T03:55:00Z"
     commit: 9af810f5
@@ -36,12 +39,30 @@ sources:
   - id: src-tests-unit-framework-test-email-providers-py
     resource: src/py/tests/unit/framework/test_email_providers.py
     title: "Python implementation module (src/py/tests/unit/framework/test_email_providers.py)"
+  - id: src-framework-queues-base-py
+    resource: src/py/vertebra/framework/queues/base.py::QueueService._build_backend
+    title: "Queue URL scheme routing to backend constructors"
+  - id: src-framework-queues-postgres-py
+    resource: src/py/vertebra/framework/queues/postgres.py::PostgreSQLQueueBackend
+    title: "PostgreSQL queue backend requiring an injected executor"
+  - id: src-framework-queues-redis-py
+    resource: src/py/vertebra/framework/queues/redis.py::RedisQueueBackend
+    title: "Redis and Valkey Streams queue backends requiring a redis client"
+  - id: src-framework-queues-oracle-py
+    resource: src/py/vertebra/framework/queues/oracle.py::OracleQueueBackend
+    title: "Oracle queue backend requiring an injected executor"
+  - id: src-framework-queues-spanner-py
+    resource: src/py/vertebra/framework/queues/spanner.py::SpannerQueueBackend
+    title: "Spanner queue backend requiring an injected executor"
 ---
 
 # Distributed Queues, Cron Leader Election & Transactional Email
 
 <!-- truth: start -->
 - `QueueService` and `@task` execute priority, delayed, and dead-letter jobs across `MemoryQueueBackend`, `RedisQueueBackend`, `ValkeyQueueBackend`, `PostgreSQLQueueBackend`, `OracleQueueBackend`, and `SpannerQueueBackend` alongside lease-elected `CronScheduler` and `WorkerRunner` lanes.
+- `OracleQueueBackend`, `PostgreSQLQueueBackend`, and `SpannerQueueBackend` bind an injected `executor=`; without one they raise `MissingDependencyError` when `oracledb`, `psycopg`, or `vertebra._spanner` is missing and `ImproperConfigurationError` otherwise. No live executor ships for these backends.
+- `RedisQueueBackend` and `ValkeyQueueBackend` bind an injected `client=`; without one they raise `MissingDependencyError` when `redis.asyncio` is missing, `ImproperConfigurationError` when `backend_url` has no hostname (including hostless `unix://` URLs), and otherwise pass `backend_url` directly to `redis.asyncio.from_url` (`redis://` / `rediss://` schemes only; `valkey://`, `valkeys://`, and `unix://` targets require a `redis://` / `rediss://` host URL or an injected `client=`).
+- `QueueService` routes `""` and `memory` schemes to `MemoryQueueBackend`.
 - `EmailService` sends transactional email across `MemoryEmailTransport`, `SmtpEmailTransport`, `ResendEmailTransport`, `SendGridEmailTransport`, `MailgunEmailTransport`, and `SesEmailTransport` behind the `EmailTransport` protocol.
 <!-- truth: end -->
 
@@ -49,16 +70,16 @@ Vertebra provides pluggable distributed background task queues, multi-process cr
 
 ## 1. Distributed Queue Backends (`framework/queues/`)
 
-[`QueueService`](../../../../../src/py/vertebra/framework/queues/__init__.py) provides unified `@task` enqueueing, delayed scheduling, dead-letter routing, and retry backoff across six storage backends (`PostgreSQLQueueBackend`, `OracleQueueBackend`, `RedisQueueBackend`, and `ValkeyQueueBackend` delegate SQL and RESP execution to caller-supplied `PostgreSQLQueueExecutor` / `OracleQueueExecutor` or configured client adapters, while `SpannerQueueBackend` pairs with `vertebra-spanner` via `SpannerQueueExecutor`):
+[`QueueService`](../../../../../src/py/vertebra/framework/queues/__init__.py) dispatches `@task` enqueueing, delayed scheduling, dead-letter routing, and retry backoff across six storage backends routed by `QueueService._build_backend`[^src-framework-queues-base-py]; Oracle, PostgreSQL, and Spanner run SQL through an injected executor protocol (`executor=`), while Redis and Valkey run through an injected or URL-built `RedisStreamClient` (`client=`):
 
 | Backend | Implementation & Storage Mechanics |
 | :--- | :--- |
 | `MemoryQueueBackend` | In-process asyncio `PriorityQueue` with monotonic sequence tracking for hermetic unit testing and single-process servers. |
-| `RedisQueueBackend` | Redis list and sorted-set (`ZADD`/`ZPOPMIN`) primitives for FIFO queues and delayed task scheduling. |
-| `ValkeyQueueBackend` | Valkey client-side tracking with atomic queue leasing and tenant-isolated namespaces. |
-| `PostgreSQLQueueBackend` | `FOR UPDATE SKIP LOCKED` row-level leasing over a dedicated `vertebra_tasks` table (`PostgreSQLQueueExecutor`), with index-accelerated lease expiration checks. |
-| `OracleQueueBackend` | Oracle Advanced Queuing (`DBMS_AQ`) and table-backed queue leasing (`OracleQueueExecutor`) using `SKIP LOCKED` queries and sequence-backed enqueues. |
-| `SpannerQueueBackend` | Spanner read-write transaction leasing (`SpannerQueueExecutor`) with multiplexed session support and deterministic retry semantics. |
+| `RedisQueueBackend` | Per-lane Redis Streams with consumer groups (`XADD`, `XREADGROUP`, `XAUTOCLAIM` visibility recovery, `XACK`) plus a scheduled sorted set (`ZADD`) promoted into streams by a `ZRANGEBYSCORE` + `XADD` Lua script; binds `client=` or a hosted `redis://` / `rediss://` URL via `redis.asyncio.from_url` (hostless `unix://` URLs raise `ImproperConfigurationError` unless `client=` is passed)[^src-framework-queues-redis-py]. |
+| `ValkeyQueueBackend` | `RedisQueueBackend` subclass with default `stream_prefix` `vtb:valkey:queue`; `redis.asyncio.from_url` accepts `redis://` / `rediss://` schemes only, so `valkey://` / `valkeys://` and `unix://` endpoints require a `redis://` / `rediss://` host URL or an injected `client=`[^src-framework-queues-redis-py]. |
+| `PostgreSQLQueueBackend` | `FOR UPDATE SKIP LOCKED` claims over `vertebra_queue_jobs` with `vertebra_queue_dlq` and `vertebra_queue_leases`, `NOTIFY` on `vertebra_queue_wakeup`, through an injected `PostgreSQLQueueExecutor` (`executor=`)[^src-framework-queues-postgres-py]. |
+| `OracleQueueBackend` | `FOR UPDATE SKIP LOCKED` claims over `vertebra_queue_jobs`, leases via `MERGE INTO vertebra_queue_leases`, through an injected `OracleQueueExecutor` (`executor=`)[^src-framework-queues-oracle-py]. |
+| `SpannerQueueBackend` | Hash-sharded primary keys (`shard_count` default `16`), GoogleSQL or Spangres DDL, `FOR UPDATE` claims over `vertebra_queue_jobs` through an injected `SpannerQueueExecutor` (`executor=`)[^src-framework-queues-spanner-py]. |
 
 ## 2. Multi-Lane Worker Runner & Cron Leader Election
 
@@ -68,7 +89,7 @@ Vertebra provides pluggable distributed background task queues, multi-process cr
   - `TaskLane.CPU`: Dedicated worker pool for heavy compute, compression, or cryptographic work.
   - `TaskLane.IO`: High-concurrency event-loop lanes for network calls, database queries, and webhooks.
   - `TaskLane.AGENT`: Specialized lanes with bounded concurrency for LLM agent loops, tool dispatch, and streaming workflows.
-- **Distributed Cron Leader Election (`CronScheduler`)**: Uses heartbeat leases to elect exactly one active cron leader across multiple server instances, preventing duplicate task dispatch while allowing seamless failover when a leader process terminates.
+- **Distributed Cron Leader Election (`CronScheduler`)**: Uses heartbeat leases to elect exactly one active cron leader across multiple server instances, preventing duplicate task dispatch while allowing failover when a leader process terminates.
 
 ## 3. Transactional Email Transports (`framework/email/`)
 
@@ -91,3 +112,8 @@ Provenance sources: [^src-vertebra-storage-src-lib-rs], [^src-tests-unit-framewo
 [^src-vertebra-storage-src-lib-rs]: `src/rs/vertebra-storage/src/lib.rs` — Rust implementation module (src/rs/vertebra-storage/src/lib.rs).
 [^src-tests-unit-framework-test-distributed-queues-py]: `src/py/tests/unit/framework/test_distributed_queues.py` — Python implementation module (src/py/tests/unit/framework/test_distributed_queues.py).
 [^src-tests-unit-framework-test-email-providers-py]: `src/py/tests/unit/framework/test_email_providers.py` — Python implementation module (src/py/tests/unit/framework/test_email_providers.py).
+[^src-framework-queues-base-py]: `src/py/vertebra/framework/queues/base.py::QueueService._build_backend` — Queue URL scheme routing to backend constructors.
+[^src-framework-queues-postgres-py]: `src/py/vertebra/framework/queues/postgres.py::PostgreSQLQueueBackend` — PostgreSQL queue backend requiring an injected executor.
+[^src-framework-queues-redis-py]: `src/py/vertebra/framework/queues/redis.py::RedisQueueBackend` — Redis and Valkey Streams queue backends requiring a redis client.
+[^src-framework-queues-oracle-py]: `src/py/vertebra/framework/queues/oracle.py::OracleQueueBackend` — Oracle queue backend requiring an injected executor.
+[^src-framework-queues-spanner-py]: `src/py/vertebra/framework/queues/spanner.py::SpannerQueueBackend` — Spanner queue backend requiring an injected executor.

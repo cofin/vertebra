@@ -15,10 +15,11 @@ import sys
 import time
 import tomllib
 import uuid
-from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Iterator, Mapping, Sequence
 from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
-from typing import Any, Self, cast
+from types import ModuleType
+from typing import TYPE_CHECKING, Any, Self, cast
 
 import pytest
 from anyio import Event, create_task_group
@@ -59,7 +60,7 @@ from vertebra.db.adapters.datafusion import DataFusionConfig, DataFusionEngine
 from vertebra.db.adapters.duckdb import AsyncDuckDBDriver, DuckDBConfig, SyncDuckDBDriver
 from vertebra.db.adapters.mssql import AsyncMSSQLDriver, MSSQLConfig, SyncMSSQLDriver
 from vertebra.db.adapters.mysql import AsyncMySQLDriver, MySQLConfig, SyncMySQLDriver
-from vertebra.db.adapters.oracle import AsyncOracleDriver, OracleConfig, SyncOracleDriver
+from vertebra.db.adapters.oracle import OracleConfig
 from vertebra.db.adapters.postgres import AsyncPostgreSQLDriver, PostgreSQLConfig, SyncPostgreSQLDriver
 from vertebra.db.adapters.postgres.notify import PostgresNotificationSource
 from vertebra.db.adapters.redis import RedisConfig, SyncRedisDriver
@@ -93,7 +94,7 @@ from vertebra.extensions.litestar import ChannelsBackend, MemoryStore
 from vertebra.extensions.sqlalchemy import dialects
 from vertebra.framework.channels import ChannelBus
 from vertebra.storage import GcpTokenSnapshot
-from vertebra.typing import MissingDependencyError, VertebraError, reset_dependency_cache
+from vertebra.typing import ImproperConfigurationError, MissingDependencyError, VertebraError, reset_dependency_cache
 from vertebra.utils.serializers import (
     decode_json,
     decode_msgpack,
@@ -102,6 +103,11 @@ from vertebra.utils.serializers import (
     encode_msgpack_bytes,
 )
 from vertebra.utils.sync_tools import SyncPool
+
+if TYPE_CHECKING:
+    from tests.unit.conftest import Resp3FakeServer
+
+_DUCKDB_SKIP_REASON = "duckdb publishes no free-threaded wheel; DuckDB tests run on GIL interpreters"
 
 
 def test_sync_transaction_rolls_back_base_exception() -> None:
@@ -484,6 +490,36 @@ def test_postgres_pooler_modes_and_jsonb_strip() -> None:
         SyncRedisDriver(RedisConfig(url="redis://127.0.0.1:1/0")).publish("chan", b"msg")
 
 
+@pytest.mark.parametrize(
+    "factory",
+    [
+        pytest.param(lambda: SyncPostgreSQLDriver(PostgreSQLConfig(dsn="memory://")), id="sync-postgres"),
+        pytest.param(lambda: AsyncPostgreSQLDriver(PostgreSQLConfig(dsn="MEMORY://")), id="async-postgres"),
+        pytest.param(lambda: SyncMySQLDriver(MySQLConfig(dsn="memory://")), id="sync-mysql"),
+        pytest.param(lambda: AsyncMySQLDriver(MySQLConfig(dsn="memory://")), id="async-mysql"),
+    ],
+)
+def test_postgres_and_mysql_drivers_reject_memory_dsn(factory: Callable[[], object]) -> None:
+    """PostgreSQL and MySQL sync and async drivers reject memory:// DSNs at construction."""
+    with pytest.raises(ImproperConfigurationError, match="memory://"):
+        factory()
+
+
+def test_postgres_pool_without_execution_surface_raises() -> None:
+    """SyncPostgreSQLDriver raises ImproperConfigurationError when its pool exposes no execution method."""
+    driver = SyncPostgreSQLDriver(PostgreSQLConfig(), pool=object())
+    with pytest.raises(ImproperConfigurationError, match="pool must provide"):
+        driver.execute_with_description("SELECT 1")
+
+
+@pytest.mark.anyio
+async def test_async_postgres_pool_without_execution_surface_raises() -> None:
+    """AsyncPostgreSQLDriver raises ImproperConfigurationError when its pool exposes no execution method."""
+    driver = AsyncPostgreSQLDriver(PostgreSQLConfig(), pool=object())
+    with pytest.raises(ImproperConfigurationError, match="pool must provide"):
+        await driver.execute_with_description("SELECT 1")
+
+
 @pytest.mark.anyio
 async def test_sqlite_plain_tuple_fetching_for_sqlalchemy_21() -> None:
     """Verify SQLite WAL configuration, explicit commit/rollback, and plain-tuple row fetching."""
@@ -503,7 +539,7 @@ async def test_sqlite_plain_tuple_fetching_for_sqlalchemy_21() -> None:
 
 
 @pytest.mark.anyio
-async def test_valkey_resp3_client_tracking_and_litestar_integration() -> None:
+async def test_valkey_resp3_client_tracking_and_litestar_integration(resp3_server: Resp3FakeServer) -> None:
     """Verify Valkey RESP3 handshake, client-side cache invalidation push, and Litestar Store/Channels."""
     vcfg = ValkeyConfig(
         url="valkeys://cache.internal:6379/0",
@@ -518,7 +554,7 @@ async def test_valkey_resp3_client_tracking_and_litestar_integration() -> None:
     assert b"BCAST" in cmds[1]
 
     mem_vcfg = ValkeyConfig(
-        url="memory://",
+        url=resp3_server.valkey_url,
         enable_client_side_caching=True,
         client_tracking_prefixes=("user:", "session:"),
     )
@@ -529,10 +565,13 @@ async def test_valkey_resp3_client_tracking_and_litestar_integration() -> None:
     evicted = vdriver.handle_invalidation_push(["user:1"])
     assert evicted == 1
     assert not vdriver.cached_keys
+    await vdriver.close()
 
-    store = MemoryStore.from_valkey("memory://")
+    store = MemoryStore.from_valkey(resp3_server.valkey_url)
     await store.set("k1", "v1", expires_in=60)
     assert await store.get("k1") == b"v1"
+    if store.driver is not None:
+        await store.driver.close()
 
     channels = ChannelsBackend(history=5)
     await channels.on_startup()
@@ -1013,8 +1052,6 @@ def test_cargo_manifests_exclude_unconditional_gcp_and_tonic_dependencies() -> N
 _SQL_CONTRACT_ENGINES: tuple[str, ...] = (
     "sqlite",
     "duckdb",
-    "oracle",
-    "mssql",
     "postgres",
     "mysql",
     "bigquery",
@@ -1446,6 +1483,7 @@ def _make_contract_driver_pair(engine: str) -> tuple[Any, Any, str, Any, str, An
             lambda row_id: (row_id,),
         )
     if engine == "duckdb":
+        pytest.importorskip("duckdb", reason=_DUCKDB_SKIP_REASON)
         sync_dd = SyncDuckDBDriver(DuckDBConfig(database=":memory:"))
         async_dd = AsyncDuckDBDriver(DuckDBConfig(database=":memory:"))
         sync_dd.execute(ddl)
@@ -1459,42 +1497,6 @@ def _make_contract_driver_pair(engine: str) -> tuple[Any, Any, str, Any, str, An
             lambda row_id, name: [row_id, name, None],
             "SELECT id, name FROM contract_items WHERE id = ?",
             lambda row_id: [row_id],
-        )
-    if engine == "oracle":
-        sync_ora = SyncOracleDriver(OracleConfig(dsn=":memory:"))
-        async_ora = AsyncOracleDriver(OracleConfig(dsn=":memory:"))
-        sync_ora.execute(ddl)
-        sync_ora.execute(
-            "INSERT INTO contract_items (id, name, note) VALUES (:id, :name, :note)",
-            {"id": 1, "name": "seed", "note": None},
-        )
-        async_ora._sync.execute(ddl)
-        async_ora._sync.execute(
-            "INSERT INTO contract_items (id, name, note) VALUES (:id, :name, :note)",
-            {"id": 1, "name": "seed", "note": None},
-        )
-        return (
-            sync_ora,
-            async_ora,
-            "INSERT INTO contract_items (id, name, note) VALUES (:id, :name, :note)",
-            lambda row_id, name: {"id": row_id, "name": name, "note": None},
-            "SELECT id, name FROM contract_items WHERE id = :id",
-            lambda row_id: {"id": row_id},
-        )
-    if engine == "mssql":
-        sync_ms = SyncMSSQLDriver(MSSQLConfig(dsn=":memory:"))
-        async_ms = AsyncMSSQLDriver(MSSQLConfig(dsn=":memory:"))
-        sync_ms.execute(ddl)
-        sync_ms.execute("INSERT INTO contract_items (id, name, note) VALUES (?, ?, ?)", (1, "seed", None))
-        async_ms._sync.execute(ddl)
-        async_ms._sync.execute("INSERT INTO contract_items (id, name, note) VALUES (?, ?, ?)", (1, "seed", None))
-        return (
-            sync_ms,
-            async_ms,
-            "INSERT INTO contract_items (id, name, note) VALUES (?, ?, ?)",
-            lambda row_id, name: (row_id, name, None),
-            "SELECT id, name FROM contract_items WHERE id = ?",
-            lambda row_id: (row_id,),
         )
     if engine == "postgres":
         sync_conn = sqlite3.connect(":memory:", check_same_thread=False)
@@ -1591,8 +1593,8 @@ def _make_contract_driver_pair(engine: str) -> tuple[Any, Any, str, Any, str, An
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("engine", _SQL_CONTRACT_ENGINES)
-async def test_unified_driver_contract_across_all_eight_engines(engine: str) -> None:
-    """Verify R6 unified signatures, return types, NotFoundError, Arrow, transactions, and alias removal."""
+async def test_unified_driver_contract_across_sql_engines(engine: str) -> None:
+    """Verify unified signatures, return types, NotFoundError, Arrow, transactions, and alias removal."""
     for alias in _LEGACY_DRIVER_ALIASES:
         assert not hasattr(SyncDatabaseDriver, alias)
         assert not hasattr(AsyncDatabaseDriver, alias)
@@ -2309,7 +2311,6 @@ _TEMPORARY_UPWARD_IMPORT_ALLOWLIST: frozenset[str] = frozenset()
         ("spangres+vertebra://projects/p/instances/i/databases/d", SpannerConfig),
         ("redis://localhost:6379/0", RedisConfig),
         ("rediss://localhost:6379/0", RedisConfig),
-        ("memory://", RedisConfig),
         ("valkey://localhost:6379/0", ValkeyConfig),
         ("valkeys://localhost:6379/0", ValkeyConfig),
         ("datafusion://embedded?target_partitions=4", DataFusionConfig),
@@ -2322,6 +2323,12 @@ def test_polymorphic_registry_parse_url_roundtrip(url: str, expected_cls: type[A
     parsed = DatabaseRegistry.parse_url(url)
     assert isinstance(parsed, expected_cls)
     assert parsed == expected_cls.from_url(url)
+
+
+def test_registry_parse_url_rejects_memory_scheme() -> None:
+    """DatabaseRegistry.parse_url rejects the memory:// scheme."""
+    with pytest.raises(ValueError, match="Unsupported database URL scheme: 'memory'"):
+        DatabaseRegistry.parse_url("memory://")
 
 
 def test_registry_parse_url_executes_zero_eager_driver_imports() -> None:
@@ -2475,8 +2482,10 @@ async def test_pool_key_memory_isolation_and_provide_driver_resolution(
                 await async_drv.close()
 
 
-def test_registry_get_dialer_sync_async_caching_mssql_wiring_and_provide_driver_type_error() -> None:
-    """Verify get_dialer caches sync/async dialers separately, wires PG/MySQL/MSSQL, and provide_driver rejects dialers."""
+def test_registry_get_dialer_sync_async_caching_mssql_wiring_and_provide_driver_type_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify get_dialer caching, PG/MySQL/MSSQL dialer wiring with MSSQL async drivers using the sync dialer, and provide_driver dialer rejection."""
     reg = DatabaseRegistry()
     csql_cfg = CloudSQLConfig(instance_connection_name="proj:us-central1:inst")
     alloy_cfg = AlloyDBConfig(instance_uri="/projects/p/locations/us-central1/clusters/c/instances/i")
@@ -2520,15 +2529,22 @@ def test_registry_get_dialer_sync_async_caching_mssql_wiring_and_provide_driver_
     pg_async = cast("AsyncPostgreSQLDriver", reg.get_shared_driver(pg_cfg))
     my_sync = cast("SyncMySQLDriver", reg.get_shared_sync_driver(my_cfg))
     my_async = cast("AsyncMySQLDriver", reg.get_shared_driver(my_cfg))
-    ms_sync = cast("SyncMSSQLDriver", reg.get_shared_sync_driver(ms_cfg))
-    ms_async = cast("AsyncMSSQLDriver", reg.get_shared_driver(ms_cfg))
 
     assert pg_sync.dialer is sync_csql
     assert pg_async.dialer is async_csql
     assert my_sync.dialer is sync_csql
     assert my_async.dialer is async_csql
-    assert ms_sync.dialer is sync_csql
-    assert ms_async.dialer is async_csql
+
+    monkeypatch.setitem(sys.modules, "vertebra._mssql", ModuleType("vertebra._mssql"))
+    reset_dependency_cache("vertebra._mssql")
+    try:
+        ms_sync = cast("SyncMSSQLDriver", reg.get_shared_sync_driver(ms_cfg))
+        ms_async = cast("AsyncMSSQLDriver", reg.get_shared_driver(ms_cfg))
+        assert ms_sync.dialer is sync_csql
+        assert ms_async.dialer is sync_csql
+        assert ms_async.sync_driver.dialer is sync_csql
+    finally:
+        reset_dependency_cache("vertebra._mssql")
 
     reg.register("dialer_only", csql_cfg)
     bad_targets: tuple[Any, ...] = (

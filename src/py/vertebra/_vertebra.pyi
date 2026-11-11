@@ -111,7 +111,6 @@ __all__ = [
     "encode_pgvector_f16",
     "encode_pgvector_f32",
     "encode_resp_command",
-    "encode_tds_sql_batch",
     "encode_ttc_session_attrs",
     "format_gemma_prompt",
     "format_traceparent",
@@ -1060,7 +1059,6 @@ def encode_ttc_session_attrs(
     ecid: str | None = None,
 ) -> bytes: ...
 def rewrite_mssql_placeholders(sql: str) -> tuple[str, int]: ...
-def encode_tds_sql_batch(sql: str, tx_descriptor: int = 0) -> bytes: ...
 def duckdb_bootstrap_statements(
     path: str = ":memory:",
     memory_limit_mb: int = 2048,

@@ -1,12 +1,12 @@
 # `vertebra.framework.queues` — Background Task Queues & Cron Scheduler
 
-Asynchronous background task queues (`QueueService`, `QueueConfig`), retry policies (`TaskRetryPolicy`), dead-letter tracking (`DeadLetterEntry`), distributed cron leases (`CronScheduler`), multi-lane worker execution (`WorkerRunner`), and pluggable storage backends (`MemoryQueueBackend`, `PostgreSQLQueueBackend`, `RedisQueueBackend`, `ValkeyQueueBackend`, `OracleQueueBackend`).
+Asynchronous background task queues (`QueueService`, `QueueConfig`), retry policies (`TaskRetryPolicy`), dead-letter tracking (`DeadLetterEntry`), distributed cron leases (`CronScheduler`), multi-lane worker execution (`WorkerRunner`), and pluggable storage backends (`MemoryQueueBackend`, `PostgreSQLQueueBackend`, `RedisQueueBackend`, `ValkeyQueueBackend`, `OracleQueueBackend`, `SpannerQueueBackend`).
 
 | Component | Classes | Purpose |
 | --- | --- | --- |
 | **Queue Core & Runner** | `QueueConfig`, `TaskRetryPolicy`, `TaskEnvelope`, `DeadLetterEntry`, `QueueService`, `WorkerRunner` | Enqueue typed tasks onto `io`, `cpu`, or `agent` lanes with exponential backoff and dead-letter retention |
 | **Cron Scheduler** | `CronSchedule`, `CronScheduler` | Execute recurring cron schedules with distributed leader lease coordination |
-| **Storage Backends** | `MemoryQueueBackend`, `PostgreSQLQueueBackend`, `RedisQueueBackend`, `ValkeyQueueBackend`, `OracleQueueBackend` | Persist and claim queued task envelopes using `SKIP LOCKED`, RESP3 streams, or Oracle AQ/table queues |
+| **Storage Backends** | `MemoryQueueBackend`, `PostgreSQLQueueBackend`, `RedisQueueBackend`, `ValkeyQueueBackend`, `OracleQueueBackend`, `SpannerQueueBackend` | Persist and claim task envelopes with `SKIP LOCKED` tables (PostgreSQL, Oracle), Redis Streams consumer groups (Redis, Valkey), or hash-sharded `FOR UPDATE` claims (Spanner). `PostgreSQLQueueBackend`, `OracleQueueBackend`, and `SpannerQueueBackend` require `executor=`; `RedisQueueBackend` and `ValkeyQueueBackend` require the `redis` package and a hosted `redis://` / `rediss://` URL or `client=` (`valkey://`, `valkeys://`, and hostless `unix://` URLs require a `redis://` / `rediss://` host URL or an injected `client=`); otherwise construction raises `MissingDependencyError`, `ImproperConfigurationError`, or `ValueError`. |
 
 ## Queue Configuration, Dead-Letter Entries & Service
 
@@ -60,7 +60,7 @@ Asynchronous background task queues (`QueueService`, `QueueConfig`), retry polic
       heading_level: 3
       members:
         - enqueue
-        - claim
+        - dequeue
         - ack
         - nack
 
@@ -69,7 +69,7 @@ Asynchronous background task queues (`QueueService`, `QueueConfig`), retry polic
       heading_level: 3
       members:
         - enqueue
-        - claim
+        - dequeue
         - ack
         - nack
 
@@ -78,7 +78,7 @@ Asynchronous background task queues (`QueueService`, `QueueConfig`), retry polic
       heading_level: 3
       members:
         - enqueue
-        - claim
+        - dequeue
         - ack
         - nack
 
@@ -87,6 +87,15 @@ Asynchronous background task queues (`QueueService`, `QueueConfig`), retry polic
       heading_level: 3
       members:
         - enqueue
-        - claim
+        - dequeue
+        - ack
+        - nack
+
+::: vertebra.framework.queues.spanner.SpannerQueueBackend
+    options:
+      heading_level: 3
+      members:
+        - enqueue
+        - dequeue
         - ack
         - nack

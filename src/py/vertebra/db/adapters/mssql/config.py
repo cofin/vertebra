@@ -1,6 +1,4 @@
-"""SQL Server (TDS 7.4) configuration."""
-
-from __future__ import annotations
+"""SQL Server connection configuration."""
 
 from typing import Any, ClassVar, Self
 from urllib.parse import parse_qsl, urlparse
@@ -16,7 +14,7 @@ __all__ = ("MSSQLConfig",)
 
 
 class MSSQLConfig(BaseDatabaseConfig, frozen=True, gc=False):
-    """Configuration for the native SQL Server (TDS 7.4) driver."""
+    """Configuration for the SQL Server driver backed by the native `vertebra._mssql` module."""
 
     dialect: ClassVar[str] = "mssql"
     dialect_tag: ClassVar[int] = MSSQL_DIALECT_TAG
@@ -54,11 +52,6 @@ class MSSQLConfig(BaseDatabaseConfig, frozen=True, gc=False):
     def rewrite_placeholders(sql: str) -> tuple[str, int]:
         """Rewrite `?` and `$1` placeholders into T-SQL `@P1, @P2, ...` parameters."""
         return MSSQLCore.rewrite_placeholders(sql)
-
-    @staticmethod
-    def encode_sql_batch(sql: str, transaction_descriptor: int = 0) -> bytes:
-        """Encode a T-SQL statement into a TDS 7.4 `SQLBatch` packet."""
-        return MSSQLCore.encode_tds_sql_batch(sql, transaction_descriptor)
 
     def to_cloud_dialer_config(self) -> CloudSQLConfig | None:
         """Return `CloudSQLConfig` when `cloud_sql_instance` is set."""
@@ -117,7 +110,7 @@ class MSSQLConfig(BaseDatabaseConfig, frozen=True, gc=False):
         _, async_cls = self.resolve_driver_classes()
         broker = self.broker if self.broker is not None else getattr(registry, "_broker", None)
         dialer = (
-            registry.get_dialer(dialer_cfg, sync=False)
+            registry.get_dialer(dialer_cfg, sync=True)
             if registry is not None and (dialer_cfg := self.to_cloud_dialer_config()) is not None
             else None
         )

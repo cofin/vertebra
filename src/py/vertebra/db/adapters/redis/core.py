@@ -272,7 +272,7 @@ class RedisCore:
         raw = key.encode("utf-8") if isinstance(key, str) else bytes(key)
         native = import_optional("vertebra._vertebra")
         if native is not None:
-            native_fn = getattr(native, "redis_hash_slot", None) or getattr(native, "redis_hash_slot_native", None)
+            native_fn = getattr(native, "redis_hash_slot", None)
             if callable(native_fn):
                 with contextlib.suppress(TypeError):
                     return int(native_fn(raw))

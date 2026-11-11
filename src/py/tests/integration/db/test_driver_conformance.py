@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import os
-from collections.abc import AsyncIterator, Iterator
+import sys
+from collections.abc import AsyncIterator, Iterator, Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -12,6 +13,7 @@ from typing import Any
 import pyarrow as pa
 import pyarrow.ipc as pa_ipc
 import pytest
+from msgspec import structs
 
 import vertebra.db.adapters.datafusion.driver as datafusion_driver_mod
 from vertebra._vertebra import BigQueryError, SpannerError
@@ -87,9 +89,12 @@ from vertebra.db.adapters.valkey import (
     SyncValkeyDriver,
     ValkeyConfig,
 )
-from vertebra.typing import FrozenBaseStruct, MissingDependencyError
-from vertebra.utils.module_loader import ensure_module
+from vertebra.typing import FrozenBaseStruct, MissingDependencyError, reset_dependency_cache
+from vertebra.utils.module_loader import ensure_module, import_optional
 from vertebra.utils.serializers import decode_json, encode_json
+
+_FAIL_LOUD_DRIVER_ENGINES: frozenset[str] = frozenset({"oracle", "mssql"})
+_DUCKDB_SKIP_REASON = "duckdb publishes no free-threaded wheel; DuckDB tests run on GIL interpreters"
 
 
 class _RollbackSentinelError(RuntimeError):
@@ -282,6 +287,8 @@ class CacheConformanceSpec(FrozenBaseStruct, frozen=True, gc=False):
     """Asynchronous RESP3 driver class."""
     tcp_url: str
     """Canonical TCP URL used to verify URL parsing and shared pool keys."""
+    env_dsn_vars: tuple[str, ...] = ()
+    """Environment variables holding a live server URL, checked in order."""
     container_fixture: str | None = None
     """Optional `pytest-databases` configuration fixture in `conftest.py` used when `VERTEBRA_CONFORMANCE_DOCKER=1`."""
 
@@ -506,6 +513,7 @@ CACHE_ENGINE_SPECS: tuple[CacheConformanceSpec, ...] = (
         sync_driver_cls=SyncRedisDriver,
         async_driver_cls=AsyncRedisDriver,
         tcp_url="redis://127.0.0.1:6379/2",
+        env_dsn_vars=("VERTEBRA_CONFORMANCE_REDIS_DSN",),
         container_fixture="vtb_redis_config",
     ),
     CacheConformanceSpec(
@@ -514,24 +522,32 @@ CACHE_ENGINE_SPECS: tuple[CacheConformanceSpec, ...] = (
         sync_driver_cls=SyncValkeyDriver,
         async_driver_cls=AsyncValkeyDriver,
         tcp_url="valkey://127.0.0.1:6379/2",
+        env_dsn_vars=("VERTEBRA_CONFORMANCE_VALKEY_DSN",),
         container_fixture="vtb_valkey_config",
     ),
 )
 
 
-def _build_live_engine_params() -> list[Any]:
-    """Build pytest fixture parameters with strict `xfail` markers on pending native engines."""
+_CONFORMANCE_DOCKER_ENV = "VERTEBRA_CONFORMANCE_DOCKER"
+
+
+def _build_live_engine_params(specs: Sequence[EngineConformanceSpec] = ENGINE_SPECS) -> list[Any]:
+    """Build fixture parameters, marking pending engines strict ``xfail`` only when their native module imports.
+
+    Args:
+        specs: Engine specs to parametrize.
+
+    Returns:
+        One ``pytest.param`` per spec with ``id=spec.engine``.
+    """
     params: list[Any] = []
-    for spec in ENGINE_SPECS:
-        if spec.pending_flow_id is not None:
+    for spec in specs:
+        if spec.pending_flow_id is not None and not _native_module_missing(spec):
             params.append(
                 pytest.param(
                     spec,
                     id=spec.engine,
-                    marks=pytest.mark.xfail(
-                        strict=True,
-                        reason=f"Owned by {spec.pending_flow_id}",
-                    ),
+                    marks=pytest.mark.xfail(strict=True, reason=f"Owned by {spec.pending_flow_id}"),
                 )
             )
         else:
@@ -539,18 +555,41 @@ def _build_live_engine_params() -> list[Any]:
     return params
 
 
+def _native_module_missing(spec: EngineConformanceSpec) -> bool:
+    """Return True when ``spec`` names a native module that does not import."""
+    return spec.native_extension_module is not None and import_optional(spec.native_extension_module) is None
+
+
+def _require_native_module(spec: EngineConformanceSpec) -> None:
+    """Skip the case, or fail a non-pending case under Docker conformance, when the native module is missing.
+
+    Args:
+        spec: Engine spec whose ``native_extension_module`` is checked.
+
+    Raises:
+        pytest.skip.Exception: When the module is missing and either the spec is pending or
+            ``VERTEBRA_CONFORMANCE_DOCKER`` is not ``"1"``.
+        pytest.fail.Exception: When the module is missing, the spec is not pending, and
+            ``VERTEBRA_CONFORMANCE_DOCKER`` is ``"1"``.
+    """
+    if spec.native_extension_module is None:
+        return
+    try:
+        ensure_module(spec.native_extension_module)
+    except MissingDependencyError:
+        reason = f"{spec.engine} conformance requires the {spec.native_extension_module} native module"
+        if spec.pending_flow_id is None and os.environ.get(_CONFORMANCE_DOCKER_ENV) == "1":
+            pytest.fail(reason, pytrace=False)
+        pytest.skip(reason)
+
+
 def _resolve_live_config(
     spec: EngineConformanceSpec,
     tmp_path: Path,
     request: pytest.FixtureRequest,
 ) -> BaseDatabaseConfig:
-    """Resolve a live configuration for `spec`, skipping cloud engines when credentials/emulators are absent."""
-    if spec.native_extension_module is not None:
-        ensure_module(
-            spec.native_extension_module,
-            package=f"vertebra-core[{spec.engine}]",
-            extra=spec.engine,
-        )
+    """Resolve a live configuration for ``spec``, checking its native module before credential skips."""
+    _require_native_module(spec)
     if spec.engine == "sqlite":
         db_path = tmp_path / "vtb_conformance.sqlite3"
         return SQLiteConfig.from_url(f"sqlite:///{db_path}")
@@ -579,7 +618,7 @@ def _resolve_live_config(
         env_dsn = os.environ.get(env_key, "").strip()
         if env_dsn:
             return spec.config_cls.from_url(env_dsn)
-    if spec.container_fixture is not None and os.environ.get("VERTEBRA_CONFORMANCE_DOCKER") == "1":
+    if spec.container_fixture is not None and os.environ.get(_CONFORMANCE_DOCKER_ENV) == "1":
         fixture_cfg = request.getfixturevalue(spec.container_fixture)
         assert isinstance(fixture_cfg, BaseDatabaseConfig)
         return fixture_cfg
@@ -715,6 +754,7 @@ def test_engine_url_parsing_and_pool_key_contract(spec: EngineConformanceSpec) -
 async def test_engine_driver_resolution_and_provide_driver(
     spec: EngineConformanceSpec,
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Every SQL/analytical config resolves its paired sync/async driver classes and registers cleanly."""
     url = (
@@ -730,6 +770,20 @@ async def test_engine_driver_resolution_and_provide_driver(
 
     registry = DatabaseRegistry()
     registry.register(spec.engine, config)
+    if spec.engine == "duckdb":
+        pytest.importorskip("duckdb", reason=_DUCKDB_SKIP_REASON)
+    if spec.engine in _FAIL_LOUD_DRIVER_ENGINES:
+        assert spec.native_extension_module is not None
+        monkeypatch.setitem(sys.modules, spec.native_extension_module, None)
+        reset_dependency_cache(spec.native_extension_module)
+        try:
+            with pytest.raises(MissingDependencyError, match=rf"vertebra-core\[{spec.engine}\]"):
+                provide_driver(spec.engine, sync=True, registry=registry)
+            with pytest.raises(MissingDependencyError, match=rf"vertebra-core\[{spec.engine}\]"):
+                provide_driver(spec.engine, sync=False, registry=registry)
+        finally:
+            reset_dependency_cache(spec.native_extension_module)
+        return
     sync_driver = provide_driver(spec.engine, sync=True, registry=registry)
     async_driver = provide_driver(spec.engine, sync=False, registry=registry)
     try:
@@ -1276,13 +1330,10 @@ async def test_cache_config_url_pool_key_and_provide_driver(cache_spec: CacheCon
     assert key == (cache_spec.engine, cache_spec.tcp_url)
     assert parsed.resolve_driver_classes() == (cache_spec.sync_driver_cls, cache_spec.async_driver_cls)
 
-    mem_cfg = cache_spec.config_cls(url="memory://")
-    assert mem_cfg.pool_key() == (cache_spec.engine, "memory://")
-
     registry = DatabaseRegistry()
-    sync_first = provide_driver(mem_cfg, sync=True, registry=registry)
-    sync_second = provide_driver(mem_cfg, sync=True, registry=registry)
-    async_driver = provide_driver(mem_cfg, sync=False, registry=registry)
+    sync_first = provide_driver(parsed, sync=True, registry=registry)
+    sync_second = provide_driver(parsed, sync=True, registry=registry)
+    async_driver = provide_driver(parsed, sync=False, registry=registry)
     try:
         assert isinstance(sync_first, cache_spec.sync_driver_cls)
         assert isinstance(async_driver, cache_spec.async_driver_cls)
@@ -1296,16 +1347,22 @@ def _resolve_cache_config(
     cache_spec: CacheConformanceSpec,
     request: pytest.FixtureRequest,
 ) -> RedisConfig:
-    """Resolve a `RedisConfig` or `ValkeyConfig`, using `pytest-databases` containers when `VERTEBRA_CONFORMANCE_DOCKER=1`."""
+    """Resolve a live `RedisConfig` or `ValkeyConfig` from an env DSN or `pytest-databases` container, skipping otherwise."""
+    for env_key in cache_spec.env_dsn_vars:
+        value = os.environ.get(env_key, "").strip()
+        if value:
+            return cache_spec.config_cls.from_url(value)
     if cache_spec.container_fixture is not None and os.environ.get("VERTEBRA_CONFORMANCE_DOCKER") == "1":
         fixture_cfg = request.getfixturevalue(cache_spec.container_fixture)
         assert isinstance(fixture_cfg, cache_spec.config_cls)
         return fixture_cfg
-    return cache_spec.config_cls(url="memory://")
+    pytest.skip(
+        f"{cache_spec.engine} conformance requires {' or '.join(cache_spec.env_dsn_vars)} or VERTEBRA_CONFORMANCE_DOCKER=1"
+    )
 
 
 @pytest.mark.parametrize("cache_spec", CACHE_ENGINE_SPECS, ids=[s.engine for s in CACHE_ENGINE_SPECS])
-def test_sync_cache_memory_roundtrip_and_pipeline(
+def test_sync_cache_roundtrip_and_pipeline(
     cache_spec: CacheConformanceSpec,
     request: pytest.FixtureRequest,
 ) -> None:
@@ -1341,7 +1398,7 @@ def test_sync_cache_memory_roundtrip_and_pipeline(
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("cache_spec", CACHE_ENGINE_SPECS, ids=[s.engine for s in CACHE_ENGINE_SPECS])
-async def test_async_cache_memory_roundtrip_and_pipeline(
+async def test_async_cache_roundtrip_and_pipeline(
     cache_spec: CacheConformanceSpec,
     request: pytest.FixtureRequest,
 ) -> None:
@@ -1418,3 +1475,102 @@ def test_gcp_conformance_specs_encode_typed_null_json_and_error_contracts() -> N
     assert sp_params["p2"] == {"type": "JSON", "value": encode_json(json_cases["json_dict"].input_value)}
     assert sp_params["p3"] == {"type": "JSON", "value": encode_json(json_cases["json_list"].input_value)}
     assert sp_params["p4"] == {"type": "INT64", "value": None}
+
+
+@pytest.mark.parametrize(
+    ("module_name", "pending_flow_id", "docker_env", "expected_outcome"),
+    [
+        ("vertebra._vtb_conformance_absent", None, None, "skip"),
+        ("vertebra._vtb_conformance_absent", None, "1", "fail"),
+        ("vertebra._vtb_conformance_absent", None, "0", "skip"),
+        ("vertebra._vtb_conformance_absent", "native-probe-driver", None, "skip"),
+        ("vertebra._vtb_conformance_absent", "native-probe-driver", "1", "skip"),
+        ("json", None, "1", "ok"),
+        (None, None, "1", "ok"),
+    ],
+    ids=[
+        "missing_local",
+        "missing_docker",
+        "missing_docker_zero",
+        "missing_pending_local",
+        "missing_pending_docker",
+        "present",
+        "no_module",
+    ],
+)
+def test_require_native_module_outcome_by_docker_mode(
+    monkeypatch: pytest.MonkeyPatch,
+    module_name: str | None,
+    pending_flow_id: str | None,
+    docker_env: str | None,
+    expected_outcome: str,
+) -> None:
+    """``_require_native_module`` skips missing modules and fails non-pending specs under Docker conformance."""
+    base_spec = next(spec for spec in ENGINE_SPECS if spec.engine == "sqlite")
+    spec = structs.replace(
+        base_spec,
+        native_extension_module=module_name,
+        pending_flow_id=pending_flow_id,
+    )
+    if docker_env is None:
+        monkeypatch.delenv(_CONFORMANCE_DOCKER_ENV, raising=False)
+    else:
+        monkeypatch.setenv(_CONFORMANCE_DOCKER_ENV, docker_env)
+    if module_name is not None:
+        reset_dependency_cache(module_name)
+    expected_reason = "sqlite conformance requires the vertebra._vtb_conformance_absent native module"
+    if expected_outcome == "skip":
+        with pytest.raises(pytest.skip.Exception) as skip_exc:
+            _require_native_module(spec)
+        assert str(skip_exc.value) == expected_reason
+    elif expected_outcome == "fail":
+        with pytest.raises(pytest.fail.Exception) as fail_exc:
+            _require_native_module(spec)
+        assert str(fail_exc.value) == expected_reason
+    else:
+        _require_native_module(spec)
+
+
+def test_live_engine_params_mark_strict_xfail_only_when_native_module_imports() -> None:
+    """``_build_live_engine_params`` attaches strict ``xfail`` only when a pending spec's native module imports."""
+    base_spec = next(spec for spec in ENGINE_SPECS if spec.engine == "sqlite")
+    reset_dependency_cache("vertebra._vtb_conformance_absent")
+    reset_dependency_cache("json")
+    absent_pending = structs.replace(
+        base_spec,
+        engine="absent",
+        native_extension_module="vertebra._vtb_conformance_absent",
+        pending_flow_id="native-probe-driver",
+    )
+    present_pending = structs.replace(
+        base_spec,
+        engine="present",
+        native_extension_module="json",
+        pending_flow_id="native-probe-driver",
+    )
+    absent_plain = structs.replace(
+        base_spec,
+        engine="plain",
+        native_extension_module="vertebra._vtb_conformance_absent",
+        pending_flow_id=None,
+    )
+    params = _build_live_engine_params((absent_pending, present_pending, absent_plain))
+    assert [param.id for param in params] == ["absent", "present", "plain"]
+    assert [[mark.name for mark in param.marks] for param in params] == [[], ["xfail"], []]
+    assert params[1].marks[0].kwargs == {"strict": True, "reason": "Owned by native-probe-driver"}
+
+
+def test_resolve_live_config_checks_native_module_before_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    request: pytest.FixtureRequest,
+) -> None:
+    """``_resolve_live_config`` checks the native module before BigQuery credential skips."""
+    bq_spec = next(spec for spec in ENGINE_SPECS if spec.engine == "bigquery")
+    spec = structs.replace(bq_spec, native_extension_module="vertebra._vtb_conformance_absent")
+    monkeypatch.delenv("VERTEBRA_CONFORMANCE_BIGQUERY_DSN", raising=False)
+    monkeypatch.delenv(_CONFORMANCE_DOCKER_ENV, raising=False)
+    reset_dependency_cache("vertebra._vtb_conformance_absent")
+    with pytest.raises(pytest.skip.Exception) as skip_exc:
+        _resolve_live_config(spec, tmp_path, request)
+    assert str(skip_exc.value) == "bigquery conformance requires the vertebra._vtb_conformance_absent native module"

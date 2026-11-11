@@ -5,7 +5,7 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Native Rust database wire protocols, cloud dialers, and shared-memory Arrow/row framing for Vertebra"
+description = "Database wire codecs, Cloud SQL and AlloyDB dialers, shared transport, and shared-memory Arrow framing for Vertebra"
 
 [lib]
 name = "vertebra_db"
@@ -32,13 +32,11 @@ lz4_flex = { workspace = true }
 pyo3 = { workspace = true, optional = true }
 rcgen = { workspace = true }
 reqwest = { workspace = true }
-rmp-serde = { workspace = true }
 rsa = { version = "0.9", features = ["sha2"] }
 rustls = { workspace = true }
 rustls-pemfile = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-sha2 = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-rustls = { workspace = true }

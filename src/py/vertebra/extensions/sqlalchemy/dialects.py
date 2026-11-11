@@ -314,7 +314,19 @@ class SyncDBAPIConnection:
         database: str | None = None,
         **kwargs: Any,
     ) -> None:
-        """Initialize PEP 249 connection with URL or database parameters."""
+        """Initialize PEP 249 connection with URL or database parameters.
+
+        Args:
+            url: Vertebra database URL string.
+            driver: Optional pre-constructed synchronous database driver.
+            broker: Optional shared-memory lease broker.
+            share_pool: Whether to share a pooled driver from `DatabaseRegistry`.
+            database: Optional SQLite database path override when `url` is default or empty.
+            **kwargs: Additional keyword arguments accepted for DB-API compatibility.
+
+        Raises:
+            InterfaceError: When `url` cannot be parsed into a Vertebra database configuration.
+        """
         resolved_url = url
         if database is not None and (url == "sqlite+vtb:///:memory:" or not url):
             resolved_url = f"sqlite+vtb:///{database}"
@@ -333,8 +345,9 @@ class SyncDBAPIConnection:
                 if self._broker is not None
                 else DatabaseRegistry.parse_url(resolved_url)
             )
-        except Exception:
-            self._config = SQLiteConfig(database=database or ":memory:", broker=self._broker)
+        except ValueError as exc:
+            msg = f"Cannot parse Vertebra database URL: {exc}"
+            raise InterfaceError(msg) from exc
 
         self._autocommit = isinstance(self._config, (BigQueryConfig, SpannerConfig))
         self._driver = driver
@@ -783,7 +796,19 @@ class AsyncDBAPIConnection:
         database: str | None = None,
         **kwargs: Any,
     ) -> None:
-        """Initialize asynchronous connection."""
+        """Initialize asynchronous connection.
+
+        Args:
+            url: Vertebra asynchronous database URL string.
+            driver: Optional pre-constructed asynchronous database driver.
+            broker: Optional shared-memory lease broker.
+            share_pool: Whether to share a pooled driver from `DatabaseRegistry`.
+            database: Optional SQLite database path override when `url` is default or empty.
+            **kwargs: Additional keyword arguments accepted for DB-API compatibility.
+
+        Raises:
+            InterfaceError: When `url` cannot be parsed into a Vertebra database configuration.
+        """
         resolved_url = url
         if database is not None and (url == "sqlite+vtb_async:///:memory:" or not url):
             resolved_url = f"sqlite+vtb_async:///{database}"
@@ -802,8 +827,9 @@ class AsyncDBAPIConnection:
                 if self._broker is not None
                 else DatabaseRegistry.parse_url(resolved_url)
             )
-        except Exception:
-            self._config = SQLiteConfig(database=database or ":memory:", broker=self._broker)
+        except ValueError as exc:
+            msg = f"Cannot parse Vertebra database URL: {exc}"
+            raise InterfaceError(msg) from exc
 
         self._autocommit = isinstance(self._config, (BigQueryConfig, SpannerConfig))
         self._driver = driver

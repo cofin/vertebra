@@ -29,8 +29,11 @@ sources:
     resource: src/rs/vertebra-db/src/connection.rs::TransportStream
     title: Shared TCP, Unix, TLS, and cloud mTLS stream primitives
   - id: pg-core-rs
-    resource: src/rs/vertebra-db/src/postgres/mod.rs::PostgresPool
-    title: Existing PostgreSQL frame codecs and admission metadata in vertebra-db
+    resource: src/rs/vertebra-db/src/postgres/mod.rs::PoolerMode
+    title: Existing PostgreSQL frame codecs, binary pgvector helpers, and pooler mode rules in vertebra-db
+  - id: fail-loud-baseline
+    resource: .agents/bundles/knowledge/domains/data/database-drivers-and-dialers.md
+    title: Completed fail-loud baseline removing PostgresPool, memory:// execution, and asyncpg probes
   - id: py-async-rs
     resource: src/rs/vertebra-db/src/py_async.rs::spawn_rust_db_task_with_attr
     title: Shared AsyncCompletionQueue and independent event-loop drainer
@@ -50,7 +53,7 @@ tags:
 
 <!-- truth: start -->
 - **Standalone Optional Wheel**: `src/rs/vertebra-postgres` (`vertebra._postgres`, `vertebra-core[postgres]`) owns live PostgreSQL Protocol 3.0 sockets on `postgres-protocol =0.6.12` + `rustls` (`ring`) without linking database clients into `vertebra-core` [^pg-conn-rs] [^pg-core-rs].
-- **Complete Single-PR Delivery**: Authentication (`SCRAM-SHA-256`, `SCRAM-SHA-256-PLUS`, Cloud SQL / AlloyDB mTLS + IAM), binary/lossless codecs, statement caching, single-`Sync` `pipeline()`, `COPY`, `VTBARROW`, `CancelRequest`, `LISTEN`/`NOTIFY`, and `pgoutput` v1 logical replication ship together with full `psycopg`/`asyncpg` removal [^py-async-rs] [^pg-driver-py].
+- **Complete Single-PR Delivery**: Authentication (`SCRAM-SHA-256`, `SCRAM-SHA-256-PLUS`, Cloud SQL / AlloyDB mTLS + IAM), binary/lossless codecs, statement caching, single-`Sync` `pipeline()`, `COPY`, `VTBARROW`, `CancelRequest`, `LISTEN`/`NOTIFY`, and `pgoutput` v1 logical replication ship together with full `psycopg` / `psycopg_pool` removal [^py-async-rs] [^pg-driver-py] [^fail-loud-baseline].
 - **Flat Worksheet Layout Status**: All 102 worksheets (`t01`–`t102`) are anchored at `plan_revision: 2` and `plan_commit: 9af810f5` (`has_chapters: false`; nested chapter decomposition deferred to `/flow:revise native-postgres-driver`).
 <!-- truth: end -->
 
@@ -59,7 +62,7 @@ tags:
 ### 1.1 Upstream Execution Baseline
 
 The user decision is: “Keep the complete driver in one PR.” All worksheets run
-on `feat/native-postgres-driver`, stacked on `feat/storage-updates` (`9af810f5`) above `main @ 077a3fe9`. The database foundation ([PR #76](https://github.com/cofin/vertebra/pull/76), `21c99f95`), engine primitives ([PR #77](https://github.com/cofin/vertebra/pull/77), `80ff8a65`), post-merge review remediation ([PR #80](https://github.com/cofin/vertebra/pull/80), `2b737240`), runtime structure ([PR #92](https://github.com/cofin/vertebra/pull/92), `d2fa5072`), and MCP/WebMCP core ([PR #94](https://github.com/cofin/vertebra/pull/94), `077a3fe9`) are squash-merged on `main`. Those results do not validate this driver.
+on `feat/native-postgres-driver`, stacked on `feat/driver-fail-loud` ([driver baseline](../../knowledge/domains/data/database-drivers-and-dialers.md)) above `feat/storage-updates` (`3c2b066a`) and `main @ 077a3fe9` [^fail-loud-baseline]. The database foundation ([PR #76](https://github.com/cofin/vertebra/pull/76), `21c99f95`), engine primitives ([PR #77](https://github.com/cofin/vertebra/pull/77), `80ff8a65`), post-merge review remediation ([PR #80](https://github.com/cofin/vertebra/pull/80), `2b737240`), runtime structure ([PR #92](https://github.com/cofin/vertebra/pull/92), `d2fa5072`), and MCP/WebMCP core ([PR #94](https://github.com/cofin/vertebra/pull/94), `077a3fe9`) are squash-merged on `main`. Those results do not validate this driver.
 
 The complete charter requires more than the default eight worksheets. The user's
 one-PR scope governs delivery; small worksheets and signed local commits govern
@@ -74,10 +77,10 @@ require the user's separate exact permission.
 | --- | --- |
 | `src/rs/vertebra-db/src/connection.rs::TransportStream` | Reuse transport/TLS. Direct PostgreSQL sends SSLRequest before upgrade; cloud proxy endpoints negotiate immediate mTLS. |
 | `src/rs/vertebra-db/src/connection.rs::{Connection,CancelHandle}` | Lifecycle traits require real ping/cancel/close implementations. No placeholder success. |
-| `src/rs/vertebra-db/src/postgres/mod.rs::PostgresPool` | SHM admission and compiled-plan metadata do not own live connections or server prepared statements. |
+| `src/rs/vertebra-db/src/postgres/mod.rs::PoolerMode` | Wire frame encoders, `PGCOPY` framing, `pgvector` codecs, and pooler mode helpers remain pure-CPU helpers; `driver-fail-loud` deleted `PostgresPool`, so `vertebra-postgres` owns live sockets and server prepared statements. |
 | `src/rs/vertebra-db/src/py_async.rs::spawn_rust_db_task_with_attr` | Reuse completion queues and independent drainer. Add abort ownership across fallible setup before using it for sessions. |
 | `src/rs/vertebra-db/src/arrow_shm.rs::ShmArrowStreamWriter` | Accepts serialized IPC; does not build columns. Its padding API cannot receive arbitrary encoder fragments. |
-| `src/py/vertebra/db/adapters/postgres/driver.py::{SyncPostgreSQLDriver,AsyncPostgreSQLDriver}` | Replace Python-client, duck-typed and memory execution with real native pool leases. Preserve count/tuple/description/hydration contracts. |
+| `src/py/vertebra/db/adapters/postgres/driver.py::{SyncPostgreSQLDriver,AsyncPostgreSQLDriver}` | Replace `psycopg` / `psycopg_pool` execution (`memory://` and `asyncpg` probes already removed in `driver-fail-loud`) with real native pool leases. Preserve count/tuple/description/hydration contracts. |
 | `src/py/vertebra/extensions/sqlspec/adapters.py::{BaseSyncDriver.execute_stack,BaseAsyncDriver.execute_stack}` | Caller conversion and strict result validation occur inside pipeline context; results cannot commit early. |
 | `src/py/vertebra/db/arrow.py::ArrowCursor` | Public cursor wraps native SHM output; inline IPC needs explicit native row-count metadata without Python rows. |
 | `src/py/tests/integration/db/test_driver_conformance.py::ENGINE_SPECS` | PostgreSQL needs native type DDL, enabled pipeline acceptance and removal of pending-flow xfail after cutover. |
@@ -403,6 +406,7 @@ The [planning review and adjudication](review.md) records adopted findings, inde
 - Next action on its stacked branch: `/flow:implement native-postgres-driver` from `t01`.
 
 [^pg-conn-rs]: `src/rs/vertebra-db/src/connection.rs::TransportStream` — Shared TCP, Unix, TLS, and cloud mTLS stream primitives.
-[^pg-core-rs]: `src/rs/vertebra-db/src/postgres/mod.rs::PostgresPool` — Existing PostgreSQL frame codecs and admission metadata in vertebra-db.
+[^pg-core-rs]: `src/rs/vertebra-db/src/postgres/mod.rs::PoolerMode` — Existing PostgreSQL frame codecs, binary pgvector helpers, and pooler mode rules in vertebra-db.
+[^fail-loud-baseline]: `.agents/bundles/knowledge/domains/data/database-drivers-and-dialers.md` — Completed fail-loud baseline removing `PostgresPool`, `memory://` execution, and `asyncpg` probes.
 [^py-async-rs]: `src/rs/vertebra-db/src/py_async.rs::spawn_rust_db_task_with_attr` — Shared AsyncCompletionQueue and independent event-loop drainer.
 [^pg-driver-py]: `src/py/vertebra/db/adapters/postgres/driver.py::SyncPostgreSQLDriver` — Python SyncPostgreSQLDriver and AsyncPostgreSQLDriver target cutover module.

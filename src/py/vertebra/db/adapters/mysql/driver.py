@@ -20,6 +20,7 @@ from vertebra.db.driver import (
     AsyncDatabaseDriver,
     SyncDatabaseDriver,
 )
+from vertebra.typing import ImproperConfigurationError
 from vertebra.utils.module_loader import ensure_module
 from vertebra.utils.text import quote_dialect_identifier, validate_identifier
 
@@ -42,10 +43,8 @@ class SyncMySQLDriver(SyncDatabaseDriver[MySQLConfig]):
         "_connect_factory",
         "_dialer",
         "_idle_conns",
-        "_in_memory_rows",
         "_in_transaction",
         "_tx_conn",
-        "_tx_snapshot",
     )
 
     def __init__(
@@ -57,6 +56,7 @@ class SyncMySQLDriver(SyncDatabaseDriver[MySQLConfig]):
         connect_factory: Any = None,
     ) -> None:
         resolved = config or MySQLConfig()
+        _reject_memory_dsn(resolved.dsn)
         super().__init__(resolved, broker=broker)
         self._dialer = dialer
         if self._dialer is None:
@@ -65,10 +65,8 @@ class SyncMySQLDriver(SyncDatabaseDriver[MySQLConfig]):
                 self._dialer = SyncCloudSQLDialer(csql_cfg)
         self._connect_factory = connect_factory
         self._idle_conns: collections.deque[Any] = collections.deque(maxlen=self.config.max_size)
-        self._in_memory_rows: list[tuple[Any, ...]] = []
         self._in_transaction: bool = False
         self._tx_conn: Any = None
-        self._tx_snapshot: list[tuple[Any, ...]] | None = None
 
     @property
     def _config(self) -> MySQLConfig:
@@ -86,8 +84,7 @@ class SyncMySQLDriver(SyncDatabaseDriver[MySQLConfig]):
             msg = "SyncMySQLDriver is closed"
             raise RuntimeError(msg)
         self._in_transaction = True
-        self._tx_snapshot = list(self._in_memory_rows)
-        if self._tx_conn is None and not (self.config.dsn.startswith("memory://") and self._connect_factory is None):
+        if self._tx_conn is None:
             self._tx_conn = self._acquire()
             if hasattr(self._tx_conn, "begin"):
                 self._tx_conn.begin()
@@ -105,7 +102,6 @@ class SyncMySQLDriver(SyncDatabaseDriver[MySQLConfig]):
                 self._connect_factory.commit()
         finally:
             self._tx_conn = None
-            self._tx_snapshot = None
             self._in_transaction = False
             if target is not None:
                 self._release(target)
@@ -116,8 +112,6 @@ class SyncMySQLDriver(SyncDatabaseDriver[MySQLConfig]):
         mru_conn = self._idle_conns.pop() if tx_conn is None and self._idle_conns else None
         target = tx_conn if tx_conn is not None else mru_conn
         try:
-            if self._tx_snapshot is not None:
-                self._in_memory_rows = list(self._tx_snapshot)
             if target is not None:
                 if hasattr(target, "rollback"):
                     target.rollback()
@@ -125,7 +119,6 @@ class SyncMySQLDriver(SyncDatabaseDriver[MySQLConfig]):
                 self._connect_factory.rollback()
         finally:
             self._tx_conn = None
-            self._tx_snapshot = None
             self._in_transaction = False
             if target is not None:
                 self._release(target)
@@ -135,7 +128,6 @@ class SyncMySQLDriver(SyncDatabaseDriver[MySQLConfig]):
         self._closed = True
         tx_conn = self._tx_conn
         self._tx_conn = None
-        self._tx_snapshot = None
         self._in_transaction = False
         if tx_conn is not None and hasattr(tx_conn, "close"):
             tx_conn.close()
@@ -232,10 +224,6 @@ class SyncMySQLDriver(SyncDatabaseDriver[MySQLConfig]):
                     lease = self._broker.acquire(os.getpid())
 
         try:
-            if self.config.dsn.startswith("memory://") and self._connect_factory is None:
-                cols = tuple(f"col_{i}" for i in range(len(self._in_memory_rows[0]))) if self._in_memory_rows else ()
-                return list(self._in_memory_rows), cols, len(self._in_memory_rows)
-
             pinned = self._tx_conn is not None
             conn = self._tx_conn if pinned else self._acquire()
             try:
@@ -287,7 +275,7 @@ class SyncMySQLDriver(SyncDatabaseDriver[MySQLConfig]):
                     return self._connect_factory()
             return self._connect_factory()
 
-        pymysql: Any = ensure_module("pymysql", install_package="pymysql", extra="mysql")
+        pymysql: Any = ensure_module("pymysql")
 
         connect_kwargs: dict[str, Any] = {
             "host": params["host"],
@@ -328,12 +316,10 @@ class AsyncMySQLDriver(AsyncDatabaseDriver[MySQLConfig]):
 
     __slots__ = (
         "_dialer",
-        "_in_memory_rows",
         "_in_transaction",
         "_pool",
         "_tx_conn",
         "_tx_conn_ctx",
-        "_tx_snapshot",
     )
 
     def __init__(
@@ -345,6 +331,7 @@ class AsyncMySQLDriver(AsyncDatabaseDriver[MySQLConfig]):
         pool: Any = None,
     ) -> None:
         resolved = config or MySQLConfig()
+        _reject_memory_dsn(resolved.dsn)
         super().__init__(resolved, broker=broker)
         self._dialer = dialer
         if self._dialer is None:
@@ -352,11 +339,9 @@ class AsyncMySQLDriver(AsyncDatabaseDriver[MySQLConfig]):
             if csql_cfg is not None:
                 self._dialer = AsyncCloudSQLDialer(csql_cfg)
         self._pool = pool
-        self._in_memory_rows: list[tuple[Any, ...]] = []
         self._in_transaction: bool = False
         self._tx_conn: Any = None
         self._tx_conn_ctx: Any = None
-        self._tx_snapshot: list[tuple[Any, ...]] | None = None
 
     @property
     def _config(self) -> MySQLConfig:
@@ -374,8 +359,7 @@ class AsyncMySQLDriver(AsyncDatabaseDriver[MySQLConfig]):
             msg = "AsyncMySQLDriver is closed"
             raise RuntimeError(msg)
         self._in_transaction = True
-        self._tx_snapshot = list(self._in_memory_rows)
-        if self._tx_conn is not None or (self.config.dsn.startswith("memory://") and self._pool is None):
+        if self._tx_conn is not None:
             return
         pool = await self._ensure_pool()
         if hasattr(pool, "acquire"):
@@ -411,8 +395,6 @@ class AsyncMySQLDriver(AsyncDatabaseDriver[MySQLConfig]):
     async def rollback(self) -> None:
         """Roll back the active async MySQL transaction."""
         try:
-            if self._tx_snapshot is not None:
-                self._in_memory_rows = list(self._tx_snapshot)
             if self._tx_conn is not None and hasattr(self._tx_conn, "rollback"):
                 res = self._tx_conn.rollback()
                 if inspect.isawaitable(res):
@@ -502,7 +484,6 @@ class AsyncMySQLDriver(AsyncDatabaseDriver[MySQLConfig]):
         ctx = self._tx_conn_ctx
         self._tx_conn = None
         self._tx_conn_ctx = None
-        self._tx_snapshot = None
         self._in_transaction = False
         if ctx is not None:
             await ctx.__aexit__(None, None, None)
@@ -550,10 +531,6 @@ class AsyncMySQLDriver(AsyncDatabaseDriver[MySQLConfig]):
                 lease = self._broker.acquire(bind_key="mysql")
 
         try:
-            if self.config.dsn.startswith("memory://") and self._pool is None:
-                cols = tuple(f"col_{i}" for i in range(len(self._in_memory_rows[0]))) if self._in_memory_rows else ()
-                return list(self._in_memory_rows), cols, len(self._in_memory_rows)
-
             if self._tx_conn is not None:
                 return await self._execute_on_async_connection(
                     self._tx_conn,
@@ -597,7 +574,7 @@ class AsyncMySQLDriver(AsyncDatabaseDriver[MySQLConfig]):
         """Ensure connection pool is initialized or raise MissingDependencyError."""
         if self._pool is not None:
             return self._pool
-        asyncmy: Any = ensure_module("asyncmy", install_package="asyncmy", extra="mysql")
+        asyncmy: Any = ensure_module("asyncmy")
         params = await self.config.parse_dsn_params_async()
         pool_kwargs: dict[str, Any] = {
             "host": params["host"],
@@ -612,3 +589,17 @@ class AsyncMySQLDriver(AsyncDatabaseDriver[MySQLConfig]):
         }
         self._pool = await asyncmy.create_pool(**pool_kwargs)
         return self._pool
+
+
+def _reject_memory_dsn(dsn: str) -> None:
+    """Reject in-process memory:// DSNs.
+
+    Args:
+        dsn: Configured MySQL DSN.
+
+    Raises:
+        ImproperConfigurationError: When ``dsn`` starts with ``memory://`` (case-insensitive).
+    """
+    if dsn.strip().lower().startswith("memory://"):
+        msg = "MySQL drivers do not support memory:// DSNs; pass a mysql:// DSN or inject connect_factory= or pool="
+        raise ImproperConfigurationError(msg)

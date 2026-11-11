@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from datetime import timedelta
+from typing import TYPE_CHECKING
 
 import msgspec
 import pytest
@@ -21,6 +22,9 @@ from vertebra.extensions.alchemy import (
     create_cache_config,
     create_sync_alchemy_config,
 )
+
+if TYPE_CHECKING:
+    from tests.unit.conftest import Resp3FakeServer
 
 
 def test_cache_entry_monotonic_expiration() -> None:
@@ -218,67 +222,82 @@ async def test_async_cache_manager_sync_async_and_zero_copy_schema_projection() 
 
 
 @pytest.mark.anyio
-async def test_alchemy_cache_clear_removes_only_its_prefix() -> None:
+async def test_alchemy_cache_clear_removes_only_its_prefix(resp3_server: Resp3FakeServer) -> None:
     """SQLAlchemyCacheBackend.clear and clear_async remove only keys under the backend's key_prefix."""
-    sync_driver = SyncRedisDriver(RedisConfig(url="memory://"))
-    async_driver = AsyncRedisDriver(RedisConfig(url="memory://"))
-    sync_driver.set("other:keep", b"1")
-    await async_driver.set("other:keep", b"1")
+    sync_driver = SyncRedisDriver(RedisConfig(url=resp3_server.redis_url))
+    async_driver = AsyncRedisDriver(RedisConfig(url=resp3_server.redis_url))
+    try:
+        sync_driver.set("other:keep", b"1")
+        await async_driver.set("other:keep", b"1")
 
-    backend_a = SQLAlchemyCacheBackend(
-        sync_driver=sync_driver,
-        async_driver=async_driver,
-        key_prefix="vtb:aa:",
-    )
-    backend_b = SQLAlchemyCacheBackend(
-        sync_driver=sync_driver,
-        async_driver=async_driver,
-        key_prefix="vtb:other:",
-    )
+        backend_a = SQLAlchemyCacheBackend(
+            sync_driver=sync_driver,
+            async_driver=async_driver,
+            key_prefix="vtb:aa:",
+        )
+        backend_b = SQLAlchemyCacheBackend(
+            sync_driver=sync_driver,
+            async_driver=async_driver,
+            key_prefix="vtb:other:",
+        )
 
-    backend_a.set("user:1", {"id": 1})
-    backend_a.set("vtb:aa:user:2", {"id": 2})
-    backend_b.set("user:9", {"id": 9})
+        backend_a.set("user:1", {"id": 1})
+        backend_a.set("vtb:aa:user:2", {"id": 2})
+        backend_b.set("user:9", {"id": 9})
 
-    assert sync_driver.get("vtb:aa:user:1") is not None
-    assert sync_driver.get("vtb:aa:user:2") is not None
-    assert sync_driver.get("vtb:other:user:9") is not None
+        assert sync_driver.get("vtb:aa:user:1") is not None
+        assert sync_driver.get("vtb:aa:user:2") is not None
+        assert sync_driver.get("vtb:other:user:9") is not None
 
-    backend_a.clear()
-    assert sync_driver.get("other:keep") == b"1"
-    assert sync_driver.get("vtb:aa:user:1") is None
-    assert sync_driver.get("vtb:aa:user:2") is None
-    assert sync_driver.get("vtb:other:user:9") is not None
-    assert backend_b.get("user:9") == {"id": 9}
+        backend_a.clear()
+        assert sync_driver.get("other:keep") == b"1"
+        assert sync_driver.get("vtb:aa:user:1") is None
+        assert sync_driver.get("vtb:aa:user:2") is None
+        assert sync_driver.get("vtb:other:user:9") is not None
+        assert backend_b.get("user:9") == {"id": 9}
 
-    await backend_a.set_async("user:1", {"id": 1})
-    await backend_a.set_async("vtb:aa:user:2", {"id": 2})
-    await backend_b.set_async("user:9", {"id": 9})
+        await backend_a.set_async("user:1", {"id": 1})
+        await backend_a.set_async("vtb:aa:user:2", {"id": 2})
+        await backend_b.set_async("user:9", {"id": 9})
 
-    await backend_a.clear_async()
-    assert await async_driver.get("other:keep") == b"1"
-    assert await async_driver.get("vtb:aa:user:1") is None
-    assert await async_driver.get("vtb:aa:user:2") is None
-    assert await async_driver.get("vtb:other:user:9") is not None
-    assert await backend_b.get_async("user:9") == {"id": 9}
+        await backend_a.clear_async()
+        assert await async_driver.get("other:keep") == b"1"
+        assert await async_driver.get("vtb:aa:user:1") is None
+        assert await async_driver.get("vtb:aa:user:2") is None
+        assert await async_driver.get("vtb:other:user:9") is not None
+        assert await backend_b.get_async("user:9") == {"id": 9}
+    finally:
+        sync_driver.close()
+        await async_driver.close()
 
 
 @pytest.mark.anyio
-async def test_alchemy_cache_sends_sub_second_ttl_as_milliseconds() -> None:
+async def test_alchemy_cache_sends_sub_second_ttl_as_milliseconds(resp3_server: Resp3FakeServer) -> None:
     """Sub-second TTLs are sent to the Redis/Valkey driver as millisecond PX expiries."""
-    sync_driver = SyncRedisDriver(RedisConfig(url="memory://"))
-    async_driver = AsyncRedisDriver(RedisConfig(url="memory://"))
-    backend = SQLAlchemyCacheBackend(
-        sync_driver=sync_driver,
-        async_driver=async_driver,
-        key_prefix="vtb:aa:",
-    )
+    sync_driver = SyncRedisDriver(RedisConfig(url=resp3_server.redis_url))
+    async_driver = AsyncRedisDriver(RedisConfig(url=resp3_server.redis_url))
+    try:
+        backend = SQLAlchemyCacheBackend(
+            sync_driver=sync_driver,
+            async_driver=async_driver,
+            key_prefix="vtb:aa:",
+        )
 
-    backend.set("ephemeral", {"ok": True}, ttl=0.25)
-    assert 1 <= sync_driver.pttl("vtb:aa:ephemeral") <= 250
+        backend.set("ephemeral", {"ok": True}, ttl=0.25)
+        assert 1 <= sync_driver.pttl("vtb:aa:ephemeral") <= 250
 
-    await backend.set_async("ephemeral_async", {"ok": True}, ttl=timedelta(milliseconds=250))
-    assert 1 <= await async_driver.pttl("vtb:aa:ephemeral_async") <= 250
+        await backend.set_async("ephemeral_async", {"ok": True}, ttl=timedelta(milliseconds=250))
+        assert 1 <= await async_driver.pttl("vtb:aa:ephemeral_async") <= 250
+    finally:
+        sync_driver.close()
+        await async_driver.close()
+
+
+def test_alchemy_cache_memory_url_stays_local() -> None:
+    """SQLAlchemyCacheBackend.from_url('memory://') builds the local L1 cache without a Redis driver."""
+    backend = SQLAlchemyCacheBackend.from_url("memory://")
+    assert backend.sync_driver is None
+    assert backend.async_driver is None
 
 
 @pytest.mark.parametrize("bad_prefix", ["", "bad*", "bad?key", "bad[0]"])

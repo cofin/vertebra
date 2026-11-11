@@ -56,7 +56,7 @@ Read `../spec.md`, direct dependency worksheets and notes, `.agents/bundles/know
 
 4. Track idle age/max lifetime and broken-session eviction. Ensure fair waiter wakeup without holding pool locks across network I/O. A leased connection is unavailable to every other caller, including transactions and portals. Install an RAII return state that t46 completes with reset; until then only known-idle/unchanged sessions can be requeued, all others retire.
 
-5. Export concrete Rust types with explicit lib.rs names for broker-pool-sharing consumers; do not move live sockets into the existing vertebra_db::postgres::PostgresPool SHM-admission helper. Commit feat(postgres): pool real PostgreSQL connections in Rust.
+5. Export concrete Rust types with explicit lib.rs names for broker-pool-sharing consumers (`driver-fail-loud` already removed the connectionless SHM admission pool helpers from `vertebra-db`). Commit feat(postgres): pool real PostgreSQL connections in Rust.
 
 ## Verification
 

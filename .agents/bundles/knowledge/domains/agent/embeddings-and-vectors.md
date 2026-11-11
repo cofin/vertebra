@@ -15,10 +15,16 @@ generated:
   by: flow/0.26.0
   at: "2026-11-04T04:33:00Z"
 verified:
+  - by: agent:flow-executor
+    at: "2026-11-09T15:23:00Z"
+    commit: b02636d9
   - by: agent:flow-setup
     at: "2026-11-07T03:55:00Z"
     commit: 9af810f5
 sources:
+  - id: src-adapters-oracle-driver-py
+    resource: src/py/vertebra/db/adapters/oracle/driver.py::SyncOracleDriver
+    title: "Oracle driver native-module guard"
   - id: src-adapters-oracle-embeddings-py
     resource: src/py/vertebra/db/adapters/oracle/embeddings.py
     title: "SQL embedding capability and facade"
@@ -86,7 +92,7 @@ sources:
 <!-- truth: start -->
 - **Shared-Memory Vector Arena (`vertebra-core::vector`, `vertebra-py::vector`)**: [`VectorSlab`](../../../../../src/rs/vertebra-core/src/vector.rs)[^src-vertebra-core-src-vector-rs] (`VECTOR_SLAB_MAGIC = *b"VTBVSLAB"`) stores 64-byte-aligned dense vectors (`Float32`, `Float64`, `Float16`, `Int8`, `Binary`) in a POSIX shared-memory `ShmRegion` with a 64-byte [`VectorSlabHeader`](../../../../../src/rs/vertebra-core/src/vector.rs). [`VectorView`](../../../../../src/rs/vertebra-py/src/vector.rs)[^src-vertebra-py-src-vector-rs] (1D) and [`VectorBatchView`](../../../../../src/rs/vertebra-py/src/vector.rs) (2D) expose zero-copy PEP 3118 buffers (`memoryview`, `numpy.asarray`), Apache Arrow `FixedSizeListArray` streams (`to_arrow_shm`), and binary database wire frames (`to_pgvector_bytes`, `to_oracle_bytes`, `to_sqlite_blob`).
 - **Cloud and SQL Embeddings**: `Embedder()` defaults to `VertexEmbedder` (`gemini-embedding-001`, 768 dimensions), dispatching over native Rust HTTP/2 (`gcp_http2_post` / `gcp_http2_post_async` in [`src/rs/vertebra-py/src/gcp_auth.rs`](../../../../../src/rs/vertebra-py/src/gcp_auth.rs)[^src-vertebra-py-src-gcp-auth-rs]) with refreshable `SyncGcpTokenCache` / `AsyncGcpTokenCache` credentials, packed-float decoding, and a persistent background portal in `Embedder._run_sync`. `GeminiEmbedder.embed_multimodal` forwards inline `bytes` and `MultimodalPart` payloads alongside text parts. `PushdownEmbedder` wraps the engine-owned `EmbeddingPushdown` capability while inheriting cache, sync, Arrow, and SIMD search methods. Its query path calls `embed_query`; document and batch paths call `embed_documents`; `vector_search` calls the capability's `similarity_search`.
-- **Engine-Owned Pushdown**: `db/adapters/{bigquery,spanner,postgres,oracle}/embeddings.py` implements `EmbeddingPushdown` without importing `vertebra.embeddings`. Adapters use `select` on async drivers and thread offloading on sync drivers, validate interpolated identifiers, preserve batch ordering, and raise `DataError` for incomplete vectors. The facade translates inference `DataError` to `EmbeddingError`. PostgreSQL binds model values; Oracle batches both `embed_documents` and `embed_query` through `DBMS_VECTOR.UTL_TO_EMBEDDINGS` (`VECTOR_ARRAY_T`), validates 128-byte UTF-8 Vertex URLs, and rotates credentials through sync or async token caches and drivers. The embeddings package lazily exports its public API and has no former SQL-provider aliases.
+- **Engine-Owned Pushdown**: `db/adapters/{bigquery,spanner,postgres,oracle}/embeddings.py` implements `EmbeddingPushdown` without importing `vertebra.embeddings`. Adapters use `select` on async drivers and thread offloading on sync drivers, validate interpolated identifiers, preserve batch ordering, and raise `DataError` for incomplete vectors. The facade translates inference `DataError` to `EmbeddingError`. PostgreSQL binds model values; Oracle batches both `embed_documents` and `embed_query` through `DBMS_VECTOR.UTL_TO_EMBEDDINGS` (`VECTOR_ARRAY_T`), validates 128-byte UTF-8 Vertex URLs, and rotates credentials through sync or async token caches and drivers. `OracleEmbeddingPushdown` needs an Oracle driver, and `SyncOracleDriver` / `AsyncOracleDriver` raise `MissingDependencyError` until the native Oracle driver ships, so the Oracle path is verified as SQL text and binds only.[^src-adapters-oracle-driver-py] The embeddings package lazily exports its public API and has no former SQL-provider aliases.
 - **Single-Copy `1x` RAM Local Model Broker (`_broker.py`, `_local.py`)**: [`EmbeddingBroker`](../../../../../src/py/vertebra/embeddings/_broker.py)[^src-embeddings-broker-py] loads local weights (`GemmaEmbedder`, `FastEmbedder`) once for an entire multi-worker deployment, dynamic-batches concurrent worker requests by token budget (`max_batch_tokens = 16_384`, `max_pending_requests = 1024`) with length-sorted grouping, offloads in-process `backend_fn` calls via `asyncio.to_thread` when subprocess quarantine is not active, and isolates `onnxruntime` / `ctranslate2` inside a dedicated child process (`submit_batch_in_subprocess`) when running on free-threaded Python `3.14t`/`3.15t` (`sys._is_gil_enabled() is False`) so C-extension loads never re-enable the GIL in HTTP workers.
 <!-- truth: end -->
 
@@ -157,7 +163,7 @@ flowchart LR
 | `BigQueryEmbeddingPushdown` | `gemini-embedding-001` | `ML.GENERATE_EMBEDDING` / `AI.GENERATE_EMBEDDING` and `VECTOR_SEARCH`. |
 | `SpannerEmbeddingPushdown` | `gemini-embedding-001` | `ML.PREDICT` / `AI.GENERATE_EMBEDDING` and exact or approximate vector distance. |
 | `PostgresEmbeddingPushdown` | `gemini-embedding-001` | AlloyDB `embedding()` inference and pgvector distance operators. |
-| `OracleEmbeddingPushdown` | `gemini-embedding-001` | Batched `DBMS_VECTOR.UTL_TO_EMBEDDINGS` (`VECTOR_ARRAY_T`) for both `embed_documents` and `embed_query`, credential rotation, and `VECTOR_DISTANCE`. |
+| `OracleEmbeddingPushdown` | `gemini-embedding-001` | Batched `DBMS_VECTOR.UTL_TO_EMBEDDINGS` (`VECTOR_ARRAY_T`) for both `embed_documents` and `embed_query`, credential rotation, and `VECTOR_DISTANCE`. Requires an Oracle driver; Oracle drivers raise `MissingDependencyError` until the native Oracle driver ships. |
 | [`GemmaEmbedder`](../../../../../src/py/vertebra/embeddings/_local.py)[^src-embeddings-local-py] | `embeddinggemma-2-270m` (`768` dims) | `EmbeddingBroker`-hosted `EmbeddingGemma` (`270M` / `300M`, `100+` languages, MRL `768`/`512`/`256`/`128`). Rejects `precision="fp16"` (`ValueError`) to prevent activation overflow; supports `int8` (default), `q4`, `bf16`, and `fp32`. |
 | [`FastEmbedder`](../../../../../src/py/vertebra/embeddings/_local.py) | `BAAI/bge-small-en-v1.5` (`384` dims) | `EmbeddingBroker`-hosted ONNX Runtime execution for BGE, Nomic, Arctic, Jina, and MiniLM models. |
 | [`StaticEmbedder`](../../../../../src/py/vertebra/embeddings/_local.py) | `potion-base-8M` (`512` dims) | Pure-Rust `StaticEmbedderCore` mmap lookup table with zero ML dependencies. |
@@ -171,7 +177,7 @@ SQL embedding execution remains adapter-owned. PostgreSQL inference and similari
 - **Token-Budgeted Length-Sorted Dynamic Batching (`_flush_pending_batch`)**: Enforces `max_pending_requests = 1024` queue-cap backpressure, collects pending items across a `batch_window_ms = 2.0` window, estimates token length (`estimate_gemma_token_count`), sorts items by ascending token length to minimize right-padding waste across attention layers, splits batches at `max_batch_tokens = 16_384` or `max_batch_items = 64`, and restores caller ordering in the output `VectorBatchView`.
 - **Free-Threaded `3.14t`/`3.15t` Subprocess Quarantine (`should_quarantine_subprocess`) & Thread Offload**: When `is_free_threaded()` is `True`, `isolate_gil_subprocess` is enabled, and no in-process `backend_fn` was passed, `EmbeddingBroker` sends batches to a child process (`submit_batch_in_subprocess`) together with its `BackendFactory` (`target="module:qualname"`, `options`); the child imports the factory once, runs the real model, and returns a `/dev/shm` `VectorSlab`. When running in-process (`backend_fn`), `EmbeddingBroker` offloads inference off the event loop via `asyncio.to_thread`. `FastEmbedder` and `GemmaEmbedder` pass `FastEmbedder.build_backend`. A broker without `backend_fn` or `backend_factory` raises `ImproperConfigurationError`.
 
-Provenance sources: [^src-embeddings-pushdown-py], [^src-adapters-bigquery-embeddings-py], [^src-adapters-spanner-embeddings-py], [^src-adapters-postgres-embeddings-py], [^src-adapters-oracle-embeddings-py], [^src-embeddings-init-py], [^src-embeddings-models-py], [^src-cli-ai-py], [^src-tests-unit-embeddings-test-vector-views-py], [^src-tests-unit-embeddings-test-google-embedders-py], [^src-tests-unit-embeddings-test-embedding-broker-py].
+Provenance sources: [^src-embeddings-pushdown-py], [^src-adapters-bigquery-embeddings-py], [^src-adapters-spanner-embeddings-py], [^src-adapters-postgres-embeddings-py], [^src-adapters-oracle-embeddings-py], [^src-adapters-oracle-driver-py], [^src-embeddings-init-py], [^src-embeddings-models-py], [^src-cli-ai-py], [^src-tests-unit-embeddings-test-vector-views-py], [^src-tests-unit-embeddings-test-google-embedders-py], [^src-tests-unit-embeddings-test-embedding-broker-py].
 
 [^src-vertebra-core-src-vector-rs]: `src/rs/vertebra-core/src/vector.rs` — Rust implementation module (src/rs/vertebra-core/src/vector.rs).
 [^src-vertebra-py-src-vector-rs]: `src/rs/vertebra-py/src/vector.rs` — Rust implementation module (src/rs/vertebra-py/src/vector.rs).
@@ -198,3 +204,5 @@ Provenance sources: [^src-embeddings-pushdown-py], [^src-adapters-bigquery-embed
 [^src-adapters-postgres-embeddings-py]: `src/py/vertebra/db/adapters/postgres/embeddings.py` — SQL embedding capability and facade.
 
 [^src-adapters-oracle-embeddings-py]: `src/py/vertebra/db/adapters/oracle/embeddings.py` — SQL embedding capability and facade.
+
+[^src-adapters-oracle-driver-py]: `src/py/vertebra/db/adapters/oracle/driver.py::SyncOracleDriver` — Oracle driver native-module guard.

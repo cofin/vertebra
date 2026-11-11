@@ -14,6 +14,9 @@ generated:
   by: flow/0.27.0
   at: '2026-11-06T18:28:00Z'
 verified:
+- by: agent:flow-executor
+  at: '2026-11-09T15:21:00Z'
+  commit: b02636d9
 - by: agent:flow-learn
   at: '2026-11-08T18:26:31.591504Z'
   commit: cda502a4
@@ -53,16 +56,16 @@ sources:
 ```bash
 # 1. Environment & Native PyO3 Extension Setup
 make setup-env                                            # Configure public registries on hosts that need them; no-op elsewhere
-make install                                              # destroy + clean + setup-env, then uv python pin 3.12, uv sync --all-extras --dev --group doc, ts-install, ts-build, dev
+make install                                              # destroy + clean + setup-env, then uv python pin 3.12, uv sync --all-extras --dev --group doc --group duckdb, ts-install, ts-build, dev
 make dev                                                  # cargo build of non-extension crates + maturin develop for _vertebra, _bundler, _storage, _bigquery, _spanner
-make upgrade                                              # uv lock --upgrade, cargo update, bun update, pre-commit autoupdate
+make upgrade                                              # uv lock --upgrade + uv sync (--group duckdb on GIL interpreters), cargo update, bun update, pre-commit autoupdate
 make clean                                                # Remove Python/Rust/TS build artifacts and caches (keeps .venv)
 make release bump=patch                                   # Bump version and synchronize package files via bump-my-version
 make pre-release version=0.2.0-alpha.1                    # Start or advance pre-release version via bump-my-version
 
 # 2. Focused Language Test Suites
 make rs-test                                              # rm -rf /dev/shm/test-* /dev/shm/*vertebra*, then cargo test --workspace --features tls,compression,gcp
-make py-test                                              # make dev, mypy.stubtest (_vertebra, _bundler, _storage, _bigquery, _spanner), then uv run pytest src/py/tests -v
+make py-test                                              # make dev, mypy.stubtest (_vertebra, _bundler, _storage, _bigquery, _spanner), then uv run $(PY_TEST_GROUPS) pytest src/py/tests -v (--group duckdb on GIL interpreters only)
 uv run pytest src/py/tests/unit/server/test_runner.py -q  # Focused Python test file (run make dev first if Rust changed)
 make ts-test                                              # bun run test (vitest run) with an isolated --localstorage-file
 
@@ -72,7 +75,7 @@ make lint                                                 # Biome --write --unsa
 make lint-all                                             # Read-only CI gate: biome check, ruff check + format --check, mypy + stubtest, cargo fmt --check, clippy --features tls,compression,gcp -D warnings, review-check
 make review-check                                         # Validate review capability manifests, skills, agents, and privacy constraints
 make review-route                                         # Route changed files to owning review areas and shards (BASE=origin/main)
-make coverage                                             # uv run pytest src/py/tests --cov, then coverage.xml and htmlcov/ (Python only)
+make coverage                                             # uv run $(PY_TEST_GROUPS) pytest src/py/tests --cov, then coverage.xml and htmlcov/ (Python only)
 make check                                                # lint + test + coverage
 make docs                                                 # scan_public_docstrings + generate_cli_docs --check + zensical build --clean + postbuild + verify_docs_artifacts
 make docs-serve                                           # make docs + zensical serve --dev-addr 127.0.0.1:8000
@@ -101,7 +104,7 @@ make bench-report                                         # Latest benchmark rep
 2. **PyPI Distribution vs. Import Namespace**: [`pyproject.toml`](../../../pyproject.toml)[^src-pyproject-toml] sets `[project] name = "vertebra-core"` while `[tool.maturin]` sets `python-packages = ["vertebra"]` and `module-name = "vertebra._vertebra"`. `importlib.metadata.version("vertebra-core")` and `vtb init` reference `vertebra-core`, whereas all Python code imports `vertebra`.
 3. **Codegen & Wheel-Bundled TypeScript Sync**: `make ts-build` compiles all 17 `@vertebra/client` entrypoints (`.` plus `./react`, `./vue`, `./svelte`, `./angular`, `./htmx`, `./vite`, `./store`, `./hmr`, `./live`, `./apex`, `./telemetry`, `./wasm`, `./arrow`, `./router`, `./webmcp`, and `./agent`), emits `.d.ts` declarations, and copies `dist/` into `src/py/vertebra/server/_js/bundle/` for wheel distribution. When modifying route schemas or [`src/py/vertebra/build/codegen/`](../../../src/py/vertebra/build/codegen/__init__.py), run `make py-test` (`src/py/tests/unit/codegen/`) and `make ts-test`.
 4. **Shared-Memory Cleanup**: `make rs-test` removes `/dev/shm/test-*` and `/dev/shm/*vertebra*`; the autouse `_cleanup_shm` fixture in [`src/py/tests/conftest.py`](../../../src/py/tests/conftest.py) also removes `/dev/shm/vtb-*`. Isolate full-suite SHM cleanup from concurrent workloads. Direct `cargo test --workspace --features tls,compression,gcp --locked` in `src/rs` omits the Make cleanup prelude; new tests clean only their own allocations.
-5. **`--group bench` & `--group doc` Isolation**: Keep `duckdb`, `uvicorn`, `httptools`, `uvloop`, `granian`, and `spikard` inside `[dependency-groups].bench` and `zensical`, `mkdocstrings-python`, and `pymdown-extensions` inside `[dependency-groups].doc` in [`pyproject.toml`](../../../pyproject.toml) so Python `3.14t`/`3.15t` test runs never compile `duckdb` C++ or `zensical` Rust sdist dependencies from source.
+5. **`--group bench`, `--group duckdb` & `--group doc` Isolation**: Keep `duckdb>=1.0` in the dedicated `[dependency-groups].duckdb` group, which `bench` includes and `dev` does not; keep `uvicorn`, `httptools`, `uvloop`, `granian`, and `spikard` in `bench` and `zensical`, `mkdocstrings-python`, and `pymdown-extensions` in `doc` in [`pyproject.toml`](../../../pyproject.toml)[^src-pyproject-toml]. `make install` syncs `--group duckdb` and `make py-test`, `make coverage`, and `make upgrade` add it through `PY_TEST_GROUPS` in [`Makefile`](../../../Makefile)[^src-makefile] only when the interpreter probe reports `Py_GIL_DISABLED=0` (GIL build); a free-threaded build or a failed probe adds no group. DuckDB publishes only `cp312-abi3` wheels, which free-threaded `3.14t` / `3.15t` cannot load, and `zensical` would build Rust sdists on those interpreters.
 6. **Zensical Documentation & Griffe `msgspec.Struct` Hygiene**: Never enable `navigation.indexes` in [`zensical.toml`](../../../zensical.toml) (it hides section `Overview` links and causes empty primary sidebars on single-page tabs). Keep PEP 257 field docstrings on all documented `msgspec.Struct` and `.pyi` stub classes so custom Griffe templates (`tools/docs/templates/python/material/`) render complete attribute tables.
 7. **Pre-Commit Secret Hygiene**: Never use Google OAuth2 access token prefixes in tests or fixtures; use `"mock-oauth-token"` instead.
 8. **Git Config & Hook Hygiene**: Keep `extensions.worktreeConfig` unset and `core.repositoryformatversion = 0` in `.git/config` (Antigravity's Git client rejects `extensions.worktreeConfig`), and keep `core.hooksPath` unset so `pre-commit` manages `.git/hooks/pre-commit` and `.git/hooks/commit-msg` from [`.pre-commit-config.yaml`](../../../.pre-commit-config.yaml).

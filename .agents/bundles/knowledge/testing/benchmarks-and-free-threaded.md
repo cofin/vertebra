@@ -13,6 +13,9 @@ generated:
   by: flow/0.26.0
   at: "2026-11-04T04:33:00Z"
 verified:
+  - by: agent:flow-executor
+    at: "2026-11-09T15:21:00Z"
+    commit: b02636d9
   - by: agent:flow-setup
     at: "2026-11-07T03:55:00Z"
     commit: 9af810f5
@@ -67,7 +70,7 @@ sources:
 # Benchmark Suite & Free-Threaded Python 3.14t/3.15t
 
 <!-- truth: start -->
-- Keep benchmark-only packages (`duckdb`, `uvicorn`, `granian`, `spikard`) isolated in `[dependency-groups].bench` so standard and free-threaded (`3.14t`/`3.15t`) test suites never build benchmark sdists.
+- `duckdb>=1.0` lives in the GIL-only `[dependency-groups].duckdb` group that `bench` includes; `uvicorn`, `granian`, and `spikard` stay in `[dependency-groups].bench`; free-threaded (`3.14t`/`3.15t`) test runs install neither group.
 - Run `make bench`, `make bench-ft`, `make rs-bench`, `make bench-micro`, and `make bench-check` against release or PGO builds (`make build` / `make build-pgo`) to enforce regression gates.
 <!-- truth: end -->
 
@@ -106,11 +109,11 @@ The workflow runs on `workflow_dispatch` (input `full_benchmark`), on published 
 
 `make build-pgo` invokes `uv run python -m tools.pgo.rust_pgo` for two-phase instrumented and profile-use release builds across `vertebra-http` and all five PyO3 extensions (`_vertebra`, `_bundler`, `_storage`, `_bigquery`, `_spanner`), or `PROFDATA=<path> make build-pgo` to reuse an existing profile. `src/py/tests/unit/build/test_packaging_and_pgo.py` exercises both modules, and `vtb build [--server-binary <path>]` bundles a pre-built `bin/vertebra-server` into standalone and onefile artifacts.
 
-## 5. Isolating `--group bench` Dependencies (`pyproject.toml`)
+## 5. Isolating `--group bench` and `--group duckdb` Dependencies (`pyproject.toml`)
 
-Keep the benchmark-only dependencies (the `duckdb>=1.0` results store and the `uvicorn[standard]>=0.30`, `httptools>=0.6`, `uvloop>=0.21`, `granian>=1.6`, and `spikard>=0.12` baselines) in `[dependency-groups].bench` in [`pyproject.toml`](../../../../pyproject.toml)[^src-pyproject-toml], never in `dev`:
+Keep the benchmark-only dependencies (the `duckdb>=1.0` results store reaching `bench` through `{ include-group = "duckdb" }`, and the `uvicorn[standard]>=0.30`, `httptools>=0.6`, `uvloop>=0.23.0; sys_platform != 'win32'`, `granian>=1.6`, and `spikard>=0.12` baselines) in `[dependency-groups].bench` in [`pyproject.toml`](../../../../pyproject.toml)[^src-pyproject-toml], never in `dev`:
 
-- `pyproject.toml` sets no `[tool.uv] default-groups`, so `uv run` during `make py-test` and the CI `3.14t` job syncs only `dev`. Keeping `duckdb` out of `dev` prevents a source build of `duckdb` when no `cp314t` wheel exists.
+- `pyproject.toml` sets no `[tool.uv] default-groups`; `make py-test` and `make coverage` run `uv run $(PY_TEST_GROUPS)`, so GIL interpreters sync `dev` plus `duckdb` and the CI `3.14t` / `3.15t` jobs sync `dev` only, where DuckDB tests skip through `pytest.importorskip("duckdb")`.
 - Every `make bench*` target passes `--group bench` to `uv run`.
 
 ## 6. Free-Threaded Build (`make bench-ft`)

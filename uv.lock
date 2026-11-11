@@ -3586,6 +3586,9 @@ doc = [
     { name = "ruff" },
     { name = "zensical" },
 ]
+duckdb = [
+    { name = "duckdb" },
+]
 lint = [
     { name = "django-stubs" },
     { name = "mypy" },
@@ -3744,6 +3747,7 @@ doc = [
     { name = "ruff", specifier = ">=0.4" },
     { name = "zensical", specifier = ">=0.0.71" },
 ]
+duckdb = [{ name = "duckdb", specifier = ">=1.0" }]
 lint = [
     { name = "django-stubs", specifier = ">=6.1.2" },
     { name = "mypy" },

@@ -6,14 +6,54 @@
 
 `QueueService` provides background task execution, retry policies (`TaskRetryPolicy` with exponential backoff and dead-letter queues), delayed scheduling (`enqueue_delayed`), and cron jobs (`CronScheduler` with distributed leader leases):
 
-| Backend | Scheme / Class | Backing Mechanism |
-| --- | --- | --- |
-| **Memory** | `memory://` (`MemoryQueueBackend`) | In-process queue for local dev and unit tests |
-| **PostgreSQL** | `postgresql://` (`PostgreSQLQueueBackend`) | `FOR UPDATE SKIP LOCKED` + `LISTEN/NOTIFY` wakeups |
-| **Redis** | `redis://` (`RedisQueueBackend`) | Redis Streams consumer groups (`XREADGROUP` / `XACK`) |
-| **Valkey** | `valkey://` (`ValkeyQueueBackend`) | Valkey Streams + sorted-set delayed scheduling |
-| **Oracle** | `oracle://` (`OracleQueueBackend`) | `FOR UPDATE SKIP LOCKED` transactional queue tables |
-| **Cloud Spanner** | `spanner://` (`SpannerQueueBackend`) | Wound-wait claim transactions + dead-letter queue mutations |
+| Backend | Scheme / Class | Backing Mechanism | Requires |
+| --- | --- | --- | --- |
+| **Memory** | `memory://` (`MemoryQueueBackend`) | In-process queue for local dev and unit tests | Nothing |
+| **PostgreSQL** | `postgresql://`, `postgres://` (`PostgreSQLQueueBackend`) | `FOR UPDATE SKIP LOCKED` + `LISTEN/NOTIFY` wakeups | `executor=` (`PostgreSQLQueueExecutor`); `psycopg[binary,pool]` |
+| **Redis** | `redis://`, `rediss://` (`RedisQueueBackend`) | Redis Streams consumer groups (`XREADGROUP` / `XACK`) + sorted-set delayed scheduling | `redis` package and a URL with a host, or `client=` (`RedisStreamClient`) |
+| **Valkey** | `ValkeyQueueBackend` | Same Streams + sorted-set mechanics under the `vtb:valkey:queue` prefix | `redis` package and a `redis://` / `rediss://` URL pointing at Valkey, or `client=` |
+| **Oracle** | `oracle://` (`OracleQueueBackend`) | `FOR UPDATE SKIP LOCKED` transactional queue tables | `executor=` (`OracleQueueExecutor`); `oracledb` |
+| **Cloud Spanner** | `spanner://`, `spangres://` (`SpannerQueueBackend`) | Hash-sharded keys + `FOR UPDATE` claims + dead-letter table | `executor=` (`SpannerQueueExecutor`); `vertebra-core[spanner]` |
+
+Backends that need an executor raise `MissingDependencyError` when their package is missing and `ImproperConfigurationError` when it is installed but no `executor=` is passed. Vertebra does not ship these executors, so build the backend and pass it in: `QueueService(config, backend=PostgreSQLQueueBackend(config, executor=executor))`.
+
+`RedisQueueBackend` and `ValkeyQueueBackend` raise `MissingDependencyError` without the `redis` package and `ImproperConfigurationError` when `backend_url` has no host (the default `memory://` included), unless `client=` is passed. `valkey://` and `valkeys://` URLs route to `ValkeyQueueBackend`, but the backend accepts only `redis://` and `rediss://` URLs with a host; point a `redis://` URL at the Valkey server or pass `client=`. Install the optional client package for your selected queue backend (`psycopg[binary,pool]`, `redis`, `oracledb`, or `vertebra-core[spanner]`):
+
+=== "uv"
+
+    ```bash
+    uv add "psycopg[binary,pool]"
+    uv add redis
+    uv add oracledb
+    uv add "vertebra-core[spanner]"
+    ```
+
+=== "pip"
+
+    ```bash
+    pip install "psycopg[binary,pool]"
+    pip install redis
+    pip install oracledb
+    pip install "vertebra-core[spanner]"
+    ```
+
+=== "pdm"
+
+    ```bash
+    pdm add "psycopg[binary,pool]"
+    pdm add redis
+    pdm add oracledb
+    pdm add "vertebra-core[spanner]"
+    ```
+
+=== "poetry"
+
+    ```bash
+    poetry add "psycopg[binary,pool]"
+    poetry add redis
+    poetry add oracledb
+    poetry add "vertebra-core[spanner]"
+    ```
 
 ```python
 from vertebra.framework.queues import (

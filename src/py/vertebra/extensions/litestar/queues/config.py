@@ -44,16 +44,18 @@ def create_sqlspec_queue_config(
     """Create a QueueConfig backed by SQLSpec persistence and ChannelsBackend events."""
     ensure_module(
         "litestar_queues",
-        package="litestar-queues is required for litestar queue integration",
+        package="litestar-queues",
         extra="queues",
     )
     sqlspec_backend_mod = ensure_module(
         "litestar_queues.backends.sqlspec",
-        package="litestar-queues is required for litestar queue integration",
+        package="litestar-queues",
         extra="queues",
     )
     events_mod = ensure_module(
-        "litestar_queues.events", package="litestar-queues is required for litestar queue integration", extra="queues"
+        "litestar_queues.events",
+        package="litestar-queues",
+        extra="queues",
     )
 
     resolved_channels = channels_backend if channels_backend is not None else ChannelsBackend()
@@ -102,7 +104,7 @@ def create_shm_queue_config(
     """Create a QueueConfig using Vertebra SHMQueueBackend and SHMExecutionBackend."""
     ensure_module(
         "litestar_queues",
-        package="litestar-queues is required for litestar queue integration",
+        package="litestar-queues",
         extra="queues",
     )
 

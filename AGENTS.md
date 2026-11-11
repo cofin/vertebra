@@ -32,7 +32,7 @@ Commits remain local unless the user explicitly asks for delivery. Never create,
 
 ```bash
 make setup-env   # Configure public uv, bun/npm, and cargo registries on hosts whose mirrors replace them; no-op elsewhere
-make install     # Fresh setup: destroy .venv + clean, setup-env, pin Python 3.12, uv sync --all-extras --dev --group doc, bun install/build, make dev
+make install     # Fresh setup: destroy .venv + clean, setup-env, pin Python 3.12, uv sync --all-extras --dev --group doc --group duckdb, bun install/build, make dev
 make dev         # Build non-extension Rust crates and install debug PyO3 extensions (_vertebra, _bundler, _storage, _bigquery, _spanner)
 make lint        # Auto-fix TS (Biome), Python (Ruff), Rust (rustfmt + Clippy --features tls,compression,gcp), and run Mypy + stubtest + review-check
 make lint-all    # Read-only CI lint, type-check, Clippy (--features tls,compression,gcp), stubtest, and review-check gate across TS, Python, and Rust

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import collections
 import contextlib
 import time
 import urllib.parse
@@ -18,7 +17,8 @@ from vertebra.framework.queues.base import (
     TaskEnvelope,
     TaskLane,
 )
-from vertebra.utils.module_loader import import_optional
+from vertebra.typing import ImproperConfigurationError
+from vertebra.utils.module_loader import ensure_module
 from vertebra.utils.serializers import decode_json, encode_json_bytes
 
 if TYPE_CHECKING:
@@ -169,226 +169,6 @@ class RedisStreamClient(Protocol):
         ...
 
 
-class _InMemoryRedisStreamClient:
-    """In-memory emulator of Redis/Valkey Streams, ZSET, and Lua execution."""
-
-    __slots__ = ("_groups", "_kv", "_pel", "_streams", "_zsets")
-
-    def __init__(self) -> None:
-        self._streams: dict[str, list[tuple[str, dict[str, Any]]]] = collections.defaultdict(list)
-        self._groups: dict[str, set[str]] = collections.defaultdict(set)
-        self._pel: dict[str, dict[str, tuple[str, float, dict[str, Any]]]] = collections.defaultdict(dict)
-        self._zsets: dict[str, dict[str, float]] = collections.defaultdict(dict)
-        self._kv: dict[str, tuple[str, float | None]] = {}
-
-    async def xgroup_create(
-        self,
-        stream: str,
-        group: str,
-        id: str = "$",
-        mkstream: bool = False,
-    ) -> bool:
-        """Register consumer group for stream."""
-        if mkstream and stream not in self._streams:
-            self._streams[stream] = []
-        self._groups[stream].add(group)
-        return True
-
-    async def xadd(
-        self,
-        stream: str,
-        fields: Mapping[str, Any],
-        id: str = "*",
-        maxlen: int | None = None,
-        approximate: bool = True,
-    ) -> str:
-        """Append stream message."""
-        entry_id = f"{int(time.time() * 1000)}-{len(self._streams[stream])}"
-        converted = {str(k): (v.decode("utf-8") if isinstance(v, bytes) else str(v)) for k, v in fields.items()}
-        self._streams[stream].append((entry_id, converted))
-        if maxlen and len(self._streams[stream]) > maxlen:
-            trim_count = len(self._streams[stream]) - maxlen
-            del self._streams[stream][:trim_count]
-        return entry_id
-
-    async def xreadgroup(
-        self,
-        group: str,
-        consumer: str,
-        streams: Mapping[str, str],
-        count: int | None = None,
-        block: int | None = None,
-    ) -> list[Any]:
-        """Read unclaimed entries for consumer group."""
-        limit = count or 10
-        results: list[tuple[str, list[tuple[str, dict[str, Any]]]]] = []
-        now = time.time()
-        for stream_name, _ in streams.items():
-            pel_key = f"{stream_name}:{group}"
-            stream_entries = self._streams.get(stream_name, [])
-            claimed_in_pel = set(self._pel[pel_key].keys())
-            matched: list[tuple[str, dict[str, Any]]] = []
-            for entry_id, fields in stream_entries:
-                if entry_id not in claimed_in_pel:
-                    self._pel[pel_key][entry_id] = (consumer, now, fields)
-                    matched.append((entry_id, fields))
-                    if len(matched) >= limit:
-                        break
-            if matched:
-                results.append((stream_name, matched))
-        return results
-
-    async def xack(self, stream: str, group: str, *ids: str) -> int:
-        """Remove entries from group PEL."""
-        pel_key = f"{stream}:{group}"
-        acked = 0
-        for entry_id in ids:
-            if entry_id in self._pel[pel_key]:
-                del self._pel[pel_key][entry_id]
-                acked += 1
-        return acked
-
-    async def xautoclaim(
-        self,
-        stream: str,
-        group: str,
-        consumer: str,
-        min_idle_time: int,
-        start_id: str = "0-0",
-        count: int | None = None,
-    ) -> tuple[str, list[tuple[str, dict[str, Any]]], list[str]]:
-        """Reclaim pending entries older than min_idle_time milliseconds."""
-        limit = count or 10
-        pel_key = f"{stream}:{group}"
-        now = time.time()
-        idle_threshold_s = min_idle_time / 1000.0
-        reclaimed: list[tuple[str, dict[str, Any]]] = []
-        for entry_id, (_, last_delivered, fields) in list(self._pel[pel_key].items()):
-            if now - last_delivered >= idle_threshold_s:
-                self._pel[pel_key][entry_id] = (consumer, now, fields)
-                reclaimed.append((entry_id, fields))
-                if len(reclaimed) >= limit:
-                    break
-        return ("0-0", reclaimed, [])
-
-    async def xrange(
-        self,
-        stream: str,
-        min: str = "-",
-        max: str = "+",
-        count: int | None = None,
-    ) -> list[tuple[str, dict[str, Any]]]:
-        """List stream entries in FIFO order."""
-        entries = self._streams.get(stream, [])
-        return entries[:count] if count else entries
-
-    async def xdel(self, stream: str, *ids: str) -> int:
-        """Remove matching entries from stream."""
-        id_set = set(ids)
-        before = len(self._streams.get(stream, []))
-        self._streams[stream] = [item for item in self._streams.get(stream, []) if item[0] not in id_set]
-        return before - len(self._streams[stream])
-
-    async def zadd(self, key: str, mapping: Mapping[str, float]) -> int:
-        """Add elements to simulated sorted set."""
-        added = 0
-        for member, score in mapping.items():
-            if member not in self._zsets[key]:
-                added += 1
-            self._zsets[key][member] = float(score)
-        return added
-
-    async def eval(self, script: str, numkeys: int, *keys_and_args: Any) -> Any:
-        """Simulate execution of queue promotion and lease renewal scripts."""
-        if "ZRANGEBYSCORE" in script:
-            scheduled_key = str(keys_and_args[0])
-            now_ts = float(keys_and_args[1])
-            prefix = str(keys_and_args[2])
-            limit = int(keys_and_args[3])
-            zset = self._zsets[scheduled_key]
-            eligible = [
-                (member, score) for member, score in sorted(zset.items(), key=lambda pair: pair[1]) if score <= now_ts
-            ][:limit]
-            promoted = 0
-            for raw_json, _ in eligible:
-                raw_bytes = raw_json.encode("utf-8") if isinstance(raw_json, str) else raw_json
-                env = msgspec.convert(decode_json(raw_bytes), type=TaskEnvelope)
-                lane = env.lane
-                stream_key = f"{prefix}:lane:{lane}"
-                await self.xadd(
-                    stream_key,
-                    {
-                        "payload": raw_json,
-                        "lane": lane,
-                        "task_name": env.task_name,
-                    },
-                )
-                zset.pop(raw_json, None)
-                promoted += 1
-            return promoted
-
-        if "current_owner == owner_id" in script:
-            lease_key = str(keys_and_args[0])
-            owner_id = str(keys_and_args[1])
-            ttl_ms = float(keys_and_args[2])
-            new_slot = str(keys_and_args[3]) if len(keys_and_args) > 3 else ""
-            existing_tuple = self._kv.get(lease_key)
-            if existing_tuple:
-                current_val, exp = existing_tuple
-                now = time.time()
-                if exp is None or exp > now:
-                    parts = current_val.split(":", 1)
-                    current_owner = parts[0]
-                    if current_owner == owner_id:
-                        slot_to_save = new_slot if new_slot else (parts[1] if len(parts) > 1 else "")
-                        val_to_save = f"{owner_id}:{slot_to_save}" if slot_to_save else owner_id
-                        self._kv[lease_key] = (val_to_save, now + (ttl_ms / 1000.0))
-                        return 1
-            return 0
-
-        return None
-
-    async def set(
-        self,
-        key: str,
-        value: str,
-        nx: bool = False,
-        px: int | None = None,
-    ) -> bool:
-        """Store key value pair."""
-        now = time.time()
-        existing = self._kv.get(key)
-        if existing:
-            _, exp = existing
-            if exp is not None and exp <= now:
-                self._kv.pop(key, None)
-                existing = None
-        if nx and existing is not None:
-            return False
-        expires_at = now + (px / 1000.0) if px else None
-        self._kv[key] = (value, expires_at)
-        return True
-
-    async def get(self, key: str) -> str | None:
-        """Fetch value if not expired."""
-        existing = self._kv.get(key)
-        if not existing:
-            return None
-        val, exp = existing
-        if exp is not None and exp <= time.time():
-            self._kv.pop(key, None)
-            return None
-        return val
-
-    async def aclose(self) -> None:
-        """Clear memory structures."""
-        self._streams.clear()
-        self._groups.clear()
-        self._pel.clear()
-        self._zsets.clear()
-        self._kv.clear()
-
-
 class RedisQueueBackend:
     """Distributed task queue backend powered by Redis Streams and Sorted Sets."""
 
@@ -400,9 +180,20 @@ class RedisQueueBackend:
         *,
         client: RedisStreamClient | None = None,
     ) -> None:
+        """Bind the queue backend to a Redis Streams client.
+
+        Args:
+            config: Queue configuration; when ``client`` is None, ``backend_url`` must carry a ``redis://`` or ``rediss://`` host URL accepted by ``redis.asyncio.from_url`` (pass ``client=`` for ``valkey://``, ``valkeys://``, or ``unix://`` endpoints).
+            client: Pre-built ``RedisStreamClient`` bound as given.
+
+        Raises:
+            MissingDependencyError: When ``client`` is None and ``redis`` is not installed.
+            ImproperConfigurationError: When ``client`` is None and ``config.backend_url`` has no hostname (including ``unix://`` URLs).
+            ValueError: When ``client`` is None and ``redis.asyncio.from_url`` rejects the URL scheme (such as ``valkey://`` or ``valkeys://``).
+        """
         self._config = config or QueueConfig()
         self._prefix = self._config.stream_prefix
-        self._client: RedisStreamClient = client or self._build_client(self._config)
+        self._client: RedisStreamClient = client if client is not None else self._build_client(self._config)
 
     @property
     def client(self) -> RedisStreamClient:
@@ -704,14 +495,16 @@ class RedisQueueBackend:
 
     @staticmethod
     def _build_client(config: QueueConfig) -> RedisStreamClient:
-        """Construct live Redis client or in-memory fallback emulator."""
-        aioredis = import_optional("redis.asyncio")
-        if aioredis is not None:
-            parsed = urllib.parse.urlparse(config.backend_url)
-            if parsed.hostname:
-                client: RedisStreamClient = aioredis.from_url(config.backend_url)
-                return client
-        return _InMemoryRedisStreamClient()
+        """Build a redis.asyncio client from ``config.backend_url``."""
+        aioredis = ensure_module("redis.asyncio", package="redis", install_package="redis")
+        if not urllib.parse.urlparse(config.backend_url).hostname:
+            msg = (
+                f"Redis queue backend_url {config.backend_url!r} has no host; "
+                "pass a redis://host:port URL or client= to bind a RedisStreamClient"
+            )
+            raise ImproperConfigurationError(msg)
+        client: RedisStreamClient = aioredis.from_url(config.backend_url)
+        return client
 
 
 class ValkeyQueueBackend(RedisQueueBackend):

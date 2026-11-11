@@ -21,10 +21,7 @@ use vertebra_db::dialer::{
     encode_alloydb_metadata_exchange as rs_encode_alloydb_metadata_exchange,
 };
 use vertebra_db::duckdb::DuckdbConfig;
-use vertebra_db::mssql::{
-    encode_tds_sql_batch as rs_encode_tds_sql_batch,
-    rewrite_mssql_placeholders as rs_rewrite_mssql_placeholders,
-};
+use vertebra_db::mssql::rewrite_mssql_placeholders as rs_rewrite_mssql_placeholders;
 use vertebra_db::oracle::{
     OracleSessionAttrs, decode_oracle_vector_binary as rs_decode_oracle_vector_binary,
     decode_oracle_vector_f32 as rs_decode_oracle_vector_f32,
@@ -956,21 +953,6 @@ pub fn rewrite_mssql_placeholders(py: Python<'_>, sql: &str) -> (String, usize) 
     py.detach(|| rs_rewrite_mssql_placeholders(sql))
 }
 
-/// Encode a TDS 7.4 `SQLBatch` packet with `ALL_HEADERS` `TransactionDescriptor` and UTF-16LE SQL text.
-#[pyfunction]
-#[pyo3(signature = (sql, tx_descriptor=0))]
-pub fn encode_tds_sql_batch<'py>(
-    py: Python<'py>,
-    sql: &str,
-    tx_descriptor: u64,
-) -> PyResult<Bound<'py, PyBytes>> {
-    let bytes = py.detach(|| rs_encode_tds_sql_batch(sql, tx_descriptor));
-    PyBytes::new_with(py, bytes.len(), |buf| {
-        buf.copy_from_slice(&bytes);
-        Ok(())
-    })
-}
-
 /// Generate DuckDB 2.0-safe post-initialization `SET` statements.
 #[pyfunction]
 #[pyo3(signature = (
@@ -1132,7 +1114,6 @@ pub fn register_db_bindings(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(decode_oson_payload, m)?)?;
     m.add_function(wrap_pyfunction!(encode_ttc_session_attrs, m)?)?;
     m.add_function(wrap_pyfunction!(rewrite_mssql_placeholders, m)?)?;
-    m.add_function(wrap_pyfunction!(encode_tds_sql_batch, m)?)?;
     m.add_function(wrap_pyfunction!(duckdb_bootstrap_statements, m)?)?;
     m.add_function(wrap_pyfunction!(sqlite_initialization_pragmas, m)?)?;
     m.add_function(wrap_pyfunction!(encode_resp_command, m)?)?;

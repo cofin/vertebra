@@ -32,6 +32,8 @@ from vertebra.utils.module_loader import (
     MissingDependencyError,
     _module_cache,
     ensure_module,
+    ensure_numpy,
+    ensure_pandas,
     import_optional,
     reset_dependency_cache,
 )
@@ -129,23 +131,84 @@ def test_public_typing_facade_exports_structs_exceptions_and_sentinels() -> None
         assert hasattr(vertebra_typing, attr), f"Missing {attr} on vertebra.typing"
 
 
+@pytest.mark.parametrize(
+    ("kwargs", "expected_install", "expected_hint"),
+    [
+        (
+            {"extra": "sqlspec"},
+            "vertebra-core[sqlspec]",
+            "Install it with: uv add vertebra-core[sqlspec]",
+        ),
+        (
+            {"install_package": "pkg", "extra": "sqlspec"},
+            "pkg",
+            "Install it with: uv add pkg",
+        ),
+        (
+            {},
+            "x",
+            "Install it with: uv add x",
+        ),
+    ],
+)
+def test_missing_dependency_error_install_hint_defaults(
+    kwargs: dict[str, str],
+    expected_install: str,
+    expected_hint: str,
+) -> None:
+    """MissingDependencyError defaults install_package to vertebra-core[extra] unless overridden."""
+    err = MissingDependencyError("x", **kwargs)
+    assert err.install_package == expected_install
+    assert err.hint == expected_hint
+    assert str(err) == "Optional dependency 'x' is required but not installed."
+
+
 def test_module_loader_caches_imported_modules_and_ensure_module() -> None:
     """Verify import_optional and ensure_module cache imported ModuleType objects."""
     reset_dependency_cache()
-    assert "json" not in _module_cache
+    try:
+        assert "json" not in _module_cache
 
-    mod1 = import_optional("json")
-    assert mod1 is not None
-    assert _module_cache.get("json") is mod1
-    assert import_optional("json") is mod1
-    assert ensure_module("json") is mod1
+        mod1 = import_optional("json")
+        assert mod1 is not None
+        assert _module_cache.get("json") is mod1
+        assert import_optional("json") is mod1
+        assert ensure_module("json") is mod1
 
-    assert import_optional("vertebra_nonexistent_pkg_xyz") is None
-    with pytest.raises(MissingDependencyError, match="vertebra_nonexistent_pkg_xyz"):
-        ensure_module("vertebra_nonexistent_pkg_xyz", extra="custom")
+        assert import_optional("vertebra_nonexistent_pkg_xyz") is None
+        with pytest.raises(MissingDependencyError, match="vertebra_nonexistent_pkg_xyz") as exc_info:
+            ensure_module("vertebra_nonexistent_pkg_xyz", extra="custom")
+        assert exc_info.value.install_package == "vertebra-core[custom]"
+        assert "vtb[" not in exc_info.value.hint
 
-    reset_dependency_cache()
-    assert "json" not in _module_cache
+        reset_dependency_cache()
+        assert "json" not in _module_cache
+    finally:
+        reset_dependency_cache()
+
+
+@pytest.mark.parametrize(
+    ("pkg_name", "loader_fn"),
+    [
+        ("numpy", ensure_numpy),
+        ("pandas", ensure_pandas),
+    ],
+)
+def test_optional_array_loaders_raise_missing_dependency_error(
+    monkeypatch: pytest.MonkeyPatch,
+    pkg_name: str,
+    loader_fn: Any,
+) -> None:
+    """Optional numpy and pandas loaders report their own package and install hint when absent."""
+    monkeypatch.setitem(sys.modules, pkg_name, None)
+    reset_dependency_cache(pkg_name)
+    try:
+        with pytest.raises(MissingDependencyError) as pkg_exc:
+            loader_fn()
+        assert pkg_exc.value.package == pkg_name
+        assert pkg_exc.value.install_package == pkg_name
+    finally:
+        reset_dependency_cache(pkg_name)
 
 
 def test_tool_provider_contract_and_policy_error_exports() -> None:

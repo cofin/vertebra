@@ -4,10 +4,10 @@ Native database configurations, synchronous and asynchronous drivers (`SyncDatab
 
 | Category | Classes | Highlights |
 | --- | --- | --- |
-| **SQLSpec Adapters (Litestar)** | `PostgreSQLAsyncConfig`, `MySQLAsyncConfig`, `SQLiteAsyncConfig`, `OracleAsyncConfig`, `MSSQLAsyncConfig`, `DuckDBAsyncConfig`, `BigQueryAsyncConfig`, `SpannerAsyncConfig` | Canonical Litestar adapter configurations (`vertebra.extensions.sqlspec`) backed by native Rust drivers and connection leasing |
+| **SQLSpec Adapters (Litestar)** | `PostgreSQLAsyncConfig`, `MySQLAsyncConfig`, `SQLiteAsyncConfig`, `OracleAsyncConfig`, `MSSQLAsyncConfig`, `DuckDBAsyncConfig`, `BigQueryAsyncConfig`, `SpannerAsyncConfig` | Canonical Litestar adapter configurations (`vertebra.extensions.sqlspec`) backed by engine drivers and connection leasing (Oracle and SQL Server sessions raise `MissingDependencyError` because their native driver packages are not yet published) |
 | **Registry, Contracts & Native Pipelines** | `DatabaseRegistry`, `provide_driver`, `BaseDatabaseConfig`, `SyncDatabaseDriver`, `AsyncDatabaseDriver`, `DatabaseError`, `NotFoundError`, `ArrowCursor` | Polymorphic URL scheme resolution, shared endpoint pool keys, uniform sync/async execution contracts, capability-based `driver.pipeline()` batching, and zero-copy Arrow IPC cursors |
 | **Capability Protocols** | `SyncPipelineCapable`, `AsyncPipelineCapable`, `NotificationSource`, `SyncChangeSource`, `AsyncChangeSource`, `QueueStore`, `EmbeddingPushdown` | `@runtime_checkable` structural protocols for query pipelining, pub/sub notifications, CDC streams, `SKIP LOCKED` job queues, and in-database embedding pushdown |
-| **Relational & OLAP Configs** | `PostgreSQLConfig`, `MySQLConfig`, `SQLiteConfig`, `OracleConfig`, `MSSQLConfig`, `DuckDBConfig`, `BigQueryConfig`, `SpannerConfig` | Pooler-aware statement caching, WAL/mmap pragmas, Oracle 26ai `VECTOR`/`OSON` & Cloud Wallets, TDS 7.4 `@P1` rewriting, DuckDB Arrow streaming, BigQuery Storage Read/Write v1 + Object Tables, and Cloud Spanner Multiplexed Sessions + `BatchWrite` |
+| **Relational & OLAP Configs** | `PostgreSQLConfig`, `MySQLConfig`, `SQLiteConfig`, `OracleConfig`, `MSSQLConfig`, `DuckDBConfig`, `BigQueryConfig`, `SpannerConfig` | Pooler-aware statement caching, WAL/mmap pragmas, Oracle 26ai `VECTOR`/`OSON` & Cloud Wallets, SQL Server `@P1` placeholder rewriting, DuckDB Arrow streaming (requires `duckdb`), BigQuery Storage Read/Write v1 + Object Tables, and Cloud Spanner Multiplexed Sessions + `BatchWrite` |
 | **RESP3 & Federated SQL** | `RedisConfig`, `ValkeyConfig`, `DataFusionConfig`, `DataFusionEngine` | RESP3 `HELLO 3` client-side cache invalidation, Cluster/Sentinel routing, and cross-engine SQL federation |
 | **Cloud Dialers, CDC & RLS** | `AlloyDBConfig`, `SyncAlloyDBDialer`, `AsyncAlloyDBDialer`, `CloudSQLConfig`, `SyncCloudSQLDialer`, `AsyncCloudSQLDialer`, `CDCConfig`, `ChangeFeed`, `PostgresNotifyConfig`, `PostgresNotificationSource`, `SyncSpannerChangeStreamSource`, `AsyncSpannerChangeStreamSource`, `TenantScopeConfig`, `TenantPredicate` | Direct TCP/TLS IAM OAuth2 token password resolution (`:5432`, `:3306`), zero-sidecar `:5433` AlloyDB and `:3307` Cloud SQL mTLS connectors, logical replication / Spanner change-stream streaming, and index-friendly tenant isolation |
 
@@ -175,8 +175,9 @@ Native database configurations, synchronous and asynchronous drivers (`SyncDatab
 placeholders and optional `CAST`, while PostgreSQL and Oracle cores own session
 SQL. SQLSpec supports the declared PostgreSQL/Oracle setters and refuses other
 engines. BigQuery/Spanner constructors reject non-None `tenant_predicate` before
-initialization. Oracle context behavior currently has helper/stand-in acceptance;
-trusted-package and live-session acceptance remain separate driver work.
+initialization. `OracleCore.build_session_context_sql()` returns the
+`DBMS_SESSION.SET_CONTEXT` block and named binds; Oracle drivers raise
+`MissingDependencyError`, so no Vertebra session executes it.
 
 See [Database Capabilities](database-capabilities.md) for notification, change-stream,
 tenant-scope, and tool-provider APIs.

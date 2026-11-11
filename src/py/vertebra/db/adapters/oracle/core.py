@@ -1,10 +1,8 @@
-"""Oracle Thin TNS/TTC packet framing and 26ai VECTOR/OSON binary codecs."""
-
-from __future__ import annotations
+"""Oracle TNS packet helpers, tnsnames.ora parsing, TTC session attributes, and 26ai VECTOR/OSON codecs."""
 
 import re
 import struct
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from typing import Any
 
 import msgspec
@@ -63,14 +61,13 @@ _CERT_DN_RE = re.compile(r'\(\s*SSL_SERVER_CERT_DN\s*=\s*"?([^")]+)"?\s*\)', re.
 _RETRY_COUNT_RE = re.compile(r"\(\s*RETRY_COUNT\s*=\s*(\d+)\s*\)", re.IGNORECASE)
 _RETRY_DELAY_RE = re.compile(r"\(\s*RETRY_DELAY\s*=\s*(\d+)\s*\)", re.IGNORECASE)
 _CONNECT_TIMEOUT_RE = re.compile(r"\(\s*(?:TRANSPORT_)?CONNECT_TIMEOUT\s*=\s*(\d+)\s*\)", re.IGNORECASE)
-_NAMED_PARAM_RE = re.compile(r"(?<!:):([a-zA-Z_][a-zA-Z0-9_]*)")
 
 
 _DEFAULT_TENANT_SCOPE = TenantScopeConfig()
 
 
 class OracleCore:
-    """TNS/TTC wire framing and Oracle 26ai `VECTOR` and `OSON` binary codecs."""
+    """TNS packet helpers, TTC session attributes, and Oracle 26ai `VECTOR` and `OSON` binary codecs."""
 
     @staticmethod
     def build_session_context_sql(
@@ -79,7 +76,7 @@ class OracleCore:
         *,
         namespace: str = "VERTEBRA_CTX",
     ) -> tuple[str, dict[str, str]]:
-        """Build bound context SQL for a trusted package or the Oracle stand-in."""
+        """Build the bound `DBMS_SESSION.SET_CONTEXT` call that scopes a session to a tenant value."""
         attribute = config.setting_name.rsplit(".", 1)[-1]
         validate_identifier(namespace, "namespace", allow_dots=False)
         validate_identifier(attribute, "attribute", allow_dots=False)
@@ -211,9 +208,6 @@ class OracleCore:
     @staticmethod
     def encode_tns_connect_packet(descriptor: str) -> bytes:
         """Encode an Oracle TNS `Connect` (`type = 1`) packet wrapping a `(DESCRIPTION=...)` descriptor."""
-        native = import_optional("vertebra._vertebra")
-        if native is not None and hasattr(native, "encode_tns_connect_packet"):
-            return bytes(native.encode_tns_connect_packet(descriptor))
         desc_bytes = descriptor.encode("utf-8")
         connect_header_len = 58
         total_len = connect_header_len + len(desc_bytes)
@@ -243,9 +237,6 @@ class OracleCore:
     @staticmethod
     def encode_tns_data_packet(data_flags: int, payload: bytes) -> bytes:
         """Encode an Oracle TNS `Data` (`type = 6`) packet with 2-byte big-endian `data_flags`."""
-        native = import_optional("vertebra._vertebra")
-        if native is not None and hasattr(native, "encode_tns_data_packet"):
-            return bytes(native.encode_tns_data_packet(data_flags, payload))
         total_len = 10 + len(payload)
         header = struct.pack(">HHBBHH", total_len, 0, 6, 0, 0, data_flags & 0xFFFF)
         return header + payload
@@ -460,28 +451,6 @@ class OracleCore:
         if target_type is Any:
             return decoded
         return msgspec.convert(decoded, type=target_type)
-
-    @staticmethod
-    def normalize_sql(
-        sql: str,
-        params: Sequence[Any] | Mapping[str, Any] | None,
-    ) -> tuple[str, tuple[Any, ...]]:
-        """Normalize `:1` or `:name` placeholders into positional parameters."""
-        if not params:
-            return sql, ()
-        if isinstance(params, Mapping):
-            ordered: list[Any] = []
-
-            def _replace_named(match: re.Match[str]) -> str:
-                name = match.group(1)
-                ordered.append(params.get(name))
-                return "?"
-
-            return _NAMED_PARAM_RE.sub(_replace_named, sql), tuple(ordered)
-
-        seq = tuple(params)
-        rewritten = re.sub(r":(\d+)", "?", sql)
-        return rewritten, seq
 
     @staticmethod
     def _encode_vector_header(fmt: int, dims: int) -> bytes:

@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import collections
 import contextlib
-import fnmatch
 import hashlib
 import inspect
 import socket
@@ -49,13 +48,11 @@ class SyncRedisDriver(CommonDriverMixin[RedisConfig]):
         "_client_cache",
         "_connections",
         "_invalidation_listeners",
-        "_kv",
         "_lock",
         "_master_address",
         "_node_connections",
         "_pubsub_queue",
         "_push_callbacks",
-        "_scripts",
         "_slot_map",
         "_socket_buffers",
         "_socket_factory",
@@ -63,7 +60,6 @@ class SyncRedisDriver(CommonDriverMixin[RedisConfig]):
         "_subscribed_channels",
         "_subscribed_patterns",
         "_subscribed_shards",
-        "_ttls",
     )
 
     def __init__(
@@ -74,11 +70,9 @@ class SyncRedisDriver(CommonDriverMixin[RedisConfig]):
         socket_factory: Callable[[tuple[str, int]], socket.socket] | None = None,
     ) -> None:
         resolved = config or RedisConfig()
+        _reject_memory_url(resolved.url)
         super().__init__(resolved, broker=broker)
         self._socket_factory = socket_factory
-        self._kv: dict[str, bytes] = {}
-        self._ttls: dict[str, float] = {}
-        self._scripts: dict[str, str] = {}
         self._connections: collections.deque[socket.socket] = collections.deque()
         self._node_connections: dict[tuple[str, int], collections.deque[socket.socket]] = {}
         self._socket_buffers: dict[int, bytearray] = {}
@@ -103,8 +97,7 @@ class SyncRedisDriver(CommonDriverMixin[RedisConfig]):
     @property
     def cached_keys(self) -> tuple[str, ...]:
         """Return the keys currently tracked in the local RESP3 client-side cache."""
-        if not self.config.url.startswith("memory://"):
-            self._drain_idle_sockets()
+        self._drain_idle_sockets()
         now = time.monotonic()
         expired: list[str] = []
         for k, entry in self._client_cache.items():
@@ -212,23 +205,11 @@ class SyncRedisDriver(CommonDriverMixin[RedisConfig]):
 
     def get(self, key: str) -> bytes | None:
         """Fetch a key value, consulting the bounded LRU client-side cache when enabled."""
-        if not self.config.url.startswith("memory://"):
-            self._drain_idle_sockets()
+        self._drain_idle_sockets()
         if self.config.effective_tracking_enabled:
             cached = self._cache_get(key)
             if cached is not None:
                 return cached
-        if self.config.url.startswith("memory://"):
-            with self._lock:
-                exp = self._ttls.get(key)
-                if exp is not None and time.monotonic() >= exp:
-                    self._kv.pop(key, None)
-                    self._ttls.pop(key, None)
-                    return None
-                val = self._kv.get(key)
-            if val is not None and self.config.effective_tracking_enabled:
-                self._cache_put(key, val)
-            return val
         res = self.execute_command("GET", key)
         out = bytes(res) if isinstance(res, (bytes, bytearray)) else None
         if out is not None and self.config.effective_tracking_enabled:
@@ -253,14 +234,6 @@ class SyncRedisDriver(CommonDriverMixin[RedisConfig]):
         ttl_seconds = float(ex) if ex is not None else (px / 1000.0 if px is not None else None)
         if self.config.effective_tracking_enabled:
             self._cache_put(key, raw, ttl_seconds=ttl_seconds)
-        if self.config.url.startswith("memory://"):
-            with self._lock:
-                self._kv[key] = raw
-                if ttl_seconds is not None:
-                    self._ttls[key] = time.monotonic() + ttl_seconds
-                else:
-                    self._ttls.pop(key, None)
-            return
         if ex is not None:
             self.execute_command("SET", key, raw, "EX", ex)
         elif px is not None:
@@ -271,22 +244,11 @@ class SyncRedisDriver(CommonDriverMixin[RedisConfig]):
     def delete(self, key: str) -> bool:
         """Delete a key and evict it from the client-side cache."""
         self._client_cache.pop(key, None)
-        if self.config.url.startswith("memory://"):
-            with self._lock:
-                self._ttls.pop(key, None)
-                return self._kv.pop(key, None) is not None
         res = self.execute_command("DEL", key)
         return bool(res and res > 0)
 
     def scan(self, cursor: int = 0, *, match: str | None = None, count: int = 500) -> tuple[int, list[str]]:
-        """Run one ``SCAN`` step and return the next cursor and the matching keys.
-
-        In ``memory://`` mode all matching keys are returned with cursor ``0``.
-        """
-        if self.config.url.startswith("memory://"):
-            with self._lock:
-                keys = [k for k in self._kv if match is None or fnmatch.fnmatchcase(k, match)]
-            return 0, keys
+        """Run one ``SCAN`` step and return the next cursor and the matching keys."""
         parts: list[str | int] = ["SCAN", cursor]
         if match is not None:
             parts.extend(["MATCH", match])
@@ -300,50 +262,22 @@ class SyncRedisDriver(CommonDriverMixin[RedisConfig]):
             return 0
         for key in keys:
             self._client_cache.pop(key, None)
-        if self.config.url.startswith("memory://"):
-            removed = 0
-            with self._lock:
-                for key in keys:
-                    self._ttls.pop(key, None)
-                    if self._kv.pop(key, None) is not None:
-                        removed += 1
-            return removed
         res = self.execute_command("UNLINK", *keys)
         return int(res) if isinstance(res, int) else 0
 
     def pttl(self, key: str) -> int:
         """Return the remaining time to live of a key in milliseconds."""
-        if self.config.url.startswith("memory://"):
-            with self._lock:
-                if key not in self._kv:
-                    return -2
-                exp = self._ttls.get(key)
-                if exp is None:
-                    return -1
-                remaining_ms = int((exp - time.monotonic()) * 1000)
-                if remaining_ms <= 0:
-                    self._kv.pop(key, None)
-                    self._ttls.pop(key, None)
-                    return -2
-                return remaining_ms
         res = self.execute_command("PTTL", key)
         return int(res) if isinstance(res, int) else -2
 
     def flushdb(self) -> None:
         """Clear all keys in the store and local client-side cache."""
         self._client_cache.clear()
-        if self.config.url.startswith("memory://"):
-            with self._lock:
-                self._kv.clear()
-                self._ttls.clear()
-            return
         self.execute_command("FLUSHDB")
 
     def publish(self, channel: str, message: bytes | str) -> int:
         """Publish a message to a Redis or Valkey pub/sub channel."""
         raw = message.encode("utf-8") if isinstance(message, str) else bytes(message)
-        if self.config.url.startswith("memory://"):
-            return self._publish_memory(channel, raw)
         res = self.execute_command("PUBLISH", channel, raw)
         return int(res) if isinstance(res, int) else 1
 
@@ -351,7 +285,7 @@ class SyncRedisDriver(CommonDriverMixin[RedisConfig]):
         """Subscribe to channels on the multiplexed RESP3 connection and return a message stream."""
         for ch in channels:
             self._subscribed_channels.add(ch)
-        if channels and not self.config.url.startswith("memory://"):
+        if channels:
             self._send_pubsub_command("SUBSCRIBE", *channels)
         return _SyncSubscriptionStream(self, channels)
 
@@ -359,7 +293,7 @@ class SyncRedisDriver(CommonDriverMixin[RedisConfig]):
         """Subscribe to glob patterns on the multiplexed RESP3 connection."""
         for pat in patterns:
             self._subscribed_patterns.add(pat)
-        if patterns and not self.config.url.startswith("memory://"):
+        if patterns:
             self._send_pubsub_command("PSUBSCRIBE", *patterns)
         return _SyncSubscriptionStream(self, patterns)
 
@@ -367,7 +301,7 @@ class SyncRedisDriver(CommonDriverMixin[RedisConfig]):
         """Subscribe to cluster shard channels (SSUBSCRIBE) on the multiplexed RESP3 connection."""
         for sch in shard_channels:
             self._subscribed_shards.add(sch)
-        if shard_channels and not self.config.url.startswith("memory://"):
+        if shard_channels:
             self._send_pubsub_command("SSUBSCRIBE", *shard_channels)
         return _SyncSubscriptionStream(self, shard_channels)
 
@@ -378,13 +312,11 @@ class SyncRedisDriver(CommonDriverMixin[RedisConfig]):
                 self._subscribed_channels.discard(ch)
         else:
             self._subscribed_channels.clear()
-        if not self.config.url.startswith("memory://"):
-            self._send_pubsub_command("UNSUBSCRIBE", *channels)
+        self._send_pubsub_command("UNSUBSCRIBE", *channels)
 
     def drain_messages(self) -> list[PubSubMessage]:
         """Drain and return all pending PubSubMessage items from the multiplexed subscription queue."""
-        if not self.config.url.startswith("memory://"):
-            self._drain_idle_sockets()
+        self._drain_idle_sockets()
         messages: list[PubSubMessage] = []
         while self._pubsub_queue:
             messages.append(self._pubsub_queue.popleft())
@@ -407,9 +339,6 @@ class SyncRedisDriver(CommonDriverMixin[RedisConfig]):
 
     def execute_command(self, *parts: str | bytes | int) -> Any:
         """Execute a single RESP3 command with Cluster MOVED/ASK redirection and Sentinel support."""
-        if self.config.url.startswith("memory://"):
-            return self._execute_memory_command(*parts)
-
         target_node = self._select_target_node(parts)
         asking = False
         max_redirects = max(0, self.config.max_redirections)
@@ -479,8 +408,6 @@ class SyncRedisDriver(CommonDriverMixin[RedisConfig]):
         """Execute a batch of pipelined RESP3 commands into a single wire buffer."""
         if not commands:
             return []
-        if self.config.url.startswith("memory://"):
-            return [self._execute_memory_command(*cmd) for cmd in commands]
         wire_buf = self.encode_pipeline(commands)
         target_node = self._select_target_node(commands[0])
         sock, _ = self._get_socket_for_node(target_node)
@@ -612,22 +539,6 @@ class SyncRedisDriver(CommonDriverMixin[RedisConfig]):
             except RuntimeError:
                 with contextlib.suppress(Exception):
                     value.close()
-
-    def _publish_memory(self, channel: str, payload: bytes) -> int:
-        """Deliver published message to matching in-memory subscriptions and attached broker."""
-        delivered = 0
-        if channel in self._subscribed_channels:
-            self._pubsub_queue.append(PubSubMessage(kind="message", channel=channel, payload=payload, pattern=None))
-            delivered += 1
-        for pat in self._subscribed_patterns:
-            if fnmatch.fnmatchcase(channel, pat):
-                self._pubsub_queue.append(PubSubMessage(kind="pmessage", channel=channel, payload=payload, pattern=pat))
-                delivered += 1
-        if channel in self._subscribed_shards:
-            self._pubsub_queue.append(PubSubMessage(kind="smessage", channel=channel, payload=payload, pattern=None))
-            delivered += 1
-        self._notify_broker_pubsub(channel, payload)
-        return max(1, delivered)
 
     def _send_pubsub_command(self, cmd: str, *targets: str) -> None:
         """Send a SUBSCRIBE, PSUBSCRIBE, SSUBSCRIBE, or UNSUBSCRIBE command and process initial frames."""
@@ -954,80 +865,6 @@ class SyncRedisDriver(CommonDriverMixin[RedisConfig]):
                 raise ConnectionError(msg)
             buf.extend(chunk)
 
-    def _execute_memory_command(self, *parts: str | bytes | int) -> Any:
-        """Simulate RESP3 commands against in-memory dictionary state."""
-        if not parts:
-            return None
-        cmd = RedisCore.decode_part(parts[0]).upper()
-        if cmd == "GET":
-            k = RedisCore.decode_part(parts[1])
-            return self.get(k)
-        if cmd == "SET":
-            k = RedisCore.decode_part(parts[1])
-            raw_v = parts[2]
-            v = str(raw_v) if isinstance(raw_v, int) else raw_v
-            ex = None
-            if len(parts) >= 5 and RedisCore.decode_part(parts[3]).upper() == "EX":
-                ex = int(parts[4])
-            px = int(parts[4]) if len(parts) >= 5 and RedisCore.decode_part(parts[3]).upper() == "PX" else None
-            self.set(k, v, ex=ex, px=px)
-            return "OK"
-        if cmd == "DEL":
-            count = 0
-            for raw_k in parts[1:]:
-                k = RedisCore.decode_part(raw_k)
-                if self.delete(k):
-                    count += 1
-            return count
-        if cmd == "PTTL":
-            k = RedisCore.decode_part(parts[1])
-            return self.pttl(k)
-        if cmd == "FLUSHDB":
-            self.flushdb()
-            return "OK"
-        if cmd == "PUBLISH":
-            ch = RedisCore.decode_part(parts[1])
-            payload = RedisCore.ensure_bytes(parts[2]) if len(parts) > 2 else b""
-            return self._publish_memory(ch, payload)
-        if cmd == "PING":
-            return parts[1] if len(parts) > 1 else "PONG"
-        if cmd == "EVAL":
-            script = RedisCore.decode_part(parts[1])
-            sha = hashlib.sha1(script.encode("utf-8")).hexdigest()
-            numkeys = int(parts[2])
-            keys = [RedisCore.decode_part(parts[3 + i]) for i in range(numkeys)]
-            args = list(parts[3 + numkeys :])
-            self._scripts[sha] = script
-            return self._eval_memory_script(script, keys, args)
-        if cmd == "EVALSHA":
-            sha = RedisCore.decode_part(parts[1])
-            if sha not in self._scripts:
-                msg = f"NOSCRIPT No matching script. Please use EVAL. (sha: {sha})"
-                raise Resp3Error(msg)
-            script = self._scripts[sha]
-            numkeys = int(parts[2])
-            keys = [RedisCore.decode_part(parts[3 + i]) for i in range(numkeys)]
-            args = list(parts[3 + numkeys :])
-            return self._eval_memory_script(script, keys, args)
-        if cmd == "CLIENT":
-            return "OK"
-        if cmd == "HELLO":
-            return {"server": "redis", "proto": 3}
-        return "OK"
-
-    def _eval_memory_script(
-        self,
-        script: str,
-        keys: Sequence[str],
-        args: Sequence[str | bytes | int],
-    ) -> Any:
-        """Run standard scripted expressions in memory test mode."""
-        if "KEYS[1]" in script and keys:
-            return self.get(keys[0])
-        if "ARGV[1]" in script and args:
-            return args[0]
-        return "OK"
-
 
 class AsyncRedisDriver(CommonDriverMixin[RedisConfig]):
     """Asynchronous Redis RESP3 driver with topology routing, client cache, and pub/sub."""
@@ -1056,6 +893,7 @@ class AsyncRedisDriver(CommonDriverMixin[RedisConfig]):
 
     def __init__(self, config: RedisConfig | None = None, *, broker: Any = None) -> None:
         resolved = config or RedisConfig()
+        _reject_memory_url(resolved.url)
         super().__init__(resolved, broker=broker)
         self._sync = SyncRedisDriver(self.config, broker=self._broker)
         self._client_cache = self._sync._client_cache
@@ -1160,8 +998,6 @@ class AsyncRedisDriver(CommonDriverMixin[RedisConfig]):
             cached = self._sync._cache_get(key)
             if cached is not None:
                 return cached
-        if self.config.url.startswith("memory://"):
-            return self._sync.get(key)
         res = await self.execute_command("GET", key)
         out = bytes(res) if isinstance(res, (bytes, bytearray)) else None
         if out is not None and self.config.effective_tracking_enabled:
@@ -1186,9 +1022,6 @@ class AsyncRedisDriver(CommonDriverMixin[RedisConfig]):
         ttl_seconds = float(ex) if ex is not None else (px / 1000.0 if px is not None else None)
         if self.config.effective_tracking_enabled:
             self._sync._cache_put(key, raw, ttl_seconds=ttl_seconds)
-        if self.config.url.startswith("memory://"):
-            self._sync.set(key, raw, ex=ex, px=px)
-            return
         if ex is not None:
             await self.execute_command("SET", key, raw, "EX", ex)
         elif px is not None:
@@ -1199,18 +1032,11 @@ class AsyncRedisDriver(CommonDriverMixin[RedisConfig]):
     async def delete(self, key: str) -> bool:
         """Asynchronously delete a key and evict from client cache."""
         self._client_cache.pop(key, None)
-        if self.config.url.startswith("memory://"):
-            return self._sync.delete(key)
         res = await self.execute_command("DEL", key)
         return bool(res and res > 0)
 
     async def scan(self, cursor: int = 0, *, match: str | None = None, count: int = 500) -> tuple[int, list[str]]:
-        """Run one ``SCAN`` step and return the next cursor and the matching keys.
-
-        In ``memory://`` mode all matching keys are returned with cursor ``0``.
-        """
-        if self.config.url.startswith("memory://"):
-            return self._sync.scan(cursor, match=match, count=count)
+        """Run one ``SCAN`` step and return the next cursor and the matching keys."""
         parts: list[str | int] = ["SCAN", cursor]
         if match is not None:
             parts.extend(["MATCH", match])
@@ -1224,31 +1050,22 @@ class AsyncRedisDriver(CommonDriverMixin[RedisConfig]):
             return 0
         for key in keys:
             self._client_cache.pop(key, None)
-        if self.config.url.startswith("memory://"):
-            return self._sync.unlink(*keys)
         res = await self.execute_command("UNLINK", *keys)
         return int(res) if isinstance(res, int) else 0
 
     async def pttl(self, key: str) -> int:
         """Return remaining TTL of key in milliseconds."""
-        if self.config.url.startswith("memory://"):
-            return self._sync.pttl(key)
         res = await self.execute_command("PTTL", key)
         return int(res) if isinstance(res, int) else -2
 
     async def flushdb(self) -> None:
         """Asynchronously clear all keys in the store and client cache."""
         self._client_cache.clear()
-        if self.config.url.startswith("memory://"):
-            self._sync.flushdb()
-            return
         await self.execute_command("FLUSHDB")
 
     async def publish(self, channel: str, message: bytes | str) -> int:
         """Asynchronously publish a message to a Redis or Valkey pub/sub channel."""
         raw = message.encode("utf-8") if isinstance(message, str) else bytes(message)
-        if self.config.url.startswith("memory://"):
-            return self._sync._publish_memory(channel, raw)
         res = await self.execute_command("PUBLISH", channel, raw)
         return int(res) if isinstance(res, int) else 1
 
@@ -1277,8 +1094,7 @@ class AsyncRedisDriver(CommonDriverMixin[RedisConfig]):
                 self._subscribed_channels.discard(ch)
         else:
             self._subscribed_channels.clear()
-        if not self.config.url.startswith("memory://"):
-            await self._send_pubsub_command_async("UNSUBSCRIBE", *channels)
+        await self._send_pubsub_command_async("UNSUBSCRIBE", *channels)
 
     def drain_messages(self) -> _AwaitableMessageList:
         """Drain and return all pending PubSubMessage items (usable synchronously or via await)."""
@@ -1305,9 +1121,6 @@ class AsyncRedisDriver(CommonDriverMixin[RedisConfig]):
 
     async def execute_command(self, *parts: str | bytes | int) -> Any:
         """Asynchronously execute a single RESP3 command with Cluster MOVED/ASK redirection."""
-        if self.config.url.startswith("memory://"):
-            return self._sync._execute_memory_command(*parts)
-
         target_node = await self._select_target_node_async(parts)
         asking = False
         max_redirects = max(0, self.config.max_redirections)
@@ -1380,8 +1193,6 @@ class AsyncRedisDriver(CommonDriverMixin[RedisConfig]):
         """Asynchronously execute a batch of pipelined RESP3 commands."""
         if not commands:
             return []
-        if self.config.url.startswith("memory://"):
-            return self._sync.execute_pipeline(commands)
         wire_buf = self._sync.encode_pipeline(commands)
         target_node = await self._select_target_node_async(commands[0])
         reader, writer, _ = await self._get_connection_for_node(target_node)
@@ -1688,6 +1499,23 @@ class AsyncRedisDriver(CommonDriverMixin[RedisConfig]):
             read_buf.extend(chunk)
 
 
+def _reject_memory_url(url: str) -> None:
+    """Reject in-process memory:// URLs.
+
+    Args:
+        url: Configured Redis or Valkey URL.
+
+    Raises:
+        ImproperConfigurationError: When ``url`` starts with ``memory://`` (case-insensitive).
+    """
+    if url.strip().lower().startswith("memory://"):
+        msg = (
+            "Redis and Valkey drivers do not support memory:// URLs; "
+            "pass a redis://, rediss://, valkey://, or valkeys:// URL"
+        )
+        raise ImproperConfigurationError(msg)
+
+
 class _AwaitableMessageList(list[PubSubMessage]):
     """List of PubSubMessage items usable both synchronously as a list and via await."""
 
@@ -1721,8 +1549,6 @@ class _SyncSubscriptionStream:
         while self._driver._pubsub_queue:
             msg = self._driver._pubsub_queue.popleft()
             yield msg.channel, msg.payload
-        if self._driver.config.url.startswith("memory://"):
-            return
         sock = self._driver._get_socket()
         buf = self._driver._socket_buffers.setdefault(id(sock), bytearray())
         try:
@@ -1759,7 +1585,7 @@ class _AsyncSubscriptionStream:
         return self._execute_subscribe().__await__()
 
     async def _execute_subscribe(self) -> _AsyncSubscriptionStream:
-        if self._channels and not self._driver.config.url.startswith("memory://"):
+        if self._channels:
             await self._driver._send_pubsub_command_async(self._command, *self._channels)
         return self
 
@@ -1770,8 +1596,6 @@ class _AsyncSubscriptionStream:
         while self._driver._pubsub_queue:
             queued = self._driver._pubsub_queue.popleft()
             yield queued.channel, queued.payload
-        if self._driver.config.url.startswith("memory://"):
-            return
         reader, writer = await self._driver._open_stream()
         buf = self._driver._reader_buffers.setdefault(id(reader), bytearray())
         try:

@@ -5,9 +5,11 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 import struct
+import sys
+import types
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Any, NoReturn
 
 import pytest
 
@@ -24,7 +26,7 @@ from vertebra.db.adapters.postgres import (
     PostgreSQLConfig,
     SyncPostgreSQLDriver,
 )
-from vertebra.typing import MissingDependencyError
+from vertebra.typing import MissingDependencyError, reset_dependency_cache
 
 
 @pytest.mark.anyio
@@ -316,13 +318,41 @@ def test_sync_postgres_driver_pool_gucs_and_prepared_statements() -> None:
     assert driver.closed is True
 
 
-def test_postgres_missing_dependency_raises_on_unconnected_dsn() -> None:
-    """Verify unmocked live connection attempts raise MissingDependencyError when psycopg is absent."""
+@pytest.mark.anyio
+async def test_postgres_sync_and_async_guards_name_psycopg_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sync and async PostgreSQL drivers require psycopg_pool and name psycopg[binary,pool]."""
     cfg = PostgreSQLConfig(dsn="postgresql://unreachable-host:5432/db")
-    driver = SyncPostgreSQLDriver(cfg)
-    with pytest.raises(MissingDependencyError) as exc_info:
-        driver.execute_tuples("SELECT 1")
-    assert "psycopg" in exc_info.value.package or "psycopg_pool" in exc_info.value.package
+    monkeypatch.setitem(sys.modules, "psycopg_pool", None)
+    reset_dependency_cache("psycopg_pool")
+
+    sync_driver = SyncPostgreSQLDriver(cfg)
+    with pytest.raises(MissingDependencyError) as sync_exc:
+        sync_driver.execute_tuples("SELECT 1")
+    assert sync_exc.value.package == "psycopg_pool"
+    assert sync_exc.value.install_package == "psycopg[binary,pool]"
+    assert sync_exc.value.hint == "Install it with: uv add psycopg[binary,pool]"
+
+    monkeypatch.setitem(sys.modules, "asyncpg", None)
+    reset_dependency_cache("asyncpg")
+    async_driver = AsyncPostgreSQLDriver(cfg)
+    with pytest.raises(MissingDependencyError) as async_absent_exc:
+        await async_driver.execute_tuples("SELECT 1")
+    assert async_absent_exc.value.package == "psycopg_pool"
+    assert async_absent_exc.value.install_package == "psycopg[binary,pool]"
+
+    monkeypatch.setitem(sys.modules, "asyncpg", types.ModuleType("asyncpg"))
+    reset_dependency_cache("asyncpg")
+
+    def _fail_thread_offload(*_args: object, **_kwargs: object) -> NoReturn:
+        raise AssertionError("thread offload reached before the psycopg_pool guard")
+
+    monkeypatch.setattr(SyncPostgreSQLDriver, "_run_sync_query", _fail_thread_offload)
+    with pytest.raises(MissingDependencyError) as async_present_exc:
+        await async_driver.execute_tuples("SELECT 1")
+    assert async_present_exc.value.package == "psycopg_pool"
+    assert async_present_exc.value.install_package == "psycopg[binary,pool]"
 
 
 def test_pgcopy_binary_parser_success_and_error_handling() -> None:

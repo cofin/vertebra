@@ -1,11 +1,6 @@
-//! SHM-brokered single-writer DuckDB analytical engine, DuckDB 2.0-safe pragmas, and `ShmRegion` Arrow IPC framing.
-
-use std::sync::Arc;
-use std::time::Duration;
+//! DuckDB 2.0-safe `SET` bootstrap statements and `ShmRegion` Arrow IPC frame re-exports.
 
 use serde::{Deserialize, Serialize};
-use vertebra_core::broker::{LeaseGrant, ShmLeaseTable};
-use vertebra_core::shm::ShmRegion;
 
 pub use crate::arrow_shm::{
     ACTIVE_ARROW_SHM_REGIONS, ARROW_IPC_EOS_MARKER, SHM_ARROW_MAGIC, ShmArrowFrameHeader,
@@ -14,7 +9,7 @@ pub use crate::arrow_shm::{
     write_shm_arrow_region,
 };
 
-/// Configuration for the SHM-brokered DuckDB analytical engine.
+/// Configuration for DuckDB 2.0-safe post-initialization `SET` statements.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DuckdbConfig {
     pub path: String,
@@ -67,66 +62,6 @@ impl DuckdbConfig {
         };
         stmts.push(format!("SET enable_http_metadata_cache = {http_meta}"));
         stmts
-    }
-}
-
-/// Single-writer / multi-reader SHM broker coordinator for a shared DuckDB catalog.
-#[derive(Clone)]
-pub struct DuckdbBrokerPool {
-    pub config: DuckdbConfig,
-    writer_lease: Arc<ShmLeaseTable>,
-    reader_leases: Arc<ShmLeaseTable>,
-}
-
-impl DuckdbBrokerPool {
-    /// Initialize a new `DuckdbBrokerPool`.
-    pub fn new(config: DuckdbConfig, max_readers: u32) -> Result<Self, String> {
-        let writer_size = ShmLeaseTable::required_size(1, 0);
-        let writer_region = ShmRegion::create(writer_size)
-            .map_err(|e| format!("failed to allocate DuckDB writer ShmRegion: {e}"))?;
-        let writer_lease = ShmLeaseTable::init_in_region(writer_region, 1, 0)
-            .map_err(|e| format!("failed to init DuckDB writer ShmLeaseTable: {e}"))?;
-
-        let readers = max_readers.max(1);
-        let reader_size = ShmLeaseTable::required_size(readers, 0);
-        let reader_region = ShmRegion::create(reader_size)
-            .map_err(|e| format!("failed to allocate DuckDB reader ShmRegion: {e}"))?;
-        let reader_leases = ShmLeaseTable::init_in_region(reader_region, readers, 0)
-            .map_err(|e| format!("failed to init DuckDB reader ShmLeaseTable: {e}"))?;
-
-        Ok(Self {
-            config,
-            writer_lease: Arc::new(writer_lease),
-            reader_leases: Arc::new(reader_leases),
-        })
-    }
-
-    /// Acquire the single-writer lease for mutating DDL/DML statements.
-    pub fn acquire_writer(&self, worker_pid: u32, timeout: Duration) -> Result<LeaseGrant, String> {
-        self.writer_lease
-            .acquire(worker_pid, 0, timeout, 0)
-            .map_err(|e| e.to_string())
-    }
-
-    /// Release the single-writer lease.
-    pub fn release_writer(&self, grant: LeaseGrant) -> Result<(), String> {
-        self.writer_lease
-            .release(grant.slot_index, grant.generation)
-            .map_err(|e| e.to_string())
-    }
-
-    /// Acquire a concurrent analytical reader lease.
-    pub fn acquire_reader(&self, worker_pid: u32, timeout: Duration) -> Result<LeaseGrant, String> {
-        self.reader_leases
-            .acquire(worker_pid, 0, timeout, 0)
-            .map_err(|e| e.to_string())
-    }
-
-    /// Release a concurrent analytical reader lease.
-    pub fn release_reader(&self, grant: LeaseGrant) -> Result<(), String> {
-        self.reader_leases
-            .release(grant.slot_index, grant.generation)
-            .map_err(|e| e.to_string())
     }
 }
 

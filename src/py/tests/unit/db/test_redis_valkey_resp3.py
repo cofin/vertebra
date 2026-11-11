@@ -6,6 +6,7 @@ import asyncio
 import collections
 import socket
 import threading
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -25,6 +26,9 @@ from vertebra.db.adapters.valkey import (
     SyncValkeyDriver,
     ValkeyConfig,
 )
+
+if TYPE_CHECKING:
+    from tests.unit.conftest import Resp3FakeServer
 
 
 class _RecordingBroker:
@@ -532,10 +536,10 @@ async def test_multiplexed_resp3_pubsub_and_broker_forwarding() -> None:
         await server.wait_closed()
 
 
-def test_sync_multiplexed_pubsub_and_cluster_moved_ask() -> None:
+def test_sync_multiplexed_pubsub_and_cluster_moved_ask(resp3_server: Resp3FakeServer) -> None:
     """SyncRedisDriver must support subscribe, psubscribe, ssubscribe, drain_messages, and Cluster MOVED/ASK."""
     broker = _RecordingBroker()
-    driver = SyncRedisDriver(RedisConfig(url="memory://"), broker=broker)
+    driver = SyncRedisDriver(RedisConfig(url=resp3_server.redis_url), broker=broker)
     try:
         driver.subscribe("alpha")
         driver.psubscribe("beta:*")
@@ -543,7 +547,7 @@ def test_sync_multiplexed_pubsub_and_cluster_moved_ask() -> None:
 
         driver.publish("alpha", "msg-a")
         driver.publish("beta:42", b"msg-b")
-        driver.publish("shard:1", b"msg-s")
+        driver.execute_command("SPUBLISH", "shard:1", b"msg-s")
 
         msgs = driver.drain_messages()
         assert msgs == [

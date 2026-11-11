@@ -16,7 +16,8 @@ from vertebra.framework.queues.base import (
     TaskEnvelope,
     TaskLane,
 )
-from vertebra.utils.module_loader import import_optional
+from vertebra.typing import ImproperConfigurationError
+from vertebra.utils.module_loader import ensure_module
 from vertebra.utils.serializers import decode_json, encode_json_bytes
 
 if TYPE_CHECKING:
@@ -106,189 +107,8 @@ class OracleQueueExecutor(Protocol):
         ...
 
 
-class _InMemoryOracleQueueExecutor:
-    """In-memory transactional SQL simulation of Oracle FOR UPDATE SKIP LOCKED semantics."""
-
-    __slots__ = ("_dlq", "_jobs", "_leases", "_lock")
-
-    def __init__(self) -> None:
-        self._jobs: dict[str, dict[str, Any]] = {}
-        self._dlq: dict[str, dict[str, Any]] = {}
-        self._leases: dict[str, dict[str, Any]] = {}
-        self._lock = asyncio.Lock()
-
-    async def execute(self, query: str, *params: Any) -> int:
-        """Execute mock DML query."""
-        async with self._lock:
-            q = query.strip().upper()
-            if "INSERT INTO VERTEBRA_QUEUE_JOBS" in q:
-                (
-                    task_id,
-                    task_name,
-                    lane,
-                    payload,
-                    attempt,
-                    max_retries,
-                    status,
-                    enq,
-                    sched,
-                    locked,
-                    cname,
-                    handle,
-                    ikey,
-                    tp,
-                ) = params
-                if ikey and any(j.get("idempotency_key") == ikey for j in self._jobs.values()):
-                    return 0
-                self._jobs[task_id] = {
-                    "task_id": task_id,
-                    "task_name": task_name,
-                    "lane": lane,
-                    "payload": payload,
-                    "attempt": attempt,
-                    "max_retries": max_retries,
-                    "status": status,
-                    "enqueued_at": enq,
-                    "scheduled_at": sched,
-                    "locked_until": locked,
-                    "consumer_name": cname,
-                    "receipt_handle": handle,
-                    "idempotency_key": ikey,
-                    "traceparent": tp,
-                }
-                return 1
-
-            if "DELETE FROM VERTEBRA_QUEUE_JOBS" in q:
-                task_id = params[0]
-                if task_id in self._jobs:
-                    del self._jobs[task_id]
-                    return 1
-                return 0
-
-            if "INSERT INTO VERTEBRA_QUEUE_DLQ" in q:
-                dlq_id, task_id, task_name, lane, payload, error_type, error_msg, failed_at = params
-                self._dlq[dlq_id] = {
-                    "dlq_id": dlq_id,
-                    "task_id": task_id,
-                    "task_name": task_name,
-                    "lane": lane,
-                    "payload": payload,
-                    "error_type": error_type,
-                    "error_message": error_msg,
-                    "failed_at": failed_at,
-                }
-                return 1
-
-            if "SET SCHEDULED_AT = NULL" in q:
-                current_time = params[0]
-                promoted = 0
-                for job in self._jobs.values():
-                    if (
-                        job.get("status") == "pending"
-                        and job.get("scheduled_at") is not None
-                        and job["scheduled_at"] <= current_time
-                    ):
-                        job["scheduled_at"] = None
-                        promoted += 1
-                return promoted
-
-            if "UPDATE VERTEBRA_QUEUE_JOBS" in q:
-                status, attempt, sched, locked, handle, task_id = params
-                if task_id in self._jobs:
-                    self._jobs[task_id].update(
-                        {
-                            "status": status,
-                            "attempt": attempt,
-                            "scheduled_at": sched,
-                            "locked_until": locked,
-                            "receipt_handle": handle,
-                        }
-                    )
-                    return 1
-                return 0
-
-            return 0
-
-    async def fetch_all(self, query: str, *params: Any) -> list[dict[str, Any]]:
-        """Fetch all matching rows."""
-        async with self._lock:
-            q = query.strip().upper()
-            if "FOR UPDATE SKIP LOCKED" in q:
-                lanes, now_ts, limit, locked_until, consumer_name, receipt_handle = params
-                target_lanes = set(lanes)
-                matched: list[dict[str, Any]] = []
-                sorted_jobs = sorted(
-                    self._jobs.values(),
-                    key=lambda j: (j.get("scheduled_at") or j.get("enqueued_at") or 0.0, j.get("enqueued_at") or 0.0),
-                )
-                for job in sorted_jobs:
-                    if len(matched) >= limit:
-                        break
-                    if job.get("lane") not in target_lanes:
-                        continue
-                    status = job.get("status")
-                    sched = job.get("scheduled_at")
-                    locked = job.get("locked_until")
-                    is_ready_pending = status == "pending" and (sched is None or sched <= now_ts)
-                    is_expired_running = status == "running" and locked is not None and locked <= now_ts
-                    if is_ready_pending or is_expired_running:
-                        job_handle = receipt_handle or uuid.uuid4().hex
-                        job["status"] = "running"
-                        job["locked_until"] = locked_until
-                        job["consumer_name"] = consumer_name
-                        job["receipt_handle"] = job_handle
-                        if is_expired_running:
-                            job["attempt"] = int(job.get("attempt", 1)) + 1
-                        matched.append(dict(job))
-                return matched
-
-            if "SELECT * FROM VERTEBRA_QUEUE_DLQ" in q:
-                limit = params[0] if params else 100
-                return [dict(e) for e in list(self._dlq.values())[:limit]]
-
-            return []
-
-    async def fetch_one(self, query: str, *params: Any) -> dict[str, Any] | None:
-        """Fetch single matching row."""
-        async with self._lock:
-            q = query.strip().upper()
-            if "MERGE INTO VERTEBRA_QUEUE_LEASES" in q:
-                lease_key, owner_id, expires_at, last_slot, check_now = params
-                existing = self._leases.get(lease_key)
-                if existing is None or existing["expires_at"] <= check_now or existing["owner_id"] == owner_id:
-                    new_slot = last_slot or (existing.get("last_slot") if existing else None)
-                    record = {
-                        "lease_key": lease_key,
-                        "owner_id": owner_id,
-                        "expires_at": expires_at,
-                        "last_slot": new_slot,
-                    }
-                    self._leases[lease_key] = record
-                    return dict(record)
-                return None
-
-            if "SELECT * FROM VERTEBRA_QUEUE_DLQ WHERE DLQ_ID" in q:
-                dlq_id = params[0]
-                if dlq_id in self._dlq:
-                    return dict(self._dlq[dlq_id])
-                return None
-
-            return None
-
-    async def commit(self) -> None:
-        """Commit active mock transaction."""
-        return None
-
-    async def close(self) -> None:
-        """Clear state."""
-        async with self._lock:
-            self._jobs.clear()
-            self._dlq.clear()
-            self._leases.clear()
-
-
 class OracleQueueBackend:
-    """Oracle Database queue backend using FOR UPDATE SKIP LOCKED cursor locks."""
+    """Oracle Database queue backend using FOR UPDATE SKIP LOCKED over an injected OracleQueueExecutor."""
 
     __slots__ = ("_config", "_executor", "_oracle_config")
 
@@ -299,9 +119,26 @@ class OracleQueueBackend:
         oracle_config: Any = None,
         executor: OracleQueueExecutor | None = None,
     ) -> None:
+        """Initialize the Oracle Database queue backend.
+
+        Args:
+            config: Optional queue configuration settings.
+            oracle_config: Optional Oracle connection configuration.
+            executor: Required `OracleQueueExecutor` binding an `oracledb` cursor executor.
+
+        Raises:
+            MissingDependencyError: When `executor` is `None` and `oracledb` is not installed.
+            ImproperConfigurationError: When `executor` is `None` and `oracledb` is installed.
+        """
         self._config = config or QueueConfig()
         self._oracle_config = oracle_config
-        self._executor: OracleQueueExecutor = executor or self._build_executor()
+        if executor is None:
+            ensure_module("oracledb", package="oracledb", install_package="oracledb")
+            msg = (
+                "OracleQueueBackend requires an OracleQueueExecutor; pass executor= to bind an oracledb cursor executor"
+            )
+            raise ImproperConfigurationError(msg)
+        self._executor: OracleQueueExecutor = executor
 
     async def enqueue(self, envelope: TaskEnvelope) -> TaskEnvelope:
         """Insert task into vertebra_queue_jobs."""
@@ -565,10 +402,3 @@ class OracleQueueBackend:
     async def close(self) -> None:
         """Release underlying executor."""
         await self._executor.close()
-
-    def _build_executor(self) -> OracleQueueExecutor:
-        """Construct live oracledb executor or fallback in-memory emulator."""
-        oracledb = import_optional("oracledb")
-        if oracledb is not None:
-            pass
-        return _InMemoryOracleQueueExecutor()

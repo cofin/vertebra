@@ -1,6 +1,4 @@
-"""Pure-Rust-backed Oracle Thin TNS/TTC driver, wallet loader, and 26ai VECTOR/OSON codecs."""
-
-from __future__ import annotations
+"""Oracle configuration, TNS descriptor and wallet parsing, and 26ai VECTOR/OSON codecs; the driver requires the native `vertebra._oracle` module."""
 
 from typing import TYPE_CHECKING
 

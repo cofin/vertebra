@@ -5,7 +5,7 @@ from __future__ import annotations
 import threading
 from datetime import timedelta
 from types import SimpleNamespace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import msgspec
 import pytest
@@ -39,6 +39,9 @@ from vertebra.extensions.starlette import (
 from vertebra.server._channels import ChannelBus
 from vertebra.server._fastpath import attach_framework_fastpath
 from vertebra.utils.serializers import decode_json
+
+if TYPE_CHECKING:
+    from tests.unit.conftest import Resp3FakeServer
 
 
 class _ItemPayload(msgspec.Struct, frozen=True, gc=False):
@@ -288,9 +291,9 @@ async def test_starlette_fastpath_inline_sync_and_send_raw_response() -> None:
 
 
 @pytest.mark.anyio
-async def test_cache_store_delete_all_removes_only_its_prefix() -> None:
+async def test_cache_store_delete_all_removes_only_its_prefix(resp3_server: Resp3FakeServer) -> None:
     """Starlette CacheStore.delete_all removes its prefixed keys and leaves other keys in place."""
-    driver = AsyncRedisDriver(RedisConfig(url="memory://"))
+    driver = AsyncRedisDriver(RedisConfig(url=resp3_server.redis_url))
     await driver.set("other:keep", b"x")
     cache = CacheStore(async_driver=driver)
     await cache.set("a", "1", expires_in=timedelta(milliseconds=250))

@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import inspect
 import os
-import sqlite3
 import threading
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -19,7 +17,7 @@ from vertebra.db.arrow import (
     _table_to_rows_and_cols,
 )
 from vertebra.db.driver import SyncDatabaseDriver, ThreadOffloadAsyncDatabaseDriver
-from vertebra.utils.module_loader import import_optional
+from vertebra.utils.module_loader import ensure_module
 from vertebra.utils.text import quote_dialect_identifier, validate_identifier
 
 if TYPE_CHECKING:
@@ -38,6 +36,17 @@ class SyncDuckDBDriver(SyncDatabaseDriver[DuckDBConfig]):
     dialect_tag: ClassVar[int] = DUCKDB_DIALECT_TAG
 
     def __init__(self, config: DuckDBConfig | None = None, *, broker: Any = None) -> None:
+        """Initialize the synchronous DuckDB analytical driver.
+
+        Args:
+            config: Optional DuckDB database configuration.
+            broker: Optional shared-memory lease broker.
+
+        Raises:
+            MissingDependencyError: When the `duckdb` package is not installed.
+            duckdb.Error: When a post-initialization bootstrap statement fails.
+        """
+        duckdb_mod = ensure_module("duckdb", package="duckdb", install_package="duckdb")
         resolved = config or DuckDBConfig()
         super().__init__(resolved, broker=broker)
         self._writer_lock = threading.RLock()
@@ -47,34 +56,21 @@ class SyncDuckDBDriver(SyncDatabaseDriver[DuckDBConfig]):
         self._cached_gcs_snapshot: Any = None
         self.executed_bootstrap_statements: tuple[str, ...] = tuple(self.config.bootstrap_statements())
 
-        duckdb_mod = import_optional("duckdb")
-        self._using_native_duckdb = duckdb_mod is not None
-        if duckdb_mod is not None:
-            self._conn = duckdb_mod.connect(self.config.resolved_path(), read_only=self.config.read_only)
-            for stmt in self.executed_bootstrap_statements:
-                with contextlib.suppress(RuntimeError, ValueError, OSError):
-                    self._conn.execute(stmt)
-        else:
-            db_path = self.config.resolved_path()
-            if db_path.startswith("duckdb://"):
-                db_path = db_path[len("duckdb://") :] or ":memory:"
-            self._conn = sqlite3.connect(db_path, check_same_thread=False)
-            self._conn.row_factory = sqlite3.Row
+        self._conn = duckdb_mod.connect(self.config.resolved_path(), read_only=self.config.read_only)
+        for stmt in self.executed_bootstrap_statements:
+            self._conn.execute(stmt)
 
     def begin(self) -> None:
         """Begin an explicit DuckDB transaction."""
         with self._writer_lock:
-            if self._using_native_duckdb:
-                self._conn.execute("BEGIN TRANSACTION")
-            elif not self._conn.in_transaction:
-                self._conn.execute("BEGIN")
+            self._conn.execute("BEGIN TRANSACTION")
             self._in_transaction = True
 
     def commit(self) -> None:
         """Commit the active DuckDB transaction."""
         with self._writer_lock:
             try:
-                if self._using_native_duckdb and not self._in_transaction:
+                if not self._in_transaction:
                     return
                 self._conn.commit()
             finally:
@@ -84,7 +80,7 @@ class SyncDuckDBDriver(SyncDatabaseDriver[DuckDBConfig]):
         """Roll back the active DuckDB transaction."""
         with self._writer_lock:
             try:
-                if self._using_native_duckdb and not self._in_transaction:
+                if not self._in_transaction:
                     return
                 self._conn.rollback()
             finally:
@@ -92,9 +88,8 @@ class SyncDuckDBDriver(SyncDatabaseDriver[DuckDBConfig]):
 
     def cancel(self) -> None:
         """Interrupt an active DuckDB query when supported, or act as an idempotent no-op."""
-        interrupt_fn = getattr(self._conn, "interrupt", None)
-        if not self._closed and callable(interrupt_fn):
-            interrupt_fn()
+        if not self._closed:
+            self._conn.interrupt()
 
     def close(self) -> None:
         """Close the underlying DuckDB connection."""
@@ -116,9 +111,7 @@ class SyncDuckDBDriver(SyncDatabaseDriver[DuckDBConfig]):
         try:
             with self._writer_lock:
                 cur = self._conn.execute(sql, bound) if bound else self._conn.execute(sql)
-                if not self._using_native_duckdb and not self._in_transaction:
-                    self._conn.commit()
-                if self._using_native_duckdb and cur.description and cur.description[0][0] == "Count":
+                if cur.description and cur.description[0][0] == "Count":
                     count = cur.fetchone()
                     return int(count[0]) if count else 0
                 rowcount = getattr(cur, "rowcount", 0)
@@ -140,18 +133,13 @@ class SyncDuckDBDriver(SyncDatabaseDriver[DuckDBConfig]):
         grant = self._acquire_duckdb_lease(sql, len(parameter_sets[0]))
         try:
             with self._writer_lock:
-                if self._using_native_duckdb:
-                    affected = 0
-                    for parameters in parameter_sets:
-                        cur = self._conn.execute(sql, parameters)
-                        if cur.description and cur.description[0][0] == "Count":
-                            count = cur.fetchone()
-                            affected += int(count[0]) if count else 0
-                    return affected
-                cur = self._conn.executemany(sql, list(parameter_sets))
-                if not self._in_transaction:
-                    self._conn.commit()
-                return max(int(cur.rowcount or 0), 0)
+                affected = 0
+                for parameters in parameter_sets:
+                    cur = self._conn.execute(sql, parameters)
+                    if cur.description and cur.description[0][0] == "Count":
+                        count = cur.fetchone()
+                        affected += int(count[0]) if count else 0
+                return affected
         finally:
             self._release_duckdb_lease(grant)
 
@@ -169,10 +157,7 @@ class SyncDuckDBDriver(SyncDatabaseDriver[DuckDBConfig]):
         try:
             with self._writer_lock:
                 cur = self._conn.execute(sql, bound) if bound else self._conn.execute(sql)
-                rows = [tuple(row) for row in cur.fetchall()]
-                if not self._using_native_duckdb and not self._in_transaction and cur.description is None:
-                    self._conn.commit()
-                return rows
+                return [tuple(row) for row in cur.fetchall()]
         finally:
             self._release_duckdb_lease(grant)
 
@@ -194,8 +179,6 @@ class SyncDuckDBDriver(SyncDatabaseDriver[DuckDBConfig]):
                     rows = [tuple(row) for row in cur.fetchall()]
                     cols = tuple(str(col[0]) for col in cur.description)
                     return rows, cols
-                if not self._using_native_duckdb and not self._in_transaction:
-                    self._conn.commit()
                 return [], ()
         finally:
             self._release_duckdb_lease(grant)
@@ -270,8 +253,6 @@ class SyncDuckDBDriver(SyncDatabaseDriver[DuckDBConfig]):
         try:
             with self._writer_lock:
                 self._conn.executemany(sql, rows)
-                if not self._using_native_duckdb and not self._in_transaction:
-                    self._conn.commit()
                 return len(rows)
         finally:
             self._release_duckdb_lease(grant)
@@ -309,9 +290,8 @@ class SyncDuckDBDriver(SyncDatabaseDriver[DuckDBConfig]):
                 secret_sql = f"CREATE OR REPLACE SECRET vertebra_gcs_adc (TYPE GCS, BEARER_TOKEN '{escaped_token}')"
                 self.last_gcs_secret_sql = secret_sql
                 self.applied_token_generation = int(snapshot.generation)
-                if self._using_native_duckdb:
-                    with self._writer_lock, contextlib.suppress(RuntimeError, ValueError, OSError):
-                        self._conn.execute(secret_sql)
+                with self._writer_lock:
+                    self._conn.execute(secret_sql)
 
     def _acquire_duckdb_lease(self, sql: str, param_count: int) -> Any:
         if self._broker is None:

@@ -43,6 +43,7 @@ from vertebra.extensions.sqlalchemy import (
     DeleteUsingClause,
     DropVectorIndexOp,
     InsertSentinelSpec,
+    InterfaceError,
     MySQLAlembicImpl,
     OracleAlembicImpl,
     ParameterizedSQL,
@@ -444,14 +445,22 @@ def test_postgres_vtb_dialect_dbapi_and_compiler_features() -> None:
     assert SyncMySQLDialect.dbapi().paramstyle == "format"
     assert SyncOracleDialect.dbapi().paramstyle == "named"
 
-    driver = SyncPostgreSQLDriver(PostgreSQLConfig(dsn="memory://"))
-    driver._in_memory_rows = [(1, "item1"), (2, "item2")]
+    class Port:
+        def execute_with_description(
+            self,
+            sql: str,
+            parameters: Any,
+        ) -> tuple[list[tuple[int, str]], tuple[tuple[str], ...]]:
+            _ = (sql, parameters)
+            return [(1, "item1"), (2, "item2")], (("id",), ("name",))
+
+    driver = SyncPostgreSQLDriver(PostgreSQLConfig(dsn="postgresql://localhost:5432/app"), pool=Port())
 
     conn = pg_dbapi.connect("postgresql+vtb://localhost:5432/app", driver=driver)
     cur = conn.cursor()
     cur.execute("SELECT id, name FROM items")
     assert cur.description is not None
-    assert len(cur.description) == 2
+    assert [d[0] for d in cur.description] == ["id", "name"]
     assert cur.fetchall() == [(1, "item1"), (2, "item2")]
     conn.commit()
     conn.rollback()
@@ -1443,3 +1452,43 @@ async def test_async_dbapi_connection_driver_ownership_broker_isolation_and_clos
     assert sqlite_drv._sync._closed is False
     assert await sqlite_drv.select_value("SELECT COUNT(*) FROM close_tx_items") == 0
     await sqlite_drv.close()
+
+
+def test_sync_dbapi_connection_rejects_unparsable_url() -> None:
+    """SyncDBAPIConnection and SyncDBAPIModule.connect raise PEP 249 InterfaceError on unparsable URLs."""
+    with pytest.raises(
+        InterfaceError,
+        match=r"Cannot parse Vertebra database URL: Unsupported database URL scheme: 'nonsense\+vtb'",
+    ) as exc_info:
+        SyncDBAPIConnection("nonsense+vtb://host/db", share_pool=False)
+    assert isinstance(exc_info.value.__cause__, ValueError)
+
+    assert SyncDBAPIModule.InterfaceError is InterfaceError
+    with pytest.raises(InterfaceError):
+        SyncDBAPIModule().connect("nonsense+vtb://host/db")
+
+    with pytest.raises(InterfaceError) as empty_exc:
+        SyncDBAPIConnection("", share_pool=False)
+    assert isinstance(empty_exc.value.__cause__, ValueError)
+    assert str(empty_exc.value.__cause__) == "Unsupported database URL scheme: ''"
+
+    driver = SyncSQLiteDriver()
+    try:
+        with pytest.raises(InterfaceError):
+            SyncDBAPIConnection("nonsense+vtb://host/db", driver=driver, share_pool=False)
+    finally:
+        driver.close()
+
+
+def test_async_dbapi_connection_rejects_unparsable_url() -> None:
+    """AsyncDBAPIConnection and AsyncDBAPIModule.connect raise PEP 249 InterfaceError on unparsable URLs."""
+    with pytest.raises(
+        InterfaceError,
+        match=r"'nonsense\+vtb_async'",
+    ) as exc_info:
+        AsyncDBAPIConnection("nonsense+vtb_async://host/db", share_pool=False)
+    assert isinstance(exc_info.value.__cause__, ValueError)
+
+    assert dialects.AsyncDBAPIModule.InterfaceError is InterfaceError
+    with pytest.raises(InterfaceError):
+        dialects.AsyncDBAPIModule().connect("nonsense+vtb_async://host/db")

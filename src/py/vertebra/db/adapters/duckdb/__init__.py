@@ -1,6 +1,4 @@
-"""Embedded DuckDB OLAP driver with SHM single-writer/multi-reader coordination and Arrow IPC streaming."""
-
-from __future__ import annotations
+"""DuckDB driver over the `duckdb` package with bootstrap statements and shared-memory Arrow IPC helpers."""
 
 from typing import TYPE_CHECKING
 

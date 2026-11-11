@@ -10,17 +10,20 @@ parent_prd: null
 research:
   - research/audit-findings_20261103.md
   - research/google-cloud-rust_20261103.md
-plan_revision: 8
-plan_commit: 07ea4a4b
-state_revision: 3
+plan_revision: 9
+plan_commit: 62a29db7
+state_revision: 5
 current_task: null
-last_verified_checkpoint: 07ea4a4b
+last_verified_checkpoint: 62a29db7
 created_at: "2026-11-03T03:30:00Z"
-updated_at: "2026-11-09T02:25:00Z"
+updated_at: "2026-11-09T20:56:00Z"
 generated:
   by: flow-setup
   at: "2026-11-07T04:15:00Z"
 verified:
+  - by: agent:flow-archive
+    at: "2026-11-09T20:56:00Z"
+    commit: 62a29db7
   - by: agent:flow-archive
     at: "2026-11-09T02:25:00Z"
     commit: 07ea4a4b
@@ -55,24 +58,24 @@ tags:
 - **Remaining Open Child Flows**: `sqlspec-adapter-parity` (Ch4), `queues-tasks-and-channels` (Ch5), and `sqlalchemy-and-django-integration` (Ch6) remain in `draft` sequenced behind sibling [native-data-platform](../native-data-platform/spec.md) driver and broker cutovers [^sqlspec-adapters].
 <!-- truth: end -->
 
-Baseline: `main @ 077a3fe9` / `HEAD @ 07ea4a4b` (Chapters 1 `critical-correctness-fixes` [`364c7cbe`], 2 `gcp-wire-protocol-correctness` [`984ce732`], 9 `gcp-driver-resilience` [`abd33ab6`], the `Sync*` / `Async*` class split [`f7417015`], `db-layout-and-contract` [`21c99f95`], Chapter 3 `db-engine-primitives` [`80ff8a65`], post-merge review remediation [`2b737240`], Chapter 8 `runtime-structure-and-throughput` [`d2fa5072`], and Chapter 7 `mcp-webmcp-core` [`077a3fe9`] completed and merged onto `main`, and sibling `storage-completeness` [`77c6acfa`] and `storage-remediation` [`c8c8998a`] completed and archived on the feature branch). Verified audit findings live in [research/audit-findings_20261103.md](research/audit-findings_20261103.md).
+Baseline: `main @ 077a3fe9` / `HEAD @ 62a29db7` (Chapters 1 `critical-correctness-fixes` [`364c7cbe`], 2 `gcp-wire-protocol-correctness` [`984ce732`], 9 `gcp-driver-resilience` [`abd33ab6`], the `Sync*` / `Async*` class split [`f7417015`], `db-layout-and-contract` [`21c99f95`], Chapter 3 `db-engine-primitives` [`80ff8a65`], post-merge review remediation [`2b737240`], Chapter 8 `runtime-structure-and-throughput` [`d2fa5072`], and Chapter 7 `mcp-webmcp-core` [`077a3fe9`] completed and merged onto `main`, sibling `storage-completeness` [`77c6acfa`] and `storage-remediation` [`c8c8998a`] completed and archived on `feat/storage-updates`, and sibling `driver-fail-loud` [`62a29db7`] completed and archived on `feat/driver-fail-loud`). Verified audit findings live in [research/audit-findings_20261103.md](research/audit-findings_20261103.md).
 
 ## 1. North Star Goal & Problem Framing
 
 ### Objective
 Vertebra's value is its Rust runtime and drivers. Users primarily reach them through SQLAlchemy / Advanced Alchemy, SQLSpec, Litestar, and Django. This initiative makes those integrations correct and feature-complete, keeps the public API small, and removes code that duplicates framework capabilities or relies on stand-in fakes.
 
-### Remaining gaps on `main @ 077a3fe9`
+### Remaining gaps
 - **Drivers not yet cut over to native Rust I/O and per-driver wheels** (tracked as 1 PR per engine in sibling PRD [native-data-platform](../native-data-platform/spec.md)):
-  - Oracle and MSSQL Python drivers execute against `sqlite3.connect(":memory:")`.
-  - PostgreSQL, MySQL, SQLite, DuckDB, and Redis/Valkey still retain Python client, `sqlite3`, or `memory://` execution paths pending their per-engine Rust wheel cutovers (`native-postgres-driver`, `native-oracle-driver`, `native-mysql-driver`, `native-mssql-driver`, `native-sqlite-driver`, `native-duckdb-driver`, `native-redis-driver`). BigQuery and Spanner use standalone optional wheels (`vertebra-bigquery`, `vertebra-spanner`); `DataFusionEngine` fails closed when `datafusion` is unavailable.
+  - Oracle and MSSQL Python drivers guard every entry point with `ensure_module("vertebra._oracle")` / `ensure_module("vertebra._mssql")` and raise `MissingDependencyError` until their standalone Rust wheels ship (`native-oracle-driver`, `native-mssql-driver`).
+  - PostgreSQL (`psycopg`/`psycopg_pool`), MySQL (`pymysql`/`asyncmy`), SQLite (`sqlite3`), DuckDB (PyPI `duckdb` on GIL interpreters; `MissingDependencyError` on `3.14t`/`3.15t`), and Redis/Valkey (Python RESP3 sockets) reject `memory://` and await their per-engine Rust wheel cutovers (`native-postgres-driver`, `native-mysql-driver`, `native-sqlite-driver`, `native-duckdb-driver`, `native-redis-driver`). BigQuery and Spanner use standalone optional wheels (`vertebra-bigquery`, `vertebra-spanner`); `DataFusionEngine` fails closed when `datafusion` is unavailable.
 - **SQLSpec adapters** [^sqlspec-adapters].
   - Vertebra stores do not subclass upstream SQLSpec store bases, and schemas drift.
   - `BaseSyncDriver` / `BaseAsyncDriver` override `execute`/`select`, bypassing SQLSpec's dispatch contract and dropping `**kwargs`.
   - Six engines return `None` from `data_dictionary` (only `BigQuerySyncDataDictionary` / `BigQueryAsyncDataDictionary` and `SpannerSyncDataDictionary` / `SpannerAsyncDataDictionary` exist today).
   - Upstream resolves stores by `sqlspec.adapters.*` module prefix ([sqlspec#876](https://github.com/litestar-org/sqlspec/issues/876)).
 - **Queues.**
-  - PostgreSQL, Oracle, and Spanner first-party queue backends run in memory, and `litestar-queues` has the same module-prefix lookup constraint ([litestar-queues#186](https://github.com/cofin/litestar-queues/issues/186)).
+  - PostgreSQL, Oracle, and Spanner first-party queue backends require an injected `executor=` (and Redis/Valkey require `redis.asyncio` with a hosted `redis://`/`rediss://` URL or an injected `client=`), raising `MissingDependencyError` or `ImproperConfigurationError` when omitted; live first-party `PostgresQueueStore` / `OracleQueueStore` executors and the `litestar-queues` module-prefix lookup constraint ([litestar-queues#186](https://github.com/cofin/litestar-queues/issues/186)) belong to `queues-tasks-and-channels`.
 - **SQLAlchemy / Advanced Alchemy & Django database backends.**
   - Relational and cloud dialects still await the framework-neutral `vertebra.db.dbapi` extraction (`broker-pool-sharing`) and full SQLAlchemy / Advanced Alchemy cache + Django `ENGINE` parity (`sqlalchemy-and-django-integration`).
 
@@ -194,8 +197,8 @@ flowchart LR
 
 ## Continuity Snapshot
 
-- **Flow ID:** `integration-remediation` (`state: planned`, `plan_revision: 8`, `plan_commit: 07ea4a4b`, `last_verified_checkpoint: 07ea4a4b`)
-- **Active Focus:** Chapters 1, 2, 3, 7 (`077a3fe9`), 8 (`d2fa5072`), and 9 are merged onto `main @ 077a3fe9`, and sibling `storage-completeness` (`77c6acfa`) and `storage-remediation` (`c8c8998a`) are archived on the feature branch. Sibling `native-postgres-driver` and the remaining per-engine native driver flows execute next ahead of Chapters 4 (`sqlspec-adapter-parity`), 5 (`queues-tasks-and-channels`), and 6 (`sqlalchemy-and-django-integration`).
+- **Flow ID:** `integration-remediation` (`state: planned`, `plan_revision: 9`, `plan_commit: 62a29db7`, `last_verified_checkpoint: 62a29db7`)
+- **Active Focus:** Chapters 1, 2, 3, 7 (`077a3fe9`), 8 (`d2fa5072`), and 9 are merged onto `main @ 077a3fe9`; sibling `storage-completeness` (`77c6acfa`) and `storage-remediation` (`c8c8998a`) are archived into durable knowledge on `feat/storage-updates`, and sibling `driver-fail-loud` (`62a29db7`, 13 chapters / 38 tasks) is completed and archived on `feat/driver-fail-loud` ahead of `native-postgres-driver`, the per-engine native driver flows, and Chapters 4 (`sqlspec-adapter-parity`), 5 (`queues-tasks-and-channels`), and 6 (`sqlalchemy-and-django-integration`).
 - **Completed Checkpoints:** `critical-correctness-fixes` (`364c7cbe`), `gcp-wire-protocol-correctness` (`984ce732`), `gcp-driver-resilience` (`abd33ab6`), `db-engine-primitives` (`80ff8a65`), `runtime-structure-and-throughput` (`d2fa5072`), and `mcp-webmcp-core` (`077a3fe9`).
 - **Key decisions:**
   - Engine adapters and local primitives live under `vertebra/db/adapters/<engine>/` backed by per-engine PyO3 wheels `src/rs/vertebra-<engine>` (`vertebra._<engine>`); framework and agent integrations live under `vertebra.extensions.*`, `vertebra.framework.*`, and `vertebra.agent.tools`.

@@ -22,6 +22,7 @@ from vertebra.db.driver import (
     AsyncDatabaseDriver,
     SyncDatabaseDriver,
 )
+from vertebra.typing import ImproperConfigurationError
 from vertebra.utils.module_loader import ensure_module, import_optional
 from vertebra.utils.text import quote_dialect_identifier, validate_identifier
 
@@ -40,12 +41,10 @@ class SyncPostgreSQLDriver(SyncDatabaseDriver[PostgreSQLConfig]):
     __slots__ = (
         "_dialer",
         "_executor",
-        "_in_memory_rows",
         "_in_transaction",
         "_pool",
         "_tx_conn",
         "_tx_conn_ctx",
-        "_tx_snapshot",
     )
 
     def __init__(
@@ -58,15 +57,14 @@ class SyncPostgreSQLDriver(SyncDatabaseDriver[PostgreSQLConfig]):
         executor: Callable[[str, Sequence[Any]], list[tuple[Any, ...]]] | None = None,
     ) -> None:
         resolved = config or PostgreSQLConfig()
+        _reject_memory_dsn(resolved.dsn)
         super().__init__(resolved, broker=broker)
         self._pool = pool
         self._dialer = dialer
         self._executor = executor
-        self._in_memory_rows: list[tuple[Any, ...]] = []
         self._in_transaction: bool = False
         self._tx_conn: Any = None
         self._tx_conn_ctx: Any = None
-        self._tx_snapshot: list[tuple[Any, ...]] | None = None
 
     @property
     def _config(self) -> PostgreSQLConfig:
@@ -110,11 +108,10 @@ class SyncPostgreSQLDriver(SyncDatabaseDriver[PostgreSQLConfig]):
     def begin(self) -> None:
         """Begin an explicit transaction and pin a pooled connection when available."""
         self._in_transaction = True
-        self._tx_snapshot = list(self._in_memory_rows)
         if self._tx_conn is not None:
             return
         pool = self._pool
-        if pool is None and not self.config.dsn.startswith("memory://") and self._executor is None:
+        if pool is None and self._executor is None:
             pool = self._ensure_pool()
         if pool is not None and hasattr(pool, "connection"):
             conn_obj = pool.connection()
@@ -137,8 +134,6 @@ class SyncPostgreSQLDriver(SyncDatabaseDriver[PostgreSQLConfig]):
     def rollback(self) -> None:
         """Roll back the active transaction."""
         try:
-            if self._tx_snapshot is not None:
-                self._in_memory_rows = list(self._tx_snapshot)
             if self._tx_conn is not None and hasattr(self._tx_conn, "rollback"):
                 self._tx_conn.rollback()
             elif self._pool is not None and hasattr(self._pool, "rollback"):
@@ -207,7 +202,7 @@ class SyncPostgreSQLDriver(SyncDatabaseDriver[PostgreSQLConfig]):
             rows = self.parse_pgcopy_binary_rows(stream)
         else:
             pool = self._pool
-            if pool is None and not self.config.dsn.startswith("memory://") and self._executor is None:
+            if pool is None and self._executor is None:
                 pool = self._ensure_pool()
             used_copy = False
             if pool is not None and not parameters and hasattr(pool, "connection"):
@@ -291,7 +286,6 @@ class SyncPostgreSQLDriver(SyncDatabaseDriver[PostgreSQLConfig]):
         ctx = self._tx_conn_ctx
         self._tx_conn = None
         self._tx_conn_ctx = None
-        self._tx_snapshot = None
         self._in_transaction = False
         if ctx is not None:
             ctx.__exit__(None, None, None)
@@ -344,38 +338,36 @@ class SyncPostgreSQLDriver(SyncDatabaseDriver[PostgreSQLConfig]):
                 )
 
             pool = self._pool
-            if pool is None and not self.config.dsn.startswith("memory://"):
+            if pool is None:
                 pool = self._ensure_pool()
 
-            if pool is not None:
-                if hasattr(pool, "connection"):
-                    conn = pool.connection()
-                    conn_ctx = conn if hasattr(conn, "__enter__") else None
-                    try:
-                        active_conn = conn.__enter__() if conn_ctx is not None else conn
-                        return self._execute_on_sync_connection(
-                            active_conn,
-                            sql,
-                            params_arg,
-                            auto_commit_dml=auto_commit_dml,
-                        )
-                    finally:
-                        if conn_ctx is not None:
-                            conn_ctx.__exit__(None, None, None)
-                if hasattr(pool, "execute_with_description"):
-                    raw_rows, raw_desc = pool.execute_with_description(sql, params_arg)
-                    tuple_rows = [tuple(r) for r in raw_rows]
-                    return tuple_rows, self._extract_column_names(raw_desc), len(tuple_rows)
-                if hasattr(pool, "execute"):
-                    exec_res = pool.execute(sql, params_arg)
-                    raw_rows = exec_res.fetchall() if hasattr(exec_res, "fetchall") else list(exec_res)
-                    tuple_rows = [tuple(r) for r in raw_rows]
-                    raw_desc = getattr(exec_res, "description", None)
-                    return tuple_rows, self._extract_column_names(raw_desc), len(tuple_rows)
+            if hasattr(pool, "connection"):
+                conn = pool.connection()
+                conn_ctx = conn if hasattr(conn, "__enter__") else None
+                try:
+                    active_conn = conn.__enter__() if conn_ctx is not None else conn
+                    return self._execute_on_sync_connection(
+                        active_conn,
+                        sql,
+                        params_arg,
+                        auto_commit_dml=auto_commit_dml,
+                    )
+                finally:
+                    if conn_ctx is not None:
+                        conn_ctx.__exit__(None, None, None)
+            if hasattr(pool, "execute_with_description"):
+                raw_rows, raw_desc = pool.execute_with_description(sql, params_arg)
+                tuple_rows = [tuple(r) for r in raw_rows]
+                return tuple_rows, self._extract_column_names(raw_desc), len(tuple_rows)
+            if hasattr(pool, "execute"):
+                exec_res = pool.execute(sql, params_arg)
+                raw_rows = exec_res.fetchall() if hasattr(exec_res, "fetchall") else list(exec_res)
+                tuple_rows = [tuple(r) for r in raw_rows]
+                raw_desc = getattr(exec_res, "description", None)
+                return tuple_rows, self._extract_column_names(raw_desc), len(tuple_rows)
 
-            _ = (sql, params_arg)
-            cols = tuple(f"col_{i}" for i in range(len(self._in_memory_rows[0]))) if self._in_memory_rows else ()
-            return list(self._in_memory_rows), cols, len(self._in_memory_rows)
+            msg = "PostgreSQL pool must provide connection(), execute_with_description(), or execute()"
+            raise ImproperConfigurationError(msg)
         finally:
             if lease is not None and hasattr(lease, "release"):
                 lease.release()
@@ -389,13 +381,7 @@ class SyncPostgreSQLDriver(SyncDatabaseDriver[PostgreSQLConfig]):
         """Ensure connection pool is initialized or raise MissingDependencyError."""
         if self._pool is not None:
             return self._pool
-        if self.config.dsn.startswith("memory://"):
-            return None
-        psycopg_pool = ensure_module(
-            "psycopg_pool",
-            install_package="psycopg[binary,pool]",
-            extra="postgres",
-        )
+        psycopg_pool = ensure_module("psycopg_pool", install_package="psycopg[binary,pool]")
 
         kwargs: dict[str, Any] = {
             "autocommit": False,
@@ -461,6 +447,7 @@ class AsyncPostgreSQLDriver(AsyncDatabaseDriver[PostgreSQLConfig]):
         async_executor: Callable[[str, Sequence[Any]], Awaitable[list[tuple[Any, ...]]]] | None = None,
     ) -> None:
         resolved = config or PostgreSQLConfig()
+        _reject_memory_dsn(resolved.dsn)
         super().__init__(resolved, broker=broker)
         self._pool = pool
         self._dialer = dialer
@@ -791,7 +778,7 @@ class AsyncPostgreSQLDriver(AsyncDatabaseDriver[PostgreSQLConfig]):
                     tuple_rows = await res_tuples if inspect.iscoroutine(res_tuples) else res_tuples
                     return list(tuple_rows), (), len(tuple_rows)
 
-            if not self.config.dsn.startswith("memory://") and self._sync._executor is None and self._pool is None:
+            if self._sync._executor is None and self._pool is None:
                 self._ensure_async_pool()
 
             return await asyncio.to_thread(
@@ -805,17 +792,25 @@ class AsyncPostgreSQLDriver(AsyncDatabaseDriver[PostgreSQLConfig]):
                 lease.release()
 
     def _ensure_async_pool(self) -> Any:
-        """Ensure async connection pool is initialized or raise MissingDependencyError."""
+        """Verify that psycopg_pool is installed before thread-offloaded query execution.
+
+        Raises:
+            MissingDependencyError: When psycopg_pool is not installed.
+        """
         if self._pool is not None:
             return self._pool
-        if self.config.dsn.startswith("memory://"):
-            return None
-        asyncpg_mod = import_optional("asyncpg")
-        if asyncpg_mod is not None:
-            return asyncpg_mod
-        return ensure_module(
-            "psycopg_pool",
-            package="asyncpg",
-            install_package="asyncpg",
-            extra="postgres",
-        )
+        return ensure_module("psycopg_pool", install_package="psycopg[binary,pool]")
+
+
+def _reject_memory_dsn(dsn: str) -> None:
+    """Reject in-process memory:// DSNs.
+
+    Args:
+        dsn: Configured PostgreSQL DSN.
+
+    Raises:
+        ImproperConfigurationError: When ``dsn`` starts with ``memory://`` (case-insensitive).
+    """
+    if dsn.strip().lower().startswith("memory://"):
+        msg = "PostgreSQL drivers do not support memory:// DSNs; pass a postgresql:// DSN or inject pool="
+        raise ImproperConfigurationError(msg)

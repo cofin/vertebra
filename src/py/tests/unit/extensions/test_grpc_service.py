@@ -269,8 +269,11 @@ def test_wasm_plugin_host_execution_and_missing_dependency(monkeypatch: pytest.M
         host.call_export("host_math", "add", 1, 2, fuel_cost=100)
 
     monkeypatch.setattr(wasm_mod, "_wasmtime", None)
-    with pytest.raises(MissingDependencyError, match="wasmtime"):
+    with pytest.raises(MissingDependencyError, match="wasmtime") as wasm_exc:
         host.register_module(WASMModuleConfig(name="guest_missing", wasm_source=wasm_add_bytes))
+    assert wasm_exc.value.package == "wasmtime"
+    assert wasm_exc.value.install_package == "wasmtime"
+    assert wasm_exc.value.hint == "Install it with: uv add wasmtime"
 
     class _FakeStore:
         def __init__(self, _engine: Any) -> None:

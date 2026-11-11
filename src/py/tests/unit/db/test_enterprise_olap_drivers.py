@@ -7,7 +7,9 @@ import io
 import mmap
 import os
 import struct
+import sys
 import zipfile
+from types import ModuleType
 from typing import TYPE_CHECKING, Any
 
 import msgspec
@@ -45,13 +47,11 @@ from vertebra.db.adapters.duckdb import (
 )
 from vertebra.db.adapters.mssql import (
     TDS_PKT_PRE_LOGIN,
-    TDS_PKT_SQL_BATCH,
     AsyncMSSQLDriver,
     MSSQLConfig,
     SyncMSSQLDriver,
     decode_tds_packet,
     encode_tds_packet,
-    encode_tds_sql_batch,
     rewrite_mssql_placeholders,
 )
 from vertebra.db.adapters.mysql import (
@@ -129,15 +129,25 @@ from vertebra.extensions.sqlspec.adapters import (
     SQLiteSyncConfig,
     TenantPredicate,
 )
-from vertebra.typing import ImproperConfigurationError, VertebraError
+from vertebra.typing import (
+    ImproperConfigurationError,
+    MissingDependencyError,
+    VertebraError,
+    module_available,
+    reset_dependency_cache,
+)
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
+
+_DUCKDB_SKIP_REASON = "duckdb publishes no free-threaded wheel; DuckDB tests run on GIL interpreters"
 
 
 @pytest.mark.anyio
 async def test_duckdb_execute_many_reports_affected_rows() -> None:
     """Batch counts reflect matching rows for sync and async UPDATE and DELETE."""
+    pytest.importorskip("duckdb", reason=_DUCKDB_SKIP_REASON)
     sync_driver = SyncDuckDBDriver()
     async_driver = AsyncDuckDBDriver()
     try:
@@ -222,6 +232,36 @@ class _MockBroker:
     def __init__(self) -> None:
         self.lease_table = _MockLeaseTable()
         self.statement_cache = _MockStatementCache()
+
+
+class _OracleSessionPort:
+    """Native port stub recording Oracle session calls for SQLSpec adapter tests."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, Any]] = []
+
+    def execute(self, sql: str, parameters: Any = None) -> int:
+        """Record the statement and its parameters and report zero affected rows."""
+        self.calls.append((sql, parameters))
+        return 0
+
+    def close(self) -> None:
+        """Release nothing; the stub holds no resources."""
+
+
+class _AsyncOracleSessionPort:
+    """Async native port stub recording Oracle session calls for SQLSpec adapter tests."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, Any]] = []
+
+    async def execute(self, sql: str, parameters: Any = None) -> int:
+        """Record the statement and its parameters and report zero affected rows."""
+        self.calls.append((sql, parameters))
+        return 0
+
+    async def close(self) -> None:
+        """Release nothing; the stub holds no resources."""
 
 
 def test_postgres_jsonb_pgcopy_and_arrow_shm_cursor() -> None:
@@ -417,35 +457,15 @@ def test_oracle_26ai_vector_oson_and_ttc_piggyback_codecs() -> None:
     assert decoded_attrs["action"] == "GET /orders"
     assert decoded_attrs["ecid"] == "00af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
 
-    broker = _MockBroker()
-    ora_driver = SyncOracleDriver(
-        OracleConfig(client_identifier="tenant-7", module="checkout", action="pay"),
-        broker=broker,
-    )
-    ora_driver.execute("CREATE TABLE orders (id INTEGER PRIMARY KEY, total INTEGER)")
-    assert ora_driver.last_piggyback_frame.startswith(b"\x11\x6e")
-    ora_driver.execute("INSERT INTO orders (id, total) VALUES (:1, :2)", (10, 250))
-    assert ora_driver.select("SELECT id, total FROM orders WHERE id = :id", {"id": 10}) == [{"id": 10, "total": 250}]
-    assert broker.statement_cache.misses >= 1
-    ora_driver.close()
-
 
 def test_mssql_tds_framing_and_placeholder_rewriter() -> None:
-    """Verify TDS 7.4 packet framing, SQLBatch ALL_HEADERS encoding, and single-pass @P1 placeholder rewriting."""
+    """Verify TDS packet framing and single-pass @P1 placeholder rewriting."""
     pkt = encode_tds_packet(TDS_PKT_PRE_LOGIN, 1, True, b"\x00\x00\x1a\x00\x06\x04")
     pkt_type, is_eom, pkt_id, payload = decode_tds_packet(pkt)
     assert pkt_type == TDS_PKT_PRE_LOGIN
     assert is_eom is True
     assert pkt_id == 1
     assert payload == b"\x00\x00\x1a\x00\x06\x04"
-
-    batch = encode_tds_sql_batch("SELECT 1", 0x1122_3344_5566_7788)
-    b_type, b_eom, _, b_payload = decode_tds_packet(batch)
-    assert b_type == TDS_PKT_SQL_BATCH
-    assert b_eom is True
-    assert struct.unpack("<I", b_payload[0:4])[0] == 22
-    assert struct.unpack("<Q", b_payload[10:18])[0] == 0x1122_3344_5566_7788
-    assert b_payload[22:].decode("utf-16-le") == "SELECT 1"
 
     sql = (
         "SELECT 'a?b''$1', \"col?name\", [col$2?], * FROM t "
@@ -458,18 +478,10 @@ def test_mssql_tds_framing_and_placeholder_rewriter() -> None:
     )
     assert count == 3
 
-    broker = _MockBroker()
-    mssql_driver = SyncMSSQLDriver(MSSQLConfig(), broker=broker)
-    mssql_driver.execute("CREATE TABLE ledger (id INTEGER PRIMARY KEY, code TEXT)")
-    mssql_driver.execute("INSERT INTO ledger (id, code) VALUES (?, ?)", (7, "USD"))
-    assert mssql_driver.last_rewritten_sql == "INSERT INTO ledger (id, code) VALUES (@P1, @P2)"
-    assert mssql_driver.select("SELECT id, code FROM ledger WHERE id = ?", (7,)) == [{"id": 7, "code": "USD"}]
-    assert broker.statement_cache.hits >= 0
-    mssql_driver.close()
-
 
 def test_duckdb_post_init_bootstrap_and_arrow_shm_streaming() -> None:
     """Verify DuckDB post-init SET statements (`parquet_metadata_cache`) and zero-copy Arrow SHM streaming."""
+    pytest.importorskip("duckdb", reason=_DUCKDB_SKIP_REASON)
     cfg = DuckDBConfig(
         path=":memory:",
         memory_limit_mb=1024,
@@ -502,9 +514,12 @@ def test_duckdb_post_init_bootstrap_and_arrow_shm_streaming() -> None:
         (PostgreSQLSyncConfig, PostgreSQLAsyncConfig, AsyncPostgreSQLDriver),
         (MySQLSyncConfig, MySQLAsyncConfig, AsyncMySQLDriver),
         (SQLiteSyncConfig, SQLiteAsyncConfig, AsyncSQLiteDriver),
-        (OracleSyncConfig, OracleAsyncConfig, AsyncOracleDriver),
-        (MSSQLSyncConfig, MSSQLAsyncConfig, AsyncMSSQLDriver),
-        (DuckDBSyncConfig, DuckDBAsyncConfig, AsyncDuckDBDriver),
+        pytest.param(
+            DuckDBSyncConfig,
+            DuckDBAsyncConfig,
+            AsyncDuckDBDriver,
+            marks=pytest.mark.skipif(not module_available("duckdb"), reason=_DUCKDB_SKIP_REASON),
+        ),
     ],
 )
 @pytest.mark.anyio
@@ -513,7 +528,7 @@ async def test_sqlspec_adapter_config_flags_and_async_driver_close(
     async_cfg_cls: type[Any],
     async_drv_cls: type[Any],
 ) -> None:
-    """Verify Sync and Async SQLSpec adapter flags and async driver teardown across all 6 engines."""
+    """Verify Sync and Async SQLSpec adapter flags and async driver teardown."""
     scfg = sync_cfg_cls()
     assert scfg.is_async is False
     assert scfg.arrow_threshold_rows == ARROW_SHM_THRESHOLD_ROWS
@@ -542,6 +557,7 @@ async def test_sqlspec_adapters_and_async_drivers() -> None:
         assert session.select_value("SELECT v FROM t_sync WHERE k = ?", (1,)) == "one"
     sqlite_sync.close()
 
+    pytest.importorskip("duckdb", reason=_DUCKDB_SKIP_REASON)
     duck_async = DuckDBAsyncConfig(path=":memory:")
     async with duck_async.provide_session() as asession:
         await asession.execute("CREATE TABLE t_async (k INTEGER, v TEXT)")
@@ -577,13 +593,13 @@ def test_sqlalchemy_vtb_dialect_nullpool_selection(dialect_name: str) -> None:
     "url",
     [
         "sqlite+vtb:///:memory:",
-        "oracle+vtb://localhost:1521/FREEPDB1",
-        "mssql+vtb://localhost:1433/master",
         "duckdb+vtb:///:memory:",
     ],
 )
 def test_sqlalchemy_dbapi_broker_forwarding(url: str) -> None:
     """Verify SyncDBAPIConnection forwards DBAPI operations through the SHM broker."""
+    if url.startswith("duckdb"):
+        pytest.importorskip("duckdb", reason=_DUCKDB_SKIP_REASON)
     broker = _MockBroker()
     conn = SyncDBAPIConnection(url, broker=broker)
     cur = conn.cursor()
@@ -921,7 +937,7 @@ async def test_async_tenant_predicate_raises_when_guc_set_fails() -> None:
 @pytest.mark.parametrize("engine", ["postgres", "oracle"])
 def test_sync_tenant_session_setting_preserves_failure_identity(engine: str, monkeypatch: pytest.MonkeyPatch) -> None:
     """Supported adapter session-setting errors escape unchanged."""
-    native = SyncPostgreSQLDriver() if engine == "postgres" else SyncOracleDriver()
+    native: Any = SyncPostgreSQLDriver() if engine == "postgres" else _OracleSessionPort()
     failure = RuntimeError("session setting refused")
 
     def fail(*args: object, **kwargs: object) -> int:
@@ -943,7 +959,7 @@ async def test_async_tenant_session_setting_preserves_failure_identity(
     engine: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Async supported adapter session-setting errors escape unchanged."""
-    native = AsyncPostgreSQLDriver() if engine == "postgres" else AsyncOracleDriver()
+    native: Any = AsyncPostgreSQLDriver() if engine == "postgres" else _AsyncOracleSessionPort()
     failure = RuntimeError("session setting refused")
 
     async def fail(*args: object, **kwargs: object) -> int:
@@ -973,7 +989,7 @@ def test_postgresql_tenant_session_prepares_psycopg_binds(config_defaults: bool)
             return []
 
     port = Port()
-    native = SyncPostgreSQLDriver(PostgreSQLConfig(dsn="memory://"), pool=port)
+    native = SyncPostgreSQLDriver(PostgreSQLConfig(dsn="postgresql://localhost:5432/app"), pool=port)
     config = PostgreSQLSyncConfig(native.config, broker=object(), share_pool=False)
     adapter = PostgreSQLSyncDriver(native, statement_config=config.statement_config if config_defaults else None)
     try:
@@ -1000,7 +1016,7 @@ async def test_postgresql_tenant_session_prepares_asyncpg_binds(config_defaults:
             return []
 
     port = Port()
-    native = AsyncPostgreSQLDriver(PostgreSQLConfig(dsn="memory://"), pool=port)
+    native = AsyncPostgreSQLDriver(PostgreSQLConfig(dsn="postgresql://localhost:5432/app"), pool=port)
     config = PostgreSQLAsyncConfig(native.config, broker=object(), share_pool=False)
     adapter = PostgreSQLAsyncDriver(native, statement_config=config.statement_config if config_defaults else None)
     try:
@@ -1012,37 +1028,41 @@ async def test_postgresql_tenant_session_prepares_asyncpg_binds(config_defaults:
         await native.close()
 
 
-def test_oracle_tenant_context_stand_in_sets_session_attribute() -> None:
-    """The Oracle stand-in records named context binds without claiming live VPD support."""
-    native = SyncOracleDriver()
-    try:
-        adapter = OracleSyncDriver(native)
-        assert adapter.apply_tenant_predicate(TenantPredicate(table_alias="o", tenant_value="acme")) == (
-            "o.tenant_id = :tenant_id"
+def test_oracle_tenant_predicate_sets_session_context_through_native_port() -> None:
+    """OracleSyncDriver executes DBMS_SESSION.SET_CONTEXT against its native port."""
+    port = _OracleSessionPort()
+    adapter = OracleSyncDriver(port)
+    assert adapter.apply_tenant_predicate(TenantPredicate(table_alias="o", tenant_value="acme")) == (
+        "o.tenant_id = :tenant_id"
+    )
+    assert port.calls == [
+        (
+            "BEGIN DBMS_SESSION.SET_CONTEXT(:namespace, :attribute, :value); END;",
+            {"namespace": "VERTEBRA_CTX", "attribute": "tenant_id", "value": "acme"},
         )
-        assert native._session_context == {("VERTEBRA_CTX", "tenant_id"): "acme"}
-    finally:
-        native.close()
+    ]
 
 
 @pytest.mark.anyio
-async def test_async_oracle_tenant_context_stand_in_sets_session_attribute() -> None:
-    """The async Oracle wrapper delegates named context binds to the same stand-in."""
-    native = AsyncOracleDriver()
-    try:
-        adapter = OracleAsyncDriver(native)
-        assert await adapter.apply_tenant_predicate(TenantPredicate(table_alias="o", tenant_value="acme")) == (
-            "o.tenant_id = :tenant_id"
+async def test_async_oracle_tenant_predicate_sets_session_context_through_native_port() -> None:
+    """OracleAsyncDriver executes DBMS_SESSION.SET_CONTEXT against its async native port."""
+    port = _AsyncOracleSessionPort()
+    adapter = OracleAsyncDriver(port)
+    assert await adapter.apply_tenant_predicate(TenantPredicate(table_alias="o", tenant_value="acme")) == (
+        "o.tenant_id = :tenant_id"
+    )
+    assert port.calls == [
+        (
+            "BEGIN DBMS_SESSION.SET_CONTEXT(:namespace, :attribute, :value); END;",
+            {"namespace": "VERTEBRA_CTX", "attribute": "tenant_id", "value": "acme"},
         )
-        assert native.sync_driver._session_context == {("VERTEBRA_CTX", "tenant_id"): "acme"}
-    finally:
-        await native.close()
+    ]
 
 
 @pytest.mark.parametrize(
     "driver_cls",
-    [SyncOracleDriver, SyncMSSQLDriver, SyncDuckDBDriver],
-    ids=["oracle-sync", "mssql-sync", "duckdb-sync"],
+    [SyncDuckDBDriver],
+    ids=["duckdb-sync"],
 )
 @pytest.mark.parametrize(
     ("table_name", "columns"),
@@ -1059,7 +1079,8 @@ def test_enterprise_and_olap_sync_load_from_arrow_rejects_unsafe_identifiers(
     table_name: str,
     columns: tuple[str, ...],
 ) -> None:
-    """SyncOracleDriver, SyncMSSQLDriver, and SyncDuckDBDriver reject unsafe table and column identifiers."""
+    """SyncDuckDBDriver rejects unsafe table and column identifiers."""
+    pytest.importorskip("duckdb", reason=_DUCKDB_SKIP_REASON)
     driver = driver_cls()
     try:
         with pytest.raises(ValueError, match="Invalid"):
@@ -1071,8 +1092,8 @@ def test_enterprise_and_olap_sync_load_from_arrow_rejects_unsafe_identifiers(
 @pytest.mark.anyio
 @pytest.mark.parametrize(
     "driver_cls",
-    [AsyncOracleDriver, AsyncMSSQLDriver, AsyncDuckDBDriver],
-    ids=["oracle-async", "mssql-async", "duckdb-async"],
+    [AsyncDuckDBDriver],
+    ids=["duckdb-async"],
 )
 @pytest.mark.parametrize(
     ("table_name", "columns"),
@@ -1087,7 +1108,8 @@ async def test_enterprise_and_olap_async_load_from_arrow_rejects_unsafe_identifi
     table_name: str,
     columns: tuple[str, ...],
 ) -> None:
-    """AsyncOracleDriver, AsyncMSSQLDriver, and AsyncDuckDBDriver reject unsafe table and column identifiers."""
+    """AsyncDuckDBDriver rejects unsafe table and column identifiers."""
+    pytest.importorskip("duckdb", reason=_DUCKDB_SKIP_REASON)
     driver = driver_cls()
     try:
         with pytest.raises(ValueError, match="Invalid"):
@@ -1126,3 +1148,318 @@ async def test_oracle_embedding_pushdown_batches_via_utl_to_embeddings() -> None
     assert batch[0].to_list() == pytest.approx([0.6, 0.8, 0.0, 0.0])
     assert batch[1].to_list() == pytest.approx([0.0, 5.0 / 13.0, 12.0 / 13.0, 0.0])
     assert batch[2].to_list() == pytest.approx([8.0 / 17.0, 0.0, 15.0 / 17.0, 0.0])
+
+
+def test_oracle_drivers_raise_missing_dependency_when_native_module_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Oracle sync/async drivers, registry, SQLSpec sync session, and DB-API raise MissingDependencyError."""
+    monkeypatch.setitem(sys.modules, "vertebra._oracle", None)
+    reset_dependency_cache("vertebra._oracle")
+    try:
+        with pytest.raises(MissingDependencyError) as exc_info:
+            SyncOracleDriver(OracleConfig.from_url("oracle://u:p@db:1521/svc"))
+        assert exc_info.value.package == "vertebra-core[oracle]"
+        assert exc_info.value.hint == "Install it with: uv add vertebra-core[oracle]"
+        assert isinstance(exc_info.value, ImportError)
+
+        with pytest.raises(MissingDependencyError, match=r"vertebra-core\[oracle\]"):
+            AsyncOracleDriver()
+
+        with pytest.raises(MissingDependencyError, match=r"vertebra-core\[oracle\]"):
+            DatabaseRegistry().get_shared_driver(OracleConfig())
+
+        with pytest.raises(MissingDependencyError, match=r"vertebra-core\[oracle\]"):
+            DatabaseRegistry().get_shared_sync_driver("oracle://scott:tiger@localhost:1521/FREEPDB1")
+
+        cfg = OracleSyncConfig()
+        assert cfg.is_async is False
+        with pytest.raises(MissingDependencyError, match=r"vertebra-core\[oracle\]"), cfg.provide_session():
+            pass
+
+        with pytest.raises(MissingDependencyError, match=r"vertebra-core\[oracle\]"):
+            SyncDBAPIConnection("oracle+vtb://localhost:1521/FREEPDB1", broker=_MockBroker())
+    finally:
+        reset_dependency_cache("vertebra._oracle")
+
+
+@pytest.mark.anyio
+async def test_oracle_async_sqlspec_session_raises_missing_dependency(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """OracleAsyncConfig.provide_session raises MissingDependencyError when vertebra._oracle is absent."""
+    monkeypatch.setitem(sys.modules, "vertebra._oracle", None)
+    reset_dependency_cache("vertebra._oracle")
+    try:
+        cfg = OracleAsyncConfig()
+        assert cfg.is_async is True
+        with pytest.raises(MissingDependencyError, match=r"vertebra-core\[oracle\]"):
+            async with cfg.provide_session():
+                pass
+    finally:
+        reset_dependency_cache("vertebra._oracle")
+
+
+def test_oracle_driver_with_stub_native_module_raises_not_implemented(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With a stub vertebra._oracle module, SyncOracleDriver.select raises NotImplementedError from the base class."""
+    monkeypatch.setitem(sys.modules, "vertebra._oracle", ModuleType("vertebra._oracle"))
+    reset_dependency_cache("vertebra._oracle")
+    try:
+        drv = SyncOracleDriver()
+        with pytest.raises(NotImplementedError):
+            drv.select("SELECT 42 AS x FROM DUAL")
+    finally:
+        reset_dependency_cache("vertebra._oracle")
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        pytest.param(lambda drv: drv.connect(), id="connect"),
+        pytest.param(lambda drv: drv.close(), id="close"),
+        pytest.param(lambda drv: drv.begin(), id="begin"),
+        pytest.param(lambda drv: drv.commit(), id="commit"),
+        pytest.param(lambda drv: drv.rollback(), id="rollback"),
+        pytest.param(lambda drv: drv.cancel(), id="cancel"),
+        pytest.param(lambda drv: drv.execute("SELECT 1 FROM DUAL"), id="execute"),
+        pytest.param(lambda drv: drv.execute_many("INSERT INTO items VALUES (1)", []), id="execute_many_empty"),
+        pytest.param(lambda drv: drv.execute_tuples("SELECT 1 FROM DUAL"), id="execute_tuples"),
+        pytest.param(lambda drv: drv.execute_with_description("SELECT 1 FROM DUAL"), id="execute_with_description"),
+        pytest.param(lambda drv: drv.select("SELECT 1 FROM DUAL"), id="select"),
+        pytest.param(lambda drv: drv.select_to_arrow("SELECT 1 FROM DUAL"), id="select_to_arrow"),
+        pytest.param(lambda drv: drv.load_from_arrow("items", [{"id": 1}]), id="load_from_arrow"),
+    ],
+)
+def test_oracle_driver_methods_require_native_module(
+    monkeypatch: pytest.MonkeyPatch,
+    call: Callable[[SyncOracleDriver], object],
+) -> None:
+    """Every public method on SyncOracleDriver raises MissingDependencyError when vertebra._oracle is absent."""
+    with pytest.MonkeyPatch.context() as stub_ctx:
+        stub_ctx.setitem(sys.modules, "vertebra._oracle", ModuleType("vertebra._oracle"))
+        reset_dependency_cache("vertebra._oracle")
+        drv = SyncOracleDriver()
+    assert not hasattr(drv, "__dict__")
+    monkeypatch.setitem(sys.modules, "vertebra._oracle", None)
+    reset_dependency_cache("vertebra._oracle")
+    try:
+        with pytest.raises(MissingDependencyError, match=r"vertebra-core\[oracle\]"):
+            call(drv)
+    finally:
+        reset_dependency_cache("vertebra._oracle")
+
+
+@pytest.mark.anyio
+async def test_async_oracle_driver_methods_require_native_module(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AsyncOracleDriver.load_from_arrow, execute, and empty execute_many raise MissingDependencyError when absent."""
+    with pytest.MonkeyPatch.context() as stub_ctx:
+        stub_ctx.setitem(sys.modules, "vertebra._oracle", ModuleType("vertebra._oracle"))
+        reset_dependency_cache("vertebra._oracle")
+        drv = AsyncOracleDriver()
+    assert not hasattr(drv, "__dict__")
+    monkeypatch.setitem(sys.modules, "vertebra._oracle", None)
+    reset_dependency_cache("vertebra._oracle")
+    try:
+        with pytest.raises(MissingDependencyError, match=r"vertebra-core\[oracle\]"):
+            await drv.load_from_arrow("items", [{"id": 1}])
+        with pytest.raises(MissingDependencyError, match=r"vertebra-core\[oracle\]"):
+            await drv.execute("SELECT 1 FROM DUAL")
+        with pytest.raises(MissingDependencyError, match=r"vertebra-core\[oracle\]"):
+            await drv.execute_many("INSERT INTO items VALUES (1)", [])
+    finally:
+        reset_dependency_cache("vertebra._oracle")
+
+
+def test_mssql_drivers_raise_missing_dependency_when_native_module_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MSSQL sync/async drivers, registry, SQLSpec sync session, and DB-API raise MissingDependencyError."""
+    monkeypatch.setitem(sys.modules, "vertebra._mssql", None)
+    reset_dependency_cache("vertebra._mssql")
+    try:
+        with pytest.raises(MissingDependencyError) as exc_info:
+            SyncMSSQLDriver(MSSQLConfig.from_url("mssql://sa:secret@localhost:1433/master"))
+        assert exc_info.value.package == "vertebra-core[mssql]"
+        assert exc_info.value.hint == "Install it with: uv add vertebra-core[mssql]"
+        assert isinstance(exc_info.value, ImportError)
+
+        with pytest.raises(MissingDependencyError, match=r"vertebra-core\[mssql\]"):
+            AsyncMSSQLDriver()
+
+        with pytest.raises(MissingDependencyError, match=r"vertebra-core\[mssql\]"):
+            DatabaseRegistry().get_shared_driver(MSSQLConfig())
+
+        with pytest.raises(MissingDependencyError, match=r"vertebra-core\[mssql\]"):
+            DatabaseRegistry().get_shared_sync_driver("sqlserver://sa:secret@localhost:1433/master")
+
+        cfg = MSSQLSyncConfig()
+        assert cfg.is_async is False
+        with pytest.raises(MissingDependencyError, match=r"vertebra-core\[mssql\]"), cfg.provide_session():
+            pass
+
+        with pytest.raises(MissingDependencyError, match=r"vertebra-core\[mssql\]"):
+            SyncDBAPIConnection("mssql+vtb://localhost:1433/master", broker=_MockBroker())
+    finally:
+        reset_dependency_cache("vertebra._mssql")
+
+
+@pytest.mark.anyio
+async def test_mssql_async_sqlspec_session_raises_missing_dependency(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MSSQLAsyncConfig.provide_session raises MissingDependencyError when vertebra._mssql is absent."""
+    monkeypatch.setitem(sys.modules, "vertebra._mssql", None)
+    reset_dependency_cache("vertebra._mssql")
+    try:
+        cfg = MSSQLAsyncConfig()
+        assert cfg.is_async is True
+        with pytest.raises(MissingDependencyError, match=r"vertebra-core\[mssql\]"):
+            async with cfg.provide_session():
+                pass
+    finally:
+        reset_dependency_cache("vertebra._mssql")
+
+
+def test_mssql_driver_with_stub_native_module_raises_not_implemented(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With a stub vertebra._mssql module, SyncMSSQLDriver.select raises NotImplementedError from the base class."""
+    monkeypatch.setitem(sys.modules, "vertebra._mssql", ModuleType("vertebra._mssql"))
+    reset_dependency_cache("vertebra._mssql")
+    try:
+        drv = SyncMSSQLDriver()
+        with pytest.raises(NotImplementedError):
+            drv.select("SELECT 42 AS x")
+    finally:
+        reset_dependency_cache("vertebra._mssql")
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        pytest.param(lambda drv: drv.connect(), id="connect"),
+        pytest.param(lambda drv: drv.close(), id="close"),
+        pytest.param(lambda drv: drv.begin(), id="begin"),
+        pytest.param(lambda drv: drv.commit(), id="commit"),
+        pytest.param(lambda drv: drv.rollback(), id="rollback"),
+        pytest.param(lambda drv: drv.cancel(), id="cancel"),
+        pytest.param(lambda drv: drv.execute("SELECT 1"), id="execute"),
+        pytest.param(lambda drv: drv.execute_many("INSERT INTO items VALUES (1)", []), id="execute_many_empty"),
+        pytest.param(lambda drv: drv.execute_tuples("SELECT 1"), id="execute_tuples"),
+        pytest.param(lambda drv: drv.execute_with_description("SELECT 1"), id="execute_with_description"),
+        pytest.param(lambda drv: drv.select("SELECT 1"), id="select"),
+        pytest.param(lambda drv: drv.select_to_arrow("SELECT 1"), id="select_to_arrow"),
+        pytest.param(lambda drv: drv.load_from_arrow("items", [{"id": 1}]), id="load_from_arrow"),
+    ],
+)
+def test_mssql_driver_methods_require_native_module(
+    monkeypatch: pytest.MonkeyPatch,
+    call: Callable[[SyncMSSQLDriver], object],
+) -> None:
+    """Every public method on SyncMSSQLDriver raises MissingDependencyError when vertebra._mssql is absent."""
+    with pytest.MonkeyPatch.context() as stub_ctx:
+        stub_ctx.setitem(sys.modules, "vertebra._mssql", ModuleType("vertebra._mssql"))
+        reset_dependency_cache("vertebra._mssql")
+        drv = SyncMSSQLDriver()
+    assert not hasattr(drv, "__dict__")
+    monkeypatch.setitem(sys.modules, "vertebra._mssql", None)
+    reset_dependency_cache("vertebra._mssql")
+    try:
+        with pytest.raises(MissingDependencyError, match=r"vertebra-core\[mssql\]"):
+            call(drv)
+    finally:
+        reset_dependency_cache("vertebra._mssql")
+
+
+@pytest.mark.anyio
+async def test_async_mssql_driver_methods_require_native_module(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AsyncMSSQLDriver.execute and empty execute_many raise MissingDependencyError when vertebra._mssql is absent."""
+    with pytest.MonkeyPatch.context() as stub_ctx:
+        stub_ctx.setitem(sys.modules, "vertebra._mssql", ModuleType("vertebra._mssql"))
+        reset_dependency_cache("vertebra._mssql")
+        drv = AsyncMSSQLDriver()
+    assert not hasattr(drv, "__dict__")
+    monkeypatch.setitem(sys.modules, "vertebra._mssql", None)
+    reset_dependency_cache("vertebra._mssql")
+    try:
+        with pytest.raises(MissingDependencyError, match=r"vertebra-core\[mssql\]"):
+            await drv.execute("SELECT 1")
+        with pytest.raises(MissingDependencyError, match=r"vertebra-core\[mssql\]"):
+            await drv.execute_many("INSERT INTO items VALUES (1)", [])
+    finally:
+        reset_dependency_cache("vertebra._mssql")
+
+
+def test_async_mssql_driver_forwards_sync_dialer_to_sync_driver(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AsyncMSSQLDriver forwards its SyncCloudSQLDialer to SyncMSSQLDriver and raises when the module is absent."""
+    dialer = SyncCloudSQLDialer(CloudSQLConfig(instance_connection_name="proj:us-central1:inst"))
+    monkeypatch.setitem(sys.modules, "vertebra._mssql", ModuleType("vertebra._mssql"))
+    reset_dependency_cache("vertebra._mssql")
+    try:
+        drv = AsyncMSSQLDriver(MSSQLConfig(), dialer=dialer)
+        assert drv.sync_driver.dialer is dialer
+        assert drv.dialer is dialer
+
+        drv_no_dialer = AsyncMSSQLDriver(MSSQLConfig())
+        assert drv_no_dialer.dialer is None
+        assert drv_no_dialer.sync_driver.dialer is None
+
+        monkeypatch.setitem(sys.modules, "vertebra._mssql", None)
+        reset_dependency_cache("vertebra._mssql")
+        with pytest.raises(MissingDependencyError, match=r"vertebra-core\[mssql\]"):
+            AsyncMSSQLDriver(MSSQLConfig(), dialer=dialer)
+    finally:
+        reset_dependency_cache("vertebra._mssql")
+
+
+def test_duckdb_drivers_raise_missing_dependency_when_duckdb_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SyncDuckDBDriver and AsyncDuckDBDriver raise MissingDependencyError naming duckdb when it is absent."""
+    monkeypatch.setitem(sys.modules, "duckdb", None)
+    reset_dependency_cache("duckdb")
+    try:
+        with pytest.raises(MissingDependencyError) as exc_info:
+            SyncDuckDBDriver()
+        assert exc_info.value.package == "duckdb"
+        assert exc_info.value.install_package == "duckdb"
+        assert exc_info.value.hint == "Install it with: uv add duckdb"
+
+        with pytest.raises(MissingDependencyError) as async_exc:
+            AsyncDuckDBDriver(DuckDBConfig(path=":memory:"))
+        assert async_exc.value.package == "duckdb"
+    finally:
+        reset_dependency_cache("duckdb")
+
+
+def test_duckdb_driver_executes_on_duckdb_engine() -> None:
+    """SyncDuckDBDriver executes DuckDB-specific SQL and honors explicit transaction commit/rollback."""
+    pytest.importorskip("duckdb", reason=_DUCKDB_SKIP_REASON)
+    driver = SyncDuckDBDriver()
+    try:
+        assert driver.select("SELECT list_value(1, 2, 3) AS xs") == [{"xs": [1, 2, 3]}]
+        assert driver.execute("CREATE TABLE tx_items (v INTEGER)") == 0
+        assert driver.execute("INSERT INTO tx_items VALUES (1), (2)") == 2
+
+        driver.begin()
+        assert driver.execute("INSERT INTO tx_items VALUES (?)", [7]) == 1
+        driver.rollback()
+        assert driver.execute_tuples("SELECT count(*) FROM tx_items") == [(2,)]
+
+        driver.begin()
+        assert driver.execute("INSERT INTO tx_items VALUES (?)", [9]) == 1
+        driver.commit()
+        assert driver.execute_tuples("SELECT max(v) FROM tx_items") == [(9,)]
+
+        assert driver.commit() is None
+        assert driver.rollback() is None
+    finally:
+        driver.close()
