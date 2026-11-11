@@ -1764,6 +1764,7 @@ def test_native_copy_async_cancel_finish_and_write_recovers_pool(op_kind: str) -
                 copy_in = await ac1.copy_from_arrow("items", ipc1)
                 if op_kind == "finish":
                     fut = asyncio.create_task(_as_coro(copy_in.finish()))
+                    await asyncio.sleep(0)
                     assert await asyncio.to_thread(state.finish_entered.wait, 3.0)
                     fut.cancel()
                     with pytest.raises((asyncio.CancelledError, OperationalError)):
@@ -3832,10 +3833,12 @@ def test_async_copy_from_unresponsive_cancel_retains_pool_slot_until_close(
                 elif blocked_step == "finish_copy_done":
                     copy_in = await ac1.copy_from_arrow("items", first_ipc)
                     blocked_task = asyncio.create_task(_as_coro(copy_in.finish()))
+                    await asyncio.sleep(0)
                     assert await asyncio.to_thread(state.finish_entered.wait, 2.0)
                 else:
                     copy_in = await ac1.copy_from_arrow("items", first_ipc)
                     blocked_task = asyncio.create_task(_as_coro(copy_in.finish()))
+                    await asyncio.sleep(0)
                     assert await asyncio.to_thread(state.commit_entered.wait, 2.0)
 
                 blocked_task.cancel()
@@ -3909,6 +3912,7 @@ def test_async_copy_from_ambient_tx_unresponsive_cancel_marks_ambient_failed(
                 copy_in = await ac1.copy_from_arrow("items", first_ipc)
                 if blocked_step == "finish":
                     task: asyncio.Task[Any] = asyncio.create_task(_as_coro(copy_in.finish()))
+                    await asyncio.sleep(0)
                     assert await asyncio.to_thread(state.finish_entered.wait, 2.0)
                 else:
                     assert await asyncio.to_thread(state.copy_data_stalled.wait, 2.0)

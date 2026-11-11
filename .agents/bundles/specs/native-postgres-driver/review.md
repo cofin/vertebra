@@ -6,7 +6,7 @@ description: Adjudication and validation of the nested 33-chapter complete-drive
 status: stable
 state: active
 plan_revision: 6
-plan_commit: 043d8444
+plan_commit: bf53faf3
 created_at: "2026-11-05T00:00:00Z"
 updated_at: "2026-11-10T14:45:00Z"
 generated:
@@ -15,7 +15,7 @@ generated:
 verified:
   - by: agent:plan-generator
     at: "2026-11-10T14:45:00Z"
-    commit: 043d8444
+    commit: bf53faf3
   - by: agent:flow-setup
     at: "2026-11-07T04:15:00Z"
     commit: 9af810f5
@@ -38,7 +38,7 @@ tags:
 # Planning review
 
 <!-- truth: start -->
-- **Adjudicated Active Plan Baseline (`plan_revision: 6`)**: All planning and execution-reconciliation findings are adopted across `spec.md`, `contracts.md`, and `33` nested chapters (`ch01`–`ch33`, `118` vertical-slice worksheets) at `state: active`, `has_chapters: true`, and `plan_commit: 043d8444`; `19/33` chapters (`71/118` tasks) are completed through `ch19-native-arrow-batches-and-shm` (`59a6dc09`), `ch20`–`ch33` (`14` chapters, `47` tasks) and `[0/33 files documented]` remain planned [^pg-core-rs] [^pg-driver-py].
+- **Adjudicated Active Plan Baseline (`plan_revision: 6`)**: All planning and execution-reconciliation findings are adopted across `spec.md`, `contracts.md`, and `33` nested chapters (`ch01`–`ch33`, `118` vertical-slice worksheets) at `state: active`, `has_chapters: true`, and `plan_commit: bf53faf3`; `19/33` chapters (`71/118` tasks) are completed through `ch19-native-arrow-batches-and-shm` (`59a6dc09`), `ch20`–`ch33` (`14` chapters, `47` tasks) and `[0/33 files documented]` remain planned [^pg-core-rs] [^pg-driver-py].
 - **Scope of Evidence**: Chapters `ch01`–`ch19` carry verified local unit and wire-harness commits through `59a6dc09`; Arrow import/portals, notifications, `pgoutput` v1 replication, Python adapter/queue cutover, strict zero-skip PG14–18/service conformance, outside-checkout wheels, PG18 benchmarks, `33`-file docs/OKF/skill sync, and final `88c30004..HEAD` correctness and quality reviews execute across `ch20`–`ch33`.
 <!-- truth: end -->
 
@@ -72,10 +72,10 @@ All findings below are ADOPT. No product decision remains unresolved.
 ## Review and validation evidence
 
 - Chapters `ch01`–`ch19` (`71` tasks) are implemented, verified, and reviewed through `ch19-native-arrow-batches-and-shm` (`59a6dc09`).
-- `plan_revision: 6` (`plan_commit: 043d8444`) reconciles remaining chapters `ch20`–`ch33` (`14` chapters, `47` pending worksheets, `<= 3` files and `read_set <= 6` per task, continuous cross-chapter `depends_on` DAG, `27` traced requirements `R1`–`R27`, and `[0/33 files documented]` across `ch30`–`ch32`).
+- `plan_revision: 6` (`plan_commit: bf53faf3`) reconciles remaining chapters `ch20`–`ch33` (`14` chapters, `47` pending worksheets, `<= 3` files and `read_set <= 6` per task, continuous cross-chapter `depends_on` DAG, `27` traced requirements `R1`–`R27`, and `[0/33 files documented]` across `ch30`–`ch32`).
 - Repository `make review-check` validates multi-line YAML frontmatter, `<= 40`-line truth blocks, on-disk `sources:` paths, 1:1 provenance footnotes, resolving relative links, frontmatter-free directory `index.md` files, and privacy rules.
 
-Current flow state is `active` at `plan_revision: 6` and `plan_commit: 043d8444` (`current_chapter: ch20-arrow-copy-import-and-portals`, `current_task: "native-postgres-driver:ch20:t01"`). The next canonical command is `/flow:implement native-postgres-driver ch20`. Live PG14–18/service conformance (`ch28`), outside-checkout release/benchmark acceptance (`ch29`), `33`-file documentation/OKF synchronization (`ch30`–`ch32`), and complete-driver `88c30004..HEAD` correctness plus fresh quality reviews (`ch33`) remain pending until executed.
+Current flow state is `active` at `plan_revision: 6` and `plan_commit: bf53faf3` (`current_chapter: ch20-arrow-copy-import-and-portals`, `current_task: "native-postgres-driver:ch20:t01"`). The next canonical command is `/flow:implement native-postgres-driver ch20`. Live PG14–18/service conformance (`ch28`), outside-checkout release/benchmark acceptance (`ch29`), `33`-file documentation/OKF synchronization (`ch30`–`ch32`), and complete-driver `88c30004..HEAD` correctness plus fresh quality reviews (`ch33`) remain pending until executed.
 
 [^pg-core-rs]: `src/rs/vertebra-db/src/postgres/mod.rs::encode_query_frame` — Shared PostgreSQL wire frame helpers in `vertebra-db`.
 [^fail-loud-baseline]: `.agents/bundles/knowledge/domains/data/database-drivers-and-dialers.md` — Upstream flow that deletes PostgreSQL `memory://` paths and `vertebra_db::postgres::PostgresPool`.

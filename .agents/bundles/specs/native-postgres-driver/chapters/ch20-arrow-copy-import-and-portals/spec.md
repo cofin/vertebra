@@ -12,7 +12,7 @@ depends_on_chapters:
 replan_trigger: null
 current_task: null
 plan_revision: 6
-plan_commit: 043d8444
+plan_commit: bf53faf3
 state_revision: 2
 last_verified_checkpoint: 40ce977c
 last_reviewed_commit: 40ce977c
@@ -24,10 +24,10 @@ generated:
 verified:
   - by: agent:plan-generator
     at: "2026-11-10T14:45:00Z"
-    commit: 043d8444
+    commit: bf53faf3
   - by: agent:flow-setup
     at: "2026-11-07T05:00:00Z"
-    commit: 0147d80c
+    commit: 936daa9f
   - by: agent:code-reviewer
     at: "2026-11-10T21:55:00Z"
     commit: 40ce977c
@@ -164,17 +164,17 @@ Progress: `[0/0 files documented in ch20]` (repository-wide public docs and OKF 
 
 ## 5. Implementation Plan
 
-- [x] [00344dd7] native-postgres-driver:ch20:t01 — Convert Arrow RecordBatches into binary COPY fields with prevalidated target plans and IPC batch iterators (tasks/t01-arrow-to-copy-field-import.md)
-- [x] [473d4e79] native-postgres-driver:ch20:t02 — Expose PyO3 COPY handles and stream Arrow IPC input buffers into native COPY (tasks/t02-streaming-arrow-input-bridge.md)
-- [x] [41e4203b] native-postgres-driver:ch20:t03 — Expose synchronous select_to_arrow and pinned Arrow portal batch streams (tasks/t03-sync-arrow-selection-and-portals.md)
-- [x] [1706e1a0] native-postgres-driver:ch20:t04 — Expose asynchronous select_to_arrow and cancellation-safe Arrow portal streams (tasks/t04-async-arrow-portal-cancellation.md)
+- [x] [21dd7c1d] native-postgres-driver:ch20:t01 — Convert Arrow RecordBatches into binary COPY fields with prevalidated target plans and IPC batch iterators (tasks/t01-arrow-to-copy-field-import.md)
+- [x] [c8f982b9] native-postgres-driver:ch20:t02 — Expose PyO3 COPY handles and stream Arrow IPC input buffers into native COPY (tasks/t02-streaming-arrow-input-bridge.md)
+- [x] [384fc2ed] native-postgres-driver:ch20:t03 — Expose synchronous select_to_arrow and pinned Arrow portal batch streams (tasks/t03-sync-arrow-selection-and-portals.md)
+- [x] [e556a64f] native-postgres-driver:ch20:t04 — Expose asynchronous select_to_arrow and cancellation-safe Arrow portal streams (tasks/t04-async-arrow-portal-cancellation.md)
 
 **Chapter Recovery Checkpoint:** `make dev && PYTHONPATH="$(pwd)/src/py:$(pwd)/.venv/lib/python3.12/site-packages" cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --test postgres_arrow_import_tests && PYTHONPATH="$(pwd)/src/py:$(pwd)/.venv/lib/python3.12/site-packages" cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --test postgres_arrow_tests && uv run --no-sync ruff check src/py/vertebra/_postgres.pyi src/py/vertebra/db/adapters/postgres/arrow.py src/py/tests/unit/db/test_postgres_native_data.py && uv run --no-sync mypy src/py/vertebra/_postgres.pyi src/py/vertebra/db/adapters/postgres/arrow.py src/py/tests/unit/db/test_postgres_native_data.py && uv run --no-sync python -m mypy.stubtest vertebra._postgres && uv run --no-sync python -m pytest src/py/tests/unit/db/test_postgres_native_data.py -q` exits `0`.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `plan_revision: 6`, `plan_commit: 043d8444`; chapter `state: completed` at `40ce977c` (`last_reviewed_commit: 40ce977c`, `last_verified_checkpoint: 40ce977c`; `make lint-all`, `cargo test -p vertebra-postgres` `186 passed`, `test_postgres_native_data.py` `162 passed` -> exit `0`).
-- **Remaining Tasks in Chapter**: None (`4/4` completed: `t01` `00344dd7`, `t02` `473d4e79`, `t03` `41e4203b`, `t04` `1706e1a0`).
+- **Verified Baseline**: `plan_revision: 6`, `plan_commit: bf53faf3`; chapter `state: completed` at `40ce977c` (`last_reviewed_commit: 40ce977c`, `last_verified_checkpoint: 40ce977c`; `make lint-all`, `cargo test -p vertebra-postgres` `186 passed`, `test_postgres_native_data.py` `162 passed` -> exit `0`).
+- **Remaining Tasks in Chapter**: None (`4/4` completed: `t01` `21dd7c1d`, `t02` `c8f982b9`, `t03` `384fc2ed`, `t04` `e556a64f`).
 - **Downstream Dependents**: Unblocks `ch21-live-notifications` and `ch26:t03` (`driver-arrow-and-owned-binds`).
 
 [^pg-contracts]: `.agents/bundles/specs/native-postgres-driver/contracts.md` — Native PostgreSQL Arrow selection, COPY, portal, and cancellation contracts.

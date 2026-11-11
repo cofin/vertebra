@@ -22,7 +22,7 @@ tests:
   - src/py/tests/integration/db/test_postgres_features.py
 estimated_loc: 245
 plan_revision: 6
-plan_commit: 043d8444
+plan_commit: bf53faf3
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -38,7 +38,7 @@ commit: null
 verified:
   - by: agent:plan-generator
     at: "2026-11-10T14:45:00Z"
-    commit: 043d8444
+    commit: bf53faf3
 sources:
   - id: int-conftest
     resource: src/py/tests/integration/conftest.py::vtb_postgres_config

@@ -12,7 +12,7 @@ depends_on_chapters:
 replan_trigger: null
 current_task: null
 plan_revision: 5
-plan_commit: 0147d80c
+plan_commit: 936daa9f
 state_revision: 0
 last_verified_checkpoint: ba367822
 last_reviewed_commit: ba367822
@@ -24,7 +24,7 @@ generated:
 verified:
   - by: agent:plan-generator
     at: "2026-11-07T05:00:00Z"
-    commit: 0147d80c
+    commit: 936daa9f
 sources:
   - id: rs-transport
     resource: src/rs/vertebra-db/src/connection.rs::TransportStream
@@ -151,7 +151,7 @@ Progress: `[0/0 files documented in ch02]` (all new symbols in `protocol.rs`, `t
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `plan_commit: 0147d80c`; chapter `state: completed` at `ba367822`, `planning_status: complete`.
+- **Verified Baseline**: `plan_commit: 936daa9f`; chapter `state: completed` at `ba367822`, `planning_status: complete`.
 - **Remaining Tasks in Chapter**: None (`4/4` completed at `ba367822`).
 - **Documentation & OKF Status**: `[0/0 files documented in ch02]`; user docs and OKF data chapters scheduled in `ch30`.
 - **Downstream Dependents**: Unblocks `ch03-scram-and-channel-binding` (`ch03:t01` depends on `ch02:t04`).

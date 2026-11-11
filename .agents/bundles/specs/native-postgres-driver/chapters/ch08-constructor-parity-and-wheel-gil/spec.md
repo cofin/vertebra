@@ -12,7 +12,7 @@ depends_on_chapters:
 replan_trigger: null
 current_task: null
 plan_revision: 5
-plan_commit: 0147d80c
+plan_commit: 936daa9f
 state_revision: 0
 last_verified_checkpoint: adf34226
 last_reviewed_commit: adf34226
@@ -24,7 +24,7 @@ generated:
 verified:
   - by: agent:plan-generator
     at: "2026-11-07T16:55:00Z"
-    commit: 0147d80c
+    commit: 936daa9f
 sources:
   - id: pg-contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md
@@ -145,7 +145,7 @@ Progress: `[1/1 stub file finalized for Phase 1 in ch08]` (`src/py/vertebra/_pos
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `plan_commit: 0147d80c`; chapter `state: completed` at `adf34226`, `planning_status: complete`.
+- **Verified Baseline**: `plan_commit: 936daa9f`; chapter `state: completed` at `adf34226`, `planning_status: complete`.
 - **Remaining Tasks in Chapter**: None (`4/4` completed at `adf34226`).
 - **Downstream Dependents**: Completes Phase 1 transport, cloud, auth, packaging, and session foundations and unblocks `ch09-owned-results-and-numeric-codecs` (`ch09:t01` depends on `ch08:t04`).
 

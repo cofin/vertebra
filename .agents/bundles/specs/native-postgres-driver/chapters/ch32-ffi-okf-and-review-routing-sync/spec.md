@@ -12,7 +12,7 @@ depends_on_chapters:
 replan_trigger: null
 current_task: "native-postgres-driver:ch32:t01"
 plan_revision: 6
-plan_commit: 043d8444
+plan_commit: bf53faf3
 state_revision: 0
 last_verified_checkpoint: null
 last_reviewed_commit: null
@@ -24,7 +24,7 @@ generated:
 verified:
   - by: agent:plan-generator
     at: "2026-11-10T14:45:00Z"
-    commit: 043d8444
+    commit: bf53faf3
 sources:
   - id: okf-ffi-pattern
     resource: .agents/bundles/knowledge/patterns/rust/ffi-and-gil-discipline.md
@@ -139,7 +139,7 @@ Progress: `[0/9 files documented]`
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Plan Baseline**: `043d8444`; `depends_on_chapters: [ch31-data-and-testing-okf-sync]`, `state: planned`, `plan_revision: 6`.
+- **Verified Plan Baseline**: `bf53faf3`; `depends_on_chapters: [ch31-data-and-testing-okf-sync]`, `state: planned`, `plan_revision: 6`.
 - **Remaining Tasks in Chapter**: `t01`, `t02`, `t03` (`3/3` pending); `[0/9 files documented]`.
 - **Downstream Dependents**: Unblocks [ch33-final-review-and-release-gate](../ch33-final-review-and-release-gate/spec.md) (`ch33:t01`) for complete-driver verification, routed correctness review, and fresh zero-context quality review across `88c30004..HEAD`.
 

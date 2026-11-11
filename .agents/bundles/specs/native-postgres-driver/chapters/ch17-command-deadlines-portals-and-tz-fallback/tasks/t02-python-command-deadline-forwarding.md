@@ -25,7 +25,7 @@ tests:
   - src/py/tests/integration/db/test_postgres_command_deadlines.py
 estimated_loc: 215
 plan_revision: 5
-plan_commit: 0147d80c
+plan_commit: 936daa9f
 state_revision: 1
 claimed_by: null
 claimed_at: null
@@ -33,7 +33,7 @@ blocked_reason: null
 unblock_condition: null
 next_step: null
 last_verified_at: "2026-11-09T20:22:04Z"
-last_verified_commit: e8b397b4
+last_verified_commit: ffe3e745
 verification_evidence: "pytest test_postgres_command_deadlines.py (12 passed), mypy.stubtest vertebra._postgres, ruff, mypy, and clippy passed"
 created_at: "2026-11-05T18:25:07Z"
 updated_at: "2026-11-08T02:05:22Z"

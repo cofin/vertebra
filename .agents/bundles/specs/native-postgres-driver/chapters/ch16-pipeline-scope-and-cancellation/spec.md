@@ -12,10 +12,10 @@ depends_on_chapters:
 replan_trigger: null
 current_task: null
 plan_revision: 5
-plan_commit: 0147d80c
+plan_commit: 936daa9f
 state_revision: 1
-last_verified_checkpoint: e8b397b4
-last_reviewed_commit: e8b397b4
+last_verified_checkpoint: ffe3e745
+last_reviewed_commit: ffe3e745
 created_at: "2026-11-05T00:00:00Z"
 updated_at: "2026-11-08T02:05:22Z"
 generated:
@@ -24,7 +24,7 @@ generated:
 verified:
   - by: agent:flow-setup
     at: "2026-11-07T05:00:00Z"
-    commit: 0147d80c
+    commit: 936daa9f
 sources:
   - id: pg-contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md
@@ -121,17 +121,17 @@ Progress: `[2/2 files documented in ch16]` (`src/py/vertebra/db/adapters/postgre
 
 ## 5. Implementation Plan
 
-- [x] [e8b397b4] native-postgres-driver:ch16:t01 — Implement retained pipeline transaction scope and Python pipeline context classes (tasks/t01-pipeline-transaction-scope.md)
-- [x] [e8b397b4] native-postgres-driver:ch16:t02 — Wire PyO3 client pipeline scope methods and end-to-end transactional pipeline tests (tasks/t02-python-pipeline-contexts.md)
-- [x] [e8b397b4] native-postgres-driver:ch16:t03 — Implement protocol CancelRequest engine, connection retirement, and non-aborting async cancel callback (tasks/t03-cancel-engine-and-retirement.md)
-- [x] [e8b397b4] native-postgres-driver:ch16:t04 — Expose explicit and asyncio client cancellation with independent native cleanup (tasks/t04-python-and-asyncio-cancellation.md)
+- [x] [ffe3e745] native-postgres-driver:ch16:t01 — Implement retained pipeline transaction scope and Python pipeline context classes (tasks/t01-pipeline-transaction-scope.md)
+- [x] [ffe3e745] native-postgres-driver:ch16:t02 — Wire PyO3 client pipeline scope methods and end-to-end transactional pipeline tests (tasks/t02-python-pipeline-contexts.md)
+- [x] [ffe3e745] native-postgres-driver:ch16:t03 — Implement protocol CancelRequest engine, connection retirement, and non-aborting async cancel callback (tasks/t03-cancel-engine-and-retirement.md)
+- [x] [ffe3e745] native-postgres-driver:ch16:t04 — Expose explicit and asyncio client cancellation with independent native cleanup (tasks/t04-python-and-asyncio-cancellation.md)
 
 **Chapter Recovery Checkpoint:** `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-db --features pyo3 --lib py_async::tests && cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --test pipeline_scope --test cancellation_protocol && make dev && uv run --no-sync pytest src/py/tests/unit/db/test_postgres_native_pipeline.py src/py/tests/unit/db/test_postgres_native_cancel.py -q && uv run --no-sync python -m mypy.stubtest vertebra._postgres` exits `0`.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `plan_commit: 0147d80c`; chapter `state: completed` at `e8b397b4`, `planning_status: complete`.
-- **Remaining Tasks in Chapter**: None (`4/4` completed at `e8b397b4`).
+- **Verified Baseline**: `plan_commit: 936daa9f`; chapter `state: completed` at `ffe3e745`, `planning_status: complete`.
+- **Remaining Tasks in Chapter**: None (`4/4` completed at `ffe3e745`).
 - **Downstream Dependents**: Unblocks `ch17-command-deadlines-portals-and-tz-fallback` (command I/O deadlines reusing `OperationGeneration` + `PostgresCancelHandle`, Python portals, and `jiff` timezone fallback) and `ch26:t02` (permanent driver `.pipeline()` factories).
 
 [^pg-contracts]: `.agents/bundles/specs/native-postgres-driver/contracts.md` — Frozen pipeline transaction scope, `SyncPostgresPipeline` / `AsyncPostgresPipeline`, and cancellation retirement contracts.

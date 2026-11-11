@@ -12,7 +12,7 @@ depends_on_chapters:
 replan_trigger: null
 current_task: null
 plan_revision: 5
-plan_commit: 0147d80c
+plan_commit: 936daa9f
 state_revision: 0
 last_verified_checkpoint: adf34226
 last_reviewed_commit: adf34226
@@ -24,7 +24,7 @@ generated:
 verified:
   - by: agent:plan-generator
     at: "2026-11-07T05:00:00Z"
-    commit: 0147d80c
+    commit: 936daa9f
 sources:
   - id: py-async-rs
     resource: src/rs/vertebra-db/src/py_async.rs::spawn_rust_db_task_with_attr
@@ -128,7 +128,7 @@ Progress: `[1/1 file stubbed in ch07]` (`src/py/vertebra/_postgres.pyi` updated 
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `plan_commit: 0147d80c`; chapter `state: completed` at `adf34226`, `planning_status: complete`.
+- **Verified Baseline**: `plan_commit: 936daa9f`; chapter `state: completed` at `adf34226`, `planning_status: complete`.
 - **Remaining Tasks in Chapter**: None (`3/3` completed at `adf34226`).
 - **Downstream Dependents**: Unblocks `ch08-constructor-parity-and-wheel-gil`.
 

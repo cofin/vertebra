@@ -25,7 +25,7 @@ tests:
   - src/py/tests/unit/db/test_postgres_native_pipeline.py
 estimated_loc: 220
 plan_revision: 5
-plan_commit: 0147d80c
+plan_commit: 936daa9f
 state_revision: 1
 claimed_by: null
 claimed_at: null
@@ -33,11 +33,11 @@ blocked_reason: null
 unblock_condition: null
 next_step: null
 last_verified_at: "2026-11-09T19:32:00Z"
-last_verified_commit: 1ae9ab3d
+last_verified_commit: ab725d86
 verification_evidence: "pytest test_postgres_native_pipeline.py (9 passed) + mypy.stubtest vertebra._postgres + mypy exit 0"
 created_at: "2026-11-05T18:25:07Z"
 updated_at: "2026-11-08T02:05:22Z"
-commit: e8b397b4
+commit: ffe3e745
 sources:
   - id: pg-contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md

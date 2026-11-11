@@ -25,7 +25,7 @@ tests:
   - src/rs/vertebra-postgres/tests/postgres_replication_wire_tests.rs
 estimated_loc: 230
 plan_revision: 6
-plan_commit: 043d8444
+plan_commit: bf53faf3
 state_revision: 1
 claimed_by: null
 claimed_at: null
@@ -33,18 +33,18 @@ blocked_reason: null
 unblock_condition: null
 next_step: null
 last_verified_at: "2026-11-11T01:52:41Z"
-last_verified_commit: 530da588
+last_verified_commit: 258bedb5
 verification_evidence: "cargo test -p vertebra-postgres --test postgres_replication_wire_tests (9 passed), cargo fmt --check, and cargo clippy --workspace --all-targets --features tls,compression,gcp -- -D warnings exited 0"
 created_at: "2026-11-05T18:25:07Z"
 updated_at: "2026-11-11T01:53:00Z"
-commit: 530da588
+commit: 258bedb5
 generated:
   by: flow-revise
   at: "2026-11-10T14:45:00Z"
 verified:
   - by: agent:plan-generator
     at: "2026-11-10T14:45:00Z"
-    commit: 043d8444
+    commit: bf53faf3
 sources:
   - id: npd-contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md

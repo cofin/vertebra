@@ -26,7 +26,7 @@ tests:
   - src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py
 estimated_loc: 225
 plan_revision: 6
-plan_commit: 043d8444
+plan_commit: bf53faf3
 state_revision: 1
 claimed_by: null
 claimed_at: null
@@ -34,15 +34,15 @@ blocked_reason: null
 unblock_condition: null
 next_step: null
 last_verified_at: "2026-11-10T23:43:28Z"
-last_verified_commit: db3307e5
+last_verified_commit: 39d75501
 verification_evidence: "make lint-all, make dev, cargo test postgres_notification_wire_tests (11 passed), mypy.stubtest vertebra._postgres, and pytest test_postgres_native_notifications.py + test_pg_dataplane_and_datafusion.py + test_postgres_driver.py (184 passed) exited 0"
 created_at: "2026-11-05T18:25:07Z"
 updated_at: "2026-11-10T23:43:28Z"
-commit: db3307e5
+commit: 39d75501
 verified:
   - by: agent:plan-generator
     at: "2026-11-10T14:45:00Z"
-    commit: 043d8444
+    commit: bf53faf3
 sources:
   - id: pg-contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md

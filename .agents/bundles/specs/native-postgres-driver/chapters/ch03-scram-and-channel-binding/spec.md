@@ -12,7 +12,7 @@ depends_on_chapters:
 replan_trigger: null
 current_task: "native-postgres-driver:ch03:t01"
 plan_revision: 5
-plan_commit: 0147d80c
+plan_commit: 936daa9f
 state_revision: 0
 last_verified_checkpoint: 2cd7ee0f
 last_reviewed_commit: 2cd7ee0f
@@ -24,7 +24,7 @@ generated:
 verified:
   - by: agent:plan-generator
     at: "2026-11-07T16:40:00Z"
-    commit: 0147d80c
+    commit: 936daa9f
 sources:
   - id: pg-contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md
@@ -141,7 +141,7 @@ Progress: `[0/0 files documented in ch03]`
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `plan_commit: 0147d80c`; chapter `state: completed` at `2cd7ee0f`, `planning_status: complete`.
+- **Verified Baseline**: `plan_commit: 936daa9f`; chapter `state: completed` at `2cd7ee0f`, `planning_status: complete`.
 - **Remaining Tasks in Chapter**: None (`3/3` completed at `2cd7ee0f`).
 - **Documentation & OKF Status**: `[0/0 files documented in ch03]`; RFC 5929 channel-binding OKF curation scheduled in `ch30:t02`.
 - **Downstream Dependents**: Unblocks `ch04-cloud-material-and-admin-discovery` (`ch04:t01` depends on `ch03:t03`).

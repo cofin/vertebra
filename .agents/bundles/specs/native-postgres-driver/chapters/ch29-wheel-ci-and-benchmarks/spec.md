@@ -12,7 +12,7 @@ depends_on_chapters:
 replan_trigger: null
 current_task: "native-postgres-driver:ch29:t01"
 plan_revision: 6
-plan_commit: 043d8444
+plan_commit: bf53faf3
 state_revision: 0
 last_verified_checkpoint: null
 last_reviewed_commit: null
@@ -24,7 +24,7 @@ generated:
 verified:
   - by: agent:plan-generator
     at: "2026-11-10T14:45:00Z"
-    commit: 043d8444
+    commit: bf53faf3
 sources:
   - id: gh-ci
     resource: .github/workflows/ci.yml
@@ -134,7 +134,7 @@ Progress: `[0/0 files documented in ch29]` — hands off to [ch30-user-and-workf
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Plan Baseline**: `plan_commit: 043d8444`, `plan_revision: 6`; chapter `state: planned`, `planning_status: complete` (`33` chapters / `118` tasks total across flow, `ch01`–`ch19` / `71` tasks completed).
+- **Verified Plan Baseline**: `plan_commit: bf53faf3`, `plan_revision: 6`; chapter `state: planned`, `planning_status: complete` (`33` chapters / `118` tasks total across flow, `ch01`–`ch19` / `71` tasks completed).
 - **Remaining Tasks in Chapter**: `t01`, `t02`, `t03` (`3/3` pending).
 - **Downstream Handoff & Invariants**: Unblocks `ch30-user-and-workflow-docs` (`[0/33 files documented]` across `ch30`–`ch32`, followed by `ch33-final-review-and-release-gate`); `psycopg` and `asyncpg` stay confined to `[dependency-groups].postgres-bench` (`python_version == '3.12'`); `src/py/vertebra/build/packaging/` stays untouched; `VERTEBRA_POSTGRES_BENCH_DSN` is never persisted in JSON artifacts; zero workflow dispatch, push, or tag mutation occurs locally.
 

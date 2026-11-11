@@ -23,7 +23,7 @@ tests:
   - src/rs/vertebra-postgres/tests/json_codecs.rs
 estimated_loc: 205
 plan_revision: 5
-plan_commit: 0147d80c
+plan_commit: 936daa9f
 state_revision: 0
 claimed_by: null
 claimed_at: null

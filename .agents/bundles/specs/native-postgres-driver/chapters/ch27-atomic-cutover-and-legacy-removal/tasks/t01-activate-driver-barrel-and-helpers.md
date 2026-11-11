@@ -31,7 +31,7 @@ tests:
   - src/py/tests/unit/db/test_postgres_native_adapter_arrow.py
 estimated_loc: 245
 plan_revision: 6
-plan_commit: 043d8444
+plan_commit: bf53faf3
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -47,7 +47,7 @@ commit: null
 verified:
   - by: agent:plan-generator
     at: "2026-11-10T14:45:00Z"
-    commit: 043d8444
+    commit: bf53faf3
 sources:
   - id: pg-driver-py
     resource: src/py/vertebra/db/adapters/postgres/driver.py::SyncPostgreSQLDriver

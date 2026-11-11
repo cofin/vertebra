@@ -12,7 +12,7 @@ depends_on_chapters:
 replan_trigger: null
 current_task: null
 plan_revision: 5
-plan_commit: 0147d80c
+plan_commit: 936daa9f
 state_revision: 0
 last_verified_checkpoint: e7c0a42f
 last_reviewed_commit: e7c0a42f
@@ -24,7 +24,7 @@ generated:
 verified:
   - by: agent:flow-setup
     at: "2026-11-07T05:00:00Z"
-    commit: 0147d80c
+    commit: 936daa9f
 sources:
   - id: pg-contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md
@@ -132,7 +132,7 @@ Progress: `[0/0 files documented in ch13]` (public Python `.pyi` stubs and user/
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `plan_commit: 0147d80c`; chapter `state: completed` at `e7c0a42f`, `planning_status: complete`.
+- **Verified Baseline**: `plan_commit: 936daa9f`; chapter `state: completed` at `e7c0a42f`, `planning_status: complete`.
 - **Remaining Tasks in Chapter**: None (`3/3` completed at `e7c0a42f`).
 - **Downstream Dependents**: Unblocks `ch14-physical-pools-and-query-facades` (`PostgresPool`, `DISCARD ALL` reset, and Python query/transaction facades), `ch17:t03` (Python portal facades), and `ch20:t03`–`t04` (Arrow portal streaming).
 

@@ -12,7 +12,7 @@ depends_on_chapters:
 replan_trigger: null
 current_task: "native-postgres-driver:ch30:t01"
 plan_revision: 6
-plan_commit: 043d8444
+plan_commit: bf53faf3
 state_revision: 0
 last_verified_checkpoint: null
 last_reviewed_commit: null
@@ -24,7 +24,7 @@ generated:
 verified:
   - by: agent:plan-generator
     at: "2026-11-10T14:45:00Z"
-    commit: 043d8444
+    commit: bf53faf3
 sources:
   - id: doc-databases
     resource: docs/usage/databases.md
@@ -149,7 +149,7 @@ Progress: `[0/12 files documented]`
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Plan Baseline**: `043d8444`; `depends_on_chapters: [ch29-wheel-ci-and-benchmarks]`, `state: planned`, `plan_revision: 6`.
+- **Verified Plan Baseline**: `bf53faf3`; `depends_on_chapters: [ch29-wheel-ci-and-benchmarks]`, `state: planned`, `plan_revision: 6`.
 - **Remaining Tasks in Chapter**: `t01`, `t02`, `t03`, `t04` (`4/4` pending); `[0/12 files documented]`.
 - **Downstream Dependents**: Unblocks [ch31-data-and-testing-okf-sync](../ch31-data-and-testing-okf-sync/spec.md) (`ch31:t01`) for OKF domain, testing, and product knowledge synchronization.
 

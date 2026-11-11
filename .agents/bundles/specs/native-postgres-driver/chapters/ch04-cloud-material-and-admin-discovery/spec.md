@@ -12,7 +12,7 @@ depends_on_chapters:
 replan_trigger: null
 current_task: null
 plan_revision: 5
-plan_commit: 0147d80c
+plan_commit: 936daa9f
 state_revision: 0
 last_verified_checkpoint: aa1cfbb1
 last_reviewed_commit: aa1cfbb1
@@ -24,7 +24,7 @@ generated:
 verified:
   - by: agent:plan-generator
     at: "2026-11-07T16:40:00Z"
-    commit: 0147d80c
+    commit: 936daa9f
 sources:
   - id: cloud-research
     resource: .agents/bundles/specs/native-postgres-driver/research/cloud-material_20261105.md
@@ -157,7 +157,7 @@ Progress: `[0/0 files documented in ch04]`
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `plan_commit: 0147d80c`; chapter `state: completed` at `aa1cfbb1`, `planning_status: complete`.
+- **Verified Baseline**: `plan_commit: 936daa9f`; chapter `state: completed` at `aa1cfbb1`, `planning_status: complete`.
 - **Remaining Tasks in Chapter**: None (`4/4` completed at `aa1cfbb1`).
 - **Documentation & OKF Status**: `[0/0 files documented in ch04]`; Cloud SQL `v1beta4` and AlloyDB `v1alpha` OKF curation scheduled in `ch30:t02`.
 - **Downstream Dependents**: Unblocks `ch05-cloud-tls-and-scoped-iam` (`ch05:t01`–`ch05:t04`).

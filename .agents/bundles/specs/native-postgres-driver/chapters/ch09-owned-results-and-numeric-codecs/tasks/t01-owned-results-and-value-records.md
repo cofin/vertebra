@@ -26,7 +26,7 @@ tests:
   - src/py/tests/unit/db/test_postgres_types.py
 estimated_loc: 245
 plan_revision: 5
-plan_commit: 0147d80c
+plan_commit: 936daa9f
 state_revision: 0
 claimed_by: null
 claimed_at: null
