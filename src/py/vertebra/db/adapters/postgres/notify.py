@@ -69,6 +69,7 @@ class PostgresNotificationSource(NotificationSource):
         "_queue_capacity",
         "_reconnect",
         "_subscribed_channels",
+        "_subscription_lock",
     )
 
     def __init__(
@@ -96,6 +97,7 @@ class PostgresNotificationSource(NotificationSource):
         self._queue_capacity = queue_capacity
         self._reconnect = reconnect
         self._subscribed_channels: dict[str, None] = {}
+        self._subscription_lock = asyncio.Lock()
         self._listener: AsyncPostgresListener | None = None
         self._listening = False
         self._generation = 0
@@ -152,21 +154,23 @@ class PostgresNotificationSource(NotificationSource):
         validated = self._validate_channel_sequence(channels)
         if not validated:
             return
-        self._subscribed_channels.update(dict.fromkeys(validated))
-        listener = self._listener
-        if listener is not None and not listener.closed:
-            await listener.subscribe(validated)
+        async with self._subscription_lock:
+            self._subscribed_channels.update(dict.fromkeys(validated))
+            listener = self._listener
+            if listener is not None and not listener.closed:
+                await listener.subscribe(validated)
 
     async def unsubscribe(self, channels: Sequence[str]) -> None:
         """Atomically validate channels and synchronize both desired and active UNLISTEN state."""
         validated = self._validate_channel_sequence(channels)
         if not validated:
             return
-        for channel in validated:
-            self._subscribed_channels.pop(channel, None)
-        listener = self._listener
-        if listener is not None and not listener.closed:
-            await listener.unsubscribe(validated)
+        async with self._subscription_lock:
+            for channel in validated:
+                self._subscribed_channels.pop(channel, None)
+            listener = self._listener
+            if listener is not None and not listener.closed:
+                await listener.unsubscribe(validated)
 
     def listen(self) -> AsyncIterator[NotificationEvent]:
         """Return a single-consumer async iterator streaming hydrated NotificationEvent frames."""
@@ -233,19 +237,29 @@ class PostgresNotificationSource(NotificationSource):
         self,
         listener: AsyncPostgresListener,
         initial_channels: tuple[str, ...],
+        generation: int,
     ) -> None:
-        """Apply subscribe or unsubscribe deltas accumulated while open_listener was connecting."""
-        current = tuple(self._subscribed_channels)
-        if current == initial_channels or listener.closed:
-            return
-        initial_set = set(initial_channels)
-        current_set = set(current)
-        added = tuple(ch for ch in current if ch not in initial_set)
-        removed = tuple(ch for ch in initial_channels if ch not in current_set)
-        if added and not listener.closed:
-            await listener.subscribe(added)
-        if removed and not listener.closed:
-            await listener.unsubscribe(removed)
+        """Converge subscribe or unsubscribe deltas raced across open_listener before activation."""
+        async with self._subscription_lock:
+            if self._generation != generation or listener.closed:
+                return
+            self._listener = listener
+            applied = initial_channels
+            while True:
+                desired = tuple(self._subscribed_channels)
+                if desired == applied or self._generation != generation or listener.closed:
+                    return
+                applied_set = set(applied)
+                desired_set = set(desired)
+                added = tuple(ch for ch in desired if ch not in applied_set)
+                removed = tuple(ch for ch in applied if ch not in desired_set)
+                if added and self._generation == generation and not listener.closed:
+                    await listener.subscribe(added)
+                    applied = tuple(dict.fromkeys((*applied, *added)))
+                if removed and self._generation == generation and not listener.closed:
+                    await listener.unsubscribe(removed)
+                    removed_set = set(removed)
+                    applied = tuple(ch for ch in applied if ch not in removed_set)
 
     def _hydrate_payload(self, raw_payload: bytes) -> bytes:
         """Decode UTF-8 notification text and hydrate ChangeFeed or b64-prefixed binary payloads."""
@@ -324,10 +338,11 @@ class _PostgresNotificationStream(AsyncIterator[NotificationEvent]):
             self._source._listening = True
             try:
                 await self._source._drain_pending_closes()
-                if self._source._generation != self._generation:
-                    self._closed = True
-                    raise StopAsyncIteration
-                initial_channels = tuple(self._source._subscribed_channels)
+                async with self._source._subscription_lock:
+                    if self._source._generation != self._generation:
+                        self._closed = True
+                        raise StopAsyncIteration
+                    initial_channels = tuple(self._source._subscribed_channels)
                 listener = await open_listener(
                     initial_channels,
                     queue_capacity=self._source._queue_capacity,
@@ -338,8 +353,10 @@ class _PostgresNotificationStream(AsyncIterator[NotificationEvent]):
                     await listener.aclose()
                     raise StopAsyncIteration
                 self._listener = listener
-                self._source._listener = listener
-                await self._source._reconcile_initial_channels(listener, initial_channels)
+                await self._source._reconcile_initial_channels(listener, initial_channels, self._generation)
+                if self._source._generation != self._generation:
+                    await self.aclose()
+                    raise StopAsyncIteration
             except StopAsyncIteration:
                 raise
             except BaseException:
@@ -371,24 +388,20 @@ class _PostgresNotificationStream(AsyncIterator[NotificationEvent]):
 
     async def aclose(self) -> None:
         """Idempotently close the underlying native listener and release source ownership."""
-        if self._closed:
-            return
-        self._closed = True
-        listener = self._listener
-        self._listener = None
-        if self._started:
-            self._started = False
-            if self._source._generation == self._generation:
-                self._source._generation += 1
-                self._source._listener = None
-                self._source._listening = False
+        listener = self._detach_listener()
         if listener is not None:
             await listener.aclose()
 
     def __del__(self) -> None:
         """Release source ownership and schedule listener teardown on broken async-for loops."""
+        listener = self._detach_listener()
+        if listener is not None:
+            self._source._schedule_detached_close(listener)
+
+    def _detach_listener(self) -> AsyncPostgresListener | None:
+        """Mark the stream closed, release active generation state, and return the listener."""
         if self._closed:
-            return
+            return None
         self._closed = True
         listener = self._listener
         self._listener = None
@@ -398,8 +411,7 @@ class _PostgresNotificationStream(AsyncIterator[NotificationEvent]):
                 self._source._generation += 1
                 self._source._listener = None
                 self._source._listening = False
-        if listener is not None:
-            self._source._schedule_detached_close(listener)
+        return listener
 
 
 def _validate_channel(channel: str) -> str:

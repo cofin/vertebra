@@ -332,7 +332,6 @@ impl PostgresListener {
     /// and joining the pump within `connect_timeout`.
     pub async fn close(&self) -> Result<(), PostgresError> {
         self.shared.initiate_user_close();
-        let _ = self.ctrl_tx.try_send(ControlCommand::Close);
 
         let handle_opt = {
             let mut guard = self
@@ -397,7 +396,6 @@ enum ControlCommand {
         channels: Vec<(String, String)>,
         reply: oneshot::Sender<Result<(), PostgresError>>,
     },
-    Close,
 }
 
 struct ListenerState {
@@ -672,12 +670,6 @@ impl ListenerPump {
                 maybe_cmd = self.ctrl_rx.recv(), if !self.ctrl_closed => {
                     match maybe_cmd {
                         None => self.ctrl_closed = true,
-                        Some(ControlCommand::Close) => {
-                            self.shared.initiate_user_close();
-                            close_conn_bounded(&mut conn, self.config.connect_timeout).await;
-                            self.shared.mark_pump_finished();
-                            return;
-                        }
                         Some(cmd) => {
                             let mut pending_replies = Vec::new();
                             match self.apply_control_command(&mut conn, cmd, &mut pending_replies).await {
@@ -860,10 +852,6 @@ impl ListenerPump {
                 }
                 Ok(())
             }
-            ControlCommand::Close => {
-                self.shared.initiate_user_close();
-                Err(ControlApplyError::UserClosed)
-            }
         }
     }
 
@@ -885,10 +873,6 @@ impl ListenerPump {
                     maybe_cmd = self.ctrl_rx.recv(), if !self.ctrl_closed => {
                         match maybe_cmd {
                             None => self.ctrl_closed = true,
-                            Some(ControlCommand::Close) => {
-                                self.shared.initiate_user_close();
-                                return ReconnectOutcome::UserClosed;
-                            }
                             Some(ControlCommand::Subscribe { channels, reply }) => {
                                 for (raw, quoted) in channels {
                                     self.active.insert(raw, quoted);

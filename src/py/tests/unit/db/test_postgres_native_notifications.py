@@ -1286,6 +1286,112 @@ def test_notification_source_concurrent_listen_guard_and_lazy_extension_imports(
         assert srv.wait_for_live_connections(0, timeout=2.0)
 
 
+def test_notification_source_startup_reconciliation_and_concurrent_subscriptions() -> None:
+    """Converge subscribe/unsubscribe mutations raced across listener startup, LISTEN reconciliation, and steady state."""
+    entered_startup = threading.Event()
+    release_startup = threading.Event()
+    entered_listen_b = threading.Event()
+    release_listen_b = threading.Event()
+    entered_listen_c = threading.Event()
+    release_listen_c = threading.Event()
+
+    def _startup_hook(idx: int, _conn: socket.socket) -> bytes | None:
+        if idx == 1:
+            entered_startup.set()
+            release_startup.wait(timeout=3.0)
+        return None
+
+    def _query_hook(_sess: _ServerSession, sql: str) -> bool:
+        if sql == 'LISTEN "b"' and not entered_listen_b.is_set():
+            entered_listen_b.set()
+            release_listen_b.wait(timeout=3.0)
+        elif sql == 'LISTEN "c"' and not entered_listen_c.is_set():
+            entered_listen_c.set()
+            release_listen_c.wait(timeout=3.0)
+        return False
+
+    with _running_pg_server(startup_hook=_startup_hook, query_hook=_query_hook) as srv:
+
+        async def _run() -> None:
+            cfg = PostgreSQLConfig(
+                dsn=f"postgresql://postgres@127.0.0.1:{srv.port}/appdb",
+                max_size=1,
+            )
+            concrete_port = NativeNotificationDriverPort(cfg)
+            port: PostgresNotificationDriver = concrete_port
+            try:
+                async with PostgresNotificationSource(port, queue_capacity=16) as source:
+                    await source.subscribe(["a"])
+                    stream = source.listen()
+                    first_waiter = asyncio.create_task(_as_coro(anext(stream)))
+                    try:
+                        assert await _wait_threading_event(entered_startup, timeout=3.0)
+                        await source.subscribe(["b"])
+                        await source.unsubscribe(["a"])
+                        assert source.subscribed_channels == ["b"]
+
+                        release_startup.set()
+                        assert await _wait_threading_event(entered_listen_b, timeout=3.0)
+
+                        resub_a = asyncio.create_task(source.subscribe(["a"]))
+                        await asyncio.sleep(0.02)
+
+                        with pytest.raises(ValueError, match="channel"):
+                            await source.subscribe(["bad;drop"])
+
+                        release_listen_b.set()
+                        await asyncio.wait_for(resub_a, timeout=3.0)
+
+                        listener_sess = srv.session(0)
+                        assert await listener_sess.wait_for_query_count_async(4, timeout=3.0)
+                        assert listener_sess.queries == [
+                            'LISTEN "a"',
+                            'LISTEN "b"',
+                            'UNLISTEN "a"',
+                            'LISTEN "a"',
+                        ]
+                        assert source.subscribed_channels == ["b", "a"]
+                        assert listener_sess.is_subscribed_to("a") is True
+                        assert listener_sess.is_subscribed_to("b") is True
+
+                        await source.publish("a", "resubscribed-a")
+                        evt_a = await asyncio.wait_for(first_waiter, timeout=3.0)
+                        assert evt_a.channel == "a"
+                        assert evt_a.payload == b"resubscribed-a"
+
+                        await source.publish("b", "subscribed-b")
+                        evt_b = await asyncio.wait_for(_as_coro(anext(stream)), timeout=3.0)
+                        assert evt_b.channel == "b"
+                        assert evt_b.payload == b"subscribed-b"
+
+                        sub_c = asyncio.create_task(source.subscribe(["c"]))
+                        assert await _wait_threading_event(entered_listen_c, timeout=3.0)
+                        unsub_c = asyncio.create_task(source.unsubscribe(["c"]))
+                        await asyncio.sleep(0.02)
+                        release_listen_c.set()
+                        await asyncio.wait_for(asyncio.gather(sub_c, unsub_c), timeout=3.0)
+
+                        assert listener_sess.queries[-2:] == ['LISTEN "c"', 'UNLISTEN "c"']
+                        assert "c" not in source.subscribed_channels
+                        assert listener_sess.is_subscribed_to("c") is False
+                    finally:
+                        release_startup.set()
+                        release_listen_b.set()
+                        release_listen_c.set()
+                        if not first_waiter.done():
+                            first_waiter.cancel()
+                            with contextlib.suppress(BaseException):
+                                await first_waiter
+            finally:
+                release_startup.set()
+                release_listen_b.set()
+                release_listen_c.set()
+                await concrete_port.aclose()
+
+        asyncio.run(_run())
+        assert srv.wait_for_live_connections(0, timeout=2.0)
+
+
 async def _exercise_active_listener(
     client: SyncPostgresClient | AsyncPostgresClient,
     srv: _ScriptedNotificationServer,
