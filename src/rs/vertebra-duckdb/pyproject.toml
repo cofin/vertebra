@@ -19,6 +19,7 @@ exclude = [
     "**/py/vertebra/py.typed",
     "**/py/vertebra/_bigquery.pyi",
     "**/py/vertebra/_bundler.pyi",
+    "**/py/vertebra/_mssql.pyi",
     "**/py/vertebra/_mysql.pyi",
     "**/py/vertebra/_spanner.pyi",
     "**/py/vertebra/_storage.pyi",

@@ -175,6 +175,7 @@ paths = [
   "src/rs/vertebra-py/**",
   "src/rs/vertebra-mysql/**",
   "src/rs/vertebra-bigquery/**",
+  "src/rs/vertebra-mssql/**",
   "src/rs/vertebra-spanner/**",
   "src/rs/vertebra-duckdb/**",
   "src/rs/vertebra-bundler/src/lib.rs",
@@ -184,6 +185,7 @@ paths = [
   "src/py/vertebra/_storage.pyi",
   "src/py/vertebra/_mysql.pyi",
   "src/py/vertebra/_bigquery.pyi",
+  "src/py/vertebra/_mssql.pyi",
   "src/py/vertebra/_spanner.pyi",
   "src/py/vertebra/_duckdb.pyi"
 ]

@@ -18,7 +18,6 @@ import uuid
 from collections.abc import AsyncIterator, Callable, Iterator, Mapping, Sequence
 from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
-from types import ModuleType
 from typing import TYPE_CHECKING, Any, Self, cast
 
 import pytest
@@ -1397,6 +1396,149 @@ class _ContractSpannerClient:
         raise RuntimeError(msg)
 
 
+class _ContractMSSQLClient:
+    """In-memory SQLite-backed MSSQL client double supporting sync and async wire calls."""
+
+    __slots__ = ("_async_mode", "_conn", "_in_tx")
+
+    def __init__(self, conn: sqlite3.Connection, *, async_mode: bool = False) -> None:
+        self._conn = conn
+        self._async_mode = async_mode
+        self._in_tx = False
+
+    @staticmethod
+    def _adapt_sql(sql: str, parameters: Any) -> tuple[str, tuple[Any, ...]]:
+        if not parameters:
+            return re.sub(r"@P\d+", "?", sql), ()
+        if isinstance(parameters, Mapping):
+            ordered: list[Any] = []
+
+            def _rep(match: re.Match[str]) -> str:
+                key = match.group(1)
+                ordered.append(parameters.get(key, parameters.get(f"@{key}")))
+                return "?"
+
+            return re.sub(r"@([A-Za-z_][A-Za-z0-9_]*)", _rep, sql), tuple(ordered)
+        return re.sub(r"@P\d+", "?", sql), tuple(parameters)
+
+    def _wrap(self, value: Any) -> Any:
+        if self._async_mode:
+
+            async def _coro() -> Any:
+                return value
+
+            return _coro()
+        return value
+
+    def begin(self) -> Any:
+        if not self._conn.in_transaction:
+            self._conn.execute("BEGIN")
+        self._in_tx = True
+        return self._wrap(None)
+
+    def commit(self) -> Any:
+        self._conn.commit()
+        self._in_tx = False
+        return self._wrap(None)
+
+    def rollback(self) -> Any:
+        self._conn.rollback()
+        self._in_tx = False
+        return self._wrap(None)
+
+    def cancel(self) -> Any:
+        return self._wrap(False)
+
+    def close(self) -> Any:
+        self._in_tx = False
+        self._conn.close()
+        return self._wrap(None)
+
+    def execute(self, sql: str, parameters: Any = None) -> Any:
+        adapted, bound = self._adapt_sql(sql, parameters)
+        cur = self._conn.execute(adapted, bound)
+        if not self._in_tx:
+            self._conn.commit()
+        return self._wrap(max(0, int(cur.rowcount or 0)))
+
+    def query(self, sql: str, parameters: Any = None) -> Any:
+        adapted, bound = self._adapt_sql(sql, parameters)
+        cur = self._conn.execute(adapted, bound)
+        cols = [str(d[0]) for d in (cur.description or ())]
+        rows = [tuple(r) for r in cur.fetchall()] if cur.description is not None else []
+        if cur.description is None and not self._in_tx:
+            self._conn.commit()
+        return self._wrap({"columns": cols, "rows": rows, "affected_rows": max(0, int(cur.rowcount or 0))})
+
+    def fetch_all(self, sql: str, parameters: Any = None) -> Any:
+        adapted, bound = self._adapt_sql(sql, parameters)
+        cur = self._conn.execute(adapted, bound)
+        cols = [str(d[0]) for d in (cur.description or ())]
+        rows = [dict(zip(cols, r, strict=False)) for r in cur.fetchall()]
+        return self._wrap(rows)
+
+    def fetch_one(self, sql: str, parameters: Any = None) -> Any:
+        adapted, bound = self._adapt_sql(sql, parameters)
+        cur = self._conn.execute(adapted, bound)
+        cols = [str(d[0]) for d in (cur.description or ())]
+        fetched = cur.fetchall()
+        if not fetched:
+            if self._async_mode:
+
+                async def _raise_not_found() -> Any:
+                    msg = "Query returned no rows"
+                    raise NotFoundError(msg)
+
+                return _raise_not_found()
+            msg = "Query returned no rows"
+            raise NotFoundError(msg)
+        return self._wrap(dict(zip(cols, fetched[0], strict=False)))
+
+    def fetch_optional(self, sql: str, parameters: Any = None) -> Any:
+        adapted, bound = self._adapt_sql(sql, parameters)
+        cur = self._conn.execute(adapted, bound)
+        cols = [str(d[0]) for d in (cur.description or ())]
+        fetched = cur.fetchall()
+        if not fetched:
+            return self._wrap(None)
+        return self._wrap(dict(zip(cols, fetched[0], strict=False)))
+
+    def select_value(self, sql: str, parameters: Any = None) -> Any:
+        adapted, bound = self._adapt_sql(sql, parameters)
+        cur = self._conn.execute(adapted, bound)
+        fetched = cur.fetchall()
+        if not fetched:
+            if self._async_mode:
+
+                async def _raise_not_found() -> Any:
+                    msg = "Query returned no rows"
+                    raise NotFoundError(msg)
+
+                return _raise_not_found()
+            msg = "Query returned no rows"
+            raise NotFoundError(msg)
+        return self._wrap(fetched[0][0] if fetched[0] else None)
+
+    def select_to_arrow(self, sql: str, parameters: Any = None) -> Any:
+        adapted, bound = self._adapt_sql(sql, parameters)
+        cur = self._conn.execute(adapted, bound)
+        cols = [str(d[0]) for d in (cur.description or ())]
+        rows = [tuple(r) for r in cur.fetchall()]
+        return self._wrap(ArrowCursor.from_rows(rows, cols, threshold_rows=512))
+
+    def stream_arrow_batches(self, sql: str, parameters: Any = None, batch_size: int = 1024) -> Any:
+        adapted, bound = self._adapt_sql(sql, parameters)
+        cur = self._conn.execute(adapted, bound)
+        cols = [str(d[0]) for d in (cur.description or ())]
+        rows = [tuple(r) for r in cur.fetchall()]
+        chunk = max(1, int(batch_size))
+        batches = [
+            ArrowCursor.from_rows(rows[idx : idx + chunk], cols, threshold_rows=512)
+            for idx in range(0, len(rows), chunk)
+        ]
+        return self._wrap(batches)
+
+
 @pytest.mark.anyio
 @pytest.mark.parametrize("engine", ["bigquery", "spanner", "spangres"])
 async def test_cloud_dbapi_preserves_statement_autocommit(engine: str) -> None:
@@ -1502,6 +1644,26 @@ def _make_contract_driver_pair(engine: str) -> tuple[Any, Any, str, Any, str, An
             lambda row_id, name: [row_id, name, None],
             "SELECT id, name FROM contract_items WHERE id = ?",
             lambda row_id: [row_id],
+        )
+    if engine == "mssql":
+        sync_ms_conn = sqlite3.connect(":memory:", check_same_thread=False)
+        sync_ms_conn.execute(ddl)
+        sync_ms_conn.execute("INSERT INTO contract_items (id, name, note) VALUES (1, 'seed', NULL)")
+        sync_ms_conn.commit()
+        async_ms_conn = sqlite3.connect(":memory:", check_same_thread=False)
+        async_ms_conn.execute(ddl)
+        async_ms_conn.execute("INSERT INTO contract_items (id, name, note) VALUES (1, 'seed', NULL)")
+        async_ms_conn.commit()
+        ms_cfg = MSSQLConfig(dsn="mssql://127.0.0.1:1433/master")
+        sync_ms = SyncMSSQLDriver(ms_cfg, client=cast("Any", _ContractMSSQLClient(sync_ms_conn, async_mode=False)))
+        async_ms = AsyncMSSQLDriver(ms_cfg, client=cast("Any", _ContractMSSQLClient(async_ms_conn, async_mode=True)))
+        return (
+            sync_ms,
+            async_ms,
+            "INSERT INTO contract_items (id, name, note) VALUES (?, ?, ?)",
+            lambda row_id, name: (row_id, name, None),
+            "SELECT id, name FROM contract_items WHERE id = ?",
+            lambda row_id: (row_id,),
         )
     if engine == "postgres":
         sync_conn = sqlite3.connect(":memory:", check_same_thread=False)
@@ -2488,10 +2650,8 @@ async def test_pool_key_memory_isolation_and_provide_driver_resolution(
                 await async_drv.close()
 
 
-def test_registry_get_dialer_sync_async_caching_mssql_wiring_and_provide_driver_type_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Verify get_dialer caching, PG/MySQL/MSSQL dialer wiring with MSSQL async drivers using the sync dialer, and provide_driver dialer rejection."""
+def test_registry_get_dialer_sync_async_caching_mssql_wiring_and_provide_driver_type_error() -> None:
+    """Verify get_dialer caches sync/async dialers separately, wires PG/MySQL/MSSQL, and provide_driver rejects dialers."""
     reg = DatabaseRegistry()
     csql_cfg = CloudSQLConfig(instance_connection_name="proj:us-central1:inst")
     alloy_cfg = AlloyDBConfig(instance_uri="/projects/p/locations/us-central1/clusters/c/instances/i")
@@ -2535,22 +2695,15 @@ def test_registry_get_dialer_sync_async_caching_mssql_wiring_and_provide_driver_
     pg_async = cast("AsyncPostgreSQLDriver", reg.get_shared_driver(pg_cfg))
     my_sync = cast("SyncMySQLDriver", reg.get_shared_sync_driver(my_cfg))
     my_async = cast("AsyncMySQLDriver", reg.get_shared_driver(my_cfg))
+    ms_sync = cast("SyncMSSQLDriver", reg.get_shared_sync_driver(ms_cfg))
+    ms_async = cast("AsyncMSSQLDriver", reg.get_shared_driver(ms_cfg))
 
     assert pg_sync.dialer is sync_csql
     assert pg_async.dialer is async_csql
     assert my_sync.dialer is sync_csql
     assert my_async.dialer is async_csql
-
-    monkeypatch.setitem(sys.modules, "vertebra._mssql", ModuleType("vertebra._mssql"))
-    reset_dependency_cache("vertebra._mssql")
-    try:
-        ms_sync = cast("SyncMSSQLDriver", reg.get_shared_sync_driver(ms_cfg))
-        ms_async = cast("AsyncMSSQLDriver", reg.get_shared_driver(ms_cfg))
-        assert ms_sync.dialer is sync_csql
-        assert ms_async.dialer is sync_csql
-        assert ms_async.sync_driver.dialer is sync_csql
-    finally:
-        reset_dependency_cache("vertebra._mssql")
+    assert ms_sync.dialer is sync_csql
+    assert ms_async.dialer is async_csql
 
     reg.register("dialer_only", csql_cfg)
     bad_targets: tuple[Any, ...] = (

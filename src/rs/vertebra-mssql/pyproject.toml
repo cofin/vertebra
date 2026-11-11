@@ -1,0 +1,27 @@
+[build-system]
+requires = ["maturin>=1.5,<2"]
+build-backend = "maturin"
+
+[project]
+name = "vertebra-mssql"
+version = "0.3.0"
+description = "Native pure-Rust Microsoft SQL Server (TDS 7.3+) client extension for Vertebra."
+requires-python = ">=3.12"
+license = { text = "MIT" }
+
+[tool.maturin]
+python-source = "../../py"
+module-name = "vertebra._mssql"
+features = ["extension-module"]
+exclude = [
+    "**/py/vertebra/**/*.py",
+    "**/py/vertebra/**/*.so",
+    "**/py/vertebra/py.typed",
+    "**/py/vertebra/_bigquery.pyi",
+    "**/py/vertebra/_bundler.pyi",
+    "**/py/vertebra/_duckdb.pyi",
+    "**/py/vertebra/_mysql.pyi",
+    "**/py/vertebra/_spanner.pyi",
+    "**/py/vertebra/_storage.pyi",
+    "**/py/vertebra/_vertebra.pyi",
+]

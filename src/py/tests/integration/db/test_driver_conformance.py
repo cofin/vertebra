@@ -93,7 +93,7 @@ from vertebra.typing import FrozenBaseStruct, MissingDependencyError, reset_depe
 from vertebra.utils.module_loader import ensure_module, import_optional
 from vertebra.utils.serializers import decode_json, encode_json
 
-_FAIL_LOUD_DRIVER_ENGINES: frozenset[str] = frozenset({"oracle", "mssql"})
+_FAIL_LOUD_DRIVER_ENGINES: frozenset[str] = frozenset({"oracle"})
 
 
 class _RollbackSentinelError(RuntimeError):
@@ -193,6 +193,24 @@ _SPANNER_TYPES_DDL = (
     "val_ts TIMESTAMP, "
     "val_json JSON"
     ") PRIMARY KEY (id)"
+)
+
+_MSSQL_ITEMS_DDL = (
+    "CREATE TABLE vtb_conformance_items (id BIGINT PRIMARY KEY, label NVARCHAR(255) NOT NULL, amount BIGINT)"
+)
+
+_MSSQL_TYPES_DDL = (
+    "CREATE TABLE vtb_conformance_types ("
+    "id BIGINT PRIMARY KEY, "
+    "val_int BIGINT, "
+    "val_float FLOAT, "
+    "val_decimal DECIMAL(38, 4), "
+    "val_bool BIT, "
+    "val_text NVARCHAR(MAX), "
+    "val_bytes VARBINARY(MAX), "
+    "val_ts DATETIMEOFFSET, "
+    "val_json NVARCHAR(MAX)"
+    ")"
 )
 
 
@@ -412,8 +430,11 @@ ENGINE_SPECS: tuple[EngineConformanceSpec, ...] = (
         async_driver_cls=AsyncMSSQLDriver,
         sample_url="mssql://sa:secret@127.0.0.1:1433/master",
         placeholder_style="at_upper_p",
+        items_ddl=_MSSQL_ITEMS_DDL,
+        types_ddl=_MSSQL_TYPES_DDL,
+        supports_pipeline=True,
         native_extension_module="vertebra._mssql",
-        pending_flow_id="native-mysql-mssql-drivers",
+        pending_flow_id=None,
         env_dsn_vars=("VERTEBRA_CONFORMANCE_MSSQL_DSN",),
         container_fixture="vtb_mssql_config",
     ),
@@ -652,6 +673,15 @@ def _resolve_live_config(
             )
         )
         return SpannerConfig.from_url(resolved_dsn)
+    if spec.engine == "mssql":
+        dsn = os.environ.get("VERTEBRA_CONFORMANCE_MSSQL_DSN", "").strip()
+        if dsn:
+            return MSSQLConfig.from_url(dsn)
+        if spec.container_fixture is not None and os.environ.get("VERTEBRA_CONFORMANCE_DOCKER") == "1":
+            fixture_cfg = request.getfixturevalue(spec.container_fixture)
+            assert isinstance(fixture_cfg, BaseDatabaseConfig)
+            return fixture_cfg
+        pytest.skip("MSSQL conformance requires VERTEBRA_CONFORMANCE_MSSQL_DSN or VERTEBRA_CONFORMANCE_DOCKER=1")
     for env_key in spec.env_dsn_vars:
         env_dsn = os.environ.get(env_key, "").strip()
         if env_dsn:
@@ -1617,3 +1647,18 @@ def test_resolve_live_config_checks_native_module_before_credentials(
     with pytest.raises(pytest.skip.Exception) as skip_exc:
         _resolve_live_config(spec, tmp_path, request)
     assert str(skip_exc.value) == "bigquery conformance requires the vertebra._vtb_conformance_absent native module"
+
+
+def test_mssql_driver_raises_missing_dependency_when_wheel_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify SyncMSSQLDriver and AsyncMSSQLDriver fail loud with MissingDependencyError when vertebra._mssql is absent."""
+    monkeypatch.setitem(sys.modules, "vertebra._mssql", None)
+    reset_dependency_cache("vertebra._mssql")
+    try:
+        with pytest.raises(MissingDependencyError, match=r"vertebra-core\[mssql\]"):
+            SyncMSSQLDriver()
+        with pytest.raises(MissingDependencyError, match=r"vertebra-core\[mssql\]"):
+            AsyncMSSQLDriver()
+    finally:
+        reset_dependency_cache("vertebra._mssql")
