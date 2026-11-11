@@ -284,21 +284,25 @@ fn load_from_driver_module(
 }
 
 fn resolve_exception_types(py: Python<'_>) -> PyResult<&'static CachedOracleExceptionTypes> {
-    ORACLE_EXCEPTION_TYPES.get_or_try_init(py, || match py.import("vertebra.db.driver") {
-        Ok(driver_mod) => load_from_driver_module(&driver_mod),
-        Err(_) => {
-            if let Ok(sys) = py.import("sys")
-                && let Ok(path_any) = sys.getattr("path")
-                && let Ok(path_list) = path_any.cast::<PyList>()
-            {
-                let repo_py = concat!(env!("CARGO_MANIFEST_DIR"), "/../../py");
-                let _ = path_list.insert(0, repo_py);
-            }
-            match py.import("vertebra.db.driver") {
-                Ok(driver_mod) => load_from_driver_module(&driver_mod),
-                Err(_) => build_stand_in_types(py),
-            }
+    ORACLE_EXCEPTION_TYPES.get_or_try_init(py, || {
+        if let Ok(driver_mod) = py.import("vertebra.db.driver")
+            && let Ok(cached) = load_from_driver_module(&driver_mod)
+        {
+            return Ok(cached);
         }
+        if let Ok(sys) = py.import("sys")
+            && let Ok(path_any) = sys.getattr("path")
+            && let Ok(path_list) = path_any.cast::<PyList>()
+        {
+            let repo_py = concat!(env!("CARGO_MANIFEST_DIR"), "/../../py");
+            let _ = path_list.insert(0, repo_py);
+        }
+        if let Ok(driver_mod) = py.import("vertebra.db.driver")
+            && let Ok(cached) = load_from_driver_module(&driver_mod)
+        {
+            return Ok(cached);
+        }
+        build_stand_in_types(py)
     })
 }
 

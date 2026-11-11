@@ -11,7 +11,6 @@ import sqlite3
 import struct
 import sys
 import zipfile
-from types import ModuleType
 from typing import TYPE_CHECKING, Any
 
 import msgspec
@@ -137,7 +136,6 @@ from vertebra.typing import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
     from pathlib import Path
 
 _DUCKDB_SKIP_REASON = "vertebra._duckdb native extension is not built"

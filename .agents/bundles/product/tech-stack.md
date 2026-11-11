@@ -16,7 +16,7 @@ verified:
     commit: b02636d9
   - by: agent:docs-okf-specialist
     at: "2026-11-09T20:48:51Z"
-    commit: f6197370
+    commit: 5bbc7407
   - by: agent:docs-okf-specialist
     at: "2026-11-08T14:48:48Z"
     commit: 43a61a56

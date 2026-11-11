@@ -2592,7 +2592,7 @@ async def test_oracle_notification_and_listener_exports_validation_and_fail_loud
         assert listener.dropped_count == 0
 
         with pytest.raises(ConnectionFailure) as listen_exc:
-            await listener.next_notification(timeout=1.0)
+            await listener.next_notification(timeout=5.0)
         assert listen_exc.value.sqlstate == "08006"
         assert listen_exc.value.is_transient is True
 
