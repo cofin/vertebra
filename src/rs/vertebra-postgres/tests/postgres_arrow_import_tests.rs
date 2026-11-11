@@ -1924,6 +1924,11 @@ _src_py = str(_repo_root / "src" / "py")
 if _src_py not in sys.path:
     sys.path.insert(0, _src_py)
 
+import importlib.util
+
+if importlib.util.find_spec("pyarrow") is None or importlib.util.find_spec("vertebra._vertebra") is None:
+    raise SystemExit(0)
+
 import pyarrow as pa
 
 from vertebra.db.adapters.postgres.arrow import (

@@ -12,10 +12,10 @@ depends_on_chapters:
 replan_trigger: null
 current_task: null
 plan_revision: 5
-plan_commit: 73c8a6ff
+plan_commit: 0147d80c
 state_revision: 0
-last_verified_checkpoint: 2ebd79f5
-last_reviewed_commit: 2ebd79f5
+last_verified_checkpoint: cae857ba
+last_reviewed_commit: cae857ba
 created_at: "2026-11-05T00:00:00Z"
 updated_at: "2026-11-08T02:05:22Z"
 generated:
@@ -24,7 +24,7 @@ generated:
 verified:
   - by: agent:plan-generator
     at: "2026-11-07T05:00:00Z"
-    commit: 73c8a6ff
+    commit: 0147d80c
 sources:
   - id: pg-contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md
@@ -143,17 +143,17 @@ Parent roadmap: [spec.md](../../spec.md). Public interface authority: [contracts
 
 ## 5. Implementation Plan
 
-- [x] [2ebd79f5] native-postgres-driver:ch11:t01 — Implement session-local PostgreSQL type discovery and format negotiation (tasks/t01-session-type-catalog.md)
-- [x] [2ebd79f5] native-postgres-driver:ch11:t02 — Implement dimensioned binary array codecs preserving rank, lower bounds, and element OIDs (tasks/t02-binary-arrays.md)
-- [x] [2ebd79f5] native-postgres-driver:ch11:t03 — Implement escaped multidimensional text array codecs and bounded container scanning (tasks/t03-multidimensional-text-arrays.md)
-- [x] [2ebd79f5] native-postgres-driver:ch11:t04 — Implement typed ordered composite binary and text codecs (tasks/t04-composite-codecs.md)
+- [x] [cae857ba] native-postgres-driver:ch11:t01 — Implement session-local PostgreSQL type discovery and format negotiation (tasks/t01-session-type-catalog.md)
+- [x] [cae857ba] native-postgres-driver:ch11:t02 — Implement dimensioned binary array codecs preserving rank, lower bounds, and element OIDs (tasks/t02-binary-arrays.md)
+- [x] [cae857ba] native-postgres-driver:ch11:t03 — Implement escaped multidimensional text array codecs and bounded container scanning (tasks/t03-multidimensional-text-arrays.md)
+- [x] [cae857ba] native-postgres-driver:ch11:t04 — Implement typed ordered composite binary and text codecs (tasks/t04-composite-codecs.md)
 
 **Chapter Recovery Checkpoint:** `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres && cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-postgres --all-targets -- -D warnings` exits `0`.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `plan_commit: 73c8a6ff`; chapter `state: completed` at `2ebd79f5`, `planning_status: complete`.
-- **Remaining Tasks in Chapter**: None (`4/4` completed at `2ebd79f5`).
+- **Verified Baseline**: `plan_commit: 0147d80c`; chapter `state: completed` at `cae857ba`, `planning_status: complete`.
+- **Remaining Tasks in Chapter**: None (`4/4` completed at `cae857ba`).
 - **Downstream Dependents**: Unblocks `ch12-pgvector-and-extended-query`, `ch14:t03` (`python_values.rs`), `ch18` (`COPY`), `ch19` (`VTBARROW` nested schemas), and `ch22` (`pgoutput` tuple decoding).
 
 [^pg-contracts]: `.agents/bundles/specs/native-postgres-driver/contracts.md` — `PgArray`, `PgComposite`, `Column` OID invariants, and cold-pipeline unknown-OID text fallback contracts.

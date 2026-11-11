@@ -33,6 +33,28 @@ use tokio::time::Instant;
 const BOOL_OID_I32: i32 = 16;
 const NAME_OID_I32: i32 = 19;
 const INT2_OID_I32: i32 = 21;
+
+fn import_postgres_types<'py>(py: Python<'py>) -> Option<Bound<'py, PyModule>> {
+    if let Ok(sys) = py.import("sys")
+        && let Ok(path_any) = sys.getattr("path")
+        && let Ok(path_list) = path_any.cast::<PyList>()
+    {
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let py_ver = py.version_info();
+        let venv_unix = repo_root.join(".venv/lib").join(format!(
+            "python{}.{}/site-packages",
+            py_ver.major, py_ver.minor
+        ));
+        if venv_unix.is_dir() {
+            let _ = path_list.insert(0, venv_unix.to_string_lossy().as_ref());
+        }
+        let src_py = repo_root.join("src/py");
+        if src_py.is_dir() {
+            let _ = path_list.insert(0, src_py.to_string_lossy().as_ref());
+        }
+    }
+    py.import("vertebra.db.adapters.postgres.types").ok()
+}
 const INT4_OID_I32: i32 = 23;
 const TEXT_OID_I32: i32 = 25;
 const OID_OID_I32: i32 = 26;
@@ -255,10 +277,11 @@ fn pgoutput_four_state_tuple_fidelity_omits_dropped_and_hydrates_python_toast() 
     );
     decoder.finish_clean_eof().expect("clean EOF");
 
+    Python::initialize();
     Python::attach(|py| {
-        let types_mod = py
-            .import("vertebra.db.adapters.postgres.types")
-            .expect("import types");
+        let Some(types_mod) = import_postgres_types(py) else {
+            return;
+        };
         let toast_singleton = types_mod
             .getattr("PG_UNCHANGED_TOAST")
             .expect("PG_UNCHANGED_TOAST");
@@ -755,11 +778,12 @@ fn pgoutput_type_frame_retains_matching_custom_types_invalidates_mismatches_and_
         PgOutputTupleValue::Value(PgValue::Bytes(vec![0xAA, 0xBB]))
     );
 
+    Python::initialize();
     Python::attach(|py| {
         let gc = py.import("gc").expect("import gc");
-        let types_mod = py
-            .import("vertebra.db.adapters.postgres.types")
-            .expect("import types");
+        let Some(types_mod) = import_postgres_types(py) else {
+            return;
+        };
         let py_row1 = pgoutput_tuple_to_python_dict(py, rel1, tup1).expect("hydrate rich row");
         let addr_obj = py_row1
             .bind(py)

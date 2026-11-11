@@ -49,11 +49,11 @@ research:
   - research/protocol-and-execution_20261105.md
   - research/cloud-material_20261105.md
 plan_revision: 6
-plan_commit: ef86844f
+plan_commit: 043d8444
 state_revision: 8
-last_verified_checkpoint: 16429b11
+last_verified_checkpoint: a53aa01e
 last_reviewed_chapter: ch21-live-notifications
-last_reviewed_commit: f56ec4cd
+last_reviewed_commit: b44e28ca
 created_at: "2026-11-03T04:05:00Z"
 updated_at: "2026-11-11T01:53:00Z"
 generated:
@@ -62,7 +62,7 @@ generated:
 verified:
   - by: agent:plan-generator
     at: "2026-11-10T14:45:00Z"
-    commit: ef86844f
+    commit: 043d8444
 sources:
   - id: pg-conn-rs
     resource: src/rs/vertebra-db/src/connection.rs::TransportStream
@@ -112,7 +112,7 @@ tags:
 - **Standalone Optional Wheel**: `src/rs/vertebra-postgres` (`vertebra._postgres`, `vertebra-core[postgres]`) owns live PostgreSQL Protocol 3.0 sockets over `postgres-protocol =0.6.12` and `rustls` (`ring`) without linking database clients into `vertebra-core` [^pg-conn-rs] [^pg-core-rs].
 - **Complete Single-PR Delivery**: Authentication (`SCRAM-SHA-256`, `SCRAM-SHA-256-PLUS`, Cloud SQL / AlloyDB Admin discovery + mTLS + IAM), lossless codecs, statement caching, single-`Sync` `pipeline()`, binary `COPY`, native `VTBARROW`, `CancelRequest`, `LISTEN`/`NOTIFY`, `pgoutput` v1 logical replication, and `PostgreSQLQueueBackend` dependency-guard cutover ship together with full `psycopg`/`asyncpg` runtime removal [^py-async-rs] [^arrow-shm-rs] [^pg-driver-py] [^sqlspec-py].
 - **Fail-Loud Baseline**: `driver-fail-loud` lands first (`88c30004`) and deletes `_in_memory_rows`, every PostgreSQL `memory://` branch, and `vertebra_db::postgres::PostgresPool`; this flow starts from that baseline and adds no memory or SHM-admission pool paths [^fail-loud-baseline].
-- **Nested Chapter Roadmap (`plan_revision: 6`)**: Decomposed into `33` dependency-ordered chapters (`ch01`–`ch33`, `118` vertical-slice tasks, each owning `<= 3` files) anchored at `plan_commit: ef86844f`, pairing implementation chapters (`ch01`–`ch29`) with `33`-file documentation, OKF, and review-routing synchronization (`ch30`–`ch32`) and full release gates (`ch33`); live execution and documentation progress are tracked in frontmatter and Sections 3, 5, and 6.
+- **Nested Chapter Roadmap (`plan_revision: 6`)**: Decomposed into `33` dependency-ordered chapters (`ch01`–`ch33`, `118` vertical-slice tasks, each owning `<= 3` files) anchored at `plan_commit: 043d8444`, pairing implementation chapters (`ch01`–`ch29`) with `33`-file documentation, OKF, and review-routing synchronization (`ch30`–`ch32`) and full release gates (`ch33`); live execution and documentation progress are tracked in frontmatter and Sections 3, 5, and 6.
 <!-- truth: end -->
 
 ## 1. Specification, Context & Provenance
@@ -313,27 +313,27 @@ Progress: `[0/33 files documented]` across [ch30-user-and-workflow-docs](chapter
 
 Every worksheet (`118` total across `33` chapters) executes in one bounded invocation and produces one signed local conventional commit. Each chapter owns `1`–`4` vertical-slice tasks (`<= 3` files per task, zero overlapping `files:` across ready tasks) in a strict serial chapter dependency chain (`ch01` -> `ch33`). See [review.md](review.md) for adjudicated planning decisions.
 
-- [x] [b973f800] ch01-wheel-scaffold-and-config — Standalone Optional Wheel Scaffold, Build Matrix, and Validated Connection Options (chapters/ch01-wheel-scaffold-and-config/spec.md)
-- [x] [42e3586d] ch02-wire-codec-and-session-startup — Bounded Protocol Framing, Trust Lifecycle, SSLRequest TLS, and Cleartext/MD5 Startup (chapters/ch02-wire-codec-and-session-startup/spec.md)
-- [x] [02af81ee] ch03-scram-and-channel-binding — Ordered SCRAM-SHA-256, Peer Certificate Binding, and SCRAM-SHA-256-PLUS Negotiation (chapters/ch03-scram-and-channel-binding/spec.md)
-- [x] [2aef3d64] ch04-cloud-material-and-admin-discovery — Single-Flight Cloud Material Cache, Ephemeral Keys, and Cloud SQL / AlloyDB Admin Discovery (chapters/ch04-cloud-material-and-admin-discovery/spec.md)
-- [x] [eb48155b] ch05-cloud-tls-and-scoped-iam — Cloud TLS 1.3 Peer Identities, Static Login Token Contract, Scoped Auth Caches, and Cloud SQL mTLS/IAM (chapters/ch05-cloud-tls-and-scoped-iam/spec.md)
-- [x] [eb48155b] ch06-alloydb-keepalive-unix-and-direct-iam — AlloyDB Metadata Exchange, TCP Keepalives, Unix Socket Projection, and Direct-Host IAM Refresh (chapters/ch06-alloydb-keepalive-unix-and-direct-iam/spec.md)
-- [x] [4b1870c7] ch07-async-bridge-and-client-sessions — Setup-Safe Async Worker Bridge and Raw Sync/Async Physical PostgreSQL Client Sessions (chapters/ch07-async-bridge-and-client-sessions/spec.md)
-- [x] [4b1870c7] ch08-constructor-parity-and-wheel-gil — Sync/Async Constructor Parity, Packaging & Stub Exclusions, Outside-Checkout Wheel Bootstrap, and Isolated Free-Threaded GIL Probe (chapters/ch08-constructor-parity-and-wheel-gil/spec.md)
-- [x] [d3bb0d14] ch09-owned-results-and-numeric-codecs — Owned Query Result/Value Records, Simple Query SQLSTATE Mapping, and Scalar/Numeric Codecs (chapters/ch09-owned-results-and-numeric-codecs/spec.md)
-- [x] [d3bb0d14] ch10-temporal-interval-and-json-codecs — Lossless Temporal/Interval Binary and Multi-Style Text Codecs plus JSON/JSONB Codecs (chapters/ch10-temporal-interval-and-json-codecs/spec.md)
-- [x] [2ebd79f5] ch11-type-catalog-arrays-and-composites — Session Type Catalog Discovery, Dimensioned Binary/Text Arrays, and Ordered Composite Codecs (chapters/ch11-type-catalog-arrays-and-composites/spec.md)
-- [x] [2ebd79f5] ch12-pgvector-and-extended-query — Validated pgvector/halfvec/bit Codecs, Cold Parameter/Result Metadata Normalization, and Mixed-Format Extended Query (chapters/ch12-pgvector-and-extended-query/spec.md)
-- [x] [fa38544c] ch13-transactions-portals-and-statement-cache — Pinned Transaction/Savepoint State, Bounded Portals, and Pooler-Safe Prepared Statement Cache (chapters/ch13-transactions-portals-and-statement-cache/spec.md)
-- [x] [fa38544c] ch14-physical-pools-and-query-facades — Concrete Rust Physical Connection Pool, Rollback/Drain Lifecycle, and Python Value/Query Facades (chapters/ch14-physical-pools-and-query-facades/spec.md)
-- [x] [7b67a4ed] ch15-pool-facades-and-single-sync-pipeline — Python Pool Facades, SQL-Head Pipeline Guard, Single-Sync Outbound Batching, and Ordered Pipeline Outcomes (chapters/ch15-pool-facades-and-single-sync-pipeline/spec.md)
-- [x] [94caf47a] ch16-pipeline-scope-and-cancellation — Delayed-Commit Pipeline Transaction Scope, Python Pipeline Contexts, and Backend-Key Cancellation Retirement (chapters/ch16-pipeline-scope-and-cancellation/spec.md)
-- [x] [7db43548] ch17-command-deadlines-portals-and-tz-fallback — Native Per-Command I/O Deadlines, Python Portal Facades, and Ambiguous Timezone Text Fallback (chapters/ch17-command-deadlines-portals-and-tz-fallback/spec.md)
-- [x] [03e9b772] ch18-binary-copy-streaming — Incremental Binary COPY Framing, COPY TO Streaming, and Duplex Backpressured COPY FROM Recovery (chapters/ch18-binary-copy-streaming/spec.md)
-- [x] [3c7a9355] ch19-native-arrow-batches-and-shm — Lossless PostgreSQL Arrow Schemas, Bounded Scalar/Nested Batch Builders, and IPC-to-SHM Capsules (chapters/ch19-native-arrow-batches-and-shm/spec.md)
-- [x] [e5366213] ch20-arrow-copy-import-and-portals — Arrow-to-COPY Field Import, Schema-Qualified Streaming Writers, and Sync/Async Arrow Portal Cancellation (chapters/ch20-arrow-copy-import-and-portals/spec.md)
-- [x] [f56ec4cd] ch21-live-notifications — Dedicated Notification Session Pump, PendingDeliveryGuard Async Bridge, and Python PostgresNotificationSource (chapters/ch21-live-notifications/spec.md)
+- [x] [62bf91f1] ch01-wheel-scaffold-and-config — Standalone Optional Wheel Scaffold, Build Matrix, and Validated Connection Options (chapters/ch01-wheel-scaffold-and-config/spec.md)
+- [x] [ba367822] ch02-wire-codec-and-session-startup — Bounded Protocol Framing, Trust Lifecycle, SSLRequest TLS, and Cleartext/MD5 Startup (chapters/ch02-wire-codec-and-session-startup/spec.md)
+- [x] [2cd7ee0f] ch03-scram-and-channel-binding — Ordered SCRAM-SHA-256, Peer Certificate Binding, and SCRAM-SHA-256-PLUS Negotiation (chapters/ch03-scram-and-channel-binding/spec.md)
+- [x] [aa1cfbb1] ch04-cloud-material-and-admin-discovery — Single-Flight Cloud Material Cache, Ephemeral Keys, and Cloud SQL / AlloyDB Admin Discovery (chapters/ch04-cloud-material-and-admin-discovery/spec.md)
+- [x] [2bcade62] ch05-cloud-tls-and-scoped-iam — Cloud TLS 1.3 Peer Identities, Static Login Token Contract, Scoped Auth Caches, and Cloud SQL mTLS/IAM (chapters/ch05-cloud-tls-and-scoped-iam/spec.md)
+- [x] [2bcade62] ch06-alloydb-keepalive-unix-and-direct-iam — AlloyDB Metadata Exchange, TCP Keepalives, Unix Socket Projection, and Direct-Host IAM Refresh (chapters/ch06-alloydb-keepalive-unix-and-direct-iam/spec.md)
+- [x] [adf34226] ch07-async-bridge-and-client-sessions — Setup-Safe Async Worker Bridge and Raw Sync/Async Physical PostgreSQL Client Sessions (chapters/ch07-async-bridge-and-client-sessions/spec.md)
+- [x] [adf34226] ch08-constructor-parity-and-wheel-gil — Sync/Async Constructor Parity, Packaging & Stub Exclusions, Outside-Checkout Wheel Bootstrap, and Isolated Free-Threaded GIL Probe (chapters/ch08-constructor-parity-and-wheel-gil/spec.md)
+- [x] [ef33a380] ch09-owned-results-and-numeric-codecs — Owned Query Result/Value Records, Simple Query SQLSTATE Mapping, and Scalar/Numeric Codecs (chapters/ch09-owned-results-and-numeric-codecs/spec.md)
+- [x] [ef33a380] ch10-temporal-interval-and-json-codecs — Lossless Temporal/Interval Binary and Multi-Style Text Codecs plus JSON/JSONB Codecs (chapters/ch10-temporal-interval-and-json-codecs/spec.md)
+- [x] [cae857ba] ch11-type-catalog-arrays-and-composites — Session Type Catalog Discovery, Dimensioned Binary/Text Arrays, and Ordered Composite Codecs (chapters/ch11-type-catalog-arrays-and-composites/spec.md)
+- [x] [cae857ba] ch12-pgvector-and-extended-query — Validated pgvector/halfvec/bit Codecs, Cold Parameter/Result Metadata Normalization, and Mixed-Format Extended Query (chapters/ch12-pgvector-and-extended-query/spec.md)
+- [x] [e7c0a42f] ch13-transactions-portals-and-statement-cache — Pinned Transaction/Savepoint State, Bounded Portals, and Pooler-Safe Prepared Statement Cache (chapters/ch13-transactions-portals-and-statement-cache/spec.md)
+- [x] [e7c0a42f] ch14-physical-pools-and-query-facades — Concrete Rust Physical Connection Pool, Rollback/Drain Lifecycle, and Python Value/Query Facades (chapters/ch14-physical-pools-and-query-facades/spec.md)
+- [x] [1ae9ab3d] ch15-pool-facades-and-single-sync-pipeline — Python Pool Facades, SQL-Head Pipeline Guard, Single-Sync Outbound Batching, and Ordered Pipeline Outcomes (chapters/ch15-pool-facades-and-single-sync-pipeline/spec.md)
+- [x] [e8b397b4] ch16-pipeline-scope-and-cancellation — Delayed-Commit Pipeline Transaction Scope, Python Pipeline Contexts, and Backend-Key Cancellation Retirement (chapters/ch16-pipeline-scope-and-cancellation/spec.md)
+- [x] [f7535c47] ch17-command-deadlines-portals-and-tz-fallback — Native Per-Command I/O Deadlines, Python Portal Facades, and Ambiguous Timezone Text Fallback (chapters/ch17-command-deadlines-portals-and-tz-fallback/spec.md)
+- [x] [5bfc7feb] ch18-binary-copy-streaming — Incremental Binary COPY Framing, COPY TO Streaming, and Duplex Backpressured COPY FROM Recovery (chapters/ch18-binary-copy-streaming/spec.md)
+- [x] [59a6dc09] ch19-native-arrow-batches-and-shm — Lossless PostgreSQL Arrow Schemas, Bounded Scalar/Nested Batch Builders, and IPC-to-SHM Capsules (chapters/ch19-native-arrow-batches-and-shm/spec.md)
+- [x] [40ce977c] ch20-arrow-copy-import-and-portals — Arrow-to-COPY Field Import, Schema-Qualified Streaming Writers, and Sync/Async Arrow Portal Cancellation (chapters/ch20-arrow-copy-import-and-portals/spec.md)
+- [x] [b44e28ca] ch21-live-notifications — Dedicated Notification Session Pump, PendingDeliveryGuard Async Bridge, and Python PostgresNotificationSource (chapters/ch21-live-notifications/spec.md)
 - [~] ch22-copyboth-and-pgoutput-decoding — Dedicated Standalone CopyBoth Logical Replication Sessions and Lossless pgoutput v1 Decoding (chapters/ch22-copyboth-and-pgoutput-decoding/spec.md)
 - [ ] ch23-replication-feedback-resume-and-bridge — Durable Commit-Boundary Feedback, Checkpoint-Verified Reconnect Resume, and Cancellation-Safe Replication Bridge (chapters/ch23-replication-feedback-resume-and-bridge/spec.md)
 - [ ] ch24-change-source-and-checkpoints — PostgresChangeSource, PostgresCheckpointStore, Serialized CAS Ack Reconciliation, and Replay/Shutdown Semantics (chapters/ch24-change-source-and-checkpoints/spec.md)
@@ -351,9 +351,9 @@ Every worksheet (`118` total across `33` chapters) executes in one bounded invoc
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Plan Baseline**: `plan_commit: ef86844f` above `feat/driver-fail-loud` (`88c30004`) and `main @ 077a3fe9`; `state: active`, `has_chapters: true`, `plan_revision: 6`, `last_verified_checkpoint: 16429b11`, `last_reviewed_chapter: ch21-live-notifications` (`f56ec4cd`).
+- **Verified Plan Baseline**: `plan_commit: 043d8444` above `feat/driver-fail-loud` (`88c30004`) and `main @ 077a3fe9`; `state: active`, `has_chapters: true`, `plan_revision: 6`, `last_verified_checkpoint: a53aa01e`, `last_reviewed_chapter: ch21-live-notifications` (`b44e28ca`).
 - **Upstream Flow Dependency**: [`driver-fail-loud`](../../knowledge/domains/data/database-drivers-and-dialers.md) is completed at `88c30004`, deleting PostgreSQL `memory://` execution and `vertebra_db::postgres::PostgresPool` [^fail-loud-baseline].
-- **Active Chapter & Next Task**: [ch22-copyboth-and-pgoutput-decoding](chapters/ch22-copyboth-and-pgoutput-decoding/spec.md) (`native-postgres-driver:ch22:t03`, `2/3` tasks completed at `8dd5df3f` and `16429b11`); `21/33` chapters (`ch01`–`ch21`) are completed and reviewed, `ch22` is active (`80/118` tasks completed overall), and `38/118` tasks remain across `ch22:t03` and `ch23`–`ch33`.
+- **Active Chapter & Next Task**: [ch22-copyboth-and-pgoutput-decoding](chapters/ch22-copyboth-and-pgoutput-decoding/spec.md) (`native-postgres-driver:ch22:t03`, `2/3` tasks completed at `530da588` and `a53aa01e`); `21/33` chapters (`ch01`–`ch21`) are completed and reviewed, `ch22` is active (`80/118` tasks completed overall), and `38/118` tasks remain across `ch22:t03` and `ch23`–`ch33`.
 - **Documentation & OKF Status**: `[0/33 files documented]`, scheduled across [ch30-user-and-workflow-docs](chapters/ch30-user-and-workflow-docs/spec.md) (`12` files), [ch31-data-and-testing-okf-sync](chapters/ch31-data-and-testing-okf-sync/spec.md) (`12` files), and [ch32-ffi-okf-and-review-routing-sync](chapters/ch32-ffi-okf-and-review-routing-sync/spec.md) (`9` files), followed by final verification and `88c30004..HEAD` review in [ch33-final-review-and-release-gate](chapters/ch33-final-review-and-release-gate/spec.md) (`ch33:t01`, keeping `state: active` and `current_task: null` for `DOC-07` before finish/archive).
 - **Delivery & Next Action**: Complete single-PR delivery on `feat/native-postgres-driver`; intermediate chapters never trigger early `/flow:finish` or `/flow:archive`. Next canonical command: `/flow:implement native-postgres-driver ch22`.
 

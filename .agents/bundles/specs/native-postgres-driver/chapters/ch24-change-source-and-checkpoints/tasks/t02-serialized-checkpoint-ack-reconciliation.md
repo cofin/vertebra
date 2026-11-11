@@ -23,7 +23,7 @@ tests:
   - src/py/tests/unit/db/test_postgres_change_source.py
 estimated_loc: 235
 plan_revision: 6
-plan_commit: ef86844f
+plan_commit: 043d8444
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -42,7 +42,7 @@ generated:
 verified:
   - by: agent:plan-generator
     at: "2026-11-10T14:45:00Z"
-    commit: ef86844f
+    commit: 043d8444
 sources:
   - id: npd-contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md

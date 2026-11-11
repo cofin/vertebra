@@ -367,7 +367,7 @@ version = "60.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "de2c8e714b466404cdc1189e89f892426efea614d938e16c15518c340cd43ba3"
 dependencies = [
- "bitflags",
+ "bitflags 2.13.2",
 ]
 
 [[package]]
@@ -3323,7 +3323,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0f27695f286b461da077b8c2f72f47feaa04ce3c3f9c0976257410e90e21208a"
 dependencies = [
  "base64 0.22.1",
- "bitflags",
+ "bitflags 2.13.2",
  "btoi",
  "byteorder",
  "bytes",
@@ -6656,7 +6656,7 @@ dependencies = [
  "arrow-schema 60.1.0",
  "base64 0.22.1",
  "bytes",
- "fallible-iterator",
+ "fallible-iterator 0.2.0",
  "half",
  "hex",
  "hmac 0.12.1",

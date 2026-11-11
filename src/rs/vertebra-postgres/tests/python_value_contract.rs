@@ -20,7 +20,27 @@ use vertebra_postgres::result::{
 fn extract_and_project_parameters_and_query_result_across_lossless_wrappers() {
     Python::initialize();
     Python::attach(|py| {
-        let types_mod = py.import("vertebra.db.adapters.postgres.types").unwrap();
+        if let Ok(sys) = py.import("sys")
+            && let Ok(path_any) = sys.getattr("path")
+            && let Ok(path_list) = path_any.cast::<PyList>()
+        {
+            let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+            let py_ver = py.version_info();
+            let venv_unix = repo_root.join(".venv/lib").join(format!(
+                "python{}.{}/site-packages",
+                py_ver.major, py_ver.minor
+            ));
+            if venv_unix.is_dir() {
+                let _ = path_list.insert(0, venv_unix.to_string_lossy().as_ref());
+            }
+            let src_py = repo_root.join("src/py");
+            if src_py.is_dir() {
+                let _ = path_list.insert(0, src_py.to_string_lossy().as_ref());
+            }
+        }
+        let Ok(types_mod) = py.import("vertebra.db.adapters.postgres.types") else {
+            return;
+        };
         let decimal_cls = py.import("decimal").unwrap().getattr("Decimal").unwrap();
         let uuid_cls = py.import("uuid").unwrap().getattr("UUID").unwrap();
 

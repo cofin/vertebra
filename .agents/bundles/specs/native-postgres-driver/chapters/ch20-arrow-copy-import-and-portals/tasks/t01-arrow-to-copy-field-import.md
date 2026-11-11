@@ -26,7 +26,7 @@ tests:
   - src/rs/vertebra-postgres/tests/postgres_arrow_import_tests.rs
 estimated_loc: 245
 plan_revision: 6
-plan_commit: ef86844f
+plan_commit: 043d8444
 state_revision: 1
 claimed_by: null
 claimed_at: null
@@ -34,15 +34,15 @@ blocked_reason: null
 unblock_condition: null
 next_step: null
 last_verified_at: "2026-11-10T16:58:55Z"
-last_verified_commit: 34a428d7
+last_verified_commit: 00344dd7
 verification_evidence: "cargo test -p vertebra-postgres --test postgres_arrow_import_tests (10 passed), cargo clippy -p vertebra-postgres --all-targets -- -D warnings, ruff check, and mypy on postgres/arrow.py exited 0"
 created_at: "2026-11-05T18:25:07Z"
 updated_at: "2026-11-10T16:58:55Z"
-commit: 34a428d7
+commit: 00344dd7
 verified:
   - by: agent:plan-generator
     at: "2026-11-10T14:45:00Z"
-    commit: ef86844f
+    commit: 043d8444
 sources:
   - id: pg-contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md
@@ -87,7 +87,7 @@ Implement `parse_postgres_qualified_table` and post-`ch19` `PostgresArrowImportP
   - `pub struct PostgresArrowImportPlan`:
     - `pub fn from_schema(schema: &Schema, target_columns: &[crate::result::Column], catalog: &TypeCatalog) -> Result<Self, PostgresError>`:
       - Resolves domain chains via `catalog.resolve_domain_base(col.type_oid)` and rejects column-count mismatch, missing/unknown/duplicate target columns, or incompatible Arrow `DataType` / `"postgres.oid"` identity with `PostgresError::Data`.
-      - Accepts post-`ch19` (`3c7a9355`) `"postgres.arrow.version" == "1"` encodings: binary scalars/temporals/intervals/vectors/varbits, `"numeric-decimal"` via the dedicated PostgreSQL numeric parser (`NaN`/`±Infinity`/scale preserved), top-level `"pg-enum"` (`DataType::Utf8` -> `PgValue::Text`), `DataType::UInt32` `"scalar"` for `oid` (`26`), binary `regproc` (`24`), `xid` (`28`), and `cid` (`29`) via `PgValue::Int8(i64::from(u32_val))`, `xml` (`142`) `"scalar"` `Utf8` -> `PgValue::Text`, `"unknown"` (`705`) `Utf8` targeting text-family columns (`text`/`varchar`/`bpchar`/`name`/`xml`) while rejecting target pseudo-column `705`, and `"pg-timestamptz"` (`temporal_struct_data_type(DataType::Int64)`).
+      - Accepts post-`ch19` (`59a6dc09`) `"postgres.arrow.version" == "1"` encodings: binary scalars/temporals/intervals/vectors/varbits, `"numeric-decimal"` via the dedicated PostgreSQL numeric parser (`NaN`/`±Infinity`/scale preserved), top-level `"pg-enum"` (`DataType::Utf8` -> `PgValue::Text`), `DataType::UInt32` `"scalar"` for `oid` (`26`), binary `regproc` (`24`), `xid` (`28`), and `cid` (`29`) via `PgValue::Int8(i64::from(u32_val))`, `xml` (`142`) `"scalar"` `Utf8` -> `PgValue::Text`, `"unknown"` (`705`) `Utf8` targeting text-family columns (`text`/`varchar`/`bpchar`/`name`/`xml`) while rejecting target pseudo-column `705`, and `"pg-timestamptz"` (`temporal_struct_data_type(DataType::Int64)`).
       - Rejects at schema-plan construction time (including `0`-row schema-only first batches) with `PostgresError::Data` before `COPY` starts: `"regproc-text"`, `"pg-range"`, `"record-text"`, `"unknown-text"`, `BOX_OID` (`603`), `RECORD_OID` (`2249`), and any `"pg-array"` or `"pg-composite"` column where `codecs::supports_binary_with_catalog(base_target_oid, catalog)` returns `false` (such as arrays or composites containing enums, ranges, `xml`, `box`, or anonymous records).
       - For ordinary Arrow schemas without PostgreSQL metadata, maps primitives with checked signed/unsigned narrowing (`UInt8/16/32/64`, `Int8/16/32/64`, `Float16/32/64`, `Boolean`, `Utf8`/`LargeUtf8`/`Utf8View`, `Binary`/`LargeBinary`/`FixedSizeBinary`), `Decimal128`/`Decimal256`, `Date32`/`Date64` (checked PG epoch conversion), `Timestamp(Second|Millisecond|Microsecond|Nanosecond, tz)` (requiring `ns % 1000 == 0`, normalizing `tz`-aware values to UTC for `timestamptz`, and rejecting `tz`-aware `Timestamp` -> naive `timestamp` loss), `Time32`/`Time64` (`ns % 1000 == 0`), `List`/`LargeList`/`FixedSizeList` -> 1D lower-bound-`1` `PgArray` (when `supports_binary_with_catalog` is `true`, or `PgVector` when target OID is `vector`/`halfvec`), `Struct` matching ordered non-dropped composite attributes without missing/extra fields (when `supports_binary_with_catalog` is `true`), and direct Rust `DictionaryArray` value lookup.
     - `pub fn encode_batch(&self, batch: &RecordBatch, encoder: &mut BinaryCopyEncoder, ctx: &CodecContext, catalog: &TypeCatalog, out: &mut BytesMut) -> Result<(), PostgresError>`:

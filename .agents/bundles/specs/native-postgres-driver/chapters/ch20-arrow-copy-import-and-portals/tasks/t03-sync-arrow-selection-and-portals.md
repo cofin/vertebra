@@ -27,7 +27,7 @@ tests:
   - src/py/tests/unit/db/test_postgres_native_data.py
 estimated_loc: 240
 plan_revision: 6
-plan_commit: ef86844f
+plan_commit: 043d8444
 state_revision: 1
 claimed_by: null
 claimed_at: null
@@ -35,15 +35,15 @@ blocked_reason: null
 unblock_condition: null
 next_step: null
 last_verified_at: "2026-11-10T18:46:12Z"
-last_verified_commit: e5da5da5
+last_verified_commit: 41e4203b
 verification_evidence: "make dev, ruff, mypy, mypy.stubtest vertebra._postgres, pytest test_postgres_native_data.py (92 passed), cargo test postgres_arrow_tests (17 passed), and cargo clippy exited 0"
 created_at: "2026-11-05T18:25:07Z"
 updated_at: "2026-11-10T18:46:12Z"
-commit: e5da5da5
+commit: 41e4203b
 verified:
   - by: agent:plan-generator
     at: "2026-11-10T14:45:00Z"
-    commit: ef86844f
+    commit: 043d8444
 sources:
   - id: pg-contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md

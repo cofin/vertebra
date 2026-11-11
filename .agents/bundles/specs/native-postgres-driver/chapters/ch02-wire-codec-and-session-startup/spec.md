@@ -12,10 +12,10 @@ depends_on_chapters:
 replan_trigger: null
 current_task: null
 plan_revision: 5
-plan_commit: 73c8a6ff
+plan_commit: 0147d80c
 state_revision: 0
-last_verified_checkpoint: 42e3586d
-last_reviewed_commit: 42e3586d
+last_verified_checkpoint: ba367822
+last_reviewed_commit: ba367822
 created_at: "2026-11-05T00:00:00Z"
 updated_at: "2026-11-08T02:05:22Z"
 generated:
@@ -24,7 +24,7 @@ generated:
 verified:
   - by: agent:plan-generator
     at: "2026-11-07T05:00:00Z"
-    commit: 73c8a6ff
+    commit: 0147d80c
 sources:
   - id: rs-transport
     resource: src/rs/vertebra-db/src/connection.rs::TransportStream
@@ -142,17 +142,17 @@ Progress: `[0/0 files documented in ch02]` (all new symbols in `protocol.rs`, `t
 
 ## 5. Implementation Plan
 
-- [x] [42e3586d] native-postgres-driver:ch02:t01 — Implement bounded PostgreSQL Protocol 3.0 startup encoder and backend frame decoder (tasks/t01-bounded-codec.md)
-- [x] [42e3586d] native-postgres-driver:ch02:t02 — Establish authenticated trust sessions with SessionHandle and PendingSession publication (tasks/t02-trust-session-lifecycle.md)
-- [x] [42e3586d] native-postgres-driver:ch02:t03 — Negotiate PostgreSQL SSLRequest and verify rustls peer TLS identities (tasks/t03-sslrequest-and-tls-identity.md)
-- [x] [42e3586d] native-postgres-driver:ch02:t04 — Authenticate cleartext password and MD5 startup exchanges (tasks/t04-cleartext-and-md5-auth.md)
+- [x] [ba367822] native-postgres-driver:ch02:t01 — Implement bounded PostgreSQL Protocol 3.0 startup encoder and backend frame decoder (tasks/t01-bounded-codec.md)
+- [x] [ba367822] native-postgres-driver:ch02:t02 — Establish authenticated trust sessions with SessionHandle and PendingSession publication (tasks/t02-trust-session-lifecycle.md)
+- [x] [ba367822] native-postgres-driver:ch02:t03 — Negotiate PostgreSQL SSLRequest and verify rustls peer TLS identities (tasks/t03-sslrequest-and-tls-identity.md)
+- [x] [ba367822] native-postgres-driver:ch02:t04 — Authenticate cleartext password and MD5 startup exchanges (tasks/t04-cleartext-and-md5-auth.md)
 
 **Chapter Recovery Checkpoint:** `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres && cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-postgres --all-targets -- -D warnings` exits `0`.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `plan_commit: 73c8a6ff`; chapter `state: completed` at `42e3586d`, `planning_status: complete`.
-- **Remaining Tasks in Chapter**: None (`4/4` completed at `42e3586d`).
+- **Verified Baseline**: `plan_commit: 0147d80c`; chapter `state: completed` at `ba367822`, `planning_status: complete`.
+- **Remaining Tasks in Chapter**: None (`4/4` completed at `ba367822`).
 - **Documentation & OKF Status**: `[0/0 files documented in ch02]`; user docs and OKF data chapters scheduled in `ch30`.
 - **Downstream Dependents**: Unblocks `ch03-scram-and-channel-binding` (`ch03:t01` depends on `ch02:t04`).
 

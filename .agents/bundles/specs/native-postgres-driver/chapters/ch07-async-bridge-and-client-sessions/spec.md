@@ -12,10 +12,10 @@ depends_on_chapters:
 replan_trigger: null
 current_task: null
 plan_revision: 5
-plan_commit: 73c8a6ff
+plan_commit: 0147d80c
 state_revision: 0
-last_verified_checkpoint: 4b1870c7
-last_reviewed_commit: 4b1870c7
+last_verified_checkpoint: adf34226
+last_reviewed_commit: adf34226
 created_at: "2026-11-05T00:00:00Z"
 updated_at: "2026-11-08T02:05:22Z"
 generated:
@@ -24,7 +24,7 @@ generated:
 verified:
   - by: agent:plan-generator
     at: "2026-11-07T05:00:00Z"
-    commit: 73c8a6ff
+    commit: 0147d80c
 sources:
   - id: py-async-rs
     resource: src/rs/vertebra-db/src/py_async.rs::spawn_rust_db_task_with_attr
@@ -120,16 +120,16 @@ Progress: `[1/1 file stubbed in ch07]` (`src/py/vertebra/_postgres.pyi` updated 
 
 ## 5. Implementation Plan
 
-- [x] [4b1870c7] native-postgres-driver:ch07:t01 — Abort shared database workers when Python completion setup fails (tasks/t01-async-bridge-setup-abort.md)
-- [x] [4b1870c7] native-postgres-driver:ch07:t02 — Expose physical synchronous native PostgreSQL sessions (tasks/t02-sync-postgres-client.md)
-- [x] [4b1870c7] native-postgres-driver:ch07:t03 — Expose async physical sessions with cancellation-safe publication (tasks/t03-async-postgres-client.md)
+- [x] [adf34226] native-postgres-driver:ch07:t01 — Abort shared database workers when Python completion setup fails (tasks/t01-async-bridge-setup-abort.md)
+- [x] [adf34226] native-postgres-driver:ch07:t02 — Expose physical synchronous native PostgreSQL sessions (tasks/t02-sync-postgres-client.md)
+- [x] [adf34226] native-postgres-driver:ch07:t03 — Expose async physical sessions with cancellation-safe publication (tasks/t03-async-postgres-client.md)
 
 **Chapter Recovery Checkpoint:** `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-db --features pyo3 --lib py_async::tests && make dev && uv run --no-sync python -m pytest src/py/tests/unit/db/test_postgres_driver.py -k native_ -q && uv run --no-sync python -m mypy.stubtest vertebra._postgres` exits `0`.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `plan_commit: 73c8a6ff`; chapter `state: completed` at `4b1870c7`, `planning_status: complete`.
-- **Remaining Tasks in Chapter**: None (`3/3` completed at `4b1870c7`).
+- **Verified Baseline**: `plan_commit: 0147d80c`; chapter `state: completed` at `adf34226`, `planning_status: complete`.
+- **Remaining Tasks in Chapter**: None (`3/3` completed at `adf34226`).
 - **Downstream Dependents**: Unblocks `ch08-constructor-parity-and-wheel-gil`.
 
 [^py-async-rs]: `src/rs/vertebra-db/src/py_async.rs::spawn_rust_db_task_with_attr` — Shared Tokio database worker spawner and event-loop completion drainer.

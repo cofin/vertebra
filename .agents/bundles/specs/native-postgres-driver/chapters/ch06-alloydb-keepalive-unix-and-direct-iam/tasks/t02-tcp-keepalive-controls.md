@@ -26,7 +26,7 @@ tests:
   - src/rs/vertebra-postgres/tests/postgres_cloud_wire_tests.rs
 estimated_loc: 210
 plan_revision: 5
-plan_commit: 73c8a6ff
+plan_commit: 0147d80c
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -38,7 +38,7 @@ last_verified_commit: null
 verification_evidence: null
 created_at: "2026-11-05T18:25:07Z"
 updated_at: "2026-11-08T02:05:22Z"
-commit: eb48155b
+commit: 2bcade62
 sources:
   - id: db-conn
     resource: src/rs/vertebra-db/src/connection.rs::TransportStream

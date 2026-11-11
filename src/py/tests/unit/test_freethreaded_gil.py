@@ -192,12 +192,9 @@ def test_native_pyclasses_enforce_immutable_type() -> None:
     storage_mod = pytest.importorskip("vertebra._storage")
     mysql_mod = pytest.importorskip("vertebra._mysql")
     bigquery_mod = pytest.importorskip("vertebra._bigquery")
-<<<<<<< HEAD
     mssql_mod = pytest.importorskip("vertebra._mssql")
     oracle_mod = pytest.importorskip("vertebra._oracle")
-=======
     postgres_mod = pytest.importorskip("vertebra._postgres")
->>>>>>> 4b1870c (feat(postgres): expose native sync and async clients with constructor parity and wheel isolation)
     spanner_mod = pytest.importorskip("vertebra._spanner")
     duckdb_mod = pytest.importorskip("vertebra._duckdb")
 
@@ -225,7 +222,6 @@ def test_native_pyclasses_enforce_immutable_type() -> None:
         mysql_mod.MySQLWireTestServer,
         bigquery_mod.SyncBigQueryClient,
         bigquery_mod.AsyncBigQueryClient,
-<<<<<<< HEAD
         mssql_mod.SyncMSSQLClient,
         mssql_mod.AsyncMSSQLClient,
         oracle_mod.SyncOracleClient,
@@ -237,10 +233,8 @@ def test_native_pyclasses_enforce_immutable_type() -> None:
         oracle_mod.OraclePipelineOutcome,
         oracle_mod.OracleNotification,
         oracle_mod.AsyncOracleListener,
-=======
         postgres_mod.SyncPostgresClient,
         postgres_mod.AsyncPostgresClient,
->>>>>>> 4b1870c (feat(postgres): expose native sync and async clients with constructor parity and wheel isolation)
         spanner_mod.SyncSpannerClient,
         spanner_mod.AsyncSpannerClient,
         duckdb_mod.SyncDuckDBClient,

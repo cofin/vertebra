@@ -5,6 +5,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use tiberius::{AuthMethod, Config as TiberiusConfig, EncryptionLevel, IsolationLevel};
+use vertebra_db::connection::CloudPeerIdentity;
 use vertebra_db::{
     AuthType, CloudSqlDialer, CloudSqlInstanceUri, ConnectOptions, EndpointTarget, IpType, TlsMode,
 };
@@ -336,6 +337,13 @@ impl MssqlClientConfig {
                     server_ca_pem: server_ca,
                     client_cert_pem: client_cert,
                     client_key_pem: client_key,
+                    peer_identity: CloudPeerIdentity::CloudSql {
+                        server_name: self.server_name.clone(),
+                        expected_cn: format!(
+                            "{}:{}",
+                            csql.instance_uri.project, csql.instance_uri.instance
+                        ),
+                    },
                 },
                 tls_mode: TlsMode::VerifyCa,
                 ca_pem: self.ca_pem.clone(),

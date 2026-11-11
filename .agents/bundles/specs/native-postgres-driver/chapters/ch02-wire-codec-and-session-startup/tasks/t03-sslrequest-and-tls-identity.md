@@ -25,7 +25,7 @@ tests:
   - src/rs/vertebra-postgres/tests/postgres_tls_wire_tests.rs
 estimated_loc: 235
 plan_revision: 5
-plan_commit: 73c8a6ff
+plan_commit: 0147d80c
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -37,7 +37,7 @@ last_verified_commit: null
 verification_evidence: null
 created_at: "2026-11-05T18:25:07Z"
 updated_at: "2026-11-08T02:05:22Z"
-commit: 42e3586d
+commit: ba367822
 sources:
   - id: rs-upgrade-tls
     resource: src/rs/vertebra-db/src/connection.rs::TransportStream

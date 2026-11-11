@@ -12,10 +12,10 @@ depends_on_chapters:
 replan_trigger: null
 current_task: null
 plan_revision: 5
-plan_commit: 73c8a6ff
+plan_commit: 0147d80c
 state_revision: 0
-last_verified_checkpoint: 4b1870c7
-last_reviewed_commit: 4b1870c7
+last_verified_checkpoint: adf34226
+last_reviewed_commit: adf34226
 created_at: "2026-11-05T00:00:00Z"
 updated_at: "2026-11-08T02:05:22Z"
 generated:
@@ -24,7 +24,7 @@ generated:
 verified:
   - by: agent:plan-generator
     at: "2026-11-07T16:55:00Z"
-    commit: 73c8a6ff
+    commit: 0147d80c
 sources:
   - id: pg-contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md
@@ -136,17 +136,17 @@ Progress: `[1/1 stub file finalized for Phase 1 in ch08]` (`src/py/vertebra/_pos
 
 ## 5. Implementation Plan
 
-- [x] [4b1870c7] native-postgres-driver:ch08:t01 — Characterize and lock complete sync and async constructor parity (tasks/t01-constructor-parity.md)
-- [x] [4b1870c7] native-postgres-driver:ch08:t02 — Register root postgres extra, uv.lock, and review area paths (tasks/t02-root-extra-and-review-areas.md)
-- [x] [4b1870c7] native-postgres-driver:ch08:t03 — Exclude _postgres.pyi from bigquery, bundler, and spanner wheels (tasks/t03-sibling-wheel-stub-exclusions.md)
-- [x] [4b1870c7] native-postgres-driver:ch08:t04 — Exclude _postgres.pyi from storage wheel, wire release.yaml, and verify isolated free-threaded imports (tasks/t04-ffi-wheel-and-freethreaded-gil.md)
+- [x] [adf34226] native-postgres-driver:ch08:t01 — Characterize and lock complete sync and async constructor parity (tasks/t01-constructor-parity.md)
+- [x] [adf34226] native-postgres-driver:ch08:t02 — Register root postgres extra, uv.lock, and review area paths (tasks/t02-root-extra-and-review-areas.md)
+- [x] [adf34226] native-postgres-driver:ch08:t03 — Exclude _postgres.pyi from bigquery, bundler, and spanner wheels (tasks/t03-sibling-wheel-stub-exclusions.md)
+- [x] [adf34226] native-postgres-driver:ch08:t04 — Exclude _postgres.pyi from storage wheel, wire release.yaml, and verify isolated free-threaded imports (tasks/t04-ffi-wheel-and-freethreaded-gil.md)
 
 **Chapter Recovery Checkpoint:** `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres && make dev && uv lock --check && make review-check && uv run --no-sync python -m mypy.stubtest vertebra._postgres && uv run --no-sync python -m pytest src/py/tests/unit/db/test_postgres_driver.py -k native_ -q && uv run --no-sync python -m pytest src/py/tests/unit/test_freethreaded_gil.py -q` exits `0`.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `plan_commit: 73c8a6ff`; chapter `state: completed` at `4b1870c7`, `planning_status: complete`.
-- **Remaining Tasks in Chapter**: None (`4/4` completed at `4b1870c7`).
+- **Verified Baseline**: `plan_commit: 0147d80c`; chapter `state: completed` at `adf34226`, `planning_status: complete`.
+- **Remaining Tasks in Chapter**: None (`4/4` completed at `adf34226`).
 - **Downstream Dependents**: Completes Phase 1 transport, cloud, auth, packaging, and session foundations and unblocks `ch09-owned-results-and-numeric-codecs` (`ch09:t01` depends on `ch08:t04`).
 
 [^pg-contracts]: `.agents/bundles/specs/native-postgres-driver/contracts.md` — Frozen 25-parameter constructor and FFI ownership specification.

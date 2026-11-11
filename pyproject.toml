@@ -287,7 +287,11 @@ exclude = [
     { path = "src/py/vertebra/*.dylib", format = ["sdist", "wheel"] },
     { path = "src/py/vertebra/_bigquery.pyi", format = "wheel" },
     { path = "src/py/vertebra/_bundler.pyi", format = "wheel" },
+    { path = "src/py/vertebra/_duckdb.pyi", format = "wheel" },
+    { path = "src/py/vertebra/_mssql.pyi", format = "wheel" },
+    { path = "src/py/vertebra/_mysql.pyi", format = "wheel" },
     { path = "src/py/vertebra/_oracle.pyi", format = "wheel" },
+    { path = "src/py/vertebra/_postgres.pyi", format = "wheel" },
     { path = "src/py/vertebra/_spanner.pyi", format = "wheel" },
     { path = "src/py/vertebra/_storage.pyi", format = "wheel" },
 ]
@@ -443,6 +447,11 @@ replace = 'vertebra-oracle=={new_version}'
 
 [[tool.bumpversion.files]]
 filename = "pyproject.toml"
+search = 'vertebra-postgres=={current_version}'
+replace = 'vertebra-postgres=={new_version}'
+
+[[tool.bumpversion.files]]
+filename = "pyproject.toml"
 search = 'vertebra-spanner=={current_version}'
 replace = 'vertebra-spanner=={new_version}'
 
@@ -488,6 +497,11 @@ replace = 'version = "{new_version}"'
 
 [[tool.bumpversion.files]]
 filename = "src/rs/vertebra-oracle/pyproject.toml"
+search = 'version = "{current_version}"'
+replace = 'version = "{new_version}"'
+
+[[tool.bumpversion.files]]
+filename = "src/rs/vertebra-postgres/pyproject.toml"
 search = 'version = "{current_version}"'
 replace = 'version = "{new_version}"'
 

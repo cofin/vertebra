@@ -11,7 +11,7 @@ use arrow_ipc::reader::StreamReader;
 use arrow_ipc::writer::StreamWriter;
 use arrow_schema::{DataType, Field, Schema};
 use bytes::BytesMut;
-use pyo3::types::PyDictMethods;
+use pyo3::types::{PyAnyMethods, PyDictMethods, PyListMethods};
 use std::io::Cursor;
 use std::sync::Arc;
 use vertebra_db::arrow_shm::{
@@ -3493,6 +3493,30 @@ fn ipc_transfers_shm_capsule_into_frozen_py_result_and_keeps_views_alive_past_re
 
     pyo3::Python::initialize();
     pyo3::Python::attach(|py| {
+        if let Ok(sys) = py.import("sys")
+            && let Ok(path_any) = sys.getattr("path")
+            && let Ok(path_list) = path_any.cast::<pyo3::types::PyList>()
+        {
+            let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+            let py_ver = py.version_info();
+            let venv_unix = repo_root.join(".venv/lib").join(format!(
+                "python{}.{}/site-packages",
+                py_ver.major, py_ver.minor
+            ));
+            if venv_unix.is_dir() {
+                let _ = path_list.insert(0, venv_unix.to_string_lossy().as_ref());
+            }
+            let src_py = repo_root.join("src/py");
+            if src_py.is_dir() {
+                let _ = path_list.insert(0, src_py.to_string_lossy().as_ref());
+            }
+        }
+        if py.import("pyarrow").is_err()
+            || py.import("vertebra._vertebra").is_err()
+            || py.import("vertebra.db.adapters.postgres.types").is_err()
+        {
+            return;
+        }
         let bad_inline = ArrowOutput::Inline {
             ipc_bytes: Vec::new(),
             row_count: 0,

@@ -12,9 +12,9 @@ depends_on_chapters:
 replan_trigger: null
 current_task: "native-postgres-driver:ch22:t03"
 plan_revision: 6
-plan_commit: ef86844f
+plan_commit: 043d8444
 state_revision: 1
-last_verified_checkpoint: 16429b11
+last_verified_checkpoint: a53aa01e
 last_reviewed_commit: null
 created_at: "2026-11-05T00:00:00Z"
 updated_at: "2026-11-11T01:53:00Z"
@@ -24,7 +24,7 @@ generated:
 verified:
   - by: agent:plan-generator
     at: "2026-11-10T14:45:00Z"
-    commit: ef86844f
+    commit: 043d8444
 sources:
   - id: npd-contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md
@@ -136,15 +136,15 @@ Progress: `[0/0 files documented in ch22]` (project documentation and OKF chapte
 
 ## 5. Implementation Plan
 
-- [x] [8dd5df3f] native-postgres-driver:ch22:t01 — Start dedicated CopyBoth logical replication sessions (tasks/t01-copyboth-replication-session.md)
-- [x] [16429b11] native-postgres-driver:ch22:t02 — Decode pgoutput relation metadata and lossless tuples (tasks/t02-pgoutput-relation-and-tuple-decoding.md)
+- [x] [530da588] native-postgres-driver:ch22:t01 — Start dedicated CopyBoth logical replication sessions (tasks/t01-copyboth-replication-session.md)
+- [x] [a53aa01e] native-postgres-driver:ch22:t02 — Decode pgoutput relation metadata and lossless tuples (tasks/t02-pgoutput-relation-and-tuple-decoding.md)
 - [ ] native-postgres-driver:ch22:t03 — Order logical transactions and change envelopes (tasks/t03-pgoutput-transaction-envelopes.md)
 
 **Chapter Recovery Checkpoint:** `PYTHONPATH="$(pwd)/src/py:$(pwd)/.venv/lib/python3.12/site-packages" cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --test postgres_replication_wire_tests --test postgres_pgoutput_tests && cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-postgres --all-targets -- -D warnings && uv run --no-sync ruff check src/py/vertebra/db/adapters/postgres/types.py && uv run --no-sync mypy src/py/vertebra/db/adapters/postgres/types.py` exits `0`.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Plan Baseline**: `ef86844f`; chapter `state: active`, `planning_status: complete`, `plan_revision: 6`, `plan_commit: ef86844f`, `last_verified_checkpoint: 16429b11` (`t01` completed at `8dd5df3f`, `t02` completed at `16429b11`, `postgres_replication_wire_tests` `9 passed`, `postgres_pgoutput_tests` `7 passed`, `test_postgres_types.py` `26 passed`).
+- **Verified Plan Baseline**: `043d8444`; chapter `state: active`, `planning_status: complete`, `plan_revision: 6`, `plan_commit: 043d8444`, `last_verified_checkpoint: a53aa01e` (`t01` completed at `530da588`, `t02` completed at `a53aa01e`, `postgres_replication_wire_tests` `9 passed`, `postgres_pgoutput_tests` `7 passed`, `test_postgres_types.py` `26 passed`).
 - **Remaining Tasks in Chapter**: `t03` (`1/3` pending; `t01` and `t02` completed).
 - **Downstream Dependents**: Unblocks `ch23-replication-feedback-resume-and-bridge` and `ch24-change-source-and-checkpoints`.
 

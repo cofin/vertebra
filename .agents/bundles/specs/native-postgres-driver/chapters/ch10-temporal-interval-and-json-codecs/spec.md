@@ -12,10 +12,10 @@ depends_on_chapters:
 replan_trigger: null
 current_task: null
 plan_revision: 5
-plan_commit: 73c8a6ff
+plan_commit: 0147d80c
 state_revision: 0
-last_verified_checkpoint: d3bb0d14
-last_reviewed_commit: d3bb0d14
+last_verified_checkpoint: ef33a380
+last_reviewed_commit: ef33a380
 created_at: "2026-11-05T00:00:00Z"
 updated_at: "2026-11-08T02:05:22Z"
 generated:
@@ -24,7 +24,7 @@ generated:
 verified:
   - by: agent:plan-generator
     at: "2026-11-07T05:00:00Z"
-    commit: 73c8a6ff
+    commit: 0147d80c
 sources:
   - id: pg-contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md
@@ -152,17 +152,17 @@ Parent roadmap: [spec.md](../../spec.md). Public interface authority: [contracts
 
 ## 5. Implementation Plan
 
-- [x] [d3bb0d14] native-postgres-driver:ch10:t01 — Implement lossless PostgreSQL 2000-01-01 epoch temporal and interval binary codecs (tasks/t01-temporal-and-interval-binary.md)
-- [x] [d3bb0d14] native-postgres-driver:ch10:t02 — Implement session-aware DateStyle and TimeZone temporal text codecs (tasks/t02-datetime-text-styles.md)
-- [x] [d3bb0d14] native-postgres-driver:ch10:t03 — Implement lossless interval text codecs across all four PostgreSQL IntervalStyle formats (tasks/t03-interval-text-styles.md)
-- [x] [d3bb0d14] native-postgres-driver:ch10:t04 — Implement strict JSON and version-validated JSONB binary and text codecs (tasks/t04-json-and-jsonb-codecs.md)
+- [x] [ef33a380] native-postgres-driver:ch10:t01 — Implement lossless PostgreSQL 2000-01-01 epoch temporal and interval binary codecs (tasks/t01-temporal-and-interval-binary.md)
+- [x] [ef33a380] native-postgres-driver:ch10:t02 — Implement session-aware DateStyle and TimeZone temporal text codecs (tasks/t02-datetime-text-styles.md)
+- [x] [ef33a380] native-postgres-driver:ch10:t03 — Implement lossless interval text codecs across all four PostgreSQL IntervalStyle formats (tasks/t03-interval-text-styles.md)
+- [x] [ef33a380] native-postgres-driver:ch10:t04 — Implement strict JSON and version-validated JSONB binary and text codecs (tasks/t04-json-and-jsonb-codecs.md)
 
 **Chapter Recovery Checkpoint:** `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres && cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-postgres --all-targets -- -D warnings` exits `0`.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `plan_commit: 73c8a6ff`; chapter `state: completed` at `d3bb0d14`, `planning_status: complete`.
-- **Remaining Tasks in Chapter**: None (`4/4` completed at `d3bb0d14`).
+- **Verified Baseline**: `plan_commit: 0147d80c`; chapter `state: completed` at `ef33a380`, `planning_status: complete`.
+- **Remaining Tasks in Chapter**: None (`4/4` completed at `ef33a380`).
 - **Downstream Dependents**: Unblocks `ch11-type-catalog-arrays-and-composites`, `ch12-pgvector-and-extended-query`, `ch17:t04` (`timezone_text.rs`), and `ch18`–`ch20` (`COPY` and `VTBARROW`).
 
 [^pg-contracts]: `.agents/bundles/specs/native-postgres-driver/contracts.md` — PostgreSQL 2000-01-01 temporal epoch units, PgTemporal/PgInterval/PgJson contracts, and typed NULL rules.

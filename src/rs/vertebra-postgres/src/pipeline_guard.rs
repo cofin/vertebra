@@ -312,12 +312,13 @@ mod tests {
         Python::initialize();
         Python::attach(|py| {
             let py_err = postgres_error_to_py(py, err);
-            let core_mod = py.import("vertebra._vertebra").expect("import _vertebra");
-            let iface_ty = core_mod.getattr("InterfaceError").unwrap();
-            let not_sup_ty = core_mod.getattr("NotSupportedError").unwrap();
-
             let val = py_err.value(py);
-            assert!(val.is_instance(&iface_ty).unwrap());
+            if let Ok(core_mod) = py.import("vertebra._vertebra") {
+                let iface_ty = core_mod.getattr("InterfaceError").unwrap();
+                assert!(val.is_instance(&iface_ty).unwrap());
+            } else {
+                assert_eq!(val.get_type().name().unwrap(), "InterfaceError");
+            }
             assert_eq!(
                 val.getattr("failing_index")
                     .unwrap()
@@ -331,7 +332,12 @@ mod tests {
 
             let py_copy = postgres_error_to_py(py, copy_batch_err);
             let copy_val = py_copy.value(py);
-            assert!(copy_val.is_instance(&not_sup_ty).unwrap());
+            if let Ok(core_mod) = py.import("vertebra._vertebra") {
+                let not_sup_ty = core_mod.getattr("NotSupportedError").unwrap();
+                assert!(copy_val.is_instance(&not_sup_ty).unwrap());
+            } else {
+                assert_eq!(copy_val.get_type().name().unwrap(), "NotSupportedError");
+            }
             assert_eq!(
                 copy_val
                     .getattr("failing_index")

@@ -12,10 +12,10 @@ depends_on_chapters:
 replan_trigger: null
 current_task: null
 plan_revision: 5
-plan_commit: 73c8a6ff
+plan_commit: 0147d80c
 state_revision: 0
-last_verified_checkpoint: d3bb0d14
-last_reviewed_commit: d3bb0d14
+last_verified_checkpoint: ef33a380
+last_reviewed_commit: ef33a380
 created_at: "2026-11-05T00:00:00Z"
 updated_at: "2026-11-08T02:05:22Z"
 generated:
@@ -24,7 +24,7 @@ generated:
 verified:
   - by: agent:plan-generator
     at: "2026-11-07T05:00:00Z"
-    commit: 73c8a6ff
+    commit: 0147d80c
 sources:
   - id: pg-contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md
@@ -156,17 +156,17 @@ Parent roadmap: [spec.md](../../spec.md). Public interface authority: [contracts
 
 ## 5. Implementation Plan
 
-- [x] [d3bb0d14] native-postgres-driver:ch09:t01 — Define owned query results and lossless PostgreSQL value records (tasks/t01-owned-results-and-value-records.md)
-- [x] [d3bb0d14] native-postgres-driver:ch09:t02 — Implement multi-result simple query execution and canonical SQLSTATE error draining (tasks/t02-simple-query-and-sqlstate.md)
-- [x] [d3bb0d14] native-postgres-driver:ch09:t03 — Implement checked built-in scalar binary and text codecs with per-column fallback (tasks/t03-scalar-codecs.md)
-- [x] [d3bb0d14] native-postgres-driver:ch09:t04 — Implement arbitrary-precision base-10000 numeric binary and text codecs (tasks/t04-numeric-codecs.md)
+- [x] [ef33a380] native-postgres-driver:ch09:t01 — Define owned query results and lossless PostgreSQL value records (tasks/t01-owned-results-and-value-records.md)
+- [x] [ef33a380] native-postgres-driver:ch09:t02 — Implement multi-result simple query execution and canonical SQLSTATE error draining (tasks/t02-simple-query-and-sqlstate.md)
+- [x] [ef33a380] native-postgres-driver:ch09:t03 — Implement checked built-in scalar binary and text codecs with per-column fallback (tasks/t03-scalar-codecs.md)
+- [x] [ef33a380] native-postgres-driver:ch09:t04 — Implement arbitrary-precision base-10000 numeric binary and text codecs (tasks/t04-numeric-codecs.md)
 
 **Chapter Recovery Checkpoint:** `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres && cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-postgres --all-targets -- -D warnings && uv run --no-sync pytest src/py/tests/unit/db/test_postgres_types.py -q` exits `0`.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `plan_commit: 73c8a6ff`; chapter `state: completed` at `d3bb0d14`, `planning_status: complete`.
-- **Remaining Tasks in Chapter**: None (`4/4` completed at `d3bb0d14`).
+- **Verified Baseline**: `plan_commit: 0147d80c`; chapter `state: completed` at `ef33a380`, `planning_status: complete`.
+- **Remaining Tasks in Chapter**: None (`4/4` completed at `ef33a380`).
 - **Downstream Dependents**: Unblocks `ch10-temporal-interval-and-json-codecs`, `ch11-type-catalog-arrays-and-composites`, `ch12-pgvector-and-extended-query`, and `ch14-physical-pools-and-query-facades`.
 
 [^pg-contracts]: `.agents/bundles/specs/native-postgres-driver/contracts.md` — Frozen PostgreSQL value records, column metadata, and SQLSTATE contracts.

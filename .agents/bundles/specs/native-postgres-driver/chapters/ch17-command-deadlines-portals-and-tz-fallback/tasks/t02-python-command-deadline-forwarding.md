@@ -25,7 +25,7 @@ tests:
   - src/py/tests/integration/db/test_postgres_command_deadlines.py
 estimated_loc: 215
 plan_revision: 5
-plan_commit: 73c8a6ff
+plan_commit: 0147d80c
 state_revision: 1
 claimed_by: null
 claimed_at: null
@@ -33,11 +33,11 @@ blocked_reason: null
 unblock_condition: null
 next_step: null
 last_verified_at: "2026-11-09T20:22:04Z"
-last_verified_commit: 94caf47a
+last_verified_commit: e8b397b4
 verification_evidence: "pytest test_postgres_command_deadlines.py (12 passed), mypy.stubtest vertebra._postgres, ruff, mypy, and clippy passed"
 created_at: "2026-11-05T18:25:07Z"
 updated_at: "2026-11-08T02:05:22Z"
-commit: 7db43548
+commit: f7535c47
 sources:
   - id: pg-contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md

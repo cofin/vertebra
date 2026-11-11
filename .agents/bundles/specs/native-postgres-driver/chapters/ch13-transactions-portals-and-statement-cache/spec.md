@@ -12,10 +12,10 @@ depends_on_chapters:
 replan_trigger: null
 current_task: null
 plan_revision: 5
-plan_commit: 73c8a6ff
+plan_commit: 0147d80c
 state_revision: 0
-last_verified_checkpoint: fa38544c
-last_reviewed_commit: fa38544c
+last_verified_checkpoint: e7c0a42f
+last_reviewed_commit: e7c0a42f
 created_at: "2026-11-05T00:00:00Z"
 updated_at: "2026-11-08T02:05:22Z"
 generated:
@@ -24,7 +24,7 @@ generated:
 verified:
   - by: agent:flow-setup
     at: "2026-11-07T05:00:00Z"
-    commit: 73c8a6ff
+    commit: 0147d80c
 sources:
   - id: pg-contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md
@@ -124,16 +124,16 @@ Progress: `[0/0 files documented in ch13]` (public Python `.pyi` stubs and user/
 
 ## 5. Implementation Plan
 
-- [x] [fa38544c] native-postgres-driver:ch13:t01 — Enforce pinned transaction and numeric savepoint command state (tasks/t01-transaction-and-savepoint-state.md)
-- [x] [fa38544c] native-postgres-driver:ch13:t02 — Stream bounded results through session-retaining portals (tasks/t02-bounded-portal-streaming.md)
-- [x] [fa38544c] native-postgres-driver:ch13:t03 — Cache server prepared statements with pooler capability attestation (tasks/t03-prepared-statement-cache-and-poolers.md)
+- [x] [e7c0a42f] native-postgres-driver:ch13:t01 — Enforce pinned transaction and numeric savepoint command state (tasks/t01-transaction-and-savepoint-state.md)
+- [x] [e7c0a42f] native-postgres-driver:ch13:t02 — Stream bounded results through session-retaining portals (tasks/t02-bounded-portal-streaming.md)
+- [x] [e7c0a42f] native-postgres-driver:ch13:t03 — Cache server prepared statements with pooler capability attestation (tasks/t03-prepared-statement-cache-and-poolers.md)
 
 **Chapter Recovery Checkpoint:** `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --test transaction_state --test portal_protocol --test statement_cache && cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-postgres --all-targets -- -D warnings` exits `0`.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `plan_commit: 73c8a6ff`; chapter `state: completed` at `fa38544c`, `planning_status: complete`.
-- **Remaining Tasks in Chapter**: None (`3/3` completed at `fa38544c`).
+- **Verified Baseline**: `plan_commit: 0147d80c`; chapter `state: completed` at `e7c0a42f`, `planning_status: complete`.
+- **Remaining Tasks in Chapter**: None (`3/3` completed at `e7c0a42f`).
 - **Downstream Dependents**: Unblocks `ch14-physical-pools-and-query-facades` (`PostgresPool`, `DISCARD ALL` reset, and Python query/transaction facades), `ch17:t03` (Python portal facades), and `ch20:t03`–`t04` (Arrow portal streaming).
 
 [^pg-contracts]: `.agents/bundles/specs/native-postgres-driver/contracts.md` — Frozen public constructor, transaction, pooler, and query contracts.

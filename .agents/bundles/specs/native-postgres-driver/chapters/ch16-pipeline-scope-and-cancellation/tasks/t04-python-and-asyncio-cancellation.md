@@ -25,7 +25,7 @@ tests:
   - src/py/tests/unit/db/test_postgres_native_cancel.py
 estimated_loc: 230
 plan_revision: 5
-plan_commit: 73c8a6ff
+plan_commit: 0147d80c
 state_revision: 1
 claimed_by: null
 claimed_at: null
@@ -33,11 +33,11 @@ blocked_reason: null
 unblock_condition: null
 next_step: null
 last_verified_at: "2026-11-09T19:32:00Z"
-last_verified_commit: 7b67a4ed
+last_verified_commit: 1ae9ab3d
 verification_evidence: "pytest test_postgres_native_cancel.py (4 passed) + mypy.stubtest vertebra._postgres + ruff/clippy exit 0"
 created_at: "2026-11-05T18:25:07Z"
 updated_at: "2026-11-08T02:05:22Z"
-commit: 94caf47a
+commit: e8b397b4
 sources:
   - id: pg-contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md

@@ -12,10 +12,10 @@ depends_on_chapters:
 replan_trigger: null
 current_task: "native-postgres-driver:ch03:t01"
 plan_revision: 5
-plan_commit: 73c8a6ff
+plan_commit: 0147d80c
 state_revision: 0
-last_verified_checkpoint: 02af81ee
-last_reviewed_commit: 02af81ee
+last_verified_checkpoint: 2cd7ee0f
+last_reviewed_commit: 2cd7ee0f
 created_at: "2026-11-05T00:00:00Z"
 updated_at: "2026-11-08T02:05:22Z"
 generated:
@@ -24,7 +24,7 @@ generated:
 verified:
   - by: agent:plan-generator
     at: "2026-11-07T16:40:00Z"
-    commit: 73c8a6ff
+    commit: 0147d80c
 sources:
   - id: pg-contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md
@@ -133,16 +133,16 @@ Progress: `[0/0 files documented in ch03]`
 
 ## 5. Implementation Plan
 
-- [x] [02af81ee] native-postgres-driver:ch03:t01 — Authenticate ordered SCRAM-SHA-256 SASL exchanges (tasks/t01-scram-sha256.md)
-- [x] [02af81ee] native-postgres-driver:ch03:t02 — Derive RFC 5929 tls-server-end-point digests from verified peer certificates (tasks/t02-peer-certificate-binding.md)
-- [x] [02af81ee] native-postgres-driver:ch03:t03 — Enforce SCRAM-SHA-256-PLUS channel-binding policies and GS2 downgrade protection (tasks/t03-scram-sha256-plus.md)
+- [x] [2cd7ee0f] native-postgres-driver:ch03:t01 — Authenticate ordered SCRAM-SHA-256 SASL exchanges (tasks/t01-scram-sha256.md)
+- [x] [2cd7ee0f] native-postgres-driver:ch03:t02 — Derive RFC 5929 tls-server-end-point digests from verified peer certificates (tasks/t02-peer-certificate-binding.md)
+- [x] [2cd7ee0f] native-postgres-driver:ch03:t03 — Enforce SCRAM-SHA-256-PLUS channel-binding policies and GS2 downgrade protection (tasks/t03-scram-sha256-plus.md)
 
 **Chapter Recovery Checkpoint:** `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --locked && cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-postgres --all-targets --locked -- -D warnings` exits `0`.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `plan_commit: 73c8a6ff`; chapter `state: completed` at `02af81ee`, `planning_status: complete`.
-- **Remaining Tasks in Chapter**: None (`3/3` completed at `02af81ee`).
+- **Verified Baseline**: `plan_commit: 0147d80c`; chapter `state: completed` at `2cd7ee0f`, `planning_status: complete`.
+- **Remaining Tasks in Chapter**: None (`3/3` completed at `2cd7ee0f`).
 - **Documentation & OKF Status**: `[0/0 files documented in ch03]`; RFC 5929 channel-binding OKF curation scheduled in `ch30:t02`.
 - **Downstream Dependents**: Unblocks `ch04-cloud-material-and-admin-discovery` (`ch04:t01` depends on `ch03:t03`).
 

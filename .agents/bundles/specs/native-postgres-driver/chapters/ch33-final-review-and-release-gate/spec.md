@@ -12,7 +12,7 @@ depends_on_chapters:
 replan_trigger: null
 current_task: "native-postgres-driver:ch33:t01"
 plan_revision: 6
-plan_commit: ef86844f
+plan_commit: 043d8444
 state_revision: 0
 last_verified_checkpoint: null
 last_reviewed_commit: null
@@ -24,7 +24,7 @@ generated:
 verified:
   - by: agent:plan-generator
     at: "2026-11-10T14:45:00Z"
-    commit: ef86844f
+    commit: 043d8444
 sources:
   - id: root-spec
     resource: .agents/bundles/specs/native-postgres-driver/spec.md
@@ -123,7 +123,7 @@ All `33` repository documentation, OKF knowledge, product, and skill files are c
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Plan Baseline**: `ef86844f`; `depends_on_chapters: [ch32-ffi-okf-and-review-routing-sync]`, `state: planned`, `plan_revision: 6`.
+- **Verified Plan Baseline**: `043d8444`; `depends_on_chapters: [ch32-ffi-okf-and-review-routing-sync]`, `state: planned`, `plan_revision: 6`.
 - **Remaining Tasks in Chapter**: `t01` (`1/1` pending).
 - **Downstream Lifecycle Transition**: After `ch33:t01` records its signed local commit with `make review-check` exiting `0`, run `/flow:finish native-postgres-driver` and `/flow:archive native-postgres-driver` atomically on the feature branch.
 

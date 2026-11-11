@@ -12,10 +12,10 @@ depends_on_chapters:
 replan_trigger: null
 current_task: null
 plan_revision: 5
-plan_commit: 73c8a6ff
+plan_commit: 0147d80c
 state_revision: 0
-last_verified_checkpoint: 2ebd79f5
-last_reviewed_commit: 2ebd79f5
+last_verified_checkpoint: cae857ba
+last_reviewed_commit: cae857ba
 created_at: "2026-11-05T00:00:00Z"
 updated_at: "2026-11-08T02:05:22Z"
 generated:
@@ -24,7 +24,7 @@ generated:
 verified:
   - by: agent:plan-generator
     at: "2026-11-07T05:00:00Z"
-    commit: 73c8a6ff
+    commit: 0147d80c
 sources:
   - id: pg-contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md
@@ -150,16 +150,16 @@ Parent roadmap: [spec.md](../../spec.md). Public interface authority: [contracts
 
 ## 5. Implementation Plan
 
-- [x] [2ebd79f5] native-postgres-driver:ch12:t01 — Repair shared pgvector/halfvec/bit CPU helpers and integrate dynamic vector and bitstring codecs (tasks/t01-pgvector-halfvec-and-bit.md)
-- [x] [2ebd79f5] native-postgres-driver:ch12:t02 — Implement cold-query pre-Parse parameter discovery and post-ReadyForQuery owned result normalization (tasks/t02-cold-query-metadata-normalization.md)
-- [x] [2ebd79f5] native-postgres-driver:ch12:t03 — Implement extended-query execution with typed NULLs and mixed binary/text format negotiation (tasks/t03-extended-query-mixed-formats.md)
+- [x] [cae857ba] native-postgres-driver:ch12:t01 — Repair shared pgvector/halfvec/bit CPU helpers and integrate dynamic vector and bitstring codecs (tasks/t01-pgvector-halfvec-and-bit.md)
+- [x] [cae857ba] native-postgres-driver:ch12:t02 — Implement cold-query pre-Parse parameter discovery and post-ReadyForQuery owned result normalization (tasks/t02-cold-query-metadata-normalization.md)
+- [x] [cae857ba] native-postgres-driver:ch12:t03 — Implement extended-query execution with typed NULLs and mixed binary/text format negotiation (tasks/t03-extended-query-mixed-formats.md)
 
 **Chapter Recovery Checkpoint:** `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-db --lib postgres::tests && cargo test --manifest-path src/rs/Cargo.toml -p vertebra-db --test postgres_vector_tests && cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres && cargo check --manifest-path src/rs/Cargo.toml -p vertebra-postgres --locked && cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-db -p vertebra-postgres --all-targets -- -D warnings` exits `0`.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `plan_commit: 73c8a6ff`; chapter `state: completed` at `2ebd79f5`, `planning_status: complete`.
-- **Remaining Tasks in Chapter**: None (`3/3` completed at `2ebd79f5`).
+- **Verified Baseline**: `plan_commit: 0147d80c`; chapter `state: completed` at `cae857ba`, `planning_status: complete`.
+- **Remaining Tasks in Chapter**: None (`3/3` completed at `cae857ba`).
 - **Downstream Dependents**: Unblocks `ch13-transactions-portals-and-statement-cache` (`TransactionScope`, portals, prepared cache), `ch14` (pools and Python query facades), `ch15`–`ch17` (pipelines, cancellation, deadlines), and `ch18`–`ch20` (`COPY` and `VTBARROW`).
 
 [^pg-contracts]: `.agents/bundles/specs/native-postgres-driver/contracts.md` — `PgVector` `1..=16000` and `half 2.7.1` contracts, `PgBitString` rules, cold-query metadata boundaries, and `AfterCompletion` diagnostics.

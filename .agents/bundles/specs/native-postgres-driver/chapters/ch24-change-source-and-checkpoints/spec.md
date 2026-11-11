@@ -12,7 +12,7 @@ depends_on_chapters:
 replan_trigger: null
 current_task: "native-postgres-driver:ch24:t01"
 plan_revision: 6
-plan_commit: ef86844f
+plan_commit: 043d8444
 state_revision: 0
 last_verified_checkpoint: null
 last_reviewed_commit: null
@@ -24,7 +24,7 @@ generated:
 verified:
   - by: agent:plan-generator
     at: "2026-11-10T14:45:00Z"
-    commit: ef86844f
+    commit: 043d8444
 sources:
   - id: npd-contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md
@@ -135,7 +135,7 @@ Progress: `[0/0 files documented in ch24]` (project documentation and OKF chapte
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Plan Baseline**: `ef86844f`; chapter `state: planned`, `planning_status: complete`, `plan_revision: 6`, `plan_commit: ef86844f`.
+- **Verified Plan Baseline**: `043d8444`; chapter `state: planned`, `planning_status: complete`, `plan_revision: 6`, `plan_commit: 043d8444`.
 - **Remaining Tasks in Chapter**: `t01`, `t02`, `t03` (`3/3` pending).
 - **Downstream Dependents**: Unblocks `ch25-dsn-bridge-lexer-and-permanent-drivers` and `ch26-compiler-pipeline-arrow-and-event-hooks`.
 

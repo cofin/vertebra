@@ -24,7 +24,7 @@ files:
 tests: []
 estimated_loc: 150
 plan_revision: 6
-plan_commit: ef86844f
+plan_commit: 043d8444
 state_revision: 0
 claimed_by: null
 claimed_at: null

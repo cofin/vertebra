@@ -12,7 +12,7 @@ depends_on_chapters:
 replan_trigger: null
 current_task: "native-postgres-driver:ch27:t01"
 plan_revision: 6
-plan_commit: ef86844f
+plan_commit: 043d8444
 state_revision: 0
 last_verified_checkpoint: null
 last_reviewed_commit: null
@@ -24,7 +24,7 @@ generated:
 verified:
   - by: agent:plan-generator
     at: "2026-11-10T14:45:00Z"
-    commit: ef86844f
+    commit: 043d8444
 sources:
   - id: pg-driver-barrel
     resource: src/py/vertebra/db/adapters/postgres/driver.py::SyncPostgreSQLDriver
@@ -170,7 +170,7 @@ Progress: `[0/0 files documented in this chapter]` (`[0/33 files documented]` ac
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Plan Baseline**: `plan_revision: 6`, `plan_commit: ef86844f`; `depends_on_chapters: [ch26-compiler-pipeline-arrow-and-event-hooks]`, `state: planned`, `planning_status: complete` (`33` chapters / `118` tasks in full flow, `ch01`–`ch19` / `71` tasks completed).
+- **Verified Plan Baseline**: `plan_revision: 6`, `plan_commit: 043d8444`; `depends_on_chapters: [ch26-compiler-pipeline-arrow-and-event-hooks]`, `state: planned`, `planning_status: complete` (`33` chapters / `118` tasks in full flow, `ch01`–`ch19` / `71` tasks completed).
 - **Remaining Tasks in Chapter**: `t01`, `t02`, `t03`, `t04` (`4/4` pending).
 - **Active Invariants**: Zero `psycopg`, `psycopg_pool`, `asyncpg`, `_executor`, or `_Legacy*` references survive in `src/py/vertebra/db/adapters/postgres/`, `src/py/vertebra/extensions/{sqlspec,sqlalchemy,alchemy}/`, and `src/py/vertebra/framework/queues/postgres.py` after `t04` (`src/py/vertebra/db/dialer/` helper shims remain separate); `core.py`, `parse_pgcopy_binary_rows`, and `vertebra._vertebra` CPU helpers remain intact.
 

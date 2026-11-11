@@ -28,7 +28,7 @@ tests:
   - src/py/tests/unit/db/test_postgres_event_hooks.py
 estimated_loc: 235
 plan_revision: 6
-plan_commit: ef86844f
+plan_commit: 043d8444
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -44,7 +44,7 @@ commit: null
 verified:
   - by: agent:plan-generator
     at: "2026-11-10T14:45:00Z"
-    commit: ef86844f
+    commit: 043d8444
 sources:
   - id: pg-notify-mod
     resource: src/py/vertebra/db/adapters/postgres/notify.py::PostgresNotificationSource
