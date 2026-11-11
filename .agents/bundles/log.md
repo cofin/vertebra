@@ -1,5 +1,22 @@
 # Bundle Activity Log
 
+## [2026-11-09T21:46:00Z] flow-archive | native-duckdb-driver
+
+Completed 6 tasks (`t01`–`t06`) and documentation sync (`84959389`) on `feat/native-duckdb-driver` stacked on `feat/driver-fail-loud` (`213967be`). Source range `213967be..84959389` is preserved in Git.
+
+Durable synthesis and `/flow:sync` updates are committed in `database-drivers-and-dialers.md`, `query-pipeline-cdc-and-tenancy.md`, `workflow.md`, `polyglot-test-matrix.md`, `benchmarks-and-free-threaded.md`, `product.md`, `tech-stack.md`, `specs/native-data-platform/spec.md`, `AGENTS.md`, `pyo3-bridge`, `review-pyo3-bridge`, and `pyo3-bridge-{reviewer,specialist}.md` before contracting `.agents/bundles/specs/native-duckdb-driver/`.
+
+Recorded implementation notes on `feat/native-duckdb-driver`:
+- DuckDB `CREATE SECRET` DDL rejects `?` prepared parameters, so cloud-agnostic `DuckDBSecretConfig` (`value` + sync/async `value_provider`) renders secret options and scopes as single-quoted SQL literals (`'` doubled, NUL/CR/LF rejected) for `CREATE [OR REPLACE] [PERSISTENT] SECRET`.
+
+Functional task commits:
+- `native-duckdb-driver:t01`: `f5df6f98`.
+- `native-duckdb-driver:t02`: `3855b8f7`.
+- `native-duckdb-driver:t03`: `9c549ed1`.
+- `native-duckdb-driver:t04`: `8869f7c1`.
+- `native-duckdb-driver:t05`: `bb4d2b59`.
+- `native-duckdb-driver:t06`: `aeed1dc7` (docs/OKF checkpoint `84959389`).
+
 ## [2026-11-09T20:56:00Z] flow-archive | driver-fail-loud
 
 Completed 13 chapters and 38 tasks on `feat/driver-fail-loud`; final correctness and fresh quality review remediations (`df6e0b8e`, `62a29db7`) have no unresolved findings. Source range `3c2b066a..62a29db7` is preserved in Git. Full lint, Clippy, Mypy, stubtest, Rust `vertebra-db` tests, Python fail-loud/queue/packaging/docs tests, and Zensical documentation gates pass.

@@ -107,7 +107,7 @@ from vertebra.utils.sync_tools import SyncPool
 if TYPE_CHECKING:
     from tests.unit.conftest import Resp3FakeServer
 
-_DUCKDB_SKIP_REASON = "duckdb publishes no free-threaded wheel; DuckDB tests run on GIL interpreters"
+_DUCKDB_SKIP_REASON = "vertebra._duckdb native extension is not built"
 
 
 def test_sync_transaction_rolls_back_base_exception() -> None:
@@ -1483,13 +1483,14 @@ def _make_contract_driver_pair(engine: str) -> tuple[Any, Any, str, Any, str, An
             lambda row_id: (row_id,),
         )
     if engine == "duckdb":
-        pytest.importorskip("duckdb", reason=_DUCKDB_SKIP_REASON)
+        pytest.importorskip("vertebra._duckdb", reason=_DUCKDB_SKIP_REASON)
         sync_dd = SyncDuckDBDriver(DuckDBConfig(database=":memory:"))
         async_dd = AsyncDuckDBDriver(DuckDBConfig(database=":memory:"))
         sync_dd.execute(ddl)
         sync_dd.execute("INSERT INTO contract_items (id, name, note) VALUES (?, ?, ?)", [1, "seed", None])
-        async_dd._sync.execute(ddl)
-        async_dd._sync.execute("INSERT INTO contract_items (id, name, note) VALUES (?, ?, ?)", [1, "seed", None])
+        sync_for_async = async_dd._client.to_sync()
+        sync_for_async.execute(ddl)
+        sync_for_async.execute("INSERT INTO contract_items (id, name, note) VALUES (?, ?, ?)", [1, "seed", None])
         return (
             sync_dd,
             async_dd,

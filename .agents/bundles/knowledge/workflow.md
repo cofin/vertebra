@@ -14,6 +14,9 @@ generated:
   by: flow/0.27.0
   at: '2026-11-06T18:28:00Z'
 verified:
+- by: agent:flow-sync
+  at: '2026-11-09T21:46:00Z'
+  commit: 84959389
 - by: agent:flow-executor
   at: '2026-11-09T15:21:00Z'
   commit: b02636d9
@@ -42,7 +45,7 @@ sources:
 
 <!-- truth: start -->
 - Task files under `.agents/bundles/specs/<flow_id>/tasks/` (or `.agents/bundles/specs/<flow_id>/chapters/chNN-<slug>/tasks/` for multi-chapter initiatives) are authoritative; `spec.md` (and `chapters/index.md` + `chapters/chNN-<slug>/spec.md`) is the synchronized checklist and continuity view.
-- Use Vertebra's canonical [`Makefile`](../../../Makefile)[^src-makefile] targets (`make setup-env`, `make install`, `make dev`, `make rs-test`, `make py-test`, `make ts-test`, `make test`, `make lint`, `make lint-all`, `make review-check`, `make review-route`, `make coverage`, `make check`, `make docs`, `make docs-serve`, `make docs-check`, `make docs-clean`, `make docs-rust`, `make build`, `make build-pgo`, `make bench`, `make bench-all`, `make bench-ft`, `make bench-report`, `make rs-bench`, `make bench-micro`, `make bench-baseline`, `make bench-check`, `make upgrade`) and rebuild all five PyO3 extensions (`_vertebra`, `_bundler`, `_storage`, `_bigquery`, `_spanner`) via `make dev` after any Rust edit before running `pytest`.
+- Use Vertebra's canonical [`Makefile`](../../../Makefile)[^src-makefile] targets (`make setup-env`, `make install`, `make dev`, `make rs-test`, `make py-test`, `make duckdb-test`, `make duckdb-wheel-check`, `make ts-test`, `make test`, `make lint`, `make lint-all`, `make review-check`, `make review-route`, `make coverage`, `make check`, `make docs`, `make docs-serve`, `make docs-check`, `make docs-clean`, `make docs-rust`, `make build`, `make build-pgo`, `make bench`, `make bench-all`, `make bench-ft`, `make bench-report`, `make rs-bench`, `make bench-micro`, `make bench-baseline`, `make bench-check`, `make upgrade`) and rebuild all six PyO3 extensions (`_vertebra`, `_bundler`, `_storage`, `_bigquery`, `_spanner`, `_duckdb`) via `make dev` after any Rust edit before running `pytest`.
 - Every task declares and justifies one `verification_strategy`; only observable behavior and defect correction require an initial failing test.
 - Record durable findings in the task's `## Notes & Discoveries` and preserve unrelated worktree changes.
 - Operational project skills install only under `.agents/skills/` and subagents under `.agents/agents/`. Product, knowledge, research, and specs remain under `.agents/bundles/` (`specs/` and `research/` are created lazily only when needed). Subdirectory `index.md` files (`product/index.md`, `knowledge/**/index.md`, `specs/index.md`, `chapters/index.md`) and `log.md` never carry YAML frontmatter, and Markdown bodies never use standalone `---` horizontal rules.
@@ -57,7 +60,7 @@ sources:
 # 1. Environment & Native PyO3 Extension Setup
 make setup-env                                            # Configure public registries on hosts that need them; no-op elsewhere
 make install                                              # destroy + clean + setup-env, then uv python pin 3.12, uv sync --all-extras --dev --group doc --group duckdb, ts-install, ts-build, dev
-make dev                                                  # cargo build of non-extension crates + maturin develop for _vertebra, _bundler, _storage, _bigquery, _spanner
+make dev                                                  # cargo build of non-extension crates + maturin develop for _vertebra, _bundler, _storage, _bigquery, _spanner, _duckdb
 make upgrade                                              # uv lock --upgrade + uv sync (--group duckdb on GIL interpreters), cargo update, bun update, pre-commit autoupdate
 make clean                                                # Remove Python/Rust/TS build artifacts and caches (keeps .venv)
 make release bump=patch                                   # Bump version and synchronize package files via bump-my-version
@@ -65,7 +68,9 @@ make pre-release version=0.2.0-alpha.1                    # Start or advance pre
 
 # 2. Focused Language Test Suites
 make rs-test                                              # rm -rf /dev/shm/test-* /dev/shm/*vertebra*, then cargo test --workspace --features tls,compression,gcp
-make py-test                                              # make dev, mypy.stubtest (_vertebra, _bundler, _storage, _bigquery, _spanner), then uv run $(PY_TEST_GROUPS) pytest src/py/tests -v (--group duckdb on GIL interpreters only)
+make py-test                                              # make dev, mypy.stubtest (_vertebra, _bundler, _storage, _bigquery, _spanner, _duckdb), then uv run $(PY_TEST_GROUPS) pytest src/py/tests -v (--group duckdb on GIL interpreters only)
+make duckdb-test                                          # cargo test -p vertebra-duckdb --locked, stubtest vertebra._duckdb, and DuckDB unit/wheel/conformance pytest suites
+make duckdb-wheel-check                                   # Build vertebra-duckdb wheel and verify payload isolation (no leaked vertebra/*.py or sibling stubs)
 uv run pytest src/py/tests/unit/server/test_runner.py -q  # Focused Python test file (run make dev first if Rust changed)
 make ts-test                                              # bun run test (vitest run) with an isolated --localstorage-file
 
@@ -84,7 +89,7 @@ make docs-clean                                           # rm -rf site .cache
 make docs-rust                                            # cargo doc --manifest-path src/rs/Cargo.toml --workspace --no-deps -> site/rustdoc/
 
 # 4. Release Builds & Benchmarks (--group bench kept out of dev)
-make build                                                # ts-build, release cargo build of non-extension crates, maturin develop -r for all 5 extensions, uv build
+make build                                                # ts-build, release cargo build of non-extension crates, maturin develop -r for all 6 extensions, uv build
 make build-pgo                                            # Two-phase Rust PGO instrumentation + profile-use build via tools/pgo/rust_pgo.py (or PROFDATA=<path>)
 make bench                                                # make build, then tools.benchmarks run -t ${TARGETS:-vtb} -s ${SCENARIOS:-default} ${BENCH_ARGS}
 make bench-all                                            # make build, then tools.benchmarks run -t all -s full
@@ -96,11 +101,11 @@ make bench-check                                          # Compare current benc
 make bench-report                                         # Latest benchmark report (make bench-diff compares the latest run with the previous one)
 ```
 
-`make dev` and `make build` exclude `vertebra-py`, `vertebra-bundler`, `vertebra-storage`, `vertebra-bigquery`, and `vertebra-spanner` from `cargo build --workspace` because `maturin develop` builds and installs all five PyO3 extensions into `.venv`. `make build` installs the release extensions into `.venv` and then runs `uv build`; it does not produce separate extension wheels.
+`make dev` and `make build` exclude `vertebra-py`, `vertebra-bundler`, `vertebra-storage`, `vertebra-bigquery`, `vertebra-spanner`, and `vertebra-duckdb` from `cargo build --workspace` because `maturin develop` builds and installs all six PyO3 extensions into `.venv`. `make build` installs the release extensions into `.venv` and then runs `uv build`; it does not produce separate extension wheels.
 
 ## Polyglot Rebuild & Hygiene Rules
 
-1. **Rust to Python FFI Rebuild (`make dev`)**: Preserve installed optional extras with `UV_NO_SYNC=1` when verifying an existing environment. `uv run pytest` loads the compiled `vertebra._vertebra`, `vertebra._bundler`, `vertebra._storage`, `vertebra._bigquery`, and `vertebra._spanner` extensions from `.venv`. After any `.rs` change in `vertebra-core`, `vertebra-py`, `vertebra-bundler`, `vertebra-storage`, `vertebra-db`, `vertebra-bigquery`, or `vertebra-spanner`, run `make dev` (or `make py-test`) before `uv run pytest`. `vertebra-http` changes need `make dev` only to rebuild the `vertebra-server` binary.
+1. **Rust to Python FFI Rebuild (`make dev`)**: Preserve installed optional extras with `UV_NO_SYNC=1` when verifying an existing environment. `uv run pytest` loads the compiled `vertebra._vertebra`, `vertebra._bundler`, `vertebra._storage`, `vertebra._bigquery`, `vertebra._spanner`, and `vertebra._duckdb` extensions from `.venv`. After any `.rs` change in `vertebra-core`, `vertebra-py`, `vertebra-bundler`, `vertebra-storage`, `vertebra-db`, `vertebra-bigquery`, `vertebra-spanner`, or `vertebra-duckdb`, run `make dev` (or `make py-test`) before `uv run pytest`. `vertebra-http` changes need `make dev` only to rebuild the `vertebra-server` binary.
 2. **PyPI Distribution vs. Import Namespace**: [`pyproject.toml`](../../../pyproject.toml)[^src-pyproject-toml] sets `[project] name = "vertebra-core"` while `[tool.maturin]` sets `python-packages = ["vertebra"]` and `module-name = "vertebra._vertebra"`. `importlib.metadata.version("vertebra-core")` and `vtb init` reference `vertebra-core`, whereas all Python code imports `vertebra`.
 3. **Codegen & Wheel-Bundled TypeScript Sync**: `make ts-build` compiles all 17 `@vertebra/client` entrypoints (`.` plus `./react`, `./vue`, `./svelte`, `./angular`, `./htmx`, `./vite`, `./store`, `./hmr`, `./live`, `./apex`, `./telemetry`, `./wasm`, `./arrow`, `./router`, `./webmcp`, and `./agent`), emits `.d.ts` declarations, and copies `dist/` into `src/py/vertebra/server/_js/bundle/` for wheel distribution. When modifying route schemas or [`src/py/vertebra/build/codegen/`](../../../src/py/vertebra/build/codegen/__init__.py), run `make py-test` (`src/py/tests/unit/codegen/`) and `make ts-test`.
 4. **Shared-Memory Cleanup**: `make rs-test` removes `/dev/shm/test-*` and `/dev/shm/*vertebra*`; the autouse `_cleanup_shm` fixture in [`src/py/tests/conftest.py`](../../../src/py/tests/conftest.py) also removes `/dev/shm/vtb-*`. Isolate full-suite SHM cleanup from concurrent workloads. Direct `cargo test --workspace --features tls,compression,gcp --locked` in `src/rs` omits the Make cleanup prelude; new tests clean only their own allocations.

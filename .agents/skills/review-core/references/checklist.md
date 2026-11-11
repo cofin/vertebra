@@ -44,7 +44,7 @@ Shared checklist with stable IDs across all 8 review domains. Every rule require
 - **FFI-06**: No `unwrap`/`expect` on caller-controlled data in `#[pyfunction]`/`#[pymethods]`; errors map to typed `PyErr`. Verify: grep `unwrap()` in `vertebra-py/src`.
 - **FFI-07**: Long-lived `Py<T>` held in Rust structs have a defined drop path; `clone_ref` is deliberate; no reference leak in loops. Verify: `sys.getrefcount` assertions in tests.
 - **FFI-08**: Hot attribute/key names use `intern!`; no per-call `PyString::new` inside per-request loops. Verify: `asgi.rs`, `rsgi/scope.rs`, and `request.rs`.
-- **FFI-09**: `{_vertebra,_bundler,_storage,_bigquery,_spanner}.pyi` match every added or changed `#[pyfunction]`/`#[pymethods]` signature and return type across all 5 PyO3 extensions. Verify: diff Rust signatures vs stubs; `uv run --no-sync python -m mypy.stubtest vertebra._vertebra vertebra._bundler vertebra._storage vertebra._bigquery vertebra._spanner` and `uv run --no-sync mypy src/py/vertebra`.
+- **FFI-09**: `{_vertebra,_bundler,_storage,_bigquery,_spanner,_duckdb}.pyi` match every added or changed `#[pyfunction]`/`#[pymethods]` signature and return type across all 6 PyO3 extensions. Verify: diff Rust signatures vs stubs; `uv run --no-sync python -m mypy.stubtest vertebra._vertebra vertebra._bundler vertebra._storage vertebra._bigquery vertebra._spanner vertebra._duckdb` and `uv run --no-sync mypy src/py/vertebra`.
 - **FFI-10**: Embedding registers `_vertebra` via `append_to_inittab!(pymodule_init)` (`use _vertebra::pymodule_init`) before Tokio/Python worker initialization. Verify: `src/rs/vertebra-http/src/main.rs`.
 
 ## PY: Python framework and server

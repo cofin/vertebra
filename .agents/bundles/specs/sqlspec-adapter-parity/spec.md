@@ -55,7 +55,7 @@ Vertebra's SQLSpec adapters must be feature-complete in the same way upstream ad
 
 ## Scope
 
-1. **Layout and dependency ownership.** Create `extensions/sqlspec/adapters/<engine>/{__init__,config,driver,core,data_dictionary}.py` plus `adk/`, `events/`, and `litestar/` store modules for `postgres`, `mysql`, `sqlite`, `oracle`, `mssql`, `duckdb`, `bigquery`, and `spanner`. SQLSpec adapter `config.py` owns SQLSpec configuration and store declarations; `driver.py` owns SQLSpec dispatch and result adaptation; `data_dictionary.py` owns SQLSpec metadata contracts; adapter-local `core.py` owns only SQLSpec-specific dialect/parameter translation. Native driver/config classes and reusable engine primitives remain in `db/adapters/<engine>/`; SQLSpec wrappers call them instead of copying their behavior. Generic modules (`plugin.py`, `provider.py`, `proxy.py`, `storage.py`, `events.py`) hold zero engine code, removing the delegating `extensions/sqlspec/storage.py::build_duckdb_gcs_secret_sql` wrapper (whose SQL builder relocated onto `DuckDBCore.build_gcs_secret_sql` in `native-duckdb-driver:t02`).
+1. **Layout and dependency ownership.** Create `extensions/sqlspec/adapters/<engine>/{__init__,config,driver,core,data_dictionary}.py` plus `adk/`, `events/`, and `litestar/` store modules for `postgres`, `mysql`, `sqlite`, `oracle`, `mssql`, `duckdb`, `bigquery`, and `spanner`. SQLSpec adapter `config.py` owns SQLSpec configuration and store declarations; `driver.py` owns SQLSpec dispatch and result adaptation; `data_dictionary.py` owns SQLSpec metadata contracts; adapter-local `core.py` owns only SQLSpec-specific dialect/parameter translation. Native driver/config classes and reusable engine primitives remain in `db/adapters/<engine>/`; SQLSpec wrappers call them instead of copying their behavior. Generic modules (`plugin.py`, `provider.py`, `proxy.py`, `storage.py`, `events.py`) hold zero engine code.
 2. **Driver dispatch contract.**
    - Shared bases in `extensions/sqlspec/_driver.py` implement `dispatch_execute`, `dispatch_execute_many`, `dispatch_execute_script`, `with_cursor`, exception mapping over `DatabaseError`, and `SQLResult`, removing the `execute`/`select`/`select_one` overrides in `adapters.py::BaseSyncDriver`/`BaseAsyncDriver`.
    - Preserve `**kwargs` parameters across dispatch hooks, and carry `SyncPipelineCapable.pipeline()` / `AsyncPipelineCapable.pipeline()` dispatch (wired in `db-engine-primitives:t06`) into `execute_stack` with upstream SQLSpec fallback when `isinstance(self.native_driver, SyncPipelineCapable)` / `isinstance(self.native_driver, AsyncPipelineCapable)` is `False`.
@@ -108,7 +108,7 @@ Vertebra's SQLSpec adapters must be feature-complete in the same way upstream ad
 
 ## Draft Task Outline
 
-- t01 Adapter package layout with explicit native-versus-SQLSpec ownership, `build_duckdb_gcs_secret_sql` wrapper removal, and generic-module cleanup.
+- t01 Adapter package layout with explicit native-versus-SQLSpec ownership and generic-module cleanup.
 - t02 Dispatch-contract driver bases, verified native placeholder defaults and upstream prepared classification across engine profiles with explicit caller configuration preserved, and `execute_stack` `SyncPipelineCapable` / `AsyncPipelineCapable` integration.
 - t03 Per-engine `<Engine>SyncDataDictionary` / `<Engine>AsyncDataDictionary` implementations.
 - t04 `_compat.py` resolver shim + `adapter_name` + pinning test.

@@ -58,7 +58,7 @@ jobs:
 
   lint:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 45
     needs: [changes]
     if: needs.changes.outputs.python == 'true' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.typescript == 'true' || needs.changes.outputs.ci == 'true'
     steps:
@@ -68,6 +68,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "src/rs"
+          shared-key: "vertebra"
+          cache-on-failure: true
       - uses: oven-sh/setup-bun@v2
       - uses: astral-sh/setup-uv@v7
         with:
@@ -75,11 +80,14 @@ jobs:
       - name: Install dependencies
         run: make ts-install
       - name: Run lint
+        env:
+          CARGO_PROFILE_DEV_DEBUG: "0"
+          CARGO_INCREMENTAL: "0"
         run: make lint-all
 
   test-python:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 35
     needs: [changes, lint]
     if: needs.changes.outputs.python == 'true' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.ci == 'true'
     strategy:
@@ -91,11 +99,20 @@ jobs:
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "src/rs"
+          key: "py-${{ matrix.python-version }}"
+          shared-key: "vertebra"
+          cache-on-failure: true
       - uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
           python-version: ${{ matrix.python-version }}
       - name: Run tests
+        env:
+          CARGO_PROFILE_DEV_DEBUG: "0"
+          CARGO_INCREMENTAL: "0"
         run: make py-test
       - name: Generate coverage
         if: matrix.python-version == '3.12'
@@ -109,7 +126,7 @@ jobs:
 
   test-rust:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 45
     needs: [changes, lint]
     if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.ci == 'true'
     steps:
@@ -119,16 +136,26 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "src/rs"
+          shared-key: "vertebra"
+          cache-on-failure: true
       - name: Check Windows target portability
         working-directory: src/rs
         run: cargo check -p vertebra-core --target x86_64-pc-windows-msvc --no-default-features
+      - name: Reclaim Windows check target space
+        run: rm -rf src/rs/target/x86_64-pc-windows-msvc
       - name: Run Rust tests
+        env:
+          CARGO_PROFILE_DEV_DEBUG: "0"
+          CARGO_INCREMENTAL: "0"
         run: make rs-test
 
   test-rust-features:
     needs: [changes, lint]
     if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.ci == 'true'
-    timeout-minutes: 15
+    timeout-minutes: 45
     strategy:
       fail-fast: true
       matrix:
@@ -143,10 +170,17 @@ jobs:
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "src/rs"
+          shared-key: "vertebra"
+          cache-on-failure: true
       - name: Test with feature flags
         working-directory: src/rs
         env:
           CARGO_FEATURES: ${{ matrix.features }}
+          CARGO_PROFILE_DEV_DEBUG: "0"
+          CARGO_INCREMENTAL: "0"
         run: cargo test --workspace --features "$CARGO_FEATURES"
 
   test-typescript:

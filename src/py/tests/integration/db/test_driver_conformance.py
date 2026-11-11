@@ -94,7 +94,6 @@ from vertebra.utils.module_loader import ensure_module, import_optional
 from vertebra.utils.serializers import decode_json, encode_json
 
 _FAIL_LOUD_DRIVER_ENGINES: frozenset[str] = frozenset({"oracle", "mssql"})
-_DUCKDB_SKIP_REASON = "duckdb publishes no free-threaded wheel; DuckDB tests run on GIL interpreters"
 
 
 class _RollbackSentinelError(RuntimeError):
@@ -125,6 +124,22 @@ _TYPES_DDL = (
     "val_bytes BLOB, "
     "val_ts TEXT, "
     "val_json TEXT"
+    ")"
+)
+
+_DUCKDB_ITEMS_DDL = "CREATE TABLE vtb_conformance_items (id BIGINT PRIMARY KEY, label VARCHAR NOT NULL, amount BIGINT)"
+
+_DUCKDB_TYPES_DDL = (
+    "CREATE TABLE vtb_conformance_types ("
+    "id BIGINT PRIMARY KEY, "
+    "val_int BIGINT, "
+    "val_float DOUBLE, "
+    "val_decimal DECIMAL(18, 4), "
+    "val_bool BOOLEAN, "
+    "val_text VARCHAR, "
+    "val_bytes BLOB, "
+    "val_ts TIMESTAMP, "
+    "val_json VARCHAR"
     ")"
 )
 
@@ -388,8 +403,10 @@ ENGINE_SPECS: tuple[EngineConformanceSpec, ...] = (
         async_driver_cls=AsyncDuckDBDriver,
         sample_url="duckdb:////tmp/vtb_conformance_sample.duckdb",
         placeholder_style="qmark",
+        items_ddl=_DUCKDB_ITEMS_DDL,
+        types_ddl=_DUCKDB_TYPES_DDL,
+        supports_pipeline=True,
         native_extension_module="vertebra._duckdb",
-        pending_flow_id="native-embedded-and-cache-drivers",
         env_dsn_vars=("VERTEBRA_CONFORMANCE_DUCKDB_DSN",),
     ),
     EngineConformanceSpec(
@@ -771,7 +788,7 @@ async def test_engine_driver_resolution_and_provide_driver(
     registry = DatabaseRegistry()
     registry.register(spec.engine, config)
     if spec.engine == "duckdb":
-        pytest.importorskip("duckdb", reason=_DUCKDB_SKIP_REASON)
+        _require_native_module(spec)
     if spec.engine in _FAIL_LOUD_DRIVER_ENGINES:
         assert spec.native_extension_module is not None
         monkeypatch.setitem(sys.modules, spec.native_extension_module, None)

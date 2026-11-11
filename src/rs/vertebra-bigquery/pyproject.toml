@@ -18,6 +18,7 @@ exclude = [
     "**/py/vertebra/**/*.so",
     "**/py/vertebra/py.typed",
     "**/py/vertebra/_bundler.pyi",
+    "**/py/vertebra/_duckdb.pyi",
     "**/py/vertebra/_spanner.pyi",
     "**/py/vertebra/_storage.pyi",
     "**/py/vertebra/_vertebra.pyi",

@@ -1,6 +1,6 @@
 # Databases & Native Drivers
 
-Vertebra integrates first-class **SQLSpec** adapters (`vertebra.extensions.sqlspec`) on top of `vertebra.db` engine drivers; each engine lives in its own adapter package under `vertebra.db.adapters.<engine>`, keeping `import vertebra.db` lightweight until a concrete driver is requested. BigQuery and Spanner run on their own native wheels, the other engines use their Python client packages, and the Rust `vertebra-db` crate supplies shared wire codecs, Cloud SQL / AlloyDB dialers, and shared-memory Arrow transport. See the focused guides for [Cloud SQL & AlloyDB Dialers](cloud-dialers.md), [RLS, CDC & Arrow Analytics](analytics-and-cdc.md), and [SQLSpec & SQLAlchemy Extensions](extensions.md).
+Vertebra integrates first-class **SQLSpec** adapters (`vertebra.extensions.sqlspec`) on top of `vertebra.db` engine drivers; each engine lives in its own adapter package under `vertebra.db.adapters.<engine>`, keeping `import vertebra.db` lightweight until a concrete driver is requested. BigQuery, Spanner, and DuckDB run on their own native wheels, the other live engines use their Python client packages, and the Rust `vertebra-db` crate supplies shared wire codecs, Cloud SQL / AlloyDB dialers, and shared-memory Arrow transport. See the focused guides for [Cloud SQL & AlloyDB Dialers](cloud-dialers.md), [RLS, CDC & Arrow Analytics](analytics-and-cdc.md), and [SQLSpec & SQLAlchemy Extensions](extensions.md).
 
 ```mermaid
 flowchart LR
@@ -18,35 +18,35 @@ Core SQL and RESP3 configuration contracts ship in `vertebra-core`, while standa
 
     ```bash
     uv add "vertebra-core[bigquery]"
+    uv add "vertebra-core[duckdb]"
     uv add "vertebra-core[spanner]"
-    uv add duckdb
     ```
 
 === "pip"
 
     ```bash
     pip install "vertebra-core[bigquery]"
+    pip install "vertebra-core[duckdb]"
     pip install "vertebra-core[spanner]"
-    pip install duckdb
     ```
 
 === "pdm"
 
     ```bash
     pdm add "vertebra-core[bigquery]"
+    pdm add "vertebra-core[duckdb]"
     pdm add "vertebra-core[spanner]"
-    pdm add duckdb
     ```
 
 === "poetry"
 
     ```bash
     poetry add "vertebra-core[bigquery]"
+    poetry add "vertebra-core[duckdb]"
     poetry add "vertebra-core[spanner]"
-    poetry add duckdb
     ```
 
-DuckDB requires the `duckdb` package; without it `SyncDuckDBDriver` and `AsyncDuckDBDriver` raise `MissingDependencyError`. DuckDB publishes no free-threaded wheel, so `duckdb` is not installed on Python `3.14t` / `3.15t` and DuckDB drivers raise `MissingDependencyError` there.
+Installing `vertebra-core[duckdb]` provides the standalone `vertebra-duckdb` (`vertebra._duckdb`) native wheel across standard and free-threaded Python (`3.14t` / `3.15t`); without it `SyncDuckDBDriver` and `AsyncDuckDBDriver` raise `MissingDependencyError`.
 
 The native Oracle and SQL Server driver packages are not yet published. `OracleConfig` and `MSSQLConfig` import and parse URLs; constructing `SyncOracleDriver`, `AsyncOracleDriver`, `SyncMSSQLDriver`, or `AsyncMSSQLDriver` raises `MissingDependencyError`.
 
@@ -130,7 +130,7 @@ app = Litestar(
 | **SQLite / libSQL** | `SQLiteAsyncConfig`, `SQLiteSyncConfig` | `SQLiteConfig` | `SyncSQLiteDriver`, `AsyncSQLiteDriver` | WAL mode, `mmap_size`, SQLite 3.45+ binary `JSONB`, SHM single-writer/multi-reader leasing |
 | **Oracle 26ai** | `OracleAsyncConfig`, `OracleSyncConfig` | `OracleConfig` | `SyncOracleDriver`, `AsyncOracleDriver` | Native driver pending (drivers raise `MissingDependencyError`); Autonomous Database wallet and `tnsnames.ora` parsing, 26ai `VECTOR` and `OSON` codecs |
 | **SQL Server** | `MSSQLAsyncConfig`, `MSSQLSyncConfig` | `MSSQLConfig` | `SyncMSSQLDriver`, `AsyncMSSQLDriver` | Native driver pending (drivers raise `MissingDependencyError`); `?` / `$1` to `@P1` parameter rewriting |
-| **DuckDB** | `DuckDBAsyncConfig`, `DuckDBSyncConfig` | `DuckDBConfig` | `SyncDuckDBDriver`, `AsyncDuckDBDriver` | Requires the `duckdb` package (not installed on `3.14t` / `3.15t`, where DuckDB publishes no free-threaded wheel and the drivers raise `MissingDependencyError`); single-writer/multi-reader OLAP, active ADC `httpfs` secret rotation, zero-copy Arrow SHM |
+| **DuckDB** | `DuckDBAsyncConfig`, `DuckDBSyncConfig` | `DuckDBConfig` | `SyncDuckDBDriver`, `AsyncDuckDBDriver` | Native `vertebra._duckdb` (`vertebra-core[duckdb]`), single-writer/multi-reader OLAP, savepoints, `SyncDuckDBPipeline` / `AsyncDuckDBPipeline`, active ADC `httpfs` secret rotation, zero-copy Arrow SHM + `Appender` |
 | **Google BigQuery** | `BigQueryAsyncConfig`, `BigQuerySyncConfig` | `BigQueryConfig` | `SyncBigQueryDriver`, `AsyncBigQueryDriver` | Pure-Rust REST v2 + Storage Read/Write v1 (`VTBARROW` zero-copy Arrow SHM via `select_to_arrow` / `load_from_arrow`), `ObjectTableConfig` (`ObjectRef`), `dry_run` cost ceiling, ADK/Litestar/Events/Artifact stores |
 | **Google Cloud Spanner** | `SpannerAsyncConfig`, `SpannerSyncConfig` | `SpannerConfig` | `SyncSpannerDriver`, `AsyncSpannerDriver` | Pure-Rust GoogleSQL + `Spangres`, cached `multiplexed = true` sessions, wound-wait `Aborted` retry, `BatchWrite`, Data Boost `PartitionQuery` (`select_to_arrow`), `SyncSpannerChangeStreamSource` / `AsyncSpannerChangeStreamSource` |
 | **Redis** | — | `RedisConfig` | `SyncRedisDriver`, `AsyncRedisDriver` | RESP3 (`HELLO 3`), `CLIENT TRACKING` local cache invalidation, Sentinel, Cluster (`CRC16-XMODEM`) |

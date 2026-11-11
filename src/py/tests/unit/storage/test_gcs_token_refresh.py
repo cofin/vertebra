@@ -33,7 +33,12 @@ from vertebra._vertebra import (
 from vertebra._vertebra import (
     SyncGcpTokenCache as CoreSyncGcpTokenCache,
 )
-from vertebra.db.adapters.duckdb import AsyncDuckDBDriver, DuckDBConfig, SyncDuckDBDriver
+from vertebra.db.adapters.duckdb import (
+    AsyncDuckDBDriver,
+    DuckDBConfig,
+    DuckDBSecretConfig,
+    SyncDuckDBDriver,
+)
 from vertebra.embeddings import VertexEmbedder
 from vertebra.storage import (
     AsyncGcpTokenCache,
@@ -46,7 +51,7 @@ from vertebra.storage import (
 )
 from vertebra.typing import ImproperConfigurationError
 
-_DUCKDB_SKIP_REASON = "duckdb publishes no free-threaded wheel; DuckDB tests run on GIL interpreters"
+_DUCKDB_SKIP_REASON = "vertebra._duckdb native extension is not built"
 
 
 class _MockTokenServer:
@@ -415,8 +420,8 @@ def test_duckdb_multi_session_token_generation_secret_rotation(
     token_server: _MockTokenServer,
     tmp_path: Path,
 ) -> None:
-    """Verify multiple DuckDB sessions track applied_token_generation and all rotate secrets on refresh."""
-    pytest.importorskip("duckdb", reason=_DUCKDB_SKIP_REASON)
+    """Verify multiple DuckDB sessions rotate generic `value_provider` secrets when a token cache advances."""
+    pytest.importorskip("vertebra._duckdb", reason=_DUCKDB_SKIP_REASON)
     adc_path = tmp_path / "adc.json"
     adc_path.write_text(
         json.dumps(
@@ -433,28 +438,50 @@ def test_duckdb_multi_session_token_generation_secret_rotation(
     gcs_cfg = GCSConfig(bucket="test-bucket", application_credentials=str(adc_path))
     cache = gcs_cfg.sync_token_cache()
 
-    db_cfg = DuckDBConfig(gcs_token_cache=cache)
-    driver_a = SyncDuckDBDriver(db_cfg)
-    driver_b = SyncDuckDBDriver(db_cfg)
+    class _SyncBearerSecretProvider:
+        def __init__(self, token_cache: SyncGcpTokenCache) -> None:
+            self._cache = token_cache
+            self.last_token = ""
+
+        @property
+        def generation(self) -> int:
+            return int(self._cache.generation)
+
+        def needs_refresh(self) -> bool:
+            return bool(self._cache.needs_refresh())
+
+        def __call__(self) -> dict[str, str]:
+            snap = self._cache.get_token()
+            self.last_token = str(snap.access_token)
+            return {"bearer_token": self.last_token}
+
+    provider_a = _SyncBearerSecretProvider(cache)
+    provider_b = _SyncBearerSecretProvider(cache)
+    driver_a = SyncDuckDBDriver(
+        DuckDBConfig(secrets=(DuckDBSecretConfig(name="lake_bearer", secret_type="http", value_provider=provider_a),))
+    )
+    driver_b = SyncDuckDBDriver(
+        DuckDBConfig(secrets=(DuckDBSecretConfig(name="lake_bearer", secret_type="http", value_provider=provider_b),))
+    )
     try:
         rows_a1 = driver_a.select("SELECT 1 AS v")
         rows_b1 = driver_b.select("SELECT 1 AS v")
         assert rows_a1 == [{"v": 1}]
         assert rows_b1 == [{"v": 1}]
-        assert driver_a.applied_token_generation == 1
-        assert driver_b.applied_token_generation == 1
-        assert "mock-oauth-token-user-1" in driver_a.last_gcs_secret_sql
-        assert "mock-oauth-token-user-1" in driver_b.last_gcs_secret_sql
+        assert driver_a._secret_generations["lake_bearer"] == 1
+        assert driver_b._secret_generations["lake_bearer"] == 1
+        assert provider_a.last_token == "mock-oauth-token-user-1"
+        assert provider_b.last_token == "mock-oauth-token-user-1"
 
         cache.invalidate(1)
 
         driver_a.select("SELECT 2 AS v")
-        assert driver_a.applied_token_generation == 2
-        assert "mock-oauth-token-user-2" in driver_a.last_gcs_secret_sql
+        assert driver_a._secret_generations["lake_bearer"] == 2
+        assert provider_a.last_token == "mock-oauth-token-user-2"
 
         driver_b.select("SELECT 2 AS v")
-        assert driver_b.applied_token_generation == 2
-        assert "mock-oauth-token-user-2" in driver_b.last_gcs_secret_sql
+        assert driver_b._secret_generations["lake_bearer"] == 2
+        assert provider_b.last_token == "mock-oauth-token-user-2"
     finally:
         driver_a.close()
         driver_b.close()
@@ -465,8 +492,8 @@ async def test_async_duckdb_driver_token_generation_rotation(
     token_server: _MockTokenServer,
     tmp_path: Path,
 ) -> None:
-    """Verify AsyncDuckDBDriver rotates GCS secrets when SyncGcpTokenCache generation advances."""
-    pytest.importorskip("duckdb", reason=_DUCKDB_SKIP_REASON)
+    """Verify AsyncDuckDBDriver rotates sync and async `value_provider` secrets when generation advances."""
+    pytest.importorskip("vertebra._duckdb", reason=_DUCKDB_SKIP_REASON)
     adc_path = tmp_path / "adc.json"
     adc_path.write_text(
         json.dumps(
@@ -483,25 +510,56 @@ async def test_async_duckdb_driver_token_generation_rotation(
     cache = GCSConfig(bucket="b", application_credentials=str(adc_path)).sync_token_cache()
     async_cache = GCSConfig(bucket="b", application_credentials=str(adc_path)).async_token_cache()
 
-    drv = AsyncDuckDBDriver(DuckDBConfig(gcs_token_cache=cache))
+    class _SyncProvider:
+        @property
+        def generation(self) -> int:
+            return int(cache.generation)
+
+        def needs_refresh(self) -> bool:
+            return bool(cache.needs_refresh())
+
+        def __call__(self) -> dict[str, str]:
+            return {"bearer_token": str(cache.get_token().access_token)}
+
+    class _AsyncProvider:
+        @property
+        def generation(self) -> int:
+            return int(async_cache.generation)
+
+        def needs_refresh(self) -> bool:
+            return bool(async_cache.needs_refresh())
+
+        async def __call__(self) -> dict[str, str]:
+            snap = await async_cache.get_token()
+            return {"bearer_token": str(snap.access_token)}
+
+    drv = AsyncDuckDBDriver(
+        DuckDBConfig(
+            secrets=(DuckDBSecretConfig(name="lake_sync_bearer", secret_type="http", value_provider=_SyncProvider()),)
+        )
+    )
     try:
         res = await drv.select("SELECT 1 AS ok")
         assert res == [{"ok": 1}]
-        assert drv.applied_token_generation == 1
+        assert drv._secret_generations["lake_sync_bearer"] == 1
         cache.get_token(force_refresh=True)
         await drv.select("SELECT 1 AS ok")
-        assert drv.applied_token_generation == 2
+        assert drv._secret_generations["lake_sync_bearer"] == 2
     finally:
         await drv.close()
 
-    async_drv = AsyncDuckDBDriver(DuckDBConfig(gcs_token_cache=async_cache))
+    async_drv = AsyncDuckDBDriver(
+        DuckDBConfig(
+            secrets=(DuckDBSecretConfig(name="lake_async_bearer", secret_type="http", value_provider=_AsyncProvider()),)
+        )
+    )
     try:
         res_async = await async_drv.select("SELECT 1 AS ok")
         assert res_async == [{"ok": 1}]
-        assert async_drv.applied_token_generation == 1
+        assert async_drv._secret_generations["lake_async_bearer"] == 1
         await async_cache.get_token(force_refresh=True)
         await async_drv.select("SELECT 1 AS ok")
-        assert async_drv.applied_token_generation == 2
+        assert async_drv._secret_generations["lake_async_bearer"] == 2
     finally:
         await async_drv.close()
 

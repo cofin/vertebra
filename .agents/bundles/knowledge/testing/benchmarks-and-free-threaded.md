@@ -13,6 +13,9 @@ generated:
   by: flow/0.26.0
   at: "2026-11-04T04:33:00Z"
 verified:
+  - by: agent:flow-sync
+    at: "2026-11-09T21:46:00Z"
+    commit: 84959389
   - by: agent:flow-executor
     at: "2026-11-09T15:21:00Z"
     commit: b02636d9
@@ -110,7 +113,7 @@ The workflow runs on `workflow_dispatch` (input `full_benchmark`), on published 
 
 Keep the benchmark-only dependencies (the `duckdb>=1.0` results store reaching `bench` through `{ include-group = "duckdb" }`, and the `uvicorn[standard]>=0.30`, `httptools>=0.6`, `uvloop>=0.23.0; sys_platform != 'win32'`, `granian>=1.6`, and `spikard>=0.12` baselines) in `[dependency-groups].bench` in [`pyproject.toml`](../../../../pyproject.toml)[^src-pyproject-toml], never in `dev`:
 
-- `pyproject.toml` sets no `[tool.uv] default-groups`; `make py-test` and `make coverage` run `uv run $(PY_TEST_GROUPS)`, so GIL interpreters sync `dev` plus `duckdb` and the CI `3.14t` / `3.15t` jobs sync `dev` only, where DuckDB tests skip through `pytest.importorskip("duckdb")`.
+- `pyproject.toml` sets no `[tool.uv] default-groups`; `make py-test` builds all 6 native PyO3 extensions (`vertebra._duckdb` serves production and conformance DuckDB paths across both standard and free-threaded `3.14t`/`3.15t` interpreters) while `PY_TEST_GROUPS` adds PyPI `--group duckdb` only on GIL builds.
 - Every `make bench*` target passes `--group bench` to `uv run`.
 
 ## 6. Free-Threaded Build (`make bench-ft`)
@@ -126,8 +129,8 @@ PyO3 links different CPython ABI symbols when `Py_GIL_DISABLED` is set, so free-
 ## 7. Free-Threaded Test Gate
 
 - The CI `test-python` matrix includes `3.14t` and `3.15t` and runs `make py-test` on both.
-- `_vertebra`, `_bundler`, `_storage`, `_bigquery`, and `_spanner` declare `#[pymodule(gil_used = false)]`.
-- [`test_freethreaded_gil.py`](../../../../src/py/tests/unit/test_freethreaded_gil.py)[^src-tests-unit-test-freethreaded-gil-py] asserts `GIL_USED` is `False` across `_vertebra`, `_bundler`, `_storage`, `_bigquery`, and `_spanner` and that `sys._is_gil_enabled()` stays false after import.
+- `_vertebra`, `_bundler`, `_storage`, `_bigquery`, `_spanner`, and `_duckdb` declare `#[pymodule(gil_used = false)]`.
+- [`test_freethreaded_gil.py`](../../../../src/py/tests/unit/test_freethreaded_gil.py)[^src-tests-unit-test-freethreaded-gil-py] asserts `GIL_USED` is `False` across `_vertebra`, `_bundler`, `_storage`, `_bigquery`, `_spanner`, and `_duckdb` and that `sys._is_gil_enabled()` stays false after import.
 - `unit/server/test_stage1_hotpath_and_314t.py` and `unit/server/test_runtime_tuning.py` cover the free-threaded dispatch, loop backend selection, and `EventLoopPool` paths; `GilAuditReport` (`server/_gil_audit.py`) reports native extensions that re-enable the GIL.
 
 Provenance sources: [^src-makefile], [^src-tools-benchmarks-runner-py], [^src-tools-benchmarks-scenarios-py], [^src-tools-benchmarks-targets-py], [^src-tools-benchmarks-store-py], [^src-tools-pgo-init-py], [^src-benchmark-yml], [^src-vertebra-core-cargo-toml], [^src-vertebra-http-cargo-toml].
