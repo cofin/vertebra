@@ -11,7 +11,7 @@ depends_on_chapters: []
 replan_trigger: null
 current_task: null
 plan_revision: 5
-plan_commit: 936daa9f
+plan_commit: 79eea133
 state_revision: 0
 last_verified_checkpoint: 62bf91f1
 last_reviewed_commit: 62bf91f1
@@ -23,7 +23,7 @@ generated:
 verified:
   - by: agent:plan-generator
     at: "2026-11-07T16:40:00Z"
-    commit: 936daa9f
+    commit: 79eea133
 sources:
   - id: ws-cargo
     resource: src/rs/Cargo.toml
@@ -146,7 +146,7 @@ Progress: `[0/0 files documented in ch01]` (`src/py/vertebra/_postgres.pyi` modu
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `plan_commit: 936daa9f`; chapter `state: completed` at `62bf91f1`, `planning_status: complete`.
+- **Verified Baseline**: `plan_commit: 79eea133`; chapter `state: completed` at `62bf91f1`, `planning_status: complete`.
 - **Remaining Tasks in Chapter**: None (`4/4` completed at `62bf91f1`).
 - **Documentation & OKF Status**: `[0/0 files documented in ch01]`; `_postgres.pyi` wired in `t03`, root `pyproject.toml`/`uv.lock`/`areas.toml` wired in `ch08:t02`–`t04`, and full docs/OKF scheduled in `ch30`.
 - **Downstream Dependents**: Unblocks `ch02-wire-codec-and-session-startup` (`ch02:t01` depends on `ch01:t04`).

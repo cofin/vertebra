@@ -25,7 +25,7 @@ tests:
   - src/rs/vertebra-postgres/tests/pipeline_wire.rs
 estimated_loc: 245
 plan_revision: 5
-plan_commit: 936daa9f
+plan_commit: 79eea133
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -37,7 +37,7 @@ last_verified_commit: null
 verification_evidence: null
 created_at: "2026-11-05T18:25:07Z"
 updated_at: "2026-11-08T02:05:22Z"
-commit: ab725d86
+commit: 6d472b86
 sources:
   - id: pg-contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md

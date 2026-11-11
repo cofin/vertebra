@@ -12,7 +12,7 @@ depends_on_chapters:
 replan_trigger: null
 current_task: null
 plan_revision: 5
-plan_commit: 936daa9f
+plan_commit: 79eea133
 state_revision: 0
 last_verified_checkpoint: e7c0a42f
 last_reviewed_commit: e7c0a42f
@@ -24,7 +24,7 @@ generated:
 verified:
   - by: agent:flow-setup
     at: "2026-11-07T05:00:00Z"
-    commit: 936daa9f
+    commit: 79eea133
 sources:
   - id: pg-contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md
@@ -132,7 +132,7 @@ Progress: `[0/1 files documented in ch14]` (`src/py/vertebra/_postgres.pyi` type
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `plan_commit: 936daa9f`; chapter `state: completed` at `e7c0a42f`, `planning_status: complete`.
+- **Verified Baseline**: `plan_commit: 79eea133`; chapter `state: completed` at `e7c0a42f`, `planning_status: complete`.
 - **Remaining Tasks in Chapter**: None (`4/4` completed at `e7c0a42f`).
 - **Downstream Dependents**: Unblocks `ch15-pool-facades-and-single-sync-pipeline` (`SyncPostgresPool` / `AsyncPostgresPool` and single-`Sync` pipelines), `ch16`–`ch17` (pipeline contexts, cancellation, deadlines, portals), and `ch18`–`ch26` (COPY, Arrow, and permanent Python drivers).
 

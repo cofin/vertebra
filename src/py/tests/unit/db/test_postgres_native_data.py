@@ -1558,6 +1558,7 @@ def test_native_copy_from_arrow_async_cancel_mid_preflight_and_mid_start_recover
                 task = asyncio.create_task(
                     _as_coro(ac1.copy_from_arrow("items", first_ipc, schema_name="analytics")),
                 )
+                await asyncio.sleep(0)
                 entered = await asyncio.to_thread(trigger_evt.wait, 3.0)
                 assert entered
                 task.cancel()
@@ -1682,6 +1683,7 @@ def test_native_copy_overlapping_and_post_close_raise_interface_error() -> None:
             copy_in = await c_in.copy_from(copy_in_sql)
             await copy_in.write([(1, "ok")], [_INT4_OID, _TEXT_OID])
             finish_fut = asyncio.create_task(_as_coro(copy_in.finish()))
+            await asyncio.sleep(0)
             assert await asyncio.to_thread(state.finish_entered.wait, 3.0)
             with pytest.raises(InterfaceError):
                 await copy_in.write([(2, "overlap")], [_INT4_OID, _TEXT_OID])
@@ -3297,6 +3299,7 @@ def test_async_arrow_stream_heartbeat_overlapping_anext_and_exhausted_aclose() -
                 hb_task = asyncio.create_task(_heartbeat())
                 fetch2_task = asyncio.create_task(_as_coro(anext(stream)))
                 try:
+                    await asyncio.sleep(0)
                     assert await asyncio.to_thread(state.batch2_waiting.wait, 2.0)
                     while ticks < 4:
                         await asyncio.sleep(0.005)
@@ -3628,6 +3631,7 @@ def test_async_arrow_stream_cancellation_open_execute_and_queued_drainer_zero_sh
                 )
                 if cancel_stage == "open_bind":
                     t_open = asyncio.create_task(_as_coro(anext(stream)))
+                    await asyncio.sleep(0)
                     assert await asyncio.to_thread(state.bind_waiting.wait, 2.0)
                     t_open.cancel()
                     with pytest.raises(asyncio.CancelledError):
@@ -3636,6 +3640,7 @@ def test_async_arrow_stream_cancellation_open_execute_and_queued_drainer_zero_sh
                     cur1 = await anext(stream)
                     cur1.release()
                     t_exec = asyncio.create_task(_as_coro(anext(stream)))
+                    await asyncio.sleep(0)
                     assert await asyncio.to_thread(state.batch2_waiting.wait, 2.0)
                     t_exec.cancel()
                     with pytest.raises(asyncio.CancelledError):
@@ -3821,6 +3826,7 @@ def test_async_copy_from_unresponsive_cancel_retains_pool_slot_until_close(
                     blocked_task: asyncio.Task[Any] = asyncio.create_task(
                         _as_coro(copy_in.write(large_rows, [_INT4_OID, _TEXT_OID])),
                     )
+                    await asyncio.sleep(0)
                     assert await asyncio.to_thread(state.copy_data_stalled.wait, 2.0)
                     await asyncio.sleep(0.03)
                     assert not blocked_task.done()
@@ -4096,6 +4102,7 @@ def test_async_copy_cancelled_aclose_and_unawaited_bad_write_sync_with_client_cl
                 if scenario == "copy_in_aclose":
                     copy_in = await ac1.copy_from_arrow("items", first_ipc)
                     t_close = asyncio.create_task(_as_coro(copy_in.aclose()))
+                    await asyncio.sleep(0)
                     assert await asyncio.to_thread(state.copy_fail_entered.wait, 2.0)
                     t_close.cancel()
                     with pytest.raises(asyncio.CancelledError):
@@ -4108,6 +4115,7 @@ def test_async_copy_cancelled_aclose_and_unawaited_bad_write_sync_with_client_cl
                             pass
 
                     t_exit = asyncio.create_task(_exit_scope())
+                    await asyncio.sleep(0)
                     assert await asyncio.to_thread(state.copy_fail_entered.wait, 2.0)
                     t_exit.cancel()
                     with pytest.raises(asyncio.CancelledError):
@@ -4117,6 +4125,7 @@ def test_async_copy_cancelled_aclose_and_unawaited_bad_write_sync_with_client_cl
                     row1 = await anext(copy_out)
                     assert row1 == copy_out_rows[0]
                     t_out_close = asyncio.create_task(_as_coro(copy_out.aclose()))
+                    await asyncio.sleep(0)
                     assert await asyncio.to_thread(state.cancel_received.wait, 2.0)
                     t_out_close.cancel()
                     with pytest.raises(asyncio.CancelledError):

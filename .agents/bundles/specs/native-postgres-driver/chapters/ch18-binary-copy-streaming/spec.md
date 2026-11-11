@@ -12,7 +12,7 @@ depends_on_chapters:
 replan_trigger: null
 current_task: null
 plan_revision: 5
-plan_commit: 936daa9f
+plan_commit: 79eea133
 state_revision: 1
 last_verified_checkpoint: 5bfc7feb
 last_reviewed_commit: 5bfc7feb
@@ -24,7 +24,7 @@ generated:
 verified:
   - by: agent:flow-setup
     at: "2026-11-07T05:00:00Z"
-    commit: 936daa9f
+    commit: 79eea133
 sources:
   - id: pg-contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md
@@ -148,7 +148,7 @@ Progress: `[0/0 files documented in ch18]` (user-facing `COPY` documentation in 
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `plan_commit: 936daa9f`; chapter `state: completed` at `5bfc7feb`, `planning_status: complete`.
+- **Verified Baseline**: `plan_commit: 79eea133`; chapter `state: completed` at `5bfc7feb`, `planning_status: complete`.
 - **Remaining Tasks in Chapter**: None (`3/3` completed at `5bfc7feb`).
 - **Downstream Dependents**: Unblocks `ch19-native-arrow-batches-and-shm` and `ch20-arrow-copy-import-and-portals` (which wires Arrow `COPY` plans and PyO3 `copy_to` / `copy_from` / `copy_from_arrow` handles).
 

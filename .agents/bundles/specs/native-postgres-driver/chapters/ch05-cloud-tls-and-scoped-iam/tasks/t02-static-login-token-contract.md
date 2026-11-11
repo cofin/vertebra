@@ -24,7 +24,7 @@ tests:
   - src/rs/vertebra-postgres/src/credentials.rs
 estimated_loc: 215
 plan_revision: 5
-plan_commit: 936daa9f
+plan_commit: 79eea133
 state_revision: 0
 claimed_by: null
 claimed_at: null

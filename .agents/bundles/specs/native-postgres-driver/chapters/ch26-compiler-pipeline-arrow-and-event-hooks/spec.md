@@ -12,7 +12,7 @@ depends_on_chapters:
 replan_trigger: null
 current_task: "native-postgres-driver:ch26:t01"
 plan_revision: 6
-plan_commit: bf53faf3
+plan_commit: 8e9b324e
 state_revision: 0
 last_verified_checkpoint: null
 last_reviewed_commit: null
@@ -24,7 +24,7 @@ generated:
 verified:
   - by: agent:plan-generator
     at: "2026-11-10T14:45:00Z"
-    commit: bf53faf3
+    commit: 8e9b324e
 sources:
   - id: npd-contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md
@@ -144,7 +144,7 @@ Progress: `[0/0 files documented in ch26]` (`[0/33 files documented]` across the
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Plan Baseline**: `plan_revision: 6`, `plan_commit: bf53faf3`; chapter `state: planned`, `planning_status: complete` (`33` chapters / `118` tasks in full flow, `ch01`–`ch19` / `71` tasks completed).
+- **Verified Plan Baseline**: `plan_revision: 6`, `plan_commit: 8e9b324e`; chapter `state: planned`, `planning_status: complete` (`33` chapters / `118` tasks in full flow, `ch01`–`ch19` / `71` tasks completed).
 - **Remaining Tasks in Chapter**: `t01`, `t02`, `t03`, `t04` (`4/4` pending).
 - **Downstream Dependents**: Unblocks `ch27-atomic-cutover-and-legacy-removal` ahead of `ch30`–`ch32` documentation/OKF sync (`[0/33 files documented]`) and `ch33-final-review-and-release-gate`.
 

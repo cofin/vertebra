@@ -12,7 +12,7 @@ depends_on_chapters:
 replan_trigger: null
 current_task: null
 plan_revision: 5
-plan_commit: 936daa9f
+plan_commit: 79eea133
 state_revision: 0
 last_verified_checkpoint: cae857ba
 last_reviewed_commit: cae857ba
@@ -24,7 +24,7 @@ generated:
 verified:
   - by: agent:plan-generator
     at: "2026-11-07T05:00:00Z"
-    commit: 936daa9f
+    commit: 79eea133
 sources:
   - id: pg-contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md
@@ -152,7 +152,7 @@ Parent roadmap: [spec.md](../../spec.md). Public interface authority: [contracts
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `plan_commit: 936daa9f`; chapter `state: completed` at `cae857ba`, `planning_status: complete`.
+- **Verified Baseline**: `plan_commit: 79eea133`; chapter `state: completed` at `cae857ba`, `planning_status: complete`.
 - **Remaining Tasks in Chapter**: None (`4/4` completed at `cae857ba`).
 - **Downstream Dependents**: Unblocks `ch12-pgvector-and-extended-query`, `ch14:t03` (`python_values.rs`), `ch18` (`COPY`), `ch19` (`VTBARROW` nested schemas), and `ch22` (`pgoutput` tuple decoding).
 

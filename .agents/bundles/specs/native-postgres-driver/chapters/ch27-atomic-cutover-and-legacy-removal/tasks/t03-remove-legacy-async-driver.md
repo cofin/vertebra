@@ -24,7 +24,7 @@ tests:
   - src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py
 estimated_loc: 200
 plan_revision: 6
-plan_commit: bf53faf3
+plan_commit: 8e9b324e
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -40,7 +40,7 @@ commit: null
 verified:
   - by: agent:plan-generator
     at: "2026-11-10T14:45:00Z"
-    commit: bf53faf3
+    commit: 8e9b324e
 sources:
   - id: pg-driver-mod
     resource: src/py/vertebra/db/adapters/postgres/driver.py::AsyncPostgreSQLDriver

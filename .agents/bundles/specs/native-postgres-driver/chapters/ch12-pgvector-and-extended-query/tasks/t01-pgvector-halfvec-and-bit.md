@@ -25,7 +25,7 @@ tests:
   - src/rs/vertebra-postgres/tests/vector_codecs.rs
 estimated_loc: 240
 plan_revision: 5
-plan_commit: 936daa9f
+plan_commit: 79eea133
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -44,7 +44,7 @@ generated:
 verified:
   - by: agent:plan-generator
     at: "2026-11-07T05:00:00Z"
-    commit: dd432f18
+    commit: 35763a26
 sources:
   - id: pg-contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md

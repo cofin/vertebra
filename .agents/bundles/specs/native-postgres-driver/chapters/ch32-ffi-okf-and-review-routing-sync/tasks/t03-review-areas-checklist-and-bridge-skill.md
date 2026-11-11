@@ -3,7 +3,7 @@ type: Task
 id: "native-postgres-driver:ch32:t03"
 chapter_id: ch32-ffi-okf-and-review-routing-sync
 title: Synchronize review areas.toml, checklist.md, and review-pyo3-bridge skill routing
-description: Verify and synchronize vertebra-postgres globs, PostgreSQL OKF knowledge entries, and focused commands in areas.toml, update FFI-09 and PERF-06 in checklist.md, and update review-pyo3-bridge/SKILL.md for all 6 PyO3 extensions, validating with make review-check and make review-route BASE=88c30004.
+description: Verify and synchronize vertebra-postgres globs, PostgreSQL OKF knowledge entries, and focused commands in areas.toml, update FFI-09 and PERF-06 in checklist.md, and update review-pyo3-bridge/SKILL.md for all 6 PyO3 extensions, validating with make review-check and make review-route BASE=213967be.
 status: stable
 state: pending
 priority: P1
@@ -24,7 +24,7 @@ files:
 tests: []
 estimated_loc: 95
 plan_revision: 6
-plan_commit: bf53faf3
+plan_commit: 8e9b324e
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -68,7 +68,7 @@ tags:
 
 ## Objective & Scope Boundary
 
-Synchronize `.agents/skills/review-core/references/areas.toml`, `.agents/skills/review-core/references/checklist.md`, and `.agents/skills/review-pyo3-bridge/SKILL.md` so review validation (`make review-check`) and branch diff routing (`make review-route BASE=88c30004`) cover all six PyO3 extensions and the new PostgreSQL OKF chapters cleanly [^review-areas] [^review-checklist] [^skill-review-pyo3] [^review-script] [^pg-lib-rs] [^pg-pyi]:
+Synchronize `.agents/skills/review-core/references/areas.toml`, `.agents/skills/review-core/references/checklist.md`, and `.agents/skills/review-pyo3-bridge/SKILL.md` so review validation (`make review-check`) and branch diff routing (`make review-route BASE=213967be`) cover all six PyO3 extensions and the new PostgreSQL OKF chapters cleanly [^review-areas] [^review-checklist] [^skill-review-pyo3] [^review-script] [^pg-lib-rs] [^pg-pyi]:
 1. `.agents/skills/review-core/references/areas.toml`:
    - Verify and preserve `"src/rs/vertebra-postgres/**"` in `[areas.runtime-ipc].paths` and `[areas.pyo3-bridge].paths` plus `"src/py/vertebra/_postgres.pyi"` in `[areas.pyo3-bridge].paths` (adding a dedicated `database-and-postgres` shard under `[areas.runtime-ipc]` covering `src/rs/vertebra-db/**`, `src/rs/vertebra-postgres/**`, and `src/rs/vertebra-storage/**` so large branch diffs shard protocol/database Rust files cleanly alongside `rings` and `platform-and-transport`).
    - Add `".agents/bundles/knowledge/domains/data/postgres-native-driver.md"` and `".agents/bundles/knowledge/domains/data/postgres-limitations.md"` (created in `ch31:t01`) to `[areas.runtime-ipc].knowledge` and `[areas.pyo3-bridge].knowledge`, and include `-p vertebra-postgres` coverage in read-only `focused_commands` as appropriate [^review-areas] [^pg-lib-rs] [^pg-pyi].
@@ -92,7 +92,7 @@ Out of scope: Modifying `tools/scripts/review_setup.py`, `.agents/agents/*.md`, 
 ## Symbol & Signature Contracts
 
 - Every `knowledge` file listed in `areas.toml` exists on disk (`review_setup.py::validate_manifest`), every checklist code in `checklist.md` preserves sequential numbering (`RT-01`..`DOC-09` with zero gaps), and `review-pyo3-bridge/SKILL.md` stays `<= 200` lines with zero `reviewer_forbidden_commands` matches in fenced shell blocks [^review-script].
-- `make review-route BASE=88c30004` routes `src/rs/vertebra-postgres/**` to both `runtime-ipc` and `pyo3-bridge`, `src/py/vertebra/_postgres.pyi` to `pyo3-bridge`, `src/py/vertebra/db/adapters/postgres/**` to `python-framework` (`framework-and-extensions`), `benches/` + `tools/benchmarks/postgres.py` to `performance`, test suites to `tests`, and docs/OKF/skills to `docs-okf` with zero meaningful PostgreSQL files left unrouted.
+- `make review-route BASE=213967be` routes `src/rs/vertebra-postgres/**` to both `runtime-ipc` and `pyo3-bridge`, `src/py/vertebra/_postgres.pyi` to `pyo3-bridge`, `src/py/vertebra/db/adapters/postgres/**` to `python-framework` (`framework-and-extensions`), `benches/` + `tools/benchmarks/postgres.py` to `performance`, test suites to `tests`, and docs/OKF/skills to `docs-okf` with zero meaningful PostgreSQL files left unrouted.
 
 ## Edge Cases & Error Semantics
 
@@ -101,28 +101,28 @@ Out of scope: Modifying `tools/scripts/review_setup.py`, `.agents/agents/*.md`, 
 
 ## Public-Seam Test Blueprint
 
-- **Canonical validation gates**: `make review-check` and `make review-route BASE=88c30004` (`tests: []`).
+- **Canonical validation gates**: `make review-check` and `make review-route BASE=213967be` (`tests: []`).
 - **Worked Test Matrix**:
 
 | Case | Input | Expected Output / Error |
 | --- | --- | --- |
 | Review manifest, checklist sequence, & skill validation | `make review-check` | Exits `0` (`review-check: ok`); `manifest`, `checklist`, `skills`, `agents`, `bundles`, `privacy`, and `python_imports` all pass. |
-| Full branch PostgreSQL routing from upstream baseline | `make review-route BASE=88c30004` | Exits `0` and emits JSON listing `runtime-ipc` (with `database-and-postgres` shard matching `src/rs/vertebra-postgres/**`), `pyo3-bridge` (matching `src/rs/vertebra-postgres/**` and `src/py/vertebra/_postgres.pyi`), `python-framework`, `performance`, `tests`, and `docs-okf`. |
+| Full branch PostgreSQL routing from upstream baseline | `make review-route BASE=213967be` | Exits `0` and emits JSON listing `runtime-ipc` (with `database-and-postgres` shard matching `src/rs/vertebra-postgres/**`), `pyo3-bridge` (matching `src/rs/vertebra-postgres/**` and `src/py/vertebra/_postgres.pyi`), `python-framework`, `performance`, `tests`, and `docs-okf`. |
 | Reviewer read-only command discipline | Inspect `review-pyo3-bridge/SKILL.md` `Focused Commands` | Uses read-only `cargo test --manifest-path src/rs/Cargo.toml ... -p vertebra-postgres` and `uv run --no-sync python -m mypy.stubtest ... vertebra._postgres`, staying strictly `<= 200` lines. |
 
 ## Verification
 
 - Review manifest, skill, & OKF validator: `make review-check`
-- Complete-driver diff routing check: `make review-route BASE=88c30004`
+- Complete-driver diff routing check: `make review-route BASE=213967be`
 
 ## Acceptance Criteria
 
 - [ ] `areas.toml`, `checklist.md` (`FFI-09`, `PERF-06`), and `review-pyo3-bridge/SKILL.md` (`<= 200L`) synchronize all six PyO3 extensions (`vertebra-postgres` / `_postgres.pyi`), PostgreSQL OKF knowledge chapters, and `[dependency-groups].postgres-bench` (R1, R8, R27).
-- [ ] `make review-check` and `make review-route BASE=88c30004` exit `0` cleanly, completing `[33/33 files documented]` across `ch30`–`ch32` (R8, R27).
+- [ ] `make review-check` and `make review-route BASE=213967be` exit `0` cleanly, completing `[33/33 files documented]` across `ch30`–`ch32` (R8, R27).
 
 ## Notes & Discoveries
 
-- Note that root non-code files such as `Makefile`, `pyproject.toml`, and `.github/workflows/*.yml` intentionally appear under `unmatched` in `make review-route BASE=88c30004`; verify specifically that zero `src/rs/vertebra-postgres/**`, `src/py/vertebra/**`, `src/py/tests/**`, `tools/benchmarks/**`, `docs/**`, or `.agents/**` files fall into `unmatched`.
+- Note that root non-code files such as `Makefile`, `pyproject.toml`, and `.github/workflows/*.yml` intentionally appear under `unmatched` in `make review-route BASE=213967be`; verify specifically that zero `src/rs/vertebra-postgres/**`, `src/py/vertebra/**`, `src/py/tests/**`, `tools/benchmarks/**`, `docs/**`, or `.agents/**` files fall into `unmatched`.
 
 [^review-areas]: `.agents/skills/review-core/references/areas.toml` — Review area path globs, shards, knowledge files, and focused commands.
 [^review-checklist]: `.agents/skills/review-core/references/checklist.md` — Shared review checklist across `RT`, `HTTP`, `FFI`, `PY`, `TS`, `PERF`, `TEST`, and `DOC`.

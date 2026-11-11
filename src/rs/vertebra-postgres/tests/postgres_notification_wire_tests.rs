@@ -1422,7 +1422,7 @@ async fn close_aborts_backoff_within_100ms_wakes_waiter_and_drop_closes_cleanly(
     assert!(matches!(end, FrontendMsg::Terminate | FrontendMsg::Eof));
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn reconnect_exhausts_exact_max_8_attempts_and_transitions_closed_true() {
     let tcp = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let port = tcp.local_addr().unwrap().port();

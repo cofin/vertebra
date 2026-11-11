@@ -12,7 +12,7 @@ depends_on_chapters:
 replan_trigger: null
 current_task: null
 plan_revision: 5
-plan_commit: 936daa9f
+plan_commit: 79eea133
 state_revision: 1
 last_verified_checkpoint: f7535c47
 last_reviewed_commit: f7535c47
@@ -24,7 +24,7 @@ generated:
 verified:
   - by: agent:flow-setup
     at: "2026-11-07T05:00:00Z"
-    commit: 936daa9f
+    commit: 79eea133
 sources:
   - id: pg-contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md
@@ -131,7 +131,7 @@ Progress: `[1/1 files documented in ch17]` (`src/py/vertebra/_postgres.pyi` stub
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `plan_commit: 936daa9f`; chapter `state: completed` at `f7535c47`, `planning_status: complete`.
+- **Verified Baseline**: `plan_commit: 79eea133`; chapter `state: completed` at `f7535c47`, `planning_status: complete`.
 - **Remaining Tasks in Chapter**: None (`4/4` completed at `f7535c47`).
 - **Downstream Dependents**: Completes Phase 3 and unblocks `ch18-binary-copy-streaming` (`ch18:t01` incremental binary COPY codec), `ch20:t03`–`t04` (Arrow portal streaming), and `ch25`–`ch26` (permanent driver `timeout=` forwarding and `_publish_notification(..., timeout=10.0)`).
 

@@ -26,7 +26,7 @@ tests:
   - src/rs/vertebra-db/src/py_async.rs
 estimated_loc: 250
 plan_revision: 5
-plan_commit: 936daa9f
+plan_commit: 79eea133
 state_revision: 1
 claimed_by: null
 claimed_at: null
@@ -34,11 +34,11 @@ blocked_reason: null
 unblock_condition: null
 next_step: null
 last_verified_at: "2026-11-09T19:32:00Z"
-last_verified_commit: ab725d86
+last_verified_commit: 6d472b86
 verification_evidence: "cargo test -p vertebra-db --features pyo3 (49 passed) + cargo test -p vertebra-postgres --test cancellation_protocol (6 passed)"
 created_at: "2026-11-05T18:25:07Z"
 updated_at: "2026-11-08T02:05:22Z"
-commit: ffe3e745
+commit: c9f7335e
 sources:
   - id: pg-contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md

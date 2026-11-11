@@ -12,7 +12,7 @@ depends_on_chapters:
 replan_trigger: null
 current_task: "native-postgres-driver:ch30:t01"
 plan_revision: 6
-plan_commit: bf53faf3
+plan_commit: 8e9b324e
 state_revision: 0
 last_verified_checkpoint: null
 last_reviewed_commit: null
@@ -24,7 +24,7 @@ generated:
 verified:
   - by: agent:plan-generator
     at: "2026-11-10T14:45:00Z"
-    commit: bf53faf3
+    commit: 8e9b324e
 sources:
   - id: doc-databases
     resource: docs/usage/databases.md
@@ -89,7 +89,7 @@ Parent roadmap: [spec.md](../../spec.md); frozen contracts: [contracts.md](../..
 - **R27.1 (`ch30:t01`)**: Update `docs/usage/databases.md`, `docs/usage/analytics-and-cdc.md`, and `docs/reference/database-capabilities.md` with linked `=== "uv"`/`"pip"`/`"pdm"`/`"poetry"` `[postgres]` tabs, conceptual `4`–`6` node Mermaid topologies where diagrams appear, concise `class Model(msgspec.Struct):` examples with inline config dicts, zero external SQL/driver library names, and `heading_level: 4` capability directives (`PostgresChangeConfig`, `PostgresCheckpoint`, `PostgresCheckpointStore`, `MemoryPostgresCheckpointStore`, `PostgresChangeSource`, `PostgresCheckpointConflictError`, `PostgresReplicationGapError`, `PostgresEmbeddingPushdown`, `PostgresNotifyConfig`, `PostgresNotificationSource`) passing `verify_docs_artifacts.py` (`H2+H3 <= 14`, HTML `<= 120,000` bytes).
 - **R27.2 (`ch30:t02`)**: Update `docs/reference/native-stubs.md`, `docs/reference/index.md`, and `docs/getting-started/installation.md` for all six `gil_used = false` extensions including `vertebra._postgres` (`src/rs/vertebra-postgres`, `[postgres]` extra), keeping `native-stubs.md` at `H2+H3 <= 14` and `site/reference/native-stubs/index.html <= 120,000` bytes via `heading_level: 4` and `members: false` / concise curated `members:`.
 - **R27.3 (`ch30:t03`)**: Update `docs/usage/cloud-dialers.md` (native `PostgreSQLConfig` Cloud SQL / AlloyDB discovery + mTLS 1.3 + IAM `cloud_auth_options` / `iam_auth_options`), `docs/usage/packaging-and-deployment.md` (six PyO3 extensions including `_postgres` / `vertebra-core[postgres]` and core-5 PGO vs release-LTO `_postgres`), and `docs/usage/queues-and-realtime.md` (replacing legacy third-party package names with `vertebra-core[postgres]` while preserving the truthful caller-injected `PostgreSQLQueueExecutor` `executor=` contract, e.g., wrapping `AsyncPostgreSQLDriver` + `PostgresNotificationSource`, without claiming a built-in default executor).
-- **R27.4 (`ch30:t04`)**: Synchronize `README.md`, `.agents/bundles/knowledge/workflow.md` (trimmed and synced strictly `<= 200` lines), and `AGENTS.md` (synced strictly `<= 100` lines) with nine Rust crates (`vertebra-postgres`), six compiled extensions (`_postgres`), `[dependency-groups].postgres-bench`, `postgres-test`, `postgres-wheel-check`, `postgres-bench`, `postgres-bench-check`, and `make review-route BASE=88c30004`.
+- **R27.4 (`ch30:t04`)**: Synchronize `README.md`, `.agents/bundles/knowledge/workflow.md` (trimmed and synced strictly `<= 200` lines), and `AGENTS.md` (synced strictly `<= 100` lines) with nine Rust crates (`vertebra-postgres`), six compiled extensions (`_postgres`), `[dependency-groups].postgres-bench`, `postgres-test`, `postgres-wheel-check`, `postgres-bench`, `postgres-bench-check`, and `make review-route BASE=213967be`.
 
 ### 2.2 Documentation Artifact & Gate Map
 
@@ -126,7 +126,7 @@ Progress: `[0/12 files documented]`
 - `docs/usage/packaging-and-deployment.md` (`ch30:t03`) — Six PyO3 extensions including `_postgres` (`vertebra-core[postgres]`) and core-5 `make build-pgo` vs release-LTO `vertebra-postgres` builds.
 - `docs/usage/queues-and-realtime.md` (`ch30:t03`) — `PostgreSQLQueueBackend` `vertebra-core[postgres]` installation tabs and truthful caller-injected `PostgreSQLQueueExecutor` (`executor=`) contract replacing stale third-party package references.
 - `README.md` (`ch30:t04`) — Nine Rust crates (`src/rs/vertebra-postgres`), six `gil_used = false` extensions (`_postgres`), `[postgres]` extra, and `postgres-*` Make targets.
-- `.agents/bundles/knowledge/workflow.md` (`ch30:t04`) — Trimmed and synchronized `<= 200`-line workflow reference covering six extensions, `[dependency-groups].postgres-bench`, `postgres-test`, `postgres-wheel-check`, `postgres-bench`, `postgres-bench-check`, and `make review-route BASE=88c30004`.
+- `.agents/bundles/knowledge/workflow.md` (`ch30:t04`) — Trimmed and synchronized `<= 200`-line workflow reference covering six extensions, `[dependency-groups].postgres-bench`, `postgres-test`, `postgres-wheel-check`, `postgres-bench`, `postgres-bench-check`, and `make review-route BASE=213967be`.
 - `AGENTS.md` (`ch30:t04`) — Synchronized `<= 100`-line root agent instructions adding `vertebra-postgres` (`_postgres`) and `postgres-*` quick verification commands.
 
 ## 4. Requirement-to-Task Traceability Matrix
@@ -149,7 +149,7 @@ Progress: `[0/12 files documented]`
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Plan Baseline**: `bf53faf3`; `depends_on_chapters: [ch29-wheel-ci-and-benchmarks]`, `state: planned`, `plan_revision: 6`.
+- **Verified Plan Baseline**: `8e9b324e`; `depends_on_chapters: [ch29-wheel-ci-and-benchmarks]`, `state: planned`, `plan_revision: 6`.
 - **Remaining Tasks in Chapter**: `t01`, `t02`, `t03`, `t04` (`4/4` pending); `[0/12 files documented]`.
 - **Downstream Dependents**: Unblocks [ch31-data-and-testing-okf-sync](../ch31-data-and-testing-okf-sync/spec.md) (`ch31:t01`) for OKF domain, testing, and product knowledge synchronization.
 

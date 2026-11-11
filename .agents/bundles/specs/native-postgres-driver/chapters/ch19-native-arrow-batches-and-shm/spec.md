@@ -12,7 +12,7 @@ depends_on_chapters:
 replan_trigger: null
 current_task: null
 plan_revision: 5
-plan_commit: 936daa9f
+plan_commit: 79eea133
 state_revision: 7
 last_verified_checkpoint: 59a6dc09
 last_reviewed_commit: 59a6dc09
@@ -24,7 +24,7 @@ generated:
 verified:
   - by: agent:flow-setup
     at: "2026-11-07T05:00:00Z"
-    commit: 936daa9f
+    commit: 79eea133
   - by: agent:code-reviewer
     at: "2026-11-10T05:10:00Z"
     commit: 59a6dc09
@@ -152,17 +152,17 @@ Progress: `[0/0 files documented in ch19]` (public Arrow data-plane docs in `doc
 
 ## 5. Implementation Plan
 
-- [x] [e12c9618] native-postgres-driver:ch19:t01 — Define lossless PostgreSQL Arrow schemas over locked workspace Arrow crates (tasks/t01-lossless-arrow-schemas.md)
-- [x] [fdec426a] native-postgres-driver:ch19:t02 — Build bounded native Arrow scalar RecordBatches in Rust (tasks/t02-bounded-arrow-scalar-batches.md)
-- [x] [8a758b35] native-postgres-driver:ch19:t03 — Build recursive Arrow builders for arrays, composites, pgvector, and bitstrings (tasks/t03-nested-arrow-arrays-composites-vectors.md)
+- [x] [3c246fc0] native-postgres-driver:ch19:t01 — Define lossless PostgreSQL Arrow schemas over locked workspace Arrow crates (tasks/t01-lossless-arrow-schemas.md)
+- [x] [1726c31b] native-postgres-driver:ch19:t02 — Build bounded native Arrow scalar RecordBatches in Rust (tasks/t02-bounded-arrow-scalar-batches.md)
+- [x] [fe925db7] native-postgres-driver:ch19:t03 — Build recursive Arrow builders for arrays, composites, pgvector, and bitstrings (tasks/t03-nested-arrow-arrays-composites-vectors.md)
 - [x] [df033deb] native-postgres-driver:ch19:t04 — Serialize adaptive inline and VTBARROW SHM IPC streams with validated ArrowCursor counts (tasks/t04-arrow-ipc-to-shm.md)
 
 **Chapter Recovery Checkpoint:** `make dev && cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --test postgres_arrow_tests && uv run --no-sync python -m mypy.stubtest vertebra._postgres && uv run --no-sync python -m pytest src/py/tests/unit/db/test_postgres_native_data.py -k arrow_count -q` exits `0`.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `plan_commit: 936daa9f`; chapter `state: completed` at `59a6dc09` (`last_reviewed_commit: 59a6dc09`, `last_verified_checkpoint: 59a6dc09`; `make postgres-test`, `pytest src/py/tests/unit/db -k "postgres or pg_dataplane or arrow"` -> `273 passed`, `make lint-all` -> `0`).
-- **Remaining Tasks in Chapter**: None (`4/4` completed: `t01` `e12c9618`, `t02` `fdec426a`, `t03` `8a758b35`, `t04` `df033deb`).
+- **Verified Baseline**: `plan_commit: 79eea133`; chapter `state: completed` at `59a6dc09` (`last_reviewed_commit: 59a6dc09`, `last_verified_checkpoint: 59a6dc09`; `make postgres-test`, `pytest src/py/tests/unit/db -k "postgres or pg_dataplane or arrow"` -> `273 passed`, `make lint-all` -> `0`).
+- **Remaining Tasks in Chapter**: None (`4/4` completed: `t01` `3c246fc0`, `t02` `1726c31b`, `t03` `fe925db7`, `t04` `df033deb`).
 - **Downstream Dependents**: Unblocks `ch20-arrow-copy-import-and-portals` (Arrow `COPY` import plans, streaming `COPY` input bridges, and sync/async Arrow selection and portal streams).
 
 [^pg-contracts]: `.agents/bundles/specs/native-postgres-driver/contracts.md` — Lossless PostgreSQL value, Arrow result, and VTBARROW capsule contracts.

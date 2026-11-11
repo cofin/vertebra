@@ -12,7 +12,7 @@ depends_on_chapters:
 replan_trigger: null
 current_task: "native-postgres-driver:ch31:t01"
 plan_revision: 6
-plan_commit: bf53faf3
+plan_commit: 8e9b324e
 state_revision: 0
 last_verified_checkpoint: null
 last_reviewed_commit: null
@@ -24,7 +24,7 @@ generated:
 verified:
   - by: agent:plan-generator
     at: "2026-11-10T14:45:00Z"
-    commit: bf53faf3
+    commit: 8e9b324e
 sources:
   - id: okf-drivers
     resource: .agents/bundles/knowledge/domains/data/database-drivers-and-dialers.md
@@ -147,7 +147,7 @@ Progress: `[0/12 files documented]`
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Plan Baseline**: `bf53faf3`; `depends_on_chapters: [ch30-user-and-workflow-docs]`, `state: planned`, `plan_revision: 6`.
+- **Verified Plan Baseline**: `8e9b324e`; `depends_on_chapters: [ch30-user-and-workflow-docs]`, `state: planned`, `plan_revision: 6`.
 - **Remaining Tasks in Chapter**: `t01`, `t02`, `t03`, `t04` (`4/4` pending); `[0/12 files documented]`.
 - **Downstream Dependents**: Unblocks [ch32-ffi-okf-and-review-routing-sync](../ch32-ffi-okf-and-review-routing-sync/spec.md) (`ch32:t01`), where `areas.toml` binds `[areas.runtime-ipc].knowledge` and `[areas.pyo3-bridge].knowledge` to the newly created `postgres-native-driver.md` and `postgres-limitations.md` chapters.
 

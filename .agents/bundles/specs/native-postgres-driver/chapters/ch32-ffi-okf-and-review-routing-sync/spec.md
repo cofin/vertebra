@@ -12,7 +12,7 @@ depends_on_chapters:
 replan_trigger: null
 current_task: "native-postgres-driver:ch32:t01"
 plan_revision: 6
-plan_commit: bf53faf3
+plan_commit: 8e9b324e
 state_revision: 0
 last_verified_checkpoint: null
 last_reviewed_commit: null
@@ -24,7 +24,7 @@ generated:
 verified:
   - by: agent:plan-generator
     at: "2026-11-10T14:45:00Z"
-    commit: bf53faf3
+    commit: 8e9b324e
 sources:
   - id: okf-ffi-pattern
     resource: .agents/bundles/knowledge/patterns/rust/ffi-and-gil-discipline.md
@@ -56,7 +56,7 @@ tags:
 
 <!-- truth: start -->
 - **Complete Six-Extension FFI & Packaging Alignment (`t01`–`t02`)**: Synchronizes `ffi-and-gil-discipline.md`, `pyo3-and-python-runtime.md`, `pyo3-ffi-and-batch-dispatch.md` (`212L -> <= 200L`), `packaging-and-pgo.md`, `adr-004-optional-driver-wheels-and-shm-ownership.md`, and `.agents/skills/pyo3-bridge/SKILL.md` from five to all six `gil_used = false` extensions (`_vertebra`, `_bundler`, `_storage`, `_bigquery`, `_spanner`, `_postgres`), covering cross-`cdylib` primitive kwargs, `VTBARROW` `ShmCapsule` ownership, `PendingDeliveryGuard` async drop restoration, and core-5 PGO vs release-LTO `_postgres` packaging [^okf-ffi-pattern] [^okf-ffi-gotcha] [^okf-worker-ffi] [^okf-packaging] [^okf-adr-004].
-- **Review Routing & Checklist Synchronization (`t03`)**: Verifies and synchronizes `src/rs/vertebra-postgres/**` and `src/py/vertebra/_postgres.pyi` coverage, PostgreSQL OKF `knowledge` entries, and `focused_commands` in `areas.toml`, updates `FFI-09` and `PERF-06` in `checklist.md`, and aligns `review-pyo3-bridge/SKILL.md` (`<= 200L`) so `make review-check` and `make review-route BASE=88c30004` validate and route every PostgreSQL crate/stub change prior to `ch33` [^review-areas].
+- **Review Routing & Checklist Synchronization (`t03`)**: Verifies and synchronizes `src/rs/vertebra-postgres/**` and `src/py/vertebra/_postgres.pyi` coverage, PostgreSQL OKF `knowledge` entries, and `focused_commands` in `areas.toml`, updates `FFI-09` and `PERF-06` in `checklist.md`, and aligns `review-pyo3-bridge/SKILL.md` (`<= 200L`) so `make review-check` and `make review-route BASE=213967be` validate and route every PostgreSQL crate/stub change prior to `ch33` [^review-areas].
 <!-- truth: end -->
 
 ## 1. Specification, Context & Provenance
@@ -77,7 +77,7 @@ This chapter updates all `9` files across three `static_validation` worksheets (
 
 ### 1.3 Upstream Baseline & Code Analysis
 
-Parent roadmap: [spec.md](../../spec.md); frozen contracts: [contracts.md](../../contracts.md); depends on [ch31-data-and-testing-okf-sync](../ch31-data-and-testing-okf-sync/spec.md) (which materializes `postgres-native-driver.md` and `postgres-limitations.md` referenced by `areas.toml`). `areas.toml` already carries top-level `src/rs/vertebra-postgres/**` and `src/py/vertebra/_postgres.pyi` globs from `ch08`, which `ch32:t03` verifies alongside knowledge-list and focused-command synchronization so `make review-route BASE=88c30004` covers every touched area cleanly [^review-areas].
+Parent roadmap: [spec.md](../../spec.md); frozen contracts: [contracts.md](../../contracts.md); depends on [ch31-data-and-testing-okf-sync](../ch31-data-and-testing-okf-sync/spec.md) (which materializes `postgres-native-driver.md` and `postgres-limitations.md` referenced by `areas.toml`). `areas.toml` already carries top-level `src/rs/vertebra-postgres/**` and `src/py/vertebra/_postgres.pyi` globs from `ch08`, which `ch32:t03` verifies alongside knowledge-list and focused-command synchronization so `make review-route BASE=213967be` covers every touched area cleanly [^review-areas].
 
 ## 2. Requirements, Concrete Contracts & Architecture
 
@@ -85,12 +85,12 @@ Parent roadmap: [spec.md](../../spec.md); frozen contracts: [contracts.md](../..
 
 - **R1.5 / R27.9 (`ch32:t01`)**: Synchronize `ffi-and-gil-discipline.md` (`<= 200L`), `pyo3-and-python-runtime.md` (`<= 200L`), and trimmed `pyo3-ffi-and-batch-dispatch.md` (`212L -> <= 200L`) to six `#[pymodule(gil_used = false)]` extensions (`_postgres`), distinct per-extension `spawn_rust_db_task_with_attr` drainer attributes, cross-`cdylib` primitive-kwargs (never sharing sibling `Arc`/`PyRef` handles), `VTBARROW` `ShmCapsule` single-claim adoption, and `PendingDeliveryGuard` async drop restoration for cancelled notification/replication `next()` futures.
 - **R26.4 / R27.10 (`ch32:t02`)**: Synchronize `packaging-and-pgo.md` (`<= 200L`), `adr-004-optional-driver-wheels-and-shm-ownership.md` (`<= 200L`), and `.agents/skills/pyo3-bridge/SKILL.md` (`<= 200L`) for five standalone optional companion distributions including `vertebra-postgres` (`vertebra-core[postgres]`), core-5 `make build-pgo` vs workspace release-LTO `vertebra-postgres` compilation, `VTBARROW` producer-owned cleanup, and six-extension `pyo3-bridge` rules and `mypy.stubtest` commands.
-- **R8.1 / R27.11 (`ch32:t03`)**: Update `.agents/skills/review-core/references/areas.toml` (verifying/preserving `src/rs/vertebra-postgres/**` in `runtime-ipc` and `pyo3-bridge` plus `src/py/vertebra/_postgres.pyi` in `pyo3-bridge`, registering `postgres-native-driver.md` and `postgres-limitations.md` in `knowledge`, and aligning `focused_commands`), update `.agents/skills/review-core/references/checklist.md` (`FFI-09` covering all six `.pyi` stubs including `_postgres.pyi` and `PERF-06` recording `[dependency-groups].postgres-bench`), and update `.agents/skills/review-pyo3-bridge/SKILL.md` (`<= 200L`) to cover `vertebra-postgres` and `_postgres.pyi`, passing `make review-check` and `make review-route BASE=88c30004`.
+- **R8.1 / R27.11 (`ch32:t03`)**: Update `.agents/skills/review-core/references/areas.toml` (verifying/preserving `src/rs/vertebra-postgres/**` in `runtime-ipc` and `pyo3-bridge` plus `src/py/vertebra/_postgres.pyi` in `pyo3-bridge`, registering `postgres-native-driver.md` and `postgres-limitations.md` in `knowledge`, and aligning `focused_commands`), update `.agents/skills/review-core/references/checklist.md` (`FFI-09` covering all six `.pyi` stubs including `_postgres.pyi` and `PERF-06` recording `[dependency-groups].postgres-bench`), and update `.agents/skills/review-pyo3-bridge/SKILL.md` (`<= 200L`) to cover `vertebra-postgres` and `_postgres.pyi`, passing `make review-check` and `make review-route BASE=213967be`.
 
 ### 2.2 Validation & Routing Map
 
 - `5` OKF chapters (`ffi-and-gil-discipline.md`, `pyo3-and-python-runtime.md`, `pyo3-ffi-and-batch-dispatch.md`, `packaging-and-pgo.md`, `adr-004-optional-driver-wheels-and-shm-ownership.md`) -> `wc -l <= 200`, truth blocks `<= 40L`, 1:1 `sources:` <-> footnotes, `make review-check`.
-- `4` skill/routing files (`pyo3-bridge/SKILL.md`, `areas.toml`, `checklist.md`, `review-pyo3-bridge/SKILL.md`) -> `SKILL.md <= 200L`, `make review-check`, and `make review-route BASE=88c30004`.
+- `4` skill/routing files (`pyo3-bridge/SKILL.md`, `areas.toml`, `checklist.md`, `review-pyo3-bridge/SKILL.md`) -> `SKILL.md <= 200L`, `make review-check`, and `make review-route BASE=213967be`.
 
 ### 2.3 Edge-Case & Failure-Mode Matrix
 
@@ -127,7 +127,7 @@ Progress: `[0/9 files documented]`
 | --- | --- | --- | --- |
 | R1, R7, R20, R27 (FFI patterns, gotchas, & worker boundary OKF) | [t01](tasks/t01-ffi-gil-and-worker-okf-sync.md) | `static_validation` | `make review-check`, `wc -l <= 200` |
 | R1, R20, R26, R27 (Packaging/PGO, ADR-004, & `pyo3-bridge` skill) | [t02](tasks/t02-packaging-adr-and-pyo3-skill-sync.md) | `static_validation` | `make review-check`, `wc -l <= 200` |
-| R1, R8, R27 (`areas.toml`, `checklist.md`, & `review-pyo3-bridge` skill) | [t03](tasks/t03-review-areas-checklist-and-bridge-skill.md) | `static_validation` | `make review-check`, `make review-route BASE=88c30004` |
+| R1, R8, R27 (`areas.toml`, `checklist.md`, & `review-pyo3-bridge` skill) | [t03](tasks/t03-review-areas-checklist-and-bridge-skill.md) | `static_validation` | `make review-check`, `make review-route BASE=213967be` |
 
 ## 5. Implementation Plan
 
@@ -135,13 +135,13 @@ Progress: `[0/9 files documented]`
 - [ ] native-postgres-driver:ch32:t02 — Synchronize packaging-and-pgo, ADR-004, and pyo3-bridge engineering skill for vertebra-postgres (tasks/t02-packaging-adr-and-pyo3-skill-sync.md)
 - [ ] native-postgres-driver:ch32:t03 — Synchronize review areas.toml, checklist.md, and review-pyo3-bridge skill routing (tasks/t03-review-areas-checklist-and-bridge-skill.md)
 
-**Chapter Recovery Checkpoint:** `make review-check && make review-route BASE=88c30004` exits `0` with all updated OKF and `SKILL.md` files strictly `<= 200` lines (`[33/33 files documented]` cumulative across `ch30`–`ch32`).
+**Chapter Recovery Checkpoint:** `make review-check && make review-route BASE=213967be` exits `0` with all updated OKF and `SKILL.md` files strictly `<= 200` lines (`[33/33 files documented]` cumulative across `ch30`–`ch32`).
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Plan Baseline**: `bf53faf3`; `depends_on_chapters: [ch31-data-and-testing-okf-sync]`, `state: planned`, `plan_revision: 6`.
+- **Verified Plan Baseline**: `8e9b324e`; `depends_on_chapters: [ch31-data-and-testing-okf-sync]`, `state: planned`, `plan_revision: 6`.
 - **Remaining Tasks in Chapter**: `t01`, `t02`, `t03` (`3/3` pending); `[0/9 files documented]`.
-- **Downstream Dependents**: Unblocks [ch33-final-review-and-release-gate](../ch33-final-review-and-release-gate/spec.md) (`ch33:t01`) for complete-driver verification, routed correctness review, and fresh zero-context quality review across `88c30004..HEAD`.
+- **Downstream Dependents**: Unblocks [ch33-final-review-and-release-gate](../ch33-final-review-and-release-gate/spec.md) (`ch33:t01`) for complete-driver verification, routed correctness review, and fresh zero-context quality review across `213967be..HEAD`.
 
 [^okf-ffi-pattern]: `.agents/bundles/knowledge/patterns/rust/ffi-and-gil-discipline.md` — PyO3 0.30.1 FFI and GIL discipline pattern chapter.
 [^okf-ffi-gotcha]: `.agents/bundles/knowledge/gotchas/pyo3-and-python-runtime.md` — PyO3 FFI, embedded globals, and Python runtime gotchas chapter.
