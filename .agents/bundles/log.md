@@ -2,7 +2,7 @@
 
 ## [2026-11-09T21:46:00Z] flow-archive | native-duckdb-driver
 
-Completed 6 tasks (`t01`–`t06`) and documentation sync (`a1af802c`) on `feat/native-duckdb-driver` stacked on `feat/driver-fail-loud` (`88c30004`). Source range `88c30004..a1af802c` is preserved in Git.
+Completed 6 tasks (`t01`–`t06`) and documentation sync (`45cb828b`) on `feat/native-duckdb-driver` stacked on `feat/driver-fail-loud` (`88c30004`). Source range `88c30004..45cb828b` is preserved in Git.
 
 Durable synthesis and `/flow:sync` updates are committed in `database-drivers-and-dialers.md`, `query-pipeline-cdc-and-tenancy.md`, `workflow.md`, `polyglot-test-matrix.md`, `benchmarks-and-free-threaded.md`, `product.md`, `tech-stack.md`, `specs/native-data-platform/spec.md`, `AGENTS.md`, `pyo3-bridge`, `review-pyo3-bridge`, and `pyo3-bridge-{reviewer,specialist}.md` before contracting `.agents/bundles/specs/native-duckdb-driver/`.
 
@@ -15,7 +15,7 @@ Functional task commits:
 - `native-duckdb-driver:t03`: `9c549ed1`.
 - `native-duckdb-driver:t04`: `8869f7c1`.
 - `native-duckdb-driver:t05`: `bb4d2b59`.
-- `native-duckdb-driver:t06`: `89de2b8c` (docs/OKF checkpoint `a1af802c`).
+- `native-duckdb-driver:t06`: `6f8c41d8` (docs/OKF checkpoint `45cb828b`).
 
 ## [2026-11-09T20:56:00Z] flow-archive | driver-fail-loud
 
