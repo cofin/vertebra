@@ -11,7 +11,7 @@ The completed database foundation, fail-loud baseline, and standalone DuckDB, My
 
 ## 2. Active Feature Specifications (`state: active`)
 
-- [`native-postgres-driver`](native-postgres-driver/spec.md) — Standalone Rust PostgreSQL wheel (`vertebra-postgres`) covering wire authentication, cloud mTLS/IAM, pools, single-Sync pipelines, binary COPY, SHM Arrow, notifications, logical replication, and native adapter cutover (`state: active`; [`chapters/ch01`–`ch33`](native-postgres-driver/chapters/index.md), `118` tasks, `21/33` chapters completed through `ch21`).
+- [`native-postgres-driver`](native-postgres-driver/spec.md) — Standalone Rust PostgreSQL wheel (`vertebra-postgres`) covering wire authentication, cloud mTLS/IAM, pools, single-Sync pipelines, binary COPY, SHM Arrow, notifications, logical replication, and native adapter cutover (`state: active`; [`chapters/ch01`–`ch33`](native-postgres-driver/chapters/index.md), `118` tasks, `21/33` chapters completed through `ch21`, `ch22` active at `ch22:t03` with `80/118` tasks completed).
 
 ## 3. Draft Child Flow Charters (`state: draft`)
 

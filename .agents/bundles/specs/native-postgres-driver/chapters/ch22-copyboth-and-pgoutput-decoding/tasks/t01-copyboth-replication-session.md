@@ -5,7 +5,7 @@ chapter_id: ch22-copyboth-and-pgoutput-decoding
 title: Start dedicated CopyBoth logical replication sessions
 description: Factor bounded CopyBothResponse framing in protocol.rs and establish dedicated replication=database PostgresReplicationConnection sessions with catalog preflight and IDENTIFY_SYSTEM validation.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -26,18 +26,18 @@ tests:
 estimated_loc: 230
 plan_revision: 6
 plan_commit: ef86844f
-state_revision: 0
+state_revision: 1
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-11T01:52:41Z"
+last_verified_commit: 8dd5df3f
+verification_evidence: "cargo test -p vertebra-postgres --test postgres_replication_wire_tests (9 passed), cargo fmt --check, and cargo clippy --workspace --all-targets --features tls,compression,gcp -- -D warnings exited 0"
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-10T14:45:00Z"
-commit: null
+updated_at: "2026-11-11T01:53:00Z"
+commit: 8dd5df3f
 generated:
   by: flow-revise
   at: "2026-11-10T14:45:00Z"
@@ -130,9 +130,9 @@ Factor the bounded backend message reader in `src/rs/vertebra-postgres/src/proto
 
 ## Acceptance Criteria
 
-- [ ] `protocol.rs` shares one deadline-aware bounded `read_frame(..., deadline: Option<Instant>)` helper and decodes replication `'W'` (`CopyBothResponse`, `format == 0`, `0` columns) while leaving `read_message` and `postgres-protocol` decoding intact (R22).
-- [ ] `PostgresReplicationConnection` rejects `PoolerMode::Transaction | Statement | Auto` (requiring explicit `PoolerMode::Direct | Session`) with `PostgresError::Interface` before dialing, reuses `session::establish_standalone_connection(config, false/true)`, hashes `publication_fingerprint` via one parameterized `LEFT JOIN` query without creating/dropping slots, emits exact `proto_version '1'` `START_REPLICATION` SQL without `two_phase`, and drains or discards on shutdown (R22).
-- [ ] Commit message follows `feat(postgres): establish logical CopyBoth sessions` once verified.
+- [x] `protocol.rs` shares one deadline-aware bounded `read_frame(..., deadline: Option<Instant>)` helper and decodes replication `'W'` (`CopyBothResponse`, `format == 0`, `0` columns) while leaving `read_message` and `postgres-protocol` decoding intact (R22).
+- [x] `PostgresReplicationConnection` rejects `PoolerMode::Transaction | Statement | Auto` (requiring explicit `PoolerMode::Direct | Session`) with `PostgresError::Interface` before dialing, reuses `session::establish_standalone_connection(config, false/true)`, hashes `publication_fingerprint` via one parameterized `LEFT JOIN` query without creating/dropping slots, emits exact `proto_version '1'` `START_REPLICATION` SQL without `two_phase`, and drains or discards on shutdown (R22).
+- [x] Commit message follows `feat(postgres): establish logical CopyBoth sessions` once verified.
 
 ## Notes & Discoveries
 

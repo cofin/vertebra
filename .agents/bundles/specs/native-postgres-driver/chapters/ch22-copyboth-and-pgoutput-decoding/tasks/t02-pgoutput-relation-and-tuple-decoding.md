@@ -5,7 +5,7 @@ chapter_id: ch22-copyboth-and-pgoutput-decoding
 title: Decode pgoutput relation metadata and lossless tuples
 description: Implement incremental PgOutputDecoder with bounded RelationCache, Type invalidation, shared lossless tuple decoding, and pure-Python PgUnchangedToast and replication record types.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -26,18 +26,18 @@ tests:
 estimated_loc: 240
 plan_revision: 6
 plan_commit: ef86844f
-state_revision: 0
+state_revision: 1
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-11T01:52:41Z"
+last_verified_commit: 16429b11
+verification_evidence: "cargo test -p vertebra-postgres --test postgres_pgoutput_tests --test postgres_replication_wire_tests (7 + 9 passed), cargo clippy -p vertebra-postgres --all-targets -- -D warnings, ruff check, mypy, pytest test_postgres_types.py (26 passed), and scan_public_docstrings exited 0"
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-10T14:45:00Z"
-commit: null
+updated_at: "2026-11-11T01:53:00Z"
+commit: 16429b11
 generated:
   by: flow-revise
   at: "2026-11-10T14:45:00Z"
@@ -131,13 +131,14 @@ Implement `PgOutputDecoder` in `src/rs/vertebra-postgres/src/replication/pgoutpu
 
 ## Acceptance Criteria
 
-- [ ] `PgOutputDecoder` parses `'R'`, mismatch-aware `'Y'` (retaining matching preloaded `vector`/`halfvec`/`enum`/`domain`/`range`/`array`/`composite` entries), and four-state `TupleData` (`'n'`, `'u'`, `'t'`, `'b'`) incrementally across arbitrary splits and coalesced frames using shared `vertebra-postgres` value codecs (R22).
-- [ ] `RelationCache` enforces the `4096`-relation cap and immutable `Arc` schema snapshots, while `types.py` defines `PgUnchangedToast` (`PG_UNCHANGED_TOAST`), `PostgresReplicationIdentity`, and GC-tracked `PostgresReplicationRecord` (`frozen=True`, without `gc=False`) without optional native wheel imports (R22).
-- [ ] Commit message follows `feat(postgres): decode pgoutput relations and tuples` once verified.
+- [x] `PgOutputDecoder` parses `'R'`, mismatch-aware `'Y'` (retaining matching preloaded `vector`/`halfvec`/`enum`/`domain`/`range`/`array`/`composite` entries), and four-state `TupleData` (`'n'`, `'u'`, `'t'`, `'b'`) incrementally across arbitrary splits and coalesced frames using shared `vertebra-postgres` value codecs (R22).
+- [x] `RelationCache` enforces the `4096`-relation cap and immutable `Arc` schema snapshots, while `types.py` defines `PgUnchangedToast` (`PG_UNCHANGED_TOAST`), `PostgresReplicationIdentity`, and GC-tracked `PostgresReplicationRecord` (`frozen=True`, without `gc=False`) without optional native wheel imports (R22).
+- [x] Commit message follows `feat(postgres): decode pgoutput relations and tuples` once verified.
 
 ## Notes & Discoveries
 
 - `PgUnchangedToast` is intentionally excluded from `PostgresValue` so accidentally passing an unchanged-TOAST marker into a SQL `INSERT`/`UPDATE` parameter list fails preflight type checking immediately [^npd-contracts].
+- Recursive `preload_publication_types` resolves published attribute OIDs plus transitive `array`, `domain`, `range`, PG14+ `multirange`, `composite`, and `pgvector` `vector`/`halfvec` metadata on the standalone ordinary connection before closing `meta_conn` and opening `replication=database`, keeping zero SQL on `CopyBoth`.
 
 [^npd-contracts]: `.agents/bundles/specs/native-postgres-driver/contracts.md` — Exact PostgreSQL value records, replication identity, and TOAST rules.
 [^npd-proto-research]: `.agents/bundles/specs/native-postgres-driver/research/protocol-and-execution_20261105.md` — pgoutput v1 Relation, Type, and four-state TupleData message layouts.
