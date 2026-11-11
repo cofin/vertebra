@@ -109,7 +109,11 @@ duck_cfg = DuckDBConfig(
         DuckDBSecretConfig(
             name="lakehouse_s3",
             secret_type="s3",
-            value={"key_id": "access-key", "secret": "secret-key", "region": "us-east-1"},
+            value={
+                "key_id": "access-key",
+                "secret": "secret-key",
+                "region": "us-east-1",
+            },
         ),
     ),
 )
