@@ -15,4 +15,4 @@ Every pattern chapter contains code-truth blocks (`<!-- truth: start -->` / `<!-
 
 ## TypeScript (`typescript/`)
 
-- [Client SDK Root Exports, Subpaths & Build Entries](typescript/client-and-adapter-subpaths.md) — Zero-dependency `@vertebra/client` core, subpath exports (`vite`, `react`, `vue`, `svelte`, `angular`, `htmx`, `store`, `wasm`, `arrow`, `live`, `apex`, `telemetry`), `tsup` build entries, Biome lint rules, and codegen parity.
+- [Client SDK Root Exports, Subpaths & Build Entries](typescript/client-and-adapter-subpaths.md) — Zero-dependency `@vertebra/client` core, subpath exports (`vite`, `hmr`, `router`, `react`, `vue`, `svelte`, `angular`, `htmx`, `store`, `wasm`, `arrow`, `live`, `apex`, `telemetry`, `webmcp`, `agent`), `tsup` build entries, Biome lint rules, and codegen parity.

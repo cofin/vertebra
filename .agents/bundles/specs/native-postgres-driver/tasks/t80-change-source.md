@@ -1,25 +1,24 @@
 ---
 type: Task
-id: native-postgres-driver:t80
-title: Implement PostgreSQL change sources and checkpoint stores
+id: "native-postgres-driver:t80"
+title: "Implement PostgreSQL change sources and checkpoint stores"
+description: "Implement PostgreSQL change sources and checkpoint stores for the standalone vertebra-postgres native driver."
+status: stable
 state: pending
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
-- native-postgres-driver:t79
+  - "native-postgres-driver:t79"
 files:
-- src/py/vertebra/db/adapters/postgres/events.py
-- src/py/vertebra/db/adapters/postgres/change_stream.py
-- src/py/vertebra/db/adapters/postgres/types.py
-- src/py/vertebra/db/adapters/postgres/__init__.py
-- src/py/tests/unit/db/test_postgres_change_source.py
+  - src/py/vertebra/db/adapters/postgres/events.py
+  - src/py/vertebra/db/adapters/postgres/change_stream.py
+  - src/py/vertebra/db/adapters/postgres/types.py
+  - src/py/vertebra/db/adapters/postgres/__init__.py
+  - src/py/tests/unit/db/test_postgres_change_source.py
 tests:
-- src/py/tests/unit/db/test_postgres_change_source.py::test_change_source_event_envelopes
-- src/py/tests/unit/db/test_postgres_change_source.py::test_checkpoint_store_atomic_compare_and_swap
-- src/py/tests/unit/db/test_postgres_change_source.py::test_checkpoint_store_identity_and_monotonicity
-- src/py/tests/unit/db/test_postgres_change_source.py::test_change_source_structural_port
+  - src/py/tests/unit/db/test_postgres_change_source.py
 plan_revision: 2
-plan_commit: "7657e8b7c2c96bdda6821aec70a2b603f438a127"
+plan_commit: 9af810f5
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -29,16 +28,13 @@ next_step: null
 last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
-created_at: '2026-11-05T18:25:07Z'
-updated_at: '2026-11-06T06:30:00Z'
+created_at: "2026-11-05T18:25:07Z"
+updated_at: "2026-11-07T04:15:00Z"
 commit: null
 tags:
-- postgres
-- native
-- data-events
-requirements:
-- R22
-- R23
+  - postgres
+  - native
+  - data-events
 ---
 
 # Implement PostgreSQL change sources and checkpoint stores

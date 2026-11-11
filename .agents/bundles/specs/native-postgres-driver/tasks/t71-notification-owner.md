@@ -1,22 +1,23 @@
 ---
 type: Task
-id: native-postgres-driver:t71
-title: Pump notifications on a dedicated bounded session
+id: "native-postgres-driver:t71"
+title: "Pump notifications on a dedicated bounded session"
+description: "Pump notifications on a dedicated bounded session for the standalone vertebra-postgres native driver."
+status: stable
 state: pending
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
-- native-postgres-driver:t70
+  - "native-postgres-driver:t70"
 files:
-- src/rs/vertebra-postgres/src/lib.rs
-- src/rs/vertebra-postgres/src/notifications.rs
-- src/rs/vertebra-postgres/src/session.rs
-- src/rs/vertebra-postgres/tests/postgres_notification_wire_tests.rs
+  - src/rs/vertebra-postgres/src/lib.rs
+  - src/rs/vertebra-postgres/src/notifications.rs
+  - src/rs/vertebra-postgres/src/session.rs
+  - src/rs/vertebra-postgres/tests/postgres_notification_wire_tests.rs
 tests:
-- src/rs/vertebra-postgres/tests/postgres_notification_wire_tests.rs::idle_notifications
-- src/rs/vertebra-postgres/tests/postgres_notification_wire_tests.rs::notification_overflow_is_explicit
+  - src/rs/vertebra-postgres/tests/postgres_notification_wire_tests.rs
 plan_revision: 2
-plan_commit: "7657e8b7c2c96bdda6821aec70a2b603f438a127"
+plan_commit: 9af810f5
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -26,15 +27,13 @@ next_step: null
 last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
-created_at: '2026-11-05T18:25:07Z'
-updated_at: '2026-11-06T06:30:00Z'
+created_at: "2026-11-05T18:25:07Z"
+updated_at: "2026-11-07T04:15:00Z"
 commit: null
 tags:
-- postgres
-- native
-- data-events
-requirements:
-- R21
+  - postgres
+  - native
+  - data-events
 ---
 
 # Pump notifications on a dedicated bounded session

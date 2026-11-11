@@ -9,12 +9,15 @@ Active specifications and promoted research notes under `.agents/bundles/specs/`
 
 The completed database foundation is documented in [driver contracts and adapter layout](../knowledge/domains/data/database-drivers-and-dialers.md) and [ADR-004](../knowledge/decisions/adr-004-optional-driver-wheels-and-shm-ownership.md).
 
-## 2. Planned Feature Specifications (`state: planned`)
+## 2. Active Feature Specifications (`state: active`)
 
-- [`storage-completeness`](storage-completeness/spec.md) — Complete `SyncObjectStore` and `AsyncObjectStore` (`vertebra-storage`), unified GCP token caches, fail-closed construction, and SQLSpec, Advanced Alchemy, Django, and Litestar storage contracts (`t01`–`t07`).
+None.
+
+## 3. Planned Feature Specifications (`state: planned`)
+
 - [`native-postgres-driver`](native-postgres-driver/spec.md) — Standalone Rust PostgreSQL wheel (`vertebra-postgres`) covering wire authentication, cloud mTLS/IAM, pools, single-Sync pipelines, binary COPY, SHM Arrow, notifications, logical replication, and native adapter cutover (`t01`–`t102`).
 
-## 3. Draft Child Flow Charters (`state: draft`)
+## 4. Draft Child Flow Charters (`state: draft`)
 
 - [`broker-pool-sharing`](broker-pool-sharing/spec.md) — Shared broker-owned pools for any SQLSpec, Advanced Alchemy, or SQLAlchemy config.
 - [`native-oracle-driver`](native-oracle-driver/spec.md) — Standalone Rust Oracle Thin wheel (`vertebra-oracle`).
@@ -27,7 +30,7 @@ The completed database foundation is documented in [driver contracts and adapter
 - [`sqlspec-adapter-parity`](sqlspec-adapter-parity/spec.md) — Feature-complete SQLSpec per-engine adapters, stores, and data dictionaries.
 - [`queues-tasks-and-channels`](queues-tasks-and-channels/spec.md) — Native PostgreSQL and Oracle `QueueStore` backends, `litestar-queues`, Django tasks, distributed channels, and `ValkeyStore`.
 
-## 4. Promoted Spec Research (`state: promoted`)
+## 5. Promoted Spec Research (`state: promoted`)
 
 - [`gap-analysis_20261103.md`](native-data-platform/research/gap-analysis_20261103.md) — Broker, native driver, and storage gap analysis (`native-data-platform`).
 - [`rust-driver-crates_20261103.md`](native-data-platform/research/rust-driver-crates_20261103.md) — Primary-source Rust client crate comparison and per-engine wheel packaging (`native-data-platform`).

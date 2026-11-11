@@ -3,21 +3,33 @@ type: Guide
 title: "ASGI, RSGI & WSGI Runners"
 description: "How the Python worker drives mounted ASGI 3.0, RSGI 1.6, and PEP 3333 WSGI apps via Rust C-API PyIter_Send batch drivers, lazy scopes, and zero-suspension awaitables."
 status: stable
-tags: [architecture, worker, asgi, rsgi, wsgi, python]
+tags:
+  - architecture
+  - worker
+  - asgi
+  - rsgi
+  - wsgi
+  - python
 generated:
   by: flow/0.26.0
   at: "2026-11-04T04:33:00Z"
 verified:
   - by: agent:flow-setup
-    at: "2026-11-04T04:33:00Z"
-    commit: f741701
+    at: "2026-11-07T03:55:00Z"
+    commit: 9af810f5
 sources:
   - id: src-server-worker-py
     resource: src/py/vertebra/server/worker.py
     title: "Python implementation module (src/py/vertebra/server/worker.py)"
+  - id: src-server-loops-py
+    resource: src/py/vertebra/server/_loops.py
+    title: "Python implementation module (src/py/vertebra/server/_loops.py)"
   - id: src-server-dispatch-py
     resource: src/py/vertebra/server/_dispatch.py
     title: "Python implementation module (src/py/vertebra/server/_dispatch.py)"
+  - id: src-server-fastpath-core-py
+    resource: src/py/vertebra/server/_fastpath_core.py
+    title: "Python implementation module (src/py/vertebra/server/_fastpath_core.py)"
   - id: src-server-fastpath-py
     resource: src/py/vertebra/server/_fastpath.py
     title: "Python implementation module (src/py/vertebra/server/_fastpath.py)"
@@ -60,10 +72,12 @@ sources:
 
 <!-- truth: start -->
 - `drive_asgi_batch` and `drive_native_batch` step synchronous coroutine prefixes directly in Rust via `PyIter_Send`, promoting only suspended coroutines into `asyncio.Task` objects via `_SteppedCoroutine`.
+- `_loops.py` resolves `LoopBackend` (`auto`, `uvloop`, `winloop`, `rloop`, `asyncio`) via `_LOOP_BACKEND_SPECS`, probing `winloop` on `win32` and `uvloop` then `rloop` on `posix` before falling back to stdlib `asyncio`.
+- `_fastpath_core.py` defines `FastPathProvider`, `DirectPlan`, and `QueryParamSpec` so `attach_framework_fastpath` resolves lazy framework adapters without importing unselected third-party frameworks.
 - `drive_rsgi_batch` drives RSGI 1.6 scopes with frozen `_RsgiReadyAwaitable` singletons, and `drive_wsgi_batch` executes PEP 3333 apps over zero-copy `WsgiInput::from_snapshot` buffers and state-tracked `_WsgiStartResponse`.
 <!-- truth: end -->
 
-Applications mounted via `App.mount(prefix, app, protocol=...)` (or passed directly to `vtb run app --asgi`) are served by protocol adapters initialized in [`Worker`](../../../../../src/py/vertebra/server/worker.py)[^src-server-worker-py] (`detect_interface` selects RSGI when `__rsgi__` is present, then ASGI or WSGI). Requests routed to a mount carry `MOUNT_HANDLER_BASE | mount_idx` for `O(1)` lookup (see [PyO3 FFI & Batch Dispatch](pyo3-ffi-and-batch-dispatch.md)). Litestar-specific fastpath and offload integration is detailed in [Litestar Integration](../../domains/extensions/litestar.md).
+Applications mounted via `App.mount(prefix, app, protocol=...)` (or passed directly to `vtb run app --asgi`) are served by protocol adapters initialized in [`Worker`](../../../../../src/py/vertebra/server/worker.py)[^src-server-worker-py] (`detect_interface` selects RSGI when `__rsgi__` is present, then ASGI or WSGI) on the event loop resolved by [`resolve_loop_backend`](../../../../../src/py/vertebra/server/_loops.py)[^src-server-loops-py] (`_LOOP_BACKEND_SPECS` orders `winloop` on Windows and `uvloop` then `rloop` on POSIX ahead of `asyncio`). Requests routed to a mount carry `MOUNT_HANDLER_BASE | mount_idx` for `O(1)` lookup (see [PyO3 FFI & Batch Dispatch](pyo3-ffi-and-batch-dispatch.md)). Litestar-specific fastpath and offload integration is detailed in [Litestar Integration](../../domains/extensions/litestar.md).
 
 ## ASGI 3.0 (`asgi.rs`, `_asgi/_runner.py`)
 
@@ -77,10 +91,11 @@ Applications mounted via `App.mount(prefix, app, protocol=...)` (or passed direc
   - `PYGEN_NEXT`: wraps `(coro, first_yielded, finalizer)` in a Rust `_SteppedCoroutine` (`ProtocolFinalizer::Asgi`, `ProtocolFinalizer::Rsgi`, or `ProtocolFinalizer::Native`) accepted natively by `asyncio`, `uvloop`, `winloop`, and `rloop` `create_task` without an intermediate Python wrapper frame.
   - `PYGEN_ERROR`: logs unhandled app exceptions and emits a `500` response if headers were not yet sent.
 
-### `AsgiRunner`, `AsgiLifespan`, and `attach_framework_fastpath` (`_asgi/_runner.py`, `_asgi/_queues.py`, `_fastpath.py`, `worker.py`)
+### `AsgiRunner`, `AsgiLifespan`, and `attach_framework_fastpath` (`_asgi/_runner.py`, `_asgi/_queues.py`, `_fastpath_core.py`, `_fastpath.py`, `worker.py`)
 
 - [`AsgiLifespan`](../../../../../src/py/vertebra/server/_asgi/_runner.py)[^src-server-asgi-runner-py] drives the ASGI 3.0 `lifespan` protocol (`lifespan.startup` -> `lifespan.startup.complete` / `lifespan.startup.failed` on worker entry, and `lifespan.shutdown` -> `lifespan.shutdown.complete` on worker exit). [`Worker.run`](../../../../../src/py/vertebra/server/worker.py) enters `AsgiLifespan` for every mounted ASGI application before serving requests and passes the shared `lifespan_state` dict into `AsgiRunner` so `scope["state"]` exposes lifespan-initialized resources. Apps that do not implement `lifespan` gracefully degrade to HTTP-only mode.
-- [`attach_framework_fastpath`](../../../../../src/py/vertebra/server/_fastpath.py)[^src-server-fastpath-py] is invoked by `Worker._instantiate_mount_runners` and `WsgiAdapter` to auto-detect and idempotently wrap `Litestar`, `FastAPI`, `Starlette`, `Flask`, and `Django` apps with their zero-closure `FastPath` (`wrap_asgi_fastpath` / `wrap_wsgi`) and bind `mount_prefix` for stacked `App.mount` sub-applications.
+- [`_fastpath_core.py`](../../../../../src/py/vertebra/server/_fastpath_core.py)[^src-server-fastpath-core-py] defines the `FastPathProvider` protocol (`matches`, `attach`), `register_fastpath_provider`, `resolve_fastpath_provider` (lazy module loader over `Litestar`, `FastAPI`, `Starlette`, `Flask`, and `Django`), and shared `DirectPlan` / `QueryParamSpec` compiled route descriptors.
+- [`attach_framework_fastpath`](../../../../../src/py/vertebra/server/_fastpath.py)[^src-server-fastpath-py] is invoked by `Worker._instantiate_mount_runners` and `WsgiAdapter` to resolve a matching `FastPathProvider`, idempotently wrap `Litestar`, `FastAPI`, `Starlette`, `Flask`, and `Django` apps with their zero-closure `FastPath` (`wrap_asgi_fastpath` / `wrap_wsgi`), and bind `mount_prefix` for stacked `App.mount` sub-applications.
 - [`AsgiRunner`](../../../../../src/py/vertebra/server/_asgi/_runner.py) finalizes attached `VertebraPlugin` state (`ensure_finalized`), exposes `dispatch_app` (wrapping `__vertebra_fastpath__` ahead of `app` when present), and routes unary HTTP batches directly to `_vertebra.drive_asgi_batch` on the active event loop.
 - `AsgiReceive`, `AsgiSend` (including `send_raw_response`), `AsgiResponse`, and bounded `AsgiStreamQueuePair` (`_asgi/_queues.py`) back standalone `run_single` test invocations, WebSocket upgrades, and full-duplex streaming exchanges.
 
@@ -89,7 +104,7 @@ Applications mounted via `App.mount(prefix, app, protocol=...)` (or passed direc
 - [`RsgiScope`](../../../../../src/rs/vertebra-py/src/rsgi/scope.rs)[^src-vertebra-py-src-rsgi-scope-rs] (`frozen, immutable_type`, conditional `freelist = 128`) stores `(Arc<BatchSnapshot>, index, root_path, OnceLock<Py<Headers>>)` with **zero** eager Rust `String` allocations on construction, slicing `path` / `root_path` lazily from the snapshot, caching `.headers` (`Headers`), and returning static `pyo3::intern!` strings for `proto`, `http_version`, `scheme`, and standard HTTP methods.
 - [`RsgiReadyAwaitable`](../../../../../src/rs/vertebra-py/src/rsgi/http.rs)[^src-vertebra-py-src-rsgi-http-rs] (`_RsgiReadyAwaitable`) is `frozen, immutable_type` (`&self` on `__await__` and `__next__`), eliminating `PyBorrowMutError` races when multiple threads await the cached singleton concurrently under free-threaded `3.14t`/`3.15t`.
 - [`RsgiHttpProtocol`](../../../../../src/rs/vertebra-py/src/rsgi/http.rs) submits responses directly into the Rust SHM / `BatchBridge` transport inside `response_empty`, `response_str`, `response_bytes`, and `response_file` (releasing the GIL for file reads, and buffering for `take_response()` only when `direct_submit=False` in isolated unit tests).
-- [`drive_rsgi_batch(app, batch, loop, root_path)`](../../../../../src/rs/vertebra-py/src/rsgi/mod.rs)[^src-vertebra-py-src-rsgi-mod-rs] resolves `getattr(app, "__rsgi__", app)` once per batch, steps each handler via `PyIter_Send`, completes non-suspending handlers in zero `asyncio.Task` allocations, promotes suspending handlers via `_SteppedCoroutine` onto `uvloop`, and coalesces Dekker response notifications at batch completion. [`RsgiAdapter`](../../../../../src/py/vertebra/server/_rsgi/_adapter.py)[^src-server-rsgi-adapter-py] delegates batch execution directly to `drive_rsgi_batch`.
+- [`drive_rsgi_batch(app, batch, loop, root_path)`](../../../../../src/rs/vertebra-py/src/rsgi/mod.rs)[^src-vertebra-py-src-rsgi-mod-rs] resolves `getattr(app, "__rsgi__", app)` once per batch, steps each handler via `PyIter_Send`, completes non-suspending handlers in zero `asyncio.Task` allocations, promotes suspending handlers via `_SteppedCoroutine` onto the active event loop, and coalesces Dekker response notifications at batch completion. [`RsgiAdapter`](../../../../../src/py/vertebra/server/_rsgi/_adapter.py)[^src-server-rsgi-adapter-py] delegates batch execution directly to `drive_rsgi_batch`.
 
 ## WSGI (PEP 3333) (`wsgi/`, `_wsgi/_adapter.py`)
 
@@ -104,7 +119,9 @@ Applications mounted via `App.mount(prefix, app, protocol=...)` (or passed direc
 Provenance sources: [^src-server-dispatch-py], [^src-server-asgi-queues-py].
 
 [^src-server-worker-py]: `src/py/vertebra/server/worker.py` — Python implementation module (src/py/vertebra/server/worker.py).
+[^src-server-loops-py]: `src/py/vertebra/server/_loops.py` — Python implementation module (src/py/vertebra/server/_loops.py).
 [^src-server-dispatch-py]: `src/py/vertebra/server/_dispatch.py` — Python implementation module (src/py/vertebra/server/_dispatch.py).
+[^src-server-fastpath-core-py]: `src/py/vertebra/server/_fastpath_core.py` — Python implementation module (src/py/vertebra/server/_fastpath_core.py).
 [^src-server-fastpath-py]: `src/py/vertebra/server/_fastpath.py` — Python implementation module (src/py/vertebra/server/_fastpath.py).
 [^src-server-asgi-runner-py]: `src/py/vertebra/server/_asgi/_runner.py` — Python implementation module (src/py/vertebra/server/_asgi/_runner.py).
 [^src-server-asgi-queues-py]: `src/py/vertebra/server/_asgi/_queues.py` — Python implementation module (src/py/vertebra/server/_asgi/_queues.py).

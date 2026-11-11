@@ -1,22 +1,34 @@
 # PyO3 FFI Lifetimes, C-API Hydration, and Free-Threaded Python 3.14t/3.15t
 
-## `py.detach` Boundary Pattern
+## `py.detach` Boundary Pattern (`vertebra-py/src/transport.rs`)
 
 ```rust
-#[pymethods]
-impl ShmWorkerBridge {
-    fn poll_batch<'py>(&self, py: Python<'py>, timeout_ms: u64) -> PyResult<Bound<'py, PyList>> {
-        let frames = py.detach(|| self.inner.wait_and_drain_batch(timeout_ms))
-            .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
-        self.hydrate_python_batch(py, &frames)
+#[pyfunction]
+#[pyo3(name = "get_batch", signature = (timeout_ms=100))]
+pub fn get_batch(py: Python<'_>, timeout_ms: u64) -> PyResult<Option<RequestBatch>> {
+    if let Some(transport) = SHM_TRANSPORT.get() {
+        if let Some(s) = transport.poll_batch_async() {
+            return Ok(Some(RequestBatch { snapshot: s }));
+        }
+        let snapshot = py.detach(|| transport.poll_batch(Duration::from_millis(timeout_ms)));
+        return Ok(snapshot.map(|s| RequestBatch { snapshot: s }));
     }
+    let bridge = BatchBridge::get()
+        .ok_or_else(|| PyRuntimeError::new_err("transport not initialized; call init_transport() first"))?;
+    if let Some(s) = bridge.try_poll_batch() {
+        return Ok(Some(RequestBatch { snapshot: s }));
+    }
+    let snapshot = py.detach(|| bridge.poll_batch(Duration::from_millis(timeout_ms)));
+    Ok(snapshot.map(|s| RequestBatch { snapshot: s }))
 }
 ```
 
-## Direct C-API Struct Hydration (`msgspec_bridge.rs`)
+- `try_get_batch()` in `vertebra-py/src/transport.rs` provides the non-blocking fast path (`poll_batch_async()` / `try_poll_batch()`) for event-loop reader callbacks without parking the OS thread.
 
-- Hot-path frame hydration populates `msgspec.Struct(..., frozen=True, gc=False, array_like=True)` attributes directly via CPython C-API slot offsets cached at module initialization.
-- Avoid intermediate `PyDict` allocation when passing `(method, path, headers, body_view, params)` from `vertebra-py` into `vertebra.server`.
+## Direct C-API Decoding & Struct Hydration (`msgspec_bridge.rs`)
+
+- `decode_msgspec_from_buffer` and `decode_msgspec_from_slice` cache bound `msgspec.{json,msgpack}.Decoder(ty).decode` callables per target type and invoke them via CPython single-argument vectorcall (`PyObject_Vectorcall` / `PyObject_CallOneArg` semantics) over zero-copy PEP 688 / PEP 3118 `__getbuffer__` `PyMemoryView` views (`PyMemoryView_FromObject` and `PyMemoryView_FromMemory`).
+- `instantiate_struct_vectorcall`, `hydrate_one_vectorcall`, `hydrate_rows_vectorcall`, and `orm_to_struct_vectorcall` hydrate `msgspec.Struct`, `@dataclass`, `attrs`, and Pydantic models directly via `PyObject_Vectorcall` / `PyObject_VectorcallDict` with cached `__struct_fields__` keyword tuples, avoiding intermediate `PyBytes` or `PyDict` allocations.
 
 ## Free-Threaded Build Isolation
 

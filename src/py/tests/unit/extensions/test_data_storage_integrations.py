@@ -2,9 +2,20 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import subprocess
+import sys
+import threading
+from asyncio import CancelledError
+from collections.abc import AsyncIterator, Iterator
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from io import BytesIO
 from pathlib import Path
+from typing import Any
 
 import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 from advanced_alchemy.types.file_object import FileObject, StorageBackend, StoredObject
 from advanced_alchemy.types.file_object.registry import StorageRegistry as AlchemyStorageRegistry
@@ -22,22 +33,410 @@ from vertebra.extensions.alchemy.storage import register_storage_backend
 from vertebra.extensions.sqlspec.events import ChangeFeedAsyncEventBackend, ChangeFeedSyncEventBackend
 from vertebra.extensions.sqlspec.storage import (
     ArrowFlightSerializer,
-    StreamingStorageResponse,
     build_duckdb_gcs_secret_sql,
     register_storage_alias,
 )
 from vertebra.extensions.sqlspec.storage import ObjectStoreBackend as SQLSpecObjectStoreBackend
 from vertebra.storage import (
     AsyncGcpTokenCache,
+    AsyncObjectStore,
+    AsyncReadableFile,
     GCSConfig,
+    LocalConfig,
+    MemoryConfig,
+    S3Config,
     SigningConfig,
+    StreamingStorageResponse,
     SyncGcpTokenCache,
     SyncObjectStore,
 )
-from vertebra.storage import (
-    StreamingStorageResponse as StorageStreamingStorageResponse,
-)
+from vertebra.typing import ImproperConfigurationError
+from vertebra.utils.module_loader import import_optional
 from vertebra.utils.serializers import decode_json
+
+duckdb = import_optional("duckdb")
+
+
+class _SQLSpecRangeServer:
+    """Serve real native S3 reads with an optional response barrier."""
+
+    def __init__(self, payload: bytes, *, gated: bool) -> None:
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.paths: list[str] = []
+        self.ranges: list[tuple[int, int]] = []
+        owner = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_HEAD(self) -> None:
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(payload)))
+                self.send_header("ETag", '"fixture"')
+                self.send_header("Last-Modified", "Wed, 21 Oct 2015 07:28:00 GMT")
+                self.end_headers()
+
+            def do_GET(self) -> None:
+                owner.paths.append(self.path)
+                owner.entered.set()
+                if gated and not owner.release.wait(10):
+                    self.send_error(504)
+                    return
+                range_header = self.headers.get("Range")
+                start, end = 0, len(payload) - 1
+                if range_header:
+                    left, right = range_header.removeprefix("bytes=").split("-")
+                    start, end = int(left), int(right) if right else end
+                owner.ranges.append((start, end))
+                body = payload[start : end + 1]
+                self.send_response(206 if range_header else 200)
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("ETag", '"fixture"')
+                if range_header:
+                    self.send_header("Content-Range", f"bytes {start}-{end}/{len(payload)}")
+                self.end_headers()
+                with contextlib.suppress(BrokenPipeError, ConnectionResetError):
+                    self.wfile.write(body)
+
+            def log_message(self, format: str, *args: object) -> None:
+                pass
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self.endpoint = f"http://127.0.0.1:{self._server.server_port}"
+
+    def __enter__(self) -> _SQLSpecRangeServer:
+        self._thread.start()
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self.release.set()
+        self._server.shutdown()
+        self._server.server_close()
+        self._thread.join()
+
+
+@pytest.mark.anyio
+async def test_sqlspec_arrow_async_io_stays_on_caller_loop(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Async Table reads and writes use native async I/O rather than synchronous stores."""
+    backend = SQLSpecObjectStoreBackend(MemoryConfig(namespace="sqlspec-arrow-native-async"))
+    table = pa.table({"id": [1, 2]})
+    backend.write_arrow_sync("input.parquet", table)
+
+    def reject_sync(*args: object, **kwargs: object) -> Any:
+        raise AssertionError("synchronous storage called by async Arrow consumer")
+
+    monkeypatch.setattr(SyncObjectStore, "get_range", reject_sync)
+    monkeypatch.setattr(SyncObjectStore, "put", reject_sync)
+    monkeypatch.setattr(SyncObjectStore, "put_stream", reject_sync)
+    assert (await backend.read_arrow_async("input.parquet")).equals(table)
+    assert await backend.write_arrow_async("output.parquet", table) is None
+    assert (await backend.read_arrow_async("output.parquet")).equals(table)
+
+
+@pytest.mark.anyio
+async def test_sqlspec_arrow_stream_demands_one_file_at_a_time(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A first batch is delivered before reading a later matching object."""
+    backend = SQLSpecObjectStoreBackend(MemoryConfig(namespace="sqlspec-arrow-demand"), base_path="warehouse")
+    for name, first in (("a", 0), ("b", 250)):
+        backend.write_arrow_sync(
+            f"tables/{name}.parquet", pa.table({"id": range(first, first + 250)}), row_group_size=100
+        )
+    requested: list[str] = []
+    sync_range = SyncObjectStore.get_range
+    async_range = AsyncObjectStore.get_range
+
+    def observe_sync(self: SyncObjectStore, key: str, offset: int, length: int) -> bytes:
+        requested.append(key)
+        return sync_range(self, key, offset, length)
+
+    async def observe_async(self: AsyncObjectStore, key: str, offset: int, length: int) -> bytes:
+        requested.append(key)
+        return await async_range(self, key, offset, length)
+
+    monkeypatch.setattr(SyncObjectStore, "get_range", observe_sync)
+    monkeypatch.setattr(AsyncObjectStore, "get_range", observe_async)
+    stream = backend.stream_arrow_async("tables/*.parquet", batch_size=100, columns=["id"])
+    try:
+        batch = await anext(stream)
+        assert batch.to_pydict() == {"id": list(range(100))}
+        assert requested and set(requested) == {"warehouse/tables/a.parquet"}
+    finally:
+        await stream.aclose()
+
+
+@pytest.mark.anyio
+async def test_sqlspec_arrow_explicit_prefetch_options() -> None:
+    """Accepted Parquet constructor options remain distinct from batch iteration options."""
+    backend = SQLSpecObjectStoreBackend(MemoryConfig(namespace="sqlspec-arrow-prefetch"))
+    table = pa.table({"id": range(250), "label": ["data"] * 250})
+    backend.write_arrow_sync("data.parquet", table, row_group_size=100)
+    batches = [
+        batch
+        async for batch in backend.stream_arrow_async(
+            "data.parquet", batch_size=100, columns=["id"], pre_buffer=True, use_threads=False
+        )
+    ]
+    assert [batch.num_rows for batch in batches] == [100, 100, 50]
+    assert pa.Table.from_batches(batches).to_pydict() == {"id": list(range(250))}
+
+
+@pytest.mark.anyio
+async def test_sqlspec_arrow_default_prefetch_preserves_rowgroup_demand() -> None:
+    """The public SQLSpec stream returns its first batch before native later-rowgroup reads."""
+    table = pa.table({"id": range(250), "payload": [b"x" * 4096] * 250})
+    sink = pa.BufferOutputStream()
+    pq.write_table(table, sink, row_group_size=100, compression="NONE", use_dictionary=False)
+    payload = sink.getvalue().to_pybytes()
+    metadata = pq.ParquetFile(BytesIO(payload)).metadata
+    later_columns = [metadata.row_group(i).column(0) for i in (1, 2)]
+    with _SQLSpecRangeServer(payload, gated=False) as server:
+        backend = SQLSpecObjectStoreBackend(
+            S3Config(
+                bucket="sqlspec-codec",
+                region="us-east-1",
+                endpoint=server.endpoint,
+                access_key_id="test",
+                secret_access_key="test",
+                allow_http=True,
+            )
+        )
+        stream = backend.stream_arrow_async("data", batch_size=100, columns=["id"])
+        try:
+            assert (await anext(stream)).to_pydict() == {"id": list(range(100))}
+            footer_start = len(payload) - 65536
+            data_ranges = [(start, end) for start, end in server.ranges if end < footer_start]
+            assert data_ranges
+            for column in later_columns:
+                start = column.data_page_offset
+                end = start + column.total_compressed_size
+                assert not any(left < end and right >= start for left, right in data_ranges)
+            batches = [batch async for batch in stream]
+            assert [batch.num_rows for batch in batches] == [100, 50]
+            assert pa.Table.from_batches(batches).to_pydict() == {"id": list(range(100, 250))}
+        finally:
+            await stream.aclose()
+
+
+def test_sqlspec_arrow_ipc_table_reads_native_ranges(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Materialized IPC Tables retain file fallback and schema without fetching encoded objects whole."""
+    backend = SQLSpecObjectStoreBackend(MemoryConfig(namespace="sqlspec-arrow-ipc-ranges"))
+    schema = pa.schema([("id", pa.int64())])
+    sink = pa.BufferOutputStream()
+    with pa.ipc.new_file(sink, schema):
+        pass
+    backend.write_bytes_sync("empty.ipc", sink.getvalue())
+
+    def reject_view(*args: object, **kwargs: object) -> Any:
+        raise AssertionError("whole encoded object requested")
+
+    monkeypatch.setattr(SyncObjectStore, "get_view", reject_view)
+    result = backend.read_arrow_sync("empty.ipc")
+    assert result.schema == schema
+    assert result.num_rows == 0
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("file_format", ["parquet", "arrow-ipc"])
+@pytest.mark.parametrize("as_view", [False, True])
+async def test_sqlspec_arrow_cursor_accepts_raw_ipc_buffers(
+    asynchronous: bool, file_format: str, as_view: bool
+) -> None:
+    """Buffer-protocol cursor inputs preserve format selection, values and None returns."""
+    backend = SQLSpecObjectStoreBackend(MemoryConfig(namespace="sqlspec-arrow-raw-cursor"))
+    table = pa.table({"id": [1, 2], "label": ["a", "b"]})
+    sink = pa.BufferOutputStream()
+    with pa.ipc.new_stream(sink, table.schema) as writer:
+        writer.write_table(table)
+    payload = sink.getvalue().to_pybytes()
+    source = memoryview(payload) if as_view else payload
+    if asynchronous:
+        assert await backend.write_arrow_cursor_async("output.unknown", source, file_format=file_format) is None
+        actual = await backend.read_arrow_async("output.unknown", file_format=file_format)
+    else:
+        assert backend.write_arrow_cursor_sync("output.unknown", source, file_format=file_format) is None
+        actual = backend.read_arrow_sync("output.unknown", file_format=file_format)
+    assert actual.equals(table)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("compression", [None, "gzip"])
+async def test_sqlspec_arrow_parquet_preserves_codec_defaults(asynchronous: bool, compression: str | None) -> None:
+    """Unspecified compression retains PyArrow defaults while explicit writer options survive."""
+    backend = SQLSpecObjectStoreBackend(MemoryConfig(namespace="sqlspec-arrow-compression"))
+    table = pa.table({"id": range(250)})
+    options = {"compression": compression} if compression is not None else {}
+    if asynchronous:
+        assert await backend.write_arrow_async("data.parquet", table, row_group_size=100, **options) is None
+        raw = await backend.read_bytes_async("data.parquet")
+    else:
+        assert backend.write_arrow_sync("data.parquet", table, row_group_size=100, **options) is None
+        raw = backend.read_bytes_sync("data.parquet")
+    expected_sink = pa.BufferOutputStream()
+    pq.write_table(table, expected_sink, row_group_size=100, **options)
+    expected = pq.ParquetFile(expected_sink.getvalue()).metadata
+    actual = pq.ParquetFile(BytesIO(raw)).metadata
+    assert [actual.row_group(i).num_rows for i in range(actual.num_row_groups)] == [100, 100, 50]
+    assert actual.row_group(0).column(0).compression == expected.row_group(0).column(0).compression
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("cursor_input", [False, True])
+@pytest.mark.parametrize(
+    "options", [{}, {"row_group_size": None}, {"row_group_size": -1}], ids=["omitted", "none", "minus-one"]
+)
+async def test_sqlspec_parquet_default_row_groups(
+    asynchronous: bool, cursor_input: bool, options: dict[str, int | None]
+) -> None:
+    """Default row-group sentinels match the installed PyArrow writer's output."""
+    backend = SQLSpecObjectStoreBackend(MemoryConfig(namespace="sqlspec-rowgroup-default"))
+    table = pa.table({"id": range(1_048_577)})
+    source: Any = table
+    if cursor_input:
+        sink = pa.BufferOutputStream()
+        with pa.ipc.new_stream(sink, table.schema) as writer:
+            writer.write_table(table)
+        source = sink.getvalue()
+    if asynchronous:
+        write = backend.write_arrow_cursor_async if cursor_input else backend.write_arrow_async
+        assert await write("data.parquet", source, **options) is None
+        raw = await backend.read_bytes_async("data.parquet")
+    else:
+        write = backend.write_arrow_cursor_sync if cursor_input else backend.write_arrow_sync
+        assert write("data.parquet", source, **options) is None
+        raw = backend.read_bytes_sync("data.parquet")
+    expected_sink = pa.BufferOutputStream()
+    pq.write_table(table, expected_sink, **options)
+    expected = pq.ParquetFile(expected_sink.getvalue())
+    expected_sizes = [expected.metadata.row_group(i).num_rows for i in range(expected.num_row_groups)]
+    actual = pq.ParquetFile(BytesIO(raw))
+    assert expected_sizes == [1_048_576, 1]
+    assert [actual.metadata.row_group(i).num_rows for i in range(actual.num_row_groups)] == expected_sizes
+    assert actual.read().equals(table)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("row_group_size", [0, -2])
+async def test_sqlspec_parquet_invalid_row_group_size(asynchronous: bool, row_group_size: int) -> None:
+    """Values rejected by the installed PyArrow writer remain errors in the adapter."""
+    table = pa.table({"id": [1]})
+    with pytest.raises((ValueError, pa.ArrowInvalid)):
+        pq.write_table(table, pa.BufferOutputStream(), row_group_size=row_group_size)
+    backend = SQLSpecObjectStoreBackend(MemoryConfig(namespace="sqlspec-rowgroup-invalid"))
+    with pytest.raises(ValueError, match="batch_size"):
+        if asynchronous:
+            await backend.write_arrow_async("invalid.parquet", pa.table({"id": [1]}), row_group_size=row_group_size)
+        else:
+            backend.write_arrow_sync("invalid.parquet", pa.table({"id": [1]}), row_group_size=row_group_size)
+    assert not await backend.exists_async("invalid.parquet")
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+async def test_sqlspec_arrow_ipc_invalid_options_abort(asynchronous: bool) -> None:
+    """Invalid codec keywords retain PyArrow errors and leave no completed native object."""
+    backend = SQLSpecObjectStoreBackend(MemoryConfig(namespace="sqlspec-arrow-invalid-options"))
+    table = pa.table({"id": [1]})
+    with pytest.raises(TypeError, match="unexpected keyword"):
+        if asynchronous:
+            await backend.write_arrow_async("bad.ipc", table, unsupported_option=True)
+        else:
+            backend.write_arrow_sync("bad.ipc", table, unsupported_option=True)
+    assert not await backend.exists_async("bad.ipc")
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+async def test_sqlspec_arrow_empty_ipc_file_retains_schema(asynchronous: bool) -> None:
+    """The complete-Table contract retains typed zero-row IPC file schemas on both APIs."""
+    backend = SQLSpecObjectStoreBackend(MemoryConfig(namespace="sqlspec-arrow-empty-file"))
+    schema = pa.schema([("id", pa.int64()), ("label", pa.string())])
+    sink = pa.BufferOutputStream()
+    with pa.ipc.new_file(sink, schema):
+        pass
+    backend.write_bytes_sync("empty.feather", sink.getvalue())
+    result = (
+        await backend.read_arrow_async("empty.feather") if asynchronous else backend.read_arrow_sync("empty.feather")
+    )
+    assert result.schema == schema
+    assert result.num_rows == 0
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("cancel_pending", [False, True])
+@pytest.mark.parametrize("file_format", ["parquet", "arrow-ipc"])
+async def test_sqlspec_arrow_outer_stream_closes_native_source(
+    monkeypatch: pytest.MonkeyPatch, cancel_pending: bool, file_format: str
+) -> None:
+    """Outer close or cancellation unwinds the actual native per-file reader before returning."""
+    table = pa.table({"id": range(250)})
+    sink = pa.BufferOutputStream()
+    if file_format == "parquet":
+        pq.write_table(table, sink, row_group_size=100)
+    else:
+        with pa.ipc.new_stream(sink, table.schema) as writer:
+            writer.write_table(table, max_chunksize=100)
+    closed: list[object] = []
+    close_reader = AsyncReadableFile.close
+    get_stream = AsyncObjectStore.get_stream
+
+    def observe_close(self: AsyncReadableFile) -> None:
+        close_reader(self)
+        closed.append(self)
+
+    async def observe_stream(self: AsyncObjectStore, key: str, *, chunk_size: int | None = None) -> AsyncIterator[Any]:
+        source = get_stream(self, key, chunk_size=chunk_size)
+        try:
+            async for chunk in source:
+                yield chunk
+        finally:
+            await source.aclose()
+            closed.append(key)
+
+    monkeypatch.setattr(AsyncReadableFile, "close", observe_close)
+    monkeypatch.setattr(AsyncObjectStore, "get_stream", observe_stream)
+    with _SQLSpecRangeServer(sink.getvalue().to_pybytes(), gated=cancel_pending) as server:
+        store = AsyncObjectStore(
+            S3Config(
+                bucket="sqlspec-codec",
+                region="us-east-1",
+                endpoint=server.endpoint,
+                access_key_id="test",
+                secret_access_key="test",
+                allow_http=True,
+            )
+        )
+        backend = SQLSpecObjectStoreBackend(store)
+        stream = backend.stream_arrow_async("data", file_format=file_format, batch_size=100)
+        task: asyncio.Task[Any] | None = None
+        try:
+            if cancel_pending:
+                task = asyncio.create_task(anext(stream))
+                async with asyncio.timeout(5):
+                    while not server.entered.is_set():
+                        await asyncio.sleep(0.001)
+                assert not task.done()
+                task.cancel()
+                with pytest.raises(CancelledError):
+                    await asyncio.wait_for(task, 2)
+            else:
+                first = await anext(stream)
+                assert first.to_pydict() == {"id": list(range(100))}
+                assert not closed
+                await stream.aclose()
+            assert closed
+            assert server.paths and set(server.paths) == {"/sqlspec-codec/data"}
+        finally:
+            server.release.set()
+            if task is not None:
+                if not task.done():
+                    task.cancel()
+                with contextlib.suppress(CancelledError, Exception):
+                    await task
+            await stream.aclose()
 
 
 def test_duplicated_storage_shims_removed_from_extension_modules() -> None:
@@ -46,6 +445,453 @@ def test_duplicated_storage_shims_removed_from_extension_modules() -> None:
     assert not hasattr(alchemy_storage_mod, "StoredObject")
     assert not hasattr(sqlspec_storage_mod, "SQLSpecStore")
     assert not hasattr(sqlspec_storage_mod, "SqlSpecStorageBridge")
+
+
+def test_alchemy_import_preserves_registry_api() -> None:
+    """Importing the adapter preserves Advanced Alchemy's registry API."""
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from advanced_alchemy.types.file_object import storages; "
+            "before = hasattr(storages, 'get'); "
+            "import vertebra.extensions.alchemy.storage; "
+            "assert hasattr(storages, 'get') == before",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("target", [None, "", "  "])
+def test_alchemy_requires_explicit_target(target: str | None) -> None:
+    """Missing targets fail before changing the singleton registry or its default."""
+    registry = AlchemyStorageRegistry()
+    registered = registry.registered_backends()
+    default = registry.default_backend
+    with pytest.raises(ImproperConfigurationError):
+        AlchemyObjectStoreBackend(fs=target)
+    with pytest.raises(ImproperConfigurationError):
+        register_storage_backend("alchemy_missing_target", store=target, set_default=True)
+    with pytest.raises(ImproperConfigurationError):
+        AlchemyObjectStoreBackend()
+    assert registry.registered_backends() == registered
+    assert registry.default_backend == default
+
+
+@pytest.mark.parametrize("path", ["../escape.bin", "folder/../escape.bin", "folder\\..\\escape.bin"])
+def test_alchemy_rejects_traversal_in_keys_and_prefixes(tmp_path: Path, path: str) -> None:
+    """Namespaces reject traversal before storage or registry changes."""
+    store = SyncObjectStore.from_local(tmp_path)
+    backend = AlchemyObjectStoreBackend(fs=store, prefix="uploads")
+    with pytest.raises(ValueError):
+        backend.get_content(path)
+    registry = AlchemyStorageRegistry()
+    registered = registry.registered_backends()
+    default = registry.default_backend
+    with pytest.raises(ValueError, match="traversal"):
+        register_storage_backend(store, key="alchemy_bad_prefix", prefix=path, set_default=True)
+    assert registry.registered_backends() == registered
+    assert registry.default_backend == default
+    assert store.list() == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("mode", ["sync", "async", "async-reader"])
+async def test_alchemy_file_upload_reads_bounded_chunks(tmp_path: Path, mode: str) -> None:
+    """File-like uploads request bounded chunks and populate actual native metadata."""
+    reads: list[int] = []
+
+    class BoundedReader(BytesIO):
+        def read(self, size: int = -1) -> bytes:
+            assert size == 4
+            reads.append(size)
+            return super().read(size)
+
+    reader = BoundedReader(b"chunk1-chunk2")
+
+    class AsyncReader:
+        async def read(self, size: int = -1) -> bytes:
+            return reader.read(size)
+
+    backend = AlchemyObjectStoreBackend(fs=SyncObjectStore.from_local(tmp_path), prefix="uploads")
+    obj = FileObject(backend=backend, filename="chunks.bin")
+    if mode == "sync":
+        assert obj.save(reader, use_multipart=True, chunk_size=4) is obj
+    else:
+        assert (
+            await obj.save_async(AsyncReader() if mode == "async-reader" else reader, use_multipart=True, chunk_size=4)
+            is obj
+        )
+    assert reads == [4, 4, 4, 4, 4]
+    assert obj.size == 13
+    assert obj.etag is not None
+    assert obj.get_content() == b"chunk1-chunk2"
+    assert await obj.get_content_async() == b"chunk1-chunk2"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("chunk_size", [0, -1])
+async def test_alchemy_invalid_chunk_size_preserves_source(tmp_path: Path, chunk_size: int) -> None:
+    """Invalid sizes fail before consuming either upload source."""
+    backend = AlchemyObjectStoreBackend(fs=SyncObjectStore.from_local(tmp_path))
+    reader = BytesIO(b"unread")
+    obj = FileObject(backend=backend, filename="invalid.bin")
+    with pytest.raises(ValueError, match="chunk_size"):
+        obj.save(reader, chunk_size=chunk_size)
+    with pytest.raises(ValueError, match="chunk_size"):
+        await obj.save_async(reader, chunk_size=chunk_size)
+    assert reader.tell() == 0
+    assert not backend.exists("invalid.bin")
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("async_handle", [False, True])
+async def test_alchemy_explicit_registration_and_shared_handles(tmp_path: Path, async_handle: bool) -> None:
+    """Explicit forms resolve real registry keys and share one native engine."""
+    registry = AlchemyStorageRegistry()
+    default = registry.default_backend
+    sync_store = SyncObjectStore.from_local(tmp_path)
+    store = sync_store.to_async() if async_handle else sync_store
+    try:
+        backend = register_storage_backend("alchemy_explicit", store=store, prefix="uploads", set_default=True)
+        assert registry.get_backend("alchemy_explicit") is backend
+        assert registry.default_backend == "vertebra.extensions.alchemy.storage.ObjectStoreBackend"
+        obj = FileObject(backend="alchemy_explicit", filename="uploads/one.bin")
+        assert obj.save(b"one") is obj
+        assert sync_store.get("uploads/one.bin") == b"one"
+        await obj.save_async(b"two2")
+        assert obj.size == 4
+        assert obj.get_content() == b"two2"
+        configured = register_storage_backend(LocalConfig(root=tmp_path), key="alchemy_config")
+        assert registry.get_backend("alchemy_config") is configured
+        assert configured.get_content("uploads/one.bin") == b"two2"
+        assert AlchemyObjectStoreBackend(fs="", store=store).store.get("uploads/one.bin") == b"two2"
+        memory = AlchemyObjectStoreBackend(fs=MemoryConfig())
+        FileObject(backend=memory, filename="explicit.bin").save(b"explicit")
+        assert await memory.get_content_async("explicit.bin") == b"explicit"
+        await backend.delete_object_async("one.bin")
+        assert not sync_store.exists("uploads/one.bin")
+    finally:
+        registry.unregister_backend("alchemy_explicit")
+        registry.unregister_backend("alchemy_config")
+        registry.set_default_backend(default)
+
+
+@pytest.mark.anyio
+async def test_alchemy_stream_sources_and_failure_cleanup(tmp_path: Path) -> None:
+    """Iterable sources stream to native storage and failures leave no partial objects."""
+    backend = AlchemyObjectStoreBackend(fs=LocalConfig(root=tmp_path), prefix="uploads")
+
+    def chunks() -> Iterator[bytes]:
+        yield b"chunk1-"
+        yield b"chunk2"
+
+    async def async_chunks() -> AsyncIterator[bytes]:
+        yield b"chunk1-"
+        yield b"chunk2"
+
+    sync_obj = FileObject(backend=backend, filename="sync.bin")
+    sync_obj.save(chunks(), use_multipart=True, chunk_size=4)
+    assert sync_obj.size == 13
+    assert sync_obj.get_content() == b"chunk1-chunk2"
+    async_obj = FileObject(backend=backend, filename="async.bin")
+    await async_obj.save_async(async_chunks(), use_multipart=True, chunk_size=4)
+    assert async_obj.size == 13
+    assert await async_obj.get_content_async() == b"chunk1-chunk2"
+    await async_obj.save_async(chunks())
+    assert await async_obj.get_content_async() == b"chunk1-chunk2"
+    failure = RuntimeError("source failed")
+
+    def failed_chunks() -> Iterator[bytes]:
+        yield b"partial"
+        raise failure
+
+    async def failed_async_chunks() -> AsyncIterator[bytes]:
+        yield b"partial"
+        raise failure
+
+    with pytest.raises(RuntimeError) as sync_error:
+        FileObject(backend=backend, filename="failed-sync.bin").save(failed_chunks())
+    with pytest.raises(RuntimeError) as async_error:
+        await FileObject(backend=backend, filename="failed-async.bin").save_async(failed_async_chunks())
+    assert sync_error.value is failure
+    assert async_error.value is failure
+    assert not backend.exists("failed-sync.bin")
+    assert not await backend.exists_async("failed-async.bin")
+
+    async def cancelled_chunks() -> AsyncIterator[bytes]:
+        yield b"partial"
+        raise CancelledError
+
+    with pytest.raises(CancelledError):
+        await FileObject(backend=backend, filename="cancelled.bin").save_async(cancelled_chunks())
+    assert not await backend.exists_async("cancelled.bin")
+
+
+@pytest.mark.anyio
+async def test_alchemy_unconfigured_signing() -> None:
+    """Unsupported native signing reports the capability and retains the upstream backend error contract."""
+    backend = AlchemyObjectStoreBackend(fs=MemoryConfig())
+    assert backend.supports_signing is False
+    with pytest.raises(NotImplementedError, match="not configured"):
+        backend.sign("one.bin")
+    with pytest.raises(NotImplementedError, match="not configured"):
+        await backend.sign_async(["one.bin"], for_upload=True)
+
+
+@pytest.mark.parametrize("target", [None, "", "  "])
+def test_sqlspec_object_store_requires_explicit_target(target: str | None) -> None:
+    """Missing and blank targets fail before a storage engine is constructed."""
+    with pytest.raises(ImproperConfigurationError):
+        SQLSpecObjectStoreBackend(target)
+
+
+def test_sqlspec_object_store_requires_target_when_omitted() -> None:
+    """Omitting the target reports configuration failure."""
+    with pytest.raises(ImproperConfigurationError):
+        SQLSpecObjectStoreBackend()
+
+
+@pytest.mark.parametrize("uri", [None, "", "  "])
+def test_sqlspec_explicit_store_precedes_empty_uri(tmp_path: Path, uri: str | None) -> None:
+    """An explicit store supplies the canonical address when the URI is omitted or blank."""
+    backend = SQLSpecObjectStoreBackend(uri, store=SyncObjectStore.from_local(tmp_path), base_path="tenant-a")
+    assert backend.resolve_uri("object.bin") == str(tmp_path / "tenant-a" / "object.bin")
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("async_store", [False, True])
+async def test_sqlspec_shared_store_conditional_writes_and_rename(tmp_path: Path, async_store: bool) -> None:
+    """Paired handles retain bytes and native write conditions across moves."""
+    store = SyncObjectStore.from_local(tmp_path)
+    backend = SQLSpecObjectStoreBackend(store=store.to_async() if async_store else store, base_path="tenant-a")
+    assert isinstance(backend, ObjectStoreProtocol)
+    backend.write_bytes_sync("a.bin", b"123")
+    await backend.move_async("a.bin", "b.bin")
+    assert not backend.exists_sync("a.bin")
+    assert await backend.read_bytes_async("b.bin") == b"123"
+    with pytest.raises(FileExistsError):
+        backend.write_bytes_sync("b.bin", b"replacement", if_not_exists=True)
+    assert await backend.read_bytes_async("b.bin") == b"123"
+    with pytest.raises(FileExistsError):
+        await backend.write_bytes_async("b.bin", b"replacement", if_not_exists=True)
+    backend.write_text_sync("c.txt", "sync")
+    await backend.write_text_async("d.txt", "async")
+    backend.move_sync("c.txt", "d.txt")
+    assert not await backend.exists_async("c.txt")
+    assert await backend.read_text_async("d.txt") == "sync"
+    assert backend.sync_store.get("tenant-a/b.bin") == b"123"
+
+
+@pytest.mark.anyio
+async def test_sqlspec_write_metadata_and_conditions() -> None:
+    """Native metadata and etag conditions survive both byte and text writes."""
+    backend = SQLSpecObjectStoreBackend(MemoryConfig(), base_path="tenant-a")
+    backend.write_bytes_sync("meta.bin", b"data", content_type="text/plain", attributes={"tenant": "a"})
+    meta = await backend.async_store.head("tenant-a/meta.bin")
+    assert meta.content_type == "text/plain"
+    assert meta.attributes == {"tenant": "a"}
+    await backend.write_text_async("meta.bin", "updated", if_match=meta.etag, content_type="text/markdown")
+    assert backend.read_text_sync("meta.bin") == "updated"
+    assert backend.sync_store.head("tenant-a/meta.bin").content_type == "text/markdown"
+    with pytest.raises(OSError):
+        backend.write_bytes_sync("meta.bin", b"rejected", if_match="wrong-etag")
+    with pytest.raises(OSError):
+        await backend.write_text_async("meta.bin", "rejected", if_none_match="*")
+    assert backend.read_text_sync("meta.bin") == "updated"
+
+
+@pytest.mark.anyio
+async def test_sqlspec_native_streams_and_namespace_pages(tmp_path: Path) -> None:
+    """Native streams retain chunk bytes and pages share opaque sync/async cursors."""
+    store = SyncObjectStore.from_local(tmp_path)
+    backend = SQLSpecObjectStoreBackend(store=store, base_path="tenant-a")
+    store.put("tenant-other/hidden.bin", b"hidden")
+    result = backend.put_stream_sync("b.bin", iter([b"123"]))
+    assert result.etag
+    uploaded = await backend.put_stream_async("big.bin", [b"chunk1-", b"chunk2"])
+    assert uploaded.etag
+    assert b"".join(bytes(chunk) for chunk in backend.get_stream_sync("big.bin", chunk_size=3)) == b"chunk1-chunk2"
+    assert (
+        b"".join([bytes(chunk) async for chunk in backend.get_stream_async("big.bin", chunk_size=4)])
+        == b"chunk1-chunk2"
+    )
+    assert all(isinstance(chunk, bytes) for chunk in backend.stream_read_sync("big.bin", chunk_size=3))
+    assert b"".join(backend.stream_read_sync("big.bin", chunk_size=3)) == b"chunk1-chunk2"
+    stream = await backend.stream_read_async("big.bin", chunk_size=4)
+    assert b"".join([chunk async for chunk in stream]) == b"chunk1-chunk2"
+    page, cursor = backend.list_page_sync(limit=1)
+    assert page == ["b.bin"]
+    assert cursor is not None
+    assert await backend.list_page_async(cursor=cursor, limit=1) == (["big.bin"], None)
+    with pytest.raises(ValueError, match="limit"):
+        backend.list_page_sync(limit=0)
+    with pytest.raises(ValueError, match="limit"):
+        await backend.list_page_async(limit=0)
+
+
+@pytest.mark.anyio
+async def test_sqlspec_seekable_reader_factories(tmp_path: Path) -> None:
+    """Native readers preserve seek/read/close and their metadata lookup behavior."""
+    backend = SQLSpecObjectStoreBackend(store=SyncObjectStore.from_local(tmp_path), base_path="tenant-a")
+    backend.write_bytes_sync("big.bin", b"chunk1-chunk2")
+    with backend.open_sync("big.bin", chunk_size=3) as reader:
+        assert reader.read(7) == b"chunk1-"
+        assert reader.seek(0) == 0
+        assert reader.read() == b"chunk1-chunk2"
+    assert reader.closed
+    async with backend.open_async("big.bin", size=13, chunk_size=3) as async_reader:
+        assert await async_reader.read(7) == b"chunk1-"
+        assert async_reader.seek(0) == 0
+        assert await async_reader.read() == b"chunk1-chunk2"
+    assert async_reader.closed
+    with pytest.raises(FileNotFoundError):
+        backend.open_sync("missing.bin")
+    missing = backend.open_sync("missing.bin", size=1)
+    with pytest.raises(FileNotFoundError):
+        missing.read(1)
+    missing.close()
+    async_missing = backend.open_async("missing.bin")
+    with pytest.raises(FileNotFoundError):
+        await async_missing.read(1)
+    async_missing.close()
+
+
+@pytest.mark.parametrize("path", ["../secret.txt", "safe/../secret.txt", "memory://bucket/../secret.txt"])
+@pytest.mark.parametrize(
+    "operation", ["read_bytes_sync", "get_stream_sync", "open_sync", "glob_sync", "list_page_sync", "sign_sync"]
+)
+def test_sqlspec_rejects_namespace_traversal(path: str, operation: str) -> None:
+    """Every key-bearing synchronous seam refuses parent segments before namespace qualification."""
+    backend = SQLSpecObjectStoreBackend("memory://bucket", base_path="tenant-a")
+    with pytest.raises(ValueError, match="traversal"):
+        result = getattr(backend, operation)(path)
+        if operation == "get_stream_sync":
+            list(result)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "operation", ["read_bytes_async", "get_stream_async", "open_async", "glob_async", "list_page_async", "sign_async"]
+)
+async def test_sqlspec_rejects_async_namespace_traversal(operation: str) -> None:
+    """Asynchronous and reader-factory seams refuse parent key segments."""
+    backend = SQLSpecObjectStoreBackend(MemoryConfig(), base_path="tenant-a")
+    with pytest.raises(ValueError, match="traversal"):
+        if operation == "get_stream_async":
+            async for _ in backend.get_stream_async("../secret.txt"):
+                pass
+        elif operation == "open_async":
+            backend.open_async("../secret.txt")
+        else:
+            await getattr(backend, operation)("../secret.txt")
+
+
+@pytest.mark.parametrize("namespace", [{"base_path": "tenant/../other"}, {"prefix": "../other"}])
+def test_sqlspec_rejects_configured_namespace_traversal(namespace: dict[str, str]) -> None:
+    """Parent segments in configured namespaces fail at construction."""
+    with pytest.raises(ValueError, match="traversal"):
+        SQLSpecObjectStoreBackend(MemoryConfig(), **namespace)
+
+
+@pytest.mark.anyio
+async def test_sqlspec_stream_options_and_failed_uploads() -> None:
+    """Streaming uploads preserve write options and abort incomplete objects."""
+    backend = SQLSpecObjectStoreBackend(MemoryConfig(), base_path="tenant-a")
+    backend.put_stream_sync("meta.bin", [b"sync"], content_type="text/plain", attributes={"tenant": "a"})
+    meta = await backend.async_store.head("tenant-a/meta.bin")
+    assert meta.content_type == "text/plain"
+    assert meta.attributes == {"tenant": "a"}
+    with pytest.raises(FileExistsError):
+        backend.put_stream_sync("meta.bin", [b"rejected"], if_not_exists=True)
+
+    async def chunks() -> AsyncIterator[bytes]:
+        yield b"async-"
+        yield b"payload"
+
+    await backend.put_stream_async(
+        "meta.bin", chunks(), if_match=meta.etag, content_type="text/markdown", attributes={"tenant": "b"}
+    )
+    assert backend.read_bytes_sync("meta.bin") == b"async-payload"
+    updated = backend.sync_store.head("tenant-a/meta.bin")
+    assert updated.content_type == "text/markdown"
+    assert updated.attributes == {"tenant": "b"}
+    with pytest.raises(OSError):
+        await backend.put_stream_async("meta.bin", [b"rejected"], if_none_match="*")
+
+    def broken_chunks() -> Iterator[bytes]:
+        yield b"partial"
+        raise RuntimeError("source failed")
+
+    async def broken_async_chunks() -> AsyncIterator[bytes]:
+        yield b"partial"
+        raise RuntimeError("source failed")
+
+    with pytest.raises(RuntimeError, match="source failed"):
+        backend.put_stream_sync("failed-sync.bin", broken_chunks())
+    with pytest.raises(RuntimeError, match="source failed"):
+        await backend.put_stream_async("failed-async.bin", broken_async_chunks())
+    assert not backend.exists_sync("failed-sync.bin")
+    assert not await backend.exists_async("failed-async.bin")
+
+
+@pytest.mark.anyio
+async def test_sqlspec_unsupported_signing_preserves_adapter_error() -> None:
+    """Unconfigured native signing is reported using SQLSpec's adapter contract."""
+    backend = SQLSpecObjectStoreBackend(MemoryConfig())
+    assert backend.supports_signing is False
+    with pytest.raises(NotImplementedError, match="signing not supported"):
+        backend.sign_sync("object.bin")
+    with pytest.raises(NotImplementedError, match="signing not supported"):
+        await backend.sign_async(["object.bin"], for_upload=True)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("for_upload", [False, True], ids=["get", "put"])
+async def test_sqlspec_signing_propagates_native_argument_errors(for_upload: bool) -> None:
+    """Configured signing surfaces the native expiry error unchanged instead of reporting missing support."""
+    signing = SigningConfig(provider="hmac", hmac_secret="sqlspec-native-error", endpoint="https://signed.example.com")
+    backend = SQLSpecObjectStoreBackend("memory://", signing=signing)
+    assert backend.supports_signing is True
+    with pytest.raises(ValueError, match="expires_in_secs"):
+        backend.sign_sync("k", expires_in=0, for_upload=for_upload)
+    with pytest.raises(ValueError, match="expires_in_secs"):
+        await backend.sign_async("k", expires_in=0, for_upload=for_upload)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("for_upload", [False, True], ids=["get", "put"])
+async def test_alchemy_signing_propagates_native_argument_errors(for_upload: bool) -> None:
+    """Configured Advanced Alchemy signing surfaces the native expiry error unchanged."""
+    signing = SigningConfig(provider="hmac", hmac_secret="alchemy-native-error", endpoint="https://signed.example.com")
+    backend = AlchemyObjectStoreBackend(fs="memory://", signing=signing)
+    assert backend.supports_signing is True
+    with pytest.raises(ValueError, match="expires_in_secs"):
+        backend.sign("k", expires_in=0, for_upload=for_upload)
+    with pytest.raises(ValueError, match="expires_in_secs"):
+        await backend.sign_async("k", expires_in=0, for_upload=for_upload)
+
+
+@pytest.mark.parametrize("async_handle", [False, True], ids=["sync-store", "async-store"])
+@pytest.mark.parametrize(
+    "auth_kwargs",
+    [
+        {"signing": SigningConfig(provider="hmac", hmac_secret="ignored", endpoint="https://ignored.example.com")},
+        {"token_cache": SyncGcpTokenCache({"access_token": "ignored"}, allow_ambient_adc=False)},
+    ],
+    ids=["signing", "token-cache"],
+)
+def test_sqlspec_rejects_auth_options_with_prebuilt_store(async_handle: bool, auth_kwargs: dict[str, Any]) -> None:
+    """Auth options for a prebuilt store fail loudly and leave the caller's store untouched."""
+    sync_store = SyncObjectStore("memory://")
+    store = sync_store.to_async() if async_handle else sync_store
+    with pytest.raises(ImproperConfigurationError, match="StorageConfig or URI"):
+        SQLSpecObjectStoreBackend(store=store, **auth_kwargs)
+    assert store.token_cache is None
+    assert store.supports_signing is False
 
 
 def test_sqlspec_object_store_backend_protocol_arrow_and_sync_pipeline() -> None:
@@ -172,14 +1018,124 @@ async def test_sqlspec_object_store_backend_async_pipeline_and_arrow_streaming(t
 
 
 def test_duckdb_gcs_secret_sql_builder() -> None:
-    """build_duckdb_gcs_secret_sql emits parameterized DuckDB httpfs GCS secret DDL."""
+    """build_duckdb_gcs_secret_sql renders DuckDB httpfs GCS secret DDL with a quoted token literal."""
     cfg = GCSConfig(bucket="lakehouse", access_token="mock-adc-bearer-token")
-    sql, params = build_duckdb_gcs_secret_sql("gcs_lake", cfg)
-    assert sql == "CREATE OR REPLACE SECRET gcs_lake (TYPE gcs, BEARER_TOKEN ?)"
-    assert params == ("mock-adc-bearer-token",)
+    sql = build_duckdb_gcs_secret_sql("gcs_lake", cfg)
+    assert sql == "CREATE OR REPLACE SECRET gcs_lake (TYPE gcs, BEARER_TOKEN 'mock-adc-bearer-token')"
 
     with pytest.raises(ValueError, match="Invalid SQL identifier"):
         build_duckdb_gcs_secret_sql("bad-name;DROP TABLE x", cfg)
+
+
+@pytest.mark.parametrize(
+    "token_kwargs",
+    [{}, {"bearer_token": ""}, {"bearer_token": "   "}, {"config": GCSConfig(bucket="lakehouse"), "bearer_token": " "}],
+    ids=["no-token", "empty-token", "blank-token", "blank-token-with-config"],
+)
+def test_duckdb_gcs_secret_sql_requires_bearer_token(token_kwargs: dict[str, Any]) -> None:
+    """Missing or blank bearer tokens fail loudly instead of emitting a broken DuckDB secret."""
+    with pytest.raises(ImproperConfigurationError, match="bearer token"):
+        build_duckdb_gcs_secret_sql("my_secret", **token_kwargs)
+
+
+@pytest.mark.parametrize(
+    ("token", "expected_literal"),
+    [("tok'en", "'tok''en'"), ("''", "''''''"), ("mock-oauth-token.a-b_c/d+e=", "'mock-oauth-token.a-b_c/d+e='")],
+    ids=["embedded-quote", "only-quotes", "oauth-charset"],
+)
+def test_duckdb_gcs_secret_sql_escapes_token_quotes(token: str, expected_literal: str) -> None:
+    """Single quotes inside a bearer token are doubled so the literal cannot terminate early."""
+    sql = build_duckdb_gcs_secret_sql("gcs_lake", bearer_token=token)
+    assert sql == f"CREATE OR REPLACE SECRET gcs_lake (TYPE gcs, BEARER_TOKEN {expected_literal})"
+
+
+@pytest.mark.parametrize("token", ["tok\x00en", "tok\ren", "tok\nen"], ids=["nul", "cr", "lf"])
+def test_duckdb_gcs_secret_sql_rejects_control_characters(token: str) -> None:
+    """Tokens carrying NUL, CR, or LF characters are rejected before any SQL is rendered."""
+    with pytest.raises(ValueError, match="NUL, CR, or LF"):
+        build_duckdb_gcs_secret_sql("gcs_lake", bearer_token=token)
+
+
+@pytest.mark.skipif(duckdb is None, reason="duckdb is not installed")
+def test_duckdb_gcs_secret_sql_executes_against_duckdb() -> None:
+    """The rendered statement is accepted by DuckDB and stores the exact token, including embedded quotes."""
+    connection = duckdb.connect()
+    try:
+        installed = connection.execute(
+            "SELECT installed FROM duckdb_extensions() WHERE extension_name = 'httpfs'"
+        ).fetchone()
+        if installed is None or not installed[0]:
+            pytest.skip("DuckDB httpfs extension is not installed locally and is not downloaded offline")
+        connection.execute("LOAD httpfs")
+        connection.execute(build_duckdb_gcs_secret_sql("gcs_lake", bearer_token="tok'en"))
+        secret = connection.execute("SELECT name, type FROM duckdb_secrets() WHERE name = 'gcs_lake'").fetchone()
+        assert secret == ("gcs_lake", "gcs")
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize("target", [GCSConfig(bucket="lakehouse"), "gs://lakehouse"], ids=["config", "uri"])
+@pytest.mark.parametrize("via_registry", [False, True], ids=["direct", "registered"])
+@pytest.mark.anyio
+async def test_alchemy_forwards_signing_and_token_cache(target: GCSConfig | str, via_registry: bool) -> None:
+    """StorageConfig and URI targets build both stores with the forwarded SigningConfig and token cache."""
+    signing = SigningConfig(provider="hmac", hmac_secret="alchemy-forward", endpoint="https://signed.example.com")
+    token_cache = SyncGcpTokenCache({"access_token": "forwarded-token"}, allow_ambient_adc=False)
+    registry = AlchemyStorageRegistry()
+    if via_registry:
+        backend = register_storage_backend(
+            target, key="alchemy_forwarded", signing=signing, token_cache=token_cache, registry=registry
+        )
+    else:
+        backend = AlchemyObjectStoreBackend("alchemy_forwarded", target, signing=signing, token_cache=token_cache)
+    try:
+        assert backend.sync_store.token_cache is token_cache
+        assert isinstance(backend.async_store.token_cache, AsyncGcpTokenCache)
+        assert backend.supports_signing is True
+        assert backend.sync_store.supports_signing is True
+        assert backend.async_store.supports_signing is True
+        sync_url = backend.sign("one.bin")
+        async_urls = await backend.sign_async(["one.bin"], for_upload=True)
+        assert isinstance(sync_url, str)
+        assert sync_url.startswith("https://signed.example.com/one.bin?")
+        assert isinstance(async_urls, list)
+        assert async_urls[0].startswith("https://signed.example.com/one.bin?")
+    finally:
+        if via_registry:
+            registry.unregister_backend("alchemy_forwarded")
+
+
+@pytest.mark.parametrize("async_handle", [False, True])
+@pytest.mark.parametrize(
+    "auth_kwargs",
+    [
+        {"signing": SigningConfig(provider="hmac", hmac_secret="ignored", endpoint="https://ignored.example.com")},
+        {"token_cache": SyncGcpTokenCache({"access_token": "ignored"}, allow_ambient_adc=False)},
+    ],
+    ids=["signing", "token-cache"],
+)
+def test_alchemy_rejects_auth_options_with_prebuilt_store(async_handle: bool, auth_kwargs: dict[str, Any]) -> None:
+    """Auth options for a prebuilt store fail loudly instead of being silently discarded."""
+    sync_store = SyncObjectStore("memory://")
+    store = sync_store.to_async() if async_handle else sync_store
+    with pytest.raises(ImproperConfigurationError, match="StorageConfig or URI"):
+        AlchemyObjectStoreBackend(fs=store, **auth_kwargs)
+
+
+def test_sqlspec_storage_module_drops_ipc_buffer_wrapper() -> None:
+    """Raw IPC buffers flow directly to the shared batch codec without a wrapper type."""
+    assert not hasattr(sqlspec_storage_mod, "_IPCBuffer")
+
+
+def test_sqlspec_public_methods_precede_private_helpers() -> None:
+    """ObjectStoreBackend groups public sync methods, then public async methods, then private helpers."""
+    names = [name for name in vars(SQLSpecObjectStoreBackend) if not name.startswith("__")]
+    callables = [name for name in names if callable(getattr(SQLSpecObjectStoreBackend, name, None))]
+    private_start = next(index for index, name in enumerate(callables) if name.startswith("_"))
+    assert all(name.startswith("_") for name in callables[private_start:])
+    public = callables[:private_start]
+    first_async = next(index for index, name in enumerate(public) if name.endswith("_async"))
+    assert all(name.endswith("_async") for name in public[first_async:])
 
 
 @pytest.mark.anyio
@@ -292,12 +1248,11 @@ async def test_alchemy_storage_backend_file_object_and_session_tracker_rollback(
 
 
 @pytest.mark.anyio
-async def test_streaming_storage_response_exported_from_vertebra_storage() -> None:
-    """Verify StreamingStorageResponse is canonically exported from vertebra.storage and re-exported in sqlspec."""
-    assert StorageStreamingStorageResponse is StreamingStorageResponse
+async def test_streaming_storage_response_chunks_match_across_sync_and_async_iteration() -> None:
+    """A store-backed StreamingStorageResponse yields identical bounded chunks through sync and async iteration."""
     store = SyncObjectStore.from_memory("streaming-export-test")
     store.put("blobs/sample.bin", b"abcdefghij")
-    resp = StorageStreamingStorageResponse(store=store, key="blobs/sample.bin", total_size=10, chunk_size=4)
+    resp = StreamingStorageResponse(store=store, key="blobs/sample.bin", total_size=10, chunk_size=4)
     sync_chunks = [bytes(c) for c in resp.iter_chunks()]
     async_chunks = [bytes(c) async for c in resp.aiter_chunks()]
     assert sync_chunks == [b"abcd", b"efgh", b"ij"]
@@ -322,13 +1277,9 @@ async def test_object_store_backend_write_arrow_cursor_and_uri_qualified_globs(t
     assert ipc_table.to_pylist() == [{"id": 1, "region": "us"}, {"id": 2, "region": "eu"}]
 
     token_cache = SyncGcpTokenCache({"access_token": "initial-token"}, allow_ambient_adc=False)
-    gcs_sim_store = SyncObjectStore.from_local(tmp_path / "gcs-sim")
-    gcs_backend = SQLSpecObjectStoreBackend(
-        "gs://analytics-bucket",
-        store=gcs_sim_store,
-        token_cache=token_cache,
-    )
-    assert gcs_backend.store.token_cache is token_cache
+    gcs_sim_store = SyncObjectStore(LocalConfig(root=tmp_path / "gcs-sim"), token_cache=token_cache)
+    gcs_backend = SQLSpecObjectStoreBackend("gs://analytics-bucket", store=gcs_sim_store)
+    assert gcs_backend.sync_store.token_cache is token_cache
     assert gcs_backend.async_store.token_cache is not None
     assert isinstance(gcs_backend.async_store.token_cache, AsyncGcpTokenCache)
 

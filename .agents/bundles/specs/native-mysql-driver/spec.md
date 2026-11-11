@@ -1,9 +1,11 @@
 ---
 type: Spec
 flow_id: native-mysql-driver
-title: Standalone Rust MySQL and MariaDB Wheel (vertebra-mysql)
-description: Standalone PyO3 crate src/rs/vertebra-mysql (vertebra._mysql + vertebra-core[mysql]) built on mysql_async (rustls+ring, binary protocol, Cloud SQL IAM, KILL QUERY cancellation, VTBARROW ShmCapsule ArrowCursor), replacing pymysql and memory:// execution.
+title: "Standalone Rust MySQL and MariaDB Wheel (vertebra-mysql)"
+description: "Standalone PyO3 crate src/rs/vertebra-mysql (vertebra._mysql + vertebra-core[mysql]) built on mysql_async (rustls+ring, binary protocol, Cloud SQL IAM, KILL QUERY cancellation, VTBARROW ShmCapsule ArrowCursor), replacing pymysql and memory:// execution."
+status: draft
 state: draft
+has_chapters: false
 parent_prd: native-data-platform
 research:
   - ../native-data-platform/research/rust-driver-crates_20261103.md
@@ -13,12 +15,40 @@ plan_commit: null
 state_revision: 0
 current_task: null
 last_verified_checkpoint: null
-created_at: 2026-11-03T04:05:00Z
-updated_at: "2026-11-06T06:30:00Z"
-tags: [rust, mysql, mariadb, driver, wheel]
+created_at: "2026-11-03T04:05:00Z"
+updated_at: "2026-11-07T04:15:00Z"
+generated:
+  by: flow-setup
+  at: "2026-11-07T04:15:00Z"
+verified:
+  - by: agent:flow-setup
+    at: "2026-11-07T04:15:00Z"
+    commit: 9af810f5
+sources:
+  - id: mysql-rs
+    resource: src/rs/vertebra-db/src/mysql/mod.rs
+    title: MySQL packet framing and caching_sha2 codecs in vertebra-db
+  - id: mysql-py
+    resource: src/py/vertebra/db/adapters/mysql/driver.py
+    title: Python SyncMySQLDriver and AsyncMySQLDriver target cutover module
+  - id: py-async-rs
+    resource: src/rs/vertebra-db/src/py_async.rs
+    title: Shared AsyncCompletionQueue + Notifier PyO3 bridge
+tags:
+  - rust
+  - mysql
+  - mariadb
+  - driver
+  - wheel
 ---
 
 # Flow Charter: Standalone Rust MySQL and MariaDB Wheel (`vertebra-mysql`)
+
+<!-- truth: start -->
+- **Standalone Optional Wheel**: `src/rs/vertebra-mysql` (`vertebra._mysql`, `vertebra-core[mysql]`) builds on `mysql_async 0.37.1` (`default-rustls-ring`) with `#[pymodule(gil_used = false)]` [^mysql-rs].
+- **Explicit `Sync*` / `Async*` Clients**: `SyncMySQLClient` and `AsyncMySQLClient` support Handshake v10, `caching_sha2_password`, Cloud SQL `:3307` mTLS / IAM tokens, `KILL QUERY` cancellation, binary prepared statements, and `VTBARROW` `ShmCapsule` transfer [^py-async-rs].
+- **Clean-Break Python Cutover**: `SyncMySQLDriver` and `AsyncMySQLDriver` remove `pymysql`, `asyncmy`, and `memory://` execution paths [^mysql-py].
+<!-- truth: end -->
 
 ## Approach
 
@@ -58,3 +88,7 @@ See [crate research](../native-data-platform/research/rust-driver-crates_2026110
 - t02 MySQL binary prepared protocol, multi-result sets, statement cache, codecs, and `DatabaseError` mapping.
 - t03 MySQL `VTBARROW` `ShmCapsule` export/load and `BrokerEngineBackend` registration.
 - t04 Python `SyncMySQLDriver` / `AsyncMySQLDriver` cutover, `pymysql`/`memory://` removal, conformance activation, and docs/OKF update.
+
+[^mysql-rs]: `src/rs/vertebra-db/src/mysql/mod.rs` — MySQL packet framing and caching_sha2 codecs in vertebra-db.
+[^mysql-py]: `src/py/vertebra/db/adapters/mysql/driver.py` — Python SyncMySQLDriver and AsyncMySQLDriver target cutover module.
+[^py-async-rs]: `src/rs/vertebra-db/src/py_async.rs` — Shared AsyncCompletionQueue + Notifier PyO3 bridge.

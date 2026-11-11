@@ -6,6 +6,7 @@ import gc
 
 import pytest
 
+from vertebra._storage import StorageBuffer
 from vertebra._vertebra import (
     ArrowCursor as RustArrowCursor,
 )
@@ -22,6 +23,7 @@ from vertebra.server._fastpath import (
     ARROW_STREAM_MEDIA_TYPE,
     serialize_fastpath_special_result,
 )
+from vertebra.storage import AsyncObjectStore, StreamingStorageResponse
 
 
 def test_request_body_view_returns_readonly_memoryview() -> None:
@@ -191,3 +193,95 @@ def test_serialize_fastpath_special_result_returns_zero_copy_arrow_memoryview() 
             return memoryview(b"impostor")
 
     assert serialize_fastpath_special_result(ImpostorArrowCursor()) is None
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("range_header", "status", "content_range", "expected"),
+    [
+        (None, 200, None, bytes(range(100))),
+        ("items=0-5", 200, None, bytes(range(100))),
+        ("bytes=0-15", 206, "bytes 0-15/100", bytes(range(16))),
+        ("bytes=80-", 206, "bytes 80-99/100", bytes(range(80, 100))),
+        ("bytes=-12", 206, "bytes 88-99/100", bytes(range(88, 100))),
+        ("bytes=60-999", 206, "bytes 60-99/100", bytes(range(60, 100))),
+        ("bytes=-999", 206, "bytes 0-99/100", bytes(range(100))),
+        ("bytes=100-110", 416, "bytes */100", b""),
+        ("bytes=40-10", 416, "bytes */100", b""),
+        ("bytes=-0", 416, "bytes */100", b""),
+        ("bytes=0-2,4-6", 416, "bytes */100", b""),
+        ("bytes=wat", 416, "bytes */100", b""),
+    ],
+)
+async def test_storage_response_async_ranges(
+    range_header: str | None, status: int, content_range: str | None, expected: bytes
+) -> None:
+    """Native memory storage produces exact HTTP range bodies through both async seams."""
+    store = AsyncObjectStore("memory://")
+    await store.put("video.mp4", bytes(range(100)), content_type="video/mp4")
+    response = await StreamingStorageResponse.from_async_store(
+        store, "video.mp4", range_header=range_header, chunk_size=7
+    )
+    chunks = [chunk async for chunk in response.aiter_chunks()]
+    assert b"".join(bytes(chunk) for chunk in chunks) == expected
+    if status == 200:
+        assert all(isinstance(chunk, StorageBuffer) for chunk in chunks)
+    assert all(len(chunk) <= 7 for chunk in chunks)
+    resolved_status, header_pairs, body = await response.to_async_fastpath_tuple()
+    headers = dict(header_pairs)
+    assert resolved_status == status
+    assert bytes(body) == expected
+    assert headers[b"accept-ranges"] == b"bytes"
+    assert headers[b"content-length"] == str(len(expected)).encode()
+    assert headers[b"content-type"] == b"video/mp4"
+    assert headers.get(b"content-range") == (content_range.encode() if content_range else None)
+    etag = (await store.head("video.mp4")).etag
+    assert etag is not None
+    assert headers[b"etag"] == f'"{etag}"'.encode()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("range_header", "expected_status", "expected_body"),
+    [(None, 200, b"0123456789"), ("bytes=2-5", 206, b"2345"), ("bytes=10-", 416, b"")],
+)
+async def test_async_storage_handler_submits_native_fastpath_frames(
+    range_header: str | None, expected_status: int, expected_body: bytes
+) -> None:
+    """An explicit async handler resolves storage before native FastPath buffer submission."""
+    store = AsyncObjectStore("memory://")
+    await store.put("body", b"0123456789")
+
+    async def handler() -> tuple[int, list[tuple[bytes, bytes]], bytes | memoryview]:
+        response = await StreamingStorageResponse.from_async_store(store, "body", range_header=range_header)
+        return await response.to_async_fastpath_tuple()
+
+    status, headers, body = await handler()
+    if expected_status == 200:
+        assert isinstance(body, memoryview)
+        assert isinstance(body.obj, StorageBuffer)
+    native = Response.from_buffer(status, body, headers=headers, request_id=303)
+    assert native.status == expected_status
+    assert native.body == expected_body
+    assert dict(native.headers)[b"content-length"] == str(len(expected_body)).encode()
+    text_headers = [(key.decode("latin-1"), value.decode("latin-1")) for key, value in headers]
+    frames = submit_raw_response(request_id=303, status=status, headers=text_headers, body=body, flags=2)
+    assert len(frames) == 1
+    frame = frames[0]
+    assert int.from_bytes(frame[0:8], "little") == 303
+    assert int.from_bytes(frame[8:10], "little") == expected_status
+    header_count = int.from_bytes(frame[12:14], "little")
+    offset = 16
+    wire_headers: dict[bytes, bytes] = {}
+    for _ in range(header_count):
+        key_length = int.from_bytes(frame[offset : offset + 2], "little")
+        offset += 2
+        key = frame[offset : offset + key_length]
+        offset += key_length
+        value_length = int.from_bytes(frame[offset : offset + 2], "little")
+        offset += 2
+        wire_headers[key] = frame[offset : offset + value_length]
+        offset += value_length
+    body_length = int.from_bytes(frame[offset : offset + 4], "little")
+    assert frame[offset + 4 : offset + 4 + body_length] == expected_body
+    assert wire_headers == dict(headers)

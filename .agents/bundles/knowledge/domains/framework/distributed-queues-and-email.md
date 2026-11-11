@@ -1,16 +1,22 @@
 ---
 type: Concept
 title: "Distributed Queues, Cron Leader Election & Transactional Email"
-description: "The `vertebra.framework.queues` backends (Memory, Redis, Valkey, PostgreSQL, Oracle, Spanner), `CronScheduler` leader election, `WorkerRunner` with priority lanes, and `vertebra.framework.email` transactional transports (SMTP, Resend, SendGrid, Mailgun, AWS SES with Rust SigV4 signing)."
+description: "The vertebra.framework.queues backends (Memory, Redis, Valkey, PostgreSQL, Oracle, Spanner), CronScheduler leader election, WorkerRunner lanes, and vertebra.framework.email transactional transports."
 status: stable
-tags: [domains, framework, queues, email, cron, workers]
+tags:
+  - domains
+  - framework
+  - queues
+  - email
+  - cron
+  - workers
 generated:
   by: flow/0.26.0
   at: "2026-11-04T04:33:00Z"
 verified:
-  - by: agent:flow-review
-    at: "2026-11-06T06:10:00Z"
-    commit: 7657e8b7c2c96bdda6821aec70a2b603f438a127
+  - by: agent:flow-setup
+    at: "2026-11-07T03:55:00Z"
+    commit: 9af810f5
 sources:
   - id: src-framework-queues-init-py
     resource: src/py/vertebra/framework/queues/__init__.py
@@ -43,7 +49,7 @@ Vertebra provides pluggable distributed background task queues, multi-process cr
 
 ## 1. Distributed Queue Backends (`framework/queues/`)
 
-[`QueueService`](../../../../../src/py/vertebra/framework/queues/__init__.py) provides unified `@task` enqueueing, delayed scheduling, dead-letter routing, and retry backoff across six storage backends (note that `PostgreSQLQueueBackend`, `OracleQueueBackend`, `RedisQueueBackend`, and `ValkeyQueueBackend` delegate SQL/RESP execution to caller-supplied `PostgreSQLQueueExecutor` / `OracleQueueExecutor` or Python fallback clients until their corresponding `native-*-driver` cutover flows land, whereas `SpannerQueueBackend` pairs with `vertebra-spanner` via `SpannerQueueExecutor`):
+[`QueueService`](../../../../../src/py/vertebra/framework/queues/__init__.py) provides unified `@task` enqueueing, delayed scheduling, dead-letter routing, and retry backoff across six storage backends (`PostgreSQLQueueBackend`, `OracleQueueBackend`, `RedisQueueBackend`, and `ValkeyQueueBackend` delegate SQL and RESP execution to caller-supplied `PostgreSQLQueueExecutor` / `OracleQueueExecutor` or configured client adapters, while `SpannerQueueBackend` pairs with `vertebra-spanner` via `SpannerQueueExecutor`):
 
 | Backend | Implementation & Storage Mechanics |
 | :--- | :--- |

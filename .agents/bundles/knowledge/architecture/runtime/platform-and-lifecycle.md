@@ -3,11 +3,19 @@ type: Guide
 title: "Server Platform & Process Lifecycle"
 description: "Python-side runtime around vertebra-server: the launcher, binary discovery, worker loop and uvloop inline polling, 3.14t/3.15t loop sharding, sync pools, and platform helpers."
 status: stable
-tags: [architecture, runtime, free-threaded, platform, process-lifecycle]
+tags:
+  - architecture
+  - runtime
+  - free-threaded
+  - platform
+  - process-lifecycle
 generated:
   by: flow/0.26.0
   at: "2026-11-04T04:33:00Z"
 verified:
+  - by: agent:flow-setup
+    at: "2026-11-07T03:55:00Z"
+    commit: 9af810f5
   - by: agent:flow-setup
     at: "2026-11-04T04:33:00Z"
     commit: f741701
@@ -82,7 +90,7 @@ This chapter covers the Python code that launches the Rust binary and runs insid
 
 ## Event Loops & Free-Threaded Support
 
-- **`create_event_loop()`** ([`_loops.py`](../../../../../src/py/vertebra/server/_loops.py)[^src-server-loops-py]): prefers `uvloop.new_event_loop()` on POSIX via `import_optional("uvloop")` and `winloop.new_event_loop()` on Windows, falling back to `asyncio.new_event_loop()` and enabling `asyncio.eager_task_factory` when available.
+- **`create_event_loop()` & `resolve_loop_backend()`** ([`_loops.py`](../../../../../src/py/vertebra/server/_loops.py)[^src-server-loops-py]): exposes `LoopBackend` (`auto`, `uvloop`, `winloop`, `rloop` via `LoopBackend.RLOOP`, `asyncio`) backed by declarative `_LOOP_BACKEND_SPECS` (`winloop` on `win32`, `uvloop` then `rloop` on `posix`, falling back to `asyncio`). `resolve_loop_backend` honors explicit `--loop` and `VERTEBRA_LOOP` overrides, skips `quarantined_modules` (populated by `GilAuditReport` or `VERTEBRA_QUARANTINED_LOOPS` when an extension re-enabled the GIL under `3.14t`/`3.15t`), instantiates `new_event_loop()` directly without deprecated `AbstractEventLoopPolicy` APIs, and enables `asyncio.eager_task_factory` when supported.
 - **`is_free_threaded()`** ([`_gil_audit.py`](../../../../../src/py/vertebra/server/_gil_audit.py)[^src-server-gil-audit-py]): `not sys._is_gil_enabled()` when available, else the `Py_GIL_DISABLED` build flag.
 - **`GilAuditReport`** ([`_gil_audit.py`](../../../../../src/py/vertebra/server/_gil_audit.py)): a frozen `msgspec.Struct` that compares GIL state before and after import, lists newly loaded native extensions as suspects when the GIL was re-enabled, logs a warning, and raises `RuntimeError` when `VERTEBRA_STRICT_FREE_THREADING` is `1`/`true`.
 - **`EventLoopPool`**: manages `size` persistent event loops (`inline_single_loop=True` when `size == 1` attaches an inline loop on the caller thread without spawning a background thread; `size > 1` spawns daemon threads `vertebra-event-loop-{i}` and coalesces batch submissions into one `call_soon_threadsafe` wakeup per target loop in `spawn_batch`). `stop()` cancels and awaits every pending task, runs `shutdown_asyncgens`, stops each loop, and closes a loop only after its thread exits; `__init__` raises `RuntimeError` when a shard does not signal readiness within 5 s.
@@ -90,7 +98,7 @@ This chapter covers the Python code that launches the Rust binary and runs insid
 
 ## Sync Pools & Loop-Affine Resources (`utils/sync_tools.py`)
 
-- **`SyncPool`**: a lazily created `ThreadPoolExecutor` (default `2 × cpu_count` workers) that copies `contextvars` into each call and recreates itself after `fork` (PID check). `SyncPool.default()` is process-wide. `async_()` wrappers (`_AsyncWrapper`) use it instead of `asyncio.to_thread` when the GIL is disabled; the SQLAlchemy dialect adapter (`extensions/sqlalchemy/dialects.py`) owns its own instance.
+- **`SyncPool`**: a lazily created `ThreadPoolExecutor` (`max(1, max_workers if max_workers is not None else cpu_count * 2)` workers) paired with per-loop `_AsyncCompletionQueue` (`add_reader` socketpair wakeup) that copies `contextvars` into each call and recreates itself after `fork` (PID check). `SyncPool.default()` is process-wide. `async_()` wrappers (`_AsyncWrapper`) use it instead of `asyncio.to_thread` when the GIL is disabled; the SQLAlchemy dialect adapter (`extensions/sqlalchemy/dialects.py`) owns its own instance.
 - **`SyncLoopShardedResource[T]` / `AsyncLoopShardedResource[T]`**: caches one resource per event loop in a `WeakKeyDictionary`, built synchronously by `factory` or awaited asynchronously via `async def get` (`clear`).
 
 ## Platform Helpers (`platform.py`)

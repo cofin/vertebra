@@ -1,9 +1,11 @@
 ---
 type: Spec
 flow_id: sqlalchemy-and-django-integration
-title: SQLAlchemy, Advanced Alchemy, and Django DB Integration
-description: Split the multi-engine Sync/Async SQLAlchemy dialect module onto built-in and official GCP/DuckDB dialect bases over the shared Vertebra SyncDBAPI / AsyncDBAPI module, replace the custom Advanced Alchemy cache region with a dogpile backend, and build Django database backends on Django built-ins and django_spanner.
+title: "SQLAlchemy, Advanced Alchemy, and Django DB Integration"
+description: "Split the multi-engine Sync/Async SQLAlchemy dialect module onto built-in and official GCP/DuckDB dialect bases over the shared Vertebra SyncDBAPI / AsyncDBAPI module, replace the custom Advanced Alchemy cache region with a dogpile backend, and build Django database backends on Django built-ins and django_spanner."
+status: draft
 state: draft
+has_chapters: false
 parent_prd: integration-remediation
 research:
   - ../integration-remediation/research/audit-findings_20261103.md
@@ -12,12 +14,40 @@ plan_commit: null
 state_revision: 0
 current_task: null
 last_verified_checkpoint: null
-created_at: 2026-11-03T03:30:00Z
-updated_at: "2026-11-05T06:20:28Z"
-tags: [sqlalchemy, advanced-alchemy, django, dialects, dbapi]
+created_at: "2026-11-03T03:30:00Z"
+updated_at: "2026-11-07T04:15:00Z"
+generated:
+  by: flow-setup
+  at: "2026-11-07T04:15:00Z"
+verified:
+  - by: agent:flow-setup
+    at: "2026-11-07T04:15:00Z"
+    commit: 9af810f5
+sources:
+  - id: sa-dialects
+    resource: src/py/vertebra/extensions/sqlalchemy/dialects.py
+    title: Current multi-engine SQLAlchemy dialect module slated for per-engine split
+  - id: aa-cache
+    resource: src/py/vertebra/extensions/alchemy/cache.py
+    title: Advanced Alchemy cache integration slated for dogpile.cache backend
+  - id: django-backends
+    resource: src/py/vertebra/extensions/django/db/backends/__init__.py
+    title: Django database backend wrapper mixin
+tags:
+  - sqlalchemy
+  - advanced-alchemy
+  - django
+  - dialects
+  - dbapi
 ---
 
 # Flow Charter: SQLAlchemy, Advanced Alchemy, and Django DB Integration
+
+<!-- truth: start -->
+- **Upstream Dialect & Backend Inheritance**: `Sync<Engine>Dialect` / `Async<Engine>Dialect` subclass SQLAlchemy built-ins and official `sqlalchemy_bigquery` / `sqlalchemy_spanner` / `duckdb_engine` bases over `vertebra.db.dbapi`, while Django backends subclass Django built-ins and `django_spanner` [^sa-dialects] [^django-backends].
+- **Layer Purity**: `vertebra.db.dbapi` remains free of SQLAlchemy, Django, or engine-specific imports; SQLAlchemy greenlet adaptation stays isolated in `extensions/sqlalchemy/async_adapter.py` [^sa-dialects].
+- **Real Dogpile Cache Backend**: `extensions/alchemy/cache.py` registers `dogpile.cache` backends (`vertebra.valkey`, `vertebra.redis`) and deletes the process-local `shm://` cache scheme and `extensions/sqlalchemy/cache.py` shim [^aa-cache].
+<!-- truth: end -->
 
 ## Charter
 
@@ -79,3 +109,7 @@ SQLAlchemy and Advanced Alchemy are the primary user path. Vertebra's `Sync<Engi
 - t06 Wire `alchemy/plugin.py::normalize_alchemy_url` onto `BaseDatabaseConfig.url_schemes`.
 - t07 Rebasing Django PostgreSQL, MySQL, Oracle, and SQLite backends onto Django built-ins.
 - t08 Rebase Django Spanner backend onto `django_spanner`, remove `bigquery`/`duckdb`/`mssql` Django backends, and update docs/OKF.
+
+[^sa-dialects]: `src/py/vertebra/extensions/sqlalchemy/dialects.py` — Current multi-engine SQLAlchemy dialect module slated for per-engine split.
+[^aa-cache]: `src/py/vertebra/extensions/alchemy/cache.py` — Advanced Alchemy cache integration slated for dogpile.cache backend.
+[^django-backends]: `src/py/vertebra/extensions/django/db/backends/__init__.py` — Django database backend wrapper mixin.

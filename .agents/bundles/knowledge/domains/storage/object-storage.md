@@ -1,145 +1,160 @@
 ---
 type: Guide
-title: "Object Storage, Presigning & Upload Tracking"
-description: "The `vertebra-storage` Rust crate (`vertebra._storage`) and the `vertebra.storage` Python facade for multicloud object I/O, presigned URLs, transactional uploads, and range reads."
+title: Object Storage, Streaming & Presigning
+description: Native multicloud object I/O, shared GCP token authority, conditional writes, bulk file transfers, file-like readers and writers, presigning, Arrow/Parquet codecs, and framework storage adapters.
 status: stable
-tags: [domains, storage, object-store, signing]
-generated:
-  by: flow/0.26.0
-  at: "2026-11-04T04:33:00Z"
+tags:
+- domains
+- storage
+- object-store
+- signing
 verified:
-  - by: agent:flow-setup
-    at: "2026-11-04T04:33:00Z"
-    commit: f741701
+- by: agent:docs-okf-specialist
+  at: '2026-11-09T02:24:00Z'
+  commit: c8c8998a
 sources:
-  - id: src-vertebra-core-src-gcp-auth-rs
-    resource: src/rs/vertebra-core/src/gcp_auth.rs
-    title: "Rust implementation module (src/rs/vertebra-core/src/gcp_auth.rs)"
-  - id: src-vertebra-storage-cargo-toml
-    resource: src/rs/vertebra-storage/Cargo.toml
-    title: "Rust crate manifest (src/rs/vertebra-storage/Cargo.toml)"
-  - id: src-vertebra-storage-src-lib-rs
-    resource: src/rs/vertebra-storage/src/lib.rs
-    title: "Rust implementation module (src/rs/vertebra-storage/src/lib.rs)"
-  - id: src-vertebra-storage-src-store-rs
-    resource: src/rs/vertebra-storage/src/store.rs
-    title: "Rust implementation module (src/rs/vertebra-storage/src/store.rs)"
-  - id: src-vertebra-storage-src-gcp-auth-rs
-    resource: src/rs/vertebra-storage/src/gcp_auth.rs
-    title: "Rust implementation module (src/rs/vertebra-storage/src/gcp_auth.rs)"
-  - id: src-vertebra-storage-src-oci-rs
-    resource: src/rs/vertebra-storage/src/oci.rs
-    title: "Rust implementation module (src/rs/vertebra-storage/src/oci.rs)"
-  - id: src-vertebra-storage-src-signing-rs
-    resource: src/rs/vertebra-storage/src/signing.rs
-    title: "Rust implementation module (src/rs/vertebra-storage/src/signing.rs)"
-  - id: src-vertebra-storage-tests-storage-engine-tests-rs
-    resource: src/rs/vertebra-storage/tests/storage_engine_tests.rs
-    title: "Rust implementation module (src/rs/vertebra-storage/tests/storage_engine_tests.rs)"
-  - id: src-storage-init-py
-    resource: src/py/vertebra/storage/__init__.py
-    title: "Python implementation module (src/py/vertebra/storage/__init__.py)"
-  - id: src-storage-store-py
-    resource: src/py/vertebra/storage/_store.py
-    title: "Python implementation module (src/py/vertebra/storage/_store.py)"
-  - id: src-storage-streaming-py
-    resource: src/py/vertebra/storage/_streaming.py
-    title: "Python implementation module (src/py/vertebra/storage/_streaming.py)"
-  - id: src-extensions-alchemy-storage-py
-    resource: src/py/vertebra/extensions/alchemy/storage.py
-    title: "Python implementation module (src/py/vertebra/extensions/alchemy/storage.py)"
-  - id: src-extensions-sqlspec-storage-py
-    resource: src/py/vertebra/extensions/sqlspec/storage.py
-    title: "Python implementation module (src/py/vertebra/extensions/sqlspec/storage.py)"
-  - id: src-tests-integration-storage-conftest-py
-    resource: src/py/tests/integration/storage/conftest.py
-    title: "Python implementation module (src/py/tests/integration/storage/conftest.py)"
+- id: core-gcp-auth
+  resource: src/rs/vertebra-core/src/gcp_auth.rs
+  title: Shared Rust GCP OAuth2 token cache and capsule name
+- id: py-gcp-auth
+  resource: src/rs/vertebra-py/src/gcp_auth.rs
+  title: PyO3 GCP token cache bindings in vertebra._vertebra
+- id: storage-lib
+  resource: src/rs/vertebra-storage/src/lib.rs
+  title: PyO3 module bindings, buffer extraction, and error mapping for vertebra._storage
+- id: storage-store
+  resource: src/rs/vertebra-storage/src/store.rs
+  title: ObjectStoreEngine, GCS compose, file transfers, and HTTP clients
+- id: storage-gcp-auth
+  resource: src/rs/vertebra-storage/src/gcp_auth.rs
+  title: RefreshingGcpCredentialProvider over vertebra_core::gcp_auth
+- id: storage-oci
+  resource: src/rs/vertebra-storage/src/oci.rs
+  title: Streaming OCI REST v2 ObjectStore and PAR support
+- id: storage-r2
+  resource: src/rs/vertebra-storage/src/r2.rs
+  title: Cloudflare R2 uniform multipart chunking
+- id: storage-signing
+  resource: src/rs/vertebra-storage/src/signing.rs
+  title: Multicloud URL and header signing with pooled IAM clients
+- id: storage-pyi
+  resource: src/py/vertebra/_storage.pyi
+  title: Type stubs for vertebra._storage
+- id: py-store
+  resource: src/py/vertebra/storage/_store.py
+  title: SyncObjectStore, AsyncObjectStore, configs, readers, and writers
+- id: py-streaming
+  resource: src/py/vertebra/storage/_streaming.py
+  title: StreamingStorageResponse and byte-range parsing
+- id: py-arrow
+  resource: src/py/vertebra/storage/_arrow.py
+  title: Demand-driven Arrow and Parquet codec bridge
+- id: py-typing
+  resource: src/py/vertebra/_typing.py
+  title: PreconditionError definition
+- id: db-arrow
+  resource: src/py/vertebra/db/arrow.py
+  title: ArrowCursor and zero-copy read_arrow_shm
+- id: core-notify
+  resource: src/rs/vertebra-core/src/notify.rs
+  title: Native Notifier event-loop completion wakeups
+- id: ext-litestar-store
+  resource: src/py/vertebra/extensions/litestar/store.py
+  title: Persistent Litestar Store and confined async filesystem
+- id: ext-alchemy-storage
+  resource: src/py/vertebra/extensions/alchemy/storage.py
+  title: Advanced Alchemy StorageBackend adapter
+- id: ext-sqlspec-storage
+  resource: src/py/vertebra/extensions/sqlspec/storage.py
+  title: SQLSpec ObjectStoreProtocol adapter
+- id: ext-django-storage
+  resource: src/py/vertebra/extensions/django/storage.py
+  title: Deconstructible Django Storage with native readers
+- id: tests-storage-engine
+  resource: src/rs/vertebra-storage/tests/storage_engine_tests.rs
+  title: Rust integration tests for vertebra-storage
+- id: tests-storage-unit
+  resource: src/py/tests/unit/storage/test_storage_store.py
+  title: Python store, range, and response contract tests
+- id: tests-storage-integration
+  resource: src/py/tests/integration/storage/conftest.py
+  title: Emulator integration fixtures
 ---
 
-# Object Storage, Presigning & Upload Tracking
+# Object Storage, Streaming & Presigning
 
 <!-- truth: start -->
-- **Rust Extension & GIL-Free Async Execution (`vertebra-storage`, `vertebra.storage`)**: [`vertebra-storage`](../../../../../src/rs/vertebra-storage/src/lib.rs)[^src-vertebra-storage-src-lib-rs] is a PyO3 crate built as `_storage` (`#[pymodule(gil_used = false)]`) over `object_store 0.13`. `SyncObjectStore` methods release the GIL via `py.detach()`, while `AsyncObjectStore` methods return a `RustStorageAwaitable` (`vertebra._storage.RustStorageAwaitable`) backed by a per-loop [`AsyncCompletionQueue`](../../../../../src/rs/vertebra-core/src/notify.rs) and `vertebra_core::notify::Notifier` (`eventfd` on Linux, `kqueue`/pipe on macOS) registered once via `loop.add_reader`, completing on the `STORAGE_RUNTIME` Tokio pool with zero Tokio `Python::attach` GIL acquisitions and coalesced event-loop wakeups.
-- **Shared GCP ADC Credential Caching & Local RSA-SHA256 GCS V4 Signing (`vertebra_core::gcp_auth`, `signing.rs`)**: [`vertebra_core::gcp_auth::GcpTokenCache`](../../../../../src/rs/vertebra-core/src/gcp_auth.rs)[^src-vertebra-core-src-gcp-auth-rs] caches [`GcpTokenSnapshot`](../../../../../src/rs/vertebra-core/src/gcp_auth.rs) instances inside an `ArcSwapOption<GcpTokenSnapshot>` across `ServiceAccountKey` (local PKCS#8 RSA-SHA256 JWT assertion), `AuthorizedUser`, `MetadataServer`, `ImpersonatedServiceAccount`, and `Static` sources with `quota_project_id` (`x-goog-user-project`) and custom OAuth scopes. `sign_gcs_v4_url` signs GCS V4 URLs in-process with zero network RTT when a PKCS#8 `private_key_pem` is present, falling back to IAM Credentials `signBlob` with cached `SyncGcpTokenCache` / `AsyncGcpTokenCache` Bearer tokens otherwise.
+- `vertebra._storage` (`#[pymodule(gil_used = false)]`, typed in `_storage.pyi`) exports `SyncObjectStore`, `AsyncObjectStore`, `SyncStreamReader`, `AsyncStreamReader`, `SyncMultipartUpload`, `AsyncMultipartUpload`, `ObjectMeta`, `StorageBuffer`, `RustTaskAwaitable`, and signing functions over `object_store 0.13` [^storage-lib] [^storage-pyi].
+- Sync calls release the GIL with `py.detach()`; async calls return `RustTaskAwaitable` completed through a per-loop `AsyncCompletionQueue` and `Notifier` (`eventfd` on Linux, pipe elsewhere) registered with `loop.add_reader` [^storage-lib] [^core-notify].
+- `SyncGcpTokenCache`, `AsyncGcpTokenCache`, and `GcpTokenSnapshot` live in `vertebra._vertebra`; `vertebra.storage` re-exports them, and stores pass `cache._capsule()` to `vertebra._storage`, which accepts only a `PyCapsule` named `vertebra.GcpTokenCacheCapsule` (`GcpTokenCacheCapsule`) [^core-gcp-auth] [^py-gcp-auth] [^storage-lib].
+- One shared cache backs GCS data requests (`RefreshingGcpCredentialProvider`), server-side `compose`, and keyless IAM `signBlob`; `compose` and `signBlob` invalidate the observed token generation and retry once on `401` [^storage-gcp-auth] [^storage-store] [^storage-signing].
+- GCS `allow_ambient_adc=false` builds the client with `GoogleCloudStorageBuilder::new()` instead of `from_env()`; `access_token` installs a static bearer provider, `skip_signature` installs an empty bearer and skips signing, and `quota_project_id` becomes `x-goog-user-project` on storage, compose, IAM, and token requests [^storage-store] [^storage-signing] [^core-gcp-auth].
+- HTTP clients are pooled: `object_store` clients keep 64 idle connections per host, the GCS compose and IAM `reqwest` clients keep 32, all with 10 s connect and 300 s total timeouts [^storage-store] [^storage-signing].
+- GCS presigning forwards `GCSConfig.endpoint` as the URL origin, and S3 presigning honors `virtual_hosted_style` [^py-store] [^storage-signing].
+- `extract_buffer_bytes` keeps `StorageBuffer` and `bytes` zero-copy (`PyBackedBytes`) and copies any other C-contiguous `u8` buffer synchronously before releasing the GIL, so callers may mutate `bytearray` sources afterwards [^storage-lib].
+- Object keys collapse empty `/` and `.` segments in Python before passing `StorePath::parse`, so spaces, `%`, `~`, and non-ASCII characters are stored verbatim while `..` segments raise `ValueError` [^storage-store] [^py-store].
+- `get_range` rejects `offset + length` overflow with `ValueError` and answers `length == 0` with a `head` check and empty bytes [^storage-store].
+- `StorageError::Precondition` maps to `vertebra.typing.PreconditionError` (an `OSError`); `AlreadyExists` maps to `FileExistsError`, so `if_not_exists=True`, `copy(..., overwrite=False)`, and `rename(..., overwrite=False)` raise `FileExistsError` while `if_match` / `if_none_match` failures raise `PreconditionError` [^storage-lib] [^py-typing].
+- GCS `if_match` accepts a numeric generation directly or resolves a matching ETag to the object generation before a conditional `PutMode::Update` [^storage-store].
+- `OciObjectStore` streams GET bodies (`bytes_stream`) instead of buffering whole objects [^storage-oci].
+- `put_file` / `get_file` stream files over 8 MiB in parts; `get_file` writes a `.part` sibling and renames it into place; `get_files` / `put_files` run with bounded `buffer_unordered(concurrency)` and keep results in input order [^storage-store].
+- Python adds `download_many`, `upload_many`, and `staged_download` (unique directory under writable `/dev/shm`, else the temp dir; caller-owned `destination` preserves pre-existing files), rejecting duplicate basenames or keys before any transfer [^py-store].
+- `glob` matches full keys, so `*` and `?` also match `/`; `compose` uses the GCS compose API with 32-source folds whose temporaries are deleted on success, failure, or cancellation, and multipart concatenation elsewhere [^py-store] [^storage-store].
+- `open_reader(..., read_ahead=4_194_304)` serves short reads from one cached range window; `open_writer(..., part_size=8_388_608)` returns `SyncWritableFile` (`io.RawIOBase`) or `AsyncWritableFile`, whose `aclose()` returns `PutResult | None` [^py-store].
+- Parquet batch readers open with `read_ahead=0` and `pre_buffer=False`; whole-table reads default to `pre_buffer=True`; `write_parquet` exposes `use_dictionary`, `use_byte_stream_split`, and `options` forwarded to `ParquetWriter` [^py-arrow] [^py-store].
+- `read_arrow_shm` wraps a shared-memory Arrow IPC or `VTBARROW` region in a zero-copy `ArrowCursor` that anchors the region views [^db-arrow].
+- Framework adapters accept only an explicit store, `StorageConfig`, or URI; `vertebra.extensions.django` exports Django integration types only, so stores and configs import from `vertebra.storage` [^ext-alchemy-storage] [^ext-sqlspec-storage] [^ext-django-storage].
 <!-- truth: end -->
 
-Object storage has two layers. [`vertebra-storage`](../../../../../src/rs/vertebra-storage/src/lib.rs) is a PyO3 crate built as the `_storage` extension (`#[pymodule(gil_used = false)]`) on top of `object_store 0.13`. [`vertebra.storage`](../../../../../src/py/vertebra/storage/__init__.py)[^src-storage-init-py] is the public Python API. It loads `vertebra._storage` lazily and falls back to pure-Python code when the extension is missing.
+Known caveats (R2 custom domains, `fsync`, cancellation windows, request timeouts) live in [Object Storage Implementation Limitations](object-storage-limitations.md).
 
-`make dev` and `make build` build the crate with `maturin develop -m src/rs/vertebra-storage/Cargo.toml`. The workspace `cargo build` in the `Makefile` excludes it.
+## Rust Engine
 
-## 1. Rust Engine (`store.rs`, `oci.rs`, `lib.rs`)
+`ObjectStoreEngine` wraps `Arc<dyn object_store::ObjectStore>` across `memory`, `file`, `s3`/`b2`, `r2`, `oci`, `gs`/`gcs`, `az`/`azure`/`abfs`, and `http`/`https`, and adds conditional `put_opts`, multipart sessions, file transfers, paging, `rename`, and GCS `compose` [^storage-store]. `MultipartUploadSession` buffers normalized S3/B2, R2, GCS, and OCI writes into 8 MiB parts so every non-final part meets the 5 MiB minimum [^storage-r2]. `SyncStreamReader` / `AsyncStreamReader` slice streamed `Bytes` to an optional `chunk_size` as zero-copy `StorageBuffer` views [^storage-lib]. `.to_async()` and `.to_sync()` clone the shared engine `Arc`, so in-memory data and HTTP pools are shared across handles [^storage-lib].
 
-| Symbol | Source | Responsibility |
-|---|---|---|
-| [`BackendConfig`](../../../../../src/rs/vertebra-storage/src/store.rs)[^src-vertebra-storage-src-store-rs] | `store.rs` | Variants `Memory`, `Local`, `S3`, `Gcs`, `Azure`, `Oci`, `R2`, `Http`. |
-| [`ObjectStoreEngine`](../../../../../src/rs/vertebra-storage/src/store.rs) | `store.rs` | Wraps `Arc<dyn object_store::ObjectStore>`. `from_url` maps schemes `memory`, `file`, `s3`/`b2`, `r2`, `oci`, `gs`/`gcs`, `az`/`azure`/`abfs`, `http`/`https` to a backend. `b2` resolves to `https://s3.{region}.backblazeb2.com`. |
-| `STORAGE_RUNTIME`, `runtime_handle`, `block_on_storage` | `store.rs` | Private 2-worker Tokio runtime. Sync calls use `block_in_place` when already on a multi-thread runtime. |
-| [`StorageError`](../../../../../src/rs/vertebra-storage/src/store.rs) | `store.rs` | `ObjectStore`, `Io`, `InvalidUrl`, `Signing`. |
-| [`GcpTokenSnapshot`](../../../../../src/rs/vertebra-storage/src/gcp_auth.rs)[^src-vertebra-storage-src-gcp-auth-rs], [`SyncGcpTokenCache` / `AsyncGcpTokenCache`](../../../../../src/rs/vertebra-storage/src/gcp_auth.rs), [`RefreshingGcpCredentialProvider`](../../../../../src/rs/vertebra-storage/src/gcp_auth.rs) | `gcp_auth.rs` | Wait-free `ArcSwapOption` ADC Bearer token cache with `300s` proactive refresh skew (`DEFAULT_REFRESH_SKEW_MS = 300_000`), single-flight `tokio::sync::Mutex` refresh deduplication, generation-checked invalidation (`invalidate_if_generation`), and support for `AuthorizedUser`, `MetadataServer`, `ImpersonatedServiceAccount`, and `Static` sources. Wired into `GoogleCloudStorageBuilder::with_credentials(...)` when no explicit `service_account_path` or `service_account_key` is supplied. |
-| [`OciObjectStore`](../../../../../src/rs/vertebra-storage/src/oci.rs)[^src-vertebra-storage-src-oci-rs] | `oci.rs` | Native `ObjectStore` impl over the OCI Object Storage REST API (`/n/{ns}/b/{bucket}/o/{name}`, pre-authenticated `par_url`, multipart via `OciMultipartUpload`). Defaults to `https://objectstorage.{region}.oraclecloud.com`. |
-| `OciCavageCredentials`, `sign_oci_cavage_request` | `oci.rs` | RSA-SHA256 `draft-cavage-http-signatures-08` request signing (`Authorization`, `Date`, `Host`, `x-content-sha256`). |
-| `chunk_uniform_parts`, `R2_UNIFORM_PART_SIZE` | `oci.rs` | Splits a payload into equal 8 MiB parts. `ObjectStoreEngine::put_multipart` re-chunks multi-part uploads when the scheme is `r2`, because R2 requires uniform non-trailing part sizes. |
-| `SyncObjectStore` / `AsyncObjectStore` | `lib.rs` | Python classes with sync and async methods for `put`, `put_file`, `get`, `get_buffer`, `get_range`, `head`, `exists`, `delete`, `copy`, `list`, plus sync `put_multipart`. |
-| `StorageBuffer` | `lib.rs` | Frozen `Bytes` holder that implements the buffer protocol, so `memoryview(buf)` does not copy. |
-| `RustCompletionRing` / `spawn_rust_task` | `lib.rs` | `spawn_rust_task` creates an `asyncio.Future` on the running loop, registers a per-loop `RustCompletionRing` + `vertebra_core::notify::Notifier` (`eventfd`/`kqueue`) once via `loop.add_reader`, runs the Rust future on `STORAGE_RUNTIME` without acquiring the GIL on Tokio worker threads, and drains all ready completions in a single batch callback on the Python event loop thread (falling back to `call_soon_threadsafe` only if `add_reader` is unsupported). |
+## Signing
 
-Module functions exported by `_storage`: `py_sign_hmac_url`, `py_verify_hmac_url`, `py_sign_s3_v4_url`, `py_verify_s3_v4_url`, `py_sign_gcs_v4_iam_url`, `py_sign_oci_cavage_headers`, `py_sign_azure_sas_url`, `py_chunk_r2_uniform_parts`.
+`signing.rs` implements Vertebra HMAC URLs (`X-Vtb-Expires`, `X-Vtb-Method`, `X-Vtb-Signature`, constant-time verification), AWS SigV4 query and header signing (`UNSIGNED-PAYLOAD`, RFC 3986 path encoding, 1–604800 s expiry), GCS V4 `GOOG4-RSA-SHA256` with local PKCS#8 keys or sync/async IAM `signBlob`, and Azure service SAS; `oci.rs` builds PAR URLs and Cavage request signatures [^storage-signing] [^storage-oci]. `verify_presigned_url` checks HMAC and SigV4 only; GCS, Azure, and OCI verification raises `NotImplementedError` [^py-store].
 
-## 2. Signing (`signing.rs`)
+## Python Facade
 
-| Symbol | Scheme |
-|---|---|
-| `HmacSigner` (`sign_url`, `verify_url`) | Vertebra HMAC-SHA256 URLs with `X-Vtb-Expires`, `X-Vtb-Method`, `X-Vtb-Signature`. |
-| `S3SignConfig`, `sign_s3_v4_url`, `verify_s3_v4_url` | AWS SigV4 query presigning (`UNSIGNED-PAYLOAD`). |
-| `GcsSignConfig`, `sign_gcs_v4_with_iam_endpoint` | GCS V4 signing through the IAM Credentials `signBlob` endpoint. |
-| `AzureSasConfig`, `sign_azure_sas_url` | Azure Blob service SAS (`sv=2020-12-06`). |
+Provider configs are frozen `msgspec.Struct` types implementing `to_url_and_options()`; constructors require an explicit target, raise `ImproperConfigurationError` for `None`, empty, or unsupported targets, and raise `MissingDependencyError` (`vertebra-core[storage]`) when `vertebra._storage` is absent [^py-store]. Configs with credentials derive `SigningConfig` automatically: S3 and R2 access keys, GCS service-account identities, Azure shared keys, and OCI PAR tokens or prefixes [^py-store]. GCS stores without `access_token` or `target_service_account` build a token cache from their options when none is supplied [^py-store].
 
-Verification uses `constant_time_eq`.
+`SyncWritableFile` and `AsyncWritableFile` copy writes into a rolling buffer, create the multipart upload lazily on the first full part or on close, and abort on `abort()`, an escaping exception, or (sync only) collection; an unclosed async writer emits `ResourceWarning` [^py-store]. `SyncReadableFile` and `AsyncReadableFile` iterate from offset zero with `get_stream`; `read` serves requests shorter than `read_ahead` from one cached `get_range` window and issues larger reads directly, while `read_at` reads without moving the cursor [^py-store].
 
-## 3. Python Facade (`_store.py`)
+## Arrow and Parquet
 
-Provider configs are `msgspec.Struct(frozen=True, gc=False, kw_only=True)` with a `to_url_and_options()` method: `LocalConfig`, `S3Config`, `GCSConfig`, `AzureConfig`, `OCIConfig`, `R2Config`, `HTTPConfig`, `MemoryConfig`. `StorageConfig` is the PEP 695 union of all of them.
+Batch codecs drain each encoded chunk into native `put_stream` before advancing input; async PyArrow work runs in per-demand pool steps while native I/O stays on the caller loop, and cancellation waits for codec and I/O cleanup before releasing sources or sinks [^py-arrow]. Writers accept a Table, RecordBatch, `ArrowCursor`, or synchronous batch iterable; a schema-less empty iterable raises `ValueError` [^py-arrow]. A single column name passed as `str` to `use_dictionary` or `use_byte_stream_split` selects that column, and caller `options` override the keyword arguments [^py-store].
 
-- `SyncObjectStore(url, *, options, signing)` and `AsyncObjectStore(url, *, options, signing)` build native stores for supported schemes. Constructors: `from_config`, `from_local`, `from_s3`, `from_gcs`, `from_azure`, `from_oci`, `from_r2`, `from_http`, `from_memory`.
-- Methods accept any `Buffer` and return `PutResult` / `ObjectMeta` structs. `SyncObjectStore.get_view` and `AsyncObjectStore.get_view` return a `memoryview` over `StorageBuffer` without copying.
-- `presign_get`, `presign_put`, `verify_presigned_url` dispatch on [`PresignedUrlSigner`](../../../../../src/py/vertebra/storage/_store.py)[^src-storage-store-py] (`provider`: `"hmac"`, `"s3"`, `"gcs"`). Verification supports HMAC and S3 only. GCS signing without the extension calls `signBlob` with `urllib`, and bypasses proxies for loopback IAM endpoints.
-- `PresignedUrlSigner.sign_oci_headers` (static) requires the native extension and raises `RuntimeError` without it.
-- `PresignedUrlSigner.sign_azure_sas` (static) uses the native function when available and has a pure-Python HMAC fallback.
-- `R2Config.chunk_uniform_parts` (static) uses `py_chunk_r2_uniform_parts` when available. The Python fallback enforces a 5 MiB minimum part size. `R2Config.resolved_endpoint` builds `https://{account_id}[.{jurisdiction}].r2.cloudflarestorage.com`.
-## 4. Range Reads & Ecosystem Adapters
+## HTTP Range and Framework Adapters
 
-| Symbol | Source | Responsibility |
-|---|---|---|
-| [`SyncReadableFile` / `AsyncReadableFile`](../../../../../src/py/vertebra/storage/_store.py) | `_store.py` | Read-only seekable `io.RawIOBase` backed by `get_range`, with `SyncReadableFile.read_at` and `AsyncReadableFile.read_at` that leave the cursor alone. It lets PyArrow or Polars read Parquet footers and row groups without downloading the whole object. |
-| [`StreamingStorageResponse`](../../../../../src/py/vertebra/storage/_streaming.py)[^src-storage-streaming-py] | `_streaming.py` | Frozen `msgspec.Struct` descriptor for streaming objects, HTTP `206 Partial Content` byte ranges (`Content-Range`), and `307 Temporary Redirect` presigned URL handoffs (`X-Vertebra-Signed-Url`) directly through `FastPath` across native, Litestar, FastAPI, Starlette, Flask, and Django handlers. |
-| [`ObjectStoreBackend`](../../../../../src/py/vertebra/extensions/alchemy/storage.py)[^src-extensions-alchemy-storage-py] | `extensions/alchemy/storage.py` | Drop-in `advanced_alchemy.types.file_object.StorageBackend` implementation wrapping `SyncObjectStore` / `AsyncObjectStore` with sync and async file attachments, content streaming, and presigned URLs. |
-| [`ObjectStoreBackend`](../../../../../src/py/vertebra/extensions/sqlspec/storage.py)[^src-extensions-sqlspec-storage-py] | `extensions/sqlspec/storage.py` | Drop-in `sqlspec.protocols.ObjectStoreProtocol` implementation wrapping `SyncObjectStore` / `AsyncObjectStore` with buffer, streaming, range, and `VTBARROW` `ArrowCursor` (`read_arrow_shm`, `write_arrow_shm`) operations. |
+`parse_byte_range` resolves one closed, open-ended, or suffix range and raises `RangeNotSatisfiableError` for malformed or unsatisfiable input; `StreamingStorageResponse.from_sync_store` / `from_async_store` perform one `head` and produce `200`, `206`, or an empty `416` with `Content-Range: bytes */<size>` [^py-streaming]. Async stores must await `to_async_fastpath_tuple()`; `to_fastpath_tuple()` rejects async stores [^py-streaming].
 
-Vertebra delegates storage registry and multi-store management to upstream ecosystems (`advanced_alchemy.types.file_object.StorageRegistry` and `sqlspec.storage.registry.StorageRegistry`), eliminating redundant internal abstractions.
+`ObjectStoreLitestarStore` stores a versioned `VTBSTORE\x01` MessagePack envelope with the expiry deadline so TTL survives reconstruction, and `ObjectStoreFileSystemAdapter` confines static GET/HEAD to a base path [^ext-litestar-store]. Advanced Alchemy `ObjectStoreBackend` and `register_storage_backend` forward `signing` and `token_cache` only when building from a config or URI and reject them with a prebuilt store [^ext-alchemy-storage]. SQLSpec `ObjectStoreBackend` implements the `*_sync` / `*_async` protocol and delegates `read_arrow_*` to whole-table reads and `stream_arrow_*` to batch readers; like the Alchemy backend, it forwards `signing` and `token_cache` only when building from a config or URI, raises `ImproperConfigurationError` when they accompany a prebuilt store, and lets native signing errors propagate unchanged. `build_duckdb_gcs_secret_sql(secret_name="vertebra_gcs", config=None, *, bearer_token=None) -> str` returns one `CREATE OR REPLACE SECRET` statement with the token as a quote-escaped literal, raising `ImproperConfigurationError` for a missing or blank token and `ValueError` for NUL, CR, or LF [^ext-sqlspec-storage]. `DjangoStorage` subclasses Django `Storage`, deconstructs for migrations, and returns `File` handles over `SyncReadableFile` [^ext-django-storage].
 
-## 5. Emulator Fixtures
+## Tests
 
-There is no emulator preset class in the library. [`src/py/tests/integration/storage/conftest.py`](../../../../../src/py/tests/integration/storage/conftest.py)[^src-tests-integration-storage-conftest-py] defines Floci emulator fixtures (`floci_s3_config` on port 4566, `floci_azure_config` on 4577, `floci_gcs_config` on 4588, `floci_r2_config`, plus local, memory, and OCI configs). Endpoints can be overridden with `FLOCI_*_ENDPOINT` environment variables. The directory contains fixtures only, no test modules. Unit coverage lives in `src/py/tests/unit/storage/` and `src/rs/vertebra-storage/tests/storage_engine_tests.rs`.
+Rust engine, streaming, and signing tests run in `storage_engine_tests.rs`; Python contracts live under `src/py/tests/unit/storage/`; emulator fixtures for S3, Azure, GCS, and R2 live in the integration `conftest.py` [^tests-storage-engine] [^tests-storage-unit] [^tests-storage-integration].
 
-## 6. Gotchas
-
-- `_BaseObjectStore.__init__` catches any exception from `vertebra._storage.SyncObjectStore(...)` / `AsyncObjectStore(...)` and sets `_native = None`. With no native store and no `file://` root, reads and writes go to the in-process `_memory` dict. A misconfigured `s3://` store therefore keeps working in memory without raising an error.
-- Without the native extension, `AsyncObjectStore` methods execute pure-Python local and in-memory fallbacks directly.
-- `put` without a native backend synthesizes the ETag as the first 16 hex characters of SHA-256.
-
-Provenance sources: [^src-vertebra-storage-cargo-toml], [^src-vertebra-storage-src-signing-rs], [^src-vertebra-storage-tests-storage-engine-tests-rs].
-
-[^src-vertebra-core-src-gcp-auth-rs]: `src/rs/vertebra-core/src/gcp_auth.rs` — Rust implementation module (src/rs/vertebra-core/src/gcp_auth.rs).
-[^src-vertebra-storage-cargo-toml]: `src/rs/vertebra-storage/Cargo.toml` — Rust crate manifest (src/rs/vertebra-storage/Cargo.toml).
-[^src-vertebra-storage-src-lib-rs]: `src/rs/vertebra-storage/src/lib.rs` — Rust implementation module (src/rs/vertebra-storage/src/lib.rs).
-[^src-vertebra-storage-src-store-rs]: `src/rs/vertebra-storage/src/store.rs` — Rust implementation module (src/rs/vertebra-storage/src/store.rs).
-[^src-vertebra-storage-src-gcp-auth-rs]: `src/rs/vertebra-storage/src/gcp_auth.rs` — Rust implementation module (src/rs/vertebra-storage/src/gcp_auth.rs).
-[^src-vertebra-storage-src-oci-rs]: `src/rs/vertebra-storage/src/oci.rs` — Rust implementation module (src/rs/vertebra-storage/src/oci.rs).
-[^src-vertebra-storage-src-signing-rs]: `src/rs/vertebra-storage/src/signing.rs` — Rust implementation module (src/rs/vertebra-storage/src/signing.rs).
-[^src-vertebra-storage-tests-storage-engine-tests-rs]: `src/rs/vertebra-storage/tests/storage_engine_tests.rs` — Rust implementation module (src/rs/vertebra-storage/tests/storage_engine_tests.rs).
-[^src-storage-init-py]: `src/py/vertebra/storage/__init__.py` — Python implementation module (src/py/vertebra/storage/__init__.py).
-[^src-storage-store-py]: `src/py/vertebra/storage/_store.py` — Python implementation module (src/py/vertebra/storage/_store.py).
-[^src-storage-streaming-py]: `src/py/vertebra/storage/_streaming.py` — Python implementation module (src/py/vertebra/storage/_streaming.py).
-[^src-extensions-alchemy-storage-py]: `src/py/vertebra/extensions/alchemy/storage.py` — Python implementation module (src/py/vertebra/extensions/alchemy/storage.py).
-[^src-extensions-sqlspec-storage-py]: `src/py/vertebra/extensions/sqlspec/storage.py` — Python implementation module (src/py/vertebra/extensions/sqlspec/storage.py).
-[^src-tests-integration-storage-conftest-py]: `src/py/tests/integration/storage/conftest.py` — Python implementation module (src/py/tests/integration/storage/conftest.py).
+[^core-gcp-auth]: `src/rs/vertebra-core/src/gcp_auth.rs` — Shared Rust GCP OAuth2 token cache and capsule name.
+[^py-gcp-auth]: `src/rs/vertebra-py/src/gcp_auth.rs` — PyO3 GCP token cache bindings in `vertebra._vertebra`.
+[^storage-lib]: `src/rs/vertebra-storage/src/lib.rs` — PyO3 module bindings, buffer extraction, and error mapping.
+[^storage-store]: `src/rs/vertebra-storage/src/store.rs` — `ObjectStoreEngine`, GCS compose, file transfers, and HTTP clients.
+[^storage-gcp-auth]: `src/rs/vertebra-storage/src/gcp_auth.rs` — `RefreshingGcpCredentialProvider`.
+[^storage-oci]: `src/rs/vertebra-storage/src/oci.rs` — Streaming OCI REST v2 `ObjectStore` and PAR support.
+[^storage-r2]: `src/rs/vertebra-storage/src/r2.rs` — Cloudflare R2 uniform multipart chunking.
+[^storage-signing]: `src/rs/vertebra-storage/src/signing.rs` — Multicloud URL and header signing with pooled IAM clients.
+[^storage-pyi]: `src/py/vertebra/_storage.pyi` — Type stubs for `vertebra._storage`.
+[^py-store]: `src/py/vertebra/storage/_store.py` — Stores, configs, readers, and writers.
+[^py-streaming]: `src/py/vertebra/storage/_streaming.py` — `StreamingStorageResponse` and byte-range parsing.
+[^py-arrow]: `src/py/vertebra/storage/_arrow.py` — Demand-driven Arrow and Parquet codec bridge.
+[^py-typing]: `src/py/vertebra/_typing.py` — `PreconditionError` definition.
+[^db-arrow]: `src/py/vertebra/db/arrow.py` — `ArrowCursor` and zero-copy `read_arrow_shm`.
+[^core-notify]: `src/rs/vertebra-core/src/notify.rs` — Native `Notifier` event-loop completion wakeups.
+[^ext-litestar-store]: `src/py/vertebra/extensions/litestar/store.py` — Persistent Litestar Store and confined async filesystem.
+[^ext-alchemy-storage]: `src/py/vertebra/extensions/alchemy/storage.py` — Advanced Alchemy StorageBackend adapter.
+[^ext-sqlspec-storage]: `src/py/vertebra/extensions/sqlspec/storage.py` — SQLSpec ObjectStoreProtocol adapter.
+[^ext-django-storage]: `src/py/vertebra/extensions/django/storage.py` — Deconstructible Django Storage with native readers.
+[^tests-storage-engine]: `src/rs/vertebra-storage/tests/storage_engine_tests.rs` — Rust integration tests for `vertebra-storage`.
+[^tests-storage-unit]: `src/py/tests/unit/storage/test_storage_store.py` — Python store, range, and response contract tests.
+[^tests-storage-integration]: `src/py/tests/integration/storage/conftest.py` — Emulator integration fixtures.

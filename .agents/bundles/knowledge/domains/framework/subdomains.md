@@ -1,16 +1,21 @@
 ---
 type: Concept
 title: "Framework Subdomains"
-description: "Built-in vertebra.framework capability modules: DI, security, autowire, HTMX, SSR, OpenAPI, AsyncAPI, queues, channels, stores, email, procedures, and first-party litestar-mcp."
+description: "Built-in vertebra.framework capability subdomains (DI, security, autowire, procedures, HTMX, Inertia, SSR, OpenAPI, AsyncAPI, queues, channels, stores, email, and live state) alongside native vertebra.agent.{mcp,a2a} and Litestar MCP integration."
 status: stable
-tags: [domains, framework, subdomains, security, mcp]
+tags:
+  - domains
+  - framework
+  - subdomains
+  - security
+  - mcp
 generated:
   by: flow/0.26.0
   at: "2026-11-04T04:33:00Z"
 verified:
   - by: agent:flow-setup
-    at: "2026-11-04T04:33:00Z"
-    commit: f741701
+    at: "2026-11-07T03:55:00Z"
+    commit: 9af810f5
 sources:
   - id: src-framework-init-py
     resource: src/py/vertebra/framework/__init__.py
@@ -51,6 +56,12 @@ sources:
   - id: src-framework-procedures-py
     resource: src/py/vertebra/framework/procedures.py
     title: "Python implementation module (src/py/vertebra/framework/procedures.py)"
+  - id: src-agent-init-py
+    resource: src/py/vertebra/agent/__init__.py
+    title: "Python implementation module (src/py/vertebra/agent/__init__.py)"
+  - id: src-extensions-litestar-mcp-init-py
+    resource: src/py/vertebra/extensions/litestar/mcp/__init__.py
+    title: "Python implementation module (src/py/vertebra/extensions/litestar/mcp/__init__.py)"
   - id: src-extensions-litestar-plugin-py
     resource: src/py/vertebra/extensions/litestar/plugin.py
     title: "Python implementation module (src/py/vertebra/extensions/litestar/plugin.py)"
@@ -62,7 +73,8 @@ sources:
 # Framework Subdomains
 
 <!-- truth: start -->
-- `vertebra.framework` exposes lazy-loaded built-in capability modules (`di`, `security`, `autowire`, `procedures`, `htmx`, `inertia`, `ssr`, `openapi`, `asyncapi`, `queues`, `channels`, `stores`, `email`, `live`, `mcp`, `a2a`) without mandatory third-party dependencies.
+- `vertebra.framework` exposes exactly 14 lazy-loaded built-in capability subdomains (`asyncapi`, `autowire`, `channels`, `di`, `email`, `htmx`, `inertia`, `live`, `openapi`, `procedures`, `queues`, `security`, `ssr`, `stores`) without mandatory third-party dependencies.
+- Native MCP (`2026-07-28`) and A2A (`1.0`) implementations live in `vertebra.agent.mcp` and `vertebra.agent.a2a`, with optional Litestar integration in `vertebra.extensions.litestar.mcp` (`litestar-mcp`).
 - `KeyValueStore` backends enforce validated `key_prefix` namespaces with cursor-iterated `SCAN` + `UNLINK` on `delete_all()` and millisecond `px` expiries.
 <!-- truth: end -->
 
@@ -83,9 +95,9 @@ sources:
 - **[`ssr`](../../../../../src/py/vertebra/framework/ssr/__init__.py)[^src-framework-ssr-init-py]**: `SSRConfig`, `SSRFrame`, `SSRResult`, `SSRRenderTimeoutError`, `create_sync_ssr_client`, and `create_async_ssr_client` selecting between `SyncEmbeddedSSRClient` / `AsyncEmbeddedSSRClient` (`vertebra._bundler.SSRPool`) and `SyncSidecarSSRClient` / `AsyncSidecarSSRClient`, plus `render_page_shell`.
 - **[`openapi.py`](../../../../../src/py/vertebra/framework/openapi.py)[^src-framework-openapi-py] & [`asyncapi.py`](../../../../../src/py/vertebra/framework/asyncapi.py)[^src-framework-asyncapi-py]**: `OpenAPIConfig`, `OpenAPISpecBuilder`, and `ScalarDocsConfig` for OpenAPI 3.1.0 + Scalar UI; `AsyncAPIConfig`, `AsyncAPISpecBuilder`, and `AsyncChannelDef` for AsyncAPI 3.0.0 WebSocket/SSE/channel schemas.
 
-## 3. Agent Protocols (`litestar-mcp`) & Background Infrastructure (`queues`, `channels`, `stores`, `email`)
+## 3. Agent Protocols (`vertebra.agent`, `litestar-mcp`) & Background Infrastructure (`queues`, `channels`, `stores`, `email`)
 
-- **First-Party `litestar-mcp` (`LitestarMCP`, `LitestarA2A` via `vertebra[mcp]`)**: Model Context Protocol (MCP) and Agent-to-Agent (A2A) endpoints are provided by the official first-party `litestar-mcp` package (`LitestarMCP`, `MCPConfig`, `LitestarA2A`, `A2AConfig`) discovered by [`VertebraPlugin`](../../../../../src/py/vertebra/extensions/litestar/plugin.py)[^src-extensions-litestar-plugin-py] (`mcp_endpoint`, `a2a_endpoint`) and paired with Rust's [`WellKnownDiscoveryCache`](../../../../../src/rs/vertebra-http/src/discovery.rs)[^src-vertebra-http-src-discovery-rs] (`/.well-known/agent.json`, `/.well-known/mcp.json`).
+- **Native `vertebra.agent.{mcp,a2a}` & Optional Litestar Integration (`litestar-mcp`)**: `vertebra.framework` does not export `mcp` or `a2a` subdomains; native MCP (`2026-07-28`) and A2A (`1.0`) protocol harnesses live in [`vertebra.agent`](../../../../../src/py/vertebra/agent/__init__.py)[^src-agent-init-py] (`MCPCore`, `ToolRegistry`, `A2AService`, `AgentPlugin`; see [MCP & A2A Protocol Harness](../agent/mcp-and-a2a-protocol-harness.md)). Litestar applications integrate optionally through [`vertebra.extensions.litestar.mcp`](../../../../../src/py/vertebra/extensions/litestar/mcp/__init__.py)[^src-extensions-litestar-mcp-init-py] (`create_mcp_plugin`, `JSONRPCFrameAccelerator`, `ObjectStoreSkillSource`, `WellKnownAgentCardOffload` over `litestar-mcp` `LitestarMCP` / `LitestarA2A`), discovered by [`VertebraPlugin`](../../../../../src/py/vertebra/extensions/litestar/plugin.py)[^src-extensions-litestar-plugin-py] (`mcp_endpoint`, `a2a_endpoint`) and paired with Rust's [`WellKnownDiscoveryCache`](../../../../../src/rs/vertebra-http/src/discovery.rs)[^src-vertebra-http-src-discovery-rs] (`/.well-known/agent-card.json`, `/.well-known/mcp.json`, `/.well-known/oauth-protected-resource`).
 - **[`queues`](../../../../../src/py/vertebra/framework/queues/__init__.py)[^src-framework-queues-init-py], [`channels.py`](../../../../../src/py/vertebra/framework/channels.py)[^src-framework-channels-py], [`stores.py`](../../../../../src/py/vertebra/framework/stores.py)[^src-framework-stores-py], [`email`](../../../../../src/py/vertebra/framework/email/__init__.py)[^src-framework-email-init-py]**: `QueueService`, `@task`, `TaskLane` (`CPU`/`IO`/`AGENT`), `TaskRetryPolicy`, and `CronSchedule`; `ChannelsBackend`; `KeyValueStore` and `NamespacedStore` (`key_prefix`-scoped `delete_all`, `PX` TTLs); `EmailService`, `EmailMessage`, and `EmailConfig` (`memory`, `smtp`, `resend`, `sendgrid`, `mailgun`, `ses`).
 
 [^src-framework-init-py]: `src/py/vertebra/framework/__init__.py` — Python implementation module (src/py/vertebra/framework/__init__.py).
@@ -101,5 +113,7 @@ sources:
 [^src-framework-stores-py]: `src/py/vertebra/framework/stores.py` — Python implementation module (src/py/vertebra/framework/stores.py).
 [^src-framework-email-init-py]: `src/py/vertebra/framework/email/__init__.py` — Python implementation module (src/py/vertebra/framework/email/__init__.py).
 [^src-framework-procedures-py]: `src/py/vertebra/framework/procedures.py` — Python implementation module (src/py/vertebra/framework/procedures.py).
+[^src-agent-init-py]: `src/py/vertebra/agent/__init__.py` — Python implementation module (src/py/vertebra/agent/__init__.py).
+[^src-extensions-litestar-mcp-init-py]: `src/py/vertebra/extensions/litestar/mcp/__init__.py` — Python implementation module (src/py/vertebra/extensions/litestar/mcp/__init__.py).
 [^src-extensions-litestar-plugin-py]: `src/py/vertebra/extensions/litestar/plugin.py` — Python implementation module (src/py/vertebra/extensions/litestar/plugin.py).
 [^src-vertebra-http-src-discovery-rs]: `src/rs/vertebra-http/src/discovery.rs` — Rust implementation module (src/rs/vertebra-http/src/discovery.rs).

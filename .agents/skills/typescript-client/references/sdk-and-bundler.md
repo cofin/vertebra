@@ -4,7 +4,7 @@
 
 | Subpath | Source File | Purpose |
 | :--- | :--- | :--- |
-| `@vertebra/client` | `src/index.ts` | `HttpClient`, `SseClient`, `WebSocketClient`, `SessionStore`, `LiveStateClient`, `HotReloadClient`, `routeUrl`, `wsUrl`, `registerWebMCPTools`, `ArrowStreamClient`, `WASMClient`, `TraceContext`, `ApexRegion`, `McpClient`, `A2aClient` |
+| `@vertebra/client` | `src/index.ts` | `HttpClient`, `SseClient`, `WebSocketClient`, `SessionStore`, `LiveStateClient`, `HotReloadClient`, `routeUrl`, `wsUrl`, `registerWebMCPTools`, `WebMCPRegistrationHandle`, `ArrowStreamClient`, `WASMClient`, `TraceContext`, `ApexRegion`, `McpClient`, `A2aClient`, `ClientError`, `NetworkError`, `TimeoutError`, `ServerError`, `ValidationError` |
 | `@vertebra/client/react` | `src/react/index.tsx` | `ClientProvider`, `useClient`, `useQuery`, `useMutation`, `useInvalidateQueries`, `QueryCache` |
 | `@vertebra/client/vue` | `src/vue/index.ts` | `provideClient`, `useClient`, `useQuery`, `useMutation` |
 | `@vertebra/client/svelte` | `src/svelte/index.ts` | `setClient`, `getClient`, `createQuery`, `createMutation` |
@@ -19,10 +19,10 @@
 | `@vertebra/client/wasm` | `src/wasm.ts` | `WASMClient` and `WASM_MAGIC_BYTES` |
 | `@vertebra/client/arrow` | `src/arrow.ts` | `ArrowStreamClient` and `ARROW_*` constants |
 | `@vertebra/client/router` | `src/router.ts` | `routeUrl`, `wsUrl`, `interpolateRoutePath`, `RouteUrlOptions` |
-| `@vertebra/client/webmcp` | `src/webmcp.ts` | `registerWebMCPTools`, `WebMCPManifest`, `WebMCPToolDescriptor` (`window.navigator.modelContext`) |
+| `@vertebra/client/webmcp` | `src/webmcp.ts` | `registerWebMCPTools`, `WebMCPRegistrationHandle`, `WebMCPManifest`, `WebMCPToolDescriptor` (`document.modelContext ?? navigator.modelContext`) |
 | `@vertebra/client/agent` | `src/agent/index.ts` | `McpClient`, `A2aClient`, `AgentStreamClient`, `WorkflowLiveSubscriber` |
 
 ## Native Wheel Distribution (`src/py/vertebra/server/_js/bundle/`)
 
-- `@vertebra/client` is distributed inside the `vertebra-core` Python wheel under `src/py/vertebra/server/_js/bundle/` and served over HTTP (`/__vertebra/client/*`) by `src/py/vertebra/framework/dev.py`.
-- `tsup.config.ts` `onSuccess` and `ImportMapGenerator.sync_wheel_client` sync all subpath entry points and `.d.ts` declaration files on build, and projects manage JS dependencies via `[tool.vtb.js]` in `pyproject.toml` (`vtb js install` generating `.vertebra/importmap.json`).
+- `@vertebra/client` (v0.3.0) is distributed inside the `vertebra-core` Python wheel under `src/py/vertebra/server/_js/bundle/` and served over HTTP (`/__vertebra/client/*`) by `src/py/vertebra/framework/dev.py`.
+- `tsup.config.ts` `onSuccess` and `ImportMapGenerator.sync_wheel_client` sync all subpath entry points and `.d.ts` declaration files on build, and projects manage JS dependencies via `[tool.vertebra.js]` in `pyproject.toml` (`vtb js install` generating `.vertebra/import_map.json`).

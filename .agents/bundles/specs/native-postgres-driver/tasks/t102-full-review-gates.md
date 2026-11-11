@@ -1,18 +1,20 @@
 ---
 type: Task
-id: native-postgres-driver:t102
-title: Run complete native PostgreSQL correctness and fresh quality acceptance
+id: "native-postgres-driver:t102"
+title: "Run complete native PostgreSQL correctness and fresh quality acceptance"
+description: "Run complete native PostgreSQL correctness and fresh quality acceptance for the standalone vertebra-postgres native driver."
+status: stable
 state: pending
 priority: P1
 verification_strategy: static_validation
 depends_on:
-- native-postgres-driver:t101
+  - "native-postgres-driver:t101"
 files:
-- .agents/bundles/specs/native-postgres-driver/spec.md
-- .agents/bundles/specs/native-postgres-driver/tasks/t102-full-review-gates.md
+  - .agents/bundles/specs/native-postgres-driver/spec.md
+  - .agents/bundles/specs/native-postgres-driver/tasks/t102-full-review-gates.md
 tests: []
 plan_revision: 2
-plan_commit: "7657e8b7c2c96bdda6821aec70a2b603f438a127"
+plan_commit: 9af810f5
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -22,16 +24,13 @@ next_step: null
 last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
-created_at: '2026-11-05T18:25:07Z'
-updated_at: '2026-11-06T06:30:00Z'
+created_at: "2026-11-05T18:25:07Z"
+updated_at: "2026-11-07T04:15:00Z"
 commit: null
 tags:
-- postgres
-- cutover
-- native
-requirements:
-- R8
-- R27
+  - postgres
+  - cutover
+  - native
 ---
 
 # Run complete native PostgreSQL correctness and fresh quality acceptance

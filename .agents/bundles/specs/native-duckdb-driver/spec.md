@@ -1,9 +1,11 @@
 ---
 type: Spec
 flow_id: native-duckdb-driver
-title: Standalone Rust DuckDB Wheel (vertebra-duckdb)
-description: Standalone PyO3 crate src/rs/vertebra-duckdb (vertebra._duckdb + vertebra-core[duckdb]) built on bundled duckdb with arrow 60 -> VTBARROW ShmCapsule streaming, Appender bulk load, GCS ADC secret rotation, and interrupt cancellation, removing the sqlite3 fallback.
+title: "Standalone Rust DuckDB Wheel (vertebra-duckdb)"
+description: "Standalone PyO3 crate src/rs/vertebra-duckdb (vertebra._duckdb + vertebra-core[duckdb]) built on bundled duckdb with arrow 60 -> VTBARROW ShmCapsule streaming, Appender bulk load, GCS ADC secret rotation, and interrupt cancellation, removing the sqlite3 fallback."
+status: draft
 state: draft
+has_chapters: false
 parent_prd: native-data-platform
 research:
   - ../native-data-platform/research/rust-driver-crates_20261103.md
@@ -13,12 +15,40 @@ plan_commit: null
 state_revision: 0
 current_task: null
 last_verified_checkpoint: null
-created_at: 2026-11-03T04:05:00Z
-updated_at: "2026-11-06T06:30:00Z"
-tags: [rust, duckdb, arrow, driver, wheel]
+created_at: "2026-11-03T04:05:00Z"
+updated_at: "2026-11-07T04:15:00Z"
+generated:
+  by: flow-setup
+  at: "2026-11-07T04:15:00Z"
+verified:
+  - by: agent:flow-setup
+    at: "2026-11-07T04:15:00Z"
+    commit: 9af810f5
+sources:
+  - id: duckdb-rs
+    resource: src/rs/vertebra-db/src/duckdb/mod.rs
+    title: DuckDB configuration and pragma primitives in vertebra-db
+  - id: duckdb-py
+    resource: src/py/vertebra/db/adapters/duckdb/driver.py
+    title: Python SyncDuckDBDriver and AsyncDuckDBDriver target cutover module
+  - id: sqlspec-storage
+    resource: src/py/vertebra/extensions/sqlspec/storage.py::build_duckdb_gcs_secret_sql
+    title: GCS secret SQL builder slated for relocation to DuckDBCore
+tags:
+  - rust
+  - duckdb
+  - arrow
+  - driver
+  - wheel
 ---
 
 # Flow Charter: Standalone Rust DuckDB Wheel (`vertebra-duckdb`)
+
+<!-- truth: start -->
+- **Isolated Amalgamation & `arrow 60` Wheel**: `src/rs/vertebra-duckdb` (`vertebra._duckdb`, `vertebra-core[duckdb]`) isolates bundled `duckdb` and `arrow 60` from `vertebra-core` and `vertebra-oracle` (`arrow 59`) [^duckdb-rs].
+- **Zero-Copy `VTBARROW` & `Appender`**: `SyncDuckDBClient` and `AsyncDuckDBClient` stream `arrow 60` batches into `VTBARROW` `ShmCapsule` `ArrowCursor`, ingest via `Appender`, and rotate GCS ADC secrets on `DuckDBCore.build_gcs_secret_sql` [^sqlspec-storage].
+- **Fallback Removal**: `SyncDuckDBDriver` and `AsyncDuckDBDriver` remove `sqlite3` fallback execution [^duckdb-py].
+<!-- truth: end -->
 
 ## Approach
 
@@ -56,3 +86,7 @@ See [crate research](../native-data-platform/research/rust-driver-crates_2026110
 - t01 Scaffold `src/rs/vertebra-duckdb` (`vertebra._duckdb`, `_duckdb.pyi`, `[duckdb]` extra + `uv.lock` + `release.yaml`/`ci.yml`), session pool, pragmas, transactions, `interrupt()` cancel, and `DatabaseError` mapping.
 - t02 `arrow 60` -> `VTBARROW` `ShmCapsule` streaming, `Appender` `load_from_arrow`, `BrokerEngineBackend` registration, and `DuckDBCore.build_gcs_secret_sql` relocation.
 - t03 Python `SyncDuckDBDriver` / `AsyncDuckDBDriver` cutover, `sqlite3` fallback removal, conformance activation, and docs/OKF update.
+
+[^duckdb-rs]: `src/rs/vertebra-db/src/duckdb/mod.rs` — DuckDB configuration and pragma primitives in vertebra-db.
+[^duckdb-py]: `src/py/vertebra/db/adapters/duckdb/driver.py` — Python SyncDuckDBDriver and AsyncDuckDBDriver target cutover module.
+[^sqlspec-storage]: `src/py/vertebra/extensions/sqlspec/storage.py::build_duckdb_gcs_secret_sql` — GCS secret SQL builder slated for relocation to DuckDBCore.

@@ -1,35 +1,38 @@
 ---
 type: Task
-id: native-postgres-driver:t50
-title: Native pipeline SQL-head command guard
+id: "native-postgres-driver:t50"
+title: "Native pipeline SQL-head command guard"
+description: "Native pipeline SQL-head command guard for the standalone vertebra-postgres native driver."
+status: stable
 state: pending
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
-- native-postgres-driver:t49
+  - "native-postgres-driver:t49"
 files:
-- src/rs/vertebra-postgres/src/pipeline_guard.rs
-- src/rs/vertebra-postgres/src/errors.rs
-- src/rs/vertebra-postgres/src/lib.rs
+  - src/rs/vertebra-postgres/src/pipeline_guard.rs
+  - src/rs/vertebra-postgres/src/errors.rs
+  - src/rs/vertebra-postgres/src/lib.rs
 tests:
-- src/rs/vertebra-postgres/src/pipeline_guard.rs
+  - src/rs/vertebra-postgres/src/pipeline_guard.rs
 plan_revision: 2
-plan_commit: "7657e8b7c2c96bdda6821aec70a2b603f438a127"
+plan_commit: 9af810f5
 state_revision: 0
 claimed_by: null
 claimed_at: null
-commit: null
-verification_evidence: null
-created_at: '2026-11-05T18:25:07Z'
-updated_at: '2026-11-06T06:30:00Z'
-requirements:
-- R17
-- R13
 blocked_reason: null
 unblock_condition: null
 next_step: null
 last_verified_at: null
 last_verified_commit: null
+verification_evidence: null
+created_at: "2026-11-05T18:25:07Z"
+updated_at: "2026-11-07T04:15:00Z"
+commit: null
+tags:
+  - postgres
+  - driver
+  - rust
 ---
 
 # Native pipeline SQL-head command guard
@@ -40,7 +43,7 @@ Reject transaction-control aliases and COPY at the native pipeline boundary befo
 
 ## Context
 
-Read `../spec.md`, `../contracts.md`, t49 facade/ownership dependencies and local Rust/PyO3 review guidance. Ownership is exactly the listed files, with semantic unit tests colocated in the private production lexer module. No new public Python API, generic SQL compiler or exception class is introduced. One invocation makes one signed local commit in the complete-driver PR. Estimate 280 handwritten changed lines including tests and canonical diagnostic mapping; keep this focused guard below approximately 300 lines. Preserve other work. Task state remains pending, revision 1 and plan_commit:null.
+Read `../spec.md`, `../contracts.md`, t49 facade/ownership dependencies and local Rust/PyO3 review guidance. Ownership is exactly the listed files, with semantic unit tests colocated in the private production lexer module. No new public Python API, generic SQL compiler or exception class is introduced. One invocation makes one signed local commit in the complete-driver PR. Estimate 280 handwritten changed lines including tests and canonical diagnostic mapping; keep this focused guard below approximately 300 lines. Preserve other work. Task state is `pending` at `plan_revision: 2` and `plan_commit: 9af810f5`.
 
 ## Steps
 

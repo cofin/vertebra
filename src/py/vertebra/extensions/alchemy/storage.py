@@ -3,15 +3,15 @@
 from __future__ import annotations
 
 import builtins
-import contextlib
 import datetime as dt
 import inspect
 import os
-from collections.abc import Buffer, Sequence
+from collections.abc import AsyncIterable, AsyncIterator, Buffer, Iterable, Iterator, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from vertebra.storage import (
+    AsyncGcpTokenCache,
     AsyncObjectStore,
     AzureConfig,
     GCSConfig,
@@ -22,24 +22,22 @@ from vertebra.storage import (
     OCIConfig,
     R2Config,
     S3Config,
+    SigningConfig,
     StorageConfig,
+    SyncGcpTokenCache,
     SyncObjectStore,
 )
-from vertebra.typing import MissingDependencyError
+from vertebra.typing import ImproperConfigurationError, MissingDependencyError
 
 try:
-    from advanced_alchemy.types.file_object import StorageBackend, storages
+    from advanced_alchemy.types.file_object import StorageBackend as AAStorageBackend
+    from advanced_alchemy.types.file_object import storages
 except ImportError as exc:
     raise MissingDependencyError(
         "advanced-alchemy",
         install_package="advanced-alchemy",
         extra="alchemy",
     ) from exc
-
-_storage_get_attr = "get"
-if not hasattr(storages, _storage_get_attr):
-    with contextlib.suppress(AttributeError, TypeError):
-        setattr(storages, _storage_get_attr, storages.get_backend)
 
 if TYPE_CHECKING:
     from advanced_alchemy.types.file_object.base import AsyncDataLike, DataLike, PathLike
@@ -54,7 +52,7 @@ __all__ = (
 _STORAGE_CONFIGS = (LocalConfig, S3Config, GCSConfig, AzureConfig, OCIConfig, R2Config, HTTPConfig, MemoryConfig)
 
 
-class ObjectStoreBackend(StorageBackend):
+class ObjectStoreBackend(AAStorageBackend):
     """Advanced Alchemy StorageBackend delegating zero-copy and async I/O to ObjectStore instances."""
 
     driver = "vertebra"
@@ -66,22 +64,37 @@ class ObjectStoreBackend(StorageBackend):
         *,
         store: SyncObjectStore | AsyncObjectStore | str | StorageConfig | None = None,
         prefix: str = "",
+        signing: SigningConfig | None = None,
+        token_cache: SyncGcpTokenCache | AsyncGcpTokenCache | None = None,
         **kwargs: Any,
     ) -> None:
         """Initialize the storage backend for Advanced Alchemy FileObject and StoredObject columns.
 
         Args:
             key: Logical storage backend key registered in Advanced Alchemy's `storages` registry.
-            fs: Either an `ObjectStore` instance or a storage URI string (`memory://`, `file://`, `s3://`, `gs://`, `az://`, `oci://`, `r2://`).
-            store: Explicit `ObjectStore` keyword alias when constructing directly.
+            fs: Either an `ObjectStore` instance, a `StorageConfig`, or a storage URI string (`memory://`, `file://`, `s3://`, `gs://`, `az://`, `oci://`, `r2://`).
+            store: Explicit `ObjectStore`, `StorageConfig`, or URI keyword taking precedence over `fs`.
             prefix: Optional key namespace prefix prepended to all stored object paths.
-            **kwargs: Optional string options or signing configuration when fs is a URI string.
+            signing: Optional `SigningConfig` for presigned GET/PUT URLs when building a store from a config or URI.
+            token_cache: Optional shared GCS OAuth2 token cache when building a store from a config or URI.
+            **kwargs: Optional scalar string options applied when the target is a URI string.
+
+        Raises:
+            ImproperConfigurationError: When no target is supplied, or `signing` / `token_cache` accompany a
+                prebuilt object store whose authentication is already fixed.
+            TypeError: When the target is not an object store, storage config, or URI string.
         """
-        signing = kwargs.pop("signing", None)
         string_options: dict[str, str] = {
             str(k): str(v) for k, v in kwargs.items() if isinstance(v, (str, int, float, bool))
         }
         target = store if store is not None else fs
+        self._prefix = self._clean_key(prefix).strip("/")
+        if target is None or isinstance(target, str) and not target.strip():
+            msg = "An explicit object store, storage config, or URI is required"
+            raise ImproperConfigurationError(msg)
+        if isinstance(target, (SyncObjectStore, AsyncObjectStore)) and (signing is not None or token_cache is not None):
+            msg = "signing and token_cache apply only when building a store from a StorageConfig or URI"
+            raise ImproperConfigurationError(msg)
 
         sync_store: SyncObjectStore
         async_store: AsyncObjectStore
@@ -93,22 +106,20 @@ class ObjectStoreBackend(StorageBackend):
             async_store = target
             sync_store = target.to_sync()
         elif isinstance(target, _STORAGE_CONFIGS):
-            sync_store = SyncObjectStore.from_config(target)
-            async_store = AsyncObjectStore.from_config(target)
+            sync_store = SyncObjectStore(target, signing=signing, token_cache=token_cache)
+            async_store = sync_store.to_async()
         elif isinstance(target, str):
-            sync_store = SyncObjectStore(target, options=string_options or None, signing=signing)
-            async_store = AsyncObjectStore(target, options=string_options or None, signing=signing)
-        elif target is None:
-            sync_store = SyncObjectStore("memory://", options=string_options or None, signing=signing)
-            async_store = AsyncObjectStore("memory://", options=string_options or None, signing=signing)
+            sync_store = SyncObjectStore(
+                target, options=string_options or None, signing=signing, token_cache=token_cache
+            )
+            async_store = sync_store.to_async()
         else:
-            msg = f"Expected SyncObjectStore, AsyncObjectStore, or URI string, got {type(target)!r}"
+            msg = f"Expected SyncObjectStore, AsyncObjectStore, StorageConfig, or URI string, got {type(target)!r}"
             raise TypeError(msg)
 
         super().__init__(key=key, fs=sync_store, **kwargs)
         self._sync_store = sync_store
         self._async_store = async_store
-        self._prefix = prefix.strip("/")
         self.protocol = self._normalize_protocol(sync_store.scheme)
 
     @property
@@ -130,6 +141,11 @@ class ObjectStoreBackend(StorageBackend):
     def prefix(self) -> str:
         """Return the configured object key prefix."""
         return self._prefix
+
+    @property
+    def supports_signing(self) -> bool:
+        """Return True when presigned URL generation is configured on the underlying store."""
+        return self._sync_store.supports_signing
 
     def get_content(self, path: PathLike, *, options: dict[str, Any] | None = None) -> bytes:
         """Read full object bytes synchronously."""
@@ -178,17 +194,16 @@ class ObjectStoreBackend(StorageBackend):
     ) -> FileObject:
         """Persist a FileObject payload synchronously and populate size, etag, and last_modified."""
         _ = max_concurrency
+        if chunk_size < 1:
+            msg = "chunk_size must be >= 1"
+            raise ValueError(msg)
         qualified = self._qualify(file_object.path)
         if isinstance(data, Path):
             put_res = self._sync_store.put_file(qualified, data)
+        elif isinstance(data, Buffer) and not use_multipart:
+            put_res = self._sync_store.put(qualified, data)
         else:
-            raw = self._resolve_sync_data(data)
-            view = memoryview(raw).cast("B")
-            if use_multipart and chunk_size > 0:
-                parts = [view[idx : idx + chunk_size] for idx in range(0, len(view), chunk_size)] or [memoryview(b"")]
-                put_res = self._sync_store.put_multipart(qualified, parts)
-            else:
-                put_res = self._sync_store.put(qualified, view)
+            put_res = self._sync_store.put_stream(qualified, self._iter_sync_data(data, chunk_size))
         self._apply_put_metadata(file_object, put_res.size, put_res.etag)
         return file_object
 
@@ -203,17 +218,16 @@ class ObjectStoreBackend(StorageBackend):
     ) -> FileObject:
         """Persist a FileObject payload asynchronously and populate size, etag, and last_modified."""
         _ = max_concurrency
+        if chunk_size < 1:
+            msg = "chunk_size must be >= 1"
+            raise ValueError(msg)
         qualified = self._qualify(file_object.path)
         if isinstance(data, Path):
             put_res = await self._async_store.put_file(qualified, data)
+        elif isinstance(data, Buffer) and not use_multipart:
+            put_res = await self._async_store.put(qualified, data)
         else:
-            raw = await self._resolve_async_data(data)
-            view = memoryview(raw).cast("B")
-            if use_multipart and chunk_size > 0:
-                parts = [view[idx : idx + chunk_size] for idx in range(0, len(view), chunk_size)] or [memoryview(b"")]
-                put_res = await self._async_store.put_multipart(qualified, parts)
-            else:
-                put_res = await self._async_store.put(qualified, view)
+            put_res = await self._async_store.put_stream(qualified, self._iter_async_data(data, chunk_size))
         self._apply_put_metadata(file_object, put_res.size, put_res.etag)
         return file_object
 
@@ -254,7 +268,12 @@ class ObjectStoreBackend(StorageBackend):
         expires_in: int | None = None,
         for_upload: bool = False,
     ) -> str | list[str]:
-        """Generate presigned GET or PUT URLs for one or more object paths."""
+        """Generate presigned GET or PUT URLs for one or more object paths.
+
+        Raises:
+            NotImplementedError: When the underlying store has no `SigningConfig`.
+            ValueError: When the native signer rejects the expiry or credentials.
+        """
         ttl = 3600 if expires_in is None else expires_in
         if isinstance(paths, (str, Path, os.PathLike)):
             return self._sign_one(paths, expires_in=ttl, for_upload=for_upload)
@@ -267,43 +286,58 @@ class ObjectStoreBackend(StorageBackend):
         expires_in: int | None = None,
         for_upload: bool = False,
     ) -> str | list[str]:
-        """Generate presigned GET or PUT URLs asynchronously."""
+        """Generate presigned GET or PUT URLs asynchronously.
+
+        Raises:
+            NotImplementedError: When the underlying store has no `SigningConfig`.
+            ValueError: When the native signer rejects the expiry or credentials.
+        """
         ttl = 3600 if expires_in is None else expires_in
         if isinstance(paths, (str, Path, os.PathLike)):
             return await self._sign_one_async(paths, expires_in=ttl, for_upload=for_upload)
         return [await self._sign_one_async(item, expires_in=ttl, for_upload=for_upload) for item in paths]
 
+    def _require_signing(self) -> None:
+        """Reject signing requests when the underlying store has no `SigningConfig`."""
+        if not self.supports_signing:
+            msg = f"URL signing is not configured for backend {self.key!r}: no SigningConfig is attached"
+            raise NotImplementedError(msg)
+
     def _sign_one(self, path: PathLike, *, expires_in: int, for_upload: bool) -> str:
         """Sign a single path using the underlying SyncObjectStore presigner."""
         qualified = self._qualify(path)
-        try:
-            if for_upload:
-                return self._sync_store.presign_put(qualified, expires_in_secs=expires_in)
-            return self._sync_store.presign_get(qualified, expires_in_secs=expires_in)
-        except (RuntimeError, ValueError) as exc:
-            msg = f"URL signing is not configured for backend {self.key!r}: {exc}"
-            raise NotImplementedError(msg) from exc
+        self._require_signing()
+        if for_upload:
+            return self._sync_store.presign_put(qualified, expires_in_secs=expires_in)
+        return self._sync_store.presign_get(qualified, expires_in_secs=expires_in)
 
     async def _sign_one_async(self, path: PathLike, *, expires_in: int, for_upload: bool) -> str:
         """Sign a single path using the underlying AsyncObjectStore presigner."""
         qualified = self._qualify(path)
-        try:
-            if for_upload:
-                res = self._async_store.presign_put(qualified, expires_in_secs=expires_in)
-            else:
-                res = self._async_store.presign_get(qualified, expires_in_secs=expires_in)
-            return await res if inspect.isawaitable(res) else res
-        except (RuntimeError, ValueError) as exc:
-            msg = f"URL signing is not configured for backend {self.key!r}: {exc}"
-            raise NotImplementedError(msg) from exc
+        self._require_signing()
+        if for_upload:
+            res = self._async_store.presign_put(qualified, expires_in_secs=expires_in)
+        else:
+            res = self._async_store.presign_get(qualified, expires_in_secs=expires_in)
+        return await res if inspect.isawaitable(res) else res
 
     def _qualify(self, path: PathLike) -> str:
         """Normalize a PathLike key and prepend any configured namespace prefix."""
-        raw_path = Path(path).as_posix() if isinstance(path, (Path, os.PathLike)) else str(path)
-        cleaned = raw_path.strip().lstrip("/")
+        cleaned = self._clean_key(path)
         if not self._prefix:
             return cleaned
+        if cleaned == self._prefix or cleaned.startswith(f"{self._prefix}/"):
+            return cleaned
         return f"{self._prefix}/{cleaned}" if cleaned else self._prefix
+
+    @staticmethod
+    def _clean_key(path: PathLike) -> str:
+        """Reject parent traversal before a key reaches native storage."""
+        cleaned = os.fspath(path).replace("\\", "/").strip().lstrip("/")
+        if ".." in cleaned.split("/"):
+            msg = f"Parent traversal is not permitted in storage keys: {path}"
+            raise ValueError(msg)
+        return cleaned
 
     @staticmethod
     def _normalize_protocol(scheme: str) -> str:
@@ -323,63 +357,69 @@ class ObjectStoreBackend(StorageBackend):
         if etag:
             file_object.etag = etag
 
-    @staticmethod
-    def _resolve_sync_data(data: DataLike) -> Buffer:
-        """Materialize synchronous DataLike inputs into a contiguous Buffer."""
+    @classmethod
+    def _iter_sync_data(cls, data: DataLike, chunk_size: int) -> Iterator[Buffer]:
+        """Yield buffers or bounded file reads without collecting the source."""
         if isinstance(data, Buffer):
-            return data
-        if isinstance(data, Path):
-            return data.read_bytes()
-        if hasattr(data, "read"):
-            return bytes(data.read())
-        file_attr = getattr(data, "file", None)
-        if file_attr is not None and hasattr(file_attr, "read"):
-            return bytes(file_attr.read())
-        stream_attr = getattr(data, "stream", None)
-        if stream_attr is not None and hasattr(stream_attr, "read"):
-            return bytes(stream_attr.read())
-        return b"".join(bytes(chunk) for chunk in data)
+            view = memoryview(data).cast("B")
+            for start in range(0, len(view), chunk_size):
+                yield view[start : start + chunk_size]
+        elif (reader := cls._get_reader(data)) is not None:
+            while chunk := reader(chunk_size):
+                yield chunk
+        else:
+            yield from cast("Iterable[Buffer]", data)
+
+    @classmethod
+    async def _iter_async_data(cls, data: AsyncDataLike, chunk_size: int) -> AsyncIterator[Buffer]:
+        """Yield async chunks and bounded reads, retaining legacy one-read objects."""
+        if isinstance(data, Buffer):
+            for chunk in cls._iter_sync_data(data, chunk_size):
+                yield chunk
+        elif (reader := cls._get_reader(data)) is not None:
+            bounded = True
+            try:
+                inspect.signature(reader).bind(chunk_size)
+            except TypeError:
+                bounded = False
+            except ValueError:
+                pass
+            while True:
+                result = reader(chunk_size) if bounded else reader()
+                chunk = await result if inspect.isawaitable(result) else result
+                if not chunk:
+                    break
+                yield chunk
+                if not bounded:
+                    break
+        elif isinstance(data, AsyncIterable):
+            async for chunk in data:
+                yield chunk
+        else:
+            for chunk in cast("Iterable[Buffer]", data):
+                yield chunk
 
     @staticmethod
-    async def _resolve_async_data(data: AsyncDataLike) -> Buffer:
-        """Materialize synchronous or asynchronous DataLike inputs into a contiguous Buffer."""
-        if isinstance(data, Buffer):
-            return data
-        if isinstance(data, Path):
-            return data.read_bytes()
-        if hasattr(data, "read"):
-            result = data.read()
-            if inspect.isawaitable(result):
-                result = await result
-            return result if isinstance(result, Buffer) else bytes(result)
-        file_attr = getattr(data, "file", None)
-        if file_attr is not None and hasattr(file_attr, "read"):
-            result = file_attr.read()
-            if inspect.isawaitable(result):
-                result = await result
-            return result if isinstance(result, Buffer) else bytes(result)
-        stream_attr = getattr(data, "stream", None)
-        if stream_attr is not None and hasattr(stream_attr, "read"):
-            result = stream_attr.read()
-            if inspect.isawaitable(result):
-                result = await result
-            return result if isinstance(result, Buffer) else bytes(result)
-        if hasattr(data, "__aiter__"):
-            chunks: list[bytes] = []
-            async for chunk in data:
-                chunks.append(bytes(chunk))
-            return b"".join(chunks)
-        return b"".join(bytes(chunk) for chunk in data)
+    def _get_reader(data: Any) -> Any:
+        """Resolve direct and upload-wrapper file readers."""
+        if callable(reader := getattr(data, "read", None)):
+            return reader
+        for attr in ("file", "stream"):
+            if callable(reader := getattr(getattr(data, attr, None), "read", None)):
+                return reader
+        return None
 
 
 def register_storage_backend(
-    store_or_key: SyncObjectStore | AsyncObjectStore | str,
+    store_or_key: SyncObjectStore | AsyncObjectStore | str | StorageConfig,
     *,
-    store: SyncObjectStore | AsyncObjectStore | str | None = None,
+    store: SyncObjectStore | AsyncObjectStore | str | StorageConfig | None = None,
     key: str = "default",
     prefix: str = "",
     set_default: bool = False,
     registry: StorageRegistry | None = None,
+    signing: SigningConfig | None = None,
+    token_cache: SyncGcpTokenCache | AsyncGcpTokenCache | None = None,
 ) -> ObjectStoreBackend:
     """Register an ObjectStoreBackend into Advanced Alchemy's `storages` registry.
 
@@ -390,25 +430,27 @@ def register_storage_backend(
         prefix: Optional object key prefix applied to all operations on this backend.
         set_default: When True, configure `ObjectStoreBackend` as the registry's default URI backend class.
         registry: Optional custom StorageRegistry instance (defaults to advanced_alchemy.types.file_object.storages).
+        signing: Optional `SigningConfig` forwarded when the store is built from a config or URI.
+        token_cache: Optional shared GCS OAuth2 token cache forwarded when the store is built from a config or URI.
 
     Returns:
         The registered `ObjectStoreBackend` instance.
     """
     target_registry = storages if registry is None else registry
-    if set_default:
-        target_registry.set_default_backend("vertebra.extensions.alchemy.storage.ObjectStoreBackend")
     if store is not None:
         resolved_key = str(store_or_key) if key == "default" else key
         resolved_store = store
     elif isinstance(store_or_key, str) and ("://" not in store_or_key and not store_or_key.startswith("/")):
         resolved_key = store_or_key
-        resolved_store = "memory://"
+        msg = "A backend key requires an explicit object store, storage config, or URI"
+        raise ImproperConfigurationError(msg)
     else:
         resolved_key = key
         resolved_store = store_or_key
-    backend = ObjectStoreBackend(key=resolved_key, fs=resolved_store, prefix=prefix)
+    backend = ObjectStoreBackend(
+        key=resolved_key, fs=resolved_store, prefix=prefix, signing=signing, token_cache=token_cache
+    )
     target_registry.register_backend(backend)
-    if not hasattr(target_registry, _storage_get_attr):
-        with contextlib.suppress(AttributeError, TypeError):
-            setattr(target_registry, _storage_get_attr, target_registry.get_backend)
+    if set_default:
+        target_registry.set_default_backend("vertebra.extensions.alchemy.storage.ObjectStoreBackend")
     return backend

@@ -191,7 +191,7 @@ doc = [
 test = [
     "pytest",
     "pytest-cov>=5.0",
-    "pytest-databases>=0.19.0",
+    "pytest-databases>=0.20.0b1",
     "pytest-xdist>=3.6.1",
     "anyio",
     "sqlspec>=0.69.0",
@@ -219,6 +219,7 @@ test = [
 lint = [
     "ruff",
     "mypy",
+    "django-stubs>=6.1.2",
 ]
 build = [
     "bump-my-version>=0.31.1",
@@ -234,7 +235,6 @@ bench = [
 ]
 
 [tool.uv.sources]
-pytest-databases = { git = "https://github.com/litestar-org/pytest-databases.git", branch = "test/clientless-all" }
 vertebra-bigquery = { path = "src/rs/vertebra-bigquery", editable = true }
 vertebra-bundler = { path = "src/rs/vertebra-bundler", editable = true }
 vertebra-spanner = { path = "src/rs/vertebra-spanner", editable = true }

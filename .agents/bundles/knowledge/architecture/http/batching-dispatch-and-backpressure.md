@@ -3,15 +3,26 @@ type: Guide
 title: "Request Batching, Dispatch & Backpressure"
 description: "How matched requests flow through double-buffered RequestBatcher tasks, BatchLimit, the three Dispatcher modes, sharded InFlightRequests correlation, the SHM response reader, and lock-free BackpressureController admission."
 status: stable
-tags: [architecture, http, batching, dispatch, backpressure]
+tags:
+  - architecture
+  - http
+  - batching
+  - dispatch
+  - backpressure
 generated:
   by: flow/0.26.0
   at: "2026-11-04T04:33:00Z"
 verified:
   - by: agent:flow-setup
+    at: "2026-11-07T03:55:00Z"
+    commit: 9af810f5
+  - by: agent:flow-setup
     at: "2026-11-04T04:33:00Z"
     commit: f741701
 sources:
+  - id: src-vertebra-http-src-body-rs
+    resource: src/rs/vertebra-http/src/body.rs
+    title: "Rust implementation module (src/rs/vertebra-http/src/body.rs)"
   - id: src-vertebra-http-src-response-rs
     resource: src/rs/vertebra-http/src/response.rs
     title: "Rust implementation module (src/rs/vertebra-http/src/response.rs)"
@@ -67,11 +78,11 @@ flowchart LR
     Disp -->|Direct| Direct["mpsc of DirectBatch"]
 ```
 
-## Request and response types (`batcher.rs`, `response.rs`)
+## Request and response types (`batcher.rs`, `body.rs`, `response.rs`)
 
 - [`PendingRequest`](../../../../../src/rs/vertebra-http/src/batcher.rs)[^src-vertebra-http-src-batcher-rs]: `handler_id: u64`, `method_tag` (`GET`=0 … `CONNECT`=8, other=255), `http_version_tag` (`HTTP/1.0`=0, `HTTP/1.1`=1, `HTTP/2`=2, `HTTP/3`=3, matching `TransportNode::http_version()`), `flags: u32` (`vertebra_core::protocol::flags`), `path_and_query: http::uri::PathAndQuery`, compact binary `headers_mp: Bytes` (`[name_len: u8][name][val_len: u16 LE][val]`), `body: Bytes`, and `reply: oneshot::Sender<PendingResponse>`.
-- `PendingResponse { status, headers_mp, body, stream_rx: Option<PendingResponseBody> }` with `PendingResponse::unary` and `PendingResponse::streaming`.
-- [`ResponseBody`](../../../../../src/rs/vertebra-http/src/response.rs) is `Either<Full<Bytes>, StreamingBody>`, where `StreamingBody = StreamBody<ReceiverFrameStream>` over `mpsc::Receiver<Result<Frame<Bytes>, Infallible>>`. `HttpResponse = Response<ResponseBody>`. `build_response_with_offloads` selects streaming when `stream_rx` is set and applies configured Rust CORS and compression offloads on unary responses.
+- [`PendingResponse`](../../../../../src/rs/vertebra-http/src/body.rs)[^src-vertebra-http-src-body-rs] `{ status, headers_mp, body, stream_rx: Option<FrameReceiver> }` exposes `PendingResponse::unary` and `PendingResponse::streaming`.
+- [`ResponseBody`](../../../../../src/rs/vertebra-http/src/body.rs) (re-exported by [`response.rs`](../../../../../src/rs/vertebra-http/src/response.rs)) is `Either<Full<Bytes>, FrameReceiver>` (`full_body` and `stream_body` helpers over `mpsc::Receiver<Result<Frame<Bytes>, Infallible>>`), with `HttpResponse = Response<ResponseBody>`. `build_response_with_offloads` selects streaming when `stream_rx` is set and applies configured Rust CORS and compression offloads on unary responses.
 
 ## `RequestBatcher` and `BatchLimit` (`batcher.rs`)
 
@@ -113,6 +124,7 @@ flowchart LR
 
 Provenance sources: [^src-vertebra-http-src-backpressure-rs], [^src-vertebra-http-src-dispatcher-types-rs], [^src-vertebra-http-src-main-rs].
 
+[^src-vertebra-http-src-body-rs]: `src/rs/vertebra-http/src/body.rs` — Rust implementation module (src/rs/vertebra-http/src/body.rs).
 [^src-vertebra-http-src-response-rs]: `src/rs/vertebra-http/src/response.rs` — Rust implementation module (src/rs/vertebra-http/src/response.rs).
 [^src-vertebra-http-src-batcher-rs]: `src/rs/vertebra-http/src/batcher.rs` — Rust implementation module (src/rs/vertebra-http/src/batcher.rs).
 [^src-vertebra-http-src-backpressure-rs]: `src/rs/vertebra-http/src/backpressure.rs` — Rust implementation module (src/rs/vertebra-http/src/backpressure.rs).

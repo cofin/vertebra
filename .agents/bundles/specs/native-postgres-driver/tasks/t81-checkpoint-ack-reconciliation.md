@@ -1,22 +1,21 @@
 ---
 type: Task
-id: native-postgres-driver:t81
-title: Serialize checkpoint acknowledgements and uncertain outcomes
+id: "native-postgres-driver:t81"
+title: "Serialize checkpoint acknowledgements and uncertain outcomes"
+description: "Serialize checkpoint acknowledgements and uncertain outcomes for the standalone vertebra-postgres native driver."
+status: stable
 state: pending
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
-- native-postgres-driver:t80
+  - "native-postgres-driver:t80"
 files:
-- src/py/vertebra/db/adapters/postgres/change_stream.py
-- src/py/tests/unit/db/test_postgres_change_source.py
+  - src/py/vertebra/db/adapters/postgres/change_stream.py
+  - src/py/tests/unit/db/test_postgres_change_source.py
 tests:
-- src/py/tests/unit/db/test_postgres_change_source.py::test_checkpoint_save_precedes_feedback
-- src/py/tests/unit/db/test_postgres_change_source.py::test_ack_caller_cancel_keeps_source_owned_task
-- src/py/tests/unit/db/test_postgres_change_source.py::test_ack_ambiguous_save_closes_generation
-- src/py/tests/unit/db/test_postgres_change_source.py::test_ack_barrier_retains_pending_next
+  - src/py/tests/unit/db/test_postgres_change_source.py
 plan_revision: 2
-plan_commit: "7657e8b7c2c96bdda6821aec70a2b603f438a127"
+plan_commit: 9af810f5
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -26,16 +25,13 @@ next_step: null
 last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
-created_at: '2026-11-05T18:25:07Z'
-updated_at: '2026-11-06T06:30:00Z'
+created_at: "2026-11-05T18:25:07Z"
+updated_at: "2026-11-07T04:15:00Z"
 commit: null
 tags:
-- postgres
-- native
-- data-events
-requirements:
-- R22
-- R23
+  - postgres
+  - native
+  - data-events
 ---
 
 # Serialize checkpoint acknowledgements and uncertain outcomes
@@ -46,7 +42,7 @@ Keep durable checkpoint state, protocol feedback and event generations consisten
 
 ## Context
 
-Read spec/checkpoint contracts and t78, t79, t80. Execution placement is t80 -> t81 -> t82; numeric task IDs are stable. This pending revision1/null-plan-commit worksheet authorizes no implementation now. One signed conventional local commit on the same complete-driver branch/PR; preserve others. Estimated400 handwritten lines including tests. Source owns the acknowledgement task and yield barrier; native autoreconnect is disabled. No generic AsyncChangeSource ack API is added.
+Read spec/checkpoint contracts and t78, t79, t80. Execution placement is t80 -> t81 -> t82; numeric task IDs are stable. State is `pending` at `plan_revision: 2` and `plan_commit: 9af810f5`. One signed conventional local commit on the same complete-driver branch/PR; preserve others. Estimated400 handwritten lines including tests. Source owns the acknowledgement task and yield barrier; native autoreconnect is disabled. No generic AsyncChangeSource ack API is added.
 
 ## Steps
 

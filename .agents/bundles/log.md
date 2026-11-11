@@ -1,5 +1,193 @@
 # Bundle Activity Log
 
+## [2026-11-09T02:25:00Z] flow-archive | storage-remediation
+
+Completed 6 chapters and 20 tasks on the feature branch; final correctness and fresh quality review `c8c8998a` have no unresolved findings. Source range `077a3fe9..c8c8998a` is preserved in Git. Full lint, locked Rust workspace, Python (2795 passed, 7 skipped), all-five native rebuild/stubtest, and documentation gates pass.
+
+Durable synthesis is committed in `object-storage.md`, `object-storage-limitations.md`, and `product.md` before spec deletion.
+
+Reviewed chapter checkpoints:
+- `ch01-native-gcs-plane-and-signing`: `3842b7d0`.
+- `ch02-zero-copy-ffi-keys-and-backends`: `942336d7`.
+- `ch03-bulk-file-io-compose-and-streams`: `c854444e`.
+- `ch04-streaming-arrow-parquet-and-shm`: `13400785`.
+- `ch05-framework-adapters-and-test-hygiene`: `3b1a917b`.
+- `ch06-docs-okf-and-plan-sync`: `c8c8998a`.
+
+Functional task commits:
+- `storage-remediation:ch01:t01`: `8bdb0e97`.
+- `storage-remediation:ch01:t02`: `1ece46f3`.
+- `storage-remediation:ch01:t03`: `b87c7660`.
+- `storage-remediation:ch01:t04`: `0026b671`.
+- `storage-remediation:ch02:t01`: `59dc50ff`.
+- `storage-remediation:ch02:t02`: `45a7b1f1`.
+- `storage-remediation:ch02:t03`: `b010bdf4`.
+- `storage-remediation:ch02:t04`: `769e0af6`.
+- `storage-remediation:ch03:t01`: `db6562f4`.
+- `storage-remediation:ch03:t02`: `4d1783e3`.
+- `storage-remediation:ch03:t03`: `ce4a50c7`.
+- `storage-remediation:ch03:t04`: `3e49bb38`.
+- `storage-remediation:ch04:t01`: `54766b65`.
+- `storage-remediation:ch04:t02`: `d965d501`.
+- `storage-remediation:ch04:t03`: `e37b8b32`.
+- `storage-remediation:ch05:t01`: `4fcbd19a`.
+- `storage-remediation:ch05:t02`: `6a4599de`.
+- `storage-remediation:ch05:t03`: `71f11476`.
+- `storage-remediation:ch06:t01`: `aefe786a`.
+- `storage-remediation:ch06:t02`: `6a27e8ff`.
+
+## [2026-11-08T18:55:28.220570Z] flow-archive | storage-completeness
+
+Completed 5 chapters and 15 tasks on the feature branch; final correctness and fresh quality review `77c6acfa` have no unresolved findings. Source range `9af810f5..77c6acfa` is preserved in Git. Full lint, locked Rust workspace, Python (2608 passed, 74 skipped, 170 xfailed), all-five native rebuild/stubtest, and documentation gates pass. Offline native/framework/provider examples and 29 documentation checks pass; live cloud credential calls are not executed.
+
+Durable synthesis is committed in `3ecd1288` across storage/framework domains, FFI architecture, codec patterns, test recipes, ADR-004, and ADR-005 before spec deletion.
+
+Reviewed chapter checkpoints:
+- `ch01-native-engine-and-auth`: `0b3d32ea`.
+- `ch02-orm-and-sql-storage-contracts`: `b2911b06`.
+- `ch03-litestar-and-range-streaming`: `043d9837`.
+- `ch04-arrow-shm-and-docs`: `e966025e`.
+- `ch05-sqlspec-arrow-and-docs`: `77c6acfa`.
+
+Functional task commits:
+- `storage-completeness:ch01:t01`: `7f414f10`.
+- `storage-completeness:ch01:t02`: `6267a775`.
+- `storage-completeness:ch01:t03`: `2794c4ea`.
+- `storage-completeness:ch01:t04`: `0b3d32ea`.
+- `storage-completeness:ch02:t01`: `aa8e53ffd58739520c11ca7a2c3e012867f660d9`.
+- `storage-completeness:ch02:t02`: `2208b021dc31bdf120b3a3c1fae84c1a2b4e6c6a`.
+- `storage-completeness:ch02:t03`: `593632437901e76ea3a487dfa5ba519061a14a8c`.
+- `storage-completeness:ch03:t01`: `0220958d`.
+- `storage-completeness:ch03:t02`: `11f403fe609e62a73d8b0036d444c1268ac2eb1d`.
+- `storage-completeness:ch04:t01`: `c8fc3521`.
+- `storage-completeness:ch04:t02`: `e828a361`.
+- `storage-completeness:ch04:t03`: `5b1bbc95`.
+- `storage-completeness:ch04:t04`: `a8eaf2fa`.
+- `storage-completeness:ch05:t01`: `26f8cfcd`.
+- `storage-completeness:ch05:t02`: `3ecd1288`.
+
+Remaining storage work: none. Delivery/push is owned by the root coordinator.
+
+## [2026-11-08T18:53:48.034303Z] flow-finish | storage-completeness
+
+All 5 chapters and 15 tasks are complete; correctness and fresh quality reviews pass at `77c6acfa` with no unresolved findings. Full lint, locked Rust workspace, Python (`2608` passed, `74` skipped, `170` xfailed), all-five rebuild/stubtest, and docs gates pass. Native and extensions synthesis plus ADR-005 are committed before archive; no implementation remains. Live cloud credential calls are outside local validation. Changes remain on the signed feature branch for root delivery.
+
+## [2026-11-08] flow-implement | Verified PyArrow sentinel parity (`26f8cfcd`)
+
+- Source `26f8cfcd` preserves omitted, `None`, and `-1` row-group defaults using installed PyArrow as the test oracle across sync/async Table and cursor writers. Invalid `0`/`-2` values remain rejected. The canonical suite passes `106` cases; full lint exits `0` and Python exits `0` (`2608` passed, `74` skipped, `170` xfailed, `17` warnings in `72.79s`). Correctness recheck passes; fresh quality review precedes finish/archive.
+
+## [2026-11-08] flow-implement | Verified SQLSpec optional row-group compatibility (`058da28c`)
+
+- Source `058da28c` preserves installed PyArrow row-group defaults for omitted and `None` options across sync/async Table and cursor writes, while invalid sizes still fail. Eight Red failures lead to `102` canonical passes with actual metadata assertions. Full `lint-all` exits `0`; refreshed Python suite exits `0` (`2604` passed, `74` skipped, `170` xfailed, `17` warnings in `71.51s`). Catalog counts are synchronized; final correctness and fresh quality reviews precede finish/archive.
+
+## [2026-11-08] flow-implement | Completed storage documentation and durable synthesis (`3ecd1288`)
+
+- Source `3ecd1288` completes both user guides and source-backed native/storage/framework knowledge, including ADR-005 for persistent TTL envelopes. Documentation review/build gates and `29` tooling/viewport cases pass; offline native/provider/framework examples pass. Full Python exits `0` with `2592` passed, `74` skipped, `170` xfailed; full lint and locked native workspace gates pass. All `15` implementation tasks and `5` documentation targets are complete; chapter 5 independent reviews precede finish/archive. No live GCS ADC/IAM calls are executed.
+
+## [2026-11-08] flow-implement | Verified SQLSpec bounded Arrow consumers (`a1ee9042`)
+
+- Source `a1ee9042` preserves public `Table`/`None`/iterator contracts while using bounded native async codecs, async pattern matching, raw IPC buffers, format options, and owned inner iterator cleanup. Four Red failures lead to `90` canonical integration passes, including `25` new public cases. Storage/adapter Mypy, Ruff, format, and diff checks pass. Only the final storage/auth documentation task remains.
+
+## [2026-11-08] chapter-reviewed | Completed strict Arrow and bounded storage chapter (`e966025e`)
+
+- Correctness and fresh quality reviews pass at `e966025e` with no unresolved findings. All four chapter tasks are complete, including real S3 minimum-part completion and repeated-cancellation ownership. Full lint, locked Rust workspace, Python (`2567` passed, `74` skipped, `170` xfailed), and documentation gates pass. Chapter `ch05` starts SQLSpec delegation; its final two tasks complete the original documentation scope.
+
+## [2026-11-08] flow-implement | Verified repeated-cancellation codec ownership (`e828a361`)
+
+- Source `e828a361` retains worker and loop-task ownership through repeated task cancellation. Four Red failures lead to `123` canonical store passes, including six real producer-barrier cases across both formats. Focused quality gates pass. Full `lint-all` exits `0`; the refreshed Python suite exits `0` (`2567` passed, `74` skipped, `170` xfailed, `17` warnings in `74.13s`). Native and documentation gates remain valid. Python correctness recheck precedes fresh quality review.
+
+## [2026-11-08] flow-implement | Verified native S3 minimum-part completion (`a8eaf2fa`)
+
+- Source `a8eaf2fa` repairs `8` real S3 Complete failures by applying the existing `8 MiB` native accumulator to normalized S3/B2. Locked native `3` unit + `22` integration tests, `119` canonical Python store cases, all-five rebuild/stubtest, and focused quality gates pass; lockfiles are unchanged. Full locked Rust workspace exits `0`; full Python passes `2563` cases with `74` skips and `170` xfails; docs exits `0`. Chapter `ch04` has `4` completed tasks awaiting correctness and fresh quality review. Two SQLSpec/documentation tasks remain.
+
+## [2026-11-08] flow-implement | Synchronize bounded storage codecs
+
+- Source `5b1bbc95` implements bounded sync/async IPC and Parquet writers. Two public-format Red failures lead to `111` passing canonical storage cases, including `44` writer cases, real native S3 PUT cancellation/abort barriers for both formats, and worker-exit ownership checks. Storage Mypy (`4` files), focused Ruff, format, and whitespace gates pass.
+- Storage knowledge documents strict named allocation, real IPC, bounded demand, caller-loop native I/O, per-step `SyncPool` codecs, cancellation ownership, and explicit Parquet prefetch opt-in. Chapter `ch04` has `3/4` tasks complete and is active on a source-grounded S3 minimum-part worksheet. Root progress is `12/15` tasks; native S3 compliance and two SQLSpec/documentation tasks remain. Consumer-guide progress remains `3/5`.
+
+## [2026-11-08] flow-implement | Verified bounded Arrow and Parquet readers (`fe3b44bd`)
+
+- Source `fe3b44bd` adds native sync/async batch readers and schema-preserving full-`Table` helpers, including IPC-file fallback. Four Red cases lead to `67` passing canonical store cases with `18` new codec cases and `4` real native S3 HTTP cancellation/responsiveness barriers. Focused Mypy, Ruff, format, and diff gates pass. Chapter `ch04` executes its writer worksheet; three tasks remain across `ch04`/`ch05`.
+
+## [2026-11-08] flow-implement | Verified strict named Arrow SHM allocation (`c8fc3521`)
+
+- Source `c8fc3521` removes native/Python anonymous allocation fallback and JSON pseudo-IPC from threshold-selected `ArrowCursor` construction. Red reproduces native invalid-name success and three Python failures. Locked Rust `37` unit + `2` stream tests and Clippy pass; all five extensions rebuild, `114` Python cases pass with `5` existing `psycopg` skips, and five-extension stubtest passes. `Cargo.lock` remains unchanged. Chapter `ch04` now executes bounded batch readers; four tasks remain.
+
+## [2026-11-08] chapter-reviewed | Completed storage HTTP and Litestar chapter (`043d9837`)
+
+- Correctness and fresh quality reviews pass at `043d9837` with no unresolved findings. Native FastPath `200`/`206`/`416`, valid ETags, persistent TTL envelopes, namespace deletion, and actual Litestar static consumers are covered. The broad Python gate passes `654` tests, full Mypy covers `419` source files, and docs build passes. Chapter `ch04` starts the strict Arrow SHM worksheet; five storage tasks remain across `ch04` and `ch05`.
+
+## [2026-11-08] review | Repair storage HTTP range metadata and entity tags
+
+- Source `0220958d` preserves direct async range status/Content-Range and formats HTTP entity tags; `ba4c9526` aligns the existing consumer assertion and collapses a boolean-equivalent provider branch for the lint gate.
+- Fresh verification passes: 71 Range/storage canonical tests, 654 extension/storage/server cases, full MyPy 419 files, and touched-path Ruff. Chapter correctness recheck and fresh quality review follow this synchronized evidence.
+
+## [2026-11-08] flow-implement | Record storage ch03 Litestar consumers
+
+- Source `11f403fe` implements public object-store Store/static adapters with persistent TTL envelopes, hierarchical namespace deletion, and native escaped-path/cursor reuse. Seven Red cases lead to 21 canonical and 634 extension/storage Green cases; focused MyPy, Ruff, and format checks pass.
+- Chapter `ch03` has two completed tasks and remains active pending independent correctness and fresh quality reviews. Root progress is `9/14` tasks and `3/5` documentation targets; five Arrow/storage/SQLSpec/documentation tasks remain across `ch04` and `ch05`. Source commits remain local.
+
+## [2026-11-08] revise | Ground remaining storage streaming contracts
+
+- Range source `7262460c` and native consumer proof `d594ac85` pass 51 canonical cases, Ruff, and storage MyPy. Active task advances to Litestar integration with persistent TTL envelopes and installed filesystem contracts.
+- Revision `9` splits original Arrow/storage scope into bounded strict-allocation, read-bridge, write-bridge, SQLSpec integration, and documentation tasks across `ch04` and `ch05`; no original deliverable is omitted. PyArrow codec work uses existing SyncPool with native async I/O on the caller loop; default Parquet batch prefetch is disabled.
+
+## [2026-11-08] chapter-reviewed | Close storage-completeness ch02 at b2911b06
+
+- All three storage integration tasks are complete. Correctness and fresh quality reviews pass at `b2911b06` after native-key file reopening, provider-config migration serialization, and worksheet-note cleanup.
+- Verification passes: `136` canonical tests, `592` extension/storage tests, full MyPy (`419` files), Ruff/format, lock validation, documentation build/artifacts, and all five native extension imports.
+- The active pointer advances to `ch03-litestar-and-range-streaming` (`storage-completeness:ch03:t01`); `ch03` and `ch04` retain five pending tasks. Commits remain local.
+
+## [2026-11-08] flow-implement | Bind Django file reopening and migration serialization to native storage
+
+- Correctness review identified two Django consumer failures. Source fix `59363243` binds closed-file reopening to the configured native store/key and registers public migration serializers only for the eight owned `StorageConfig` types, preserving public constructors and every field. Real `FieldFile` consumers and async-opened handles retain native content despite colliding local filenames; `MigrationWriter` round trips local/memory storage and provider configuration options.
+- Task receipt `91d7942d` records the completed repair under revision `7` at `ecccd498`. Fresh verification passes `136` canonical tests, `592` extension/storage tests, full configured MyPy (`419` files), Ruff checks/format, and the documentation build. Independent correctness recheck passes the original reproductions and canonical tests; the coordinator's focused reproduction gate passes `11` tests.
+- Storage knowledge and root/ch02 snapshots reflect the repaired contracts. Documentation coverage remains root `[2/4 files documented]` and chapter `[2/2 files documented in ch02]`; the chapter stays active for final correctness and fresh quality review.
+
+## [2026-11-08] review | Repair Django file reuse and migration serialization
+
+- Correctness review of `34368ff5..ecccd498` reproduces two Important Django consumer gaps: plain File reopening can resolve a process-local filename, and captured provider config objects fail MigrationWriter serialization. Revision `7` reopens `ch02:t03` at `ecccd498` for native-backed reopen and supported serialization of owned config types, with real consumer regressions.
+
+## [2026-11-08] flow-implement | Completed storage-completeness Chapter 02 task implementation
+
+- SQLSpec `ObjectStoreBackend` (`aa8e53ff`) implements exact protocol methods, native buffer streaming, conditional writes, opaque pagination, seekable readers, shared handles, and traversal refusal. Advanced Alchemy `ObjectStoreBackend` (`2208b021`) uses real registry registration and bounded native `FileObject` uploads without monkeypatching or implicit memory targets.
+- Django `DjangoStorage` (`5820090c`, runtime annotation fix `fb3dbccc`, task receipt `43a61a56`) subclasses deconstructible Django `Storage`, returns seekable `File` handles, implements sync/async persistence, Django naming/collisions, directory/path/URL contracts, and aware UTC modification time; unsupported creation/access timestamps raise `NotImplementedError`. `django-stubs>=6.1.2` is a lint development dependency.
+- Fresh coordinator verification against final source `fb3dbccc`: `UV_NO_SYNC=1 uv run --no-sync pytest src/py/tests/unit/extensions src/py/tests/unit/storage -q --disable-warnings` passes `581` tests (`17` warnings); touched-file Ruff check/format, full configured MyPy (`419` files), `uv lock --check`, whitespace checks, all five native extension imports, and Django runtime annotation introspection pass. `UV_NO_SYNC=1 make docs` passes docstring hygiene, CLI reference verification, Zensical build, postbuild, and artifact checks.
+- Storage knowledge and the technology matrix are synchronized (`ch02` `[2/2 files documented]`, root `[2/4 files documented]`). Root/chapter/catalog snapshots show `7/12` tasks completed and `5` planned downstream tasks. Chapter `ch02` remains active pending correctness and fresh quality review; its pointer and review stamp remain unchanged.
+
+## [2026-11-08] revise | Type-check Django storage against upstream stubs
+
+- Active storage `ch02` and `t03` share revision `6` at `749fa2bc`. Task `t03` owns its adapter plus `pyproject.toml` and `uv.lock`, adding `django-stubs` to lint dependencies so MyPy checks the real Django base. Its bounded source manifest remains six files.
+
+## [2026-11-08] revise | Report only available Django storage timestamps
+
+- Storage `ch02` and pending task `t03` share revision `5` at `749fa2bc`. Native `ObjectMeta` exposes modification time only; Django creation/access hooks raise `NotImplementedError` rather than substituting modification time. Completed task evidence remains unchanged.
+
+## [2026-11-08] revise | Preserve native storage reader metadata timing
+
+- Storage `ch02` and its three worksheets share revision `4` at plan baseline `34368ff5`. SQLSpec reader factories retain native eager sync metadata lookup when size is omitted and lazy async reads; this correction requires no native facade changes.
+
+## [2026-11-08] revise | Align storage integration worksheets with installed framework contracts
+
+- [`storage-completeness`](knowledge/domains/storage/object-storage.md), `ch02-orm-and-sql-storage-contracts`, and its three pending worksheets share revision `3` anchored at `aba30976`. The completed `ch01` review stamp `0b3d32ea` and all four task commits remain unchanged and ancestry-verified.
+- Installed source evidence establishes SQLSpec `0.71.1` exact `_sync` / `_async` protocol names, Advanced Alchemy `1.12.0` concrete `ObjectStoreBackend` / upstream `get_content` methods, and Django `6.1.3` `Storage.save` / `File` contracts. The blueprints declare explicit native adapter extensions, callable omission errors, public registry registration, and non-blocking async adapter entry points.
+- Baseline collection covers `15` canonical storage/Django tests; the coordinator's fresh extension-suite baseline passes `421` tests. This revision changes planning Markdown only and records no implementation acceptance.
+
+## [2026-11-07] flow-implement | Implemented storage-completeness Chapter 01 (ch01-native-engine-and-auth)
+
+- Completed all 4 vertical-slice tasks in `storage-completeness` `ch01-native-engine-and-auth` on `feat/storage-updates` above `23041dfb` and synchronized [`object-storage.md`](knowledge/domains/storage/object-storage.md):
+  - **Rust Streaming, Incremental Multipart, Conditional Puts, Pagination & Rename (`ch01:t01`, `7f414f10`)**: Extended `StoredObjectMeta` with `content_type` and `attributes`, added `PutConditionalOptions` (`if_not_exists`, `if_match`, `if_none_match`), `StreamReader` (`get_stream`), stateful `MultipartUploadSession` (uniform `8 MiB` R2/OCI part buffering without whole-payload `Vec<Bytes>` / `Vec<u8>` concatenation), `list_page`, `list_with_delimiter`, and `rename` in `vertebra-storage`.
+  - **Python Streaming Facade & `_storage.pyi` Stubs (`ch01:t02`, `6267a775`)**: Wired `SyncStreamReader`, `AsyncStreamReader`, `SyncMultipartUpload`, `AsyncMultipartUpload`, `get_stream`, `put_stream` (with automatic `abort()` on producer failure), conditional `put`, `list_page`, `list_with_delimiter`, `rename`, and streaming `SyncReadableFile.__iter__` / `AsyncReadableFile.__aiter__` across `vertebra._storage` and `vertebra.storage`.
+  - **Deduplicated Rust GCS Auth Wrapper & Multi-Cloud Presigning (`ch01:t03`, `2794c4ea`)**: Trimmed `vertebra-storage/src/gcp_auth.rs` to `GCS_OAUTH_SCOPES` and `RefreshingGcpCredentialProvider` over `vertebra_core::gcp_auth::GcpTokenCache`, enforced `1..=604_800s` expiry bounds and RFC 3986 path encoding across GCS V4 (`GOOG4-RSA-SHA256` + IAM `signBlob`) and S3 SigV4, and added native OCI PAR presigning (`sign_oci_par_url`).
+  - **Unified `vertebra._vertebra` Token Caches & Fail-Closed Facade (`ch01:t04`, `613783bd`, `699fb9ce`, `0b3d32ea`)**: Removed duplicate `SyncGcpTokenCache`, `AsyncGcpTokenCache`, and `GcpTokenSnapshot` PyO3 classes from `vertebra._storage`, re-exported `vertebra._vertebra` token caches (with ambient ADC precedence/isolation, `GoogleCloudAuthError` handling, and `.to_async()` / `.to_sync()` shared-`Arc` conversion parity), deleted pure-Python `urllib` OAuth fetchers and `self._memory` fallbacks, shared native stores via `.to_async()` across Django/Alchemy/SQLSpec adapters, enforced `ImproperConfigurationError` / `MissingDependencyError` (`vertebra-core[storage]`), and passed zero-context `@code-reviewer` and `@quality-reviewer` closeout gates across `23041dfb..0b3d32ea`.
+
+## [2026-11-07] flow-setup | Aligned OKF v0.2 knowledge, skills, subagents, and chaptered storage-completeness spec
+
+- Executed `/flow:setup` (`Align & True-Up`, `shared` Git tracking policy) on `feat/storage-updates` (`HEAD @ 9af810f5`, `main @ 077a3fe9`):
+  - **OKF v0.2 Knowledge & Product Resynthesis**: Re-anchored `verified[].commit` (`9af810f5`) across all `product/*` and `knowledge/**` files (replacing pre-squash SHAs orphaned by squash merges `#80` `2b737240`, `#92` `d2fa5072`, and `#94` `077a3fe9`), split `database-drivers-and-dialers.md` into [`database-drivers-and-dialers.md`](knowledge/domains/data/database-drivers-and-dialers.md) and [`gcp-bigquery-and-spanner-drivers.md`](knowledge/domains/data/gcp-bigquery-and-spanner-drivers.md) so every chapter stays `<= 200` lines, tightened `pyo3-and-python-runtime.md`, moved all `<!-- truth: start -->` bullet blocks immediately after `# H1`, standardized `type: Decision` across `decisions/adr-001..004`, and updated `workflow.md` (`make docs-check`, `make docs-clean`, `make docs-rust`, `make bench-report`) and root `AGENTS.md` (`<= 100` lines).
+  - **Skills, Paired Subagents & Local Harness Cleanup**: Synchronized `.agents/skills/review-core/references/{areas.toml,checklist.md,false-positive-suppressions.md}`, all 5 engineering domain skills, and all 8 review skills with live `src/` paths and `--manifest-path src/rs/Cargo.toml` commands; aligned all 16 `.agents/agents/*-{reviewer,specialist}.md` definitions to satisfy both `tools.scripts.review_setup` and Flow `validate.md` (`skills:` + `preloadSkills:`, 4 Flow H1 sections + 4 `review_setup` H2 subsections, `commandExecutionPolicy: sandbox`); removed obsolete `.claude/{skills,agents,commands}` directories that shadowed `.agents/`; and non-destructively merged current `Makefile` allow-rules into `.claude/settings.local.json` (backup at `.claude/settings.local.json.bak`).
+  - **Active Specs Normalization & `storage-completeness` Chapterization**: Reconciled `#92` (`d2fa5072`) and `#94` (`077a3fe9`) completion state in Master PRDs `integration-remediation` and `native-data-platform`; migrated `storage-completeness` from flat `t01`–`t07` tasks into 4 chapters (`ch01-native-engine-and-auth`, `ch02-orm-and-sql-storage-contracts`, `ch03-litestar-and-range-streaming`, `ch04-arrow-shm-and-docs`) and 12 8-section task blueprints (`files <= 3`, `read_set <= 6`, `estimated_loc <= 250`); and normalized OKF v0.2 frontmatter, truth blocks, `sources` footnotes, and `9af810f5` commit stamps across `native-postgres-driver` (`t01`–`t102`), all 10 `draft` child flow charters, and all 6 spec research briefs.
+
 ## [2026-11-06] flow-archive | Completed and Archived MCP 2026-07-28 Core and WebMCP Bridge (`mcp-webmcp-core`)
 
 - Completed, reviewed (`6b819b6d..d4a5d1c1`), and archived Flow `mcp-webmcp-core` (`integration-remediation` Chapter 7, 8 tasks across `vertebra.agent`, `vertebra.extensions`, `vertebra.build`, `@vertebra/client`, `docs/`, and `.agents/bundles/`):

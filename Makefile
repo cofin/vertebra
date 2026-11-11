@@ -23,7 +23,7 @@ export CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse
 export CARGO_NET_GIT_FETCH_WITH_CLI=true
 endif
 
-export CARGO_TARGET_DIR ?= /tmp/vtb-cargo-target
+export CARGO_TARGET_DIR ?= $(if $(CI),$(CURDIR)/src/rs/target,/tmp/vtb-cargo-target)
 export PATH := $(CURDIR)/.venv/bin:$(CURDIR)/.venv/Scripts:$(HOME)/.bun/bin:$(HOME)/.local/bin:$(PATH)
 export PYO3_PYTHON ?= $(shell if [ -x "$(CURDIR)/.venv/bin/python" ]; then echo "$(CURDIR)/.venv/bin/python"; elif [ -x "$(CURDIR)/.venv/Scripts/python.exe" ]; then echo "$(CURDIR)/.venv/Scripts/python.exe"; else uv run which python 2>/dev/null || which python3; fi)
 

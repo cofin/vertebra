@@ -1,9 +1,11 @@
 ---
 type: Spec
 flow_id: native-sqlite-driver
-title: Standalone Rust SQLite Wheel (vertebra-sqlite)
-description: Standalone PyO3 crate src/rs/vertebra-sqlite (vertebra._sqlite + vertebra-core[sqlite]) built on bundled rusqlite with dedicated per-connection worker threads, WAL/mmap pragmas, sqlite3_interrupt cancellation, and zero-copy VTBARROW ShmCapsule results, replacing Python stdlib sqlite3.
+title: "Standalone Rust SQLite Wheel (vertebra-sqlite)"
+description: "Standalone PyO3 crate src/rs/vertebra-sqlite (vertebra._sqlite + vertebra-core[sqlite]) built on bundled rusqlite with dedicated per-connection worker threads, WAL/mmap pragmas, sqlite3_interrupt cancellation, and zero-copy VTBARROW ShmCapsule results, replacing Python stdlib sqlite3."
+status: draft
 state: draft
+has_chapters: false
 parent_prd: native-data-platform
 research:
   - ../native-data-platform/research/rust-driver-crates_20261103.md
@@ -13,12 +15,39 @@ plan_commit: null
 state_revision: 0
 current_task: null
 last_verified_checkpoint: null
-created_at: 2026-11-03T04:05:00Z
-updated_at: "2026-11-06T06:30:00Z"
-tags: [rust, sqlite, driver, wheel]
+created_at: "2026-11-03T04:05:00Z"
+updated_at: "2026-11-07T04:15:00Z"
+generated:
+  by: flow-setup
+  at: "2026-11-07T04:15:00Z"
+verified:
+  - by: agent:flow-setup
+    at: "2026-11-07T04:15:00Z"
+    commit: 9af810f5
+sources:
+  - id: sqlite-rs
+    resource: src/rs/vertebra-db/src/sqlite/mod.rs
+    title: SQLite pragma and codec helpers in vertebra-db
+  - id: sqlite-py
+    resource: src/py/vertebra/db/adapters/sqlite/driver.py
+    title: Python SyncSQLiteDriver and AsyncSQLiteDriver target cutover module
+  - id: py-async-rs
+    resource: src/rs/vertebra-db/src/py_async.rs
+    title: Shared AsyncCompletionQueue + Notifier PyO3 bridge
+tags:
+  - rust
+  - sqlite
+  - driver
+  - wheel
 ---
 
 # Flow Charter: Standalone Rust SQLite Wheel (`vertebra-sqlite`)
+
+<!-- truth: start -->
+- **Bundled Pure-FFI Wheel**: `src/rs/vertebra-sqlite` (`vertebra._sqlite`, `vertebra-core[sqlite]`) wraps `rusqlite 0.41.1` (`bundled`) with `#[pymodule(gil_used = false)]` [^sqlite-rs].
+- **GIL-Free Worker Threads & `sqlite3_interrupt`**: `SyncSQLiteClient` and `AsyncSQLiteClient` run per-connection worker threads over `SyncCompletionQueue` / `AsyncCompletionQueue` with WAL/mmap pragmas, `sqlite3_interrupt()` cancellation, and direct `VTBARROW` `ShmCapsule` encoding [^py-async-rs].
+- **Stdlib `sqlite3` Removal**: `SyncSQLiteDriver` and `AsyncSQLiteDriver` execute exclusively through `vertebra._sqlite` [^sqlite-py].
+<!-- truth: end -->
 
 ## Approach
 
@@ -56,3 +85,7 @@ See [crate research](../native-data-platform/research/rust-driver-crates_2026110
 - t01 Scaffold `src/rs/vertebra-sqlite` (`vertebra._sqlite`, `_sqlite.pyi`, `[sqlite]` extra + `uv.lock` + `release.yaml`/`ci.yml`), `rusqlite` worker threads, WAL/mmap pragmas, transactions, and `sqlite3_interrupt` cancellation.
 - t02 SQLite prepared statement cache, `DatabaseError` extended-code mapping, `VTBARROW` `ShmCapsule` builder/importer, and `BrokerEngineBackend` registration.
 - t03 Python `SyncSQLiteDriver` / `AsyncSQLiteDriver` cutover, stdlib `sqlite3` removal, conformance verification, and docs/OKF update.
+
+[^sqlite-rs]: `src/rs/vertebra-db/src/sqlite/mod.rs` — SQLite pragma and codec helpers in vertebra-db.
+[^sqlite-py]: `src/py/vertebra/db/adapters/sqlite/driver.py` — Python SyncSQLiteDriver and AsyncSQLiteDriver target cutover module.
+[^py-async-rs]: `src/rs/vertebra-db/src/py_async.rs` — Shared AsyncCompletionQueue + Notifier PyO3 bridge.

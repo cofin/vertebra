@@ -1,22 +1,23 @@
 ---
 type: Task
-id: native-postgres-driver:t70
-title: Own asynchronous Arrow portal cancellation
+id: "native-postgres-driver:t70"
+title: "Own asynchronous Arrow portal cancellation"
+description: "Own asynchronous Arrow portal cancellation for the standalone vertebra-postgres native driver."
+status: stable
 state: pending
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
-- native-postgres-driver:t69
+  - "native-postgres-driver:t69"
 files:
-- src/rs/vertebra-postgres/src/arrow.rs
-- src/rs/vertebra-postgres/src/async_client.rs
-- src/py/vertebra/_postgres.pyi
-- src/py/tests/unit/db/test_postgres_native_data.py
+  - src/rs/vertebra-postgres/src/arrow.rs
+  - src/rs/vertebra-postgres/src/async_client.rs
+  - src/py/vertebra/_postgres.pyi
+  - src/py/tests/unit/db/test_postgres_native_data.py
 tests:
-- src/py/tests/unit/db/test_postgres_native_data.py::test_native_async_arrow_batches
-- src/py/tests/unit/db/test_postgres_native_data.py::test_native_async_arrow_cancellation_discards_pending_result
+  - src/py/tests/unit/db/test_postgres_native_data.py
 plan_revision: 2
-plan_commit: "7657e8b7c2c96bdda6821aec70a2b603f438a127"
+plan_commit: 9af810f5
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -26,16 +27,13 @@ next_step: null
 last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
-created_at: '2026-11-05T18:25:07Z'
-updated_at: '2026-11-06T06:30:00Z'
+created_at: "2026-11-05T18:25:07Z"
+updated_at: "2026-11-07T04:15:00Z"
 commit: null
 tags:
-- postgres
-- native
-- data-events
-requirements:
-- R16
-- R20
+  - postgres
+  - native
+  - data-events
 ---
 
 # Own asynchronous Arrow portal cancellation

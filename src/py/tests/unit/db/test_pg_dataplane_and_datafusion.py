@@ -20,6 +20,7 @@ from vertebra.db import (
     TenantPredicate,
     TenantScopeConfig,
 )
+from vertebra.db import arrow as arrow_module
 from vertebra.db.adapters.datafusion import (
     ARROW_STREAM_MEDIA_TYPE,
     DataFusionConfig,
@@ -27,12 +28,21 @@ from vertebra.db.adapters.datafusion import (
     TableRegistration,
 )
 from vertebra.db.adapters.postgres import AsyncPostgreSQLDriver, PostgresEmbeddingPushdown, SyncPostgreSQLDriver
+from vertebra.db.adapters.postgres.core import PostgreSQLCore
 from vertebra.db.adapters.postgres.notify import PostgresNotificationSource, PostgresNotifyConfig
 from vertebra.db.driver import NotificationEvent, NotificationSource, NotSupportedError
+from vertebra.extensions.sqlspec.adapters import PostgreSQLSyncDriver
 from vertebra.server.platform import SHMAllocationPolicy
 from vertebra.typing import MissingDependencyError, reset_dependency_cache
 from vertebra.utils.module_loader import import_optional
 from vertebra.utils.serializers import decode_json
+
+datafusion = import_optional("datafusion")
+psycopg_queries = import_optional("psycopg._queries")
+psycopg_adapt = import_optional("psycopg.adapt")
+requires_psycopg = pytest.mark.skipif(
+    psycopg_queries is None or psycopg_adapt is None, reason="psycopg is not installed"
+)
 
 
 class _DeterministicDataFrame:
@@ -81,8 +91,6 @@ class _DeterministicSessionContext:
 
 def test_rls_planner_unfenced_predicate_and_session_guc() -> None:
     """Tenant fragments use ANSI casts while PostgreSQL owns session SQL."""
-    from vertebra.db.adapters.postgres.core import PostgreSQLCore
-
     scope = TenantScopeConfig(setting_name="app.tenant_id", tenant_column="org_id", parameter_cast="UUID")
     predicate = TenantPredicate(table_alias="o", tenant_value="tenant-123", config=scope)
     assert predicate.column_reference() == "o.org_id"
@@ -99,14 +107,22 @@ def test_rls_planner_unfenced_predicate_and_session_guc() -> None:
     assert not hasattr(TenantPredicate, "build_session_guc_sql")
     with pytest.raises(TypeError):
         TenantScopeConfig(guc_name="app.tenant_id")
-    for bad in ("o; DROP", "a.b", ""):
-        if bad:
-            with pytest.raises(ValueError):
-                TenantPredicate(table_alias=bad, tenant_value="t1")
-        with pytest.raises(ValueError):
-            TenantScopeConfig(tenant_column=bad)
-        with pytest.raises(ValueError):
-            TenantScopeConfig(parameter_cast=bad)
+
+
+@pytest.mark.parametrize("bad", ["o; DROP", "a.b", ""])
+def test_tenant_scope_config_rejects_invalid_identifiers(bad: str) -> None:
+    """Injected, qualified, and empty identifiers are rejected for tenant columns and parameter casts."""
+    with pytest.raises(ValueError):
+        TenantScopeConfig(tenant_column=bad)
+    with pytest.raises(ValueError):
+        TenantScopeConfig(parameter_cast=bad)
+
+
+@pytest.mark.parametrize("bad", ["o; DROP", "a.b"])
+def test_tenant_predicate_rejects_invalid_table_alias(bad: str) -> None:
+    """Injected and qualified table aliases are rejected before SQL fragments are built."""
+    with pytest.raises(ValueError):
+        TenantPredicate(table_alias=bad, tenant_value="t1")
 
 
 def test_cdc_listen_notify_spill_and_logical_emit() -> None:
@@ -132,7 +148,7 @@ def test_cdc_listen_notify_spill_and_logical_emit() -> None:
 
 def test_embedded_datafusion_and_memfd_scm_rights(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify DataFusionEngine fail-closed execution, ctx injection, and anonymous memfd + SCM_RIGHTS."""
-    ctx = None if import_optional("datafusion") is not None else _DeterministicSessionContext()
+    ctx = None if datafusion is not None else _DeterministicSessionContext()
     engine = DataFusionEngine(DataFusionConfig(mode="in_process"), ctx=ctx)
     assert engine.supports_cloud_run_ingress is True
     engine.register_table(TableRegistration(name="events_archive", uri="gs://bucket/events.parquet"))
@@ -284,6 +300,11 @@ class _PsycopgConnectionPort:
         self.calls: list[tuple[str, Any]] = []
         self.failure: RuntimeError | None = None
 
+    @classmethod
+    def with_installed_converter(cls, columns: tuple[str, ...], rows: list[tuple[Any, ...]]) -> _PsycopgConnectionPort:
+        """Build a port that validates SQL through the installed psycopg query converter."""
+        return cls(psycopg_queries.PostgresQuery, psycopg_adapt.Transformer, columns, rows)
+
     def connection(self) -> _PsycopgConnectionPort:
         return self
 
@@ -304,45 +325,131 @@ class _PsycopgConnectionPort:
         """Keep the externally owned connection port available for assertions."""
 
 
-@pytest.mark.anyio
-@pytest.mark.parametrize("operation", ["notify", "embedding", "search", "rls", "rls-failure"])
-async def test_postgres_sync_primitives_bind_with_real_psycopg_converter(operation: str) -> None:
-    """Public sync primitives generate SQL accepted by the installed psycopg converter."""
-    queries = pytest.importorskip("psycopg._queries")
-    adapt = pytest.importorskip("psycopg.adapt")
-    columns = ("id", "distance") if operation == "search" else ("embedding",)
-    rows: list[tuple[Any, ...]] = [(7, 0.25)] if operation == "search" else [([3.0, 4.0],)]
-    connection = _PsycopgConnectionPort(queries.PostgresQuery, adapt.Transformer, columns, rows)
+@requires_psycopg
+def test_postgres_sync_rls_predicate_binds_with_real_psycopg_converter() -> None:
+    """The SQLSpec RLS predicate binds its session setter through the installed psycopg converter."""
+    connection = _PsycopgConnectionPort.with_installed_converter(("embedding",), [([3.0, 4.0],)])
     driver = SyncPostgreSQLDriver(pool=connection)
     try:
-        if operation in {"rls", "rls-failure"}:
-            from vertebra.extensions.sqlspec.adapters import PostgreSQLSyncDriver
-
-            adapter = PostgreSQLSyncDriver(driver)
-            predicate = TenantPredicate(tenant_value="tenant-1")
-            if operation == "rls-failure":
-                connection.failure = RuntimeError("external session setter refused")
-                with pytest.raises(RuntimeError) as raised:
-                    adapter.apply_tenant_predicate(predicate)
-                assert raised.value is connection.failure
-            else:
-                assert adapter.apply_tenant_predicate(predicate) == "tenant_id = $1"
-            sql, parameters = connection.calls[0]
-            assert sql.casefold() == "select set_config(%s, %s, %s)"
-            assert tuple(parameters) == ("app.tenant_id", "tenant-1", True)
-        elif operation == "notify":
-            await PostgresNotificationSource(driver).publish("orders", "quote ' and % payload")
-            assert connection.calls == [("SELECT pg_notify(%s, %s)", ("orders", "quote ' and % payload"))]
-        else:
-            pushdown = PostgresEmbeddingPushdown(driver, dimensions=2, normalize=False)
-            if operation == "embedding":
-                assert (await pushdown.embed_query("document")).to_list() == [3.0, 4.0]
-                assert connection.calls[0][1] == ("gemini-embedding-001", ["document"])
-            else:
-                assert await pushdown.similarity_search([3.0, 4.0], table="docs", top_k=2) == [
-                    {"id": 7, "distance": 0.25}
-                ]
-                assert connection.calls[0][1] == ([3.0, 4.0], 2)
-            assert connection.calls[0][0].count("%s") == 2
+        adapter = PostgreSQLSyncDriver(driver)
+        assert adapter.apply_tenant_predicate(TenantPredicate(tenant_value="tenant-1")) == "tenant_id = $1"
+        sql, parameters = connection.calls[0]
+        assert sql.casefold() == "select set_config(%s, %s, %s)"
+        assert tuple(parameters) == ("app.tenant_id", "tenant-1", True)
     finally:
         driver.close()
+
+
+@requires_psycopg
+def test_postgres_sync_rls_predicate_propagates_session_setter_failure() -> None:
+    """A refused RLS session setter propagates the original driver error after binding the statement."""
+    connection = _PsycopgConnectionPort.with_installed_converter(("embedding",), [([3.0, 4.0],)])
+    connection.failure = RuntimeError("external session setter refused")
+    driver = SyncPostgreSQLDriver(pool=connection)
+    try:
+        adapter = PostgreSQLSyncDriver(driver)
+        with pytest.raises(RuntimeError) as raised:
+            adapter.apply_tenant_predicate(TenantPredicate(tenant_value="tenant-1"))
+        assert raised.value is connection.failure
+        sql, parameters = connection.calls[0]
+        assert sql.casefold() == "select set_config(%s, %s, %s)"
+        assert tuple(parameters) == ("app.tenant_id", "tenant-1", True)
+    finally:
+        driver.close()
+
+
+@requires_psycopg
+@pytest.mark.anyio
+async def test_postgres_sync_notify_binds_with_real_psycopg_converter() -> None:
+    """NOTIFY publication keeps quotes and percent signs in bound parameters accepted by psycopg."""
+    connection = _PsycopgConnectionPort.with_installed_converter(("embedding",), [([3.0, 4.0],)])
+    driver = SyncPostgreSQLDriver(pool=connection)
+    try:
+        await PostgresNotificationSource(driver).publish("orders", "quote ' and % payload")
+        assert connection.calls == [("SELECT pg_notify(%s, %s)", ("orders", "quote ' and % payload"))]
+    finally:
+        driver.close()
+
+
+@requires_psycopg
+@pytest.mark.anyio
+async def test_postgres_sync_embedding_pushdown_binds_with_real_psycopg_converter() -> None:
+    """Embedding pushdown binds the model and documents through psycopg's two-placeholder SQL."""
+    connection = _PsycopgConnectionPort.with_installed_converter(("embedding",), [([3.0, 4.0],)])
+    driver = SyncPostgreSQLDriver(pool=connection)
+    try:
+        pushdown = PostgresEmbeddingPushdown(driver, dimensions=2, normalize=False)
+        assert (await pushdown.embed_query("document")).to_list() == [3.0, 4.0]
+        sql, parameters = connection.calls[0]
+        assert parameters == ("gemini-embedding-001", ["document"])
+        assert sql.count("%s") == 2
+    finally:
+        driver.close()
+
+
+@requires_psycopg
+@pytest.mark.anyio
+async def test_postgres_sync_similarity_search_binds_with_real_psycopg_converter() -> None:
+    """Similarity search binds the query vector and limit through psycopg's two-placeholder SQL."""
+    connection = _PsycopgConnectionPort.with_installed_converter(("id", "distance"), [(7, 0.25)])
+    driver = SyncPostgreSQLDriver(pool=connection)
+    try:
+        pushdown = PostgresEmbeddingPushdown(driver, dimensions=2, normalize=False)
+        assert await pushdown.similarity_search([3.0, 4.0], table="docs", top_k=2) == [{"id": 7, "distance": 0.25}]
+        sql, parameters = connection.calls[0]
+        assert parameters == ([3.0, 4.0], 2)
+        assert sql.count("%s") == 2
+    finally:
+        driver.close()
+
+
+@pytest.mark.parametrize("threshold_rows", [1, 256])
+@pytest.mark.parametrize(
+    "rows,columns,expected",
+    [
+        ([(1, "a")], ["id", "name"], [{"id": 1, "name": "a"}]),
+        ([(1, "a")], None, [{"col_0": 1, "col_1": "a"}]),
+        ([{"id": 1}], None, [{"id": 1}]),
+        ([], None, []),
+        ([], ["id"], []),
+    ],
+)
+def test_arrow_cursor_rows_are_real_ipc(
+    rows: list[Any], columns: list[str] | None, expected: list[dict[str, Any]], threshold_rows: int
+) -> None:
+    """Threshold selection preserves real IPC, values, schema and retained views."""
+    cursor = ArrowCursor.from_rows(rows, columns, threshold_rows=threshold_rows)
+    view = cursor.buffer_view()
+    try:
+        table = pa.ipc.open_stream(view).read_all()
+        assert table.to_pylist() == expected
+        assert cursor.to_pylist() == expected
+        assert cursor.to_arrow_table().equals(table)
+        assert cursor.num_rows == len(rows)
+        assert cursor.used_shm is (len(rows) >= threshold_rows)
+        if columns is not None:
+            assert table.column_names == columns
+        cursor.release()
+        assert pa.ipc.open_stream(view).read_all().equals(table)
+        assert cursor.release() is False
+        del table
+    finally:
+        cursor.close()
+        view.release()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX named allocation contract")
+def test_arrow_cursor_propagates_real_named_allocation_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Required SHM cannot silently become an anonymous mapping after native failure."""
+    monkeypatch.setattr(ArrowCursor, "_next_shm_segment_name", staticmethod(lambda: "/bad/nested/seg"))
+    with pytest.raises(RuntimeError, match="/bad/nested/seg"):
+        ArrowCursor.from_rows([{"id": 1}], threshold_rows=1)
+
+
+@pytest.mark.parametrize("missing", ["pyarrow", "vertebra._vertebra"])
+def test_arrow_cursor_requires_optional_dependencies(missing: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """IPC requires its codec and threshold-selected SHM requires the native cursor."""
+    original = arrow_module.import_optional
+    monkeypatch.setattr(arrow_module, "import_optional", lambda name: None if name == missing else original(name))
+    with pytest.raises(MissingDependencyError, match=missing):
+        ArrowCursor.from_rows([{"id": 1}], threshold_rows=1)

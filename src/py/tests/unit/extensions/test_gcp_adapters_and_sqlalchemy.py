@@ -151,7 +151,7 @@ async def test_fastpath_zero_copy_arrow_cursor_and_streaming_storage() -> None:
     assert direct_tuple is not None
     assert direct_tuple[0] == 206
     assert (b"content-type", b"application/parquet") in direct_tuple[1]
-    assert (b"etag", b"etag-123") in direct_tuple[1]
+    assert (b"etag", b'"etag-123"') in direct_tuple[1]
     assert (b"content-range", b"bytes 0-15/16") in direct_tuple[1]
     assert direct_tuple[2] == b"PAR1-binary-data"
 

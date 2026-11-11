@@ -1,13 +1,22 @@
 ---
 type: Concept
 title: "Shared-Memory Connection Broker & Statement Cache"
-description: "The cross-process SHM connection lease broker (`ShmLeaseTable` and `ShmStatementCache` in `vertebra-core/src/broker.rs`), the native PyO3 bindings (`LeaseBroker`, `StatementCache`), and Python broker transports (`SyncSHMBrokerTransport`, `AsyncSHMBrokerTransport`, `SyncInMemoryBrokerTransport`, `AsyncInMemoryBrokerTransport`, `BrokerPlugin`, `SyncPool`, `SyncLoopShardedResource`, `AsyncLoopShardedResource`)."
+description: "Cross-process shared-memory connection lease tables, seqlock statement caches, PyO3 broker bindings, and loop-sharded sync thread pools."
 status: stable
-tags: [domains, data, broker, shm, ipc, database]
+tags:
+  - domains
+  - data
+  - broker
+  - shm
+  - ipc
+  - database
 generated:
   by: flow/0.26.0
   at: "2026-11-04T04:33:00Z"
 verified:
+  - by: agent:flow-setup
+    at: "2026-11-07T03:55:00Z"
+    commit: 9af810f5
   - by: agent:flow-setup
     at: "2026-11-04T04:33:00Z"
     commit: f741701
@@ -76,7 +85,7 @@ Vertebra provides cross-process shared-memory database connection management and
 - **`SyncSHMBrokerTransport` / `AsyncSHMBrokerTransport` & `SyncInMemoryBrokerTransport` / `AsyncInMemoryBrokerTransport`**: Coordinate lease requests and statement plan caching across workers via `LeaseBroker` and `StatementCache`, with an in-process thread-safe fallback.
 - **`BrokerPlugin` & `SyncSHMSessionBroker` / `AsyncSHMSessionBroker`**: Install broker state, DI providers, ZPages diagnostics, OpenTelemetry `DbPoolRecorder` metrics, and SQLAlchemy check-out and return pool event listeners.
 - **`DatabaseRegistry.default()`, `BaseDatabaseConfig.pool_key()`, & `provide_driver`** ([`vertebra.db.registry`](../../../../../src/py/vertebra/db/registry.py)[^src-db-registry-py], [`vertebra.db.driver._common`](../../../../../src/py/vertebra/db/driver/_common.py)[^src-db-driver-common-py]): Every adapter config overrides `BaseDatabaseConfig.pool_key()` (returning `None` for `:memory:` SQLite and DuckDB instances so ephemeral in-memory databases never cross-pollinate), and `DatabaseRegistry.pool_fingerprint(config_or_url)` delegates directly to `config.pool_key()`. `DatabaseRegistry.default()`, `DatabaseRegistry.default_broker()`, and `provide_driver(name_or_config, *, sync=False, registry=None)` allow native database adapters declared independently across stacked `Django` (`DatabaseWrapperMixin`), `Litestar` (`SQLSpec` `SyncAdapterConfig` / `AsyncAdapterConfig`), `SQLAlchemy` (`+vtb` `SyncDBAPIConnection` / `AsyncDBAPIConnection`), and `Vertebra Native` apps to reuse the exact same underlying connection pool, `SyncCloudSQLDialer` / `AsyncCloudSQLDialer` / `SyncAlloyDBDialer` / `AsyncAlloyDBDialer`, and process-wide SHM `LeaseBroker` (unless `share_pool=False` is set).
-- **`SyncPool` & `SyncLoopShardedResource` / `AsyncLoopShardedResource`** ([`vertebra.utils.sync_tools`](../../../../../src/py/vertebra/utils/sync_tools.py)[^src-utils-sync-tools-py]): `SyncPool` right-sizes its thread pool (`max(4, min(32, cpu_count * 2))` on GIL builds, `cpu_count * 4` on `3.14t`/`3.15t`) and coalesces `submit_async` completion wakeups per event loop via `_LoopCompletionQueue` (`0 -> 1` transition triggers a single `loop.call_soon_threadsafe(_drain_completions)` wakeup per burst). `SyncLoopShardedResource[T]` / `AsyncLoopShardedResource[T]` shards non-thread-safe async primitives per event-loop thread.
+- **`SyncPool` & `SyncLoopShardedResource` / `AsyncLoopShardedResource`** ([`vertebra.utils.sync_tools`](../../../../../src/py/vertebra/utils/sync_tools.py)[^src-utils-sync-tools-py]): `SyncPool` sizes its `ThreadPoolExecutor` to `max(1, max_workers if max_workers is not None else cpu_count * 2)` workers, propagates `contextvars`, recreates the executor across `fork`, and coalesces `submit_async` completion wakeups per event loop via `_AsyncCompletionQueue` (`socketpair` + `loop.add_reader` draining all queued completions per readiness wakeup, falling back to `call_soon_threadsafe` when `add_reader` is unsupported). `SyncLoopShardedResource[T]` / `AsyncLoopShardedResource[T]` shards non-thread-safe async primitives per event-loop thread.
 
 Provenance sources: [^src-vertebra-py-src-lib-rs], [^src-extensions-alchemy-broker-py], [^src-tests-unit-db-test-native-db-drivers-py].
 

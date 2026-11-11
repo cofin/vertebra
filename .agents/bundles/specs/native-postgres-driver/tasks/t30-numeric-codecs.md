@@ -1,35 +1,39 @@
 ---
 type: Task
-id: native-postgres-driver:t30
-title: Arbitrary precision numeric binary and text codecs
+id: "native-postgres-driver:t30"
+title: "Arbitrary precision numeric binary and text codecs"
+description: "Arbitrary precision numeric binary and text codecs for the standalone vertebra-postgres native driver."
+status: stable
 state: pending
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
-- native-postgres-driver:t29
+  - "native-postgres-driver:t29"
 files:
-- src/rs/vertebra-postgres/src/codecs/numeric.rs
-- src/rs/vertebra-postgres/src/codecs/mod.rs
-- src/rs/vertebra-postgres/src/result.rs
-- src/rs/vertebra-postgres/tests/numeric_codecs.rs
+  - src/rs/vertebra-postgres/src/codecs/numeric.rs
+  - src/rs/vertebra-postgres/src/codecs/mod.rs
+  - src/rs/vertebra-postgres/src/result.rs
+  - src/rs/vertebra-postgres/tests/numeric_codecs.rs
 tests:
-- src/rs/vertebra-postgres/tests/numeric_codecs.rs
+  - src/rs/vertebra-postgres/tests/numeric_codecs.rs
 plan_revision: 2
-plan_commit: "7657e8b7c2c96bdda6821aec70a2b603f438a127"
+plan_commit: 9af810f5
 state_revision: 0
 claimed_by: null
 claimed_at: null
-commit: null
-verification_evidence: null
-created_at: '2026-11-05T18:25:07Z'
-updated_at: '2026-11-06T06:30:00Z'
-requirements:
-- R11
 blocked_reason: null
 unblock_condition: null
 next_step: null
 last_verified_at: null
 last_verified_commit: null
+verification_evidence: null
+created_at: "2026-11-05T18:25:07Z"
+updated_at: "2026-11-07T04:15:00Z"
+commit: null
+tags:
+  - postgres
+  - driver
+  - rust
 ---
 
 # Arbitrary precision numeric binary and text codecs

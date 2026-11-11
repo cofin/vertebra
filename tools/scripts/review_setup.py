@@ -1661,7 +1661,7 @@ class ReviewSetupValidator:
         return None
 
     def _check_bundles(self) -> list[ReviewIssue]:
-        """Validate OKF v0.2 frontmatter, truth budgets, commit SHAs, and absence of completed specs."""
+        """Validate OKF v0.2 frontmatter, truth budgets, commit SHAs, and absence of completed top-level specs."""
         issues: list[ReviewIssue] = []
         bundles_root = self.repo_root / ".agents/bundles"
         if not bundles_root.exists():
@@ -1734,7 +1734,7 @@ class ReviewSetupValidator:
                     continue
                 rel_spec = str(md_file.relative_to(self.repo_root))
                 doc = MarkdownDocument.parse(md_file)
-                if md_file.name == "spec.md":
+                if md_file.name == "spec.md" and md_file.parent.parent == specs_dir:
                     state_val = doc.frontmatter.get("state") or doc.frontmatter.get("status")
                     if state_val == "completed":
                         issues.append(
@@ -1987,6 +1987,12 @@ class ReviewSetupValidator:
                 continue
 
             in_vertebra_pkg = rel_file.startswith("src/py/vertebra/")
+            in_storage_async_plane = rel_file.startswith("src/py/vertebra/storage/") or rel_file in {
+                "src/py/vertebra/extensions/alchemy/storage.py",
+                "src/py/vertebra/extensions/sqlspec/storage.py",
+                "src/py/vertebra/extensions/django/storage.py",
+                "src/py/vertebra/extensions/litestar/store.py",
+            }
             if in_vertebra_pkg:
                 for stmt in tree.body:
                     if (
@@ -2089,6 +2095,18 @@ class ReviewSetupValidator:
                             rel_file,
                             node.lineno,
                             "use vertebra.utils.module_loader.{import_optional,ensure_module} instead of importlib.import_module (PY-08)",
+                        )
+                    )
+                elif in_storage_async_plane and (
+                    (isinstance(node, ast.Attribute) and node.attr == "to_thread")
+                    or (isinstance(node, ast.Name) and node.id == "to_thread")
+                ):
+                    issues.append(
+                        ReviewIssue(
+                            "python_imports",
+                            rel_file,
+                            node.lineno,
+                            "storage and framework storage adapters must use native Rust Tokio awaitables instead of to_thread (PYO3-01)",
                         )
                     )
 

@@ -1,18 +1,43 @@
 //! PyO3 bindings for `vertebra_core::gcp_auth` (`GcpTokenCache` and `GcpTokenSnapshot`).
 
 use std::collections::HashMap;
+use std::ffi::c_void;
 use std::sync::Arc;
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::PyBytes;
+use pyo3::types::{PyBytes, PyCapsule};
 use vertebra_core::gcp_auth::{
-    GcpTokenCache as NativeGcpTokenCache, GcpTokenSnapshot as NativeGcpTokenSnapshot,
-    current_unix_ms, gcp_http2_post as native_gcp_http2_post,
+    GCP_TOKEN_CACHE_CAPSULE_NAME, GcpRefreshCompleteFn, GcpTokenCache as NativeGcpTokenCache,
+    GcpTokenCacheCapsule, GcpTokenSnapshot as NativeGcpTokenSnapshot, current_unix_ms,
+    gcp_http2_post as native_gcp_http2_post, invoke_capsule_refresh_on_runtime,
 };
 
-use crate::async_bridge::{RustDbTaskAwaitable, block_on_db, spawn_rust_db_task};
+use crate::async_bridge::{
+    RustDbTaskAwaitable, block_on_db, db_runtime_handle, spawn_rust_db_task,
+};
 use crate::errors::auth_error_to_py;
+
+unsafe extern "C" fn refresh_token_cache_on_db_runtime(
+    ctx: *const c_void,
+    force_refresh: bool,
+    out_ctx: *mut c_void,
+    complete_cb: GcpRefreshCompleteFn,
+) {
+    let runtime = db_runtime_handle();
+    // SAFETY: `ctx` and `complete_cb` originate from `GcpTokenCacheCapsule` and `SharedGcpTokenCacheHandle`.
+    unsafe {
+        invoke_capsule_refresh_on_runtime(runtime, ctx, force_refresh, out_ctx, complete_cb);
+    }
+}
+
+fn build_token_cache_pycapsule(
+    py: Python<'_>,
+    cache: &Arc<NativeGcpTokenCache>,
+) -> PyResult<Py<PyCapsule>> {
+    let capsule = GcpTokenCacheCapsule::new(Arc::clone(cache), refresh_token_cache_on_db_runtime);
+    Ok(PyCapsule::new_with_value(py, capsule, GCP_TOKEN_CACHE_CAPSULE_NAME)?.unbind())
+}
 
 /// Immutable snapshot of a cached Google Cloud OAuth2 bearer token.
 #[pyclass(name = "GcpTokenSnapshot", frozen, immutable_type, from_py_object)]
@@ -69,16 +94,20 @@ fn build_token_cache(
     py: Python<'_>,
     options: Option<HashMap<String, String>>,
     scopes: Option<Vec<String>>,
+    allow_ambient_adc: bool,
 ) -> PyResult<Arc<NativeGcpTokenCache>> {
-    let default_options = HashMap::new();
-    let opts = options.as_ref().unwrap_or(&default_options);
+    let mut opts = options.unwrap_or_default();
+    if !allow_ambient_adc {
+        opts.entry("allow_ambient_adc".to_string())
+            .or_insert_with(|| "false".to_string());
+    }
     let scopes_vec: Option<Vec<&str>> = scopes
         .as_ref()
         .map(|s| s.iter().map(|x| x.as_str()).collect());
     let effective_scopes: &[&str] = scopes_vec
         .as_deref()
         .unwrap_or(vertebra_core::gcp_auth::DEFAULT_GCP_SCOPES);
-    py.detach(|| NativeGcpTokenCache::from_options(opts, effective_scopes))
+    py.detach(|| NativeGcpTokenCache::from_options(&opts, effective_scopes))
         .ok_or_else(|| PyValueError::new_err("unable to configure GcpTokenCache from options"))
 }
 
@@ -97,14 +126,25 @@ impl PySyncGcpTokenCache {
 #[pymethods]
 impl PySyncGcpTokenCache {
     #[new]
-    #[pyo3(signature = (options=None, scopes=None))]
+    #[pyo3(signature = (options=None, scopes=None, *, allow_ambient_adc=true))]
     fn new(
         py: Python<'_>,
         options: Option<HashMap<String, String>>,
         scopes: Option<Vec<String>>,
+        allow_ambient_adc: bool,
     ) -> PyResult<Self> {
-        let inner = build_token_cache(py, options, scopes)?;
+        let inner = build_token_cache(py, options, scopes, allow_ambient_adc)?;
         Ok(Self { inner })
+    }
+
+    fn to_async(&self) -> PyAsyncGcpTokenCache {
+        PyAsyncGcpTokenCache {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+
+    fn _capsule(&self, py: Python<'_>) -> PyResult<Py<PyCapsule>> {
+        build_token_cache_pycapsule(py, &self.inner)
     }
 
     #[getter]
@@ -174,14 +214,25 @@ impl PyAsyncGcpTokenCache {
 #[pymethods]
 impl PyAsyncGcpTokenCache {
     #[new]
-    #[pyo3(signature = (options=None, scopes=None))]
+    #[pyo3(signature = (options=None, scopes=None, *, allow_ambient_adc=true))]
     fn new(
         py: Python<'_>,
         options: Option<HashMap<String, String>>,
         scopes: Option<Vec<String>>,
+        allow_ambient_adc: bool,
     ) -> PyResult<Self> {
-        let inner = build_token_cache(py, options, scopes)?;
+        let inner = build_token_cache(py, options, scopes, allow_ambient_adc)?;
         Ok(Self { inner })
+    }
+
+    fn to_sync(&self) -> PySyncGcpTokenCache {
+        PySyncGcpTokenCache {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+
+    fn _capsule(&self, py: Python<'_>) -> PyResult<Py<PyCapsule>> {
+        build_token_cache_pycapsule(py, &self.inner)
     }
 
     #[getter]

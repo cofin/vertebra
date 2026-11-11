@@ -3,11 +3,19 @@ type: Pattern
 title: "Lock-Free Shared Memory & Sharded Concurrency"
 description: "Rust conventions for cache-line isolation, Dekker SeqCst sleeper/waker handshakes, cached SPSC heads, padded MPMC slots, and lock-free sharded dispatch."
 status: stable
-tags: [patterns, rust, shared-memory, concurrency, sharding]
+tags:
+  - patterns
+  - rust
+  - shared-memory
+  - concurrency
+  - sharding
 generated:
   by: flow/0.26.0
   at: "2026-11-04T04:33:00Z"
 verified:
+  - by: agent:flow-setup
+    at: "2026-11-07T03:55:00Z"
+    commit: 9af810f5
   - by: agent:flow-setup
     at: "2026-11-04T04:33:00Z"
     commit: f741701
@@ -52,7 +60,14 @@ sources:
 
 # Lock-Free Shared Memory & Sharded Concurrency
 
-All crates use `edition = "2024"`, and `make lint-all` runs `cargo clippy --workspace --all-targets --features tls,compression -- -D warnings`. The patterns below apply to [`vertebra-core`](../../../../../src/rs/vertebra-core/src/lib.rs) rings and the [`vertebra-http`](../../../../../src/rs/vertebra-http/src/lib.rs) dispatch path.
+<!-- truth: start -->
+- Wrap every cross-process hot atomic in `CacheLine<T>` (`64 B`, or `128 B` on `aarch64` macOS) inside `#[repr(C)]` `ShmHeader` (`ABI_VERSION = 3`) and `MpmcRing` sequence slots.
+- Maintain `Ordering::SeqCst` barriers across Dekker sleeper/waker handshakes (`send_waiters`, `consumer_sleeping`, `mark_tier_active`, and `BackpressureController` counters).
+- Clamp every untrusted `SlotHeader::len` read from shared memory to `payload_capacity()` before constructing slices.
+- Partition ingress batching and correlation across power-of-two shards (`RequestBatcher::spawn_pool`, 8 `InFlightRequests` shards) and release shard locks before waking responders.
+<!-- truth: end -->
+
+All crates use `edition = "2024"`, and `make lint-all` runs `cargo clippy --workspace --all-targets --features tls,compression,gcp -- -D warnings`. The patterns below apply to [`vertebra-core`](../../../../../src/rs/vertebra-core/src/lib.rs) rings and the [`vertebra-http`](../../../../../src/rs/vertebra-http/src/lib.rs) dispatch path.
 
 ## Cache-Line Isolation (`ABI_VERSION = 3`) & Padded MPMC Sequence Slots
 
@@ -62,7 +77,6 @@ Wrap every cross-process hot atomic in `CacheLine<T>` ([`buffer.rs`](../../../..
 
 A side that may sleep arms its waiter word (`recv_waiters`/`send_waiters` for futex rings, or `ShmHeader::prepare_sleep()` setting `consumer_sleeping = 1` with `SeqCst` for `eventfd`/pipe-driven `TieredRingSet` and `BatchBridge`), re-checks the ring cursor (`cancel_sleep()` if data arrived), and blocks. The producer must publish its payload and cursor first (`TieredRingSet` sets `mark_tier_active(bit)` *before* `write_head` is published so non-small tiers are never skipped by `has_non_small_data()`), and only then test-and-clear the sleeper flag with `SeqCst` (`should_notify_and_clear()` / `send_waiters().load(Ordering::SeqCst)`). `SlotView::release` in [`channel.rs`](../../../../../src/rs/vertebra-core/src/channel.rs):
 
-<!-- truth: start -->
 ```rust
     pub fn release(&mut self) {
         if self.released {
@@ -82,7 +96,6 @@ A side that may sleep arms its waiter word (`recv_waiters`/`send_waiters` for fu
         self.ring.slot_borrowed.store(false, Ordering::Release);
     }
 ```
-<!-- truth: end -->
 
 `SpscRing` caches remote `read_head` and `write_head` snapshots locally (`cached_read_head`, `cached_write_head`, invalidated when `ShmHeader.generation` advances on `reset()`), checks fast-empty (`read_head == write_head`) before attempting `slot_borrowed.compare_exchange` in `try_recv_view`, and drains bursts with `drain_with` using a single `Release` `read_head` commit per batch. In [`Transport::poll_batch`](../../../../../src/rs/vertebra-core/src/transport/mod.rs)[^src-vertebra-core-src-transport-mod-rs], always drop the `RequestSleepGuard` (`cancel_request_sleep()`, setting `consumer_sleeping = 0`) *before* calling `request_notifier.clear()` so a concurrent producer calling `notify_request_if_sleeping()` between wakeup and `clear()` is never swallowed.
 

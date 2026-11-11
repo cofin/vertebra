@@ -22,9 +22,6 @@ from typing import (
     runtime_checkable,
 )
 
-import msgspec
-from msgspec import Struct
-
 __all__ = (
     "ATTRS_INSTALLED",
     "NANOID_INSTALLED",
@@ -49,6 +46,7 @@ __all__ = (
     "MissingDependencyError",
     "NumpyArray",
     "OptionalDependency",
+    "PreconditionError",
     "RawHeaders",
     "Struct",
     "ToolPolicyError",
@@ -62,30 +60,6 @@ __all__ = (
     "module_available",
     "reset_dependency_cache",
 )
-
-
-class BaseStruct(Struct, gc=False, omit_defaults=True, repr_omit_defaults=True):
-    """Mutable GC-free base struct for state objects."""
-
-    def to_dict(self) -> dict[str, Any]:
-        """Convert struct fields to a Python dictionary."""
-        return msgspec.structs.asdict(self)
-
-
-class CamelizedBaseStruct(BaseStruct, rename="camel"):
-    """Mutable GC-free base struct with camelCase wire field names."""
-
-
-class FrozenBaseStruct(Struct, frozen=True, gc=False, omit_defaults=True, repr_omit_defaults=True):
-    """Immutable GC-free base struct for configs, metadata, and wire models."""
-
-    def to_dict(self) -> dict[str, Any]:
-        """Convert struct fields to a Python dictionary."""
-        return msgspec.structs.asdict(self)
-
-
-class FrozenCamelizedStruct(FrozenBaseStruct, rename="camel", frozen=True):
-    """Immutable GC-free base struct with camelCase wire field names."""
 
 
 class VertebraError(Exception):
@@ -137,6 +111,10 @@ class MissingDependencyError(VertebraError, ImportError):
 
 class ImproperConfigurationError(VertebraError, ValueError):
     """Raised when configuration is invalid."""
+
+
+class PreconditionError(VertebraError, OSError):
+    """Raised when a conditional storage or resource precondition fails."""
 
 
 class UnsupportedBackendError(VertebraError):
@@ -262,7 +240,40 @@ def _attrs_has_stub(obj: Any) -> bool:
     return False
 
 
+_MSGSPEC_TYPING_ATTRS = frozenset(
+    {
+        "BaseStruct",
+        "CamelizedBaseStruct",
+        "FrozenBaseStruct",
+        "FrozenCamelizedStruct",
+        "Struct",
+    }
+)
+
 if TYPE_CHECKING:
+    import msgspec
+    from msgspec import Struct
+
+    class BaseStruct(Struct, gc=False, omit_defaults=True, repr_omit_defaults=True):
+        """Mutable GC-free base struct for state objects."""
+
+        def to_dict(self) -> dict[str, Any]:
+            """Convert struct fields to a Python dictionary."""
+            return msgspec.structs.asdict(self)
+
+    class CamelizedBaseStruct(BaseStruct, rename="camel"):
+        """Mutable GC-free base struct with camelCase wire field names."""
+
+    class FrozenBaseStruct(Struct, frozen=True, gc=False, omit_defaults=True, repr_omit_defaults=True):
+        """Immutable GC-free base struct for configs, metadata, and wire models."""
+
+        def to_dict(self) -> dict[str, Any]:
+            """Convert struct fields to a Python dictionary."""
+            return msgspec.structs.asdict(self)
+
+    class FrozenCamelizedStruct(FrozenBaseStruct, rename="camel", frozen=True):
+        """Immutable GC-free base struct with camelCase wire field names."""
+
     BaseModel: Any = BaseModelStub
     AttrsInstance: Any = Any
     attrs_asdict: Callable[..., Any] = attrs_asdict_stub
@@ -272,6 +283,42 @@ if TYPE_CHECKING:
 
 def __getattr__(name: str) -> Any:
     """Lazy-resolve optional third-party types and helpers on first access."""
+    if name in _MSGSPEC_TYPING_ATTRS:
+        import msgspec as _msgspec
+        from msgspec import Struct as _RealStruct
+
+        class _BaseStruct(_RealStruct, gc=False, omit_defaults=True, repr_omit_defaults=True):
+            """Mutable GC-free base struct for state objects."""
+
+            def to_dict(self) -> dict[str, Any]:
+                """Convert struct fields to a Python dictionary."""
+                return _msgspec.structs.asdict(self)
+
+        class _CamelizedBaseStruct(_BaseStruct, rename="camel"):
+            """Mutable GC-free base struct with camelCase wire field names."""
+
+        class _FrozenBaseStruct(_RealStruct, frozen=True, gc=False, omit_defaults=True, repr_omit_defaults=True):
+            """Immutable GC-free base struct for configs, metadata, and wire models."""
+
+            def to_dict(self) -> dict[str, Any]:
+                """Convert struct fields to a Python dictionary."""
+                return _msgspec.structs.asdict(self)
+
+        class _FrozenCamelizedStruct(_FrozenBaseStruct, rename="camel", frozen=True):
+            """Immutable GC-free base struct with camelCase wire field names."""
+
+        _BaseStruct.__name__ = _BaseStruct.__qualname__ = "BaseStruct"
+        _CamelizedBaseStruct.__name__ = _CamelizedBaseStruct.__qualname__ = "CamelizedBaseStruct"
+        _FrozenBaseStruct.__name__ = _FrozenBaseStruct.__qualname__ = "FrozenBaseStruct"
+        _FrozenCamelizedStruct.__name__ = _FrozenCamelizedStruct.__qualname__ = "FrozenCamelizedStruct"
+
+        globals()["Struct"] = _RealStruct
+        globals()["BaseStruct"] = _BaseStruct
+        globals()["CamelizedBaseStruct"] = _CamelizedBaseStruct
+        globals()["FrozenBaseStruct"] = _FrozenBaseStruct
+        globals()["FrozenCamelizedStruct"] = _FrozenCamelizedStruct
+        return globals()[name]
+
     if name == "BaseModel":
         resolved: Any = BaseModelStub
         if PYDANTIC_INSTALLED:

@@ -3,14 +3,19 @@ type: Concept
 title: "Live State Synchronization"
 description: "Server-authoritative LiveState rooms with 64-bit HybridLogicalClock LWW conflict resolution and MessagePack delta frames across Rust, Python, and TypeScript."
 status: stable
-tags: [domains, framework, live-state, realtime, msgpack]
+tags:
+  - domains
+  - framework
+  - live-state
+  - realtime
+  - msgpack
 generated:
   by: flow/0.26.0
   at: "2026-11-04T04:33:00Z"
 verified:
   - by: agent:flow-setup
-    at: "2026-11-04T04:33:00Z"
-    commit: f741701
+    at: "2026-11-07T03:55:00Z"
+    commit: 9af810f5
 sources:
   - id: src-vertebra-core-src-protocol-mod-rs
     resource: src/rs/vertebra-core/src/protocol/mod.rs
@@ -48,7 +53,7 @@ Vertebra's Live Event State protocol synchronizes reactive state objects across 
 
 - **[`LiveState`](../../../../../src/py/vertebra/framework/live.py)**: Subclasses compute `__vertebra_state_id__` (FNV-1a 64 of class name), `__vertebra_field_map__` (FNV-1a 32 of annotated attributes), and `__vertebra_actions__` (methods decorated with `@live_action`) in `__init_subclass__`. Setting or deleting a public attribute advances `_hlc.tick()` and appends a `FIELD_SET` or `FIELD_DELETE` `StateDeltaFrame` to `_pending_deltas`.
 - **LWW Resolution & Actions**: `apply_delta(frame)` compares `frame.timestamp_ns` against `_field_timestamps[field_id]`, rejecting stale updates (`frame.timestamp_ns < current_ts`) and merging newer timestamps via `_hlc.receive()`. `dispatch_action(frame)` executes `@live_action` methods (sync or async) for `ACTION_CALL` (`0x06`) and returns an `ACTION_RESULT` (`0x07`) frame.
-- **[`LiveStateRoom`](../../../../../src/py/vertebra/framework/live.py)**: Binds a `LiveState` instance to a pub/sub `channel`, draining encoded MessagePack frames (`MsgpackCodec`) via `broadcast_pending()` and handling client `SYNC_REQUEST`, `ACTION_CALL`, and mutation frames via `handle_client_frame(raw_bytes)`.
+- **[`LiveStateRoom`](../../../../../src/py/vertebra/framework/live.py)**: Binds a `LiveState` instance to a pub/sub `channel`, draining encoded MessagePack frames (`encode_msgpack_bytes` / `decode_msgpack` via `StateDeltaFrame.encode` and `StateDeltaFrame.decode`) through `broadcast_pending()` and handling client `SYNC_REQUEST`, `ACTION_CALL`, and mutation frames via `handle_client_frame(raw_bytes)`.
 
 ## 3. TypeScript `LiveStateClient` (`@vertebra/client/live`)
 

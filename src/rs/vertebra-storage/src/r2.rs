@@ -1,9 +1,18 @@
-//! Cloudflare R2 multipart upload chunking utilities.
+//! Bounded multipart chunking for S3/GCS minimum sizes and R2/OCI uniformity.
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 
-/// Uniform 8 MiB multipart chunk size required by Cloudflare R2 and OCI multipart uploads.
+/// Uniform 8 MiB chunks satisfy the S3 and GCS XML 5 MiB minimum and R2/OCI part uniformity.
 pub const R2_UNIFORM_PART_SIZE: usize = 8 * 1024 * 1024;
+
+/// Return `true` when the backend uses bounded uniform non-trailing multipart parts.
+///
+/// S3 and the GCS XML multipart API reject non-final parts below 5 MiB; R2 and OCI also
+/// require identical non-final part sizes. Azure block blobs, memory, and local files accept
+/// arbitrary block sizes, so their chunks pass through unchanged.
+pub fn requires_uniform_part_size(scheme: &str) -> bool {
+    matches!(scheme, "s3" | "r2" | "oci" | "gs" | "gcs")
+}
 
 /// Split a payload into uniform `part_size` chunks (all non-trailing chunks have identical byte length).
 pub fn chunk_uniform_parts(data: Bytes, part_size: usize) -> Vec<Bytes> {
@@ -19,4 +28,56 @@ pub fn chunk_uniform_parts(data: Bytes, part_size: usize) -> Vec<Bytes> {
         offset = end;
     }
     parts
+}
+
+/// Rolling fixed-capacity re-chunker that emits exact `part_size` `Bytes` frames incrementally
+/// without concatenating an entire multi-part stream in memory.
+#[derive(Debug)]
+pub struct UniformPartAccumulator {
+    part_size: usize,
+    buf: BytesMut,
+}
+
+impl UniformPartAccumulator {
+    pub fn new(part_size: usize) -> Self {
+        Self {
+            part_size: part_size.max(1),
+            buf: BytesMut::new(),
+        }
+    }
+
+    pub fn push(&mut self, mut chunk: Bytes) -> Vec<Bytes> {
+        if chunk.is_empty() {
+            return Vec::new();
+        }
+        let mut ready = Vec::new();
+        if !self.buf.is_empty() {
+            if self.buf.len() + chunk.len() < self.part_size {
+                self.buf.extend_from_slice(&chunk);
+                return ready;
+            }
+            let needed = self.part_size - self.buf.len();
+            self.buf.extend_from_slice(&chunk.split_to(needed));
+            ready.push(self.buf.split().freeze());
+        }
+        while chunk.len() >= self.part_size {
+            ready.push(chunk.split_to(self.part_size));
+        }
+        if !chunk.is_empty() {
+            self.buf.extend_from_slice(&chunk);
+        }
+        ready
+    }
+
+    pub fn finish(&mut self) -> Option<Bytes> {
+        if self.buf.is_empty() {
+            None
+        } else {
+            Some(self.buf.split().freeze())
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.buf.clear();
+    }
 }

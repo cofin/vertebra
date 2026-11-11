@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import gc
 import io
+import mmap
 import os
 import struct
 import zipfile
@@ -748,6 +750,148 @@ def test_unified_db_arrow_cursor_identity_and_native_delegation() -> None:
             {"k": 20, "v": "y"},
             {"k": 30, "v": "z"},
         ]
+
+
+def _arrow_ipc_stream_bytes(table: pa.Table) -> bytes:
+    """Serialize `table` into a complete Arrow IPC stream."""
+    sink = pa.BufferOutputStream()
+    with pa.ipc.new_stream(sink, table.schema) as writer:
+        writer.write_table(table)
+    return sink.getvalue().to_pybytes()
+
+
+def _raise_on_row_materialization(*_args: Any, **_kwargs: Any) -> Any:
+    """Fail when a code path materializes per-row dictionaries."""
+    raise AssertionError("per-row to_pylist() materialization is not allowed on this path")
+
+
+@pytest.mark.parametrize("framing", ["raw_ipc", "vtbarrow_header"])
+def test_read_arrow_shm_zero_copy_lazy_len_survives_dropped_region(
+    framing: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`read_arrow_shm` maps Arrow buffers directly over the SHM region and keeps it alive after the caller drops it."""
+    table = pa.Table.from_pydict({"id": [1, 2, 3], "name": ["a", "b", "c"]})
+    ipc_bytes = _arrow_ipc_stream_bytes(table)
+    region: Any
+    if framing == "vtbarrow_header":
+        mapping = mmap.mmap(-1, 4096)
+        mapping[:8] = b"VTBARROW"
+        mapping[8:16] = struct.pack("<Q", len(ipc_bytes))
+        mapping[16 : 16 + len(ipc_bytes)] = ipc_bytes
+        region = memoryview(mapping)
+        payload_offset = 16
+        del mapping
+    else:
+        region = write_arrow_shm(table)
+        payload_offset = 0
+    region_address = pa.py_buffer(region).address
+    region_size = len(region)
+
+    cursor = read_arrow_shm(region)
+    del region
+    gc.collect()
+
+    assert pa.py_buffer(cursor.buffer_view()).address == region_address + payload_offset
+    assert len(cursor.buffer_view()) == len(ipc_bytes)
+    monkeypatch.setattr(db_arrow_mod.ArrowCursor, "to_pylist", _raise_on_row_materialization)
+    assert len(cursor) == table.num_rows
+    assert cursor.row_count == table.num_rows
+    assert cursor._rows == []
+    monkeypatch.undo()
+
+    decoded = cursor.to_pyarrow()
+    value_buffer_address = decoded.column("id").chunks[0].buffers()[1].address
+    assert region_address <= value_buffer_address < region_address + region_size
+    assert decoded.equals(table)
+    assert cursor.to_pylist() == [{"id": 1, "name": "a"}, {"id": 2, "name": "b"}, {"id": 3, "name": "c"}]
+
+
+def test_read_arrow_shm_rejects_truncated_vtbarrow_frame() -> None:
+    """A `VTBARROW` header declaring more payload bytes than the region holds raises `ValueError`."""
+    ipc_bytes = _arrow_ipc_stream_bytes(pa.Table.from_pydict({"id": [1]}))
+    frame = b"VTBARROW" + struct.pack("<Q", len(ipc_bytes) + 1) + ipc_bytes
+    with pytest.raises(ValueError, match="VTBARROW"):
+        read_arrow_shm(memoryview(frame))
+
+
+def test_read_arrow_shm_empty_ipc_table_reports_zero_rows_and_schema() -> None:
+    """A `0`-row Arrow IPC stream yields `len(cursor) == 0` and schema-derived column names."""
+    empty = pa.table({"id": pa.array([], pa.int64()), "name": pa.array([], pa.string())})
+    cursor = read_arrow_shm(_arrow_ipc_stream_bytes(empty))
+    assert len(cursor) == 0
+    assert db_arrow_mod._table_to_rows_and_cols(cursor) == ([], ("id", "name"))
+
+
+@pytest.mark.parametrize(
+    ("table", "columns", "expected"),
+    [
+        (
+            pa.table({"id": pa.array([], pa.int64()), "name": pa.array([], pa.string())}),
+            None,
+            ([], ("id", "name")),
+        ),
+        (
+            pa.Table.from_pydict({"id": [1, 2, 3], "name": ["a", "b", "c"]}),
+            None,
+            ([(1, "a"), (2, "b"), (3, "c")], ("id", "name")),
+        ),
+        (pa.table({}), None, ([], ())),
+        (
+            pa.Table.from_pydict({"id": [1, 2], "name": ["a", "b"]}),
+            ("name", "missing", "id"),
+            ([("a", None, 1), ("b", None, 2)], ("name", "missing", "id")),
+        ),
+        (
+            pa.RecordBatch.from_pydict({"id": [7, 8], "name": ["x", "y"]}),
+            None,
+            ([(7, "x"), (8, "y")], ("id", "name")),
+        ),
+    ],
+    ids=["empty-typed", "populated", "zero-columns", "column-subset", "record-batch"],
+)
+def test_table_to_rows_and_cols_transposes_arrow_tables_columnar(
+    table: Any, columns: tuple[str, ...] | None, expected: tuple[list[tuple[Any, ...]], tuple[str, ...]]
+) -> None:
+    """`_table_to_rows_and_cols` returns tuple rows and column names for Arrow tables and record batches."""
+    assert db_arrow_mod._table_to_rows_and_cols(table, columns) == expected
+
+
+def test_table_to_rows_and_cols_reads_ipc_cursor_without_row_dicts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An IPC-backed `ArrowCursor` converts column-wise without calling `ArrowCursor.to_pylist()`."""
+    table = pa.Table.from_pydict({"id": [1, 2, 3], "name": ["a", "b", "c"]})
+    cursor = read_arrow_shm(write_arrow_shm(table))
+    monkeypatch.setattr(db_arrow_mod.ArrowCursor, "to_pylist", _raise_on_row_materialization)
+    assert db_arrow_mod._table_to_rows_and_cols(cursor) == ([(1, "a"), (2, "b"), (3, "c")], ("id", "name"))
+
+
+def test_table_to_rows_and_cols_collapses_duplicate_join_columns_to_last_field() -> None:
+    """Duplicate field names from SQL joins resolve to the last field, matching `Table.to_pylist()` dictionaries."""
+    table = pa.Table.from_arrays(
+        [pa.array([1, 2]), pa.array(["a", "b"]), pa.array([10, 20])], names=["id", "name", "id"]
+    )
+    rows, cols = db_arrow_mod._table_to_rows_and_cols(table)
+    assert (rows, cols) == ([(10, "a"), (20, "b")], ("id", "name"))
+    assert [dict(zip(cols, row, strict=True)) for row in rows] == table.to_pylist()
+    assert db_arrow_mod._table_to_rows_and_cols(table, ("name", "id")) == ([("a", 10), ("b", 20)], ("name", "id"))
+
+
+def test_arrow_cursor_decodes_ipc_stream_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`len()`, `to_arrow_table()`, `to_pylist()`, and row extraction share one decoded IPC table."""
+    table = pa.Table.from_pydict({"id": [1, 2, 3], "name": ["a", "b", "c"]})
+    cursor = read_arrow_shm(_arrow_ipc_stream_bytes(table))
+    opened: list[Any] = []
+    original_open_stream = pa.ipc.open_stream
+
+    def counting_open_stream(source: Any, *args: Any, **kwargs: Any) -> Any:
+        opened.append(source)
+        return original_open_stream(source, *args, **kwargs)
+
+    monkeypatch.setattr(pa.ipc, "open_stream", counting_open_stream)
+    assert len(cursor) == 3
+    assert cursor.to_arrow_table().equals(table)
+    assert cursor.to_pylist() == table.to_pylist()
+    assert db_arrow_mod._table_to_rows_and_cols(cursor) == ([(1, "a"), (2, "b"), (3, "c")], ("id", "name"))
+    assert len(opened) == 1
 
 
 def test_sync_tenant_predicate_raises_when_guc_set_fails() -> None:

@@ -1,24 +1,25 @@
 ---
 type: Task
-id: native-postgres-driver:t66
-title: Serialize complete Arrow IPC messages into SHM
+id: "native-postgres-driver:t66"
+title: "Serialize complete Arrow IPC messages into SHM"
+description: "Serialize complete Arrow IPC messages into SHM for the standalone vertebra-postgres native driver."
+status: stable
 state: pending
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
-- native-postgres-driver:t65
+  - "native-postgres-driver:t65"
 files:
-- src/rs/vertebra-postgres/src/arrow.rs
-- src/rs/vertebra-postgres/tests/postgres_arrow_tests.rs
-- src/py/tests/unit/db/test_postgres_native_data.py
-- src/py/vertebra/db/arrow.py
-- src/py/vertebra/db/adapters/postgres/types.py
+  - src/rs/vertebra-postgres/src/arrow.rs
+  - src/rs/vertebra-postgres/tests/postgres_arrow_tests.rs
+  - src/py/tests/unit/db/test_postgres_native_data.py
+  - src/py/vertebra/db/arrow.py
+  - src/py/vertebra/db/adapters/postgres/types.py
 tests:
-- src/rs/vertebra-postgres/tests/postgres_arrow_tests.rs::ipc_is_one_valid_stream
-- src/rs/vertebra-postgres/tests/postgres_arrow_tests.rs::ipc_capsule_retains_views
-- src/py/tests/unit/db/test_postgres_native_data.py::test_arrow_count_metadata
+  - src/rs/vertebra-postgres/tests/postgres_arrow_tests.rs
+  - src/py/tests/unit/db/test_postgres_native_data.py
 plan_revision: 2
-plan_commit: "7657e8b7c2c96bdda6821aec70a2b603f438a127"
+plan_commit: 9af810f5
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -28,15 +29,13 @@ next_step: null
 last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
-created_at: '2026-11-05T18:25:07Z'
-updated_at: '2026-11-06T06:30:00Z'
+created_at: "2026-11-05T18:25:07Z"
+updated_at: "2026-11-07T04:15:00Z"
 commit: null
 tags:
-- postgres
-- native
-- data-events
-requirements:
-- R20
+  - postgres
+  - native
+  - data-events
 ---
 
 # Serialize complete Arrow IPC messages into SHM

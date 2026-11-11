@@ -1,22 +1,24 @@
 ---
 type: Task
-id: native-postgres-driver:t101
-title: Document complete native PostgreSQL installation behavior and operations
+id: "native-postgres-driver:t101"
+title: "Document complete native PostgreSQL installation behavior and operations"
+description: "Document complete native PostgreSQL installation behavior and operations for the standalone vertebra-postgres native driver."
+status: stable
 state: pending
 priority: P1
 verification_strategy: static_validation
 depends_on:
-- native-postgres-driver:t100
+  - "native-postgres-driver:t100"
 files:
-- docs/usage/databases.md
-- docs/reference/database-capabilities.md
-- src/py/vertebra/db/adapters/postgres/driver.py
-- src/py/vertebra/db/adapters/postgres/config.py
-- README.md
-- Makefile
+  - docs/usage/databases.md
+  - docs/reference/database-capabilities.md
+  - src/py/vertebra/db/adapters/postgres/driver.py
+  - src/py/vertebra/db/adapters/postgres/config.py
+  - README.md
+  - Makefile
 tests: []
 plan_revision: 2
-plan_commit: "7657e8b7c2c96bdda6821aec70a2b603f438a127"
+plan_commit: 9af810f5
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -26,15 +28,13 @@ next_step: null
 last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
-created_at: '2026-11-05T18:25:07Z'
-updated_at: '2026-11-06T06:30:00Z'
+created_at: "2026-11-05T18:25:07Z"
+updated_at: "2026-11-07T04:15:00Z"
 commit: null
 tags:
-- postgres
-- cutover
-- native
-requirements:
-- R27
+  - postgres
+  - cutover
+  - native
 ---
 
 # Document complete native PostgreSQL installation behavior and operations

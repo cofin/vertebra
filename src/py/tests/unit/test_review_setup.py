@@ -400,6 +400,26 @@ def test_bundles_catches_completed_spec_and_broken_source(tmp_path: Path) -> Non
     assert any("resident spec has 'state: completed'" in i.message for i in issues)
 
 
+def test_bundles_allows_completed_nested_chapter_spec_inside_active_flow(tmp_path: Path) -> None:
+    """Verify bundles rule permits completed nested chapter specs while parent flow spec remains active."""
+    repo = build_minimal_review_tree(tmp_path)
+    flow_dir = repo / ".agents/bundles/specs/active-flow"
+    chapter_dir = flow_dir / "chapters/ch01-slice"
+    chapter_dir.mkdir(parents=True, exist_ok=True)
+    (flow_dir / "spec.md").write_text(
+        "---\ntype: Spec\ntitle: Active Flow\ndescription: Active parent.\nstate: active\n---\n\n# Active Flow\n",
+        encoding="utf-8",
+    )
+    (chapter_dir / "spec.md").write_text(
+        "---\ntype: Spec\nparent_flow: active-flow\nchapter_id: ch01-slice\ntitle: Chapter 1\ndescription: Done chapter.\nstate: completed\n---\n\n# Chapter 1\n",
+        encoding="utf-8",
+    )
+
+    validator = ReviewSetupValidator(repo)
+    issues = validator.validate(frozenset({"bundles"}))
+    assert issues == []
+
+
 @pytest.mark.parametrize(
     ("rel_path", "content", "expected_fragment"),
     [

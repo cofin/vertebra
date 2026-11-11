@@ -1,38 +1,41 @@
 ---
 type: Task
-id: native-postgres-driver:t27
-title: Owned query results and PostgreSQL value records
+id: "native-postgres-driver:t27"
+title: "Owned query results and PostgreSQL value records"
+description: "Owned query results and PostgreSQL value records for the standalone vertebra-postgres native driver."
+status: stable
 state: pending
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
-- native-postgres-driver:t26
+  - "native-postgres-driver:t26"
 files:
-- src/rs/vertebra-postgres/src/result.rs
-- src/rs/vertebra-postgres/src/lib.rs
-- src/py/vertebra/db/adapters/postgres/types.py
-- src/rs/vertebra-postgres/tests/result_contract.rs
-- src/py/tests/unit/db/test_postgres_types.py
+  - src/rs/vertebra-postgres/src/result.rs
+  - src/rs/vertebra-postgres/src/lib.rs
+  - src/py/vertebra/db/adapters/postgres/types.py
+  - src/rs/vertebra-postgres/tests/result_contract.rs
+  - src/py/tests/unit/db/test_postgres_types.py
 tests:
-- src/rs/vertebra-postgres/tests/result_contract.rs
-- src/py/tests/unit/db/test_postgres_types.py
+  - src/rs/vertebra-postgres/tests/result_contract.rs
+  - src/py/tests/unit/db/test_postgres_types.py
 plan_revision: 2
-plan_commit: "7657e8b7c2c96bdda6821aec70a2b603f438a127"
+plan_commit: 9af810f5
 state_revision: 0
 claimed_by: null
 claimed_at: null
-commit: null
-verification_evidence: null
-created_at: '2026-11-05T18:25:07Z'
-updated_at: '2026-11-06T06:30:00Z'
-requirements:
-- R10
-- R11
 blocked_reason: null
 unblock_condition: null
 next_step: null
 last_verified_at: null
 last_verified_commit: null
+verification_evidence: null
+created_at: "2026-11-05T18:25:07Z"
+updated_at: "2026-11-07T04:15:00Z"
+commit: null
+tags:
+  - postgres
+  - driver
+  - rust
 ---
 
 # Owned query results and PostgreSQL value records

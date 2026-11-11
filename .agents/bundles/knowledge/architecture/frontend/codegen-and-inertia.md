@@ -3,14 +3,19 @@ type: Guide
 title: "Route Codegen Targets & Inertia v3 Middleware"
 description: "How vertebra.build.codegen turns App routes into TypeNode IR and TypeScript, Zod, Valibot, OpenAPI, Protobuf, and procedure client output, and how SyncInertiaMiddleware / AsyncInertiaMiddleware build Inertia v3 responses."
 status: stable
-tags: [architecture, frontend, codegen, typescript, inertia]
+tags:
+  - architecture
+  - frontend
+  - codegen
+  - typescript
+  - inertia
 generated:
   by: flow/0.26.0
   at: "2026-11-04T04:33:00Z"
 verified:
   - by: agent:flow-setup
-    at: "2026-11-04T04:33:00Z"
-    commit: f741701
+    at: "2026-11-07T03:55:00Z"
+    commit: 9af810f5
 sources:
   - id: src-build-codegen-init-py
     resource: src/py/vertebra/build/codegen/__init__.py
@@ -99,7 +104,7 @@ flowchart LR
 | `ManifestGenerator` | `_manifest.py` | `{"routes": {operation_id: {handlerName, method, paramsSchema, procedureId, responseSchema, route}}, "version": 1}`. |
 | `ValibotGenerator` | `valibot.py` | `import * as v from 'valibot';` schemas with the same entry points as `ZodGenerator`. |
 | `OpenAPIGenerator` | `openapi.py` | `generate` / `generate_json` producing an `"openapi": "3.1.0"` document. |
-| `ProtobufGenerator` / `ProtoParser` | `protobuf.py` | Bidirectional `.proto` ↔ `TypeNode` IR + `RouteMetadata`: `ProtobufGenerator` emits `syntax = "proto3";` messages plus one `service` (`unary`, `server_streaming`, `client_streaming`, `bidi` RPCs and `google.api.http` annotations), while `ProtoParser` parses `.proto` files into `ProtoFileSpec`, `msgspec.Struct` stubs (`generate_python_stubs`), and `RouteMetadata` (`to_routes`). |
+| `ProtobufGenerator` / `ProtobufParser` | `protobuf.py` | Bidirectional `.proto` ↔ `TypeNode` IR + `RouteMetadata`: `ProtobufGenerator` emits `syntax = "proto3";` messages plus one `service` (`unary`, `server_streaming`, `client_streaming`, `bidi` RPCs and `google.api.http` annotations), while `ProtobufParser` parses `.proto` files into `ProtoFileSpec`, `msgspec.Struct` stubs (`generate_python_stubs`), and `RouteMetadata` (`to_routes`). |
 | `ProcedureClientGenerator` | `procedures.py` | Interfaces plus an `export interface ProcedureRpcClient` map from the `ProcedureRegistry` filled by `@procedure`. |
 
 `procedures.py` also defines Litestar-style parameter markers (`Parameter`, `Body`, `FromPath`, `FromQuery`, `FromHeader`, `FromCookie`, `JSONBody`, `MsgPackBody`, `MultipartBody`, `URLEncodedBody`, `SkipValidation`, `NamedDependency`), `resolve_parameter_node` (used by the Zod, Valibot, and OpenAPI targets to place parameters), and `json_schema_to_type_node`.

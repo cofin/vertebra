@@ -107,7 +107,6 @@ from vertebra.extensions.sqlspec.spanner import (
 from vertebra.extensions.sqlspec.storage import (
     ArrowFlightSerializer,
     ObjectStoreBackend,
-    StreamingStorageResponse,
     build_duckdb_gcs_secret_sql,
     register_storage_alias,
 )
@@ -199,7 +198,6 @@ __all__ = (
     "SpannerSyncDriver",
     "SpannerSyncEventQueueStore",
     "SpannerSyncStore",
-    "StreamingStorageResponse",
     "SyncAlloyDBDialer",
     "SyncCloudSQLDialer",
     "SyncAdapterConfig",

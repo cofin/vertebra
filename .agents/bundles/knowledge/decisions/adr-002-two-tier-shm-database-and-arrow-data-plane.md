@@ -1,29 +1,28 @@
 ---
-type: Concept
-title: 'ADR-002: Shared-Memory Database Broker and Arrow IPC Data Plane'
-description: Architectural decision to combine pure-Rust native database drivers and
-  SHM connection leasing with a universal broker proxy for SQLSpec and Advanced Alchemy.
+type: Decision
+title: "ADR-002: Shared-Memory Database Broker and Arrow IPC Data Plane"
+description: "Architectural decision to combine pure-Rust native database drivers and SHM connection leasing with a universal broker proxy for SQLSpec and Advanced Alchemy."
 status: stable
 tags:
-- decisions
-- adr
-- database
-- arrow
-- sqlspec
-- alchemy
+  - decisions
+  - adr
+  - database
+  - arrow
+  - sqlspec
+  - alchemy
 generated:
   by: flow/0.26.0
-  at: '2026-11-04T04:33:00Z'
+  at: "2026-11-04T04:33:00Z"
 verified:
-- by: agent:flow-review
-  at: '2026-11-06T06:10:00Z'
-  commit: 7657e8b7c2c96bdda6821aec70a2b603f438a127
-- by: agent:codex
-  at: '2026-11-05T06:09:26Z'
-  commit: 80ff8a65e43a2bcef9e48a7763e89a7352118232
-- by: agent:flow-setup
-  at: '2026-11-04T04:33:00Z'
-  commit: f741701
+  - by: agent:flow-setup
+    at: "2026-11-07T03:55:00Z"
+    commit: 9af810f5
+  - by: agent:codex
+    at: "2026-11-05T06:09:26Z"
+    commit: 80ff8a65e43a2bcef9e48a7763e89a7352118232
+  - by: agent:flow-setup
+    at: "2026-11-04T04:33:00Z"
+    commit: f741701
 sources:
 - id: src-db-contracts
   resource: src/py/vertebra/db/driver/_common.py
@@ -85,7 +84,7 @@ Multi-worker Python servers traditionally maintain isolated connection pools per
 
 ## Python Ownership Boundaries
 
-`vertebra.db` owns generic driver/capability contracts, registry resolution, Arrow cursors, and engine-neutral change-feed/tenant primitives. Engine configuration, SQL and native operations live in `db/adapters/<engine>/`, including PostgreSQL notifications, Spanner change streams, and database embedding pushdown. SQLSpec wrappers consume those contracts from `extensions/sqlspec`. Native `BigQueryToolProvider` and `SpannerToolProvider` classes live in their adapters and expose bound operations through neutral `vertebra.typing.ToolProvider`; they raise neutral `ToolPolicyError` for execution-policy denials. `agent/tools.build_tools` consumes that contract generically, preserving typed invocation and caller-bound confirmation without vendor imports or engine dispatch. A generic DB operation never imports agent, framework, extension, server, or embedding implementations.[^src-db-contracts][^src-db-registry][^src-db-boundary-tests][^src-tool-contracts][^src-bigquery-provider][^src-spanner-provider][^src-agent-tools]
+`vertebra.db` owns generic driver/capability contracts, registry resolution, Arrow cursors, and engine-neutral change-feed/tenant primitives. Engine configuration, SQL and native operations live in `db/adapters/<engine>/`, including PostgreSQL notifications, Spanner change streams, and database embedding pushdown. SQLSpec wrappers consume those contracts from `extensions/sqlspec`. Native `BigQueryToolProvider` and `SpannerToolProvider` classes live in their adapters and expose bound operations through neutral `vertebra.typing.ToolProvider`[^src-tool-typing-facade]; they raise neutral `ToolPolicyError` for execution-policy denials. `agent/tools.build_tools` consumes that contract generically, preserving typed invocation and caller-bound confirmation without vendor imports or engine dispatch. A generic DB operation never imports agent, framework, extension, server, or embedding implementations.[^src-db-contracts][^src-db-registry][^src-db-boundary-tests][^src-tool-contracts][^src-bigquery-provider][^src-spanner-provider][^src-agent-tools]
 
 The registry's declarative config registration and annotation-only driver imports are composition metadata. They do not authorize concrete driver imports or engine-class dispatch inside generic modules; construction still delegates polymorphically to the owning config. Broker dialect integers likewise identify protocol/cache domains; keep their numeric identities rather than treating every engine name as executable coupling.[^src-db-registry][^src-db-contracts][^src-db-boundary-tests]
 
@@ -102,7 +101,7 @@ The registry's declarative config registration and annotation-only driver import
 
 ## Consequences
 
-- `vertebra-db` implements pure-Rust protocol codecs and cloud dialers (`CloudSqlDialer` `:3307`, `AlloyDbDialer` `:5433`, Oracle Thin TNS/TTC + Wallet, TDS `@P1` rewriting, RESP3 client tracking) with zero external C client libraries required at runtime; `vertebra-bigquery` and `vertebra-spanner` execute over native Rust clients today, while non-GCP Python driver adapters execute through Python client fallbacks until their dedicated `native-*-driver` PyO3 cutovers complete.
+- `vertebra-db` implements pure-Rust protocol codecs and cloud dialers (`CloudSqlDialer` `:3307`, `AlloyDbDialer` `:5433`, Oracle Thin TNS/TTC + Wallet, TDS `@P1` rewriting, RESP3 client tracking) with zero external C client libraries required at runtime; `vertebra-bigquery` and `vertebra-spanner` execute over native Rust clients in standalone PyO3 wheels, while non-GCP Python driver adapters execute through Python client bindings or the shared-memory broker proxy.
 - `vertebra.extensions.sqlspec`, `vertebra.extensions.alchemy`, and `vertebra.extensions.sqlalchemy` expose drop-in adapter configs and `+vtb` dialects backed by `LeaseBroker`, `StatementCache`, and `hydrate_rows_vectorcall`.
 
 Provenance sources: [^src-vertebra-core-src-broker-rs], [^src-vertebra-db-src-lib-rs], [^src-db-init-py], [^src-extensions-sqlspec-init-py], [^src-extensions-alchemy-init-py], [^src-extensions-sqlalchemy-dialects-py].

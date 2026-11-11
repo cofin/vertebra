@@ -1,29 +1,68 @@
 ---
 type: Research
 flow_id: integration-remediation
-title: Audit findings for the merged d3d5f8b..142cc49 range
-description: Verified findings from audits of the database framework extensions, framework/embeddings/utils/server, the Rust GCP driver layer, MCP/WebMCP, and the vertebra.db package, with owning child flow for each item.
+title: "Audit findings for the merged d3d5f8b..142cc49 range"
+description: "Verified findings from audits of database framework extensions, framework/embeddings/utils/server, the Rust GCP driver layer, MCP/WebMCP, and vertebra.db, mapped to owning child flows."
 status: stable
 state: promoted
 promoted_to: integration-remediation
-created_at: 2026-11-03T03:30:00Z
-updated_at: 2026-11-03T03:30:00Z
-tags: [research, audit, remediation]
+created_at: "2026-11-03T03:30:00Z"
+updated_at: "2026-11-07T04:15:00Z"
+generated:
+  by: flow-setup
+  at: "2026-11-07T04:15:00Z"
+verified:
+  - by: agent:flow-setup
+    at: "2026-11-07T04:15:00Z"
+    commit: 9af810f5
 sources:
-  - resource: src/py/vertebra/db/
-  - resource: src/py/vertebra/extensions/
-  - resource: src/py/vertebra/framework/
-  - resource: src/py/vertebra/embeddings/
-  - resource: src/py/vertebra/agent/mcp/
-  - resource: src/py/vertebra/utils/
-  - resource: src/py/vertebra/server/
-  - resource: src/rs/vertebra-db/src/
-  - resource: src/rs/vertebra-py/src/
-  - resource: src/rs/vertebra-core/src/
-  - resource: src/ts/vertebra-client/src/webmcp.ts
+  - id: db-registry
+    resource: src/py/vertebra/db/registry.py
+    title: Database driver registry and adapter boundary
+  - id: sqlspec-adapters
+    resource: src/py/vertebra/extensions/sqlspec/adapters.py
+    title: SQLSpec adapter drivers and store bindings
+  - id: queue-base
+    resource: src/py/vertebra/framework/queues/base.py
+    title: First-party QueueService and backend selection
+  - id: embeddings-pkg
+    resource: src/py/vertebra/embeddings/__init__.py
+    title: Embeddings package exports and transports
+  - id: mcp-pkg
+    resource: src/py/vertebra/agent/mcp/__init__.py
+    title: MCP 2026-07-28 protocol package
+  - id: utils-pkg
+    resource: src/py/vertebra/utils/__init__.py
+    title: Public Rust-backed utility helpers
+  - id: server-fastpath
+    resource: src/py/vertebra/server/_fastpath_core.py
+    title: Consolidated framework fastpath provider
+  - id: rs-db-lib
+    resource: src/rs/vertebra-db/src/lib.rs
+    title: Shared Rust database crate
+  - id: rs-py-lib
+    resource: src/rs/vertebra-py/src/lib.rs
+    title: Core PyO3 extension bindings
+  - id: rs-core-lib
+    resource: src/rs/vertebra-core/src/lib.rs
+    title: Core Rust runtime, SHM rings, and GCP auth
+  - id: ts-webmcp
+    resource: src/ts/vertebra-client/src/webmcp.ts
+    title: TypeScript WebMCP browser bridge
+tags:
+  - research
+  - audit
+  - remediation
+  - drivers
+  - mcp
 ---
 
 # Audit Findings: `d3d5f8b..142cc49`
+
+<!-- truth: start -->
+- **Historical Baseline Snapshot (`main @ 142cc49`)**: Records the verified defects across `vertebra.db` [^db-registry], `extensions/sqlspec` [^sqlspec-adapters], `framework/queues` [^queue-base], `embeddings` [^embeddings-pkg], `utils` [^utils-pkg], `server` [^server-fastpath], Rust GCP clients [^rs-db-lib] [^rs-py-lib] [^rs-core-lib], and MCP/WebMCP [^mcp-pkg] [^ts-webmcp] that decomposed into `integration-remediation` Chapters 1–9 and `native-data-platform`.
+- **Current Resolution Status on `main @ 077a3fe9`**: Chapters 1 (`364c7cbe`), 2 (`984ce732`), 3 (`80ff8a65`), 7 (`077a3fe9`), 8 (`d2fa5072`), and 9 (`abd33ab6`) plus `db-layout-and-contract` (`21c99f95`) are merged on `main`; remaining driver, SQLSpec, queue, and SQLAlchemy/Django items track in their respective child specs.
+<!-- truth: end -->
 
 Baseline: `main @ 142cc49`. It contains PRs #64 (embeddings, GCP ADC), #65 (LoopBackend, C-API stepper, FastPath, shared native pools), #66 (BigQuery/Spanner drivers, SQLSpec/framework adapters, modular driver packages), #69 (dev welcome page), and #70 (Rust text/humanize/uuid primitives).
 
@@ -45,7 +84,7 @@ Each finding names its owning child flow in brackets. Confidence is high unless 
 - python-oracledb 2.4+ supports pipelining: `oracledb.create_pipeline()` with `add_execute`/`add_executemany`/`add_fetchall`/`add_commit`, then `AsyncConnection.run_pipeline(pipeline)`. It needs Thin mode, and the round-trip reduction requires Oracle Database 23ai+. Older servers execute the operations sequentially.
 - Vertebra exposes neither. `db/pipeline.py::QueryPipeline` instead compiles steps into one CTE (`jsonb_agg` / `TO_JSON_STRING` envelope), with a hand-written `_rewrite_googlesql_params` tokenizer and `hasattr`-based driver probing in `execute`/`execute_async`.
 - `extensions/sqlspec/{bigquery,spanner}.py::*Driver.execute_stack` reuse `QueryPipeline`.
-- `docs/usage/query-pipelines.md`, `docs/usage/databases.md`, `docs/usage/extensions.md`, `docs/index.md`, and `docs/reference/index.md` document `QueryPipeline` as the pipelining feature.
+- Pre-remediation pages across `docs/usage/databases.md`, `docs/usage/extensions.md`, `docs/index.md`, and `docs/reference/index.md` (alongside the retired standalone query-pipelines guide removed in `db-engine-primitives`) documented `QueryPipeline` as the pipelining feature.
 
 ### 1.3 Engine code inside generic modules [db-driver-foundation]
 - `db/cdc.py` combines generic `ChangeEvent`/`ChangeFeed` with Postgres-only `ChangeFeed.build_emit_message_sql` (`pg_logical_emit_message`) and `CDCConfig.replication_slot_name`/`publication_name`/`max_slot_wal_keep_size_mb`, plus the Spanner `SpannerChildPartition`, `SpannerChangeStreamRecord`, and `SpannerChangeStreamSource`.
@@ -302,3 +341,15 @@ Field numbers were checked against the official protos. The tests mock the same 
   - Exception text leaks into responses.
 - **Performance.** `inspect.signature` runs per call, the body is decoded up to three times, Struct outputs are encoded twice, and `tools/list` is rebuilt every request.
 - **Stale docs.** The knowledge chapter `domains/agent/mcp-and-a2a-protocol-harness.md` describes `McpService`/`McpController`/SSE components that do not exist. `build/_import_map.py::_CLIENT_SUBPATHS` is a third copy of the package exports.
+
+[^db-registry]: `src/py/vertebra/db/registry.py` — Database driver registry and adapter boundary.
+[^sqlspec-adapters]: `src/py/vertebra/extensions/sqlspec/adapters.py` — SQLSpec adapter drivers and store bindings.
+[^queue-base]: `src/py/vertebra/framework/queues/base.py` — First-party QueueService and backend selection.
+[^embeddings-pkg]: `src/py/vertebra/embeddings/__init__.py` — Embeddings package exports and transports.
+[^mcp-pkg]: `src/py/vertebra/agent/mcp/__init__.py` — MCP 2026-07-28 protocol package.
+[^utils-pkg]: `src/py/vertebra/utils/__init__.py` — Public Rust-backed utility helpers.
+[^server-fastpath]: `src/py/vertebra/server/_fastpath_core.py` — Consolidated framework fastpath provider.
+[^rs-db-lib]: `src/rs/vertebra-db/src/lib.rs` — Shared Rust database crate.
+[^rs-py-lib]: `src/rs/vertebra-py/src/lib.rs` — Core PyO3 extension bindings.
+[^rs-core-lib]: `src/rs/vertebra-core/src/lib.rs` — Core Rust runtime, SHM rings, and GCP auth.
+[^ts-webmcp]: `src/ts/vertebra-client/src/webmcp.ts` — TypeScript WebMCP browser bridge.

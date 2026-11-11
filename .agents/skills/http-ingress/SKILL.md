@@ -33,20 +33,21 @@ Implementation guide for the Rust Hyper/Tokio/Quinn ingress engine, `response::h
    - Maintain 1:1 batcher-to-worker shard affinity in `RequestBatcher` (`batcher.rs`) and `ShmDispatcher` (`dispatcher/shm.rs`), releasing shard mutexes before `oneshot::send`.
 
 2. **Header Sanitization & Security (`HTTP-06`, `HTTP-07`)**:
-   - Strip untrusted inbound identity headers (`x-client-cert-*`, `x-forwarded-client-cert`) before injecting verified mTLS (`tls.rs` `WebPkiClientVerifier` + `extract_der_common_name`) or JWT claims.
-   - Validate JWT algorithm headers against configured allowlists and reject `alg: none` or algorithm family mismatches.
+   - Strip untrusted inbound proxy identity headers (`x-goog-iap-jwt-assertion` and `x-forwarded-client-cert` via `normalize_trusted_proxy_headers` when the peer IP is outside `TrustedProxyConfig.trusted_cidrs`) before injecting verified mTLS (`tls.rs` `WebPkiClientVerifier` + `extract_client_identity_from_der`) or proxy auth metadata.
+   - Native HS256 JWT validation (`JWTGuard`) lives in `src/rs/vertebra-py/src/telemetry.rs` rather than `vertebra-http`; enforce constant-time token comparisons (`profile.rs`) and header redaction (`access_log.rs`) in ingress.
 
 3. **Radix Router & Offload Paths (`HTTP-08`, `HTTP-10`)**:
    - Keep `RouteTable` (`routing.rs`) path normalization (`normalize_typed_path` in `vertebra-core/src/router.rs`) and FNV-1a handler hashes identical between Rust and Python (`vertebra.framework._router`).
    - Register mounted sub-apps (`MOUNT_HANDLER_BASE | mount_idx`) across `GET`, `POST`, `PUT`, `DELETE`, `PATCH`, `OPTIONS`, and `HEAD`.
    - Canonicalize static asset offload paths (`assets.rs`) and verify the resolved path remains inside the configured root directory.
 
-4. **Graceful Connection Draining (`HTTP-03`, `HTTP-09`)**:
-   - Propagate `CancellationToken` shutdown across HTTP/1.1 keep-alive loops, HTTP/2 `GOAWAY` frames, HTTP/3 Quinn endpoints (`http3.rs`), and active WebSocket/SSE registries (`ws_registry.close_all`).
+4. **Graceful Connection Draining & Feature Gates (`HTTP-03`, `HTTP-09`, `HTTP-12`)**:
+   - Propagate `CancellationToken` shutdown across HTTP/1.1 keep-alive loops, HTTP/2 `GOAWAY` frames, HTTP/3 Quinn endpoints (`http3.rs`, gated behind `--features http3`), and active WebSocket/SSE registries (`ws_registry.close_all`).
 
 ## Verification
 
 ```bash
 cargo test --manifest-path src/rs/Cargo.toml -p vertebra-http --features tls,compression
+cargo check --manifest-path src/rs/Cargo.toml -p vertebra-http --features tls,compression,http3
 cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-http --all-targets --features tls,compression -- -D warnings
 ```

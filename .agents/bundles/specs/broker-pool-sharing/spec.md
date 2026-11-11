@@ -1,9 +1,11 @@
 ---
 type: Spec
 flow_id: broker-pool-sharing
-title: Shared Pools for Any SQLSpec, Advanced Alchemy, or SQLAlchemy Config
-description: Route any upstream SQLSpec config or Advanced Alchemy/SQLAlchemy config through the shared-memory ring broker so worker processes share one broker-owned connection pool per pool_key with session affinity, transactions, VTBARROW streaming, and crash reclamation.
+title: "Shared Pools for Any SQLSpec, Advanced Alchemy, or SQLAlchemy Config"
+description: "Route any upstream SQLSpec config or Advanced Alchemy/SQLAlchemy config through the shared-memory ring broker so worker processes share one broker-owned connection pool per pool_key with session affinity, transactions, VTBARROW streaming, and crash reclamation."
+status: draft
 state: draft
+has_chapters: false
 parent_prd: native-data-platform
 research:
   - ../native-data-platform/research/gap-analysis_20261103.md
@@ -13,12 +15,41 @@ plan_commit: null
 state_revision: 0
 current_task: null
 last_verified_checkpoint: null
-created_at: 2026-11-03T04:05:00Z
-updated_at: "2026-11-05T06:20:28Z"
-tags: [broker, shm, pool, sqlspec, advanced-alchemy, sqlalchemy]
+created_at: "2026-11-03T04:05:00Z"
+updated_at: "2026-11-07T04:15:00Z"
+generated:
+  by: flow-setup
+  at: "2026-11-07T04:15:00Z"
+verified:
+  - by: agent:flow-setup
+    at: "2026-11-07T04:15:00Z"
+    commit: 9af810f5
+sources:
+  - id: core-broker
+    resource: src/rs/vertebra-core/src/broker.rs
+    title: Shared-memory ring broker lease table and pool partitioning
+  - id: broker-transport
+    resource: src/py/vertebra/extensions/broker/transport.py
+    title: SyncSHMBrokerTransport and AsyncSHMBrokerTransport worker transports
+  - id: sqlspec-proxy
+    resource: src/py/vertebra/extensions/sqlspec/proxy.py
+    title: ProxySyncDriver and ProxyAsyncDriver upstream SQLSpec wrappers
+tags:
+  - broker
+  - shm
+  - pool
+  - sqlspec
+  - advanced-alchemy
+  - sqlalchemy
 ---
 
 # Flow Charter: Shared Pools for Any SQLSpec, Advanced Alchemy, or SQLAlchemy Config
+
+<!-- truth: start -->
+- **Shared Broker Pool Ownership**: Every worker process leases connections over POSIX SHM rings from a single broker-owned pool per `BaseDatabaseConfig.pool_key()`, dynamically backed by installed `vertebra-<engine>` crates [^core-broker] [^broker-transport].
+- **Framework-Neutral DB-API Boundary**: `vertebra.db.dbapi` (`SyncDBAPI*` / `AsyncDBAPI*`) extracts directly into `src/py/vertebra/db/dbapi/` with zero upward SQLAlchemy, Django, or engine-specific imports, while SQLAlchemy async adaptation stays in `extensions/sqlalchemy/async_adapter.py`.
+- **Upstream Config Wrapping & Crash Reclamation**: `ProxySyncConfig` / `ProxyAsyncConfig` and `BrokerPool` preserve upstream SQL compilers and session affinity (`VTBARROW` result streaming) and roll back crashed worker leases server-side [^sqlspec-proxy].
+<!-- truth: end -->
 
 ## Charter
 
@@ -78,3 +109,7 @@ These are planning research gaps, not runtime acceptance evidence. Resolve them 
 - t05 Extract the shared `SyncDBAPI*` / `AsyncDBAPI*` directly into `db/dbapi/{__init__,_sync,_async,_errors}.py`, preserve verified execution/cursor/Arrow contracts, isolate SQLAlchemy wrapping in `extensions/sqlalchemy/async_adapter.py`, and implement `extensions/sqlalchemy/pool.py::BrokerPool` for SQLAlchemy & Advanced Alchemy.
 - t06 Worker crash reclamation (`reclaim_worker` + server-side `ROLLBACK`) and multi-process integration tests.
 - t07 ZPages pool metrics, `docs/`, and OKF `broker-and-shm-leases.md` update.
+
+[^core-broker]: `src/rs/vertebra-core/src/broker.rs` — Shared-memory ring broker lease table and pool partitioning.
+[^broker-transport]: `src/py/vertebra/extensions/broker/transport.py` — SyncSHMBrokerTransport and AsyncSHMBrokerTransport worker transports.
+[^sqlspec-proxy]: `src/py/vertebra/extensions/sqlspec/proxy.py` — ProxySyncDriver and ProxyAsyncDriver upstream SQLSpec wrappers.

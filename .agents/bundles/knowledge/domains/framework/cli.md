@@ -3,14 +3,18 @@ type: Concept
 title: "`vtb` Command-Line Interface"
 description: "CLI commands, options, environment preservation, entry-point plugin discovery, Rich TUI/theme utilities, and structured logging for the vtb executable."
 status: stable
-tags: [domains, framework, cli, developer-experience]
+tags:
+  - domains
+  - framework
+  - cli
+  - developer-experience
 generated:
   by: flow/0.26.0
   at: "2026-11-04T04:33:00Z"
 verified:
-  - by: agent:flow-review
-    at: "2026-11-06T06:10:00Z"
-    commit: 7657e8b7c2c96bdda6821aec70a2b603f438a127
+  - by: agent:flow-setup
+    at: "2026-11-07T03:55:00Z"
+    commit: 9af810f5
 sources:
   - id: src-cli-init-py
     resource: src/py/vertebra/cli/__init__.py

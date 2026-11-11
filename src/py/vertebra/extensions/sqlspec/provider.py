@@ -1024,11 +1024,10 @@ class _BaseSQLSpecProvider:
             res = begin_fn()
             if inspect.isawaitable(res):
                 await res
-        elif hasattr(session, "execute"):
-            if not getattr(session, "in_transaction", False):
-                res = session.execute("BEGIN")
-                if inspect.isawaitable(res):
-                    await res
+        elif hasattr(session, "execute") and not getattr(session, "in_transaction", False):
+            res = session.execute("BEGIN")
+            if inspect.isawaitable(res):
+                await res
         with self._lock:
             self._tx_states[key] = True
 

@@ -1,20 +1,22 @@
 ---
 type: Task
-id: native-postgres-driver:t84
-title: Lower PostgreSQL legacy binds with a lexer-aware adapter compiler
+id: "native-postgres-driver:t84"
+title: "Lower PostgreSQL legacy binds with a lexer-aware adapter compiler"
+description: "Lower PostgreSQL legacy binds with a lexer-aware adapter compiler for the standalone vertebra-postgres native driver."
+status: stable
 state: pending
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
-- native-postgres-driver:t83
+  - "native-postgres-driver:t83"
 files:
-- src/py/vertebra/db/adapters/postgres/binds.py
-- src/py/vertebra/db/adapters/postgres/core.py
-- src/py/tests/unit/db/test_postgres_binds.py
+  - src/py/vertebra/db/adapters/postgres/binds.py
+  - src/py/vertebra/db/adapters/postgres/core.py
+  - src/py/tests/unit/db/test_postgres_binds.py
 tests:
-- src/py/tests/unit/db/test_postgres_binds.py
+  - src/py/tests/unit/db/test_postgres_binds.py
 plan_revision: 2
-plan_commit: "7657e8b7c2c96bdda6821aec70a2b603f438a127"
+plan_commit: 9af810f5
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -24,16 +26,13 @@ next_step: null
 last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
-created_at: '2026-11-05T18:25:07Z'
-updated_at: '2026-11-06T06:30:00Z'
+created_at: "2026-11-05T18:25:07Z"
+updated_at: "2026-11-07T04:15:00Z"
 commit: null
 tags:
-- postgres
-- parameters
-- native
-requirements:
-- R2
-- R24
+  - postgres
+  - parameters
+  - native
 ---
 
 # Lower PostgreSQL legacy binds with a lexer-aware adapter compiler

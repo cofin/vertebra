@@ -3,11 +3,19 @@ type: Pattern
 title: "Python Module Structure, Class Layout & PEP 695 Typing"
 description: "Python 3.12+ module layout, PEP 810/562 lazy root exports, msgspec.Struct value objects, class member ordering, zero inline comments, and PEP 695/604/585 typing."
 status: stable
-tags: [patterns, python, code-style, typing, conventions]
+tags:
+  - patterns
+  - python
+  - code-style
+  - typing
+  - conventions
 generated:
   by: flow/0.26.0
   at: "2026-11-04T04:33:00Z"
 verified:
+  - by: agent:flow-setup
+    at: "2026-11-07T03:55:00Z"
+    commit: 9af810f5
   - by: agent:flow-setup
     at: "2026-11-04T04:33:00Z"
     commit: f741701
@@ -43,13 +51,19 @@ sources:
 
 # Python Module Structure, Class Layout & PEP 695 Typing
 
+<!-- truth: start -->
+- Every Python module orders top-level sections as module docstring, grouped imports (`stdlib`, third-party, local), `if TYPE_CHECKING:`, `__all__`, public classes and functions, and private `_...` helpers, with zero inline `#` comments.
+- `vertebra/__init__.py` and `vertebra/framework/__init__.py` declare PEP 810 `__lazy_modules__` paired with PEP 562 `__getattr__` lazy loading (`lazy_exports`) so root imports incur zero framework or extension import overhead.
+- Public typing aliases, sentinels, protocols, exceptions, and `msgspec.Struct` bases (`BaseStruct`, `CamelizedBaseStruct`, `FrozenBaseStruct`, `FrozenCamelizedStruct`) resolve exclusively through `vertebra.typing` using PEP 695/604/585 syntax without `typing_extensions`.
+- Immutable and acyclic `msgspec.Struct` value objects set `gc=False`, stateful service classes declare explicit `__slots__`, and public `msgspec.Struct` / `.pyi` fields include single-line PEP 257 docstrings.
+<!-- truth: end -->
+
 All Python code under [`src/py/vertebra/`](../../../../../src/py/vertebra/__init__.py)[^src-init-py] and [`src/py/tests/`](../../../../../src/py/tests/conftest.py) targets Python 3.12+ (`3.12`, `3.13`, `3.14`, `3.14t`, `3.15`, `3.15t`) under strict Ruff (`PLC0415` enforced) and Mypy gates configured in [`pyproject.toml`](../../../../../pyproject.toml)[^src-pyproject-toml].
 
 ## 1. Module Layout, PEP 810 `__lazy_modules__` & PEP 562 Lazy Root Exports
 
 Every module follows a fixed top-to-bottom layout: module docstring $\to$ grouped top-level imports (`stdlib`, third-party, local) $\to$ `if TYPE_CHECKING:` $\to$ `__all__` $\to$ public classes and functions $\to$ module-scoped `_...` helpers. Both [`vertebra/__init__.py`](../../../../../src/py/vertebra/__init__.py) and [`vertebra/framework/__init__.py`](../../../../../src/py/vertebra/framework/__init__.py)[^src-framework-init-py] declare PEP 810 `__lazy_modules__` (honored natively by Python 3.15+ while remaining a harmless `list[str]` on 3.12–3.14), and [`vertebra/__init__.py`](../../../../../src/py/vertebra/__init__.py) pairs it with PEP 562 `__getattr__` lazy loading so `import vertebra` does not import the framework, server, or native extensions until first attribute access:
 
-<!-- truth: start -->
 ```python
 def __getattr__(name: str) -> Any:
     """Lazy-load framework exports on first attribute access."""
@@ -68,7 +82,6 @@ def __getattr__(name: str) -> Any:
     msg = f"module {__name__!r} has no attribute {name!r}"
     raise AttributeError(msg)
 ```
-<!-- truth: end -->
 
 ## 2. Class Member Ordering & Zero Inline `#` Comments
 

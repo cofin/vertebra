@@ -1,71 +1,104 @@
 ---
 type: Guide
-title: "PyO3 FFI & Vectorized Batch Dispatch"
-description: "The vertebra._vertebra module surface, anchored zero-copy Request/Headers/Response/RequestBatch types, and how Worker and run_worker partition and execute batches."
+title: PyO3 FFI & Vectorized Batch Dispatch
+description: The vertebra._vertebra module surface, anchored zero-copy Request/Headers/Response/RequestBatch
+  types, FastPathProvider dispatch plans, and Worker batch execution.
 status: stable
-tags: [architecture, worker, pyo3, ffi, batch-dispatch]
+tags:
+- architecture
+- worker
+- pyo3
+- ffi
+- batch-dispatch
 generated:
   by: flow/0.26.0
-  at: "2026-11-04T04:33:00Z"
+  at: '2026-11-04T04:33:00Z'
 verified:
-  - by: agent:flow-review
-    at: "2026-11-06T06:10:00Z"
-    commit: 7657e8b7c2c96bdda6821aec70a2b603f438a127
+- by: agent:flow-learn
+  at: '2026-11-08T18:26:31.591504Z'
+  commit: cda502a4
 sources:
-  - id: src-vertebra-py-src-lib-rs
-    resource: src/rs/vertebra-py/src/lib.rs
-    title: "Rust implementation module (src/rs/vertebra-py/src/lib.rs)"
-  - id: src-vertebra-py-src-transport-rs
-    resource: src/rs/vertebra-py/src/transport.rs
-    title: "Rust implementation module (src/rs/vertebra-py/src/transport.rs)"
-  - id: src-vertebra-py-src-request-rs
-    resource: src/rs/vertebra-py/src/request.rs
-    title: "Rust implementation module (src/rs/vertebra-py/src/request.rs)"
-  - id: src-vertebra-py-src-headers-rs
-    resource: src/rs/vertebra-py/src/headers.rs
-    title: "Rust implementation module (src/rs/vertebra-py/src/headers.rs)"
-  - id: src-vertebra-py-src-response-rs
-    resource: src/rs/vertebra-py/src/response.rs
-    title: "Rust implementation module (src/rs/vertebra-py/src/response.rs)"
-  - id: src-vertebra-py-src-msgspec-bridge-rs
-    resource: src/rs/vertebra-py/src/msgspec_bridge.rs
-    title: "Rust implementation module (src/rs/vertebra-py/src/msgspec_bridge.rs)"
-  - id: src-vertebra-pyi
-    resource: src/py/vertebra/_vertebra.pyi
-    title: "Python implementation module (src/py/vertebra/_vertebra.pyi)"
-  - id: src-bundler-pyi
-    resource: src/py/vertebra/_bundler.pyi
-    title: "Python implementation module (src/py/vertebra/_bundler.pyi)"
-  - id: src-storage-pyi
-    resource: src/py/vertebra/_storage.pyi
-    title: "Python implementation module (src/py/vertebra/_storage.pyi)"
-  - id: src-bigquery-pyi
-    resource: src/py/vertebra/_bigquery.pyi
-    title: "Python implementation module (src/py/vertebra/_bigquery.pyi)"
-  - id: src-spanner-pyi
-    resource: src/py/vertebra/_spanner.pyi
-    title: "Python implementation module (src/py/vertebra/_spanner.pyi)"
-  - id: src-server-worker-py
-    resource: src/py/vertebra/server/worker.py
-    title: "Python implementation module (src/py/vertebra/server/worker.py)"
-  - id: src-server-dispatch-py
-    resource: src/py/vertebra/server/_dispatch.py
-    title: "Python implementation module (src/py/vertebra/server/_dispatch.py)"
-  - id: src-server-loops-py
-    resource: src/py/vertebra/server/_loops.py
-    title: "Python implementation module (src/py/vertebra/server/_loops.py)"
-  - id: src-server-fastpath-py
-    resource: src/py/vertebra/server/_fastpath.py
-    title: "Python implementation module (src/py/vertebra/server/_fastpath.py)"
-  - id: src-db-py-async
-    resource: src/rs/vertebra-db/src/py_async.rs
-    title: "Per-extension completion queues and SHM capsule construction"
-  - id: src-core-shm-capsule
-    resource: src/rs/vertebra-core/src/shm.rs
-    title: "C ABI capsule and shared-memory mapping ownership"
-  - id: src-py-arrow-cursor
-    resource: src/rs/vertebra-py/src/db.rs
-    title: "ArrowCursor capsule adoption and release"
+- id: src-vertebra-py-src-lib-rs
+  resource: src/rs/vertebra-py/src/lib.rs
+  title: Rust implementation module (src/rs/vertebra-py/src/lib.rs)
+- id: src-vertebra-py-src-transport-rs
+  resource: src/rs/vertebra-py/src/transport.rs
+  title: Rust implementation module (src/rs/vertebra-py/src/transport.rs)
+- id: src-vertebra-py-src-request-rs
+  resource: src/rs/vertebra-py/src/request.rs
+  title: Rust implementation module (src/rs/vertebra-py/src/request.rs)
+- id: src-vertebra-py-src-headers-rs
+  resource: src/rs/vertebra-py/src/headers.rs
+  title: Rust implementation module (src/rs/vertebra-py/src/headers.rs)
+- id: src-vertebra-py-src-response-rs
+  resource: src/rs/vertebra-py/src/response.rs
+  title: Rust implementation module (src/rs/vertebra-py/src/response.rs)
+- id: src-vertebra-py-src-msgspec-bridge-rs
+  resource: src/rs/vertebra-py/src/msgspec_bridge.rs
+  title: Rust implementation module (src/rs/vertebra-py/src/msgspec_bridge.rs)
+- id: src-vertebra-py-src-gcp-auth-rs
+  resource: src/rs/vertebra-py/src/gcp_auth.rs
+  title: Native GCP token cache and HTTP/2 post exports in vertebra._vertebra
+- id: src-vertebra-py-src-errors-rs
+  resource: src/rs/vertebra-py/src/errors.rs
+  title: Canonical DatabaseError and GoogleCloudError exception hierarchy
+- id: src-vertebra-py-src-vector-rs
+  resource: src/rs/vertebra-py/src/vector.rs
+  title: Zero-copy VectorView, VectorBatchView, VectorCache, and StaticEmbedderCore
+- id: src-vertebra-py-src-text-rs
+  resource: src/rs/vertebra-py/src/text.rs
+  title: Native text, identifier, humanize, and UUID/NanoID primitives
+- id: src-vertebra-pyi
+  resource: src/py/vertebra/_vertebra.pyi
+  title: Python implementation module (src/py/vertebra/_vertebra.pyi)
+- id: src-bundler-pyi
+  resource: src/py/vertebra/_bundler.pyi
+  title: Python implementation module (src/py/vertebra/_bundler.pyi)
+- id: src-storage-pyi
+  resource: src/py/vertebra/_storage.pyi
+  title: Python implementation module (src/py/vertebra/_storage.pyi)
+- id: src-bigquery-pyi
+  resource: src/py/vertebra/_bigquery.pyi
+  title: Python implementation module (src/py/vertebra/_bigquery.pyi)
+- id: src-spanner-pyi
+  resource: src/py/vertebra/_spanner.pyi
+  title: Python implementation module (src/py/vertebra/_spanner.pyi)
+- id: src-server-worker-py
+  resource: src/py/vertebra/server/worker.py
+  title: Python implementation module (src/py/vertebra/server/worker.py)
+- id: src-server-dispatch-py
+  resource: src/py/vertebra/server/_dispatch.py
+  title: Python implementation module (src/py/vertebra/server/_dispatch.py)
+- id: src-server-loops-py
+  resource: src/py/vertebra/server/_loops.py
+  title: Python implementation module (src/py/vertebra/server/_loops.py)
+- id: src-server-fastpath-py
+  resource: src/py/vertebra/server/_fastpath.py
+  title: Python implementation module (src/py/vertebra/server/_fastpath.py)
+- id: src-server-fastpath-core-py
+  resource: src/py/vertebra/server/_fastpath_core.py
+  title: FastPathProvider protocol and DirectPlan route bypass contracts
+- id: src-db-py-async
+  resource: src/rs/vertebra-db/src/py_async.rs
+  title: Per-extension completion queues and SHM capsule construction
+- id: src-core-shm-capsule
+  resource: src/rs/vertebra-core/src/shm.rs
+  title: C ABI capsule and shared-memory mapping ownership
+- id: src-py-arrow-cursor
+  resource: src/rs/vertebra-py/src/db.rs
+  title: ArrowCursor capsule adoption, dialers, and native DB exports
+- id: src-storage-native-completion
+  resource: src/rs/vertebra-storage/src/lib.rs::spawn_rust_task
+  title: Native storage completion and cancellation
+- id: src-storage-core-gcp
+  resource: src/rs/vertebra-core/src/gcp_auth.rs::GcpTokenCache
+  title: Canonical GCP token authority
+- id: src-storage-python-facade
+  resource: src/py/vertebra/storage/_store.py
+  title: Storage facade and shared cache handles
+- id: src-storage-codec-bridge
+  resource: src/py/vertebra/storage/_arrow.py::_CodecBridge
+  title: Caller-loop I/O and worker codec ownership
 ---
 
 # PyO3 FFI & Vectorized Batch Dispatch
@@ -89,6 +122,10 @@ sources:
   - `get_request_notify_fd()`, `clear_request_notification()`, `prepare_request_sleep()`, and `cancel_request_sleep()`: drive lost-wakeup-free Dekker `SeqCst` `eventfd`/pipe polling on both `RingPair` (`shm`) and single-consumer `BatchBridge` (`inprocess` when `consumer_count <= 1`).
   - `submit_response_raw(request_id, status, headers_raw, body)` and `submit_batch_raw(items)`: accept any contiguous buffer-protocol object (`bytes`, `bytearray`, `memoryview`, including `req.body_view`), write directly into the SHM response ring or `BatchBridge` inline without `py.detach` for payloads `<= 64 KiB`, and coalesce `notify_if_sleeping` to once per batch.
   - `submit_response(resp)`, `submit_results(responses)`, and `submit_raw_response(...)`: object and multi-frame `ResponseSlot` streaming submission helpers.
+- **Database, GCP auth, vector slab & native utility exports**:
+  - [`gcp_auth.rs`](../../../../../src/rs/vertebra-py/src/gcp_auth.rs)[^src-vertebra-py-src-gcp-auth-rs]: `SyncGcpTokenCache`, `AsyncGcpTokenCache`, `GcpTokenSnapshot`, `gcp_http2_post_sync` (wrapping `vertebra_core::gcp_auth::gcp_http2_post`), and `gcp_http2_post_async`.
+  - [`db.rs`](../../../../../src/rs/vertebra-py/src/db.rs)[^src-py-arrow-cursor] & [`errors.rs`](../../../../../src/rs/vertebra-py/src/errors.rs)[^src-vertebra-py-src-errors-rs]: `RustDbTaskAwaitable`, `TaskPanicError`, the canonical `DatabaseError` hierarchy (`InterfaceError`, `DataError`, `OperationalError`, `IntegrityError`, `InternalError`, `ProgrammingError`, `NotSupportedError`, `SerializationFailure`, `DeadlockDetected`, `QueryCanceled`, `GoogleCloudError`, `GoogleCloudAuthError`, `BigQueryError`, `BigQueryRowError`, `SpannerError`, `SpannerAbortedError`), `CloudSQLDialer` / `AlloyDBDialer` (`CloudSqlDialer` / `AlloyDbDialer`), `ArrowCursor`, and `LeaseBroker` / `StatementCache`.
+  - [`vector.rs`](../../../../../src/rs/vertebra-py/src/vector.rs)[^src-vertebra-py-src-vector-rs] & [`text.rs`](../../../../../src/rs/vertebra-py/src/text.rs)[^src-vertebra-py-src-text-rs]: `VectorView`, `VectorBatchView`, `VectorCache`, `StaticEmbedderCore`, `SimilarityMatch`, Gemini gRPC embedding frame codecs, and native text/identifier/humanize/UUID/NanoID primitives (`camelize`, `snake_case`, `slugify`, `validate_identifier`, `humanize`, `parse_bytes`, `parse_duration`, `uuid4_u128`, `uuid7_u128`, `nanoid_generate`).
 
 ## Snapshot-backed types & C-API zero-copy bridge (`request.rs`, `headers.rs`, `response.rs`, `msgspec_bridge.rs`)
 
@@ -106,7 +143,7 @@ sources:
 - [`compile_handler_table`](../../../../../src/py/vertebra/server/_dispatch.py)[^src-server-dispatch-py] inspects every registered route once at startup into a frozen [`HandlerSpec`](../../../../../src/py/vertebra/server/_dispatch.py) (`msgspec.Struct, frozen=True, gc=False, cache_hash=True`) carrying `(has_params, is_async, param_names, invoker, sync_to_thread)`. Route decorators (`@app.get(..., sync_to_thread=False)`) default `sync_to_thread` to `False`.
 - **Inline vectorized sync execution**: default synchronous native routes (`sync_to_thread=False`) run inline in the batch loop and flush together via a single `submit_batch_raw(raw_responses)` call (`0` `ThreadPoolExecutor` submissions and `0` `Future` allocations). Routes opting into `sync_to_thread=True` execute once on `ThreadPoolExecutor` without duplicate inline execution.
 - **Zero-copy buffer serialization, C-API `drive_native_batch` & async snapshot release**: `_serialize_result` accepts `bytes`, `bytearray`, and `memoryview` (`_RAW_BUFFER_TYPES`) directly so `return req.body_view` incurs zero payload copies, and encodes structured objects via `encode_json_bytes`. When an `async def` native handler has only synchronous guards and dependencies, `compile_handler_spec` compiles `_invoke_compiled_sync_to_coro` so parameter extraction executes synchronously and returns the handler's direct coroutine without an outer wrapper frame. On the worker event loop, `dispatch_batch` steps `partitioned.async_native` coroutines in C via `drive_native_batch` (`PyIter_Send`): coroutines returning on the first step (`PYGEN_RETURN`) serialize and flush immediately with **zero** `asyncio.Task` allocations, while suspending coroutines (`PYGEN_NEXT`) promote via `SteppedCoroutine` (`ProtocolFinalizer::Native`) after dropping the local `Request` reference so I/O waits never pin `Arc<BatchSnapshot>`.
-- **`O(1)` mount resolution & auto-attached `FastPath` stacking**: `vertebra-http` stamps mounted requests with `MOUNT_HANDLER_BASE | mount_idx` (`0xFFFF_0000_0000_0000 | idx`), allowing `Worker._process_batch` and `partition_batch` to index directly into `mounts[mount_idx]` in `O(1)` without decoding `req.path`. `_instantiate_mount_runners` calls [`attach_framework_fastpath`](../../../../../src/py/vertebra/server/_fastpath.py)[^src-server-fastpath-py] on every mounted `Litestar`, `FastAPI`, `Starlette`, `Flask`, or `Django` sub-application so stacked `app.mount("/prefix", sub_app)` trees automatically execute through each framework's C-API `FastPath` with `mount_prefix` / `root_path` stripping.
+- **`O(1)` mount resolution & `FastPathProvider` / `DirectPlan` stacking**: `vertebra-http` stamps mounted requests with `MOUNT_HANDLER_BASE | mount_idx` (`0xFFFF_0000_0000_0000 | idx`), allowing `Worker._process_batch` and `partition_batch` to index directly into `mounts[mount_idx]` in `O(1)` without decoding `req.path`. [`_fastpath_core.py`](../../../../../src/py/vertebra/server/_fastpath_core.py)[^src-server-fastpath-core-py] defines the neutral `FastPathProvider` protocol (`register_fastpath`, `try_fastpath`) and `DirectPlan` (`DirectSyncInvoker` / `DirectAsyncInvoker` route bypass plans with `match_and_extract`), and `_instantiate_mount_runners` calls [`attach_framework_fastpath`](../../../../../src/py/vertebra/server/_fastpath.py)[^src-server-fastpath-py] on every mounted `Litestar`, `FastAPI`, `Starlette`, `Flask`, or `Django` sub-application so stacked `app.mount("/prefix", sub_app)` trees execute through each framework's C-API `FastPath` with `mount_prefix` / `root_path` stripping.
 - **Unified `LoopBackend` (`auto`, `uvloop`, `winloop`, `rloop`, `asyncio`) & same-thread `add_reader` polling**: [`_loops.py`](../../../../../src/py/vertebra/server/_loops.py)[^src-server-loops-py] exposes `LoopBackend(StrEnum)` and `resolve_loop_backend`, selecting `uvloop` (`>=0.23.0`) on POSIX, `winloop` (`>=0.8.1`) on Windows, opt-in `rloop` (`>=0.5.0`), or stdlib `asyncio` via `create_event_loop` without deprecated `asyncio.AbstractEventLoopPolicy` APIs, and honoring `--loop` / `VERTEBRA_LOOP` and `GilAuditReport` `quarantined_modules`. When `loop_shards == 1` and a request notify FD is active, `Worker._run_inline_event_loop` registers `loop.add_reader(notify_fd, ...)` with Dekker `prepare_request_sleep()` / `cancel_request_sleep()` so polling and coroutine execution share one OS thread with **zero** cross-thread `call_soon_threadsafe` wakeups.
 
 ## Database extension boundary
@@ -116,6 +153,27 @@ sources:
 Each extension attaches its own completion drainer to the running event loop through `spawn_rust_db_task_with_attr`. Distinct attribute names keep the separately linked completion queues and PyO3 classes independent when several engines use one loop. Python future cancellation invokes the worker's Tokio abort handle, and the completion path maps worker panics to `TaskPanicError`.[^src-db-py-async]
 
 Arrow-producing extensions use an unregistered SHM region and pass a named `vertebra.ShmCapsule` to the core `ArrowCursor._from_shm_capsule`. The capsule carries a data pointer, length, atomic ownership context, and producer-owned release callbacks. The core cursor validates the capsule and atomically claims its context once; its backing invokes the producer callback when the last owner drops. This keeps the Arrow data in place across extension boundaries.[^src-core-shm-capsule][^src-py-arrow-cursor]
+
+## Storage extension and codec boundary
+
+`vertebra._storage` owns its `RustTaskAwaitable` and per-loop completion queue. Python future cancellation aborts the Tokio worker; worker panics become the canonical `TaskPanicError`. The notifier-backed path drains on the caller loop without attaching Python on Tokio threads. When a reader FD cannot be registered, `RustCompletionRing::signal_fallback` attaches Python to schedule `call_soon_threadsafe` on that loop.[^src-storage-native-completion]
+
+GCP token authority remains `vertebra_core::gcp_auth::GcpTokenCache`, exposed by the canonical `_vertebra` cache classes and re-exported by the Python storage facade. Sync/async conversions share the underlying cache and engine handles; the storage extension supplies the refreshing credential provider rather than a second Python token-cache type.[^src-storage-core-gcp][^src-storage-python-facade]
+
+```mermaid
+flowchart LR
+    CoreCache[Core GCP cache] --> CacheBinding[Canonical _vertebra binding]
+    CacheBinding --> Facade[Python storage facade]
+    Facade --> Native[Native _storage]
+    Native --> Backend[ObjectStoreEngine backend]
+    Facade --> Codec[Codec bridge]
+    Codec --> Pool[SyncPool codec steps]
+    Pool -->|I/O callbacks| Loop[Caller event loop]
+    Loop --> Native
+    Native -->|completion| Loop
+```
+
+PyArrow remains synchronous inside per-demand pool operations; its callbacks schedule native asynchronous I/O on the original loop. The bridge owns both the pool future and loop tasks until cancellation cleanup finishes. The [utility pattern](../../patterns/python/serialization-and-utils.md#storage-codec-callbacks) defines the lifetime rule.[^src-storage-codec-bridge]
 
 See [ADR-004](../../decisions/adr-004-optional-driver-wheels-and-shm-ownership.md) for the packaging and ownership trade-offs.
 
@@ -127,6 +185,10 @@ Provenance sources: [^src-vertebra-py-src-transport-rs].
 [^src-vertebra-py-src-headers-rs]: `src/rs/vertebra-py/src/headers.rs` — Rust implementation module (src/rs/vertebra-py/src/headers.rs).
 [^src-vertebra-py-src-response-rs]: `src/rs/vertebra-py/src/response.rs` — Rust implementation module (src/rs/vertebra-py/src/response.rs).
 [^src-vertebra-py-src-msgspec-bridge-rs]: `src/rs/vertebra-py/src/msgspec_bridge.rs` — Rust implementation module (src/rs/vertebra-py/src/msgspec_bridge.rs).
+[^src-vertebra-py-src-gcp-auth-rs]: `src/rs/vertebra-py/src/gcp_auth.rs` — Native GCP token cache and HTTP/2 post exports in vertebra._vertebra.
+[^src-vertebra-py-src-errors-rs]: `src/rs/vertebra-py/src/errors.rs` — Canonical DatabaseError and GoogleCloudError exception hierarchy.
+[^src-vertebra-py-src-vector-rs]: `src/rs/vertebra-py/src/vector.rs` — Zero-copy VectorView, VectorBatchView, VectorCache, and StaticEmbedderCore.
+[^src-vertebra-py-src-text-rs]: `src/rs/vertebra-py/src/text.rs` — Native text, identifier, humanize, and UUID/NanoID primitives.
 [^src-vertebra-pyi]: `src/py/vertebra/_vertebra.pyi` — Python implementation module (src/py/vertebra/_vertebra.pyi).
 [^src-bundler-pyi]: `src/py/vertebra/_bundler.pyi` — Python implementation module (src/py/vertebra/_bundler.pyi).
 [^src-storage-pyi]: `src/py/vertebra/_storage.pyi` — Python implementation module (src/py/vertebra/_storage.pyi).
@@ -136,9 +198,15 @@ Provenance sources: [^src-vertebra-py-src-transport-rs].
 [^src-server-dispatch-py]: `src/py/vertebra/server/_dispatch.py` — Python implementation module (src/py/vertebra/server/_dispatch.py).
 [^src-server-loops-py]: `src/py/vertebra/server/_loops.py` — Python implementation module (src/py/vertebra/server/_loops.py).
 [^src-server-fastpath-py]: `src/py/vertebra/server/_fastpath.py` — Python implementation module (src/py/vertebra/server/_fastpath.py).
-
+[^src-server-fastpath-core-py]: `src/py/vertebra/server/_fastpath_core.py` — FastPathProvider protocol and DirectPlan route bypass contracts.
 [^src-db-py-async]: `src/rs/vertebra-db/src/py_async.rs` — Per-extension completion queues and SHM capsule construction.
-
 [^src-core-shm-capsule]: `src/rs/vertebra-core/src/shm.rs` — C ABI capsule and shared-memory mapping ownership.
+[^src-py-arrow-cursor]: `src/rs/vertebra-py/src/db.rs` — ArrowCursor capsule adoption, dialers, and native DB exports.
 
-[^src-py-arrow-cursor]: `src/rs/vertebra-py/src/db.rs` — ArrowCursor capsule adoption and release.
+[^src-storage-native-completion]: `src/rs/vertebra-storage/src/lib.rs::spawn_rust_task` — Native storage completion and cancellation.
+
+[^src-storage-core-gcp]: `src/rs/vertebra-core/src/gcp_auth.rs::GcpTokenCache` — Canonical GCP token authority.
+
+[^src-storage-python-facade]: `src/py/vertebra/storage/_store.py` — Storage facade and shared cache handles.
+
+[^src-storage-codec-bridge]: `src/py/vertebra/storage/_arrow.py::_CodecBridge` — Caller-loop I/O and worker codec ownership.

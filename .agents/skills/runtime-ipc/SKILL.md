@@ -51,5 +51,5 @@ Implementation guide for Rust lock-free shared-memory ring buffers (`SpscRing`, 
 
 ```bash
 cargo test --manifest-path src/rs/Cargo.toml -p vertebra-core -p vertebra-storage -p vertebra-db
-cargo clippy --manifest-path src/rs/Cargo.toml --workspace --all-targets -- -D warnings
+cargo clippy --manifest-path src/rs/Cargo.toml --workspace --all-targets --features tls,compression,gcp -- -D warnings
 ```

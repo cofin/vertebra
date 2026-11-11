@@ -4,11 +4,11 @@ description: Use when implementing or debugging the @vertebra/client TypeScript 
 ---
 
 <!-- truth: start -->
-- **Package**: `src/ts/vertebra-client` (`@vertebra/client` v0.2.0, zero runtime dependencies, `sideEffects: false`, pure ESM + `.d.ts` via `tsup`).
-- **Entrypoints**: Root `src/index.ts` exports `HttpClient`, `SseClient`, `WebSocketClient`, `SessionStore`, `LiveStateClient`, `routeUrl`, `registerWebMCPTools`, `ArrowStreamClient`, `WASMClient`, `ApexRegion`, and `McpClient`/`A2aClient`; 16 subpath exports cover `./react`, `./vue`, `./svelte`, `./angular`, `./htmx`, `./vite`, `./store`, `./hmr`, `./live`, `./apex`, `./telemetry`, `./wasm`, `./arrow`, `./router`, `./webmcp`, and `./agent` (`TS-01`, `TS-02`).
+- **Package**: `src/ts/vertebra-client` (`@vertebra/client` v0.3.0, zero runtime dependencies, `sideEffects: false`, pure ESM + `.d.ts` via `tsup`).
+- **Entrypoints**: Root `src/index.ts` exports `HttpClient`, `SseClient`, `WebSocketClient`, `SessionStore`, `LiveStateClient`, `routeUrl`, `registerWebMCPTools` (`WebMCPRegistrationHandle` over `document.modelContext ?? navigator.modelContext`), `ArrowStreamClient`, `WASMClient`, `ApexRegion`, `McpClient`/`A2aClient`, and typed client errors (`ClientError`, `NetworkError`, `TimeoutError`, `ServerError`, `ValidationError`); 16 subpath exports cover `./react`, `./vue`, `./svelte`, `./angular`, `./htmx`, `./vite`, `./store`, `./hmr`, `./live`, `./apex`, `./telemetry`, `./wasm`, `./arrow`, `./router`, `./webmcp`, and `./agent` (`TS-01`, `TS-02`).
 - **Strictness**: `strict: true` and `noUncheckedIndexedAccess: true` in `tsconfig.json`; validate external JSON payloads before narrowing (`TS-03`).
 - **Resilience**: Realtime transports (`WebSocketClient`, `SseClient`) enforce exponential backoff with random jitter (`computeBackoffDelay`) and clean up listeners on `dispose()`/`AbortSignal` (`TS-04`, `TS-05`).
-- **Wheel Sync**: `@vertebra/client` ships inside the `vertebra-core` Python wheel under `src/py/vertebra/server/_js/bundle/` and is served over `/__vertebra/client/*` via `.vertebra/importmap.json` (`TS-07`).
+- **Wheel Sync**: `@vertebra/client` ships inside the `vertebra-core` Python wheel under `src/py/vertebra/server/_js/bundle/` and is served over `/__vertebra/client/*` via `.vertebra/import_map.json` configured from `[tool.vertebra.js]` (`TS-07`).
 - **Verify**: `cd src/ts/vertebra-client && bunx biome check . && bun run test && bun run build`
 <!-- truth: end -->
 

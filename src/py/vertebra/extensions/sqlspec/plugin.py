@@ -24,7 +24,7 @@ from vertebra.extensions.sqlspec.proxy import (
     ProxyAsyncSessionContext,
     ProxySyncSessionContext,
 )
-from vertebra.extensions.sqlspec.storage import ObjectStoreBackend
+from vertebra.extensions.sqlspec.storage import register_storage_alias
 from vertebra.storage import AsyncObjectStore, SyncObjectStore
 from vertebra.typing import MissingDependencyError
 
@@ -380,7 +380,7 @@ def create_sqlspec_plugin(
     """Create a real sqlspec.extensions.litestar.SQLSpecPlugin instance with registered configs."""
     _ = kwargs
     if store is not None:
-        ObjectStoreBackend.register_alias(storage_alias, store, base_path=storage_base_path)
+        register_storage_alias(storage_alias, store, base_path=storage_base_path)
     sqlspec_instance = SQLSpec(
         loader=loader,
         observability_config=observability_config,

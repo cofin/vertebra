@@ -2364,7 +2364,7 @@ class SpannerSyncADKArtifactStore:
             existing = self.list_artifacts(session_id, artifact_key=artifact_key)
             version = (max((int(r["version"]) for r in existing), default=0)) + 1
         object_key = f"{self._prefix}/{session_id}/{artifact_key}/v{version}"
-        self._storage.store.put(object_key, data)
+        self._storage.sync_store.put(object_key, data)
         uri = f"{self._storage.store_uri.rstrip('/')}/{object_key}"
         now = datetime.now(UTC).isoformat()
         self._driver.apply_mutations(
@@ -2399,7 +2399,7 @@ class SpannerSyncADKArtifactStore:
         if meta is None:
             return None
         object_key = f"{self._prefix}/{session_id}/{artifact_key}/v{meta['version']}"
-        payload = self._storage.store.get(object_key)
+        payload = self._storage.sync_store.get(object_key)
         meta["data"] = payload
         meta["object_ref"] = self.get_artifact_ref(session_id, artifact_key, version=int(meta["version"]))
         return meta
@@ -2459,7 +2459,7 @@ class SpannerSyncADKArtifactStore:
         for v in versions:
             object_key = f"{self._prefix}/{session_id}/{artifact_key}/v{v['version']}"
             with suppress(Exception):
-                self._storage.store.delete(object_key)
+                self._storage.sync_store.delete(object_key)
         affected = self._driver.execute(
             f"DELETE FROM {self._artifacts_table} WHERE session_id = @session_id AND artifact_key = @artifact_key",
             {"session_id": session_id, "artifact_key": artifact_key},

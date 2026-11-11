@@ -1,28 +1,24 @@
 ---
 type: Task
-id: native-postgres-driver:t90
-title: Open and close dedicated native PostgreSQL event sessions from drivers
+id: "native-postgres-driver:t90"
+title: "Open and close dedicated native PostgreSQL event sessions from drivers"
+description: "Open and close dedicated native PostgreSQL event sessions from drivers for the standalone vertebra-postgres native driver."
+status: stable
 state: pending
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
-- native-postgres-driver:t89
+  - "native-postgres-driver:t89"
 files:
-- src/py/vertebra/db/adapters/postgres/_sync.py
-- src/py/vertebra/db/adapters/postgres/_async.py
-- src/py/vertebra/db/adapters/postgres/config.py
-- src/py/vertebra/db/adapters/postgres/events.py
-- src/py/tests/unit/db/test_postgres_event_hooks.py
+  - src/py/vertebra/db/adapters/postgres/_sync.py
+  - src/py/vertebra/db/adapters/postgres/_async.py
+  - src/py/vertebra/db/adapters/postgres/config.py
+  - src/py/vertebra/db/adapters/postgres/events.py
+  - src/py/tests/unit/db/test_postgres_event_hooks.py
 tests:
-- src/py/tests/unit/db/test_postgres_event_hooks.py
-- src/py/tests/unit/db/test_postgres_event_hooks.py::test_native_notification_publish_modes
-requirements:
-- R21
-- R22
-- R23
-- R24
+  - src/py/tests/unit/db/test_postgres_event_hooks.py
 plan_revision: 2
-plan_commit: "7657e8b7c2c96bdda6821aec70a2b603f438a127"
+plan_commit: 9af810f5
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -32,13 +28,13 @@ next_step: null
 last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
-created_at: '2026-11-05T00:00:00Z'
-updated_at: '2026-11-06T06:30:00Z'
+created_at: "2026-11-05T00:00:00Z"
+updated_at: "2026-11-07T04:15:00Z"
 commit: null
 tags:
-- postgres
-- events
-- lifecycle
+  - postgres
+  - events
+  - lifecycle
 ---
 
 # Open and close dedicated native PostgreSQL event sessions from drivers

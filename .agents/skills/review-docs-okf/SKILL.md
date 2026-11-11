@@ -37,6 +37,8 @@ description: Use when reviewing OKF v0.2 knowledge chapters, bounded truth block
 
 ## Suppressions Index
 
+Shared catalog: [`false-positive-suppressions.md`](../review-core/references/false-positive-suppressions.md).
+
 - `FP-DOC-01`: KaTeX mathematical notation
 
 ## Focused Commands

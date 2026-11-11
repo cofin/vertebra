@@ -1,24 +1,24 @@
 ---
 type: Task
-id: native-postgres-driver:t72
-title: Expose async notification handles and reconnect gaps
+id: "native-postgres-driver:t72"
+title: "Expose async notification handles and reconnect gaps"
+description: "Expose async notification handles and reconnect gaps for the standalone vertebra-postgres native driver."
+status: stable
 state: pending
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
-- native-postgres-driver:t71
+  - "native-postgres-driver:t71"
 files:
-- src/rs/vertebra-postgres/src/notifications.rs
-- src/rs/vertebra-postgres/src/sync_client.rs
-- src/rs/vertebra-postgres/src/async_client.rs
-- src/py/vertebra/_postgres.pyi
-- src/py/tests/unit/db/test_postgres_native_notifications.py
+  - src/rs/vertebra-postgres/src/notifications.rs
+  - src/rs/vertebra-postgres/src/sync_client.rs
+  - src/rs/vertebra-postgres/src/async_client.rs
+  - src/py/vertebra/_postgres.pyi
+  - src/py/tests/unit/db/test_postgres_native_notifications.py
 tests:
-- src/py/tests/unit/db/test_postgres_native_notifications.py::test_native_listener_idle_delivery
-- src/py/tests/unit/db/test_postgres_native_notifications.py::test_native_listener_reconnect_marks_gap
-- src/py/tests/unit/db/test_postgres_native_notifications.py::test_native_listener_closed_state
+  - src/py/tests/unit/db/test_postgres_native_notifications.py
 plan_revision: 2
-plan_commit: "7657e8b7c2c96bdda6821aec70a2b603f438a127"
+plan_commit: 9af810f5
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -28,15 +28,13 @@ next_step: null
 last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
-created_at: '2026-11-05T18:25:07Z'
-updated_at: '2026-11-06T06:30:00Z'
+created_at: "2026-11-05T18:25:07Z"
+updated_at: "2026-11-07T04:15:00Z"
 commit: null
 tags:
-- postgres
-- native
-- data-events
-requirements:
-- R21
+  - postgres
+  - native
+  - data-events
 ---
 
 # Expose async notification handles and reconnect gaps

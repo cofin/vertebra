@@ -12,7 +12,6 @@ from pathlib import Path
 
 import pytest
 
-import vertebra.storage as storage
 from vertebra.storage import (
     AsyncObjectStore,
     AzureConfig,
@@ -27,7 +26,7 @@ from vertebra.storage import (
     SyncObjectStore,
     SyncReadableFile,
 )
-from vertebra.utils.serializers import encode_json_bytes
+from vertebra.utils.serializers import decode_json, encode_json_bytes
 
 
 def test_storage_provider_configs_to_url_and_options(tmp_path: Path) -> None:
@@ -86,22 +85,13 @@ def test_storage_provider_configs_to_url_and_options(tmp_path: Path) -> None:
     http_cfg = HTTPConfig(url="https://cdn.example.com/files", headers={"X-Token": "abc"})
     http_url, http_opts = http_cfg.to_url_and_options()
     assert http_url == "https://cdn.example.com/files"
-    assert http_opts == {"X-Token": "abc"}
+    assert list(http_opts) == ["headers"]
+    assert decode_json(http_opts["headers"]) == {"X-Token": "abc"}
 
     mem_cfg = MemoryConfig(namespace="unit")
     mem_url, mem_opts = mem_cfg.to_url_and_options()
     assert mem_url == "memory://"
     assert mem_opts == {"namespace": "unit"}
-
-
-def test_duplicated_storage_facades_and_trackers_removed() -> None:
-    """Duplicated SyncStore, AsyncStore, UploadTracker, StagedUpload, and StorageRegistry are deleted."""
-    assert not hasattr(storage, "SyncStore")
-    assert not hasattr(storage, "AsyncStore")
-    assert not hasattr(storage, "UploadTracker")
-    assert not hasattr(storage, "StagedUpload")
-    assert not hasattr(storage, "StorageRegistry")
-    assert not hasattr(storage, "get_default_storage_registry")
 
 
 def test_gcs_emulator_env_and_service_account_identity(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -215,7 +205,7 @@ def test_gcs_adc_authorized_user_and_impersonation_flow(
         assert _MockAdcAndIamHandler.seen_headers[1].get("authorization") == "Bearer mock-source-adc-token"
 
         _, opts = cfg.to_url_and_options()
-        assert opts["access_token"] == "mock-impersonated-sa-token"
+        assert "access_token" not in opts
         assert opts["target_service_account"] == "lake-reader@analytics-proj.iam.gserviceaccount.com"
     finally:
         server.shutdown()
@@ -356,3 +346,35 @@ async def test_async_object_store_roundtrip_and_buffer_safety() -> None:
     assert await store.get("empty.bin") == b""
     await store.put("hello.bin", bytearray(b"hello-async"))
     assert await store.get("hello.bin") == b"hello-async"
+
+
+@pytest.mark.parametrize("backend_kind", ["local", "memory"])
+@pytest.mark.anyio
+async def test_multibackend_streaming_conditional_and_rename(
+    backend_kind: str,
+    tmp_path: Path,
+) -> None:
+    """LocalConfig and MemoryConfig stores support streaming, conditional writes, pagination, and rename."""
+    cfg: LocalConfig | MemoryConfig = (
+        LocalConfig(root=tmp_path / "bucket")
+        if backend_kind == "local"
+        else MemoryConfig(namespace="multibackend-stream")
+    )
+    store = AsyncObjectStore(cfg)
+
+    await store.put_stream(
+        "datasets/part-000.bin",
+        [b"row-0\n", b"row-1\n", b"row-2\n"],
+        if_not_exists=True,
+    )
+    with pytest.raises(FileExistsError):
+        await store.put("datasets/part-000.bin", b"overwrite", if_not_exists=True)
+
+    streamed = b"".join([bytes(buf) async for buf in store.get_stream("datasets/part-000.bin", chunk_size=6)])
+    assert streamed == b"row-0\nrow-1\nrow-2\n"
+
+    await store.rename("datasets/part-000.bin", "datasets/committed-000.bin", overwrite=False)
+    assert not await store.exists("datasets/part-000.bin")
+    items, next_cursor = await store.list_page("datasets/", limit=10)
+    assert [item.path for item in items] == ["datasets/committed-000.bin"]
+    assert next_cursor is None

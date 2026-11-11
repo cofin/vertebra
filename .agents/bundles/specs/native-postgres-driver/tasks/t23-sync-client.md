@@ -1,23 +1,24 @@
 ---
 type: Task
-id: native-postgres-driver:t23
-title: Expose physical synchronous native PostgreSQL sessions
+id: "native-postgres-driver:t23"
+title: "Expose physical synchronous native PostgreSQL sessions"
+description: "Expose physical synchronous native PostgreSQL sessions for the standalone vertebra-postgres native driver."
+status: stable
 state: pending
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
-- native-postgres-driver:t22
+  - "native-postgres-driver:t22"
 files:
-- src/rs/vertebra-postgres/src/lib.rs
-- src/rs/vertebra-postgres/src/errors.rs
-- src/rs/vertebra-postgres/src/sync_client.rs
-- src/py/vertebra/_postgres.pyi
-- src/py/tests/unit/db/test_postgres_driver.py
+  - src/rs/vertebra-postgres/src/lib.rs
+  - src/rs/vertebra-postgres/src/errors.rs
+  - src/rs/vertebra-postgres/src/sync_client.rs
+  - src/py/vertebra/_postgres.pyi
+  - src/py/tests/unit/db/test_postgres_driver.py
 tests:
-- src/py/tests/unit/db/test_postgres_driver.py::test_native_sync_lifecycle
-- src/py/tests/unit/db/test_postgres_driver.py::test_native_sync_detaches
+  - src/py/tests/unit/db/test_postgres_driver.py
 plan_revision: 2
-plan_commit: "7657e8b7c2c96bdda6821aec70a2b603f438a127"
+plan_commit: 9af810f5
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -27,15 +28,13 @@ next_step: null
 last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
-created_at: '2026-11-05T18:25:07Z'
-updated_at: '2026-11-06T06:30:00Z'
+created_at: "2026-11-05T18:25:07Z"
+updated_at: "2026-11-07T04:15:00Z"
 commit: null
 tags:
-- postgres
-- connection
-- native
-requirements:
-- R6
+  - postgres
+  - connection
+  - native
 ---
 
 # Expose physical synchronous native PostgreSQL sessions

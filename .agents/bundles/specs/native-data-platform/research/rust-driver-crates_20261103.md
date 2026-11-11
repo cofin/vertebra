@@ -1,27 +1,61 @@
 ---
 type: Research
 flow_id: native-data-platform
-title: Rust driver crate selection per engine
-description: Primary-source comparison of Rust client crates for Postgres, MySQL, Oracle, MSSQL, SQLite, DuckDB, Redis/Valkey, and Google Cloud, with per-engine PyO3 wheel packaging and the gaps Vertebra fills itself.
+title: "Rust driver crate selection per engine"
+description: "Primary-source comparison of Rust client crates for Postgres, MySQL, Oracle, MSSQL, SQLite, DuckDB, Redis/Valkey, and Google Cloud, with per-engine PyO3 wheel packaging."
 status: stable
 state: promoted
 promoted_to: native-data-platform
-created_at: 2026-11-03T04:25:00Z
-updated_at: 2026-11-04T01:05:00Z
-tags: [research, rust, crates, drivers]
+created_at: "2026-11-03T04:25:00Z"
+updated_at: "2026-11-07T04:15:00Z"
+generated:
+  by: flow-setup
+  at: "2026-11-07T04:15:00Z"
+verified:
+  - by: agent:flow-setup
+    at: "2026-11-07T04:15:00Z"
+    commit: 9af810f5
 sources:
-  - resource: https://crates.io/api/v1/crates
-  - resource: https://github.com/rust-postgres/rust-postgres
-  - resource: https://github.com/oracle/rust-oracledb
-  - resource: https://docs.rs/oracledb/latest/oracledb/guide/index.html
-  - resource: https://github.com/microsoft/mssql-rs
-  - resource: https://github.com/prisma/tiberius
-  - resource: https://github.com/duckdb/duckdb-rs
-  - resource: https://github.com/redis-rs/redis-rs
-  - resource: https://github.com/googleapis/google-cloud-rust
+  - id: crates-io
+    resource: https://crates.io/api/v1/crates
+    title: crates.io package metadata and version API
+  - id: rust-postgres
+    resource: https://github.com/rust-postgres/rust-postgres
+    title: postgres-protocol 0.6.12 and tokio-postgres 0.7.18 upstream repository
+  - id: rust-oracledb
+    resource: https://github.com/oracle/rust-oracledb
+    title: Official Oracle pure-Rust thin client repository
+  - id: oracledb-docs
+    resource: https://docs.rs/oracledb/latest/oracledb/guide/index.html
+    title: oracledb crate guide and supported feature matrix
+  - id: mssql-rs
+    resource: https://github.com/microsoft/mssql-rs
+    title: Microsoft experimental mssql-tds Rust repository
+  - id: tiberius
+    resource: https://github.com/prisma/tiberius
+    title: tiberius 0.13.0 TDS 7.3/8.0 Rust client
+  - id: duckdb-rs
+    resource: https://github.com/duckdb/duckdb-rs
+    title: Official DuckDB Rust bindings with bundled engine and Arrow 60
+  - id: redis-rs
+    resource: https://github.com/redis-rs/redis-rs
+    title: redis 1.8.1 Tokio + rustls RESP3 client
+  - id: gcp-rust
+    resource: https://github.com/googleapis/google-cloud-rust
+    title: Official Google Cloud Rust SDK workspace
+tags:
+  - research
+  - rust
+  - crates
+  - drivers
 ---
 
 # Rust Driver Crate Selection
+
+<!-- truth: start -->
+- **Per-Engine Wheel Isolation**: Every database engine ships in an optional `src/rs/vertebra-<engine>` (`vertebra._<engine>`) wheel standardized on `rustls` + `ring`, isolating heavy C++ (`duckdb`) and divergent `arrow` (`59` vs `60`) trees behind `VTBARROW` IPC v5 shared memory [^crates-io] [^duckdb-rs].
+- **Selected Upstream Crates**: `postgres-protocol` `0.6.12` (+ `tokio-postgres` dev oracle) [^rust-postgres], `oracledb =26.0.0-beta.5` [^rust-oracledb] [^oracledb-docs], `mysql_async` `0.37.1`, `tiberius` `0.13.0` (over OpenSSL-locked `mssql-tds`) [^mssql-rs] [^tiberius], `rusqlite` `0.41.1`, `duckdb` `1.20000.1` [^duckdb-rs], `redis` `1.8.1` [^redis-rs], and `google-cloud-{spanner,bigquery}` [^gcp-rust].
+<!-- truth: end -->
 
 Survey date: 2026-11-03 (packaging & naming updated 2026-11-04). Popularity uses crates.io 90-day `recent_downloads`; GitHub stars were not collected. Workspace baseline: tokio 1.54, rustls 0.23 with `ring`, hyper 1, sha2 0.10.
 
@@ -112,3 +146,13 @@ User decision (2026-11-04): build on the official or best-in-class client for ea
 4. **Duplicate crypto stacks.** Spanner defaults to aws-lc-rs, mssql-tds forces OpenSSL, oracledb uses sha2 0.11 against the workspace's 0.10, and tiberius defaults to native-tls. Disable default features everywhere and standardize on rustls + ring.
 5. **Maintenance.** fred is stale, mssql-tds is closed to PRs, oracledb is beta, and mysql_async has a single maintainer.
 6. **No primary-source cross-crate benchmarks.** `make bench-check` decides each adoption.
+
+[^crates-io]: crates.io package metadata and version API (https://crates.io/api/v1/crates).
+[^rust-postgres]: postgres-protocol 0.6.12 and tokio-postgres 0.7.18 upstream repository (https://github.com/rust-postgres/rust-postgres).
+[^rust-oracledb]: Official Oracle pure-Rust thin client repository (https://github.com/oracle/rust-oracledb).
+[^oracledb-docs]: oracledb crate guide and supported feature matrix (https://docs.rs/oracledb/latest/oracledb/guide/index.html).
+[^mssql-rs]: Microsoft experimental mssql-tds Rust repository (https://github.com/microsoft/mssql-rs).
+[^tiberius]: tiberius 0.13.0 TDS 7.3/8.0 Rust client (https://github.com/prisma/tiberius).
+[^duckdb-rs]: Official DuckDB Rust bindings with bundled engine and Arrow 60 (https://github.com/duckdb/duckdb-rs).
+[^redis-rs]: redis 1.8.1 Tokio + rustls RESP3 client (https://github.com/redis-rs/redis-rs).
+[^gcp-rust]: Official Google Cloud Rust SDK workspace (https://github.com/googleapis/google-cloud-rust).

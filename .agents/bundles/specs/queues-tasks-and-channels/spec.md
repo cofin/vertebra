@@ -1,9 +1,11 @@
 ---
 type: Spec
 flow_id: queues-tasks-and-channels
-title: Native Queues, Tasks, Channels, and Stores
-description: Build native Vertebra QueueStore backends for PostgreSQL and Oracle on the standalone Rust driver wheels, plug them into first-party QueueService, litestar-queues, and Django tasks with settings-driven selection and DI, unify cron parsing, provide distributed Litestar/Starlette channel backends, and consolidate ValkeyStore.
+title: "Native Queues, Tasks, Channels, and Stores"
+description: "Build native Vertebra QueueStore backends for PostgreSQL and Oracle on the standalone Rust driver wheels, plug them into first-party QueueService, litestar-queues, and Django tasks with settings-driven selection and DI, unify cron parsing, provide distributed Litestar/Starlette channel backends, and consolidate ValkeyStore."
+status: draft
 state: draft
+has_chapters: false
 parent_prd: integration-remediation
 research:
   - ../integration-remediation/research/audit-findings_20261103.md
@@ -12,12 +14,42 @@ plan_commit: null
 state_revision: 0
 current_task: null
 last_verified_checkpoint: null
-created_at: 2026-11-03T03:30:00Z
-updated_at: 2026-11-04T01:19:00Z
-tags: [queues, tasks, django, litestar, channels, stores, di]
+created_at: "2026-11-03T03:30:00Z"
+updated_at: "2026-11-07T04:15:00Z"
+generated:
+  by: flow-setup
+  at: "2026-11-07T04:15:00Z"
+verified:
+  - by: agent:flow-setup
+    at: "2026-11-07T04:15:00Z"
+    commit: 9af810f5
+sources:
+  - id: queue-service
+    resource: src/py/vertebra/framework/queues/base.py::QueueService
+    title: First-party QueueService backend registry and cron scheduling
+  - id: litestar-queues
+    resource: src/py/vertebra/extensions/litestar/queues/__init__.py
+    title: litestar-queues extension integration
+  - id: litestar-channels
+    resource: src/py/vertebra/extensions/litestar/channels.py
+    title: Litestar pub/sub channels integration
+tags:
+  - queues
+  - tasks
+  - django
+  - litestar
+  - channels
+  - stores
+  - di
 ---
 
 # Flow Charter: Native Queues, Tasks, Channels, and Stores
+
+<!-- truth: start -->
+- **Durable Native `QueueStore` Backends**: `PostgresQueueStore` (`vertebra-postgres`) and `OracleQueueStore` (`vertebra-oracle`) implement `FOR UPDATE SKIP LOCKED` leases, fenced completions, retries, DLQ transitions, and `NotificationSource` wakeups, deleting fake in-memory engine queue modules [^queue-service].
+- **Framework Task & DI Integration**: `QueueService`, `litestar-queues` (`PostgresQueueBackend`, `OracleQueueBackend`), and Django `django.tasks` resolve handler dependencies through `framework/di.py::Container` [^litestar-queues].
+- **Distributed Channels & `ValkeyStore`**: Litestar and Starlette `ChannelsBackend`s run on `NotificationSource` without `swap_channels_backend` monkeypatching, and `ValkeyStore` consolidates onto `vertebra._redis` [^litestar-channels].
+<!-- truth: end -->
 
 ## Charter
 
@@ -71,3 +103,7 @@ Spanner and Redis/Valkey native `QueueStore` backends (deferred to PRD backlog).
 - t06 Django `django.tasks` backend, worker management command, and per-task DI scope.
 - t07 Distributed Litestar/Starlette `ChannelsBackend`s over `NotificationSource` + `swap_channels_backend` removal.
 - t08 `ValkeyStore` consolidation + docs & OKF update.
+
+[^queue-service]: `src/py/vertebra/framework/queues/base.py::QueueService` — First-party QueueService backend registry and cron scheduling.
+[^litestar-queues]: `src/py/vertebra/extensions/litestar/queues/__init__.py` — litestar-queues extension integration.
+[^litestar-channels]: `src/py/vertebra/extensions/litestar/channels.py` — Litestar pub/sub channels integration.

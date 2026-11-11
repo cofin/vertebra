@@ -1,23 +1,21 @@
 ---
 type: Task
-id: native-postgres-driver:t82
-title: Preserve change-source replay identity and shutdown semantics
+id: "native-postgres-driver:t82"
+title: "Preserve change-source replay identity and shutdown semantics"
+description: "Preserve change-source replay identity and shutdown semantics for the standalone vertebra-postgres native driver."
+status: stable
 state: pending
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
-- native-postgres-driver:t81
+  - "native-postgres-driver:t81"
 files:
-- src/py/vertebra/db/adapters/postgres/change_stream.py
-- src/py/tests/unit/db/test_postgres_change_source.py
+  - src/py/vertebra/db/adapters/postgres/change_stream.py
+  - src/py/tests/unit/db/test_postgres_change_source.py
 tests:
-- src/py/tests/unit/db/test_postgres_change_source.py::test_change_source_replays_after_saved_ack_failure
-- src/py/tests/unit/db/test_postgres_change_source.py::test_change_source_reloads_save_cancel_after_commit
-- src/py/tests/unit/db/test_postgres_change_source.py::test_change_source_crash_reload_preserves_ids
-- src/py/tests/unit/db/test_postgres_change_source.py::test_change_source_old_generation_never_yields
-- src/py/tests/unit/db/test_postgres_change_source.py::test_change_source_close_joins_ack
+  - src/py/tests/unit/db/test_postgres_change_source.py
 plan_revision: 2
-plan_commit: "7657e8b7c2c96bdda6821aec70a2b603f438a127"
+plan_commit: 9af810f5
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -27,16 +25,13 @@ next_step: null
 last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
-created_at: '2026-11-05T18:25:07Z'
-updated_at: '2026-11-06T06:30:00Z'
+created_at: "2026-11-05T18:25:07Z"
+updated_at: "2026-11-07T04:15:00Z"
 commit: null
 tags:
-- postgres
-- native
-- data-events
-requirements:
-- R22
-- R23
+  - postgres
+  - native
+  - data-events
 ---
 
 # Preserve change-source replay identity and shutdown semantics

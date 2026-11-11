@@ -1,9 +1,11 @@
 ---
 type: Spec
 flow_id: native-redis-driver
-title: Standalone Rust Redis and Valkey Wheel (vertebra-redis)
-description: Standalone PyO3 crate src/rs/vertebra-redis (vertebra._redis for vertebra-core[redis] and vertebra-core[valkey]) with Tokio + rustls RESP3 client, pipelining, streams, Sentinel, Cluster CRC16 routing, CLIENT TRACKING invalidation, and pub/sub NotificationSource, removing Python raw sockets and memory:// mode.
+title: "Standalone Rust Redis and Valkey Wheel (vertebra-redis)"
+description: "Standalone PyO3 crate src/rs/vertebra-redis (vertebra._redis for vertebra-core[redis] and vertebra-core[valkey]) with Tokio + rustls RESP3 client, pipelining, streams, Sentinel, Cluster CRC16 routing, CLIENT TRACKING invalidation, and pub/sub NotificationSource, removing Python raw sockets and memory:// mode."
+status: draft
 state: draft
+has_chapters: false
 parent_prd: native-data-platform
 research:
   - ../native-data-platform/research/rust-driver-crates_20261103.md
@@ -13,12 +15,41 @@ plan_commit: null
 state_revision: 0
 current_task: null
 last_verified_checkpoint: null
-created_at: 2026-11-03T04:05:00Z
-updated_at: "2026-11-06T06:30:00Z"
-tags: [rust, redis, valkey, resp3, driver, wheel]
+created_at: "2026-11-03T04:05:00Z"
+updated_at: "2026-11-07T04:15:00Z"
+generated:
+  by: flow-setup
+  at: "2026-11-07T04:15:00Z"
+verified:
+  - by: agent:flow-setup
+    at: "2026-11-07T04:15:00Z"
+    commit: 9af810f5
+sources:
+  - id: redis-py
+    resource: src/py/vertebra/db/adapters/redis/driver.py
+    title: Python SyncRedisDriver and AsyncRedisDriver target cutover module
+  - id: valkey-py
+    resource: src/py/vertebra/db/adapters/valkey/driver.py
+    title: Python SyncValkeyDriver and AsyncValkeyDriver re-exporting vertebra._redis
+  - id: py-async-rs
+    resource: src/rs/vertebra-db/src/py_async.rs
+    title: Shared AsyncCompletionQueue + Notifier PyO3 bridge
+tags:
+  - rust
+  - redis
+  - valkey
+  - resp3
+  - driver
+  - wheel
 ---
 
 # Flow Charter: Standalone Rust Redis and Valkey Wheel (`vertebra-redis`)
+
+<!-- truth: start -->
+- **Shared Redis & Valkey Rust Wheel**: `src/rs/vertebra-redis` (`vertebra._redis`, `vertebra-core[redis]` and `vertebra-core[valkey]`) builds on `redis 1.8.1` (`tokio-rustls-comp`, `cluster-async`, `cache-aio`) [^redis-py] [^valkey-py].
+- **RESP3 Pipelining, Cluster & Pub/Sub**: `SyncRedisClient` and `AsyncRedisClient` provide `HELLO 3`, multiplexed pipelining, `SCAN`+`UNLINK`, Sentinel, Cluster `MOVED`/`ASK` routing, `CLIENT TRACKING` invalidations, and `SyncRedisNotificationSource` / `AsyncRedisNotificationSource` [^py-async-rs].
+- **Socket & `memory://` Removal**: Python raw socket / RESP parsers and `memory://` schemes are deleted from `redis` and `valkey` adapters [^redis-py].
+<!-- truth: end -->
 
 ## Approach
 
@@ -58,3 +89,7 @@ See [crate research](../native-data-platform/research/rust-driver-crates_2026110
 - t02 Redis/Valkey pub/sub `SyncRedisNotificationSource` / `AsyncRedisNotificationSource` and streams (`XADD`/`XREADGROUP`/`XACK`).
 - t03 Sentinel discovery, Cluster CRC16 slot routing (`MOVED`/`ASK`), and RESP3 `CLIENT TRACKING` invalidation push handling.
 - t04 Python `SyncRedisDriver`/`AsyncRedisDriver` & `SyncValkeyDriver`/`AsyncValkeyDriver` cutover, Python socket/RESP parser + `memory://` removal, integration conformance, and docs/OKF update.
+
+[^redis-py]: `src/py/vertebra/db/adapters/redis/driver.py` — Python SyncRedisDriver and AsyncRedisDriver target cutover module.
+[^valkey-py]: `src/py/vertebra/db/adapters/valkey/driver.py` — Python SyncValkeyDriver and AsyncValkeyDriver re-exporting vertebra._redis.
+[^py-async-rs]: `src/rs/vertebra-db/src/py_async.rs` — Shared AsyncCompletionQueue + Notifier PyO3 bridge.

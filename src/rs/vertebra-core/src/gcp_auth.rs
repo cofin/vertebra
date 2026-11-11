@@ -1,6 +1,7 @@
 //! Pure-Rust Google Cloud Application Default Credentials (ADC) token cache and RS256 JWT signer.
 
 use std::collections::HashMap;
+use std::ffi::{CStr, c_void};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
@@ -12,6 +13,8 @@ use serde::{Deserialize, Serialize};
 pub const DEFAULT_REFRESH_SKEW_MS: u64 = 300_000;
 pub const DEFAULT_GCP_SCOPES: &[&str] = &["https://www.googleapis.com/auth/cloud-platform"];
 pub const GCLOUD_CLI_TIMEOUT: Duration = Duration::from_secs(30);
+pub const GCP_TOKEN_CACHE_CAPSULE_NAME: &CStr = c"vertebra.GcpTokenCacheCapsule";
+pub const GCP_TOKEN_CACHE_ABI_VERSION: u32 = 1;
 const DEFAULT_TOKEN_TTL_MS: u64 = 3_600_000;
 const DEFAULT_OAUTH_TOKEN_URI: &str = "https://oauth2.googleapis.com/token";
 const DEFAULT_IAM_ENDPOINT: &str = "https://iamcredentials.googleapis.com";
@@ -765,6 +768,35 @@ impl GcpTokenCache {
         }
     }
 
+    pub fn quota_project_id(&self) -> Option<&str> {
+        Self::source_quota_project_id(&self.source)
+    }
+
+    fn source_quota_project_id(source: &GcpAuthSource) -> Option<&str> {
+        match source {
+            GcpAuthSource::Static {
+                quota_project_id, ..
+            }
+            | GcpAuthSource::AuthorizedUser {
+                quota_project_id, ..
+            }
+            | GcpAuthSource::MetadataServer {
+                quota_project_id, ..
+            }
+            | GcpAuthSource::GcloudCli {
+                quota_project_id, ..
+            } => quota_project_id.as_deref(),
+            GcpAuthSource::ServiceAccount { key, .. } => key.quota_project_id.as_deref(),
+            GcpAuthSource::ImpersonatedServiceAccount {
+                base,
+                quota_project_id,
+                ..
+            } => quota_project_id
+                .as_deref()
+                .or_else(|| Self::source_quota_project_id(base)),
+        }
+    }
+
     pub fn sign_jwt_for_audience(&self, audience: &str) -> Result<String, String> {
         let key = self.service_account_key().ok_or_else(|| {
             "sign_jwt_for_audience requires ServiceAccount credentials".to_string()
@@ -1164,4 +1196,816 @@ pub async fn gcp_http2_post(
         .await
         .map_err(|e| format!("failed to read GCP HTTP/2 response body from `{url}`: {e}"))?;
     Ok((status, out_headers, body_bytes.to_vec()))
+}
+
+pub type GcpCachedTokenVisitFn = unsafe extern "C" fn(
+    out_ctx: *mut c_void,
+    token_ptr: *const u8,
+    token_len: usize,
+    expires_at_unix_ms: u64,
+    generation: u64,
+    qp_ptr: *const u8,
+    qp_len: usize,
+);
+
+pub type GcpRefreshCompleteFn = unsafe extern "C" fn(
+    out_ctx: *mut c_void,
+    ok: bool,
+    ptr: *const u8,
+    len: usize,
+    expires_at_unix_ms: u64,
+    generation: u64,
+    qp_ptr: *const u8,
+    qp_len: usize,
+);
+
+pub type GcpRefreshAsyncFn = unsafe extern "C" fn(
+    ctx: *const c_void,
+    force_refresh: bool,
+    out_ctx: *mut c_void,
+    complete_cb: GcpRefreshCompleteFn,
+);
+
+pub type GcpServiceAccountVisitFn = unsafe extern "C" fn(
+    out_ctx: *mut c_void,
+    email_ptr: *const u8,
+    email_len: usize,
+    pem_ptr: *const u8,
+    pem_len: usize,
+    token_uri_ptr: *const u8,
+    token_uri_len: usize,
+    proj_ptr: *const u8,
+    proj_len: usize,
+    qp_ptr: *const u8,
+    qp_len: usize,
+);
+
+pub type GcpQuotaProjectVisitFn =
+    unsafe extern "C" fn(out_ctx: *mut c_void, qp_ptr: *const u8, qp_len: usize);
+
+/// C-ABI vtable capsule sharing a refcounted [`GcpTokenCache`] across PyO3 `cdylib` extensions.
+#[repr(C)]
+#[derive(Debug)]
+pub struct GcpTokenCacheCapsule {
+    pub abi_version: u32,
+    pub ctx: *const c_void,
+    pub clone_ctx_fn: unsafe extern "C" fn(*const c_void) -> *const c_void,
+    pub drop_ctx_fn: unsafe extern "C" fn(*const c_void),
+    pub generation_fn: unsafe extern "C" fn(*const c_void) -> u64,
+    pub invalidate_fn: unsafe extern "C" fn(*const c_void, u64),
+    pub try_cached_fn:
+        unsafe extern "C" fn(*const c_void, u64, *mut c_void, GcpCachedTokenVisitFn) -> bool,
+    pub refresh_async_fn: GcpRefreshAsyncFn,
+    pub service_account_key_fn:
+        unsafe extern "C" fn(*const c_void, *mut c_void, GcpServiceAccountVisitFn) -> bool,
+    pub quota_project_id_fn:
+        unsafe extern "C" fn(*const c_void, *mut c_void, GcpQuotaProjectVisitFn) -> bool,
+}
+
+// SAFETY: `GcpTokenCacheCapsule` wraps an atomically refcounted `Arc<GcpTokenCache>` (`Send + Sync`)
+// and pure C-ABI function pointers with no thread-local affinity.
+unsafe impl Send for GcpTokenCacheCapsule {}
+// SAFETY: Concurrent shared access only invokes thread-safe `GcpTokenCache` methods via `ctx`.
+unsafe impl Sync for GcpTokenCacheCapsule {}
+
+unsafe extern "C" fn capsule_clone_ctx(ctx: *const c_void) -> *const c_void {
+    if ctx.is_null() {
+        return std::ptr::null();
+    }
+    // SAFETY: `ctx` was produced via `Arc::into_raw` on a live `Arc<GcpTokenCache>`; incrementing
+    // the strong count creates a new owned raw pointer reference to the same allocation.
+    unsafe {
+        Arc::increment_strong_count(ctx.cast::<GcpTokenCache>());
+    }
+    ctx
+}
+
+unsafe extern "C" fn capsule_drop_ctx(ctx: *const c_void) {
+    if !ctx.is_null() {
+        // SAFETY: `ctx` is an owned raw reference created by `Arc::into_raw` or `capsule_clone_ctx`,
+        // surrendered once by `Drop`.
+        unsafe {
+            drop(Arc::from_raw(ctx.cast::<GcpTokenCache>()));
+        }
+    }
+}
+
+unsafe extern "C" fn capsule_generation(ctx: *const c_void) -> u64 {
+    if ctx.is_null() {
+        return 0;
+    }
+    // SAFETY: `ctx` points to a live `GcpTokenCache` kept alive by the caller's owned reference.
+    let cache = unsafe { &*(ctx.cast::<GcpTokenCache>()) };
+    cache.generation()
+}
+
+unsafe extern "C" fn capsule_invalidate(ctx: *const c_void, failed_generation: u64) {
+    if ctx.is_null() {
+        return;
+    }
+    // SAFETY: `ctx` points to a live `GcpTokenCache` kept alive by the caller's owned reference.
+    let cache = unsafe { &*(ctx.cast::<GcpTokenCache>()) };
+    cache.invalidate(failed_generation);
+}
+
+unsafe extern "C" fn capsule_try_cached(
+    ctx: *const c_void,
+    now_unix_ms: u64,
+    out_ctx: *mut c_void,
+    visit_cb: GcpCachedTokenVisitFn,
+) -> bool {
+    if ctx.is_null() {
+        return false;
+    }
+    // SAFETY: `ctx` points to a live `GcpTokenCache` kept alive by the caller's owned reference.
+    let cache = unsafe { &*(ctx.cast::<GcpTokenCache>()) };
+    let Some(snap) = cache.get_cached(now_unix_ms) else {
+        return false;
+    };
+    let (qp_ptr, qp_len) = match snap.quota_project_id.as_deref() {
+        Some(qp) => (qp.as_ptr(), qp.len()),
+        None => (std::ptr::null(), 0),
+    };
+    // SAFETY: All byte pointers borrow `snap` synchronously for the duration of `visit_cb`.
+    unsafe {
+        visit_cb(
+            out_ctx,
+            snap.access_token.as_ptr(),
+            snap.access_token.len(),
+            snap.expires_at_unix_ms,
+            snap.generation,
+            qp_ptr,
+            qp_len,
+        );
+    }
+    true
+}
+
+unsafe extern "C" fn capsule_service_account_key(
+    ctx: *const c_void,
+    out_ctx: *mut c_void,
+    visit_cb: GcpServiceAccountVisitFn,
+) -> bool {
+    if ctx.is_null() {
+        return false;
+    }
+    // SAFETY: `ctx` points to a live `GcpTokenCache` kept alive by the caller's owned reference.
+    let cache = unsafe { &*(ctx.cast::<GcpTokenCache>()) };
+    let Some(key) = cache.service_account_key() else {
+        return false;
+    };
+    let (proj_ptr, proj_len) = match key.project_id.as_deref() {
+        Some(p) => (p.as_ptr(), p.len()),
+        None => (std::ptr::null(), 0),
+    };
+    let (qp_ptr, qp_len) = match key.quota_project_id.as_deref() {
+        Some(qp) => (qp.as_ptr(), qp.len()),
+        None => (std::ptr::null(), 0),
+    };
+    // SAFETY: All byte slices borrow `key` synchronously for the duration of `visit_cb`.
+    unsafe {
+        visit_cb(
+            out_ctx,
+            key.client_email.as_ptr(),
+            key.client_email.len(),
+            key.private_key_pem.as_ptr(),
+            key.private_key_pem.len(),
+            key.token_uri.as_ptr(),
+            key.token_uri.len(),
+            proj_ptr,
+            proj_len,
+            qp_ptr,
+            qp_len,
+        );
+    }
+    true
+}
+
+unsafe extern "C" fn capsule_quota_project_id(
+    ctx: *const c_void,
+    out_ctx: *mut c_void,
+    visit_cb: GcpQuotaProjectVisitFn,
+) -> bool {
+    if ctx.is_null() {
+        return false;
+    }
+    // SAFETY: `ctx` points to a live `GcpTokenCache` kept alive by the caller's owned reference.
+    let cache = unsafe { &*(ctx.cast::<GcpTokenCache>()) };
+    let Some(qp) = cache.quota_project_id() else {
+        return false;
+    };
+    // SAFETY: `qp` borrows `cache` synchronously for the duration of `visit_cb`.
+    unsafe {
+        visit_cb(out_ctx, qp.as_ptr(), qp.len());
+    }
+    true
+}
+
+/// Helper invoked by a producing extension's `refresh_async_fn` implementation to clone the
+/// underlying [`Arc<GcpTokenCache>`] and forward completion across the C-ABI callback boundary.
+///
+/// # Safety
+/// `ctx` must be a live `GcpTokenCache` raw `Arc` pointer created by [`GcpTokenCacheCapsule::new`],
+/// and `complete_cb(out_ctx, ...)` must be safe to call exactly once from any thread.
+pub unsafe fn invoke_capsule_refresh_on_runtime(
+    runtime: &tokio::runtime::Handle,
+    ctx: *const c_void,
+    force_refresh: bool,
+    out_ctx: *mut c_void,
+    complete_cb: GcpRefreshCompleteFn,
+) {
+    struct SendPtr(*mut c_void);
+    // SAFETY: `out_ctx` points to a heap-allocated `tokio::sync::oneshot::Sender` owned exclusively
+    // by this single callback invocation (`Send`).
+    unsafe impl Send for SendPtr {}
+
+    if ctx.is_null() {
+        let msg = b"null GcpTokenCacheCapsule context";
+        // SAFETY: `complete_cb` is invoked once with valid UTF-8 error bytes.
+        unsafe {
+            complete_cb(
+                out_ctx,
+                false,
+                msg.as_ptr(),
+                msg.len(),
+                0,
+                0,
+                std::ptr::null(),
+                0,
+            );
+        }
+        return;
+    }
+
+    // SAFETY: `ctx` points to a live `Arc<GcpTokenCache>`; incrementing the strong count before
+    // `Arc::from_raw` produces an independent `Arc` for the spawned async task.
+    let cache = unsafe {
+        Arc::increment_strong_count(ctx.cast::<GcpTokenCache>());
+        Arc::from_raw(ctx.cast::<GcpTokenCache>())
+    };
+    let send_out = SendPtr(out_ctx);
+    runtime.spawn(async move {
+        let out_ptr = send_out;
+        match cache.get_or_refresh_with_force(force_refresh).await {
+            Ok(snap) => {
+                let (qp_ptr, qp_len) = match snap.quota_project_id.as_deref() {
+                    Some(qp) => (qp.as_ptr(), qp.len()),
+                    None => (std::ptr::null(), 0),
+                };
+                // SAFETY: `snap` stays alive across `complete_cb`, and `out_ptr.0` is consumed once.
+                unsafe {
+                    complete_cb(
+                        out_ptr.0,
+                        true,
+                        snap.access_token.as_ptr(),
+                        snap.access_token.len(),
+                        snap.expires_at_unix_ms,
+                        snap.generation,
+                        qp_ptr,
+                        qp_len,
+                    );
+                }
+            }
+            Err(err) => {
+                // SAFETY: `err` stays alive across `complete_cb`, and `out_ptr.0` is consumed once.
+                unsafe {
+                    complete_cb(
+                        out_ptr.0,
+                        false,
+                        err.as_ptr(),
+                        err.len(),
+                        0,
+                        0,
+                        std::ptr::null(),
+                        0,
+                    );
+                }
+            }
+        }
+    });
+}
+
+impl GcpTokenCacheCapsule {
+    pub fn new(cache: Arc<GcpTokenCache>, refresh_async_fn: GcpRefreshAsyncFn) -> Self {
+        Self {
+            abi_version: GCP_TOKEN_CACHE_ABI_VERSION,
+            ctx: Arc::into_raw(cache).cast::<c_void>(),
+            clone_ctx_fn: capsule_clone_ctx,
+            drop_ctx_fn: capsule_drop_ctx,
+            generation_fn: capsule_generation,
+            invalidate_fn: capsule_invalidate,
+            try_cached_fn: capsule_try_cached,
+            refresh_async_fn,
+            service_account_key_fn: capsule_service_account_key,
+            quota_project_id_fn: capsule_quota_project_id,
+        }
+    }
+}
+
+impl Drop for GcpTokenCacheCapsule {
+    fn drop(&mut self) {
+        if !self.ctx.is_null() {
+            let ptr = self.ctx;
+            self.ctx = std::ptr::null();
+            // SAFETY: `self` owns one refcounted reference in `ptr`, released once on drop.
+            unsafe {
+                (self.drop_ctx_fn)(ptr);
+            }
+        }
+    }
+}
+
+struct ForeignCapsuleHandle {
+    ctx: *const c_void,
+    clone_ctx_fn: unsafe extern "C" fn(*const c_void) -> *const c_void,
+    drop_ctx_fn: unsafe extern "C" fn(*const c_void),
+    generation_fn: unsafe extern "C" fn(*const c_void) -> u64,
+    invalidate_fn: unsafe extern "C" fn(*const c_void, u64),
+    try_cached_fn:
+        unsafe extern "C" fn(*const c_void, u64, *mut c_void, GcpCachedTokenVisitFn) -> bool,
+    refresh_async_fn: GcpRefreshAsyncFn,
+    service_account_key_fn:
+        unsafe extern "C" fn(*const c_void, *mut c_void, GcpServiceAccountVisitFn) -> bool,
+    quota_project_id_fn:
+        unsafe extern "C" fn(*const c_void, *mut c_void, GcpQuotaProjectVisitFn) -> bool,
+}
+
+// SAFETY: `ForeignCapsuleHandle` holds an atomically refcounted foreign `GcpTokenCache` pointer
+// (`Send + Sync`) and pure C-ABI vtable functions.
+unsafe impl Send for ForeignCapsuleHandle {}
+// SAFETY: Every vtable method synchronizes access internally via atomics, `RwLock`, or Tokio `Mutex`.
+unsafe impl Sync for ForeignCapsuleHandle {}
+
+impl Clone for ForeignCapsuleHandle {
+    fn clone(&self) -> Self {
+        // SAFETY: `self.ctx` is a live owned reference; `clone_ctx_fn` increments the underlying
+        // `Arc` strong count and returns an independent owned pointer.
+        let cloned_ctx = unsafe { (self.clone_ctx_fn)(self.ctx) };
+        Self {
+            ctx: cloned_ctx,
+            clone_ctx_fn: self.clone_ctx_fn,
+            drop_ctx_fn: self.drop_ctx_fn,
+            generation_fn: self.generation_fn,
+            invalidate_fn: self.invalidate_fn,
+            try_cached_fn: self.try_cached_fn,
+            refresh_async_fn: self.refresh_async_fn,
+            service_account_key_fn: self.service_account_key_fn,
+            quota_project_id_fn: self.quota_project_id_fn,
+        }
+    }
+}
+
+impl Drop for ForeignCapsuleHandle {
+    fn drop(&mut self) {
+        if !self.ctx.is_null() {
+            let ptr = self.ctx;
+            self.ctx = std::ptr::null();
+            // SAFETY: `self` owns one refcounted reference in `ptr`, released once on drop.
+            unsafe {
+                (self.drop_ctx_fn)(ptr);
+            }
+        }
+    }
+}
+
+#[derive(Clone)]
+enum CacheHandleRepr {
+    Local(Arc<GcpTokenCache>),
+    Foreign(ForeignCapsuleHandle),
+}
+
+/// Safe, clonable handle to either a crate-local [`GcpTokenCache`] or a foreign C-ABI [`GcpTokenCacheCapsule`].
+#[derive(Clone)]
+pub struct SharedGcpTokenCacheHandle {
+    repr: CacheHandleRepr,
+}
+
+impl std::fmt::Debug for SharedGcpTokenCacheHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SharedGcpTokenCacheHandle")
+            .field("generation", &self.generation())
+            .finish()
+    }
+}
+
+unsafe fn utf8_string_from_raw(ptr: *const u8, len: usize) -> String {
+    if ptr.is_null() || len == 0 {
+        return String::new();
+    }
+    // SAFETY: Caller guarantees `ptr` is valid for `len` initialized bytes for the duration of this copy.
+    let bytes = unsafe { std::slice::from_raw_parts(ptr, len) };
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
+unsafe fn opt_utf8_string_from_raw(ptr: *const u8, len: usize) -> Option<String> {
+    if ptr.is_null() {
+        None
+    } else {
+        // SAFETY: Non-null `ptr` with `len` bytes was derived from a valid `Option<&str>` slice.
+        Some(unsafe { utf8_string_from_raw(ptr, len) })
+    }
+}
+
+unsafe extern "C" fn receive_cached_snapshot(
+    out_ctx: *mut c_void,
+    token_ptr: *const u8,
+    token_len: usize,
+    expires_at_unix_ms: u64,
+    generation: u64,
+    qp_ptr: *const u8,
+    qp_len: usize,
+) {
+    // SAFETY: `out_ctx` points to a stack-allocated `Option<Arc<GcpTokenSnapshot>>` in `get_cached`,
+    // and all byte pointers borrow the producer's `GcpTokenSnapshot` during this synchronous call.
+    unsafe {
+        let slot = &mut *(out_ctx.cast::<Option<Arc<GcpTokenSnapshot>>>());
+        *slot = Some(Arc::new(GcpTokenSnapshot {
+            access_token: utf8_string_from_raw(token_ptr, token_len),
+            expires_at_unix_ms,
+            generation,
+            quota_project_id: opt_utf8_string_from_raw(qp_ptr, qp_len),
+        }));
+    }
+}
+
+unsafe extern "C" fn receive_refresh_result(
+    out_ctx: *mut c_void,
+    ok: bool,
+    ptr: *const u8,
+    len: usize,
+    expires_at_unix_ms: u64,
+    generation: u64,
+    qp_ptr: *const u8,
+    qp_len: usize,
+) {
+    if out_ctx.is_null() {
+        return;
+    }
+    // SAFETY: `out_ctx` was created via `Box::into_raw` on a `tokio::sync::oneshot::Sender` and is
+    // reclaimed at most once when `refresh_async_fn` invokes this completion callback.
+    let tx = unsafe {
+        Box::from_raw(
+            out_ctx.cast::<tokio::sync::oneshot::Sender<Result<Arc<GcpTokenSnapshot>, String>>>(),
+        )
+    };
+    let outcome = if ok {
+        // SAFETY: Byte slices borrow the refreshed `GcpTokenSnapshot` during this callback.
+        let snap = unsafe {
+            Arc::new(GcpTokenSnapshot {
+                access_token: utf8_string_from_raw(ptr, len),
+                expires_at_unix_ms,
+                generation,
+                quota_project_id: opt_utf8_string_from_raw(qp_ptr, qp_len),
+            })
+        };
+        Ok(snap)
+    } else {
+        // SAFETY: `ptr`/`len` borrow the UTF-8 error message during this callback.
+        Err(unsafe { utf8_string_from_raw(ptr, len) })
+    };
+    let _ = tx.send(outcome);
+}
+
+unsafe extern "C" fn receive_service_account_key(
+    out_ctx: *mut c_void,
+    email_ptr: *const u8,
+    email_len: usize,
+    pem_ptr: *const u8,
+    pem_len: usize,
+    token_uri_ptr: *const u8,
+    token_uri_len: usize,
+    proj_ptr: *const u8,
+    proj_len: usize,
+    qp_ptr: *const u8,
+    qp_len: usize,
+) {
+    // SAFETY: `out_ctx` points to a stack-allocated `Option<ServiceAccountKey>` and all byte pointers
+    // borrow the producer's `ServiceAccountKey` for the duration of this synchronous call.
+    unsafe {
+        let slot = &mut *(out_ctx.cast::<Option<ServiceAccountKey>>());
+        *slot = Some(ServiceAccountKey {
+            client_email: utf8_string_from_raw(email_ptr, email_len),
+            private_key_pem: utf8_string_from_raw(pem_ptr, pem_len),
+            token_uri: utf8_string_from_raw(token_uri_ptr, token_uri_len),
+            project_id: opt_utf8_string_from_raw(proj_ptr, proj_len),
+            quota_project_id: opt_utf8_string_from_raw(qp_ptr, qp_len),
+        });
+    }
+}
+
+unsafe extern "C" fn receive_quota_project_id(
+    out_ctx: *mut c_void,
+    qp_ptr: *const u8,
+    qp_len: usize,
+) {
+    // SAFETY: `out_ctx` points to a stack-allocated `Option<String>` and `qp_ptr` is valid for `qp_len` bytes.
+    unsafe {
+        let slot = &mut *(out_ctx.cast::<Option<String>>());
+        *slot = Some(utf8_string_from_raw(qp_ptr, qp_len));
+    }
+}
+
+impl SharedGcpTokenCacheHandle {
+    pub fn from_arc(cache: Arc<GcpTokenCache>) -> Self {
+        Self {
+            repr: CacheHandleRepr::Local(cache),
+        }
+    }
+
+    /// Construct an owned [`SharedGcpTokenCacheHandle`] by cloning the refcounted context inside a
+    /// validated C-ABI [`GcpTokenCacheCapsule`].
+    ///
+    /// # Safety
+    /// When non-null, `capsule_ptr` must point to a valid, aligned [`GcpTokenCacheCapsule`] whose
+    /// `abi_version` and C-ABI vtable pointers were initialized by [`GcpTokenCacheCapsule::new`].
+    pub unsafe fn from_capsule_ptr(
+        capsule_ptr: *const GcpTokenCacheCapsule,
+    ) -> Result<Self, String> {
+        if capsule_ptr.is_null() {
+            return Err("invalid or incompatible GcpTokenCacheCapsule".to_string());
+        }
+        // SAFETY: Caller verified the PyCapsule name matches `GCP_TOKEN_CACHE_CAPSULE_NAME`, so
+        // `capsule_ptr` points to an initialized `#[repr(C)] GcpTokenCacheCapsule`.
+        let capsule = unsafe { &*capsule_ptr };
+        if capsule.abi_version != GCP_TOKEN_CACHE_ABI_VERSION || capsule.ctx.is_null() {
+            return Err("invalid or incompatible GcpTokenCacheCapsule".to_string());
+        }
+        // SAFETY: `capsule.ctx` is a live owned pointer; `clone_ctx_fn` increments its refcount.
+        let cloned_ctx = unsafe { (capsule.clone_ctx_fn)(capsule.ctx) };
+        if cloned_ctx.is_null() {
+            return Err("invalid or incompatible GcpTokenCacheCapsule".to_string());
+        }
+        Ok(Self {
+            repr: CacheHandleRepr::Foreign(ForeignCapsuleHandle {
+                ctx: cloned_ctx,
+                clone_ctx_fn: capsule.clone_ctx_fn,
+                drop_ctx_fn: capsule.drop_ctx_fn,
+                generation_fn: capsule.generation_fn,
+                invalidate_fn: capsule.invalidate_fn,
+                try_cached_fn: capsule.try_cached_fn,
+                refresh_async_fn: capsule.refresh_async_fn,
+                service_account_key_fn: capsule.service_account_key_fn,
+                quota_project_id_fn: capsule.quota_project_id_fn,
+            }),
+        })
+    }
+
+    pub fn get_cached(&self, now_unix_ms: u64) -> Option<Arc<GcpTokenSnapshot>> {
+        match &self.repr {
+            CacheHandleRepr::Local(cache) => cache.get_cached(now_unix_ms),
+            CacheHandleRepr::Foreign(foreign) => {
+                let mut out: Option<Arc<GcpTokenSnapshot>> = None;
+                // SAFETY: `foreign.ctx` is live and `&mut out` is valid for synchronous `receive_cached_snapshot`.
+                let hit = unsafe {
+                    (foreign.try_cached_fn)(
+                        foreign.ctx,
+                        now_unix_ms,
+                        (&raw mut out).cast::<c_void>(),
+                        receive_cached_snapshot,
+                    )
+                };
+                if hit { out } else { None }
+            }
+        }
+    }
+
+    pub async fn get_or_refresh(&self) -> Result<Arc<GcpTokenSnapshot>, String> {
+        self.get_or_refresh_with_force(false).await
+    }
+
+    pub async fn get_or_refresh_with_force(
+        &self,
+        force_refresh: bool,
+    ) -> Result<Arc<GcpTokenSnapshot>, String> {
+        if !force_refresh && let Some(snap) = self.get_cached(current_unix_ms()) {
+            return Ok(snap);
+        }
+        match &self.repr {
+            CacheHandleRepr::Local(cache) => cache.get_or_refresh_with_force(force_refresh).await,
+            CacheHandleRepr::Foreign(foreign) => {
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                let out_ctx = Box::into_raw(Box::new(tx)).cast::<c_void>();
+                // SAFETY: `foreign.ctx` is live and `out_ctx` transfers ownership of `oneshot::Sender`
+                // to `receive_refresh_result`, which reclaims it once upon task completion.
+                unsafe {
+                    (foreign.refresh_async_fn)(
+                        foreign.ctx,
+                        force_refresh,
+                        out_ctx,
+                        receive_refresh_result,
+                    );
+                }
+                rx.await.map_err(|_| {
+                    "GCP token cache refresh task cancelled before completion".to_string()
+                })?
+            }
+        }
+    }
+
+    pub fn generation(&self) -> u64 {
+        match &self.repr {
+            CacheHandleRepr::Local(cache) => cache.generation(),
+            CacheHandleRepr::Foreign(foreign) => {
+                // SAFETY: `foreign.ctx` is a live owned reference.
+                unsafe { (foreign.generation_fn)(foreign.ctx) }
+            }
+        }
+    }
+
+    pub fn invalidate(&self, failed_generation: u64) {
+        match &self.repr {
+            CacheHandleRepr::Local(cache) => cache.invalidate(failed_generation),
+            CacheHandleRepr::Foreign(foreign) => {
+                // SAFETY: `foreign.ctx` is a live owned reference.
+                unsafe { (foreign.invalidate_fn)(foreign.ctx, failed_generation) }
+            }
+        }
+    }
+
+    pub fn service_account_key(&self) -> Option<ServiceAccountKey> {
+        match &self.repr {
+            CacheHandleRepr::Local(cache) => cache.service_account_key().cloned(),
+            CacheHandleRepr::Foreign(foreign) => {
+                let mut out: Option<ServiceAccountKey> = None;
+                // SAFETY: `foreign.ctx` is live and `&mut out` is valid during synchronous `receive_service_account_key`.
+                let ok = unsafe {
+                    (foreign.service_account_key_fn)(
+                        foreign.ctx,
+                        (&raw mut out).cast::<c_void>(),
+                        receive_service_account_key,
+                    )
+                };
+                if ok { out } else { None }
+            }
+        }
+    }
+
+    pub fn quota_project_id(&self) -> Option<String> {
+        match &self.repr {
+            CacheHandleRepr::Local(cache) => cache.quota_project_id().map(str::to_string),
+            CacheHandleRepr::Foreign(foreign) => {
+                let mut out: Option<String> = None;
+                // SAFETY: `foreign.ctx` is live and `&mut out` is valid during synchronous `receive_quota_project_id`.
+                let ok = unsafe {
+                    (foreign.quota_project_id_fn)(
+                        foreign.ctx,
+                        (&raw mut out).cast::<c_void>(),
+                        receive_quota_project_id,
+                    )
+                };
+                if ok { out } else { None }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    #[tokio::test]
+    async fn capsule_handle_warm_refresh_invalidate_and_post_drop_lifetime() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let server_calls = Arc::clone(&calls);
+
+        let server = tokio::spawn(async move {
+            for idx in 1..=2usize {
+                let (mut socket, _) = listener.accept().await.expect("accept");
+                let mut buf = vec![0u8; 4096];
+                let _ = socket.read(&mut buf).await.expect("read");
+                server_calls.fetch_add(1, Ordering::SeqCst);
+                let body = format!(
+                    "{{\"access_token\":\"tok-{idx}\",\"expires_in\":3600,\"token_type\":\"Bearer\"}}"
+                );
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                socket.write_all(resp.as_bytes()).await.expect("write");
+            }
+        });
+
+        let cache = Arc::new(GcpTokenCache::new(
+            GcpAuthSource::AuthorizedUser {
+                client_id: "cid".to_string(),
+                client_secret: "csec".to_string(),
+                refresh_token: "rtok".to_string(),
+                quota_project_id: Some("qp-123".to_string()),
+                token_uri: format!("http://{addr}/token"),
+            },
+            DEFAULT_REFRESH_SKEW_MS,
+        ));
+
+        unsafe extern "C" fn test_refresh_async(
+            ctx: *const c_void,
+            force_refresh: bool,
+            out_ctx: *mut c_void,
+            complete_cb: GcpRefreshCompleteFn,
+        ) {
+            let rt = tokio::runtime::Handle::current();
+            // SAFETY: `ctx` and `complete_cb` originate from `GcpTokenCacheCapsule::new` / `SharedGcpTokenCacheHandle`.
+            unsafe {
+                invoke_capsule_refresh_on_runtime(&rt, ctx, force_refresh, out_ctx, complete_cb);
+            }
+        }
+
+        let capsule = GcpTokenCacheCapsule::new(Arc::clone(&cache), test_refresh_async);
+        // SAFETY: `&capsule` is a live `#[repr(C)] GcpTokenCacheCapsule`.
+        let handle = unsafe { SharedGcpTokenCacheHandle::from_capsule_ptr(&raw const capsule) }
+            .expect("valid capsule");
+        drop(capsule);
+        drop(cache);
+
+        let cloned_handle = handle.clone();
+        assert_eq!(cloned_handle.quota_project_id().as_deref(), Some("qp-123"));
+        assert!(cloned_handle.service_account_key().is_none());
+
+        let snap1 = cloned_handle.get_or_refresh().await.expect("first refresh");
+        assert_eq!(snap1.access_token, "tok-1");
+        assert_eq!(snap1.generation, 1);
+        assert_eq!(snap1.quota_project_id.as_deref(), Some("qp-123"));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        let snap_cached = handle.get_or_refresh().await.expect("cached hit");
+        assert_eq!(snap_cached.access_token, "tok-1");
+        assert_eq!(snap_cached.generation, 1);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        handle.invalidate(1);
+        let snap2 = cloned_handle
+            .get_or_refresh()
+            .await
+            .expect("second refresh");
+        assert_eq!(snap2.access_token, "tok-2");
+        assert_eq!(snap2.generation, 2);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+        server.await.expect("server task");
+    }
+
+    #[test]
+    fn capsule_handle_exposes_service_account_and_rejects_invalid_pointers() {
+        // SAFETY: Null pointer rejection is explicitly tested.
+        let null_res = unsafe { SharedGcpTokenCacheHandle::from_capsule_ptr(std::ptr::null()) };
+        assert!(null_res.is_err());
+
+        let cache = Arc::new(GcpTokenCache::new(
+            GcpAuthSource::ServiceAccount {
+                key: ServiceAccountKey {
+                    client_email: "sa@proj.iam.gserviceaccount.com".to_string(),
+                    private_key_pem: "-----BEGIN PRIVATE KEY-----\ntest\n-----END PRIVATE KEY-----"
+                        .to_string(),
+                    token_uri: DEFAULT_OAUTH_TOKEN_URI.to_string(),
+                    project_id: Some("proj".to_string()),
+                    quota_project_id: Some("qp-sa".to_string()),
+                },
+                scopes: vec![],
+            },
+            DEFAULT_REFRESH_SKEW_MS,
+        ));
+
+        unsafe extern "C" fn noop_refresh(
+            _ctx: *const c_void,
+            _force_refresh: bool,
+            out_ctx: *mut c_void,
+            complete_cb: GcpRefreshCompleteFn,
+        ) {
+            let err = b"unused";
+            // SAFETY: Invokes completion callback once with valid static error bytes.
+            unsafe {
+                complete_cb(
+                    out_ctx,
+                    false,
+                    err.as_ptr(),
+                    err.len(),
+                    0,
+                    0,
+                    std::ptr::null(),
+                    0,
+                );
+            }
+        }
+
+        let mut bad_capsule = GcpTokenCacheCapsule::new(Arc::clone(&cache), noop_refresh);
+        bad_capsule.abi_version = 999;
+        // SAFETY: `bad_capsule` is valid memory with an incompatible `abi_version`.
+        assert!(
+            unsafe { SharedGcpTokenCacheHandle::from_capsule_ptr(&raw const bad_capsule) }.is_err()
+        );
+
+        let capsule = GcpTokenCacheCapsule::new(cache, noop_refresh);
+        // SAFETY: `capsule` is a valid `GcpTokenCacheCapsule`.
+        let handle =
+            unsafe { SharedGcpTokenCacheHandle::from_capsule_ptr(&raw const capsule) }.unwrap();
+        let sa = handle.service_account_key().expect("service account key");
+        assert_eq!(sa.client_email, "sa@proj.iam.gserviceaccount.com");
+        assert_eq!(sa.project_id.as_deref(), Some("proj"));
+        assert_eq!(handle.quota_project_id().as_deref(), Some("qp-sa"));
+    }
 }

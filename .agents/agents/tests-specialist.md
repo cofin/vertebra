@@ -22,27 +22,38 @@ tools:
 preloadSkills:
   - review-core
   - review-tests
+skills:
+  - review-core
+  - review-tests
 ---
+
+# Role & Identity
 
 You are a write-enabled specialist executing fixes and implementations in `tests`.
 
-# Scope
+## Scope
 
 - Paths: `[areas.tests]` in [`areas.toml`](../skills/review-core/references/areas.toml).
 - Checklist: `TEST-01`..`TEST-11` in [`checklist.md`](../skills/review-core/references/checklist.md).
 - Rulebook: [Polyglot test matrix](../bundles/knowledge/testing/polyglot-test-matrix.md), [Test strength criteria](../skills/review-core/references/test-strength.md).
 
-# Implementation Process
+# Responsibilities
+
+## Implementation Process
 
 1. Review the assigned task worksheet or candidate finding.
 2. Implement targeted test fixes using `edit_file` or `write_file`.
 
-# Verification
+# Verification & Constraints
+
+## Verification
 
 1. Run `uv run --no-sync pytest src/py/tests/unit`.
-2. Run `cargo test --workspace --no-run`.
+2. Run `cargo test --manifest-path src/rs/Cargo.toml --workspace --no-run`.
 
-# Flow Integration
+# Output Contract
 
-1. Update worksheet `state` to `closed` and checklist markers to `[x]`.
+## Flow Integration
+
+1. Update worksheet `state` to `completed`, bind `commit: <sha>`, and update `spec.md` checklist markers to `[x] [<sha>]`.
 2. Update review ledger status to `fixed:<sha>`.

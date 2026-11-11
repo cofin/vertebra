@@ -3,14 +3,19 @@ type: Guide
 title: "Runtime Topologies & Python Embedding"
 description: "How the vertebra-server binary starts, selects Auto, Embedded, or Shm topologies, supervises SO_REUSEPORT embedded workers or SHM subprocesses, and runs free-threaded Python pools."
 status: stable
-tags: [architecture, runtime, topologies, pyo3, free-threaded]
+tags:
+  - architecture
+  - runtime
+  - topologies
+  - pyo3
+  - free-threaded
 generated:
   by: flow/0.26.0
   at: "2026-11-04T04:33:00Z"
 verified:
-  - by: agent:flow-review
-    at: "2026-11-06T06:10:00Z"
-    commit: 7657e8b7c2c96bdda6821aec70a2b603f438a127
+  - by: agent:flow-setup
+    at: "2026-11-07T03:55:00Z"
+    commit: 9af810f5
 sources:
   - id: src-vertebra-http-src-main-rs
     resource: src/rs/vertebra-http/src/main.rs

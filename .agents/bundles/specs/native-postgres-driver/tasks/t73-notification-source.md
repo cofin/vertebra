@@ -1,26 +1,26 @@
 ---
 type: Task
-id: native-postgres-driver:t73
-title: Integrate live notification sources with active subscriptions
+id: "native-postgres-driver:t73"
+title: "Integrate live notification sources with active subscriptions"
+description: "Integrate live notification sources with active subscriptions for the standalone vertebra-postgres native driver."
+status: stable
 state: pending
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
-- native-postgres-driver:t72
+  - "native-postgres-driver:t72"
 files:
-- src/py/vertebra/db/adapters/postgres/events.py
-- src/py/vertebra/db/adapters/postgres/driver.py
-- src/py/vertebra/db/adapters/postgres/notify.py
-- src/py/vertebra/db/adapters/postgres/config.py
-- src/py/tests/unit/db/test_postgres_native_notifications.py
-- src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py
+  - src/py/vertebra/db/adapters/postgres/events.py
+  - src/py/vertebra/db/adapters/postgres/driver.py
+  - src/py/vertebra/db/adapters/postgres/notify.py
+  - src/py/vertebra/db/adapters/postgres/config.py
+  - src/py/tests/unit/db/test_postgres_native_notifications.py
+  - src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py
 tests:
-- src/py/tests/unit/db/test_postgres_native_notifications.py::test_notification_source_updates_live_channels
-- src/py/tests/unit/db/test_postgres_native_notifications.py::test_notification_source_payload_and_close
-- src/py/tests/unit/db/test_postgres_native_notifications.py::test_notification_source_structural_port
-- src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py::test_postgres_notify_publish
+  - src/py/tests/unit/db/test_postgres_native_notifications.py
+  - src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py
 plan_revision: 2
-plan_commit: "7657e8b7c2c96bdda6821aec70a2b603f438a127"
+plan_commit: 9af810f5
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -30,15 +30,13 @@ next_step: null
 last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
-created_at: '2026-11-05T18:25:07Z'
-updated_at: '2026-11-06T06:30:00Z'
+created_at: "2026-11-05T18:25:07Z"
+updated_at: "2026-11-07T04:15:00Z"
 commit: null
 tags:
-- postgres
-- native
-- data-events
-requirements:
-- R21
+  - postgres
+  - native
+  - data-events
 ---
 
 # Integrate live notification sources with active subscriptions

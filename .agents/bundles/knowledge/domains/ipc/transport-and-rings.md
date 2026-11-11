@@ -3,11 +3,19 @@ type: Guide
 title: "Rust IPC, Shared Memory & Ring Transport Domain"
 description: "Symbol map of the vertebra-core and vertebra-py types that make up the shared-memory regions, rings, batch transport, and PyO3 transport API."
 status: stable
-tags: [domains, ipc, shared-memory, ring-buffer, rust]
+tags:
+  - domains
+  - ipc
+  - shared-memory
+  - ring-buffer
+  - rust
 generated:
   by: flow/0.26.0
   at: "2026-11-04T04:33:00Z"
 verified:
+  - by: agent:flow-setup
+    at: "2026-11-07T03:55:00Z"
+    commit: 9af810f5
   - by: agent:flow-setup
     at: "2026-11-04T04:33:00Z"
     commit: f741701
@@ -98,7 +106,7 @@ Where each IPC type lives and what it owns. Behavior, Dekker sleep/wake handshak
 |---|---|---|
 | [`Transport`, `Backend`, `InProcessRequest`, `TransportError`](../../../../../src/rs/vertebra-core/src/transport/mod.rs)[^src-vertebra-core-src-transport-mod-rs] | `transport` | Unified API over `Backend::InProcess` (`BatchBridge`) and `Backend::SharedMemory(Arc<RingPair>)`: `poll_batch`, `try_poll_batch`, `send_response`, `send_response_raw`, `drain_responses_with`, and Dekker sleep/wake helpers. |
 | `TransportNode`, `DataSlab`, `TransportArena`, `BatchSnapshot`, `ShmSlotHolder`, `ShmBatchWriter`, `REQUEST_OVERFLOW_MAGIC` (`VQOV`), `transport::BufferPool` | `transport` | Request descriptors, zero-copy `BatchSnapshot` backings (`Slab`, `InProcess(Vec<InProcessRequest>)`, `ShmSlot(ShmSlotHolder::Ring(MpmcSlotView) \| Overflow(ShmRegion))`), compact binary header codec (`encode_headers_compact`, `iter_raw_headers`), and SHM batch/overflow serializer. |
-| [`RingPair`, `RingPairConfig`, `RingPairFds`, `RingPairError`, `TieredRingSet`, `RESPONSE_OVERFLOW_MAGIC` (`VROV`)](../../../../../src/rs/vertebra-core/src/transport/ring_pair.rs)[^src-vertebra-core-src-transport-ring-pair-rs] | `transport::ring_pair` | Per-worker request `MpmcRing` + 4-tier response `SpscRing`s + notifiers (`RingPairConfig::default` `46 MiB/worker`, `compact` `12 MiB/worker`, `for_environment(worker_count)`); active-tier bitmask ordering (`mark_tier_active` before `write_head` + `has_non_small_data()`), Dekker `prepare_request_sleep`/`prepare_response_sleep`, `VROV` overflow region transfer, and zero-copy `drain_responses_with`. |
+| [`RingPair`, `RingPairConfig`, `RingPairFds`, `RingPairError`, `TieredRingSet`, `RESPONSE_OVERFLOW_MAGIC` (`VROV`)](../../../../../src/rs/vertebra-core/src/transport/ring_pair.rs)[^src-vertebra-core-src-transport-ring-pair-rs] | `transport::ring_pair` | Per-worker request `MpmcRing` + four-tier response `SpscRing`s + notifiers (`RingPairConfig::default` `46 MiB/worker`, `compact` `12 MiB/worker`, `for_environment(worker_count)`); active-tier bitmask ordering (`mark_tier_active` before `write_head` + `has_non_small_data()`), Dekker `prepare_request_sleep`/`prepare_response_sleep`, `VROV` overflow region transfer, and zero-copy `drain_responses_with`. |
 | [`TieredRingConfig`, `RingTier`](../../../../../src/rs/vertebra-core/src/tiered_ring.rs)[^src-vertebra-core-src-tiered-ring-rs] | `tiered_ring` | Default tier geometry (`small` 4 KiB×512, `medium` 32 KiB×128, `large` 256 KiB×32, `xlarge` 2 MiB×8; ~30 MiB total), `compact()` geometry (`8 MiB` total), and `select_tier`. |
 | [`BatchBridge`, `BatchWriter`, `WriteRequest`, `BridgeResponse`, `ResponseSink`](../../../../../src/rs/vertebra-core/src/bridge.rs)[^src-vertebra-core-src-bridge-rs] | `bridge` | Lock-free unbounded in-process transport for `Topology::Embedded` with zero-copy `submit_inprocess_batch`, `BridgeResponse { request_id, status, headers_raw, body }`, direct `ResponseSink` completion callback, and single-consumer Dekker request `Notifier`. |
 

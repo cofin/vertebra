@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import asyncio
-import fnmatch
-import re
-from collections.abc import AsyncIterator, Iterator
+import contextlib
+from collections.abc import AsyncGenerator, AsyncIterable, AsyncIterator, Buffer, Iterable, Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast, overload
 from urllib.parse import urlparse
@@ -13,6 +11,7 @@ from urllib.parse import urlparse
 from vertebra.storage import (
     AsyncGcpTokenCache,
     AsyncObjectStore,
+    AsyncReadableFile,
     AzureConfig,
     GCSConfig,
     HTTPConfig,
@@ -20,6 +19,7 @@ from vertebra.storage import (
     MemoryConfig,
     ObjectMeta,
     OCIConfig,
+    PutResult,
     R2Config,
     S3Config,
     SigningConfig,
@@ -27,8 +27,17 @@ from vertebra.storage import (
     StreamingStorageResponse,
     SyncGcpTokenCache,
     SyncObjectStore,
+    SyncReadableFile,
 )
-from vertebra.typing import MissingDependencyError
+from vertebra.storage._arrow import (
+    iter_batches_async,
+    iter_batches_sync,
+    read_table_async,
+    read_table_sync,
+    write_batches_async,
+    write_batches_sync,
+)
+from vertebra.typing import ImproperConfigurationError
 from vertebra.utils.module_loader import ensure_module
 from vertebra.utils.serializers import decode_msgpack, encode_msgpack_bytes
 from vertebra.utils.text import validate_identifier
@@ -38,17 +47,16 @@ if TYPE_CHECKING:
     from sqlspec.storage.registry import StorageRegistry
     from sqlspec.typing import ArrowRecordBatch, ArrowTable
 
+    from vertebra._storage import StorageBuffer
     from vertebra.db.arrow import ArrowCursor
 
 __all__ = (
     "ArrowFlightSerializer",
     "ObjectStoreBackend",
-    "StreamingStorageResponse",
     "build_duckdb_gcs_secret_sql",
     "register_storage_alias",
 )
 
-_GLOB_CHARS_RE = re.compile(r"[*?[]")
 _STORAGE_CONFIGS = (LocalConfig, S3Config, GCSConfig, AzureConfig, OCIConfig, R2Config, HTTPConfig, MemoryConfig)
 
 
@@ -76,7 +84,7 @@ class ObjectStoreBackend:
 
     def __init__(
         self,
-        uri: str | SyncObjectStore | AsyncObjectStore | StorageConfig = "memory://",
+        uri: str | SyncObjectStore | AsyncObjectStore | StorageConfig | None = None,
         *,
         store: SyncObjectStore | AsyncObjectStore | StorageConfig | None = None,
         base_path: str = "",
@@ -95,76 +103,61 @@ class ObjectStoreBackend:
             prefix: Alias for `base_path` when configuring key namespaces directly.
             options: Optional string options passed to `ObjectStore` when constructed from a URI.
             signing: Optional `SigningConfig` for presigned GET/PUT URL generation.
-            token_cache: Optional shared `GcpTokenCache` for GCS OAuth2 bearer token refresh.
+            token_cache: Optional shared `GcpTokenCache` for GCS OAuth2 bearer token refresh when building a store
+                from a config or URI.
             **kwargs: Additional scalar backend options merged into `options`.
+
+        Raises:
+            ImproperConfigurationError: When no target is supplied, or `signing` / `token_cache` accompany a
+                prebuilt object store whose authentication is already fixed.
         """
+        self._reject_traversal(base_path)
+        self._reject_traversal(prefix)
         merged_options: dict[str, str] = dict(options or {})
         for key, value in kwargs.items():
             if isinstance(value, (str, int, float, bool)):
                 merged_options.setdefault(str(key), str(value))
 
         target = store if store is not None else uri
+        if target is None or (isinstance(target, str) and not target.strip()):
+            msg = "SQLSpec storage requires an explicit store, configuration, or URI"
+            raise ImproperConfigurationError(msg)
+        if isinstance(target, (SyncObjectStore, AsyncObjectStore)) and (signing is not None or token_cache is not None):
+            msg = "signing and token_cache apply only when building a store from a StorageConfig or URI"
+            raise ImproperConfigurationError(msg)
         sync_store: SyncObjectStore
         async_store: AsyncObjectStore
 
         if isinstance(target, SyncObjectStore):
             sync_store = target
-            if token_cache is not None and getattr(sync_store, "_gcp_token_cache", None) is None:
-                sync_store._gcp_token_cache = (
-                    token_cache if isinstance(token_cache, SyncGcpTokenCache) else token_cache.to_sync()
-                )
             async_store = target.to_async()
         elif isinstance(target, AsyncObjectStore):
             async_store = target
-            if token_cache is not None and getattr(async_store, "_gcp_token_cache", None) is None:
-                async_store._gcp_token_cache = (
-                    token_cache if isinstance(token_cache, AsyncGcpTokenCache) else token_cache.to_async()
-                )
             sync_store = target.to_sync()
         elif isinstance(target, _STORAGE_CONFIGS):
-            sync_store = SyncObjectStore.from_config(target)
-            async_store = AsyncObjectStore.from_config(target)
+            sync_store = SyncObjectStore.from_config(target, signing=signing, token_cache=token_cache)
+            async_store = sync_store.to_async()
         else:
             uri_str = str(target)
-            sync_cache = (
-                token_cache
-                if isinstance(token_cache, SyncGcpTokenCache)
-                else (token_cache.to_sync() if token_cache is not None and hasattr(token_cache, "to_sync") else None)
-            )
-            async_cache = (
-                token_cache
-                if isinstance(token_cache, AsyncGcpTokenCache)
-                else (token_cache.to_async() if token_cache is not None and hasattr(token_cache, "to_async") else None)
-            )
             sync_store = SyncObjectStore(
                 uri_str,
                 options=merged_options or None,
                 signing=signing,
-                token_cache=sync_cache,
+                token_cache=token_cache,
             )
-            async_store = AsyncObjectStore(
-                uri_str,
-                options=merged_options or None,
-                signing=signing,
-                token_cache=async_cache,
-            )
+            async_store = sync_store.to_async()
 
         effective_prefix = (base_path or prefix).strip("/")
         self._sync_store = sync_store
         self._async_store = async_store
         self._base_path = effective_prefix
-        if store is not None and isinstance(uri, str) and uri != "memory://":
+        if store is not None and isinstance(uri, str) and uri.strip() and uri != "memory://":
             self.store_uri = uri
             parsed_scheme = urlparse(uri).scheme
             self.protocol = self._normalize_protocol(parsed_scheme or sync_store.scheme)
         else:
             self.store_uri = sync_store.url
             self.protocol = self._normalize_protocol(sync_store.scheme)
-
-    @property
-    def store(self) -> SyncObjectStore:
-        """Return the underlying SyncObjectStore instance."""
-        return self._sync_store
 
     @property
     def sync_store(self) -> SyncObjectStore:
@@ -186,34 +179,6 @@ class ObjectStoreBackend:
         """Return True when presigned URL generation is configured on the underlying store."""
         return self._sync_store.supports_signing
 
-    @classmethod
-    def register_alias(
-        cls,
-        alias: str,
-        uri_or_store: str | SyncObjectStore | AsyncObjectStore,
-        *,
-        registry: StorageRegistry | None = None,
-        base_path: str = "",
-        **kwargs: Any,
-    ) -> None:
-        """Register this backend under a named alias in SQLSpec's `storage_registry`."""
-        reg_mod = ensure_module("sqlspec.storage.registry", package="sqlspec", extra="sqlspec")
-        target_registry = reg_mod.storage_registry if registry is None else registry
-        backend_config: dict[str, Any] = dict(kwargs)
-        if base_path:
-            backend_config["base_path"] = base_path
-        if isinstance(uri_or_store, (SyncObjectStore, AsyncObjectStore)):
-            stored_uri = uri_or_store.url
-            backend_config["store"] = uri_or_store
-        else:
-            stored_uri = uri_or_store
-        target_registry._alias_configs[alias] = (
-            cast("type[ObjectStoreProtocol]", cls),
-            stored_uri,
-            backend_config,
-        )
-        target_registry.clear_cache(alias)
-
     def resolve_uri(self, path: str | Path) -> str:
         """Resolve a backend-relative path to its unsigned canonical address."""
         resolved = self._qualify(path)
@@ -234,8 +199,7 @@ class ObjectStoreBackend:
 
     def write_bytes_sync(self, path: str | Path, data: bytes, **kwargs: Any) -> None:
         """Write full object bytes synchronously."""
-        _ = kwargs
-        self._sync_store.put(self._qualify(path), data)
+        self._sync_store.put(self._qualify(path), data, **self._write_options(kwargs))
 
     def read_text_sync(self, path: str | Path, encoding: str = "utf-8", **kwargs: Any) -> str:
         """Read and decode UTF-8 text from an object synchronously."""
@@ -263,10 +227,7 @@ class ObjectStoreBackend:
     def move_sync(self, source: str | Path, destination: str | Path, **kwargs: Any) -> None:
         """Move an object within the store synchronously."""
         _ = kwargs
-        src_key = self._qualify(source)
-        dst_key = self._qualify(destination)
-        self._sync_store.copy(src_key, dst_key)
-        self._sync_store.delete(src_key)
+        self._sync_store.rename(self._qualify(source), self._qualify(destination))
 
     def list_objects_sync(self, prefix: str = "", recursive: bool = True, **kwargs: Any) -> list[str]:
         """List relative object keys matching the optional prefix synchronously."""
@@ -277,28 +238,15 @@ class ObjectStoreBackend:
         return self._filter_recursive(rel_paths, prefix=prefix, recursive=recursive)
 
     def glob_sync(self, pattern: str, **kwargs: Any) -> list[str]:
-        """Match relative object keys against a shell-style or URI-qualified glob pattern synchronously."""
-        _ = kwargs
-        cleaned_pattern, static_prefix = self._normalize_glob_pattern(pattern)
-        candidates = self.list_objects_sync(static_prefix, recursive=True)
-        return [
-            candidate
-            for candidate in candidates
-            if fnmatch.fnmatch(candidate, cleaned_pattern)
-            or fnmatch.fnmatch(candidate.rsplit("/", 1)[-1], cleaned_pattern)
-        ]
+        """Match relative object keys against a shell-style or URI-qualified glob pattern synchronously.
 
-    async def glob_async(self, pattern: str, **kwargs: Any) -> list[str]:
-        """Match relative object keys against a shell-style or URI-qualified glob pattern asynchronously."""
+        The pattern is qualified with `base_path` and matched against full keys by `SyncObjectStore.glob`;
+        returned keys are relative to `base_path`. An empty pattern matches nothing.
+        """
         _ = kwargs
-        cleaned_pattern, static_prefix = self._normalize_glob_pattern(pattern)
-        candidates = await self.list_objects_async(static_prefix, recursive=True)
-        return [
-            candidate
-            for candidate in candidates
-            if fnmatch.fnmatch(candidate, cleaned_pattern)
-            or fnmatch.fnmatch(candidate.rsplit("/", 1)[-1], cleaned_pattern)
-        ]
+        if not pattern.strip():
+            return []
+        return [self._unqualify(meta.path) for meta in self._sync_store.glob(self._qualify(pattern))]
 
     def is_object_sync(self, path: str | Path) -> bool:
         """Return True when `path` points to a stored object."""
@@ -326,38 +274,20 @@ class ObjectStoreBackend:
 
     def read_arrow_sync(self, path: str | Path, **kwargs: Any) -> ArrowTable:
         """Read a Parquet or Arrow IPC object into a `pyarrow.Table` synchronously."""
-        pa = ensure_module("pyarrow", package="pyarrow", extra="arrow")
         file_format = str(kwargs.pop("file_format", "") or self._infer_arrow_format(path))
-        key = self._qualify(path)
-        if file_format == "parquet":
-            pq = ensure_module("pyarrow.parquet", package="pyarrow", extra="arrow")
-            with self._sync_store.open_readable_file(key) as reader:
-                return pq.read_table(reader, **kwargs)
-        ipc = ensure_module("pyarrow.ipc", package="pyarrow", extra="arrow")
-        view = self._sync_store.get_view(key)
-        buf = pa.py_buffer(view)
-        try:
-            with ipc.open_stream(buf) as stream_reader:
-                return stream_reader.read_all()
-        except pa.ArrowInvalid:
-            with ipc.open_file(buf) as file_reader:
-                return file_reader.read_all()
+        return read_table_sync(self._sync_store, self._qualify(path), file_format=file_format, options=kwargs)
 
     def write_arrow_sync(self, path: str | Path, table: ArrowTable, **kwargs: Any) -> None:
-        """Serialize and write a `pyarrow.Table` as Parquet or Arrow IPC synchronously."""
-        payload = self._serialize_arrow_table(path, table, **kwargs)
-        self._sync_store.put(self._qualify(path), payload)
+        """Write a Table through bounded native multipart codec output."""
+        file_format = str(kwargs.pop("file_format", "") or self._infer_arrow_format(path))
+        self._normalize_arrow_write_options(file_format, kwargs)
+        write_batches_sync(self._sync_store, self._qualify(path), table, file_format=file_format, options=kwargs)
 
     def write_arrow_cursor_sync(self, path: str | Path, cursor: ArrowCursor | Any, **kwargs: Any) -> None:
-        """Write an `ArrowCursor` to object storage as zero-copy Arrow IPC or batch-streamed Parquet."""
+        """Write IPC cursor buffers through a persistent batch codec reader."""
         file_format = str(kwargs.pop("file_format", "") or self._infer_arrow_format(path))
-        key = self._qualify(path)
-        view = cursor.buffer_view() if hasattr(cursor, "buffer_view") else memoryview(cursor)
-        if file_format == "arrow-ipc" and len(view) > 0:
-            self._sync_store.put(key, view)
-            return
-        payload = self._serialize_arrow_cursor_parquet(cursor, **kwargs)
-        self._sync_store.put(key, payload)
+        self._normalize_arrow_write_options(file_format, kwargs)
+        write_batches_sync(self._sync_store, self._qualify(path), cursor, file_format=file_format, options=kwargs)
 
     def stream_arrow_sync(
         self,
@@ -367,21 +297,15 @@ class ObjectStoreBackend:
         batch_size: int = 65_536,
         **kwargs: Any,
     ) -> Iterator[ArrowRecordBatch]:
-        """Stream `pyarrow.RecordBatch` frames from matching Parquet or IPC objects synchronously."""
-        pa = ensure_module("pyarrow", package="pyarrow", extra="arrow")
-        matched = self._resolve_pattern_matches_sync(pattern)
-        for rel_path in matched:
-            key = self._qualify(rel_path)
-            if file_format == "parquet":
-                pq = ensure_module("pyarrow.parquet", package="pyarrow", extra="arrow")
-                with self._sync_store.open_readable_file(key) as reader:
-                    parquet_file = pq.ParquetFile(reader)
-                    yield from parquet_file.iter_batches(batch_size=batch_size, **kwargs)
-            else:
-                ipc = ensure_module("pyarrow.ipc", package="pyarrow", extra="arrow")
-                buf = pa.py_buffer(self._sync_store.get_view(key))
-                with ipc.open_stream(buf) as stream_reader:
-                    yield from stream_reader
+        """Yield projected batches on demand from each matching native object."""
+        for rel_path in self._resolve_pattern_matches_sync(pattern):
+            yield from iter_batches_sync(
+                self._sync_store,
+                self._qualify(rel_path),
+                file_format=file_format,
+                batch_size=batch_size,
+                options=kwargs,
+            )
 
     def stream_read_sync(
         self,
@@ -392,13 +316,27 @@ class ObjectStoreBackend:
         """Stream fixed-size byte chunks from a stored object synchronously."""
         _ = kwargs
         step = chunk_size if chunk_size is not None and chunk_size > 0 else 65_536
-        key = self._qualify(path)
-        with self._sync_store.open_readable_file(key) as reader:
-            while True:
-                chunk = reader.read(step)
-                if not chunk:
-                    break
-                yield chunk
+        for chunk in self.get_stream_sync(path, chunk_size=step):
+            yield bytes(chunk)
+
+    def get_stream_sync(self, path: str | Path, *, chunk_size: int | None = None) -> Iterator[StorageBuffer]:
+        """Return native buffer chunks without buffering the object."""
+        return self._sync_store.get_stream(self._qualify(path), chunk_size=chunk_size)
+
+    def put_stream_sync(self, path: str | Path, chunks: Iterable[Buffer], **kwargs: Any) -> PutResult:
+        """Upload buffer chunks incrementally with native write options."""
+        return self._sync_store.put_stream(self._qualify(path), chunks, **self._write_options(kwargs))
+
+    def list_page_sync(
+        self, prefix: str = "", *, cursor: str | None = None, limit: int = 1000
+    ) -> tuple[list[str], str | None]:
+        """List a page of relative keys while preserving the native cursor."""
+        items, next_cursor = self._sync_store.list_page(self._qualify(prefix), cursor=cursor, limit=limit)
+        return [self._unqualify(item.path) for item in items], next_cursor
+
+    def open_sync(self, path: str | Path, *, size: int | None = None, chunk_size: int = 65536) -> SyncReadableFile:
+        """Create a seekable reader, resolving metadata unless its size is supplied."""
+        return self._sync_store.open_reader(self._qualify(path), size=size, chunk_size=chunk_size)
 
     def stream_response(
         self,
@@ -425,6 +363,26 @@ class ObjectStoreBackend:
             headers=headers,
         )
 
+    @overload
+    def sign_sync(self, paths: str, expires_in: int = 3600, for_upload: bool = False) -> str: ...
+    @overload
+    def sign_sync(self, paths: list[str], expires_in: int = 3600, for_upload: bool = False) -> list[str]: ...
+    def sign_sync(
+        self,
+        paths: str | list[str],
+        expires_in: int = 3600,
+        for_upload: bool = False,
+    ) -> str | list[str]:
+        """Generate presigned GET or PUT URLs synchronously.
+
+        Raises:
+            NotImplementedError: When the underlying store has no `SigningConfig`.
+            ValueError: When the native signer rejects the expiry or credentials.
+        """
+        if isinstance(paths, str):
+            return self._sign_single(paths, expires_in=expires_in, for_upload=for_upload)
+        return [self._sign_single(item, expires_in=expires_in, for_upload=for_upload) for item in paths]
+
     async def read_bytes_async(self, path: str | Path, **kwargs: Any) -> bytes:
         """Read full object bytes asynchronously."""
         _ = kwargs
@@ -432,8 +390,7 @@ class ObjectStoreBackend:
 
     async def write_bytes_async(self, path: str | Path, data: bytes, **kwargs: Any) -> None:
         """Write full object bytes asynchronously."""
-        _ = kwargs
-        await self._async_store.put(self._qualify(path), data)
+        await self._async_store.put(self._qualify(path), data, **self._write_options(kwargs))
 
     async def read_text_async(self, path: str | Path, encoding: str = "utf-8", **kwargs: Any) -> str:
         """Read and decode UTF-8 text from an object asynchronously."""
@@ -481,10 +438,7 @@ class ObjectStoreBackend:
     async def move_async(self, source: str | Path, destination: str | Path, **kwargs: Any) -> None:
         """Move an object within the store asynchronously."""
         _ = kwargs
-        src_key = self._qualify(source)
-        dst_key = self._qualify(destination)
-        await self._async_store.copy(src_key, dst_key)
-        await self._async_store.delete(src_key)
+        await self._async_store.rename(self._qualify(source), self._qualify(destination))
 
     async def get_metadata_async(self, path: str | Path, **kwargs: Any) -> dict[str, object]:
         """Return metadata dictionary for a stored object asynchronously."""
@@ -500,23 +454,24 @@ class ObjectStoreBackend:
 
     async def read_arrow_async(self, path: str | Path, **kwargs: Any) -> ArrowTable:
         """Read a Parquet or Arrow IPC object into a `pyarrow.Table` asynchronously."""
-        return await asyncio.to_thread(self.read_arrow_sync, path, **kwargs)
+        file_format = str(kwargs.pop("file_format", "") or self._infer_arrow_format(path))
+        return await read_table_async(self._async_store, self._qualify(path), file_format=file_format, options=kwargs)
 
     async def write_arrow_async(self, path: str | Path, table: ArrowTable, **kwargs: Any) -> None:
-        """Serialize and write a `pyarrow.Table` as Parquet or Arrow IPC asynchronously."""
-        payload = await asyncio.to_thread(self._serialize_arrow_table, path, table, **kwargs)
-        await self._async_store.put(self._qualify(path), payload)
+        """Encode off-loop and upload incrementally using native asynchronous I/O."""
+        file_format = str(kwargs.pop("file_format", "") or self._infer_arrow_format(path))
+        self._normalize_arrow_write_options(file_format, kwargs)
+        await write_batches_async(
+            self._async_store, self._qualify(path), table, file_format=file_format, options=kwargs
+        )
 
     async def write_arrow_cursor_async(self, path: str | Path, cursor: ArrowCursor | Any, **kwargs: Any) -> None:
-        """Write an `ArrowCursor` asynchronously as zero-copy Arrow IPC or batch-streamed Parquet."""
+        """Write cursor or buffer IPC through the shared off-loop batch encoder."""
         file_format = str(kwargs.pop("file_format", "") or self._infer_arrow_format(path))
-        key = self._qualify(path)
-        view = cursor.buffer_view() if hasattr(cursor, "buffer_view") else memoryview(cursor)
-        if file_format == "arrow-ipc" and len(view) > 0:
-            await self._async_store.put(key, view)
-            return
-        payload = await asyncio.to_thread(self._serialize_arrow_cursor_parquet, cursor, **kwargs)
-        await self._async_store.put(key, payload)
+        self._normalize_arrow_write_options(file_format, kwargs)
+        await write_batches_async(
+            self._async_store, self._qualify(path), cursor, file_format=file_format, options=kwargs
+        )
 
     def stream_arrow_async(
         self,
@@ -534,20 +489,37 @@ class ObjectStoreBackend:
             **kwargs,
         )
 
-    @overload
-    def sign_sync(self, paths: str, expires_in: int = 3600, for_upload: bool = False) -> str: ...
-    @overload
-    def sign_sync(self, paths: list[str], expires_in: int = 3600, for_upload: bool = False) -> list[str]: ...
-    def sign_sync(
-        self,
-        paths: str | list[str],
-        expires_in: int = 3600,
-        for_upload: bool = False,
-    ) -> str | list[str]:
-        """Generate presigned GET or PUT URLs synchronously."""
-        if isinstance(paths, str):
-            return self._sign_single(paths, expires_in=expires_in, for_upload=for_upload)
-        return [self._sign_single(item, expires_in=expires_in, for_upload=for_upload) for item in paths]
+    async def glob_async(self, pattern: str, **kwargs: Any) -> list[str]:
+        """Match relative object keys against a shell-style or URI-qualified glob pattern asynchronously.
+
+        The pattern is qualified with `base_path` and matched against full keys by `AsyncObjectStore.glob`;
+        returned keys are relative to `base_path`. An empty pattern matches nothing.
+        """
+        _ = kwargs
+        if not pattern.strip():
+            return []
+        return [self._unqualify(meta.path) for meta in await self._async_store.glob(self._qualify(pattern))]
+
+    def get_stream_async(self, path: str | Path, *, chunk_size: int | None = None) -> AsyncIterator[StorageBuffer]:
+        """Return an asynchronous native buffer iterator."""
+        return self._async_store.get_stream(self._qualify(path), chunk_size=chunk_size)
+
+    async def put_stream_async(
+        self, path: str | Path, chunks: AsyncIterable[Buffer] | Iterable[Buffer], **kwargs: Any
+    ) -> PutResult:
+        """Upload synchronous or asynchronous chunks incrementally."""
+        return await self._async_store.put_stream(self._qualify(path), chunks, **self._write_options(kwargs))
+
+    async def list_page_async(
+        self, prefix: str = "", *, cursor: str | None = None, limit: int = 1000
+    ) -> tuple[list[str], str | None]:
+        """List an asynchronous page of relative keys with a native cursor."""
+        items, next_cursor = await self._async_store.list_page(self._qualify(prefix), cursor=cursor, limit=limit)
+        return [self._unqualify(item.path) for item in items], next_cursor
+
+    def open_async(self, path: str | Path, *, size: int | None = None, chunk_size: int = 65536) -> AsyncReadableFile:
+        """Create a seekable asynchronous reader without performing storage I/O."""
+        return self._async_store.open_reader(self._qualify(path), size=size, chunk_size=chunk_size)
 
     @overload
     async def sign_async(self, paths: str, expires_in: int = 3600, for_upload: bool = False) -> str: ...
@@ -559,22 +531,20 @@ class ObjectStoreBackend:
         expires_in: int = 3600,
         for_upload: bool = False,
     ) -> str | list[str]:
-        """Generate presigned GET or PUT URLs asynchronously."""
+        """Generate presigned GET or PUT URLs asynchronously.
+
+        Raises:
+            NotImplementedError: When the underlying store has no `SigningConfig`.
+            ValueError: When the native signer rejects the expiry or credentials.
+        """
         if isinstance(paths, str):
             return await self._sign_single_async(paths, expires_in=expires_in, for_upload=for_upload)
         return [await self._sign_single_async(item, expires_in=expires_in, for_upload=for_upload) for item in paths]
 
     async def _iter_bytes_async(self, key: str, chunk_size: int) -> AsyncIterator[bytes]:
-        """Yield byte slices asynchronously using range reads against the underlying store."""
-        meta = await self._async_store.head(key)
-        offset = 0
-        while offset < meta.size:
-            length = min(chunk_size, meta.size - offset)
-            chunk = await self._async_store.get_range(key, offset, length)
-            if not chunk:
-                break
-            offset += len(chunk)
-            yield chunk
+        """Yield byte chunks asynchronously from the native storage stream."""
+        async for chunk in self._async_store.get_stream(key, chunk_size=chunk_size):
+            yield bytes(chunk)
 
     async def _iter_arrow_async(
         self,
@@ -585,72 +555,43 @@ class ObjectStoreBackend:
         **kwargs: Any,
     ) -> AsyncIterator[ArrowRecordBatch]:
         """Yield Arrow record batches asynchronously."""
-        batches = await asyncio.to_thread(
-            lambda: list(self.stream_arrow_sync(pattern, file_format=file_format, batch_size=batch_size, **kwargs))
-        )
-        for batch in batches:
-            yield batch
+        for rel_path in await self._resolve_pattern_matches_async(pattern):
+            batches = iter_batches_async(
+                self._async_store,
+                self._qualify(rel_path),
+                file_format=file_format,
+                batch_size=batch_size,
+                options=kwargs,
+            )
+            async with contextlib.aclosing(cast("AsyncGenerator[ArrowRecordBatch, None]", batches)):
+                async for batch in batches:
+                    yield batch
+
+    def _require_signing(self) -> None:
+        """Reject signing requests when the underlying store has no `SigningConfig`."""
+        if not self.supports_signing:
+            msg = f"URL signing not supported by backend ({self.protocol}): no SigningConfig is configured"
+            raise NotImplementedError(msg)
 
     def _sign_single(self, path: str, *, expires_in: int, for_upload: bool) -> str:
         """Sign a single object key using the underlying ObjectStore."""
         qualified = self._qualify(path)
-        try:
-            if for_upload:
-                return self._sync_store.presign_put(qualified, expires_in_secs=expires_in)
-            return self._sync_store.presign_get(qualified, expires_in_secs=expires_in)
-        except (RuntimeError, ValueError) as exc:
-            msg = f"URL signing not supported by backend ({self.protocol}): {exc}"
-            raise NotImplementedError(msg) from exc
+        self._require_signing()
+        if for_upload:
+            return self._sync_store.presign_put(qualified, expires_in_secs=expires_in)
+        return self._sync_store.presign_get(qualified, expires_in_secs=expires_in)
 
     async def _sign_single_async(self, path: str, *, expires_in: int, for_upload: bool) -> str:
         """Sign a single object key asynchronously using the underlying AsyncObjectStore."""
         qualified = self._qualify(path)
-        try:
-            if for_upload:
-                return await self._async_store.presign_put(qualified, expires_in_secs=expires_in)
-            return await self._async_store.presign_get(qualified, expires_in_secs=expires_in)
-        except (RuntimeError, ValueError) as exc:
-            msg = f"URL signing not supported by backend ({self.protocol}): {exc}"
-            raise NotImplementedError(msg) from exc
-
-    def _serialize_arrow_table(self, path: str | Path, table: ArrowTable, **kwargs: Any) -> memoryview:
-        """Serialize a `pyarrow.Table` into a zero-copy `BufferOutputStream` buffer."""
-        pa = ensure_module("pyarrow", package="pyarrow", extra="arrow")
-        file_format = str(kwargs.pop("file_format", "") or self._infer_arrow_format(path))
-        sink = pa.BufferOutputStream()
-        if file_format == "parquet":
-            pq = ensure_module("pyarrow.parquet", package="pyarrow", extra="arrow")
-            pq.write_table(table, sink, **kwargs)
-        else:
-            ipc = ensure_module("pyarrow.ipc", package="pyarrow", extra="arrow")
-            with ipc.new_stream(sink, table.schema) as writer:
-                writer.write_table(table)
-        return memoryview(sink.getvalue())
-
-    def _serialize_arrow_cursor_parquet(self, cursor: ArrowCursor | Any, **kwargs: Any) -> memoryview:
-        """Stream `RecordBatch` frames from an `ArrowCursor` into an in-memory Parquet buffer."""
-        pa = ensure_module("pyarrow", package="pyarrow", extra="arrow")
-        pq = ensure_module("pyarrow.parquet", package="pyarrow", extra="arrow")
-        ipc = ensure_module("pyarrow.ipc", package="pyarrow", extra="arrow")
-        sink = pa.BufferOutputStream()
-        view = cursor.buffer_view() if hasattr(cursor, "buffer_view") else memoryview(cursor)
-        if len(view) > 0:
-            try:
-                with (
-                    ipc.open_stream(pa.py_buffer(view)) as reader,
-                    pq.ParquetWriter(sink, reader.schema, **kwargs) as writer,
-                ):
-                    for batch in reader:
-                        writer.write_batch(batch)
-                return memoryview(sink.getvalue())
-            except (TypeError, ValueError, OSError):
-                pass
-        table = cursor.to_arrow_table() if hasattr(cursor, "to_arrow_table") else cursor
-        pq.write_table(table, sink, **kwargs)
-        return memoryview(sink.getvalue())
+        self._require_signing()
+        if for_upload:
+            return await self._async_store.presign_put(qualified, expires_in_secs=expires_in)
+        return await self._async_store.presign_get(qualified, expires_in_secs=expires_in)
 
     def _strip_matching_uri_prefix(self, raw_path_or_pattern: str) -> str:
         """Strip a scheme/bucket prefix when `raw_path_or_pattern` is a full URI matching `self.store_uri`."""
+        self._reject_traversal(raw_path_or_pattern)
         stripped = raw_path_or_pattern.strip()
         if "://" not in stripped:
             return stripped
@@ -679,25 +620,19 @@ class ObjectStoreBackend:
             rel_path = ""
         return rel_path
 
-    def _normalize_glob_pattern(self, pattern: str) -> tuple[str, str]:
-        """Normalize a relative or URI-qualified glob pattern and extract its static prefix."""
-        rel_pattern = self._strip_matching_uri_prefix(pattern).strip().lstrip("/")
-        if self._base_path and rel_pattern.startswith(f"{self._base_path}/"):
-            rel_pattern = rel_pattern[len(self._base_path) + 1 :]
-        match = _GLOB_CHARS_RE.search(rel_pattern)
-        if match is None:
-            static_prefix = rel_pattern.rsplit("/", 1)[0] if "/" in rel_pattern else ""
-        else:
-            before_wildcard = rel_pattern[: match.start()]
-            static_prefix = before_wildcard.rsplit("/", 1)[0] if "/" in before_wildcard else ""
-        return rel_pattern, static_prefix
-
     def _resolve_pattern_matches_sync(self, pattern: str) -> list[str]:
         """Resolve either a glob wildcard pattern or an exact object key."""
         normalized = self._strip_matching_uri_prefix(pattern)
         if any(ch in normalized for ch in ("*", "?", "[")):
             return self.glob_sync(normalized)
         return [normalized] if self.exists_sync(normalized) else []
+
+    async def _resolve_pattern_matches_async(self, pattern: str) -> list[str]:
+        """Resolve URI-aware patterns through native asynchronous listing and metadata."""
+        normalized = self._strip_matching_uri_prefix(pattern)
+        if any(ch in normalized for ch in ("*", "?", "[")):
+            return await self.glob_async(normalized)
+        return [normalized] if await self.exists_async(normalized) else []
 
     def _qualify(self, path: str | Path) -> str:
         """Normalize a relative, URI-qualified, or local-root-qualified path into an ObjectStore key."""
@@ -734,6 +669,22 @@ class ObjectStoreBackend:
         return qualified_path
 
     @staticmethod
+    def _reject_traversal(path: str) -> None:
+        """Reject parent segments before resolving a key or configured namespace."""
+        if ".." in path.split("/"):
+            msg = f"Path traversal rejected: {path}"
+            raise ValueError(msg)
+
+    @staticmethod
+    def _write_options(kwargs: dict[str, Any]) -> dict[str, Any]:
+        """Select supported native conditional and metadata write options."""
+        return {
+            key: kwargs[key]
+            for key in ("content_type", "attributes", "if_not_exists", "if_match", "if_none_match")
+            if key in kwargs
+        }
+
+    @staticmethod
     def _filter_recursive(paths: list[str], *, prefix: str, recursive: bool) -> list[str]:
         """Filter listed relative paths when `recursive=False`."""
         if recursive:
@@ -748,6 +699,12 @@ class ObjectStoreBackend:
             if "/" not in remainder:
                 filtered.append(item)
         return filtered
+
+    @staticmethod
+    def _normalize_arrow_write_options(file_format: str, options: dict[str, Any]) -> None:
+        """Preserve PyArrow's default Parquet size for omitted, None, and -1 values."""
+        if file_format == "parquet" and options.get("row_group_size") in (None, -1):
+            options["row_group_size"] = 1024 * 1024
 
     @staticmethod
     def _infer_arrow_format(path: str | Path) -> str:
@@ -777,13 +734,22 @@ def register_storage_alias(
     **kwargs: Any,
 ) -> None:
     """Register `ObjectStoreBackend` under `alias` in SQLSpec's `storage_registry`."""
-    ObjectStoreBackend.register_alias(
-        alias,
-        uri_or_store,
-        registry=registry,
-        base_path=base_path,
-        **kwargs,
+    reg_mod = ensure_module("sqlspec.storage.registry", package="sqlspec", extra="sqlspec")
+    target_registry = reg_mod.storage_registry if registry is None else registry
+    backend_config: dict[str, Any] = dict(kwargs)
+    if base_path:
+        backend_config["base_path"] = base_path
+    if isinstance(uri_or_store, (SyncObjectStore, AsyncObjectStore)):
+        stored_uri = uri_or_store.url
+        backend_config["store"] = uri_or_store
+    else:
+        stored_uri = uri_or_store
+    target_registry._alias_configs[alias] = (
+        cast("type[ObjectStoreProtocol]", ObjectStoreBackend),
+        stored_uri,
+        backend_config,
     )
+    target_registry.clear_cache(alias)
 
 
 def build_duckdb_gcs_secret_sql(
@@ -791,21 +757,27 @@ def build_duckdb_gcs_secret_sql(
     config: GCSConfig | None = None,
     *,
     bearer_token: str | None = None,
-) -> tuple[str, tuple[str]]:
-    """Build parameterized DuckDB `httpfs` GCS bearer-token `CREATE OR REPLACE SECRET` SQL and parameters.
+) -> str:
+    """Build a DuckDB `httpfs` GCS bearer-token `CREATE OR REPLACE SECRET` statement.
 
     Resolves an OAuth2 bearer token via `GCSConfig.resolve_adc_token()` (including optional
-    `target_service_account` impersonation) when `bearer_token` is omitted.
+    `target_service_account` impersonation) when `bearer_token` is omitted. DuckDB `CREATE SECRET` DDL does not
+    accept prepared parameters, so the token is rendered as a single-quoted SQL literal with embedded quotes
+    doubled, and tokens containing NUL, CR, or LF characters are rejected before rendering.
+
+    Raises:
+        ImproperConfigurationError: When neither `bearer_token` nor `config` yields a non-blank bearer token.
+        ValueError: When `secret_name` is not a valid SQL identifier or the token contains NUL, CR, or LF.
     """
     validate_identifier(secret_name, "DuckDB secret name", allow_dots=False)
     token = bearer_token
     if token is None and config is not None:
         token = config.resolve_adc_token()
-    if not token:
-        raise MissingDependencyError(
-            "google-auth",
-            install_package="google-auth",
-            extra="sqlspec",
-        )
-    sql = f"CREATE OR REPLACE SECRET {secret_name} (TYPE gcs, BEARER_TOKEN ?)"
-    return sql, (token,)
+    if token is None or not token.strip():
+        msg = "DuckDB GCS secret requires a non-empty bearer token from `bearer_token` or `GCSConfig` credentials"
+        raise ImproperConfigurationError(msg)
+    if any(char in token for char in ("\x00", "\r", "\n")):
+        msg = "DuckDB GCS bearer token must not contain NUL, CR, or LF characters"
+        raise ValueError(msg)
+    escaped = token.replace("'", "''")
+    return f"CREATE OR REPLACE SECRET {secret_name} (TYPE gcs, BEARER_TOKEN '{escaped}')"

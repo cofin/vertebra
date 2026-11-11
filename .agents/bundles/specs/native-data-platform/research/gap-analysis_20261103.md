@@ -1,28 +1,66 @@
 ---
 type: Research
 flow_id: native-data-platform
-title: Broker, native driver, and storage gap analysis
-description: Verified gaps between today's code and the two required features (shared broker pools for any SQLSpec/AA config; Vertebra-native Rust drivers and storage), with work items mapped to child flows.
+title: "Broker, native driver, and storage gap analysis"
+description: "Verified gaps between baseline code and shared broker pools, standalone Rust database drivers, and complete object storage, mapped to owning child flows."
 status: stable
 state: promoted
 promoted_to: native-data-platform
-created_at: 2026-11-03T04:10:00Z
-updated_at: 2026-11-03T04:10:00Z
-tags: [research, broker, drivers, storage, gap-analysis]
+created_at: "2026-11-03T04:10:00Z"
+updated_at: "2026-11-07T04:15:00Z"
+generated:
+  by: flow-setup
+  at: "2026-11-07T04:15:00Z"
+verified:
+  - by: agent:flow-setup
+    at: "2026-11-07T04:15:00Z"
+    commit: 9af810f5
 sources:
-  - resource: src/rs/vertebra-core/src/broker.rs
-  - resource: src/rs/vertebra-http/src/workers/factory.rs
-  - resource: src/rs/vertebra-db/src/
-  - resource: src/rs/vertebra-storage/src/
-  - resource: src/py/vertebra/extensions/broker/transport.py
-  - resource: src/py/vertebra/extensions/sqlspec/plugin.py
-  - resource: src/py/vertebra/extensions/sqlspec/proxy.py
-  - resource: src/py/vertebra/extensions/sqlspec/provider.py
-  - resource: src/py/vertebra/extensions/alchemy/plugin.py
-  - resource: src/py/vertebra/storage/_store.py
+  - id: core-broker
+    resource: src/rs/vertebra-core/src/broker.rs
+    title: Shared-memory broker lease table implementation
+  - id: http-factory
+    resource: src/rs/vertebra-http/src/workers/factory.rs
+    title: Worker supervisor SHM broker wiring
+  - id: db-lib
+    resource: src/rs/vertebra-db/src/lib.rs
+    title: Shared vertebra-db codecs and connection primitives
+  - id: storage-lib
+    resource: src/rs/vertebra-storage/src/lib.rs
+    title: PyO3 bindings for vertebra-storage
+  - id: broker-transport
+    resource: src/py/vertebra/extensions/broker/transport.py
+    title: Python SHM broker transport classes
+  - id: sqlspec-plugin
+    resource: src/py/vertebra/extensions/sqlspec/plugin.py
+    title: SQLSpec plugin and proxy configuration
+  - id: sqlspec-proxy
+    resource: src/py/vertebra/extensions/sqlspec/proxy.py
+    title: SQLSpec proxy driver wrappers
+  - id: sqlspec-provider
+    resource: src/py/vertebra/extensions/sqlspec/provider.py
+    title: SQLSpec provider Arrow result surface
+  - id: alchemy-plugin
+    resource: src/py/vertebra/extensions/alchemy/plugin.py
+    title: Advanced Alchemy plugin configuration
+  - id: storage-store
+    resource: src/py/vertebra/storage/_store.py
+    title: Python object storage facade
+tags:
+  - research
+  - broker
+  - drivers
+  - storage
+  - gap-analysis
 ---
 
 # Gap Analysis: Shared Broker Pools, Native Drivers, Storage
+
+<!-- truth: start -->
+- **Broker Admission vs. Pool Ownership**: `ShmLeaseTable` (`vertebra-core`) and `vertebra-http` worker wiring provide slot admission and crash reclamation hooks, while cross-worker RPC pooling (`dbrpc`), `ProxySyncDriver`/`ProxyAsyncDriver`, and `BrokerPool` belong to `broker-pool-sharing` [^core-broker] [^http-factory] [^broker-transport] [^sqlspec-plugin] [^sqlspec-proxy] [^sqlspec-provider] [^alchemy-plugin].
+- **Native Driver Cutovers**: Relational, OLAP, and KV engines require dedicated per-engine Rust crates (`vertebra-<engine>`) sharing `vertebra-db` primitives to eliminate Python client, `sqlite3`, and `memory://` stand-ins [^db-lib].
+- **Storage Completeness Scope**: `vertebra-storage` and `vertebra.storage` require streaming reads/uploads, unified `vertebra._vertebra` GCP token caches, fail-closed constructors, and complete SQLSpec, Advanced Alchemy, Django, and Litestar contracts [^storage-lib] [^storage-store].
+<!-- truth: end -->
 
 Baseline: `main @ 142cc49`. Confidence is high unless marked otherwise. Each item names its owning child flow in brackets.
 
@@ -183,3 +221,14 @@ Baseline: `main @ 142cc49`. Confidence is high unless marked otherwise. Each ite
 6. `native-oracle-driver`.
 
 The storage and remaining-fakes items run in parallel.
+
+[^core-broker]: `src/rs/vertebra-core/src/broker.rs` — Shared-memory broker lease table implementation.
+[^http-factory]: `src/rs/vertebra-http/src/workers/factory.rs` — Worker supervisor SHM broker wiring.
+[^db-lib]: `src/rs/vertebra-db/src/lib.rs` — Shared vertebra-db codecs and connection primitives.
+[^storage-lib]: `src/rs/vertebra-storage/src/lib.rs` — PyO3 bindings for vertebra-storage.
+[^broker-transport]: `src/py/vertebra/extensions/broker/transport.py` — Python SHM broker transport classes.
+[^sqlspec-plugin]: `src/py/vertebra/extensions/sqlspec/plugin.py` — SQLSpec plugin and proxy configuration.
+[^sqlspec-proxy]: `src/py/vertebra/extensions/sqlspec/proxy.py` — SQLSpec proxy driver wrappers.
+[^sqlspec-provider]: `src/py/vertebra/extensions/sqlspec/provider.py` — SQLSpec provider Arrow result surface.
+[^alchemy-plugin]: `src/py/vertebra/extensions/alchemy/plugin.py` — Advanced Alchemy plugin configuration.
+[^storage-store]: `src/py/vertebra/storage/_store.py` — Python object storage facade.

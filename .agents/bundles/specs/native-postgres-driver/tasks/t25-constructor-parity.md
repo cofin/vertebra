@@ -1,20 +1,20 @@
 ---
 type: Task
-id: native-postgres-driver:t25
-title: Characterize the complete sync and async constructor contract
+id: "native-postgres-driver:t25"
+title: "Characterize the complete sync and async constructor contract"
+description: "Characterize the complete sync and async constructor contract for the standalone vertebra-postgres native driver."
+status: stable
 state: pending
 priority: P1
 verification_strategy: characterization
 depends_on:
-- native-postgres-driver:t24
+  - "native-postgres-driver:t24"
 files:
-- src/py/tests/unit/db/test_postgres_driver.py
+  - src/py/tests/unit/db/test_postgres_driver.py
 tests:
-- src/py/tests/unit/db/test_postgres_driver.py::test_native_constructor_signature_parity
-- src/py/tests/unit/db/test_postgres_driver.py::test_native_constructor_full_options_are_pure
-- src/py/tests/unit/db/test_postgres_driver.py::test_native_constructor_mapping_copy
+  - src/py/tests/unit/db/test_postgres_driver.py
 plan_revision: 2
-plan_commit: "7657e8b7c2c96bdda6821aec70a2b603f438a127"
+plan_commit: 9af810f5
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -24,17 +24,13 @@ next_step: null
 last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
-created_at: '2026-11-05T18:25:07Z'
-updated_at: '2026-11-06T06:30:00Z'
+created_at: "2026-11-05T18:25:07Z"
+updated_at: "2026-11-07T04:15:00Z"
 commit: null
 tags:
-- postgres
-- connection
-- native
-requirements:
-- R2
-- R6
-- R7
+  - postgres
+  - connection
+  - native
 ---
 
 # Characterize the complete sync and async constructor contract
