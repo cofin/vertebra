@@ -1,13 +1,14 @@
 # Bundle Activity Log
 
-## [2026-11-10T23:44:00Z] flow-implement | native-postgres-driver (ch21-live-notifications)
+## [2026-11-11T00:41:00Z] flow-implement | native-postgres-driver (ch21-live-notifications)
 
-Implemented Chapter 21 (`ch21-live-notifications`, `3/3` tasks verified through `99f80d07`, raising flow progress to `78/118` tasks across `33` chapters on `feat/native-postgres-driver`): `session::establish_standalone_connection(config, replication_database)` shared standalone dialer, `PostgresListener` with bounded `1024`-frame + `8 MiB` overflow fail-closed termination, `push_front_unconsumed` retention, `PoolerMode` direct/session enforcement, `1..=63` UTF-8 byte channel validation, and optional `reconnect = true` credential refresh / `reconnected_gap` tracking, `SyncPostgresClient`/`AsyncPostgresClient.open_listener` and `AsyncPostgresListener` with `PendingDeliveryGuard` and read-only `closed`, `events.py::PostgresNotificationDriver`, legacy `driver.py::_publish_notification`, and live `PostgresNotificationSource` serialized subscription reconciliation and `ChangeFeed` hydration.
+Completed and reviewed Chapter 21 (`ch21-live-notifications`, `3/3` tasks, reviewed checkpoint `f56ec4cd`, raising flow progress to `21/33` chapters and `78/118` tasks on `feat/native-postgres-driver`): `session::establish_standalone_connection(config, replication_database)` shared standalone dialer, `PostgresListener` with bounded `1024`-frame + `8 MiB` overflow fail-closed termination, `push_front_unconsumed` retention, `PoolerMode` direct/session enforcement, `1..=63` UTF-8 byte channel validation, `Subscribe`/`Unsubscribe` control signaling alongside `close_notify` shutdown wakeups, and optional `reconnect = true` credential refresh / `reconnected_gap` tracking, `SyncPostgresClient`/`AsyncPostgresClient.open_listener` and `AsyncPostgresListener` with `PendingDeliveryGuard` and read-only `closed`, `events.py::PostgresNotificationDriver`, legacy `driver.py::_publish_notification`, and live `PostgresNotificationSource` with single-pass lock-serialized startup subscription convergence and `ChangeFeed` hydration.
 
-Functional task commits:
+Functional task and review commits:
 - `native-postgres-driver:ch21:t01`: `356e79c1` — `establish_standalone_connection`, `PostgresListener`, bounded pump, and reconnect gap state.
 - `native-postgres-driver:ch21:t02`: `fa483036` — PyO3 `AsyncPostgresListener`, `open_listener`, `PendingDeliveryGuard`, and `closed` state.
 - `native-postgres-driver:ch21:t03`: `2a575ce3` — `PostgresNotificationDriver` protocol, legacy `_publish_notification`, and live `PostgresNotificationSource`.
+- Chapter 21 review checkpoints: `be041002`, `99f80d07`, `f56ec4cd` (correctness and independent quality reviews passed cleanly; advancing to `ch22-copyboth-and-pgoutput-decoding`).
 
 ## [2026-11-10T21:55:00Z] flow-implement | native-postgres-driver (ch20-arrow-copy-import-and-portals)
 

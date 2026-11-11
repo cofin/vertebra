@@ -5,7 +5,7 @@ chapter_id: ch21-live-notifications
 title: "Chapter 21: Dedicated LISTEN/NOTIFY Sessions, Async Listener Bridges, and Active Notification Sources"
 description: Implement dedicated non-pooled PostgreSQL LISTEN/NOTIFY sessions with bounded overflow and optional reconnect gap tracking, expose AsyncPostgresListener across sync and async native clients, and wire PostgresNotificationSource over typed adapter protocols.
 status: stable
-state: in_progress
+state: completed
 planning_status: complete
 depends_on_chapters:
   - ch20-arrow-copy-import-and-portals
@@ -13,15 +13,21 @@ replan_trigger: null
 current_task: null
 plan_revision: 6
 plan_commit: ef86844f
-state_revision: 2
+state_revision: 3
 last_verified_checkpoint: 99f80d07
-last_reviewed_commit: null
+last_reviewed_commit: f56ec4cd
 created_at: "2026-11-05T00:00:00Z"
-updated_at: "2026-11-11T00:36:00Z"
+updated_at: "2026-11-11T00:41:00Z"
 generated:
   by: flow-setup
   at: "2026-11-07T05:00:00Z"
 verified:
+  - by: agent:quality-reviewer
+    at: "2026-11-11T00:41:00Z"
+    commit: f56ec4cd
+  - by: agent:code-reviewer
+    at: "2026-11-11T00:40:00Z"
+    commit: f56ec4cd
   - by: agent:plan-generator
     at: "2026-11-10T14:45:00Z"
     commit: ef86844f
@@ -157,7 +163,7 @@ Progress: `[0/0 files documented in ch21]` (repository-wide public docs and OKF 
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `plan_revision: 6`, `plan_commit: ef86844f`; chapter `state: in_progress` awaiting zero-context chapter review (`last_verified_checkpoint: 99f80d07`; `make lint-all`, `postgres_notification_wire_tests` `11 passed`, `test_postgres_native_notifications.py` `72 passed`, `test_pg_dataplane_and_datafusion.py -k notif` `47 passed` -> exit `0`).
+- **Verified Baseline**: `plan_revision: 6`, `plan_commit: ef86844f`; chapter `state: completed` (`last_verified_checkpoint: 99f80d07`, `last_reviewed_commit: f56ec4cd`; `make lint-all`, `postgres_notification_wire_tests` `11 passed`, `test_postgres_native_notifications.py` `72 passed`, `test_pg_dataplane_and_datafusion.py -k notif` `47 passed`, and zero-context correctness + quality reviews passed cleanly).
 - **Remaining Tasks in Chapter**: None (`3/3` completed: `t01` `356e79c1`, `t02` `fa483036`, `t03` `2a575ce3`).
 - **Downstream Dependents**: Unblocks `ch22-copyboth-and-pgoutput-decoding` (`CopyBoth` logical replication reusing `establish_standalone_connection`), `ch24:t01` (`events.py` replication protocol), and `ch26:t04` (`dedicated-driver-event-hooks`).
 
