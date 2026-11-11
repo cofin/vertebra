@@ -23,6 +23,7 @@ exclude = [
     "**/py/vertebra/_mssql.pyi",
     "**/py/vertebra/_mysql.pyi",
     "**/py/vertebra/_oracle.pyi",
+    "**/py/vertebra/_postgres.pyi",
     "**/py/vertebra/_storage.pyi",
     "**/py/vertebra/_vertebra.pyi",
 ]

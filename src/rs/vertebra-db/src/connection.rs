@@ -123,6 +123,38 @@ impl TransportError {
     }
 }
 
+/// Expected server certificate identity for Cloud SQL (`:3307`) or AlloyDB (`:5433`) TLS 1.3 mTLS.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CloudPeerIdentity {
+    /// Cloud SQL `:3307`: try SAN verification against `server_name` when `Some`, falling back to Subject `CN == expected_cn`.
+    CloudSql {
+        server_name: Option<String>,
+        expected_cn: String,
+    },
+    /// AlloyDB `:5433`: require SAN verification against `expected_san` (`instanceIp` or `pscDnsName`), never falling back to Subject `CN` or CA-only.
+    AlloyDb { expected_san: String },
+}
+
+/// TCP keepalive parameters applied to a socket before protocol startup.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TcpKeepaliveConfig {
+    pub enabled: bool,
+    pub idle: Option<Duration>,
+    pub interval: Option<Duration>,
+    pub retries: Option<u32>,
+}
+
+impl Default for TcpKeepaliveConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            idle: None,
+            interval: None,
+            retries: None,
+        }
+    }
+}
+
 /// Network or IPC endpoint targeted by [`ConnectOptions`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EndpointTarget {
@@ -130,13 +162,14 @@ pub enum EndpointTarget {
     Tcp { host: String, port: u16 },
     /// Local Unix domain socket path.
     Unix { path: PathBuf },
-    /// Google Cloud SQL `:3307` mTLS proxy endpoint verifying server CN `project:instance`.
+    /// Google Cloud SQL `:3307` mTLS proxy endpoint verifying server SAN or Subject `CN`.
     CloudSql {
         instance: CloudSqlInstanceUri,
         addr: SocketAddr,
         server_ca_pem: Vec<u8>,
         client_cert_pem: Vec<u8>,
         client_key_pem: Vec<u8>,
+        peer_identity: CloudPeerIdentity,
     },
     /// Google Cloud AlloyDB `:5433` mTLS + `MetadataExchangeRequest` endpoint.
     AlloyDb {
@@ -148,6 +181,7 @@ pub enum EndpointTarget {
         user_agent: String,
         oauth2_token: String,
         auth_type: AuthType,
+        peer_identity: CloudPeerIdentity,
     },
 }
 
@@ -260,12 +294,138 @@ impl TransportStream {
         }
     }
 
+    /// Return the raw DER bytes of the verified peer leaf certificate when connected over TLS.
+    pub fn peer_leaf_der(&self) -> Option<&[u8]> {
+        match self {
+            Self::TlsTcp(tls) => tls
+                .get_ref()
+                .1
+                .peer_certificates()
+                .and_then(|certs| certs.first())
+                .map(CertificateDer::as_ref),
+            Self::PlainTcp(_) => None,
+            #[cfg(unix)]
+            Self::Unix(_) => None,
+        }
+    }
+
+    /// Apply TCP keepalive socket options (`SO_KEEPALIVE`, `TCP_KEEPIDLE`/`TCP_KEEPALIVE`,
+    /// `TCP_KEEPINTVL`, `TCP_KEEPCNT`) to the underlying TCP socket.
+    pub fn set_tcp_keepalive(&self, config: TcpKeepaliveConfig) -> Result<(), TransportError> {
+        if !config.enabled
+            && (config.idle.is_some() || config.interval.is_some() || config.retries.is_some())
+        {
+            return Err(TransportError::InvalidConfig(
+                "keepalive idle/interval/retries cannot be set when keepalives are disabled"
+                    .to_string(),
+            ));
+        }
+        if config.idle.is_some_and(|d| d.is_zero()) {
+            return Err(TransportError::InvalidConfig(
+                "keepalives_idle must be greater than zero".to_string(),
+            ));
+        }
+        if config.interval.is_some_and(|d| d.is_zero()) {
+            return Err(TransportError::InvalidConfig(
+                "keepalives_interval must be greater than zero".to_string(),
+            ));
+        }
+        if config.retries == Some(0) {
+            return Err(TransportError::InvalidConfig(
+                "keepalives_count must be greater than zero".to_string(),
+            ));
+        }
+
+        let tcp = match self {
+            Self::PlainTcp(tcp) => tcp,
+            Self::TlsTcp(tls) => tls.get_ref().0,
+            #[cfg(unix)]
+            Self::Unix(_) => {
+                return Err(TransportError::InvalidConfig(
+                    "TCP keepalives cannot be applied to a Unix domain socket".to_string(),
+                ));
+            }
+        };
+
+        let sock_ref = socket2::SockRef::from(tcp);
+        sock_ref.set_keepalive(config.enabled)?;
+        if config.enabled
+            && (config.idle.is_some() || config.interval.is_some() || config.retries.is_some())
+        {
+            let mut ka = socket2::TcpKeepalive::new();
+            if let Some(idle) = config.idle {
+                ka = ka.with_time(idle);
+            }
+            if let Some(interval) = config.interval {
+                ka = ka.with_interval(interval);
+            }
+            #[cfg(any(
+                target_os = "linux",
+                target_os = "macos",
+                target_os = "ios",
+                target_os = "freebsd",
+                target_os = "netbsd",
+                target_os = "tvos",
+                target_os = "watchos",
+            ))]
+            if let Some(retries) = config.retries {
+                ka = ka.with_retries(retries);
+            }
+            sock_ref.set_tcp_keepalive(&ka)?;
+        }
+        Ok(())
+    }
+
     /// Establish a transport connection (including TLS and Cloud SQL / AlloyDB handshakes when configured).
     pub async fn connect(options: &ConnectOptions) -> Result<Self, TransportError> {
         let timeout = options.connect_timeout;
-        tokio::time::timeout(timeout, Self::connect_inner(options))
+        let deadline = tokio::time::Instant::now() + timeout;
+        tokio::time::timeout_at(deadline, Self::connect_inner(options, deadline))
             .await
             .map_err(|_| TransportError::Timeout(timeout))?
+    }
+
+    /// Establish only the TCP + TLS 1.3 mTLS channel for an [`EndpointTarget::AlloyDb`] target
+    /// without sending `MetadataExchangeRequest`, allowing callers to validate or refresh login
+    /// credentials before calling [`finish_alloydb_metadata`].
+    pub async fn connect_alloydb_tls(options: &ConnectOptions) -> Result<Self, TransportError> {
+        let timeout = options.connect_timeout;
+        tokio::time::timeout(timeout, Self::connect_alloydb_tls_inner(options))
+            .await
+            .map_err(|_| TransportError::Timeout(timeout))?
+    }
+
+    async fn connect_alloydb_tls_inner(options: &ConnectOptions) -> Result<Self, TransportError> {
+        let EndpointTarget::AlloyDb {
+            addr,
+            server_ca_pem,
+            client_cert_pem,
+            client_key_pem,
+            peer_identity,
+            ..
+        } = &options.target
+        else {
+            return Err(TransportError::InvalidConfig(
+                "connect_alloydb_tls requires EndpointTarget::AlloyDb".to_string(),
+            ));
+        };
+        let tcp = TcpStream::connect(*addr).await?;
+        if options.tcp_nodelay {
+            tcp.set_nodelay(true)?;
+        }
+        let client_cfg = build_cloud_mtls_config(
+            server_ca_pem,
+            client_cert_pem,
+            client_key_pem,
+            peer_identity.clone(),
+        )?;
+        let server_name = cloud_sni_server_name(peer_identity, *addr);
+        let connector = TlsConnector::from(Arc::new(client_cfg));
+        let tls_stream = connector
+            .connect(server_name, tcp)
+            .await
+            .map_err(|e| TransportError::Tls(e.to_string()))?;
+        Ok(Self::TlsTcp(Box::new(tls_stream)))
     }
 
     /// Upgrade an existing plain [`TcpStream`] to TLS using `options` (for protocol `SSLRequest` / `STARTTLS`).
@@ -299,7 +459,10 @@ impl TransportStream {
         Ok(Self::TlsTcp(Box::new(tls_stream)))
     }
 
-    async fn connect_inner(options: &ConnectOptions) -> Result<Self, TransportError> {
+    async fn connect_inner(
+        options: &ConnectOptions,
+        absolute_deadline: tokio::time::Instant,
+    ) -> Result<Self, TransportError> {
         match &options.target {
             EndpointTarget::Tcp { host, port } => {
                 let tcp = TcpStream::connect((host.as_str(), *port)).await?;
@@ -327,11 +490,12 @@ impl TransportStream {
                 }
             }
             EndpointTarget::CloudSql {
-                instance,
+                instance: _,
                 addr,
                 server_ca_pem,
                 client_cert_pem,
                 client_key_pem,
+                peer_identity,
             } => {
                 let tcp = TcpStream::connect(*addr).await?;
                 if options.tcp_nodelay {
@@ -341,9 +505,9 @@ impl TransportStream {
                     server_ca_pem,
                     client_cert_pem,
                     client_key_pem,
-                    Some(instance.expected_server_cn()),
+                    peer_identity.clone(),
                 )?;
-                let server_name = ServerName::IpAddress(addr.ip().into());
+                let server_name = cloud_sni_server_name(peer_identity, *addr);
                 let connector = TlsConnector::from(Arc::new(client_cfg));
                 let tls_stream = connector
                     .connect(server_name, tcp)
@@ -351,40 +515,74 @@ impl TransportStream {
                     .map_err(|e| TransportError::Tls(e.to_string()))?;
                 Ok(Self::TlsTcp(Box::new(tls_stream)))
             }
-            EndpointTarget::AlloyDb {
-                cluster: _,
-                addr,
-                server_ca_pem,
-                client_cert_pem,
-                client_key_pem,
-                user_agent,
-                oauth2_token,
-                auth_type,
-            } => {
-                let tcp = TcpStream::connect(*addr).await?;
-                if options.tcp_nodelay {
-                    tcp.set_nodelay(true)?;
-                }
-                let client_cfg =
-                    build_cloud_mtls_config(server_ca_pem, client_cert_pem, client_key_pem, None)?;
-                let server_name = ServerName::IpAddress(addr.ip().into());
-                let connector = TlsConnector::from(Arc::new(client_cfg));
-                let mut tls_stream = connector
-                    .connect(server_name, tcp)
-                    .await
-                    .map_err(|e| TransportError::Tls(e.to_string()))?;
-                exchange_alloydb_metadata_over_stream(
-                    &mut tls_stream,
-                    user_agent,
-                    oauth2_token,
-                    *auth_type,
-                )
-                .await
-                .map_err(TransportError::Dialer)?;
-                Ok(Self::TlsTcp(Box::new(tls_stream)))
+            EndpointTarget::AlloyDb { .. } => {
+                let mut stream = Self::connect_alloydb_tls_inner(options).await?;
+                finish_alloydb_metadata(&mut stream, options, absolute_deadline).await?;
+                Ok(stream)
             }
         }
     }
+}
+
+/// Complete the AlloyDB `:5433` `MetadataExchangeRequest` / `MetadataExchangeResponse` frame
+/// exchange over an established [`TransportStream`] (after [`TransportStream::connect_alloydb_tls`])
+/// within `absolute_deadline`.
+pub async fn finish_alloydb_metadata(
+    stream: &mut TransportStream,
+    options: &ConnectOptions,
+    absolute_deadline: tokio::time::Instant,
+) -> Result<(), TransportError> {
+    let EndpointTarget::AlloyDb {
+        user_agent,
+        oauth2_token,
+        auth_type,
+        ..
+    } = &options.target
+    else {
+        return Err(TransportError::InvalidConfig(
+            "finish_alloydb_metadata requires EndpointTarget::AlloyDb".to_string(),
+        ));
+    };
+    let TransportStream::TlsTcp(tls_stream) = stream else {
+        return Err(TransportError::InvalidConfig(
+            "finish_alloydb_metadata requires an established TlsTcp stream".to_string(),
+        ));
+    };
+    if tokio::time::Instant::now() >= absolute_deadline {
+        return Err(TransportError::Timeout(options.connect_timeout));
+    }
+    tokio::time::timeout_at(
+        absolute_deadline,
+        exchange_alloydb_metadata_over_stream(
+            tls_stream.as_mut(),
+            user_agent,
+            oauth2_token,
+            *auth_type,
+        ),
+    )
+    .await
+    .map_err(|_| TransportError::Timeout(options.connect_timeout))?
+    .map_err(TransportError::Dialer)?;
+    Ok(())
+}
+
+fn cloud_sni_server_name(
+    peer_identity: &CloudPeerIdentity,
+    addr: SocketAddr,
+) -> ServerName<'static> {
+    let candidate = match peer_identity {
+        CloudPeerIdentity::CloudSql { server_name, .. } => server_name.as_deref(),
+        CloudPeerIdentity::AlloyDb { expected_san } => Some(expected_san.as_str()),
+    };
+    if let Some(raw) = candidate {
+        let trimmed = raw.trim().trim_end_matches('.');
+        if !trimmed.is_empty()
+            && let Ok(sn) = parse_server_name(trimmed)
+        {
+            return sn;
+        }
+    }
+    ServerName::IpAddress(addr.ip().into())
 }
 
 impl AsyncRead for TransportStream {
@@ -615,7 +813,7 @@ fn build_cloud_mtls_config(
     server_ca_pem: &[u8],
     client_cert_pem: &[u8],
     client_key_pem: &[u8],
-    expected_cn: Option<String>,
+    peer_identity: CloudPeerIdentity,
 ) -> Result<ClientConfig, TransportError> {
     install_rustls_ring_provider();
     let provider = Arc::new(rustls::crypto::ring::default_provider());
@@ -623,10 +821,13 @@ fn build_cloud_mtls_config(
     let inner = WebPkiServerVerifier::builder_with_provider(roots, Arc::clone(&provider))
         .build()
         .map_err(|e| TransportError::Tls(e.to_string()))?;
-    let verifier = Arc::new(CaAndOptionalCnVerifier { inner, expected_cn });
+    let verifier = Arc::new(CloudPeerVerifier {
+        inner,
+        peer_identity,
+    });
     let (certs, key) = parse_client_identity(client_cert_pem, client_key_pem)?;
     ClientConfig::builder_with_provider(provider)
-        .with_safe_default_protocol_versions()
+        .with_protocol_versions(&[&rustls::version::TLS13])
         .map_err(|e| TransportError::Tls(e.to_string()))?
         .dangerous()
         .with_custom_certificate_verifier(verifier)
@@ -672,6 +873,111 @@ impl ServerCertVerifier for CaAndOptionalCnVerifier {
             }
         }
         Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        self.inner.verify_tls12_signature(message, cert, dss)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        self.inner.verify_tls13_signature(message, cert, dss)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.inner.supported_verify_schemes()
+    }
+}
+
+#[derive(Debug)]
+struct CloudPeerVerifier {
+    inner: Arc<WebPkiServerVerifier>,
+    peer_identity: CloudPeerIdentity,
+}
+
+impl ServerCertVerifier for CloudPeerVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        server_name: &ServerName<'_>,
+        ocsp_response: &[u8],
+        now: UnixTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        match self.inner.verify_server_cert(
+            end_entity,
+            intermediates,
+            server_name,
+            ocsp_response,
+            now,
+        ) {
+            Ok(_) => {}
+            Err(rustls::Error::InvalidCertificate(
+                CertificateError::NotValidForName | CertificateError::NotValidForNameContext { .. },
+            )) => {}
+            Err(other) => return Err(other),
+        }
+
+        match &self.peer_identity {
+            CloudPeerIdentity::AlloyDb { expected_san } => {
+                let trimmed = expected_san.trim().trim_end_matches('.');
+                if trimmed.is_empty() {
+                    return Err(rustls::Error::InvalidCertificate(
+                        CertificateError::NotValidForName,
+                    ));
+                }
+                let sn = parse_server_name(trimmed).map_err(|_| {
+                    rustls::Error::InvalidCertificate(CertificateError::NotValidForName)
+                })?;
+                self.inner
+                    .verify_server_cert(end_entity, intermediates, &sn, ocsp_response, now)
+            }
+            CloudPeerIdentity::CloudSql {
+                server_name: sni_opt,
+                expected_cn,
+            } => {
+                if let Some(raw_name) = sni_opt.as_deref().map(str::trim).filter(|s| !s.is_empty())
+                {
+                    if let Ok(sn) = parse_server_name(raw_name)
+                        && self
+                            .inner
+                            .verify_server_cert(end_entity, intermediates, &sn, ocsp_response, now)
+                            .is_ok()
+                    {
+                        return Ok(ServerCertVerified::assertion());
+                    }
+                    let stripped = raw_name.trim_end_matches('.');
+                    if !stripped.is_empty()
+                        && stripped != raw_name
+                        && let Ok(sn) = parse_server_name(stripped)
+                        && self
+                            .inner
+                            .verify_server_cert(end_entity, intermediates, &sn, ocsp_response, now)
+                            .is_ok()
+                    {
+                        return Ok(ServerCertVerified::assertion());
+                    }
+                }
+                if !expected_cn.is_empty()
+                    && extract_der_common_name(end_entity.as_ref()).as_deref()
+                        == Some(expected_cn.as_str())
+                {
+                    return Ok(ServerCertVerified::assertion());
+                }
+                Err(rustls::Error::InvalidCertificate(
+                    CertificateError::NotValidForName,
+                ))
+            }
+        }
     }
 
     fn verify_tls12_signature(
@@ -1132,6 +1438,10 @@ mod tests {
                 server_ca_pem: csql_pki.ca_pem.clone(),
                 client_cert_pem: csql_pki.client_cert_pem.clone(),
                 client_key_pem: csql_pki.client_key_pem.clone(),
+                peer_identity: CloudPeerIdentity::CloudSql {
+                    server_name: None,
+                    expected_cn: "proj-a:inst-1".to_string(),
+                },
             },
             tls_mode: TlsMode::VerifyFull,
             ca_pem: None,
@@ -1143,6 +1453,7 @@ mod tests {
             application_name: None,
         };
         let mut csql_stream = TransportStream::connect(&csql_opts).await.unwrap();
+        assert!(csql_stream.peer_leaf_der().is_some());
         let mut tag = [0u8; 4];
         csql_stream.read_exact(&mut tag).await.unwrap();
         assert_eq!(&tag, b"CSQL");
@@ -1161,6 +1472,10 @@ mod tests {
                 server_ca_pem: csql_pki.ca_pem,
                 client_cert_pem: csql_pki.client_cert_pem,
                 client_key_pem: csql_pki.client_key_pem,
+                peer_identity: CloudPeerIdentity::CloudSql {
+                    server_name: None,
+                    expected_cn: "proj-a:other-inst".to_string(),
+                },
             },
             ..csql_opts
         };
@@ -1170,7 +1485,7 @@ mod tests {
         ));
         csql_bad_srv.await.unwrap();
 
-        let alloy_pki = TestPki::generate(&[], "alloydb-psc");
+        let alloy_pki = TestPki::generate(&["127.0.0.1"], "alloydb-psc");
         let alloy_acceptor = alloy_pki.server_acceptor(true);
         let alloy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let alloy_addr = alloy_listener.local_addr().unwrap();
@@ -1200,6 +1515,9 @@ mod tests {
                 user_agent: "vertebra-db/test".to_string(),
                 oauth2_token: "mock-oauth-token".to_string(),
                 auth_type: AuthType::Iam,
+                peer_identity: CloudPeerIdentity::AlloyDb {
+                    expected_san: "127.0.0.1".to_string(),
+                },
             },
             tls_mode: TlsMode::VerifyFull,
             ca_pem: None,
@@ -1330,6 +1648,10 @@ mod tests {
                     server_ca_pem: pki.ca_pem,
                     client_cert_pem: pki.client_cert_pem,
                     client_key_pem: pki.client_key_pem,
+                    peer_identity: CloudPeerIdentity::CloudSql {
+                        server_name: None,
+                        expected_cn: "proj-a:inst-1".to_string(),
+                    },
                 },
                 tls_mode: TlsMode::VerifyFull,
                 ca_pem: None,
@@ -1346,5 +1668,119 @@ mod tests {
             ));
             srv.await.unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn tcp_keepalive_applies_to_tcp_and_rejects_unix_or_invalid_bounds() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let srv = tokio::spawn(async move {
+            let (_sock, _) = listener.accept().await.unwrap();
+        });
+        let opts = ConnectOptions::tcp("127.0.0.1", addr.port());
+        let stream = TransportStream::connect(&opts).await.unwrap();
+        stream
+            .set_tcp_keepalive(TcpKeepaliveConfig {
+                enabled: true,
+                idle: Some(Duration::from_secs(30)),
+                interval: Some(Duration::from_secs(10)),
+                retries: Some(3),
+            })
+            .expect("apply keepalive");
+        stream
+            .set_tcp_keepalive(TcpKeepaliveConfig {
+                enabled: false,
+                idle: None,
+                interval: None,
+                retries: None,
+            })
+            .expect("disable keepalive");
+        assert!(matches!(
+            stream.set_tcp_keepalive(TcpKeepaliveConfig {
+                enabled: false,
+                idle: Some(Duration::from_secs(10)),
+                interval: None,
+                retries: None,
+            }),
+            Err(TransportError::InvalidConfig(_))
+        ));
+        srv.await.unwrap();
+
+        #[cfg(unix)]
+        {
+            let dir = tempfile::tempdir().unwrap();
+            let sock_path = dir.path().join("ka.sock");
+            let unix_listener = tokio::net::UnixListener::bind(&sock_path).unwrap();
+            let unix_srv = tokio::spawn(async move {
+                let _ = unix_listener.accept().await.unwrap();
+            });
+            let unix_stream = TransportStream::connect(&ConnectOptions::unix(&sock_path))
+                .await
+                .unwrap();
+            assert!(matches!(
+                unix_stream.set_tcp_keepalive(TcpKeepaliveConfig::default()),
+                Err(TransportError::InvalidConfig(_))
+            ));
+            unix_srv.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn alloydb_split_transport_stages() {
+        let alloy_pki = TestPki::generate(&["127.0.0.1"], "alloydb-split");
+        let alloy_acceptor = alloy_pki.server_acceptor(true);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let srv = tokio::spawn(async move {
+            let (sock, _) = listener.accept().await.unwrap();
+            let mut tls = alloy_acceptor.accept(sock).await.unwrap();
+            let mut hdr = [0u8; 4];
+            tls.read_exact(&mut hdr).await.unwrap();
+            let len = u32::from_be_bytes(hdr) as usize;
+            let mut body = vec![0u8; len];
+            tls.read_exact(&mut body).await.unwrap();
+            let resp = encode_alloydb_metadata_response(1, "");
+            tls.write_all(&resp).await.unwrap();
+            tls.write_all(b"SPLIT").await.unwrap();
+        });
+
+        let opts = ConnectOptions {
+            target: EndpointTarget::AlloyDb {
+                cluster: AlloyDbClusterUri::parse(
+                    "projects/p1/locations/us-central1/clusters/c1/instances/i1",
+                )
+                .unwrap(),
+                addr,
+                server_ca_pem: alloy_pki.ca_pem,
+                client_cert_pem: alloy_pki.client_cert_pem,
+                client_key_pem: alloy_pki.client_key_pem,
+                user_agent: "vertebra-db/split-test".to_string(),
+                oauth2_token: "split-oauth-token".to_string(),
+                auth_type: AuthType::Iam,
+                peer_identity: CloudPeerIdentity::AlloyDb {
+                    expected_san: "127.0.0.1".to_string(),
+                },
+            },
+            tls_mode: TlsMode::VerifyFull,
+            ca_pem: None,
+            client_cert_pem: None,
+            client_key_pem: None,
+            server_name: None,
+            connect_timeout: DEFAULT_CONNECT_TIMEOUT,
+            tcp_nodelay: true,
+            application_name: None,
+        };
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let mut stream = TransportStream::connect_alloydb_tls(&opts).await.unwrap();
+        assert!(stream.is_tls());
+        assert!(stream.peer_leaf_der().is_some());
+        finish_alloydb_metadata(&mut stream, &opts, deadline)
+            .await
+            .unwrap();
+        let mut buf = [0u8; 5];
+        stream.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"SPLIT");
+        srv.await.unwrap();
     }
 }

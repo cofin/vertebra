@@ -53,6 +53,10 @@ jobs:
             path: src/rs/vertebra-oracle
             module: vertebra._oracle
             exports: SyncOracleClient AsyncOracleClient SyncOraclePool AsyncOraclePool
+          - name: postgres
+            path: src/rs/vertebra-postgres
+            module: vertebra._postgres
+            exports: SyncPostgresClient AsyncPostgresClient
           - name: spanner
             path: src/rs/vertebra-spanner
             module: vertebra._spanner
@@ -87,6 +91,10 @@ jobs:
         uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
+
+      - name: Check Windows MSVC targets for postgres
+        if: runner.os == 'Windows' && matrix.package.name == 'postgres'
+        run: cargo check --manifest-path src/rs/Cargo.toml -p vertebra-db -p vertebra-postgres --all-targets
 
       - name: Build wheels
         uses: pypa/cibuildwheel@v4.3.5
@@ -127,7 +135,7 @@ jobs:
       - name: Build source distributions
         run: |
           uv build --sdist --out-dir dist
-          for package in bigquery bundler duckdb mssql mysql oracle spanner storage; do
+          for package in bigquery bundler duckdb mssql mysql oracle postgres spanner storage; do
             uv build "src/rs/vertebra-$package" --sdist --out-dir dist
           done
       - uses: actions/upload-artifact@v7
@@ -152,8 +160,8 @@ jobs:
         run: |
           version=$(uv run --no-project --python 3.12 python -c "from pathlib import Path; print(next(Path('dist').glob('vertebra_core-*.whl')).name.split('-')[1])")
           uv venv --python 3.12 "$RUNNER_TEMP/wheel-smoke"
-          uv pip install --python "$RUNNER_TEMP/wheel-smoke/bin/python" --no-index --no-deps --find-links "$GITHUB_WORKSPACE/dist" vertebra-core vertebra-bigquery vertebra-bundler vertebra-duckdb vertebra-mssql vertebra-mysql vertebra-oracle vertebra-spanner vertebra-storage
-          uv pip install --python "$RUNNER_TEMP/wheel-smoke/bin/python" --only-binary :all: --find-links "$GITHUB_WORKSPACE/dist" "vertebra-core[bigquery,bundler,duckdb,mssql,mysql,oracle,spanner,storage]==$version"
+          uv pip install --python "$RUNNER_TEMP/wheel-smoke/bin/python" --no-index --no-deps --find-links "$GITHUB_WORKSPACE/dist" vertebra-core vertebra-bigquery vertebra-bundler vertebra-duckdb vertebra-mssql vertebra-mysql vertebra-oracle vertebra-postgres vertebra-spanner vertebra-storage
+          uv pip install --python "$RUNNER_TEMP/wheel-smoke/bin/python" --only-binary :all: --find-links "$GITHUB_WORKSPACE/dist" "vertebra-core[bigquery,bundler,duckdb,mssql,mysql,oracle,postgres,spanner,storage]==$version"
       - name: Check installed namespace and native exports
         shell: bash
         working-directory: ${{ runner.temp }}
@@ -174,6 +182,7 @@ jobs:
               "mssql": ("SyncMSSQLClient", "AsyncMSSQLClient"),
               "mysql": ("SyncMySQLClient", "AsyncMySQLClient"),
               "oracle": ("SyncOracleClient", "AsyncOracleClient", "SyncOraclePool", "AsyncOraclePool"),
+              "postgres": ("SyncPostgresClient", "AsyncPostgresClient"),
               "spanner": ("SyncSpannerClient", "AsyncSpannerClient"),
               "storage": ("SyncObjectStore", "AsyncObjectStore"),
           }.items():
@@ -181,11 +190,15 @@ jobs:
               assert pathlib.Path(module.__file__).is_relative_to(sys.prefix)
               assert all(hasattr(module, export) for export in exports)
               assert importlib.metadata.version(f"vertebra-{name}") == vertebra.__version__
+          pg_mod = importlib.import_module("vertebra._postgres")
+          assert pg_mod.SyncPostgresClient(user="u", database="d").closed is True
+          assert pg_mod.AsyncPostgresClient(user="u", database="d").parameters == {}
           assert not hasattr(_vertebra, "SyncBigQueryClient")
           assert not hasattr(_vertebra, "SyncDuckDBClient")
           assert not hasattr(_vertebra, "SyncMSSQLClient")
           assert not hasattr(_vertebra, "SyncMySQLClient")
           assert not hasattr(_vertebra, "SyncOracleClient")
+          assert not hasattr(_vertebra, "SyncPostgresClient")
           assert not hasattr(_vertebra, "SyncSpannerClient")
           assert pathlib.Path(vertebra.__file__).is_relative_to(sys.prefix)
           PY

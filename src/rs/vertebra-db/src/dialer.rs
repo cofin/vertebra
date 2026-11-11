@@ -9,7 +9,7 @@ use vertebra_core::proto::{
 };
 
 /// Authentication mode for Cloud SQL and AlloyDB connections.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[repr(u32)]
 pub enum AuthType {
     /// Built-in database password authentication (`1` in AlloyDB `MetadataExchangeRequest`).
@@ -37,7 +37,7 @@ impl AuthType {
 }
 
 /// Network IP selection mode for Cloud SQL and AlloyDB instances.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum IpType {
     /// Public IPv4 endpoint.
     Public,
@@ -62,7 +62,7 @@ impl IpType {
 }
 
 /// Parsed Google Cloud SQL instance connection name (`project:region:instance`).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct CloudSqlInstanceUri {
     pub project: String,
     pub region: String,
@@ -128,7 +128,7 @@ impl CloudSqlInstanceUri {
 }
 
 /// Parsed Google Cloud AlloyDB instance URI (`projects/<p>/locations/<l>/clusters/<c>/instances/<i>`).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct AlloyDbClusterUri {
     pub project: String,
     pub location: String,

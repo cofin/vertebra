@@ -81,6 +81,7 @@ title = "Rust runtime and IPC"
 paths = [
   "src/rs/vertebra-core/**",
   "src/rs/vertebra-db/**",
+  "src/rs/vertebra-postgres/**",
   "src/rs/vertebra-storage/**",
   "src/rs/*"
 ]
@@ -176,6 +177,7 @@ paths = [
   "src/rs/vertebra-mysql/**",
   "src/rs/vertebra-bigquery/**",
   "src/rs/vertebra-mssql/**",
+  "src/rs/vertebra-postgres/**",
   "src/rs/vertebra-spanner/**",
   "src/rs/vertebra-duckdb/**",
   "src/rs/vertebra-oracle/**",
@@ -187,6 +189,7 @@ paths = [
   "src/py/vertebra/_mysql.pyi",
   "src/py/vertebra/_bigquery.pyi",
   "src/py/vertebra/_mssql.pyi",
+  "src/py/vertebra/_postgres.pyi",
   "src/py/vertebra/_spanner.pyi",
   "src/py/vertebra/_duckdb.pyi",
   "src/py/vertebra/_oracle.pyi"

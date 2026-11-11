@@ -25,6 +25,7 @@ exclude = [
     "**/py/vertebra/_duckdb.pyi",
     "**/py/vertebra/_mssql.pyi",
     "**/py/vertebra/_mysql.pyi",
+    "**/py/vertebra/_postgres.pyi",
     "**/py/vertebra/_spanner.pyi",
     "**/py/vertebra/_storage.pyi",
     "**/py/vertebra/_vertebra.pyi",

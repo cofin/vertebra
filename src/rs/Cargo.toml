@@ -13,6 +13,7 @@ members = [
     "vertebra-spanner",
     "vertebra-duckdb",
     "vertebra-oracle",
+    "vertebra-postgres",
 ]
 
 [workspace.package]
@@ -87,6 +88,12 @@ quinn = { version = "0.11.12", default-features = false, features = ["runtime-to
 h3 = "0.0.8"
 h3-quinn = "0.0.10"
 windows-sys = { version = "0.61", features = ["Win32_System_Memory", "Win32_System_SystemInformation", "Win32_System_Threading"] }
+
+[profile.dev.package.num-bigint-dig]
+opt-level = 3
+
+[profile.dev.package.rsa]
+opt-level = 3
 
 [profile.release]
 lto = true

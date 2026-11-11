@@ -675,8 +675,8 @@ async def test_channel_bus_shared_feed_publish_and_notification_hydration() -> N
         def __init__(self) -> None:
             self.parameters: Any = None
 
-        def execute(self, sql: str, parameters: Any) -> None:
-            self.parameters = parameters
+        async def _publish_notification(self, channel: str, payload: str) -> None:
+            self.parameters = (channel, payload)
 
     driver = Driver()
     feed = ChangeFeed(CDCConfig(spill_threshold_bytes=16))

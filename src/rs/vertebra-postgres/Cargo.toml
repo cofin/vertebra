@@ -1,0 +1,54 @@
+[package]
+name = "vertebra-postgres"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Standalone native PostgreSQL Protocol 3.0 client and pool extension for Vertebra"
+
+[lib]
+name = "_postgres"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+extension-module = ["pyo3/extension-module"]
+
+[dependencies]
+arrow-array = { version = "=60.1.0", default-features = false }
+arrow-buffer = { version = "=60.1.0", default-features = false }
+arrow-ipc = { version = "=60.1.0", default-features = false }
+arrow-schema = { version = "=60.1.0", default-features = false }
+bytes = { workspace = true }
+fallible-iterator = "=0.2.0"
+half = "=2.7.1"
+jiff = { version = "=0.2.39", default-features = false, features = ["std", "tzdb-bundle-always"] }
+postgres-protocol = "=0.6.12"
+pyo3 = { workspace = true }
+reqwest = { workspace = true }
+rsa = { version = "0.9", features = ["pem", "sha2"] }
+rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-rustls = { workspace = true }
+url = { workspace = true }
+vertebra-core = { path = "../vertebra-core" }
+vertebra-db = { path = "../vertebra-db", features = ["pyo3"] }
+x509-parser = { version = "=0.18.1", default-features = false }
+
+[build-dependencies]
+pyo3-build-config = { workspace = true }
+
+[dev-dependencies]
+base64 = { workspace = true }
+hex = { workspace = true }
+hmac = { workspace = true }
+pyo3 = { workspace = true, features = ["auto-initialize"] }
+rcgen = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
+tokio-postgres = "=0.7.18"

@@ -47,6 +47,7 @@ class ArrowCursor:
         "_columns",
         "_ipc_table_cache",
         "_mmap",
+        "_row_count",
         "_rows",
         "_shm_anchor",
         "_shm_cursor",
@@ -63,6 +64,7 @@ class ArrowCursor:
         mmap_obj: mmap.mmap | None = None,
         shm_cursor: Any = None,
         shm_anchor: Any = None,
+        row_count: int | None = None,
     ) -> None:
         if (
             shm_cursor is None
@@ -72,13 +74,35 @@ class ArrowCursor:
         ):
             shm_cursor = buffer
             used_shm = True
+        row_list = list(rows)
+        if row_count is not None:
+            if isinstance(row_count, bool) or not isinstance(row_count, int):
+                msg = "row_count must be an int (not bool) or None"
+                raise TypeError(msg)
+            if row_count < 0:
+                msg = f"row_count must be >= 0, got {row_count}"
+                raise ValueError(msg)
+            if row_list and row_count != len(row_list):
+                msg = f"row_count={row_count} conflicts with len(rows)={len(row_list)}"
+                raise ValueError(msg)
+            if shm_cursor is not None and hasattr(shm_cursor, "row_count"):
+                native_rc = shm_cursor.row_count
+                if (
+                    not isinstance(native_rc, bool)
+                    and isinstance(native_rc, int)
+                    and native_rc > 0
+                    and row_count != native_rc
+                ):
+                    msg = f"row_count={row_count} conflicts with native SHM cursor row_count={native_rc}"
+                    raise ValueError(msg)
         self._buffer = buffer
-        self._rows = list(rows)
+        self._rows = row_list
         self._columns = tuple(columns)
         self._used_shm = used_shm
         self._mmap = mmap_obj
         self._shm_cursor = shm_cursor
         self._shm_anchor = shm_anchor
+        self._row_count = row_count
         self._ipc_table_cache: Any = None
 
     def __len__(self) -> int:
@@ -86,9 +110,11 @@ class ArrowCursor:
         if self._rows:
             return len(self._rows)
         if self._shm_cursor is not None and hasattr(self._shm_cursor, "row_count"):
-            rc = int(self._shm_cursor.row_count)
-            if rc > 0:
-                return rc
+            native_rc = self._shm_cursor.row_count
+            if not isinstance(native_rc, bool) and isinstance(native_rc, int) and native_rc > 0:
+                return native_rc
+        if self._row_count is not None:
+            return self._row_count
         ipc_table = self._ipc_table()
         return 0 if ipc_table is None else int(ipc_table.num_rows)
 

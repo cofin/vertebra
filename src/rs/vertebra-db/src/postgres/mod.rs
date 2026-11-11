@@ -292,63 +292,17 @@ pub fn decode_pgcopy_binary_rows(buf: &[u8]) -> Result<Vec<Vec<Option<Vec<u8>>>>
     Err("missing PGCOPY -1 trailer".to_string())
 }
 
-#[inline]
-fn f32_to_f16_bits(val: f32) -> u16 {
-    let bits = val.to_bits();
-    let sign = ((bits >> 16) & 0x8000) as u16;
-    let exp = ((bits >> 23) & 0xff) as i32 - 127 + 15;
-    let mant = bits & 0x007f_ffff;
-    if exp <= 0 {
-        if exp < -10 {
-            return sign;
-        }
-        let m = (mant | 0x0080_0000) >> (1 - exp);
-        return sign | ((m + 0x0000_1000) >> 13) as u16;
-    } else if exp == 0xff - (127 - 15) {
-        if mant == 0 {
-            return sign | 0x7c00;
-        }
-        return sign | 0x7c00 | ((mant >> 13) as u16).max(1);
-    } else if exp > 30 {
-        return sign | 0x7c00;
-    }
-    sign | ((exp as u16) << 10) | ((mant + 0x0000_1000) >> 13) as u16
-}
-
-#[inline]
-fn f16_bits_to_f32(bits: u16) -> f32 {
-    let sign = ((bits & 0x8000) as u32) << 16;
-    let exp = ((bits >> 10) & 0x1f) as u32;
-    let mant = (bits & 0x03ff) as u32;
-    let f_bits = if exp == 0 {
-        if mant == 0 {
-            sign
-        } else {
-            let mut m = mant;
-            let mut e = 127u32 - 14;
-            while (m & 0x0400) == 0 {
-                m <<= 1;
-                e -= 1;
-            }
-            m &= 0x03ff;
-            sign | (e << 23) | (m << 13)
-        }
-    } else if exp == 31 {
-        sign | 0x7f80_0000 | (mant << 13)
-    } else {
-        sign | ((exp + 127 - 15) << 23) | (mant << 13)
-    };
-    f32::from_bits(f_bits)
-}
+/// Maximum allowed dimension for `pgvector` `vector` and `halfvec` values (`16000`).
+pub const PGVECTOR_MAX_DIM: usize = 16_000;
 
 /// Encode a `pgvector` binary `vector` (`[u16 dim BE][u16 unused=0 BE][f32 BE; dim]`).
 pub fn encode_pgvector_f32(values: &[f32]) -> Result<Vec<u8>, String> {
     if values.is_empty() {
         return Err("pgvector must have at least 1 dimension".to_string());
     }
-    if values.len() > u16::MAX as usize {
+    if values.len() > PGVECTOR_MAX_DIM {
         return Err(format!(
-            "pgvector dimension {} exceeds u16::MAX",
+            "pgvector dimension {} exceeds PGVECTOR_MAX_DIM ({PGVECTOR_MAX_DIM})",
             values.len()
         ));
     }
@@ -356,11 +310,8 @@ pub fn encode_pgvector_f32(values: &[f32]) -> Result<Vec<u8>, String> {
     out.extend_from_slice(&(values.len() as u16).to_be_bytes());
     out.extend_from_slice(&0u16.to_be_bytes());
     for &v in values {
-        if v.is_nan() {
-            return Err("pgvector does not allow NaN values".to_string());
-        }
-        if v.is_infinite() {
-            return Err("pgvector does not allow infinite values".to_string());
+        if !v.is_finite() {
+            return Err("pgvector does not allow NaN or infinite values".to_string());
         }
         out.extend_from_slice(&v.to_be_bytes());
     }
@@ -379,6 +330,11 @@ pub fn decode_pgvector_f32(buf: &[u8]) -> Result<Vec<f32>, String> {
             "pgvector unused header field must be 0, got {unused}"
         ));
     }
+    if !(1..=PGVECTOR_MAX_DIM).contains(&dim) {
+        return Err(format!(
+            "pgvector dimension {dim} is out of valid range 1..={PGVECTOR_MAX_DIM}"
+        ));
+    }
     let expected = 4 + dim * 4;
     if buf.len() != expected {
         return Err(format!(
@@ -388,7 +344,11 @@ pub fn decode_pgvector_f32(buf: &[u8]) -> Result<Vec<f32>, String> {
     }
     let mut out = Vec::with_capacity(dim);
     for &chunk in buf[4..].as_chunks::<4>().0 {
-        out.push(f32::from_be_bytes(chunk));
+        let v = f32::from_be_bytes(chunk);
+        if !v.is_finite() {
+            return Err("pgvector binary payload contains non-finite float".to_string());
+        }
+        out.push(v);
     }
     Ok(out)
 }
@@ -398,9 +358,9 @@ pub fn encode_pgvector_f16(values: &[f32]) -> Result<Vec<u8>, String> {
     if values.is_empty() {
         return Err("halfvec must have at least 1 dimension".to_string());
     }
-    if values.len() > u16::MAX as usize {
+    if values.len() > PGVECTOR_MAX_DIM {
         return Err(format!(
-            "halfvec dimension {} exceeds u16::MAX",
+            "halfvec dimension {} exceeds PGVECTOR_MAX_DIM ({PGVECTOR_MAX_DIM})",
             values.len()
         ));
     }
@@ -408,10 +368,16 @@ pub fn encode_pgvector_f16(values: &[f32]) -> Result<Vec<u8>, String> {
     out.extend_from_slice(&(values.len() as u16).to_be_bytes());
     out.extend_from_slice(&0u16.to_be_bytes());
     for &v in values {
-        if v.is_nan() || v.is_infinite() {
+        if !v.is_finite() {
             return Err("halfvec does not allow NaN or infinite values".to_string());
         }
-        out.extend_from_slice(&f32_to_f16_bits(v).to_be_bytes());
+        let h = half::f16::from_f32(v);
+        if !h.is_finite() {
+            return Err(format!(
+                "halfvec value {v} overflowed finite IEEE-754 binary16"
+            ));
+        }
+        out.extend_from_slice(&h.to_bits().to_be_bytes());
     }
     Ok(out)
 }
@@ -428,6 +394,11 @@ pub fn decode_pgvector_f16(buf: &[u8]) -> Result<Vec<f32>, String> {
             "halfvec unused header field must be 0, got {unused}"
         ));
     }
+    if !(1..=PGVECTOR_MAX_DIM).contains(&dim) {
+        return Err(format!(
+            "halfvec dimension {dim} is out of valid range 1..={PGVECTOR_MAX_DIM}"
+        ));
+    }
     let expected = 4 + dim * 2;
     if buf.len() != expected {
         return Err(format!(
@@ -437,17 +408,19 @@ pub fn decode_pgvector_f16(buf: &[u8]) -> Result<Vec<f32>, String> {
     }
     let mut out = Vec::with_capacity(dim);
     for &chunk in buf[4..].as_chunks::<2>().0 {
-        let bits = u16::from_be_bytes(chunk);
-        out.push(f16_bits_to_f32(bits));
+        let h = half::f16::from_bits(u16::from_be_bytes(chunk));
+        if !h.is_finite() {
+            return Err("halfvec binary payload contains non-finite float".to_string());
+        }
+        out.push(h.to_f32());
     }
     Ok(out)
 }
 
 /// Encode a PostgreSQL / `pgvector` binary `bit` (`VARBIT`: `[i32 bit_len BE][u8; ceil(bit_len / 8)]`).
 pub fn encode_pgvector_bit(packed_bytes: &[u8], bit_len: usize) -> Result<Vec<u8>, String> {
-    if bit_len == 0 {
-        return Err("pgvector bit_len must be > 0".to_string());
-    }
+    let bit_len_i32 =
+        i32::try_from(bit_len).map_err(|_| format!("bit_len {bit_len} exceeds i32::MAX"))?;
     let expected_bytes = bit_len.div_ceil(8);
     if packed_bytes.len() != expected_bytes {
         return Err(format!(
@@ -455,8 +428,17 @@ pub fn encode_pgvector_bit(packed_bytes: &[u8], bit_len: usize) -> Result<Vec<u8
             packed_bytes.len()
         ));
     }
+    let rem = bit_len % 8;
+    if rem != 0
+        && let Some(&last) = packed_bytes.last()
+        && (last & ((1u8 << (8 - rem)) - 1)) != 0
+    {
+        return Err(format!(
+            "nonzero unused low-order padding bits in final byte 0x{last:02x} for bit_len {bit_len}"
+        ));
+    }
     let mut out = Vec::with_capacity(4 + expected_bytes);
-    out.extend_from_slice(&(bit_len as i32).to_be_bytes());
+    out.extend_from_slice(&bit_len_i32.to_be_bytes());
     out.extend_from_slice(packed_bytes);
     Ok(out)
 }
@@ -467,8 +449,8 @@ pub fn decode_pgvector_bit(buf: &[u8]) -> Result<(Vec<u8>, usize), String> {
         return Err("pgvector bit buffer too short (< 4 bytes)".to_string());
     }
     let bit_len_i32 = i32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]);
-    if bit_len_i32 <= 0 {
-        return Err(format!("invalid pgvector bit_len {bit_len_i32}"));
+    if bit_len_i32 < 0 {
+        return Err(format!("invalid negative pgvector bit_len {bit_len_i32}"));
     }
     let bit_len = bit_len_i32 as usize;
     let expected_bytes = bit_len.div_ceil(8);
@@ -479,7 +461,17 @@ pub fn decode_pgvector_bit(buf: &[u8]) -> Result<(Vec<u8>, usize), String> {
             4 + expected_bytes
         ));
     }
-    Ok((buf[4..].to_vec(), bit_len))
+    let payload = &buf[4..];
+    let rem = bit_len % 8;
+    if rem != 0
+        && let Some(&last) = payload.last()
+        && (last & ((1u8 << (8 - rem)) - 1)) != 0
+    {
+        return Err(format!(
+            "nonzero unused low-order padding bits in final byte 0x{last:02x} for bit_len {bit_len}"
+        ));
+    }
+    Ok((payload.to_vec(), bit_len))
 }
 
 #[cfg(test)]

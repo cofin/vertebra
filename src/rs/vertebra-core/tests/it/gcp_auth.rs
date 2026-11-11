@@ -527,3 +527,150 @@ async fn explicit_proxy_routes_token_requests_and_metadata_bypasses_it() {
     assert_eq!(meta_count.load(Ordering::SeqCst), 1);
     assert_eq!(proxy_count.load(Ordering::SeqCst), 1);
 }
+
+#[tokio::test]
+async fn from_scoped_options_enforces_scopes_for_authorized_user_and_rejects_static_tokens() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local_addr");
+    let token_uri = format!("http://127.0.0.1:{}/token", addr.port());
+
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let req = read_http_request(&mut stream).await;
+                let (_, body) = req.split_once("\r\n\r\n").expect("http body");
+                let form: HashMap<String, String> = url::form_urlencoded::parse(body.as_bytes())
+                    .into_owned()
+                    .collect();
+                assert_eq!(
+                    form.get("scope").map(String::as_str),
+                    Some("https://www.googleapis.com/auth/sqlservice.login")
+                );
+                let resp_body = r#"{"access_token":"scoped-user-tok","expires_in":3600,"scope":"https://www.googleapis.com/auth/sqlservice.login"}"#;
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    resp_body.len(),
+                    resp_body
+                );
+                let _ = stream.write_all(resp.as_bytes()).await;
+            });
+        }
+    });
+
+    let mut opts = HashMap::new();
+    opts.insert("client_id".to_string(), "cid".to_string());
+    opts.insert("client_secret".to_string(), "csec".to_string());
+    opts.insert("refresh_token".to_string(), "rtok".to_string());
+    opts.insert("token_uri".to_string(), token_uri);
+    opts.insert("proxy_policy".to_string(), "direct".to_string());
+
+    let default_scopes = vec!["https://www.googleapis.com/auth/sqlservice.login".to_string()];
+    let cache = GcpTokenCache::from_scoped_options(Some(&opts), &default_scopes)
+        .expect("build scoped authorized_user cache");
+    let snap = cache.get_or_refresh().await.expect("scoped refresh");
+    assert_eq!(snap.access_token, "scoped-user-tok");
+
+    let mut static_opts = HashMap::new();
+    static_opts.insert("access_token".to_string(), "static-tok".to_string());
+    let static_err = GcpTokenCache::from_scoped_options(Some(&static_opts), &default_scopes)
+        .expect_err("static token must reject explicit scopes");
+    assert!(
+        static_err.contains("static access token cannot satisfy explicit non-empty OAuth scopes")
+    );
+}
+
+#[tokio::test]
+async fn explicit_login_scopes_rejected_when_authorized_user_omits_scope() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local_addr");
+    let token_uri = format!("http://127.0.0.1:{}/token", addr.port());
+
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let _req = read_http_request(&mut stream).await;
+                let resp_body = r#"{"access_token":"unscoped-tok","expires_in":3600,"scope":"https://www.googleapis.com/auth/cloud-platform"}"#;
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    resp_body.len(),
+                    resp_body
+                );
+                let _ = stream.write_all(resp.as_bytes()).await;
+            });
+        }
+    });
+
+    let mut opts = HashMap::new();
+    opts.insert("client_id".to_string(), "cid".to_string());
+    opts.insert("client_secret".to_string(), "csec".to_string());
+    opts.insert("refresh_token".to_string(), "rtok".to_string());
+    opts.insert("token_uri".to_string(), token_uri);
+    opts.insert("proxy_policy".to_string(), "direct".to_string());
+
+    let default_scopes = vec!["https://www.googleapis.com/auth/sqlservice.login".to_string()];
+    let cache = GcpTokenCache::from_scoped_options(Some(&opts), &default_scopes).unwrap();
+    let err = cache
+        .get_or_refresh()
+        .await
+        .expect_err("must reject token missing requested scope");
+    assert!(err.contains("omitted requested scope"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn explicit_login_scopes_passed_to_gcloud_without_unscoped_fallback() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let script_path = dir.path().join("mock-gcloud-scoped");
+    std::fs::write(
+        &script_path,
+        "#!/bin/sh\nif [ \"$1\" = \"auth\" ] && [ \"$2\" = \"application-default\" ] && [ \"$3\" = \"print-access-token\" ] && [ \"$4\" = \"--quiet\" ] && [ \"$5\" = \"--scopes=https://www.googleapis.com/auth/alloydb.login\" ]; then\n  echo \"gcloud-scoped-tok\"\n  exit 0\nfi\nexit 1\n",
+    )
+    .expect("write script");
+    std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755))
+        .expect("chmod script");
+
+    let cache = GcpTokenCache::new(
+        GcpAuthSource::GcloudCli {
+            binary: script_path,
+            timeout: Duration::from_secs(2),
+            quota_project_id: None,
+            impersonate_service_account: None,
+        },
+        60_000,
+    )
+    .with_requested_scopes(vec![
+        "https://www.googleapis.com/auth/alloydb.login".to_string(),
+    ]);
+
+    let snap = cache.get_or_refresh().await.expect("scoped gcloud token");
+    assert_eq!(snap.access_token, "gcloud-scoped-tok");
+
+    let fail_script = dir.path().join("mock-gcloud-fail-adc");
+    std::fs::write(
+        &fail_script,
+        "#!/bin/sh\nif [ \"$2\" = \"application-default\" ]; then\n  echo \"adc failed\" >&2\n  exit 1\nfi\necho \"unscoped-fallback-tok\"\nexit 0\n",
+    )
+    .expect("write fail script");
+    std::fs::set_permissions(&fail_script, std::fs::Permissions::from_mode(0o755))
+        .expect("chmod fail script");
+
+    let fail_cache = GcpTokenCache::new(
+        GcpAuthSource::GcloudCli {
+            binary: fail_script,
+            timeout: Duration::from_secs(2),
+            quota_project_id: None,
+            impersonate_service_account: None,
+        },
+        60_000,
+    )
+    .with_requested_scopes(vec![
+        "https://www.googleapis.com/auth/alloydb.login".to_string(),
+    ]);
+    let err = fail_cache
+        .get_or_refresh()
+        .await
+        .expect_err("must not fall back to unscoped gcloud auth print-access-token");
+    assert!(err.contains("adc failed"));
+}

@@ -9,9 +9,9 @@ Active specifications and promoted research notes under `.agents/bundles/specs/`
 
 The completed database foundation, fail-loud baseline, and standalone DuckDB, MySQL, SQL Server, and Oracle wheels (`vertebra-duckdb`, `vertebra-mysql`, `vertebra-mssql`, `vertebra-oracle`) are documented in [driver contracts, native clients, and adapter layout](../knowledge/domains/data/database-drivers-and-dialers.md), [VPD tenancy and delayed-commit pipelines](../knowledge/domains/data/query-pipeline-cdc-and-tenancy.md), [collaborator-required queue backends](../knowledge/domains/framework/distributed-queues-and-email.md), and [ADR-004](../knowledge/decisions/adr-004-optional-driver-wheels-and-shm-ownership.md).
 
-## 2. Planned Feature Specifications (`state: planned`)
+## 2. Active Feature Specifications (`state: active`)
 
-- [`native-postgres-driver`](native-postgres-driver/spec.md) — Standalone Rust PostgreSQL wheel (`vertebra-postgres`) covering wire authentication, cloud mTLS/IAM, pools, single-Sync pipelines, binary COPY, SHM Arrow, notifications, logical replication, and native adapter cutover (`t01`–`t102`).
+- [`native-postgres-driver`](native-postgres-driver/spec.md) — Standalone Rust PostgreSQL wheel (`vertebra-postgres`) covering wire authentication, cloud mTLS/IAM, pools, single-Sync pipelines, binary COPY, SHM Arrow, notifications, logical replication, and native adapter cutover (`state: active`; [`chapters/ch01`–`ch33`](native-postgres-driver/chapters/index.md), `118` tasks, `21/33` chapters completed through `ch21`, `ch22` active at `ch22:t03` with `80/118` tasks completed).
 
 ## 3. Draft Child Flow Charters (`state: draft`)
 

@@ -418,6 +418,10 @@ class SyncPostgreSQLDriver(SyncDatabaseDriver[PostgreSQLConfig]):
                 return self._broker.acquire(os.getpid())
         return None
 
+    async def _publish_notification(self, channel: str, payload: str) -> None:
+        """Publish a parameterized PostgreSQL notification off the event loop."""
+        await asyncio.to_thread(self.execute, "SELECT pg_notify(%s, %s)", (channel, payload))
+
 
 class AsyncPostgreSQLDriver(AsyncDatabaseDriver[PostgreSQLConfig]):
     """Asynchronous PostgreSQL driver facade supporting plain-tuple, zero-copy JSONB, and COPY streaming."""
@@ -800,6 +804,10 @@ class AsyncPostgreSQLDriver(AsyncDatabaseDriver[PostgreSQLConfig]):
         if self._pool is not None:
             return self._pool
         return ensure_module("psycopg_pool", install_package="psycopg[binary,pool]")
+
+    async def _publish_notification(self, channel: str, payload: str) -> None:
+        """Asynchronously publish a parameterized PostgreSQL notification."""
+        await self.execute("SELECT pg_notify($1, $2)", (channel, payload))
 
 
 def _reject_memory_dsn(dsn: str) -> None:
