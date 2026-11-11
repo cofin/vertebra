@@ -3451,6 +3451,7 @@ all = [
     { name = "vertebra-bigquery" },
     { name = "vertebra-bundler" },
     { name = "vertebra-duckdb" },
+    { name = "vertebra-mysql" },
     { name = "vertebra-spanner" },
     { name = "vertebra-storage" },
 ]
@@ -3499,6 +3500,9 @@ litestar = [
 ]
 mcp = [
     { name = "litestar-mcp" },
+]
+mysql = [
+    { name = "vertebra-mysql" },
 ]
 polars = [
     { name = "polars" },
@@ -3689,13 +3693,15 @@ requires-dist = [
     { name = "vertebra-bundler", marker = "extra == 'bundler'", editable = "src/rs/vertebra-bundler" },
     { name = "vertebra-duckdb", marker = "extra == 'all'", editable = "src/rs/vertebra-duckdb" },
     { name = "vertebra-duckdb", marker = "extra == 'duckdb'", editable = "src/rs/vertebra-duckdb" },
+    { name = "vertebra-mysql", marker = "extra == 'all'", editable = "src/rs/vertebra-mysql" },
+    { name = "vertebra-mysql", marker = "extra == 'mysql'", editable = "src/rs/vertebra-mysql" },
     { name = "vertebra-spanner", marker = "extra == 'all'", editable = "src/rs/vertebra-spanner" },
     { name = "vertebra-spanner", marker = "extra == 'spanner'", editable = "src/rs/vertebra-spanner" },
     { name = "vertebra-storage", marker = "extra == 'all'", editable = "src/rs/vertebra-storage" },
     { name = "vertebra-storage", marker = "extra == 'storage'", editable = "src/rs/vertebra-storage" },
     { name = "winloop", marker = "sys_platform == 'win32'", specifier = ">=0.8.1" },
 ]
-provides-extras = ["sqlspec", "alchemy", "arrow", "pydantic", "attrs", "polars", "litestar", "starlette", "fastapi", "flask", "django", "queues", "security", "autowire", "email", "mcp", "vite", "asyncapi", "htmx", "saq", "embeddings", "bigquery", "bundler", "duckdb", "spanner", "storage", "rloop", "all"]
+provides-extras = ["sqlspec", "alchemy", "arrow", "pydantic", "attrs", "polars", "litestar", "starlette", "fastapi", "flask", "django", "queues", "security", "autowire", "email", "mcp", "vite", "asyncapi", "htmx", "saq", "embeddings", "bigquery", "bundler", "duckdb", "mysql", "spanner", "storage", "rloop", "all"]
 
 [package.metadata.requires-dev]
 bench = [
@@ -3792,6 +3798,11 @@ test = [
 name = "vertebra-duckdb"
 version = "0.3.0"
 source = { editable = "src/rs/vertebra-duckdb" }
+
+[[package]]
+name = "vertebra-mysql"
+version = "0.3.0"
+source = { editable = "src/rs/vertebra-mysql" }
 
 [[package]]
 name = "vertebra-spanner"

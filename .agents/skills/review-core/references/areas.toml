@@ -173,6 +173,7 @@ prefix = "FFI"
 title = "PyO3 native extension bridge"
 paths = [
   "src/rs/vertebra-py/**",
+  "src/rs/vertebra-mysql/**",
   "src/rs/vertebra-bigquery/**",
   "src/rs/vertebra-spanner/**",
   "src/rs/vertebra-duckdb/**",
@@ -181,6 +182,7 @@ paths = [
   "src/py/vertebra/_vertebra.pyi",
   "src/py/vertebra/_bundler.pyi",
   "src/py/vertebra/_storage.pyi",
+  "src/py/vertebra/_mysql.pyi",
   "src/py/vertebra/_bigquery.pyi",
   "src/py/vertebra/_spanner.pyi",
   "src/py/vertebra/_duckdb.pyi"

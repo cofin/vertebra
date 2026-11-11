@@ -15,6 +15,15 @@ from vertebra.utils.module_loader import reset_dependency_cache
 
 _REPO_ROOT = Path(__file__).resolve().parents[5]
 
+SIBLING_WHEEL_MANIFESTS: tuple[tuple[str, str, str], ...] = (
+    ("vertebra-duckdb", "src/rs/vertebra-duckdb/pyproject.toml", "_duckdb.pyi"),
+    ("vertebra-mysql", "src/rs/vertebra-mysql/pyproject.toml", "_mysql.pyi"),
+    ("vertebra-bigquery", "src/rs/vertebra-bigquery/pyproject.toml", "_bigquery.pyi"),
+    ("vertebra-spanner", "src/rs/vertebra-spanner/pyproject.toml", "_spanner.pyi"),
+    ("vertebra-storage", "src/rs/vertebra-storage/pyproject.toml", "_storage.pyi"),
+    ("vertebra-bundler", "src/rs/vertebra-bundler/pyproject.toml", "_bundler.pyi"),
+)
+
 
 def test_root_pyproject_omits_pypi_duckdb_from_core_and_non_duckdb_groups() -> None:
     """Root `pyproject.toml` declares `vertebra-core[duckdb]` matching project version and isolates PyPI `duckdb`."""
@@ -54,6 +63,7 @@ def test_vertebra_duckdb_wheel_pyproject_includes_only_duckdb_stub() -> None:
     assert "**/py/vertebra/_vertebra.pyi" in excludes
     assert "**/py/vertebra/_bigquery.pyi" in excludes
     assert "**/py/vertebra/_bundler.pyi" in excludes
+    assert "**/py/vertebra/_mysql.pyi" in excludes
     assert "**/py/vertebra/_spanner.pyi" in excludes
     assert "**/py/vertebra/_storage.pyi" in excludes
 
@@ -63,6 +73,7 @@ def test_vertebra_duckdb_wheel_pyproject_includes_only_duckdb_stub() -> None:
     [
         "vertebra-bigquery",
         "vertebra-bundler",
+        "vertebra-mysql",
         "vertebra-spanner",
         "vertebra-storage",
     ],
@@ -92,3 +103,54 @@ def test_duckdb_drivers_raise_missing_dependency_error_when_wheel_absent(
             driver_cls(DuckDBConfig())
     finally:
         reset_dependency_cache("vertebra._duckdb")
+
+
+@pytest.mark.parametrize(
+    ("pkg_name", "rel_path", "own_stub"),
+    SIBLING_WHEEL_MANIFESTS,
+    ids=[item[0] for item in SIBLING_WHEEL_MANIFESTS],
+)
+def test_optional_wheel_pyproject_isolation_and_exclusions(
+    pkg_name: str,
+    rel_path: str,
+    own_stub: str,
+) -> None:
+    """Each native extension wheel manifest excludes `vertebra/__init__.py` and sibling `.pyi` stubs."""
+    manifest_path = _REPO_ROOT / rel_path
+    data = tomllib.loads(manifest_path.read_text(encoding="utf-8"))
+    assert data["project"]["name"] == pkg_name
+    maturin_cfg = data["tool"]["maturin"]
+    assert maturin_cfg["python-source"] == "../../py"
+    excludes = set(maturin_cfg.get("exclude", []))
+    assert "**/py/vertebra/**/*.py" in excludes
+    assert "**/py/vertebra/**/*.so" in excludes
+    assert "**/py/vertebra/_vertebra.pyi" in excludes
+    sibling_stubs = {
+        "_duckdb.pyi",
+        "_mysql.pyi",
+        "_bigquery.pyi",
+        "_spanner.pyi",
+        "_storage.pyi",
+        "_bundler.pyi",
+    } - {own_stub}
+    assert all(f"**/py/vertebra/{stub}" in excludes for stub in sibling_stubs)
+
+
+def test_root_pyproject_declares_vertebra_mysql_optional_extra() -> None:
+    """Root `pyproject.toml` maps the `mysql` optional extra to `vertebra-mysql`."""
+    root_toml = tomllib.loads((_REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    optional_deps = root_toml["project"]["optional-dependencies"]
+    assert any(dep.startswith("vertebra-mysql") for dep in optional_deps["mysql"])
+    assert any(dep.startswith("vertebra-mysql") for dep in optional_deps["all"])
+    uv_sources = root_toml["tool"]["uv"]["sources"]
+    assert uv_sources["vertebra-mysql"] == {"path": "src/rs/vertebra-mysql", "editable": True}
+
+
+def test_vertebra_mysql_runtime_module_surface() -> None:
+    """`vertebra._mysql` exposes `SyncMySQLClient`, `AsyncMySQLClient`, `MySQLWireTestServer`, and `GIL_USED=False`."""
+    mysql_mod = pytest.importorskip("vertebra._mysql")
+    assert getattr(mysql_mod, "GIL_USED", None) is False
+    assert isinstance(getattr(mysql_mod, "__version__", None), str)
+    assert hasattr(mysql_mod, "SyncMySQLClient")
+    assert hasattr(mysql_mod, "AsyncMySQLClient")
+    assert hasattr(mysql_mod, "MySQLWireTestServer")

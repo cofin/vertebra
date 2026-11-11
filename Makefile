@@ -156,10 +156,11 @@ ts-lint:                                            ## Lint TS package with auto
 .PHONY: dev
 dev:                                                ## Install native extensions in debug mode for development
 	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
-	@(cd src/rs && PYO3_PYTHON="$(PYO3_PYTHON)" cargo build --workspace --exclude vertebra-py --exclude vertebra-bundler --exclude vertebra-storage --exclude vertebra-bigquery --exclude vertebra-spanner --exclude vertebra-duckdb)
+	@(cd src/rs && PYO3_PYTHON="$(PYO3_PYTHON)" cargo build --workspace --exclude vertebra-py --exclude vertebra-bundler --exclude vertebra-storage --exclude vertebra-mysql --exclude vertebra-bigquery --exclude vertebra-spanner --exclude vertebra-duckdb)
 	@uv run maturin develop --uv
 	@uv run maturin develop --uv -m src/rs/vertebra-bundler/Cargo.toml
 	@uv run maturin develop --uv -m src/rs/vertebra-storage/Cargo.toml
+	@uv run maturin develop --uv -m src/rs/vertebra-mysql/Cargo.toml
 	@uv run maturin develop --uv -m src/rs/vertebra-bigquery/Cargo.toml
 	@uv run maturin develop --uv -m src/rs/vertebra-spanner/Cargo.toml
 	@uv run maturin develop --uv -m src/rs/vertebra-duckdb/Cargo.toml
@@ -170,10 +171,11 @@ dev:                                                ## Install native extensions
 .PHONY: build
 build: ts-build                                     ## Build optimized release binaries + native extension + TS client
 	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
-	@(cd src/rs && PYO3_PYTHON="$(PYO3_PYTHON)" cargo build --workspace --exclude vertebra-py --exclude vertebra-bundler --exclude vertebra-storage --exclude vertebra-bigquery --exclude vertebra-spanner --exclude vertebra-duckdb --release --features vertebra-http/python,vertebra-http/tls,vertebra-http/compression)
+	@(cd src/rs && PYO3_PYTHON="$(PYO3_PYTHON)" cargo build --workspace --exclude vertebra-py --exclude vertebra-bundler --exclude vertebra-storage --exclude vertebra-mysql --exclude vertebra-bigquery --exclude vertebra-spanner --exclude vertebra-duckdb --release --features vertebra-http/python,vertebra-http/tls,vertebra-http/compression)
 	@uv run maturin develop --uv -r
 	@uv run maturin develop --uv -r -m src/rs/vertebra-bundler/Cargo.toml
 	@uv run maturin develop --uv -r -m src/rs/vertebra-storage/Cargo.toml
+	@uv run maturin develop --uv -r -m src/rs/vertebra-mysql/Cargo.toml
 	@uv run maturin develop --uv -r -m src/rs/vertebra-bigquery/Cargo.toml
 	@uv run maturin develop --uv -r -m src/rs/vertebra-spanner/Cargo.toml
 	@uv run maturin develop --uv -r -m src/rs/vertebra-duckdb/Cargo.toml
@@ -203,7 +205,7 @@ rs-test:                                            ## Run Rust tests (all featu
 
 .PHONY: py-test
 py-test: dev                                        ## Run Python tests
-	@uv run python -m mypy.stubtest vertebra._vertebra vertebra._bundler vertebra._storage vertebra._bigquery vertebra._spanner vertebra._duckdb
+	@uv run python -m mypy.stubtest vertebra._vertebra vertebra._bundler vertebra._storage vertebra._mysql vertebra._bigquery vertebra._spanner vertebra._duckdb
 	@uv run $(PY_TEST_GROUPS) pytest src/py/tests -v
 	@echo "${OK} Python tests passed"
 
@@ -221,6 +223,21 @@ duckdb-wheel-check:                                 ## Build vertebra-duckdb whe
 	@uv run maturin build --manifest-path src/rs/vertebra-duckdb/Cargo.toml --out /tmp/vtb-wheels-duckdb
 	@uv run python -c 'import glob, zipfile; whl = sorted(glob.glob("/tmp/vtb-wheels-duckdb/vertebra_duckdb-*.whl"))[-1]; zf = zipfile.ZipFile(whl); names = zf.namelist(); assert any(n.startswith("vertebra/_duckdb") and (n.endswith(".so") or n.endswith(".pyd") or n.endswith(".dylib")) for n in names), names; bad = [n for n in names if n.startswith("vertebra/") and not n.startswith("vertebra/_duckdb")]; assert not bad, f"Unexpected files in vertebra-duckdb wheel: {bad}"'
 	@echo "${OK} vertebra-duckdb wheel isolation verified"
+
+.PHONY: mysql-test
+mysql-test:                                         ## Run MySQL Rust crate tests, stubtest, and Python MySQL test suites
+	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
+	@(cd src/rs && cargo test -p vertebra-mysql -p vertebra-db --features gcp)
+	@uv run python -m mypy.stubtest vertebra._mysql
+	@uv run pytest src/py/tests/unit/db/test_mysql_driver.py src/py/tests/unit/db/test_optional_driver_wheels.py src/py/tests/integration/db/test_driver_conformance.py -k "mysql" -v
+	@echo "${OK} MySQL tests passed"
+
+.PHONY: mysql-wheel-check
+mysql-wheel-check:                                  ## Build vertebra-mysql wheel and verify PEP 420 namespace isolation
+	@rm -rf /tmp/vtb-wheels-mysql && mkdir -p /tmp/vtb-wheels-mysql
+	@uv run maturin build --manifest-path src/rs/vertebra-mysql/Cargo.toml --out /tmp/vtb-wheels-mysql
+	@uv run python -c 'import glob, zipfile; whls = glob.glob("/tmp/vtb-wheels-mysql/vertebra_mysql-*.whl"); assert whls, "No vertebra-mysql wheel built"; zf = zipfile.ZipFile(whls[0]); names = zf.namelist(); assert any(n.startswith("vertebra/_mysql") and n.endswith((".so", ".pyd", ".dylib")) for n in names), names; assert "vertebra/__init__.py" not in names, names; assert not any(n.endswith(".py") for n in names), names'
+	@echo "${OK} vertebra-mysql wheel isolation verified"
 
 .PHONY: test
 test: rs-test py-test ts-test                       ## Run all tests (Rust, Python, TypeScript)
@@ -248,7 +265,7 @@ lint: ts-lint                                       ## Format and lint everythin
 	@(cd src/rs && cargo clippy --fix --allow-dirty --allow-staged --workspace --all-targets --features tls,compression,gcp -- -D warnings)
 	@echo "${INFO} Running type checks (Mypy)..."
 	@uv run mypy src/py/vertebra tools/scripts tools/pgo $(wildcard tools/docs docs/examples)
-	@stub_mods="$$(uv run python -c 'import importlib.util; print(" ".join(m for m in ("vertebra._vertebra", "vertebra._bundler", "vertebra._storage", "vertebra._bigquery", "vertebra._spanner", "vertebra._duckdb") if importlib.util.find_spec(m) is not None))')"; \
+	@stub_mods="$$(uv run python -c 'import importlib.util; print(" ".join(m for m in ("vertebra._vertebra", "vertebra._bundler", "vertebra._storage", "vertebra._mysql", "vertebra._bigquery", "vertebra._spanner", "vertebra._duckdb") if importlib.util.find_spec(m) is not None))')"; \
 	if [ -n "$$stub_mods" ]; then \
 		uv run python -m mypy.stubtest $$stub_mods; \
 	fi
@@ -263,7 +280,7 @@ lint-all:                                           ## Check formatting, linting
 	@uv run ruff check src/py/vertebra src/py/tests tools/scripts tools/pgo $(wildcard tools/docs docs/examples)
 	@uv run ruff format --check src/py/vertebra src/py/tests tools/scripts tools/pgo $(wildcard tools/docs docs/examples)
 	@uv run mypy src/py/vertebra tools/scripts tools/pgo $(wildcard tools/docs docs/examples)
-	@stub_mods="$$(uv run python -c 'import importlib.util; print(" ".join(m for m in ("vertebra._vertebra", "vertebra._bundler", "vertebra._storage", "vertebra._bigquery", "vertebra._spanner", "vertebra._duckdb") if importlib.util.find_spec(m) is not None))')"; \
+	@stub_mods="$$(uv run python -c 'import importlib.util; print(" ".join(m for m in ("vertebra._vertebra", "vertebra._bundler", "vertebra._storage", "vertebra._mysql", "vertebra._bigquery", "vertebra._spanner", "vertebra._duckdb") if importlib.util.find_spec(m) is not None))')"; \
 	if [ -n "$$stub_mods" ]; then \
 		uv run python -m mypy.stubtest $$stub_mods; \
 	fi

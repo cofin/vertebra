@@ -7,6 +7,7 @@ members = [
     "vertebra-bundler",
     "vertebra-storage",
     "vertebra-db",
+    "vertebra-mysql",
     "vertebra-bigquery",
     "vertebra-spanner",
     "vertebra-duckdb",

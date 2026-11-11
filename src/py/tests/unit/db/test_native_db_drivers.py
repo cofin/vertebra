@@ -30,6 +30,7 @@ import vertebra
 import vertebra._vertebra as native_vertebra
 import vertebra.db as vertebra_db
 import vertebra.db.driver as vertebra_db_driver
+from vertebra._mysql import MySQLWireTestServer
 from vertebra._vertebra import VectorBatchView, VectorView
 from vertebra.db import (
     AlloyDBAuthType,
@@ -1464,6 +1465,9 @@ async def test_cloud_dbapi_preserves_statement_autocommit(engine: str) -> None:
         raw_async.close()
 
 
+_ACTIVE_MYSQL_CONTRACT_SERVERS: list[MySQLWireTestServer] = []
+
+
 def _make_contract_driver_pair(engine: str) -> tuple[Any, Any, str, Any, str, Any]:
     """Create a seeded `(sync_driver, async_driver, insert_sql, insert_fn, by_id_sql, by_id_fn)` tuple."""
     ddl = "CREATE TABLE contract_items (id INTEGER PRIMARY KEY, name TEXT, note TEXT)"
@@ -1523,17 +1527,18 @@ def _make_contract_driver_pair(engine: str) -> tuple[Any, Any, str, Any, str, An
             lambda row_id: (row_id,),
         )
     if engine == "mysql":
-        sync_my_conn = sqlite3.connect(":memory:", check_same_thread=False)
-        sync_my_conn.execute(ddl)
-        sync_my_conn.execute("INSERT INTO contract_items (id, name, note) VALUES (1, 'seed', NULL)")
-        sync_my_conn.commit()
-        async_my_conn = sqlite3.connect(":memory:", check_same_thread=False)
-        async_my_conn.execute(ddl)
-        async_my_conn.execute("INSERT INTO contract_items (id, name, note) VALUES (1, 'seed', NULL)")
-        async_my_conn.commit()
-        sync_wrapped = _ContractDBAPIConnection(sync_my_conn, async_mode=False)
-        sync_my = SyncMySQLDriver(MySQLConfig(dsn="mysql://localhost/test"), connect_factory=lambda **_kw: sync_wrapped)
-        async_my = AsyncMySQLDriver(MySQLConfig(dsn="mysql://localhost/test"), pool=_ContractDBAPIPool(async_my_conn))
+        sync_srv = MySQLWireTestServer()
+        async_srv = MySQLWireTestServer()
+        _ACTIVE_MYSQL_CONTRACT_SERVERS.extend((sync_srv, async_srv))
+        sync_my = SyncMySQLDriver(MySQLConfig.from_url(sync_srv.dsn))
+        async_my = AsyncMySQLDriver(MySQLConfig.from_url(async_srv.dsn))
+        for seed_srv in (sync_srv, async_srv):
+            seed_drv = SyncMySQLDriver(MySQLConfig.from_url(seed_srv.dsn))
+            try:
+                seed_drv.execute(ddl)
+                seed_drv.execute("INSERT INTO contract_items (id, name, note) VALUES (1, 'seed', NULL)")
+            finally:
+                seed_drv.close()
         return (
             sync_my,
             async_my,

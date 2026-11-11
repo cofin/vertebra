@@ -119,9 +119,9 @@ async def test_async_dialect_begins_native_transaction(dialect_name: str) -> Non
 @pytest.mark.parametrize("autocommit", [False, True])
 def test_sync_dbapi_native_dml_transaction_ownership(autocommit: bool) -> None:
     """DBAPI cursors pin MySQL connections and respect commit, rollback, and autocommit."""
-    raw = sqlite3.connect(":memory:")
-    raw.execute("CREATE TABLE transaction_items (id INTEGER)")
-    driver = SyncMySQLDriver(MySQLConfig(dsn="mysql://localhost/db"), connect_factory=lambda: raw)
+    port = _NativeBindConnection()
+    port.raw.execute("CREATE TABLE transaction_items (id INTEGER)")
+    driver = SyncMySQLDriver(MySQLConfig(dsn="mysql://localhost/db"), client=port)
     conn = SyncDBAPIConnection("mysql+vtb://localhost/db", driver=driver, share_pool=False)
     conn.autocommit = autocommit
     try:
@@ -130,13 +130,13 @@ def test_sync_dbapi_native_dml_transaction_ownership(autocommit: bool) -> None:
         conn.commit()
         cursor.executemany("INSERT INTO transaction_items VALUES (?)", [(2,), (3,)])
         conn.rollback()
-        assert raw.execute("SELECT id FROM transaction_items ORDER BY id").fetchall() == (
+        assert port.raw.execute("SELECT id FROM transaction_items ORDER BY id").fetchall() == (
             [(1,), (2,), (3,)] if autocommit else [(1,)]
         )
         cursor.execute("INSERT INTO transaction_items VALUES (?) RETURNING id", (4,))
         assert cursor.fetchall() == [(4,)]
         conn.rollback()
-        assert raw.execute("SELECT COUNT(*) FROM transaction_items WHERE id = 4").fetchone() == (
+        assert port.raw.execute("SELECT COUNT(*) FROM transaction_items WHERE id = 4").fetchone() == (
             (1,) if autocommit else (0,)
         )
     finally:
@@ -1025,6 +1025,11 @@ class _NativeBindConnection:
         self.raw = sqlite3.connect(":memory:")
         self.raw.execute("CREATE TABLE stack_items (id INTEGER)")
         self.calls: list[tuple[str, Any]] = []
+        self._in_tx = False
+
+    @property
+    def in_transaction(self) -> bool:
+        return self._in_tx
 
     def connection(self) -> Any:
         return self
@@ -1059,13 +1064,60 @@ class _NativeBindConnection:
 
         return Cursor()
 
+    def execute(self, sql: str, params: Any = None) -> int:
+        bound = list(params) if params is not None else []
+        self.calls.append((sql, bound))
+        cur = self.raw.cursor()
+        try:
+            cur.execute(sql.replace("%s", "?"), bound)
+            return int(cur.rowcount) if cur.rowcount >= 0 else 0
+        finally:
+            cur.close()
+
+    def execute_many(self, sql: str, param_sets: Any) -> int:
+        total = 0
+        for params in param_sets:
+            total += self.execute(sql, params)
+        return total
+
+    def execute_with_description(self, sql: str, params: Any = None) -> tuple[list[tuple[Any, ...]], list[str]]:
+        bound = list(params) if params is not None else []
+        self.calls.append((sql, bound))
+        cur = self.raw.cursor()
+        try:
+            cur.execute(sql.replace("%s", "?"), bound)
+            rows = [tuple(row) for row in cur.fetchall()]
+            cols = [str(col[0]) for col in (cur.description or ())]
+            return rows, cols
+        finally:
+            cur.close()
+
+    def fetch_all(self, sql: str, params: Any = None) -> list[dict[str, Any]]:
+        rows, cols = _NativeBindConnection.execute_with_description(self, sql, params)
+        return [dict(zip(cols, row, strict=False)) for row in rows]
+
+    def begin(self) -> None:
+        self._in_tx = True
+
+    def savepoint(self, name: str) -> None:
+        self.raw.execute(f"SAVEPOINT {name}")
+
+    def release_savepoint(self, name: str) -> None:
+        self.raw.execute(f"RELEASE SAVEPOINT {name}")
+
+    def rollback_to_savepoint(self, name: str) -> None:
+        self.raw.execute(f"ROLLBACK TO SAVEPOINT {name}")
+
     def commit(self) -> None:
+        self._in_tx = False
         self.raw.commit()
 
     def rollback(self) -> None:
+        self._in_tx = False
         self.raw.rollback()
 
     def close(self) -> None:
+        self._in_tx = False
         self.raw.close()
 
     def __enter__(self) -> Any:
@@ -1110,14 +1162,38 @@ class _AsyncNativeBindConnection(_NativeBindConnection):
 
         return Cursor()
 
+    async def execute(self, sql: str, params: Any = None) -> int:
+        return super().execute(sql, params)
+
+    async def execute_many(self, sql: str, param_sets: Any) -> int:
+        return super().execute_many(sql, param_sets)
+
+    async def execute_with_description(self, sql: str, params: Any = None) -> tuple[list[tuple[Any, ...]], list[str]]:
+        return super().execute_with_description(sql, params)
+
+    async def fetch_all(self, sql: str, params: Any = None) -> list[dict[str, Any]]:
+        return super().fetch_all(sql, params)
+
+    async def begin(self) -> None:
+        super().begin()
+
+    async def savepoint(self, name: str) -> None:
+        super().savepoint(name)
+
+    async def release_savepoint(self, name: str) -> None:
+        super().release_savepoint(name)
+
+    async def rollback_to_savepoint(self, name: str) -> None:
+        super().rollback_to_savepoint(name)
+
     async def commit(self) -> None:
-        self.raw.commit()
+        super().commit()
 
     async def rollback(self) -> None:
-        self.raw.rollback()
+        super().rollback()
 
     async def close(self) -> None:
-        self.raw.close()
+        super().close()
 
     async def __aenter__(self) -> Any:
         return self
@@ -1138,7 +1214,7 @@ def test_sqlspec_stack_preserves_native_dbapi_binds_and_rows(engine: str, config
             native, statement_config=config.statement_config if config_defaults else None
         )
     else:
-        native = SyncMySQLDriver(MySQLConfig(dsn="mysql://localhost/db"), connect_factory=lambda: port)
+        native = SyncMySQLDriver(MySQLConfig(dsn="mysql://localhost/db"), client=port)
         config = MySQLSyncConfig(native.config)
         driver = SQLSpecMySQLSyncDriver(native, statement_config=config.statement_config if config_defaults else None)
     try:
@@ -1177,7 +1253,7 @@ async def test_sqlspec_async_stack_preserves_native_dbapi_binds_and_rows(engine:
         update_sql = "UPDATE stack_items SET id = $1 WHERE id = $2"
         select_sql = "SELECT id FROM stack_items WHERE id = $1"
     else:
-        native = AsyncMySQLDriver(MySQLConfig(dsn="mysql://localhost/db"), pool=port)
+        native = AsyncMySQLDriver(MySQLConfig(dsn="mysql://localhost/db"), client=port)
         config = MySQLAsyncConfig(native.config)
         driver = SQLSpecMySQLAsyncDriver(native, statement_config=config.statement_config if config_defaults else None)
         marker = "%s"

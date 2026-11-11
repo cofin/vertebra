@@ -129,6 +129,20 @@ class ArrowCursor:
         return self._used_shm
 
     @property
+    def shm_name(self) -> str:
+        """Return the POSIX shared-memory segment name when backed by a native `VTBARROW` cursor."""
+        if self._shm_cursor is not None and hasattr(self._shm_cursor, "shm_name"):
+            return str(self._shm_cursor.shm_name)
+        return ""
+
+    @property
+    def byte_len(self) -> int:
+        """Return the byte length of the serialized Arrow IPC payload."""
+        if self._shm_cursor is not None and hasattr(self._shm_cursor, "byte_len"):
+            return int(self._shm_cursor.byte_len)
+        return len(self.buffer_view())
+
+    @property
     def shm_region(self) -> Any:
         """Return the underlying shared-memory region or mmap object when SHM transfer is active."""
         if self._shm_cursor is not None:
