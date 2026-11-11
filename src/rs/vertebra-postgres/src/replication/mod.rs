@@ -1,17 +1,22 @@
 //! Dedicated non-pooled PostgreSQL `CopyBoth` logical replication session handshake, catalog
-//! preflight, `IDENTIFY_SYSTEM` verification, and clean `CopyDone` shutdown.
+//! preflight, publication custom-type preloading, `IDENTIFY_SYSTEM` verification, `pgoutput`
+//! tuple hydration, and clean `CopyDone` shutdown.
 
-use std::collections::BTreeMap;
+pub mod pgoutput;
+
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Duration;
 
 use postgres_protocol::message::backend::Message;
 use postgres_protocol::message::frontend;
 use pyo3::prelude::*;
+use pyo3::sync::PyOnceLock;
+use pyo3::types::PyDict;
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 use tokio::time::Instant;
 
-use crate::codecs::TEXT_OID;
+use crate::codecs::{CodecContext, OID_OID, TEXT_OID};
 use crate::config::PostgresConfig;
 use crate::errors::PostgresError;
 use crate::extended::Parameter;
@@ -19,10 +24,17 @@ use crate::protocol::{
     MAX_BACKEND_FRAME_LENGTH, ReplicationBackendMessage, TERMINATE_FRAME, parse_error_fields,
     read_replication_message,
 };
-use crate::result::{PgValue, TransactionStatus};
+use crate::python_values::pg_value_to_python;
+use crate::result::{PgValue, QueryResult, TransactionStatus};
 use crate::session::statements::PoolerMode;
 use crate::session::{
     CommandBudget, ExchangeState, PostgresConnection, establish_standalone_connection,
+};
+use crate::types::{CompositeField, MAX_DISCOVERY_ROUNDS, TypeCatalog, TypeInfo, TypeKind};
+
+pub use pgoutput::{
+    DEFAULT_MAX_RECORD_BYTES, DEFAULT_MAX_RELATIONS, PgOutputColumn, PgOutputDecoder,
+    PgOutputFrame, PgOutputRelationSchema, PgOutputTupleValue,
 };
 
 /// Maximum UTF-8 byte length of a PostgreSQL replication slot or publication identifier (`NAMEDATALEN - 1`).
@@ -34,8 +46,20 @@ const PUBLICATION_PREFLIGHT_PG14_SQL: &str = "SELECT p.pubname, p.puballtables, 
 
 const PUBLICATION_PREFLIGHT_PG15_SQL: &str = "SELECT p.pubname, p.puballtables, p.pubinsert, p.pubupdate, p.pubdelete, p.pubtruncate, p.pubviaroot, pt.schemaname, pt.tablename, pt.attnames, pt.rowfilter FROM pg_catalog.pg_publication p LEFT JOIN pg_catalog.pg_publication_tables pt ON pt.pubname = p.pubname WHERE p.pubname = $1 ORDER BY pt.schemaname ASC NULLS FIRST, pt.tablename ASC NULLS FIRST";
 
+const PUBLICATION_TYPES_PRELOAD_SQL: &str = "SELECT DISTINCT t.oid, tn.nspname, t.typname, t.typtype::pg_catalog.text, t.typcategory::pg_catalog.text, t.typdelim::pg_catalog.text, t.typelem, t.typbasetype, rng.rngsubtype, mrng.rngtypid, mrng.rngsubtype, ext.extname, ca.attname, ca.atttypid, ca.atttypmod, ca.attnum FROM pg_catalog.pg_publication_tables pt JOIN pg_catalog.pg_namespace rn ON rn.nspname = pt.schemaname JOIN pg_catalog.pg_class c ON c.relnamespace = rn.oid AND c.relname = pt.tablename JOIN pg_catalog.pg_attribute col ON col.attrelid = c.oid AND col.attnum > 0 AND NOT col.attisdropped JOIN pg_catalog.pg_type t ON t.oid = col.atttypid JOIN pg_catalog.pg_namespace tn ON tn.oid = t.typnamespace LEFT JOIN pg_catalog.pg_range rng ON rng.rngtypid = t.oid LEFT JOIN pg_catalog.pg_range mrng ON mrng.rngmultitypid = t.oid LEFT JOIN pg_catalog.pg_depend dep ON dep.classid = 1247 AND dep.objid = t.oid AND dep.deptype = 'e' LEFT JOIN pg_catalog.pg_extension ext ON ext.oid = dep.refobjid LEFT JOIN pg_catalog.pg_attribute ca ON t.typtype = 'c' AND ca.attrelid = t.typrelid AND ca.attnum > 0 AND NOT ca.attisdropped WHERE pt.pubname = $1 ORDER BY t.oid ASC, ca.attnum ASC NULLS FIRST";
+
+const MAX_PRELOAD_DISCOVERY_ROWS: usize = 4096;
+const MAX_PRELOAD_OID_BATCH: usize = 128;
+
 const FINGERPRINT_DOMAIN: &[u8] = b"vertebra-postgres:publication_fingerprint:v1\0";
 const SOCKET_DISCARD_GRACE: Duration = Duration::from_millis(50);
+
+struct CachedReplicationPyTypes {
+    pg_unchanged_toast: Py<PyAny>,
+    replication_identity: Py<PyAny>,
+}
+
+static REPLICATION_PY_TYPES: PyOnceLock<CachedReplicationPyTypes> = PyOnceLock::new();
 
 /// Verified server, slot, and publication identity captured from catalog preflight and `IDENTIFY_SYSTEM`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,6 +113,9 @@ pub fn parse_pg_lsn(raw: &str) -> Result<u64, PostgresError> {
 pub struct PostgresReplicationConnection {
     conn: PostgresConnection,
     identity: VerifiedReplicationIdentity,
+    type_catalog: TypeCatalog,
+    type_identities: HashMap<u32, (String, String)>,
+    codec_ctx: CodecContext,
 }
 
 impl PostgresReplicationConnection {
@@ -114,7 +141,7 @@ impl PostgresReplicationConnection {
     }
 
     /// Establish a dedicated `replication=database` logical `pgoutput` `CopyBoth` session after
-    /// verifying catalog slot/publication metadata and `IDENTIFY_SYSTEM`.
+    /// verifying catalog slot/publication metadata, preloading published custom types, and running `IDENTIFY_SYSTEM`.
     pub async fn connect_logical(
         config: &PostgresConfig,
         slot: &str,
@@ -125,10 +152,8 @@ impl PostgresReplicationConnection {
         validate_replication_identifier(slot, "slot")?;
         validate_replication_identifier(publication, "publication")?;
 
-        let preflight = run_catalog_preflight(config, slot, publication).await?;
-        if let Some(requested_lsn) = start_lsn {
-            validate_start_lsn_floor(slot, requested_lsn, &preflight)?;
-        }
+        let (preflight, type_catalog, type_identities) =
+            run_connect_preflight(config, slot, publication, start_lsn).await?;
 
         let mut repl_conn = establish_standalone_connection(config, true).await?;
         let system = match run_identify_system(&mut repl_conn, config.connect_timeout).await {
@@ -157,16 +182,40 @@ impl PostgresReplicationConnection {
         let start_deadline = Instant::now() + config.connect_timeout;
         enter_copy_both(&mut repl_conn, &start_sql, start_deadline).await?;
 
+        let codec_ctx = CodecContext::from_parameters(repl_conn.parameters());
         let identity = build_verified_identity(slot, preflight, system);
         Ok(Self {
             conn: repl_conn,
             identity,
+            type_catalog,
+            type_identities,
+            codec_ctx,
         })
     }
 
     /// Borrow the verified server, slot, and publication identity captured during session startup.
     pub const fn identity(&self) -> &VerifiedReplicationIdentity {
         &self.identity
+    }
+
+    /// Borrow the preloaded session [`TypeCatalog`] populated on the metadata socket before `CopyBoth`.
+    pub const fn type_catalog(&self) -> &TypeCatalog {
+        &self.type_catalog
+    }
+
+    /// Mutably borrow the session [`TypeCatalog`] for streaming `pgoutput` `'Y'` mismatch invalidation.
+    pub fn type_catalog_mut(&mut self) -> &mut TypeCatalog {
+        &mut self.type_catalog
+    }
+
+    /// Borrow the preloaded `(namespace, name)` identity map keyed by custom `pg_type.oid`.
+    pub const fn type_identities(&self) -> &HashMap<u32, (String, String)> {
+        &self.type_identities
+    }
+
+    /// Borrow the session [`CodecContext`] captured from replication backend `ParameterStatus` frames.
+    pub const fn codec_context(&self) -> &CodecContext {
+        &self.codec_ctx
     }
 
     /// Return `true` once this replication connection has closed or discarded its physical socket.
@@ -268,6 +317,7 @@ impl PostgresReplicationConnection {
                         self.discard_socket().await;
                         return Err(err);
                     }
+                    self.codec_ctx = CodecContext::from_parameters(self.conn.parameters());
                 }
                 ReplicationBackendMessage::Standard(Message::NotificationResponse(body)) => {
                     if let Err(err) = self.conn.handle_notification_frame(&body) {
@@ -352,8 +402,78 @@ impl Drop for PostgresReplicationConnection {
     }
 }
 
+/// Project a single replication [`PgOutputTupleValue`] into Python without leaking `UnchangedToast`
+/// into SQL [`PgValue`] or parameter binding codecs.
+pub fn pgoutput_tuple_value_to_python(
+    py: Python<'_>,
+    value: &PgOutputTupleValue,
+) -> PyResult<Py<PyAny>> {
+    match value {
+        PgOutputTupleValue::Null => Ok(py.None()),
+        PgOutputTupleValue::UnchangedToast => {
+            let py_types = resolve_replication_py_types(py)?;
+            Ok(py_types.pg_unchanged_toast.clone_ref(py))
+        }
+        PgOutputTupleValue::Value(val) => pg_value_to_python(py, val),
+    }
+}
+
+/// Project a decoded `pgoutput` tuple aligned with `relation` into an ordered Python `dict[str, Any]`.
+pub fn pgoutput_tuple_to_python_dict(
+    py: Python<'_>,
+    relation: &PgOutputRelationSchema,
+    tuple: &[PgOutputTupleValue],
+) -> PyResult<Py<PyDict>> {
+    if relation.columns.len() != tuple.len() {
+        return Err(crate::errors::postgres_error_to_py(
+            py,
+            PostgresError::Protocol(format!(
+                "pgoutput tuple width {} does not match relation {}.{} width {}",
+                tuple.len(),
+                relation.namespace,
+                relation.name,
+                relation.columns.len()
+            )),
+        ));
+    }
+    let out = PyDict::new(py);
+    for (col, cell) in relation.columns.iter().zip(tuple.iter()) {
+        let py_cell = pgoutput_tuple_value_to_python(py, cell)?;
+        out.set_item(col.name.as_str(), py_cell)?;
+    }
+    Ok(out.unbind())
+}
+
+/// Project a [`VerifiedReplicationIdentity`] into `vertebra.db.adapters.postgres.types.PostgresReplicationIdentity`.
+pub fn verified_identity_to_python(
+    py: Python<'_>,
+    identity: &VerifiedReplicationIdentity,
+) -> PyResult<Py<PyAny>> {
+    let py_types = resolve_replication_py_types(py)?;
+    Ok(py_types
+        .replication_identity
+        .bind(py)
+        .call1((
+            identity.system_identifier.as_str(),
+            identity.database.as_str(),
+            identity.slot.as_str(),
+            identity.publication_fingerprint.as_str(),
+        ))?
+        .unbind())
+}
+
 pub(crate) fn register_pymodule(_m: &Bound<'_, PyModule>) -> PyResult<()> {
     Ok(())
+}
+
+fn resolve_replication_py_types(py: Python<'_>) -> PyResult<&CachedReplicationPyTypes> {
+    REPLICATION_PY_TYPES.get_or_try_init(py, || {
+        let types_mod = py.import("vertebra.db.adapters.postgres.types")?;
+        Ok(CachedReplicationPyTypes {
+            pg_unchanged_toast: types_mod.getattr("PG_UNCHANGED_TOAST")?.unbind(),
+            replication_identity: types_mod.getattr("PostgresReplicationIdentity")?.unbind(),
+        })
+    })
 }
 
 struct VerifiedPreflight {
@@ -361,6 +481,7 @@ struct VerifiedPreflight {
     restart_lsn: u64,
     confirmed_flush_lsn: u64,
     publication_fingerprint: String,
+    has_published_tables: bool,
 }
 
 struct SystemIdentification {
@@ -499,6 +620,39 @@ async fn run_catalog_preflight(
     let outcome =
         inspect_slot_and_publication(&mut meta_conn, config.connect_timeout, slot, publication)
             .await;
+    close_connection_bounded(&mut meta_conn, config.connect_timeout).await;
+    outcome
+}
+
+async fn run_connect_preflight(
+    config: &PostgresConfig,
+    slot: &str,
+    publication: &str,
+    start_lsn: Option<u64>,
+) -> Result<
+    (
+        VerifiedPreflight,
+        TypeCatalog,
+        HashMap<u32, (String, String)>,
+    ),
+    PostgresError,
+> {
+    let mut meta_conn = establish_standalone_connection(config, false).await?;
+    let outcome = async {
+        let preflight =
+            inspect_slot_and_publication(&mut meta_conn, config.connect_timeout, slot, publication)
+                .await?;
+        if let Some(requested_lsn) = start_lsn {
+            validate_start_lsn_floor(slot, requested_lsn, &preflight)?;
+        }
+        let (catalog, identities) = if preflight.has_published_tables {
+            preload_publication_types(&mut meta_conn, config.connect_timeout, publication).await?
+        } else {
+            (TypeCatalog::new_with_builtins(), HashMap::new())
+        };
+        Ok((preflight, catalog, identities))
+    }
+    .await;
     close_connection_bounded(&mut meta_conn, config.connect_timeout).await;
     outcome
 }
@@ -662,13 +816,390 @@ async fn inspect_slot_and_publication(
     }
     let publication_fingerprint =
         hash_publication_rows(publication, &pub_res.rows, include_pg15_cols)?;
+    let has_published_tables = pub_res.rows.iter().any(|r| {
+        matches!(
+            (r.get(7), r.get(8)),
+            (Some(PgValue::Text(s)), Some(PgValue::Text(t))) if !s.is_empty() && !t.is_empty()
+        )
+    });
 
     Ok(VerifiedPreflight {
         database: current_db.to_owned(),
         restart_lsn,
         confirmed_flush_lsn,
         publication_fingerprint,
+        has_published_tables,
     })
+}
+
+async fn preload_publication_types(
+    meta_conn: &mut PostgresConnection,
+    timeout: Duration,
+    publication: &str,
+) -> Result<(TypeCatalog, HashMap<u32, (String, String)>), PostgresError> {
+    let mut catalog = TypeCatalog::new_with_builtins();
+    let mut identities: HashMap<u32, (String, String)> = HashMap::new();
+    let mut queried_oids: HashSet<u32> = HashSet::new();
+    let mut total_rows = 0usize;
+
+    let pub_params = [Parameter::new(PgValue::Text(publication.to_owned()))];
+    let text_oids = [TEXT_OID];
+    let root_res = meta_conn
+        .query_with_deadline(
+            PUBLICATION_TYPES_PRELOAD_SQL,
+            &pub_params,
+            Some(&text_oids),
+            CommandBudget::from_deadline(Some(Instant::now() + timeout)),
+        )
+        .await?;
+
+    total_rows = total_rows.saturating_add(root_res.rows.len());
+    if total_rows > MAX_PRELOAD_DISCOVERY_ROWS {
+        return Err(PostgresError::Operational(format!(
+            "publication custom-type preload exceeded maximum catalog row cap ({MAX_PRELOAD_DISCOVERY_ROWS})"
+        )));
+    }
+
+    let mut next_candidates = Vec::new();
+    ingest_preloaded_type_rows(
+        &mut catalog,
+        &mut identities,
+        &mut queried_oids,
+        &root_res,
+        &mut next_candidates,
+    )?;
+
+    let mut pending_oids = collect_unseen_child_oids(&catalog, &mut queried_oids, next_candidates);
+    let mut round = 0usize;
+
+    while !pending_oids.is_empty() {
+        if round >= MAX_DISCOVERY_ROUNDS {
+            return Err(PostgresError::Data(format!(
+                "publication custom-type preload exceeded maximum transitive rounds ({MAX_DISCOVERY_ROUNDS})"
+            )));
+        }
+        round += 1;
+
+        let current_batch = std::mem::take(&mut pending_oids);
+        let mut round_candidates = Vec::new();
+
+        for chunk in current_batch.chunks(MAX_PRELOAD_OID_BATCH) {
+            let sql = build_oid_preload_query(chunk.len());
+            let params: Vec<Parameter> = chunk
+                .iter()
+                .map(|&oid| Parameter::new(PgValue::Int8(i64::from(oid))))
+                .collect();
+            let param_oids = vec![OID_OID; chunk.len()];
+            let res = meta_conn
+                .query_with_deadline(
+                    &sql,
+                    &params,
+                    Some(&param_oids),
+                    CommandBudget::from_deadline(Some(Instant::now() + timeout)),
+                )
+                .await?;
+            total_rows = total_rows.saturating_add(res.rows.len());
+            if total_rows > MAX_PRELOAD_DISCOVERY_ROWS {
+                return Err(PostgresError::Operational(format!(
+                    "publication custom-type preload exceeded maximum catalog row cap ({MAX_PRELOAD_DISCOVERY_ROWS})"
+                )));
+            }
+            ingest_preloaded_type_rows(
+                &mut catalog,
+                &mut identities,
+                &mut queried_oids,
+                &res,
+                &mut round_candidates,
+            )?;
+        }
+
+        pending_oids = collect_unseen_child_oids(&catalog, &mut queried_oids, round_candidates);
+    }
+
+    let custom_oids: Vec<u32> = identities.keys().copied().collect();
+    for oid in custom_oids {
+        let _ = catalog.resolve_domain_base(oid)?;
+    }
+
+    Ok((catalog, identities))
+}
+
+fn collect_unseen_child_oids(
+    catalog: &TypeCatalog,
+    queried_oids: &mut HashSet<u32>,
+    candidates: Vec<u32>,
+) -> Vec<u32> {
+    let mut pending = Vec::new();
+    for oid in candidates {
+        if oid != 0 && catalog.type_info(oid).is_none() && queried_oids.insert(oid) {
+            pending.push(oid);
+        }
+    }
+    pending
+}
+
+fn build_oid_preload_query(param_count: usize) -> String {
+    let mut placeholders = String::with_capacity(param_count * 5);
+    for idx in 1..=param_count {
+        if idx > 1 {
+            placeholders.push_str(", ");
+        }
+        placeholders.push('$');
+        placeholders.push_str(&idx.to_string());
+    }
+    format!(
+        "SELECT DISTINCT t.oid, tn.nspname, t.typname, t.typtype::pg_catalog.text, t.typcategory::pg_catalog.text, t.typdelim::pg_catalog.text, t.typelem, t.typbasetype, rng.rngsubtype, mrng.rngtypid, mrng.rngsubtype, ext.extname, ca.attname, ca.atttypid, ca.atttypmod, ca.attnum FROM pg_catalog.pg_type t JOIN pg_catalog.pg_namespace tn ON tn.oid = t.typnamespace LEFT JOIN pg_catalog.pg_range rng ON rng.rngtypid = t.oid LEFT JOIN pg_catalog.pg_range mrng ON mrng.rngmultitypid = t.oid LEFT JOIN pg_catalog.pg_depend dep ON dep.classid = 1247 AND dep.objid = t.oid AND dep.deptype = 'e' LEFT JOIN pg_catalog.pg_extension ext ON ext.oid = dep.refobjid LEFT JOIN pg_catalog.pg_attribute ca ON t.typtype = 'c' AND ca.attrelid = t.typrelid AND ca.attnum > 0 AND NOT ca.attisdropped WHERE t.oid IN ({placeholders}) ORDER BY t.oid ASC, ca.attnum ASC NULLS FIRST"
+    )
+}
+
+fn ingest_preloaded_type_rows(
+    catalog: &mut TypeCatalog,
+    identities: &mut HashMap<u32, (String, String)>,
+    queried_oids: &mut HashSet<u32>,
+    result: &QueryResult,
+    next_candidates: &mut Vec<u32>,
+) -> Result<(), PostgresError> {
+    let mut composite_headers: HashMap<u32, (String, String, u8)> = HashMap::new();
+    let mut composite_fields: HashMap<u32, Vec<(i32, CompositeField)>> = HashMap::new();
+
+    for (row_idx, row) in result.rows.iter().enumerate() {
+        if row.len() < 16 {
+            return Err(PostgresError::Protocol(format!(
+                "expected 16 columns from publication custom-type preload row {row_idx}, got {}",
+                row.len()
+            )));
+        }
+
+        let oid = preload_cell_u32(row.first())?;
+        if oid == 0 {
+            return Err(PostgresError::Protocol(format!(
+                "publication custom-type preload row {row_idx} returned invalid type oid 0"
+            )));
+        }
+        queried_oids.insert(oid);
+
+        let is_seeded_builtin = catalog.type_info(oid).is_some() && !identities.contains_key(&oid);
+        if is_seeded_builtin {
+            continue;
+        }
+
+        let schema = preload_cell_opt_str(row.get(1))
+            .ok_or_else(|| {
+                PostgresError::Protocol(format!(
+                    "publication custom-type preload OID {oid} missing nspname"
+                ))
+            })?
+            .to_owned();
+        let name = preload_cell_opt_str(row.get(2))
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                PostgresError::Protocol(format!(
+                    "publication custom-type preload OID {oid} missing typname"
+                ))
+            })?
+            .to_owned();
+        let typtype = preload_cell_opt_str(row.get(3)).unwrap_or("b");
+        let typcategory = preload_cell_opt_str(row.get(4)).unwrap_or("");
+        let delimiter = preload_cell_opt_str(row.get(5))
+            .and_then(|s| s.as_bytes().first().copied())
+            .unwrap_or(b',');
+        let typelem = preload_cell_u32(row.get(6))?;
+        let typbasetype = preload_cell_u32(row.get(7))?;
+        let rngsubtype = preload_cell_u32(row.get(8))?;
+        let mrngtypid = preload_cell_u32(row.get(9))?;
+        let mrngsubtype = preload_cell_u32(row.get(10))?;
+        let extname = preload_cell_opt_str(row.get(11)).filter(|s| !s.is_empty());
+
+        identities.insert(oid, (schema.clone(), name.clone()));
+
+        match typtype {
+            "c" => {
+                composite_headers
+                    .entry(oid)
+                    .or_insert_with(|| (schema, name, delimiter));
+                let entry = composite_fields.entry(oid).or_default();
+                let attnum = preload_cell_i32(row.get(15), 0)?;
+                if attnum > 0
+                    && let Some(att_name) =
+                        preload_cell_opt_str(row.get(12)).filter(|s| !s.is_empty())
+                {
+                    let atttypid = preload_cell_u32(row.get(13))?;
+                    if atttypid == 0 {
+                        return Err(PostgresError::Data(format!(
+                            "composite OID {oid} attribute {att_name:?} has invalid atttypid 0"
+                        )));
+                    }
+                    let atttypmod = preload_cell_i32(row.get(14), -1)?;
+                    next_candidates.push(atttypid);
+                    entry.push((
+                        attnum,
+                        CompositeField {
+                            name: att_name.to_owned(),
+                            type_oid: atttypid,
+                            type_modifier: atttypmod,
+                        },
+                    ));
+                }
+            }
+            "d" => {
+                if typbasetype == 0 {
+                    return Err(PostgresError::Data(format!(
+                        "domain OID {oid} ({name:?}) has invalid typbasetype 0"
+                    )));
+                }
+                next_candidates.push(typbasetype);
+                catalog.insert_custom_type(TypeInfo {
+                    oid,
+                    schema,
+                    name,
+                    kind: TypeKind::Domain {
+                        base_oid: typbasetype,
+                    },
+                    delimiter,
+                });
+            }
+            "e" => {
+                catalog.insert_custom_type(TypeInfo {
+                    oid,
+                    schema,
+                    name,
+                    kind: TypeKind::Enum,
+                    delimiter,
+                });
+            }
+            "r" => {
+                if rngsubtype != 0 {
+                    next_candidates.push(rngsubtype);
+                }
+                catalog.insert_custom_type(TypeInfo {
+                    oid,
+                    schema,
+                    name,
+                    kind: TypeKind::Range,
+                    delimiter,
+                });
+            }
+            "m" => {
+                if mrngtypid != 0 {
+                    next_candidates.push(mrngtypid);
+                }
+                if mrngsubtype != 0 {
+                    next_candidates.push(mrngsubtype);
+                }
+                catalog.insert_custom_type(TypeInfo {
+                    oid,
+                    schema,
+                    name,
+                    kind: TypeKind::Range,
+                    delimiter,
+                });
+            }
+            _ => {
+                let is_array = typelem != 0
+                    && (typcategory == "A" || (name.starts_with('_') && extname.is_none()));
+                if is_array {
+                    next_candidates.push(typelem);
+                    catalog.insert_custom_type(TypeInfo {
+                        oid,
+                        schema,
+                        name,
+                        kind: TypeKind::Array {
+                            element_oid: typelem,
+                            delimiter,
+                        },
+                        delimiter,
+                    });
+                } else if extname.is_some() || matches!(name.as_str(), "vector" | "halfvec") {
+                    catalog.insert_custom_type(TypeInfo {
+                        oid,
+                        schema: schema.clone(),
+                        name: name.clone(),
+                        kind: TypeKind::Extension { schema, name },
+                        delimiter,
+                    });
+                } else {
+                    catalog.insert_custom_type(TypeInfo {
+                        oid,
+                        schema,
+                        name,
+                        kind: TypeKind::Scalar,
+                        delimiter,
+                    });
+                }
+            }
+        }
+    }
+
+    for (oid, (schema, name, delimiter)) in composite_headers {
+        let mut numbered = composite_fields.remove(&oid).unwrap_or_default();
+        numbered.sort_by_key(|(attnum, _)| *attnum);
+        numbered.dedup_by_key(|(attnum, _)| *attnum);
+        let fields = numbered.into_iter().map(|(_, field)| field).collect();
+        catalog.insert_custom_type(TypeInfo {
+            oid,
+            schema,
+            name,
+            kind: TypeKind::Composite { fields },
+            delimiter,
+        });
+    }
+
+    Ok(())
+}
+
+fn preload_cell_u32(val: Option<&PgValue>) -> Result<u32, PostgresError> {
+    match val {
+        None | Some(PgValue::Null) => Ok(0),
+        Some(PgValue::Int2(v)) => u32::try_from(*v)
+            .map_err(|_| PostgresError::Protocol(format!("negative catalog OID {v}"))),
+        Some(PgValue::Int4(v)) => u32::try_from(*v)
+            .map_err(|_| PostgresError::Protocol(format!("negative catalog OID {v}"))),
+        Some(PgValue::Int8(v)) => u32::try_from(*v)
+            .map_err(|_| PostgresError::Protocol(format!("out-of-range catalog OID {v}"))),
+        Some(PgValue::Text(s)) => {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                Ok(0)
+            } else {
+                trimmed.parse::<u32>().map_err(|_| {
+                    PostgresError::Protocol(format!("invalid catalog u32 literal {trimmed:?}"))
+                })
+            }
+        }
+        other => Err(PostgresError::Protocol(format!(
+            "unexpected catalog u32 cell value {other:?}"
+        ))),
+    }
+}
+
+fn preload_cell_i32(val: Option<&PgValue>, default: i32) -> Result<i32, PostgresError> {
+    match val {
+        None | Some(PgValue::Null) => Ok(default),
+        Some(PgValue::Int2(v)) => Ok(i32::from(*v)),
+        Some(PgValue::Int4(v)) => Ok(*v),
+        Some(PgValue::Int8(v)) => i32::try_from(*v)
+            .map_err(|_| PostgresError::Protocol(format!("out-of-range catalog i32 {v}"))),
+        Some(PgValue::Text(s)) => {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                Ok(default)
+            } else {
+                trimmed.parse::<i32>().map_err(|_| {
+                    PostgresError::Protocol(format!("invalid catalog i32 literal {trimmed:?}"))
+                })
+            }
+        }
+        other => Err(PostgresError::Protocol(format!(
+            "unexpected catalog i32 cell value {other:?}"
+        ))),
+    }
+}
+
+fn preload_cell_opt_str(val: Option<&PgValue>) -> Option<&str> {
+    match val {
+        Some(PgValue::Text(s)) => Some(s.as_str()),
+        _ => None,
+    }
 }
 
 fn validate_start_lsn_floor(

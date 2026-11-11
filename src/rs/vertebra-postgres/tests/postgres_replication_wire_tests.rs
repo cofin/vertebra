@@ -29,8 +29,10 @@ use tokio::time::Instant;
 
 const BOOL_OID: i32 = 16;
 const NAME_OID: i32 = 19;
+const INT2_OID: i32 = 21;
 const INT4_OID: i32 = 23;
 const TEXT_OID: i32 = 25;
+const OID_OID: i32 = 26;
 const NAME_ARRAY_OID: i32 = 1003;
 
 fn build_backend_frame(tag: u8, payload: &[u8]) -> Vec<u8> {
@@ -934,7 +936,41 @@ async fn copyboth_connect_logical_pg15_startup_left_join_pool_isolation_and_clea
             .expect("write pub rows");
         meta_sock.flush().await.expect("flush pub rows");
 
-        captured_queries_bg.lock().await.extend([q1, q2]);
+        let FrontendExchange::Extended(q3) = read_frontend_exchange(&mut meta_sock).await else {
+            panic!("expected parameterized custom-type preload ExtendedQuery");
+        };
+        assert_no_correlated_select_subquery(&q3.sql);
+        assert_eq!(q3.params, vec![Some("vertebra_pub".to_string())]);
+        let preload_cols = [
+            ("oid", OID_OID),
+            ("nspname", NAME_OID),
+            ("typname", NAME_OID),
+            ("typtype", TEXT_OID),
+            ("typcategory", TEXT_OID),
+            ("typdelim", TEXT_OID),
+            ("typelem", OID_OID),
+            ("typbasetype", OID_OID),
+            ("rngsubtype", OID_OID),
+            ("mrngtypid", OID_OID),
+            ("rngsubtype", OID_OID),
+            ("extname", NAME_OID),
+            ("attname", NAME_OID),
+            ("atttypid", OID_OID),
+            ("atttypmod", INT4_OID),
+            ("attnum", INT2_OID),
+        ];
+        meta_sock
+            .write_all(&extended_select_response(
+                &q3.param_oids,
+                &preload_cols,
+                &[],
+                q3.saw_close_portal,
+            ))
+            .await
+            .expect("write empty custom-type preload rows");
+        meta_sock.flush().await.expect("flush preload rows");
+
+        captured_queries_bg.lock().await.extend([q1, q2, q3]);
         assert_clean_terminate_to_eof(&mut meta_sock).await;
         meta_closed_flag.store(true, Ordering::SeqCst);
 

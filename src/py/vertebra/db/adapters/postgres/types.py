@@ -1,16 +1,17 @@
-"""Owned PostgreSQL value records, query results, and pipeline outcome models."""
+"""Owned PostgreSQL value records, query results, pipeline outcomes, and replication models."""
 
 from __future__ import annotations
 
 import math
 from datetime import date, datetime, time
 from decimal import Decimal
-from typing import Any, Literal
+from typing import Any, Final, Literal
 from uuid import UUID
 
 import msgspec
 
 __all__ = [
+    "PG_UNCHANGED_TOAST",
     "PgArray",
     "PgBitString",
     "PgComposite",
@@ -18,6 +19,7 @@ __all__ = [
     "PgJson",
     "PgParameter",
     "PgTemporal",
+    "PgUnchangedToast",
     "PgVector",
     "PostgresArrowResult",
     "PostgresColumn",
@@ -26,6 +28,8 @@ __all__ = [
     "PostgresPipelineOperation",
     "PostgresPipelineOutcome",
     "PostgresQueryResult",
+    "PostgresReplicationIdentity",
+    "PostgresReplicationRecord",
     "PostgresValue",
     "TemporalKind",
     "TemporalSpecial",
@@ -65,6 +69,18 @@ _PY_TS_MAX_PG_MICROS = 252_455_616_000_000_000
 
 _F32_MAX = 3.4028234663852886e38
 _F16_MAX = 65504.0
+_REPLICATION_RECORD_KINDS: Final[frozenset[str]] = frozenset(
+    {
+        "control",
+        "begin",
+        "insert",
+        "update",
+        "delete",
+        "truncate",
+        "message",
+        "commit",
+    }
+)
 
 
 class PostgresColumn(msgspec.Struct, frozen=True, gc=False):
@@ -550,6 +566,80 @@ class PostgresPipelineOutcome(msgspec.Struct, frozen=True, gc=False):
             raise ValueError(msg)
 
 
+class PgUnchangedToast(msgspec.Struct, frozen=True, gc=False):
+    """Sentinel representing an unchanged TOASTed column in a logical replication tuple."""
+
+
+PG_UNCHANGED_TOAST: Final[PgUnchangedToast] = PgUnchangedToast()
+
+
+class PostgresReplicationIdentity(msgspec.Struct, frozen=True, gc=False):
+    """Verified PostgreSQL logical replication source, slot, and publication identity."""
+
+    system_identifier: str
+    database: str
+    slot: str
+    publication_fingerprint: str
+
+    def __post_init__(self) -> None:
+        """Validate non-empty scalar string replication identity fields."""
+        for field_name, value in (
+            ("system_identifier", self.system_identifier),
+            ("database", self.database),
+            ("slot", self.slot),
+            ("publication_fingerprint", self.publication_fingerprint),
+        ):
+            if not isinstance(value, str):
+                msg = f"PostgresReplicationIdentity.{field_name} must be a str"
+                raise TypeError(msg)
+            if not value or not value.strip() or "\x00" in value:
+                msg = f"PostgresReplicationIdentity.{field_name} must be a non-empty str without NUL bytes"
+                raise ValueError(msg)
+
+    @property
+    def identity_key(self) -> tuple[str, str, str, str]:
+        """Return the four-part checkpoint source identity key."""
+        return (
+            self.system_identifier,
+            self.database,
+            self.slot,
+            self.publication_fingerprint,
+        )
+
+
+class PostgresReplicationRecord(msgspec.Struct, frozen=True):
+    """Lossless logical replication event envelope retaining cyclic GC tracking for payloads."""
+
+    kind: Literal["control", "begin", "insert", "update", "delete", "truncate", "message", "commit"]
+    payload: dict[str, Any]
+    commit_end_lsn: int | None = None
+    generation: int = 0
+
+    def __post_init__(self) -> None:
+        """Validate replication record kind, dictionary payload, LSN bounds, and generation."""
+        if not isinstance(self.kind, str):
+            msg = "PostgresReplicationRecord.kind must be a str"
+            raise TypeError(msg)
+        if self.kind not in _REPLICATION_RECORD_KINDS:
+            msg = f"Invalid PostgresReplicationRecord.kind: {self.kind!r}"
+            raise ValueError(msg)
+        if not isinstance(self.payload, dict):
+            msg = "PostgresReplicationRecord.payload must be a dict"
+            raise TypeError(msg)
+        for key in self.payload:
+            if not isinstance(key, str):
+                msg = "PostgresReplicationRecord.payload keys must be str"
+                raise TypeError(msg)
+        if self.commit_end_lsn is not None:
+            _validate_int(self.commit_end_lsn, "commit_end_lsn", 0, _U64_MAX)
+        if isinstance(self.generation, bool) or not isinstance(self.generation, int):
+            msg = "generation must be an int (not bool)"
+            raise TypeError(msg)
+        if self.generation < 0:
+            msg = f"generation={self.generation} must be >= 0"
+            raise ValueError(msg)
+
+
 type PostgresValue = (
     None
     | bool
@@ -601,6 +691,9 @@ def _reject_nested_parameter(value: object) -> None:
         if isinstance(current, PgParameter):
             msg = "PgParameter cannot be nested inside another wrapper or container"
             raise ValueError(msg)
+        if isinstance(current, PgUnchangedToast):
+            msg = "PgUnchangedToast cannot be bound inside a SQL value, parameter, or result container"
+            raise TypeError(msg)
         if isinstance(current, (PgArray, PgComposite)):
             stack.extend(current.values)
         elif isinstance(current, PgJson):
