@@ -2625,3 +2625,194 @@ fn feedback_state_capacity_is_reclaimed_by_acknowledgement() {
     state.record_published_commit(1025).unwrap();
     assert_eq!(state.acknowledge(1025).unwrap(), 1025);
 }
+
+async fn session_writer_connection(
+    start: Option<u64>,
+) -> (PostgresReplicationConnection, TcpStream) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let cfg = direct_config(listener.local_addr().unwrap().port());
+    let peer = tokio::spawn(async move {
+        let (mut meta, _) = listener.accept().await.unwrap();
+        complete_startup_ready_version(&mut meta, 301, "14.12").await;
+        let FrontendExchange::Extended(slot) = read_frontend_exchange(&mut meta).await else {
+            panic!("slot query")
+        };
+        meta.write_all(&extended_select_response(
+            &slot.param_oids,
+            &slot_columns(),
+            &[vec![
+                Some("appdb"),
+                Some("appdb"),
+                Some("logical"),
+                Some("pgoutput"),
+                Some("f"),
+                Some("2/10"),
+                Some("2/80"),
+                Some("extended"),
+            ]],
+            slot.saw_close_portal,
+        ))
+        .await
+        .unwrap();
+        let FrontendExchange::Extended(publication) = read_frontend_exchange(&mut meta).await
+        else {
+            panic!("publication query")
+        };
+        meta.write_all(&extended_select_response(
+            &publication.param_oids,
+            &pub_columns_pg14(),
+            &[vec![
+                Some("vertebra_pub"),
+                Some("f"),
+                Some("t"),
+                Some("t"),
+                Some("t"),
+                Some("f"),
+                Some("f"),
+                None,
+                None,
+            ]],
+            publication.saw_close_portal,
+        ))
+        .await
+        .unwrap();
+        assert_clean_terminate_to_eof(&mut meta).await;
+        let (mut socket, _) = listener.accept().await.unwrap();
+        complete_startup_ready_version(&mut socket, 302, "14.12").await;
+        assert_eq!(
+            read_frontend_exchange(&mut socket).await,
+            FrontendExchange::SimpleQuery("IDENTIFY_SYSTEM".into())
+        );
+        socket
+            .write_all(&identify_system_response(
+                "9990001112223334445",
+                "1",
+                "2/900",
+                Some("appdb"),
+            ))
+            .await
+            .unwrap();
+        let FrontendExchange::SimpleQuery(sql) = read_frontend_exchange(&mut socket).await else {
+            panic!("START")
+        };
+        assert!(sql.contains(&format!(
+            "LOGICAL {} ",
+            start.map_or("0/0".into(), format_pg_lsn)
+        )));
+        let mut startup = copy_both_response_frame(0, &[]);
+        startup.extend(copy_data_frame(b"k\0\0\0\x02\0\0\x09\0\0\0\0\0\0\0\0\0\0"));
+        socket.write_all(&startup).await.unwrap();
+        socket
+    });
+    let connection = PostgresReplicationConnection::connect_logical(
+        &cfg,
+        "vertebra_slot",
+        "vertebra_pub",
+        start,
+    )
+    .await
+    .unwrap();
+    (connection, peer.await.unwrap())
+}
+
+#[tokio::test(start_paused = true)]
+async fn session_writer_preserves_fence_ticks_and_closes_once() {
+    let initial = 0x200000100;
+    let (connection, mut peer) = session_writer_connection(Some(initial)).await;
+    let identity = connection.identity().clone();
+    assert!(connection.buffered_read_len() > 0);
+    let session = connection
+        .into_stream(1, Duration::from_secs(10), Duration::from_secs(2))
+        .unwrap();
+    assert_eq!(session.identity(), &identity);
+    assert_eq!(session.status_positions(), (initial, initial, initial));
+    assert!(matches!(
+        session.acknowledge(initial + 1),
+        Err(PostgresError::Interface(_))
+    ));
+    tokio::task::yield_now().await;
+    let mut byte = [0; 1];
+    assert_eq!(
+        peer.try_read(&mut byte).unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+    for _ in 0..3 {
+        tokio::time::advance(Duration::from_secs(10)).await;
+        let FrontendExchange::Other(b'd', payload) = read_frontend_exchange(&mut peer).await else {
+            panic!("status")
+        };
+        assert_eq!(payload.len(), 34);
+        assert_eq!(payload[0], b'r');
+        for offset in [1, 9, 17] {
+            assert_eq!(
+                u64::from_be_bytes(payload[offset..offset + 8].try_into().unwrap()),
+                initial
+            );
+        }
+    }
+    session.shutdown().await.unwrap();
+    session.shutdown().await.unwrap();
+    assert!(session.is_closed());
+    session.wait_closed().await.unwrap();
+    assert!(matches!(
+        read_frontend_exchange(&mut peer).await,
+        FrontendExchange::Other(b'd', _)
+    ));
+    assert_eq!(
+        read_frontend_exchange(&mut peer).await,
+        FrontendExchange::CopyDone
+    );
+    assert_eq!(
+        read_frontend_exchange(&mut peer).await,
+        FrontendExchange::Eof
+    );
+}
+
+#[tokio::test]
+async fn session_writer_defaults_to_confirmed_fence_and_validates_options() {
+    let (connection, _peer) = session_writer_connection(None).await;
+    let session = connection
+        .into_stream(1, Duration::from_secs(10), Duration::from_secs(2))
+        .unwrap();
+    assert_eq!(
+        session.status_positions(),
+        (0x200000080, 0x200000080, 0x200000080)
+    );
+    session.cancel();
+    assert!(session.is_closed());
+    for (capacity, interval, timeout) in [(0, 10, 2), (1025, 10, 2), (1, 0, 2), (1, 10, 0)] {
+        let (connection, mut peer) = session_writer_connection(None).await;
+        assert!(matches!(
+            connection.into_stream(
+                capacity,
+                Duration::from_secs(interval),
+                Duration::from_secs(timeout)
+            ),
+            Err(PostgresError::Interface(_))
+        ));
+        assert_eq!(
+            read_frontend_exchange(&mut peer).await,
+            FrontendExchange::Eof
+        );
+    }
+}
+
+#[test]
+fn session_writer_drop_without_runtime_closes_socket() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let (session, peer) = runtime.block_on(async {
+        let (connection, peer) = session_writer_connection(None).await;
+        let session = connection
+            .into_stream(1, Duration::from_secs(10), Duration::from_secs(2))
+            .unwrap();
+        (session, peer.into_std().unwrap())
+    });
+    drop(runtime);
+    drop(session);
+    peer.set_nonblocking(false).unwrap();
+    peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    assert_eq!(std::io::Read::read(&mut &peer, &mut [0; 1]).unwrap(), 0);
+}

@@ -5,7 +5,7 @@ chapter_id: ch34-replication-session-pump
 title: "Transfer CopyBoth ownership and run independent status writer"
 description: "Introduce the public ReplicationSession ownership shell, consuming into_stream, identity/status/ack/closed access, timer writer and bounded cancellation shutdown. No record-consumption or placeholder next/publish methods are added in this task; those are owned by t02/t03."
 status: stable
-state: pending
+state: in_progress
 priority: P1
 verification_strategy: behavior_tdd
 depends_on: ["native-postgres-driver:ch23:t02"]
@@ -25,8 +25,8 @@ estimated_loc: 230
 plan_revision: 8
 plan_commit: d90d4625
 state_revision: 2
-claimed_by: null
-claimed_at: null
+claimed_by: agent:session_task1
+claimed_at: "2026-11-12T15:09:41.151283+00:00"
 blocked_reason: null
 unblock_condition: null
 next_step: null
