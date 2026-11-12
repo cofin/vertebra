@@ -2494,3 +2494,103 @@ fn feedback_wire_status_intervals_respect_timeout_and_clamps() {
         Duration::from_secs(10)
     );
 }
+
+#[test]
+fn feedback_state_initial_and_unpublished_commit() {
+    use _postgres::replication::feedback::ReplicationFeedback;
+    let mut state = ReplicationFeedback::new(0x2_0000_0100);
+    assert_eq!(
+        state.status_positions(),
+        (0x2_0000_0100, 0x2_0000_0100, 0x2_0000_0100)
+    );
+    assert_eq!(state.unacked_count(), 0);
+    assert_eq!(state.acknowledge(0x2_0000_0100).unwrap(), 0x2_0000_0100);
+    state.record_received_commit(0x2_0000_0200).unwrap();
+    assert!(matches!(
+        state.acknowledge(0x2_0000_0200),
+        Err(PostgresError::Interface(_))
+    ));
+    assert_eq!(
+        state.status_positions(),
+        (0x2_0000_0200, 0x2_0000_0100, 0x2_0000_0100)
+    );
+}
+
+#[test]
+fn feedback_state_received_progress_is_monotonic() {
+    use _postgres::replication::feedback::ReplicationFeedback;
+    let mut state = ReplicationFeedback::new(100);
+    state.record_received_commit(200).unwrap();
+    state.record_received_commit(200).unwrap();
+    assert!(matches!(
+        state.record_received_commit(150),
+        Err(PostgresError::Interface(_))
+    ));
+    assert_eq!(state.status_positions(), (200, 100, 100));
+    assert_eq!(state.unacked_count(), 0);
+}
+
+#[test]
+fn feedback_state_publication_refusals_preserve_boundaries() {
+    use _postgres::replication::feedback::ReplicationFeedback;
+    let mut state = ReplicationFeedback::new(100);
+    state.record_received_commit(400).unwrap();
+    state.record_published_commit(200).unwrap();
+    for invalid in [200, 150, 500, 100, 99] {
+        assert!(matches!(
+            state.record_published_commit(invalid),
+            Err(PostgresError::Interface(_))
+        ));
+        assert_eq!(state.status_positions(), (400, 100, 100));
+        assert_eq!(state.unacked_count(), 1);
+    }
+    assert_eq!(state.acknowledge(200).unwrap(), 200);
+    assert_eq!(state.status_positions(), (400, 200, 200));
+    assert_eq!(state.unacked_count(), 0);
+}
+
+#[test]
+fn feedback_state_acknowledgement_is_cumulative_and_exact() {
+    use _postgres::replication::feedback::ReplicationFeedback;
+    let mut state = ReplicationFeedback::new(100);
+    state.record_received_commit(350).unwrap();
+    state.record_published_commit(200).unwrap();
+    state.record_published_commit(350).unwrap();
+    for invalid in [250, 999] {
+        assert!(matches!(
+            state.acknowledge(invalid),
+            Err(PostgresError::Interface(_))
+        ));
+        assert_eq!(state.status_positions(), (350, 100, 100));
+        assert_eq!(state.unacked_count(), 2);
+    }
+    assert_eq!(state.acknowledge(350).unwrap(), 350);
+    assert_eq!(state.acknowledge(350).unwrap(), 350);
+    assert!(matches!(
+        state.acknowledge(200),
+        Err(PostgresError::Interface(_))
+    ));
+    assert_eq!(state.status_positions(), (350, 350, 350));
+    assert_eq!(state.unacked_count(), 0);
+}
+
+#[test]
+fn feedback_state_capacity_is_reclaimed_by_acknowledgement() {
+    use _postgres::replication::feedback::{MAX_UNACKED_COMMITS, ReplicationFeedback};
+    let mut state = ReplicationFeedback::new(0);
+    state.record_received_commit(2048).unwrap();
+    for lsn in 1..=1024 {
+        state.record_published_commit(lsn).unwrap();
+    }
+    assert_eq!(MAX_UNACKED_COMMITS, 1024);
+    assert!(matches!(
+        state.record_published_commit(1025),
+        Err(PostgresError::Interface(_))
+    ));
+    assert_eq!(state.status_positions(), (2048, 0, 0));
+    assert_eq!(state.unacked_count(), 1024);
+    assert_eq!(state.acknowledge(1024).unwrap(), 1024);
+    assert_eq!(state.unacked_count(), 0);
+    state.record_published_commit(1025).unwrap();
+    assert_eq!(state.acknowledge(1025).unwrap(), 1025);
+}

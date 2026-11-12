@@ -1,5 +1,6 @@
 //! Logical replication payload codecs and commit-fenced status primitives.
 
+use std::collections::VecDeque;
 use std::time::Duration;
 
 use crate::errors::PostgresError;
@@ -76,5 +77,90 @@ pub fn compute_status_interval(wal_sender_timeout: Option<Duration>) -> Duration
             (timeout / 3).clamp(Duration::from_millis(100), DEFAULT_STATUS_INTERVAL)
         }
         _ => DEFAULT_STATUS_INTERVAL,
+    }
+}
+
+/// Complete received and published Commit boundaries, fenced by caller acknowledgement.
+#[derive(Debug)]
+pub struct ReplicationFeedback {
+    received_complete_lsn: u64,
+    published_commits: VecDeque<u64>,
+    acknowledged_commit_lsn: u64,
+}
+
+impl ReplicationFeedback {
+    /// Initialize all status positions at the validated replication start position.
+    pub fn new(initial_lsn: u64) -> Self {
+        Self {
+            received_complete_lsn: initial_lsn,
+            published_commits: VecDeque::new(),
+            acknowledged_commit_lsn: initial_lsn,
+        }
+    }
+
+    /// Advance received progress only after decoding a complete Commit.
+    pub fn record_received_commit(&mut self, commit_end_lsn: u64) -> Result<(), PostgresError> {
+        if commit_end_lsn < self.received_complete_lsn {
+            return Err(PostgresError::Interface(
+                "received replication Commit position regressed".to_owned(),
+            ));
+        }
+        self.received_complete_lsn = commit_end_lsn;
+        Ok(())
+    }
+
+    /// Register a Commit after actual consumer publication, retaining bounded pending state.
+    pub fn record_published_commit(&mut self, commit_end_lsn: u64) -> Result<(), PostgresError> {
+        let last_published = self
+            .published_commits
+            .back()
+            .copied()
+            .unwrap_or(self.acknowledged_commit_lsn);
+        if commit_end_lsn <= last_published || commit_end_lsn > self.received_complete_lsn {
+            return Err(PostgresError::Interface(
+                "published replication Commit must advance within received progress".to_owned(),
+            ));
+        }
+        if self.published_commits.len() >= MAX_UNACKED_COMMITS {
+            return Err(PostgresError::Interface(
+                "replication has reached its unacknowledged Commit limit".to_owned(),
+            ));
+        }
+        self.published_commits.push_back(commit_end_lsn);
+        Ok(())
+    }
+
+    /// Cumulatively acknowledge an exact published Commit boundary without accepting regressions.
+    pub fn acknowledge(&mut self, commit_end_lsn: u64) -> Result<u64, PostgresError> {
+        if commit_end_lsn == self.acknowledged_commit_lsn {
+            return Ok(commit_end_lsn);
+        }
+        let Some(index) = self
+            .published_commits
+            .iter()
+            .position(|lsn| *lsn == commit_end_lsn)
+        else {
+            return Err(PostgresError::Interface(
+                "acknowledgement requires a current published replication Commit boundary"
+                    .to_owned(),
+            ));
+        };
+        self.published_commits.drain(..=index);
+        self.acknowledged_commit_lsn = commit_end_lsn;
+        Ok(commit_end_lsn)
+    }
+
+    /// Return write, flush, and apply positions without treating receipt as durability.
+    pub fn status_positions(&self) -> (u64, u64, u64) {
+        (
+            self.received_complete_lsn.max(self.acknowledged_commit_lsn),
+            self.acknowledged_commit_lsn,
+            self.acknowledged_commit_lsn,
+        )
+    }
+
+    /// Count published Commit boundaries not yet covered by an acknowledgement.
+    pub fn unacked_count(&self) -> usize {
+        self.published_commits.len()
     }
 }

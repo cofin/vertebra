@@ -44,7 +44,7 @@ chapters:
   - ch32-ffi-okf-and-review-routing-sync
   - ch33-final-review-and-release-gate
 current_chapter: ch23-replication-feedback-resume-and-bridge
-current_task: "native-postgres-driver:ch23:t01"
+current_task: "native-postgres-driver:ch23:t02"
 parent_prd: native-data-platform
 depends_on_flows:
   - driver-fail-loud

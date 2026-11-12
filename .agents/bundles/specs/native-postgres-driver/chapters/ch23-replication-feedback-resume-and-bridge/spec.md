@@ -9,7 +9,7 @@ state: active
 planning_status: complete
 depends_on_chapters: ["ch22-copyboth-and-pgoutput-decoding"]
 replan_trigger: null
-current_task: "native-postgres-driver:ch23:t01"
+current_task: "native-postgres-driver:ch23:t02"
 plan_revision: 8
 plan_commit: d90d4625
 state_revision: 2
@@ -131,8 +131,8 @@ The sync owns these docs collectively, independent of task production limits. Fu
 
 ## 5. Implementation Plan
 
-- [~] native-postgres-driver:ch23:t01 — Decode replication CopyData and encode bounded status payloads (tasks/t01-feedback-wire-codecs.md)
-- [ ] native-postgres-driver:ch23:t02 — Fence acknowledgement to published Commit boundaries (tasks/t02-commit-fenced-feedback.md)
+- [x] [64d317cd] native-postgres-driver:ch23:t01 — Decode replication CopyData and encode bounded status payloads (tasks/t01-feedback-wire-codecs.md)
+- [~] native-postgres-driver:ch23:t02 — Fence acknowledgement to published Commit boundaries (tasks/t02-commit-fenced-feedback.md)
 
 
 One executor per worksheet, in dependency order. No shared-file task executors run in parallel.

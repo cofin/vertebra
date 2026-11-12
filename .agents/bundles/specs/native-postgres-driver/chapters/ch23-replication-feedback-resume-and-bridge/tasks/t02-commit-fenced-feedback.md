@@ -5,7 +5,7 @@ chapter_id: ch23-replication-feedback-resume-and-bridge
 title: "Fence acknowledgement to published Commit boundaries"
 description: "Implement initialized feedback state and cumulative exact-boundary acknowledgements; defer all transport and publication-lease mechanics to ch34."
 status: stable
-state: pending
+state: in_progress
 priority: P1
 verification_strategy: behavior_tdd
 depends_on: ["native-postgres-driver:ch23:t01"]
@@ -21,8 +21,8 @@ estimated_loc: 165
 plan_revision: 8
 plan_commit: d90d4625
 state_revision: 2
-claimed_by: null
-claimed_at: null
+claimed_by: agent:implement23t02
+claimed_at: 2026-11-12T04:36:40.500518+00:00
 blocked_reason: null
 unblock_condition: null
 next_step: null
@@ -111,7 +111,7 @@ Green: repeat the same focused command, then run the full canonical module and f
 ```bash
 PYO3_PYTHON="$PWD/.venv/bin/python" PYTHONPATH="$PWD/src/py" cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --test postgres_replication_wire_tests
 PYO3_PYTHON="$PWD/.venv/bin/python" cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-postgres --all-targets -- -D warnings
-cargo fmt --manifest-path src/rs/Cargo.toml --check
+cargo fmt --manifest-path src/rs/Cargo.toml -p vertebra-postgres --check
 ```
 
 ## Acceptance Criteria

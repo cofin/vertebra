@@ -5,7 +5,7 @@ chapter_id: ch23-replication-feedback-resume-and-bridge
 title: "Decode replication CopyData and encode bounded status payloads"
 description: "Implement strict public wire payload codecs and status interval computation only; session ownership, published-commit state, and I/O loops remain separate tasks."
 status: stable
-state: in_progress
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on: ["native-postgres-driver:ch22:t03"]
@@ -24,15 +24,15 @@ estimated_loc: 130
 plan_revision: 8
 plan_commit: d90d4625
 state_revision: 2
-claimed_by: agent:implement23t01
-claimed_at: "2026-11-12T04:27:27Z"
+claimed_by: null
+claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
 last_verified_at: "2026-11-12T04:29:34Z"
-last_verified_commit: null
+last_verified_commit: 64d317cd
 verification_evidence: "Red feedback_wire exit 101 (missing feedback module); Green feedback_wire 4 passed, full wire module 13 passed, Clippy all-targets -D warnings and package fmt check exit 0. Logs: /tmp/ch23-t01-{red,green,module,clippy}.log."
-commit: null
+commit: 64d317cd
 created_at: "2026-11-12T05:00:00Z"
 updated_at: "2026-11-12T04:25:15Z"
 generated: {by: flow-revise, at: "2026-11-12T05:00:00Z"}
@@ -122,7 +122,7 @@ cargo fmt --manifest-path src/rs/Cargo.toml -p vertebra-postgres --check
 
 - [x] R22.4 framing and interval cases pass with no socket or feedback mutation.
 
-- [ ] Red, Green, and lint evidence is recorded, and task plus checklist synchronization is included in one signed conventional commit.
+- [x] Red, Green, and lint evidence is recorded, and task plus checklist synchronization is included in one signed conventional commit.
 
 ## Notes & Discoveries
 
