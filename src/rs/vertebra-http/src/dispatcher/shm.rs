@@ -14,7 +14,7 @@ use vertebra_core::buffer::CacheLine;
 use vertebra_core::transport::ring_pair::RingPair;
 use vertebra_core::transport::{ShmBatchWriter, TransportNode};
 
-use super::shm_reader::PendingRequests;
+use super::streams::ResponseStreamRegistry;
 use super::types::{
     TransportRequestView, WorkerState, batch_snapshot_serialized_size, request_slab_size,
     service_unavailable_response, worker_ring_has_capacity,
@@ -22,6 +22,7 @@ use super::types::{
 use crate::batcher::Batch;
 use crate::body::PendingResponse;
 use crate::dispatcher::correlation::{CorrelationId, InFlightRequests};
+use vertebra_core::bridge::{ResponseStreamFrame, StreamDelivery};
 
 const SHM_CORRELATION_SHARDS: usize = 8;
 const SHM_CORRELATION_MASK: usize = SHM_CORRELATION_SHARDS - 1;
@@ -43,7 +44,7 @@ pub struct ShmDispatcher {
     next_batch: AtomicUsize,
     active_requests: CacheLine<AtomicUsize>,
     correlation_shards: [Mutex<InFlightRequests>; SHM_CORRELATION_SHARDS],
-    pending_streams: Arc<PendingRequests>,
+    streams: ResponseStreamRegistry,
     lease_table: Mutex<Option<Arc<vertebra_core::broker::ShmLeaseTable>>>,
 }
 
@@ -70,7 +71,7 @@ impl ShmDispatcher {
             next_batch: AtomicUsize::new(0),
             active_requests: CacheLine(AtomicUsize::new(0)),
             correlation_shards,
-            pending_streams: Arc::new(PendingRequests::new()),
+            streams: ResponseStreamRegistry::default(),
             lease_table: Mutex::new(None),
         })
     }
@@ -526,6 +527,7 @@ impl ShmDispatcher {
 
     /// Sweep for expired entries across all shards, sending `504` outside shard locks.
     pub fn sweep_expired(&self, timeout: Duration) -> usize {
+        self.streams.sweep_closed();
         let mut total = 0;
         for shard in &self.correlation_shards {
             let expired = {
@@ -571,7 +573,7 @@ impl ShmDispatcher {
                 }
             }
         }
-        total
+        total + self.streams.close_worker(worker_id)
     }
 
     /// Complete a single correlation ID, releasing the shard lock before `oneshot::send`.
@@ -581,7 +583,13 @@ impl ShmDispatcher {
         let shard_idx = cid.shard() & SHM_CORRELATION_MASK;
         let completed = {
             let mut slab = self.correlation_shards[shard_idx].lock().unwrap();
-            slab.take_completed_with_worker(cid)
+            let completed = slab.take_completed_with_worker(cid);
+            if response.stream_rx.is_some()
+                && let Some((_, worker_id)) = &completed
+            {
+                self.streams.set_worker(correlation_id, *worker_id);
+            }
+            completed
         };
         if let Some((tx, worker_id)) = completed {
             self.decrement_active(1);
@@ -666,92 +674,15 @@ impl ShmDispatcher {
             .collect()
     }
 
-    /// Inspect an incoming `ResponseSlot` frame from SHM.
-    pub fn handle_raw_response_slot(&self, raw_slot: &[u8]) -> bool {
-        use bytes::Bytes;
-        use http::{HeaderMap, HeaderName, HeaderValue};
-        use hyper::body::Frame;
-        use vertebra_core::ipc::{
-            FLAG_ERROR, FLAG_FINAL, FLAG_HEADERS_SENT, FLAG_STREAMING, FLAG_TRAILERS, ResponseSlot,
-        };
+    /// Deliver an ordered frame to a live streaming response.
+    pub async fn deliver_stream_frame(&self, frame: ResponseStreamFrame) -> StreamDelivery {
+        self.streams
+            .deliver(frame, |id, response| self.complete_one(id, response))
+            .await
+    }
 
-        let Some(correlation_id) = ResponseSlot::peek_request_id(raw_slot) else {
-            return false;
-        };
-        let Some(flags) = ResponseSlot::peek_flags(raw_slot) else {
-            return false;
-        };
-        let Ok(slot) = ResponseSlot::decode_from(raw_slot) else {
-            return false;
-        };
-
-        let is_streaming = (flags & FLAG_STREAMING) != 0;
-        let is_final = (flags & (FLAG_FINAL | FLAG_ERROR)) != 0;
-
-        if !is_streaming || ((flags & FLAG_HEADERS_SENT) != 0 && is_final) {
-            let encoded_headers: Vec<(Vec<u8>, Vec<u8>)> = slot
-                .headers
-                .into_iter()
-                .map(|(k, v)| (k.into_bytes(), v.into_bytes()))
-                .collect();
-            let headers_mp = crate::response::encode_response_headers(&encoded_headers);
-            return self.complete_one(
-                correlation_id,
-                PendingResponse::unary(slot.status, headers_mp, Bytes::from(slot.body)),
-            );
-        }
-
-        if (flags & FLAG_HEADERS_SENT) != 0 {
-            let mut raw_rx = self.pending_streams.register_stream(correlation_id, 64);
-            let _ = self.pending_streams.deliver_raw_frame(raw_slot.to_vec());
-
-            let encoded_headers: Vec<(Vec<u8>, Vec<u8>)> = slot
-                .headers
-                .into_iter()
-                .map(|(k, v)| (k.into_bytes(), v.into_bytes()))
-                .collect();
-            let headers_mp = crate::response::encode_response_headers(&encoded_headers);
-            let (frame_tx, frame_rx) = tokio::sync::mpsc::channel(64);
-
-            tokio::spawn(async move {
-                while let Some(raw_frame) = raw_rx.recv().await {
-                    let Ok(chunk_slot) = ResponseSlot::decode_from(&raw_frame) else {
-                        break;
-                    };
-                    if (chunk_slot.flags & FLAG_TRAILERS) != 0 && !chunk_slot.headers.is_empty() {
-                        let mut trailers = HeaderMap::new();
-                        for (k, v) in chunk_slot.headers {
-                            if let (Ok(name), Ok(val)) = (
-                                HeaderName::from_bytes(k.as_bytes()),
-                                HeaderValue::from_str(&v),
-                            ) {
-                                trailers.insert(name, val);
-                            }
-                        }
-                        if frame_tx.send(Ok(Frame::trailers(trailers))).await.is_err() {
-                            break;
-                        }
-                    } else if !chunk_slot.body.is_empty()
-                        && frame_tx
-                            .send(Ok(Frame::data(Bytes::from(chunk_slot.body))))
-                            .await
-                            .is_err()
-                    {
-                        break;
-                    }
-                    if (chunk_slot.flags & (FLAG_FINAL | FLAG_ERROR)) != 0 {
-                        break;
-                    }
-                }
-            });
-
-            return self.complete_one(
-                correlation_id,
-                PendingResponse::streaming(slot.status, headers_mp, frame_rx),
-            );
-        }
-
-        self.pending_streams.deliver_raw_frame(raw_slot.to_vec())
+    pub fn active_streams(&self) -> usize {
+        self.streams.active_streams()
     }
 
     fn fail_staged_slice(&self, slice: &[StagedShmRequest]) {

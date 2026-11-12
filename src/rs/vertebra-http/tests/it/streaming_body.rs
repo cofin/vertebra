@@ -10,20 +10,9 @@ use vertebra_http::body::{
     FrameReceiver, HttpResponse, PendingResponse, ResponseBody, full_body, stream_body,
 };
 use vertebra_http::dispatcher::shm_reader::{
-    FLAG_ERROR, FLAG_FINAL, FLAG_HEADERS_SENT, FLAG_STREAMING, FLAG_TRAILERS, PendingRequests,
+    FLAG_ERROR, FLAG_FINAL, FLAG_HEADERS_SENT, FLAG_STREAMING, FLAG_TRAILERS,
 };
 use vertebra_http::response::build_response;
-
-fn encode_test_frame(request_id: u64, status: u16, flags: u16, payload: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(16 + payload.len());
-    out.extend_from_slice(&request_id.to_le_bytes());
-    out.extend_from_slice(&status.to_le_bytes());
-    out.extend_from_slice(&flags.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(&(payload.len() as u16).to_le_bytes());
-    out.extend_from_slice(payload);
-    out
-}
 
 #[tokio::test]
 async fn unary_full_body_yields_single_frame_without_channel() {
@@ -101,72 +90,6 @@ async fn build_response_constructs_streaming_variant_from_pending_response() {
     assert_eq!(response.status(), StatusCode::OK);
     let collected = response.into_body().collect().await.unwrap();
     assert_eq!(collected.to_bytes(), Bytes::from_static(b"part-apart-b"));
-}
-
-#[tokio::test]
-async fn pending_requests_keeps_stream_open_until_flag_final_or_error() {
-    let pending = PendingRequests::new();
-    let request_id = 77_u64;
-    let mut rx = pending.register_stream(request_id, 8);
-    assert_eq!(pending.len(), 1);
-
-    let frame1 = encode_test_frame(
-        request_id,
-        200,
-        FLAG_STREAMING | FLAG_HEADERS_SENT,
-        b"alpha",
-    );
-    let frame2 = encode_test_frame(request_id, 200, FLAG_STREAMING, b"beta");
-    let frame3 = encode_test_frame(
-        request_id,
-        200,
-        FLAG_STREAMING | FLAG_TRAILERS | FLAG_FINAL,
-        b"grpc-status:0",
-    );
-
-    assert!(pending.deliver_raw_frame(frame1));
-    assert_eq!(
-        pending.len(),
-        1,
-        "stream entry must remain active after start frame"
-    );
-
-    assert!(pending.deliver_raw_frame(frame2));
-    assert_eq!(
-        pending.len(),
-        1,
-        "stream entry must remain active after middle chunk"
-    );
-
-    assert!(pending.deliver_raw_frame(frame3));
-    assert_eq!(
-        pending.len(),
-        0,
-        "stream entry must be removed when FLAG_FINAL is set"
-    );
-
-    let recv1 = rx.recv().await.expect("frame 1");
-    let recv2 = rx.recv().await.expect("frame 2");
-    let recv3 = rx.recv().await.expect("frame 3");
-    assert!(
-        rx.recv().await.is_none(),
-        "stream must close after FLAG_FINAL"
-    );
-    assert_eq!(&recv1[16..], b"alpha");
-    assert_eq!(&recv2[16..], b"beta");
-    assert_eq!(&recv3[16..], b"grpc-status:0");
-
-    let err_id = 88_u64;
-    let mut err_rx = pending.register_stream(err_id, 4);
-    let err_frame = encode_test_frame(err_id, 500, FLAG_STREAMING | FLAG_ERROR, b"boom");
-    assert!(pending.deliver_raw_frame(err_frame));
-    assert_eq!(
-        pending.len(),
-        0,
-        "stream entry must be removed when FLAG_ERROR is set"
-    );
-    assert!(err_rx.recv().await.is_some());
-    assert!(err_rx.recv().await.is_none());
 }
 
 fn stream_frame(
@@ -464,5 +387,226 @@ async fn registry_empty_final_reports_disconnected_client() {
             .await,
         StreamDelivery::Closed
     );
+    assert_eq!(registry.active_streams(), 0);
+}
+
+#[tokio::test]
+async fn abandoned_bridge_stream_is_pruned_by_existing_timeout_sweep() {
+    use std::sync::Arc;
+    use vertebra_http::dispatcher::BridgeCorrelation;
+    let correlation = Arc::new(BridgeCorrelation::default());
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let id = correlation.register_pending(tx).unwrap();
+    correlation
+        .stream_registry()
+        .deliver(stream_frame(id, FLAG_HEADERS_SENT, b"a"), |id, response| {
+            correlation.complete(id, response)
+        })
+        .await;
+    drop(rx.await.unwrap());
+    assert_eq!(correlation.sweep_expired(std::time::Duration::ZERO), 0);
+    assert_eq!(correlation.stream_registry().active_streams(), 0);
+}
+
+fn register_shm_stream(
+    shm: &vertebra_http::dispatcher::ShmDispatcher,
+) -> (u64, tokio::sync::oneshot::Receiver<PendingResponse>) {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let id = shm
+        .correlation_shard(0)
+        .lock()
+        .unwrap()
+        .insert(0, tx, 0)
+        .unwrap()
+        .raw();
+    (id, rx)
+}
+
+#[tokio::test]
+async fn worker_sweep_closes_stream_and_cancels_a_backpressured_sender_clone() {
+    use std::sync::Arc;
+    use vertebra_core::bridge::StreamDelivery;
+    use vertebra_core::transport::ring_pair::{RingPair, RingPairConfig};
+    use vertebra_http::dispatcher::ShmDispatcher;
+    let pair = Arc::new(RingPair::create(RingPairConfig::compact()).unwrap());
+    let shm = ShmDispatcher::new(vec![pair], 128);
+    let (id, response) = register_shm_stream(&shm);
+    assert_eq!(
+        shm.deliver_stream_frame(stream_frame(id, FLAG_HEADERS_SENT, b"a"))
+            .await,
+        StreamDelivery::Accepted
+    );
+    for _ in 1..64 {
+        assert_eq!(
+            shm.deliver_stream_frame(stream_frame(id, 0, b"b")).await,
+            StreamDelivery::Accepted
+        );
+    }
+    let pending = response.await.unwrap();
+    let send = shm.deliver_stream_frame(stream_frame(id, 0, b"blocked"));
+    tokio::pin!(send);
+    tokio::select! { biased; _ = &mut send => panic!("full stream must backpressure"), _ = std::future::ready(()) => {} }
+    assert_eq!(shm.sweep_worker(0), 1);
+    assert_eq!(
+        tokio::time::timeout(std::time::Duration::from_secs(2), send)
+            .await
+            .unwrap(),
+        StreamDelivery::Closed
+    );
+    let bytes = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        build_response(pending).into_body().collect(),
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .to_bytes();
+    assert_eq!(bytes.len(), 64);
+    assert_eq!(bytes[0], b'a');
+    assert!(bytes[1..].iter().all(|byte| *byte == b'b'));
+    assert_eq!(shm.active_streams(), 0);
+}
+
+#[tokio::test]
+async fn shm_reader_streams_progressively_then_keeps_serving_unary_responses() {
+    use std::sync::Arc;
+    use tokio_util::sync::CancellationToken;
+    use vertebra_core::transport::ring_pair::{RingPair, RingPairConfig};
+    use vertebra_http::dispatcher::shm_reader::spawn_response_readers;
+    use vertebra_http::dispatcher::{Dispatcher, ShmDispatcher};
+    let mut config = RingPairConfig::compact();
+    config.response_tiers.xlarge.slot_count = 8;
+    let pair = Arc::new(RingPair::create(config).unwrap());
+    let shm = ShmDispatcher::new(vec![pair.clone()], 128);
+    let dispatcher = Arc::new(Dispatcher::from_shm(shm.clone()));
+    let shutdown = CancellationToken::new();
+    let reader = spawn_response_readers(vec![pair.clone()], dispatcher, shutdown.clone());
+    let (id, response) = register_shm_stream(&shm);
+    pair.send_stream_frame(id, 200, FLAG_STREAMING | FLAG_HEADERS_SENT, b"", b"a")
+        .unwrap();
+    pair.response_notifier.notify().unwrap();
+    let pending = tokio::time::timeout(std::time::Duration::from_secs(2), response)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(pending.stream_rx.is_some());
+    let continuation = vec![b'b'; 5000];
+    pair.send_stream_frame(id, 200, FLAG_STREAMING, b"", &continuation)
+        .unwrap();
+    pair.send_stream_frame(id, 200, FLAG_STREAMING | FLAG_FINAL, b"", b"")
+        .unwrap();
+    pair.response_notifier.notify().unwrap();
+    let bytes = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        build_response(pending).into_body().collect(),
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .to_bytes();
+    assert_eq!(bytes.len(), 5001);
+    assert_eq!(bytes[0], b'a');
+    assert_eq!(&bytes[1..], continuation);
+    let (id, response) = register_shm_stream(&shm);
+    pair.response_rings
+        .send_response(id, 201, b"", b"ok")
+        .unwrap();
+    pair.response_notifier.notify().unwrap();
+    let unary = tokio::time::timeout(std::time::Duration::from_secs(2), response)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(unary.status, 201);
+    assert_eq!(unary.body.as_ref(), b"ok");
+    assert!(unary.stream_rx.is_none());
+    shutdown.cancel();
+    tokio::time::timeout(std::time::Duration::from_secs(2), reader)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(shm.active_streams(), 0);
+}
+
+#[tokio::test]
+async fn shm_reader_shutdown_cancels_a_full_stream_channel() {
+    use std::sync::Arc;
+    use tokio_util::sync::CancellationToken;
+    use vertebra_core::transport::ring_pair::{RingPair, RingPairConfig};
+    use vertebra_http::dispatcher::shm_reader::spawn_response_readers;
+    use vertebra_http::dispatcher::{Dispatcher, ShmDispatcher};
+    let mut config = RingPairConfig::compact();
+    config.response_tiers.xlarge.slot_size = 4096;
+    config.response_tiers.xlarge.slot_count = 128;
+    let pair = Arc::new(RingPair::create(config).unwrap());
+    let shm = ShmDispatcher::new(vec![pair.clone()], 128);
+    let (id, response) = register_shm_stream(&shm);
+    pair.send_stream_frame(id, 200, FLAG_STREAMING | FLAG_HEADERS_SENT, b"", b"a")
+        .unwrap();
+    for _ in 0..65 {
+        pair.send_stream_frame(id, 200, FLAG_STREAMING, b"", b"b")
+            .unwrap();
+    }
+    let shutdown = CancellationToken::new();
+    let reader = spawn_response_readers(
+        vec![pair.clone()],
+        Arc::new(Dispatcher::from_shm(shm.clone())),
+        shutdown.clone(),
+    );
+    pair.response_notifier.notify().unwrap();
+    let pending = tokio::time::timeout(std::time::Duration::from_secs(2), response)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut receiver = pending.stream_rx.unwrap().into_inner();
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while receiver.len() < 64 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    shutdown.cancel();
+    tokio::time::timeout(std::time::Duration::from_secs(2), reader)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(shm.active_streams(), 0);
+    let mut bytes = Vec::new();
+    while let Some(frame) = receiver.recv().await {
+        bytes.extend_from_slice(&frame.unwrap().into_data().unwrap());
+    }
+    assert_eq!(bytes.len(), 64);
+}
+
+#[tokio::test]
+async fn dropped_bridge_receiver_releases_a_blocked_producer() {
+    use std::sync::Arc;
+    use vertebra_core::bridge::StreamDelivery;
+    use vertebra_http::dispatcher::ResponseStreamRegistry;
+    let registry = Arc::new(ResponseStreamRegistry::with_capacity(1));
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+    let worker_registry = registry.clone();
+    let worker = std::thread::spawn(move || {
+        worker_registry
+            .deliver_blocking(stream_frame(1, FLAG_HEADERS_SENT, b"a"), |_, response| {
+                tx.send(response).is_ok()
+            });
+        started_tx.send(()).unwrap();
+        done_tx
+            .send(worker_registry.deliver_blocking(stream_frame(1, 0, b"b"), |_, _| false))
+            .unwrap();
+    });
+    started_rx.await.unwrap();
+    drop(rx.await.unwrap());
+    assert_eq!(
+        tokio::time::timeout(std::time::Duration::from_secs(2), done_rx)
+            .await
+            .unwrap()
+            .unwrap(),
+        StreamDelivery::Closed
+    );
+    worker.join().unwrap();
     assert_eq!(registry.active_streams(), 0);
 }

@@ -185,6 +185,7 @@ impl BridgeCorrelation {
 
     /// Sweep expired entries across all shards, sending `504 Gateway Timeout` outside locks.
     pub fn sweep_expired(&self, timeout: Duration) -> usize {
+        self.streams.sweep_closed();
         let mut total = 0usize;
         for shard in &self.shards {
             let expired = {
