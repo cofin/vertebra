@@ -119,7 +119,7 @@ Parent roadmap: [spec.md](../../spec.md) and [contracts.md](../../contracts.md).
 Arrow Bulk Import:
   Python Table / RecordBatch / ArrowCursor / __arrow_c_stream__
     -> adapters/postgres/arrow.py::{iter_arrow_ipc_batches, load_arrow_sync, load_arrow_async}
-      -> Sync/AsyncPostgresClient.copy_from_arrow(..., schema_name=...) + CopyIn.write_arrow_ipc(batch_ipc)
+      -> Sync/AsyncPostgresClient.copy_from_arrow(..., schema_name=...) + copy_in.write_arrow_ipc(batch_ipc)
         -> SessionHandle::copy_from_arrow_with_generation_as (bound pg_catalog JOIN + TypeCatalog::discover + CopySessionLease)
         -> PostgresArrowImportPlan::encode_batch -> pre-initialized BinaryCopyEncoder -> CopyFromStream::flush_encoded_slice_internal(&payload, false)
 
@@ -164,17 +164,17 @@ Progress: `[0/0 files documented in ch20]` (repository-wide public docs and OKF 
 
 ## 5. Implementation Plan
 
-- [x] [1a3007d2] native-postgres-driver:ch20:t01 — Convert Arrow RecordBatches into binary COPY fields with prevalidated target plans and IPC batch iterators (tasks/t01-arrow-to-copy-field-import.md)
-- [x] [c5b56452] native-postgres-driver:ch20:t02 — Expose PyO3 COPY handles and stream Arrow IPC input buffers into native COPY (tasks/t02-streaming-arrow-input-bridge.md)
-- [x] [97fc682e] native-postgres-driver:ch20:t03 — Expose synchronous select_to_arrow and pinned Arrow portal batch streams (tasks/t03-sync-arrow-selection-and-portals.md)
-- [x] [83ebe4e1] native-postgres-driver:ch20:t04 — Expose asynchronous select_to_arrow and cancellation-safe Arrow portal streams (tasks/t04-async-arrow-portal-cancellation.md)
+- [x] [00344dd7] native-postgres-driver:ch20:t01 — Convert Arrow RecordBatches into binary COPY fields with prevalidated target plans and IPC batch iterators (tasks/t01-arrow-to-copy-field-import.md)
+- [x] [473d4e79] native-postgres-driver:ch20:t02 — Expose PyO3 COPY handles and stream Arrow IPC input buffers into native COPY (tasks/t02-streaming-arrow-input-bridge.md)
+- [x] [41e4203b] native-postgres-driver:ch20:t03 — Expose synchronous select_to_arrow and pinned Arrow portal batch streams (tasks/t03-sync-arrow-selection-and-portals.md)
+- [x] [1706e1a0] native-postgres-driver:ch20:t04 — Expose asynchronous select_to_arrow and cancellation-safe Arrow portal streams (tasks/t04-async-arrow-portal-cancellation.md)
 
 **Chapter Recovery Checkpoint:** `make dev && PYTHONPATH="$(pwd)/src/py:$(pwd)/.venv/lib/python3.12/site-packages" cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --test postgres_arrow_import_tests && PYTHONPATH="$(pwd)/src/py:$(pwd)/.venv/lib/python3.12/site-packages" cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --test postgres_arrow_tests && uv run --no-sync ruff check src/py/vertebra/_postgres.pyi src/py/vertebra/db/adapters/postgres/arrow.py src/py/tests/unit/db/test_postgres_native_data.py && uv run --no-sync mypy src/py/vertebra/_postgres.pyi src/py/vertebra/db/adapters/postgres/arrow.py src/py/tests/unit/db/test_postgres_native_data.py && uv run --no-sync python -m mypy.stubtest vertebra._postgres && uv run --no-sync python -m pytest src/py/tests/unit/db/test_postgres_native_data.py -q` exits `0`.
 
 ## 6. Current State & Remaining Plan Snapshot
 
 - **Verified Baseline**: `plan_revision: 6`, `plan_commit: 8e9b324e`; chapter `state: completed` at `40ce977c` (`last_reviewed_commit: 40ce977c`, `last_verified_checkpoint: 40ce977c`; `make lint-all`, `cargo test -p vertebra-postgres` `186 passed`, `test_postgres_native_data.py` `162 passed` -> exit `0`).
-- **Remaining Tasks in Chapter**: None (`4/4` completed: `t01` `1a3007d2`, `t02` `c5b56452`, `t03` `97fc682e`, `t04` `83ebe4e1`).
+- **Remaining Tasks in Chapter**: None (`4/4` completed: `t01` `00344dd7`, `t02` `473d4e79`, `t03` `41e4203b`, `t04` `1706e1a0`).
 - **Downstream Dependents**: Unblocks `ch21-live-notifications` and `ch26:t03` (`driver-arrow-and-owned-binds`).
 
 [^pg-contracts]: `.agents/bundles/specs/native-postgres-driver/contracts.md` — Native PostgreSQL Arrow selection, COPY, portal, and cancellation contracts.

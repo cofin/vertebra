@@ -38,7 +38,7 @@ last_verified_commit: c8722c76
 verification_evidence: "make dev, ruff, mypy, mypy.stubtest vertebra._postgres, pytest test_postgres_native_notifications.py (47 passed), cargo test postgres_notification_wire_tests (11 passed), and cargo clippy exited 0"
 created_at: "2026-11-05T18:25:07Z"
 updated_at: "2026-11-10T23:08:35Z"
-commit: 8e8972b3
+commit: b2c449c0
 verified:
   - by: agent:plan-generator
     at: "2026-11-10T14:45:00Z"

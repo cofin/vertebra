@@ -39,7 +39,7 @@ last_verified_commit: c8722c76
 verification_evidence: "make dev, ruff, mypy, mypy.stubtest vertebra._postgres, pytest test_postgres_native_data.py (57 passed), cargo test postgres_arrow_import_tests (10 passed), and cargo clippy exited 0"
 created_at: "2026-11-05T18:25:07Z"
 updated_at: "2026-11-10T17:57:27Z"
-commit: c5b56452
+commit: 473d4e79
 verified:
   - by: agent:plan-generator
     at: "2026-11-10T14:45:00Z"

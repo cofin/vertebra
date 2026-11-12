@@ -38,7 +38,7 @@ last_verified_commit: c8722c76
 verification_evidence: "make lint-all, make dev, cargo test postgres_arrow_import_tests (10 passed) & postgres_arrow_tests (17 passed), mypy.stubtest vertebra._postgres, and pytest test_postgres_native_data.py (129 passed) exited 0"
 created_at: "2026-11-05T18:25:07Z"
 updated_at: "2026-11-10T19:25:26Z"
-commit: 83ebe4e1
+commit: 1706e1a0
 verified:
   - by: agent:plan-generator
     at: "2026-11-10T14:45:00Z"

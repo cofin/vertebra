@@ -37,7 +37,7 @@ last_verified_commit: c8722c76
 verification_evidence: "cargo test -p vertebra-postgres --test postgres_notification_wire_tests (11 passed), cargo test --lib (12 passed), cargo fmt --check, and cargo clippy --all-targets -- -D warnings exited 0"
 created_at: "2026-11-05T18:25:07Z"
 updated_at: "2026-11-10T22:35:18Z"
-commit: e0ff8d78
+commit: 395e1fe2
 verified:
   - by: agent:plan-generator
     at: "2026-11-10T14:45:00Z"

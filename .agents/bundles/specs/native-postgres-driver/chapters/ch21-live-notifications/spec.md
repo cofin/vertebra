@@ -155,16 +155,16 @@ Progress: `[0/0 files documented in ch21]` (repository-wide public docs and OKF 
 
 ## 5. Implementation Plan
 
-- [x] [e0ff8d78] native-postgres-driver:ch21:t01 — Pump PostgreSQL notifications on a dedicated bounded session with reconnect gap state (tasks/t01-dedicated-notification-session.md)
-- [x] [8e8972b3] native-postgres-driver:ch21:t02 — Expose AsyncPostgresListener across sync and async native clients (tasks/t02-async-notification-bridge.md)
-- [x] [ce3a6769] native-postgres-driver:ch21:t03 — Wire PostgresNotificationSource over typed adapter protocols and active subscriptions (tasks/t03-python-notification-source.md)
+- [x] [395e1fe2] native-postgres-driver:ch21:t01 — Pump PostgreSQL notifications on a dedicated bounded session with reconnect gap state (tasks/t01-dedicated-notification-session.md)
+- [x] [b2c449c0] native-postgres-driver:ch21:t02 — Expose AsyncPostgresListener across sync and async native clients (tasks/t02-async-notification-bridge.md)
+- [x] [db3307e5] native-postgres-driver:ch21:t03 — Wire PostgresNotificationSource over typed adapter protocols and active subscriptions (tasks/t03-python-notification-source.md)
 
 **Chapter Recovery Checkpoint:** `make dev && PYTHONPATH="$(pwd)/src/py:$(pwd)/.venv/lib/python3.12/site-packages" cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --test postgres_notification_wire_tests && uv run --no-sync ruff check src/py/vertebra/_postgres.pyi src/py/vertebra/db/adapters/postgres/events.py src/py/vertebra/db/adapters/postgres/driver.py src/py/vertebra/db/adapters/postgres/notify.py src/py/tests/unit/db/test_postgres_native_notifications.py src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py && uv run --no-sync mypy src/py/vertebra/_postgres.pyi src/py/vertebra/db/adapters/postgres/events.py src/py/vertebra/db/adapters/postgres/driver.py src/py/vertebra/db/adapters/postgres/notify.py src/py/tests/unit/db/test_postgres_native_notifications.py src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py && uv run --no-sync python -m mypy.stubtest vertebra._postgres && uv run --no-sync python -m pytest src/py/tests/unit/db/test_postgres_native_notifications.py src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py -k "native_listener or notification_source or notif" -q` exits `0`.
 
 ## 6. Current State & Remaining Plan Snapshot
 
 - **Verified Baseline**: `plan_revision: 6`, `plan_commit: 8e9b324e`; chapter `state: completed` (`last_verified_checkpoint: 2d143805`, `last_reviewed_commit: b44e28ca`; `make lint-all`, `postgres_notification_wire_tests` `11 passed`, `test_postgres_native_notifications.py` `72 passed`, `test_pg_dataplane_and_datafusion.py -k notif` `47 passed`, and zero-context correctness + quality reviews passed cleanly).
-- **Remaining Tasks in Chapter**: None (`3/3` completed: `t01` `e0ff8d78`, `t02` `8e8972b3`, `t03` `ce3a6769`).
+- **Remaining Tasks in Chapter**: None (`3/3` completed: `t01` `395e1fe2`, `t02` `b2c449c0`, `t03` `db3307e5`).
 - **Downstream Dependents**: Unblocks `ch22-copyboth-and-pgoutput-decoding` (`CopyBoth` logical replication reusing `establish_standalone_connection`), `ch24:t01` (`events.py` replication protocol), and `ch26:t04` (`dedicated-driver-event-hooks`).
 
 [^pg-contracts]: `.agents/bundles/specs/native-postgres-driver/contracts.md` — Dedicated PostgreSQL notification handle, closed snapshot, and protocol contracts.

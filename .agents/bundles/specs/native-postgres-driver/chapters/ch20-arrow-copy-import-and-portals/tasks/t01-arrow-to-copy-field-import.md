@@ -38,7 +38,7 @@ last_verified_commit: c8722c76
 verification_evidence: "cargo test -p vertebra-postgres --test postgres_arrow_import_tests (10 passed), cargo clippy -p vertebra-postgres --all-targets -- -D warnings, ruff check, and mypy on postgres/arrow.py exited 0"
 created_at: "2026-11-05T18:25:07Z"
 updated_at: "2026-11-10T16:58:55Z"
-commit: 1a3007d2
+commit: 00344dd7
 verified:
   - by: agent:plan-generator
     at: "2026-11-10T14:45:00Z"

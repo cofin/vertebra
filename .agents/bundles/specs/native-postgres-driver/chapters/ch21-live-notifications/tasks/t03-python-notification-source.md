@@ -38,7 +38,7 @@ last_verified_commit: c8722c76
 verification_evidence: "make lint-all, make dev, cargo test postgres_notification_wire_tests (11 passed), mypy.stubtest vertebra._postgres, and pytest test_postgres_native_notifications.py + test_pg_dataplane_and_datafusion.py + test_postgres_driver.py (184 passed) exited 0"
 created_at: "2026-11-05T18:25:07Z"
 updated_at: "2026-11-10T23:43:28Z"
-commit: ce3a6769
+commit: db3307e5
 verified:
   - by: agent:plan-generator
     at: "2026-11-10T14:45:00Z"

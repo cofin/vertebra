@@ -18,16 +18,16 @@ chapters:
   - ch09-runtime-native-cleanup
   - ch10-docs-and-okf-sync
   - ch11-product-okf-and-release-gate
-current_chapter: null
-current_task: null
+current_chapter: ch01-bridge-stream-frames
+current_task: "server-runtime-correctness:ch01:t01"
 parent_prd: integration-remediation
 depends_on_flows: []
 plan_revision: 2
 plan_commit: null
-state_revision: 0
+state_revision: 1
 last_verified_checkpoint: null
 created_at: "2026-11-12T00:45:00Z"
-updated_at: "2026-11-12T01:30:00Z"
+updated_at: "2026-11-12T02:02:40Z"
 generated:
   by: agent:plan-generator
   at: "2026-11-12T00:45:00Z"

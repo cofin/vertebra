@@ -1,5 +1,11 @@
 # Bundle Activity Log
 
+## [2026-11-12T02:02:40Z] flow-sync | Review-history continuity and server chapter pointer
+
+- Restored original PostgreSQL review-history objects through `b44e28ca`, retained locally at `refs/flow/native-postgres-reviewed-history`, without changing review stamps or task completion counts.
+- Reconciled ten task commit references in chapters 19–21 to patch-equivalent commits that are ancestors of their existing chapter review stamps. Stable patch IDs match across source, tools, build, and CI paths; corresponding task checklist and snapshot references agree.
+- Set the planned `server-runtime-correctness` chapter/task pointers to `ch01-bridge-stream-frames` / `server-runtime-correctness:ch01:t01`; approval and implementation remain pending.
+
 ## [2026-11-12T01:48:00Z] flow-review + flow-spec + flow-revise | PR range 80ff8a65..c8722c76 and 23 GitHub issues
 
 Audited `80ff8a65..c8722c76` across PRs `#80`, `#92`, `#94`, `#101`, `#102`, `#103`, `#104`, `#105`, `#106`, `#107`, and `#108` alongside all `23` open issues in `cofin/vertebra`:
