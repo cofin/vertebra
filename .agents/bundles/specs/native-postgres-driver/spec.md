@@ -44,7 +44,7 @@ chapters:
   - ch32-ffi-okf-and-review-routing-sync
   - ch33-final-review-and-release-gate
 current_chapter: ch34-replication-session-pump
-current_task: "native-postgres-driver:ch34:t01"
+current_task: "native-postgres-driver:ch34:t02"
 parent_prd: native-data-platform
 depends_on_flows:
   - driver-fail-loud

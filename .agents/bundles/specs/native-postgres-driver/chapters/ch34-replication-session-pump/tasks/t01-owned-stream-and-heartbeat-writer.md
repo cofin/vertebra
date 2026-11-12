@@ -5,7 +5,7 @@ chapter_id: ch34-replication-session-pump
 title: "Transfer CopyBoth ownership and run independent status writer"
 description: "Introduce the public ReplicationSession ownership shell, consuming into_stream, identity/status/ack/closed access, timer writer and bounded cancellation shutdown. No record-consumption or placeholder next/publish methods are added in this task; those are owned by t02/t03."
 status: stable
-state: in_progress
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on: ["native-postgres-driver:ch23:t02"]
@@ -30,10 +30,10 @@ claimed_at: "2026-11-12T15:09:41.151283+00:00"
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
-commit: null
+last_verified_at: "2026-11-12T18:30:54.668790+00:00"
+last_verified_commit: f520aa6d
+verification_evidence: "Red exit 101 missing into_stream; full canonical module 26 passed; Clippy, package rustfmt and diff check exit 0. Logs /tmp/ch34-t01-{red,module,clippy}.log"
+commit: f520aa6d
 created_at: "2026-11-12T05:00:00Z"
 updated_at: "2026-11-12T04:25:15Z"
 generated: {by: flow-revise, at: "2026-11-12T05:00:00Z"}
@@ -137,10 +137,10 @@ cargo fmt --manifest-path src/rs/Cargo.toml --check
 
 ## Acceptance Criteria
 
-- [ ] R22.4 independent periodic writer works without reader/consumer tasks.
-- [ ] Safe consuming transfer preserves all buffered bytes and ownership on every error path.
+- [x] R22.4 independent periodic writer works without reader/consumer tasks.
+- [x] Safe consuming transfer preserves all buffered bytes and ownership on every error path.
 
-- [ ] Red, Green, and lint evidence is recorded, and task plus checklist synchronization is included in one signed conventional commit.
+- [x] Red, Green, and lint evidence is recorded, and task plus checklist synchronization is included in one signed conventional commit.
 
 ## Notes & Discoveries
 
