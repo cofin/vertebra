@@ -17,7 +17,7 @@ chapter_base_commit: f58aa695
 last_verified_checkpoint: null
 last_reviewed_commit: null
 created_at: "2026-11-12T05:00:00Z"
-updated_at: "2026-11-12T04:25:15Z"
+updated_at: "2026-11-12T19:56:42.010392+00:00"
 generated: {by: flow-revise, at: "2026-11-12T05:00:00Z"}
 verified: []
 sources:
@@ -144,7 +144,7 @@ The sync owns these docs collectively, independent of task production limits. Fu
 ## 5. Implementation Plan
 
 - [x] [f520aa6d] native-postgres-driver:ch34:t01 — Transfer CopyBoth ownership and run independent status writer (tasks/t01-owned-stream-and-heartbeat-writer.md)
-- [ ] native-postgres-driver:ch34:t02 — Drain coalesced WAL through bounded single-generation reader (tasks/t02-bounded-read-pump.md)
+- [~] native-postgres-driver:ch34:t02 — Drain coalesced WAL through bounded single-generation reader (tasks/t02-bounded-read-pump.md)
 - [ ] native-postgres-driver:ch34:t03 — Publish Commit leases exactly at consumer delivery (tasks/t03-delivery-publication-and-cancellation.md)
 - [ ] native-postgres-driver:ch34:t04 — Join replication owners and drain CopyDone under one deadline (tasks/t04-bounded-session-shutdown.md)
 

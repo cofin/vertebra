@@ -2629,6 +2629,13 @@ fn feedback_state_capacity_is_reclaimed_by_acknowledgement() {
 async fn session_writer_connection(
     start: Option<u64>,
 ) -> (PostgresReplicationConnection, TcpStream) {
+    session_connection_with_payload(start, Vec::new()).await
+}
+
+async fn session_connection_with_payload(
+    start: Option<u64>,
+    payload: Vec<u8>,
+) -> (PostgresReplicationConnection, TcpStream) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let cfg = direct_config(listener.local_addr().unwrap().port());
     let peer = tokio::spawn(async move {
@@ -2701,6 +2708,7 @@ async fn session_writer_connection(
         )));
         let mut startup = copy_both_response_frame(0, &[]);
         startup.extend(copy_data_frame(b"k\0\0\0\x02\0\0\x09\0\0\0\0\0\0\0\0\0\0"));
+        startup.extend(payload);
         socket.write_all(&startup).await.unwrap();
         socket
     });
@@ -2815,4 +2823,255 @@ fn session_writer_drop_without_runtime_closes_socket() {
     peer.set_nonblocking(false).unwrap();
     peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
     assert_eq!(std::io::Read::read(&mut &peer, &mut [0; 1]).unwrap(), 0);
+}
+
+fn session_transaction_payload() -> Vec<u8> {
+    let mut payload = vec![b'B'];
+    payload.extend_from_slice(&0x200000200_u64.to_be_bytes());
+    payload.extend_from_slice(&0_i64.to_be_bytes());
+    payload.extend_from_slice(&7_u32.to_be_bytes());
+    payload.push(b'R');
+    payload.extend_from_slice(&42_u32.to_be_bytes());
+    payload.extend_from_slice(b"public\0items\0d");
+    payload.extend_from_slice(&1_u16.to_be_bytes());
+    payload.extend_from_slice(b"\x01id\0");
+    payload.extend_from_slice(&23_u32.to_be_bytes());
+    payload.extend_from_slice(&(-1_i32).to_be_bytes());
+    payload.push(b'I');
+    payload.extend_from_slice(&42_u32.to_be_bytes());
+    payload.push(b'N');
+    payload.extend_from_slice(&1_u16.to_be_bytes());
+    payload.push(b't');
+    payload.extend_from_slice(&1_u32.to_be_bytes());
+    payload.push(b'7');
+    payload.extend_from_slice(b"C\0");
+    payload.extend_from_slice(&0x200000200_u64.to_be_bytes());
+    payload.extend_from_slice(&0x200000300_u64.to_be_bytes());
+    payload.extend_from_slice(&0_i64.to_be_bytes());
+    payload
+}
+
+fn session_wal_frame(payload: &[u8]) -> Vec<u8> {
+    let mut body = vec![b'w'];
+    body.extend_from_slice(&0x200000100_u64.to_be_bytes());
+    body.extend_from_slice(&0x2ffffffff_u64.to_be_bytes());
+    body.extend_from_slice(&0_i64.to_be_bytes());
+    body.extend_from_slice(payload);
+    copy_data_frame(&body)
+}
+
+#[tokio::test]
+async fn session_reader_coalesced_startup_publishes_in_order() {
+    use _postgres::replication::pgoutput::ReplicationRecord;
+    let mut payload = copy_data_frame(b"k\0\0\0\x02\0\0\x09\0\0\0\0\0\0\0\0\0\x01");
+    payload.extend(session_wal_frame(&session_transaction_payload()));
+    let (connection, mut peer) = session_connection_with_payload(Some(0x200000100), payload).await;
+    let session = connection
+        .into_stream(4, Duration::from_secs(10), Duration::from_secs(2))
+        .unwrap();
+    let FrontendExchange::Other(b'd', status) = read_frontend_exchange(&mut peer).await else {
+        panic!("keepalive status")
+    };
+    assert_eq!(status[0], b'r');
+    assert_eq!(
+        u64::from_be_bytes(status[9..17].try_into().unwrap()),
+        0x200000100
+    );
+    let begin = session.next().await.unwrap().unwrap().publish().unwrap();
+    assert!(matches!(begin, ReplicationRecord::Begin { xid: 7, .. }));
+    let insert = session.next().await.unwrap().unwrap().publish().unwrap();
+    assert!(matches!(insert, ReplicationRecord::Insert { xid: 7, .. }));
+    let commit = session.next().await.unwrap().unwrap();
+    assert_eq!(commit.record().commit_end_lsn(), Some(0x200000300));
+    assert!(matches!(
+        session.acknowledge(0x200000300),
+        Err(PostgresError::Interface(_))
+    ));
+    commit.publish().unwrap();
+    assert_eq!(session.acknowledge(0x200000300).unwrap(), 0x200000300);
+    session.cancel();
+}
+
+#[tokio::test]
+async fn session_reader_malformed_keepalive_is_terminal() {
+    let (connection, _peer) =
+        session_connection_with_payload(Some(0x200000100), copy_data_frame(&[b'k'; 12])).await;
+    let session = connection
+        .into_stream(1, Duration::from_secs(10), Duration::from_secs(2))
+        .unwrap();
+    assert!(matches!(
+        session.next().await,
+        Err(PostgresError::Protocol(_))
+    ));
+    assert!(matches!(
+        session.wait_closed().await,
+        Err(PostgresError::Protocol(_))
+    ));
+    assert!(session.next().await.unwrap().is_none());
+    assert_eq!(
+        session.status_positions(),
+        (0x200000100, 0x200000100, 0x200000100)
+    );
+}
+
+#[tokio::test]
+async fn session_reader_unknown_copydata_is_terminal() {
+    let (connection, _peer) =
+        session_connection_with_payload(Some(0x200000100), copy_data_frame(b"x")).await;
+    let session = connection
+        .into_stream(1, Duration::from_secs(10), Duration::from_secs(2))
+        .unwrap();
+    assert!(matches!(
+        session.next().await,
+        Err(PostgresError::Protocol(_))
+    ));
+    assert!(session.is_closed());
+}
+
+#[tokio::test]
+async fn session_reader_frame_boundary_eof_during_transaction_is_transport() {
+    let begin = session_transaction_payload()[..21].to_vec();
+    let (connection, mut peer) =
+        session_connection_with_payload(Some(0x200000100), session_wal_frame(&begin)).await;
+    let session = connection
+        .into_stream(4, Duration::from_secs(10), Duration::from_secs(2))
+        .unwrap();
+    peer.shutdown().await.unwrap();
+    assert!(matches!(
+        session.wait_closed().await,
+        Err(PostgresError::Transport(_))
+    ));
+    assert!(matches!(
+        session.next().await,
+        Err(PostgresError::Transport(_))
+    ));
+    assert!(session.next().await.unwrap().is_none());
+    assert_eq!(
+        session.status_positions(),
+        (0x200000100, 0x200000100, 0x200000100)
+    );
+}
+
+#[tokio::test]
+async fn session_reader_truncated_backend_frame_eof_is_protocol() {
+    let (connection, mut peer) =
+        session_connection_with_payload(Some(0x200000100), b"d\0\0\0\x20w".to_vec()).await;
+    let session = connection
+        .into_stream(4, Duration::from_secs(10), Duration::from_secs(2))
+        .unwrap();
+    peer.shutdown().await.unwrap();
+    assert!(matches!(
+        session.next().await,
+        Err(PostgresError::Protocol(_))
+    ));
+}
+
+#[tokio::test]
+async fn session_reader_copydone_rejects_unfinished_transaction() {
+    let mut payload = session_wal_frame(&session_transaction_payload()[..21]);
+    payload.extend(copy_done_frame());
+    let (connection, _peer) = session_connection_with_payload(Some(0x200000100), payload).await;
+    let session = connection
+        .into_stream(4, Duration::from_secs(10), Duration::from_secs(2))
+        .unwrap();
+    assert!(matches!(
+        session.wait_closed().await,
+        Err(PostgresError::Protocol(_))
+    ));
+    assert!(matches!(
+        session.next().await,
+        Err(PostgresError::Protocol(_))
+    ));
+}
+
+#[tokio::test]
+async fn session_reader_copydone_drains_queued_records_before_none() {
+    let mut payload = session_wal_frame(&session_transaction_payload());
+    payload.extend(copy_done_frame());
+    let (connection, _peer) = session_connection_with_payload(Some(0x200000100), payload).await;
+    let session = connection
+        .into_stream(4, Duration::from_secs(10), Duration::from_secs(2))
+        .unwrap();
+    for _ in 0..3 {
+        session.next().await.unwrap().unwrap().publish().unwrap();
+    }
+    assert!(session.next().await.unwrap().is_none());
+    assert_eq!(session.acknowledge(0x200000300).unwrap(), 0x200000300);
+    session.cancel();
+}
+
+#[tokio::test(start_paused = true)]
+async fn session_reader_full_fifo_does_not_starve_periodic_writer() {
+    let payload = session_wal_frame(&session_transaction_payload());
+    let (connection, mut peer) = session_connection_with_payload(Some(0x200000100), payload).await;
+    let session = connection
+        .into_stream(1, Duration::from_secs(10), Duration::from_secs(2))
+        .unwrap();
+    let begin = session.next().await.unwrap().unwrap();
+    for _ in 0..3 {
+        tokio::time::advance(Duration::from_secs(10)).await;
+        let FrontendExchange::Other(b'd', status) = read_frontend_exchange(&mut peer).await else {
+            panic!("periodic status")
+        };
+        assert_eq!(
+            u64::from_be_bytes(status[9..17].try_into().unwrap()),
+            0x200000100
+        );
+        assert_eq!(
+            u64::from_be_bytes(status[17..25].try_into().unwrap()),
+            0x200000100
+        );
+    }
+    begin.publish().unwrap();
+    session.next().await.unwrap().unwrap().publish().unwrap();
+    session.next().await.unwrap().unwrap().publish().unwrap();
+    assert_eq!(session.acknowledge(0x200000300).unwrap(), 0x200000300);
+    session.cancel();
+}
+
+fn session_message_payload(size: usize, byte: u8) -> Vec<u8> {
+    let mut payload = b"M\0".to_vec();
+    payload.extend_from_slice(&0x200000200_u64.to_be_bytes());
+    payload.extend_from_slice(b"bulk\0");
+    payload.extend_from_slice(&(size as u32).to_be_bytes());
+    payload.resize(payload.len() + size, byte);
+    payload
+}
+
+#[tokio::test]
+async fn session_reader_individually_valid_nine_mib_record_exceeds_aggregate_budget() {
+    use _postgres::replication::pgoutput::ReplicationRecord;
+    let (connection, mut peer) = session_writer_connection(Some(0x200000100)).await;
+    let session = connection
+        .into_stream(4, Duration::from_secs(10), Duration::from_secs(2))
+        .unwrap();
+    let sender = tokio::spawn(async move {
+        peer.write_all(&session_wal_frame(&session_message_payload(
+            9 * 1024 * 1024,
+            b'a',
+        )))
+        .await
+        .unwrap();
+        peer.write_all(&session_wal_frame(&session_message_payload(
+            9 * 1024 * 1024,
+            b'b',
+        )))
+        .await
+        .unwrap();
+        peer
+    });
+    for byte in *b"ab" {
+        let record = session.next().await.unwrap().unwrap().publish().unwrap();
+        let ReplicationRecord::Message { content, .. } = record else {
+            panic!("logical message")
+        };
+        assert_eq!(content.len(), 9 * 1024 * 1024);
+        assert!(content.iter().all(|value| *value == byte));
+    }
+    let _peer = sender.await.unwrap();
+    assert_eq!(
+        session.status_positions(),
+        (0x200000100, 0x200000100, 0x200000100)
+    );
+    session.cancel();
 }

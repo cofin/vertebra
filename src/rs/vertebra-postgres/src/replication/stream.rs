@@ -4,15 +4,27 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bytes::BytesMut;
+use postgres_protocol::message::backend::Message;
 use tokio::io::{AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::sync::watch;
 use tokio::task::AbortHandle;
 use tokio::time::{Instant, MissedTickBehavior};
 
-use super::feedback::{ReplicationFeedback, encode_standby_status_update};
+use super::feedback::{
+    ReplicationCopyData, ReplicationFeedback, decode_replication_copy_data,
+    encode_standby_status_update,
+};
+use super::pgoutput::{
+    BoundedReplicationQueue, DEFAULT_MAX_QUEUE_BYTES, DEFAULT_MAX_RECORD_BYTES,
+    DEFAULT_MAX_RELATIONS, PgOutputDecoder, ReplicationRecord,
+};
 use super::{PostgresReplicationConnection, VerifiedReplicationIdentity};
 use crate::codecs::CodecContext;
 use crate::errors::PostgresError;
+use crate::protocol::{
+    MAX_BACKEND_FRAME_LENGTH, ReplicationBackendMessage, parse_error_fields,
+    read_replication_message,
+};
 use crate::session::ConnectionStream;
 use crate::types::TypeCatalog;
 
@@ -20,22 +32,35 @@ struct SessionState {
     feedback: ReplicationFeedback,
     closing: bool,
     terminal: Option<Result<(), PostgresError>>,
+    queue: BoundedReplicationQueue,
+    reader_eof: bool,
+    error_delivered: bool,
 }
 
 struct SessionShared {
     state: Mutex<SessionState>,
     revision: watch::Sender<u64>,
+    status: watch::Sender<u64>,
 }
 
 impl SessionShared {
-    fn signal(&self) {
+    fn signal_records(&self) {
         self.revision
+            .send_modify(|revision| *revision = revision.wrapping_add(1));
+    }
+
+    fn signal(&self) {
+        self.signal_records();
+        self.status
             .send_modify(|revision| *revision = revision.wrapping_add(1));
     }
 
     fn finish(&self, result: Result<(), PostgresError>) {
         let mut state = self.state.lock().unwrap();
         state.closing = true;
+        if result.is_err() {
+            while state.queue.pop().is_some() {}
+        }
         if state.terminal.is_none() {
             state.terminal = Some(result);
         }
@@ -49,12 +74,6 @@ pub struct ReplicationSession {
     identity: VerifiedReplicationIdentity,
     shared: Arc<SessionShared>,
     workers: Vec<AbortHandle>,
-    _reader: ReadHalf<ConnectionStream>,
-    _read_buf: BytesMut,
-    _type_catalog: TypeCatalog,
-    _type_identities: std::collections::HashMap<u32, (String, String)>,
-    _codec_ctx: CodecContext,
-    _queue_capacity: usize,
 }
 
 impl PostgresReplicationConnection {
@@ -86,14 +105,23 @@ impl PostgresReplicationConnection {
             effective_start_lsn,
         } = self;
         let (reader, writer) = tokio::io::split(conn.stream);
-        let (revision, changes) = watch::channel(0);
+        let (revision, _) = watch::channel(0);
+        let (status, changes) = watch::channel(0);
         let shared = Arc::new(SessionShared {
             state: Mutex::new(SessionState {
                 feedback: ReplicationFeedback::new(effective_start_lsn),
                 closing: false,
                 terminal: None,
+                queue: BoundedReplicationQueue::new(
+                    queue_capacity,
+                    DEFAULT_MAX_QUEUE_BYTES,
+                    DEFAULT_MAX_RECORD_BYTES,
+                ),
+                reader_eof: false,
+                error_delivered: false,
             }),
             revision,
+            status,
         });
         let owner = Arc::clone(&shared);
         let task = runtime.spawn(async move {
@@ -101,21 +129,71 @@ impl PostgresReplicationConnection {
                 run_writer(writer, &owner, changes, status_interval, shutdown_timeout).await;
             owner.finish(result);
         });
+        let owner = Arc::clone(&shared);
+        let reader_identity = identity.clone();
+        let reader_task = runtime.spawn(async move {
+            let result = run_reader(
+                reader,
+                conn.read_buf,
+                type_catalog,
+                codec_ctx,
+                PgOutputDecoder::with_type_identities(
+                    DEFAULT_MAX_RELATIONS,
+                    DEFAULT_MAX_RECORD_BYTES,
+                    type_identities,
+                ),
+                &reader_identity,
+                &owner,
+            )
+            .await;
+            if let Err(error) = result {
+                owner.finish(Err(error));
+            }
+        });
         Ok(ReplicationSession {
             identity,
             shared,
-            workers: vec![task.abort_handle()],
-            _reader: reader,
-            _read_buf: conn.read_buf,
-            _type_catalog: type_catalog,
-            _type_identities: type_identities,
-            _codec_ctx: codec_ctx,
-            _queue_capacity: queue_capacity,
+            workers: vec![task.abort_handle(), reader_task.abort_handle()],
         })
     }
 }
 
 impl ReplicationSession {
+    /// Lease the next decoded record; Commit publication remains explicit.
+    pub async fn next(&self) -> Result<Option<ReplicationDelivery>, PostgresError> {
+        let mut changes = self.shared.revision.subscribe();
+        loop {
+            {
+                let mut state = self.shared.state.lock().unwrap();
+                if let Some(Err(error)) = state.terminal.clone() {
+                    if !state.error_delivered {
+                        state.error_delivered = true;
+                        return Err(error);
+                    }
+                    return Ok(None);
+                }
+                if state.closing {
+                    return Ok(None);
+                }
+                if let Some(record) = state.queue.pop() {
+                    drop(state);
+                    self.shared.signal_records();
+                    return Ok(Some(ReplicationDelivery {
+                        record,
+                        shared: Arc::clone(&self.shared),
+                    }));
+                }
+                if state.reader_eof {
+                    return Ok(None);
+                }
+            }
+            changes
+                .changed()
+                .await
+                .map_err(|_| PostgresError::Transport("replication reader disappeared".into()))?;
+        }
+    }
+
     /// Borrow the verified identity retained across ownership transfer.
     pub fn identity(&self) -> &VerifiedReplicationIdentity {
         &self.identity
@@ -176,6 +254,125 @@ impl ReplicationSession {
                 .changed()
                 .await
                 .map_err(|_| PostgresError::Transport("replication writer disappeared".into()))?;
+        }
+    }
+}
+
+/// A decoded record whose Commit boundary is published only on successful consumption.
+pub struct ReplicationDelivery {
+    record: ReplicationRecord,
+    shared: Arc<SessionShared>,
+}
+
+impl ReplicationDelivery {
+    /// Borrow the decoded record without advancing publication or acknowledgement.
+    pub fn record(&self) -> &ReplicationRecord {
+        &self.record
+    }
+
+    /// Publish one record, making an exact Commit boundary acknowledgeable.
+    pub fn publish(self) -> Result<ReplicationRecord, PostgresError> {
+        let mut state = self.shared.state.lock().unwrap();
+        if state.closing {
+            return Err(PostgresError::Interface(
+                "replication session is closed".into(),
+            ));
+        }
+        if let Some(lsn) = self.record.commit_end_lsn() {
+            state.feedback.record_published_commit(lsn)?;
+        }
+        Ok(self.record)
+    }
+}
+
+async fn run_reader(
+    mut reader: ReadHalf<ConnectionStream>,
+    mut read_buf: BytesMut,
+    mut catalog: TypeCatalog,
+    codec_ctx: CodecContext,
+    mut decoder: PgOutputDecoder,
+    identity: &VerifiedReplicationIdentity,
+    shared: &SessionShared,
+) -> Result<(), PostgresError> {
+    let mut changes = shared.revision.subscribe();
+    let mut pending = None;
+    loop {
+        if shared.state.lock().unwrap().closing {
+            return Ok(());
+        }
+        if let Some(record) = pending.take() {
+            let bytes = ReplicationRecord::approx_bytes(&record);
+            if bytes > DEFAULT_MAX_RECORD_BYTES {
+                return Err(PostgresError::Operational(
+                    "replication record size exceeded".into(),
+                ));
+            }
+            {
+                let mut state = shared.state.lock().unwrap();
+                if state.queue.can_accept(bytes) {
+                    state.queue.push(record)?;
+                } else {
+                    pending = Some(record);
+                }
+            }
+            if pending.is_some() {
+                changes.changed().await.map_err(|_| {
+                    PostgresError::Transport("replication session disappeared".into())
+                })?;
+            } else {
+                shared.signal_records();
+            }
+            continue;
+        }
+        if let Some(record) = decoder.next_record(identity, &mut catalog, &codec_ctx)? {
+            if let Some(lsn) = record.commit_end_lsn() {
+                shared
+                    .state
+                    .lock()
+                    .unwrap()
+                    .feedback
+                    .record_received_commit(lsn)?;
+            }
+            pending = Some(record);
+            continue;
+        }
+        let message = tokio::select! {
+            result = read_replication_message(&mut reader, &mut read_buf, MAX_BACKEND_FRAME_LENGTH, None) => {
+                result.map_err(|error| match error {
+                    PostgresError::Transport(message) if !read_buf.is_empty() => PostgresError::Protocol(format!("truncated replication backend frame: {message}")),
+                    other => other,
+                })?
+            }
+            _ = changes.changed() => continue,
+        };
+        match message {
+            ReplicationBackendMessage::Standard(Message::CopyData(body)) => {
+                match decode_replication_copy_data(body.data())? {
+                    ReplicationCopyData::XLogData { payload, .. } => decoder.push(payload)?,
+                    ReplicationCopyData::PrimaryKeepalive {
+                        reply_requested: true,
+                        ..
+                    } => shared.signal(),
+                    ReplicationCopyData::PrimaryKeepalive { .. } => {}
+                }
+            }
+            ReplicationBackendMessage::Standard(Message::CopyDone) => {
+                decoder.finish_clean_eof()?;
+                shared.state.lock().unwrap().reader_eof = true;
+                shared.signal_records();
+                return Ok(());
+            }
+            ReplicationBackendMessage::Standard(Message::ErrorResponse(body)) => {
+                return Err(parse_error_fields(body.fields())?);
+            }
+            ReplicationBackendMessage::Standard(
+                Message::NoticeResponse(_) | Message::ParameterStatus(_),
+            ) => {}
+            _ => {
+                return Err(PostgresError::Protocol(
+                    "unexpected replication backend message".into(),
+                ));
+            }
         }
     }
 }
@@ -251,6 +448,7 @@ async fn run_writer(
             }
             result = changes.changed() => {
                 if result.is_err() { return Ok(()); }
+                if !shared.state.lock().unwrap().closing { write_status(&mut writer, shared).await?; }
             }
         }
     }

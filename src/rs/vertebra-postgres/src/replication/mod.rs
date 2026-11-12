@@ -5,7 +5,7 @@
 pub mod feedback;
 pub mod pgoutput;
 pub mod stream;
-pub use stream::ReplicationSession;
+pub use stream::{ReplicationDelivery, ReplicationSession};
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Duration;
