@@ -424,12 +424,7 @@ async fn run_reader(
             continue;
         }
         let message = tokio::select! {
-            result = read_replication_message(&mut reader, &mut read_buf, MAX_BACKEND_FRAME_LENGTH, None) => {
-                result.map_err(|error| match error {
-                    PostgresError::Transport(message) if !read_buf.is_empty() => PostgresError::Protocol(format!("truncated replication backend frame: {message}")),
-                    other => other,
-                })?
-            }
+            result = read_session_message(&mut reader, &mut read_buf) => result?,
             _ = changes.changed() => continue,
         };
         match message {
@@ -549,7 +544,7 @@ async fn drain_backend(
 ) -> Result<(), PostgresError> {
     let mut saw_command = false;
     loop {
-        match read_replication_message(reader, read_buf, MAX_BACKEND_FRAME_LENGTH, None).await? {
+        match read_session_message(reader, read_buf).await? {
             ReplicationBackendMessage::Standard(Message::CopyDone) if !saw_copy_done => {
                 saw_copy_done = true
             }
@@ -575,4 +570,18 @@ async fn drain_backend(
             }
         }
     }
+}
+
+async fn read_session_message(
+    reader: &mut ReadHalf<ConnectionStream>,
+    read_buf: &mut BytesMut,
+) -> Result<ReplicationBackendMessage, PostgresError> {
+    read_replication_message(reader, read_buf, MAX_BACKEND_FRAME_LENGTH, None)
+        .await
+        .map_err(|error| match error {
+            PostgresError::Transport(message) if !read_buf.is_empty() => {
+                PostgresError::Protocol(format!("truncated replication backend frame: {message}"))
+            }
+            other => other,
+        })
 }

@@ -3599,3 +3599,24 @@ async fn session_shutdown_transport_error_fences_held_commit_before_publication(
         FrontendExchange::Eof
     );
 }
+
+#[tokio::test]
+async fn session_shutdown_truncated_command_frame_is_terminal_protocol_error() {
+    let mut payload = copy_done_frame();
+    payload.extend_from_slice(b"C\0\0\0\x0bCOP");
+    let (connection, mut peer) = session_connection_with_payload(Some(0x200000100), payload).await;
+    let session = connection
+        .into_stream(4, Duration::from_secs(3600), Duration::from_secs(2))
+        .unwrap();
+    peer.shutdown().await.unwrap();
+    assert!(matches!(
+        session.wait_closed().await,
+        Err(PostgresError::Protocol(_))
+    ));
+    assert!(matches!(
+        session.next().await,
+        Err(PostgresError::Protocol(_))
+    ));
+    assert!(session.next().await.unwrap().is_none());
+    assert_eq!(session.status_positions().1, 0x200000100);
+}
