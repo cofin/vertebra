@@ -2,6 +2,7 @@
 //! preflight, publication custom-type preloading, `IDENTIFY_SYSTEM` verification, `pgoutput`
 //! tuple hydration, and clean `CopyDone` shutdown.
 
+pub mod feedback;
 pub mod pgoutput;
 
 use std::collections::{BTreeMap, HashMap, HashSet};

@@ -5,7 +5,7 @@ chapter_id: ch23-replication-feedback-resume-and-bridge
 title: "Chapter 23: Commit-Fenced Replication Feedback"
 description: "Implement strict CopyData payload codecs, status intervals, and separate received/published/acknowledged Commit positions."
 status: stable
-state: planned
+state: active
 planning_status: complete
 depends_on_chapters: ["ch22-copyboth-and-pgoutput-decoding"]
 replan_trigger: null
@@ -13,7 +13,7 @@ current_task: "native-postgres-driver:ch23:t01"
 plan_revision: 8
 plan_commit: d90d4625
 state_revision: 2
-chapter_base_commit: null
+chapter_base_commit: a203b946
 last_verified_checkpoint: null
 last_reviewed_commit: null
 created_at: "2026-11-12T05:00:00Z"
@@ -131,7 +131,7 @@ The sync owns these docs collectively, independent of task production limits. Fu
 
 ## 5. Implementation Plan
 
-- [ ] native-postgres-driver:ch23:t01 — Decode replication CopyData and encode bounded status payloads (tasks/t01-feedback-wire-codecs.md)
+- [~] native-postgres-driver:ch23:t01 — Decode replication CopyData and encode bounded status payloads (tasks/t01-feedback-wire-codecs.md)
 - [ ] native-postgres-driver:ch23:t02 — Fence acknowledgement to published Commit boundaries (tasks/t02-commit-fenced-feedback.md)
 
 
@@ -142,7 +142,7 @@ One executor per worksheet, in dependency order. No shared-file task executors r
 ```bash
 PYO3_PYTHON="$PWD/.venv/bin/python" PYTHONPATH="$PWD/src/py" cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --test postgres_replication_wire_tests
 PYO3_PYTHON="$PWD/.venv/bin/python" cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-postgres --all-targets -- -D warnings
-cargo fmt --manifest-path src/rs/Cargo.toml --check
+cargo fmt --manifest-path src/rs/Cargo.toml -p vertebra-postgres --check
 UV_NO_SYNC=1 make review-check
 git diff --check
 ```

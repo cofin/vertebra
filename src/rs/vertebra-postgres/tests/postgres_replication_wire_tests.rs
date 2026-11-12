@@ -2356,3 +2356,141 @@ async fn replication_identity_publication_fingerprint_tracks_flags_tables_attnam
         assert_ne!(&baseline, other);
     }
 }
+
+#[test]
+fn feedback_wire_xlogdata_preserves_fields_and_borrowed_payload() {
+    use _postgres::replication::feedback::{ReplicationCopyData, decode_replication_copy_data};
+    let empty = [
+        b'w', 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 2, 0, 0, 0x90, 0, 255, 255, 255, 255, 255, 255, 255,
+        249,
+    ];
+    let ReplicationCopyData::XLogData {
+        wal_start,
+        wal_end,
+        server_time_pg_us,
+        payload,
+    } = decode_replication_copy_data(&empty).unwrap()
+    else {
+        panic!("expected XLogData")
+    };
+    assert_eq!(
+        (wal_start, wal_end, server_time_pg_us),
+        (0x1_0000_0100, 0x2_0000_9000, -7)
+    );
+    assert!(payload.is_empty());
+    let mut nonempty = empty.to_vec();
+    nonempty.extend_from_slice(&[0, 255, 66]);
+    let ReplicationCopyData::XLogData {
+        wal_start,
+        wal_end,
+        server_time_pg_us,
+        payload,
+    } = decode_replication_copy_data(&nonempty).unwrap()
+    else {
+        panic!("expected XLogData")
+    };
+    assert_eq!(
+        (wal_start, wal_end, server_time_pg_us),
+        (0x1_0000_0100, 0x2_0000_9000, -7)
+    );
+    assert_eq!(payload, [0, 255, 66]);
+    assert_eq!(payload.as_ptr(), nonempty[25..].as_ptr());
+}
+
+#[test]
+fn feedback_wire_keepalive_and_status_match_golden_bytes() {
+    use _postgres::replication::feedback::{
+        ReplicationCopyData, decode_replication_copy_data, encode_standby_status_update,
+    };
+    let frame = [
+        b'k', 0, 0, 0, 2, 0, 0, 0x10, 0, 255, 255, 255, 255, 255, 255, 255, 255, 1,
+    ];
+    let ReplicationCopyData::PrimaryKeepalive {
+        wal_end,
+        server_time_pg_us,
+        reply_requested,
+    } = decode_replication_copy_data(&frame).unwrap()
+    else {
+        panic!("expected keepalive")
+    };
+    assert_eq!(
+        (wal_end, server_time_pg_us, reply_requested),
+        (0x2_0000_1000, -1, true)
+    );
+    let mut no_reply = frame;
+    no_reply[17] = 0;
+    assert!(matches!(
+        decode_replication_copy_data(&no_reply).unwrap(),
+        ReplicationCopyData::PrimaryKeepalive {
+            reply_requested: false,
+            ..
+        }
+    ));
+    let expected = [
+        b'r', 0, 0, 0, 2, 0, 0, 1, 0, 0, 0, 0, 2, 0, 0, 0, 128, 0, 0, 0, 2, 0, 0, 0, 128, 255, 255,
+        255, 255, 255, 255, 255, 255, 0,
+    ];
+    assert_eq!(
+        encode_standby_status_update(0x2_0000_0100, 0x2_0000_0080, 0x2_0000_0080, -1, false),
+        expected
+    );
+    let mut reply = expected;
+    reply[33] = 1;
+    assert_eq!(
+        encode_standby_status_update(0x2_0000_0100, 0x2_0000_0080, 0x2_0000_0080, -1, true),
+        reply
+    );
+}
+
+#[test]
+fn feedback_wire_rejects_invalid_payloads() {
+    use _postgres::replication::feedback::decode_replication_copy_data;
+    for frame in [
+        vec![],
+        vec![b'x'],
+        vec![b'w'; 24],
+        vec![b'k'; 17],
+        vec![b'k'; 19],
+        {
+            let mut frame = vec![0; 18];
+            frame[0] = b'k';
+            frame[17] = 2;
+            frame
+        },
+    ] {
+        assert!(matches!(
+            decode_replication_copy_data(&frame),
+            Err(PostgresError::Protocol(_))
+        ));
+    }
+}
+
+#[test]
+fn feedback_wire_status_intervals_respect_timeout_and_clamps() {
+    use _postgres::replication::feedback::{
+        DEFAULT_STATUS_INTERVAL, MAX_UNACKED_COMMITS, compute_status_interval,
+    };
+    assert_eq!(DEFAULT_STATUS_INTERVAL, Duration::from_secs(10));
+    assert_eq!(MAX_UNACKED_COMMITS, 1024);
+    assert_eq!(compute_status_interval(None), Duration::from_secs(10));
+    assert_eq!(
+        compute_status_interval(Some(Duration::ZERO)),
+        Duration::from_secs(10)
+    );
+    assert_eq!(
+        compute_status_interval(Some(Duration::from_millis(150))),
+        Duration::from_millis(100)
+    );
+    assert_eq!(
+        compute_status_interval(Some(Duration::from_secs(9))),
+        Duration::from_secs(3)
+    );
+    assert_eq!(
+        compute_status_interval(Some(Duration::from_secs(30))),
+        Duration::from_secs(10)
+    );
+    assert_eq!(
+        compute_status_interval(Some(Duration::from_secs(90))),
+        Duration::from_secs(10)
+    );
+}

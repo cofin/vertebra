@@ -5,7 +5,7 @@ chapter_id: ch23-replication-feedback-resume-and-bridge
 title: "Decode replication CopyData and encode bounded status payloads"
 description: "Implement strict public wire payload codecs and status interval computation only; session ownership, published-commit state, and I/O loops remain separate tasks."
 status: stable
-state: pending
+state: in_progress
 priority: P1
 verification_strategy: behavior_tdd
 depends_on: ["native-postgres-driver:ch22:t03"]
@@ -24,14 +24,14 @@ estimated_loc: 130
 plan_revision: 8
 plan_commit: d90d4625
 state_revision: 2
-claimed_by: null
-claimed_at: null
+claimed_by: agent:implement23t01
+claimed_at: "2026-11-12T04:27:27Z"
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
+last_verified_at: "2026-11-12T04:29:34Z"
 last_verified_commit: null
-verification_evidence: null
+verification_evidence: "Red feedback_wire exit 101 (missing feedback module); Green feedback_wire 4 passed, full wire module 13 passed, Clippy all-targets -D warnings and package fmt check exit 0. Logs: /tmp/ch23-t01-{red,green,module,clippy}.log."
 commit: null
 created_at: "2026-11-12T05:00:00Z"
 updated_at: "2026-11-12T04:25:15Z"
@@ -115,16 +115,18 @@ Green: repeat the same focused command, then run the full canonical module and f
 ```bash
 PYO3_PYTHON="$PWD/.venv/bin/python" PYTHONPATH="$PWD/src/py" cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --test postgres_replication_wire_tests
 PYO3_PYTHON="$PWD/.venv/bin/python" cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-postgres --all-targets -- -D warnings
-cargo fmt --manifest-path src/rs/Cargo.toml --check
+cargo fmt --manifest-path src/rs/Cargo.toml -p vertebra-postgres --check
 ```
 
 ## Acceptance Criteria
 
-- [ ] R22.4 framing and interval cases pass with no socket or feedback mutation.
+- [x] R22.4 framing and interval cases pass with no socket or feedback mutation.
 
 - [ ] Red, Green, and lint evidence is recorded, and task plus checklist synchronization is included in one signed conventional commit.
 
 ## Notes & Discoveries
+
+- Strict payload decoding checks lengths before all fixed-offset reads, borrows XLogData bytes, and preserves signed timestamps. The virtual workspace requires `-p vertebra-postgres` for the scoped cargo fmt command.
 
 - Decoded, queued, leased, published, and acknowledged records have distinct ownership boundaries. Only an actually published Commit becomes acknowledgeable. [^contracts]
 

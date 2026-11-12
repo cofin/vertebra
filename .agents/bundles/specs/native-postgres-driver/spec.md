@@ -467,7 +467,7 @@ Every worksheet (`129` total across `36` chapters) executes in one bounded invoc
 - [x] [40ce977c] ch20-arrow-copy-import-and-portals — Arrow-to-COPY Field Import, Schema-Qualified Streaming Writers, and Sync/Async Arrow Portal Cancellation (chapters/ch20-arrow-copy-import-and-portals/spec.md)
 - [x] [b44e28ca] ch21-live-notifications — Dedicated Notification Session Pump, PendingDeliveryGuard Async Bridge, and Python PostgresNotificationSource (chapters/ch21-live-notifications/spec.md)
 - [x] [9c1865b7] ch22-copyboth-and-pgoutput-decoding — Dedicated CopyBoth Sessions, Lossless pgoutput v1 Decoding and Transaction Envelopes, and the Split-State Limitations Record (chapters/ch22-copyboth-and-pgoutput-decoding/spec.md)
-- [ ] ch23-replication-feedback-resume-and-bridge — Replication CopyData Codecs and Monotonic Commit-Boundary Feedback (chapters/ch23-replication-feedback-resume-and-bridge/spec.md)
+- [~] ch23-replication-feedback-resume-and-bridge — Replication CopyData Codecs and Monotonic Commit-Boundary Feedback (chapters/ch23-replication-feedback-resume-and-bridge/spec.md)
 - [ ] ch34-replication-session-pump — Bounded Single-Generation Replication Session, Independent Heartbeats, and Delivery Leases (chapters/ch34-replication-session-pump/spec.md)
 - [ ] ch35-replication-supervision — Verified Reconnect Supervision and Generation-Fenced Delivery (chapters/ch35-replication-supervision/spec.md)
 - [ ] ch36-replication-python-bridge — Cancellation-Safe Python Replication Handles and Typed Event Hydration (chapters/ch36-replication-python-bridge/spec.md)
