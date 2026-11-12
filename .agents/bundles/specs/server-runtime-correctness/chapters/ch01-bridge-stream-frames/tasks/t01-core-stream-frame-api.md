@@ -5,7 +5,7 @@ chapter_id: ch01-bridge-stream-frames
 title: Add ResponseStreamFrame, StreamDelivery, StreamSink, and submit_stream_frame to BatchBridge
 description: Introduce a transport-neutral ordered stream frame type and a dedicated stream sink on the in-process BatchBridge that reports acceptance or a closed client per frame, without changing unary BridgeResponse delivery.
 status: draft
-state: pending
+state: in_progress
 priority: P1
 verification_strategy: behavior_tdd
 depends_on: []
@@ -21,17 +21,17 @@ files:
 tests:
   - src/rs/vertebra-core/src/bridge.rs
 estimated_loc: 150
-plan_revision: 1
+plan_revision: 2
 plan_commit: null
 state_revision: 0
-claimed_by: null
-claimed_at: null
+claimed_by: agent:bulk-runtime
+claimed_at: "2026-11-12T02:30:00Z"
 blocked_reason: null
 unblock_condition: null
 next_step: null
 last_verified_at: null
 last_verified_commit: null
-verification_evidence: null
+verification_evidence: "Red: bridge tests exit 101 (missing stream API); Green: 23 bridge tests exit 0; core all-target Clippy -D warnings exit 0; cargo fmt --check exit 0."
 created_at: "2026-11-12T00:45:00Z"
 updated_at: "2026-11-12T00:45:00Z"
 commit: null
@@ -109,7 +109,7 @@ Add a stream frame type, delivery outcome enum, and a dedicated stream sink to `
 
 ## Acceptance Criteria
 
-- [ ] `ResponseStreamFrame`, `StreamDelivery`, `StreamSink`, `set_stream_sink`, and `submit_stream_frame` exist with the signatures above and are re-exported from `vertebra_core` (R1).
+- [x] `ResponseStreamFrame`, `StreamDelivery`, `StreamSink`, `set_stream_sink`, and `submit_stream_frame` exist with the signatures above and are re-exported from `vertebra_core` (R1).
 - [ ] Submitting without a sink fails with `TransportError::Disconnected` (R1).
 - [ ] Unary bridge behaviour and existing bridge tests are unchanged (R1).
 
