@@ -15,6 +15,9 @@ generated:
   at: "2026-11-04T04:33:00Z"
 verified:
   - by: agent:flow-sync
+    at: "2026-11-12T03:00:27Z"
+    commit: 2947d015
+  - by: agent:flow-sync
     at: "2026-11-09T21:46:00Z"
     commit: 14aa83b8
   - by: agent:flow-executor
@@ -27,6 +30,9 @@ verified:
     at: "2026-11-07T03:55:00Z"
     commit: 067fa901
 sources:
+- id: src-postgres-pgoutput-rs
+  resource: src/rs/vertebra-postgres/src/replication/pgoutput.rs::PgOutputDecoder
+  title: Incremental pgoutput v1 transaction records and bounded queue
 - id: src-postgres-tenant-core
   resource: src/py/vertebra/db/adapters/postgres/core.py
   title: PostgreSQL tenant and session SQL builders
@@ -110,6 +116,7 @@ sources:
 # Native Pipelines, Change Feeds, Tenant Predicates & DataFusion
 
 <!-- truth: start -->
+- **Native PostgreSQL Transaction Records**: On the working branch, `PgOutputDecoder::next_record` emits ordered v1 `Begin`, DML, truncate, message, and `Commit` envelopes without whole-transaction buffering. Deduplication uses system identifier, slot, begin-final LSN, and transaction ordinal; only `Commit` exposes an acknowledgement boundary. `BoundedReplicationQueue` uses explicit constructor limits; its planned default limits are 1024 records / 8 MiB, admits one bounded oversized record when empty, and rejects overflow without dropping records. Feedback, resume, and public change-source integration remain in `native-postgres-driver` chapters 23–24 [^src-postgres-pgoutput-rs].
 - **Delayed-Commit & Native Pipelines**: `SyncPipelineCapable` / `AsyncPipelineCapable` batch ordered statements via `driver.pipeline()`; `SyncOraclePipeline` and `AsyncOraclePipeline` (`ORACLESQL_NATIVE_TTC_PIPELINE_SUPPORTED = False`) hold an open transaction or `SAVEPOINT _vtb_pipe_<n>` across `results()` and commit only on clean `__exit__`/`__aexit__`, while SQLSpec `OracleSyncDriver` / `OracleAsyncDriver` set `_execution_parameter_style = ParameterStyle.NAMED_COLON`.
 - **Reset-or-Evict Tenant Scoping**: `TenantPredicate` stays engine-neutral while `TenantConnectionScope` / `AsyncTenantConnectionScope` (`vertebra.db.rls`), `OracleCore` (`context_package_proc` / `context_clear_proc` + `DBMS_SESSION.SET_IDENTIFIER` / `CLEAR_IDENTIFIER`), and `OracleSessionManager` always reset session context on lease exit and permanently evict pooled sessions when reset fails.
 - **Notifications & Change Streams**: `ChangeFeed` manages event envelopes and bounded spill hydration; `PostgresNotificationSource`, `OracleNotificationSource` (`AsyncOracleListener` `DBMS_AQ.DEQUEUE` / TxEventQ worker pump with 1s-sliced server waits and exponential reconnect backoff), and `SyncSpannerChangeStreamSource` / `AsyncSpannerChangeStreamSource` implement adapter streaming.
@@ -212,3 +219,5 @@ Provenance sources: [^src-tests-unit-db-test-pg-dataplane-and-datafusion-py], [^
 [^src-extensions-apex-session-py]: `src/py/vertebra/extensions/apex/session.py` — OracleSessionManager APEX VPD propagation and ECID piggyback.
 [^src-tenant-native-tests]: `src/py/tests/unit/db/test_native_db_drivers.py` — Generic engine-purity positive and negative probes.
 [^src-tenant-enterprise-tests]: `src/py/tests/unit/db/test_enterprise_olap_drivers.py` — Session bind and failure identity acceptance.
+
+[^src-postgres-pgoutput-rs]: `src/rs/vertebra-postgres/src/replication/pgoutput.rs::PgOutputDecoder` — Incremental pgoutput v1 transaction records and bounded queue.

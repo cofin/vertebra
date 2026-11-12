@@ -4,7 +4,7 @@ flow_id: mcp-protocol-completeness
 title: MCP Protocol Completeness
 description: Trusted AgentContext propagation, single-pass guards and single-use confirmation tickets, dual-mode MCP version negotiation with legacy sessions and GET SSE streams, resource subscriptions, the skills extension, MCP Apps UI metadata, Litestar delegation parity, and the `vtb ai mcp serve` / `bridge` commands with OIDC identity.
 status: draft
-state: planned
+state: active
 has_chapters: true
 chapters:
   - ch01-agent-context-propagation
@@ -20,7 +20,7 @@ chapters:
   - ch12-iap-identity-source
   - ch11-docs-and-okf
 current_chapter: ch01-agent-context-propagation
-current_task: null
+current_task: "mcp-protocol-completeness:ch01:t04"
 parent_prd: integration-remediation
 depends_on_flows:
   - server-runtime-correctness
@@ -437,7 +437,7 @@ class MCPCore:
 
 ## 5. Implementation Plan
 
-- [ ] ch01-agent-context-propagation — Trusted context construction, core binding, task cancellation, and adapter contexts (chapters/ch01-agent-context-propagation/spec.md)
+- [~] ch01-agent-context-propagation — Trusted context construction, core binding, task cancellation, and adapter contexts (chapters/ch01-agent-context-propagation/spec.md)
 - [ ] ch02-guard-and-confirmation-correctness — Single-pass guards with typed errors and single-use, expiring confirmation tickets (chapters/ch02-guard-and-confirmation-correctness/spec.md)
 - [ ] ch03-version-negotiation-and-sessions — Version registry, legacy initialize and sessions, termination, and shared capabilities (chapters/ch03-version-negotiation-and-sessions/spec.md)
 - [ ] ch04-get-sse-streams — Streaming envelope, `GET` SSE, adapter writers, and session notifications (chapters/ch04-get-sse-streams/spec.md) [empirical_dependent: server-runtime-correctness lands incremental ASGI response streaming]

@@ -3,8 +3,8 @@ type: Spec
 flow_id: server-runtime-correctness
 title: Server Runtime Correctness — Incremental Streaming, Fail-Loud Startup, Worker Modes, and Wheel-Shipped Server Binary
 description: Stream mounted ASGI and RSGI responses incrementally across the in-process bridge and shared-memory transports, abort worker startup on lifespan failure, export the supervisor API, make worker-only and worker lanes real, and ship a relocatable vertebra-server binary inside every core wheel with a smoke test that runs vtb run, and remove FastPath aliases, predictable UUID entropy, native-helper fallbacks, and inert runtime parameters.
-status: draft
-state: planned
+status: stable
+state: active
 has_chapters: true
 chapters:
   - ch01-bridge-stream-frames
@@ -19,15 +19,15 @@ chapters:
   - ch10-docs-and-okf-sync
   - ch11-product-okf-and-release-gate
 current_chapter: ch01-bridge-stream-frames
-current_task: "server-runtime-correctness:ch01:t01"
+current_task: "server-runtime-correctness:ch01:t02"
 parent_prd: integration-remediation
 depends_on_flows: []
 plan_revision: 2
 plan_commit: null
-state_revision: 1
+state_revision: 2
 last_verified_checkpoint: null
 created_at: "2026-11-12T00:45:00Z"
-updated_at: "2026-11-12T02:02:40Z"
+updated_at: "2026-11-12T02:56:52Z"
 generated:
   by: agent:plan-generator
   at: "2026-11-12T00:45:00Z"
@@ -377,7 +377,7 @@ Progress: `[0/18 files documented]`.
 
 ## 5. Implementation Plan
 
-- [ ] ch01-bridge-stream-frames — Bridge stream frames, VRSF ring frames, shared stream registry, and lossless SHM routing ([spec](chapters/ch01-bridge-stream-frames/spec.md))
+- [~] ch01-bridge-stream-frames — Bridge stream frames, VRSF ring frames, shared stream registry, and lossless SHM routing ([spec](chapters/ch01-bridge-stream-frames/spec.md))
 - [ ] ch02-python-stream-submission — `submit_stream_frame` binding for both transports ([spec](chapters/ch02-python-stream-submission/spec.md))
 - [ ] ch03-asgi-rsgi-incremental-flush — Progressive ASGI/RSGI/Python fallback flush and server-binary streaming acceptance ([spec](chapters/ch03-asgi-rsgi-incremental-flush/spec.md))
 - [ ] ch04-lifespan-fail-loud — `WorkerStartupError`, exit code `78`, and supervisor stop ([spec](chapters/ch04-lifespan-fail-loud/spec.md))
@@ -393,11 +393,11 @@ Progress: `[0/18 files documented]`.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Plan Baseline**: `state: planned`, `plan_revision: 2`, `plan_commit: null` (stamped on approval), authored against `main @ c8722c76`.
+- **Execution Baseline**: `c368cb00`; `state: active`, `plan_revision: 2`, `plan_commit: null`; `0/11` chapters and `0/33` tasks completed.
 - **Upstream Dependencies**: none. `mcp-protocol-completeness` depends on `ch01`–`ch03` of this flow for incremental mounted-ASGI streaming.
-- **Next Task**: `server-runtime-correctness:ch01:t01` once approved; `0/33` tasks completed.
+- **Active Chapter & Task**: `ch01-bridge-stream-frames`, `server-runtime-correctness:ch01:t01`; implementation is in progress.
 - **Documentation & OKF Status**: `[0/18 files documented]` across `ch10` and `ch11`.
-- **Next Command**: `/flow:implement server-runtime-correctness ch01` after approval.
+- **Remaining Plan**: `ch01` through `ch11`; chapter completion requires fresh aggregate verification and correctness and quality reviews.
 
 [^asgi-protocol-rs]: `src/rs/vertebra-py/src/asgi.rs::AsgiProtocol` — Rust ASGI protocol that buffers `more_body` chunks into `body_buf` until the final chunk.
 [^bridge-core-rs]: `src/rs/vertebra-core/src/bridge.rs::BatchBridge` — In-process batch bridge with unary-only `BridgeResponse` and `ResponseSink`.

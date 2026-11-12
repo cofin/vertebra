@@ -5,11 +5,11 @@ chapter_id: ch01-agent-context-propagation
 title: "Chapter 1: Agent Context Propagation"
 description: Build trusted AgentContext values from headers, ASGI scopes, and WSGI environs, bind them for every MCPCore dispatch and promoted task, and pass them from every transport adapter.
 status: draft
-state: planned
+state: active
 planning_status: complete
 depends_on_chapters: []
 replan_trigger: null
-current_task: null
+current_task: "mcp-protocol-completeness:ch01:t04"
 plan_revision: 1
 plan_commit: null
 state_revision: 0
@@ -192,9 +192,9 @@ async def run_stdio_server(service: MCPService, *, stdin: AsyncIterable[bytes] |
 
 ## 5. Implementation Plan
 
-- [ ] mcp-protocol-completeness:ch01:t01 — Build trusted contexts from headers, scopes, and environs (tasks/t01-trusted-context-construction.md)
-- [ ] mcp-protocol-completeness:ch01:t02 — Bind contexts in MCPCore and isolate promoted tasks (tasks/t02-core-context-binding-and-task-cancellation.md)
-- [ ] mcp-protocol-completeness:ch01:t03 — Pass contexts from ASGI and WSGI adapters (tasks/t03-transport-adapter-contexts.md)
+- [x] [ff668194] mcp-protocol-completeness:ch01:t01 — Build trusted contexts from headers, scopes, and environs (tasks/t01-trusted-context-construction.md)
+- [x] [7e4129c4] mcp-protocol-completeness:ch01:t02 — Bind contexts in MCPCore and isolate promoted tasks (tasks/t02-core-context-binding-and-task-cancellation.md)
+- [x] [5fccef87] mcp-protocol-completeness:ch01:t03 — Pass contexts from ASGI and WSGI adapters (tasks/t03-transport-adapter-contexts.md)
 - [ ] mcp-protocol-completeness:ch01:t04 — Pass contexts from native, Litestar fallback, and stdio entry points (tasks/t04-plugin-litestar-and-stdio-contexts.md)
 
 **Chapter Recovery Checkpoint:** `uv run --no-sync pytest src/py/tests/unit/agent/test_core_and_observability.py src/py/tests/unit/agent/test_mcp_conformance.py src/py/tests/unit/cli/test_mcp_cli.py -q && uv run --no-sync ruff check src/py/vertebra/agent && uv run --no-sync mypy src/py/vertebra/agent` exits `0`.

@@ -5,12 +5,12 @@ chapter_id: ch01-bridge-stream-frames
 title: "Chapter 01: Response Stream Frames on the In-Process Bridge and SHM Rings"
 description: Add transport-neutral ResponseStreamFrame and StreamSink to the in-process BatchBridge, add a flagged VRSF stream frame to the SHM response rings, route both into PendingResponse::streaming through one ResponseStreamRegistry, and retire the unreachable ResponseSlot routing path in the SHM dispatcher.
 status: draft
-state: planned
+state: active
 planning_status: complete
 depends_on_chapters: []
 replan_trigger: null
-current_task: null
-plan_revision: 1
+current_task: "server-runtime-correctness:ch01:t02"
+plan_revision: 2
 plan_commit: null
 state_revision: 0
 last_verified_checkpoint: null
@@ -58,7 +58,7 @@ Neither transport can carry a streamed response. The embedded topology delivers 
 
 ### 1.3 Upstream Baseline & Code Analysis
 
-`PendingResponse::streaming(status, headers_mp, rx)` and `response::build_response` already serve progressive bodies [^body-rs]. `BridgeCorrelation::complete` and `Dispatcher::complete` both take the oneshot sender out of the correlation slab, so completing at the first stream frame removes the request from the `30s` `sweep_expired` window. `RingPair::send_overflow_response` moves frames above the xlarge tier into named SHM regions identified by `VROV`; stream frames stay within the xlarge slot by construction (the submitter chunks bodies by `RingPair::max_stream_frame_payload`).
+`PendingResponse::streaming(status, headers_mp, rx)` and `response::build_response` already serve progressive bodies [^body-rs]. `BridgeCorrelation::complete` and `Dispatcher::complete` both take the oneshot sender out of the correlation slab, so completing at the first stream frame removes the request from the `30s` `sweep_expired` window. `RingPair::send_overflow_response` moves frames above the xlarge tier into named SHM regions identified by `VROV`; all stream frames use the xlarge tier to preserve stream order across body sizes and stay within its slot by construction (the submitter chunks bodies by `RingPair::max_stream_frame_payload`).
 
 ## 2. Requirements, Concrete Contracts & Architecture
 
@@ -150,9 +150,9 @@ Progress: `[0/0 files documented in ch01]`; bridge and SHM stream semantics land
 
 ## 5. Implementation Plan
 
-- [ ] server-runtime-correctness:ch01:t01 — Add ResponseStreamFrame, StreamDelivery, StreamSink, and submit_stream_frame to BatchBridge (tasks/t01-core-stream-frame-api.md)
+- [x] [2e4ef248] server-runtime-correctness:ch01:t01 — Add ResponseStreamFrame, StreamDelivery, StreamSink, and submit_stream_frame to BatchBridge (tasks/t01-core-stream-frame-api.md)
 - [ ] server-runtime-correctness:ch01:t02 — Add VRSF stream frames and flag-aware draining to the SHM response rings (tasks/t02-shm-ring-stream-frames.md)
-- [ ] server-runtime-correctness:ch01:t03 — Route stream frames into PendingResponse::streaming through ResponseStreamRegistry and the bridge sink (tasks/t03-response-stream-registry.md)
+- [x] [3a3fab9a] server-runtime-correctness:ch01:t03 — Route stream frames into PendingResponse::streaming through ResponseStreamRegistry and the bridge sink (tasks/t03-response-stream-registry.md)
 - [ ] server-runtime-correctness:ch01:t04 — Route drained VRSF frames through the registry and remove the unreachable ResponseSlot routing path (tasks/t04-shm-reader-stream-routing.md)
 
 **Chapter Recovery Checkpoint:** `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-core -p vertebra-http --features vertebra-http/tls,vertebra-http/compression && cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-core -p vertebra-http --all-targets --features vertebra-http/tls,vertebra-http/compression -- -D warnings` exits `0`.

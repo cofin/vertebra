@@ -5,7 +5,7 @@ chapter_id: ch01-bridge-stream-frames
 title: Add VRSF stream frames and flag-aware draining to the SHM response rings
 description: Add a flagged VRSF response frame to RingPair alongside VRES, with non-blocking and blocking writers, a maximum stream payload query, a flag-aware drain_frames_with, and Transport wrappers, leaving unary VRES and VROV frames unchanged.
 status: draft
-state: pending
+state: in_progress
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -22,10 +22,10 @@ files:
 tests:
   - src/rs/vertebra-core/tests/it/shm.rs
 estimated_loc: 200
-plan_revision: 1
+plan_revision: 2
 plan_commit: null
 state_revision: 0
-claimed_by: null
+claimed_by: agent:bulk-runtime
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
@@ -72,7 +72,7 @@ Teach the SHM response rings to carry stream frames: a `VRSF` frame (`magic u32 
   - `pub const RESPONSE_STREAM_MAGIC: u32 = 0x56_52_53_46; // "VRSF"` and `const RESPONSE_STREAM_HEADER_SIZE: usize = 22;`.
   - `#[derive(Debug, Clone, Copy)] pub struct ResponseFrameView<'a> { pub correlation_id: u64, pub status: u16, pub flags: u16, pub headers_raw: &'a [u8], pub body: &'a [u8] }`.
   - `impl ResponseData { pub fn parse_frame(data: &[u8]) -> Result<ResponseFrameView<'_>, RingPairError> }`: `VRES` → view with `flags = FLAG_FINAL`; `VRSF` → view with decoded flags; anything else → `InvalidResponse("bad magic")`; truncation and length overflow errors mirror `parse_slice`.
-  - `pub fn send_stream_frame(&self, correlation_id: u64, status: u16, flags: u16, headers_raw: &[u8], body: &[u8]) -> Result<(), RingPairError>` and `pub fn send_stream_frame_blocking(...)` with the same arguments; both reject `headers_raw.len() > u16::MAX` and frames larger than the xlarge slot with `ResponseTooLarge(total)` (never the overflow region).
+  - `pub fn send_stream_frame(&self, correlation_id: u64, status: u16, flags: u16, headers_raw: &[u8], body: &[u8]) -> Result<(), RingPairError>` and `pub fn send_stream_frame_blocking(...)` with the same arguments; both route all stream frames through the xlarge tier to preserve order across varying body sizes, and reject `headers_raw.len() > u16::MAX` and frames larger than the xlarge slot with `ResponseTooLarge(total)` (never the overflow region).
   - `pub fn max_stream_frame_payload(&self) -> usize` = xlarge slot size minus `RESPONSE_STREAM_HEADER_SIZE`.
   - `pub fn drain_frames_with<F: FnMut(ResponseFrameView<'_>)>(&self, max_items: usize, f: F) -> Result<usize, RingPairError>` — same tier order, overflow handling (`VROV` regions parse through `parse_frame`), and `parse_err` semantics as `drain_with`; `drain_with` becomes a thin wrapper.
 - `src/rs/vertebra-core/src/transport/mod.rs`:
@@ -83,7 +83,7 @@ Teach the SHM response rings to carry stream frames: a `VRSF` frame (`magic u32 
 
 - Frame exactly at the xlarge slot size succeeds; one byte larger returns `ResponseTooLarge`.
 - `VRSF` with `headers_len` or `body_len` pointing past the slot: `InvalidResponse("truncated")`.
-- Mixed `VRES` and `VRSF` frames in one tier drain in send order.
+- Every `VRSF` frame uses the xlarge tier, including empty final frames, so body size changes cannot reorder one stream. Unary responses retain size-based tier selection; relative ordering between unrelated unary and stream requests is not guaranteed.
 - `send_stream_frame` on a full ring returns `Channel(ChannelError::Full)` → `TransportError::RingFull`; the blocking variant waits.
 
 ## Public-Seam Test Blueprint
@@ -95,7 +95,7 @@ Teach the SHM response rings to carry stream frames: a `VRSF` frame (`magic u32 
 | Stream round trip | `send_stream_frame(11, 200, FLAG_STREAMING \| FLAG_HEADERS_SENT, b"\x00\x0ccontent-type...", b"data: 1\n\n")` then `send_stream_frame(11, 200, FLAG_STREAMING \| FLAG_FINAL, b"", b"")` | `drain_frames_with` yields two views with ids `11`, flags in order, bodies `b"data: 1\n\n"` and `b""` |
 | Unary reports final | `send_response(12, 201, b"", b"ok")` | View with `flags == FLAG_FINAL`, `status == 201`, body `b"ok"` |
 | Legacy drain unchanged | Same `VRES` frame via `drain_with` | Callback receives `(12, 201, b"", b"ok")` |
-| Mixed order | `VRES` id 1, `VRSF` id 2, `VRES` id 3 in the small tier | Views ids `[1, 2, 3]` |
+| Cross-size stream order | First body `b"a"`, continuation `5000` bytes, empty final, all id `11` | Drained flags and bodies retain first, continuation, final order |
 | Oversize | Body of `max_stream_frame_payload() + 1` bytes | `Err(RingPairError::ResponseTooLarge(_))` |
 | Bad magic | `ResponseData::parse_frame(&[0u8; 32])` | `Err(InvalidResponse("bad magic"))` |
 | Truncated | `VRSF` header claiming `body_len = 100` with `10` body bytes | `Err(InvalidResponse("truncated"))` |
@@ -103,10 +103,9 @@ Teach the SHM response rings to carry stream frames: a `VRSF` frame (`magic u32 
 
 ## Verification
 
-- Initial Red baseline: `rm -f /dev/shm/test-* && cargo test --manifest-path src/rs/Cargo.toml -p vertebra-core --test it shm`
+- Initial Red baseline: `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-core --test it shm`
 - Final Green + lint:
   ```bash
-  rm -f /dev/shm/test-*
   cargo test --manifest-path src/rs/Cargo.toml -p vertebra-core --test it shm
   cargo test --manifest-path src/rs/Cargo.toml -p vertebra-core --lib transport
   cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-core --all-targets -- -D warnings
@@ -115,11 +114,13 @@ Teach the SHM response rings to carry stream frames: a `VRSF` frame (`magic u32 
 
 ## Acceptance Criteria
 
-- [ ] `VRSF` frames round-trip with flags through every ring tier and through `drain_frames_with` (R3).
+- [ ] `VRSF` frames round-trip with flags through the xlarge stream tier and through `drain_frames_with` (R3).
 - [ ] `VRES`, `VROV`, and `drain_with` behaviour and existing SHM tests are unchanged (R3).
 - [ ] `Transport` exposes `send_stream_frame`, `send_stream_frame_blocking`, and `max_stream_frame_payload` with the stated in-process semantics (R3).
 
 ## Notes & Discoveries
+
+All stream frames share the xlarge response tier because draining size-selected tiers can place an empty final frame ahead of a larger continuation. The bounded xlarge slot count applies backpressure; unary frames keep size-based routing.
 
 [^ring-pair-rs]: `src/rs/vertebra-core/src/transport/ring_pair.rs::ResponseData` — `VRES` frame layout, `write_response_slot`, `send_response`, `select_ring_with_bit`, and `drain_with`.
 [^transport-mod-rs]: `src/rs/vertebra-core/src/transport/mod.rs::Transport` — `Transport` `send_response` and `send_response_bytes` wrappers with `RingPairError` mapping.

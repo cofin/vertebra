@@ -3,8 +3,8 @@ type: Spec
 flow_id: storage-integrity-and-streaming
 title: Object Storage Integrity, Create-Only Copy, and Streamed Arrow Writes
 description: Create-only copy and rename on S3-compatible and R2 stores, opt-in SHA-256 write receipts and checksum-verified reads, the SQLSpec direct Arrow write capability with its upstream hook dependency, storage quality fixes, a standalone vertebra-storage wheel isolation check, and complete storage limitations records.
-status: draft
-state: planned
+status: stable
+state: active
 has_chapters: true
 chapters:
   - ch01-create-only-copy-and-quality
@@ -12,19 +12,19 @@ chapters:
   - ch03-arrow-streaming-and-integrations
   - ch04-wheel-check-docs-and-okf
 current_chapter: ch01-create-only-copy-and-quality
-current_task: "storage-integrity-and-streaming:ch01:t01"
+current_task: null
 parent_prd: native-data-platform
 depends_on_flows: []
 research:
   - research/upstream-sqlspec-direct-arrow-write.md
-plan_revision: 1
-plan_commit: null
-state_revision: 0
-last_verified_checkpoint: null
+plan_revision: 2
+plan_commit: c368cb00
+state_revision: 1
+last_verified_checkpoint: da0d764e
 last_reviewed_chapter: null
 last_reviewed_commit: null
 created_at: "2026-11-12T01:30:00Z"
-updated_at: "2026-11-12T01:30:00Z"
+updated_at: "2026-11-12T03:33:00Z"
 generated:
   by: flow-spec
   at: "2026-11-12T01:30:00Z"
@@ -52,8 +52,8 @@ sources:
     resource: src/py/vertebra/extensions/sqlspec/storage.py::ObjectStoreBackend
     title: SQLSpec ObjectStoreBackend with write_arrow_sync/async
   - id: engine-tests
-    resource: src/rs/vertebra-storage/tests/storage_engine_tests.rs::test_copy_if_not_exists_conflict_memory_and_local
-    title: Create-only copy test covering memory and local only
+    resource: src/rs/vertebra-storage/tests/storage_engine_tests.rs::test_copy_if_not_exists_s3_compatible
+    title: Create-only copy and rename conflicts and success on memory, local, S3, B2, and R2
   - id: limitations
     resource: .agents/bundles/knowledge/domains/storage/object-storage-limitations.md
     title: Object storage limitations chapter
@@ -78,20 +78,19 @@ tags:
 # Flow: Object Storage Integrity, Create-Only Copy, and Streamed Arrow Writes
 
 <!-- truth: start -->
-- **Create-only copy and rename**: `copy(..., overwrite=False)` and `rename(..., overwrite=False)` raise `FileExistsError` on every backend. S3/B2 stores use `S3CopyIfNotExists::Multipart`; R2 stores use `S3CopyIfNotExists::HeaderWithStatus("cf-copy-destination-if-none-match", "*", 412)` [^store-rs].
-- **Cloud rename** remains copy-then-delete and is not atomic on object stores; the limitations chapter records it [^limitations].
-- **Write receipts** ([#99](https://github.com/cofin/vertebra/issues/99)): `put`, `put_stream`, `put_multipart`, `put_file`, and `open_writer` (sync and async) accept `checksum: bool = False` and `expected_sha256: str | None = None`. With either set, the Rust engine hashes the bytes it sends and returns `PutResult.sha256` (lowercase hex). A mismatched `expected_sha256` aborts before publish and raises `vertebra.typing.IntegrityError`; the prior object survives [^issue-99].
-- **Verified reads**: `get` and `get_file` accept `expected_sha256`; a mismatch raises `IntegrityError` before bytes are returned or the `.part` file is renamed into place. `open_reader` / `get_stream` verify at end of stream and raise on the final read.
-- **Zero default cost**: with `checksum=False` and no expected digest, no hasher is constructed.
-- **Streamed Arrow writes** ([#100](https://github.com/cofin/vertebra/issues/100)): `ObjectStoreBackend.write_arrow_sync/async` stream through `write_batches_sync/async`. The backend declares `supports_direct_arrow_write = True`; SQLSpec pipelines reach it only after the upstream hook lands, tracked as an external dependency.
-- **Wheel isolation**: `make storage-wheel-check` asserts the `vertebra-storage` wheel contains only `vertebra/_storage*.so` and `vertebra/_storage.pyi` plus dist-info [^makefile].
+- S3/B2 create-only copy uses `S3CopyIfNotExists::Multipart`; R2 uses `HeaderWithStatus("cf-copy-destination-if-none-match", "*", 412)`. Destination conflicts preserve existing bytes and map to `FileExistsError`; unsupported provider operations fail loud [^store-rs] [^engine-tests].
+- Cloud rename copies before deleting the source and is not atomic. A destination conflict preserves the source [^store-rs] [^limitations].
+- Sync and async `put_multipart` accept synchronous buffer iterables and stream through `put_stream`; generator failure aborts before publish [^py-store].
+- Explicit nonempty SQLSpec backend URIs, including `"memory://"`, override the URI inferred from a prebuilt store [^sqlspec-backend].
+- SHA-256 receipts, checksum-verified reads, the direct Arrow-write capability flag, and `storage-wheel-check` remain planned in chapters `ch02`–`ch04` [^issue-99] [^issue-100] [^makefile].
+- SQLSpec pipelines still require an upstream direct Arrow-write hook to avoid encoding whole-file payloads [^sqlspec-backend].
 <!-- truth: end -->
 
 ## 1. Specification, Context & Provenance
 
 ### 1.1 Problem Statement & Objectives
 
-`ObjectStoreEngine::copy` falls back for create-only copy only when `scheme == "file"`, and the S3/R2 `AmazonS3Builder` is built without a copy-if-not-exists strategy, so `object_store 0.13.2` returns `NotSupported` on `s3`/`b2`/`r2` [^store-rs]. Tests cover only memory and local [^engine-tests]. There is no content digest over uploaded or downloaded bytes [^issue-99]. SQLSpec pipelines encode whole Arrow payloads before calling `write_bytes_*`, bypassing the streaming backend [^issue-100]. `SyncObjectStore.put_multipart` materializes every part before crossing FFI [^py-store]. `ObjectStoreBackend.__init__` treats the literal `"memory://"` as a sentinel [^sqlspec-backend]. No Make target checks the standalone storage wheel [^makefile].
+S3/B2 and R2 use provider-specific create-only copy strategies, with conflict and success tests for memory, local, S3, B2, and R2 [^store-rs] [^engine-tests]. Multipart facades consume inputs incrementally, and explicit SQLSpec backend URIs determine URI resolution [^py-store] [^sqlspec-backend]. The remaining scope adds content digests, verified reads, direct Arrow-write capability and upstream hook tracking, wheel isolation, and complete user documentation [^issue-99] [^issue-100] [^makefile].
 
 ### 1.2 Non-Goals
 
@@ -193,7 +192,7 @@ class IntegrityError(OSError): ...
 
 ## 3. Documentation & OKF Knowledge Plan
 
-Progress: `[0/9 files documented]`.
+Progress: `[3/9 files documented]`.
 
 | File | Owning Task |
 | --- | --- |
@@ -205,8 +204,8 @@ Progress: `[0/9 files documented]`.
 
 | Requirement | Owning Task | Verification Strategy | Canonical Test Gate |
 | --- | --- | --- | --- |
-| R1 | ch01/t01 | `tdd` | `cargo test -p vertebra-storage copy_if_not_exists` |
-| R2 | ch01/t02 | `tdd` | `pytest src/py/tests/unit/storage/test_storage_store.py src/py/tests/unit/extensions/test_data_storage_integrations.py` |
+| R1 | ch01/t01 | `regression_tdd` | `cargo test -p vertebra-storage copy_if_not_exists` |
+| R2 | ch01/t02 | `regression_tdd` | `pytest src/py/tests/unit/storage/test_storage_store.py src/py/tests/unit/extensions/test_data_storage_integrations.py` |
 | R3 | ch02/t01 | `tdd` | `cargo test -p vertebra-storage sha256` |
 | R4 | ch02/t02, ch03/t03 | `tdd`, `benchmark` | `cargo test -p vertebra-storage verified`; `cargo bench -p vertebra-storage --bench put_checksum -- --quick` |
 | R5 | ch02/t03, ch02/t04, ch03/t02 | `tdd` | stubtest; `pytest src/py/tests/unit/storage/test_storage_store.py -k "sha256 or verified"`; `pytest src/py/tests/unit/extensions/test_data_storage_integrations.py -k sha256` |
@@ -217,18 +216,19 @@ Progress: `[0/9 files documented]`.
 
 ## 5. Implementation Plan
 
-- [ ] ch01-create-only-copy-and-quality ([spec](chapters/ch01-create-only-copy-and-quality/spec.md))
+- [~] ch01-create-only-copy-and-quality ([spec](chapters/ch01-create-only-copy-and-quality/spec.md))
 - [ ] ch02-write-receipts-and-verified-reads ([spec](chapters/ch02-write-receipts-and-verified-reads/spec.md))
 - [ ] ch03-arrow-streaming-and-integrations ([spec](chapters/ch03-arrow-streaming-and-integrations/spec.md))
 - [ ] ch04-wheel-check-docs-and-okf ([spec](chapters/ch04-wheel-check-docs-and-okf/spec.md))
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline (`HEAD`)**: `c8722c76`; `0/4` chapters, `0/12` tasks.
-- **Active Chapter**: `ch01-create-only-copy-and-quality`.
-- **Documentation & OKF Sync**: `[0/9 files documented]`.
+- **Verified Baseline**: `da0d764e`; `2/12` tasks completed and `0/4` chapters reviewed.
+- **Active Chapter**: `ch01-create-only-copy-and-quality`; both tasks are complete and chapter correctness and quality reviews remain open.
+- **Remaining Plan**: `ch02` adds SHA-256 receipts and verified reads; `ch03` adds direct Arrow-write capability, integration forwarding, and benchmarks; `ch04` adds wheel checks and completes documentation and upstream draft tracking.
+- **Documentation & OKF Sync**: `[3/9 files documented]`; the storage guide and two knowledge chapters reflect create-only copy, streamed multipart, and provider caveats. Remaining chapter contracts require further documentation updates.
 - **External Dependency**: upstream SQLSpec direct Arrow write hook in `SyncStoragePipeline.write_arrow` / `AsyncStoragePipeline.write_arrow`.
-- **Active Invariants**: fail loud on unsupported conditional operations; no hashing on the default path.
+- **Active Invariants**: unsupported conditional operations fail loud; existing objects survive create-only conflicts and failed multipart input. Checksum work remains unimplemented.
 
 [^store-rs]: `src/rs/vertebra-storage/src/store.rs::ObjectStoreEngine` — Engine operations and S3/R2 builders.
 [^session-rs]: `src/rs/vertebra-storage/src/store.rs::MultipartUploadSession` — Multipart session.
@@ -236,7 +236,7 @@ Progress: `[0/9 files documented]`.
 [^py-store]: `src/py/vertebra/storage/_store.py::SyncObjectStore` — Python facades.
 [^py-arrow]: `src/py/vertebra/storage/_arrow.py::write_batches_sync` — Incremental Arrow uploads.
 [^sqlspec-backend]: `src/py/vertebra/extensions/sqlspec/storage.py::ObjectStoreBackend` — SQLSpec backend.
-[^engine-tests]: `src/rs/vertebra-storage/tests/storage_engine_tests.rs::test_copy_if_not_exists_conflict_memory_and_local` — Existing create-only test.
+[^engine-tests]: `src/rs/vertebra-storage/tests/storage_engine_tests.rs::test_copy_if_not_exists_s3_compatible` — Existing create-only test.
 [^limitations]: `.agents/bundles/knowledge/domains/storage/object-storage-limitations.md` — Limitations chapter.
 [^makefile]: `Makefile` — Wheel isolation checks.
 [^issue-99]: [#99](https://github.com/cofin/vertebra/issues/99) — SHA-256 receipts and verified reads.

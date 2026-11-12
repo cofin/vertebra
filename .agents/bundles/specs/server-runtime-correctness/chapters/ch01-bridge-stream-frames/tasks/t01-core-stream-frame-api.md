@@ -5,7 +5,7 @@ chapter_id: ch01-bridge-stream-frames
 title: Add ResponseStreamFrame, StreamDelivery, StreamSink, and submit_stream_frame to BatchBridge
 description: Introduce a transport-neutral ordered stream frame type and a dedicated stream sink on the in-process BatchBridge that reports acceptance or a closed client per frame, without changing unary BridgeResponse delivery.
 status: draft
-state: in_progress
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on: []
@@ -24,17 +24,17 @@ estimated_loc: 150
 plan_revision: 2
 plan_commit: null
 state_revision: 0
-claimed_by: agent:bulk-runtime
-claimed_at: "2026-11-12T02:30:00Z"
+claimed_by: null
+claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
 last_verified_at: null
-last_verified_commit: null
+last_verified_commit: 2e4ef248
 verification_evidence: "Red: bridge tests exit 101 (missing stream API); Green: 23 bridge tests exit 0; core all-target Clippy -D warnings exit 0; cargo fmt --check exit 0."
 created_at: "2026-11-12T00:45:00Z"
 updated_at: "2026-11-12T00:45:00Z"
-commit: null
+commit: 2e4ef248
 generated:
   by: agent:plan-generator
   at: "2026-11-12T00:45:00Z"

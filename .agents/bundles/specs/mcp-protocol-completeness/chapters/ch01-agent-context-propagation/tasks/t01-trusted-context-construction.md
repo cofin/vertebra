@@ -5,7 +5,7 @@ chapter_id: ch01-agent-context-propagation
 title: Build trusted contexts from headers, scopes, and environs
 description: Add AgentContext.from_headers, from_scope, from_wsgi_environ, fork, and reset_agent_context, add the identity-source seam with mTLS-subject and custom-callable presets, and ignore proxy identity headers unless a source is configured.
 status: draft
-state: pending
+state: completed
 priority: P0
 verification_strategy: regression_tdd
 depends_on: []
@@ -29,12 +29,12 @@ claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-12T02:40:00Z"
+last_verified_commit: ff668194
+verification_evidence: "Red: missing reset/context API; Green: 31 canonical tests, Ruff check/format and Mypy core (8 files), all exit 0."
 created_at: "2026-11-12T00:30:00Z"
 updated_at: "2026-11-12T00:30:00Z"
-commit: null
+commit: ff668194
 generated:
   by: agent:plan-generator
   at: "2026-11-12T00:30:00Z"
@@ -93,7 +93,7 @@ Replace the header-trusting body of `AgentContext.from_request` with three const
 ## Edge Cases & Error Semantics
 
 - Proxy identity headers without a source are ignored; no exception and no log.
-- mTLS header from a peer outside `trusted_proxies`, from an unparseable peer, or with `peer=None` is ignored (`resolve` returns `None`).
+- mTLS header from a peer outside `trusted_proxies`, from an unparsable peer, or with `peer=None` is ignored (`resolve` returns `None`).
 - `x-tenant-id` never sets `tenant_id`; tenants come only from a source's `CallerIdentity`.
 - `x-goog-authenticated-user-email` never sets identity under any source in this module.
 - `scope["headers"]` absent yields an empty header map; `scope["client"]` absent yields `peer=None`.
@@ -134,11 +134,11 @@ Replace the header-trusting body of `AgentContext.from_request` with three const
 
 ## Acceptance Criteria
 
-- [ ] R1.1: proxy identity headers never set identity without an identity source; the mTLS preset honors its header only from trusted proxy CIDRs; the callable preset supplies identity verbatim.
-- [ ] R1.2: Starlette requests without authentication middleware build contexts.
-- [ ] R1.3: invalid preset construction (empty or invalid CIDRs, non-callable resolver) raises at construction.
-- [ ] `fork` and `reset_agent_context` behave per the matrix.
-- [ ] No inline `#` comments; module-level imports only.
+- [x] R1.1: proxy identity headers never set identity without an identity source; the mTLS preset honors its header only from trusted proxy CIDRs; the callable preset supplies identity verbatim.
+- [x] R1.2: Starlette requests without authentication middleware build contexts.
+- [x] R1.3: invalid preset construction (empty or invalid CIDRs, non-callable resolver) raises at construction.
+- [x] `fork` and `reset_agent_context` behave per the matrix.
+- [x] No inline `#` comments; module-level imports only.
 
 ## Notes & Discoveries
 

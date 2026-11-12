@@ -5,7 +5,7 @@ chapter_id: ch01-create-only-copy-and-quality
 title: Configure S3/B2 and R2 create-only copy with mock-S3 tests
 description: Build S3/B2 stores with S3CopyIfNotExists::Multipart and R2 stores with the cf-copy-destination-if-none-match header strategy, normalize destination conflicts to StorageError::AlreadyExists, and prove conflict and success against loopback mock S3 servers.
 status: stable
-state: in_progress
+state: completed
 priority: P1
 verification_strategy: regression_tdd
 depends_on: []
@@ -23,17 +23,17 @@ estimated_loc: 220
 plan_revision: 2
 plan_commit: c368cb00
 state_revision: 0
-claimed_by: agent:bulk-storage
-claimed_at: "2026-11-12T03:14:29Z"
+claimed_by: null
+claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
 last_verified_at: "2026-11-12T03:14:29Z"
-last_verified_commit: null
+last_verified_commit: 0658fd1f
 verification_evidence: "Red: create-only S3 copy returns NotSupported; Green: focused copy_if_not_exists test passes for memory/file/s3/b2/r2, cargo storage suite 43 passed, clippy all-targets exits 0; focused storage extension rebuild succeeds."
 created_at: "2026-11-12T01:30:00Z"
 updated_at: "2026-11-12T01:30:00Z"
-commit: null
+commit: 0658fd1f
 sources:
   - id: store-rs
     resource: src/rs/vertebra-storage/src/store.rs::ObjectStoreEngine

@@ -26,7 +26,7 @@ tests:
   - src/rs/vertebra-http/tests/it/streaming_body.rs
   - src/rs/vertebra-http/tests/it/broker_shm.rs
 estimated_loc: 200
-plan_revision: 1
+plan_revision: 2
 plan_commit: null
 state_revision: 0
 claimed_by: null
@@ -102,11 +102,10 @@ Change `shm_reader::drain_worker` to use `RingPair::drain_frames_with`: unary fr
 
 ## Verification
 
-- Initial Red baseline: `rm -f /dev/shm/test-* /dev/shm/*vertebra* && cargo test --manifest-path src/rs/Cargo.toml -p vertebra-http --test it streaming_body`
+- Initial Red baseline: `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-http --test it streaming_body`
 - Final Green + lint:
   ```bash
-  rm -f /dev/shm/test-* /dev/shm/*vertebra*
-  cargo test --manifest-path src/rs/Cargo.toml -p vertebra-http --test it streaming_body broker_shm dispatcher
+  cargo test --manifest-path src/rs/Cargo.toml -p vertebra-http --test it
   cargo test --manifest-path src/rs/Cargo.toml -p vertebra-http --lib
   cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-http --all-targets --features tls,compression -- -D warnings
   ```

@@ -37,7 +37,8 @@ last_verified_commit: c8722c76
 verification_evidence: "cargo test -p vertebra-postgres --test postgres_replication_wire_tests (9 passed), cargo fmt --check, and cargo clippy --workspace --all-targets --features tls,compression,gcp -- -D warnings exited 0"
 created_at: "2026-11-05T18:25:07Z"
 updated_at: "2026-11-11T01:53:00Z"
-commit: 81048251
+commit: c8722c76
+original_commit: 81048251
 generated:
   by: flow-revise
   at: "2026-11-10T14:45:00Z"
@@ -135,6 +136,8 @@ Factor the bounded backend message reader in `src/rs/vertebra-postgres/src/proto
 - [x] Commit message follows `feat(postgres): establish logical CopyBoth sessions` once verified.
 
 ## Notes & Discoveries
+
+- Canonical commit `c8722c76` retains this task through the PR #104 squash; `original_commit` preserves its source commit. Production implementation files match the original reviewed branch.
 
 - Pre-existing caller-provisioned logical slots and publications are mandatory; `probe_identity` is reused directly by `AsyncPostgresClient.replication_identity` in `ch23:t03` [^npd-contracts].
 

@@ -2,7 +2,7 @@
 type: Spec
 flow_id: native-postgres-driver
 title: Complete Standalone Native PostgreSQL Driver
-description: The standalone vertebra-postgres wheel (transport, authentication, typed queries, pools, pipelines, cancellation, COPY, Arrow, notifications, and CopyBoth/pgoutput relation decoding) is on main at c8722c76; the remaining chapters finish pgoutput envelopes, replication feedback and change sources, build the permanent native Python drivers, cut every PostgreSQL consumer over atomically while deleting psycopg/asyncpg, prove PG14–18 conformance and wheel/benchmark gates, and synchronize documentation and OKF in a follow-up pull request.
+description: The standalone vertebra-postgres wheel (transport, authentication, typed queries, pools, pipelines, cancellation, COPY, Arrow, notifications, and CopyBoth/pgoutput relation decoding) is on main at c8722c76; local follow-up commits add pgoutput transaction envelopes and the limitations record; the remaining chapters finish replication feedback and change sources, build the permanent native Python drivers, cut every PostgreSQL consumer over atomically while deleting psycopg/asyncpg, prove PG14–18 conformance and wheel/benchmark gates, and synchronize documentation and OKF in a follow-up pull request.
 status: draft
 state: active
 has_chapters: true
@@ -41,7 +41,7 @@ chapters:
   - ch32-ffi-okf-and-review-routing-sync
   - ch33-final-review-and-release-gate
 current_chapter: ch22-copyboth-and-pgoutput-decoding
-current_task: "native-postgres-driver:ch22:t03"
+current_task: null
 parent_prd: native-data-platform
 depends_on_flows:
   - driver-fail-loud
@@ -50,12 +50,12 @@ research:
   - research/cloud-material_20261105.md
 plan_revision: 7
 plan_commit: c8722c76
-state_revision: 9
-last_verified_checkpoint: c8722c76
+state_revision: 10
+last_verified_checkpoint: 48b50600
 last_reviewed_chapter: ch21-live-notifications
 last_reviewed_commit: c8722c76
 created_at: "2026-11-03T04:05:00Z"
-updated_at: "2026-11-12T01:30:00Z"
+updated_at: "2026-11-12T03:00:27Z"
 generated:
   by: flow-revise
   at: "2026-11-12T01:30:00Z"
@@ -123,8 +123,8 @@ tags:
 <!-- truth: start -->
 - **Wheel on Main**: [PR #104](https://github.com/cofin/vertebra/pull/104) (squash commit `c8722c76`) ships `src/rs/vertebra-postgres` (`vertebra._postgres`, `vertebra-core[postgres]`) with Protocol 3.0 sockets over `postgres-protocol =0.6.12` and `rustls` (`ring`), SCRAM/PLUS, Cloud SQL and AlloyDB discovery with mTLS and IAM, lossless codecs, pools, statement caches, single-`Sync` pipelines, cancellation, binary `COPY`, `VTBARROW`, `LISTEN`/`NOTIFY`, and `CopyBoth` replication sessions with `pgoutput` relation/insert decoding (`ch01`–`ch21`, `ch22:t01`–`t02`, `80/119` tasks) [^pg-conn-rs] [^pg-core-rs] [^py-async-rs] [^arrow-shm-rs].
 - **Split Runtime State on Main**: The Python drivers are not cut over. `SyncPostgreSQLDriver` executes through `psycopg_pool`, `AsyncPostgreSQLDriver` offloads that sync driver with `asyncio.to_thread`, `PostgreSQLQueueBackend` probes `psycopg` when `executor=` is missing, and `pipeline.py` / `arrow.py` are imported only by unit tests; the PR #104 title and body describe a cutover that main does not contain [^pg-driver-py] [^pg-queue-py] [^pg-pipeline-py] [^pg-arrow-py].
-- **Follow-Up Pull Request**: `ch22:t03` through `ch33` (`39` tasks) ship together in one follow-up pull request: `pgoutput` transaction envelopes, commit-fenced feedback, resume and bridge, the CAS change source, permanent native drivers, atomic consumer cutover with full `psycopg`/`asyncpg` runtime removal, live PG14–18 conformance, wheel/free-threaded/benchmark gates, and documentation/OKF synchronization [^sqlspec-py].
-- **Squash Mapping**: Task `commit:` values and checklist SHAs in `ch01`–`ch22` are pre-squash branch SHAs reachable only through PR #104; all of them map to squash commit `c8722c76` on main, which anchors `plan_commit`, `last_verified_checkpoint`, `last_reviewed_commit`, and every follow-up review range.
+- **Working Branch and Remaining Delivery**: Local `ch22:t03` (`2947d015`) adds ordered transaction envelopes and `ch22:t04` (`48b50600`) records the split state. The remaining `37` tasks in `ch23`–`ch33` deliver commit-fenced feedback, resume and bridge, the CAS change source, native public drivers, atomic consumer cutover, live conformance, wheels, benchmarks, and final documentation together in the follow-up PR [^sqlspec-py].
+- **Git Continuity**: Original task/review history through `ch21` is retained locally at `refs/flow/native-postgres-reviewed-history`; original `ch22:t01`–`t02` task objects remain available. Their changes are included in squash `c8722c76` on `main`. Local follow-up task SHAs remain separate; `plan_commit` and the final review base stay `c8722c76`.
 - **Fail-Loud Baseline**: `driver-fail-loud` deletes `_in_memory_rows`, every PostgreSQL `memory://` branch, and `vertebra_db::postgres::PostgresPool`; this flow adds no memory or SHM-admission pool paths [^fail-loud-baseline].
 <!-- truth: end -->
 
@@ -132,11 +132,11 @@ tags:
 
 ### 1.1 Problem Statement & Current Baseline
 
-[PR #104](https://github.com/cofin/vertebra/pull/104) squash-merges the native wheel onto `main` as `c8722c76` with `80` of `119` tasks complete. Every chapter through `ch21` and `ch22:t01`–`t02` is implemented and reviewed. The pre-squash task commits recorded in completed worksheets (for example `62bf91f1` for `ch01` and `64288c63` for `ch22:t02`) are not ancestors of `main`; they remain readable only through the PR #104 branch history, and `c8722c76` is the single `main` commit that contains all of them.
+[PR #104](https://github.com/cofin/vertebra/pull/104) squash-merges the native wheel onto `main` as `c8722c76` with `80` of `119` tasks complete. Every chapter through `ch21` and `ch22:t01`–`t02` is implemented and reviewed. The pre-squash task commits recorded in completed worksheets (for example `62bf91f1` for `ch01` and `64288c63` for `ch22:t02`) are not ancestors of `main`; their original history through `ch21` is retained at `refs/flow/native-postgres-reviewed-history`, and the original `ch22:t01`–`t02` objects remain available locally. Squash `c8722c76` contains their source changes on `main`. Local follow-up commits bring task progress to `82/119`; Chapter 22 awaits its code-and-Markdown review stamp.
 
 The Python adapter layer on `main` still runs on third-party clients: `src/py/vertebra/db/adapters/postgres/driver.py::SyncPostgreSQLDriver` builds a `psycopg_pool.ConnectionPool`, `AsyncPostgreSQLDriver` wraps that sync driver with `asyncio.to_thread`, `src/py/vertebra/framework/queues/postgres.py::PostgreSQLQueueBackend` probes `psycopg` before raising for a missing `executor=`, `src/py/vertebra/db/dialer/{cloudsql,alloydb}.py` expose `create_psycopg_connect_func` / `create_asyncpg_connect_func`, and `src/py/tests/unit/db/test_postgres_driver.py` exercises `AsyncPostgreSQLDriver` through a SQLite-backed asyncpg pool double (`_SQLiteAsyncPGPool`). `src/py/vertebra/db/adapters/postgres/pipeline.py` and `arrow.py` are complete but imported only by `test_postgres_native_pipeline.py` and `test_postgres_native_data.py` [^pg-driver-py] [^pg-queue-py] [^pg-pipeline-py] [^pg-arrow-py].
 
-The remaining `39` tasks (`ch22:t03`–`ch33:t01`) ship in one follow-up pull request from a branch cut off `main` at `c8722c76`. `ch22:t04` records the split state in the PostgreSQL limitations OKF entry early in that branch; `ch27:t04` removes those caveats once the cutover lands. Hosted writes (push, PR creation, workflow dispatch) require separate explicit user permission.
+The working branch includes verified `ch22:t03` and `ch22:t04` commits; the remaining `37` tasks (`ch23:t01`–`ch33:t01`) complete the follow-up delivery based on `main` at `c8722c76`. The PostgreSQL limitations OKF entry records the split state; `ch27:t04` removes those caveats once the cutover lands. Hosted writes (push, PR creation, workflow dispatch) require separate explicit user permission.
 
 This flow depends on [`driver-fail-loud`](../../knowledge/domains/data/database-drivers-and-dialers.md), which deletes `_in_memory_rows` and every `memory://` branch from `driver.py` (a `memory://` DSN raises `ImproperConfigurationError`) and deletes `vertebra_db::postgres::PostgresPool` [^fail-loud-baseline].
 
@@ -157,7 +157,7 @@ This flow depends on [`driver-fail-loud`](../../knowledge/domains/data/database-
 | `src/rs/vertebra-db/src/postgres/mod.rs::encode_query_frame` [^pg-core-rs] | Stateless frame, `JSONB`, `PGCOPY`, and vector helpers only; live connections and server prepared statements belong to `vertebra-postgres`. |
 | `src/rs/vertebra-db/src/py_async.rs::spawn_rust_db_task_with_attr` [^py-async-rs] | Completion queues and independent drainer with setup-abort ownership and `PendingDeliveryGuard` stream cancellation safety. |
 | `src/rs/vertebra-db/src/arrow_shm.rs::ShmArrowStreamWriter` [^arrow-shm-rs] | Accepts serialized IPC; native builders in `vertebra-postgres` produce the columns. |
-| `src/rs/vertebra-postgres/src/replication/pgoutput.rs::PgOutputDecoder` | `decode_next_frame` parses `Relation`, `Type`, and `Insert` only; `ch22:t03` adds `Begin`, `Origin`, `Update`, `Delete`, `Truncate`, `Message`, and `Commit` envelopes and the bounded queue. |
+| `src/rs/vertebra-postgres/src/replication/pgoutput.rs::PgOutputDecoder` | `decode_next_frame` parses all negotiated v1 frames; local `2947d015` adds ordered `next_record` transaction envelopes and the bounded queue beyond the relation/insert baseline on `main`. |
 | `src/py/vertebra/db/adapters/postgres/driver.py::{SyncPostgreSQLDriver,AsyncPostgreSQLDriver}` [^pg-driver-py] | `psycopg_pool` execution and `asyncio.to_thread` offload; replaced by permanent `_sync.py` / `_async.py` native drivers (`ch25`) and activated atomically (`ch27`). |
 | `src/py/vertebra/db/adapters/postgres/{pipeline,arrow}.py` [^pg-pipeline-py] [^pg-arrow-py] | Test-only today; `ch26:t02` wires `SyncPostgresPipeline`/`AsyncPostgresPipeline` and `ch26:t03` wires `load_arrow_sync`/`load_arrow_async` into the permanent drivers. |
 | `src/py/vertebra/framework/queues/postgres.py::PostgreSQLQueueBackend` [^pg-queue-py] | Executor-injected backend; `ch27:t04` swaps the missing-executor `psycopg` probe for `vertebra._postgres`. |
@@ -262,7 +262,7 @@ flowchart LR
 
 ## 3. Documentation & OKF Knowledge Plan
 
-Progress: `[0/33 files documented]`. `ch22:t04` creates `postgres-limitations.md` and registers it in both knowledge indexes as an interim split-state record, `ch27:t04` removes the split-state caveats from it, and the final synchronization runs across [ch30-user-and-workflow-docs](chapters/ch30-user-and-workflow-docs/spec.md) (`12` files, `ch30:t01`–`t04`), [ch31-data-and-testing-okf-sync](chapters/ch31-data-and-testing-okf-sync/spec.md) (`12` files, `ch31:t01`–`t04`), and [ch32-ffi-okf-and-review-routing-sync](chapters/ch32-ffi-okf-and-review-routing-sync/spec.md) (`9` files, `ch32:t01`–`t03`). Module, crate, and wheel inventories are enumerated from the `Makefile` `lint` stubtest list and `src/rs/*/Cargo.toml` at execution time rather than hardcoded counts.
+Progress: `[3/33 files documented]` with interim coverage. `ch22:t04` supplies `postgres-limitations.md` and both knowledge index entries; these three files still require cutover and final-state maintenance in `ch27` / `ch31`. `ch27:t04` removes the split-state caveats from it, and the final synchronization runs across [ch30-user-and-workflow-docs](chapters/ch30-user-and-workflow-docs/spec.md) (`12` files, `ch30:t01`–`t04`), [ch31-data-and-testing-okf-sync](chapters/ch31-data-and-testing-okf-sync/spec.md) (`12` files, `ch31:t01`–`t04`), and [ch32-ffi-okf-and-review-routing-sync](chapters/ch32-ffi-okf-and-review-routing-sync/spec.md) (`9` files, `ch32:t01`–`t03`). Module, crate, and wheel inventories are enumerated from the `Makefile` `lint` stubtest list and `src/rs/*/Cargo.toml` at execution time rather than hardcoded counts.
 
 - `docs/usage/databases.md` (`ch30:t01`) — Linked `uv`/`pip`/`pdm`/`poetry` `[postgres]` tabs, `$n` vs `E'...'` pyformat lowering, SQLSpec `NUMERIC` and SQLAlchemy `numeric_dollar`, `query_multi`, single-`Sync` `pipeline()`, lossless `Pg*` records, raw native `copy_to`/`copy_from`/`copy_from_arrow` vs driver `load_from_arrow`/`select_to_arrow`/`stream_arrow_batches`/`VTBARROW`, `PgBouncer` modes, `direct_dsn`, and DSN precedence (zero external driver names).
 - `docs/usage/analytics-and-cdc.md` (`ch30:t01`) — Unified `$n` PostgreSQL tenant binds (replacing psycopg/asyncpg bind wording), `PostgresNotificationSource`, and `PostgresChangeSource` `pgoutput` v1 CAS checkpointing.
@@ -372,14 +372,14 @@ Every worksheet (`119` total across `33` chapters) executes in one bounded invoc
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Plan Baseline**: `plan_commit: c8722c76` (`main` and `origin/main`); `state: active`, `has_chapters: true`, `plan_revision: 7`, `last_verified_checkpoint: c8722c76`, `last_reviewed_chapter: ch21-live-notifications` (`last_reviewed_commit: c8722c76`).
-- **Squash Mapping**: Completed worksheets keep their pre-squash `commit:` SHAs (for example `ch21` at `b44e28ca`, `ch22:t01` at `81048251`, `ch22:t02` at `64288c63`); those SHAs are reachable only through [PR #104](https://github.com/cofin/vertebra/pull/104) and all map to squash commit `c8722c76` on `main`.
-- **Split State on Main**: `vertebra._postgres` is installed by `make dev` / `make build` and checked by `make postgres-test` / `make postgres-wheel-check`, while `SyncPostgreSQLDriver` (`psycopg_pool`), `AsyncPostgreSQLDriver` (`asyncio.to_thread` over the sync driver), `PostgreSQLQueueBackend` (`psycopg` probe), the dialer `create_psycopg_connect_func` / `create_asyncpg_connect_func` helpers, and the SQLite-backed asyncpg test double remain until `ch27`.
-- **Downstream Notification Rename**: `queues-tasks-and-channels` t01 splits `NotificationSource` into `SyncNotificationSource` / `AsyncNotificationSource` and renames `PostgresNotificationSource` to `AsyncPostgresNotificationSource` with a new `SyncPostgresNotificationSource` after this flow completes; pending worksheets in `ch26`–`ch31` keep the HEAD names and add no new unprefixed notification protocol, class, or alias.
-- **Upstream Flow Dependency**: [`driver-fail-loud`](../../knowledge/domains/data/database-drivers-and-dialers.md) is completed on `main`, deleting PostgreSQL `memory://` execution and `vertebra_db::postgres::PostgresPool` [^fail-loud-baseline].
-- **Active Chapter & Next Task**: [ch22-copyboth-and-pgoutput-decoding](chapters/ch22-copyboth-and-pgoutput-decoding/spec.md) (`native-postgres-driver:ch22:t03`, then `ch22:t04`); `21/33` chapters are completed and reviewed, `80/119` tasks are complete, and `39` tasks remain across `ch22:t03`–`t04` and `ch23`–`ch33`.
-- **Documentation & OKF Status**: `[0/33 files documented]`; `ch22:t04` and `ch27:t04` maintain the limitations record, and `ch30`–`ch32` complete the synchronization before final verification and `c8722c76..HEAD` review in [ch33-final-review-and-release-gate](chapters/ch33-final-review-and-release-gate/spec.md).
-- **Delivery & Next Action**: All remaining chapters ship in one follow-up PR from a branch cut off `main` at `c8722c76`; intermediate chapters never trigger `/flow:finish` or `/flow:archive`. Next canonical command: `/flow:implement native-postgres-driver ch22`.
+- **Plan and Review Baseline**: `plan_commit: c8722c76`, `state: active`, `plan_revision: 7`; `last_reviewed_chapter` remains `ch21-live-notifications` until Chapter 22 code and synchronized Markdown receive correctness and fresh quality review.
+- **Git Continuity**: Original chapter/task history through `ch21` is retained at `refs/flow/native-postgres-reviewed-history`; original `ch22:t01` / `t02` objects are available locally. These changes are included in `main` squash `c8722c76`; local follow-up commits are `2947d015` (`t03`) and `48b50600` (`t04`).
+- **Split Runtime State**: `vertebra._postgres` ships on `main`; public drivers still use `psycopg_pool` / `asyncio.to_thread`, queues probe `psycopg`, and dialer helpers and legacy tests remain until `ch27`. The local limitations entry documents this boundary.
+- **Active Chapter**: Chapter 22 has `4/4` verified committed tasks and awaits review/stamping; `current_chapter` remains `ch22`, `current_task: null`. Progress is `82/119` completed tasks, `37` remaining in `ch23`–`ch33`, with `21/33` chapters currently stamped completed.
+- **Verification Boundary**: Full `vertebra-postgres --tests`, focused replication tests, all-target Clippy, and documentation checks pass locally. Live PG14–18, wheel/free-threaded, benchmark, and final aggregate acceptance remain downstream work.
+- **Documentation**: `[3/33 files documented]` represents interim limitations and index coverage; `ch27` and `ch31` still maintain those files, while `ch30`–`ch32` complete final synchronization.
+- **Remaining Plan**: `ch23` feedback/resume/bridge; `ch24` change source/checkpoints; `ch25`–`ch27` native drivers and atomic cutover; `ch28` live conformance; `ch29` wheels/benchmarks; `ch30`–`ch32` docs/OKF; `ch33` final verification and routed reviews.
+- **Next Action**: Complete Chapter 22 correctness review followed by fresh quality review, stamp the reviewed head, then advance to `/flow:implement native-postgres-driver ch23`. Push and PR creation require separate permission; intermediate chapters do not trigger finish/archive.
 
 [^pg-conn-rs]: `src/rs/vertebra-db/src/connection.rs::TransportStream` — Shared TCP, Unix, TLS, and cloud mTLS stream primitives.
 [^pg-core-rs]: `src/rs/vertebra-db/src/postgres/mod.rs::encode_query_frame` — Shared stateless PostgreSQL wire frame and codec helpers in `vertebra-db`.

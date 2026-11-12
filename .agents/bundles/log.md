@@ -1,5 +1,17 @@
 # Bundle Activity Log
 
+## [2026-11-12T03:50:00Z] flow-implement | parallel chapter checkpoints
+
+- Storage ch01 tasks commit as `0658fd1f` and `da0d764e`; fresh native and Python recovery gates pass, source correctness and fresh quality reviews have no material findings. Living documentation reflects conditional copy and incremental uploads.
+- MCP ch01 tasks t01–t03 commit as `ff668194`, `7e4129c4`, and `5fccef87`; trusted contexts, cancellation, and adapter forwarding pass focused tests, Ruff, and Mypy.
+- Runtime ch01 t01 and t03 commit as `2e4ef248` and `3a3fab9a`; bridge and registry tests, full HTTP tests, Clippy, and HTTP/3 checks pass. Ordered SHM frames and reader routing remain active work. All commits stay local.
+
+## [2026-11-12T03:00:27Z] flow-implement | native-postgres-driver ch22 pre-review checkpoint
+
+- Completed `ch22:t03` (`2947d015`) with pgoutput v1 transaction frames, ordered bounded replication records, deduplication coordinates, and a backpressured queue; completed `ch22:t04` (`48b50600`) with the limitations entry and its two knowledge index registrations.
+- Focused replication tests, all-target Clippy, full `vertebra-postgres --tests`, documentation structure/source checks, review manifests, privacy, and whitespace checks pass locally. Live database, wheel/free-threaded, and benchmark acceptance remain downstream gates.
+- Synchronized present-tense chapter/root/catalog/knowledge state at `82/119` tasks and `37` remaining; Chapter 22 remains active pending correctness and fresh quality review and closeout stamping. Commits remain local.
+
 ## [2026-11-12T02:02:40Z] flow-sync | Review-history continuity and server chapter pointer
 
 - Restored original PostgreSQL review-history objects through `b44e28ca`, retained locally at `refs/flow/native-postgres-reviewed-history`, without changing review stamps or task completion counts.

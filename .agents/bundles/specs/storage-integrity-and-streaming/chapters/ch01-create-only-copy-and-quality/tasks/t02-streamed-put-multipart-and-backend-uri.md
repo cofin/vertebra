@@ -5,7 +5,7 @@ chapter_id: ch01-create-only-copy-and-quality
 title: Stream put_multipart and remove the backend URI sentinel
 description: Reimplement SyncObjectStore.put_multipart and AsyncObjectStore.put_multipart on put_stream so parts are not materialized into a list, and drop the literal memory:// sentinel from ObjectStoreBackend.__init__.
 status: stable
-state: in_progress
+state: completed
 priority: P2
 verification_strategy: regression_tdd
 depends_on: []
@@ -27,17 +27,17 @@ estimated_loc: 90
 plan_revision: 2
 plan_commit: c368cb00
 state_revision: 0
-claimed_by: agent:multipart-executor
-claimed_at: "2026-11-12T02:24:00Z"
+claimed_by: null
+claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
 last_verified_at: "2026-11-12T02:58:52Z"
-last_verified_commit: null
+last_verified_commit: da0d764e
 verification_evidence: "Red: reused mutable chunks fail sync/async and explicit memory URI fails (3 failures). Green: canonical storage/integration modules 434 passed, 1 existing skip; post-restore focused regressions 8 passed; Ruff check/format and focused Mypy exit 0."
 created_at: "2026-11-12T01:30:00Z"
 updated_at: "2026-11-12T02:58:52Z"
-commit: null
+commit: da0d764e
 sources:
   - id: py-store
     resource: src/py/vertebra/storage/_store.py::SyncObjectStore

@@ -5,7 +5,7 @@ chapter_id: ch01-bridge-stream-frames
 title: Route stream frames into PendingResponse::streaming through ResponseStreamRegistry and the bridge sink
 description: Implement ResponseStreamRegistry in a new dispatcher streams module with blocking and async delivery parameterised by a completion closure, register it as the BatchBridge stream sink from BridgeCorrelation, and move correlation allocation into a shared register_pending seam.
 status: draft
-state: in_progress
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -33,11 +33,11 @@ blocked_reason: null
 unblock_condition: null
 next_step: null
 last_verified_at: "2026-11-12T03:33:36Z"
-last_verified_commit: null
+last_verified_commit: 3a3fab9a
 verification_evidence: "Red: missing ResponseStreamRegistry/register_pending (11 compile errors); Green: 12 canonical streaming tests, 17 dispatcher tests, full HTTP TLS/compression 153 tests, HTTP3 feature check, all-target Clippy and whitespace all exit 0."
 created_at: "2026-11-12T00:45:00Z"
 updated_at: "2026-11-12T00:45:00Z"
-commit: null
+commit: 3a3fab9a
 generated:
   by: agent:plan-generator
   at: "2026-11-12T00:45:00Z"

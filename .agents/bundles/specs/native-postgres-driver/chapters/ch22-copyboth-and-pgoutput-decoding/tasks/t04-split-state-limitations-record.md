@@ -5,7 +5,7 @@ chapter_id: ch22-copyboth-and-pgoutput-decoding
 title: Record the split native-wheel and legacy-driver state in the PostgreSQL limitations OKF entry
 description: Create postgres-limitations.md as an OKF Gotcha recording that main carries the vertebra-postgres wheel while the Python drivers, queue guard, dialer helpers, and driver tests still use psycopg/asyncpg, and register it in the root and domain knowledge indexes.
 status: draft
-state: in_progress
+state: completed
 priority: P1
 verification_strategy: documentation_validation
 depends_on: []
@@ -25,17 +25,17 @@ estimated_loc: 110
 plan_revision: 7
 plan_commit: c8722c76
 state_revision: 0
-claimed_by: agent:bulk-pg-docs
-claimed_at: "2026-11-12T02:22:54Z"
+claimed_by: null
+claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
 last_verified_at: "2026-11-12T02:56:52Z"
-last_verified_commit: null
+last_verified_commit: 48b50600
 verification_evidence: "Documentation baseline and final review-check exit 0; bundles/privacy validation exit 0; 8 unique sources and matching footnotes, both index links, 71-line entry, bounded truth block and source paths verified; git diff --check exit 0."
 created_at: "2026-11-12T01:30:00Z"
-updated_at: "2026-11-12T02:22:54Z"
-commit: null
+updated_at: "2026-11-12T03:00:27Z"
+commit: 48b50600
 generated:
   by: flow-revise
   at: "2026-11-12T01:30:00Z"
@@ -128,7 +128,7 @@ Out of scope: any production, test, `docs/**`, or other OKF file; runtime caveat
 - [x] `postgres-limitations.md` exists as an OKF `Gotcha` with matched sources/footnotes and a truth block recording the split state on `main` with symbol anchors (R27).
 - [x] Both knowledge indexes register the entry once each and remain frontmatter-free (R27).
 - [x] `make review-check` exits `0`.
-- [ ] Commit message follows `docs(postgres): record split native driver state in limitations OKF` once verified.
+- [x] Commit message follows `docs(postgres): record split native driver state in limitations OKF` once verified.
 
 ## Notes & Discoveries
 

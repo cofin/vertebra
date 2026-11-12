@@ -91,6 +91,8 @@ asyncio.run(main())
 
 The chunks contain `b'hello '` and `b'world'`. Close a stream explicitly when stopping early. Producer errors abort the active multipart upload. S3/B2, R2, and OCI accumulate bounded 8 MiB parts, so callers can supply smaller chunks; the final part may be shorter.
 
+`put_multipart(key, parts)` accepts a synchronous iterable on both sync and async stores and uses the same incremental upload path. Parts are consumed in order without collecting the whole iterable. A producer exception aborts the upload and preserves an existing destination.
+
 `head(key)` returns `ObjectMeta` without fetching its body, and `exists(key)` returns a boolean. Async versions of every method use the same names and are awaited.
 
 ## Conditional writes
@@ -105,6 +107,8 @@ The chunks contain `b'hello '` and `b'world'`. Close a stream explicitly when st
 | `if_none_match=etag` | The current ETag differs from `etag`, or the key is missing | `PreconditionError` |
 | `copy(src, dst, overwrite=False)` | `dst` does not exist | `FileExistsError` |
 | `rename(src, dst, overwrite=False)` | `dst` does not exist | `FileExistsError` |
+
+S3/B2 enforce create-only copy with conditional multipart completion; R2 uses its conditional copy header. Providers that reject these operations surface a backend error. Cloud rename copies before deleting the source, so it is not atomic; a delete failure can leave both keys present.
 
 `copy` and `rename` overwrite by default. `PreconditionError` subclasses `OSError` and is importable from `vertebra.storage` and `vertebra.typing`:
 

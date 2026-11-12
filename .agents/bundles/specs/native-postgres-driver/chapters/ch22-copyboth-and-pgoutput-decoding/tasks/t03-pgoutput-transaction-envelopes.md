@@ -5,7 +5,7 @@ chapter_id: ch22-copyboth-and-pgoutput-decoding
 title: Order logical transactions and change envelopes
 description: Extend PgOutputDecoder with pgoutput v1 Begin, Origin, Update, Delete, Truncate, Message, and Commit frames, a next_record transaction state machine emitting bounded ReplicationRecord envelopes, and a BoundedReplicationQueue.
 status: draft
-state: in_progress
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -26,17 +26,17 @@ estimated_loc: 245
 plan_revision: 7
 plan_commit: c8722c76
 state_revision: 0
-claimed_by: agent:bulk_postgres
+claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
 last_verified_at: "2026-11-12T02:35:00Z"
-last_verified_commit: null
+last_verified_commit: 2947d015
 verification_evidence: "Red: missing ReplicationRecord, BoundedReplicationQueue and next_record. Green: 20 pgoutput and replication wire tests; all-target Clippy -D warnings; diff --check exit 0. PYO3_PYTHON pinned to repository Python 3.12."
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-12T01:30:00Z"
-commit: null
+updated_at: "2026-11-12T03:00:27Z"
+commit: 2947d015
 generated:
   by: flow-revise
   at: "2026-11-12T01:30:00Z"
@@ -146,7 +146,7 @@ Out of scope: `StandbyStatusUpdate` feedback and heartbeats (`ch23:t01`), Python
 
 - [x] `decode_next_frame` parses exact `proto.c` v1 `'B'`, `'O'`, `'U'`, `'D'`, `'T'`, `'M'`, and `'C'` layouts and `next_record` emits ordered `ReplicationRecord`s carrying `(system_identifier, slot, begin_final_lsn, transaction_ordinal)` and `Commit` origin fields without whole-transaction buffering (R22).
 - [x] Ordering violations, reserved flags, v2+ tags, and `> 16 MiB` records fail explicitly; `BoundedReplicationQueue` enforces `1024` records / `8 MiB` without drops; `reset_on_disconnect` clears the active transaction (R22).
-- [ ] Commit message follows `feat(postgres): order pgoutput transaction records` once verified.
+- [x] Commit message follows `feat(postgres): order pgoutput transaction records` once verified.
 
 ## Notes & Discoveries
 
