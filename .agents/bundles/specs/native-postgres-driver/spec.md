@@ -43,8 +43,8 @@ chapters:
   - ch31-data-and-testing-okf-sync
   - ch32-ffi-okf-and-review-routing-sync
   - ch33-final-review-and-release-gate
-current_chapter: ch34-replication-session-pump
-current_task: null
+current_chapter: ch35-replication-supervision
+current_task: "native-postgres-driver:ch35:t01"
 parent_prd: native-data-platform
 depends_on_flows:
   - driver-fail-loud
@@ -54,11 +54,11 @@ research:
 plan_revision: 8
 plan_commit: d90d4625
 state_revision: 12
-last_verified_checkpoint: a1340034
-last_reviewed_chapter: ch23-replication-feedback-resume-and-bridge
-last_reviewed_commit: 4700ecbc
+last_verified_checkpoint: 6e4e6bfc
+last_reviewed_chapter: ch34-replication-session-pump
+last_reviewed_commit: 6e4e6bfc
 created_at: "2026-11-03T04:05:00Z"
-updated_at: "2026-11-12T20:10:51.550371+00:00"
+updated_at: "2026-11-12T21:09:21.836151+00:00"
 generated:
   by: flow-revise
   at: "2026-11-12T01:30:00Z"
@@ -489,13 +489,13 @@ Every worksheet (`129` total across `36` chapters) executes in one bounded invoc
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Work**: All four ch34 tasks are complete through `a1340034`; 49 canonical wire tests, Clippy and package formatting pass. Independent correctness and fresh quality reviews remain open from base `f58aa695`.
-- **Progress**: `23/36` chapters are reviewed; ch34 awaits review. `88/129` tasks are complete, with `41` tasks across `12` subsequent chapters remaining. The active chapter is `ch34-replication-session-pump`, with no uncompleted task in that chapter.
+- **Verified Work**: All four ch34 tasks are complete through `a1340034`; 49 canonical wire tests, Clippy and package formatting pass. Correctness and fresh quality reviews approve `f58aa695..6e4e6bfc` with no open findings.
+- **Progress**: `24/36` chapters are reviewed through ch34. `88/129` tasks are complete, with `41` tasks across `12` subsequent chapters remaining. The active chapter is `ch35-replication-supervision`, beginning with `ch35:t01`.
 - **Git Continuity**: Completed chapter attestations through ch23 remain intact, including reviewed checkpoint `4700ecbc`. The revision-8 plan anchor is `d90d4625`; final flow review uses base `c8722c76`.
 - **Runtime Boundary**: Native decoding, feedback and single-generation session pumping are available. Reconnect supervision and Python replication handles remain ch35–ch36; public Python drivers retain psycopg and asyncio.to_thread until ch27.
 - **Documentation**: Chapter 34 coverage is `[2/2]`; interim full-plan coverage is `[4/33]`. Final user guides and remaining OKF synchronization belong to ch30–ch32.
 - **Remaining Plan**: ch35 verified supervision; ch36 Python bridge; ch24 change sources/checkpoints; ch25–ch27 native drivers/cutover; ch28 live conformance; ch29 wheels/benchmarks; ch30–ch32 docs/OKF; ch33 final verification.
-- **Next Action**: Complete correctness and fresh quality review, stamp ch34, then `/flow:implement native-postgres-driver ch35`. Draft [PR #118](https://github.com/cofin/vertebra/pull/118) contains the published working branch snapshot; subsequent commits require a push to update it.
+- **Next Action**: `/flow:implement native-postgres-driver ch35`. Draft [PR #118](https://github.com/cofin/vertebra/pull/118) contains the published working branch snapshot; subsequent commits require a push to update it.
 
 [^pg-conn-rs]: `src/rs/vertebra-db/src/connection.rs::TransportStream` — Shared TCP, Unix, TLS, and cloud mTLS stream primitives.
 [^pg-core-rs]: `src/rs/vertebra-db/src/postgres/mod.rs::encode_query_frame` — Shared stateless PostgreSQL wire frame and codec helpers in `vertebra-db`.

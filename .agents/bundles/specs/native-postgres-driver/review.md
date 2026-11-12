@@ -38,7 +38,7 @@ tags:
 # Planning review
 
 <!-- truth: start -->
-- Revision 8 is approved and anchored to reviewed plan commit `d90d4625`. The roadmap has `36` chapters and `129` tasks, with `23` reviewed chapters and `88` completed tasks; chapter 34 awaits review [^pg-core-rs].
+- Revision 8 is approved and anchored to reviewed plan commit `d90d4625`. The roadmap has `36` chapters and `129` tasks, with `24` reviewed chapters and `88` completed tasks; chapter 35 is next [^pg-core-rs].
 - Replication execution order is `ch23` feedback, `ch34` bounded session, `ch35` verified supervision, `ch36` Python bridge, then `ch24` checkpoint sources. The public Python drivers retain their legacy implementation until `ch27` [^pg-driver-py].
 - Planning validation proves blueprint consistency; live services, wheels, benchmarks, and final release acceptance remain downstream gates [^fail-loud-baseline].
 <!-- truth: end -->
@@ -87,11 +87,11 @@ Correctness review finds no production defects. The chapter has strict wire code
 
 Independent chapter blueprint reviews pass after adopted test-matrix, publication-order, cancellation, EOF-classification, and ownership fixes. Deterministic worksheet bounds/count checks, review-check, whitespace checks, and the Flow stop gate pass. The final independent cross-chapter reread passes with zero remaining Critical or Important findings. No runtime
 implementation or acceptance is claimed by this planning revision. User approval stamps
-`status: stable` and `plan_commit: d90d4625`; the active chapter is ch34, awaiting correctness and fresh quality review.
+`status: stable` and `plan_commit: d90d4625`; the active chapter is ch35, ready for implementation.
 
 ## Chapter 34 implementation review
 
-All four tasks are complete through `a1340034`. The checkpoint passes 49 canonical wire tests, Clippy and package formatting. Coverage includes independent heartbeats, bounded coalesced ingestion, cancellation-safe publication leases, exact Commit acknowledgement, backend drain and terminal cleanup. Both chapter knowledge files are synchronized (`[2/2]`). Streaming and shutdown-drain reads share partial-frame mapping: truncated backend frames produce terminal Protocol errors. The real-peer regression passes with 49 total canonical tests. Correctness review approves `f58aa695..49cb287a` with no open findings. Fresh quality review and chapter approval remain open; no release acceptance is claimed.
+All four tasks are complete through `a1340034`. The checkpoint passes 49 canonical wire tests, Clippy and package formatting. Coverage includes independent heartbeats, bounded coalesced ingestion, cancellation-safe publication leases, exact Commit acknowledgement, backend drain and terminal cleanup. Both chapter knowledge files are synchronized (`[2/2]`). Streaming and shutdown-drain reads share partial-frame mapping: truncated backend frames produce terminal Protocol errors. The real-peer regression passes with 49 total canonical tests. Correctness review approves `f58aa695..49cb287a` with no open findings. Fresh quality review also approves `f58aa695..6e4e6bfc` with no open findings. Chapter 34 is complete; live, wheel and release acceptance remain open.
 
 [^pg-core-rs]: `src/rs/vertebra-db/src/postgres/mod.rs::encode_query_frame` — Shared PostgreSQL wire frame helpers in `vertebra-db`.
 [^fail-loud-baseline]: `.agents/bundles/knowledge/domains/data/database-drivers-and-dialers.md` — Upstream flow that deletes PostgreSQL `memory://` paths and `vertebra_db::postgres::PostgresPool`.

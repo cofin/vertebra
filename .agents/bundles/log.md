@@ -705,3 +705,7 @@ All 5 chapters and 15 tasks are complete; correctness and fresh quality reviews 
 ## Chapter 34 drain-frame review repair
 
 - Adopted the correctness finding that truncated shutdown-drain frames require Protocol rather than Transport classification. Commit `caa4a0fb` passes 49 canonical tests, Clippy, package formatting and diff checks; Red reproduces the original wrong category.
+
+## [2026-11-12T21:09:21.836151+00:00] chapter-closeout | PostgreSQL session
+
+- Correctness and fresh quality reviews approve `f58aa695..6e4e6bfc`; chapter 34 is completed at reviewed checkpoint `6e4e6bfc`. All 49 canonical wire tests and focused native checks pass. The next chapter is ch35; 41 tasks across 12 chapters remain.
