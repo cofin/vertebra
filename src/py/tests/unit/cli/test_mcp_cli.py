@@ -1,15 +1,22 @@
 """Unit tests for the vtb ai mcp bridge CLI and MCP JSON-RPC observability extraction."""
 
 import io
+from collections.abc import AsyncIterator
 from typing import Any
 
+import pytest
 from click.testing import CliRunner
 
+from vertebra.agent.core.context import AgentContext, CallerIdentity
+from vertebra.agent.core.schema import tool
+from vertebra.agent.mcp.service import MCPService
+from vertebra.agent.mcp.stdio import run_stdio_server
 from vertebra.cli.ai import (
     extract_mcp_headers_from_jsonrpc,
     mcp,
     run_mcp_stdio_bridge,
 )
+from vertebra.utils.serializers import decode_json, encode_json_bytes
 
 
 def test_extract_mcp_headers_from_jsonrpc() -> None:
@@ -168,3 +175,45 @@ def test_run_mcp_stdio_bridge_max_message_bytes_enforcement() -> None:
     assert not transport_called
     output = stdout_buf.getvalue()
     assert "-32600" in output
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("explicit", [False, True])
+async def test_mcp_stdio_context_session(explicit: bool) -> None:
+    """A stdio session reuses one caller context for every dispatched frame."""
+    service = MCPService()
+    seen: list[AgentContext] = []
+
+    @tool(name="whoami")
+    def whoami() -> str:
+        context = AgentContext.current()
+        assert context is not None
+        seen.append(context)
+        return str(context.identity.user_id) if explicit else str(context.session_id)
+
+    service.registry.register_tool(whoami)
+    context = AgentContext(identity=CallerIdentity(user_id="cli"))
+
+    async def stdin() -> AsyncIterator[bytes]:
+        for request_id in (1, 2):
+            yield encode_json_bytes(
+                {"jsonrpc": "2.0", "id": request_id, "method": "tools/call", "params": {"name": "whoami"}}
+            )
+
+    output: list[bytes] = []
+
+    async def stdout(raw: bytes) -> None:
+        output.append(raw)
+
+    if explicit:
+        result = await run_stdio_server(service, stdin=stdin(), stdout=stdout, context=context)
+    else:
+        result = await run_stdio_server(service, stdin=stdin(), stdout=stdout)
+    assert result == 0
+    assert len(seen) == 2
+    assert seen[0] is seen[1]
+    if explicit:
+        assert seen[0] is context
+    values = [decode_json(raw)["result"]["content"][0]["text"] for raw in output]
+    assert values[0] == values[1]
+    assert values[0] == "cli" if explicit else values[0].startswith("stdio-")

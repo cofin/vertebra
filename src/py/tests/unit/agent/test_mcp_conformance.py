@@ -10,6 +10,7 @@ from typing import Any
 import anyio
 import pytest
 from flask import Flask
+from litestar.testing import create_test_client
 from starlette.requests import Request as StarletteRequest
 
 from vertebra._vertebra import Request as NativeRequest
@@ -993,6 +994,17 @@ async def test_mcp_task_cancel_stops_execution() -> None:
     )
     assert denied is not None and "error" in decode_json(denied)
     assert not contexts[0].cancellation_token.is_cancelled
+    for method in ("tasks/get", "tasks/update", "tasks/cancel"):
+        anonymous = await core.handle_payload(
+            encode_json_bytes({"jsonrpc": "2.0", "id": 4, "method": method, "params": {"taskId": task_id}})
+        )
+        assert anonymous is not None
+        assert decode_json(anonymous)["error"]["code"] == -32602
+        assert not contexts[0].cancellation_token.is_cancelled
+        assert not task_handles[0].done()
+    anonymous_list = await core.handle_payload(encode_json_bytes({"jsonrpc": "2.0", "id": 5, "method": "tasks/list"}))
+    assert anonymous_list is not None
+    assert decode_json(anonymous_list)["result"]["tasks"] == []
     cancelled = await core.handle_payload(
         encode_json_bytes({"jsonrpc": "2.0", "id": 3, "method": "tasks/cancel", "params": {"taskId": task_id}}),
         context=owner,
@@ -1219,3 +1231,74 @@ def test_mcp_native_request_adapter_propagates_explicit_identity() -> None:
     request = NativeRequest.from_parts("POST", "/mcp", body=body, headers=[("x-user", "ana")])
     response = WsgiMcpApp(core).handle_vertebra_request(request)
     assert decode_json(bytes(response.body))["result"]["content"][0]["text"] == "ana"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("trusted", [False, True])
+async def test_native_plugin_context_and_delete_route(trusted: bool) -> None:
+    """Native plugin endpoints honor explicit identity policies and register DELETE."""
+    source = CallableIdentitySource(resolver=lambda request: CallerIdentity(email=request.headers.get("x-test-email")))
+    config = MCPConfig(trust_proxy_identity=trusted, identity_source=source if trusted else None)
+    plugin = AgentPlugin(AgentPluginConfig(mcp=config))
+
+    @tool(name="whoami")
+    def whoami(context: AgentContext) -> str:
+        return str(context.identity.email)
+
+    plugin.mcp_registry.register_tool(whoami)
+    app = App()
+    plugin.mount_native(app)
+    routes = {(route.method.upper(), route.path): route.handler for route in app.routes}
+    assert ("DELETE", "/mcp") in routes
+    headers = {"x-test-email": "ana@example.com", "x-goog-authenticated-user-email": "ana@example.com"}
+    header_obj = SimpleNamespace(as_dict=lambda: headers) if trusted else headers
+    status, _, raw = await routes[("POST", "/mcp")](
+        body=encode_json_bytes({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "whoami"}}),
+        headers=header_obj,
+    )
+    assert status == 200
+    assert decode_json(raw)["result"]["content"][0]["text"] == ("ana@example.com" if trusted else "None")
+    delete_status, _, _ = await routes[("DELETE", "/mcp")](headers={})
+    assert delete_status == 405
+
+
+def test_litestar_fallback_preserves_core_responses_and_context() -> None:
+    """Fallback requests retain core status, headers, and configured caller identity."""
+    source = CallableIdentitySource(resolver=lambda request: CallerIdentity(user_id=request.headers.get("x-user")))
+    plugin = AgentPlugin(AgentPluginConfig(mcp=MCPConfig(trust_proxy_identity=True, identity_source=source)))
+
+    @tool(name="whoami")
+    def whoami(context: AgentContext) -> str:
+        return str(context.identity.user_id)
+
+    plugin.mcp_registry.register_tool(whoami)
+    with create_test_client(route_handlers=[], plugins=[plugin]) as client:
+        notified = client.post("/mcp", content=b'{"jsonrpc":"2.0","method":"notifications/initialized"}')
+        assert notified.status_code == 202
+        assert notified.content == b""
+        forbidden = client.post("/mcp", content=b"{}", headers={"Origin": "https://evil.example.com"})
+        assert forbidden.status_code == 403
+        listed = client.post(
+            "/mcp",
+            content=b'{"jsonrpc":"2.0","id":1,"method":"tools/list"}',
+            headers={"MCP-Protocol-Version": "2026-07-28"},
+        )
+        assert listed.status_code == 200
+        assert listed.headers["mcp-protocol-version"] == "2026-07-28"
+        cached = client.post(
+            "/mcp",
+            content=b'{"jsonrpc":"2.0","id":1,"method":"tools/list"}',
+            headers={"If-None-Match": listed.headers["etag"]},
+        )
+        assert cached.status_code == 304
+        assert cached.content == b""
+        called = client.post(
+            "/mcp",
+            content=b'{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"whoami"}}',
+            headers={"x-user": "ana"},
+        )
+        assert called.json()["result"]["content"][0]["text"] == "ana"
+        for method in (client.get, client.delete):
+            refused = method("/mcp")
+            assert refused.status_code == 405
+            assert refused.headers["allow"] == "POST, OPTIONS"

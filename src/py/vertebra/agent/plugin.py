@@ -5,12 +5,13 @@ A2A 1.0, AgentChatController, and .well-known discovery manifests on both native
 vertebra.framework.App and Litestar applications with automatic opt-attribute handler discovery.
 """
 
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import msgspec
 
 from vertebra.agent.a2a.service import A2AConfig, A2AService
 from vertebra.agent.controller import AgentChatController
+from vertebra.agent.core.context import AgentContext
 from vertebra.agent.mcp.controllers import PromptController, SkillController
 from vertebra.agent.mcp.models import MCPConfig, McpHttpRequest
 from vertebra.agent.mcp.registry import MCPRegistry
@@ -22,6 +23,10 @@ from vertebra.agent.telemetry import AgentTelemetryRecorder
 from vertebra.framework._app import App
 from vertebra.utils.module_loader import import_optional
 from vertebra.utils.serializers import decode_json
+
+if TYPE_CHECKING:
+    from litestar import Request as LitestarRequest
+    from litestar import Response as LitestarResponse
 
 __all__ = [
     "AgentPlugin",
@@ -105,28 +110,47 @@ class AgentPlugin:
             @app.post(srv.config.path)
             async def _mcp_endpoint(
                 body: bytes = b"",
-                headers: dict[str, str] | None = None,
+                headers: Any = None,
             ) -> tuple[int, dict[str, str], bytes]:
+                header_map = self._header_dict(headers)
                 mcp_resp = await srv.handle(
                     McpHttpRequest(
                         method="POST",
                         path=srv.config.path,
-                        headers=headers or {},
+                        headers=header_map,
                         body=body,
+                        context=AgentContext.from_headers(header_map, identity_source=srv.config.identity_source),
                     )
                 )
                 return mcp_resp.status, mcp_resp.headers, mcp_resp.body
 
             @app.get(srv.config.path)
             async def _mcp_get_endpoint(
-                headers: dict[str, str] | None = None,
+                body: bytes = b"",
+                headers: Any = None,
             ) -> tuple[int, dict[str, str], bytes]:
+                header_map = self._header_dict(headers)
                 mcp_resp = await srv.handle(
                     McpHttpRequest(
                         method="GET",
                         path=srv.config.path,
-                        headers=headers or {},
-                        body=b"",
+                        headers=header_map,
+                        body=body,
+                        context=AgentContext.from_headers(header_map, identity_source=srv.config.identity_source),
+                    )
+                )
+                return mcp_resp.status, mcp_resp.headers, mcp_resp.body
+
+            @app.delete(srv.config.path)
+            async def _mcp_delete_endpoint(body: bytes = b"", headers: Any = None) -> tuple[int, dict[str, str], bytes]:
+                header_map = self._header_dict(headers)
+                mcp_resp = await srv.handle(
+                    McpHttpRequest(
+                        method="DELETE",
+                        path=srv.config.path,
+                        headers=header_map,
+                        body=body,
+                        context=AgentContext.from_headers(header_map, identity_source=srv.config.identity_source),
                     )
                 )
                 return mcp_resp.status, mcp_resp.headers, mcp_resp.body
@@ -214,6 +238,13 @@ class AgentPlugin:
 
         return app_config
 
+    @staticmethod
+    def _header_dict(headers: Any) -> dict[str, str]:
+        """Normalize native header views and ordinary header mappings."""
+        if headers is None:
+            return {}
+        return dict(headers.as_dict()) if hasattr(headers, "as_dict") else dict(headers)
+
     def _discover_handlers(self, handlers: list[Any]) -> None:
         """Walk route handler hierarchy and register annotated tools, resources, and prompts."""
         for item in handlers:
@@ -291,18 +322,39 @@ class AgentPlugin:
 
             if not has_litestar_mcp and not self._has_route_path(route_handlers, srv.config.path):
 
-                async def _litestar_mcp_endpoint(body: bytes) -> dict[str, Any]:
+                async def _litestar_mcp_endpoint(
+                    request: "LitestarRequest[Any, Any, Any]",
+                ) -> "LitestarResponse[bytes]":
                     mcp_resp = await srv.handle(
                         McpHttpRequest(
-                            method="POST",
+                            method=request.method,
                             path=srv.config.path,
-                            headers={},
-                            body=body,
+                            headers=dict(request.headers),
+                            body=await request.body(),
+                            context=AgentContext.from_scope(request.scope, identity_source=srv.config.identity_source),
                         )
                     )
-                    return cast(dict[str, Any], decode_json(mcp_resp.body) if mcp_resp.body else {})
+                    return cast(
+                        "LitestarResponse[bytes]",
+                        litestar_mod.Response(
+                            content=mcp_resp.body,
+                            status_code=mcp_resp.status,
+                            headers=mcp_resp.headers,
+                            media_type=mcp_resp.headers.get("Content-Type", "application/json"),
+                        ),
+                    )
 
-                route_handlers.append(post_fn(srv.config.path, include_in_schema=False)(_litestar_mcp_endpoint))
+                route_handlers.append(
+                    litestar_mod.route(
+                        srv.config.path,
+                        http_method=["POST", "GET", "DELETE"],
+                        include_in_schema=False,
+                        signature_namespace={
+                            "LitestarRequest": litestar_mod.Request,
+                            "LitestarResponse": litestar_mod.Response,
+                        },
+                    )(_litestar_mcp_endpoint)
+                )
 
             if (
                 srv.config.webmcp is not None

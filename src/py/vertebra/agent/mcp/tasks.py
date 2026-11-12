@@ -6,6 +6,7 @@ with owner isolation, TTL expiry, and background queue lane integration.
 
 import secrets
 from datetime import UTC, datetime
+from enum import Enum
 from typing import Any, Literal
 
 import anyio
@@ -17,6 +18,10 @@ from vertebra.agent.telemetry import AgentTelemetryRecorder
 from vertebra.utils.serializers import encode_json_bytes
 
 MCPTaskStatus = Literal["working", "input_required", "completed", "failed", "cancelled"]
+
+
+class _OwnerLookup(Enum):
+    UNSCOPED = "unscoped"
 
 
 class TaskLookupError(Exception):
@@ -149,12 +154,12 @@ class MCPTaskStore:
         self._emit_status(task)
         return task
 
-    def get(self, task_id: str, owner_id: str | None = None) -> TaskRecord:
+    def get(self, task_id: str, owner_id: str | None | _OwnerLookup = _OwnerLookup.UNSCOPED) -> TaskRecord:
         """Retrieve a task record enforcing owner isolation."""
         task = self._tasks.get(task_id)
         if task is None:
             raise TaskLookupError(f"Task '{task_id}' not found")
-        if owner_id is not None and task.owner_id is not None and task.owner_id != owner_id:
+        if owner_id is not _OwnerLookup.UNSCOPED and task.owner_id != owner_id:
             raise TaskLookupError(f"Task '{task_id}' not found")
         return task
 
@@ -167,7 +172,7 @@ class MCPTaskStore:
         """List tasks matching owner_id using cursor pagination."""
         matched: list[TaskRecord] = []
         for t in self._tasks.values():
-            if owner_id is None or t.owner_id == owner_id:
+            if t.owner_id == owner_id:
                 matched.append(t)
         matched.sort(key=lambda t: t.created_at_iso, reverse=True)
         page = paginate_sequence(matched, cursor=cursor, page_size=limit)

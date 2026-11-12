@@ -5,7 +5,7 @@ chapter_id: ch01-agent-context-propagation
 title: Pass contexts from native, Litestar fallback, and stdio entry points
 description: Build AgentContext values in AgentPlugin native endpoints and the Litestar fallback endpoint, make the fallback return litestar.Response with core status and headers, mount GET and DELETE alongside POST, and give run_stdio_server one session context.
 status: draft
-state: pending
+state: in_progress
 priority: P0
 verification_strategy: regression_tdd
 depends_on:
@@ -31,9 +31,9 @@ claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
+last_verified_at: "2026-11-12T03:51:23Z"
 last_verified_commit: null
-verification_evidence: null
+verification_evidence: "Red: five native/Litestar/stdio regressions and anonymous task-owner bypass; Green: 55 conformance/CLI tests, Ruff and Mypy, independent full chapter suite 86 passed."
 created_at: "2026-11-12T00:30:00Z"
 updated_at: "2026-11-12T00:30:00Z"
 commit: null
@@ -105,11 +105,13 @@ Close the remaining context gaps: native `App` endpoints, the Litestar fallback 
 
 ## Acceptance Criteria
 
-- [ ] R3.2: native, Litestar fallback, and stdio entry points pass contexts.
-- [ ] The Litestar fallback preserves core status codes and headers and mounts `POST`, `GET`, and `DELETE`.
-- [ ] Existing native route test keeps passing with the added `DELETE` route.
+- [x] R3.2: native, Litestar fallback, and stdio entry points pass contexts.
+- [x] The Litestar fallback preserves core status codes and headers and mounts `POST`, `GET`, and `DELETE`.
+- [x] Existing native route test keeps passing with the added `DELETE` route.
 
 ## Notes & Discoveries
+
+- Correctness review reproduces anonymous access to owner-bound tasks. An internal lookup sentinel distinguishes omitted trusted lookups from explicit anonymous owner_id=None; public get/update/cancel/list now preserve owner isolation.
 
 - [2026-11-12 00:30] Native `App` exposes `get`, `post`, `put`, `delete`, and `patch` decorators but no `options`; `OPTIONS /mcp` on native apps is answered by the ingress layer, not by this mount.
 
