@@ -489,7 +489,7 @@ Every worksheet (`129` total across `36` chapters) executes in one bounded invoc
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Work**: All four ch34 tasks are complete through `a1340034`; 48 canonical wire tests, Clippy and package formatting pass. Independent correctness and fresh quality reviews remain open from base `f58aa695`.
+- **Verified Work**: All four ch34 tasks are complete through `a1340034`; 49 canonical wire tests, Clippy and package formatting pass. Independent correctness and fresh quality reviews remain open from base `f58aa695`.
 - **Progress**: `23/36` chapters are reviewed; ch34 awaits review. `88/129` tasks are complete, with `41` tasks across `12` subsequent chapters remaining. The active chapter is `ch34-replication-session-pump`, with no uncompleted task in that chapter.
 - **Git Continuity**: Completed chapter attestations through ch23 remain intact, including reviewed checkpoint `4700ecbc`. The revision-8 plan anchor is `d90d4625`; final flow review uses base `c8722c76`.
 - **Runtime Boundary**: Native decoding, feedback and single-generation session pumping are available. Reconnect supervision and Python replication handles remain ch35–ch36; public Python drivers retain psycopg and asyncio.to_thread until ch27.

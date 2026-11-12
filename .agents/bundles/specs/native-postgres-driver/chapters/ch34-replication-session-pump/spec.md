@@ -169,7 +169,7 @@ All commands exit0 before present-tense documentation sync, zero-context correct
 ## 6. Current State & Remaining Plan Snapshot
 
 - All four tasks are complete at `f520aa6d`, `d99caddf`, `9d4c4258` and `a1340034`; the chapter awaits independent correctness and fresh quality review from base `f58aa695`.
-- The recovery checkpoint passes 48 canonical wire tests, Clippy and package formatting. The tests cover start fences, bounded/coalesced decoding, Commit publication, cancellation retention, heartbeat liveness and graceful/terminal shutdown.
+- The recovery checkpoint passes 49 canonical wire tests, Clippy and package formatting. The tests cover start fences, bounded/coalesced decoding, Commit publication, cancellation retention, heartbeat liveness and graceful/terminal shutdown.
 - `cancel` and explicit `shutdown` fence external leases and discard session-owned queued records. Natural clean CopyDone closes transport while allowing already decoded records to drain and publish. [^stream]
 - Documentation coverage is `[2/2]`; native public Python driver cutover remains ch27. Reconnect supervision (ch35), Python handles (ch36), checkpoints (ch24), and ch25–ch33 remain open: 41 tasks in 12 subsequent chapters.
 - Next: approve the chapter through independent correctness and fresh quality review, stamp the reviewed commit, then execute ch35 in dependency order.
