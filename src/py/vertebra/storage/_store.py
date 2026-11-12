@@ -1720,12 +1720,9 @@ class SyncObjectStore(_BaseObjectStore):
         )
         return [self._native_to_put_result(meta, f"{int(meta.size):016x}") for meta in native_metas]
 
-    def put_multipart(self, path: str, parts: Sequence[Buffer]) -> PutResult:
-        """Concatenate and upload multiple buffer parts atomically."""
-        key = self._key(path)
-        native = self._require_native()
-        native_meta = native.put_multipart(key, [self._native_payload(part) for part in parts])
-        return self._native_to_put_result(native_meta, f"{int(native_meta.size):016x}")
+    def put_multipart(self, path: str, parts: Iterable[Buffer]) -> PutResult:
+        """Upload `parts` in order as one object through the incremental multipart path."""
+        return self.put_stream(path, parts)
 
     def compose(self, sources: Sequence[str], dst: str, *, content_type: str | None = None) -> PutResult:
         """Concatenate `sources` in order into `dst` through the backend's native compose path.
@@ -2208,12 +2205,9 @@ class AsyncObjectStore(_BaseObjectStore):
         )
         return [self._native_to_put_result(meta, f"{int(meta.size):016x}") for meta in native_metas]
 
-    async def put_multipart(self, path: str, parts: Sequence[Buffer]) -> PutResult:
-        """Asynchronously upload multiple buffer parts atomically."""
-        key = self._key(path)
-        native = self._require_native()
-        native_meta = await native.put_multipart(key, [self._native_payload(part) for part in parts])
-        return self._native_to_put_result(native_meta, f"{int(native_meta.size):016x}")
+    async def put_multipart(self, path: str, parts: Iterable[Buffer]) -> PutResult:
+        """Upload `parts` in order as one object through the incremental multipart path."""
+        return await self.put_stream(path, parts)
 
     async def compose(self, sources: Sequence[str], dst: str, *, content_type: str | None = None) -> PutResult:
         """Asynchronously concatenate `sources` in order into `dst` through the backend's native compose path.

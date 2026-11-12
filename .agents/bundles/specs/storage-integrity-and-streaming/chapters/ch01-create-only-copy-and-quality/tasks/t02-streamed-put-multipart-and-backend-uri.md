@@ -4,10 +4,10 @@ id: "storage-integrity-and-streaming:ch01:t02"
 chapter_id: ch01-create-only-copy-and-quality
 title: Stream put_multipart and remove the backend URI sentinel
 description: Reimplement SyncObjectStore.put_multipart and AsyncObjectStore.put_multipart on put_stream so parts are not materialized into a list, and drop the literal memory:// sentinel from ObjectStoreBackend.__init__.
-status: draft
-state: pending
+status: stable
+state: in_progress
 priority: P2
-verification_strategy: tdd
+verification_strategy: regression_tdd
 depends_on: []
 read_set:
   - src/py/vertebra/storage/_store.py
@@ -18,23 +18,25 @@ files:
   - src/py/vertebra/storage/_store.py
   - src/py/vertebra/extensions/sqlspec/storage.py
   - src/py/tests/unit/storage/test_storage_store.py
+  - src/py/tests/unit/extensions/test_data_storage_integrations.py
 tests:
   - src/py/tests/unit/storage/test_storage_store.py::test_put_multipart_streams_parts
-  - src/py/tests/unit/storage/test_storage_store.py::test_sqlspec_backend_store_uri_resolution
+  - src/py/tests/unit/storage/test_storage_store.py::test_put_multipart_empty_and_failed_iterables
+  - src/py/tests/unit/extensions/test_data_storage_integrations.py::test_sqlspec_backend_store_uri_resolution
 estimated_loc: 90
-plan_revision: 1
-plan_commit: null
+plan_revision: 2
+plan_commit: c368cb00
 state_revision: 0
-claimed_by: null
-claimed_at: null
+claimed_by: agent:multipart-executor
+claimed_at: "2026-11-12T02:24:00Z"
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
+last_verified_at: "2026-11-12T02:58:52Z"
 last_verified_commit: null
-verification_evidence: null
+verification_evidence: "Red: reused mutable chunks fail sync/async and explicit memory URI fails (3 failures). Green: canonical storage/integration modules 434 passed, 1 existing skip; post-restore focused regressions 8 passed; Ruff check/format and focused Mypy exit 0."
 created_at: "2026-11-12T01:30:00Z"
-updated_at: "2026-11-12T01:30:00Z"
+updated_at: "2026-11-12T02:58:52Z"
 commit: null
 sources:
   - id: py-store
@@ -81,10 +83,10 @@ Out of scope: native `put_multipart` removal (Rust ABI), checksum options (ch02)
 
 | Case | Concrete Input | Expected Output / Error |
 | --- | --- | --- |
-| Generator parts | `store.put_multipart("k", (bytes([i]) * 4 for i in range(3)))` on `memory://` | `get("k") == b"\x00"*4 + b"\x01"*4 + b"\x02"*4` |
+| Reused mutable parts | one `bytearray` overwritten with `b"aaaa"`, `b"bbbb"`, `b"cccc"` between yields | `get("parts") == b"aaaabbbbcccc"` |
 | Generator raises mid-stream | generator yields `b"a"` then raises `RuntimeError("boom")` | `RuntimeError("boom")`; `exists("k2") is False` |
 | Async parity | `await AsyncObjectStore("memory://").put_multipart("k", [b"x", b"y"])` | `get == b"xy"` |
-| Backend explicit memory uri | `ObjectStoreBackend("memory://", store=SyncObjectStore("memory://"))` | `store_uri == "memory://"` |
+| Backend explicit memory uri | `ObjectStoreBackend("memory://", store=SyncObjectStore.from_local(tmp_path))` | `store_uri == "memory://"` |
 | Backend no uri | `ObjectStoreBackend(store=SyncObjectStore("memory://"))` | `store_uri == "memory://"`, `protocol == "memory"` |
 
 ## Verification
@@ -94,10 +96,12 @@ Out of scope: native `put_multipart` removal (Rust ABI), checksum options (ch02)
 
 ## Acceptance Criteria
 
-- [ ] `put_multipart` streams without building a list of every part (R2).
-- [ ] No literal `"memory://"` comparison remains in `ObjectStoreBackend` (R2).
+- [x] `put_multipart` streams without building a list of every part (R2).
+- [x] No literal `"memory://"` comparison remains in `ObjectStoreBackend` (R2).
 
 ## Notes & Discoveries
+
+- [2026-11-12 02:58] Real native storage tests prove the producer may reuse one mutable buffer between yields. Both sync and async preserve each yielded value; iterable failure preserves an existing object and leaves absent keys unpublished. Storage extension rebuilding resolves the stale constructor signature before behavioral validation.
 
 - [2026-11-12 01:30] Existing integration tests construct backends with `"memory://"` URIs; they keep passing because explicit URIs now always win.
 

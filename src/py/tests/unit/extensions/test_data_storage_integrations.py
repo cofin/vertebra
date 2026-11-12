@@ -663,6 +663,17 @@ def test_sqlspec_explicit_store_precedes_empty_uri(tmp_path: Path, uri: str | No
     assert backend.resolve_uri("object.bin") == str(tmp_path / "tenant-a" / "object.bin")
 
 
+@pytest.mark.parametrize("uri", ["memory://", "s3://logical-bucket"])
+def test_sqlspec_backend_store_uri_resolution(tmp_path: Path, uri: str) -> None:
+    """Explicit URI metadata applies to a prebuilt store, including a memory URI."""
+    store = SyncObjectStore.from_local(tmp_path)
+    backend = SQLSpecObjectStoreBackend(uri, store=store)
+    assert backend.store_uri == uri
+    assert backend.protocol == uri.split(":", 1)[0]
+    backend.write_bytes_sync("object.bin", b"value")
+    assert store.get("object.bin") == b"value"
+
+
 @pytest.mark.anyio
 @pytest.mark.parametrize("async_store", [False, True])
 async def test_sqlspec_shared_store_conditional_writes_and_rename(tmp_path: Path, async_store: bool) -> None:
