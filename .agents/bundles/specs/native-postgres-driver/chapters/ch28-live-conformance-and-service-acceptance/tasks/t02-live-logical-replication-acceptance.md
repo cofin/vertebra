@@ -4,7 +4,7 @@ id: "native-postgres-driver:ch28:t02"
 chapter_id: ch28-live-conformance-and-service-acceptance
 title: Verify live PG14-18 pgoutput logical replication, durable checkpoints, and slot cleanup
 description: Add VERTEBRA_CONFORMANCE_DOCKER-gated wal_level=logical PostgreSQL 14-18 Docker fixtures in integration/conftest.py and prove parameterized live PostgresChangeSource streaming, durable checkpoint CAS before LSN feedback, reconnect replay, backpressure, and slot teardown.
-status: draft
+status: stable
 state: pending
 priority: P1
 verification_strategy: behavior_tdd
@@ -22,7 +22,7 @@ tests:
   - src/py/tests/integration/db/test_postgres_replication.py
 estimated_loc: 240
 plan_revision: 8
-plan_commit: 5eb75b2a
+plan_commit: d90d4625
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -33,7 +33,7 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-12T01:30:00Z"
+updated_at: "2026-11-12T04:25:15Z"
 commit: null
 generated:
   by: flow-revise

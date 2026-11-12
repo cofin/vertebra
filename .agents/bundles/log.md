@@ -1,5 +1,9 @@
 # Bundle Activity Log
 
+## [2026-11-12T04:25:15Z] revise-approved | Native PostgreSQL revision 8
+
+- User approval anchors revision 8 to reviewed plan commit `d90d4625`. Revised specifications and worksheets are stable; chapter 23 is ready for `/flow:implement native-postgres-driver ch23`. No production edits or hosted writes occur.
+
 ## [2026-11-12T04:16:55Z] revise-candidate | Native PostgreSQL replication seams
 
 - Revision 8 decomposes replication into ch23 feedback, ch34 single-generation sessions, ch35 verified supervision, and ch36 Python publication. The roadmap spans 36 chapters and 129 worksheets; 82 tasks are complete and 47 remain.

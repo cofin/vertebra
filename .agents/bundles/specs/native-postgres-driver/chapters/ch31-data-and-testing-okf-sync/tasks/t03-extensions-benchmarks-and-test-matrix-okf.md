@@ -4,7 +4,7 @@ id: "native-postgres-driver:ch31:t03"
 chapter_id: ch31-data-and-testing-okf-sync
 title: Synchronize SQLSpec/SQLAlchemy dialects, benchmarks/free-threaded, and polyglot test matrix OKF chapters
 description: Update sqlspec-alchemy-and-dialects.md, benchmarks-and-free-threaded.md, and trimmed polyglot-test-matrix.md (243L -> <= 200L) for unified $n/numeric_dollar compilation, _postgres in the gil_used = false extension enumeration, [dependency-groups].postgres-bench, and zero-skip make postgres-test gates.
-status: draft
+status: stable
 state: pending
 priority: P1
 verification_strategy: documentation_validation
@@ -24,7 +24,7 @@ files:
 tests: []
 estimated_loc: 215
 plan_revision: 8
-plan_commit: 5eb75b2a
+plan_commit: d90d4625
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -35,7 +35,7 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: "2026-11-10T14:45:00Z"
-updated_at: "2026-11-12T01:30:00Z"
+updated_at: "2026-11-12T04:25:15Z"
 commit: null
 generated:
   by: flow-revise

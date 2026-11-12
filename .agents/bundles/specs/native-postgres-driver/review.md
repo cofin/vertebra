@@ -3,12 +3,12 @@ type: Review
 flow_id: native-postgres-driver
 title: Native PostgreSQL planning review
 description: Adjudication and validation of the 36-chapter complete-driver plan and revision 8 replication seams.
-status: draft
+status: stable
 state: active
 plan_revision: 8
-plan_commit: 5eb75b2a
+plan_commit: d90d4625
 created_at: "2026-11-05T00:00:00Z"
-updated_at: "2026-11-12T01:30:00Z"
+updated_at: "2026-11-12T04:25:15Z"
 generated:
   by: flow-revise
   at: "2026-11-12T01:30:00Z"
@@ -38,7 +38,7 @@ tags:
 # Planning review
 
 <!-- truth: start -->
-- Revision 8 is a draft blueprint at baseline `5eb75b2a`; approval remains pending. The roadmap has `36` chapters and `129` tasks, with `22` reviewed chapters and `82` completed tasks [^pg-core-rs].
+- Revision 8 is approved and anchored to reviewed plan commit `d90d4625`. The roadmap has `36` chapters and `129` tasks, with `22` reviewed chapters and `82` completed tasks [^pg-core-rs].
 - Replication execution order is `ch23` feedback, `ch34` bounded session, `ch35` verified supervision, `ch36` Python bridge, then `ch24` checkpoint sources. The public Python drivers retain their legacy implementation until `ch27` [^pg-driver-py].
 - Planning validation proves blueprint consistency; live services, wheels, benchmarks, and final release acceptance remain downstream gates [^fail-loud-baseline].
 <!-- truth: end -->
@@ -48,7 +48,7 @@ worksheets at revision 8. Completed task and chapter attestations remain unchang
 
 ## Adjudication
 
-The contract decisions below are ADOPT. Revision 8 awaits fresh blueprint review and user approval.
+The contract decisions below are ADOPT. Revision 8 passes fresh blueprint reviews and has user approval.
 
 | Finding | Correction and verification contract |
 | --- | --- |
@@ -82,8 +82,8 @@ The contract decisions below are ADOPT. Revision 8 awaits fresh blueprint review
 | Resume classification | ADOPT | Frame-boundary transport loss is replayable; truncated frames, invalid clean EOF, and server `08P01` remain terminal. Initial feedback derives from the connection-owned successful START LSN. |
 
 Independent chapter blueprint reviews pass after adopted test-matrix, publication-order, cancellation, EOF-classification, and ownership fixes. Deterministic worksheet bounds/count checks, review-check, whitespace checks, and the Flow stop gate pass. The final independent cross-chapter reread passes with zero remaining Critical or Important findings. No runtime
-implementation or acceptance is claimed by this planning revision. Approval stamps
-`status: stable` and re-anchors `plan_commit` before `/flow:implement native-postgres-driver`.
+implementation or acceptance is claimed by this planning revision. User approval stamps
+`status: stable` and `plan_commit: d90d4625`; the next command is `/flow:implement native-postgres-driver ch23`.
 
 [^pg-core-rs]: `src/rs/vertebra-db/src/postgres/mod.rs::encode_query_frame` — Shared PostgreSQL wire frame helpers in `vertebra-db`.
 [^fail-loud-baseline]: `.agents/bundles/knowledge/domains/data/database-drivers-and-dialers.md` — Upstream flow that deletes PostgreSQL `memory://` paths and `vertebra_db::postgres::PostgresPool`.

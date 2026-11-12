@@ -3,7 +3,7 @@ type: Spec
 flow_id: native-postgres-driver
 title: Complete Standalone Native PostgreSQL Driver
 description: The standalone vertebra-postgres wheel (transport, authentication, typed queries, pools, pipelines, cancellation, COPY, Arrow, notifications, and CopyBoth/pgoutput relation decoding) is on main at c8722c76; local follow-up commits add pgoutput transaction envelopes and the limitations record; the remaining chapters finish replication feedback and change sources, build the permanent native Python drivers, cut every PostgreSQL consumer over atomically while deleting psycopg/asyncpg, prove PG14–18 conformance and wheel/benchmark gates, and synchronize documentation and OKF in a follow-up pull request.
-status: draft
+status: stable
 state: active
 has_chapters: true
 chapters:
@@ -52,13 +52,13 @@ research:
   - research/protocol-and-execution_20261105.md
   - research/cloud-material_20261105.md
 plan_revision: 8
-plan_commit: 5eb75b2a
+plan_commit: d90d4625
 state_revision: 12
 last_verified_checkpoint: 9c1865b7
 last_reviewed_chapter: ch22-copyboth-and-pgoutput-decoding
 last_reviewed_commit: 9c1865b7
 created_at: "2026-11-03T04:05:00Z"
-updated_at: "2026-11-12T04:16:55Z"
+updated_at: "2026-11-12T04:25:15Z"
 generated:
   by: flow-revise
   at: "2026-11-12T01:30:00Z"
@@ -492,8 +492,8 @@ Every worksheet (`129` total across `36` chapters) executes in one bounded invoc
 - **Runtime Boundary**: Native replication decoding is available locally; public Python drivers still use psycopg and asyncio.to_thread until ch27. Live PG14–18, wheel/free-threaded, benchmark, and release acceptance remain downstream gates.
 - **Documentation**: Interim limitations coverage is `3/33` files; ch27 and ch31 maintain it, and ch30–ch32 finish synchronization.
 - **Remaining Plan**: ch23 feedback; ch34 session pump; ch35 verified supervision; ch36 Python bridge; ch24 change sources/checkpoints; ch25–ch27 native drivers/cutover; ch28 live conformance; ch29 wheels/benchmarks; ch30–ch32 docs/OKF; ch33 final verification.
-- **Plan Readiness**: Revision 8 defines public feedback, single-generation session delivery leases, verified supervision, and Python publication contracts. The revised plan is a draft awaiting zero-context review and approval; production and tests are untouched.
-- **Next Action**: Review the revision, then `/flow:implement native-postgres-driver ch23` after approval. Commits stay local.
+- **Plan Readiness**: Revision 8 defines public feedback, single-generation session delivery leases, verified supervision, and Python publication contracts. The revised plan passes independent chapter and cross-chapter review and has user approval; production and tests are untouched.
+- **Next Action**: `/flow:implement native-postgres-driver ch23`. Commits stay local.
 
 [^pg-conn-rs]: `src/rs/vertebra-db/src/connection.rs::TransportStream` — Shared TCP, Unix, TLS, and cloud mTLS stream primitives.
 [^pg-core-rs]: `src/rs/vertebra-db/src/postgres/mod.rs::encode_query_frame` — Shared stateless PostgreSQL wire frame and codec helpers in `vertebra-db`.

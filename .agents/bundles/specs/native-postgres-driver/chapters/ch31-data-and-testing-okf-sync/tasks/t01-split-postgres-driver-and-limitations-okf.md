@@ -4,7 +4,7 @@ id: "native-postgres-driver:ch31:t01"
 chapter_id: ch31-data-and-testing-okf-sync
 title: Split database-drivers-and-dialers, create postgres-native-driver, and extend postgres-limitations OKF chapters
 description: Refactor database-drivers-and-dialers.md into a <= 200-line cross-engine overview, create postgres-native-driver.md (Concept, <= 200L), and extend the existing postgres-limitations.md (Gotcha, <= 200L) with vertebra-postgres runtime caveats.
-status: draft
+status: stable
 state: pending
 priority: P1
 verification_strategy: documentation_validation
@@ -24,7 +24,7 @@ files:
 tests: []
 estimated_loc: 245
 plan_revision: 8
-plan_commit: 5eb75b2a
+plan_commit: d90d4625
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -35,7 +35,7 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-12T01:30:00Z"
+updated_at: "2026-11-12T04:25:15Z"
 commit: null
 generated:
   by: flow-revise

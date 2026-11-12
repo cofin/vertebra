@@ -4,7 +4,7 @@ id: "native-postgres-driver:ch34:t03"
 chapter_id: ch34-replication-session-pump
 title: "Publish Commit leases exactly at consumer delivery"
 description: "Harden successful ReplicationDelivery publication with lease-duration single-next ownership and cancellation retention; publication capacity notifications coordinate reader and ack writer. No reconnect or Python completion code belongs here."
-status: draft
+status: stable
 state: pending
 priority: P1
 verification_strategy: behavior_tdd
@@ -21,7 +21,7 @@ tests:
   - src/rs/vertebra-postgres/tests/postgres_replication_wire_tests.rs
 estimated_loc: 195
 plan_revision: 8
-plan_commit: 5eb75b2a
+plan_commit: d90d4625
 state_revision: 2
 claimed_by: null
 claimed_at: null
@@ -33,7 +33,7 @@ last_verified_commit: null
 verification_evidence: null
 commit: null
 created_at: "2026-11-12T05:00:00Z"
-updated_at: "2026-11-12T05:00:00Z"
+updated_at: "2026-11-12T04:25:15Z"
 generated: {by: flow-revise, at: "2026-11-12T05:00:00Z"}
 verified: []
 sources:

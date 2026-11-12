@@ -4,7 +4,7 @@ id: "native-postgres-driver:ch29:t03"
 chapter_id: ch29-wheel-ci-and-benchmarks
 title: Wire Criterion native benchmarks, live PG18 paired orchestrator, and Makefile targets
 description: Add Criterion benches/postgres_native.rs in vertebra-postgres, implement the @pytest.mark.postgres_benchmark PG18 paired orchestrator, update Makefile postgres-test/postgres-wheel-check/lint/lint-all in place, and add self-contained postgres-bench and postgres-bench-check.
-status: draft
+status: stable
 state: pending
 priority: P1
 verification_strategy: static_validation
@@ -25,7 +25,7 @@ tests:
   - src/py/tests/integration/db/test_postgres_benchmarks.py
 estimated_loc: 245
 plan_revision: 8
-plan_commit: 5eb75b2a
+plan_commit: d90d4625
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -36,7 +36,7 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-12T01:30:00Z"
+updated_at: "2026-11-12T04:25:15Z"
 commit: null
 generated:
   by: flow-revise

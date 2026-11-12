@@ -4,7 +4,7 @@ parent_flow: native-postgres-driver
 chapter_id: ch33-final-review-and-release-gate
 title: "Chapter 33: Complete-Driver Verification Gates, Routed Correctness Review, and Fresh Quality Review"
 description: Reconcile all 36 chapters (129 tasks) and 33 documented files, run the complete verification and benchmark matrix, execute routed correctness review and fresh zero-context quality review over c8722c76..HEAD, and prepare active state for finish/archive.
-status: draft
+status: stable
 state: planned
 planning_status: complete
 depends_on_chapters:
@@ -12,12 +12,12 @@ depends_on_chapters:
 replan_trigger: null
 current_task: "native-postgres-driver:ch33:t01"
 plan_revision: 8
-plan_commit: 5eb75b2a
+plan_commit: d90d4625
 state_revision: 0
 last_verified_checkpoint: null
 last_reviewed_commit: null
 created_at: "2026-11-05T00:00:00Z"
-updated_at: "2026-11-12T04:16:55Z"
+updated_at: "2026-11-12T04:25:15Z"
 generated:
   by: flow-revise
   at: "2026-11-12T01:30:00Z"

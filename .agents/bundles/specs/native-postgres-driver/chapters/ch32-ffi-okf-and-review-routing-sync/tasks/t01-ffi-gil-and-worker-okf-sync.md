@@ -4,7 +4,7 @@ id: "native-postgres-driver:ch32:t01"
 chapter_id: ch32-ffi-okf-and-review-routing-sync
 title: Synchronize FFI/GIL pattern, PyO3 runtime gotchas, and worker batch-dispatch OKF chapters
 description: Update ffi-and-gil-discipline.md, pyo3-and-python-runtime.md, and trimmed pyo3-ffi-and-batch-dispatch.md (212L -> <= 200L) so extension enumerations match the Makefile lint stubtest list including _postgres, document cross-cdylib primitive-kwarg and VTBARROW rules, and PendingDeliveryGuard async drop restoration.
-status: draft
+status: stable
 state: pending
 priority: P1
 verification_strategy: static_validation
@@ -24,7 +24,7 @@ files:
 tests: []
 estimated_loc: 175
 plan_revision: 8
-plan_commit: 5eb75b2a
+plan_commit: d90d4625
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -35,7 +35,7 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: "2026-11-10T14:45:00Z"
-updated_at: "2026-11-12T04:16:55Z"
+updated_at: "2026-11-12T04:25:15Z"
 commit: null
 generated:
   by: flow-revise

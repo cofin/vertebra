@@ -4,7 +4,7 @@ id: "native-postgres-driver:ch36:t04"
 chapter_id: ch36-replication-python-bridge
 title: "Deliver cancellation-safe event leases"
 description: "Expose next through supervisor delivery leases, convert before publish, and complete cancellation/publication and generation-fenced acknowledgement behavior through the actual native extension"
-status: draft
+status: stable
 state: pending
 priority: P1
 verification_strategy: behavior_tdd
@@ -33,10 +33,10 @@ last_verified_commit: null
 verification_evidence: null
 commit: null
 plan_revision: 8
-plan_commit: 5eb75b2a
+plan_commit: d90d4625
 state_revision: 0
 created_at: "2026-11-12T04:20:00Z"
-updated_at: "2026-11-12T04:20:00Z"
+updated_at: "2026-11-12T04:25:15Z"
 generated: {by: flow-revise, at: "2026-11-12T04:20:00Z"}
 verified: []
 sources:

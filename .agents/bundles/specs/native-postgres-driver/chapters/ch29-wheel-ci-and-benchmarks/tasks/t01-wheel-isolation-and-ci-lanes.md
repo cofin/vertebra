@@ -4,7 +4,7 @@ id: "native-postgres-driver:ch29:t01"
 chapter_id: ch29-wheel-ci-and-benchmarks
 title: Verify outside-checkout PostgreSQL wheel isolation, release matrix, and strict CI/free-threaded lanes
 description: Create two-probe tools/scripts/verify_postgres_wheel.py for strict --no-deps and cached-runtime-deps outside-checkout verification, extend release.yaml and zero-skip ci.yml PostgreSQL lanes, and harden free-threaded GIL/immutable-type/concurrent pool tests.
-status: draft
+status: stable
 state: pending
 priority: P1
 verification_strategy: static_validation
@@ -25,7 +25,7 @@ tests:
   - src/py/tests/unit/test_freethreaded_gil.py
 estimated_loc: 245
 plan_revision: 8
-plan_commit: 5eb75b2a
+plan_commit: d90d4625
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -36,7 +36,7 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-12T01:30:00Z"
+updated_at: "2026-11-12T04:25:15Z"
 commit: null
 generated:
   by: flow-revise

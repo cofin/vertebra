@@ -4,7 +4,7 @@ id: "native-postgres-driver:ch25:t01"
 chapter_id: ch25-dsn-bridge-lexer-and-permanent-drivers
 title: Bridge PostgreSQL URL and libpq configuration into native options
 description: Implement pure-Python URI and libpq keyword DSN parsing in options.py and wire PostgreSQLConfig.from_url, pool_key, resolve_sync_options, resolve_async_options, and derive_direct_config in config.py.
-status: draft
+status: stable
 state: pending
 priority: P1
 verification_strategy: behavior_tdd
@@ -23,7 +23,7 @@ tests:
   - src/py/tests/unit/db/test_postgres_options.py
 estimated_loc: 245
 plan_revision: 8
-plan_commit: 5eb75b2a
+plan_commit: d90d4625
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -34,7 +34,7 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-12T01:30:00Z"
+updated_at: "2026-11-12T04:25:15Z"
 commit: null
 generated:
   by: flow-revise

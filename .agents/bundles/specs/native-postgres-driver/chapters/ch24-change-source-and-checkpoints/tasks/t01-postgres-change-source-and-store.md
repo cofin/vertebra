@@ -4,7 +4,7 @@ id: "native-postgres-driver:ch24:t01"
 chapter_id: ch24-change-source-and-checkpoints
 title: Implement PostgreSQL change sources and checkpoint stores
 description: Define PostgresReplicationDriver, PostgresChangeConfig, PostgresCheckpoint, atomic CAS PostgresCheckpointStore, MemoryPostgresCheckpointStore, and PostgresChangeSource.stream().
-status: draft
+status: stable
 state: pending
 priority: P1
 verification_strategy: behavior_tdd
@@ -25,7 +25,7 @@ tests:
   - src/py/tests/unit/db/test_postgres_change_source.py
 estimated_loc: 240
 plan_revision: 8
-plan_commit: 5eb75b2a
+plan_commit: d90d4625
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -36,7 +36,7 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-12T04:16:55Z"
+updated_at: "2026-11-12T04:25:15Z"
 commit: null
 generated:
   by: flow-revise

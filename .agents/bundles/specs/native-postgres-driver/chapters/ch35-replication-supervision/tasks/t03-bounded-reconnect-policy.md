@@ -4,7 +4,7 @@ id: "native-postgres-driver:ch35:t03"
 chapter_id: ch35-replication-supervision
 title: Bound retries and cancel credential-refresh reconnects
 description: Bound retries and cancel credential-refresh reconnects through the public native replication supervisor seam.
-status: draft
+status: stable
 state: pending
 priority: P1
 verification_strategy: behavior_tdd
@@ -23,7 +23,7 @@ tests:
   - src/rs/vertebra-postgres/tests/postgres_replication_wire_tests.rs
 estimated_loc: 220
 plan_revision: 8
-plan_commit: 5eb75b2a
+plan_commit: d90d4625
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -35,7 +35,7 @@ last_verified_commit: null
 verification_evidence: null
 commit: null
 created_at: "2026-11-12T05:00:00Z"
-updated_at: "2026-11-12T05:00:00Z"
+updated_at: "2026-11-12T04:25:15Z"
 generated: {by: flow-revise, at: "2026-11-12T05:00:00Z"}
 verified: []
 sources:

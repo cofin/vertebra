@@ -4,7 +4,7 @@ parent_flow: native-postgres-driver
 chapter_id: ch36-replication-python-bridge
 title: "Chapter 36: Cancellation-safe native replication Python bridge"
 description: "Expose identity probes and lease-backed raw replication handles over the existing PyO3 completion drainer."
-status: draft
+status: stable
 state: planned
 planning_status: complete
 depends_on_chapters: [ch35-replication-supervision]
@@ -13,10 +13,10 @@ current_task: "native-postgres-driver:ch36:t01"
 last_verified_checkpoint: null
 last_reviewed_commit: null
 plan_revision: 8
-plan_commit: 5eb75b2a
+plan_commit: d90d4625
 state_revision: 0
 created_at: "2026-11-12T04:20:00Z"
-updated_at: "2026-11-12T04:20:00Z"
+updated_at: "2026-11-12T04:25:15Z"
 generated: {by: flow-revise, at: "2026-11-12T04:20:00Z"}
 verified: []
 sources:
@@ -125,7 +125,7 @@ Alternatives: reuse the supervisor lease (chosen, one reservation/buffer and sma
 
 ## 6. Current State & Remaining Plan Snapshot
 
-Plan revision 8 at base `5eb75b2a`; all four tasks are pending behind reviewed ch35. Native Python replication methods and canonical Python test module are new targets. ch24 consumes the published raw API after chapter code/doc review; source retry, checkpoints, permanent driver cutover and release gates remain downstream.
+Plan revision 8 is approved at `d90d4625`; all four pending tasks require completed and reviewed ch35. Native Python replication methods and canonical Python test module are new targets. ch24 consumes the published raw API after chapter code/doc review; source retry, checkpoints, permanent driver cutover and release gates remain downstream.
 
 [^contracts]: `.agents/bundles/specs/native-postgres-driver/contracts.md` — Raw replication ownership and checkpoint boundary.
 [^async]: `src/rs/vertebra-db/src/py_async.rs::spawn_rust_db_task_with_attr` — Aborting worker cancellation and event-loop outcome delivery.

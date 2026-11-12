@@ -4,7 +4,7 @@ id: "native-postgres-driver:ch32:t02"
 chapter_id: ch32-ffi-okf-and-review-routing-sync
 title: Synchronize packaging-and-pgo, ADR-004, and pyo3-bridge engineering skill for vertebra-postgres
 description: Update packaging-and-pgo.md, adr-004-optional-driver-wheels-and-shm-ownership.md, and .agents/skills/pyo3-bridge/SKILL.md (all <= 200L) for vertebra-postgres optional wheel isolation, discovery-based PGO coverage, VTBARROW ownership, and stubtest guidance matching the Makefile lint stubtest list.
-status: draft
+status: stable
 state: pending
 priority: P1
 verification_strategy: static_validation
@@ -24,7 +24,7 @@ files:
 tests: []
 estimated_loc: 145
 plan_revision: 8
-plan_commit: 5eb75b2a
+plan_commit: d90d4625
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -35,7 +35,7 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: "2026-11-10T14:45:00Z"
-updated_at: "2026-11-12T01:30:00Z"
+updated_at: "2026-11-12T04:25:15Z"
 commit: null
 generated:
   by: flow-revise

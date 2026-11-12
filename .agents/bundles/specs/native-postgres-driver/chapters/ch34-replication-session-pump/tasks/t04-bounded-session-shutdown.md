@@ -4,7 +4,7 @@ id: "native-postgres-driver:ch34:t04"
 chapter_id: ch34-replication-session-pump
 title: "Join replication owners and drain CopyDone under one deadline"
 description: "Finish graceful and terminal session lifecycle: bounded final feedback/CopyDone plus backend drain, receiver wakeup, and cancellation-safe cleanup of split socket owners and delivery leases."
-status: draft
+status: stable
 state: pending
 priority: P1
 verification_strategy: behavior_tdd
@@ -21,7 +21,7 @@ tests:
   - src/rs/vertebra-postgres/tests/postgres_replication_wire_tests.rs
 estimated_loc: 235
 plan_revision: 8
-plan_commit: 5eb75b2a
+plan_commit: d90d4625
 state_revision: 2
 claimed_by: null
 claimed_at: null
@@ -33,7 +33,7 @@ last_verified_commit: null
 verification_evidence: null
 commit: null
 created_at: "2026-11-12T05:00:00Z"
-updated_at: "2026-11-12T05:00:00Z"
+updated_at: "2026-11-12T04:25:15Z"
 generated: {by: flow-revise, at: "2026-11-12T05:00:00Z"}
 verified: []
 sources:

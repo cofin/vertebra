@@ -4,20 +4,20 @@ parent_flow: native-postgres-driver
 chapter_id: ch23-replication-feedback-resume-and-bridge
 title: "Chapter 23: Commit-Fenced Replication Feedback"
 description: "Implement strict CopyData payload codecs, status intervals, and separate received/published/acknowledged Commit positions."
-status: draft
+status: stable
 state: planned
 planning_status: complete
 depends_on_chapters: ["ch22-copyboth-and-pgoutput-decoding"]
 replan_trigger: null
 current_task: "native-postgres-driver:ch23:t01"
 plan_revision: 8
-plan_commit: 5eb75b2a
+plan_commit: d90d4625
 state_revision: 2
 chapter_base_commit: null
 last_verified_checkpoint: null
 last_reviewed_commit: null
 created_at: "2026-11-12T05:00:00Z"
-updated_at: "2026-11-12T05:00:00Z"
+updated_at: "2026-11-12T04:25:15Z"
 generated: {by: flow-revise, at: "2026-11-12T05:00:00Z"}
 verified: []
 sources:
@@ -151,7 +151,7 @@ All commands exit0 before present-tense documentation sync, zero-context correct
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- Plan revision8 is draft against verified repository baseline `5eb75b2a`; execution requires the planning approval gate.
+- Plan revision 8 is approved at reviewed plan commit `d90d4625`; execution requires the declared chapter dependencies and task preflight.
 - All 2 worksheets are pending, signature-complete and individually bounded; no production changes are present.
 - Root dependency order continues ch34 session → ch35 supervision → ch36 Python bridge → ch24 checkpoints, then ch25–ch33. Full flow contains36chapters; completed22chapter history remains intact.
 - Doc/OKF manifest is open until chapter implementation sync; native public Python driver cutover remains ch27.

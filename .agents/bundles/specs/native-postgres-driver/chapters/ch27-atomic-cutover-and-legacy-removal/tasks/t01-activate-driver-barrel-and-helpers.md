@@ -4,7 +4,7 @@ id: "native-postgres-driver:ch27:t01"
 chapter_id: ch27-atomic-cutover-and-legacy-removal
 title: Activate the permanent native driver barrel, package exports, and numeric embedding pushdown, and replace legacy test doubles
 description: Switch vertebra.db.adapters.postgres.driver and package __init__ to export the permanent _sync, _async, types, events, and change_stream contracts atomically, update PostgresEmbeddingPushdown to numeric binds with verified Google-style docstrings, and replace the SQLite-backed asyncpg pool double, psycopg pool mocks, and psycopg converter ports with native-shaped postgres_ports.py tests over canonical public imports.
-status: draft
+status: stable
 state: pending
 priority: P1
 verification_strategy: behavior_tdd
@@ -31,7 +31,7 @@ tests:
   - src/py/tests/unit/db/test_postgres_native_adapter_arrow.py
 estimated_loc: 245
 plan_revision: 8
-plan_commit: 5eb75b2a
+plan_commit: d90d4625
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -42,7 +42,7 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-12T01:30:00Z"
+updated_at: "2026-11-12T04:25:15Z"
 commit: null
 generated:
   by: flow-revise

@@ -4,7 +4,7 @@ id: "native-postgres-driver:ch26:t03"
 chapter_id: ch26-compiler-pipeline-arrow-and-event-hooks
 title: Complete native Arrow forwarding before public PostgreSQL activation
 description: Enforce exact SyncDatabaseDriver and AsyncDatabaseDriver Liskov Arrow signatures, threshold_rows/max_result_bytes forwarding, ArrowCursor batch wrapping, and postgres/arrow.py load_from_arrow delegation on permanent PostgreSQL drivers.
-status: draft
+status: stable
 state: pending
 priority: P1
 verification_strategy: behavior_tdd
@@ -24,7 +24,7 @@ tests:
   - src/py/tests/unit/db/test_postgres_native_adapter_arrow.py
 estimated_loc: 220
 plan_revision: 8
-plan_commit: 5eb75b2a
+plan_commit: d90d4625
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -35,7 +35,7 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-12T01:30:00Z"
+updated_at: "2026-11-12T04:25:15Z"
 commit: null
 generated:
   by: flow-revise

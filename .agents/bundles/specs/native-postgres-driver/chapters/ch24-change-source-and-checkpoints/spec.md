@@ -4,7 +4,7 @@ parent_flow: native-postgres-driver
 chapter_id: ch24-change-source-and-checkpoints
 title: "Chapter 24: PostgreSQL Change Source, CAS Checkpoint Stores, and Replay Recovery"
 description: Implement PostgresChangeSource, atomic compare-and-swap PostgresCheckpointStore, shielded acknowledgement reconciliation, and deterministic replay/shutdown semantics.
-status: draft
+status: stable
 state: planned
 planning_status: complete
 depends_on_chapters:
@@ -12,12 +12,12 @@ depends_on_chapters:
 replan_trigger: null
 current_task: "native-postgres-driver:ch24:t01"
 plan_revision: 8
-plan_commit: 5eb75b2a
+plan_commit: d90d4625
 state_revision: 0
 last_verified_checkpoint: null
 last_reviewed_commit: null
 created_at: "2026-11-05T00:00:00Z"
-updated_at: "2026-11-12T04:16:55Z"
+updated_at: "2026-11-12T04:25:15Z"
 generated:
   by: flow-revise
   at: "2026-11-12T01:30:00Z"
@@ -136,7 +136,7 @@ Progress: `[0/0 files documented in ch24]` (project documentation and OKF chapte
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Plan Baseline**: `c8722c76`; chapter `state: planned`, `planning_status: complete`, `plan_revision: 8`, `plan_commit: 5eb75b2a` (`ch01`–`ch21` and `ch22:t01`–`t02` on `main` through the PR #104 squash).
+- **Verified Plan Baseline**: `c8722c76`; chapter `state: planned`, `planning_status: complete`, `plan_revision: 8`, `plan_commit: d90d4625` (`ch01`–`ch21` and `ch22:t01`–`t02` on `main` through the PR #104 squash).
 - **Remaining Tasks in Chapter**: `t01`, `t02`, `t03` (`3/3` pending).
 - **Downstream Dependents**: Unblocks `ch25-dsn-bridge-lexer-and-permanent-drivers` and `ch26-compiler-pipeline-arrow-and-event-hooks`.
 

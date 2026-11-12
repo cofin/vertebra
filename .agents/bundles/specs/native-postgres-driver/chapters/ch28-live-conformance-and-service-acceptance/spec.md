@@ -4,7 +4,7 @@ parent_flow: native-postgres-driver
 chapter_id: ch28-live-conformance-and-service-acceptance
 title: "Chapter 28: Live PG14-18 Conformance, Logical Replication, pgvector, and Pooler Acceptance"
 description: Verify the cut-over native PostgreSQL driver against live Docker PostgreSQL 14-18 servers, logical replication WAL streams, multi-arch digest-pinned pgvector 0.8.1 containers, and SCRAM-authenticated PgBouncer 1.26.0 transaction poolers.
-status: draft
+status: stable
 state: planned
 planning_status: complete
 depends_on_chapters:
@@ -12,12 +12,12 @@ depends_on_chapters:
 replan_trigger: null
 current_task: "native-postgres-driver:ch28:t01"
 plan_revision: 8
-plan_commit: 5eb75b2a
+plan_commit: d90d4625
 state_revision: 0
 last_verified_checkpoint: null
 last_reviewed_commit: null
 created_at: "2026-11-05T00:00:00Z"
-updated_at: "2026-11-12T04:16:55Z"
+updated_at: "2026-11-12T04:25:15Z"
 generated:
   by: flow-revise
   at: "2026-11-12T01:30:00Z"
@@ -137,7 +137,7 @@ Progress: `[0/0 files documented in this chapter]` (`[0/33 files documented]` ac
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Plan Baseline**: `plan_revision: 8`, `plan_commit: 5eb75b2a`; `depends_on_chapters: [ch27-atomic-cutover-and-legacy-removal]`, `state: planned`, `planning_status: complete` (`36` chapters / `129` tasks; `ch01`–`ch21` and `ch22:t01`–`t02` (`80` tasks) are on `main` in `c8722c76`).
+- **Verified Plan Baseline**: `plan_revision: 8`, `plan_commit: d90d4625`; `depends_on_chapters: [ch27-atomic-cutover-and-legacy-removal]`, `state: planned`, `planning_status: complete` (`36` chapters / `129` tasks; `ch01`–`ch21` and `ch22:t01`–`t02` (`80` tasks) are on `main` in `c8722c76`).
 - **Remaining Tasks in Chapter**: `t01`, `t02`, `t03`, `t04` (`4/4` pending).
 - **Active Invariants**: Offline pytest runs never spawn Docker containers when `VERTEBRA_CONFORMANCE_DOCKER` and `VERTEBRA_CONFORMANCE_POSTGRES_DSN` are unset; live runs enforce `VERTEBRA_CONFORMANCE_POSTGRES_REQUIRE_ZERO_SKIPS=1`, pass explicit `sslmode="disable"`, use `@pytest.mark.parametrize` / `@pytest.fixture(params=...)` exclusively, and leave zero leaked slots, containers, or `/dev/shm` segments.
 

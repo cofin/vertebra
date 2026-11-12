@@ -4,7 +4,7 @@ id: "native-postgres-driver:ch23:t01"
 chapter_id: ch23-replication-feedback-resume-and-bridge
 title: "Decode replication CopyData and encode bounded status payloads"
 description: "Implement strict public wire payload codecs and status interval computation only; session ownership, published-commit state, and I/O loops remain separate tasks."
-status: draft
+status: stable
 state: pending
 priority: P1
 verification_strategy: behavior_tdd
@@ -22,7 +22,7 @@ tests:
   - src/rs/vertebra-postgres/tests/postgres_replication_wire_tests.rs
 estimated_loc: 130
 plan_revision: 8
-plan_commit: 5eb75b2a
+plan_commit: d90d4625
 state_revision: 2
 claimed_by: null
 claimed_at: null
@@ -34,7 +34,7 @@ last_verified_commit: null
 verification_evidence: null
 commit: null
 created_at: "2026-11-12T05:00:00Z"
-updated_at: "2026-11-12T05:00:00Z"
+updated_at: "2026-11-12T04:25:15Z"
 generated: {by: flow-revise, at: "2026-11-12T05:00:00Z"}
 verified: []
 sources:

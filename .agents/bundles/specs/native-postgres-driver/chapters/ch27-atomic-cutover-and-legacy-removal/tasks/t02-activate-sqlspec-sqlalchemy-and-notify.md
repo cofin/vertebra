@@ -4,7 +4,7 @@ id: "native-postgres-driver:ch27:t02"
 chapter_id: ch27-atomic-cutover-and-legacy-removal
 title: Activate SQLSpec NUMERIC routing and SQLAlchemy numeric_dollar dialect and DB-API paramstyle
 description: Route every SQLSpec PostgreSQL execution, stack, Arrow, dispatch, and tenant-session method through _compile_postgres_numeric_transport, activate default_paramstyle and paramstyle numeric_dollar on SQLAlchemy +vtb dialects, and migrate extension, tenant, and event-hook tests to canonical public imports.
-status: draft
+status: stable
 state: pending
 priority: P1
 verification_strategy: behavior_tdd
@@ -28,7 +28,7 @@ tests:
   - src/py/tests/unit/db/test_postgres_event_hooks.py
 estimated_loc: 235
 plan_revision: 8
-plan_commit: 5eb75b2a
+plan_commit: d90d4625
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -39,7 +39,7 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-12T01:30:00Z"
+updated_at: "2026-11-12T04:25:15Z"
 commit: null
 generated:
   by: flow-revise

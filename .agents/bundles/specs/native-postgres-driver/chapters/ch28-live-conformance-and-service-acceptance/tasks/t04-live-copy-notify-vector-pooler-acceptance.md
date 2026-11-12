@@ -4,7 +4,7 @@ id: "native-postgres-driver:ch28:t04"
 chapter_id: ch28-live-conformance-and-service-acceptance
 title: Verify live binary COPY, VTBARROW, notifications, pgvector pushdown, and PgBouncer pooling
 description: Execute parameterized live feature acceptance across binary COPY, /dev/shm-verified VTBARROW selection/streaming/import, LISTEN/NOTIFY rollback suppression, pgvector 0.8.1 PgVector/PgBitString/PostgresEmbeddingPushdown, and PgBouncer transaction pooling.
-status: draft
+status: stable
 state: pending
 priority: P1
 verification_strategy: behavior_tdd
@@ -22,7 +22,7 @@ tests:
   - src/py/tests/integration/db/test_postgres_features.py
 estimated_loc: 245
 plan_revision: 8
-plan_commit: 5eb75b2a
+plan_commit: d90d4625
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -33,7 +33,7 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-12T01:30:00Z"
+updated_at: "2026-11-12T04:25:15Z"
 commit: null
 generated:
   by: flow-revise

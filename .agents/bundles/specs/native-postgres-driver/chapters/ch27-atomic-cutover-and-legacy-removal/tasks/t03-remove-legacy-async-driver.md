@@ -4,7 +4,7 @@ id: "native-postgres-driver:ch27:t03"
 chapter_id: ch27-atomic-cutover-and-legacy-removal
 title: Remove the legacy async driver and dialer psycopg/asyncpg connect helpers
 description: Delete the unreferenced private _LegacyAsyncPostgreSQLDriver and its async-only imports from driver.py (retaining import asyncio for _LegacySyncPostgreSQLDriver until ch27:t04) and delete the psycopg/asyncpg connect factories from the Cloud SQL and AlloyDB dialers.
-status: draft
+status: stable
 state: pending
 priority: P1
 verification_strategy: characterization
@@ -28,7 +28,7 @@ tests:
   - src/py/tests/unit/extensions/test_gcp_adapters_and_sqlalchemy.py
 estimated_loc: 240
 plan_revision: 8
-plan_commit: 5eb75b2a
+plan_commit: d90d4625
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -39,7 +39,7 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-12T01:30:00Z"
+updated_at: "2026-11-12T04:25:15Z"
 commit: null
 generated:
   by: flow-revise

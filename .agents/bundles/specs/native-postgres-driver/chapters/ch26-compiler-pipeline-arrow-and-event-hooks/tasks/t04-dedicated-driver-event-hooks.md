@@ -4,7 +4,7 @@ id: "native-postgres-driver:ch26:t04"
 chapter_id: ch26-compiler-pipeline-arrow-and-event-hooks
 title: Open and close dedicated native PostgreSQL event sessions from drivers
 description: Implement EventSessionRegistry in events.py and wire dedicated notification, replication identity, replication stream, and pg_notify publisher hooks across permanent SyncPostgreSQLDriver and AsyncPostgreSQLDriver.
-status: draft
+status: stable
 state: pending
 priority: P1
 verification_strategy: behavior_tdd
@@ -25,7 +25,7 @@ tests:
   - src/py/tests/unit/db/test_postgres_event_hooks.py
 estimated_loc: 245
 plan_revision: 8
-plan_commit: 5eb75b2a
+plan_commit: d90d4625
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -36,7 +36,7 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-12T01:30:00Z"
+updated_at: "2026-11-12T04:25:15Z"
 commit: null
 generated:
   by: flow-revise

@@ -4,7 +4,7 @@ id: "native-postgres-driver:ch28:t01"
 chapter_id: ch28-live-conformance-and-service-acceptance
 title: Activate strict PostgreSQL 14-18 driver conformance and live active-query cancellation
 description: Gate PostgreSQL live conformance on VERTEBRA_CONFORMANCE_DOCKER or VERTEBRA_CONFORMANCE_POSTGRES_DSN with strict zero-skip enforcement, enable _POSTGRES_TYPES_DDL and pipeline conformance across PG14-18, and verify live backend query cancellation and retirement.
-status: draft
+status: stable
 state: pending
 priority: P1
 verification_strategy: behavior_tdd
@@ -23,7 +23,7 @@ tests:
   - src/py/tests/integration/db/test_postgres_native.py
 estimated_loc: 245
 plan_revision: 8
-plan_commit: 5eb75b2a
+plan_commit: d90d4625
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -34,7 +34,7 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-12T01:30:00Z"
+updated_at: "2026-11-12T04:25:15Z"
 commit: null
 generated:
   by: flow-revise

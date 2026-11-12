@@ -4,7 +4,7 @@ id: "native-postgres-driver:ch34:t02"
 chapter_id: ch34-replication-session-pump
 title: "Drain coalesced WAL through bounded single-generation reader"
 description: "Wire real protocol reads to pgoutput decoding and bounded FIFO, retaining startup bytes and independent writer liveness. Introduce next returning a delivery lease with complete successful-path record/publish semantics. Cancellation retention, the lease-duration waiter reservation and unacked-capacity gating belong to t03."
-status: draft
+status: stable
 state: pending
 priority: P1
 verification_strategy: behavior_tdd
@@ -22,7 +22,7 @@ tests:
   - src/rs/vertebra-postgres/tests/postgres_replication_wire_tests.rs
 estimated_loc: 245
 plan_revision: 8
-plan_commit: 5eb75b2a
+plan_commit: d90d4625
 state_revision: 2
 claimed_by: null
 claimed_at: null
@@ -34,7 +34,7 @@ last_verified_commit: null
 verification_evidence: null
 commit: null
 created_at: "2026-11-12T05:00:00Z"
-updated_at: "2026-11-12T05:00:00Z"
+updated_at: "2026-11-12T04:25:15Z"
 generated: {by: flow-revise, at: "2026-11-12T05:00:00Z"}
 verified: []
 sources:

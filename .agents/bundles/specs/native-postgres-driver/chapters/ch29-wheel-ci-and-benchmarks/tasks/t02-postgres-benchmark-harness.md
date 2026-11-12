@@ -4,7 +4,7 @@ id: "native-postgres-driver:ch29:t02"
 chapter_id: ch29-wheel-ci-and-benchmarks
 title: Implement reproducible PostgreSQL benchmark capture and offline threshold comparator
 description: Add Python 3.12-scoped [dependency-groups].postgres-bench comparators, verify existing vertebra-postgres bumpversion entries, add strict Mypy/pytest config, and implement the msgspec schema_version=1 capture/compare CLI in tools/benchmarks/postgres.py.
-status: draft
+status: stable
 state: pending
 priority: P1
 verification_strategy: behavior_tdd
@@ -25,7 +25,7 @@ tests:
   - src/py/tests/unit/tools/test_postgres_benchmarks.py
 estimated_loc: 245
 plan_revision: 8
-plan_commit: 5eb75b2a
+plan_commit: d90d4625
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -36,7 +36,7 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: "2026-11-05T00:00:00Z"
-updated_at: "2026-11-12T01:30:00Z"
+updated_at: "2026-11-12T04:25:15Z"
 commit: null
 generated:
   by: flow-revise

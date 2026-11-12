@@ -4,7 +4,7 @@ parent_flow: native-postgres-driver
 chapter_id: ch25-dsn-bridge-lexer-and-permanent-drivers
 title: "Chapter 25: DSN/libpq Config Bridge, Lexer Bind Compiler, and Permanent Native Drivers"
 description: Implement the pure-Python PostgreSQL URI/libpq option bridge, single-pass lexical bind compiler, and permanent SyncPostgreSQLDriver and AsyncPostgreSQLDriver facades before public cutover.
-status: draft
+status: stable
 state: planned
 planning_status: complete
 depends_on_chapters:
@@ -12,12 +12,12 @@ depends_on_chapters:
 replan_trigger: null
 current_task: "native-postgres-driver:ch25:t01"
 plan_revision: 8
-plan_commit: 5eb75b2a
+plan_commit: d90d4625
 state_revision: 0
 last_verified_checkpoint: null
 last_reviewed_commit: null
 created_at: "2026-11-05T00:00:00Z"
-updated_at: "2026-11-12T04:16:55Z"
+updated_at: "2026-11-12T04:25:15Z"
 generated:
   by: flow-revise
   at: "2026-11-12T01:30:00Z"
@@ -140,7 +140,7 @@ Progress: `[0/0 files documented in ch25]` (`[0/33 files documented]` across the
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Plan Baseline**: `plan_revision: 8`, `plan_commit: 5eb75b2a`; chapter `state: planned`, `planning_status: complete` (`36` chapters / `129` tasks; `ch01`–`ch21` and `ch22:t01`–`t02` (`80` tasks) are on `main` in `c8722c76`).
+- **Verified Plan Baseline**: `plan_revision: 8`, `plan_commit: d90d4625`; chapter `state: planned`, `planning_status: complete` (`36` chapters / `129` tasks; `ch01`–`ch21` and `ch22:t01`–`t02` (`80` tasks) are on `main` in `c8722c76`).
 - **Remaining Tasks in Chapter**: `t01`, `t02`, `t03`, `t04` (`4/4` pending).
 - **Downstream Dependents**: Unblocks `ch26-compiler-pipeline-arrow-and-event-hooks` and `ch27-atomic-cutover-and-legacy-removal` ahead of `ch30`–`ch32` documentation/OKF sync (`[0/33 files documented]`) and `ch33-final-review-and-release-gate`.
 

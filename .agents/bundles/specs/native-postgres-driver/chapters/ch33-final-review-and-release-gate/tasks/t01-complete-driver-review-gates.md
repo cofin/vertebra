@@ -4,7 +4,7 @@ id: "native-postgres-driver:ch33:t01"
 chapter_id: ch33-final-review-and-release-gate
 title: Execute complete-driver verification gates, routed correctness review, and fresh zero-context quality review
 description: Reconcile all 36 chapters (129 tasks) and 33 documented files, run the complete polyglot/PostgreSQL/wheel/benchmark/docs/review gate matrix, execute routed correctness review and fresh quality review over c8722c76..HEAD, and record final evidence in review.md and active spec.md.
-status: draft
+status: stable
 state: pending
 priority: P1
 verification_strategy: static_validation
@@ -23,7 +23,7 @@ files:
 tests: []
 estimated_loc: 135
 plan_revision: 8
-plan_commit: 5eb75b2a
+plan_commit: d90d4625
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -34,7 +34,7 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-12T04:16:55Z"
+updated_at: "2026-11-12T04:25:15Z"
 commit: null
 sources:
   - id: root-spec

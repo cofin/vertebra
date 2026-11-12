@@ -4,7 +4,7 @@ id: "native-postgres-driver:ch30:t04"
 chapter_id: ch30-user-and-workflow-docs
 title: Synchronize README, workflow knowledge chapter, and AGENTS instructions within line budgets
 description: Add vertebra-postgres and _postgres to README.md, workflow.md (trimmed to <= 200 lines), and AGENTS.md (<= 100 lines) crate and extension enumerations, plus [dependency-groups].postgres-bench and postgres-* Make targets.
-status: draft
+status: stable
 state: pending
 priority: P1
 verification_strategy: documentation_validation
@@ -24,7 +24,7 @@ files:
 tests: []
 estimated_loc: 150
 plan_revision: 8
-plan_commit: 5eb75b2a
+plan_commit: d90d4625
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -35,7 +35,7 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-12T01:30:00Z"
+updated_at: "2026-11-12T04:25:15Z"
 commit: null
 generated:
   by: flow-revise

@@ -4,7 +4,7 @@ id: "native-postgres-driver:ch36:t03"
 chapter_id: ch36-replication-python-bridge
 title: "Expose owned raw replication handles and lifecycle"
 description: "Expose the raw replication handle with open, ownership, zero-I/O closed, acknowledgement, close and context-manager methods"
-status: draft
+status: stable
 state: pending
 priority: P1
 verification_strategy: behavior_tdd
@@ -33,10 +33,10 @@ last_verified_commit: null
 verification_evidence: null
 commit: null
 plan_revision: 8
-plan_commit: 5eb75b2a
+plan_commit: d90d4625
 state_revision: 0
 created_at: "2026-11-12T04:20:00Z"
-updated_at: "2026-11-12T04:20:00Z"
+updated_at: "2026-11-12T04:25:15Z"
 generated: {by: flow-revise, at: "2026-11-12T04:20:00Z"}
 verified: []
 sources:

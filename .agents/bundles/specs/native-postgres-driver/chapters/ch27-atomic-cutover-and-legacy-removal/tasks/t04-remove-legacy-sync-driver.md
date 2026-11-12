@@ -4,7 +4,7 @@ id: "native-postgres-driver:ch27:t04"
 chapter_id: ch27-atomic-cutover-and-legacy-removal
 title: Remove the legacy sync driver, switch the queue guard to vertebra-core[postgres], and trim split-state caveats
 description: Delete _LegacySyncPostgreSQLDriver and import asyncio from driver.py leaving a minimal public barrel, switch the PostgreSQLQueueBackend missing-executor guard from psycopg to vertebra._postgres while keeping executor= mandatory, and remove the split-state caveats from postgres-limitations.md.
-status: draft
+status: stable
 state: pending
 priority: P1
 verification_strategy: behavior_tdd
@@ -27,7 +27,7 @@ tests:
   - src/py/tests/unit/framework/test_distributed_queues.py
 estimated_loc: 245
 plan_revision: 8
-plan_commit: 5eb75b2a
+plan_commit: d90d4625
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -38,7 +38,7 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-12T01:30:00Z"
+updated_at: "2026-11-12T04:25:15Z"
 commit: null
 generated:
   by: flow-revise
