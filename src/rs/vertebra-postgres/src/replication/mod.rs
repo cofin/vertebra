@@ -33,8 +33,10 @@ use crate::session::{
 use crate::types::{CompositeField, MAX_DISCOVERY_ROUNDS, TypeCatalog, TypeInfo, TypeKind};
 
 pub use pgoutput::{
-    DEFAULT_MAX_RECORD_BYTES, DEFAULT_MAX_RELATIONS, PgOutputColumn, PgOutputDecoder,
-    PgOutputFrame, PgOutputRelationSchema, PgOutputTupleValue,
+    ActiveLogicalTx, BoundedReplicationQueue, DEFAULT_MAX_QUEUE_BYTES, DEFAULT_MAX_QUEUE_RECORDS,
+    DEFAULT_MAX_RECORD_BYTES, DEFAULT_MAX_RELATIONS, OldTupleKind, PgOutputColumn, PgOutputDecoder,
+    PgOutputFrame, PgOutputRelationSchema, PgOutputTupleValue, ReplicationDedupKey,
+    ReplicationRecord,
 };
 
 /// Maximum UTF-8 byte length of a PostgreSQL replication slot or publication identifier (`NAMEDATALEN - 1`).

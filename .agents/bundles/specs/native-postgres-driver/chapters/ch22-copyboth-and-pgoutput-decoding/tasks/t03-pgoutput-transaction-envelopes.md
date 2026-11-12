@@ -5,7 +5,7 @@ chapter_id: ch22-copyboth-and-pgoutput-decoding
 title: Order logical transactions and change envelopes
 description: Extend PgOutputDecoder with pgoutput v1 Begin, Origin, Update, Delete, Truncate, Message, and Commit frames, a next_record transaction state machine emitting bounded ReplicationRecord envelopes, and a BoundedReplicationQueue.
 status: draft
-state: pending
+state: in_progress
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -16,6 +16,7 @@ read_set:
   - src/rs/vertebra-postgres/src/replication/pgoutput.rs
   - src/rs/vertebra-postgres/src/replication/mod.rs
   - src/rs/vertebra-postgres/tests/postgres_pgoutput_tests.rs
+  - src/rs/vertebra-postgres/src/result.rs
 files:
   - src/rs/vertebra-postgres/src/replication/pgoutput.rs
   - src/rs/vertebra-postgres/src/replication/mod.rs
@@ -25,14 +26,14 @@ estimated_loc: 245
 plan_revision: 7
 plan_commit: c8722c76
 state_revision: 0
-claimed_by: null
+claimed_by: agent:bulk_postgres
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
+last_verified_at: "2026-11-12T02:35:00Z"
 last_verified_commit: null
-verification_evidence: null
+verification_evidence: "Red: missing ReplicationRecord, BoundedReplicationQueue and next_record. Green: 20 pgoutput and replication wire tests; all-target Clippy -D warnings; diff --check exit 0. PYO3_PYTHON pinned to repository Python 3.12."
 created_at: "2026-11-05T18:25:07Z"
 updated_at: "2026-11-12T01:30:00Z"
 commit: null
@@ -134,20 +135,22 @@ Out of scope: `StandbyStatusUpdate` feedback and heartbeats (`ch23:t01`), Python
 
 ## Verification
 
-- Initial Red baseline: `PYTHONPATH="$(pwd)/src/py:$(pwd)/.venv/lib/python3.12/site-packages" cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --test postgres_pgoutput_tests`
+- Initial Red baseline: `PYO3_PYTHON="$(pwd)/.venv/bin/python" PYTHONPATH="$(pwd)/src/py:$(pwd)/.venv/lib/python3.12/site-packages" cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --test postgres_pgoutput_tests`
 - Final Green + Clippy gate:
   ```bash
-  PYTHONPATH="$(pwd)/src/py:$(pwd)/.venv/lib/python3.12/site-packages" cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --test postgres_pgoutput_tests --test postgres_replication_wire_tests
-  cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-postgres --all-targets -- -D warnings
+  PYO3_PYTHON="$(pwd)/.venv/bin/python" PYTHONPATH="$(pwd)/src/py:$(pwd)/.venv/lib/python3.12/site-packages" cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --test postgres_pgoutput_tests --test postgres_replication_wire_tests
+  PYO3_PYTHON="$(pwd)/.venv/bin/python" cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-postgres --all-targets -- -D warnings
   ```
 
 ## Acceptance Criteria
 
-- [ ] `decode_next_frame` parses exact `proto.c` v1 `'B'`, `'O'`, `'U'`, `'D'`, `'T'`, `'M'`, and `'C'` layouts and `next_record` emits ordered `ReplicationRecord`s carrying `(system_identifier, slot, begin_final_lsn, transaction_ordinal)` and `Commit` origin fields without whole-transaction buffering (R22).
-- [ ] Ordering violations, reserved flags, v2+ tags, and `> 16 MiB` records fail explicitly; `BoundedReplicationQueue` enforces `1024` records / `8 MiB` without drops; `reset_on_disconnect` clears the active transaction (R22).
+- [x] `decode_next_frame` parses exact `proto.c` v1 `'B'`, `'O'`, `'U'`, `'D'`, `'T'`, `'M'`, and `'C'` layouts and `next_record` emits ordered `ReplicationRecord`s carrying `(system_identifier, slot, begin_final_lsn, transaction_ordinal)` and `Commit` origin fields without whole-transaction buffering (R22).
+- [x] Ordering violations, reserved flags, v2+ tags, and `> 16 MiB` records fail explicitly; `BoundedReplicationQueue` enforces `1024` records / `8 MiB` without drops; `reset_on_disconnect` clears the active transaction (R22).
 - [ ] Commit message follows `feat(postgres): order pgoutput transaction records` once verified.
 
 ## Notes & Discoveries
+
+- Retained-byte accounting reads `result.rs` as the sixth manifest file. The full declared parser/state/queue contract requires substantially more code than the original 245-line estimate; coverage includes fragmented frames and unfinished-transaction EOF refusal.
 
 - With `streaming = 'false'` PostgreSQL publishes only committed transactions, but a disconnect can still truncate an in-flight `Begin`..`Commit` stream; consumers stage application until `Commit` while Rust keeps memory bounded [^npd-proto-research].
 

@@ -2262,3 +2262,315 @@ async fn pgoutput_connect_logical_preloads_custom_types_recursively_before_start
         .expect("shutdown");
     srv.await.expect("server passed");
 }
+
+fn transaction_identity() -> VerifiedReplicationIdentity {
+    VerifiedReplicationIdentity {
+        system_identifier: "7312345678901234567".into(),
+        timeline: 1,
+        database: "app".into(),
+        slot: "changes".into(),
+        publication_fingerprint: "00".into(),
+        confirmed_flush_lsn: 0,
+        restart_lsn: 0,
+    }
+}
+fn begin_frame(xid: u32) -> Vec<u8> {
+    let mut out = vec![b'B'];
+    out.extend_from_slice(&0x1_0000_0400u64.to_be_bytes());
+    out.extend_from_slice(&(-100i64).to_be_bytes());
+    out.extend_from_slice(&xid.to_be_bytes());
+    out
+}
+fn commit_frame(flags: u8, lsn: u64, end: u64) -> Vec<u8> {
+    let mut out = vec![b'C', flags];
+    out.extend_from_slice(&lsn.to_be_bytes());
+    out.extend_from_slice(&end.to_be_bytes());
+    out.extend_from_slice(&(-100i64).to_be_bytes());
+    out
+}
+fn message_frame(flags: u8, content: &[u8]) -> Vec<u8> {
+    let mut out = vec![b'M', flags];
+    out.extend_from_slice(&0x1_0000_0500u64.to_be_bytes());
+    push_cstring(&mut out, "hb");
+    out.extend_from_slice(&(content.len() as u32).to_be_bytes());
+    out.extend_from_slice(content);
+    out
+}
+
+#[test]
+fn pgoutput_orders_transaction_records_without_buffering_the_transaction() {
+    use _postgres::replication::{OldTupleKind, ReplicationRecord};
+    let mut decoder = PgOutputDecoder::default();
+    let mut catalog = TypeCatalog::default();
+    let ctx = CodecContext::default();
+    let identity = transaction_identity();
+    for oid in [41, 42] {
+        decoder
+            .push(&encode_relation_frame(
+                oid,
+                "public",
+                "items",
+                b'd',
+                &[(1, "id", INT4_OID, -1), (0, "data", TEXT_OID, -1)],
+            ))
+            .unwrap();
+    }
+    decoder.push(&begin_frame(701)).unwrap();
+    assert!(
+        matches!(decoder.next_record(&identity, &mut catalog, &ctx).unwrap(), Some(ReplicationRecord::Begin { xid: 701, dedup, .. }) if dedup.transaction_ordinal == 0 && dedup.system_identifier == "7312345678901234567" && dedup.slot == "changes" && dedup.begin_final_lsn == 0x1_0000_0400)
+    );
+    let mut origin = vec![b'O'];
+    origin.extend_from_slice(&0x5000_0100u64.to_be_bytes());
+    push_cstring(&mut origin, "peer_a");
+    decoder.push(&origin).unwrap();
+    decoder
+        .push(&encode_insert_frame(
+            41,
+            b'N',
+            &[RawTupleCell::Text(b"7"), RawTupleCell::Text(b"new")],
+        ))
+        .unwrap();
+    assert!(
+        matches!(decoder.next_record(&identity, &mut catalog, &ctx).unwrap(), Some(ReplicationRecord::Insert { dedup, new_tuple, .. }) if dedup.transaction_ordinal == 1 && new_tuple[0] == PgOutputTupleValue::Value(PgValue::Int4(7)))
+    );
+    for (ordinal, marker) in [(2, b'K'), (3, b'O')] {
+        let mut update = vec![b'U'];
+        update.extend_from_slice(&41u32.to_be_bytes());
+        update.push(marker);
+        encode_tuple_data(&mut update, &[RawTupleCell::Text(b"7"), RawTupleCell::Null]);
+        update.push(b'N');
+        encode_tuple_data(
+            &mut update,
+            &[RawTupleCell::Text(b"8"), RawTupleCell::UnchangedToast],
+        );
+        decoder.push(&update).unwrap();
+        let Some(ReplicationRecord::Update {
+            dedup,
+            old_kind,
+            old_tuple,
+            new_tuple,
+            ..
+        }) = decoder.next_record(&identity, &mut catalog, &ctx).unwrap()
+        else {
+            panic!("update")
+        };
+        assert_eq!(dedup.transaction_ordinal, ordinal);
+        assert_eq!(
+            old_kind,
+            Some(if marker == b'K' {
+                OldTupleKind::Key
+            } else {
+                OldTupleKind::Full
+            })
+        );
+        assert_eq!(
+            old_tuple.unwrap()[0],
+            PgOutputTupleValue::Value(PgValue::Int4(7))
+        );
+        assert_eq!(new_tuple[1], PgOutputTupleValue::UnchangedToast);
+    }
+    let mut delete = vec![b'D'];
+    delete.extend_from_slice(&41u32.to_be_bytes());
+    delete.push(b'K');
+    encode_tuple_data(&mut delete, &[RawTupleCell::Text(b"8"), RawTupleCell::Null]);
+    decoder.push(&delete).unwrap();
+    assert!(
+        matches!(decoder.next_record(&identity, &mut catalog, &ctx).unwrap(), Some(ReplicationRecord::Delete { dedup, old_kind: OldTupleKind::Key, .. }) if dedup.transaction_ordinal == 4)
+    );
+    let mut truncate = vec![b'T'];
+    truncate.extend_from_slice(&2u32.to_be_bytes());
+    truncate.push(3);
+    truncate.extend_from_slice(&41u32.to_be_bytes());
+    truncate.extend_from_slice(&42u32.to_be_bytes());
+    decoder.push(&truncate).unwrap();
+    assert!(
+        matches!(decoder.next_record(&identity, &mut catalog, &ctx).unwrap(), Some(ReplicationRecord::Truncate { dedup, relations, cascade: true, restart_identity: true, .. }) if dedup.transaction_ordinal == 5 && relations.len() == 2)
+    );
+    decoder.push(&message_frame(1, &[0xde, 0xad])).unwrap();
+    assert!(
+        matches!(decoder.next_record(&identity, &mut catalog, &ctx).unwrap(), Some(ReplicationRecord::Message { dedup: Some(dedup), xid: Some(701), transactional: true, content, .. }) if dedup.transaction_ordinal == 6 && content.as_ref() == [0xde, 0xad])
+    );
+    decoder
+        .push(&commit_frame(0, 0x1_0000_0400, 0x1_0000_0440))
+        .unwrap();
+    let record = decoder
+        .next_record(&identity, &mut catalog, &ctx)
+        .unwrap()
+        .unwrap();
+    assert_eq!(record.commit_end_lsn(), Some(0x1_0000_0440));
+    assert!(
+        matches!(record, ReplicationRecord::Commit { dedup, origin_name, origin_lsn: Some(0x5000_0100), .. } if dedup.transaction_ordinal == 7 && origin_name.as_deref() == Some("peer_a"))
+    );
+    assert!(decoder.active_transaction().is_none());
+}
+
+#[test]
+fn pgoutput_rejects_ordering_and_reserved_flags_without_advancing_transaction() {
+    let ctx = CodecContext::default();
+    let identity = transaction_identity();
+    let mut origin = vec![b'O'];
+    origin.extend_from_slice(&0u64.to_be_bytes());
+    push_cstring(&mut origin, "peer");
+    for invalid in [
+        origin,
+        vec![b'S'],
+        message_frame(1, b"x"),
+        message_frame(2, b"x"),
+        commit_frame(0, 1, 2),
+    ] {
+        let mut decoder = PgOutputDecoder::default();
+        decoder.push(&invalid).unwrap();
+        assert!(matches!(
+            decoder.next_record(&identity, &mut TypeCatalog::default(), &ctx),
+            Err(PostgresError::Protocol(_))
+        ));
+        assert!(decoder.active_transaction().is_none());
+    }
+    for invalid in [
+        begin_frame(702),
+        commit_frame(1, 0x1_0000_0400, 0x1_0000_0440),
+        commit_frame(0, 1, 2),
+        commit_frame(0, 0x1_0000_0400, 1),
+        vec![b'T', 0, 0, 0, 0, 0],
+        vec![b'T', 0, 0, 0, 1, 4],
+    ] {
+        let mut decoder = PgOutputDecoder::default();
+        let mut catalog = TypeCatalog::default();
+        decoder.push(&begin_frame(701)).unwrap();
+        decoder.next_record(&identity, &mut catalog, &ctx).unwrap();
+        decoder.push(&invalid).unwrap();
+        assert!(matches!(
+            decoder.next_record(&identity, &mut catalog, &ctx),
+            Err(PostgresError::Protocol(_))
+        ));
+        assert_eq!(decoder.active_transaction().unwrap().xid, 701);
+        assert_eq!(decoder.active_transaction().unwrap().next_ordinal, 1);
+    }
+}
+
+#[test]
+fn pgoutput_nontransactional_messages_queue_limits_and_disconnect_reset() {
+    use _postgres::replication::{BoundedReplicationQueue, ReplicationRecord};
+    let identity = transaction_identity();
+    let mut catalog = TypeCatalog::default();
+    let ctx = CodecContext::default();
+    let mut decoder = PgOutputDecoder::default();
+    decoder.push(&message_frame(0, &[0xde, 0xad])).unwrap();
+    let record = decoder
+        .next_record(&identity, &mut catalog, &ctx)
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(&record, ReplicationRecord::Message { dedup: None, xid: None, transactional: false, content, .. } if content.as_ref() == [0xde, 0xad])
+    );
+    let mut queue = BoundedReplicationQueue::new(1024, 8 * 1024 * 1024, DEFAULT_MAX_RECORD_BYTES);
+    for _ in 0..1024 {
+        queue.push(record.clone()).unwrap();
+    }
+    assert!(!queue.can_accept(1));
+    assert!(queue.push(record).is_err());
+    assert_eq!(queue.len(), 1024);
+    for _ in 0..1024 {
+        assert!(queue.pop().is_some());
+    }
+    assert!(queue.is_empty());
+    decoder
+        .push(&message_frame(0, &vec![0; 9 * 1024 * 1024]))
+        .unwrap();
+    let big = decoder
+        .next_record(&identity, &mut catalog, &ctx)
+        .unwrap()
+        .unwrap();
+    assert!(big.approx_bytes() >= 9 * 1024 * 1024);
+    queue.push(big).unwrap();
+    assert!(!queue.can_accept(1));
+    queue.pop().unwrap();
+    assert!(matches!(
+        decoder.push(&message_frame(0, &vec![0; DEFAULT_MAX_RECORD_BYTES + 1])),
+        Err(PostgresError::Operational(_))
+    ));
+    decoder.push(&begin_frame(701)).unwrap();
+    decoder.next_record(&identity, &mut catalog, &ctx).unwrap();
+    decoder.push(&message_frame(0, b"inside")).unwrap();
+    assert!(matches!(
+        decoder.next_record(&identity, &mut catalog, &ctx).unwrap(),
+        Some(ReplicationRecord::Message {
+            dedup: None,
+            xid: Some(701),
+            ..
+        })
+    ));
+    assert_eq!(decoder.active_transaction().unwrap().next_ordinal, 1);
+    assert!(matches!(
+        decoder.finish_clean_eof(),
+        Err(PostgresError::Protocol(_))
+    ));
+    decoder.reset_on_disconnect();
+    assert!(decoder.active_transaction().is_none());
+    decoder.push(&begin_frame(702)).unwrap();
+    assert!(
+        matches!(decoder.next_record(&identity, &mut catalog, &ctx).unwrap(), Some(ReplicationRecord::Begin { dedup, xid: 702, .. }) if dedup.transaction_ordinal == 0)
+    );
+}
+
+#[test]
+fn pgoutput_incremental_transaction_frames_and_unknown_relations_fail_atomically() {
+    use _postgres::replication::{OldTupleKind, ReplicationRecord};
+    let identity = transaction_identity();
+    let mut wire = encode_relation_frame(41, "public", "items", b'f', &[(1, "id", INT4_OID, -1)]);
+    wire.extend(begin_frame(701));
+    let mut update = vec![b'U'];
+    update.extend_from_slice(&41u32.to_be_bytes());
+    update.push(b'N');
+    encode_tuple_data(&mut update, &[RawTupleCell::Text(b"8")]);
+    wire.extend(update);
+    let mut delete = vec![b'D'];
+    delete.extend_from_slice(&41u32.to_be_bytes());
+    delete.push(b'O');
+    encode_tuple_data(&mut delete, &[RawTupleCell::Text(b"8")]);
+    wire.extend(delete);
+    wire.extend(message_frame(1, b"event"));
+    wire.extend(commit_frame(0, 0x1_0000_0400, 0x1_0000_0440));
+    for split in 0..=wire.len() {
+        let mut decoder = PgOutputDecoder::default();
+        let mut catalog = TypeCatalog::default();
+        let ctx = CodecContext::default();
+        let mut records = Vec::new();
+        for chunk in [&wire[..split], &wire[split..]] {
+            decoder.push(chunk).unwrap();
+            while let Some(record) = decoder.next_record(&identity, &mut catalog, &ctx).unwrap() {
+                records.push(record);
+            }
+        }
+        assert_eq!(records.len(), 5, "split {split}");
+        assert!(
+            matches!(&records[1], ReplicationRecord::Update { old_kind: None, old_tuple: None, new_tuple, .. } if new_tuple == &[PgOutputTupleValue::Value(PgValue::Int4(8))])
+        );
+        assert!(
+            matches!(&records[2], ReplicationRecord::Delete { old_kind: OldTupleKind::Full, old_tuple, .. } if old_tuple == &[PgOutputTupleValue::Value(PgValue::Int4(8))])
+        );
+        assert_eq!(records[4].commit_end_lsn(), Some(0x1_0000_0440));
+        assert_eq!(decoder.buffered_bytes(), 0);
+    }
+    for invalid in [
+        vec![b'U', 0, 0, 0, 99, b'N'],
+        vec![b'D', 0, 0, 0, 99, b'K'],
+        vec![b'T', 0, 0, 0, 1, 0, 0, 0, 0, 99],
+        vec![b'I', 0, 0, 0, 99, b'N'],
+    ] {
+        let mut decoder = PgOutputDecoder::default();
+        let mut catalog = TypeCatalog::default();
+        decoder.push(&begin_frame(701)).unwrap();
+        decoder
+            .next_record(&identity, &mut catalog, &CodecContext::default())
+            .unwrap();
+        decoder.push(&invalid).unwrap();
+        let before = decoder.buffered_bytes();
+        assert!(matches!(
+            decoder.next_record(&identity, &mut catalog, &CodecContext::default()),
+            Err(PostgresError::Protocol(_))
+        ));
+        assert_eq!(decoder.buffered_bytes(), before);
+        assert_eq!(decoder.active_transaction().unwrap().next_ordinal, 1);
+    }
+}
