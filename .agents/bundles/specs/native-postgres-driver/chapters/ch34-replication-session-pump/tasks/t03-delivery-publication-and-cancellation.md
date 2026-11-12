@@ -5,7 +5,7 @@ chapter_id: ch34-replication-session-pump
 title: "Publish Commit leases exactly at consumer delivery"
 description: "Harden successful ReplicationDelivery publication with lease-duration single-next ownership and cancellation retention; publication capacity notifications coordinate reader and ack writer. No reconnect or Python completion code belongs here."
 status: stable
-state: in_progress
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on: ["native-postgres-driver:ch34:t02"]
@@ -28,12 +28,12 @@ claimed_at: "2026-11-12T19:57:19.194997+00:00"
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
-commit: null
+last_verified_at: "2026-11-12T20:05:41.175938+00:00"
+last_verified_commit: 9d4c4258
+verification_evidence: "Red exit101 held lease overlap; focused4/full39 pass; Clippy/packagefmt/diffcheck exit0. Logs /tmp/ch34-t03-{red,green,module,clippy}.log"
+commit: 9d4c4258
 created_at: "2026-11-12T05:00:00Z"
-updated_at: "2026-11-12T19:57:19.194997+00:00"
+updated_at: "2026-11-12T20:05:41.175938+00:00"
 generated: {by: flow-revise, at: "2026-11-12T05:00:00Z"}
 verified: []
 sources:
@@ -133,10 +133,10 @@ cargo fmt --manifest-path src/rs/Cargo.toml --check
 
 ## Acceptance Criteria
 
-- [ ] R22.4 publication requires consuming a live delivery lease.
-- [ ] Cancellation returns exact event once in FIFO order without pre-publication acknowledgement.
+- [x] R22.4 publication requires consuming a live delivery lease.
+- [x] Cancellation returns exact event once in FIFO order without pre-publication acknowledgement.
 
-- [ ] Red, Green, and lint evidence is recorded, and task plus checklist synchronization is included in one signed conventional commit.
+- [x] Red, Green, and lint evidence is recorded, and task plus checklist synchronization is included in one signed conventional commit.
 
 ## Notes & Discoveries
 

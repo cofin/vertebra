@@ -2758,22 +2758,26 @@ async fn session_writer_preserves_fence_ticks_and_closes_once() {
             );
         }
     }
+    let closing_peer = tokio::spawn(async move {
+        assert!(matches!(
+            read_frontend_exchange(&mut peer).await,
+            FrontendExchange::Other(b'd', _)
+        ));
+        assert_eq!(
+            read_frontend_exchange(&mut peer).await,
+            FrontendExchange::CopyDone
+        );
+        peer.write_all(&session_shutdown_response()).await.unwrap();
+        assert_eq!(
+            read_frontend_exchange(&mut peer).await,
+            FrontendExchange::Eof
+        );
+    });
     session.shutdown().await.unwrap();
     session.shutdown().await.unwrap();
     assert!(session.is_closed());
     session.wait_closed().await.unwrap();
-    assert!(matches!(
-        read_frontend_exchange(&mut peer).await,
-        FrontendExchange::Other(b'd', _)
-    ));
-    assert_eq!(
-        read_frontend_exchange(&mut peer).await,
-        FrontendExchange::CopyDone
-    );
-    assert_eq!(
-        read_frontend_exchange(&mut peer).await,
-        FrontendExchange::Eof
-    );
+    closing_peer.await.unwrap();
 }
 
 #[tokio::test]
@@ -3258,4 +3262,340 @@ async fn session_delivery_unacknowledged_cap_resumes_after_ack_and_updates_write
     commit.publish().unwrap();
     assert_eq!(session.acknowledge(next_lsn).unwrap(), next_lsn);
     session.cancel();
+}
+
+#[tokio::test]
+async fn session_shutdown_waits_for_backend_drain_without_acknowledging_publication() {
+    use std::future::Future;
+    let payload = session_wal_frame(&session_transaction_payload());
+    let (connection, mut peer) = session_connection_with_payload(Some(0x200000100), payload).await;
+    let session = connection
+        .into_stream(4, Duration::from_secs(10), Duration::from_secs(2))
+        .unwrap();
+    for _ in 0..3 {
+        session.next().await.unwrap().unwrap().publish().unwrap();
+    }
+    let mut closing = Box::pin(session.shutdown());
+    std::future::poll_fn(|cx| {
+        assert!(closing.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    let FrontendExchange::Other(b'd', status) = read_frontend_exchange(&mut peer).await else {
+        panic!("final feedback")
+    };
+    for offset in [9, 17] {
+        assert_eq!(
+            u64::from_be_bytes(status[offset..offset + 8].try_into().unwrap()),
+            0x200000100
+        );
+    }
+    assert_eq!(
+        read_frontend_exchange(&mut peer).await,
+        FrontendExchange::CopyDone
+    );
+    std::future::poll_fn(|cx| {
+        assert!(
+            closing.as_mut().poll(cx).is_pending(),
+            "shutdown must await the backend drain"
+        );
+        Poll::Ready(())
+    })
+    .await;
+    let mut response = copy_done_frame();
+    response.extend(command_complete_frame("COPY 0"));
+    response.extend(ready_for_query_frame(b'I'));
+    peer.write_all(&response).await.unwrap();
+    closing.await.unwrap();
+    session.shutdown().await.unwrap();
+    assert!(session.is_closed());
+    assert_eq!(
+        read_frontend_exchange(&mut peer).await,
+        FrontendExchange::Eof
+    );
+}
+
+fn session_shutdown_response() -> Vec<u8> {
+    let mut response = copy_done_frame();
+    response.extend(command_complete_frame("COPY 0"));
+    response.extend(ready_for_query_frame(b'I'));
+    response
+}
+
+#[tokio::test(start_paused = true)]
+async fn session_shutdown_unresponsive_peer_expires_once_and_closes_socket() {
+    use std::future::Future;
+    let (connection, mut peer) = session_writer_connection(Some(0x200000100)).await;
+    let session = connection
+        .into_stream(1, Duration::from_secs(3600), Duration::from_millis(100))
+        .unwrap();
+    let mut closing = Box::pin(session.shutdown());
+    std::future::poll_fn(|cx| {
+        assert!(closing.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    assert!(matches!(
+        read_frontend_exchange(&mut peer).await,
+        FrontendExchange::Other(b'd', _)
+    ));
+    assert_eq!(
+        read_frontend_exchange(&mut peer).await,
+        FrontendExchange::CopyDone
+    );
+    tokio::time::advance(Duration::from_millis(100)).await;
+    assert!(matches!(closing.await, Err(PostgresError::Operational(_))));
+    let (first, second) = tokio::join!(session.wait_closed(), session.wait_closed());
+    assert!(matches!(first, Err(PostgresError::Operational(_))));
+    assert!(matches!(second, Err(PostgresError::Operational(_))));
+    assert!(matches!(
+        session.next().await,
+        Err(PostgresError::Operational(_))
+    ));
+    assert!(session.next().await.unwrap().is_none());
+    assert_eq!(
+        read_frontend_exchange(&mut peer).await,
+        FrontendExchange::Eof
+    );
+}
+
+#[tokio::test]
+async fn session_shutdown_concurrent_callers_send_only_one_copydone() {
+    let (connection, mut peer) = session_writer_connection(None).await;
+    let session = connection
+        .into_stream(1, Duration::from_secs(3600), Duration::from_secs(2))
+        .unwrap();
+    let peer_close = async {
+        assert!(matches!(
+            read_frontend_exchange(&mut peer).await,
+            FrontendExchange::Other(b'd', _)
+        ));
+        assert_eq!(
+            read_frontend_exchange(&mut peer).await,
+            FrontendExchange::CopyDone
+        );
+        peer.write_all(&session_shutdown_response()).await.unwrap();
+        assert_eq!(
+            read_frontend_exchange(&mut peer).await,
+            FrontendExchange::Eof
+        );
+    };
+    let (first, second, ()) = tokio::join!(session.shutdown(), session.shutdown(), peer_close);
+    first.unwrap();
+    second.unwrap();
+    session.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn session_shutdown_cancelled_close_waiter_keeps_transport_owned() {
+    use std::future::Future;
+    let (connection, mut peer) = session_writer_connection(None).await;
+    let session = connection
+        .into_stream(1, Duration::from_secs(3600), Duration::from_secs(2))
+        .unwrap();
+    let mut closing = Box::pin(session.shutdown());
+    std::future::poll_fn(|cx| {
+        assert!(closing.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    assert!(matches!(
+        read_frontend_exchange(&mut peer).await,
+        FrontendExchange::Other(b'd', _)
+    ));
+    assert_eq!(
+        read_frontend_exchange(&mut peer).await,
+        FrontendExchange::CopyDone
+    );
+    drop(closing);
+    peer.write_all(&session_shutdown_response()).await.unwrap();
+    let (first, second) = tokio::join!(session.wait_closed(), session.wait_closed());
+    first.unwrap();
+    second.unwrap();
+    assert_eq!(
+        read_frontend_exchange(&mut peer).await,
+        FrontendExchange::Eof
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn session_shutdown_cancel_fences_backpressured_lease_and_wakes_all_waiters() {
+    let payload = session_wal_frame(&session_transaction_payload());
+    let (connection, mut peer) = session_connection_with_payload(Some(0x200000100), payload).await;
+    let session = connection
+        .into_stream(1, Duration::from_secs(10), Duration::from_secs(2))
+        .unwrap();
+    let delivery = session.next().await.unwrap().unwrap();
+    tokio::time::advance(Duration::from_secs(10)).await;
+    assert!(matches!(
+        read_frontend_exchange(&mut peer).await,
+        FrontendExchange::Other(b'd', _)
+    ));
+    let record = delivery.record();
+    session.cancel();
+    session.cancel();
+    assert!(matches!(
+        record,
+        _postgres::replication::pgoutput::ReplicationRecord::Begin { xid: 7, .. }
+    ));
+    assert!(matches!(
+        delivery.publish(),
+        Err(PostgresError::Interface(_))
+    ));
+    let (first, second) = tokio::join!(session.wait_closed(), session.wait_closed());
+    first.unwrap();
+    second.unwrap();
+    assert!(session.next().await.unwrap().is_none());
+    assert_eq!(session.status_positions().1, 0x200000100);
+    assert_eq!(
+        read_frontend_exchange(&mut peer).await,
+        FrontendExchange::Eof
+    );
+}
+
+#[tokio::test]
+async fn session_shutdown_backend_error_preserves_sqlstate_and_discards_records() {
+    let (connection, mut peer) = session_writer_connection(None).await;
+    let session = connection
+        .into_stream(1, Duration::from_secs(3600), Duration::from_secs(2))
+        .unwrap();
+    let peer_close = async {
+        assert!(matches!(
+            read_frontend_exchange(&mut peer).await,
+            FrontendExchange::Other(b'd', _)
+        ));
+        assert_eq!(
+            read_frontend_exchange(&mut peer).await,
+            FrontendExchange::CopyDone
+        );
+        peer.write_all(&error_response_frame("ERROR", "42501", "permission denied"))
+            .await
+            .unwrap();
+        assert_eq!(
+            read_frontend_exchange(&mut peer).await,
+            FrontendExchange::Eof
+        );
+    };
+    let (result, ()) = tokio::join!(session.shutdown(), peer_close);
+    assert_eq!(result.unwrap_err().sqlstate(), Some("42501"));
+    assert_eq!(
+        session.wait_closed().await.unwrap_err().sqlstate(),
+        Some("42501")
+    );
+    assert_eq!(
+        session.next().await.err().unwrap().sqlstate(),
+        Some("42501")
+    );
+    assert!(session.next().await.unwrap().is_none());
+    assert!(session.is_closed());
+}
+
+#[tokio::test]
+async fn session_shutdown_clean_backend_eof_closes_transport_but_retains_fifo() {
+    let mut payload = session_wal_frame(&session_transaction_payload());
+    payload.extend(session_shutdown_response());
+    let (connection, mut peer) = session_connection_with_payload(Some(0x200000100), payload).await;
+    let session = connection
+        .into_stream(4, Duration::from_secs(3600), Duration::from_secs(2))
+        .unwrap();
+    session.wait_closed().await.unwrap();
+    assert!(session.is_closed());
+    assert!(matches!(
+        read_frontend_exchange(&mut peer).await,
+        FrontendExchange::Other(b'd', _)
+    ));
+    assert_eq!(
+        read_frontend_exchange(&mut peer).await,
+        FrontendExchange::CopyDone
+    );
+    assert_eq!(
+        read_frontend_exchange(&mut peer).await,
+        FrontendExchange::Eof
+    );
+    for _ in 0..3 {
+        session.next().await.unwrap().unwrap().publish().unwrap();
+    }
+    assert!(session.next().await.unwrap().is_none());
+    session.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn session_shutdown_held_commit_stays_borrowable_but_cannot_publish() {
+    use std::future::Future;
+    let payload = session_wal_frame(&session_transaction_payload());
+    let (connection, mut peer) = session_connection_with_payload(Some(0x200000100), payload).await;
+    let session = connection
+        .into_stream(1, Duration::from_secs(3600), Duration::from_secs(2))
+        .unwrap();
+    for _ in 0..2 {
+        session.next().await.unwrap().unwrap().publish().unwrap();
+    }
+    let delivery = session.next().await.unwrap().unwrap();
+    let borrowed = delivery.record();
+    peer.write_all(&session_wal_frame(&session_empty_transaction_payload(
+        0x200000500,
+        9,
+    )))
+    .await
+    .unwrap();
+    let mut closing = Box::pin(session.shutdown());
+    std::future::poll_fn(|cx| {
+        assert!(closing.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    assert_eq!(borrowed.commit_end_lsn(), Some(0x200000300));
+    assert!(matches!(
+        read_frontend_exchange(&mut peer).await,
+        FrontendExchange::Other(b'd', _)
+    ));
+    assert_eq!(
+        read_frontend_exchange(&mut peer).await,
+        FrontendExchange::CopyDone
+    );
+    peer.write_all(&session_shutdown_response()).await.unwrap();
+    closing.await.unwrap();
+    assert!(matches!(
+        delivery.publish(),
+        Err(PostgresError::Interface(_))
+    ));
+    assert_eq!(session.status_positions().1, 0x200000100);
+    assert!(session.next().await.unwrap().is_none());
+    assert_eq!(
+        read_frontend_exchange(&mut peer).await,
+        FrontendExchange::Eof
+    );
+}
+
+#[tokio::test]
+async fn session_shutdown_transport_error_fences_held_commit_before_publication() {
+    let payload = session_wal_frame(&session_transaction_payload());
+    let (connection, mut peer) = session_connection_with_payload(Some(0x200000100), payload).await;
+    let session = connection
+        .into_stream(4, Duration::from_secs(3600), Duration::from_secs(2))
+        .unwrap();
+    for _ in 0..2 {
+        session.next().await.unwrap().unwrap().publish().unwrap();
+    }
+    let delivery = session.next().await.unwrap().unwrap();
+    peer.shutdown().await.unwrap();
+    assert!(matches!(
+        session.wait_closed().await,
+        Err(PostgresError::Transport(_))
+    ));
+    assert_eq!(delivery.record().commit_end_lsn(), Some(0x200000300));
+    assert!(matches!(
+        delivery.publish(),
+        Err(PostgresError::Interface(_))
+    ));
+    assert!(matches!(
+        session.next().await,
+        Err(PostgresError::Transport(_))
+    ));
+    assert!(session.next().await.unwrap().is_none());
+    assert_eq!(session.status_positions().1, 0x200000100);
+    assert_eq!(
+        read_frontend_exchange(&mut peer).await,
+        FrontendExchange::Eof
+    );
 }

@@ -37,12 +37,14 @@ struct SessionState {
     error_delivered: bool,
     front: Option<ReplicationRecord>,
     receiver_reserved: bool,
+    deadline: Option<Instant>,
 }
 
 struct SessionShared {
     state: Mutex<SessionState>,
     revision: watch::Sender<u64>,
     status: watch::Sender<u64>,
+    shutdown_timeout: Duration,
 }
 
 impl SessionShared {
@@ -59,9 +61,11 @@ impl SessionShared {
 
     fn finish(&self, result: Result<(), PostgresError>) {
         let mut state = self.state.lock().unwrap();
-        state.closing = true;
-        while state.queue.pop().is_some() {}
-        state.front = None;
+        if result.is_err() || state.closing {
+            state.closing = true;
+            while state.queue.pop().is_some() {}
+            state.front = None;
+        }
         if state.terminal.is_none() {
             state.terminal = Some(result);
         }
@@ -74,7 +78,7 @@ impl SessionShared {
 pub struct ReplicationSession {
     identity: VerifiedReplicationIdentity,
     shared: Arc<SessionShared>,
-    workers: Vec<AbortHandle>,
+    worker: AbortHandle,
 }
 
 impl PostgresReplicationConnection {
@@ -122,20 +126,16 @@ impl PostgresReplicationConnection {
                 error_delivered: false,
                 front: None,
                 receiver_reserved: false,
+                deadline: None,
             }),
             revision,
             status,
-        });
-        let owner = Arc::clone(&shared);
-        let task = runtime.spawn(async move {
-            let result =
-                run_writer(writer, &owner, changes, status_interval, shutdown_timeout).await;
-            owner.finish(result);
+            shutdown_timeout,
         });
         let owner = Arc::clone(&shared);
         let reader_identity = identity.clone();
-        let reader_task = runtime.spawn(async move {
-            let result = run_reader(
+        let task = runtime.spawn(async move {
+            let reader = run_reader(
                 reader,
                 conn.read_buf,
                 type_catalog,
@@ -147,16 +147,41 @@ impl PostgresReplicationConnection {
                 ),
                 &reader_identity,
                 &owner,
-            )
-            .await;
-            if let Err(error) = result {
-                owner.finish(Err(error));
-            }
+            );
+            let writer = run_writer(writer, &owner, changes, status_interval);
+            let mut revisions = owner.revision.subscribe();
+            let result = {
+                let transport = async {
+                    let (_reader, mut writer) = tokio::try_join!(reader, writer)?;
+                    writer
+                        .shutdown()
+                        .await
+                        .map_err(|e| PostgresError::Transport(e.to_string()))
+                };
+                tokio::pin!(transport);
+                loop {
+                    let deadline = owner.state.lock().unwrap().deadline;
+                    if let Some(deadline) = deadline {
+                        break tokio::time::timeout_at(deadline, &mut transport)
+                            .await
+                            .unwrap_or_else(|_| {
+                                Err(PostgresError::Operational(
+                                    "replication shutdown timed out".into(),
+                                ))
+                            });
+                    }
+                    tokio::select! {
+                        result = &mut transport => break result,
+                        _ = revisions.changed() => {}
+                    }
+                }
+            };
+            owner.finish(result);
         });
         Ok(ReplicationSession {
             identity,
             shared,
-            workers: vec![task.abort_handle(), reader_task.abort_handle()],
+            worker: task.abort_handle(),
         })
     }
 }
@@ -246,20 +271,28 @@ impl ReplicationSession {
 
     /// Report whether graceful shutdown or terminal cancellation has begun.
     pub fn is_closed(&self) -> bool {
-        self.shared.state.lock().unwrap().closing
+        let state = self.shared.state.lock().unwrap();
+        state.closing || state.terminal.is_some()
     }
 
     /// Fence the session and abort its owned tasks without entering a runtime.
     pub fn cancel(&self) {
+        self.shared.state.lock().unwrap().closing = true;
         self.shared.finish(Ok(()));
-        for worker in &self.workers {
-            worker.abort();
-        }
+        self.worker.abort();
     }
 
     /// Send final feedback and CopyDone under the configured shutdown deadline.
     pub async fn shutdown(&self) -> Result<(), PostgresError> {
-        self.shared.state.lock().unwrap().closing = true;
+        {
+            let mut state = self.shared.state.lock().unwrap();
+            state.closing = true;
+            state
+                .deadline
+                .get_or_insert_with(|| Instant::now() + self.shared.shutdown_timeout);
+            while state.queue.pop().is_some() {}
+            state.front = None;
+        }
         self.shared.signal();
         self.wait_closed().await
     }
@@ -337,12 +370,15 @@ async fn run_reader(
     mut decoder: PgOutputDecoder,
     identity: &VerifiedReplicationIdentity,
     shared: &SessionShared,
-) -> Result<(), PostgresError> {
+) -> Result<ReadHalf<ConnectionStream>, PostgresError> {
     let mut changes = shared.revision.subscribe();
     let mut pending = None;
     loop {
         if shared.state.lock().unwrap().closing {
-            return Ok(());
+            drop(pending);
+            drop(decoder);
+            drain_backend(&mut reader, &mut read_buf, false).await?;
+            return Ok(reader);
         }
         if shared.state.lock().unwrap().feedback.unacked_count() >= MAX_UNACKED_COMMITS {
             changes
@@ -409,9 +445,16 @@ async fn run_reader(
             }
             ReplicationBackendMessage::Standard(Message::CopyDone) => {
                 decoder.finish_clean_eof()?;
-                shared.state.lock().unwrap().reader_eof = true;
-                shared.signal_records();
-                return Ok(());
+                {
+                    let mut state = shared.state.lock().unwrap();
+                    state.reader_eof = true;
+                    state
+                        .deadline
+                        .get_or_insert_with(|| Instant::now() + shared.shutdown_timeout);
+                }
+                shared.signal();
+                drain_backend(&mut reader, &mut read_buf, true).await?;
+                return Ok(reader);
             }
             ReplicationBackendMessage::Standard(Message::ErrorResponse(body)) => {
                 return Err(parse_error_fields(body.fields())?);
@@ -465,41 +508,70 @@ async fn run_writer(
     shared: &SessionShared,
     mut changes: watch::Receiver<u64>,
     interval: Duration,
-    shutdown_timeout: Duration,
-) -> Result<(), PostgresError> {
+) -> Result<WriteHalf<ConnectionStream>, PostgresError> {
     let mut ticks = tokio::time::interval_at(Instant::now() + interval, interval);
     ticks.set_missed_tick_behavior(MissedTickBehavior::Delay);
     loop {
-        if shared.state.lock().unwrap().closing {
-            return tokio::time::timeout(shutdown_timeout, async {
-                write_status(&mut writer, shared).await?;
-                writer
-                    .write_all(b"c\0\0\0\x04")
-                    .await
-                    .map_err(|e| PostgresError::Transport(e.to_string()))?;
-                writer
-                    .flush()
-                    .await
-                    .map_err(|e| PostgresError::Transport(e.to_string()))?;
-                writer
-                    .shutdown()
-                    .await
-                    .map_err(|e| PostgresError::Transport(e.to_string()))?;
-                Ok(())
-            })
-            .await
-            .map_err(|_| PostgresError::Operational("replication shutdown timed out".into()))?;
+        let stopping = {
+            let state = shared.state.lock().unwrap();
+            state.closing || state.reader_eof
+        };
+        if stopping {
+            write_status(&mut writer, shared).await?;
+            writer
+                .write_all(b"c\0\0\0\x04")
+                .await
+                .map_err(|e| PostgresError::Transport(e.to_string()))?;
+            writer
+                .flush()
+                .await
+                .map_err(|e| PostgresError::Transport(e.to_string()))?;
+            return Ok(writer);
         }
         tokio::select! {
-            _ = ticks.tick() => {
-                tokio::select! {
-                    result = write_status(&mut writer, shared) => result?,
-                    _ = changes.changed() => continue,
-                }
-            }
+            _ = ticks.tick() => write_status(&mut writer, shared).await?,
             result = changes.changed() => {
-                if result.is_err() { return Ok(()); }
-                if !shared.state.lock().unwrap().closing { write_status(&mut writer, shared).await?; }
+                if result.is_err() { return Ok(writer); }
+                let stopping = {
+                    let state = shared.state.lock().unwrap();
+                    state.closing || state.reader_eof
+                };
+                if !stopping { write_status(&mut writer, shared).await?; }
+            }
+        }
+    }
+}
+
+async fn drain_backend(
+    reader: &mut ReadHalf<ConnectionStream>,
+    read_buf: &mut BytesMut,
+    mut saw_copy_done: bool,
+) -> Result<(), PostgresError> {
+    let mut saw_command = false;
+    loop {
+        match read_replication_message(reader, read_buf, MAX_BACKEND_FRAME_LENGTH, None).await? {
+            ReplicationBackendMessage::Standard(Message::CopyDone) if !saw_copy_done => {
+                saw_copy_done = true
+            }
+            ReplicationBackendMessage::Standard(Message::CommandComplete(_))
+                if saw_copy_done && !saw_command =>
+            {
+                saw_command = true
+            }
+            ReplicationBackendMessage::Standard(Message::ReadyForQuery(_)) if saw_command => {
+                return Ok(());
+            }
+            ReplicationBackendMessage::Standard(Message::ErrorResponse(body)) => {
+                return Err(parse_error_fields(body.fields())?);
+            }
+            ReplicationBackendMessage::Standard(
+                Message::NoticeResponse(_) | Message::ParameterStatus(_),
+            ) => {}
+            ReplicationBackendMessage::Standard(Message::CopyData(_)) if !saw_copy_done => {}
+            _ => {
+                return Err(PostgresError::Protocol(
+                    "unexpected replication shutdown backend message".into(),
+                ));
             }
         }
     }
