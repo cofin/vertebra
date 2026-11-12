@@ -19,7 +19,7 @@ chapters:
   - ch10-docs-and-okf-sync
   - ch11-product-okf-and-release-gate
 current_chapter: ch01-bridge-stream-frames
-current_task: "server-runtime-correctness:ch01:t02"
+current_task: "server-runtime-correctness:ch01:t04"
 parent_prd: integration-remediation
 depends_on_flows: []
 plan_revision: 2

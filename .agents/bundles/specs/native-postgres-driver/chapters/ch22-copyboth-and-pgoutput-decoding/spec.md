@@ -5,7 +5,7 @@ chapter_id: ch22-copyboth-and-pgoutput-decoding
 title: "Chapter 22: Dedicated CopyBoth Sessions, pgoutput v1 Decoding and Transaction Envelopes, and the Split-State Limitations Record"
 description: Establish dedicated CopyBoth logical replication sessions, decode bounded pgoutput v1 relation, tuple, and transaction change envelopes in vertebra-postgres, and record the split native-wheel/legacy-driver state on main in the PostgreSQL limitations OKF entry.
 status: draft
-state: active
+state: completed
 planning_status: complete
 depends_on_chapters:
   - ch21-live-notifications
@@ -14,10 +14,10 @@ current_task: null
 plan_revision: 7
 plan_commit: c8722c76
 state_revision: 3
-last_verified_checkpoint: 48b50600
-last_reviewed_commit: null
+last_verified_checkpoint: 9c1865b7
+last_reviewed_commit: 9c1865b7
 created_at: "2026-11-05T00:00:00Z"
-updated_at: "2026-11-12T03:00:27Z"
+updated_at: "2026-11-12T03:49:28Z"
 generated:
   by: flow-revise
   at: "2026-11-12T01:30:00Z"
@@ -166,11 +166,11 @@ The `t01` and `t02` canonical task SHAs identify squash `c8722c76` on `main`; th
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Chapter State**: All four tasks are verified and committed; `state: active` and `last_reviewed_commit: null` remain until correctness and fresh quality reviews cover code and synchronized Markdown.
+- **Chapter State**: All four tasks are verified and committed; correctness and fresh quality reviews approve the code and synchronized Markdown at `9c1865b7`. Chapter state is `completed`.
 - **Local Implementation**: `t03` (`2947d015`) supplies transaction frames, ordered records, and bounded queue; `t04` (`48b50600`) supplies the three-file limitations record. The upstream `t01` / `t02` worksheets use canonical squash `c8722c76` and preserve `81048251` / `64288c63` as `original_commit` provenance.
 - **Verification**: Focused pgoutput and replication wire tests, all-target Clippy, and the full `vertebra-postgres --tests` aggregate pass. Documentation structure, source anchors, review manifests, and privacy checks pass. Live PostgreSQL, wheels, and free-threaded acceptance remain downstream gates.
-- **Remaining Tasks in Chapter**: None; review and closeout stamping remain. Flow progress is `82/119` completed tasks, `37` remaining across `ch23`–`ch33`; `21/33` chapters hold completed review stamps.
-- **Downstream Dependents**: After review stamps Chapter 22, `ch23-replication-feedback-resume-and-bridge` becomes the next chapter; `ch24` supplies the change source. Chapters `ch27` and `ch31` maintain the interim limitations record.
+- **Remaining Tasks in Chapter**: None; the chapter is reviewed and complete. Flow progress is `82/119` completed tasks, `37` remaining across `ch23`–`ch33`; `22/33` chapters hold completed review stamps.
+- **Downstream Dependents**: With Chapter 22 reviewed, `ch23-replication-feedback-resume-and-bridge` becomes the next chapter; `ch24` supplies the change source. Chapters `ch27` and `ch31` maintain the interim limitations record.
 
 [^npd-contracts]: `.agents/bundles/specs/native-postgres-driver/contracts.md` — Native PostgreSQL public contracts for CDC, values, and dedicated sessions.
 [^npd-proto-research]: `.agents/bundles/specs/native-postgres-driver/research/protocol-and-execution_20261105.md` — PostgreSQL Protocol 3.0 CopyBoth and pgoutput v1 wire constraints.

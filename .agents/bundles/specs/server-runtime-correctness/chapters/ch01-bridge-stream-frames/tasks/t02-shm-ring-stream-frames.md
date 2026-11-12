@@ -5,7 +5,7 @@ chapter_id: ch01-bridge-stream-frames
 title: Add VRSF stream frames and flag-aware draining to the SHM response rings
 description: Add a flagged VRSF response frame to RingPair alongside VRES, with non-blocking and blocking writers, a maximum stream payload query, a flag-aware drain_frames_with, and Transport wrappers, leaving unary VRES and VROV frames unchanged.
 status: draft
-state: in_progress
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -31,11 +31,11 @@ blocked_reason: null
 unblock_condition: null
 next_step: null
 last_verified_at: null
-last_verified_commit: null
+last_verified_commit: 616f33a8
 verification_evidence: "Red: SHM tests exit 101 (missing stream APIs). Green: 22 SHM integration tests, 41 transport unit tests, all-target core Clippy -D warnings, formatting and whitespace checks exit 0."
 created_at: "2026-11-12T00:45:00Z"
 updated_at: "2026-11-12T00:45:00Z"
-commit: null
+commit: 616f33a8
 generated:
   by: agent:plan-generator
   at: "2026-11-12T00:45:00Z"

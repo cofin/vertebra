@@ -5,7 +5,7 @@ chapter_id: ch01-agent-context-propagation
 title: Pass contexts from native, Litestar fallback, and stdio entry points
 description: Build AgentContext values in AgentPlugin native endpoints and the Litestar fallback endpoint, make the fallback return litestar.Response with core status and headers, mount GET and DELETE alongside POST, and give run_stdio_server one session context.
 status: draft
-state: in_progress
+state: completed
 priority: P0
 verification_strategy: regression_tdd
 depends_on:
@@ -32,11 +32,11 @@ blocked_reason: null
 unblock_condition: null
 next_step: null
 last_verified_at: "2026-11-12T03:51:23Z"
-last_verified_commit: null
+last_verified_commit: c007f853
 verification_evidence: "Red: five native/Litestar/stdio regressions and anonymous task-owner bypass; Green: 55 conformance/CLI tests, Ruff and Mypy, independent full chapter suite 86 passed."
 created_at: "2026-11-12T00:30:00Z"
 updated_at: "2026-11-12T00:30:00Z"
-commit: null
+commit: c007f853
 generated:
   by: agent:plan-generator
   at: "2026-11-12T00:30:00Z"

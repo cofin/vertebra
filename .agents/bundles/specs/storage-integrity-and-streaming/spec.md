@@ -11,8 +11,8 @@ chapters:
   - ch02-write-receipts-and-verified-reads
   - ch03-arrow-streaming-and-integrations
   - ch04-wheel-check-docs-and-okf
-current_chapter: ch01-create-only-copy-and-quality
-current_task: null
+current_chapter: ch02-write-receipts-and-verified-reads
+current_task: "storage-integrity-and-streaming:ch02:t01"
 parent_prd: native-data-platform
 depends_on_flows: []
 research:
@@ -20,11 +20,11 @@ research:
 plan_revision: 2
 plan_commit: c368cb00
 state_revision: 1
-last_verified_checkpoint: da0d764e
-last_reviewed_chapter: null
-last_reviewed_commit: null
+last_verified_checkpoint: 9c1865b7
+last_reviewed_chapter: ch01-create-only-copy-and-quality
+last_reviewed_commit: 9c1865b7
 created_at: "2026-11-12T01:30:00Z"
-updated_at: "2026-11-12T03:33:00Z"
+updated_at: "2026-11-12T03:49:28Z"
 generated:
   by: flow-spec
   at: "2026-11-12T01:30:00Z"
@@ -216,15 +216,15 @@ Progress: `[3/9 files documented]`.
 
 ## 5. Implementation Plan
 
-- [~] ch01-create-only-copy-and-quality ([spec](chapters/ch01-create-only-copy-and-quality/spec.md))
+- [x] [9c1865b7] ch01-create-only-copy-and-quality ([spec](chapters/ch01-create-only-copy-and-quality/spec.md))
 - [ ] ch02-write-receipts-and-verified-reads ([spec](chapters/ch02-write-receipts-and-verified-reads/spec.md))
 - [ ] ch03-arrow-streaming-and-integrations ([spec](chapters/ch03-arrow-streaming-and-integrations/spec.md))
 - [ ] ch04-wheel-check-docs-and-okf ([spec](chapters/ch04-wheel-check-docs-and-okf/spec.md))
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `da0d764e`; `2/12` tasks completed and `0/4` chapters reviewed.
-- **Active Chapter**: `ch01-create-only-copy-and-quality`; both tasks are complete and chapter correctness and quality reviews remain open.
+- **Verified Baseline**: `da0d764e`; `2/12` tasks completed and `1/4` chapters reviewed.
+- **Active Chapter**: `ch02-write-receipts-and-verified-reads`, task `storage-integrity-and-streaming:ch02:t01`; ch01 is complete after correctness and fresh quality reviews at `9c1865b7`.
 - **Remaining Plan**: `ch02` adds SHA-256 receipts and verified reads; `ch03` adds direct Arrow-write capability, integration forwarding, and benchmarks; `ch04` adds wheel checks and completes documentation and upstream draft tracking.
 - **Documentation & OKF Sync**: `[3/9 files documented]`; the storage guide and two knowledge chapters reflect create-only copy, streamed multipart, and provider caveats. Remaining chapter contracts require further documentation updates.
 - **External Dependency**: upstream SQLSpec direct Arrow write hook in `SyncStoragePipeline.write_arrow` / `AsyncStoragePipeline.write_arrow`.

@@ -20,7 +20,7 @@ chapters:
   - ch12-iap-identity-source
   - ch11-docs-and-okf
 current_chapter: ch01-agent-context-propagation
-current_task: "mcp-protocol-completeness:ch01:t04"
+current_task: null
 parent_prd: integration-remediation
 depends_on_flows:
   - server-runtime-correctness

@@ -40,8 +40,8 @@ chapters:
   - ch31-data-and-testing-okf-sync
   - ch32-ffi-okf-and-review-routing-sync
   - ch33-final-review-and-release-gate
-current_chapter: ch22-copyboth-and-pgoutput-decoding
-current_task: null
+current_chapter: ch23-replication-feedback-resume-and-bridge
+current_task: "native-postgres-driver:ch23:t01"
 parent_prd: native-data-platform
 depends_on_flows:
   - driver-fail-loud
@@ -51,11 +51,11 @@ research:
 plan_revision: 7
 plan_commit: c8722c76
 state_revision: 10
-last_verified_checkpoint: 48b50600
-last_reviewed_chapter: ch21-live-notifications
-last_reviewed_commit: c8722c76
+last_verified_checkpoint: 9c1865b7
+last_reviewed_chapter: ch22-copyboth-and-pgoutput-decoding
+last_reviewed_commit: 9c1865b7
 created_at: "2026-11-03T04:05:00Z"
-updated_at: "2026-11-12T03:00:27Z"
+updated_at: "2026-11-12T03:49:28Z"
 generated:
   by: flow-revise
   at: "2026-11-12T01:30:00Z"
@@ -355,7 +355,7 @@ Every worksheet (`119` total across `33` chapters) executes in one bounded invoc
 - [x] [59a6dc09] ch19-native-arrow-batches-and-shm — Lossless PostgreSQL Arrow Schemas, Bounded Scalar/Nested Batch Builders, and IPC-to-SHM Capsules (chapters/ch19-native-arrow-batches-and-shm/spec.md)
 - [x] [40ce977c] ch20-arrow-copy-import-and-portals — Arrow-to-COPY Field Import, Schema-Qualified Streaming Writers, and Sync/Async Arrow Portal Cancellation (chapters/ch20-arrow-copy-import-and-portals/spec.md)
 - [x] [b44e28ca] ch21-live-notifications — Dedicated Notification Session Pump, PendingDeliveryGuard Async Bridge, and Python PostgresNotificationSource (chapters/ch21-live-notifications/spec.md)
-- [~] ch22-copyboth-and-pgoutput-decoding — Dedicated CopyBoth Sessions, Lossless pgoutput v1 Decoding and Transaction Envelopes, and the Split-State Limitations Record (chapters/ch22-copyboth-and-pgoutput-decoding/spec.md)
+- [x] [9c1865b7] ch22-copyboth-and-pgoutput-decoding — Dedicated CopyBoth Sessions, Lossless pgoutput v1 Decoding and Transaction Envelopes, and the Split-State Limitations Record (chapters/ch22-copyboth-and-pgoutput-decoding/spec.md)
 - [ ] ch23-replication-feedback-resume-and-bridge — Durable Commit-Boundary Feedback, Checkpoint-Verified Reconnect Resume, and Cancellation-Safe Replication Bridge (chapters/ch23-replication-feedback-resume-and-bridge/spec.md)
 - [ ] ch24-change-source-and-checkpoints — PostgresChangeSource, PostgresCheckpointStore, Serialized CAS Ack Reconciliation, and Replay/Shutdown Semantics (chapters/ch24-change-source-and-checkpoints/spec.md)
 - [ ] ch25-dsn-bridge-lexer-and-permanent-drivers — URL/libpq Config Bridge, Lexer-Aware Bind Compiler, and Pre-Activation Permanent Sync/Async Drivers (chapters/ch25-dsn-bridge-lexer-and-permanent-drivers/spec.md)
@@ -372,14 +372,13 @@ Every worksheet (`119` total across `33` chapters) executes in one bounded invoc
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Plan and Review Baseline**: `plan_commit: c8722c76`, `state: active`, `plan_revision: 7`; `last_reviewed_chapter` remains `ch21-live-notifications` until Chapter 22 code and synchronized Markdown receive correctness and fresh quality review.
-- **Git Continuity**: Original chapter/task history through `ch21` is retained at `refs/flow/native-postgres-reviewed-history`; original `ch22:t01` / `t02` objects are available locally. These changes are included in `main` squash `c8722c76`; local follow-up commits are `2947d015` (`t03`) and `48b50600` (`t04`).
-- **Split Runtime State**: `vertebra._postgres` ships on `main`; public drivers still use `psycopg_pool` / `asyncio.to_thread`, queues probe `psycopg`, and dialer helpers and legacy tests remain until `ch27`. The local limitations entry documents this boundary.
-- **Active Chapter**: Chapter 22 has `4/4` verified committed tasks and awaits review/stamping; `current_chapter` remains `ch22`, `current_task: null`. Progress is `82/119` completed tasks, `37` remaining in `ch23`–`ch33`, with `21/33` chapters currently stamped completed.
-- **Verification Boundary**: Full `vertebra-postgres --tests`, focused replication tests, all-target Clippy, and documentation checks pass locally. Live PG14–18, wheel/free-threaded, benchmark, and final aggregate acceptance remain downstream work.
-- **Documentation**: `[3/33 files documented]` represents interim limitations and index coverage; `ch27` and `ch31` still maintain those files, while `ch30`–`ch32` complete final synchronization.
-- **Remaining Plan**: `ch23` feedback/resume/bridge; `ch24` change source/checkpoints; `ch25`–`ch27` native drivers and atomic cutover; `ch28` live conformance; `ch29` wheels/benchmarks; `ch30`–`ch32` docs/OKF; `ch33` final verification and routed reviews.
-- **Next Action**: Complete Chapter 22 correctness review followed by fresh quality review, stamp the reviewed head, then advance to `/flow:implement native-postgres-driver ch23`. Push and PR creation require separate permission; intermediate chapters do not trigger finish/archive.
+- **Verified Chapter**: Chapter 22 is completed at reviewed commit `9c1865b7`; correctness, fresh quality, native tests, Clippy, and documentation gates pass.
+- **Progress**: `22/33` chapters and `82/119` tasks are complete; `37` tasks remain. The active pointer is `ch23-replication-feedback-resume-and-bridge`, task `native-postgres-driver:ch23:t01`.
+- **Git Continuity**: Chapters through `ch21` retain original reviewed history under `refs/flow/native-postgres-reviewed-history`. Chapter 22 t01/t02 use squash `c8722c76` with original task provenance; t03/t04 are local commits `2947d015`/`48b50600`.
+- **Runtime Boundary**: Native replication decoding is available locally; public Python drivers still use psycopg and asyncio.to_thread until ch27. Live PG14–18, wheel/free-threaded, benchmark, and release acceptance remain downstream gates.
+- **Documentation**: Interim limitations coverage is `3/33` files; ch27 and ch31 maintain it, and ch30–ch32 finish synchronization.
+- **Remaining Plan**: ch23 feedback/resume/bridge; ch24 change sources/checkpoints; ch25–ch27 native drivers/cutover; ch28 live conformance; ch29 wheels/benchmarks; ch30–ch32 docs/OKF; ch33 final verification.
+- **Next Action**: `/flow:implement native-postgres-driver ch23`. Commits stay local; this chapter boundary does not finish or archive the flow.
 
 [^pg-conn-rs]: `src/rs/vertebra-db/src/connection.rs::TransportStream` — Shared TCP, Unix, TLS, and cloud mTLS stream primitives.
 [^pg-core-rs]: `src/rs/vertebra-db/src/postgres/mod.rs::encode_query_frame` — Shared stateless PostgreSQL wire frame and codec helpers in `vertebra-db`.

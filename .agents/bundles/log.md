@@ -1,5 +1,10 @@
 # Bundle Activity Log
 
+## [2026-11-12T03:49:28Z] chapter-complete | PostgreSQL ch22 and storage ch01
+
+- Correctness and fresh independent quality reviews approve both chapters at `9c1865b7`. Task SHAs and living documentation agree; root pointers advance to each flow’s ch23 and ch02 respectively.
+- PostgreSQL progress is `22/33` chapters and `82/119` tasks; storage is `1/4` chapters and `2/12` tasks. Remaining runtime, integration, wheel, benchmark, and release gates stay open. No hosted write or push occurs.
+
 ## [2026-11-12T03:50:00Z] flow-implement | parallel chapter checkpoints
 
 - Storage ch01 tasks commit as `0658fd1f` and `da0d764e`; fresh native and Python recovery gates pass, source correctness and fresh quality reviews have no material findings. Living documentation reflects conditional copy and incremental uploads.

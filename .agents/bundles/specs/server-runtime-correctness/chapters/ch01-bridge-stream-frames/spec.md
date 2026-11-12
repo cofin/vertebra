@@ -9,7 +9,7 @@ state: active
 planning_status: complete
 depends_on_chapters: []
 replan_trigger: null
-current_task: "server-runtime-correctness:ch01:t02"
+current_task: "server-runtime-correctness:ch01:t04"
 plan_revision: 2
 plan_commit: null
 state_revision: 0
@@ -151,7 +151,7 @@ Progress: `[0/0 files documented in ch01]`; bridge and SHM stream semantics land
 ## 5. Implementation Plan
 
 - [x] [2e4ef248] server-runtime-correctness:ch01:t01 — Add ResponseStreamFrame, StreamDelivery, StreamSink, and submit_stream_frame to BatchBridge (tasks/t01-core-stream-frame-api.md)
-- [ ] server-runtime-correctness:ch01:t02 — Add VRSF stream frames and flag-aware draining to the SHM response rings (tasks/t02-shm-ring-stream-frames.md)
+- [x] [616f33a8] server-runtime-correctness:ch01:t02 — Add VRSF stream frames and flag-aware draining to the SHM response rings (tasks/t02-shm-ring-stream-frames.md)
 - [x] [3a3fab9a] server-runtime-correctness:ch01:t03 — Route stream frames into PendingResponse::streaming through ResponseStreamRegistry and the bridge sink (tasks/t03-response-stream-registry.md)
 - [ ] server-runtime-correctness:ch01:t04 — Route drained VRSF frames through the registry and remove the unreachable ResponseSlot routing path (tasks/t04-shm-reader-stream-routing.md)
 

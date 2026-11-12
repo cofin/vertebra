@@ -5,7 +5,7 @@ chapter_id: ch01-create-only-copy-and-quality
 title: "Chapter 1: Create-Only Copy and Quality"
 description: Copy-if-not-exists strategies for S3/B2 and R2 stores with mock-S3 conflict and success tests, streamed put_multipart, and a sentinel-free ObjectStoreBackend constructor.
 status: stable
-state: active
+state: completed
 planning_status: complete
 depends_on_chapters: []
 replan_trigger: null
@@ -13,10 +13,10 @@ current_task: null
 plan_revision: 2
 plan_commit: c368cb00
 state_revision: 1
-last_verified_checkpoint: da0d764e
-last_reviewed_commit: null
+last_verified_checkpoint: 9c1865b7
+last_reviewed_commit: 9c1865b7
 created_at: "2026-11-12T01:30:00Z"
-updated_at: "2026-11-12T03:33:00Z"
+updated_at: "2026-11-12T03:49:28Z"
 generated:
   by: flow-spec
   at: "2026-11-12T01:30:00Z"
@@ -146,7 +146,7 @@ Chapter `ch04/t02` owns the remaining integrity and streaming documentation.
 
 - **Verified Baseline**: `da0d764e`; `2/2` task commits are complete.
 - **Recovery Checkpoint**: 43 Rust tests, 434 Python tests, focused Clippy, Ruff, and mypy pass; the storage extension is rebuilt from current source.
-- **Chapter Review**: correctness and fresh quality reviews remain open; `last_reviewed_commit` stays null.
+- **Chapter Review**: correctness and fresh quality reviews approve `9c1865b7`; the chapter is completed.
 - **Remaining Plan**: `ch02` receipts and verified reads, `ch03` Arrow capability and integration forwarding, and `ch04` wheel isolation and final docs.
 
 [^store-rs]: `src/rs/vertebra-storage/src/store.rs::ObjectStoreEngine` — Builders, copy, rename.
