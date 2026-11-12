@@ -13,6 +13,7 @@ from vertebra.agent.core.context import (
     ProgressReporter,
     bind_agent_context,
     current_agent_context,
+    reset_agent_context,
 )
 from vertebra.agent.core.cursor import (
     CursorPage,
@@ -122,6 +123,7 @@ __all__ = [
     "authorize",
     "bind_agent_context",
     "current_agent_context",
+    "reset_agent_context",
     "decode_cursor",
     "encode_cursor",
     "execute_tool_calls",
