@@ -24,7 +24,7 @@ tests:
   - src/rs/vertebra-postgres/src/pipeline_guard.rs
 estimated_loc: 225
 plan_revision: 5
-plan_commit: 79eea133
+plan_commit: c8722c76
 state_revision: 0
 claimed_by: null
 claimed_at: null

@@ -149,7 +149,7 @@ class ObjectStoreBackend:
         self._sync_store = sync_store
         self._async_store = async_store
         self._base_path = effective_prefix
-        if store is not None and isinstance(uri, str) and uri.strip() and uri != "memory://":
+        if store is not None and isinstance(uri, str) and uri.strip():
             self.store_uri = uri
             parsed_scheme = urlparse(uri).scheme
             self.protocol = self._normalize_protocol(parsed_scheme or sync_store.scheme)

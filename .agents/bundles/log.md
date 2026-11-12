@@ -1,5 +1,78 @@
 # Bundle Activity Log
 
+## [2026-11-12T20:10:51.550371+00:00] chapter-checkpoint | PostgreSQL single-generation replication
+
+- Chapter 34 completes four tasks at `f520aa6d`, `d99caddf`, `9d4c4258` and `a1340034`. All 48 canonical wire tests, Clippy and package formatting pass.
+- The session owns bounded decoding, independent heartbeats, cancellation-safe delivery leases and one-deadline shutdown. Both knowledge files and the living roadmap are synchronized before correctness and fresh quality review. Task progress is 88/129; 41 tasks remain across 12 subsequent chapters.
+
+## [2026-11-12T15:05:07Z] chapter-complete | PostgreSQL feedback
+
+- Chapter 23 is reviewed at `4700ecbc` after correctness and fresh quality approval. All 23 canonical wire tests, Clippy, formatting and documentation checks pass. Source commits are `64d317cd` and `bbb77ecf`; documentation sync is `3142d692`.
+- The pointer advances to ch34. Full flow progress is 23/36 chapters and 84/129 tasks; 45 tasks remain. Commits remain local.
+
+## [2026-11-12] chapter-review | PostgreSQL feedback quality
+
+- Correctness review finds no production defects; the stale remaining-task count is corrected. Quality findings are adopted: malformed payload cases have independent test identities and the living review summary states current outcomes directly.
+
+## [2026-11-12T14:58:28Z] chapter-checkpoint | PostgreSQL commit-fenced feedback
+
+- Chapter 23 completes two tasks at `64d317cd` and `bbb77ecf`. The native codecs and bounded received/published/acknowledged Commit state pass 18 canonical wire tests, Clippy, and package formatting.
+- PostgreSQL limitations and the full roadmap are synchronized before independent correctness and fresh quality review. The socket pump, reconnect supervisor, Python handle, and downstream release gates remain open.
+
+## [2026-11-12T04:25:15Z] revise-approved | Native PostgreSQL revision 8
+
+- User approval anchors revision 8 to reviewed plan commit `d90d4625`. Revised specifications and worksheets are stable; chapter 23 is ready for `/flow:implement native-postgres-driver ch23`. No production edits or hosted writes occur.
+
+## [2026-11-12T04:16:55Z] revise-candidate | Native PostgreSQL replication seams
+
+- Revision 8 decomposes replication into ch23 feedback, ch34 single-generation sessions, ch35 verified supervision, and ch36 Python publication. The roadmap spans 36 chapters and 129 worksheets; 82 tasks are complete and 47 remain.
+- The draft defines delivery leases, safe transport transfer, and feedback initialization/update contracts. Zero-context plan review and approval are required before implementation resumes. Production and tests are untouched.
+
+## [2026-11-12T04:05:24Z] chapter-complete | Parallel implementation batch
+
+- MCP ch01 and server runtime ch01 are completed after correctness and fresh quality review of `b0578ebc`; chapter/task pointers advance to ch02. PostgreSQL ch22 and storage ch01 retain reviewed checkpoint `9c1865b7`.
+- The batch completes 12 tasks across four chapters with signed local commits. MCP/storage Python validation passes 520 tests with one existing skip; 51 additional agent consumer tests pass. PostgreSQL, storage, core, and HTTP native gates pass.
+- Remaining flow chapters, live service and wheel lanes, benchmarks, and release acceptance stay open. No push or hosted repository mutation occurs.
+
+## [2026-11-12T04:03:34Z] flow-implement | Context and native streaming review checkpoint
+
+- MCP ch01 completes four tasks through `c007f853`; correctness review reproduces and resolves anonymous task-owner access, and fresh quality review approves the implementation and living docs.
+- Runtime ch01 completes four tasks through `f45a5fe8`; SHM reader routing and cleanup pass full core/HTTP tests, four doctests, Clippy, and formatting. Review covers abandoned clients, worker death, blocked sends, and shutdown.
+- Rebuilt the core extension; combined MCP/storage Python validation passes 520 tests with one existing skip, and 51 additional agent consumer tests pass. Final chapter stamp synchronization remains; all commits stay local.
+
+## [2026-11-12T03:49:28Z] chapter-complete | PostgreSQL ch22 and storage ch01
+
+- Correctness and fresh independent quality reviews approve both chapters at `9c1865b7`. Task SHAs and living documentation agree; root pointers advance to each flow’s ch23 and ch02 respectively.
+- PostgreSQL progress is `22/33` chapters and `82/119` tasks; storage is `1/4` chapters and `2/12` tasks. Remaining runtime, integration, wheel, benchmark, and release gates stay open. No hosted write or push occurs.
+
+## [2026-11-12T03:50:00Z] flow-implement | parallel chapter checkpoints
+
+- Storage ch01 tasks commit as `0658fd1f` and `da0d764e`; fresh native and Python recovery gates pass, source correctness and fresh quality reviews have no material findings. Living documentation reflects conditional copy and incremental uploads.
+- MCP ch01 tasks t01–t03 commit as `ff668194`, `7e4129c4`, and `5fccef87`; trusted contexts, cancellation, and adapter forwarding pass focused tests, Ruff, and Mypy.
+- Runtime ch01 t01 and t03 commit as `2e4ef248` and `3a3fab9a`; bridge and registry tests, full HTTP tests, Clippy, and HTTP/3 checks pass. Ordered SHM frames and reader routing remain active work. All commits stay local.
+
+## [2026-11-12T03:00:27Z] flow-implement | native-postgres-driver ch22 pre-review checkpoint
+
+- Completed `ch22:t03` (`2947d015`) with pgoutput v1 transaction frames, ordered bounded replication records, deduplication coordinates, and a backpressured queue; completed `ch22:t04` (`48b50600`) with the limitations entry and its two knowledge index registrations.
+- Focused replication tests, all-target Clippy, full `vertebra-postgres --tests`, documentation structure/source checks, review manifests, privacy, and whitespace checks pass locally. Live database, wheel/free-threaded, and benchmark acceptance remain downstream gates.
+- Synchronized present-tense chapter/root/catalog/knowledge state at `82/119` tasks and `37` remaining; Chapter 22 remains active pending correctness and fresh quality review and closeout stamping. Commits remain local.
+
+## [2026-11-12T02:02:40Z] flow-sync | Review-history continuity and server chapter pointer
+
+- Restored original PostgreSQL review-history objects through `b44e28ca`, retained locally at `refs/flow/native-postgres-reviewed-history`, without changing review stamps or task completion counts.
+- Reconciled ten task commit references in chapters 19–21 to patch-equivalent commits that are ancestors of their existing chapter review stamps. Stable patch IDs match across source, tools, build, and CI paths; corresponding task checklist and snapshot references agree.
+- Set the planned `server-runtime-correctness` chapter/task pointers to `ch01-bridge-stream-frames` / `server-runtime-correctness:ch01:t01`; approval and implementation remain pending.
+
+## [2026-11-12T01:48:00Z] flow-review + flow-spec + flow-revise | PR range 80ff8a65..c8722c76 and 23 GitHub issues
+
+Audited `80ff8a65..c8722c76` across PRs `#80`, `#92`, `#94`, `#101`, `#102`, `#103`, `#104`, `#105`, `#106`, `#107`, and `#108` alongside all `23` open issues in `cofin/vertebra`:
+
+- Verified split wheel/legacy state from PR `#104` (`c8722c76`): `vertebra._postgres` implements `ch01`–`ch21` and `ch22:t01`–`t02` (`80/119` tasks), while `ch22:t03`–`ch33` remain pending and the Python `postgres` adapter cutover stays open.
+- Decomposed six executable `status: draft`, `state: planned` flows (`47` chapters, `144` vertical-slice tasks total): [`broker-pool-sharing`](specs/broker-pool-sharing/spec.md) (`9` chapters, `31` tasks), [`mcp-protocol-completeness`](specs/mcp-protocol-completeness/spec.md) (`12` chapters, `35` tasks), [`server-runtime-correctness`](specs/server-runtime-correctness/spec.md) (`11` chapters, `33` tasks), [`gcp-embeddings-and-identity`](specs/gcp-embeddings-and-identity/spec.md) (`6` chapters, `17` tasks), [`driver-conformance-ci`](specs/driver-conformance-ci/spec.md) (`5` chapters, `16` tasks), and [`storage-integrity-and-streaming`](specs/storage-integrity-and-streaming/spec.md) (`4` chapters, `12` tasks).
+- Revised active [`native-postgres-driver`](specs/native-postgres-driver/spec.md) (`plan_revision: 7`, `plan_commit: c8722c76`, `33` chapters, `119` tasks) adding `ch22:t04` split-state caveats, replacing deleted `build/packaging/pgo.py` references, and reconciling `ch27` with queues and DB-API extraction; resynced both master PRDs (`integration-remediation` at `plan_revision: 10`, `native-data-platform`) and all five remaining draft charters (`native-sqlite-driver`, `native-redis-driver`, `sqlalchemy-and-django-integration`, `sqlspec-adapter-parity`, `queues-tasks-and-channels`).
+- Triaged `23` open GitHub issues: `#89` verified fixed in `#101`; `#100` half-complete (upstream `sqlspec` `StoragePipeline.write_arrow` still buffers); `#115` split to separate `.agents/skills` standalone packaging bug into `mcp-protocol-completeness`; `#59`, `#67`, `#68`, and `#116` deferred in `integration-remediation`; `#81`–`#85`, `#95`–`#99`, and `#109`–`#114` mapped to executable tasks.
+- Synchronized OKF knowledge chapters (plus four new limitation records across `embeddings`, `mcp`, `database-driver`, and `server-runtime`) and re-anchored `57` pre-squash `verified[].commit` SHAs in `.agents/bundles/{knowledge,product}` to their reachable `main` squash commits (`067fa901`, `af1b3d30`, `47da6820`, `14aa83b8`).
+
 ## [2026-11-11T01:53:00Z] flow-implement | native-postgres-driver (ch22:t01-t02 checkpoint)
 
 Completed and verified `native-postgres-driver:ch22:t01` (`81048251`) and `native-postgres-driver:ch22:t02` (`64288c63`) in active Chapter 22 (`ch22-copyboth-and-pgoutput-decoding`, `2/3` tasks complete, raising flow progress to `80/118` tasks on `feat/native-postgres-driver`): shared bounded `protocol::read_frame` + `'W'` `CopyBothResponse` decoding, `PostgresReplicationConnection::{probe_identity, connect_logical, shutdown}` enforcing pre-dial `PoolerMode::Direct | PoolerMode::Session`, parameterized single-`LEFT JOIN` SHA-256 `publication_fingerprint` (PG14 `9` cols / PG15–18 `11` cols with `attnames` and `rowfilter`) and two-stage `pgoutput.c` publication quoting, recursive standalone metadata custom-type preloading (`vector`, `halfvec`, `enum`, `domain`, `range`, PG14+ `multirange`, `array`, `composite`) with zero SQL on `CopyBoth`, incremental `PgOutputDecoder` (`4096`-cap `RelationCache`, mismatch-only `'Y'` invalidation, lossless four-state `'n'`/`'u'`/`'t'`/`'b'` `TupleData`), and pure-Python `PgUnchangedToast` (`PG_UNCHANGED_TOAST`), `PostgresReplicationIdentity`, and GC-tracked `PostgresReplicationRecord` in `src/py/vertebra/db/adapters/postgres/types.py`. Paused cleanly ahead of `native-postgres-driver:ch22:t03` (`Order logical transactions and change envelopes`).
@@ -628,3 +701,11 @@ All 5 chapters and 15 tasks are complete; correctness and fresh quality reviews 
 - **2026-10-20 (`flow-setup` / `align`)**: Revalidated OKF v0.2 bundle integrity across all 36 bundle files (`0` broken links, `0` missing sources, `0` legacy tracker artifacts), backfilled strict OKF v0.2 frontmatter (`type:`, `title:`, `description:`, `status: stable`, `tags:`, and `sources: - resource: ...`) across 29 nested `knowledge/` chapters and sub-indexes, synchronized `knowledge/workflow.md` with `flow-template-v2` sections (`Low-Signal Test & Gate Policy`, `Commits & Checkpoints`, `Knowledge Lifecycle`, `Quality Gates`), and updated `.agents/setup-state.json`.
 - **2026-10-20 (`flow-sync`)**: Synchronized repository baseline to `main` (`0e84dc3` / PR #6 merge) and reconciled OKF v0.2 knowledge base: resolved YAML frontmatter syntax errors in Rust and Python pattern chapters, updated `JSONSerializer` documentation to reflect the clean removal of `orjson` in favor of direct `msgspec.json` + stdlib `json`, clarified TypeScript adapter source paths, and aligned test directory references across operational skills.
 - **2026-10-19 (`flow-setup` / `resynthesize`)**: Initialized and resynthesized OKF v0.2 bundle (`product/`, nested `knowledge/{architecture/{runtime,ipc,http,worker,frontend},domains/{framework,server,ipc,http,frontend},patterns/{python,rust,typescript},testing,gotchas}/`, and customized polyglot `knowledge/workflow.md`) synchronized with commit `6dc6be4`. Configured `shared` Git tracking policy and cleaned up legacy `.agent/`, `.gemini/`, and `.beads/` artifacts.
+
+## Chapter 34 drain-frame review repair
+
+- Adopted the correctness finding that truncated shutdown-drain frames require Protocol rather than Transport classification. Commit `caa4a0fb` passes 49 canonical tests, Clippy, package formatting and diff checks; Red reproduces the original wrong category.
+
+## [2026-11-12T21:09:21.836151+00:00] chapter-closeout | PostgreSQL session
+
+- Correctness and fresh quality reviews approve `f58aa695..6e4e6bfc`; chapter 34 is completed at reviewed checkpoint `6e4e6bfc`. All 49 canonical wire tests and focused native checks pass. The next chapter is ch35; 41 tasks across 12 chapters remain.

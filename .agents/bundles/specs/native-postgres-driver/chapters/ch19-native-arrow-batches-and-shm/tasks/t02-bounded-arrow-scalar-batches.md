@@ -23,7 +23,7 @@ tests:
   - src/rs/vertebra-postgres/tests/postgres_arrow_tests.rs
 estimated_loc: 225
 plan_revision: 5
-plan_commit: 79eea133
+plan_commit: c8722c76
 state_revision: 2
 claimed_by: null
 claimed_at: null
@@ -31,11 +31,11 @@ blocked_reason: null
 unblock_condition: null
 next_step: null
 last_verified_at: "2026-11-10T03:33:33Z"
-last_verified_commit: 3c246fc0
+last_verified_commit: c8722c76
 verification_evidence: "cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --test postgres_arrow_tests (9 passed); cargo fmt --check; cargo clippy -p vertebra-postgres --all-targets -- -D warnings; make review-check"
 created_at: "2026-11-05T18:25:07Z"
 updated_at: "2026-11-10T03:33:33Z"
-commit: 1726c31b
+commit: 4f9242ab
 sources:
   - id: pg-contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md

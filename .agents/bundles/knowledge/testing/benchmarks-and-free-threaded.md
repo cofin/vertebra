@@ -15,13 +15,13 @@ generated:
 verified:
   - by: agent:flow-sync
     at: "2026-11-09T21:46:00Z"
-    commit: 84959389
+    commit: 14aa83b8
   - by: agent:flow-executor
     at: "2026-11-09T15:21:00Z"
-    commit: b02636d9
+    commit: af1b3d30
   - by: agent:flow-setup
     at: "2026-11-07T03:55:00Z"
-    commit: 9af810f5
+    commit: 067fa901
 sources:
   - id: src-makefile
     resource: Makefile

@@ -452,9 +452,7 @@ impl OracleCellValue {
                         .call1((v.to_string(),))
                         .map_err(|e| OracleError::data_error(e.to_string()))
                 } else {
-                    v.into_pyobject(py)
-                        .map(Bound::into_any)
-                        .map_err(|e| OracleError::data_error(e.to_string()))
+                    Ok(PyInt::new(py, v).into_any())
                 }
             }
             Self::Float(f) => {
@@ -467,9 +465,7 @@ impl OracleCellValue {
                         .call1((f.to_string(),))
                         .map_err(|e| OracleError::data_error(e.to_string()))
                 } else {
-                    f.into_pyobject(py)
-                        .map(Bound::into_any)
-                        .map_err(|e| OracleError::data_error(e.to_string()))
+                    Ok(PyFloat::new(py, f).into_any())
                 }
             }
             Self::DecimalStr(s) => {
@@ -479,10 +475,7 @@ impl OracleCellValue {
                     && !s.contains('E')
                     && let Ok(iv) = s.parse::<i64>()
                 {
-                    return iv
-                        .into_pyobject(py)
-                        .map(Bound::into_any)
-                        .map_err(|e| OracleError::data_error(e.to_string()));
+                    return Ok(PyInt::new(py, iv).into_any());
                 }
                 let dec_cls = py
                     .import("decimal")

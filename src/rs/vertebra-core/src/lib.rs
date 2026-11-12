@@ -31,7 +31,10 @@ pub mod util;
 pub mod vector;
 
 // Re-exports for ergonomics
-pub use bridge::{BatchBridge, BridgeResponse, ResponseSink, WriteRequest};
+pub use bridge::{
+    BatchBridge, BridgeResponse, ResponseSink, ResponseStreamFrame, StreamDelivery, StreamSink,
+    WriteRequest,
+};
 pub use broker::{
     BrokerError, LeaseGrant, LeaseSlot, LeaseTableStats, ShmLeaseTable, ShmStatementCache,
     StatementCacheStats, StatementPlanEntry, StatementSlot,

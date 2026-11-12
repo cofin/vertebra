@@ -21,8 +21,8 @@ files:
 tests:
   - src/py/tests/integration/db/test_postgres_features.py
 estimated_loc: 245
-plan_revision: 6
-plan_commit: 8e9b324e
+plan_revision: 8
+plan_commit: d90d4625
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -33,12 +33,15 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-10T14:45:00Z"
+updated_at: "2026-11-12T04:25:15Z"
 commit: null
+generated:
+  by: flow-revise
+  at: "2026-11-12T01:30:00Z"
 verified:
   - by: agent:plan-generator
-    at: "2026-11-10T14:45:00Z"
-    commit: 8e9b324e
+    at: "2026-11-12T01:30:00Z"
+    commit: c8722c76
 sources:
   - id: int-conftest
     resource: src/py/tests/integration/conftest.py::vtb_postgres_config
@@ -121,6 +124,7 @@ Out of scope: Re-implementing protocol-level unit fixtures or duplicating `ch28:
 
 ## Notes & Discoveries
 
+- Notification source naming: this worksheet executes before `queues-tasks-and-channels` t01 splits `NotificationSource` into `SyncNotificationSource` / `AsyncNotificationSource` and renames `PostgresNotificationSource` to `AsyncPostgresNotificationSource` alongside a new `SyncPostgresNotificationSource` (see [native-data-platform](../../../../native-data-platform/spec.md) Seam 2). It keeps the HEAD names, adds no new unprefixed notification protocol, class, or alias, and leaves the rename of every symbol, doc, and OKF reference it touches to that task.
 - Test-owned SQL `embedding(model text, input text) RETURNS vector` validates `PostgresEmbeddingPushdown` bind ordering, vector decoding, and parameterized distance rankings locally without external ML inference calls.
 
 [^int-conftest]: `src/py/tests/integration/conftest.py::vtb_postgres_config` — `VERTEBRA_CONFORMANCE_DOCKER`-gated fixtures for PG, `pgvector` 0.8.1, and SCRAM `PgBouncer` 1.26.0.

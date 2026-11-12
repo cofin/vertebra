@@ -9,7 +9,7 @@ state: pending
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
-  - "native-postgres-driver:ch23:t03"
+  - "native-postgres-driver:ch36:t04"
 read_set:
   - .agents/bundles/specs/native-postgres-driver/contracts.md
   - src/py/vertebra/db/adapters/postgres/events.py
@@ -24,8 +24,8 @@ files:
 tests:
   - src/py/tests/unit/db/test_postgres_change_source.py
 estimated_loc: 240
-plan_revision: 6
-plan_commit: 8e9b324e
+plan_revision: 8
+plan_commit: d90d4625
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -36,15 +36,15 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-10T14:45:00Z"
+updated_at: "2026-11-12T04:25:15Z"
 commit: null
 generated:
   by: flow-revise
-  at: "2026-11-10T14:45:00Z"
+  at: "2026-11-12T01:30:00Z"
 verified:
   - by: agent:plan-generator
-    at: "2026-11-10T14:45:00Z"
-    commit: 8e9b324e
+    at: "2026-11-12T01:30:00Z"
+    commit: c8722c76
 sources:
   - id: npd-contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md
@@ -97,7 +97,7 @@ Extend `src/py/vertebra/db/adapters/postgres/events.py` with `PostgresReplicatio
     - `queue_capacity: int = 1024`
     - `reconnect: bool = True`
     - `checkpoint_timeout: float = 10.0`
-    - `__post_init__` validates identifiers (`slot`, `publication`, `channel`), rejects `bool` for integers, checks `queue_capacity >= 1`, `0 <= start_lsn < 2**64` when not `None`, and `math.isfinite(checkpoint_timeout) and checkpoint_timeout > 0.0`.
+    - `__post_init__` validates identifiers (`slot`, `publication`, `channel`), rejects `bool` for integers, checks `1 <= queue_capacity <= 1024`, `0 <= start_lsn < 2**64` when not `None`, and `math.isfinite(checkpoint_timeout) and checkpoint_timeout > 0.0`.
   - `class PostgresCheckpoint(FrozenBaseStruct, frozen=True, gc=False, kw_only=True):`
     - `system_identifier: str`, `database: str`, `slot: str`, `publication_fingerprint: str`, `commit_end_lsn: int`, `next_event_id: int`
     - Validates non-empty strings, non-bool `0 <= commit_end_lsn < 2**64`, and non-bool `1 <= next_event_id <= 2**63 - 1`.

@@ -26,7 +26,7 @@ tests:
   - src/py/tests/unit/db/test_postgres_native_data.py
 estimated_loc: 245
 plan_revision: 5
-plan_commit: 79eea133
+plan_commit: c8722c76
 state_revision: 2
 claimed_by: null
 claimed_at: null
@@ -34,7 +34,7 @@ blocked_reason: null
 unblock_condition: null
 next_step: null
 last_verified_at: "2026-11-10T04:06:23Z"
-last_verified_commit: fe925db7
+last_verified_commit: c8722c76
 verification_evidence: "make postgres-test -> 0; cargo clippy -p vertebra-postgres --all-targets -- -D warnings -> 0; uv run --no-sync python -m pytest src/py/tests/unit/db/test_postgres_native_data.py -k arrow_count -q -> 28 passed; uv run --no-sync python -m mypy.stubtest vertebra._postgres -> 0"
 created_at: "2026-11-05T18:25:07Z"
 updated_at: "2026-11-10T04:10:58Z"

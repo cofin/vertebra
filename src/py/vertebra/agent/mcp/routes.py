@@ -14,7 +14,7 @@ from vertebra.agent.mcp.client import MCP_NAME_FIELDS, decode_mcp_header_value
 from vertebra.agent.mcp.models import MCP_PROTOCOL_VERSION, MCPConfig, McpHttpRequest, McpHttpResponse
 from vertebra.agent.mcp.registry import ToolRegistry
 from vertebra.agent.mcp.service import CACHEABLE_METHODS, MCPCore
-from vertebra.utils.module_loader import import_optional
+from vertebra.utils.module_loader import MissingDependencyError, import_optional
 from vertebra.utils.portal import Portal, PortalProvider
 from vertebra.utils.serializers import encode_json_bytes
 
@@ -118,6 +118,13 @@ class AsgiMcpApp:
                 path=path,
                 headers=headers,
                 body=body,
+                context=AgentContext.from_headers(
+                    headers,
+                    identity_source=self.config.identity_source,
+                    peer=self._scope_client_host(scope),
+                    user=self._scope_value(scope, "user"),
+                    auth=self._scope_value(scope, "auth"),
+                ),
             )
         )
         raw_headers = [(k.encode("latin-1"), v.encode("latin-1")) for k, v in resp.headers.items()]
@@ -160,6 +167,9 @@ class AsgiMcpApp:
                 path=path,
                 headers=headers,
                 body=raw_body,
+                context=AgentContext.from_scope(scope, identity_source=self.config.identity_source)
+                if isinstance(scope, Mapping)
+                else AgentContext.from_headers(headers, identity_source=self.config.identity_source),
             )
         )
         responses_mod = import_optional("starlette.responses")
@@ -171,6 +181,17 @@ class AsgiMcpApp:
                 media_type=resp.headers.get("content-type", "application/json"),
             )
         return resp.body
+
+    @staticmethod
+    def _scope_value(scope: Any, key: str) -> Any:
+        """Read authenticated scope state without evaluating request properties."""
+        return scope.get(key) if hasattr(scope, "get") else None
+
+    @staticmethod
+    def _scope_client_host(scope: Any) -> str | None:
+        """Read the immediate peer address supplied by the ASGI server."""
+        client = AsgiMcpApp._scope_value(scope, "client")
+        return str(client[0]) if client else None
 
     @staticmethod
     def _extract_scope_headers(scope: Any) -> dict[str, str]:
@@ -251,13 +272,15 @@ class WsgiMcpApp:
             headers = request.headers.as_dict()
             body = bytes(request.body or b"")
             req_id = int(request.request_id)
+            context = AgentContext.from_headers(headers, identity_source=self.config.identity_source)
         else:
             method = default_method.upper()
             path = resolved_path
             headers = {"content-type": "application/json"}
             body = bytes(request)
             req_id = 0
-        resp = self.handle_http(method, path, headers, body)
+            context = AgentContext()
+        resp = self.handle_http(method, path, headers, body, context=context)
         return Response(
             status=resp.status,
             headers=list(resp.headers.items()),
@@ -278,7 +301,8 @@ class WsgiMcpApp:
                 if hasattr(raw_headers, "as_dict")
                 else {str(k): str(v) for k, v in dict(raw_headers).items()}
             )
-            resp = self.handle_http(method, path, headers, bytes(request.body or b""))
+            context = AgentContext.from_headers(headers, identity_source=self.config.identity_source)
+            resp = self.handle_http(method, path, headers, bytes(request.body or b""), context=context)
             return resp.body, resp.status, resp.headers
 
         flask_mod = import_optional("flask")
@@ -288,12 +312,10 @@ class WsgiMcpApp:
             path = str(getattr(fl_req, "path", self.config.path) or self.config.path)
             headers = {str(k): str(v) for k, v in getattr(fl_req, "headers", {}).items()}
             raw = bytes(fl_req.get_data() or b"")
+            context = AgentContext.from_wsgi_environ(fl_req.environ, identity_source=self.config.identity_source)
         else:
-            method = "POST"
-            path = self.config.path
-            headers = {"content-type": "application/json"}
-            raw = b"{}"
-        resp = self.handle_http(method, path, headers, raw)
+            raise MissingDependencyError("flask", install_package="flask")
+        resp = self.handle_http(method, path, headers, raw, context=context)
         return resp.body, resp.status, resp.headers
 
     def __call__(
@@ -314,7 +336,8 @@ class WsgiMcpApp:
         headers = self._extract_wsgi_headers(environ)
         wsgi_in = environ.get("wsgi.input")
         raw = bytes(wsgi_in.read()) if wsgi_in is not None and hasattr(wsgi_in, "read") else b""
-        resp = self.handle_http(method, path, headers, raw)
+        context = AgentContext.from_wsgi_environ(environ, identity_source=self.config.identity_source)
+        resp = self.handle_http(method, path, headers, raw, context=context)
         status_line = f"{resp.status} OK" if resp.status < 400 else f"{resp.status} ERROR"
         start_response(status_line, list(resp.headers.items()))
         return [resp.body]

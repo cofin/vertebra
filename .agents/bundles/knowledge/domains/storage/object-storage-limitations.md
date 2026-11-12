@@ -6,6 +6,7 @@ status: stable
 tags:
 - storage
 - limitations
+- s3
 - r2
 - oci
 - gcs
@@ -13,9 +14,15 @@ generated:
   by: flow/0.28.0
   at: "2026-11-09T00:44:30Z"
 verified:
+- by: agent:flow-sync
+  at: "2026-11-12T03:33:00Z"
+  commit: da0d764e
+- by: agent:flow-sync
+  at: "2026-11-12T01:15:00Z"
+  commit: c8722c76
 - by: agent:flow-implement
   at: "2026-11-09T02:24:00Z"
-  commit: c8c8998a
+  commit: 067fa901
 sources:
 - id: py-store
   resource: src/py/vertebra/storage/_store.py::SyncObjectStore
@@ -25,10 +32,13 @@ sources:
   title: PyO3 buffer extraction for vertebra._storage
 - id: storage-store-rs
   resource: src/rs/vertebra-storage/src/store.rs::ObjectStoreEngine
-  title: Rust ObjectStoreEngine file I/O and compose
+  title: Rust ObjectStoreEngine file I/O, copy, rename, and compose
 - id: storage-oci-rs
   resource: src/rs/vertebra-storage/src/oci.rs::OciObjectStore
   title: Native OCI Object Storage REST backend
+- id: storage-cargo
+  resource: src/rs/vertebra-storage/Cargo.toml
+  title: object_store dependency pin and enabled backends
 ---
 
 # Object Storage Implementation Limitations
@@ -41,6 +51,8 @@ sources:
 - `ObjectStoreEngine::get_file` flushes and atomically renames the `.part` file but does not call `fsync`; durability across power loss depends on the filesystem [^storage-store-rs].
 - Cancellation cleanup (`PartFileGuard`, `CreatedFilesGuard`, `MultipartUploadSession` `Drop`, `ComposeTemporariesGuard`) runs when an aborted Tokio task drops its future; a `tokio::fs` open or rename already running on the blocking pool can still complete after the guard runs, so a `.part` or target file can survive that narrow window [^storage-store-rs].
 - `OciObjectStore::copy_opts` fails closed with `Generic` when `copyObject` returns `202` without an `opc-work-request-id` header because completion cannot be confirmed [^storage-oci-rs].
+- Create-only copy and rename use conditional multipart completion on S3/B2 and the `cf-copy-destination-if-none-match: *` copy header on R2. Providers that reject these primitives surface their backend error; there is no racy read-then-overwrite fallback. Destination conflicts raise `FileExistsError` and preserve the source and destination bytes [^storage-store-rs] [^storage-cargo].
+- Cloud rename copies to the destination before deleting the source, so it is not atomic. A delete failure can leave both keys present [^storage-store-rs].
 - Pooled storage HTTP clients apply a `300 s` total request timeout that also bounds streamed response bodies, so single very large downloads on slow links must use `get_range` windows or `open_reader` [^storage-oci-rs] [^storage-store-rs].
 <!-- truth: end -->
 
@@ -49,8 +61,14 @@ sources:
 - Serve public R2 objects through the custom domain with unsigned URLs or Cloudflare access rules; use presigned URLs only for the S3 API host.
 - Prefer `open_reader(..., read_ahead=...)` or bounded `get_range` loops for multi-gigabyte objects on high-latency links.
 - Parquet batch readers in `vertebra.storage._arrow` pass `read_ahead=0` to `open_reader` so row-group demand paging stays bounded; keep that default when adding new demand-paged codecs.
+- Use `overwrite=False` for create-only copy and rename only with providers supporting the configured conditional primitive. Handle backend refusal explicitly; a successful cloud rename does not provide an atomic move.
+
+## Planned Fixes
+
+The `storage-integrity-and-streaming` flow has open chapters for content-integrity receipts, verified reads, Arrow-write integration, wheel isolation, and complete caveat documentation. `get_file` durability, cancellation cleanup windows, and total request timeouts remain limitations. The R2 presigned-host rule, whole-segment `list(prefix)` matching, and trailing-`/` normalization follow provider and `object_store` semantics and are documented behavior rather than defects.
 
 [^py-store]: `src/py/vertebra/storage/_store.py::SyncObjectStore` — Python `SyncObjectStore` and `AsyncObjectStore` facades.
 [^storage-lib-rs]: `src/rs/vertebra-storage/src/lib.rs::extract_buffer_bytes` — PyO3 buffer extraction for `vertebra._storage`.
 [^storage-store-rs]: `src/rs/vertebra-storage/src/store.rs::ObjectStoreEngine` — Rust `ObjectStoreEngine` file I/O and compose.
 [^storage-oci-rs]: `src/rs/vertebra-storage/src/oci.rs::OciObjectStore` — Native OCI Object Storage REST backend.
+[^storage-cargo]: `src/rs/vertebra-storage/Cargo.toml` — `object_store = "0.13.2"` dependency with the `aws`, `gcp`, `azure`, and `http` features.

@@ -9,9 +9,15 @@ tags:
 - object-store
 - signing
 verified:
+- by: agent:flow-sync
+  at: "2026-11-12T03:33:00Z"
+  commit: da0d764e
+- by: agent:flow-sync
+  at: '2026-11-12T01:15:00Z'
+  commit: c8722c76
 - by: agent:docs-okf-specialist
   at: '2026-11-09T02:24:00Z'
-  commit: c8c8998a
+  commit: 067fa901
 sources:
 - id: core-gcp-auth
   resource: src/rs/vertebra-core/src/gcp_auth.rs
@@ -94,7 +100,7 @@ sources:
 - `extract_buffer_bytes` keeps `StorageBuffer` and `bytes` zero-copy (`PyBackedBytes`) and copies any other C-contiguous `u8` buffer synchronously before releasing the GIL, so callers may mutate `bytearray` sources afterwards [^storage-lib].
 - Object keys collapse empty `/` and `.` segments in Python before passing `StorePath::parse`, so spaces, `%`, `~`, and non-ASCII characters are stored verbatim while `..` segments raise `ValueError` [^storage-store] [^py-store].
 - `get_range` rejects `offset + length` overflow with `ValueError` and answers `length == 0` with a `head` check and empty bytes [^storage-store].
-- `StorageError::Precondition` maps to `vertebra.typing.PreconditionError` (an `OSError`); `AlreadyExists` maps to `FileExistsError`, so `if_not_exists=True`, `copy(..., overwrite=False)`, and `rename(..., overwrite=False)` raise `FileExistsError` while `if_match` / `if_none_match` failures raise `PreconditionError` [^storage-lib] [^py-typing].
+- `StorageError::Precondition` maps to `vertebra.typing.PreconditionError` (an `OSError`); `AlreadyExists` maps to `FileExistsError`, so `if_not_exists=True`, `copy(..., overwrite=False)`, and `rename(..., overwrite=False)` raise `FileExistsError` while `if_match` / `if_none_match` failures raise `PreconditionError`; S3/B2 use conditional multipart completion and R2 uses `cf-copy-destination-if-none-match: *`, while unsupported provider conditions fail with the backend error [^storage-lib] [^py-typing] [^storage-store].
 - GCS `if_match` accepts a numeric generation directly or resolves a matching ETag to the object generation before a conditional `PutMode::Update` [^storage-store].
 - `OciObjectStore` streams GET bodies (`bytes_stream`) instead of buffering whole objects [^storage-oci].
 - `put_file` / `get_file` stream files over 8 MiB in parts; `get_file` writes a `.part` sibling and renames it into place; `get_files` / `put_files` run with bounded `buffer_unordered(concurrency)` and keep results in input order [^storage-store].
@@ -106,7 +112,7 @@ sources:
 - Framework adapters accept only an explicit store, `StorageConfig`, or URI; `vertebra.extensions.django` exports Django integration types only, so stores and configs import from `vertebra.storage` [^ext-alchemy-storage] [^ext-sqlspec-storage] [^ext-django-storage].
 <!-- truth: end -->
 
-Known caveats (R2 custom domains, `fsync`, cancellation windows, request timeouts) live in [Object Storage Implementation Limitations](object-storage-limitations.md).
+Known caveats (R2 custom domains, non-atomic cloud rename, unsupported provider conditions, `fsync`, cancellation windows, request timeouts) live in [Object Storage Implementation Limitations](object-storage-limitations.md).
 
 ## Rust Engine
 
@@ -120,6 +126,8 @@ Known caveats (R2 custom domains, `fsync`, cancellation windows, request timeout
 
 Provider configs are frozen `msgspec.Struct` types implementing `to_url_and_options()`; constructors require an explicit target, raise `ImproperConfigurationError` for `None`, empty, or unsupported targets, and raise `MissingDependencyError` (`vertebra-core[storage]`) when `vertebra._storage` is absent [^py-store]. Configs with credentials derive `SigningConfig` automatically: S3 and R2 access keys, GCS service-account identities, Azure shared keys, and OCI PAR tokens or prefixes [^py-store]. GCS stores without `access_token` or `target_service_account` build a token cache from their options when none is supplied [^py-store].
 
+`put_multipart(path, parts)` accepts a synchronous buffer iterable on both store facades and delegates to the incremental `put_stream` path. Each part reaches the native upload before the next part is requested, and producer failure aborts the upload before publishing.
+
 `SyncWritableFile` and `AsyncWritableFile` copy writes into a rolling buffer, create the multipart upload lazily on the first full part or on close, and abort on `abort()`, an escaping exception, or (sync only) collection; an unclosed async writer emits `ResourceWarning` [^py-store]. `SyncReadableFile` and `AsyncReadableFile` iterate from offset zero with `get_stream`; `read` serves requests shorter than `read_ahead` from one cached `get_range` window and issues larger reads directly, while `read_at` reads without moving the cursor [^py-store].
 
 ## Arrow and Parquet
@@ -130,7 +138,7 @@ Batch codecs drain each encoded chunk into native `put_stream` before advancing 
 
 `parse_byte_range` resolves one closed, open-ended, or suffix range and raises `RangeNotSatisfiableError` for malformed or unsatisfiable input; `StreamingStorageResponse.from_sync_store` / `from_async_store` perform one `head` and produce `200`, `206`, or an empty `416` with `Content-Range: bytes */<size>` [^py-streaming]. Async stores must await `to_async_fastpath_tuple()`; `to_fastpath_tuple()` rejects async stores [^py-streaming].
 
-`ObjectStoreLitestarStore` stores a versioned `VTBSTORE\x01` MessagePack envelope with the expiry deadline so TTL survives reconstruction, and `ObjectStoreFileSystemAdapter` confines static GET/HEAD to a base path [^ext-litestar-store]. Advanced Alchemy `ObjectStoreBackend` and `register_storage_backend` forward `signing` and `token_cache` only when building from a config or URI and reject them with a prebuilt store [^ext-alchemy-storage]. SQLSpec `ObjectStoreBackend` implements the `*_sync` / `*_async` protocol and delegates `read_arrow_*` to whole-table reads and `stream_arrow_*` to batch readers; like the Alchemy backend, it forwards `signing` and `token_cache` only when building from a config or URI, raises `ImproperConfigurationError` when they accompany a prebuilt store, and lets native signing errors propagate unchanged [^ext-sqlspec-storage]. `DjangoStorage` subclasses Django `Storage`, deconstructs for migrations, and returns `File` handles over `SyncReadableFile` [^ext-django-storage].
+`ObjectStoreLitestarStore` stores a versioned `VTBSTORE\x01` MessagePack envelope with the expiry deadline so TTL survives reconstruction, and `ObjectStoreFileSystemAdapter` confines static GET/HEAD to a base path [^ext-litestar-store]. Advanced Alchemy `ObjectStoreBackend` and `register_storage_backend` forward `signing` and `token_cache` only when building from a config or URI and reject them with a prebuilt store [^ext-alchemy-storage]. SQLSpec `ObjectStoreBackend` honors an explicit nonempty URI, including `"memory://"`, with a prebuilt store; an omitted or blank URI uses that store's URL. It implements the `*_sync` / `*_async` protocol and delegates `read_arrow_*` to whole-table reads and `stream_arrow_*` to batch readers; like the Alchemy backend, it forwards `signing` and `token_cache` only when building from a config or URI, raises `ImproperConfigurationError` when they accompany a prebuilt store, and lets native signing errors propagate unchanged [^ext-sqlspec-storage]. `DjangoStorage` subclasses Django `Storage`, deconstructs for migrations, and returns `File` handles over `SyncReadableFile` [^ext-django-storage].
 
 ## Tests
 

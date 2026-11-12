@@ -24,7 +24,7 @@ tests:
   - src/rs/vertebra-postgres/tests/postgres_copy_wire_tests.rs
 estimated_loc: 220
 plan_revision: 5
-plan_commit: 79eea133
+plan_commit: c8722c76
 state_revision: 0
 claimed_by: null
 claimed_at: null

@@ -2,8 +2,8 @@
 type: Task
 id: "native-postgres-driver:ch27:t03"
 chapter_id: ch27-atomic-cutover-and-legacy-removal
-title: Remove unreachable _LegacyAsyncPostgreSQLDriver implementation from driver.py
-description: Delete the unreferenced private _LegacyAsyncPostgreSQLDriver class and async-only imports from vertebra.db.adapters.postgres.driver while retaining import asyncio for _LegacySyncPostgreSQLDriver until ch27:t04.
+title: Remove the legacy async driver and dialer psycopg/asyncpg connect helpers
+description: Delete the unreferenced private _LegacyAsyncPostgreSQLDriver and its async-only imports from driver.py (retaining import asyncio for _LegacySyncPostgreSQLDriver until ch27:t04) and delete the psycopg/asyncpg connect factories from the Cloud SQL and AlloyDB dialers.
 status: stable
 state: pending
 priority: P1
@@ -12,19 +12,23 @@ depends_on:
   - "native-postgres-driver:ch27:t02"
 read_set:
   - src/py/vertebra/db/adapters/postgres/driver.py
-  - src/py/vertebra/db/adapters/postgres/__init__.py
+  - src/py/vertebra/db/dialer/cloudsql.py
+  - src/py/vertebra/db/dialer/alloydb.py
   - src/py/tests/unit/db/test_postgres_driver.py
-  - src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py
+  - src/py/tests/unit/extensions/test_gcp_adapters_and_sqlalchemy.py
   - .agents/bundles/specs/native-postgres-driver/contracts.md
 files:
   - src/py/vertebra/db/adapters/postgres/driver.py
+  - src/py/vertebra/db/dialer/cloudsql.py
+  - src/py/vertebra/db/dialer/alloydb.py
 tests:
   - src/py/tests/unit/db/test_postgres_driver.py
   - src/py/tests/unit/db/test_postgres_native_adapters.py
   - src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py
-estimated_loc: 200
-plan_revision: 6
-plan_commit: 8e9b324e
+  - src/py/tests/unit/extensions/test_gcp_adapters_and_sqlalchemy.py
+estimated_loc: 240
+plan_revision: 8
+plan_commit: d90d4625
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -35,16 +39,25 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-10T14:45:00Z"
+updated_at: "2026-11-12T04:25:15Z"
 commit: null
+generated:
+  by: flow-revise
+  at: "2026-11-12T01:30:00Z"
 verified:
   - by: agent:plan-generator
-    at: "2026-11-10T14:45:00Z"
-    commit: 8e9b324e
+    at: "2026-11-12T01:30:00Z"
+    commit: c8722c76
 sources:
   - id: pg-driver-mod
     resource: src/py/vertebra/db/adapters/postgres/driver.py::AsyncPostgreSQLDriver
-    title: Public PostgreSQL driver module containing temporary _LegacyAsyncPostgreSQLDriver remnant
+    title: Public PostgreSQL driver module containing the temporary _LegacyAsyncPostgreSQLDriver remnant after ch27:t01
+  - id: dialer-cloudsql
+    resource: src/py/vertebra/db/dialer/cloudsql.py::SyncCloudSQLDialer
+    title: Cloud SQL dialers carrying create_psycopg_connect_func and create_asyncpg_connect_func
+  - id: dialer-alloydb
+    resource: src/py/vertebra/db/dialer/alloydb.py::SyncAlloyDBDialer
+    title: AlloyDB dialers carrying create_psycopg_connect_func and create_asyncpg_connect_func
   - id: pg-contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md
     title: Final activation and dead-body removal invariants
@@ -52,60 +65,71 @@ tags:
   - postgres
   - cutover
   - cleanup
-  - async
+  - dialers
 ---
 
-# Task t03: Remove Unreachable `_LegacyAsyncPostgreSQLDriver` Implementation from `driver.py`
+# Task t03: Remove the Legacy Async Driver and Dialer psycopg/asyncpg Connect Helpers
 
 ## Objective & Scope Boundary
 
-Delete the unreachable private `_LegacyAsyncPostgreSQLDriver` class and all imports referenced exclusively by it (`inspect`, `anyio.CancelScope`, `AsyncIterator`, `Awaitable`, `AsyncDatabaseDriver`, etc.) from `src/py/vertebra/db/adapters/postgres/driver.py` after `ch27:t01`–`t02` complete public cutover, while explicitly retaining `import asyncio` until `ch27:t04` because `_LegacySyncPostgreSQLDriver._publish_notification` still references `asyncio` [^pg-driver-mod] [^pg-contracts].
+After `ch27:t01`–`t02` switch every public path to the native drivers:
 
-Out of scope: Deleting `_LegacySyncPostgreSQLDriver` or `import asyncio` (`ch27:t04`), updating `PostgreSQLQueueBackend` (`ch27:t04`), or modifying `_async.py`, `_sync.py`, `core.py`, or any test file.
+1. Delete `_LegacyAsyncPostgreSQLDriver` and the imports used only by it (`inspect`, `anyio.CancelScope`, `AsyncIterator`, `Awaitable`, `AsyncDatabaseDriver`) from `src/py/vertebra/db/adapters/postgres/driver.py`, keeping `import asyncio` because `_LegacySyncPostgreSQLDriver._publish_notification` uses it until `ch27:t04` [^pg-driver-mod] [^pg-contracts].
+2. Delete `SyncCloudSQLDialer.create_psycopg_connect_func` and `AsyncCloudSQLDialer.create_asyncpg_connect_func` from `src/py/vertebra/db/dialer/cloudsql.py`, and `SyncAlloyDBDialer.create_psycopg_connect_func` and `AsyncAlloyDBDialer.create_asyncpg_connect_func` from `src/py/vertebra/db/dialer/alloydb.py`, together with any import used only by them (for example `import_optional` if no other caller remains) [^dialer-cloudsql] [^dialer-alloydb].
+
+Out of scope: `_LegacySyncPostgreSQLDriver`, `import asyncio`, and `PostgreSQLQueueBackend` (`ch27:t04`); native dialer helpers (`CloudSQLConfig`, `AlloyDBConfig`, ephemeral certificate and `MetadataExchange` helpers); `_async.py`, `_sync.py`, `core.py`; user documentation (`ch30:t03`).
 
 ## Bounded Read Manifest
 
-- [src/py/vertebra/db/adapters/postgres/driver.py](../../../../../../../src/py/vertebra/db/adapters/postgres/driver.py) — Barrel exports plus `_LegacyAsyncPostgreSQLDriver` body slated for deletion (`_LegacySyncPostgreSQLDriver._publish_notification` keeps `import asyncio` alive until `t04`) [^pg-driver-mod].
-- [src/py/vertebra/db/adapters/postgres/__init__.py](../../../../../../../src/py/vertebra/db/adapters/postgres/__init__.py) — Package export map confirming zero `_LegacyAsyncPostgreSQLDriver` references.
-- [src/py/tests/unit/db/test_postgres_driver.py](../../../../../../../src/py/tests/unit/db/test_postgres_driver.py) — Canonical PostgreSQL unit suite used as characterization baseline.
-- [src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py](../../../../../../../src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py) — SQLSpec and SQLAlchemy PostgreSQL regression suite.
-- [.agents/bundles/specs/native-postgres-driver/contracts.md](../../../contracts.md) — Delivered barrel cleanliness contract [^pg-contracts].
+- `src/py/vertebra/db/adapters/postgres/driver.py::{_LegacyAsyncPostgreSQLDriver, _LegacySyncPostgreSQLDriver}` — bodies and imports after `t01` [^pg-driver-mod].
+- `src/py/vertebra/db/dialer/cloudsql.py::{SyncCloudSQLDialer.create_psycopg_connect_func, AsyncCloudSQLDialer.create_asyncpg_connect_func}` [^dialer-cloudsql].
+- `src/py/vertebra/db/dialer/alloydb.py::{SyncAlloyDBDialer.create_psycopg_connect_func, AsyncAlloyDBDialer.create_asyncpg_connect_func}` [^dialer-alloydb].
+- `src/py/tests/unit/db/test_postgres_driver.py::test_database_registry_attaches_cloudsql_and_alloydb_dialers_to_postgres_drivers` — dialer attachment characterization.
+- `src/py/tests/unit/extensions/test_gcp_adapters_and_sqlalchemy.py` — Cloud SQL / AlloyDB + SQLAlchemy characterization.
+- [contracts.md](../../../contracts.md) — barrel cleanliness [^pg-contracts].
 
 ## Symbol & Signature Contracts
 
-- `src/py/vertebra/db/adapters/postgres/driver.py`:
-  - Retain `from vertebra.db.adapters.postgres._async import AsyncPostgreSQLDriver`, `from vertebra.db.adapters.postgres._sync import SyncPostgreSQLDriver`, `__all__ = ("AsyncPostgreSQLDriver", "SyncPostgreSQLDriver")`, and temporary `_LegacySyncPostgreSQLDriver` (including `import asyncio` referenced by `_LegacySyncPostgreSQLDriver._publish_notification` and only the remaining imports still used by `_LegacySyncPostgreSQLDriver` until `ch27:t04`).
-  - Zero references to `_LegacyAsyncPostgreSQLDriver`, `_async_executor`, or `asyncpg` remain in `src/py/vertebra/db/adapters/postgres/driver.py`.
+- `driver.py` keeps the permanent re-exports, `__all__ = ("AsyncPostgreSQLDriver", "SyncPostgreSQLDriver")`, `_LegacySyncPostgreSQLDriver`, `import asyncio`, and only the imports `_LegacySyncPostgreSQLDriver` still uses; zero `_LegacyAsyncPostgreSQLDriver`, `asyncpg`, or `CancelScope` references remain.
+- `cloudsql.py` and `alloydb.py` keep every other public method on `SyncCloudSQLDialer`, `AsyncCloudSQLDialer`, `SyncAlloyDBDialer`, and `AsyncAlloyDBDialer`; `git grep -n -E "create_(psycopg|asyncpg)_connect_func" -- src/py` prints nothing.
+- Docstrings on the dialer classes stop mentioning `psycopg`/`asyncpg` (verified by `tools.docs.scan_public_docstrings`).
 
 ## Edge Cases & Error Semantics
 
-- Retaining `import asyncio` prevents `F821` / `NameError` inside `_LegacySyncPostgreSQLDriver._publish_notification` during Ruff and Mypy validation between `t03` and `t04`.
-- Removing `_LegacyAsyncPostgreSQLDriver` leaves `AsyncPostgreSQLDriver` and `SyncPostgreSQLDriver` class identity, MRO, `__module__`, and runtime error mapping unchanged.
-- All characterization tests pass unchanged before and after deletion without relaxing assertions.
+- Retaining `import asyncio` keeps Ruff `F821` and Mypy clean inside `_LegacySyncPostgreSQLDriver._publish_notification` between `t03` and `t04`.
+- Removing `_LegacyAsyncPostgreSQLDriver` leaves `AsyncPostgreSQLDriver` identity, MRO, `__module__`, and error mapping unchanged.
+- A caller of a deleted dialer factory gets `AttributeError`; no alias or deprecation shim is added.
+- Characterization tests pass unchanged before and after deletion; if any test referenced a deleted factory, it is removed rather than rewritten against a shim.
 
 ## Public-Seam Test Blueprint
 
-- **Canonical characterization files**: `src/py/tests/unit/db/test_postgres_driver.py`, `src/py/tests/unit/db/test_postgres_native_adapters.py`, `src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py`.
+- **Canonical characterization files**: `src/py/tests/unit/db/test_postgres_driver.py`, `src/py/tests/unit/db/test_postgres_native_adapters.py`, `src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py`, `src/py/tests/unit/extensions/test_gcp_adapters_and_sqlalchemy.py`.
 - **Worked Test Matrix**:
 
 | Case | Input | Expected Output / Error |
 | --- | --- | --- |
-| Public barrel & module namespace check | `import vertebra.db.adapters.postgres.driver as drv; hasattr(drv, "_LegacyAsyncPostgreSQLDriver")` | `False`, while `drv.AsyncPostgreSQLDriver` and `drv.SyncPostgreSQLDriver` remain bound to `._async` and `._sync` and `driver.py` passes Ruff/Mypy with `import asyncio` intact for `_LegacySyncPostgreSQLDriver`. |
-| Full PostgreSQL unit & extension characterization | Run pre-deletion and post-deletion pytest + Ruff + Mypy across PostgreSQL adapter, pipeline, Arrow, event, embedding, SQLSpec, tenant, and SQLAlchemy suites | Identical `0`-exit pass counts with zero unused-import (`F401`) or undefined-name (`F821`) warnings and zero Mypy errors. |
+| Barrel namespace | `import vertebra.db.adapters.postgres.driver as drv; hasattr(drv, "_LegacyAsyncPostgreSQLDriver")` | `False`; `drv.AsyncPostgreSQLDriver.__module__ == "vertebra.db.adapters.postgres._async"`. |
+| Dialer surface | `hasattr(SyncCloudSQLDialer, "create_psycopg_connect_func")`, `hasattr(AsyncCloudSQLDialer, "create_asyncpg_connect_func")`, `hasattr(SyncAlloyDBDialer, "create_psycopg_connect_func")`, `hasattr(AsyncAlloyDBDialer, "create_asyncpg_connect_func")` (parametrized in `test_postgres_driver.py`) | Each `False`. |
+| Registry dialer attachment | `test_database_registry_attaches_cloudsql_and_alloydb_dialers_to_postgres_drivers` | Passes unchanged. |
+| Full characterization | Pre- and post-deletion pytest + Ruff + Mypy across PostgreSQL adapter, pipeline, Arrow, event, embedding, SQLSpec, tenant, SQLAlchemy, and GCP adapter suites | Identical pass counts, zero `F401`/`F821`, zero Mypy errors. |
 
 ## Verification
 
-- Pre-deletion characterization baseline: `uv run --no-sync pytest src/py/tests/unit/db/test_postgres_driver.py src/py/tests/unit/db/test_postgres_native_adapters.py src/py/tests/unit/db/test_postgres_native_adapter_pipeline.py src/py/tests/unit/db/test_postgres_native_adapter_arrow.py src/py/tests/unit/db/test_postgres_event_hooks.py src/py/tests/unit/embeddings/test_google_embedders.py src/py/tests/unit/db/test_native_db_drivers.py src/py/tests/unit/db/test_enterprise_olap_drivers.py src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py src/py/tests/unit/extensions/test_gcp_adapters_and_sqlalchemy.py -q`
-- Post-deletion characterization + lint + typecheck gate: `uv run --no-sync pytest src/py/tests/unit/db/test_postgres_driver.py src/py/tests/unit/db/test_postgres_native_adapters.py src/py/tests/unit/db/test_postgres_native_adapter_pipeline.py src/py/tests/unit/db/test_postgres_native_adapter_arrow.py src/py/tests/unit/db/test_postgres_event_hooks.py src/py/tests/unit/embeddings/test_google_embedders.py src/py/tests/unit/db/test_native_db_drivers.py src/py/tests/unit/db/test_enterprise_olap_drivers.py src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py src/py/tests/unit/extensions/test_gcp_adapters_and_sqlalchemy.py -q && uv run --no-sync ruff check src/py/vertebra/db/adapters/postgres && uv run --no-sync mypy src/py/vertebra/db/adapters/postgres src/py/vertebra/extensions`
+- Pre-deletion baseline: `uv run --no-sync pytest src/py/tests/unit/db/test_postgres_driver.py src/py/tests/unit/db/test_postgres_native_adapters.py src/py/tests/unit/db/test_postgres_native_adapter_pipeline.py src/py/tests/unit/db/test_postgres_native_adapter_arrow.py src/py/tests/unit/db/test_postgres_event_hooks.py src/py/tests/unit/embeddings/test_google_embedders.py src/py/tests/unit/db/test_native_db_drivers.py src/py/tests/unit/db/test_enterprise_olap_drivers.py src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py src/py/tests/unit/extensions/test_gcp_adapters_and_sqlalchemy.py -q`
+- Post-deletion gate: the same pytest command, then `PYTHONPATH="src/py:." uv run --no-sync python -m tools.docs.scan_public_docstrings --check-leaks --check-overloads --check-typeddicts src/py/vertebra/db/adapters/postgres src/py/vertebra/db/dialer && uv run --no-sync ruff check src/py/vertebra/db/adapters/postgres src/py/vertebra/db/dialer && uv run --no-sync mypy src/py/vertebra/db src/py/vertebra/extensions && test -z "$(git grep -n -E 'create_(psycopg|asyncpg)_connect_func|_LegacyAsyncPostgreSQLDriver' -- src/py)"`
 
 ## Acceptance Criteria
 
-- [ ] `_LegacyAsyncPostgreSQLDriver` and all imports used exclusively by it are deleted from `src/py/vertebra/db/adapters/postgres/driver.py`, while `import asyncio` stays intact for `_LegacySyncPostgreSQLDriver._publish_notification` until `ch27:t04` (R24).
-- [ ] Baseline and post-deletion characterization, Ruff, and Mypy commands pass with zero test modifications or behavioral drift (R24).
+- [ ] `_LegacyAsyncPostgreSQLDriver` and its exclusive imports are deleted from `driver.py` with `import asyncio` retained for `t04` (R24).
+- [ ] The four dialer `psycopg`/`asyncpg` connect factories and their exclusive imports are deleted without shims (R24).
+- [ ] Characterization, docstring scan, Ruff, and Mypy pass with no relaxed assertions (R24).
+- [ ] Commit message follows `refactor(postgres): remove legacy async driver and third-party dialer factories` once verified.
 
 ## Notes & Discoveries
 
-- Keep `_LegacySyncPostgreSQLDriver` and `import asyncio` untouched in this commit so `ch27:t04` deletes them cleanly alongside the `PostgreSQLQueueBackend` dependency-guard cutover.
+- No repository code, test, or doc calls the dialer factories at `c8722c76` (`git grep -n create_psycopg_connect_func` matches only their definitions).
 
-[^pg-driver-mod]: `src/py/vertebra/db/adapters/postgres/driver.py::AsyncPostgreSQLDriver` — Public PostgreSQL driver module containing temporary `_LegacyAsyncPostgreSQLDriver` remnant.
+[^pg-driver-mod]: `src/py/vertebra/db/adapters/postgres/driver.py::AsyncPostgreSQLDriver` — Public PostgreSQL driver module containing the temporary `_LegacyAsyncPostgreSQLDriver` remnant after `ch27:t01`.
+[^dialer-cloudsql]: `src/py/vertebra/db/dialer/cloudsql.py::SyncCloudSQLDialer` — Cloud SQL dialers carrying `create_psycopg_connect_func` and `create_asyncpg_connect_func`.
+[^dialer-alloydb]: `src/py/vertebra/db/dialer/alloydb.py::SyncAlloyDBDialer` — AlloyDB dialers carrying `create_psycopg_connect_func` and `create_asyncpg_connect_func`.
 [^pg-contracts]: `.agents/bundles/specs/native-postgres-driver/contracts.md` — Final activation and dead-body removal invariants.

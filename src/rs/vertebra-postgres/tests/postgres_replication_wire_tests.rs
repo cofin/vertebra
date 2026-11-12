@@ -2356,3 +2356,1267 @@ async fn replication_identity_publication_fingerprint_tracks_flags_tables_attnam
         assert_ne!(&baseline, other);
     }
 }
+
+#[test]
+fn feedback_wire_xlogdata_preserves_fields_and_borrowed_payload() {
+    use _postgres::replication::feedback::{ReplicationCopyData, decode_replication_copy_data};
+    let empty = [
+        b'w', 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 2, 0, 0, 0x90, 0, 255, 255, 255, 255, 255, 255, 255,
+        249,
+    ];
+    let ReplicationCopyData::XLogData {
+        wal_start,
+        wal_end,
+        server_time_pg_us,
+        payload,
+    } = decode_replication_copy_data(&empty).unwrap()
+    else {
+        panic!("expected XLogData")
+    };
+    assert_eq!(
+        (wal_start, wal_end, server_time_pg_us),
+        (0x1_0000_0100, 0x2_0000_9000, -7)
+    );
+    assert!(payload.is_empty());
+    let mut nonempty = empty.to_vec();
+    nonempty.extend_from_slice(&[0, 255, 66]);
+    let ReplicationCopyData::XLogData {
+        wal_start,
+        wal_end,
+        server_time_pg_us,
+        payload,
+    } = decode_replication_copy_data(&nonempty).unwrap()
+    else {
+        panic!("expected XLogData")
+    };
+    assert_eq!(
+        (wal_start, wal_end, server_time_pg_us),
+        (0x1_0000_0100, 0x2_0000_9000, -7)
+    );
+    assert_eq!(payload, [0, 255, 66]);
+    assert_eq!(payload.as_ptr(), nonempty[25..].as_ptr());
+}
+
+#[test]
+fn feedback_wire_keepalive_and_status_match_golden_bytes() {
+    use _postgres::replication::feedback::{
+        ReplicationCopyData, decode_replication_copy_data, encode_standby_status_update,
+    };
+    let frame = [
+        b'k', 0, 0, 0, 2, 0, 0, 0x10, 0, 255, 255, 255, 255, 255, 255, 255, 255, 1,
+    ];
+    let ReplicationCopyData::PrimaryKeepalive {
+        wal_end,
+        server_time_pg_us,
+        reply_requested,
+    } = decode_replication_copy_data(&frame).unwrap()
+    else {
+        panic!("expected keepalive")
+    };
+    assert_eq!(
+        (wal_end, server_time_pg_us, reply_requested),
+        (0x2_0000_1000, -1, true)
+    );
+    let mut no_reply = frame;
+    no_reply[17] = 0;
+    assert!(matches!(
+        decode_replication_copy_data(&no_reply).unwrap(),
+        ReplicationCopyData::PrimaryKeepalive {
+            reply_requested: false,
+            ..
+        }
+    ));
+    let expected = [
+        b'r', 0, 0, 0, 2, 0, 0, 1, 0, 0, 0, 0, 2, 0, 0, 0, 128, 0, 0, 0, 2, 0, 0, 0, 128, 255, 255,
+        255, 255, 255, 255, 255, 255, 0,
+    ];
+    assert_eq!(
+        encode_standby_status_update(0x2_0000_0100, 0x2_0000_0080, 0x2_0000_0080, -1, false),
+        expected
+    );
+    let mut reply = expected;
+    reply[33] = 1;
+    assert_eq!(
+        encode_standby_status_update(0x2_0000_0100, 0x2_0000_0080, 0x2_0000_0080, -1, true),
+        reply
+    );
+}
+
+#[test]
+fn feedback_wire_rejects_empty_payload() {
+    use _postgres::replication::feedback::decode_replication_copy_data;
+    assert!(matches!(
+        decode_replication_copy_data(&[]),
+        Err(PostgresError::Protocol(_))
+    ));
+}
+
+#[test]
+fn feedback_wire_rejects_unknown_tag() {
+    use _postgres::replication::feedback::decode_replication_copy_data;
+    assert!(matches!(
+        decode_replication_copy_data(b"x"),
+        Err(PostgresError::Protocol(_))
+    ));
+}
+
+#[test]
+fn feedback_wire_rejects_short_xlog_data() {
+    use _postgres::replication::feedback::decode_replication_copy_data;
+    assert!(matches!(
+        decode_replication_copy_data(&[b'w'; 24]),
+        Err(PostgresError::Protocol(_))
+    ));
+}
+
+#[test]
+fn feedback_wire_rejects_short_keepalive() {
+    use _postgres::replication::feedback::decode_replication_copy_data;
+    assert!(matches!(
+        decode_replication_copy_data(&[b'k'; 17]),
+        Err(PostgresError::Protocol(_))
+    ));
+}
+
+#[test]
+fn feedback_wire_rejects_long_keepalive() {
+    use _postgres::replication::feedback::decode_replication_copy_data;
+    assert!(matches!(
+        decode_replication_copy_data(&[b'k'; 19]),
+        Err(PostgresError::Protocol(_))
+    ));
+}
+
+#[test]
+fn feedback_wire_rejects_invalid_reply_flag() {
+    use _postgres::replication::feedback::decode_replication_copy_data;
+    assert!(matches!(
+        decode_replication_copy_data(&[b'k', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2]),
+        Err(PostgresError::Protocol(_))
+    ));
+}
+
+#[test]
+fn feedback_wire_status_intervals_respect_timeout_and_clamps() {
+    use _postgres::replication::feedback::{
+        DEFAULT_STATUS_INTERVAL, MAX_UNACKED_COMMITS, compute_status_interval,
+    };
+    assert_eq!(DEFAULT_STATUS_INTERVAL, Duration::from_secs(10));
+    assert_eq!(MAX_UNACKED_COMMITS, 1024);
+    assert_eq!(compute_status_interval(None), Duration::from_secs(10));
+    assert_eq!(
+        compute_status_interval(Some(Duration::ZERO)),
+        Duration::from_secs(10)
+    );
+    assert_eq!(
+        compute_status_interval(Some(Duration::from_millis(150))),
+        Duration::from_millis(100)
+    );
+    assert_eq!(
+        compute_status_interval(Some(Duration::from_secs(9))),
+        Duration::from_secs(3)
+    );
+    assert_eq!(
+        compute_status_interval(Some(Duration::from_secs(30))),
+        Duration::from_secs(10)
+    );
+    assert_eq!(
+        compute_status_interval(Some(Duration::from_secs(90))),
+        Duration::from_secs(10)
+    );
+}
+
+#[test]
+fn feedback_state_initial_and_unpublished_commit() {
+    use _postgres::replication::feedback::ReplicationFeedback;
+    let mut state = ReplicationFeedback::new(0x2_0000_0100);
+    assert_eq!(
+        state.status_positions(),
+        (0x2_0000_0100, 0x2_0000_0100, 0x2_0000_0100)
+    );
+    assert_eq!(state.unacked_count(), 0);
+    assert_eq!(state.acknowledge(0x2_0000_0100).unwrap(), 0x2_0000_0100);
+    state.record_received_commit(0x2_0000_0200).unwrap();
+    assert!(matches!(
+        state.acknowledge(0x2_0000_0200),
+        Err(PostgresError::Interface(_))
+    ));
+    assert_eq!(
+        state.status_positions(),
+        (0x2_0000_0200, 0x2_0000_0100, 0x2_0000_0100)
+    );
+}
+
+#[test]
+fn feedback_state_received_progress_is_monotonic() {
+    use _postgres::replication::feedback::ReplicationFeedback;
+    let mut state = ReplicationFeedback::new(100);
+    state.record_received_commit(200).unwrap();
+    state.record_received_commit(200).unwrap();
+    assert!(matches!(
+        state.record_received_commit(150),
+        Err(PostgresError::Interface(_))
+    ));
+    assert_eq!(state.status_positions(), (200, 100, 100));
+    assert_eq!(state.unacked_count(), 0);
+}
+
+#[test]
+fn feedback_state_publication_refusals_preserve_boundaries() {
+    use _postgres::replication::feedback::ReplicationFeedback;
+    let mut state = ReplicationFeedback::new(100);
+    state.record_received_commit(400).unwrap();
+    state.record_published_commit(200).unwrap();
+    for invalid in [200, 150, 500, 100, 99] {
+        assert!(matches!(
+            state.record_published_commit(invalid),
+            Err(PostgresError::Interface(_))
+        ));
+        assert_eq!(state.status_positions(), (400, 100, 100));
+        assert_eq!(state.unacked_count(), 1);
+    }
+    assert_eq!(state.acknowledge(200).unwrap(), 200);
+    assert_eq!(state.status_positions(), (400, 200, 200));
+    assert_eq!(state.unacked_count(), 0);
+}
+
+#[test]
+fn feedback_state_acknowledgement_is_cumulative_and_exact() {
+    use _postgres::replication::feedback::ReplicationFeedback;
+    let mut state = ReplicationFeedback::new(100);
+    state.record_received_commit(350).unwrap();
+    state.record_published_commit(200).unwrap();
+    state.record_published_commit(350).unwrap();
+    for invalid in [250, 999] {
+        assert!(matches!(
+            state.acknowledge(invalid),
+            Err(PostgresError::Interface(_))
+        ));
+        assert_eq!(state.status_positions(), (350, 100, 100));
+        assert_eq!(state.unacked_count(), 2);
+    }
+    assert_eq!(state.acknowledge(350).unwrap(), 350);
+    assert_eq!(state.acknowledge(350).unwrap(), 350);
+    assert!(matches!(
+        state.acknowledge(200),
+        Err(PostgresError::Interface(_))
+    ));
+    assert_eq!(state.status_positions(), (350, 350, 350));
+    assert_eq!(state.unacked_count(), 0);
+}
+
+#[test]
+fn feedback_state_capacity_is_reclaimed_by_acknowledgement() {
+    use _postgres::replication::feedback::{MAX_UNACKED_COMMITS, ReplicationFeedback};
+    let mut state = ReplicationFeedback::new(0);
+    state.record_received_commit(2048).unwrap();
+    for lsn in 1..=1024 {
+        state.record_published_commit(lsn).unwrap();
+    }
+    assert_eq!(MAX_UNACKED_COMMITS, 1024);
+    assert!(matches!(
+        state.record_published_commit(1025),
+        Err(PostgresError::Interface(_))
+    ));
+    assert_eq!(state.status_positions(), (2048, 0, 0));
+    assert_eq!(state.unacked_count(), 1024);
+    assert_eq!(state.acknowledge(1024).unwrap(), 1024);
+    assert_eq!(state.unacked_count(), 0);
+    state.record_published_commit(1025).unwrap();
+    assert_eq!(state.acknowledge(1025).unwrap(), 1025);
+}
+
+async fn session_writer_connection(
+    start: Option<u64>,
+) -> (PostgresReplicationConnection, TcpStream) {
+    session_connection_with_payload(start, Vec::new()).await
+}
+
+async fn session_connection_with_payload(
+    start: Option<u64>,
+    payload: Vec<u8>,
+) -> (PostgresReplicationConnection, TcpStream) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let cfg = direct_config(listener.local_addr().unwrap().port());
+    let peer = tokio::spawn(async move {
+        let (mut meta, _) = listener.accept().await.unwrap();
+        complete_startup_ready_version(&mut meta, 301, "14.12").await;
+        let FrontendExchange::Extended(slot) = read_frontend_exchange(&mut meta).await else {
+            panic!("slot query")
+        };
+        meta.write_all(&extended_select_response(
+            &slot.param_oids,
+            &slot_columns(),
+            &[vec![
+                Some("appdb"),
+                Some("appdb"),
+                Some("logical"),
+                Some("pgoutput"),
+                Some("f"),
+                Some("2/10"),
+                Some("2/80"),
+                Some("extended"),
+            ]],
+            slot.saw_close_portal,
+        ))
+        .await
+        .unwrap();
+        let FrontendExchange::Extended(publication) = read_frontend_exchange(&mut meta).await
+        else {
+            panic!("publication query")
+        };
+        meta.write_all(&extended_select_response(
+            &publication.param_oids,
+            &pub_columns_pg14(),
+            &[vec![
+                Some("vertebra_pub"),
+                Some("f"),
+                Some("t"),
+                Some("t"),
+                Some("t"),
+                Some("f"),
+                Some("f"),
+                None,
+                None,
+            ]],
+            publication.saw_close_portal,
+        ))
+        .await
+        .unwrap();
+        assert_clean_terminate_to_eof(&mut meta).await;
+        let (mut socket, _) = listener.accept().await.unwrap();
+        complete_startup_ready_version(&mut socket, 302, "14.12").await;
+        assert_eq!(
+            read_frontend_exchange(&mut socket).await,
+            FrontendExchange::SimpleQuery("IDENTIFY_SYSTEM".into())
+        );
+        socket
+            .write_all(&identify_system_response(
+                "9990001112223334445",
+                "1",
+                "2/900",
+                Some("appdb"),
+            ))
+            .await
+            .unwrap();
+        let FrontendExchange::SimpleQuery(sql) = read_frontend_exchange(&mut socket).await else {
+            panic!("START")
+        };
+        assert!(sql.contains(&format!(
+            "LOGICAL {} ",
+            start.map_or("0/0".into(), format_pg_lsn)
+        )));
+        let mut startup = copy_both_response_frame(0, &[]);
+        startup.extend(copy_data_frame(b"k\0\0\0\x02\0\0\x09\0\0\0\0\0\0\0\0\0\0"));
+        startup.extend(payload);
+        socket.write_all(&startup).await.unwrap();
+        socket
+    });
+    let connection = PostgresReplicationConnection::connect_logical(
+        &cfg,
+        "vertebra_slot",
+        "vertebra_pub",
+        start,
+    )
+    .await
+    .unwrap();
+    (connection, peer.await.unwrap())
+}
+
+#[tokio::test(start_paused = true)]
+async fn session_writer_preserves_fence_ticks_and_closes_once() {
+    let initial = 0x200000100;
+    let (connection, mut peer) = session_writer_connection(Some(initial)).await;
+    let identity = connection.identity().clone();
+    assert!(connection.buffered_read_len() > 0);
+    let session = connection
+        .into_stream(1, Duration::from_secs(10), Duration::from_secs(2))
+        .unwrap();
+    assert_eq!(session.identity(), &identity);
+    assert_eq!(session.status_positions(), (initial, initial, initial));
+    assert!(matches!(
+        session.acknowledge(initial + 1),
+        Err(PostgresError::Interface(_))
+    ));
+    tokio::task::yield_now().await;
+    let mut byte = [0; 1];
+    assert_eq!(
+        peer.try_read(&mut byte).unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+    for _ in 0..3 {
+        tokio::time::advance(Duration::from_secs(10)).await;
+        let FrontendExchange::Other(b'd', payload) = read_frontend_exchange(&mut peer).await else {
+            panic!("status")
+        };
+        assert_eq!(payload.len(), 34);
+        assert_eq!(payload[0], b'r');
+        for offset in [1, 9, 17] {
+            assert_eq!(
+                u64::from_be_bytes(payload[offset..offset + 8].try_into().unwrap()),
+                initial
+            );
+        }
+    }
+    let closing_peer = tokio::spawn(async move {
+        assert!(matches!(
+            read_frontend_exchange(&mut peer).await,
+            FrontendExchange::Other(b'd', _)
+        ));
+        assert_eq!(
+            read_frontend_exchange(&mut peer).await,
+            FrontendExchange::CopyDone
+        );
+        peer.write_all(&session_shutdown_response()).await.unwrap();
+        assert_eq!(
+            read_frontend_exchange(&mut peer).await,
+            FrontendExchange::Eof
+        );
+    });
+    session.shutdown().await.unwrap();
+    session.shutdown().await.unwrap();
+    assert!(session.is_closed());
+    session.wait_closed().await.unwrap();
+    closing_peer.await.unwrap();
+}
+
+#[tokio::test]
+async fn session_writer_defaults_to_confirmed_fence_and_validates_options() {
+    let (connection, _peer) = session_writer_connection(None).await;
+    let session = connection
+        .into_stream(1, Duration::from_secs(10), Duration::from_secs(2))
+        .unwrap();
+    assert_eq!(
+        session.status_positions(),
+        (0x200000080, 0x200000080, 0x200000080)
+    );
+    session.cancel();
+    assert!(session.is_closed());
+    for (capacity, interval, timeout) in [(0, 10, 2), (1025, 10, 2), (1, 0, 2), (1, 10, 0)] {
+        let (connection, mut peer) = session_writer_connection(None).await;
+        assert!(matches!(
+            connection.into_stream(
+                capacity,
+                Duration::from_secs(interval),
+                Duration::from_secs(timeout)
+            ),
+            Err(PostgresError::Interface(_))
+        ));
+        assert_eq!(
+            read_frontend_exchange(&mut peer).await,
+            FrontendExchange::Eof
+        );
+    }
+}
+
+#[test]
+fn session_writer_drop_without_runtime_closes_socket() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let (session, peer) = runtime.block_on(async {
+        let (connection, peer) = session_writer_connection(None).await;
+        let session = connection
+            .into_stream(1, Duration::from_secs(10), Duration::from_secs(2))
+            .unwrap();
+        (session, peer.into_std().unwrap())
+    });
+    drop(runtime);
+    drop(session);
+    peer.set_nonblocking(false).unwrap();
+    peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    assert_eq!(std::io::Read::read(&mut &peer, &mut [0; 1]).unwrap(), 0);
+}
+
+fn session_transaction_payload() -> Vec<u8> {
+    let mut payload = vec![b'B'];
+    payload.extend_from_slice(&0x200000200_u64.to_be_bytes());
+    payload.extend_from_slice(&0_i64.to_be_bytes());
+    payload.extend_from_slice(&7_u32.to_be_bytes());
+    payload.push(b'R');
+    payload.extend_from_slice(&42_u32.to_be_bytes());
+    payload.extend_from_slice(b"public\0items\0d");
+    payload.extend_from_slice(&1_u16.to_be_bytes());
+    payload.extend_from_slice(b"\x01id\0");
+    payload.extend_from_slice(&23_u32.to_be_bytes());
+    payload.extend_from_slice(&(-1_i32).to_be_bytes());
+    payload.push(b'I');
+    payload.extend_from_slice(&42_u32.to_be_bytes());
+    payload.push(b'N');
+    payload.extend_from_slice(&1_u16.to_be_bytes());
+    payload.push(b't');
+    payload.extend_from_slice(&1_u32.to_be_bytes());
+    payload.push(b'7');
+    payload.extend_from_slice(b"C\0");
+    payload.extend_from_slice(&0x200000200_u64.to_be_bytes());
+    payload.extend_from_slice(&0x200000300_u64.to_be_bytes());
+    payload.extend_from_slice(&0_i64.to_be_bytes());
+    payload
+}
+
+fn session_wal_frame(payload: &[u8]) -> Vec<u8> {
+    let mut body = vec![b'w'];
+    body.extend_from_slice(&0x200000100_u64.to_be_bytes());
+    body.extend_from_slice(&0x2ffffffff_u64.to_be_bytes());
+    body.extend_from_slice(&0_i64.to_be_bytes());
+    body.extend_from_slice(payload);
+    copy_data_frame(&body)
+}
+
+#[tokio::test]
+async fn session_reader_coalesced_startup_publishes_in_order() {
+    use _postgres::replication::pgoutput::ReplicationRecord;
+    let mut payload = copy_data_frame(b"k\0\0\0\x02\0\0\x09\0\0\0\0\0\0\0\0\0\x01");
+    payload.extend(session_wal_frame(&session_transaction_payload()));
+    let (connection, mut peer) = session_connection_with_payload(Some(0x200000100), payload).await;
+    let session = connection
+        .into_stream(4, Duration::from_secs(10), Duration::from_secs(2))
+        .unwrap();
+    let FrontendExchange::Other(b'd', status) = read_frontend_exchange(&mut peer).await else {
+        panic!("keepalive status")
+    };
+    assert_eq!(status[0], b'r');
+    assert_eq!(
+        u64::from_be_bytes(status[9..17].try_into().unwrap()),
+        0x200000100
+    );
+    let begin = session.next().await.unwrap().unwrap().publish().unwrap();
+    assert!(matches!(begin, ReplicationRecord::Begin { xid: 7, .. }));
+    let insert = session.next().await.unwrap().unwrap().publish().unwrap();
+    assert!(matches!(insert, ReplicationRecord::Insert { xid: 7, .. }));
+    let commit = session.next().await.unwrap().unwrap();
+    assert_eq!(commit.record().commit_end_lsn(), Some(0x200000300));
+    assert!(matches!(
+        session.acknowledge(0x200000300),
+        Err(PostgresError::Interface(_))
+    ));
+    commit.publish().unwrap();
+    assert_eq!(session.acknowledge(0x200000300).unwrap(), 0x200000300);
+    session.cancel();
+}
+
+#[tokio::test]
+async fn session_reader_malformed_keepalive_is_terminal() {
+    let (connection, _peer) =
+        session_connection_with_payload(Some(0x200000100), copy_data_frame(&[b'k'; 12])).await;
+    let session = connection
+        .into_stream(1, Duration::from_secs(10), Duration::from_secs(2))
+        .unwrap();
+    assert!(matches!(
+        session.next().await,
+        Err(PostgresError::Protocol(_))
+    ));
+    assert!(matches!(
+        session.wait_closed().await,
+        Err(PostgresError::Protocol(_))
+    ));
+    assert!(session.next().await.unwrap().is_none());
+    assert_eq!(
+        session.status_positions(),
+        (0x200000100, 0x200000100, 0x200000100)
+    );
+}
+
+#[tokio::test]
+async fn session_reader_unknown_copydata_is_terminal() {
+    let (connection, _peer) =
+        session_connection_with_payload(Some(0x200000100), copy_data_frame(b"x")).await;
+    let session = connection
+        .into_stream(1, Duration::from_secs(10), Duration::from_secs(2))
+        .unwrap();
+    assert!(matches!(
+        session.next().await,
+        Err(PostgresError::Protocol(_))
+    ));
+    assert!(session.is_closed());
+}
+
+#[tokio::test]
+async fn session_reader_frame_boundary_eof_during_transaction_is_transport() {
+    let begin = session_transaction_payload()[..21].to_vec();
+    let (connection, mut peer) =
+        session_connection_with_payload(Some(0x200000100), session_wal_frame(&begin)).await;
+    let session = connection
+        .into_stream(4, Duration::from_secs(10), Duration::from_secs(2))
+        .unwrap();
+    peer.shutdown().await.unwrap();
+    assert!(matches!(
+        session.wait_closed().await,
+        Err(PostgresError::Transport(_))
+    ));
+    assert!(matches!(
+        session.next().await,
+        Err(PostgresError::Transport(_))
+    ));
+    assert!(session.next().await.unwrap().is_none());
+    assert_eq!(
+        session.status_positions(),
+        (0x200000100, 0x200000100, 0x200000100)
+    );
+}
+
+#[tokio::test]
+async fn session_reader_truncated_backend_frame_eof_is_protocol() {
+    let (connection, mut peer) =
+        session_connection_with_payload(Some(0x200000100), b"d\0\0\0\x20w".to_vec()).await;
+    let session = connection
+        .into_stream(4, Duration::from_secs(10), Duration::from_secs(2))
+        .unwrap();
+    peer.shutdown().await.unwrap();
+    assert!(matches!(
+        session.next().await,
+        Err(PostgresError::Protocol(_))
+    ));
+}
+
+#[tokio::test]
+async fn session_reader_copydone_rejects_unfinished_transaction() {
+    let mut payload = session_wal_frame(&session_transaction_payload()[..21]);
+    payload.extend(copy_done_frame());
+    let (connection, _peer) = session_connection_with_payload(Some(0x200000100), payload).await;
+    let session = connection
+        .into_stream(4, Duration::from_secs(10), Duration::from_secs(2))
+        .unwrap();
+    assert!(matches!(
+        session.wait_closed().await,
+        Err(PostgresError::Protocol(_))
+    ));
+    assert!(matches!(
+        session.next().await,
+        Err(PostgresError::Protocol(_))
+    ));
+}
+
+#[tokio::test]
+async fn session_reader_copydone_drains_queued_records_before_none() {
+    let mut payload = session_wal_frame(&session_transaction_payload());
+    payload.extend(copy_done_frame());
+    let (connection, _peer) = session_connection_with_payload(Some(0x200000100), payload).await;
+    let session = connection
+        .into_stream(4, Duration::from_secs(10), Duration::from_secs(2))
+        .unwrap();
+    for _ in 0..3 {
+        session.next().await.unwrap().unwrap().publish().unwrap();
+    }
+    assert!(session.next().await.unwrap().is_none());
+    assert_eq!(session.acknowledge(0x200000300).unwrap(), 0x200000300);
+    session.cancel();
+}
+
+#[tokio::test(start_paused = true)]
+async fn session_reader_full_fifo_does_not_starve_periodic_writer() {
+    let payload = session_wal_frame(&session_transaction_payload());
+    let (connection, mut peer) = session_connection_with_payload(Some(0x200000100), payload).await;
+    let session = connection
+        .into_stream(1, Duration::from_secs(10), Duration::from_secs(2))
+        .unwrap();
+    let begin = session.next().await.unwrap().unwrap();
+    for _ in 0..3 {
+        tokio::time::advance(Duration::from_secs(10)).await;
+        let FrontendExchange::Other(b'd', status) = read_frontend_exchange(&mut peer).await else {
+            panic!("periodic status")
+        };
+        assert_eq!(
+            u64::from_be_bytes(status[9..17].try_into().unwrap()),
+            0x200000100
+        );
+        assert_eq!(
+            u64::from_be_bytes(status[17..25].try_into().unwrap()),
+            0x200000100
+        );
+    }
+    begin.publish().unwrap();
+    session.next().await.unwrap().unwrap().publish().unwrap();
+    session.next().await.unwrap().unwrap().publish().unwrap();
+    assert_eq!(session.acknowledge(0x200000300).unwrap(), 0x200000300);
+    session.cancel();
+}
+
+fn session_message_payload(size: usize, byte: u8) -> Vec<u8> {
+    let mut payload = b"M\0".to_vec();
+    payload.extend_from_slice(&0x200000200_u64.to_be_bytes());
+    payload.extend_from_slice(b"bulk\0");
+    payload.extend_from_slice(&(size as u32).to_be_bytes());
+    payload.resize(payload.len() + size, byte);
+    payload
+}
+
+#[tokio::test]
+async fn session_reader_individually_valid_nine_mib_record_exceeds_aggregate_budget() {
+    use _postgres::replication::pgoutput::ReplicationRecord;
+    let (connection, mut peer) = session_writer_connection(Some(0x200000100)).await;
+    let session = connection
+        .into_stream(4, Duration::from_secs(10), Duration::from_secs(2))
+        .unwrap();
+    let sender = tokio::spawn(async move {
+        peer.write_all(&session_wal_frame(&session_message_payload(
+            9 * 1024 * 1024,
+            b'a',
+        )))
+        .await
+        .unwrap();
+        peer.write_all(&session_wal_frame(&session_message_payload(
+            9 * 1024 * 1024,
+            b'b',
+        )))
+        .await
+        .unwrap();
+        peer
+    });
+    for byte in *b"ab" {
+        let record = session.next().await.unwrap().unwrap().publish().unwrap();
+        let ReplicationRecord::Message { content, .. } = record else {
+            panic!("logical message")
+        };
+        assert_eq!(content.len(), 9 * 1024 * 1024);
+        assert!(content.iter().all(|value| *value == byte));
+    }
+    let _peer = sender.await.unwrap();
+    assert_eq!(
+        session.status_positions(),
+        (0x200000100, 0x200000100, 0x200000100)
+    );
+    session.cancel();
+}
+
+#[tokio::test]
+async fn session_delivery_dropped_commit_restores_fifo_and_blocks_overlap() {
+    use _postgres::replication::pgoutput::ReplicationRecord;
+    let payload = session_wal_frame(&session_transaction_payload());
+    let (connection, mut peer) = session_connection_with_payload(Some(0x200000100), payload).await;
+    let session = connection
+        .into_stream(4, Duration::from_secs(10), Duration::from_secs(2))
+        .unwrap();
+    for _ in 0..2 {
+        session.next().await.unwrap().unwrap().publish().unwrap();
+    }
+    let commit = session.next().await.unwrap().unwrap();
+    assert_eq!(commit.record().commit_end_lsn(), Some(0x200000300));
+    let mut overlap = Box::pin(session.next());
+    std::future::poll_fn(|cx| {
+        assert!(matches!(
+            std::future::Future::poll(overlap.as_mut(), cx),
+            Poll::Ready(Err(PostgresError::Interface(_)))
+        ));
+        Poll::Ready(())
+    })
+    .await;
+    drop(overlap);
+    let mut begin = session_transaction_payload()[..21].to_vec();
+    begin[1..9].copy_from_slice(&0x200000400_u64.to_be_bytes());
+    begin[17..21].copy_from_slice(&9_u32.to_be_bytes());
+    peer.write_all(&session_wal_frame(&begin)).await.unwrap();
+    drop(commit);
+    assert!(matches!(
+        session.acknowledge(0x200000300),
+        Err(PostgresError::Interface(_))
+    ));
+    let restored = session.next().await.unwrap().unwrap();
+    assert_eq!(restored.record().commit_end_lsn(), Some(0x200000300));
+    restored.publish().unwrap();
+    assert_eq!(session.acknowledge(0x200000300).unwrap(), 0x200000300);
+    assert!(matches!(
+        session.next().await.unwrap().unwrap().publish().unwrap(),
+        ReplicationRecord::Begin { xid: 9, .. }
+    ));
+    session.cancel();
+}
+
+#[tokio::test]
+async fn session_delivery_cancelled_waiter_releases_reservation() {
+    use _postgres::replication::pgoutput::ReplicationRecord;
+    use std::future::Future;
+    let (connection, mut peer) = session_writer_connection(Some(0x200000100)).await;
+    let session = connection
+        .into_stream(4, Duration::from_secs(10), Duration::from_secs(2))
+        .unwrap();
+    let mut pending = Box::pin(session.next());
+    std::future::poll_fn(|cx| {
+        assert!(pending.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    let mut overlap = Box::pin(session.next());
+    std::future::poll_fn(|cx| {
+        assert!(matches!(
+            std::future::Future::poll(overlap.as_mut(), cx),
+            Poll::Ready(Err(PostgresError::Interface(_)))
+        ));
+        Poll::Ready(())
+    })
+    .await;
+    drop(overlap);
+    drop(pending);
+    peer.write_all(&session_wal_frame(&session_transaction_payload()))
+        .await
+        .unwrap();
+    assert!(matches!(
+        session.next().await.unwrap().unwrap().publish().unwrap(),
+        ReplicationRecord::Begin { xid: 7, .. }
+    ));
+    session.cancel();
+}
+
+#[tokio::test]
+async fn session_delivery_closed_lease_preserves_borrow_but_refuses_publication() {
+    let payload = session_wal_frame(&session_transaction_payload());
+    let (connection, _peer) = session_connection_with_payload(Some(0x200000100), payload).await;
+    let session = connection
+        .into_stream(4, Duration::from_secs(10), Duration::from_secs(2))
+        .unwrap();
+    for _ in 0..2 {
+        session.next().await.unwrap().unwrap().publish().unwrap();
+    }
+    let commit = session.next().await.unwrap().unwrap();
+    let borrowed = commit.record();
+    session.cancel();
+    assert_eq!(borrowed.commit_end_lsn(), Some(0x200000300));
+    assert!(matches!(commit.publish(), Err(PostgresError::Interface(_))));
+    assert!(session.next().await.unwrap().is_none());
+    assert_eq!(session.status_positions().1, 0x200000100);
+}
+
+fn session_empty_transaction_payload(end_lsn: u64, xid: u32) -> Vec<u8> {
+    let mut payload = vec![b'B'];
+    payload.extend_from_slice(&(end_lsn - 1).to_be_bytes());
+    payload.extend_from_slice(&0_i64.to_be_bytes());
+    payload.extend_from_slice(&xid.to_be_bytes());
+    payload.extend_from_slice(b"C\0");
+    payload.extend_from_slice(&(end_lsn - 1).to_be_bytes());
+    payload.extend_from_slice(&end_lsn.to_be_bytes());
+    payload.extend_from_slice(&0_i64.to_be_bytes());
+    payload
+}
+
+#[tokio::test]
+async fn session_delivery_unacknowledged_cap_resumes_after_ack_and_updates_writer() {
+    use _postgres::replication::pgoutput::ReplicationRecord;
+    use std::future::Future;
+    let initial = 0x200000100;
+    let (connection, mut peer) = session_writer_connection(Some(initial)).await;
+    let session = connection
+        .into_stream(8, Duration::from_secs(3600), Duration::from_secs(2))
+        .unwrap();
+    let mut payload = Vec::new();
+    for xid in 1..=1023 {
+        payload.extend(session_empty_transaction_payload(
+            initial + u64::from(xid),
+            xid,
+        ));
+    }
+    peer.write_all(&session_wal_frame(&payload)).await.unwrap();
+    for _ in 0..1023 {
+        assert!(matches!(
+            session.next().await.unwrap().unwrap().publish().unwrap(),
+            ReplicationRecord::Begin { .. }
+        ));
+        session.next().await.unwrap().unwrap().publish().unwrap();
+    }
+    let last_published = initial + 1024;
+    let next_lsn = initial + 1025;
+    let mut payload = session_empty_transaction_payload(last_published, 1024);
+    payload.extend(session_empty_transaction_payload(next_lsn, 1025));
+    let mut frames = session_wal_frame(&payload);
+    frames.extend(copy_data_frame(
+        b"k\0\0\0\x02\0\0\x09\0\0\0\0\0\0\0\0\0\x01",
+    ));
+    peer.write_all(&frames).await.unwrap();
+    session.next().await.unwrap().unwrap().publish().unwrap();
+    let final_lease = session.next().await.unwrap().unwrap();
+    let FrontendExchange::Other(b'd', status) = read_frontend_exchange(&mut peer).await else {
+        panic!("keepalive barrier")
+    };
+    assert_eq!(
+        u64::from_be_bytes(status[1..9].try_into().unwrap()),
+        next_lsn
+    );
+    assert_eq!(
+        u64::from_be_bytes(status[9..17].try_into().unwrap()),
+        initial
+    );
+    final_lease.publish().unwrap();
+    session.next().await.unwrap().unwrap().publish().unwrap();
+    let mut pending_commit = Box::pin(session.next());
+    std::future::poll_fn(|cx| {
+        assert!(pending_commit.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    assert!(matches!(
+        session.acknowledge(next_lsn),
+        Err(PostgresError::Interface(_))
+    ));
+    assert_eq!(session.acknowledge(last_published).unwrap(), last_published);
+    let commit = pending_commit.await.unwrap().unwrap();
+    assert_eq!(commit.record().commit_end_lsn(), Some(next_lsn));
+    let FrontendExchange::Other(b'd', status) = read_frontend_exchange(&mut peer).await else {
+        panic!("acknowledged status")
+    };
+    for offset in [9, 17] {
+        assert_eq!(
+            u64::from_be_bytes(status[offset..offset + 8].try_into().unwrap()),
+            last_published
+        );
+    }
+    commit.publish().unwrap();
+    assert_eq!(session.acknowledge(next_lsn).unwrap(), next_lsn);
+    session.cancel();
+}
+
+#[tokio::test]
+async fn session_shutdown_waits_for_backend_drain_without_acknowledging_publication() {
+    use std::future::Future;
+    let payload = session_wal_frame(&session_transaction_payload());
+    let (connection, mut peer) = session_connection_with_payload(Some(0x200000100), payload).await;
+    let session = connection
+        .into_stream(4, Duration::from_secs(10), Duration::from_secs(2))
+        .unwrap();
+    for _ in 0..3 {
+        session.next().await.unwrap().unwrap().publish().unwrap();
+    }
+    let mut closing = Box::pin(session.shutdown());
+    std::future::poll_fn(|cx| {
+        assert!(closing.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    let FrontendExchange::Other(b'd', status) = read_frontend_exchange(&mut peer).await else {
+        panic!("final feedback")
+    };
+    for offset in [9, 17] {
+        assert_eq!(
+            u64::from_be_bytes(status[offset..offset + 8].try_into().unwrap()),
+            0x200000100
+        );
+    }
+    assert_eq!(
+        read_frontend_exchange(&mut peer).await,
+        FrontendExchange::CopyDone
+    );
+    std::future::poll_fn(|cx| {
+        assert!(
+            closing.as_mut().poll(cx).is_pending(),
+            "shutdown must await the backend drain"
+        );
+        Poll::Ready(())
+    })
+    .await;
+    let mut response = copy_done_frame();
+    response.extend(command_complete_frame("COPY 0"));
+    response.extend(ready_for_query_frame(b'I'));
+    peer.write_all(&response).await.unwrap();
+    closing.await.unwrap();
+    session.shutdown().await.unwrap();
+    assert!(session.is_closed());
+    assert_eq!(
+        read_frontend_exchange(&mut peer).await,
+        FrontendExchange::Eof
+    );
+}
+
+fn session_shutdown_response() -> Vec<u8> {
+    let mut response = copy_done_frame();
+    response.extend(command_complete_frame("COPY 0"));
+    response.extend(ready_for_query_frame(b'I'));
+    response
+}
+
+#[tokio::test(start_paused = true)]
+async fn session_shutdown_unresponsive_peer_expires_once_and_closes_socket() {
+    use std::future::Future;
+    let (connection, mut peer) = session_writer_connection(Some(0x200000100)).await;
+    let session = connection
+        .into_stream(1, Duration::from_secs(3600), Duration::from_millis(100))
+        .unwrap();
+    let mut closing = Box::pin(session.shutdown());
+    std::future::poll_fn(|cx| {
+        assert!(closing.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    assert!(matches!(
+        read_frontend_exchange(&mut peer).await,
+        FrontendExchange::Other(b'd', _)
+    ));
+    assert_eq!(
+        read_frontend_exchange(&mut peer).await,
+        FrontendExchange::CopyDone
+    );
+    tokio::time::advance(Duration::from_millis(100)).await;
+    assert!(matches!(closing.await, Err(PostgresError::Operational(_))));
+    let (first, second) = tokio::join!(session.wait_closed(), session.wait_closed());
+    assert!(matches!(first, Err(PostgresError::Operational(_))));
+    assert!(matches!(second, Err(PostgresError::Operational(_))));
+    assert!(matches!(
+        session.next().await,
+        Err(PostgresError::Operational(_))
+    ));
+    assert!(session.next().await.unwrap().is_none());
+    assert_eq!(
+        read_frontend_exchange(&mut peer).await,
+        FrontendExchange::Eof
+    );
+}
+
+#[tokio::test]
+async fn session_shutdown_concurrent_callers_send_only_one_copydone() {
+    let (connection, mut peer) = session_writer_connection(None).await;
+    let session = connection
+        .into_stream(1, Duration::from_secs(3600), Duration::from_secs(2))
+        .unwrap();
+    let peer_close = async {
+        assert!(matches!(
+            read_frontend_exchange(&mut peer).await,
+            FrontendExchange::Other(b'd', _)
+        ));
+        assert_eq!(
+            read_frontend_exchange(&mut peer).await,
+            FrontendExchange::CopyDone
+        );
+        peer.write_all(&session_shutdown_response()).await.unwrap();
+        assert_eq!(
+            read_frontend_exchange(&mut peer).await,
+            FrontendExchange::Eof
+        );
+    };
+    let (first, second, ()) = tokio::join!(session.shutdown(), session.shutdown(), peer_close);
+    first.unwrap();
+    second.unwrap();
+    session.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn session_shutdown_cancelled_close_waiter_keeps_transport_owned() {
+    use std::future::Future;
+    let (connection, mut peer) = session_writer_connection(None).await;
+    let session = connection
+        .into_stream(1, Duration::from_secs(3600), Duration::from_secs(2))
+        .unwrap();
+    let mut closing = Box::pin(session.shutdown());
+    std::future::poll_fn(|cx| {
+        assert!(closing.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    assert!(matches!(
+        read_frontend_exchange(&mut peer).await,
+        FrontendExchange::Other(b'd', _)
+    ));
+    assert_eq!(
+        read_frontend_exchange(&mut peer).await,
+        FrontendExchange::CopyDone
+    );
+    drop(closing);
+    peer.write_all(&session_shutdown_response()).await.unwrap();
+    let (first, second) = tokio::join!(session.wait_closed(), session.wait_closed());
+    first.unwrap();
+    second.unwrap();
+    assert_eq!(
+        read_frontend_exchange(&mut peer).await,
+        FrontendExchange::Eof
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn session_shutdown_cancel_fences_backpressured_lease_and_wakes_all_waiters() {
+    let payload = session_wal_frame(&session_transaction_payload());
+    let (connection, mut peer) = session_connection_with_payload(Some(0x200000100), payload).await;
+    let session = connection
+        .into_stream(1, Duration::from_secs(10), Duration::from_secs(2))
+        .unwrap();
+    let delivery = session.next().await.unwrap().unwrap();
+    tokio::time::advance(Duration::from_secs(10)).await;
+    assert!(matches!(
+        read_frontend_exchange(&mut peer).await,
+        FrontendExchange::Other(b'd', _)
+    ));
+    let record = delivery.record();
+    session.cancel();
+    session.cancel();
+    assert!(matches!(
+        record,
+        _postgres::replication::pgoutput::ReplicationRecord::Begin { xid: 7, .. }
+    ));
+    assert!(matches!(
+        delivery.publish(),
+        Err(PostgresError::Interface(_))
+    ));
+    let (first, second) = tokio::join!(session.wait_closed(), session.wait_closed());
+    first.unwrap();
+    second.unwrap();
+    assert!(session.next().await.unwrap().is_none());
+    assert_eq!(session.status_positions().1, 0x200000100);
+    assert_eq!(
+        read_frontend_exchange(&mut peer).await,
+        FrontendExchange::Eof
+    );
+}
+
+#[tokio::test]
+async fn session_shutdown_backend_error_preserves_sqlstate_and_discards_records() {
+    let (connection, mut peer) = session_writer_connection(None).await;
+    let session = connection
+        .into_stream(1, Duration::from_secs(3600), Duration::from_secs(2))
+        .unwrap();
+    let peer_close = async {
+        assert!(matches!(
+            read_frontend_exchange(&mut peer).await,
+            FrontendExchange::Other(b'd', _)
+        ));
+        assert_eq!(
+            read_frontend_exchange(&mut peer).await,
+            FrontendExchange::CopyDone
+        );
+        peer.write_all(&error_response_frame("ERROR", "42501", "permission denied"))
+            .await
+            .unwrap();
+        assert_eq!(
+            read_frontend_exchange(&mut peer).await,
+            FrontendExchange::Eof
+        );
+    };
+    let (result, ()) = tokio::join!(session.shutdown(), peer_close);
+    assert_eq!(result.unwrap_err().sqlstate(), Some("42501"));
+    assert_eq!(
+        session.wait_closed().await.unwrap_err().sqlstate(),
+        Some("42501")
+    );
+    assert_eq!(
+        session.next().await.err().unwrap().sqlstate(),
+        Some("42501")
+    );
+    assert!(session.next().await.unwrap().is_none());
+    assert!(session.is_closed());
+}
+
+#[tokio::test]
+async fn session_shutdown_clean_backend_eof_closes_transport_but_retains_fifo() {
+    let mut payload = session_wal_frame(&session_transaction_payload());
+    payload.extend(session_shutdown_response());
+    let (connection, mut peer) = session_connection_with_payload(Some(0x200000100), payload).await;
+    let session = connection
+        .into_stream(4, Duration::from_secs(3600), Duration::from_secs(2))
+        .unwrap();
+    session.wait_closed().await.unwrap();
+    assert!(session.is_closed());
+    assert!(matches!(
+        read_frontend_exchange(&mut peer).await,
+        FrontendExchange::Other(b'd', _)
+    ));
+    assert_eq!(
+        read_frontend_exchange(&mut peer).await,
+        FrontendExchange::CopyDone
+    );
+    assert_eq!(
+        read_frontend_exchange(&mut peer).await,
+        FrontendExchange::Eof
+    );
+    for _ in 0..3 {
+        session.next().await.unwrap().unwrap().publish().unwrap();
+    }
+    assert!(session.next().await.unwrap().is_none());
+    session.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn session_shutdown_held_commit_stays_borrowable_but_cannot_publish() {
+    use std::future::Future;
+    let payload = session_wal_frame(&session_transaction_payload());
+    let (connection, mut peer) = session_connection_with_payload(Some(0x200000100), payload).await;
+    let session = connection
+        .into_stream(1, Duration::from_secs(3600), Duration::from_secs(2))
+        .unwrap();
+    for _ in 0..2 {
+        session.next().await.unwrap().unwrap().publish().unwrap();
+    }
+    let delivery = session.next().await.unwrap().unwrap();
+    let borrowed = delivery.record();
+    peer.write_all(&session_wal_frame(&session_empty_transaction_payload(
+        0x200000500,
+        9,
+    )))
+    .await
+    .unwrap();
+    let mut closing = Box::pin(session.shutdown());
+    std::future::poll_fn(|cx| {
+        assert!(closing.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    assert_eq!(borrowed.commit_end_lsn(), Some(0x200000300));
+    assert!(matches!(
+        read_frontend_exchange(&mut peer).await,
+        FrontendExchange::Other(b'd', _)
+    ));
+    assert_eq!(
+        read_frontend_exchange(&mut peer).await,
+        FrontendExchange::CopyDone
+    );
+    peer.write_all(&session_shutdown_response()).await.unwrap();
+    closing.await.unwrap();
+    assert!(matches!(
+        delivery.publish(),
+        Err(PostgresError::Interface(_))
+    ));
+    assert_eq!(session.status_positions().1, 0x200000100);
+    assert!(session.next().await.unwrap().is_none());
+    assert_eq!(
+        read_frontend_exchange(&mut peer).await,
+        FrontendExchange::Eof
+    );
+}
+
+#[tokio::test]
+async fn session_shutdown_transport_error_fences_held_commit_before_publication() {
+    let payload = session_wal_frame(&session_transaction_payload());
+    let (connection, mut peer) = session_connection_with_payload(Some(0x200000100), payload).await;
+    let session = connection
+        .into_stream(4, Duration::from_secs(3600), Duration::from_secs(2))
+        .unwrap();
+    for _ in 0..2 {
+        session.next().await.unwrap().unwrap().publish().unwrap();
+    }
+    let delivery = session.next().await.unwrap().unwrap();
+    peer.shutdown().await.unwrap();
+    assert!(matches!(
+        session.wait_closed().await,
+        Err(PostgresError::Transport(_))
+    ));
+    assert_eq!(delivery.record().commit_end_lsn(), Some(0x200000300));
+    assert!(matches!(
+        delivery.publish(),
+        Err(PostgresError::Interface(_))
+    ));
+    assert!(matches!(
+        session.next().await,
+        Err(PostgresError::Transport(_))
+    ));
+    assert!(session.next().await.unwrap().is_none());
+    assert_eq!(session.status_positions().1, 0x200000100);
+    assert_eq!(
+        read_frontend_exchange(&mut peer).await,
+        FrontendExchange::Eof
+    );
+}
+
+#[tokio::test]
+async fn session_shutdown_truncated_command_frame_is_terminal_protocol_error() {
+    let mut payload = copy_done_frame();
+    payload.extend_from_slice(b"C\0\0\0\x0bCOP");
+    let (connection, mut peer) = session_connection_with_payload(Some(0x200000100), payload).await;
+    let session = connection
+        .into_stream(4, Duration::from_secs(3600), Duration::from_secs(2))
+        .unwrap();
+    peer.shutdown().await.unwrap();
+    assert!(matches!(
+        session.wait_closed().await,
+        Err(PostgresError::Protocol(_))
+    ));
+    assert!(matches!(
+        session.next().await,
+        Err(PostgresError::Protocol(_))
+    ));
+    assert!(session.next().await.unwrap().is_none());
+    assert_eq!(session.status_positions().1, 0x200000100);
+}

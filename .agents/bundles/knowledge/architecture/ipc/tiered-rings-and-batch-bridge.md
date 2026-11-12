@@ -1,7 +1,7 @@
 ---
 type: Guide
 title: "Tiered Rings & In-Process Batch Bridge"
-description: "RingPair request/response framing, TieredRingSet size classes, ResponseSlot streaming frames, and the in-process BatchBridge batch transport."
+description: "RingPair unary and ordered stream framing, TieredRingSet size classes, and bounded in-process and SHM response delivery."
 status: stable
 tags:
   - architecture
@@ -15,11 +15,14 @@ generated:
 verified:
   - by: agent:flow-setup
     at: "2026-11-07T03:55:00Z"
-    commit: 9af810f5
+    commit: 067fa901
   - by: agent:flow-setup
     at: "2026-11-04T04:33:00Z"
     commit: f741701
 sources:
+  - id: src-vertebra-http-src-dispatcher-streams-rs
+    resource: src/rs/vertebra-http/src/dispatcher/streams.rs
+    title: Bounded response stream registry and worker lifecycle cleanup
   - id: src-vertebra-core-src-transport-mod-rs
     resource: src/rs/vertebra-core/src/transport/mod.rs
     title: "Rust implementation module (src/rs/vertebra-core/src/transport/mod.rs)"
@@ -50,10 +53,12 @@ sources:
 
 <!-- truth: start -->
 - `BatchSnapshot` unifies zero-copy request backing across in-process `Vec<InProcessRequest>`, borrowed SHM ring slots (`MpmcSlotView` / `SlotView`), and file-backed `VQOV`/`VROV` overflow segments.
-- `TieredRingSet` routes worker responses across small, medium, large, and xlarge `SpscRing` size classes, setting `active_flags` (`Ordering::SeqCst`) before notifying the Tokio response reader.
+- `TieredRingSet` routes unary responses by size; all flagged `VRSF` stream frames share the xlarge `SpscRing` so different body sizes cannot reorder a stream [^src-vertebra-core-src-transport-ring-pair-rs].
+- `BatchBridge` carries native `ResponseStreamFrame`s through a dedicated `StreamSink`; bounded registry channels report client disconnects and apply blocking or awaited backpressure [^src-vertebra-core-src-bridge-rs] [^src-vertebra-http-src-dispatcher-streams-rs].
+- Python stream submission and mounted ASGI/RSGI flushing remain unwired; native transport support alone does not make mounted applications stream [^src-vertebra-py-src-transport-rs].
 <!-- truth: end -->
 
-Both topologies move requests as `BatchSnapshot`s. Embedded mode hands zero-copy `InProcessRequest` snapshots across threads through [`BatchBridge`](../../../../../src/rs/vertebra-core/src/bridge.rs)[^src-vertebra-core-src-bridge-rs] and completes responses directly through a registered `ResponseSink`. Shm mode serializes batches directly into a per-worker [`RingPair`](../../../../../src/rs/vertebra-core/src/transport/ring_pair.rs)[^src-vertebra-core-src-transport-ring-pair-rs] and borrows the slot zero-copy on the Python side (`MpmcSlotView` / `SlotView`). [`Transport`](../../../../../src/rs/vertebra-core/src/transport/mod.rs)[^src-vertebra-core-src-transport-mod-rs] wraps either backend cleanly.
+Both topologies move requests as `BatchSnapshot`s. Embedded mode hands zero-copy `InProcessRequest` snapshots across threads through [`BatchBridge`](../../../../../src/rs/vertebra-core/src/bridge.rs)[^src-vertebra-core-src-bridge-rs] and completes unary responses through `ResponseSink` or progressive responses through `StreamSink`. Shm mode serializes batches directly into a per-worker [`RingPair`](../../../../../src/rs/vertebra-core/src/transport/ring_pair.rs)[^src-vertebra-core-src-transport-ring-pair-rs] and borrows the slot zero-copy on the Python side (`MpmcSlotView` / `SlotView`). [`Transport`](../../../../../src/rs/vertebra-core/src/transport/mod.rs)[^src-vertebra-core-src-transport-mod-rs] wraps either backend cleanly.
 
 ## Request Batches (`transport/mod.rs`)
 
@@ -69,6 +74,8 @@ Both topologies move requests as `BatchSnapshot`s. Embedded mode hands zero-copy
 - **Lock-free request queue**: `RequestBatcher` shards call `BatchBridge::submit_inprocess_batch(Vec<InProcessRequest>)`, pushing `Arc<BatchSnapshot>` onto an unbounded `crossbeam_channel` (bounded at ingress by `BackpressureController` `max_in_flight`, eliminating bounded-channel ABBA deadlocks between Tokio workers and Python). Legacy `BatchWriter::push_request` callers auto-seal on `SlabFull`/`ArenaFull`.
 - **Single-consumer Dekker request `Notifier`**: `BatchBridge` embeds a `Notifier` (`request_notify_fd`, `consumer_sleeping: AtomicU32`, `consumer_count: AtomicUsize`). When `consumer_count <= 1`, single-loop embedded `uvloop` workers register `loop.add_reader(request_notify_fd, ...)` and bracket idle waits with `prepare_request_sleep` / `cancel_request_sleep` so producers signal the FD only when the loop is sleeping. When `consumer_count > 1` (free-threaded multi-thread pools), workers poll `get_batch` directly.
 - **Direct response completion (`ResponseSink`)**: `BridgeResponse` carries `(request_id: u64, status: u16, headers_raw: Bytes, body: Bytes)` with zero `Vec<(Vec<u8>, Vec<u8>)>` header transcoding. When `vertebra-http` registers a `ResponseSink` (`OnceLock<ResponseSink>`), `submit_response_raw` and `submit_batch_raw` complete the sharded `InFlightRequests` `oneshot::Sender` directly on the submitting thread without an intermediate `mpsc` channel or `spawn_response_reader` task (falling back to an unbounded `mpsc` response channel in standalone bridge tests).
+
+- **Progressive response delivery (`StreamSink`)**: `ResponseStreamFrame` owns the request ID, status, flags, compact headers, and a body `Bytes`. `BatchBridge::submit_stream_frame` invokes a replaceable sink outside its read lock and returns `StreamDelivery::{Accepted, Closed}`. No sink returns `TransportError::Disconnected`. `BridgeCorrelation` registers a weakly held sink that calls `ResponseStreamRegistry::deliver_blocking` on a detached producer thread; calling this blocking path inside a Tokio runtime returns `Closed` rather than blocking the runtime [^src-vertebra-core-src-bridge-rs] [^src-vertebra-http-src-dispatcher-streams-rs].
 
 ## Per-Worker `RingPair` (`transport/ring_pair.rs`)
 
@@ -91,13 +98,19 @@ Both topologies move requests as `BatchSnapshot`s. Embedded mode hands zero-copy
 
 `send_response` writes a 20-byte header followed by compact binary headers and body: `magic: u32` (`RESPONSE_MAGIC = 0x5652_4553`, "VRES"), `correlation_id: u64`, `status: u16`, `headers_len: u16`, `body_len: u32`. `drain_responses_with` parses `HeaderMap` and `Bytes` directly from the borrowed SHM slot slice without intermediate `Vec<u8>` copies.
 
-## `ResponseSlot` Streaming Frames (`ipc.rs`)
+## Native `VRSF` Stream Frames
 
-[`ResponseSlot`](../../../../../src/rs/vertebra-core/src/ipc.rs)[^src-vertebra-core-src-ipc-rs] provides the unified response framing with a 16-byte header `[request_id u64][status u16][flags u16][header_count u16][reserved u16]`, length-prefixed headers, a `u32` body length, and the body. Flags are `u16`: `FLAG_STREAMING`, `FLAG_FINAL`, `FLAG_ERROR`, `FLAG_COMPRESSED`, `FLAG_HEADERS_SENT`, `FLAG_TRAILERS` (bits 0-5).
+`send_stream_frame` writes a 22-byte header: `magic: u32` (`RESPONSE_STREAM_MAGIC = 0x5652_5346`, "VRSF"), `correlation_id: u64`, `status: u16`, `flags: u16`, `headers_len: u16`, and `body_len: u32`, followed by compact headers and body. All stream frames use the xlarge ring regardless of size, preserving first/body/final order across small and large chunks. `max_stream_frame_payload` reports that tier's payload budget after the frame header; callers account for header bytes when chunking. Oversized frames return `ResponseTooLarge`; stream frames do not use unary overflow envelopes [^src-vertebra-core-src-transport-ring-pair-rs].
 
-- `ResponseSlot::encode_raw_parts_into(request_id, status, flags, headers, body, dst)` encodes borrowed parts into a caller buffer without building a `ResponseSlot`.
-- `submit_raw_response` ([`transport.rs`](../../../../../src/rs/vertebra-py/src/transport.rs)[^src-vertebra-py-src-transport-rs]) reads the body through `PyBuffer`, splits it at `slot_capacity` (default 16384) into `STREAMING | HEADERS_SENT` → `STREAMING` → `STREAMING | FINAL` frames (one `Vec<u8>` each), and returns the frames. In SHM mode it also writes them with `send_response_bytes`.
-- `ShmDispatcher::handle_raw_response_slot` and [`shm_reader::PendingRequests`](../../../../../src/rs/vertebra-http/src/dispatcher/shm_reader.rs)[^src-vertebra-http-src-dispatcher-shm-reader-rs] decode and route streaming `ResponseSlot` frames.
+`drain_frames_with` exposes a borrowed `ResponseFrameView` for unary (`flags == FLAG_FINAL` without `FLAG_STREAMING`) and stream frames. Unary `VRES`/`VROV` framing and the legacy unary drain callback remain available. The HTTP reader copies headers and body into owned `Bytes` before releasing ring slots and awaiting stream-channel capacity; unary completions keep their batching path. `Transport` wraps stream send, blocking send, and payload-budget access for SHM callers [^src-vertebra-core-src-transport-ring-pair-rs] [^src-vertebra-core-src-transport-mod-rs] [^src-vertebra-http-src-dispatcher-shm-reader-rs].
+
+## Bounded HTTP Stream Delivery
+
+`ResponseStreamRegistry` defaults to 64 queued frames per response. A first nonterminal frame completes the correlation as `PendingResponse::streaming`; a terminal first frame stays unary. Continuations use blocking sends for detached bridge producers or awaited sends for SHM readers. Final data and trailers are delivered before the sender closes; an error frame ends the body without a transport error because the body receiver is `Infallible`. Invalid trailer fields are skipped [^src-vertebra-http-src-dispatcher-streams-rs].
+
+The first frame leaves the request timeout slab, so long-lived streams do not inherit the 30-second pending-request timeout. Closed receivers are reclaimed by dispatcher sweeps. SHM streams retain their worker ownership: a worker sweep closes its streams and wakes backpressured senders, while response-reader shutdown cancels delivery rather than waiting indefinitely on a full client channel. The unused `PendingRequests`/`handle_raw_response_slot` dispatcher path is absent; `ResponseSlot` remains a separate core codec and is not the SHM response-ring format [^src-vertebra-http-src-dispatcher-streams-rs] [^src-vertebra-http-src-dispatcher-shm-reader-rs] [^src-vertebra-core-src-ipc-rs].
+
+The Python `submit_raw_response` path still needs the stream-submission binding and ASGI/RSGI progressive producers supplied by `server-runtime-correctness` chapters `ch02` and `ch03` [^src-vertebra-py-src-transport-rs].
 
 Provenance sources: [^src-vertebra-core-src-protocol-codec-rs].
 
@@ -109,3 +122,5 @@ Provenance sources: [^src-vertebra-core-src-protocol-codec-rs].
 [^src-vertebra-core-src-protocol-codec-rs]: `src/rs/vertebra-core/src/protocol/codec.rs` — Rust implementation module (src/rs/vertebra-core/src/protocol/codec.rs).
 [^src-vertebra-py-src-transport-rs]: `src/rs/vertebra-py/src/transport.rs` — Rust implementation module (src/rs/vertebra-py/src/transport.rs).
 [^src-vertebra-http-src-dispatcher-shm-reader-rs]: `src/rs/vertebra-http/src/dispatcher/shm_reader.rs` — Rust implementation module (src/rs/vertebra-http/src/dispatcher/shm_reader.rs).
+
+[^src-vertebra-http-src-dispatcher-streams-rs]: `src/rs/vertebra-http/src/dispatcher/streams.rs` — Bounded native response delivery and worker lifecycle cleanup.

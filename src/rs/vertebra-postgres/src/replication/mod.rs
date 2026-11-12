@@ -2,7 +2,10 @@
 //! preflight, publication custom-type preloading, `IDENTIFY_SYSTEM` verification, `pgoutput`
 //! tuple hydration, and clean `CopyDone` shutdown.
 
+pub mod feedback;
 pub mod pgoutput;
+pub mod stream;
+pub use stream::{ReplicationDelivery, ReplicationSession};
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Duration;
@@ -33,8 +36,10 @@ use crate::session::{
 use crate::types::{CompositeField, MAX_DISCOVERY_ROUNDS, TypeCatalog, TypeInfo, TypeKind};
 
 pub use pgoutput::{
-    DEFAULT_MAX_RECORD_BYTES, DEFAULT_MAX_RELATIONS, PgOutputColumn, PgOutputDecoder,
-    PgOutputFrame, PgOutputRelationSchema, PgOutputTupleValue,
+    ActiveLogicalTx, BoundedReplicationQueue, DEFAULT_MAX_QUEUE_BYTES, DEFAULT_MAX_QUEUE_RECORDS,
+    DEFAULT_MAX_RECORD_BYTES, DEFAULT_MAX_RELATIONS, OldTupleKind, PgOutputColumn, PgOutputDecoder,
+    PgOutputFrame, PgOutputRelationSchema, PgOutputTupleValue, ReplicationDedupKey,
+    ReplicationRecord,
 };
 
 /// Maximum UTF-8 byte length of a PostgreSQL replication slot or publication identifier (`NAMEDATALEN - 1`).
@@ -116,6 +121,7 @@ pub struct PostgresReplicationConnection {
     type_catalog: TypeCatalog,
     type_identities: HashMap<u32, (String, String)>,
     codec_ctx: CodecContext,
+    effective_start_lsn: u64,
 }
 
 impl PostgresReplicationConnection {
@@ -183,6 +189,7 @@ impl PostgresReplicationConnection {
         enter_copy_both(&mut repl_conn, &start_sql, start_deadline).await?;
 
         let codec_ctx = CodecContext::from_parameters(repl_conn.parameters());
+        let effective_start_lsn = start_lsn.unwrap_or(preflight.confirmed_flush_lsn);
         let identity = build_verified_identity(slot, preflight, system);
         Ok(Self {
             conn: repl_conn,
@@ -190,6 +197,7 @@ impl PostgresReplicationConnection {
             type_catalog,
             type_identities,
             codec_ctx,
+            effective_start_lsn,
         })
     }
 
@@ -391,14 +399,6 @@ impl PostgresReplicationConnection {
         self.conn.read_buf.clear();
         self.conn.write_buf.clear();
         let _ = tokio::time::timeout(SOCKET_DISCARD_GRACE, self.conn.stream.shutdown()).await;
-    }
-}
-
-impl Drop for PostgresReplicationConnection {
-    fn drop(&mut self) {
-        if !self.conn.is_closed() {
-            self.conn.mark_closed();
-        }
     }
 }
 

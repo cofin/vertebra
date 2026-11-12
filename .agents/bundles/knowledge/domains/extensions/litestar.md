@@ -18,9 +18,12 @@ generated:
   by: flow/0.26.0
   at: '2026-11-04T04:33:00Z'
 verified:
+- by: agent:flow-sync
+  at: '2026-11-12T01:15:00Z'
+  commit: c8722c76
 - by: agent:codex
   at: '2026-11-08T18:27:30.456016Z'
-  commit: a1ee9042
+  commit: 067fa901
 sources:
 - id: src-extensions-litestar-init-py
   resource: src/py/vertebra/extensions/litestar/__init__.py
@@ -105,7 +108,7 @@ sources:
 - `ObjectStoreLitestarStore` and `ObjectStoreFileSystemAdapter` are lazy public Litestar exports backed by explicitly configured `AsyncObjectStore`; persistent TTL envelopes, confined namespaces, and virtual filesystem GET/HEAD contracts are tested against native Memory/Local storage [^src-extensions-litestar-store-py].
 <!-- truth: end -->
 
-Vertebra provides symmetric, zero-coupling extensions for **Litestar** (`vertebra.extensions.litestar`), **Starlette** (`vertebra.extensions.starlette`), **FastAPI** (`vertebra.extensions.fastapi`), **Flask** (`vertebra.extensions.flask`), and **Django** (`vertebra.extensions.django`). Each extension shares the same canonical domain vocabulary (`RouteCompiler`, `RouterTable`, `ExtractedRoute` / `RouteEntry`, `CompiledRoute`, `FastPath`, `OffloadPlan`, `offload_middlewares`), routes path converter normalization through [`vertebra.server._routing`](../../../../../src/py/vertebra/server/_routing.py)[^src-server-routing-py] without importing `vertebra.framework.*`, registers its framework detector and builder in [`vertebra.server._fastpath_core`](../../../../../src/py/vertebra/server/_fastpath_core.py)[^src-server-fastpath-core-py] (`FastPathProvider`, `register_fastpath_provider`, `resolve_fastpath_provider`, `DirectPlan`, `QueryParamSpec`), and uses [`vertebra.server._fastpath`](../../../../../src/py/vertebra/server/_fastpath.py)[^src-server-fastpath-py] (`wrap_asgi_fastpath`, `resolve_relative_path`, `extract_scope_body_fast`, `send_asgi_direct`, `attach_framework_fastpath`) for zero-closure C-API `send_raw_response` dispatch and automatic `App.mount("/prefix", sub_app)` fastpath stacking across all 6 frameworks.
+Vertebra provides symmetric, zero-coupling extensions for **Litestar** (`vertebra.extensions.litestar`), **Starlette** (`vertebra.extensions.starlette`), **FastAPI** (`vertebra.extensions.fastapi`), **Flask** (`vertebra.extensions.flask`), and **Django** (`vertebra.extensions.django`). Each extension shares the same canonical domain vocabulary (`RouteCompiler`, `RouterTable`, `ExtractedRoute` / `RouteEntry`, `CompiledRoute`, `FastPath`, `OffloadPlan`, `offload_middlewares`), routes path converter normalization through [`vertebra.server._routing`](../../../../../src/py/vertebra/server/_routing.py)[^src-server-routing-py] without importing `vertebra.framework.*`, is detected and built by a lazy built-in `FastPathProvider` (`detect(app)`, `build(app, *, mount_prefix="")` returning `FastPath.from_app(...)`) in [`vertebra.server._fastpath_core`](../../../../../src/py/vertebra/server/_fastpath_core.py)[^src-server-fastpath-core-py] (`register_fastpath_provider`, `resolve_fastpath_provider`, `DirectPlan`, `QueryParamSpec`), and uses [`vertebra.server._fastpath`](../../../../../src/py/vertebra/server/_fastpath.py)[^src-server-fastpath-py] (`wrap_asgi_fastpath`, `resolve_relative_path`, `extract_scope_body_fast`, `send_asgi_direct`, `attach_framework_fastpath`) for zero-closure C-API `send_raw_response` dispatch and automatic `App.mount("/prefix", sub_app)` fastpath stacking across all 6 frameworks.
 
 ## 1. Litestar Integration (`vertebra.extensions.litestar`)
 

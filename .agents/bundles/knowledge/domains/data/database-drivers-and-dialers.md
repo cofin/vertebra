@@ -17,17 +17,20 @@ generated:
   at: "2026-11-04T04:33:00Z"
 verified:
   - by: agent:flow-sync
+    at: "2026-11-12T01:15:00Z"
+    commit: c8722c76
+  - by: agent:flow-sync
     at: "2026-11-09T21:46:00Z"
-    commit: 84959389
+    commit: 14aa83b8
   - by: agent:flow-archive
     at: "2026-11-09T20:56:00Z"
-    commit: 62a29db7
+    commit: af1b3d30
   - by: agent:docs-okf-specialist
     at: "2026-11-09T20:48:51Z"
-    commit: 5bbc7407
+    commit: 47da6820
   - by: agent:flow-setup
     at: "2026-11-07T03:55:00Z"
-    commit: 9af810f5
+    commit: 067fa901
   - by: agent:codex
     at: "2026-11-05T06:09:26Z"
     commit: 80ff8a65e43a2bcef9e48a7763e89a7352118232
@@ -151,7 +154,7 @@ sources:
     title: SyncDuckDBDriver and AsyncDuckDBDriver native DuckDB 2.0 adapters
   - id: src-duckdb-core
     resource: src/py/vertebra/db/adapters/duckdb/core.py::DuckDBCore
-    title: DuckDBCore write detection and GCS CREATE SECRET literal SQL builder
+    title: DuckDBCore write-statement detection
   - id: src-redis-config
     resource: src/py/vertebra/db/adapters/redis/config.py::RedisConfig
     title: Redis configuration and driver memory:// rejection
@@ -171,7 +174,7 @@ sources:
 - **Zero-Sidecar Cloud SQL & AlloyDB Dialers (`vertebra-db/src/dialer.rs`, `vertebra-core/src/proto.rs`)**: `CloudSQLDialer` (`:3307`, custom `project:instance` `ServerCertVerifier`) and `AlloyDBDialer` (`:5433`, mTLS + 4-byte BE length-prefixed `MetadataExchangeRequest` encoded via `vertebra_core::proto` varint/bytes wire helpers) establish IAM or password connections without external proxy processes.
 <!-- truth: end -->
 
-[`src/rs/vertebra-db`](../../../../../src/rs/vertebra-db/src/lib.rs)[^src-vertebra-db-src-lib-rs], [`src/rs/vertebra-oracle`](../../../../../src/rs/vertebra-oracle/src/lib.rs)[^src-vertebra-oracle-src-lib-rs], and [`vertebra.db`](../../../../../src/py/vertebra/db/__init__.py)[^src-db-init-py] define Vertebra's database and cache adapter contracts, standalone Oracle 26ai Thin transport (`vertebra._oracle`), shared-memory `ArrowCursor` transport, binary wire codecs, and zero-sidecar Cloud SQL and AlloyDB dialers. Standalone Google Cloud analytical and distributed SQL wheels (`vertebra._bigquery` and `vertebra._spanner`), multicloud `ObjectStoreStaging`, and adapter `ToolProvider` policies are documented in [GCP BigQuery & Spanner Native Drivers](gcp-bigquery-and-spanner-drivers.md) and [ADR-004](../../decisions/adr-004-optional-driver-wheels-and-shm-ownership.md); query composition, CDC, and RLS live in [query-pipeline-cdc-and-tenancy](query-pipeline-cdc-and-tenancy.md).
+[`src/rs/vertebra-db`](../../../../../src/rs/vertebra-db/src/lib.rs)[^src-vertebra-db-src-lib-rs], [`src/rs/vertebra-oracle`](../../../../../src/rs/vertebra-oracle/src/lib.rs)[^src-vertebra-oracle-src-lib-rs], and [`vertebra.db`](../../../../../src/py/vertebra/db/__init__.py)[^src-db-init-py] define Vertebra's database and cache adapter contracts, standalone Oracle 26ai Thin transport (`vertebra._oracle`), shared-memory `ArrowCursor` transport, binary wire codecs, and zero-sidecar Cloud SQL and AlloyDB dialers. Standalone Google Cloud analytical and distributed SQL wheels (`vertebra._bigquery` and `vertebra._spanner`), multicloud `ObjectStoreStaging`, and adapter `ToolProvider` policies are documented in [GCP BigQuery & Spanner Native Drivers](gcp-bigquery-and-spanner-drivers.md) and [ADR-004](../../decisions/adr-004-optional-driver-wheels-and-shm-ownership.md); query composition, CDC, and RLS live in [query-pipeline-cdc-and-tenancy](query-pipeline-cdc-and-tenancy.md). Known driver gaps (the unwired `vertebra._postgres` wheel and DuckDB GCS credentials) live in [Database Driver Limitations](database-driver-limitations.md).
 
 ## Polymorphic Registry & Driver Contracts
 
@@ -184,7 +187,7 @@ sources:
 
 | Adapter & Rust Module | Config & Core | Wire & Runtime Behavior |
 |---|---|---|
-| [`adapters/postgres/`](../../../../../src/py/vertebra/db/adapters/postgres/__init__.py) / [`postgres/mod.rs`](../../../../../src/rs/vertebra-db/src/postgres/mod.rs)[^src-vertebra-db-src-postgres-rs] | `PostgreSQLConfig`, `PostgreSQLCore` | v3 frame encoders (`encode_startup_message`, `encode_parse_frame`, `encode_bind_frame`, `encode_execute_frame`, `encode_sync_frame`, `encode_query_frame`), `PGCOPY` binary codec, binary `pgvector` (`f32`/`f16`/`bit`) codecs, zero-copy `strip_pg_jsonb_header` (`0x01`), `:5432` IAM auth, `PoolerMode` statement-cache gating (`0` in `transaction` mode unless `protocol_level_pooler_cache`), `effective_direct_dsn`, `compute_worker_pool_budget`, and `alloydb.enable_columnar_engine=on` session GUCs; rejects `memory://`. |
+| [`adapters/postgres/`](../../../../../src/py/vertebra/db/adapters/postgres/__init__.py) / [`postgres/mod.rs`](../../../../../src/rs/vertebra-db/src/postgres/mod.rs)[^src-vertebra-db-src-postgres-rs] | `PostgreSQLConfig`, `PostgreSQLCore` | v3 frame encoders (`encode_startup_message`, `encode_parse_frame`, `encode_bind_frame`, `encode_execute_frame`, `encode_sync_frame`, `encode_query_frame`), `PGCOPY` binary codec, binary `pgvector` (`f32`/`f16`/`bit`) codecs, zero-copy `strip_pg_jsonb_header` (`0x01`), `:5432` IAM auth, `PoolerMode` statement-cache gating (`0` in `transaction` mode unless `protocol_level_pooler_cache`), `effective_direct_dsn`, `compute_worker_pool_budget`, and `alloydb.enable_columnar_engine=on` session GUCs; rejects `memory://`. `SyncPostgreSQLDriver` runs over `psycopg_pool` and `AsyncPostgreSQLDriver` offloads it with `asyncio.to_thread`; the standalone `vertebra._postgres` wheel ships but is not wired into these drivers ([limitations](database-driver-limitations.md)). |
 | [`adapters/mysql/`](../../../../../src/py/vertebra/db/adapters/mysql/__init__.py) / [`vertebra-mysql/src/lib.rs`](../../../../../src/rs/vertebra-mysql/src/lib.rs)[^src-vertebra-mysql-src-lib-rs] | `MySQLConfig` | Pure-Rust `vertebra._mysql` wheel (`SyncMySQLClient`, `AsyncMySQLClient`), Handshake v10 (`caching_sha2_password`, `mysql_native_password`, `mysql_clear_password`), LRU-cached binary `COM_STMT_PREPARE` / `COM_STMT_EXECUTE` / `COM_STMT_CLOSE`, MySQL 9 `VECTOR(N)` (`f32` LE), `SyncMySQLPipeline` / `AsyncMySQLPipeline`, `VTBARROW` `ArrowCursor` + `load_from_arrow`, `:3306` IAM token auth, Cloud SQL `:3307` mTLS dialer, and out-of-band `KILL QUERY <conn_id>`. |
 | [`adapters/sqlite/`](../../../../../src/py/vertebra/db/adapters/sqlite/__init__.py) / [`sqlite/mod.rs`](../../../../../src/rs/vertebra-db/src/sqlite/mod.rs) | `SQLiteConfig`, `SQLiteCore` | `SqliteConfig` pragmas (`journal_mode=WAL`, `synchronous=NORMAL`, `busy_timeout`, `mmap_size`), `LeaseBroker`-serialized writes when `broker` is attached, and `ArrowCursor` batch streaming. |
 | [`adapters/oracle/`](../../../../../src/py/vertebra/db/adapters/oracle/driver.py)[^src-oracle-driver-py] / [`vertebra-oracle`](../../../../../src/rs/vertebra-oracle/src/client.rs)[^src-vertebra-oracle-src-client-rs] & [`oracle/mod.rs`](../../../../../src/rs/vertebra-db/src/oracle/mod.rs)[^src-vertebra-db-src-oracle-rs] | `OracleConfig`, `OracleCore`, `SyncOraclePool`, `AsyncOraclePool` | Standalone `vertebra._oracle` wheel wrapping pure-Rust `oracledb =26.0.0-beta.5` (`features = ["arrow"]`, zero ODPI-C/`libclntsh`, session `TIME_ZONE = '+00:00'`), dedicated per-connection worker threads (`SyncCompletionQueue` / `AsyncCompletionQueue`) with out-of-band `OracleBreakHandle` (`ALTER SYSTEM CANCEL SQL` + single-host TCP [`dialer.rs`](../../../../../src/rs/vertebra-oracle/src/dialer.rs)[^src-vertebra-oracle-src-dialer-rs] TNS `MARKER_TYPE_RESET` relay + socket-shutdown fallback; `ORA-01013` -> `QueryCancelledError`), in-memory `OracleWalletMaterial` (`.zip`/`ewallet.pem`/`cwallet.sso` + `tnsnames.ora`) and `wallet_location` mTLS plus `GcpTokenCache` IAM token auth, native [`pool.rs`](../../../../../src/rs/vertebra-oracle/src/pool.rs)[^src-vertebra-oracle-src-pool-rs] DRCP (`cclass`, `purity` `SELF`/`NEW`, `connection_tag`) and `[0x11, 0x6e]` TTC piggyback (`set_session_attrs`), single-round-trip `DML RETURNING INTO`, 26ai `VECTOR` (`0xDB 0x01`) & `OSON` codecs, and crate-local `arrow 59` [`batches_to_arrow_ipc`](../../../../../src/rs/vertebra-oracle/src/arrow.rs)[^src-vertebra-oracle-src-arrow-rs] -> `construct_py_arrow_cursor` `VTBARROW` SHM (falling back to row-decoded Arrow 59 builders for named binds, `JSON`, and `VECTOR`). |
@@ -253,5 +256,5 @@ Driver transaction scopes roll back on `BaseException` (with async rollback shie
 [^src-oracle-driver]: `src/py/vertebra/db/adapters/oracle/driver.py::SyncOracleDriver` — Oracle drivers over the standalone `vertebra._oracle` module.
 [^src-mssql-driver]: `src/py/vertebra/db/adapters/mssql/driver.py::SyncMSSQLDriver` — SQL Server drivers over the standalone `vertebra._mssql` module.
 [^src-duckdb-driver]: `src/py/vertebra/db/adapters/duckdb/driver.py::SyncDuckDBDriver` — SyncDuckDBDriver and AsyncDuckDBDriver native DuckDB 2.0 adapters.
-[^src-duckdb-core]: `src/py/vertebra/db/adapters/duckdb/core.py::DuckDBCore` — DuckDBCore write detection and GCS CREATE SECRET literal SQL builder.
+[^src-duckdb-core]: `src/py/vertebra/db/adapters/duckdb/core.py::DuckDBCore` — DuckDBCore write-statement detection.
 [^src-redis-config]: `src/py/vertebra/db/adapters/redis/config.py::RedisConfig` — Redis configuration and driver memory:// rejection.

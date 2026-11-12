@@ -237,6 +237,55 @@ impl Transport {
         }
     }
 
+    /// Send an ordered response frame through shared memory.
+    pub fn send_stream_frame(
+        &self,
+        correlation_id: u64,
+        status: u16,
+        flags: u16,
+        headers_raw: &[u8],
+        body: &[u8],
+    ) -> Result<(), TransportError> {
+        match &self.backend {
+            Backend::InProcess(_) => Err(TransportError::Disconnected),
+            Backend::SharedMemory(pair) => pair
+                .send_stream_frame(correlation_id, status, flags, headers_raw, body)
+                .map_err(|error| match error {
+                    RingPairError::ResponseTooLarge(_) => TransportError::ResponseTooLarge,
+                    RingPairError::Channel(ChannelError::Full) => TransportError::RingFull,
+                    _ => TransportError::Disconnected,
+                }),
+        }
+    }
+
+    /// Send an ordered response frame, waiting for response-ring capacity.
+    pub fn send_stream_frame_blocking(
+        &self,
+        correlation_id: u64,
+        status: u16,
+        flags: u16,
+        headers_raw: &[u8],
+        body: &[u8],
+    ) -> Result<(), TransportError> {
+        match &self.backend {
+            Backend::InProcess(_) => Err(TransportError::Disconnected),
+            Backend::SharedMemory(pair) => pair
+                .send_stream_frame_blocking(correlation_id, status, flags, headers_raw, body)
+                .map_err(|error| match error {
+                    RingPairError::ResponseTooLarge(_) => TransportError::ResponseTooLarge,
+                    RingPairError::Channel(ChannelError::Full) => TransportError::RingFull,
+                    _ => TransportError::Disconnected,
+                }),
+        }
+    }
+
+    pub fn max_stream_frame_payload(&self) -> Option<usize> {
+        match &self.backend {
+            Backend::InProcess(_) => None,
+            Backend::SharedMemory(pair) => Some(pair.max_stream_frame_payload()),
+        }
+    }
+
     /// Send a pre-encoded raw response frame back through the shared-memory transport.
     pub fn send_response_bytes(&self, raw_frame: &[u8]) -> Result<(), TransportError> {
         match &self.backend {

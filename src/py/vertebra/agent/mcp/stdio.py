@@ -4,11 +4,13 @@ This module provides run_stdio_server, allowing an MCPService to be hosted over 
 """
 
 import sys
+import uuid
 from collections.abc import AsyncIterable, Awaitable, Callable
 
 import anyio
 import anyio.to_thread
 
+from vertebra.agent.core.context import AgentContext
 from vertebra.agent.mcp.service import MCPService
 from vertebra.utils.serializers import encode_json_bytes
 
@@ -19,8 +21,10 @@ async def run_stdio_server(
     stdin: AsyncIterable[bytes] | None = None,
     stdout: Callable[[bytes], Awaitable[None]] | None = None,
     max_message_bytes: int = 4_194_304,
+    context: AgentContext | None = None,
 ) -> int:
     """Read newline-delimited JSON-RPC frames from stdin, dispatching to service."""
+    session_context = context if context is not None else AgentContext(session_id=f"stdio-{uuid.uuid4().hex}")
     write_fn = stdout
 
     if write_fn is None:
@@ -54,7 +58,7 @@ async def run_stdio_server(
                 await write_fn(err_resp)
                 continue
 
-            resp = await service.handle_payload(line)
+            resp = await service.handle_payload(line, session_context)
             if resp is not None:
                 await write_fn(resp)
     else:
@@ -84,7 +88,7 @@ async def run_stdio_server(
                 await write_fn(err_resp)
                 continue
 
-            resp = await service.handle_payload(line)
+            resp = await service.handle_payload(line, session_context)
             if resp is not None:
                 await write_fn(resp)
 

@@ -1,15 +1,23 @@
 """Conformance tests for MCP 2026-07-28 protocol, registry, HTTP handler, and tasks."""
 
+import asyncio
 import dataclasses
+import io
 from collections.abc import Mapping
 from types import SimpleNamespace
 from typing import Any
 
+import anyio
 import pytest
+from flask import Flask
+from litestar.testing import create_test_client
+from starlette.requests import Request as StarletteRequest
 
+from vertebra._vertebra import Request as NativeRequest
 from vertebra.agent.controller import ConfirmationDecisionRequest
-from vertebra.agent.core.context import AgentContext, CallerIdentity
+from vertebra.agent.core.context import AgentContext, CallerIdentity, bind_agent_context, reset_agent_context
 from vertebra.agent.core.guards import GuardProtocol, PermissionDeniedError, RequireRoles, authorize
+from vertebra.agent.core.identity import CallableIdentitySource, MtlsIdentitySource
 from vertebra.agent.core.jsonrpc import METHOD_NOT_FOUND, JSONRPCErrorException
 from vertebra.agent.core.schema import tool
 from vertebra.agent.mcp import (
@@ -45,6 +53,7 @@ from vertebra.agent.mcp import (
     render_webmcp_manifest_json,
     resource,
 )
+from vertebra.agent.mcp.routes import AsgiMcpApp, WsgiMcpApp
 from vertebra.agent.mcp.service import CONFIRMATION_REQUIRED, CONFIRMATION_TOKEN_META_KEY
 from vertebra.agent.plugin import AgentPlugin, AgentPluginConfig
 from vertebra.agent.runtime import ConfirmationGate
@@ -53,6 +62,7 @@ from vertebra.extensions.flask.mcp import attach_mcp_routes as attach_flask_mcp
 from vertebra.extensions.starlette.mcp import mount_mcp_routes as mount_starlette_mcp
 from vertebra.framework._app import App
 from vertebra.typing import FrozenBaseStruct
+from vertebra.utils.module_loader import MissingDependencyError
 from vertebra.utils.serializers import decode_json, encode_json_bytes
 
 
@@ -900,3 +910,395 @@ async def test_webmcp_manifest_projects_strictly_from_toolspec_exposure() -> Non
     assert [t["name"] for t in webmcp_doc["tools"]] == ["browser_delete_item"]
     assert webmcp_doc["tools"][0]["title"] == "Delete Item"
     assert webmcp_doc["tools"][0]["annotations"]["consequentialHint"] is True
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("entrypoint", ["handle", "handle_payload"])
+@pytest.mark.parametrize("user_id", ["ana", None])
+async def test_mcp_core_binds_agent_context(entrypoint: str, user_id: str | None) -> None:
+    """HTTP and raw payload dispatch bind identity and restore their caller's context."""
+    core = MCPCore()
+
+    @tool(name="whoami")
+    def whoami() -> str:
+        ctx = AgentContext.current()
+        assert ctx is not None
+        return str(ctx.identity.user_id)
+
+    core.registry.register_tool(whoami)
+    body = encode_json_bytes({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "whoami"}})
+    context = AgentContext(identity=CallerIdentity(user_id=user_id)) if user_id else None
+    outer = AgentContext(identity=CallerIdentity(user_id="outer"))
+    token = bind_agent_context(outer)
+    try:
+        if entrypoint == "handle":
+            response = await core.handle(McpHttpRequest(method="POST", path="/mcp", body=body, context=context))
+            payload = response.body
+        else:
+            payload = await core.handle_payload(body, context=context)
+        assert payload is not None
+        assert decode_json(payload)["result"]["content"][0]["text"] == str(user_id)
+        assert AgentContext.current() is outer
+    finally:
+        reset_agent_context(token)
+    assert AgentContext.current() is None
+
+
+@pytest.mark.anyio
+async def test_mcp_task_cancel_stops_execution() -> None:
+    """Promoted tasks own cancellation state and cannot complete after cancellation."""
+    core = MCPCore()
+    started = anyio.Event()
+    stopped = anyio.Event()
+    contexts: list[AgentContext] = []
+    task_handles: list[asyncio.Task[Any]] = []
+
+    @tool(name="waiting")
+    async def waiting() -> str:
+        context = AgentContext.current()
+        assert context is not None
+        contexts.append(context)
+        current = asyncio.current_task()
+        assert current is not None
+        task_handles.append(current)
+        started.set()
+        try:
+            await anyio.Event().wait()
+        finally:
+            stopped.set()
+        return "unexpected"
+
+    core.registry.register_tool(waiting)
+    owner = AgentContext(identity=CallerIdentity(user_id="ana"), metadata={"request": 1})
+    request = encode_json_bytes(
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "waiting", "_meta": {"io.modelcontextprotocol/task": True}},
+        }
+    )
+    promoted = await core.handle_payload(request, context=owner)
+    assert promoted is not None
+    task_id = decode_json(promoted)["result"]["task"]["taskId"]
+    with anyio.fail_after(2):
+        await started.wait()
+    assert contexts[0] is not owner
+    assert contexts[0].identity is owner.identity
+    assert contexts[0].metadata == owner.metadata
+    assert contexts[0].metadata is not owner.metadata
+    assert contexts[0].cancellation_token is not owner.cancellation_token
+    denied = await core.handle_payload(
+        encode_json_bytes({"jsonrpc": "2.0", "id": 2, "method": "tasks/cancel", "params": {"taskId": task_id}}),
+        context=AgentContext(identity=CallerIdentity(user_id="other")),
+    )
+    assert denied is not None and "error" in decode_json(denied)
+    assert not contexts[0].cancellation_token.is_cancelled
+    for method in ("tasks/get", "tasks/update", "tasks/cancel"):
+        anonymous = await core.handle_payload(
+            encode_json_bytes({"jsonrpc": "2.0", "id": 4, "method": method, "params": {"taskId": task_id}})
+        )
+        assert anonymous is not None
+        assert decode_json(anonymous)["error"]["code"] == -32602
+        assert not contexts[0].cancellation_token.is_cancelled
+        assert not task_handles[0].done()
+    anonymous_list = await core.handle_payload(encode_json_bytes({"jsonrpc": "2.0", "id": 5, "method": "tasks/list"}))
+    assert anonymous_list is not None
+    assert decode_json(anonymous_list)["result"]["tasks"] == []
+    cancelled = await core.handle_payload(
+        encode_json_bytes({"jsonrpc": "2.0", "id": 3, "method": "tasks/cancel", "params": {"taskId": task_id}}),
+        context=owner,
+    )
+    assert cancelled is not None and decode_json(cancelled)["result"]["task"]["status"] == "cancelled"
+    with anyio.fail_after(2):
+        await stopped.wait()
+        with pytest.raises(asyncio.CancelledError):
+            await task_handles[0]
+    assert contexts[0].cancellation_token.is_cancelled
+    assert not owner.cancellation_token.is_cancelled
+    record = core.task_store.get(task_id, owner_id="default:ana")
+    assert record.status == "cancelled"
+    assert core.task_store.complete(task_id, {"content": []}) is record
+    assert core.task_store.fail(task_id, {"message": "late"}) is record
+
+
+@pytest.mark.anyio
+async def test_mcp_promoted_task_inherits_bound_identity() -> None:
+    """A completed promoted tool observes its caller identity through the bound context."""
+    core = MCPCore()
+
+    @tool(name="whoami")
+    def whoami() -> str:
+        context = AgentContext.current()
+        assert context is not None
+        return str(context.identity.user_id)
+
+    core.registry.register_tool(whoami)
+    response = await core.handle_payload(
+        encode_json_bytes(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": "whoami", "_meta": {"io.modelcontextprotocol/task": True}},
+            }
+        ),
+        context=AgentContext(identity=CallerIdentity(user_id="ana")),
+    )
+    assert response is not None
+    task_id = decode_json(response)["result"]["task"]["taskId"]
+    result = await core.task_store.wait_for_result(task_id, owner_id="default:ana", timeout_s=2)
+    assert result.owner_id == "default:ana"
+    assert result.result is not None
+    assert result.result["content"][0]["text"] == "ana"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("surface", ["asgi", "starlette"])
+@pytest.mark.parametrize(
+    "identity_case,expected",
+    [
+        ("user", "ana|None|None"),
+        ("anonymous", "None|None|None"),
+        ("trusted", "None|None|CN=svc"),
+        ("untrusted", "None|None|None"),
+        ("custom", "erin|None|None"),
+    ],
+)
+async def test_mcp_adapters_propagate_agent_context(surface: str, identity_case: str, expected: str) -> None:
+    """ASGI and Starlette adapters preserve authenticated state and explicit proxy policies."""
+    config = MCPConfig()
+    if identity_case in ("trusted", "untrusted"):
+        config = MCPConfig(
+            trust_proxy_identity=True, identity_source=MtlsIdentitySource(trusted_proxies=("10.0.0.0/8",))
+        )
+    elif identity_case == "custom":
+        config = MCPConfig(
+            trust_proxy_identity=True,
+            identity_source=CallableIdentitySource(
+                resolver=lambda request: CallerIdentity(user_id=request.headers.get("x-user"))
+            ),
+        )
+    core = MCPCore(config=config)
+
+    @tool(name="whoami")
+    def whoami(context: AgentContext) -> str:
+        return f"{context.identity.user_id}|{context.identity.email}|{context.identity.client_cert_subject}"
+
+    core.registry.register_tool(whoami)
+    app = AsgiMcpApp(core)
+    body = encode_json_bytes({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "whoami"}})
+    scope: dict[str, Any] = {
+        "type": "http",
+        "method": "POST",
+        "path": "/mcp",
+        "headers": [
+            (b"content-type", b"application/json"),
+            (b"x-goog-authenticated-user-email", b"ana@example.com"),
+            (b"x-vertebra-mtls-subject", b"CN=svc"),
+            (b"x-user", b"erin"),
+        ],
+        "client": ("203.0.113.9" if identity_case == "untrusted" else "10.0.0.5", 1),
+    }
+    if identity_case == "user":
+        scope["user"] = SimpleNamespace(id="ana", roles=["admin"])
+
+    async def receive() -> dict[str, Any]:
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    if surface == "starlette":
+        response = await app.handle_starlette_request(StarletteRequest(scope, receive))
+        payload = response.body
+    else:
+        messages: list[dict[str, Any]] = []
+
+        async def send(message: dict[str, Any]) -> None:
+            messages.append(message)
+
+        await app(scope, receive, send)
+        assert messages[0]["status"] == 200
+        payload = messages[-1]["body"]
+    assert decode_json(payload)["result"]["content"][0]["text"] == expected
+
+
+@pytest.mark.parametrize("surface", ["wsgi", "flask", "duck-request"])
+def test_mcp_wsgi_adapters_propagate_agent_context(surface: str) -> None:
+    """WSGI and Flask adapters use immediate-peer metadata and authenticated WSGI users."""
+    config = MCPConfig(trust_proxy_identity=True, identity_source=MtlsIdentitySource(trusted_proxies=("10.0.0.0/8",)))
+    core = MCPCore(config=config)
+
+    @tool(name="whoami")
+    def whoami(context: AgentContext) -> str:
+        return f"{context.identity.user_id}|{context.identity.client_cert_subject}"
+
+    core.registry.register_tool(whoami)
+    app = WsgiMcpApp(core)
+    body = encode_json_bytes({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "whoami"}})
+    if surface == "wsgi":
+        response = app(
+            {
+                "REQUEST_METHOD": "POST",
+                "PATH_INFO": "/mcp",
+                "REMOTE_USER": "carol",
+                "REMOTE_ADDR": "10.0.0.5",
+                "HTTP_X_VERTEBRA_MTLS_SUBJECT": "CN=svc",
+                "wsgi.input": io.BytesIO(body),
+            },
+            lambda status, headers: None,
+        )
+        payload = b"".join(response)
+        expected = "carol|CN=svc"
+    elif surface == "flask":
+        flask = Flask(__name__)
+        with flask.test_request_context(
+            "/mcp",
+            method="POST",
+            data=body,
+            headers={"x-vertebra-mtls-subject": "CN=svc"},
+            environ_overrides={"REMOTE_ADDR": "10.0.0.5", "REMOTE_USER": "carol"},
+        ):
+            result = app.handle_flask_view()
+        assert isinstance(result, tuple)
+        payload = result[0]
+        expected = "carol|CN=svc"
+    else:
+        result = app.handle_flask_view(
+            SimpleNamespace(method="POST", path="/mcp", headers={"x-vertebra-mtls-subject": "CN=svc"}, body=body)
+        )
+        assert isinstance(result, tuple)
+        payload = result[0]
+        expected = "None|None"
+    assert decode_json(payload)["result"]["content"][0]["text"] == expected
+
+
+def test_mcp_identity_config_requires_explicit_opt_in() -> None:
+    """Proxy trust requires both an explicit opt-in and a concrete policy."""
+    with pytest.raises(ValueError, match="requires identity_source"):
+        MCPConfig(trust_proxy_identity=True)
+    with pytest.raises(ValueError, match="requires trust_proxy_identity=True"):
+        MCPConfig(identity_source=CallableIdentitySource(resolver=lambda request: None))
+
+
+def test_mcp_flask_missing_refuses_fabricated_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An unavailable Flask dependency raises before dispatching an invented request."""
+    monkeypatch.setattr("vertebra.agent.mcp.routes.import_optional", lambda name: None)
+    with pytest.raises(MissingDependencyError):
+        WsgiMcpApp(MCPCore()).handle_flask_view()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("authenticated", [True, False])
+async def test_mcp_asgi_adapter_context_controls_guard(authenticated: bool) -> None:
+    """Only authenticated ASGI scope roles authorize guarded tools."""
+    core = MCPCore()
+    calls: list[str] = []
+
+    @tool(name="admin_only", guards=(RequireRoles("admin"),))
+    def admin_only() -> str:
+        calls.append("ran")
+        return "ok"
+
+    core.registry.register_tool(admin_only)
+    body = encode_json_bytes({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "admin_only"}})
+    scope: dict[str, Any] = {"type": "http", "method": "POST", "path": "/mcp", "headers": []}
+    if authenticated:
+        scope["user"] = SimpleNamespace(id="ana", roles=["admin"])
+    messages: list[dict[str, Any]] = []
+
+    async def receive() -> dict[str, Any]:
+        return {"type": "http.request", "body": body}
+
+    async def send(message: dict[str, Any]) -> None:
+        messages.append(message)
+
+    await AsgiMcpApp(core)(scope, receive, send)
+    result = decode_json(messages[-1]["body"])
+    assert ("result" in result) is authenticated
+    assert calls == (["ran"] if authenticated else [])
+
+
+def test_mcp_native_request_adapter_propagates_explicit_identity() -> None:
+    """Native request headers reach the configured application identity source."""
+    source = CallableIdentitySource(resolver=lambda request: CallerIdentity(user_id=request.headers.get("x-user")))
+    core = MCPCore(config=MCPConfig(trust_proxy_identity=True, identity_source=source))
+
+    @tool(name="whoami")
+    def whoami(context: AgentContext) -> str:
+        return str(context.identity.user_id)
+
+    core.registry.register_tool(whoami)
+    body = encode_json_bytes({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "whoami"}})
+    request = NativeRequest.from_parts("POST", "/mcp", body=body, headers=[("x-user", "ana")])
+    response = WsgiMcpApp(core).handle_vertebra_request(request)
+    assert decode_json(bytes(response.body))["result"]["content"][0]["text"] == "ana"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("trusted", [False, True])
+async def test_native_plugin_context_and_delete_route(trusted: bool) -> None:
+    """Native plugin endpoints honor explicit identity policies and register DELETE."""
+    source = CallableIdentitySource(resolver=lambda request: CallerIdentity(email=request.headers.get("x-test-email")))
+    config = MCPConfig(trust_proxy_identity=trusted, identity_source=source if trusted else None)
+    plugin = AgentPlugin(AgentPluginConfig(mcp=config))
+
+    @tool(name="whoami")
+    def whoami(context: AgentContext) -> str:
+        return str(context.identity.email)
+
+    plugin.mcp_registry.register_tool(whoami)
+    app = App()
+    plugin.mount_native(app)
+    routes = {(route.method.upper(), route.path): route.handler for route in app.routes}
+    assert ("DELETE", "/mcp") in routes
+    headers = {"x-test-email": "ana@example.com", "x-goog-authenticated-user-email": "ana@example.com"}
+    header_obj = SimpleNamespace(as_dict=lambda: headers) if trusted else headers
+    status, _, raw = await routes[("POST", "/mcp")](
+        body=encode_json_bytes({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "whoami"}}),
+        headers=header_obj,
+    )
+    assert status == 200
+    assert decode_json(raw)["result"]["content"][0]["text"] == ("ana@example.com" if trusted else "None")
+    delete_status, _, _ = await routes[("DELETE", "/mcp")](headers={})
+    assert delete_status == 405
+
+
+def test_litestar_fallback_preserves_core_responses_and_context() -> None:
+    """Fallback requests retain core status, headers, and configured caller identity."""
+    source = CallableIdentitySource(resolver=lambda request: CallerIdentity(user_id=request.headers.get("x-user")))
+    plugin = AgentPlugin(AgentPluginConfig(mcp=MCPConfig(trust_proxy_identity=True, identity_source=source)))
+
+    @tool(name="whoami")
+    def whoami(context: AgentContext) -> str:
+        return str(context.identity.user_id)
+
+    plugin.mcp_registry.register_tool(whoami)
+    with create_test_client(route_handlers=[], plugins=[plugin]) as client:
+        notified = client.post("/mcp", content=b'{"jsonrpc":"2.0","method":"notifications/initialized"}')
+        assert notified.status_code == 202
+        assert notified.content == b""
+        forbidden = client.post("/mcp", content=b"{}", headers={"Origin": "https://evil.example.com"})
+        assert forbidden.status_code == 403
+        listed = client.post(
+            "/mcp",
+            content=b'{"jsonrpc":"2.0","id":1,"method":"tools/list"}',
+            headers={"MCP-Protocol-Version": "2026-07-28"},
+        )
+        assert listed.status_code == 200
+        assert listed.headers["mcp-protocol-version"] == "2026-07-28"
+        cached = client.post(
+            "/mcp",
+            content=b'{"jsonrpc":"2.0","id":1,"method":"tools/list"}',
+            headers={"If-None-Match": listed.headers["etag"]},
+        )
+        assert cached.status_code == 304
+        assert cached.content == b""
+        called = client.post(
+            "/mcp",
+            content=b'{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"whoami"}}',
+            headers={"x-user": "ana"},
+        )
+        assert called.json()["result"]["content"][0]["text"] == "ana"
+        for method in (client.get, client.delete):
+            refused = method("/mcp")
+            assert refused.status_code == 405
+            assert refused.headers["allow"] == "POST, OPTIONS"

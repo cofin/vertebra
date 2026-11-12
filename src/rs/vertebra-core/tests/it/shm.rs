@@ -214,3 +214,152 @@ fn tiered_ring_set_drains_non_small_tier_even_when_active_mask_is_cleared() {
         .expect("medium slot view must be discovered via has_data_acquire");
     assert!(!view.as_slice().is_empty());
 }
+
+#[test]
+fn stream_frames_preserve_cross_size_order_and_unary_flags() {
+    use vertebra_core::ipc::{FLAG_FINAL, FLAG_HEADERS_SENT, FLAG_STREAMING};
+    use vertebra_core::transport::ring_pair::{RingPair, RingPairConfig};
+    let mut config = RingPairConfig::compact();
+    config.response_tiers.xlarge.slot_count = 8;
+    let pair = RingPair::create(config).unwrap();
+    let large = vec![b'b'; 5000];
+    pair.send_stream_frame(
+        11,
+        200,
+        FLAG_STREAMING | FLAG_HEADERS_SENT,
+        b"content-type",
+        b"a",
+    )
+    .unwrap();
+    pair.send_stream_frame(11, 200, FLAG_STREAMING, b"", &large)
+        .unwrap();
+    pair.send_stream_frame(11, 200, FLAG_STREAMING | FLAG_FINAL, b"", b"")
+        .unwrap();
+    let mut frames = Vec::new();
+    assert_eq!(
+        pair.drain_frames_with(8, |frame| frames.push((
+            frame.correlation_id,
+            frame.flags,
+            frame.headers_raw.to_vec(),
+            frame.body.to_vec()
+        )))
+        .unwrap(),
+        3
+    );
+    assert_eq!(
+        frames,
+        vec![
+            (
+                11,
+                FLAG_STREAMING | FLAG_HEADERS_SENT,
+                b"content-type".to_vec(),
+                b"a".to_vec()
+            ),
+            (11, FLAG_STREAMING, vec![], large),
+            (11, FLAG_STREAMING | FLAG_FINAL, vec![], vec![])
+        ]
+    );
+    pair.response_rings
+        .send_response(12, 201, b"", b"ok")
+        .unwrap();
+    pair.drain_frames_with(8, |frame| {
+        assert_eq!(frame.flags, FLAG_FINAL);
+        assert_eq!(frame.status, 201);
+        assert_eq!(frame.body, b"ok");
+    })
+    .unwrap();
+    pair.response_rings
+        .send_response(12, 201, b"", b"ok")
+        .unwrap();
+    pair.response_rings
+        .drain_with(8, |id, status, headers, body| {
+            assert_eq!(
+                (id, status, headers, body),
+                (12, 201, b"".as_slice(), b"ok".as_slice())
+            )
+        })
+        .unwrap();
+}
+
+#[test]
+fn stream_frames_validate_lengths_capacity_and_transport_backend() {
+    use vertebra_core::transport::ring_pair::{
+        RESPONSE_STREAM_MAGIC, ResponseData, RingPair, RingPairConfig, RingPairError,
+    };
+    use vertebra_core::transport::{Transport, TransportError};
+    let pair = RingPair::create(RingPairConfig::compact()).unwrap();
+    let capacity = pair.max_stream_frame_payload();
+    pair.send_stream_frame(1, 200, 1, b"", &vec![b'x'; capacity])
+        .unwrap();
+    pair.drain_frames_with(1, |frame| assert_eq!(frame.body.len(), capacity))
+        .unwrap();
+    assert!(matches!(
+        pair.send_stream_frame(1, 200, 1, b"", &vec![0; capacity + 1]),
+        Err(RingPairError::ResponseTooLarge(_))
+    ));
+    assert!(matches!(
+        pair.send_stream_frame(1, 200, 1, &vec![0; 65536], b""),
+        Err(RingPairError::ResponseTooLarge(_))
+    ));
+    assert!(matches!(
+        ResponseData::parse_frame(&[0; 32]),
+        Err(RingPairError::InvalidResponse("bad magic"))
+    ));
+    let mut truncated = vec![0; 32];
+    truncated[..4].copy_from_slice(&RESPONSE_STREAM_MAGIC.to_le_bytes());
+    truncated[18..22].copy_from_slice(&100u32.to_le_bytes());
+    assert!(matches!(
+        ResponseData::parse_frame(&truncated),
+        Err(RingPairError::InvalidResponse("truncated"))
+    ));
+    let (_tx, rx) = crossbeam_channel::unbounded();
+    let transport = Transport::new_in_process(rx);
+    assert_eq!(transport.max_stream_frame_payload(), None);
+    assert!(matches!(
+        transport.send_stream_frame(1, 200, 1, b"", b"x"),
+        Err(TransportError::Disconnected)
+    ));
+    assert!(matches!(
+        transport.send_stream_frame_blocking(1, 200, 1, b"", b"x"),
+        Err(TransportError::Disconnected)
+    ));
+}
+
+#[test]
+fn stream_frame_backpressure_waits_until_the_reader_releases_a_slot() {
+    use std::sync::{Arc, mpsc};
+    use std::time::Duration;
+    use vertebra_core::channel::ChannelError;
+    use vertebra_core::transport::ring_pair::{RingPair, RingPairConfig, RingPairError};
+    let mut config = RingPairConfig::compact();
+    config.response_tiers.xlarge.slot_count = 2;
+    let pair = Arc::new(RingPair::create(config).unwrap());
+    pair.send_stream_frame(1, 200, 1, b"", b"a").unwrap();
+    assert!(matches!(
+        pair.send_stream_frame(1, 200, 1, b"", b"b"),
+        Err(RingPairError::Channel(ChannelError::Full))
+    ));
+    let (started_tx, started_rx) = mpsc::channel();
+    let (finished_tx, finished_rx) = mpsc::channel();
+    let writer = pair.clone();
+    let thread = std::thread::spawn(move || {
+        started_tx.send(()).unwrap();
+        writer
+            .send_stream_frame_blocking(1, 200, 1, b"", b"b")
+            .unwrap();
+        finished_tx.send(()).unwrap();
+    });
+    started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert!(matches!(
+        finished_rx.recv_timeout(Duration::from_millis(20)),
+        Err(mpsc::RecvTimeoutError::Timeout)
+    ));
+    let mut bodies = Vec::new();
+    pair.drain_frames_with(1, |frame| bodies.push(frame.body.to_vec()))
+        .unwrap();
+    finished_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    thread.join().unwrap();
+    pair.drain_frames_with(8, |frame| bodies.push(frame.body.to_vec()))
+        .unwrap();
+    assert_eq!(bodies, vec![b"a".to_vec(), b"b".to_vec()]);
+}

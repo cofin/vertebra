@@ -14,9 +14,12 @@ generated:
   by: flow/0.26.0
   at: "2026-11-04T04:33:00Z"
 verified:
+  - by: agent:flow-sync
+    at: "2026-11-12T01:15:00Z"
+    commit: c8722c76
   - by: agent:flow-setup
     at: "2026-11-07T03:55:00Z"
-    commit: 9af810f5
+    commit: 067fa901
 sources:
   - id: src-server-worker-py
     resource: src/py/vertebra/server/worker.py
@@ -93,9 +96,9 @@ Applications mounted via `App.mount(prefix, app, protocol=...)` (or passed direc
 
 ### `AsgiRunner`, `AsgiLifespan`, and `attach_framework_fastpath` (`_asgi/_runner.py`, `_asgi/_queues.py`, `_fastpath_core.py`, `_fastpath.py`, `worker.py`)
 
-- [`AsgiLifespan`](../../../../../src/py/vertebra/server/_asgi/_runner.py)[^src-server-asgi-runner-py] drives the ASGI 3.0 `lifespan` protocol (`lifespan.startup` -> `lifespan.startup.complete` / `lifespan.startup.failed` on worker entry, and `lifespan.shutdown` -> `lifespan.shutdown.complete` on worker exit). [`Worker.run`](../../../../../src/py/vertebra/server/worker.py) enters `AsgiLifespan` for every mounted ASGI application before serving requests and passes the shared `lifespan_state` dict into `AsgiRunner` so `scope["state"]` exposes lifespan-initialized resources. Apps that do not implement `lifespan` gracefully degrade to HTTP-only mode.
-- [`_fastpath_core.py`](../../../../../src/py/vertebra/server/_fastpath_core.py)[^src-server-fastpath-core-py] defines the `FastPathProvider` protocol (`matches`, `attach`), `register_fastpath_provider`, `resolve_fastpath_provider` (lazy module loader over `Litestar`, `FastAPI`, `Starlette`, `Flask`, and `Django`), and shared `DirectPlan` / `QueryParamSpec` compiled route descriptors.
-- [`attach_framework_fastpath`](../../../../../src/py/vertebra/server/_fastpath.py)[^src-server-fastpath-py] is invoked by `Worker._instantiate_mount_runners` and `WsgiAdapter` to resolve a matching `FastPathProvider`, idempotently wrap `Litestar`, `FastAPI`, `Starlette`, `Flask`, and `Django` apps with their zero-closure `FastPath` (`wrap_asgi_fastpath` / `wrap_wsgi`), and bind `mount_prefix` for stacked `App.mount` sub-applications.
+- [`AsgiLifespan`](../../../../../src/py/vertebra/server/_asgi/_runner.py)[^src-server-asgi-runner-py] drives the ASGI 3.0 `lifespan` protocol (`lifespan.startup` -> `lifespan.startup.complete` / `lifespan.startup.failed` on worker entry, and `lifespan.shutdown` -> `lifespan.shutdown.complete` on worker exit). [`Worker.run`](../../../../../src/py/vertebra/server/worker.py) enters `AsgiLifespan` for every mounted ASGI application before serving requests and passes the shared `lifespan_state` dict into `AsgiRunner` so `scope["state"]` exposes lifespan-initialized resources. Apps that do not implement `lifespan` gracefully degrade to HTTP-only mode. A startup exception is logged (`"ASGI lifespan startup failed for mount %r"`) and swallowed, and RSGI `__rsgi_init__` failures are handled the same way, so the worker keeps serving the mount ([Server Runtime Limitations](../../domains/server/server-runtime-limitations.md)).
+- [`_fastpath_core.py`](../../../../../src/py/vertebra/server/_fastpath_core.py)[^src-server-fastpath-core-py] defines the `FastPathProvider` protocol (`name`, `detect(app) -> bool`, `build(app, *, mount_prefix="") -> Any`), the provider table helpers `register_fastpath_provider(provider, *, prepend=False)`, `unregister_fastpath_provider(name)`, `get_fastpath_providers()`, and `resolve_fastpath_provider(app)` (first provider whose `detect` returns `True`), built-in lazy providers for Litestar, FastAPI, Starlette, Flask, and Django whose `build` imports `vertebra.extensions.<framework>.fastpath` and returns `FastPath.from_app(app, mount_prefix=...)`, and shared `DirectPlan` / `QueryParamSpec` compiled route descriptors.
+- [`attach_framework_fastpath(app, *, mount_prefix="", protocol="auto")`](../../../../../src/py/vertebra/server/_fastpath.py)[^src-server-fastpath-py] is invoked by `Worker._instantiate_mount_runners`, `AsgiRunner.__init__`, and `WsgiAdapter.__init__`. It returns apps already marked `__vertebra_fastpath_attached__` (or their wrapped `wsgi_app`) unchanged, wraps an app that is itself a `FastPath` (`wrap_asgi` + `dispatch`) directly, finalizes attached `VertebraPlugin` state, reuses an existing `FastPath` found on `__vertebra_fastpath__`, `fastpath`, `state["vertebra_fastpath_bypass"]`, or `extensions["vertebra"].fastpath`, and otherwise calls `provider.build(...)` and stores the result on `state["vertebra_fastpath_bypass"]` and `__vertebra_fastpath__`. It then binds `mount_prefix` and returns `FastPath.wrap_asgi(...)` or `FastPath.wrap_wsgi(...)` (each framework's `wrap_asgi` delegates to `wrap_asgi_fastpath`).
 - [`AsgiRunner`](../../../../../src/py/vertebra/server/_asgi/_runner.py) finalizes attached `VertebraPlugin` state (`ensure_finalized`), exposes `dispatch_app` (wrapping `__vertebra_fastpath__` ahead of `app` when present), and routes unary HTTP batches directly to `_vertebra.drive_asgi_batch` on the active event loop.
 - `AsgiReceive`, `AsgiSend` (including `send_raw_response`), `AsgiResponse`, and bounded `AsgiStreamQueuePair` (`_asgi/_queues.py`) back standalone `run_single` test invocations, WebSocket upgrades, and full-duplex streaming exchanges.
 

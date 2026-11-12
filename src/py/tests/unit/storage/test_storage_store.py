@@ -213,6 +213,56 @@ def test_local_file_store_and_multipart(tmp_path: Path) -> None:
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+async def test_put_multipart_streams_parts(asynchronous: bool) -> None:
+    """Consume each part before a producer reuses its mutable buffer."""
+    store = SyncObjectStore(MemoryConfig())
+    buffer = bytearray(b"aaaa")
+
+    def parts() -> Iterator[bytearray]:
+        for value in (b"aaaa", b"bbbb", b"cccc"):
+            buffer[:] = value
+            yield buffer
+
+    if asynchronous:
+        meta = await store.to_async().put_multipart("parts", parts())
+    else:
+        meta = store.put_multipart("parts", parts())
+    assert meta.size == 12
+    assert store.get("parts") == b"aaaabbbbcccc"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+async def test_put_multipart_empty_and_failed_iterables(asynchronous: bool) -> None:
+    """Empty iterables publish empty objects and failed iterables preserve existing bytes."""
+    store = SyncObjectStore(MemoryConfig())
+    store.put("prior", b"original")
+
+    def parts() -> Iterator[bytes]:
+        yield b"partial"
+        raise RuntimeError("boom")
+
+    if asynchronous:
+        paired = store.to_async()
+        meta = await paired.put_multipart("empty", iter(()))
+        with pytest.raises(RuntimeError, match="boom"):
+            await paired.put_multipart("prior", parts())
+        with pytest.raises(RuntimeError, match="boom"):
+            await paired.put_multipart("absent", parts())
+    else:
+        meta = store.put_multipart("empty", iter(()))
+        with pytest.raises(RuntimeError, match="boom"):
+            store.put_multipart("prior", parts())
+        with pytest.raises(RuntimeError, match="boom"):
+            store.put_multipart("absent", parts())
+    assert meta.size == 0
+    assert store.get("empty") == b""
+    assert store.get("prior") == b"original"
+    assert not store.exists("absent")
+
+
+@pytest.mark.anyio
 async def test_async_store_operations() -> None:
     """Verify asyncio-compatible put, get, get_range, head, list, delete on AsyncObjectStore."""
     store = AsyncObjectStore("memory://")
@@ -1966,12 +2016,14 @@ async def test_storage_arrow_writer_waits_for_cancelled_codec_worker(file_format
 class _RecordingUpload:
     """Record part lengths while delegating every multipart operation to a real native upload."""
 
-    def __init__(self, native: Any, parts: list[int]) -> None:
+    def __init__(self, native: Any, parts: list[int], payloads: list[Any]) -> None:
         self.native = native
         self.parts = parts
+        self.payloads = payloads
 
     def write_part(self, chunk: Any) -> Any:
         self.parts.append(memoryview(chunk).nbytes)
+        self.payloads.append(chunk)
         return self.native.write_part(chunk)
 
     def complete(self) -> Any:
@@ -1998,20 +2050,16 @@ class _RecordingNative:
         self.payloads.append(data)
         return self.native.put(key, data, **kwargs)
 
-    def put_multipart(self, key: str, parts: list[Any]) -> Any:
-        self.payloads.extend(parts)
-        return self.native.put_multipart(key, parts)
-
     def create_multipart(self, *args: Any, **kwargs: Any) -> Any:
         upload = self.native.create_multipart(*args, **kwargs)
         self.uploads += 1
         if self.asynchronous:
 
             async def resolve() -> Any:
-                return _RecordingUpload(await upload, self.parts)
+                return _RecordingUpload(await upload, self.parts, self.payloads)
 
             return resolve()
-        return _RecordingUpload(upload, self.parts)
+        return _RecordingUpload(upload, self.parts, self.payloads)
 
 
 def _recording_store(asynchronous: bool) -> tuple[Any, SyncObjectStore, _RecordingNative]:

@@ -24,8 +24,8 @@ files:
 tests:
   - src/py/tests/unit/db/test_postgres_event_hooks.py
 estimated_loc: 245
-plan_revision: 6
-plan_commit: 8e9b324e
+plan_revision: 8
+plan_commit: d90d4625
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -36,12 +36,15 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-10T14:45:00Z"
+updated_at: "2026-11-12T04:25:15Z"
 commit: null
+generated:
+  by: flow-revise
+  at: "2026-11-12T01:30:00Z"
 verified:
   - by: agent:plan-generator
-    at: "2026-11-10T14:45:00Z"
-    commit: 8e9b324e
+    at: "2026-11-12T01:30:00Z"
+    commit: c8722c76
 sources:
   - id: npd-contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md
@@ -91,7 +94,7 @@ Implement adapter-internal `EventSessionRegistry` in `src/py/vertebra/db/adapter
   - `async def _replication_identity(self, slot: str, publication: str) -> PostgresReplicationIdentity`:
     - Rejects closed driver (`InterfaceError`), resolves direct options via `derive_direct_config()`, loads `vertebra._postgres` with exact `package="vertebra-core[postgres]"` metadata, connects a fresh `AsyncPostgresClient`, awaits `client.replication_identity(slot, publication)` (zero `START_REPLICATION`), and always awaits `await client.close()` inside `CancelScope(shield=True)` in `finally`.
   - `async def _open_replication_stream(self, config: PostgresChangeConfig, *, start_lsn: int | None = None, reconnect: bool = False) -> AsyncPostgresReplication`:
-    - Unpacks `config.slot`, `config.publication`, and `config.queue_capacity` (never passing `config.checkpoint_timeout` to native `open_replication`), and opens `client.open_replication(config.slot, config.publication, start_lsn=start_lsn, queue_capacity=config.queue_capacity, reconnect=reconnect)` via `self._event_registry`.
+    - Unpacks `config.slot`, `config.publication`, and `config.queue_capacity` (never passing `config.checkpoint_timeout` to native `open_replication`), and forwards the validated replication `queue_capacity` range `1..1024` unchanged; native refusal is `InterfaceError` before dialing. It opens `client.open_replication(config.slot, config.publication, start_lsn=start_lsn, queue_capacity=config.queue_capacity, reconnect=reconnect)` via `self._event_registry`.
   - `async def _publish_notification(self, channel: str, payload: str) -> None`:
     - `AsyncPostgreSQLDriver`: `await self.execute("SELECT pg_notify($1, $2)", (channel, payload), timeout=10.0)` in the caller's task (joining any ambient `async with driver.transaction():` so rollback suppresses delivery).
     - `SyncPostgreSQLDriver`: checks this driver's active `Sync` transaction `ContextVar` scope first and raises `InterfaceError` before `asyncio.to_thread` or I/O when active; outside a sync scope, awaits `await asyncio.to_thread(self.execute, "SELECT pg_notify($1, $2)", (channel, payload), timeout=10.0)`.
@@ -136,6 +139,7 @@ Implement adapter-internal `EventSessionRegistry` in `src/py/vertebra/db/adapter
 
 ## Notes & Discoveries
 
+- Notification source naming: this worksheet executes before `queues-tasks-and-channels` t01 splits `NotificationSource` into `SyncNotificationSource` / `AsyncNotificationSource` and renames `PostgresNotificationSource` to `AsyncPostgresNotificationSource` alongside a new `SyncPostgresNotificationSource` (see [native-data-platform](../../../../native-data-platform/spec.md) Seam 2). It keeps the HEAD names, adds no new unprefixed notification protocol, class, or alias, and leaves the rename of every symbol, doc, and OKF reference it touches to that task. The synchronous-driver `publish` cases asserted here (sync transaction rejection and out-of-transaction `pg_notify($1, $2)`) carry over to `SyncPostgresNotificationSource` when the rename lands.
 - With `ch26:t04` complete, `_sync.py::SyncPostgreSQLDriver` and `_async.py::AsyncPostgreSQLDriver` expose the complete production surface required for atomic public barrel and consumer cutover in `ch27:t01`–`t02` [^npd-contracts].
 
 [^npd-contracts]: `.agents/bundles/specs/native-postgres-driver/contracts.md` — EventSessionRegistry handle/client close symmetry, _publish_notification mode rules, and PortalProvider sync shutdown.

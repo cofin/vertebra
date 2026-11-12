@@ -11,20 +11,20 @@ depends_on_chapters:
   - ch27-atomic-cutover-and-legacy-removal
 replan_trigger: null
 current_task: "native-postgres-driver:ch28:t01"
-plan_revision: 6
-plan_commit: 8e9b324e
+plan_revision: 8
+plan_commit: d90d4625
 state_revision: 0
 last_verified_checkpoint: null
 last_reviewed_commit: null
 created_at: "2026-11-05T00:00:00Z"
-updated_at: "2026-11-10T14:45:00Z"
+updated_at: "2026-11-12T04:25:15Z"
 generated:
   by: flow-revise
-  at: "2026-11-10T14:45:00Z"
+  at: "2026-11-12T01:30:00Z"
 verified:
   - by: agent:plan-generator
-    at: "2026-11-10T14:45:00Z"
-    commit: 8e9b324e
+    at: "2026-11-12T01:30:00Z"
+    commit: c8722c76
 sources:
   - id: int-conftest
     resource: src/py/tests/integration/conftest.py::vtb_postgres_config
@@ -115,7 +115,7 @@ Parent roadmap: [spec.md](../../spec.md); frozen contracts: [contracts.md](../..
 
 ## 3. Documentation & OKF Knowledge Plan
 
-Progress: `[0/0 files documented in this chapter]` (`[0/33 files documented]` across the `33`-chapter / `118`-task flow synchronized in `ch30-user-and-workflow-docs`, `ch31-data-and-testing-okf-sync`, and `ch32-ffi-okf-and-review-routing-sync` ahead of `ch33-final-review-and-release-gate`).
+Progress: `[0/0 files documented in this chapter]` (`[0/33 files documented]` across the `36`-chapter / `129`-task flow synchronized in `ch30-user-and-workflow-docs`, `ch31-data-and-testing-okf-sync`, and `ch32-ffi-okf-and-review-routing-sync` ahead of `ch33-final-review-and-release-gate`).
 
 ## 4. Requirement-to-Task Traceability Matrix
 
@@ -137,7 +137,7 @@ Progress: `[0/0 files documented in this chapter]` (`[0/33 files documented]` ac
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Plan Baseline**: `plan_revision: 6`, `plan_commit: 8e9b324e`; `depends_on_chapters: [ch27-atomic-cutover-and-legacy-removal]`, `state: planned`, `planning_status: complete` (`33` chapters / `118` tasks in full flow, `ch01`–`ch19` / `71` tasks completed).
+- **Verified Plan Baseline**: `plan_revision: 8`, `plan_commit: d90d4625`; `depends_on_chapters: [ch27-atomic-cutover-and-legacy-removal]`, `state: planned`, `planning_status: complete` (`36` chapters / `129` tasks; `ch01`–`ch21` and `ch22:t01`–`t02` (`80` tasks) are on `main` in `c8722c76`).
 - **Remaining Tasks in Chapter**: `t01`, `t02`, `t03`, `t04` (`4/4` pending).
 - **Active Invariants**: Offline pytest runs never spawn Docker containers when `VERTEBRA_CONFORMANCE_DOCKER` and `VERTEBRA_CONFORMANCE_POSTGRES_DSN` are unset; live runs enforce `VERTEBRA_CONFORMANCE_POSTGRES_REQUIRE_ZERO_SKIPS=1`, pass explicit `sslmode="disable"`, use `@pytest.mark.parametrize` / `@pytest.fixture(params=...)` exclusively, and leave zero leaked slots, containers, or `/dev/shm` segments.
 

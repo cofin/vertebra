@@ -9,7 +9,7 @@ use std::time::Duration;
 use bytes::{BufMut, Bytes, BytesMut};
 use futures::stream::BoxStream;
 use futures::{StreamExt, TryStreamExt};
-use object_store::aws::AmazonS3Builder;
+use object_store::aws::{AmazonS3Builder, S3CopyIfNotExists};
 use object_store::azure::MicrosoftAzureBuilder;
 use object_store::gcp::{GcpCredential, GcpCredentialProvider, GoogleCloudStorageBuilder};
 use object_store::http::HttpBuilder;
@@ -776,7 +776,8 @@ impl ObjectStoreEngine {
                 let mut builder = AmazonS3Builder::new()
                     .with_bucket_name(&bucket)
                     .with_allow_http(allow_http)
-                    .with_client_options(client_opts);
+                    .with_client_options(client_opts)
+                    .with_copy_if_not_exists(S3CopyIfNotExists::Multipart);
                 if let Some(region_val) = region {
                     builder = builder.with_region(region_val);
                 }
@@ -989,7 +990,12 @@ impl ObjectStoreEngine {
                     .with_region("auto")
                     .with_endpoint(resolved_endpoint)
                     .with_allow_http(allow_http)
-                    .with_client_options(client_opts);
+                    .with_client_options(client_opts)
+                    .with_copy_if_not_exists(S3CopyIfNotExists::HeaderWithStatus(
+                        "cf-copy-destination-if-none-match".to_string(),
+                        "*".to_string(),
+                        reqwest::StatusCode::PRECONDITION_FAILED,
+                    ));
                 if let Some(key_id) = access_key_id {
                     builder = builder.with_access_key_id(key_id);
                 }
@@ -1713,6 +1719,7 @@ impl ObjectStoreEngine {
 
     /// Copy `src` to `dst`; with `if_not_exists`, fail with `AlreadyExists` when `dst` exists.
     ///
+    /// S3/B2 use conditional multipart completion; R2 uses its conditional copy header.
     /// Stores without native create-only copy on the `file` scheme fall back to an atomic
     /// create-only put of the source bytes.
     pub async fn copy(
@@ -1739,6 +1746,15 @@ impl ObjectStoreEngine {
                         )
                         .await?;
                 }
+                Err(
+                    err @ (object_store::Error::AlreadyExists { .. }
+                    | object_store::Error::Precondition { .. }),
+                ) => {
+                    return Err(StorageError::AlreadyExists {
+                        path: dst.to_string(),
+                        message: err.to_string(),
+                    });
+                }
                 Err(err) => return Err(err.into()),
             }
         } else {
@@ -1764,7 +1780,19 @@ impl ObjectStoreEngine {
         let from = validate_object_path(src)?;
         let to = validate_object_path(dst)?;
         if if_not_exists {
-            self.inner.rename_if_not_exists(&from, &to).await?;
+            match self.inner.rename_if_not_exists(&from, &to).await {
+                Ok(()) => {}
+                Err(
+                    err @ (object_store::Error::AlreadyExists { .. }
+                    | object_store::Error::Precondition { .. }),
+                ) => {
+                    return Err(StorageError::AlreadyExists {
+                        path: dst.to_string(),
+                        message: err.to_string(),
+                    });
+                }
+                Err(err) => return Err(err.into()),
+            }
         } else {
             self.inner.rename(&from, &to).await?;
         }

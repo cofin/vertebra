@@ -23,6 +23,49 @@ use crate::transport::{
 /// Direct response completion callback registered by the embedded HTTP dispatcher.
 pub type ResponseSink = Arc<dyn Fn(BridgeResponse) + Send + Sync>;
 
+/// Ordered response frame sent through the dedicated streaming sink.
+#[derive(Debug, Clone)]
+pub struct ResponseStreamFrame {
+    pub request_id: u64,
+    pub status: u16,
+    pub flags: u16,
+    pub headers_raw: bytes::Bytes,
+    pub body: bytes::Bytes,
+}
+
+impl ResponseStreamFrame {
+    pub fn is_first(&self) -> bool {
+        self.flags & crate::ipc::FLAG_HEADERS_SENT != 0
+    }
+
+    pub fn is_terminal(&self) -> bool {
+        self.flags & (crate::ipc::FLAG_FINAL | crate::ipc::FLAG_ERROR) != 0
+    }
+
+    pub fn has_trailers(&self) -> bool {
+        self.flags & crate::ipc::FLAG_TRAILERS != 0
+    }
+
+    pub fn is_error(&self) -> bool {
+        self.flags & crate::ipc::FLAG_ERROR != 0
+    }
+
+    pub fn iter_headers(&self) -> impl Iterator<Item = (&[u8], &[u8])> + '_ {
+        iter_raw_headers(&self.headers_raw)
+    }
+}
+
+/// Whether a stream frame reaches its client or the client is disconnected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamDelivery {
+    Accepted,
+    Closed,
+}
+
+/// Streaming callback that may block until the client accepts a frame.
+/// Invoke only outside async runtime threads, with the Python GIL detached.
+pub type StreamSink = Arc<dyn Fn(ResponseStreamFrame) -> StreamDelivery + Send + Sync>;
+
 /// Response data sent from Python workers back to the HTTP server.
 #[derive(Debug, Clone)]
 pub struct BridgeResponse {
@@ -68,6 +111,7 @@ pub struct BatchBridge {
     fast_sink: OnceLock<ResponseSink>,
     has_override_sink: AtomicBool,
     override_sink: RwLock<Option<ResponseSink>>,
+    stream_sink: RwLock<Option<StreamSink>>,
     request_notifier: Option<Notifier>,
     consumer_sleeping: CacheLine<AtomicBool>,
     consumer_count: AtomicUsize,
@@ -122,6 +166,7 @@ impl BatchBridge {
                 fast_sink: OnceLock::new(),
                 has_override_sink: AtomicBool::new(false),
                 override_sink: RwLock::new(None),
+                stream_sink: RwLock::new(None),
                 request_notifier: Notifier::new().ok(),
                 consumer_sleeping: CacheLine::new(AtomicBool::new(false)),
                 consumer_count: AtomicUsize::new(max_workers.max(1)),
@@ -215,6 +260,27 @@ impl BatchBridge {
     pub fn clear_response_sink(&self) {
         *self.override_sink.write().unwrap() = None;
         self.has_override_sink.store(true, Ordering::Release);
+    }
+
+    /// Replace the registered stream callback.
+    pub fn set_stream_sink(&self, sink: StreamSink) {
+        if let Ok(mut registered) = self.stream_sink.write() {
+            *registered = Some(sink);
+        }
+    }
+
+    /// Submit a stream frame without holding the sink lock during delivery.
+    pub fn submit_stream_frame(
+        &self,
+        frame: ResponseStreamFrame,
+    ) -> Result<StreamDelivery, TransportError> {
+        let sink = self
+            .stream_sink
+            .read()
+            .map_err(|_| TransportError::Disconnected)?
+            .clone()
+            .ok_or(TransportError::Disconnected)?;
+        Ok(sink(frame))
     }
 
     /// Submit a zero-copy in-process request batch without acquiring `write_lock` or copying into `DataSlab`.
@@ -465,6 +531,7 @@ mod tests {
             fast_sink: OnceLock::new(),
             has_override_sink: AtomicBool::new(false),
             override_sink: RwLock::new(None),
+            stream_sink: RwLock::new(None),
             request_notifier: Notifier::new().ok(),
             consumer_sleeping: CacheLine::new(AtomicBool::new(false)),
             consumer_count: AtomicUsize::new(1),
@@ -490,6 +557,126 @@ mod tests {
             query,
             headers_raw,
             body,
+        }
+    }
+
+    fn stream_frame(body: &'static [u8], flags: u16) -> ResponseStreamFrame {
+        ResponseStreamFrame {
+            request_id: 7,
+            status: 200,
+            flags,
+            headers_raw: bytes::Bytes::new(),
+            body: bytes::Bytes::from_static(body),
+        }
+    }
+
+    #[test]
+    fn stream_sink_reports_disconnect_and_preserves_order() {
+        use crate::ipc::{FLAG_HEADERS_SENT, FLAG_STREAMING};
+        let bridge = make_bridge();
+        assert!(matches!(
+            bridge.submit_stream_frame(stream_frame(b"a", FLAG_STREAMING | FLAG_HEADERS_SENT)),
+            Err(TransportError::Disconnected)
+        ));
+        let bodies = Arc::new(Mutex::new(Vec::new()));
+        let received = bodies.clone();
+        bridge.set_stream_sink(Arc::new(move |frame| {
+            received.lock().unwrap().push(frame.body);
+            StreamDelivery::Accepted
+        }));
+        for body in [b"a".as_slice(), b"b"] {
+            assert_eq!(
+                bridge
+                    .submit_stream_frame(stream_frame(body, FLAG_STREAMING))
+                    .unwrap(),
+                StreamDelivery::Accepted
+            );
+        }
+        assert_eq!(
+            *bodies.lock().unwrap(),
+            vec![
+                bytes::Bytes::from_static(b"a"),
+                bytes::Bytes::from_static(b"b")
+            ]
+        );
+        bridge.set_stream_sink(Arc::new(|_| StreamDelivery::Closed));
+        assert_eq!(
+            bridge
+                .submit_stream_frame(stream_frame(b"c", FLAG_STREAMING))
+                .unwrap(),
+            StreamDelivery::Closed
+        );
+    }
+
+    #[test]
+    fn stream_sink_can_replace_itself_without_locking_unary_delivery() {
+        let bridge = Arc::new(make_bridge());
+        let weak = Arc::downgrade(&bridge);
+        bridge.set_stream_sink(Arc::new(move |_| {
+            weak.upgrade()
+                .unwrap()
+                .set_stream_sink(Arc::new(|_| StreamDelivery::Closed));
+            StreamDelivery::Accepted
+        }));
+        assert_eq!(
+            bridge.submit_stream_frame(stream_frame(b"1", 0)).unwrap(),
+            StreamDelivery::Accepted
+        );
+        assert_eq!(
+            bridge.submit_stream_frame(stream_frame(b"2", 0)).unwrap(),
+            StreamDelivery::Closed
+        );
+        let unary = Arc::new(Mutex::new(Vec::new()));
+        let received = unary.clone();
+        bridge.set_response_sink(Arc::new(move |frame| {
+            received.lock().unwrap().push(frame.body)
+        }));
+        bridge
+            .submit_response(BridgeResponse {
+                request_id: 9,
+                status: 200,
+                headers_raw: bytes::Bytes::new(),
+                body: bytes::Bytes::from_static(b"u"),
+            })
+            .unwrap();
+        assert_eq!(
+            *unary.lock().unwrap(),
+            vec![bytes::Bytes::from_static(b"u")]
+        );
+    }
+
+    #[test]
+    fn stream_frame_flags_and_headers_are_exposed() {
+        use crate::ipc::{
+            FLAG_ERROR, FLAG_FINAL, FLAG_HEADERS_SENT, FLAG_STREAMING, FLAG_TRAILERS,
+        };
+        for (flags, expected) in [
+            (FLAG_STREAMING, (false, false, false, false)),
+            (FLAG_STREAMING | FLAG_ERROR, (false, true, false, true)),
+            (
+                FLAG_STREAMING | FLAG_HEADERS_SENT | FLAG_FINAL | FLAG_TRAILERS,
+                (true, true, true, false),
+            ),
+        ] {
+            let mut frame = stream_frame(b"", flags);
+            frame.headers_raw = crate::transport::encode_headers_compact(&[(
+                b"content-type".to_vec(),
+                b"text/event-stream".to_vec(),
+            )])
+            .into();
+            assert_eq!(
+                (
+                    frame.is_first(),
+                    frame.is_terminal(),
+                    frame.has_trailers(),
+                    frame.is_error()
+                ),
+                expected
+            );
+            assert_eq!(
+                frame.iter_headers().collect::<Vec<_>>(),
+                vec![(b"content-type".as_slice(), b"text/event-stream".as_slice())]
+            );
         }
     }
 
@@ -902,6 +1089,7 @@ mod tests {
             fast_sink: OnceLock::new(),
             has_override_sink: AtomicBool::new(false),
             override_sink: RwLock::new(None),
+            stream_sink: RwLock::new(None),
             request_notifier: Notifier::new().ok(),
             consumer_sleeping: CacheLine::new(AtomicBool::new(false)),
             consumer_count: AtomicUsize::new(1),

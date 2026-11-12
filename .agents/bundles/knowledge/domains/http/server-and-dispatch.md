@@ -14,11 +14,14 @@ generated:
 verified:
   - by: agent:flow-setup
     at: "2026-11-07T03:55:00Z"
-    commit: 9af810f5
+    commit: 067fa901
   - by: agent:flow-setup
     at: "2026-11-04T04:33:00Z"
     commit: f741701
 sources:
+  - id: src-vertebra-http-src-dispatcher-streams-rs
+    resource: src/rs/vertebra-http/src/dispatcher/streams.rs
+    title: Bounded response stream registry and worker lifecycle cleanup
   - id: src-vertebra-http-src-lib-rs
     resource: src/rs/vertebra-http/src/lib.rs
     title: "Rust implementation module (src/rs/vertebra-http/src/lib.rs)"
@@ -80,6 +83,7 @@ sources:
 <!-- truth: start -->
 - `vertebra-http` packages `ServerConfig`, `ServerState`, `Router` (`matchit 0.9`), `RequestBatcher`, `Dispatcher` / `ShmDispatcher`, and `BackpressureController` as both a Rust library and the `vertebra-server` binary.
 - Ingress offloads (CORS, compression, static mounts, OpenAPI cache, health, HMR) execute natively in Rust before Python worker dispatch.
+- The native bridge and SHM reader route progressive response frames through bounded `ResponseStreamRegistry` channels; Python submission and mounted ASGI/RSGI producers remain buffered until their separate cutover [^src-vertebra-http-src-dispatcher-streams-rs].
 <!-- truth: end -->
 
 [`vertebra-http`](../../../../../src/rs/vertebra-http/src/lib.rs)[^src-vertebra-http-src-lib-rs] is both a library and the `vertebra-server` binary. The crate root re-exports `Batch`, `BatchLimit`, `PendingRequest`, `RequestBatcher`, `CorrelationId`, `InFlightRequests`, `HandlerId`, `RouteTable`, `Router`, and `RouterError`. Mechanics are in [HTTP Ingress](../../architecture/http/ingress-and-routing.md) and [Request Batching, Dispatch & Backpressure](../../architecture/http/batching-dispatch-and-backpressure.md); protocol and offload modules are listed in [Protocol and Offload Modules](../../architecture/http/protocol-and-offload-modules.md).
@@ -107,11 +111,19 @@ sources:
 | Symbol | Module | Responsibility |
 |---|---|---|
 | [`RequestBatcher`](../../../../../src/rs/vertebra-http/src/batcher.rs)[^src-vertebra-http-src-batcher-rs] / `BatchLimit` / `PendingRequest` / `PendingResponse` / `method_tag` / `http_version_tag` | `vertebra_http::batcher` | Double-buffered opportunistic batcher (`spawn_pool`, `with_shard`; `1..8` shards, capacity `16,384`, `BatchLimit::default()` = `64`) draining ready requests and gating `yield_now().await` on `dispatcher.in_flight() > 0 \|\| !rx.is_empty()` into `Dispatcher::dispatch_requests_from_shard`. |
-| [`Dispatcher`](../../../../../src/rs/vertebra-http/src/dispatcher/mod.rs)[^src-vertebra-http-src-dispatcher-mod-rs] / `DispatchBackend` (`Direct`, `Bridge`, `Shm`) / `BridgeCorrelation` | `vertebra_http::dispatcher` | Routes batches by backend; `BridgeCorrelation` uses 8-shard `InFlightRequests`, zero-copy `BatchBridge::submit_inprocess_batch`, direct `ResponseSink` completion (releasing shard lock before `tx.send`), and `spawn_bridge_sweeper`. |
+| [`Dispatcher`](../../../../../src/rs/vertebra-http/src/dispatcher/mod.rs)[^src-vertebra-http-src-dispatcher-mod-rs] / `DispatchBackend` (`Direct`, `Bridge`, `Shm`) / `BridgeCorrelation` | `vertebra_http::dispatcher` | Routes batches by backend; `BridgeCorrelation` uses 8-shard `InFlightRequests`, zero-copy `BatchBridge::submit_inprocess_batch`, separate unary `ResponseSink` and bounded `StreamSink` completion, `register_pending` allocation with `503` overflow, and `spawn_bridge_sweeper`. |
 | [`ShmDispatcher`](../../../../../src/rs/vertebra-http/src/dispatcher/shm.rs)[^src-vertebra-http-src-dispatcher-shm-rs] | `vertebra_http::dispatcher::shm` | Lock-free 1:1 shard-sticky worker routing (`home = shard_idx % worker_count`, MRU warm-worker affinity at `prev_active == 0`, least-loaded spillover when unhealthy/full/`in_flight >= 64`), per-worker `healthy` and `in_flight` state, direct `try_send_with` / `send_with` slot serialization (`VQOV` overflow spill for `> 64 KiB`), Dekker `notify_request_if_sleeping`, and 8 `Mutex<InFlightRequests>` shards. |
 | [`InFlightRequests`](../../../../../src/rs/vertebra-http/src/dispatcher/correlation.rs)[^src-vertebra-http-src-dispatcher-correlation-rs] / `CorrelationId` | `vertebra_http::dispatcher::correlation` | Generation-tagged slab: `allocate_batch`, `insert`, `complete`, `complete_many`, `sweep_expired`, `sweep_for_worker`. |
-| [`spawn_response_readers`](../../../../../src/rs/vertebra-http/src/dispatcher/shm_reader.rs)[^src-vertebra-http-src-dispatcher-shm-reader-rs] / `PendingRequests` | `vertebra_http::dispatcher::shm_reader` | Per-worker `AsyncFd` SHM response reader using zero-copy `drain_responses_with`, Dekker `prepare_response_sleep` / `cancel_response_sleep`, and lock-free `tx.send` outside shard mutexes. |
+| [`spawn_response_readers`](../../../../../src/rs/vertebra-http/src/dispatcher/shm_reader.rs)[^src-vertebra-http-src-dispatcher-shm-reader-rs] | `vertebra_http::dispatcher::shm_reader` | Per-worker `AsyncFd` reader using flag-aware `drain_frames_with`, owned stream frames before awaited delivery, unary completion batching, shutdown-aware backpressure, and Dekker sleep handshakes. |
 | [`DirectWorkerPool`](../../../../../src/rs/vertebra-http/src/dispatcher/direct.rs)[^src-vertebra-http-src-dispatcher-direct-rs] / `AdaptiveWorkerConfig` / `run_adaptive_worker` | `vertebra_http::dispatcher::direct` | Consumer for Direct mode. |
+
+## Native response stream lifecycle
+
+[`ResponseStreamRegistry`](../../../../../src/rs/vertebra-http/src/dispatcher/streams.rs)[^src-vertebra-http-src-dispatcher-streams-rs] handles first frames, ordered data, trailers, final/error frames, and disconnected clients. Its default capacity is 64 frames per response. The embedded sink calls `deliver_blocking` from a producer outside Tokio; the SHM reader calls `Dispatcher::deliver_stream_frame(...).await`, which forwards to `ShmDispatcher::deliver_stream_frame` and the same registry implementation. No send drops a frame merely because the queue is full.
+
+First frames complete their correlation as `PendingResponse::streaming`, removing the pending-request timeout entry. Final or error frames close the channel; periodic dispatcher sweeps reclaim dropped receivers. `set_worker`, `close_worker`, and `sweep_closed` retain SHM worker ownership and cancel blocked async delivery when the worker exits. Unary `VRES` and overflow `VROV` responses retain their completion batching path [^src-vertebra-http-src-dispatcher-streams-rs] [^src-vertebra-http-src-dispatcher-shm-reader-rs].
+
+This is native transport support. Python submission and mounted ASGI/RSGI response flushing remain work for `server-runtime-correctness` chapters `ch02` and `ch03`.
 
 ## Admission and worker processes
 
@@ -142,3 +154,5 @@ Provenance sources: [^src-vertebra-http-src-dispatcher-bridge-rs].
 [^src-vertebra-http-src-backpressure-rs]: `src/rs/vertebra-http/src/backpressure.rs` — Rust implementation module (src/rs/vertebra-http/src/backpressure.rs).
 [^src-vertebra-http-src-workers-factory-rs]: `src/rs/vertebra-http/src/workers/factory.rs` — Rust implementation module (src/rs/vertebra-http/src/workers/factory.rs).
 [^src-vertebra-http-src-assets-rs]: `src/rs/vertebra-http/src/assets.rs` — Rust implementation module (src/rs/vertebra-http/src/assets.rs).
+
+[^src-vertebra-http-src-dispatcher-streams-rs]: `src/rs/vertebra-http/src/dispatcher/streams.rs` — Bounded native response delivery and worker lifecycle cleanup.

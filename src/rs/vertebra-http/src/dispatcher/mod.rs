@@ -14,6 +14,7 @@ pub mod correlation;
 mod direct;
 mod shm;
 pub mod shm_reader;
+pub mod streams;
 #[cfg(test)]
 mod tests;
 pub mod types;
@@ -21,6 +22,7 @@ pub mod types;
 pub use self::bridge::BridgeCorrelation;
 pub use self::correlation::{CorrelationId, InFlightRequests};
 pub use self::shm::ShmDispatcher;
+pub use self::streams::ResponseStreamRegistry;
 
 use std::sync::Arc;
 
@@ -198,11 +200,20 @@ impl Dispatcher {
         }
     }
 
-    /// Forward a raw SHM `ResponseSlot` frame to the SHM dispatcher.
-    pub fn handle_raw_response_slot(&self, raw_slot: &[u8]) -> bool {
+    /// Forward a stream frame through the SHM response registry.
+    pub async fn deliver_stream_frame(
+        &self,
+        frame: vertebra_core::bridge::ResponseStreamFrame,
+    ) -> vertebra_core::bridge::StreamDelivery {
         match &self.backend {
-            DispatchBackend::Shm(shm) => shm.handle_raw_response_slot(raw_slot),
-            _ => false,
+            DispatchBackend::Shm(shm) => shm.deliver_stream_frame(frame).await,
+            _ => {
+                debug!(
+                    id = frame.request_id,
+                    "stream frame received on non-SHM dispatcher"
+                );
+                vertebra_core::bridge::StreamDelivery::Closed
+            }
         }
     }
 }

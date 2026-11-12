@@ -5,11 +5,14 @@ and server configurations compliant with the MCP 2026-07-28 specification.
 """
 
 from collections.abc import Callable, Mapping
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import msgspec
 
 from vertebra.typing import FrozenBaseStruct
+
+if TYPE_CHECKING:
+    from vertebra.agent.core.identity import IdentitySource
 
 __all__ = [
     "HEADER_MISMATCH",
@@ -66,6 +69,19 @@ class MCPConfig(FrozenBaseStruct, frozen=True, kw_only=True):
     """HTTP path for the well-known MCP discovery document."""
     webmcp: Any | None = None
     """Optional `WebMCPConfig` controlling browser WebMCP manifest generation."""
+
+    trust_proxy_identity: bool = False
+    """Trust proxy identity only with an explicitly configured identity source."""
+    identity_source: "IdentitySource | None" = None
+    """Trusted IAP, mTLS, or application identity source from agent.core.identity."""
+
+    def __post_init__(self) -> None:
+        if self.trust_proxy_identity and self.identity_source is None:
+            raise ValueError(
+                "MCPConfig.trust_proxy_identity=True requires identity_source (IapIdentitySource, MtlsIdentitySource, or CallableIdentitySource)"
+            )
+        if self.identity_source is not None and not self.trust_proxy_identity:
+            raise ValueError("MCPConfig.identity_source requires trust_proxy_identity=True")
 
 
 class McpHttpRequest(FrozenBaseStruct, frozen=True, kw_only=True):

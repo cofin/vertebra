@@ -7,10 +7,15 @@ all agentic operations via AgentContext.
 
 import contextvars
 from collections.abc import Callable, Coroutine, Mapping
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import anyio
 import msgspec
+
+from vertebra.agent.core.identity import IdentityRequest
+
+if TYPE_CHECKING:
+    from vertebra.agent.core.identity import IdentitySource
 
 
 class CallerIdentity(msgspec.Struct, frozen=True, gc=False, kw_only=True):
@@ -134,103 +139,136 @@ class AgentContext:
         return current_agent_context()
 
     @classmethod
+    def from_headers(
+        cls,
+        headers: Mapping[str, str],
+        *,
+        identity_source: "IdentitySource | None" = None,
+        peer: str | None = None,
+        user: Any = None,
+        auth: Any = None,
+        session_id: str | None = None,
+    ) -> "AgentContext":
+        """Construct context using trusted application identity and an optional proxy policy."""
+        lowered = {str(key).lower(): str(value) for key, value in headers.items()}
+        identity = CallerIdentity()
+        if identity_source is not None:
+            identity = identity_source.resolve(IdentityRequest(headers=lowered, peer=peer)) or identity
+        user_id, email = identity.user_id, identity.email
+        roles, scopes = list(identity.roles), list(identity.scopes)
+        scheme = identity.auth_scheme
+        if scheme == "anonymous" and lowered.get("authorization", "").lower().startswith("bearer "):
+            scheme = "jwt"
+        if user is not None:
+            raw_id = (
+                user.get("id")
+                if isinstance(user, Mapping)
+                else getattr(user, "id", user if isinstance(user, str) else None)
+            )
+            if raw_id is not None:
+                user_id = str(raw_id)
+            raw_email = user.get("email") if isinstance(user, Mapping) else getattr(user, "email", None)
+            if email is None and raw_email is not None:
+                email = str(raw_email)
+            roles.extend(
+                str(role)
+                for role in (user.get("roles", ()) if isinstance(user, Mapping) else getattr(user, "roles", ()))
+            )
+            if scheme == "anonymous":
+                scheme = "connection"
+        if auth is not None:
+            roles.extend(
+                str(role)
+                for role in (auth.get("roles", ()) if isinstance(auth, Mapping) else getattr(auth, "roles", ()))
+            )
+            scopes.extend(
+                str(scope)
+                for scope in (auth.get("scopes", ()) if isinstance(auth, Mapping) else getattr(auth, "scopes", ()))
+            )
+        return cls(
+            identity=msgspec.structs.replace(
+                identity,
+                user_id=user_id,
+                email=email,
+                roles=tuple(sorted(set(roles))),
+                scopes=tuple(sorted(set(scopes))),
+                auth_scheme=scheme,
+            ),
+            session_id=session_id,
+        )
+
+    @classmethod
+    def from_scope(cls, scope: Mapping[str, Any], *, identity_source: "IdentitySource | None" = None) -> "AgentContext":
+        """Construct context from authenticated ASGI scope state and its immediate peer."""
+        client = scope.get("client")
+        return cls.from_headers(
+            cls._headers(scope.get("headers", {})),
+            identity_source=identity_source,
+            peer=client[0] if client else None,
+            user=scope.get("user"),
+            auth=scope.get("auth"),
+        )
+
+    @classmethod
+    def from_wsgi_environ(
+        cls, environ: Mapping[str, Any], *, identity_source: "IdentitySource | None" = None
+    ) -> "AgentContext":
+        """Construct context from WSGI authentication state and its immediate peer."""
+        headers = {
+            key[5:].replace("_", "-").lower(): str(value) for key, value in environ.items() if key.startswith("HTTP_")
+        }
+        if "CONTENT_TYPE" in environ:
+            headers["content-type"] = str(environ["CONTENT_TYPE"])
+        return cls.from_headers(
+            headers, identity_source=identity_source, peer=environ.get("REMOTE_ADDR"), user=environ.get("REMOTE_USER")
+        )
+
+    @classmethod
     def from_request(
         cls,
         request_or_connection: Any,
         *,
+        identity_source: "IdentitySource | None" = None,
         session_id: str | None = None,
         turn_id: str | None = None,
         progress_token: str | int | None = None,
         progress_callback: ProgressCallback | None = None,
     ) -> "AgentContext":
-        """Extract CallerIdentity from an HTTP request or connection and build AgentContext."""
-        headers: dict[str, str] = {}
-        scope: dict[str, Any] = {}
+        """Construct context without evaluating framework authentication properties."""
+        scope = getattr(request_or_connection, "scope", None)
+        context = (
+            cls.from_scope(scope, identity_source=identity_source)
+            if isinstance(scope, Mapping)
+            else cls.from_headers(
+                cls._headers(getattr(request_or_connection, "headers", {})), identity_source=identity_source
+            )
+        )
+        context.session_id = session_id
+        context.turn_id = turn_id
+        context.progress_reporter = ProgressReporter(callback=progress_callback, progress_token=progress_token)
+        return context
 
-        if hasattr(request_or_connection, "headers"):
-            raw_headers = request_or_connection.headers
-            if isinstance(raw_headers, Mapping):
-                for k, v in raw_headers.items():
-                    headers[str(k).lower()] = str(v)
-            elif isinstance(raw_headers, (list, tuple)):
-                for item in raw_headers:
-                    if len(item) == 2:
-                        k_str = item[0].decode("latin-1") if isinstance(item[0], bytes) else str(item[0])
-                        v_str = item[1].decode("latin-1") if isinstance(item[1], bytes) else str(item[1])
-                        headers[k_str.lower()] = v_str
-
-        if hasattr(request_or_connection, "scope") and isinstance(request_or_connection.scope, dict):
-            scope = request_or_connection.scope
-
-        user_id: str | None = None
-        email: str | None = None
-        client_cert_subject: str | None = None
-        roles: list[str] = []
-        scopes: list[str] = []
-        auth_scheme: Literal["mtls", "iap", "jwt", "connection", "anonymous"] = "anonymous"
-
-        tenant_id = headers.get("x-tenant-id", "default")
-
-        if "x-vertebra-mtls-subject" in headers:
-            client_cert_subject = headers["x-vertebra-mtls-subject"]
-            auth_scheme = "mtls"
-        elif "x-forwarded-client-cert" in headers:
-            xfcc = headers["x-forwarded-client-cert"]
-            client_cert_subject = xfcc
-            auth_scheme = "mtls"
-
-        if "x-goog-authenticated-user-email" in headers:
-            raw_email = headers["x-goog-authenticated-user-email"]
-            email = raw_email.split(":", 1)[1] if raw_email.startswith("accounts.google.com:") else raw_email
-            auth_scheme = "iap"
-
-        if "authorization" in headers:
-            auth_header = headers["authorization"]
-            if auth_header.lower().startswith("bearer ") and auth_scheme == "anonymous":
-                auth_scheme = "jwt"
-
-        scope_user = scope.get("user") or getattr(request_or_connection, "user", None)
-        if scope_user is not None:
-            if hasattr(scope_user, "id"):
-                user_id = str(scope_user.id)
-            elif isinstance(scope_user, dict) and "id" in scope_user:
-                user_id = str(scope_user["id"])
-            elif isinstance(scope_user, str):
-                user_id = scope_user
-
-            if hasattr(scope_user, "email") and email is None:
-                email = str(scope_user.email)
-            if hasattr(scope_user, "roles"):
-                roles.extend([str(r) for r in scope_user.roles])
-
-            if auth_scheme == "anonymous":
-                auth_scheme = "connection"
-
-        scope_auth = scope.get("auth") or getattr(request_or_connection, "auth", None)
-        if scope_auth is not None:
-            if hasattr(scope_auth, "scopes"):
-                scopes.extend([str(s) for s in scope_auth.scopes])
-            if hasattr(scope_auth, "roles"):
-                roles.extend([str(r) for r in scope_auth.roles])
-
-        identity = CallerIdentity(
-            user_id=user_id,
-            email=email,
-            tenant_id=tenant_id,
-            roles=tuple(sorted(set(roles))),
-            scopes=tuple(sorted(set(scopes))),
-            auth_scheme=auth_scheme,
-            client_cert_subject=client_cert_subject,
+    def fork(self) -> "AgentContext":
+        """Copy request state with independent cancellation and mutable metadata."""
+        return type(self)(
+            identity=self.identity,
+            session_id=self.session_id,
+            turn_id=self.turn_id,
+            progress_reporter=self.progress_reporter,
+            trace_context=self.trace_context,
+            metadata=dict(self.metadata),
         )
 
-        progress_rep = ProgressReporter(callback=progress_callback, progress_token=progress_token)
-
-        return cls(
-            identity=identity,
-            session_id=session_id,
-            turn_id=turn_id,
-            progress_reporter=progress_rep,
-        )
+    @staticmethod
+    def _headers(raw: Any) -> dict[str, str]:
+        """Normalize mappings and ASGI header pairs using latin-1 decoding."""
+        pairs = raw.items() if isinstance(raw, Mapping) else raw
+        return {
+            (key.decode("latin-1") if isinstance(key, bytes) else str(key)).lower(): value.decode("latin-1")
+            if isinstance(value, bytes)
+            else str(value)
+            for key, value in pairs
+        }
 
 
 _CURRENT_AGENT_CONTEXT: contextvars.ContextVar[AgentContext | None] = contextvars.ContextVar(
@@ -249,6 +287,11 @@ def bind_agent_context(ctx: AgentContext) -> contextvars.Token[AgentContext | No
     return _CURRENT_AGENT_CONTEXT.set(ctx)
 
 
+def reset_agent_context(token: contextvars.Token[AgentContext | None]) -> None:
+    """Restore the context value preceding a binding."""
+    _CURRENT_AGENT_CONTEXT.reset(token)
+
+
 __all__ = [
     "AgentContext",
     "CallerIdentity",
@@ -257,4 +300,5 @@ __all__ = [
     "ProgressReporter",
     "bind_agent_context",
     "current_agent_context",
+    "reset_agent_context",
 ]

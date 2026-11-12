@@ -25,7 +25,7 @@ tests:
   - src/py/tests/unit/db/test_postgres_driver.py
 estimated_loc: 240
 plan_revision: 5
-plan_commit: 79eea133
+plan_commit: c8722c76
 state_revision: 0
 claimed_by: null
 claimed_at: null

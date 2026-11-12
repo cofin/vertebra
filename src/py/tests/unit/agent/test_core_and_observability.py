@@ -4,17 +4,22 @@ import ast
 import dataclasses
 import inspect
 from collections.abc import Mapping
-from typing import Annotated, Any, Literal, TypedDict
+from types import SimpleNamespace
+from typing import Annotated, Any, Literal, TypedDict, cast
 
 import anyio
 import msgspec
 import pytest
+from starlette.requests import Request
 
 import vertebra.agent as agent_pkg
 import vertebra.agent.core.schema as schema_mod
 from vertebra.agent.core.context import (
     AgentContext,
     CallerIdentity,
+    bind_agent_context,
+    current_agent_context,
+    reset_agent_context,
 )
 from vertebra.agent.core.cursor import (
     decode_cursor,
@@ -28,6 +33,7 @@ from vertebra.agent.core.guards import (
     RequireRoles,
     RequireScopes,
 )
+from vertebra.agent.core.identity import CallableIdentitySource, MtlsIdentitySource
 from vertebra.agent.core.jsonrpc import (
     FRAME_KIND_BATCH_REQUEST,
     FRAME_KIND_NOTIFICATION,
@@ -341,10 +347,10 @@ async def test_agent_context_identity_and_guard_chain_inheritance() -> None:
     )
     ctx = AgentContext.from_request(req)
     assert ctx.identity.user_id == "usr_999"
-    assert ctx.identity.email == "dev@example.com"
-    assert ctx.identity.tenant_id == "acme-corp"
-    assert ctx.identity.auth_scheme == "iap"
-    assert ctx.identity.owner_key() == "acme-corp:usr_999"
+    assert ctx.identity.email is None
+    assert ctx.identity.tenant_id == "default"
+    assert ctx.identity.auth_scheme == "connection"
+    assert ctx.identity.owner_key() == "default:usr_999"
 
     app_guard = RequireAuthenticated()
     controller_guard = RequireScopes("read:agents", "write:agents")
@@ -698,3 +704,106 @@ async def test_toolspec_and_msgspec_schema_components_without_eval() -> None:
     with pytest.raises(ToolArgumentError) as err_range:
         await default_tool.invoke({"query": "Ada", "limit": 99})
     assert err_range.value.pointer == "/limit"
+
+
+@pytest.mark.parametrize(
+    "header,value",
+    [
+        ("x-goog-authenticated-user-email", "accounts.google.com:ana@example.com"),
+        ("x-vertebra-mtls-subject", "CN=svc"),
+        ("x-forwarded-client-cert", "By=spiffe://a"),
+        ("x-tenant-id", "acme"),
+    ],
+)
+def test_agent_context_ignores_untrusted_identity_headers(header: str, value: str) -> None:
+    """Untrusted proxy headers cannot authenticate a caller or select a tenant."""
+    assert AgentContext.from_headers({header: value}).identity == CallerIdentity()
+
+
+@pytest.mark.parametrize(
+    "peer,expected", [("10.0.0.5", "CN=svc"), ("203.0.113.9", None), (None, None), ("bad", None), ("::1", None)]
+)
+def test_agent_context_identity_sources(peer: str | None, expected: str | None) -> None:
+    """Only a peer inside the configured proxy network may assert a certificate."""
+    source = MtlsIdentitySource(trusted_proxies=("10.0.0.0/8",), header="X-Forwarded-Client-Cert")
+    ctx = AgentContext.from_headers(
+        {"X-Forwarded-Client-Cert": "CN=svc", "x-goog-authenticated-user-email": "ana@example.com"},
+        identity_source=source,
+        peer=peer,
+    )
+    assert ctx.identity.client_cert_subject == expected
+    assert ctx.identity.email is None
+    assert ctx.identity.auth_scheme == ("mtls" if expected else "anonymous")
+
+
+def test_agent_context_constructors_and_fork() -> None:
+    """Trusted users, scopes, custom sources, and forks preserve their stated boundaries."""
+    source = CallableIdentitySource(
+        resolver=lambda request: CallerIdentity(user_id=request.headers["x-user"], tenant_id="acme")
+    )
+    assert AgentContext.from_headers({"X-User": "u1"}, identity_source=source).identity.owner_key() == "acme:u1"
+    assert (
+        AgentContext.from_headers({}, identity_source=CallableIdentitySource(resolver=lambda request: None)).identity
+        == CallerIdentity()
+    )
+    ctx = AgentContext.from_scope(
+        {
+            "headers": [(b"x-tenant-id", b"bad")],
+            "user": SimpleNamespace(id=7, email="b@x.io", roles=["admin", "admin"]),
+            "auth": {"scopes": ["read", "read"], "roles": ["viewer"]},
+        }
+    )
+    assert ctx.identity == CallerIdentity(
+        user_id="7", email="b@x.io", roles=("admin", "viewer"), scopes=("read",), auth_scheme="connection"
+    )
+    mtls = MtlsIdentitySource(trusted_proxies=("10.0.0.0/8",))
+    assert (
+        AgentContext.from_scope(
+            {"headers": [(b"x-vertebra-mtls-subject", b"CN=svc")], "client": ("10.0.0.5", 5)}, identity_source=mtls
+        ).identity.client_cert_subject
+        == "CN=svc"
+    )
+    assert (
+        AgentContext.from_wsgi_environ({"REMOTE_USER": "carol", "HTTP_X_TENANT_ID": "t9"}).identity.owner_key()
+        == "default:carol"
+    )
+    assert (
+        AgentContext.from_wsgi_environ(
+            {"REMOTE_ADDR": "198.51.100.7", "HTTP_X_VERTEBRA_MTLS_SUBJECT": "CN=svc"}, identity_source=mtls
+        ).identity
+        == CallerIdentity()
+    )
+    assert AgentContext.from_headers({"Authorization": "Bearer abc"}).identity == CallerIdentity(auth_scheme="jwt")
+    ctx.metadata["a"] = 1
+    child = ctx.fork()
+    assert child.identity is ctx.identity
+    assert child.cancellation_token is not ctx.cancellation_token
+    assert child.metadata == {"a": 1}
+    assert child.metadata is not ctx.metadata
+    token = bind_agent_context(ctx)
+    try:
+        assert current_agent_context() is ctx
+    finally:
+        reset_agent_context(token)
+    assert current_agent_context() is None
+
+
+def test_agent_context_starlette_without_authentication() -> None:
+    """Request construction never evaluates middleware-dependent user properties."""
+    request = Request({"type": "http", "method": "POST", "path": "/mcp", "headers": []})
+    assert AgentContext.from_request(request).identity == CallerIdentity()
+
+
+@pytest.mark.parametrize(
+    "cidrs,message", [((), "at least one trusted proxy CIDR"), (("not-a-cidr",), "Invalid trusted proxy CIDR")]
+)
+def test_identity_source_config_errors(cidrs: tuple[str, ...], message: str) -> None:
+    """Invalid proxy policies fail during construction."""
+    with pytest.raises(ValueError, match=message):
+        MtlsIdentitySource(trusted_proxies=cidrs)
+
+
+def test_identity_source_rejects_noncallable() -> None:
+    """A non-callable identity resolver cannot produce a working policy."""
+    with pytest.raises(TypeError, match="must be callable"):
+        CallableIdentitySource(resolver=cast("Any", "x"))

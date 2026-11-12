@@ -12,7 +12,7 @@ depends_on_chapters:
 replan_trigger: null
 current_task: null
 plan_revision: 5
-plan_commit: 79eea133
+plan_commit: c8722c76
 state_revision: 0
 last_verified_checkpoint: ba367822
 last_reviewed_commit: ba367822
@@ -24,7 +24,7 @@ generated:
 verified:
   - by: agent:plan-generator
     at: "2026-11-07T05:00:00Z"
-    commit: 79eea133
+    commit: c8722c76
 sources:
   - id: rs-transport
     resource: src/rs/vertebra-db/src/connection.rs::TransportStream

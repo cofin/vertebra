@@ -26,7 +26,7 @@ tests:
   - src/rs/vertebra-postgres/tests/postgres_arrow_import_tests.rs
 estimated_loc: 245
 plan_revision: 6
-plan_commit: 8e9b324e
+plan_commit: c8722c76
 state_revision: 1
 claimed_by: null
 claimed_at: null
@@ -34,15 +34,15 @@ blocked_reason: null
 unblock_condition: null
 next_step: null
 last_verified_at: "2026-11-10T16:58:55Z"
-last_verified_commit: 1a3007d2
+last_verified_commit: c8722c76
 verification_evidence: "cargo test -p vertebra-postgres --test postgres_arrow_import_tests (10 passed), cargo clippy -p vertebra-postgres --all-targets -- -D warnings, ruff check, and mypy on postgres/arrow.py exited 0"
 created_at: "2026-11-05T18:25:07Z"
 updated_at: "2026-11-10T16:58:55Z"
-commit: 1a3007d2
+commit: 00344dd7
 verified:
   - by: agent:plan-generator
     at: "2026-11-10T14:45:00Z"
-    commit: 8e9b324e
+    commit: c8722c76
 sources:
   - id: pg-contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md

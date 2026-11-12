@@ -12,8 +12,6 @@ use std::sync::Arc;
 #[cfg(unix)]
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd};
 
-use dashmap::DashMap;
-use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, warn};
@@ -21,6 +19,7 @@ use tracing::{debug, error, warn};
 #[cfg(unix)]
 use tokio::io::unix::AsyncFd;
 
+use vertebra_core::bridge::ResponseStreamFrame;
 use vertebra_core::transport::ring_pair::RingPair;
 
 use crate::body::PendingResponse;
@@ -29,82 +28,6 @@ use crate::dispatcher::Dispatcher;
 pub use vertebra_core::ipc::{
     FLAG_ERROR, FLAG_FINAL, FLAG_HEADERS_SENT, FLAG_STREAMING, FLAG_TRAILERS,
 };
-
-/// Responder channel variant for an in-flight request ID.
-pub enum PendingResponder {
-    /// Single-frame unary response channel.
-    Unary(oneshot::Sender<Vec<u8>>),
-    /// Multi-frame streaming response channel kept open until `FLAG_FINAL` or `FLAG_ERROR`.
-    Stream(mpsc::Sender<Vec<u8>>),
-}
-
-/// Concurrent correlation map supporting both unary and multi-frame streaming responses.
-#[derive(Default)]
-pub struct PendingRequests {
-    map: DashMap<u64, PendingResponder>,
-}
-
-impl PendingRequests {
-    /// Create an empty pending request registry.
-    pub fn new() -> Self {
-        Self {
-            map: DashMap::new(),
-        }
-    }
-
-    /// Number of currently active request correlations.
-    pub fn len(&self) -> usize {
-        self.map.len()
-    }
-
-    /// Return `true` when no request correlations are active.
-    pub fn is_empty(&self) -> bool {
-        self.map.is_empty()
-    }
-
-    /// Register a single-shot unary response channel for `request_id`.
-    pub fn register_unary(&self, request_id: u64) -> oneshot::Receiver<Vec<u8>> {
-        let (tx, rx) = oneshot::channel();
-        self.map.insert(request_id, PendingResponder::Unary(tx));
-        rx
-    }
-
-    /// Register a bounded multi-frame streaming channel for `request_id`.
-    pub fn register_stream(&self, request_id: u64, capacity: usize) -> mpsc::Receiver<Vec<u8>> {
-        let (tx, rx) = mpsc::channel(capacity.max(1));
-        self.map.insert(request_id, PendingResponder::Stream(tx));
-        rx
-    }
-
-    /// Inspect raw frame header `[request_id: u64][status: u16][flags: u16]` and route to the registered responder.
-    pub fn deliver_raw_frame(&self, raw_bytes: Vec<u8>) -> bool {
-        if raw_bytes.len() < 12 {
-            return false;
-        }
-        let request_id = u64::from_le_bytes(raw_bytes[0..8].try_into().unwrap());
-        let flags = u16::from_le_bytes(raw_bytes[10..12].try_into().unwrap());
-        let is_streaming = (flags & FLAG_STREAMING) != 0;
-        let is_terminal = !is_streaming || (flags & (FLAG_FINAL | FLAG_ERROR)) != 0;
-
-        if is_terminal {
-            let Some((_, responder)) = self.map.remove(&request_id) else {
-                return false;
-            };
-            match responder {
-                PendingResponder::Unary(tx) => tx.send(raw_bytes).is_ok(),
-                PendingResponder::Stream(tx) => tx.try_send(raw_bytes).is_ok(),
-            }
-        } else {
-            let Some(entry) = self.map.get(&request_id) else {
-                return false;
-            };
-            match entry.value() {
-                PendingResponder::Stream(tx) => tx.try_send(raw_bytes).is_ok(),
-                PendingResponder::Unary(_) => false,
-            }
-        }
-    }
-}
 
 /// Wrapper around a raw FD for `AsyncFd` registration.
 #[cfg(unix)]
@@ -200,13 +123,13 @@ async fn run_worker_reader_async(
 ) {
     loop {
         let mut drained_any = false;
-        while drain_worker(&worker, &dispatcher) {
+        while drain_worker(worker_id, &worker, &dispatcher, &shutdown).await {
             drained_any = true;
         }
 
         if drained_any {
             tokio::task::yield_now().await;
-            if drain_worker(&worker, &dispatcher) {
+            if drain_worker(worker_id, &worker, &dispatcher, &shutdown).await {
                 continue;
             }
         }
@@ -254,12 +177,15 @@ async fn run_worker_reader_async(
     }
 
     // Final drain after shutdown
-    while drain_worker(&worker, &dispatcher) {}
+    while drain_worker(worker_id, &worker, &dispatcher, &shutdown).await {}
+    if let Some(shm) = dispatcher.shm_dispatcher() {
+        shm.sweep_worker(worker_id as u32);
+    }
 }
 
 /// Fallback: Periodic polling of the response rings with cancellation select.
 async fn run_worker_reader_polling(
-    _worker_id: usize,
+    worker_id: usize,
     worker: Arc<RingPair>,
     dispatcher: Arc<Dispatcher>,
     shutdown: CancellationToken,
@@ -272,54 +198,64 @@ async fn run_worker_reader_polling(
             biased;
             _ = shutdown.cancelled() => break,
             _ = tokio::time::sleep(poll_interval) => {
-                while drain_worker(&worker, &dispatcher) {}
+                while drain_worker(worker_id, &worker, &dispatcher, &shutdown).await {}
             }
         }
     }
 
-    while drain_worker(&worker, &dispatcher) {}
+    while drain_worker(worker_id, &worker, &dispatcher, &shutdown).await {}
+    if let Some(shm) = dispatcher.shm_dispatcher() {
+        shm.sweep_worker(worker_id as u32);
+    }
 }
 
-/// Drain available responses from a worker's tiered rings via zero-copy `drain_with`.
-fn drain_worker(worker: &Arc<RingPair>, dispatcher: &Dispatcher) -> bool {
+/// Drain owned stream frames before awaiting client capacity; unary completions keep their fast path.
+async fn drain_worker(
+    worker_id: usize,
+    worker: &Arc<RingPair>,
+    dispatcher: &Dispatcher,
+    shutdown: &CancellationToken,
+) -> bool {
     use bytes::Bytes;
-
     let mut completions = Vec::new();
-    match worker
-        .response_rings
-        .drain_with(1024, |correlation_id, status, headers_raw, body| {
-            let headers_mp = if headers_raw.is_empty() {
-                Bytes::new()
-            } else {
-                Bytes::copy_from_slice(headers_raw)
-            };
-            let body_bytes = if body.is_empty() {
-                Bytes::new()
-            } else {
-                Bytes::copy_from_slice(body)
-            };
+    let mut stream_frames = Vec::new();
+    match worker.drain_frames_with(1024, |frame| {
+        let headers = Bytes::copy_from_slice(frame.headers_raw);
+        let body = Bytes::copy_from_slice(frame.body);
+        if frame.flags & FLAG_STREAMING != 0 {
+            stream_frames.push(ResponseStreamFrame {
+                request_id: frame.correlation_id,
+                status: frame.status,
+                flags: frame.flags,
+                headers_raw: headers,
+                body,
+            });
+        } else {
             completions.push((
-                correlation_id,
-                PendingResponse {
-                    status,
-                    headers_mp,
-                    body: body_bytes,
-                    stream_rx: None,
-                },
+                frame.correlation_id,
+                PendingResponse::unary(frame.status, headers, body),
             ));
-        }) {
-        Ok(_) => {}
-        Err(e) => {
-            warn!(error = %e, "error reading response ring");
         }
+    }) {
+        Ok(_) => {}
+        Err(error) => warn!(error = %error, "error reading response ring"),
     }
-
-    let any_received = !completions.is_empty();
+    let any_received = !completions.is_empty() || !stream_frames.is_empty();
     if completions.len() == 1 {
-        let (cid, resp) = completions.pop().unwrap();
-        dispatcher.complete(cid, resp);
-    } else if any_received {
+        let (id, response) = completions.pop().unwrap();
+        dispatcher.complete(id, response);
+    } else if !completions.is_empty() {
         dispatcher.complete_many(completions);
+    }
+    for frame in stream_frames {
+        tokio::select! {
+            biased;
+            _ = dispatcher.deliver_stream_frame(frame) => {},
+            _ = shutdown.cancelled() => {
+                if let Some(shm) = dispatcher.shm_dispatcher() { shm.sweep_worker(worker_id as u32); }
+                return false;
+            }
+        }
     }
     any_received
 }
