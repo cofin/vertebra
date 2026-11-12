@@ -121,7 +121,7 @@ Every request entering `AsgiMcpApp` or `WsgiMcpApp` carries an `AgentContext` bu
 
 ## Notes & Discoveries
 
-- [2026-11-12 00:30] Guard denial surfaces as `-32603` until `ch02:t01`; this task asserts only that the guarded tool does not run.
+- ASGI, Starlette, WSGI, Flask, and native request paths pass trusted context and immediate-peer data where available. Missing Flask raises a dependency error; no request body is fabricated.
 
 [^mcp-routes]: `src/py/vertebra/agent/mcp/routes.py::AsgiMcpApp` — Shared ASGI and WSGI adapters.
 [^agent-context]: `src/py/vertebra/agent/core/context.py::AgentContext.from_scope` — Trusted context constructors from t01.

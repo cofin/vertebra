@@ -44,13 +44,32 @@ registry.register_resource(list_warehouses)
 
 ## MCP 2026-07-28 Transport, Framework Mounts & `vtb ai mcp` CLI
 
-- **Transport-Agnostic `MCPCore` (`McpHttpRequest` -> `McpHttpResponse`)**: Enforces MCP `2026-07-28` HTTP semantics (`server/discover`, `_meta` protocol version negotiation, `Mcp-Method`/`Mcp-Name`/`Mcp-Param-*` header validation, default same-origin `Origin` checks, `202 Accepted` notifications, `400` batch rejection, `405` on `GET /mcp`, and `ETag` `304 Not Modified` caching).
+- **Transport-Agnostic `MCPCore` (`McpHttpRequest` -> `McpHttpResponse`)**: Enforces MCP `2026-07-28` HTTP semantics (`server/discover`, `_meta` protocol version negotiation, `Mcp-Method`/`Mcp-Name` header validation, default same-origin `Origin` checks, `202 Accepted` notifications, `400` batch rejection, `405` on `GET /mcp`, and `ETag` `304 Not Modified` caching).
 - **Shared ASGI/WSGI Adapters & `litestar-mcp` Delegation**: Starlette and FastAPI share `AsgiMcpApp`, Flask and Django share `WsgiMcpApp` over a persistent `Portal`, Litestar delegates `/mcp` to `litestar-mcp` without duplicating `opt["mcp_tool"]` handlers, and all frameworks serve one canonical `/.well-known/mcp.json` discovery schema.
 - **Skills (`MCPSkillsConfig`, `SkillController`, `FilesystemSkillSource`)**: Serve structured `SKILL.md` bundles over MCP resources and HTTP endpoints so coding agents can load domain workflows on demand.
-- **Async Tasks (`MCPTaskConfig`, `MCPTaskStore`, `TaskRecord`)**: Track long-running tool calls with progress updates, cancellation, and TTL retention.
+- **Async Tasks (`MCPTaskConfig`, `MCPTaskStore`, `TaskRecord`)**: Track promoted tool calls with owner-scoped records and cancellation that stops execution. Terminal records remain terminal.
 - **Stdio Server & Stdio-to-HTTP Bridge (`vtb ai mcp serve|bridge`)**: Run a local MCP server over stdio (`vtb ai mcp serve --name my-mcp`) or bridge stdio-only MCP desktop clients to remote Vertebra HTTP/SSE MCP endpoints with W3C trace header propagation:
 
 ```bash
 vtb ai mcp serve --name my-mcp
 vtb ai mcp bridge --url http://127.0.0.1:8000/mcp
 ```
+
+
+## Caller Identity and Cancellation
+
+MCP tools receive an `AgentContext`, also available through `AgentContext.current()` during dispatch. ASGI authentication state and WSGI `REMOTE_USER` supply application identity. Proxy identity headers are ignored by default. To trust a certificate subject header from your proxy, configure both the opt-in and its policy:
+
+```python
+from vertebra.agent.core.identity import MtlsIdentitySource
+from vertebra.agent.mcp import MCPConfig
+
+config = MCPConfig(
+    trust_proxy_identity=True,
+    identity_source=MtlsIdentitySource(trusted_proxies=("10.0.0.0/8",)),
+)
+```
+
+The mTLS policy accepts `x-vertebra-mtls-subject` only when the adapter supplies an immediate peer inside that network. Configure the network for proxies that authenticate clients and replace incoming identity headers. Header-only native routes do not supply a peer, so this policy refuses identity there. `CallableIdentitySource` supports application-defined policies. Plain IAP email headers never establish identity; verified IAP JWT support remains pending.
+
+Promoted tools inherit immutable caller identity and receive independent cancellation state. An owner calling `tasks/cancel` signals that tool's token and cancels its coroutine. Anonymous callers cannot access authenticated callers' task records. Stdio accepts an explicit `AgentContext` or creates one session context shared by its input frames.

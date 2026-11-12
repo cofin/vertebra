@@ -142,7 +142,7 @@ Replace the header-trusting body of `AgentContext.from_request` with three const
 
 ## Notes & Discoveries
 
-- [2026-11-12 00:30] `AgentContext.from_request` has no production caller at `c8722c76`; tightening header trust breaks no production path.
+- Proxy identity requires an explicit source; framework authentication properties are never evaluated. Forks copy metadata and own independent cancellation tokens.
 
 [^agent-context]: `src/py/vertebra/agent/core/context.py::AgentContext.from_request` — Existing header and scope identity extraction.
 [^caller-identity]: `src/py/vertebra/agent/core/context.py::CallerIdentity` — Normalized caller identity struct.

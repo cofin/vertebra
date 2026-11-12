@@ -27,7 +27,10 @@ sources:
   title: Embedded bridge correlation completion
 - id: ring-pair-rs
   resource: src/rs/vertebra-core/src/transport/ring_pair.rs::RingPair
-  title: SHM response ring VRES framing
+  title: SHM unary VRES and ordered VRSF streaming frames
+- id: shm-reader-rs
+  resource: src/rs/vertebra-http/src/dispatcher/shm_reader.rs::drain_worker
+  title: Per-worker reader backpressure and shutdown cancellation
 - id: worker-py
   resource: src/py/vertebra/server/worker.py::Worker
   title: Worker lifespan entry and mount runner instantiation
@@ -50,12 +53,13 @@ sources:
 <!-- truth: start -->
 - Mounted ASGI responses do not stream: `AsgiProtocol::send` appends every `more_body=True` chunk to `AsgiProtocolState.body_buf` and submits one unary response when the final chunk arrives, so SSE and MCP streamable HTTP deliver nothing until the handler returns [^asgi-protocol-rs].
 - RSGI `response_stream` appends into `RsgiHttpProtocol.stream_chunks` and flushes once at return [^rsgi-http-rs].
-- The embedded bridge completes every correlation with `stream_rx: None`, and SHM response rings carry only unflagged `VRES` frames (`RingPair::send_response`), so neither transport carries a progressive response today [^bridge-http-rs] [^ring-pair-rs].
+- The native embedded bridge and SHM rings carry progressive responses through `ResponseStreamRegistry` and ordered `VRSF` frames. Python stream submission and ASGI/RSGI producers remain unwired, so transport support alone does not make mounted responses stream [^bridge-http-rs] [^ring-pair-rs] [^asgi-protocol-rs] [^rsgi-http-rs].
 - `Worker.run` logs and swallows ASGI lifespan startup failures (`"ASGI lifespan startup failed for mount %r"`), and `_instantiate_mount_runners` logs and swallows RSGI `__rsgi_init__` failures; the worker then serves traffic without the resources startup was meant to create [^worker-py].
 - `vertebra.supervisor` (`supervisor/__init__.py`) contains only a docstring; it imports nothing and defines no `__all__`, so launcher symbols must be imported from `vertebra.supervisor._supervisor` [^supervisor-init-py].
 - `vtb run --worker-only` only sets `VERTEBRA_WORKER_ONLY`, which no module reads, and still launches the HTTP server [^run-cli-py].
 - `vtb workers run` calls `execute_worker_cli` without `run_until_stopped=True`, so it enters the app lifespan, stops the runner, and exits; `WorkerRunner` is built without a `QueueService`, so `process_once` has nothing to dequeue [^workers-cli-py].
 - `find_server_binary` checks for a packaged `vertebra/bin/vertebra-server[.exe]`, but the `vertebra-core` wheel does not ship one; installs resolve `VERTEBRA_SERVER_BINARY` or a locally built binary [^supervisor-py].
+- A slow streaming client stalls delivery of later responses from the same worker: its SHM reader awaits bounded channel capacity until the client drains or disconnects. Other worker readers continue independently [^shm-reader-rs].
 <!-- truth: end -->
 
 ## Planned Fixes
@@ -67,9 +71,11 @@ Current runtime behavior is described in [ASGI, RSGI & WSGI Runners](../../archi
 [^asgi-protocol-rs]: `src/rs/vertebra-py/src/asgi.rs::AsgiProtocol` — Rust ASGI protocol send path and body buffer.
 [^rsgi-http-rs]: `src/rs/vertebra-py/src/rsgi/http.rs::RsgiHttpProtocol` — Rust RSGI HTTP protocol stream accumulation.
 [^bridge-http-rs]: `src/rs/vertebra-http/src/dispatcher/bridge.rs::BridgeCorrelation` — Embedded bridge correlation completion.
-[^ring-pair-rs]: `src/rs/vertebra-core/src/transport/ring_pair.rs::RingPair` — SHM response ring `VRES` framing.
+[^ring-pair-rs]: `src/rs/vertebra-core/src/transport/ring_pair.rs::RingPair` — SHM unary `VRES` and ordered `VRSF` streaming frames.
 [^worker-py]: `src/py/vertebra/server/worker.py::Worker` — Worker lifespan entry and mount runner instantiation.
 [^supervisor-init-py]: `src/py/vertebra/supervisor/__init__.py` — Supervisor package docstring.
 [^run-cli-py]: `src/py/vertebra/cli/run.py` — `vtb run` command and worker-only flag.
 [^workers-cli-py]: `src/py/vertebra/cli/workers.py::execute_worker_cli` — `vtb workers run` entry point.
 [^supervisor-py]: `src/py/vertebra/supervisor/_supervisor.py::find_server_binary` — Server binary resolution.
+
+[^shm-reader-rs]: `src/rs/vertebra-http/src/dispatcher/shm_reader.rs::drain_worker` — Per-worker reader backpressure and shutdown cancellation.

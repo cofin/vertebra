@@ -5,7 +5,7 @@ chapter_id: ch01-bridge-stream-frames
 title: Route drained VRSF frames through the registry and remove the unreachable ResponseSlot routing path
 description: Make the SHM response reader drain frames with flags, complete unary frames as today, deliver VRSF stream frames through a ShmDispatcher-owned ResponseStreamRegistry with awaited lossless delivery, and delete the unreachable ResponseSlot-based handle_raw_response_slot and PendingRequests stream machinery.
 status: draft
-state: in_progress
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -31,17 +31,17 @@ estimated_loc: 250
 plan_revision: 2
 plan_commit: null
 state_revision: 0
-claimed_by: agent:bulk-runtime
+claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
 last_verified_at: null
-last_verified_commit: null
+last_verified_commit: f45a5fe8
 verification_evidence: "Red: abandoned bridge receiver regression fails with active_streams 1 versus 0 (exit 101). Green: full core+HTTP tls/compression chapter checkpoint exits 0 (169 core unit, 47 core integration, 49 HTTP unit, 105 HTTP integration, 4 doctests); matching all-target Clippy -D warnings, cargo fmt --check and scoped whitespace exit 0. Logs: /tmp/bulk-runtime-checkpoint.log, /tmp/bulk-runtime-clippy.log."
 created_at: "2026-11-12T00:45:00Z"
 updated_at: "2026-11-12T00:45:00Z"
-commit: null
+commit: f45a5fe8
 generated:
   by: agent:plan-generator
   at: "2026-11-12T00:45:00Z"

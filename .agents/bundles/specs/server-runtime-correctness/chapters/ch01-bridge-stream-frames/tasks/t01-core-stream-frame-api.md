@@ -110,8 +110,8 @@ Add a stream frame type, delivery outcome enum, and a dedicated stream sink to `
 ## Acceptance Criteria
 
 - [x] `ResponseStreamFrame`, `StreamDelivery`, `StreamSink`, `set_stream_sink`, and `submit_stream_frame` exist with the signatures above and are re-exported from `vertebra_core` (R1).
-- [ ] Submitting without a sink fails with `TransportError::Disconnected` (R1).
-- [ ] Unary bridge behaviour and existing bridge tests are unchanged (R1).
+- [x] Submitting without a sink fails with `TransportError::Disconnected` (R1).
+- [x] Unary bridge behaviour and existing bridge tests are unchanged (R1).
 
 ## Notes & Discoveries
 

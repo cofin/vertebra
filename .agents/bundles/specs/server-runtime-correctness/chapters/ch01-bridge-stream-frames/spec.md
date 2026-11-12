@@ -9,13 +9,13 @@ state: active
 planning_status: complete
 depends_on_chapters: []
 replan_trigger: null
-current_task: "server-runtime-correctness:ch01:t04"
+current_task: null
 plan_revision: 2
 plan_commit: null
 state_revision: 0
 last_verified_checkpoint: null
 created_at: "2026-11-12T00:45:00Z"
-updated_at: "2026-11-12T00:45:00Z"
+updated_at: "2026-11-12T04:00:11Z"
 generated:
   by: agent:plan-generator
   at: "2026-11-12T00:45:00Z"
@@ -25,7 +25,7 @@ sources:
     title: In-process bridge, BridgeResponse, ResponseSink, and sink dispatch helpers
   - id: ring-pair-rs
     resource: src/rs/vertebra-core/src/transport/ring_pair.rs::ResponseData
-    title: VRES and VROV SHM response frame layout, send_response, and drain_with
+    title: VRES unary responses, ordered VRSF stream frames, and flag-aware draining
   - id: bridge-http-rs
     resource: src/rs/vertebra-http/src/dispatcher/bridge.rs::BridgeCorrelation
     title: Embedded correlation table and response sink registration
@@ -34,7 +34,7 @@ sources:
     title: Unary and streaming pending responses over FrameReceiver
   - id: shm-reader-rs
     resource: src/rs/vertebra-http/src/dispatcher/shm_reader.rs::drain_worker
-    title: SHM reader that completes every drained frame as a unary PendingResponse
+    title: SHM reader routing unary completions and awaited stream delivery
 tags:
   - rust
   - streaming
@@ -44,11 +44,17 @@ tags:
 
 # Chapter 01: Response Stream Frames on the In-Process Bridge and SHM Rings
 
+<!-- truth: start -->
+- The embedded bridge and SHM response rings carry native ordered stream frames with bounded client backpressure [^bridge-core-rs] [^ring-pair-rs].
+- One `ResponseStreamRegistry` implementation handles first, continuation, trailer, final, error, disconnect, and worker-lifecycle delivery [^bridge-http-rs] [^shm-reader-rs].
+- Python submission and ASGI/RSGI flush paths remain in `ch02` and `ch03`; mounted applications still buffer their responses [^bridge-core-rs].
+<!-- truth: end -->
+
 ## 1. Specification, Context & Provenance
 
 ### 1.1 Problem Statement & Objectives
 
-Neither transport can carry a streamed response. The embedded topology delivers responses through `BatchBridge::submit_response` and a `ResponseSink` that returns `()`, and `BridgeCorrelation::ensure_sink_registered` completes every correlation with `PendingResponse { stream_rx: None, .. }` [^bridge-core-rs] [^bridge-http-rs]. The SHM topology writes `VRES` frames (`magic, correlation_id, status, headers_len, body_len`) through `RingPair::send_response`; the frame has no flags, and `shm_reader::drain_worker` completes every drained frame as a unary response [^ring-pair-rs] [^shm-reader-rs]. `ShmDispatcher::handle_raw_response_slot`, `Dispatcher::handle_raw_response_slot`, and the stream half of `PendingRequests` decode the 16-byte `ResponseSlot` format with flags, but no production code calls them and the rings never carry that format. This chapter delivers the transport layer for [#81](https://github.com/cofin/vertebra/issues/81): ordered, lossless stream frames on both transports, completed into `PendingResponse::streaming` by one registry.
+The Rust transport layer carries progressive response frames on both topologies. The embedded bridge registers a dedicated `StreamSink` alongside its unary `ResponseSink`; `BridgeCorrelation` completes the first frame as a streaming `PendingResponse`, and `ResponseStreamRegistry` forwards later data, trailers, and terminal frames with bounded backpressure [^bridge-core-rs] [^bridge-http-rs] [^body-rs]. SHM rings carry flagged `VRSF` frames through the xlarge tier in producer order, while `VRES` and `VROV` retain their unary formats [^ring-pair-rs]. The SHM reader routes owned stream frames through the same registry with awaited delivery and preserves unary completion batching [^shm-reader-rs]. Python-facing stream submission and progressive ASGI/RSGI producers remain work for chapters `ch02` and `ch03`, so this chapter does not establish end-to-end mounted-app streaming.
 
 ### 1.2 Non-Goals
 
@@ -137,7 +143,7 @@ Adding `flags` to `BridgeResponse` or `VRES` was rejected: every unary construct
 
 ## 3. Documentation & OKF Knowledge Plan
 
-Progress: `[0/0 files documented in ch01]`; bridge and SHM stream semantics land in `ch10:t03` (`tiered-rings-and-batch-bridge.md`, `server-and-dispatch.md`).
+Progress: `[3/3 files documented in ch01]`; native transport behavior is synchronized in `tiered-rings-and-batch-bridge.md`, `server-and-dispatch.md`, and `server-runtime-limitations.md`. Flow-wide progress is an interim `[3/18 files documented]`; `ch10:t03` and `ch10:t04` complete those entries after Python submission, protocol flushing, and remaining runtime behavior are delivered.
 
 ## 4. Requirement-to-Task Traceability Matrix
 
@@ -153,18 +159,21 @@ Progress: `[0/0 files documented in ch01]`; bridge and SHM stream semantics land
 - [x] [2e4ef248] server-runtime-correctness:ch01:t01 — Add ResponseStreamFrame, StreamDelivery, StreamSink, and submit_stream_frame to BatchBridge (tasks/t01-core-stream-frame-api.md)
 - [x] [616f33a8] server-runtime-correctness:ch01:t02 — Add VRSF stream frames and flag-aware draining to the SHM response rings (tasks/t02-shm-ring-stream-frames.md)
 - [x] [3a3fab9a] server-runtime-correctness:ch01:t03 — Route stream frames into PendingResponse::streaming through ResponseStreamRegistry and the bridge sink (tasks/t03-response-stream-registry.md)
-- [ ] server-runtime-correctness:ch01:t04 — Route drained VRSF frames through the registry and remove the unreachable ResponseSlot routing path (tasks/t04-shm-reader-stream-routing.md)
+- [x] [f45a5fe8] server-runtime-correctness:ch01:t04 — Route drained VRSF frames through the registry and remove the unreachable ResponseSlot routing path (tasks/t04-shm-reader-stream-routing.md)
 
 **Chapter Recovery Checkpoint:** `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-core -p vertebra-http --features vertebra-http/tls,vertebra-http/compression && cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-core -p vertebra-http --all-targets --features vertebra-http/tls,vertebra-http/compression -- -D warnings` exits `0`.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Baseline**: `plan_commit: null`; chapter `state: planned`.
-- **Remaining Tasks**: `t01`–`t04` (`0/4`).
-- **Downstream Dependents**: `ch02:t01` depends on `ch01:t01`–`ch01:t04`.
+- **Verified Tasks**: `t01` (`2e4ef248`), `t02` (`616f33a8`), and `t03` (`3a3fab9a`), and `t04` (`f45a5fe8`) are completed; `4/4` tasks are committed.
+- **Recovery Checkpoint**: Full core and HTTP suites, four doctests, all-target Clippy, formatting, and whitespace checks pass. Task `t04` is committed; chapter review and stamping remain.
+- **Native Transport Boundary**: Bridge stream frames and ordered `VRSF` ring frames feed a shared bounded registry; Python-facing producers remain buffered until `ch02`–`ch03`.
+- **Documentation**: `[3/3 files documented in ch01]`; flow-wide documentation remains an interim `[3/18]`.
+- **Downstream Dependents**: `ch02:t01` depends on all four tasks and a reviewed chapter checkpoint.
+- **Chapter State**: `active`; correctness review and a fresh quality review precede completion and pointer advancement.
 
 [^bridge-core-rs]: `src/rs/vertebra-core/src/bridge.rs::BatchBridge` — In-process bridge, `BridgeResponse`, `ResponseSink`, and sink dispatch helpers.
-[^ring-pair-rs]: `src/rs/vertebra-core/src/transport/ring_pair.rs::ResponseData` — `VRES` and `VROV` SHM response frame layout, `send_response`, and `drain_with`.
+[^ring-pair-rs]: `src/rs/vertebra-core/src/transport/ring_pair.rs::ResponseData` — `VRES` unary responses, ordered `VRSF` stream frames, and flag-aware draining.
 [^bridge-http-rs]: `src/rs/vertebra-http/src/dispatcher/bridge.rs::BridgeCorrelation` — Embedded correlation table and response sink registration.
 [^body-rs]: `src/rs/vertebra-http/src/body.rs::PendingResponse` — Unary and streaming pending responses over `FrameReceiver`.
-[^shm-reader-rs]: `src/rs/vertebra-http/src/dispatcher/shm_reader.rs::drain_worker` — SHM reader that completes every drained frame as a unary `PendingResponse`.
+[^shm-reader-rs]: `src/rs/vertebra-http/src/dispatcher/shm_reader.rs::drain_worker` — SHM reader routing unary completions and awaited stream delivery.

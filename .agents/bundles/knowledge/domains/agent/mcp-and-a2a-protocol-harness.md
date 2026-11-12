@@ -16,12 +16,27 @@ generated:
   at: "2026-11-04T04:33:00Z"
 verified:
   - by: agent:flow-sync
+    at: "2026-11-12T03:53:56Z"
+    commit: c007f853
+  - by: agent:flow-sync
     at: "2026-11-12T01:15:00Z"
     commit: c8722c76
   - by: agent:flow-setup
     at: "2026-11-07T03:55:00Z"
     commit: 067fa901
 sources:
+  - id: agent-context
+    resource: src/py/vertebra/agent/core/context.py::AgentContext
+    title: Trusted context construction, independent forks, and binding restoration
+  - id: agent-identity
+    resource: src/py/vertebra/agent/core/identity.py::MtlsIdentitySource
+    title: Explicit trusted proxy and callable identity sources
+  - id: mcp-tasks
+    resource: src/py/vertebra/agent/mcp/tasks.py::MCPTaskStore
+    title: Exact-owner task access and immutable terminal records
+  - id: agent-plugin
+    resource: src/py/vertebra/agent/plugin.py::AgentPlugin
+    title: Native and Litestar fallback context forwarding
   - id: src-typing-public-py
     resource: src/py/vertebra/typing.py
     title: "Public neutral ToolProvider and ToolPolicyError exports"
@@ -110,6 +125,8 @@ sources:
 - `MCPCore.handle(McpHttpRequest) -> McpHttpResponse` and `AsgiMcpApp` / `WsgiMcpApp` (backed by a persistent `PortalProvider.default()` portal) implement MCP `2026-07-28` Streamable HTTP (`POST /mcp`, `204` on `OPTIONS /mcp`, `405` on `GET /mcp`) across native `App`, Starlette, FastAPI, Flask, and Django, validating `MCP-Protocol-Version`, `Mcp-Method`, and `Mcp-Name` against the JSON-RPC body, echoing `Mcp-Session-Id` without session validation, and sharing one canonical `/.well-known/mcp.json` discovery schema; `MCPService(MCPCore)` is an alias subclass with no added behavior, and `Mcp-Param-*` header validation is not implemented.
 - `build_webmcp_manifest` projects `/.well-known/webmcp.json` strictly from `ToolSpec` entries with `"webmcp" in exposure` (emitting `title`, `outputSchema`, and `annotations.consequentialHint = True` when `requires_confirmation=True`), and `registerWebMCPTools` in `@vertebra/client/webmcp` targets `document.modelContext ?? navigator.modelContext` with `AbortSignal` disposal, HMR idempotency, and per-tool error isolation.
 - `vertebra.agent.a2a` implements A2A `1.0` task lifecycles, dynamic request-origin `AgentCard` URLs, `ToolSpec` skill card projection (`"a2a" in exposure`), RFC 7515 JWS `HS256` card signatures (`AgentCardSigner`), and DAG/`SpecTree` workflow execution.
+- `AgentContext` trusts application authentication state; proxy identity requires explicit `MCPConfig.trust_proxy_identity=True` and an `IdentitySource`. mTLS subject headers require an immediate peer inside configured CIDRs; plain IAP email headers never authenticate callers [^agent-context] [^agent-identity].
+- `MCPCore` binds/restores caller context; promoted tasks fork cancellation state, stop their coroutine on owner cancellation, and retain terminal status. Explicit anonymous requests cannot access owner-bound tasks [^src-agent-mcp-service-py] [^mcp-tasks].
 <!-- truth: end -->
 
 [`vertebra.agent`](../../../../../src/py/vertebra/agent/__init__.py)[^src-agent-init-py] provides an agentic harness combining Model Context Protocol (`MCP 2026-07-28`), Agent-to-Agent (`A2A 1.0`), browser WebMCP, durable DAG workflows, `SpecTree` hierarchical execution, Rust PyO3 JSON-RPC and schema digest fastpaths, and OpenTelemetry GenAI semantic conventions.
@@ -127,6 +144,14 @@ sources:
 | [`WebMCPConfig` & `build_webmcp_manifest`](../../../../../src/py/vertebra/agent/mcp/webmcp.py)[^src-agent-mcp-webmcp-py] | Builds and serializes (`render_webmcp_manifest_json`) the `/.well-known/webmcp.json` `WebMCPManifest` (`WebMCPToolDescriptor`) strictly from `ToolSpec` entries with `"webmcp" in exposure`, propagating `title`, `outputSchema`, and `consequentialHint`. |
 | [`run_stdio_server`](../../../../../src/py/vertebra/agent/mcp/stdio.py)[^src-agent-mcp-stdio-py] | Hosts an `MCPService` over newline-delimited JSON-RPC 2.0 `stdin`/`stdout` pipes for CLI agents and local developer tooling. |
 | [`McpClient`](../../../../../src/ts/vertebra-client/src/agent/index.ts)[^src-src-agent-index-ts] & [`registerWebMCPTools`](../../../../../src/ts/vertebra-client/src/webmcp.ts)[^src-src-webmcp-ts] | TypeScript client SDK sending `Accept: application/json, text/event-stream`, `MCP-Protocol-Version`, `Mcp-Method`, `Mcp-Name`, `Mcp-Session-Id`, and `2026-07-28` `_meta`, parsing JSON or SSE JSON-RPC responses, encoding control/non-ASCII header values via `encodeMcpHeaderValue`, and registering browser WebMCP tools (`WebMCPRegistrationHandle`) on `document.modelContext ?? navigator.modelContext` with `AbortSignal` disposal and HMR idempotency. |
+
+### Caller context and task ownership
+
+`AgentContext.from_scope` reads authenticated `user`/`auth` state without touching framework request properties; `from_wsgi_environ` reads `REMOTE_USER` and `REMOTE_ADDR`. `from_headers` ignores proxy identity by default. `MtlsIdentitySource` accepts a subject header only from configured proxy networks, and `CallableIdentitySource` delegates identity to application policy. `MCPConfig` rejects a source without opt-in and opt-in without a source [^agent-context] [^agent-identity] [^src-agent-mcp-models-py].
+
+ASGI, Starlette, WSGI, Flask, native routes, and the Litestar fallback pass context into `MCPCore`. The fallback preserves core HTTP status and headers. `run_stdio_server` uses an explicit caller context or one generated `stdio-` session context for every input frame [^src-agent-mcp-routes-py] [^agent-plugin] [^src-agent-mcp-stdio-py].
+
+Dispatch restores its enclosing context in `finally`. Promoted tools run with the same immutable identity and separate cancellation token and metadata dictionary. Owner cancellation signals the token and cancels the coroutine; terminal records resist late completion/failure. Anonymous requests see only anonymous-owned tasks. Omitted internal store lookups remain available to task lifecycle methods [^agent-context] [^src-agent-mcp-service-py] [^mcp-tasks].
 
 ### Adapter-owned tool providers
 
@@ -195,3 +220,8 @@ Provenance sources: [^src-tests-unit-agent-test-mcp-conformance-py].
 [^src-src-agent-index-ts]: `src/ts/vertebra-client/src/agent/index.ts` — TypeScript client module (src/ts/vertebra-client/src/agent/index.ts).
 [^src-src-webmcp-ts]: `src/ts/vertebra-client/src/webmcp.ts` — TypeScript WebMCP client module (src/ts/vertebra-client/src/webmcp.ts).
 [^src-tests-unit-agent-test-mcp-conformance-py]: `src/py/tests/unit/agent/test_mcp_conformance.py` — Python implementation module (src/py/tests/unit/agent/test_mcp_conformance.py).
+
+[^agent-context]: `src/py/vertebra/agent/core/context.py::AgentContext` — Trusted constructors, independent forks, and binding restoration.
+[^agent-identity]: `src/py/vertebra/agent/core/identity.py::MtlsIdentitySource` — Explicit trusted proxy and callable identity policies.
+[^mcp-tasks]: `src/py/vertebra/agent/mcp/tasks.py::MCPTaskStore` — Exact-owner access and terminal record invariants.
+[^agent-plugin]: `src/py/vertebra/agent/plugin.py::AgentPlugin` — Context forwarding and native/Litestar response handling.

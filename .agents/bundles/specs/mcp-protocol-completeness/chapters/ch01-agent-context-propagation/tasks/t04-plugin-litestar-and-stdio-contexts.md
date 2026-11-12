@@ -111,9 +111,7 @@ Close the remaining context gaps: native `App` endpoints, the Litestar fallback 
 
 ## Notes & Discoveries
 
-- Correctness review reproduces anonymous access to owner-bound tasks. An internal lookup sentinel distinguishes omitted trusted lookups from explicit anonymous owner_id=None; public get/update/cancel/list now preserve owner isolation.
-
-- [2026-11-12 00:30] Native `App` exposes `get`, `post`, `put`, `delete`, and `patch` decorators but no `options`; `OPTIONS /mcp` on native apps is answered by the ingress layer, not by this mount.
+- Native POST/GET/DELETE routes pass context; the Litestar fallback preserves status and headers, and stdio frames share one session context.
 
 [^agent-plugin]: `src/py/vertebra/agent/plugin.py::AgentPlugin` — Native and Litestar MCP route mounting.
 [^stdio]: `src/py/vertebra/agent/mcp/stdio.py::run_stdio_server` — Stdio transport runner.

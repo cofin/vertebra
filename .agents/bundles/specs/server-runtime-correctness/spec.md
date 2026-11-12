@@ -19,7 +19,7 @@ chapters:
   - ch10-docs-and-okf-sync
   - ch11-product-okf-and-release-gate
 current_chapter: ch01-bridge-stream-frames
-current_task: "server-runtime-correctness:ch01:t04"
+current_task: null
 parent_prd: integration-remediation
 depends_on_flows: []
 plan_revision: 2
@@ -27,7 +27,7 @@ plan_commit: null
 state_revision: 2
 last_verified_checkpoint: null
 created_at: "2026-11-12T00:45:00Z"
-updated_at: "2026-11-12T02:56:52Z"
+updated_at: "2026-11-12T04:00:11Z"
 generated:
   by: agent:plan-generator
   at: "2026-11-12T00:45:00Z"
@@ -37,13 +37,13 @@ sources:
     title: Rust ASGI protocol that buffers more_body chunks into body_buf until the final chunk
   - id: bridge-core-rs
     resource: src/rs/vertebra-core/src/bridge.rs::BatchBridge
-    title: In-process batch bridge with unary-only BridgeResponse and ResponseSink
+    title: In-process batch bridge with separate unary and streaming response sinks
   - id: bridge-http-rs
     resource: src/rs/vertebra-http/src/dispatcher/bridge.rs::BridgeCorrelation
-    title: Embedded-topology correlation table that completes every response with stream_rx None
+    title: Embedded correlation completion and bounded progressive response delivery
   - id: shm-reader-rs
-    resource: src/rs/vertebra-http/src/dispatcher/shm_reader.rs::PendingRequests
-    title: Unreachable ResponseSlot stream responder map that drops frames with try_send
+    resource: src/rs/vertebra-http/src/dispatcher/shm_reader.rs::drain_worker
+    title: SHM reader routing native stream frames through awaited registry delivery
   - id: transport-py-rs
     resource: src/rs/vertebra-py/src/transport.rs::submit_raw_response
     title: Python-callable raw response submission whose SHM branch writes streaming chunks as unary frames
@@ -92,7 +92,7 @@ tags:
 
 ### 1.1 Problem Statement
 
-Applications that mount a Litestar, Starlette, FastAPI, or MCP ASGI app under Vertebra cannot stream. `AsgiProtocol::send` in `src/rs/vertebra-py/src/asgi.rs` appends every `more_body=True` chunk of `http.response.body`, `http.response.zerocopysend`, and `http.response.sse` to `AsgiProtocolState.body_buf` and submits one unary response only when the final chunk arrives [^asgi-protocol-rs]. The embedded transport cannot carry a stream even if the protocol flushed: `BridgeResponse` has no flags, and `BridgeCorrelation::ensure_sink_registered` completes every correlation with `PendingResponse { stream_rx: None, .. }` [^bridge-core-rs] [^bridge-http-rs]. The shared-memory rings carry only unflagged `VRES` frames, and `shm_reader::drain_worker` completes every drained frame as a unary response; `ShmDispatcher::handle_raw_response_slot` and `PendingRequests` decode a separate 16-byte `ResponseSlot` format with streaming flags, but no production path calls them and they drop frames with `try_send` when a stream queue holds `64` frames. `submit_raw_response(..., flags=FLAG_STREAMING)` writes each chunk through `send_shm_response_detached` as a unary `VRES` frame, discarding the flags [^shm-reader-rs] [^transport-py-rs]. RSGI `response_stream` accumulates into `RsgiHttpProtocol.stream_chunks` with the same effect. SSE and MCP streamable HTTP therefore deliver nothing until the handler returns ([#81](https://github.com/cofin/vertebra/issues/81)).
+Applications that mount a Litestar, Starlette, FastAPI, or MCP ASGI app under Vertebra still buffer mounted responses. `AsgiProtocol::send` appends non-final body, zero-copy, and SSE chunks to `AsgiProtocolState.body_buf`; RSGI `response_stream` also accumulates chunks until return [^asgi-protocol-rs]. The Rust transport layer supports progressive delivery through dedicated bridge stream frames, ordered `VRSF` SHM frames, and bounded `ResponseStreamRegistry` channels [^bridge-core-rs] [^bridge-http-rs] [^shm-reader-rs]. Chapters `ch02` and `ch03` connect those native transports to Python submission and progressive ASGI/RSGI producers. `submit_raw_response(..., flags=FLAG_STREAMING)` still writes unary `VRES` frames until that submission cutover [^transport-py-rs]. SSE and MCP streamable HTTP therefore still wait for their mounted handler to return ([#81](https://github.com/cofin/vertebra/issues/81)).
 
 Startup is not fail-loud. `Worker.run` wraps `enter_litestar_server_lifespan` and `AsgiLifespan` in `except Exception: logger.exception("ASGI lifespan startup failed for mount %r", ...)` and serves traffic without the resources startup was meant to create; `_instantiate_mount_runners` does the same for RSGI `__rsgi_init__` [^worker-py]. A failing SHM worker would also be respawned by `Supervisor::poll_workers` with exponential backoff instead of stopping the server ([#84](https://github.com/cofin/vertebra/issues/84)).
 
@@ -113,11 +113,11 @@ Startup is not fail-loud. `Worker.run` wraps `enter_litestar_server_lifespan` an
 | Existing symbol | Verified consequence |
 | --- | --- |
 | `src/rs/vertebra-py/src/asgi.rs::AsgiProtocol::send` [^asgi-protocol-rs] | Buffers non-final chunks; submits via `ResponseSubmitter::submit_raw_inner` only when `!more_body` and `direct_submit && immediate_submit`. |
-| `src/rs/vertebra-core/src/bridge.rs::{BridgeResponse,ResponseSink,BatchBridge::submit_response}` [^bridge-core-rs] | Unary frames only; the sink returns `()` so producers cannot observe backpressure or disconnect. |
-| `src/rs/vertebra-http/src/dispatcher/bridge.rs::BridgeCorrelation::{ensure_sink_registered,complete}` [^bridge-http-rs] | Completes with `stream_rx: None`; `sweep_expired` answers `504` only for correlations not yet completed, so a stream completed at its first frame is never swept. |
+| `src/rs/vertebra-core/src/bridge.rs::{BridgeResponse,ResponseSink,BatchBridge::submit_response}` [^bridge-core-rs] | Unary `BridgeResponse` remains unchanged; dedicated `ResponseStreamFrame` and `StreamSink` report bounded streaming delivery and disconnects. |
+| `src/rs/vertebra-http/src/dispatcher/bridge.rs::BridgeCorrelation::{ensure_sink_registered,complete}` [^bridge-http-rs] | Completes first frames as streaming responses; active streams leave the request timeout slab, while closed receivers are pruned separately. |
 | `src/rs/vertebra-http/src/body.rs::PendingResponse::streaming` | Existing progressive response constructor over `mpsc::Receiver<Result<Frame<Bytes>, Infallible>>`; `response::build_response` already takes the streaming branch. |
-| `src/rs/vertebra-core/src/transport/ring_pair.rs::{RingPair::send_response,RingPair::drain_with}` | SHM response rings carry only unflagged `VRES` frames (`magic, correlation_id, status, headers_len, body_len`); `shm_reader::drain_worker` completes every drained frame as unary. |
-| `src/rs/vertebra-http/src/dispatcher/shm_reader.rs::PendingRequests` [^shm-reader-rs], `src/rs/vertebra-http/src/dispatcher/shm.rs::ShmDispatcher::handle_raw_response_slot` | Decode the 16-byte `ResponseSlot` format and drop frames with `try_send`; no production path calls them. |
+| `src/rs/vertebra-core/src/transport/ring_pair.rs::{RingPair::send_response,RingPair::drain_with}` | Unary `VRES`/`VROV` formats remain unchanged; flagged `VRSF` stream frames use one xlarge tier and flag-aware draining to retain order. |
+| `src/rs/vertebra-http/src/dispatcher/shm_reader.rs::drain_worker` [^shm-reader-rs], `ShmDispatcher::deliver_stream_frame` | Routes owned `VRSF` frames through awaited registry delivery; worker sweeps close streams and wake blocked senders. |
 | `src/rs/vertebra-py/src/transport.rs::{submit_raw_response,ResponseSubmitter::submit_raw_inner}` [^transport-py-rs] | SHM streaming branch sends unary `VRES` frames; the bridge branch has no stream path. |
 | `src/rs/vertebra-py/src/rsgi/http.rs::RsgiHttpProtocol` | `response_stream` sets `streaming` and appends into `stream_chunks`; flushes once at return. |
 | `src/py/vertebra/server/_asgi/_queues.py::AsgiSend` | Python fallback collects chunks; `on_chunk` callback exists but no production caller sets it. |
@@ -323,7 +323,7 @@ class ServerBinaryBuilder: ...
 
 ## 3. Documentation & OKF Knowledge Plan
 
-Progress: `[0/18 files documented]`.
+Progress: interim `[3/18 files documented]`. Native transport behavior is synchronized in the IPC and HTTP chapters and the runtime limitations entry; `ch10`–`ch11` complete public docs and the remaining runtime contracts.
 
 | File | Owning task | Change |
 | --- | --- | --- |
@@ -338,7 +338,7 @@ Progress: `[0/18 files documented]`.
 | `.agents/bundles/knowledge/domains/http/server-and-dispatch.md` | `ch10:t03` | `ResponseStreamRegistry`, SHM stream routing, supervisor startup-failure stop. |
 | `.agents/bundles/knowledge/domains/server/worker-and-protocols.md` | `ch10:t04` | `WorkerStartupError`, exit code `78`, supervisor exports, binary runtime. |
 | `.agents/bundles/knowledge/domains/server/worker-lanes.md` | `ch10:t04` | `resolve_queue_service`, worker-only, `HealthProbeServer`. |
-| `.agents/bundles/knowledge/domains/server/server-runtime-limitations.md` (new) | `ch10:t04` | Caveats record, including the UUID entropy panic. |
+| `.agents/bundles/knowledge/domains/server/server-runtime-limitations.md` | `ch10:t04` | Caveats record, including the UUID entropy panic. |
 | `.agents/bundles/knowledge/domains/frontend/packaging-and-pgo.md` | `ch11:t01` | Build script, maturin include, repair exclusions, smoke gate. |
 | `.agents/bundles/knowledge/gotchas/pyo3-and-python-runtime.md` | `ch11:t01` | Relocatable rpath and shared-libpython gotchas. |
 | `.agents/bundles/knowledge/domains/index.md` | `ch11:t01` | List the limitations chapter. |
@@ -393,16 +393,18 @@ Progress: `[0/18 files documented]`.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Execution Baseline**: `c368cb00`; `state: active`, `plan_revision: 2`, `plan_commit: null`; `0/11` chapters and `0/33` tasks completed.
-- **Upstream Dependencies**: none. `mcp-protocol-completeness` depends on `ch01`–`ch03` of this flow for incremental mounted-ASGI streaming.
-- **Active Chapter & Task**: `ch01-bridge-stream-frames`, `server-runtime-correctness:ch01:t01`; implementation is in progress.
-- **Documentation & OKF Status**: `[0/18 files documented]` across `ch10` and `ch11`.
-- **Remaining Plan**: `ch01` through `ch11`; chapter completion requires fresh aggregate verification and correctness and quality reviews.
+- **Execution State**: `active`, `plan_revision: 2`, `plan_commit: null`; `0/11` chapters are reviewed and `4/33` tasks are committed.
+- **Native Transport**: `ch01:t01`–`t04` provide bridge stream frames, ordered xlarge-tier `VRSF` ring frames, and bounded registry delivery; `t04` reader routing and lifecycle cleanup pass their full checkpoint and are committed at `f45a5fe8`.
+- **Active Chapter & Task**: `ch01-bridge-stream-frames`, all four tasks committed; chapter correctness and fresh quality reviews precede pointer advancement.
+- **Remaining Delivery Boundary**: Python submission (`ch02`) and mounted ASGI/RSGI incremental flushing and server acceptance (`ch03`) remain pending; mounted apps still buffer responses.
+- **Documentation & OKF Status**: interim `[3/18 files documented]`; `ch10` and `ch11` complete the remaining public and product documentation.
+- **Remaining Plan**: chapter review and closeout in `ch01`; Python submission `ch02`; streaming producers `ch03`; startup `ch04`; workers `ch05`; relocatable binaries `ch06`; wheel delivery `ch07`; FastPath cleanup `ch08`; native cleanup `ch09`; docs `ch10`; final gates `ch11`.
+- **Dependencies**: This flow has no upstream flow dependency. `mcp-protocol-completeness` consumes reviewed `ch01`–`ch03` for incremental mounted-ASGI streaming.
 
 [^asgi-protocol-rs]: `src/rs/vertebra-py/src/asgi.rs::AsgiProtocol` — Rust ASGI protocol that buffers `more_body` chunks into `body_buf` until the final chunk.
-[^bridge-core-rs]: `src/rs/vertebra-core/src/bridge.rs::BatchBridge` — In-process batch bridge with unary-only `BridgeResponse` and `ResponseSink`.
-[^bridge-http-rs]: `src/rs/vertebra-http/src/dispatcher/bridge.rs::BridgeCorrelation` — Embedded-topology correlation table that completes every response with `stream_rx: None`.
-[^shm-reader-rs]: `src/rs/vertebra-http/src/dispatcher/shm_reader.rs::PendingRequests` — Unreachable `ResponseSlot` stream responder map that drops frames with `try_send`.
+[^bridge-core-rs]: `src/rs/vertebra-core/src/bridge.rs::BatchBridge` — In-process batch bridge with separate unary and streaming response sinks.
+[^bridge-http-rs]: `src/rs/vertebra-http/src/dispatcher/bridge.rs::BridgeCorrelation` — Embedded correlation completion and bounded progressive response delivery.
+[^shm-reader-rs]: `src/rs/vertebra-http/src/dispatcher/shm_reader.rs::drain_worker` — SHM reader routing native stream frames through awaited registry delivery.
 [^transport-py-rs]: `src/rs/vertebra-py/src/transport.rs::submit_raw_response` — Raw response submission whose SHM branch writes streaming chunks as unary frames.
 [^worker-py]: `src/py/vertebra/server/worker.py::Worker` — Worker run loop that logs and swallows ASGI lifespan startup failures.
 [^supervisor-py]: `src/py/vertebra/supervisor/_supervisor.py::find_server_binary` — Server binary resolution expecting `vertebra/bin/vertebra-server` in the installed package.

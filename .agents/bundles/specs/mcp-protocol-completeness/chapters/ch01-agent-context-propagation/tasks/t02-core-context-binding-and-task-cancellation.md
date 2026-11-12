@@ -108,7 +108,7 @@ Make `MCPCore` the single place that binds `AgentContext` for request dispatch, 
 
 ## Notes & Discoveries
 
-- [2026-11-12 00:30] `MCPTaskStore.complete` at `c8722c76` overwrites `cancelled` records because it never checks `is_terminal`.
+- Core dispatch binds and restores context. Promoted tasks use forked contexts; cancellation stops execution. Terminal records are immutable. Omitted internal task lookup is distinct from explicit anonymous access; anonymous callers cannot access owner-bound tasks.
 
 [^mcp-core]: `src/py/vertebra/agent/mcp/service.py::MCPCore` — MCP core dispatch, tool calls, and task handlers.
 [^task-store]: `src/py/vertebra/agent/mcp/tasks.py::MCPTaskStore` — Task record transitions.

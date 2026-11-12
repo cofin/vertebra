@@ -1,5 +1,11 @@
 # Bundle Activity Log
 
+## [2026-11-12T04:03:34Z] flow-implement | Context and native streaming review checkpoint
+
+- MCP ch01 completes four tasks through `c007f853`; correctness review reproduces and resolves anonymous task-owner access, and fresh quality review approves the implementation and living docs.
+- Runtime ch01 completes four tasks through `f45a5fe8`; SHM reader routing and cleanup pass full core/HTTP tests, four doctests, Clippy, and formatting. Review covers abandoned clients, worker death, blocked sends, and shutdown.
+- Rebuilt the core extension; combined MCP/storage Python validation passes 520 tests with one existing skip, and 51 additional agent consumer tests pass. Final chapter stamp synchronization remains; all commits stay local.
+
 ## [2026-11-12T03:49:28Z] chapter-complete | PostgreSQL ch22 and storage ch01
 
 - Correctness and fresh independent quality reviews approve both chapters at `9c1865b7`. Task SHAs and living documentation agree; root pointers advance to each flow’s ch23 and ch02 respectively.

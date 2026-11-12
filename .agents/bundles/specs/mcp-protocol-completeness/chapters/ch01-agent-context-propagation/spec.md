@@ -52,7 +52,7 @@ tags:
 <!-- truth: start -->
 - **Trusted construction**: `AgentContext.from_headers`, `from_scope`, and `from_wsgi_environ` read `scope["user"]`, `scope["auth"]`, and `REMOTE_USER` always; proxy identity headers set identity only through an explicit `IdentitySource` (`MtlsIdentitySource` accepted only from trusted proxy CIDRs, `CallableIdentitySource`, or the IAP preset from `ch12`); `MCPConfig.trust_proxy_identity` defaults to `False` and fails at construction without `identity_source` [^agent-context].
 - **Core binding**: `MCPCore.handle` and `MCPCore.handle_payload` bind the request context (or a fresh anonymous `AgentContext`) with `bind_agent_context` and reset it with `reset_agent_context` in `finally` [^mcp-core].
-- **Task isolation**: promoted `tools/call` tasks run under `AgentContext.fork()` with a fresh `CancellationToken`; `tasks/cancel` cancels the token and the asyncio task; `MCPTaskStore.complete` and `fail` leave terminal records unchanged [^task-store].
+- **Task isolation**: promoted `tools/call` tasks run under `AgentContext.fork()` with a fresh `CancellationToken`; `tasks/cancel` cancels the token and the asyncio task; `MCPTaskStore.complete` and `fail` leave terminal records unchanged; anonymous callers cannot access owner-bound tasks [^task-store].
 - **Adapters**: `AsgiMcpApp`, `WsgiMcpApp`, native `AgentPlugin` endpoints, the Litestar fallback endpoint, and `run_stdio_server` pass a context into `MCPCore`; the Litestar fallback returns `litestar.Response` with the core's status and headers [^mcp-routes] [^agent-plugin] [^stdio].
 <!-- truth: end -->
 
@@ -60,9 +60,9 @@ tags:
 
 ### 1.1 Problem Statement & Objectives
 
-No production code passes an `AgentContext` into `MCPCore` and nothing calls `bind_agent_context`, so guards evaluate an anonymous caller, confirmation tickets are issued with `owner_id=None`, and `AgentContext.current()` is `None` inside tools. `AgentContext.from_request` trusts identity headers from any caller and raises `AssertionError` on Starlette requests without `AuthenticationMiddleware` because it calls `getattr(request, "user", None)`. Promoted tasks keep running after `tasks/cancel`, and `MCPTaskStore.complete` overwrites a `cancelled` record.
+MCP dispatch requires authenticated application identity to reach guards, tools, confirmation ownership, and promoted tasks. `AgentContext` derives that identity from application scope state or an explicit proxy policy, and `MCPCore` binds it throughout dispatch. Promoted tasks own independent cancellation tokens; cancelling a task stops its coroutine and preserves its terminal record. Anonymous task requests cannot access owner-bound records.
 
-This chapter makes context construction safe, binds context for every dispatch, isolates promoted tasks, and wires every adapter.
+Every transport adapter passes context. Native and Litestar mounts retain core HTTP semantics, and stdio frames share one session context. IAP JWT verification remains assigned to `ch12`.
 
 ### 1.2 Upstream Execution Baseline
 
@@ -72,7 +72,7 @@ This chapter makes context construction safe, binds context for every dispatch, 
 
 | Area | Files Examined | Public Seam & Dependency Category |
 | --- | --- | --- |
-| Context | `src/py/vertebra/agent/core/context.py::AgentContext.from_request`, `bind_agent_context` [^agent-context] | In-process; new classmethods are the seam. |
+| Context | `src/py/vertebra/agent/core/context.py::AgentContext.from_request`, `bind_agent_context` [^agent-context] | In-process; trusted constructors are the seam. |
 | Core | `src/py/vertebra/agent/mcp/service.py::MCPCore.handle`, `handle_payload`, `_handle_tools_call`, `_handle_tasks_cancel` [^mcp-core] | In-process. |
 | Tasks | `src/py/vertebra/agent/mcp/tasks.py::MCPTaskStore.complete`, `fail`, `cancel` [^task-store] | In-process. |
 | Adapters | `src/py/vertebra/agent/mcp/routes.py::AsgiMcpApp.__call__`, `handle_starlette_request`, `WsgiMcpApp.handle_vertebra_request`, `handle_flask_view`, `__call__` [^mcp-routes] | External framework objects at the boundary. |
@@ -177,7 +177,10 @@ async def run_stdio_server(service: MCPService, *, stdin: AsyncIterable[bytes] |
 
 ## 3. Documentation & OKF Knowledge Plan
 
-- **Progress**: `[0/0 files documented in ch01]` — user docs and OKF updates consolidate in `ch11` (`docs/usage/agent-protocols.md`, harness chapter, limitations chapter).
+- **Progress**: `[3/3 files documented in ch01]`.
+- `docs/usage/agent-protocols.md` documents trusted context configuration and task ownership/cancellation.
+- `.agents/bundles/knowledge/domains/agent/mcp-and-a2a-protocol-harness.md` records constructor, dispatch, task, and adapter contracts.
+- `.agents/bundles/knowledge/domains/agent/mcp-limitations.md` separates shipped context behavior from remaining protocol gaps; `ch11` completes coverage for later chapters.
 
 ## 4. Requirement-to-Task Traceability Matrix
 
@@ -201,9 +204,11 @@ async def run_stdio_server(service: MCPService, *, stdin: AsyncIterable[bytes] |
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `c8722c76`; `0/4` tasks completed.
-- **Remaining Tasks**: `t01`–`t04`.
-- **Downstream Dependents**: `ch12` adds the IAP preset on the identity-source seam; `ch02` relies on bound contexts for guard and owner evaluation.
+- **Verified Implementation**: `c007f853`; `4/4` tasks completed with committed verification evidence.
+- **Current Contracts**: trusted context constructors; explicit mTLS/callable policies; binding restoration; independent task cancellation; anonymous access refusal for owner-bound tasks; context forwarding through every adapter.
+- **Recovery Checkpoint**: the canonical core, MCP conformance, and CLI suite passes `86` tests; focused Ruff and Mypy gates pass.
+- **Remaining Chapter Work**: present-tense documentation synchronization and fresh chapter quality review; `last_reviewed_commit` remains null until review closes.
+- **Downstream Dependents**: `ch02` addresses duplicate guard execution and confirmation semantics; `ch12` adds verified IAP identity on the source seam.
 
 [^agent-context]: `src/py/vertebra/agent/core/context.py::AgentContext` — AgentContext, CallerIdentity, and context variable helpers.
 [^mcp-core]: `src/py/vertebra/agent/mcp/service.py::MCPCore.handle` — MCP core dispatch and task promotion.
