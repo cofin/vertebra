@@ -1,5 +1,9 @@
 # Bundle Activity Log
 
+## [2026-11-12] chapter-review | PostgreSQL feedback quality
+
+- Correctness review finds no production defects; the stale remaining-task count is corrected. Quality findings are adopted: malformed payload cases have independent test identities and the living review summary states current outcomes directly.
+
 ## [2026-11-12T14:58:28Z] chapter-checkpoint | PostgreSQL commit-fenced feedback
 
 - Chapter 23 completes two tasks at `64d317cd` and `bbb77ecf`. The native codecs and bounded received/published/acknowledged Commit state pass 18 canonical wire tests, Clippy, and package formatting.

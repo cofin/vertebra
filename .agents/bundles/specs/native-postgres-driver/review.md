@@ -72,7 +72,7 @@ The contract decisions below are ADOPT. Revision 8 passes fresh blueprint review
 
 ## Chapter 23 correctness review
 
-Review of `a203b946..3142d692` finds no production correctness issues; all 18 canonical wire tests pass. The minor remaining-task count finding is adopted in the root truth block. Fresh quality review follows this synchronized checkpoint.
+Correctness review finds no production defects. The chapter has strict wire codecs and bounded, commit-fenced feedback state. The roadmap and limitations describe the implemented primitives and remaining stream ownership work. Independent quality review covers the same code and living documentation; final verification and reviewed commit are recorded at chapter closeout.
 
 ## Revision 8 review and validation
 

@@ -2443,26 +2443,57 @@ fn feedback_wire_keepalive_and_status_match_golden_bytes() {
 }
 
 #[test]
-fn feedback_wire_rejects_invalid_payloads() {
+fn feedback_wire_rejects_empty_payload() {
     use _postgres::replication::feedback::decode_replication_copy_data;
-    for frame in [
-        vec![],
-        vec![b'x'],
-        vec![b'w'; 24],
-        vec![b'k'; 17],
-        vec![b'k'; 19],
-        {
-            let mut frame = vec![0; 18];
-            frame[0] = b'k';
-            frame[17] = 2;
-            frame
-        },
-    ] {
-        assert!(matches!(
-            decode_replication_copy_data(&frame),
-            Err(PostgresError::Protocol(_))
-        ));
-    }
+    assert!(matches!(
+        decode_replication_copy_data(&[]),
+        Err(PostgresError::Protocol(_))
+    ));
+}
+
+#[test]
+fn feedback_wire_rejects_unknown_tag() {
+    use _postgres::replication::feedback::decode_replication_copy_data;
+    assert!(matches!(
+        decode_replication_copy_data(b"x"),
+        Err(PostgresError::Protocol(_))
+    ));
+}
+
+#[test]
+fn feedback_wire_rejects_short_xlog_data() {
+    use _postgres::replication::feedback::decode_replication_copy_data;
+    assert!(matches!(
+        decode_replication_copy_data(&[b'w'; 24]),
+        Err(PostgresError::Protocol(_))
+    ));
+}
+
+#[test]
+fn feedback_wire_rejects_short_keepalive() {
+    use _postgres::replication::feedback::decode_replication_copy_data;
+    assert!(matches!(
+        decode_replication_copy_data(&[b'k'; 17]),
+        Err(PostgresError::Protocol(_))
+    ));
+}
+
+#[test]
+fn feedback_wire_rejects_long_keepalive() {
+    use _postgres::replication::feedback::decode_replication_copy_data;
+    assert!(matches!(
+        decode_replication_copy_data(&[b'k'; 19]),
+        Err(PostgresError::Protocol(_))
+    ));
+}
+
+#[test]
+fn feedback_wire_rejects_invalid_reply_flag() {
+    use _postgres::replication::feedback::decode_replication_copy_data;
+    assert!(matches!(
+        decode_replication_copy_data(&[b'k', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2]),
+        Err(PostgresError::Protocol(_))
+    ));
 }
 
 #[test]
