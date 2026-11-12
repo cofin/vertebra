@@ -23,7 +23,7 @@ sources:
 verified:
 - by: agent:codex
   at: '2026-11-08T18:27:30.456016Z'
-  commit: a1ee9042
+  commit: 067fa901
 ---
 # ADR-005: Persistent Object-Store TTL Envelopes
 

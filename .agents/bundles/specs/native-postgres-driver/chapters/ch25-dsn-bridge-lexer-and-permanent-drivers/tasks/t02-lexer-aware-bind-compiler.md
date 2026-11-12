@@ -4,7 +4,7 @@ id: "native-postgres-driver:ch25:t02"
 chapter_id: ch25-dsn-bridge-lexer-and-permanent-drivers
 title: Lower PostgreSQL legacy binds with a lexer-aware adapter compiler
 description: Implement a class-organized single-pass PostgreSQL lexical bind compiler in binds.py and expose PostgreSQLCore.prepare_native_query in core.py.
-status: stable
+status: draft
 state: pending
 priority: P1
 verification_strategy: behavior_tdd
@@ -22,8 +22,8 @@ files:
 tests:
   - src/py/tests/unit/db/test_postgres_binds.py
 estimated_loc: 235
-plan_revision: 6
-plan_commit: 8e9b324e
+plan_revision: 7
+plan_commit: c8722c76
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -34,12 +34,15 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-10T14:45:00Z"
+updated_at: "2026-11-12T01:30:00Z"
 commit: null
+generated:
+  by: flow-revise
+  at: "2026-11-12T01:30:00Z"
 verified:
   - by: agent:plan-generator
-    at: "2026-11-10T14:45:00Z"
-    commit: 8e9b324e
+    at: "2026-11-12T01:30:00Z"
+    commit: c8722c76
 sources:
   - id: npd-contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md

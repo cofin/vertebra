@@ -13,9 +13,12 @@ generated:
   by: flow/0.26.0
   at: "2026-11-04T04:33:00Z"
 verified:
+  - by: agent:flow-sync
+    at: "2026-11-12T01:15:00Z"
+    commit: c8722c76
   - by: agent:flow-setup
     at: "2026-11-07T03:55:00Z"
-    commit: 9af810f5
+    commit: 067fa901
 sources:
   - id: src-server-lanes-py
     resource: src/py/vertebra/server/lanes.py
@@ -59,7 +62,7 @@ sources:
 
 ## 3. CLI Integration (`cli/workers.py`)
 
-- **[`vtb workers run APP`](../../../../../src/py/vertebra/cli/workers.py)** (`WorkerRunner.execute_cli`): Sets `LITESTAR_APP` and `VERTEBRA_APP`, imports `APP` via `import_app`, attaches `WorkerRunner` to `app.state["vertebra_worker_runner"]` when `app.state` is a `dict`, enters [`enter_litestar_server_lifespan`](../../../../../src/py/vertebra/extensions/litestar/plugin.py)[^src-extensions-litestar-plugin-py], and drains all lanes via `runner.stop()` on exit.
+- **[`vtb workers run APP`](../../../../../src/py/vertebra/cli/workers.py)** (`WorkerRunner.execute_cli`): Sets `LITESTAR_APP` and `VERTEBRA_APP`, imports `APP` via `import_app`, attaches `WorkerRunner` to `app.state["vertebra_worker_runner"]` when `app.state` is a `dict`, enters [`enter_litestar_server_lifespan`](../../../../../src/py/vertebra/extensions/litestar/plugin.py)[^src-extensions-litestar-plugin-py], and drains all lanes via `runner.stop()` on exit. The command calls `execute_worker_cli` without `run_until_stopped=True` and builds `WorkerRunner` without a `QueueService`, so it enters and leaves the lifespan immediately without processing queued work ([Server Runtime Limitations](server-runtime-limitations.md)).
 
 Provenance sources: [^src-cli-run-py], [^src-cli-dev-py].
 

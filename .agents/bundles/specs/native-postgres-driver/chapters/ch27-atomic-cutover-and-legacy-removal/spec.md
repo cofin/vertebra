@@ -2,51 +2,66 @@
 type: Spec
 parent_flow: native-postgres-driver
 chapter_id: ch27-atomic-cutover-and-legacy-removal
-title: "Chapter 27: Atomic Native Driver Cutover and Legacy Removal"
-description: Activate the permanent SyncPostgreSQLDriver and AsyncPostgreSQLDriver classes across the postgres barrel, package exports, embeddings, SQLSpec, SQLAlchemy, and queue consumers, then delete unreachable legacy driver bodies.
-status: stable
+title: "Chapter 27: Atomic Native Driver Cutover and psycopg/asyncpg Removal"
+description: Activate the permanent SyncPostgreSQLDriver and AsyncPostgreSQLDriver across the postgres barrel, package exports, embeddings, SQLSpec, and SQLAlchemy, replace the SQLite-backed asyncpg and psycopg test doubles, delete the legacy driver bodies and dialer psycopg/asyncpg helpers, switch the PostgreSQLQueueBackend missing-executor guard to vertebra-core[postgres], and remove the split-state caveats from the limitations entry.
+status: draft
 state: planned
 planning_status: complete
 depends_on_chapters:
   - ch26-compiler-pipeline-arrow-and-event-hooks
 replan_trigger: null
 current_task: "native-postgres-driver:ch27:t01"
-plan_revision: 6
-plan_commit: 8e9b324e
+plan_revision: 7
+plan_commit: c8722c76
 state_revision: 0
 last_verified_checkpoint: null
 last_reviewed_commit: null
 created_at: "2026-11-05T00:00:00Z"
-updated_at: "2026-11-10T14:45:00Z"
+updated_at: "2026-11-12T01:30:00Z"
 generated:
   by: flow-revise
-  at: "2026-11-10T14:45:00Z"
+  at: "2026-11-12T01:30:00Z"
 verified:
   - by: agent:plan-generator
-    at: "2026-11-10T14:45:00Z"
-    commit: 8e9b324e
+    at: "2026-11-12T01:30:00Z"
+    commit: c8722c76
 sources:
   - id: pg-driver-barrel
     resource: src/py/vertebra/db/adapters/postgres/driver.py::SyncPostgreSQLDriver
-    title: Canonical PostgreSQL driver export module targeted for atomic cutover
+    title: Public PostgreSQL driver module defining psycopg_pool and asyncio.to_thread classes on main
   - id: pg-pkg-init
     resource: src/py/vertebra/db/adapters/postgres/__init__.py
     title: Lazy package export map for vertebra.db.adapters.postgres
   - id: pg-embeddings
     resource: src/py/vertebra/db/adapters/postgres/embeddings.py::PostgresEmbeddingPushdown
-    title: AlloyDB SQL embedding pushdown and pgvector similarity search helper
+    title: AlloyDB SQL embedding pushdown with _uses_dollar_binds branching
   - id: pg-notify
     resource: src/py/vertebra/db/adapters/postgres/notify.py::PostgresNotificationSource
     title: PostgreSQL notification publisher and streaming source rewritten in ch21:t03
   - id: sqlspec-adapters
     resource: src/py/vertebra/extensions/sqlspec/adapters.py::PostgreSQLSyncDriver
-    title: SQLSpec PostgreSQL sync and async adapter parameter and tenant profiles
+    title: SQLSpec PostgreSQL adapters (sync POSITIONAL_PYFORMAT, async NUMERIC)
   - id: sa-dialects
-    resource: src/py/vertebra/extensions/sqlalchemy/dialects.py
-    title: SQLAlchemy +vertebra and +vtb sync and async PostgreSQL dialects
+    resource: src/py/vertebra/extensions/sqlalchemy/dialects.py::SyncPostgreSQLDialect
+    title: SQLAlchemy +vertebra/+vtb PostgreSQL dialects with pyformat paramstyle and DB-API module factories
+  - id: sa-dbapi
+    resource: src/py/vertebra/extensions/sqlalchemy/dialects.py::SyncDBAPIModule
+    title: DB-API module facades constructed with a per-dialect paramstyle argument
   - id: pg-queues
     resource: src/py/vertebra/framework/queues/postgres.py::PostgreSQLQueueBackend
-    title: Distributed PostgreSQL queue backend dependency guard
+    title: Executor-injected PostgreSQL queue backend whose missing-executor guard probes psycopg
+  - id: dialer-cloudsql
+    resource: src/py/vertebra/db/dialer/cloudsql.py::CloudSQLConfig
+    title: Cloud SQL dialer carrying create_psycopg_connect_func and create_asyncpg_connect_func
+  - id: dialer-alloydb
+    resource: src/py/vertebra/db/dialer/alloydb.py::AlloyDBConfig
+    title: AlloyDB dialer carrying create_psycopg_connect_func and create_asyncpg_connect_func
+  - id: queues-flow
+    resource: .agents/bundles/specs/queues-tasks-and-channels/spec.md
+    title: Flow owning PostgresQueueStore, the settings-driven queue registry, and the litestar-queues backend
+  - id: broker-flow
+    resource: .agents/bundles/specs/broker-pool-sharing/spec.md
+    title: Flow owning extraction of SyncDBAPI*/AsyncDBAPI* into vertebra.db.dbapi and BrokerPool
   - id: fail-loud-baseline
     resource: .agents/bundles/knowledge/domains/data/database-drivers-and-dialers.md
     title: Upstream flow baseline with zero PostgreSQL memory:// execution paths
@@ -56,56 +71,68 @@ tags:
   - sqlspec
   - sqlalchemy
   - driver
+  - queues
 ---
 
-# Chapter 27: Atomic Native Driver Cutover and Legacy Removal
+# Chapter 27: Atomic Native Driver Cutover and psycopg/asyncpg Removal
 
 <!-- truth: start -->
-- **Canonical Barrel & Package Cutover**: `src/py/vertebra/db/adapters/postgres/driver.py` re-exports permanent `SyncPostgreSQLDriver` (`._sync`) and `AsyncPostgreSQLDriver` (`._async`) together without runtime flags or `memory://` execution paths [^fail-loud-baseline], while `postgres/__init__.py` preserves `PoolerMode` (`config`), `PostgresNotifyConfig` (`notify`), `PG_UNCHANGED_TOAST`/`PgUnchangedToast`/`PostgresArrowResult`/`PostgresReplicationIdentity`/`PostgresReplicationRecord` (`types`), retained `core` helpers (`PGCOPY_BINARY_SIGNATURE`, `decode_pgcopy_rows`, `encode_pg_jsonb`, `encode_pgcopy_rows`, `strip_pg_jsonb_header`), `vertebra.db.arrow` re-exports (`ARROW_SHM_THRESHOLD_ROWS`, `ArrowCursor`, `read_arrow_shm`, `write_arrow_shm`), and CDC/checkpoint exports from `change_stream` (keeping `EventSessionRegistry` internal to `events.py`) [^pg-driver-barrel] [^pg-pkg-init].
-- **Numeric Consumer Compilation & Public Event Verification**: `PostgresEmbeddingPushdown`, every SQLSpec `PostgreSQLSyncDriver` / `PostgreSQLAsyncDriver` query/stack/Arrow/tenant seam (`_compile_postgres_numeric_transport`), and SQLAlchemy `+vtb` dialects (`default_paramstyle = paramstyle = "numeric_dollar"`) emit `$N` positional binds while `PostgresNotificationSource` is verified over canonical public drivers [^pg-embeddings] [^pg-notify] [^sqlspec-adapters] [^sa-dialects].
-- **Clean Dead-Code & Queue Guard Cutover**: `_LegacyAsyncPostgreSQLDriver` (`t03`, keeping `import asyncio` for sync `_publish_notification`) and `_LegacySyncPostgreSQLDriver` + `import asyncio` (`t04`) are deleted cleanly alongside switching `PostgreSQLQueueBackend.__init__`'s `executor is None` dependency check from `psycopg` to `vertebra._postgres` (`vertebra-core[postgres]`) while keeping `PostgreSQLQueueBackend` strictly caller-`PostgreSQLQueueExecutor`-injected [^pg-queues].
+- **Barrel & Package Cutover (`t01`)**: `driver.py` re-exports permanent `SyncPostgreSQLDriver` (`._sync`) and `AsyncPostgreSQLDriver` (`._async`) without runtime flags, `postgres/__init__.py` maps `pipeline`, `types`, `events`, and `change_stream` exports (keeping `EventSessionRegistry` internal), `PostgresEmbeddingPushdown` emits `$1`/`$2` unconditionally, and the SQLite-backed asyncpg pool double, psycopg pool mocks, and psycopg converter ports are replaced by native-shaped `postgres_ports.py` tests [^pg-driver-barrel] [^pg-pkg-init] [^pg-embeddings].
+- **Consumer Compilation (`t02`)**: Every SQLSpec `PostgreSQLSyncDriver` / `PostgreSQLAsyncDriver` path compiles through `_compile_postgres_numeric_transport` (`$1..$N`), and `SyncPostgreSQLDialect` / `AsyncPostgreSQLDialect` set `default_paramstyle = paramstyle = "numeric_dollar"` and construct their DB-API module with `paramstyle="numeric_dollar"` [^sqlspec-adapters] [^sa-dialects] [^sa-dbapi].
+- **Legacy & Third-Party Removal (`t03`, `t04`)**: `_LegacyAsyncPostgreSQLDriver`, `_LegacySyncPostgreSQLDriver`, and the dialer `create_psycopg_connect_func` / `create_asyncpg_connect_func` helpers are deleted; `PostgreSQLQueueBackend` stays caller-executor-injected and its missing-executor guard probes `vertebra._postgres` (`vertebra-core[postgres]`) instead of `psycopg`; `postgres-limitations.md` drops the split-state caveats [^dialer-cloudsql] [^dialer-alloydb] [^pg-queues].
+- **Ownership Boundary**: The native `PostgresQueueStore` executor, settings-driven queue backend registry, and `litestar-queues` / Django task backends belong to `queues-tasks-and-channels`; extraction of `SyncDBAPI*` / `AsyncDBAPI*` into `vertebra.db.dbapi` and `BrokerPool` belong to `broker-pool-sharing` [^queues-flow] [^broker-flow].
 <!-- truth: end -->
 
 ## 1. Specification, Context & Provenance
 
 ### 1.1 Problem Statement & Objectives
 
-Chapters 25 and 26 complete the permanent native `._sync.SyncPostgreSQLDriver` and `._async.AsyncPostgreSQLDriver` implementations, SQLSpec/SQLAlchemy numeric transport helpers, native pipeline/Arrow bindings, and `EventSessionRegistry` hooks while leaving the legacy `driver.py` classes selected on public paths so intermediate commits stay coherent [^pg-driver-barrel]. Legacy `AsyncPostgreSQLDriver.__init__` constructs legacy `SyncPostgreSQLDriver(executor=...)` and references static `strip_jsonb_header`/`encode_jsonb` helpers, so switching only one public class would break type-checking and construction. Meanwhile, `ch21:t03` already rewrote `src/py/vertebra/db/adapters/postgres/notify.py` around `PostgresNotificationDriver` (`queue_capacity: int = 1024, reconnect: bool = False`), leaving public driver import verification alongside SQLSpec, SQLAlchemy, embedding, and queue backend activation [^pg-notify] [^pg-queues].
+On `main` (`c8722c76`), `driver.py` defines `SyncPostgreSQLDriver` over `psycopg_pool.ConnectionPool` and `AsyncPostgreSQLDriver` as an `asyncio.to_thread` wrapper around it; `embeddings.py` branches between `$N` and `%s` binds via `_uses_dollar_binds()`; SQLSpec `PostgreSQLSyncDriver` executes with `ParameterStyle.POSITIONAL_PYFORMAT`; SQLAlchemy PostgreSQL dialects use `paramstyle = "pyformat"` and `SyncDBAPIModule(paramstyle="pyformat")` / `AsyncDBAPIModule(paramstyle="pyformat")`; `PostgreSQLQueueBackend.__init__` calls `ensure_module("psycopg", package="psycopg", install_package="psycopg[binary,pool]")` before raising for a missing `executor=`; both cloud dialers expose `create_psycopg_connect_func` and `create_asyncpg_connect_func`; and `test_postgres_driver.py` covers `AsyncPostgreSQLDriver` through `_SQLiteAsyncPGPool` [^pg-driver-barrel] [^pg-embeddings] [^sqlspec-adapters] [^sa-dialects] [^pg-queues] [^dialer-cloudsql] [^dialer-alloydb].
 
-This chapter executes the public cutover and cleanup across four bounded commits (`<= 3` production files per task):
-1. Switch `driver.py`, `__init__.py` (preserving `PG_UNCHANGED_TOAST`, `PgUnchangedToast`, and exact `types`, `events`, and `change_stream` lazy targets with zero phantom Arrow codecs), and `embeddings.py` (`$1`/`$2` pushdown binds + `tools.docs` docstring scan) to select the permanent native pair, updating `test_postgres_driver.py`, `test_pg_dataplane_and_datafusion.py`, `test_google_embedders.py`, `test_native_db_drivers.py`, and staged native adapter tests (`ch27:t01`) [^pg-driver-barrel] [^pg-pkg-init] [^pg-embeddings].
-2. Route every SQLSpec PostgreSQL execution, stack, Arrow, dispatch, and tenant-session entry point through `_compile_postgres_numeric_transport` in `extensions/sqlspec/adapters.py` and activate `default_paramstyle = paramstyle = "numeric_dollar"` on registered SQLAlchemy dialects in `extensions/sqlalchemy/dialects.py`, migrating extension, `test_enterprise_olap_drivers.py`, and `test_postgres_event_hooks.py` tests to canonical public imports (`ch27:t02`) [^pg-notify] [^sqlspec-adapters] [^sa-dialects].
-3. Delete unreachable `_LegacyAsyncPostgreSQLDriver` from `driver.py` while retaining `import asyncio` until `t04` (`ch27:t03`).
-4. Delete unreachable `_LegacySyncPostgreSQLDriver` and `import asyncio` from `driver.py`, and switch `PostgreSQLQueueBackend.__init__` in `src/py/vertebra/framework/queues/postgres.py` from `psycopg` to `ensure_module("vertebra._postgres", package="vertebra-core[postgres]", install_package="vertebra-core[postgres]", extra="postgres")` (`ch27:t04`) [^pg-queues].
+Chapters 25 and 26 build the permanent native `_sync.py` / `_async.py` drivers, the SQLSpec/SQLAlchemy numeric helpers, the driver wiring of `pipeline.py` and `arrow.py`, and `EventSessionRegistry` hooks without switching public paths. Legacy `AsyncPostgreSQLDriver.__init__` constructs the legacy sync driver, so switching one class alone breaks construction and typing. This chapter performs the public cutover and cleanup in four bounded commits:
 
-### 1.2 Non-Goals
+1. Switch `driver.py`, `__init__.py`, and `embeddings.py` to the permanent pair and migrate driver, dataplane, embedding, registry, and staged adapter tests to public imports over `postgres_ports.py`, deleting the SQLite-backed asyncpg double and psycopg mocks (`t01`).
+2. Route every SQLSpec PostgreSQL entry point through `_compile_postgres_numeric_transport` and activate `numeric_dollar` on the SQLAlchemy PostgreSQL dialects and their DB-API module construction (`t02`).
+3. Delete `_LegacyAsyncPostgreSQLDriver` and the dialer `psycopg`/`asyncpg` connect helpers (`t03`).
+4. Delete `_LegacySyncPostgreSQLDriver`, switch the queue guard to `vertebra._postgres`, and trim the split-state caveats from `postgres-limitations.md` (`t04`).
 
-- Live Docker PG14–18 conformance, `pgoutput` logical replication containers, `pgvector` 0.8.1 containers, and `PgBouncer` containers (owned by [ch28-live-conformance-and-service-acceptance](../ch28-live-conformance-and-service-acceptance/spec.md)).
-- Rewriting `src/py/vertebra/db/adapters/postgres/notify.py` (completed in `ch21:t03`).
-- Removing shared `PostgreSQLCore` CPU helpers (`strip_jsonb_header`, `encode_jsonb`, `encode_pgcopy_rows`, `decode_pgcopy_rows`), driver static `parse_pgcopy_binary_rows`, `vertebra._vertebra` vector CPU views (`decode_pgvector_f32`), or standalone dialer helper shims under `src/py/vertebra/db/dialer/`.
-- Removing `_in_memory_rows` or `vertebra_db::postgres::PostgresPool` execution fallbacks already eliminated by the upstream fail-loud baseline [^fail-loud-baseline].
+### 1.2 Ownership Reconciliation With Sibling Flows
 
-### 1.3 Upstream Baseline & Code Analysis
-
-Parent roadmap: [spec.md](../../spec.md); frozen contracts: [contracts.md](../../contracts.md); depends on [ch26-compiler-pipeline-arrow-and-event-hooks](../ch26-compiler-pipeline-arrow-and-event-hooks/spec.md). Skills: [python-framework](../../../../../skills/python-framework/SKILL.md) and [pyo3-bridge](../../../../../skills/pyo3-bridge/SKILL.md). Knowledge: [database-drivers-and-dialers.md](../../../../knowledge/domains/data/database-drivers-and-dialers.md), [query-pipeline-cdc-and-tenancy.md](../../../../knowledge/domains/data/query-pipeline-cdc-and-tenancy.md), and [sqlspec-alchemy-and-dialects.md](../../../../knowledge/domains/extensions/sqlspec-alchemy-and-dialects.md).
-
-| Seam | Pre-Cutover State (`after ch26`) | Chapter 27 Target State |
+| Concern | `ch27` rewires | Left to the owning flow |
 | --- | --- | --- |
-| `src/py/vertebra/db/adapters/postgres/driver.py` [^pg-driver-barrel] | Defines legacy `psycopg_pool` / `asyncpg` classes directly. | Pure public barrel importing `AsyncPostgreSQLDriver` from `._async` and `SyncPostgreSQLDriver` from `._sync` with zero legacy bodies after `t04`. |
-| `src/py/vertebra/db/adapters/postgres/__init__.py` [^pg-pkg-init] | Lazily exports `driver`, `config`, `core`, `embeddings`, `notify`, `pipeline`, `types`, `events`, `change_stream`, and `vertebra.db.arrow` symbols. | Preserves `PoolerMode` (`config`), `PostgresNotifyConfig` (`notify`), retained `core` helpers, and `vertebra.db.arrow` re-exports while mapping `PG_UNCHANGED_TOAST`, `PgUnchangedToast`, `PostgresArrowResult`, `PostgresReplicationIdentity`, and `PostgresReplicationRecord` to `types`, protocols to `events` (omitting `EventSessionRegistry`), and CDC/checkpoint exports to `change_stream`. |
-| `src/py/vertebra/db/adapters/postgres/embeddings.py` [^pg-embeddings] | Branches between `("$1", "$2")` and `("%s", "%s")` via `_uses_dollar_binds()`. | Emits `("$1", "$2")` unconditionally across both permanent native drivers, removes `_uses_dollar_binds()`, and passes `tools.docs` docstring scanning. |
-| `src/py/vertebra/extensions/sqlspec/adapters.py` [^sqlspec-adapters] | `PostgreSQLSyncDriver._execution_parameter_style` uses `POSITIONAL_PYFORMAT`; tenant setter emits `%s`. | `execute`, `select`, `execute_many`, `select_to_arrow`, `execute_stack` (pipeline, sequential, `execute_many`, Arrow), `dispatch_execute`, `dispatch_execute_many`, and `_prepare_postgres_tenant_session` all route through `_compile_postgres_numeric_transport` (`$1..$N`). |
-| `src/py/vertebra/extensions/sqlalchemy/dialects.py` [^sa-dialects] | Registered PostgreSQL dialects emit `%s` pyformat parameters on sync paths. | Both `SyncPostgreSQLDialect` and `AsyncPostgreSQLDialect` set `default_paramstyle = "numeric_dollar"` and `paramstyle = "numeric_dollar"` with `numeric_dollar` DBAPI modules. |
-| `src/py/vertebra/framework/queues/postgres.py` [^pg-queues] | `PostgreSQLQueueBackend.__init__` probes `ensure_module("psycopg", ...)` when `executor is None`. | Keeps `PostgreSQLQueueBackend` strictly caller-`PostgreSQLQueueExecutor`-injected (built-in native queue executor shipping belongs to `queues-tasks-and-channels`); when `executor is None`, probes `ensure_module("vertebra._postgres", package="vertebra-core[postgres]", install_package="vertebra-core[postgres]", extra="postgres")` and raises `ImproperConfigurationError` instructing callers to pass `executor=` implementing `PostgreSQLQueueExecutor` (e.g., wrapping `AsyncPostgreSQLDriver` + `PostgresNotificationSource`). |
+| `PostgreSQLQueueBackend` executor | `t04` replaces the `psycopg` probe with `ensure_module("vertebra._postgres", package="vertebra-core[postgres]", install_package="vertebra-core[postgres]", extra="postgres")`, rewrites the `Raises:` docstring and the `ImproperConfigurationError` message to name `PostgreSQLQueueExecutor`, and keeps `executor=` mandatory. The existing `PostgreSQLQueueExecutor` protocol and `$1..$N` queue SQL stay unchanged. | [`queues-tasks-and-channels`](../../../queues-tasks-and-channels/spec.md) builds `PostgresQueueStore` (the native executor), binds it through a settings-driven `QueueBackendSettings(kind="postgres")` registry, and adds the `litestar-queues` and Django task backends [^queues-flow]. |
+| SQLAlchemy DB-API paramstyle | `t02` sets `default_paramstyle` and `paramstyle` to `"numeric_dollar"` on `SyncPostgreSQLDialect` / `AsyncPostgreSQLDialect` and passes `paramstyle="numeric_dollar"` to the `SyncDBAPIModule` / `AsyncDBAPIModule` constructors in their `dbapi` / `import_dbapi` factories. DB-API module, connection, and cursor internals are not modified. | [`broker-pool-sharing`](../../../broker-pool-sharing/spec.md) extracts `SyncDBAPI*` / `AsyncDBAPI*` into `src/py/vertebra/db/dbapi/`, moves SQLAlchemy async adaptation to `extensions/sqlalchemy/async_adapter.py`, and adds `BrokerPool`; its extraction preserves the per-dialect `paramstyle` constructor argument. When `vertebra.db.dbapi` exists at execution time, `t02` imports the module classes from there instead of `dialects.py` [^broker-flow]. |
+
+### 1.3 Non-Goals
+
+- Live Docker PG14–18 conformance, logical replication, `pgvector`, and `PgBouncer` containers ([ch28](../ch28-live-conformance-and-service-acceptance/spec.md)).
+- Rewriting `notify.py` (completed in `ch21:t03`) [^pg-notify].
+- Removing `PostgreSQLCore` CPU helpers (`strip_jsonb_header`, `encode_jsonb`, `encode_pgcopy_rows`, `decode_pgcopy_rows`), driver static `parse_pgcopy_binary_rows`, `vertebra._vertebra` vector views, or the dialers' native ephemeral-certificate and metadata-exchange helpers.
+- Adding `psycopg` or `asyncpg` anywhere except `[dependency-groups].postgres-bench` (`ch29:t02`).
+
+### 1.4 Upstream Baseline & Code Analysis
+
+Parent roadmap: [spec.md](../../spec.md); frozen contracts: [contracts.md](../../contracts.md); depends on [ch26-compiler-pipeline-arrow-and-event-hooks](../ch26-compiler-pipeline-arrow-and-event-hooks/spec.md). Skills: [python-framework](../../../../../skills/python-framework/SKILL.md) and [pyo3-bridge](../../../../../skills/pyo3-bridge/SKILL.md). Knowledge: [database-drivers-and-dialers.md](../../../../knowledge/domains/data/database-drivers-and-dialers.md), [sqlspec-alchemy-and-dialects.md](../../../../knowledge/domains/extensions/sqlspec-alchemy-and-dialects.md), and [distributed-queues-and-email.md](../../../../knowledge/domains/framework/distributed-queues-and-email.md).
+
+| Seam | State on `main` / after `ch26` | Target State |
+| --- | --- | --- |
+| `driver.py` [^pg-driver-barrel] | Legacy `psycopg_pool` / `asyncio.to_thread` classes. | Barrel importing `AsyncPostgreSQLDriver` from `._async` and `SyncPostgreSQLDriver` from `._sync`, no legacy bodies after `t04`. |
+| `__init__.py` [^pg-pkg-init] | Exports `driver`, `config`, `core`, `embeddings`, `notify`, `types`, and `vertebra.db.arrow` symbols. | Adds `pipeline`, `events` protocols, and `change_stream` exports; keeps `EventSessionRegistry` internal. |
+| `embeddings.py` [^pg-embeddings] | `_uses_dollar_binds()` chooses `$N` or `%s`. | `$1`/`$2` unconditionally; `_uses_dollar_binds()` removed. |
+| `extensions/sqlspec/adapters.py` [^sqlspec-adapters] | Sync adapter `POSITIONAL_PYFORMAT`; tenant setter emits `%s`. | All PostgreSQL paths through `_compile_postgres_numeric_transport`; `SELECT set_config($1, $2, $3)`. |
+| `extensions/sqlalchemy/dialects.py` [^sa-dialects] [^sa-dbapi] | `paramstyle = "pyformat"`, `SyncDBAPIModule(paramstyle="pyformat")`. | `default_paramstyle = paramstyle = "numeric_dollar"` and `paramstyle="numeric_dollar"` module construction. |
+| `db/dialer/{cloudsql,alloydb}.py` [^dialer-cloudsql] [^dialer-alloydb] | `create_psycopg_connect_func`, `create_asyncpg_connect_func`. | Both methods deleted from both dialers. |
+| `framework/queues/postgres.py` [^pg-queues] | `psycopg` probe when `executor is None`. | `vertebra._postgres` probe; executor still mandatory. |
+| `test_postgres_driver.py` | `_SQLiteAsyncPGPool`, `MockConnectionPool`, `test_postgres_sync_and_async_guards_name_psycopg_pool`. | Native-shaped `postgres_ports.py` doubles with real lease and transaction accounting. |
 
 ## 2. Requirements, Concrete Contracts & Architecture
 
 ### 2.1 Chapter Requirements
 
-- **R24.1 (`ch27:t01`)**: Rename legacy classes in `driver.py` to `_LegacySyncPostgreSQLDriver` and `_LegacyAsyncPostgreSQLDriver` (updating `_LegacyAsyncPostgreSQLDriver.__init__` and `strip_jsonb_header`/`encode_jsonb` calls), re-export permanent `._sync.SyncPostgreSQLDriver` and `._async.AsyncPostgreSQLDriver`, preserve `PG_UNCHANGED_TOAST` and `PgUnchangedToast` alongside canonical `types`/`events`/`change_stream`/`pipeline` entries in `postgres/__init__.py`, switch `PostgresEmbeddingPushdown` to unconditional `$1`/`$2` binds passing `tools.docs.scan_public_docstrings`, and migrate `test_postgres_driver.py`, `test_pg_dataplane_and_datafusion.py` (deleting `_PsycopgConnectionPort` and `@requires_psycopg`), `test_google_embedders.py`, `test_native_db_drivers.py`, and staged native adapter suites to public imports.
-- **R24.2 (`ch27:t02`)**: Route SQLSpec `execute`, `select`, `execute_many`, `select_to_arrow`, `execute_stack` (pipeline, sequential, `execute_many`, Arrow), `dispatch_execute`, `dispatch_execute_many`, and `_prepare_postgres_tenant_session` on `PostgreSQLSyncDriver` and `PostgreSQLAsyncDriver` through `_compile_postgres_numeric_transport`, set both `default_paramstyle = "numeric_dollar"` and `paramstyle = "numeric_dollar"` (plus `numeric_dollar` DBAPI modules) on `SyncPostgreSQLDialect` and `AsyncPostgreSQLDialect`, and migrate `test_postgres_compiler_transport.py`, `test_sqlalchemy_and_sqlspec_vtb.py`, `test_gcp_adapters_and_sqlalchemy.py`, `test_enterprise_olap_drivers.py` (`SELECT set_config($1, $2, $3)`), and `test_postgres_event_hooks.py` to canonical public APIs.
-- **R24.3 (`ch27:t03`)**: Delete unreachable `_LegacyAsyncPostgreSQLDriver` and its exclusively owned imports (`anyio.CancelScope`, `inspect`, `AsyncIterator`, `Awaitable`, `AsyncDatabaseDriver`) from `driver.py` while keeping `import asyncio` for `_LegacySyncPostgreSQLDriver._publish_notification` until `t04`.
-- **R24.4 (`ch27:t04`)**: Delete unreachable `_LegacySyncPostgreSQLDriver`, `import asyncio`, and all remaining legacy imports from `driver.py` (preserving `parse_pgcopy_binary_rows` on `_sync.SyncPostgreSQLDriver`), and update `PostgreSQLQueueBackend.__init__` (`src/py/vertebra/framework/queues/postgres.py` lines `147`–`159`) from `psycopg` to `ensure_module("vertebra._postgres", package="vertebra-core[postgres]", install_package="vertebra-core[postgres]", extra="postgres")` with `src/py/tests/unit/framework/test_distributed_queues.py` coverage.
+- **R24.1 (`ch27:t01`)**: Rename legacy classes to `_LegacySyncPostgreSQLDriver` / `_LegacyAsyncPostgreSQLDriver`, re-export the permanent pair, extend `__init__.py`, switch `PostgresEmbeddingPushdown` to `$1`/`$2`, and replace `test_asyncpg_pool_transaction_and_affected_rows`, `test_asyncpg_pool_rollback_and_cancel_release_connection`, `test_asyncpg_pool_failed_begin_releases_connection`, `test_sync_postgres_driver_pool_gucs_and_prepared_statements`, `test_postgres_sync_and_async_guards_name_psycopg_pool`, and their `_SQLiteAsyncPG*` / `Mock*` doubles with native-port equivalents; delete `_PsycopgConnectionPort` and `@requires_psycopg` from `test_pg_dataplane_and_datafusion.py`.
+- **R24.2 (`ch27:t02`)**: SQLSpec numeric routing for `execute`, `select`, `execute_many`, `select_to_arrow`, `execute_stack`, `dispatch_execute`, `dispatch_execute_many`, and `_prepare_postgres_tenant_session`; SQLAlchemy dialect and DB-API module `numeric_dollar`; tenant tests renamed from psycopg/asyncpg wording to native wording.
+- **R24.3 (`ch27:t03`)**: Delete `_LegacyAsyncPostgreSQLDriver` and its exclusively owned imports (`anyio.CancelScope`, `inspect`, `AsyncIterator`, `Awaitable`, `AsyncDatabaseDriver`) and delete `SyncCloudSQLDialer.create_psycopg_connect_func`, `AsyncCloudSQLDialer.create_asyncpg_connect_func` (`cloudsql.py`), `SyncAlloyDBDialer.create_psycopg_connect_func`, and `AsyncAlloyDBDialer.create_asyncpg_connect_func` (`alloydb.py`).
+- **R24.4 & R27 (`ch27:t04`)**: Delete `_LegacySyncPostgreSQLDriver` and remaining legacy imports, switch the queue guard to `vertebra._postgres`, and remove the split-state bullets from `postgres-limitations.md`.
 
 ### 2.2 Public Contracts & Caller -> Seam -> Collaborator Map
 
@@ -123,62 +150,71 @@ __all__ = (
 )
 ```
 
-- `DatabaseRegistry` / `PostgreSQLConfig` / direct callers -> `vertebra.db.adapters.postgres.{SyncPostgreSQLDriver, AsyncPostgreSQLDriver}` (`driver.py`) -> `._sync.SyncPostgreSQLDriver` / `._async.AsyncPostgreSQLDriver` -> `vertebra._postgres.{SyncPostgresPool, AsyncPostgresPool}`.
-- `PostgresEmbeddingPushdown.{embed_documents, similarity_search}` -> `$1`, `$2` numeric SQL -> `SyncPostgreSQLDriver.select` / `AsyncPostgreSQLDriver.select` -> `VectorBatchView` / `VectorView`.
-- `PostgreSQLSyncDriver` / `PostgreSQLAsyncDriver` (`execute`, `select`, `execute_many`, `select_to_arrow`, `execute_stack`, `dispatch_execute*`, `_prepare_postgres_tenant_session`) -> `_compile_postgres_numeric_transport` (`ParameterStyle.NUMERIC`, `TypedParameter` unwrap, single-run `statement_transformers`) -> native drivers.
-- `SyncPostgreSQLDialect` / `AsyncPostgreSQLDialect` -> `default_paramstyle = paramstyle = "numeric_dollar"` + `SyncDBAPIModule`/`AsyncDBAPIModule(paramstyle="numeric_dollar")` -> native drivers.
-- `PostgreSQLQueueBackend(executor=None)` -> `ensure_module("vertebra._postgres", package="vertebra-core[postgres]", install_package="vertebra-core[postgres]", extra="postgres")` -> `ImproperConfigurationError("PostgreSQLQueueBackend requires a PostgreSQLQueueExecutor; pass executor= implementing PostgreSQLQueueExecutor (for example wrapping AsyncPostgreSQLDriver and PostgresNotificationSource)")`.
+- `DatabaseRegistry` / direct callers -> `vertebra.db.adapters.postgres.{SyncPostgreSQLDriver, AsyncPostgreSQLDriver}` -> `._sync` / `._async` -> `vertebra._postgres.{SyncPostgresPool, AsyncPostgresPool}`.
+- `PostgresEmbeddingPushdown.{embed_documents, similarity_search}` -> `$1`, `$2` SQL -> native driver `select`.
+- SQLSpec `PostgreSQLSyncDriver` / `PostgreSQLAsyncDriver` -> `_compile_postgres_numeric_transport` -> native drivers.
+- `SyncPostgreSQLDialect` / `AsyncPostgreSQLDialect` -> `SyncDBAPIModule(paramstyle="numeric_dollar")` / `AsyncDBAPIModule(paramstyle="numeric_dollar")` -> native drivers.
+- `PostgreSQLQueueBackend(executor=None)` -> `ensure_module("vertebra._postgres", ...)` -> `ImproperConfigurationError("PostgreSQLQueueBackend requires a PostgreSQLQueueExecutor; pass executor= implementing PostgreSQLQueueExecutor (for example wrapping AsyncPostgreSQLDriver and PostgresNotificationSource)")`.
 
 ### 2.3 Edge-Case & Failure-Mode Matrix
 
 | Boundary / Failure Mode | Deterministic Behavior |
 | --- | --- |
-| Intermediate state between `ch27:t01` and `ch27:t02` | `SyncPostgreSQLDriver._prepare_native_query` lowers `%s` pyformat binds from pre-`t02` SQLSpec/SQLAlchemy sync callers cleanly until `t02` switches consumers to direct `NUMERIC` / `numeric_dollar`. |
-| Missing `vertebra._postgres` optional wheel at runtime (drivers & `PostgreSQLQueueBackend`) | `ensure_module("vertebra._postgres", package="vertebra-core[postgres]", install_package="vertebra-core[postgres]", extra="postgres")` raises `MissingDependencyError` with `package == "vertebra-core[postgres]"` in `str(exc)`, never `asyncpg` or `psycopg`. |
-| Caller `StatementConfig` with `?`/`:name`, `TypedParameter`, `sqlglot` AST transformer, and tenant `set_config` | Original `StatementConfig` and `SQLResult.statement` stay untouched; `_compile_postgres_numeric_transport` runs transformers once, unwraps `TypedParameter`, and emits `SELECT set_config($1, $2, $3)` for tenant sessions. |
-| Offline `stmt.compile(dialect=SyncPostgreSQLDialect())` vs live `+vtb` execution | Setting both `default_paramstyle = "numeric_dollar"` and `paramstyle = "numeric_dollar"` ensures offline and connected compilation both emit `$1..$N`. |
-| Legacy kwargs (`executor=...`) and `dsn="MEMORY://..."` | `executor=...` raises `TypeError`; `memory://` (any casing) raises `ImproperConfigurationError(match="memory://")` synchronously in `__init__` [^fail-loud-baseline]. |
+| Between `t01` and `t02` | `SyncPostgreSQLDriver._prepare_native_query` lowers `%s` binds from pre-`t02` SQLSpec/SQLAlchemy callers until `t02` switches them to `$N`. |
+| Missing `vertebra._postgres` (drivers and queue backend) | `MissingDependencyError` with `package == "vertebra-core[postgres]"` in `str(exc)`, never naming `psycopg` or `asyncpg`. |
+| Caller `StatementConfig` with `?`/`:name`, `TypedParameter`, AST transformer, and tenant `set_config` | Caller config and `SQLResult.statement` untouched; transformers run once; `SELECT set_config($1, $2, $3)`. |
+| Offline `stmt.compile(dialect=SyncPostgreSQLDialect())` vs live `+vtb` | Both emit `$1..$N`. |
+| `broker-pool-sharing` extraction landed before `t02` | `t02` imports `SyncDBAPIModule` / `AsyncDBAPIModule` from `vertebra.db.dbapi` and applies the same `paramstyle` argument; no re-export shim is added in `dialects.py`. |
+| Legacy kwargs (`executor=...`) and `dsn="MEMORY://..."` | `TypeError`; `ImproperConfigurationError(match="memory://")` [^fail-loud-baseline]. |
+| Caller still uses `SyncCloudSQLDialer.create_psycopg_connect_func` after `t03` | `AttributeError`; docs (`ch30:t03`) describe native `PostgreSQLConfig` cloud options instead. |
 
 ### 2.4 Alternatives Comparison
 
-| Decision | Chosen Seam | Rejected Alternative & Why Rejected |
+| Decision | Chosen Seam | Rejected Alternative & Why |
 | --- | --- | --- |
-| Cutover & legacy deletion sequencing | Activate barrel + helpers (`t01`), activate consumers (`t02`), then delete `_LegacyAsync*` (`t03`) and `_LegacySync*` + queue `psycopg` probe (`t04`) | Deleting 800+ legacy lines in the same commit as consumer/test migration — mixes behavioral cutover with dead-code removal and exceeds review budgets. |
-| Runtime fallback policy | Hard cutover to `._sync` and `._async` with `ensure_module("vertebra._postgres", package="vertebra-core[postgres]", install_package="vertebra-core[postgres]", extra="postgres")` | Retaining a `psycopg`/`asyncpg` fallback when `_postgres` is uninstalled — violates R24 clean-break native ownership. |
+| Sequencing | Activate barrel/helpers (`t01`), consumers (`t02`), delete async legacy + dialer helpers (`t03`), delete sync legacy + queue probe + split-state caveats (`t04`) | One commit mixing behavioral cutover with 800+ deleted lines, exceeding review budgets. |
+| Runtime fallback | Hard cutover with `ensure_module("vertebra._postgres", ...)` | Keeping `psycopg`/`asyncpg` when `_postgres` is missing, violating clean-break native ownership. |
+| Dialer helpers | Delete `create_psycopg_connect_func` / `create_asyncpg_connect_func` | Keeping third-party connect factories that steer users to `psycopg`/`asyncpg` I/O while the native driver dials Cloud SQL and AlloyDB itself. |
+| Queue executor | Guard swap only; native executor from `queues-tasks-and-channels` | Shipping an ad-hoc driver-backed executor here, duplicating `PostgresQueueStore`. |
 
 ## 3. Documentation & OKF Knowledge Plan
 
-Progress: `[0/0 files documented in this chapter]` (`[0/33 files documented]` across the `33`-chapter / `118`-task flow synchronized in `ch30-user-and-workflow-docs`, `ch31-data-and-testing-okf-sync`, and `ch32-ffi-okf-and-review-routing-sync` ahead of `ch33-final-review-and-release-gate`; Google-style docstrings across `driver.py`, `__init__.py`, `embeddings.py`, `adapters.py`, `dialects.py`, and `queues/postgres.py` are verified via `tools.docs` within `ch27:t01`–`ch27:t04`).
+Progress: `[0/1 files documented in this chapter]` — `ch27:t04` removes the split-state bullets from `.agents/bundles/knowledge/domains/data/postgres-limitations.md` (created in `ch22:t04`, completed in `ch31:t01`). Google-style docstrings across `driver.py`, `__init__.py`, `embeddings.py`, `adapters.py`, `dialects.py`, the dialers, and `queues/postgres.py` are verified by `tools.docs.scan_public_docstrings` within `t01`–`t04`; user docs follow in `ch30`.
 
 ## 4. Requirement-to-Task Traceability Matrix
 
 | Requirement | Owning Task | Verification Strategy | Canonical Test Gate |
 | --- | --- | --- | --- |
-| R24 (Barrel, package exports, embeddings cutover) | [t01](tasks/t01-activate-driver-barrel-and-helpers.md) | `behavior_tdd` | `src/py/tests/unit/db/test_postgres_driver.py`, `src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py`, `src/py/tests/unit/embeddings/test_google_embedders.py`, `src/py/tests/unit/db/test_native_db_drivers.py`, `src/py/tests/unit/db/test_postgres_native_adapters.py`, `src/py/tests/unit/db/test_postgres_native_adapter_pipeline.py`, `src/py/tests/unit/db/test_postgres_native_adapter_arrow.py` |
-| R24 (SQLSpec NUMERIC, SQLAlchemy numeric_dollar, tenant & event-hook imports) | [t02](tasks/t02-activate-sqlspec-sqlalchemy-and-notify.md) | `behavior_tdd` | `src/py/tests/unit/extensions/test_postgres_compiler_transport.py`, `src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py`, `src/py/tests/unit/extensions/test_gcp_adapters_and_sqlalchemy.py`, `src/py/tests/unit/db/test_enterprise_olap_drivers.py`, `src/py/tests/unit/db/test_postgres_event_hooks.py` |
-| R24 (Legacy async driver removal) | [t03](tasks/t03-remove-legacy-async-driver.md) | `characterization` | `src/py/tests/unit/db/test_postgres_driver.py`, `src/py/tests/unit/db/test_postgres_native_adapters.py`, `src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py` |
-| R24 (Legacy sync driver removal & queue guard cutover) | [t04](tasks/t04-remove-legacy-sync-driver.md) | `behavior_tdd` | `src/py/tests/unit/db/test_postgres_driver.py`, `src/py/tests/unit/db/test_postgres_native_adapters.py`, `src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py`, `src/py/tests/unit/framework/test_distributed_queues.py` |
+| R24 (barrel, exports, embeddings, test doubles) | [t01](tasks/t01-activate-driver-barrel-and-helpers.md) | `behavior_tdd` | `src/py/tests/unit/db/test_postgres_driver.py`, `src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py`, `src/py/tests/unit/embeddings/test_google_embedders.py`, `src/py/tests/unit/db/test_native_db_drivers.py`, `src/py/tests/unit/db/test_postgres_native_adapters.py`, `src/py/tests/unit/db/test_postgres_native_adapter_pipeline.py`, `src/py/tests/unit/db/test_postgres_native_adapter_arrow.py` |
+| R24 (SQLSpec NUMERIC, SQLAlchemy and DB-API numeric_dollar) | [t02](tasks/t02-activate-sqlspec-sqlalchemy-and-notify.md) | `behavior_tdd` | `src/py/tests/unit/extensions/test_postgres_compiler_transport.py`, `src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py`, `src/py/tests/unit/extensions/test_gcp_adapters_and_sqlalchemy.py`, `src/py/tests/unit/db/test_enterprise_olap_drivers.py`, `src/py/tests/unit/db/test_postgres_event_hooks.py` |
+| R24 (legacy async driver and dialer helper removal) | [t03](tasks/t03-remove-legacy-async-driver.md) | `characterization` | `src/py/tests/unit/db/test_postgres_driver.py`, `src/py/tests/unit/extensions/test_gcp_adapters_and_sqlalchemy.py` |
+| R24, R27 (legacy sync removal, queue guard, limitations trim) | [t04](tasks/t04-remove-legacy-sync-driver.md) | `behavior_tdd` | `src/py/tests/unit/framework/test_distributed_queues.py`, `src/py/tests/unit/db/test_postgres_driver.py`, `make review-check` |
 
 ## 5. Implementation Plan
 
-- [ ] native-postgres-driver:ch27:t01 — Activate permanent native PostgreSQL driver barrel, package exports, and numeric embedding pushdown (tasks/t01-activate-driver-barrel-and-helpers.md)
-- [ ] native-postgres-driver:ch27:t02 — Activate SQLSpec NUMERIC defaults, SQLAlchemy numeric_dollar dialects, and public event-hook imports (tasks/t02-activate-sqlspec-sqlalchemy-and-notify.md)
-- [ ] native-postgres-driver:ch27:t03 — Remove unreachable _LegacyAsyncPostgreSQLDriver implementation from driver.py (tasks/t03-remove-legacy-async-driver.md)
-- [ ] native-postgres-driver:ch27:t04 — Remove unreachable _LegacySyncPostgreSQLDriver and update PostgreSQLQueueBackend dependency guard (tasks/t04-remove-legacy-sync-driver.md)
+- [ ] native-postgres-driver:ch27:t01 — Activate the permanent native driver barrel, package exports, and numeric embedding pushdown, and replace legacy test doubles (tasks/t01-activate-driver-barrel-and-helpers.md)
+- [ ] native-postgres-driver:ch27:t02 — Activate SQLSpec NUMERIC routing and SQLAlchemy numeric_dollar dialect and DB-API paramstyle (tasks/t02-activate-sqlspec-sqlalchemy-and-notify.md)
+- [ ] native-postgres-driver:ch27:t03 — Remove the legacy async driver and dialer psycopg/asyncpg connect helpers (tasks/t03-remove-legacy-async-driver.md)
+- [ ] native-postgres-driver:ch27:t04 — Remove the legacy sync driver, switch the queue guard to vertebra-core[postgres], and trim split-state caveats (tasks/t04-remove-legacy-sync-driver.md)
 
-**Chapter Recovery Checkpoint:** `make dev && uv run --no-sync python -m mypy.stubtest vertebra._postgres && PYTHONPATH="src/py:." uv run --no-sync python -m tools.docs.scan_public_docstrings --check-leaks --check-overloads --check-typeddicts src/py/vertebra/db/adapters/postgres src/py/vertebra/framework/queues/postgres.py && uv run --no-sync pytest src/py/tests/unit/db/test_postgres_driver.py src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py src/py/tests/unit/embeddings/test_google_embedders.py src/py/tests/unit/db/test_native_db_drivers.py src/py/tests/unit/db/test_enterprise_olap_drivers.py src/py/tests/unit/db/test_postgres_native_adapters.py src/py/tests/unit/db/test_postgres_native_adapter_pipeline.py src/py/tests/unit/db/test_postgres_native_adapter_arrow.py src/py/tests/unit/db/test_postgres_event_hooks.py src/py/tests/unit/extensions/test_postgres_compiler_transport.py src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py src/py/tests/unit/extensions/test_gcp_adapters_and_sqlalchemy.py src/py/tests/unit/framework/test_distributed_queues.py -q && uv run --no-sync ruff check src/py/vertebra/db/adapters/postgres src/py/vertebra/extensions/sqlspec src/py/vertebra/extensions/sqlalchemy src/py/vertebra/framework/queues/postgres.py && uv run --no-sync mypy src/py/vertebra/db/adapters/postgres src/py/vertebra/extensions src/py/vertebra/framework/queues/postgres.py && uv lock --check` exits `0`.
+**Chapter Recovery Checkpoint:** `make dev && uv run --no-sync python -m mypy.stubtest vertebra._postgres && PYTHONPATH="src/py:." uv run --no-sync python -m tools.docs.scan_public_docstrings --check-leaks --check-overloads --check-typeddicts src/py/vertebra/db/adapters/postgres src/py/vertebra/db/dialer src/py/vertebra/framework/queues/postgres.py && uv run --no-sync pytest src/py/tests/unit/db/test_postgres_driver.py src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py src/py/tests/unit/embeddings/test_google_embedders.py src/py/tests/unit/db/test_native_db_drivers.py src/py/tests/unit/db/test_enterprise_olap_drivers.py src/py/tests/unit/db/test_postgres_native_adapters.py src/py/tests/unit/db/test_postgres_native_adapter_pipeline.py src/py/tests/unit/db/test_postgres_native_adapter_arrow.py src/py/tests/unit/db/test_postgres_event_hooks.py src/py/tests/unit/extensions/test_postgres_compiler_transport.py src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py src/py/tests/unit/extensions/test_gcp_adapters_and_sqlalchemy.py src/py/tests/unit/framework/test_distributed_queues.py -q && uv run --no-sync ruff check src/py/vertebra/db/adapters/postgres src/py/vertebra/db/dialer src/py/vertebra/extensions/sqlspec src/py/vertebra/extensions/sqlalchemy src/py/vertebra/framework/queues/postgres.py && uv run --no-sync mypy src/py/vertebra/db src/py/vertebra/extensions src/py/vertebra/framework/queues/postgres.py && test -z "$(git grep -n -E 'psycopg|asyncpg' -- src/py/vertebra)" && make review-check && uv lock --check` exits `0`.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Plan Baseline**: `plan_revision: 6`, `plan_commit: 8e9b324e`; `depends_on_chapters: [ch26-compiler-pipeline-arrow-and-event-hooks]`, `state: planned`, `planning_status: complete` (`33` chapters / `118` tasks in full flow, `ch01`–`ch19` / `71` tasks completed).
+- **Verified Plan Baseline**: `plan_revision: 7`, `plan_commit: c8722c76`; `state: planned`, `planning_status: complete` (`33` chapters / `119` tasks; `ch01`–`ch21` and `ch22:t01`–`t02` are on `main`).
 - **Remaining Tasks in Chapter**: `t01`, `t02`, `t03`, `t04` (`4/4` pending).
-- **Active Invariants**: Zero `psycopg`, `psycopg_pool`, `asyncpg`, `_executor`, or `_Legacy*` references survive in `src/py/vertebra/db/adapters/postgres/`, `src/py/vertebra/extensions/{sqlspec,sqlalchemy,alchemy}/`, and `src/py/vertebra/framework/queues/postgres.py` after `t04` (`src/py/vertebra/db/dialer/` helper shims remain separate); `core.py`, `parse_pgcopy_binary_rows`, and `vertebra._vertebra` CPU helpers remain intact.
+- **Active Invariants**: After `t04`, `git grep -n -E 'psycopg|asyncpg' -- src/py/vertebra` prints nothing; driver unit tests contain no SQLite-backed or psycopg/asyncpg doubles; `core.py`, `parse_pgcopy_binary_rows`, and `vertebra._vertebra` CPU helpers remain intact; the only remaining comparator references live under `[dependency-groups].postgres-bench` (`ch29:t02`) and the extras-literal fixture in `src/py/tests/unit/build/test_packaging_and_pgo.py`.
 
-[^pg-driver-barrel]: `src/py/vertebra/db/adapters/postgres/driver.py::SyncPostgreSQLDriver` — Canonical PostgreSQL driver export module targeted for atomic cutover.
+[^pg-driver-barrel]: `src/py/vertebra/db/adapters/postgres/driver.py::SyncPostgreSQLDriver` — Public PostgreSQL driver module defining `psycopg_pool` and `asyncio.to_thread` classes on `main`.
 [^pg-pkg-init]: `src/py/vertebra/db/adapters/postgres/__init__.py` — Lazy package export map for `vertebra.db.adapters.postgres`.
-[^pg-embeddings]: `src/py/vertebra/db/adapters/postgres/embeddings.py::PostgresEmbeddingPushdown` — AlloyDB SQL embedding pushdown and `pgvector` similarity search helper.
+[^pg-embeddings]: `src/py/vertebra/db/adapters/postgres/embeddings.py::PostgresEmbeddingPushdown` — AlloyDB SQL embedding pushdown with `_uses_dollar_binds` branching.
 [^pg-notify]: `src/py/vertebra/db/adapters/postgres/notify.py::PostgresNotificationSource` — PostgreSQL notification publisher and streaming source rewritten in `ch21:t03`.
-[^sqlspec-adapters]: `src/py/vertebra/extensions/sqlspec/adapters.py::PostgreSQLSyncDriver` — SQLSpec PostgreSQL sync and async adapter parameter and tenant profiles.
-[^sa-dialects]: `src/py/vertebra/extensions/sqlalchemy/dialects.py` — SQLAlchemy `+vertebra` and `+vtb` sync and async PostgreSQL dialects.
-[^pg-queues]: `src/py/vertebra/framework/queues/postgres.py::PostgreSQLQueueBackend` — Distributed PostgreSQL queue backend dependency guard.
+[^sqlspec-adapters]: `src/py/vertebra/extensions/sqlspec/adapters.py::PostgreSQLSyncDriver` — SQLSpec PostgreSQL adapters (sync `POSITIONAL_PYFORMAT`, async `NUMERIC`).
+[^sa-dialects]: `src/py/vertebra/extensions/sqlalchemy/dialects.py::SyncPostgreSQLDialect` — SQLAlchemy `+vertebra`/`+vtb` PostgreSQL dialects with `pyformat` paramstyle and DB-API module factories.
+[^sa-dbapi]: `src/py/vertebra/extensions/sqlalchemy/dialects.py::SyncDBAPIModule` — DB-API module facades constructed with a per-dialect `paramstyle` argument.
+[^pg-queues]: `src/py/vertebra/framework/queues/postgres.py::PostgreSQLQueueBackend` — Executor-injected PostgreSQL queue backend whose missing-executor guard probes `psycopg`.
+[^dialer-cloudsql]: `src/py/vertebra/db/dialer/cloudsql.py::CloudSQLConfig` — Cloud SQL dialer carrying `create_psycopg_connect_func` and `create_asyncpg_connect_func`.
+[^dialer-alloydb]: `src/py/vertebra/db/dialer/alloydb.py::AlloyDBConfig` — AlloyDB dialer carrying `create_psycopg_connect_func` and `create_asyncpg_connect_func`.
+[^queues-flow]: `.agents/bundles/specs/queues-tasks-and-channels/spec.md` — Flow owning `PostgresQueueStore`, the settings-driven queue registry, and the `litestar-queues` backend.
+[^broker-flow]: `.agents/bundles/specs/broker-pool-sharing/spec.md` — Flow owning extraction of `SyncDBAPI*`/`AsyncDBAPI*` into `vertebra.db.dbapi` and `BrokerPool`.
 [^fail-loud-baseline]: `.agents/bundles/knowledge/domains/data/database-drivers-and-dialers.md` — Upstream flow baseline with zero PostgreSQL `memory://` execution paths.

@@ -4,7 +4,7 @@ id: "native-postgres-driver:ch26:t04"
 chapter_id: ch26-compiler-pipeline-arrow-and-event-hooks
 title: Open and close dedicated native PostgreSQL event sessions from drivers
 description: Implement EventSessionRegistry in events.py and wire dedicated notification, replication identity, replication stream, and pg_notify publisher hooks across permanent SyncPostgreSQLDriver and AsyncPostgreSQLDriver.
-status: stable
+status: draft
 state: pending
 priority: P1
 verification_strategy: behavior_tdd
@@ -24,8 +24,8 @@ files:
 tests:
   - src/py/tests/unit/db/test_postgres_event_hooks.py
 estimated_loc: 245
-plan_revision: 6
-plan_commit: 8e9b324e
+plan_revision: 7
+plan_commit: c8722c76
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -36,12 +36,15 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-10T14:45:00Z"
+updated_at: "2026-11-12T01:30:00Z"
 commit: null
+generated:
+  by: flow-revise
+  at: "2026-11-12T01:30:00Z"
 verified:
   - by: agent:plan-generator
-    at: "2026-11-10T14:45:00Z"
-    commit: 8e9b324e
+    at: "2026-11-12T01:30:00Z"
+    commit: c8722c76
 sources:
   - id: npd-contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md
@@ -136,6 +139,7 @@ Implement adapter-internal `EventSessionRegistry` in `src/py/vertebra/db/adapter
 
 ## Notes & Discoveries
 
+- Notification source naming: this worksheet executes before `queues-tasks-and-channels` t01 splits `NotificationSource` into `SyncNotificationSource` / `AsyncNotificationSource` and renames `PostgresNotificationSource` to `AsyncPostgresNotificationSource` alongside a new `SyncPostgresNotificationSource` (see [native-data-platform](../../../../native-data-platform/spec.md) Seam 2). It keeps the HEAD names, adds no new unprefixed notification protocol, class, or alias, and leaves the rename of every symbol, doc, and OKF reference it touches to that task. The synchronous-driver `publish` cases asserted here (sync transaction rejection and out-of-transaction `pg_notify($1, $2)`) carry over to `SyncPostgresNotificationSource` when the rename lands.
 - With `ch26:t04` complete, `_sync.py::SyncPostgreSQLDriver` and `_async.py::AsyncPostgreSQLDriver` expose the complete production surface required for atomic public barrel and consumer cutover in `ch27:t01`–`t02` [^npd-contracts].
 
 [^npd-contracts]: `.agents/bundles/specs/native-postgres-driver/contracts.md` — EventSessionRegistry handle/client close symmetry, _publish_notification mode rules, and PortalProvider sync shutdown.

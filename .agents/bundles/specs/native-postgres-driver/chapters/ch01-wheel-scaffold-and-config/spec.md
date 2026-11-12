@@ -11,7 +11,7 @@ depends_on_chapters: []
 replan_trigger: null
 current_task: null
 plan_revision: 5
-plan_commit: 79eea133
+plan_commit: c8722c76
 state_revision: 0
 last_verified_checkpoint: 62bf91f1
 last_reviewed_commit: 62bf91f1
@@ -23,7 +23,7 @@ generated:
 verified:
   - by: agent:plan-generator
     at: "2026-11-07T16:40:00Z"
-    commit: 79eea133
+    commit: c8722c76
 sources:
   - id: ws-cargo
     resource: src/rs/Cargo.toml

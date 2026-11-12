@@ -25,7 +25,7 @@ tests:
   - src/rs/vertebra-postgres/tests/postgres_notification_wire_tests.rs
 estimated_loc: 235
 plan_revision: 6
-plan_commit: 8e9b324e
+plan_commit: c8722c76
 state_revision: 1
 claimed_by: null
 claimed_at: null
@@ -33,7 +33,7 @@ blocked_reason: null
 unblock_condition: null
 next_step: null
 last_verified_at: "2026-11-10T22:35:18Z"
-last_verified_commit: e0ff8d78
+last_verified_commit: c8722c76
 verification_evidence: "cargo test -p vertebra-postgres --test postgres_notification_wire_tests (11 passed), cargo test --lib (12 passed), cargo fmt --check, and cargo clippy --all-targets -- -D warnings exited 0"
 created_at: "2026-11-05T18:25:07Z"
 updated_at: "2026-11-10T22:35:18Z"
@@ -41,7 +41,7 @@ commit: e0ff8d78
 verified:
   - by: agent:plan-generator
     at: "2026-11-10T14:45:00Z"
-    commit: 8e9b324e
+    commit: c8722c76
 sources:
   - id: pg-contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md

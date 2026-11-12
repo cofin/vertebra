@@ -25,7 +25,7 @@ tests:
   - src/rs/vertebra-postgres/tests/python_value_contract.rs
 estimated_loc: 250
 plan_revision: 5
-plan_commit: 79eea133
+plan_commit: c8722c76
 state_revision: 0
 claimed_by: null
 claimed_at: null

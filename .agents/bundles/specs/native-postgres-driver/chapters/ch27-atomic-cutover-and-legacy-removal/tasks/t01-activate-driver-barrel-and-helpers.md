@@ -2,9 +2,9 @@
 type: Task
 id: "native-postgres-driver:ch27:t01"
 chapter_id: ch27-atomic-cutover-and-legacy-removal
-title: Activate permanent native PostgreSQL driver barrel, package exports, and numeric embedding pushdown
-description: Switch vertebra.db.adapters.postgres.driver and package __init__ to export the permanent _sync, _async, types, events, and change_stream contracts atomically, update PostgresEmbeddingPushdown to numeric binds with verified Google-style docstrings, and migrate core driver, embedding, and dataplane unit tests to canonical public imports.
-status: stable
+title: Activate the permanent native driver barrel, package exports, and numeric embedding pushdown, and replace legacy test doubles
+description: Switch vertebra.db.adapters.postgres.driver and package __init__ to export the permanent _sync, _async, types, events, and change_stream contracts atomically, update PostgresEmbeddingPushdown to numeric binds with verified Google-style docstrings, and replace the SQLite-backed asyncpg pool double, psycopg pool mocks, and psycopg converter ports with native-shaped postgres_ports.py tests over canonical public imports.
+status: draft
 state: pending
 priority: P1
 verification_strategy: behavior_tdd
@@ -30,8 +30,8 @@ tests:
   - src/py/tests/unit/db/test_postgres_native_adapter_pipeline.py
   - src/py/tests/unit/db/test_postgres_native_adapter_arrow.py
 estimated_loc: 245
-plan_revision: 6
-plan_commit: 8e9b324e
+plan_revision: 7
+plan_commit: c8722c76
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -42,16 +42,19 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-10T14:45:00Z"
+updated_at: "2026-11-12T01:30:00Z"
 commit: null
+generated:
+  by: flow-revise
+  at: "2026-11-12T01:30:00Z"
 verified:
   - by: agent:plan-generator
-    at: "2026-11-10T14:45:00Z"
-    commit: 8e9b324e
+    at: "2026-11-12T01:30:00Z"
+    commit: c8722c76
 sources:
   - id: pg-driver-py
     resource: src/py/vertebra/db/adapters/postgres/driver.py::SyncPostgreSQLDriver
-    title: Public PostgreSQL driver barrel module
+    title: Public PostgreSQL driver module defining psycopg_pool and asyncio.to_thread classes on main
   - id: pg-init-py
     resource: src/py/vertebra/db/adapters/postgres/__init__.py
     title: Lazy package export map for vertebra.db.adapters.postgres including PG_UNCHANGED_TOAST and PgUnchangedToast
@@ -61,6 +64,9 @@ sources:
   - id: pg-contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md
     title: Frozen public contracts for native PostgreSQL activation
+  - id: pg-driver-tests
+    resource: src/py/tests/unit/db/test_postgres_driver.py::test_asyncpg_pool_transaction_and_affected_rows
+    title: AsyncPostgreSQLDriver tests over a SQLite-backed asyncpg pool double
 tags:
   - postgres
   - cutover
@@ -68,11 +74,11 @@ tags:
   - embeddings
 ---
 
-# Task t01: Activate Permanent Native PostgreSQL Driver Barrel, Package Exports, and Numeric Embedding Pushdown
+# Task t01: Activate the Permanent Native Driver Barrel, Package Exports, and Numeric Embedding Pushdown, and Replace Legacy Test Doubles
 
 ## Objective & Scope Boundary
 
-Atomically switch `src/py/vertebra/db/adapters/postgres/driver.py` and `src/py/vertebra/db/adapters/postgres/__init__.py` to select the completed `._sync.SyncPostgreSQLDriver` and `._async.AsyncPostgreSQLDriver` classes alongside canonical `types`, `pipeline`, `events`, and `change_stream` lazy exports (explicitly preserving `PG_UNCHANGED_TOAST` and `PgUnchangedToast`) [^pg-driver-py] [^pg-init-py], update `PostgresEmbeddingPushdown` in `embeddings.py` to emit unconditional `$1`/`$2` numeric binds across both native drivers with complete Google-style docstrings [^pg-embeddings-py], and migrate core PostgreSQL driver, dataplane, embedding, and registry/pool unit tests to canonical public imports over `postgres_ports.py` [^pg-contracts].
+Atomically switch `src/py/vertebra/db/adapters/postgres/driver.py` and `src/py/vertebra/db/adapters/postgres/__init__.py` to select the completed `._sync.SyncPostgreSQLDriver` and `._async.AsyncPostgreSQLDriver` classes alongside canonical `types`, `pipeline`, `events`, and `change_stream` lazy exports (explicitly preserving `PG_UNCHANGED_TOAST` and `PgUnchangedToast`) [^pg-driver-py] [^pg-init-py], update `PostgresEmbeddingPushdown` in `embeddings.py` to emit unconditional `$1`/`$2` numeric binds across both native drivers with complete Google-style docstrings [^pg-embeddings-py], and migrate core PostgreSQL driver, dataplane, embedding, and registry/pool unit tests to canonical public imports over `postgres_ports.py` (created in `ch25:t03`) [^pg-contracts]. On `main`, `test_postgres_driver.py` exercises `AsyncPostgreSQLDriver` through `_SQLiteAsyncPGPool` / `_SQLiteAsyncPGConnection` / `_SQLiteAsyncPGTransaction` (real SQLite semantics behind an asyncpg-shaped port) and `SyncPostgreSQLDriver` through `MockConnectionPool` / `MockConnection` / `MockCursor`; this task deletes those doubles and the tests bound to them and re-expresses the same transaction, rollback, cancellation, affected-count, GUC, and prepared-statement behaviors against native-shaped ports [^pg-driver-tests].
 
 Out of scope: `extensions/sqlspec/adapters.py` and `extensions/sqlalchemy/dialects.py` activation (`ch27:t02`), and physical deletion of private `_LegacyAsyncPostgreSQLDriver` (`ch27:t03`) and `_LegacySyncPostgreSQLDriver` + queue `psycopg` guard (`ch27:t04`).
 
@@ -100,7 +106,7 @@ Out of scope: `extensions/sqlspec/adapters.py` and `extensions/sqlalchemy/dialec
   - Remove `PostgresEmbeddingPushdown._uses_dollar_binds()` and emit `("$1", "$2")` unconditionally in `embed_documents(...)` (`SELECT embedding($1, t.txt)::vector FROM unnest($2::text[]) WITH ORDINALITY AS t(txt, idx) ORDER BY t.idx`) and `similarity_search(...)` (`SELECT *, <col> <op> $1::vector AS distance FROM <table> ORDER BY distance ASC LIMIT $2`) for both `SyncPostgreSQLDriver` and `AsyncPostgreSQLDriver`.
   - Extract decoded `PgVector` (`row_val.values`), `VectorView`, binary `bytes`, or text pgvector payloads cleanly in `_extract_vector` while preserving `VectorBatchView.from_f32_rows` normalization.
 - Test migrations to canonical public APIs over `postgres_ports.py`:
-  - Replace `_SQLiteAsyncPGPool`/`MockConnectionPool`/`executor=` in `test_postgres_driver.py`; replace `_PsycopgConnectionPort` and `@requires_psycopg` in `test_pg_dataplane_and_datafusion.py` (keeping non-PostgreSQL and `PostgreSQLCore` CPU codec cases intact); update sync/async `$1`/`$2` pushdown SQL assertions in `src/py/tests/unit/embeddings/test_google_embedders.py`; update PostgreSQL pool validation, `dialer`/`pool` checks, and `MissingDependencyError` (`vertebra-core[postgres]`) assertions over `postgres_ports.py` in `src/py/tests/unit/db/test_native_db_drivers.py`; switch `test_postgres_native_adapters.py`, `test_postgres_native_adapter_pipeline.py`, and `test_postgres_native_adapter_arrow.py` from `._sync`/`._async` to `vertebra.db.adapters.postgres`.
+  - In `test_postgres_driver.py`, delete `_SQLiteAsyncPGTransaction`, `_SQLiteAsyncPGConnection`, `_SQLiteAsyncPGPool`, `MockCursor`, `MockConnection`, `MockConnectionPool`, `test_asyncpg_pool_transaction_and_affected_rows`, `test_asyncpg_pool_rollback_and_cancel_release_connection`, `test_asyncpg_pool_failed_begin_releases_connection`, `test_sync_postgres_driver_pool_gucs_and_prepared_statements`, and `test_postgres_sync_and_async_guards_name_psycopg_pool`, and add `test_native_driver_transaction_and_affected_rows`, `test_native_driver_rollback_and_cancel_release_lease`, `test_native_driver_failed_begin_releases_lease`, `test_native_driver_pool_gucs_and_statement_cache`, and `test_native_drivers_name_postgres_extra_when_wheel_missing` (parametrized over sync/async drivers) over `postgres_ports.py`; replace `_PsycopgConnectionPort` and `@requires_psycopg` in `test_pg_dataplane_and_datafusion.py` (keeping non-PostgreSQL and `PostgreSQLCore` CPU codec cases intact); update sync/async `$1`/`$2` pushdown SQL assertions in `src/py/tests/unit/embeddings/test_google_embedders.py`; update PostgreSQL pool validation, `dialer`/`pool` checks, and `MissingDependencyError` (`vertebra-core[postgres]`) assertions over `postgres_ports.py` in `src/py/tests/unit/db/test_native_db_drivers.py`; switch `test_postgres_native_adapters.py`, `test_postgres_native_adapter_pipeline.py`, and `test_postgres_native_adapter_arrow.py` from `._sync`/`._async` to `vertebra.db.adapters.postgres`.
 
 ## Edge Cases & Error Semantics
 
@@ -117,25 +123,28 @@ Out of scope: `extensions/sqlspec/adapters.py` and `extensions/sqlalchemy/dialec
 | --- | --- | --- |
 | Canonical barrel & `_EXPORT_MAP` resolution | Import every symbol in `vertebra.db.adapters.postgres.__all__` (including `PoolerMode`, `PostgresNotifyConfig`, `PostgresReplicationRecord`, `PGCOPY_BINARY_SIGNATURE`/`decode_pgcopy_rows`/`encode_pg_jsonb`/`encode_pgcopy_rows`/`strip_pg_jsonb_header`, `ARROW_SHM_THRESHOLD_ROWS`/`ArrowCursor`/`read_arrow_shm`/`write_arrow_shm`, `PG_UNCHANGED_TOAST`, `PgUnchangedToast`, `PostgresArrowResult`, `PostgresReplicationIdentity`, `PostgresChangeSource`, `SyncPostgreSQLDriver`, `AsyncPostgreSQLDriver`) | Exact `._sync` / `._async` classes, preserved `config`/`notify`/`core`/`vertebra.db.arrow`/`types` symbols, valid lazy resolution for every `__all__` item, and zero `_Legacy*` or `EventSessionRegistry` leaks in `__all__`. |
 | Missing wheel, `memory://`, & `test_native_db_drivers.py` registry checks | Absent `vertebra._postgres`, `dsn="MEMORY://db"`, invalid external `pool=`, `DatabaseRegistry` dialer/pool attachment over `postgres_ports.py` | Missing wheel raises `MissingDependencyError` (`package == "vertebra-core[postgres]"` in `str(exc)`); `MEMORY://` and bad `pool=` raise `ImproperConfigurationError`; `driver.dialer` and validated shared pool attach cleanly. |
+| Native replacements for SQLite/psycopg doubles (`test_postgres_driver.py`) | Parametrized sync/async driver over `postgres_ports.py`: `CREATE`/`INSERT` (`execute == 1`), `execute_many` of `2` rows inside `transaction()`; `ValueError("abort")` inside `transaction()`; `asyncio` task cancelled after `INSERT`; `begin()` with the port's begin failing once | Affected counts `1`, `2`, and `3` for the `UPDATE`; aborted and cancelled transactions leave `0` rows and `acquired == released`; failed `begin()` releases the lease and a retry succeeds; zero `sqlite3`, `psycopg`, or `asyncpg` names remain in the module. |
 | Sync & async embedding pushdown (`test_google_embedders.py`) | `PostgresEmbeddingPushdown(sync_driver, ...)` and `PostgresEmbeddingPushdown(async_driver, ...)` running `embed_documents(["alpha", "beta"])` and `similarity_search(...)` | Both sync and async drivers receive unconditional `$1`/`$2` placeholders and return normalized `VectorBatchView` (`len == 2`) and ranked rows. |
 | Dataplane (`test_pg_dataplane_and_datafusion.py`) & docstring scan | Replace `_PsycopgConnectionPort` + `@requires_psycopg` with `postgres_ports.py`; preserve `parse_pgcopy_binary_rows`/`encode_pgcopy_binary_rows`/`strip_jsonb_header`/`encode_jsonb` + DataFusion tests; run `tools.docs.scan_public_docstrings` | Zero `@requires_psycopg` skips remain on PostgreSQL unit paths, `in_use == 0`, and docstring scan exits `0`. |
 
 ## Verification
 
 - Initial Red baseline: `make dev && uv run --no-sync pytest src/py/tests/unit/db/test_postgres_driver.py src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py src/py/tests/unit/embeddings/test_google_embedders.py src/py/tests/unit/db/test_native_db_drivers.py -q`
-- Final Green + docstring + lint + typecheck gate: `make dev && PYTHONPATH="src/py:." uv run --no-sync python -m tools.docs.scan_public_docstrings --check-leaks --check-overloads --check-typeddicts src/py/vertebra/db/adapters/postgres && uv run --no-sync pytest src/py/tests/unit/db/test_postgres_driver.py src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py src/py/tests/unit/embeddings/test_google_embedders.py src/py/tests/unit/db/test_native_db_drivers.py src/py/tests/unit/db/test_postgres_native_adapters.py src/py/tests/unit/db/test_postgres_native_adapter_pipeline.py src/py/tests/unit/db/test_postgres_native_adapter_arrow.py -q && uv run --no-sync ruff check src/py/vertebra/db/adapters/postgres src/py/tests/unit/db src/py/tests/unit/embeddings/test_google_embedders.py && uv run --no-sync mypy src/py/vertebra/db/adapters/postgres`
+- Final Green + docstring + lint + typecheck gate: `make dev && PYTHONPATH="src/py:." uv run --no-sync python -m tools.docs.scan_public_docstrings --check-leaks --check-overloads --check-typeddicts src/py/vertebra/db/adapters/postgres && uv run --no-sync pytest src/py/tests/unit/db/test_postgres_driver.py src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py src/py/tests/unit/embeddings/test_google_embedders.py src/py/tests/unit/db/test_native_db_drivers.py src/py/tests/unit/db/test_postgres_native_adapters.py src/py/tests/unit/db/test_postgres_native_adapter_pipeline.py src/py/tests/unit/db/test_postgres_native_adapter_arrow.py -q && uv run --no-sync ruff check src/py/vertebra/db/adapters/postgres src/py/tests/unit/db src/py/tests/unit/embeddings/test_google_embedders.py && uv run --no-sync mypy src/py/vertebra/db/adapters/postgres && test -z "$(git grep -n -E 'sqlite3|psycopg|asyncpg|_SQLiteAsyncPG' -- src/py/tests/unit/db/test_postgres_driver.py)"`
 
 ## Acceptance Criteria
 
 - [ ] `driver.py` and `postgres/__init__.py` export permanent `._sync.SyncPostgreSQLDriver` and `._async.AsyncPostgreSQLDriver` while preserving `PoolerMode`, `PostgresNotifyConfig`, `PostgresReplicationRecord`, `PG_UNCHANGED_TOAST`, `PgUnchangedToast`, retained `core` helpers, `vertebra.db.arrow` re-exports, and exact `types`/`pipeline`/`events`/`change_stream` lazy targets without phantom Arrow helpers or `EventSessionRegistry` leaks (R24).
 - [ ] `PostgresEmbeddingPushdown` emits unconditional `$1`/`$2` numeric binds across both sync and async drivers, and `src/py/vertebra/db/adapters/postgres` passes `tools.docs.scan_public_docstrings` (R24).
-- [ ] `test_postgres_driver.py`, `test_pg_dataplane_and_datafusion.py` (`_PsycopgConnectionPort` + `@requires_psycopg` removed), `test_google_embedders.py`, `test_native_db_drivers.py`, and native adapter unit suites pass over canonical public imports and `postgres_ports.py` (R24).
+- [ ] `test_postgres_driver.py` contains no SQLite-backed asyncpg double or psycopg pool mock, `test_pg_dataplane_and_datafusion.py` drops `_PsycopgConnectionPort` + `@requires_psycopg`, and `test_google_embedders.py`, `test_native_db_drivers.py`, and native adapter unit suites pass over canonical public imports and `postgres_ports.py` (R24).
 
 ## Notes & Discoveries
 
+- Notification source naming: this worksheet executes before `queues-tasks-and-channels` t01 splits `NotificationSource` into `SyncNotificationSource` / `AsyncNotificationSource` and renames `PostgresNotificationSource` to `AsyncPostgresNotificationSource` alongside a new `SyncPostgresNotificationSource` (see [native-data-platform](../../../../native-data-platform/spec.md) Seam 2). It keeps the HEAD names, adds no new unprefixed notification protocol, class, or alias, and leaves the rename of every symbol, doc, and OKF reference it touches to that task.
 - Preserve `PostgreSQLCore` CPU helpers (`strip_jsonb_header`, `encode_jsonb`, `encode_pgcopy_rows`, `decode_pgcopy_rows`), driver static `parse_pgcopy_binary_rows`, and all non-PostgreSQL cases in `test_pg_dataplane_and_datafusion.py` and `test_native_db_drivers.py`.
 
-[^pg-driver-py]: `src/py/vertebra/db/adapters/postgres/driver.py::SyncPostgreSQLDriver` — Public PostgreSQL driver barrel module.
+[^pg-driver-py]: `src/py/vertebra/db/adapters/postgres/driver.py::SyncPostgreSQLDriver` — Public PostgreSQL driver module defining `psycopg_pool` and `asyncio.to_thread` classes on `main`.
 [^pg-init-py]: `src/py/vertebra/db/adapters/postgres/__init__.py` — Lazy package export map for `vertebra.db.adapters.postgres` including `PG_UNCHANGED_TOAST` and `PgUnchangedToast`.
 [^pg-embeddings-py]: `src/py/vertebra/db/adapters/postgres/embeddings.py::PostgresEmbeddingPushdown` — AlloyDB SQL embedding pushdown and `pgvector` similarity search helper.
 [^pg-contracts]: `.agents/bundles/specs/native-postgres-driver/contracts.md` — Frozen public contracts for native PostgreSQL activation.
+[^pg-driver-tests]: `src/py/tests/unit/db/test_postgres_driver.py::test_asyncpg_pool_transaction_and_affected_rows` — `AsyncPostgreSQLDriver` tests over a SQLite-backed asyncpg pool double.

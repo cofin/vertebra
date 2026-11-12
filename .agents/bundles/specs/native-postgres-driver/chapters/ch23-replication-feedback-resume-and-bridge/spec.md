@@ -4,27 +4,27 @@ parent_flow: native-postgres-driver
 chapter_id: ch23-replication-feedback-resume-and-bridge
 title: "Chapter 23: Commit-Fenced LSN Feedback, Verified Replication Resume, and PyO3 Bridge"
 description: Implement commit-boundary StandbyStatusUpdate feedback, identity-verified stream reconnect, and cancellation-safe AsyncPostgresReplication PyO3 handles.
-status: stable
+status: draft
 state: planned
 planning_status: complete
 depends_on_chapters:
   - ch22-copyboth-and-pgoutput-decoding
 replan_trigger: null
 current_task: "native-postgres-driver:ch23:t01"
-plan_revision: 6
-plan_commit: 8e9b324e
+plan_revision: 7
+plan_commit: c8722c76
 state_revision: 0
 last_verified_checkpoint: null
 last_reviewed_commit: null
 created_at: "2026-11-05T00:00:00Z"
-updated_at: "2026-11-10T14:45:00Z"
+updated_at: "2026-11-12T01:30:00Z"
 generated:
   by: flow-revise
-  at: "2026-11-10T14:45:00Z"
+  at: "2026-11-12T01:30:00Z"
 verified:
   - by: agent:plan-generator
-    at: "2026-11-10T14:45:00Z"
-    commit: 8e9b324e
+    at: "2026-11-12T01:30:00Z"
+    commit: c8722c76
 sources:
   - id: npd-contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md
@@ -143,7 +143,7 @@ Progress: `[0/0 files documented in ch23]` (project documentation and OKF chapte
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Plan Baseline**: `8e9b324e`; chapter `state: planned`, `planning_status: complete`, `plan_revision: 6`, `plan_commit: 8e9b324e`.
+- **Verified Plan Baseline**: `c8722c76`; chapter `state: planned`, `planning_status: complete`, `plan_revision: 7`, `plan_commit: c8722c76` (`ch01`–`ch21` and `ch22:t01`–`t02` on `main` through the PR #104 squash).
 - **Remaining Tasks in Chapter**: `t01`, `t02`, `t03` (`3/3` pending).
 - **Downstream Dependents**: Unblocks `ch24-change-source-and-checkpoints` and `ch26-compiler-pipeline-arrow-and-event-hooks`.
 

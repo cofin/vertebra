@@ -4,7 +4,7 @@ id: "native-postgres-driver:ch25:t04"
 chapter_id: ch25-dsn-bridge-lexer-and-permanent-drivers
 title: Implement the permanent asynchronous native PostgreSQL driver before activation
 description: Implement AsyncPostgreSQLDriver in _async.py directly over native AsyncPostgresPool leases with task-pinned transactions, shielded cleanup, static JSONB helpers, command timeouts, Arrow forwarders, and cancel().
-status: stable
+status: draft
 state: pending
 priority: P1
 verification_strategy: behavior_tdd
@@ -23,8 +23,8 @@ tests:
   - src/py/tests/unit/db/postgres_ports.py
   - src/py/tests/unit/db/test_postgres_native_adapters.py
 estimated_loc: 245
-plan_revision: 6
-plan_commit: 8e9b324e
+plan_revision: 7
+plan_commit: c8722c76
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -35,12 +35,15 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-10T14:45:00Z"
+updated_at: "2026-11-12T01:30:00Z"
 commit: null
+generated:
+  by: flow-revise
+  at: "2026-11-12T01:30:00Z"
 verified:
   - by: agent:plan-generator
-    at: "2026-11-10T14:45:00Z"
-    commit: 8e9b324e
+    at: "2026-11-12T01:30:00Z"
+    commit: c8722c76
 sources:
   - id: npd-contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md

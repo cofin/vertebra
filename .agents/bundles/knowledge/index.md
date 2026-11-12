@@ -38,10 +38,13 @@ Curated current-state engineering documentation for **Vertebra** (`src/py/verteb
   - [`vtb` Command-Line Interface](domains/framework/cli.md)
 - **Agent Protocols & Harness (`domains/agent/`)**:
   - [Agentic Harness, MCP 2026-07-28 & A2A 1.0 Protocols](domains/agent/mcp-and-a2a-protocol-harness.md)
+  - [MCP Implementation Limitations](domains/agent/mcp-limitations.md)
   - [Shared-Memory Vector Slabs, Zero-Weight Cloud & SQL Embeddings, and Local Broker](domains/agent/embeddings-and-vectors.md)
+  - [Embeddings Limitations](domains/agent/embeddings-limitations.md)
 - **Server & Worker Runtime (`domains/server/`)**:
   - [Python Server, Worker Loop & Protocol Adapters Domain](domains/server/worker-and-protocols.md)
   - [Multi-Lane Worker Runner](domains/server/worker-lanes.md)
+  - [Server Runtime Limitations](domains/server/server-runtime-limitations.md)
 - **IPC & HTTP (`domains/ipc/`, `domains/http/`)**:
   - [Rust IPC, Shared Memory & Ring Transport Domain](domains/ipc/transport-and-rings.md)
   - [Rust HTTP Ingress, Batching & Dispatch Domain](domains/http/server-and-dispatch.md)
@@ -54,6 +57,7 @@ Curated current-state engineering documentation for **Vertebra** (`src/py/verteb
   - [Object Storage Implementation Limitations](domains/storage/object-storage-limitations.md)
   - [Shared-Memory Connection Broker & Statement Cache](domains/data/broker-and-shm-leases.md)
   - [Database Drivers & Cloud Dialers](domains/data/database-drivers-and-dialers.md)
+  - [Database Driver Limitations](domains/data/database-driver-limitations.md)
   - [GCP BigQuery & Spanner Native Drivers](domains/data/gcp-bigquery-and-spanner-drivers.md)
   - [Native Pipelines, Change Feeds, Tenant Predicates & DataFusion](domains/data/query-pipeline-cdc-and-tenancy.md)
   - [Logging, Trace Context, SQL Trace Propagation & GenAI Metrics](domains/telemetry/logging-tracing-and-genai.md)

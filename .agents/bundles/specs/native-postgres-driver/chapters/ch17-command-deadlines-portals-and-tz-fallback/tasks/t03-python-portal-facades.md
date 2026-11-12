@@ -25,7 +25,7 @@ tests:
   - src/py/tests/unit/db/test_postgres_native_portals.py
 estimated_loc: 235
 plan_revision: 5
-plan_commit: 79eea133
+plan_commit: c8722c76
 state_revision: 1
 claimed_by: null
 claimed_at: null
@@ -33,7 +33,7 @@ blocked_reason: null
 unblock_condition: null
 next_step: null
 last_verified_at: "2026-11-09T20:21:59Z"
-last_verified_commit: c9f7335e
+last_verified_commit: c8722c76
 verification_evidence: "pytest test_postgres_native_portals.py (9 passed), mypy.stubtest vertebra._postgres, ruff, mypy, and clippy passed"
 created_at: "2026-11-05T18:25:07Z"
 updated_at: "2026-11-08T02:05:22Z"

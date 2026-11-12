@@ -12,7 +12,7 @@ depends_on_chapters:
 replan_trigger: null
 current_task: null
 plan_revision: 5
-plan_commit: 79eea133
+plan_commit: c8722c76
 state_revision: 7
 last_verified_checkpoint: 59a6dc09
 last_reviewed_commit: 59a6dc09
@@ -24,13 +24,13 @@ generated:
 verified:
   - by: agent:flow-setup
     at: "2026-11-07T05:00:00Z"
-    commit: 79eea133
+    commit: c8722c76
   - by: agent:code-reviewer
     at: "2026-11-10T05:10:00Z"
-    commit: 59a6dc09
+    commit: c8722c76
   - by: agent:quality-reviewer
     at: "2026-11-10T05:10:00Z"
-    commit: 59a6dc09
+    commit: c8722c76
 sources:
   - id: pg-contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md

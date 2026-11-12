@@ -11,18 +11,26 @@ The completed database foundation, fail-loud baseline, and standalone DuckDB, My
 
 ## 2. Active Feature Specifications (`state: active`)
 
-- [`native-postgres-driver`](native-postgres-driver/spec.md) — Standalone Rust PostgreSQL wheel (`vertebra-postgres`) covering wire authentication, cloud mTLS/IAM, pools, single-Sync pipelines, binary COPY, SHM Arrow, notifications, logical replication, and native adapter cutover (`state: active`; [`chapters/ch01`–`ch33`](native-postgres-driver/chapters/index.md), `118` tasks, `21/33` chapters completed through `ch21`, `ch22` active at `ch22:t03` with `80/118` tasks completed).
+- [`native-postgres-driver`](native-postgres-driver/spec.md) — Standalone Rust PostgreSQL wheel (`vertebra-postgres`) covering wire authentication, cloud mTLS/IAM, pools, single-Sync pipelines, binary COPY, SHM Arrow, notifications, logical replication, and native adapter cutover (`state: active`; [`chapters/ch01`–`ch33`](native-postgres-driver/chapters/index.md), `119` tasks, `21/33` chapters completed through `ch21`, `ch22` active at `ch22:t03` with `80/119` tasks completed).
 
-## 3. Draft Child Flow Charters (`state: draft`)
+## 3. Planned Decomposed Specifications (`state: planned`, awaiting approval)
 
-- [`broker-pool-sharing`](broker-pool-sharing/spec.md) — Shared broker-owned pools for any SQLSpec, Advanced Alchemy, or SQLAlchemy config.
+- [`broker-pool-sharing`](broker-pool-sharing/spec.md) — Shared broker-owned pools for any SQLSpec, Advanced Alchemy, or SQLAlchemy config, cross-cdylib native engine capsules, lease quarantine, `vertebra.db.dbapi` extraction, and PostgreSQL pool reclamation (`9` chapters, `31` tasks; covers [#95](https://github.com/cofin/vertebra/issues/95), [#96](https://github.com/cofin/vertebra/issues/96), [#97](https://github.com/cofin/vertebra/issues/97), [#98](https://github.com/cofin/vertebra/issues/98), [#109](https://github.com/cofin/vertebra/issues/109), [#111](https://github.com/cofin/vertebra/issues/111)).
+- [`mcp-protocol-completeness`](mcp-protocol-completeness/spec.md) — MCP `2026-07-28` JSON-RPC dispatch parity, trusted `AgentContext` propagation, opt-in IAP/mTLS `IdentitySource`, task lifecycle, WebMCP adapter coverage, and standalone skills packaging (`12` chapters, `35` tasks; covers [#114](https://github.com/cofin/vertebra/issues/114), [#115](https://github.com/cofin/vertebra/issues/115) skill split).
+- [`server-runtime-correctness`](server-runtime-correctness/spec.md) — Embedded fastpath dispatch cleanup, fork-safe `id.rs`, Rust client `max_frame_size`, FFI batch/SHM hygiene, static root fallback, and typed server metrics (`11` chapters, `33` tasks; covers [#110](https://github.com/cofin/vertebra/issues/110)).
+- [`gcp-embeddings-and-identity`](gcp-embeddings-and-identity/spec.md) — Vertex HTTP/2 transport reliability, WIF/`authorized_user` ADC ID tokens, Spanner/BigQuery correctness and timeout bounds (`6` chapters, `17` tasks).
+- [`driver-conformance-ci`](driver-conformance-ci/spec.md) — Real multi-engine database conformance suites, `--group duckdb` benchmark isolation, Oracle AQ/batch/SHM hardening, and CI gates (`5` chapters, `16` tasks; covers [#81](https://github.com/cofin/vertebra/issues/81), [#82](https://github.com/cofin/vertebra/issues/82), [#83](https://github.com/cofin/vertebra/issues/83), [#84](https://github.com/cofin/vertebra/issues/84), [#85](https://github.com/cofin/vertebra/issues/85), [#112](https://github.com/cofin/vertebra/issues/112), [#113](https://github.com/cofin/vertebra/issues/113)).
+- [`storage-integrity-and-streaming`](storage-integrity-and-streaming/spec.md) — Streaming ObjectStore multipart reads/writes, `sqlspec` upstream Arrow upload tracking, `s3`/`r2` create-only copy guards, and storage packaging checks (`4` chapters, `12` tasks; covers [#99](https://github.com/cofin/vertebra/issues/99), [#100](https://github.com/cofin/vertebra/issues/100)).
+
+## 4. Draft Child Flow Charters (`state: draft`)
+
 - [`native-sqlite-driver`](native-sqlite-driver/spec.md) — Standalone Rust SQLite wheel (`vertebra-sqlite`).
 - [`native-redis-driver`](native-redis-driver/spec.md) — Standalone Rust Redis and Valkey RESP3 wheel (`vertebra-redis`).
 - [`sqlalchemy-and-django-integration`](sqlalchemy-and-django-integration/spec.md) — SQLAlchemy `+vtb` dialect bases, Advanced Alchemy dogpile cache backend, and Django database backends.
 - [`sqlspec-adapter-parity`](sqlspec-adapter-parity/spec.md) — Feature-complete SQLSpec per-engine adapters, stores, and data dictionaries.
-- [`queues-tasks-and-channels`](queues-tasks-and-channels/spec.md) — Native PostgreSQL and Oracle `QueueStore` backends, `litestar-queues`, Django tasks, distributed channels, and `ValkeyStore`.
+- [`queues-tasks-and-channels`](queues-tasks-and-channels/spec.md) — Native PostgreSQL and Oracle `QueueStore` backends, `SyncNotificationSource`/`AsyncNotificationSource` splits, `litestar-queues`, Django tasks, distributed channels, and `ValkeyStore`.
 
-## 4. Promoted Spec Research (`state: promoted`)
+## 5. Promoted Spec Research (`state: promoted`)
 
 - [`gap-analysis_20261103.md`](native-data-platform/research/gap-analysis_20261103.md) — Broker, native driver, and storage gap analysis (`native-data-platform`).
 - [`rust-driver-crates_20261103.md`](native-data-platform/research/rust-driver-crates_20261103.md) — Primary-source Rust client crate comparison and per-engine wheel packaging (`native-data-platform`).

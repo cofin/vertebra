@@ -7,22 +7,26 @@ status: draft
 state: draft
 has_chapters: false
 parent_prd: integration-remediation
+depends_on_flows:
+  - native-postgres-driver
+  - broker-pool-sharing
+  - native-sqlite-driver
+  - db-layout-and-contract
+  - db-engine-primitives
+  - driver-fail-loud
 research:
   - ../integration-remediation/research/audit-findings_20261103.md
-plan_revision: 1
+plan_revision: 2
 plan_commit: null
 state_revision: 0
 current_task: null
 last_verified_checkpoint: null
 created_at: "2026-11-03T03:30:00Z"
-updated_at: "2026-11-07T04:15:00Z"
+updated_at: "2026-11-12T01:30:00Z"
 generated:
-  by: flow-setup
-  at: "2026-11-07T04:15:00Z"
-verified:
-  - by: agent:flow-setup
-    at: "2026-11-07T04:15:00Z"
-    commit: 9af810f5
+  by: flow-revise
+  at: "2026-11-12T01:30:00Z"
+verified: []
 sources:
   - id: sqlspec-adapters
     resource: src/py/vertebra/extensions/sqlspec/adapters.py
@@ -44,9 +48,10 @@ tags:
 # Flow Charter: Feature-Complete SQLSpec Adapters
 
 <!-- truth: start -->
-- **Upstream Package & Dispatch Parity**: Per-engine packages `extensions/sqlspec/adapters/<engine>/` implement `dispatch_execute*`, `<Engine>SyncDataDictionary` / `<Engine>AsyncDataDictionary`, and upstream-base ADK/events/Litestar stores while preserving `<Engine>SyncConfig` / `<Engine>AsyncConfig` naming [^sqlspec-adapters].
-- **Storage-Owned `ArtifactReference` & Refcounted Pools**: Shared artifact metadata uses `vertebra.storage.ArtifactReference` without cross-engine BigQuery imports in Spanner, and `DatabaseRegistry` pools close via reference counting [^sqlspec-plugin].
-- **`VTBARROW` Provider Cutover**: `SQLSpecSyncProvider` and `SQLSpecAsyncProvider` replace `SharedArrowBuffer`/`SharedArrowTable` with Rust `VTBARROW` `ArrowCursor` frames [^sqlspec-provider].
+- **Current State**: `extensions/sqlspec/adapters.py` is one module whose `BaseSyncDriver` / `BaseAsyncDriver` override `execute` / `select`; only BigQuery and Spanner ship data dictionaries; `extensions/sqlspec/provider.py` still defines `SharedArrowTable` and `SharedArrowBuffer`; `extensions/sqlspec/spanner.py` imports the BigQuery adapter's `ObjectRef` [^sqlspec-adapters] [^sqlspec-provider].
+- **Upstream Package & Dispatch Parity (target state)**: Per-engine packages `extensions/sqlspec/adapters/<engine>/` implement `dispatch_execute*`, `<Engine>SyncDataDictionary` / `<Engine>AsyncDataDictionary`, and upstream-base ADK/events/Litestar stores while preserving `<Engine>SyncConfig` / `<Engine>AsyncConfig` naming.
+- **Storage-Owned `ArtifactReference` & Refcounted Pools (target state)**: Shared artifact metadata uses a new `vertebra.storage.ArtifactReference` without cross-engine BigQuery imports in Spanner, and `DatabaseRegistry`-shared pools close via reference counting [^sqlspec-plugin].
+- **`VTBARROW` Provider Cutover (target state)**: `SQLSpecSyncProvider` and `SQLSpecAsyncProvider` replace `SharedArrowBuffer`/`SharedArrowTable` with Rust `VTBARROW` `ArrowCursor` frames.
 <!-- truth: end -->
 
 ## Charter
@@ -55,7 +60,7 @@ Vertebra's SQLSpec adapters must be feature-complete in the same way upstream ad
 
 ## Scope
 
-1. **Layout and dependency ownership.** Create `extensions/sqlspec/adapters/<engine>/{__init__,config,driver,core,data_dictionary}.py` plus `adk/`, `events/`, and `litestar/` store modules for `postgres`, `mysql`, `sqlite`, `oracle`, `mssql`, `duckdb`, `bigquery`, and `spanner`. SQLSpec adapter `config.py` owns SQLSpec configuration and store declarations; `driver.py` owns SQLSpec dispatch and result adaptation; `data_dictionary.py` owns SQLSpec metadata contracts; adapter-local `core.py` owns only SQLSpec-specific dialect/parameter translation. Native driver/config classes and reusable engine primitives remain in `db/adapters/<engine>/`; SQLSpec wrappers call them instead of copying their behavior. Generic modules (`plugin.py`, `provider.py`, `proxy.py`, `storage.py`, `events.py`) hold zero engine code.
+1. **Layout and dependency ownership.** Replace the `extensions/sqlspec/adapters.py` module with the package `extensions/sqlspec/adapters/<engine>/{__init__,config,driver,core,data_dictionary}.py` plus `adk/`, `events/`, and `litestar/` store modules for `postgres`, `mysql`, `sqlite`, `oracle`, `mssql`, `duckdb`, `bigquery`, and `spanner`. SQLSpec adapter `config.py` owns SQLSpec configuration and store declarations; `driver.py` owns SQLSpec dispatch and result adaptation; `data_dictionary.py` owns SQLSpec metadata contracts; adapter-local `core.py` owns only SQLSpec-specific dialect/parameter translation. Native driver/config classes and reusable engine primitives remain in `db/adapters/<engine>/`; SQLSpec wrappers call them instead of copying their behavior. Generic modules (`plugin.py`, `provider.py`, `proxy.py`, `storage.py`, `events.py`) hold zero engine code.
 2. **Driver dispatch contract.**
    - Shared bases in `extensions/sqlspec/_driver.py` implement `dispatch_execute`, `dispatch_execute_many`, `dispatch_execute_script`, `with_cursor`, exception mapping over `DatabaseError`, and `SQLResult`, removing the `execute`/`select`/`select_one` overrides in `adapters.py::BaseSyncDriver`/`BaseAsyncDriver`.
    - Preserve `**kwargs` parameters across dispatch hooks, and carry `SyncPipelineCapable.pipeline()` / `AsyncPipelineCapable.pipeline()` dispatch (wired in `db-engine-primitives:t06`) into `execute_stack` with upstream SQLSpec fallback when `isinstance(self.native_driver, SyncPipelineCapable)` / `isinstance(self.native_driver, AsyncPipelineCapable)` is `False`.
@@ -80,7 +85,7 @@ Vertebra's SQLSpec adapters must be feature-complete in the same way upstream ad
 
 ## Out of Scope
 
-- Queue backends (Chapter 5 `queues-tasks-and-channels`), SQLAlchemy/Django (Chapter 6 `sqlalchemy-and-django-integration`), `ObjectStoreProtocol` streaming parity (`native-data-platform/storage-completeness`), and upstream `sqlspec` repository changes ([sqlspec#876](https://github.com/litestar-org/sqlspec/issues/876)).
+- Queue backends (`queues-tasks-and-channels`), SQLAlchemy/Django (`sqlalchemy-and-django-integration`), object-storage streaming and integrity (`storage-integrity-and-streaming`), and upstream `sqlspec` repository changes ([sqlspec#876](https://github.com/litestar-org/sqlspec/issues/876)).
 
 ## Public Seams
 
@@ -88,7 +93,10 @@ Vertebra's SQLSpec adapters must be feature-complete in the same way upstream ad
 
 ## Dependencies
 
-`native-data-platform` Chapters 1–8 (`db-layout-and-contract`, `native-postgres-driver`, `broker-pool-sharing`, `native-oracle-driver`, `native-mysql-driver`, `native-mssql-driver`, `native-sqlite-driver`, and `native-duckdb-driver` off `main @ 80ff8a65`) and `integration-remediation` `db-engine-primitives` (`main @ 80ff8a65`).
+- `native-postgres-driver` (active): PostgreSQL adapters, stores, and pipeline dispatch run on the cut-over native PostgreSQL driver.
+- `broker-pool-sharing` (draft): `VTBARROW` broker results and lease-scoped SHM unlink depend on broker-owned pools and lease lifecycles.
+- `native-sqlite-driver` (draft): SQLite adapters and stores run on the native SQLite driver.
+- Merged: `db-layout-and-contract` (`21c99f95`), integration-remediation `db-engine-primitives` (`80ff8a65`, including the `execute_stack` pipeline dispatch from its `t06`), `driver-fail-loud` (`af1b3d30`), and the MySQL (`e86d8daf`), SQL Server (`134546d4`), Oracle (`47da6820`), and DuckDB (`14aa83b8`) native wheels.
 
 ## Contract Research Before Task Refinement
 
@@ -104,6 +112,7 @@ Vertebra's SQLSpec adapters must be feature-complete in the same way upstream ad
 - Artifact-reference tests prove BigQuery and Spanner artifact surfaces produce the same storage-neutral metadata and signed-URL semantics, preserve upstream hook return shapes, and retain BigQuery `ObjectRef` for native Object Table operations. The Spanner SQLSpec adapter imports no BigQuery adapter modules.
 - Adapter ownership checks prove generic SQLSpec modules contain no vendor dispatch or engine SQL, native DB adapters import no SQLSpec/framework/agent code, and SQLSpec-specific helpers stay inside their owning adapter. Broker dialect IDs remain protocol metadata; checks target dependency direction and executable engine behavior rather than engine-name substring bans.
 - `SQLSpecSessionService` and extension migrations run cleanly on Vertebra BigQuery and Spanner configs.
+- Docs and OKF chapters describe the per-engine adapter packages, and every caveat (including the resolver shim) is recorded in a limitations chapter.
 - `make lint-all`, `make py-test`, and `make docs` pass.
 
 ## Draft Task Outline
@@ -115,8 +124,9 @@ Vertebra's SQLSpec adapters must be feature-complete in the same way upstream ad
 - t05 BigQuery stores on upstream bases, connection shim fixes, and storage-owned `ArtifactReference` use on the shared artifact surface while retaining native BigQuery `ObjectRef`.
 - t06 Spanner stores on upstream bases, DDL/parameter fixes, and direct storage-owned artifact-reference construction without cross-engine imports.
 - t07 Remaining engine stores + `DatabaseRegistry` shared-pool refcount.
-- t08 Rust `VTBARROW` replacement for `provider.py::{SharedArrowBuffer,SharedArrowTable}` + docs.
+- t08 Rust `VTBARROW` replacement for `provider.py::{SharedArrowBuffer,SharedArrowTable}`.
+- t09 Docs and OKF: `docs/usage/extensions.md`, `docs/reference/extensions.md`, `.agents/bundles/knowledge/domains/extensions/sqlspec-alchemy-and-dialects.md`, and a SQLSpec limitations chapter for upstream contract gaps and the temporary resolver shim.
 
-[^sqlspec-adapters]: `src/py/vertebra/extensions/sqlspec/adapters.py` — Current monolithic SQLSpec adapter definitions.
+[^sqlspec-adapters]: `src/py/vertebra/extensions/sqlspec/adapters.py` — Current monolithic SQLSpec adapter definitions (`BaseSyncDriver`, `BaseAsyncDriver`, `SyncAdapterConfig`, `AsyncAdapterConfig`).
 [^sqlspec-plugin]: `src/py/vertebra/extensions/sqlspec/plugin.py` — SQLSpecPlugin lifecycle and pool configuration.
 [^sqlspec-provider]: `src/py/vertebra/extensions/sqlspec/provider.py` — SQLSpecSyncProvider and SQLSpecAsyncProvider Arrow result surface.

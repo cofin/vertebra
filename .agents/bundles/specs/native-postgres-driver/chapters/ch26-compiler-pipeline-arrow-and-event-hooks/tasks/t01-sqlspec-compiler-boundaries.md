@@ -4,7 +4,7 @@ id: "native-postgres-driver:ch26:t01"
 chapter_id: ch26-compiler-pipeline-arrow-and-event-hooks
 title: Prepare native PostgreSQL compiler boundaries without changing public defaults
 description: Implement pure sqlspec==0.71.1 ParameterStyle.NUMERIC transport copy helpers preserving statement_transformers and unwrapping TypedParameter, and stage the SQLAlchemy numeric_dollar PostgreSQL profile without altering pre-cutover defaults.
-status: stable
+status: draft
 state: pending
 priority: P1
 verification_strategy: behavior_tdd
@@ -23,8 +23,8 @@ files:
 tests:
   - src/py/tests/unit/extensions/test_postgres_compiler_transport.py
 estimated_loc: 235
-plan_revision: 6
-plan_commit: 8e9b324e
+plan_revision: 7
+plan_commit: c8722c76
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -35,12 +35,15 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-10T14:45:00Z"
+updated_at: "2026-11-12T01:30:00Z"
 commit: null
+generated:
+  by: flow-revise
+  at: "2026-11-12T01:30:00Z"
 verified:
   - by: agent:plan-generator
-    at: "2026-11-10T14:45:00Z"
-    commit: 8e9b324e
+    at: "2026-11-12T01:30:00Z"
+    commit: c8722c76
 sources:
   - id: npd-contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md

@@ -3,16 +3,16 @@ type: Guide
 flow_id: native-postgres-driver
 title: Native PostgreSQL public contracts
 description: Public interface and ownership contracts for the complete native PostgreSQL driver plan.
-status: stable
+status: draft
 created_at: "2026-11-05T00:00:00Z"
-updated_at: "2026-11-10T14:45:00Z"
+updated_at: "2026-11-12T01:30:00Z"
 generated:
   by: flow-revise
-  at: "2026-11-10T14:45:00Z"
+  at: "2026-11-12T01:30:00Z"
 verified:
   - by: agent:plan-generator
-    at: "2026-11-10T14:45:00Z"
-    commit: 8e9b324e
+    at: "2026-11-12T01:30:00Z"
+    commit: c8722c76
   - by: agent:flow-setup
     at: "2026-11-07T04:15:00Z"
     commit: 9af810f5
@@ -606,6 +606,7 @@ module via `ensure_module("vertebra._postgres", package="vertebra-core[postgres]
 retained `core` helpers (`PGCOPY_BINARY_SIGNATURE`, `decode_pgcopy_rows`, `encode_pg_jsonb`, `encode_pgcopy_rows`, `strip_pg_jsonb_header`),
 and `vertebra.db.arrow` re-exports (`ARROW_SHM_THRESHOLD_ROWS`, `ArrowCursor`, `read_arrow_shm`, `write_arrow_shm`) across `__lazy_modules__`, `__all__`, `_EXPORT_MAP`, and `TYPE_CHECKING` so downstream framework extensions and suites continue resolving cleanly.
 `PostgreSQLQueueBackend` stays strictly caller-`PostgreSQLQueueExecutor`-injected (built-in native queue executor shipping belongs to the separate `queues-tasks-and-channels` spec): when `executor is None`, `PostgreSQLQueueBackend.__init__` checks `ensure_module("vertebra._postgres", package="vertebra-core[postgres]", install_package="vertebra-core[postgres]", extra="postgres")` and raises `ImproperConfigurationError` instructing callers to pass `executor=` implementing `PostgreSQLQueueExecutor` (for example wrapping `AsyncPostgreSQLDriver` and `PostgresNotificationSource`).
+`ch27:t03` deletes `SyncCloudSQLDialer.create_psycopg_connect_func`, `AsyncCloudSQLDialer.create_asyncpg_connect_func`, `SyncAlloyDBDialer.create_psycopg_connect_func`, and `AsyncAlloyDBDialer.create_asyncpg_connect_func` without aliases; native cloud dialing goes through `PostgreSQLConfig` cloud options.
 Before `ch27`, the existing public driver pair remains coherent; final-module test imports
 switch to canonical public imports at activation. `ch27:t03` then `ch27:t04` remove the
 private unreachable legacy async and sync bodies, preserving static validity at every

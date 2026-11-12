@@ -16,7 +16,7 @@ generated:
 verified:
 - by: agent:flow-learn
   at: '2026-11-08T18:26:31.591504Z'
-  commit: cda502a4
+  commit: 067fa901
 sources:
 - id: src-vertebra-py-src-lib-rs
   resource: src/rs/vertebra-py/src/lib.rs

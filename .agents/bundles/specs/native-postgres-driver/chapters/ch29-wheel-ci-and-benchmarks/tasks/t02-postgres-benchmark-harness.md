@@ -3,8 +3,8 @@ type: Task
 id: "native-postgres-driver:ch29:t02"
 chapter_id: ch29-wheel-ci-and-benchmarks
 title: Implement reproducible PostgreSQL benchmark capture and offline threshold comparator
-description: Add Python 3.12-scoped [dependency-groups].postgres-bench comparators, bumpversion entries for vertebra-postgres, strict Mypy/pytest config, and clean msgspec schema_version=1 capture/compare CLI in tools/benchmarks/postgres.py.
-status: stable
+description: Add Python 3.12-scoped [dependency-groups].postgres-bench comparators, verify existing vertebra-postgres bumpversion entries, add strict Mypy/pytest config, and implement the msgspec schema_version=1 capture/compare CLI in tools/benchmarks/postgres.py.
+status: draft
 state: pending
 priority: P1
 verification_strategy: behavior_tdd
@@ -24,8 +24,8 @@ files:
 tests:
   - src/py/tests/unit/tools/test_postgres_benchmarks.py
 estimated_loc: 245
-plan_revision: 6
-plan_commit: 8e9b324e
+plan_revision: 7
+plan_commit: c8722c76
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -36,12 +36,15 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: "2026-11-05T00:00:00Z"
-updated_at: "2026-11-10T14:45:00Z"
+updated_at: "2026-11-12T01:30:00Z"
 commit: null
+generated:
+  by: flow-revise
+  at: "2026-11-12T01:30:00Z"
 verified:
   - by: agent:plan-generator
-    at: "2026-11-10T14:45:00Z"
-    commit: 8e9b324e
+    at: "2026-11-12T01:30:00Z"
+    commit: c8722c76
 sources:
   - id: root-pyproject
     resource: pyproject.toml
@@ -72,10 +75,10 @@ tags:
 
 ## Objective & Scope Boundary
 
-Create the deterministic `schema_version=1` PostgreSQL benchmark capture and offline comparison harness in `tools/benchmarks/postgres.py` alongside universal-lock-safe comparator dependency, `bumpversion`, pytest marker, and strict Mypy settings in `pyproject.toml` and `uv.lock` [^root-pyproject] [^bench-micro] [^vtb-serializers] [^vtb-loader] [^bench-guide] [^pg-contracts]:
+Create the deterministic `schema_version=1` PostgreSQL benchmark capture and offline comparison harness in `tools/benchmarks/postgres.py` alongside universal-lock-safe comparator dependency, pytest marker, and strict Mypy settings in `pyproject.toml` and `uv.lock`, verifying the existing `vertebra-postgres` `bumpversion` entries [^root-pyproject] [^bench-micro] [^vtb-serializers] [^vtb-loader] [^bench-guide] [^pg-contracts]:
 1. Update `pyproject.toml` and refresh `uv.lock` (preserving `3.12`–`3.15t` universal lock compatibility without broad transitive upgrades):
    - Add dedicated `[dependency-groups].postgres-bench = ["psycopg[binary]==3.2.13; python_version == '3.12'", "asyncpg==0.31.0; python_version == '3.12'"]` (leaving `[dependency-groups].bench`, `[project.dependencies]`, and `[project.optional-dependencies]` free of `psycopg`/`asyncpg` so `make bench`, `make bench-ft` on `3.14t`/`3.15t`, and universal `uv lock` all succeed cleanly).
-   - Register two `[[tool.bumpversion.files]]` entries syncing `vertebra-postgres` on `make release` / `make pre-release`: (a) `filename = "pyproject.toml"`, `search = 'vertebra-postgres=={current_version}'`, `replace = 'vertebra-postgres=={new_version}'` (updating both `[postgres]` and `[all]` extras), and (b) `filename = "src/rs/vertebra-postgres/pyproject.toml"`, `search = 'version = "{current_version}"'`, `replace = 'version = "{new_version}"'`.
+   - Verify (without duplicating) the two `[[tool.bumpversion.files]]` entries that already sync `vertebra-postgres` on `make release` / `make pre-release` at `c8722c76`: (a) `filename = "pyproject.toml"`, `search = 'vertebra-postgres=={current_version}'`, `replace = 'vertebra-postgres=={new_version}'` (updating both `[postgres]` and `[all]` extras), and (b) `filename = "src/rs/vertebra-postgres/pyproject.toml"`, `search = 'version = "{current_version}"'`, `replace = 'version = "{new_version}"'`; the dry-run bump in `## Verification` proves both entries rewrite their targets.
    - Register `postgres_benchmark` in `[tool.pytest.ini_options].markers` and set `addopts = "-m 'not postgres_benchmark'"` so default `make py-test` and `make coverage` skip live multi-sample captures unless `-m postgres_benchmark` is selected.
    - Append `"tools/benchmarks/postgres.py"` to `[tool.mypy].files` and add `"asyncpg"`, `"asyncpg.*"`, `"psycopg"`, `"psycopg.*"` to `[[tool.mypy.overrides]]` (`ignore_missing_imports = true`) so `uv run --no-sync mypy tools/benchmarks/postgres.py` (`strict = true`) and `make lint-all` without `--group postgres-bench` exit `0`.
 2. Implement `tools/benchmarks/postgres.py` (`capture --implementation reference|native --dsn-env VERTEBRA_POSTGRES_BENCH_DSN --output <path>` and offline `compare --reference <reference.json> --native <native.json> --output <comparison.json>`) adhering to strict Python organization rules:
@@ -102,7 +105,7 @@ Out of scope: Ephemeral PG18 container orchestration, Criterion Rust benches, an
 
 - `pyproject.toml`:
   - `[dependency-groups].postgres-bench = ["psycopg[binary]==3.2.13; python_version == '3.12'", "asyncpg==0.31.0; python_version == '3.12'"]`.
-  - `[[tool.bumpversion.files]]` entries for `pyproject.toml` (`vertebra-postgres=={current_version}`) and `src/rs/vertebra-postgres/pyproject.toml` (`version = "{current_version}"`).
+  - Existing `[[tool.bumpversion.files]]` entries for `pyproject.toml` (`vertebra-postgres=={current_version}`) and `src/rs/vertebra-postgres/pyproject.toml` (`version = "{current_version}"`) stay single and unchanged.
   - `[tool.mypy].files`: append `"tools/benchmarks/postgres.py"`; `[[tool.mypy.overrides]]`: append `"asyncpg"`, `"asyncpg.*"`, `"psycopg"`, `"psycopg.*"`.
 - `tools/benchmarks/postgres.py`:
   - `SCHEMA_VERSION: Final[int] = 1`
@@ -148,7 +151,7 @@ Out of scope: Ephemeral PG18 container orchestration, Criterion Rust benches, an
 
 ## Acceptance Criteria
 
-- [ ] `pyproject.toml` and `uv.lock` isolate CPython 3.12 comparators in `[dependency-groups].postgres-bench` with `; python_version == '3.12'` markers, register `[[tool.bumpversion.files]]` for `vertebra-postgres` in both `pyproject.toml` and `src/rs/vertebra-postgres/pyproject.toml`, configure `[tool.mypy]` targets/overrides, and exclude `postgres_benchmark` from default `pytest` runs while keeping `3.12`–`3.15t` locking and `make bench-ft` intact (R27).
+- [ ] `pyproject.toml` and `uv.lock` isolate CPython 3.12 comparators in `[dependency-groups].postgres-bench` with `; python_version == '3.12'` markers, keep exactly one `[[tool.bumpversion.files]]` entry each for `vertebra-postgres` in `pyproject.toml` and `src/rs/vertebra-postgres/pyproject.toml`, configure `[tool.mypy]` targets/overrides, and exclude `postgres_benchmark` from default `pytest` runs while keeping `3.12`–`3.15t` locking and `make bench-ft` intact (R27).
 - [ ] `tools/benchmarks/postgres.py` implements clean class-structured `schema_version=1` `capture` and offline `compare` using `gc`-safe `msgspec.Struct` envelopes, top-level `if TYPE_CHECKING:` + `ensure_module`, `vertebra.utils.serializers`, and `sys.stdout.write`/`sys.stderr.write`, verified by `@pytest.mark.parametrize` tests in `src/py/tests/unit/tools/test_postgres_benchmarks.py` (R27).
 
 ## Notes & Discoveries

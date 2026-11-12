@@ -9,9 +9,12 @@ tags:
 - object-store
 - signing
 verified:
+- by: agent:flow-sync
+  at: '2026-11-12T01:15:00Z'
+  commit: c8722c76
 - by: agent:docs-okf-specialist
   at: '2026-11-09T02:24:00Z'
-  commit: c8c8998a
+  commit: 067fa901
 sources:
 - id: core-gcp-auth
   resource: src/rs/vertebra-core/src/gcp_auth.rs
@@ -94,7 +97,7 @@ sources:
 - `extract_buffer_bytes` keeps `StorageBuffer` and `bytes` zero-copy (`PyBackedBytes`) and copies any other C-contiguous `u8` buffer synchronously before releasing the GIL, so callers may mutate `bytearray` sources afterwards [^storage-lib].
 - Object keys collapse empty `/` and `.` segments in Python before passing `StorePath::parse`, so spaces, `%`, `~`, and non-ASCII characters are stored verbatim while `..` segments raise `ValueError` [^storage-store] [^py-store].
 - `get_range` rejects `offset + length` overflow with `ValueError` and answers `length == 0` with a `head` check and empty bytes [^storage-store].
-- `StorageError::Precondition` maps to `vertebra.typing.PreconditionError` (an `OSError`); `AlreadyExists` maps to `FileExistsError`, so `if_not_exists=True`, `copy(..., overwrite=False)`, and `rename(..., overwrite=False)` raise `FileExistsError` while `if_match` / `if_none_match` failures raise `PreconditionError` [^storage-lib] [^py-typing].
+- `StorageError::Precondition` maps to `vertebra.typing.PreconditionError` (an `OSError`); `AlreadyExists` maps to `FileExistsError`, so `if_not_exists=True`, `copy(..., overwrite=False)`, and `rename(..., overwrite=False)` raise `FileExistsError` while `if_match` / `if_none_match` failures raise `PreconditionError`; on the `s3`/`b2` and `r2` backends create-only `copy` and `rename` are not supported and fail with the backend error instead (see limitations) [^storage-lib] [^py-typing] [^storage-store].
 - GCS `if_match` accepts a numeric generation directly or resolves a matching ETag to the object generation before a conditional `PutMode::Update` [^storage-store].
 - `OciObjectStore` streams GET bodies (`bytes_stream`) instead of buffering whole objects [^storage-oci].
 - `put_file` / `get_file` stream files over 8 MiB in parts; `get_file` writes a `.part` sibling and renames it into place; `get_files` / `put_files` run with bounded `buffer_unordered(concurrency)` and keep results in input order [^storage-store].
@@ -106,7 +109,7 @@ sources:
 - Framework adapters accept only an explicit store, `StorageConfig`, or URI; `vertebra.extensions.django` exports Django integration types only, so stores and configs import from `vertebra.storage` [^ext-alchemy-storage] [^ext-sqlspec-storage] [^ext-django-storage].
 <!-- truth: end -->
 
-Known caveats (R2 custom domains, `fsync`, cancellation windows, request timeouts) live in [Object Storage Implementation Limitations](object-storage-limitations.md).
+Known caveats (R2 custom domains, create-only copy and rename on S3-compatible backends, `fsync`, cancellation windows, request timeouts) live in [Object Storage Implementation Limitations](object-storage-limitations.md).
 
 ## Rust Engine
 

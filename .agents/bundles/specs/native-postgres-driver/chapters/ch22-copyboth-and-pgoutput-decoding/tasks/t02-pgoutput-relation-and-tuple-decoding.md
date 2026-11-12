@@ -25,7 +25,7 @@ tests:
   - src/rs/vertebra-postgres/tests/postgres_pgoutput_tests.rs
 estimated_loc: 240
 plan_revision: 6
-plan_commit: 8e9b324e
+plan_commit: c8722c76
 state_revision: 1
 claimed_by: null
 claimed_at: null
@@ -33,7 +33,7 @@ blocked_reason: null
 unblock_condition: null
 next_step: null
 last_verified_at: "2026-11-11T01:52:41Z"
-last_verified_commit: 64288c63
+last_verified_commit: c8722c76
 verification_evidence: "cargo test -p vertebra-postgres --test postgres_pgoutput_tests --test postgres_replication_wire_tests (7 + 9 passed), cargo clippy -p vertebra-postgres --all-targets -- -D warnings, ruff check, mypy, pytest test_postgres_types.py (26 passed), and scan_public_docstrings exited 0"
 created_at: "2026-11-05T18:25:07Z"
 updated_at: "2026-11-11T01:53:00Z"
@@ -44,7 +44,7 @@ generated:
 verified:
   - by: agent:plan-generator
     at: "2026-11-10T14:45:00Z"
-    commit: 8e9b324e
+    commit: c8722c76
 sources:
   - id: npd-contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md

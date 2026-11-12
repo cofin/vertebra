@@ -2,29 +2,29 @@
 type: Spec
 parent_flow: native-postgres-driver
 chapter_id: ch22-copyboth-and-pgoutput-decoding
-title: "Chapter 22: Dedicated CopyBoth Logical Replication Sessions and pgoutput v1 Decoding"
-description: Establish dedicated CopyBoth logical replication sessions and decode bounded pgoutput v1 relation, tuple, and transaction change envelopes in vertebra-postgres.
-status: stable
+title: "Chapter 22: Dedicated CopyBoth Sessions, pgoutput v1 Decoding and Transaction Envelopes, and the Split-State Limitations Record"
+description: Establish dedicated CopyBoth logical replication sessions, decode bounded pgoutput v1 relation, tuple, and transaction change envelopes in vertebra-postgres, and record the split native-wheel/legacy-driver state on main in the PostgreSQL limitations OKF entry.
+status: draft
 state: active
 planning_status: complete
 depends_on_chapters:
   - ch21-live-notifications
 replan_trigger: null
 current_task: "native-postgres-driver:ch22:t03"
-plan_revision: 6
-plan_commit: 8e9b324e
-state_revision: 1
-last_verified_checkpoint: 64288c63
+plan_revision: 7
+plan_commit: c8722c76
+state_revision: 2
+last_verified_checkpoint: c8722c76
 last_reviewed_commit: null
 created_at: "2026-11-05T00:00:00Z"
-updated_at: "2026-11-11T01:53:00Z"
+updated_at: "2026-11-12T01:30:00Z"
 generated:
   by: flow-revise
-  at: "2026-11-10T14:45:00Z"
+  at: "2026-11-12T01:30:00Z"
 verified:
   - by: agent:plan-generator
-    at: "2026-11-10T14:45:00Z"
-    commit: 8e9b324e
+    at: "2026-11-12T01:30:00Z"
+    commit: c8722c76
 sources:
   - id: npd-contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md
@@ -35,96 +35,114 @@ sources:
   - id: pg-core-rs
     resource: src/rs/vertebra-db/src/postgres/mod.rs::encode_query_frame
     title: Shared PostgreSQL wire framing substrate in vertebra-db
+  - id: pgoutput-rs
+    resource: src/rs/vertebra-postgres/src/replication/pgoutput.rs::PgOutputDecoder
+    title: Incremental pgoutput decoder whose decode_next_frame parses Relation, Type, and Insert frames
   - id: cdc-domain
     resource: .agents/bundles/knowledge/domains/data/query-pipeline-cdc-and-tenancy.md
     title: Adapter-owned CDC envelopes, unchanged TOAST invariants, and int64 event IDs
+  - id: pg-driver-py
+    resource: src/py/vertebra/db/adapters/postgres/driver.py::SyncPostgreSQLDriver
+    title: Python drivers still executing through psycopg_pool and asyncio.to_thread on main
+  - id: storage-limitations
+    resource: .agents/bundles/knowledge/domains/storage/object-storage-limitations.md
+    title: House format for a domain limitations OKF Gotcha entry
 tags:
   - postgres
   - replication
   - pgoutput
   - rust
   - cdc
+  - limitations
 ---
 
-# Chapter 22: Dedicated CopyBoth Logical Replication Sessions and pgoutput v1 Decoding
+# Chapter 22: Dedicated CopyBoth Sessions, pgoutput v1 Decoding and Transaction Envelopes, and the Split-State Limitations Record
 
 <!-- truth: start -->
-- **Dedicated `CopyBoth` Ownership**: `PostgresReplicationConnection` dials an isolated direct/session `PostgresConnection` with `replication=database`, verifies pre-existing caller-owned `pgoutput` slots and publications on a short-lived metadata probe without creating or dropping slots, and enters `CopyBothResponse` (`'W'`) via `START_REPLICATION ... LOGICAL ... (proto_version '1', publication_names '...', binary 'false', streaming 'false', messages 'true')` [^npd-contracts] [^npd-proto-research].
-- **Single Bounded Frame Reader**: `protocol.rs` factors frame length checking into one shared `read_frame` helper, adding only tag `'W'` (`CopyBothResponse`, overall format `0`, `0` columns) for replication while delegating all standard tags to `postgres-protocol` [^npd-proto-research] [^pg-core-rs].
-- **Lossless `pgoutput` v1 Tuples & Explicit TOAST**: `PgOutputDecoder` maintains an immutable-snapshot `RelationCache` (capped at `4096` relations), distinguishes missing attributes, SQL `NULL` (`'n'`), unchanged TOAST (`'u'` -> `PgUnchangedToast`), text (`'t'`), and binary (`'b'`) values, and emits bounded `ReplicationRecord` envelopes (`<= 16 MiB` per record, `<= 1024` queued records / `8 MiB`) without buffering whole transactions [^npd-contracts] [^cdc-domain].
+- **Dedicated `CopyBoth` Ownership (on main)**: `PostgresReplicationConnection` dials an isolated direct/session connection with `replication=database`, verifies caller-owned `pgoutput` slots and publications on a short-lived metadata probe without creating or dropping slots, and enters `CopyBothResponse` (`'W'`) via `START_REPLICATION ... LOGICAL ... (proto_version '1', publication_names '...', binary 'false', streaming 'false', messages 'true')` [^npd-contracts] [^npd-proto-research].
+- **Relation, Type, and Insert Decoding (on main)**: `PgOutputDecoder::decode_next_frame` maintains an `Arc<PgOutputRelationSchema>` relation cache capped at `4096`, reconciles `Type` (`'Y'`) declarations, and decodes `Insert` (`'I'`) tuples distinguishing SQL `NULL`, unchanged TOAST (`PgUnchangedToast`), text, and binary values [^pgoutput-rs] [^cdc-domain].
+- **Ordered Transaction Envelopes (`ch22:t03`)**: The decoder adds `Begin`, `Origin`, `Update`, `Delete`, `Truncate`, `Message`, and `Commit` frames and a `next_record` state machine emitting bounded `ReplicationRecord` envelopes (`<= 16 MiB` per record, `<= 1024` queued records / `8 MiB`) with stable `(system_identifier, slot, begin_final_lsn, transaction_ordinal)` coordinates and no whole-transaction buffering [^npd-contracts] [^npd-proto-research].
+- **Split-State Limitations Record (`ch22:t04`)**: `.agents/bundles/knowledge/domains/data/postgres-limitations.md` records that `main` (`c8722c76`) carries the native wheel while the Python drivers, queue guard, dialer helpers, and driver tests still use `psycopg`/`asyncpg`, and that the PR #104 description overstates the cutover; both knowledge indexes register the entry [^pg-driver-py] [^storage-limitations].
 <!-- truth: end -->
 
 ## 1. Specification, Context & Provenance
 
 ### 1.1 Problem Statement & Objectives
 
-PostgreSQL logical replication requires a dedicated `replication=database` Protocol 3.0 session that negotiates `CopyBothResponse` (`'W'`) — a backend tag absent from upstream `postgres-protocol =0.6.12` — and streams binary `pgoutput` v1 logical decoding messages (`Relation`, `Type`, `Begin`, `Origin`, `Insert`, `Update`, `Delete`, `Truncate`, `Message`, `Commit`) [^npd-proto-research]. Chapter 22 establishes `PostgresReplicationConnection` startup and preflight validation, implements incremental `PgOutputDecoder` relation/type/tuple decoding with explicit `PgUnchangedToast` preservation, and orders bounded transaction and DML change envelopes ready for commit-fenced LSN feedback in Chapter 23 [^npd-contracts] [^cdc-domain].
+PostgreSQL logical replication requires a dedicated `replication=database` Protocol 3.0 session that negotiates `CopyBothResponse` (`'W'`) and streams binary `pgoutput` v1 messages (`Relation`, `Type`, `Begin`, `Origin`, `Insert`, `Update`, `Delete`, `Truncate`, `Message`, `Commit`) [^npd-proto-research]. `ch22:t01` and `ch22:t02` are on `main` in squash commit `c8722c76`: session startup, preflight, relation/type state, and `Insert` tuples decode today, while `decode_next_frame` rejects every other tag as unnegotiated [^pgoutput-rs]. `ch22:t03` completes the transaction envelopes that Chapter 23 fences LSN feedback on.
+
+`main` also carries a split runtime state: the native wheel is installed and tested, but `SyncPostgreSQLDriver` runs on `psycopg_pool`, `AsyncPostgreSQLDriver` offloads it with `asyncio.to_thread`, and `PostgreSQLQueueBackend` probes `psycopg` [^pg-driver-py]. `ch22:t04` records that state in the PostgreSQL limitations OKF entry at the start of the follow-up PR so readers of `main` see the real boundary until `ch27:t04` removes those caveats.
 
 ### 1.2 Non-Goals
 
-- `XLogData` (`'w'`), `PrimaryKeepalive` (`'k'`), and `StandbyStatusUpdate` (`'r'`) LSN feedback, reconnect loops, and PyO3 `AsyncPostgresReplication` handles (owned by Chapter 23).
-- Python `PostgresChangeSource` and `PostgresCheckpointStore` orchestration (owned by Chapter 24).
-- Automatic slot creation, slot drop, DDL replication, initial table snapshot export, or `pgoutput` v2–v4 streaming/two-phase transactions [^npd-contracts] [^npd-proto-research].
+- `XLogData` (`'w'`), `PrimaryKeepalive` (`'k'`), and `StandbyStatusUpdate` (`'r'`) feedback, reconnect loops, and PyO3 `AsyncPostgresReplication` handles (Chapter 23).
+- Python `PostgresChangeSource` and `PostgresCheckpointStore` orchestration (Chapter 24).
+- Automatic slot creation or drop, DDL replication, initial snapshot export, or `pgoutput` v2–v4 streaming/two-phase transactions [^npd-contracts].
+- Changing driver, queue, dialer, or test code while recording the split state (Chapter 27), and the final limitations content for runtime caveats (`ch31:t01`).
 
 ### 1.3 Upstream Baseline & Code Analysis
 
-Parent roadmap: [spec.md](../../spec.md) and [contracts.md](../../contracts.md). Research: [protocol-and-execution_20261105.md](../../research/protocol-and-execution_20261105.md). Skills: [runtime-ipc](../../../../../skills/runtime-ipc/SKILL.md), [pyo3-bridge](../../../../../skills/pyo3-bridge/SKILL.md), and [python-framework](../../../../../skills/python-framework/SKILL.md). Knowledge: [query-pipeline-cdc-and-tenancy.md](../../../../knowledge/domains/data/query-pipeline-cdc-and-tenancy.md) and [adr-004-optional-driver-wheels-and-shm-ownership.md](../../../../knowledge/decisions/adr-004-optional-driver-wheels-and-shm-ownership.md).
+Parent roadmap: [spec.md](../../spec.md) and [contracts.md](../../contracts.md). Research: [protocol-and-execution_20261105.md](../../research/protocol-and-execution_20261105.md). Skills: [runtime-ipc](../../../../../skills/runtime-ipc/SKILL.md) and [pyo3-bridge](../../../../../skills/pyo3-bridge/SKILL.md). Knowledge: [query-pipeline-cdc-and-tenancy.md](../../../../knowledge/domains/data/query-pipeline-cdc-and-tenancy.md), [database-drivers-and-dialers.md](../../../../knowledge/domains/data/database-drivers-and-dialers.md), and [object-storage-limitations.md](../../../../knowledge/domains/storage/object-storage-limitations.md).
+
+| Existing symbol at `c8722c76` | Verified consequence |
+| --- | --- |
+| `src/rs/vertebra-postgres/src/replication/pgoutput.rs::PgOutputFrame` | Variants `Relation`, `Type { type_oid, namespace, name }`, and `Insert { relation, new_tuple }`; `ch22:t03` adds the remaining v1 frames. |
+| `src/rs/vertebra-postgres/src/replication/pgoutput.rs::PgOutputDecoder::decode_next_frame` | `(&mut self, catalog: &mut TypeCatalog, codec_ctx: &CodecContext) -> Result<Option<PgOutputFrame>, PostgresError>`; unknown tags fail with `PostgresError::Protocol`. |
+| `src/rs/vertebra-postgres/src/replication/pgoutput.rs::PgOutputDecoder::reset_on_disconnect` | Clears buffered bytes and relation cache; `ch22:t03` also drops the active transaction. |
+| `src/rs/vertebra-db/src/postgres/mod.rs::encode_query_frame` [^pg-core-rs] | Shared stateless frame helpers; replication framing stays in `vertebra-postgres`. |
+| `src/rs/vertebra-postgres/src/replication/mod.rs::pgoutput_tuple_to_python_dict` | Existing tuple projection reused by `ch23:t03` for record payloads. |
+| `src/py/vertebra/db/adapters/postgres/types.py::PostgresReplicationRecord` | Kinds `control`, `begin`, `insert`, `update`, `delete`, `truncate`, `message`, `commit` already validated in Python. |
 
 ## 2. Requirements, Concrete Contracts & Architecture
 
 ### 2.1 Chapter Requirements
 
-- **R22.1 (`ch22:t01`)**: Factor `protocol.rs` framing into one deadline-aware bounded `read_frame` with replication-only `'W'` (`CopyBothResponse`) decoding; reject `PoolerMode::Transaction`, `PoolerMode::Statement`, and `PoolerMode::Auto` on `PostgresConfig.pooler_mode` (requiring explicit `PoolerMode::Direct | PoolerMode::Session`) with `PostgresError::Interface` before dialing; implement `PostgresReplicationConnection` reusing `session::establish_standalone_connection(config, false)` for ordinary-session slot/publication preflight (`plugin = 'pgoutput'`, inactive slot, valid `restart_lsn` / `confirmed_flush_lsn` window, single `LEFT JOIN` SHA-256 `publication_fingerprint`) and `session::establish_standalone_connection(config, true)` for the dedicated `replication=database` socket (`IDENTIFY_SYSTEM`, `START_REPLICATION SLOT ... LOGICAL ...`, bounded `CopyDone` shutdown).
-- **R22.2 (`ch22:t02`)**: Implement incremental `PgOutputDecoder` (`push`, `decode_next_frame`) with atomic `Arc<PgOutputRelationSchema>` replacement in a bounded `4096`-entry `RelationCache`, ordinary-preflight `(namespace, name)` + `TypeInfo` preloading across `vector`, `halfvec`, `enum`, `domain`, `range`, `array`, and `composite` OIDs, mismatch-only `Type` (`'Y'`) invalidation, shared scalar/container value decoding, and adapter-owned pure-Python `PgUnchangedToast`, `PostgresReplicationIdentity`, and GC-tracked `PostgresReplicationRecord` structs in `src/py/vertebra/db/adapters/postgres/types.py`.
-- **R22.3 (`ch22:t03`)**: Implement transaction state machine and bounded `ReplicationRecord` envelopes across exact `proto.c` v1 layouts for `Begin` (`'B'`), `Origin` (`'O'`), `Insert` (`'I'`), `Update` (`'U'` with `'K'`/`'O'`/`'N'`), `Delete` (`'D'`), `Truncate` (`'T'`), transactional/non-transactional `Message` (`'M'`), and `Commit` (`'C'`, carrying `origin_name` and `origin_lsn`), enforcing `16 MiB` max record bytes and `1024`-record / `8 MiB` queue bounds plus stable `(system_identifier, slot, begin_final_lsn, transaction_ordinal)` deduplication coordinates.
+- **R22.1 (`ch22:t01`, completed)**: Shared bounded `read_frame`, replication-only `'W'` decoding, pooler-mode rejection, `PostgresReplicationConnection` preflight and `START_REPLICATION`.
+- **R22.2 (`ch22:t02`, completed)**: `PgOutputDecoder` relation cache, type reconciliation, four-state `Insert` tuples, and adapter `PgUnchangedToast`, `PostgresReplicationIdentity`, and `PostgresReplicationRecord` structs.
+- **R22.3 (`ch22:t03`)**: Extend `PgOutputFrame` and `decode_next_frame` with exact `proto.c` v1 layouts for `Begin` (`'B'`), `Origin` (`'O'`), `Update` (`'U'` with `'K'`/`'O'`/`'N'`), `Delete` (`'D'`), `Truncate` (`'T'`), transactional/non-transactional `Message` (`'M'`), and `Commit` (`'C'`); add `PgOutputDecoder::next_record` driving an `ActiveLogicalTx` state machine into bounded `ReplicationRecord` envelopes; add `BoundedReplicationQueue` (`1024` records / `8 MiB`); re-export the record types from `replication/mod.rs`.
+- **R27.1 (`ch22:t04`)**: Create `postgres-limitations.md` (OKF `Gotcha`) recording the split state on `main` with symbol-anchored provenance, and register it in `.agents/bundles/knowledge/index.md` and `.agents/bundles/knowledge/domains/index.md`.
 
 ### 2.2 Concrete Type & Signature Contracts
 
-- Rust (`src/rs/vertebra-postgres/src/protocol.rs` & `src/rs/vertebra-postgres/src/replication/mod.rs`):
-  - `pub async fn read_frame<R: AsyncRead + Unpin>(reader: &mut R, scratch: &mut BytesMut, max_frame_bytes: usize, deadline: Option<Instant>) -> Result<(u8, BytesMut), crate::errors::PostgresError>` and `pub async fn read_replication_message<R: AsyncRead + Unpin>(reader: &mut R, scratch: &mut BytesMut, max_frame_bytes: usize, deadline: Option<Instant>) -> Result<ReplicationBackendMessage, crate::errors::PostgresError>`
-  - `pub enum ReplicationBackendMessage { CopyBothResponse { format: u8, column_formats: Vec<u16> }, Standard(postgres_protocol::message::backend::Message) }`
-  - `pub struct VerifiedReplicationIdentity { pub system_identifier: String, pub timeline: i32, pub database: String, pub slot: String, pub publication_fingerprint: String, pub confirmed_flush_lsn: u64, pub restart_lsn: u64 }`
-  - `pub fn format_pg_lsn(lsn: u64) -> String` and `pub fn parse_pg_lsn(text: &str) -> Result<u64, crate::errors::PostgresError>`
-  - `impl PostgresReplicationConnection { pub async fn probe_identity(config: &crate::config::PostgresConfig, slot: &str, publication: &str) -> Result<VerifiedReplicationIdentity, crate::errors::PostgresError>; pub async fn connect_logical(config: &crate::config::PostgresConfig, slot: &str, publication: &str, start_lsn: Option<u64>) -> Result<Self, crate::errors::PostgresError>; pub async fn shutdown(&mut self, deadline: Instant) -> Result<(), crate::errors::PostgresError>; }` — rejects `PoolerMode::Transaction | PoolerMode::Statement | PoolerMode::Auto` on `config.pooler_mode` (requiring explicit `PoolerMode::Direct | PoolerMode::Session`) with `PostgresError::Interface` before dialing (matching Python `PostgreSQLConfig.derive_direct_config()`), dials ordinary preflight via `crate::session::establish_standalone_connection(config, false)` and the logical replication session via `crate::session::establish_standalone_connection(config, true)`, and hashes `publication_fingerprint` from a single parameterized `pg_publication LEFT JOIN pg_publication_tables` query.
-- Rust (`src/rs/vertebra-postgres/src/replication/pgoutput.rs`):
-  - `pub enum PgOutputTupleValue { Null, UnchangedToast, Value(PgValue) }`
-  - `pub struct PgOutputDecoder { ... }` with `pub fn new(max_relations: usize, max_record_bytes: usize) -> Self`, `pub fn push(&mut self, payload: &[u8]) -> Result<(), crate::errors::PostgresError>`, `pub fn next_record(&mut self, identity: &VerifiedReplicationIdentity, catalog: &mut crate::types::TypeCatalog, codec_ctx: &CodecContext) -> Result<Option<ReplicationRecord>, crate::errors::PostgresError>`, `pub fn reset_on_disconnect(&mut self)`, and `pub fn finish_clean_eof(&self) -> Result<(), crate::errors::PostgresError>`.
-  - `pub enum ReplicationRecord { Begin { ... }, Insert { ... }, Update { ... }, Delete { ... }, Truncate { ... }, Message { ... }, Commit { dedup: ReplicationDedupKey, xid: u32, flags: u8, commit_lsn: u64, commit_end_lsn: u64, commit_time_pg_us: i64, origin_name: Option<String>, origin_lsn: Option<u64> } }`
-- Python (`src/py/vertebra/db/adapters/postgres/types.py`):
-  - `class PgUnchangedToast(msgspec.Struct, frozen=True, gc=False): pass` (`PG_UNCHANGED_TOAST: Final = PgUnchangedToast()`)
-  - `class PostgresReplicationIdentity(msgspec.Struct, frozen=True, gc=False): system_identifier: str; database: str; slot: str; publication_fingerprint: str` with `@property def identity_key(self) -> tuple[str, str, str, str]`
-  - `class PostgresReplicationRecord(msgspec.Struct, frozen=True): kind: Literal["control", "begin", "insert", "update", "delete", "truncate", "message", "commit"]; payload: dict[str, Any]; commit_end_lsn: int | None = None; generation: int = 0` (`gc=False` intentionally omitted because `payload` holds mutable `dict`/`list`/`PgJson` containers requiring cyclic GC traversal).
+- Rust (`src/rs/vertebra-postgres/src/replication/pgoutput.rs`), added by `ch22:t03`:
+  - `pub const DEFAULT_MAX_QUEUE_RECORDS: usize = 1024;` and `pub const DEFAULT_MAX_QUEUE_BYTES: usize = 8 * 1024 * 1024;`
+  - `PgOutputFrame` gains `Begin { final_lsn: u64, commit_time_pg_us: i64, xid: u32 }`, `Origin { origin_lsn: u64, origin_name: String }`, `Update { relation, old_kind: Option<OldTupleKind>, old_tuple: Option<Vec<PgOutputTupleValue>>, new_tuple: Vec<PgOutputTupleValue> }`, `Delete { relation, old_kind: OldTupleKind, old_tuple: Vec<PgOutputTupleValue> }`, `Truncate { relations: Vec<Arc<PgOutputRelationSchema>>, cascade: bool, restart_identity: bool }`, `Message { transactional: bool, message_lsn: u64, prefix: String, content: Bytes }`, and `Commit { flags: u8, commit_lsn: u64, commit_end_lsn: u64, commit_time_pg_us: i64 }`.
+  - `pub enum OldTupleKind { Key, Full }`, `pub struct ActiveLogicalTx { pub xid: u32, pub begin_final_lsn: u64, pub commit_time_pg_us: i64, pub origin_name: Option<String>, pub origin_lsn: Option<u64>, pub next_ordinal: u64 }`, `pub struct ReplicationDedupKey { pub system_identifier: String, pub slot: String, pub begin_final_lsn: u64, pub transaction_ordinal: u64 }`.
+  - `pub enum ReplicationRecord { Begin { .. }, Insert { .. }, Update { .. }, Delete { .. }, Truncate { .. }, Message { dedup: Option<ReplicationDedupKey>, xid: Option<u32>, .. }, Commit { dedup, xid, flags, commit_lsn, commit_end_lsn, commit_time_pg_us, origin_name: Option<String>, origin_lsn: Option<u64> } }` with `pub fn approx_bytes(&self) -> usize`.
+  - `impl PgOutputDecoder { pub fn next_record(&mut self, identity: &VerifiedReplicationIdentity, catalog: &mut TypeCatalog, codec_ctx: &CodecContext) -> Result<Option<ReplicationRecord>, PostgresError>; pub fn active_transaction(&self) -> Option<&ActiveLogicalTx>; }` — `Relation` and `Type` frames update decoder state inside `next_record` and emit no record.
+  - `pub struct BoundedReplicationQueue { .. }` with `pub fn new(max_records: usize, max_bytes: usize, max_record_bytes: usize) -> Self`, `pub fn can_accept(&self, approx_bytes: usize) -> bool`, `pub fn push(&mut self, record: ReplicationRecord) -> Result<(), PostgresError>`, `pub fn pop(&mut self) -> Option<ReplicationRecord>`, `pub fn len(&self) -> usize`, `pub fn is_empty(&self) -> bool`.
+- OKF (`.agents/bundles/knowledge/domains/data/postgres-limitations.md`), added by `ch22:t04`: frontmatter `type: Gotcha`, `title: PostgreSQL Native Driver Limitations`, `status: stable`, `tags`, `generated`, `verified` (`commit: c8722c76`), `sources` with matching `[^id]:` footnotes; a `<!-- truth: start -->` block; and a `## Caller Guidance` section.
 
 ### 2.3 Caller -> Seam -> Collaborator Map
 
-- `AsyncPostgresClient` (`ch23:t03`) -> `PostgresReplicationConnection::{probe_identity, connect_logical}` -> `crate::session::establish_standalone_connection(config, false)` preflight (`pg_replication_slots`, `pg_publication LEFT JOIN pg_publication_tables`, `(namespace, name)` + `crate::types::TypeCatalog` preload) + dedicated `crate::session::establish_standalone_connection(config, true)` (`IDENTIFY_SYSTEM`, `START_REPLICATION`, `protocol::read_replication_message`).
-- Replication stream reader (`ch23:t01`) -> `PgOutputDecoder::{push, next_record}` -> `RelationCache` (`Arc<PgOutputRelationSchema>`) + `crate::codecs::decode_value_with_catalog` (`src/rs/vertebra-postgres/src/codecs/mod.rs`) + `crate::types::TypeCatalog` (`src/rs/vertebra-postgres/src/types.rs`) + `types.py::{PgUnchangedToast, PostgresReplicationRecord}`.
+- Replication read task (`ch23:t01`) -> `PgOutputDecoder::{push, next_record}` -> `decode_next_frame` + `ActiveLogicalTx` + `RelationCache` + `crate::codecs` + `crate::types::TypeCatalog` -> `BoundedReplicationQueue::push`.
+- `AsyncPostgresReplication.next` (`ch23:t03`) -> `ReplicationRecord` -> `replication/mod.rs::pgoutput_tuple_to_python_dict` -> `types.py::PostgresReplicationRecord`.
+- Maintainers and agents reading `main` -> `knowledge/index.md` / `domains/index.md` -> `postgres-limitations.md` -> symbol-anchored split-state caveats.
 
 ### 2.4 Edge-Case & Failure-Mode Matrix
 
 | Condition | Required Behavior |
 | --- | --- |
-| `config.pooler_mode` is `PoolerMode::Transaction`, `PoolerMode::Statement`, or `PoolerMode::Auto` | Reject before dialing any socket with `PostgresError::Interface` (`InterfaceError`), requiring explicit `PoolerMode::Direct | PoolerMode::Session`. |
-| Missing slot/publication, non-`pgoutput` slot plugin, wrong database, or active slot (`55006`) | Reject during preflight or `START_REPLICATION` preserving exact server SQLSTATE or typed `OperationalError`; never create or alter slots. |
-| Requested `start_lsn < restart_lsn` or `start_lsn < confirmed_flush_lsn` | Fail closed with `OperationalError` (`wal_unavailable` / invalid resume) before streaming. |
-| `CopyBothResponse` (`'W'`) with nonzero `format` or nonzero `num_columns` | Reject boundedly as `ProtocolError` and close dedicated socket. |
-| `Type` (`'Y'`) frame matches preloaded `(type_oid, namespace, name)` vs mismatches | Retain matching `TypeCatalog` entries (`vector`, `halfvec`, `enum`, `domain`, `range`, `array`, `composite`) intact; invalidate `type_oid` to lossless text fallback only on `(namespace, name)` mismatch. |
-| `TupleData` with `'u'` (unchanged TOAST) vs `'n'` (SQL `NULL`) vs dropped column | Emit `PgOutputTupleValue::UnchangedToast` (`PgUnchangedToast`), `Null` (`None`), and omit dropped attributes respectively; reject `PgUnchangedToast` if passed as a SQL query bind. |
-| `Relation` (`'R'`) schema update mid-stream or `> 4096` relations | Atomically swap new `Arc<PgOutputRelationSchema>` without mutating already emitted records; fail explicitly with resource-limit `OperationalError` above `4096`. |
-| DML/`Origin` outside `Begin`..`Commit`, nested `Begin`, or v2+ streaming/two-phase tags | Fail immediately with `ProtocolError` without advancing LSN feedback. |
-| Clean `CopyDone` with partial buffered record vs transport EOF mid-transaction | Clean `CopyDone` with trailing bytes raises `ProtocolError`; transport EOF calls `reset_on_disconnect()` discarding partial record/transaction state for reconnect replay. |
+| DML, `Origin`, `Commit`, or transactional `Message` outside `Begin`..`Commit`, or nested `Begin` | `PostgresError::Protocol` without advancing state. |
+| Nonzero `Commit` flags, `commit_lsn != begin_final_lsn`, or `commit_end_lsn < commit_lsn` | `PostgresError::Protocol`. |
+| `Truncate` with `nrelids == 0`, unknown option bits (`> 0x03`), or an uncached relation OID | `PostgresError::Protocol`. |
+| `Message` flags outside `{0, 1}` or v2–v4 tags (`'S'`, `'E'`, `'A'`, `'c'`, `'b'`, `'P'`, `'K'`, `'r'`) | `PostgresError::Protocol`. |
+| Non-transactional `Message` inside or outside a transaction | Emits immediately with `dedup = None`, `xid = active_tx.map(|t| t.xid)`, no commit boundary. |
+| Record `> 16 MiB` or full queue | Oversized record fails with `PostgresError::Operational`; full queue returns `can_accept == false` and never drops; an empty queue always admits one record `<= max_record_bytes`. |
+| Transport EOF mid-transaction | `reset_on_disconnect()` drops buffered bytes, relation cache, and `ActiveLogicalTx`; the next `Begin` restarts at ordinal `0`. |
+| Split-state entry cites a symbol that no longer matches `main` | The task re-verifies each cited symbol with `git grep -n` at execution time and fails rather than recording an unverified claim. |
 
 ### 2.5 Mandatory Alternatives Comparison
 
 | Decision | Chosen Design | Rejected Alternative & Why |
 | --- | --- | --- |
-| `'W'` (`CopyBothResponse`) framing | Thin wrapper over one shared bounded `read_frame` delegating all non-`'W'` tags to `postgres-protocol` | Forking `postgres-protocol` or duplicating standard `ErrorResponse`/`RowDescription` parsers, creating drift and double maintenance. |
-| Transaction staging in Rust | Emit bounded per-record `Begin`..`Commit` envelopes holding only header metadata | Materializing whole multi-GB transactions in Rust memory before emission, violating bounded memory invariants. |
-| Unchanged TOAST representation | Dedicated `PgUnchangedToast` record excluded from `PostgresValue` SQL binds | Mapping `'u'` to `None` or empty `bytes`, conflating unchanged TOAST columns with explicit `SET col = NULL` updates. |
+| Envelope construction | `next_record` wraps the existing `decode_next_frame` parser and owns the transaction state machine | A second parser for transaction frames, duplicating bounds checks and tuple decoding. |
+| Transaction staging | Bounded per-record envelopes carrying header metadata | Materializing whole transactions before emission, violating bounded memory. |
+| Split-state disclosure | Domain limitations entry registered in both indexes, trimmed at cutover | A note in the spec only, which agents and maintainers reading `knowledge/` never see. |
 
 ## 3. Documentation & OKF Knowledge Plan
 
-Progress: `[0/0 files documented in ch22]` (project documentation and OKF chapters `[0/33 files documented]` consolidate across `ch30`–`ch32` with final review gates in `ch33-final-review-and-release-gate`; Google-style docstrings on `PgUnchangedToast`, `PostgresReplicationIdentity`, and `PostgresReplicationRecord` in `src/py/vertebra/db/adapters/postgres/types.py` land in `ch22:t02`).
+Progress: `[0/3 files documented in ch22]` (`ch22:t04` owns `postgres-limitations.md`, `knowledge/index.md`, and `knowledge/domains/index.md`; these files are completed in `ch27:t04`, `ch31:t01`, and `ch31:t02` and count toward the flow manifest `[0/33 files documented]`). Rust doc comments on the new `pgoutput.rs` types land in `ch22:t03`.
 
 ## 4. Requirement-to-Task Traceability Matrix
 
@@ -133,22 +151,29 @@ Progress: `[0/0 files documented in ch22]` (project documentation and OKF chapte
 | R22 (R22.1) | [t01](tasks/t01-copyboth-replication-session.md) | `behavior_tdd` | `src/rs/vertebra-postgres/tests/postgres_replication_wire_tests.rs` |
 | R22 (R22.2) | [t02](tasks/t02-pgoutput-relation-and-tuple-decoding.md) | `behavior_tdd` | `src/rs/vertebra-postgres/tests/postgres_pgoutput_tests.rs` |
 | R22 (R22.3) | [t03](tasks/t03-pgoutput-transaction-envelopes.md) | `behavior_tdd` | `src/rs/vertebra-postgres/tests/postgres_pgoutput_tests.rs` |
+| R27 (R27.1) | [t04](tasks/t04-split-state-limitations-record.md) | `documentation_validation` | `make review-check`, frontmatter/link/symbol checks in the worksheet |
 
 ## 5. Implementation Plan
 
 - [x] [81048251] native-postgres-driver:ch22:t01 — Start dedicated CopyBoth logical replication sessions (tasks/t01-copyboth-replication-session.md)
 - [x] [64288c63] native-postgres-driver:ch22:t02 — Decode pgoutput relation metadata and lossless tuples (tasks/t02-pgoutput-relation-and-tuple-decoding.md)
 - [ ] native-postgres-driver:ch22:t03 — Order logical transactions and change envelopes (tasks/t03-pgoutput-transaction-envelopes.md)
+- [ ] native-postgres-driver:ch22:t04 — Record the split native-wheel and legacy-driver state in the PostgreSQL limitations OKF entry (tasks/t04-split-state-limitations-record.md)
 
-**Chapter Recovery Checkpoint:** `PYTHONPATH="$(pwd)/src/py:$(pwd)/.venv/lib/python3.12/site-packages" cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --test postgres_replication_wire_tests --test postgres_pgoutput_tests && cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-postgres --all-targets -- -D warnings && uv run --no-sync ruff check src/py/vertebra/db/adapters/postgres/types.py && uv run --no-sync mypy src/py/vertebra/db/adapters/postgres/types.py` exits `0`.
+The `t01` and `t02` SHAs are pre-squash PR #104 branch SHAs that map to `c8722c76` on `main`.
+
+**Chapter Recovery Checkpoint:** `PYTHONPATH="$(pwd)/src/py:$(pwd)/.venv/lib/python3.12/site-packages" cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --test postgres_replication_wire_tests --test postgres_pgoutput_tests && cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-postgres --all-targets -- -D warnings && make review-check` exits `0`.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Plan Baseline**: `8e9b324e`; chapter `state: active`, `planning_status: complete`, `plan_revision: 6`, `plan_commit: 8e9b324e`, `last_verified_checkpoint: 64288c63` (`t01` completed at `81048251`, `t02` completed at `64288c63`, `postgres_replication_wire_tests` `9 passed`, `postgres_pgoutput_tests` `7 passed`, `test_postgres_types.py` `26 passed`).
-- **Remaining Tasks in Chapter**: `t03` (`1/3` pending; `t01` and `t02` completed).
-- **Downstream Dependents**: Unblocks `ch23-replication-feedback-resume-and-bridge` and `ch24-change-source-and-checkpoints`.
+- **Verified Plan Baseline**: `c8722c76`; chapter `state: active`, `planning_status: complete`, `plan_revision: 7`, `last_verified_checkpoint: c8722c76` (`t01` and `t02` on `main` through the PR #104 squash).
+- **Remaining Tasks in Chapter**: `t03`, `t04` (`2/4` pending).
+- **Downstream Dependents**: Unblocks `ch23-replication-feedback-resume-and-bridge` and `ch24-change-source-and-checkpoints`; `ch27:t04` and `ch31:t01` update the limitations entry created here.
 
 [^npd-contracts]: `.agents/bundles/specs/native-postgres-driver/contracts.md` — Native PostgreSQL public contracts for CDC, values, and dedicated sessions.
 [^npd-proto-research]: `.agents/bundles/specs/native-postgres-driver/research/protocol-and-execution_20261105.md` — PostgreSQL Protocol 3.0 CopyBoth and pgoutput v1 wire constraints.
-[^pg-core-rs]: `src/rs/vertebra-db/src/postgres/mod.rs::encode_query_frame` — Shared stateless PostgreSQL wire framing helpers in vertebra-db (the module holds no pool type after `driver-fail-loud`).
+[^pg-core-rs]: `src/rs/vertebra-db/src/postgres/mod.rs::encode_query_frame` — Shared stateless PostgreSQL wire framing helpers in `vertebra-db`.
+[^pgoutput-rs]: `src/rs/vertebra-postgres/src/replication/pgoutput.rs::PgOutputDecoder` — Incremental `pgoutput` decoder whose `decode_next_frame` parses `Relation`, `Type`, and `Insert` frames.
 [^cdc-domain]: `.agents/bundles/knowledge/domains/data/query-pipeline-cdc-and-tenancy.md` — Adapter-owned CDC envelopes, unchanged TOAST invariants, and int64 event IDs.
+[^pg-driver-py]: `src/py/vertebra/db/adapters/postgres/driver.py::SyncPostgreSQLDriver` — Python drivers still executing through `psycopg_pool` and `asyncio.to_thread` on `main`.
+[^storage-limitations]: `.agents/bundles/knowledge/domains/storage/object-storage-limitations.md` — House format for a domain limitations OKF `Gotcha` entry.

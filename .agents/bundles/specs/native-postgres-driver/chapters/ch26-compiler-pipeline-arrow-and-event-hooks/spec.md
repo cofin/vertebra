@@ -2,29 +2,29 @@
 type: Spec
 parent_flow: native-postgres-driver
 chapter_id: ch26-compiler-pipeline-arrow-and-event-hooks
-title: "Chapter 26: SQLSpec/SQLAlchemy Compiler Boundaries, Pipeline Scopes, Arrow Forwarding, and Event Hooks"
+title: "Chapter 26: SQLSpec/SQLAlchemy Compiler Boundaries, Driver Wiring of pipeline.py and arrow.py, and Event Hooks"
 description: Complete SQLSpec/SQLAlchemy numeric parameter compilation helpers, transaction-bound pipeline factories, Arrow/COPY forwarding, and dedicated event session hooks on the permanent PostgreSQL drivers.
-status: stable
+status: draft
 state: planned
 planning_status: complete
 depends_on_chapters:
   - ch25-dsn-bridge-lexer-and-permanent-drivers
 replan_trigger: null
 current_task: "native-postgres-driver:ch26:t01"
-plan_revision: 6
-plan_commit: 8e9b324e
+plan_revision: 7
+plan_commit: c8722c76
 state_revision: 0
 last_verified_checkpoint: null
 last_reviewed_commit: null
 created_at: "2026-11-05T00:00:00Z"
-updated_at: "2026-11-10T14:45:00Z"
+updated_at: "2026-11-12T01:30:00Z"
 generated:
   by: flow-revise
-  at: "2026-11-10T14:45:00Z"
+  at: "2026-11-12T01:30:00Z"
 verified:
   - by: agent:plan-generator
-    at: "2026-11-10T14:45:00Z"
-    commit: 8e9b324e
+    at: "2026-11-12T01:30:00Z"
+    commit: c8722c76
 sources:
   - id: npd-contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md
@@ -41,6 +41,12 @@ sources:
   - id: portal-py
     resource: src/py/vertebra/utils/portal.py::PortalProvider
     title: PortalProvider background event-loop bridge for synchronous driver cleanup
+  - id: pg-pipeline-py
+    resource: src/py/vertebra/db/adapters/postgres/pipeline.py::SyncPostgresPipeline
+    title: Adapter pipeline wrappers with no production caller on main
+  - id: pg-arrow-py
+    resource: src/py/vertebra/db/adapters/postgres/arrow.py::load_arrow_sync
+    title: Adapter Arrow COPY import helpers with no production caller on main
 tags:
   - postgres
   - sqlspec
@@ -54,15 +60,15 @@ tags:
 
 <!-- truth: start -->
 - **Pure Consumer Compiler Boundaries**: SQLSpec copies unmutated `SQL` instances to `ParameterStyle.NUMERIC` (`$1..$N`) while preserving `base_config.statement_transformers` (compiled once, never re-applying `StatementFilter`s) and unwrapping `TypedParameter` across single and `is_many=True` binds; SQLAlchemy stages `default_paramstyle = "numeric_dollar"` + `paramstyle = "numeric_dollar"` alongside `SyncDBAPIModule`/`AsyncDBAPIModule(paramstyle="numeric_dollar")` without altering legacy defaults until `ch27:t02` [^npd-contracts] [^sqlspec-py] [^sqla-py].
-- **Single-Lifecycle Lazy Pipelines**: Synchronous `driver.pipeline()` factories wrap `SyncPostgresPipeline` / `AsyncPostgresPipeline` over a lazy driver-owned protocol adapter that acquires transient leases inside `__enter__`/`__aenter__`, delegates `BEGIN`/`SAVEPOINT`/`COMMIT`/`ROLLBACK` to one native `pipeline_begin`/`pipeline_results`/`pipeline_finish` lifecycle (zero duplicate Python `BEGIN`), registers active-operation `cancel()` guards, and rejects overlapping scopes [^npd-contracts] [^sqlspec-py].
-- **Liskov `VTBARROW` & `EventSessionRegistry`**: Driver Arrow methods match `SyncDatabaseDriver`/`AsyncDatabaseDriver` signatures (`threshold_rows`, `max_result_bytes`, `batch_size=65_536`, `columns`, `table_name`, `data`, `schema_name`) delegating `load_from_arrow` to `postgres/arrow.py` (`copy_from_arrow`/`write_arrow_ipc`/`finish`/`close`/`aclose`) [^arrow-py], and `EventSessionRegistry` closes handles via `await handle.aclose()` and clients via `await client.close()` [^npd-contracts] [^portal-py].
+- **Single-Lifecycle Lazy Pipelines**: `src/py/vertebra/db/adapters/postgres/pipeline.py` is imported only by `test_postgres_native_pipeline.py` on `main`; synchronous `driver.pipeline()` factories wire its `SyncPostgresPipeline` / `AsyncPostgresPipeline` into the permanent drivers over a lazy driver-owned protocol adapter that acquires transient leases inside `__enter__`/`__aenter__`, delegates `BEGIN`/`SAVEPOINT`/`COMMIT`/`ROLLBACK` to one native `pipeline_begin`/`pipeline_results`/`pipeline_finish` lifecycle (zero duplicate Python `BEGIN`), registers active-operation `cancel()` guards, and rejects overlapping scopes [^npd-contracts] [^sqlspec-py].
+- **Liskov `VTBARROW` & `EventSessionRegistry`**: Driver Arrow methods match `SyncDatabaseDriver`/`AsyncDatabaseDriver` signatures (`threshold_rows`, `max_result_bytes`, `batch_size=65_536`, `columns`, `table_name`, `data`, `schema_name`) delegating `load_from_arrow` to `postgres/arrow.py::{load_arrow_sync, load_arrow_async}` (imported only by `test_postgres_native_data.py` on `main`) over `copy_from_arrow`/`write_arrow_ipc`/`finish`/`close`/`aclose` [^arrow-py] [^pg-arrow-py], and `EventSessionRegistry` closes handles via `await handle.aclose()` and clients via `await client.close()` [^npd-contracts] [^portal-py].
 <!-- truth: end -->
 
 ## 1. Specification, Context & Provenance
 
 ### 1.1 Problem Statement & Objectives
 
-Before `ch27:t01`–`t02` atomically switches `driver.py` and consumer adapters to the native engine, the permanent `_sync.py` and `_async.py` driver classes must support every higher-level capability consumed by SQLSpec, SQLAlchemy, analytical `VTBARROW` pipelines, `PostgresNotificationSource`, and `PostgresChangeSource` without breaking the still-active legacy `driver.py` pair [^npd-contracts]. Chapter 26 implements pure SQLSpec `ParameterStyle.NUMERIC` (`sqlspec==0.71.1`) and SQLAlchemy `numeric_dollar` compilation profiles (`ch26:t01`), binds synchronous `pipeline()` factories lazily to a single native `pipeline_begin`/`pipeline_results`/`pipeline_finish` lifecycle (`ch26:t02`), completes Liskov-exact Arrow selection, streaming, and `postgres/arrow.py` COPY forwarding (`ch26:t03`), and wires `EventSessionRegistry` notification and replication hooks across both permanent drivers (`ch26:t04`) [^sqlspec-py] [^sqla-py] [^arrow-py] [^portal-py].
+On `main` (`c8722c76`), `pipeline.py` and `arrow.py` are complete adapter modules with no production caller: only `src/py/tests/unit/db/test_postgres_native_pipeline.py` imports `pipeline.py` and only `src/py/tests/unit/db/test_postgres_native_data.py` imports `arrow.py` [^pg-pipeline-py] [^pg-arrow-py]. Before `ch27:t01`–`t02` atomically switches `driver.py` and consumer adapters to the native engine, the permanent `_sync.py` and `_async.py` driver classes must support every higher-level capability consumed by SQLSpec, SQLAlchemy, analytical `VTBARROW` pipelines, `PostgresNotificationSource`, and `PostgresChangeSource` without breaking the still-active legacy `driver.py` pair [^npd-contracts]. Chapter 26 implements pure SQLSpec `ParameterStyle.NUMERIC` (`sqlspec==0.71.1`) and SQLAlchemy `numeric_dollar` compilation profiles (`ch26:t01`), binds synchronous `pipeline()` factories lazily to a single native `pipeline_begin`/`pipeline_results`/`pipeline_finish` lifecycle (`ch26:t02`), completes Liskov-exact Arrow selection, streaming, and `postgres/arrow.py` COPY forwarding (`ch26:t03`), and wires `EventSessionRegistry` notification and replication hooks across both permanent drivers (`ch26:t04`) [^sqlspec-py] [^sqla-py] [^arrow-py] [^portal-py].
 
 ### 1.2 Non-Goals
 
@@ -122,7 +128,7 @@ Parent roadmap: [spec.md](../../spec.md) and [contracts.md](../../contracts.md).
 
 ## 3. Documentation & OKF Knowledge Plan
 
-Progress: `[0/0 files documented in ch26]` (`[0/33 files documented]` across the full `33`-chapter / `118`-task flow consolidated in `ch30-user-and-workflow-docs`, `ch31-data-and-testing-okf-sync`, and `ch32-ffi-okf-and-review-routing-sync`; public hook docstrings in `_sync.py`, `_async.py`, and `events.py` document the sync vs async `_publish_notification` transaction boundary).
+Progress: `[0/0 files documented in ch26]` (`[0/33 files documented]` across the full `33`-chapter / `119`-task flow consolidated in `ch30-user-and-workflow-docs`, `ch31-data-and-testing-okf-sync`, and `ch32-ffi-okf-and-review-routing-sync`; public hook docstrings in `_sync.py`, `_async.py`, and `events.py` document the sync vs async `_publish_notification` transaction boundary).
 
 ## 4. Requirement-to-Task Traceability Matrix
 
@@ -144,7 +150,7 @@ Progress: `[0/0 files documented in ch26]` (`[0/33 files documented]` across the
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Plan Baseline**: `plan_revision: 6`, `plan_commit: 8e9b324e`; chapter `state: planned`, `planning_status: complete` (`33` chapters / `118` tasks in full flow, `ch01`–`ch19` / `71` tasks completed).
+- **Verified Plan Baseline**: `plan_revision: 7`, `plan_commit: c8722c76`; chapter `state: planned`, `planning_status: complete` (`33` chapters / `119` tasks; `ch01`–`ch21` and `ch22:t01`–`t02` (`80` tasks) are on `main` in `c8722c76`).
 - **Remaining Tasks in Chapter**: `t01`, `t02`, `t03`, `t04` (`4/4` pending).
 - **Downstream Dependents**: Unblocks `ch27-atomic-cutover-and-legacy-removal` ahead of `ch30`–`ch32` documentation/OKF sync (`[0/33 files documented]`) and `ch33-final-review-and-release-gate`.
 
@@ -153,3 +159,5 @@ Progress: `[0/0 files documented in ch26]` (`[0/33 files documented]` across the
 [^sqla-py]: `src/py/vertebra/extensions/sqlalchemy/dialects.py::SyncPostgreSQLDialect` — SQLAlchemy 2.1 +vtb/+vertebra PostgreSQL sync and async dialects.
 [^arrow-py]: `src/py/vertebra/db/arrow.py::ArrowCursor` — Shared ArrowCursor wrapper over VTBARROW ShmCapsule and inline IPC buffers.
 [^portal-py]: `src/py/vertebra/utils/portal.py::PortalProvider` — PortalProvider background event-loop bridge for synchronous driver cleanup.
+[^pg-pipeline-py]: `src/py/vertebra/db/adapters/postgres/pipeline.py::SyncPostgresPipeline` — Adapter pipeline wrappers with no production caller on `main`.
+[^pg-arrow-py]: `src/py/vertebra/db/adapters/postgres/arrow.py::load_arrow_sync` — Adapter Arrow COPY import helpers with no production caller on `main`.

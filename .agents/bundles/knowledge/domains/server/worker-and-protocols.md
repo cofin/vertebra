@@ -16,7 +16,7 @@ generated:
 verified:
   - by: agent:flow-setup
     at: "2026-11-07T03:55:00Z"
-    commit: 9af810f5
+    commit: 067fa901
 sources:
   - id: src-server-worker-py
     resource: src/py/vertebra/server/worker.py

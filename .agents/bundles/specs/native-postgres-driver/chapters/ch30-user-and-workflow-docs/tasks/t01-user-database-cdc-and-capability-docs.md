@@ -4,7 +4,7 @@ id: "native-postgres-driver:ch30:t01"
 chapter_id: ch30-user-and-workflow-docs
 title: Update database usage guide, CDC analytics guide, and capability API references
 description: Document vertebra-core[postgres] tabbed installation, native bind/query/pipeline/value/COPY/Arrow/PgBouncer/DSN contracts, unified $n tenant binds, PostgresNotificationSource, and vertebra.db.adapters.postgres.change_stream across databases.md, analytics-and-cdc.md, and database-capabilities.md.
-status: stable
+status: draft
 state: pending
 priority: P1
 verification_strategy: documentation_validation
@@ -23,8 +23,8 @@ files:
   - docs/reference/database-capabilities.md
 tests: []
 estimated_loc: 230
-plan_revision: 6
-plan_commit: 8e9b324e
+plan_revision: 7
+plan_commit: c8722c76
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -35,8 +35,15 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-10T14:45:00Z"
+updated_at: "2026-11-12T01:30:00Z"
 commit: null
+generated:
+  by: flow-revise
+  at: "2026-11-12T01:30:00Z"
+verified:
+  - by: agent:plan-generator
+    at: "2026-11-12T01:30:00Z"
+    commit: c8722c76
 sources:
   - id: doc-databases
     resource: docs/usage/databases.md
@@ -73,7 +80,7 @@ Update `docs/usage/databases.md`, `docs/usage/analytics-and-cdc.md`, and `docs/r
    - Add `vertebra-core[postgres]` across all four linked `pymdownx.tabbed` blocks (`=== "uv"`, `=== "pip"`, `=== "pdm"`, `=== "poetry"`) under `Optional Engine Extras`.
    - Document `PostgreSQLConfig`, `SyncPostgreSQLDriver`, and `AsyncPostgreSQLDriver` pool ownership (`share_pool`, `validate_configuration`), `$n` numeric passthrough vs SQL-aware raw `%s`/`%(name)s` lowering (requiring explicit `E'...'` for backslash-escaped string literals), SQLSpec `ParameterStyle.NUMERIC` and SQLAlchemy `+vtb` `numeric_dollar`, single-statement extended `execute` vs parameterless `query_multi(sql)`, per-command `timeout`, delayed-commit single-`Sync` `pipeline()`, lossless `PgInterval`/`PgArray`/`PgComposite`/`PgTemporal` (`wire_text` typed-rebind refusal)/`PgJson`/`PgBitString`/`PgVector` (`1..16000`), raw native `vertebra._postgres.{SyncPostgresClient, AsyncPostgresClient}` `copy_to`, `copy_from`, and `copy_from_arrow(table_name, first_batch_ipc, *, columns=None, schema_name=None)` (`write_arrow_ipc`/`finish`/`close`/`aclose`) vs Python `SyncPostgreSQLDriver`/`AsyncPostgreSQLDriver` `load_from_arrow(table_name, data, *, columns=None, schema_name=None)`, `select_to_arrow`, and `stream_arrow_batches` (`VTBARROW` `ArrowCursor`), `PgBouncer` `pooler_mode` (`direct`/`session`/`transaction`/`statement`/`auto`), `direct_dsn`, and `PG*` DSN precedence (`sslmode="prefer"` adapter default vs explicit `sslmode="disable"` only for local non-TLS fixtures).
 2. `docs/usage/analytics-and-cdc.md`:
-   - Replace pre-cutover tenant placeholder prose and `listen_notifications()` wording with unified `$n` (`ParameterStyle.NUMERIC`) across sync and async PostgreSQL drivers and dedicated `_open_notification_listener` / `PostgresNotificationSource` (`direct_dsn` bypass, bounded `queue_capacity`, `reconnect`).
+   - Replace the tenant-predicate sentence that names third-party PostgreSQL bind styles (psycopg `%s` / asyncpg `$N` at `c8722c76`) and any `listen_notifications()` wording with unified `$n` (`ParameterStyle.NUMERIC`) across sync and async PostgreSQL drivers and dedicated `_open_notification_listener` / `PostgresNotificationSource` (`direct_dsn` bypass, bounded `queue_capacity`, `reconnect`).
    - Document `vertebra.db.adapters.postgres.change_stream` (`PostgresChangeConfig`, `PostgresChangeSource`, `PostgresCheckpoint`, `PostgresCheckpointStore`, `MemoryPostgresCheckpointStore`, `PostgresCheckpointConflictError`, `PostgresReplicationGapError`) covering caller-owned `pgoutput` v1 slot/publication tailing, CAS checkpoint persistence before WAL standby feedback, signed-`int64` replay IDs, and explicit `acknowledge(commit_end_lsn)`.
 3. `docs/reference/database-capabilities.md`:
    - Render mkdocstrings `:::` directives using `heading_level: 4` (with `members: false` or concise curated `members:` and `summary: false`) across `PostgresChangeConfig`, `PostgresCheckpoint`, `PostgresCheckpointStore`, `MemoryPostgresCheckpointStore`, `PostgresChangeSource`, `PostgresCheckpointConflictError`, `PostgresReplicationGapError`, `PostgresEmbeddingPushdown`, `PostgresNotifyConfig`, and `PostgresNotificationSource` so `H2+H3` secondary TOC stays `<= 14` and `site/reference/database-capabilities/index.html` stays `<= 120,000` bytes [^docs-verifier].
@@ -109,12 +116,13 @@ Out of scope: Modifying Python/Rust source files, `native-stubs.md` / `reference
 | Case | Input | Expected Output / Error |
 | --- | --- | --- |
 | Griffe resolution & reference page budgets | `make docs` inspecting `site/reference/database-capabilities/index.html` | Exits `0`; all ten PostgreSQL capability directives resolve, secondary TOC `H2+H3 <= 14`, HTML byte length `<= 120,000`, and zero empty `Attributes` table rows. |
-| Tabbed install, Mermaid, & `msgspec` example audit | Inspect `docs/usage/databases.md` and `docs/usage/analytics-and-cdc.md` + `make docs-check` | Linked `uv`/`pip`/`pdm`/`poetry` tabs present, any Mermaid block has `4`–`6` conceptual nodes, zero `frozen=True, gc=False` or inline `#` comments in examples, zero external PostgreSQL driver library mentions, and live `zensical serve` responds HTTP `200`. |
+| Tabbed install, Mermaid, & `msgspec` example audit | Inspect `docs/usage/databases.md` and `docs/usage/analytics-and-cdc.md` + `make docs-check` | Linked `uv`/`pip`/`pdm`/`poetry` tabs present, any Mermaid block has `4`–`6` conceptual nodes, zero `frozen=True, gc=False` or inline `#` comments in examples, `git grep -n -i -E "psycopg|asyncpg" -- docs/usage/databases.md docs/usage/analytics-and-cdc.md docs/reference/database-capabilities.md` prints nothing, and live `zensical serve` responds HTTP `200`. |
 | Privacy & bundle hygiene | `make review-check` | Exits `0` with zero forbidden terms or count-prefixed phrase violations across `docs/**/*.md`. |
 
 ## Verification
 
 - Build & artifact budget check: `make docs && make docs-check`
+- External driver name audit: `git grep -n -i -E "psycopg|asyncpg" -- docs/usage/databases.md docs/usage/analytics-and-cdc.md docs/reference/database-capabilities.md` (expects no output)
 - Documentation privacy & structure check: `make review-check`
 
 ## Acceptance Criteria
@@ -124,6 +132,7 @@ Out of scope: Modifying Python/Rust source files, `native-stubs.md` / `reference
 
 ## Notes & Discoveries
 
+- Notification source naming: this worksheet executes before `queues-tasks-and-channels` t01 splits `NotificationSource` into `SyncNotificationSource` / `AsyncNotificationSource` and renames `PostgresNotificationSource` to `AsyncPostgresNotificationSource` alongside a new `SyncPostgresNotificationSource` (see [native-data-platform](../../../../native-data-platform/spec.md) Seam 2). It keeps the HEAD names, adds no new unprefixed notification protocol, class, or alias, and leaves the rename of every symbol, doc, and OKF reference it touches to that task.
 - Group PostgreSQL change-stream, notification, and embedding directives under the existing capability `H2` headings in `docs/reference/database-capabilities.md` with `heading_level: 4` so secondary TOC stays at `2` items (`<= 14`).
 
 [^doc-databases]: `docs/usage/databases.md` — User-facing Databases and Native Drivers usage guide.

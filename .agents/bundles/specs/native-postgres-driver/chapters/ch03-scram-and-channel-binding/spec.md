@@ -12,7 +12,7 @@ depends_on_chapters:
 replan_trigger: null
 current_task: "native-postgres-driver:ch03:t01"
 plan_revision: 5
-plan_commit: 79eea133
+plan_commit: c8722c76
 state_revision: 0
 last_verified_checkpoint: 2cd7ee0f
 last_reviewed_commit: 2cd7ee0f
@@ -24,7 +24,7 @@ generated:
 verified:
   - by: agent:plan-generator
     at: "2026-11-07T16:40:00Z"
-    commit: 79eea133
+    commit: c8722c76
 sources:
   - id: pg-contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md

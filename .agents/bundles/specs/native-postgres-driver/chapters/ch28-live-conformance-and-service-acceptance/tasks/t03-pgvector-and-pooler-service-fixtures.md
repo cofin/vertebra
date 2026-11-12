@@ -4,7 +4,7 @@ id: "native-postgres-driver:ch28:t03"
 chapter_id: ch28-live-conformance-and-service-acceptance
 title: Provision digest-pinned pgvector 0.8.1 and PgBouncer 1.26.0 acceptance service fixtures
 description: Add VERTEBRA_CONFORMANCE_DOCKER-gated multi-arch OCI-index digest-pinned pgvector 0.8.1 (PG14 and PG18) and pg_authid SCRAM-authenticated PgBouncer 1.26.0 Docker fixtures in integration/conftest.py and verify capability, cold-metadata, and negative controls in test_postgres_services.py.
-status: stable
+status: draft
 state: pending
 priority: P1
 verification_strategy: behavior_tdd
@@ -21,8 +21,8 @@ files:
 tests:
   - src/py/tests/integration/db/test_postgres_services.py
 estimated_loc: 245
-plan_revision: 6
-plan_commit: 8e9b324e
+plan_revision: 7
+plan_commit: c8722c76
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -33,12 +33,15 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-10T14:45:00Z"
+updated_at: "2026-11-12T01:30:00Z"
 commit: null
+generated:
+  by: flow-revise
+  at: "2026-11-12T01:30:00Z"
 verified:
   - by: agent:plan-generator
-    at: "2026-11-10T14:45:00Z"
-    commit: 8e9b324e
+    at: "2026-11-12T01:30:00Z"
+    commit: c8722c76
 sources:
   - id: int-conftest
     resource: src/py/tests/integration/conftest.py::vtb_postgres_config

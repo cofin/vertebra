@@ -20,10 +20,10 @@ generated:
 verified:
 - by: agent:flow-executor
   at: '2026-11-09T15:23:00Z'
-  commit: b02636d9
+  commit: af1b3d30
 - by: agent:codex
   at: '2026-11-08T18:27:30.456016Z'
-  commit: a1ee9042
+  commit: 067fa901
 sources:
 - id: src-oracle-driver-py
   resource: src/py/vertebra/db/adapters/oracle/driver.py::SyncOracleDriver

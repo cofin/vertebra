@@ -4,7 +4,7 @@ id: "native-postgres-driver:ch23:t03"
 chapter_id: ch23-replication-feedback-resume-and-bridge
 title: Expose cancellation-safe native replication handles
 description: Expose AsyncPostgresClient.replication_identity, AsyncPostgresClient.open_replication, and cancellation-safe AsyncPostgresReplication PyO3 handles and type stubs.
-status: stable
+status: draft
 state: pending
 priority: P1
 verification_strategy: behavior_tdd
@@ -25,8 +25,8 @@ tests:
   - src/py/tests/unit/db/test_postgres_change_source.py
   - src/rs/vertebra-postgres/tests/postgres_replication_wire_tests.rs
 estimated_loc: 240
-plan_revision: 6
-plan_commit: 8e9b324e
+plan_revision: 7
+plan_commit: c8722c76
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -37,15 +37,15 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-10T14:45:00Z"
+updated_at: "2026-11-12T01:30:00Z"
 commit: null
 generated:
   by: flow-revise
-  at: "2026-11-10T14:45:00Z"
+  at: "2026-11-12T01:30:00Z"
 verified:
   - by: agent:plan-generator
-    at: "2026-11-10T14:45:00Z"
-    commit: 8e9b324e
+    at: "2026-11-12T01:30:00Z"
+    commit: c8722c76
 sources:
   - id: npd-contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md
