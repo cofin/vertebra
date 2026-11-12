@@ -138,7 +138,7 @@ tags:
 
 ### 1.1 Problem Statement & Current Baseline
 
-The native wheel baseline on `main` is squash commit `c8722c76`. Chapters `ch01`–`ch23` are completed and reviewed, most recently at `4700ecbc`. Chapter `ch34` has four verified tasks and awaits review, bringing task completion to `88/129`. Original task/review history through `ch21` is retained locally at `refs/flow/native-postgres-reviewed-history`; completed worksheets retain canonical squash mapping and original provenance where needed.
+The native wheel baseline on `main` is squash commit `c8722c76`. Chapters `ch01`–`ch23` are completed and reviewed, most recently at `4700ecbc`. Chapter `ch34` is complete and reviewed at `6e4e6bfc`, bringing task completion to `88/129`; `ch35` is next. Original task/review history through `ch21` is retained locally at `refs/flow/native-postgres-reviewed-history`; completed worksheets retain canonical squash mapping and original provenance where needed.
 
 The Python adapter layer on `main` still runs on third-party clients: `src/py/vertebra/db/adapters/postgres/driver.py::SyncPostgreSQLDriver` builds a `psycopg_pool.ConnectionPool`, `AsyncPostgreSQLDriver` wraps that sync driver with `asyncio.to_thread`, `src/py/vertebra/framework/queues/postgres.py::PostgreSQLQueueBackend` probes `psycopg` before raising for a missing `executor=`, `src/py/vertebra/db/dialer/{cloudsql,alloydb}.py` expose `create_psycopg_connect_func` / `create_asyncpg_connect_func`, and `src/py/tests/unit/db/test_postgres_driver.py` exercises `AsyncPostgreSQLDriver` through a SQLite-backed asyncpg pool double (`_SQLiteAsyncPGPool`). `src/py/vertebra/db/adapters/postgres/pipeline.py` and `arrow.py` are complete but imported only by `test_postgres_native_pipeline.py` and `test_postgres_native_data.py` [^pg-driver-py] [^pg-queue-py] [^pg-pipeline-py] [^pg-arrow-py].
 
@@ -471,7 +471,7 @@ Every worksheet (`129` total across `36` chapters) executes in one bounded invoc
 - [x] [b44e28ca] ch21-live-notifications — Dedicated Notification Session Pump, PendingDeliveryGuard Async Bridge, and Python PostgresNotificationSource (chapters/ch21-live-notifications/spec.md)
 - [x] [9c1865b7] ch22-copyboth-and-pgoutput-decoding — Dedicated CopyBoth Sessions, Lossless pgoutput v1 Decoding and Transaction Envelopes, and the Split-State Limitations Record (chapters/ch22-copyboth-and-pgoutput-decoding/spec.md)
 - [x] [4700ecbc] ch23-replication-feedback-resume-and-bridge — Replication CopyData Codecs and Monotonic Commit-Boundary Feedback (chapters/ch23-replication-feedback-resume-and-bridge/spec.md)
-- [~] ch34-replication-session-pump — Bounded Single-Generation Replication Session, Independent Heartbeats, and Delivery Leases (chapters/ch34-replication-session-pump/spec.md)
+- [x] [6e4e6bfc] ch34-replication-session-pump — Bounded Single-Generation Replication Session, Independent Heartbeats, and Delivery Leases (chapters/ch34-replication-session-pump/spec.md)
 - [ ] ch35-replication-supervision — Verified Reconnect Supervision and Generation-Fenced Delivery (chapters/ch35-replication-supervision/spec.md)
 - [ ] ch36-replication-python-bridge — Cancellation-Safe Python Replication Handles and Typed Event Hydration (chapters/ch36-replication-python-bridge/spec.md)
 - [ ] ch24-change-source-and-checkpoints — PostgresChangeSource, PostgresCheckpointStore, Serialized CAS Ack Reconciliation, and Replay/Shutdown Semantics (chapters/ch24-change-source-and-checkpoints/spec.md)
