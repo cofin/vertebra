@@ -30,6 +30,9 @@ chapters:
   - ch21-live-notifications
   - ch22-copyboth-and-pgoutput-decoding
   - ch23-replication-feedback-resume-and-bridge
+  - ch34-replication-session-pump
+  - ch35-replication-supervision
+  - ch36-replication-python-bridge
   - ch24-change-source-and-checkpoints
   - ch25-dsn-bridge-lexer-and-permanent-drivers
   - ch26-compiler-pipeline-arrow-and-event-hooks
@@ -48,14 +51,14 @@ depends_on_flows:
 research:
   - research/protocol-and-execution_20261105.md
   - research/cloud-material_20261105.md
-plan_revision: 7
-plan_commit: c8722c76
-state_revision: 11
+plan_revision: 8
+plan_commit: 5eb75b2a
+state_revision: 12
 last_verified_checkpoint: 9c1865b7
 last_reviewed_chapter: ch22-copyboth-and-pgoutput-decoding
 last_reviewed_commit: 9c1865b7
 created_at: "2026-11-03T04:05:00Z"
-updated_at: "2026-11-12T04:12:48Z"
+updated_at: "2026-11-12T04:16:55Z"
 generated:
   by: flow-revise
   at: "2026-11-12T01:30:00Z"
@@ -121,10 +124,10 @@ tags:
 # Specification: Complete Standalone Native PostgreSQL Driver
 
 <!-- truth: start -->
-- **Wheel on Main**: [PR #104](https://github.com/cofin/vertebra/pull/104) (squash commit `c8722c76`) ships `src/rs/vertebra-postgres` (`vertebra._postgres`, `vertebra-core[postgres]`) with Protocol 3.0 sockets over `postgres-protocol =0.6.12` and `rustls` (`ring`), SCRAM/PLUS, Cloud SQL and AlloyDB discovery with mTLS and IAM, lossless codecs, pools, statement caches, single-`Sync` pipelines, cancellation, binary `COPY`, `VTBARROW`, `LISTEN`/`NOTIFY`, and `CopyBoth` replication sessions with `pgoutput` relation/insert decoding (`ch01`–`ch21`, `ch22:t01`–`t02`, `80/119` tasks) [^pg-conn-rs] [^pg-core-rs] [^py-async-rs] [^arrow-shm-rs].
+- **Wheel on Main**: [PR #104](https://github.com/cofin/vertebra/pull/104) (squash commit `c8722c76`) ships `src/rs/vertebra-postgres` (`vertebra._postgres`, `vertebra-core[postgres]`) with Protocol 3.0 sockets over `postgres-protocol =0.6.12` and `rustls` (`ring`), SCRAM/PLUS, Cloud SQL and AlloyDB discovery with mTLS and IAM, lossless codecs, pools, statement caches, single-`Sync` pipelines, cancellation, binary `COPY`, `VTBARROW`, `LISTEN`/`NOTIFY`, and `CopyBoth` replication sessions with `pgoutput` relation/insert decoding (`ch01`–`ch21`, `ch22:t01`–`t02`, `80/129` tasks) [^pg-conn-rs] [^pg-core-rs] [^py-async-rs] [^arrow-shm-rs].
 - **Split Runtime State on Main**: The Python drivers are not cut over. `SyncPostgreSQLDriver` executes through `psycopg_pool`, `AsyncPostgreSQLDriver` offloads that sync driver with `asyncio.to_thread`, `PostgreSQLQueueBackend` probes `psycopg` when `executor=` is missing, and `pipeline.py` / `arrow.py` are imported only by unit tests; the PR #104 title and body describe a cutover that main does not contain [^pg-driver-py] [^pg-queue-py] [^pg-pipeline-py] [^pg-arrow-py].
-- **Working Branch and Remaining Delivery**: Local `ch22:t03` (`2947d015`) adds ordered transaction envelopes and `ch22:t04` (`48b50600`) records the split state. The remaining `37` tasks in `ch23`–`ch33` deliver commit-fenced feedback, resume and bridge, the CAS change source, native public drivers, atomic consumer cutover, live conformance, wheels, benchmarks, and final documentation together in the follow-up PR [^sqlspec-py].
-- **Git Continuity**: Original task/review history through `ch21` is retained locally at `refs/flow/native-postgres-reviewed-history`; original `ch22:t01`–`t02` task objects remain available. Their changes are included in squash `c8722c76` on `main`. Local follow-up task SHAs remain separate; `plan_commit` and the final review base stay `c8722c76`.
+- **Working Branch and Remaining Delivery**: Local `ch22:t03` (`2947d015`) adds ordered transaction envelopes and `ch22:t04` (`48b50600`) records the split state. The remaining `47` tasks in `ch23`, `ch34`–`ch36`, and `ch24`–`ch33` deliver commit-fenced feedback, resume and bridge, the CAS change source, native public drivers, atomic consumer cutover, live conformance, wheels, benchmarks, and final documentation together in the follow-up PR [^sqlspec-py].
+- **Git Continuity**: Original task/review history through `ch21` is retained locally at `refs/flow/native-postgres-reviewed-history`; original `ch22:t01`–`t02` task objects remain available. Their changes are included in squash `c8722c76` on `main`. Local follow-up task SHAs remain separate; the revision-8 draft anchor is `5eb75b2a` and the final implementation review base remains `c8722c76`.
 - **Fail-Loud Baseline**: `driver-fail-loud` deletes `_in_memory_rows`, every PostgreSQL `memory://` branch, and `vertebra_db::postgres::PostgresPool`; this flow adds no memory or SHM-admission pool paths [^fail-loud-baseline].
 <!-- truth: end -->
 
@@ -132,11 +135,11 @@ tags:
 
 ### 1.1 Problem Statement & Current Baseline
 
-[PR #104](https://github.com/cofin/vertebra/pull/104) squash-merges the native wheel onto `main` as `c8722c76` with `80` of `119` tasks complete. Every chapter through `ch21` and `ch22:t01`–`t02` is implemented and reviewed. The pre-squash task commits recorded in completed worksheets (for example `62bf91f1` for `ch01` and `64288c63` for `ch22:t02`) are not ancestors of `main`; their original history through `ch21` is retained at `refs/flow/native-postgres-reviewed-history`, and the original `ch22:t01`–`t02` objects remain available locally. Squash `c8722c76` contains their source changes on `main`. Local follow-up commits bring task progress to `82/119`; Chapter 22 awaits its code-and-Markdown review stamp.
+The native wheel baseline on `main` is squash commit `c8722c76`. Chapters `ch01`–`ch22` are completed and reviewed, with the current reviewed checkpoint at `9c1865b7` and `82/129` tasks complete. Original task/review history through `ch21` is retained locally at `refs/flow/native-postgres-reviewed-history`; completed worksheets retain canonical squash mapping and original provenance where needed.
 
 The Python adapter layer on `main` still runs on third-party clients: `src/py/vertebra/db/adapters/postgres/driver.py::SyncPostgreSQLDriver` builds a `psycopg_pool.ConnectionPool`, `AsyncPostgreSQLDriver` wraps that sync driver with `asyncio.to_thread`, `src/py/vertebra/framework/queues/postgres.py::PostgreSQLQueueBackend` probes `psycopg` before raising for a missing `executor=`, `src/py/vertebra/db/dialer/{cloudsql,alloydb}.py` expose `create_psycopg_connect_func` / `create_asyncpg_connect_func`, and `src/py/tests/unit/db/test_postgres_driver.py` exercises `AsyncPostgreSQLDriver` through a SQLite-backed asyncpg pool double (`_SQLiteAsyncPGPool`). `src/py/vertebra/db/adapters/postgres/pipeline.py` and `arrow.py` are complete but imported only by `test_postgres_native_pipeline.py` and `test_postgres_native_data.py` [^pg-driver-py] [^pg-queue-py] [^pg-pipeline-py] [^pg-arrow-py].
 
-The working branch includes verified `ch22:t03` and `ch22:t04` commits; the remaining `37` tasks (`ch23:t01`–`ch33:t01`) complete the follow-up delivery based on `main` at `c8722c76`. The PostgreSQL limitations OKF entry records the split state; `ch27:t04` removes those caveats once the cutover lands. Hosted writes (push, PR creation, workflow dispatch) require separate explicit user permission.
+The working branch includes verified `ch22:t03` and `ch22:t04` commits; the remaining `47` tasks (`ch23`, `ch34`–`ch36`, `ch24`–`ch33`) complete the follow-up delivery based on `main` at `c8722c76`. The PostgreSQL limitations OKF entry records the split state; `ch27:t04` removes those caveats once the cutover lands. Hosted writes (push, PR creation, workflow dispatch) require separate explicit user permission.
 
 This flow depends on [`driver-fail-loud`](../../knowledge/domains/data/database-drivers-and-dialers.md), which deletes `_in_memory_rows` and every `memory://` branch from `driver.py` (a `memory://` DSN raises `ImproperConfigurationError`) and deletes `vertebra_db::postgres::PostgresPool` [^fail-loud-baseline].
 
@@ -223,11 +226,117 @@ The [public contracts](contracts.md) freeze constructor options, pool ownership,
 ```mermaid
 flowchart LR
     Core["vertebra-core (GcpTokenCache, ShmCapsule)"] --> Db["vertebra-db (TransportStream, py_async, ShmArrowStreamWriter)"]
-    Db --> PgRs["vertebra-postgres wheel (on main: ch01-ch22:t02; follow-up: ch22:t03-ch23)"]
+    Db --> PgRs["vertebra-postgres wheel (on main: ch01-ch22:t02; follow-up: ch22:t03, ch23, ch34-ch36)"]
     PgRs --> PyAdapters["vertebra.db.adapters.postgres (change_stream, options, binds, _sync, _async: ch24-ch27)"]
     PyAdapters --> Consumers["SQLSpec + SQLAlchemy +vtb + queue guard + embeddings (ch26-ch27)"]
     Consumers --> Gates["Live PG14-18, wheel and benchmark gates, docs/OKF, final review (ch28-ch33)"]
 ```
+
+### 2.3.1 Replication Public Contracts and Ownership
+
+The execution order is ch23 feedback → ch34 single-generation session → ch35 verified supervisor → ch36 Python bridge → ch24 durable change source. These are planned Rust public seams, introduced by their owning tasks; source existence is not claimed before implementation. `E` below means `crate::errors::PostgresError`.
+
+```rust
+pub enum ReplicationCopyData<'a> {
+    XLogData { wal_start: u64, wal_end: u64, server_time_pg_us: i64, payload: &'a [u8] },
+    PrimaryKeepalive { wal_end: u64, server_time_pg_us: i64, reply_requested: bool },
+}
+pub fn decode_replication_copy_data(frame: &[u8]) -> Result<ReplicationCopyData<'_>, E>;
+pub fn encode_standby_status_update(write_lsn: u64, flush_lsn: u64, apply_lsn: u64, client_time_pg_us: i64, reply_requested: bool) -> [u8; 34];
+pub fn compute_status_interval(wal_sender_timeout: Option<std::time::Duration>) -> std::time::Duration;
+impl ReplicationFeedback {
+    pub fn new(initial_lsn: u64) -> Self;
+    pub fn record_received_commit(&mut self, commit_end_lsn: u64) -> Result<(), E>;
+    pub fn record_published_commit(&mut self, commit_end_lsn: u64) -> Result<(), E>;
+    pub fn acknowledge(&mut self, commit_end_lsn: u64) -> Result<u64, E>;
+    pub fn status_positions(&self) -> (u64, u64, u64);
+    pub fn unacked_count(&self) -> usize;
+}
+impl PostgresReplicationConnection {
+    pub fn into_stream(self, queue_capacity: usize, status_interval: std::time::Duration, shutdown_timeout: std::time::Duration) -> Result<ReplicationSession, E>;
+    pub async fn connect_logical_verified(config: &crate::config::PostgresConfig, slot: &str, publication: &str, start_lsn: u64, expected: &VerifiedReplicationIdentity) -> Result<Self, E>;
+}
+impl ReplicationSession {
+    pub fn identity(&self) -> &VerifiedReplicationIdentity;
+    pub async fn next(&self) -> Result<Option<ReplicationDelivery>, E>;
+    pub fn acknowledge(&self, commit_end_lsn: u64) -> Result<u64, E>;
+    pub fn status_positions(&self) -> (u64, u64, u64);
+    pub async fn wait_closed(&self) -> Result<(), E>;
+    pub fn cancel(&self);
+    pub async fn shutdown(&self) -> Result<(), E>;
+    pub fn is_closed(&self) -> bool;
+}
+impl ReplicationDelivery {
+    pub fn record(&self) -> &ReplicationRecord;
+    pub fn publish(self) -> Result<ReplicationRecord, E>;
+}
+pub struct PostgresReplicationResume { pub identity: VerifiedReplicationIdentity, pub acknowledged_lsn: u64, pub generation: u64 }
+pub enum ReplicationStreamEvent {
+    Control { identity: VerifiedReplicationIdentity, acknowledged_lsn: u64, generation: u64 },
+    Record { record: ReplicationRecord, generation: u64 },
+}
+impl ReplicationSupervisor {
+    pub async fn open(config: crate::config::PostgresConfig, slot: String, publication: String, start_lsn: Option<u64>, queue_capacity: usize, reconnect: bool) -> Result<Self, E>;
+    pub async fn next_event(&self) -> Result<Option<ReplicationEventDelivery>, E>;
+    pub fn resume(&self) -> PostgresReplicationResume;
+    pub fn cancel(&self);
+    pub fn acknowledge(&self, generation: u64, commit_end_lsn: u64) -> Result<u64, E>;
+    pub async fn shutdown(&self) -> Result<(), E>;
+    pub fn is_closed(&self) -> bool;
+}
+pub const MAX_RAW_RECONNECT_ATTEMPTS: u32 = 8;
+pub fn raw_reconnect_delay(attempt: u32, jitter_seed: u64) -> std::time::Duration;
+impl ReplicationEventDelivery {
+    pub fn event(&self) -> &ReplicationStreamEvent;
+    pub fn publish(self) -> Result<ReplicationStreamEvent, E>;
+}
+```
+`ReplicationSession::cancel` synchronously fences publication, marks closed, wakes waiters and aborts read/write owners without an ambient runtime. Shutdown clears session-owned FIFO/front/pending records; an external delivery lease retains its one bounded record until publication attempt or Drop, preserving borrowed `record()` references.
+
+
+`feedback.rs` owns pure framing/state; `stream.rs` owns one socket generation and bounded delivery; `supervisor.rs` owns replacement generations. `PostgresReplicationConnection::into_stream` removes the outer redundant `Drop` implementation, destructures the owned connection, and moves its stream and buffered bytes without unsafe extraction or dummy sockets. The inner connection has no custom `Drop`; dropping its transport closes it. The connection stores private `effective_start_lsn` only after successful START_REPLICATION, using the requested start or verified confirmed-flush LSN. The session derives initial feedback from that owned value; callers cannot supply a different initial LSN to `into_stream`. The read task drains coalesced post-CopyBoth bytes before waiting for a new socket read.
+
+Received progress advances only at a complete decoded Commit end LSN. Neither `wal_end` nor payload byte count establishes a transaction boundary. Status positions are `(max(received_complete_lsn, acknowledged_lsn), acknowledged_lsn, acknowledged_lsn)`; only published exact commit boundaries may be acknowledged, with equal acknowledgements idempotent. Pending published commits are bounded at 1024. Readers pause at bounded record/byte and commit limits while the independent writer continues periodic status frames and observed keepalive replies. Shutdown sends final current feedback plus CopyDone under its absolute budget, without acknowledging undelivered records.
+
+A `ReplicationDelivery` owns both its record and the single-next reservation until publication or Drop. Drop restores the record to one unconsumed front slot; no subsequent read may overtake the lease. `ReplicationEventDelivery` additionally fences generation and wraps either a control event or a session lease. Its Drop restores only a live matching generation; stale or closed leases discard their data and release reservations. Publication fails on stale/closed generations. Terminal errors remain observable even when the event queue is full.
+
+The supervisor sends Control before records for each generation and rejects `PoolerMode::Transaction | Statement | Auto` before dialing. `reconnect=false` creates no replacement sockets. With reconnect enabled, identity/WAL availability checks run before START_REPLICATION; retries refresh credentials, preserve only acknowledged LSN, fence old deliveries, and use cancellable 100ms–5s jittered backoff with at most eight attempts. Authentication, identity mismatch, and WAL gaps fail closed.
+
+The Python completion closure owns the supervisor lease. It builds the complete Python object before publishing the Rust delivery; cancellation or conversion error drops the lease without feedback advancement. The public Python acknowledge method carries its delivered generation internally. Native open publication uses a guard that invokes `ReplicationSupervisor::cancel` on abandonment: it synchronously fences leases, marks closed, and cancels/aborts owned tasks without runtime lookup, network I/O, or worker-thread Python attachment. The Python methods expose the following `def ... -> Awaitable[T]` stubs.
+
+```python
+class AsyncPostgresClient:
+    def replication_identity(self, slot: str, publication: str) -> Awaitable[PostgresReplicationIdentity]: ...
+    def open_replication(self, slot: str, publication: str, *, start_lsn: int | None = None, queue_capacity: int = 1024, reconnect: bool = True) -> Awaitable[AsyncPostgresReplication]: ...
+class AsyncPostgresReplication:
+    @property
+    def closed(self) -> bool: ...
+    def next(self) -> Awaitable[PostgresReplicationRecord | None]: ...
+    def acknowledge(self, commit_end_lsn: int) -> Awaitable[None]: ...
+    def aclose(self) -> Awaitable[None]: ...
+    def __aenter__(self) -> Awaitable[AsyncPostgresReplication]: ...
+    def __aexit__(self, exc_type: Any = None, exc_val: Any = None, exc_tb: Any = None) -> Awaitable[None]: ...
+```
+
+The ch36 cancellation boundary uses the shared future-aware aborting helper in `vertebra-db/src/py_async.rs`:
+
+```rust
+pub fn spawn_rust_db_task_with_attr_and_future<F, T, E, M, EMap>(
+    py: Python<'_>, fut: F, map_ok: M, map_err: EMap, attr_name: &'static str,
+) -> PyResult<RustDbTaskAwaitable>
+where
+    F: Future<Output = Result<T, E>> + Send + 'static,
+    T: Send + 'static,
+    E: Send + 'static,
+    M: for<'py> FnOnce(Python<'py>, Bound<'py, PyAny>, T) -> PyResult<Py<PyAny>> + Send + 'static,
+    EMap: FnOnce(Python<'_>, E) -> PyErr + Send + 'static;
+```
+
+The mapper receives the exact original asyncio Future. The existing aborting helper delegates with an adapter that ignores this argument; the non-aborting cancellation variant retains its behavior. The replication mapper finishes fallible Python construction, checks that original Future for owning-loop cancellation, and only then publishes its delivery lease. A synchronous invocation claim spans worker and mapper lifetime so overlapping `next()` calls fail before either worker is polled. No fallible Python calls follow publication.
+
+Boolean LSNs fail with TypeError; integer LSNs outside `0 <= lsn < 2**64` fail with ValueError. Replication queue capacity is `1..=1024`; native `ReplicationSupervisor::open` and Python `open_replication` reject values outside that interval with InterfaceError before dialing any socket. Overlapping next calls raise InterfaceError, including when the first completion holds a lease in the drainer. Aclose is idempotent and joins socket/backoff tasks within its budget. Identity probing starts no replication. Native bridge behavior is tested in the new canonical `src/py/tests/unit/db/test_postgres_native_replication.py`; the separate source/store module and `test_postgres_change_source.py` are created by ch24.
+
+
 
 ### 2.4 Acceptance Scenarios
 
@@ -261,6 +370,8 @@ flowchart LR
 | Arrow | Native typed builders, raw `copy_from_arrow` / driver `load_from_arrow`, and IPC-to-SHM preserve bounded row processing. Python row materialization violates that path. |
 
 ## 3. Documentation & OKF Knowledge Plan
+
+The chapter-boundary sync for ch23, ch34, and ch35 maintains `knowledge/domains/data/postgres-limitations.md` and `knowledge/domains/data/query-pipeline-cdc-and-tenancy.md`; ch36 also maintains `knowledge/patterns/rust/ffi-and-gil-discipline.md`. These existing manifest entries receive verified present-tense coverage as each public seam lands. Their revision-8 implementation coverage is `[0/3 files documented]`; this does not claim implementation or replace the full-flow `[3/33]` interim count.
 
 Progress: `[3/33 files documented]` with interim coverage. `ch22:t04` supplies `postgres-limitations.md` and both knowledge index entries; these three files still require cutover and final-state maintenance in `ch27` / `ch31`. `ch27:t04` removes the split-state caveats from it, and the final synchronization runs across [ch30-user-and-workflow-docs](chapters/ch30-user-and-workflow-docs/spec.md) (`12` files, `ch30:t01`–`t04`), [ch31-data-and-testing-okf-sync](chapters/ch31-data-and-testing-okf-sync/spec.md) (`12` files, `ch31:t01`–`t04`), and [ch32-ffi-okf-and-review-routing-sync](chapters/ch32-ffi-okf-and-review-routing-sync/spec.md) (`9` files, `ch32:t01`–`t03`). Module, crate, and wheel inventories are enumerated from the `Makefile` `lint` stubtest list and `src/rs/*/Cargo.toml` at execution time rather than hardcoded counts.
 
@@ -308,7 +419,7 @@ Progress: `[3/33 files documented]` with interim coverage. `ch22:t04` supplies `
 | R4 | [ch02](chapters/ch02-wire-codec-and-session-startup/spec.md) (`ch02:t03`), [ch03](chapters/ch03-scram-and-channel-binding/spec.md) (`ch03:t02`), [ch04](chapters/ch04-cloud-material-and-admin-discovery/spec.md) (`ch04:t02`), [ch05](chapters/ch05-cloud-tls-and-scoped-iam/spec.md) (`ch05:t01`) | `behavior_tdd` | `src/rs/vertebra-postgres/tests/postgres_tls_wire_tests.rs`, `src/rs/vertebra-postgres/tests/postgres_cloud_wire_tests.rs` |
 | R5 | [ch02](chapters/ch02-wire-codec-and-session-startup/spec.md) (`ch02:t04`), [ch03](chapters/ch03-scram-and-channel-binding/spec.md) (`ch03:t01`–`t03`), [ch04](chapters/ch04-cloud-material-and-admin-discovery/spec.md) (`ch04:t01`), [ch05](chapters/ch05-cloud-tls-and-scoped-iam/spec.md) (`ch05:t02`–`t04`), [ch06](chapters/ch06-alloydb-keepalive-unix-and-direct-iam/spec.md) (`ch06:t01`, `ch06:t04`) | `behavior_tdd`, `regression_tdd` | `src/rs/vertebra-postgres/tests/postgres_auth_wire_tests.rs`, `src/rs/vertebra-postgres/tests/postgres_cloud_wire_tests.rs`, `src/rs/vertebra-core/tests/it/gcp_auth.rs` |
 | R6 | [ch07](chapters/ch07-async-bridge-and-client-sessions/spec.md) (`ch07:t02`), [ch08](chapters/ch08-constructor-parity-and-wheel-gil/spec.md) (`ch08:t01`, `ch08:t04`), [ch14](chapters/ch14-physical-pools-and-query-facades/spec.md) (`ch14:t03`–`t04`), [ch15](chapters/ch15-pool-facades-and-single-sync-pipeline/spec.md) (`ch15:t01`), [ch17](chapters/ch17-command-deadlines-portals-and-tz-fallback/spec.md) (`ch17:t01`–`t03`), [ch25](chapters/ch25-dsn-bridge-lexer-and-permanent-drivers/spec.md) (`ch25:t03`) | `behavior_tdd`, `characterization`, `regression_tdd` | `src/py/tests/unit/db/test_postgres_native_queries.py`, `src/py/tests/unit/db/test_postgres_native_pools.py`, `src/py/tests/unit/db/test_postgres_native_portals.py`, `src/py/tests/unit/db/test_postgres_native_adapters.py` |
-| R7 | [ch02](chapters/ch02-wire-codec-and-session-startup/spec.md) (`ch02:t02`), [ch07](chapters/ch07-async-bridge-and-client-sessions/spec.md) (`ch07:t01`, `ch07:t03`), [ch08](chapters/ch08-constructor-parity-and-wheel-gil/spec.md) (`ch08:t01`, `ch08:t04`), [ch14](chapters/ch14-physical-pools-and-query-facades/spec.md) (`ch14:t03`–`t04`), [ch15](chapters/ch15-pool-facades-and-single-sync-pipeline/spec.md) (`ch15:t01`), [ch16](chapters/ch16-pipeline-scope-and-cancellation/spec.md) (`ch16:t04`), [ch17](chapters/ch17-command-deadlines-portals-and-tz-fallback/spec.md) (`ch17:t01`–`t03`), [ch21](chapters/ch21-live-notifications/spec.md) (`ch21:t02`), [ch23](chapters/ch23-replication-feedback-resume-and-bridge/spec.md) (`ch23:t03`), [ch25](chapters/ch25-dsn-bridge-lexer-and-permanent-drivers/spec.md) (`ch25:t04`) | `behavior_tdd`, `characterization`, `regression_tdd` | `src/rs/vertebra-db/tests/py_async_cancel_tests.rs`, `src/py/tests/unit/db/test_postgres_native_cancel.py`, `src/py/tests/unit/db/test_postgres_native_adapters.py` |
+| R7 | [ch02](chapters/ch02-wire-codec-and-session-startup/spec.md) (`ch02:t02`), [ch07](chapters/ch07-async-bridge-and-client-sessions/spec.md) (`ch07:t01`, `ch07:t03`), [ch08](chapters/ch08-constructor-parity-and-wheel-gil/spec.md) (`ch08:t01`, `ch08:t04`), [ch14](chapters/ch14-physical-pools-and-query-facades/spec.md) (`ch14:t03`–`t04`), [ch15](chapters/ch15-pool-facades-and-single-sync-pipeline/spec.md) (`ch15:t01`), [ch16](chapters/ch16-pipeline-scope-and-cancellation/spec.md) (`ch16:t04`), [ch17](chapters/ch17-command-deadlines-portals-and-tz-fallback/spec.md) (`ch17:t01`–`t03`), [ch21](chapters/ch21-live-notifications/spec.md) (`ch21:t02`), [ch36](chapters/ch36-replication-python-bridge/spec.md) (`ch36:t01`–`t04`), [ch25](chapters/ch25-dsn-bridge-lexer-and-permanent-drivers/spec.md) (`ch25:t04`) | `behavior_tdd`, `characterization`, `regression_tdd` | `src/rs/vertebra-db/tests/py_async_cancel_tests.rs`, `src/py/tests/unit/db/test_postgres_native_cancel.py`, `src/py/tests/unit/db/test_postgres_native_adapters.py` |
 | R8 | [ch32](chapters/ch32-ffi-okf-and-review-routing-sync/spec.md) (`ch32:t03`), [ch33](chapters/ch33-final-review-and-release-gate/spec.md) (`ch33:t01`) | `static_validation` | `make lint-all`, `make review-check`, `make review-route BASE=c8722c76`, `review.md` |
 | R9 | [ch04](chapters/ch04-cloud-material-and-admin-discovery/spec.md) (`ch04:t01`–`t04`), [ch05](chapters/ch05-cloud-tls-and-scoped-iam/spec.md) (`ch05:t01`–`t04`), [ch06](chapters/ch06-alloydb-keepalive-unix-and-direct-iam/spec.md) (`ch06:t01`) | `behavior_tdd`, `regression_tdd` | `src/rs/vertebra-postgres/tests/postgres_cloud_wire_tests.rs`, `src/rs/vertebra-core/tests/it/gcp_auth.rs` |
 | R10 | [ch09](chapters/ch09-owned-results-and-numeric-codecs/spec.md) (`ch09:t01`–`t02`), [ch17](chapters/ch17-command-deadlines-portals-and-tz-fallback/spec.md) (`ch17:t01`–`t02`) | `behavior_tdd` | `src/rs/vertebra-postgres/tests/result_contract.rs`, `src/rs/vertebra-postgres/tests/query_protocol.rs` |
@@ -323,8 +434,8 @@ Progress: `[3/33 files documented]` with interim coverage. `ch22:t04` supplies `
 | R19 | [ch18](chapters/ch18-binary-copy-streaming/spec.md) (`ch18:t01`–`t03`), [ch28](chapters/ch28-live-conformance-and-service-acceptance/spec.md) (`ch28:t04`) | `behavior_tdd` | `src/rs/vertebra-postgres/tests/postgres_copy_codec_tests.rs`, `src/rs/vertebra-postgres/tests/postgres_copy_wire_tests.rs`, `src/py/tests/integration/db/test_postgres_features.py` |
 | R20 | [ch19](chapters/ch19-native-arrow-batches-and-shm/spec.md) (`ch19:t01`–`t04`), [ch20](chapters/ch20-arrow-copy-import-and-portals/spec.md) (`ch20:t01`–`t04`), [ch26](chapters/ch26-compiler-pipeline-arrow-and-event-hooks/spec.md) (`ch26:t03`), [ch28](chapters/ch28-live-conformance-and-service-acceptance/spec.md) (`ch28:t04`) | `behavior_tdd` | `src/rs/vertebra-postgres/tests/postgres_arrow_tests.rs`, `src/rs/vertebra-postgres/tests/postgres_arrow_import_tests.rs`, `src/py/tests/unit/db/test_postgres_native_adapter_arrow.py` |
 | R21 | [ch21](chapters/ch21-live-notifications/spec.md) (`ch21:t01`–`t03`), [ch26](chapters/ch26-compiler-pipeline-arrow-and-event-hooks/spec.md) (`ch26:t04`), [ch28](chapters/ch28-live-conformance-and-service-acceptance/spec.md) (`ch28:t04`) | `behavior_tdd` | `src/rs/vertebra-postgres/tests/postgres_notification_wire_tests.rs`, `src/py/tests/unit/db/test_postgres_event_hooks.py` |
-| R22 | [ch22](chapters/ch22-copyboth-and-pgoutput-decoding/spec.md) (`ch22:t01`–`t03`), [ch23](chapters/ch23-replication-feedback-resume-and-bridge/spec.md) (`ch23:t01`–`t03`), [ch24](chapters/ch24-change-source-and-checkpoints/spec.md) (`ch24:t01`–`t03`), [ch26](chapters/ch26-compiler-pipeline-arrow-and-event-hooks/spec.md) (`ch26:t04`), [ch28](chapters/ch28-live-conformance-and-service-acceptance/spec.md) (`ch28:t02`) | `behavior_tdd` | `src/rs/vertebra-postgres/tests/postgres_replication_wire_tests.rs`, `src/rs/vertebra-postgres/tests/postgres_pgoutput_tests.rs`, `src/py/tests/integration/db/test_postgres_replication.py` |
-| R23 | [ch23](chapters/ch23-replication-feedback-resume-and-bridge/spec.md) (`ch23:t03`), [ch24](chapters/ch24-change-source-and-checkpoints/spec.md) (`ch24:t01`–`t03`), [ch26](chapters/ch26-compiler-pipeline-arrow-and-event-hooks/spec.md) (`ch26:t04`), [ch28](chapters/ch28-live-conformance-and-service-acceptance/spec.md) (`ch28:t02`) | `behavior_tdd` | `src/py/tests/unit/db/test_postgres_change_source.py`, `src/py/tests/unit/db/test_postgres_event_hooks.py`, `src/py/tests/integration/db/test_postgres_replication.py` |
+| R22 | [ch22](chapters/ch22-copyboth-and-pgoutput-decoding/spec.md) (`ch22:t01`–`t03`), [ch23](chapters/ch23-replication-feedback-resume-and-bridge/spec.md) (`ch23:t01`–`t02`), [ch34](chapters/ch34-replication-session-pump/spec.md) (`ch34:t01`–`t04`), [ch35](chapters/ch35-replication-supervision/spec.md) (`ch35:t01`–`t03`), [ch36](chapters/ch36-replication-python-bridge/spec.md) (`ch36:t01`–`t04`), [ch24](chapters/ch24-change-source-and-checkpoints/spec.md) (`ch24:t01`–`t03`), [ch26](chapters/ch26-compiler-pipeline-arrow-and-event-hooks/spec.md) (`ch26:t04`), [ch28](chapters/ch28-live-conformance-and-service-acceptance/spec.md) (`ch28:t02`) | `behavior_tdd` | `src/rs/vertebra-postgres/tests/postgres_replication_wire_tests.rs`, `src/rs/vertebra-postgres/tests/postgres_pgoutput_tests.rs`, `src/py/tests/integration/db/test_postgres_replication.py` |
+| R23 | [ch36](chapters/ch36-replication-python-bridge/spec.md) (`ch36:t01`–`t04`), [ch24](chapters/ch24-change-source-and-checkpoints/spec.md) (`ch24:t01`–`t03`), [ch26](chapters/ch26-compiler-pipeline-arrow-and-event-hooks/spec.md) (`ch26:t04`), [ch28](chapters/ch28-live-conformance-and-service-acceptance/spec.md) (`ch28:t02`) | `behavior_tdd` | `src/py/tests/unit/db/test_postgres_native_replication.py`, `src/py/tests/unit/db/test_postgres_change_source.py`, `src/py/tests/unit/db/test_postgres_event_hooks.py`, `src/py/tests/integration/db/test_postgres_replication.py` |
 | R24 | [ch25](chapters/ch25-dsn-bridge-lexer-and-permanent-drivers/spec.md) (`ch25:t02`–`t04`), [ch26](chapters/ch26-compiler-pipeline-arrow-and-event-hooks/spec.md) (`ch26:t01`–`t04`), [ch27](chapters/ch27-atomic-cutover-and-legacy-removal/spec.md) (`ch27:t01`–`t04`) | `behavior_tdd`, `characterization` | `src/py/tests/unit/db/test_postgres_driver.py`, `src/py/tests/unit/framework/test_distributed_queues.py`, `src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py`, `src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py` |
 | R25 | [ch28](chapters/ch28-live-conformance-and-service-acceptance/spec.md) (`ch28:t01`–`t04`) | `behavior_tdd` | `VERTEBRA_CONFORMANCE_DOCKER=1 VERTEBRA_CONFORMANCE_POSTGRES_REQUIRE_ZERO_SKIPS=1 make postgres-test`, `src/py/tests/integration/db/test_driver_conformance.py`, `src/py/tests/integration/db/test_postgres_native.py`, `src/py/tests/integration/db/test_postgres_replication.py`, `src/py/tests/integration/db/test_postgres_services.py`, `src/py/tests/integration/db/test_postgres_features.py` |
 | R26 | [ch08](chapters/ch08-constructor-parity-and-wheel-gil/spec.md) (`ch08:t02`–`t04`), [ch29](chapters/ch29-wheel-ci-and-benchmarks/spec.md) (`ch29:t01`), [ch30](chapters/ch30-user-and-workflow-docs/spec.md) (`ch30:t02`), [ch32](chapters/ch32-ffi-okf-and-review-routing-sync/spec.md) (`ch32:t02`) | `regression_tdd`, `documentation_validation`, `static_validation` | `tools/scripts/verify_postgres_wheel.py`, `src/py/tests/unit/test_freethreaded_gil.py`, `.github/workflows/ci.yml`, `.github/workflows/release.yaml` |
@@ -332,7 +443,7 @@ Progress: `[3/33 files documented]` with interim coverage. `ch22:t04` supplies `
 
 ## 5. Implementation Plan
 
-Every worksheet (`119` total across `33` chapters) executes in one bounded invocation and produces one signed local conventional commit. Each chapter owns `1`–`4` vertical-slice tasks (`<= 3` files per task) in a strict serial chapter dependency chain (`ch01` -> `ch33`). Checklist SHAs for `ch01`–`ch21` are pre-squash PR #104 branch SHAs that all map to `c8722c76` on `main`. See [review.md](review.md) for adjudicated planning decisions.
+Every worksheet (`129` total across `36` chapters) executes in one bounded invocation and produces one signed local conventional commit. Each chapter owns `1`–`4` vertical-slice tasks (`<= 3` files per task) in the explicit dependency order `ch01`–`ch23` → `ch34` → `ch35` → `ch36` → `ch24`–`ch33`; chapter IDs remain stable while dependency edges govern execution. Checklist SHAs for `ch01`–`ch21` are pre-squash PR #104 branch SHAs that all map to `c8722c76` on `main`. See [review.md](review.md) for adjudicated planning decisions.
 
 - [x] [62bf91f1] ch01-wheel-scaffold-and-config — Standalone Optional Wheel Scaffold, Build Matrix, and Validated Connection Options (chapters/ch01-wheel-scaffold-and-config/spec.md)
 - [x] [ba367822] ch02-wire-codec-and-session-startup — Bounded Protocol Framing, Trust Lifecycle, SSLRequest TLS, and Cleartext/MD5 Startup (chapters/ch02-wire-codec-and-session-startup/spec.md)
@@ -356,7 +467,10 @@ Every worksheet (`119` total across `33` chapters) executes in one bounded invoc
 - [x] [40ce977c] ch20-arrow-copy-import-and-portals — Arrow-to-COPY Field Import, Schema-Qualified Streaming Writers, and Sync/Async Arrow Portal Cancellation (chapters/ch20-arrow-copy-import-and-portals/spec.md)
 - [x] [b44e28ca] ch21-live-notifications — Dedicated Notification Session Pump, PendingDeliveryGuard Async Bridge, and Python PostgresNotificationSource (chapters/ch21-live-notifications/spec.md)
 - [x] [9c1865b7] ch22-copyboth-and-pgoutput-decoding — Dedicated CopyBoth Sessions, Lossless pgoutput v1 Decoding and Transaction Envelopes, and the Split-State Limitations Record (chapters/ch22-copyboth-and-pgoutput-decoding/spec.md)
-- [ ] ch23-replication-feedback-resume-and-bridge — Durable Commit-Boundary Feedback, Checkpoint-Verified Reconnect Resume, and Cancellation-Safe Replication Bridge (chapters/ch23-replication-feedback-resume-and-bridge/spec.md)
+- [ ] ch23-replication-feedback-resume-and-bridge — Replication CopyData Codecs and Monotonic Commit-Boundary Feedback (chapters/ch23-replication-feedback-resume-and-bridge/spec.md)
+- [ ] ch34-replication-session-pump — Bounded Single-Generation Replication Session, Independent Heartbeats, and Delivery Leases (chapters/ch34-replication-session-pump/spec.md)
+- [ ] ch35-replication-supervision — Verified Reconnect Supervision and Generation-Fenced Delivery (chapters/ch35-replication-supervision/spec.md)
+- [ ] ch36-replication-python-bridge — Cancellation-Safe Python Replication Handles and Typed Event Hydration (chapters/ch36-replication-python-bridge/spec.md)
 - [ ] ch24-change-source-and-checkpoints — PostgresChangeSource, PostgresCheckpointStore, Serialized CAS Ack Reconciliation, and Replay/Shutdown Semantics (chapters/ch24-change-source-and-checkpoints/spec.md)
 - [ ] ch25-dsn-bridge-lexer-and-permanent-drivers — URL/libpq Config Bridge, Lexer-Aware Bind Compiler, and Pre-Activation Permanent Sync/Async Drivers (chapters/ch25-dsn-bridge-lexer-and-permanent-drivers/spec.md)
 - [ ] ch26-compiler-pipeline-arrow-and-event-hooks — SQLSpec/SQLAlchemy Compiler Boundaries, Driver Wiring of pipeline.py and arrow.py, and EventSessionRegistry Hooks (chapters/ch26-compiler-pipeline-arrow-and-event-hooks/spec.md)
@@ -373,13 +487,13 @@ Every worksheet (`119` total across `33` chapters) executes in one bounded invoc
 ## 6. Current State & Remaining Plan Snapshot
 
 - **Verified Chapter**: Chapter 22 is completed at reviewed commit `9c1865b7`; correctness, fresh quality, native tests, Clippy, and documentation gates pass.
-- **Progress**: `22/33` chapters and `82/119` tasks are complete; `37` tasks remain. The active pointer is `ch23-replication-feedback-resume-and-bridge`, task `native-postgres-driver:ch23:t01`.
+- **Progress**: `22/36` chapters and `82/129` tasks are complete; `47` tasks remain. The active pointer is `ch23-replication-feedback-resume-and-bridge`, task `native-postgres-driver:ch23:t01`.
 - **Git Continuity**: Chapters through `ch21` retain original reviewed history under `refs/flow/native-postgres-reviewed-history`. Chapter 22 t01/t02 use squash `c8722c76` with original task provenance; t03/t04 are local commits `2947d015`/`48b50600`.
 - **Runtime Boundary**: Native replication decoding is available locally; public Python drivers still use psycopg and asyncio.to_thread until ch27. Live PG14–18, wheel/free-threaded, benchmark, and release acceptance remain downstream gates.
 - **Documentation**: Interim limitations coverage is `3/33` files; ch27 and ch31 maintain it, and ch30–ch32 finish synchronization.
-- **Remaining Plan**: ch23 feedback/resume/bridge; ch24 change sources/checkpoints; ch25–ch27 native drivers/cutover; ch28 live conformance; ch29 wheels/benchmarks; ch30–ch32 docs/OKF; ch33 final verification.
-- **Execution Blocker**: ch23:t01 lacks the public split-session contract required by its wire scenarios; ch23:t02 owns the dependent supervisor. Production and tests are untouched.
-- **Next Action**: `/flow:revise native-postgres-driver ch23-replication-feedback-resume-and-bridge` defines session ownership, feedback initialization/update methods, and supervisor composition. Commits stay local.
+- **Remaining Plan**: ch23 feedback; ch34 session pump; ch35 verified supervision; ch36 Python bridge; ch24 change sources/checkpoints; ch25–ch27 native drivers/cutover; ch28 live conformance; ch29 wheels/benchmarks; ch30–ch32 docs/OKF; ch33 final verification.
+- **Plan Readiness**: Revision 8 defines public feedback, single-generation session delivery leases, verified supervision, and Python publication contracts. The revised plan is a draft awaiting zero-context review and approval; production and tests are untouched.
+- **Next Action**: Review the revision, then `/flow:implement native-postgres-driver ch23` after approval. Commits stay local.
 
 [^pg-conn-rs]: `src/rs/vertebra-db/src/connection.rs::TransportStream` — Shared TCP, Unix, TLS, and cloud mTLS stream primitives.
 [^pg-core-rs]: `src/rs/vertebra-db/src/postgres/mod.rs::encode_query_frame` — Shared stateless PostgreSQL wire frame and codec helpers in `vertebra-db`.

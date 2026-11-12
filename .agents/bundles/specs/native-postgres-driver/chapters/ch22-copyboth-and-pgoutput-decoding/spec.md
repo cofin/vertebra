@@ -96,7 +96,7 @@ Parent roadmap: [spec.md](../../spec.md) and [contracts.md](../../contracts.md).
 | `src/rs/vertebra-postgres/src/replication/pgoutput.rs::PgOutputDecoder::decode_next_frame` | `(&mut self, catalog: &mut TypeCatalog, codec_ctx: &CodecContext) -> Result<Option<PgOutputFrame>, PostgresError>`; unknown tags fail with `PostgresError::Protocol`. |
 | `src/rs/vertebra-postgres/src/replication/pgoutput.rs::PgOutputDecoder::reset_on_disconnect` | Clears buffered bytes, relation cache, and active transaction for replay. |
 | `src/rs/vertebra-db/src/postgres/mod.rs::encode_query_frame` [^pg-core-rs] | Shared stateless frame helpers; replication framing stays in `vertebra-postgres`. |
-| `src/rs/vertebra-postgres/src/replication/mod.rs::pgoutput_tuple_to_python_dict` | Existing tuple projection reused by `ch23:t03` for record payloads. |
+| `src/rs/vertebra-postgres/src/replication/mod.rs::pgoutput_tuple_to_python_dict` | Existing tuple projection reused by `ch36:t02` for record payloads. |
 | `src/py/vertebra/db/adapters/postgres/types.py::PostgresReplicationRecord` | Kinds `control`, `begin`, `insert`, `update`, `delete`, `truncate`, `message`, `commit` already validated in Python. |
 
 ## 2. Requirements, Concrete Contracts & Architecture
@@ -122,7 +122,7 @@ Parent roadmap: [spec.md](../../spec.md) and [contracts.md](../../contracts.md).
 ### 2.3 Caller -> Seam -> Collaborator Map
 
 - Replication read task (`ch23:t01`) -> `PgOutputDecoder::{push, next_record}` -> `decode_next_frame` + `ActiveLogicalTx` + `RelationCache` + `crate::codecs` + `crate::types::TypeCatalog` -> `BoundedReplicationQueue::push`.
-- `AsyncPostgresReplication.next` (`ch23:t03`) -> `ReplicationRecord` -> `replication/mod.rs::pgoutput_tuple_to_python_dict` -> `types.py::PostgresReplicationRecord`.
+- `AsyncPostgresReplication.next` (`ch36:t04`) -> `ReplicationRecord` -> `replication/mod.rs::pgoutput_tuple_to_python_dict` -> `types.py::PostgresReplicationRecord`.
 - Maintainers and agents reading `main` -> `knowledge/index.md` / `domains/index.md` -> `postgres-limitations.md` -> symbol-anchored split-state caveats.
 
 ### 2.4 Edge-Case & Failure-Mode Matrix

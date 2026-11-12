@@ -23,8 +23,8 @@ files:
   - docs/usage/queues-and-realtime.md
 tests: []
 estimated_loc: 165
-plan_revision: 7
-plan_commit: c8722c76
+plan_revision: 8
+plan_commit: 5eb75b2a
 state_revision: 0
 claimed_by: null
 claimed_at: null

@@ -11,13 +11,13 @@ depends_on_chapters:
   - ch31-data-and-testing-okf-sync
 replan_trigger: null
 current_task: "native-postgres-driver:ch32:t01"
-plan_revision: 7
-plan_commit: c8722c76
+plan_revision: 8
+plan_commit: 5eb75b2a
 state_revision: 0
 last_verified_checkpoint: null
 last_reviewed_commit: null
 created_at: "2026-11-10T14:45:00Z"
-updated_at: "2026-11-12T01:30:00Z"
+updated_at: "2026-11-12T04:16:55Z"
 generated:
   by: flow-revise
   at: "2026-11-12T01:30:00Z"
@@ -143,7 +143,7 @@ Progress: `[0/9 files documented]`
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Plan Baseline**: `plan_commit: c8722c76`, `plan_revision: 7`; `depends_on_chapters: [ch31-data-and-testing-okf-sync]`, `state: planned`. The flow spans `33` chapters / `119` tasks; `ch01`–`ch21` plus `ch22:t01`–`t02` (`80` tasks) landed on `main` in `c8722c76`, and the remaining chapters ship in a follow-up pull request.
+- **Verified Plan Baseline**: `plan_commit: 5eb75b2a`, `plan_revision: 8`; `depends_on_chapters: [ch31-data-and-testing-okf-sync]`, `state: planned`. The flow spans `36` chapters / `129` tasks; `ch01`–`ch21` plus `ch22:t01`–`t02` (`80` tasks) landed on `main` in `c8722c76`, and the remaining chapters ship in a follow-up pull request.
 - **Remaining Tasks in Chapter**: `t01`, `t02`, `t03` (`3/3` pending); `[0/9 files documented]`.
 - **Downstream Dependents**: Unblocks [ch33-final-review-and-release-gate](../ch33-final-review-and-release-gate/spec.md) (`ch33:t01`) for complete-driver verification, routed correctness review, and fresh zero-context quality review across `c8722c76..HEAD`.
 

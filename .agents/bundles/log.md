@@ -1,5 +1,10 @@
 # Bundle Activity Log
 
+## [2026-11-12T04:16:55Z] revise-candidate | Native PostgreSQL replication seams
+
+- Revision 8 decomposes replication into ch23 feedback, ch34 single-generation sessions, ch35 verified supervision, and ch36 Python publication. The roadmap spans 36 chapters and 129 worksheets; 82 tasks are complete and 47 remain.
+- The draft defines delivery leases, safe transport transfer, and feedback initialization/update contracts. Zero-context plan review and approval are required before implementation resumes. Production and tests are untouched.
+
 ## [2026-11-12T04:05:24Z] chapter-complete | Parallel implementation batch
 
 - MCP ch01 and server runtime ch01 are completed after correctness and fresh quality review of `b0578ebc`; chapter/task pointers advance to ch02. PostgreSQL ch22 and storage ch01 retain reviewed checkpoint `9c1865b7`.

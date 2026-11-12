@@ -24,8 +24,8 @@ files:
 tests:
   - src/py/tests/unit/db/test_postgres_event_hooks.py
 estimated_loc: 245
-plan_revision: 7
-plan_commit: c8722c76
+plan_revision: 8
+plan_commit: 5eb75b2a
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -94,7 +94,7 @@ Implement adapter-internal `EventSessionRegistry` in `src/py/vertebra/db/adapter
   - `async def _replication_identity(self, slot: str, publication: str) -> PostgresReplicationIdentity`:
     - Rejects closed driver (`InterfaceError`), resolves direct options via `derive_direct_config()`, loads `vertebra._postgres` with exact `package="vertebra-core[postgres]"` metadata, connects a fresh `AsyncPostgresClient`, awaits `client.replication_identity(slot, publication)` (zero `START_REPLICATION`), and always awaits `await client.close()` inside `CancelScope(shield=True)` in `finally`.
   - `async def _open_replication_stream(self, config: PostgresChangeConfig, *, start_lsn: int | None = None, reconnect: bool = False) -> AsyncPostgresReplication`:
-    - Unpacks `config.slot`, `config.publication`, and `config.queue_capacity` (never passing `config.checkpoint_timeout` to native `open_replication`), and opens `client.open_replication(config.slot, config.publication, start_lsn=start_lsn, queue_capacity=config.queue_capacity, reconnect=reconnect)` via `self._event_registry`.
+    - Unpacks `config.slot`, `config.publication`, and `config.queue_capacity` (never passing `config.checkpoint_timeout` to native `open_replication`), and forwards the validated replication `queue_capacity` range `1..1024` unchanged; native refusal is `InterfaceError` before dialing. It opens `client.open_replication(config.slot, config.publication, start_lsn=start_lsn, queue_capacity=config.queue_capacity, reconnect=reconnect)` via `self._event_registry`.
   - `async def _publish_notification(self, channel: str, payload: str) -> None`:
     - `AsyncPostgreSQLDriver`: `await self.execute("SELECT pg_notify($1, $2)", (channel, payload), timeout=10.0)` in the caller's task (joining any ambient `async with driver.transaction():` so rollback suppresses delivery).
     - `SyncPostgreSQLDriver`: checks this driver's active `Sync` transaction `ContextVar` scope first and raises `InterfaceError` before `asyncio.to_thread` or I/O when active; outside a sync scope, awaits `await asyncio.to_thread(self.execute, "SELECT pg_notify($1, $2)", (channel, payload), timeout=10.0)`.

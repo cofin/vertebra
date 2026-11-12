@@ -23,8 +23,8 @@ files:
   - docs/getting-started/installation.md
 tests: []
 estimated_loc: 140
-plan_revision: 7
-plan_commit: c8722c76
+plan_revision: 8
+plan_commit: 5eb75b2a
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -35,7 +35,7 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: "2026-11-10T14:45:00Z"
-updated_at: "2026-11-12T01:30:00Z"
+updated_at: "2026-11-12T04:16:55Z"
 commit: null
 generated:
   by: flow-revise
@@ -131,7 +131,7 @@ Out of scope: Modifying `src/py/vertebra/_postgres.pyi`, `database-capabilities.
 
 ## Notes & Discoveries
 
-- `src/py/vertebra/_postgres.pyi` expands in `ch22`–`ch23` with replication handles; read the completed `_postgres.pyi::__all__` at execution time so every exported stub class is listed under `## vertebra._postgres` at `heading_level: 4`.
+- `src/py/vertebra/_postgres.pyi` expands in `ch22`, `ch23`, and `ch34`–`ch36` with replication handles; read the completed `_postgres.pyi::__all__` at execution time so every exported stub class is listed under `## vertebra._postgres` at `heading_level: 4`.
 
 [^doc-stubs]: `docs/reference/native-stubs.md` — Native PyO3 extension type stubs reference page.
 [^doc-ref-index]: `docs/reference/index.md` — API reference landing page and module overview table.

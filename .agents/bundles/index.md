@@ -52,7 +52,7 @@ Root index for **Vertebra** — the Rust-powered, full-stack Python & TypeScript
 
 - **[`specs/`](specs/index.md) (active)** —
   - **Master PRDs (`state: planned`)**: [`native-data-platform`](specs/native-data-platform/spec.md) and [`integration-remediation`](specs/integration-remediation/spec.md)
-  - **Active Feature Specifications (`state: active`)**: [`native-postgres-driver`](specs/native-postgres-driver/spec.md) (`ch01`–`ch33`, `119` tasks, `22/33` chapters completed through `ch22`, with `ch23` next, `82/119` tasks completed through `ch22:t04`) delivers the standalone Rust PostgreSQL wheel (`vertebra-postgres`).
+  - **Active Feature Specifications (`state: active`)**: [`native-postgres-driver`](specs/native-postgres-driver/spec.md) (`36` dependency-ordered chapters, `129` tasks, `22/36` chapters completed through `ch22`, with `ch23` next, `82/129` tasks completed through `ch22:t04`) delivers the standalone Rust PostgreSQL wheel (`vertebra-postgres`).
   - **Active Feature Specification**: [`mcp-protocol-completeness`](specs/mcp-protocol-completeness/spec.md) (`12` chapters, `35` tasks; ch01 reviewed)
   - **Active Feature Specification**: [`server-runtime-correctness`](specs/server-runtime-correctness/spec.md) (`11` chapters, `33` tasks; ch01 reviewed)
   - **Active Feature Specification**: [`storage-integrity-and-streaming`](specs/storage-integrity-and-streaming/spec.md) (`4` chapters, `12` tasks; ch01 reviewed)

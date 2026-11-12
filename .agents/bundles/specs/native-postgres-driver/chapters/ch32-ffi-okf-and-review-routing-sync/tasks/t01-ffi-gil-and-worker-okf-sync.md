@@ -23,8 +23,8 @@ files:
   - .agents/bundles/knowledge/architecture/worker/pyo3-ffi-and-batch-dispatch.md
 tests: []
 estimated_loc: 175
-plan_revision: 7
-plan_commit: c8722c76
+plan_revision: 8
+plan_commit: 5eb75b2a
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -35,7 +35,7 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: "2026-11-10T14:45:00Z"
-updated_at: "2026-11-12T01:30:00Z"
+updated_at: "2026-11-12T04:16:55Z"
 commit: null
 generated:
   by: flow-revise
@@ -130,7 +130,7 @@ Out of scope: Modifying Rust/Python source files, `packaging-and-pgo.md` / `ADR-
 
 ## Notes & Discoveries
 
-- Inspect the delivered notification and replication Rust modules from `ch21` and `ch23` before citing a `resource: path::PendingDeliveryGuard` anchor in `ffi-and-gil-discipline.md`.
+- Inspect the delivered notification and replication Rust modules from `ch21` and `ch36` before citing a `resource: path::PendingDeliveryGuard` anchor in `ffi-and-gil-discipline.md`.
 
 [^okf-ffi-pattern]: `.agents/bundles/knowledge/patterns/rust/ffi-and-gil-discipline.md` — PyO3 0.30.1 FFI and GIL discipline pattern chapter.
 [^okf-ffi-gotcha]: `.agents/bundles/knowledge/gotchas/pyo3-and-python-runtime.md` — PyO3 FFI, embedded globals, and Python runtime gotchas chapter.

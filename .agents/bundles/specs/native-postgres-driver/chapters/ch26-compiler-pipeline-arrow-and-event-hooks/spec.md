@@ -11,13 +11,13 @@ depends_on_chapters:
   - ch25-dsn-bridge-lexer-and-permanent-drivers
 replan_trigger: null
 current_task: "native-postgres-driver:ch26:t01"
-plan_revision: 7
-plan_commit: c8722c76
+plan_revision: 8
+plan_commit: 5eb75b2a
 state_revision: 0
 last_verified_checkpoint: null
 last_reviewed_commit: null
 created_at: "2026-11-05T00:00:00Z"
-updated_at: "2026-11-12T01:30:00Z"
+updated_at: "2026-11-12T04:16:55Z"
 generated:
   by: flow-revise
   at: "2026-11-12T01:30:00Z"
@@ -128,7 +128,7 @@ Parent roadmap: [spec.md](../../spec.md) and [contracts.md](../../contracts.md).
 
 ## 3. Documentation & OKF Knowledge Plan
 
-Progress: `[0/0 files documented in ch26]` (`[0/33 files documented]` across the full `33`-chapter / `119`-task flow consolidated in `ch30-user-and-workflow-docs`, `ch31-data-and-testing-okf-sync`, and `ch32-ffi-okf-and-review-routing-sync`; public hook docstrings in `_sync.py`, `_async.py`, and `events.py` document the sync vs async `_publish_notification` transaction boundary).
+Progress: `[0/0 files documented in ch26]` (`[0/33 files documented]` across the full `36`-chapter / `129`-task flow consolidated in `ch30-user-and-workflow-docs`, `ch31-data-and-testing-okf-sync`, and `ch32-ffi-okf-and-review-routing-sync`; public hook docstrings in `_sync.py`, `_async.py`, and `events.py` document the sync vs async `_publish_notification` transaction boundary).
 
 ## 4. Requirement-to-Task Traceability Matrix
 
@@ -150,7 +150,7 @@ Progress: `[0/0 files documented in ch26]` (`[0/33 files documented]` across the
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Plan Baseline**: `plan_revision: 7`, `plan_commit: c8722c76`; chapter `state: planned`, `planning_status: complete` (`33` chapters / `119` tasks; `ch01`–`ch21` and `ch22:t01`–`t02` (`80` tasks) are on `main` in `c8722c76`).
+- **Verified Plan Baseline**: `plan_revision: 8`, `plan_commit: 5eb75b2a`; chapter `state: planned`, `planning_status: complete` (`36` chapters / `129` tasks; `ch01`–`ch21` and `ch22:t01`–`t02` (`80` tasks) are on `main` in `c8722c76`).
 - **Remaining Tasks in Chapter**: `t01`, `t02`, `t03`, `t04` (`4/4` pending).
 - **Downstream Dependents**: Unblocks `ch27-atomic-cutover-and-legacy-removal` ahead of `ch30`–`ch32` documentation/OKF sync (`[0/33 files documented]`) and `ch33-final-review-and-release-gate`.
 

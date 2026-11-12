@@ -8,16 +8,16 @@ status: draft
 state: planned
 planning_status: complete
 depends_on_chapters:
-  - ch23-replication-feedback-resume-and-bridge
+  - ch36-replication-python-bridge
 replan_trigger: null
 current_task: "native-postgres-driver:ch24:t01"
-plan_revision: 7
-plan_commit: c8722c76
+plan_revision: 8
+plan_commit: 5eb75b2a
 state_revision: 0
 last_verified_checkpoint: null
 last_reviewed_commit: null
 created_at: "2026-11-05T00:00:00Z"
-updated_at: "2026-11-12T01:30:00Z"
+updated_at: "2026-11-12T04:16:55Z"
 generated:
   by: flow-revise
   at: "2026-11-12T01:30:00Z"
@@ -86,6 +86,7 @@ Parent roadmap: [spec.md](../../spec.md) and [contracts.md](../../contracts.md).
     - `async def _open_replication_stream(self, config: PostgresChangeConfig, *, start_lsn: int | None = None, reconnect: bool = False) -> AsyncPostgresReplication: ...`
 - `src/py/vertebra/db/adapters/postgres/change_stream.py`:
   - `class PostgresChangeConfig(FrozenBaseStruct, frozen=True, gc=False, kw_only=True): slot: str; publication: str; channel: str = "vertebra_events"; start_lsn: int | None = None; queue_capacity: int = 1024; reconnect: bool = True; checkpoint_timeout: float = 10.0`
+  - `PostgresChangeConfig` validates `1 <= queue_capacity <= 1024` locally; the native replication opener refuses out-of-range capacity with `InterfaceError` before any socket dial.
   - `class PostgresCheckpoint(FrozenBaseStruct, frozen=True, gc=False, kw_only=True): system_identifier: str; database: str; slot: str; publication_fingerprint: str; commit_end_lsn: int; next_event_id: int` (`@property def identity_key(self) -> tuple[str, str, str, str]`)
   - `class PostgresCheckpointStore(Protocol): async def load(self, identity_key: tuple[str, str, str, str]) -> PostgresCheckpoint | None: ...; async def save(self, checkpoint: PostgresCheckpoint, *, expected: PostgresCheckpoint | None) -> None: ...`
   - `class MemoryPostgresCheckpointStore:` (`load`, `save` guarded by `asyncio.Lock`)
@@ -135,7 +136,7 @@ Progress: `[0/0 files documented in ch24]` (project documentation and OKF chapte
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Plan Baseline**: `c8722c76`; chapter `state: planned`, `planning_status: complete`, `plan_revision: 7`, `plan_commit: c8722c76` (`ch01`–`ch21` and `ch22:t01`–`t02` on `main` through the PR #104 squash).
+- **Verified Plan Baseline**: `c8722c76`; chapter `state: planned`, `planning_status: complete`, `plan_revision: 8`, `plan_commit: 5eb75b2a` (`ch01`–`ch21` and `ch22:t01`–`t02` on `main` through the PR #104 squash).
 - **Remaining Tasks in Chapter**: `t01`, `t02`, `t03` (`3/3` pending).
 - **Downstream Dependents**: Unblocks `ch25-dsn-bridge-lexer-and-permanent-drivers` and `ch26-compiler-pipeline-arrow-and-event-hooks`.
 

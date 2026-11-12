@@ -22,8 +22,8 @@ tests:
   - src/py/tests/integration/db/test_driver_conformance.py
   - src/py/tests/integration/db/test_postgres_native.py
 estimated_loc: 245
-plan_revision: 7
-plan_commit: c8722c76
+plan_revision: 8
+plan_commit: 5eb75b2a
 state_revision: 0
 claimed_by: null
 claimed_at: null

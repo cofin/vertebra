@@ -27,8 +27,8 @@ tests:
   - src/py/tests/unit/db/test_enterprise_olap_drivers.py
   - src/py/tests/unit/db/test_postgres_event_hooks.py
 estimated_loc: 235
-plan_revision: 7
-plan_commit: c8722c76
+plan_revision: 8
+plan_commit: 5eb75b2a
 state_revision: 0
 claimed_by: null
 claimed_at: null

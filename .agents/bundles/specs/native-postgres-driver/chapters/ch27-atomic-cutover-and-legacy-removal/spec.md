@@ -11,13 +11,13 @@ depends_on_chapters:
   - ch26-compiler-pipeline-arrow-and-event-hooks
 replan_trigger: null
 current_task: "native-postgres-driver:ch27:t01"
-plan_revision: 7
-plan_commit: c8722c76
+plan_revision: 8
+plan_commit: 5eb75b2a
 state_revision: 0
 last_verified_checkpoint: null
 last_reviewed_commit: null
 created_at: "2026-11-05T00:00:00Z"
-updated_at: "2026-11-12T01:30:00Z"
+updated_at: "2026-11-12T04:16:55Z"
 generated:
   by: flow-revise
   at: "2026-11-12T01:30:00Z"
@@ -201,7 +201,7 @@ Progress: `[0/1 files documented in this chapter]` — `ch27:t04` removes the sp
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Plan Baseline**: `plan_revision: 7`, `plan_commit: c8722c76`; `state: planned`, `planning_status: complete` (`33` chapters / `119` tasks; `ch01`–`ch21` and `ch22:t01`–`t02` are on `main`).
+- **Verified Plan Baseline**: `plan_revision: 8`, `plan_commit: 5eb75b2a`; `state: planned`, `planning_status: complete` (`36` chapters / `129` tasks; `ch01`–`ch21` and `ch22:t01`–`t02` are on `main`).
 - **Remaining Tasks in Chapter**: `t01`, `t02`, `t03`, `t04` (`4/4` pending).
 - **Active Invariants**: After `t04`, `git grep -n -E 'psycopg|asyncpg' -- src/py/vertebra` prints nothing; driver unit tests contain no SQLite-backed or psycopg/asyncpg doubles; `core.py`, `parse_pgcopy_binary_rows`, and `vertebra._vertebra` CPU helpers remain intact; the only remaining comparator references live under `[dependency-groups].postgres-bench` (`ch29:t02`) and the extras-literal fixture in `src/py/tests/unit/build/test_packaging_and_pgo.py`.
 

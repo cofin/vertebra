@@ -11,13 +11,13 @@ depends_on_chapters:
   - ch28-live-conformance-and-service-acceptance
 replan_trigger: null
 current_task: "native-postgres-driver:ch29:t01"
-plan_revision: 7
-plan_commit: c8722c76
+plan_revision: 8
+plan_commit: 5eb75b2a
 state_revision: 0
 last_verified_checkpoint: null
 last_reviewed_commit: null
 created_at: "2026-11-05T00:00:00Z"
-updated_at: "2026-11-12T01:30:00Z"
+updated_at: "2026-11-12T04:16:55Z"
 generated:
   by: flow-revise
   at: "2026-11-12T01:30:00Z"
@@ -134,7 +134,7 @@ Progress: `[0/0 files documented in ch29]` — hands off to [ch30-user-and-workf
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Plan Baseline**: `plan_commit: c8722c76`, `plan_revision: 7`; chapter `state: planned`, `planning_status: complete`. The flow spans `33` chapters / `119` tasks; `ch01`–`ch21` plus `ch22:t01`–`t02` (`80` tasks) landed on `main` in `c8722c76` ([#104](https://github.com/cofin/vertebra/pull/104)), and the remaining chapters ship in a follow-up pull request.
+- **Verified Plan Baseline**: `plan_commit: 5eb75b2a`, `plan_revision: 8`; chapter `state: planned`, `planning_status: complete`. The flow spans `36` chapters / `129` tasks; `ch01`–`ch21` plus `ch22:t01`–`t02` (`80` tasks) landed on `main` in `c8722c76` ([#104](https://github.com/cofin/vertebra/pull/104)), and the remaining chapters ship in a follow-up pull request.
 - **Remaining Tasks in Chapter**: `t01`, `t02`, `t03` (`3/3` pending).
 - **Downstream Handoff & Invariants**: Unblocks `ch30-user-and-workflow-docs` (`[0/33 files documented]` across `ch30`–`ch32`, followed by `ch33-final-review-and-release-gate`); `psycopg` and `asyncpg` stay confined to `[dependency-groups].postgres-bench` (`python_version == '3.12'`); `src/py/vertebra/build/packaging/` and `tools/pgo/` stay untouched; `VERTEBRA_POSTGRES_BENCH_DSN` is never persisted in JSON artifacts; zero workflow dispatch, push, or tag mutation occurs locally.
 

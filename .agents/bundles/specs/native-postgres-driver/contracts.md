@@ -40,7 +40,7 @@ tags:
 - **Lossless Value & `VTBARROW` Contracts**: Frozen `msgspec` adapter records (`PgInterval`, `PgArray`, `PgComposite`, `PgTemporal`, `PgBitString`) and standard Arrow structural schemas preserve full PostgreSQL fidelity without Tokio-thread Python hydration [^pg-driver] [^arrow-cursor].
 <!-- truth: end -->
 
-All features ship in one complete-driver PR across `ch01`–`ch33`. These contracts govern every chapter specification and task worksheet.
+The complete-driver roadmap spans 36 dependency-ordered chapters (`ch01`–`ch23`, `ch34`–`ch36`, `ch24`–`ch33`). These contracts govern every chapter specification and task worksheet.
 
 ## Connection constructors
 
@@ -232,7 +232,114 @@ with a metadata-only savepoint inside ambient T. Irrecoverable after-completion
 errors keep the canonical source class/SQLSTATE and attach .completed_result; the
 original statement is never replayed.
 
+## Native replication layering and delivery leases
+
+The execution order is ch23 feedback → ch34 single-generation session → ch35 verified supervisor → ch36 Python bridge → ch24 durable change source. These are planned Rust public seams, introduced by their owning tasks; source existence is not claimed before implementation. `E` below means `crate::errors::PostgresError`.
+
+```rust
+pub enum ReplicationCopyData<'a> {
+    XLogData { wal_start: u64, wal_end: u64, server_time_pg_us: i64, payload: &'a [u8] },
+    PrimaryKeepalive { wal_end: u64, server_time_pg_us: i64, reply_requested: bool },
+}
+pub fn decode_replication_copy_data(frame: &[u8]) -> Result<ReplicationCopyData<'_>, E>;
+pub fn encode_standby_status_update(write_lsn: u64, flush_lsn: u64, apply_lsn: u64, client_time_pg_us: i64, reply_requested: bool) -> [u8; 34];
+pub fn compute_status_interval(wal_sender_timeout: Option<std::time::Duration>) -> std::time::Duration;
+impl ReplicationFeedback {
+    pub fn new(initial_lsn: u64) -> Self;
+    pub fn record_received_commit(&mut self, commit_end_lsn: u64) -> Result<(), E>;
+    pub fn record_published_commit(&mut self, commit_end_lsn: u64) -> Result<(), E>;
+    pub fn acknowledge(&mut self, commit_end_lsn: u64) -> Result<u64, E>;
+    pub fn status_positions(&self) -> (u64, u64, u64);
+    pub fn unacked_count(&self) -> usize;
+}
+impl PostgresReplicationConnection {
+    pub fn into_stream(self, queue_capacity: usize, status_interval: std::time::Duration, shutdown_timeout: std::time::Duration) -> Result<ReplicationSession, E>;
+    pub async fn connect_logical_verified(config: &crate::config::PostgresConfig, slot: &str, publication: &str, start_lsn: u64, expected: &VerifiedReplicationIdentity) -> Result<Self, E>;
+}
+impl ReplicationSession {
+    pub fn identity(&self) -> &VerifiedReplicationIdentity;
+    pub async fn next(&self) -> Result<Option<ReplicationDelivery>, E>;
+    pub fn acknowledge(&self, commit_end_lsn: u64) -> Result<u64, E>;
+    pub fn status_positions(&self) -> (u64, u64, u64);
+    pub async fn wait_closed(&self) -> Result<(), E>;
+    pub fn cancel(&self);
+    pub async fn shutdown(&self) -> Result<(), E>;
+    pub fn is_closed(&self) -> bool;
+}
+impl ReplicationDelivery {
+    pub fn record(&self) -> &ReplicationRecord;
+    pub fn publish(self) -> Result<ReplicationRecord, E>;
+}
+pub struct PostgresReplicationResume { pub identity: VerifiedReplicationIdentity, pub acknowledged_lsn: u64, pub generation: u64 }
+pub enum ReplicationStreamEvent {
+    Control { identity: VerifiedReplicationIdentity, acknowledged_lsn: u64, generation: u64 },
+    Record { record: ReplicationRecord, generation: u64 },
+}
+impl ReplicationSupervisor {
+    pub async fn open(config: crate::config::PostgresConfig, slot: String, publication: String, start_lsn: Option<u64>, queue_capacity: usize, reconnect: bool) -> Result<Self, E>;
+    pub async fn next_event(&self) -> Result<Option<ReplicationEventDelivery>, E>;
+    pub fn resume(&self) -> PostgresReplicationResume;
+    pub fn cancel(&self);
+    pub fn acknowledge(&self, generation: u64, commit_end_lsn: u64) -> Result<u64, E>;
+    pub async fn shutdown(&self) -> Result<(), E>;
+    pub fn is_closed(&self) -> bool;
+}
+pub const MAX_RAW_RECONNECT_ATTEMPTS: u32 = 8;
+pub fn raw_reconnect_delay(attempt: u32, jitter_seed: u64) -> std::time::Duration;
+impl ReplicationEventDelivery {
+    pub fn event(&self) -> &ReplicationStreamEvent;
+    pub fn publish(self) -> Result<ReplicationStreamEvent, E>;
+}
+```
+
+`feedback.rs` owns pure framing/state; `stream.rs` owns one socket generation and bounded delivery; `supervisor.rs` owns replacement generations. `PostgresReplicationConnection::into_stream` removes the outer redundant `Drop` implementation, destructures the owned connection, and moves its stream and buffered bytes without unsafe extraction or dummy sockets. The inner connection has no custom `Drop`; dropping its transport closes it. The connection stores private `effective_start_lsn` only after successful START_REPLICATION, using the requested start or verified confirmed-flush LSN. The session derives initial feedback from that owned value; callers cannot supply a different initial LSN to `into_stream`. The read task drains coalesced post-CopyBoth bytes before waiting for a new socket read.
+
+Received progress advances only at a complete decoded Commit end LSN. Neither `wal_end` nor payload byte count establishes a transaction boundary. Status positions are `(max(received_complete_lsn, acknowledged_lsn), acknowledged_lsn, acknowledged_lsn)`; only published exact commit boundaries may be acknowledged, with equal acknowledgements idempotent. Pending published commits are bounded at 1024. Readers pause at bounded record/byte and commit limits while the independent writer continues periodic status frames and observed keepalive replies. Shutdown sends final current feedback plus CopyDone under its absolute budget, without acknowledging undelivered records.
+
+A `ReplicationDelivery` owns both its record and the single-next reservation until publication or Drop. Drop restores the record to one unconsumed front slot; no subsequent read may overtake the lease. `ReplicationEventDelivery` additionally fences generation and wraps either a control event or a session lease. Its Drop restores only a live matching generation; stale or closed leases discard their data and release reservations. Publication fails on stale/closed generations. Terminal errors remain observable even when the event queue is full.
+
+The supervisor sends Control before records for each generation and rejects `PoolerMode::Transaction | Statement | Auto` before dialing. `reconnect=false` creates no replacement sockets. With reconnect enabled, identity/WAL availability checks run before START_REPLICATION; retries refresh credentials, preserve only acknowledged LSN, fence old deliveries, and use cancellable 100ms–5s jittered backoff with at most eight attempts. Authentication, identity mismatch, and WAL gaps fail closed.
+
+The Python completion closure owns the supervisor lease. It builds the complete Python object before publishing the Rust delivery; cancellation or conversion error drops the lease without feedback advancement. The public Python acknowledge method carries its delivered generation internally. Native open publication uses a guard that invokes `ReplicationSupervisor::cancel` on abandonment: it synchronously fences leases, marks closed, and cancels/aborts owned tasks without runtime lookup, network I/O, or worker-thread Python attachment. The Python methods expose the following `def ... -> Awaitable[T]` stubs.
+
+```python
+class AsyncPostgresClient:
+    def replication_identity(self, slot: str, publication: str) -> Awaitable[PostgresReplicationIdentity]: ...
+    def open_replication(self, slot: str, publication: str, *, start_lsn: int | None = None, queue_capacity: int = 1024, reconnect: bool = True) -> Awaitable[AsyncPostgresReplication]: ...
+class AsyncPostgresReplication:
+    @property
+    def closed(self) -> bool: ...
+    def next(self) -> Awaitable[PostgresReplicationRecord | None]: ...
+    def acknowledge(self, commit_end_lsn: int) -> Awaitable[None]: ...
+    def aclose(self) -> Awaitable[None]: ...
+    def __aenter__(self) -> Awaitable[AsyncPostgresReplication]: ...
+    def __aexit__(self, exc_type: Any = None, exc_val: Any = None, exc_tb: Any = None) -> Awaitable[None]: ...
+```
+
+The ch36 cancellation boundary uses the shared future-aware aborting helper in `vertebra-db/src/py_async.rs`:
+
+```rust
+pub fn spawn_rust_db_task_with_attr_and_future<F, T, E, M, EMap>(
+    py: Python<'_>, fut: F, map_ok: M, map_err: EMap, attr_name: &'static str,
+) -> PyResult<RustDbTaskAwaitable>
+where
+    F: Future<Output = Result<T, E>> + Send + 'static,
+    T: Send + 'static,
+    E: Send + 'static,
+    M: for<'py> FnOnce(Python<'py>, Bound<'py, PyAny>, T) -> PyResult<Py<PyAny>> + Send + 'static,
+    EMap: FnOnce(Python<'_>, E) -> PyErr + Send + 'static;
+```
+
+The mapper receives the exact original asyncio Future. The existing aborting helper delegates with an adapter that ignores this argument; the non-aborting cancellation variant retains its behavior. The replication mapper finishes fallible Python construction, checks that original Future for owning-loop cancellation, and only then publishes its delivery lease. A synchronous invocation claim spans worker and mapper lifetime so overlapping `next()` calls fail before either worker is polled. No fallible Python calls follow publication.
+
+Boolean LSNs fail with TypeError; integer LSNs outside `0 <= lsn < 2**64` fail with ValueError. Replication queue capacity is `1..=1024`; native `ReplicationSupervisor::open` and Python `open_replication` reject values outside that interval with InterfaceError before dialing any socket. Overlapping next calls raise InterfaceError, including when the first completion holds a lease in the drainer. Aclose is idempotent and joins socket/backoff tasks within its budget. Identity probing starts no replication. Native bridge behavior is tested in the new canonical `src/py/tests/unit/db/test_postgres_native_replication.py`; the separate source/store module and `test_postgres_change_source.py` are created by ch24.
+
+
+
 ## Dedicated event ownership and checkpoints
+
+`ReplicationSession::cancel` synchronously fences publication, marks closed, wakes waiters and aborts read/write owners without an ambient runtime. Shutdown clears session-owned FIFO/front/pending records; an external delivery lease retains its one bounded record until publication attempt or Drop, preserving borrowed `record()` references.
+
 
 Both native listener and replication handles expose read-only `closed: bool` and pair
 an async `PendingDeliveryGuard` on in-flight `next()` reads so Python cancellation after
