@@ -43,8 +43,8 @@ chapters:
   - ch31-data-and-testing-okf-sync
   - ch32-ffi-okf-and-review-routing-sync
   - ch33-final-review-and-release-gate
-current_chapter: ch23-replication-feedback-resume-and-bridge
-current_task: null
+current_chapter: ch34-replication-session-pump
+current_task: "native-postgres-driver:ch34:t01"
 parent_prd: native-data-platform
 depends_on_flows:
   - driver-fail-loud
@@ -54,11 +54,11 @@ research:
 plan_revision: 8
 plan_commit: d90d4625
 state_revision: 12
-last_verified_checkpoint: bbb77ecf
-last_reviewed_chapter: ch22-copyboth-and-pgoutput-decoding
-last_reviewed_commit: 9c1865b7
+last_verified_checkpoint: 4700ecbc
+last_reviewed_chapter: ch23-replication-feedback-resume-and-bridge
+last_reviewed_commit: 4700ecbc
 created_at: "2026-11-03T04:05:00Z"
-updated_at: "2026-11-12T14:58:28Z"
+updated_at: "2026-11-12T15:05:07Z"
 generated:
   by: flow-revise
   at: "2026-11-12T01:30:00Z"
@@ -467,7 +467,7 @@ Every worksheet (`129` total across `36` chapters) executes in one bounded invoc
 - [x] [40ce977c] ch20-arrow-copy-import-and-portals — Arrow-to-COPY Field Import, Schema-Qualified Streaming Writers, and Sync/Async Arrow Portal Cancellation (chapters/ch20-arrow-copy-import-and-portals/spec.md)
 - [x] [b44e28ca] ch21-live-notifications — Dedicated Notification Session Pump, PendingDeliveryGuard Async Bridge, and Python PostgresNotificationSource (chapters/ch21-live-notifications/spec.md)
 - [x] [9c1865b7] ch22-copyboth-and-pgoutput-decoding — Dedicated CopyBoth Sessions, Lossless pgoutput v1 Decoding and Transaction Envelopes, and the Split-State Limitations Record (chapters/ch22-copyboth-and-pgoutput-decoding/spec.md)
-- [~] ch23-replication-feedback-resume-and-bridge — Replication CopyData Codecs and Monotonic Commit-Boundary Feedback (chapters/ch23-replication-feedback-resume-and-bridge/spec.md)
+- [x] [4700ecbc] ch23-replication-feedback-resume-and-bridge — Replication CopyData Codecs and Monotonic Commit-Boundary Feedback (chapters/ch23-replication-feedback-resume-and-bridge/spec.md)
 - [ ] ch34-replication-session-pump — Bounded Single-Generation Replication Session, Independent Heartbeats, and Delivery Leases (chapters/ch34-replication-session-pump/spec.md)
 - [ ] ch35-replication-supervision — Verified Reconnect Supervision and Generation-Fenced Delivery (chapters/ch35-replication-supervision/spec.md)
 - [ ] ch36-replication-python-bridge — Cancellation-Safe Python Replication Handles and Typed Event Hydration (chapters/ch36-replication-python-bridge/spec.md)
@@ -487,7 +487,7 @@ Every worksheet (`129` total across `36` chapters) executes in one bounded invoc
 ## 6. Current State & Remaining Plan Snapshot
 
 - **Verified Work**: Chapter 23 tasks complete at `64d317cd` and `bbb77ecf`; 18 canonical wire tests, Clippy, package rustfmt, review-check, and whitespace gates pass. Independent chapter review remains open.
-- **Progress**: `22/36` chapters are reviewed and `84/129` tasks complete; `45` tasks remain. The current chapter is ch23, with no remaining task; ch34 is next after review closeout.
+- **Progress**: `23/36` chapters and `84/129` tasks are complete; `45` tasks remain. The active pointer is `ch34-replication-session-pump`, task `native-postgres-driver:ch34:t01`.
 - **Git Continuity**: Completed chapter attestations through ch22 remain intact, including reviewed commit `9c1865b7`. Chapter base is `a203b946`.
 - **Runtime Boundary**: Native replication decoding, payload codecs, and bounded feedback state are available. Session pumping, reconnect supervision, and Python handles remain ch34–ch36; public Python drivers retain psycopg and asyncio.to_thread until ch27.
 - **Documentation**: Chapter 23 limitations coverage is `[1/1]`; interim full-plan coverage remains `3/33` files. User guides and remaining OKF synchronization belong to ch30–ch32.

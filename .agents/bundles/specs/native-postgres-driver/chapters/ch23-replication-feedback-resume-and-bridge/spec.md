@@ -5,7 +5,7 @@ chapter_id: ch23-replication-feedback-resume-and-bridge
 title: "Chapter 23: Commit-Fenced Replication Feedback"
 description: "Implement strict CopyData payload codecs, status intervals, and separate received/published/acknowledged Commit positions."
 status: stable
-state: active
+state: completed
 planning_status: complete
 depends_on_chapters: ["ch22-copyboth-and-pgoutput-decoding"]
 replan_trigger: null
@@ -14,12 +14,18 @@ plan_revision: 8
 plan_commit: d90d4625
 state_revision: 2
 chapter_base_commit: a203b946
-last_verified_checkpoint: bbb77ecf
-last_reviewed_commit: null
+last_verified_checkpoint: 4700ecbc
+last_reviewed_commit: 4700ecbc
 created_at: "2026-11-12T05:00:00Z"
-updated_at: "2026-11-12T14:58:28Z"
+updated_at: "2026-11-12T15:05:07Z"
 generated: {by: flow-revise, at: "2026-11-12T05:00:00Z"}
-verified: []
+verified:
+  - by: agent:correctness23
+    at: "2026-11-12T15:05:07Z"
+    commit: 4700ecbc
+  - by: agent:quality23
+    at: "2026-11-12T15:05:07Z"
+    commit: 4700ecbc
 sources:
   - id: contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md
@@ -154,12 +160,11 @@ All commands exit0 before present-tense documentation sync, zero-context correct
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- Both tasks are completed at `64d317cd` and `bbb77ecf`; the full canonical wire module passes 18 tests, with Clippy and package rustfmt passing.
-- The native codecs and feedback state implement strict framing, initialized positions, cumulative exact published-boundary acknowledgement, 1024 unacked Commit bounds, and refusal without state mutation.
-- `[1/1 files documented]` is synchronized. Chapter state remains active pending independent correctness and fresh quality review; no review completion is claimed.
-- The full roadmap has 36 chapters and 129 tasks: 84 tasks complete, 45 remain. Chapters through ch22 are reviewed; ch23 awaits review.
-- Next chapter is ch34 session pump, followed by ch35 supervision, ch36 Python bridge, ch24 checkpoints, and ch25–ch33. Public driver cutover remains ch27.
-- Stop at this chapter boundary after review and metadata closeout; no live, wheel, benchmark, or release acceptance is implied.
+- Chapter 23 is completed and reviewed at `4700ecbc`; both worksheets are verified and committed.
+- All 23 canonical wire tests, Clippy, package formatting, review manifests, and whitespace checks pass.
+- Documentation is synchronized at `[1/1 files documented]`; standalone feedback does not implement stream ownership or Python handles.
+- The full flow has 23/36 reviewed chapters and 84/129 completed tasks; 45 tasks remain across ch34–ch36 and ch24–ch33.
+- Next: `/flow:implement native-postgres-driver ch34`, after `/compact` or a fresh session.
 
 [^contracts]: `.agents/bundles/specs/native-postgres-driver/contracts.md` — Replication ownership and acknowledgement contracts.
 [^connection]: `src/rs/vertebra-postgres/src/replication/mod.rs::PostgresReplicationConnection` — Dedicated CopyBoth session ownership.

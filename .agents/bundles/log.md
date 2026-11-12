@@ -1,5 +1,10 @@
 # Bundle Activity Log
 
+## [2026-11-12T15:05:07Z] chapter-complete | PostgreSQL feedback
+
+- Chapter 23 is reviewed at `4700ecbc` after correctness and fresh quality approval. All 23 canonical wire tests, Clippy, formatting and documentation checks pass. Source commits are `64d317cd` and `bbb77ecf`; documentation sync is `3142d692`.
+- The pointer advances to ch34. Full flow progress is 23/36 chapters and 84/129 tasks; 45 tasks remain. Commits remain local.
+
 ## [2026-11-12] chapter-review | PostgreSQL feedback quality
 
 - Correctness review finds no production defects; the stale remaining-task count is corrected. Quality findings are adopted: malformed payload cases have independent test identities and the living review summary states current outcomes directly.

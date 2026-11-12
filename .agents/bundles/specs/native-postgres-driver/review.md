@@ -38,7 +38,7 @@ tags:
 # Planning review
 
 <!-- truth: start -->
-- Revision 8 is approved and anchored to reviewed plan commit `d90d4625`. The roadmap has `36` chapters and `129` tasks, with `22` reviewed chapters and `84` completed tasks [^pg-core-rs].
+- Revision 8 is approved and anchored to reviewed plan commit `d90d4625`. The roadmap has `36` chapters and `129` tasks, with `23` reviewed chapters and `84` completed tasks [^pg-core-rs].
 - Replication execution order is `ch23` feedback, `ch34` bounded session, `ch35` verified supervision, `ch36` Python bridge, then `ch24` checkpoint sources. The public Python drivers retain their legacy implementation until `ch27` [^pg-driver-py].
 - Planning validation proves blueprint consistency; live services, wheels, benchmarks, and final release acceptance remain downstream gates [^fail-loud-baseline].
 <!-- truth: end -->
@@ -72,7 +72,7 @@ The contract decisions below are ADOPT. Revision 8 passes fresh blueprint review
 
 ## Chapter 23 correctness review
 
-Correctness review finds no production defects. The chapter has strict wire codecs and bounded, commit-fenced feedback state. The roadmap and limitations describe the implemented primitives and remaining stream ownership work. Independent quality review covers the same code and living documentation; final verification and reviewed commit are recorded at chapter closeout.
+Correctness review finds no production defects. The chapter has strict wire codecs and bounded, commit-fenced feedback state. The roadmap and limitations describe the implemented primitives and remaining stream ownership work. Independent correctness and fresh quality reviews approve `a203b946..4700ecbc` with no remaining findings. All 23 canonical tests, Clippy, and formatting pass.
 
 ## Revision 8 review and validation
 
