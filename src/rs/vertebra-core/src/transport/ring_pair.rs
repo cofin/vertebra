@@ -28,6 +28,9 @@ use crate::shm::ShmRegion;
 use crate::tiered_ring::{RingTier, TieredRingConfig};
 
 /// Magic marker for response wire format validation.
+pub const RESPONSE_STREAM_MAGIC: u32 = 0x56_52_53_46;
+const RESPONSE_STREAM_HEADER_SIZE: usize = 22;
+
 pub const RESPONSE_MAGIC: u32 = 0x56_52_45_53; // "VRES"
 
 /// Magic marker for out-of-line named SHM overflow responses (`> xlarge` tier).
@@ -56,7 +59,58 @@ pub struct ResponseData {
 /// Zero-copy parsed `VRES` response frame view: `(correlation_id, status, headers_raw, body)`.
 pub type ParsedResponseSlice<'a> = (u64, u16, &'a [u8], &'a [u8]);
 
+/// Borrowed unary or stream response parsed directly from its ring slot.
+#[derive(Debug, Clone, Copy)]
+pub struct ResponseFrameView<'a> {
+    pub correlation_id: u64,
+    pub status: u16,
+    pub flags: u16,
+    pub headers_raw: &'a [u8],
+    pub body: &'a [u8],
+}
+
 impl ResponseData {
+    /// Parse either a legacy unary response or a flagged streaming frame.
+    pub fn parse_frame(data: &[u8]) -> Result<ResponseFrameView<'_>, RingPairError> {
+        if data.len() < 4 {
+            return Err(RingPairError::InvalidResponse("too short"));
+        }
+        match u32::from_le_bytes(data[..4].try_into().unwrap()) {
+            RESPONSE_MAGIC => {
+                let (correlation_id, status, headers_raw, body) = Self::parse_slice(data)?;
+                Ok(ResponseFrameView {
+                    correlation_id,
+                    status,
+                    flags: crate::ipc::FLAG_FINAL,
+                    headers_raw,
+                    body,
+                })
+            }
+            RESPONSE_STREAM_MAGIC => {
+                if data.len() < RESPONSE_STREAM_HEADER_SIZE {
+                    return Err(RingPairError::InvalidResponse("too short"));
+                }
+                let headers_len = u16::from_le_bytes(data[16..18].try_into().unwrap()) as usize;
+                let body_len = u32::from_le_bytes(data[18..22].try_into().unwrap()) as usize;
+                let headers_end = RESPONSE_STREAM_HEADER_SIZE + headers_len;
+                let end = headers_end
+                    .checked_add(body_len)
+                    .ok_or(RingPairError::InvalidResponse("length overflow"))?;
+                if end > data.len() {
+                    return Err(RingPairError::InvalidResponse("truncated"));
+                }
+                Ok(ResponseFrameView {
+                    correlation_id: u64::from_le_bytes(data[4..12].try_into().unwrap()),
+                    status: u16::from_le_bytes(data[12..14].try_into().unwrap()),
+                    flags: u16::from_le_bytes(data[14..16].try_into().unwrap()),
+                    headers_raw: &data[RESPONSE_STREAM_HEADER_SIZE..headers_end],
+                    body: &data[headers_end..end],
+                })
+            }
+            _ => Err(RingPairError::InvalidResponse("bad magic")),
+        }
+    }
+
     /// Parse a serialized `VRES` response slot in-place without copying header or body slices.
     #[inline]
     pub fn parse_slice(data: &[u8]) -> Result<ParsedResponseSlice<'_>, RingPairError> {
@@ -91,6 +145,21 @@ impl ResponseData {
     where
         F: FnOnce(ParsedResponseSlice<'_>) -> R,
     {
+        Self::with_overflow_frame(data, |frame| {
+            f((
+                frame.correlation_id,
+                frame.status,
+                frame.headers_raw,
+                frame.body,
+            ))
+        })
+    }
+
+    #[cfg(unix)]
+    fn with_overflow_frame<R, F>(data: &[u8], f: F) -> Result<R, RingPairError>
+    where
+        F: FnOnce(ResponseFrameView<'_>) -> R,
+    {
         if data.len() < 16 {
             return Err(RingPairError::InvalidResponse("overflow header too short"));
         }
@@ -103,7 +172,8 @@ impl ResponseData {
             .map_err(|_| RingPairError::InvalidResponse("invalid overflow region name"))?;
         let region = ShmRegion::open_named(name, total_size)?;
         let _ = crate::shm::shm_unlink_named(name);
-        let parsed = Self::parse_slice(unsafe { &region.as_slice()[..total_size] })?;
+        // SAFETY: open_named maps the validated overflow region size for this callback.
+        let parsed = Self::parse_frame(unsafe { &region.as_slice()[..total_size] })?;
         Ok(f(parsed))
     }
 
@@ -300,6 +370,74 @@ impl TieredRingSet {
         slot[offset..offset + headers_raw.len()].copy_from_slice(headers_raw);
         offset += headers_raw.len();
         slot[offset..offset + body.len()].copy_from_slice(body);
+    }
+
+    /// Maximum combined headers and body size of an ordered stream frame.
+    pub fn max_stream_frame_payload(&self) -> usize {
+        self.xlarge
+            .payload_capacity()
+            .saturating_sub(RESPONSE_STREAM_HEADER_SIZE)
+    }
+
+    /// Send all stream frames through one tier so changing chunk sizes preserves order.
+    pub fn send_stream_frame(
+        &self,
+        correlation_id: u64,
+        status: u16,
+        flags: u16,
+        headers_raw: &[u8],
+        body: &[u8],
+    ) -> Result<(), RingPairError> {
+        self.write_stream_frame(correlation_id, status, flags, headers_raw, body, false)
+    }
+
+    /// Send an ordered stream frame, waiting for capacity instead of losing data.
+    pub fn send_stream_frame_blocking(
+        &self,
+        correlation_id: u64,
+        status: u16,
+        flags: u16,
+        headers_raw: &[u8],
+        body: &[u8],
+    ) -> Result<(), RingPairError> {
+        self.write_stream_frame(correlation_id, status, flags, headers_raw, body, true)
+    }
+
+    fn write_stream_frame(
+        &self,
+        correlation_id: u64,
+        status: u16,
+        flags: u16,
+        headers_raw: &[u8],
+        body: &[u8],
+        blocking: bool,
+    ) -> Result<(), RingPairError> {
+        let total = RESPONSE_STREAM_HEADER_SIZE + headers_raw.len() + body.len();
+        if headers_raw.len() > u16::MAX as usize || total > self.xlarge.payload_capacity() {
+            return Err(RingPairError::ResponseTooLarge(total));
+        }
+        let write = |slot: &mut [u8]| {
+            slot[..4].copy_from_slice(&RESPONSE_STREAM_MAGIC.to_le_bytes());
+            slot[4..12].copy_from_slice(&correlation_id.to_le_bytes());
+            slot[12..14].copy_from_slice(&status.to_le_bytes());
+            slot[14..16].copy_from_slice(&flags.to_le_bytes());
+            slot[16..18].copy_from_slice(&(headers_raw.len() as u16).to_le_bytes());
+            slot[18..22].copy_from_slice(&(body.len() as u32).to_le_bytes());
+            let headers_end = RESPONSE_STREAM_HEADER_SIZE + headers_raw.len();
+            slot[RESPONSE_STREAM_HEADER_SIZE..headers_end].copy_from_slice(headers_raw);
+            slot[headers_end..total].copy_from_slice(body);
+        };
+        self.mark_tier_active(TIER_BIT_XLARGE);
+        let result = if blocking {
+            self.xlarge.send_with(total, 0, write)
+        } else {
+            self.xlarge.try_send_with(total, 0, write)
+        };
+        if let Err(error) = result {
+            self.clear_tier_if_empty(&self.xlarge, TIER_BIT_XLARGE);
+            return Err(RingPairError::Channel(error));
+        }
+        Ok(())
     }
 
     /// Send a response through the appropriate tier ring without intermediate heap allocation.
@@ -562,6 +700,21 @@ impl TieredRingSet {
     where
         F: FnMut(u64, u16, &[u8], &[u8]),
     {
+        self.drain_frames_with(max_items, |frame| {
+            f(
+                frame.correlation_id,
+                frame.status,
+                frame.headers_raw,
+                frame.body,
+            )
+        })
+    }
+
+    /// Drain unary and streaming frames without copying their borrowed payloads.
+    pub fn drain_frames_with<F>(&self, max_items: usize, mut f: F) -> Result<usize, RingPairError>
+    where
+        F: FnMut(ResponseFrameView<'_>),
+    {
         if max_items == 0 {
             return Ok(0);
         }
@@ -595,20 +748,13 @@ impl TieredRingSet {
                         && u32::from_le_bytes(slice[0..4].try_into().unwrap())
                             == RESPONSE_OVERFLOW_MAGIC
                     {
-                        if let Err(err) = ResponseData::with_overflow_slice(
-                            slice,
-                            |(corr_id, status, headers_raw, body)| {
-                                f(corr_id, status, headers_raw, body);
-                            },
-                        ) {
+                        if let Err(err) = ResponseData::with_overflow_frame(slice, &mut f) {
                             parse_err = Some(err);
                         }
                         return;
                     }
-                    match ResponseData::parse_slice(slice) {
-                        Ok((corr_id, status, headers_raw, body)) => {
-                            f(corr_id, status, headers_raw, body);
-                        }
+                    match ResponseData::parse_frame(slice) {
+                        Ok(frame) => f(frame),
                         Err(err) => {
                             parse_err = Some(err);
                         }
@@ -981,6 +1127,49 @@ impl RingPair {
     #[cfg(unix)]
     pub fn all_fds(&self) -> Vec<RawFd> {
         self.fd_set().all_fds()
+    }
+
+    /// Send one ordered response stream frame.
+    pub fn send_stream_frame(
+        &self,
+        correlation_id: u64,
+        status: u16,
+        flags: u16,
+        headers_raw: &[u8],
+        body: &[u8],
+    ) -> Result<(), RingPairError> {
+        self.response_rings
+            .send_stream_frame(correlation_id, status, flags, headers_raw, body)
+    }
+
+    /// Wait for room to send one ordered response stream frame.
+    pub fn send_stream_frame_blocking(
+        &self,
+        correlation_id: u64,
+        status: u16,
+        flags: u16,
+        headers_raw: &[u8],
+        body: &[u8],
+    ) -> Result<(), RingPairError> {
+        self.response_rings.send_stream_frame_blocking(
+            correlation_id,
+            status,
+            flags,
+            headers_raw,
+            body,
+        )
+    }
+
+    pub fn max_stream_frame_payload(&self) -> usize {
+        self.response_rings.max_stream_frame_payload()
+    }
+
+    pub fn drain_frames_with<F: FnMut(ResponseFrameView<'_>)>(
+        &self,
+        max_items: usize,
+        f: F,
+    ) -> Result<usize, RingPairError> {
+        self.response_rings.drain_frames_with(max_items, f)
     }
 
     /// Send a pre-encoded raw response frame through the tiered response rings.

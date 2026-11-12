@@ -32,7 +32,7 @@ unblock_condition: null
 next_step: null
 last_verified_at: null
 last_verified_commit: null
-verification_evidence: null
+verification_evidence: "Red: SHM tests exit 101 (missing stream APIs). Green: 22 SHM integration tests, 41 transport unit tests, all-target core Clippy -D warnings, formatting and whitespace checks exit 0."
 created_at: "2026-11-12T00:45:00Z"
 updated_at: "2026-11-12T00:45:00Z"
 commit: null
@@ -114,9 +114,9 @@ Teach the SHM response rings to carry stream frames: a `VRSF` frame (`magic u32 
 
 ## Acceptance Criteria
 
-- [ ] `VRSF` frames round-trip with flags through the xlarge stream tier and through `drain_frames_with` (R3).
-- [ ] `VRES`, `VROV`, and `drain_with` behaviour and existing SHM tests are unchanged (R3).
-- [ ] `Transport` exposes `send_stream_frame`, `send_stream_frame_blocking`, and `max_stream_frame_payload` with the stated in-process semantics (R3).
+- [x] `VRSF` frames round-trip with flags through the xlarge stream tier and through `drain_frames_with` (R3).
+- [x] `VRES`, `VROV`, and `drain_with` behaviour and existing SHM tests are unchanged (R3).
+- [x] `Transport` exposes `send_stream_frame`, `send_stream_frame_blocking`, and `max_stream_frame_payload` with the stated in-process semantics (R3).
 
 ## Notes & Discoveries
 
