@@ -19,8 +19,8 @@ chapters:
   - ch10-bridge-dual-mode-and-oidc
   - ch12-iap-identity-source
   - ch11-docs-and-okf
-current_chapter: ch01-agent-context-propagation
-current_task: null
+current_chapter: ch02-guard-and-confirmation-correctness
+current_task: "mcp-protocol-completeness:ch02:t01"
 parent_prd: integration-remediation
 depends_on_flows:
   - server-runtime-correctness
@@ -29,11 +29,11 @@ research: []
 plan_revision: 1
 plan_commit: null
 state_revision: 0
-last_verified_checkpoint: null
-last_reviewed_chapter: null
-last_reviewed_commit: null
+last_verified_checkpoint: b0578ebc
+last_reviewed_chapter: ch01-agent-context-propagation
+last_reviewed_commit: b0578ebc
 created_at: "2026-11-12T00:30:00Z"
-updated_at: "2026-11-12T00:30:00Z"
+updated_at: "2026-11-12T04:05:24Z"
 generated:
   by: agent:plan-generator
   at: "2026-11-12T00:30:00Z"
@@ -437,7 +437,7 @@ class MCPCore:
 
 ## 5. Implementation Plan
 
-- [~] ch01-agent-context-propagation — Trusted context construction, core binding, task cancellation, and adapter contexts (chapters/ch01-agent-context-propagation/spec.md)
+- [x] [b0578ebc] ch01-agent-context-propagation — Trusted context construction, core binding, task cancellation, and adapter contexts (chapters/ch01-agent-context-propagation/spec.md)
 - [ ] ch02-guard-and-confirmation-correctness — Single-pass guards with typed errors and single-use, expiring confirmation tickets (chapters/ch02-guard-and-confirmation-correctness/spec.md)
 - [ ] ch03-version-negotiation-and-sessions — Version registry, legacy initialize and sessions, termination, and shared capabilities (chapters/ch03-version-negotiation-and-sessions/spec.md)
 - [ ] ch04-get-sse-streams — Streaming envelope, `GET` SSE, adapter writers, and session notifications (chapters/ch04-get-sse-streams/spec.md) [empirical_dependent: server-runtime-correctness lands incremental ASGI response streaming]
@@ -453,12 +453,23 @@ class MCPCore:
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Implementation**: `c007f853`; `4/35` tasks completed. Chapter review remains open for `ch01`.
-- **Active Chapter**: `ch01-agent-context-propagation` (`4/4` tasks completed); `current_task` is null while documentation and chapter review complete.
-- **Current Contracts**: trusted contexts, explicit identity policies, bound dispatch, forked task cancellation, exact-owner task access, and native/Litestar/stdio context forwarding.
-- **Remaining Plan**: `ch02` guard/confirmation correctness; `ch03` versions/sessions; `ch04` SSE; `ch05` subscriptions; `ch06` skills; `ch07` MCP Apps; `ch08` Litestar delegation; `ch09` incremental stdio/serve; `ch10` bridge/OIDC; `ch12` IAP; `ch11` final docs/OKF (`31` pending tasks).
-- **Documentation & OKF Sync**: `[3/12 files documented]` for current behavior; remaining feature documentation follows its owning chapters.
-- **Active Triggers**: `ch04` replans when `server-runtime-correctness` lands incremental ASGI streaming; `ch08` replans when `litestar-mcp` `0.20.0` is published; `ch10:t02` replans when `gcp-embeddings-and-identity` lands id_token minting.
+- **Verified Progress**: `1/12` chapters and `4/35` tasks are complete; ch01 is reviewed at `b0578ebc`.
+- **Current Pointer**: `ch02-guard-and-confirmation-correctness`, task `mcp-protocol-completeness:ch02:t01`.
+- **Verification**: Focused behavior, lint/type checks, correctness review, and fresh quality review pass. Runtime and user-facing acceptance for remaining chapters stays open.
+- **Documentation**: Current chapter coverage is synchronized; later documentation targets remain in the full roadmap.
+- **Remaining Chapters**:
+  - `ch02-guard-and-confirmation-correctness`.
+  - `ch03-version-negotiation-and-sessions`.
+  - `ch04-get-sse-streams`.
+  - `ch05-resource-subscriptions`.
+  - `ch06-skills-extension`.
+  - `ch07-mcp-apps-ui-metadata`.
+  - `ch08-litestar-delegation-parity`.
+  - `ch09-stdio-and-serve`.
+  - `ch10-bridge-dual-mode-and-oidc`.
+  - `ch11-docs-and-okf`.
+  - `ch12-iap-identity-source`.
+- **Next Action**: `/flow:implement mcp-protocol-completeness ch02`. Commits remain local; this chapter boundary does not finish or archive the flow.
 
 [^mcp-core]: `src/py/vertebra/agent/mcp/service.py::MCPCore` — Transport-agnostic MCP JSON-RPC and HTTP core.
 [^mcp-routes]: `src/py/vertebra/agent/mcp/routes.py::AsgiMcpApp` — Shared ASGI and WSGI MCP adapters.

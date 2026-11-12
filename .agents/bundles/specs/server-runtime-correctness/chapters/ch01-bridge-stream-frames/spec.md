@@ -4,8 +4,8 @@ parent_flow: server-runtime-correctness
 chapter_id: ch01-bridge-stream-frames
 title: "Chapter 01: Response Stream Frames on the In-Process Bridge and SHM Rings"
 description: Add transport-neutral ResponseStreamFrame and StreamSink to the in-process BatchBridge, add a flagged VRSF stream frame to the SHM response rings, route both into PendingResponse::streaming through one ResponseStreamRegistry, and retire the unreachable ResponseSlot routing path in the SHM dispatcher.
-status: draft
-state: active
+status: stable
+state: completed
 planning_status: complete
 depends_on_chapters: []
 replan_trigger: null
@@ -13,12 +13,20 @@ current_task: null
 plan_revision: 2
 plan_commit: null
 state_revision: 0
-last_verified_checkpoint: null
+last_verified_checkpoint: b0578ebc
+last_reviewed_commit: b0578ebc
 created_at: "2026-11-12T00:45:00Z"
-updated_at: "2026-11-12T04:00:11Z"
+updated_at: "2026-11-12T04:05:24Z"
 generated:
   by: agent:plan-generator
   at: "2026-11-12T00:45:00Z"
+verified:
+  - by: agent:code-reviewer
+    at: "2026-11-12T04:05:24Z"
+    commit: b0578ebc
+  - by: agent:quality-reviewer
+    at: "2026-11-12T04:05:24Z"
+    commit: b0578ebc
 sources:
   - id: bridge-core-rs
     resource: src/rs/vertebra-core/src/bridge.rs::BatchBridge
@@ -165,12 +173,11 @@ Progress: `[3/3 files documented in ch01]`; native transport behavior is synchro
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Tasks**: `t01` (`2e4ef248`), `t02` (`616f33a8`), and `t03` (`3a3fab9a`), and `t04` (`f45a5fe8`) are completed; `4/4` tasks are committed.
-- **Recovery Checkpoint**: Full core and HTTP suites, four doctests, all-target Clippy, formatting, and whitespace checks pass. Task `t04` is committed; chapter review and stamping remain.
-- **Native Transport Boundary**: Bridge stream frames and ordered `VRSF` ring frames feed a shared bounded registry; Python-facing producers remain buffered until `ch02`–`ch03`.
-- **Documentation**: `[3/3 files documented in ch01]`; flow-wide documentation remains an interim `[3/18]`.
-- **Downstream Dependents**: `ch02:t01` depends on all four tasks and a reviewed chapter checkpoint.
-- **Chapter State**: `active`; correctness review and a fresh quality review precede completion and pointer advancement.
+- **Chapter State**: Completed; all four tasks are verified and committed. Correctness and fresh independent quality reviews approve `b0578ebc`.
+- **Review Scope**: Code, public behavioral tests, task SHAs, and synchronized living documentation are reviewed together.
+- **Remaining Chapter Work**: None. The root pointer advances to `ch02-python-stream-submission`, task `server-runtime-correctness:ch02:t01`.
+- **Documentation**: Three current-coverage documentation targets are synchronized; later chapters retain final documentation and integration acceptance.
+- **Delivery Boundary**: Native bridge and SHM streams are implemented; Python submission and ASGI/RSGI incremental producers remain in ch02/ch03. Slow clients can stall later responses from the same worker reader.
 
 [^bridge-core-rs]: `src/rs/vertebra-core/src/bridge.rs::BatchBridge` — In-process bridge, `BridgeResponse`, `ResponseSink`, and sink dispatch helpers.
 [^ring-pair-rs]: `src/rs/vertebra-core/src/transport/ring_pair.rs::ResponseData` — `VRES` unary responses, ordered `VRSF` stream frames, and flag-aware draining.

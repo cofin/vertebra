@@ -4,8 +4,8 @@ parent_flow: mcp-protocol-completeness
 chapter_id: ch01-agent-context-propagation
 title: "Chapter 1: Agent Context Propagation"
 description: Build trusted AgentContext values from headers, ASGI scopes, and WSGI environs, bind them for every MCPCore dispatch and promoted task, and pass them from every transport adapter.
-status: draft
-state: active
+status: stable
+state: completed
 planning_status: complete
 depends_on_chapters: []
 replan_trigger: null
@@ -13,14 +13,20 @@ current_task: null
 plan_revision: 1
 plan_commit: null
 state_revision: 0
-last_verified_checkpoint: null
-last_reviewed_commit: null
+last_verified_checkpoint: b0578ebc
+last_reviewed_commit: b0578ebc
 created_at: "2026-11-12T00:30:00Z"
-updated_at: "2026-11-12T00:30:00Z"
+updated_at: "2026-11-12T04:05:24Z"
 generated:
   by: agent:plan-generator
   at: "2026-11-12T00:30:00Z"
-verified: []
+verified:
+  - by: agent:code-reviewer
+    at: "2026-11-12T04:05:24Z"
+    commit: b0578ebc
+  - by: agent:quality-reviewer
+    at: "2026-11-12T04:05:24Z"
+    commit: b0578ebc
 sources:
   - id: agent-context
     resource: src/py/vertebra/agent/core/context.py::AgentContext
@@ -204,11 +210,11 @@ async def run_stdio_server(service: MCPService, *, stdin: AsyncIterable[bytes] |
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Implementation**: `c007f853`; `4/4` tasks completed with committed verification evidence.
-- **Current Contracts**: trusted context constructors; explicit mTLS/callable policies; binding restoration; independent task cancellation; anonymous access refusal for owner-bound tasks; context forwarding through every adapter.
-- **Recovery Checkpoint**: the canonical core, MCP conformance, and CLI suite passes `86` tests; focused Ruff and Mypy gates pass.
-- **Remaining Chapter Work**: present-tense documentation synchronization and fresh chapter quality review; `last_reviewed_commit` remains null until review closes.
-- **Downstream Dependents**: `ch02` addresses duplicate guard execution and confirmation semantics; `ch12` adds verified IAP identity on the source seam.
+- **Chapter State**: Completed; all four tasks are verified and committed. Correctness and fresh independent quality reviews approve `b0578ebc`.
+- **Review Scope**: Code, public behavioral tests, task SHAs, and synchronized living documentation are reviewed together.
+- **Remaining Chapter Work**: None. The root pointer advances to `ch02-guard-and-confirmation-correctness`, task `mcp-protocol-completeness:ch02:t01`.
+- **Documentation**: Three current-coverage documentation targets are synchronized; later chapters retain final documentation and integration acceptance.
+- **Delivery Boundary**: Context and owner isolation are implemented; remaining protocol, session/SSE, IAP, packaging, and release work stays planned.
 
 [^agent-context]: `src/py/vertebra/agent/core/context.py::AgentContext` — AgentContext, CallerIdentity, and context variable helpers.
 [^mcp-core]: `src/py/vertebra/agent/mcp/service.py::MCPCore.handle` — MCP core dispatch and task promotion.

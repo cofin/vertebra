@@ -1,5 +1,11 @@
 # Bundle Activity Log
 
+## [2026-11-12T04:05:24Z] chapter-complete | Parallel implementation batch
+
+- MCP ch01 and server runtime ch01 are completed after correctness and fresh quality review of `b0578ebc`; chapter/task pointers advance to ch02. PostgreSQL ch22 and storage ch01 retain reviewed checkpoint `9c1865b7`.
+- The batch completes 12 tasks across four chapters with signed local commits. MCP/storage Python validation passes 520 tests with one existing skip; 51 additional agent consumer tests pass. PostgreSQL, storage, core, and HTTP native gates pass.
+- Remaining flow chapters, live service and wheel lanes, benchmarks, and release acceptance stay open. No push or hosted repository mutation occurs.
+
 ## [2026-11-12T04:03:34Z] flow-implement | Context and native streaming review checkpoint
 
 - MCP ch01 completes four tasks through `c007f853`; correctness review reproduces and resolves anonymous task-owner access, and fresh quality review approves the implementation and living docs.

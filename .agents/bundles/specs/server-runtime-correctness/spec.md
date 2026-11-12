@@ -18,16 +18,18 @@ chapters:
   - ch09-runtime-native-cleanup
   - ch10-docs-and-okf-sync
   - ch11-product-okf-and-release-gate
-current_chapter: ch01-bridge-stream-frames
-current_task: null
+current_chapter: ch02-python-stream-submission
+current_task: "server-runtime-correctness:ch02:t01"
 parent_prd: integration-remediation
 depends_on_flows: []
 plan_revision: 2
 plan_commit: null
 state_revision: 2
-last_verified_checkpoint: null
+last_verified_checkpoint: b0578ebc
+last_reviewed_chapter: ch01-bridge-stream-frames
+last_reviewed_commit: b0578ebc
 created_at: "2026-11-12T00:45:00Z"
-updated_at: "2026-11-12T04:00:11Z"
+updated_at: "2026-11-12T04:05:24Z"
 generated:
   by: agent:plan-generator
   at: "2026-11-12T00:45:00Z"
@@ -377,7 +379,7 @@ Progress: interim `[3/18 files documented]`. Native transport behavior is synchr
 
 ## 5. Implementation Plan
 
-- [~] ch01-bridge-stream-frames — Bridge stream frames, VRSF ring frames, shared stream registry, and lossless SHM routing ([spec](chapters/ch01-bridge-stream-frames/spec.md))
+- [x] [b0578ebc] ch01-bridge-stream-frames — Bridge stream frames, VRSF ring frames, shared stream registry, and lossless SHM routing ([spec](chapters/ch01-bridge-stream-frames/spec.md))
 - [ ] ch02-python-stream-submission — `submit_stream_frame` binding for both transports ([spec](chapters/ch02-python-stream-submission/spec.md))
 - [ ] ch03-asgi-rsgi-incremental-flush — Progressive ASGI/RSGI/Python fallback flush and server-binary streaming acceptance ([spec](chapters/ch03-asgi-rsgi-incremental-flush/spec.md))
 - [ ] ch04-lifespan-fail-loud — `WorkerStartupError`, exit code `78`, and supervisor stop ([spec](chapters/ch04-lifespan-fail-loud/spec.md))
@@ -393,13 +395,22 @@ Progress: interim `[3/18 files documented]`. Native transport behavior is synchr
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Execution State**: `active`, `plan_revision: 2`, `plan_commit: null`; `0/11` chapters are reviewed and `4/33` tasks are committed.
-- **Native Transport**: `ch01:t01`–`t04` provide bridge stream frames, ordered xlarge-tier `VRSF` ring frames, and bounded registry delivery; `t04` reader routing and lifecycle cleanup pass their full checkpoint and are committed at `f45a5fe8`.
-- **Active Chapter & Task**: `ch01-bridge-stream-frames`, all four tasks committed; chapter correctness and fresh quality reviews precede pointer advancement.
-- **Remaining Delivery Boundary**: Python submission (`ch02`) and mounted ASGI/RSGI incremental flushing and server acceptance (`ch03`) remain pending; mounted apps still buffer responses.
-- **Documentation & OKF Status**: interim `[3/18 files documented]`; `ch10` and `ch11` complete the remaining public and product documentation.
-- **Remaining Plan**: chapter review and closeout in `ch01`; Python submission `ch02`; streaming producers `ch03`; startup `ch04`; workers `ch05`; relocatable binaries `ch06`; wheel delivery `ch07`; FastPath cleanup `ch08`; native cleanup `ch09`; docs `ch10`; final gates `ch11`.
-- **Dependencies**: This flow has no upstream flow dependency. `mcp-protocol-completeness` consumes reviewed `ch01`–`ch03` for incremental mounted-ASGI streaming.
+- **Verified Progress**: `1/11` chapters and `4/33` tasks are complete; ch01 is reviewed at `b0578ebc`.
+- **Current Pointer**: `ch02-python-stream-submission`, task `server-runtime-correctness:ch02:t01`.
+- **Verification**: Focused behavior, lint/type checks, correctness review, and fresh quality review pass. Runtime and user-facing acceptance for remaining chapters stays open.
+- **Documentation**: Current chapter coverage is synchronized; later documentation targets remain in the full roadmap.
+- **Remaining Chapters**:
+  - `ch02-python-stream-submission`.
+  - `ch03-asgi-rsgi-incremental-flush`.
+  - `ch04-lifespan-fail-loud`.
+  - `ch05-supervisor-exports-and-worker-lanes`.
+  - `ch06-relocatable-server-binary`.
+  - `ch07-wheel-packaging-and-smoke`.
+  - `ch08-fastpath-cleanup`.
+  - `ch09-runtime-native-cleanup`.
+  - `ch10-docs-and-okf-sync`.
+  - `ch11-product-okf-and-release-gate`.
+- **Next Action**: `/flow:implement server-runtime-correctness ch02`. Commits remain local; this chapter boundary does not finish or archive the flow.
 
 [^asgi-protocol-rs]: `src/rs/vertebra-py/src/asgi.rs::AsgiProtocol` — Rust ASGI protocol that buffers `more_body` chunks into `body_buf` until the final chunk.
 [^bridge-core-rs]: `src/rs/vertebra-core/src/bridge.rs::BatchBridge` — In-process batch bridge with separate unary and streaming response sinks.
