@@ -50,12 +50,12 @@ research:
   - research/cloud-material_20261105.md
 plan_revision: 7
 plan_commit: c8722c76
-state_revision: 10
+state_revision: 11
 last_verified_checkpoint: 9c1865b7
 last_reviewed_chapter: ch22-copyboth-and-pgoutput-decoding
 last_reviewed_commit: 9c1865b7
 created_at: "2026-11-03T04:05:00Z"
-updated_at: "2026-11-12T03:49:28Z"
+updated_at: "2026-11-12T04:12:48Z"
 generated:
   by: flow-revise
   at: "2026-11-12T01:30:00Z"
@@ -378,7 +378,8 @@ Every worksheet (`119` total across `33` chapters) executes in one bounded invoc
 - **Runtime Boundary**: Native replication decoding is available locally; public Python drivers still use psycopg and asyncio.to_thread until ch27. Live PG14–18, wheel/free-threaded, benchmark, and release acceptance remain downstream gates.
 - **Documentation**: Interim limitations coverage is `3/33` files; ch27 and ch31 maintain it, and ch30–ch32 finish synchronization.
 - **Remaining Plan**: ch23 feedback/resume/bridge; ch24 change sources/checkpoints; ch25–ch27 native drivers/cutover; ch28 live conformance; ch29 wheels/benchmarks; ch30–ch32 docs/OKF; ch33 final verification.
-- **Next Action**: `/flow:implement native-postgres-driver ch23`. Commits stay local; this chapter boundary does not finish or archive the flow.
+- **Execution Blocker**: ch23:t01 lacks the public split-session contract required by its wire scenarios; ch23:t02 owns the dependent supervisor. Production and tests are untouched.
+- **Next Action**: `/flow:revise native-postgres-driver ch23-replication-feedback-resume-and-bridge` defines session ownership, feedback initialization/update methods, and supervisor composition. Commits stay local.
 
 [^pg-conn-rs]: `src/rs/vertebra-db/src/connection.rs::TransportStream` — Shared TCP, Unix, TLS, and cloud mTLS stream primitives.
 [^pg-core-rs]: `src/rs/vertebra-db/src/postgres/mod.rs::encode_query_frame` — Shared stateless PostgreSQL wire frame and codec helpers in `vertebra-db`.

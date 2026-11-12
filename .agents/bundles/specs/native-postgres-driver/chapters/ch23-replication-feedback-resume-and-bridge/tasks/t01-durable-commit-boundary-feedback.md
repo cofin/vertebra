@@ -5,7 +5,7 @@ chapter_id: ch23-replication-feedback-resume-and-bridge
 title: Acknowledge only completed durable commit boundaries
 description: Implement XLogData and PrimaryKeepalive decoding, StandbyStatusUpdate encoding, monotonic commit-fenced ReplicationFeedback, and split read/write heartbeat ownership.
 status: draft
-state: pending
+state: blocked
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -24,17 +24,17 @@ tests:
 estimated_loc: 235
 plan_revision: 7
 plan_commit: c8722c76
-state_revision: 0
+state_revision: 1
 claimed_by: null
 claimed_at: null
-blocked_reason: null
-unblock_condition: null
-next_step: null
+blocked_reason: "missing_decision: t01 has no public split-session start/next/acknowledge/shutdown contract; its tests otherwise depend on the supervisor owned by dependent t02."
+unblock_condition: "Revise ch23 to define the single-generation public session, Drop-safe transport transfer, feedback initialization and received-LSN updates, and supervisor composition; reassess worksheet scope."
+next_step: "/flow:revise native-postgres-driver ch23-replication-feedback-resume-and-bridge"
 last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-12T01:30:00Z"
+updated_at: "2026-11-12T04:12:48Z"
 commit: null
 generated:
   by: flow-revise
@@ -131,6 +131,8 @@ Implement `src/rs/vertebra-postgres/src/replication/feedback.rs` and wire split 
 - [ ] Commit message follows `feat(postgres): fence durable replication acknowledgements` once verified.
 
 ## Notes & Discoveries
+
+- Execution preflight is blocked before TDD: `PostgresReplicationConnection` exposes startup, metadata, and shutdown but no split-session record-consumption API. The public supervisor is owned by dependent t02. The t01 wire scenarios require a declared public session seam, feedback initialization/update methods, and a Drop-safe transfer of `conn.stream` plus `conn.read_buf` (`replication/mod.rs` implements `Drop`). Production and tests are untouched.
 
 - Marking a commit boundary as acknowledgeable only upon consumer receiver publication (rather than worker decode) prevents acknowledging a transaction whose queued Python future is cancelled before delivery in `ch23:t03` [^npd-contracts].
 

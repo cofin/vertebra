@@ -13,11 +13,11 @@ replan_trigger: null
 current_task: "native-postgres-driver:ch23:t01"
 plan_revision: 7
 plan_commit: c8722c76
-state_revision: 0
+state_revision: 1
 last_verified_checkpoint: null
 last_reviewed_commit: null
 created_at: "2026-11-05T00:00:00Z"
-updated_at: "2026-11-12T01:30:00Z"
+updated_at: "2026-11-12T04:12:48Z"
 generated:
   by: flow-revise
   at: "2026-11-12T01:30:00Z"
@@ -135,7 +135,7 @@ Progress: `[0/0 files documented in ch23]` (project documentation and OKF chapte
 
 ## 5. Implementation Plan
 
-- [ ] native-postgres-driver:ch23:t01 — Acknowledge only completed durable commit boundaries (tasks/t01-durable-commit-boundary-feedback.md)
+- [!] native-postgres-driver:ch23:t01 — Acknowledge only completed durable commit boundaries (tasks/t01-durable-commit-boundary-feedback.md)
 - [ ] native-postgres-driver:ch23:t02 — Reconnect logical streams from verified checkpoints (tasks/t02-checkpoint-verified-replication-resume.md)
 - [ ] native-postgres-driver:ch23:t03 — Expose cancellation-safe native replication handles (tasks/t03-cancellation-safe-replication-bridge.md)
 
@@ -144,7 +144,8 @@ Progress: `[0/0 files documented in ch23]` (project documentation and OKF chapte
 ## 6. Current State & Remaining Plan Snapshot
 
 - **Verified Plan Baseline**: `c8722c76`; chapter `state: planned`, `planning_status: complete`, `plan_revision: 7`, `plan_commit: c8722c76` (`ch01`–`ch21` and `ch22:t01`–`t02` on `main` through the PR #104 squash).
-- **Remaining Tasks in Chapter**: `t01`, `t02`, `t03` (`3/3` pending).
+- **Remaining Tasks in Chapter**: `t01` is blocked on missing public split-session and ownership-transfer contracts; `t02` and `t03` remain pending behind it. No production or test edits are present.
+- **Next Action**: `/flow:revise native-postgres-driver ch23-replication-feedback-resume-and-bridge` defines the public session seam, feedback initialization/update methods, and supervisor composition before execution resumes.
 - **Downstream Dependents**: Unblocks `ch24-change-source-and-checkpoints` and `ch26-compiler-pipeline-arrow-and-event-hooks`.
 
 [^npd-contracts]: `.agents/bundles/specs/native-postgres-driver/contracts.md` — Native PostgreSQL replication handle, closed snapshot, and feedback invariants.
