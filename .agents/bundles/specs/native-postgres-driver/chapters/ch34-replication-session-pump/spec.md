@@ -9,18 +9,21 @@ state: active
 planning_status: complete
 depends_on_chapters: ["ch23-replication-feedback-resume-and-bridge"]
 replan_trigger: null
-current_task: "native-postgres-driver:ch34:t04"
+current_task: null
 plan_revision: 8
 plan_commit: d90d4625
 state_revision: 2
 chapter_base_commit: f58aa695
-last_verified_checkpoint: null
+last_verified_checkpoint: a1340034
 last_reviewed_commit: null
 created_at: "2026-11-12T05:00:00Z"
-updated_at: "2026-11-12T20:05:41.205447+00:00"
+updated_at: "2026-11-12T20:10:51.550371+00:00"
 generated: {by: flow-revise, at: "2026-11-12T05:00:00Z"}
 verified: []
 sources:
+  - id: stream
+    resource: src/rs/vertebra-postgres/src/replication/stream.rs::ReplicationSession
+    title: Bounded session transport and publication leases
   - id: contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md
     title: Replication ownership and acknowledgement contracts
@@ -39,7 +42,7 @@ tags: [postgres, replication, bounded]
 # Chapter 34: Single-Generation Replication Session
 
 <!-- truth: start -->
-- Own a split CopyBoth stream with bounded decoding, independent heartbeats, cancellation-safe delivery leases and bounded shutdown. [^contracts]
+- `ReplicationSession` owns split CopyBoth transport with bounded decoding, independent heartbeats, cancellation-safe delivery leases and bounded shutdown. [^stream]
 - Feedback never promotes server wal_end or payload byte lengths into acknowledged durability. [^contracts]
 - Every transport task has one owner and bounded cancellation; no Python objects or checkpoint-store calls belong to this chapter. [^connection]
 <!-- truth: end -->
@@ -48,7 +51,7 @@ tags: [postgres, replication, bounded]
 
 Own a split CopyBoth stream with bounded decoding, independent heartbeats, cancellation-safe delivery leases and bounded shutdown.
 
-The dedicated `PostgresReplicationConnection` validates slots/publications and owns the CopyBoth socket plus coalesced `read_buf`. `PgOutputDecoder` emits incrementally bounded transaction records and `BoundedReplicationQueue` supplies record/byte limits. The plan uses those concrete seams; it defines all new APIs before their isolated executor tasks. [^connection] [^protocol] [^decoder]
+The dedicated `PostgresReplicationConnection` validates slots/publications and owns the CopyBoth socket plus coalesced `read_buf`. `PgOutputDecoder` emits incrementally bounded transaction records and `BoundedReplicationQueue` supplies record/byte limits. `ReplicationSession` composes those seams and owns both transport halves through one abortable worker. [^connection] [^protocol] [^decoder] [^stream]
 
 Parent: [full roadmap](../../spec.md) and [contracts](../../contracts.md). Domain context: [CDC](../../../../knowledge/domains/data/query-pipeline-cdc-and-tenancy.md), [FFI discipline](../../../../knowledge/patterns/rust/ffi-and-gil-discipline.md), [runtime skill](../../../../../skills/runtime-ipc/SKILL.md), [PyO3 skill](../../../../../skills/pyo3-bridge/SKILL.md). Source anchors are current symbols; new modules in worksheets are intentional creation targets.
 
@@ -88,11 +91,11 @@ The single-generation owner keeps immutable identity, shared bounded queue/feedb
 
 ### Internal coordination contract
 
-`ReplicationSession` uses an `Arc<SessionShared>` state owner and `Arc<VerifiedReplicationIdentity>`. `SessionShared` privately owns one synchronized state containing `BoundedReplicationQueue`, `ReplicationFeedback`, front-slot `Option<ReplicationRecord>`, single waiter/lease reservation, closing/closed flags and first terminal error. It also owns `Notify` signals for queue availability/capacity and cancellation, plus a `watch` status revision channel. Never hold its synchronous lock across await. Reader, writer, lease and caller use the same state to make capacity/publication/close transitions atomic. Register Notify wait before rechecking predicate. Reader owns TypeCatalog/codec/decoder state exclusively; caller never touches those mutable structures.
+`ReplicationSession` retains immutable `VerifiedReplicationIdentity` and an `Arc<SessionShared>`. The shared mutex contains `BoundedReplicationQueue`, `ReplicationFeedback`, one front-slot record, the single waiter/lease reservation, closing/EOF flags, the absolute shutdown deadline and first terminal result. Separate coalesced `watch` revisions wake record/capacity waiters and the status writer. Subscribe before checking state, and never hold the synchronous lock across await. Reader, writer, lease and caller make publication, capacity and close transitions under the same lock. The reader exclusively owns catalog/codec/decoder state. [^stream]
 
 The connection stores private effective_start_lsn at successful START from the validated explicit requested start_lsn, or confirmed_flush_lsn when absent. into_stream initializes feedback exclusively from this stored fence and accepts no independent LSN.
 
-The immutable identity is captured before consuming `PostgresReplicationConnection`. Remove its redundant mark-only Drop before safe destructuring; PostgresConnection has no Drop. Ordinary abandoned unsplit connections still close by dropping their socket. Private writer/read owners use `tokio::io::{ReadHalf, WriteHalf}<ConnectionStream>`, where ConnectionStream is the existing session transport type. Preserve exact read_buf alongside readhalf and own both join/abort handles. The writer accepts a shared status revision and cancellation signal; it uses received Commit ends and the acknowledged fence, never wal_end.
+The immutable identity is captured before consuming `PostgresReplicationConnection`. Remove its redundant mark-only Drop before safe destructuring; PostgresConnection has no Drop. Ordinary abandoned unsplit connections still close by dropping their socket. Private writer/read owners use `tokio::io::{ReadHalf, WriteHalf}<ConnectionStream>`, where ConnectionStream is the existing session transport type. Preserve exact read_buf alongside readhalf. One abort-owned task polls reader and writer futures concurrently; either failure drops both halves, and one absolute shutdown deadline covers final status, CopyDone, backend drain and transport closure. The writer accepts a shared status revision and cancellation signal; it uses received Commit ends and the acknowledged fence, never wal_end.
 
 Admission bounds are queue_capacity1..1024,8MiB aggregate queue,16MiB individual record,4096relations, at most one inputframe, one pending decoded record, one front-slot and one live delivery. Empty queue may admit one individually valid record beyond aggregate bytecap. Queue memory does not become transaction-sized. Received and published are independent; no pending unacked1025thCommit is leased. Every blocked wait selects cancellation and terminal state.
 
@@ -122,10 +125,10 @@ Acceptance scenarios are the literal Worked Test Matrices in the task blueprints
 
 ## 3. Documentation & OKF Knowledge Plan
 
-Progress: `[0/2 files documented]` at chapter sync. The isolated sync subagent updates these living files with implementation-backed truth before code and fresh quality review:
+Progress: `[2/2 files documented]`. Both living knowledge chapters describe the verified implementation and remaining integration boundaries before correctness and fresh quality review:
 
-- [ ] `.agents/bundles/knowledge/domains/data/postgres-limitations.md` — Describe single-generation transport support and remaining reconnect/Python/cutover limitations.
-- [ ] `.agents/bundles/knowledge/domains/data/query-pipeline-cdc-and-tenancy.md` — Document native event leases, feedback fences, queue bounds and shutdown ownership.
+- [x] `.agents/bundles/knowledge/domains/data/postgres-limitations.md` — Describe single-generation transport support and remaining reconnect/Python/cutover limitations.
+- [x] `.agents/bundles/knowledge/domains/data/query-pipeline-cdc-and-tenancy.md` — Document native event leases, feedback fences, queue bounds and shutdown ownership.
 
 
 The sync owns these docs collectively, independent of task production limits. Full user API guides, packaging and release documentation retain ch30–ch32 ownership; interim knowledge explicitly describes the native/legacy cutover boundary.
@@ -146,7 +149,7 @@ The sync owns these docs collectively, independent of task production limits. Fu
 - [x] [f520aa6d] native-postgres-driver:ch34:t01 — Transfer CopyBoth ownership and run independent status writer (tasks/t01-owned-stream-and-heartbeat-writer.md)
 - [x] [d99caddf] native-postgres-driver:ch34:t02 — Drain coalesced WAL through bounded single-generation reader (tasks/t02-bounded-read-pump.md)
 - [x] [9d4c4258] native-postgres-driver:ch34:t03 — Publish Commit leases exactly at consumer delivery (tasks/t03-delivery-publication-and-cancellation.md)
-- [~] native-postgres-driver:ch34:t04 — Join replication owners and drain CopyDone under one deadline (tasks/t04-bounded-session-shutdown.md)
+- [x] [a1340034] native-postgres-driver:ch34:t04 — Join replication owners and drain CopyDone under one deadline (tasks/t04-bounded-session-shutdown.md)
 
 
 One executor per worksheet, in dependency order. No shared-file task executors run in parallel.
@@ -156,7 +159,7 @@ One executor per worksheet, in dependency order. No shared-file task executors r
 ```bash
 PYO3_PYTHON="$PWD/.venv/bin/python" PYTHONPATH="$PWD/src/py" cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --test postgres_replication_wire_tests
 PYO3_PYTHON="$PWD/.venv/bin/python" cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-postgres --all-targets -- -D warnings
-cargo fmt --manifest-path src/rs/Cargo.toml --check
+cargo fmt --manifest-path src/rs/Cargo.toml -p vertebra-postgres --check
 UV_NO_SYNC=1 make review-check
 git diff --check
 ```
@@ -165,13 +168,15 @@ All commands exit0 before present-tense documentation sync, zero-context correct
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- Plan revision 8 is approved at reviewed plan commit `d90d4625`; execution requires the declared chapter dependencies and task preflight.
-- All 4 worksheets are pending, signature-complete and individually bounded; no production changes are present.
-- Root order continues ch35 supervision → ch36 Python bridge → ch24 checkpoints, followed by ch25–ch33. This chapter introduces no reconnect behavior or Python public API.
-- Doc/OKF manifest is open until chapter implementation sync; native public Python driver cutover remains ch27.
-- Stop after this chapter's recovery checkpoint, living documentation sync and independent code/quality review.
+- All four tasks are complete at `f520aa6d`, `d99caddf`, `9d4c4258` and `a1340034`; the chapter awaits independent correctness and fresh quality review from base `f58aa695`.
+- The recovery checkpoint passes 48 canonical wire tests, Clippy and package formatting. The tests cover start fences, bounded/coalesced decoding, Commit publication, cancellation retention, heartbeat liveness and graceful/terminal shutdown.
+- `cancel` and explicit `shutdown` fence external leases and discard session-owned queued records. Natural clean CopyDone closes transport while allowing already decoded records to drain and publish. [^stream]
+- Documentation coverage is `[2/2]`; native public Python driver cutover remains ch27. Reconnect supervision (ch35), Python handles (ch36), checkpoints (ch24), and ch25–ch33 remain open: 41 tasks in 12 subsequent chapters.
+- Next: approve the chapter through independent correctness and fresh quality review, stamp the reviewed commit, then execute ch35 in dependency order.
 
 [^contracts]: `.agents/bundles/specs/native-postgres-driver/contracts.md` — Replication ownership and acknowledgement contracts.
 [^connection]: `src/rs/vertebra-postgres/src/replication/mod.rs::PostgresReplicationConnection` — Dedicated CopyBoth session ownership.
 [^protocol]: `src/rs/vertebra-postgres/src/protocol.rs::read_replication_message` — Buffered bounded protocol frame parsing.
 [^decoder]: `src/rs/vertebra-postgres/src/replication/pgoutput.rs::PgOutputDecoder` — Incremental bounded pgoutput record decoding.
+
+[^stream]: `src/rs/vertebra-postgres/src/replication/stream.rs::ReplicationSession` — Bounded session transport and publication leases.

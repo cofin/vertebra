@@ -5,7 +5,7 @@ chapter_id: ch34-replication-session-pump
 title: "Join replication owners and drain CopyDone under one deadline"
 description: "Finish graceful and terminal session lifecycle: bounded final feedback/CopyDone plus backend drain, receiver wakeup, and cancellation-safe cleanup of split socket owners and delivery leases."
 status: stable
-state: in_progress
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on: ["native-postgres-driver:ch34:t03"]
@@ -28,12 +28,12 @@ claimed_at: "2026-11-12T20:05:41.205447+00:00"
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
-commit: null
+last_verified_at: "2026-11-12T20:07:53.614860+00:00"
+last_verified_commit: a1340034
+verification_evidence: "Red exit101 shutdown before backend drain; full48 tests pass; Clippy/packagefmt/diffcheck exit0. Logs /tmp/ch34-t04-{red,green,module,clippy}.log"
+commit: a1340034
 created_at: "2026-11-12T05:00:00Z"
-updated_at: "2026-11-12T20:05:41.205447+00:00"
+updated_at: "2026-11-12T20:07:53.614860+00:00"
 generated: {by: flow-revise, at: "2026-11-12T05:00:00Z"}
 verified: []
 sources:
@@ -134,10 +134,10 @@ cargo fmt --manifest-path src/rs/Cargo.toml --check
 
 ## Acceptance Criteria
 
-- [ ] R22.4 close uses one bounded deadline and never advances unacknowledged Commit.
-- [ ] Idle, backpressured, cancelled and failed owners relinquish every socket and join handle.
+- [x] R22.4 close uses one bounded deadline and never advances unacknowledged Commit.
+- [x] Idle, backpressured, cancelled and failed owners relinquish every socket and join handle.
 
-- [ ] Red, Green, and lint evidence is recorded, and task plus checklist synchronization is included in one signed conventional commit.
+- [x] Red, Green, and lint evidence is recorded, and task plus checklist synchronization is included in one signed conventional commit.
 
 ## Notes & Discoveries
 

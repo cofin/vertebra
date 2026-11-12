@@ -2,7 +2,7 @@
 type: Spec
 flow_id: native-postgres-driver
 title: Complete Standalone Native PostgreSQL Driver
-description: The standalone vertebra-postgres wheel (transport, authentication, typed queries, pools, pipelines, cancellation, COPY, Arrow, notifications, and CopyBoth/pgoutput relation decoding) is on main at c8722c76; local follow-up commits add pgoutput transaction envelopes and the limitations record; the remaining chapters finish replication feedback and change sources, build the permanent native Python drivers, cut every PostgreSQL consumer over atomically while deleting psycopg/asyncpg, prove PG14–18 conformance and wheel/benchmark gates, and synchronize documentation and OKF in a follow-up pull request.
+description: The standalone vertebra-postgres wheel and bounded single-generation Rust replication sessions are available. Remaining chapters implement verified reconnect, Python replication handles, durable change sources, native public driver cutover, live conformance, wheel and benchmark acceptance, and documentation.
 status: stable
 state: active
 has_chapters: true
@@ -44,7 +44,7 @@ chapters:
   - ch32-ffi-okf-and-review-routing-sync
   - ch33-final-review-and-release-gate
 current_chapter: ch34-replication-session-pump
-current_task: "native-postgres-driver:ch34:t04"
+current_task: null
 parent_prd: native-data-platform
 depends_on_flows:
   - driver-fail-loud
@@ -54,11 +54,11 @@ research:
 plan_revision: 8
 plan_commit: d90d4625
 state_revision: 12
-last_verified_checkpoint: 4700ecbc
+last_verified_checkpoint: a1340034
 last_reviewed_chapter: ch23-replication-feedback-resume-and-bridge
 last_reviewed_commit: 4700ecbc
 created_at: "2026-11-03T04:05:00Z"
-updated_at: "2026-11-12T15:05:07Z"
+updated_at: "2026-11-12T20:10:51.550371+00:00"
 generated:
   by: flow-revise
   at: "2026-11-12T01:30:00Z"
@@ -67,6 +67,9 @@ verified:
     at: "2026-11-12T01:30:00Z"
     commit: c8722c76
 sources:
+  - id: pg-stream-rs
+    resource: src/rs/vertebra-postgres/src/replication/stream.rs::ReplicationSession
+    title: Bounded single-generation replication transport and delivery leases
   - id: pg-conn-rs
     resource: src/rs/vertebra-db/src/connection.rs::TransportStream
     title: Shared TCP, Unix, TLS, and cloud mTLS stream primitives
@@ -126,7 +129,7 @@ tags:
 <!-- truth: start -->
 - **Wheel on Main**: [PR #104](https://github.com/cofin/vertebra/pull/104) (squash commit `c8722c76`) ships `src/rs/vertebra-postgres` (`vertebra._postgres`, `vertebra-core[postgres]`) with Protocol 3.0 sockets over `postgres-protocol =0.6.12` and `rustls` (`ring`), SCRAM/PLUS, Cloud SQL and AlloyDB discovery with mTLS and IAM, lossless codecs, pools, statement caches, single-`Sync` pipelines, cancellation, binary `COPY`, `VTBARROW`, `LISTEN`/`NOTIFY`, and `CopyBoth` replication sessions with `pgoutput` relation/insert decoding (`ch01`–`ch21`, `ch22:t01`–`t02`, `80/129` tasks) [^pg-conn-rs] [^pg-core-rs] [^py-async-rs] [^arrow-shm-rs].
 - **Split Runtime State on Main**: The Python drivers are not cut over. `SyncPostgreSQLDriver` executes through `psycopg_pool`, `AsyncPostgreSQLDriver` offloads that sync driver with `asyncio.to_thread`, `PostgreSQLQueueBackend` probes `psycopg` when `executor=` is missing, and `pipeline.py` / `arrow.py` are imported only by unit tests; the PR #104 title and body describe a cutover that main does not contain [^pg-driver-py] [^pg-queue-py] [^pg-pipeline-py] [^pg-arrow-py].
-- **Working Branch and Remaining Delivery**: Local `ch22:t03` (`2947d015`) adds ordered transaction envelopes and `ch22:t04` (`48b50600`) records the split state. Chapter 23 adds verified feedback primitives. The remaining `45` tasks in `ch34`–`ch36` and `ch24`–`ch33` deliver stream pumping, resume and bridge, the CAS change source, native public drivers, atomic consumer cutover, live conformance, wheels, benchmarks, and final documentation together in the follow-up PR [^sqlspec-py].
+- **Working Branch and Remaining Delivery**: Ordered pgoutput transaction envelopes, strict feedback codecs and single-generation `ReplicationSession` transport are available. Commit publication is explicit, cancellation restores held deliveries, and one absolute deadline bounds graceful shutdown. The remaining `41` tasks in `ch35`–`ch36` and `ch24`–`ch33` deliver verified resume, Python handles, durable change sources, native public drivers, atomic consumer cutover, live conformance, wheels, benchmarks and final documentation [^pg-stream-rs] [^sqlspec-py].
 - **Git Continuity**: Original task/review history through `ch21` is retained locally at `refs/flow/native-postgres-reviewed-history`; original `ch22:t01`–`t02` task objects remain available. Their changes are included in squash `c8722c76` on `main`. Local follow-up task SHAs remain separate; the approved revision-8 plan anchor is `d90d4625` and the final implementation review base remains `c8722c76`.
 - **Fail-Loud Baseline**: `driver-fail-loud` deletes `_in_memory_rows`, every PostgreSQL `memory://` branch, and `vertebra_db::postgres::PostgresPool`; this flow adds no memory or SHM-admission pool paths [^fail-loud-baseline].
 <!-- truth: end -->
@@ -135,11 +138,11 @@ tags:
 
 ### 1.1 Problem Statement & Current Baseline
 
-The native wheel baseline on `main` is squash commit `c8722c76`. Chapters `ch01`–`ch22` are completed and reviewed, with the current reviewed checkpoint at `9c1865b7` and `82/129` tasks complete. Original task/review history through `ch21` is retained locally at `refs/flow/native-postgres-reviewed-history`; completed worksheets retain canonical squash mapping and original provenance where needed.
+The native wheel baseline on `main` is squash commit `c8722c76`. Chapters `ch01`–`ch23` are completed and reviewed, most recently at `4700ecbc`. Chapter `ch34` has four verified tasks and awaits review, bringing task completion to `88/129`. Original task/review history through `ch21` is retained locally at `refs/flow/native-postgres-reviewed-history`; completed worksheets retain canonical squash mapping and original provenance where needed.
 
 The Python adapter layer on `main` still runs on third-party clients: `src/py/vertebra/db/adapters/postgres/driver.py::SyncPostgreSQLDriver` builds a `psycopg_pool.ConnectionPool`, `AsyncPostgreSQLDriver` wraps that sync driver with `asyncio.to_thread`, `src/py/vertebra/framework/queues/postgres.py::PostgreSQLQueueBackend` probes `psycopg` before raising for a missing `executor=`, `src/py/vertebra/db/dialer/{cloudsql,alloydb}.py` expose `create_psycopg_connect_func` / `create_asyncpg_connect_func`, and `src/py/tests/unit/db/test_postgres_driver.py` exercises `AsyncPostgreSQLDriver` through a SQLite-backed asyncpg pool double (`_SQLiteAsyncPGPool`). `src/py/vertebra/db/adapters/postgres/pipeline.py` and `arrow.py` are complete but imported only by `test_postgres_native_pipeline.py` and `test_postgres_native_data.py` [^pg-driver-py] [^pg-queue-py] [^pg-pipeline-py] [^pg-arrow-py].
 
-The working branch includes verified `ch22:t03` and `ch22:t04` commits; the remaining `47` tasks (`ch23`, `ch34`–`ch36`, `ch24`–`ch33`) complete the follow-up delivery based on `main` at `c8722c76`. The PostgreSQL limitations OKF entry records the split state; `ch27:t04` removes those caveats once the cutover lands. Hosted writes (push, PR creation, workflow dispatch) require separate explicit user permission.
+The working branch includes ordered transaction records, commit-fenced feedback, and bounded single-generation replication sessions. The remaining `41` tasks (`ch35`–`ch36`, `ch24`–`ch33`) complete the delivery based on `main` at `c8722c76`. The PostgreSQL limitations OKF entry records the native/legacy runtime boundary; `ch27:t04` removes those caveats when the cutover is verified. Hosted writes require explicit user permission for the exact action and repository.
 
 This flow depends on [`driver-fail-loud`](../../knowledge/domains/data/database-drivers-and-dialers.md), which deletes `_in_memory_rows` and every `memory://` branch from `driver.py` (a `memory://` DSN raises `ImproperConfigurationError`) and deletes `vertebra_db::postgres::PostgresPool` [^fail-loud-baseline].
 
@@ -371,9 +374,9 @@ Boolean LSNs fail with TypeError; integer LSNs outside `0 <= lsn < 2**64` fail w
 
 ## 3. Documentation & OKF Knowledge Plan
 
-The chapter-boundary sync for ch23, ch34, and ch35 maintains `knowledge/domains/data/postgres-limitations.md` and `knowledge/domains/data/query-pipeline-cdc-and-tenancy.md`; ch36 also maintains `knowledge/patterns/rust/ffi-and-gil-discipline.md`. These existing manifest entries receive verified present-tense coverage as each public seam lands. Their revision-8 implementation coverage is `[0/3 files documented]`; this does not claim implementation or replace the full-flow `[3/33]` interim count.
+The chapter-boundary sync for ch23, ch34, and ch35 maintains `knowledge/domains/data/postgres-limitations.md` and `knowledge/domains/data/query-pipeline-cdc-and-tenancy.md`; ch36 also maintains `knowledge/patterns/rust/ffi-and-gil-discipline.md`. These existing manifest entries receive verified present-tense coverage as each public seam lands. Their revision-8 implementation coverage is `[2/3 files documented]`; the FFI chapter remains with ch36. Interim full-flow coverage is `[4/33]` and retains the final-state maintenance obligations below.
 
-Progress: `[3/33 files documented]` with interim coverage. `ch22:t04` supplies `postgres-limitations.md` and both knowledge index entries; these three files still require cutover and final-state maintenance in `ch27` / `ch31`. `ch27:t04` removes the split-state caveats from it, and the final synchronization runs across [ch30-user-and-workflow-docs](chapters/ch30-user-and-workflow-docs/spec.md) (`12` files, `ch30:t01`–`t04`), [ch31-data-and-testing-okf-sync](chapters/ch31-data-and-testing-okf-sync/spec.md) (`12` files, `ch31:t01`–`t04`), and [ch32-ffi-okf-and-review-routing-sync](chapters/ch32-ffi-okf-and-review-routing-sync/spec.md) (`9` files, `ch32:t01`–`t03`). Module, crate, and wheel inventories are enumerated from the `Makefile` `lint` stubtest list and `src/rs/*/Cargo.toml` at execution time rather than hardcoded counts.
+Progress: `[4/33 files documented]` with interim coverage: `postgres-limitations.md`, both knowledge indexes, and `query-pipeline-cdc-and-tenancy.md`. These files still require cutover and final-state maintenance in `ch27` / `ch31`. `ch27:t04` removes the split-state caveats from it, and the final synchronization runs across [ch30-user-and-workflow-docs](chapters/ch30-user-and-workflow-docs/spec.md) (`12` files, `ch30:t01`–`t04`), [ch31-data-and-testing-okf-sync](chapters/ch31-data-and-testing-okf-sync/spec.md) (`12` files, `ch31:t01`–`t04`), and [ch32-ffi-okf-and-review-routing-sync](chapters/ch32-ffi-okf-and-review-routing-sync/spec.md) (`9` files, `ch32:t01`–`t03`). Module, crate, and wheel inventories are enumerated from the `Makefile` `lint` stubtest list and `src/rs/*/Cargo.toml` at execution time rather than hardcoded counts.
 
 - `docs/usage/databases.md` (`ch30:t01`) — Linked `uv`/`pip`/`pdm`/`poetry` `[postgres]` tabs, `$n` vs `E'...'` pyformat lowering, SQLSpec `NUMERIC` and SQLAlchemy `numeric_dollar`, `query_multi`, single-`Sync` `pipeline()`, lossless `Pg*` records, raw native `copy_to`/`copy_from`/`copy_from_arrow` vs driver `load_from_arrow`/`select_to_arrow`/`stream_arrow_batches`/`VTBARROW`, `PgBouncer` modes, `direct_dsn`, and DSN precedence (zero external driver names).
 - `docs/usage/analytics-and-cdc.md` (`ch30:t01`) — Unified `$n` PostgreSQL tenant binds (replacing psycopg/asyncpg bind wording), `PostgresNotificationSource`, and `PostgresChangeSource` `pgoutput` v1 CAS checkpointing.
@@ -468,7 +471,7 @@ Every worksheet (`129` total across `36` chapters) executes in one bounded invoc
 - [x] [b44e28ca] ch21-live-notifications — Dedicated Notification Session Pump, PendingDeliveryGuard Async Bridge, and Python PostgresNotificationSource (chapters/ch21-live-notifications/spec.md)
 - [x] [9c1865b7] ch22-copyboth-and-pgoutput-decoding — Dedicated CopyBoth Sessions, Lossless pgoutput v1 Decoding and Transaction Envelopes, and the Split-State Limitations Record (chapters/ch22-copyboth-and-pgoutput-decoding/spec.md)
 - [x] [4700ecbc] ch23-replication-feedback-resume-and-bridge — Replication CopyData Codecs and Monotonic Commit-Boundary Feedback (chapters/ch23-replication-feedback-resume-and-bridge/spec.md)
-- [ ] ch34-replication-session-pump — Bounded Single-Generation Replication Session, Independent Heartbeats, and Delivery Leases (chapters/ch34-replication-session-pump/spec.md)
+- [~] ch34-replication-session-pump — Bounded Single-Generation Replication Session, Independent Heartbeats, and Delivery Leases (chapters/ch34-replication-session-pump/spec.md)
 - [ ] ch35-replication-supervision — Verified Reconnect Supervision and Generation-Fenced Delivery (chapters/ch35-replication-supervision/spec.md)
 - [ ] ch36-replication-python-bridge — Cancellation-Safe Python Replication Handles and Typed Event Hydration (chapters/ch36-replication-python-bridge/spec.md)
 - [ ] ch24-change-source-and-checkpoints — PostgresChangeSource, PostgresCheckpointStore, Serialized CAS Ack Reconciliation, and Replay/Shutdown Semantics (chapters/ch24-change-source-and-checkpoints/spec.md)
@@ -486,13 +489,13 @@ Every worksheet (`129` total across `36` chapters) executes in one bounded invoc
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Work**: Chapter 23 tasks complete at `64d317cd` and `bbb77ecf`; 18 canonical wire tests, Clippy, package rustfmt, review-check, and whitespace gates pass. Independent chapter review remains open.
-- **Progress**: `23/36` chapters and `84/129` tasks are complete; `45` tasks remain. The active pointer is `ch34-replication-session-pump`, task `native-postgres-driver:ch34:t01`.
-- **Git Continuity**: Completed chapter attestations through ch22 remain intact, including reviewed commit `9c1865b7`. Chapter base is `a203b946`.
-- **Runtime Boundary**: Native replication decoding, payload codecs, and bounded feedback state are available. Session pumping, reconnect supervision, and Python handles remain ch34–ch36; public Python drivers retain psycopg and asyncio.to_thread until ch27.
-- **Documentation**: Chapter 23 limitations coverage is `[1/1]`; interim full-plan coverage remains `3/33` files. User guides and remaining OKF synchronization belong to ch30–ch32.
-- **Remaining Plan**: ch34 session pump; ch35 verified supervision; ch36 Python bridge; ch24 change sources/checkpoints; ch25–ch27 native drivers/cutover; ch28 live conformance; ch29 wheels/benchmarks; ch30–ch32 docs/OKF; ch33 final verification.
-- **Next Action**: Complete independent correctness and fresh quality review, stamp chapter 23, then `/flow:implement native-postgres-driver ch34`. Commits remain local.
+- **Verified Work**: All four ch34 tasks are complete through `a1340034`; 48 canonical wire tests, Clippy and package formatting pass. Independent correctness and fresh quality reviews remain open from base `f58aa695`.
+- **Progress**: `23/36` chapters are reviewed; ch34 awaits review. `88/129` tasks are complete, with `41` tasks across `12` subsequent chapters remaining. The active chapter is `ch34-replication-session-pump`, with no uncompleted task in that chapter.
+- **Git Continuity**: Completed chapter attestations through ch23 remain intact, including reviewed checkpoint `4700ecbc`. The revision-8 plan anchor is `d90d4625`; final flow review uses base `c8722c76`.
+- **Runtime Boundary**: Native decoding, feedback and single-generation session pumping are available. Reconnect supervision and Python replication handles remain ch35–ch36; public Python drivers retain psycopg and asyncio.to_thread until ch27.
+- **Documentation**: Chapter 34 coverage is `[2/2]`; interim full-plan coverage is `[4/33]`. Final user guides and remaining OKF synchronization belong to ch30–ch32.
+- **Remaining Plan**: ch35 verified supervision; ch36 Python bridge; ch24 change sources/checkpoints; ch25–ch27 native drivers/cutover; ch28 live conformance; ch29 wheels/benchmarks; ch30–ch32 docs/OKF; ch33 final verification.
+- **Next Action**: Complete correctness and fresh quality review, stamp ch34, then `/flow:implement native-postgres-driver ch35`. Draft [PR #118](https://github.com/cofin/vertebra/pull/118) contains the published working branch snapshot; subsequent commits require a push to update it.
 
 [^pg-conn-rs]: `src/rs/vertebra-db/src/connection.rs::TransportStream` — Shared TCP, Unix, TLS, and cloud mTLS stream primitives.
 [^pg-core-rs]: `src/rs/vertebra-db/src/postgres/mod.rs::encode_query_frame` — Shared stateless PostgreSQL wire frame and codec helpers in `vertebra-db`.
@@ -509,3 +512,5 @@ Every worksheet (`129` total across `36` chapters) executes in one bounded invoc
 [^conformance-py]: `src/py/tests/integration/db/test_driver_conformance.py::ENGINE_SPECS` — Cross-engine database driver conformance matrix and pipeline suite.
 [^dialer-cloudsql-py]: `src/py/vertebra/db/dialer/cloudsql.py::CloudSQLConfig` — Existing Python Cloud SQL dialer configuration and ephemeral certificate helper.
 [^dialer-alloydb-py]: `src/py/vertebra/db/dialer/alloydb.py::AlloyDBConfig` — Existing Python AlloyDB dialer configuration and `MetadataExchange` helper.
+
+[^pg-stream-rs]: `src/rs/vertebra-postgres/src/replication/stream.rs::ReplicationSession` — Bounded single-generation replication transport and delivery leases.

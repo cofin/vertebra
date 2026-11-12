@@ -1,5 +1,10 @@
 # Bundle Activity Log
 
+## [2026-11-12T20:10:51.550371+00:00] chapter-checkpoint | PostgreSQL single-generation replication
+
+- Chapter 34 completes four tasks at `f520aa6d`, `d99caddf`, `9d4c4258` and `a1340034`. All 48 canonical wire tests, Clippy and package formatting pass.
+- The session owns bounded decoding, independent heartbeats, cancellation-safe delivery leases and one-deadline shutdown. Both knowledge files and the living roadmap are synchronized before correctness and fresh quality review. Task progress is 88/129; 41 tasks remain across 12 subsequent chapters.
+
 ## [2026-11-12T15:05:07Z] chapter-complete | PostgreSQL feedback
 
 - Chapter 23 is reviewed at `4700ecbc` after correctness and fresh quality approval. All 23 canonical wire tests, Clippy, formatting and documentation checks pass. Source commits are `64d317cd` and `bbb77ecf`; documentation sync is `3142d692`.

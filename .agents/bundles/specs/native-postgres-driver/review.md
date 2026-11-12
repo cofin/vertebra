@@ -8,7 +8,7 @@ state: active
 plan_revision: 8
 plan_commit: d90d4625
 created_at: "2026-11-05T00:00:00Z"
-updated_at: "2026-11-12T04:25:15Z"
+updated_at: "2026-11-12T20:10:51.550371+00:00"
 generated:
   by: flow-revise
   at: "2026-11-12T01:30:00Z"
@@ -38,7 +38,7 @@ tags:
 # Planning review
 
 <!-- truth: start -->
-- Revision 8 is approved and anchored to reviewed plan commit `d90d4625`. The roadmap has `36` chapters and `129` tasks, with `23` reviewed chapters and `84` completed tasks [^pg-core-rs].
+- Revision 8 is approved and anchored to reviewed plan commit `d90d4625`. The roadmap has `36` chapters and `129` tasks, with `23` reviewed chapters and `88` completed tasks; chapter 34 awaits review [^pg-core-rs].
 - Replication execution order is `ch23` feedback, `ch34` bounded session, `ch35` verified supervision, `ch36` Python bridge, then `ch24` checkpoint sources. The public Python drivers retain their legacy implementation until `ch27` [^pg-driver-py].
 - Planning validation proves blueprint consistency; live services, wheels, benchmarks, and final release acceptance remain downstream gates [^fail-loud-baseline].
 <!-- truth: end -->
@@ -68,11 +68,11 @@ The contract decisions below are ADOPT. Revision 8 passes fresh blueprint review
 | `ch28`–`ch29` strict Docker zero-skip gate, `PgBouncer` SCRAM, `pgvector`, GIL & `postgres-bench` | Gate live PG14–18/replication/service suites with `VERTEBRA_CONFORMANCE_DOCKER=1` + `VERTEBRA_CONFORMANCE_POSTGRES_REQUIRE_ZERO_SKIPS=1`, extract `PgBouncer` `1.26.0` SCRAM verifiers from `pg_authid.rolpassword`, pin multi-arch `pgvector` `0.8.1` digests (`ch28:t01`–`t04`), assert standard-GIL `FREE_THREADED is _is_free_threaded_runtime()` alongside isolated `3.14t`/`3.15t` disabled-GIL wheel probes (`ch29:t01`), and isolate `psycopg[binary]==3.2.13` / `asyncpg==0.31.0` in `[dependency-groups].postgres-bench` (`python_version == '3.12'`) with `[tool.mypy]` overrides (`ch29:t02`–`t03`). |
 | `ch30`–`ch33` `33`-file docs/OKF/limitations/routing split & `DOC-07` gate | Partition `33` invalidated user docs (`verify_docs_artifacts.py` `H2+H3 <= 14`, reference HTML `<= 120,000` bytes, tabbed installs, zero external driver names in `docs/`), workflow/`AGENTS.md`, split `postgres-native-driver.md` + `postgres-limitations.md` + indexes, testing/product/queue OKF, and `_postgres` FFI/`ADR-004`/`pyo3-bridge`/`areas.toml`/`checklist.md` updates across `ch30` (`12`), `ch31` (`12`), and `ch32` (`9`), then run `make review-route BASE=c8722c76`, dual reviews, and full gates in `ch33:t01` while keeping resident `spec.md` `state: active` (`current_task: null`) for `DOC-07` compliance ahead of `/flow:finish` -> `/flow:archive`. |
 | Split state after the PR #104 squash | Re-anchor the plan to `c8722c76`, map pre-squash task SHAs to it, record the split state in `postgres-limitations.md` (`ch22:t04`), wire the test-only `pipeline.py`/`arrow.py` into the permanent drivers (`ch26:t02`–`t03`), and replace `src/py/vertebra/build/packaging/pgo.py` references with `tools/pgo/rust_pgo.py::discover_extension_manifests`, which already includes `vertebra-postgres` in `make build-pgo`. |
-| Decoder baseline | Chapter 22 is reviewed at `9c1865b7`; `PgOutputDecoder` and `BoundedReplicationQueue` supply ordered transaction records to the planned session pump. |
+| Decoder baseline | Chapter 22 is reviewed at `9c1865b7`; `PgOutputDecoder` and `BoundedReplicationQueue` supply ordered transaction records to `ReplicationSession`. |
 
 ## Chapter 23 correctness review
 
-Correctness review finds no production defects. The chapter has strict wire codecs and bounded, commit-fenced feedback state. The roadmap and limitations describe the implemented primitives and remaining stream ownership work. Independent correctness and fresh quality reviews approve `a203b946..4700ecbc` with no remaining findings. All 23 canonical tests, Clippy, and formatting pass.
+Correctness review finds no production defects. The chapter has strict wire codecs and bounded, commit-fenced feedback state. The roadmap and limitations describe feedback primitives and the verified single-generation stream, with reconnect and Python integration remaining open. Independent correctness and fresh quality reviews approve `a203b946..4700ecbc` with no remaining findings. All 23 canonical tests, Clippy, and formatting pass.
 
 ## Revision 8 review and validation
 
@@ -87,7 +87,11 @@ Correctness review finds no production defects. The chapter has strict wire code
 
 Independent chapter blueprint reviews pass after adopted test-matrix, publication-order, cancellation, EOF-classification, and ownership fixes. Deterministic worksheet bounds/count checks, review-check, whitespace checks, and the Flow stop gate pass. The final independent cross-chapter reread passes with zero remaining Critical or Important findings. No runtime
 implementation or acceptance is claimed by this planning revision. User approval stamps
-`status: stable` and `plan_commit: d90d4625`; the next command is `/flow:implement native-postgres-driver ch23`.
+`status: stable` and `plan_commit: d90d4625`; the active chapter is ch34, awaiting correctness and fresh quality review.
+
+## Chapter 34 implementation review
+
+All four tasks are complete through `a1340034`. The checkpoint passes 48 canonical wire tests, Clippy and package formatting. Coverage includes independent heartbeats, bounded coalesced ingestion, cancellation-safe publication leases, exact Commit acknowledgement, backend drain and terminal cleanup. Both chapter knowledge files are synchronized (`[2/2]`). Independent correctness review and subsequent fresh quality review remain open for `f58aa695..HEAD`; no chapter approval or release acceptance is claimed.
 
 [^pg-core-rs]: `src/rs/vertebra-db/src/postgres/mod.rs::encode_query_frame` — Shared PostgreSQL wire frame helpers in `vertebra-db`.
 [^fail-loud-baseline]: `.agents/bundles/knowledge/domains/data/database-drivers-and-dialers.md` — Upstream flow that deletes PostgreSQL `memory://` paths and `vertebra_db::postgres::PostgresPool`.

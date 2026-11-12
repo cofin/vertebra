@@ -14,109 +14,44 @@ generated:
   by: flow/0.26.0
   at: "2026-11-04T04:33:00Z"
 verified:
-  - by: agent:flow-sync
-    at: "2026-11-12T03:00:27Z"
-    commit: 2947d015
-  - by: agent:flow-sync
-    at: "2026-11-09T21:46:00Z"
-    commit: 14aa83b8
-  - by: agent:flow-executor
-    at: "2026-11-09T15:06:00Z"
-    commit: af1b3d30
-  - by: agent:docs-okf-specialist
-    at: "2026-11-09T20:48:51Z"
-    commit: 47da6820
-  - by: agent:flow-setup
-    at: "2026-11-07T03:55:00Z"
-    commit: 067fa901
+  - by: agent:chapter-sync
+    at: "2026-11-12T20:10:51.550371+00:00"
+    commit: a1340034
 sources:
-- id: src-postgres-pgoutput-rs
-  resource: src/rs/vertebra-postgres/src/replication/pgoutput.rs::PgOutputDecoder
-  title: Incremental pgoutput v1 transaction records and bounded queue
-- id: src-postgres-tenant-core
-  resource: src/py/vertebra/db/adapters/postgres/core.py
-  title: PostgreSQL tenant and session SQL builders
-- id: src-oracle-tenant-core
-  resource: src/py/vertebra/db/adapters/oracle/core.py
-  title: Oracle VPD trusted-package and SET_IDENTIFIER context SQL builders
-- id: src-oracle-driver-py
-  resource: src/py/vertebra/db/adapters/oracle/driver.py
-  title: SyncOraclePipeline, AsyncOraclePipeline, and VPD reset-or-evict pool hooks
-- id: src-db-oracle-notify-py
-  resource: src/py/vertebra/db/adapters/oracle/notify.py
-  title: OracleNotifyConfig and OracleNotificationSource TxEventQ / DBMS_AQ streaming
-- id: src-vertebra-oracle-notify-rs
-  resource: src/rs/vertebra-oracle/src/notify.rs
-  title: Dedicated AsyncOracleListener DBMS_AQ.DEQUEUE worker pump
-- id: src-extensions-apex-session-py
-  resource: src/py/vertebra/extensions/apex/session.py
-  title: OracleSessionManager APEX VPD propagation and ECID piggyback
-- id: src-tenant-native-tests
-  resource: src/py/tests/unit/db/test_native_db_drivers.py
-  title: Generic engine-purity positive and negative probes
-- id: src-tenant-enterprise-tests
-  resource: src/py/tests/unit/db/test_enterprise_olap_drivers.py
-  title: Session bind and failure identity acceptance
-- id: src-extensions-sqlspec-bigquery-py
-  resource: src/py/vertebra/extensions/sqlspec/bigquery.py
-  title: BigQuery SQLSpec native statement defaults and session execution
-- id: src-extensions-sqlspec-spanner-py
-  resource: src/py/vertebra/extensions/sqlspec/spanner.py
-  title: Spanner SQLSpec parser and native parameter defaults
-- id: src-extensions-sqlspec-adapters-py
-  resource: src/py/vertebra/extensions/sqlspec/adapters.py
-  title: SQLSpec native pipeline dispatch and sequential stack execution
-- id: src-db-duckdb-pipeline-py
-  resource: src/py/vertebra/db/adapters/duckdb/pipeline.py
-  title: Delayed-commit SyncDuckDBPipeline and AsyncDuckDBPipeline with savepoint nesting
-- id: src-db-cdc-py
-  resource: src/py/vertebra/db/cdc.py
-  title: Python implementation module (src/py/vertebra/db/cdc.py)
-- id: src-db-spanner-change-stream-py
-  resource: src/py/vertebra/db/adapters/spanner/change_stream.py
-  title: Spanner change-stream readers and partition record types
-- id: src-db-postgres-notify-py
-  resource: src/py/vertebra/db/adapters/postgres/notify.py
-  title: PostgreSQL notification transport and logical message builders
-- id: src-extensions-sqlspec-events-py
-  resource: src/py/vertebra/extensions/sqlspec/events.py
-  title: Engine-neutral SQLSpec change-feed event backends
-- id: src-tests-unit-db-test-pg-gateway-py
-  resource: src/py/tests/unit/db/test_pg_gateway.py
-  title: CDC spill bounds, key normalization, and storage error coverage
-- id: src-tests-unit-extensions-test-data-storage-integrations-py
-  resource: src/py/tests/unit/extensions/test_data_storage_integrations.py
-  title: SQLSpec event backend lifecycle and spill hydration coverage
-- id: src-db-rls-py
-  resource: src/py/vertebra/db/rls.py
-  title: Python implementation module (src/py/vertebra/db/rls.py)
-- id: src-db-datafusion-py
-  resource: src/py/vertebra/db/adapters/datafusion/__init__.py
-  title: Python implementation module (src/py/vertebra/db/adapters/datafusion/__init__.py)
-- id: src-db-datafusion-config-py
-  resource: src/py/vertebra/db/adapters/datafusion/config.py
-  title: Python implementation module (src/py/vertebra/db/adapters/datafusion/config.py)
-- id: src-db-datafusion-driver-py
-  resource: src/py/vertebra/db/adapters/datafusion/driver.py
-  title: Python implementation module (src/py/vertebra/db/adapters/datafusion/driver.py)
-- id: src-db-init-py
-  resource: src/py/vertebra/db/__init__.py
-  title: Python implementation module (src/py/vertebra/db/__init__.py)
-- id: src-db-registry-py
-  resource: src/py/vertebra/db/registry.py
-  title: Python implementation module (src/py/vertebra/db/registry.py)
-- id: src-db-driver-capabilities-py
-  resource: src/py/vertebra/db/driver/capabilities.py
-  title: Python implementation module (src/py/vertebra/db/driver/capabilities.py)
-- id: src-tests-unit-db-test-pg-dataplane-and-datafusion-py
-  resource: src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py
-  title: Python implementation module (src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py)
+- {id: src-postgres-stream-rs, resource: src/rs/vertebra-postgres/src/replication/stream.rs::ReplicationSession, title: Bounded replication session, publication leases and shutdown}
+- {id: src-postgres-pgoutput-rs, resource: src/rs/vertebra-postgres/src/replication/pgoutput.rs::PgOutputDecoder, title: Incremental pgoutput v1 transaction records and bounded queue}
+- {id: src-postgres-tenant-core, resource: src/py/vertebra/db/adapters/postgres/core.py, title: PostgreSQL tenant and session SQL builders}
+- {id: src-oracle-tenant-core, resource: src/py/vertebra/db/adapters/oracle/core.py, title: Oracle VPD trusted-package and SET_IDENTIFIER context SQL builders}
+- {id: src-oracle-driver-py, resource: src/py/vertebra/db/adapters/oracle/driver.py, title: SyncOraclePipeline, AsyncOraclePipeline, and VPD reset-or-evict pool hooks}
+- {id: src-db-oracle-notify-py, resource: src/py/vertebra/db/adapters/oracle/notify.py, title: OracleNotifyConfig and OracleNotificationSource TxEventQ / DBMS_AQ streaming}
+- {id: src-vertebra-oracle-notify-rs, resource: src/rs/vertebra-oracle/src/notify.rs, title: Dedicated AsyncOracleListener DBMS_AQ.DEQUEUE worker pump}
+- {id: src-extensions-apex-session-py, resource: src/py/vertebra/extensions/apex/session.py, title: OracleSessionManager APEX VPD propagation and ECID piggyback}
+- {id: src-tenant-native-tests, resource: src/py/tests/unit/db/test_native_db_drivers.py, title: Generic engine-purity positive and negative probes}
+- {id: src-tenant-enterprise-tests, resource: src/py/tests/unit/db/test_enterprise_olap_drivers.py, title: Session bind and failure identity acceptance}
+- {id: src-extensions-sqlspec-bigquery-py, resource: src/py/vertebra/extensions/sqlspec/bigquery.py, title: BigQuery SQLSpec native statement defaults and session execution}
+- {id: src-extensions-sqlspec-spanner-py, resource: src/py/vertebra/extensions/sqlspec/spanner.py, title: Spanner SQLSpec parser and native parameter defaults}
+- {id: src-extensions-sqlspec-adapters-py, resource: src/py/vertebra/extensions/sqlspec/adapters.py, title: SQLSpec native pipeline dispatch and sequential stack execution}
+- {id: src-db-duckdb-pipeline-py, resource: src/py/vertebra/db/adapters/duckdb/pipeline.py, title: Delayed-commit SyncDuckDBPipeline and AsyncDuckDBPipeline with savepoint nesting}
+- {id: src-db-cdc-py, resource: src/py/vertebra/db/cdc.py, title: Python implementation module (src/py/vertebra/db/cdc.py)}
+- {id: src-db-spanner-change-stream-py, resource: src/py/vertebra/db/adapters/spanner/change_stream.py, title: Spanner change-stream readers and partition record types}
+- {id: src-db-postgres-notify-py, resource: src/py/vertebra/db/adapters/postgres/notify.py, title: PostgreSQL notification transport and logical message builders}
+- {id: src-extensions-sqlspec-events-py, resource: src/py/vertebra/extensions/sqlspec/events.py, title: Engine-neutral SQLSpec change-feed event backends}
+- {id: src-tests-unit-db-test-pg-gateway-py, resource: src/py/tests/unit/db/test_pg_gateway.py, title: CDC spill bounds, key normalization, and storage error coverage}
+- {id: src-tests-unit-extensions-test-data-storage-integrations-py, resource: src/py/tests/unit/extensions/test_data_storage_integrations.py, title: SQLSpec event backend lifecycle and spill hydration coverage}
+- {id: src-db-rls-py, resource: src/py/vertebra/db/rls.py, title: Python implementation module (src/py/vertebra/db/rls.py)}
+- {id: src-db-datafusion-py, resource: src/py/vertebra/db/adapters/datafusion/__init__.py, title: Python implementation module (src/py/vertebra/db/adapters/datafusion/__init__.py)}
+- {id: src-db-datafusion-config-py, resource: src/py/vertebra/db/adapters/datafusion/config.py, title: Python implementation module (src/py/vertebra/db/adapters/datafusion/config.py)}
+- {id: src-db-datafusion-driver-py, resource: src/py/vertebra/db/adapters/datafusion/driver.py, title: Python implementation module (src/py/vertebra/db/adapters/datafusion/driver.py)}
+- {id: src-db-init-py, resource: src/py/vertebra/db/__init__.py, title: Python implementation module (src/py/vertebra/db/__init__.py)}
+- {id: src-db-registry-py, resource: src/py/vertebra/db/registry.py, title: Python implementation module (src/py/vertebra/db/registry.py)}
+- {id: src-db-driver-capabilities-py, resource: src/py/vertebra/db/driver/capabilities.py, title: Python implementation module (src/py/vertebra/db/driver/capabilities.py)}
+- {id: src-tests-unit-db-test-pg-dataplane-and-datafusion-py, resource: src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py, title: Python implementation module (src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py)}
 ---
 
 # Native Pipelines, Change Feeds, Tenant Predicates & DataFusion
 
 <!-- truth: start -->
-- **Native PostgreSQL Transaction Records**: On the working branch, `PgOutputDecoder::next_record` emits ordered v1 `Begin`, DML, truncate, message, and `Commit` envelopes without whole-transaction buffering. Deduplication uses system identifier, slot, begin-final LSN, and transaction ordinal; only `Commit` exposes an acknowledgement boundary. `BoundedReplicationQueue` uses explicit constructor limits; its planned default limits are 1024 records / 8 MiB, admits one bounded oversized record when empty, and rejects overflow without dropping records. Feedback, resume, and public change-source integration remain in `native-postgres-driver` chapters 23–24 [^src-postgres-pgoutput-rs].
+- **Native PostgreSQL Replication**: `PgOutputDecoder::next_record` emits ordered v1 transaction envelopes without buffering entire transactions. `ReplicationSession` transfers the dedicated CopyBoth socket and startup bytes into concurrent reader/writer loops with independent status writes. Queue limits are 1–1024 records, 8 MiB aggregate and 16 MiB per record, with one oversized bounded record admitted when empty. Delivery leases retain the single receiver reservation and restore dropped records ahead of the FIFO; only published Commit ends become acknowledgeable. Verified reconnect, Python handles and durable change sources remain in ch35, ch36 and ch24 [^src-postgres-pgoutput-rs] [^src-postgres-stream-rs].
 - **Delayed-Commit & Native Pipelines**: `SyncPipelineCapable` / `AsyncPipelineCapable` batch ordered statements via `driver.pipeline()`; `SyncOraclePipeline` and `AsyncOraclePipeline` (`ORACLESQL_NATIVE_TTC_PIPELINE_SUPPORTED = False`) hold an open transaction or `SAVEPOINT _vtb_pipe_<n>` across `results()` and commit only on clean `__exit__`/`__aexit__`, while SQLSpec `OracleSyncDriver` / `OracleAsyncDriver` set `_execution_parameter_style = ParameterStyle.NAMED_COLON`.
 - **Reset-or-Evict Tenant Scoping**: `TenantPredicate` stays engine-neutral while `TenantConnectionScope` / `AsyncTenantConnectionScope` (`vertebra.db.rls`), `OracleCore` (`context_package_proc` / `context_clear_proc` + `DBMS_SESSION.SET_IDENTIFIER` / `CLEAR_IDENTIFIER`), and `OracleSessionManager` always reset session context on lease exit and permanently evict pooled sessions when reset fails.
 - **Notifications & Change Streams**: `ChangeFeed` manages event envelopes and bounded spill hydration; `PostgresNotificationSource`, `OracleNotificationSource` (`AsyncOracleListener` `DBMS_AQ.DEQUEUE` / TxEventQ worker pump with 1s-sliced server waits and exponential reconnect backoff), and `SyncSpannerChangeStreamSource` / `AsyncSpannerChangeStreamSource` implement adapter streaming.
@@ -181,6 +116,12 @@ Replay history retains at most `max_history_size` events. Without an object stor
 
 Store keys use `spill_prefix.rstrip("/")`: a non-empty normalized prefix yields `<prefix>/<event_id>.json`, and an empty prefix yields `<event_id>.json`. Publication and hydration without an explicit `spill_key` apply the same normalization. `SyncObjectStore.get()` exceptions, including missing-object errors, reach the caller unchanged. PostgreSQL replication and notification settings belong to `PostgresNotifyConfig`, while `CDCConfig` retains only engine-neutral fields.
 
+### Native PostgreSQL Session Ownership
+
+`PostgresReplicationConnection::into_stream` initializes feedback from its connection-owned successful START LSN. Received, published and acknowledged Commit ends remain separate; flush/apply never advance from `wal_end`. At most 1024 published Commits await acknowledgement. Reader admission pauses at capacity while periodic status writes continue; only parsed keepalive reply requests can trigger immediate responses. [^src-postgres-stream-rs]
+
+`next()` allows one pending receiver or held delivery lease. Dropping a pending future releases the reservation; dropping a held lease restores the same record before later FIFO records. Explicit `shutdown()` fences publication, clears session-owned records, and uses one absolute deadline for final feedback, frontend CopyDone, backend CopyDone/CommandComplete/ReadyForQuery and socket closure. `cancel()` requests synchronous fencing and worker abortion without requiring a runtime; caller-owned leases retain valid borrows until consumed or dropped. Natural clean CopyDone closes transport while preserving decoded records for draining and publication. `wait_closed()` supports multiple cancellation-safe waiters and preserves the first terminal error. Frame-boundary transport loss is retryable by the future supervisor; truncated frames and unfinished transactions at normal CopyDone are protocol errors. [^src-postgres-stream-rs]
+
 ## 4. DataFusion Federation Adapter (`adapters/datafusion/`)
 
 | Symbol | Responsibility |
@@ -221,3 +162,5 @@ Provenance sources: [^src-tests-unit-db-test-pg-dataplane-and-datafusion-py], [^
 [^src-tenant-enterprise-tests]: `src/py/tests/unit/db/test_enterprise_olap_drivers.py` — Session bind and failure identity acceptance.
 
 [^src-postgres-pgoutput-rs]: `src/rs/vertebra-postgres/src/replication/pgoutput.rs::PgOutputDecoder` — Incremental pgoutput v1 transaction records and bounded queue.
+
+[^src-postgres-stream-rs]: `src/rs/vertebra-postgres/src/replication/stream.rs::ReplicationSession` — Bounded replication session, publication leases and shutdown.
