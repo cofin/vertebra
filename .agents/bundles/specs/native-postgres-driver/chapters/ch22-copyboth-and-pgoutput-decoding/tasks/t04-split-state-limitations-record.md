@@ -5,7 +5,7 @@ chapter_id: ch22-copyboth-and-pgoutput-decoding
 title: Record the split native-wheel and legacy-driver state in the PostgreSQL limitations OKF entry
 description: Create postgres-limitations.md as an OKF Gotcha recording that main carries the vertebra-postgres wheel while the Python drivers, queue guard, dialer helpers, and driver tests still use psycopg/asyncpg, and register it in the root and domain knowledge indexes.
 status: draft
-state: pending
+state: in_progress
 priority: P1
 verification_strategy: documentation_validation
 depends_on: []
@@ -25,16 +25,16 @@ estimated_loc: 110
 plan_revision: 7
 plan_commit: c8722c76
 state_revision: 0
-claimed_by: null
-claimed_at: null
+claimed_by: agent:bulk-pg-docs
+claimed_at: "2026-11-12T02:22:54Z"
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
+last_verified_at: "2026-11-12T02:56:52Z"
 last_verified_commit: null
-verification_evidence: null
+verification_evidence: "Documentation baseline and final review-check exit 0; bundles/privacy validation exit 0; 8 unique sources and matching footnotes, both index links, 71-line entry, bounded truth block and source paths verified; git diff --check exit 0."
 created_at: "2026-11-12T01:30:00Z"
-updated_at: "2026-11-12T01:30:00Z"
+updated_at: "2026-11-12T02:22:54Z"
 commit: null
 generated:
   by: flow-revise
@@ -125,12 +125,14 @@ Out of scope: any production, test, `docs/**`, or other OKF file; runtime caveat
 
 ## Acceptance Criteria
 
-- [ ] `postgres-limitations.md` exists as an OKF `Gotcha` with matched sources/footnotes and a truth block recording the split state on `main` with symbol anchors (R27).
-- [ ] Both knowledge indexes register the entry once each and remain frontmatter-free (R27).
-- [ ] `make review-check` exits `0`.
+- [x] `postgres-limitations.md` exists as an OKF `Gotcha` with matched sources/footnotes and a truth block recording the split state on `main` with symbol anchors (R27).
+- [x] Both knowledge indexes register the entry once each and remain frontmatter-free (R27).
+- [x] `make review-check` exits `0`.
 - [ ] Commit message follows `docs(postgres): record split native driver state in limitations OKF` once verified.
 
 ## Notes & Discoveries
+
+- Explicit source-anchor verification also covers the dialer, pipeline, Arrow, wheel, and Makefile symbols named by the contract but omitted from the bounded read list. Native verification commands are documented as lanes; this documentation task does not claim to execute wheel acceptance. The PR #104 title and body are verified read-only against GitHub.
 
 - `ch27:t04` deletes the split-state bullets once the cutover lands, and `ch31:t01` adds the runtime caveats listed in the root documentation plan.
 
