@@ -5,7 +5,7 @@ chapter_id: ch01-bridge-stream-frames
 title: Route stream frames into PendingResponse::streaming through ResponseStreamRegistry and the bridge sink
 description: Implement ResponseStreamRegistry in a new dispatcher streams module with blocking and async delivery parameterised by a completion closure, register it as the BatchBridge stream sink from BridgeCorrelation, and move correlation allocation into a shared register_pending seam.
 status: draft
-state: pending
+state: in_progress
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -24,17 +24,17 @@ files:
 tests:
   - src/rs/vertebra-http/tests/it/streaming_body.rs
 estimated_loc: 240
-plan_revision: 1
+plan_revision: 2
 plan_commit: null
 state_revision: 0
-claimed_by: null
-claimed_at: null
+claimed_by: agent:bulk_runtime_registry
+claimed_at: "2026-11-12T03:33:00Z"
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
+last_verified_at: "2026-11-12T03:33:36Z"
 last_verified_commit: null
-verification_evidence: null
+verification_evidence: "Red: missing ResponseStreamRegistry/register_pending (11 compile errors); Green: 12 canonical streaming tests, 17 dispatcher tests, full HTTP TLS/compression 153 tests, HTTP3 feature check, all-target Clippy and whitespace all exit 0."
 created_at: "2026-11-12T00:45:00Z"
 updated_at: "2026-11-12T00:45:00Z"
 commit: null
@@ -89,7 +89,7 @@ Create `src/rs/vertebra-http/src/dispatcher/streams.rs` with `ResponseStreamRegi
 - `src/rs/vertebra-http/src/dispatcher/bridge.rs`:
   - `BridgeCorrelation` gains `streams: ResponseStreamRegistry` and `pub fn stream_registry(&self) -> &ResponseStreamRegistry`.
   - `ensure_sink_registered` also calls `bridge.set_stream_sink(Arc::new(move |frame| match weak.upgrade() { Some(corr) => corr.streams.deliver_blocking(frame, |id, resp| corr.complete(id, resp)), None => StreamDelivery::Closed }))`.
-  - `pub fn register_pending(&self, reply: oneshot::Sender<PendingResponse>) -> Option<u64>` allocates in the next shard with spare capacity (probing all `BRIDGE_SHARDS`), increments `active_requests`, and returns `None` when every shard is full; `dispatch_bridge_vec` calls it per non-fire-and-forget request and answers `None` with `service_unavailable_response()`.
+  - `pub fn register_pending(&self, reply: oneshot::Sender<PendingResponse>) -> Option<u64>` allocates in the next shard with spare capacity (probing all `BRIDGE_SHARDS`), increments `active_requests`, and sends `service_unavailable_response()` and returns `None` when every shard is full; `dispatch_bridge_vec` calls it per non-fire-and-forget request and counts `None` as a rejected request.
 - `src/rs/vertebra-http/src/dispatcher/mod.rs`: `pub mod streams;` and `pub use self::streams::ResponseStreamRegistry;`.
 
 ## Edge Cases & Error Semantics
@@ -97,7 +97,7 @@ Create `src/rs/vertebra-http/src/dispatcher/streams.rs` with `ResponseStreamRegi
 - Completing at the first frame removes the correlation from `sweep_expired`, so long-lived SSE streams are not cut at `30s`.
 - Hyper drops the body receiver on disconnect: the next send fails, the entry is removed, `Closed` is returned.
 - Invalid trailer names or values are skipped, matching `ShmDispatcher` tolerance.
-- `register_pending` under full shards returns `None`; `dispatch_bridge_vec` keeps its `503` overflow behaviour and warn log.
+- `register_pending` under full shards sends `503` before returning `None` because it owns the reply sender; `dispatch_bridge_vec` keeps its overflow warn log.
 
 ## Public-Seam Test Blueprint
 
@@ -121,7 +121,7 @@ Create `src/rs/vertebra-http/src/dispatcher/streams.rs` with `ResponseStreamRegi
 - Initial Red baseline: `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-http --test it streaming_body`
 - Final Green + lint:
   ```bash
-  cargo test --manifest-path src/rs/Cargo.toml -p vertebra-http --test it streaming_body dispatcher
+  cargo test --manifest-path src/rs/Cargo.toml -p vertebra-http --test it streaming_body
   cargo test --manifest-path src/rs/Cargo.toml -p vertebra-http --lib dispatcher
   cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-http --all-targets --features tls,compression -- -D warnings
   ```
@@ -129,11 +129,15 @@ Create `src/rs/vertebra-http/src/dispatcher/streams.rs` with `ResponseStreamRegi
 
 ## Acceptance Criteria
 
-- [ ] `ResponseStreamRegistry` implements first, continuation, trailer, final, and error semantics with blocking and async delivery (R2).
-- [ ] `BridgeCorrelation::ensure_sink_registered` registers the stream sink, and `dispatch_bridge_vec` allocates through `register_pending` (R2).
-- [ ] Existing dispatcher and bridge tests stay green (R2).
+- [x] `ResponseStreamRegistry` implements first, continuation, trailer, final, and error semantics with blocking and async delivery (R2).
+- [x] `BridgeCorrelation::ensure_sink_registered` registers the stream sink, and `dispatch_bridge_vec` allocates through `register_pending` (R2).
+- [x] Existing dispatcher and bridge tests stay green (R2).
 
 ## Notes & Discoveries
+
+- `BridgeCorrelation::complete` returns the result of `oneshot::send`, so a dropped client prevents first-frame registration. Empty final frames also check the receiver state and report `Closed`.
+- The consuming `register_pending` signature answers full-capacity callers with `503` internally; dispatch records the rejection and logs it.
+- Red: canonical streaming tests fail on missing registry and allocator APIs. Green: 12 streaming tests, 17 dispatcher tests, all-target Clippy with TLS/compression, and whitespace check exit `0`. Full HTTP TLS/compression tests (`153`) and the HTTP/3 feature check also exit `0`.
 
 [^bridge-http-rs]: `src/rs/vertebra-http/src/dispatcher/bridge.rs::BridgeCorrelation` — Embedded correlation slab, `ensure_sink_registered`, `complete`, `sweep_expired`, and `dispatch_bridge_vec`.
 [^body-rs]: `src/rs/vertebra-http/src/body.rs::PendingResponse` — `PendingResponse::streaming` and `PendingResponse::unary`.

@@ -10,12 +10,13 @@ use bytes::Bytes;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, warn};
-use vertebra_core::bridge::{BatchBridge, BridgeResponse};
+use vertebra_core::bridge::{BatchBridge, BridgeResponse, StreamDelivery};
 use vertebra_core::buffer::CacheLine;
 use vertebra_core::protocol::flags;
 use vertebra_core::transport::InProcessRequest;
 
 use super::correlation::{CorrelationId, InFlightRequests};
+use super::streams::ResponseStreamRegistry;
 use super::types::service_unavailable_response;
 use crate::batcher::PendingRequest;
 use crate::body::PendingResponse;
@@ -30,6 +31,7 @@ pub struct BridgeCorrelation {
     next_batch: AtomicUsize,
     active_requests: CacheLine<AtomicUsize>,
     sink_registered: AtomicBool,
+    streams: ResponseStreamRegistry,
 }
 
 impl Default for BridgeCorrelation {
@@ -47,6 +49,7 @@ impl BridgeCorrelation {
             next_batch: AtomicUsize::new(0),
             active_requests: CacheLine(AtomicUsize::new(0)),
             sink_registered: AtomicBool::new(false),
+            streams: ResponseStreamRegistry::default(),
         }
     }
 
@@ -60,6 +63,29 @@ impl BridgeCorrelation {
     #[inline]
     pub fn in_flight(&self) -> usize {
         self.active_requests.0.load(Ordering::Acquire)
+    }
+
+    /// Shared progressive delivery state for this correlation table.
+    pub fn stream_registry(&self) -> &ResponseStreamRegistry {
+        &self.streams
+    }
+
+    /// Allocate a correlation, answering with 503 when every shard is full.
+    pub fn register_pending(&self, reply: oneshot::Sender<PendingResponse>) -> Option<u64> {
+        let start = self.next_batch.fetch_add(1, Ordering::Relaxed) & BRIDGE_SHARD_MASK;
+        for attempt in 0..BRIDGE_SHARDS {
+            let shard_idx = (start + attempt) & BRIDGE_SHARD_MASK;
+            let mut shard = self.shards[shard_idx].lock().unwrap();
+            if shard.in_flight() < shard.capacity() {
+                let cid = shard
+                    .insert(shard_idx as u8, reply, 0)
+                    .expect("correlation slot available after capacity check");
+                self.active_requests.0.fetch_add(1, Ordering::Release);
+                return Some(cid.raw());
+            }
+        }
+        let _ = reply.send(service_unavailable_response());
+        None
     }
 
     /// Register a direct `ResponseSink` callback on `bridge` holding a `Weak` handle to `self`.
@@ -87,6 +113,13 @@ impl BridgeCorrelation {
                     );
                 }
             }));
+            let weak = Arc::downgrade(self);
+            bridge.set_stream_sink(Arc::new(move |frame| match weak.upgrade() {
+                Some(corr) => corr
+                    .streams
+                    .deliver_blocking(frame, |id, response| corr.complete(id, response)),
+                None => StreamDelivery::Closed,
+            }));
         }
     }
 
@@ -101,8 +134,7 @@ impl BridgeCorrelation {
         };
         if let Some(tx) = tx {
             self.active_requests.0.fetch_sub(1, Ordering::Release);
-            let _ = tx.send(response);
-            true
+            tx.send(response).is_ok()
         } else {
             false
         }
@@ -232,89 +264,50 @@ pub(super) fn dispatch_bridge_vec(
     let batch_len = requests.len();
     let mut inproc_reqs = Vec::with_capacity(batch_len);
     let mut allocated_ids = Vec::with_capacity(batch_len);
-    let mut overflow_replies = Vec::new();
+    let mut rejected = 0;
 
-    let mut shard_idx = bridge_corr.next_batch.fetch_add(1, Ordering::Relaxed) & BRIDGE_SHARD_MASK;
-    {
-        let mut shard_guard = bridge_corr.shards[shard_idx].lock().unwrap();
-        for req in requests.drain(..) {
-            let is_fnf = (req.flags & flags::FIRE_AND_FORGET) != 0;
-            let correlation_id = if is_fnf {
-                0
-            } else {
-                let mut reply_opt = Some(req.reply);
-                if shard_guard.in_flight() >= shard_guard.capacity() {
-                    drop(shard_guard);
-                    let mut found = None;
-                    for attempt in 1..BRIDGE_SHARDS {
-                        let alt_idx = (shard_idx + attempt) & BRIDGE_SHARD_MASK;
-                        let alt_guard = bridge_corr.shards[alt_idx].lock().unwrap();
-                        if alt_guard.in_flight() < alt_guard.capacity() {
-                            found = Some((alt_idx, alt_guard));
-                            break;
-                        }
-                    }
-                    if let Some((new_idx, new_guard)) = found {
-                        shard_idx = new_idx;
-                        shard_guard = new_guard;
-                    } else {
-                        shard_guard = bridge_corr.shards[shard_idx].lock().unwrap();
-                        if let Some(tx) = reply_opt.take() {
-                            overflow_replies.push(tx);
-                        }
-                        continue;
-                    }
-                }
-                let cid = shard_guard
-                    .insert(shard_idx as u8, reply_opt.take().unwrap(), 0)
-                    .expect("correlation slot available after capacity check");
-                let raw = cid.raw();
-                allocated_ids.push(raw);
-                raw
-            };
+    for req in requests.drain(..) {
+        let correlation_id = if (req.flags & flags::FIRE_AND_FORGET) != 0 {
+            0
+        } else if let Some(id) = bridge_corr.register_pending(req.reply) {
+            allocated_ids.push(id);
+            id
+        } else {
+            rejected += 1;
+            continue;
+        };
 
-            let path_bytes = req.path_and_query.path().as_bytes();
-            let path = if path_bytes.is_empty() {
-                Bytes::new()
-            } else if path_bytes == b"/" {
-                Bytes::from_static(b"/")
-            } else {
-                Bytes::copy_from_slice(path_bytes)
-            };
-            let query = req
-                .path_and_query
-                .query()
-                .map_or_else(Bytes::new, |q| Bytes::copy_from_slice(q.as_bytes()));
+        let path_bytes = req.path_and_query.path().as_bytes();
+        let path = if path_bytes.is_empty() {
+            Bytes::new()
+        } else if path_bytes == b"/" {
+            Bytes::from_static(b"/")
+        } else {
+            Bytes::copy_from_slice(path_bytes)
+        };
+        let query = req
+            .path_and_query
+            .query()
+            .map_or_else(Bytes::new, |q| Bytes::copy_from_slice(q.as_bytes()));
 
-            inproc_reqs.push(InProcessRequest::new(
-                req.method_tag,
-                req.http_version_tag,
-                req.handler_id,
-                correlation_id,
-                path,
-                query,
-                req.headers_mp,
-                req.body,
-                Bytes::new(),
-            ));
-        }
+        inproc_reqs.push(InProcessRequest::new(
+            req.method_tag,
+            req.http_version_tag,
+            req.handler_id,
+            correlation_id,
+            path,
+            query,
+            req.headers_mp,
+            req.body,
+            Bytes::new(),
+        ));
     }
 
-    if !allocated_ids.is_empty() {
-        bridge_corr
-            .active_requests
-            .0
-            .fetch_add(allocated_ids.len(), Ordering::Release);
-    }
-
-    if !overflow_replies.is_empty() {
+    if rejected > 0 {
         warn!(
-            rejected = overflow_replies.len(),
+            rejected,
             "all bridge correlation shards full, responding with 503"
         );
-        for tx in overflow_replies {
-            let _ = tx.send(service_unavailable_response());
-        }
     }
 
     if inproc_reqs.is_empty() {

@@ -14,6 +14,7 @@ pub mod correlation;
 mod direct;
 mod shm;
 pub mod shm_reader;
+pub mod streams;
 #[cfg(test)]
 mod tests;
 pub mod types;
@@ -21,6 +22,7 @@ pub mod types;
 pub use self::bridge::BridgeCorrelation;
 pub use self::correlation::{CorrelationId, InFlightRequests};
 pub use self::shm::ShmDispatcher;
+pub use self::streams::ResponseStreamRegistry;
 
 use std::sync::Arc;
 
