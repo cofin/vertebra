@@ -5,7 +5,7 @@ chapter_id: ch01-agent-context-propagation
 title: Bind contexts in MCPCore and isolate promoted tasks
 description: Bind the request AgentContext (or an anonymous one) for every MCPCore.handle and handle_payload call, run promoted tasks under a forked context, cancel running tasks on tasks/cancel, and keep terminal task records immutable.
 status: draft
-state: pending
+state: in_progress
 priority: P0
 verification_strategy: regression_tdd
 depends_on:
@@ -29,9 +29,9 @@ claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
+last_verified_at: "2026-11-12T03:14:30Z"
 last_verified_commit: null
-verification_evidence: null
+verification_evidence: "Red: six context and cancellation regressions failed; Green: 24 conformance tests, Ruff and Mypy service/tasks all exit 0."
 created_at: "2026-11-12T00:30:00Z"
 updated_at: "2026-11-12T00:30:00Z"
 commit: null
@@ -102,9 +102,9 @@ Make `MCPCore` the single place that binds `AgentContext` for request dispatch, 
 
 ## Acceptance Criteria
 
-- [ ] R2.1: contexts are bound and restored for `handle` and `handle_payload`.
-- [ ] R2.2: promoted tasks use forked contexts, cancellation stops execution, terminal records are immutable.
-- [ ] Existing conformance tests stay green.
+- [x] R2.1: contexts are bound and restored for `handle` and `handle_payload`.
+- [x] R2.2: promoted tasks use forked contexts, cancellation stops execution, terminal records are immutable.
+- [x] Existing conformance tests stay green.
 
 ## Notes & Discoveries
 

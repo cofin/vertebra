@@ -1,14 +1,16 @@
 """Conformance tests for MCP 2026-07-28 protocol, registry, HTTP handler, and tasks."""
 
+import asyncio
 import dataclasses
 from collections.abc import Mapping
 from types import SimpleNamespace
 from typing import Any
 
+import anyio
 import pytest
 
 from vertebra.agent.controller import ConfirmationDecisionRequest
-from vertebra.agent.core.context import AgentContext, CallerIdentity
+from vertebra.agent.core.context import AgentContext, CallerIdentity, bind_agent_context, reset_agent_context
 from vertebra.agent.core.guards import GuardProtocol, PermissionDeniedError, RequireRoles, authorize
 from vertebra.agent.core.jsonrpc import METHOD_NOT_FOUND, JSONRPCErrorException
 from vertebra.agent.core.schema import tool
@@ -900,3 +902,133 @@ async def test_webmcp_manifest_projects_strictly_from_toolspec_exposure() -> Non
     assert [t["name"] for t in webmcp_doc["tools"]] == ["browser_delete_item"]
     assert webmcp_doc["tools"][0]["title"] == "Delete Item"
     assert webmcp_doc["tools"][0]["annotations"]["consequentialHint"] is True
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("entrypoint", ["handle", "handle_payload"])
+@pytest.mark.parametrize("user_id", ["ana", None])
+async def test_mcp_core_binds_agent_context(entrypoint: str, user_id: str | None) -> None:
+    """HTTP and raw payload dispatch bind identity and restore their caller's context."""
+    core = MCPCore()
+
+    @tool(name="whoami")
+    def whoami() -> str:
+        ctx = AgentContext.current()
+        assert ctx is not None
+        return str(ctx.identity.user_id)
+
+    core.registry.register_tool(whoami)
+    body = encode_json_bytes({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "whoami"}})
+    context = AgentContext(identity=CallerIdentity(user_id=user_id)) if user_id else None
+    outer = AgentContext(identity=CallerIdentity(user_id="outer"))
+    token = bind_agent_context(outer)
+    try:
+        if entrypoint == "handle":
+            response = await core.handle(McpHttpRequest(method="POST", path="/mcp", body=body, context=context))
+            payload = response.body
+        else:
+            payload = await core.handle_payload(body, context=context)
+        assert payload is not None
+        assert decode_json(payload)["result"]["content"][0]["text"] == str(user_id)
+        assert AgentContext.current() is outer
+    finally:
+        reset_agent_context(token)
+    assert AgentContext.current() is None
+
+
+@pytest.mark.anyio
+async def test_mcp_task_cancel_stops_execution() -> None:
+    """Promoted tasks own cancellation state and cannot complete after cancellation."""
+    core = MCPCore()
+    started = anyio.Event()
+    stopped = anyio.Event()
+    contexts: list[AgentContext] = []
+    task_handles: list[asyncio.Task[Any]] = []
+
+    @tool(name="waiting")
+    async def waiting() -> str:
+        context = AgentContext.current()
+        assert context is not None
+        contexts.append(context)
+        current = asyncio.current_task()
+        assert current is not None
+        task_handles.append(current)
+        started.set()
+        try:
+            await anyio.Event().wait()
+        finally:
+            stopped.set()
+        return "unexpected"
+
+    core.registry.register_tool(waiting)
+    owner = AgentContext(identity=CallerIdentity(user_id="ana"), metadata={"request": 1})
+    request = encode_json_bytes(
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "waiting", "_meta": {"io.modelcontextprotocol/task": True}},
+        }
+    )
+    promoted = await core.handle_payload(request, context=owner)
+    assert promoted is not None
+    task_id = decode_json(promoted)["result"]["task"]["taskId"]
+    with anyio.fail_after(2):
+        await started.wait()
+    assert contexts[0] is not owner
+    assert contexts[0].identity is owner.identity
+    assert contexts[0].metadata == owner.metadata
+    assert contexts[0].metadata is not owner.metadata
+    assert contexts[0].cancellation_token is not owner.cancellation_token
+    denied = await core.handle_payload(
+        encode_json_bytes({"jsonrpc": "2.0", "id": 2, "method": "tasks/cancel", "params": {"taskId": task_id}}),
+        context=AgentContext(identity=CallerIdentity(user_id="other")),
+    )
+    assert denied is not None and "error" in decode_json(denied)
+    assert not contexts[0].cancellation_token.is_cancelled
+    cancelled = await core.handle_payload(
+        encode_json_bytes({"jsonrpc": "2.0", "id": 3, "method": "tasks/cancel", "params": {"taskId": task_id}}),
+        context=owner,
+    )
+    assert cancelled is not None and decode_json(cancelled)["result"]["task"]["status"] == "cancelled"
+    with anyio.fail_after(2):
+        await stopped.wait()
+        with pytest.raises(asyncio.CancelledError):
+            await task_handles[0]
+    assert contexts[0].cancellation_token.is_cancelled
+    assert not owner.cancellation_token.is_cancelled
+    record = core.task_store.get(task_id, owner_id="default:ana")
+    assert record.status == "cancelled"
+    assert core.task_store.complete(task_id, {"content": []}) is record
+    assert core.task_store.fail(task_id, {"message": "late"}) is record
+
+
+@pytest.mark.anyio
+async def test_mcp_promoted_task_inherits_bound_identity() -> None:
+    """A completed promoted tool observes its caller identity through the bound context."""
+    core = MCPCore()
+
+    @tool(name="whoami")
+    def whoami() -> str:
+        context = AgentContext.current()
+        assert context is not None
+        return str(context.identity.user_id)
+
+    core.registry.register_tool(whoami)
+    response = await core.handle_payload(
+        encode_json_bytes(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": "whoami", "_meta": {"io.modelcontextprotocol/task": True}},
+            }
+        ),
+        context=AgentContext(identity=CallerIdentity(user_id="ana")),
+    )
+    assert response is not None
+    task_id = decode_json(response)["result"]["task"]["taskId"]
+    result = await core.task_store.wait_for_result(task_id, owner_id="default:ana", timeout_s=2)
+    assert result.owner_id == "default:ana"
+    assert result.result is not None
+    assert result.result["content"][0]["text"] == "ana"

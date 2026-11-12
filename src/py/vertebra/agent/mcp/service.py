@@ -14,6 +14,7 @@ from typing import Any
 
 import msgspec
 
+from vertebra.agent.core.context import AgentContext, bind_agent_context, reset_agent_context
 from vertebra.agent.core.cursor import paginate_sequence
 from vertebra.agent.core.guards import authorize
 from vertebra.agent.core.jsonrpc import (
@@ -97,12 +98,44 @@ class MCPCore:
         self.skill_catalog = skill_catalog
         self.router = JSONRPCRouter()
         self._resource_subscriptions: dict[str, set[str]] = {}
-        self._background_tasks: set[asyncio.Task[Any]] = set()
+        self._task_runs: dict[str, tuple[asyncio.Task[None], AgentContext]] = {}
 
         self._register_handlers()
 
     async def handle(self, request: McpHttpRequest) -> McpHttpResponse:
-        """Process a transport-agnostic MCP 2026-07-28 HTTP request."""
+        """Process an HTTP request under its caller context and restore the prior binding."""
+        context = request.context if isinstance(request.context, AgentContext) else AgentContext()
+        token = bind_agent_context(context)
+        try:
+            return await self._handle_http(request, context)
+        finally:
+            reset_agent_context(token)
+
+    async def handle_tool_call(self, params: Any = None, context: Any = None) -> dict[str, Any]:
+        """Execute a tool invocation with parameter validation and structured outputs."""
+        return await self._handle_tools_call(params, context=context)
+
+    def notify_resource_updated(self, uri: str) -> int:
+        """Push a notifications/resources/updated SSE frame to all subscribed sessions."""
+        sessions = self._resource_subscriptions.get(uri, set())
+        if not sessions:
+            return 0
+
+        payload = {"jsonrpc": "2.0", "method": "notifications/resources/updated", "params": {"uri": uri}}
+        frame = SseFrame(event="message", data=encode_json_bytes(payload).decode("utf-8"))
+        return self.stream_broker.broadcast(frame, list(sessions))
+
+    async def handle_payload(self, raw_bytes: bytes, context: AgentContext | None = None) -> bytes | None:
+        """Dispatch JSON-RPC under its caller context and restore the prior binding."""
+        context = context if isinstance(context, AgentContext) else AgentContext()
+        token = bind_agent_context(context)
+        try:
+            return await self.router.dispatch_payload(raw_bytes, context)
+        finally:
+            reset_agent_context(token)
+
+    async def _handle_http(self, request: McpHttpRequest, context: AgentContext) -> McpHttpResponse:
+        """Validate HTTP metadata and dispatch with the bound caller context."""
         lower_headers = {k.lower(): v for k, v in request.headers.items()}
         origin = lower_headers.get("origin")
         host = lower_headers.get("host")
@@ -209,7 +242,7 @@ class MCPCore:
                 body=b"",
             )
 
-        resp_bytes = await self.handle_payload(request.body, request.context)
+        resp_bytes = await self.router.dispatch_payload(request.body, context)
         resp_headers: dict[str, str] = {
             "Content-Type": "application/json",
             "MCP-Protocol-Version": MCP_PROTOCOL_VERSION,
@@ -225,24 +258,6 @@ class MCPCore:
             return McpHttpResponse(status=202, headers=resp_headers, body=b"")
 
         return McpHttpResponse(status=200, headers=resp_headers, body=resp_bytes)
-
-    async def handle_tool_call(self, params: Any = None, context: Any = None) -> dict[str, Any]:
-        """Execute a tool invocation with parameter validation and structured outputs."""
-        return await self._handle_tools_call(params, context=context)
-
-    def notify_resource_updated(self, uri: str) -> int:
-        """Push a notifications/resources/updated SSE frame to all subscribed sessions."""
-        sessions = self._resource_subscriptions.get(uri, set())
-        if not sessions:
-            return 0
-
-        payload = {"jsonrpc": "2.0", "method": "notifications/resources/updated", "params": {"uri": uri}}
-        frame = SseFrame(event="message", data=encode_json_bytes(payload).decode("utf-8"))
-        return self.stream_broker.broadcast(frame, list(sessions))
-
-    async def handle_payload(self, raw_bytes: bytes, context: Any = None) -> bytes | None:
-        """Dispatch a raw JSON-RPC payload byte sequence through the router."""
-        return await self.router.dispatch_payload(raw_bytes, context)
 
     def _is_origin_allowed(self, origin: str | None, host: str | None) -> bool:
         if not origin:
@@ -426,17 +441,24 @@ class MCPCore:
             owner_id = context.identity.owner_key() if context and getattr(context, "identity", None) else None
             task = self.task_store.create(tool_name=tool_name, owner_id=owner_id)
 
+            task_context = (context if isinstance(context, AgentContext) else AgentContext()).fork()
+
             async def _run_async_tool() -> None:
+                token = bind_agent_context(task_context)
                 try:
-                    res = await target_tool.invoke(arguments, context=context)
+                    res = await target_tool.invoke(arguments, context=task_context)
                     formatted = self._format_tool_output(res, is_error=False)
                     self.task_store.complete(task.task_id, formatted)
+                except asyncio.CancelledError:
+                    raise
                 except Exception as exc:
                     self.task_store.fail(task.task_id, {"message": str(exc)})
+                finally:
+                    reset_agent_context(token)
 
             bg_task = asyncio.create_task(_run_async_tool())
-            self._background_tasks.add(bg_task)
-            bg_task.add_done_callback(self._background_tasks.discard)
+            self._task_runs[task.task_id] = (bg_task, task_context)
+            bg_task.add_done_callback(lambda _run: self._task_runs.pop(task.task_id, None))
             return self._with_meta(
                 "tools/call",
                 {"task": {"taskId": task.task_id, "status": task.status, "pollInterval": task.poll_interval_ms}},
@@ -828,6 +850,10 @@ class MCPCore:
             raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message="Missing 'taskId'"))
         try:
             task = self.task_store.cancel(str(task_id), self._caller_owner(context), reason)
+            if task.status == "cancelled" and str(task_id) in self._task_runs:
+                run, task_context = self._task_runs[str(task_id)]
+                task_context.cancellation_token.cancel(reason or "Task cancelled by client")
+                run.cancel()
             return self._with_meta("tasks/cancel", {"task": self._task_to_dict(task)})
         except TaskLookupError as exc:
             raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message=str(exc))) from exc

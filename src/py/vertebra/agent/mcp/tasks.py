@@ -286,6 +286,8 @@ class MCPTaskStore:
     def complete(self, task_id: str, result: dict[str, Any]) -> TaskRecord:
         """Mark a task as completed with result payload."""
         current = self.get(task_id)
+        if current.is_terminal:
+            return current
         updated = TaskRecord(
             task_id=current.task_id,
             owner_id=current.owner_id,
@@ -309,6 +311,8 @@ class MCPTaskStore:
     def fail(self, task_id: str, error: dict[str, Any]) -> TaskRecord:
         """Mark a task as failed with error descriptor."""
         current = self.get(task_id)
+        if current.is_terminal:
+            return current
         updated = TaskRecord(
             task_id=current.task_id,
             owner_id=current.owner_id,
