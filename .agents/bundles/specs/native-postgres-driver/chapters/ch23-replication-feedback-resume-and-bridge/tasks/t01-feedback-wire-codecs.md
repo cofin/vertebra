@@ -29,12 +29,12 @@ claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: "2026-11-12T04:29:34Z"
+last_verified_at: "2026-11-12T14:58:28Z"
 last_verified_commit: 64d317cd
 verification_evidence: "Red feedback_wire exit 101 (missing feedback module); Green feedback_wire 4 passed, full wire module 13 passed, Clippy all-targets -D warnings and package fmt check exit 0. Logs: /tmp/ch23-t01-{red,green,module,clippy}.log."
 commit: 64d317cd
 created_at: "2026-11-12T05:00:00Z"
-updated_at: "2026-11-12T04:25:15Z"
+updated_at: "2026-11-12T14:58:28Z"
 generated: {by: flow-revise, at: "2026-11-12T05:00:00Z"}
 verified: []
 sources:

@@ -44,7 +44,7 @@ chapters:
   - ch32-ffi-okf-and-review-routing-sync
   - ch33-final-review-and-release-gate
 current_chapter: ch23-replication-feedback-resume-and-bridge
-current_task: "native-postgres-driver:ch23:t02"
+current_task: null
 parent_prd: native-data-platform
 depends_on_flows:
   - driver-fail-loud
@@ -54,11 +54,11 @@ research:
 plan_revision: 8
 plan_commit: d90d4625
 state_revision: 12
-last_verified_checkpoint: 9c1865b7
+last_verified_checkpoint: bbb77ecf
 last_reviewed_chapter: ch22-copyboth-and-pgoutput-decoding
 last_reviewed_commit: 9c1865b7
 created_at: "2026-11-03T04:05:00Z"
-updated_at: "2026-11-12T04:25:15Z"
+updated_at: "2026-11-12T14:58:28Z"
 generated:
   by: flow-revise
   at: "2026-11-12T01:30:00Z"
@@ -486,14 +486,13 @@ Every worksheet (`129` total across `36` chapters) executes in one bounded invoc
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Chapter**: Chapter 22 is completed at reviewed commit `9c1865b7`; correctness, fresh quality, native tests, Clippy, and documentation gates pass.
-- **Progress**: `22/36` chapters and `82/129` tasks are complete; `47` tasks remain. The active pointer is `ch23-replication-feedback-resume-and-bridge`, task `native-postgres-driver:ch23:t01`.
-- **Git Continuity**: Chapters through `ch21` retain original reviewed history under `refs/flow/native-postgres-reviewed-history`. Chapter 22 t01/t02 use squash `c8722c76` with original task provenance; t03/t04 are local commits `2947d015`/`48b50600`.
-- **Runtime Boundary**: Native replication decoding is available locally; public Python drivers still use psycopg and asyncio.to_thread until ch27. Live PG14–18, wheel/free-threaded, benchmark, and release acceptance remain downstream gates.
-- **Documentation**: Interim limitations coverage is `3/33` files; ch27 and ch31 maintain it, and ch30–ch32 finish synchronization.
-- **Remaining Plan**: ch23 feedback; ch34 session pump; ch35 verified supervision; ch36 Python bridge; ch24 change sources/checkpoints; ch25–ch27 native drivers/cutover; ch28 live conformance; ch29 wheels/benchmarks; ch30–ch32 docs/OKF; ch33 final verification.
-- **Plan Readiness**: Revision 8 defines public feedback, single-generation session delivery leases, verified supervision, and Python publication contracts. The revised plan passes independent chapter and cross-chapter review and has user approval; production and tests are untouched.
-- **Next Action**: `/flow:implement native-postgres-driver ch23`. Commits stay local.
+- **Verified Work**: Chapter 23 tasks complete at `64d317cd` and `bbb77ecf`; 18 canonical wire tests, Clippy, package rustfmt, review-check, and whitespace gates pass. Independent chapter review remains open.
+- **Progress**: `22/36` chapters are reviewed and `84/129` tasks complete; `45` tasks remain. The current chapter is ch23, with no remaining task; ch34 is next after review closeout.
+- **Git Continuity**: Completed chapter attestations through ch22 remain intact, including reviewed commit `9c1865b7`. Chapter base is `a203b946`.
+- **Runtime Boundary**: Native replication decoding, payload codecs, and bounded feedback state are available. Session pumping, reconnect supervision, and Python handles remain ch34–ch36; public Python drivers retain psycopg and asyncio.to_thread until ch27.
+- **Documentation**: Chapter 23 limitations coverage is `[1/1]`; interim full-plan coverage remains `3/33` files. User guides and remaining OKF synchronization belong to ch30–ch32.
+- **Remaining Plan**: ch34 session pump; ch35 verified supervision; ch36 Python bridge; ch24 change sources/checkpoints; ch25–ch27 native drivers/cutover; ch28 live conformance; ch29 wheels/benchmarks; ch30–ch32 docs/OKF; ch33 final verification.
+- **Next Action**: Complete independent correctness and fresh quality review, stamp chapter 23, then `/flow:implement native-postgres-driver ch34`. Commits remain local.
 
 [^pg-conn-rs]: `src/rs/vertebra-db/src/connection.rs::TransportStream` — Shared TCP, Unix, TLS, and cloud mTLS stream primitives.
 [^pg-core-rs]: `src/rs/vertebra-db/src/postgres/mod.rs::encode_query_frame` — Shared stateless PostgreSQL wire frame and codec helpers in `vertebra-db`.

@@ -1,5 +1,10 @@
 # Bundle Activity Log
 
+## [2026-11-12T14:58:28Z] chapter-checkpoint | PostgreSQL commit-fenced feedback
+
+- Chapter 23 completes two tasks at `64d317cd` and `bbb77ecf`. The native codecs and bounded received/published/acknowledged Commit state pass 18 canonical wire tests, Clippy, and package formatting.
+- PostgreSQL limitations and the full roadmap are synchronized before independent correctness and fresh quality review. The socket pump, reconnect supervisor, Python handle, and downstream release gates remain open.
+
 ## [2026-11-12T04:25:15Z] revise-approved | Native PostgreSQL revision 8
 
 - User approval anchors revision 8 to reviewed plan commit `d90d4625`. Revised specifications and worksheets are stable; chapter 23 is ready for `/flow:implement native-postgres-driver ch23`. No production edits or hosted writes occur.

@@ -5,7 +5,7 @@ chapter_id: ch23-replication-feedback-resume-and-bridge
 title: "Fence acknowledgement to published Commit boundaries"
 description: "Implement initialized feedback state and cumulative exact-boundary acknowledgements; defer all transport and publication-lease mechanics to ch34."
 status: stable
-state: in_progress
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on: ["native-postgres-driver:ch23:t01"]
@@ -21,17 +21,17 @@ estimated_loc: 165
 plan_revision: 8
 plan_commit: d90d4625
 state_revision: 2
-claimed_by: agent:implement23t02
-claimed_at: 2026-11-12T04:36:40.500518+00:00
+claimed_by: null
+claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
-commit: null
+last_verified_at: "2026-11-12T14:58:28Z"
+last_verified_commit: bbb77ecf
+verification_evidence: "Red exit 101: missing ReplicationFeedback; focused Green 5 passed; full canonical module 18 passed; Clippy, package rustfmt, whitespace and review-check exit 0. Logs: /tmp/ch23-t02-{red,green,module,clippy}.log"
+commit: bbb77ecf
 created_at: "2026-11-12T05:00:00Z"
-updated_at: "2026-11-12T04:25:15Z"
+updated_at: "2026-11-12T14:58:28Z"
 generated: {by: flow-revise, at: "2026-11-12T05:00:00Z"}
 verified: []
 sources:
@@ -116,10 +116,10 @@ cargo fmt --manifest-path src/rs/Cargo.toml -p vertebra-postgres --check
 
 ## Acceptance Criteria
 
-- [ ] R22.4 only published complete Commit boundaries advance flush/apply.
-- [ ] Cumulative acknowledgements, initialized positions, cap and no-mutation refusal all pass.
+- [x] R22.4 only published complete Commit boundaries advance flush/apply.
+- [x] Cumulative acknowledgements, initialized positions, cap and no-mutation refusal all pass.
 
-- [ ] Red, Green, and lint evidence is recorded, and task plus checklist synchronization is included in one signed conventional commit.
+- [x] Red, Green, and lint evidence is recorded, and task plus checklist synchronization is included in one signed conventional commit.
 
 ## Notes & Discoveries
 

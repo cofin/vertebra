@@ -9,21 +9,24 @@ state: active
 planning_status: complete
 depends_on_chapters: ["ch22-copyboth-and-pgoutput-decoding"]
 replan_trigger: null
-current_task: "native-postgres-driver:ch23:t02"
+current_task: null
 plan_revision: 8
 plan_commit: d90d4625
 state_revision: 2
 chapter_base_commit: a203b946
-last_verified_checkpoint: null
+last_verified_checkpoint: bbb77ecf
 last_reviewed_commit: null
 created_at: "2026-11-12T05:00:00Z"
-updated_at: "2026-11-12T04:25:15Z"
+updated_at: "2026-11-12T14:58:28Z"
 generated: {by: flow-revise, at: "2026-11-12T05:00:00Z"}
 verified: []
 sources:
   - id: contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md
     title: Replication ownership and acknowledgement contracts
+  - id: feedback
+    resource: src/rs/vertebra-postgres/src/replication/feedback.rs::ReplicationFeedback
+    title: Strict replication codecs and commit-fenced acknowledgement state
   - id: connection
     resource: src/rs/vertebra-postgres/src/replication/mod.rs::PostgresReplicationConnection
     title: Dedicated CopyBoth session ownership
@@ -39,9 +42,9 @@ tags: [postgres, replication, bounded]
 # Chapter 23: Commit-Fenced Replication Feedback
 
 <!-- truth: start -->
-- Implement strict CopyData payload codecs, status intervals, and separate received/published/acknowledged Commit positions. [^contracts]
+- Native payload codecs, status intervals, and received/published/acknowledged Commit state are implemented and verified. [^feedback]
 - Feedback never promotes server wal_end or payload byte lengths into acknowledged durability. [^contracts]
-- Every transport task has one owner and bounded cancellation; no Python objects or checkpoint-store calls belong to this chapter. [^connection]
+- Socket pumping, reconnect supervision, and Python replication handles remain in ch34, ch35, and ch36. No transport worker or Python object is introduced by these feedback primitives. [^feedback]
 <!-- truth: end -->
 
 ## 1. Specification, Context & Provenance
@@ -113,9 +116,9 @@ Acceptance scenarios are the literal Worked Test Matrices in the task blueprints
 
 ## 3. Documentation & OKF Knowledge Plan
 
-Progress: `[0/1 files documented]` at chapter sync. The isolated sync subagent updates these living files with implementation-backed truth before code and fresh quality review:
+Progress: `[1/1 files documented]`. The living knowledge chapter describes the verified native primitives and remaining integration boundary:
 
-- [ ] `.agents/bundles/knowledge/domains/data/postgres-limitations.md` — Describe available native feedback APIs and unimplemented stream/reconnect/bridge boundary.
+- [x] `.agents/bundles/knowledge/domains/data/postgres-limitations.md` — Describe available native feedback APIs and unimplemented stream/reconnect/bridge boundary.
 
 
 The sync owns these docs collectively, independent of task production limits. Full user API guides, packaging and release documentation retain ch30–ch32 ownership; interim knowledge explicitly describes the native/legacy cutover boundary.
@@ -132,7 +135,7 @@ The sync owns these docs collectively, independent of task production limits. Fu
 ## 5. Implementation Plan
 
 - [x] [64d317cd] native-postgres-driver:ch23:t01 — Decode replication CopyData and encode bounded status payloads (tasks/t01-feedback-wire-codecs.md)
-- [~] native-postgres-driver:ch23:t02 — Fence acknowledgement to published Commit boundaries (tasks/t02-commit-fenced-feedback.md)
+- [x] [bbb77ecf] native-postgres-driver:ch23:t02 — Fence acknowledgement to published Commit boundaries (tasks/t02-commit-fenced-feedback.md)
 
 
 One executor per worksheet, in dependency order. No shared-file task executors run in parallel.
@@ -151,13 +154,16 @@ All commands exit0 before present-tense documentation sync, zero-context correct
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- Plan revision 8 is approved at reviewed plan commit `d90d4625`; execution requires the declared chapter dependencies and task preflight.
-- All 2 worksheets are pending, signature-complete and individually bounded; no production changes are present.
-- Root dependency order continues ch34 session → ch35 supervision → ch36 Python bridge → ch24 checkpoints, then ch25–ch33. Full flow contains36chapters; completed22chapter history remains intact.
-- Doc/OKF manifest is open until chapter implementation sync; native public Python driver cutover remains ch27.
-- Stop after this chapter's recovery checkpoint, living documentation sync and independent code/quality review.
+- Both tasks are completed at `64d317cd` and `bbb77ecf`; the full canonical wire module passes 18 tests, with Clippy and package rustfmt passing.
+- The native codecs and feedback state implement strict framing, initialized positions, cumulative exact published-boundary acknowledgement, 1024 unacked Commit bounds, and refusal without state mutation.
+- `[1/1 files documented]` is synchronized. Chapter state remains active pending independent correctness and fresh quality review; no review completion is claimed.
+- The full roadmap has 36 chapters and 129 tasks: 84 tasks complete, 45 remain. Chapters through ch22 are reviewed; ch23 awaits review.
+- Next chapter is ch34 session pump, followed by ch35 supervision, ch36 Python bridge, ch24 checkpoints, and ch25–ch33. Public driver cutover remains ch27.
+- Stop at this chapter boundary after review and metadata closeout; no live, wheel, benchmark, or release acceptance is implied.
 
 [^contracts]: `.agents/bundles/specs/native-postgres-driver/contracts.md` — Replication ownership and acknowledgement contracts.
 [^connection]: `src/rs/vertebra-postgres/src/replication/mod.rs::PostgresReplicationConnection` — Dedicated CopyBoth session ownership.
 [^protocol]: `src/rs/vertebra-postgres/src/protocol.rs::read_replication_message` — Buffered bounded protocol frame parsing.
 [^decoder]: `src/rs/vertebra-postgres/src/replication/pgoutput.rs::PgOutputDecoder` — Incremental bounded pgoutput record decoding.
+
+[^feedback]: `src/rs/vertebra-postgres/src/replication/feedback.rs::ReplicationFeedback` — Implemented codecs and bounded Commit feedback state.
