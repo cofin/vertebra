@@ -3723,48 +3723,207 @@ async fn test_get_files_put_files_bounded_concurrency_order_and_cleanup() {
     }
 }
 
+async fn copy_if_not_exists_server() -> (String, tokio::task::JoinHandle<()>) {
+    use std::sync::{Arc, Mutex};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let objects = Arc::new(Mutex::new(HashMap::<String, Vec<u8>>::new()));
+    let uploads = Arc::new(Mutex::new(HashMap::<String, Vec<u8>>::new()));
+    let server = tokio::spawn(async move {
+        loop {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let objects = objects.clone();
+            let uploads = uploads.clone();
+            tokio::spawn(async move {
+                let mut request = Vec::new();
+                let mut chunk = [0; 4096];
+                let header_end = loop {
+                    let count = socket.read(&mut chunk).await.unwrap();
+                    if count == 0 {
+                        return;
+                    }
+                    request.extend_from_slice(&chunk[..count]);
+                    if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                        break end + 4;
+                    }
+                };
+                let headers = String::from_utf8_lossy(&request[..header_end]).to_string();
+                let mut first = headers.lines().next().unwrap().split_whitespace();
+                let method = first.next().unwrap();
+                let target = first.next().unwrap();
+                let parsed = url::Url::parse(&format!("http://localhost{target}")).unwrap();
+                let key = parsed
+                    .path()
+                    .trim_start_matches('/')
+                    .trim_start_matches("bucket/")
+                    .to_string();
+                let query: HashMap<_, _> = parsed.query_pairs().into_owned().collect();
+                let fields: HashMap<_, _> = headers
+                    .lines()
+                    .skip(1)
+                    .filter_map(|line| {
+                        line.split_once(':')
+                            .map(|(k, v)| (k.to_ascii_lowercase(), v.trim().to_string()))
+                    })
+                    .collect();
+                let length = fields
+                    .get("content-length")
+                    .and_then(|v| v.parse::<usize>().ok())
+                    .unwrap_or(0);
+                while request.len() < header_end + length {
+                    let count = socket.read(&mut chunk).await.unwrap();
+                    assert_ne!(count, 0);
+                    request.extend_from_slice(&chunk[..count]);
+                }
+                let (status, body) = {
+                    let mut objects = objects.lock().unwrap();
+                    let mut uploads = uploads.lock().unwrap();
+                    let mut status = "200 OK";
+                    let body = if method == "POST" && query.contains_key("delete") {
+                        let xml =
+                            String::from_utf8_lossy(&request[header_end..header_end + length]);
+                        let deleted = xml
+                            .split_once("<Key>")
+                            .unwrap()
+                            .1
+                            .split_once("</Key>")
+                            .unwrap()
+                            .0;
+                        objects.remove(deleted);
+                        format!(
+                            "<DeleteResult><Deleted><Key>{deleted}</Key></Deleted></DeleteResult>"
+                        )
+                        .into_bytes()
+                    } else if method == "POST" && query.contains_key("uploads") {
+                        b"<InitiateMultipartUploadResult><UploadId>fixture</UploadId></InitiateMultipartUploadResult>".to_vec()
+                    } else if method == "PUT" && query.contains_key("partNumber") {
+                        let source = fields
+                            .get("x-amz-copy-source")
+                            .unwrap()
+                            .trim_start_matches('/')
+                            .trim_start_matches("bucket/");
+                        uploads.insert(key.clone(), objects.get(source).unwrap().clone());
+                        b"<CopyPartResult><ETag>\"fixture\"</ETag><LastModified>2026-11-12T00:00:00Z</LastModified></CopyPartResult>".to_vec()
+                    } else if method == "POST" && query.contains_key("uploadId") {
+                        assert_eq!(fields.get("if-none-match").map(String::as_str), Some("*"));
+                        if let std::collections::hash_map::Entry::Vacant(entry) =
+                            objects.entry(key.clone())
+                        {
+                            entry.insert(uploads.remove(&key).unwrap());
+                            b"<CompleteMultipartUploadResult><ETag>\"fixture\"</ETag></CompleteMultipartUploadResult>".to_vec()
+                        } else {
+                            status = "412 Precondition Failed";
+                            b"<Error><Code>PreconditionFailed</Code></Error>".to_vec()
+                        }
+                    } else if method == "DELETE" {
+                        if query.contains_key("uploadId") {
+                            uploads.remove(&key);
+                        } else {
+                            objects.remove(&key);
+                        }
+                        Vec::new()
+                    } else if method == "PUT" {
+                        if let Some(source) = fields.get("x-amz-copy-source") {
+                            assert_eq!(
+                                fields
+                                    .get("cf-copy-destination-if-none-match")
+                                    .map(String::as_str),
+                                Some("*")
+                            );
+                            if key == "unsupported" {
+                                status = "501 Not Implemented";
+                                b"<Error><Code>NotImplemented</Code></Error>".to_vec()
+                            } else if objects.contains_key(&key) {
+                                status = "412 Precondition Failed";
+                                b"<Error><Code>PreconditionFailed</Code></Error>".to_vec()
+                            } else {
+                                let data = objects
+                                    .get(
+                                        source
+                                            .trim_start_matches('/')
+                                            .trim_start_matches("bucket/"),
+                                    )
+                                    .unwrap()
+                                    .clone();
+                                objects.insert(key, data);
+                                b"<CopyObjectResult><ETag>\"fixture\"</ETag></CopyObjectResult>"
+                                    .to_vec()
+                            }
+                        } else {
+                            objects.insert(key, request[header_end..header_end + length].to_vec());
+                            Vec::new()
+                        }
+                    } else if let Some(data) = objects.get(&key) {
+                        data.clone()
+                    } else {
+                        status = "404 Not Found";
+                        b"<Error><Code>NoSuchKey</Code></Error>".to_vec()
+                    };
+                    (status, body)
+                };
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nETag: \"fixture\"\r\nLast-Modified: Thu, 12 Nov 2026 00:00:00 GMT\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+                if method != "HEAD" {
+                    socket.write_all(&body).await.unwrap();
+                }
+            });
+        }
+    });
+    (endpoint, server)
+}
+
 #[tokio::test]
-async fn test_copy_if_not_exists_conflict_memory_and_local() {
+async fn test_copy_if_not_exists_s3_compatible() {
     use _storage::store::StorageError;
 
-    let tmp = TempDir::new().expect("tempdir");
-    let local_url = format!("file://{}", tmp.path().display());
-    let engines = [
-        ObjectStoreEngine::new(BackendConfig::Memory).expect("memory engine"),
-        ObjectStoreEngine::from_url(&local_url, None).expect("local engine"),
-    ];
-    for engine in &engines {
-        engine
-            .put("a", Bytes::from_static(b"alpha"))
-            .await
-            .expect("put a");
-        engine
-            .put("b", Bytes::from_static(b"bravo"))
-            .await
-            .expect("put b");
-
-        let err = engine
-            .copy("a", "b", true)
-            .await
-            .expect_err("conditional copy onto existing key must fail");
-        assert!(
-            matches!(err, StorageError::AlreadyExists { .. }),
-            "scheme {} returned {err:?}",
-            engine.scheme()
-        );
-        assert_eq!(&engine.get("b").await.expect("get b")[..], b"bravo");
-
-        engine
-            .copy("a", "c", true)
-            .await
-            .expect("conditional copy onto new key");
-        assert_eq!(&engine.get("c").await.expect("get c")[..], b"alpha");
-
-        engine
-            .copy("a", "b", false)
-            .await
-            .expect("unconditional copy overwrites");
-        assert_eq!(&engine.get("b").await.expect("get b")[..], b"alpha");
+    let tmp = TempDir::new().unwrap();
+    for scheme in ["memory", "file", "s3", "b2", "r2"] {
+        let (endpoint, server) = copy_if_not_exists_server().await;
+        let options = HashMap::from([
+            ("endpoint".to_string(), endpoint),
+            ("allow_http".to_string(), "true".to_string()),
+            ("access_key_id".to_string(), "fixture".to_string()),
+            ("secret_access_key".to_string(), "fixture".to_string()),
+            ("account_id".to_string(), "fixture".to_string()),
+            ("region".to_string(), "us-east-1".to_string()),
+        ]);
+        let url = if scheme == "file" {
+            format!("file://{}", tmp.path().display())
+        } else {
+            format!("{scheme}://bucket")
+        };
+        let engine = ObjectStoreEngine::from_url(&url, Some(&options)).unwrap();
+        engine.put("a", Bytes::from_static(b"alpha")).await.unwrap();
+        engine.put("b", Bytes::from_static(b"bravo")).await.unwrap();
+        for rename in [false, true] {
+            let result = if rename {
+                engine.rename("a", "b", true).await
+            } else {
+                engine.copy("a", "b", true).await
+            };
+            assert!(
+                matches!(result, Err(StorageError::AlreadyExists { .. })),
+                "{scheme}: {result:?}"
+            );
+            assert_eq!(engine.get("b").await.unwrap().as_ref(), b"bravo");
+            assert_eq!(engine.get("a").await.unwrap().as_ref(), b"alpha");
+        }
+        engine.copy("a", "c", true).await.unwrap();
+        assert_eq!(engine.get("c").await.unwrap().as_ref(), b"alpha");
+        engine.rename("a", "d", true).await.unwrap();
+        assert!(!engine.exists("a").await.unwrap());
+        assert_eq!(engine.get("d").await.unwrap().as_ref(), b"alpha");
+        if scheme == "r2" {
+            let err = engine.copy("d", "unsupported", true).await.unwrap_err();
+            assert!(!matches!(err, StorageError::AlreadyExists { .. }));
+            assert_eq!(engine.get("d").await.unwrap().as_ref(), b"alpha");
+        }
+        server.abort();
     }
 }
 

@@ -4,10 +4,10 @@ id: "storage-integrity-and-streaming:ch01:t01"
 chapter_id: ch01-create-only-copy-and-quality
 title: Configure S3/B2 and R2 create-only copy with mock-S3 tests
 description: Build S3/B2 stores with S3CopyIfNotExists::Multipart and R2 stores with the cf-copy-destination-if-none-match header strategy, normalize destination conflicts to StorageError::AlreadyExists, and prove conflict and success against loopback mock S3 servers.
-status: draft
-state: pending
+status: stable
+state: in_progress
 priority: P1
-verification_strategy: tdd
+verification_strategy: regression_tdd
 depends_on: []
 read_set:
   - src/rs/vertebra-storage/src/store.rs
@@ -20,17 +20,17 @@ files:
 tests:
   - src/rs/vertebra-storage/tests/storage_engine_tests.rs::test_copy_if_not_exists_s3_compatible
 estimated_loc: 220
-plan_revision: 1
-plan_commit: null
+plan_revision: 2
+plan_commit: c368cb00
 state_revision: 0
-claimed_by: null
-claimed_at: null
+claimed_by: agent:bulk-storage
+claimed_at: "2026-11-12T03:14:29Z"
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
+last_verified_at: "2026-11-12T03:14:29Z"
 last_verified_commit: null
-verification_evidence: null
+verification_evidence: "Red: create-only S3 copy returns NotSupported; Green: focused copy_if_not_exists test passes for memory/file/s3/b2/r2, cargo storage suite 43 passed, clippy all-targets exits 0; focused storage extension rebuild succeeds."
 created_at: "2026-11-12T01:30:00Z"
 updated_at: "2026-11-12T01:30:00Z"
 commit: null
@@ -39,7 +39,7 @@ sources:
     resource: src/rs/vertebra-storage/src/store.rs::ObjectStoreEngine
     title: BackendConfig::S3 and BackendConfig::R2 builder arms, copy, rename
   - id: engine-tests
-    resource: src/rs/vertebra-storage/tests/storage_engine_tests.rs::test_copy_if_not_exists_conflict_memory_and_local
+    resource: src/rs/vertebra-storage/tests/storage_engine_tests.rs::test_copy_if_not_exists_s3_compatible
     title: Existing memory/local create-only test and TcpListener mock-server pattern
 tags:
   - storage
@@ -58,14 +58,14 @@ In `store.rs::ObjectStoreEngine::new` [^store-rs]:
 3. `ObjectStoreEngine::copy` and `::rename` with `if_not_exists=true`: map `object_store::Error::AlreadyExists { .. }` and `object_store::Error::Precondition { .. }` returned by `copy_if_not_exists` / `rename_if_not_exists` to `StorageError::AlreadyExists { path: dst.to_string(), message }`. Keep the `file` fallback. Any other error (including `NotSupported`) propagates unchanged.
 4. Update the `copy` doc comment to list the S3/B2 and R2 strategies.
 
-Replace `test_copy_if_not_exists_conflict_memory_and_local` with a table-driven `test_copy_if_not_exists_s3_compatible` covering memory, local, a mock S3 server, and a mock R2 server (rename covered in the same test).
+Replace `test_copy_if_not_exists_s3_compatible` with a table-driven `test_copy_if_not_exists_s3_compatible` covering memory, local, a mock S3 server, and a mock R2 server (rename covered in the same test).
 
 Out of scope: Azure, GCS, OCI (native support unchanged); Python facade.
 
 ## Bounded Read Manifest
 
 - `store.rs` — `BackendConfig`, `ObjectStoreEngine::new` S3/R2 arms, `copy`, `rename`, `StorageError` [^store-rs].
-- `storage_engine_tests.rs` — `test_copy_if_not_exists_conflict_memory_and_local`, `test_incremental_s3_uniform_multipart_session`, `tokio::net::TcpListener` mock patterns [^engine-tests].
+- `storage_engine_tests.rs` — `test_copy_if_not_exists_s3_compatible`, `test_incremental_s3_uniform_multipart_session`, `tokio::net::TcpListener` mock patterns [^engine-tests].
 - `Cargo.toml` — `object_store 0.13.2` features (`aws`) and `reqwest`/`http` availability for `StatusCode`.
 
 ## Symbol & Signature Contracts
@@ -104,12 +104,12 @@ Each row runs for `memory`, `file`, `s3`, `r2` engines.
 
 ## Acceptance Criteria
 
-- [ ] S3/B2 and R2 engines perform create-only copy and rename with `FileExistsError` semantics (R1).
-- [ ] Mock-server tests cover conflict and success on all four schemes (R1).
+- [x] S3/B2 and R2 engines perform create-only copy and rename with `FileExistsError` semantics (R1).
+- [x] Mock-server tests cover conflict and success on all four schemes (R1).
 
 ## Notes & Discoveries
 
 - [2026-11-12 01:30] Cloudflare R2 documents `cf-copy-destination-if-none-match` for conditional `CopyObject`; object_store documents `HeaderWithStatus` for this case.
 
 [^store-rs]: `src/rs/vertebra-storage/src/store.rs::ObjectStoreEngine` — Builders, copy, rename.
-[^engine-tests]: `src/rs/vertebra-storage/tests/storage_engine_tests.rs::test_copy_if_not_exists_conflict_memory_and_local` — Existing test and mock patterns.
+[^engine-tests]: `src/rs/vertebra-storage/tests/storage_engine_tests.rs::test_copy_if_not_exists_s3_compatible` — Existing test and mock patterns.
