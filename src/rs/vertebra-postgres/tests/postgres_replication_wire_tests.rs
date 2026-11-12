@@ -3075,3 +3075,187 @@ async fn session_reader_individually_valid_nine_mib_record_exceeds_aggregate_bud
     );
     session.cancel();
 }
+
+#[tokio::test]
+async fn session_delivery_dropped_commit_restores_fifo_and_blocks_overlap() {
+    use _postgres::replication::pgoutput::ReplicationRecord;
+    let payload = session_wal_frame(&session_transaction_payload());
+    let (connection, mut peer) = session_connection_with_payload(Some(0x200000100), payload).await;
+    let session = connection
+        .into_stream(4, Duration::from_secs(10), Duration::from_secs(2))
+        .unwrap();
+    for _ in 0..2 {
+        session.next().await.unwrap().unwrap().publish().unwrap();
+    }
+    let commit = session.next().await.unwrap().unwrap();
+    assert_eq!(commit.record().commit_end_lsn(), Some(0x200000300));
+    let mut overlap = Box::pin(session.next());
+    std::future::poll_fn(|cx| {
+        assert!(matches!(
+            std::future::Future::poll(overlap.as_mut(), cx),
+            Poll::Ready(Err(PostgresError::Interface(_)))
+        ));
+        Poll::Ready(())
+    })
+    .await;
+    drop(overlap);
+    let mut begin = session_transaction_payload()[..21].to_vec();
+    begin[1..9].copy_from_slice(&0x200000400_u64.to_be_bytes());
+    begin[17..21].copy_from_slice(&9_u32.to_be_bytes());
+    peer.write_all(&session_wal_frame(&begin)).await.unwrap();
+    drop(commit);
+    assert!(matches!(
+        session.acknowledge(0x200000300),
+        Err(PostgresError::Interface(_))
+    ));
+    let restored = session.next().await.unwrap().unwrap();
+    assert_eq!(restored.record().commit_end_lsn(), Some(0x200000300));
+    restored.publish().unwrap();
+    assert_eq!(session.acknowledge(0x200000300).unwrap(), 0x200000300);
+    assert!(matches!(
+        session.next().await.unwrap().unwrap().publish().unwrap(),
+        ReplicationRecord::Begin { xid: 9, .. }
+    ));
+    session.cancel();
+}
+
+#[tokio::test]
+async fn session_delivery_cancelled_waiter_releases_reservation() {
+    use _postgres::replication::pgoutput::ReplicationRecord;
+    use std::future::Future;
+    let (connection, mut peer) = session_writer_connection(Some(0x200000100)).await;
+    let session = connection
+        .into_stream(4, Duration::from_secs(10), Duration::from_secs(2))
+        .unwrap();
+    let mut pending = Box::pin(session.next());
+    std::future::poll_fn(|cx| {
+        assert!(pending.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    let mut overlap = Box::pin(session.next());
+    std::future::poll_fn(|cx| {
+        assert!(matches!(
+            std::future::Future::poll(overlap.as_mut(), cx),
+            Poll::Ready(Err(PostgresError::Interface(_)))
+        ));
+        Poll::Ready(())
+    })
+    .await;
+    drop(overlap);
+    drop(pending);
+    peer.write_all(&session_wal_frame(&session_transaction_payload()))
+        .await
+        .unwrap();
+    assert!(matches!(
+        session.next().await.unwrap().unwrap().publish().unwrap(),
+        ReplicationRecord::Begin { xid: 7, .. }
+    ));
+    session.cancel();
+}
+
+#[tokio::test]
+async fn session_delivery_closed_lease_preserves_borrow_but_refuses_publication() {
+    let payload = session_wal_frame(&session_transaction_payload());
+    let (connection, _peer) = session_connection_with_payload(Some(0x200000100), payload).await;
+    let session = connection
+        .into_stream(4, Duration::from_secs(10), Duration::from_secs(2))
+        .unwrap();
+    for _ in 0..2 {
+        session.next().await.unwrap().unwrap().publish().unwrap();
+    }
+    let commit = session.next().await.unwrap().unwrap();
+    let borrowed = commit.record();
+    session.cancel();
+    assert_eq!(borrowed.commit_end_lsn(), Some(0x200000300));
+    assert!(matches!(commit.publish(), Err(PostgresError::Interface(_))));
+    assert!(session.next().await.unwrap().is_none());
+    assert_eq!(session.status_positions().1, 0x200000100);
+}
+
+fn session_empty_transaction_payload(end_lsn: u64, xid: u32) -> Vec<u8> {
+    let mut payload = vec![b'B'];
+    payload.extend_from_slice(&(end_lsn - 1).to_be_bytes());
+    payload.extend_from_slice(&0_i64.to_be_bytes());
+    payload.extend_from_slice(&xid.to_be_bytes());
+    payload.extend_from_slice(b"C\0");
+    payload.extend_from_slice(&(end_lsn - 1).to_be_bytes());
+    payload.extend_from_slice(&end_lsn.to_be_bytes());
+    payload.extend_from_slice(&0_i64.to_be_bytes());
+    payload
+}
+
+#[tokio::test]
+async fn session_delivery_unacknowledged_cap_resumes_after_ack_and_updates_writer() {
+    use _postgres::replication::pgoutput::ReplicationRecord;
+    use std::future::Future;
+    let initial = 0x200000100;
+    let (connection, mut peer) = session_writer_connection(Some(initial)).await;
+    let session = connection
+        .into_stream(8, Duration::from_secs(3600), Duration::from_secs(2))
+        .unwrap();
+    let mut payload = Vec::new();
+    for xid in 1..=1023 {
+        payload.extend(session_empty_transaction_payload(
+            initial + u64::from(xid),
+            xid,
+        ));
+    }
+    peer.write_all(&session_wal_frame(&payload)).await.unwrap();
+    for _ in 0..1023 {
+        assert!(matches!(
+            session.next().await.unwrap().unwrap().publish().unwrap(),
+            ReplicationRecord::Begin { .. }
+        ));
+        session.next().await.unwrap().unwrap().publish().unwrap();
+    }
+    let last_published = initial + 1024;
+    let next_lsn = initial + 1025;
+    let mut payload = session_empty_transaction_payload(last_published, 1024);
+    payload.extend(session_empty_transaction_payload(next_lsn, 1025));
+    let mut frames = session_wal_frame(&payload);
+    frames.extend(copy_data_frame(
+        b"k\0\0\0\x02\0\0\x09\0\0\0\0\0\0\0\0\0\x01",
+    ));
+    peer.write_all(&frames).await.unwrap();
+    session.next().await.unwrap().unwrap().publish().unwrap();
+    let final_lease = session.next().await.unwrap().unwrap();
+    let FrontendExchange::Other(b'd', status) = read_frontend_exchange(&mut peer).await else {
+        panic!("keepalive barrier")
+    };
+    assert_eq!(
+        u64::from_be_bytes(status[1..9].try_into().unwrap()),
+        next_lsn
+    );
+    assert_eq!(
+        u64::from_be_bytes(status[9..17].try_into().unwrap()),
+        initial
+    );
+    final_lease.publish().unwrap();
+    session.next().await.unwrap().unwrap().publish().unwrap();
+    let mut pending_commit = Box::pin(session.next());
+    std::future::poll_fn(|cx| {
+        assert!(pending_commit.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    assert!(matches!(
+        session.acknowledge(next_lsn),
+        Err(PostgresError::Interface(_))
+    ));
+    assert_eq!(session.acknowledge(last_published).unwrap(), last_published);
+    let commit = pending_commit.await.unwrap().unwrap();
+    assert_eq!(commit.record().commit_end_lsn(), Some(next_lsn));
+    let FrontendExchange::Other(b'd', status) = read_frontend_exchange(&mut peer).await else {
+        panic!("acknowledged status")
+    };
+    for offset in [9, 17] {
+        assert_eq!(
+            u64::from_be_bytes(status[offset..offset + 8].try_into().unwrap()),
+            last_published
+        );
+    }
+    commit.publish().unwrap();
+    assert_eq!(session.acknowledge(next_lsn).unwrap(), next_lsn);
+    session.cancel();
+}

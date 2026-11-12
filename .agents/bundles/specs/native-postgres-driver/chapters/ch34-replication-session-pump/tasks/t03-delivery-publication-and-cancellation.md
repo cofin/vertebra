@@ -5,7 +5,7 @@ chapter_id: ch34-replication-session-pump
 title: "Publish Commit leases exactly at consumer delivery"
 description: "Harden successful ReplicationDelivery publication with lease-duration single-next ownership and cancellation retention; publication capacity notifications coordinate reader and ack writer. No reconnect or Python completion code belongs here."
 status: stable
-state: pending
+state: in_progress
 priority: P1
 verification_strategy: behavior_tdd
 depends_on: ["native-postgres-driver:ch34:t02"]
@@ -23,8 +23,8 @@ estimated_loc: 195
 plan_revision: 8
 plan_commit: d90d4625
 state_revision: 2
-claimed_by: null
-claimed_at: null
+claimed_by: agent:executor
+claimed_at: "2026-11-12T19:57:19.194997+00:00"
 blocked_reason: null
 unblock_condition: null
 next_step: null
@@ -33,7 +33,7 @@ last_verified_commit: null
 verification_evidence: null
 commit: null
 created_at: "2026-11-12T05:00:00Z"
-updated_at: "2026-11-12T04:25:15Z"
+updated_at: "2026-11-12T19:57:19.194997+00:00"
 generated: {by: flow-revise, at: "2026-11-12T05:00:00Z"}
 verified: []
 sources:

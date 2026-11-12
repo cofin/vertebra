@@ -11,7 +11,7 @@ use tokio::task::AbortHandle;
 use tokio::time::{Instant, MissedTickBehavior};
 
 use super::feedback::{
-    ReplicationCopyData, ReplicationFeedback, decode_replication_copy_data,
+    MAX_UNACKED_COMMITS, ReplicationCopyData, ReplicationFeedback, decode_replication_copy_data,
     encode_standby_status_update,
 };
 use super::pgoutput::{
@@ -35,6 +35,8 @@ struct SessionState {
     queue: BoundedReplicationQueue,
     reader_eof: bool,
     error_delivered: bool,
+    front: Option<ReplicationRecord>,
+    receiver_reserved: bool,
 }
 
 struct SessionShared {
@@ -58,9 +60,8 @@ impl SessionShared {
     fn finish(&self, result: Result<(), PostgresError>) {
         let mut state = self.state.lock().unwrap();
         state.closing = true;
-        if result.is_err() {
-            while state.queue.pop().is_some() {}
-        }
+        while state.queue.pop().is_some() {}
+        state.front = None;
         if state.terminal.is_none() {
             state.terminal = Some(result);
         }
@@ -119,6 +120,8 @@ impl PostgresReplicationConnection {
                 ),
                 reader_eof: false,
                 error_delivered: false,
+                front: None,
+                receiver_reserved: false,
             }),
             revision,
             status,
@@ -162,6 +165,18 @@ impl ReplicationSession {
     /// Lease the next decoded record; Commit publication remains explicit.
     pub async fn next(&self) -> Result<Option<ReplicationDelivery>, PostgresError> {
         let mut changes = self.shared.revision.subscribe();
+        {
+            let mut state = self.shared.state.lock().unwrap();
+            if state.receiver_reserved {
+                return Err(PostgresError::Interface(
+                    "replication already has a pending receiver or delivery".into(),
+                ));
+            }
+            state.receiver_reserved = true;
+        }
+        let reservation = ReceiverReservation {
+            shared: Arc::clone(&self.shared),
+        };
         loop {
             {
                 let mut state = self.shared.state.lock().unwrap();
@@ -175,15 +190,21 @@ impl ReplicationSession {
                 if state.closing {
                     return Ok(None);
                 }
-                if let Some(record) = state.queue.pop() {
-                    drop(state);
-                    self.shared.signal_records();
-                    return Ok(Some(ReplicationDelivery {
-                        record,
-                        shared: Arc::clone(&self.shared),
-                    }));
+                if let Some(record) = state.front.take().or_else(|| state.queue.pop()) {
+                    if record.commit_end_lsn().is_some()
+                        && state.feedback.unacked_count() >= MAX_UNACKED_COMMITS
+                    {
+                        state.front = Some(record);
+                    } else {
+                        drop(state);
+                        self.shared.signal_records();
+                        return Ok(Some(ReplicationDelivery {
+                            record: Some(record),
+                            reservation,
+                        }));
+                    }
                 }
-                if state.reader_eof {
+                if state.reader_eof && state.front.is_none() {
                     return Ok(None);
                 }
             }
@@ -260,28 +281,51 @@ impl ReplicationSession {
 
 /// A decoded record whose Commit boundary is published only on successful consumption.
 pub struct ReplicationDelivery {
-    record: ReplicationRecord,
+    record: Option<ReplicationRecord>,
+    reservation: ReceiverReservation,
+}
+
+struct ReceiverReservation {
     shared: Arc<SessionShared>,
+}
+
+impl Drop for ReceiverReservation {
+    fn drop(&mut self) {
+        self.shared.state.lock().unwrap().receiver_reserved = false;
+        self.shared.signal_records();
+    }
+}
+
+impl Drop for ReplicationDelivery {
+    fn drop(&mut self) {
+        if let Some(record) = self.record.take() {
+            let mut state = self.reservation.shared.state.lock().unwrap();
+            if !state.closing {
+                state.front = Some(record);
+            }
+        }
+    }
 }
 
 impl ReplicationDelivery {
     /// Borrow the decoded record without advancing publication or acknowledgement.
     pub fn record(&self) -> &ReplicationRecord {
-        &self.record
+        self.record.as_ref().expect("live delivery owns its record")
     }
 
     /// Publish one record, making an exact Commit boundary acknowledgeable.
-    pub fn publish(self) -> Result<ReplicationRecord, PostgresError> {
-        let mut state = self.shared.state.lock().unwrap();
+    pub fn publish(mut self) -> Result<ReplicationRecord, PostgresError> {
+        let mut state = self.reservation.shared.state.lock().unwrap();
         if state.closing {
             return Err(PostgresError::Interface(
                 "replication session is closed".into(),
             ));
         }
-        if let Some(lsn) = self.record.commit_end_lsn() {
+        if let Some(lsn) = self.record().commit_end_lsn() {
             state.feedback.record_published_commit(lsn)?;
         }
-        Ok(self.record)
+        drop(state);
+        Ok(self.record.take().expect("live delivery owns its record"))
     }
 }
 
@@ -299,6 +343,13 @@ async fn run_reader(
     loop {
         if shared.state.lock().unwrap().closing {
             return Ok(());
+        }
+        if shared.state.lock().unwrap().feedback.unacked_count() >= MAX_UNACKED_COMMITS {
+            changes
+                .changed()
+                .await
+                .map_err(|_| PostgresError::Transport("replication session disappeared".into()))?;
+            continue;
         }
         if let Some(record) = pending.take() {
             let bytes = ReplicationRecord::approx_bytes(&record);

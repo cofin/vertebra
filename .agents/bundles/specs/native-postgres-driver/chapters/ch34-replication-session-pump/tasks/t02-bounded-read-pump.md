@@ -5,7 +5,7 @@ chapter_id: ch34-replication-session-pump
 title: "Drain coalesced WAL through bounded single-generation reader"
 description: "Wire real protocol reads to pgoutput decoding and bounded FIFO, retaining startup bytes and independent writer liveness. Introduce next returning a delivery lease with complete successful-path record/publish semantics. Cancellation retention, the lease-duration waiter reservation and unacked-capacity gating belong to t03."
 status: stable
-state: in_progress
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on: ["native-postgres-driver:ch34:t01"]
@@ -29,12 +29,12 @@ claimed_at: "2026-11-12T19:56:42.010392+00:00"
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
-commit: null
+last_verified_at: "2026-11-12T19:57:07.698528+00:00"
+last_verified_commit: d99caddf
+verification_evidence: "Red exit101 missing next; focused9/full35 tests passed; Clippy/packagefmt/diffcheck exit0. Logs /tmp/ch34-t02-{red,green,module,clippy}.log"
+commit: d99caddf
 created_at: "2026-11-12T05:00:00Z"
-updated_at: "2026-11-12T19:56:42.010392+00:00"
+updated_at: "2026-11-12T19:57:07.698528+00:00"
 generated: {by: flow-revise, at: "2026-11-12T05:00:00Z"}
 verified: []
 sources:
@@ -133,10 +133,10 @@ cargo fmt --manifest-path src/rs/Cargo.toml --check
 
 ## Acceptance Criteria
 
-- [ ] R22.4 bounded coalesced frame ingestion and real pgoutput ordering pass.
-- [ ] Blocked producer, malformed frame, and EOF all wake correct owners without starving writer.
+- [x] R22.4 bounded coalesced frame ingestion and real pgoutput ordering pass.
+- [x] Blocked producer, malformed frame, and EOF all wake correct owners without starving writer.
 
-- [ ] Red, Green, and lint evidence is recorded, and task plus checklist synchronization is included in one signed conventional commit.
+- [x] Red, Green, and lint evidence is recorded, and task plus checklist synchronization is included in one signed conventional commit.
 
 ## Notes & Discoveries
 
