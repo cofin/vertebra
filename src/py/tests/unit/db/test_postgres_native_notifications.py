@@ -800,6 +800,7 @@ def test_notification_source_end_to_end_publish_subscribe_reuse_and_reconnect() 
     with _running_pg_server() as srv:
 
         async def _run() -> None:
+            drainer_ctl = _DrainerController(asyncio.get_running_loop())
             cfg = PostgreSQLConfig(
                 dsn=f"postgresql://postgres@127.0.0.1:{srv.port}/appdb",
                 max_size=1,
@@ -930,12 +931,18 @@ def test_notification_source_end_to_end_publish_subscribe_reuse_and_reconnect() 
                         async for _ in source.listen():
                             pass
 
+                    await source.aclose()
+                    drainer_ctl.pause()
                     cancel_task = asyncio.create_task(_consume_until_cancelled())
-                    assert await srv.wait_for_accept_count_async(5, timeout=3.0)
-                    cancel_task.cancel()
-                    with pytest.raises(asyncio.CancelledError):
-                        await cancel_task
-                    assert srv.wait_for_live_connections(1, timeout=2.0)
+                    try:
+                        assert await srv.wait_for_accept_count_async(5, timeout=3.0)
+                        assert await drainer_ctl.wait_until_signaled(timeout=2.0)
+                        cancel_task.cancel()
+                        with pytest.raises(asyncio.CancelledError):
+                            await cancel_task
+                    finally:
+                        drainer_ctl.resume()
+                    assert await asyncio.to_thread(srv.wait_for_live_connections, 1, timeout=2.0)
 
                     drained_on_aclose: list[NotificationEvent] = []
 
