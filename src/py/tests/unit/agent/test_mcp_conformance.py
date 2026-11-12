@@ -2,16 +2,21 @@
 
 import asyncio
 import dataclasses
+import io
 from collections.abc import Mapping
 from types import SimpleNamespace
 from typing import Any
 
 import anyio
 import pytest
+from flask import Flask
+from starlette.requests import Request as StarletteRequest
 
+from vertebra._vertebra import Request as NativeRequest
 from vertebra.agent.controller import ConfirmationDecisionRequest
 from vertebra.agent.core.context import AgentContext, CallerIdentity, bind_agent_context, reset_agent_context
 from vertebra.agent.core.guards import GuardProtocol, PermissionDeniedError, RequireRoles, authorize
+from vertebra.agent.core.identity import CallableIdentitySource, MtlsIdentitySource
 from vertebra.agent.core.jsonrpc import METHOD_NOT_FOUND, JSONRPCErrorException
 from vertebra.agent.core.schema import tool
 from vertebra.agent.mcp import (
@@ -47,6 +52,7 @@ from vertebra.agent.mcp import (
     render_webmcp_manifest_json,
     resource,
 )
+from vertebra.agent.mcp.routes import AsgiMcpApp, WsgiMcpApp
 from vertebra.agent.mcp.service import CONFIRMATION_REQUIRED, CONFIRMATION_TOKEN_META_KEY
 from vertebra.agent.plugin import AgentPlugin, AgentPluginConfig
 from vertebra.agent.runtime import ConfirmationGate
@@ -55,6 +61,7 @@ from vertebra.extensions.flask.mcp import attach_mcp_routes as attach_flask_mcp
 from vertebra.extensions.starlette.mcp import mount_mcp_routes as mount_starlette_mcp
 from vertebra.framework._app import App
 from vertebra.typing import FrozenBaseStruct
+from vertebra.utils.module_loader import MissingDependencyError
 from vertebra.utils.serializers import decode_json, encode_json_bytes
 
 
@@ -1032,3 +1039,183 @@ async def test_mcp_promoted_task_inherits_bound_identity() -> None:
     assert result.owner_id == "default:ana"
     assert result.result is not None
     assert result.result["content"][0]["text"] == "ana"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("surface", ["asgi", "starlette"])
+@pytest.mark.parametrize(
+    "identity_case,expected",
+    [
+        ("user", "ana|None|None"),
+        ("anonymous", "None|None|None"),
+        ("trusted", "None|None|CN=svc"),
+        ("untrusted", "None|None|None"),
+        ("custom", "erin|None|None"),
+    ],
+)
+async def test_mcp_adapters_propagate_agent_context(surface: str, identity_case: str, expected: str) -> None:
+    """ASGI and Starlette adapters preserve authenticated state and explicit proxy policies."""
+    config = MCPConfig()
+    if identity_case in ("trusted", "untrusted"):
+        config = MCPConfig(
+            trust_proxy_identity=True, identity_source=MtlsIdentitySource(trusted_proxies=("10.0.0.0/8",))
+        )
+    elif identity_case == "custom":
+        config = MCPConfig(
+            trust_proxy_identity=True,
+            identity_source=CallableIdentitySource(
+                resolver=lambda request: CallerIdentity(user_id=request.headers.get("x-user"))
+            ),
+        )
+    core = MCPCore(config=config)
+
+    @tool(name="whoami")
+    def whoami(context: AgentContext) -> str:
+        return f"{context.identity.user_id}|{context.identity.email}|{context.identity.client_cert_subject}"
+
+    core.registry.register_tool(whoami)
+    app = AsgiMcpApp(core)
+    body = encode_json_bytes({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "whoami"}})
+    scope: dict[str, Any] = {
+        "type": "http",
+        "method": "POST",
+        "path": "/mcp",
+        "headers": [
+            (b"content-type", b"application/json"),
+            (b"x-goog-authenticated-user-email", b"ana@example.com"),
+            (b"x-vertebra-mtls-subject", b"CN=svc"),
+            (b"x-user", b"erin"),
+        ],
+        "client": ("203.0.113.9" if identity_case == "untrusted" else "10.0.0.5", 1),
+    }
+    if identity_case == "user":
+        scope["user"] = SimpleNamespace(id="ana", roles=["admin"])
+
+    async def receive() -> dict[str, Any]:
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    if surface == "starlette":
+        response = await app.handle_starlette_request(StarletteRequest(scope, receive))
+        payload = response.body
+    else:
+        messages: list[dict[str, Any]] = []
+
+        async def send(message: dict[str, Any]) -> None:
+            messages.append(message)
+
+        await app(scope, receive, send)
+        assert messages[0]["status"] == 200
+        payload = messages[-1]["body"]
+    assert decode_json(payload)["result"]["content"][0]["text"] == expected
+
+
+@pytest.mark.parametrize("surface", ["wsgi", "flask", "duck-request"])
+def test_mcp_wsgi_adapters_propagate_agent_context(surface: str) -> None:
+    """WSGI and Flask adapters use immediate-peer metadata and authenticated WSGI users."""
+    config = MCPConfig(trust_proxy_identity=True, identity_source=MtlsIdentitySource(trusted_proxies=("10.0.0.0/8",)))
+    core = MCPCore(config=config)
+
+    @tool(name="whoami")
+    def whoami(context: AgentContext) -> str:
+        return f"{context.identity.user_id}|{context.identity.client_cert_subject}"
+
+    core.registry.register_tool(whoami)
+    app = WsgiMcpApp(core)
+    body = encode_json_bytes({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "whoami"}})
+    if surface == "wsgi":
+        response = app(
+            {
+                "REQUEST_METHOD": "POST",
+                "PATH_INFO": "/mcp",
+                "REMOTE_USER": "carol",
+                "REMOTE_ADDR": "10.0.0.5",
+                "HTTP_X_VERTEBRA_MTLS_SUBJECT": "CN=svc",
+                "wsgi.input": io.BytesIO(body),
+            },
+            lambda status, headers: None,
+        )
+        payload = b"".join(response)
+        expected = "carol|CN=svc"
+    elif surface == "flask":
+        flask = Flask(__name__)
+        with flask.test_request_context(
+            "/mcp",
+            method="POST",
+            data=body,
+            headers={"x-vertebra-mtls-subject": "CN=svc"},
+            environ_overrides={"REMOTE_ADDR": "10.0.0.5", "REMOTE_USER": "carol"},
+        ):
+            result = app.handle_flask_view()
+        assert isinstance(result, tuple)
+        payload = result[0]
+        expected = "carol|CN=svc"
+    else:
+        result = app.handle_flask_view(
+            SimpleNamespace(method="POST", path="/mcp", headers={"x-vertebra-mtls-subject": "CN=svc"}, body=body)
+        )
+        assert isinstance(result, tuple)
+        payload = result[0]
+        expected = "None|None"
+    assert decode_json(payload)["result"]["content"][0]["text"] == expected
+
+
+def test_mcp_identity_config_requires_explicit_opt_in() -> None:
+    """Proxy trust requires both an explicit opt-in and a concrete policy."""
+    with pytest.raises(ValueError, match="requires identity_source"):
+        MCPConfig(trust_proxy_identity=True)
+    with pytest.raises(ValueError, match="requires trust_proxy_identity=True"):
+        MCPConfig(identity_source=CallableIdentitySource(resolver=lambda request: None))
+
+
+def test_mcp_flask_missing_refuses_fabricated_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An unavailable Flask dependency raises before dispatching an invented request."""
+    monkeypatch.setattr("vertebra.agent.mcp.routes.import_optional", lambda name: None)
+    with pytest.raises(MissingDependencyError):
+        WsgiMcpApp(MCPCore()).handle_flask_view()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("authenticated", [True, False])
+async def test_mcp_asgi_adapter_context_controls_guard(authenticated: bool) -> None:
+    """Only authenticated ASGI scope roles authorize guarded tools."""
+    core = MCPCore()
+    calls: list[str] = []
+
+    @tool(name="admin_only", guards=(RequireRoles("admin"),))
+    def admin_only() -> str:
+        calls.append("ran")
+        return "ok"
+
+    core.registry.register_tool(admin_only)
+    body = encode_json_bytes({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "admin_only"}})
+    scope: dict[str, Any] = {"type": "http", "method": "POST", "path": "/mcp", "headers": []}
+    if authenticated:
+        scope["user"] = SimpleNamespace(id="ana", roles=["admin"])
+    messages: list[dict[str, Any]] = []
+
+    async def receive() -> dict[str, Any]:
+        return {"type": "http.request", "body": body}
+
+    async def send(message: dict[str, Any]) -> None:
+        messages.append(message)
+
+    await AsgiMcpApp(core)(scope, receive, send)
+    result = decode_json(messages[-1]["body"])
+    assert ("result" in result) is authenticated
+    assert calls == (["ran"] if authenticated else [])
+
+
+def test_mcp_native_request_adapter_propagates_explicit_identity() -> None:
+    """Native request headers reach the configured application identity source."""
+    source = CallableIdentitySource(resolver=lambda request: CallerIdentity(user_id=request.headers.get("x-user")))
+    core = MCPCore(config=MCPConfig(trust_proxy_identity=True, identity_source=source))
+
+    @tool(name="whoami")
+    def whoami(context: AgentContext) -> str:
+        return str(context.identity.user_id)
+
+    core.registry.register_tool(whoami)
+    body = encode_json_bytes({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "whoami"}})
+    request = NativeRequest.from_parts("POST", "/mcp", body=body, headers=[("x-user", "ana")])
+    response = WsgiMcpApp(core).handle_vertebra_request(request)
+    assert decode_json(bytes(response.body))["result"]["content"][0]["text"] == "ana"

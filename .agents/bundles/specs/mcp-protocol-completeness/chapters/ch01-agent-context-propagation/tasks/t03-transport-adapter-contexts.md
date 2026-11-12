@@ -5,7 +5,7 @@ chapter_id: ch01-agent-context-propagation
 title: Pass contexts from ASGI and WSGI adapters
 description: Build AgentContext values in AsgiMcpApp and WsgiMcpApp from ASGI scopes, Starlette requests, native Requests, Flask requests, and WSGI environs, honoring the opt-in MCPConfig.trust_proxy_identity / identity_source pair (validated at construction), and remove the fabricated Flask fallback body.
 status: draft
-state: pending
+state: in_progress
 priority: P0
 verification_strategy: regression_tdd
 depends_on:
@@ -31,9 +31,9 @@ claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
+last_verified_at: "2026-11-12T03:46:37Z"
 last_verified_commit: null
-verification_evidence: null
+verification_evidence: "Red: 13 adapter context/config regressions failed; Green: 42 canonical conformance tests, Ruff routes/models/test and Mypy routes/models, all exit 0."
 created_at: "2026-11-12T00:30:00Z"
 updated_at: "2026-11-12T00:30:00Z"
 commit: null
@@ -115,9 +115,9 @@ Every request entering `AsgiMcpApp` or `WsgiMcpApp` carries an `AgentContext` bu
 
 ## Acceptance Criteria
 
-- [ ] R3.1: ASGI, Starlette/FastAPI, WSGI, Flask, and Django (via `handle_vertebra_request`) requests carry contexts.
-- [ ] R1.3: `MCPConfig` rejects `trust_proxy_identity=True` without `identity_source` and a source without the flag; the configured source and peer address flow into every adapter.
-- [ ] The fabricated Flask fallback body is gone.
+- [x] R3.1: ASGI, Starlette/FastAPI, WSGI, Flask, and Django (via `handle_vertebra_request`) requests carry contexts.
+- [x] R1.3: `MCPConfig` rejects `trust_proxy_identity=True` without `identity_source` and a source without the flag; the configured source and peer address flow into every adapter.
+- [x] The fabricated Flask fallback body is gone.
 
 ## Notes & Discoveries
 
