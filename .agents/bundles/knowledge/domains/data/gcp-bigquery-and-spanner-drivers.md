@@ -15,6 +15,9 @@ generated:
   by: flow/0.26.0
   at: "2026-11-07T03:55:00Z"
 verified:
+  - by: agent:flow-executor
+    at: "2026-11-13T05:25:00Z"
+    commit: 91af2c72
   - by: agent:flow-setup
     at: "2026-11-07T03:55:00Z"
     commit: 067fa901
@@ -95,7 +98,7 @@ sources:
 
 ## Shared GCP Auth, Async Drainer & Exception Bridge
 
-- **Scoped ADC & Transport Classification (`gcp_auth.rs`, `gcp.rs`)**: [`GcpTokenCache::from_options(raw_opts, default_scopes)`](../../../../../src/rs/vertebra-core/src/gcp_auth.rs)[^src-vertebra-core-src-gcp-auth-rs] requires explicit OAuth scopes, applies `ProxyPolicy` to token/IAM endpoints while keeping metadata-server requests direct, and runs `GcpAuthSource::GcloudCli` with `kill_on_drop(true)` and `GCLOUD_CLI_TIMEOUT` (`30s`). [`vertebra_db::gcp`](../../../../../src/rs/vertebra-db/src/gcp.rs)[^src-vertebra-db-src-gcp-rs] adapts `GcpTokenCache` to `google-cloud-auth` `CredentialsProvider` and normalizes HTTP status codes before generic transport fallbacks.
+- **Scoped ADC & Transport Classification (`gcp_auth.rs`, `gcp.rs`)**: [`GcpTokenCache::from_options(raw_opts, default_scopes)`](../../../../../src/rs/vertebra-core/src/gcp_auth.rs)[^src-vertebra-core-src-gcp-auth-rs] requires explicit OAuth scopes, evaluates canonical ADC precedence (`explicit options -> ambient ADC file -> ambient env bearer tokens -> GCE metadata server`, ending ambient discovery at `MetadataServer`), applies `ProxyPolicy` to token/IAM endpoints while keeping metadata-server requests direct, and supports `GcpAuthSource::GcloudCli` when explicitly selected (`kill_on_drop(true)`, `GCLOUD_CLI_TIMEOUT = 30s`). [`vertebra_db::gcp`](../../../../../src/rs/vertebra-db/src/gcp.rs)[^src-vertebra-db-src-gcp-rs] adapts `GcpTokenCache` to `google-cloud-auth` `CredentialsProvider` and normalizes HTTP status codes before generic transport fallbacks.
 - **5-Argument Completion Drainer & `ShmCapsule` (`py_async.rs`)**: [`spawn_rust_db_task_with_attr(py, fut, map_ok, map_err, attr_name)`](../../../../../src/rs/vertebra-db/src/py_async.rs)[^src-vertebra-db-src-py-async-rs] registers per-extension `AsyncCompletionQueue` drainers (`_vertebra_bigquery_completion_drainer` and `_vertebra_spanner_completion_drainer`), binds Python `Future.cancel()` to Tokio `AbortHandle`, and pairs with `construct_py_arrow_cursor` (`c"vertebra.ShmCapsule"`) so optional `.so` crates never retain leaked `ShmRegion` entries.
 - **Multi-Base Exceptions (`vertebra-py/src/errors.rs`)**: [`vertebra_py::errors`](../../../../../src/rs/vertebra-py/src/errors.rs)[^src-vertebra-py-src-errors-rs] defines `BigQueryError(GoogleCloudError, DatabaseError)`, `BigQueryRowError(BigQueryError, DataError)`, `SpannerError(GoogleCloudError, DatabaseError)`, and `SpannerAbortedError(SpannerError, SerializationFailure)` (`sqlstate = "40001"`), resolved lazily via `PyOnceLock` in each wheel's `errors.rs` (falling back to standalone types in Rust-only unit tests).
 

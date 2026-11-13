@@ -9,6 +9,9 @@ tags:
 - object-store
 - signing
 verified:
+- by: agent:flow-executor
+  at: "2026-11-13T05:25:00Z"
+  commit: 91af2c72
 - by: agent:flow-setup
   at: "2026-11-12T23:30:00Z"
   commit: 18baadcd
@@ -22,9 +25,15 @@ sources:
 - id: core-gcp-auth
   resource: src/rs/vertebra-core/src/gcp_auth.rs
   title: Shared Rust GCP OAuth2 token cache and capsule name
+- id: core-gcp-identity
+  resource: src/rs/vertebra-core/src/gcp_identity.rs
+  title: Audience-scoped GCP OIDC ID token cache
 - id: py-gcp-auth
   resource: src/rs/vertebra-py/src/gcp_auth.rs
   title: PyO3 GCP token cache bindings in vertebra._vertebra
+- id: py-gcp-identity
+  resource: src/rs/vertebra-py/src/gcp_identity.rs
+  title: PyO3 GCP OIDC ID token cache bindings in vertebra._vertebra
 - id: storage-lib
   resource: src/rs/vertebra-storage/src/lib.rs
   title: PyO3 module bindings, buffer extraction, and error mapping for vertebra._storage
@@ -95,7 +104,7 @@ sources:
 <!-- truth: start -->
 - `vertebra._storage` (`#[pymodule(gil_used = false)]`, typed in `_storage.pyi`) exports `SyncObjectStore`, `AsyncObjectStore`, `SyncStreamReader`, `AsyncStreamReader`, `SyncMultipartUpload`, `AsyncMultipartUpload`, `ObjectMeta`, `StorageBuffer`, `RustTaskAwaitable`, and signing functions over `object_store 0.13` [^storage-lib] [^storage-pyi].
 - Sync calls release the GIL with `py.detach()`; async calls return `RustTaskAwaitable` completed through a per-loop `AsyncCompletionQueue` and `Notifier` (`eventfd` on Linux, pipe elsewhere) registered with `loop.add_reader` [^storage-lib] [^core-notify].
-- `SyncGcpTokenCache`, `AsyncGcpTokenCache`, and `GcpTokenSnapshot` live in `vertebra._vertebra`; `vertebra.storage` re-exports them, and stores pass `cache._capsule()` to `vertebra._storage`, which accepts only a `PyCapsule` named `vertebra.GcpTokenCacheCapsule` (`GcpTokenCacheCapsule`) [^core-gcp-auth] [^py-gcp-auth] [^storage-lib].
+- `SyncGcpTokenCache`, `AsyncGcpTokenCache`, `GcpTokenSnapshot` (`gcp_auth.rs`) and audience-bound `SyncGcpIdTokenCache`, `AsyncGcpIdTokenCache`, `GcpIdTokenSnapshot` (`gcp_identity.rs`) live in `vertebra._vertebra`; `vertebra.storage` re-exports all six types. Canonical ADC discovery evaluates `explicit options -> ambient ADC file (GOOGLE_APPLICATION_CREDENTIALS / gcloud ADC) -> ambient env tokens (GOOGLE_OAUTH_ACCESS_TOKEN / CLOUDSDK_AUTH_ACCESS_TOKEN) -> GCE metadata server`, and GCS stores pass `token_cache._capsule()` to `vertebra._storage` (`PyCapsule` `vertebra.GcpTokenCacheCapsule`), while `gcp_identity.rs` supports `authorized_user` (`client_id` audience), service-account, GCE metadata, and `target_service_account` ID token minting [^core-gcp-auth] [^core-gcp-identity] [^py-gcp-auth] [^py-gcp-identity] [^storage-lib].
 - One shared cache backs GCS data requests (`RefreshingGcpCredentialProvider`), server-side `compose`, and keyless IAM `signBlob`; `compose` and `signBlob` invalidate the observed token generation and retry once on `401` [^storage-gcp-auth] [^storage-store] [^storage-signing].
 - GCS `allow_ambient_adc=false` builds the client with `GoogleCloudStorageBuilder::new()` instead of `from_env()`; `access_token` installs a static bearer provider, `skip_signature` installs an empty bearer and skips signing, and `quota_project_id` becomes `x-goog-user-project` on storage, compose, IAM, and token requests [^storage-store] [^storage-signing] [^core-gcp-auth].
 - HTTP clients are pooled: `object_store` clients keep 64 idle connections per host, the GCS compose and IAM `reqwest` clients keep 32, all with 10 s connect and 300 s total timeouts [^storage-store] [^storage-signing].
@@ -151,7 +160,9 @@ Batch codecs drain each encoded chunk into native `put_stream` before advancing 
 Rust engine, streaming, and signing tests run in `storage_engine_tests.rs`; Python contracts live under `src/py/tests/unit/storage/`; emulator fixtures for S3, Azure, GCS, and R2 live in the integration `conftest.py`; companion wheel and sdist isolation is checked by `verify_storage_wheel.py` and `make {storage,bigquery,spanner,bundler}-wheel-check` [^tests-storage-engine] [^tests-storage-unit] [^tests-storage-integration] [^verify-storage-wheel].
 
 [^core-gcp-auth]: `src/rs/vertebra-core/src/gcp_auth.rs` — Shared Rust GCP OAuth2 token cache and capsule name.
+[^core-gcp-identity]: `src/rs/vertebra-core/src/gcp_identity.rs` — Audience-scoped GCP OIDC ID token cache.
 [^py-gcp-auth]: `src/rs/vertebra-py/src/gcp_auth.rs` — PyO3 GCP token cache bindings in `vertebra._vertebra`.
+[^py-gcp-identity]: `src/rs/vertebra-py/src/gcp_identity.rs` — PyO3 GCP OIDC ID token cache bindings in `vertebra._vertebra`.
 [^storage-lib]: `src/rs/vertebra-storage/src/lib.rs` — PyO3 module bindings, buffer extraction, and error mapping.
 [^storage-store]: `src/rs/vertebra-storage/src/store.rs` — `ObjectStoreEngine`, GCS compose, file transfers, and HTTP clients.
 [^storage-gcp-auth]: `src/rs/vertebra-storage/src/gcp_auth.rs` — `RefreshingGcpCredentialProvider`.

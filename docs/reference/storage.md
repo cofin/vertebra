@@ -4,7 +4,7 @@ Backend configurations, GIL-free `SyncObjectStore` and `AsyncObjectStore`, file-
 
 ## Object stores
 
-Construct a store from a URI or configuration: `SyncObjectStore(target, *, options=None, signing=None, token_cache=None)`. The class methods `from_config`, `from_local`, `from_s3`, `from_gcs`, `from_azure`, `from_oci`, `from_r2`, `from_http`, and `from_memory` build the same store from configuration fields. Every store exposes the read-only properties `url`, `scheme`, `options`, `token_cache`, and `supports_signing`, batch transfer helpers (`upload_many`, `download_many`, `staged_download`), paginated listing (`list_page`, `list_with_delimiter`), `to_async()`, `close()`, and the context-manager protocol. `put_multipart(key, parts)` uploads a sequence of buffers as one object.
+Construct a store from a URI or configuration: `SyncObjectStore(target, *, options=None, signing=None, token_cache=None)`. The class methods `from_config`, `from_local`, `from_s3`, `from_gcs`, `from_azure`, `from_oci`, `from_r2`, `from_http`, and `from_memory` build the same store from configuration fields. Every store exposes the read-only properties `url`, `scheme`, `options`, `token_cache`, and `supports_signing`, plus `close()` and the context-manager protocol. `put_multipart(key, parts)` uploads a sequence of buffers as one object.
 
 `AsyncObjectStore` mirrors `SyncObjectStore` with the same constructor, class methods, properties, and method signatures. Its I/O methods are awaited, except `get_stream`, `iter_arrow_batches`, `iter_parquet_batches`, `open_reader`, and `open_writer`, which return async iterators or file objects directly. `staged_download` is an async context manager, `verify_presigned_url` stays synchronous, and `to_sync()` returns a `SyncObjectStore` sharing the same native engine.
 
@@ -13,14 +13,18 @@ Construct a store from a URI or configuration: `SyncObjectStore(target, *, optio
       heading_level: 3
       inherited_members: true
       members:
+        - to_async
         - put
         - put_stream
         - put_file
+        - upload_many
         - get
         - get_view
         - get_stream
         - get_range
         - get_file
+        - download_many
+        - staged_download
         - head
         - exists
         - delete
@@ -28,6 +32,8 @@ Construct a store from a URI or configuration: `SyncObjectStore(target, *, optio
         - rename
         - compose
         - list
+        - list_page
+        - list_with_delimiter
         - glob
         - open_reader
         - open_writer
@@ -142,7 +148,7 @@ Readers support `read`, `read_at`, `seek`, `tell`, and `close`; the async reader
 
 ## GCS token caches
 
-`vertebra.storage` re-exports `SyncGcpTokenCache`, `AsyncGcpTokenCache`, and `GcpTokenSnapshot` from the core `vertebra._vertebra` extension. One cache passed as `token_cache=` to several stores shares a single token and refresh schedule. `SyncGcpTokenCache.get_token(*, force_refresh=False)` returns a `GcpTokenSnapshot`; `AsyncGcpTokenCache` awaits the same call, and `to_async()` / `to_sync()` convert between handles over one native cache. The [authentication guide](../usage/storage-auth-and-signing.md#google-cloud-credentials-and-token-caches) covers construction and sharing.
+`vertebra.storage` re-exports `SyncGcpTokenCache`, `AsyncGcpTokenCache`, and `GcpTokenSnapshot` (OAuth bearer tokens) alongside `SyncGcpIdTokenCache`, `AsyncGcpIdTokenCache`, and `GcpIdTokenSnapshot` (audience-bound OIDC ID tokens) from the core `vertebra._vertebra` extension. One cache passed as `token_cache=` or `id_token_cache=` to several stores or embedders shares a single token and refresh schedule. `SyncGcpTokenCache.get_token(*, force_refresh=False)` returns a `GcpTokenSnapshot`, and `SyncGcpIdTokenCache.get_token(audience, *, force_refresh=False)` returns a `GcpIdTokenSnapshot`; the async variants await the same calls, and `to_async()` / `to_sync()` convert between handles over one native cache. The [authentication guide](../usage/storage-auth-and-signing.md#google-cloud-credentials-and-token-caches) covers construction, ADC discovery order, and sharing.
 
 ## HTTP Range responses
 
@@ -155,10 +161,6 @@ Readers support `read`, `read_at`, `seek`, `tell`, and `close`; the async reader
       members: false
 
 ## Errors
-
-::: vertebra.typing.IntegrityError
-    options:
-      heading_level: 4
 
 ::: vertebra.typing.PreconditionError
     options:
