@@ -6,7 +6,13 @@ chapter_id: ch03-relocatable-server-binary-and-packaging
 title: Resolve Embedded Python Runtime Library Paths in Launcher
 description: Implement EmbeddedPythonRuntime and is_packaged_server_binary in _supervisor.py to export PYTHONHOME and shared library search paths and fail loud on static interpreters.
 status: stable
-state: pending
+state: completed
+commit: 7a5cbc61
+last_verified_commit: 7a5cbc61
+last_verified_at: "2026-11-13T05:08:00Z"
+verification_evidence: "cargo fmt/clippy/build + readelf 0 rpath + ruff + mypy + pytest (121 passed)"
+claimed_by: null
+claimed_at: null
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -66,8 +72,8 @@ uv run --no-sync ruff check src/py/vertebra/supervisor/_supervisor.py && uv run 
 
 ## Acceptance Criteria
 
-- [ ] Packaged `vertebra-server` fails loud with exit `2` on static-only Python interpreters.
-- [ ] `run_supervisor` exports `PYTHONHOME` and platform library search paths cleanly.
+- [x] Packaged `vertebra-server` fails loud with exit `2` on static-only Python interpreters.
+- [x] `run_supervisor` exports `PYTHONHOME` and platform library search paths cleanly.
 
 [^supervisor-py]: `src/py/vertebra/supervisor/_supervisor.py::find_server_binary` — Packaged vs workspace server binary resolution.
 [^main-rs]: `src/rs/vertebra-http/src/main.rs::prepare_embedded_python_env` — Embedded Python sys.path and PATH initialization.

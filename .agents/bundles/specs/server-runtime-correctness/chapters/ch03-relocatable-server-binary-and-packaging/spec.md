@@ -5,7 +5,7 @@ chapter_id: ch03-relocatable-server-binary-and-packaging
 title: "Chapter 03: Relocatable Server Binary, Wheel Packaging, and Standalone Skills Staging"
 description: "Build relocatable per-ABI vertebra-server binaries, resolve shared libpython at launch, include vertebra/bin/* in core wheels, and add opt-in StandaloneBuilder .agents/skills staging."
 status: stable
-state: planned
+state: active
 planning_status: complete
 planning_quality: standard
 planning_degraded_reason: null
@@ -14,7 +14,7 @@ depends_on_chapters:
 replan_trigger: null
 plan_commit: 18baadcd
 last_reviewed_commit: null
-updated_at: "2026-11-12T23:45:00Z"
+updated_at: "2026-11-13T05:08:00Z"
 generated:
   by: flow-plan
   at: "2026-11-12T23:45:00Z"
@@ -83,13 +83,14 @@ Wheel binary installation, shared-libpython requirements, and `--include-agent-s
 
 ## 5. Implementation Plan
 
-- [ ] [t01-relocatable-build-rs-and-target.md](tasks/t01-relocatable-build-rs-and-target.md) — Remove absolute rpaths in `build.rs` and implement `ServerBinaryTarget` / `ServerBinaryBuilder`
-- [ ] [t02-launcher-runtime-library-resolution.md](tasks/t02-launcher-runtime-library-resolution.md) — Add `EmbeddedPythonRuntime` shared-libpython check and runtime env export in `_supervisor.py`
-- [ ] [t03-core-wheel-maturin-binary-include.md](tasks/t03-core-wheel-maturin-binary-include.md) — Include `src/py/vertebra/bin/*` in core wheels and verify libpython-excluding wheel repair commands
-- [ ] [t04-standalone-builder-skills-staging.md](tasks/t04-standalone-builder-skills-staging.md) — Add opt-in `StandaloneBuilder` staging of user `.agents/skills` with Vertebra-repo guard ([#115](https://github.com/cofin/vertebra/issues/115))
+- [x] [7a5cbc61] [t01-relocatable-build-rs-and-target.md](tasks/t01-relocatable-build-rs-and-target.md) — Remove absolute rpaths in `build.rs` and implement `ServerBinaryTarget` / `ServerBinaryBuilder`
+- [x] [7a5cbc61] [t02-launcher-runtime-library-resolution.md](tasks/t02-launcher-runtime-library-resolution.md) — Add `EmbeddedPythonRuntime` shared-libpython check and runtime env export in `_supervisor.py`
+- [x] [7a5cbc61] [t03-core-wheel-maturin-binary-include.md](tasks/t03-core-wheel-maturin-binary-include.md) — Include `src/py/vertebra/bin/*` in core wheels and verify libpython-excluding wheel repair commands
+- [x] [7a5cbc61] [t04-standalone-builder-skills-staging.md](tasks/t04-standalone-builder-skills-staging.md) — Add opt-in `StandaloneBuilder` staging of user `.agents/skills` with Vertebra-repo guard ([#115](https://github.com/cofin/vertebra/issues/115))
 
 ## 6. Current State & Remaining Plan Snapshot
 
+- **Status**: `t01`–`t04` are implemented and verified at `7a5cbc61` (`cargo fmt`/`clippy`/`build`, `readelf -d` 0 RPATH/RUNPATH, `ruff`, `mypy`, and `121` targeted packaging/CLI/server integration tests pass).
 - **Fast Chapter Gate (`< 25s`)**: `uv run --no-sync ruff check src/py/vertebra/supervisor src/py/vertebra/build/packaging/standalone.py src/py/vertebra/cli/build.py tools/scripts/build_server_binary.py && uv run --no-sync mypy src/py/vertebra/supervisor src/py/vertebra/build/packaging/standalone.py src/py/vertebra/cli/build.py tools/scripts/build_server_binary.py && uv run --no-sync pytest src/py/tests/unit/build/test_packaging_and_pgo.py src/py/tests/unit/cli/test_cli_commands.py -q`.
 
 [^http-build-rs]: `src/rs/vertebra-http/build.rs` — Current build script embedding absolute build-host rpaths.

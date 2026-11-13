@@ -6,7 +6,13 @@ chapter_id: ch03-relocatable-server-binary-and-packaging
 title: "Stage Opt-In User .agents/skills in StandaloneBuilder (#115)"
 description: "Add opt-in include_agent_skills staging to StandaloneBuilder and vtb build --include-agent-skills, refusing Vertebra's own repo .agents/ and anchoring relative skill lookup."
 status: stable
-state: pending
+state: completed
+commit: 7a5cbc61
+last_verified_commit: 7a5cbc61
+last_verified_at: "2026-11-13T05:08:00Z"
+verification_evidence: "cargo fmt/clippy/build + readelf 0 rpath + ruff + mypy + pytest (121 passed)"
+claimed_by: null
+claimed_at: null
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -73,8 +79,8 @@ uv run --no-sync ruff check src/py/vertebra/build/packaging/standalone.py src/py
 
 ## Acceptance Criteria
 
-- [ ] User `.agents/skills` stage deterministically when opted in, and sibling `.agents/*` state is never bundled.
-- [ ] Vertebra's own repository `.agents/` is deterministically rejected when `include_agent_skills=True`.
+- [x] User `.agents/skills` stage deterministically when opted in, and sibling `.agents/*` state is never bundled.
+- [x] Vertebra's own repository `.agents/` is deterministically rejected when `include_agent_skills=True`.
 
 [^standalone-py]: `src/py/vertebra/build/packaging/standalone.py::StandaloneBuilder` — Standalone staging loop skipping dot-prefixed entries.
 [^cli-build-py]: `src/py/vertebra/cli/build.py::build` — vtb build --standalone and --onefile CLI options.

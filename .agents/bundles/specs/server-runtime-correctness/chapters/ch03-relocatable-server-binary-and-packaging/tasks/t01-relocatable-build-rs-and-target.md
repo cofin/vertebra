@@ -6,7 +6,13 @@ chapter_id: ch03-relocatable-server-binary-and-packaging
 title: Remove Absolute Build Rpaths and Create ServerBinaryBuilder
 description: Drop absolute build-machine rpaths in vertebra-http/build.rs and implement per-ABI relocatable server binary building in tools/scripts/build_server_binary.py.
 status: stable
-state: pending
+state: completed
+commit: 7a5cbc61
+last_verified_commit: 7a5cbc61
+last_verified_at: "2026-11-13T05:08:00Z"
+verification_evidence: "cargo fmt/clippy/build + readelf 0 rpath + ruff + mypy + pytest (121 passed)"
+claimed_by: null
+claimed_at: null
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -67,8 +73,8 @@ cargo check --manifest-path src/rs/Cargo.toml -p vertebra-http --bin vertebra-se
 
 ## Acceptance Criteria
 
-- [ ] `vertebra-http/build.rs` embeds zero build-host absolute rpaths.
-- [ ] `ServerBinaryTarget` and `ServerBinaryBuilder` pass strict typing and unit tests across Linux, macOS, Windows, and free-threaded ABIs.
+- [x] `vertebra-http/build.rs` embeds zero build-host absolute rpaths.
+- [x] `ServerBinaryTarget` and `ServerBinaryBuilder` pass strict typing and unit tests across Linux, macOS, Windows, and free-threaded ABIs.
 
 [^http-build-rs]: `src/rs/vertebra-http/build.rs` — Current build script setting absolute build-host rpath.
 [^release-binaries-yml]: `.github/workflows/release-binaries.yml` — Release server binary cargo flags.

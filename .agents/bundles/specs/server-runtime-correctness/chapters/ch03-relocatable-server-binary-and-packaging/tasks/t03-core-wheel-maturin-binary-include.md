@@ -6,7 +6,13 @@ chapter_id: ch03-relocatable-server-binary-and-packaging
 title: "Package vertebra/bin/* in Core Wheels and Exclude libpython from Wheel Repairs"
 description: "Configure pyproject.toml [tool.maturin] wheel-only binary inclusion and add auditwheel/delocate repair command helpers in tools/scripts/build_server_binary.py."
 status: stable
-state: pending
+state: completed
+commit: 7a5cbc61
+last_verified_commit: 7a5cbc61
+last_verified_at: "2026-11-13T05:08:00Z"
+verification_evidence: "cargo fmt/clippy/build + readelf 0 rpath + ruff + mypy + pytest (121 passed)"
+claimed_by: null
+claimed_at: null
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -67,8 +73,8 @@ uv run --no-sync ruff check tools/scripts/build_server_binary.py && uv run --no-
 
 ## Acceptance Criteria
 
-- [ ] `pyproject.toml` includes `src/py/vertebra/bin/*` strictly for `wheel` format.
-- [ ] Linux and macOS wheel repair commands exclude `libpython` across GIL and free-threaded ABIs.
+- [x] `pyproject.toml` includes `src/py/vertebra/bin/*` strictly for `wheel` format.
+- [x] Linux and macOS wheel repair commands exclude `libpython` across GIL and free-threaded ABIs.
 
 [^pyproject-toml]: `pyproject.toml` — Maturin include configuration for vertebra-core.
 [^release-yaml]: `.github/workflows/release.yaml` — cibuildwheel repair hooks.
