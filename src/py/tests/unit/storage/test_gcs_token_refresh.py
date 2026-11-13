@@ -10,25 +10,36 @@ import json
 import os
 import subprocess
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, cast
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
 import vertebra._storage as native_storage_mod
 import vertebra._vertebra as native_core_mod
 import vertebra.embeddings._google as google_embeddings_mod
+import vertebra.storage as storage_mod
+from vertebra._vertebra import (
+    AsyncGcpIdTokenCache as CoreAsyncGcpIdTokenCache,
+)
 from vertebra._vertebra import (
     AsyncGcpTokenCache as CoreAsyncGcpTokenCache,
+)
+from vertebra._vertebra import (
+    GcpIdTokenSnapshot as CoreGcpIdTokenSnapshot,
 )
 from vertebra._vertebra import (
     GcpTokenSnapshot as CoreGcpTokenSnapshot,
 )
 from vertebra._vertebra import (
     GoogleCloudAuthError,
+)
+from vertebra._vertebra import (
+    SyncGcpIdTokenCache as CoreSyncGcpIdTokenCache,
 )
 from vertebra._vertebra import (
     SyncGcpTokenCache as CoreSyncGcpTokenCache,
@@ -41,11 +52,14 @@ from vertebra.db.adapters.duckdb import (
 )
 from vertebra.embeddings import VertexEmbedder
 from vertebra.storage import (
+    AsyncGcpIdTokenCache,
     AsyncGcpTokenCache,
     AsyncObjectStore,
+    GcpIdTokenSnapshot,
     GcpTokenSnapshot,
     GCSConfig,
     SigningConfig,
+    SyncGcpIdTokenCache,
     SyncGcpTokenCache,
     SyncObjectStore,
 )
@@ -54,20 +68,42 @@ from vertebra.typing import ImproperConfigurationError
 _DUCKDB_SKIP_REASON = "vertebra._duckdb native extension is not built"
 
 
+def _b64url_encode(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+
+
+def _make_mock_jwt(audience: str, exp: int, token_id: int = 1) -> str:
+    header = _b64url_encode(json.dumps({"alg": "RS256", "typ": "JWT"}).encode("utf-8"))
+    payload = _b64url_encode(
+        json.dumps({"aud": audience, "exp": exp, "iat": exp - 3600, "jti": f"id-{token_id}"}).encode("utf-8")
+    )
+    signature = _b64url_encode(f"mock-sig-{token_id}".encode())
+    return f"{header}.{payload}.{signature}"
+
+
 class _MockTokenServer:
     """Local HTTP server simulating OAuth2 token, Metadata Server, IAM, and GCS endpoints."""
 
     def __init__(self) -> None:
         self.oauth_calls = 0
         self.metadata_calls = 0
+        self.metadata_id_calls = 0
         self.iam_calls = 0
         self.gcs_calls = 0
         self.stored_objects: dict[str, bytes] = {}
         self.fail_next_sign_blob_401 = False
         self.last_headers: dict[str, str] = {}
         self.last_post_body: bytes = b""
+        self.last_token_form: dict[str, list[str]] = {}
+        self.last_metadata_path: str = ""
+        self.last_iam_body: bytes = b""
         self.expires_in: int = 3600
         self.token_status: int = 200
+        self.metadata_status: int = 200
+        self.id_token_status: int = 200
+        self.id_token_exp_offset_s: int = 3600
+        self.id_token_client_id: str = "user-client-id"
+        self.omit_id_token: bool = False
         self.expire_time_iso: str = "2099-01-01T00:00:00Z"
         self._lock = threading.Lock()
 
@@ -81,8 +117,41 @@ class _MockTokenServer:
                 with parent._lock:
                     parent.last_headers = {k.lower(): v for k, v in self.headers.items()}
                     if self.path.startswith("/computeMetadata/v1/instance/service-accounts/"):
+                        parent.last_metadata_path = self.path
+                        parsed_url = urlsplit(self.path)
+                        if parsed_url.path.endswith("/identity"):
+                            parent.metadata_id_calls += 1
+                            idx = parent.metadata_id_calls
+                            if parent.metadata_status != 200:
+                                err_raw = b"metadata error"
+                                self.send_response(parent.metadata_status)
+                                self.send_header("Content-Type", "text/plain")
+                                self.send_header("Content-Length", str(len(err_raw)))
+                                self.end_headers()
+                                self.wfile.write(err_raw)
+                                return
+                            query = parse_qs(parsed_url.query)
+                            audience = query.get("audience", [""])[0]
+                            jwt_raw = _make_mock_jwt(
+                                audience, int(time.time()) + parent.id_token_exp_offset_s, idx
+                            ).encode("utf-8")
+                            self.send_response(200)
+                            self.send_header("Content-Type", "text/plain")
+                            self.send_header("Content-Length", str(len(jwt_raw)))
+                            self.end_headers()
+                            self.wfile.write(jwt_raw)
+                            return
+
                         parent.metadata_calls += 1
                         idx = parent.metadata_calls
+                        if parent.metadata_status != 200:
+                            err_raw = b"metadata error"
+                            self.send_response(parent.metadata_status)
+                            self.send_header("Content-Type", "text/plain")
+                            self.send_header("Content-Length", str(len(err_raw)))
+                            self.end_headers()
+                            self.wfile.write(err_raw)
+                            return
                         payload = {
                             "access_token": f"mock-oauth-token-meta-{idx}",
                             "expires_in": parent.expires_in,
@@ -152,6 +221,7 @@ class _MockTokenServer:
                     if self.path == "/token":
                         parent.oauth_calls += 1
                         idx = parent.oauth_calls
+                        parent.last_token_form = parse_qs(body.decode("utf-8"), keep_blank_values=True)
                         if parent.token_status != 200:
                             err_raw = json.dumps({"error": "access_denied"}).encode("utf-8")
                             self.send_response(parent.token_status)
@@ -160,10 +230,67 @@ class _MockTokenServer:
                             self.end_headers()
                             self.wfile.write(err_raw)
                             return
-                        payload = {
+                        payload: dict[str, Any] = {
                             "access_token": f"mock-oauth-token-user-{idx}",
                             "expires_in": parent.expires_in,
                             "token_type": "Bearer",
+                        }
+                        grant_types = parent.last_token_form.get("grant_type", [])
+                        if grant_types == ["urn:ietf:params:oauth:grant-type:jwt-bearer"]:
+                            assertions = parent.last_token_form.get("assertion", [])
+                            if assertions:
+                                segs = assertions[0].split(".")
+                                if len(segs) == 3:
+                                    padded = segs[1] + "=" * ((4 - len(segs[1]) % 4) % 4)
+                                    claims = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")))
+                                    target_aud = claims.get("target_audience")
+                                    if isinstance(target_aud, str):
+                                        if parent.id_token_status != 200:
+                                            err_raw = json.dumps({"error": "id_token_denied"}).encode("utf-8")
+                                            self.send_response(parent.id_token_status)
+                                            self.send_header("Content-Type", "application/json")
+                                            self.send_header("Content-Length", str(len(err_raw)))
+                                            self.end_headers()
+                                            self.wfile.write(err_raw)
+                                            return
+                                        payload = {
+                                            "id_token": _make_mock_jwt(
+                                                target_aud,
+                                                int(time.time()) + parent.id_token_exp_offset_s,
+                                                idx,
+                                            )
+                                        }
+                        elif not parent.omit_id_token:
+                            client_ids = parent.last_token_form.get("client_id", [parent.id_token_client_id])
+                            payload["id_token"] = _make_mock_jwt(
+                                client_ids[0],
+                                int(time.time()) + parent.id_token_exp_offset_s,
+                                idx,
+                            )
+                        raw = json.dumps(payload).encode("utf-8")
+                        self.send_response(200)
+                        self.send_header("Content-Type", "application/json")
+                        self.send_header("Content-Length", str(len(raw)))
+                        self.end_headers()
+                        self.wfile.write(raw)
+                        return
+
+                    if ":generateIdToken" in self.path:
+                        parent.iam_calls += 1
+                        idx = parent.iam_calls
+                        parent.last_iam_body = body
+                        if parent.id_token_status != 200:
+                            err_raw = json.dumps({"error": {"code": parent.id_token_status}}).encode("utf-8")
+                            self.send_response(parent.id_token_status)
+                            self.send_header("Content-Type", "application/json")
+                            self.send_header("Content-Length", str(len(err_raw)))
+                            self.end_headers()
+                            self.wfile.write(err_raw)
+                            return
+                        req_payload = json.loads(body.decode("utf-8"))
+                        audience = req_payload["audience"]
+                        payload = {
+                            "token": _make_mock_jwt(audience, int(time.time()) + parent.id_token_exp_offset_s, idx)
                         }
                         raw = json.dumps(payload).encode("utf-8")
                         self.send_response(200)
@@ -1058,3 +1185,171 @@ async def test_gcs_config_to_url_and_options_is_non_blocking_and_preserves_env(
     assert sync_store.scheme == "gs"
     assert async_store.scheme == "gs"
     assert dict(os.environ) == env_snapshot
+
+
+def test_gcp_id_token_cache_storage_exports() -> None:
+    """Verify ID token classes are re-exported from vertebra.storage and match native extension classes."""
+    assert SyncGcpIdTokenCache is CoreSyncGcpIdTokenCache
+    assert AsyncGcpIdTokenCache is CoreAsyncGcpIdTokenCache
+    assert GcpIdTokenSnapshot is CoreGcpIdTokenSnapshot
+    for name in ("SyncGcpIdTokenCache", "AsyncGcpIdTokenCache", "GcpIdTokenSnapshot"):
+        assert name in storage_mod.__all__
+
+    snap = GcpIdTokenSnapshot(
+        id_token="mock-oidc-secret-token",
+        audience="https://service-a.run.app",
+        expires_at_unix_ms=1_900_000_000_000,
+        generation=7,
+    )
+    assert snap.id_token == "mock-oidc-secret-token"
+    assert snap.audience == "https://service-a.run.app"
+    assert snap.expires_at_unix_ms == 1_900_000_000_000
+    assert snap.generation == 7
+    assert "mock-oidc-secret-token" not in repr(snap)
+    assert "[REDACTED]" in repr(snap)
+
+
+def test_gcs_config_to_token_cache_options_delegates_metadata_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+    token_server: _MockTokenServer,
+) -> None:
+    """Verify GCSConfig.to_token_cache_options omits use_metadata_server while preserving ambient fallback."""
+    monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
+    monkeypatch.delenv("CLOUDSDK_CONFIG", raising=False)
+    monkeypatch.delenv("GOOGLE_OAUTH_ACCESS_TOKEN", raising=False)
+    monkeypatch.delenv("CLOUDSDK_AUTH_ACCESS_TOKEN", raising=False)
+    monkeypatch.setenv("HOME", "/nonexistent-home-for-vertebra-test")
+    monkeypatch.setenv("GCE_METADATA_HOST", f"127.0.0.1:{token_server.port}")
+
+    cfg = GCSConfig(bucket="ambient-bucket")
+    opts = cfg.to_token_cache_options()
+    assert "use_metadata_server" not in opts
+
+    snap = cfg.sync_token_cache().get_token()
+    assert snap.access_token == "mock-oauth-token-meta-1"
+    assert token_server.metadata_calls == 1
+
+    with pytest.raises(ValueError, match="unable to configure GcpTokenCache from options"):
+        cfg.sync_token_cache(allow_ambient_adc=False)
+
+
+@pytest.mark.anyio
+async def test_gcp_id_token_cache_sync_async_parity_and_redaction(
+    monkeypatch: pytest.MonkeyPatch,
+    token_server: _MockTokenServer,
+) -> None:
+    """Verify sync/async ID token parity, shared generation via to_async/to_sync, invalidation, and repr redaction."""
+    monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
+    monkeypatch.delenv("CLOUDSDK_CONFIG", raising=False)
+    monkeypatch.delenv("GOOGLE_OAUTH_ACCESS_TOKEN", raising=False)
+    monkeypatch.delenv("CLOUDSDK_AUTH_ACCESS_TOKEN", raising=False)
+    monkeypatch.setenv("HOME", "/nonexistent-home-for-vertebra-test")
+    monkeypatch.setenv("GCE_METADATA_HOST", f"127.0.0.1:{token_server.port}")
+
+    audience = "https://service-a.run.app"
+    sync_cache = SyncGcpIdTokenCache()
+    async_cache = sync_cache.to_async()
+    assert sync_cache.refresh_skew_ms == 300_000
+    assert async_cache.refresh_skew_ms == 300_000
+    assert sync_cache.needs_refresh(audience) is True
+
+    snap1 = sync_cache.get_token(audience)
+    assert snap1.audience == audience
+    assert snap1.generation == 1
+    assert sync_cache.generation == 1
+    assert async_cache.generation == 1
+    assert sync_cache.needs_refresh(audience) is False
+    assert snap1.id_token not in repr(snap1)
+    assert "[REDACTED]" in repr(snap1)
+    assert token_server.metadata_id_calls == 1
+
+    snap2 = await async_cache.get_token(audience)
+    assert snap2.id_token == snap1.id_token
+    assert snap2.generation == 1
+    assert token_server.metadata_id_calls == 1
+
+    sync_cache.invalidate(audience, 999)
+    assert sync_cache.needs_refresh(audience) is False
+
+    sync_cache.invalidate(audience, snap1.generation)
+    assert async_cache.needs_refresh(audience) is True
+
+    snap3 = await async_cache.to_sync().to_async().get_token(audience)
+    assert snap3.generation == 2
+    assert sync_cache.generation == 2
+    assert token_server.metadata_id_calls == 2
+
+    snap4 = sync_cache.get_token(audience, force_refresh=True)
+    assert snap4.generation == 3
+    assert token_server.metadata_id_calls == 3
+
+
+@pytest.mark.anyio
+async def test_gcp_id_token_cache_authorized_user_adc_and_errors(
+    token_server: _MockTokenServer,
+    tmp_path: Path,
+) -> None:
+    """Verify authorized_user ADC supports client_id audience without scope and rejects other audiences or missing id_token."""
+    adc_path = tmp_path / "user_adc.json"
+    adc_path.write_text(
+        json.dumps(
+            {
+                "type": "authorized_user",
+                "client_id": "user-client-id",
+                "client_secret": "user-client-secret",
+                "refresh_token": "user-refresh-token",
+                "token_uri": f"{token_server.base_url}/token",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    cache = SyncGcpIdTokenCache({"application_credentials_path": str(adc_path)}, allow_ambient_adc=False)
+
+    with pytest.raises(GoogleCloudAuthError, match="client_id"):
+        cache.get_token("https://cloud-run-service.run.app")
+    assert token_server.oauth_calls == 0
+
+    snap = cache.get_token("user-client-id")
+    assert snap.audience == "user-client-id"
+    assert snap.generation == 1
+    assert token_server.oauth_calls == 1
+    assert "scope" not in token_server.last_token_form
+
+    token_server.omit_id_token = True
+    async_cache = AsyncGcpIdTokenCache({"application_credentials_path": str(adc_path)}, allow_ambient_adc=False)
+    with pytest.raises(GoogleCloudAuthError, match="id_token"):
+        await async_cache.get_token("user-client-id")
+
+
+@pytest.mark.anyio
+async def test_gcp_id_token_cache_validation_and_upstream_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    token_server: _MockTokenServer,
+) -> None:
+    """Verify invalid audience raises ValueError pre-network, static tokens are rejected, and metadata HTTP errors raise GoogleCloudAuthError."""
+    with pytest.raises(ValueError, match="static"):
+        SyncGcpIdTokenCache({"access_token": "mock-oauth-token"}, allow_ambient_adc=False)
+
+    monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
+    monkeypatch.delenv("CLOUDSDK_CONFIG", raising=False)
+    monkeypatch.delenv("GOOGLE_OAUTH_ACCESS_TOKEN", raising=False)
+    monkeypatch.delenv("CLOUDSDK_AUTH_ACCESS_TOKEN", raising=False)
+    monkeypatch.setenv("HOME", "/nonexistent-home-for-vertebra-test")
+    monkeypatch.setenv("GCE_METADATA_HOST", f"127.0.0.1:{token_server.port}")
+
+    sync_cache = SyncGcpIdTokenCache()
+    async_cache = sync_cache.to_async()
+
+    for bad_audience in ("", "   ", "https://bad\n.run.app"):
+        with pytest.raises(ValueError):
+            sync_cache.get_token(bad_audience)
+        with pytest.raises(ValueError):
+            async_cache.get_token(bad_audience)
+        with pytest.raises(ValueError):
+            sync_cache.needs_refresh(bad_audience)
+    assert token_server.metadata_id_calls == 0
+
+    token_server.metadata_status = 500
+    with pytest.raises(GoogleCloudAuthError, match="500"):
+        await async_cache.get_token("https://failing-service.run.app")

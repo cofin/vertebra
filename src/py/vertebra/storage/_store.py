@@ -18,7 +18,15 @@ from urllib.parse import unquote, urlparse
 
 import msgspec
 
-from vertebra._vertebra import AsyncGcpTokenCache, GcpTokenSnapshot, GoogleCloudAuthError, SyncGcpTokenCache
+from vertebra._vertebra import (
+    AsyncGcpIdTokenCache,
+    AsyncGcpTokenCache,
+    GcpIdTokenSnapshot,
+    GcpTokenSnapshot,
+    GoogleCloudAuthError,
+    SyncGcpIdTokenCache,
+    SyncGcpTokenCache,
+)
 from vertebra.storage import _arrow
 from vertebra.typing import ImproperConfigurationError, IntegrityError, MissingDependencyError, PreconditionError
 from vertebra.utils.module_loader import import_optional
@@ -28,12 +36,14 @@ if TYPE_CHECKING:
     from vertebra._storage import StorageBuffer
 
 __all__ = (
+    "AsyncGcpIdTokenCache",
     "AsyncGcpTokenCache",
     "AsyncObjectStore",
     "AsyncReadableFile",
     "AsyncWritableFile",
     "AzureConfig",
     "GCSConfig",
+    "GcpIdTokenSnapshot",
     "GcpTokenSnapshot",
     "HTTPConfig",
     "IntegrityError",
@@ -47,6 +57,7 @@ __all__ = (
     "S3Config",
     "SigningConfig",
     "StorageConfig",
+    "SyncGcpIdTokenCache",
     "SyncGcpTokenCache",
     "SyncObjectStore",
     "SyncReadableFile",
@@ -270,21 +281,6 @@ class GCSConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
             opts["quota_project_id"] = self.quota_project_id
         if scopes:
             opts["scopes"] = ",".join(scopes)
-        has_explicit_creds = bool(
-            self.application_credentials or self.service_account_path or self.service_account_key or self.access_token
-        )
-        has_ambient_env_token = bool(
-            os.environ.get("GOOGLE_OAUTH_ACCESS_TOKEN", "").strip()
-            or os.environ.get("CLOUDSDK_AUTH_ACCESS_TOKEN", "").strip()
-        )
-        if (
-            allow_ambient_adc
-            and not has_explicit_creds
-            and not self.target_service_account
-            and self._resolve_adc_file(allow_ambient=True) is None
-            and not has_ambient_env_token
-        ):
-            opts["use_metadata_server"] = "true"
         return opts
 
     def sync_token_cache(

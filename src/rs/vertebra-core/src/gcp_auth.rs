@@ -15,9 +15,9 @@ pub const DEFAULT_GCP_SCOPES: &[&str] = &["https://www.googleapis.com/auth/cloud
 pub const GCLOUD_CLI_TIMEOUT: Duration = Duration::from_secs(30);
 pub const GCP_TOKEN_CACHE_CAPSULE_NAME: &CStr = c"vertebra.GcpTokenCacheCapsule";
 pub const GCP_TOKEN_CACHE_ABI_VERSION: u32 = 1;
-const DEFAULT_TOKEN_TTL_MS: u64 = 3_600_000;
-const DEFAULT_OAUTH_TOKEN_URI: &str = "https://oauth2.googleapis.com/token";
-const DEFAULT_IAM_ENDPOINT: &str = "https://iamcredentials.googleapis.com";
+pub(crate) const DEFAULT_TOKEN_TTL_MS: u64 = 3_600_000;
+pub(crate) const DEFAULT_OAUTH_TOKEN_URI: &str = "https://oauth2.googleapis.com/token";
+pub(crate) const DEFAULT_IAM_ENDPOINT: &str = "https://iamcredentials.googleapis.com";
 
 /// How token and IAM HTTP requests reach the network; metadata requests never use a proxy.
 #[allow(clippy::large_enum_variant)]
@@ -275,7 +275,7 @@ pub fn parse_service_account_key_json(
     })
 }
 
-fn normalize_gcp_options(raw_opts: &HashMap<String, String>) -> HashMap<String, String> {
+pub(crate) fn normalize_gcp_options(raw_opts: &HashMap<String, String>) -> HashMap<String, String> {
     let mut opts = HashMap::with_capacity(raw_opts.len());
     for (k, v) in raw_opts {
         let normalized = k
@@ -626,45 +626,7 @@ impl GcpTokenCache {
         let token_uri_override = opts.get("token_uri").map(String::as_str);
 
         let mut base_source: Option<GcpAuthSource> = None;
-
-        if let Some(inline_json) = opts.get("service_account_key")
-            && let Some(sa_key) = parse_service_account_key_json(
-                inline_json,
-                quota_project_id.as_deref(),
-                token_uri_override,
-            )
-        {
-            base_source = Some(GcpAuthSource::ServiceAccount {
-                key: sa_key,
-                scopes: default_sa_scopes(),
-            });
-        } else if let Some(sa_path_or_json) = opts
-            .get("service_account_path")
-            .or_else(|| opts.get("service_account"))
-        {
-            let trimmed = sa_path_or_json.trim();
-            let parsed_key = if trimmed.starts_with('{') {
-                parse_service_account_key_json(
-                    trimmed,
-                    quota_project_id.as_deref(),
-                    token_uri_override,
-                )
-            } else {
-                std::fs::read_to_string(trimmed).ok().and_then(|raw| {
-                    parse_service_account_key_json(
-                        &raw,
-                        quota_project_id.as_deref(),
-                        token_uri_override,
-                    )
-                })
-            };
-            if let Some(sa_key) = parsed_key {
-                base_source = Some(GcpAuthSource::ServiceAccount {
-                    key: sa_key,
-                    scopes: default_sa_scopes(),
-                });
-            }
-        }
+        let mut explicit_credential_requested = false;
 
         let parse_adc_source = |adc_path: &Path| -> Option<GcpAuthSource> {
             let raw = std::fs::read_to_string(adc_path).ok()?;
@@ -697,108 +659,155 @@ impl GcpTokenCache {
             None
         };
 
-        if base_source.is_none() {
-            if let (Some(cid), Some(csec), Some(rtok)) = (
-                opts.get("client_id"),
-                opts.get("client_secret"),
-                opts.get("refresh_token"),
-            ) {
-                let token_uri = opts
-                    .get("token_uri")
+        let build_metadata_source = || -> GcpAuthSource {
+            let host = opts
+                .get("metadata_host")
+                .cloned()
+                .or_else(|| std::env::var("GCE_METADATA_HOST").ok())
+                .unwrap_or_else(|| "metadata.google.internal".to_string());
+            let endpoint = if host.starts_with("http://") || host.starts_with("https://") {
+                host
+            } else {
+                format!("http://{host}")
+            };
+            GcpAuthSource::MetadataServer {
+                service_account: opts
+                    .get("metadata_service_account")
                     .cloned()
-                    .unwrap_or_else(|| DEFAULT_OAUTH_TOKEN_URI.to_string());
-                base_source = Some(GcpAuthSource::AuthorizedUser {
-                    client_id: cid.clone(),
-                    client_secret: csec.clone(),
-                    refresh_token: rtok.clone(),
-                    quota_project_id: quota_project_id.clone(),
-                    token_uri,
-                });
-            } else if let Some(ref adc_path) = explicit_adc_candidate {
-                base_source = parse_adc_source(adc_path);
-            } else if let Some(tok) = opts
-                .get("access_token")
-                .or_else(|| opts.get("bearer_token"))
-                .filter(|s| !s.trim().is_empty())
-            {
-                base_source = Some(GcpAuthSource::Static {
-                    access_token: tok.clone(),
-                    expires_at_unix_ms: None,
-                    quota_project_id: quota_project_id.clone(),
-                });
-            } else if opts
-                .get("use_metadata_server")
-                .is_some_and(|v| v == "true" || v == "1")
-            {
-                let host = opts
-                    .get("metadata_host")
-                    .cloned()
-                    .or_else(|| std::env::var("GCE_METADATA_HOST").ok())
-                    .unwrap_or_else(|| "metadata.google.internal".to_string());
-                let endpoint = if host.starts_with("http://") || host.starts_with("https://") {
-                    host
-                } else {
-                    format!("http://{host}")
-                };
-                base_source = Some(GcpAuthSource::MetadataServer {
-                    service_account: opts
-                        .get("metadata_service_account")
-                        .cloned()
-                        .unwrap_or_else(|| "default".to_string()),
-                    quota_project_id: quota_project_id.clone(),
-                    endpoint,
-                    scopes: custom_scopes.clone().unwrap_or_default(),
-                });
-            } else if opts
-                .get("use_gcloud_cli")
-                .is_some_and(|v| v == "true" || v == "1")
-            {
-                base_source = Some(GcpAuthSource::GcloudCli {
-                    binary: default_gcloud_binary(),
-                    timeout: GCLOUD_CLI_TIMEOUT,
-                    quota_project_id: quota_project_id.clone(),
-                    impersonate_service_account: None,
-                });
-            } else if let Some(ref adc_path) = ambient_adc_candidate {
-                base_source = parse_adc_source(adc_path);
+                    .unwrap_or_else(|| "default".to_string()),
+                quota_project_id: quota_project_id.clone(),
+                endpoint,
+                scopes: custom_scopes.clone().unwrap_or_default(),
             }
+        };
+
+        if let Some(inline_json) = opts
+            .get("service_account_key")
+            .filter(|v| !v.trim().is_empty())
+        {
+            explicit_credential_requested = true;
+            let sa_key = parse_service_account_key_json(
+                inline_json,
+                quota_project_id.as_deref(),
+                token_uri_override,
+            )?;
+            base_source = Some(GcpAuthSource::ServiceAccount {
+                key: sa_key,
+                scopes: default_sa_scopes(),
+            });
+        } else if let Some(sa_path_or_json) = opts
+            .get("service_account_path")
+            .or_else(|| opts.get("service_account"))
+            .filter(|v| !v.trim().is_empty())
+        {
+            explicit_credential_requested = true;
+            let trimmed = sa_path_or_json.trim();
+            let sa_key = if trimmed.starts_with('{') {
+                parse_service_account_key_json(
+                    trimmed,
+                    quota_project_id.as_deref(),
+                    token_uri_override,
+                )
+            } else {
+                std::fs::read_to_string(trimmed).ok().and_then(|raw| {
+                    parse_service_account_key_json(
+                        &raw,
+                        quota_project_id.as_deref(),
+                        token_uri_override,
+                    )
+                })
+            }?;
+            base_source = Some(GcpAuthSource::ServiceAccount {
+                key: sa_key,
+                scopes: default_sa_scopes(),
+            });
+        } else if opts.contains_key("client_id")
+            || opts.contains_key("client_secret")
+            || opts.contains_key("refresh_token")
+        {
+            explicit_credential_requested = true;
+            let (Some(cid), Some(csec), Some(rtok)) = (
+                opts.get("client_id").filter(|v| !v.trim().is_empty()),
+                opts.get("client_secret").filter(|v| !v.trim().is_empty()),
+                opts.get("refresh_token").filter(|v| !v.trim().is_empty()),
+            ) else {
+                return None;
+            };
+            let token_uri = opts
+                .get("token_uri")
+                .cloned()
+                .unwrap_or_else(|| DEFAULT_OAUTH_TOKEN_URI.to_string());
+            base_source = Some(GcpAuthSource::AuthorizedUser {
+                client_id: cid.clone(),
+                client_secret: csec.clone(),
+                refresh_token: rtok.clone(),
+                quota_project_id: quota_project_id.clone(),
+                token_uri,
+            });
+        } else if explicit_adc.is_some_and(|v| !v.trim().is_empty()) {
+            explicit_credential_requested = true;
+            let adc_path = explicit_adc_candidate.as_ref()?;
+            base_source = Some(parse_adc_source(adc_path)?);
+        } else if let Some(tok) = opts
+            .get("access_token")
+            .or_else(|| opts.get("bearer_token"))
+            .filter(|s| !s.trim().is_empty())
+        {
+            explicit_credential_requested = true;
+            base_source = Some(GcpAuthSource::Static {
+                access_token: tok.clone(),
+                expires_at_unix_ms: None,
+                quota_project_id: quota_project_id.clone(),
+            });
+        } else if opts
+            .get("use_metadata_server")
+            .is_some_and(|v| v == "true" || v == "1")
+        {
+            explicit_credential_requested = true;
+            base_source = Some(build_metadata_source());
+        } else if opts
+            .get("use_gcloud_cli")
+            .is_some_and(|v| v == "true" || v == "1")
+        {
+            explicit_credential_requested = true;
+            base_source = Some(GcpAuthSource::GcloudCli {
+                binary: default_gcloud_binary(),
+                timeout: GCLOUD_CLI_TIMEOUT,
+                quota_project_id: quota_project_id.clone(),
+                impersonate_service_account: None,
+            });
         }
 
-        if base_source.is_none() && target_service_account.is_none() && allow_ambient {
-            for env_var in ["GOOGLE_OAUTH_ACCESS_TOKEN", "CLOUDSDK_AUTH_ACCESS_TOKEN"] {
-                if let Ok(tok) = std::env::var(env_var) {
-                    let trimmed = tok.trim();
-                    if !trimmed.is_empty() {
-                        base_source = Some(GcpAuthSource::Static {
-                            access_token: trimmed.to_string(),
-                            expires_at_unix_ms: None,
-                            quota_project_id: quota_project_id.clone(),
-                        });
-                        break;
+        if !explicit_credential_requested && base_source.is_none() && allow_ambient {
+            if let Some(ref adc_path) = ambient_adc_candidate {
+                base_source = parse_adc_source(adc_path);
+            }
+            if base_source.is_none() && target_service_account.is_none() {
+                for env_var in ["GOOGLE_OAUTH_ACCESS_TOKEN", "CLOUDSDK_AUTH_ACCESS_TOKEN"] {
+                    if let Ok(tok) = std::env::var(env_var) {
+                        let trimmed = tok.trim();
+                        if !trimmed.is_empty() {
+                            base_source = Some(GcpAuthSource::Static {
+                                access_token: trimmed.to_string(),
+                                expires_at_unix_ms: None,
+                                quota_project_id: quota_project_id.clone(),
+                            });
+                            break;
+                        }
                     }
                 }
+            }
+            let allow_metadata_fallback = !opts
+                .get("use_metadata_server")
+                .is_some_and(|v| v == "false" || v == "0");
+            if base_source.is_none() && target_service_account.is_none() && allow_metadata_fallback
+            {
+                base_source = Some(build_metadata_source());
             }
         }
 
         let source = if let Some(target_sa) = target_service_account {
-            let resolved_base = base_source.unwrap_or_else(|| {
-                let host = opts
-                    .get("metadata_host")
-                    .cloned()
-                    .or_else(|| std::env::var("GCE_METADATA_HOST").ok())
-                    .unwrap_or_else(|| "metadata.google.internal".to_string());
-                let endpoint = if host.starts_with("http://") || host.starts_with("https://") {
-                    host
-                } else {
-                    format!("http://{host}")
-                };
-                GcpAuthSource::MetadataServer {
-                    service_account: "default".to_string(),
-                    quota_project_id: quota_project_id.clone(),
-                    endpoint,
-                    scopes: custom_scopes.clone().unwrap_or_default(),
-                }
-            });
+            let resolved_base = base_source.unwrap_or_else(&build_metadata_source);
             let iam_endpoint = opts
                 .get("iam_endpoint")
                 .cloned()
@@ -827,6 +836,26 @@ impl GcpTokenCache {
             GcpAuthSource::ServiceAccount { key, .. } => Some(key),
             _ => None,
         }
+    }
+
+    pub fn auth_source(&self) -> &GcpAuthSource {
+        &self.source
+    }
+
+    pub(crate) fn http_client(&self) -> &reqwest::Client {
+        &self.client
+    }
+
+    pub(crate) fn metadata_http_client(&self) -> &reqwest::Client {
+        &self.metadata_client
+    }
+
+    pub(crate) async fn fetch_source_access_token(
+        &self,
+        source: &GcpAuthSource,
+    ) -> Result<String, String> {
+        let (token, _, _) = self.fetch_from_source(source, current_unix_ms()).await?;
+        Ok(token)
     }
 
     pub fn quota_project_id(&self) -> Option<&str> {
