@@ -72,14 +72,14 @@ User and OKF documentation for CDC, options, and `$N` binds land in `ch08` and `
 
 ## 5. Implementation Plan
 
-- [x] [bff04dcd] [t01-event-session-registry-and-checkpoint-stores.md](tasks/t01-event-session-registry-and-checkpoint-stores.md) — Extend events.py with PostgresReplicationDriver and EventSessionRegistry and create checkpoint structs/stores in change_stream.py.
-- [x] [bff04dcd] [t02-postgres-change-source-coordinator.md](tasks/t02-postgres-change-source-coordinator.md) — Build PostgresChangeSource streaming transaction records into ChangeFeed and persisting CAS checkpoints before wire WAL acks.
-- [x] [bff04dcd] [t03-dsn-and-cloud-options-bridge.md](tasks/t03-dsn-and-cloud-options-bridge.md) — Translate PostgreSQLConfig, libpq PG* env defaults, percent-decoded sockets, and Cloud SQL/AlloyDB settings into native client kwargs.
-- [x] [bff04dcd] [t04-lexer-bind-compiler-and-owned-params.md](tasks/t04-lexer-bind-compiler-and-owned-params.md) — Compile %s, %(name)s, and $N binds in one lexical pass while normalizing mutable buffers, JSONB text, and pgvector inputs.
+- [x] [a2ea407d] [t01-event-session-registry-and-checkpoint-stores.md](tasks/t01-event-session-registry-and-checkpoint-stores.md) — Extend events.py with PostgresReplicationDriver and EventSessionRegistry and create checkpoint structs/stores in change_stream.py.
+- [x] [a2ea407d] [t02-postgres-change-source-coordinator.md](tasks/t02-postgres-change-source-coordinator.md) — Build PostgresChangeSource streaming transaction records into ChangeFeed and persisting CAS checkpoints before wire WAL acks.
+- [x] [a2ea407d] [t03-dsn-and-cloud-options-bridge.md](tasks/t03-dsn-and-cloud-options-bridge.md) — Translate PostgreSQLConfig, libpq PG* env defaults, percent-decoded sockets, and Cloud SQL/AlloyDB settings into native client kwargs.
+- [x] [a2ea407d] [t04-lexer-bind-compiler-and-owned-params.md](tasks/t04-lexer-bind-compiler-and-owned-params.md) — Compile %s, %(name)s, and $N binds in one lexical pass while normalizing mutable buffers, JSONB text, and pgvector inputs.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-Completed (`4/4` tasks at `bff04dcd`: `ruff`, `mypy` across `15` source files, and `111` unit tests pass). Fast `< 20s` pure-Python unit, Ruff, and Mypy gate.
+Completed (`4/4` tasks at `a2ea407d`: `ruff`, `mypy` across `15` source files, and `111` unit tests pass). Fast `< 20s` pure-Python unit, Ruff, and Mypy gate.
 
 ```bash
 uv run --no-sync pytest src/py/tests/unit/db/test_postgres_change_stream.py src/py/tests/unit/db/test_postgres_options_and_binds.py -q && uv run --no-sync ruff check src/py/vertebra/db/adapters/postgres src/py/tests/unit/db/test_postgres_change_stream.py src/py/tests/unit/db/test_postgres_options_and_binds.py && uv run --no-sync mypy src/py/vertebra/db/adapters/postgres

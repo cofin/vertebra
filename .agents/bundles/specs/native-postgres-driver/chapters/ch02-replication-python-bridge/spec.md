@@ -72,14 +72,14 @@ Task `t04` updates `ffi-and-gil-discipline.md`, `pyo3-and-python-runtime.md`, an
 
 ## 5. Implementation Plan
 
-- [x] [f4d3d1eb] [t01-cancel-safe-db-task-and-record-conversion.md](tasks/t01-cancel-safe-db-task-and-record-conversion.md) — Extend vertebra-db py_async for cancel-safe lease restoration and convert ReplicationEventDelivery records to PostgresReplicationRecord on the event loop.
-- [x] [f4d3d1eb] [t02-async-postgres-replication-pyclass.md](tasks/t02-async-postgres-replication-pyclass.md) — Expose AsyncPostgresReplication (#[pyclass(frozen)]) with cancel-safe next, fenced acknowledge, aclose, closed, and async context management.
-- [x] [f4d3d1eb] [t03-client-open-replication-and-pyi-stubs.md](tasks/t03-client-open-replication-and-pyi-stubs.md) — Add replication_identity and open_replication on AsyncPostgresClient and finalize _postgres.pyi for stubtest parity.
-- [x] [f4d3d1eb] [t04-pyo3-ffi-okf-sync.md](tasks/t04-pyo3-ffi-okf-sync.md) — Update the 3 PyO3 FFI OKF chapters (each <= 200 lines) for vertebra._postgres, ShmCapsule, and PendingDeliveryGuard.
+- [x] [a37cac43] [t01-cancel-safe-db-task-and-record-conversion.md](tasks/t01-cancel-safe-db-task-and-record-conversion.md) — Extend vertebra-db py_async for cancel-safe lease restoration and convert ReplicationEventDelivery records to PostgresReplicationRecord on the event loop.
+- [x] [a37cac43] [t02-async-postgres-replication-pyclass.md](tasks/t02-async-postgres-replication-pyclass.md) — Expose AsyncPostgresReplication (#[pyclass(frozen)]) with cancel-safe next, fenced acknowledge, aclose, closed, and async context management.
+- [x] [a37cac43] [t03-client-open-replication-and-pyi-stubs.md](tasks/t03-client-open-replication-and-pyi-stubs.md) — Add replication_identity and open_replication on AsyncPostgresClient and finalize _postgres.pyi for stubtest parity.
+- [x] [a37cac43] [t04-pyo3-ffi-okf-sync.md](tasks/t04-pyo3-ffi-okf-sync.md) — Update the 3 PyO3 FFI OKF chapters (each <= 200 lines) for vertebra._postgres, ShmCapsule, and PendingDeliveryGuard.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-Completed (`4/4` tasks at `f4d3d1eb`). Next chapter: `ch03-cdc-options-and-bind-compiler`.
+Completed (`4/4` tasks at `a37cac43`). Next chapter: `ch03-cdc-options-and-bind-compiler`.
 
 ```bash
 UV_NO_SYNC=1 PYO3_PYTHON=.venv/bin/python make dev && uv run --no-sync python -m mypy.stubtest vertebra._postgres && uv run --no-sync pytest src/py/tests/unit/db/test_postgres_native_replication.py -q && make review-check

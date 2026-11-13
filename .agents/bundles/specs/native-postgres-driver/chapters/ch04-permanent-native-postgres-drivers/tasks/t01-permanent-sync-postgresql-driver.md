@@ -7,7 +7,7 @@ title: "Implement permanent SyncPostgreSQLDriver in _sync.py and postgres_ports.
 description: "Build SyncPostgreSQLDriver over SyncPostgresPool/SyncPostgresClient with queries, transactions/savepoints, RLS scopes, and binary COPY."
 status: stable
 state: completed
-commit: 50d7a1ef
+commit: 9a370dcc
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact

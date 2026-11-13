@@ -7,8 +7,8 @@ title: "Implement frozen AsyncPostgresReplication pyclass and module registratio
 description: "Expose AsyncPostgresReplication (#[pyclass(frozen)]) with cancel-safe next, fenced acknowledge, aclose, closed, and async context management."
 status: stable
 state: completed
-commit: f4d3d1eb
-last_verified_commit: f4d3d1eb
+commit: a37cac43
+last_verified_commit: a37cac43
 last_verified_at: "2026-11-13T04:53:53Z"
 verification_evidence: "maturin develop + pytest test_postgres_native_replication.py (110 passed)"
 claimed_by: null

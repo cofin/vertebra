@@ -7,7 +7,7 @@ title: "Implement permanent AsyncPostgreSQLDriver in _async.py"
 description: "Build native AsyncPostgreSQLDriver over AsyncPostgresPool/AsyncPostgresClient with shielded rollback and zero asyncio.to_thread."
 status: stable
 state: completed
-commit: 50d7a1ef
+commit: 9a370dcc
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact

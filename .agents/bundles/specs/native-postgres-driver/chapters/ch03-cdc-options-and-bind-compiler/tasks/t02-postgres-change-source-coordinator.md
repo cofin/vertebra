@@ -7,8 +7,8 @@ title: "Implement PostgresChangeSource serialized checkpoint-before-ack coordina
 description: "Build PostgresChangeSource streaming transaction records into ChangeFeed and persisting CAS checkpoints before wire WAL acks."
 status: stable
 state: completed
-commit: bff04dcd
-last_verified_commit: bff04dcd
+commit: a2ea407d
+last_verified_commit: a2ea407d
 last_verified_at: "2026-11-13T05:14:30Z"
 verification_evidence: "ruff + mypy (15 files) + pytest (111 passed)"
 claimed_by: null

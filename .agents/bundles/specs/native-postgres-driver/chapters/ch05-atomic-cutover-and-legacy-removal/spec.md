@@ -80,14 +80,14 @@ Performs the single atomic cutover from `psycopg`/`asyncpg` to `vertebra._postgr
 
 ## 5. Implementation Plan
 
-- [x] [d635f818] [t01-sqlspec-numeric-and-sqlalchemy-dollar-cutover.md](tasks/t01-sqlspec-numeric-and-sqlalchemy-dollar-cutover.md) — Cut PostgreSQLSyncDriver/PostgreSQLAsyncDriver to ParameterStyle.NUMERIC and SQLAlchemy PostgreSQL dialects to numeric_dollar.
-- [x] [d635f818] [t02-activate-native-driver-barrel-and-migrate-unit-tests.md](tasks/t02-activate-native-driver-barrel-and-migrate-unit-tests.md) — Cut driver.py, __init__.py, and embeddings.py over to native PostgreSQL drivers and replace psycopg/SQLite test doubles with postgres_ports.py.
-- [x] [d635f818] [t03-queue-guard-and-gcp-dialer-cleanup.md](tasks/t03-queue-guard-and-gcp-dialer-cleanup.md) — Switch PostgreSQLQueueBackend to vertebra._postgres, delete legacy psycopg/asyncpg/asyncmy dialer helpers, and fix TLS/RSA/async refresh bugs in cloudsql.py and alloydb.py.
+- [x] [19e9a251] [t01-sqlspec-numeric-and-sqlalchemy-dollar-cutover.md](tasks/t01-sqlspec-numeric-and-sqlalchemy-dollar-cutover.md) — Cut PostgreSQLSyncDriver/PostgreSQLAsyncDriver to ParameterStyle.NUMERIC and SQLAlchemy PostgreSQL dialects to numeric_dollar.
+- [x] [19e9a251] [t02-activate-native-driver-barrel-and-migrate-unit-tests.md](tasks/t02-activate-native-driver-barrel-and-migrate-unit-tests.md) — Cut driver.py, __init__.py, and embeddings.py over to native PostgreSQL drivers and replace psycopg/SQLite test doubles with postgres_ports.py.
+- [x] [19e9a251] [t03-queue-guard-and-gcp-dialer-cleanup.md](tasks/t03-queue-guard-and-gcp-dialer-cleanup.md) — Switch PostgreSQLQueueBackend to vertebra._postgres, delete legacy psycopg/asyncpg/asyncmy dialer helpers, and fix TLS/RSA/async refresh bugs in cloudsql.py and alloydb.py.
 - [x] [6d134bb4] [t04-cutover-extensions-and-limitations-okf-sync.md](tasks/t04-cutover-extensions-and-limitations-okf-sync.md) — Update sqlspec-alchemy-and-dialects.md, distributed-queues-and-email.md, and database-driver-limitations.md (<= 200L each) for native PostgreSQL.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-All `4` tasks (`t01`–`t04`) completed (`6d134bb4`, `d635f818`). Zero `psycopg`/`asyncpg`/`asyncmy` references remain in `src/py/vertebra`.
+All `4` tasks (`t01`–`t04`) completed (`6d134bb4`, `19e9a251`). Zero `psycopg`/`asyncpg`/`asyncmy` references remain in `src/py/vertebra`.
 
 ```bash
 uv run --no-sync pytest src/py/tests/unit/db/test_postgres_driver.py src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py src/py/tests/unit/db/test_native_db_drivers.py src/py/tests/unit/db/test_enterprise_olap_drivers.py src/py/tests/unit/embeddings/test_google_embedders.py src/py/tests/unit/extensions/test_postgres_compiler_transport.py src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py src/py/tests/unit/extensions/test_gcp_adapters_and_sqlalchemy.py src/py/tests/unit/framework/test_distributed_queues.py -q && test -z "$(git grep -n -E 'psycopg|asyncpg|asyncmy' -- src/py/vertebra)" && make review-check

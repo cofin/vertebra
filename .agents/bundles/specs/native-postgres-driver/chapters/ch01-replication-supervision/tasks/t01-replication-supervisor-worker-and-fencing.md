@@ -7,8 +7,8 @@ title: "Implement generation-fenced ReplicationSupervisor and Drop cancel"
 description: "Add ReplicationSupervisor worker loop, generation-fenced ReplicationEventDelivery leases, monotonic acknowledge(generation, commit_end_lsn), and synchronous Drop cancellation."
 status: stable
 state: completed
-commit: 7d50fd42
-last_verified_commit: 7d50fd42
+commit: 7c4a3996
+last_verified_commit: 7c4a3996
 last_verified_at: "2026-11-13T01:52:00Z"
 verification_evidence: "cargo test -p vertebra-postgres --test postgres_replication_wire_tests (56 passed; 0 failed) + cargo clippy -p vertebra-postgres --all-targets -- -D warnings (exit 0)"
 claimed_by: null

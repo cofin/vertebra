@@ -7,8 +7,8 @@ title: "Synchronize PyO3 FFI pattern, runtime gotcha, and worker dispatch OKF ch
 description: "Update the 3 PyO3 FFI OKF chapters (each <= 200 lines) for vertebra._postgres, ShmCapsule, and PendingDeliveryGuard."
 status: stable
 state: completed
-commit: f4d3d1eb
-last_verified_commit: f4d3d1eb
+commit: a37cac43
+last_verified_commit: a37cac43
 last_verified_at: "2026-11-13T04:53:53Z"
 verification_evidence: "review_setup.py validate + pytest test_review_setup.py (27 passed)"
 claimed_by: null

@@ -67,8 +67,8 @@ OKF updates are consolidated in `ch09` so `postgres-native-driver.md` and `postg
 
 ## 5. Implementation Plan
 
-- [x] [7d50fd42] [t01-replication-supervisor-worker-and-fencing.md](tasks/t01-replication-supervisor-worker-and-fencing.md) — Add ReplicationSupervisor worker loop, generation-fenced ReplicationEventDelivery leases, monotonic acknowledge(generation, commit_end_lsn), and synchronous Drop cancellation.
-- [x] [7d50fd42] [t02-verified-resume-and-reconnect-policy.md](tasks/t02-verified-resume-and-reconnect-policy.md) — Verify server/database/slot/publication identity across reconnects via connect_logical_verified, enforce confirmed_flush_lsn floors, and classify transient vs permanent errors.
+- [x] [7c4a3996] [t01-replication-supervisor-worker-and-fencing.md](tasks/t01-replication-supervisor-worker-and-fencing.md) — Add ReplicationSupervisor worker loop, generation-fenced ReplicationEventDelivery leases, monotonic acknowledge(generation, commit_end_lsn), and synchronous Drop cancellation.
+- [x] [7c4a3996] [t02-verified-resume-and-reconnect-policy.md](tasks/t02-verified-resume-and-reconnect-policy.md) — Verify server/database/slot/publication identity across reconnects via connect_logical_verified, enforce confirmed_flush_lsn floors, and classify transient vs permanent errors.
 
 ## 6. Current State & Remaining Plan Snapshot
 

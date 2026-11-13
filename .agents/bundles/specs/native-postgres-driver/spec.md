@@ -27,7 +27,7 @@ research:
 plan_revision: 9
 plan_commit: 18baadcd
 state_revision: 19
-last_verified_checkpoint: d635f818
+last_verified_checkpoint: 19e9a251
 last_reviewed_chapter: ch05-atomic-cutover-and-legacy-removal
 last_reviewed_commit: 11c7c541
 created_at: "2026-11-03T04:05:00Z"
@@ -129,7 +129,7 @@ Nine cohesive chapters (`32` tasks) remain to finish logical replication supervi
 - [x] [bfa2dad7] [ch01-replication-supervision](chapters/ch01-replication-supervision/spec.md) — Generation-fenced `ReplicationSupervisor`, bounded control/event channels, monotonic LSN acks, and identity-verified `connect_logical_verified` resume.
 - [x] [1eeeffb9] [ch02-replication-python-bridge](chapters/ch02-replication-python-bridge/spec.md) — Cancel-safe `spawn_rust_db_task_with_attr_and_future`, frozen `AsyncPostgresReplication`, 14-class `_postgres.pyi`, and PyO3 FFI OKF sync.
 - [x] [31024a23] [ch03-cdc-options-and-bind-compiler](chapters/ch03-cdc-options-and-bind-compiler/spec.md) — `PostgresChangeSource` CAS checkpoint-before-ack coordinator, `EventSessionRegistry`, libpq/cloud `options.py`, and single-pass lexer `binds.py`.
-- [x] [50d7a1ef] [ch04-permanent-native-postgres-drivers](chapters/ch04-permanent-native-postgres-drivers/spec.md) — Permanent `SyncPostgreSQLDriver` (`_sync.py`) and `AsyncPostgreSQLDriver` (`_async.py`) wiring native pools, pipelines, `VTBARROW`, and event hooks.
+- [x] [9a370dcc] [ch04-permanent-native-postgres-drivers](chapters/ch04-permanent-native-postgres-drivers/spec.md) — Permanent `SyncPostgreSQLDriver` (`_sync.py`) and `AsyncPostgreSQLDriver` (`_async.py`) wiring native pools, pipelines, `VTBARROW`, and event hooks.
 - [x] [11c7c541] [ch05-atomic-cutover-and-legacy-removal](chapters/ch05-atomic-cutover-and-legacy-removal/spec.md) — Atomic SQLSpec (`NUMERIC`), SQLAlchemy (`numeric_dollar`), 12-line `driver.py` barrel, `PostgreSQLQueueBackend` guard, and `cloudsql.py`/`alloydb.py` legacy removal + TLS/async fixes.
 - [~] [ch06-live-conformance-and-service-acceptance](chapters/ch06-live-conformance-and-service-acceptance/spec.md) — PostgreSQL 14–18 conformance matrix with zero-skip hook plus live `pgoutput` replication and `PGCOPY`/`VTBARROW`/`LISTEN`/`pgvector`/`PgBouncer` suites.
 - [ ] [ch07-wheel-ci-and-benchmarks](chapters/ch07-wheel-ci-and-benchmarks/spec.md) — `verify_postgres_wheel.py`, CI/release smoke lanes, free-threaded 8-thread pool proofs, `postgres-bench` group, Criterion benches, and testing OKF sync.
@@ -138,7 +138,7 @@ Nine cohesive chapters (`32` tasks) remain to finish logical replication supervi
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Active Frontier**: Chapters `ch01`–`ch05` (`17/32` tasks) are completed (`d635f818`, sync `11c7c541`), eliminating `psycopg`, `asyncpg`, and `asyncmy` from `src/py/vertebra`; active frontier advances to `ch06-live-conformance-and-service-acceptance` (`native-postgres-driver:ch06:t01`, `15` open `compact` tasks remain across `ch06`–`ch09`).
+- **Active Frontier**: Chapters `ch01`–`ch05` (`17/32` tasks) are completed (`19e9a251`, sync `11c7c541`), eliminating `psycopg`, `asyncpg`, and `asyncmy` from `src/py/vertebra`; active frontier advances to `ch06-live-conformance-and-service-acceptance` (`native-postgres-driver:ch06:t01`, `15` open `compact` tasks remain across `ch06`–`ch09`).
 - **Downstream Unlocks**: Completing `ch05` unblocks [`broker-pool-sharing`](../broker-pool-sharing/spec.md), [`driver-conformance-ci`](../driver-conformance-ci/spec.md), [`native-redis-driver`](../native-redis-driver/spec.md), [`native-adapter-organization`](../native-adapter-organization/spec.md), [`sqlspec-adapter-parity`](../sqlspec-adapter-parity/spec.md), and [`queues-tasks-and-channels`](../queues-tasks-and-channels/spec.md).
 - **`/flow:finish` Full Gate**: `make lint-all && make rs-test && make py-test && make postgres-wheel-check && make postgres-test && make postgres-bench-check && make docs-check && make review-check`.
 

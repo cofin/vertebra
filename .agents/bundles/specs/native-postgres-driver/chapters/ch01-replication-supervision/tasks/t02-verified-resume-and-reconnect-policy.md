@@ -7,8 +7,8 @@ title: "Add connect_logical_verified identity checks and reconnect backoff"
 description: "Verify server/database/slot/publication identity across reconnects, enforce confirmed_flush_lsn floors, and classify transient vs permanent errors."
 status: stable
 state: completed
-commit: 7d50fd42
-last_verified_commit: 7d50fd42
+commit: 7c4a3996
+last_verified_commit: 7c4a3996
 last_verified_at: "2026-11-13T01:52:00Z"
 verification_evidence: "cargo test -p vertebra-postgres --test postgres_replication_wire_tests (56 passed; 0 failed) + cargo clippy -p vertebra-postgres --all-targets -- -D warnings (exit 0)"
 claimed_by: null

@@ -7,8 +7,8 @@ title: "Switch SQLSpec and SQLAlchemy PostgreSQL adapters directly to $N numeric
 description: "Cut PostgreSQLSyncDriver/PostgreSQLAsyncDriver to ParameterStyle.NUMERIC and SQLAlchemy PostgreSQL dialects to numeric_dollar."
 status: stable
 state: completed
-commit: d635f818
-last_verified_commit: d635f818
+commit: 19e9a251
+last_verified_commit: 19e9a251
 last_verified_at: "2026-11-13T15:43:00Z"
 verification_evidence: "pytest test_postgres_compiler_transport.py test_sqlalchemy_and_sqlspec_vtb.py + ruff + mypy clean"
 planning_quality: standard
