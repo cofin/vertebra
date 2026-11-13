@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 from sqlalchemy import bindparam, column, select, table
 from sqlspec import StatementStack
-from sqlspec.core.filters import LimitOffsetFilter
+from sqlspec.core.filters import LimitOffsetFilter, NullFilter
 from sqlspec.core.parameters import ParameterStyle, TypedParameter
 from sqlspec.core.statement import SQL
 
@@ -175,3 +175,236 @@ def test_sqlalchemy_postgres_dialects_compile_numeric_dollar(dialect_cls: type[A
     assert "$1" in compiled.string
     assert "$2" in compiled.string
     assert compiled.positiontup == ["id", "name"]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+async def test_postgres_execute_many_and_stack_many_compile_numeric_filters_and_typed_params(
+    asynchronous: bool,
+) -> None:
+    """Sync and async execute_many and StatementStack.push_execute_many compile $N binds, filters, and TypedParameter."""
+    cluster = FakePostgresCluster()
+    cluster._conn.execute("CREATE TABLE items (id INTEGER, name TEXT, deleted_at TEXT)")
+    cfg = PostgreSQLConfig(dsn="postgresql://localhost:5432/app")
+    seen_transforms: list[str] = []
+
+    def transformer(expression: Any, parameters: Any) -> tuple[Any, Any]:
+        seen_transforms.append(type(expression).__name__)
+        return expression, parameters
+
+    if asynchronous:
+        native_async = AsyncPostgreSQLDriver(cfg, pool=FakeAsyncPostgresPool(cluster))
+        adapter_async = PostgreSQLAsyncDriver(
+            native_async,
+            statement_config=PostgreSQLAsyncConfig(cfg).statement_config,
+        )
+        custom_cfg = adapter_async.statement_config.replace(
+            enable_parsing=True,
+            statement_transformers=[transformer],
+        )
+        try:
+            inserted = await adapter_async.execute_many(
+                "INSERT INTO items (id, name, deleted_at) VALUES (?, ?, ?)",
+                [
+                    (TypedParameter(1, int, "id"), TypedParameter("alpha", str, "name"), None),
+                    (TypedParameter(2, int, "id"), "beta", "2026-01-01"),
+                ],
+                statement_config=custom_cfg,
+            )
+            assert inserted == 2
+            assert seen_transforms == ["Insert"]
+            assert [(sql, params) for sql, params, _ in cluster.recorded_queries] == [
+                ("INSERT INTO items (id, name, deleted_at) VALUES ($1, $2, $3)", (1, "alpha", None)),
+                ("INSERT INTO items (id, name, deleted_at) VALUES ($1, $2, $3)", (2, "beta", "2026-01-01")),
+            ]
+
+            cluster.recorded_queries.clear()
+            updated = await adapter_async.execute_many(
+                "UPDATE items SET name = ? WHERE id = ?",
+                [
+                    (TypedParameter("alpha-v2", str, "name"), TypedParameter(1, int, "id")),
+                    (TypedParameter("beta-v2", str, "name"), TypedParameter(2, int, "id")),
+                ],
+                NullFilter("deleted_at"),
+            )
+            assert updated == 1
+            assert [(sql, params) for sql, params, _ in cluster.recorded_queries] == [
+                (
+                    "UPDATE items SET name = $1 WHERE id = $2 AND deleted_at IS NULL",
+                    ("alpha-v2", 1),
+                ),
+                (
+                    "UPDATE items SET name = $1 WHERE id = $2 AND deleted_at IS NULL",
+                    ("beta-v2", 2),
+                ),
+            ]
+
+            cluster.recorded_queries.clear()
+            stack_results = await adapter_async.execute_stack(
+                StatementStack().push_execute_many(
+                    "UPDATE items SET name = ? WHERE id = ?",
+                    [
+                        (TypedParameter("alpha-v3", str, "name"), TypedParameter(1, int, "id")),
+                        (TypedParameter("beta-v3", str, "name"), TypedParameter(2, int, "id")),
+                    ],
+                    NullFilter("deleted_at"),
+                )
+            )
+            assert stack_results[0].rows_affected == 1
+            assert [(sql, params) for sql, params, _ in cluster.recorded_queries if sql.startswith("UPDATE")] == [
+                (
+                    "UPDATE items SET name = $1 WHERE id = $2 AND deleted_at IS NULL",
+                    ("alpha-v3", 1),
+                ),
+                (
+                    "UPDATE items SET name = $1 WHERE id = $2 AND deleted_at IS NULL",
+                    ("beta-v3", 2),
+                ),
+            ]
+            assert cluster._conn.execute("SELECT id, name FROM items ORDER BY id").fetchall() == [
+                (1, "alpha-v3"),
+                (2, "beta"),
+            ]
+        finally:
+            await native_async.close()
+        return
+
+    native_sync = SyncPostgreSQLDriver(cfg, pool=FakeSyncPostgresPool(cluster))
+    adapter_sync = PostgreSQLSyncDriver(
+        native_sync,
+        statement_config=PostgreSQLSyncConfig(cfg).statement_config,
+    )
+    custom_cfg = adapter_sync.statement_config.replace(
+        enable_parsing=True,
+        statement_transformers=[transformer],
+    )
+    try:
+        inserted = adapter_sync.execute_many(
+            "INSERT INTO items (id, name, deleted_at) VALUES (?, ?, ?)",
+            [
+                (TypedParameter(1, int, "id"), TypedParameter("alpha", str, "name"), None),
+                (TypedParameter(2, int, "id"), "beta", "2026-01-01"),
+            ],
+            statement_config=custom_cfg,
+        )
+        assert inserted == 2
+        assert seen_transforms == ["Insert"]
+        assert [(sql, params) for sql, params, _ in cluster.recorded_queries] == [
+            ("INSERT INTO items (id, name, deleted_at) VALUES ($1, $2, $3)", (1, "alpha", None)),
+            ("INSERT INTO items (id, name, deleted_at) VALUES ($1, $2, $3)", (2, "beta", "2026-01-01")),
+        ]
+
+        cluster.recorded_queries.clear()
+        updated = adapter_sync.execute_many(
+            "UPDATE items SET name = ? WHERE id = ?",
+            [
+                (TypedParameter("alpha-v2", str, "name"), TypedParameter(1, int, "id")),
+                (TypedParameter("beta-v2", str, "name"), TypedParameter(2, int, "id")),
+            ],
+            NullFilter("deleted_at"),
+        )
+        assert updated == 1
+        assert [(sql, params) for sql, params, _ in cluster.recorded_queries] == [
+            (
+                "UPDATE items SET name = $1 WHERE id = $2 AND deleted_at IS NULL",
+                ("alpha-v2", 1),
+            ),
+            (
+                "UPDATE items SET name = $1 WHERE id = $2 AND deleted_at IS NULL",
+                ("beta-v2", 2),
+            ),
+        ]
+
+        cluster.recorded_queries.clear()
+        stack_results = adapter_sync.execute_stack(
+            StatementStack().push_execute_many(
+                "UPDATE items SET name = ? WHERE id = ?",
+                [
+                    (TypedParameter("alpha-v3", str, "name"), TypedParameter(1, int, "id")),
+                    (TypedParameter("beta-v3", str, "name"), TypedParameter(2, int, "id")),
+                ],
+                NullFilter("deleted_at"),
+            )
+        )
+        assert stack_results[0].rows_affected == 1
+        assert [(sql, params) for sql, params, _ in cluster.recorded_queries if sql.startswith("UPDATE")] == [
+            (
+                "UPDATE items SET name = $1 WHERE id = $2 AND deleted_at IS NULL",
+                ("alpha-v3", 1),
+            ),
+            (
+                "UPDATE items SET name = $1 WHERE id = $2 AND deleted_at IS NULL",
+                ("beta-v3", 2),
+            ),
+        ]
+        assert cluster._conn.execute("SELECT id, name FROM items ORDER BY id").fetchall() == [
+            (1, "alpha-v3"),
+            (2, "beta"),
+        ]
+    finally:
+        native_sync.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("method_name", ["select_one", "select_one_or_none", "select_value"])
+async def test_postgres_select_one_family_forwards_statement_config(
+    asynchronous: bool,
+    method_name: str,
+) -> None:
+    """select_one, select_one_or_none, and select_value forward statement_config to select."""
+    cluster = _seed_cluster()
+    cfg = PostgreSQLConfig(dsn="postgresql://localhost:5432/app")
+    seen_transforms: list[str] = []
+
+    def transformer(expression: Any, parameters: Any) -> tuple[Any, Any]:
+        seen_transforms.append(type(expression).__name__)
+        return expression, parameters
+
+    if asynchronous:
+        native_async = AsyncPostgreSQLDriver(cfg, pool=FakeAsyncPostgresPool(cluster))
+        adapter_async = PostgreSQLAsyncDriver(
+            native_async,
+            statement_config=PostgreSQLAsyncConfig(cfg).statement_config,
+        )
+        override_cfg = adapter_async.statement_config.replace(
+            enable_parsing=True,
+            statement_transformers=[transformer],
+        )
+        try:
+            fn_async = getattr(adapter_async, method_name)
+            out = await fn_async(
+                "SELECT name FROM items WHERE id = ?",
+                TypedParameter(7, int, "id"),
+                statement_config=override_cfg,
+            )
+            expected = "alpha" if method_name == "select_value" else {"name": "alpha"}
+            assert out == expected
+            assert seen_transforms == ["Select"]
+            assert cluster.recorded_queries[-1][:2] == ("SELECT name FROM items WHERE id = $1", (7,))
+        finally:
+            await native_async.close()
+        return
+
+    native_sync = SyncPostgreSQLDriver(cfg, pool=FakeSyncPostgresPool(cluster))
+    adapter_sync = PostgreSQLSyncDriver(
+        native_sync,
+        statement_config=PostgreSQLSyncConfig(cfg).statement_config,
+    )
+    override_cfg = adapter_sync.statement_config.replace(
+        enable_parsing=True,
+        statement_transformers=[transformer],
+    )
+    try:
+        fn_sync = getattr(adapter_sync, method_name)
+        out = fn_sync(
+            "SELECT name FROM items WHERE id = ?",
+            TypedParameter(7, int, "id"),
+            statement_config=override_cfg,
+        )
+        expected = "alpha" if method_name == "select_value" else {"name": "alpha"}
+        assert out == expected
+        assert seen_transforms == ["Select"]
+        assert cluster.recorded_queries[-1][:2] == ("SELECT name FROM items WHERE id = $1", (7,))
+    finally:
+        native_sync.close()

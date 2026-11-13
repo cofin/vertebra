@@ -11,7 +11,7 @@ use std::any::Any;
 use std::ffi::{CStr, c_void};
 use std::future::Future;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use pyo3::exceptions::PyRuntimeError;
@@ -53,14 +53,22 @@ fn make_task_panic_err(py: Python<'_>, message: String) -> PyErr {
     immutable_type
 )]
 struct DbTaskCanceller {
-    abort: AbortHandle,
+    abort: Mutex<Option<AbortHandle>>,
+    cancelled_early: AtomicBool,
 }
 
 #[pymethods]
 impl DbTaskCanceller {
     fn __call__(&self, future: &Bound<'_, PyAny>) -> PyResult<()> {
         if future.call_method0("cancelled")?.extract::<bool>()? {
-            self.abort.abort();
+            let handle = {
+                let guard = self.abort.lock().unwrap_or_else(|e| e.into_inner());
+                self.cancelled_early.store(true, Ordering::Release);
+                guard.clone()
+            };
+            if let Some(abort) = handle {
+                abort.abort();
+            }
         }
         Ok(())
     }
@@ -76,6 +84,7 @@ type BoxedCancelCallback = Box<dyn FnOnce() + Send + 'static>;
 )]
 struct CustomDbTaskCanceller {
     on_cancel: Arc<Mutex<Option<BoxedCancelCallback>>>,
+    cancelled_early: Arc<AtomicBool>,
 }
 
 #[pymethods]
@@ -84,6 +93,7 @@ impl CustomDbTaskCanceller {
         if future.call_method0("cancelled")?.extract::<bool>()? {
             let callback = {
                 let mut guard = self.on_cancel.lock().unwrap_or_else(|e| e.into_inner());
+                self.cancelled_early.store(true, Ordering::Release);
                 guard.take()
             };
             if let Some(cb) = callback {
@@ -338,32 +348,6 @@ impl Drop for RustDbTaskAwaitable {
     }
 }
 
-struct ArmedWorkerGuard {
-    abort: tokio::task::AbortHandle,
-    disarmed: bool,
-}
-
-impl ArmedWorkerGuard {
-    fn new(abort: tokio::task::AbortHandle) -> Self {
-        Self {
-            abort,
-            disarmed: false,
-        }
-    }
-
-    fn disarm(&mut self) {
-        self.disarmed = true;
-    }
-}
-
-impl Drop for ArmedWorkerGuard {
-    fn drop(&mut self) {
-        if !self.disarmed {
-            self.abort.abort();
-        }
-    }
-}
-
 /// Spawn a background Tokio task and resolve its Python `asyncio.Future` via an `attr_name`-keyed
 /// `AsyncCompletionQueue` drainer attached to the running event loop, passing the original Python
 /// `Future` to `map_ok` so mappers can gate side effects on owning-loop cancellation.
@@ -385,15 +369,36 @@ where
     let loop_obj = asyncio.call_method0("get_running_loop")?;
     let py_fut = loop_obj.call_method0("create_future")?;
     let ring = ensure_db_completion_ring(py, &loop_obj, attr_name)?;
+    let canceller = Py::new(
+        py,
+        DbTaskCanceller {
+            abort: Mutex::new(None),
+            cancelled_early: AtomicBool::new(false),
+        },
+    )?;
+    py_fut.call_method1("add_done_callback", (canceller.bind(py),))?;
     let fut_for_cb = py_fut.clone().unbind();
+    let fut_for_await = py_fut.unbind();
+
     let worker = db_runtime_handle().spawn(fut);
     let abort = worker.abort_handle();
     let abort_for_drop = abort.clone();
-    let mut guard = ArmedWorkerGuard::new(abort.clone());
-    let canceller = Py::new(py, DbTaskCanceller { abort })?;
-    py_fut.call_method1("add_done_callback", (canceller,))?;
-    let fut_for_await = py_fut.unbind();
-    guard.disarm();
+    let abort_immediately = {
+        let canceller_ref = canceller.get();
+        let mut guard = canceller_ref
+            .abort
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if canceller_ref.cancelled_early.load(Ordering::Acquire) {
+            true
+        } else {
+            *guard = Some(abort);
+            false
+        }
+    };
+    if abort_immediately {
+        abort_for_drop.abort();
+    }
 
     db_runtime_handle().spawn(async move {
         let produce: DbOutcomeProducer = match worker.await {
@@ -420,7 +425,7 @@ where
 
     Ok(RustDbTaskAwaitable {
         future: fut_for_await,
-        awaited: std::sync::atomic::AtomicBool::new(false),
+        awaited: AtomicBool::new(false),
         on_unawaited_drop: Arc::new(Mutex::new(Some(Box::new(move || abort_for_drop.abort())))),
     })
 }
@@ -472,28 +477,39 @@ where
     let loop_obj = asyncio.call_method0("get_running_loop")?;
     let py_fut = loop_obj.call_method0("create_future")?;
     let ring = ensure_db_completion_ring(py, &loop_obj, attr_name)?;
-    let fut_for_cb = py_fut.clone().unbind();
-    let worker = db_runtime_handle().spawn(fut);
-    let abort = worker.abort_handle();
-    let mut guard = ArmedWorkerGuard::new(abort);
-    let cancel_slot: Arc<Mutex<Option<BoxedCancelCallback>>> =
-        Arc::new(Mutex::new(Some(Box::new(on_cancel))));
+    let cancel_slot: Arc<Mutex<Option<BoxedCancelCallback>>> = Arc::new(Mutex::new(None));
+    let cancelled_early = Arc::new(AtomicBool::new(false));
     let canceller = Py::new(
         py,
         CustomDbTaskCanceller {
             on_cancel: Arc::clone(&cancel_slot),
+            cancelled_early: Arc::clone(&cancelled_early),
         },
     )?;
     py_fut.call_method1("add_done_callback", (canceller,))?;
+    let fut_for_cb = py_fut.clone().unbind();
     let awaitable = Bound::new(
         py,
         RustDbTaskAwaitable {
             future: py_fut.unbind(),
-            awaited: std::sync::atomic::AtomicBool::new(false),
-            on_unawaited_drop: cancel_slot,
+            awaited: AtomicBool::new(false),
+            on_unawaited_drop: Arc::clone(&cancel_slot),
         },
     )?;
-    guard.disarm();
+
+    let worker = db_runtime_handle().spawn(fut);
+    let immediate_cancel = {
+        let mut guard = cancel_slot.lock().unwrap_or_else(|e| e.into_inner());
+        if cancelled_early.load(Ordering::Acquire) {
+            Some(on_cancel)
+        } else {
+            *guard = Some(Box::new(on_cancel));
+            None
+        }
+    };
+    if let Some(cancel_fn) = immediate_cancel {
+        cancel_fn();
+    }
 
     db_runtime_handle().spawn(async move {
         let produce: DbOutcomeProducer = match worker.await {
@@ -868,16 +884,20 @@ mod tests {
     fn callback_registration_failure_aborts_worker() {
         Python::initialize();
         let dropped = Arc::new(AtomicBool::new(false));
+        let started = Arc::new(AtomicBool::new(false));
         let dropped_clone = Arc::clone(&dropped);
+        let started_clone = Arc::clone(&started);
 
         Python::attach(|py| {
             let spawn =
                 PyCFunction::new_closure(py, None, None, move |args: &Bound<'_, PyTuple>, _| {
                     let guard = DropFlag(Arc::clone(&dropped_clone));
+                    let started_flag = Arc::clone(&started_clone);
                     spawn_rust_db_task_with_attr(
                         args.py(),
                         async move {
                             let _guard = guard;
+                            started_flag.store(true, Ordering::SeqCst);
                             tokio::time::sleep(Duration::from_secs(5)).await;
                             Ok::<i64, String>(1)
                         },
@@ -915,15 +935,12 @@ mod tests {
                 .extract()
                 .unwrap();
             assert_eq!(msg, "callback registration failed");
-            py.detach(|| {
-                let deadline = Instant::now() + Duration::from_secs(1);
-                while !dropped.load(Ordering::SeqCst) && Instant::now() < deadline {
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-            });
+            assert!(dropped.load(Ordering::SeqCst));
+            assert!(!started.load(Ordering::SeqCst));
         });
 
         assert!(dropped.load(Ordering::SeqCst));
+        assert!(!started.load(Ordering::SeqCst));
     }
 
     #[test]
@@ -1060,19 +1077,23 @@ mod tests {
     fn registration_failure_drops_worker() {
         Python::initialize();
         let dropped = Arc::new(AtomicBool::new(false));
+        let started = Arc::new(AtomicBool::new(false));
         let callback_called = Arc::new(AtomicBool::new(false));
         let dropped_clone = Arc::clone(&dropped);
+        let started_clone = Arc::clone(&started);
         let cb_clone = Arc::clone(&callback_called);
 
         Python::attach(|py| {
             let spawn =
                 PyCFunction::new_closure(py, None, None, move |args: &Bound<'_, PyTuple>, _| {
                     let guard = DropFlag(Arc::clone(&dropped_clone));
+                    let started_flag = Arc::clone(&started_clone);
                     let cb_flag = Arc::clone(&cb_clone);
                     spawn_rust_db_task_with_attr_and_cancel(
                         args.py(),
                         async move {
                             let _guard = guard;
+                            started_flag.store(true, Ordering::SeqCst);
                             tokio::time::sleep(Duration::from_secs(5)).await;
                             Ok::<i64, String>(1)
                         },
@@ -1114,15 +1135,12 @@ mod tests {
                 .extract()
                 .unwrap();
             assert_eq!(msg, "custom callback registration failed");
-            py.detach(|| {
-                let deadline = Instant::now() + Duration::from_secs(1);
-                while !dropped.load(Ordering::SeqCst) && Instant::now() < deadline {
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-            });
+            assert!(dropped.load(Ordering::SeqCst));
+            assert!(!started.load(Ordering::SeqCst));
         });
 
         assert!(dropped.load(Ordering::SeqCst));
+        assert!(!started.load(Ordering::SeqCst));
         assert!(!callback_called.load(Ordering::SeqCst));
     }
 

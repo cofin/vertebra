@@ -296,18 +296,21 @@ def test_cloud_dialers_remove_legacy_driver_helpers_and_validate_configs() -> No
     assert CloudSQLConfig(instance_connection_name="p:r:i", refresh_lead_seconds=0).refresh_lead_seconds == 0
 
 
+@pytest.mark.parametrize("dialer_kind", ["cloudsql", "alloydb"])
 def test_cloud_dialers_default_tls_cert_required_and_reject_fake_rsa_fallback(
+    dialer_kind: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Default TLS contexts require certificate verification and keygen raises instead of returning static fake keys."""
-    csql_dialer = SyncCloudSQLDialer(CloudSQLConfig(instance_connection_name="p:r:i"))
-    alloy_dialer = SyncAlloyDBDialer(AlloyDBConfig(instance_uri="projects/p/locations/r/clusters/c/instances/i"))
-
-    for dialer in (csql_dialer, alloy_dialer):
-        ctx = dialer.build_tls_context(ca_pem=None)
-        assert ctx.minimum_version == ssl.TLSVersion.TLSv1_3
-        assert ctx.check_hostname is False
-        assert ctx.verify_mode == ssl.CERT_REQUIRED
+    dialer: SyncCloudSQLDialer | SyncAlloyDBDialer = (
+        SyncCloudSQLDialer(CloudSQLConfig(instance_connection_name="p:r:i"))
+        if dialer_kind == "cloudsql"
+        else SyncAlloyDBDialer(AlloyDBConfig(instance_uri="projects/p/locations/r/clusters/c/instances/i"))
+    )
+    ctx = dialer.build_tls_context(ca_pem=None)
+    assert ctx.minimum_version == ssl.TLSVersion.TLSv1_3
+    assert ctx.check_hostname is False
+    assert ctx.verify_mode == ssl.CERT_REQUIRED
 
     monkeypatch.setitem(sys.modules, "vertebra._vertebra", None)
     monkeypatch.setitem(sys.modules, "cryptography.hazmat.primitives.asymmetric.rsa", None)
@@ -315,7 +318,7 @@ def test_cloud_dialers_default_tls_cert_required_and_reject_fake_rsa_fallback(
     reset_dependency_cache("cryptography.hazmat.primitives.asymmetric.rsa")
     try:
         with pytest.raises(MissingDependencyError):
-            SyncCloudSQLDialer.generate_ephemeral_keypair()
+            dialer.generate_ephemeral_keypair()
     finally:
         reset_dependency_cache("vertebra._vertebra")
         reset_dependency_cache("cryptography.hazmat.primitives.asymmetric.rsa")
@@ -362,19 +365,27 @@ async def test_cloud_dialers_propagate_token_cache_errors_and_serialize_async_re
     in_flight = 0
     max_in_flight = 0
     calls = 0
+    first_entered = anyio.Event()
+    release_first = anyio.Event()
+    second_started = anyio.Event()
 
     async def _async_http(_url: str, _payload: bytes, _headers: dict[str, str]) -> bytes:
         nonlocal in_flight, max_in_flight, calls
         in_flight += 1
         max_in_flight = max(max_in_flight, in_flight)
         calls += 1
-        await anyio.sleep(0.02)
+        call_num = calls
+        if call_num == 1:
+            first_entered.set()
+            await release_first.wait()
         in_flight -= 1
         if dialer_kind == "cloudsql":
             return b'{"ephemeralCert":{"cert":"CERT"},"serverCaCert":{"cert":"CA"},"ipAddress":"10.0.0.1"}'
         return b'{"clientCert":"CERT","caCert":"CA"}'
 
-    async def _invoke() -> None:
+    async def _invoke(*, is_second: bool = False) -> None:
+        if is_second:
+            second_started.set()
         if isinstance(async_dialer, AsyncCloudSQLDialer):
             await async_dialer.refresh_certificate(
                 public_key_pem="PUB",
@@ -391,8 +402,14 @@ async def test_cloud_dialers_propagate_token_cache_errors_and_serialize_async_re
             )
 
     async with anyio.create_task_group() as tg:
-        tg.start_soon(_invoke)
-        tg.start_soon(_invoke)
+        tg.start_soon(lambda: _invoke(is_second=False))
+        await first_entered.wait()
+        tg.start_soon(lambda: _invoke(is_second=True))
+        await second_started.wait()
+        await anyio.lowlevel.checkpoint()
+        assert calls == 1
+        assert in_flight == 1
+        release_first.set()
 
     assert calls == 2
     assert max_in_flight == 1

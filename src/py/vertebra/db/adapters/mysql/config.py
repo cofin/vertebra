@@ -95,7 +95,6 @@ class MySQLConfig(BaseDatabaseConfig, frozen=True, gc=False):
         "mysql",
         "mariadb",
         "mysql+pymysql",
-        "mysql+asyncmy",
         "mysql+vtb",
         "mysql+vertebra",
         "mysql+vtb_async",
@@ -352,22 +351,6 @@ class MySQLConfig(BaseDatabaseConfig, frozen=True, gc=False):
             enable_iam_auth=self.enable_iam_auth,
         )
 
-    def _build_iam_options(self) -> dict[str, str]:
-        opts = dict(self.iam_auth_options)
-        if self.credentials_path and "credentials_path" not in opts:
-            opts["credentials_path"] = self.credentials_path
-        if self.credentials_json and "credentials_json" not in opts:
-            opts["credentials_json"] = self.credentials_json
-        if self.target_service_account and "target_service_account" not in opts:
-            opts["target_service_account"] = self.target_service_account
-        if "access_token" in opts or "bearer_token" in opts:
-            opts.setdefault("allow_ambient_adc", "false")
-        opts.setdefault(
-            "scopes",
-            "https://www.googleapis.com/auth/sqlservice.login,https://www.googleapis.com/auth/cloud-platform",
-        )
-        return opts
-
     def resolve_iam_password_sync(self, *, force_refresh: bool = False) -> str | None:
         """Resolve a Cloud SQL IAM OAuth2 token synchronously via `SyncGcpTokenCache`."""
         if not self.enable_iam_auth:
@@ -421,3 +404,19 @@ class MySQLConfig(BaseDatabaseConfig, frozen=True, gc=False):
             f"user={self.user!r}, database={self.database!r}, "
             f"ssl_mode={self.canonical_ssl_mode!r}, password='***')"
         )
+
+    def _build_iam_options(self) -> dict[str, str]:
+        opts = dict(self.iam_auth_options)
+        if self.credentials_path and "credentials_path" not in opts:
+            opts["credentials_path"] = self.credentials_path
+        if self.credentials_json and "credentials_json" not in opts:
+            opts["credentials_json"] = self.credentials_json
+        if self.target_service_account and "target_service_account" not in opts:
+            opts["target_service_account"] = self.target_service_account
+        if "access_token" in opts or "bearer_token" in opts:
+            opts.setdefault("allow_ambient_adc", "false")
+        opts.setdefault(
+            "scopes",
+            "https://www.googleapis.com/auth/sqlservice.login,https://www.googleapis.com/auth/cloud-platform",
+        )
+        return opts

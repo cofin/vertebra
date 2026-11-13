@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 
 from vertebra._vertebra import VectorBatchView
+from vertebra.db.adapters.postgres import PostgresClientOptions, PostgresTarget
 from vertebra.db.adapters.postgres.binds import (
     PG_JSONB_TEXT,
     compile_postgres_binds,
@@ -41,6 +42,8 @@ def test_parse_uri_preserves_plus_and_decodes_unix_socket_percent_encoding() -> 
         "postgresql://alice+tag:sec+ret%2B1@%2Fvar%2Frun%2Fpostgresql/my+db?application_name=app+worker"
     )
     opts = build_native_client_options(cfg, env={})
+    assert isinstance(opts, PostgresClientOptions)
+    assert isinstance(opts.targets[0], PostgresTarget)
     assert opts.user == "alice+tag"
     assert opts.password == "sec+ret+1"
     assert opts.database == "my+db"

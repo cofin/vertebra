@@ -17,9 +17,9 @@ if TYPE_CHECKING:
     from vertebra.db.adapters.postgres.config import PostgreSQLConfig
 
 __all__ = (
-    "NativeClientOptions",
-    "NativeTarget",
     "ParsedPostgresDsn",
+    "PostgresClientOptions",
+    "PostgresTarget",
     "build_native_client_options",
     "parse_libpq_conninfo",
     "parse_postgres_dsn",
@@ -361,7 +361,7 @@ def _resolve_os_username() -> str:
 
 
 @dataclass(frozen=True, slots=True)
-class NativeTarget:
+class PostgresTarget:
     """Normalized PostgreSQL endpoint target (TCP or Unix domain socket)."""
 
     host: str
@@ -372,7 +372,7 @@ class NativeTarget:
 
 
 @dataclass(frozen=True, slots=True)
-class NativeClientOptions:
+class PostgresClientOptions:
     """Validated kwargs container matching ``SyncPostgresClient`` / ``AsyncPostgresClient`` / Pools."""
 
     user: str
@@ -409,14 +409,14 @@ class NativeClientOptions:
     acquire_timeout: float
     reset_timeout: float
     close_timeout: float
-    targets: tuple[NativeTarget, ...] = ()
+    targets: tuple[PostgresTarget, ...] = ()
 
-    def for_target(self, index: int = 0) -> NativeClientOptions:
+    def for_target(self, index: int = 0) -> PostgresClientOptions:
         """Return a copy bound to multi-host endpoint candidate ``index``."""
         if not self.targets:
             return self
         target = self.targets[index]
-        return NativeClientOptions(
+        return PostgresClientOptions(
             user=self.user,
             database=self.database,
             host=target.host,
@@ -530,7 +530,7 @@ def _resolve_targets(
     env: Mapping[str, str],
     *,
     explicit_sslmode: str | None,
-) -> tuple[NativeTarget, ...]:
+) -> tuple[PostgresTarget, ...]:
     """Build normalized TCP or Unix socket target tuples enforcing port/TLS parity."""
     raw_hosts: list[str] = []
     explicit_ports: list[int | None] = []
@@ -556,7 +556,7 @@ def _resolve_targets(
         if sslmode != "disable":
             raise ImproperConfigurationError(f"sslmode={sslmode!r} is incompatible with Unix socket connections")
         return (
-            NativeTarget(
+            PostgresTarget(
                 host="localhost",
                 port=port_val,
                 unix_socket=_normalize_unix_socket_path(sock, port_val),
@@ -623,7 +623,7 @@ def _resolve_targets(
         else 5432
     )
 
-    targets: list[NativeTarget] = []
+    targets: list[PostgresTarget] = []
     seen_unix: bool | None = None
     for idx, raw_host in enumerate(raw_hosts):
         explicit_port = explicit_ports[idx] if idx < len(explicit_ports) else None
@@ -642,7 +642,7 @@ def _resolve_targets(
                     f"sslmode={target_sslmode!r} is incompatible with Unix socket connections"
                 )
             targets.append(
-                NativeTarget(
+                PostgresTarget(
                     host="localhost",
                     port=port_val,
                     unix_socket=_normalize_unix_socket_path(raw_host, port_val),
@@ -655,7 +655,7 @@ def _resolve_targets(
                 raise ImproperConfigurationError(f"TCP host must not contain '/' or URI scheme: {raw_host!r}")
             target_sslmode = explicit_sslmode or "prefer"
             targets.append(
-                NativeTarget(
+                PostgresTarget(
                     host=raw_host,
                     port=port_val,
                     unix_socket=None,
@@ -672,7 +672,7 @@ def build_native_client_options(
     dsn: str | None = None,
     env: Mapping[str, str] | None = None,
     **overrides: Any,
-) -> NativeClientOptions:
+) -> PostgresClientOptions:
     """Resolve `PostgreSQLConfig`, DSN/conninfo, and `PG*` env into validated native kwargs."""
     active_env = os.environ if env is None else env
     raw_dsn = dsn if dsn is not None else config.dsn
@@ -1038,7 +1038,7 @@ def build_native_client_options(
     reset_timeout = _parse_float(explicit.get("reset_timeout", 5.0), field_name="reset_timeout", positive=True)
     close_timeout = _parse_float(explicit.get("close_timeout", 10.0), field_name="close_timeout", positive=True)
 
-    return NativeClientOptions(
+    return PostgresClientOptions(
         user=user_str,
         database=db_str,
         host=primary.host,

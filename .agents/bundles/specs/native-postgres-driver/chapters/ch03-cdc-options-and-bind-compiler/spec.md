@@ -54,7 +54,7 @@ Builds the pure-Python CDC coordinator, option normalizer, and SQL bind lexer co
 ## 2. Requirements, Concrete Contracts & Architecture
 
 - `events.py` & `change_stream.py`: `PostgresReplicationDriver` protocol, `EventSessionRegistry`, `PostgresCheckpoint(FrozenBaseStruct)`, `PostgresCheckpointStore` protocol, `MemoryPostgresCheckpointStore`, and `PostgresChangeSource` (`AsyncChangeSource` with single-flight shielded CAS save-before-wire-ack, `ChangeFeed` integration, `replay_since`, `aclose`).
-- `options.py`: `NativeClientOptions` builder from `PostgreSQLConfig` (`sslmode=prefer` adapter default when unset, `disable` on Unix sockets, `verify-full` raw native default).
+- `options.py`: `PostgresClientOptions` builder from `PostgreSQLConfig` (`sslmode=prefer` adapter default when unset, `disable` on Unix sockets, `verify-full` raw native default).
 - `binds.py`: `compile_postgres_binds(sql, params)` + owned parameter normalization (`bytes` buffer copies, `PG_JSONB_TEXT`, `VectorBatchView`).
 
 ## 3. Documentation & OKF Knowledge Plan
