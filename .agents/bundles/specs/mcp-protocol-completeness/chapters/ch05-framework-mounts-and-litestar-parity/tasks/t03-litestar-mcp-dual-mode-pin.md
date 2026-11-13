@@ -7,8 +7,8 @@ title: "Pin litestar-mcp>=0.20.0 and Merge Litestar Skill Names in Well-Known Do
 description: "Require litestar-mcp>=0.20.0 in pyproject.toml and uv.lock, fail loud on pre-0.20 installs, and merge Litestar skill_catalog names into /.well-known/mcp.json."
 status: stable
 state: completed
-commit: 63904aab
-last_verified_commit: 63904aab
+commit: 8c1a9f30
+last_verified_commit: 8c1a9f30
 last_verified_at: "2026-11-13T05:28:40Z"
 verification_evidence: "uv lock --check --offline + ruff + mypy (48 files) + pytest (279 passed)"
 claimed_by: null

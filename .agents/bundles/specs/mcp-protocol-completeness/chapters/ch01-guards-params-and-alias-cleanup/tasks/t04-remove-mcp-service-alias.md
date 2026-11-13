@@ -7,8 +7,8 @@ title: Delete Empty MCPService Alias Subclass Across agent/mcp and CLI
 description: "Remove class MCPService(MCPCore) from service.py, agent/mcp/__init__.py, and cli/ai.py, updating unit tests to canonical MCPCore."
 status: stable
 state: completed
-commit: e22452c5
-last_verified_commit: e22452c5
+commit: 54f39ff4
+last_verified_commit: 54f39ff4
 last_verified_at: "2026-11-13T01:59:00Z"
 verification_evidence: "ruff + mypy + pytest (177 passed) + review-check (exit 0)"
 claimed_by: null

@@ -73,12 +73,13 @@ Run worker lanes alongside HTTP readiness probes (`/healthz`, `/readyz`, `/start
 vtb run app:app --worker-only --host 0.0.0.0 --port 8080
 ```
 
-### MCP Stdio-to-HTTP Bridge (`vtb ai mcp`)
+### MCP Stdio Server & HTTP/OIDC Bridge (`vtb ai mcp`)
 
-Expose a remote or local Vertebra MCP HTTP endpoint over standard input/output for desktop AI hosts:
+Serve your discovered application MCP endpoints incrementally over stdio, or bridge stdio desktop AI hosts to remote Vertebra or Cloud Run / IAP HTTP/SSE endpoints with audience-bound OIDC identity tokens (`AsyncGcpIdTokenCache`):
 
 ```bash
-vtb ai mcp bridge --url http://127.0.0.1:8000/mcp --timeout 30
+vtb ai mcp serve --app app:app
+vtb ai mcp bridge --url https://agent.example.com/mcp --audience https://agent.example.com --timeout 30
 ```
 
 ### Standalone Binary Packaging (`vtb build`)

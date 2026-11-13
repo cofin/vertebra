@@ -1,11 +1,11 @@
 # `vertebra.agent` — Model Context Protocol (MCP), A2A & Workflow Engine
 
-Agent runtime (`AgentRuntime`), Model Context Protocol (`MCPRegistry`, `MCPConfig`, `MCPSkillsConfig`, `MCPTaskConfig`), Agent-to-Agent (`A2AService`, `A2AConfig`, `AgentCard`), bidirectional protocol bridges (`McpToolBridge`, `A2aAgentBridge`), hierarchical task planning (`SpecTree`), and multi-step DAG execution (`DynamicWorkflow`, `WorkflowEngine`). See the [Agent Protocols Usage Guide](../usage/agent-protocols.md) for end-to-end walkthroughs.
+Agent runtime (`AgentRuntime`), Model Context Protocol (`MCPCore`, `MCPSessionStore`, `ToolRegistry`, `MCPRegistry`, `MCPConfig`, `MCPSkillsConfig`, `MCPTaskConfig`, `SkillCatalog`), Identity (`IapIdentitySource`, `MtlsIdentitySource`), Agent-to-Agent (`A2AService`, `A2AConfig`, `AgentCard`), bidirectional protocol bridges (`McpToolBridge`, `A2aAgentBridge`), hierarchical task planning (`SpecTree`), and multi-step DAG execution (`DynamicWorkflow`, `WorkflowEngine`). See the [Agent Protocols Usage Guide](../usage/agent-protocols.md) for end-to-end walkthroughs.
 
 | Section | Core Classes | Responsibility |
 | --- | --- | --- |
-| **Agent Plugin & Harness Runtime** | `AgentPlugin`, `AgentPluginConfig`, `AgentRuntime`, `ConfirmationGate`, `Tool`, `ToolSpec`, `ToolAnnotations` | Mount MCP/A2A/chat endpoints on `App`, execute bounded LLM tool-calling loops, and gate destructive tools on human approval |
-| **Model Context Protocol** | `MCPCore`, `MCPService`, `ToolRegistry`, `MCPRegistry`, `MCPConfig`, `MCPSkillsConfig`, `MCPTaskConfig` | Register `@tool`, `ToolProvider`, `@prompt`, and `@resource` handlers, expose `SKILL.md` progressive disclosure, and track long-running async tool tasks |
+| **Agent Plugin & Harness Runtime** | `AgentPlugin`, `AgentPluginConfig`, `AgentRuntime`, `ConfirmationGate`, `Tool`, `ToolSpec`, `ToolAnnotations` | Mount MCP/A2A/chat endpoints on `App`, execute bounded LLM tool-calling loops, and gate destructive tools on single-use human approval |
+| **Model Context Protocol** | `MCPCore`, `MCPSessionStore`, `ToolRegistry`, `MCPRegistry`, `MCPConfig`, `MCPSkillsConfig`, `MCPTaskConfig`, `SkillCatalog`, `McpIcon`, `IapIdentitySource` | Negotiate `2026-07-28` and legacy MCP versions, stream `GET` SSE notifications, serve `SKILL.md` & SEP-1865 UI resources, verify IAP JWTs, and track async tool tasks |
 | **Agent-to-Agent Protocol & Bridges** | `AgentCard`, `A2AConfig`, `A2AService`, `McpToolBridge`, `A2aAgentBridge` | Serve JWS-signed `/.well-known/agent-card.json` descriptors, stream A2A task updates, and bridge MCP tools with A2A agents |
 | **SpecTree, Workflows & Session Stores** | `SpecTree`, `DynamicWorkflow`, `WorkflowEngine`, `MemorySessionStore`, `SQLSpecSessionStore`, `AlchemySessionStore`, `ObjectStoreSessionStore` | Decompose goals into dependency trees, execute parallel DAG waves with checkpointing, and persist multi-turn conversation state |
 
@@ -77,7 +77,17 @@ execution, including when its optional dry-run guard is disabled.
 
 ## Model Context Protocol (`vertebra.agent.mcp`)
 
+::: vertebra.agent.mcp.service.MCPCore
+    options:
+      heading_level: 4
+      members: false
+
 ::: vertebra.agent.mcp.models.MCPConfig
+    options:
+      heading_level: 4
+      members: false
+
+::: vertebra.agent.core.identity.IapIdentitySource
     options:
       heading_level: 4
       members: false

@@ -7,8 +7,8 @@ title: "Implement Resource Subscriptions, Update Fan-Out, and Stateless subscrip
 description: "Add authorized resources/subscribe and unsubscribe, async notify_resource_updated fan-out with session cleanup, and 2026-07-28 subscriptions/listen SSE streams."
 status: stable
 state: completed
-commit: 2454dbef
-last_verified_commit: 2454dbef
+commit: 8c964cc3
+last_verified_commit: 8c964cc3
 last_verified_at: "2026-11-13T05:02:00Z"
 verification_evidence: "ruff + mypy (41 files) + pytest (251 passed)"
 claimed_by: null

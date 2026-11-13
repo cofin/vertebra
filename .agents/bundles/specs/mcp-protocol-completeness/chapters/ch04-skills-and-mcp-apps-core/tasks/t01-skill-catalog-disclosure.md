@@ -7,8 +7,8 @@ title: "Complete SkillCatalog Filtering, URI Lookup, Listeners, and Refresh"
 description: "Extend Skill, MCPSkillsConfig, and SkillCatalog in skills.py with coerce, tag/query filtering, skill:// URI resolution, resource_entries, listeners, and refresh."
 status: stable
 state: completed
-commit: b0c0ae12
-last_verified_commit: b0c0ae12
+commit: a38f6ef7
+last_verified_commit: a38f6ef7
 last_verified_at: "2026-11-13T05:17:00Z"
 verification_evidence: "ruff + mypy (39 files) + pytest (270 passed)"
 claimed_by: null

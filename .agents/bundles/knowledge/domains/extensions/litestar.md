@@ -18,6 +18,9 @@ generated:
   by: flow/0.26.0
   at: '2026-11-04T04:33:00Z'
 verified:
+- by: agent:flow-executor
+  at: '2026-11-13T20:35:00Z'
+  commit: 7607f4d8
 - by: agent:flow-sync
   at: '2026-11-12T01:15:00Z'
   commit: c8722c76
@@ -104,7 +107,7 @@ sources:
 <!-- truth: start -->
 - Host-framework extensions (`vertebra.extensions.{litestar,starlette,fastapi,flask,django}`) expose `VertebraPlugin` and `VertebraConfig` with lazy optional imports so uninstalled frameworks incur zero import cost.
 - `RouteCompiler`, `OffloadPlan`, `FastPath`, and `FastPathProvider` (`_fastpath_core.py`) compile framework routes into `matchit 0.9` tables, Rust CORS/compression/static offloads, and `DirectPlan` C-API dispatch plans.
-- Starlette, FastAPI, Flask, and Django MCP integrations delegate to shared `MCPCore`, `AsgiMcpApp`, `WsgiMcpApp`, `WebMCPConfig`, and `build_webmcp_manifest` primitives in `vertebra.agent.mcp`.
+- Starlette, FastAPI, Flask, and Django MCP integrations delegate to shared `MCPCore`, `AsgiMcpApp`, `WsgiMcpApp`, `SkillCatalog`, `MCPCore.validate()`, and `build_webmcp_manifest` primitives; Litestar delegates `/mcp` to `litestar-mcp>=0.20.0` (`create_mcp_plugin`) with well-known skill list merging.
 - `ObjectStoreLitestarStore` and `ObjectStoreFileSystemAdapter` are lazy public Litestar exports backed by explicitly configured `AsyncObjectStore`; persistent TTL envelopes, confined namespaces, and virtual filesystem GET/HEAD contracts are tested against native Memory/Local storage [^src-extensions-litestar-store-py].
 <!-- truth: end -->
 
@@ -152,7 +155,7 @@ All `litestar-*` ecosystem integrations are nested strictly under [`vertebra.ext
 | `security` | `JWTAuthenticator`, `JWTAuthenticationMechanism`, `IngressIdentityMechanism`, `RateLimitGuard`, `create_jwt_authentication_mechanism()`, `create_ingress_identity_mechanism()`, `exempt_vertebra_routes()`, `configure_vertebra_exclusions()` | Wraps `litestar_security` (`SecurityPlugin`, `SecurityConfig`) with zero-copy bearer/ingress identity slots, JWT authentication, and Rust rate-limit guards. |
 | `autowire` | `AutowireBridgeIntegration`, `create_autowire_plugin()`, `ensure_autowire_before_route_compiler()` | Wraps `litestar_autowire` with domain package scanning and route-compiler ordering. |
 | `email` | `SESEmailBackend`, `SESEmailConfig` | Bridges `litestar_email` to Vertebra transactional SES email delivery. |
-| `mcp` | `create_mcp_plugin()`, `create_shm_mcp_task_config()`, `JSONRPCFrameAccelerator`, `ObjectStoreSkillSource`, `WellKnownAgentCardOffload` | Bridges `litestar_mcp` (`LitestarMCP`, `LitestarA2A`) with Rust JSON-RPC frame acceleration, SHM task backends, object-store skills, and cached `.well-known` discovery. |
+| `mcp` | `create_mcp_plugin()`, `create_shm_mcp_task_config()`, `JSONRPCFrameAccelerator`, `ObjectStoreSkillSource`, `WellKnownAgentCardOffload` | Bridges `litestar_mcp>=0.20.0` (`LitestarMCP`, `LitestarA2A`) dual-mode delegation, well-known skill list merging, Rust JSON-RPC frame acceleration, SHM task backends, object-store skills, and cached `.well-known` discovery. |
 | `vite` | `create_vite_plugin()`, `get_vertebra_client_path()`, `get_vertebra_client_vite_aliases()` | Bridges `litestar_vite` (`RuntimeConfig(executor="bun")`) with `vertebra-bundler` (Rolldown/Oxc) asset compilation, bundled `@vertebra/client` alias injection, and Inertia SSR. |
 | [`openapi`](../../../../../src/py/vertebra/extensions/litestar/openapi.py)[^src-extensions-litestar-openapi-py] | `OpenAPIConfig`, `ScalarDocsConfig`, `SwaggerDocsConfig`, `RedocDocsConfig`, `ElementsDocsConfig`, `RapiDocDocsConfig`, `AsyncAPIDocsConfig`, `ScalarSpecSource`, `build_docs_route_handlers()` | Configurable multi-spec API documentation portal (Scalar default, Swagger UI, Redoc, Elements, RapiDoc, and AsyncAPI 3.0). |
 | `htmx` | `create_htmx_plugin()` | Configures `litestar_htmx` (`HTMXPlugin`, `HTMXConfig`) for server-rendered HTML applications. |

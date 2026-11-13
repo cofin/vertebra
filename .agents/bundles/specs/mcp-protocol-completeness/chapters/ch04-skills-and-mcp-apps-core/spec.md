@@ -79,14 +79,14 @@ Skills and MCP Apps authoring are documented in `ch07` (`docs/usage/agent-protoc
 
 ## 5. Implementation Plan
 
-- [x] [b0c0ae12] [t01-skill-catalog-disclosure.md](tasks/t01-skill-catalog-disclosure.md) — Add `SkillCatalog` filtering, URI resolution, resource projection, listeners, and `refresh()`
-- [x] [b0c0ae12] [t02-core-skill-surface.md](tasks/t02-core-skill-surface.md) — Expose `io.modelcontextprotocol/skills`, binary skill blobs, prompt projection, and skill notifications in `MCPCore`
-- [x] [b0c0ae12] [t03-ui-metadata-models-and-decorators.md](tasks/t03-ui-metadata-models-and-decorators.md) — Add `McpIcon`, resource/tool `meta`, and SEP-1865 decorator arguments
-- [x] [b0c0ae12] [t04-registry-webmcp-and-core-ui-projection.md](tasks/t04-registry-webmcp-and-core-ui-projection.md) — Add `validate_ui_links` / `MCPCore.validate()`, UI extension projection, app-only filtering, and WebMCP exclusion
+- [x] [a38f6ef7] [t01-skill-catalog-disclosure.md](tasks/t01-skill-catalog-disclosure.md) — Add `SkillCatalog` filtering, URI resolution, resource projection, listeners, and `refresh()`
+- [x] [a38f6ef7] [t02-core-skill-surface.md](tasks/t02-core-skill-surface.md) — Expose `io.modelcontextprotocol/skills`, binary skill blobs, prompt projection, and skill notifications in `MCPCore`
+- [x] [a38f6ef7] [t03-ui-metadata-models-and-decorators.md](tasks/t03-ui-metadata-models-and-decorators.md) — Add `McpIcon`, resource/tool `meta`, and SEP-1865 decorator arguments
+- [x] [a38f6ef7] [t04-registry-webmcp-and-core-ui-projection.md](tasks/t04-registry-webmcp-and-core-ui-projection.md) — Add `validate_ui_links` / `MCPCore.validate()`, UI extension projection, app-only filtering, and WebMCP exclusion
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Status**: `ch04-skills-and-mcp-apps-core` is completed at `b0c0ae12` (`sync` `7ea0f382`); next frontier is [`ch05-framework-mounts-and-litestar-parity`](../ch05-framework-mounts-and-litestar-parity/spec.md).
+- **Status**: `ch04-skills-and-mcp-apps-core` is completed at `a38f6ef7` (`sync` `7ea0f382`); next frontier is [`ch05-framework-mounts-and-litestar-parity`](../ch05-framework-mounts-and-litestar-parity/spec.md).
 - **Fast Chapter Gate (`< 15s`)**: `uv run --no-sync ruff check src/py/vertebra/agent && uv run --no-sync mypy src/py/vertebra/agent && uv run --no-sync pytest src/py/tests/unit/agent/test_core_and_observability.py src/py/tests/unit/agent/test_mcp_conformance.py -q`.
 
 [^skills-py]: `src/py/vertebra/agent/mcp/skills.py::SkillCatalog` — Skill catalog and filesystem skill source.

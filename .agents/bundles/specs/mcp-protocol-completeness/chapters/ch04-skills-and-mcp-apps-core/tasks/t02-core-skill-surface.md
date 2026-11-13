@@ -7,8 +7,8 @@ title: Expose io.modelcontextprotocol/skills Surface in MCPCore
 description: "Advertise capabilities.extensions['io.modelcontextprotocol/skills'], paginate/filter skills/list, project skill resources/prompts, read binary blobs, and notify skill changes."
 status: stable
 state: completed
-commit: b0c0ae12
-last_verified_commit: b0c0ae12
+commit: a38f6ef7
+last_verified_commit: a38f6ef7
 last_verified_at: "2026-11-13T05:17:00Z"
 verification_evidence: "ruff + mypy (39 files) + pytest (270 passed)"
 claimed_by: null

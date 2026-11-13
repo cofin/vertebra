@@ -7,8 +7,8 @@ title: Add SEP-1865 UI Metadata Models and Decorator Parameters
 description: "Add McpIcon, UI_EXTENSION, UI_MIME_TYPE, title/icons/meta on resources and ToolSpec, and UI metadata arguments on @tool, @mcp_tool, and @mcp_resource."
 status: stable
 state: completed
-commit: b0c0ae12
-last_verified_commit: b0c0ae12
+commit: a38f6ef7
+last_verified_commit: a38f6ef7
 last_verified_at: "2026-11-13T05:17:00Z"
 verification_evidence: "ruff + mypy (39 files) + pytest (270 passed)"
 claimed_by: null

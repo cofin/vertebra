@@ -7,8 +7,8 @@ title: "Project SEP-1865 UI Metadata, Validate ui:// Links, and Filter App-Only 
 description: "Propagate UI metadata in ToolRegistry and ETag digest, add validate_ui_links and MCPCore.validate(), advertise io.modelcontextprotocol/ui, and filter app-only tools."
 status: stable
 state: completed
-commit: b0c0ae12
-last_verified_commit: b0c0ae12
+commit: a38f6ef7
+last_verified_commit: a38f6ef7
 last_verified_at: "2026-11-13T05:17:00Z"
 verification_evidence: "ruff + mypy (39 files) + pytest (270 passed)"
 claimed_by: null

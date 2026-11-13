@@ -7,8 +7,8 @@ title: Write Incremental MCP SSE Streams Across All Framework Adapters
 description: "Wire McpHttpResponse.stream through AsgiMcpApp, Starlette, WsgiMcpApp, native AgentPlugin, Litestar fallback, and Django."
 status: stable
 state: completed
-commit: 2454dbef
-last_verified_commit: 2454dbef
+commit: 8c964cc3
+last_verified_commit: 8c964cc3
 last_verified_at: "2026-11-13T05:02:00Z"
 verification_evidence: "ruff + mypy (41 files) + pytest (251 passed)"
 claimed_by: null

@@ -7,8 +7,8 @@ title: Implement Protocol Version Negotiation and Unified Capability Builder
 description: "Add SUPPORTED_PROTOCOL_VERSIONS, NegotiatedProtocol, mode detection, -32022 renegotiation payload, shared _server_capabilities, and logging/setLevel."
 status: stable
 state: completed
-commit: 5f8fd173
-last_verified_commit: 5f8fd173
+commit: 22708450
+last_verified_commit: 22708450
 last_verified_at: "2026-11-13T04:43:05Z"
 verification_evidence: "ruff + mypy + pytest (206 agent + flask tests passed)"
 claimed_by: null

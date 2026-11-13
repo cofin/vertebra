@@ -7,8 +7,8 @@ title: "Enforce Pending-Only, Owner-Exact, Single-Use, Expiring Confirmation Tic
 description: "Harden ConfirmationGate with ttl_seconds, max_tickets, exact owner matching, and consume_call_approval across MCPCore, AgentRuntime, and ToolProvider bridges."
 status: stable
 state: completed
-commit: e22452c5
-last_verified_commit: e22452c5
+commit: 54f39ff4
+last_verified_commit: 54f39ff4
 last_verified_at: "2026-11-13T01:59:00Z"
 verification_evidence: "ruff + mypy + pytest (177 passed) + review-check (exit 0)"
 claimed_by: null

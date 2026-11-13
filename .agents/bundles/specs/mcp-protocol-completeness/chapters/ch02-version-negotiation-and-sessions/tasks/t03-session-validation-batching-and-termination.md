@@ -7,8 +7,8 @@ title: "Validate Legacy Sessions, Support 2025-03-26 Batching, and Handle DELETE
 description: "Enforce 404 on unknown/expired legacy Mcp-Session-Id, allow JSON-RPC batch arrays only on 2025-03-26, and terminate sessions on DELETE /mcp."
 status: stable
 state: completed
-commit: 5f8fd173
-last_verified_commit: 5f8fd173
+commit: 22708450
+last_verified_commit: 22708450
 last_verified_at: "2026-11-13T04:43:05Z"
 verification_evidence: "ruff + mypy + pytest (206 agent + flask tests passed)"
 claimed_by: null

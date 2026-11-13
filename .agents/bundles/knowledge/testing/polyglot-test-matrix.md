@@ -13,6 +13,9 @@ generated:
   by: flow/0.29.1
   at: "2026-11-04T04:33:00Z"
 verified:
+  - by: agent:flow-executor
+    at: "2026-11-13T20:35:00Z"
+    commit: 7607f4d8
   - by: agent:flow-setup
     at: "2026-11-13T01:05:00Z"
     commit: 18baadcd
@@ -145,7 +148,7 @@ Vertebra runs verification gates across Rust (`cargo test`), Python (`pytest` + 
 
 ## 4. Suite Inventory, Shared-Memory Hygiene & Boundary Evidence
 
-- **Python (`fail_under = 80`)**: 1:1 module-mirrored `src/py/tests/unit/` packages with `__init__.py` and top-level imports (`PLC0415`) across server hotpaths[^src-tests-unit-server-stage1-hotpath-py], storage codecs and worker cancellation barriers[^src-storage-public-codec-tests], native drivers[^src-native-driver-tests], SQLite `RETURNING`[^src-sqlite-returning-tests], PostgreSQL transactions[^src-postgres-transaction-tests], DuckDB/Arrow cursor retention[^src-storage-cursor-view-tests], loopback `resp3_server` Redis/Valkey tests[^src-tests-unit-conftest-py], SQLSpec/SQLAlchemy stacks[^src-stack-regressions][^src-bigquery-stack-regressions][^src-spanner-stack-regressions][^src-psycopg-bind-regressions], and MCP `2026-07-28` / `ToolRegistry` / approval snapshot conformance[^src-tests-unit-agent-mcp-conformance-py][^src-agent-mcp-registry-py][^src-provider-regressions][^src-provider-schema-regressions][^src-provider-snapshot-regressions].
+- **Python (`fail_under = 80`)**: 1:1 module-mirrored `src/py/tests/unit/` packages with `__init__.py` and top-level imports (`PLC0415`) across server hotpaths[^src-tests-unit-server-stage1-hotpath-py], storage codecs and worker cancellation barriers[^src-storage-public-codec-tests], native drivers[^src-native-driver-tests], SQLite `RETURNING`[^src-sqlite-returning-tests], PostgreSQL transactions[^src-postgres-transaction-tests], DuckDB/Arrow cursor retention[^src-storage-cursor-view-tests], loopback `resp3_server` Redis/Valkey tests[^src-tests-unit-conftest-py], SQLSpec/SQLAlchemy stacks[^src-stack-regressions][^src-bigquery-stack-regressions][^src-spanner-stack-regressions][^src-psycopg-bind-regressions], and dual-mode MCP / SSE / skills / UI / ES256 IAP / stdio-bridge CLI / `litestar-mcp` parity suites[^src-tests-unit-agent-mcp-conformance-py][^src-agent-mcp-registry-py][^src-provider-regressions][^src-provider-schema-regressions][^src-provider-snapshot-regressions].
 - **Rust & TypeScript**: Integration harnesses in `vertebra-core`, `vertebra-http`, `vertebra-storage`[^src-storage-native-tests], and `vertebra-db`[^src-storage-shm-tests]; Vitest suites in [`tests/agent.test.ts`](../../../../src/ts/vertebra-client/tests/agent.test.ts)[^src-ts-tests-agent-test-ts] and sibling client modules; and cross-engine SQL/Arrow conformance in [`test_driver_conformance.py`](../../../../src/py/tests/integration/db/test_driver_conformance.py)[^src-db-conformance].
 - **SHM Hygiene**: [`conftest.py`](../../../../src/py/tests/conftest.py)[^src-tests-conftest-py] pins AnyIO to `asyncio`, generates `test-<uuid8>` SHM names, and sweeps `/dev/shm/{test-*,vtb-*,*vertebra*}` post-test; use targeted `cargo test -p <crate>` during parallel runs to avoid `make rs-test` SHM sweeps.
 

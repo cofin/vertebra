@@ -296,11 +296,12 @@ vtb ai mcp bridge [OPTIONS]
 | --- | --- | --- | --- |
 | `--url` | `text` | - | **Required.** Remote MCP HTTP/SSE endpoint URL |
 | `--token` | `text` | - | Bearer / OAuth2 / OIDC access token |
+| `--audience` | `text` | - | Target OIDC audience URL for AsyncGcpIdTokenCache |
 | `--timeout` | `float` | `30.0` | Per-request HTTP timeout in seconds |
 
 #### `vtb ai mcp serve`
 
-Run an in-process MCP service over standard input/output (stdio).
+Serve a discovered application MCP surface over standard input/output (stdio).
 
 ```bash
 vtb ai mcp serve [OPTIONS]
@@ -308,7 +309,8 @@ vtb ai mcp serve [OPTIONS]
 
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |
-| `--name` | `text` | `"vertebra-mcp"` | Server name |
+| `--app` | `text` | - | Application import path in MODULE:ATTR format |
+| `--app-dir` | `directory` | - | Working directory for application autodiscovery |
 
 #### `vtb workers run`
 

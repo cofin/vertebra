@@ -7,8 +7,8 @@ title: "Run Tool Guards Once with Typed Errors and Validate Mcp-Param-* Headers"
 description: "Split Tool.authorize and Tool.call, map guard errors to -32004/-32005, fail closed on 2-arg connection guards, and validate Mcp-Param-* headers in MCPCore.handle."
 status: stable
 state: completed
-commit: e22452c5
-last_verified_commit: e22452c5
+commit: 54f39ff4
+last_verified_commit: 54f39ff4
 last_verified_at: "2026-11-13T01:59:00Z"
 verification_evidence: "ruff + mypy + pytest (177 passed) + review-check (exit 0)"
 claimed_by: null

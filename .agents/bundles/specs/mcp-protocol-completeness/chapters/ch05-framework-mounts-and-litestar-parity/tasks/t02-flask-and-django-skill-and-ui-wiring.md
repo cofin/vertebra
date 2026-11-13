@@ -7,8 +7,8 @@ title: Wire Skills and UI Link Validation in Flask and Django MCP Mounts
 description: "Pass skills=MCPSkillsConfig | SkillCatalog | None through Flask and Django MCP helpers, emit well-known skill names, and call MCPCore.validate() at mount."
 status: stable
 state: completed
-commit: 63904aab
-last_verified_commit: 63904aab
+commit: 8c1a9f30
+last_verified_commit: 8c1a9f30
 last_verified_at: "2026-11-13T05:28:40Z"
 verification_evidence: "uv lock --check --offline + ruff + mypy (48 files) + pytest (279 passed)"
 claimed_by: null

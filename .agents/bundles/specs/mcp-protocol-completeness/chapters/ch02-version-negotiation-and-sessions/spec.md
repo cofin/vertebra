@@ -71,13 +71,13 @@ Dual-mode negotiation and session lifecycle semantics are documented in `ch07` (
 
 ## 5. Implementation Plan
 
-- [x] [5f8fd173] [t01-protocol-version-registry-and-capabilities.md](tasks/t01-protocol-version-registry-and-capabilities.md) — Add protocol version negotiation, shared `_server_capabilities`, and `logging/setLevel`
-- [x] [5f8fd173] [t02-session-store-and-initialize.md](tasks/t02-session-store-and-initialize.md) — Create `MCPSessionStore` and implement legacy `initialize`, `ping`, and `notifications/initialized`
-- [x] [5f8fd173] [t03-session-validation-batching-and-termination.md](tasks/t03-session-validation-batching-and-termination.md) — Validate legacy sessions (`404`), dispatch `2025-03-26` batches, and handle `DELETE /mcp`
+- [x] [22708450] [t01-protocol-version-registry-and-capabilities.md](tasks/t01-protocol-version-registry-and-capabilities.md) — Add protocol version negotiation, shared `_server_capabilities`, and `logging/setLevel`
+- [x] [22708450] [t02-session-store-and-initialize.md](tasks/t02-session-store-and-initialize.md) — Create `MCPSessionStore` and implement legacy `initialize`, `ping`, and `notifications/initialized`
+- [x] [22708450] [t03-session-validation-batching-and-termination.md](tasks/t03-session-validation-batching-and-termination.md) — Validate legacy sessions (`404`), dispatch `2025-03-26` batches, and handle `DELETE /mcp`
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Completed (`5f8fd173`)**: All `3` tasks in `ch02-version-negotiation-and-sessions` (`206` unit tests, `ruff`, and `mypy` clean) are complete. Next chapter: `ch03-sse-streams-and-resource-subscriptions`.
+- **Completed (`22708450`)**: All `3` tasks in `ch02-version-negotiation-and-sessions` (`206` unit tests, `ruff`, and `mypy` clean) are complete. Next chapter: `ch03-sse-streams-and-resource-subscriptions`.
 - **Fast Chapter Gate (`< 12s`)**: `uv run --no-sync ruff check src/py/vertebra/agent/mcp && uv run --no-sync mypy src/py/vertebra/agent/mcp && uv run --no-sync pytest src/py/tests/unit/agent/test_mcp_conformance.py -q`.
 
 [^mcp-handle]: `src/py/vertebra/agent/mcp/service.py::MCPCore.handle` — HTTP validation and dispatch.

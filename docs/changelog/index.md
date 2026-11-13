@@ -2,6 +2,24 @@
 
 All notable changes to Vertebra are documented on this page.
 
+## Unreleased
+
+### Added
+
+- Dual-mode MCP version negotiation (`SUPPORTED_PROTOCOL_VERSIONS = ("2026-07-28", "2025-11-25", "2025-06-18", "2025-03-26")`), `MCPSessionStore`, legacy `initialize` / `ping` / `logging/setLevel` / `2025-03-26` JSON-RPC batch arrays, `DELETE /mcp`, and structured `-32022` negotiation payloads ([#109](https://github.com/cofin/vertebra/issues/109)).
+- Server-initiated `GET /mcp` SSE notification streams (`McpHttpResponse.stream` across native `App`, ASGI, Starlette, WSGI, Flask, and Django), `Last-Event-ID` replay, level-gated `MCPCore.log`, progress event relay, authorized `resources/subscribe`, `notify_resource_updated`, and `2026-07-28` `subscriptions/listen` ([#109](https://github.com/cofin/vertebra/issues/109), [#112](https://github.com/cofin/vertebra/issues/112)).
+- `SKILLS_EXTENSION` (`io.modelcontextprotocol/skills`) filtering/URI resolution across `SkillCatalog` and framework mounts ([#111](https://github.com/cofin/vertebra/issues/111)), plus SEP-1865 `UI_EXTENSION` (`io.modelcontextprotocol/ui`) metadata (`McpIcon`, `ToolSpec.meta`, `ToolRegistry.validate_ui_links`, `MCPCore.validate()`) and app-only tool filtering ([#110](https://github.com/cofin/vertebra/issues/110)).
+- Google Cloud `IapIdentitySource` ES256 signed JWT header verification (`vertebra-core[iap]`), `OidcTokenSource` (`AsyncGcpIdTokenCache` + `401` single retry) for `vtb ai mcp bridge --audience`, incremental cancellable `run_stdio_server`, and `resolve_app_mcp_core` / `is_litestar_mcp_app` discovery in `vtb ai mcp serve --app` ([#114](https://github.com/cofin/vertebra/issues/114)).
+- `Tool.authorize` single-pass guard splitting (`-32004` / `-32005`), `Mcp-Param-*` header validation (`-32020`), and single-use expiring confirmation consumption (`ConfirmationGate.consume_call_approval`).
+
+### Changed
+
+- Consolidated `MCPCore` well-known discovery and `SkillCatalog` / UI validation wiring across `AgentPlugin`, Starlette, FastAPI, Flask, Django, and `litestar-mcp>=0.20.0` (`create_mcp_plugin`) ([#110](https://github.com/cofin/vertebra/issues/110), [#111](https://github.com/cofin/vertebra/issues/111)).
+
+### Removed
+
+- Deleted empty compatibility alias `MCPService(MCPCore)` and `--name` flag on `vtb ai mcp serve` ([#114](https://github.com/cofin/vertebra/issues/114)).
+
 ## 0.3.0
 
 Release introducing shared-memory vector embeddings, zero-copy PEP 3118 vector views, binary database vector codecs, active Google Cloud ADC credential refresh, the `vtb ai` CLI, co-located background worker lanes, automatic A2A `AgentInterface` and dynamic request-origin URL resolution, updated isometric axial vertebrae branding, and expanded topic documentation.

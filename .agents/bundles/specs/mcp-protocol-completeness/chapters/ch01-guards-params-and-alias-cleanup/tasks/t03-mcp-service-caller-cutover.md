@@ -7,8 +7,8 @@ title: "Migrate Agent Bridges, Plugin, and Stdio Callers from MCPService to MCPC
 description: "Switch A2aAgentBridge, AgentPlugin, and run_stdio_server from MCPService (and MCPRegistry in AgentPlugin) to canonical MCPCore and ToolRegistry."
 status: stable
 state: completed
-commit: e22452c5
-last_verified_commit: e22452c5
+commit: 54f39ff4
+last_verified_commit: 54f39ff4
 last_verified_at: "2026-11-13T01:59:00Z"
 verification_evidence: "ruff + mypy + pytest (177 passed) + review-check (exit 0)"
 claimed_by: null

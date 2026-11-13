@@ -78,14 +78,14 @@ SSE streaming, progress notifications, and resource subscriptions are documented
 
 ## 5. Implementation Plan
 
-- [x] [2454dbef] [t01-streaming-envelope-and-legacy-get-sse.md](tasks/t01-streaming-envelope-and-legacy-get-sse.md) — Add `McpHttpResponse.stream`, `SseStreamBroker.open_stream`, and legacy `GET /mcp` SSE negotiation
-- [x] [2454dbef] [t02-adapter-stream-writers.md](tasks/t02-adapter-stream-writers.md) — Stream `McpHttpResponse.stream` incrementally across ASGI, Starlette, WSGI, native `App`, Litestar fallback, and Django
-- [x] [2454dbef] [t03-list-changed-logging-and-progress-notifications.md](tasks/t03-list-changed-logging-and-progress-notifications.md) — Broadcast `list_changed`, level-gated `MCPCore.log`, and POST/session progress notifications
-- [x] [2454dbef] [t04-resource-subscriptions-fanout-and-stateless-listen.md](tasks/t04-resource-subscriptions-fanout-and-stateless-listen.md) — Implement `resources/subscribe`, async `notify_resource_updated` fan-out, and `2026-07-28` `subscriptions/listen`
+- [x] [8c964cc3] [t01-streaming-envelope-and-legacy-get-sse.md](tasks/t01-streaming-envelope-and-legacy-get-sse.md) — Add `McpHttpResponse.stream`, `SseStreamBroker.open_stream`, and legacy `GET /mcp` SSE negotiation
+- [x] [8c964cc3] [t02-adapter-stream-writers.md](tasks/t02-adapter-stream-writers.md) — Stream `McpHttpResponse.stream` incrementally across ASGI, Starlette, WSGI, native `App`, Litestar fallback, and Django
+- [x] [8c964cc3] [t03-list-changed-logging-and-progress-notifications.md](tasks/t03-list-changed-logging-and-progress-notifications.md) — Broadcast `list_changed`, level-gated `MCPCore.log`, and POST/session progress notifications
+- [x] [8c964cc3] [t04-resource-subscriptions-fanout-and-stateless-listen.md](tasks/t04-resource-subscriptions-fanout-and-stateless-listen.md) — Implement `resources/subscribe`, async `notify_resource_updated` fan-out, and `2026-07-28` `subscriptions/listen`
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Status**: `ch03-sse-streams-and-resource-subscriptions` is completed at `2454dbef` (`sync` `353c0d0c`); all `4` chapter tasks passed `ruff`, `mypy` across 41 files, and `251` unit tests. Next frontier is [`ch04-skills-and-mcp-apps-core`](../ch04-skills-and-mcp-apps-core/spec.md).
+- **Status**: `ch03-sse-streams-and-resource-subscriptions` is completed at `8c964cc3` (`sync` `353c0d0c`); all `4` chapter tasks passed `ruff`, `mypy` across 41 files, and `251` unit tests. Next frontier is [`ch04-skills-and-mcp-apps-core`](../ch04-skills-and-mcp-apps-core/spec.md).
 - **Fast Chapter Gate (`< 15s`)**: `uv run --no-sync ruff check src/py/vertebra/agent src/py/vertebra/extensions/django/mcp.py && uv run --no-sync mypy src/py/vertebra/agent src/py/vertebra/extensions/django/mcp.py && uv run --no-sync pytest src/py/tests/unit/agent/test_core_and_observability.py src/py/tests/unit/agent/test_mcp_conformance.py -q`.
 
 [^sse-broker]: `src/py/vertebra/agent/core/sse.py::SseStreamBroker` — SSE replay buffers and subscriber channels.

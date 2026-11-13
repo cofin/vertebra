@@ -7,8 +7,8 @@ title: "Wire Skills, Well-Known Skill Names, and UI Validation in AgentPlugin an
 description: "Add AgentPluginConfig.skills, build_well_known_mcp_document skill_names, and mount-time MCPCore.validate() across AgentPlugin and Starlette/FastAPI."
 status: stable
 state: completed
-commit: 63904aab
-last_verified_commit: 63904aab
+commit: 8c1a9f30
+last_verified_commit: 8c1a9f30
 last_verified_at: "2026-11-13T05:28:40Z"
 verification_evidence: "uv lock --check --offline + ruff + mypy (48 files) + pytest (279 passed)"
 claimed_by: null

@@ -77,10 +77,10 @@ Guard error codes, `Mcp-Param-*` validation, single-use confirmation tickets, an
 
 ## 5. Implementation Plan
 
-- [x] [e22452c5] [t01-guards-and-mcp-param-validation.md](tasks/t01-guards-and-mcp-param-validation.md) — Split `Tool.authorize`/`Tool.call`, map `-32004`/`-32005`, and validate `Mcp-Param-*` headers
-- [x] [e22452c5] [t02-confirmation-ticket-lifecycle.md](tasks/t02-confirmation-ticket-lifecycle.md) — Enforce pending-only, exact-owner, single-use, expiring `ConfirmationGate` tickets
-- [x] [e22452c5] [t03-mcp-service-caller-cutover.md](tasks/t03-mcp-service-caller-cutover.md) — Migrate `a2a.py`, `plugin.py`, and `stdio.py` from `MCPService` to `MCPCore` and `ToolRegistry`
-- [x] [e22452c5] [t04-remove-mcp-service-alias.md](tasks/t04-remove-mcp-service-alias.md) — Remove the `MCPService` alias subclass from `service.py`, `agent/mcp/__init__.py`, and `cli/ai.py`
+- [x] [54f39ff4] [t01-guards-and-mcp-param-validation.md](tasks/t01-guards-and-mcp-param-validation.md) — Split `Tool.authorize`/`Tool.call`, map `-32004`/`-32005`, and validate `Mcp-Param-*` headers
+- [x] [54f39ff4] [t02-confirmation-ticket-lifecycle.md](tasks/t02-confirmation-ticket-lifecycle.md) — Enforce pending-only, exact-owner, single-use, expiring `ConfirmationGate` tickets
+- [x] [54f39ff4] [t03-mcp-service-caller-cutover.md](tasks/t03-mcp-service-caller-cutover.md) — Migrate `a2a.py`, `plugin.py`, and `stdio.py` from `MCPService` to `MCPCore` and `ToolRegistry`
+- [x] [54f39ff4] [t04-remove-mcp-service-alias.md](tasks/t04-remove-mcp-service-alias.md) — Remove the `MCPService` alias subclass from `service.py`, `agent/mcp/__init__.py`, and `cli/ai.py`
 
 ## 6. Current State & Remaining Plan Snapshot
 

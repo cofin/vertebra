@@ -78,13 +78,13 @@ Framework mount options and `litestar-mcp>=0.20.0` delegation are documented in 
 
 ## 5. Implementation Plan
 
-- [x] [63904aab] [t01-plugin-routes-and-starlette-skill-and-ui-wiring.md](tasks/t01-plugin-routes-and-starlette-skill-and-ui-wiring.md) — Wire `skills`, well-known `skill_names`, and `MCPCore.validate()` in `AgentPlugin`, `routes.py`, and Starlette
-- [x] [63904aab] [t02-flask-and-django-skill-and-ui-wiring.md](tasks/t02-flask-and-django-skill-and-ui-wiring.md) — Wire `skills`, well-known `skill_names`, and `MCPCore.validate()` in Flask and Django mounts
-- [x] [63904aab] [t03-litestar-mcp-dual-mode-pin.md](tasks/t03-litestar-mcp-dual-mode-pin.md) — Pin `litestar-mcp>=0.20.0`, enforce version guard, and merge Litestar skill names in `/.well-known/mcp.json`
+- [x] [8c1a9f30] [t01-plugin-routes-and-starlette-skill-and-ui-wiring.md](tasks/t01-plugin-routes-and-starlette-skill-and-ui-wiring.md) — Wire `skills`, well-known `skill_names`, and `MCPCore.validate()` in `AgentPlugin`, `routes.py`, and Starlette
+- [x] [8c1a9f30] [t02-flask-and-django-skill-and-ui-wiring.md](tasks/t02-flask-and-django-skill-and-ui-wiring.md) — Wire `skills`, well-known `skill_names`, and `MCPCore.validate()` in Flask and Django mounts
+- [x] [8c1a9f30] [t03-litestar-mcp-dual-mode-pin.md](tasks/t03-litestar-mcp-dual-mode-pin.md) — Pin `litestar-mcp>=0.20.0`, enforce version guard, and merge Litestar skill names in `/.well-known/mcp.json`
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Status**: `ch05-framework-mounts-and-litestar-parity` is completed at `63904aab` (`sync` `0166aa62`); next frontier is [`ch06-stdio-serve-bridge-and-gcp-auth`](../ch06-stdio-serve-bridge-and-gcp-auth/spec.md).
+- **Status**: `ch05-framework-mounts-and-litestar-parity` is completed at `8c1a9f30` (`sync` `0166aa62`); next frontier is [`ch06-stdio-serve-bridge-and-gcp-auth`](../ch06-stdio-serve-bridge-and-gcp-auth/spec.md).
 - **Fast Chapter Gate (`< 15s`)**: `uv lock --check --offline && uv run --no-sync ruff check src/py/vertebra/agent src/py/vertebra/extensions/{starlette,flask,django,litestar} && uv run --no-sync mypy src/py/vertebra/agent src/py/vertebra/extensions/{starlette,flask,django,litestar} && uv run --no-sync pytest src/py/tests/unit/agent/test_mcp_conformance.py src/py/tests/unit/extensions/test_litestar_ecosystem_mcp.py -q`.
 
 [^agent-plugin]: `src/py/vertebra/agent/plugin.py::AgentPluginConfig` — AgentPluginConfig and native/Litestar mount hooks.
