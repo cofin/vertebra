@@ -6,6 +6,7 @@ import datetime
 import inspect
 import itertools
 import os
+import re
 import time
 from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
 from contextlib import asynccontextmanager, contextmanager
@@ -42,6 +43,7 @@ __all__ = (
 )
 
 _TX_SAVEPOINT_COUNTER = itertools.count(1)
+_CREDENTIAL_REJECTION_PATTERN = re.compile(r"\(HTTP (?:401|403)\)")
 
 
 class SyncDuckDBDriver(SyncDatabaseDriver[DuckDBConfig]):
@@ -79,7 +81,7 @@ class SyncDuckDBDriver(SyncDatabaseDriver[DuckDBConfig]):
         self.executed_bootstrap_statements: tuple[str, ...] = tuple(self.config.bootstrap_statements())
 
         if _client is not None:
-            self._client: SyncDuckDBClient = _client
+            self._client: SyncDuckDBClient | None = _client
         else:
             native_mod = ensure_module(
                 "vertebra._duckdb",
@@ -102,12 +104,29 @@ class SyncDuckDBDriver(SyncDatabaseDriver[DuckDBConfig]):
                 extensions=list(self.config.extensions) or None,
                 init_statements=init_stmts or None,
             )
+        try:
             self._refresh_dynamic_secrets(force=True)
+        except BaseException:
+            client = self._client
+            self._client = None
+            self._closed = True
+            if client is not None:
+                client.close()
+            raise
+
+    def _require_client(self) -> SyncDuckDBClient:
+        """Return the open `SyncDuckDBClient` or raise `InterfaceError` when closed."""
+        client = self._client
+        if client is None:
+            msg = "DuckDB driver is closed"
+            raise InterfaceError(msg)
+        return client
 
     @property
     def in_transaction(self) -> bool:
         """Return `True` when an explicit DuckDB transaction is active on the writer session."""
-        return bool(self._client.in_transaction)
+        client = self._client
+        return bool(client.in_transaction) if client is not None else False
 
     def cursor(self) -> _SyncDuckDBCursor:
         """Create a synchronous DBAPI-style cursor bound to this driver."""
@@ -119,30 +138,33 @@ class SyncDuckDBDriver(SyncDatabaseDriver[DuckDBConfig]):
 
     def begin(self) -> None:
         """Begin an explicit DuckDB transaction on the writer session."""
-        if not self._client.in_transaction:
-            self._client.begin()
+        client = self._require_client()
+        if not client.in_transaction:
+            client.begin()
 
     def commit(self) -> None:
         """Commit the active DuckDB transaction when one is open."""
-        if self._client.in_transaction:
-            self._client.commit()
+        client = self._require_client()
+        if client.in_transaction:
+            client.commit()
 
     def rollback(self) -> None:
         """Roll back the active DuckDB transaction when one is open."""
-        if self._client.in_transaction:
-            self._client.rollback()
+        client = self._require_client()
+        if client.in_transaction:
+            client.rollback()
 
     def savepoint(self, name: str) -> None:
         """Create a transactional savepoint on the active DuckDB transaction."""
-        self._client.savepoint(name)
+        self._require_client().savepoint(name)
 
     def rollback_to_savepoint(self, name: str) -> None:
         """Roll back the active DuckDB transaction to savepoint `name`."""
-        self._client.rollback_to_savepoint(name)
+        self._require_client().rollback_to_savepoint(name)
 
     def release_savepoint(self, name: str) -> None:
         """Release savepoint `name` on the active DuckDB transaction."""
-        self._client.release_savepoint(name)
+        self._require_client().release_savepoint(name)
 
     @contextmanager
     def transaction(self) -> Iterator[Self]:
@@ -170,13 +192,17 @@ class SyncDuckDBDriver(SyncDatabaseDriver[DuckDBConfig]):
 
     def cancel(self) -> None:
         """Interrupt any in-flight DuckDB query via `duckdb::InterruptHandle`."""
-        if not self._closed:
-            self._client.cancel()
+        client = self._client
+        if not self._closed and client is not None:
+            client.cancel()
 
     def close(self) -> None:
         """Close the underlying `SyncDuckDBClient` worker pool."""
         self._closed = True
-        self._client.close()
+        client = self._client
+        self._client = None
+        if client is not None:
+            client.close()
 
     def refresh_secrets(self, *, force: bool = True) -> None:
         """Evaluate configured `value_provider` secrets and apply `CREATE OR REPLACE SECRET` when due."""
@@ -191,10 +217,14 @@ class SyncDuckDBDriver(SyncDatabaseDriver[DuckDBConfig]):
         """Execute a DDL or DML statement under single-writer coordination."""
         _ = kwargs
         self._refresh_dynamic_secrets()
+        client = self._require_client()
         bound = _normalize_duckdb_parameters(parameters)
         grant = _acquire_duckdb_lease(self._broker, sql, _param_len(bound))
         try:
-            return int(self._client.execute(sql, bound))
+            return int(client.execute(sql, bound))
+        except Exception as exc:
+            _invalidate_rejected_credentials(exc, self._dynamic_secrets, self._secret_generations)
+            raise
         finally:
             _release_duckdb_lease(self._broker, grant)
 
@@ -209,10 +239,14 @@ class SyncDuckDBDriver(SyncDatabaseDriver[DuckDBConfig]):
         if not parameter_sets:
             return 0
         self._refresh_dynamic_secrets()
+        client = self._require_client()
         normalized_sets = [_normalize_duckdb_parameters(item) or () for item in parameter_sets]
         grant = _acquire_duckdb_lease(self._broker, sql, _param_len(normalized_sets[0]))
         try:
-            return int(self._client.execute_many(sql, normalized_sets))
+            return int(client.execute_many(sql, normalized_sets))
+        except Exception as exc:
+            _invalidate_rejected_credentials(exc, self._dynamic_secrets, self._secret_generations)
+            raise
         finally:
             _release_duckdb_lease(self._broker, grant)
 
@@ -225,10 +259,14 @@ class SyncDuckDBDriver(SyncDatabaseDriver[DuckDBConfig]):
         """Execute a query and return positional row tuples."""
         _ = kwargs
         self._refresh_dynamic_secrets()
+        client = self._require_client()
         bound = _normalize_duckdb_parameters(parameters)
         grant = _acquire_duckdb_lease(self._broker, sql, _param_len(bound))
         try:
-            return list(self._client.execute_tuples(sql, bound))
+            return list(client.execute_tuples(sql, bound))
+        except Exception as exc:
+            _invalidate_rejected_credentials(exc, self._dynamic_secrets, self._secret_generations)
+            raise
         finally:
             _release_duckdb_lease(self._broker, grant)
 
@@ -241,11 +279,15 @@ class SyncDuckDBDriver(SyncDatabaseDriver[DuckDBConfig]):
         """Execute SQL and return `(tuple_rows, column_names)` preserving column names on empty result sets."""
         _ = kwargs
         self._refresh_dynamic_secrets()
+        client = self._require_client()
         bound = _normalize_duckdb_parameters(parameters)
         grant = _acquire_duckdb_lease(self._broker, sql, _param_len(bound))
         try:
-            rows, cols = self._client.execute_with_description(sql, bound)
+            rows, cols = client.execute_with_description(sql, bound)
             return list(rows), tuple(str(c) for c in cols)
+        except Exception as exc:
+            _invalidate_rejected_credentials(exc, self._dynamic_secrets, self._secret_generations)
+            raise
         finally:
             _release_duckdb_lease(self._broker, grant)
 
@@ -273,16 +315,20 @@ class SyncDuckDBDriver(SyncDatabaseDriver[DuckDBConfig]):
         """Stream analytical query results into an `ArrowCursor`, spilling to `VTBARROW` SHM at `threshold_rows`."""
         _ = kwargs
         self._refresh_dynamic_secrets()
+        client = self._require_client()
         bound = _normalize_duckdb_parameters(parameters)
         grant = _acquire_duckdb_lease(self._broker, sql, _param_len(bound))
         try:
-            native_cursor = self._client.select_to_arrow(
+            native_cursor = client.select_to_arrow(
                 sql,
                 bound,
                 batch_size=max(1, int(batch_size)),
                 threshold_rows=max(0, int(threshold_rows)),
             )
             return native_cursor if isinstance(native_cursor, ArrowCursor) else ArrowCursor(native_cursor)
+        except Exception as exc:
+            _invalidate_rejected_credentials(exc, self._dynamic_secrets, self._secret_generations)
+            raise
         finally:
             _release_duckdb_lease(self._broker, grant)
 
@@ -309,14 +355,18 @@ class SyncDuckDBDriver(SyncDatabaseDriver[DuckDBConfig]):
         _ = kwargs
         chunk = max(1, int(batch_size))
         self._refresh_dynamic_secrets()
+        client = self._require_client()
         bound = _normalize_duckdb_parameters(parameters)
         grant = _acquire_duckdb_lease(self._broker, sql, _param_len(bound))
         try:
-            native_cursors = self._client.stream_arrow_batches(
+            native_cursors = client.stream_arrow_batches(
                 sql,
                 bound,
                 batch_size=chunk,
             )
+        except Exception as exc:
+            _invalidate_rejected_credentials(exc, self._dynamic_secrets, self._secret_generations)
+            raise
         finally:
             _release_duckdb_lease(self._broker, grant)
 
@@ -335,6 +385,9 @@ class SyncDuckDBDriver(SyncDatabaseDriver[DuckDBConfig]):
                         rows = cursor.to_pylist()
                         for idx in range(0, len(rows), chunk):
                             yield rows[idx : idx + chunk]
+        except Exception as exc:
+            _invalidate_rejected_credentials(exc, self._dynamic_secrets, self._secret_generations)
+            raise
         finally:
             for remaining in native_cursors[idx_cur:]:
                 release_fn = getattr(remaining, "release", None)
@@ -362,6 +415,7 @@ class SyncDuckDBDriver(SyncDatabaseDriver[DuckDBConfig]):
                 col_list.append(col_str)
 
         self._refresh_dynamic_secrets()
+        client = self._require_client()
         if isinstance(data, ArrowCursor) or hasattr(data, "schema") or isinstance(data, (bytes, bytearray, memoryview)):
             if hasattr(data, "schema") and col_list is None:
                 for field_name in getattr(data.schema, "names", ()):
@@ -370,13 +424,16 @@ class SyncDuckDBDriver(SyncDatabaseDriver[DuckDBConfig]):
             grant = _acquire_duckdb_lease(self._broker, f"APPENDER {table_name}", len(col_list or ()))
             try:
                 return int(
-                    self._client.load_from_arrow(
+                    client.load_from_arrow(
                         table_name,
                         payload,
                         columns=col_list,
                         create_if_missing=create_if_missing,
                     )
                 )
+            except Exception as exc:
+                _invalidate_rejected_credentials(exc, self._dynamic_secrets, self._secret_generations)
+                raise
             finally:
                 _release_duckdb_lease(self._broker, grant)
 
@@ -389,13 +446,16 @@ class SyncDuckDBDriver(SyncDatabaseDriver[DuckDBConfig]):
         grant = _acquire_duckdb_lease(self._broker, f"APPENDER {table_name}", len(cols))
         try:
             return int(
-                self._client.load_from_arrow(
+                client.load_from_arrow(
                     table_name,
                     dict_rows,
                     columns=[str(c) for c in cols],
                     create_if_missing=create_if_missing,
                 )
             )
+        except Exception as exc:
+            _invalidate_rejected_credentials(exc, self._dynamic_secrets, self._secret_generations)
+            raise
         finally:
             _release_duckdb_lease(self._broker, grant)
 
@@ -403,6 +463,7 @@ class SyncDuckDBDriver(SyncDatabaseDriver[DuckDBConfig]):
         """Refresh `value_provider` secrets when uninitialized, stale by interval, or generation-bumped."""
         if not self._dynamic_secrets or self._closed:
             return
+        client = self._require_client()
         now_monotonic = time.monotonic()
         for secret in self._dynamic_secrets:
             provider = secret.value_provider
@@ -427,7 +488,7 @@ class SyncDuckDBDriver(SyncDatabaseDriver[DuckDBConfig]):
                     msg = f"SyncDuckDBDriver secret {secret.name!r} requires a synchronous `value_provider`"
                     raise ImproperConfigurationError(msg)
                 ddl = secret.to_create_secret_sql(resolved)
-                self._client.execute(ddl, None)
+                client.execute(ddl, None)
             except Exception:
                 if secret.required:
                     raise
@@ -448,6 +509,7 @@ class AsyncDuckDBDriver(AsyncDatabaseDriver[DuckDBConfig]):
         "_client",
         "_dynamic_secrets",
         "_executed_bootstrap_statements",
+        "_initial_secrets_applied",
         "_secret_generations",
         "_secret_refresh_times",
     )
@@ -468,11 +530,12 @@ class AsyncDuckDBDriver(AsyncDatabaseDriver[DuckDBConfig]):
         self._dynamic_secrets: tuple[DuckDBSecretConfig, ...] = tuple(
             s for s in normalized_secrets if s.value_provider is not None
         )
+        self._initial_secrets_applied: bool = False
         self._secret_refresh_times: dict[str, float] = {}
         self._secret_generations: dict[str, int] = {}
         self._executed_bootstrap_statements: tuple[str, ...] = tuple(self.config.bootstrap_statements())
         if _client is not None:
-            self._client: AsyncDuckDBClient = _client
+            self._client: AsyncDuckDBClient | None = _client
         else:
             native_mod = ensure_module(
                 "vertebra._duckdb",
@@ -496,6 +559,20 @@ class AsyncDuckDBDriver(AsyncDatabaseDriver[DuckDBConfig]):
                 init_statements=init_stmts or None,
             )
 
+    def _require_client(self) -> AsyncDuckDBClient:
+        """Return the open `AsyncDuckDBClient` or raise `InterfaceError` when closed."""
+        client = self._client
+        if client is None:
+            msg = "DuckDB driver is closed"
+            raise InterfaceError(msg)
+        return client
+
+    async def connect(self) -> Self:
+        """Apply initial dynamic secrets when opening the asynchronous driver."""
+        await super().connect()
+        await self._refresh_dynamic_secrets_async(force=True)
+        return self
+
     @property
     def executed_bootstrap_statements(self) -> tuple[str, ...]:
         """Return the post-initialization `SET` statements executed on startup."""
@@ -504,7 +581,8 @@ class AsyncDuckDBDriver(AsyncDatabaseDriver[DuckDBConfig]):
     @property
     def in_transaction(self) -> bool:
         """Return `True` when an explicit DuckDB transaction is active on the writer session."""
-        return bool(self._client.in_transaction)
+        client = self._client
+        return bool(client.in_transaction) if client is not None else False
 
     def cursor(self) -> _AsyncDuckDBCursor:
         """Create an asynchronous cursor bound to this driver."""
@@ -516,30 +594,33 @@ class AsyncDuckDBDriver(AsyncDatabaseDriver[DuckDBConfig]):
 
     async def begin(self) -> None:
         """Begin an explicit DuckDB transaction asynchronously."""
-        if not self._client.in_transaction:
-            await self._client.begin()
+        client = self._require_client()
+        if not client.in_transaction:
+            await client.begin()
 
     async def commit(self) -> None:
         """Commit the active DuckDB transaction asynchronously when one is open."""
-        if self._client.in_transaction:
-            await self._client.commit()
+        client = self._require_client()
+        if client.in_transaction:
+            await client.commit()
 
     async def rollback(self) -> None:
         """Roll back the active DuckDB transaction asynchronously when one is open."""
-        if self._client.in_transaction:
-            await self._client.rollback()
+        client = self._require_client()
+        if client.in_transaction:
+            await client.rollback()
 
     async def savepoint(self, name: str) -> None:
         """Create a transactional savepoint asynchronously on the active DuckDB transaction."""
-        await self._client.savepoint(name)
+        await self._require_client().savepoint(name)
 
     async def rollback_to_savepoint(self, name: str) -> None:
         """Roll back the active DuckDB transaction asynchronously to savepoint `name`."""
-        await self._client.rollback_to_savepoint(name)
+        await self._require_client().rollback_to_savepoint(name)
 
     async def release_savepoint(self, name: str) -> None:
         """Release savepoint `name` asynchronously on the active DuckDB transaction."""
-        await self._client.release_savepoint(name)
+        await self._require_client().release_savepoint(name)
 
     @asynccontextmanager
     async def transaction(self) -> AsyncIterator[Self]:
@@ -569,13 +650,17 @@ class AsyncDuckDBDriver(AsyncDatabaseDriver[DuckDBConfig]):
 
     async def cancel(self) -> None:
         """Interrupt any in-flight DuckDB query via `duckdb::InterruptHandle`."""
-        if not self._closed:
-            self._client.cancel()
+        client = self._client
+        if not self._closed and client is not None:
+            client.cancel()
 
     async def close(self) -> None:
         """Close the underlying DuckDB worker pool asynchronously."""
         self._closed = True
-        await self._client.close()
+        client = self._client
+        self._client = None
+        if client is not None:
+            await client.close()
 
     async def refresh_secrets(self, *, force: bool = True) -> None:
         """Evaluate configured sync or async `value_provider` secrets and apply `CREATE OR REPLACE SECRET`."""
@@ -590,10 +675,14 @@ class AsyncDuckDBDriver(AsyncDatabaseDriver[DuckDBConfig]):
         """Execute a DDL or DML statement asynchronously via the native completion ring."""
         _ = kwargs
         await self._refresh_dynamic_secrets_async()
+        client = self._require_client()
         bound = _normalize_duckdb_parameters(parameters)
         grant = _acquire_duckdb_lease(self._broker, sql, _param_len(bound))
         try:
-            return int(await self._client.execute(sql, bound))
+            return int(await client.execute(sql, bound))
+        except Exception as exc:
+            _invalidate_rejected_credentials(exc, self._dynamic_secrets, self._secret_generations)
+            raise
         finally:
             _release_duckdb_lease(self._broker, grant)
 
@@ -608,10 +697,14 @@ class AsyncDuckDBDriver(AsyncDatabaseDriver[DuckDBConfig]):
         if not parameter_sets:
             return 0
         await self._refresh_dynamic_secrets_async()
+        client = self._require_client()
         normalized_sets = [_normalize_duckdb_parameters(item) or () for item in parameter_sets]
         grant = _acquire_duckdb_lease(self._broker, sql, _param_len(normalized_sets[0]))
         try:
-            return int(await self._client.execute_many(sql, normalized_sets))
+            return int(await client.execute_many(sql, normalized_sets))
+        except Exception as exc:
+            _invalidate_rejected_credentials(exc, self._dynamic_secrets, self._secret_generations)
+            raise
         finally:
             _release_duckdb_lease(self._broker, grant)
 
@@ -624,11 +717,15 @@ class AsyncDuckDBDriver(AsyncDatabaseDriver[DuckDBConfig]):
         """Execute a query returning tuple rows asynchronously."""
         _ = kwargs
         await self._refresh_dynamic_secrets_async()
+        client = self._require_client()
         bound = _normalize_duckdb_parameters(parameters)
         grant = _acquire_duckdb_lease(self._broker, sql, _param_len(bound))
         try:
-            rows = await self._client.execute_tuples(sql, bound)
+            rows = await client.execute_tuples(sql, bound)
             return list(rows)
+        except Exception as exc:
+            _invalidate_rejected_credentials(exc, self._dynamic_secrets, self._secret_generations)
+            raise
         finally:
             _release_duckdb_lease(self._broker, grant)
 
@@ -641,11 +738,15 @@ class AsyncDuckDBDriver(AsyncDatabaseDriver[DuckDBConfig]):
         """Execute SQL and return `(rows, column_names)` asynchronously preserving column names on empty result sets."""
         _ = kwargs
         await self._refresh_dynamic_secrets_async()
+        client = self._require_client()
         bound = _normalize_duckdb_parameters(parameters)
         grant = _acquire_duckdb_lease(self._broker, sql, _param_len(bound))
         try:
-            rows, cols = await self._client.execute_with_description(sql, bound)
+            rows, cols = await client.execute_with_description(sql, bound)
             return list(rows), tuple(str(c) for c in cols)
+        except Exception as exc:
+            _invalidate_rejected_credentials(exc, self._dynamic_secrets, self._secret_generations)
+            raise
         finally:
             _release_duckdb_lease(self._broker, grant)
 
@@ -673,16 +774,20 @@ class AsyncDuckDBDriver(AsyncDatabaseDriver[DuckDBConfig]):
         """Execute a query asynchronously and return an `ArrowCursor`, spilling to `VTBARROW` SHM at `threshold_rows`."""
         _ = kwargs
         await self._refresh_dynamic_secrets_async()
+        client = self._require_client()
         bound = _normalize_duckdb_parameters(parameters)
         grant = _acquire_duckdb_lease(self._broker, sql, _param_len(bound))
         try:
-            native_cursor = await self._client.select_to_arrow(
+            native_cursor = await client.select_to_arrow(
                 sql,
                 bound,
                 batch_size=max(1, int(batch_size)),
                 threshold_rows=max(0, int(threshold_rows)),
             )
             return native_cursor if isinstance(native_cursor, ArrowCursor) else ArrowCursor(native_cursor)
+        except Exception as exc:
+            _invalidate_rejected_credentials(exc, self._dynamic_secrets, self._secret_generations)
+            raise
         finally:
             _release_duckdb_lease(self._broker, grant)
 
@@ -709,14 +814,18 @@ class AsyncDuckDBDriver(AsyncDatabaseDriver[DuckDBConfig]):
         _ = kwargs
         chunk = max(1, int(batch_size))
         await self._refresh_dynamic_secrets_async()
+        client = self._require_client()
         bound = _normalize_duckdb_parameters(parameters)
         grant = _acquire_duckdb_lease(self._broker, sql, _param_len(bound))
         try:
-            native_cursors = await self._client.stream_arrow_batches(
+            native_cursors = await client.stream_arrow_batches(
                 sql,
                 bound,
                 batch_size=chunk,
             )
+        except Exception as exc:
+            _invalidate_rejected_credentials(exc, self._dynamic_secrets, self._secret_generations)
+            raise
         finally:
             _release_duckdb_lease(self._broker, grant)
 
@@ -736,6 +845,9 @@ class AsyncDuckDBDriver(AsyncDatabaseDriver[DuckDBConfig]):
                         rows = cursor.to_pylist()
                         for idx in range(0, len(rows), chunk):
                             yield rows[idx : idx + chunk]
+        except Exception as exc:
+            _invalidate_rejected_credentials(exc, self._dynamic_secrets, self._secret_generations)
+            raise
         finally:
             for remaining in native_cursors[idx_cur:]:
                 release_fn = getattr(remaining, "release", None)
@@ -763,6 +875,7 @@ class AsyncDuckDBDriver(AsyncDatabaseDriver[DuckDBConfig]):
                 col_list.append(col_str)
 
         await self._refresh_dynamic_secrets_async()
+        client = self._require_client()
         if isinstance(data, ArrowCursor) or hasattr(data, "schema") or isinstance(data, (bytes, bytearray, memoryview)):
             if hasattr(data, "schema") and col_list is None:
                 for field_name in getattr(data.schema, "names", ()):
@@ -771,13 +884,16 @@ class AsyncDuckDBDriver(AsyncDatabaseDriver[DuckDBConfig]):
             grant = _acquire_duckdb_lease(self._broker, f"APPENDER {table_name}", len(col_list or ()))
             try:
                 return int(
-                    await self._client.load_from_arrow(
+                    await client.load_from_arrow(
                         table_name,
                         payload,
                         columns=col_list,
                         create_if_missing=create_if_missing,
                     )
                 )
+            except Exception as exc:
+                _invalidate_rejected_credentials(exc, self._dynamic_secrets, self._secret_generations)
+                raise
             finally:
                 _release_duckdb_lease(self._broker, grant)
 
@@ -790,49 +906,69 @@ class AsyncDuckDBDriver(AsyncDatabaseDriver[DuckDBConfig]):
         grant = _acquire_duckdb_lease(self._broker, f"APPENDER {table_name}", len(cols))
         try:
             return int(
-                await self._client.load_from_arrow(
+                await client.load_from_arrow(
                     table_name,
                     dict_rows,
                     columns=[str(c) for c in cols],
                     create_if_missing=create_if_missing,
                 )
             )
+        except Exception as exc:
+            _invalidate_rejected_credentials(exc, self._dynamic_secrets, self._secret_generations)
+            raise
         finally:
             _release_duckdb_lease(self._broker, grant)
+
+    async def _cleanup_failed_startup_client(self) -> None:
+        """Close and clear the underlying client if initial dynamic secret bootstrap raises."""
+        client = self._client
+        self._client = None
+        self._closed = True
+        if client is not None:
+            await client.close()
 
     async def _refresh_dynamic_secrets_async(self, *, force: bool = False) -> None:
         """Asynchronously refresh `value_provider` secrets when uninitialized, stale, or generation-bumped."""
         if not self._dynamic_secrets or self._closed:
+            self._initial_secrets_applied = True
             return
+        client = self._require_client()
+        is_initial = not self._initial_secrets_applied
         now_monotonic = time.monotonic()
-        for secret in self._dynamic_secrets:
-            provider = secret.value_provider
-            if provider is None:
-                continue
-            key = secret.name.lower()
-            provider_gen = _probe_provider_generation(provider)
-            provider_needs_refresh = _probe_provider_needs_refresh(provider)
-            last_refreshed = self._secret_refresh_times.get(key)
-            applied_gen = self._secret_generations.get(key)
-            interval_due = (
-                last_refreshed is None or (now_monotonic - last_refreshed) >= secret.effective_refresh_interval()
-            )
-            gen_changed = provider_gen is not None and provider_gen != applied_gen
-            if not (force or interval_due or provider_needs_refresh or gen_changed):
-                continue
-            try:
-                candidate = provider()
-                resolved = await candidate if inspect.isawaitable(candidate) else candidate
-                ddl = secret.to_create_secret_sql(resolved)
-                await self._client.execute(ddl, None)
-            except Exception:
-                if secret.required:
-                    raise
-            else:
-                self._secret_refresh_times[key] = now_monotonic
-                updated_gen = _probe_provider_generation(provider)
-                if updated_gen is not None:
-                    self._secret_generations[key] = updated_gen
+        try:
+            for secret in self._dynamic_secrets:
+                provider = secret.value_provider
+                if provider is None:
+                    continue
+                key = secret.name.lower()
+                provider_gen = _probe_provider_generation(provider)
+                provider_needs_refresh = _probe_provider_needs_refresh(provider)
+                last_refreshed = self._secret_refresh_times.get(key)
+                applied_gen = self._secret_generations.get(key)
+                interval_due = (
+                    last_refreshed is None or (now_monotonic - last_refreshed) >= secret.effective_refresh_interval()
+                )
+                gen_changed = provider_gen is not None and provider_gen != applied_gen
+                if not (force or interval_due or provider_needs_refresh or gen_changed):
+                    continue
+                try:
+                    candidate = provider()
+                    resolved = await candidate if inspect.isawaitable(candidate) else candidate
+                    ddl = secret.to_create_secret_sql(resolved)
+                    await client.execute(ddl, None)
+                except Exception:
+                    if secret.required:
+                        raise
+                else:
+                    self._secret_refresh_times[key] = now_monotonic
+                    updated_gen = _probe_provider_generation(provider)
+                    if updated_gen is not None:
+                        self._secret_generations[key] = updated_gen
+        except BaseException:
+            if is_initial:
+                await self._cleanup_failed_startup_client()
+            raise
+        self._initial_secrets_applied = True
 
 
 class _SyncDuckDBCursor:
@@ -987,6 +1123,27 @@ class _AsyncDuckDBCursor:
         """Clear buffered cursor rows."""
         self._rows = []
         self._pos = 0
+
+
+def _invalidate_rejected_credentials(
+    exc: BaseException,
+    secrets: tuple[DuckDBSecretConfig, ...],
+    secret_generations: dict[str, int],
+) -> None:
+    """Invalidate dynamic secret providers on HTTP 401/403 errors for already-applied generations."""
+    if not _CREDENTIAL_REJECTION_PATTERN.search(str(exc)):
+        return
+    for secret in secrets:
+        provider = secret.value_provider
+        if provider is None:
+            continue
+        applied_gen = secret_generations.get(secret.name.lower())
+        if applied_gen is None:
+            continue
+        target = getattr(provider, "__self__", provider)
+        invalidate_fn = getattr(target, "invalidate", None)
+        if callable(invalidate_fn):
+            invalidate_fn(applied_gen)
 
 
 def _probe_provider_generation(provider: Any) -> int | None:

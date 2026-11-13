@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import ast
+import asyncio
+import math
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import msgspec
 import pyarrow as pa
@@ -40,6 +42,7 @@ from vertebra.db.adapters.duckdb import (
     SyncDuckDBDriver,
     SyncDuckDBPipeline,
 )
+from vertebra.typing import ImproperConfigurationError
 
 
 class _PipelineAbortError(RuntimeError):
@@ -462,12 +465,13 @@ async def test_duckdb_arrow_c_stream_ipc_bytes_and_dynamic_secret_provider_rotat
         name="vtb_async_http_secret",
         secret_type="http",
         value_provider=_async_secret_provider,
-        refresh_interval_seconds=0.0,
+        refresh_interval_seconds=0.001,
     )
     async_driver = AsyncDuckDBDriver(DuckDBConfig(secrets=(async_secret,)))
     try:
         await async_driver.select("SELECT 1 AS ok")
         assert async_calls == 1
+        await asyncio.sleep(0.005)
         await async_driver.select("SELECT 2 AS ok")
         assert async_calls == 2
     finally:
@@ -578,3 +582,194 @@ async def test_duckdb_secret_escaping_core_write_detection_notfound_and_pipeline
     finally:
         sync_driver.close()
         await async_driver.close()
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"persistent": True, "value_provider": lambda: {"bearer_token": "tok"}},
+        {"refresh_interval_seconds": True},
+        {"refresh_interval_seconds": False},
+        {"refresh_interval_seconds": 0.0},
+        {"refresh_interval_seconds": -1.0},
+        {"refresh_interval_seconds": float("nan")},
+        {"refresh_interval_seconds": float("inf")},
+    ],
+)
+def test_duckdb_secret_config_rejects_invalid_persistent_and_refresh_intervals(
+    kwargs: dict[str, Any],
+) -> None:
+    """Verify DuckDBSecretConfig fails closed on persistent dynamic providers and invalid intervals."""
+    with pytest.raises(ImproperConfigurationError):
+        DuckDBSecretConfig(name="invalid_secret", secret_type="http", **kwargs)
+    assert math.isfinite(DuckDBSecretConfig(name="ok_secret", secret_type="http").effective_refresh_interval())
+
+
+class _FaultInjectingSyncClient:
+    """Real SyncDuckDBClient proxy injecting an HTTP error on data queries while tracking close()."""
+
+    def __init__(self, inner: SyncDuckDBClient, query_error: Exception | None = None) -> None:
+        self._inner = inner
+        self._query_error = query_error
+        self.close_calls = 0
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+    def execute(self, sql: str, params: Any = None) -> int:
+        if self._query_error is not None and "CREATE" not in sql.upper():
+            raise self._query_error
+        return int(self._inner.execute(sql, params))
+
+    def execute_with_description(self, sql: str, params: Any = None) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
+        if self._query_error is not None:
+            raise self._query_error
+        rows, cols = self._inner.execute_with_description(sql, params)
+        return list(rows), tuple(str(col) for col in cols)
+
+    def close(self) -> None:
+        self.close_calls += 1
+        self._inner.close()
+
+
+class _FaultInjectingAsyncClient:
+    """Real AsyncDuckDBClient proxy injecting an HTTP error on data queries while tracking close()."""
+
+    def __init__(self, inner: AsyncDuckDBClient, query_error: Exception | None = None) -> None:
+        self._inner = inner
+        self._query_error = query_error
+        self.close_calls = 0
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+    async def execute(self, sql: str, params: Any = None) -> int:
+        if self._query_error is not None and "CREATE" not in sql.upper():
+            raise self._query_error
+        return int(await self._inner.execute(sql, params))
+
+    async def execute_with_description(
+        self, sql: str, params: Any = None
+    ) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
+        if self._query_error is not None:
+            raise self._query_error
+        rows, cols = await self._inner.execute_with_description(sql, params)
+        return list(rows), tuple(str(col) for col in cols)
+
+    async def close(self) -> None:
+        self.close_calls += 1
+        await self._inner.close()
+
+
+class _RecordingSecretProvider:
+    """Minimal stateful dynamic secret provider tracking generation, invalidation, and call counts."""
+
+    def __init__(self) -> None:
+        self.generation = 1
+        self.invalidated: list[int] = []
+        self.calls = 0
+
+    def invalidate(self, failed_generation: int) -> None:
+        self.invalidated.append(failed_generation)
+        if self.generation == failed_generation:
+            self.generation += 1
+
+    def __call__(self) -> dict[str, str]:
+        self.calls += 1
+        return {"bearer_token": f"tok-gen-{self.generation}"}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("error_message", "expected_invalidation"),
+    [
+        ("HTTP Error: unable to connect (HTTP 401)", True),
+        ("HTTP Error: forbidden (HTTP 403)", True),
+        ("HTTP Error: not found (HTTP 404)", False),
+        ("Parser Error: syntax error at or near 'FROM'", False),
+    ],
+)
+async def test_duckdb_driver_invalidates_only_401_and_403_errors_and_rotates_next_query(
+    error_message: str,
+    expected_invalidation: bool,
+) -> None:
+    """Verify sync and async drivers invalidate tracked secret generations only on HTTP 401/403 errors."""
+    sync_provider = _RecordingSecretProvider()
+    plain_calls = 0
+
+    def plain_callable() -> dict[str, str]:
+        nonlocal plain_calls
+        plain_calls += 1
+        return {"bearer_token": "plain-tok"}
+
+    sync_secrets = (
+        DuckDBSecretConfig(name="s_tracked", secret_type="http", value_provider=sync_provider),
+        DuckDBSecretConfig(name="s_plain", secret_type="http", value_provider=plain_callable),
+    )
+    sync_proxy = _FaultInjectingSyncClient(SyncDuckDBClient(":memory:"), query_error=RuntimeError(error_message))
+    sync_driver = SyncDuckDBDriver(DuckDBConfig(secrets=sync_secrets), _client=cast("SyncDuckDBClient", sync_proxy))
+    try:
+        assert sync_provider.calls == 1
+        assert plain_calls == 1
+        with pytest.raises(RuntimeError, match="Error"):
+            sync_driver.select("SELECT * FROM 'https://example.invalid/data.parquet'")
+        if expected_invalidation:
+            assert sync_provider.invalidated == [1]
+            assert sync_provider.generation == 2
+        else:
+            assert sync_provider.invalidated == []
+            assert sync_provider.generation == 1
+
+        sync_proxy._query_error = None
+        assert sync_driver.select("SELECT 42 AS answer") == [{"answer": 42}]
+        assert sync_provider.calls == (2 if expected_invalidation else 1)
+    finally:
+        sync_driver.close()
+
+    async_provider = _RecordingSecretProvider()
+    async_secrets = (DuckDBSecretConfig(name="a_tracked", secret_type="http", value_provider=async_provider),)
+    async_proxy = _FaultInjectingAsyncClient(AsyncDuckDBClient(":memory:"), query_error=RuntimeError(error_message))
+    async_driver = AsyncDuckDBDriver(
+        DuckDBConfig(secrets=async_secrets), _client=cast("AsyncDuckDBClient", async_proxy)
+    )
+    try:
+        with pytest.raises(RuntimeError, match="Error"):
+            await async_driver.select("SELECT * FROM 'https://example.invalid/data.parquet'")
+        assert async_provider.calls == 1
+        if expected_invalidation:
+            assert async_provider.invalidated == [1]
+            assert async_provider.generation == 2
+        else:
+            assert async_provider.invalidated == []
+            assert async_provider.generation == 1
+
+        async_proxy._query_error = None
+        assert await async_driver.select("SELECT 7 AS answer") == [{"answer": 7}]
+        assert async_provider.calls == (2 if expected_invalidation else 1)
+    finally:
+        await async_driver.close()
+
+
+@pytest.mark.anyio
+async def test_duckdb_driver_closes_client_when_initial_required_secret_refresh_fails() -> None:
+    """Verify failed initial required=True secret refresh closes and clears _client across sync and async drivers."""
+
+    def failing_provider() -> dict[str, str]:
+        raise RuntimeError("vault unavailable")
+
+    cfg = DuckDBConfig(
+        secrets=(DuckDBSecretConfig(name="broken_secret", secret_type="http", value_provider=failing_provider),)
+    )
+    sync_proxy = _FaultInjectingSyncClient(SyncDuckDBClient(":memory:"))
+    with pytest.raises(RuntimeError, match="vault unavailable"):
+        SyncDuckDBDriver(cfg, _client=cast("SyncDuckDBClient", sync_proxy))
+    assert sync_proxy.close_calls == 1
+
+    async_proxy = _FaultInjectingAsyncClient(AsyncDuckDBClient(":memory:"))
+    async_driver = AsyncDuckDBDriver(cfg, _client=cast("AsyncDuckDBClient", async_proxy))
+    with pytest.raises(RuntimeError, match="vault unavailable"):
+        await async_driver.select("SELECT 1 AS ok")
+    assert async_proxy.close_calls == 1
+    assert async_driver._client is None
+    await async_driver.close()
+    assert async_proxy.close_calls == 1

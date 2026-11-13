@@ -1,5 +1,6 @@
 """Native object storage, Arrow file bridge, and V4/OCI/Azure/GCS signing package for Vertebra."""
 
+from vertebra.storage._secrets import AsyncGcsBearerSecretProvider, SyncGcsBearerSecretProvider
 from vertebra.storage._store import (
     AsyncGcpIdTokenCache,
     AsyncGcpTokenCache,
@@ -33,6 +34,7 @@ from vertebra.storage._streaming import ByteRange, RangeNotSatisfiableError, Str
 __all__ = (
     "AsyncGcpIdTokenCache",
     "AsyncGcpTokenCache",
+    "AsyncGcsBearerSecretProvider",
     "AsyncObjectStore",
     "AsyncReadableFile",
     "AsyncWritableFile",
@@ -57,6 +59,7 @@ __all__ = (
     "StreamingStorageResponse",
     "SyncGcpIdTokenCache",
     "SyncGcpTokenCache",
+    "SyncGcsBearerSecretProvider",
     "SyncObjectStore",
     "SyncReadableFile",
     "SyncWritableFile",

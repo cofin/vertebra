@@ -4,7 +4,7 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
@@ -308,60 +308,68 @@ fn enqueue_plsql_sql() -> &'static str {
     )
 }
 
-fn run_live_aq_worker(
-    config: Arc<NativeOracleConfig>,
-    queue_name: String,
-    consumer_name: Option<String>,
-    wait_timeout_seconds: u32,
-    state: Arc<ListenerSharedState>,
+trait LoopClock {
+    fn now(&self) -> Instant;
+}
+
+struct SystemLoopClock;
+
+impl LoopClock for SystemLoopClock {
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+}
+
+trait AqDequeueSession {
+    fn dequeue_slice(
+        &mut self,
+        queue_name: &str,
+        consumer_name: Option<&str>,
+        wait_sec: i64,
+    ) -> Result<OracleNotification, OracleError>;
+
+    fn ping_session(&mut self) -> Result<(), OracleError>;
+
+    fn close_session(self: Box<Self>);
+}
+
+struct LiveAqSession {
+    conn: oracledb::Connection,
     break_handle: Arc<OracleBreakHandle>,
-) {
-    let mut conn = match connect_oracledb(&config) {
-        Ok(c) => c,
-        Err(err) => {
-            if !state.is_closed() {
-                state.record_fatal_error(err);
-            }
-            return;
-        }
-    };
+    sql: &'static str,
+    out_payload_buf: Vec<u8>,
+}
 
-    let state_for_break = Arc::clone(&state);
-    break_handle.set_callback(Some(Arc::new(move || {
-        state_for_break.wake_cvar.notify_all();
-    })));
-
-    // Slice server-blocking DBMS_AQ.DEQUEUE waits into 1-second kernel waits:
-    // enqueued messages wake immediately (<1ms), ORA-25228 loops while open,
-    // and close()/Drop exits cleanly in <=1s without cancelling SYS.DBMS_AQ.DEQUEUE
-    // (which triggers an upstream `todo!()` in `oracledb` 26.0.0-beta.5 ErrorInfo).
-    let _ = wait_timeout_seconds.max(1);
-    let wait_sec = 1_i64;
-    let out_payload_buf = vec![0u8; 32767];
-    let sql = dequeue_plsql_sql();
-
-    while !state.is_closed() {
-        break_handle.begin_operation();
-        let res = conn.execute_named(
-            sql,
+impl AqDequeueSession for LiveAqSession {
+    fn dequeue_slice(
+        &mut self,
+        queue_name: &str,
+        consumer_name: Option<&str>,
+        wait_sec: i64,
+    ) -> Result<OracleNotification, OracleError> {
+        let consumer_owned = consumer_name.map(str::to_owned);
+        let queue_owned = queue_name.to_owned();
+        self.break_handle.begin_operation();
+        let res = self.conn.execute_named(
+            self.sql,
             &[
                 ("wait_sec", &wait_sec as &dyn oracledb::ToDbValue),
-                ("consumer", &consumer_name as &dyn oracledb::ToDbValue),
-                ("queue_name", &queue_name as &dyn oracledb::ToDbValue),
+                ("consumer", &consumer_owned as &dyn oracledb::ToDbValue),
+                ("queue_name", &queue_owned as &dyn oracledb::ToDbValue),
                 (
                     "out_msgid",
                     &oracledb::DB_TYPE_VARCHAR as &dyn oracledb::ToDbValue,
                 ),
-                ("out_payload", &out_payload_buf as &dyn oracledb::ToDbValue),
+                (
+                    "out_payload",
+                    &self.out_payload_buf as &dyn oracledb::ToDbValue,
+                ),
             ],
         );
-        break_handle.end_operation();
+        self.break_handle.end_operation();
 
         match res {
             Ok(mut exec_res) => {
-                if state.is_closed() {
-                    break;
-                }
                 let out_row = exec_res.out_bind_data();
                 let mut msg_id_bytes = Vec::new();
                 let mut payload_bytes = Vec::new();
@@ -380,20 +388,75 @@ fn run_live_aq_worker(
                     .duration_since(UNIX_EPOCH)
                     .ok()
                     .and_then(|d| i64::try_from(d.as_millis()).ok());
-                state.deliver_frame(OracleNotification {
-                    queue_name: queue_name.clone(),
-                    consumer_name: consumer_name.clone(),
+                Ok(OracleNotification {
+                    queue_name: queue_owned,
+                    consumer_name: consumer_owned,
                     msg_id_bytes,
                     payload_bytes,
                     enqueued_at_epoch_ms: now_ms,
-                });
+                })
             }
-            Err(raw_err) => {
-                let ora_err = OracleError::from_oracledb(&raw_err);
+            Err(raw_err) => Err(OracleError::from_oracledb(&raw_err)),
+        }
+    }
+
+    fn ping_session(&mut self) -> Result<(), OracleError> {
+        self.break_handle.begin_operation();
+        let res = self.conn.query("SELECT 1 FROM DUAL", &[]);
+        self.break_handle.end_operation();
+        res.map(|_| ())
+            .map_err(|raw_err| OracleError::from_oracledb(&raw_err))
+    }
+
+    fn close_session(mut self: Box<Self>) {
+        self.break_handle.set_callback(None);
+        let _ = self.conn.close();
+    }
+}
+
+fn run_aq_loop(
+    mut session: Box<dyn AqDequeueSession>,
+    queue_name: &str,
+    consumer_name: Option<&str>,
+    wait_timeout_seconds: u32,
+    state: &ListenerSharedState,
+    clock: &dyn LoopClock,
+) {
+    // Slice server-blocking DBMS_AQ.DEQUEUE waits into 1-second kernel waits:
+    // enqueued messages wake immediately (<1ms), ORA-25228 tracks cumulative
+    // idle elapsed against `wait_timeout_seconds` to run `SELECT 1 FROM DUAL`,
+    // and close()/Drop exits cleanly in <=1s without cancelling SYS.DBMS_AQ.DEQUEUE.
+    let wait_budget = Duration::from_secs(u64::from(wait_timeout_seconds.max(1)));
+    let wait_sec = 1_i64;
+    let mut idle_since = clock.now();
+
+    while !state.is_closed() {
+        match session.dequeue_slice(queue_name, consumer_name, wait_sec) {
+            Ok(frame) => {
+                if state.is_closed() {
+                    break;
+                }
+                idle_since = clock.now();
+                state.deliver_frame(frame);
+            }
+            Err(ora_err) => {
                 if state.is_closed() {
                     break;
                 }
                 if is_idle_dequeue_timeout(&ora_err) {
+                    if clock.now().saturating_duration_since(idle_since) >= wait_budget {
+                        match session.ping_session() {
+                            Ok(()) => {
+                                idle_since = clock.now();
+                            }
+                            Err(ping_err) => {
+                                if !state.is_closed() {
+                                    state.record_fatal_error(ping_err);
+                                }
+                                break;
+                            }
+                        }
+                    }
                     continue;
                 }
                 state.record_fatal_error(ora_err);
@@ -401,8 +464,48 @@ fn run_live_aq_worker(
             }
         }
     }
-    break_handle.set_callback(None);
-    let _ = conn.close();
+
+    session.close_session();
+}
+
+fn run_live_aq_worker(
+    config: Arc<NativeOracleConfig>,
+    queue_name: String,
+    consumer_name: Option<String>,
+    wait_timeout_seconds: u32,
+    state: Arc<ListenerSharedState>,
+    break_handle: Arc<OracleBreakHandle>,
+) {
+    let conn = match connect_oracledb(&config) {
+        Ok(c) => c,
+        Err(err) => {
+            if !state.is_closed() {
+                state.record_fatal_error(err);
+            }
+            return;
+        }
+    };
+
+    let state_for_break = Arc::clone(&state);
+    break_handle.set_callback(Some(Arc::new(move || {
+        state_for_break.wake_cvar.notify_all();
+    })));
+
+    let session = Box::new(LiveAqSession {
+        conn,
+        break_handle,
+        sql: dequeue_plsql_sql(),
+        out_payload_buf: vec![0u8; 32767],
+    });
+    let clock = SystemLoopClock;
+    run_aq_loop(
+        session,
+        &queue_name,
+        consumer_name.as_deref(),
+        wait_timeout_seconds,
+        &state,
+        &clock,
+    );
 }
 
 /// Dedicated AQ / TxEventQ listener owning an isolated worker thread and bounded 1024-frame ring buffer.
@@ -649,10 +752,99 @@ pub(crate) fn enqueue_notification_sync(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+    use std::time::{Duration, Instant};
+
     use super::{
-        ListenerRingBuffer, OracleNotification, is_idle_dequeue_timeout, validate_aq_identifier,
+        AqDequeueSession, ListenerRingBuffer, ListenerSharedState, LoopClock, OracleNotification,
+        is_idle_dequeue_timeout, run_aq_loop, validate_aq_identifier,
     };
     use crate::errors::{OracleError, OracleErrorKind};
+
+    struct FakeLoopClock {
+        base: Instant,
+        elapsed_ms: Arc<AtomicU64>,
+    }
+
+    impl FakeLoopClock {
+        fn new() -> Self {
+            Self {
+                base: Instant::now(),
+                elapsed_ms: Arc::new(AtomicU64::new(0)),
+            }
+        }
+    }
+
+    impl LoopClock for FakeLoopClock {
+        fn now(&self) -> Instant {
+            self.base + Duration::from_millis(self.elapsed_ms.load(Ordering::Acquire))
+        }
+    }
+
+    enum ScriptedSlice {
+        Timeout,
+        Message(OracleNotification),
+        CloseAfter,
+    }
+
+    struct ScriptedAqSession {
+        slices: VecDeque<ScriptedSlice>,
+        clock_ms: Arc<AtomicU64>,
+        state: Arc<ListenerSharedState>,
+        ping_calls: Arc<AtomicUsize>,
+        fail_ping: bool,
+        closed: Arc<AtomicBool>,
+        observed_wait_secs: Vec<i64>,
+    }
+
+    impl AqDequeueSession for ScriptedAqSession {
+        fn dequeue_slice(
+            &mut self,
+            _queue_name: &str,
+            _consumer_name: Option<&str>,
+            wait_sec: i64,
+        ) -> Result<OracleNotification, OracleError> {
+            self.observed_wait_secs.push(wait_sec);
+            match self.slices.pop_front() {
+                Some(ScriptedSlice::Timeout) => {
+                    self.clock_ms.fetch_add(1000, Ordering::AcqRel);
+                    Err(OracleError::Server {
+                        code: 25228,
+                        message: "ORA-25228: timeout or end-of-fetch".to_owned(),
+                    })
+                }
+                Some(ScriptedSlice::Message(frame)) => Ok(frame),
+                Some(ScriptedSlice::CloseAfter) | None => {
+                    self.state.mark_closed();
+                    Err(OracleError::Server {
+                        code: 25228,
+                        message: "ORA-25228: timeout or end-of-fetch".to_owned(),
+                    })
+                }
+            }
+        }
+
+        fn ping_session(&mut self) -> Result<(), OracleError> {
+            self.ping_calls.fetch_add(1, Ordering::AcqRel);
+            if self.fail_ping {
+                return Err(OracleError::Server {
+                    code: 3113,
+                    message: "ORA-03113: end-of-file on communication channel".to_owned(),
+                });
+            }
+            Ok(())
+        }
+
+        fn close_session(self: Box<Self>) {
+            self.closed.store(true, Ordering::Release);
+            assert!(
+                self.observed_wait_secs.iter().all(|&sec| sec == 1),
+                "DBMS_AQ.DEQUEUE slice must remain 1s for responsive shutdown"
+            );
+        }
+    }
 
     #[test]
     fn test_validate_aq_identifier_accepts_valid_and_rejects_injection() {
@@ -718,5 +910,133 @@ mod tests {
         assert_eq!(classified.sqlstate, "08006");
         assert_eq!(classified.vendor_code, Some(3113));
         assert!(classified.is_transient);
+    }
+
+    #[test]
+    fn test_wait_timeout_seconds_governs_idle_liveness_ping_frequency() {
+        for (wait_timeout_seconds, expected_pings) in [(2_u32, 3_usize), (5_u32, 1_usize)] {
+            let clock = FakeLoopClock::new();
+            let state = Arc::new(ListenerSharedState::new(16));
+            let ping_calls = Arc::new(AtomicUsize::new(0));
+            let closed = Arc::new(AtomicBool::new(false));
+            let slices = VecDeque::from([
+                ScriptedSlice::Timeout,
+                ScriptedSlice::Timeout,
+                ScriptedSlice::Timeout,
+                ScriptedSlice::Timeout,
+                ScriptedSlice::Timeout,
+                ScriptedSlice::Timeout,
+                ScriptedSlice::CloseAfter,
+            ]);
+            let session = Box::new(ScriptedAqSession {
+                slices,
+                clock_ms: Arc::clone(&clock.elapsed_ms),
+                state: Arc::clone(&state),
+                ping_calls: Arc::clone(&ping_calls),
+                fail_ping: false,
+                closed: Arc::clone(&closed),
+                observed_wait_secs: Vec::new(),
+            });
+            run_aq_loop(
+                session,
+                "VTB_AQ_EVENTS",
+                None,
+                wait_timeout_seconds,
+                &state,
+                &clock,
+            );
+            assert_eq!(ping_calls.load(Ordering::Acquire), expected_pings);
+            assert!(closed.load(Ordering::Acquire));
+        }
+    }
+
+    #[test]
+    fn test_delivered_notification_resets_idle_timer_without_probing() {
+        let clock = FakeLoopClock::new();
+        let state = Arc::new(ListenerSharedState::new(16));
+        let ping_calls = Arc::new(AtomicUsize::new(0));
+        let closed = Arc::new(AtomicBool::new(false));
+        let frame = OracleNotification {
+            queue_name: "VTB_AQ_EVENTS".to_owned(),
+            consumer_name: None,
+            msg_id_bytes: b"m1".to_vec(),
+            payload_bytes: b"p1".to_vec(),
+            enqueued_at_epoch_ms: Some(1),
+        };
+        let slices = VecDeque::from([
+            ScriptedSlice::Timeout,
+            ScriptedSlice::Message(frame),
+            ScriptedSlice::Timeout,
+            ScriptedSlice::CloseAfter,
+        ]);
+        let session = Box::new(ScriptedAqSession {
+            slices,
+            clock_ms: Arc::clone(&clock.elapsed_ms),
+            state: Arc::clone(&state),
+            ping_calls: Arc::clone(&ping_calls),
+            fail_ping: false,
+            closed: Arc::clone(&closed),
+            observed_wait_secs: Vec::new(),
+        });
+        run_aq_loop(session, "VTB_AQ_EVENTS", None, 2, &state, &clock);
+        assert_eq!(ping_calls.load(Ordering::Acquire), 0);
+        assert!(closed.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn test_close_stops_aq_loop_within_single_slice() {
+        let clock = FakeLoopClock::new();
+        let state = Arc::new(ListenerSharedState::new(16));
+        let ping_calls = Arc::new(AtomicUsize::new(0));
+        let closed = Arc::new(AtomicBool::new(false));
+        let slices = VecDeque::from([
+            ScriptedSlice::CloseAfter,
+            ScriptedSlice::Timeout,
+            ScriptedSlice::Timeout,
+        ]);
+        let session = Box::new(ScriptedAqSession {
+            slices,
+            clock_ms: Arc::clone(&clock.elapsed_ms),
+            state: Arc::clone(&state),
+            ping_calls: Arc::clone(&ping_calls),
+            fail_ping: false,
+            closed: Arc::clone(&closed),
+            observed_wait_secs: Vec::new(),
+        });
+        run_aq_loop(session, "VTB_AQ_EVENTS", None, 60, &state, &clock);
+        assert_eq!(ping_calls.load(Ordering::Acquire), 0);
+        assert!(closed.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn test_failed_liveness_ping_records_fatal_error_and_closes() {
+        let clock = FakeLoopClock::new();
+        let state = Arc::new(ListenerSharedState::new(16));
+        let ping_calls = Arc::new(AtomicUsize::new(0));
+        let closed = Arc::new(AtomicBool::new(false));
+        let slices = VecDeque::from([
+            ScriptedSlice::Timeout,
+            ScriptedSlice::Timeout,
+            ScriptedSlice::Timeout,
+        ]);
+        let session = Box::new(ScriptedAqSession {
+            slices,
+            clock_ms: Arc::clone(&clock.elapsed_ms),
+            state: Arc::clone(&state),
+            ping_calls: Arc::clone(&ping_calls),
+            fail_ping: true,
+            closed: Arc::clone(&closed),
+            observed_wait_secs: Vec::new(),
+        });
+        run_aq_loop(session, "VTB_AQ_EVENTS", None, 2, &state, &clock);
+        assert_eq!(ping_calls.load(Ordering::Acquire), 1);
+        assert!(closed.load(Ordering::Acquire));
+        let fatal = {
+            let guard = state.inner.lock().unwrap_or_else(|e| e.into_inner());
+            guard.fatal_error.clone()
+        };
+        let err = fatal.expect("failed ping must surface fatal error for reconnect");
+        assert_eq!(err.classify().kind, OracleErrorKind::Operational);
+        assert!(err.classify().is_transient);
     }
 }

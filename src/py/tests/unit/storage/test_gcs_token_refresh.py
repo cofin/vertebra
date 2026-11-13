@@ -54,6 +54,7 @@ from vertebra.embeddings import VertexEmbedder
 from vertebra.storage import (
     AsyncGcpIdTokenCache,
     AsyncGcpTokenCache,
+    AsyncGcsBearerSecretProvider,
     AsyncObjectStore,
     GcpIdTokenSnapshot,
     GcpTokenSnapshot,
@@ -61,6 +62,7 @@ from vertebra.storage import (
     SigningConfig,
     SyncGcpIdTokenCache,
     SyncGcpTokenCache,
+    SyncGcsBearerSecretProvider,
     SyncObjectStore,
 )
 from vertebra.typing import ImproperConfigurationError
@@ -547,7 +549,7 @@ def test_duckdb_multi_session_token_generation_secret_rotation(
     token_server: _MockTokenServer,
     tmp_path: Path,
 ) -> None:
-    """Verify multiple DuckDB sessions rotate generic `value_provider` secrets when a token cache advances."""
+    """Verify multiple DuckDB sessions rotate shipped SyncGcsBearerSecretProvider secrets on generation advance."""
     pytest.importorskip("vertebra._duckdb", reason=_DUCKDB_SKIP_REASON)
     adc_path = tmp_path / "adc.json"
     adc_path.write_text(
@@ -565,25 +567,11 @@ def test_duckdb_multi_session_token_generation_secret_rotation(
     gcs_cfg = GCSConfig(bucket="test-bucket", application_credentials=str(adc_path))
     cache = gcs_cfg.sync_token_cache()
 
-    class _SyncBearerSecretProvider:
-        def __init__(self, token_cache: SyncGcpTokenCache) -> None:
-            self._cache = token_cache
-            self.last_token = ""
+    provider_a = SyncGcsBearerSecretProvider(cache)
+    provider_b = SyncGcsBearerSecretProvider(cache)
+    assert provider_a.token_cache is cache
+    assert provider_b.token_cache is cache
 
-        @property
-        def generation(self) -> int:
-            return int(self._cache.generation)
-
-        def needs_refresh(self) -> bool:
-            return bool(self._cache.needs_refresh())
-
-        def __call__(self) -> dict[str, str]:
-            snap = self._cache.get_token()
-            self.last_token = str(snap.access_token)
-            return {"bearer_token": self.last_token}
-
-    provider_a = _SyncBearerSecretProvider(cache)
-    provider_b = _SyncBearerSecretProvider(cache)
     driver_a = SyncDuckDBDriver(
         DuckDBConfig(secrets=(DuckDBSecretConfig(name="lake_bearer", secret_type="http", value_provider=provider_a),))
     )
@@ -595,20 +583,25 @@ def test_duckdb_multi_session_token_generation_secret_rotation(
         rows_b1 = driver_b.select("SELECT 1 AS v")
         assert rows_a1 == [{"v": 1}]
         assert rows_b1 == [{"v": 1}]
-        assert driver_a._secret_generations["lake_bearer"] == 1
-        assert driver_b._secret_generations["lake_bearer"] == 1
-        assert provider_a.last_token == "mock-oauth-token-user-1"
-        assert provider_b.last_token == "mock-oauth-token-user-1"
+        assert provider_a.generation == 1
+        assert provider_b.generation == 1
+        assert token_server.oauth_calls == 1
+        visible_a = driver_a.select_one_or_none("SELECT name, type FROM duckdb_secrets() WHERE name = 'lake_bearer'")
+        assert visible_a == {"name": "lake_bearer", "type": "http"}
 
-        cache.invalidate(1)
+        provider_a.invalidate(1)
+        assert provider_a.needs_refresh() is True
+        assert provider_b.needs_refresh() is True
 
         driver_a.select("SELECT 2 AS v")
-        assert driver_a._secret_generations["lake_bearer"] == 2
-        assert provider_a.last_token == "mock-oauth-token-user-2"
+        assert provider_a.generation == 2
+        assert provider_a.needs_refresh() is False
+        assert token_server.oauth_calls == 2
 
         driver_b.select("SELECT 2 AS v")
-        assert driver_b._secret_generations["lake_bearer"] == 2
-        assert provider_b.last_token == "mock-oauth-token-user-2"
+        assert provider_b.generation == 2
+        assert token_server.oauth_calls == 2
+        assert provider_b()["bearer_token"] == "mock-oauth-token-user-2"
     finally:
         driver_a.close()
         driver_b.close()
@@ -619,7 +612,7 @@ async def test_async_duckdb_driver_token_generation_rotation(
     token_server: _MockTokenServer,
     tmp_path: Path,
 ) -> None:
-    """Verify AsyncDuckDBDriver rotates sync and async `value_provider` secrets when generation advances."""
+    """Verify AsyncDuckDBDriver rotates shipped sync and async GCS bearer providers on generation advance."""
     pytest.importorskip("vertebra._duckdb", reason=_DUCKDB_SKIP_REASON)
     adc_path = tmp_path / "adc.json"
     adc_path.write_text(
@@ -634,61 +627,118 @@ async def test_async_duckdb_driver_token_generation_rotation(
         ),
         encoding="utf-8",
     )
-    cache = GCSConfig(bucket="b", application_credentials=str(adc_path)).sync_token_cache()
-    async_cache = GCSConfig(bucket="b", application_credentials=str(adc_path)).async_token_cache()
-
-    class _SyncProvider:
-        @property
-        def generation(self) -> int:
-            return int(cache.generation)
-
-        def needs_refresh(self) -> bool:
-            return bool(cache.needs_refresh())
-
-        def __call__(self) -> dict[str, str]:
-            return {"bearer_token": str(cache.get_token().access_token)}
-
-    class _AsyncProvider:
-        @property
-        def generation(self) -> int:
-            return int(async_cache.generation)
-
-        def needs_refresh(self) -> bool:
-            return bool(async_cache.needs_refresh())
-
-        async def __call__(self) -> dict[str, str]:
-            snap = await async_cache.get_token()
-            return {"bearer_token": str(snap.access_token)}
+    gcs_cfg = GCSConfig(bucket="b", application_credentials=str(adc_path))
+    sync_provider = SyncGcsBearerSecretProvider.from_config(gcs_cfg)
+    async_provider = AsyncGcsBearerSecretProvider.from_config(gcs_cfg)
 
     drv = AsyncDuckDBDriver(
         DuckDBConfig(
-            secrets=(DuckDBSecretConfig(name="lake_sync_bearer", secret_type="http", value_provider=_SyncProvider()),)
+            secrets=(DuckDBSecretConfig(name="lake_sync_bearer", secret_type="http", value_provider=sync_provider),)
         )
     )
     try:
         res = await drv.select("SELECT 1 AS ok")
         assert res == [{"ok": 1}]
-        assert drv._secret_generations["lake_sync_bearer"] == 1
-        cache.get_token(force_refresh=True)
+        assert sync_provider.generation == 1
+        assert sync_provider.needs_refresh() is False
+        visible_sync = await drv.select_one_or_none(
+            "SELECT name, type FROM duckdb_secrets() WHERE name = 'lake_sync_bearer'"
+        )
+        assert visible_sync == {"name": "lake_sync_bearer", "type": "http"}
+
+        sync_provider.token_cache.get_token(force_refresh=True)
         await drv.select("SELECT 1 AS ok")
-        assert drv._secret_generations["lake_sync_bearer"] == 2
+        assert sync_provider.generation == 2
+        assert sync_provider()["bearer_token"] == "mock-oauth-token-user-2"
     finally:
         await drv.close()
 
     async_drv = AsyncDuckDBDriver(
         DuckDBConfig(
-            secrets=(DuckDBSecretConfig(name="lake_async_bearer", secret_type="http", value_provider=_AsyncProvider()),)
+            secrets=(DuckDBSecretConfig(name="lake_async_bearer", secret_type="http", value_provider=async_provider),)
         )
     )
     try:
         res_async = await async_drv.select("SELECT 1 AS ok")
         assert res_async == [{"ok": 1}]
-        assert async_drv._secret_generations["lake_async_bearer"] == 1
-        await async_cache.get_token(force_refresh=True)
+        assert async_provider.generation == 1
+        visible_async = await async_drv.select_one_or_none(
+            "SELECT name, type FROM duckdb_secrets() WHERE name = 'lake_async_bearer'"
+        )
+        assert visible_async == {"name": "lake_async_bearer", "type": "http"}
+
+        async_provider.invalidate(1)
+        assert async_provider.needs_refresh() is True
         await async_drv.select("SELECT 1 AS ok")
-        assert async_drv._secret_generations["lake_async_bearer"] == 2
+        assert async_provider.generation == 2
+        assert async_provider.needs_refresh() is False
+        assert (await async_provider())["bearer_token"] == "mock-oauth-token-user-4"
     finally:
         await async_drv.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("use_async", [False, True])
+async def test_gcs_bearer_secret_provider_from_config_error_and_sync_driver_rejection(
+    token_server: _MockTokenServer,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    use_async: bool,
+) -> None:
+    """Verify from_config options, GoogleCloudAuthError propagation, and SyncDuckDBDriver async-provider guard."""
+    adc_path = tmp_path / "adc.json"
+    adc_path.write_text(
+        json.dumps(
+            {
+                "type": "authorized_user",
+                "client_id": "cid",
+                "client_secret": "csec",
+                "refresh_token": "rtok",
+                "token_uri": f"{token_server.base_url}/token",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", str(adc_path))
+    custom_scopes = ("https://www.googleapis.com/auth/devstorage.read_only",)
+    cfg = GCSConfig(bucket="b")
+
+    if use_async:
+        provider = AsyncGcsBearerSecretProvider.from_config(cfg, allow_ambient_adc=True, scopes=custom_scopes)
+        assert provider.generation == 0
+        assert provider.needs_refresh() is True
+        first = await provider()
+        assert first == {"bearer_token": "mock-oauth-token-user-1"}
+        assert provider.generation == 1
+        assert provider.needs_refresh() is False
+
+        token_server.token_status = 403
+        provider.invalidate(1)
+        with pytest.raises(GoogleCloudAuthError):
+            await provider()
+
+        if pytest.importorskip("vertebra._duckdb", reason=_DUCKDB_SKIP_REASON):
+            with pytest.raises(ImproperConfigurationError, match="requires a synchronous"):
+                SyncDuckDBDriver(
+                    DuckDBConfig(
+                        secrets=(
+                            DuckDBSecretConfig(name="bad_async_secret", secret_type="http", value_provider=provider),
+                        )
+                    )
+                )
+    else:
+        sync_provider = SyncGcsBearerSecretProvider.from_config(cfg, allow_ambient_adc=True, scopes=custom_scopes)
+        assert sync_provider.generation == 0
+        assert sync_provider.needs_refresh() is True
+        first_sync = sync_provider()
+        assert first_sync == {"bearer_token": "mock-oauth-token-user-1"}
+        assert sync_provider.generation == 1
+        assert sync_provider.needs_refresh() is False
+
+        token_server.token_status = 403
+        sync_provider.invalidate(1)
+        with pytest.raises(GoogleCloudAuthError):
+            sync_provider()
 
 
 @pytest.mark.anyio

@@ -2823,3 +2823,26 @@ async def test_oracle_embedding_pushdown_batch_vectors_and_similarity_search() -
         assert "VECTOR_DISTANCE(embedding, TO_VECTOR(:query_vector), COSINE)" in search_call["sql"]
         assert search_call["params"]["top_k"] == 5
         assert msgspec.json.decode(search_call["params"]["query_vector"]) == [0.25, -0.5, 1.0]
+
+
+@pytest.mark.parametrize(
+    ("wait_timeout_seconds", "valid"),
+    [
+        (1, True),
+        (5, True),
+        (30, True),
+        (0, False),
+        (-3, False),
+    ],
+)
+def test_oracle_notify_config_validates_wait_timeout_seconds(
+    wait_timeout_seconds: int,
+    valid: bool,
+) -> None:
+    """Verify OracleNotifyConfig requires wait_timeout_seconds >= 1."""
+    if valid:
+        cfg = OracleNotifyConfig(wait_timeout_seconds=wait_timeout_seconds)
+        assert cfg.wait_timeout_seconds == wait_timeout_seconds
+    else:
+        with pytest.raises(ValueError, match="wait_timeout_seconds"):
+            OracleNotifyConfig(wait_timeout_seconds=wait_timeout_seconds)
