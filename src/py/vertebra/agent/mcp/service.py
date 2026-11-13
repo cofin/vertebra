@@ -7,10 +7,12 @@ and completions with OpenTelemetry observability.
 """
 
 import asyncio
+import contextlib
 import dataclasses
 import inspect
 import logging
-from collections.abc import Callable, Mapping
+import secrets
+from collections.abc import AsyncIterator, Callable, Mapping
 from typing import Any, NoReturn
 
 import anyio
@@ -18,6 +20,7 @@ import msgspec
 
 from vertebra.agent.core.context import (
     AgentContext,
+    ProgressReporter,
     bind_agent_context,
     current_agent_context,
     reset_agent_context,
@@ -35,7 +38,7 @@ from vertebra.agent.core.jsonrpc import (
     JSONRPCRouter,
 )
 from vertebra.agent.core.schema import ToolArgumentError
-from vertebra.agent.core.sse import SseFrame, SseStreamBroker
+from vertebra.agent.core.sse import SseFrame, SseStreamBroker, StreamLimitExceededError
 from vertebra.agent.mcp.client import MCP_NAME_FIELDS, decode_mcp_header_value
 from vertebra.agent.mcp.models import (
     HEADER_MISMATCH,
@@ -58,7 +61,7 @@ from vertebra.agent.mcp.models import (
     TextContent,
     ToolCallOutput,
 )
-from vertebra.agent.mcp.registry import ToolRegistry
+from vertebra.agent.mcp.registry import RegistryChangeKind, ToolRegistry
 from vertebra.agent.mcp.sessions import MCPSession, MCPSessionStore, SessionLimitExceededError
 from vertebra.agent.mcp.tasks import MCPTaskStore, TaskLookupError, TaskRecord, TaskStateError
 from vertebra.agent.runtime import ConfirmationGate
@@ -96,6 +99,68 @@ CACHEABLE_METHODS: frozenset[str] = frozenset(
         "skills/list",
     }
 )
+MCP_LOG_LEVEL_INDEX: dict[McpLogLevel, int] = {lvl: idx for idx, lvl in enumerate(MCP_LOG_LEVELS)}
+_REGISTRY_CHANGE_KINDS: tuple[RegistryChangeKind, ...] = ("tools", "resources", "prompts")
+
+
+class _ListenRegistration(msgspec.Struct, frozen=True, gc=False, kw_only=True):
+    """Active 2026-07-28 stateless subscriptions/listen SSE registration."""
+
+    subscription_id: str
+    stream_id: str
+    resource_uris: frozenset[str]
+    list_changed_kinds: frozenset[RegistryChangeKind]
+    owner_id: str | None = None
+
+
+class _ListenStreamWrapper(AsyncIterator[bytes]):
+    """Wrap an SSE stream to unregister subscriptions/listen state on close."""
+
+    def __init__(
+        self,
+        core: "MCPCore",
+        subscription_id: str,
+        stream_id: str,
+        inner: AsyncIterator[bytes],
+    ) -> None:
+        self._core = core
+        self._subscription_id = subscription_id
+        self._stream_id = stream_id
+        self._inner = inner
+        self._closed = False
+
+    def __aiter__(self) -> "_ListenStreamWrapper":
+        return self
+
+    async def __anext__(self) -> bytes:
+        if self._closed:
+            self._cleanup()
+            raise StopAsyncIteration
+        try:
+            return await self._inner.__anext__()
+        except StopAsyncIteration:
+            await self.aclose()
+            raise
+        except BaseException:
+            await self.aclose()
+            raise
+
+    async def aclose(self) -> None:
+        """Close the underlying stream and remove the listen registration."""
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            aclose = getattr(self._inner, "aclose", None)
+            if callable(aclose):
+                with contextlib.suppress(BaseException):
+                    await aclose()
+        finally:
+            self._cleanup()
+
+    def _cleanup(self) -> None:
+        self._core._listen_registrations.pop(self._subscription_id, None)
+        self._core.stream_broker.close_session(self._stream_id)
 
 
 class MCPCore:
@@ -129,10 +194,55 @@ class MCPCore:
         )
         self.router = JSONRPCRouter()
         self._extensions: dict[str, dict[str, Any]] = {}
-        self._resource_subscriptions: dict[str, set[str]] = {}
+        self._listen_registrations: dict[str, _ListenRegistration] = {}
+        self._event_counter: int = 0
         self._task_runs: dict[str, tuple[asyncio.Task[None], AgentContext]] = {}
 
         self._register_handlers()
+        self.registry.add_listener(self._on_registry_changed)
+
+    def _next_event_id(self) -> str:
+        self._event_counter += 1
+        return f"mcp-evt-{self._event_counter}"
+
+    def _make_sse_frame(self, payload: Mapping[str, Any], *, event: str = "message") -> SseFrame:
+        return SseFrame(
+            id=self._next_event_id(),
+            event=event,
+            data=encode_json_bytes(payload).decode("utf-8"),
+        )
+
+    def _is_family_enabled(self, kind: RegistryChangeKind) -> bool:
+        if kind == "tools":
+            return self.config.tools_enabled
+        if kind == "resources":
+            return self.config.resources_enabled
+        return self.config.prompts_enabled
+
+    def _on_registry_changed(self, kind: RegistryChangeKind) -> None:
+        if not self._is_family_enabled(kind):
+            return
+        method = f"notifications/{kind}/list_changed"
+        legacy_frame = self._make_sse_frame({"jsonrpc": "2.0", "method": method})
+        task_ids = self.task_store._tasks if self.task_store is not None else {}
+        listen_stream_ids = {reg.stream_id for reg in self._listen_registrations.values()}
+        legacy_targets = [
+            sid
+            for sid in self.stream_broker.active_stream_ids()
+            if sid not in listen_stream_ids and sid not in task_ids
+        ]
+        if legacy_targets:
+            self.stream_broker.broadcast(legacy_frame, legacy_targets)
+        for reg in list(self._listen_registrations.values()):
+            if kind in reg.list_changed_kinds:
+                stamped = self._make_sse_frame(
+                    {
+                        "jsonrpc": "2.0",
+                        "method": method,
+                        "params": {"_meta": {"io.modelcontextprotocol/subscriptionId": reg.subscription_id}},
+                    }
+                )
+                self.stream_broker.publish(reg.stream_id, stamped)
 
     def register_extension(self, name: str, payload: Mapping[str, Any] | None = None) -> None:
         """Register an MCP capability extension under ``capabilities.extensions``."""
@@ -145,7 +255,10 @@ class MCPCore:
         if self.config.tools_enabled:
             capabilities["tools"] = {"listChanged": True}
         if self.config.resources_enabled:
-            capabilities["resources"] = {"listChanged": True}
+            capabilities["resources"] = {
+                "subscribe": self.config.resource_subscriptions,
+                "listChanged": True,
+            }
         if self.config.prompts_enabled:
             capabilities["prompts"] = {"listChanged": True}
         if self.config.tasks_enabled:
@@ -164,6 +277,8 @@ class MCPCore:
 
     def _is_method_enabled(self, method: str) -> bool:
         """Return True when configuration enables the capability family owning method."""
+        if method in ("resources/subscribe", "resources/unsubscribe"):
+            return self.config.resources_enabled and self.config.resource_subscriptions
         if method.startswith("tools/"):
             return self.config.tools_enabled
         if method.startswith(("resources/", "subscriptions/")):
@@ -246,15 +361,54 @@ class MCPCore:
         """Execute a tool invocation with parameter validation and structured outputs."""
         return await self._handle_tools_call(params, context=context)
 
-    def notify_resource_updated(self, uri: str) -> int:
-        """Push a notifications/resources/updated SSE frame to all subscribed sessions."""
-        sessions = self._resource_subscriptions.get(uri, set())
-        if not sessions:
+    async def log(self, level: McpLogLevel, data: Any, *, logger: str | None = None) -> int:
+        """Broadcast a level-gated notifications/message SSE frame to active legacy streams."""
+        if level not in MCP_LOG_LEVEL_INDEX:
+            raise ValueError(f"Invalid MCP log level {level!r}; expected one of {', '.join(MCP_LOG_LEVELS)}")
+        if not self.config.logging:
             return 0
+        level_rank = MCP_LOG_LEVEL_INDEX[level]
+        log_params: dict[str, Any] = {"level": level, "data": data}
+        if logger is not None:
+            log_params["logger"] = logger
+        frame = self._make_sse_frame({"jsonrpc": "2.0", "method": "notifications/message", "params": log_params})
+        delivered = 0
+        seen_sessions: set[str] = set()
+        for session in await self.session_store.active_sessions():
+            seen_sessions.add(session.session_id)
+            if level_rank >= MCP_LOG_LEVEL_INDEX[session.log_level] and self.stream_broker.publish(
+                session.session_id, frame
+            ):
+                delivered += 1
+        default_rank = MCP_LOG_LEVEL_INDEX[self.config.default_log_level]
+        if level_rank >= default_rank:
+            for sid in self.stream_broker.active_stream_ids():
+                if sid not in seen_sessions and sid.startswith("anon-") and self.stream_broker.publish(sid, frame):
+                    delivered += 1
+        return delivered
 
-        payload = {"jsonrpc": "2.0", "method": "notifications/resources/updated", "params": {"uri": uri}}
-        frame = SseFrame(event="message", data=encode_json_bytes(payload).decode("utf-8"))
-        return self.stream_broker.broadcast(frame, list(sessions))
+    async def notify_resource_updated(self, uri: str) -> int:
+        """Push notifications/resources/updated to subscribed legacy sessions and listen streams."""
+        delivered = 0
+        session_ids = await self.session_store.subscribed_session_ids(uri)
+        if session_ids:
+            payload = {"jsonrpc": "2.0", "method": "notifications/resources/updated", "params": {"uri": uri}}
+            frame = self._make_sse_frame(payload)
+            delivered += self.stream_broker.broadcast(frame, list(session_ids))
+
+        for reg in list(self._listen_registrations.values()):
+            if uri in reg.resource_uris:
+                listen_payload = {
+                    "jsonrpc": "2.0",
+                    "method": "notifications/resources/updated",
+                    "params": {
+                        "uri": uri,
+                        "_meta": {"io.modelcontextprotocol/subscriptionId": reg.subscription_id},
+                    },
+                }
+                if self.stream_broker.publish(reg.stream_id, self._make_sse_frame(listen_payload)):
+                    delivered += 1
+        return delivered
 
     async def _dispatch_request(
         self,
@@ -275,7 +429,11 @@ class MCPCore:
                     "message": "initialize cannot be called inside a JSON-RPC batch",
                 },
             }
-        if (modern and req.method in LEGACY_ONLY_METHODS) or not self._is_method_enabled(req.method):
+        if (
+            (modern and req.method in LEGACY_ONLY_METHODS)
+            or (not modern and req.method == "subscriptions/listen")
+            or not self._is_method_enabled(req.method)
+        ):
             if req.is_notification:
                 return None
             return {
@@ -286,6 +444,37 @@ class MCPCore:
                     "message": f"Method not found: {req.method}",
                 },
             }
+        req_meta = req.params.get("_meta") if isinstance(req.params, Mapping) else None
+        req_progress_token = req_meta.get("progressToken") if isinstance(req_meta, Mapping) else None
+        if (
+            not modern
+            and isinstance(req_progress_token, (str, int))
+            and not isinstance(req_progress_token, bool)
+            and context.progress_reporter.callback is None
+            and isinstance(context.session_id, str)
+            and context.session_id
+        ):
+            target_sid = context.session_id
+            prior_reporter = context.progress_reporter
+
+            async def _emit_session_progress(progress_payload: dict[str, Any]) -> None:
+                frame = self._make_sse_frame(
+                    {
+                        "jsonrpc": "2.0",
+                        "method": "notifications/progress",
+                        "params": progress_payload,
+                    }
+                )
+                self.stream_broker.publish(target_sid, frame)
+
+            context.progress_reporter = ProgressReporter(
+                callback=_emit_session_progress,
+                progress_token=req_progress_token,
+            )
+            try:
+                return await self.router.dispatch(req, context)
+            finally:
+                context.progress_reporter = prior_reporter
         return await self.router.dispatch(req, context)
 
     async def _dispatch_decoded(
@@ -432,12 +621,15 @@ class MCPCore:
                     code=INVALID_PARAMS,
                     message="Session not found or expired",
                 )
-            self.stream_broker.disconnect(session_id)
+            self.stream_broker.close_session(session_id)
             return McpHttpResponse(
                 status=204,
                 headers={"MCP-Protocol-Version": deleted.protocol_version},
                 body=b"",
             )
+
+        if method == "GET":
+            return await self._handle_get(lower_headers, context)
 
         if method != "POST":
             return McpHttpResponse(
@@ -592,6 +784,40 @@ class MCPCore:
                 not_mod_headers["Mcp-Session-Id"] = session.session_id
             return McpHttpResponse(status=304, headers=not_mod_headers, body=b"")
 
+        accept_types = self._parse_accept_header(lower_headers.get("accept"))
+        if (
+            frame_kind == 1
+            and frame_method == "subscriptions/listen"
+            and negotiated.modern
+            and self._is_method_enabled("subscriptions/listen")
+        ):
+            return await self._handle_subscriptions_listen(
+                decoded_body=decoded_body,
+                lower_headers=lower_headers,
+                accept_types=accept_types,
+                context=context,
+                negotiated=negotiated,
+                frame_id=frame_id,
+            )
+
+        progress_token = raw_meta.get("progressToken") if isinstance(raw_meta, Mapping) else None
+        if (
+            frame_kind == 1
+            and frame_method != "initialize"
+            and isinstance(progress_token, (str, int))
+            and not isinstance(progress_token, bool)
+            and "text/event-stream" in accept_types
+        ):
+            return self._open_post_progress_stream(
+                decoded_body=decoded_body,
+                context=context,
+                negotiated=negotiated,
+                progress_token=progress_token,
+                session=session,
+                frame_method=frame_method,
+                current_etag=current_etag,
+            )
+
         resp_bytes = await self._dispatch_decoded(decoded_body, context, modern=negotiated.modern)
         final_version = str(context.metadata.get("mcp_negotiated_protocol_version", negotiated.version))
         resp_headers: dict[str, str] = {
@@ -613,6 +839,408 @@ class MCPCore:
 
         status = int(context.metadata.get("mcp_http_status", 200))
         return McpHttpResponse(status=status, headers=resp_headers, body=resp_bytes)
+
+    @staticmethod
+    def _parse_accept_header(accept_header: str | None) -> list[str]:
+        if not accept_header:
+            return []
+        accepted: list[str] = []
+        for raw_part in accept_header.split(","):
+            part = raw_part.strip()
+            if not part:
+                continue
+            segments = [seg.strip().lower() for seg in part.split(";")]
+            media_type = segments[0]
+            if not media_type:
+                continue
+            excluded = False
+            for param in segments[1:]:
+                if param.startswith("q="):
+                    with contextlib.suppress(ValueError):
+                        if float(param[2:]) <= 0.0:
+                            excluded = True
+            if not excluded:
+                accepted.append(media_type)
+        return accepted
+
+    async def _handle_get(self, lower_headers: Mapping[str, str], context: AgentContext) -> McpHttpResponse:
+        header_version = lower_headers.get("mcp-protocol-version")
+        if header_version is not None and header_version not in SUPPORTED_PROTOCOL_VERSIONS:
+            return self._unsupported_version_response(header_version)
+
+        session_id = lower_headers.get("mcp-session-id")
+        negotiated = self._negotiate_protocol(
+            header_version=header_version,
+            meta_version=None,
+            session_id=session_id,
+            frame_method=None,
+        )
+        if isinstance(negotiated, McpHttpResponse):
+            return negotiated
+        if negotiated.modern or not self.config.enable_get_sse:
+            return McpHttpResponse(
+                status=405,
+                headers={"Content-Type": "text/plain", "Allow": "POST, DELETE, OPTIONS"},
+                body=b"Method Not Allowed",
+            )
+
+        accept_types = self._parse_accept_header(lower_headers.get("accept"))
+        if "text/event-stream" not in accept_types:
+            if not accept_types or "*/*" in accept_types:
+                return McpHttpResponse(
+                    status=405,
+                    headers={"Content-Type": "text/plain", "Allow": "POST, DELETE, OPTIONS"},
+                    body=b"Method Not Allowed",
+                )
+            return McpHttpResponse(
+                status=406,
+                headers={"Content-Type": "text/plain"},
+                body=b"Not Acceptable: text/event-stream required",
+            )
+
+        owner_id = self._caller_owner(context)
+        session: MCPSession | None = None
+        if session_id is not None:
+            session = await self.session_store.get(session_id, owner_id)
+            if session is None:
+                return self._jsonrpc_http_error(
+                    status=404,
+                    code=INVALID_PARAMS,
+                    message="Session not found or expired",
+                )
+            stream_session_id = session.session_id
+            stream_version = header_version if header_version is not None else session.protocol_version
+        else:
+            stream_session_id = f"anon-{secrets.token_hex(8)}"
+            stream_version = negotiated.version
+
+        last_event_id = lower_headers.get("last-event-id") or None
+        try:
+            stream = self.stream_broker.open_stream(
+                stream_session_id,
+                owner_id=owner_id,
+                last_event_id=last_event_id,
+                heartbeat_seconds=self.config.sse_heartbeat_seconds,
+                max_streams_per_owner=self.config.max_streams_per_owner,
+            )
+        except StreamLimitExceededError as exc:
+            return self._jsonrpc_http_error(
+                status=503,
+                code=SESSION_CAPACITY_EXHAUSTED,
+                message=str(exc),
+            )
+
+        sse_headers: dict[str, str] = {
+            "Content-Type": "text/event-stream",
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "MCP-Protocol-Version": stream_version,
+        }
+        if session is not None:
+            sse_headers["Mcp-Session-Id"] = session.session_id
+        return McpHttpResponse(status=200, headers=sse_headers, body=b"", stream=stream)
+
+    def _open_post_progress_stream(
+        self,
+        *,
+        decoded_body: Any,
+        context: AgentContext,
+        negotiated: NegotiatedProtocol,
+        progress_token: str | int,
+        session: MCPSession | None,
+        frame_method: str | None,
+        current_etag: str,
+    ) -> McpHttpResponse:
+        send_chan, recv_chan = anyio.create_memory_object_stream[bytes](128)
+
+        async def _emit_post_progress(progress_payload: dict[str, Any]) -> None:
+            frame = self._make_sse_frame(
+                {
+                    "jsonrpc": "2.0",
+                    "method": "notifications/progress",
+                    "params": progress_payload,
+                }
+            )
+            with contextlib.suppress(anyio.ClosedResourceError, anyio.BrokenResourceError):
+                await send_chan.send(frame.encode())
+
+        context.progress_reporter = ProgressReporter(
+            callback=_emit_post_progress,
+            progress_token=progress_token,
+        )
+
+        async def _post_sse_stream() -> AsyncIterator[bytes]:
+            async def _run_dispatch() -> None:
+                try:
+                    token = bind_agent_context(context)
+                    try:
+                        resp_bytes = await self._dispatch_decoded(decoded_body, context, modern=negotiated.modern)
+                    finally:
+                        reset_agent_context(token)
+                    if resp_bytes is not None:
+                        final_frame = SseFrame(
+                            id=self._next_event_id(),
+                            event="message",
+                            data=resp_bytes.decode("utf-8"),
+                        )
+                        with contextlib.suppress(anyio.ClosedResourceError, anyio.BrokenResourceError):
+                            await send_chan.send(final_frame.encode())
+                finally:
+                    with contextlib.suppress(Exception):
+                        await send_chan.aclose()
+
+            try:
+                async with anyio.create_task_group() as tg:
+                    tg.start_soon(_run_dispatch)
+                    async for chunk in recv_chan:
+                        yield chunk
+            finally:
+                with contextlib.suppress(Exception):
+                    await send_chan.aclose()
+                with contextlib.suppress(Exception):
+                    await recv_chan.aclose()
+
+        sse_headers: dict[str, str] = {
+            "Content-Type": "text/event-stream",
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "MCP-Protocol-Version": negotiated.version,
+        }
+        if frame_method in CACHEABLE_METHODS and self._is_method_enabled(frame_method):
+            sse_headers["ETag"] = current_etag
+        if not negotiated.modern and session is not None:
+            sse_headers["Mcp-Session-Id"] = session.session_id
+        return McpHttpResponse(status=200, headers=sse_headers, body=b"", stream=_post_sse_stream())
+
+    def _is_resolvable_resource_uri(self, uri: str) -> bool:
+        if self.registry.get_resource(uri) is not None:
+            return True
+        if self.registry.match_resource_template(uri) is not None:
+            return True
+        if uri.startswith("skill://") and self.skill_catalog is not None:
+            raw = uri.removeprefix("skill://").strip("/")
+            if not raw:
+                return False
+            parts = raw.split("/", 1)
+            skill = self.skill_catalog.get_skill(parts[0])
+            if skill is None:
+                return False
+            if len(parts) == 1:
+                return True
+            subpath = parts[1]
+            return subpath in skill.files or any(file_path.startswith(f"{subpath}/") for file_path in skill.files)
+        return False
+
+    async def _authorize_subscription(self, uri: str, context: Any) -> None:
+        authorizer = self.config.subscription_authorizer
+        if authorizer is None:
+            return
+        try:
+            sig = inspect.signature(authorizer)
+            positional = [
+                param
+                for param in sig.parameters.values()
+                if param.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+            ]
+            has_varargs = any(param.kind == inspect.Parameter.VAR_POSITIONAL for param in sig.parameters.values())
+            if has_varargs or len(positional) >= 2:
+                if positional and positional[0].name in ("ctx", "context"):
+                    outcome = authorizer(context, uri)
+                else:
+                    outcome = authorizer(uri, context)
+            elif len(positional) == 1:
+                outcome = authorizer(uri)
+            else:
+                outcome = authorizer()
+            if inspect.isawaitable(outcome):
+                outcome = await outcome
+        except Exception as exc:
+            raise JSONRPCErrorException(
+                JSONRPCError(
+                    code=PERMISSION_DENIED,
+                    message=f"Subscription unauthorized for resource '{uri}'",
+                    data={"uri": uri, "reason": str(exc)},
+                )
+            ) from exc
+        if not bool(outcome):
+            raise JSONRPCErrorException(
+                JSONRPCError(
+                    code=PERMISSION_DENIED,
+                    message=f"Subscription denied for resource '{uri}'",
+                    data={"uri": uri},
+                )
+            )
+
+    async def _handle_subscriptions_listen(
+        self,
+        *,
+        decoded_body: Any,
+        lower_headers: Mapping[str, str],
+        accept_types: list[str],
+        context: AgentContext,
+        negotiated: NegotiatedProtocol,
+        frame_id: str | None,
+    ) -> McpHttpResponse:
+        if "text/event-stream" not in accept_types:
+            return McpHttpResponse(
+                status=406,
+                headers={"Content-Type": "text/plain"},
+                body=b"Not Acceptable: text/event-stream required",
+            )
+        raw_req_id = decoded_body.get("id") if isinstance(decoded_body, Mapping) else frame_id
+        raw_params = decoded_body.get("params") if isinstance(decoded_body, Mapping) else None
+        if raw_params is not None and not isinstance(raw_params, Mapping):
+            return self._jsonrpc_http_error(
+                status=200,
+                code=INVALID_PARAMS,
+                message="Invalid params in subscriptions/listen",
+                req_id=raw_req_id,
+            )
+        params: Mapping[str, Any] = raw_params if isinstance(raw_params, Mapping) else {}
+
+        resource_uris: list[str] = []
+        raw_subs = params.get("resourceSubscriptions")
+        if raw_subs is not None:
+            if not isinstance(raw_subs, (list, tuple)) or isinstance(raw_subs, (str, bytes, Mapping)):
+                return self._jsonrpc_http_error(
+                    status=200,
+                    code=INVALID_PARAMS,
+                    message="resourceSubscriptions must be a list of URIs",
+                    req_id=raw_req_id,
+                )
+            if raw_subs and not self.config.resource_subscriptions:
+                return self._jsonrpc_http_error(
+                    status=200,
+                    code=METHOD_NOT_FOUND,
+                    message="Resource subscriptions are disabled",
+                    req_id=raw_req_id,
+                )
+            for item in raw_subs:
+                uri = item.get("uri") if isinstance(item, Mapping) else item
+                if not isinstance(uri, str) or not uri:
+                    return self._jsonrpc_http_error(
+                        status=200,
+                        code=INVALID_PARAMS,
+                        message="Each resourceSubscriptions entry must be a non-empty URI string",
+                        req_id=raw_req_id,
+                    )
+                if not self._is_resolvable_resource_uri(uri):
+                    return self._jsonrpc_http_error(
+                        status=200,
+                        code=INVALID_PARAMS,
+                        message=f"Unknown or unresolvable resource URI: {uri}",
+                        req_id=raw_req_id,
+                    )
+                try:
+                    await self._authorize_subscription(uri, context)
+                except JSONRPCErrorException as exc:
+                    return self._jsonrpc_http_error(
+                        status=200,
+                        code=exc.error.code,
+                        message=exc.error.message,
+                        req_id=raw_req_id,
+                        data=exc.error.data,
+                    )
+                resource_uris.append(uri)
+
+        list_changed_kinds: set[RegistryChangeKind] = set()
+        if "listChanged" not in params:
+            if not resource_uris:
+                list_changed_kinds = {kind for kind in _REGISTRY_CHANGE_KINDS if self._is_family_enabled(kind)}
+        else:
+            raw_lc = params["listChanged"]
+            if raw_lc is True:
+                list_changed_kinds = {kind for kind in _REGISTRY_CHANGE_KINDS if self._is_family_enabled(kind)}
+            elif raw_lc is False or raw_lc is None:
+                list_changed_kinds = set()
+            elif isinstance(raw_lc, (list, tuple, set, frozenset)):
+                for item in raw_lc:
+                    if item not in _REGISTRY_CHANGE_KINDS:
+                        return self._jsonrpc_http_error(
+                            status=200,
+                            code=INVALID_PARAMS,
+                            message=f"Invalid listChanged family {item!r}",
+                            req_id=raw_req_id,
+                        )
+                    if self._is_family_enabled(item):
+                        list_changed_kinds.add(item)
+            elif isinstance(raw_lc, Mapping):
+                for key, enabled in raw_lc.items():
+                    if key not in _REGISTRY_CHANGE_KINDS:
+                        return self._jsonrpc_http_error(
+                            status=200,
+                            code=INVALID_PARAMS,
+                            message=f"Invalid listChanged family {key!r}",
+                            req_id=raw_req_id,
+                        )
+                    if enabled and self._is_family_enabled(key):
+                        list_changed_kinds.add(key)
+            else:
+                return self._jsonrpc_http_error(
+                    status=200,
+                    code=INVALID_PARAMS,
+                    message="Invalid listChanged parameter in subscriptions/listen",
+                    req_id=raw_req_id,
+                )
+
+        sub_id_raw = params.get("subscriptionId")
+        if sub_id_raw is not None and (not isinstance(sub_id_raw, str) or not sub_id_raw):
+            return self._jsonrpc_http_error(
+                status=200,
+                code=INVALID_PARAMS,
+                message="subscriptionId must be a non-empty string",
+                req_id=raw_req_id,
+            )
+        subscription_id = sub_id_raw if isinstance(sub_id_raw, str) else f"sub_{secrets.token_hex(12)}"
+        stream_id = f"listen-{subscription_id}-{secrets.token_hex(6)}"
+        owner_id = self._caller_owner(context)
+        try:
+            raw_stream = self.stream_broker.open_stream(
+                stream_id,
+                owner_id=owner_id,
+                last_event_id=lower_headers.get("last-event-id") or None,
+                heartbeat_seconds=self.config.sse_heartbeat_seconds,
+                max_streams_per_owner=self.config.max_streams_per_owner,
+            )
+        except StreamLimitExceededError as exc:
+            return self._jsonrpc_http_error(
+                status=503,
+                code=SESSION_CAPACITY_EXHAUSTED,
+                message=str(exc),
+                req_id=raw_req_id,
+            )
+
+        self._listen_registrations[stream_id] = _ListenRegistration(
+            subscription_id=subscription_id,
+            stream_id=stream_id,
+            resource_uris=frozenset(resource_uris),
+            list_changed_kinds=frozenset(list_changed_kinds),
+            owner_id=owner_id,
+        )
+        if raw_req_id is not None:
+            init_payload = {
+                "jsonrpc": "2.0",
+                "id": raw_req_id,
+                "result": self._with_meta(
+                    "subscriptions/listen",
+                    {"subscriptionId": subscription_id},
+                    context=context,
+                ),
+            }
+            self.stream_broker.publish(stream_id, self._make_sse_frame(init_payload))
+
+        wrapped_stream = _ListenStreamWrapper(self, stream_id, stream_id, raw_stream)
+        return McpHttpResponse(
+            status=200,
+            headers={
+                "Content-Type": "text/event-stream",
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "MCP-Protocol-Version": negotiated.version,
+            },
+            body=b"",
+            stream=wrapped_stream,
+        )
 
     def _validate_mcp_param_headers(
         self,
@@ -804,6 +1432,8 @@ class MCPCore:
         self.router.register("tools/call", self._handle_tools_call)
         self.router.register("resources/list", self._handle_resources_list)
         self.router.register("resources/read", self._handle_resources_read)
+        self.router.register("resources/subscribe", self._handle_resources_subscribe)
+        self.router.register("resources/unsubscribe", self._handle_resources_unsubscribe)
         self.router.register("resources/templates/list", self._handle_resources_templates_list)
         self.router.register("prompts/list", self._handle_prompts_list)
         self.router.register("prompts/get", self._handle_prompts_get)
@@ -1171,6 +1801,74 @@ class MCPCore:
 
         msg = f"Resource not found: {uri}"
         raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message=msg))
+
+    async def _require_legacy_session(self, context: Any) -> tuple[MCPSession, str | None]:
+        owner_id = self._caller_owner(context)
+        session_id = None
+        if isinstance(context, AgentContext):
+            raw_sid = context.metadata.get("mcp_session_id") or context.session_id
+            if isinstance(raw_sid, str) and raw_sid:
+                session_id = raw_sid
+        if not session_id:
+            raise JSONRPCErrorException(
+                JSONRPCError(
+                    code=INVALID_PARAMS,
+                    message="Resource subscriptions require an initialized legacy MCP session",
+                )
+            )
+        session = await self.session_store.get(session_id, owner_id)
+        if session is None:
+            raise JSONRPCErrorException(
+                JSONRPCError(
+                    code=INVALID_PARAMS,
+                    message="Session not found or expired",
+                )
+            )
+        return session, owner_id
+
+    async def _handle_resources_subscribe(self, params: Any = None, context: Any = None) -> dict[str, Any]:
+        """Subscribe an initialized legacy session to updates for a resolvable, authorized resource URI."""
+        session, owner_id = await self._require_legacy_session(context)
+        if not isinstance(params, Mapping) or not isinstance(params.get("uri"), str) or not params["uri"]:
+            raise JSONRPCErrorException(
+                JSONRPCError(code=INVALID_PARAMS, message="Missing required 'uri' in resources/subscribe parameters")
+            )
+        uri = str(params["uri"])
+        if not self._is_resolvable_resource_uri(uri):
+            raise JSONRPCErrorException(
+                JSONRPCError(code=INVALID_PARAMS, message=f"Unknown or unresolvable resource URI: {uri}")
+            )
+        await self._authorize_subscription(uri, context)
+        if uri not in session.subscriptions and len(session.subscriptions) >= self.config.max_subscriptions_per_session:
+            raise JSONRPCErrorException(
+                JSONRPCError(
+                    code=SESSION_CAPACITY_EXHAUSTED,
+                    message=f"Maximum resource subscriptions ({self.config.max_subscriptions_per_session}) exceeded for session",
+                )
+            )
+        if uri not in session.subscriptions:
+            await self.session_store.update(
+                session.session_id,
+                owner_id,
+                subscriptions=session.subscriptions | {uri},
+            )
+        return {}
+
+    async def _handle_resources_unsubscribe(self, params: Any = None, context: Any = None) -> dict[str, Any]:
+        """Unsubscribe a legacy session from resource updates idempotently."""
+        session, owner_id = await self._require_legacy_session(context)
+        if not isinstance(params, Mapping) or not isinstance(params.get("uri"), str) or not params["uri"]:
+            raise JSONRPCErrorException(
+                JSONRPCError(code=INVALID_PARAMS, message="Missing required 'uri' in resources/unsubscribe parameters")
+            )
+        uri = str(params["uri"])
+        if uri in session.subscriptions:
+            await self.session_store.update(
+                session.session_id,
+                owner_id,
+                subscriptions=session.subscriptions - {uri},
+            )
+        return {}
 
     async def _handle_resources_templates_list(self, params: Any = None, context: Any = None) -> dict[str, Any]:
         """List registered resource URI templates with cursor pagination."""

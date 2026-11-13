@@ -191,3 +191,9 @@ class MCPSessionStore:
         async with self._lock:
             self._prune_expired(self._clock())
             return tuple(self._sessions.keys())
+
+    async def active_sessions(self) -> tuple[MCPSession, ...]:
+        """Return all non-expired session snapshots currently tracked by the store."""
+        async with self._lock:
+            self._prune_expired(self._clock())
+            return tuple(session for session, _ in self._sessions.values())

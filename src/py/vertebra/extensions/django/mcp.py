@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any, cast
 
 from vertebra._vertebra import Request, Response
+from vertebra.agent.core.context import AgentContext
 from vertebra.agent.mcp.controllers import (
     PromptController,
     SkillController,
@@ -24,6 +26,7 @@ from vertebra.agent.mcp.webmcp import (
     render_webmcp_manifest_json,
 )
 from vertebra.extensions.django.router import RouteCompiler
+from vertebra.utils.module_loader import import_optional
 
 __all__ = (
     "MCPConfig",
@@ -48,16 +51,60 @@ __all__ = (
 
 def dispatch_mcp_request(
     registry: ToolRegistry,
-    request: Request | bytes,
+    request: Request | bytes | Any,
     config: MCPConfig | None = None,
-) -> Response:
+) -> Any:
     """Execute an MCP HTTP request via shared ``WsgiMcpApp`` over ``MCPCore``."""
     resolved = config or MCPConfig(server_name="vertebra-django-mcp")
     cached_app = getattr(registry, "_mcp_app", None)
     if not isinstance(cached_app, WsgiMcpApp) or cached_app.config != resolved:
         cached_app = WsgiMcpApp(MCPCore(config=resolved, registry=registry))
         cast("Any", registry)._mcp_app = cached_app
-    return cached_app.handle_vertebra_request(request, default_path=resolved.path)
+
+    if isinstance(request, Request):
+        method = request.method.upper()
+        path = request.path or resolved.path
+        headers = request.headers.as_dict()
+        body = bytes(request.body or b"")
+        req_id = int(request.request_id)
+        context = AgentContext.from_headers(headers, identity_source=resolved.identity_source)
+    elif isinstance(request, (bytes, bytearray, memoryview)):
+        method = "POST"
+        path = resolved.path
+        headers = {"content-type": "application/json"}
+        body = bytes(request)
+        req_id = 0
+        context = AgentContext()
+    else:
+        method = str(getattr(request, "method", "POST") or "POST").upper()
+        path = str(getattr(request, "path", resolved.path) or resolved.path)
+        raw_headers = getattr(request, "headers", None)
+        headers = {str(k): str(v) for k, v in raw_headers.items()} if isinstance(raw_headers, Mapping) else {}
+        body = bytes(getattr(request, "body", b"") or b"")
+        req_id = 0
+        meta = getattr(request, "META", None)
+        context = (
+            AgentContext.from_wsgi_environ(meta, identity_source=resolved.identity_source)
+            if isinstance(meta, Mapping)
+            else AgentContext.from_headers(headers, identity_source=resolved.identity_source)
+        )
+
+    resp = cached_app.handle_http(method, path, headers, body, context=context)
+    if resp.stream is not None:
+        django_http = import_optional("django.http")
+        streaming_cls = getattr(django_http, "StreamingHttpResponse", None) if django_http is not None else None
+        if streaming_cls is not None:
+            stream_iter = cached_app.iter_stream(resp.stream)
+            django_resp = streaming_cls(stream_iter, status=resp.status)
+            for key, value in resp.headers.items():
+                django_resp[key] = value
+            return django_resp
+    return Response(
+        status=resp.status,
+        headers=list(resp.headers.items()),
+        body=resp.body,
+        request_id=req_id,
+    )
 
 
 def attach_mcp_routes(

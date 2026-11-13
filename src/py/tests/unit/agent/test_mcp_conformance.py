@@ -3,15 +3,20 @@
 import asyncio
 import dataclasses
 import io
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import anyio
 import pytest
+from django.conf import settings as django_settings
+from django.http import StreamingHttpResponse
 from flask import Flask
+from litestar import Litestar
+from litestar.response import Stream as LitestarStream
 from litestar.testing import create_test_client
 from starlette.requests import Request as StarletteRequest
+from starlette.responses import StreamingResponse
 
 import vertebra.agent.mcp as mcp_pkg
 import vertebra.agent.mcp.service as mcp_service_mod
@@ -35,7 +40,7 @@ from vertebra.agent.core.jsonrpc import (
     JSONRPCErrorException,
 )
 from vertebra.agent.core.schema import tool
-from vertebra.agent.core.sse import SseFrame
+from vertebra.agent.core.sse import SseFrame, StreamLimitExceededError
 from vertebra.agent.mcp import (
     CONFIRMATION_REQUIRED,
     CONFIRMATION_TOKEN_META_KEY,
@@ -83,6 +88,7 @@ from vertebra.agent.mcp.routes import AsgiMcpApp, WsgiMcpApp
 from vertebra.agent.plugin import AgentPlugin, AgentPluginConfig
 from vertebra.agent.runtime import ConfirmationGate
 from vertebra.extensions.django.mcp import attach_mcp_routes as attach_django_mcp
+from vertebra.extensions.django.mcp import dispatch_mcp_request as dispatch_django_mcp
 from vertebra.extensions.flask.mcp import attach_mcp_routes as attach_flask_mcp
 from vertebra.extensions.starlette.mcp import mount_mcp_routes as mount_starlette_mcp
 from vertebra.framework._app import App
@@ -2174,3 +2180,813 @@ async def test_mcp_2025_03_26_batch_dispatch_and_delete_session_termination() ->
     assert post_del.status == 404
     assert LEGACY_PROTOCOL_VERSIONS == ("2025-11-25", "2025-06-18", "2025-03-26")
     assert isinstance(SseFrame(data="ok"), SseFrame)
+
+
+def _decode_sse_json(chunk: bytes) -> dict[str, Any]:
+    lines = [line[len("data: ") :] for line in chunk.decode("utf-8").splitlines() if line.startswith("data: ")]
+    return dict(decode_json("\n".join(lines).encode("utf-8")))
+
+
+async def _init_legacy_session(
+    core: MCPCore,
+    *,
+    context: AgentContext | None = None,
+    version: str = "2025-11-25",
+) -> str:
+    resp = await core.handle(
+        McpHttpRequest(
+            method="POST",
+            path="/mcp",
+            context=context,
+            body=encode_json_bytes(
+                {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": version}}
+            ),
+        )
+    )
+    assert resp.status == 200
+    return resp.headers["Mcp-Session-Id"]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("enable_get_sse", "headers", "expected_status"),
+    [
+        (True, {"Accept": "text/event-stream", "MCP-Protocol-Version": "2026-07-28"}, 405),
+        (False, {"Accept": "text/event-stream", "MCP-Protocol-Version": "2025-11-25"}, 405),
+        (True, {"MCP-Protocol-Version": "2025-11-25"}, 405),
+        (True, {"Accept": "*/*", "MCP-Protocol-Version": "2025-11-25"}, 405),
+        (True, {"Accept": "application/json", "MCP-Protocol-Version": "2025-11-25"}, 406),
+        (
+            True,
+            {
+                "Accept": "text/event-stream",
+                "MCP-Protocol-Version": "2025-11-25",
+                "Mcp-Session-Id": "mcp_missing",
+            },
+            404,
+        ),
+    ],
+    ids=["modern-405", "disabled-405", "missing-accept-405", "wildcard-accept-405", "json-accept-406", "unknown-404"],
+)
+async def test_mcp_get_sse_negotiation_matrix(
+    enable_get_sse: bool,
+    headers: dict[str, str],
+    expected_status: int,
+) -> None:
+    """GET /mcp enforces 2026-07-28 405, Accept 405/406, and unknown session 404."""
+    core = MCPCore(config=MCPConfig(enable_get_sse=enable_get_sse))
+    resp = await core.handle(McpHttpRequest(method="GET", path="/mcp", headers=headers))
+    assert resp.status == expected_status
+    assert resp.stream is None
+
+
+@pytest.mark.anyio
+async def test_mcp_get_sse_session_replay_keepalive_and_owner_limit() -> None:
+    """Legacy GET /mcp streams events, replays after Last-Event-ID, emits keepalives, and bounds owner streams."""
+    alice = AgentContext(identity=CallerIdentity(user_id="alice", tenant_id="t1"))
+    core = MCPCore(config=MCPConfig(sse_heartbeat_seconds=0.02, max_streams_per_owner=8))
+    sid = await _init_legacy_session(core, context=alice)
+
+    core.stream_broker.publish(sid, SseFrame(id="ev-1", event="message", data='{"jsonrpc":"2.0","method":"n1"}'))
+    core.stream_broker.publish(sid, SseFrame(id="ev-2", event="message", data='{"jsonrpc":"2.0","method":"n2"}'))
+
+    get_resp = await core.handle(
+        McpHttpRequest(
+            method="GET",
+            path="/mcp",
+            context=alice,
+            headers={"Accept": "text/event-stream", "Mcp-Session-Id": sid, "Last-Event-ID": "ev-1"},
+        )
+    )
+    assert get_resp.status == 200
+    assert get_resp.headers["Content-Type"] == "text/event-stream"
+    assert get_resp.headers["Mcp-Session-Id"] == sid
+    assert get_resp.stream is not None
+    assert await anext(get_resp.stream) == b'id: ev-2\ndata: {"jsonrpc":"2.0","method":"n2"}\n\n'
+    assert await anext(get_resp.stream) == b": keepalive\n\n"
+
+    extra_streams = [get_resp.stream]
+    for _ in range(7):
+        extra = await core.handle(
+            McpHttpRequest(
+                method="GET",
+                path="/mcp",
+                context=alice,
+                headers={"Accept": "text/event-stream", "Mcp-Session-Id": sid},
+            )
+        )
+        assert extra.status == 200
+        assert extra.stream is not None
+        extra_streams.append(extra.stream)
+
+    ninth = await core.handle(
+        McpHttpRequest(
+            method="GET",
+            path="/mcp",
+            context=alice,
+            headers={"Accept": "text/event-stream", "Mcp-Session-Id": sid},
+        )
+    )
+    assert ninth.status == 503
+    assert decode_json(ninth.body)["error"]["code"] == SESSION_CAPACITY_EXHAUSTED
+    assert isinstance(StreamLimitExceededError("limit"), StreamLimitExceededError)
+
+    await extra_streams.pop().aclose()
+    replacement = await core.handle(
+        McpHttpRequest(
+            method="GET",
+            path="/mcp",
+            context=alice,
+            headers={"Accept": "text/event-stream", "Mcp-Session-Id": sid},
+        )
+    )
+    assert replacement.status == 200
+    assert replacement.stream is not None
+    extra_streams.append(replacement.stream)
+
+    for stream in extra_streams:
+        await stream.aclose()
+    assert core.stream_broker.owner_stream_count("t1:alice") == 0
+
+
+@pytest.mark.anyio
+async def test_mcp_adapters_stream_incrementally_and_close_on_disconnect() -> None:
+    """ASGI, Starlette, WSGI, Flask, Django, native App, and Litestar stream chunks and close streams."""
+    if not django_settings.configured:
+        django_settings.configure()
+
+    core = MCPCore(config=MCPConfig(sse_heartbeat_seconds=5.0))
+    sid = await _init_legacy_session(core)
+
+    def _open_session_stream() -> tuple[Any, list[bool]]:
+        closed_flag = [False]
+        inner = core.stream_broker.open_stream(sid, owner_id=None, heartbeat_seconds=5.0, max_streams_per_owner=8)
+
+        class _TrackingStream(AsyncIterator[bytes]):
+            def __aiter__(self) -> "_TrackingStream":
+                return self
+
+            async def __anext__(self) -> bytes:
+                return await inner.__anext__()
+
+            async def aclose(self) -> None:
+                closed_flag[0] = True
+                await inner.aclose()
+
+        return _TrackingStream(), closed_flag
+
+    asgi_app = AsgiMcpApp(core)
+    asgi_stream, asgi_closed = _open_session_stream()
+    original_handle = core.handle
+
+    async def _asgi_handle(req: McpHttpRequest) -> McpHttpResponse:
+        if req.method == "GET":
+            return McpHttpResponse(
+                status=200,
+                headers={"Content-Type": "text/event-stream", "Mcp-Session-Id": sid},
+                body=b"",
+                stream=asgi_stream,
+            )
+        return await original_handle(req)
+
+    cast(Any, core).handle = _asgi_handle
+    disconnect_gate = anyio.Event()
+    sent_events: list[dict[str, Any]] = []
+    first_chunk_received = anyio.Event()
+    recv_calls = 0
+
+    async def _asgi_receive() -> dict[str, Any]:
+        nonlocal recv_calls
+        recv_calls += 1
+        if recv_calls == 1:
+            return {"type": "http.request", "body": b"", "more_body": False}
+        await disconnect_gate.wait()
+        return {"type": "http.disconnect"}
+
+    async def _asgi_send(event: dict[str, Any]) -> None:
+        sent_events.append(event)
+        if event.get("type") == "http.response.body" and event.get("body"):
+            first_chunk_received.set()
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(
+            asgi_app,
+            {"type": "http", "method": "GET", "path": "/mcp", "headers": [(b"accept", b"text/event-stream")]},
+            _asgi_receive,
+            _asgi_send,
+        )
+        await anyio.sleep(0)
+        core.stream_broker.publish(sid, SseFrame(id="asgi-1", event="message", data="hello"))
+        await first_chunk_received.wait()
+        assert sent_events[0]["type"] == "http.response.start"
+        assert sent_events[1]["more_body"] is True
+        assert b"hello" in sent_events[1]["body"]
+        assert asgi_closed[0] is False
+        disconnect_gate.set()
+
+    assert asgi_closed[0] is True
+
+    starlette_stream, starlette_closed = _open_session_stream()
+
+    async def _starlette_handle(req: McpHttpRequest) -> McpHttpResponse:
+        if req.method == "GET":
+            return McpHttpResponse(
+                status=200,
+                headers={"Content-Type": "text/event-stream"},
+                body=b"",
+                stream=starlette_stream,
+            )
+        return await original_handle(req)
+
+    cast(Any, core).handle = _starlette_handle
+    star_req = StarletteRequest(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/mcp",
+            "headers": [(b"accept", b"text/event-stream")],
+        }
+    )
+    star_resp = await asgi_app.handle_starlette_request(star_req)
+    assert isinstance(star_resp, StreamingResponse)
+    star_iter = star_resp.body_iterator
+    core.stream_broker.publish(sid, SseFrame(id="star-1", event="message", data="star-chunk"))
+    assert b"star-chunk" in await anext(star_iter)
+    await star_iter.aclose()
+    assert starlette_closed[0] is True
+
+    cast(Any, core).handle = original_handle
+
+    wsgi_stream, wsgi_closed = _open_session_stream()
+
+    async def _wsgi_handle(req: McpHttpRequest) -> McpHttpResponse:
+        if req.method == "GET":
+            return McpHttpResponse(
+                status=200,
+                headers={"Content-Type": "text/event-stream"},
+                body=b"",
+                stream=wsgi_stream,
+            )
+        return await original_handle(req)
+
+    cast(Any, core).handle = _wsgi_handle
+    wsgi_app = WsgiMcpApp(core)
+    wsgi_meta: dict[str, Any] = {}
+
+    def _start_resp(status: str, headers: list[tuple[str, str]]) -> None:
+        wsgi_meta["status"] = status
+        wsgi_meta["headers"] = headers
+
+    wsgi_iter = wsgi_app(
+        {
+            "REQUEST_METHOD": "GET",
+            "PATH_INFO": "/mcp",
+            "HTTP_ACCEPT": "text/event-stream",
+            "HTTP_MCP_PROTOCOL_VERSION": "2025-11-25",
+            "HTTP_MCP_SESSION_ID": sid,
+        },
+        _start_resp,
+    )
+    core.stream_broker.publish(sid, SseFrame(id="wsgi-1", event="message", data="wsgi-chunk"))
+    chunk = await anyio.to_thread.run_sync(next, iter(wsgi_iter))
+    assert b"wsgi-chunk" in chunk
+    assert wsgi_meta["status"].startswith("200")
+    await anyio.to_thread.run_sync(cast(Any, wsgi_iter).close)
+    assert wsgi_closed[0] is True
+
+    flask_stream, flask_closed = _open_session_stream()
+
+    async def _flask_handle(req: McpHttpRequest) -> McpHttpResponse:
+        if req.method == "GET":
+            return McpHttpResponse(
+                status=200,
+                headers={"Content-Type": "text/event-stream"},
+                body=b"",
+                stream=flask_stream,
+            )
+        return await original_handle(req)
+
+    cast(Any, core).handle = _flask_handle
+    flask_res = wsgi_app.handle_flask_view(
+        SimpleNamespace(
+            method="GET",
+            path="/mcp",
+            headers={"accept": "text/event-stream", "mcp-protocol-version": "2025-11-25"},
+            body=b"",
+        )
+    )
+    assert isinstance(flask_res, tuple)
+    flask_iter, flask_status, _ = flask_res
+    assert flask_status == 200
+    core.stream_broker.publish(sid, SseFrame(id="fl-1", event="message", data="flask-chunk"))
+    assert b"flask-chunk" in await anyio.to_thread.run_sync(next, iter(flask_iter))
+    await anyio.to_thread.run_sync(cast(Any, flask_iter).close)
+    assert flask_closed[0] is True
+
+    django_reg = ToolRegistry()
+    django_core = MCPCore(config=MCPConfig(server_name="dj-sse"), registry=django_reg)
+    dj_sid = await _init_legacy_session(django_core)
+    cast(Any, django_reg)._mcp_app = WsgiMcpApp(django_core)
+    django_stream_closed = [False]
+    dj_inner = django_core.stream_broker.open_stream(dj_sid, owner_id=None, heartbeat_seconds=5.0)
+
+    class _DjTrackingStream(AsyncIterator[bytes]):
+        def __aiter__(self) -> "_DjTrackingStream":
+            return self
+
+        async def __anext__(self) -> bytes:
+            return await dj_inner.__anext__()
+
+        async def aclose(self) -> None:
+            django_stream_closed[0] = True
+            await dj_inner.aclose()
+
+    orig_dj_handle = django_core.handle
+
+    async def _dj_handle(req: McpHttpRequest) -> McpHttpResponse:
+        if req.method == "GET":
+            return McpHttpResponse(
+                status=200,
+                headers={"Content-Type": "text/event-stream"},
+                body=b"",
+                stream=_DjTrackingStream(),
+            )
+        return await orig_dj_handle(req)
+
+    cast(Any, django_core).handle = _dj_handle
+    dj_resp = dispatch_django_mcp(
+        django_reg,
+        SimpleNamespace(
+            method="GET",
+            path="/mcp",
+            headers={"accept": "text/event-stream", "mcp-protocol-version": "2025-11-25"},
+            body=b"",
+        ),
+        MCPConfig(server_name="dj-sse"),
+    )
+    assert isinstance(dj_resp, StreamingHttpResponse)
+    django_core.stream_broker.publish(dj_sid, SseFrame(id="dj-1", event="message", data="dj-chunk"))
+    dj_chunk = await anyio.to_thread.run_sync(next, dj_resp.streaming_content)
+    assert b"dj-chunk" in dj_chunk
+    dj_resp.close()
+    assert django_stream_closed[0] is True
+
+    native_plugin = AgentPlugin(AgentPluginConfig(mcp=MCPConfig(server_name="native-sse")))
+    native_app = App()
+    native_plugin.mount_native(native_app)
+    native_routes = {(r.method.upper(), r.path): r.handler for r in native_app.routes}
+    for required_verb in ("POST", "GET", "DELETE", "OPTIONS"):
+        assert (required_verb, "/mcp") in native_routes
+
+    assert native_plugin.mcp_service is not None
+    native_sid = await _init_legacy_session(native_plugin.mcp_service)
+    native_status, native_hdrs, native_body = await native_routes[("GET", "/mcp")](
+        headers={"Accept": "text/event-stream", "Mcp-Session-Id": native_sid}
+    )
+    assert native_status == 200
+    assert native_hdrs["Content-Type"] == "text/event-stream"
+    assert isinstance(native_body, AsyncIterator)
+    native_plugin.mcp_service.stream_broker.publish(
+        native_sid, SseFrame(id="nat-1", event="message", data="native-chunk")
+    )
+    assert b"native-chunk" in await anext(native_body)
+    await native_body.aclose()
+
+    opt_status, opt_hdrs, _ = await native_routes[("OPTIONS", "/mcp")](headers={})
+    assert opt_status == 204
+    assert "DELETE" in opt_hdrs["Allow"]
+
+    litestar_plugin = AgentPlugin(AgentPluginConfig(mcp=MCPConfig(server_name="ls-sse")))
+    litestar_app = Litestar(route_handlers=[], plugins=[litestar_plugin])
+    ls_service = litestar_plugin.mcp_service
+    assert ls_service is not None
+    ls_sid = await _init_legacy_session(ls_service)
+    ls_stream_closed = [False]
+    ls_inner = ls_service.stream_broker.open_stream(ls_sid, owner_id=None, heartbeat_seconds=5.0)
+
+    class _LsTrackingStream(AsyncIterator[bytes]):
+        def __aiter__(self) -> "_LsTrackingStream":
+            return self
+
+        async def __anext__(self) -> bytes:
+            return await ls_inner.__anext__()
+
+        async def aclose(self) -> None:
+            ls_stream_closed[0] = True
+            await ls_inner.aclose()
+
+    async def _ls_stream_handle(req: McpHttpRequest) -> McpHttpResponse:
+        if req.method == "GET":
+            return McpHttpResponse(
+                status=200,
+                headers={"Content-Type": "text/event-stream"},
+                body=b"",
+                stream=_LsTrackingStream(),
+            )
+        return McpHttpResponse(status=204, headers={"Allow": "GET, POST, DELETE, OPTIONS"}, body=b"")
+
+    cast(Any, ls_service).handle = _ls_stream_handle
+    mcp_route = next(h for h in litestar_app.routes if h.path == "/mcp")
+    assert set(mcp_route.methods) >= {"POST", "GET", "DELETE", "OPTIONS"}
+    ls_route_handler = mcp_route.route_handler_map["GET"][0]
+    ls_result = await ls_route_handler.fn(
+        SimpleNamespace(
+            method="GET",
+            headers={"accept": "text/event-stream", "mcp-session-id": ls_sid},
+            body=AsyncMockBytes(),
+            scope={"headers": []},
+        )
+    )
+    assert isinstance(ls_result, LitestarStream)
+    ls_service.stream_broker.publish(ls_sid, SseFrame(id="ls-1", event="message", data="ls-chunk"))
+    assert b"ls-chunk" in await anext(ls_result.iterator)
+    await ls_result.iterator.aclose()
+    assert ls_stream_closed[0] is True
+
+
+class AsyncMockBytes:
+    """Async callable returning empty bytes for request.body()."""
+
+    async def __call__(self) -> bytes:
+        return b""
+
+
+@pytest.mark.anyio
+async def test_mcp_list_changed_logging_and_progress_notifications() -> None:
+    """Registry listeners, level-gated MCPCore.log, and POST/session progress notifications deliver frames."""
+    zero_arg_calls: list[str] = []
+    kind_calls: list[str] = []
+
+    core = MCPCore(config=MCPConfig(default_log_level="warning"))
+    core.registry.add_listener(lambda: zero_arg_calls.append("mutated"))
+    core.registry.add_listener(lambda kind: kind_calls.append(kind))
+
+    @tool(name="slow_tool")
+    async def slow_tool(ctx: AgentContext) -> str:
+        await ctx.progress_reporter.report(1, total=2, message="halfway")
+        await ctx.progress_reporter.report(2, total=2, message="done")
+        return "finished"
+
+    sid = await _init_legacy_session(core)
+    sse_resp = await core.handle(
+        McpHttpRequest(
+            method="GET",
+            path="/mcp",
+            headers={"Accept": "text/event-stream", "Mcp-Session-Id": sid},
+        )
+    )
+    assert sse_resp.stream is not None
+
+    core.registry.register_tool(slow_tool)
+    core.registry.register_resource(ResourceEntry(uri="doc://1", name="Doc1", reader=lambda: "text"))
+    core.registry.register_prompt(PromptEntry(name="p1", description="Prompt1", getter=lambda: []))
+
+    assert len(zero_arg_calls) == 3
+    assert kind_calls == ["tools", "resources", "prompts"]
+
+    list_changed_methods = [_decode_sse_json(await anext(sse_resp.stream))["method"] for _ in range(3)]
+    assert list_changed_methods == [
+        "notifications/tools/list_changed",
+        "notifications/resources/list_changed",
+        "notifications/prompts/list_changed",
+    ]
+
+    assert await core.log("info", "ignored-below-default") == 0
+    assert await core.log("warning", {"detail": "warn-msg"}, logger="mcp.test") == 1
+    log_evt = _decode_sse_json(await anext(sse_resp.stream))
+    assert log_evt["method"] == "notifications/message"
+    assert log_evt["params"] == {"level": "warning", "data": {"detail": "warn-msg"}, "logger": "mcp.test"}
+
+    set_level_resp = await core.handle(
+        McpHttpRequest(
+            method="POST",
+            path="/mcp",
+            headers={"Mcp-Session-Id": sid},
+            body=encode_json_bytes(
+                {"jsonrpc": "2.0", "id": 10, "method": "logging/setLevel", "params": {"level": "error"}}
+            ),
+        )
+    )
+    assert set_level_resp.status == 200
+    assert await core.log("warning", "suppressed-after-setlevel") == 0
+    assert await core.log("error", "delivered-error") == 1
+    assert _decode_sse_json(await anext(sse_resp.stream))["params"]["data"] == "delivered-error"
+
+    legacy_prog_resp = await core.handle(
+        McpHttpRequest(
+            method="POST",
+            path="/mcp",
+            headers={"Mcp-Session-Id": sid, "Accept": "application/json"},
+            body=encode_json_bytes(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 11,
+                    "method": "tools/call",
+                    "params": {"name": "slow_tool", "_meta": {"progressToken": "tok-sess"}},
+                }
+            ),
+        )
+    )
+    assert legacy_prog_resp.status == 200
+    assert decode_json(legacy_prog_resp.body)["result"]["content"][0]["text"] == "finished"
+    p1 = _decode_sse_json(await anext(sse_resp.stream))
+    p2 = _decode_sse_json(await anext(sse_resp.stream))
+    assert p1["method"] == "notifications/progress"
+    assert p1["params"] == {"progressToken": "tok-sess", "progress": 1, "total": 2, "message": "halfway"}
+    assert p2["params"]["progress"] == 2
+    await sse_resp.stream.aclose()
+
+    post_sse_resp = await core.handle(
+        McpHttpRequest(
+            method="POST",
+            path="/mcp",
+            headers={"MCP-Protocol-Version": "2026-07-28", "Accept": "application/json, text/event-stream"},
+            body=encode_json_bytes(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 12,
+                    "method": "tools/call",
+                    "params": {"name": "slow_tool", "_meta": {"progressToken": "tok-post"}},
+                }
+            ),
+        )
+    )
+    assert post_sse_resp.status == 200
+    assert post_sse_resp.headers["Content-Type"] == "text/event-stream"
+    assert post_sse_resp.stream is not None
+    post_frames = [_decode_sse_json(chunk) async for chunk in post_sse_resp.stream]
+    assert len(post_frames) == 3
+    assert post_frames[0]["method"] == "notifications/progress"
+    assert post_frames[0]["params"]["progressToken"] == "tok-post"
+    assert post_frames[1]["method"] == "notifications/progress"
+    assert post_frames[2]["id"] == 12
+    assert post_frames[2]["result"]["content"][0]["text"] == "finished"
+
+    disabled_tools_core = MCPCore(config=MCPConfig(tools_enabled=False, logging=False))
+    disabled_sid = await _init_legacy_session(disabled_tools_core)
+    disabled_stream_resp = await disabled_tools_core.handle(
+        McpHttpRequest(
+            method="GET",
+            path="/mcp",
+            headers={"Accept": "text/event-stream", "Mcp-Session-Id": disabled_sid},
+        )
+    )
+    assert disabled_stream_resp.stream is not None
+    disabled_tools_core.registry.register_tool(slow_tool)
+    assert await disabled_tools_core.log("emergency", "ignored-when-logging-disabled") == 0
+    await disabled_stream_resp.stream.aclose()
+
+
+@pytest.mark.anyio
+async def test_mcp_resource_subscriptions_fanout_cleanup_and_listen() -> None:
+    """Authorized resources/subscribe, notify_resource_updated, cleanup, and 2026-07-28 subscriptions/listen work."""
+    now_mono = [100.0]
+    store = MCPSessionStore(ttl_seconds=10.0, clock=lambda: now_mono[0])
+
+    async def _authorizer(uri: str, ctx: AgentContext | None) -> bool:
+        if uri == "doc://forbidden":
+            return False
+        if uri == "doc://explode":
+            raise RuntimeError("auth backend failure")
+        return True
+
+    skill = Skill.build("guide", "Guide", body="# Guide", files={"SKILL.md": "# Guide"})
+    catalog = SkillCatalog(skills=[skill])
+    core = MCPCore(
+        config=MCPConfig(subscription_authorizer=_authorizer, sse_heartbeat_seconds=5.0),
+        session_store=store,
+        skill_catalog=catalog,
+    )
+    assert not hasattr(core, "_resource_subscriptions")
+    core.registry.register_resource(ResourceEntry(uri="doc://allowed", name="Allowed", reader=lambda: "ok"))
+    core.registry.register_resource(ResourceEntry(uri="doc://forbidden", name="Forbidden", reader=lambda: "no"))
+    core.registry.register_resource(ResourceEntry(uri="doc://explode", name="Explode", reader=lambda: "boom"))
+    core.registry.register_resource_template(
+        ResourceTemplateEntry(uriTemplate="item://{item_id}", name="Item", reader=lambda item_id: item_id)
+    )
+
+    alice = AgentContext(identity=CallerIdentity(user_id="alice", tenant_id="t1"))
+    sid = await _init_legacy_session(core, context=alice)
+    get_resp = await core.handle(
+        McpHttpRequest(
+            method="GET",
+            path="/mcp",
+            context=alice,
+            headers={"Accept": "text/event-stream", "Mcp-Session-Id": sid},
+        )
+    )
+    assert get_resp.stream is not None
+
+    for valid_uri in ("doc://allowed", "item://42", "skill://guide/SKILL.md"):
+        sub_resp = await core.handle(
+            McpHttpRequest(
+                method="POST",
+                path="/mcp",
+                context=alice,
+                headers={"Mcp-Session-Id": sid},
+                body=encode_json_bytes(
+                    {"jsonrpc": "2.0", "id": 2, "method": "resources/subscribe", "params": {"uri": valid_uri}}
+                ),
+            )
+        )
+        assert sub_resp.status == 200
+        assert "error" not in decode_json(sub_resp.body)
+
+    missing_resp = await core.handle(
+        McpHttpRequest(
+            method="POST",
+            path="/mcp",
+            context=alice,
+            headers={"Mcp-Session-Id": sid},
+            body=encode_json_bytes(
+                {"jsonrpc": "2.0", "id": 3, "method": "resources/subscribe", "params": {"uri": "doc://missing"}}
+            ),
+        )
+    )
+    assert decode_json(missing_resp.body)["error"]["code"] == INVALID_PARAMS
+
+    for denied_uri in ("doc://forbidden", "doc://explode"):
+        denied_resp = await core.handle(
+            McpHttpRequest(
+                method="POST",
+                path="/mcp",
+                context=alice,
+                headers={"Mcp-Session-Id": sid},
+                body=encode_json_bytes(
+                    {"jsonrpc": "2.0", "id": 4, "method": "resources/subscribe", "params": {"uri": denied_uri}}
+                ),
+            )
+        )
+        assert decode_json(denied_resp.body)["error"]["code"] == PERMISSION_DENIED
+
+    listen_406 = await core.handle(
+        McpHttpRequest(
+            method="POST",
+            path="/mcp",
+            headers={"MCP-Protocol-Version": "2026-07-28", "Accept": "application/json"},
+            body=encode_json_bytes({"jsonrpc": "2.0", "id": 5, "method": "subscriptions/listen", "params": {}}),
+        )
+    )
+    assert listen_406.status == 406
+
+    listen_resp = await core.handle(
+        McpHttpRequest(
+            method="POST",
+            path="/mcp",
+            headers={"MCP-Protocol-Version": "2026-07-28", "Accept": "text/event-stream"},
+            body=encode_json_bytes(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 6,
+                    "method": "subscriptions/listen",
+                    "params": {"resourceSubscriptions": ["doc://allowed"], "listChanged": ["tools"]},
+                }
+            ),
+        )
+    )
+    assert listen_resp.status == 200
+    assert listen_resp.stream is not None
+    listen_init = _decode_sse_json(await anext(listen_resp.stream))
+    sub_id = listen_init["result"]["subscriptionId"]
+
+    delivered = await core.notify_resource_updated("doc://allowed")
+    assert delivered == 2
+
+    legacy_notif = _decode_sse_json(await anext(get_resp.stream))
+    assert legacy_notif == {
+        "jsonrpc": "2.0",
+        "method": "notifications/resources/updated",
+        "params": {"uri": "doc://allowed"},
+    }
+    listen_notif = _decode_sse_json(await anext(listen_resp.stream))
+    assert listen_notif["method"] == "notifications/resources/updated"
+    assert listen_notif["params"]["uri"] == "doc://allowed"
+    assert listen_notif["params"]["_meta"]["io.modelcontextprotocol/subscriptionId"] == sub_id
+
+    @tool(name="listen_added")
+    def listen_added() -> str:
+        return "ok"
+
+    core.registry.register_tool(listen_added)
+    _ = await anext(get_resp.stream)
+    listen_lc = _decode_sse_json(await anext(listen_resp.stream))
+    assert listen_lc["method"] == "notifications/tools/list_changed"
+    assert listen_lc["params"]["_meta"]["io.modelcontextprotocol/subscriptionId"] == sub_id
+
+    await listen_resp.stream.aclose()
+    assert not core._listen_registrations
+
+    unsub_resp = await core.handle(
+        McpHttpRequest(
+            method="POST",
+            path="/mcp",
+            context=alice,
+            headers={"Mcp-Session-Id": sid},
+            body=encode_json_bytes(
+                {"jsonrpc": "2.0", "id": 7, "method": "resources/unsubscribe", "params": {"uri": "item://42"}}
+            ),
+        )
+    )
+    assert decode_json(unsub_resp.body)["result"] == {}
+    unsub_again = await core.handle(
+        McpHttpRequest(
+            method="POST",
+            path="/mcp",
+            context=alice,
+            headers={"Mcp-Session-Id": sid},
+            body=encode_json_bytes(
+                {"jsonrpc": "2.0", "id": 8, "method": "resources/unsubscribe", "params": {"uri": "item://42"}}
+            ),
+        )
+    )
+    assert decode_json(unsub_again.body)["result"] == {}
+    assert await core.notify_resource_updated("item://42") == 0
+
+    del_resp = await core.handle(
+        McpHttpRequest(method="DELETE", path="/mcp", context=alice, headers={"Mcp-Session-Id": sid})
+    )
+    assert del_resp.status == 204
+    await get_resp.stream.aclose()
+    assert await core.notify_resource_updated("doc://allowed") == 0
+
+    sid_ttl = await _init_legacy_session(core, context=alice)
+    ttl_stream_resp = await core.handle(
+        McpHttpRequest(
+            method="GET",
+            path="/mcp",
+            context=alice,
+            headers={"Accept": "text/event-stream", "Mcp-Session-Id": sid_ttl},
+        )
+    )
+    assert ttl_stream_resp.stream is not None
+    await core.handle(
+        McpHttpRequest(
+            method="POST",
+            path="/mcp",
+            context=alice,
+            headers={"Mcp-Session-Id": sid_ttl},
+            body=encode_json_bytes(
+                {"jsonrpc": "2.0", "id": 9, "method": "resources/subscribe", "params": {"uri": "doc://allowed"}}
+            ),
+        )
+    )
+    now_mono[0] = 120.0
+    assert await core.notify_resource_updated("doc://allowed") == 0
+    await ttl_stream_resp.stream.aclose()
+
+
+@pytest.mark.anyio
+async def test_mcp_resource_subscription_limits_and_disabled_flag() -> None:
+    """Enforce max_subscriptions_per_session and resource_subscriptions=False gating."""
+    limited_core = MCPCore(config=MCPConfig(max_subscriptions_per_session=2))
+    for uri in ("doc://1", "doc://2", "doc://3"):
+        limited_core.registry.register_resource(ResourceEntry(uri=uri, name=uri, reader=lambda val=uri: val))
+    sid = await _init_legacy_session(limited_core)
+
+    for uri in ("doc://1", "doc://2"):
+        resp = await limited_core.handle(
+            McpHttpRequest(
+                method="POST",
+                path="/mcp",
+                headers={"Mcp-Session-Id": sid},
+                body=encode_json_bytes(
+                    {"jsonrpc": "2.0", "id": 1, "method": "resources/subscribe", "params": {"uri": uri}}
+                ),
+            )
+        )
+        assert "error" not in decode_json(resp.body)
+
+    over_limit = await limited_core.handle(
+        McpHttpRequest(
+            method="POST",
+            path="/mcp",
+            headers={"Mcp-Session-Id": sid},
+            body=encode_json_bytes(
+                {"jsonrpc": "2.0", "id": 2, "method": "resources/subscribe", "params": {"uri": "doc://3"}}
+            ),
+        )
+    )
+    assert decode_json(over_limit.body)["error"]["code"] == SESSION_CAPACITY_EXHAUSTED
+
+    disabled_core = MCPCore(config=MCPConfig(resource_subscriptions=False))
+    disabled_core.registry.register_resource(ResourceEntry(uri="doc://1", name="doc1", reader=lambda: "1"))
+    disc = await disabled_core.handle(
+        McpHttpRequest(
+            method="POST",
+            path="/mcp",
+            headers={"MCP-Protocol-Version": "2026-07-28"},
+            body=encode_json_bytes({"jsonrpc": "2.0", "id": 3, "method": "server/discover"}),
+        )
+    )
+    assert decode_json(disc.body)["result"]["capabilities"]["resources"]["subscribe"] is False
+    disabled_sid = await _init_legacy_session(disabled_core)
+    for method in ("resources/subscribe", "resources/unsubscribe"):
+        err_resp = await disabled_core.handle(
+            McpHttpRequest(
+                method="POST",
+                path="/mcp",
+                headers={"Mcp-Session-Id": disabled_sid},
+                body=encode_json_bytes({"jsonrpc": "2.0", "id": 4, "method": method, "params": {"uri": "doc://1"}}),
+            )
+        )
+        assert decode_json(err_resp.body)["error"]["code"] == METHOD_NOT_FOUND

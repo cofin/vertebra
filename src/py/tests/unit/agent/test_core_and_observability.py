@@ -63,6 +63,7 @@ from vertebra.agent.core.schema import (
 from vertebra.agent.core.sse import (
     SseFrame,
     SseStreamBroker,
+    StreamLimitExceededError,
 )
 from vertebra.agent.telemetry import (
     AgentTelemetryRecorder,
@@ -883,3 +884,64 @@ async def test_two_arg_connection_guards_fail_closed_without_connection(
     fake_conn: dict[str, Any] = {}
     await conn_guarded.authorize(ctx, connection=fake_conn, route_handler="route_1")
     assert fake_conn["checked_by"] == (expected_tag, "route_1")
+
+
+@pytest.mark.anyio
+async def test_sse_broker_open_stream_replay_keepalive_limits_and_cleanup() -> None:
+    """SseStreamBroker.open_stream replays missed frames, emits keepalives, enforces owner limits, and cleans up."""
+    broker = SseStreamBroker(replay_capacity=16)
+    broker.publish("sess-1", SseFrame(id="e1", event="message", data="first"))
+    broker.publish("sess-1", SseFrame(id="e2", event="message", data="second"))
+
+    resumed = broker.open_stream(
+        "sess-1",
+        owner_id="owner-a",
+        last_event_id="e1",
+        heartbeat_seconds=0.02,
+        max_streams_per_owner=2,
+    )
+    assert broker.owner_stream_count("owner-a") == 1
+    first_chunk = await anext(resumed)
+    assert first_chunk == b"id: e2\ndata: second\n\n"
+
+    keepalive_chunk = await anext(resumed)
+    assert keepalive_chunk == b": keepalive\n\n"
+
+    second = broker.open_stream(
+        "sess-1",
+        owner_id="owner-a",
+        heartbeat_seconds=1.0,
+        max_streams_per_owner=2,
+    )
+    assert broker.owner_stream_count("owner-a") == 2
+
+    with pytest.raises(StreamLimitExceededError):
+        broker.open_stream(
+            "sess-1",
+            owner_id="owner-a",
+            heartbeat_seconds=1.0,
+            max_streams_per_owner=2,
+        )
+
+    other_owner_stream = broker.open_stream(
+        "anon-other",
+        owner_id="owner-b",
+        heartbeat_seconds=1.0,
+        max_streams_per_owner=2,
+    )
+    assert broker.owner_stream_count("owner-b") == 1
+    broker.publish("anon-other", SseFrame(id="e3", event="message", data="anon-msg"))
+    assert await anext(other_owner_stream) == b"id: e3\ndata: anon-msg\n\n"
+    await other_owner_stream.aclose()
+    assert broker.owner_stream_count("owner-b") == 0
+    assert "anon-other" not in broker._buffers
+
+    await resumed.aclose()
+    assert broker.owner_stream_count("owner-a") == 1
+
+    broker.close_session("sess-1")
+    assert "sess-1" not in broker._buffers
+    with pytest.raises(StopAsyncIteration):
+        await anext(second)
+    await second.aclose()
+    assert broker.owner_stream_count("owner-a") == 0

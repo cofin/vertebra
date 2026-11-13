@@ -110,7 +110,7 @@ def attach_mcp_routes(
                 resolved.path,
                 endpoint="vertebra_mcp_rpc",
                 view_func=_serve_mcp_rpc,
-                methods=["POST", "GET", "OPTIONS"],
+                methods=["POST", "GET", "DELETE", "OPTIONS"],
             )
 
     return registry

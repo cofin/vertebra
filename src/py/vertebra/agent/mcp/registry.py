@@ -8,9 +8,10 @@ deterministic schema digests and ETags across mutations.
 
 from __future__ import annotations
 
+import inspect
 import re
 from collections.abc import Callable, Iterable
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from vertebra.agent.core.schema import SchemaDigestCache, Tool, ToolExposure, ToolSpec
 from vertebra.agent.mcp.models import (
@@ -27,8 +28,11 @@ if TYPE_CHECKING:
 
 __all__ = (
     "MCPRegistry",
+    "RegistryChangeKind",
     "ToolRegistry",
 )
+
+type RegistryChangeKind = Literal["tools", "resources", "prompts"]
 
 
 class ToolRegistry:
@@ -46,7 +50,7 @@ class ToolRegistry:
         self._prompts: dict[str, PromptEntry] = {}
         self._completions: dict[str, Callable[..., Any]] = {}
         self._skill_controllers: dict[str, Any] = {}
-        self._listeners: list[Callable[[], None]] = []
+        self._listeners: list[tuple[Callable[..., Any], bool]] = []
         self.schema_cache = schema_cache if schema_cache is not None else SchemaDigestCache()
         self.confirmation_gate = confirmation_gate
 
@@ -59,9 +63,26 @@ class ToolRegistry:
         """Return deterministic weak ETag across all registered tools, resources, templates, and prompts."""
         return self.schema_cache.combined_etag()
 
-    def add_listener(self, listener: Callable[[], None]) -> None:
-        """Register a callback invoked whenever the registry is mutated."""
-        self._listeners.append(listener)
+    @staticmethod
+    def _accepts_kind_arg(listener: Callable[..., Any]) -> bool:
+        try:
+            sig = inspect.signature(listener)
+        except (TypeError, ValueError):
+            return False
+        positional = [
+            param
+            for param in sig.parameters.values()
+            if param.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+        ]
+        has_varargs = any(param.kind == inspect.Parameter.VAR_POSITIONAL for param in sig.parameters.values())
+        return has_varargs or len(positional) >= 1
+
+    def add_listener(
+        self,
+        listener: Callable[[], None] | Callable[[RegistryChangeKind], None],
+    ) -> None:
+        """Register a callback invoked with change kind (or zero args) on registry mutation."""
+        self._listeners.append((listener, self._accepts_kind_arg(listener)))
 
     def register_tool(self, tool_or_fn: Tool | Callable[..., Any]) -> Tool:
         """Register a Tool descriptor (or callable) and cache its ToolSpec digest."""
@@ -79,7 +100,7 @@ class ToolRegistry:
             "requires_confirmation": spec.requires_confirmation,
         }
         self.schema_cache.put(f"tool:{spec.name}", encode_json_bytes(spec_payload))
-        self._notify()
+        self._notify("tools")
         return tool_obj
 
     def register_provider(
@@ -130,7 +151,7 @@ class ToolRegistry:
             "mimeType": resource.mimeType,
         }
         self.schema_cache.put(f"resource:{resource.uri}", encode_json_bytes(res_dict))
-        self._notify()
+        self._notify("resources")
 
     def get_resource(self, uri: str) -> ResourceEntry | None:
         """Retrieve a static resource descriptor by exact URI."""
@@ -150,7 +171,7 @@ class ToolRegistry:
             "mimeType": template.mimeType,
         }
         self.schema_cache.put(f"template:{template.uriTemplate}", encode_json_bytes(tmpl_dict))
-        self._notify()
+        self._notify("resources")
 
     def list_resource_templates(self) -> list[ResourceTemplateEntry]:
         """Return all registered resource templates sorted by template string."""
@@ -178,7 +199,7 @@ class ToolRegistry:
             ],
         }
         self.schema_cache.put(f"prompt:{prompt.name}", encode_json_bytes(prompt_dict))
-        self._notify()
+        self._notify("prompts")
 
     def get_prompt(self, name: str) -> PromptEntry | None:
         """Retrieve a prompt template by name."""
@@ -366,9 +387,12 @@ class ToolRegistry:
         routes = getattr(app, "routes", ()) or ()
         self.register_routes(routes)
 
-    def _notify(self) -> None:
-        for listener in self._listeners:
-            listener()
+    def _notify(self, kind: RegistryChangeKind) -> None:
+        for listener, accepts_kind in self._listeners:
+            if accepts_kind:
+                listener(kind)
+            else:
+                listener()
 
 
 class MCPRegistry(ToolRegistry):

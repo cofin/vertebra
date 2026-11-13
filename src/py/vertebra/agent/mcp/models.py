@@ -5,7 +5,7 @@ protocol version constants, and server configurations across MCP 2026-07-28 and
 legacy Streamable HTTP protocol revisions.
 """
 
-from collections.abc import Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from typing import TYPE_CHECKING, Any, Literal
 
 import msgspec
@@ -135,6 +135,18 @@ class MCPConfig(FrozenBaseStruct, frozen=True, kw_only=True):
     """Advertise and serve MCP logging capabilities and `logging/setLevel`."""
     default_log_level: McpLogLevel = "info"
     """Default minimum log severity assigned to newly created MCP sessions."""
+    enable_get_sse: bool = True
+    """Allow legacy `GET /mcp` Server-Sent Events notification streams."""
+    sse_heartbeat_seconds: float = 15.0
+    """Interval in seconds between SSE keepalive comments on idle streams."""
+    max_streams_per_owner: int = 8
+    """Maximum concurrent SSE streams allowed per authenticated owner key."""
+    resource_subscriptions: bool = True
+    """Advertise and serve `resources/subscribe` and `resources/unsubscribe`."""
+    max_subscriptions_per_session: int = 256
+    """Maximum number of active resource URI subscriptions permitted per session."""
+    subscription_authorizer: Callable[..., Any] | None = None
+    """Optional sync or async callable authorizing resource subscription requests."""
 
     def __post_init__(self) -> None:
         if self.trust_proxy_identity and self.identity_source is None:
@@ -149,6 +161,14 @@ class MCPConfig(FrozenBaseStruct, frozen=True, kw_only=True):
             raise ValueError("MCPConfig.max_sessions must be non-negative")
         if self.default_log_level not in MCP_LOG_LEVELS:
             raise ValueError(f"MCPConfig.default_log_level must be one of {MCP_LOG_LEVELS}")
+        if self.sse_heartbeat_seconds <= 0:
+            raise ValueError("MCPConfig.sse_heartbeat_seconds must be positive")
+        if self.max_streams_per_owner < 0:
+            raise ValueError("MCPConfig.max_streams_per_owner must be non-negative")
+        if self.max_subscriptions_per_session < 0:
+            raise ValueError("MCPConfig.max_subscriptions_per_session must be non-negative")
+        if self.subscription_authorizer is not None and not callable(self.subscription_authorizer):
+            raise TypeError("MCPConfig.subscription_authorizer must be callable")
 
 
 class McpHttpRequest(FrozenBaseStruct, frozen=True, kw_only=True):
@@ -175,6 +195,8 @@ class McpHttpResponse(FrozenBaseStruct, frozen=True, kw_only=True):
     """HTTP response headers dictionary."""
     body: bytes = b""
     """Serialized HTTP response body bytes."""
+    stream: AsyncIterator[bytes] | None = None
+    """Optional incremental byte stream for Server-Sent Events responses."""
 
 
 class TextContent(FrozenBaseStruct, frozen=True, kw_only=True, cache_hash=True):
