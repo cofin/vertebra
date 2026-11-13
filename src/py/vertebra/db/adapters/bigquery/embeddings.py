@@ -22,9 +22,13 @@ _DISTANCE_TYPES: frozenset[str] = frozenset({"COSINE", "EUCLIDEAN", "DOT_PRODUCT
 _TASK_TO_VERTEX_TASK_TYPE: dict[str, str] = {
     "query": "RETRIEVAL_QUERY",
     "search_query": "RETRIEVAL_QUERY",
+    "retrieval_query": "RETRIEVAL_QUERY",
     "document": "RETRIEVAL_DOCUMENT",
     "search_document": "RETRIEVAL_DOCUMENT",
+    "retrieval_document": "RETRIEVAL_DOCUMENT",
+    "qa": "QUESTION_ANSWERING",
     "question_answering": "QUESTION_ANSWERING",
+    "fact": "FACT_VERIFICATION",
     "fact_verification": "FACT_VERIFICATION",
     "classification": "CLASSIFICATION",
     "clustering": "CLUSTERING",
@@ -120,10 +124,10 @@ class BigQueryEmbeddingPushdown:
             raise ValueError("dimensions must be positive")
         if not texts:
             raise ValueError("texts must not be empty")
-        params: dict[str, Any] = {"texts": list(texts)}
-        params.update(
-            task_type=_TASK_TO_VERTEX_TASK_TYPE.get(task.lower(), "RETRIEVAL_DOCUMENT"), output_dimensionality=dims
-        )
+        task_type = _TASK_TO_VERTEX_TASK_TYPE.get(task.strip().lower())
+        if task_type is None:
+            raise ValueError(f"Unsupported embedding task {task!r}")
+        params: dict[str, Any] = {"texts": list(texts), "task_type": task_type, "output_dimensionality": dims}
         rows = await self._select(self.build_generate_embedding_sql(), params)
         if len(rows) != len(texts):
             raise DataError(f"BigQuery returned {len(rows)} embedding rows for {len(texts)} texts")

@@ -4,7 +4,7 @@ Backend configurations, GIL-free `SyncObjectStore` and `AsyncObjectStore`, file-
 
 ## Object stores
 
-Construct a store from a URI or configuration: `SyncObjectStore(target, *, options=None, signing=None, token_cache=None)`. The class methods `from_config`, `from_local`, `from_s3`, `from_gcs`, `from_azure`, `from_oci`, `from_r2`, `from_http`, and `from_memory` build the same store from configuration fields. Every store exposes the read-only properties `url`, `scheme`, `options`, `token_cache`, and `supports_signing`, plus `close()` and the context-manager protocol. `put_multipart(key, parts)` uploads a sequence of buffers as one object.
+Construct a store from a URI or configuration: `SyncObjectStore(target, *, options=None, signing=None, token_cache=None)`. The class methods `from_config`, `from_local`, `from_s3`, `from_gcs`, `from_azure`, `from_oci`, `from_r2`, `from_http`, and `from_memory` build the same store from configuration fields. Every store exposes the read-only properties `url`, `scheme`, `options`, `token_cache`, and `supports_signing`, batch transfer helpers (`upload_many`, `download_many`, `staged_download`), paginated listing (`list_page`, `list_with_delimiter`), `to_async()`, `close()`, and the context-manager protocol. `put_multipart(key, parts)` uploads a sequence of buffers as one object.
 
 `AsyncObjectStore` mirrors `SyncObjectStore` with the same constructor, class methods, properties, and method signatures. Its I/O methods are awaited, except `get_stream`, `iter_arrow_batches`, `iter_parquet_batches`, `open_reader`, and `open_writer`, which return async iterators or file objects directly. `staged_download` is an async context manager, `verify_presigned_url` stays synchronous, and `to_sync()` returns a `SyncObjectStore` sharing the same native engine.
 
@@ -13,18 +13,14 @@ Construct a store from a URI or configuration: `SyncObjectStore(target, *, optio
       heading_level: 3
       inherited_members: true
       members:
-        - to_async
         - put
         - put_stream
         - put_file
-        - upload_many
         - get
         - get_view
         - get_stream
         - get_range
         - get_file
-        - download_many
-        - staged_download
         - head
         - exists
         - delete
@@ -32,8 +28,6 @@ Construct a store from a URI or configuration: `SyncObjectStore(target, *, optio
         - rename
         - compose
         - list
-        - list_page
-        - list_with_delimiter
         - glob
         - open_reader
         - open_writer
@@ -161,6 +155,10 @@ Readers support `read`, `read_at`, `seek`, `tell`, and `close`; the async reader
       members: false
 
 ## Errors
+
+::: vertebra.typing.IntegrityError
+    options:
+      heading_level: 4
 
 ::: vertebra.typing.PreconditionError
     options:

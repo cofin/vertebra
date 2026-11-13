@@ -7,6 +7,7 @@ import math
 import os
 import sys
 import threading
+import time
 import types
 from pathlib import Path
 from typing import Any
@@ -58,6 +59,18 @@ def build_crash_backend() -> BackendInferenceCallable:
     def _infer(texts: list[str], dims: int) -> list[list[float]]:
         _ = (texts, dims)
         os._exit(1)
+
+    return _infer
+
+
+def build_slow_tagged_backend(delay_s: float = 0.18) -> BackendInferenceCallable:
+    """Return a backend that delays ``slow-cancel`` inputs and emits distinct rows per text."""
+
+    def _infer(texts: list[str], dims: int) -> list[list[float]]:
+        if texts and texts[0] == "slow-cancel":
+            time.sleep(delay_s)
+            return [[99.0, 1.0, 0.0, 0.0][:dims] for _ in texts]
+        return [[float(len(text)), 1.0, 0.0, 0.0][:dims] for text in texts]
 
     return _infer
 
@@ -424,8 +437,12 @@ def test_embedding_broker_multi_loop_thread_isolation() -> None:
     assert results[0][1] == 2.0
     assert results[1][1] == 2.0
 
-    asyncio.run(broker.submit_single("prune-check"))
-    assert len(broker._loop_states) == 1
+    async def _prune_check() -> int:
+        await broker.submit_single("prune-check")
+        return len(broker._loop_states)
+
+    assert asyncio.run(_prune_check()) == 1
+    assert len(broker._loop_states) == 0
 
 
 @pytest.mark.anyio
@@ -607,3 +624,40 @@ def test_gemma_embedder_precision_validation_and_fastembed_forwarding(
     fallback_backend = FastEmbedder.build_backend("embeddinggemma-2-270m", precision="fp32")
     assert fallback_backend(["hi"], 2) == [[0.5, 0.5]]
     assert strict_kwargs == [{"model_name": "embeddinggemma-2-270m", "specific_model_path": None}]
+
+
+@pytest.mark.anyio
+async def test_embedding_broker_sidecar_cancellation_kills_stale_pipe_and_recovers() -> None:
+    """Cancelling submit_batch_in_subprocess mid-readline kills the sidecar so the next request gets its own vectors."""
+    shm_prefix = f"vtb-qvec-{os.getpid()}-"
+    broker = EmbeddingBroker(
+        dimensions=4,
+        config=EmbeddingBrokerConfig(isolate_gil_subprocess=True, coalesce_window_ms=0.0),
+        backend_factory=BackendFactory(
+            target="tests.unit.embeddings.test_embedding_broker:build_slow_tagged_backend",
+            options={"delay_s": 0.18},
+        ),
+    )
+    try:
+        warmup = await broker.submit_batch_in_subprocess(["w"])
+        assert warmup.count == 1
+        first_proc = broker._state_for_loop().subprocess
+        assert first_proc is not None
+        first_pid = first_proc.pid
+
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(broker.submit_batch_in_subprocess(["slow-cancel"]), timeout=0.04)
+        assert broker._state_for_loop().subprocess is None
+
+        await asyncio.sleep(0.22)
+        recovered = await broker.submit_batch_in_subprocess(["ab"])
+        assert recovered.count == 1
+        second_proc = broker._state_for_loop().subprocess
+        assert second_proc is not None and second_proc.pid != first_pid
+        expected_norm = math.sqrt(5.0)
+        assert recovered.to_list() == [pytest.approx([2.0 / expected_norm, 1.0 / expected_norm, 0.0, 0.0], rel=1e-5)]
+        shm_dir = Path("/dev/shm")
+        if shm_dir.is_dir():
+            assert [p.name for p in shm_dir.iterdir() if p.name.startswith(shm_prefix)] == []
+    finally:
+        await broker.close()

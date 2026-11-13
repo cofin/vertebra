@@ -54,11 +54,11 @@ Zero-weight cloud clients (`VertexEmbedder`, `GeminiEmbedder`, `RemoteEmbedder`)
 | `StaticEmbedder` | `potion-base-8M` (`512` dims) | Pure-Rust `mmap` token lookup (`<50 µs`) | None |
 | `GemmaEmbedder` | `embeddinggemma-2-270m` (`768` dims) | `1x` RAM `EmbeddingBroker` (`int8` / `q4` / `bf16` / `fp32`) | `[embeddings]` |
 | `FastEmbedder` | `BAAI/bge-small-en-v1.5` (`384` dims) | `1x` RAM `EmbeddingBroker` (ONNX Runtime) | `[embeddings]` |
-| `RemoteEmbedder` | `embeddinggemma-2-270m` (`768` dims) | Rust HTTP/2 gRPC `BatchEmbed` (optional `id_token_cache`) | None |
+| `RemoteEmbedder` | `gemini-embedding-001` (`768` dims) | Rust HTTP/2 gRPC `BatchEmbed` (optional `id_token_cache`) | None |
 
 ## Google Cloud & In-Database SQL Pushdown
 
-`Embedder()` defaults to `VertexEmbedder("gemini-embedding-001", dimensions=768)`. `VertexEmbedder` dispatches `gemini-embedding-*` models to the Vertex AI v1 `:embedContent` REST endpoint and `text-embedding-*` models to `:predict` over HTTP/2 with `SyncGcpTokenCache`, forwarding `auto_truncate=False` for `:predict` models and decoding JSON float payloads into `VectorSlab` off-GIL. `GeminiEmbedder` uses HTTP/2 gRPC (`EmbedContent` / `BatchEmbedContents`) with `x-goog-api-key` or `SyncGcpTokenCache` and supports text and binary media parts via `embed_multimodal(...)`. `RemoteEmbedder` accepts an optional `id_token_cache` (`SyncGcpIdTokenCache` or `AsyncGcpIdTokenCache`) and `audience` for Cloud Run and IAP-protected gRPC endpoints:
+`Embedder()` defaults to `VertexEmbedder("gemini-embedding-001", dimensions=768)`. `VertexEmbedder` dispatches `gemini-embedding-001` (`1` instance per request), `text-embedding-005`, and `text-multilingual-embedding-002` (`250` instances per request) to the Vertex AI v1 `:predict` REST endpoint and `gemini-embedding-2` (plus `embed_multimodal(...)`) to `:embedContent` over HTTP/2 with `SyncGcpTokenCache` / `AsyncGcpTokenCache` and `autoTruncate=False` by default. `GeminiEmbedder` uses HTTP/2 gRPC (`BatchEmbedContents`) with `x-goog-api-key` or `SyncGcpTokenCache` and encodes text and binary media parts via `embed_multimodal(...)`. `RemoteEmbedder` accepts an optional `id_token_cache` (`SyncGcpIdTokenCache` or `AsyncGcpIdTokenCache`) and `audience` for Cloud Run and IAP-protected gRPC endpoints:
 
 ```python
 from vertebra.embeddings import (
@@ -83,9 +83,9 @@ remote_emb = RemoteEmbedder(
 )
 ```
 
-All embedders expose a uniform `embed_batch(...)` contract that validates dimensions, rejects boolean values passed as numeric parameters, and unlinks per-call `/dev/shm/vtb-qvec-*` shared-memory query segments on teardown.
+`EmbeddingBroker` sidecar calls unlink per-call `/dev/shm/vtb-qvec-*` shared-memory segments on teardown, and database pushdown adapters expose a uniform `embed_batch(...)` contract that validates dimensions, positive `top_k`, and strict numeric vector cells (rejecting booleans).
 
-SQL generation belongs to the database adapters. Pass an existing sync or async driver to `BigQueryEmbeddingPushdown`, `SpannerEmbeddingPushdown`, `PostgresEmbeddingPushdown` (including AlloyDB), or `OracleEmbeddingPushdown`, then wrap it with `PushdownEmbedder` for caching, sync/async `embed_batch`, Arrow output, and in-memory similarity search. `OracleEmbeddingPushdown` takes a `SyncOracleDriver` or `AsyncOracleDriver`. The native Oracle driver package is not yet published, so constructing either driver raises `MissingDependencyError`:
+SQL generation belongs to the database adapters. Pass an existing sync or async driver to `BigQueryEmbeddingPushdown`, `SpannerEmbeddingPushdown`, `PostgresEmbeddingPushdown` (including AlloyDB), or `OracleEmbeddingPushdown`, then wrap it with `PushdownEmbedder` for caching, `embed_many` / `embed_many_sync`, Arrow output, and in-memory similarity search. `OracleEmbeddingPushdown` takes a `SyncOracleDriver` or `AsyncOracleDriver` from the `vertebra-core[oracle]` extra (`vertebra._oracle`):
 
 ```python
 from vertebra.db.adapters.postgres import (

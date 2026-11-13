@@ -872,21 +872,36 @@ async def test_vertebra_core_gcp_token_cache_service_account_and_audience_jwt(
 
 def test_google_embedder_uses_vertebra_gcp_token_cache_without_storage_import(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
-    """Verify vertebra.embeddings._google imports AsyncGcpTokenCache from vertebra._vertebra and handles TypeError stub."""
+    """Verify vertebra.embeddings._google uses AsyncGcpTokenCache directly from vertebra._vertebra."""
     source_path = Path(google_embeddings_mod.__file__)
-    tree = ast.parse(source_path.read_text(encoding="utf-8"))
+    source_text = source_path.read_text(encoding="utf-8")
+    tree = ast.parse(source_text)
     imported_modules = [
         node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) and node.module is not None
     ]
     assert "vertebra.storage" not in imported_modules
+    assert "vertebra.storage._store" not in source_text
     assert "vertebra._vertebra" in imported_modules
 
-    dummy_stub = type("AsyncGcpTokenCache", (), {})
-    monkeypatch.setattr(google_embeddings_mod, "AsyncGcpTokenCache", dummy_stub)
+    adc_path = tmp_path / "embedder_adc.json"
+    adc_path.write_text(
+        json.dumps(
+            {
+                "type": "authorized_user",
+                "client_id": "cid",
+                "client_secret": "csec",
+                "refresh_token": "rtok",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", str(adc_path))
     embedder = VertexEmbedder("gemini-embedding-001", project="test-proj")
-    resolved_cache = embedder._ensure_token_cache(async_mode=True)
-    assert isinstance(resolved_cache, AsyncGcpTokenCache)
+    resolved_cache = embedder._ensure_token_cache()
+    assert isinstance(resolved_cache, CoreAsyncGcpTokenCache)
+    assert embedder._ensure_token_cache() is resolved_cache
 
 
 def test_gcp_token_cache_unified_on_vertebra_core_and_removed_from_storage_ext(
@@ -1323,9 +1338,11 @@ async def test_gcp_id_token_cache_authorized_user_adc_and_errors(
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("bad_audience", ["", "   ", "https://bad\n.run.app"])
 async def test_gcp_id_token_cache_validation_and_upstream_errors(
     monkeypatch: pytest.MonkeyPatch,
     token_server: _MockTokenServer,
+    bad_audience: str,
 ) -> None:
     """Verify invalid audience raises ValueError pre-network, static tokens are rejected, and metadata HTTP errors raise GoogleCloudAuthError."""
     with pytest.raises(ValueError, match="static"):
@@ -1341,13 +1358,12 @@ async def test_gcp_id_token_cache_validation_and_upstream_errors(
     sync_cache = SyncGcpIdTokenCache()
     async_cache = sync_cache.to_async()
 
-    for bad_audience in ("", "   ", "https://bad\n.run.app"):
-        with pytest.raises(ValueError):
-            sync_cache.get_token(bad_audience)
-        with pytest.raises(ValueError):
-            async_cache.get_token(bad_audience)
-        with pytest.raises(ValueError):
-            sync_cache.needs_refresh(bad_audience)
+    with pytest.raises(ValueError):
+        sync_cache.get_token(bad_audience)
+    with pytest.raises(ValueError):
+        async_cache.get_token(bad_audience)
+    with pytest.raises(ValueError):
+        sync_cache.needs_refresh(bad_audience)
     assert token_server.metadata_id_calls == 0
 
     token_server.metadata_status = 500

@@ -1726,20 +1726,11 @@ pub fn encode_batch_embed_grpc_request(
     task_type: Option<u32>,
     titles: Option<&[Option<String>]>,
     output_dimensionality: Option<u32>,
-) -> Vec<u8> {
+) -> Result<Vec<u8>, String> {
     let contents: Vec<Vec<GeminiContentPart<'_>>> = texts
         .iter()
         .map(|text| vec![GeminiContentPart::Text(text.as_str())])
         .collect();
-    if contents.is_empty() {
-        return encode_batch_embed_contents_unchecked(
-            model,
-            &[],
-            task_type,
-            titles,
-            output_dimensionality,
-        );
-    }
     encode_batch_embed_contents_grpc_request(
         model,
         &contents,
@@ -1747,15 +1738,6 @@ pub fn encode_batch_embed_grpc_request(
         titles,
         output_dimensionality,
     )
-    .unwrap_or_else(|_| {
-        encode_batch_embed_contents_unchecked(
-            model,
-            &contents,
-            task_type,
-            titles,
-            output_dimensionality,
-        )
-    })
 }
 
 /// Encode a `BatchEmbedContentsResponse` wrapped in a 5-byte gRPC LPM frame (used by `RemoteEmbedder` servers and tests).
@@ -1943,8 +1925,23 @@ mod tests {
             None,
             None,
             None,
-        );
+        )
+        .expect("text encode");
         assert!(text_frame.windows(4).any(|w| w == [0x12, 0x02, b'h', b'i']));
+        assert!(
+            encode_batch_embed_grpc_request("gemini-embedding-001", &[], None, None, None,)
+                .is_err()
+        );
+        assert!(
+            encode_batch_embed_grpc_request(
+                "gemini-embedding-001",
+                &["hi".to_string()],
+                None,
+                Some(&[None, None]),
+                None,
+            )
+            .is_err()
+        );
 
         let media_contents = vec![
             vec![

@@ -258,10 +258,15 @@ async fn fetch_id_token_from_gcloud_cli(
     }
 }
 
+struct CachedIdTokenEntry {
+    snapshot: Arc<GcpIdTokenSnapshot>,
+    minted_at_unix_ms: u64,
+}
+
 pub struct GcpIdTokenCache {
     credentials: Arc<GcpTokenCache>,
     options: GcpIdTokenOptions,
-    entries: RwLock<HashMap<String, Arc<GcpIdTokenSnapshot>>>,
+    entries: RwLock<HashMap<String, CachedIdTokenEntry>>,
     inflight_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     generation: AtomicU64,
 }
@@ -317,9 +322,14 @@ impl GcpIdTokenCache {
             .entries
             .read()
             .expect("id token snapshot lock poisoned");
-        let snap = guard.get(aud)?;
-        if now_unix_ms.saturating_add(self.options.refresh_skew_ms) < snap.expires_at_unix_ms {
-            Some(Arc::clone(snap))
+        let entry = guard.get(aud)?;
+        let lifetime_ms = entry
+            .snapshot
+            .expires_at_unix_ms
+            .saturating_sub(entry.minted_at_unix_ms);
+        let effective_skew_ms = self.options.refresh_skew_ms.min(lifetime_ms / 2);
+        if now_unix_ms.saturating_add(effective_skew_ms) < entry.snapshot.expires_at_unix_ms {
+            Some(Arc::clone(&entry.snapshot))
         } else {
             None
         }
@@ -338,7 +348,7 @@ impl GcpIdTokenCache {
             .write()
             .expect("id token snapshot lock poisoned");
         if let Some(current) = guard.get(aud)
-            && current.generation == failed_generation
+            && current.snapshot.generation == failed_generation
         {
             guard.remove(aud);
         }
@@ -391,7 +401,13 @@ impl GcpIdTokenCache {
                 .entries
                 .write()
                 .expect("id token snapshot lock poisoned");
-            guard.insert(aud.clone(), Arc::clone(&snapshot));
+            guard.insert(
+                aud.clone(),
+                CachedIdTokenEntry {
+                    snapshot: Arc::clone(&snapshot),
+                    minted_at_unix_ms: now_after_lock,
+                },
+            );
             while guard.len() > self.options.max_audiences {
                 let victim = Self::select_eviction_victim(&guard, &aud, now_after_lock);
                 let Some(victim_key) = victim else {
@@ -405,16 +421,19 @@ impl GcpIdTokenCache {
     }
 
     fn select_eviction_victim(
-        entries: &HashMap<String, Arc<GcpIdTokenSnapshot>>,
+        entries: &HashMap<String, CachedIdTokenEntry>,
         preserve_key: &str,
         now_unix_ms: u64,
     ) -> Option<String> {
         let expired_victim = entries
             .iter()
-            .filter(|(k, v)| k.as_str() != preserve_key && v.expires_at_unix_ms <= now_unix_ms)
+            .filter(|(k, v)| {
+                k.as_str() != preserve_key && v.snapshot.expires_at_unix_ms <= now_unix_ms
+            })
             .min_by(|(ka, va), (kb, vb)| {
-                va.expires_at_unix_ms
-                    .cmp(&vb.expires_at_unix_ms)
+                va.snapshot
+                    .expires_at_unix_ms
+                    .cmp(&vb.snapshot.expires_at_unix_ms)
                     .then_with(|| ka.cmp(kb))
             })
             .map(|(k, _)| k.clone());
@@ -425,8 +444,9 @@ impl GcpIdTokenCache {
             .iter()
             .filter(|(k, _)| k.as_str() != preserve_key)
             .min_by(|(ka, va), (kb, vb)| {
-                va.expires_at_unix_ms
-                    .cmp(&vb.expires_at_unix_ms)
+                va.snapshot
+                    .expires_at_unix_ms
+                    .cmp(&vb.snapshot.expires_at_unix_ms)
                     .then_with(|| ka.cmp(kb))
             })
             .map(|(k, _)| k.clone())

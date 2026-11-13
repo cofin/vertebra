@@ -917,6 +917,7 @@ async fn id_token_metadata_formats_claims_validation_and_eviction() {
                 let body = match cur_mode.as_str() {
                     "malformed" => "not-a-jwt".to_string(),
                     "expired" => sign_test_id_token(serde_json::json!(aud), -10),
+                    "short_ttl" => sign_test_id_token(serde_json::json!(aud), 60),
                     "wrong_aud" => {
                         sign_test_id_token(serde_json::json!("https://other.run.app"), 3600)
                     }
@@ -1059,6 +1060,22 @@ async fn id_token_metadata_formats_claims_validation_and_eviction() {
             .await
             .unwrap_err()
             .contains("mismatch")
+    );
+
+    *mode.lock().expect("lock") = "short_ttl".to_string();
+    let urls_before_short = request_urls.lock().expect("lock").len();
+    let short_first = full_cache
+        .get_or_refresh("https://aud-short-ttl", false)
+        .await
+        .expect("short ttl mint");
+    let short_second = full_cache
+        .get_or_refresh("https://aud-short-ttl", false)
+        .await
+        .expect("short ttl cached hit");
+    assert_eq!(short_second.generation, short_first.generation);
+    assert_eq!(
+        request_urls.lock().expect("lock").len(),
+        urls_before_short + 1
     );
 
     let full_default = GcpIdTokenOptions::default();

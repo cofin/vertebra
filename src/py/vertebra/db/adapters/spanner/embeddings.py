@@ -28,9 +28,13 @@ _DISTANCE_FUNCTIONS: dict[bool, dict[str, str]] = {
 _TASK_TO_VERTEX_TASK_TYPE: dict[str, str] = {
     "query": "RETRIEVAL_QUERY",
     "search_query": "RETRIEVAL_QUERY",
+    "retrieval_query": "RETRIEVAL_QUERY",
     "document": "RETRIEVAL_DOCUMENT",
     "search_document": "RETRIEVAL_DOCUMENT",
+    "retrieval_document": "RETRIEVAL_DOCUMENT",
+    "qa": "QUESTION_ANSWERING",
     "question_answering": "QUESTION_ANSWERING",
+    "fact": "FACT_VERIFICATION",
     "fact_verification": "FACT_VERIFICATION",
     "classification": "CLASSIFICATION",
     "clustering": "CLUSTERING",
@@ -141,9 +145,12 @@ class SpannerEmbeddingPushdown:
             raise ValueError("dimensions must be positive")
         if not texts:
             raise ValueError("texts must not be empty")
+        task_type = _TASK_TO_VERTEX_TASK_TYPE.get(task.strip().lower())
+        if task_type is None:
+            raise ValueError(f"Unsupported embedding task {task!r}")
         params: dict[str, Any] = {"texts": list(texts)}
         if self._use_ai_function:
-            params["task_type"] = _TASK_TO_VERTEX_TASK_TYPE.get(task.strip().lower(), "RETRIEVAL_DOCUMENT")
+            params["task_type"] = task_type
             params["output_dimensionality"] = dims
         rows = await self._select(self.build_generate_embedding_sql(), params)
         if len(rows) != len(texts):

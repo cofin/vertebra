@@ -9,6 +9,7 @@ import math
 import subprocess
 import sys
 import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 import pytest
@@ -884,13 +885,21 @@ async def test_google_micro_batch_per_loop_isolation_and_gemini_multimodal_valid
     assert v_sync.dimensions == 4
     assert len(embedder._queues) == 0
 
-    for bad_part in (
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "bad_part",
+    [
         MultimodalPart(mime_type="image/png", data=b"x", uri="https://example.com/a.png"),
         MultimodalPart(mime_type="text/plain"),
         MultimodalPart(mime_type="image/png", uri="gs://bucket/obj.png"),
-    ):
-        with pytest.raises(ValueError):
-            await embedder.embed_multimodal([bad_part])
+    ],
+)
+async def test_gemini_embedder_rejects_invalid_multimodal_parts(bad_part: MultimodalPart) -> None:
+    """GeminiEmbedder.embed_multimodal rejects conflicting, empty, or gs:// MultimodalPart payloads."""
+    embedder = GeminiEmbedder("gemini-embedding-2", dimensions=4, api_key="k")
+    with pytest.raises(ValueError):
+        await embedder.embed_multimodal([bad_part])
 
 
 @pytest.mark.anyio
@@ -1039,6 +1048,12 @@ async def test_remote_embedder_id_token_auth_audience_and_401_retry(monkeypatch:
             id_token_cache=fake_id,
         )
 
+    with pytest.raises(ValueError, match="audience requires id_token_cache"):
+        RemoteEmbedder(
+            endpoint="https://emb-svc.a.run.app/v1/",
+            audience="https://emb-svc.a.run.app",
+        )
+
     with pytest.raises(ValueError, match="scheme or host"):
         RemoteEmbedder(endpoint="/relative-only", id_token_cache=fake_id)
 
@@ -1077,7 +1092,7 @@ async def test_remote_embedder_id_token_auth_audience_and_401_retry(monkeypatch:
     )
     batch = await remote.embed_many(["hello"])
     assert batch.count == 1
-    assert fake_id.calls == [("https://emb-svc.a.run.app", False), ("https://emb-svc.a.run.app", True)]
+    assert fake_id.calls == [("https://emb-svc.a.run.app", False), ("https://emb-svc.a.run.app", False)]
     assert fake_id.invalidated == [("https://emb-svc.a.run.app", 1)]
     assert sent_headers[0]["authorization"] == "Bearer mock-id-token-1"
     assert sent_headers[1]["authorization"] == "Bearer mock-id-token-2"
@@ -1091,6 +1106,9 @@ async def test_remote_embedder_id_token_auth_audience_and_401_retry(monkeypatch:
     )
     await explicit_remote.embed_many(["world"])
     assert fake_id.calls[-1] == ("custom-iap-audience", False)
+
+    with pytest.raises(EmbeddingError, match="expected 2"):
+        await remote.embed_many(["one", "two"])
 
     async def double_401_transport(url: str, headers: dict[str, str], body: bytes) -> tuple[int, dict[str, str], bytes]:
         _ = (url, headers, body)
@@ -1107,10 +1125,71 @@ async def test_remote_embedder_id_token_auth_audience_and_401_retry(monkeypatch:
 
 
 @pytest.mark.anyio
-async def test_oracle_pushdown_explicit_cache_fail_loud_and_strict_bounds(
+async def test_remote_embedder_concurrent_401_coalesces_single_id_token_mint() -> None:
+    """Concurrent 401 retries pass force_refresh=False so generation-fenced single-flight mints once."""
+
+    class _SingleFlightIdCache:
+        def __init__(self) -> None:
+            self._lock = asyncio.Lock()
+            self.mint_count = 0
+            self._cached: GcpIdTokenSnapshot | None = None
+
+        def invalidate(self, audience: str, failed_generation: int) -> None:
+            if (
+                self._cached is not None
+                and self._cached.audience == audience
+                and self._cached.generation == failed_generation
+            ):
+                self._cached = None
+
+        async def get_token(self, audience: str, *, force_refresh: bool = False) -> GcpIdTokenSnapshot:
+            if not force_refresh and self._cached is not None:
+                return self._cached
+            async with self._lock:
+                if not force_refresh and self._cached is not None:
+                    return self._cached
+                await asyncio.sleep(0.01)
+                self.mint_count += 1
+                self._cached = GcpIdTokenSnapshot(
+                    id_token=f"sf-id-token-{self.mint_count}",
+                    audience=audience,
+                    expires_at_unix_ms=4_102_444_800_000,
+                    generation=self.mint_count,
+                )
+                return self._cached
+
+    sf_cache: Any = _SingleFlightIdCache()
+    await sf_cache.get_token("https://emb-svc.a.run.app")
+    assert sf_cache.mint_count == 1
+
+    async def gen1_401_transport(url: str, headers: dict[str, str], body: bytes) -> tuple[int, dict[str, str], bytes]:
+        _ = (url, body)
+        if headers.get("authorization") == "Bearer sf-id-token-1":
+            return (401, {"content-type": "application/grpc+msgpack"}, b"")
+        batch = VectorBatchView.from_f32_rows([[1.0, 0.0, 0.0, 0.0]], normalize=True)
+        resp_msg = RemoteEmbedResponse(
+            packed_frame=encode_gemini_embed_grpc_response_frame(batch),
+            count=1,
+            dimensions=4,
+        )
+        return (200, {"grpc-status": "0"}, encode_lpm_frame(encode_msgpack_bytes(resp_msg)))
+
+    remote = RemoteEmbedder(
+        endpoint="https://emb-svc.a.run.app/v1/",
+        dimensions=4,
+        id_token_cache=sf_cache,
+        transport=gen1_401_transport,
+    )
+    batches = await asyncio.gather(*(remote.embed_many(["concurrent-item"]) for _ in range(8)))
+    assert all(b.count == 1 for b in batches)
+    assert sf_cache.mint_count == 2
+
+
+@pytest.mark.anyio
+async def test_oracle_pushdown_explicit_cache_and_oversized_vector_rejection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verify OracleEmbeddingPushdown avoids implicit token caches, propagates cache failures, and validates bounds."""
+    """OracleEmbeddingPushdown avoids implicit token caches, normalizes sync caches, and rejects oversized vectors."""
     monkeypatch.setenv("GOOGLE_OAUTH_ACCESS_TOKEN", "mock-oauth-token")
     monkeypatch.setenv("GCE_METADATA_HOST", "127.0.0.1:9")
 
@@ -1136,29 +1215,112 @@ async def test_oracle_pushdown_explicit_cache_fail_loud_and_strict_bounds(
     await with_sync_cache.embed_query("rotate-once")
     assert sum("CREATE_CREDENTIAL" in sql for sql, _, _ in port_sync_cache.calls) == 1
 
-    class BrokenTokenCache:
-        def __init__(self, exc: Exception) -> None:
-            self._exc = exc
-
-        async def get_token(self) -> GcpTokenSnapshot:
-            raise self._exc
-
-    for exc in (RuntimeError("oauth daemon offline"), GoogleCloudAuthError("expired grant")):
-        broken: Any = BrokenTokenCache(exc)
-        failing_pushdown = OracleEmbeddingPushdown(
-            _AsyncSelectPort([]),
-            project_number="123",
-            dimensions=4,
-            token_cache=broken,
-        )
-        with pytest.raises(type(exc)):
-            await failing_pushdown.embed_query("fail-loud")
-
-    for bad_top_k in (0, -3):
-        with pytest.raises(ValueError, match="top_k must be positive"):
-            await implicit_none.similarity_search([1.0, 0.0, 0.0, 0.0], table="docs", top_k=bad_top_k)
-
     oversized_port = _AsyncSelectPort([{"embedding": encode_oracle_vector_f32([1.0, 2.0, 3.0, 4.0, 5.0])}])
     oversized_pushdown = OracleEmbeddingPushdown(oversized_port, project_number="123", dimensions=4)
     with pytest.raises(DataError, match="Oracle embedding row"):
         await oversized_pushdown.embed_query("oversized")
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "exc",
+    [RuntimeError("oauth daemon offline"), GoogleCloudAuthError("expired grant")],
+)
+async def test_oracle_pushdown_propagates_token_cache_errors(exc: Exception) -> None:
+    """OracleEmbeddingPushdown propagates explicit token_cache errors without swallowing them."""
+
+    class BrokenTokenCache:
+        async def get_token(self) -> GcpTokenSnapshot:
+            raise exc
+
+    broken: Any = BrokenTokenCache()
+    failing_pushdown = OracleEmbeddingPushdown(
+        _AsyncSelectPort([]),
+        project_number="123",
+        dimensions=4,
+        token_cache=broken,
+    )
+    with pytest.raises(type(exc)):
+        await failing_pushdown.embed_query("fail-loud")
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("bad_top_k", [0, -3])
+async def test_oracle_pushdown_rejects_non_positive_top_k(bad_top_k: int) -> None:
+    """OracleEmbeddingPushdown.similarity_search rejects non-positive top_k."""
+    pushdown = OracleEmbeddingPushdown(_AsyncSelectPort([]), project_number="123", dimensions=4)
+    with pytest.raises(ValueError, match="top_k must be positive"):
+        await pushdown.similarity_search([1.0, 0.0, 0.0, 0.0], table="docs", top_k=bad_top_k)
+
+
+@pytest.mark.anyio
+async def test_remote_embedder_default_http_transport_handles_http_401_and_retries() -> None:
+    """RemoteEmbedder._default_http_transport returns HTTPError status/headers/body so 401 retry runs."""
+    seen_auths: list[str | None] = []
+    batch = VectorBatchView.from_f32_rows([[1.0, 0.0, 0.0, 0.0]], normalize=True)
+    ok_payload = encode_lpm_frame(
+        encode_msgpack_bytes(
+            RemoteEmbedResponse(
+                packed_frame=encode_gemini_embed_grpc_response_frame(batch),
+                count=1,
+                dimensions=4,
+            )
+        )
+    )
+
+    class _Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            length = int(self.headers.get("content-length", "0"))
+            _ = self.rfile.read(length)
+            seen_auths.append(self.headers.get("authorization"))
+            if len(seen_auths) == 1:
+                self.send_response(401)
+                self.send_header("content-type", "application/grpc+msgpack")
+                self.end_headers()
+                self.wfile.write(b"expired")
+                return
+            self.send_response(200)
+            self.send_header("content-type", "application/grpc+msgpack")
+            self.send_header("grpc-status", "0")
+            self.end_headers()
+            self.wfile.write(ok_payload)
+
+        def log_message(self, format: str, *args: Any) -> None:
+            _ = (format, args)
+
+    class _LoopbackIdCache:
+        def __init__(self) -> None:
+            self.generation = 0
+            self.invalidated: list[tuple[str, int]] = []
+
+        def invalidate(self, audience: str, failed_generation: int) -> None:
+            self.invalidated.append((audience, failed_generation))
+
+        async def get_token(self, audience: str, *, force_refresh: bool = False) -> GcpIdTokenSnapshot:
+            _ = force_refresh
+            self.generation += 1
+            return GcpIdTokenSnapshot(
+                id_token=f"http-id-tok-{self.generation}",
+                audience=audience,
+                expires_at_unix_ms=4_102_444_800_000,
+                generation=self.generation,
+            )
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        cache: Any = _LoopbackIdCache()
+        remote = RemoteEmbedder(
+            endpoint=f"http://127.0.0.1:{server.server_port}",
+            dimensions=4,
+            id_token_cache=cache,
+        )
+        out = await remote.embed_many(["loopback-401"])
+        assert out.count == 1
+        assert seen_auths == ["Bearer http-id-tok-1", "Bearer http-id-tok-2"]
+        assert cache.invalidated == [(f"http://127.0.0.1:{server.server_port}", 1)]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2.0)

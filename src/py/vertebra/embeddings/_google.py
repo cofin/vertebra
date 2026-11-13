@@ -71,48 +71,47 @@ class _PendingMicroBatchItem(msgspec.Struct, gc=False):
     future: asyncio.Future[VectorView]
 
 
-class _LoopMicroBatchQueue:
+class _LoopMicroBatchQueue(msgspec.Struct, gc=False):
     """Per-event-loop pending micro-batch buffer and active drain task."""
 
-    def __init__(self) -> None:
-        self.pending: list[_PendingMicroBatchItem] = []
-        self.flush_task: asyncio.Task[None] | None = None
-
-
-def _decode_error_snippet(body: bytes, *, limit: int = 256) -> str:
-    """Decode an HTTP error response snippet safely for diagnostics."""
-    if not body:
-        return ""
-    snippet = body[:limit].decode("utf-8", errors="replace").strip()
-    return f": {snippet}" if snippet else ""
-
-
-def _validate_multimodal_part(part: MultimodalPart, *, allow_gcs: bool, provider: str) -> None:
-    """Validate MultimodalPart payload fields before serialization."""
-    if part.data is not None and part.uri is not None:
-        raise ValueError("MultimodalPart cannot specify both data and uri")
-    if part.uri is not None:
-        if not part.uri.strip():
-            raise ValueError("MultimodalPart uri must not be empty")
-        if not allow_gcs and part.uri.startswith("gs://"):
-            raise ValueError(f"{provider} does not support gs:// URIs; use VertexEmbedder for GCS media URIs")
-        if not part.mime_type.strip():
-            raise ValueError("MultimodalPart mime_type must not be empty")
-        return
-    if part.data is not None:
-        if len(part.data) == 0:
-            raise ValueError("MultimodalPart data must not be empty")
-        if not part.mime_type.strip():
-            raise ValueError("MultimodalPart mime_type must not be empty")
-        return
-    if part.text is None or not part.text:
-        raise ValueError("MultimodalPart must specify data, uri, or text")
+    pending: list[_PendingMicroBatchItem] = msgspec.field(default_factory=list)
+    flush_task: asyncio.Task[None] | None = None
 
 
 class _GoogleEmbedder(Embedder):
     """Shared base for Google Cloud Vertex AI and Gemini embedders."""
 
     DEFAULT_SCOPES: ClassVar[tuple[str, ...]] = ("https://www.googleapis.com/auth/cloud-platform",)
+
+    @staticmethod
+    def _decode_error_snippet(body: bytes, *, limit: int = 256) -> str:
+        """Decode an HTTP error response snippet safely for diagnostics."""
+        if not body:
+            return ""
+        snippet = body[:limit].decode("utf-8", errors="replace").strip()
+        return f": {snippet}" if snippet else ""
+
+    @staticmethod
+    def _validate_multimodal_part(part: MultimodalPart, *, allow_gcs: bool, provider: str) -> None:
+        """Validate MultimodalPart payload fields before serialization."""
+        if part.data is not None and part.uri is not None:
+            raise ValueError("MultimodalPart cannot specify both data and uri")
+        if part.uri is not None:
+            if not part.uri.strip():
+                raise ValueError("MultimodalPart uri must not be empty")
+            if not allow_gcs and part.uri.startswith("gs://"):
+                raise ValueError(f"{provider} does not support gs:// URIs; use VertexEmbedder for GCS media URIs")
+            if not part.mime_type.strip():
+                raise ValueError("MultimodalPart mime_type must not be empty")
+            return
+        if part.data is not None:
+            if len(part.data) == 0:
+                raise ValueError("MultimodalPart data must not be empty")
+            if not part.mime_type.strip():
+                raise ValueError("MultimodalPart mime_type must not be empty")
+            return
+        if part.text is None or not part.text:
+            raise ValueError("MultimodalPart must specify data, uri, or text")
 
     def __init__(
         self,
@@ -183,6 +182,9 @@ class _GoogleEmbedder(Embedder):
             future=fut,
         )
         with self._queues_lock:
+            closed_loops = [existing for existing in self._queues if existing.is_closed() and existing is not loop]
+            for closed_loop in closed_loops:
+                self._queues.pop(closed_loop, None)
             queue = self._queues.get(loop)
             if queue is None:
                 queue = _LoopMicroBatchQueue()
@@ -299,7 +301,7 @@ class _GoogleEmbedder(Embedder):
         normalized_headers = {k.lower(): v for k, v in resp_headers.items()}
         if status != 200:
             raise EmbeddingError(
-                f"{self._provider_label} embedding request failed with HTTP {status}{_decode_error_snippet(resp_body)}"
+                f"{self._provider_label} embedding request failed with HTTP {status}{self._decode_error_snippet(resp_body)}"
             )
         grpc_status = normalized_headers.get("grpc-status")
         if grpc_status is not None and grpc_status != "0":
@@ -652,7 +654,7 @@ class VertexEmbedder(_GoogleEmbedder):
                 item_parts.append([{"text": item}])
                 usage_texts.append(item)
                 continue
-            _validate_multimodal_part(item, allow_gcs=True, provider="VertexEmbedder")
+            self._validate_multimodal_part(item, allow_gcs=True, provider="VertexEmbedder")
             parts: list[dict[str, Any]] = []
             if item.uri is not None:
                 parts.append({"fileData": {"mimeType": item.mime_type, "fileUri": item.uri}})
@@ -767,7 +769,7 @@ class GeminiEmbedder(_GoogleEmbedder):
                 contents.append([("text", "", item)])
                 usage_texts.append(item)
                 continue
-            _validate_multimodal_part(item, allow_gcs=False, provider="GeminiEmbedder")
+            self._validate_multimodal_part(item, allow_gcs=False, provider="GeminiEmbedder")
             parts: list[tuple[Literal["text", "inline_data", "file_data"], str, str | bytes]] = []
             if item.uri is not None:
                 parts.append(("file_data", item.mime_type, item.uri))

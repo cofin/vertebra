@@ -8,6 +8,7 @@ import os
 import sys
 import threading
 import uuid
+import weakref
 from collections import deque
 from collections.abc import Callable, Sequence
 from typing import Any, cast
@@ -97,7 +98,7 @@ class _SubprocessRpcResponse(msgspec.Struct, frozen=True, gc=False):
     error: str | None = None
 
 
-class _BrokerLoopState(msgspec.Struct, gc=False):
+class _BrokerLoopState(msgspec.Struct, weakref=True):
     """Per-event-loop queue, flush task, lock, and sidecar process state for `EmbeddingBroker`."""
 
     pending: deque[_QueuedBrokerRequest]
@@ -146,12 +147,15 @@ class EmbeddingBroker:
         self._backend_factory = backend_factory
         self._dimensions = dimensions
         self._config = config or EmbeddingBrokerConfig()
-        self._loop_states: dict[asyncio.AbstractEventLoop, _BrokerLoopState] = {}
+        self._loop_states: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, _BrokerLoopState] = (
+            weakref.WeakKeyDictionary()
+        )
         self._loop_states_lock = threading.Lock()
+        self._reap_tasks: set[asyncio.Task[None]] = set()
 
     @staticmethod
     def _terminate_process_nowait(proc: asyncio.subprocess.Process | None) -> None:
-        """Close stdin and send SIGTERM to a sidecar subprocess whose owning loop has already closed."""
+        """Close stdin and kill a sidecar subprocess without awaiting inside cancelled or foreign-loop paths."""
         if proc is None:
             return
         if proc.stdin is not None:
@@ -159,22 +163,56 @@ class EmbeddingBroker:
                 proc.stdin.close()
         if proc.returncode is None:
             with contextlib.suppress(ProcessLookupError, OSError):
-                proc.terminate()
+                proc.kill()
+
+    @staticmethod
+    def _terminate_state_ref(state_ref: weakref.ref[_BrokerLoopState]) -> None:
+        """Best-effort finalizer terminating any sidecar held by a garbage-collected loop state."""
+        state = state_ref()
+        if state is not None:
+            EmbeddingBroker._terminate_process_nowait(state.subprocess)
+            state.subprocess = None
+
+    def _schedule_reap_and_cleanup(
+        self,
+        loop: asyncio.AbstractEventLoop,
+        proc: asyncio.subprocess.Process,
+        shm_names: list[str],
+    ) -> bool:
+        """Schedule background process reaping and post-exit `/dev/shm` cleanup on an open event loop."""
+        if loop.is_closed():
+            return False
+
+        async def _reap() -> None:
+            try:
+                if proc.returncode is None:
+                    with contextlib.suppress(Exception):
+                        await asyncio.wait_for(proc.wait(), timeout=5.0)
+            finally:
+                for segment_name in shm_names:
+                    _unlink_shm_segment(segment_name)
+
+        task = loop.create_task(_reap())
+        self._reap_tasks.add(task)
+        task.add_done_callback(self._reap_tasks.discard)
+        return True
 
     def _state_for_loop(self, loop: asyncio.AbstractEventLoop | None = None) -> _BrokerLoopState:
         """Return or create the per-event-loop state bucket while pruning closed loops."""
         target_loop = loop or asyncio.get_running_loop()
         with self._loop_states_lock:
             closed_loops = [
-                existing for existing in self._loop_states if existing.is_closed() and existing is not target_loop
+                existing for existing in list(self._loop_states) if existing.is_closed() and existing is not target_loop
             ]
             for closed_loop in closed_loops:
-                closed_state = self._loop_states.pop(closed_loop)
-                self._terminate_process_nowait(closed_state.subprocess)
+                closed_state = self._loop_states.pop(closed_loop, None)
+                if closed_state is not None:
+                    self._terminate_process_nowait(closed_state.subprocess)
             state = self._loop_states.get(target_loop)
             if state is None:
                 state = _BrokerLoopState(pending=deque(), subprocess_lock=asyncio.Lock())
                 self._loop_states[target_loop] = state
+                weakref.finalize(target_loop, self._terminate_state_ref, weakref.ref(state))
             return state
 
     async def _reset_subprocess(self, state: _BrokerLoopState) -> None:
@@ -290,6 +328,7 @@ class EmbeddingBroker:
                 dimensions=self._dimensions,
                 factory=self._backend_factory,
             )
+            reap_scheduled = False
             try:
                 if proc.stdin is None or proc.stdout is None:
                     await self._reset_subprocess(state)
@@ -302,6 +341,11 @@ class EmbeddingBroker:
                 except Exception:
                     await self._reset_subprocess(state)
                     raise
+                except BaseException:
+                    state.subprocess = None
+                    self._terminate_process_nowait(proc)
+                    reap_scheduled = self._schedule_reap_and_cleanup(loop, proc, list(shm_names_to_cleanup))
+                    raise
                 if not raw_line:
                     await self._reset_subprocess(state)
                     raise RuntimeError("Quarantined embedding subprocess terminated unexpectedly")
@@ -310,40 +354,54 @@ class EmbeddingBroker:
                 except Exception:
                     await self._reset_subprocess(state)
                     raise
+                except BaseException:
+                    state.subprocess = None
+                    self._terminate_process_nowait(proc)
+                    reap_scheduled = self._schedule_reap_and_cleanup(loop, proc, list(shm_names_to_cleanup))
+                    raise
                 if resp.shm_name:
                     shm_names_to_cleanup.add(resp.shm_name)
                 if resp.error:
                     raise RuntimeError(f"Quarantined embedding subprocess error: {resp.error}")
                 return VectorBatchView.open_shm(resp.shm_name)
             finally:
-                for segment_name in shm_names_to_cleanup:
-                    _unlink_shm_segment(segment_name)
+                if not reap_scheduled:
+                    for segment_name in shm_names_to_cleanup:
+                        _unlink_shm_segment(segment_name)
 
     async def close(self) -> None:
-        """Terminate the active event loop's quarantined sidecar subprocess and prune closed loops."""
+        """Terminate the active event loop's sidecar subprocess and prune closed foreign loops.
+
+        Closed foreign loops are pruned eagerly here and on subsequent ``_state_for_loop`` lookups.
+        """
         loop = asyncio.get_running_loop()
         with self._loop_states_lock:
-            closed_loops = [existing for existing in self._loop_states if existing.is_closed() and existing is not loop]
+            closed_loops = [
+                existing for existing in list(self._loop_states) if existing.is_closed() and existing is not loop
+            ]
             for closed_loop in closed_loops:
-                closed_state = self._loop_states.pop(closed_loop)
-                self._terminate_process_nowait(closed_state.subprocess)
-            state = self._loop_states.get(loop)
-        if state is None:
-            return
-        async with state.subprocess_lock:
-            proc = state.subprocess
-            if proc is not None:
-                if proc.stdin is not None:
-                    with contextlib.suppress(Exception):
-                        proc.stdin.close()
-                try:
-                    await asyncio.wait_for(proc.wait(), timeout=3.0)
-                except TimeoutError:
-                    with contextlib.suppress(ProcessLookupError, OSError):
-                        proc.kill()
-                    with contextlib.suppress(Exception):
-                        await proc.wait()
-                state.subprocess = None
+                closed_state = self._loop_states.pop(closed_loop, None)
+                if closed_state is not None:
+                    self._terminate_process_nowait(closed_state.subprocess)
+            state = self._loop_states.pop(loop, None)
+        if state is not None:
+            async with state.subprocess_lock:
+                proc = state.subprocess
+                if proc is not None:
+                    if proc.stdin is not None:
+                        with contextlib.suppress(Exception):
+                            proc.stdin.close()
+                    try:
+                        await asyncio.wait_for(proc.wait(), timeout=3.0)
+                    except TimeoutError:
+                        with contextlib.suppress(ProcessLookupError, OSError):
+                            proc.kill()
+                        with contextlib.suppress(Exception):
+                            await proc.wait()
+                    state.subprocess = None
+        loop_reap_tasks = [task for task in list(self._reap_tasks) if task.get_loop() is loop]
+        if loop_reap_tasks:
+            await asyncio.gather(*loop_reap_tasks, return_exceptions=True)
 
     async def _flush_loop(self, loop: asyncio.AbstractEventLoop, state: _BrokerLoopState) -> None:
         """Wait for the coalesce window and drain pending singular requests on the owning loop."""

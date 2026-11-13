@@ -1085,13 +1085,17 @@ pub fn encode_gemini_embed_grpc_frame<'py>(
     output_dimensionality: Option<u32>,
 ) -> PyResult<Bound<'py, PyBytes>> {
     let task_type = parse_gemini_task_type(task)?;
-    let frame = encode_batch_embed_grpc_request(
-        model,
-        &texts,
-        task_type,
-        titles.as_deref(),
-        output_dimensionality,
-    );
+    let frame = py
+        .detach(|| {
+            encode_batch_embed_grpc_request(
+                model,
+                &texts,
+                task_type,
+                titles.as_deref(),
+                output_dimensionality,
+            )
+        })
+        .map_err(PyValueError::new_err)?;
     Ok(PyBytes::new(py, &frame))
 }
 
@@ -1137,39 +1141,42 @@ pub fn encode_gemini_embed_contents_grpc_frame<'py>(
         owned_contents.push(parsed_parts);
     }
 
-    let borrowed_contents: Vec<Vec<GeminiContentPart<'_>>> = owned_contents
-        .iter()
-        .map(|parts| {
-            parts
+    let frame = py
+        .detach(|| {
+            let borrowed_contents: Vec<Vec<GeminiContentPart<'_>>> = owned_contents
                 .iter()
-                .map(|part| match part {
-                    OwnedGeminiPart::Text(text) => GeminiContentPart::Text(text.as_str()),
-                    OwnedGeminiPart::InlineData { mime_type, data } => {
-                        GeminiContentPart::InlineData {
-                            mime_type: mime_type.as_str(),
-                            data: data.as_slice(),
-                        }
-                    }
-                    OwnedGeminiPart::FileData {
-                        mime_type,
-                        file_uri,
-                    } => GeminiContentPart::FileData {
-                        mime_type: mime_type.as_str(),
-                        file_uri: file_uri.as_str(),
-                    },
+                .map(|parts| {
+                    parts
+                        .iter()
+                        .map(|part| match part {
+                            OwnedGeminiPart::Text(text) => GeminiContentPart::Text(text.as_str()),
+                            OwnedGeminiPart::InlineData { mime_type, data } => {
+                                GeminiContentPart::InlineData {
+                                    mime_type: mime_type.as_str(),
+                                    data: data.as_slice(),
+                                }
+                            }
+                            OwnedGeminiPart::FileData {
+                                mime_type,
+                                file_uri,
+                            } => GeminiContentPart::FileData {
+                                mime_type: mime_type.as_str(),
+                                file_uri: file_uri.as_str(),
+                            },
+                        })
+                        .collect()
                 })
-                .collect()
-        })
-        .collect();
+                .collect();
 
-    let frame = encode_batch_embed_contents_grpc_request(
-        model,
-        &borrowed_contents,
-        task_type,
-        titles.as_deref(),
-        output_dimensionality,
-    )
-    .map_err(PyValueError::new_err)?;
+            encode_batch_embed_contents_grpc_request(
+                model,
+                &borrowed_contents,
+                task_type,
+                titles.as_deref(),
+                output_dimensionality,
+            )
+        })
+        .map_err(PyValueError::new_err)?;
     Ok(PyBytes::new(py, &frame))
 }
 

@@ -1193,8 +1193,8 @@ async def test_spanner_batch_write_rejects_max_commit_delay_ms() -> None:
 
 
 @pytest.mark.anyio
-async def test_spanner_pushdown_ai_function_binds_embed_batch_top_k_and_vector_validation() -> None:
-    """SpannerEmbeddingPushdown exposes embed_batch, AI.GENERATE_EMBEDDING options, top_k > 0, and strict vectors."""
+async def test_spanner_pushdown_ai_function_binds_and_embed_batch() -> None:
+    """SpannerEmbeddingPushdown exposes embed_batch and binds AI.GENERATE_EMBEDDING options when enabled."""
     ai_driver = _StubSpannerSelectDriver(rows=[{"embedding": [1.0, 2.0]}, {"embedding": [3.0, 4.0]}])
     ai_embedder = SpannerEmbeddingPushdown(ai_driver, dimensions=2, use_ai_function=True, normalize=False)
     ai_sql = ai_embedder.build_generate_embedding_sql()
@@ -1226,15 +1226,36 @@ async def test_spanner_pushdown_ai_function_binds_embed_batch_top_k_and_vector_v
     await ml_embedder.embed_query("find me")
     assert ml_driver.calls[0][1] == {"texts": ["find me"]}
 
-    for bad_top_k in (0, -1):
-        with pytest.raises(ValueError, match="top_k must be positive"):
-            await ml_embedder.similarity_search([1.0, 0.0], table="docs", top_k=bad_top_k)
 
-    for bad_vec in ([True, False], [1.0], [1.0, 2.0, 3.0]):
-        bad_embedder = SpannerEmbeddingPushdown(
-            _StubSpannerSelectDriver(rows=[{"embedding": bad_vec}]),
-            dimensions=2,
-            normalize=False,
-        )
-        with pytest.raises(DataError, match="Spanner embedding row"):
-            await bad_embedder.embed_documents(["alpha"])
+@pytest.mark.anyio
+@pytest.mark.parametrize("bad_top_k", [0, -1])
+async def test_spanner_pushdown_rejects_non_positive_top_k(bad_top_k: int) -> None:
+    """SpannerEmbeddingPushdown.similarity_search rejects non-positive top_k."""
+    embedder = SpannerEmbeddingPushdown(_StubSpannerSelectDriver(rows=[]), dimensions=2, normalize=False)
+    with pytest.raises(ValueError, match="top_k must be positive"):
+        await embedder.similarity_search([1.0, 0.0], table="docs", top_k=bad_top_k)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("bad_task", ["", "   ", "unknown_task", "translate"])
+@pytest.mark.parametrize("use_ai_function", [True, False])
+async def test_spanner_pushdown_rejects_unsupported_task(bad_task: str, use_ai_function: bool) -> None:
+    """SpannerEmbeddingPushdown.embed_documents rejects unknown embedding task names before issuing SQL."""
+    driver = _StubSpannerSelectDriver(rows=[])
+    embedder = SpannerEmbeddingPushdown(driver, dimensions=2, use_ai_function=use_ai_function, normalize=False)
+    with pytest.raises(ValueError, match="Unsupported embedding task"):
+        await embedder.embed_documents(["alpha"], task=bad_task)
+    assert driver.calls == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("bad_vec", [[True, False], [1.0], [1.0, 2.0, 3.0]])
+async def test_spanner_pushdown_rejects_invalid_vector_rows(bad_vec: list[Any]) -> None:
+    """SpannerEmbeddingPushdown rejects boolean elements and dimension drift with DataError."""
+    bad_embedder = SpannerEmbeddingPushdown(
+        _StubSpannerSelectDriver(rows=[{"embedding": bad_vec}]),
+        dimensions=2,
+        normalize=False,
+    )
+    with pytest.raises(DataError, match="Spanner embedding row"):
+        await bad_embedder.embed_documents(["alpha"])

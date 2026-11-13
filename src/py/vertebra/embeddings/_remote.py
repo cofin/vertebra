@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import urllib.error
 import urllib.parse
 import urllib.request
 from typing import TYPE_CHECKING, Any
@@ -74,6 +75,8 @@ class RemoteEmbedder(Embedder):
         """Initialize the remote cluster gRPC embedder."""
         if bearer_token is not None and id_token_cache is not None:
             raise ValueError("bearer_token and id_token_cache are mutually exclusive")
+        if audience is not None and id_token_cache is None:
+            raise ValueError("audience requires id_token_cache")
         super().__init__(model=model, dimensions=dimensions, cache=cache)
         self._endpoint = endpoint.rstrip("/")
         self._bearer_token = bearer_token
@@ -123,14 +126,14 @@ class RemoteEmbedder(Embedder):
         }
         url = f"{self._endpoint}/vertebra.EmbeddingService/BatchEmbed"
 
-        if self._id_token_cache is not None:
-            assert self._audience is not None
-            snap = await self._fetch_id_token(self._audience, force_refresh=False)
+        if self._id_token_cache is not None and self._audience is not None:
+            audience = self._audience
+            snap = await self._fetch_id_token(audience, force_refresh=False)
             req_headers = {**headers, "authorization": f"Bearer {snap.id_token}"}
             status, resp_headers, resp_body = await self._transport(url, req_headers, wire_body)
             if status == 401:
-                self._id_token_cache.invalidate(self._audience, snap.generation)
-                snap2 = await self._fetch_id_token(self._audience, force_refresh=True)
+                self._id_token_cache.invalidate(audience, snap.generation)
+                snap2 = await self._fetch_id_token(audience, force_refresh=False)
                 req_headers2 = {**headers, "authorization": f"Bearer {snap2.id_token}"}
                 status, resp_headers, resp_body = await self._transport(url, req_headers2, wire_body)
         else:
@@ -150,11 +153,14 @@ class RemoteEmbedder(Embedder):
         if not frames:
             raise EmbeddingError("RemoteEmbedder received empty gRPC response frame list")
         resp_msg = decode_msgpack(frames[0], type=RemoteEmbedResponse)
-        return decode_gemini_embed_grpc_frame_to_batch(
+        batch = decode_gemini_embed_grpc_frame_to_batch(
             resp_msg.packed_frame,
             dimensions=self._dimensions,
             normalize=True,
         )
+        if batch.count != len(texts):
+            raise EmbeddingError(f"RemoteEmbedder returned {batch.count} embedding vectors, expected {len(texts)}")
+        return batch
 
     @staticmethod
     async def _default_http_transport(
@@ -166,9 +172,21 @@ class RemoteEmbedder(Embedder):
 
         def _sync_send() -> tuple[int, dict[str, str], bytes]:
             req = urllib.request.Request(url, data=body, headers=headers, method="POST")
-            with urllib.request.urlopen(req, timeout=30.0) as resp:
-                resp_headers = {k.lower(): v for k, v in resp.headers.items()}
-                return (resp.status, resp_headers, resp.read())
+            host = (urllib.parse.urlsplit(url).hostname or "").lower()
+            try:
+                if host in {"127.0.0.1", "localhost", "::1"}:
+                    resp_ctx = urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, timeout=30.0)
+                else:
+                    resp_ctx = urllib.request.urlopen(req, timeout=30.0)
+                with resp_ctx as resp:
+                    resp_headers = {k.lower(): v for k, v in resp.headers.items()}
+                    return (resp.status, resp_headers, resp.read())
+            except urllib.error.HTTPError as exc:
+                try:
+                    resp_headers = {k.lower(): v for k, v in exc.headers.items()} if exc.headers is not None else {}
+                    return (exc.code, resp_headers, exc.read())
+                finally:
+                    exc.close()
 
         return await asyncio.to_thread(_sync_send)
 

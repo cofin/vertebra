@@ -181,8 +181,8 @@ def test_zero_copy_binds_native_helpers_directly_without_python_fallbacks() -> N
         assert not hasattr(_zero_copy, fallback_name)
 
 
-def test_gemini_content_part_wire_tags_and_multimodal_validation() -> None:
-    """Verify Part.text uses field 2, inline_data uses field 3, file_data uses field 6, and invalid inputs raise ValueError."""
+def test_gemini_content_part_wire_tags_encoding() -> None:
+    """Verify Part.text uses field 2, inline_data uses field 3, and file_data uses field 6."""
     text_frame = encode_gemini_embed_grpc_frame("gemini-embedding-001", ["hi"])
     assert b"\x12\x02hi" in text_frame
 
@@ -201,20 +201,39 @@ def test_gemini_content_part_wire_tags_and_multimodal_validation() -> None:
     assert b"\x32" in media_frame
     assert b"https://example.com/v.mp4" in media_frame
 
-    bad_cases: list[Any] = [
-        [],
-        [[]],
-        [[("inline_data", "", b"\x89P")]],
-        [[("file_data", "video/mp4", "")]],
-        [[("unknown", "text/plain", "x")]],
-    ]
-    for bad_contents in bad_cases:
-        with pytest.raises(ValueError):
-            encode_gemini_embed_contents_grpc_frame("gemini-embedding-2", bad_contents)
 
+@pytest.mark.parametrize(
+    ("bad_contents", "titles"),
+    [
+        ([], None),
+        ([[]], None),
+        ([[("inline_data", "", b"\x89P")]], None),
+        ([[("file_data", "video/mp4", "")]], None),
+        ([[("unknown", "text/plain", "x")]], None),
+        ([[("text", "", "a")]], [None, None]),
+    ],
+)
+def test_gemini_content_part_multimodal_validation_rejects_invalid_inputs(
+    bad_contents: list[Any],
+    titles: list[str | None] | None,
+) -> None:
+    """encode_gemini_embed_contents_grpc_frame rejects malformed multimodal parts and misaligned titles."""
     with pytest.raises(ValueError):
-        encode_gemini_embed_contents_grpc_frame(
-            "gemini-embedding-2",
-            [[("text", "", "a")]],
-            titles=[None, None],
-        )
+        encode_gemini_embed_contents_grpc_frame("gemini-embedding-2", bad_contents, titles=titles)
+
+
+@pytest.mark.parametrize(
+    ("texts", "titles"),
+    [
+        ([], None),
+        (["single-doc"], ["t1", "t2"]),
+        (["doc-a", "doc-b"], ["only-one"]),
+    ],
+)
+def test_gemini_text_grpc_frame_rejects_empty_texts_and_misaligned_titles(
+    texts: list[str],
+    titles: list[str | None] | None,
+) -> None:
+    """encode_gemini_embed_grpc_frame raises ValueError when texts is empty or titles length mismatches texts."""
+    with pytest.raises(ValueError):
+        encode_gemini_embed_grpc_frame("gemini-embedding-001", texts, titles=titles)

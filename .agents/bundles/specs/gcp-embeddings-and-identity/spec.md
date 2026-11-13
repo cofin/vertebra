@@ -128,7 +128,7 @@ At baseline `18baadcd`, outbound calls to Cloud Run, Cloud Functions, and IAP-pr
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Active Frontier**: All `4` chapters (`15/15` tasks) completed through `ch04-docs-and-okf-sync` (`01a74272`); awaiting Frontier Joint Review Gate and `/flow:finish` contraction.
+- **Active Frontier**: All `4` chapters (`15/15` tasks) completed through `ch04-docs-and-okf-sync` (`01a74272`); ready for `/flow:finish` contraction and archive.
 - **Cross-Flow Unblock**: `ch01-gcp-id-token-cache` is complete on `feat/gcp-embeddings-and-identity`, ready to unblock `mcp-protocol-completeness` `ch06` bridge OIDC token authentication ([#113](https://github.com/cofin/vertebra/issues/113)).
 - **Release Gate (`/flow:finish`)**: `make lint-all && make rs-test && make py-test && make docs && make review-check`.
 
