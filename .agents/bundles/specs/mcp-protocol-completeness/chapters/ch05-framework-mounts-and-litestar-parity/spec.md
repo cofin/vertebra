@@ -5,7 +5,7 @@ chapter_id: ch05-framework-mounts-and-litestar-parity
 title: "Chapter 05: Framework Mount Skill/UI Wiring and Litestar Delegation Parity"
 description: "Wire SkillCatalog and MCPCore.validate() across AgentPlugin, Starlette, FastAPI, Flask, Django, and well-known manifests, and pin litestar-mcp>=0.20.0."
 status: stable
-state: active
+state: completed
 planning_status: complete
 planning_quality: standard
 planning_degraded_reason: null
@@ -13,15 +13,15 @@ depends_on_chapters:
   - ch04-skills-and-mcp-apps-core
 replan_trigger: "Confirm litestar-mcp>=0.20.0 release on PyPI (SUPPORTED_PROTOCOL_VERSIONS and skill_catalog DI key) before executing t03"
 plan_commit: 18baadcd
-last_reviewed_commit: null
-updated_at: "2026-11-13T05:28:40Z"
+last_reviewed_commit: 0166aa62
+updated_at: "2026-11-13T05:29:35Z"
 generated:
   by: flow-plan
   at: "2026-11-12T23:45:00Z"
 verified:
-  - by: agent:plan-generator
-    at: "2026-11-12T23:45:00Z"
-    commit: 18baadcd
+  - by: agent:code-reviewer
+    at: "2026-11-13T05:29:35Z"
+    commit: 0166aa62
 tags:
   - mcp
   - mounts
@@ -84,7 +84,7 @@ Framework mount options and `litestar-mcp>=0.20.0` delegation are documented in 
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Status**: `t01`–`t03` are implemented and verified at `63904aab` (`uv lock --check --offline`, `ruff`, `mypy` across 48 source files, and `279` unit tests pass with `litestar-mcp==0.20.0`).
+- **Status**: `ch05-framework-mounts-and-litestar-parity` is completed at `63904aab` (`sync` `0166aa62`); next frontier is [`ch06-stdio-serve-bridge-and-gcp-auth`](../ch06-stdio-serve-bridge-and-gcp-auth/spec.md).
 - **Fast Chapter Gate (`< 15s`)**: `uv lock --check --offline && uv run --no-sync ruff check src/py/vertebra/agent src/py/vertebra/extensions/{starlette,flask,django,litestar} && uv run --no-sync mypy src/py/vertebra/agent src/py/vertebra/extensions/{starlette,flask,django,litestar} && uv run --no-sync pytest src/py/tests/unit/agent/test_mcp_conformance.py src/py/tests/unit/extensions/test_litestar_ecosystem_mcp.py -q`.
 
 [^agent-plugin]: `src/py/vertebra/agent/plugin.py::AgentPluginConfig` — AgentPluginConfig and native/Litestar mount hooks.

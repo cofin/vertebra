@@ -1,5 +1,10 @@
 # Bundle Activity Log
 
+## [2026-11-13T05:29:35Z] chapter-complete | mcp-protocol-completeness ch05-framework-mounts-and-litestar-parity
+
+- Closed `ch05-framework-mounts-and-litestar-parity` at `63904aab` (sync `0166aa62`): wired `SkillCatalog` coercion, well-known `skills` lists, and startup `MCPCore.validate()` across `AgentPlugin`, Starlette/FastAPI, Flask, and Django MCP mounts, bumped `litestar-mcp>=0.20.0` in `pyproject.toml` + `uv.lock`, added pre-`0.20` capability guard in `create_mcp_plugin`, and merged Litestar `skill_catalog` names in `/.well-known/mcp.json` (`uv lock --check`, `ruff`, `mypy` across `48` source files, and `279` tests clean).
+- Advanced active frontier to `ch06-stdio-serve-bridge-and-gcp-auth` (`mcp-protocol-completeness:ch06:t01`; `7` tasks remain across `ch06`–`ch07`).
+
 ## [2026-11-13T05:17:45Z] chapter-complete | mcp-protocol-completeness ch04-skills-and-mcp-apps-core
 
 - Closed `ch04-skills-and-mcp-apps-core` at `b0c0ae12` (sync `7ea0f382`): extended `SkillCatalog` filtering/URI resolution/listeners/refresh, advertised `io.modelcontextprotocol/skills` and `io.modelcontextprotocol/ui` extensions, added `McpIcon`/`ToolSpec.meta`/`@mcp_tool` UI metadata, implemented `ToolRegistry.validate_ui_links` and `MCPCore.validate()`, filtered app-only tools for non-UI clients and WebMCP manifests (`270` unit tests, `ruff`, and `mypy` clean).
