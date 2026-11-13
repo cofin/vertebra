@@ -11,6 +11,7 @@ from typing import Any, cast
 import msgspec
 import pytest
 import starlette.requests
+from starlette.responses import JSONResponse, Response
 
 from vertebra._vertebra import AsgiProtocol, AsgiScope, Request
 from vertebra.agent.mcp.routes import AsgiMcpApp
@@ -35,6 +36,12 @@ from vertebra.extensions.fastapi import (
     mount_mcp_routes,
     offload_middlewares,
 )
+from vertebra.extensions.fastapi.fastpath import (
+    BUFFERED_RESPONSE_TYPES,
+)
+from vertebra.extensions.fastapi.fastpath import (
+    CompiledRoute as FastAPICompiledRoute,
+)
 from vertebra.extensions.flask import VertebraPlugin as FlaskVertebraPlugin
 from vertebra.extensions.flask import vertebra_route
 from vertebra.extensions.litestar.fastpath import (
@@ -43,9 +50,10 @@ from vertebra.extensions.litestar.fastpath import (
 from vertebra.extensions.litestar.router import ExtractedRoute as LitestarExtractedRoute
 from vertebra.extensions.litestar.router import RouterTable as LitestarRouterTable
 from vertebra.extensions.starlette import VertebraPlugin as StarletteVertebraPlugin
+from vertebra.extensions.starlette.fastpath import serialize_buffered_response
 from vertebra.framework._app import App
 from vertebra.server._fastpath import attach_framework_fastpath
-from vertebra.server._fastpath_core import resolve_fastpath_provider
+from vertebra.server._fastpath_core import CompiledRouteBase, get_attached_fastpath, resolve_fastpath_provider
 from vertebra.server.worker import _instantiate_mount_runners
 from vertebra.utils.serializers import decode_json
 
@@ -531,3 +539,29 @@ async def test_fastapi_mount_mcp_routes_uses_shared_asgi_mcp_app() -> None:
     )
     await mcp_app(scope_notify, proto_notify.receive, proto_notify.send)
     assert proto_notify.take_response().status == 202
+
+
+def test_fastapi_compiled_route_base_attachment_and_buffered_response_types() -> None:
+    """FastAPI plugin attaches __vertebra_fastpath__ without legacy state keys and supports exact BUFFERED_RESPONSE_TYPES."""
+    assert issubclass(FastAPICompiledRoute, CompiledRouteBase)
+
+    app, _ = _make_mock_fastapi_app()
+    VertebraPlugin(app)
+    assert get_attached_fastpath(app) is not None
+    assert not hasattr(app.state, "vertebra_fastpath_bypass")
+
+    assert MsgspecJSONResponse in BUFFERED_RESPONSE_TYPES
+    assert JSONResponse in BUFFERED_RESPONSE_TYPES
+    assert Response in BUFFERED_RESPONSE_TYPES
+
+    msgspec_resp = MsgspecJSONResponse({"fast": True}, status_code=201)
+    serialized = serialize_buffered_response(msgspec_resp)
+    assert serialized is not None
+    assert serialized[0] == 201
+    assert serialized[2] is msgspec_resp.body
+
+    class _CustomMsgspecJSONResponse(MsgspecJSONResponse):
+        pass
+
+    assert _CustomMsgspecJSONResponse not in BUFFERED_RESPONSE_TYPES
+    assert serialize_buffered_response(_CustomMsgspecJSONResponse({"fast": False})) is None

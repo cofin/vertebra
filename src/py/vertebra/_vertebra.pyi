@@ -1,6 +1,6 @@
 """Type stubs for the vertebra._vertebra native extension module."""
 
-from collections.abc import Awaitable, Buffer, Generator, Sequence
+from collections.abc import Awaitable, Buffer, Callable, Generator, Sequence
 from typing import Any, Self, final
 
 from vertebra.typing import VertebraError
@@ -8,10 +8,20 @@ from vertebra.typing import VertebraError
 __version__: str
 FREE_THREADED: bool
 GIL_USED: bool
+STREAM_FLAG_STREAMING: int
+STREAM_FLAG_FINAL: int
+STREAM_FLAG_ERROR: int
+STREAM_FLAG_HEADERS_SENT: int
+STREAM_FLAG_TRAILERS: int
 
 __all__ = [
     "FREE_THREADED",
     "GIL_USED",
+    "STREAM_FLAG_ERROR",
+    "STREAM_FLAG_FINAL",
+    "STREAM_FLAG_HEADERS_SENT",
+    "STREAM_FLAG_STREAMING",
+    "STREAM_FLAG_TRAILERS",
     "AlloyDBDialer",
     "ArrowCursor",
     "AsgiProtocol",
@@ -73,6 +83,7 @@ __all__ = [
     "WsgiFileWrapper",
     "WsgiInput",
     "_WsgiStartResponse",
+    "_set_stream_sink",
     "__version__",
     "camelize",
     "cancel_request_sleep",
@@ -128,6 +139,7 @@ __all__ = [
     "init_transport",
     "instantiate_struct_vectorcall",
     "kebabize",
+    "max_stream_frame_payload",
     "nanoid_generate",
     "normalize_identifier",
     "ordinalize",
@@ -163,6 +175,7 @@ __all__ = [
     "submit_response",
     "submit_response_raw",
     "submit_results",
+    "submit_stream_frame",
     "titleize",
     "truncate",
     "truncate_utf8_bytes",
@@ -675,6 +688,17 @@ def submit_response_raw(
 ) -> None: ...
 def submit_batch_raw(
     items: Sequence[tuple[int, int, Buffer] | tuple[int, int, Buffer, Buffer | None]],
+) -> None: ...
+def max_stream_frame_payload() -> int: ...
+def submit_stream_frame(
+    request_id: int,
+    status: int,
+    flags: int,
+    headers: Sequence[tuple[bytes | str, bytes | str]] | None,
+    body: Buffer,
+) -> None: ...
+def _set_stream_sink(
+    sink: Callable[[int, int, int, list[tuple[bytes, bytes]], bytes], bool | None] | None = None,
 ) -> None: ...
 def stream_file_chunks(
     path: str,

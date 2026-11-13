@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import sys
+from collections.abc import MutableMapping
 from typing import Any
 
 import click
 import msgspec
 
 from vertebra.cli.plugin_registry import enter_app_server_lifespan, resolve_cli_app_path
+from vertebra.framework._app import App
 from vertebra.server.lanes import WorkerRunner
-from vertebra.server.platform import LameDuckController
+from vertebra.server.platform import HealthProbeServer, LameDuckController, ZPagesRegistry
 from vertebra.utils.module_loader import import_app
 from vertebra.utils.serializers import decode_json
 
@@ -28,31 +31,75 @@ def execute_worker_cli(
     run_until_stopped: bool = False,
     oneshot_job: str | None = None,
     payload: Any = None,
+    health_probe: tuple[str, int] | None = None,
 ) -> int:
-    """Load the target application, enter its CLI server lifespan, and configure worker lanes."""
+    """Load the target application, enter its lifespan, bind QueueService, and run worker lanes."""
+    prev_litestar_app = os.environ.get("LITESTAR_APP")
+    prev_vertebra_app = os.environ.get("VERTEBRA_APP")
     os.environ["LITESTAR_APP"] = app_path
     os.environ["VERTEBRA_APP"] = app_path
-    app = import_app(app_path)
-    if oneshot_job:
-        with enter_app_server_lifespan(app, app_path=app_path):
-            return asyncio.run(WorkerRunner.run_oneshot(app, oneshot_job, payload=payload))
+    try:
+        app = import_app(app_path)
+        if oneshot_job:
+            with enter_app_server_lifespan(app, app_path=app_path):
+                return asyncio.run(WorkerRunner.run_oneshot(app, oneshot_job, payload=payload))
 
-    lanes = WorkerRunner.parse_lanes(queues, concurrency, drain_timeout_s=drain_timeout_s)
-    lame_duck = LameDuckController()
-    runner = WorkerRunner(lanes, lame_duck=lame_duck)
-    state = getattr(app, "state", None)
-    if isinstance(state, dict):
-        state["vertebra_worker_runner"] = runner
-        state["vertebra_lame_duck"] = lame_duck
-    with enter_app_server_lifespan(app, app_path=app_path):
-        try:
-            if run_until_stopped:
-                asyncio.run(runner.run(install_signal_handlers=True))
-        except KeyboardInterrupt:
-            pass
-        finally:
-            asyncio.run(runner.stop())
-        return 0
+        lanes = WorkerRunner.parse_lanes(queues, concurrency, drain_timeout_s=drain_timeout_s)
+        lame_duck = LameDuckController()
+        zpages = ZPagesRegistry("vertebra-worker", lame_duck=lame_duck)
+
+        async def _serve_workers() -> int:
+            async with contextlib.AsyncExitStack() as async_stack:
+                if not isinstance(app, App):
+                    lifespan_fn = getattr(app, "lifespan", None)
+                    if callable(lifespan_fn):
+                        cm = lifespan_fn()
+                        if hasattr(cm, "__aenter__"):
+                            await async_stack.enter_async_context(cm)
+
+                queue_service = WorkerRunner.resolve_queue_service(app)
+                runner = WorkerRunner(lanes, queue_service=queue_service, lame_duck=lame_duck)
+                state = getattr(app, "state", None)
+                if isinstance(state, MutableMapping):
+                    state["vertebra_worker_runner"] = runner
+                    state["vertebra_lame_duck"] = lame_duck
+                    state["vertebra_zpages"] = zpages
+
+                probe_server: HealthProbeServer | None = None
+                if health_probe is not None:
+                    probe_host, probe_port = health_probe
+                    probe_server = HealthProbeServer(zpages, host=probe_host, port=probe_port)
+                    await probe_server.start()
+                    if isinstance(state, MutableMapping):
+                        state["vertebra_health_probe_server"] = probe_server
+                        state["vertebra_health_probe_port"] = probe_server.bound_port
+
+                zpages.set_var("worker_state", "ready")
+                try:
+                    if run_until_stopped:
+                        await runner.run(install_signal_handlers=True)
+                finally:
+                    zpages.set_var("worker_state", "draining")
+                    await runner.stop()
+                    if probe_server is not None:
+                        await probe_server.stop()
+                    zpages.set_var("worker_state", "stopped")
+                return 0
+
+        with enter_app_server_lifespan(app, app_path=app_path):
+            try:
+                return asyncio.run(_serve_workers())
+            except KeyboardInterrupt:
+                return 0
+    finally:
+        if prev_litestar_app is None:
+            os.environ.pop("LITESTAR_APP", None)
+        else:
+            os.environ["LITESTAR_APP"] = prev_litestar_app
+        if prev_vertebra_app is None:
+            os.environ.pop("VERTEBRA_APP", None)
+        else:
+            os.environ["VERTEBRA_APP"] = prev_vertebra_app
 
 
 @click.group()
@@ -110,6 +157,7 @@ def run_workers(
         queues=queues,
         concurrency=concurrency,
         drain_timeout_s=drain_timeout_s,
+        run_until_stopped=oneshot_job is None,
         oneshot_job=oneshot_job,
         payload=parsed_payload,
     )

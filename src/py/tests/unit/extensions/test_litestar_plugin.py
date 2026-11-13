@@ -28,6 +28,7 @@ from vertebra.extensions.litestar.channels import ChannelsBackend, swap_channels
 from vertebra.server._asgi._runner import AsgiRunner
 from vertebra.server._channels import ChannelBus
 from vertebra.server._dispatch import _schedule_coros
+from vertebra.server._fastpath_core import get_attached_fastpath
 from vertebra.storage import AsyncObjectStore, LocalConfig, MemoryConfig, StreamingStorageResponse
 from vertebra.typing import ImproperConfigurationError
 from vertebra.utils.module_loader import import_optional
@@ -147,7 +148,9 @@ def test_asgi_runner_invokes_attached_vertebra_fastpath(monkeypatch: pytest.Monk
         return {"fast": "yes"}
 
     litestar_app = litestar_mod.Litestar(route_handlers=[accelerated], plugins=[vtb_plugin])
-    bypass = litestar_app.state["vertebra_fastpath_bypass"]
+    bypass = get_attached_fastpath(litestar_app)
+    assert bypass is not None
+    assert "vertebra_fastpath_bypass" not in litestar_app.state
 
     class _FastPathOnlyAsgiWrapper:
         def __init__(self, inner: Any, fastpath: Any) -> None:
@@ -301,7 +304,8 @@ def test_litestar_plugin_ensure_finalized_populates_openapi_and_binds_asgi_runne
     runner = AsgiRunner(app)
     try:
         plugin.ensure_finalized(app)
-        assert getattr(app, "__vertebra_fastpath__", None) is not None
+        assert get_attached_fastpath(app) is not None
+        assert "vertebra_fastpath_bypass" not in app.state
         exported = decode_json(app.state["vertebra_offload_config_json"])
         assert exported["compression"]["backend"] == "brotli"
         assert exported["openapi"]["schema_path"] == "/schema/openapi.json"
@@ -796,3 +800,23 @@ async def test_litestar_store_and_fs_adapter_preserve_percent_and_tilde_keys(
     assert file_info["size"] == 9
     async with await adapter.open("dir%25v1~beta/rate%25limit~doc.txt") as reader:
         assert await reader.read() == b"raw-bytes"
+
+
+@requires_litestar
+def test_litestar_plugin_never_mutates_litestar_class_attribute() -> None:
+    """Attaching VertebraPlugin stores fastpath on app.state without mutating type(app)."""
+    assert litestar_mod is not None
+
+    @litestar_mod.get("/ping", sync_to_thread=False)
+    def ping() -> dict[str, bool]:
+        return {"ok": True}
+
+    plugin = VertebraPlugin()
+    accelerated_app = litestar_mod.Litestar(route_handlers=[ping], plugins=[plugin])
+    plugin.ensure_finalized(accelerated_app)
+
+    plain_app = litestar_mod.Litestar(route_handlers=[ping])
+    assert get_attached_fastpath(accelerated_app) is not None
+    assert "vertebra_fastpath_bypass" not in accelerated_app.state
+    assert not hasattr(litestar_mod.Litestar, "__vertebra_fastpath__")
+    assert get_attached_fastpath(plain_app) is None

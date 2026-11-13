@@ -4,11 +4,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
-use pyo3::exceptions::{PyIOError, PyRuntimeError, PyStopIteration, PyValueError};
+use pyo3::exceptions::{
+    PyConnectionResetError, PyIOError, PyRuntimeError, PyStopIteration, PyValueError,
+};
 use pyo3::ffi;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyTuple};
 
+use vertebra_core::ipc::{FLAG_ERROR, FLAG_FINAL, FLAG_HEADERS_SENT, FLAG_STREAMING};
 use vertebra_core::transport::{BatchSnapshot, decode_headers_raw};
 
 use crate::asgi::{
@@ -88,33 +91,104 @@ pub fn get_rsgi_done(py: Python<'_>) -> PyResult<Py<RsgiReadyAwaitable>> {
 )]
 #[derive(Clone)]
 pub struct RsgiTransport {
-    chunks: Arc<Mutex<Vec<u8>>>,
+    shared: Arc<RsgiSharedState>,
 }
 
 impl RsgiTransport {
     pub fn new(chunks: Arc<Mutex<Vec<u8>>>) -> Self {
-        Self { chunks }
+        Self {
+            shared: Arc::new(RsgiSharedState {
+                request_id: 0,
+                direct_submit: false,
+                state: Mutex::new(HttpProtocolState {
+                    status: 200,
+                    streaming: true,
+                    ..HttpProtocolState::default()
+                }),
+                stream_chunks: chunks,
+                disconnect_future: Mutex::new(None),
+                disconnected: AtomicBool::new(false),
+            }),
+        }
+    }
+
+    pub(crate) fn from_shared(shared: Arc<RsgiSharedState>) -> Self {
+        Self { shared }
+    }
+
+    fn send_chunk(&self, py: Python<'_>, data: &[u8]) -> PyResult<Py<RsgiReadyAwaitable>> {
+        if !self.shared.direct_submit {
+            let mut guard = self
+                .shared
+                .stream_chunks
+                .lock()
+                .map_err(|_| PyRuntimeError::new_err("stream chunks lock poisoned"))?;
+            guard.extend_from_slice(data);
+            return get_rsgi_done(py);
+        }
+
+        if self.shared.disconnected.load(Ordering::Acquire) {
+            if let Ok(mut st) = self.shared.state.lock() {
+                st.stream_closed = true;
+            }
+            return Err(PyConnectionResetError::new_err("stream closed by peer"));
+        }
+
+        let (status, flags, headers_raw) = {
+            let mut st = self
+                .shared
+                .state
+                .lock()
+                .map_err(|_| PyRuntimeError::new_err("protocol state lock poisoned"))?;
+            if st.stream_closed {
+                return Err(PyConnectionResetError::new_err("stream closed by peer"));
+            }
+            if !st.stream_started {
+                st.stream_started = true;
+                st.submitted = true;
+                (
+                    st.status,
+                    FLAG_STREAMING | FLAG_HEADERS_SENT,
+                    std::mem::take(&mut st.headers_raw),
+                )
+            } else {
+                if data.is_empty() {
+                    return get_rsgi_done(py);
+                }
+                (st.status, FLAG_STREAMING, Vec::new())
+            }
+        };
+
+        match ResponseSubmitter::submit_stream_frame_inner(
+            py,
+            self.shared.request_id,
+            status,
+            flags,
+            &headers_raw,
+            data,
+        ) {
+            Ok(()) => get_rsgi_done(py),
+            Err(err) => {
+                if err.is_instance_of::<PyConnectionResetError>(py) {
+                    if let Ok(mut st) = self.shared.state.lock() {
+                        st.stream_closed = true;
+                    }
+                    let _ = self.shared.notify_disconnect(py);
+                }
+                Err(err)
+            }
+        }
     }
 }
 
 #[pymethods]
 impl RsgiTransport {
     pub fn send_bytes(&self, py: Python<'_>, data: &[u8]) -> PyResult<Py<RsgiReadyAwaitable>> {
-        let mut guard = self
-            .chunks
-            .lock()
-            .map_err(|_| PyRuntimeError::new_err("stream chunks lock poisoned"))?;
-        guard.extend_from_slice(data);
-        get_rsgi_done(py)
+        self.send_chunk(py, data)
     }
 
     pub fn send_str(&self, py: Python<'_>, data: &str) -> PyResult<Py<RsgiReadyAwaitable>> {
-        let mut guard = self
-            .chunks
-            .lock()
-            .map_err(|_| PyRuntimeError::new_err("stream chunks lock poisoned"))?;
-        guard.extend_from_slice(data.as_bytes());
-        get_rsgi_done(py)
+        self.send_chunk(py, data.as_bytes())
     }
 }
 
@@ -142,6 +216,8 @@ struct HttpProtocolState {
     submitted: bool,
     immediate_submit: bool,
     streaming: bool,
+    stream_started: bool,
+    stream_closed: bool,
     has_content_length: bool,
     status: u16,
     headers_raw: Vec<u8>,
@@ -150,6 +226,31 @@ struct HttpProtocolState {
     file_path: Option<String>,
     file_range: Option<(u64, u64)>,
     loop_obj: Option<Py<PyAny>>,
+}
+
+pub(crate) struct RsgiSharedState {
+    request_id: u64,
+    direct_submit: bool,
+    state: Mutex<HttpProtocolState>,
+    stream_chunks: Arc<Mutex<Vec<u8>>>,
+    disconnect_future: Mutex<Option<Py<PyAny>>>,
+    disconnected: AtomicBool,
+}
+
+impl RsgiSharedState {
+    fn notify_disconnect(&self, py: Python<'_>) -> PyResult<()> {
+        self.disconnected.store(true, Ordering::Release);
+        let mut guard = self
+            .disconnect_future
+            .lock()
+            .map_err(|_| PyRuntimeError::new_err("disconnect lock poisoned"))?;
+        if let Some(fut) = guard.take() {
+            let _ = fut
+                .bind(py)
+                .call_method1(pyo3::intern!(py, "set_result"), (py.None(),));
+        }
+        Ok(())
+    }
 }
 
 /// RSGI v1.6 HTTP protocol handler supporting single-call unary, file, file-range, and streaming responses.
@@ -163,27 +264,24 @@ struct HttpProtocolState {
 )]
 pub struct RsgiHttpProtocol {
     body_source: RsgiBodySource,
-    request_id: u64,
-    direct_submit: bool,
-    state: Mutex<HttpProtocolState>,
-    stream_chunks: Arc<Mutex<Vec<u8>>>,
-    disconnect_future: Mutex<Option<Py<PyAny>>>,
-    disconnected: AtomicBool,
+    shared: Arc<RsgiSharedState>,
 }
 
 impl RsgiHttpProtocol {
     pub fn new(request_body: Bytes, request_id: u64) -> Self {
         Self {
             body_source: RsgiBodySource::Owned(request_body),
-            request_id,
-            direct_submit: false,
-            state: Mutex::new(HttpProtocolState {
-                status: 200,
-                ..HttpProtocolState::default()
+            shared: Arc::new(RsgiSharedState {
+                request_id,
+                direct_submit: false,
+                state: Mutex::new(HttpProtocolState {
+                    status: 200,
+                    ..HttpProtocolState::default()
+                }),
+                stream_chunks: Arc::new(Mutex::new(Vec::new())),
+                disconnect_future: Mutex::new(None),
+                disconnected: AtomicBool::new(false),
             }),
-            stream_chunks: Arc::new(Mutex::new(Vec::new())),
-            disconnect_future: Mutex::new(None),
-            disconnected: AtomicBool::new(false),
         }
     }
 
@@ -198,17 +296,19 @@ impl RsgiHttpProtocol {
         let request_id = batch.node(index).correlation_id;
         Self {
             body_source: RsgiBodySource::Snapshot { batch, index },
-            request_id,
-            direct_submit,
-            state: Mutex::new(HttpProtocolState {
-                status: 200,
-                immediate_submit,
-                loop_obj,
-                ..HttpProtocolState::default()
+            shared: Arc::new(RsgiSharedState {
+                request_id,
+                direct_submit,
+                state: Mutex::new(HttpProtocolState {
+                    status: 200,
+                    immediate_submit,
+                    loop_obj,
+                    ..HttpProtocolState::default()
+                }),
+                stream_chunks: Arc::new(Mutex::new(Vec::new())),
+                disconnect_future: Mutex::new(None),
+                disconnected: AtomicBool::new(false),
             }),
-            stream_chunks: Arc::new(Mutex::new(Vec::new())),
-            disconnect_future: Mutex::new(None),
-            disconnected: AtomicBool::new(false),
         }
     }
 
@@ -246,75 +346,177 @@ impl RsgiHttpProtocol {
 
     pub(crate) fn take_completed_for_batch(
         &self,
+        py: Python<'_>,
         is_return: bool,
-    ) -> Option<FlushedProtocolResponse> {
-        let mut st = self.state.lock().ok()?;
-        if st.submitted {
-            return None;
-        }
-        let ready = if is_return {
-            true
-        } else {
-            st.started && !st.streaming
+    ) -> PyResult<Option<FlushedProtocolResponse>> {
+        let mut finalize_stream: Option<(u16, u16, Vec<u8>)> = None;
+        let maybe_unary = {
+            let Ok(mut st) = self.shared.state.lock() else {
+                return Ok(None);
+            };
+            if self.shared.direct_submit && st.streaming {
+                if is_return && !st.stream_closed {
+                    st.stream_closed = true;
+                    st.submitted = true;
+                    finalize_stream = Some(if !st.stream_started {
+                        st.stream_started = true;
+                        (
+                            st.status,
+                            FLAG_STREAMING | FLAG_HEADERS_SENT | FLAG_FINAL,
+                            std::mem::take(&mut st.headers_raw),
+                        )
+                    } else {
+                        (st.status, FLAG_STREAMING | FLAG_FINAL, Vec::new())
+                    });
+                }
+                None
+            } else if st.submitted {
+                None
+            } else {
+                let ready = if is_return {
+                    true
+                } else {
+                    st.started && !st.streaming
+                };
+                if !ready {
+                    st.immediate_submit = true;
+                    None
+                } else if !st.started {
+                    st.submitted = true;
+                    Some(FlushedProtocolResponse {
+                        request_id: self.shared.request_id,
+                        status: 500,
+                        headers_raw: ERROR_500_HEADERS_RAW.to_vec(),
+                        body: PreparedRawBody::Owned(ERROR_500_BODY.to_vec()),
+                    })
+                } else {
+                    Some(Self::extract_prepared(
+                        self.shared.request_id,
+                        &mut st,
+                        &self.shared.stream_chunks,
+                    ))
+                }
+            }
         };
-        if !ready {
-            st.immediate_submit = true;
-            return None;
+        if let Some((status, flags, headers_raw)) = finalize_stream {
+            match ResponseSubmitter::submit_stream_frame_inner(
+                py,
+                self.shared.request_id,
+                status,
+                flags,
+                &headers_raw,
+                b"",
+            ) {
+                Ok(()) => {}
+                Err(err) if err.is_instance_of::<PyConnectionResetError>(py) => {
+                    let _ = self.shared.notify_disconnect(py);
+                }
+                Err(err) => return Err(err),
+            }
         }
-        if !st.started {
-            st.submitted = true;
-            return Some(FlushedProtocolResponse {
-                request_id: self.request_id,
-                status: 500,
-                headers_raw: ERROR_500_HEADERS_RAW.to_vec(),
-                body: PreparedRawBody::Owned(ERROR_500_BODY.to_vec()),
-            });
-        }
-        Some(Self::extract_prepared(
-            self.request_id,
-            &mut st,
-            &self.stream_chunks,
-        ))
+        Ok(maybe_unary)
     }
 
-    pub(crate) fn take_error_for_batch(&self) -> Option<FlushedProtocolResponse> {
-        let mut st = self.state.lock().ok()?;
-        if st.submitted {
-            return None;
+    pub(crate) fn take_error_for_batch(&self, py: Python<'_>) -> Option<FlushedProtocolResponse> {
+        let mut error_stream_status: Option<u16> = None;
+        let maybe_unary = {
+            let mut st = self.shared.state.lock().ok()?;
+            if self.shared.direct_submit && st.streaming && st.stream_started {
+                if !st.stream_closed {
+                    st.stream_closed = true;
+                    error_stream_status = Some(st.status);
+                }
+                None
+            } else if st.stream_closed
+                || (st.submitted
+                    && !(self.shared.direct_submit && st.streaming && !st.stream_started))
+            {
+                None
+            } else {
+                st.submitted = true;
+                st.stream_closed = true;
+                Some(FlushedProtocolResponse {
+                    request_id: self.shared.request_id,
+                    status: 500,
+                    headers_raw: ERROR_500_HEADERS_RAW.to_vec(),
+                    body: PreparedRawBody::Owned(ERROR_500_BODY.to_vec()),
+                })
+            }
+        };
+        if let Some(status) = error_stream_status {
+            let _ = ResponseSubmitter::submit_stream_frame_inner(
+                py,
+                self.shared.request_id,
+                status,
+                FLAG_STREAMING | FLAG_ERROR,
+                b"",
+                b"",
+            );
         }
-        st.submitted = true;
-        Some(FlushedProtocolResponse {
-            request_id: self.request_id,
-            status: 500,
-            headers_raw: ERROR_500_HEADERS_RAW.to_vec(),
-            body: PreparedRawBody::Owned(ERROR_500_BODY.to_vec()),
-        })
+        maybe_unary
     }
 
     pub(crate) fn finalize_async_return(&self, py: Python<'_>) -> PyResult<()> {
+        let mut finalize_stream: Option<(u16, u16, Vec<u8>)> = None;
         let maybe_resp = {
             let mut st = self
+                .shared
                 .state
                 .lock()
                 .map_err(|_| PyRuntimeError::new_err("protocol state lock poisoned"))?;
-            if st.submitted || !self.direct_submit {
+            if !self.shared.direct_submit {
+                None
+            } else if st.streaming {
+                if !st.stream_closed {
+                    st.stream_closed = true;
+                    st.submitted = true;
+                    finalize_stream = Some(if !st.stream_started {
+                        st.stream_started = true;
+                        (
+                            st.status,
+                            FLAG_STREAMING | FLAG_HEADERS_SENT | FLAG_FINAL,
+                            std::mem::take(&mut st.headers_raw),
+                        )
+                    } else {
+                        (st.status, FLAG_STREAMING | FLAG_FINAL, Vec::new())
+                    });
+                }
+                None
+            } else if st.submitted {
                 None
             } else if !st.started {
                 st.submitted = true;
                 Some(FlushedProtocolResponse {
-                    request_id: self.request_id,
+                    request_id: self.shared.request_id,
                     status: 500,
                     headers_raw: ERROR_500_HEADERS_RAW.to_vec(),
                     body: PreparedRawBody::Owned(ERROR_500_BODY.to_vec()),
                 })
             } else {
                 Some(Self::extract_prepared(
-                    self.request_id,
+                    self.shared.request_id,
                     &mut st,
-                    &self.stream_chunks,
+                    &self.shared.stream_chunks,
                 ))
             }
         };
+        if let Some((status, flags, headers_raw)) = finalize_stream {
+            match ResponseSubmitter::submit_stream_frame_inner(
+                py,
+                self.shared.request_id,
+                status,
+                flags,
+                &headers_raw,
+                b"",
+            ) {
+                Ok(()) => {}
+                Err(err) if err.is_instance_of::<PyConnectionResetError>(py) => {
+                    let _ = self.shared.notify_disconnect(py);
+                }
+                Err(err) => return Err(err),
+            }
+            return Ok(());
+        }
         if let Some(flushed) = maybe_resp {
             ResponseSubmitter::submit_raw_inner(
                 py,
@@ -328,22 +530,44 @@ impl RsgiHttpProtocol {
     }
 
     pub(crate) fn finalize_async_error(&self, py: Python<'_>) -> PyResult<()> {
+        let mut error_stream_status: Option<u16> = None;
         let should_send_500 = {
             let mut st = self
+                .shared
                 .state
                 .lock()
                 .map_err(|_| PyRuntimeError::new_err("protocol state lock poisoned"))?;
-            if st.submitted || !self.direct_submit {
+            if !self.shared.direct_submit {
+                false
+            } else if st.streaming && st.stream_started {
+                if !st.stream_closed {
+                    st.stream_closed = true;
+                    error_stream_status = Some(st.status);
+                }
+                false
+            } else if st.stream_closed || (st.submitted && !(st.streaming && !st.stream_started)) {
                 false
             } else {
                 st.submitted = true;
+                st.stream_closed = true;
                 true
             }
         };
+        if let Some(status) = error_stream_status {
+            let _ = ResponseSubmitter::submit_stream_frame_inner(
+                py,
+                self.shared.request_id,
+                status,
+                FLAG_STREAMING | FLAG_ERROR,
+                b"",
+                b"",
+            );
+            return Ok(());
+        }
         if should_send_500 {
             ResponseSubmitter::submit_raw_inner(
                 py,
-                self.request_id,
+                self.shared.request_id,
                 500,
                 ERROR_500_HEADERS_RAW,
                 ERROR_500_BODY,
@@ -369,16 +593,18 @@ impl RsgiHttpProtocol {
         };
         Ok(Self {
             body_source: RsgiBodySource::Owned(owned),
-            request_id,
-            direct_submit,
-            state: Mutex::new(HttpProtocolState {
-                status: 200,
-                immediate_submit: direct_submit,
-                ..HttpProtocolState::default()
+            shared: Arc::new(RsgiSharedState {
+                request_id,
+                direct_submit,
+                state: Mutex::new(HttpProtocolState {
+                    status: 200,
+                    immediate_submit: direct_submit,
+                    ..HttpProtocolState::default()
+                }),
+                stream_chunks: Arc::new(Mutex::new(Vec::new())),
+                disconnect_future: Mutex::new(None),
+                disconnected: AtomicBool::new(false),
             }),
-            stream_chunks: Arc::new(Mutex::new(Vec::new())),
-            disconnect_future: Mutex::new(None),
-            disconnected: AtomicBool::new(false),
         })
     }
 
@@ -392,12 +618,13 @@ impl RsgiHttpProtocol {
 
     /// Await client disconnect notification.
     pub fn client_disconnect(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        if self.disconnected.load(Ordering::Acquire) {
+        if self.shared.disconnected.load(Ordering::Acquire) {
             let awaitable = get_rsgi_done(py)?;
             return Ok(awaitable.into_any());
         }
 
         let mut guard = self
+            .shared
             .disconnect_future
             .lock()
             .map_err(|_| PyRuntimeError::new_err("disconnect lock poisoned"))?;
@@ -406,6 +633,7 @@ impl RsgiHttpProtocol {
         }
 
         let maybe_loop = self
+            .shared
             .state
             .lock()
             .ok()
@@ -425,17 +653,7 @@ impl RsgiHttpProtocol {
 
     /// Signal client disconnect to resolve `client_disconnect()` awaitables.
     pub fn notify_disconnect(&self, py: Python<'_>) -> PyResult<()> {
-        self.disconnected.store(true, Ordering::Release);
-        let mut guard = self
-            .disconnect_future
-            .lock()
-            .map_err(|_| PyRuntimeError::new_err("disconnect lock poisoned"))?;
-        if let Some(fut) = guard.take() {
-            let _ = fut
-                .bind(py)
-                .call_method1(pyo3::intern!(py, "set_result"), (py.None(),));
-        }
-        Ok(())
+        self.shared.notify_disconnect(py)
     }
 
     /// Emit an empty-body HTTP response in a single FFI call.
@@ -447,6 +665,7 @@ impl RsgiHttpProtocol {
     ) -> PyResult<()> {
         let immediate_headers = {
             let mut st = self
+                .shared
                 .state
                 .lock()
                 .map_err(|_| PyRuntimeError::new_err("protocol state lock poisoned"))?;
@@ -459,7 +678,7 @@ impl RsgiHttpProtocol {
             let mut has_cl = false;
             encode_py_headers_into(py, headers, &mut st.headers_raw, &mut has_cl)?;
             st.has_content_length = has_cl;
-            if self.direct_submit && st.immediate_submit && !st.submitted {
+            if self.shared.direct_submit && st.immediate_submit && !st.submitted {
                 st.submitted = true;
                 Some(std::mem::take(&mut st.headers_raw))
             } else {
@@ -467,7 +686,7 @@ impl RsgiHttpProtocol {
             }
         };
         if let Some(hdrs) = immediate_headers {
-            ResponseSubmitter::submit_raw_inner(py, self.request_id, status, &hdrs, b"")?;
+            ResponseSubmitter::submit_raw_inner(py, self.shared.request_id, status, &hdrs, b"")?;
         }
         Ok(())
     }
@@ -482,6 +701,7 @@ impl RsgiHttpProtocol {
     ) -> PyResult<()> {
         let immediate_headers = {
             let mut st = self
+                .shared
                 .state
                 .lock()
                 .map_err(|_| PyRuntimeError::new_err("protocol state lock poisoned"))?;
@@ -493,7 +713,7 @@ impl RsgiHttpProtocol {
             let mut has_cl = false;
             encode_py_headers_into(py, headers, &mut st.headers_raw, &mut has_cl)?;
             st.has_content_length = has_cl;
-            if self.direct_submit && st.immediate_submit && !st.submitted {
+            if self.shared.direct_submit && st.immediate_submit && !st.submitted {
                 st.submitted = true;
                 st.body.clear();
                 Some(std::mem::take(&mut st.headers_raw))
@@ -506,7 +726,7 @@ impl RsgiHttpProtocol {
         if let Some(hdrs) = immediate_headers {
             ResponseSubmitter::submit_raw_inner(
                 py,
-                self.request_id,
+                self.shared.request_id,
                 status,
                 &hdrs,
                 body.as_bytes(),
@@ -525,6 +745,7 @@ impl RsgiHttpProtocol {
     ) -> PyResult<()> {
         let immediate_headers = {
             let mut st = self
+                .shared
                 .state
                 .lock()
                 .map_err(|_| PyRuntimeError::new_err("protocol state lock poisoned"))?;
@@ -537,7 +758,7 @@ impl RsgiHttpProtocol {
             let mut has_cl = false;
             encode_py_headers_into(py, headers, &mut st.headers_raw, &mut has_cl)?;
             st.has_content_length = has_cl;
-            if self.direct_submit && st.immediate_submit && !st.submitted {
+            if self.shared.direct_submit && st.immediate_submit && !st.submitted {
                 st.submitted = true;
                 Some(std::mem::take(&mut st.headers_raw))
             } else {
@@ -558,7 +779,13 @@ impl RsgiHttpProtocol {
         };
         if let Some(hdrs) = immediate_headers {
             with_buffer_slice(py, body, |slice| {
-                ResponseSubmitter::submit_raw_inner(py, self.request_id, status, &hdrs, slice)
+                ResponseSubmitter::submit_raw_inner(
+                    py,
+                    self.shared.request_id,
+                    status,
+                    &hdrs,
+                    slice,
+                )
             })?;
         }
         Ok(())
@@ -579,6 +806,7 @@ impl RsgiHttpProtocol {
 
         let immediate_headers = {
             let mut st = self
+                .shared
                 .state
                 .lock()
                 .map_err(|_| PyRuntimeError::new_err("protocol state lock poisoned"))?;
@@ -596,7 +824,7 @@ impl RsgiHttpProtocol {
             st.has_content_length = has_cl;
             st.file_path = Some(file);
             st.file_range = None;
-            if self.direct_submit && st.immediate_submit && !st.submitted {
+            if self.shared.direct_submit && st.immediate_submit && !st.submitted {
                 st.submitted = true;
                 st.body.clear();
                 Some(std::mem::take(&mut st.headers_raw))
@@ -606,7 +834,13 @@ impl RsgiHttpProtocol {
             }
         };
         if let Some(hdrs) = immediate_headers {
-            ResponseSubmitter::submit_raw_inner(py, self.request_id, status, &hdrs, &body_bytes)?;
+            ResponseSubmitter::submit_raw_inner(
+                py,
+                self.shared.request_id,
+                status,
+                &hdrs,
+                &body_bytes,
+            )?;
         }
         Ok(())
     }
@@ -633,6 +867,7 @@ impl RsgiHttpProtocol {
 
         let immediate_headers = {
             let mut st = self
+                .shared
                 .state
                 .lock()
                 .map_err(|_| PyRuntimeError::new_err("protocol state lock poisoned"))?;
@@ -650,7 +885,7 @@ impl RsgiHttpProtocol {
             st.has_content_length = has_cl;
             st.file_path = Some(file);
             st.file_range = Some((start, end));
-            if self.direct_submit && st.immediate_submit && !st.submitted {
+            if self.shared.direct_submit && st.immediate_submit && !st.submitted {
                 st.submitted = true;
                 st.body.clear();
                 Some(std::mem::take(&mut st.headers_raw))
@@ -660,7 +895,13 @@ impl RsgiHttpProtocol {
             }
         };
         if let Some(hdrs) = immediate_headers {
-            ResponseSubmitter::submit_raw_inner(py, self.request_id, status, &hdrs, &body_bytes)?;
+            ResponseSubmitter::submit_raw_inner(
+                py,
+                self.shared.request_id,
+                status,
+                &hdrs,
+                &body_bytes,
+            )?;
         }
         Ok(())
     }
@@ -673,6 +914,7 @@ impl RsgiHttpProtocol {
         headers: &Bound<'_, PyAny>,
     ) -> PyResult<RsgiTransport> {
         let mut st = self
+            .shared
             .state
             .lock()
             .map_err(|_| PyRuntimeError::new_err("protocol state lock poisoned"))?;
@@ -684,27 +926,38 @@ impl RsgiHttpProtocol {
         encode_py_headers_into(py, headers, &mut st.headers_raw, &mut has_cl)?;
         st.has_content_length = has_cl;
         st.streaming = true;
-        Ok(RsgiTransport::new(Arc::clone(&self.stream_chunks)))
+        st.stream_started = false;
+        st.stream_closed = false;
+        if self.shared.direct_submit {
+            st.submitted = true;
+        }
+        Ok(RsgiTransport::from_shared(Arc::clone(&self.shared)))
     }
 
     #[getter]
     pub fn file_path(&self) -> Option<String> {
-        self.state.lock().ok().and_then(|st| st.file_path.clone())
+        self.shared
+            .state
+            .lock()
+            .ok()
+            .and_then(|st| st.file_path.clone())
     }
 
     #[getter]
     pub fn file_range(&self) -> Option<(u64, u64)> {
-        self.state.lock().ok().and_then(|st| st.file_range)
+        self.shared.state.lock().ok().and_then(|st| st.file_range)
     }
 
     /// Materialize the final `Response` object after `__rsgi__` completes.
     pub fn take_response(&self, py: Python<'_>) -> PyResult<Response> {
         let mut st = self
+            .shared
             .state
             .lock()
             .map_err(|_| PyRuntimeError::new_err("protocol state lock poisoned"))?;
         let body_bytes = if st.streaming {
             let mut chunks = self
+                .shared
                 .stream_chunks
                 .lock()
                 .map_err(|_| PyRuntimeError::new_err("stream chunks lock poisoned"))?;
@@ -720,7 +973,7 @@ impl RsgiHttpProtocol {
             status: st.status,
             body: body_bytes,
             headers,
-            request_id: self.request_id,
+            request_id: self.shared.request_id,
         })
     }
 }
@@ -799,7 +1052,7 @@ fn drive_rsgi_targets_inline(
             Ok(c) => c,
             Err(err) => {
                 log_app_exception(py, "RSGI", &err);
-                if let Some(err_resp) = proto_bound.get().take_error_for_batch() {
+                if let Some(err_resp) = proto_bound.get().take_error_for_batch(py) {
                     ready_responses.push(err_resp);
                 }
                 completed_inline += 1;
@@ -808,7 +1061,7 @@ fn drive_rsgi_targets_inline(
         };
 
         if coro.is_none() {
-            if let Some(resp) = proto_bound.get().take_completed_for_batch(true) {
+            if let Some(resp) = proto_bound.get().take_completed_for_batch(py, true)? {
                 ready_responses.push(resp);
             }
             completed_inline += 1;
@@ -824,7 +1077,7 @@ fn drive_rsgi_targets_inline(
                         let _ = Bound::from_owned_ptr(py, yielded);
                     }
                 }
-                if let Some(resp) = proto_bound.get().take_completed_for_batch(true) {
+                if let Some(resp) = proto_bound.get().take_completed_for_batch(py, true)? {
                     ready_responses.push(resp);
                 }
                 completed_inline += 1;
@@ -832,14 +1085,14 @@ fn drive_rsgi_targets_inline(
             ffi::PySendResult::PYGEN_ERROR => {
                 let err = PyErr::fetch(py);
                 log_app_exception(py, "RSGI", &err);
-                if let Some(err_resp) = proto_bound.get().take_error_for_batch() {
+                if let Some(err_resp) = proto_bound.get().take_error_for_batch(py) {
                     ready_responses.push(err_resp);
                 }
                 completed_inline += 1;
             }
             ffi::PySendResult::PYGEN_NEXT => {
                 let first_yielded = unsafe { Bound::from_owned_ptr(py, yielded) }.unbind();
-                if let Some(resp) = proto_bound.get().take_completed_for_batch(false) {
+                if let Some(resp) = proto_bound.get().take_completed_for_batch(py, false)? {
                     ready_responses.push(resp);
                 }
                 let lp = match active_loop {
@@ -957,5 +1210,55 @@ pub fn drive_rsgi_batch(
             lp.call_method1(pyo3::intern!(py, "call_soon_threadsafe"), (cb,))?;
             Ok(0)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pyo3::types::PyList;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use vertebra_core::bridge::BatchBridge;
+
+    #[test]
+    fn disconnect_before_first_send_suppresses_spurious_500_on_error_finalization() {
+        crate::transport::init_transport("inprocess", 4096, 64, 64).expect("init bridge");
+        let bridge = BatchBridge::get().expect("bridge initialized");
+        let unary_count = Arc::new(AtomicUsize::new(0));
+        let unary_count_sink = Arc::clone(&unary_count);
+        bridge.set_response_sink(Arc::new(move |_| {
+            unary_count_sink.fetch_add(1, Ordering::SeqCst);
+        }));
+
+        Python::attach(|py| {
+            let proto = RsgiHttpProtocol {
+                body_source: RsgiBodySource::Owned(Bytes::new()),
+                shared: Arc::new(RsgiSharedState {
+                    request_id: 980,
+                    direct_submit: true,
+                    state: Mutex::new(HttpProtocolState {
+                        status: 200,
+                        ..HttpProtocolState::default()
+                    }),
+                    stream_chunks: Arc::new(Mutex::new(Vec::new())),
+                    disconnect_future: Mutex::new(None),
+                    disconnected: AtomicBool::new(false),
+                }),
+            };
+            proto.notify_disconnect(py).expect("notify disconnect");
+            let empty_hdrs = PyList::empty(py);
+            let transport = proto
+                .response_stream(py, 200, empty_hdrs.as_any())
+                .expect("create response_stream");
+            let _ = transport.send_str(py, "after-disconnect");
+
+            assert!(proto.take_error_for_batch(py).is_none());
+            proto
+                .finalize_async_error(py)
+                .expect("finalize_async_error must succeed without submitting 500");
+        });
+
+        bridge.clear_response_sink();
+        assert_eq!(unary_count.load(Ordering::SeqCst), 0);
     }
 }

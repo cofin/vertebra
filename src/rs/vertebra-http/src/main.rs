@@ -434,6 +434,7 @@ async fn run_server(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let server_shutdown_token = tokio_util::sync::CancellationToken::new();
     let embedded_worker_failed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let shm_startup_failed = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     if config.topology == Topology::Embedded {
         BatchBridge::init(256, 1_048_576, 16, config.thread_count.max(1))
@@ -547,6 +548,7 @@ async fn run_server(
                     Arc::clone(&factory),
                     Arc::clone(&shm),
                     server_shutdown_token.clone(),
+                    Arc::clone(&shm_startup_failed),
                 );
 
                 shm_factory = Some(factory);
@@ -649,6 +651,10 @@ async fn run_server(
 
     if embedded_worker_failed.load(std::sync::atomic::Ordering::Acquire) {
         return Err("embedded Python worker thread terminated unexpectedly".into());
+    }
+
+    if shm_startup_failed.load(std::sync::atomic::Ordering::Acquire) {
+        return Err("SHM worker exited with permanent startup failure (exit code 78)".into());
     }
 
     Ok(())

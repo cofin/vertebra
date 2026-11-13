@@ -127,6 +127,7 @@ vtb build [OPTIONS]
 | `--python-version` | `text` | `"3.12"` | Target Python runtime version (3.12, 3.13, 3.14, 3.14t, 3.15, 3.15t) |
 | `--output` | `path` | - | Output directory (for --standalone) or binary path (for --onefile) |
 | `--project-dir` | `directory` | - | Project directory containing pyproject.toml and any frontend workspace |
+| `--include-agent-skills` | `flag` | `False` | Stage .agents/skills into the standalone bundle (application repositories only) |
 
 ## JavaScript & Frontend Tooling
 

@@ -10,12 +10,17 @@ import pytest
 from click.testing import CliRunner
 
 from vertebra._vertebra import (
+    STREAM_FLAG_ERROR,
+    STREAM_FLAG_FINAL,
+    STREAM_FLAG_HEADERS_SENT,
+    STREAM_FLAG_STREAMING,
     Headers,
     Request,
     Response,
     RsgiHttpProtocol,
     RsgiScope,
     RsgiTransport,
+    _set_stream_sink,
     drive_rsgi_batch,
     init_transport,
 )
@@ -420,6 +425,19 @@ async def test_rsgi_http_protocol_direct_submit_and_drive_rsgi_batch() -> None:
         Request.from_parts("POST", "/v1/a", b"1", request_id=811),
         Request.from_parts("POST", "/v1/b", b"2", request_id=812),
     ]
+    streamed_frames: list[tuple[int, int, int, list[tuple[bytes, bytes]], bytes]] = []
+
+    def sink(
+        req_id: int,
+        status: int,
+        flags: int,
+        headers: list[tuple[bytes, bytes]],
+        body: bytes,
+    ) -> bool:
+        streamed_frames.append((req_id, status, flags, headers, body))
+        return True
+
+    _set_stream_sink(sink)
     create_task_attr = "create_task"
     setattr(loop, create_task_attr, tracked_create_task)
     try:
@@ -438,5 +456,165 @@ async def test_rsgi_http_protocol_direct_submit_and_drive_rsgi_batch() -> None:
         await asyncio.gather(*created_tasks)
     finally:
         setattr(loop, create_task_attr, orig_create_task)
+        _set_stream_sink(None)
 
     assert executed == ["/a", "/b", "/c", "/slow"]
+    assert streamed_frames == [
+        (
+            814,
+            200,
+            STREAM_FLAG_STREAMING | STREAM_FLAG_HEADERS_SENT,
+            [(b"content-type", b"text/plain")],
+            b"s1",
+        ),
+        (814, 200, STREAM_FLAG_STREAMING, [], b"s2"),
+        (814, 200, STREAM_FLAG_STREAMING | STREAM_FLAG_FINAL, [], b""),
+    ]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("send_kind", ["str", "bytes"])
+@pytest.mark.parametrize("scenario", ["live", "empty", "crash", "disconnect", "disconnect_before_first_send"])
+async def test_rsgi_http_protocol_progressive_flush_error_and_disconnect(send_kind: str, scenario: str) -> None:
+    """Verify RsgiTransport flushes progressive chunks, emits FLAG_ERROR, and handles disconnect cleanly."""
+    init_transport()
+    frames: list[tuple[int, int, int, list[tuple[bytes, bytes]], bytes]] = []
+    gate = asyncio.Event()
+    first_flushed = asyncio.Event()
+    terminal_flushed = asyncio.Event()
+    accept_client = scenario not in {"disconnect", "disconnect_before_first_send"}
+
+    def sink(
+        req_id: int,
+        status: int,
+        flags: int,
+        headers: list[tuple[bytes, bytes]],
+        body: bytes,
+    ) -> bool:
+        frames.append((req_id, status, flags, headers, body))
+        if len(frames) == 1:
+            first_flushed.set()
+        if (flags & (STREAM_FLAG_FINAL | STREAM_FLAG_ERROR)) != 0:
+            terminal_flushed.set()
+        return accept_client
+
+    class ProgressiveRsgiApp:
+        async def __rsgi__(self, scope: RsgiScope, protocol: RsgiHttpProtocol) -> None:
+            transport = protocol.response_stream(200, [("content-type", "text/event-stream")])
+            if scope.path == "/empty-stream":
+                return
+            if scope.path == "/disc-early":
+                protocol.notify_disconnect()
+                await asyncio.sleep(0)
+            if send_kind == "str":
+                await transport.send_str("first-chunk\n")
+                await transport.send_str("")
+            else:
+                await transport.send_bytes(b"first-chunk\n")
+                await transport.send_bytes(b"")
+            if scope.path == "/crash":
+                await asyncio.sleep(0)
+                msg = "rsgi mid-stream crash"
+                raise RuntimeError(msg)
+            await gate.wait()
+            if send_kind == "str":
+                await transport.send_str("second-chunk\n")
+            else:
+                await transport.send_bytes(b"second-chunk\n")
+
+    loop = asyncio.get_running_loop()
+    app = ProgressiveRsgiApp()
+    _set_stream_sink(sink)
+    try:
+        if scenario == "live":
+            drive_rsgi_batch(
+                app,
+                [Request.from_parts("GET", "/live", b"", request_id=850)],
+                loop_obj=loop,
+            )
+            await asyncio.wait_for(first_flushed.wait(), timeout=1.0)
+            assert not gate.is_set()
+            assert frames == [
+                (
+                    850,
+                    200,
+                    STREAM_FLAG_STREAMING | STREAM_FLAG_HEADERS_SENT,
+                    [(b"content-type", b"text/event-stream")],
+                    b"first-chunk\n",
+                )
+            ]
+            gate.set()
+            await asyncio.wait_for(terminal_flushed.wait(), timeout=1.0)
+            assert frames == [
+                (
+                    850,
+                    200,
+                    STREAM_FLAG_STREAMING | STREAM_FLAG_HEADERS_SENT,
+                    [(b"content-type", b"text/event-stream")],
+                    b"first-chunk\n",
+                ),
+                (850, 200, STREAM_FLAG_STREAMING, [], b"second-chunk\n"),
+                (850, 200, STREAM_FLAG_STREAMING | STREAM_FLAG_FINAL, [], b""),
+            ]
+        elif scenario == "empty":
+            drive_rsgi_batch(
+                app,
+                [Request.from_parts("GET", "/empty-stream", b"", request_id=851)],
+                loop_obj=loop,
+            )
+            assert frames == [
+                (
+                    851,
+                    200,
+                    STREAM_FLAG_STREAMING | STREAM_FLAG_HEADERS_SENT | STREAM_FLAG_FINAL,
+                    [(b"content-type", b"text/event-stream")],
+                    b"",
+                )
+            ]
+        elif scenario == "crash":
+            drive_rsgi_batch(
+                app,
+                [Request.from_parts("GET", "/crash", b"", request_id=852)],
+                loop_obj=loop,
+            )
+            await asyncio.wait_for(terminal_flushed.wait(), timeout=1.0)
+            assert [f[2] for f in frames] == [
+                STREAM_FLAG_STREAMING | STREAM_FLAG_HEADERS_SENT,
+                STREAM_FLAG_STREAMING | STREAM_FLAG_ERROR,
+            ]
+        elif scenario == "disconnect":
+            proto_disc = RsgiHttpProtocol(body=b"", request_id=853, direct_submit=True)
+            disc_fut = proto_disc.client_disconnect()
+            transport_disc = proto_disc.response_stream(200, [("x-stream", "1")])
+            with pytest.raises(ConnectionResetError):
+                if send_kind == "str":
+                    await transport_disc.send_str("closed")
+                else:
+                    await transport_disc.send_bytes(b"closed")
+            await asyncio.wait_for(disc_fut, timeout=1.0)
+        else:
+            early_done = asyncio.Event()
+
+            class EarlyDisconnectApp:
+                async def __rsgi__(self, _scope: RsgiScope, protocol: RsgiHttpProtocol) -> None:
+                    transport = protocol.response_stream(200, [("content-type", "text/event-stream")])
+                    protocol.notify_disconnect()
+                    await asyncio.sleep(0)
+                    try:
+                        if send_kind == "str":
+                            await transport.send_str("first-chunk\n")
+                        else:
+                            await transport.send_bytes(b"first-chunk\n")
+                    finally:
+                        early_done.set()
+
+            drive_rsgi_batch(
+                EarlyDisconnectApp(),
+                [Request.from_parts("GET", "/disc-early", b"", request_id=854)],
+                loop_obj=loop,
+            )
+            await asyncio.wait_for(early_done.wait(), timeout=1.0)
+            await asyncio.sleep(0)
+            assert frames == []
+    finally:
+        _set_stream_sink(None)

@@ -133,13 +133,22 @@ def dev(
     with enter_app_server_lifespan(resolved_app, app_path=resolved_app, native=not asgi) as offload_json:
         if offload_json:
             env["VERTEBRA_OFFLOAD_CONFIG"] = offload_json
-        exit_code = run_supervisor(
-            server_cmd=server_cmd,
-            env=env,
-            drain_timeout_ms=2000,
-            shutdown_timeout_ms=5000,
-            tui=use_tui,
-        )
+        try:
+            exit_code = run_supervisor(
+                server_cmd=server_cmd,
+                env=env,
+                drain_timeout_ms=2000,
+                shutdown_timeout_ms=5000,
+                tui=use_tui,
+            )
+        except SystemExit as e:
+            if frontend_orch is not None:
+                frontend_orch.stop()
+            raise CLIError(
+                str(e),
+                hint="Ensure shared libpython is available or set VERTEBRA_SERVER_BINARY.",
+                exit_code=EXIT_CONFIG_ERROR,
+            ) from e
     if frontend_orch is not None:
         frontend_orch.stop()
     sys.exit(exit_code)

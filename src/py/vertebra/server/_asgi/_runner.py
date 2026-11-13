@@ -3,12 +3,17 @@
 import asyncio
 import contextlib
 import logging
+import math
+import os
 from collections.abc import Awaitable, Buffer, Callable, Iterable, Mapping
 from typing import Any, cast
 
 import msgspec
 
 from vertebra._vertebra import (
+    STREAM_FLAG_FINAL,
+    STREAM_FLAG_STREAMING,
+    STREAM_FLAG_TRAILERS,
     AsgiScope,
     RequestBatch,
     drive_asgi_batch,
@@ -25,6 +30,9 @@ from vertebra._vertebra import (
 from vertebra._vertebra import (
     submit_response as _native_submit_response,
 )
+from vertebra._vertebra import (
+    submit_stream_frame as _native_submit_stream_frame,
+)
 from vertebra.server._asgi._queues import (
     DEFAULT_STREAM_HIGH_WATERMARK,
     DEFAULT_STREAM_LOW_WATERMARK,
@@ -36,9 +44,12 @@ from vertebra.server._asgi._queues import (
     AsgiStreamReceive,
     AsgiStreamSend,
     ChunkCallback,
+    StreamSubmitter,
 )
 from vertebra.server._fastpath import PayloadTooLargeError, attach_framework_fastpath
+from vertebra.server._fastpath_core import get_attached_fastpath
 from vertebra.server._loops import EventLoopPool
+from vertebra.typing import ImproperConfigurationError
 
 __all__ = (
     "FLAG_FINAL",
@@ -50,9 +61,9 @@ __all__ = (
 
 logger = logging.getLogger(__name__)
 
-FLAG_STREAMING: int = 1 << 0
-FLAG_FINAL: int = 1 << 1
-FLAG_TRAILERS: int = 1 << 5
+FLAG_STREAMING: int = STREAM_FLAG_STREAMING
+FLAG_FINAL: int = STREAM_FLAG_FINAL
+FLAG_TRAILERS: int = STREAM_FLAG_TRAILERS
 
 
 class _InlineAsgiRequest(msgspec.Struct, frozen=True, gc=False):
@@ -90,13 +101,28 @@ class AsgiLifespan:
         *,
         loop: asyncio.AbstractEventLoop | None = None,
         state: dict[str, Any] | None = None,
-        timeout: float = 30.0,
+        timeout: float | None = None,
     ) -> None:
         self._app = app
         self._loop = loop
         self._owns_loop = False
         self._state: dict[str, Any] = dict(state) if state is not None else {}
-        self._timeout = timeout
+        if timeout is None:
+            raw_timeout = os.environ.get("VERTEBRA_LIFESPAN_TIMEOUT", "").strip()
+            if not raw_timeout:
+                self._timeout = 30.0
+            else:
+                try:
+                    parsed = float(raw_timeout)
+                except ValueError as exc:
+                    msg = f"VERTEBRA_LIFESPAN_TIMEOUT must be a positive finite number of seconds, got {raw_timeout!r}"
+                    raise ImproperConfigurationError(msg) from exc
+                if not math.isfinite(parsed) or parsed <= 0.0:
+                    msg = f"VERTEBRA_LIFESPAN_TIMEOUT must be a positive finite number of seconds, got {raw_timeout!r}"
+                    raise ImproperConfigurationError(msg)
+                self._timeout = parsed
+        else:
+            self._timeout = timeout
         self._supported = False
         self._received_startup = False
         self._startup_error: BaseException | None = None
@@ -127,7 +153,14 @@ class AsgiLifespan:
 
         await self._receive_queue.put({"type": "lifespan.startup"})
         self._task = loop.create_task(self._run_app())
-        await asyncio.wait_for(self._startup_complete.wait(), timeout=self._timeout)
+        try:
+            await asyncio.wait_for(self._startup_complete.wait(), timeout=self._timeout)
+        except BaseException:
+            if self._task is not None and not self._task.done():
+                self._task.cancel()
+                with contextlib.suppress(BaseException):
+                    await self._task
+            raise
         if self._startup_error is not None:
             if self._task is not None and not self._task.done():
                 self._task.cancel()
@@ -168,7 +201,7 @@ class AsgiLifespan:
         loop = self._ensure_loop()
         if loop.is_running():
             fut = asyncio.run_coroutine_threadsafe(self.startup(), loop)
-            return fut.result(timeout=self._timeout)
+            return fut.result(timeout=self._timeout + 1.0)
         return loop.run_until_complete(self.startup())
 
     def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
@@ -196,12 +229,12 @@ class AsgiLifespan:
         return self._loop
 
     async def _run_app(self) -> None:
-        assert self._receive_queue is not None
-        assert self._startup_complete is not None
-        assert self._shutdown_complete is not None
         receive_queue = self._receive_queue
         startup_complete = self._startup_complete
         shutdown_complete = self._shutdown_complete
+        if receive_queue is None or startup_complete is None or shutdown_complete is None:
+            msg = "AsgiLifespan queues are not initialized"
+            raise RuntimeError(msg)
 
         scope: dict[str, Any] = {
             "type": "lifespan",
@@ -345,38 +378,13 @@ class AsgiRunner:
         send = AsgiSend(request_id=request_id, on_chunk=self._on_chunk)
 
         try:
-            if self._fastpath is not None and self._on_chunk is None:
-                raw_req_body = body if isinstance(body, bytes) else bytes(body)
-                direct = await self._fastpath.dispatch(scope, receive, send, body=raw_req_body)
-                if direct is not None:
-                    status_code, encoded_headers, raw_body = direct
-                    decoded_headers = [(k.decode("latin-1"), v.decode("latin-1")) for k, v in encoded_headers]
-                    zc_buf = raw_body if isinstance(raw_body, memoryview) else None
-                    return AsgiResponse(
-                        status=status_code,
-                        headers=decoded_headers,
-                        body=raw_body,
-                        request_id=request_id,
-                        zero_copy_buffer=zc_buf,
-                        raw_headers=encoded_headers,
-                    )
-                if send.started:
-                    resp = send.response
-                    if resp.trailers:
-                        self._emit_trailers(resp, request_id)
-                    return resp
-
-            await self._app(scope, receive, send)
+            resp = await self._drive_asgi_once(scope, body, receive, send, request_id)
+            if resp is None:
+                msg = "Unary ASGI execution returned no response"
+                raise RuntimeError(msg)
+            return resp
         except PayloadTooLargeError:
-            if not send.started:
-                return AsgiResponse(
-                    status=413,
-                    headers=[("content-type", "text/plain; charset=utf-8"), ("content-length", "17")],
-                    body=b"Payload Too Large",
-                    request_id=request_id,
-                    raw_headers=[(b"content-type", b"text/plain; charset=utf-8"), (b"content-length", b"17")],
-                )
-            return send.response
+            return self._payload_too_large_response(send, request_id)
         except Exception:
             logger.exception("Unhandled exception in ASGI application for %s", getattr(request, "path", "/"))
             if not send.started:
@@ -392,11 +400,6 @@ class AsgiRunner:
                 body=b"",
                 request_id=request_id,
             )
-
-        resp = send.response
-        if resp.trailers:
-            self._emit_trailers(resp, request_id)
-        return resp
 
     async def handle_path(
         self,
@@ -627,14 +630,9 @@ class AsgiRunner:
                 if callable(ensure_fn):
                     ensure_fn(candidate_app)
 
-        direct = getattr(app, "__vertebra_fastpath__", None)
-        if direct is not None and callable(getattr(direct, "dispatch", None)):
-            return direct
-        state = getattr(app, "state", None)
-        if state is not None and hasattr(state, "get"):
-            candidate = state.get("vertebra_fastpath_bypass")
-            if candidate is not None and callable(getattr(candidate, "dispatch", None)):
-                return candidate
+        candidate = get_attached_fastpath(app)
+        if candidate is not None and callable(getattr(candidate, "dispatch", None)):
+            return candidate
         return None
 
     @staticmethod
@@ -672,18 +670,139 @@ class AsgiRunner:
             self._loop = self._owned_pool.primary_loop
         return self._loop
 
-    async def _execute_and_submit(self, request: Any, request_id: int) -> None:
-        try:
-            resp = await self.run_single(request)
-            native_resp = self._to_native_response(resp, request_id)
-            _native_submit_response(native_resp)
-        except Exception:
-            logger.exception("Unhandled error in spawned ASGI task (request_id=%d)", request_id)
+    async def _execute_and_submit(
+        self,
+        request: Any,
+        request_id: int,
+        *,
+        stream_submitter: StreamSubmitter | None = None,
+        unary_submitter: Callable[[_NativeResponse], None] | None = None,
+    ) -> None:
+        active_stream = _native_submit_stream_frame if stream_submitter is None else stream_submitter
+        active_unary = _native_submit_response if unary_submitter is None else unary_submitter
+        req_id = int(getattr(request, "request_id", 0)) or request_id
+        scope = self._build_scope(request)
+        body = self._extract_body(request)
+        disconnect_event = asyncio.Event()
+        receive = AsgiReceive(body=body, disconnect_event=disconnect_event)
+
+        def _forward_stream(
+            rid: int,
+            status: int,
+            flags: int,
+            headers: list[tuple[bytes, bytes]],
+            chunk: bytes,
+        ) -> None:
             try:
-                err_resp = _NativeResponse(500, b"Internal Server Error", None, request_id)
-                _native_submit_response(err_resp)
-            except Exception:
-                logger.exception("Failed to submit error response for request_id=%d", request_id)
+                active_stream(rid, status, flags, headers, chunk)
+            except ConnectionResetError:
+                disconnect_event.set()
+                raise
+
+        send = AsgiSend(
+            request_id=req_id,
+            on_chunk=self._on_chunk,
+            stream_submitter=_forward_stream,
+        )
+        try:
+            resp_or_none = await self._drive_asgi_once(scope, body, receive, send, req_id, allow_stream=True)
+        except ConnectionResetError:
+            disconnect_event.set()
+            return
+        except asyncio.CancelledError:
+            if send.streamed:
+                send.finish_stream(error=True)
+            raise
+        except PayloadTooLargeError:
+            if send.streamed:
+                send.finish_stream(error=True)
+                return
+            active_unary(self._to_native_response(self._payload_too_large_response(send, req_id), req_id))
+            return
+        except Exception:
+            logger.exception("Unhandled error in spawned ASGI task (request_id=%d)", req_id)
+            if send.streamed:
+                send.finish_stream(error=True)
+                return
+            self._submit_fallback_500(active_unary, req_id)
+            return
+
+        if resp_or_none is None:
+            return
+        try:
+            active_unary(self._to_native_response(resp_or_none, req_id))
+        except Exception:
+            logger.exception("Unhandled error finalizing spawned ASGI response (request_id=%d)", req_id)
+            self._submit_fallback_500(active_unary, req_id)
+
+    async def _drive_asgi_once(
+        self,
+        scope: Any,
+        body: Any,
+        receive: AsgiReceive,
+        send: AsgiSend,
+        request_id: int,
+        *,
+        allow_stream: bool = False,
+    ) -> AsgiResponse | None:
+        if self._fastpath is not None and self._on_chunk is None:
+            raw_req_body = body if isinstance(body, bytes) else bytes(body)
+            direct = await self._fastpath.dispatch(scope, receive, send, body=raw_req_body)
+            if direct is not None:
+                status_code, encoded_headers, raw_body = direct
+                decoded_headers = [(k.decode("latin-1"), v.decode("latin-1")) for k, v in encoded_headers]
+                zc_buf = raw_body if isinstance(raw_body, memoryview) else None
+                return AsgiResponse(
+                    status=status_code,
+                    headers=decoded_headers,
+                    body=raw_body,
+                    request_id=request_id,
+                    zero_copy_buffer=zc_buf,
+                    raw_headers=encoded_headers,
+                )
+            if allow_stream and send.streamed:
+                send.finish_stream()
+                return None
+            if send.started:
+                resp = send.response
+                if resp.trailers:
+                    self._emit_trailers(resp, request_id)
+                return resp
+
+        await self._app(scope, receive, send)
+        if allow_stream and send.streamed:
+            send.finish_stream()
+            return None
+        resp = send.response
+        if resp.trailers:
+            self._emit_trailers(resp, request_id)
+        return resp
+
+    @staticmethod
+    def _payload_too_large_response(send: AsgiSend, request_id: int) -> AsgiResponse:
+        if not send.started:
+            return AsgiResponse(
+                status=413,
+                headers=[("content-type", "text/plain; charset=utf-8"), ("content-length", "17")],
+                body=b"Payload Too Large",
+                request_id=request_id,
+                raw_headers=[(b"content-type", b"text/plain; charset=utf-8"), (b"content-length", b"17")],
+            )
+        return send.response
+
+    @staticmethod
+    def _submit_fallback_500(active_unary: Callable[[_NativeResponse], None], request_id: int) -> None:
+        try:
+            active_unary(
+                _NativeResponse(
+                    500,
+                    b"Internal Server Error",
+                    [("content-type", "text/plain")],
+                    request_id,
+                )
+            )
+        except Exception:
+            logger.exception("Failed to submit error response for request_id=%d", request_id)
 
     def _to_native_response(self, resp: AsgiResponse, request_id: int) -> _NativeResponse:
         """Convert an ``AsgiResponse`` to a Rust ``Response`` without extra body copies."""

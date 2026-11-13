@@ -18,6 +18,7 @@ from vertebra.extensions.litestar.channels import (
 )
 from vertebra.extensions.litestar.config import VertebraConfig
 from vertebra.extensions.litestar.fastpath import (
+    CompiledRoute,
     FastPath,
     ScopeState,
     _is_empty_sentinel,
@@ -33,10 +34,12 @@ from vertebra.extensions.litestar.store import (
 )
 from vertebra.server._fastpath import attach_framework_fastpath, wrap_asgi_fastpath
 from vertebra.server._fastpath_core import (
+    CompiledRouteBase,
     DirectPlan,
     FastPathProvider,
     QueryParamSpec,
     coerce_path_param,
+    get_attached_fastpath,
     get_fastpath_providers,
     parse_bool_query,
     register_fastpath_provider,
@@ -1247,7 +1250,7 @@ async def test_fastpath_core_provider_registry_and_shared_primitives() -> None:
 
     ls_app = Litestar(route_handlers=[core_check])
     wrapped_ls = attach_framework_fastpath(ls_app)
-    ls_fp = getattr(ls_app, "__vertebra_fastpath__", None)
+    ls_fp = get_attached_fastpath(ls_app)
     assert isinstance(ls_fp, FastPath)
     assert not hasattr(ls_app, "_vertebra_fastpath")
     assert not hasattr(wrapped_ls, "_vertebra_fastpath")
@@ -1275,3 +1278,8 @@ async def test_fastpath_core_provider_registry_and_shared_primitives() -> None:
 
     assert step_coro_sync(_immediate_coro()) == (True, "done")
     assert step_coro_sync(_suspended_coro()) == (False, None)
+
+
+def test_litestar_compiled_route_inherits_compiled_route_base() -> None:
+    """Litestar CompiledRoute inherits CompiledRouteBase."""
+    assert issubclass(CompiledRoute, CompiledRouteBase)

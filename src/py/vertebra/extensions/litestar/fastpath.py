@@ -33,8 +33,10 @@ from vertebra.server._fastpath import (
 )
 from vertebra.server._fastpath_core import (
     UNSET_DEFAULT,
+    CompiledRouteBase,
     DirectPlan,
     QueryParamSpec,
+    has_custom_exception_handlers,
     resolve_scalar_query_converter,
     serialize_litestar_http_exception,
 )
@@ -52,10 +54,9 @@ __all__ = (
 )
 
 
-class CompiledRoute(msgspec.Struct, frozen=True, gc=False, kw_only=True):
+class CompiledRoute(CompiledRouteBase, frozen=True, gc=False, kw_only=True):
     """Pre-compiled per-route dispatch metadata for zero-overhead Litestar v2/v3 handler invocation."""
 
-    handler_id: int
     method: str
     path_template: str
     route: Any
@@ -441,16 +442,6 @@ def _has_lifecycle_hook(handler: Any, app: Any, attr_name: str, resolve_name: st
     return False
 
 
-def _has_custom_exception_handlers(exc_map: Any) -> bool:
-    if _is_empty_sentinel(exc_map) or not isinstance(exc_map, dict) or not exc_map:
-        return False
-    for handler_fn in exc_map.values():
-        module_name = str(getattr(handler_fn, "__module__", "") or "")
-        if not module_name.startswith("litestar."):
-            return True
-    return False
-
-
 def _resolve_max_body_size(handler: Any, app: Any) -> int | None:
     raw = getattr(handler, "request_max_body_size", None)
     if not _is_empty_sentinel(raw) and isinstance(raw, int):
@@ -498,7 +489,7 @@ def _compile_routes_from_table(
         app_has_middleware or app_has_csrf or app_has_allowed_hosts or app_has_py_compression or app_has_py_cors
     )
     app_exc_handlers = getattr(app, "exception_handlers", None) if app is not None else None
-    has_app_custom_exc = _has_custom_exception_handlers(app_exc_handlers)
+    has_app_custom_exc = has_custom_exception_handlers(app_exc_handlers, ("litestar.",))
 
     compiled: dict[int, CompiledRoute] = {}
 
@@ -522,7 +513,7 @@ def _compile_routes_from_table(
         request_class = _get_handler_request_class(handler, app)
         after_response = _get_handler_after_response(handler)
         exception_handlers = _get_handler_exception_handlers(handler)
-        has_custom_exc = has_app_custom_exc or _has_custom_exception_handlers(exception_handlers)
+        has_custom_exc = has_app_custom_exc or has_custom_exception_handlers(exception_handlers, ("litestar.",))
         has_cache = bool(getattr(handler, "cache", False))
         handler_owns_get_response = callable(getattr(handler, "_get_response_for_request", None))
         max_body_size = _resolve_max_body_size(handler, app)

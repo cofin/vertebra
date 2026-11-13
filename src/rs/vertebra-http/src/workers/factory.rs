@@ -33,6 +33,7 @@ pub struct WorkerLifecycle {
     pub last_spawn: Option<std::time::Instant>,
     pub worker_id: usize,
     pub last_pid: u32,
+    pub last_exit_code: Option<i32>,
     pub app_path: String,
     pub python_bin: String,
     #[cfg(unix)]
@@ -70,6 +71,7 @@ impl WorkerLifecycle {
             last_spawn: Some(std::time::Instant::now()),
             worker_id,
             last_pid,
+            last_exit_code: None,
             app_path,
             python_bin,
             #[cfg(unix)]
@@ -105,12 +107,14 @@ impl WorkerLifecycle {
     pub fn check_alive(&mut self) -> bool {
         if let Some(ref mut child) = self.child {
             match child.try_wait() {
-                Ok(Some(_status)) => {
+                Ok(Some(status)) => {
+                    self.last_exit_code = status.code();
                     self.state = WorkerHealth::Dead;
                     false
                 }
                 Ok(None) => true,
                 Err(_) => {
+                    self.last_exit_code = None;
                     self.state = WorkerHealth::Dead;
                     false
                 }
@@ -118,6 +122,11 @@ impl WorkerLifecycle {
         } else {
             false
         }
+    }
+
+    /// Return the OS exit code observed for the last exited child process, if any.
+    pub fn last_exit_code(&self) -> Option<i32> {
+        self.last_exit_code
     }
 
     /// Check if the worker is alive, and if it exited, reclaim its broker leases.
@@ -225,6 +234,7 @@ impl WorkerLifecycle {
         }
 
         self.last_pid = child.id();
+        self.last_exit_code = None;
         self.child = Some(child);
         self.state = WorkerHealth::Running;
         self.last_spawn = Some(std::time::Instant::now());

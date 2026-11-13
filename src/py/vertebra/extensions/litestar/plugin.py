@@ -32,6 +32,7 @@ from vertebra.extensions.litestar.offload import (
 )
 from vertebra.extensions.litestar.router import extract_routes
 from vertebra.extensions.litestar.store import swap_response_cache_store
+from vertebra.server._fastpath_core import FASTPATH_ATTR, get_attached_fastpath, set_attached_fastpath
 from vertebra.supervisor._supervisor import build_server_command, run_supervisor
 from vertebra.typing import MissingDependencyError
 from vertebra.utils.module_loader import import_optional
@@ -148,7 +149,7 @@ class VertebraPlugin:
                 self._router_table = extract_routes(app_config)
             except (AttributeError, TypeError, ValueError, KeyError):
                 self._router_table = None
-            app_config.state["vertebra_fastpath_bypass"] = FastPath(self._router_table)
+            app_config.state[FASTPATH_ATTR] = FastPath(self._router_table)
 
         self._offload_plan = offload_middlewares(
             app_config,
@@ -218,10 +219,9 @@ class VertebraPlugin:
                 self._router_table = None
 
             bypass: FastPath | None = None
-            if state is not None and hasattr(state, "get"):
-                existing = state.get("vertebra_fastpath_bypass")
-                if isinstance(existing, FastPath):
-                    bypass = existing
+            existing = get_attached_fastpath(app)
+            if isinstance(existing, FastPath):
+                bypass = existing
 
             if bypass is None:
                 bypass = FastPath(
@@ -229,9 +229,6 @@ class VertebraPlugin:
                     app=app,
                     compiled_routes=self._compiled_routes or None,
                 )
-                if state is not None:
-                    with contextlib.suppress(TypeError, AttributeError):
-                        state["vertebra_fastpath_bypass"] = bypass
             else:
                 bypass.bind_app(
                     app,
@@ -239,13 +236,8 @@ class VertebraPlugin:
                     compiled_routes=self._compiled_routes or None,
                 )
 
-            try:
-                app.__vertebra_fastpath__ = bypass
-            except (AttributeError, TypeError):
-                with contextlib.suppress(AttributeError, TypeError):
-                    type(app).__vertebra_fastpath__ = property(
-                        lambda self: getattr(self, "state", {}).get("vertebra_fastpath_bypass")
-                    )
+            with contextlib.suppress(TypeError):
+                set_attached_fastpath(app, bypass)
 
 
 @contextlib.contextmanager

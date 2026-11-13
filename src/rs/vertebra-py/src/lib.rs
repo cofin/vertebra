@@ -67,6 +67,14 @@ pub fn pymodule_init(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add("FREE_THREADED", FREE_THREADED)?;
     m.add("GIL_USED", false)?;
+    m.add("STREAM_FLAG_STREAMING", vertebra_core::ipc::FLAG_STREAMING)?;
+    m.add("STREAM_FLAG_FINAL", vertebra_core::ipc::FLAG_FINAL)?;
+    m.add("STREAM_FLAG_ERROR", vertebra_core::ipc::FLAG_ERROR)?;
+    m.add(
+        "STREAM_FLAG_HEADERS_SENT",
+        vertebra_core::ipc::FLAG_HEADERS_SENT,
+    )?;
+    m.add("STREAM_FLAG_TRAILERS", vertebra_core::ipc::FLAG_TRAILERS)?;
 
     m.add_class::<request::Request>()?;
     m.add_class::<headers::Headers>()?;
@@ -109,6 +117,9 @@ pub fn pymodule_init(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(transport::submit_raw_response, m)?)?;
     m.add_function(wrap_pyfunction!(transport::submit_response_raw, m)?)?;
     m.add_function(wrap_pyfunction!(transport::submit_batch_raw, m)?)?;
+    m.add_function(wrap_pyfunction!(transport::max_stream_frame_payload, m)?)?;
+    m.add_function(wrap_pyfunction!(transport::submit_stream_frame, m)?)?;
+    m.add_function(wrap_pyfunction!(transport::set_stream_sink_py, m)?)?;
 
     // SHM async helpers
     m.add_function(wrap_pyfunction!(transport::get_request_notify_fd, m)?)?;

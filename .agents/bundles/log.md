@@ -1,5 +1,54 @@
 # Bundle Activity Log
 
+## [2026-11-13T16:02:30Z] archive | server-runtime-correctness
+
+- Archived `server-runtime-correctness` (`7` chapters, `26` tasks, `47143761..06ef86e9`) after verifying full mypy (`436` files), pure-Python doc postbuild/verifier lazy imports (`serializers/__init__.py`), and present-tense OKF knowledge chapters (`pyo3-ffi-and-batch-dispatch.md`, `asgi-and-wsgi-runners.md`, `tiered-rings-and-batch-bridge.md`, `worker-and-protocols.md`, `server-runtime-limitations.md`, `server-and-dispatch.md`, `product.md`).
+
+## [2026-11-13T15:15:00Z] finish | server-runtime-correctness
+
+- Completed `server-runtime-correctness` (`state: completed`) at `92b84a09` across all `7` chapters (`26/26` tasks) on `feat/server-runtime-correctness`, delivering progressive Python/ASGI/RSGI/native response streaming ([#81](https://github.com/cofin/vertebra/issues/81)), fail-loud `WorkerStartupError` lifespan and `__rsgi_init__` startup with SHM exit `78` ([#84](https://github.com/cofin/vertebra/issues/84)), public `vertebra.supervisor` exports ([#83](https://github.com/cofin/vertebra/issues/83)), co-located and `--worker-only` `QueueService` lanes ([#85](https://github.com/cofin/vertebra/issues/85)), relocatable wheel-bundled `vertebra-server` binaries and `core-wheel-check` ([#82](https://github.com/cofin/vertebra/issues/82)), opt-in `StandaloneBuilder` `.agents/skills` staging ([#115](https://github.com/cofin/vertebra/issues/115)), shared `CompiledRouteBase` / `__vertebra_fastpath__` consolidation, and fork-safe `getrandom` UUID entropy.
+- Synchronized runtime, worker, IPC, and product OKF chapters in present tense.
+
+## [2026-11-13T06:14:45Z] chapter-complete | server-runtime-correctness ch07-docs-and-okf-sync
+
+- Closed `ch07-docs-and-okf-sync` at `d9475b72` (sync `8727830e`): regenerated `docs/reference/cli.md`, synchronized server/CLI/packaging usage and reference guides, compacted `pyo3-ffi-and-batch-dispatch.md` (`174L`), synced `tiered-rings-and-batch-bridge.md` (`132L`), `asgi-and-wsgi-runners.md` (`142L`), `worker-and-protocols.md` (`137L`), `server-runtime-limitations.md` (`69L`), and `product.md` (`191L`), and switched `cli/__init__.py` and `server/lanes.py` to `ensure_module` (`make docs`, `make review-check`, and `36` unit tests clean).
+- Completed all `7` chapters (`26/26` tasks) of `server-runtime-correctness`.
+
+## [2026-11-13T06:02:45Z] chapter-complete | server-runtime-correctness ch06-runtime-native-cleanup
+
+- Closed `ch06-runtime-native-cleanup` at `db02a0b6` (sync `7e78e3f6`): enforced fail-loud `getrandom::fill` panic and Unix `pthread_atfork` `FORK_GENERATION` reseed in `vertebra-core/src/id.rs`, removed duplicate `_module_cache` from `module_loader.py`/`_typing.py`/`typing.py`, bound `_zero_copy.py` helpers directly to `vertebra._vertebra`, and dropped inert `max_commit_delay_ms` from sync/async Spanner `batch_write` (`4` `id::` Rust tests, `clippy`, `ruff`, `mypy`, and `92` unit tests clean).
+- Advanced active frontier to `ch07-docs-and-okf-sync` (`server-runtime-correctness:ch07:t01`; `4` tasks remain).
+
+## [2026-11-13T05:51:45Z] chapter-complete | server-runtime-correctness ch05-fastpath-consolidation
+
+- Closed `ch05-fastpath-consolidation` at `780338a4` (sync `d95d65d3`): extracted `FASTPATH_ATTR = "__vertebra_fastpath__"`, `CompiledRouteBase`, `get_attached_fastpath`/`set_attached_fastpath`, and `has_custom_exception_handlers` in `_fastpath_core.py`, removed alias probes across `_fastpath.py`/`_runner.py` and extension plugins, unified all five framework `CompiledRoute` structs, and enforced exact `BUFFERED_RESPONSE_TYPES` copy-free response serialization (`ruff`, `mypy` across `105` files, and `228` tests clean).
+- Advanced active frontier to `ch06-runtime-native-cleanup` (`server-runtime-correctness:ch06:t01`; `7` tasks remain across `ch06`–`ch07`).
+
+## [2026-11-13T05:21:00Z] chapter-complete | server-runtime-correctness ch04-wheel-smoke-and-ci
+
+- Closed `ch04-wheel-smoke-and-ci` at `11731ca5` (sync `ca20d6ae`): added `VtbRunSmoke` multi-wheel smoke harness in `tools/scripts/smoke_vtb_run.py`, wired `make core-wheel-check` and the `core-wheel-smoke` PR CI job, scoped core wheel `cibuildwheel` build/repair hooks and 4-OS `test_wheels` matrix in `release.yaml`, and added `linux-arm64` to `release-binaries.yml` (`ruff`, `mypy`, `make -n core-wheel-check`, and `66` packaging tests clean).
+- Advanced active frontier to `ch05-fastpath-consolidation` (`server-runtime-correctness:ch05:t01`; `11` tasks remain across `ch05`–`ch07`).
+
+## [2026-11-13T05:08:50Z] chapter-complete | server-runtime-correctness ch03-relocatable-server-binary-and-packaging
+
+- Closed `ch03-relocatable-server-binary-and-packaging` at `7a5cbc61` (sync `0e03d7a1`): dropped build-host rpaths in `vertebra-http/build.rs`, implemented `ServerBinaryTarget` + `ServerBinaryBuilder` and wheel repair exclusions in `build_server_binary.py`, wired `EmbeddedPythonRuntime` shared-libpython detection into `_supervisor.py` and CLI runners, included `src/py/vertebra/bin/*` in core wheels, and added opt-in `.agents/skills` staging (`VERTEBRA_APP_ROOT`) to `StandaloneBuilder` and `vtb build` (`cargo clippy`/`build`, `readelf` 0 rpath, `ruff`, `mypy`, and `121` tests clean).
+- Advanced active frontier to `ch04-wheel-smoke-and-ci` (`server-runtime-correctness:ch04:t01`; `14` tasks remain across `ch04`–`ch07`).
+
+## [2026-11-13T04:57:32Z] chapter-complete | server-runtime-correctness ch02-lifespan-supervisor-and-worker-lanes
+
+- Closed `ch02-lifespan-supervisor-and-worker-lanes` at `d2da8fa0` (sync `f32c3234`): added `WorkerStartupError` + SHM exit code `78` supervisor halt, lazy `vertebra.supervisor` exports, `WorkerRunner.resolve_queue_service`, `vtb workers run` signal lifetime, and `vtb run --worker-only` `HealthProbeServer` (`14` Rust `workers` tests, `183` Python unit/integration tests, `clippy`, `ruff`, and `mypy` clean).
+- Advanced active frontier to `ch03-relocatable-server-binary-and-packaging` (`server-runtime-correctness:ch03:t01`; `18` tasks remain across `ch03`–`ch07`).
+
+## [2026-11-13T03:42:00Z] chapter-complete | Server runtime progressive streaming (`server-runtime-correctness/ch01`)
+
+- Closed `ch01-python-stream-submission-and-flush` at `c9e7b370` (`cargo test -p vertebra-py --lib` 14 passed, `cargo clippy -p vertebra-core -p vertebra-py` clean, `mypy.stubtest vertebra._vertebra` clean, `ruff` + `mypy` clean, and `132 passed` across unit and live embedded/SHM `vertebra-server` streaming suites including `StreamingStorageResponse`, `ArrowCursor`, and inline `drive_until_complete` async streams).
+- Advanced `server-runtime-correctness` to `ch02-lifespan-supervisor-and-worker-lanes` (`server-runtime-correctness:ch02:t01`; `4/26` tasks complete, `22` tasks remaining across `ch02`–`ch07`).
+
+## [2026-11-13T02:38:00Z] chapter-checkpoint | Server runtime progressive streaming (`server-runtime-correctness/ch01`)
+
+- Completed `t01`–`t04` in `ch01-python-stream-submission-and-flush` at `6a23bd18` (`cargo test -p vertebra-py --lib` 13 passed, `mypy.stubtest vertebra._vertebra` clean, `ruff` + `mypy` clean, `120 passed` across unit and live embedded/SHM `vertebra-server` streaming suites).
+- Synchronized `server-runtime-limitations.md` and `server-runtime-correctness` specs in present tense (`4/26` tasks completed; `22` tasks remain across `ch02`–`ch07`) ahead of zero-context chapter review.
+
 ## [2026-11-13T00:42:00Z] flow-setup + flow-plan | Cross-harness alignment, merged-chapter contraction, and full 16-flow compact plan
 
 - Aligned multi-harness Flow configuration at `main @ 18baadcd`: updated `.agents/setup-state.json` (`stop_gate: "enforce"`, `ignore_policy: "shared"`, `sha_tracking: "strict"`), `AGENTS.md` (`<= 100L`), `.codex/agents/*.toml` (`16` paired reviewer/specialist wrappers), `.agents/skills/**` + `.agents/agents/*.md` (`13` Rust crates / `10` PyO3 extensions, removing `view_file` tool-alias collision), and trimmed `product/tech-stack.md` + `query-pipeline-cdc-and-tenancy.md` (`<= 200L`) while re-anchoring all post-squash `18baadcd` commit references.

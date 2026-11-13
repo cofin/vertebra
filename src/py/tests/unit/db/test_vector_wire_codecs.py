@@ -7,6 +7,7 @@ import struct
 
 import pytest
 
+from vertebra import _vertebra as native_vtb
 from vertebra._vertebra import (
     ArrowCursor,
     VectorBatchView,
@@ -26,6 +27,7 @@ from vertebra._vertebra import (
 )
 from vertebra.db.arrow import read_arrow_shm
 from vertebra.extensions.sqlalchemy.types import Vector
+from vertebra.utils.serializers import _zero_copy
 
 
 def test_pgvector_f32_f16_and_bit_wire_roundtrip() -> None:
@@ -154,3 +156,24 @@ def test_gemini_grpc_proto_frame_roundtrip_and_malformed_varint_rejection() -> N
     overflow_varint = bytes([0xFF] * 9 + [0x02])
     with pytest.raises(ValueError, match="overflow"):
         decode_gemini_embed_grpc_frame_to_batch(overflow_varint)
+
+
+def test_zero_copy_binds_native_helpers_directly_without_python_fallbacks() -> None:
+    """Verify _zero_copy binds its vectorcall and gRPC LPM helpers directly from vertebra._vertebra."""
+    for helper_name in (
+        "hydrate_one_vectorcall",
+        "hydrate_rows_vectorcall",
+        "instantiate_struct_vectorcall",
+        "orm_to_struct_vectorcall",
+        "pack_grpc_lpm_frame",
+    ):
+        assert getattr(_zero_copy, helper_name) is getattr(native_vtb, helper_name)
+
+    for fallback_name in (
+        "_py_hydrate_one_vectorcall",
+        "_py_hydrate_rows_vectorcall",
+        "_py_instantiate_struct_vectorcall",
+        "_py_orm_to_struct_vectorcall",
+        "_py_pack_grpc_lpm_frame",
+    ):
+        assert not hasattr(_zero_copy, fallback_name)

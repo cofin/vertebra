@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import contextlib
+import inspect
 import re
 import sqlite3
 import threading
 import time as _time
 from collections.abc import Callable, Mapping, Sequence
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -1172,3 +1173,20 @@ async def test_spanner_staging_rejects_missing_or_ephemeral_memory_store(
                 sync_driver.load_from_object_store("metrics", None, bad_uri)
         finally:
             sync_driver.close()
+
+
+@pytest.mark.anyio
+async def test_spanner_batch_write_rejects_max_commit_delay_ms() -> None:
+    """Sync and async Spanner driver batch_write methods no longer accept max_commit_delay_ms."""
+    sync_driver = SyncSpannerDriver(SpannerConfig(), client=FakeSpannerClient())
+    async_driver = AsyncSpannerDriver(SpannerConfig(), client=FakeAsyncSpannerClient(FakeSpannerClient()))
+    try:
+        assert "max_commit_delay_ms" not in inspect.signature(sync_driver.batch_write).parameters
+        assert "max_commit_delay_ms" not in inspect.signature(async_driver.batch_write).parameters
+        with pytest.raises(TypeError, match="max_commit_delay_ms"):
+            cast("Any", sync_driver).batch_write([], max_commit_delay_ms=10)
+        with pytest.raises(TypeError, match="max_commit_delay_ms"):
+            await cast("Any", async_driver).batch_write([], max_commit_delay_ms=10)
+    finally:
+        sync_driver.close()
+        await async_driver.close()

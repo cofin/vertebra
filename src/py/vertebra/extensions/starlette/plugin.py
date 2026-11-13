@@ -17,6 +17,7 @@ from vertebra.extensions.starlette.offload import (
     offload_middlewares,
 )
 from vertebra.extensions.starlette.router import RouterTable, extract_routes
+from vertebra.server._fastpath_core import set_attached_fastpath
 from vertebra.utils.module_loader import import_optional
 from vertebra.utils.serializers import encode_json_bytes
 
@@ -114,9 +115,8 @@ class VertebraPlugin:
                 app=app,
                 compiled_routes=self._compiled_routes or None,
             )
-            _set_state_item(state, "vertebra_fastpath_bypass", bypass)
-            with contextlib.suppress(AttributeError, TypeError):
-                app.__vertebra_fastpath__ = bypass
+            with contextlib.suppress(TypeError):
+                set_attached_fastpath(app, bypass)
 
     @contextlib.contextmanager
     def server_lifespan(self, app: Any) -> Iterator[None]:

@@ -15,8 +15,11 @@ from vertebra.cli.run import run
 from vertebra.cli.workers import workers
 from vertebra.framework.queues import (
     LaneConfig,
+    QueueService,
     WorkerRunner,
 )
+from vertebra.server.lanes import QUEUE_SERVICE_STATE_KEY
+from vertebra.typing import ImproperConfigurationError
 
 
 def _load_litestar_worker_test_primitives() -> tuple[Any, Callable[..., Callable[[Callable[..., Any]], Any]]]:
@@ -157,6 +160,8 @@ def test_vtb_workers_run_and_vtb_run_oneshot_cli(monkeypatch: pytest.MonkeyPatch
         drain_timeout_s: float,
         oneshot_job: str | None = None,
         payload: Any = None,
+        run_until_stopped: bool = False,
+        health_probe: tuple[str, int] | None = None,
     ) -> int:
         recorded["app_path"] = app_path
         recorded["queues"] = queues
@@ -164,6 +169,8 @@ def test_vtb_workers_run_and_vtb_run_oneshot_cli(monkeypatch: pytest.MonkeyPatch
         recorded["drain_timeout_s"] = drain_timeout_s
         recorded["oneshot_job"] = oneshot_job
         recorded["payload"] = payload
+        recorded["run_until_stopped"] = run_until_stopped
+        recorded["health_probe"] = health_probe
         return 0
 
     monkeypatch.setattr("vertebra.cli.workers.execute_worker_cli", fake_execute_worker_cli)
@@ -189,6 +196,8 @@ def test_vtb_workers_run_and_vtb_run_oneshot_cli(monkeypatch: pytest.MonkeyPatch
         "drain_timeout_s": 20.0,
         "oneshot_job": None,
         "payload": None,
+        "run_until_stopped": True,
+        "health_probe": None,
     }
 
     oneshot_recorded: dict[str, str] = {}
@@ -202,3 +211,35 @@ def test_vtb_workers_run_and_vtb_run_oneshot_cli(monkeypatch: pytest.MonkeyPatch
     run_res = cli_runner.invoke(run, ["example.app:app", "--oneshot-job", "sync_catalog", "--no-banner"])
     assert run_res.exit_code == 0
     assert oneshot_recorded == {"app_path": "example.app:app", "job_name": "sync_catalog"}
+
+
+@pytest.mark.parametrize(
+    "target_kind",
+    ["direct", "dict_state", "attr_state"],
+)
+def test_resolve_queue_service_supported_targets(target_kind: str) -> None:
+    """WorkerRunner.resolve_queue_service resolves direct QueueService and dict/attr state keys."""
+    qs = QueueService()
+    if target_kind == "direct":
+        target: Any = qs
+    elif target_kind == "dict_state":
+        target = SimpleNamespace(state={QUEUE_SERVICE_STATE_KEY: qs})
+    else:
+        target = SimpleNamespace(state=SimpleNamespace(**{QUEUE_SERVICE_STATE_KEY: qs}))
+
+    assert WorkerRunner.resolve_queue_service(target) is qs
+
+
+@pytest.mark.parametrize(
+    "bad_target",
+    [
+        SimpleNamespace(state={}),
+        SimpleNamespace(state={QUEUE_SERVICE_STATE_KEY: "not-a-queue-service"}),
+        SimpleNamespace(state=SimpleNamespace()),
+        SimpleNamespace(),
+    ],
+)
+def test_resolve_queue_service_rejects_missing_or_invalid_targets(bad_target: Any) -> None:
+    """WorkerRunner.resolve_queue_service raises ImproperConfigurationError for missing or wrong-typed bindings."""
+    with pytest.raises(ImproperConfigurationError, match="vertebra_queue_service"):
+        WorkerRunner.resolve_queue_service(bad_target)

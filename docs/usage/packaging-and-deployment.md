@@ -10,6 +10,8 @@ Deploy Vertebra applications as standard Python wheels (`vtb run ...`), containe
 vtb build --standalone --onefile
 ```
 
+To stage `.agents/skills` for application repositories inside a standalone or onefile bundle, opt in with `--include-agent-skills` (`AGENTS.md` and `CLAUDE.md` are excluded, and `VERTEBRA_APP_ROOT` is exported at launch).
+
 Programmatic configuration via `BuildConfig`, `BuildTarget`, `StandaloneBuilder`, and `OnefileBuilder`:
 
 ```python
@@ -36,7 +38,7 @@ vtb js generate-types
 
 ## Production Performance & Compiler Optimization
 
-Vertebra official release distribution wheels (`vertebra-core`) are pre-compiled and optimized with LLVM Profile-Guided Optimization (PGO) during release CI automation. Applications deployed via standard wheels or `vtb build` inherit these zero-overhead optimizations automatically without requiring manual compiler passes.
+Vertebra official release distribution wheels (`vertebra-core` across `linux-x86_64`, `linux-aarch64`, and macOS `arm64`/`x86_64`) ship the pre-compiled relocatable `vertebra/bin/vertebra-server` binary optimized with LLVM Profile-Guided Optimization (PGO) using `$ORIGIN`/`@loader_path` relative rpaths. At runtime, `EmbeddedPythonRuntime.require_shared_library` verifies a shared `libpython` installation (`ENABLE_SHARED=1`, such as `uv python install`) unless `VERTEBRA_SERVER_BINARY` overrides the binary path. Wheel packaging and relocatable `vtb run` smoke execution can be verified with `make core-wheel-check`.
 
 ## Container Deployment & Process Supervision
 

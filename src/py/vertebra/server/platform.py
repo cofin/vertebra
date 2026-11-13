@@ -1,7 +1,9 @@
 """Cloud and internal platform runtime adapter, cgroup v2 sizing, z-pages, and lame-duck drain."""
 
 import array
+import asyncio
 import collections.abc
+import contextlib
 import math
 import os
 import socket
@@ -9,7 +11,7 @@ import tempfile
 import time
 from importlib.metadata import entry_points
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Final, Protocol
 
 import msgspec
 
@@ -17,11 +19,20 @@ from vertebra.utils.serializers import encode_json_bytes
 
 __all__ = (
     "CgroupQuota",
+    "HealthProbeServer",
     "LameDuckController",
     "PlatformAdapter",
     "SHMAllocationPolicy",
     "ZPagesRegistry",
 )
+
+_HTTP_REASON_PHRASES: Final[dict[int, str]] = {
+    200: "OK",
+    400: "Bad Request",
+    404: "Not Found",
+    405: "Method Not Allowed",
+    503: "Service Unavailable",
+}
 
 
 class CgroupQuota(msgspec.Struct, frozen=True, gc=False, kw_only=True):
@@ -289,6 +300,122 @@ class ZPagesRegistry:
                 }
             )
         return 404, encode_json_bytes({"error": "not_found"})
+
+
+class HealthProbeServer:
+    """Lightweight asyncio HTTP/1.1 health probe server backed by ``ZPagesRegistry``."""
+
+    __slots__ = ("_bound_port", "_host", "_port", "_server", "_zpages")
+
+    def __init__(
+        self,
+        zpages: ZPagesRegistry,
+        *,
+        host: str = "127.0.0.1",
+        port: int = 8000,
+    ) -> None:
+        self._zpages = zpages
+        self._host = host
+        self._port = port
+        self._bound_port = port
+        self._server: asyncio.Server | None = None
+
+    @property
+    def bound_port(self) -> int:
+        """Return the TCP port the probe server is bound to."""
+        return self._bound_port
+
+    async def start(self) -> None:
+        """Start listening for incoming health probe HTTP connections."""
+        if self._server is not None:
+            return
+        self._server = await asyncio.start_server(
+            self._handle_connection,
+            self._host,
+            self._port,
+        )
+        if self._server.sockets:
+            sockname = self._server.sockets[0].getsockname()
+            if isinstance(sockname, tuple) and len(sockname) >= 2:
+                self._bound_port = int(sockname[1])
+
+    async def stop(self) -> None:
+        """Close the probe server and wait for active connections to finish."""
+        server = self._server
+        if server is None:
+            return
+        self._server = None
+        server.close()
+        await server.wait_closed()
+
+    async def _handle_connection(
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+    ) -> None:
+        try:
+            raw_head = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), timeout=5.0)
+        except (TimeoutError, asyncio.IncompleteReadError, asyncio.LimitOverrunError, OSError):
+            status = 400
+            payload = encode_json_bytes({"error": "bad_request"})
+            await self._write_response(writer, status, payload)
+            return
+
+        request_line = raw_head.split(b"\r\n", 1)[0].decode("latin-1", errors="replace")
+        parts = request_line.split(" ", 2)
+        if len(parts) < 2:
+            await self._write_response(writer, 400, encode_json_bytes({"error": "bad_request"}))
+            return
+
+        method = parts[0].upper()
+        raw_target = parts[1]
+        path = raw_target.split("?", 1)[0]
+
+        if method != "GET":
+            await self._write_response(
+                writer,
+                405,
+                encode_json_bytes({"error": "method_not_allowed"}),
+                extra_headers=(("Allow", "GET"),),
+            )
+            return
+
+        if path in {"/healthz", "/readyz"}:
+            status, payload = self._zpages.handle_zpage("/healthz")
+        elif path in {"/statusz", "/varz"}:
+            status, payload = self._zpages.handle_zpage(path)
+        else:
+            status, payload = 404, encode_json_bytes({"error": "not_found"})
+
+        await self._write_response(writer, status, payload)
+
+    @staticmethod
+    async def _write_response(
+        writer: asyncio.StreamWriter,
+        status: int,
+        payload: bytes,
+        *,
+        extra_headers: tuple[tuple[str, str], ...] = (),
+    ) -> None:
+        reason = _HTTP_REASON_PHRASES.get(status, "OK")
+        header_lines = [
+            f"HTTP/1.1 {status} {reason}",
+            "Content-Type: application/json",
+            f"Content-Length: {len(payload)}",
+            *(f"{name}: {value}" for name, value in extra_headers),
+            "Connection: close",
+            "",
+            "",
+        ]
+        try:
+            writer.write("\r\n".join(header_lines).encode("ascii") + payload)
+            await writer.drain()
+        except OSError:
+            pass
+        finally:
+            writer.close()
+            with contextlib.suppress(OSError):
+                await writer.wait_closed()
 
 
 class PlatformAdapter(Protocol):

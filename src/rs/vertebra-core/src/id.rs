@@ -1,7 +1,6 @@
 //! High-throughput RFC 9562 UUIDv4, monotonic UUIDv7, and URL-safe NanoID generation.
 
 use std::cell::RefCell;
-use std::io::Read;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -11,17 +10,41 @@ const NANOID_ALPHABET: &[u8; 64] =
 const ENTROPY_POOL_BYTES: usize = 256;
 
 static UUID7_STATE: AtomicU64 = AtomicU64::new(0);
+static FORK_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(unix)]
+static FORK_HOOK_REGISTERED: std::sync::Once = std::sync::Once::new();
+
+#[cfg(unix)]
+extern "C" fn on_child_fork() {
+    FORK_GENERATION.fetch_add(1, Ordering::Relaxed);
+}
+
+#[cfg(unix)]
+fn ensure_fork_hook_registered() {
+    FORK_HOOK_REGISTERED.call_once(|| {
+        // SAFETY: `on_child_fork` only calls `AtomicU64::fetch_add` (async-signal-safe), and
+        // `pthread_atfork` registers the child reseed hook once via `std::sync::Once`.
+        let _ = unsafe { libc::pthread_atfork(None, None, Some(on_child_fork)) };
+    });
+}
+
+#[cfg(not(unix))]
+fn ensure_fork_hook_registered() {}
 
 struct EntropyPool {
     buf: [u8; ENTROPY_POOL_BYTES],
     pos: usize,
+    generation: u64,
 }
 
 impl EntropyPool {
     fn new() -> Self {
+        ensure_fork_hook_registered();
         let mut pool = Self {
             buf: [0u8; ENTROPY_POOL_BYTES],
             pos: ENTROPY_POOL_BYTES,
+            generation: FORK_GENERATION.load(Ordering::Relaxed),
         };
         pool.refill();
         pool
@@ -30,10 +53,14 @@ impl EntropyPool {
     fn refill(&mut self) {
         fill_os_random(&mut self.buf);
         self.pos = 0;
+        self.generation = FORK_GENERATION.load(Ordering::Relaxed);
     }
 
     #[inline]
     fn fill_bytes(&mut self, dest: &mut [u8]) {
+        if self.generation != FORK_GENERATION.load(Ordering::Relaxed) {
+            self.refill();
+        }
         let mut offset = 0;
         while offset < dest.len() {
             if self.pos >= ENTROPY_POOL_BYTES {
@@ -76,59 +103,8 @@ thread_local! {
 }
 
 fn fill_os_random(dest: &mut [u8]) {
-    #[cfg(target_os = "linux")]
-    {
-        let mut filled = 0;
-        while filled < dest.len() {
-            // SAFETY: `dest[filled..]` is a valid mutable byte slice in stack/heap memory
-            // owned exclusively by the caller, and `getrandom` writes at most `len` bytes.
-            let rc = unsafe {
-                libc::getrandom(
-                    dest[filled..].as_mut_ptr().cast::<libc::c_void>(),
-                    dest.len() - filled,
-                    0,
-                )
-            };
-            if rc > 0 {
-                filled += rc as usize;
-            } else {
-                break;
-            }
-        }
-        if filled == dest.len() {
-            return;
-        }
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        // SAFETY: `dest` is a valid mutable byte slice of length `dest.len()`, and
-        // `arc4random_buf` fills the buffer with cryptographic random bytes without failing.
-        unsafe {
-            libc::arc4random_buf(dest.as_mut_ptr().cast::<libc::c_void>(), dest.len());
-        }
-        return;
-    }
-
-    if let Ok(mut file) = std::fs::File::open("/dev/urandom")
-        && file.read_exact(dest).is_ok()
-    {
-        return;
-    }
-
-    let mut state = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0x9E37_79B9_7F4A_7C15)
-        ^ (dest.as_ptr() as usize as u64);
-    for byte in dest.iter_mut() {
-        state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let mut z = state;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        z ^= z >> 31;
-        *byte = (z & 0xFF) as u8;
-    }
+    getrandom::fill(dest)
+        .unwrap_or_else(|e| panic!("vertebra-core: OS entropy source unavailable: {e}"));
 }
 
 /// Generate an RFC 9562 Version 4 UUID as a 128-bit integer.
@@ -290,5 +266,76 @@ mod tests {
         );
         assert!(nanoid(0).is_err());
         assert!(nanoid(1025).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn forked_child_reseeds_partially_consumed_entropy_pool() {
+        let _warm = uuid4_u128();
+
+        let mut pipe_fds = [0_i32; 2];
+        // SAFETY: `pipe_fds` points to a valid two-element `c_int` array.
+        assert_eq!(unsafe { libc::pipe(pipe_fds.as_mut_ptr()) }, 0);
+
+        // SAFETY: POSIX fork followed by async-signal-safe `write` and `_exit` in the child.
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0, "fork failed");
+        if pid == 0 {
+            // SAFETY: Child closes read FD, generates two UUIDs, writes raw bytes, and `_exit`s.
+            unsafe { libc::close(pipe_fds[0]) };
+            let child_ids = [uuid4_u128(), uuid4_u128()];
+            for id in child_ids {
+                let bytes = id.to_le_bytes();
+                // SAFETY: `bytes` points to valid stack memory for `bytes.len()` bytes.
+                let written = unsafe {
+                    libc::write(
+                        pipe_fds[1],
+                        bytes.as_ptr().cast::<libc::c_void>(),
+                        bytes.len(),
+                    )
+                };
+                if written != bytes.len() as isize {
+                    // SAFETY: Terminate child process without running Rust TLS/atexit destructors.
+                    unsafe { libc::_exit(1) };
+                }
+            }
+            // SAFETY: Close pipe write FD and terminate child cleanly.
+            unsafe {
+                libc::close(pipe_fds[1]);
+                libc::_exit(0);
+            }
+        }
+
+        // SAFETY: Parent closes write end and reads child output from `pipe_fds[0]`.
+        unsafe { libc::close(pipe_fds[1]) };
+        let parent_ids = [uuid4_u128(), uuid4_u128()];
+        let mut raw = [0u8; 32];
+        let mut offset = 0;
+        while offset < raw.len() {
+            // SAFETY: `raw[offset..]` is valid writable stack storage.
+            let n = unsafe {
+                libc::read(
+                    pipe_fds[0],
+                    raw[offset..].as_mut_ptr().cast::<libc::c_void>(),
+                    raw.len() - offset,
+                )
+            };
+            assert!(n > 0, "unexpected EOF reading child UUIDs");
+            offset += n as usize;
+        }
+        // SAFETY: Close read end after draining both child UUIDs.
+        unsafe { libc::close(pipe_fds[0]) };
+
+        let mut status = 0_i32;
+        // SAFETY: `status` points to valid writable stack memory.
+        assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+        assert!(libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0);
+
+        let child_first = u128::from_le_bytes(raw[0..16].try_into().unwrap());
+        let child_second = u128::from_le_bytes(raw[16..32].try_into().unwrap());
+        assert_ne!(child_first, parent_ids[0]);
+        assert_ne!(child_second, parent_ids[1]);
+        assert_ne!(child_first, child_second);
+        assert_ne!(parent_ids[0], parent_ids[1]);
     }
 }

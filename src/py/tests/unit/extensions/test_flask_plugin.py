@@ -41,6 +41,8 @@ from vertebra.extensions.flask import (
     send_storage_file,
     vertebra_route,
 )
+from vertebra.extensions.flask.fastpath import CompiledRoute as FlaskCompiledRoute
+from vertebra.server._fastpath_core import CompiledRouteBase, get_attached_fastpath
 from vertebra.utils.serializers import decode_json
 
 if TYPE_CHECKING:
@@ -450,3 +452,37 @@ def test_flask_mcp_shares_wsgi_mcp_app_and_reuses_persistent_portal() -> None:
 
     assert len(observed_loops) == 2
     assert observed_loops[0] == observed_loops[1]
+
+
+def test_flask_compiled_route_inherits_base_and_attaches_fastpath() -> None:
+    """Flask CompiledRoute inherits CompiledRouteBase and VertebraPlugin attaches __vertebra_fastpath__."""
+    assert issubclass(FlaskCompiledRoute, CompiledRouteBase)
+
+    class _Rule:
+        def __init__(self, rule: str, endpoint: str, methods: set[str]) -> None:
+            self.rule = rule
+            self.endpoint = endpoint
+            self.methods = methods
+
+    class _UrlMap:
+        def __init__(self, rules: list[_Rule]) -> None:
+            self._rules = rules
+
+        def iter_rules(self) -> list[_Rule]:
+            return self._rules
+
+    class _MiniFlaskApp:
+        def __init__(self) -> None:
+            self.name = "flask_fastpath_attach"
+            self.extensions: dict[str, Any] = {}
+            self.view_functions: dict[str, Any] = {"ping": lambda: {"ok": True}}
+            self.url_map = _UrlMap([_Rule("/ping", "ping", {"GET", "HEAD"})])
+
+        def wsgi_app(self, _environ: Any, start_response: Any) -> list[bytes]:
+            start_response("200 OK", [("content-type", "text/plain")])
+            return [b"ok"]
+
+    app = _MiniFlaskApp()
+    plugin = VertebraPlugin(app, config=VertebraConfig(offload_middlewares=False))
+    assert plugin.fastpath is not None
+    assert get_attached_fastpath(app) is plugin.fastpath

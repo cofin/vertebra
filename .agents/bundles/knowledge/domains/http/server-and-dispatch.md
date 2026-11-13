@@ -12,6 +12,9 @@ generated:
   by: flow/0.26.0
   at: "2026-11-04T04:33:00Z"
 verified:
+  - by: agent:flow-learn
+    at: "2026-11-13T16:02:00Z"
+    commit: 06ef86e9
   - by: agent:flow-setup
     at: "2026-11-07T03:55:00Z"
     commit: 067fa901
@@ -123,7 +126,7 @@ sources:
 
 First frames complete their correlation as `PendingResponse::streaming`, removing the pending-request timeout entry. Final or error frames close the channel; periodic dispatcher sweeps reclaim dropped receivers. `set_worker`, `close_worker`, and `sweep_closed` retain SHM worker ownership and cancel blocked async delivery when the worker exits. Unary `VRES` and overflow `VROV` responses retain their completion batching path [^src-vertebra-http-src-dispatcher-streams-rs] [^src-vertebra-http-src-dispatcher-shm-reader-rs].
 
-This is native transport support. Python submission and mounted ASGI/RSGI response flushing remain work for `server-runtime-correctness` chapters `ch02` and `ch03`.
+Python workers emit `ResponseStreamFrame` chunks through `submit_stream_frame` / `max_stream_frame_payload`, flushing mounted ASGI (`AsgiProtocol`, `AsgiSend`), RSGI (`RsgiHttpProtocol`), and native `App` (`_dispatch.py`, `StreamingStorageResponse`, `ArrowCursor`) responses progressively across both embedded `BatchBridge` and `Shm` topologies.
 
 ## Admission and worker processes
 

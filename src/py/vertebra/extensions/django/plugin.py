@@ -84,6 +84,11 @@ class VertebraPlugin:
         return self._fastpath
 
     @property
+    def __vertebra_fastpath__(self) -> FastPath | None:
+        """Expose the ``FastPath`` dispatcher via the canonical attachment attribute."""
+        return self._fastpath
+
+    @property
     def offload_bundle(self) -> OffloadPlan | None:
         """Return the ``OffloadPlan``."""
         return self._offload_bundle

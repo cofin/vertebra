@@ -8,12 +8,15 @@ import inspect
 import logging
 import signal
 import time
-from typing import TYPE_CHECKING, Any
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, Any, Final
 
 import msgspec
 
 from vertebra.server.platform import LameDuckController
 from vertebra.telemetry.otel import SpanData, SpanExporter, TraceContext
+from vertebra.typing import ImproperConfigurationError
+from vertebra.utils.module_loader import ensure_module
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
@@ -22,6 +25,7 @@ if TYPE_CHECKING:
     from vertebra.framework.queues.scheduler import CronScheduler
 
 __all__ = (
+    "QUEUE_SERVICE_STATE_KEY",
     "LaneConfig",
     "LaneMetrics",
     "WorkerRunner",
@@ -29,6 +33,8 @@ __all__ = (
     "parse_lanes",
     "run_oneshot",
 )
+
+QUEUE_SERVICE_STATE_KEY: Final[str] = "vertebra_queue_service"
 
 log = logging.getLogger(__name__)
 
@@ -231,7 +237,7 @@ class WorkerRunner:
         if install_signal_handlers:
             loop = asyncio.get_running_loop()
             for sig in (signal.SIGTERM, signal.SIGINT):
-                with contextlib.suppress(NotImplementedError):
+                with contextlib.suppress(NotImplementedError, RuntimeError, ValueError):
                     loop.add_signal_handler(
                         sig,
                         lambda: asyncio.create_task(self._handle_shutdown_signal()),
@@ -340,6 +346,39 @@ class WorkerRunner:
             reg_candidate: Callable[..., Any] = registry[job_name]
             return reg_candidate
         return None
+
+    @staticmethod
+    def resolve_queue_service(target: Any) -> QueueService:
+        """Resolve a configured QueueService directly or from ``target.state['vertebra_queue_service']``."""
+        queue_service_cls: type[QueueService] = ensure_module("vertebra.framework.queues.base").QueueService
+        if isinstance(target, queue_service_cls):
+            return target
+
+        state = getattr(target, "state", None)
+        candidate: Any = None
+        if isinstance(state, Mapping):
+            candidate = state.get(QUEUE_SERVICE_STATE_KEY)
+        elif state is not None:
+            get_fn = getattr(state, "get", None)
+            if callable(get_fn):
+                with contextlib.suppress(Exception):
+                    candidate = get_fn(QUEUE_SERVICE_STATE_KEY)
+            if candidate is None:
+                candidate = getattr(state, QUEUE_SERVICE_STATE_KEY, None)
+
+        if candidate is None:
+            msg = (
+                f"No QueueService configured on {type(target).__name__}; "
+                f"expected a QueueService or app.state[{QUEUE_SERVICE_STATE_KEY!r}]"
+            )
+            raise ImproperConfigurationError(msg)
+        if not isinstance(candidate, queue_service_cls):
+            msg = (
+                f"Invalid {QUEUE_SERVICE_STATE_KEY!r} on {type(target).__name__}: "
+                f"expected QueueService, got {type(candidate).__name__}"
+            )
+            raise ImproperConfigurationError(msg)
+        return candidate
 
     @classmethod
     async def run_oneshot(cls, app: Any, job_name: str, *, payload: Any = None) -> int:

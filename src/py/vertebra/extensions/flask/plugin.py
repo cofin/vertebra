@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 from typing import TYPE_CHECKING, Any
 
 from vertebra._vertebra import Request, Response, WsgiEnviron, run_wsgi_callable
@@ -12,6 +13,7 @@ from vertebra.extensions.flask.offload import offload_middlewares
 from vertebra.extensions.flask.openapi import attach_openapi_docs, extract_openapi_schema
 from vertebra.extensions.flask.router import RouteCompiler
 from vertebra.extensions.flask.vite import ViteAssetBridge, attach_vite
+from vertebra.server._fastpath_core import set_attached_fastpath
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
@@ -115,6 +117,8 @@ class VertebraPlugin:
             self._compiler = compiler
             if self._config.enable_fastpath:
                 self._fastpath = FastPath(compiler)
+                with contextlib.suppress(TypeError):
+                    set_attached_fastpath(app, self._fastpath)
 
         if self._config.offload_middlewares:
             openapi_path = self._config.openapi.schema_path if self._config.openapi is not None else "/openapi.json"

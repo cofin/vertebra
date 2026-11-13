@@ -9,4 +9,4 @@ pub use self::factory::{
     RingFactory, RingFactoryError, WorkerHealth, WorkerLifecycle, cleanup_stale_shm,
     compute_embedded_worker_budgets, install_panic_cleanup_hook,
 };
-pub use self::supervisor::Supervisor;
+pub use self::supervisor::{EXIT_STARTUP_FAILURE, Supervisor};

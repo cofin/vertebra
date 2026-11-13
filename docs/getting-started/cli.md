@@ -59,12 +59,18 @@ vtb js generate-types
 
 The `@vertebra/client` TypeScript SDK is supplied directly with the Python package distribution and linked automatically without requiring an external NPM install.
 
-### Background Queue Workers (`vtb workers`)
+### Background Queue Workers (`vtb workers` & `--worker-only`)
 
 Run dedicated background task queue and cron workers:
 
 ```bash
 vtb workers run app:app --concurrency 16 --queues cpu,io,agent
+```
+
+Run worker lanes alongside HTTP readiness probes (`/healthz`, `/readyz`, `/startupz`) without starting the HTTP ingress server:
+
+```bash
+vtb run app:app --worker-only --host 0.0.0.0 --port 8080
 ```
 
 ### MCP Stdio-to-HTTP Bridge (`vtb ai mcp`)
@@ -77,7 +83,7 @@ vtb ai mcp bridge --url http://127.0.0.1:8000/mcp --timeout 30
 
 ### Standalone Binary Packaging (`vtb build`)
 
-Package your Python application, native extensions, and static assets into a relocatable standalone directory or self-contained single-file executable:
+Package your Python application, native extensions, and static assets into a relocatable standalone directory or self-contained single-file executable (pass `--include-agent-skills` to opt into staging `.agents/skills`):
 
 ```bash
 vtb build --standalone --onefile

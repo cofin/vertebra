@@ -31,6 +31,7 @@ class StandaloneBuilder:
 
     __slots__ = (
         "entrypoint",
+        "include_agent_skills",
         "profile",
         "project_dir",
         "server_binary",
@@ -45,12 +46,21 @@ class StandaloneBuilder:
         *,
         server_binary: Path | None = None,
         profile: str = "release",
+        include_agent_skills: bool = False,
     ) -> None:
         self.project_dir = project_dir
         self.target = target
         self.entrypoint = entrypoint
         self.server_binary = server_binary
         self.profile = profile
+        self.include_agent_skills = include_agent_skills
+
+    @staticmethod
+    def _is_vertebra_repo_root(project_root: Path) -> bool:
+        """Return True when ``project_root`` is Vertebra's own framework source repository."""
+        return (project_root / "src" / "rs" / "vertebra-core").exists() and (
+            project_root / "src" / "py" / "vertebra"
+        ).exists()
 
     def build(self, output_dir: Path) -> Path:
         """Stage application sources, compile hash-checked .pyc files, and write manifest.json and __main__.py.
@@ -65,6 +75,9 @@ class StandaloneBuilder:
         if not project_root.exists():
             msg = f"Project directory does not exist: {project_root}"
             raise FileNotFoundError(msg)
+        if self.include_agent_skills and self._is_vertebra_repo_root(project_root):
+            msg = "Refusing to bundle Vertebra repository's own .agents/skills into an application distribution."
+            raise ValueError(msg)
 
         dist_root = output_dir.resolve()
         if dist_root.exists():
@@ -104,6 +117,19 @@ class StandaloneBuilder:
             )
             compiled_count += 1
 
+        agent_skills_staged = False
+        if self.include_agent_skills:
+            skills_src = project_root / ".agents" / "skills"
+            if skills_src.is_dir():
+                skills_dest = app_stage / ".agents" / "skills"
+                skills_dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copytree(
+                    skills_src,
+                    skills_dest,
+                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".DS_Store"),
+                )
+                agent_skills_staged = True
+
         staged_binary_rel: str | None = None
         if self.server_binary is not None:
             binary_src = self.server_binary.resolve()
@@ -132,6 +158,8 @@ class StandaloneBuilder:
         }
         if staged_binary_rel is not None:
             manifest["server_binary"] = staged_binary_rel
+        if agent_skills_staged:
+            manifest["agent_skills_staged"] = True
 
         formatted = format_json(manifest, indent=2)
         (dist_root / "manifest.json").write_text(formatted + "\n")
@@ -188,7 +216,13 @@ class StandaloneBuilder:
             '        sys.stderr.write("vertebra-server binary not found; bundle with --server-binary or set VERTEBRA_SERVER_BINARY\\n")\n'
             "        return 1\n"
             "    srv_env = os.environ.copy()\n"
+            "    try:\n"
+            "        from vertebra.supervisor._supervisor import EmbeddedPythonRuntime\n\n"
+            "        EmbeddedPythonRuntime.detect().apply(srv_env)\n"
+            "    except ImportError:\n"
+            "        pass\n"
             '    srv_env.setdefault("VERTEBRA_APP", entrypoint_spec)\n'
+            '    srv_env.setdefault("VERTEBRA_APP_ROOT", str(app_dir))\n'
             '    existing_py_path = srv_env.get("PYTHONPATH", "")\n'
             "    srv_env['PYTHONPATH'] = (\n"
             '        f"{app_dir}{os.pathsep}{existing_py_path}" if existing_py_path else str(app_dir)\n'
@@ -197,6 +231,7 @@ class StandaloneBuilder:
             "def main() -> int:\n"
             "    root_dir = Path(__file__).resolve().parent\n"
             '    app_dir = root_dir / "app"\n'
+            '    os.environ.setdefault("VERTEBRA_APP_ROOT", str(app_dir))\n'
             f"{server_env_line}"
             "    sys.path.insert(0, str(app_dir))\n"
             f"    module = importlib.import_module({module_name!r})\n"

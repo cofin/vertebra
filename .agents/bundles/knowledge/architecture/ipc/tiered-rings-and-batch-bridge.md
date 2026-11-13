@@ -13,6 +13,9 @@ generated:
   by: flow/0.26.0
   at: "2026-11-04T04:33:00Z"
 verified:
+  - by: agent:flow-executor
+    at: "2026-11-13T06:06:00Z"
+    commit: 1575427f
   - by: agent:flow-setup
     at: "2026-11-12T23:30:00Z"
     commit: 18baadcd
@@ -58,7 +61,7 @@ sources:
 - `BatchSnapshot` unifies zero-copy request backing across in-process `Vec<InProcessRequest>`, borrowed SHM ring slots (`MpmcSlotView` / `SlotView`), and file-backed `VQOV`/`VROV` overflow segments.
 - `TieredRingSet` routes unary responses by size; all flagged `VRSF` stream frames share the xlarge `SpscRing` so different body sizes cannot reorder a stream [^src-vertebra-core-src-transport-ring-pair-rs].
 - `BatchBridge` carries native `ResponseStreamFrame`s through a dedicated `StreamSink`; bounded registry channels report client disconnects and apply blocking or awaited backpressure [^src-vertebra-core-src-bridge-rs] [^src-vertebra-http-src-dispatcher-streams-rs].
-- Python stream submission and mounted ASGI/RSGI flushing remain unwired; native transport support alone does not make mounted applications stream [^src-vertebra-py-src-transport-rs].
+- Python exposes `submit_stream_frame` and `max_stream_frame_payload` for chunked `VRSF` delivery; mounted ASGI, RSGI, and native `(status, headers, AsyncIterable | Iterable)` handlers flush progressive chunks once response headers start streaming [^src-vertebra-py-src-transport-rs].
 <!-- truth: end -->
 
 Both topologies move requests as `BatchSnapshot`s. Embedded mode hands zero-copy `InProcessRequest` snapshots across threads through [`BatchBridge`](../../../../../src/rs/vertebra-core/src/bridge.rs)[^src-vertebra-core-src-bridge-rs] and completes unary responses through `ResponseSink` or progressive responses through `StreamSink`. Shm mode serializes batches directly into a per-worker [`RingPair`](../../../../../src/rs/vertebra-core/src/transport/ring_pair.rs)[^src-vertebra-core-src-transport-ring-pair-rs] and borrows the slot zero-copy on the Python side (`MpmcSlotView` / `SlotView`). [`Transport`](../../../../../src/rs/vertebra-core/src/transport/mod.rs)[^src-vertebra-core-src-transport-mod-rs] wraps either backend cleanly.
@@ -113,7 +116,7 @@ Both topologies move requests as `BatchSnapshot`s. Embedded mode hands zero-copy
 
 The first frame leaves the request timeout slab, so long-lived streams do not inherit the 30-second pending-request timeout. Closed receivers are reclaimed by dispatcher sweeps. SHM streams retain their worker ownership: a worker sweep closes its streams and wakes backpressured senders, while response-reader shutdown cancels delivery rather than waiting indefinitely on a full client channel. The unused `PendingRequests`/`handle_raw_response_slot` dispatcher path is absent; `ResponseSlot` remains a separate core codec and is not the SHM response-ring format [^src-vertebra-http-src-dispatcher-streams-rs] [^src-vertebra-http-src-dispatcher-shm-reader-rs] [^src-vertebra-core-src-ipc-rs].
 
-The Python `submit_raw_response` path still needs the stream-submission binding and ASGI/RSGI progressive producers supplied by `server-runtime-correctness` chapter `ch01` [^src-vertebra-py-src-transport-rs].
+Python invokes `submit_stream_frame` and queries `max_stream_frame_payload` to split oversized header-plus-body payloads into ordered `VRSF` chunks; `AsgiProtocol`, `RsgiHttpProtocol`, and native `App` tuple streams flush progressive frames once headers begin sending [^src-vertebra-py-src-transport-rs].
 
 Provenance sources: [^src-vertebra-core-src-protocol-codec-rs].
 

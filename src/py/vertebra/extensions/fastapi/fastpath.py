@@ -10,7 +10,6 @@ from typing import Any, Self, get_type_hints
 from urllib.parse import parse_qsl
 
 import anyio.to_thread
-import msgspec
 
 from vertebra.extensions.fastapi.dependencies import (
     CompiledDependantPlan,
@@ -23,8 +22,10 @@ from vertebra.extensions.fastapi.router import (
     extract_routes,
 )
 from vertebra.extensions.starlette.fastpath import (
+    BUFFERED_RESPONSE_TYPES,
     get_starlette_request_cls,
     preseed_request_body,
+    serialize_buffered_response,
 )
 from vertebra.server._fastpath import (
     extract_scope_body_fast,
@@ -34,6 +35,8 @@ from vertebra.server._fastpath import (
 )
 from vertebra.server._fastpath_core import (
     UNSET_DEFAULT,
+    CompiledRouteBase,
+    has_custom_exception_handlers,
     scalar_query_converter,
     serialize_starlette_http_exception,
 )
@@ -45,6 +48,7 @@ from vertebra.utils.type_guards import (
 )
 
 __all__ = (
+    "BUFFERED_RESPONSE_TYPES",
     "CompiledRoute",
     "FastPath",
     "compile_fastpath_routes",
@@ -52,16 +56,13 @@ __all__ = (
 )
 
 
-class CompiledRoute(msgspec.Struct, frozen=True, gc=False, kw_only=True):
+class CompiledRoute(CompiledRouteBase, frozen=True, gc=False, kw_only=True):
     """Pre-compiled per-route dispatch metadata for zero-jsonable_encoder FastAPI execution."""
 
-    handler_id: int
     method: str
     path_template: str
     route: Any
     endpoint: Any
-    is_async: bool
-    status_code: int
     has_middleware: bool
     has_custom_exception_handlers: bool
     dependant_plan: CompiledDependantPlan | None
@@ -383,18 +384,9 @@ async def _serialize_fastapi_result(
     if special is not None:
         return special
 
-    raw_headers = getattr(result, "raw_headers", None)
-    resp_body = getattr(result, "body", None)
-    background = getattr(result, "background", None)
-    resp_cls_name = type(result).__name__
-    if (
-        isinstance(raw_headers, list)
-        and isinstance(resp_body, (bytes, memoryview))
-        and background is None
-        and resp_cls_name not in {"StreamingResponse", "FileResponse", "_StreamingResponse"}
-    ):
-        status = int(getattr(result, "status_code", compiled.status_code))
-        return status, list(raw_headers), bytes(resp_body)
+    buffered = serialize_buffered_response(result, default_status=compiled.status_code)
+    if buffered is not None:
+        return buffered
 
     if callable(result) and not isinstance(result, type):
         await result(scope, receive, send)
@@ -439,23 +431,16 @@ def _build_response_serializer(response_field: Any, return_annotation: Any) -> C
     return None
 
 
-def _has_custom_exception_handlers(app: Any) -> bool:
-    exc_handlers = getattr(app, "exception_handlers", None)
-    if not isinstance(exc_handlers, dict) or not exc_handlers:
-        return False
-    for fn in exc_handlers.values():
-        mod_name = str(getattr(fn, "__module__", "") or "")
-        if not mod_name.startswith(("starlette.", "fastapi.")):
-            return True
-    return False
-
-
 def _compile_routes_from_table(
     router_table: RouterTable,
     app: Any,
 ) -> dict[int, CompiledRoute]:
     has_mw = has_non_offloadable_middleware(app) if app is not None else False
-    has_exc = _has_custom_exception_handlers(app) if app is not None else False
+    has_exc = (
+        has_custom_exception_handlers(getattr(app, "exception_handlers", None), ("starlette.", "fastapi."))
+        if app is not None
+        else False
+    )
     compiled: dict[int, CompiledRoute] = {}
 
     for handler_id, entry in router_table.routes.items():

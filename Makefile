@@ -293,6 +293,17 @@ postgres-wheel-check:                               ## Build and verify standalo
 	@uv run --no-sync python -c 'import glob, tarfile, zipfile; whls = glob.glob("/tmp/vertebra-postgres-wheel-check/vertebra_postgres-*.whl"); sdists = glob.glob("/tmp/vertebra-postgres-wheel-check/vertebra_postgres-*.tar.gz"); assert len(whls) == 1 and len(sdists) == 1, (whls, sdists); zf = zipfile.ZipFile(whls[0]); vtb = [n for n in zf.namelist() if n.startswith("vertebra/")]; assert "vertebra/_postgres.pyi" in vtb and len(vtb) == 2 and all(not n.endswith(".py") for n in vtb), vtb; tf = tarfile.open(sdists[0], "r:gz"); names = tf.getnames(); assert any(n.endswith("Cargo.toml") for n in names) and any(n.endswith("build.rs") for n in names) and any(n.endswith("src/lib.rs") for n in names), names'
 	@echo "${OK} PostgreSQL wheel and sdist verified"
 
+.PHONY: core-wheel-check
+core-wheel-check:                                   ## Build relocatable vertebra-server + vertebra-core wheel and smoke test vtb run
+	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
+	@rm -rf /tmp/vtb-core-wheel /tmp/vtb-core-smoke-venv /tmp/vtb-core-smoke-app
+	@uv run --no-sync python tools/scripts/build_server_binary.py build
+	@uv build --wheel --out-dir /tmp/vtb-core-wheel
+	@uv venv --python 3.12 /tmp/vtb-core-smoke-venv
+	@uv pip install --python /tmp/vtb-core-smoke-venv/bin/python /tmp/vtb-core-wheel/vertebra_core-*.whl
+	@uv run --no-sync python tools/scripts/smoke_vtb_run.py --vtb /tmp/vtb-core-smoke-venv/bin/vtb --wheel-dir /tmp/vtb-core-wheel --workdir /tmp/vtb-core-smoke-app
+	@echo "${OK} Core wheel and vtb run smoke verified"
+
 .PHONY: test
 test: rs-test py-test ts-test                       ## Run all tests (Rust, Python, TypeScript)
 	@echo "${OK} All tests passed"

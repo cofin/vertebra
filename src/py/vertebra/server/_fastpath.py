@@ -9,7 +9,12 @@ from typing import Any, cast
 
 from vertebra._vertebra import ArrowCursor as RustArrowCursor
 from vertebra.db.arrow import ArrowCursor
-from vertebra.server._fastpath_core import BODYLESS_HTTP_METHODS, resolve_fastpath_provider
+from vertebra.server._fastpath_core import (
+    BODYLESS_HTTP_METHODS,
+    get_attached_fastpath,
+    resolve_fastpath_provider,
+    set_attached_fastpath,
+)
 from vertebra.storage._streaming import StreamingStorageResponse
 from vertebra.typing import VertebraError
 from vertebra.utils.type_guards import is_coroutine_callable
@@ -282,7 +287,7 @@ def wrap_asgi_fastpath(
         await fallback_app(scope, _replay_receive, send)
 
     dyn_app = cast("Any", _fastpath_asgi_app)
-    dyn_app.__vertebra_fastpath__ = bypass
+    set_attached_fastpath(dyn_app, bypass)
     dyn_app.__vertebra_fastpath_attached__ = True
     return _fastpath_asgi_app
 
@@ -299,7 +304,7 @@ def attach_framework_fastpath(
     norm_prefix = mount_prefix.rstrip("/")
 
     if getattr(app, "__vertebra_fastpath_attached__", False):
-        existing_fp = getattr(app, "__vertebra_fastpath__", None) or getattr(app, "fastpath", None)
+        existing_fp = get_attached_fastpath(app)
         if existing_fp is not None and norm_prefix and hasattr(existing_fp, "_mount_prefix"):
             existing_fp._mount_prefix = norm_prefix
         wsgi_inner = getattr(app, "wsgi_app", None)
@@ -332,19 +337,7 @@ def attach_framework_fastpath(
             if callable(ensure_fn):
                 ensure_fn(candidate_app)
 
-    existing_fp = getattr(app, "__vertebra_fastpath__", None) or getattr(app, "fastpath", None)
-    if existing_fp is None:
-        state = getattr(app, "state", None)
-        if state is not None:
-            existing_fp = (
-                state.get("vertebra_fastpath_bypass")
-                if hasattr(state, "get")
-                else getattr(state, "vertebra_fastpath_bypass", None)
-            )
-    if existing_fp is None:
-        extensions = getattr(app, "extensions", None)
-        if isinstance(extensions, dict) and "vertebra" in extensions:
-            existing_fp = getattr(extensions["vertebra"], "fastpath", None)
+    existing_fp = get_attached_fastpath(app)
 
     if existing_fp is None:
         provider = resolve_fastpath_provider(app)
@@ -353,15 +346,8 @@ def attach_framework_fastpath(
         existing_fp = provider.build(app, mount_prefix=norm_prefix)
         if existing_fp is None:
             return app
-        state = getattr(app, "state", None)
-        if state is not None:
-            with suppress(TypeError, AttributeError):
-                if hasattr(state, "__setitem__"):
-                    state["vertebra_fastpath_bypass"] = existing_fp
-                else:
-                    state.vertebra_fastpath_bypass = existing_fp
-        with suppress(AttributeError, TypeError):
-            cast("Any", app).__vertebra_fastpath__ = existing_fp
+        with suppress(TypeError):
+            set_attached_fastpath(app, existing_fp)
 
     if norm_prefix and hasattr(existing_fp, "_mount_prefix"):
         existing_fp._mount_prefix = norm_prefix
@@ -380,7 +366,7 @@ def attach_framework_fastpath(
         )
         wrapped_wsgi = existing_fp.wrap_wsgi(fallback_wsgi)
         dyn_wsgi = cast("Any", wrapped_wsgi)
-        dyn_wsgi.__vertebra_fastpath__ = existing_fp
+        set_attached_fastpath(dyn_wsgi, existing_fp)
         dyn_wsgi.__vertebra_fastpath_attached__ = True
         if callable(getattr(app, "wsgi_app", None)):
             with suppress(AttributeError, TypeError):

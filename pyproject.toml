@@ -280,6 +280,7 @@ include = [
     { path = "src/rs/vertebra-*/**/*", format = "sdist" },
     { path = "src/py/vertebra/server/_js/bundle/**/*", format = ["sdist", "wheel"] },
     { path = "src/py/vertebra/framework/assets/*", format = ["sdist", "wheel"] },
+    { path = "src/py/vertebra/bin/*", format = "wheel" },
 ]
 exclude = [
     { path = "src/py/vertebra/*.so", format = ["sdist", "wheel"] },

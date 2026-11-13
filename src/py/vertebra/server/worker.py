@@ -1,5 +1,7 @@
 """Worker lifecycle, signal draining, Litestar lifespan entry, and mount orchestration."""
 
+from __future__ import annotations
+
 import asyncio
 import concurrent.futures
 import logging
@@ -8,7 +10,7 @@ import signal
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, suppress
-from typing import Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from vertebra._vertebra import (
     Request as _NativeRequest,
@@ -28,6 +30,7 @@ from vertebra._vertebra import (
     submit_batch_raw,
     submit_response,
     submit_response_raw,
+    submit_stream_frame,
     try_get_batch,
 )
 from vertebra.extensions.litestar.plugin import enter_litestar_server_lifespan
@@ -38,7 +41,9 @@ from vertebra.server._dispatch import (
     _JSON_CONTENT_TYPE_COMPACT,
     _RAW_BUFFER_TYPES,
     HandlerSpec,
+    _is_potential_special_return,
     _resolve_asgi_batch_timeout,
+    _submit_coerced,
     build_error_response,
     compile_handler_table,
     dispatch_batch,
@@ -54,17 +59,23 @@ from vertebra.server._loops import (
 from vertebra.server._protocol import InterfaceMode, detect_interface
 from vertebra.server._rsgi._adapter import RsgiAdapter
 from vertebra.server._wsgi._adapter import WsgiAdapter
-from vertebra.server.lanes import WorkerRunner
+from vertebra.server.lanes import QUEUE_SERVICE_STATE_KEY, WorkerRunner
 from vertebra.server.platform import (
     CgroupQuota,
     LameDuckController,
     SHMAllocationPolicy,
     ZPagesRegistry,
 )
+from vertebra.typing import VertebraError
+from vertebra.utils.module_loader import import_app
 from vertebra.utils.serializers import encode_json_bytes
+
+if TYPE_CHECKING:
+    from vertebra.framework.queues.base import QueueService
 
 __all__ = (
     "Worker",
+    "WorkerStartupError",
     "_AsgiMountRunner",
     "_build_mount_adapters",
     "_instantiate_mount_runners",
@@ -73,6 +84,15 @@ __all__ = (
 
 logger = logging.getLogger(__name__)
 _INLINE_DRAIN_BUDGET = 16
+
+
+class WorkerStartupError(VertebraError, RuntimeError):
+    """Raised when an ASGI lifespan or RSGI ``__rsgi_init__`` hook fails during worker startup."""
+
+    def __init__(self, prefix: str, phase: Literal["lifespan", "rsgi_init"]) -> None:
+        self.prefix = prefix
+        self.phase = phase
+        super().__init__(f"Worker startup failed during {phase} for mount {prefix!r}")
 
 
 class _AsgiMountRunner:
@@ -196,13 +216,12 @@ class _AsgiMountRunner:
 
     async def _execute_and_submit(self, request: Any) -> None:
         req_id = int(getattr(request, "request_id", 0))
-        try:
-            resp = await self._runner.run_single(request)
-            native_resp = self._runner._to_native_response(resp, req_id)
-            submit_response(native_resp)
-        except Exception:
-            logger.exception("Unhandled error in sharded ASGI mount task (request_id=%d)", req_id)
-            submit_response(Response.error(500, req_id))
+        await self._runner._execute_and_submit(
+            request,
+            req_id,
+            stream_submitter=submit_stream_frame,
+            unary_submitter=submit_response,
+        )
 
 
 def _instantiate_mount_runners(
@@ -246,8 +265,9 @@ def _instantiate_mount_runners(
             if callable(init_fn) and isinstance(primary_loop, asyncio.AbstractEventLoop):
                 try:
                     init_fn(primary_loop)
-                except Exception:
+                except Exception as exc:
                     logger.exception("RSGI __rsgi_init__ failed for mount %r", prefix)
+                    raise WorkerStartupError(prefix, "rsgi_init") from exc
             adapter = RsgiAdapter(app, mount_prefix=prefix)
             result.append((prefix, adapter, "rsgi"))
         elif resolved == "wsgi":
@@ -271,6 +291,7 @@ class Worker:
     """Single-responsibility worker orchestrating SHM validation, loop pools, and batch dispatch."""
 
     __slots__ = (
+        "_app_obj",
         "_batch_timeout_ms",
         "_before_extensions",
         "_cgroup_quota",
@@ -280,6 +301,7 @@ class Worker:
         "_lame_duck",
         "_max_batches",
         "_mounts",
+        "_queue_service",
         "_shm_policy",
         "_stop_event",
         "_worker_count",
@@ -300,9 +322,13 @@ class Worker:
         zpages: ZPagesRegistry | None = None,
         stop_event: Any = None,
         max_batches: int | None = None,
+        queue_service: QueueService | None = None,
+        app_obj: Any = None,
     ) -> None:
+        self._app_obj: Any = app_obj
         if hasattr(handlers, "_handlers") and not isinstance(handlers, Mapping):
             app_obj = handlers
+            self._app_obj = app_obj
             ensure_fn = getattr(app_obj, "ensure_dev_welcome_route", None)
             if callable(ensure_fn):
                 ensure_fn()
@@ -326,6 +352,7 @@ class Worker:
         self._zpages = zpages if zpages is not None else ZPagesRegistry(lame_duck=self._lame_duck)
         self._stop_event = stop_event
         self._max_batches = max_batches
+        self._queue_service = queue_service
         self._cgroup_quota: CgroupQuota | None = None
         self._gil_report: GilAuditReport | None = None
 
@@ -420,16 +447,7 @@ class Worker:
 
         colocated_runner: WorkerRunner | None = None
         colocated_future: concurrent.futures.Future[Any] | None = None
-        if has_colocated_workers:
-            queues_env = os.environ.get("VERTEBRA_WORKER_QUEUES", "default")
-            lane_env = os.environ.get("VERTEBRA_WORKER_LANE_CONCURRENCY", "")
-            lanes = WorkerRunner.parse_lane_concurrency(queues_env, lane_env)
-            colocated_runner = WorkerRunner(lanes, lame_duck=self._lame_duck)
-            if use_inline_event_loop:
-                loop_pool.primary_loop.create_task(colocated_runner.run())
-            else:
-                colocated_future = loop_pool.schedule(colocated_runner.run())
-
+        colocated_task: asyncio.Task[Any] | None = None
         lifespan_stack = ExitStack()
         lifespan_states: dict[str, dict[str, Any]] = {}
 
@@ -440,14 +458,35 @@ class Worker:
                         lifespan_stack.enter_context(enter_litestar_server_lifespan(app_obj))
                         state = lifespan_stack.enter_context(AsgiLifespan(app_obj, loop=loop_pool.primary_loop))
                         lifespan_states[_prefix] = state
-                    except Exception:
+                    except Exception as exc:
                         logger.exception("ASGI lifespan startup failed for mount %r", _prefix)
+                        raise WorkerStartupError(_prefix, "lifespan") from exc
 
             mount_runners = _instantiate_mount_runners(
                 self._mounts,
                 loop_pool,
                 lifespan_states=lifespan_states,
             )
+            if has_colocated_workers:
+                queues_env = os.environ.get("VERTEBRA_WORKER_QUEUES", "default")
+                lane_env = os.environ.get("VERTEBRA_WORKER_LANE_CONCURRENCY", "")
+                lanes = WorkerRunner.parse_lane_concurrency(queues_env, lane_env)
+                resolved_qs = self._resolve_colocated_queue_service(lifespan_states=lifespan_states)
+                colocated_runner = WorkerRunner(
+                    lanes,
+                    queue_service=resolved_qs,
+                    lame_duck=self._lame_duck,
+                )
+                if use_inline_event_loop:
+                    colocated_task = loop_pool.primary_loop.create_task(colocated_runner.run())
+
+                    def _log_colocated_task_failure(task: asyncio.Task[Any]) -> None:
+                        if not task.cancelled() and (exc := task.exception()) is not None:
+                            logger.error("Co-located WorkerRunner task failed", exc_info=exc)
+
+                    colocated_task.add_done_callback(_log_colocated_task_failure)
+                else:
+                    colocated_future = loop_pool.schedule(colocated_runner.run())
             mount_lookup = {prefix: (adapter, proto) for prefix, adapter, proto in mount_runners}
             has_mounts = bool(mount_runners)
             all_sync_native = not has_mounts and not has_async_handlers and not has_sync_thread
@@ -507,9 +546,13 @@ class Worker:
         finally:
             self._zpages.set_var("worker_state", "stopped")
             if colocated_runner is not None:
-                with suppress(Exception):
+                with suppress(Exception, asyncio.CancelledError):
                     if use_inline_event_loop:
                         loop_pool.primary_loop.run_until_complete(colocated_runner.stop())
+                        if colocated_task is not None:
+                            if not colocated_task.done():
+                                colocated_task.cancel()
+                            loop_pool.primary_loop.run_until_complete(asyncio.wait_for(colocated_task, timeout=2.0))
                     else:
                         loop_pool.schedule(colocated_runner.stop()).result(timeout=5.0)
                         if colocated_future is not None:
@@ -521,6 +564,55 @@ class Worker:
             if executor is not None:
                 executor.shutdown(wait=False)
             loop_pool.stop()
+
+    def _resolve_colocated_queue_service(
+        self,
+        *,
+        lifespan_states: Mapping[str, Mapping[str, Any]],
+    ) -> QueueService | None:
+        """Resolve QueueService for co-located worker lanes from explicit arg, mounts, lifespan state, or VERTEBRA_APP."""
+        if self._queue_service is not None:
+            return WorkerRunner.resolve_queue_service(self._queue_service)
+
+        for state in lifespan_states.values():
+            if QUEUE_SERVICE_STATE_KEY in state:
+                return WorkerRunner.resolve_queue_service(type("_StateHost", (), {"state": state})())
+
+        first_stateful_target: Any = None
+        for _prefix, mount_app, _protocol in self._mounts:
+            mount_state = getattr(mount_app, "state", None)
+            if mount_state is None:
+                continue
+            if first_stateful_target is None:
+                first_stateful_target = mount_app
+            has_key = (
+                QUEUE_SERVICE_STATE_KEY in mount_state
+                if isinstance(mount_state, Mapping)
+                else hasattr(mount_state, QUEUE_SERVICE_STATE_KEY)
+            )
+            if has_key:
+                return WorkerRunner.resolve_queue_service(mount_app)
+
+        if self._app_obj is not None and getattr(self._app_obj, "state", None) is not None:
+            app_state = self._app_obj.state
+            has_key = (
+                QUEUE_SERVICE_STATE_KEY in app_state
+                if isinstance(app_state, Mapping)
+                else hasattr(app_state, QUEUE_SERVICE_STATE_KEY)
+            )
+            if has_key or first_stateful_target is None:
+                return WorkerRunner.resolve_queue_service(self._app_obj)
+
+        if first_stateful_target is not None:
+            return WorkerRunner.resolve_queue_service(first_stateful_target)
+
+        if self._handlers:
+            app_path = os.environ.get("VERTEBRA_APP", "").strip()
+            if app_path:
+                target_app = import_app(app_path)
+                return WorkerRunner.resolve_queue_service(target_app)
+
+        return None
 
     def _should_stop(self, batches_processed: int) -> bool:
         if self._stop_event is not None and self._stop_event.is_set():
@@ -658,6 +750,19 @@ class Worker:
                             if raw.request_id == 0:
                                 raw.request_id = req_id
                             submit_response(raw)
+                        elif _is_potential_special_return(raw):
+                            if raw_items:
+                                submit_batch_raw(raw_items)
+                                raw_items.clear()
+                            _submit_coerced(
+                                raw,
+                                req_id,
+                                Response,
+                                submit_response,
+                                submit_response_raw,
+                                status_code=status,
+                                scheduler=loop_pool,
+                            )
                         else:
                             append_raw((req_id, status, encode_json_bytes(raw), _JSON_CONTENT_TYPE_COMPACT))
                     except Exception as exc:
@@ -729,6 +834,8 @@ def run_worker(
     zpages: ZPagesRegistry | None = None,
     stop_event: Any = None,
     max_batches: int | None = None,
+    queue_service: QueueService | None = None,
+    app_obj: Any = None,
 ) -> None:
     """Entry point that constructs and runs a ``Worker``."""
     worker = Worker(
@@ -743,6 +850,8 @@ def run_worker(
         zpages=zpages,
         stop_event=stop_event,
         max_batches=max_batches,
+        queue_service=queue_service,
+        app_obj=app_obj,
     )
     worker.run()
 

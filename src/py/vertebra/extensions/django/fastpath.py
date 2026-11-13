@@ -6,8 +6,6 @@ import inspect
 from collections.abc import Callable
 from typing import Any, ClassVar, Self, cast, get_type_hints
 
-import msgspec
-
 from vertebra._vertebra import Request, Response, WsgiEnviron, WsgiInput
 from vertebra.extensions.django.router import RouteCompiler
 from vertebra.server._fastpath import (
@@ -17,6 +15,7 @@ from vertebra.server._fastpath import (
     wrap_asgi_fastpath,
 )
 from vertebra.server._fastpath_core import (
+    CompiledRouteBase,
     coerce_path_param,
     resolve_wsgi_relative_path,
     step_coro_sync,
@@ -68,11 +67,8 @@ class MsgspecView:
         return _view
 
 
-class CompiledRoute(msgspec.Struct, frozen=True, gc=False):
+class CompiledRoute(CompiledRouteBase, frozen=True, gc=False, kw_only=True):
     """Pre-compiled Django fastpath execution plan for a single view."""
-
-    handler_id: int
-    """Compiled router handler identifier."""
 
     name: str
     """Django URL pattern name."""
@@ -82,15 +78,6 @@ class CompiledRoute(msgspec.Struct, frozen=True, gc=False):
 
     callback: Callable[..., Any]
     """Underlying Django view callable."""
-
-    is_async: bool
-    """Whether ``callback`` is an asynchronous coroutine callable."""
-
-    status_code: int
-    """Default HTTP response status code."""
-
-    param_converters: tuple[tuple[str, str], ...] = ()
-    """Ordered ``(param_name, converter_name)`` pairs extracted from the URL pattern."""
 
     body_param_name: str | None = None
     """Optional request body parameter name."""

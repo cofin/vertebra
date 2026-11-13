@@ -269,6 +269,13 @@ impl BatchBridge {
         }
     }
 
+    /// Clear any registered stream callback.
+    pub fn clear_stream_sink(&self) {
+        if let Ok(mut registered) = self.stream_sink.write() {
+            *registered = None;
+        }
+    }
+
     /// Submit a stream frame without holding the sink lock during delivery.
     pub fn submit_stream_frame(
         &self,

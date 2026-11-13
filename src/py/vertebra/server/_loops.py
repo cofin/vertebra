@@ -422,7 +422,14 @@ class EventLoopPool:
         if running is loop:
             self._create_tracked_tasks(loop, tasks, items)
             return
+        if self._inline_single and not loop.is_running():
+            loop.run_until_complete(self._gather_coros(items))
+            return
         loop.call_soon_threadsafe(self._create_tracked_tasks, loop, tasks, items)
+
+    @staticmethod
+    async def _gather_coros(items: list[Coroutine[Any, Any, Any]]) -> None:
+        await asyncio.gather(*items)
 
     @staticmethod
     def _create_tracked_tasks(

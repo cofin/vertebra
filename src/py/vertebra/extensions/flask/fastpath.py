@@ -6,8 +6,6 @@ import inspect
 from collections.abc import Callable
 from typing import Any, Self, cast, get_type_hints
 
-import msgspec
-
 from vertebra._vertebra import Request, Response, WsgiEnviron, WsgiInput
 from vertebra.extensions.flask.router import RouteCompiler
 from vertebra.server._fastpath import (
@@ -17,6 +15,7 @@ from vertebra.server._fastpath import (
     wrap_asgi_fastpath,
 )
 from vertebra.server._fastpath_core import (
+    CompiledRouteBase,
     coerce_path_param,
     resolve_wsgi_relative_path,
     step_coro_sync,
@@ -37,11 +36,8 @@ __all__ = (
 )
 
 
-class CompiledRoute(msgspec.Struct, frozen=True, gc=False):
+class CompiledRoute(CompiledRouteBase, frozen=True, gc=False, kw_only=True):
     """Pre-compiled Flask fastpath execution plan for a single view function."""
-
-    handler_id: int
-    """Compiled router handler identifier."""
 
     endpoint: str
     """Flask endpoint name."""
@@ -51,15 +47,6 @@ class CompiledRoute(msgspec.Struct, frozen=True, gc=False):
 
     view_func: Callable[..., Any]
     """Underlying Flask view callable."""
-
-    is_async: bool
-    """Whether ``view_func`` is an asynchronous coroutine callable."""
-
-    status_code: int
-    """Default HTTP response status code."""
-
-    param_converters: tuple[tuple[str, str], ...] = ()
-    """Ordered ``(param_name, converter_name)`` pairs extracted from the rule."""
 
     body_param_name: str | None = None
     """Optional request body parameter name."""

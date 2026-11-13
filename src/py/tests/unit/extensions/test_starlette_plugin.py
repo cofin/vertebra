@@ -9,6 +9,10 @@ from typing import TYPE_CHECKING, Any
 
 import msgspec
 import pytest
+from starlette.applications import Starlette
+from starlette.background import BackgroundTask
+from starlette.responses import JSONResponse, Response
+from starlette.routing import Route
 
 from vertebra._vertebra import AsgiProtocol, AsgiScope
 from vertebra.agent.mcp.controllers import mcp_tool
@@ -36,8 +40,16 @@ from vertebra.extensions.starlette import (
     offload_middlewares,
     preseed_request_body,
 )
+from vertebra.extensions.starlette.fastpath import (
+    BUFFERED_RESPONSE_TYPES,
+    serialize_buffered_response,
+)
+from vertebra.extensions.starlette.fastpath import (
+    CompiledRoute as StarletteCompiledRoute,
+)
 from vertebra.server._channels import ChannelBus
 from vertebra.server._fastpath import attach_framework_fastpath
+from vertebra.server._fastpath_core import CompiledRouteBase, get_attached_fastpath
 from vertebra.utils.serializers import decode_json
 
 if TYPE_CHECKING:
@@ -366,3 +378,60 @@ async def test_starlette_mount_mcp_routes_uses_shared_asgi_mcp_app() -> None:
     resp_notify = proto_notify.take_response()
     assert resp_notify.status == 202
     assert bytes(resp_notify.body) == b""
+
+
+@pytest.mark.anyio
+async def test_starlette_compiled_route_base_attachment_and_buffered_responses() -> None:
+    """Starlette plugin attaches __vertebra_fastpath__, inherits CompiledRouteBase, and copies zero buffered bytes."""
+    assert issubclass(StarletteCompiledRoute, CompiledRouteBase)
+
+    async def ping(_request: Any) -> JSONResponse:
+        return JSONResponse({"ok": True})
+
+    app = Starlette(routes=[Route("/ping", ping)])
+    VertebraPlugin(app)
+    assert get_attached_fastpath(app) is not None
+    assert not hasattr(app.state, "vertebra_fastpath_bypass")
+
+    raw_view = memoryview(b"zero-copy-payload")
+    direct_resp = Response(content=raw_view)
+    serialized = serialize_buffered_response(direct_resp)
+    assert serialized is not None
+    assert serialized[0] == 200
+    assert isinstance(serialized[2], memoryview)
+    assert serialized[2] is direct_resp.body
+
+    bg_called = False
+
+    def _bg() -> None:
+        nonlocal bg_called
+        bg_called = True
+
+    bg_resp = Response(content=b"with-bg", background=BackgroundTask(_bg))
+    assert serialize_buffered_response(bg_resp) is None
+
+    subclass_asgi_called = False
+
+    class _CustomJSONResponse(JSONResponse):
+        async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+            nonlocal subclass_asgi_called
+            subclass_asgi_called = True
+            await super().__call__(scope, receive, send)
+
+    assert _CustomJSONResponse not in BUFFERED_RESPONSE_TYPES
+    custom_resp = _CustomJSONResponse({"custom": True})
+    assert serialize_buffered_response(custom_resp) is None
+
+    async def custom_endpoint(_request: Any) -> _CustomJSONResponse:
+        return custom_resp
+
+    custom_app = Starlette(routes=[Route("/custom", custom_endpoint)])
+    VertebraPlugin(custom_app)
+    fp = get_attached_fastpath(custom_app)
+    assert fp is not None
+    wrapped = fp.wrap_asgi(custom_app)
+    proto = AsgiProtocol(b"")
+    await wrapped(AsgiScope.from_parts(method="GET", path="/custom"), proto.receive, proto.send)
+    assert subclass_asgi_called is True
+    assert decode_json(proto.take_response().body) == {"custom": True}
+    assert bg_called is False

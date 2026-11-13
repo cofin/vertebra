@@ -28,9 +28,9 @@ from vertebra.typing import (
     ToolProvider,
     VertebraError,
 )
+from vertebra.utils import module_loader
 from vertebra.utils.module_loader import (
     MissingDependencyError,
-    _module_cache,
     ensure_module,
     ensure_numpy,
     ensure_pandas,
@@ -163,17 +163,23 @@ def test_missing_dependency_error_install_hint_defaults(
     assert str(err) == "Optional dependency 'x' is required but not installed."
 
 
-def test_module_loader_caches_imported_modules_and_ensure_module() -> None:
-    """Verify import_optional and ensure_module cache imported ModuleType objects."""
+def test_module_loader_caches_imported_modules_and_ensure_module(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify import_optional resolves directly via sys.modules and _module_cache is removed."""
     reset_dependency_cache()
     try:
-        assert "json" not in _module_cache
+        assert not hasattr(vertebra_typing, "_module_cache")
+        assert not hasattr(internal_typing, "_module_cache")
+        assert not hasattr(module_loader, "_module_cache")
 
         mod1 = import_optional("json")
         assert mod1 is not None
-        assert _module_cache.get("json") is mod1
+        assert mod1 is sys.modules["json"]
         assert import_optional("json") is mod1
         assert ensure_module("json") is mod1
+
+        monkeypatch.setitem(sys.modules, "json", None)
+        assert import_optional("json") is None
+        monkeypatch.undo()
 
         assert import_optional("vertebra_nonexistent_pkg_xyz") is None
         with pytest.raises(MissingDependencyError, match="vertebra_nonexistent_pkg_xyz") as exc_info:
@@ -182,7 +188,7 @@ def test_module_loader_caches_imported_modules_and_ensure_module() -> None:
         assert "vtb[" not in exc_info.value.hint
 
         reset_dependency_cache()
-        assert "json" not in _module_cache
+        assert import_optional("json") is mod1
     finally:
         reset_dependency_cache()
 

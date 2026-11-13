@@ -20,30 +20,78 @@ from vertebra.server._fastpath import (
     serialize_fastpath_special_result,
     wrap_asgi_fastpath,
 )
-from vertebra.server._fastpath_core import serialize_starlette_http_exception
+from vertebra.server._fastpath_core import (
+    CompiledRouteBase,
+    has_custom_exception_handlers,
+    serialize_starlette_http_exception,
+)
 from vertebra.utils.module_loader import import_optional
 from vertebra.utils.serializers import decode_json, encode_json_bytes
 from vertebra.utils.type_guards import is_coroutine_callable
 
 __all__ = (
+    "BUFFERED_RESPONSE_TYPES",
     "CompiledRoute",
     "FastPath",
     "compile_fastpath_routes",
     "dispatch_handler_direct",
     "get_starlette_request_cls",
     "preseed_request_body",
+    "serialize_buffered_response",
 )
 
 
-class CompiledRoute(msgspec.Struct, frozen=True, gc=False, kw_only=True):
+def _build_buffered_response_types() -> frozenset[type]:
+    """Collect exact Starlette, FastAPI, and Vertebra buffered Response classes when installed."""
+    candidates: list[type] = []
+    starlette_mod = import_optional("starlette.responses")
+    if starlette_mod is not None:
+        for name in ("Response", "HTMLResponse", "PlainTextResponse", "JSONResponse", "RedirectResponse"):
+            cls = getattr(starlette_mod, name, None)
+            if isinstance(cls, type):
+                candidates.append(cls)
+    fastapi_mod = import_optional("fastapi.responses")
+    if fastapi_mod is not None:
+        for name in ("ORJSONResponse", "UJSONResponse"):
+            cls = getattr(fastapi_mod, name, None)
+            if isinstance(cls, type):
+                candidates.append(cls)
+    vertebra_fastapi_mod = import_optional("vertebra.extensions.fastapi.responses")
+    if vertebra_fastapi_mod is not None:
+        cls = getattr(vertebra_fastapi_mod, "MsgspecJSONResponse", None)
+        if isinstance(cls, type):
+            candidates.append(cls)
+    return frozenset(candidates)
+
+
+BUFFERED_RESPONSE_TYPES: frozenset[type] = _build_buffered_response_types()
+
+
+def serialize_buffered_response(
+    response: Any,
+    *,
+    default_status: int = 200,
+) -> tuple[int, list[tuple[bytes, bytes]], bytes | memoryview] | None:
+    """Serialize an exact-type buffered response without copying its body buffer."""
+    if type(response) not in BUFFERED_RESPONSE_TYPES:
+        return None
+    if getattr(response, "background", None) is not None:
+        return None
+    raw_headers = getattr(response, "raw_headers", None)
+    resp_body = getattr(response, "body", None)
+    if isinstance(raw_headers, list) and isinstance(resp_body, (bytes, memoryview)):
+        status_code = int(getattr(response, "status_code", default_status))
+        return status_code, list(raw_headers), resp_body
+    return None
+
+
+class CompiledRoute(CompiledRouteBase, frozen=True, gc=False, kw_only=True):
     """Pre-compiled per-route dispatch metadata for Starlette endpoint invocation."""
 
-    handler_id: int
     method: str
     path_template: str
     route: Any
     endpoint: Any
-    is_async: bool
     has_middleware: bool
     has_custom_exception_handlers: bool = False
     sync_to_thread: bool = False
@@ -263,21 +311,11 @@ async def dispatch_handler_direct(
             payload,
         )
 
-    resp_cls_name = type(response).__name__
-    raw_headers = getattr(response, "raw_headers", None)
-    resp_body = getattr(response, "body", None)
-    background = getattr(response, "background", None)
+    buffered = serialize_buffered_response(response, default_status=200)
+    if buffered is not None:
+        return buffered
 
-    if (
-        isinstance(raw_headers, list)
-        and isinstance(resp_body, (bytes, memoryview))
-        and background is None
-        and resp_cls_name not in {"StreamingResponse", "FileResponse", "_StreamingResponse"}
-    ):
-        status_code = int(getattr(response, "status_code", 200))
-        return status_code, list(raw_headers), bytes(resp_body)
-
-    if callable(response):
+    if callable(response) and not isinstance(response, type):
         await response(scope, receive, send)
         return None
 
@@ -330,23 +368,16 @@ class _FallbackStarletteRequest:
         return self._json
 
 
-def _has_custom_exception_handlers(app: Any) -> bool:
-    exc_handlers = getattr(app, "exception_handlers", None)
-    if not isinstance(exc_handlers, dict) or not exc_handlers:
-        return False
-    for fn in exc_handlers.values():
-        mod_name = str(getattr(fn, "__module__", "") or "")
-        if not mod_name.startswith(("starlette.", "fastapi.")):
-            return True
-    return False
-
-
 def _compile_routes_from_table(
     router_table: RouterTable,
     app: Any,
 ) -> dict[int, CompiledRoute]:
     has_mw = has_non_offloadable_middleware(app) if app is not None else False
-    has_exc = _has_custom_exception_handlers(app) if app is not None else False
+    has_exc = (
+        has_custom_exception_handlers(getattr(app, "exception_handlers", None), ("starlette.", "fastapi."))
+        if app is not None
+        else False
+    )
     compiled: dict[int, CompiledRoute] = {}
     for handler_id, entry in router_table.routes.items():
         compiled[handler_id] = CompiledRoute(

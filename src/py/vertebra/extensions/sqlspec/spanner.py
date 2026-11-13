@@ -725,11 +725,9 @@ class SpannerSyncDriver(BaseSyncDriver):
     def batch_write(
         self,
         mutation_groups: Sequence[MutationGroup | Sequence[Mutation]],
-        *,
-        max_commit_delay_ms: int | None = None,
     ) -> list[dict[str, Any]]:
         """Execute ``BatchWrite`` across independent ``MutationGroup`` batches."""
-        return self._core.batch_write(mutation_groups, max_commit_delay_ms=max_commit_delay_ms)
+        return self._core.batch_write(mutation_groups)
 
     def update_ddl(self, statements: Sequence[str] | str) -> str:
         """Apply Spanner schema DDL statements."""
@@ -1113,11 +1111,9 @@ class SpannerAsyncDriver(BaseAsyncDriver):
     async def batch_write(
         self,
         mutation_groups: Sequence[MutationGroup | Sequence[Mutation]],
-        *,
-        max_commit_delay_ms: int | None = None,
     ) -> list[dict[str, Any]]:
         """Asynchronously execute ``BatchWrite`` across ``MutationGroup`` batches."""
-        return await self._core.batch_write(mutation_groups, max_commit_delay_ms=max_commit_delay_ms)
+        return await self._core.batch_write(mutation_groups)
 
     async def update_ddl(self, statements: Sequence[str] | str) -> str:
         """Asynchronously apply Spanner schema DDL statements."""

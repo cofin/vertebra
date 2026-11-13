@@ -1115,11 +1115,9 @@ class SyncSpannerDriver(SyncDatabaseDriver[SpannerConfig]):
         self,
         mutation_groups: Sequence[MutationGroup | Sequence[Mutation | Mapping[str, Any]]],
         *,
-        max_commit_delay_ms: int | None = None,
         exclude_txn_from_change_streams: bool = False,
     ) -> list[dict[str, Any]]:
         """Commit independent `MutationGroup` batches via streaming `BatchWrite`."""
-        _ = max_commit_delay_ms
         if not mutation_groups:
             return []
         groups = [SpannerCore.coerce_mutation_group(g) for g in mutation_groups]
@@ -1809,11 +1807,9 @@ class AsyncSpannerDriver(AsyncDatabaseDriver[SpannerConfig]):
         self,
         mutation_groups: Sequence[MutationGroup | Sequence[Mutation | Mapping[str, Any]]],
         *,
-        max_commit_delay_ms: int | None = None,
         exclude_txn_from_change_streams: bool = False,
     ) -> list[dict[str, Any]]:
         """Commit independent `MutationGroup` batches asynchronously via `BatchWrite`."""
-        _ = max_commit_delay_ms
         if not mutation_groups:
             return []
         groups = [SpannerCore.coerce_mutation_group(g) for g in mutation_groups]
