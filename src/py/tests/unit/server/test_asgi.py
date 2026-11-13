@@ -1160,3 +1160,29 @@ async def test_python_asgi_execute_and_submit_streaming_and_errors(
     else:
         assert len(stream_calls) == 1
         assert disconnect_observed == [{"type": "http.disconnect"}]
+
+
+def test_asgi_lifespan_startup_timeout_cancels_and_awaits_task() -> None:
+    """AsgiLifespan.startup cancels and awaits the stalled lifespan task when startup times out."""
+    task_cancelled = asyncio.Event()
+
+    async def stalled_lifespan(scope: dict[str, Any], receive: Any, _send: Any) -> None:
+        if scope["type"] != "lifespan":
+            return
+        msg = await receive()
+        assert msg["type"] == "lifespan.startup"
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            task_cancelled.set()
+            raise
+
+    async def _run_check() -> None:
+        lifespan = AsgiLifespan(stalled_lifespan, timeout=0.05)
+        with pytest.raises(TimeoutError):
+            await lifespan.startup()
+        assert task_cancelled.is_set()
+        assert lifespan._task is not None
+        assert lifespan._task.done()
+
+    asyncio.run(_run_check())

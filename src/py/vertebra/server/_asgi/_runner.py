@@ -3,6 +3,7 @@
 import asyncio
 import contextlib
 import logging
+import os
 from collections.abc import Awaitable, Buffer, Callable, Iterable, Mapping
 from typing import Any, cast
 
@@ -97,13 +98,17 @@ class AsgiLifespan:
         *,
         loop: asyncio.AbstractEventLoop | None = None,
         state: dict[str, Any] | None = None,
-        timeout: float = 30.0,
+        timeout: float | None = None,
     ) -> None:
         self._app = app
         self._loop = loop
         self._owns_loop = False
         self._state: dict[str, Any] = dict(state) if state is not None else {}
-        self._timeout = timeout
+        if timeout is None:
+            raw_timeout = os.environ.get("VERTEBRA_LIFESPAN_TIMEOUT", "").strip()
+            self._timeout = float(raw_timeout) if raw_timeout else 30.0
+        else:
+            self._timeout = timeout
         self._supported = False
         self._received_startup = False
         self._startup_error: BaseException | None = None
@@ -134,7 +139,14 @@ class AsgiLifespan:
 
         await self._receive_queue.put({"type": "lifespan.startup"})
         self._task = loop.create_task(self._run_app())
-        await asyncio.wait_for(self._startup_complete.wait(), timeout=self._timeout)
+        try:
+            await asyncio.wait_for(self._startup_complete.wait(), timeout=self._timeout)
+        except BaseException:
+            if self._task is not None and not self._task.done():
+                self._task.cancel()
+                with contextlib.suppress(BaseException):
+                    await self._task
+            raise
         if self._startup_error is not None:
             if self._task is not None and not self._task.done():
                 self._task.cancel()
@@ -175,7 +187,7 @@ class AsgiLifespan:
         loop = self._ensure_loop()
         if loop.is_running():
             fut = asyncio.run_coroutine_threadsafe(self.startup(), loop)
-            return fut.result(timeout=self._timeout)
+            return fut.result(timeout=self._timeout + 1.0)
         return loop.run_until_complete(self.startup())
 
     def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:

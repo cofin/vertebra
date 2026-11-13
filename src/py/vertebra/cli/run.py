@@ -11,6 +11,7 @@ from typing import Any
 import click
 
 from vertebra.build import BuildConfig
+from vertebra.cli import workers as cli_workers_mod
 from vertebra.cli._launch import (
     ServerLaunchEnv,
     is_free_threaded_runtime,
@@ -125,16 +126,47 @@ def run(
     configure_logging(level=log_level, mode="prod")
     resolved_app = resolve_cli_app_path(app)
 
+    if worker_only and oneshot_job:
+        raise CLIError(
+            "--worker-only cannot be combined with --oneshot-job",
+            exit_code=EXIT_CONFIG_ERROR,
+        )
+
+    if worker_only and with_workers:
+        raise CLIError(
+            "--worker-only cannot be combined with --with-workers",
+            exit_code=EXIT_CONFIG_ERROR,
+        )
+
     if oneshot_job:
         sys.exit(_execute_oneshot_cli(resolved_app, oneshot_job))
 
-    resolved_jit = _resolve_jit_setting(jit)
     cfg_enabled, cfg_queues, cfg_lanes = load_workers_pyproject_config(Path.cwd())
     effective_with_workers = cfg_enabled if with_workers is None else with_workers
     effective_queues = tuple(q.strip() for q in worker_queues.split(",") if q.strip()) if worker_queues else cfg_queues
     effective_lanes = dict(cfg_lanes)
     if lane_concurrency:
         effective_lanes.update(parse_lane_concurrency_map(lane_concurrency))
+
+    if worker_only:
+        resolved_queues = effective_queues or ("default",)
+        queues_str = ",".join(resolved_queues)
+        concurrency_str = (
+            ",".join(str(effective_lanes.get(q, 10)) for q in resolved_queues) if effective_lanes else "10"
+        )
+        if not no_banner:
+            render_banner(mode="worker", host=host, port=port, workers=1)
+        worker_exit = cli_workers_mod.execute_worker_cli(
+            resolved_app,
+            queues=queues_str,
+            concurrency=concurrency_str,
+            drain_timeout_s=drain_timeout / 1000.0,
+            run_until_stopped=True,
+            health_probe=(host, port),
+        )
+        sys.exit(worker_exit)
+
+    resolved_jit = _resolve_jit_setting(jit)
 
     launch_env = ServerLaunchEnv(
         app_path=resolved_app,
@@ -155,7 +187,6 @@ def run(
     env = launch_env.to_environ()
     resolved_interface = "asgi" if asgi and interface.lower() == "auto" else interface.lower()
     env["VERTEBRA_INTERFACE"] = resolved_interface
-    env["VERTEBRA_WORKER_ONLY"] = "1" if worker_only else "0"
 
     if tls_cert and tls_key:
         env["VERTEBRA_TLS_CERT"] = str(Path(tls_cert).resolve())

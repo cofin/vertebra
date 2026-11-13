@@ -1,10 +1,16 @@
 """End-to-end streaming acceptance tests against live embedded and SHM vertebra-server."""
 
+import os
 import socket
+import subprocess
+import sys
+import time
+from pathlib import Path
 
 import pytest
 
-from tests.integration.server.conftest import LiveServerHandle
+from tests.integration.server.conftest import LiveServerHandle, _reserve_ephemeral_port
+from vertebra.supervisor import find_server_binary
 
 
 @pytest.mark.parametrize(
@@ -84,3 +90,75 @@ def _release_gate(handle: LiveServerHandle, stream_id: str) -> None:
         resp = _recv_until_eof(gate_sock)
         assert resp.startswith(b"HTTP/1.1 200"), f"Gate release failed: {resp!r}"
         assert b"opened" in resp
+
+
+@pytest.mark.parametrize("topology", ["embedded", "shm"])
+def test_vertebra_server_aborts_startup_when_lifespan_fails(
+    tmp_path: Path,
+    topology: str,
+) -> None:
+    """Both embedded and SHM server topologies abort startup with non-zero exit when lifespan fails."""
+    repo_root = Path(__file__).resolve().parents[5]
+    try:
+        binary_path = find_server_binary()
+    except SystemExit:
+        pytest.skip("vertebra-server binary not built yet")
+
+    app_file = tmp_path / "failing_lifespan_app.py"
+    app_file.write_text(
+        "async def app(scope, receive, send):\n"
+        "    if scope['type'] == 'lifespan':\n"
+        "        await receive()\n"
+        "        await send({'type': 'lifespan.startup.failed', 'message': 'startup broken'})\n"
+        "        return\n"
+        "    await send({'type': 'http.response.start', 'status': 200, 'headers': []})\n"
+        "    await send({'type': 'http.response.body', 'body': b'ok', 'more_body': False})\n",
+        encoding="utf-8",
+    )
+
+    port = _reserve_ephemeral_port()
+    env = dict(os.environ)
+    env["VERTEBRA_SERVER_BINARY"] = str(binary_path)
+    env["PYTHONHOME"] = sys.base_prefix
+    env["VERTEBRA_SHM_PROFILE"] = "compact"
+    py_paths = [str(tmp_path), str(repo_root / "src" / "py"), *(p for p in sys.path if p)]
+    env["PYTHONPATH"] = os.pathsep.join(py_paths)
+
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "from vertebra.cli import cli; cli()",
+            "run",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            str(port),
+            "--workers",
+            "1",
+            "--topology",
+            topology,
+            "--no-banner",
+            "failing_lifespan_app:app",
+        ],
+        cwd=str(repo_root),
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    start_time = time.monotonic()
+    try:
+        stdout, stderr = proc.communicate(timeout=10.0)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.communicate()
+        msg = f"vertebra-server ({topology}) hung or respawned infinitely on failing lifespan"
+        raise AssertionError(msg) from None
+
+    elapsed = time.monotonic() - start_time
+    assert proc.returncode != 0, f"Expected non-zero exit for {topology}; stdout={stdout} stderr={stderr}"
+    assert elapsed < 10.0
+    combined_output = f"{stdout}\n{stderr}"
+    assert "No module named '_socket'" not in combined_output
+    assert "startup broken" in combined_output or "WorkerStartupError" in combined_output or "78" in combined_output

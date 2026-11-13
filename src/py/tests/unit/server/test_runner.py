@@ -34,7 +34,7 @@ from vertebra.server._dispatch import (
 )
 from vertebra.server._gil_audit import is_free_threaded
 from vertebra.server._loops import EventLoopPool
-from vertebra.server.worker import Worker, _AsgiMountRunner, _instantiate_mount_runners, run_worker
+from vertebra.server.worker import Worker, WorkerStartupError, _AsgiMountRunner, _instantiate_mount_runners, run_worker
 from vertebra.typing import ImproperConfigurationError
 from vertebra.utils.serializers import decode_json, encode_json_bytes, encode_msgpack_bytes
 
@@ -1324,3 +1324,105 @@ def test_dispatch_batch_buffered_async_native_times_out_with_504_and_cancels_tas
         assert cancelled.wait(timeout=2.0)
     finally:
         pool.stop()
+
+
+@pytest.mark.parametrize("failure_mode", ["startup_failed_event", "startup_exception", "startup_timeout", "rsgi_init"])
+def test_worker_run_raises_worker_startup_error_on_lifespan_or_rsgi_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    failure_mode: str,
+) -> None:
+    """Worker.run raises WorkerStartupError on lifespan failure, exception, timeout, or RSGI init error."""
+    monkeypatch.setenv("VERTEBRA_LIFESPAN_TIMEOUT", "0.05")
+    monkeypatch.setattr("vertebra.server.worker.get_request_notify_fd", lambda: -1)
+    monkeypatch.setattr("vertebra.server.worker.get_batch", lambda _timeout: [])
+
+    async def failing_event_asgi(scope: dict[str, Any], receive: Any, send: Any) -> None:
+        if scope["type"] == "lifespan":
+            await receive()
+            await send({"type": "lifespan.startup.failed", "message": "db down"})
+
+    async def raising_asgi(scope: dict[str, Any], receive: Any, _send: Any) -> None:
+        if scope["type"] == "lifespan":
+            await receive()
+            msg = "lifespan exploded"
+            raise RuntimeError(msg)
+
+    async def timeout_asgi(scope: dict[str, Any], receive: Any, _send: Any) -> None:
+        if scope["type"] == "lifespan":
+            await receive()
+            await asyncio.sleep(60)
+
+    class FailingRsgiApp:
+        def __rsgi_init__(self, _loop: Any) -> None:
+            msg = "rsgi init exploded"
+            raise RuntimeError(msg)
+
+        async def __rsgi__(self, _scope: Any, _proto: Any) -> None:
+            return None
+
+    mount_map: dict[str, tuple[str, Any, str]] = {
+        "startup_failed_event": ("/api", failing_event_asgi, "asgi"),
+        "startup_exception": ("/api", raising_asgi, "asgi"),
+        "startup_timeout": ("/api", timeout_asgi, "asgi"),
+        "rsgi_init": ("/rsgi", FailingRsgiApp(), "rsgi"),
+    }
+    prefix, mount_app, proto = mount_map[failure_mode]
+    expected_stage = "rsgi_init" if failure_mode == "rsgi_init" else "lifespan"
+
+    w = Worker({}, mounts=[(prefix, mount_app, proto)], max_batches=1)
+    with pytest.raises(WorkerStartupError) as exc_info:
+        w.run()
+
+    assert exc_info.value.prefix == prefix
+    assert exc_info.value.phase == expected_stage
+
+
+def test_worker_run_unwinds_prior_mounts_on_later_mount_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When mount 2 fails startup, mount 1 lifespan shutdown unwinds cleanly before WorkerStartupError."""
+    monkeypatch.setattr("vertebra.server.worker.get_request_notify_fd", lambda: -1)
+    monkeypatch.setattr("vertebra.server.worker.get_batch", lambda _timeout: [])
+    events: list[str] = []
+
+    async def first_ok_asgi(scope: dict[str, Any], receive: Any, send: Any) -> None:
+        if scope["type"] != "lifespan":
+            return
+        msg = await receive()
+        if msg["type"] == "lifespan.startup":
+            events.append("m1_startup")
+            await send({"type": "lifespan.startup.complete"})
+        msg2 = await receive()
+        if msg2["type"] == "lifespan.shutdown":
+            events.append("m1_shutdown")
+            await send({"type": "lifespan.shutdown.complete"})
+
+    async def second_fail_asgi(scope: dict[str, Any], receive: Any, send: Any) -> None:
+        if scope["type"] == "lifespan":
+            await receive()
+            events.append("m2_startup_failed")
+            await send({"type": "lifespan.startup.failed", "message": "boom"})
+
+    w = Worker({}, mounts=[("/m1", first_ok_asgi, "asgi"), ("/m2", second_fail_asgi, "asgi")], max_batches=1)
+    with pytest.raises(WorkerStartupError) as exc_info:
+        w.run()
+
+    assert exc_info.value.prefix == "/m2"
+    assert events == ["m1_startup", "m2_startup_failed", "m1_shutdown"]
+
+
+def test_worker_run_unsupported_lifespan_mount_stays_non_fatal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mounts that do not support the ASGI lifespan protocol do not trigger WorkerStartupError."""
+    monkeypatch.setattr("vertebra.server.worker.get_request_notify_fd", lambda: -1)
+    monkeypatch.setattr("vertebra.server.worker.get_batch", lambda _timeout: [object()])
+    monkeypatch.setattr(Worker, "_process_batch", lambda *_args, **_kwargs: None)
+
+    async def stateless_asgi(scope: dict[str, Any], _receive: Any, _send: Any) -> None:
+        if scope["type"] == "lifespan":
+            msg = "lifespan not supported"
+            raise NotImplementedError(msg)
+
+    w = Worker({}, mounts=[("/stateless", stateless_asgi, "asgi")], max_batches=1)
+    w.run()

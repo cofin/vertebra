@@ -19,6 +19,7 @@ Environment variables (set by supervisor):
 import inspect
 import logging
 import os
+import sys
 from collections.abc import Callable
 from typing import Any
 
@@ -28,10 +29,12 @@ from vertebra.framework._app import App, _make_handler_id
 from vertebra.server._dispatch import _coerce_response
 from vertebra.server._gil_audit import GilAuditReport
 from vertebra.server._protocol import InterfaceMode, detect_interface
-from vertebra.server.worker import run_worker
+from vertebra.server.worker import WorkerStartupError, run_worker
 from vertebra.utils.module_loader import import_app
 
-__all__ = ("main", "resolve_worker_targets")
+__all__ = ("EXIT_STARTUP_FAILURE", "main", "resolve_worker_targets")
+
+EXIT_STARTUP_FAILURE = 78
 
 
 def resolve_worker_targets(
@@ -75,6 +78,10 @@ def resolve_worker_targets(
 
 def main() -> None:
     """Initialize a worker process and start the batch runner loop."""
+    if any(arg in {"-h", "--help"} for arg in sys.argv[1:]):
+        sys.stdout.write("Usage: python -m vertebra.supervisor._worker\n")
+        return
+
     transport_mode = os.environ.get("VERTEBRA_TRANSPORT_MODE", "inprocess")
     app_path = os.environ["VERTEBRA_APP"]
     worker_id = int(os.environ.get("VERTEBRA_WORKER_ID", "0"))
@@ -91,12 +98,17 @@ def main() -> None:
     interface = os.environ.get("VERTEBRA_INTERFACE", "auto").strip().lower()
     handlers, mounts = resolve_worker_targets(app, native=native, interface=interface)
 
-    run_worker(
-        handlers,
-        mounts=mounts,
-        batch_timeout_ms=100,
-        before_extensions=before_extensions,
-    )
+    try:
+        run_worker(
+            handlers,
+            mounts=mounts,
+            app_obj=app,
+            batch_timeout_ms=100,
+            before_extensions=before_extensions,
+        )
+    except WorkerStartupError:
+        logger.exception("Worker startup failed; exiting with code %d", EXIT_STARTUP_FAILURE)
+        sys.exit(EXIT_STARTUP_FAILURE)
 
 
 def _build_app_asgi_adapter(app: App) -> Callable[..., Any]:

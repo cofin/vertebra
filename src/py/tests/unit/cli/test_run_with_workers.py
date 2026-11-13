@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
+import socket
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -11,8 +15,12 @@ from click.testing import CliRunner
 from vertebra.cli import cli
 from vertebra.cli import dev as cli_dev_mod
 from vertebra.cli import run as cli_run_mod
+from vertebra.cli import workers as cli_workers_mod
 from vertebra.cli._launch import ServerLaunchEnv, load_workers_pyproject_config
-from vertebra.server.lanes import WorkerRunner
+from vertebra.framework.queues import QueueService, task
+from vertebra.server.lanes import QUEUE_SERVICE_STATE_KEY, WorkerRunner
+from vertebra.server.platform import HealthProbeServer, LameDuckController, ZPagesRegistry
+from vertebra.server.worker import Worker
 
 
 @pytest.fixture
@@ -217,3 +225,193 @@ def test_worker_starts_and_drains_colocated_worker_runner(
 
     assert ("started", ("default", "embeddings")) in lifecycle_events
     assert any(evt[0] == "stopped" for evt in lifecycle_events)
+
+
+def test_worker_binds_resolved_queue_service_from_app_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Worker.run resolves QueueService from VERTEBRA_QUEUE_SERVICE state and executes queued tasks."""
+    qs = QueueService()
+    executed: list[int] = []
+
+    @task(lane="io")
+    async def process_item(item_id: int) -> int:
+        executed.append(item_id)
+        return item_id * 2
+
+    qs.register(process_item)
+    asyncio.run(qs.enqueue("process_item", 21))
+
+    app_double = type("AppWithQueue", (), {"state": {QUEUE_SERVICE_STATE_KEY: qs}})()
+
+    batches_seen = 0
+
+    def wait_and_yield_one_batch(_timeout: int) -> list[object]:
+        nonlocal batches_seen
+        batches_seen += 1
+        if batches_seen == 1:
+            time.sleep(0.12)
+        return [object()]
+
+    monkeypatch.setenv("VERTEBRA_WITH_WORKERS", "1")
+    monkeypatch.setenv("VERTEBRA_WORKER_QUEUES", "io")
+    monkeypatch.setenv("VERTEBRA_WORKER_LANE_CONCURRENCY", "io=1")
+    monkeypatch.setattr("vertebra.server.worker.get_request_notify_fd", lambda: -1)
+    monkeypatch.setattr("vertebra.server.worker.get_batch", wait_and_yield_one_batch)
+    monkeypatch.setattr(Worker, "_process_batch", lambda *_args, **_kwargs: None)
+
+    w = Worker({}, app_obj=app_double, max_batches=1)
+    w.run()
+
+    assert executed == [21]
+
+
+def test_vtb_workers_run_continuous_mode_executes_queued_task_until_stopped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """execute_worker_cli with run_until_stopped=True processes queued work and stops cleanly."""
+    qs = QueueService()
+    done_event = threading.Event()
+    executed: list[str] = []
+
+    @task(lane="io")
+    async def process_job(label: str) -> None:
+        executed.append(label)
+        done_event.set()
+
+    qs.register(process_job)
+    asyncio.run(qs.enqueue("process_job", "continuous"))
+
+    app_double = type("WorkerApp", (), {"state": {QUEUE_SERVICE_STATE_KEY: qs}})()
+    monkeypatch.setattr(cli_workers_mod, "import_app", lambda _path: app_double)
+
+    orig_run = WorkerRunner.run
+
+    async def stop_after_task(self: WorkerRunner, **kwargs: Any) -> None:
+        async def _trigger_stop() -> None:
+            while not done_event.is_set():
+                await asyncio.sleep(0.01)
+            self._stopping = True
+
+        stopper = asyncio.create_task(_trigger_stop())
+        try:
+            await orig_run(self, **kwargs)
+        finally:
+            await stopper
+
+    monkeypatch.setattr(WorkerRunner, "run", stop_after_task)
+
+    code = cli_workers_mod.execute_worker_cli(
+        "worker_app:app",
+        queues="io",
+        concurrency="1",
+        drain_timeout_s=2.0,
+        run_until_stopped=True,
+    )
+
+    assert code == 0
+    assert executed == ["continuous"]
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "draining", "expected_status"),
+    [
+        ("GET", "/healthz", False, 200),
+        ("GET", "/readyz", False, 200),
+        ("GET", "/statusz", False, 200),
+        ("GET", "/varz", False, 200),
+        ("POST", "/healthz", False, 405),
+        ("GET", "/missing", False, 404),
+        ("GET", "/healthz", True, 503),
+        ("GET", "/readyz", True, 503),
+    ],
+)
+def test_health_probe_server_endpoints_and_lame_duck(
+    method: str,
+    path: str,
+    draining: bool,
+    expected_status: int,
+) -> None:
+    """HealthProbeServer responds with expected HTTP status codes across endpoints and drain mode."""
+    zpages = ZPagesRegistry("vertebra-worker", lame_duck=LameDuckController())
+    if draining:
+        zpages.lame_duck.enter_lame_duck()
+    else:
+        zpages.lame_duck._draining = False
+
+    async def _run_probe_check() -> None:
+        probe = HealthProbeServer(zpages, host="127.0.0.1", port=0)
+        await probe.start()
+        try:
+            reader, writer = await asyncio.open_connection("127.0.0.1", probe.bound_port)
+            try:
+                writer.write(
+                    f"{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n".encode("ascii")
+                )
+                await writer.drain()
+                raw = await reader.read()
+            finally:
+                writer.close()
+                await writer.wait_closed()
+            status_line = raw.split(b"\r\n", 1)[0].decode("ascii")
+            assert f" {expected_status} " in status_line
+            if expected_status == 405:
+                assert b"Allow: GET\r\n" in raw
+        finally:
+            await probe.stop()
+
+    asyncio.run(_run_probe_check())
+
+
+def test_vtb_run_worker_only_serves_health_probe_and_exits_cleanly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """execute_worker_cli with health_probe serves HTTP /healthz until signalled."""
+    qs = QueueService()
+    app_state: dict[str, Any] = {QUEUE_SERVICE_STATE_KEY: qs}
+    app_double = type("WorkerOnlyApp", (), {"state": app_state})()
+    monkeypatch.setattr(cli_workers_mod, "import_app", lambda _path: app_double)
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe_sock:
+        probe_sock.bind(("127.0.0.1", 0))
+        probe_port = probe_sock.getsockname()[1]
+
+    result_box: list[int] = []
+
+    def run_worker_only_thread() -> None:
+        code = cli_workers_mod.execute_worker_cli(
+            "worker_only_app:app",
+            queues="io",
+            concurrency="1",
+            drain_timeout_s=2.0,
+            run_until_stopped=True,
+            health_probe=("127.0.0.1", probe_port),
+        )
+        result_box.append(code)
+
+    thread = threading.Thread(target=run_worker_only_thread, daemon=True)
+    thread.start()
+    try:
+        response_bytes = b""
+        for _ in range(40):
+            try:
+                with socket.create_connection(("127.0.0.1", probe_port), timeout=0.5) as client:
+                    client.sendall(b"GET /healthz HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+                    response_bytes = client.recv(4096)
+                    break
+            except OSError:
+                time.sleep(0.05)
+
+        assert b"200 OK" in response_bytes
+        runner = app_state.get("vertebra_worker_runner")
+        assert runner is not None
+        runner._stopping = True
+        thread.join(timeout=3.0)
+        assert not thread.is_alive()
+    finally:
+        runner = app_state.get("vertebra_worker_runner")
+        if runner is not None:
+            runner._stopping = True
+        thread.join(timeout=1.0)
+
+    assert result_box == [0]

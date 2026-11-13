@@ -2,6 +2,8 @@
 
 import io
 import os
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -9,6 +11,7 @@ import pytest
 from click.testing import CliRunner
 
 from vertebra import App
+from vertebra import supervisor as supervisor_pkg
 from vertebra._vertebra import Response
 from vertebra.build.packaging.standalone import StandaloneBuilder
 from vertebra.build.packaging.targets import BuildTarget
@@ -20,7 +23,7 @@ from vertebra.cli.errors import CLIError
 from vertebra.cli.plugin_registry import ensure_vertebra_integration
 from vertebra.cli.theme import Console
 from vertebra.framework._app import _make_handler_id
-from vertebra.server.worker import Worker
+from vertebra.server.worker import Worker, WorkerStartupError
 from vertebra.supervisor import _supervisor as supervisor_mod
 from vertebra.supervisor import _worker as supervisor_worker
 
@@ -426,3 +429,154 @@ def test_vertebra_extension_group_plugin_cli_and_auto_integration(
     fake_st = _FakeStarletteApp()
     ensure_vertebra_integration(fake_st, native=True)
     assert getattr(fake_st, "__vertebra_fastpath__", None) is not None
+
+
+@pytest.mark.parametrize(
+    "export_name",
+    [
+        "build_server_command",
+        "find_repo_root",
+        "find_server_binary",
+        "run_supervisor",
+        "worker_main",
+    ],
+)
+def test_supervisor_package_lazy_exports(export_name: str) -> None:
+    """Verify vertebra.supervisor lazily exports expected supervisor helpers."""
+    assert export_name in supervisor_pkg.__all__
+    exported = getattr(supervisor_pkg, export_name)
+    assert callable(exported)
+
+
+def test_supervisor_import_in_fresh_interpreter_and_worker_module_help() -> None:
+    """Fresh import of vertebra.supervisor has no circular import and -m _worker --help emits no runpy warning."""
+    import_proc = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "from vertebra.supervisor import build_server_command, find_repo_root, "
+                "find_server_binary, run_supervisor, worker_main; "
+                "assert all(callable(fn) for fn in (build_server_command, find_repo_root, find_server_binary, run_supervisor, worker_main))"
+            ),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert import_proc.returncode == 0, import_proc.stderr
+
+    help_proc = subprocess.run(
+        [sys.executable, "-W", "error::RuntimeWarning", "-m", "vertebra.supervisor._worker", "--help"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert help_proc.returncode == 0, help_proc.stderr
+    assert "RuntimeWarning" not in help_proc.stderr
+
+
+def test_supervisor_worker_main_exits_78_on_worker_startup_error(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Verify supervisor._worker.main exits with code 78 and logs traceback on WorkerStartupError."""
+    monkeypatch.setenv("VERTEBRA_APP", "dummy:app")
+    monkeypatch.setattr(supervisor_worker, "import_app", lambda _path: object())
+    monkeypatch.setattr(supervisor_worker, "resolve_worker_targets", lambda *_args, **_kwargs: ({}, []))
+    monkeypatch.setattr(
+        supervisor_worker,
+        "run_worker",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(WorkerStartupError("/api", "lifespan")),
+    )
+    monkeypatch.setattr(sys, "argv", ["vertebra-worker"])
+
+    with caplog.at_level("ERROR"), pytest.raises(SystemExit) as exc_info:
+        supervisor_worker.main()
+
+    assert exc_info.value.code == supervisor_worker.EXIT_STARTUP_FAILURE == 78
+    assert any("Worker startup failed" in record.getMessage() for record in caplog.records)
+
+
+@pytest.mark.parametrize(
+    "conflicting_flag",
+    [["--with-workers"], ["--oneshot-job", "sync_all"]],
+)
+def test_vtb_run_worker_only_rejects_conflicting_flags(
+    conflicting_flag: list[str],
+) -> None:
+    """vtb run --worker-only rejects --with-workers and --oneshot-job with exit code 2."""
+    runner = CliRunner()
+    res = runner.invoke(
+        cli,
+        ["run", "sample_app:app", "--worker-only", "--no-banner", *conflicting_flag],
+    )
+    assert res.exit_code == 2
+    assert "cannot be combined" in res.output
+
+
+def test_vtb_run_worker_only_invokes_execute_worker_cli_without_server_spawn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """vtb run --worker-only dispatches to execute_worker_cli with run_until_stopped=True and health_probe."""
+    recorded: dict[str, Any] = {}
+
+    def fake_execute_worker_cli(
+        app_path: str,
+        *,
+        queues: str,
+        concurrency: str,
+        drain_timeout_s: float,
+        oneshot_job: str | None = None,
+        payload: Any = None,
+        run_until_stopped: bool = False,
+        health_probe: tuple[str, int] | None = None,
+    ) -> int:
+        recorded["app_path"] = app_path
+        recorded["queues"] = queues
+        recorded["concurrency"] = concurrency
+        recorded["drain_timeout_s"] = drain_timeout_s
+        recorded["oneshot_job"] = oneshot_job
+        recorded["payload"] = payload
+        recorded["run_until_stopped"] = run_until_stopped
+        recorded["health_probe"] = health_probe
+        return 0
+
+    def fail_supervisor(**_kwargs: Any) -> int:
+        msg = "run_supervisor must not be called in --worker-only mode"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr("vertebra.cli.workers.execute_worker_cli", fake_execute_worker_cli)
+    monkeypatch.setattr(cli_run_mod, "run_supervisor", fail_supervisor)
+
+    runner = CliRunner()
+    res = runner.invoke(
+        cli,
+        [
+            "run",
+            "sample_app:app",
+            "--worker-only",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "9099",
+            "--queues",
+            "default,emails",
+            "--lane-concurrency",
+            "default=4,emails=2",
+            "--drain-timeout",
+            "15000",
+            "--no-banner",
+        ],
+    )
+    assert res.exit_code == 0, res.output
+    assert recorded == {
+        "app_path": "sample_app:app",
+        "queues": "default,emails",
+        "concurrency": "4,2",
+        "drain_timeout_s": 15.0,
+        "oneshot_job": None,
+        "payload": None,
+        "run_until_stopped": True,
+        "health_probe": ("127.0.0.1", 9099),
+    }
