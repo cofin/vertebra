@@ -1,5 +1,10 @@
 # Bundle Activity Log
 
+## [2026-11-13T04:57:32Z] chapter-complete | server-runtime-correctness ch02-lifespan-supervisor-and-worker-lanes
+
+- Closed `ch02-lifespan-supervisor-and-worker-lanes` at `d2da8fa0` (sync `f32c3234`): added `WorkerStartupError` + SHM exit code `78` supervisor halt, lazy `vertebra.supervisor` exports, `WorkerRunner.resolve_queue_service`, `vtb workers run` signal lifetime, and `vtb run --worker-only` `HealthProbeServer` (`14` Rust `workers` tests, `183` Python unit/integration tests, `clippy`, `ruff`, and `mypy` clean).
+- Advanced active frontier to `ch03-relocatable-server-binary-and-packaging` (`server-runtime-correctness:ch03:t01`; `18` tasks remain across `ch03`–`ch07`).
+
 ## [2026-11-13T03:42:00Z] chapter-complete | Server runtime progressive streaming (`server-runtime-correctness/ch01`)
 
 - Closed `ch01-python-stream-submission-and-flush` at `c9e7b370` (`cargo test -p vertebra-py --lib` 14 passed, `cargo clippy -p vertebra-core -p vertebra-py` clean, `mypy.stubtest vertebra._vertebra` clean, `ruff` + `mypy` clean, and `132 passed` across unit and live embedded/SHM `vertebra-server` streaming suites including `StreamingStorageResponse`, `ArrowCursor`, and inline `drive_until_complete` async streams).

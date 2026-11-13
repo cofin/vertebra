@@ -5,7 +5,7 @@ chapter_id: ch02-lifespan-supervisor-and-worker-lanes
 title: "Chapter 02: Fail-Loud Lifespan, Supervisor Exports, and Worker Lanes"
 description: "Abort worker startup on lifespan or RSGI init failures with exit code 78, export vertebra.supervisor symbols, bind QueueService on worker lanes, and serve health probes in --worker-only mode."
 status: stable
-state: active
+state: completed
 planning_status: complete
 planning_quality: standard
 planning_degraded_reason: null
@@ -13,15 +13,15 @@ depends_on_chapters:
   - ch01-python-stream-submission-and-flush
 replan_trigger: null
 plan_commit: 18baadcd
-last_reviewed_commit: null
-updated_at: "2026-11-12T23:45:00Z"
+last_reviewed_commit: f32c3234
+updated_at: "2026-11-13T04:57:32Z"
 generated:
   by: flow-plan
   at: "2026-11-12T23:45:00Z"
 verified:
-  - by: agent:plan-generator
-    at: "2026-11-12T23:45:00Z"
-    commit: 18baadcd
+  - by: agent:code-reviewer
+    at: "2026-11-13T04:57:32Z"
+    commit: f32c3234
 tags:
   - lifespan
   - supervisor
@@ -87,7 +87,7 @@ Runtime startup, supervisor exports, and worker-only CLI semantics are documente
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Implemented (`4/4` tasks at `d2da8fa0`)**: `WorkerStartupError`, SHM exit code `78` supervisor halt, lazy `vertebra.supervisor` exports, `WorkerRunner.resolve_queue_service`, `vtb workers run` lifetime, and `vtb run --worker-only` `HealthProbeServer` are verified (`14` Rust `workers` tests, `183` Python unit/integration tests, `clippy`, `ruff`, and `mypy` clean).
+- **Completed (`d2da8fa0`)**: All `4` tasks in `ch02-lifespan-supervisor-and-worker-lanes` (`14` Rust `workers` tests, `183` Python unit/integration tests, `clippy`, `ruff`, and `mypy` clean) are complete. Next chapter: `ch03-relocatable-server-binary-and-packaging`.
 - **Fast Chapter Gate (`< 35s`)**: `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-http --lib workers && uv run --no-sync ruff check src/py/vertebra/server src/py/vertebra/supervisor src/py/vertebra/cli && uv run --no-sync mypy src/py/vertebra/server src/py/vertebra/supervisor src/py/vertebra/cli && uv run --no-sync pytest src/py/tests/unit/server/test_runner.py src/py/tests/unit/server/test_asgi.py src/py/tests/unit/cli/test_cli_commands.py src/py/tests/unit/cli/test_run_with_workers.py src/py/tests/unit/extensions/test_worker_lanes.py -q`.
 
 [^worker-py]: `src/py/vertebra/server/worker.py::Worker` — Worker lifespan ExitStack and RSGI mount initialization.
