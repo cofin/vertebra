@@ -5,7 +5,7 @@ chapter_id: ch02-version-negotiation-and-sessions
 title: "Chapter 02: Protocol Version Negotiation, Sessions, and Capabilities"
 description: "Implement dual-mode MCP version negotiation, owner-scoped MCPSessionStore, legacy initialize and DELETE termination, 2025-03-26 batching, and a unified capability builder."
 status: stable
-state: planned
+state: active
 planning_status: complete
 planning_quality: standard
 planning_degraded_reason: null
@@ -71,12 +71,13 @@ Dual-mode negotiation and session lifecycle semantics are documented in `ch07` (
 
 ## 5. Implementation Plan
 
-- [ ] [t01-protocol-version-registry-and-capabilities.md](tasks/t01-protocol-version-registry-and-capabilities.md) — Add protocol version negotiation, shared `_server_capabilities`, and `logging/setLevel`
-- [ ] [t02-session-store-and-initialize.md](tasks/t02-session-store-and-initialize.md) — Create `MCPSessionStore` and implement legacy `initialize`, `ping`, and `notifications/initialized`
-- [ ] [t03-session-validation-batching-and-termination.md](tasks/t03-session-validation-batching-and-termination.md) — Validate legacy sessions (`404`), dispatch `2025-03-26` batches, and handle `DELETE /mcp`
+- [x] [5f8fd173] [t01-protocol-version-registry-and-capabilities.md](tasks/t01-protocol-version-registry-and-capabilities.md) — Add protocol version negotiation, shared `_server_capabilities`, and `logging/setLevel`
+- [x] [5f8fd173] [t02-session-store-and-initialize.md](tasks/t02-session-store-and-initialize.md) — Create `MCPSessionStore` and implement legacy `initialize`, `ping`, and `notifications/initialized`
+- [x] [5f8fd173] [t03-session-validation-batching-and-termination.md](tasks/t03-session-validation-batching-and-termination.md) — Validate legacy sessions (`404`), dispatch `2025-03-26` batches, and handle `DELETE /mcp`
 
 ## 6. Current State & Remaining Plan Snapshot
 
+- **Implemented (`3/3` tasks at `5f8fd173`, `206 passed`)**: Dual-mode protocol version negotiation, owner-scoped `MCPSessionStore`, legacy `initialize`/`ping`/`logging/setLevel`, `2025-03-26` batching, and `DELETE /mcp` termination are implemented and verified.
 - **Fast Chapter Gate (`< 12s`)**: `uv run --no-sync ruff check src/py/vertebra/agent/mcp && uv run --no-sync mypy src/py/vertebra/agent/mcp && uv run --no-sync pytest src/py/tests/unit/agent/test_mcp_conformance.py -q`.
 
 [^mcp-handle]: `src/py/vertebra/agent/mcp/service.py::MCPCore.handle` — HTTP validation and dispatch.

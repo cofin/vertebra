@@ -6,7 +6,13 @@ chapter_id: ch02-version-negotiation-and-sessions
 title: Implement Protocol Version Negotiation and Unified Capability Builder
 description: "Add SUPPORTED_PROTOCOL_VERSIONS, NegotiatedProtocol, mode detection, -32022 renegotiation payload, shared _server_capabilities, and logging/setLevel."
 status: stable
-state: pending
+state: completed
+commit: 5f8fd173
+last_verified_commit: 5f8fd173
+last_verified_at: "2026-11-13T04:43:05Z"
+verification_evidence: "ruff + mypy + pytest (206 agent + flask tests passed)"
+claimed_by: null
+claimed_at: null
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -66,8 +72,8 @@ uv run --no-sync ruff check src/py/vertebra/agent/mcp && uv run --no-sync mypy s
 
 ## Acceptance Criteria
 
-- [ ] All 4 protocol versions negotiate accurately and echo `MCP-Protocol-Version`.
-- [ ] `_server_capabilities` omits disabled families and enforces `-32601`.
+- [x] All 4 protocol versions negotiate accurately and echo `MCP-Protocol-Version`.
+- [x] `_server_capabilities` omits disabled families and enforces `-32601`.
 
 [^mcp-models]: `src/py/vertebra/agent/mcp/models.py::MCPConfig` — Protocol constants and MCPConfig.
 [^mcp-discover]: `src/py/vertebra/agent/mcp/service.py::MCPCore._handle_discover` — Current server/discover capability dictionary.

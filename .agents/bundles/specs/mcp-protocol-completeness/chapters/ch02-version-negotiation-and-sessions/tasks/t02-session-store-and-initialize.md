@@ -6,7 +6,13 @@ chapter_id: ch02-version-negotiation-and-sessions
 title: Create Owner-Scoped MCPSessionStore and Legacy initialize Handshake
 description: "Implement MCPSession, SessionLimitExceededError, and MCPSessionStore in sessions.py and wire legacy initialize, ping, and notifications/initialized."
 status: stable
-state: pending
+state: completed
+commit: 5f8fd173
+last_verified_commit: 5f8fd173
+last_verified_at: "2026-11-13T04:43:05Z"
+verification_evidence: "ruff + mypy + pytest (206 agent + flask tests passed)"
+claimed_by: null
+claimed_at: null
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -68,8 +74,8 @@ uv run --no-sync ruff check src/py/vertebra/agent/mcp && uv run --no-sync mypy s
 
 ## Acceptance Criteria
 
-- [ ] `MCPSessionStore` enforces TTL, `max_sessions`, and owner isolation.
-- [ ] Legacy `initialize` issues `Mcp-Session-Id` and returns spec-compliant capabilities.
+- [x] `MCPSessionStore` enforces TTL, `max_sessions`, and owner isolation.
+- [x] Legacy `initialize` issues `Mcp-Session-Id` and returns spec-compliant capabilities.
 
 [^mcp-service]: `src/py/vertebra/agent/mcp/service.py::MCPCore` — MCPCore initialization and method registration.
 [^task-store]: `src/py/vertebra/agent/mcp/tasks.py::MCPTaskStore` — Owner-key scoping precedent.

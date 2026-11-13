@@ -6,7 +6,13 @@ chapter_id: ch02-version-negotiation-and-sessions
 title: "Validate Legacy Sessions, Support 2025-03-26 Batching, and Handle DELETE /mcp"
 description: "Enforce 404 on unknown/expired legacy Mcp-Session-Id, allow JSON-RPC batch arrays only on 2025-03-26, and terminate sessions on DELETE /mcp."
 status: stable
-state: pending
+state: completed
+commit: 5f8fd173
+last_verified_commit: 5f8fd173
+last_verified_at: "2026-11-13T04:43:05Z"
+verification_evidence: "ruff + mypy + pytest (206 agent + flask tests passed)"
+claimed_by: null
+claimed_at: null
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -68,8 +74,8 @@ uv run --no-sync ruff check src/py/vertebra/agent/mcp && uv run --no-sync mypy s
 
 ## Acceptance Criteria
 
-- [ ] Unknown or terminated `Mcp-Session-Id` values deterministically return HTTP `404`.
-- [ ] JSON-RPC batches work only on `2025-03-26` and `DELETE /mcp` cleans up session state.
+- [x] Unknown or terminated `Mcp-Session-Id` values deterministically return HTTP `404`.
+- [x] JSON-RPC batches work only on `2025-03-26` and `DELETE /mcp` cleans up session state.
 
 [^mcp-handle]: `src/py/vertebra/agent/mcp/service.py::MCPCore.handle` — HTTP method and session header validation.
 [^jsonrpc-py]: `src/py/vertebra/agent/core/jsonrpc.py::JSONRPCRouter` — JSON-RPC single and batch payload dispatch.
