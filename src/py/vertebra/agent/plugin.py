@@ -19,6 +19,7 @@ from vertebra.agent.mcp.models import MCPConfig, McpHttpRequest
 from vertebra.agent.mcp.registry import ToolRegistry
 from vertebra.agent.mcp.routes import build_well_known_mcp_document
 from vertebra.agent.mcp.service import MCPCore
+from vertebra.agent.mcp.skills import MCPSkillsConfig, SkillCatalog
 from vertebra.agent.mcp.webmcp import build_webmcp_manifest
 from vertebra.agent.runtime import AgentRuntime
 from vertebra.agent.telemetry import AgentTelemetryRecorder
@@ -53,6 +54,8 @@ class AgentPluginConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Optional background `QueueService` for durable async turn execution."""
     session_store: Any = None
     """Optional `AgentSessionStore` backend persisting multi-turn conversation history."""
+    skills: MCPSkillsConfig | SkillCatalog | None = None
+    """Optional MCP skills configuration or pre-built SkillCatalog."""
 
 
 class AgentPlugin:
@@ -64,12 +67,14 @@ class AgentPlugin:
         recorder = getattr(self.observability, "recorder", self.observability)
         self.runtime = self.config.runtime or AgentRuntime(telemetry=recorder)
         self.mcp_registry = ToolRegistry(confirmation_gate=self.runtime.confirmation_gate)
+        self.skill_catalog = SkillCatalog.coerce(self.config.skills, telemetry=recorder)
         self.mcp_service = (
             MCPCore(
                 registry=self.mcp_registry,
                 config=self.config.mcp,
                 telemetry=recorder,
                 confirmation_gate=self.runtime.confirmation_gate,
+                skill_catalog=self.skill_catalog,
             )
             if self.config.mcp is not None
             else None
@@ -97,10 +102,14 @@ class AgentPlugin:
 
         if self.mcp_service is not None:
             srv = self.mcp_service
+            srv.validate()
 
             @app.get(srv.config.well_known_path)
             async def _mcp_well_known() -> dict[str, Any]:
-                return build_well_known_mcp_document(srv.config, srv.registry)
+                skill_names = (
+                    [s.name for s in srv.skill_catalog.list_skills()] if srv.skill_catalog is not None else None
+                )
+                return build_well_known_mcp_document(srv.config, srv.registry, skill_names=skill_names)
 
             if srv.config.webmcp is not None and srv.config.webmcp.enabled:
                 webmcp_cfg = srv.config.webmcp
@@ -189,6 +198,7 @@ class AgentPlugin:
         if hasattr(app_config, "state"):
             app_config.state["mcp_registry"] = self.mcp_registry
             app_config.state["mcp_service"] = self.mcp_service
+            app_config.state["skill_catalog"] = self.skill_catalog
             app_config.state["a2a_service"] = self.a2a_service
             app_config.state["agent_runtime"] = self.runtime
             app_config.state["agent_observability"] = self.observability
@@ -213,6 +223,8 @@ class AgentPlugin:
         handlers = getattr(app_config, "route_handlers", None)
         if handlers is not None:
             self._discover_handlers(handlers)
+            if self.mcp_service is not None:
+                self.mcp_service.validate()
             self._mount_litestar_routes(handlers, app_config=app_config)
 
         return app_config
@@ -289,7 +301,10 @@ class AgentPlugin:
             if not well_known_already_mounted:
 
                 async def _litestar_mcp_well_known() -> dict[str, Any]:
-                    return build_well_known_mcp_document(srv.config, srv.registry)
+                    skill_names = (
+                        [s.name for s in srv.skill_catalog.list_skills()] if srv.skill_catalog is not None else None
+                    )
+                    return build_well_known_mcp_document(srv.config, srv.registry, skill_names=skill_names)
 
                 route_handlers.append(
                     get_fn(

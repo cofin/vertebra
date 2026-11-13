@@ -18,6 +18,7 @@ from vertebra.agent.mcp.models import MCPConfig
 from vertebra.agent.mcp.registry import MCPRegistry, ToolRegistry
 from vertebra.agent.mcp.routes import WsgiMcpApp, render_well_known_mcp_json
 from vertebra.agent.mcp.service import MCPCore
+from vertebra.agent.mcp.skills import MCPSkillsConfig, SkillCatalog
 from vertebra.agent.mcp.webmcp import (
     WebMCPConfig,
     WebMCPManifest,
@@ -53,12 +54,22 @@ def dispatch_mcp_request(
     registry: ToolRegistry,
     request: Request | bytes | Any,
     config: MCPConfig | None = None,
+    *,
+    skills: MCPSkillsConfig | SkillCatalog | None = None,
 ) -> Any:
     """Execute an MCP HTTP request via shared ``WsgiMcpApp`` over ``MCPCore``."""
     resolved = config or MCPConfig(server_name="vertebra-django-mcp")
     cached_app = getattr(registry, "_mcp_app", None)
-    if not isinstance(cached_app, WsgiMcpApp) or cached_app.config != resolved:
-        cached_app = WsgiMcpApp(MCPCore(config=resolved, registry=registry))
+    if (
+        not isinstance(cached_app, WsgiMcpApp)
+        or cached_app.config != resolved
+        or (skills is not None and getattr(cached_app, "_skills_source", None) != skills)
+    ):
+        resolved_skills = SkillCatalog.coerce(skills)
+        core = MCPCore(config=resolved, registry=registry, skill_catalog=resolved_skills)
+        core.validate()
+        cached_app = WsgiMcpApp(core)
+        cast("Any", cached_app)._skills_source = skills
         cast("Any", registry)._mcp_app = cached_app
 
     if isinstance(request, Request):
@@ -110,6 +121,8 @@ def dispatch_mcp_request(
 def attach_mcp_routes(
     compiler_or_views: RouteCompiler | list[Any] | None = None,
     config: MCPConfig | None = None,
+    *,
+    skills: MCPSkillsConfig | SkillCatalog | None = None,
 ) -> tuple[MCPRegistry, dict[str, Response]]:
     """Scan Django views for ``@mcp_tool``, ``@mcp_resource``, and ``@mcp_prompt``."""
     resolved = config or MCPConfig(server_name="vertebra-django-mcp")
@@ -123,12 +136,17 @@ def attach_mcp_routes(
             cb = getattr(item, "callback", item)
             registry.register_route_handler(cb)
 
-    mcp_app = WsgiMcpApp(MCPCore(config=resolved, registry=registry))
+    resolved_skills = SkillCatalog.coerce(skills)
+    core = MCPCore(config=resolved, registry=registry, skill_catalog=resolved_skills)
+    core.validate()
+    mcp_app = WsgiMcpApp(core)
+    cast("Any", mcp_app)._skills_source = skills
     cast("Any", registry)._mcp_app = mcp_app
 
     static_responses: dict[str, Response] = {}
     if resolved.expose_well_known:
-        well_known_bytes = render_well_known_mcp_json(resolved, registry)
+        skill_names = [s.name for s in resolved_skills.list_skills()] if resolved_skills is not None else None
+        well_known_bytes = render_well_known_mcp_json(resolved, registry, skill_names=skill_names)
         static_responses[resolved.well_known_path] = Response(
             status=200,
             headers=[("content-type", "application/json")],

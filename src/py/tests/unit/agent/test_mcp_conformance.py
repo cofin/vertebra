@@ -13,12 +13,16 @@ import anyio
 import pytest
 from django.conf import settings as django_settings
 from django.http import StreamingHttpResponse
+from fastapi import FastAPI
 from flask import Flask
 from litestar import Litestar
 from litestar.response import Stream as LitestarStream
+from litestar.testing import TestClient as LitestarTestClient
 from litestar.testing import create_test_client
+from starlette.applications import Starlette
 from starlette.requests import Request as StarletteRequest
 from starlette.responses import StreamingResponse
+from starlette.testclient import TestClient as StarletteTestClient
 
 import vertebra.agent.mcp as mcp_pkg
 import vertebra.agent.mcp.service as mcp_service_mod
@@ -93,11 +97,12 @@ from vertebra.agent.mcp import (
     render_webmcp_manifest_json,
     resource,
 )
-from vertebra.agent.mcp.routes import AsgiMcpApp, WsgiMcpApp
+from vertebra.agent.mcp.routes import AsgiMcpApp, WsgiMcpApp, build_well_known_mcp_document
 from vertebra.agent.plugin import AgentPlugin, AgentPluginConfig
 from vertebra.agent.runtime import ConfirmationGate
 from vertebra.extensions.django.mcp import attach_mcp_routes as attach_django_mcp
 from vertebra.extensions.django.mcp import dispatch_mcp_request as dispatch_django_mcp
+from vertebra.extensions.fastapi.mcp import mount_mcp_routes as mount_fastapi_mcp
 from vertebra.extensions.flask.mcp import attach_mcp_routes as attach_flask_mcp
 from vertebra.extensions.starlette.mcp import mount_mcp_routes as mount_starlette_mcp
 from vertebra.framework._app import App
@@ -865,7 +870,7 @@ async def test_native_app_agent_plugin_routes_through_mcp_core_and_unifies_well_
     assert body_notif == b""
 
     native_wk = await get_wk()
-    expected_keys = {"protocolVersion", "mcp_version", "server", "serverInfo", "endpoint", "tools"}
+    expected_keys = {"protocolVersion", "mcp_version", "server", "serverInfo", "endpoint", "tools", "skills"}
     assert set(native_wk.keys()) == expected_keys
     assert native_wk["protocolVersion"] == "2026-07-28"
     assert native_wk["tools"] == ["echo_val"]
@@ -3445,3 +3450,186 @@ async def test_mcp_apps_projection_app_only_filtering_etag_and_webmcp() -> None:
     assert [t.name for t in manifest.tools] == ["open_dashboard"]
     seq_manifest = build_webmcp_manifest([t.spec for t in core.registry.list_tools()])
     assert [t.name for t in seq_manifest.tools] == ["open_dashboard"]
+
+
+@pytest.mark.parametrize(
+    ("skill_names", "expected"),
+    [
+        (None, []),
+        ([], []),
+        (["zeta", "alpha", "zeta"], ["alpha", "zeta"]),
+    ],
+)
+def test_build_well_known_mcp_document_emits_sorted_skills(
+    skill_names: list[str] | None,
+    expected: list[str],
+) -> None:
+    """Verify build_well_known_mcp_document always includes deduplicated sorted skills."""
+    doc = build_well_known_mcp_document(MCPConfig(server_name="wk-test"), skill_names=skill_names)
+    assert doc["skills"] == expected
+
+
+def _build_demo_skills_config(tmp_path: Path) -> MCPSkillsConfig:
+    skill_dir = tmp_path / "triage"
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text("---\ntitle: Triage Skill\n---\n# Triage\nRun triage.\n", encoding="utf-8")
+    return MCPSkillsConfig(paths=[tmp_path])
+
+
+@pytest.mark.anyio
+async def test_agent_plugin_native_and_litestar_skills_and_ui_validation(tmp_path: Path) -> None:
+    """Verify AgentPlugin wires SkillCatalog, well-known skills, and mount-time ui:// validation."""
+    skills_cfg = _build_demo_skills_config(tmp_path)
+
+    native_app = App()
+
+    @mcp_tool(name="ping_native")
+    def ping_native() -> str:
+        return "pong"
+
+    native_plugin = AgentPlugin(AgentPluginConfig(skills=skills_cfg))
+    native_plugin.mcp_registry.register_tool(ping_native)
+    native_plugin.mount_native(native_app)
+    assert native_plugin.mcp_service is not None
+    native_skills = await native_plugin.mcp_service._handle_skills_list()
+    assert [s["name"] for s in native_skills["skills"]] == ["triage"]
+
+    broken_native_app = App()
+
+    @mcp_tool(name="broken_native", ui_resource_uri="ui://missing/view.html")
+    def broken_native() -> str:
+        return "fail"
+
+    broken_native_plugin = AgentPlugin(AgentPluginConfig(skills=skills_cfg))
+    broken_native_plugin.mcp_registry.register_tool(broken_native)
+    with pytest.raises(ImproperConfigurationError, match="ui://missing/view.html"):
+        broken_native_plugin.mount_native(broken_native_app)
+
+    ls_plugin = AgentPlugin(AgentPluginConfig(skills=skills_cfg))
+    ls_app = Litestar(route_handlers=[], plugins=[ls_plugin])
+    with LitestarTestClient(app=ls_app) as client:
+        wk_resp = client.get("/.well-known/mcp.json")
+        assert wk_resp.status_code == 200
+        assert wk_resp.json()["skills"] == ["triage"]
+
+        skills_resp = client.post(
+            "/mcp",
+            headers={"MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "skills/list"},
+            json={"jsonrpc": "2.0", "id": 1, "method": "skills/list", "params": {}},
+        )
+        assert skills_resp.status_code == 200
+        assert [s["name"] for s in skills_resp.json()["result"]["skills"]] == ["triage"]
+
+    broken_ls_plugin = AgentPlugin(AgentPluginConfig(skills=skills_cfg))
+
+    @mcp_tool(name="broken_ls", ui_resource_uri="ui://missing/ls.html")
+    def broken_ls() -> str:
+        return "fail"
+
+    broken_ls_plugin.mcp_registry.register_tool(broken_ls)
+    with pytest.raises(ImproperConfigurationError, match="ui://missing/ls.html"):
+        Litestar(route_handlers=[], plugins=[broken_ls_plugin])
+
+
+@pytest.mark.parametrize("use_fastapi", [False, True])
+def test_starlette_and_fastapi_mount_skills_well_known_and_ui_validation(tmp_path: Path, use_fastapi: bool) -> None:
+    """Verify Starlette and FastAPI mount_mcp_routes wire SkillCatalog, well-known skills, and UI validation."""
+    skills_cfg = _build_demo_skills_config(tmp_path)
+    app = FastAPI() if use_fastapi else Starlette()
+    mount_fn = mount_fastapi_mcp if use_fastapi else mount_starlette_mcp
+    mount_fn(app, skills=skills_cfg)
+
+    with StarletteTestClient(app) as client:
+        wk_resp = client.get("/.well-known/mcp.json")
+        assert wk_resp.status_code == 200
+        assert wk_resp.json()["skills"] == ["triage"]
+
+        skills_resp = client.post(
+            "/mcp",
+            headers={"MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "skills/list"},
+            json={"jsonrpc": "2.0", "id": 1, "method": "skills/list", "params": {}},
+        )
+        assert skills_resp.status_code == 200
+        assert [s["name"] for s in skills_resp.json()["result"]["skills"]] == ["triage"]
+
+    bad_app = FastAPI() if use_fastapi else Starlette()
+    bad_registry = MCPRegistry()
+
+    @mcp_tool(name="broken_asgi", ui_resource_uri="ui://missing/asgi.html")
+    def broken_asgi() -> str:
+        return "fail"
+
+    bad_registry.register_tool(broken_asgi)
+    with pytest.raises(ImproperConfigurationError, match="ui://missing/asgi.html"):
+        mount_fn(bad_app, registry=bad_registry, skills=skills_cfg)
+
+
+def test_flask_and_django_mount_skills_well_known_and_ui_validation(tmp_path: Path) -> None:
+    """Verify Flask and Django mounts expose skills, emit well-known skill lists, and validate ui:// links."""
+    skills_cfg = _build_demo_skills_config(tmp_path)
+
+    flask_app = Flask(__name__)
+    attach_flask_mcp(flask_app, skills=skills_cfg)
+    with flask_app.test_client() as client:
+        wk_resp = client.get("/.well-known/mcp.json")
+        assert wk_resp.status_code == 200
+        assert decode_json(wk_resp.data)["skills"] == ["triage"]
+
+        skills_resp = client.post(
+            "/mcp",
+            headers={"MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "skills/list"},
+            data=encode_json_bytes({"jsonrpc": "2.0", "id": 1, "method": "skills/list", "params": {}}),
+            content_type="application/json",
+        )
+        assert skills_resp.status_code == 200
+        assert [s["name"] for s in decode_json(skills_resp.data)["result"]["skills"]] == ["triage"]
+
+    bad_flask_app = Flask(__name__)
+
+    @mcp_tool(name="broken_flask", ui_resource_uri="ui://missing/flask.html")
+    def broken_flask() -> str:
+        return "fail"
+
+    bad_flask_app.view_functions["broken_flask"] = broken_flask
+    with pytest.raises(ImproperConfigurationError, match="ui://missing/flask.html"):
+        attach_flask_mcp(bad_flask_app, skills=skills_cfg)
+
+    dj_registry, dj_static = attach_django_mcp([], skills=skills_cfg)
+    assert decode_json(dj_static["/.well-known/mcp.json"].body)["skills"] == ["triage"]
+    dj_resp = dispatch_django_mcp(
+        dj_registry,
+        NativeRequest.from_parts(
+            "POST",
+            "/mcp",
+            headers=[("mcp-protocol-version", "2026-07-28"), ("content-type", "application/json")],
+            body=encode_json_bytes({"jsonrpc": "2.0", "id": 1, "method": "skills/list", "params": {}}),
+        ),
+    )
+    assert dj_resp.status == 200
+    assert [s["name"] for s in decode_json(bytes(dj_resp.body))["result"]["skills"]] == ["triage"]
+
+    standalone_dj_reg = MCPRegistry()
+    direct_resp = dispatch_django_mcp(
+        standalone_dj_reg,
+        NativeRequest.from_parts(
+            "POST",
+            "/mcp",
+            headers=[("mcp-protocol-version", "2026-07-28"), ("content-type", "application/json")],
+            body=encode_json_bytes({"jsonrpc": "2.0", "id": 2, "method": "skills/list", "params": {}}),
+        ),
+        skills=skills_cfg,
+    )
+    assert direct_resp.status == 200
+    assert [s["name"] for s in decode_json(bytes(direct_resp.body))["result"]["skills"]] == ["triage"]
+
+    @mcp_tool(name="broken_django", ui_resource_uri="ui://missing/django.html")
+    def broken_django() -> str:
+        return "fail"
+
+    with pytest.raises(ImproperConfigurationError, match="ui://missing/django.html"):
+        attach_django_mcp([broken_django], skills=skills_cfg)
+
+    bad_standalone_dj_reg = MCPRegistry()
+    bad_standalone_dj_reg.register_tool(broken_django)
+    with pytest.raises(ImproperConfigurationError, match="ui://missing/django.html"):
+        dispatch_django_mcp(bad_standalone_dj_reg, b"{}", skills=skills_cfg)

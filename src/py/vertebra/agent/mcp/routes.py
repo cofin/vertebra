@@ -38,6 +38,7 @@ def build_well_known_mcp_document(
     registry: ToolRegistry | None = None,
     *,
     tool_names: Iterable[str] | None = None,
+    skill_names: Iterable[str] | None = None,
 ) -> dict[str, Any]:
     """Build the canonical ``/.well-known/mcp.json`` discovery document for MCP 2026-07-28."""
     if tool_names is not None:
@@ -46,6 +47,7 @@ def build_well_known_mcp_document(
         resolved_tools = [spec.name for spec in registry.list_specs(exposure="mcp")]
     else:
         resolved_tools = []
+    resolved_skills = sorted({str(name) for name in (skill_names or ())})
     return {
         "protocolVersion": MCP_PROTOCOL_VERSION,
         "mcp_version": MCP_PROTOCOL_VERSION,
@@ -56,6 +58,7 @@ def build_well_known_mcp_document(
         },
         "endpoint": config.path,
         "tools": resolved_tools,
+        "skills": resolved_skills,
     }
 
 
@@ -64,9 +67,17 @@ def render_well_known_mcp_json(
     registry: ToolRegistry | None = None,
     *,
     tool_names: Iterable[str] | None = None,
+    skill_names: Iterable[str] | None = None,
 ) -> bytes:
     """Serialize the canonical ``/.well-known/mcp.json`` discovery document to UTF-8 JSON bytes."""
-    return encode_json_bytes(build_well_known_mcp_document(config, registry, tool_names=tool_names))
+    return encode_json_bytes(
+        build_well_known_mcp_document(
+            config,
+            registry,
+            tool_names=tool_names,
+            skill_names=skill_names,
+        )
+    )
 
 
 class MCPHttpHandler:

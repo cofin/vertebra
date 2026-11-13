@@ -1367,7 +1367,7 @@ wheels = [
 
 [[package]]
 name = "litestar-mcp"
-version = "0.19.0"
+version = "0.20.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio" },
@@ -1376,9 +1376,9 @@ dependencies = [
     { name = "pyyaml" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/75/9b/7e2e61ec227b2ae06e8b6d564b00968940c35f84a8e7177599d6c90c4300/litestar_mcp-0.19.0.tar.gz", hash = "sha256:46aaa7140269bfda9315d94a7941d56f8059e13e85d772187bf4a8f8c3749f46", size = 1005221, upload-time = "2026-11-07T00:33:55.691Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/8a/f7/e3f7d94e856a1141229ca63804b8b0c704b8129469d08dfff12093e6c9b0/litestar_mcp-0.20.0.tar.gz", hash = "sha256:2a0e79a5de5c536439dd413eaf6af8dd671a293d2d6c4270643be0f5353299c6", size = 1168319, upload-time = "2026-11-12T18:24:30.227Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/43/0c/1baaed14bff70a31f135be41bce80aed2db8cc1ba65c048476efd859b30e/litestar_mcp-0.19.0-py3-none-any.whl", hash = "sha256:4bd031790c558d41aa5af89623dbdc8baee33a79c0f23a0e6c48ed9df5260a0e", size = 216900, upload-time = "2026-11-07T00:33:53.692Z" },
+    { url = "https://files.pythonhosted.org/packages/21/54/f8481fad0f9c6416bb9ba9a123247b0da14e6361ec415694d687448630b3/litestar_mcp-0.20.0-py3-none-any.whl", hash = "sha256:63a377e28548e9db7c39ce99aae9f177e4cdfde42911d8cbf60f5599521c0f99", size = 263016, upload-time = "2026-11-12T18:24:28.528Z" },
 ]
 
 [[package]]
@@ -3670,8 +3670,8 @@ requires-dist = [
     { name = "litestar-email", marker = "extra == 'email'", specifier = ">=0.4.0" },
     { name = "litestar-htmx", marker = "extra == 'all'", specifier = ">=0.5.0" },
     { name = "litestar-htmx", marker = "extra == 'htmx'", specifier = ">=0.5.0" },
-    { name = "litestar-mcp", marker = "extra == 'all'", specifier = ">=0.16.0" },
-    { name = "litestar-mcp", marker = "extra == 'mcp'", specifier = ">=0.16.0" },
+    { name = "litestar-mcp", marker = "extra == 'all'", specifier = ">=0.20.0" },
+    { name = "litestar-mcp", marker = "extra == 'mcp'", specifier = ">=0.20.0" },
     { name = "litestar-queues", marker = "extra == 'all'", specifier = ">=0.12.0" },
     { name = "litestar-queues", marker = "extra == 'queues'", specifier = ">=0.12.0" },
     { name = "litestar-saq", marker = "extra == 'all'", specifier = ">=0.8.0" },
@@ -3749,7 +3749,7 @@ dev = [
     { name = "litestar-autowire", specifier = ">=0.2.0" },
     { name = "litestar-email", specifier = ">=0.4.0" },
     { name = "litestar-htmx", specifier = ">=0.5.0" },
-    { name = "litestar-mcp", specifier = ">=0.16.0" },
+    { name = "litestar-mcp", specifier = ">=0.20.0" },
     { name = "litestar-queues", specifier = ">=0.12.0" },
     { name = "litestar-saq", specifier = ">=0.8.0" },
     { name = "litestar-security", specifier = ">=0.6.0" },
@@ -3796,7 +3796,7 @@ test = [
     { name = "litestar-autowire", specifier = ">=0.2.0" },
     { name = "litestar-email", specifier = ">=0.4.0" },
     { name = "litestar-htmx", specifier = ">=0.5.0" },
-    { name = "litestar-mcp", specifier = ">=0.16.0" },
+    { name = "litestar-mcp", specifier = ">=0.20.0" },
     { name = "litestar-queues", specifier = ">=0.12.0" },
     { name = "litestar-saq", specifier = ">=0.8.0" },
     { name = "litestar-security", specifier = ">=0.6.0" },
