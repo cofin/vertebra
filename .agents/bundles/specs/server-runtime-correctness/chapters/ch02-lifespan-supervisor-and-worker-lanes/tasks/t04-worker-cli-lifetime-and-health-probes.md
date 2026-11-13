@@ -6,7 +6,13 @@ chapter_id: ch02-lifespan-supervisor-and-worker-lanes
 title: Keep vtb workers run Alive and Implement vtb run --worker-only Health Probes
 description: "Bind QueueService and run_until_stopped=True in vtb workers run, add HealthProbeServer on ZPagesRegistry, and wire vtb run --worker-only without launching vertebra-server."
 status: stable
-state: pending
+state: completed
+commit: d2da8fa0
+last_verified_commit: d2da8fa0
+last_verified_at: "2026-11-13T04:56:47Z"
+verification_evidence: "ruff + mypy (44 files) + pytest test_run_with_workers.py (183 suite passed)"
+claimed_by: null
+claimed_at: null
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -73,8 +79,8 @@ uv run --no-sync ruff check src/py/vertebra/server/platform.py src/py/vertebra/c
 
 ## Acceptance Criteria
 
-- [ ] `vtb workers run` processes queued tasks until signalled.
-- [ ] `vtb run --worker-only` serves health probes and drains lanes without launching `vertebra-server`.
+- [x] `vtb workers run` processes queued tasks until signalled.
+- [x] `vtb run --worker-only` serves health probes and drains lanes without launching `vertebra-server`.
 
 [^platform-py]: `src/py/vertebra/server/platform.py::ZPagesRegistry` — Z-page health and readiness renderer.
 [^workers-cli-py]: `src/py/vertebra/cli/workers.py::execute_worker_cli` — Worker CLI execution helper.

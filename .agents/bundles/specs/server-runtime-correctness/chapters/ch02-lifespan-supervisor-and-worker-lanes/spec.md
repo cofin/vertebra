@@ -5,7 +5,7 @@ chapter_id: ch02-lifespan-supervisor-and-worker-lanes
 title: "Chapter 02: Fail-Loud Lifespan, Supervisor Exports, and Worker Lanes"
 description: "Abort worker startup on lifespan or RSGI init failures with exit code 78, export vertebra.supervisor symbols, bind QueueService on worker lanes, and serve health probes in --worker-only mode."
 status: stable
-state: planned
+state: active
 planning_status: complete
 planning_quality: standard
 planning_degraded_reason: null
@@ -80,13 +80,14 @@ Runtime startup, supervisor exports, and worker-only CLI semantics are documente
 
 ## 5. Implementation Plan
 
-- [ ] [t01-worker-startup-error-and-shm-exit-code.md](tasks/t01-worker-startup-error-and-shm-exit-code.md) — Raise `WorkerStartupError` on lifespan/RSGI failures and exit SHM workers with code `78`
-- [ ] [t02-rust-supervisor-startup-failure.md](tasks/t02-rust-supervisor-startup-failure.md) — Halt Rust SHM supervisor respawn on exit code `78` and terminate `vertebra-server` non-zero
-- [ ] [t03-supervisor-exports-and-colocated-queue-resolution.md](tasks/t03-supervisor-exports-and-colocated-queue-resolution.md) — Export `vertebra.supervisor` lazily and bind `WorkerRunner.resolve_queue_service`
-- [ ] [t04-worker-cli-lifetime-and-health-probes.md](tasks/t04-worker-cli-lifetime-and-health-probes.md) — Keep `vtb workers run` alive until signalled and implement `vtb run --worker-only` with `HealthProbeServer`
+- [x] [d2da8fa0] [t01-worker-startup-error-and-shm-exit-code.md](tasks/t01-worker-startup-error-and-shm-exit-code.md) — Raise `WorkerStartupError` on lifespan/RSGI failures and exit SHM workers with code `78`
+- [x] [d2da8fa0] [t02-rust-supervisor-startup-failure.md](tasks/t02-rust-supervisor-startup-failure.md) — Halt Rust SHM supervisor respawn on exit code `78` and terminate `vertebra-server` non-zero
+- [x] [d2da8fa0] [t03-supervisor-exports-and-colocated-queue-resolution.md](tasks/t03-supervisor-exports-and-colocated-queue-resolution.md) — Export `vertebra.supervisor` lazily and bind `WorkerRunner.resolve_queue_service`
+- [x] [d2da8fa0] [t04-worker-cli-lifetime-and-health-probes.md](tasks/t04-worker-cli-lifetime-and-health-probes.md) — Keep `vtb workers run` alive until signalled and implement `vtb run --worker-only` with `HealthProbeServer`
 
 ## 6. Current State & Remaining Plan Snapshot
 
+- **Implemented (`4/4` tasks at `d2da8fa0`)**: `WorkerStartupError`, SHM exit code `78` supervisor halt, lazy `vertebra.supervisor` exports, `WorkerRunner.resolve_queue_service`, `vtb workers run` lifetime, and `vtb run --worker-only` `HealthProbeServer` are verified (`14` Rust `workers` tests, `183` Python unit/integration tests, `clippy`, `ruff`, and `mypy` clean).
 - **Fast Chapter Gate (`< 35s`)**: `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-http --lib workers && uv run --no-sync ruff check src/py/vertebra/server src/py/vertebra/supervisor src/py/vertebra/cli && uv run --no-sync mypy src/py/vertebra/server src/py/vertebra/supervisor src/py/vertebra/cli && uv run --no-sync pytest src/py/tests/unit/server/test_runner.py src/py/tests/unit/server/test_asgi.py src/py/tests/unit/cli/test_cli_commands.py src/py/tests/unit/cli/test_run_with_workers.py src/py/tests/unit/extensions/test_worker_lanes.py -q`.
 
 [^worker-py]: `src/py/vertebra/server/worker.py::Worker` — Worker lifespan ExitStack and RSGI mount initialization.

@@ -6,7 +6,13 @@ chapter_id: ch02-lifespan-supervisor-and-worker-lanes
 title: Raise WorkerStartupError on Lifespan/RSGI Failures and Exit SHM Workers with Code 78
 description: "Replace swallowed lifespan and __rsgi_init__ exceptions with WorkerStartupError, cancel timed-out lifespans, and exit SHM _worker.main with EXIT_STARTUP_FAILURE = 78."
 status: stable
-state: pending
+state: completed
+commit: d2da8fa0
+last_verified_commit: d2da8fa0
+last_verified_at: "2026-11-13T04:56:47Z"
+verification_evidence: "ruff + mypy (44 files) + pytest (183 passed)"
+claimed_by: null
+claimed_at: null
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -72,8 +78,8 @@ uv run --no-sync ruff check src/py/vertebra/server src/py/vertebra/supervisor/_w
 
 ## Acceptance Criteria
 
-- [ ] `Worker.run` raises `WorkerStartupError` and unwinds prior mounts on startup failure.
-- [ ] `_worker.main` exits with `78` on `WorkerStartupError`.
+- [x] `Worker.run` raises `WorkerStartupError` and unwinds prior mounts on startup failure.
+- [x] `_worker.main` exits with `78` on `WorkerStartupError`.
 
 [^worker-py]: `src/py/vertebra/server/worker.py::Worker` — Worker.run lifespan ExitStack and mount initialization.
 [^supervisor-worker-py]: `src/py/vertebra/supervisor/_worker.py::main` — SHM worker entrypoint.

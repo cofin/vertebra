@@ -6,7 +6,13 @@ chapter_id: ch02-lifespan-supervisor-and-worker-lanes
 title: Stop Rust Supervisor Respawn on Exit Code 78 and Exit Server Non-Zero
 description: "Track WorkerLifecycle::last_exit_code in vertebra-http and abort Supervisor::poll_workers and run_server when any SHM worker exits with EXIT_STARTUP_FAILURE = 78."
 status: stable
-state: pending
+state: completed
+commit: d2da8fa0
+last_verified_commit: d2da8fa0
+last_verified_at: "2026-11-13T04:56:47Z"
+verification_evidence: "cargo test -p vertebra-http --lib workers (14 passed) + clippy + pytest test_vertebra_server.py"
+claimed_by: null
+claimed_at: null
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -71,8 +77,8 @@ cargo test --manifest-path src/rs/Cargo.toml -p vertebra-http --lib workers && c
 
 ## Acceptance Criteria
 
-- [ ] SHM worker exit `78` stops `vertebra-server` non-zero with zero respawn attempts.
-- [ ] Transient worker exit `1` preserves backoff respawn.
+- [x] SHM worker exit `78` stops `vertebra-server` non-zero with zero respawn attempts.
+- [x] Transient worker exit `1` preserves backoff respawn.
 
 [^supervisor-rs]: `src/rs/vertebra-http/src/workers/supervisor.rs::Supervisor` — SHM worker poll and respawn supervisor.
 [^main-rs]: `src/rs/vertebra-http/src/main.rs::run_server` — Server shutdown token and exit result handling.

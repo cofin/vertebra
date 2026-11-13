@@ -6,7 +6,13 @@ chapter_id: ch02-lifespan-supervisor-and-worker-lanes
 title: Lazily Export vertebra.supervisor and Bind QueueService on Worker Lanes
 description: Implement PEP 562 lazy exports on vertebra.supervisor and add WorkerRunner.resolve_queue_service wired into colocated worker startup.
 status: stable
-state: pending
+state: completed
+commit: d2da8fa0
+last_verified_commit: d2da8fa0
+last_verified_at: "2026-11-13T04:56:47Z"
+verification_evidence: "ruff + mypy (44 files) + fresh supervisor import + pytest (183 passed)"
+claimed_by: null
+claimed_at: null
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -72,8 +78,8 @@ uv run --no-sync ruff check src/py/vertebra/supervisor src/py/vertebra/server &&
 
 ## Acceptance Criteria
 
-- [ ] All 5 `vertebra.supervisor` exports resolve lazily and type-check cleanly.
-- [ ] `WorkerRunner.resolve_queue_service` fails loud when no `QueueService` is configured.
+- [x] All 5 `vertebra.supervisor` exports resolve lazily and type-check cleanly.
+- [x] `WorkerRunner.resolve_queue_service` fails loud when no `QueueService` is configured.
 
 [^supervisor-init-py]: `src/py/vertebra/supervisor/__init__.py` — Empty supervisor package __init__.
 [^lanes-py]: `src/py/vertebra/server/lanes.py::WorkerRunner` — Multi-lane WorkerRunner.
