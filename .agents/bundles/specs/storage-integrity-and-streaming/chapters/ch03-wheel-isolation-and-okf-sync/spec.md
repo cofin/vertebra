@@ -5,21 +5,22 @@ chapter_id: ch03-wheel-isolation-and-okf-sync
 title: "Chapter 03: Companion Wheel Payload Isolation, User Docs, and Storage OKF Sync"
 description: "Adds verify_storage_wheel.py and Makefile/release.yaml payload isolation checks across storage, bigquery, spanner, and bundler, updates storage user docs and changelog, and synchronizes object-storage OKF chapters within 200 lines."
 status: stable
-state: active
+state: completed
 planning_status: complete
 planning_quality: standard
 planning_degraded_reason: null
 depends_on_chapters:
   - ch02-streaming-arrow-writes-and-integrations
 plan_commit: 18baadcd
-updated_at: "2026-11-12T23:55:00Z"
+last_reviewed_commit: 541d89b5
+updated_at: "2026-11-13T04:59:52Z"
 generated:
   by: flow-plan
   at: "2026-11-12T23:55:00Z"
 verified:
-  - by: agent:plan-generator
-    at: "2026-11-12T23:55:00Z"
-    commit: 18baadcd
+  - by: agent:code-reviewer
+    at: "2026-11-13T04:59:52Z"
+    commit: 541d89b5
 tags:
   - storage
   - packaging
@@ -100,7 +101,7 @@ def main(argv: Sequence[str] | None = None) -> int: ...
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Implemented (`3/3` tasks at `66e6913f`)**: `verify_storage_wheel.py`, `Makefile` / `release.yaml` isolation checks, storage user/reference docs, changelog, `object-storage.md` (`175L`), `object-storage-limitations.md` (`86L`), and `research/upstream-sqlspec-direct-arrow-write.md` (`41L`) are verified (`24` + `1` skipped `test_optional_driver_wheels.py`, `ruff`, `mypy`, `make docs`, and `make review-check` clean).
+- **Completed (`66e6913f`)**: All `3` tasks in `ch03-wheel-isolation-and-okf-sync` (`24` + `1` skipped `test_optional_driver_wheels.py`, `ruff`, `mypy`, `make docs`, and `make review-check` clean) are complete. All `3` chapters (`ch01`–`ch03`) are ready for the Frontier Joint Cleanup & Review Gate.
 - **Fast Chapter Gate (`< 45s`)**:
   `uv run --no-sync ruff check tools/scripts/verify_storage_wheel.py && uv run --no-sync mypy tools/scripts/verify_storage_wheel.py && uv run --no-sync pytest src/py/tests/unit/db/test_optional_driver_wheels.py -q && make docs && make review-check`
 

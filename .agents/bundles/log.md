@@ -1,5 +1,10 @@
 # Bundle Activity Log
 
+## [2026-11-13T04:59:52Z] chapter-complete | storage-integrity-and-streaming ch03-wheel-isolation-and-okf-sync
+
+- Closed `ch03-wheel-isolation-and-okf-sync` at `66e6913f` (sync `541d89b5`): added `tools/scripts/verify_storage_wheel.py`, `Makefile` (`{storage,bigquery,spanner,bundler}-wheel-check`), and `release.yaml` isolation checks, updated storage user/reference docs and changelog, and synchronized `object-storage.md` (`175L`), `object-storage-limitations.md` (`86L`), and `research/upstream-sqlspec-direct-arrow-write.md` (`41L`; `24` + `1` skipped `test_optional_driver_wheels.py`, `ruff`, `mypy`, `make docs`, and `make review-check` clean).
+- All `3` chapters (`9/9` tasks) of `storage-integrity-and-streaming` are complete and entering the Frontier Joint Cleanup & Review Gate.
+
 ## [2026-11-13T04:46:07Z] chapter-complete | storage-integrity-and-streaming ch02-streaming-arrow-writes-and-integrations
 
 - Closed `ch02-streaming-arrow-writes-and-integrations` at `c9f54436` (sync `099753b4`): threaded `checksum` and `expected_*` digests through `vertebra.storage._arrow`, enabled SQLSpec `supports_direct_arrow_write = True`, added Advanced Alchemy `save_arrow*` + digest forwarding and Django `content.{sha256,crc32c,md5}` forwarding, and added `benches/put_checksum.rs` (`640` + `82` Django Python tests, `cargo test -p vertebra-storage --benches`, `clippy`, `ruff`, `mypy` clean).
