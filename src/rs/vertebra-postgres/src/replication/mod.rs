@@ -5,7 +5,12 @@
 pub mod feedback;
 pub mod pgoutput;
 pub mod stream;
+pub mod supervisor;
 pub use stream::{ReplicationDelivery, ReplicationSession};
+pub use supervisor::{
+    MAX_RAW_RECONNECT_ATTEMPTS, PostgresReplicationResume, ReplicationEventDelivery,
+    ReplicationStreamEvent, ReplicationSupervisor, raw_reconnect_delay,
+};
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Duration;
@@ -199,6 +204,109 @@ impl PostgresReplicationConnection {
             codec_ctx,
             effective_start_lsn,
         })
+    }
+
+    /// Re-establish a dedicated `replication=database` logical `pgoutput` `CopyBoth` session after
+    /// verifying that server `system_identifier`, database, slot, and publication fingerprint match
+    /// `expected` without timeline regression, resuming monotonically from `max(start_lsn, confirmed_flush_lsn)`.
+    pub async fn connect_logical_verified(
+        config: &PostgresConfig,
+        slot: &str,
+        publication: &str,
+        start_lsn: u64,
+        expected: &VerifiedReplicationIdentity,
+    ) -> Result<Self, PostgresError> {
+        Self::connect_logical_verified_outcome(config, slot, publication, start_lsn, expected)
+            .await
+            .map_err(VerifiedConnectFailure::into_error)
+    }
+
+    pub(super) async fn connect_logical_verified_outcome(
+        config: &PostgresConfig,
+        slot: &str,
+        publication: &str,
+        start_lsn: u64,
+        expected: &VerifiedReplicationIdentity,
+    ) -> Result<Self, VerifiedConnectFailure> {
+        ensure_session_capable_pooler(config).map_err(VerifiedConnectFailure::Other)?;
+        validate_replication_identifier(slot, "slot").map_err(VerifiedConnectFailure::Other)?;
+        validate_replication_identifier(publication, "publication")
+            .map_err(VerifiedConnectFailure::Other)?;
+        if slot != expected.slot {
+            return Err(VerifiedConnectFailure::Other(PostgresError::Operational(
+                format!(
+                    "PostgreSQL logical replication slot mismatch on resume: requested {slot:?}, expected {:?} (identity_mismatch)",
+                    expected.slot
+                ),
+            )));
+        }
+
+        let (preflight, resume_lsn, type_catalog, type_identities) =
+            run_verified_connect_preflight(config, slot, publication, start_lsn, expected).await?;
+
+        let mut repl_conn = establish_standalone_connection(config, true)
+            .await
+            .map_err(VerifiedConnectFailure::Other)?;
+        let system = match run_identify_system(&mut repl_conn, config.connect_timeout).await {
+            Ok(sys) => sys,
+            Err(err) => {
+                close_connection_bounded(&mut repl_conn, config.connect_timeout).await;
+                return Err(VerifiedConnectFailure::Other(err));
+            }
+        };
+        if let Err(err) = verify_system_database(&system, &preflight.database) {
+            close_connection_bounded(&mut repl_conn, config.connect_timeout).await;
+            return Err(VerifiedConnectFailure::Other(err));
+        }
+        if system.system_identifier != expected.system_identifier {
+            close_connection_bounded(&mut repl_conn, config.connect_timeout).await;
+            return Err(VerifiedConnectFailure::Other(PostgresError::Operational(
+                format!(
+                    "IDENTIFY_SYSTEM systemid mismatch on resume: got {:?}, expected {:?} (identity_mismatch)",
+                    system.system_identifier, expected.system_identifier
+                ),
+            )));
+        }
+        if system.timeline < expected.timeline {
+            close_connection_bounded(&mut repl_conn, config.connect_timeout).await;
+            return Err(VerifiedConnectFailure::Other(PostgresError::Operational(
+                format!(
+                    "IDENTIFY_SYSTEM timeline regressed on resume: got {}, expected >= {} (identity_mismatch)",
+                    system.timeline, expected.timeline
+                ),
+            )));
+        }
+        if resume_lsn > system.xlogpos {
+            close_connection_bounded(&mut repl_conn, config.connect_timeout).await;
+            return Err(VerifiedConnectFailure::Other(PostgresError::Operational(
+                format!(
+                    "requested resume LSN {} exceeds server current WAL flush position {} on slot {slot:?} (wal_unavailable)",
+                    format_pg_lsn(resume_lsn),
+                    format_pg_lsn(system.xlogpos),
+                ),
+            )));
+        }
+
+        let start_sql = build_start_replication_command(slot, publication, Some(resume_lsn));
+        let start_deadline = Instant::now() + config.connect_timeout;
+        enter_copy_both(&mut repl_conn, &start_sql, start_deadline)
+            .await
+            .map_err(VerifiedConnectFailure::Other)?;
+
+        let codec_ctx = CodecContext::from_parameters(repl_conn.parameters());
+        let identity = build_verified_identity(slot, preflight, system);
+        Ok(Self {
+            conn: repl_conn,
+            identity,
+            type_catalog,
+            type_identities,
+            codec_ctx,
+            effective_start_lsn: resume_lsn,
+        })
+    }
+
+    pub(super) const fn effective_start_lsn(&self) -> u64 {
+        self.effective_start_lsn
     }
 
     /// Borrow the verified server, slot, and publication identity captured during session startup.
@@ -504,7 +612,20 @@ fn parse_lsn_half(part: &str, full: &str) -> Result<u32, PostgresError> {
     })
 }
 
-fn ensure_session_capable_pooler(config: &PostgresConfig) -> Result<(), PostgresError> {
+pub(super) enum VerifiedConnectFailure {
+    SlotActive(PostgresError),
+    Other(PostgresError),
+}
+
+impl VerifiedConnectFailure {
+    pub(super) fn into_error(self) -> PostgresError {
+        match self {
+            Self::SlotActive(err) | Self::Other(err) => err,
+        }
+    }
+}
+
+pub(super) fn ensure_session_capable_pooler(config: &PostgresConfig) -> Result<(), PostgresError> {
     if !matches!(config.pooler_mode, PoolerMode::Direct | PoolerMode::Session) {
         return Err(PostgresError::Interface(format!(
             "PostgreSQL logical replication requires explicit pooler_mode `direct` or `session`, got `{}`",
@@ -514,7 +635,7 @@ fn ensure_session_capable_pooler(config: &PostgresConfig) -> Result<(), Postgres
     Ok(())
 }
 
-fn validate_replication_identifier(name: &str, kind: &str) -> Result<(), PostgresError> {
+pub(super) fn validate_replication_identifier(name: &str, kind: &str) -> Result<(), PostgresError> {
     if name.is_empty() {
         return Err(PostgresError::Data(format!(
             "PostgreSQL replication {kind} identifier cannot be empty"
@@ -657,12 +778,83 @@ async fn run_connect_preflight(
     outcome
 }
 
+async fn run_verified_connect_preflight(
+    config: &PostgresConfig,
+    slot: &str,
+    publication: &str,
+    start_lsn: u64,
+    expected: &VerifiedReplicationIdentity,
+) -> Result<
+    (
+        VerifiedPreflight,
+        u64,
+        TypeCatalog,
+        HashMap<u32, (String, String)>,
+    ),
+    VerifiedConnectFailure,
+> {
+    let mut meta_conn = establish_standalone_connection(config, false)
+        .await
+        .map_err(VerifiedConnectFailure::Other)?;
+    let outcome = async {
+        let preflight = inspect_slot_and_publication_inner(
+            &mut meta_conn,
+            config.connect_timeout,
+            slot,
+            publication,
+            Some(&expected.database),
+        )
+        .await?;
+        if preflight.publication_fingerprint != expected.publication_fingerprint {
+            return Err(VerifiedConnectFailure::Other(PostgresError::Operational(
+                format!(
+                    "PostgreSQL publication {publication:?} fingerprint changed across resume: got {}, expected {} (identity_mismatch)",
+                    preflight.publication_fingerprint, expected.publication_fingerprint
+                ),
+            )));
+        }
+        let resume_lsn = start_lsn.max(preflight.confirmed_flush_lsn);
+        if resume_lsn < preflight.restart_lsn {
+            return Err(VerifiedConnectFailure::Other(PostgresError::Operational(
+                format!(
+                    "resume LSN {} is behind slot {slot:?} restart_lsn {} (wal_unavailable)",
+                    format_pg_lsn(resume_lsn),
+                    format_pg_lsn(preflight.restart_lsn),
+                ),
+            )));
+        }
+        let (catalog, identities) = if preflight.has_published_tables {
+            preload_publication_types(&mut meta_conn, config.connect_timeout, publication)
+                .await
+                .map_err(VerifiedConnectFailure::Other)?
+        } else {
+            (TypeCatalog::new_with_builtins(), HashMap::new())
+        };
+        Ok((preflight, resume_lsn, catalog, identities))
+    }
+    .await;
+    close_connection_bounded(&mut meta_conn, config.connect_timeout).await;
+    outcome
+}
+
 async fn inspect_slot_and_publication(
     meta_conn: &mut PostgresConnection,
     timeout: Duration,
     slot: &str,
     publication: &str,
 ) -> Result<VerifiedPreflight, PostgresError> {
+    inspect_slot_and_publication_inner(meta_conn, timeout, slot, publication, None)
+        .await
+        .map_err(VerifiedConnectFailure::into_error)
+}
+
+async fn inspect_slot_and_publication_inner(
+    meta_conn: &mut PostgresConnection,
+    timeout: Duration,
+    slot: &str,
+    publication: &str,
+    expected_database: Option<&str>,
+) -> Result<VerifiedPreflight, VerifiedConnectFailure> {
     let slot_params = [Parameter::new(PgValue::Text(slot.to_owned()))];
     let text_oids = [TEXT_OID];
     let slot_res = meta_conn
@@ -672,124 +864,157 @@ async fn inspect_slot_and_publication(
             Some(&text_oids),
             CommandBudget::from_deadline(Some(Instant::now() + timeout)),
         )
-        .await?;
+        .await
+        .map_err(VerifiedConnectFailure::Other)?;
 
     if slot_res.rows.is_empty() {
-        return Err(PostgresError::Operational(format!(
-            "PostgreSQL logical replication slot {slot:?} does not exist"
+        return Err(VerifiedConnectFailure::Other(PostgresError::Operational(
+            format!("PostgreSQL logical replication slot {slot:?} does not exist"),
         )));
     }
     if slot_res.rows.len() > 1 {
-        return Err(PostgresError::Protocol(format!(
-            "expected 1 pg_replication_slots row for {slot:?}, got {}",
-            slot_res.rows.len()
+        return Err(VerifiedConnectFailure::Other(PostgresError::Protocol(
+            format!(
+                "expected 1 pg_replication_slots row for {slot:?}, got {}",
+                slot_res.rows.len()
+            ),
         )));
     }
     let row = &slot_res.rows[0];
     if row.len() != 8 {
-        return Err(PostgresError::Protocol(format!(
-            "expected 8 columns from pg_replication_slots preflight, got {}",
-            row.len()
+        return Err(VerifiedConnectFailure::Other(PostgresError::Protocol(
+            format!(
+                "expected 8 columns from pg_replication_slots preflight, got {}",
+                row.len()
+            ),
         )));
     }
 
-    let current_db = expect_non_null_text(&row[0], "current_database")?;
-    let slot_type = expect_non_null_text(&row[2], "pg_replication_slots.slot_type")?;
+    let current_db =
+        expect_non_null_text(&row[0], "current_database").map_err(VerifiedConnectFailure::Other)?;
+    let slot_type = expect_non_null_text(&row[2], "pg_replication_slots.slot_type")
+        .map_err(VerifiedConnectFailure::Other)?;
     if slot_type != "logical" {
-        return Err(PostgresError::Operational(format!(
-            "PostgreSQL replication slot {slot:?} has slot_type {slot_type:?}; logical `pgoutput` slot required"
+        return Err(VerifiedConnectFailure::Other(PostgresError::Operational(
+            format!(
+                "PostgreSQL replication slot {slot:?} has slot_type {slot_type:?}; logical `pgoutput` slot required"
+            ),
         )));
     }
 
     let slot_db = match &row[1] {
         PgValue::Text(s) => s.as_str(),
         PgValue::Null => {
-            return Err(PostgresError::Operational(format!(
-                "PostgreSQL logical replication slot {slot:?} has NULL database"
+            return Err(VerifiedConnectFailure::Other(PostgresError::Operational(
+                format!("PostgreSQL logical replication slot {slot:?} has NULL database"),
             )));
         }
         other => {
-            return Err(PostgresError::Protocol(format!(
-                "unexpected pg_replication_slots.database value: {other:?}"
+            return Err(VerifiedConnectFailure::Other(PostgresError::Protocol(
+                format!("unexpected pg_replication_slots.database value: {other:?}"),
             )));
         }
     };
     if slot_db != current_db {
-        return Err(PostgresError::Operational(format!(
-            "PostgreSQL logical replication slot {slot:?} belongs to database {slot_db:?}, connected to {current_db:?}"
+        return Err(VerifiedConnectFailure::Other(PostgresError::Operational(
+            format!(
+                "PostgreSQL logical replication slot {slot:?} belongs to database {slot_db:?}, connected to {current_db:?}"
+            ),
+        )));
+    }
+    if let Some(exp_db) = expected_database
+        && current_db != exp_db
+    {
+        return Err(VerifiedConnectFailure::Other(PostgresError::Operational(
+            format!(
+                "PostgreSQL logical replication database mismatch on resume: connected to {current_db:?}, expected {exp_db:?} (identity_mismatch)"
+            ),
         )));
     }
 
     let plugin = match &row[3] {
         PgValue::Text(s) => s.as_str(),
         PgValue::Null => {
-            return Err(PostgresError::Operational(format!(
-                "PostgreSQL logical replication slot {slot:?} has NULL output plugin; `pgoutput` required"
+            return Err(VerifiedConnectFailure::Other(PostgresError::Operational(
+                format!(
+                    "PostgreSQL logical replication slot {slot:?} has NULL output plugin; `pgoutput` required"
+                ),
             )));
         }
         other => {
-            return Err(PostgresError::Protocol(format!(
-                "unexpected pg_replication_slots.plugin value: {other:?}"
+            return Err(VerifiedConnectFailure::Other(PostgresError::Protocol(
+                format!("unexpected pg_replication_slots.plugin value: {other:?}"),
             )));
         }
     };
     if plugin != "pgoutput" {
-        return Err(PostgresError::Operational(format!(
-            "PostgreSQL logical replication slot {slot:?} uses output plugin {plugin:?}; `pgoutput` is required"
+        return Err(VerifiedConnectFailure::Other(PostgresError::Operational(
+            format!(
+                "PostgreSQL logical replication slot {slot:?} uses output plugin {plugin:?}; `pgoutput` is required"
+            ),
         )));
     }
 
-    let active = expect_bool(&row[4], "pg_replication_slots.active")?;
+    let active = expect_bool(&row[4], "pg_replication_slots.active")
+        .map_err(VerifiedConnectFailure::Other)?;
     if active {
-        return Err(PostgresError::Operational(format!(
-            "PostgreSQL logical replication slot {slot:?} is already active"
-        )));
+        return Err(VerifiedConnectFailure::SlotActive(
+            PostgresError::Operational(format!(
+                "PostgreSQL logical replication slot {slot:?} is already active"
+            )),
+        ));
     }
 
     if let PgValue::Text(wal_status) = &row[7]
         && wal_status.eq_ignore_ascii_case("lost")
     {
-        return Err(PostgresError::Operational(format!(
-            "PostgreSQL logical replication slot {slot:?} WAL is invalidated (wal_unavailable: wal_status={wal_status:?})"
+        return Err(VerifiedConnectFailure::Other(PostgresError::Operational(
+            format!(
+                "PostgreSQL logical replication slot {slot:?} WAL is invalidated (wal_unavailable: wal_status={wal_status:?})"
+            ),
         )));
     }
 
     let restart_lsn_raw = match &row[5] {
         PgValue::Text(s) => s.as_str(),
         PgValue::Null => {
-            return Err(PostgresError::Operational(format!(
-                "PostgreSQL logical replication slot {slot:?} has NULL restart_lsn (wal_unavailable)"
+            return Err(VerifiedConnectFailure::Other(PostgresError::Operational(
+                format!(
+                    "PostgreSQL logical replication slot {slot:?} has NULL restart_lsn (wal_unavailable)"
+                ),
             )));
         }
         other => {
-            return Err(PostgresError::Protocol(format!(
-                "unexpected pg_replication_slots.restart_lsn value: {other:?}"
+            return Err(VerifiedConnectFailure::Other(PostgresError::Protocol(
+                format!("unexpected pg_replication_slots.restart_lsn value: {other:?}"),
             )));
         }
     };
     let restart_lsn = parse_pg_lsn(restart_lsn_raw).map_err(|_| {
-        PostgresError::Protocol(format!(
+        VerifiedConnectFailure::Other(PostgresError::Protocol(format!(
             "malformed pg_replication_slots.restart_lsn {restart_lsn_raw:?} for slot {slot:?}"
-        ))
+        )))
     })?;
 
     let confirmed_raw = match &row[6] {
         PgValue::Text(s) => s.as_str(),
         PgValue::Null => {
-            return Err(PostgresError::Operational(format!(
-                "PostgreSQL logical replication slot {slot:?} has NULL confirmed_flush_lsn"
+            return Err(VerifiedConnectFailure::Other(PostgresError::Operational(
+                format!(
+                    "PostgreSQL logical replication slot {slot:?} has NULL confirmed_flush_lsn"
+                ),
             )));
         }
         other => {
-            return Err(PostgresError::Protocol(format!(
-                "unexpected pg_replication_slots.confirmed_flush_lsn value: {other:?}"
+            return Err(VerifiedConnectFailure::Other(PostgresError::Protocol(
+                format!("unexpected pg_replication_slots.confirmed_flush_lsn value: {other:?}"),
             )));
         }
     };
     let confirmed_flush_lsn = parse_pg_lsn(confirmed_raw).map_err(|_| {
-        PostgresError::Protocol(format!(
+        VerifiedConnectFailure::Other(PostgresError::Protocol(format!(
             "malformed pg_replication_slots.confirmed_flush_lsn {confirmed_raw:?} for slot {slot:?}"
-        ))
+        )))
     })?;
 
     let server_version_num = parse_server_version_num(meta_conn.parameters());
@@ -807,15 +1032,17 @@ async fn inspect_slot_and_publication(
             Some(&text_oids),
             CommandBudget::from_deadline(Some(Instant::now() + timeout)),
         )
-        .await?;
+        .await
+        .map_err(VerifiedConnectFailure::Other)?;
 
     if pub_res.rows.is_empty() {
-        return Err(PostgresError::Operational(format!(
-            "PostgreSQL publication {publication:?} does not exist"
+        return Err(VerifiedConnectFailure::Other(PostgresError::Operational(
+            format!("PostgreSQL publication {publication:?} does not exist"),
         )));
     }
     let publication_fingerprint =
-        hash_publication_rows(publication, &pub_res.rows, include_pg15_cols)?;
+        hash_publication_rows(publication, &pub_res.rows, include_pg15_cols)
+            .map_err(VerifiedConnectFailure::Other)?;
     let has_published_tables = pub_res.rows.iter().any(|r| {
         matches!(
             (r.get(7), r.get(8)),
