@@ -114,14 +114,6 @@ class SyncDuckDBDriver(SyncDatabaseDriver[DuckDBConfig]):
                 client.close()
             raise
 
-    def _require_client(self) -> SyncDuckDBClient:
-        """Return the open `SyncDuckDBClient` or raise `InterfaceError` when closed."""
-        client = self._client
-        if client is None:
-            msg = "DuckDB driver is closed"
-            raise InterfaceError(msg)
-        return client
-
     @property
     def in_transaction(self) -> bool:
         """Return `True` when an explicit DuckDB transaction is active on the writer session."""
@@ -459,6 +451,14 @@ class SyncDuckDBDriver(SyncDatabaseDriver[DuckDBConfig]):
         finally:
             _release_duckdb_lease(self._broker, grant)
 
+    def _require_client(self) -> SyncDuckDBClient:
+        """Return the open `SyncDuckDBClient` or raise `InterfaceError` when closed."""
+        client = self._client
+        if client is None:
+            msg = "DuckDB driver is closed"
+            raise InterfaceError(msg)
+        return client
+
     def _refresh_dynamic_secrets(self, *, force: bool = False) -> None:
         """Refresh `value_provider` secrets when uninitialized, stale by interval, or generation-bumped."""
         if not self._dynamic_secrets or self._closed:
@@ -559,20 +559,6 @@ class AsyncDuckDBDriver(AsyncDatabaseDriver[DuckDBConfig]):
                 init_statements=init_stmts or None,
             )
 
-    def _require_client(self) -> AsyncDuckDBClient:
-        """Return the open `AsyncDuckDBClient` or raise `InterfaceError` when closed."""
-        client = self._client
-        if client is None:
-            msg = "DuckDB driver is closed"
-            raise InterfaceError(msg)
-        return client
-
-    async def connect(self) -> Self:
-        """Apply initial dynamic secrets when opening the asynchronous driver."""
-        await super().connect()
-        await self._refresh_dynamic_secrets_async(force=True)
-        return self
-
     @property
     def executed_bootstrap_statements(self) -> tuple[str, ...]:
         """Return the post-initialization `SET` statements executed on startup."""
@@ -584,6 +570,12 @@ class AsyncDuckDBDriver(AsyncDatabaseDriver[DuckDBConfig]):
         client = self._client
         return bool(client.in_transaction) if client is not None else False
 
+    async def connect(self) -> Self:
+        """Apply initial dynamic secrets when opening the asynchronous driver."""
+        await super().connect()
+        await self._refresh_dynamic_secrets_async(force=True)
+        return self
+
     def cursor(self) -> _AsyncDuckDBCursor:
         """Create an asynchronous cursor bound to this driver."""
         return _AsyncDuckDBCursor(self)
@@ -594,6 +586,8 @@ class AsyncDuckDBDriver(AsyncDatabaseDriver[DuckDBConfig]):
 
     async def begin(self) -> None:
         """Begin an explicit DuckDB transaction asynchronously."""
+        if not self._initial_secrets_applied:
+            await self._refresh_dynamic_secrets_async()
         client = self._require_client()
         if not client.in_transaction:
             await client.begin()
@@ -919,6 +913,14 @@ class AsyncDuckDBDriver(AsyncDatabaseDriver[DuckDBConfig]):
         finally:
             _release_duckdb_lease(self._broker, grant)
 
+    def _require_client(self) -> AsyncDuckDBClient:
+        """Return the open `AsyncDuckDBClient` or raise `InterfaceError` when closed."""
+        client = self._client
+        if client is None:
+            msg = "DuckDB driver is closed"
+            raise InterfaceError(msg)
+        return client
+
     async def _cleanup_failed_startup_client(self) -> None:
         """Close and clear the underlying client if initial dynamic secret bootstrap raises."""
         client = self._client
@@ -1137,20 +1139,22 @@ def _invalidate_rejected_credentials(
         provider = secret.value_provider
         if provider is None:
             continue
-        applied_gen = secret_generations.get(secret.name.lower())
+        key = secret.name.lower()
+        applied_gen = secret_generations.get(key)
         if applied_gen is None:
             continue
         target = getattr(provider, "__self__", provider)
         invalidate_fn = getattr(target, "invalidate", None)
         if callable(invalidate_fn):
             invalidate_fn(applied_gen)
+            secret_generations.pop(key, None)
 
 
 def _probe_provider_generation(provider: Any) -> int | None:
     """Inspect a bound `value_provider` or its `.__self__` receiver for a monotonic `.generation` counter."""
     target = getattr(provider, "__self__", provider)
     gen = getattr(target, "generation", None)
-    if isinstance(gen, int):
+    if isinstance(gen, int) and not isinstance(gen, bool):
         return gen
     return None
 

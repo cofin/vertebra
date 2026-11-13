@@ -1419,3 +1419,109 @@ async def test_gcp_id_token_cache_validation_and_upstream_errors(
     token_server.metadata_status = 500
     with pytest.raises(GoogleCloudAuthError, match="500"):
         await async_cache.get_token("https://failing-service.run.app")
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("http_code", [401, 403])
+async def test_duckdb_driver_401_and_403_invalidates_gcs_bearer_secret_providers(
+    token_server: _MockTokenServer,
+    tmp_path: Path,
+    http_code: int,
+) -> None:
+    """Verify SyncDuckDBDriver and AsyncDuckDBDriver invalidate GCS bearer secret providers on HTTP 401/403."""
+    native_duckdb = pytest.importorskip("vertebra._duckdb", reason=_DUCKDB_SKIP_REASON)
+    adc_path = tmp_path / "adc_401.json"
+    adc_path.write_text(
+        json.dumps(
+            {
+                "type": "authorized_user",
+                "client_id": "cid",
+                "client_secret": "csec",
+                "refresh_token": "rtok",
+                "token_uri": f"{token_server.base_url}/token",
+            }
+        ),
+        encoding="utf-8",
+    )
+    gcs_cfg = GCSConfig(bucket="b", application_credentials=str(adc_path))
+
+    class _SyncClientFaultProxy:
+        def __init__(self, inner: Any) -> None:
+            self._inner = inner
+            self.fail_select = True
+
+        @property
+        def in_transaction(self) -> bool:
+            return bool(self._inner.in_transaction)
+
+        def execute(self, sql: str, params: Any = None) -> int:
+            return int(self._inner.execute(sql, params))
+
+        def execute_with_description(self, sql: str, params: Any = None) -> tuple[list[Any], tuple[str, ...]]:
+            if self.fail_select:
+                msg = f"HTTP Error: GCS request rejected (HTTP {http_code})"
+                raise RuntimeError(msg)
+            rows, cols = self._inner.execute_with_description(sql, params)
+            return list(rows), tuple(str(c) for c in cols)
+
+        def close(self) -> None:
+            self._inner.close()
+
+    class _AsyncClientFaultProxy:
+        def __init__(self, inner: Any) -> None:
+            self._inner = inner
+            self.fail_select = True
+
+        @property
+        def in_transaction(self) -> bool:
+            return bool(self._inner.in_transaction)
+
+        async def execute(self, sql: str, params: Any = None) -> int:
+            return int(await self._inner.execute(sql, params))
+
+        async def execute_with_description(self, sql: str, params: Any = None) -> tuple[list[Any], tuple[str, ...]]:
+            if self.fail_select:
+                msg = f"HTTP Error: GCS request rejected (HTTP {http_code})"
+                raise RuntimeError(msg)
+            rows, cols = await self._inner.execute_with_description(sql, params)
+            return list(rows), tuple(str(c) for c in cols)
+
+        async def close(self) -> None:
+            await self._inner.close()
+
+    sync_provider = SyncGcsBearerSecretProvider.from_config(gcs_cfg)
+    sync_proxy = _SyncClientFaultProxy(native_duckdb.SyncDuckDBClient(":memory:"))
+    sync_driver = SyncDuckDBDriver(
+        DuckDBConfig(secrets=(DuckDBSecretConfig(name="gcs_sec", secret_type="http", value_provider=sync_provider),)),
+        _client=cast("Any", sync_proxy),
+    )
+    try:
+        assert sync_provider.generation == 1
+        assert sync_provider.needs_refresh() is False
+        with pytest.raises(RuntimeError, match=f"HTTP {http_code}"):
+            sync_driver.select("SELECT 1 AS v")
+        assert sync_provider.needs_refresh() is True
+        sync_proxy.fail_select = False
+        assert sync_driver.select("SELECT 1 AS v") == [{"v": 1}]
+        assert sync_provider.generation == 2
+        assert sync_provider.needs_refresh() is False
+    finally:
+        sync_driver.close()
+
+    async_provider = AsyncGcsBearerSecretProvider.from_config(gcs_cfg)
+    async_proxy = _AsyncClientFaultProxy(native_duckdb.AsyncDuckDBClient(":memory:"))
+    async_driver = AsyncDuckDBDriver(
+        DuckDBConfig(secrets=(DuckDBSecretConfig(name="gcs_asec", secret_type="http", value_provider=async_provider),)),
+        _client=cast("Any", async_proxy),
+    )
+    try:
+        with pytest.raises(RuntimeError, match=f"HTTP {http_code}"):
+            await async_driver.select("SELECT 1 AS v")
+        assert async_provider.generation == 1
+        assert async_provider.needs_refresh() is True
+        async_proxy.fail_select = False
+        assert await async_driver.select("SELECT 1 AS v") == [{"v": 1}]
+        assert async_provider.generation == 2
+        assert async_provider.needs_refresh() is False
+    finally:
+        await async_driver.close()

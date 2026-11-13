@@ -662,20 +662,24 @@ class _FaultInjectingAsyncClient:
 
 
 class _RecordingSecretProvider:
-    """Minimal stateful dynamic secret provider tracking generation, invalidation, and call counts."""
+    """Minimal stateful dynamic secret provider advancing generation lazily on fetch after invalidation."""
 
     def __init__(self) -> None:
-        self.generation = 1
+        self.generation = 0
         self.invalidated: list[int] = []
         self.calls = 0
+        self._stale = True
 
     def invalidate(self, failed_generation: int) -> None:
         self.invalidated.append(failed_generation)
         if self.generation == failed_generation:
-            self.generation += 1
+            self._stale = True
 
     def __call__(self) -> dict[str, str]:
         self.calls += 1
+        if self._stale:
+            self.generation += 1
+            self._stale = False
         return {"bearer_token": f"tok-gen-{self.generation}"}
 
 
@@ -715,14 +719,13 @@ async def test_duckdb_driver_invalidates_only_401_and_403_errors_and_rotates_nex
             sync_driver.select("SELECT * FROM 'https://example.invalid/data.parquet'")
         if expected_invalidation:
             assert sync_provider.invalidated == [1]
-            assert sync_provider.generation == 2
         else:
             assert sync_provider.invalidated == []
-            assert sync_provider.generation == 1
 
         sync_proxy._query_error = None
         assert sync_driver.select("SELECT 42 AS answer") == [{"answer": 42}]
         assert sync_provider.calls == (2 if expected_invalidation else 1)
+        assert sync_provider.generation == (2 if expected_invalidation else 1)
     finally:
         sync_driver.close()
 
@@ -738,14 +741,13 @@ async def test_duckdb_driver_invalidates_only_401_and_403_errors_and_rotates_nex
         assert async_provider.calls == 1
         if expected_invalidation:
             assert async_provider.invalidated == [1]
-            assert async_provider.generation == 2
         else:
             assert async_provider.invalidated == []
-            assert async_provider.generation == 1
 
         async_proxy._query_error = None
         assert await async_driver.select("SELECT 7 AS answer") == [{"answer": 7}]
         assert async_provider.calls == (2 if expected_invalidation else 1)
+        assert async_provider.generation == (2 if expected_invalidation else 1)
     finally:
         await async_driver.close()
 
@@ -773,3 +775,11 @@ async def test_duckdb_driver_closes_client_when_initial_required_secret_refresh_
     assert async_driver._client is None
     await async_driver.close()
     assert async_proxy.close_calls == 1
+
+    tx_proxy = _FaultInjectingAsyncClient(AsyncDuckDBClient(":memory:"))
+    tx_driver = AsyncDuckDBDriver(cfg, _client=cast("AsyncDuckDBClient", tx_proxy))
+    with pytest.raises(RuntimeError, match="vault unavailable"):
+        async with tx_driver.transaction():
+            await tx_driver.select("SELECT 1 AS ok")
+    assert tx_proxy.close_calls == 1
+    assert tx_driver._client is None
