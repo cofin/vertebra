@@ -6,7 +6,13 @@ chapter_id: ch02-replication-python-bridge
 title: "Implement frozen AsyncPostgresReplication pyclass and module registration"
 description: "Expose AsyncPostgresReplication (#[pyclass(frozen)]) with cancel-safe next, fenced acknowledge, aclose, closed, and async context management."
 status: stable
-state: pending
+state: completed
+commit: f4d3d1eb
+last_verified_commit: f4d3d1eb
+last_verified_at: "2026-11-13T04:53:53Z"
+verification_evidence: "maturin develop + pytest test_postgres_native_replication.py (110 passed)"
+claimed_by: null
+claimed_at: null
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -64,7 +70,7 @@ UV_NO_SYNC=1 PYO3_PYTHON=.venv/bin/python make dev && uv run --no-sync pytest sr
 
 ## Acceptance Criteria
 
-- [ ] `AsyncPostgresReplication` passes cancel-safety, concurrent-`next` rejection, and `aclose` tests.
-- [ ] Zero regressions in `ch02-replication-python-bridge` fast verification gate.
+- [x] `AsyncPostgresReplication` passes cancel-safety, concurrent-`next` rejection, and `aclose` tests.
+- [x] Zero regressions in `ch02-replication-python-bridge` fast verification gate.
 
 [^pg-lib]: `src/rs/vertebra-postgres/src/lib.rs` — vertebra._postgres module registration.

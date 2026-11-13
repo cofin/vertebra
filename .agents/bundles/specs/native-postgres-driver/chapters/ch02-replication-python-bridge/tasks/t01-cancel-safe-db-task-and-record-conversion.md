@@ -6,7 +6,13 @@ chapter_id: ch02-replication-python-bridge
 title: "Add spawn_rust_db_task_with_attr_and_future and lossless Python record conversion"
 description: "Extend vertebra-db py_async for cancel-safe lease restoration and convert ReplicationEventDelivery records to PostgresReplicationRecord on the event loop."
 status: stable
-state: pending
+state: completed
+commit: f4d3d1eb
+last_verified_commit: f4d3d1eb
+last_verified_at: "2026-11-13T04:53:53Z"
+verification_evidence: "cargo test py_async:: (11 passed) + replication:: (2 passed) + clippy clean"
+claimed_by: null
+claimed_at: null
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -64,8 +70,8 @@ PYO3_PYTHON="$(pwd)/.venv/bin/python" PYTHONPATH="$(pwd)/src/py:$(pwd)/.venv/lib
 
 ## Acceptance Criteria
 
-- [ ] Cancelled Python futures never consume or acknowledge an undelivered WAL record.
-- [ ] `replication_delivery_to_python` preserves `PG_UNCHANGED_TOAST` and raw bytes.
-- [ ] Zero regressions in `ch02-replication-python-bridge` fast verification gate.
+- [x] Cancelled Python futures never consume or acknowledge an undelivered WAL record.
+- [x] `replication_delivery_to_python` preserves `PG_UNCHANGED_TOAST` and raw bytes.
+- [x] Zero regressions in `ch02-replication-python-bridge` fast verification gate.
 
 [^py-async]: `src/rs/vertebra-db/src/py_async.rs::spawn_rust_db_task_with_attr` — AsyncCompletionQueue drainer.

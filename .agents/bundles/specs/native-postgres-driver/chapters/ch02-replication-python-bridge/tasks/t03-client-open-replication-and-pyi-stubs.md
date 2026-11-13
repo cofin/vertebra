@@ -6,7 +6,13 @@ chapter_id: ch02-replication-python-bridge
 title: "Wire AsyncPostgresClient.replication_identity/open_replication and 14-class _postgres.pyi"
 description: "Add replication_identity and open_replication on AsyncPostgresClient and finalize _postgres.pyi for stubtest parity."
 status: stable
-state: pending
+state: completed
+commit: f4d3d1eb
+last_verified_commit: f4d3d1eb
+last_verified_at: "2026-11-13T04:53:53Z"
+verification_evidence: "stubtest vertebra._postgres + ruff + mypy + pytest (110 passed)"
+claimed_by: null
+claimed_at: null
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -65,8 +71,8 @@ UV_NO_SYNC=1 PYO3_PYTHON=.venv/bin/python make dev && uv run --no-sync python -m
 
 ## Acceptance Criteria
 
-- [ ] `mypy.stubtest vertebra._postgres` passes with all 14 native classes.
-- [ ] Pooler-mode and queue-bound validations pass unit tests.
-- [ ] Zero regressions in `ch02-replication-python-bridge` fast verification gate.
+- [x] `mypy.stubtest vertebra._postgres` passes with all 14 native classes.
+- [x] Pooler-mode and queue-bound validations pass unit tests.
+- [x] Zero regressions in `ch02-replication-python-bridge` fast verification gate.
 
 [^pg-pyi]: `src/py/vertebra/_postgres.pyi` — Typed PyO3 stub for vertebra._postgres.

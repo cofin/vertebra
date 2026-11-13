@@ -6,7 +6,13 @@ chapter_id: ch02-replication-python-bridge
 title: "Synchronize PyO3 FFI pattern, runtime gotcha, and worker dispatch OKF chapters"
 description: "Update the 3 PyO3 FFI OKF chapters (each <= 200 lines) for vertebra._postgres, ShmCapsule, and PendingDeliveryGuard."
 status: stable
-state: pending
+state: completed
+commit: f4d3d1eb
+last_verified_commit: f4d3d1eb
+last_verified_at: "2026-11-13T04:53:53Z"
+verification_evidence: "review_setup.py validate + pytest test_review_setup.py (27 passed)"
+claimed_by: null
+claimed_at: null
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -65,7 +71,7 @@ make review-check && uv run --no-sync pytest src/py/tests/unit/test_review_setup
 
 ## Acceptance Criteria
 
-- [ ] All 3 OKF files are `<= 200` lines and pass `make review-check` with `0` issues.
-- [ ] Zero regressions in `ch02-replication-python-bridge` fast verification gate.
+- [x] All 3 OKF files are `<= 200` lines and pass `make review-check` with `0` issues.
+- [x] Zero regressions in `ch02-replication-python-bridge` fast verification gate.
 
 [^ffi-okf]: `.agents/bundles/knowledge/patterns/rust/ffi-and-gil-discipline.md` — PyO3 0.30.1 FFI and GIL discipline.

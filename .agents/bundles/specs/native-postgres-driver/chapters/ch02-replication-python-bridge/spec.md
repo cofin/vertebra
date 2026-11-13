@@ -5,7 +5,7 @@ chapter_id: ch02-replication-python-bridge
 title: "Chapter 02: PyO3 Replication Bridge, Stubs, and FFI OKF Sync"
 description: "Expose cancel-safe AsyncPostgresReplication, AsyncPostgresClient.open_replication/replication_identity, 14-class _postgres.pyi, and PyO3 FFI OKF updates."
 status: stable
-state: planned
+state: active
 planning_status: complete
 planning_quality: standard
 planning_degraded_reason: null
@@ -71,14 +71,14 @@ Task `t04` updates `ffi-and-gil-discipline.md`, `pyo3-and-python-runtime.md`, an
 
 ## 5. Implementation Plan
 
-- [ ] [t01-cancel-safe-db-task-and-record-conversion.md](tasks/t01-cancel-safe-db-task-and-record-conversion.md) — Extend vertebra-db py_async for cancel-safe lease restoration and convert ReplicationEventDelivery records to PostgresReplicationRecord on the event loop.
-- [ ] [t02-async-postgres-replication-pyclass.md](tasks/t02-async-postgres-replication-pyclass.md) — Expose AsyncPostgresReplication (#[pyclass(frozen)]) with cancel-safe next, fenced acknowledge, aclose, closed, and async context management.
-- [ ] [t03-client-open-replication-and-pyi-stubs.md](tasks/t03-client-open-replication-and-pyi-stubs.md) — Add replication_identity and open_replication on AsyncPostgresClient and finalize _postgres.pyi for stubtest parity.
-- [ ] [t04-pyo3-ffi-okf-sync.md](tasks/t04-pyo3-ffi-okf-sync.md) — Update the 3 PyO3 FFI OKF chapters (each <= 200 lines) for vertebra._postgres, ShmCapsule, and PendingDeliveryGuard.
+- [x] [f4d3d1eb] [t01-cancel-safe-db-task-and-record-conversion.md](tasks/t01-cancel-safe-db-task-and-record-conversion.md) — Extend vertebra-db py_async for cancel-safe lease restoration and convert ReplicationEventDelivery records to PostgresReplicationRecord on the event loop.
+- [x] [f4d3d1eb] [t02-async-postgres-replication-pyclass.md](tasks/t02-async-postgres-replication-pyclass.md) — Expose AsyncPostgresReplication (#[pyclass(frozen)]) with cancel-safe next, fenced acknowledge, aclose, closed, and async context management.
+- [x] [f4d3d1eb] [t03-client-open-replication-and-pyi-stubs.md](tasks/t03-client-open-replication-and-pyi-stubs.md) — Add replication_identity and open_replication on AsyncPostgresClient and finalize _postgres.pyi for stubtest parity.
+- [x] [f4d3d1eb] [t04-pyo3-ffi-okf-sync.md](tasks/t04-pyo3-ffi-okf-sync.md) — Update the 3 PyO3 FFI OKF chapters (each <= 200 lines) for vertebra._postgres, ShmCapsule, and PendingDeliveryGuard.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-Planned (`4` tasks). Fast `< 60s` local `maturin` + `stubtest` + unit test gate.
+Implemented (`4/4` tasks at `f4d3d1eb`). Fast `< 60s` local `maturin` + `stubtest` + unit test gate verified (`11` `py_async` + `2` `replication` Rust tests, `110` Python unit tests, `stubtest`, `clippy`, `ruff`, `mypy`, and `review_setup.py validate` clean).
 
 ```bash
 UV_NO_SYNC=1 PYO3_PYTHON=.venv/bin/python make dev && uv run --no-sync python -m mypy.stubtest vertebra._postgres && uv run --no-sync pytest src/py/tests/unit/db/test_postgres_native_replication.py -q && make review-check
