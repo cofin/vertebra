@@ -2,7 +2,7 @@
 
 | Chapter | State | Tasks | Summary & Fast Chapter Gate |
 | --- | --- | --- | --- |
-| [`ch01-python-stream-submission-and-flush`](ch01-python-stream-submission-and-flush/spec.md) | `planned` | `4` | PyO3 `submit_stream_frame` / `max_stream_frame_payload`, progressive ASGI/RSGI flush, and native `App` `_dispatch.py` streaming (`cargo test -p vertebra-py --lib` + `stubtest` + targeted streaming pytest) |
+| [`ch01-python-stream-submission-and-flush`](ch01-python-stream-submission-and-flush/spec.md) | `active` | `4` | PyO3 `submit_stream_frame` / `max_stream_frame_payload`, progressive ASGI/RSGI flush, and native `App` `_dispatch.py` streaming (`cargo test -p vertebra-py --lib` + `stubtest` + targeted streaming pytest) |
 | [`ch02-lifespan-supervisor-and-worker-lanes`](ch02-lifespan-supervisor-and-worker-lanes/spec.md) | `planned` | `4` | Fail-loud `WorkerStartupError` + SHM exit `78`, `vertebra.supervisor` exports, `QueueService` resolution, and `--worker-only` `HealthProbeServer` (`cargo test -p vertebra-http --lib workers` + CLI/runner pytest) |
 | [`ch03-relocatable-server-binary-and-packaging`](ch03-relocatable-server-binary-and-packaging/spec.md) | `planned` | `4` | Relocatable `build.rs` + `build_server_binary.py`, `EmbeddedPythonRuntime`, maturin binary wheel include, and opt-in `StandaloneBuilder` `.agents/skills` staging (`ruff` + `mypy` + `test_packaging_and_pgo.py`) |
 | [`ch04-wheel-smoke-and-ci`](ch04-wheel-smoke-and-ci/spec.md) | `planned` | `3` | `smoke_vtb_run.py` + `make core-wheel-check`, PR CI smoke job, and release wheel + `linux-arm64` binary workflows (`ruff` + `mypy` + workflow schema validation) |

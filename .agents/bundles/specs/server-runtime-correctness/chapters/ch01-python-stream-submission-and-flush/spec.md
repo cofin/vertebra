@@ -5,7 +5,7 @@ chapter_id: ch01-python-stream-submission-and-flush
 title: "Chapter 01: Python Stream Submission and Progressive Protocol Flush"
 description: "Expose PyO3 submit_stream_frame and max_stream_frame_payload, flush mounted ASGI and RSGI streams progressively, and wire native App streaming responses in server/_dispatch.py."
 status: stable
-state: planned
+state: active
 planning_status: complete
 planning_quality: standard
 planning_degraded_reason: null
@@ -13,14 +13,14 @@ depends_on_chapters: []
 replan_trigger: null
 plan_commit: 18baadcd
 last_reviewed_commit: null
-updated_at: "2026-11-12T23:45:00Z"
+updated_at: "2026-11-13T02:38:00Z"
 generated:
   by: flow-plan
   at: "2026-11-12T23:45:00Z"
 verified:
-  - by: agent:plan-generator
-    at: "2026-11-12T23:45:00Z"
-    commit: 18baadcd
+  - by: agent:executor
+    at: "2026-11-13T02:38:00Z"
+    commit: 6a23bd18
 tags:
   - pyo3
   - streaming
@@ -55,7 +55,7 @@ sources:
 
 ## 1. Specification, Context & Provenance
 
-Mounted ASGI/RSGI handlers and native `App` streaming endpoints still buffer or fail despite `18baadcd` landing native `ResponseStreamFrame` and `VRSF` SHM rings. `vertebra-py/src/transport.rs` lacks `submit_stream_frame` and `max_stream_frame_payload` [^transport-py-rs]; `AsgiProtocol` and `RsgiHttpProtocol` buffer chunks until completion [^asgi-rs] [^rsgi-http-rs]; `AsgiSend` buffers fallback runs [^asgi-queues-py]; and `server/_dispatch.py` raises `TypeError` (`500`) when native handlers return `(status, headers, AsyncIterable[bytes] | Iterable[bytes])` [^dispatch-py]. Buffered `AsgiRunner.__call__` calls remain unchanged.
+`vertebra-py/src/transport.rs` binds `submit_stream_frame`, `max_stream_frame_payload`, and `STREAM_FLAG_*` over both embedded `BatchBridge` and SHM `VRSF` rings [^transport-py-rs]; `AsgiProtocol` and `RsgiHttpProtocol` flush headers and continuation chunks progressively in direct-submit mode while preserving zero-copy unary responses [^asgi-rs] [^rsgi-http-rs]; Python `AsgiSend` streams fallback runs via `stream_submitter` [^asgi-queues-py]; and `server/_dispatch.py` streams `(status, headers, AsyncIterable[bytes] | Iterable[bytes])` and streaming `Response` bodies across embedded and SHM `vertebra-server` topologies [^dispatch-py]. Buffered `AsgiRunner.__call__` calls remain collecting by contract.
 
 ## 2. Requirements, Concrete Contracts & Architecture
 
@@ -94,14 +94,15 @@ Public streaming documentation (`docs/usage/server-and-workers.md`) and architec
 
 ## 5. Implementation Plan
 
-- [ ] [t01-submit-stream-frame-binding.md](tasks/t01-submit-stream-frame-binding.md) — Expose `submit_stream_frame`, `max_stream_frame_payload`, and `STREAM_FLAG_*` across both transports
-- [ ] [t02-rust-asgi-and-rsgi-progressive-flush.md](tasks/t02-rust-asgi-and-rsgi-progressive-flush.md) — Flush ASGI `more_body=True` chunks and RSGI `response_stream` sends progressively
-- [ ] [t03-python-asgi-send-streaming.md](tasks/t03-python-asgi-send-streaming.md) — Wire Python `AsgiSend` streaming fallback through `_vertebra.submit_stream_frame`
-- [ ] [t04-native-dispatch-and-server-binary-streaming.md](tasks/t04-native-dispatch-and-server-binary-streaming.md) — Stream native `App` `(status, headers, AsyncIterable | Iterable)` responses in `_dispatch.py` and verify `vertebra-server` binary streaming
+- [x] [6a23bd18] [t01-submit-stream-frame-binding.md](tasks/t01-submit-stream-frame-binding.md) — Expose `submit_stream_frame`, `max_stream_frame_payload`, and `STREAM_FLAG_*` across both transports
+- [x] [6a23bd18] [t02-rust-asgi-and-rsgi-progressive-flush.md](tasks/t02-rust-asgi-and-rsgi-progressive-flush.md) — Flush ASGI `more_body=True` chunks and RSGI `response_stream` sends progressively
+- [x] [6a23bd18] [t03-python-asgi-send-streaming.md](tasks/t03-python-asgi-send-streaming.md) — Wire Python `AsgiSend` streaming fallback through `_vertebra.submit_stream_frame`
+- [x] [6a23bd18] [t04-native-dispatch-and-server-binary-streaming.md](tasks/t04-native-dispatch-and-server-binary-streaming.md) — Stream native `App` `(status, headers, AsyncIterable | Iterable)` responses in `_dispatch.py` and verify `vertebra-server` binary streaming
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Fast Chapter Gate (`< 45s`)**: `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-py --lib && cargo build --manifest-path src/rs/Cargo.toml -p vertebra-http --bin vertebra-server && uv run --no-sync maturin develop --uv && uv run --no-sync python -m mypy.stubtest vertebra._vertebra && uv run --no-sync ruff check src/py/vertebra/server src/py/tests/integration/server && uv run --no-sync pytest src/py/tests/unit/ffi/test_ffi.py src/py/tests/unit/server/test_asgi.py src/py/tests/unit/server/test_asgi_sse.py src/py/tests/unit/server/test_rsgi_protocol.py src/py/tests/integration/server/test_vertebra_server.py -q`.
+- **Verified Baseline (`6a23bd18`)**: All 4 tasks in `ch01-python-stream-submission-and-flush` pass `cargo test -p vertebra-py --lib` (`13 passed`), `cargo clippy --all-targets -- -D warnings`, `mypy.stubtest vertebra._vertebra`, `ruff`, `mypy`, and `120 passed` across unit and live `embedded`/`shm` `vertebra-server` streaming acceptance tests.
+- **Fast Chapter Gate (`< 45s`)**: `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-py --lib && cargo build --manifest-path src/rs/Cargo.toml -p vertebra-http --bin vertebra-server && UV_CACHE_DIR=/tmp/uv-cache uv run --no-sync maturin develop --uv --skip-install && uv run --no-sync python -m mypy.stubtest vertebra._vertebra && uv run --no-sync ruff check src/py/vertebra/server src/py/tests/integration/server && uv run --no-sync pytest src/py/tests/unit/ffi/test_ffi.py src/py/tests/unit/server/test_asgi.py src/py/tests/unit/server/test_asgi_sse.py src/py/tests/unit/server/test_rsgi_protocol.py src/py/tests/integration/server/test_vertebra_server.py -q`.
 
 [^transport-py-rs]: `src/rs/vertebra-py/src/transport.rs::ResponseSubmitter` — PyO3 unary response submission and SHM ring transport binding.
 [^asgi-rs]: `src/rs/vertebra-py/src/asgi.rs::AsgiProtocol` — Rust ASGI protocol state machine.

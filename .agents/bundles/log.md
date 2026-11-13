@@ -1,5 +1,10 @@
 # Bundle Activity Log
 
+## [2026-11-13T02:38:00Z] chapter-checkpoint | Server runtime progressive streaming (`server-runtime-correctness/ch01`)
+
+- Completed `t01`–`t04` in `ch01-python-stream-submission-and-flush` at `6a23bd18` (`cargo test -p vertebra-py --lib` 13 passed, `mypy.stubtest vertebra._vertebra` clean, `ruff` + `mypy` clean, `120 passed` across unit and live embedded/SHM `vertebra-server` streaming suites).
+- Synchronized `server-runtime-limitations.md` and `server-runtime-correctness` specs in present tense (`4/26` tasks completed; `22` tasks remain across `ch02`–`ch07`) ahead of zero-context chapter review.
+
 ## [2026-11-13T00:42:00Z] flow-setup + flow-plan | Cross-harness alignment, merged-chapter contraction, and full 16-flow compact plan
 
 - Aligned multi-harness Flow configuration at `main @ 18baadcd`: updated `.agents/setup-state.json` (`stop_gate: "enforce"`, `ignore_policy: "shared"`, `sha_tracking: "strict"`), `AGENTS.md` (`<= 100L`), `.codex/agents/*.toml` (`16` paired reviewer/specialist wrappers), `.agents/skills/**` + `.agents/agents/*.md` (`13` Rust crates / `10` PyO3 extensions, removing `view_file` tool-alias collision), and trimmed `product/tech-stack.md` + `query-pipeline-cdc-and-tenancy.md` (`<= 200L`) while re-anchoring all post-squash `18baadcd` commit references.

@@ -6,7 +6,13 @@ chapter_id: ch01-python-stream-submission-and-flush
 title: Expose PyO3 submit_stream_frame and max_stream_frame_payload
 description: "Bind ResponseSubmitter::submit_stream_frame_inner, submit_stream_frame, max_stream_frame_payload, and STREAM_FLAG_* constants in vertebra-py and _vertebra.pyi."
 status: stable
-state: pending
+state: completed
+commit: 6a23bd18
+last_verified_at: "2026-11-13T02:35:00Z"
+last_verified_commit: 6a23bd18
+verification_evidence: "cargo test -p vertebra-py --lib (13 passed); mypy.stubtest vertebra._vertebra (Success); pytest test_ffi.py passed"
+claimed_by: null
+claimed_at: null
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -68,13 +74,13 @@ Implement `ResponseSubmitter::submit_stream_frame_inner`, `_vertebra.submit_stre
 ## Verification
 
 ```bash
-cargo test --manifest-path src/rs/Cargo.toml -p vertebra-py --lib transport && uv run --no-sync maturin develop --uv && uv run --no-sync python -m mypy.stubtest vertebra._vertebra && uv run --no-sync pytest src/py/tests/unit/ffi/test_ffi.py -q
+cargo test --manifest-path src/rs/Cargo.toml -p vertebra-py --lib transport && UV_CACHE_DIR=/tmp/uv-cache uv run --no-sync maturin develop --uv && uv run --no-sync python -m mypy.stubtest vertebra._vertebra && uv run --no-sync pytest src/py/tests/unit/ffi/test_ffi.py -q
 ```
 
 ## Acceptance Criteria
 
-- [ ] `submit_stream_frame`, `max_stream_frame_payload`, and `STREAM_FLAG_*` pass `mypy.stubtest vertebra._vertebra`.
-- [ ] Embedded and SHM stream frame submission pass unit tests with zero regressions.
+- [x] `submit_stream_frame`, `max_stream_frame_payload`, and `STREAM_FLAG_*` pass `mypy.stubtest vertebra._vertebra`.
+- [x] Embedded and SHM stream frame submission pass unit tests with zero regressions.
 
 [^transport-py-rs]: `src/rs/vertebra-py/src/transport.rs::ResponseSubmitter` — Existing unary ResponseSubmitter and SHM ring helpers.
 [^vertebra-pyi]: `src/py/vertebra/_vertebra.pyi` — Typed Python stub for vertebra._vertebra.

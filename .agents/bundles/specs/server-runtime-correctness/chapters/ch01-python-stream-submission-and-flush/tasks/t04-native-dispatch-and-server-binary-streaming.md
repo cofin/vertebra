@@ -6,7 +6,13 @@ chapter_id: ch01-python-stream-submission-and-flush
 title: Wire Native App Streaming in _dispatch.py and End-to-End Server Acceptance
 description: "Stream (status, headers, AsyncIterable[bytes] | Iterable[bytes]) returns from native App handlers in server/_dispatch.py and prove embedded + SHM streaming through vertebra-server."
 status: stable
-state: pending
+state: completed
+commit: 6a23bd18
+last_verified_at: "2026-11-13T02:35:00Z"
+last_verified_commit: 6a23bd18
+verification_evidence: "cargo build --bin vertebra-server + ruff + mypy + pytest test_asgi_sse.py test_vertebra_server.py (120 passed across suite)"
+claimed_by: null
+claimed_at: null
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -71,8 +77,8 @@ cargo build --manifest-path src/rs/Cargo.toml -p vertebra-http --bin vertebra-se
 
 ## Acceptance Criteria
 
-- [ ] Native `App` handlers returning `(status, headers, AsyncIterable[bytes] | Iterable[bytes])` stream progressively with zero `TypeError` / `500` fallthrough.
-- [ ] `vertebra-server` passes embedded and SHM progressive streaming integration assertions.
+- [x] Native `App` handlers returning `(status, headers, AsyncIterable[bytes] | Iterable[bytes])` stream progressively with zero `TypeError` / `500` fallthrough.
+- [x] `vertebra-server` passes embedded and SHM progressive streaming integration assertions.
 
 [^dispatch-py]: `src/py/vertebra/server/_dispatch.py::_submit_coerced` — Native App response coercion and submission.
 [^agent-plugin-py]: `src/py/vertebra/agent/plugin.py::AgentPlugin.mount_native` — Native App MCP/Agent SSE endpoint caller.

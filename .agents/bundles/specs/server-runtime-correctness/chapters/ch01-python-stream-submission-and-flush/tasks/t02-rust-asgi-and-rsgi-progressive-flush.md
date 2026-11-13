@@ -6,7 +6,13 @@ chapter_id: ch01-python-stream-submission-and-flush
 title: Flush ASGI and RSGI Streaming Responses Progressively in Rust
 description: "Update AsgiProtocol and RsgiHttpProtocol in vertebra-py to flush response headers and non-final chunks immediately via ResponseSubmitter::submit_stream_frame_inner."
 status: stable
-state: pending
+state: completed
+commit: 6a23bd18
+last_verified_at: "2026-11-13T02:35:00Z"
+last_verified_commit: 6a23bd18
+verification_evidence: "cargo test -p vertebra-py --lib (13 passed); pytest test_asgi.py test_rsgi_protocol.py passed"
+claimed_by: null
+claimed_at: null
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -69,13 +75,13 @@ Implement progressive chunk flushing in `AsgiProtocol` and `RsgiHttpProtocol` fo
 ## Verification
 
 ```bash
-cargo test --manifest-path src/rs/Cargo.toml -p vertebra-py --lib && uv run --no-sync maturin develop --uv && uv run --no-sync pytest src/py/tests/unit/server/test_asgi.py src/py/tests/unit/server/test_rsgi_protocol.py -q
+cargo test --manifest-path src/rs/Cargo.toml -p vertebra-py --lib && UV_CACHE_DIR=/tmp/uv-cache uv run --no-sync maturin develop --uv && uv run --no-sync pytest src/py/tests/unit/server/test_asgi.py src/py/tests/unit/server/test_rsgi_protocol.py -q
 ```
 
 ## Acceptance Criteria
 
-- [ ] ASGI `more_body=True` and RSGI `response_stream` flush chunks before handler return.
-- [ ] Single-chunk unary responses and `direct_submit=False` buffered callers remain unchanged.
+- [x] ASGI `more_body=True` and RSGI `response_stream` flush chunks before handler return.
+- [x] Single-chunk unary responses and `direct_submit=False` buffered callers remain unchanged.
 
 [^asgi-rs]: `src/rs/vertebra-py/src/asgi.rs::AsgiProtocol` — ASGI send and batch completion state machine.
 [^rsgi-http-rs]: `src/rs/vertebra-py/src/rsgi/http.rs::RsgiHttpProtocol` — RSGI response_stream transport.

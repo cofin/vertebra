@@ -6,7 +6,13 @@ chapter_id: ch01-python-stream-submission-and-flush
 title: Stream Python AsgiSend Fallback Chunks via Injected Submitter
 description: "Add stream_submitter, streamed, and finish_stream to AsgiSend and wire AsgiRunner and _AsgiMountRunner submit paths to _vertebra.submit_stream_frame."
 status: stable
-state: pending
+state: completed
+commit: 6a23bd18
+last_verified_at: "2026-11-13T02:35:00Z"
+last_verified_commit: 6a23bd18
+verification_evidence: "ruff check + mypy src/py/vertebra/server clean; pytest test_asgi.py passed"
+claimed_by: null
+claimed_at: null
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -70,8 +76,8 @@ uv run --no-sync ruff check src/py/vertebra/server && uv run --no-sync mypy src/
 
 ## Acceptance Criteria
 
-- [ ] `AsgiSend` streams multi-chunk responses progressively without buffering when `stream_submitter` is injected.
-- [ ] Buffered `AsgiRunner.__call__` continues returning complete `AsgiResponse` values.
+- [x] `AsgiSend` streams multi-chunk responses progressively without buffering when `stream_submitter` is injected.
+- [x] Buffered `AsgiRunner.__call__` continues returning complete `AsgiResponse` values.
 
 [^asgi-send-py]: `src/py/vertebra/server/_asgi/_queues.py::AsgiSend` — Python fallback ASGI send collector.
 [^asgi-runner-py]: `src/py/vertebra/server/_asgi/_runner.py::AsgiRunner` — Python ASGI runner spawn and submit paths.

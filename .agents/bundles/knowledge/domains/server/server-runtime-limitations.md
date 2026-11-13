@@ -1,7 +1,7 @@
 ---
 type: Gotcha
 title: Server Runtime Limitations
-description: Verified gaps in mounted response streaming, startup failure handling, the supervisor package surface, worker lanes, and wheel-shipped server binaries that callers and maintainers must account for.
+description: Verified limitations in mid-stream error signaling, startup failure handling, the supervisor package surface, worker lanes, and wheel-shipped server binaries that callers and maintainers must account for.
 status: stable
 tags:
 - server
@@ -13,15 +13,15 @@ generated:
   at: "2026-11-12T01:15:00Z"
 verified:
 - by: agent:flow-sync
-  at: "2026-11-12T01:15:00Z"
-  commit: c8722c76
+  at: "2026-11-13T02:38:00Z"
+  commit: 6a23bd18
 sources:
 - id: asgi-protocol-rs
   resource: src/rs/vertebra-py/src/asgi.rs::AsgiProtocol
-  title: Rust ASGI protocol send path and body buffer
+  title: Rust ASGI progressive stream flush and mid-stream FLAG_ERROR emission
 - id: rsgi-http-rs
   resource: src/rs/vertebra-py/src/rsgi/http.rs::RsgiHttpProtocol
-  title: Rust RSGI HTTP protocol stream accumulation
+  title: Rust RSGI HTTP progressive response_stream flush
 - id: bridge-http-rs
   resource: src/rs/vertebra-http/src/dispatcher/bridge.rs::BridgeCorrelation
   title: Embedded bridge correlation completion
@@ -51,9 +51,7 @@ sources:
 # Server Runtime Limitations
 
 <!-- truth: start -->
-- Mounted ASGI responses do not stream: `AsgiProtocol::send` appends every `more_body=True` chunk to `AsgiProtocolState.body_buf` and submits one unary response when the final chunk arrives, so SSE and MCP streamable HTTP deliver nothing until the handler returns [^asgi-protocol-rs].
-- RSGI `response_stream` appends into `RsgiHttpProtocol.stream_chunks` and flushes once at return [^rsgi-http-rs].
-- The native embedded bridge and SHM rings carry progressive responses through `ResponseStreamRegistry` and ordered `VRSF` frames. Python stream submission and ASGI/RSGI producers remain unwired, so transport support alone does not make mounted responses stream [^bridge-http-rs] [^ring-pair-rs] [^asgi-protocol-rs] [^rsgi-http-rs].
+- Progressive ASGI, RSGI, and native `App` streaming flushes headers on the first non-final chunk, so mid-stream application exceptions emit `STREAM_FLAG_ERROR` and terminate the response body early rather than rewriting the already-sent HTTP status (`FrameReceiver` yields `Result<Frame<Bytes>, Infallible>`, and buffered `AsgiRunner.__call__` remains collecting by contract) [^asgi-protocol-rs] [^rsgi-http-rs] [^bridge-http-rs] [^ring-pair-rs].
 - `Worker.run` logs and swallows ASGI lifespan startup failures (`"ASGI lifespan startup failed for mount %r"`), and `_instantiate_mount_runners` logs and swallows RSGI `__rsgi_init__` failures; the worker then serves traffic without the resources startup was meant to create [^worker-py].
 - `vertebra.supervisor` (`supervisor/__init__.py`) contains only a docstring; it imports nothing and defines no `__all__`, so launcher symbols must be imported from `vertebra.supervisor._supervisor` [^supervisor-init-py].
 - `vtb run --worker-only` only sets `VERTEBRA_WORKER_ONLY`, which no module reads, and still launches the HTTP server [^run-cli-py].
@@ -64,12 +62,12 @@ sources:
 
 ## Planned Fixes
 
-The `server-runtime-correctness` flow owns incremental mounted streaming over both transports ([#81](https://github.com/cofin/vertebra/issues/81)), fail-loud startup ([#84](https://github.com/cofin/vertebra/issues/84)), the supervisor package exports ([#83](https://github.com/cofin/vertebra/issues/83)), worker-only and worker-lane runtime behavior ([#85](https://github.com/cofin/vertebra/issues/85)), and the wheel-shipped relocatable server binary ([#82](https://github.com/cofin/vertebra/issues/82)).
+The `server-runtime-correctness` flow owns fail-loud startup ([#84](https://github.com/cofin/vertebra/issues/84)), the supervisor package exports ([#83](https://github.com/cofin/vertebra/issues/83)), worker-only and worker-lane runtime behavior ([#85](https://github.com/cofin/vertebra/issues/85)), and the wheel-shipped relocatable server binary ([#82](https://github.com/cofin/vertebra/issues/82)).
 
 Current runtime behavior is described in [ASGI, RSGI & WSGI Runners](../../architecture/worker/asgi-and-wsgi-runners.md), [Python Server, Worker Loop & Protocol Adapters Domain](worker-and-protocols.md), and [Multi-Lane Worker Runner](worker-lanes.md).
 
-[^asgi-protocol-rs]: `src/rs/vertebra-py/src/asgi.rs::AsgiProtocol` — Rust ASGI protocol send path and body buffer.
-[^rsgi-http-rs]: `src/rs/vertebra-py/src/rsgi/http.rs::RsgiHttpProtocol` — Rust RSGI HTTP protocol stream accumulation.
+[^asgi-protocol-rs]: `src/rs/vertebra-py/src/asgi.rs::AsgiProtocol` — Rust ASGI progressive stream flush and mid-stream `FLAG_ERROR` emission.
+[^rsgi-http-rs]: `src/rs/vertebra-py/src/rsgi/http.rs::RsgiHttpProtocol` — Rust RSGI HTTP progressive `response_stream` flush.
 [^bridge-http-rs]: `src/rs/vertebra-http/src/dispatcher/bridge.rs::BridgeCorrelation` — Embedded bridge correlation completion.
 [^ring-pair-rs]: `src/rs/vertebra-core/src/transport/ring_pair.rs::RingPair` — SHM unary `VRES` and ordered `VRSF` streaming frames.
 [^worker-py]: `src/py/vertebra/server/worker.py::Worker` — Worker lifespan entry and mount runner instantiation.
