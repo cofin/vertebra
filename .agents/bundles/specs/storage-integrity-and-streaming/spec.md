@@ -120,7 +120,7 @@ Three gaps remain open under parent PRD [native-data-platform](../native-data-pl
 
 ## 5. Implementation Plan
 
-- [ ] [ch01-integrity-receipts-and-verified-reads](chapters/ch01-integrity-receipts-and-verified-reads/spec.md) — Rust & Python CRC32C/MD5/SHA-256 receipts, abort-before-publish digest checks, verified streaming reads, and `vertebra.typing.IntegrityError` + `vertebra.storage` re-exports.
+- [~] [ch01-integrity-receipts-and-verified-reads](chapters/ch01-integrity-receipts-and-verified-reads/spec.md) — Rust & Python CRC32C/MD5/SHA-256 receipts, abort-before-publish digest checks, verified streaming reads, and `vertebra.typing.IntegrityError` + `vertebra.storage` re-exports.
 - [ ] [ch02-streaming-arrow-writes-and-integrations](chapters/ch02-streaming-arrow-writes-and-integrations/spec.md) — Streaming Arrow/Parquet multipart writes and digest forwarding across `vertebra.storage`, SQLSpec, Advanced Alchemy, and Django, plus Criterion `put_checksum` benchmark.
 - [ ] [ch03-wheel-isolation-and-okf-sync](chapters/ch03-wheel-isolation-and-okf-sync/spec.md) — Companion wheel payload isolation (`storage`, `bigquery`, `spanner`, `bundler`) in `verify_storage_wheel.py` / `Makefile` / `release.yaml`, user docs sync, and `<= 200L` storage OKF + upstream SQLSpec note.
 

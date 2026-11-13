@@ -6,7 +6,13 @@ chapter_id: ch01-integrity-receipts-and-verified-reads
 title: "Re-Export IntegrityError in vertebra.typing and Wire Python Storage Facade Receipts"
 description: "Explicitly re-export IntegrityError in src/py/vertebra/typing.py (__all__) and vertebra.storage (__all__), and wire sha256/crc32c/md5 receipts and verified reads across SyncObjectStore and AsyncObjectStore."
 status: stable
-state: pending
+state: completed
+commit: 85849b32
+last_verified_commit: 85849b32
+last_verified_at: "2026-11-13T02:21:00Z"
+verification_evidence: "cargo test -p vertebra-storage (47 passed) + clippy + stubtest + mypy + pytest (485 passed, 1 skipped) + review-check (exit 0)"
+claimed_by: null
+claimed_at: null
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -78,8 +84,8 @@ uv run --no-sync ruff check src/py/vertebra/typing.py src/py/vertebra/storage sr
 
 ## Acceptance Criteria
 
-- [ ] `from vertebra.typing import IntegrityError` and `from vertebra.storage import IntegrityError` resolve cleanly, and sync/async facades enforce receipts and verified reads across all write/read paths (`R1`–`R3`).
-- [ ] Zero regressions in the chapter's fast verification gate.
+- [x] `from vertebra.typing import IntegrityError` and `from vertebra.storage import IntegrityError` resolve cleanly, and sync/async facades enforce receipts and verified reads across all write/read paths (`R1`–`R3`).
+- [x] Zero regressions in the chapter's fast verification gate.
 
 [^py-public-typing]: `src/py/vertebra/typing.py` — Explicit public typing facade and `__all__` tuple.
 [^py-store]: `src/py/vertebra/storage/_store.py::PutResult` — `ObjectMeta`, `PutResult`, `SyncObjectStore`, `AsyncObjectStore`, `open_writer`, and `open_reader`.

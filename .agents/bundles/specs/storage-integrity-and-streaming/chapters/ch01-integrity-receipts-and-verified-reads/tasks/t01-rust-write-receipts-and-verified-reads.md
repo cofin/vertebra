@@ -6,7 +6,13 @@ chapter_id: ch01-integrity-receipts-and-verified-reads
 title: "Add Rust CRC32C, MD5, and SHA-256 Write Receipts and Verified Streaming Reads"
 description: "Implement opt-in CRC32C/MD5/SHA-256 receipts, abort-before-publish digest checks, and get_verified/get_file_verified/get_stream_verified in vertebra-storage."
 status: stable
-state: pending
+state: completed
+commit: 85849b32
+last_verified_commit: 85849b32
+last_verified_at: "2026-11-13T02:21:00Z"
+verification_evidence: "cargo test -p vertebra-storage (47 passed) + clippy + stubtest + mypy + pytest (485 passed, 1 skipped) + review-check (exit 0)"
+claimed_by: null
+claimed_at: null
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -14,6 +20,7 @@ strategy: regression_tdd
 plan_commit: 18baadcd
 depends_on: []
 files:
+  - src/rs/Cargo.lock
   - src/rs/vertebra-storage/Cargo.toml
   - src/rs/vertebra-storage/src/store.rs
 tests:
@@ -69,8 +76,8 @@ cargo test --manifest-path src/rs/Cargo.toml -p vertebra-storage --locked && car
 
 ## Acceptance Criteria
 
-- [ ] `ObjectStoreEngine` computes CRC32C/MD5/SHA-256 receipts, aborts mismatched uploads before publish, and verifies byte, file, and stream reads (`R1`, `R2`).
-- [ ] Zero regressions in `vertebra-storage` tests and Clippy.
+- [x] `ObjectStoreEngine` computes CRC32C/MD5/SHA-256 receipts, aborts mismatched uploads before publish, and verifies byte, file, and stream reads (`R1`, `R2`).
+- [x] Zero regressions in `vertebra-storage` tests and Clippy.
 
 [^store-rs]: `src/rs/vertebra-storage/src/store.rs::PutConditionalOptions` — `PutConditionalOptions`, `StoredObjectMeta`, `StorageError`, `put_opts`, `put_file`, `get`, `get_file`, and `get_stream`.
 [^session-rs]: `src/rs/vertebra-storage/src/store.rs::MultipartUploadSession` — `MultipartUploadSession` `write_chunk`, `complete_with_meta`, and `abort`.

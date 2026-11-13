@@ -1,5 +1,9 @@
 # Bundle Activity Log
 
+## [2026-11-13T02:21:00Z] chapter-checkpoint | storage-integrity-and-streaming ch01-integrity-receipts-and-verified-reads
+
+- Completed `ch01-integrity-receipts-and-verified-reads` (`t01`–`t03`) at `85849b32` on `feat/storage-integrity-and-streaming`: added CRC32C, MD5, and SHA-256 receipts, abort-before-publish expected-digest checks, `get_verified`/`get_file_verified`/`get_stream_verified`, and `vertebra.typing.IntegrityError` + `vertebra.storage` re-exports (`47` Rust tests, `485` Python tests, `stubtest` and `mypy` clean).
+
 ## [2026-11-13T16:02:30Z] archive | server-runtime-correctness
 
 - Archived `server-runtime-correctness` (`7` chapters, `26` tasks, `47143761..06ef86e9`) after verifying full mypy (`436` files), pure-Python doc postbuild/verifier lazy imports (`serializers/__init__.py`), and present-tense OKF knowledge chapters (`pyo3-ffi-and-batch-dispatch.md`, `asgi-and-wsgi-runners.md`, `tiered-rings-and-batch-bridge.md`, `worker-and-protocols.md`, `server-runtime-limitations.md`, `server-and-dispatch.md`, `product.md`).
