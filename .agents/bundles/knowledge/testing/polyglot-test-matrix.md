@@ -139,7 +139,7 @@ Vertebra runs verification gates across Rust (`cargo test`), Python (`pytest` + 
 | `lint` | `python`, `rust`, `typescript`, `ci`, or `workflow_dispatch` | `make ts-install` + `make lint-all` | `ubuntu-latest` |
 | `test-python` | `python`, `rust`, `ci`, or `workflow_dispatch` | `make py-test`; on `3.12` also `make coverage` (`coverage.xml`) | Python `3.12`, `3.13`, `3.14`, `3.14t`, `3.15`, `3.15t` |
 | `test-rust` | `rust`, `ci`, or `workflow_dispatch` | Windows `cargo check` (`x86_64-pc-windows-msvc`) + `make rs-test` (`tls,compression,gcp`) | `ubuntu-latest` |
-| `test-rust-macos` | `main` push (`rust` or `ci`) or `workflow_dispatch` | `cargo test --workspace --features tls,compression,gcp,macos-ulock` | `macos-latest` |
+| `test-rust-macos` | `workflow_dispatch` | `cargo test --workspace --features tls,compression,gcp,macos-ulock` | `macos-latest` |
 | `test-typescript` | `typescript`, `ci`, or `workflow_dispatch` | `make ts-install` + `make ts-build` + `make ts-test` | `ubuntu-latest` |
 | `build-docs` | `docs`, `ci`, or `workflow_dispatch` | `uv sync --frozen --no-install-project --only-group doc` + `make docs` | `ubuntu-latest` |
 
