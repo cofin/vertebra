@@ -81,7 +81,7 @@ pub fn compute_status_interval(wal_sender_timeout: Option<Duration>) -> Duration
 }
 
 /// Complete received and published Commit boundaries, fenced by caller acknowledgement.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ReplicationFeedback {
     received_complete_lsn: u64,
     published_commits: VecDeque<u64>,
