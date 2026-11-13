@@ -1568,6 +1568,17 @@ async def test_mcp_tool_guard_errors_map_to_typed_codes_before_confirmation_and_
             400,
             HEADER_MISMATCH,
         ),
+        (
+            {"Mcp-Param-payload": '{"limit": 1}'},
+            {
+                "jsonrpc": "2.0",
+                "id": 10,
+                "method": "tools/call",
+                "params": {"name": "echo_ws", "arguments": {"workspace_id": "ws-1", "payload": {"limit": True}}},
+            },
+            400,
+            HEADER_MISMATCH,
+        ),
     ],
     ids=[
         "ascii-exact-match",
@@ -1579,6 +1590,7 @@ async def test_mcp_tool_guard_errors_map_to_typed_codes_before_confirmation_and_
         "rfc2047-prompt-mismatch",
         "resource-uri-mismatch",
         "batch-with-mcp-param",
+        "nested-json-bool-int-mismatch",
     ],
 )
 async def test_mcp_http_param_header_validation(
@@ -1592,7 +1604,8 @@ async def test_mcp_http_param_header_validation(
     calls: list[tuple[str, int]] = []
 
     @tool(name="echo_ws")
-    def echo_ws(workspace_id: str, count: int = 1) -> str:
+    def echo_ws(workspace_id: str, count: int = 1, payload: dict[str, Any] | None = None) -> str:
+        _ = payload
         calls.append((workspace_id, count))
         return f"{workspace_id}:{count}"
 

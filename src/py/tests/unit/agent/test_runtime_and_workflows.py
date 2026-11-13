@@ -269,6 +269,52 @@ async def test_agent_runtime_confirmation_binds_tool_and_arguments(
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_multi_call_step_preserves_approved_ticket_when_sibling_call_blocks(streaming: bool) -> None:
+    """Approved ticket is not consumed if a sibling tool call in the same step pauses for confirmation."""
+    gate = ConfirmationGate()
+    executed: list[str] = []
+
+    async def drop_db(db_name: str) -> str:
+        executed.append(f"drop:{db_name}")
+        return db_name
+
+    async def purge_audit_log(days: int) -> int:
+        executed.append(f"purge:{days}")
+        return days
+
+    agent = Agent(
+        name="AdminAgent",
+        tools=(
+            Tool(name="drop_db", description="Drop database", fn=drop_db, requires_confirmation=True),
+            Tool(name="purge_audit_log", description="Purge audit log", fn=purge_audit_log, requires_confirmation=True),
+        ),
+    )
+    approved = gate.request_confirmation("drop_db", "call_1", {"db_name": "staging"})
+    assert gate.approve(approved.token) is True
+
+    multi_step = [
+        ModelDelta(event_type="tool_call", tool_name="drop_db", call_id="call_1", arguments={"db_name": "staging"}),
+        ModelDelta(event_type="tool_call", tool_name="purge_audit_log", call_id="call_2", arguments={"days": 30}),
+    ]
+    runtime = AgentRuntime(model_provider=DummyMockModel([multi_step]), default_agent=agent, confirmation_gate=gate)
+    req = TurnRequest(session_id="sess_multi", message="Clean staging", confirmation_token=approved.token)
+    if streaming:
+        frames = [frame async for frame in runtime.stream_turn(req)]
+        assert frames[-1].event_type == "confirmation_required"
+        assert frames[-1].tool_name == "purge_audit_log"
+    else:
+        resp = await runtime.run_turn(req)
+        assert resp.status == "confirmation_required"
+        assert resp.confirmation_ticket is not None
+        assert resp.confirmation_ticket.tool_name == "purge_audit_log"
+    still_approved = gate.get_ticket(approved.token)
+    assert still_approved is not None
+    assert still_approved.status == "approved"
+    assert executed == []
+
+
+@pytest.mark.anyio
 async def test_confirmation_gate_pause_and_approval() -> None:
     """Verify tools requiring confirmation pause the turn until approved."""
     gate = ConfirmationGate()
