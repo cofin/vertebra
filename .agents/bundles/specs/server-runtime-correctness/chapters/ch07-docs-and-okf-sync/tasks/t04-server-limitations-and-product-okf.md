@@ -6,7 +6,8 @@ chapter_id: ch07-docs-and-okf-sync
 title: "Sync Worker Domain, Server Runtime Limitations, and Product OKF Chapters"
 description: "Update worker-and-protocols.md, server-runtime-limitations.md, and product.md in place to reflect shipped runtime guarantees and remaining boundaries."
 status: stable
-state: pending
+state: completed
+commit: d9475b72
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact

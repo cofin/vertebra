@@ -6,7 +6,8 @@ chapter_id: ch07-docs-and-okf-sync
 title: "Sync Installation, Getting-Started CLI, and Supervisor Reference Docs"
 description: "Update installation platform matrix, getting-started CLI examples, and vertebra.supervisor API reference directives."
 status: stable
-state: pending
+state: completed
+commit: d9475b72
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact

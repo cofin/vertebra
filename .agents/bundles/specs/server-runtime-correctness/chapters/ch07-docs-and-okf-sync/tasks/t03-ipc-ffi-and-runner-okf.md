@@ -6,7 +6,8 @@ chapter_id: ch07-docs-and-okf-sync
 title: "Sync IPC, Runner, and PyO3 FFI OKF Chapters (<= 200 Lines)"
 description: "Update tiered-rings-and-batch-bridge.md and asgi-and-wsgi-runners.md, and compact pyo3-ffi-and-batch-dispatch.md from 212 to <= 200 lines."
 status: stable
-state: pending
+state: completed
+commit: d9475b72
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact

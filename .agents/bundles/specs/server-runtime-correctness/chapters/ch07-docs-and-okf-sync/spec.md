@@ -16,7 +16,7 @@ depends_on_chapters:
 replan_trigger: null
 plan_commit: 18baadcd
 last_reviewed_commit: null
-updated_at: "2026-11-12T23:45:00Z"
+updated_at: "2026-11-13T06:14:00Z"
 generated:
   by: flow-plan
   at: "2026-11-12T23:45:00Z"
@@ -87,12 +87,14 @@ Every documentation deliverable in this flow is executed and validated in `t01`�
 
 ## 5. Implementation Plan
 
-- [ ] [t01-server-cli-and-packaging-docs.md](tasks/t01-server-cli-and-packaging-docs.md) — Sync `server-and-workers.md`, `packaging-and-deployment.md`, and `docs/reference/cli.md`
-- [ ] [t02-getting-started-and-supervisor-docs.md](tasks/t02-getting-started-and-supervisor-docs.md) — Sync `installation.md`, `getting-started/cli.md`, and `build-and-wasm.md`
-- [ ] [t03-ipc-ffi-and-runner-okf.md](tasks/t03-ipc-ffi-and-runner-okf.md) — Sync `tiered-rings-and-batch-bridge.md`, compact `pyo3-ffi-and-batch-dispatch.md` (`<= 200L`), and sync `asgi-and-wsgi-runners.md`
-- [ ] [t04-server-limitations-and-product-okf.md](tasks/t04-server-limitations-and-product-okf.md) — Sync `worker-and-protocols.md`, `server-runtime-limitations.md`, and `product.md`
+- [x] [d9475b72] [t01-server-cli-and-packaging-docs.md](tasks/t01-server-cli-and-packaging-docs.md) — Sync `server-and-workers.md`, `packaging-and-deployment.md`, and `docs/reference/cli.md`
+- [x] [d9475b72] [t02-getting-started-and-supervisor-docs.md](tasks/t02-getting-started-and-supervisor-docs.md) — Sync `installation.md`, `getting-started/cli.md`, and `build-and-wasm.md`
+- [x] [d9475b72] [t03-ipc-ffi-and-runner-okf.md](tasks/t03-ipc-ffi-and-runner-okf.md) — Sync `tiered-rings-and-batch-bridge.md`, compact `pyo3-ffi-and-batch-dispatch.md` (`<= 200L`), and sync `asgi-and-wsgi-runners.md`
+- [x] [d9475b72] [t04-server-limitations-and-product-okf.md](tasks/t04-server-limitations-and-product-okf.md) — Sync `worker-and-protocols.md`, `server-runtime-limitations.md`, and `product.md`
 
 ## 6. Current State & Remaining Plan Snapshot
+
+Completed (`4/4` tasks at `d9475b72`).
 
 - **Fast Chapter Gate (`< 35s`)**: `make docs && make review-check`.
 

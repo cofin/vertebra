@@ -6,7 +6,8 @@ chapter_id: ch07-docs-and-okf-sync
 title: "Sync Server, Packaging, and CLI Reference Documentation"
 description: "Document progressive streaming, fail-loud startup, worker-only mode, wheel-shipped vertebra-server, and --include-agent-skills in usage and CLI reference docs."
 status: stable
-state: pending
+state: completed
+commit: d9475b72
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
