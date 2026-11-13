@@ -6,7 +6,13 @@ chapter_id: ch05-framework-mounts-and-litestar-parity
 title: "Pin litestar-mcp>=0.20.0 and Merge Litestar Skill Names in Well-Known Document"
 description: "Require litestar-mcp>=0.20.0 in pyproject.toml and uv.lock, fail loud on pre-0.20 installs, and merge Litestar skill_catalog names into /.well-known/mcp.json."
 status: stable
-state: pending
+state: completed
+commit: 63904aab
+last_verified_commit: 63904aab
+last_verified_at: "2026-11-13T05:28:40Z"
+verification_evidence: "uv lock --check --offline + ruff + mypy (48 files) + pytest (279 passed)"
+claimed_by: null
+claimed_at: null
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -68,8 +74,8 @@ uv lock --check --offline && uv run --no-sync ruff check src/py/vertebra/extensi
 
 ## Acceptance Criteria
 
-- [ ] `pyproject.toml` and `uv.lock` resolve `litestar-mcp>=0.20.0`.
-- [ ] Litestar well-known handler lists both merged tools and configured skill names.
+- [x] `pyproject.toml` and `uv.lock` resolve `litestar-mcp>=0.20.0`.
+- [x] Litestar well-known handler lists both merged tools and configured skill names.
 
 [^litestar-mcp]: `src/py/vertebra/extensions/litestar/mcp/plugin.py::create_mcp_plugin` — LitestarMCP factory and well-known handler.
 [^pyproject-toml]: `pyproject.toml` — Optional dependency groups pinning litestar-mcp.

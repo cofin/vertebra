@@ -5,8 +5,8 @@ chapter_id: ch05-framework-mounts-and-litestar-parity
 title: "Chapter 05: Framework Mount Skill/UI Wiring and Litestar Delegation Parity"
 description: "Wire SkillCatalog and MCPCore.validate() across AgentPlugin, Starlette, FastAPI, Flask, Django, and well-known manifests, and pin litestar-mcp>=0.20.0."
 status: stable
-state: planned
-planning_status: empirical_dependent
+state: active
+planning_status: complete
 planning_quality: standard
 planning_degraded_reason: null
 depends_on_chapters:
@@ -14,7 +14,7 @@ depends_on_chapters:
 replan_trigger: "Confirm litestar-mcp>=0.20.0 release on PyPI (SUPPORTED_PROTOCOL_VERSIONS and skill_catalog DI key) before executing t03"
 plan_commit: 18baadcd
 last_reviewed_commit: null
-updated_at: "2026-11-12T23:45:00Z"
+updated_at: "2026-11-13T05:28:40Z"
 generated:
   by: flow-plan
   at: "2026-11-12T23:45:00Z"
@@ -78,12 +78,13 @@ Framework mount options and `litestar-mcp>=0.20.0` delegation are documented in 
 
 ## 5. Implementation Plan
 
-- [ ] [t01-plugin-routes-and-starlette-skill-and-ui-wiring.md](tasks/t01-plugin-routes-and-starlette-skill-and-ui-wiring.md) — Wire `skills`, well-known `skill_names`, and `MCPCore.validate()` in `AgentPlugin`, `routes.py`, and Starlette
-- [ ] [t02-flask-and-django-skill-and-ui-wiring.md](tasks/t02-flask-and-django-skill-and-ui-wiring.md) — Wire `skills`, well-known `skill_names`, and `MCPCore.validate()` in Flask and Django mounts
-- [ ] [t03-litestar-mcp-dual-mode-pin.md](tasks/t03-litestar-mcp-dual-mode-pin.md) — Pin `litestar-mcp>=0.20.0`, enforce version guard, and merge Litestar skill names in `/.well-known/mcp.json`
+- [x] [63904aab] [t01-plugin-routes-and-starlette-skill-and-ui-wiring.md](tasks/t01-plugin-routes-and-starlette-skill-and-ui-wiring.md) — Wire `skills`, well-known `skill_names`, and `MCPCore.validate()` in `AgentPlugin`, `routes.py`, and Starlette
+- [x] [63904aab] [t02-flask-and-django-skill-and-ui-wiring.md](tasks/t02-flask-and-django-skill-and-ui-wiring.md) — Wire `skills`, well-known `skill_names`, and `MCPCore.validate()` in Flask and Django mounts
+- [x] [63904aab] [t03-litestar-mcp-dual-mode-pin.md](tasks/t03-litestar-mcp-dual-mode-pin.md) — Pin `litestar-mcp>=0.20.0`, enforce version guard, and merge Litestar skill names in `/.well-known/mcp.json`
 
 ## 6. Current State & Remaining Plan Snapshot
 
+- **Status**: `t01`–`t03` are implemented and verified at `63904aab` (`uv lock --check --offline`, `ruff`, `mypy` across 48 source files, and `279` unit tests pass with `litestar-mcp==0.20.0`).
 - **Fast Chapter Gate (`< 15s`)**: `uv lock --check --offline && uv run --no-sync ruff check src/py/vertebra/agent src/py/vertebra/extensions/{starlette,flask,django,litestar} && uv run --no-sync mypy src/py/vertebra/agent src/py/vertebra/extensions/{starlette,flask,django,litestar} && uv run --no-sync pytest src/py/tests/unit/agent/test_mcp_conformance.py src/py/tests/unit/extensions/test_litestar_ecosystem_mcp.py -q`.
 
 [^agent-plugin]: `src/py/vertebra/agent/plugin.py::AgentPluginConfig` — AgentPluginConfig and native/Litestar mount hooks.

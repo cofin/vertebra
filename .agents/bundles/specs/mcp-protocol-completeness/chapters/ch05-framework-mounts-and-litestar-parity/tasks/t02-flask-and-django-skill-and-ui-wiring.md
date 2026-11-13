@@ -6,7 +6,13 @@ chapter_id: ch05-framework-mounts-and-litestar-parity
 title: Wire Skills and UI Link Validation in Flask and Django MCP Mounts
 description: "Pass skills=MCPSkillsConfig | SkillCatalog | None through Flask and Django MCP helpers, emit well-known skill names, and call MCPCore.validate() at mount."
 status: stable
-state: pending
+state: completed
+commit: 63904aab
+last_verified_commit: 63904aab
+last_verified_at: "2026-11-13T05:28:40Z"
+verification_evidence: "uv lock --check --offline + ruff + mypy (48 files) + pytest (279 passed)"
+claimed_by: null
+claimed_at: null
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -66,8 +72,8 @@ uv run --no-sync ruff check src/py/vertebra/extensions/flask/mcp.py src/py/verte
 
 ## Acceptance Criteria
 
-- [ ] Flask and Django MCP mounts expose configured skills and validate `ui://` links at mount.
-- [ ] Well-known discovery manifests include sorted skill names.
+- [x] Flask and Django MCP mounts expose configured skills and validate `ui://` links at mount.
+- [x] Well-known discovery manifests include sorted skill names.
 
 [^flask-mcp]: `src/py/vertebra/extensions/flask/mcp.py::attach_mcp_routes` — Flask MCP route mount helper.
 [^django-mcp]: `src/py/vertebra/extensions/django/mcp.py::attach_mcp_routes` — Django MCP route mount helper.

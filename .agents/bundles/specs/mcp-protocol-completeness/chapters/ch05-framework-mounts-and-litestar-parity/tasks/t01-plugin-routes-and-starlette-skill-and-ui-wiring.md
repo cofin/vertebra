@@ -6,7 +6,13 @@ chapter_id: ch05-framework-mounts-and-litestar-parity
 title: "Wire Skills, Well-Known Skill Names, and UI Validation in AgentPlugin and Starlette"
 description: "Add AgentPluginConfig.skills, build_well_known_mcp_document skill_names, and mount-time MCPCore.validate() across AgentPlugin and Starlette/FastAPI."
 status: stable
-state: pending
+state: completed
+commit: 63904aab
+last_verified_commit: 63904aab
+last_verified_at: "2026-11-13T05:28:40Z"
+verification_evidence: "uv lock --check --offline + ruff + mypy (48 files) + pytest (279 passed)"
+claimed_by: null
+claimed_at: null
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -67,8 +73,8 @@ uv run --no-sync ruff check src/py/vertebra/agent/plugin.py src/py/vertebra/agen
 
 ## Acceptance Criteria
 
-- [ ] `AgentPlugin` and Starlette/FastAPI mounts serve configured skills and include them in `/.well-known/mcp.json`.
-- [ ] Broken `ui://` tool links raise `ImproperConfigurationError` during mount.
+- [x] `AgentPlugin` and Starlette/FastAPI mounts serve configured skills and include them in `/.well-known/mcp.json`.
+- [x] Broken `ui://` tool links raise `ImproperConfigurationError` during mount.
 
 [^agent-plugin]: `src/py/vertebra/agent/plugin.py::AgentPluginConfig` — Native and Litestar AgentPlugin configuration.
 [^starlette-mcp]: `src/py/vertebra/extensions/starlette/mcp.py::mount_mcp_routes` — Starlette and FastAPI MCP mount helper.
