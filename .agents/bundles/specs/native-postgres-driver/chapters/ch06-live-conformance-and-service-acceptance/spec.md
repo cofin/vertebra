@@ -5,7 +5,7 @@ chapter_id: ch06-live-conformance-and-service-acceptance
 title: "Chapter 06: Live PostgreSQL 14-18 Conformance and Service Acceptance"
 description: "Enable parameterized PG14-18 conformance with zero-skip gating plus live pgoutput replication and PGCOPY/VTBARROW/LISTEN/pgvector/PgBouncer suites."
 status: stable
-state: planned
+state: active
 planning_status: complete
 planning_quality: standard
 planning_degraded_reason: null
