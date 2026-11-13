@@ -25,6 +25,9 @@ from vertebra._vertebra import (
 from vertebra._vertebra import (
     submit_response as _native_submit_response,
 )
+from vertebra._vertebra import (
+    submit_stream_frame as _native_submit_stream_frame,
+)
 from vertebra.server._asgi._queues import (
     DEFAULT_STREAM_HIGH_WATERMARK,
     DEFAULT_STREAM_LOW_WATERMARK,
@@ -36,6 +39,7 @@ from vertebra.server._asgi._queues import (
     AsgiStreamReceive,
     AsgiStreamSend,
     ChunkCallback,
+    StreamSubmitter,
 )
 from vertebra.server._fastpath import PayloadTooLargeError, attach_framework_fastpath
 from vertebra.server._loops import EventLoopPool
@@ -672,18 +676,125 @@ class AsgiRunner:
             self._loop = self._owned_pool.primary_loop
         return self._loop
 
-    async def _execute_and_submit(self, request: Any, request_id: int) -> None:
-        try:
-            resp = await self.run_single(request)
-            native_resp = self._to_native_response(resp, request_id)
-            _native_submit_response(native_resp)
-        except Exception:
-            logger.exception("Unhandled error in spawned ASGI task (request_id=%d)", request_id)
+    async def _execute_and_submit(
+        self,
+        request: Any,
+        request_id: int,
+        *,
+        stream_submitter: StreamSubmitter | None = None,
+        unary_submitter: Callable[[_NativeResponse], None] | None = None,
+    ) -> None:
+        active_stream = _native_submit_stream_frame if stream_submitter is None else stream_submitter
+        active_unary = _native_submit_response if unary_submitter is None else unary_submitter
+        req_id = int(getattr(request, "request_id", 0)) or request_id
+        scope = self._build_scope(request)
+        body = self._extract_body(request)
+        disconnect_event = asyncio.Event()
+        receive = AsgiReceive(body=body, disconnect_event=disconnect_event)
+
+        def _forward_stream(
+            rid: int,
+            status: int,
+            flags: int,
+            headers: list[tuple[bytes, bytes]],
+            chunk: bytes,
+        ) -> None:
             try:
-                err_resp = _NativeResponse(500, b"Internal Server Error", None, request_id)
-                _native_submit_response(err_resp)
+                active_stream(rid, status, flags, headers, chunk)
+            except ConnectionResetError:
+                disconnect_event.set()
+                raise
+
+        send = AsgiSend(
+            request_id=req_id,
+            on_chunk=self._on_chunk,
+            stream_submitter=_forward_stream,
+        )
+        try:
+            if self._fastpath is not None and self._on_chunk is None:
+                raw_req_body = body if isinstance(body, bytes) else bytes(body)
+                direct = await self._fastpath.dispatch(scope, receive, send, body=raw_req_body)
+                if direct is not None:
+                    status_code, encoded_headers, raw_body = direct
+                    decoded_headers = [(k.decode("latin-1"), v.decode("latin-1")) for k, v in encoded_headers]
+                    zc_buf = raw_body if isinstance(raw_body, memoryview) else None
+                    direct_resp = AsgiResponse(
+                        status=status_code,
+                        headers=decoded_headers,
+                        body=raw_body,
+                        request_id=req_id,
+                        zero_copy_buffer=zc_buf,
+                        raw_headers=encoded_headers,
+                    )
+                    active_unary(self._to_native_response(direct_resp, req_id))
+                    return
+                if send.streamed:
+                    send.finish_stream()
+                    return
+                if send.started:
+                    resp = send.response
+                    if resp.trailers:
+                        self._emit_trailers(resp, req_id)
+                    active_unary(self._to_native_response(resp, req_id))
+                    return
+
+            await self._app(scope, receive, send)
+        except ConnectionResetError:
+            disconnect_event.set()
+            return
+        except PayloadTooLargeError:
+            if send.streamed:
+                send.finish_stream(error=True)
+                return
+            if not send.started:
+                active_unary(
+                    _NativeResponse(
+                        413,
+                        b"Payload Too Large",
+                        [("content-type", "text/plain; charset=utf-8"), ("content-length", "17")],
+                        req_id,
+                    )
+                )
+                return
+            active_unary(self._to_native_response(send.response, req_id))
+            return
+        except Exception:
+            logger.exception("Unhandled error in spawned ASGI task (request_id=%d)", req_id)
+            if send.streamed:
+                send.finish_stream(error=True)
+                return
+            try:
+                err_resp = _NativeResponse(
+                    500,
+                    b"Internal Server Error",
+                    [("content-type", "text/plain")],
+                    req_id,
+                )
+                active_unary(err_resp)
             except Exception:
-                logger.exception("Failed to submit error response for request_id=%d", request_id)
+                logger.exception("Failed to submit error response for request_id=%d", req_id)
+            return
+
+        if send.streamed:
+            send.finish_stream()
+            return
+        try:
+            resp = send.response
+            if resp.trailers:
+                self._emit_trailers(resp, req_id)
+            active_unary(self._to_native_response(resp, req_id))
+        except Exception:
+            logger.exception("Unhandled error finalizing spawned ASGI response (request_id=%d)", req_id)
+            try:
+                err_resp = _NativeResponse(
+                    500,
+                    b"Internal Server Error",
+                    [("content-type", "text/plain")],
+                    req_id,
+                )
+                active_unary(err_resp)
+            except Exception:
+                logger.exception("Failed to submit error response for request_id=%d", req_id)
 
     def _to_native_response(self, resp: AsgiResponse, request_id: int) -> _NativeResponse:
         """Convert an ``AsgiResponse`` to a Rust ``Response`` without extra body copies."""

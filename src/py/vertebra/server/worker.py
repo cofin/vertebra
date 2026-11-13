@@ -28,6 +28,7 @@ from vertebra._vertebra import (
     submit_batch_raw,
     submit_response,
     submit_response_raw,
+    submit_stream_frame,
     try_get_batch,
 )
 from vertebra.extensions.litestar.plugin import enter_litestar_server_lifespan
@@ -38,7 +39,9 @@ from vertebra.server._dispatch import (
     _JSON_CONTENT_TYPE_COMPACT,
     _RAW_BUFFER_TYPES,
     HandlerSpec,
+    _is_potential_special_return,
     _resolve_asgi_batch_timeout,
+    _submit_coerced,
     build_error_response,
     compile_handler_table,
     dispatch_batch,
@@ -196,13 +199,12 @@ class _AsgiMountRunner:
 
     async def _execute_and_submit(self, request: Any) -> None:
         req_id = int(getattr(request, "request_id", 0))
-        try:
-            resp = await self._runner.run_single(request)
-            native_resp = self._runner._to_native_response(resp, req_id)
-            submit_response(native_resp)
-        except Exception:
-            logger.exception("Unhandled error in sharded ASGI mount task (request_id=%d)", req_id)
-            submit_response(Response.error(500, req_id))
+        await self._runner._execute_and_submit(
+            request,
+            req_id,
+            stream_submitter=submit_stream_frame,
+            unary_submitter=submit_response,
+        )
 
 
 def _instantiate_mount_runners(
@@ -658,6 +660,19 @@ class Worker:
                             if raw.request_id == 0:
                                 raw.request_id = req_id
                             submit_response(raw)
+                        elif _is_potential_special_return(raw):
+                            if raw_items:
+                                submit_batch_raw(raw_items)
+                                raw_items.clear()
+                            _submit_coerced(
+                                raw,
+                                req_id,
+                                Response,
+                                submit_response,
+                                submit_response_raw,
+                                status_code=status,
+                                scheduler=loop_pool,
+                            )
                         else:
                             append_raw((req_id, status, encode_json_bytes(raw), _JSON_CONTENT_TYPE_COMPACT))
                     except Exception as exc:

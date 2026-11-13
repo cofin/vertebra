@@ -1,11 +1,29 @@
-"""Unit tests for the ASGI SSE framing helper and http.response.sse extension."""
+"""Unit tests for the ASGI SSE framing helper and native App streaming dispatch."""
 
-from collections.abc import AsyncIterator
+import asyncio
+from collections.abc import AsyncIterator, Iterator
 from typing import Any
 
 import pytest
 
+from vertebra._vertebra import (
+    STREAM_FLAG_ERROR,
+    STREAM_FLAG_FINAL,
+    STREAM_FLAG_HEADERS_SENT,
+    STREAM_FLAG_STREAMING,
+    Request,
+    Response,
+    _set_stream_sink,
+    init_transport,
+)
 from vertebra.server._asgi._sse import SseEvent, SseResponse, extract_last_event_id
+from vertebra.server._dispatch import (
+    BatchDispatchPlan,
+    _await_async_item,
+    _submit_coerced,
+    compile_handler_spec,
+    dispatch_batch,
+)
 from vertebra.utils.serializers import decode_json, encode_json_bytes
 
 
@@ -109,3 +127,164 @@ async def test_sse_response_emits_asgi_extension_and_fallback_body_frames() -> N
     assert sent_body[2]["body"] == b"id: 2\r\nevent: greeting\r\ndata: world\r\n\r\n"
     assert sent_body[2]["more_body"] is True
     assert sent_body[3] == {"type": "http.response.body", "body": b"", "more_body": False}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("stream_kind", ["sync", "async"])
+@pytest.mark.parametrize("scenario", ["multi_chunk", "empty", "mid_stream_error", "disconnect"])
+async def test_native_dispatch_tuple_streaming_modes(stream_kind: str, scenario: str) -> None:
+    """Verify _dispatch.py streams sync and async (status, headers, iterable) tuples progressively."""
+    init_transport()
+    frames: list[tuple[int, int, int, list[tuple[bytes, bytes]], bytes]] = []
+    closed_cleanly: list[bool] = []
+
+    def sink(
+        req_id: int,
+        status: int,
+        flags: int,
+        headers: list[tuple[bytes, bytes]],
+        body: bytes,
+    ) -> bool:
+        frames.append((req_id, status, flags, headers, body))
+        return not (scenario == "disconnect" and (flags & STREAM_FLAG_HEADERS_SENT) == 0)
+
+    def sync_stream() -> Iterator[bytes]:
+        try:
+            if scenario == "empty":
+                return
+            yield b"data: one\n\n"
+            if scenario == "mid_stream_error":
+                msg = "sync stream boom"
+                raise RuntimeError(msg)
+            yield b""
+            yield b"data: two\n\n"
+        finally:
+            closed_cleanly.append(True)
+
+    async def async_stream() -> AsyncIterator[bytes]:
+        try:
+            if scenario == "empty":
+                return
+            yield b"data: one\n\n"
+            if scenario == "mid_stream_error":
+                msg = "async stream boom"
+                raise RuntimeError(msg)
+            yield b""
+            yield b"data: two\n\n"
+        finally:
+            closed_cleanly.append(True)
+
+    unary_calls: list[Any] = []
+    headers_in = {"content-type": "text/event-stream", "cache-control": "no-cache"}
+    expected_hdrs = [(b"content-type", b"text/event-stream"), (b"cache-control", b"no-cache")]
+
+    _set_stream_sink(sink)
+    try:
+        if stream_kind == "sync":
+            _submit_coerced(
+                (200, headers_in, sync_stream()),
+                777,
+                Response,
+                unary_calls.append,
+            )
+        else:
+
+            async def async_handler() -> tuple[int, dict[str, str], AsyncIterator[bytes]]:
+                return 200, headers_in, async_stream()
+
+            await _await_async_item(
+                async_handler(),
+                777,
+                None,
+                None,
+                Response,
+                unary_calls.append,
+                None,
+            )
+    finally:
+        _set_stream_sink(None)
+
+    assert unary_calls == []
+    assert closed_cleanly == [True]
+    if scenario == "multi_chunk":
+        assert frames == [
+            (777, 200, STREAM_FLAG_STREAMING | STREAM_FLAG_HEADERS_SENT, expected_hdrs, b""),
+            (777, 200, STREAM_FLAG_STREAMING, [], b"data: one\n\n"),
+            (777, 200, STREAM_FLAG_STREAMING, [], b"data: two\n\n"),
+            (777, 200, STREAM_FLAG_STREAMING | STREAM_FLAG_FINAL, [], b""),
+        ]
+    elif scenario == "empty":
+        assert frames == [
+            (777, 200, STREAM_FLAG_STREAMING | STREAM_FLAG_HEADERS_SENT, expected_hdrs, b""),
+            (777, 200, STREAM_FLAG_STREAMING | STREAM_FLAG_FINAL, [], b""),
+        ]
+    elif scenario == "mid_stream_error":
+        assert frames == [
+            (777, 200, STREAM_FLAG_STREAMING | STREAM_FLAG_HEADERS_SENT, expected_hdrs, b""),
+            (777, 200, STREAM_FLAG_STREAMING, [], b"data: one\n\n"),
+            (777, 200, STREAM_FLAG_STREAMING | STREAM_FLAG_ERROR, [], b""),
+        ]
+    else:
+        assert frames == [
+            (777, 200, STREAM_FLAG_STREAMING | STREAM_FLAG_HEADERS_SENT, expected_hdrs, b""),
+            (777, 200, STREAM_FLAG_STREAMING, [], b"data: one\n\n"),
+        ]
+
+
+@pytest.mark.anyio
+async def test_drive_native_batch_streams_async_generator_before_gate_release() -> None:
+    """Verify dispatch_batch + drive_native_batch streams native App SSE before generator release."""
+    init_transport()
+    gate = asyncio.Event()
+    first_chunk_event = asyncio.Event()
+    frames: list[tuple[int, int, int, list[tuple[bytes, bytes]], bytes]] = []
+
+    def sink(
+        req_id: int,
+        status: int,
+        flags: int,
+        headers: list[tuple[bytes, bytes]],
+        body: bytes,
+    ) -> bool:
+        frames.append((req_id, status, flags, headers, body))
+        if body == b"data: first\n\n":
+            first_chunk_event.set()
+        return True
+
+    async def sse_endpoint() -> tuple[int, list[tuple[str, str]], AsyncIterator[bytes]]:
+        async def gen() -> AsyncIterator[bytes]:
+            yield b"data: first\n\n"
+            await gate.wait()
+            yield b"data: second\n\n"
+
+        return 200, [("content-type", "text/event-stream")], gen()
+
+    spec = compile_handler_spec(sse_endpoint)
+    req = Request.from_parts("GET", "/native-sse", b"", request_id=790, handler_id=1)
+    plan = BatchDispatchPlan(async_native=[(0, req, spec)])
+    loop = asyncio.get_running_loop()
+
+    _set_stream_sink(sink)
+    try:
+        dispatch_batch(plan, {1: spec}, [], Response, loop, async_mode=True)
+        await asyncio.wait_for(first_chunk_event.wait(), timeout=1.0)
+        assert not gate.is_set()
+        assert frames == [
+            (
+                790,
+                200,
+                STREAM_FLAG_STREAMING | STREAM_FLAG_HEADERS_SENT,
+                [(b"content-type", b"text/event-stream")],
+                b"",
+            ),
+            (790, 200, STREAM_FLAG_STREAMING, [], b"data: first\n\n"),
+        ]
+        gate.set()
+        for _ in range(20):
+            if frames and (frames[-1][2] & STREAM_FLAG_FINAL) != 0:
+                break
+            await asyncio.sleep(0.005)
+        assert frames[-2] == (790, 200, STREAM_FLAG_STREAMING, [], b"data: second\n\n")
+        assert frames[-1] == (790, 200, STREAM_FLAG_STREAMING | STREAM_FLAG_FINAL, [], b"")
+    finally:
+        _set_stream_sink(None)

@@ -6,26 +6,34 @@
 //!
 //! The transport mode is selected by the `mode` parameter of `init_transport()`.
 
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Duration;
 
 use bytes::Bytes;
 use pyo3::buffer::PyBuffer;
-use pyo3::exceptions::{PyRuntimeError, PyTypeError, PyValueError};
+use pyo3::exceptions::{PyConnectionResetError, PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyList, PyTuple};
+use pyo3::types::{PyBool, PyBytes, PyList, PyTuple};
 
-use vertebra_core::bridge::{BatchBridge, BridgeResponse};
+use vertebra_core::bridge::{BatchBridge, BridgeResponse, ResponseStreamFrame, StreamDelivery};
+use vertebra_core::buffer::{ChannelMode, RingLayout};
 use vertebra_core::ipc::{
-    FLAG_FINAL, FLAG_HEADERS_SENT, FLAG_STREAMING, RESPONSE_SLOT_HEADER_LEN, ResponseSlot,
+    FLAG_ERROR, FLAG_FINAL, FLAG_HEADERS_SENT, FLAG_STREAMING, FLAG_TRAILERS,
+    RESPONSE_SLOT_HEADER_LEN, ResponseSlot,
 };
-use vertebra_core::transport::{Transport, TransportError, encode_headers_compact};
+use vertebra_core::tiered_ring::TieredRingConfig;
+use vertebra_core::transport::{Backend, Transport, TransportError, encode_headers_compact};
 
+use crate::asgi::encode_py_headers_into;
 use crate::request::RequestBatch;
 use crate::response::Response;
 
 /// Global SHM transport, set once by `init_transport(mode="shm")`.
 static SHM_TRANSPORT: OnceLock<Transport> = OnceLock::new();
+static PY_STREAM_SINK: RwLock<Option<Py<PyAny>>> = RwLock::new(None);
+static PY_STREAM_SINK_INSTALLED: AtomicBool = AtomicBool::new(false);
+const STREAM_FRAME_WIRE_OVERHEAD: usize = 22;
 
 /// Initialize the transport channel. Called once during worker startup.
 ///
@@ -394,6 +402,257 @@ impl ResponseSubmitter {
         res.map_err(|e| PyRuntimeError::new_err(format!("failed to submit responses: {e}")))?;
         Ok(())
     }
+
+    pub fn submit_stream_frame_inner(
+        py: Python<'_>,
+        request_id: u64,
+        status: u16,
+        flags: u16,
+        headers_raw: &[u8],
+        body: &[u8],
+    ) -> PyResult<()> {
+        if (flags & FLAG_STREAMING) == 0 {
+            return Err(PyValueError::new_err(
+                "stream frame flags must include STREAM_FLAG_STREAMING",
+            ));
+        }
+        if headers_raw.len() > u16::MAX as usize {
+            return Err(PyValueError::new_err(
+                "stream frame headers exceed 65535 bytes",
+            ));
+        }
+
+        if let Some(transport) = SHM_TRANSPORT.get() {
+            return submit_shm_stream_frames(
+                py,
+                transport,
+                request_id,
+                status,
+                flags,
+                headers_raw,
+                body,
+            );
+        }
+
+        let bridge = BatchBridge::get().ok_or_else(|| {
+            PyRuntimeError::new_err("transport not initialized; call init_transport() first")
+        })?;
+        if PY_STREAM_SINK_INSTALLED.load(Ordering::Acquire)
+            && PY_STREAM_SINK
+                .read()
+                .map(|guard| guard.is_none())
+                .unwrap_or(false)
+        {
+            return Err(PyRuntimeError::new_err(
+                "failed to submit stream frame: stream sink not registered",
+            ));
+        }
+
+        let max_payload = default_max_stream_frame_payload();
+        if max_payload == 0 || headers_raw.len() > max_payload {
+            return Err(PyValueError::new_err(
+                "stream frame headers exceed max_stream_frame_payload",
+            ));
+        }
+
+        let delivery = py
+            .detach(|| -> Result<StreamDelivery, TransportError> {
+                let mut current_delivery = StreamDelivery::Accepted;
+                for_each_stream_chunk(
+                    flags,
+                    headers_raw,
+                    body,
+                    max_payload,
+                    |chunk_flags, chunk_headers, chunk_body| {
+                        if current_delivery == StreamDelivery::Closed {
+                            return Ok(());
+                        }
+                        let frame = ResponseStreamFrame {
+                            request_id,
+                            status,
+                            flags: chunk_flags,
+                            headers_raw: if chunk_headers.is_empty() {
+                                Bytes::new()
+                            } else {
+                                Bytes::copy_from_slice(chunk_headers)
+                            },
+                            body: if chunk_body.is_empty() {
+                                Bytes::new()
+                            } else {
+                                Bytes::copy_from_slice(chunk_body)
+                            },
+                        };
+                        current_delivery = bridge.submit_stream_frame(frame)?;
+                        Ok(())
+                    },
+                )?;
+                Ok(current_delivery)
+            })
+            .map_err(|e| PyRuntimeError::new_err(format!("failed to submit stream frame: {e}")))?;
+
+        match delivery {
+            StreamDelivery::Accepted => Ok(()),
+            StreamDelivery::Closed => Err(PyConnectionResetError::new_err("stream closed by peer")),
+        }
+    }
+}
+
+#[inline]
+fn default_max_stream_frame_payload() -> usize {
+    let tier = TieredRingConfig::default().xlarge;
+    let layout = RingLayout::new(tier.slot_size, tier.slot_count, ChannelMode::Spsc);
+    layout
+        .slot_size
+        .saturating_sub(8)
+        .saturating_sub(STREAM_FRAME_WIRE_OVERHEAD)
+}
+
+#[inline]
+fn transport_max_stream_frame_payload(transport: &Transport) -> usize {
+    if let Backend::SharedMemory(rp) = transport.backend() {
+        return rp.max_stream_frame_payload();
+    }
+    default_max_stream_frame_payload()
+}
+
+#[inline]
+fn for_each_stream_chunk<E>(
+    flags: u16,
+    headers_raw: &[u8],
+    body: &[u8],
+    max_payload: usize,
+    mut emit: impl FnMut(u16, &[u8], &[u8]) -> Result<(), E>,
+) -> Result<(), E> {
+    if headers_raw.len().saturating_add(body.len()) <= max_payload {
+        return emit(flags, headers_raw, body);
+    }
+
+    let terminal_mask = FLAG_FINAL | FLAG_ERROR | FLAG_TRAILERS;
+    let first_base_flags = (flags & !terminal_mask) | FLAG_STREAMING;
+    let first_body_len = max_payload
+        .saturating_sub(headers_raw.len())
+        .min(body.len());
+    let first_is_last = first_body_len == body.len();
+    let first_flags = if first_is_last {
+        first_base_flags | (flags & terminal_mask)
+    } else {
+        first_base_flags
+    };
+    emit(first_flags, headers_raw, &body[..first_body_len])?;
+
+    let mut offset = first_body_len;
+    let cont_base_flags = first_base_flags & !FLAG_HEADERS_SENT;
+    while offset < body.len() {
+        let end = (offset + max_payload).min(body.len());
+        let is_last = end == body.len();
+        let chunk_flags = if is_last {
+            cont_base_flags | (flags & terminal_mask)
+        } else {
+            cont_base_flags
+        };
+        emit(chunk_flags, b"", &body[offset..end])?;
+        offset = end;
+    }
+    Ok(())
+}
+
+/// Return the maximum combined compact-header and body byte payload of a single `VRSF` stream frame.
+#[pyfunction]
+#[pyo3(name = "max_stream_frame_payload")]
+pub fn max_stream_frame_payload() -> usize {
+    if let Some(transport) = SHM_TRANSPORT.get() {
+        return transport_max_stream_frame_payload(transport);
+    }
+    default_max_stream_frame_payload()
+}
+
+/// Submit an ordered streaming response frame across the active embedded or SHM transport.
+#[pyfunction]
+#[pyo3(
+    name = "submit_stream_frame",
+    signature = (request_id, status, flags, headers, body)
+)]
+pub fn submit_stream_frame(
+    py: Python<'_>,
+    request_id: u64,
+    status: u16,
+    flags: u16,
+    headers: Option<&Bound<'_, PyAny>>,
+    body: &Bound<'_, PyAny>,
+) -> PyResult<()> {
+    let mut headers_raw = Vec::new();
+    if let Some(hdrs) = headers
+        && !hdrs.is_none()
+    {
+        let mut has_cl = false;
+        encode_py_headers_into(py, hdrs, &mut headers_raw, &mut has_cl)?;
+    }
+    with_buffer_slice(py, body, |body_slice| {
+        ResponseSubmitter::submit_stream_frame_inner(
+            py,
+            request_id,
+            status,
+            flags,
+            &headers_raw,
+            body_slice,
+        )
+    })
+}
+
+/// Register or clear an in-process Python stream sink callback for unit testing.
+#[pyfunction]
+#[pyo3(name = "_set_stream_sink", signature = (sink=None))]
+pub fn set_stream_sink_py(py: Python<'_>, sink: Option<Py<PyAny>>) -> PyResult<()> {
+    let bridge = BatchBridge::get().ok_or_else(|| {
+        PyRuntimeError::new_err("transport not initialized; call init_transport() first")
+    })?;
+    {
+        let mut guard = PY_STREAM_SINK
+            .write()
+            .map_err(|_| PyRuntimeError::new_err("stream sink lock poisoned"))?;
+        *guard = sink.map(|s| s.clone_ref(py));
+    }
+    if !PY_STREAM_SINK_INSTALLED.swap(true, Ordering::AcqRel) {
+        bridge.set_stream_sink(Arc::new(|frame: ResponseStreamFrame| {
+            Python::attach(|py| {
+                let cb_opt = PY_STREAM_SINK
+                    .read()
+                    .ok()
+                    .and_then(|g| g.as_ref().map(|cb| cb.clone_ref(py)));
+                let Some(cb) = cb_opt else {
+                    return StreamDelivery::Closed;
+                };
+                let pairs: Vec<(Bound<'_, PyBytes>, Bound<'_, PyBytes>)> = frame
+                    .iter_headers()
+                    .map(|(k, v)| (PyBytes::new(py, k), PyBytes::new(py, v)))
+                    .collect();
+                let Ok(py_headers) = PyList::new(py, pairs) else {
+                    return StreamDelivery::Closed;
+                };
+                let py_body = PyBytes::new(py, &frame.body);
+                match cb.call1(
+                    py,
+                    (
+                        frame.request_id,
+                        frame.status,
+                        frame.flags,
+                        py_headers,
+                        py_body,
+                    ),
+                ) {
+                    Ok(ret) => {
+                        if ret.bind(py).is(PyBool::new(py, false)) {
+                            StreamDelivery::Closed
+                        } else {
+                            StreamDelivery::Accepted
+                        }
+                    }
+                    Err(_) => StreamDelivery::Closed,
+                }
+            })
+        }));
+    }
+    Ok(())
 }
 
 /// Submit processed responses back to the HTTP server.
@@ -712,7 +971,10 @@ pub fn submit_raw_response(
             chunk_flags |= FLAG_HEADERS_SENT;
         }
         if is_last {
-            chunk_flags |= FLAG_FINAL;
+            if (flags & FLAG_STREAMING) == 0 || (flags & FLAG_FINAL) != 0 {
+                chunk_flags |= FLAG_FINAL;
+            }
+            chunk_flags |= flags & (FLAG_TRAILERS | FLAG_ERROR);
         }
 
         let frame_size = ResponseSlot::encoded_size(chunk_headers, chunk);
@@ -727,39 +989,57 @@ pub fn submit_raw_response(
         )
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
 
+        let headers_raw = encode_headers_compact(
+            &chunk_headers
+                .iter()
+                .map(|(k, v)| (k.as_bytes().to_vec(), v.as_bytes().to_vec()))
+                .collect::<Vec<_>>(),
+        );
+
         if let Some(transport) = SHM_TRANSPORT.get() {
-            let headers_raw = encode_headers_compact(
-                &chunk_headers
-                    .iter()
-                    .map(|(k, v)| (k.as_bytes().to_vec(), v.as_bytes().to_vec()))
-                    .collect::<Vec<_>>(),
-            );
-            py.detach(|| -> Result<(), (bool, TransportError)> {
-                let mut pending_notify = false;
-                send_shm_response_detached(
-                    transport,
-                    &mut pending_notify,
+            submit_shm_stream_frames(
+                py,
+                transport,
+                request_id,
+                status,
+                chunk_flags,
+                &headers_raw,
+                chunk,
+            )?;
+        } else if let Some(bridge) = BatchBridge::get() {
+            let py_sink_cleared = PY_STREAM_SINK_INSTALLED.load(Ordering::Acquire)
+                && PY_STREAM_SINK
+                    .read()
+                    .map(|guard| guard.is_none())
+                    .unwrap_or(false);
+            if !py_sink_cleared {
+                let stream_frame = ResponseStreamFrame {
                     request_id,
                     status,
-                    &headers_raw,
-                    chunk,
-                )
-                .map_err(|e| (false, e))?;
-                flush_shm_response_notification(transport, &mut pending_notify)
-                    .map_err(|e| (true, e))?;
-                Ok(())
-            })
-            .map_err(|(is_notify, e)| {
-                if is_notify {
-                    pyo3::exceptions::PyRuntimeError::new_err(format!(
-                        "failed to notify supervisor: {e}"
-                    ))
-                } else {
-                    pyo3::exceptions::PyRuntimeError::new_err(format!(
-                        "failed to send response: {e}"
-                    ))
+                    flags: chunk_flags,
+                    headers_raw: if headers_raw.is_empty() {
+                        Bytes::new()
+                    } else {
+                        Bytes::copy_from_slice(&headers_raw)
+                    },
+                    body: if chunk.is_empty() {
+                        Bytes::new()
+                    } else {
+                        Bytes::copy_from_slice(chunk)
+                    },
+                };
+                match py.detach(|| bridge.submit_stream_frame(stream_frame)) {
+                    Ok(StreamDelivery::Accepted) | Err(TransportError::Disconnected) => {}
+                    Ok(StreamDelivery::Closed) => {
+                        return Err(PyConnectionResetError::new_err("stream closed by peer"));
+                    }
+                    Err(err) => {
+                        return Err(PyRuntimeError::new_err(format!(
+                            "failed to submit stream frame: {err}"
+                        )));
+                    }
                 }
-            })?;
+            }
         }
 
         encoded_frames.push(frame);
@@ -768,6 +1048,81 @@ pub fn submit_raw_response(
     }
 
     Ok(encoded_frames)
+}
+
+fn send_shm_stream_frame_detached(
+    transport: &Transport,
+    pending_notification: &mut bool,
+    request_id: u64,
+    status: u16,
+    flags: u16,
+    headers_raw: &[u8],
+    body: &[u8],
+) -> Result<(), TransportError> {
+    let Backend::SharedMemory(rp) = transport.backend() else {
+        return Err(TransportError::Disconnected);
+    };
+    match rp.send_stream_frame(request_id, status, flags, headers_raw, body) {
+        Ok(()) => {
+            *pending_notification = true;
+            Ok(())
+        }
+        Err(vertebra_core::transport::ring_pair::RingPairError::Channel(
+            vertebra_core::channel::ChannelError::Full,
+        )) => {
+            transport.notify_response()?;
+            *pending_notification = false;
+            rp.send_stream_frame_blocking(request_id, status, flags, headers_raw, body)
+                .map_err(|_| TransportError::Disconnected)?;
+            *pending_notification = true;
+            Ok(())
+        }
+        Err(_) => {
+            flush_shm_response_notification(transport, pending_notification)?;
+            Err(TransportError::Disconnected)
+        }
+    }
+}
+
+fn submit_shm_stream_frames(
+    py: Python<'_>,
+    transport: &Transport,
+    request_id: u64,
+    status: u16,
+    flags: u16,
+    headers_raw: &[u8],
+    body: &[u8],
+) -> PyResult<()> {
+    let max_payload = transport_max_stream_frame_payload(transport);
+    if max_payload == 0 || headers_raw.len() > max_payload {
+        return Err(PyValueError::new_err(
+            "stream frame headers exceed max_stream_frame_payload",
+        ));
+    }
+    py.detach(|| -> Result<(), (bool, TransportError)> {
+        let mut pending = false;
+        for_each_stream_chunk(
+            flags,
+            headers_raw,
+            body,
+            max_payload,
+            |chunk_flags, chunk_headers, chunk_body| {
+                send_shm_stream_frame_detached(
+                    transport,
+                    &mut pending,
+                    request_id,
+                    status,
+                    chunk_flags,
+                    chunk_headers,
+                    chunk_body,
+                )
+                .map_err(|e| (false, e))
+            },
+        )?;
+        flush_shm_response_notification(transport, &mut pending).map_err(|e| (true, e))?;
+        Ok(())
+    })
+    .map_err(map_shm_submit_err)
 }
 
 fn flush_shm_response_notification(
@@ -899,5 +1254,135 @@ mod tests {
 
         let drained_ids = drained_ids.lock().expect("lock ids");
         assert_eq!(drained_ids.as_slice(), &[1, 2]);
+    }
+
+    #[test]
+    fn shm_stream_frames_split_above_max_payload_and_recover_ring_full() {
+        let default_pair =
+            RingPair::create(RingPairConfig::default()).expect("create default ring pair");
+        assert_eq!(
+            default_max_stream_frame_payload(),
+            default_pair.max_stream_frame_payload()
+        );
+        drop(default_pair);
+
+        let mut config = RingPairConfig::compact();
+        config.response_tiers.xlarge.slot_size = 4096;
+        config.response_tiers.xlarge.slot_count = 2;
+
+        let pair = Arc::new(RingPair::create(config).expect("create compact ring pair"));
+        let transport = Transport::new_shared_memory(Arc::clone(&pair));
+        let max_payload = transport_max_stream_frame_payload(&transport);
+        assert_eq!(max_payload, pair.max_stream_frame_payload());
+
+        let headers_raw =
+            encode_headers_compact(&[(b"content-type".to_vec(), b"text/event-stream".to_vec())]);
+        let body: Vec<u8> = (0..(max_payload * 2 + 37))
+            .map(|idx| (idx % 251) as u8)
+            .collect();
+
+        let captured = Arc::new(Mutex::new(Vec::<(u64, u16, u16, Vec<u8>, Vec<u8>)>::new()));
+        let captured_reader = Arc::clone(&captured);
+        let pair_reader = Arc::clone(&pair);
+
+        pyo3::Python::attach(|py| {
+            let reader = std::thread::spawn(move || {
+                loop {
+                    pair_reader
+                        .drain_frames_with(8, |frame| {
+                            captured_reader.lock().expect("lock frames").push((
+                                frame.correlation_id,
+                                frame.status,
+                                frame.flags,
+                                frame.headers_raw.to_vec(),
+                                frame.body.to_vec(),
+                            ));
+                        })
+                        .expect("drain stream frames");
+
+                    if captured_reader
+                        .lock()
+                        .expect("lock frames")
+                        .last()
+                        .is_some_and(|(_, _, flags, _, _)| (*flags & FLAG_FINAL) != 0)
+                    {
+                        break;
+                    }
+
+                    if pair_reader.prepare_response_sleep() {
+                        assert!(
+                            pair_reader
+                                .response_notifier
+                                .wait(5_000)
+                                .expect("wait for stream frame notification"),
+                            "stream frame notification should arrive"
+                        );
+                        pair_reader.cancel_response_sleep();
+                        pair_reader
+                            .response_notifier
+                            .clear()
+                            .expect("clear response notifier");
+                    } else {
+                        pair_reader.cancel_response_sleep();
+                    }
+                }
+            });
+
+            submit_shm_stream_frames(
+                py,
+                &transport,
+                77,
+                200,
+                FLAG_STREAMING | FLAG_HEADERS_SENT | FLAG_FINAL,
+                &headers_raw,
+                &body,
+            )
+            .expect("submit multi-chunk SHM stream frames");
+
+            py.detach(|| {
+                reader.join().expect("reader thread should exit");
+            });
+        });
+
+        let frames = captured.lock().expect("lock captured frames");
+        assert_eq!(frames.len(), 3);
+        assert_eq!(frames[0].0, 77);
+        assert_eq!(frames[0].1, 200);
+        assert_eq!(frames[0].2, FLAG_STREAMING | FLAG_HEADERS_SENT);
+        assert_eq!(frames[0].3, headers_raw);
+
+        assert_eq!(frames[1].2, FLAG_STREAMING);
+        assert!(frames[1].3.is_empty());
+
+        assert_eq!(frames[2].2, FLAG_STREAMING | FLAG_FINAL);
+        assert!(frames[2].3.is_empty());
+
+        let reassembled: Vec<u8> = frames.iter().flat_map(|f| f.4.iter().copied()).collect();
+        assert_eq!(reassembled, body);
+    }
+
+    #[test]
+    fn submit_stream_frame_validates_flags_and_closed_delivery() {
+        pyo3::Python::attach(|py| {
+            let err =
+                ResponseSubmitter::submit_stream_frame_inner(py, 1, 200, FLAG_FINAL, b"", b"x")
+                    .expect_err("missing FLAG_STREAMING should fail");
+            assert!(err.is_instance_of::<PyValueError>(py));
+
+            init_transport("inprocess", 4096, 64, 64).expect("init bridge");
+            let bridge = BatchBridge::get().expect("bridge initialized");
+            bridge.set_stream_sink(Arc::new(|_| StreamDelivery::Closed));
+
+            let closed_err = ResponseSubmitter::submit_stream_frame_inner(
+                py,
+                9,
+                200,
+                FLAG_STREAMING | FLAG_HEADERS_SENT,
+                b"",
+                b"hello",
+            )
+            .expect_err("closed sink should raise ConnectionResetError");
+            assert!(closed_err.is_instance_of::<PyConnectionResetError>(py));
+        });
     }
 }

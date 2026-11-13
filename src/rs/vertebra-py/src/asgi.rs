@@ -6,12 +6,16 @@ use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 use pyo3::exceptions::{
-    PyIOError, PyIndexError, PyKeyError, PyRuntimeError, PyStopIteration, PyTypeError,
+    PyConnectionResetError, PyIOError, PyIndexError, PyKeyError, PyRuntimeError, PyStopIteration,
+    PyTypeError,
 };
 use pyo3::ffi;
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyBytes, PyDict, PyList, PyString, PyTuple};
 
+use vertebra_core::ipc::{
+    FLAG_ERROR, FLAG_FINAL, FLAG_HEADERS_SENT, FLAG_STREAMING, FLAG_TRAILERS,
+};
 use vertebra_core::transport::{BatchSnapshot, decode_headers_raw, encode_headers_compact};
 
 use crate::file_io::read_file_range_sync;
@@ -890,15 +894,25 @@ struct AsgiProtocolState {
     complete: bool,
     submitted: bool,
     immediate_submit: bool,
+    streaming: bool,
+    stream_closed: bool,
     expects_trailers: bool,
     trailers_done: bool,
     has_content_length: bool,
     status: u16,
     headers_raw: Vec<u8>,
+    trailers_raw: Vec<u8>,
     single_body_py: Option<Py<PyBytes>>,
     body_buf: Vec<u8>,
     disconnect_future: Option<Py<PyAny>>,
     loop_obj: Option<Py<PyAny>>,
+}
+
+struct PendingStreamFlush {
+    status: u16,
+    flags: u16,
+    headers_raw: Vec<u8>,
+    body: Vec<u8>,
 }
 
 #[inline]
@@ -1158,56 +1172,209 @@ impl AsgiProtocol {
         }
     }
 
-    pub(crate) fn take_completed_for_batch(
-        &self,
-        is_return: bool,
-    ) -> Option<FlushedProtocolResponse> {
-        let mut st = self.state.lock().ok()?;
-        if st.submitted {
-            return None;
+    #[inline]
+    fn prepare_stream_chunk_locked(
+        st: &mut AsgiProtocolState,
+        chunk: &[u8],
+        more_body: bool,
+    ) -> PyResult<Option<PendingStreamFlush>> {
+        if st.stream_closed {
+            return Err(PyConnectionResetError::new_err("stream closed by peer"));
         }
-        let ready = if is_return {
-            true
-        } else {
-            st.complete && (!st.expects_trailers || st.trailers_done)
-        };
-        if !ready {
-            st.immediate_submit = true;
-            return None;
-        }
-        if !st.started {
+        if !st.streaming {
+            st.streaming = true;
             st.submitted = true;
-            return Some(FlushedProtocolResponse {
-                request_id: self.request_id,
-                status: 500,
-                headers_raw: ERROR_500_HEADERS_RAW.to_vec(),
-                body: PreparedRawBody::Owned(ERROR_500_BODY.to_vec()),
-            });
+            let headers_raw = std::mem::take(&mut st.headers_raw);
+            let mut flags = FLAG_STREAMING | FLAG_HEADERS_SENT;
+            if !more_body {
+                st.complete = true;
+                if !st.expects_trailers || st.trailers_done {
+                    flags |= FLAG_FINAL;
+                    st.stream_closed = true;
+                }
+            }
+            return Ok(Some(PendingStreamFlush {
+                status: st.status,
+                flags,
+                headers_raw,
+                body: chunk.to_vec(),
+            }));
         }
-        Some(Self::extract_prepared_from_guard(self.request_id, &mut st))
+
+        if more_body {
+            if chunk.is_empty() {
+                return Ok(None);
+            }
+            return Ok(Some(PendingStreamFlush {
+                status: st.status,
+                flags: FLAG_STREAMING,
+                headers_raw: Vec::new(),
+                body: chunk.to_vec(),
+            }));
+        }
+
+        st.complete = true;
+        if st.expects_trailers && !st.trailers_done {
+            if chunk.is_empty() {
+                return Ok(None);
+            }
+            return Ok(Some(PendingStreamFlush {
+                status: st.status,
+                flags: FLAG_STREAMING,
+                headers_raw: Vec::new(),
+                body: chunk.to_vec(),
+            }));
+        }
+
+        st.stream_closed = true;
+        Ok(Some(PendingStreamFlush {
+            status: st.status,
+            flags: FLAG_STREAMING | FLAG_FINAL,
+            headers_raw: Vec::new(),
+            body: chunk.to_vec(),
+        }))
     }
 
-    pub(crate) fn take_error_for_batch(&self) -> Option<FlushedProtocolResponse> {
-        let mut st = self.state.lock().ok()?;
-        if st.submitted {
-            return None;
+    fn flush_stream_chunk(&self, py: Python<'_>, flush: PendingStreamFlush) -> PyResult<()> {
+        if self.disconnected.load(Ordering::Acquire) {
+            if let Ok(mut st) = self.state.lock() {
+                st.stream_closed = true;
+            }
+            return Err(PyConnectionResetError::new_err("stream closed by peer"));
         }
-        st.submitted = true;
-        Some(FlushedProtocolResponse {
-            request_id: self.request_id,
-            status: 500,
-            headers_raw: ERROR_500_HEADERS_RAW.to_vec(),
-            body: PreparedRawBody::Owned(ERROR_500_BODY.to_vec()),
-        })
+        match ResponseSubmitter::submit_stream_frame_inner(
+            py,
+            self.request_id,
+            flush.status,
+            flush.flags,
+            &flush.headers_raw,
+            &flush.body,
+        ) {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                if err.is_instance_of::<PyConnectionResetError>(py) {
+                    if let Ok(mut st) = self.state.lock() {
+                        st.stream_closed = true;
+                    }
+                    let _ = self.notify_disconnect(py);
+                }
+                Err(err)
+            }
+        }
+    }
+
+    pub(crate) fn take_completed_for_batch(
+        &self,
+        py: Python<'_>,
+        is_return: bool,
+    ) -> PyResult<Option<FlushedProtocolResponse>> {
+        let mut finalize_stream_status: Option<u16> = None;
+        let maybe_unary = {
+            let Ok(mut st) = self.state.lock() else {
+                return Ok(None);
+            };
+            if st.streaming {
+                if is_return && self.direct_submit && !st.stream_closed {
+                    st.stream_closed = true;
+                    st.complete = true;
+                    finalize_stream_status = Some(st.status);
+                }
+                None
+            } else if st.submitted {
+                None
+            } else {
+                let ready = if is_return {
+                    true
+                } else {
+                    st.complete && (!st.expects_trailers || st.trailers_done)
+                };
+                if !ready {
+                    st.immediate_submit = true;
+                    None
+                } else if !st.started {
+                    st.submitted = true;
+                    Some(FlushedProtocolResponse {
+                        request_id: self.request_id,
+                        status: 500,
+                        headers_raw: ERROR_500_HEADERS_RAW.to_vec(),
+                        body: PreparedRawBody::Owned(ERROR_500_BODY.to_vec()),
+                    })
+                } else {
+                    Some(Self::extract_prepared_from_guard(self.request_id, &mut st))
+                }
+            }
+        };
+        if let Some(status) = finalize_stream_status {
+            match ResponseSubmitter::submit_stream_frame_inner(
+                py,
+                self.request_id,
+                status,
+                FLAG_STREAMING | FLAG_FINAL,
+                b"",
+                b"",
+            ) {
+                Ok(()) => {}
+                Err(err) if err.is_instance_of::<PyConnectionResetError>(py) => {
+                    let _ = self.notify_disconnect(py);
+                }
+                Err(err) => return Err(err),
+            }
+        }
+        Ok(maybe_unary)
+    }
+
+    pub(crate) fn take_error_for_batch(&self, py: Python<'_>) -> Option<FlushedProtocolResponse> {
+        let mut error_stream_status: Option<u16> = None;
+        let maybe_unary = {
+            let mut st = self.state.lock().ok()?;
+            if st.streaming {
+                if self.direct_submit && !st.stream_closed {
+                    st.stream_closed = true;
+                    error_stream_status = Some(st.status);
+                }
+                None
+            } else if st.submitted {
+                None
+            } else {
+                st.submitted = true;
+                Some(FlushedProtocolResponse {
+                    request_id: self.request_id,
+                    status: 500,
+                    headers_raw: ERROR_500_HEADERS_RAW.to_vec(),
+                    body: PreparedRawBody::Owned(ERROR_500_BODY.to_vec()),
+                })
+            }
+        };
+        if let Some(status) = error_stream_status {
+            let _ = ResponseSubmitter::submit_stream_frame_inner(
+                py,
+                self.request_id,
+                status,
+                FLAG_STREAMING | FLAG_ERROR,
+                b"",
+                b"",
+            );
+        }
+        maybe_unary
     }
 
     pub(crate) fn finalize_async_return(&self, py: Python<'_>) -> PyResult<()> {
+        let mut finalize_stream_status: Option<u16> = None;
         let maybe_resp = {
             let mut st = self
                 .state
                 .lock()
                 .map_err(|_| PyRuntimeError::new_err("ASGI state lock poisoned"))?;
-            if st.submitted || !self.direct_submit {
+            if !self.direct_submit {
+                None
+            } else if st.streaming {
+                if !st.stream_closed {
+                    st.stream_closed = true;
+                    st.complete = true;
+                    finalize_stream_status = Some(st.status);
+                }
+                None
+            } else if st.submitted {
                 None
             } else if !st.started {
                 st.submitted = true;
@@ -1221,6 +1388,23 @@ impl AsgiProtocol {
                 Some(Self::extract_prepared_from_guard(self.request_id, &mut st))
             }
         };
+        if let Some(status) = finalize_stream_status {
+            match ResponseSubmitter::submit_stream_frame_inner(
+                py,
+                self.request_id,
+                status,
+                FLAG_STREAMING | FLAG_FINAL,
+                b"",
+                b"",
+            ) {
+                Ok(()) => {}
+                Err(err) if err.is_instance_of::<PyConnectionResetError>(py) => {
+                    let _ = self.notify_disconnect(py);
+                }
+                Err(err) => return Err(err),
+            }
+            return Ok(());
+        }
         if let Some(flushed) = maybe_resp {
             ResponseSubmitter::submit_raw_inner(
                 py,
@@ -1234,18 +1418,38 @@ impl AsgiProtocol {
     }
 
     pub(crate) fn finalize_async_error(&self, py: Python<'_>) -> PyResult<()> {
+        let mut error_stream_status: Option<u16> = None;
         let should_send_500 = {
             let mut st = self
                 .state
                 .lock()
                 .map_err(|_| PyRuntimeError::new_err("ASGI state lock poisoned"))?;
-            if st.submitted || !self.direct_submit {
+            if !self.direct_submit {
+                false
+            } else if st.streaming {
+                if !st.stream_closed {
+                    st.stream_closed = true;
+                    error_stream_status = Some(st.status);
+                }
+                false
+            } else if st.submitted {
                 false
             } else {
                 st.submitted = true;
                 true
             }
         };
+        if let Some(status) = error_stream_status {
+            let _ = ResponseSubmitter::submit_stream_frame_inner(
+                py,
+                self.request_id,
+                status,
+                FLAG_STREAMING | FLAG_ERROR,
+                b"",
+                b"",
+            );
+            return Ok(());
+        }
         if should_send_500 {
             ResponseSubmitter::submit_raw_inner(
                 py,
@@ -1405,6 +1609,7 @@ impl AsgiProtocol {
         let msg_type = type_obj.cast::<PyString>()?.to_str()?;
 
         let mut immediate_flush: Option<FlushedProtocolResponse> = None;
+        let mut stream_flushes: [Option<PendingStreamFlush>; 2] = [None, None];
         {
             let mut st = self
                 .state
@@ -1447,15 +1652,35 @@ impl AsgiProtocol {
                         Some(v) => v.is_truthy()?,
                         None => false,
                     };
-                    if let Some(body_obj) = message.get_item(pyo3::intern!(py, "body"))?
-                        && !body_obj.is_none()
-                    {
-                        if !more_body && st.body_buf.is_empty() && st.single_body_py.is_none() {
-                            if let Ok(py_b) = body_obj.cast::<PyBytes>() {
-                                if !py_b.as_bytes().is_empty() {
-                                    st.single_body_py = Some(py_b.clone().unbind());
+                    if self.direct_submit && (st.streaming || more_body || st.expects_trailers) {
+                        let body_item = message.get_item(pyo3::intern!(py, "body"))?;
+                        stream_flushes[0] = match body_item {
+                            Some(ref body_obj) if !body_obj.is_none() => {
+                                with_buffer_slice(py, body_obj, |slice| {
+                                    Self::prepare_stream_chunk_locked(&mut st, slice, more_body)
+                                })?
+                            }
+                            _ => Self::prepare_stream_chunk_locked(&mut st, b"", more_body)?,
+                        };
+                    } else {
+                        if let Some(body_obj) = message.get_item(pyo3::intern!(py, "body"))?
+                            && !body_obj.is_none()
+                        {
+                            if !more_body && st.body_buf.is_empty() && st.single_body_py.is_none() {
+                                if let Ok(py_b) = body_obj.cast::<PyBytes>() {
+                                    if !py_b.as_bytes().is_empty() {
+                                        st.single_body_py = Some(py_b.clone().unbind());
+                                    }
+                                } else {
+                                    with_buffer_slice(py, &body_obj, |slice| {
+                                        if !slice.is_empty() {
+                                            st.body_buf.extend_from_slice(slice);
+                                        }
+                                        Ok(())
+                                    })?;
                                 }
                             } else {
+                                Self::materialize_single_into_buf(py, &mut st);
                                 with_buffer_slice(py, &body_obj, |slice| {
                                     if !slice.is_empty() {
                                         st.body_buf.extend_from_slice(slice);
@@ -1463,25 +1688,19 @@ impl AsgiProtocol {
                                     Ok(())
                                 })?;
                             }
-                        } else {
-                            Self::materialize_single_into_buf(py, &mut st);
-                            with_buffer_slice(py, &body_obj, |slice| {
-                                if !slice.is_empty() {
-                                    st.body_buf.extend_from_slice(slice);
-                                }
-                                Ok(())
-                            })?;
                         }
-                    }
-                    if !more_body {
-                        st.complete = true;
-                        if self.direct_submit
-                            && st.immediate_submit
-                            && !st.submitted
-                            && (!st.expects_trailers || st.trailers_done)
-                        {
-                            immediate_flush =
-                                Some(Self::extract_prepared_from_guard(self.request_id, &mut st));
+                        if !more_body {
+                            st.complete = true;
+                            if self.direct_submit
+                                && st.immediate_submit
+                                && !st.submitted
+                                && (!st.expects_trailers || st.trailers_done)
+                            {
+                                immediate_flush = Some(Self::extract_prepared_from_guard(
+                                    self.request_id,
+                                    &mut st,
+                                ));
+                            }
                         }
                     }
                 }
@@ -1500,26 +1719,40 @@ impl AsgiProtocol {
                         Some(v) => v.is_truthy()?,
                         None => false,
                     };
-                    if let Some(buf_obj) = message.get_item(pyo3::intern!(py, "buffer"))?
-                        && !buf_obj.is_none()
-                    {
-                        Self::materialize_single_into_buf(py, &mut st);
-                        with_buffer_slice(py, &buf_obj, |slice| {
-                            if !slice.is_empty() {
-                                st.body_buf.extend_from_slice(slice);
+                    if self.direct_submit && (st.streaming || more_body || st.expects_trailers) {
+                        let buf_item = message.get_item(pyo3::intern!(py, "buffer"))?;
+                        stream_flushes[0] = match buf_item {
+                            Some(ref buf_obj) if !buf_obj.is_none() => {
+                                with_buffer_slice(py, buf_obj, |slice| {
+                                    Self::prepare_stream_chunk_locked(&mut st, slice, more_body)
+                                })?
                             }
-                            Ok(())
-                        })?;
-                    }
-                    if !more_body {
-                        st.complete = true;
-                        if self.direct_submit
-                            && st.immediate_submit
-                            && !st.submitted
-                            && (!st.expects_trailers || st.trailers_done)
+                            _ => Self::prepare_stream_chunk_locked(&mut st, b"", more_body)?,
+                        };
+                    } else {
+                        if let Some(buf_obj) = message.get_item(pyo3::intern!(py, "buffer"))?
+                            && !buf_obj.is_none()
                         {
-                            immediate_flush =
-                                Some(Self::extract_prepared_from_guard(self.request_id, &mut st));
+                            Self::materialize_single_into_buf(py, &mut st);
+                            with_buffer_slice(py, &buf_obj, |slice| {
+                                if !slice.is_empty() {
+                                    st.body_buf.extend_from_slice(slice);
+                                }
+                                Ok(())
+                            })?;
+                        }
+                        if !more_body {
+                            st.complete = true;
+                            if self.direct_submit
+                                && st.immediate_submit
+                                && !st.submitted
+                                && (!st.expects_trailers || st.trailers_done)
+                            {
+                                immediate_flush = Some(Self::extract_prepared_from_guard(
+                                    self.request_id,
+                                    &mut st,
+                                ));
+                            }
                         }
                     }
                 }
@@ -1551,6 +1784,15 @@ impl AsgiProtocol {
                         .state
                         .lock()
                         .map_err(|_| PyRuntimeError::new_err("ASGI state lock poisoned"))?;
+                    if self.direct_submit && (st_after.streaming || st_after.expects_trailers) {
+                        stream_flushes[0] =
+                            Self::prepare_stream_chunk_locked(&mut st_after, &file_bytes, false)?;
+                        drop(st_after);
+                        if let Some(flush) = stream_flushes[0].take() {
+                            self.flush_stream_chunk(py, flush)?;
+                        }
+                        return get_empty_awaitable(py);
+                    }
                     Self::materialize_single_into_buf(py, &mut st_after);
                     if !st_after.has_content_length {
                         let cl_val = file_bytes.len().to_string();
@@ -1591,10 +1833,50 @@ impl AsgiProtocol {
                             "Received 'http.response.trailers' before 'http.response.start'",
                         ));
                     }
-                    st.trailers_done = true;
-                    if self.direct_submit && st.immediate_submit && st.complete && !st.submitted {
-                        immediate_flush =
-                            Some(Self::extract_prepared_from_guard(self.request_id, &mut st));
+                    if st.trailers_done {
+                        return Err(PyRuntimeError::new_err(
+                            "Received 'http.response.trailers' after trailers were already complete",
+                        ));
+                    }
+                    if let Some(hdrs) = message.get_item(pyo3::intern!(py, "headers"))? {
+                        let mut has_cl = false;
+                        encode_py_headers_into(py, &hdrs, &mut st.trailers_raw, &mut has_cl)?;
+                    }
+                    let more_trailers =
+                        match message.get_item(pyo3::intern!(py, "more_trailers"))? {
+                            Some(v) => v.is_truthy()?,
+                            None => false,
+                        };
+                    if !more_trailers {
+                        st.trailers_done = true;
+                        st.complete = true;
+                        if self.direct_submit {
+                            if st.stream_closed {
+                                return Err(PyConnectionResetError::new_err(
+                                    "stream closed by peer",
+                                ));
+                            }
+                            let mut slot = 0usize;
+                            if !st.streaming {
+                                st.streaming = true;
+                                st.submitted = true;
+                                stream_flushes[slot] = Some(PendingStreamFlush {
+                                    status: st.status,
+                                    flags: FLAG_STREAMING | FLAG_HEADERS_SENT,
+                                    headers_raw: std::mem::take(&mut st.headers_raw),
+                                    body: Vec::new(),
+                                });
+                                slot += 1;
+                            }
+                            st.submitted = true;
+                            st.stream_closed = true;
+                            stream_flushes[slot] = Some(PendingStreamFlush {
+                                status: st.status,
+                                flags: FLAG_STREAMING | FLAG_TRAILERS | FLAG_FINAL,
+                                headers_raw: std::mem::take(&mut st.trailers_raw),
+                                body: Vec::new(),
+                            });
+                        }
                     }
                 }
                 "http.response.sse" => {
@@ -1608,21 +1890,30 @@ impl AsgiProtocol {
                             "Received 'http.response.sse' after response was already complete",
                         ));
                     }
-                    Self::materialize_single_into_buf(py, &mut st);
-                    encode_sse_message_into(message, &mut st.body_buf)?;
                     let more_body = match message.get_item(pyo3::intern!(py, "more_body"))? {
                         Some(v) => v.is_truthy()?,
                         None => false,
                     };
-                    if !more_body {
-                        st.complete = true;
-                        if self.direct_submit
-                            && st.immediate_submit
-                            && !st.submitted
-                            && (!st.expects_trailers || st.trailers_done)
-                        {
-                            immediate_flush =
-                                Some(Self::extract_prepared_from_guard(self.request_id, &mut st));
+                    if self.direct_submit && (st.streaming || more_body || st.expects_trailers) {
+                        let mut sse_buf = Vec::new();
+                        encode_sse_message_into(message, &mut sse_buf)?;
+                        stream_flushes[0] =
+                            Self::prepare_stream_chunk_locked(&mut st, &sse_buf, more_body)?;
+                    } else {
+                        Self::materialize_single_into_buf(py, &mut st);
+                        encode_sse_message_into(message, &mut st.body_buf)?;
+                        if !more_body {
+                            st.complete = true;
+                            if self.direct_submit
+                                && st.immediate_submit
+                                && !st.submitted
+                                && (!st.expects_trailers || st.trailers_done)
+                            {
+                                immediate_flush = Some(Self::extract_prepared_from_guard(
+                                    self.request_id,
+                                    &mut st,
+                                ));
+                            }
                         }
                     }
                 }
@@ -1632,6 +1923,10 @@ impl AsgiProtocol {
                     )));
                 }
             }
+        }
+
+        for flush in stream_flushes.into_iter().flatten() {
+            self.flush_stream_chunk(py, flush)?;
         }
 
         if let Some(flushed) = immediate_flush {
@@ -1711,6 +2006,60 @@ pub(crate) const NATIVE_ERROR_403_BODY: &[u8] = b"forbidden";
 pub(crate) const NATIVE_ERROR_500_BODY: &[u8] = b"internal server error";
 
 static ENCODE_JSON_BYTES_FN: pyo3::sync::PyOnceLock<Py<PyAny>> = pyo3::sync::PyOnceLock::new();
+static TRY_SUBMIT_NATIVE_SPECIAL_FN: pyo3::sync::PyOnceLock<Py<PyAny>> =
+    pyo3::sync::PyOnceLock::new();
+
+enum NativeSpecialOutcome<'py> {
+    NotSpecial,
+    SubmittedInline,
+    SpawnedTask(Bound<'py, PyAny>),
+}
+
+fn try_submit_native_special<'py>(
+    py: Python<'py>,
+    request_id: u64,
+    default_status: u16,
+    raw: &Bound<'py, PyAny>,
+    active_loop: Option<&Bound<'py, PyAny>>,
+) -> PyResult<NativeSpecialOutcome<'py>> {
+    if raw.is_none()
+        || raw.is_instance_of::<PyDict>()
+        || raw.is_instance_of::<PyList>()
+        || raw.is_instance_of::<PyBool>()
+        || raw.is_instance_of::<pyo3::types::PyInt>()
+        || raw.is_instance_of::<pyo3::types::PyFloat>()
+    {
+        return Ok(NativeSpecialOutcome::NotSpecial);
+    }
+    let candidate = raw.is_instance_of::<PyTuple>()
+        || raw.hasattr(pyo3::intern!(py, "__aiter__"))?
+        || raw.hasattr(pyo3::intern!(py, "status_code"))?
+        || raw.hasattr(pyo3::intern!(py, "status"))?;
+    if !candidate {
+        return Ok(NativeSpecialOutcome::NotSpecial);
+    }
+    let helper_fn =
+        TRY_SUBMIT_NATIVE_SPECIAL_FN.get_or_try_init(py, || -> PyResult<Py<PyAny>> {
+            let dispatch_mod = py.import(pyo3::intern!(py, "vertebra.server._dispatch"))?;
+            Ok(dispatch_mod
+                .getattr(pyo3::intern!(py, "_try_submit_native_special_return"))?
+                .unbind())
+        })?;
+    let loop_arg: Bound<'py, PyAny> = match active_loop {
+        Some(lp) => lp.clone(),
+        None => py.None().into_bound(py),
+    };
+    let res = helper_fn
+        .bind(py)
+        .call1((raw, request_id, default_status, loop_arg))?;
+    if res.is(PyBool::new(py, false)) {
+        return Ok(NativeSpecialOutcome::NotSpecial);
+    }
+    if res.is(PyBool::new(py, true)) || res.is_none() {
+        return Ok(NativeSpecialOutcome::SubmittedInline);
+    }
+    Ok(NativeSpecialOutcome::SpawnedTask(res))
+}
 
 fn prepare_native_flushed_response(
     py: Python<'_>,
@@ -1828,6 +2177,11 @@ impl ProtocolFinalizer {
                 request_id,
                 default_status,
             } => {
+                match try_submit_native_special(py, *request_id, *default_status, ret_val, None)? {
+                    NativeSpecialOutcome::SubmittedInline
+                    | NativeSpecialOutcome::SpawnedTask(_) => return Ok(()),
+                    NativeSpecialOutcome::NotSpecial => {}
+                }
                 let flushed =
                     prepare_native_flushed_response(py, *request_id, *default_status, ret_val)?;
                 ResponseSubmitter::submit_raw_inner(
@@ -2250,7 +2604,7 @@ fn drive_asgi_targets_inline(
             Ok(c) => c,
             Err(err) => {
                 log_app_exception(py, "ASGI", &err);
-                if let Some(err_resp) = proto_bound.get().take_error_for_batch() {
+                if let Some(err_resp) = proto_bound.get().take_error_for_batch(py) {
                     ready_responses.push(err_resp);
                 }
                 completed_inline += 1;
@@ -2267,7 +2621,7 @@ fn drive_asgi_targets_inline(
                         let _ = Bound::from_owned_ptr(py, yielded);
                     }
                 }
-                if let Some(resp) = proto_bound.get().take_completed_for_batch(true) {
+                if let Some(resp) = proto_bound.get().take_completed_for_batch(py, true)? {
                     ready_responses.push(resp);
                 }
                 completed_inline += 1;
@@ -2275,14 +2629,14 @@ fn drive_asgi_targets_inline(
             ffi::PySendResult::PYGEN_ERROR => {
                 let err = PyErr::fetch(py);
                 log_app_exception(py, "ASGI", &err);
-                if let Some(err_resp) = proto_bound.get().take_error_for_batch() {
+                if let Some(err_resp) = proto_bound.get().take_error_for_batch(py) {
                     ready_responses.push(err_resp);
                 }
                 completed_inline += 1;
             }
             ffi::PySendResult::PYGEN_NEXT => {
                 let first_yielded = unsafe { Bound::from_owned_ptr(py, yielded) }.unbind();
-                if let Some(resp) = proto_bound.get().take_completed_for_batch(false) {
+                if let Some(resp) = proto_bound.get().take_completed_for_batch(py, false)? {
                     ready_responses.push(resp);
                 }
                 let lp = match active_loop {
@@ -2444,14 +2798,43 @@ fn drive_native_items_inline(
                 } else {
                     unsafe { Bound::from_owned_ptr(py, yielded) }
                 };
-                match prepare_native_flushed_response(py, request_id, default_status, &ret_bound) {
-                    Ok(flushed) => ready_responses.push(flushed),
+                match try_submit_native_special(
+                    py,
+                    request_id,
+                    default_status,
+                    &ret_bound,
+                    active_loop,
+                ) {
+                    Ok(NativeSpecialOutcome::SubmittedInline) => {
+                        completed_inline += 1;
+                    }
+                    Ok(NativeSpecialOutcome::SpawnedTask(task)) => {
+                        if drive_until_complete {
+                            spawned_tasks.push(task);
+                        }
+                    }
+                    Ok(NativeSpecialOutcome::NotSpecial) => {
+                        match prepare_native_flushed_response(
+                            py,
+                            request_id,
+                            default_status,
+                            &ret_bound,
+                        ) {
+                            Ok(flushed) => ready_responses.push(flushed),
+                            Err(err) => {
+                                log_app_exception(py, "Native", &err);
+                                ready_responses
+                                    .push(prepare_native_error_response(py, request_id, &err));
+                            }
+                        }
+                        completed_inline += 1;
+                    }
                     Err(err) => {
                         log_app_exception(py, "Native", &err);
                         ready_responses.push(prepare_native_error_response(py, request_id, &err));
+                        completed_inline += 1;
                     }
                 }
-                completed_inline += 1;
             }
             ffi::PySendResult::PYGEN_ERROR => {
                 let err = PyErr::fetch(py);

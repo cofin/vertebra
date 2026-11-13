@@ -11,13 +11,22 @@ from typing import Any
 import pytest
 
 from vertebra._vertebra import (
+    STREAM_FLAG_ERROR,
+    STREAM_FLAG_FINAL,
+    STREAM_FLAG_HEADERS_SENT,
+    STREAM_FLAG_STREAMING,
+    STREAM_FLAG_TRAILERS,
     Response,
     RustDbTaskAwaitable,
     TaskPanicError,
+    _set_stream_sink,
     cancel_request_sleep,
     init_transport,
+    max_stream_frame_payload,
     prepare_request_sleep,
+    submit_raw_response,
     submit_response,
+    submit_stream_frame,
 )
 from vertebra.framework._app import App, _make_handler_id
 from vertebra.framework._router import handler_id
@@ -276,3 +285,147 @@ def test_async_bridge_exports_preserved() -> None:
     """Verify async_bridge.rs exports RustDbTaskAwaitable and TaskPanicError on vertebra._vertebra."""
     assert issubclass(TaskPanicError, RuntimeError)
     assert hasattr(RustDbTaskAwaitable, "__await__")
+
+
+@pytest.mark.parametrize(
+    "invalid_flags",
+    [
+        0,
+        STREAM_FLAG_FINAL,
+        STREAM_FLAG_HEADERS_SENT,
+        STREAM_FLAG_TRAILERS,
+        STREAM_FLAG_ERROR,
+    ],
+)
+def test_submit_stream_frame_rejects_missing_streaming_flag(invalid_flags: int) -> None:
+    """Verify submit_stream_frame raises ValueError when STREAM_FLAG_STREAMING is absent."""
+    init_transport()
+    with pytest.raises(ValueError, match="STREAM_FLAG_STREAMING"):
+        submit_stream_frame(1, 200, invalid_flags, None, b"chunk")
+
+
+def test_submit_stream_frame_missing_sink_raises_runtime_error() -> None:
+    """Verify submit_stream_frame raises RuntimeError when no stream sink is registered."""
+    init_transport()
+    _set_stream_sink(None)
+    with pytest.raises(RuntimeError, match="stream"):
+        submit_stream_frame(
+            1,
+            200,
+            STREAM_FLAG_STREAMING | STREAM_FLAG_HEADERS_SENT,
+            [(b"content-type", b"text/plain")],
+            b"chunk",
+        )
+
+
+@pytest.mark.parametrize(
+    ("headers_in", "body_in", "flags_in", "accept", "expected_headers"),
+    [
+        (
+            [("content-type", "text/event-stream"), (b"x-stream", b"1")],
+            memoryview(b"data: hello\r\n\r\n"),
+            STREAM_FLAG_STREAMING | STREAM_FLAG_HEADERS_SENT,
+            True,
+            [(b"content-type", b"text/event-stream"), (b"x-stream", b"1")],
+        ),
+        (
+            None,
+            b"final-chunk",
+            STREAM_FLAG_STREAMING | STREAM_FLAG_FINAL,
+            True,
+            [],
+        ),
+        (
+            [(b"x-trailer", b"ok")],
+            b"",
+            STREAM_FLAG_STREAMING | STREAM_FLAG_TRAILERS | STREAM_FLAG_FINAL,
+            False,
+            [(b"x-trailer", b"ok")],
+        ),
+    ],
+)
+def test_submit_stream_frame_embedded_delivery_and_closed_client(
+    headers_in: Any,
+    body_in: bytes | memoryview,
+    flags_in: int,
+    accept: bool,
+    expected_headers: list[tuple[bytes, bytes]],
+) -> None:
+    """Verify embedded stream sink delivery and ConnectionResetError on StreamDelivery::Closed."""
+    init_transport()
+    delivered: list[tuple[int, int, int, list[tuple[bytes, bytes]], bytes]] = []
+
+    def sink(
+        req_id: int,
+        status: int,
+        flags: int,
+        headers: list[tuple[bytes, bytes]],
+        body: bytes,
+    ) -> bool:
+        delivered.append((req_id, status, flags, headers, body))
+        return accept
+
+    _set_stream_sink(sink)
+    try:
+        if accept:
+            submit_stream_frame(55, 200, flags_in, headers_in, body_in)
+            assert delivered == [(55, 200, flags_in, expected_headers, bytes(body_in))]
+        else:
+            with pytest.raises(ConnectionResetError):
+                submit_stream_frame(55, 200, flags_in, headers_in, body_in)
+            assert len(delivered) == 1
+    finally:
+        _set_stream_sink(None)
+
+
+def test_submit_stream_frame_splits_payload_above_max_stream_frame_payload() -> None:
+    """Verify payloads exceeding max_stream_frame_payload split cleanly across consecutive frames."""
+    init_transport()
+    max_payload = max_stream_frame_payload()
+    assert max_payload > 65536
+    payload = b"x" * (max_payload * 2 + 29)
+    delivered: list[tuple[int, int, int, list[tuple[bytes, bytes]], bytes]] = []
+
+    def sink(
+        req_id: int,
+        status: int,
+        flags: int,
+        headers: list[tuple[bytes, bytes]],
+        body: bytes,
+    ) -> bool:
+        delivered.append((req_id, status, flags, headers, body))
+        return True
+
+    _set_stream_sink(sink)
+    try:
+        submit_stream_frame(
+            88,
+            200,
+            STREAM_FLAG_STREAMING | STREAM_FLAG_HEADERS_SENT | STREAM_FLAG_FINAL,
+            [("content-type", "application/octet-stream")],
+            payload,
+        )
+        assert len(delivered) == 3
+        assert delivered[0][2] == (STREAM_FLAG_STREAMING | STREAM_FLAG_HEADERS_SENT)
+        assert delivered[0][3] == [(b"content-type", b"application/octet-stream")]
+        assert delivered[1][2] == STREAM_FLAG_STREAMING
+        assert delivered[1][3] == []
+        assert delivered[2][2] == (STREAM_FLAG_STREAMING | STREAM_FLAG_FINAL)
+        assert delivered[2][3] == []
+        assert b"".join(item[4] for item in delivered) == payload
+
+        delivered.clear()
+        encoded_slots = submit_raw_response(
+            89,
+            200,
+            [("x-raw", "stream")],
+            b"abcdef",
+            flags=STREAM_FLAG_STREAMING | STREAM_FLAG_FINAL,
+            slot_capacity=64,
+        )
+        assert len(encoded_slots) >= 1
+        assert delivered[0][0] == 89
+        assert (delivered[0][2] & STREAM_FLAG_HEADERS_SENT) != 0
+        assert (delivered[-1][2] & STREAM_FLAG_FINAL) != 0
+    finally:
+        _set_stream_sink(None)

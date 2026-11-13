@@ -1,12 +1,20 @@
 """ASGI receive and send callables with bounded streaming backpressure."""
 
 import asyncio
+import contextlib
 from collections.abc import Buffer, Callable, Iterable
 from typing import Any, cast
 
 import msgspec
 
-from vertebra._vertebra import PyEmptyAwaitable
+from vertebra._vertebra import (
+    STREAM_FLAG_ERROR,
+    STREAM_FLAG_FINAL,
+    STREAM_FLAG_HEADERS_SENT,
+    STREAM_FLAG_STREAMING,
+    STREAM_FLAG_TRAILERS,
+    PyEmptyAwaitable,
+)
 
 __all__ = (
     "DEFAULT_STREAM_HIGH_WATERMARK",
@@ -20,6 +28,7 @@ __all__ = (
     "AsgiStreamReceive",
     "AsgiStreamSend",
     "ChunkCallback",
+    "StreamSubmitter",
 )
 
 DEFAULT_STREAM_QUEUE_MAXSIZE = 256
@@ -28,6 +37,7 @@ DEFAULT_STREAM_LOW_WATERMARK = 64
 _EMPTY_SEND_AWAITABLE = PyEmptyAwaitable()
 
 ChunkCallback = Callable[[int, bytes], None]
+type StreamSubmitter = Callable[[int, int, int, list[tuple[bytes, bytes]], bytes], None]
 
 
 class AsgiProtocolError(RuntimeError):
@@ -146,6 +156,9 @@ class AsgiSend:
         "_request_id",
         "_started",
         "_status",
+        "_stream_closed",
+        "_stream_submitter",
+        "_streamed",
         "_trailers",
         "_zero_copy_buffers",
     )
@@ -154,11 +167,15 @@ class AsgiSend:
         self,
         request_id: int = 0,
         on_chunk: ChunkCallback | None = None,
+        stream_submitter: StreamSubmitter | None = None,
     ) -> None:
         self._request_id = request_id
         self._on_chunk = on_chunk
+        self._stream_submitter = stream_submitter
         self._started = False
         self._complete = False
+        self._streamed = False
+        self._stream_closed = False
         self._expects_trailers = False
         self._status = 200
         self._headers: list[tuple[str, str]] | None = None
@@ -177,6 +194,11 @@ class AsgiSend:
     def complete(self) -> bool:
         """Return True once the final body chunk or file path has been processed."""
         return self._complete
+
+    @property
+    def streamed(self) -> bool:
+        """Return True once progressive streaming frames have been emitted."""
+        return self._streamed
 
     @property
     def raw_headers(self) -> list[tuple[bytes, bytes]]:
@@ -260,13 +282,16 @@ class AsgiSend:
             if self._complete:
                 msg = "Received 'http.response.body' after response was already complete"
                 raise AsgiProtocolError(msg)
-            chunk: bytes = message.get("body", b"")
-            if chunk:
-                raw = bytes(chunk)
-                self._body_chunks.append(raw)
-                if self._on_chunk is not None:
-                    self._on_chunk(self._request_id, raw)
+            chunk: Buffer = message.get("body", b"")
+            raw = bytes(chunk) if chunk else b""
             more_body: bool = bool(message.get("more_body", False))
+            if raw and self._on_chunk is not None:
+                self._on_chunk(self._request_id, raw)
+            if self._stream_submitter is not None and (self._streamed or more_body or self._expects_trailers):
+                self._flush_stream_chunk(raw, more_body=more_body)
+                return
+            if raw:
+                self._body_chunks.append(raw)
             if not more_body:
                 self._complete = True
             return
@@ -280,13 +305,23 @@ class AsgiSend:
 
         if msg_type == "http.response.zerocopysend":
             self._assert_started(msg_type)
+            if self._complete:
+                msg = "Received 'http.response.zerocopysend' after response was already complete"
+                raise AsgiProtocolError(msg)
             buf = message.get("buffer", b"")
+            more_body = bool(message.get("more_body", False))
+            if self._stream_submitter is not None and (self._streamed or more_body or self._expects_trailers):
+                raw_zc = bytes(memoryview(buf)) if buf else b""
+                if raw_zc and self._on_chunk is not None:
+                    self._on_chunk(self._request_id, raw_zc)
+                self._flush_stream_chunk(raw_zc, more_body=more_body)
+                return
             if buf:
                 mv = memoryview(buf)
                 self._zero_copy_buffers.append(mv)
                 if self._on_chunk is not None:
                     self._on_chunk(self._request_id, bytes(mv))
-            if not bool(message.get("more_body", False)):
+            if not more_body:
                 self._complete = True
             return
 
@@ -297,16 +332,52 @@ class AsgiSend:
                 kb = k if isinstance(k, bytes) else str(k).encode("latin-1")
                 vb = v if isinstance(v, bytes) else str(v).encode("latin-1")
                 self._trailers.append((kb, vb))
+            more_trailers = bool(message.get("more_trailers", False))
+            if self._stream_submitter is not None and not more_trailers:
+                if self._stream_closed:
+                    msg = "stream closed by peer"
+                    raise ConnectionResetError(msg)
+                if not self._streamed:
+                    self._streamed = True
+                    try:
+                        self._stream_submitter(
+                            self._request_id,
+                            self._status,
+                            STREAM_FLAG_STREAMING | STREAM_FLAG_HEADERS_SENT,
+                            list(self._raw_headers),
+                            b"",
+                        )
+                    except ConnectionResetError:
+                        self._stream_closed = True
+                        raise
+                self._stream_closed = True
+                self._complete = True
+                trailer_pairs = list(self._trailers)
+                self._trailers.clear()
+                self._stream_submitter(
+                    self._request_id,
+                    self._status,
+                    STREAM_FLAG_STREAMING | STREAM_FLAG_TRAILERS | STREAM_FLAG_FINAL,
+                    trailer_pairs,
+                    b"",
+                )
             return
 
         if msg_type == "http.response.sse":
             self._assert_started(msg_type)
+            if self._complete:
+                msg = "Received 'http.response.sse' after response was already complete"
+                raise AsgiProtocolError(msg)
             sse_chunk = _encode_sse_message(message)
+            more_body = bool(message.get("more_body", False))
+            if sse_chunk and self._on_chunk is not None:
+                self._on_chunk(self._request_id, sse_chunk)
+            if self._stream_submitter is not None and (self._streamed or more_body or self._expects_trailers):
+                self._flush_stream_chunk(sse_chunk, more_body=more_body)
+                return
             if sse_chunk:
                 self._body_chunks.append(sse_chunk)
-                if self._on_chunk is not None:
-                    self._on_chunk(self._request_id, sse_chunk)
-            if not bool(message.get("more_body", False)):
+            if not more_body:
                 self._complete = True
             return
 
@@ -351,6 +422,89 @@ class AsgiSend:
                 if self._on_chunk is not None:
                     self._on_chunk(self._request_id, raw)
         return _EMPTY_SEND_AWAITABLE
+
+    def finish_stream(self, *, error: bool = False) -> None:
+        """Emit a terminal final or error stream frame if progressive streaming is open."""
+        if self._stream_submitter is None or not self._streamed or self._stream_closed:
+            return
+        self._stream_closed = True
+        self._complete = True
+        terminal_flag = STREAM_FLAG_ERROR if error else STREAM_FLAG_FINAL
+        with contextlib.suppress(ConnectionResetError):
+            self._stream_submitter(
+                self._request_id,
+                self._status,
+                STREAM_FLAG_STREAMING | terminal_flag,
+                [],
+                b"",
+            )
+
+    def _flush_stream_chunk(self, chunk: bytes, *, more_body: bool) -> None:
+        assert self._stream_submitter is not None
+        if self._stream_closed:
+            msg = "stream closed by peer"
+            raise ConnectionResetError(msg)
+        if not self._streamed:
+            self._streamed = True
+            flags = STREAM_FLAG_STREAMING | STREAM_FLAG_HEADERS_SENT
+            if not more_body:
+                self._complete = True
+                if not self._expects_trailers:
+                    flags |= STREAM_FLAG_FINAL
+                    self._stream_closed = True
+            try:
+                self._stream_submitter(
+                    self._request_id,
+                    self._status,
+                    flags,
+                    list(self._raw_headers),
+                    chunk,
+                )
+            except ConnectionResetError:
+                self._stream_closed = True
+                raise
+            return
+
+        if more_body:
+            if not chunk:
+                return
+            try:
+                self._stream_submitter(
+                    self._request_id,
+                    self._status,
+                    STREAM_FLAG_STREAMING,
+                    [],
+                    chunk,
+                )
+            except ConnectionResetError:
+                self._stream_closed = True
+                raise
+            return
+
+        self._complete = True
+        if self._expects_trailers:
+            if chunk:
+                try:
+                    self._stream_submitter(
+                        self._request_id,
+                        self._status,
+                        STREAM_FLAG_STREAMING,
+                        [],
+                        chunk,
+                    )
+                except ConnectionResetError:
+                    self._stream_closed = True
+                    raise
+            return
+
+        self._stream_closed = True
+        self._stream_submitter(
+            self._request_id,
+            self._status,
+            STREAM_FLAG_STREAMING | STREAM_FLAG_FINAL,
+            [],
+            chunk,
+        )
 
     def _assert_started(self, msg_type: str) -> None:
         if not self._started:
