@@ -17,8 +17,9 @@ use _postgres::protocol::{
     MAX_BACKEND_FRAME_LENGTH, ReplicationBackendMessage, read_frame, read_replication_message,
 };
 use _postgres::replication::{
-    MAX_REPLICATION_IDENTIFIER_BYTES, PostgresReplicationConnection, VerifiedReplicationIdentity,
-    format_pg_lsn, parse_pg_lsn,
+    MAX_RAW_RECONNECT_ATTEMPTS, MAX_REPLICATION_IDENTIFIER_BYTES, PostgresReplicationConnection,
+    PostgresReplicationResume, ReplicationStreamEvent, ReplicationSupervisor,
+    VerifiedReplicationIdentity, format_pg_lsn, parse_pg_lsn, raw_reconnect_delay,
 };
 use bytes::BytesMut;
 use postgres_protocol::message::backend::Message;
@@ -3619,4 +3620,1240 @@ async fn session_shutdown_truncated_command_frame_is_terminal_protocol_error() {
     ));
     assert!(session.next().await.unwrap().is_none());
     assert_eq!(session.status_positions().1, 0x200000100);
+}
+
+#[derive(Clone)]
+struct ScriptedLogicalPeerSpec {
+    db: &'static str,
+    active: &'static str,
+    restart_lsn: &'static str,
+    confirmed_flush_lsn: &'static str,
+    pub_delete_flag: &'static str,
+    system_id: &'static str,
+    timeline: &'static str,
+    xlogpos: &'static str,
+}
+
+impl Default for ScriptedLogicalPeerSpec {
+    fn default() -> Self {
+        Self {
+            db: "appdb",
+            active: "f",
+            restart_lsn: "2/10",
+            confirmed_flush_lsn: "2/80",
+            pub_delete_flag: "t",
+            system_id: "9990001112223334445",
+            timeline: "1",
+            xlogpos: "2/900",
+        }
+    }
+}
+
+async fn accept_preflight_peer(
+    listener: &TcpListener,
+    spec: &ScriptedLogicalPeerSpec,
+    slot_error: Option<(&str, &str)>,
+) -> bool {
+    let (mut meta, _) = listener.accept().await.unwrap();
+    complete_startup_ready_version(&mut meta, 701, "14.12").await;
+    let FrontendExchange::Extended(slot_q) = read_frontend_exchange(&mut meta).await else {
+        panic!("expected slot preflight query");
+    };
+    if let Some((code, msg)) = slot_error {
+        let mut err = error_response_frame("ERROR", code, msg);
+        err.extend(ready_for_query_frame(b'I'));
+        meta.write_all(&err).await.unwrap();
+        assert_clean_terminate_to_eof(&mut meta).await;
+        return false;
+    }
+    meta.write_all(&extended_select_response(
+        &slot_q.param_oids,
+        &slot_columns(),
+        &[vec![
+            Some(spec.db),
+            Some(spec.db),
+            Some("logical"),
+            Some("pgoutput"),
+            Some(spec.active),
+            Some(spec.restart_lsn),
+            Some(spec.confirmed_flush_lsn),
+            Some("extended"),
+        ]],
+        slot_q.saw_close_portal,
+    ))
+    .await
+    .unwrap();
+
+    if spec.active == "t" || spec.db != "appdb" {
+        assert_clean_terminate_to_eof(&mut meta).await;
+        return false;
+    }
+
+    let FrontendExchange::Extended(pub_q) = read_frontend_exchange(&mut meta).await else {
+        panic!("expected publication preflight query");
+    };
+    meta.write_all(&extended_select_response(
+        &pub_q.param_oids,
+        &pub_columns_pg14(),
+        &[vec![
+            Some("vertebra_pub"),
+            Some("f"),
+            Some("t"),
+            Some("t"),
+            Some(spec.pub_delete_flag),
+            Some("f"),
+            Some("f"),
+            None,
+            None,
+        ]],
+        pub_q.saw_close_portal,
+    ))
+    .await
+    .unwrap();
+    assert_clean_terminate_to_eof(&mut meta).await;
+    true
+}
+
+async fn accept_copyboth_peer(
+    listener: &TcpListener,
+    spec: &ScriptedLogicalPeerSpec,
+    expected_start_lsn: Option<&str>,
+    start_error: Option<(&str, &str)>,
+    initial_payload: &[u8],
+) -> Option<TcpStream> {
+    let (mut socket, _) = listener.accept().await.unwrap();
+    complete_startup_ready_version(&mut socket, 702, "14.12").await;
+    assert_eq!(
+        read_frontend_exchange(&mut socket).await,
+        FrontendExchange::SimpleQuery("IDENTIFY_SYSTEM".into())
+    );
+    socket
+        .write_all(&identify_system_response(
+            spec.system_id,
+            spec.timeline,
+            spec.xlogpos,
+            Some(spec.db),
+        ))
+        .await
+        .unwrap();
+
+    let next = read_frontend_exchange(&mut socket).await;
+    let FrontendExchange::SimpleQuery(sql) = next else {
+        assert_eq!(next, FrontendExchange::Terminate);
+        assert_eq!(
+            read_frontend_exchange(&mut socket).await,
+            FrontendExchange::Eof
+        );
+        return None;
+    };
+    if let Some(expected_lsn) = expected_start_lsn {
+        assert!(
+            sql.contains(&format!("LOGICAL {expected_lsn} ")),
+            "expected LOGICAL {expected_lsn} in {sql}"
+        );
+    }
+    if let Some((code, msg)) = start_error {
+        let mut err = error_response_frame("ERROR", code, msg);
+        err.extend(ready_for_query_frame(b'I'));
+        socket.write_all(&err).await.unwrap();
+        assert_clean_terminate_to_eof(&mut socket).await;
+        return None;
+    }
+    let mut startup = parameter_status_frame("wal_sender_timeout", "30s");
+    startup.extend(copy_both_response_frame(0, &[]));
+    startup.extend_from_slice(initial_payload);
+    socket.write_all(&startup).await.unwrap();
+    Some(socket)
+}
+
+#[test]
+fn supervisor_reconnect_delay_bounds_monotonic_progression_and_cap_jitter() {
+    assert_eq!(MAX_RAW_RECONNECT_ATTEMPTS, 8);
+    let min_delay = Duration::from_millis(100);
+    let max_delay = Duration::from_secs(5);
+    let seeds = [0_u64, 1, 7, 42, 0xDEAD_BEEF_CAFE_BABE, u64::MAX];
+    let attempts = [0_u32, 1, 2, 3, 4, 5, 6, 7, 8, 16, u32::MAX];
+
+    for &seed in &seeds {
+        for &attempt in &attempts {
+            let delay = raw_reconnect_delay(attempt, seed);
+            assert!(
+                (min_delay..=max_delay).contains(&delay),
+                "delay {delay:?} out of 100ms..=5s for attempt={attempt} seed={seed}"
+            );
+            assert_eq!(delay, raw_reconnect_delay(attempt, seed));
+        }
+        for step in 0..6 {
+            let earlier = raw_reconnect_delay(step, seed);
+            let later = raw_reconnect_delay(step + 1, seed);
+            assert!(
+                earlier < later,
+                "expected exponential progression {earlier:?} < {later:?} at step {step}"
+            );
+        }
+    }
+
+    let first_distinct: std::collections::BTreeSet<Duration> = (0_u64..32)
+        .map(|seed| raw_reconnect_delay(0, seed))
+        .collect();
+    assert!(
+        first_distinct.len() > 1,
+        "expected jitter spread at attempt 0"
+    );
+
+    let cap_distinct: std::collections::BTreeSet<Duration> = (0_u64..32)
+        .map(|seed| raw_reconnect_delay(7, seed))
+        .collect();
+    assert!(
+        cap_distinct.len() > 1,
+        "expected jitter spread even at the 5s cap"
+    );
+}
+
+#[tokio::test]
+async fn supervisor_open_validates_pooler_mode_capacity_and_identifiers_pre_dial() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let accepts = Arc::new(AtomicUsize::new(0));
+    let accepts_bg = Arc::clone(&accepts);
+    let bg = tokio::spawn(async move {
+        while listener.accept().await.is_ok() {
+            accepts_bg.fetch_add(1, Ordering::SeqCst);
+        }
+    });
+
+    for bad_mode in [
+        PoolerMode::Transaction,
+        PoolerMode::Statement,
+        PoolerMode::Auto,
+    ] {
+        let cfg = config_with_mode(port, bad_mode, Duration::from_secs(1));
+        let err = ReplicationSupervisor::open(
+            cfg,
+            "vertebra_slot".into(),
+            "vertebra_pub".into(),
+            None,
+            4,
+            true,
+        )
+        .await
+        .expect_err("non-session pooler mode must fail pre-dial");
+        assert!(matches!(err, PostgresError::Interface(_)));
+    }
+
+    for bad_capacity in [0_usize, 1025] {
+        let err = ReplicationSupervisor::open(
+            direct_config(port),
+            "vertebra_slot".into(),
+            "vertebra_pub".into(),
+            None,
+            bad_capacity,
+            false,
+        )
+        .await
+        .expect_err("out-of-range queue_capacity must fail pre-dial");
+        assert!(matches!(err, PostgresError::Interface(_)));
+    }
+
+    let overlong = "x".repeat(MAX_REPLICATION_IDENTIFIER_BYTES + 1);
+    for bad_ident in ["", "bad\0id", "bad\nid", overlong.as_str()] {
+        let slot_err = ReplicationSupervisor::open(
+            direct_config(port),
+            bad_ident.into(),
+            "vertebra_pub".into(),
+            None,
+            4,
+            false,
+        )
+        .await
+        .expect_err("invalid slot must fail pre-dial");
+        assert!(matches!(slot_err, PostgresError::Data(_)));
+
+        let pub_err = ReplicationSupervisor::open(
+            direct_config(port),
+            "vertebra_slot".into(),
+            bad_ident.into(),
+            None,
+            4,
+            false,
+        )
+        .await
+        .expect_err("invalid publication must fail pre-dial");
+        assert!(matches!(pub_err, PostgresError::Data(_)));
+    }
+
+    tokio::task::yield_now().await;
+    assert_eq!(accepts.load(Ordering::SeqCst), 0);
+    bg.abort();
+}
+
+#[tokio::test]
+async fn supervisor_single_generation_leases_dropped_fifo_restoration_fenced_ack_and_clean_shutdown()
+ {
+    use _postgres::replication::pgoutput::ReplicationRecord;
+    use std::future::Future;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let cfg = direct_config(listener.local_addr().unwrap().port());
+    let spec = ScriptedLogicalPeerSpec::default();
+    let tx1 = session_wal_frame(&session_transaction_payload());
+
+    let peer_task = tokio::spawn(async move {
+        assert!(accept_preflight_peer(&listener, &spec, None).await);
+        accept_copyboth_peer(&listener, &spec, Some("2/100"), None, &tx1)
+            .await
+            .expect("initial CopyBoth socket")
+    });
+
+    let supervisor = ReplicationSupervisor::open(
+        cfg,
+        "vertebra_slot".into(),
+        "vertebra_pub".into(),
+        Some(0x2_0000_0100),
+        4,
+        false,
+    )
+    .await
+    .unwrap();
+    let mut peer = peer_task.await.unwrap();
+
+    assert!(!supervisor.is_closed());
+    assert_eq!(
+        supervisor.resume(),
+        PostgresReplicationResume {
+            identity: supervisor.resume().identity,
+            acknowledged_lsn: 0x2_0000_0100,
+            generation: 1,
+        }
+    );
+
+    let control_lease = supervisor.next_event().await.unwrap().unwrap();
+    assert!(matches!(
+        control_lease.event(),
+        ReplicationStreamEvent::Control {
+            acknowledged_lsn: 0x2_0000_0100,
+            generation: 1,
+            ..
+        }
+    ));
+
+    let mut overlap = Box::pin(supervisor.next_event());
+    std::future::poll_fn(|cx| {
+        assert!(matches!(
+            overlap.as_mut().poll(cx),
+            Poll::Ready(Err(PostgresError::Interface(_)))
+        ));
+        Poll::Ready(())
+    })
+    .await;
+    drop(overlap);
+
+    drop(control_lease);
+    let restored_control = supervisor
+        .next_event()
+        .await
+        .unwrap()
+        .unwrap()
+        .publish()
+        .unwrap();
+    assert!(matches!(
+        restored_control,
+        ReplicationStreamEvent::Control {
+            acknowledged_lsn: 0x2_0000_0100,
+            generation: 1,
+            ..
+        }
+    ));
+
+    let begin_ev = supervisor
+        .next_event()
+        .await
+        .unwrap()
+        .unwrap()
+        .publish()
+        .unwrap();
+    assert!(matches!(
+        begin_ev,
+        ReplicationStreamEvent::Record {
+            record: ReplicationRecord::Begin { xid: 7, .. },
+            generation: 1,
+        }
+    ));
+
+    let insert_ev = supervisor
+        .next_event()
+        .await
+        .unwrap()
+        .unwrap()
+        .publish()
+        .unwrap();
+    assert!(matches!(
+        insert_ev,
+        ReplicationStreamEvent::Record {
+            record: ReplicationRecord::Insert { xid: 7, .. },
+            generation: 1,
+        }
+    ));
+
+    let commit_lease = supervisor.next_event().await.unwrap().unwrap();
+    assert!(matches!(
+        commit_lease.event(),
+        ReplicationStreamEvent::Record {
+            record: ReplicationRecord::Commit {
+                commit_end_lsn: 0x2_0000_0300,
+                ..
+            },
+            generation: 1,
+        }
+    ));
+    assert!(matches!(
+        supervisor.acknowledge(1, 0x2_0000_0300),
+        Err(PostgresError::Interface(_))
+    ));
+
+    let mut next_begin = session_transaction_payload()[..21].to_vec();
+    next_begin[1..9].copy_from_slice(&0x2_0000_0400_u64.to_be_bytes());
+    next_begin[17..21].copy_from_slice(&9_u32.to_be_bytes());
+    peer.write_all(&session_wal_frame(&next_begin))
+        .await
+        .unwrap();
+
+    drop(commit_lease);
+    assert!(matches!(
+        supervisor.acknowledge(1, 0x2_0000_0300),
+        Err(PostgresError::Interface(_))
+    ));
+
+    let restored_commit = supervisor.next_event().await.unwrap().unwrap();
+    assert!(matches!(
+        restored_commit.publish().unwrap(),
+        ReplicationStreamEvent::Record {
+            record: ReplicationRecord::Commit {
+                commit_end_lsn: 0x2_0000_0300,
+                ..
+            },
+            generation: 1,
+        }
+    ));
+    assert!(matches!(
+        supervisor.acknowledge(0, 0x2_0000_0300),
+        Err(PostgresError::Interface(_))
+    ));
+    assert!(matches!(
+        supervisor.acknowledge(2, 0x2_0000_0300),
+        Err(PostgresError::Interface(_))
+    ));
+    assert_eq!(
+        supervisor.acknowledge(1, 0x2_0000_0300).unwrap(),
+        0x2_0000_0300
+    );
+    assert_eq!(
+        supervisor.acknowledge(1, 0x2_0000_0300).unwrap(),
+        0x2_0000_0300
+    );
+    assert!(matches!(
+        supervisor.acknowledge(1, 0x2_0000_0100),
+        Err(PostgresError::Interface(_))
+    ));
+    assert_eq!(supervisor.resume().acknowledged_lsn, 0x2_0000_0300);
+
+    let FrontendExchange::Other(b'd', status) = read_frontend_exchange(&mut peer).await else {
+        panic!("expected StandbyStatusUpdate frame");
+    };
+    assert_eq!(
+        u64::from_be_bytes(status[9..17].try_into().unwrap()),
+        0x2_0000_0300
+    );
+    assert_eq!(
+        u64::from_be_bytes(status[17..25].try_into().unwrap()),
+        0x2_0000_0300
+    );
+
+    let held_begin = supervisor.next_event().await.unwrap().unwrap();
+    assert!(matches!(
+        held_begin.event(),
+        ReplicationStreamEvent::Record {
+            record: ReplicationRecord::Begin { xid: 9, .. },
+            generation: 1,
+        }
+    ));
+
+    let peer_close = tokio::spawn(async move {
+        let FrontendExchange::Other(b'd', final_status) = read_frontend_exchange(&mut peer).await
+        else {
+            panic!("expected final status before CopyDone");
+        };
+        assert_eq!(
+            u64::from_be_bytes(final_status[9..17].try_into().unwrap()),
+            0x2_0000_0300
+        );
+        assert_eq!(
+            read_frontend_exchange(&mut peer).await,
+            FrontendExchange::CopyDone
+        );
+        peer.write_all(&session_shutdown_response()).await.unwrap();
+        assert_eq!(
+            read_frontend_exchange(&mut peer).await,
+            FrontendExchange::Eof
+        );
+    });
+
+    supervisor.shutdown().await.unwrap();
+    supervisor.shutdown().await.unwrap();
+    assert!(supervisor.is_closed());
+    assert!(matches!(
+        held_begin.publish(),
+        Err(PostgresError::Interface(_))
+    ));
+    assert!(supervisor.next_event().await.unwrap().is_none());
+    peer_close.await.unwrap();
+}
+
+#[test]
+fn supervisor_drop_without_ambient_runtime_aborts_tasks_and_fences_held_lease() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let (supervisor, held_lease, peer) = runtime.block_on(async {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let cfg = direct_config(listener.local_addr().unwrap().port());
+        let spec = ScriptedLogicalPeerSpec::default();
+        let peer_task = tokio::spawn(async move {
+            assert!(accept_preflight_peer(&listener, &spec, None).await);
+            accept_copyboth_peer(&listener, &spec, Some("0/0"), None, &[])
+                .await
+                .unwrap()
+        });
+        let supervisor = ReplicationSupervisor::open(
+            cfg,
+            "vertebra_slot".into(),
+            "vertebra_pub".into(),
+            None,
+            2,
+            true,
+        )
+        .await
+        .unwrap();
+        let peer = peer_task.await.unwrap().into_std().unwrap();
+        let held_lease = supervisor.next_event().await.unwrap().unwrap();
+        (supervisor, held_lease, peer)
+    });
+
+    drop(runtime);
+    assert!(matches!(
+        held_lease.event(),
+        ReplicationStreamEvent::Control { generation: 1, .. }
+    ));
+    drop(supervisor);
+
+    peer.set_nonblocking(false).unwrap();
+    peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    assert_eq!(std::io::Read::read(&mut &peer, &mut [0; 1]).unwrap(), 0);
+    assert!(matches!(
+        held_lease.publish(),
+        Err(PostgresError::Interface(_))
+    ));
+}
+
+#[tokio::test]
+async fn connect_logical_verified_enforces_identity_timeline_wal_bounds_and_confirmed_flush_floor()
+{
+    let base_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base_cfg = direct_config(base_listener.local_addr().unwrap().port());
+    let base_spec = ScriptedLogicalPeerSpec::default();
+    let base_peer = tokio::spawn(async move {
+        assert!(accept_preflight_peer(&base_listener, &base_spec, None).await);
+        let mut repl = accept_copyboth_peer(&base_listener, &base_spec, Some("2/100"), None, &[])
+            .await
+            .unwrap();
+        assert_eq!(
+            read_frontend_exchange(&mut repl).await,
+            FrontendExchange::CopyDone
+        );
+        repl.write_all(&session_shutdown_response()).await.unwrap();
+        assert_clean_terminate_to_eof(&mut repl).await;
+    });
+    let mut initial_conn = PostgresReplicationConnection::connect_logical(
+        &base_cfg,
+        "vertebra_slot",
+        "vertebra_pub",
+        Some(0x2_0000_0100),
+    )
+    .await
+    .unwrap();
+    let expected_identity = initial_conn.identity().clone();
+    initial_conn
+        .shutdown(Instant::now() + Duration::from_secs(2))
+        .await
+        .unwrap();
+    base_peer.await.unwrap();
+
+    let promoted_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let promoted_cfg = direct_config(promoted_listener.local_addr().unwrap().port());
+    let promoted_spec = ScriptedLogicalPeerSpec {
+        confirmed_flush_lsn: "2/380",
+        timeline: "2",
+        ..ScriptedLogicalPeerSpec::default()
+    };
+    let promoted_peer = tokio::spawn(async move {
+        assert!(accept_preflight_peer(&promoted_listener, &promoted_spec, None).await);
+        accept_copyboth_peer(&promoted_listener, &promoted_spec, Some("2/380"), None, &[])
+            .await
+            .unwrap()
+    });
+    let verified_conn = PostgresReplicationConnection::connect_logical_verified(
+        &promoted_cfg,
+        "vertebra_slot",
+        "vertebra_pub",
+        0x2_0000_0100,
+        &expected_identity,
+    )
+    .await
+    .unwrap();
+    assert_eq!(verified_conn.identity().timeline, 2);
+    let session = verified_conn
+        .into_stream(2, Duration::from_secs(10), Duration::from_secs(2))
+        .unwrap();
+    assert_eq!(
+        session.status_positions(),
+        (0x2_0000_0380, 0x2_0000_0380, 0x2_0000_0380)
+    );
+    session.cancel();
+    let _peer = promoted_peer.await.unwrap();
+
+    #[derive(Clone, Copy, Debug)]
+    enum MismatchCase {
+        SlotPreDial,
+        Database,
+        PublicationFingerprint,
+        SystemIdentifier,
+        TimelineRegression,
+        RestartLsnGap,
+        XlogPosGap,
+    }
+
+    for case in [
+        MismatchCase::SlotPreDial,
+        MismatchCase::Database,
+        MismatchCase::PublicationFingerprint,
+        MismatchCase::SystemIdentifier,
+        MismatchCase::TimelineRegression,
+        MismatchCase::RestartLsnGap,
+        MismatchCase::XlogPosGap,
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let cfg = direct_config(listener.local_addr().unwrap().port());
+        let dials = Arc::new(AtomicUsize::new(0));
+        let dials_bg = Arc::clone(&dials);
+
+        let mut expected = expected_identity.clone();
+        if matches!(case, MismatchCase::TimelineRegression) {
+            expected.timeline = 3;
+        }
+        let slot_arg = if matches!(case, MismatchCase::SlotPreDial) {
+            "different_slot"
+        } else {
+            "vertebra_slot"
+        };
+        let req_lsn = if matches!(case, MismatchCase::XlogPosGap) {
+            0x2_0000_0950
+        } else {
+            0x2_0000_0100
+        };
+
+        let srv = tokio::spawn(async move {
+            match case {
+                MismatchCase::SlotPreDial => {
+                    if listener.accept().await.is_ok() {
+                        dials_bg.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
+                MismatchCase::Database => {
+                    dials_bg.fetch_add(1, Ordering::SeqCst);
+                    let spec = ScriptedLogicalPeerSpec {
+                        db: "wrongdb",
+                        ..ScriptedLogicalPeerSpec::default()
+                    };
+                    assert!(!accept_preflight_peer(&listener, &spec, None).await);
+                }
+                MismatchCase::PublicationFingerprint => {
+                    dials_bg.fetch_add(1, Ordering::SeqCst);
+                    let spec = ScriptedLogicalPeerSpec {
+                        pub_delete_flag: "f",
+                        ..ScriptedLogicalPeerSpec::default()
+                    };
+                    assert!(accept_preflight_peer(&listener, &spec, None).await);
+                }
+                MismatchCase::RestartLsnGap => {
+                    dials_bg.fetch_add(1, Ordering::SeqCst);
+                    let spec = ScriptedLogicalPeerSpec {
+                        restart_lsn: "2/200",
+                        confirmed_flush_lsn: "2/180",
+                        ..ScriptedLogicalPeerSpec::default()
+                    };
+                    assert!(accept_preflight_peer(&listener, &spec, None).await);
+                }
+                MismatchCase::SystemIdentifier => {
+                    dials_bg.fetch_add(1, Ordering::SeqCst);
+                    let spec = ScriptedLogicalPeerSpec {
+                        system_id: "1112223334445556667",
+                        ..ScriptedLogicalPeerSpec::default()
+                    };
+                    assert!(accept_preflight_peer(&listener, &spec, None).await);
+                    assert!(
+                        accept_copyboth_peer(&listener, &spec, None, None, &[])
+                            .await
+                            .is_none()
+                    );
+                }
+                MismatchCase::TimelineRegression => {
+                    dials_bg.fetch_add(1, Ordering::SeqCst);
+                    let spec = ScriptedLogicalPeerSpec {
+                        timeline: "2",
+                        ..ScriptedLogicalPeerSpec::default()
+                    };
+                    assert!(accept_preflight_peer(&listener, &spec, None).await);
+                    assert!(
+                        accept_copyboth_peer(&listener, &spec, None, None, &[])
+                            .await
+                            .is_none()
+                    );
+                }
+                MismatchCase::XlogPosGap => {
+                    dials_bg.fetch_add(1, Ordering::SeqCst);
+                    let spec = ScriptedLogicalPeerSpec {
+                        xlogpos: "2/900",
+                        ..ScriptedLogicalPeerSpec::default()
+                    };
+                    assert!(accept_preflight_peer(&listener, &spec, None).await);
+                    assert!(
+                        accept_copyboth_peer(&listener, &spec, None, None, &[])
+                            .await
+                            .is_none()
+                    );
+                }
+            }
+        });
+
+        let err = PostgresReplicationConnection::connect_logical_verified(
+            &cfg,
+            slot_arg,
+            "vertebra_pub",
+            req_lsn,
+            &expected,
+        )
+        .await
+        .expect_err("verified connect must fail closed");
+        assert!(
+            matches!(err, PostgresError::Operational(_)),
+            "expected Operational for {case:?}, got {err:?}"
+        );
+        if matches!(case, MismatchCase::SlotPreDial) {
+            tokio::task::yield_now().await;
+            assert_eq!(dials.load(Ordering::SeqCst), 0);
+            srv.abort();
+        } else {
+            srv.await.unwrap();
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn supervisor_reconnect_fences_stale_generation_retries_55006_and_active_slot_and_advances_confirmed_floor()
+ {
+    use _postgres::replication::pgoutput::ReplicationRecord;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let cfg = direct_config(listener.local_addr().unwrap().port());
+
+    let mut gen1_payload = session_wal_frame(&session_empty_transaction_payload(0x2_0000_0300, 7));
+    gen1_payload.extend(session_wal_frame(&session_empty_transaction_payload(
+        0x2_0000_0450,
+        8,
+    )));
+    let gen2_payload = session_wal_frame(&session_empty_transaction_payload(0x2_0000_0600, 11));
+
+    let server = tokio::spawn(async move {
+        let gen1_spec = ScriptedLogicalPeerSpec::default();
+        assert!(accept_preflight_peer(&listener, &gen1_spec, None).await);
+        let mut gen1_sock =
+            accept_copyboth_peer(&listener, &gen1_spec, Some("2/100"), None, &gen1_payload)
+                .await
+                .unwrap();
+
+        let FrontendExchange::Other(b'd', ack_status) =
+            read_frontend_exchange(&mut gen1_sock).await
+        else {
+            panic!("expected gen 1 StandbyStatusUpdate");
+        };
+        assert_eq!(
+            u64::from_be_bytes(ack_status[9..17].try_into().unwrap()),
+            0x2_0000_0300
+        );
+        gen1_sock.shutdown().await.unwrap();
+        drop(gen1_sock);
+
+        let active_spec = ScriptedLogicalPeerSpec {
+            active: "t",
+            confirmed_flush_lsn: "2/300",
+            ..ScriptedLogicalPeerSpec::default()
+        };
+        assert!(!accept_preflight_peer(&listener, &active_spec, None).await);
+
+        let race_55006_spec = ScriptedLogicalPeerSpec {
+            confirmed_flush_lsn: "2/380",
+            ..ScriptedLogicalPeerSpec::default()
+        };
+        assert!(accept_preflight_peer(&listener, &race_55006_spec, None).await);
+        assert!(
+            accept_copyboth_peer(
+                &listener,
+                &race_55006_spec,
+                Some("2/380"),
+                Some((
+                    "55006",
+                    "replication slot \"vertebra_slot\" is active for PID 901"
+                )),
+                &[],
+            )
+            .await
+            .is_none()
+        );
+
+        let gen2_spec = ScriptedLogicalPeerSpec {
+            confirmed_flush_lsn: "2/380",
+            timeline: "2",
+            ..ScriptedLogicalPeerSpec::default()
+        };
+        assert!(accept_preflight_peer(&listener, &gen2_spec, None).await);
+        let mut gen2_sock =
+            accept_copyboth_peer(&listener, &gen2_spec, Some("2/380"), None, &gen2_payload)
+                .await
+                .unwrap();
+
+        let FrontendExchange::Other(b'd', gen2_ack) = read_frontend_exchange(&mut gen2_sock).await
+        else {
+            panic!("expected gen 2 StandbyStatusUpdate");
+        };
+        assert_eq!(
+            u64::from_be_bytes(gen2_ack[9..17].try_into().unwrap()),
+            0x2_0000_0600
+        );
+        gen2_sock
+    });
+
+    let supervisor = ReplicationSupervisor::open(
+        cfg,
+        "vertebra_slot".into(),
+        "vertebra_pub".into(),
+        Some(0x2_0000_0100),
+        8,
+        true,
+    )
+    .await
+    .unwrap();
+
+    let gen1_ctrl = supervisor
+        .next_event()
+        .await
+        .unwrap()
+        .unwrap()
+        .publish()
+        .unwrap();
+    assert!(matches!(
+        gen1_ctrl,
+        ReplicationStreamEvent::Control {
+            acknowledged_lsn: 0x2_0000_0100,
+            generation: 1,
+            ..
+        }
+    ));
+
+    assert!(matches!(
+        supervisor
+            .next_event()
+            .await
+            .unwrap()
+            .unwrap()
+            .publish()
+            .unwrap(),
+        ReplicationStreamEvent::Record {
+            record: ReplicationRecord::Begin { xid: 7, .. },
+            generation: 1,
+        }
+    ));
+    assert!(matches!(
+        supervisor
+            .next_event()
+            .await
+            .unwrap()
+            .unwrap()
+            .publish()
+            .unwrap(),
+        ReplicationStreamEvent::Record {
+            record: ReplicationRecord::Commit {
+                commit_end_lsn: 0x2_0000_0300,
+                ..
+            },
+            generation: 1,
+        }
+    ));
+
+    assert!(matches!(
+        supervisor
+            .next_event()
+            .await
+            .unwrap()
+            .unwrap()
+            .publish()
+            .unwrap(),
+        ReplicationStreamEvent::Record {
+            record: ReplicationRecord::Begin { xid: 8, .. },
+            generation: 1,
+        }
+    ));
+    let held_unacked_gen1_commit = supervisor.next_event().await.unwrap().unwrap();
+    assert!(matches!(
+        held_unacked_gen1_commit.event(),
+        ReplicationStreamEvent::Record {
+            record: ReplicationRecord::Commit {
+                commit_end_lsn: 0x2_0000_0450,
+                ..
+            },
+            generation: 1,
+        }
+    ));
+
+    assert_eq!(
+        supervisor.acknowledge(1, 0x2_0000_0300).unwrap(),
+        0x2_0000_0300
+    );
+
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    assert!(matches!(
+        held_unacked_gen1_commit.publish(),
+        Err(PostgresError::Interface(_))
+    ));
+    assert!(matches!(
+        supervisor.acknowledge(1, 0x2_0000_0300),
+        Err(PostgresError::Interface(_))
+    ));
+    assert!(!supervisor.is_closed());
+
+    let gen2_ctrl = supervisor
+        .next_event()
+        .await
+        .unwrap()
+        .unwrap()
+        .publish()
+        .unwrap();
+    match gen2_ctrl {
+        ReplicationStreamEvent::Control {
+            identity,
+            acknowledged_lsn,
+            generation,
+        } => {
+            assert_eq!(generation, 2);
+            assert_eq!(acknowledged_lsn, 0x2_0000_0380);
+            assert_eq!(identity.timeline, 2);
+        }
+        other => panic!("expected gen 2 Control event, got {other:?}"),
+    }
+
+    assert!(matches!(
+        supervisor
+            .next_event()
+            .await
+            .unwrap()
+            .unwrap()
+            .publish()
+            .unwrap(),
+        ReplicationStreamEvent::Record {
+            record: ReplicationRecord::Begin { xid: 11, .. },
+            generation: 2,
+        }
+    ));
+    assert!(matches!(
+        supervisor
+            .next_event()
+            .await
+            .unwrap()
+            .unwrap()
+            .publish()
+            .unwrap(),
+        ReplicationStreamEvent::Record {
+            record: ReplicationRecord::Commit {
+                commit_end_lsn: 0x2_0000_0600,
+                ..
+            },
+            generation: 2,
+        }
+    ));
+    assert_eq!(
+        supervisor.acknowledge(2, 0x2_0000_0600).unwrap(),
+        0x2_0000_0600
+    );
+    assert_eq!(supervisor.resume().generation, 2);
+    assert_eq!(supervisor.resume().acknowledged_lsn, 0x2_0000_0600);
+
+    let _gen2_peer = server.await.unwrap();
+    supervisor.cancel();
+}
+
+#[tokio::test(start_paused = true)]
+async fn supervisor_permanent_errors_and_disabled_reconnect_fail_immediately_and_exhaustion_caps_at_eight()
+ {
+    #[derive(Clone, Copy, Debug)]
+    enum TerminalScenario {
+        ReconnectDisabledFrameEof,
+        TruncatedMidFrameEof,
+        MissingSlot42704OnReconnect,
+        AuthFailure28P01OnReconnect,
+        SystemIdMismatchOnReconnect,
+        PublicationMismatchOnReconnect,
+    }
+
+    for scenario in [
+        TerminalScenario::ReconnectDisabledFrameEof,
+        TerminalScenario::TruncatedMidFrameEof,
+        TerminalScenario::MissingSlot42704OnReconnect,
+        TerminalScenario::AuthFailure28P01OnReconnect,
+        TerminalScenario::SystemIdMismatchOnReconnect,
+        TerminalScenario::PublicationMismatchOnReconnect,
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let cfg = direct_config(listener.local_addr().unwrap().port());
+        let reconnect_attempts = Arc::new(AtomicUsize::new(0));
+        let reconnect_attempts_bg = Arc::clone(&reconnect_attempts);
+        let reconnect_flag = !matches!(scenario, TerminalScenario::ReconnectDisabledFrameEof);
+
+        let srv = tokio::spawn(async move {
+            let spec = ScriptedLogicalPeerSpec::default();
+            assert!(accept_preflight_peer(&listener, &spec, None).await);
+            let initial_bytes: &[u8] = if matches!(scenario, TerminalScenario::TruncatedMidFrameEof)
+            {
+                b"d\0\0\0\x20w"
+            } else {
+                &[]
+            };
+            let mut gen1 = accept_copyboth_peer(&listener, &spec, Some("0/0"), None, initial_bytes)
+                .await
+                .unwrap();
+            gen1.shutdown().await.unwrap();
+            drop(gen1);
+
+            match scenario {
+                TerminalScenario::ReconnectDisabledFrameEof
+                | TerminalScenario::TruncatedMidFrameEof => {
+                    if listener.accept().await.is_ok() {
+                        reconnect_attempts_bg.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
+                TerminalScenario::MissingSlot42704OnReconnect => {
+                    reconnect_attempts_bg.fetch_add(1, Ordering::SeqCst);
+                    assert!(
+                        !accept_preflight_peer(
+                            &listener,
+                            &spec,
+                            Some(("42704", "replication slot does not exist")),
+                        )
+                        .await
+                    );
+                }
+                TerminalScenario::AuthFailure28P01OnReconnect => {
+                    reconnect_attempts_bg.fetch_add(1, Ordering::SeqCst);
+                    let (mut meta, _) = listener.accept().await.unwrap();
+                    let _ = read_startup_params(&mut meta).await;
+                    meta.write_all(&error_response_frame(
+                        "FATAL",
+                        "28P01",
+                        "password authentication failed",
+                    ))
+                    .await
+                    .unwrap();
+                    meta.shutdown().await.unwrap();
+                }
+                TerminalScenario::SystemIdMismatchOnReconnect => {
+                    reconnect_attempts_bg.fetch_add(1, Ordering::SeqCst);
+                    let drifted = ScriptedLogicalPeerSpec {
+                        system_id: "5555555555555555555",
+                        ..ScriptedLogicalPeerSpec::default()
+                    };
+                    assert!(accept_preflight_peer(&listener, &drifted, None).await);
+                    assert!(
+                        accept_copyboth_peer(&listener, &drifted, None, None, &[])
+                            .await
+                            .is_none()
+                    );
+                }
+                TerminalScenario::PublicationMismatchOnReconnect => {
+                    reconnect_attempts_bg.fetch_add(1, Ordering::SeqCst);
+                    let drifted = ScriptedLogicalPeerSpec {
+                        pub_delete_flag: "f",
+                        ..ScriptedLogicalPeerSpec::default()
+                    };
+                    assert!(accept_preflight_peer(&listener, &drifted, None).await);
+                }
+            }
+        });
+
+        let supervisor = ReplicationSupervisor::open(
+            cfg,
+            "vertebra_slot".into(),
+            "vertebra_pub".into(),
+            None,
+            4,
+            reconnect_flag,
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(
+            supervisor
+                .next_event()
+                .await
+                .unwrap()
+                .unwrap()
+                .publish()
+                .unwrap(),
+            ReplicationStreamEvent::Control { generation: 1, .. }
+        ));
+
+        let err = supervisor
+            .next_event()
+            .await
+            .expect_err("terminal error must surface");
+        match scenario {
+            TerminalScenario::ReconnectDisabledFrameEof => {
+                assert!(matches!(err, PostgresError::Transport(_)));
+                assert_eq!(reconnect_attempts.load(Ordering::SeqCst), 0);
+                srv.abort();
+            }
+            TerminalScenario::TruncatedMidFrameEof => {
+                assert!(matches!(err, PostgresError::Protocol(_)));
+                assert_eq!(reconnect_attempts.load(Ordering::SeqCst), 0);
+                srv.abort();
+            }
+            TerminalScenario::MissingSlot42704OnReconnect => {
+                assert_eq!(err.sqlstate(), Some("42704"));
+                assert_eq!(reconnect_attempts.load(Ordering::SeqCst), 1);
+                srv.await.unwrap();
+            }
+            TerminalScenario::AuthFailure28P01OnReconnect => {
+                assert_eq!(err.sqlstate(), Some("28P01"));
+                assert_eq!(reconnect_attempts.load(Ordering::SeqCst), 1);
+                srv.await.unwrap();
+            }
+            TerminalScenario::SystemIdMismatchOnReconnect
+            | TerminalScenario::PublicationMismatchOnReconnect => {
+                assert!(matches!(err, PostgresError::Operational(_)));
+                assert_eq!(reconnect_attempts.load(Ordering::SeqCst), 1);
+                srv.await.unwrap();
+            }
+        }
+        assert!(supervisor.is_closed());
+        assert!(supervisor.next_event().await.unwrap().is_none());
+    }
+
+    let cap_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let cap_cfg = direct_config(cap_listener.local_addr().unwrap().port());
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let attempts_bg = Arc::clone(&attempts);
+    let cap_srv = tokio::spawn(async move {
+        let spec = ScriptedLogicalPeerSpec::default();
+        assert!(accept_preflight_peer(&cap_listener, &spec, None).await);
+        let mut gen1 = accept_copyboth_peer(&cap_listener, &spec, Some("0/0"), None, &[])
+            .await
+            .unwrap();
+        gen1.shutdown().await.unwrap();
+        drop(gen1);
+
+        for _ in 0..MAX_RAW_RECONNECT_ATTEMPTS {
+            attempts_bg.fetch_add(1, Ordering::SeqCst);
+            assert!(accept_preflight_peer(&cap_listener, &spec, None).await);
+            assert!(
+                accept_copyboth_peer(
+                    &cap_listener,
+                    &spec,
+                    Some("2/80"),
+                    Some(("55006", "replication slot still active")),
+                    &[],
+                )
+                .await
+                .is_none()
+            );
+        }
+    });
+
+    let cap_sup = ReplicationSupervisor::open(
+        cap_cfg,
+        "vertebra_slot".into(),
+        "vertebra_pub".into(),
+        None,
+        2,
+        true,
+    )
+    .await
+    .unwrap();
+    cap_sup
+        .next_event()
+        .await
+        .unwrap()
+        .unwrap()
+        .publish()
+        .unwrap();
+    let exhausted_err = cap_sup
+        .next_event()
+        .await
+        .expect_err("exhausted retries must surface error");
+    assert_eq!(exhausted_err.sqlstate(), Some("55006"));
+    assert_eq!(
+        attempts.load(Ordering::SeqCst),
+        MAX_RAW_RECONNECT_ATTEMPTS as usize
+    );
+    assert!(cap_sup.is_closed());
+    assert!(cap_sup.next_event().await.unwrap().is_none());
+    cap_srv.await.unwrap();
+
+    let cancel_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let cancel_cfg = direct_config(cancel_listener.local_addr().unwrap().port());
+    let backoff_dials = Arc::new(AtomicUsize::new(0));
+    let backoff_dials_bg = Arc::clone(&backoff_dials);
+    let cancel_srv = tokio::spawn(async move {
+        let spec = ScriptedLogicalPeerSpec::default();
+        assert!(accept_preflight_peer(&cancel_listener, &spec, None).await);
+        let mut gen1 = accept_copyboth_peer(&cancel_listener, &spec, Some("0/0"), None, &[])
+            .await
+            .unwrap();
+        gen1.shutdown().await.unwrap();
+        drop(gen1);
+        if cancel_listener.accept().await.is_ok() {
+            backoff_dials_bg.fetch_add(1, Ordering::SeqCst);
+        }
+    });
+
+    let cancel_sup = ReplicationSupervisor::open(
+        cancel_cfg,
+        "vertebra_slot".into(),
+        "vertebra_pub".into(),
+        None,
+        2,
+        true,
+    )
+    .await
+    .unwrap();
+    cancel_sup
+        .next_event()
+        .await
+        .unwrap()
+        .unwrap()
+        .publish()
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    cancel_sup.shutdown().await.unwrap();
+    assert!(cancel_sup.is_closed());
+    assert_eq!(backoff_dials.load(Ordering::SeqCst), 0);
+    cancel_srv.abort();
 }
