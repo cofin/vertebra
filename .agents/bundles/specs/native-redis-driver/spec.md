@@ -2,129 +2,203 @@
 type: Spec
 flow_id: native-redis-driver
 title: "Standalone Rust Redis and Valkey Wheel (vertebra-redis)"
-description: "Standalone PyO3 crate src/rs/vertebra-redis (vertebra._redis for vertebra-core[redis] and vertebra-core[valkey]) built on the redis 1.8.1 crate (tokio-rustls-comp, cluster-async, cache-aio) with pipelining, streams, Sentinel, Cluster routing, CLIENT TRACKING invalidation, and SyncRedisNotificationSource / AsyncRedisNotificationSource pub/sub sources, removing the Python socket driver, the vertebra-db RESP3 codec bindings, and the redis-py clients in the Redis and Valkey queue backends."
-status: draft
-state: draft
-has_chapters: false
+description: "Build standalone PyO3 extension src/rs/vertebra-redis (vertebra._redis for vertebra-core[redis] and vertebra-core[valkey], gil_used = false) over pure-Rust redis 1.8.1 + rustls for Redis 7.2+/8.0 and Valkey 8.0+/9.0, hoist the SyncNotificationSource/AsyncNotificationSource split across PostgreSQL and Oracle, add Redis/Valkey notification sources and native Streams queue backends, and delete Python socket drivers, redis.asyncio, and vertebra_db::resp3."
+status: stable
+state: planned
+planning_quality: standard
+planning_degraded_reason: null
+has_chapters: true
+chapters:
+  - ch01-wheel-scaffold-and-packaging
+  - ch02-wheel-isolation-and-transport-config
+  - ch03-rust-clients-topologies-pubsub-and-streams
+  - ch04-python-adapter-cutover
+  - ch05-notification-source-split
+  - ch06-redis-notifications-and-resp3-cleanup
+  - ch07-queue-backends-and-conformance
+  - ch08-changelog-and-okf-sync
+current_chapter: ch01-wheel-scaffold-and-packaging
+current_task: "native-redis-driver:ch01:t01"
 parent_prd: native-data-platform
 depends_on_flows:
-  - db-layout-and-contract
-  - db-engine-primitives
-  - driver-fail-loud
-research:
-  - ../native-data-platform/research/rust-driver-crates_20261103.md
-  - ../integration-remediation/research/audit-findings_20261103.md
-plan_revision: 3
-plan_commit: null
-state_revision: 0
-current_task: null
-last_verified_checkpoint: null
-created_at: "2026-11-03T04:05:00Z"
-updated_at: "2026-11-12T01:30:00Z"
+  - native-postgres-driver
+plan_revision: 1
+plan_commit: 18baadcd
+created_at: "2026-11-12T23:45:00Z"
+updated_at: "2026-11-12T23:45:00Z"
 generated:
-  by: flow-revise
-  at: "2026-11-12T01:30:00Z"
-verified: []
-sources:
-  - id: redis-py
-    resource: src/py/vertebra/db/adapters/redis/driver.py
-    title: Python SyncRedisDriver and AsyncRedisDriver executing over Python sockets
-  - id: valkey-py
-    resource: src/py/vertebra/db/adapters/valkey/driver.py
-    title: Python SyncValkeyDriver and AsyncValkeyDriver
-  - id: py-async-rs
-    resource: src/rs/vertebra-db/src/py_async.rs
-    title: Shared AsyncCompletionQueue + Notifier PyO3 bridge
-  - id: resp3-rs
-    resource: src/rs/vertebra-db/src/resp3/mod.rs
-    title: RESP3 frame codecs in vertebra-db bound to Python for the socket driver
-  - id: resp3-bindings
-    resource: src/rs/vertebra-py/src/db.rs::redis_hash_slot
-    title: vertebra._vertebra RESP3 helper bindings including redis_hash_slot and parse_cluster_redirect
-  - id: queue-redis
-    resource: src/py/vertebra/framework/queues/redis.py::RedisQueueBackend
-    title: Redis and Valkey queue backends building redis.asyncio clients
-  - id: notification-source
-    resource: src/py/vertebra/db/driver/capabilities.py::NotificationSource
-    title: NotificationSource capability protocol split into SyncNotificationSource and AsyncNotificationSource by queues-tasks-and-channels
-  - id: crate-research
-    resource: .agents/bundles/specs/native-data-platform/research/rust-driver-crates_20261103.md
-    title: Rust client crate selection including redis 1.8.1
-  - id: fail-loud-baseline
-    resource: .agents/bundles/knowledge/domains/data/database-drivers-and-dialers.md
-    title: Completed fail-loud baseline removing Redis and Valkey memory:// execution
+  by: flow-plan
+  at: "2026-11-12T23:45:00Z"
+verified:
+  - by: agent:plan-generator
+    at: "2026-11-12T23:45:00Z"
+    commit: 18baadcd
 tags:
-  - rust
   - redis
   - valkey
+  - rust
   - resp3
-  - driver
-  - wheel
+  - pubsub
+  - streams
+sources:
+  - id: cargo-ws
+    resource: src/rs/Cargo.toml
+    title: "Rust workspace member manifest"
+  - id: root-pyproject
+    resource: pyproject.toml
+    title: "Root vertebra-core extras, uv sources, maturin excludes, and bumpversion"
+  - id: gcp-capsule
+    resource: src/rs/vertebra-core/src/gcp_auth.rs::GcpTokenCacheCapsule
+    title: "C-ABI GCP IAM token cache capsule"
+  - id: py-async
+    resource: src/rs/vertebra-db/src/py_async.rs
+    title: "AsyncCompletionQueue and Notifier PyO3 bridge"
+  - id: resp3-rs
+    resource: src/rs/vertebra-db/src/resp3/mod.rs
+    title: "Legacy RESP3 codec module in vertebra-db"
+  - id: resp3-bindings
+    resource: src/rs/vertebra-py/src/db.rs::redis_hash_slot
+    title: "Legacy RESP3 helper bindings on vertebra._vertebra"
+  - id: unit-conftest
+    resource: src/py/tests/unit/conftest.py::Resp3FakeServer
+    title: "Resp3FakeServer loopback test fixture coupled to Resp3Parser"
+  - id: redis-core
+    resource: src/py/vertebra/db/adapters/redis/core.py::Resp3Parser
+    title: "Pure-Python Resp3Parser and RESP command encoders"
+  - id: redis-drv
+    resource: src/py/vertebra/db/adapters/redis/driver.py::SyncRedisDriver
+    title: "Python socket/asyncio SyncRedisDriver and AsyncRedisDriver"
+  - id: valkey-drv
+    resource: src/py/vertebra/db/adapters/valkey/driver.py::SyncValkeyDriver
+    title: "SyncValkeyDriver and AsyncValkeyDriver"
+  - id: driver-caps
+    resource: src/py/vertebra/db/driver/capabilities.py::NotificationSource
+    title: "NotificationSource capability protocol in capabilities.py"
+  - id: pg-notify
+    resource: src/py/vertebra/db/adapters/postgres/notify.py::PostgresNotificationSource
+    title: "PostgreSQL notification source"
+  - id: ora-notify
+    resource: src/py/vertebra/db/adapters/oracle/notify.py::OracleNotificationSource
+    title: "Oracle AQ/TxEventQ notification source"
+  - id: queue-redis
+    resource: src/py/vertebra/framework/queues/redis.py::RedisQueueBackend
+    title: "RedisQueueBackend and ValkeyQueueBackend using redis.asyncio"
 ---
 
-# Flow Charter: Standalone Rust Redis and Valkey Wheel (`vertebra-redis`)
+# Specification: Standalone Rust Redis and Valkey Wheel (vertebra-redis)
 
 <!-- truth: start -->
-- **Current State**: `SyncRedisDriver` / `AsyncRedisDriver` execute over Python `socket` / `asyncio.open_connection` with the `vertebra_db::resp3` bindings on `vertebra._vertebra`; `RedisQueueBackend` and `ValkeyQueueBackend` build `redis.asyncio` clients; `pyproject.toml` declares no `redis` or `valkey` extra [^redis-py] [^resp3-bindings] [^queue-redis].
-- **Shared Redis & Valkey Rust Wheel (target state)**: `src/rs/vertebra-redis` (`vertebra._redis`, `vertebra-core[redis]` and `vertebra-core[valkey]`) builds on the `redis` 1.8.1 crate (`tokio-rustls-comp`, `cluster-async`, `cache-aio`), which owns RESP3 framing, connection management, and cluster routing; this flow writes no hand-built RESP3 client [^crate-research] [^valkey-py].
-- **RESP3 Pipelining, Cluster & Pub/Sub (target state)**: `SyncRedisClient` and `AsyncRedisClient` provide `HELLO 3`, multiplexed pipelining, `SCAN`+`UNLINK`, Sentinel, Cluster `MOVED`/`ASK` routing, `CLIENT TRACKING` invalidations, and `SyncRedisNotificationSource` / `AsyncRedisNotificationSource` implementing the `SyncNotificationSource` / `AsyncNotificationSource` protocols [^py-async-rs] [^notification-source].
-- **Socket, Codec & redis-py Removal (target state)**: Python raw socket / RESP parsers leave the `redis` and `valkey` adapters, the `vertebra_db::resp3` bindings leave `vertebra._vertebra`, and the Redis and Valkey queue backends execute through `vertebra._redis` instead of `redis.asyncio` [^resp3-rs].
+- **Baseline (`18baadcd`)**: `SyncRedisDriver`/`AsyncRedisDriver` and `SyncValkeyDriver`/`AsyncValkeyDriver` run over Python `socket` / `asyncio.open_connection` + `_vertebra` `resp3` bindings, `conftest.py::Resp3FakeServer` imports `Resp3Parser` at top level, `RedisQueueBackend`/`ValkeyQueueBackend` depend on `redis.asyncio`, and `capabilities.py` defines async-only `NotificationSource` [^redis-drv] [^unit-conftest] [^queue-redis] [^driver-caps].
+- **Target Architecture**: Standalone `src/rs/vertebra-redis` (`vertebra._redis`, `vertebra-core[redis]` & `vertebra-core[valkey]`, `#[pymodule(gil_used = false)]`) over pure-Rust `redis = "=1.8.1"` + `rustls` supporting Redis `7.2+`/`8.0` and Valkey `8.0+`/`9.0` (`SyncRedisClient`/`AsyncRedisClient`, `HELLO 3` + `CLIENT TRACKING ON ... BCAST`, Sentinel, Cluster `MOVED`/`ASK`, `GcpTokenCacheCapsule` Memorystore IAM, `SyncRedisPipeline`/`AsyncRedisPipeline`, Streams `XREADGROUP`/`XACK`/`XAUTOCLAIM`, and `SyncRedisListener`/`AsyncRedisListener`) [^gcp-capsule] [^py-async].
+- **Hoisted Notification Split (`A3`) & Clean Cutover**: `ch05-notification-source-split` splits `NotificationSource` into `SyncNotificationSource` and `AsyncNotificationSource` across `capabilities.py`, PostgreSQL, and Oracle BEFORE `ch06` adds `SyncRedisNotificationSource`/`AsyncRedisNotificationSource` and Valkey sources — keeping `native-postgres-driver -> native-redis-driver -> queues-tasks-and-channels` strictly acyclic while deleting `Resp3Parser`, `vertebra_db::resp3`, and `redis.asyncio` [^pg-notify] [^ora-notify] [^resp3-rs].
 <!-- truth: end -->
 
-## Approach
+## 1. Specification, Context & Provenance
 
-See [crate research](../native-data-platform/research/rust-driver-crates_20261103.md).
+At `18baadcd`, Redis and Valkey adapters maintain 2,300+ lines of pure-Python socket/asyncio I/O and RESP3 parsing backed by `vertebra_db::resp3` helper bindings on `_vertebra` [^redis-core] [^redis-drv] [^resp3-bindings], `Resp3FakeServer` in `src/py/tests/unit/conftest.py` couples unit test collection to `Resp3Parser` [^unit-conftest], and `RedisQueueBackend` / `ValkeyQueueBackend` require third-party `redis.asyncio` while rejecting `valkey://`, `valkeys://`, and `unix://` [^queue-redis]. Furthermore, `capabilities.py::NotificationSource` is async-only [^driver-caps]. Hoisting the `SyncNotificationSource` / `AsyncNotificationSource` split into `ch05` (`PostgreSQL` + `Oracle`) allows `native-redis-driver` (`ch06`) to ship symmetric Redis and Valkey pub/sub notification sources directly without circular dependencies on `queues-tasks-and-channels`.
 
-- **Redis & Valkey (`src/rs/vertebra-redis/` -> `vertebra._redis` + `vertebra-core[redis]` / `vertebra-core[valkey]`).** Build a standalone workspace PyO3 `cdylib` + `rlib` crate on `redis` `1.8.1` (`default-features = false`, `tokio-rustls-comp`, `cluster-async`, `connection-manager`, `cache-aio`, `streams`, `script`, `acl`) with `#[pymodule(gil_used = false)]`, `src/py/vertebra/_redis.pyi` verified by `mypy.stubtest`, new `[project.optional-dependencies].{redis,valkey}` extras both installing `vertebra-redis`, wheel isolation `exclude` globs, `uv.lock`, and `areas.toml` registration, benchmarked against the Python socket driver it replaces. The `redis` crate owns RESP3 framing, so `vertebra-redis` adds no RESP3 codec to `vertebra-db` [^crate-research].
-- **Fail-loud baseline.** The merged `driver-fail-loud` baseline (`af1b3d30`, [knowledge](../../knowledge/domains/data/database-drivers-and-dialers.md)) deletes `memory://` support from the Redis and Valkey drivers and `RedisConfig.url_schemes` while keeping the `vertebra_db::resp3` bindings for the Python socket driver; the `from_redis` and `from_valkey` store factories stay and raise `ImproperConfigurationError` for `memory://` [^fail-loud-baseline] [^resp3-rs].
-- **Explicit `Sync*` / `Async*` clients & the notification source.** Expose `SyncRedisClient` (`SyncCompletionQueue`) and `AsyncRedisClient` (`AsyncCompletionQueue` + `Notifier` via `vertebra_db::py_async` with `"_vertebra_redis_completion_drainer"`). Pub/sub is exposed as `SyncRedisNotificationSource` (over `SyncRedisClient`, blocking `publish` / `subscribe` / `unsubscribe` and `listen() -> Iterator[NotificationEvent]` for Django, Flask, synchronous workers, and CLI listeners) and `AsyncRedisNotificationSource` (over `AsyncRedisClient`, `listen() -> AsyncIterator[NotificationEvent]` for `ChannelBus` and async channels), implementing `SyncNotificationSource` and `AsyncNotificationSource` from `vertebra/db/driver/capabilities.py`, matching `Sync<Engine>NotificationSource` / `Async<Engine>NotificationSource` for PostgreSQL and Oracle, and re-exported for Valkey.
-- **Queue backends.** `framework/queues/redis.py::RedisQueueBackend` and `ValkeyQueueBackend` build their default client from `vertebra._redis.AsyncRedisClient` through `ensure_module("vertebra._redis", package="vertebra-core[redis]", extra="redis")` (`extra="valkey"` for Valkey), accepting `redis://`, `rediss://`, `valkey://`, `valkeys://`, and `unix://` URLs, and remove the `redis.asyncio.from_url` path. The injected `client=` collaborator (`RedisStreamClient`) remains supported [^queue-redis].
+**Non-Goals:**
+- Hand-rolled Rust RESP3 wire framing (`redis = "=1.8.1"` owns protocol framing, multiplexing, and cluster routing).
+- In-memory `memory://` Redis/Valkey execution (rejected with `ImproperConfigurationError` per fail-loud baseline).
+- High-level distributed channel fan-out / Litestar channels / Django tasks (owned by downstream `queues-tasks-and-channels`).
 
-## Scope
+| Area | Primary Anchors | Public Seam & Integration |
+| --- | --- | --- |
+| Rust crate & wheel | `src/rs/vertebra-redis/*`, `pyproject.toml`, `Makefile`, `release.yaml` [^cargo-ws] [^root-pyproject] | `vertebra._redis` (`gil_used = false`), `vertebra-core[redis]` & `[valkey]`, `make redis-test`, `make redis-wheel-check` |
+| RESP3 & topologies | `vertebra-redis/src/{client_core,caching,topology,pubsub,streams,py_client}.rs` [^gcp-capsule] [^py-async] | `HELLO 3`, `CLIENT TRACKING`, Sentinel, Cluster `MOVED`/`ASK`, Memorystore IAM, pipelines, Streams, listeners |
+| Notification split | `db/driver/capabilities.py`, `adapters/{postgres,oracle,redis,valkey}/notify.py` [^driver-caps] [^pg-notify] [^ora-notify] | `SyncNotificationSource` & `AsyncNotificationSource` across Postgres, Oracle, Redis, and Valkey |
+| Adapter & queue cutover | `conftest.py`, `adapters/{redis,valkey}/driver.py`, `framework/queues/redis.py`, `vertebra-db/src/resp3/` [^unit-conftest] [^queue-redis] [^resp3-rs] | Delete `Resp3Parser`, `vertebra_db::resp3`, and `redis.asyncio`; wire CI `redis_service` + `valkey_service` |
 
-1. **Crate scaffold, RESP3 connection & pipelining (`src/rs/vertebra-redis/`).**
-   - `SyncRedisClient` and `AsyncRedisClient` in `vertebra._redis` wrapping `redis` 1.8.1 multiplexed connections over `tokio-rustls-comp` (`HELLO 3`, ACL `AUTH`, GCP Memorystore IAM token refresh via `SyncGcpTokenCache` / `AsyncGcpTokenCache` through the `GcpTokenCacheCapsule`), multiplexed pipelining (`execute_pipeline`), `MULTI`/`EXEC`/`WATCH` transactions, `SCAN` + `UNLINK`, millisecond `PX` expiries, and `DatabaseError` mapping (`vertebra._vertebra`).
-2. **Pub/sub, streams, Sentinel, Cluster & client-side tracking.**
-   - Pub/sub and sharded pub/sub (`SSUBSCRIBE`) in a new `vertebra/db/adapters/redis/notify.py` (`SyncRedisNotificationSource`, `AsyncRedisNotificationSource`), re-exported by a new `vertebra/db/adapters/valkey/notify.py`.
-   - Streams (`XADD`, `XREADGROUP`, `XACK`), Sentinel master discovery (`discover_sentinel_master` / `async_discover_sentinel_master`), Cluster slot routing (`MOVED`/`ASK`) through `cluster-async`, and RESP3 `CLIENT TRACKING` invalidation push handling through `cache-aio`.
-3. **Python `redis` and `valkey` cutover.**
-   - Replace Python raw socket / `asyncio.open_connection` code in `vertebra/db/adapters/redis/driver.py` and the Python RESP parser in `vertebra/db/adapters/redis/core.py` with `ensure_module("vertebra._redis", package="vertebra-core[redis]", extra="redis")` (and `extra="valkey"` in `valkey/driver.py`).
-   - Delete the `vertebra_db::resp3` module, its `vertebra-py/src/db.rs` bindings (including `redis_hash_slot` and `parse_cluster_redirect`), and their `_vertebra.pyi` stubs in the same commit, since no Python caller remains once the socket driver goes.
-4. **Queue backend cutover.**
-   - Move `RedisQueueBackend._build_client` and `ValkeyQueueBackend` onto `vertebra._redis`, delete the `redis.asyncio` import path and its install hint, and update the queue unit tests in their canonical module to cover every accepted URL scheme and the missing-wheel `MissingDependencyError`.
-5. **Docs & OKF.** Update the Redis/Valkey driver and queue sections in `docs/`, `.agents/bundles/knowledge/domains/data/database-drivers-and-dialers.md`, and `.agents/bundles/knowledge/domains/framework/distributed-queues-and-email.md`, and record caveats in a Redis/Valkey limitations chapter under `.agents/bundles/knowledge/domains/data/`.
+**Knowledge Anchors:** [Database Drivers and Cloud Dialers](../../knowledge/domains/data/database-drivers-and-dialers.md), [Distributed Queues and Email](../../knowledge/domains/framework/distributed-queues-and-email.md), [Query Pipeline, CDC, and Tenancy](../../knowledge/domains/data/query-pipeline-cdc-and-tenancy.md), [ADR-004 Optional Driver Wheels and SHM Ownership](../../knowledge/decisions/adr-004-optional-driver-wheels-and-shm-ownership.md), [Project Workflow](../../knowledge/workflow.md).
 
-## Public Seams
+## 2. Requirements, Concrete Contracts & Architecture
 
-`vertebra._redis` (`SyncRedisClient`, `AsyncRedisClient`), `SyncRedisDriver`, `AsyncRedisDriver`, `SyncValkeyDriver`, `AsyncValkeyDriver`, `SyncRedisNotificationSource`, `AsyncRedisNotificationSource`, `RedisQueueBackend`, `ValkeyQueueBackend`, and the `vertebra-core[redis]` / `vertebra-core[valkey]` extras.
+- **R1–R4**: Scaffold `src/rs/vertebra-redis` (`redis 1.8.1` + `rustls`), `[redis]` + `[valkey]` extras, `_redis.pyi`, `Makefile` targets, `release.yaml`, and review manifests/skills (`ch01`).
+- **R5**: Enforce sibling `.pyi` wheel isolation and implement `redis://`/`rediss://`/`valkey://`/`valkeys://`/`unix://` normalization, `memory://` rejection, `GcpTokenCacheCapsule` IAM refresh, and `DatabaseError` mapping (`ch02`).
+- **R6–R9**: Implement `HELLO 3`, `CLIENT TRACKING ON ... BCAST`, Sentinel master discovery, Cluster `MOVED`/`ASK` routing, `SyncRedisClient`/`AsyncRedisClient`, `SyncRedisPipeline`/`AsyncRedisPipeline`, `SyncRedisListener`/`AsyncRedisListener`, and Streams (`ch03`).
+- **R10–R12**: Decouple `conftest.py::Resp3FakeServer` first, delete `Resp3Parser` + socket/asyncio transport, and cut `SyncRedisDriver`/`AsyncRedisDriver` & `SyncValkeyDriver`/`AsyncValkeyDriver` over to `vertebra._redis` (`ch04`).
+- **R13**: Split `NotificationSource` into `SyncNotificationSource` and `AsyncNotificationSource` (zero aliases) and split `PostgresNotificationSource` and `OracleNotificationSource` into `Sync*`/`Async*` pairs (`ch05`).
+- **R14–R16**: Delete `_vertebra` RESP3 bindings and `src/rs/vertebra-db/src/resp3/mod.rs`, and implement `SyncRedisNotificationSource`/`AsyncRedisNotificationSource` and `SyncValkeyNotificationSource`/`AsyncValkeyNotificationSource` (`ch06`).
+- **R17–R19**: Cut `RedisQueueBackend` and `ValkeyQueueBackend` onto `vertebra._redis`, add `redis_service` + `valkey_service` to `ci.yml`, and synchronize `docs/`, `product.md`, `AGENTS.md`, `review-pyo3-bridge`, and `redis-limitations.md` (`ch07`–`ch08`).
 
-## Dependencies
+```python
+# vertebra._redis
+GIL_USED: Final[bool]  # False
+class SyncRedisClient: ...
+class AsyncRedisClient: ...
+class SyncRedisPipeline: ...
+class AsyncRedisPipeline: ...
+class SyncRedisListener: ...
+class AsyncRedisListener: ...
 
-Flow dependencies (all merged): `db-layout-and-contract` (`21c99f95`), integration-remediation `db-engine-primitives` (`80ff8a65`), and `driver-fail-loud` (`af1b3d30`), which removes Redis and Valkey `memory://` execution. This flow starts from `main @ c8722c76`. Downstream, `queues-tasks-and-channels` consumes `AsyncRedisNotificationSource` for distributed channels and `SyncRedisNotificationSource` for synchronous listeners and `vertebra._redis` for `ValkeyStore`.
+# vertebra.db.driver.capabilities
+@runtime_checkable
+class SyncNotificationSource(Protocol): ...
+@runtime_checkable
+class AsyncNotificationSource(Protocol): ...
+```
 
-## Acceptance Boundary
+**Integration Flow:**
+- Flow DAG remains strictly acyclic: `native-postgres-driver -> native-redis-driver -> queues-tasks-and-channels`.
+- `KeyValueStore`, `MemoryStore`, `CacheStore`, `SQLAlchemyCacheBackend`, `ChannelBus`, `RedisQueueBackend`, and `ValkeyQueueBackend` all execute over `vertebra._redis`.
 
-- Integration tests pass natively against Redis 7/8 and Valkey 8 (standalone and cluster) via `pytest-databases`.
-- RESP3 `HELLO 3`, pipelining, `SCAN`+`UNLINK`, pub/sub `SyncRedisNotificationSource` and `AsyncRedisNotificationSource`, `MOVED`/`ASK` slot routing, and `CLIENT TRACKING` invalidation unit/integration tests pass with zero Python socket fallback.
-- `RedisQueueBackend` and `ValkeyQueueBackend` deliver tasks across processes on Redis and Valkey through `vertebra._redis`, and `git grep -n "redis.asyncio" -- src/py/vertebra` returns nothing.
-- `vertebra._vertebra` exports no RESP3 codec functions and `mypy.stubtest vertebra._vertebra` passes.
-- Wheel isolation check confirms `vertebra-redis` builds cleanly without leaking `vertebra/*.py` files.
-- `mypy.stubtest vertebra._redis`, `make bench-check`, `make lint-all`, `make rs-test`, and `make py-test` pass.
+| Boundary | Trigger | Expected Contract | Invariant |
+| --- | --- | --- | --- |
+| `conftest.py` ordering | `Resp3Parser` deleted after `t01` fixture decoupling | Pytest collection stays unbroken across every chapter | Safe staged cutover |
+| Missing wheel | `vertebra-redis` absent | `MissingDependencyError` naming `vertebra-core[redis]` or `vertebra-core[valkey]` | Engine-specific install hints |
+| Unprefixed `NotificationSource` | Legacy import attempted | Raises `ImportError` (`PY-07` zero aliases) | Clean `Sync*`/`Async*` split |
+| Cluster `CROSSSLOT` | Multi-key pipeline/Lua without matching `{tag}` | Raises `ProgrammingError` | Explicit cluster contract |
 
-## Draft Task Outline
+## 3. Documentation & OKF Knowledge Plan
 
-- t01 Scaffold `src/rs/vertebra-redis` (`vertebra._redis`, `_redis.pyi`, `[redis]` + `[valkey]` extras + `uv.lock` + `release.yaml`/`ci.yml`) and `redis`-crate client wrapper (`HELLO 3`, TLS, ACL/IAM auth, pipelining, `MULTI`/`EXEC`, `SCAN`+`UNLINK`).
-- t02 Redis/Valkey pub/sub `SyncRedisNotificationSource` / `AsyncRedisNotificationSource` and streams (`XADD`/`XREADGROUP`/`XACK`); t02 starts after the `queues-tasks-and-channels` notification-source rename task lands `SyncNotificationSource` / `AsyncNotificationSource` in `vertebra/db/driver/capabilities.py` (task-level ordering; the flow-level dependency stays `queues-tasks-and-channels` -> `native-redis-driver`).
-- t03 Sentinel discovery, `cluster-async` slot routing (`MOVED`/`ASK`), and RESP3 `CLIENT TRACKING` invalidation push handling.
-- t04 Python `SyncRedisDriver`/`AsyncRedisDriver` & `SyncValkeyDriver`/`AsyncValkeyDriver` cutover, Python socket/RESP parser removal, `vertebra_db::resp3` binding and stub deletion, and integration conformance.
-- t05 `RedisQueueBackend` / `ValkeyQueueBackend` cutover from `redis.asyncio` to `vertebra._redis`, and docs/OKF update.
+- `[ ]` `docs/usage/databases.md` & `docs/usage/queues-and-realtime.md` — `vertebra-core[redis]`/`[valkey]` install tabs, `CLIENT TRACKING`, Sentinel/Cluster, Streams queues, and `Sync*`/`Async*` notification sources (`ch07:t03`).
+- `[ ]` `docs/reference/native-stubs.md` — `vertebra._redis` stub API reference with `heading_level: 4` (`ch07:t03`).
+- `[ ]` `docs/changelog/index.md`, `AGENTS.md`, & `.agents/bundles/product/product.md` — release notes, crate/command inventory, and `vertebra-db` table cleanup (`ch08:t01`).
+- `[ ]` `.agents/bundles/knowledge/domains/data/redis-limitations.md`, `database-drivers-and-dialers.md`, & `distributed-queues-and-email.md` — OKF chapters (`<= 200` lines each, `ch08:t02`).
+- `[ ]` `.agents/skills/review-pyo3-bridge/SKILL.md`, `.agents/bundles/knowledge/domains/index.md`, & `.agents/bundles/knowledge/workflow.md` — review skill and OKF index sync (`ch08:t03`).
 
-[^redis-py]: `src/py/vertebra/db/adapters/redis/driver.py` — Python SyncRedisDriver and AsyncRedisDriver executing over Python sockets.
-[^valkey-py]: `src/py/vertebra/db/adapters/valkey/driver.py` — Python SyncValkeyDriver and AsyncValkeyDriver.
-[^py-async-rs]: `src/rs/vertebra-db/src/py_async.rs` — Shared AsyncCompletionQueue + Notifier PyO3 bridge.
-[^resp3-rs]: `src/rs/vertebra-db/src/resp3/mod.rs` — RESP3 frame codecs in vertebra-db bound to Python for the socket driver.
-[^resp3-bindings]: `src/rs/vertebra-py/src/db.rs::redis_hash_slot` — `vertebra._vertebra` RESP3 helper bindings including `redis_hash_slot` and `parse_cluster_redirect`.
-[^queue-redis]: `src/py/vertebra/framework/queues/redis.py::RedisQueueBackend` — Redis and Valkey queue backends building `redis.asyncio` clients.
-[^notification-source]: `src/py/vertebra/db/driver/capabilities.py::NotificationSource` — Current unprefixed asynchronous notification protocol that `queues-tasks-and-channels` splits into `SyncNotificationSource` and `AsyncNotificationSource`.
-[^crate-research]: `.agents/bundles/specs/native-data-platform/research/rust-driver-crates_20261103.md` — Rust client crate selection including `redis` 1.8.1.
-[^fail-loud-baseline]: `.agents/bundles/knowledge/domains/data/database-drivers-and-dialers.md` — Completed fail-loud baseline removing Redis and Valkey `memory://` execution.
+## 4. Requirement-to-Task Traceability Matrix
+
+| Requirement | Chapter / Task | Primary Files | Verification |
+| --- | --- | --- | --- |
+| `R1`–`R4` | `ch01` (`t01`–`t04`) | `src/rs/vertebra-redis/*`, `pyproject.toml`, `Makefile`, `release.yaml`, `areas.toml` | `cargo test -p vertebra-redis && make review-check` |
+| `R5` | `ch02` (`t01`–`t04`) | `src/rs/vertebra-*/pyproject.toml`, `vertebra-redis/src/{config,errors}.rs` | `make redis-wheel-check && pytest test_optional_driver_wheels.py` |
+| `R6`–`R9` | `ch03` (`t01`–`t04`) | `vertebra-redis/src/{value,client_core,caching,topology,py_client,pubsub,streams}.rs` | `make redis-test && pytest test_freethreaded_gil.py` |
+| `R10`–`R12` | `ch04` (`t01`–`t03`) | `conftest.py`, `adapters/{redis,valkey}/{core,driver,__init__}.py` | `pytest test_redis_valkey_driver.py test_redis_valkey_resp3.py` |
+| `R13` (`A3`) | `ch05` (`t01`–`t03`) | `db/driver/capabilities.py`, `server/_channels.py`, `adapters/{postgres,oracle}/notify.py` | `pytest test_postgres_native_notifications.py test_oracle_adapter.py` |
+| `R14`–`R16` | `ch06` (`t01`–`t04`) | `vertebra-py/src/db.rs`, `vertebra-db/src/resp3/mod.rs`, `adapters/{redis,valkey}/notify.py` | `mypy.stubtest vertebra._vertebra && pytest test_redis_valkey_resp3.py` |
+| `R17`–`R19a` | `ch07` (`t01`–`t03`) | `framework/queues/redis.py`, `.github/workflows/ci.yml`, `docs/**` | `pytest test_distributed_queues.py && make docs` |
+| `R19b`–`R19d` | `ch08` (`t01`–`t03`) | `docs/changelog/index.md`, `AGENTS.md`, `product.md`, `.agents/bundles/knowledge/**` | `make review-check && make docs` |
+
+## 5. Implementation Plan
+
+- [ ] [ch01-wheel-scaffold-and-packaging](chapters/ch01-wheel-scaffold-and-packaging/spec.md) — Scaffold `src/rs/vertebra-redis` (`vertebra._redis`), `vertebra-core[redis]`/`[valkey]`, `Makefile` targets, `release.yaml`, and review manifests (Gate: `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-redis && make review-check`)
+- [ ] [ch02-wheel-isolation-and-transport-config](chapters/ch02-wheel-isolation-and-transport-config/spec.md) — Sibling `.pyi` exclusions, `redis://`/`valkey://`/`unix://` + `rustls`, GCP Memorystore IAM `GcpTokenCacheCapsule`, and `DatabaseError` mapping (Gate: `make redis-wheel-check && uv run --no-sync pytest src/py/tests/unit/db/test_optional_driver_wheels.py && cargo test --manifest-path src/rs/Cargo.toml -p vertebra-redis`)
+- [ ] [ch03-rust-clients-topologies-pubsub-and-streams](chapters/ch03-rust-clients-topologies-pubsub-and-streams/spec.md) — `SyncRedisClient`/`AsyncRedisClient`, `HELLO 3` + `CLIENT TRACKING`, Sentinel/Cluster, `SyncRedisPipeline`/`AsyncRedisPipeline`, Streams, and `SyncRedisListener`/`AsyncRedisListener` (Gate: `make redis-test && uv run --no-sync pytest src/py/tests/unit/test_freethreaded_gil.py`)
+- [ ] [ch04-python-adapter-cutover](chapters/ch04-python-adapter-cutover/spec.md) — Decouple `conftest.py::Resp3FakeServer`, delete `Resp3Parser` + socket transport, and cut `SyncRedisDriver`/`AsyncRedisDriver` & `SyncValkeyDriver`/`AsyncValkeyDriver` over to `vertebra._redis` (Gate: `uv run --no-sync pytest src/py/tests/unit/db/test_redis_valkey_driver.py src/py/tests/unit/db/test_redis_valkey_resp3.py`)
+- [ ] [ch05-notification-source-split](chapters/ch05-notification-source-split/spec.md) — Hoisted `SyncNotificationSource`/`AsyncNotificationSource` split + `SyncPostgresNotificationSource`/`AsyncPostgresNotificationSource` + `SyncOracleNotificationSource`/`AsyncOracleNotificationSource` (Gate: `uv run --no-sync pytest src/py/tests/unit/db/test_native_db_drivers.py src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py src/py/tests/unit/db/test_postgres_native_notifications.py src/py/tests/unit/db/test_oracle_adapter.py`)
+- [ ] [ch06-redis-notifications-and-resp3-cleanup](chapters/ch06-redis-notifications-and-resp3-cleanup/spec.md) — Delete `vertebra_db::resp3` + `_vertebra` bindings and add `SyncRedisNotificationSource`/`AsyncRedisNotificationSource` + Valkey sources (Gate: `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-db -p vertebra-py && uv run --no-sync python -m mypy.stubtest vertebra._vertebra --concise && uv run --no-sync pytest src/py/tests/unit/db/test_redis_valkey_resp3.py`)
+- [ ] [ch07-queue-backends-and-conformance](chapters/ch07-queue-backends-and-conformance/spec.md) — `RedisQueueBackend`/`ValkeyQueueBackend` native Streams cutover, CI `redis_service` + `valkey_service`, and public `docs/` (Gate: `uv run --no-sync pytest src/py/tests/unit/framework/test_distributed_queues.py src/py/tests/integration/db/test_driver_conformance.py -k 'redis or valkey'`)
+- [ ] [ch08-changelog-and-okf-sync](chapters/ch08-changelog-and-okf-sync/spec.md) — Changelog, `AGENTS.md`, `product.md`, `redis-limitations.md` (`<= 200` lines), `review-pyo3-bridge/SKILL.md`, and OKF sync (Gate: `make review-check && make docs`)
+
+## 6. Current State & Remaining Plan Snapshot
+
+- **Baseline (`18baadcd`)**: `0/8` chapters and `0/28` tasks completed; frontier at `ch01-wheel-scaffold-and-packaging` (`native-redis-driver:ch01:t01`).
+- **Upstream Flow Dependencies**: `native-postgres-driver`.
+- **Active Invariants**: Zero OpenSSL linkage; `GIL_USED == False`; zero `redis.asyncio` or Python socket Redis drivers; zero `vertebra_db::resp3` remnants; strict `Sync*`/`Async*` notification symmetry with zero aliases.
+- **Full `/flow:finish` Gate**: `make redis-test && make redis-wheel-check && make lint-all && make py-test && make docs && make review-check`
+
+[^cargo-ws]: `src/rs/Cargo.toml` — Rust workspace member manifest.
+[^root-pyproject]: `pyproject.toml` — Root vertebra-core extras, uv sources, maturin excludes, and bumpversion.
+[^gcp-capsule]: `src/rs/vertebra-core/src/gcp_auth.rs::GcpTokenCacheCapsule` — C-ABI GCP IAM token cache capsule.
+[^py-async]: `src/rs/vertebra-db/src/py_async.rs` — AsyncCompletionQueue and Notifier PyO3 bridge.
+[^resp3-rs]: `src/rs/vertebra-db/src/resp3/mod.rs` — Legacy RESP3 codec module in vertebra-db.
+[^resp3-bindings]: `src/rs/vertebra-py/src/db.rs::redis_hash_slot` — Legacy RESP3 helper bindings on vertebra._vertebra.
+[^unit-conftest]: `src/py/tests/unit/conftest.py::Resp3FakeServer` — Resp3FakeServer loopback test fixture coupled to Resp3Parser.
+[^redis-core]: `src/py/vertebra/db/adapters/redis/core.py::Resp3Parser` — Pure-Python Resp3Parser and RESP command encoders.
+[^redis-drv]: `src/py/vertebra/db/adapters/redis/driver.py::SyncRedisDriver` — Python socket/asyncio SyncRedisDriver and AsyncRedisDriver.
+[^valkey-drv]: `src/py/vertebra/db/adapters/valkey/driver.py::SyncValkeyDriver` — SyncValkeyDriver and AsyncValkeyDriver.
+[^driver-caps]: `src/py/vertebra/db/driver/capabilities.py::NotificationSource` — NotificationSource capability protocol in capabilities.py.
+[^pg-notify]: `src/py/vertebra/db/adapters/postgres/notify.py::PostgresNotificationSource` — PostgreSQL notification source.
+[^ora-notify]: `src/py/vertebra/db/adapters/oracle/notify.py::OracleNotificationSource` — Oracle AQ/TxEventQ notification source.
+[^queue-redis]: `src/py/vertebra/framework/queues/redis.py::RedisQueueBackend` — RedisQueueBackend and ValkeyQueueBackend using redis.asyncio.

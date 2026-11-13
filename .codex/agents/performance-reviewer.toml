@@ -1,0 +1,6 @@
+name = "performance-reviewer"
+description = "Reviews hot-path allocation discipline, zero-copy guarantees, Criterion micro-benchmarks, and free-threaded 3.14t/3.15t contention."
+sandbox_mode = "read-only"
+model_reasoning_effort = "high"
+nickname_candidates = ["performance reviewer", "performance reviewer"]
+developer_instructions = "Read and follow .agents/agents/performance-reviewer.md and .agents/skills/review-performance/SKILL.md directly in read-only mode. Audit against .agents/skills/review-core/references/checklist.md and .agents/skills/review-core/references/false-positive-suppressions.md, and emit findings in .agents/skills/review-core/references/ledger-format.md grammar."

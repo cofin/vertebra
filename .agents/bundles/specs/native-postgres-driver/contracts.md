@@ -3,19 +3,16 @@ type: Guide
 flow_id: native-postgres-driver
 title: Native PostgreSQL public contracts
 description: Public interface and ownership contracts for the complete native PostgreSQL driver plan.
-status: draft
+status: stable
 created_at: "2026-11-05T00:00:00Z"
-updated_at: "2026-11-12T01:30:00Z"
+updated_at: "2026-11-12T23:45:00Z"
 generated:
-  by: flow-revise
-  at: "2026-11-12T01:30:00Z"
+  by: flow-plan
+  at: "2026-11-12T23:45:00Z"
 verified:
   - by: agent:plan-generator
-    at: "2026-11-12T01:30:00Z"
-    commit: c8722c76
-  - by: agent:flow-setup
-    at: "2026-11-07T04:15:00Z"
-    commit: 9af810f5
+    at: "2026-11-12T23:45:00Z"
+    commit: 18baadcd
 sources:
   - id: pg-config
     resource: src/py/vertebra/db/adapters/postgres/config.py::PostgreSQLConfig
@@ -40,7 +37,7 @@ tags:
 - **Lossless Value & `VTBARROW` Contracts**: Frozen `msgspec` adapter records (`PgInterval`, `PgArray`, `PgComposite`, `PgTemporal`, `PgBitString`) and standard Arrow structural schemas preserve full PostgreSQL fidelity without Tokio-thread Python hydration [^pg-driver] [^arrow-cursor].
 <!-- truth: end -->
 
-The complete-driver roadmap spans 36 dependency-ordered chapters (`ch01`–`ch23`, `ch34`–`ch36`, `ch24`–`ch33`). These contracts govern every chapter specification and task worksheet.
+The merged baseline (`postgres-native-driver.md`, squash commits `c8722c76` and `18baadcd`) ships `vertebra-postgres` (`vertebra._postgres`) through single-generation `ReplicationSession`s (`24` completed chapters, `88` tasks), and the remaining delivery spans `9` consolidated chapters (`ch01`–`ch09`, `32` tasks). These contracts govern every chapter specification and task worksheet.
 
 ## Connection constructors
 
@@ -234,7 +231,7 @@ original statement is never replayed.
 
 ## Native replication layering and delivery leases
 
-The execution order is ch23 feedback → ch34 single-generation session → ch35 verified supervisor → ch36 Python bridge → ch24 durable change source. These are planned Rust public seams, introduced by their owning tasks; source existence is not claimed before implementation. `E` below means `crate::errors::PostgresError`.
+The execution order builds on merged feedback (`feedback.rs`) and single-generation sessions (`stream.rs`) -> `ch01` verified supervisor -> `ch02` Python bridge -> `ch03` durable change source. These are planned Rust public seams, introduced by their owning tasks; source existence is not claimed before implementation. `E` below means `crate::errors::PostgresError`.
 
 ```rust
 pub enum ReplicationCopyData<'a> {
@@ -316,7 +313,7 @@ class AsyncPostgresReplication:
     def __aexit__(self, exc_type: Any = None, exc_val: Any = None, exc_tb: Any = None) -> Awaitable[None]: ...
 ```
 
-The ch36 cancellation boundary uses the shared future-aware aborting helper in `vertebra-db/src/py_async.rs`:
+The `ch02` cancellation boundary uses the shared future-aware aborting helper in `vertebra-db/src/py_async.rs`:
 
 ```rust
 pub fn spawn_rust_db_task_with_attr_and_future<F, T, E, M, EMap>(
@@ -332,7 +329,7 @@ where
 
 The mapper receives the exact original asyncio Future. The existing aborting helper delegates with an adapter that ignores this argument; the non-aborting cancellation variant retains its behavior. The replication mapper finishes fallible Python construction, checks that original Future for owning-loop cancellation, and only then publishes its delivery lease. A synchronous invocation claim spans worker and mapper lifetime so overlapping `next()` calls fail before either worker is polled. No fallible Python calls follow publication.
 
-Boolean LSNs fail with TypeError; integer LSNs outside `0 <= lsn < 2**64` fail with ValueError. Replication queue capacity is `1..=1024`; native `ReplicationSupervisor::open` and Python `open_replication` reject values outside that interval with InterfaceError before dialing any socket. Overlapping next calls raise InterfaceError, including when the first completion holds a lease in the drainer. Aclose is idempotent and joins socket/backoff tasks within its budget. Identity probing starts no replication. Native bridge behavior is tested in the new canonical `src/py/tests/unit/db/test_postgres_native_replication.py`; the separate source/store module and `test_postgres_change_source.py` are created by ch24.
+Boolean LSNs fail with TypeError; integer LSNs outside `0 <= lsn < 2**64` fail with ValueError. Replication queue capacity is `1..=1024`; native `ReplicationSupervisor::open` and Python `open_replication` reject values outside that interval with InterfaceError before dialing any socket. Overlapping next calls raise InterfaceError, including when the first completion holds a lease in the drainer. Aclose is idempotent and joins socket/backoff tasks within its budget. Identity probing starts no replication. Native bridge behavior is tested in `src/py/tests/unit/db/test_postgres_native_replication.py`; the separate source/store module and `src/py/tests/unit/db/test_postgres_change_stream.py` are created by `ch03`.
 
 
 
@@ -706,23 +703,20 @@ Permanent native facade definitions live in `_sync.py::SyncPostgreSQLDriver` and
 `_async.py::AsyncPostgreSQLDriver`. The canonical `driver.py` barrel and package,
 config, registry, `PostgreSQLQueueBackend` (`vertebra.framework.queues.postgres`),
 SQLSpec (`ParameterStyle.NUMERIC`) and SQLAlchemy (`default_paramstyle = paramstyle = "numeric_dollar"`)
-paths select the native stack in `ch27:t01`–`ch27:t04`, resolving the optional native
+paths select the native stack in `ch05:t01`–`ch05:t04`, resolving the optional native
 module via `ensure_module("vertebra._postgres", package="vertebra-core[postgres]", install_package="vertebra-core[postgres]", extra="postgres")`.
 `src/py/vertebra/db/adapters/postgres/__init__.py` explicitly preserves `PoolerMode` (`config`),
 `PostgresNotifyConfig` (`notify`), `PostgresReplicationRecord` (`types`, alongside `PG_UNCHANGED_TOAST`, `PgUnchangedToast`, `PostgresArrowResult`, `PostgresReplicationIdentity`, and remaining `types` symbols),
 retained `core` helpers (`PGCOPY_BINARY_SIGNATURE`, `decode_pgcopy_rows`, `encode_pg_jsonb`, `encode_pgcopy_rows`, `strip_pg_jsonb_header`),
 and `vertebra.db.arrow` re-exports (`ARROW_SHM_THRESHOLD_ROWS`, `ArrowCursor`, `read_arrow_shm`, `write_arrow_shm`) across `__lazy_modules__`, `__all__`, `_EXPORT_MAP`, and `TYPE_CHECKING` so downstream framework extensions and suites continue resolving cleanly.
 `PostgreSQLQueueBackend` stays strictly caller-`PostgreSQLQueueExecutor`-injected (built-in native queue executor shipping belongs to the separate `queues-tasks-and-channels` spec): when `executor is None`, `PostgreSQLQueueBackend.__init__` checks `ensure_module("vertebra._postgres", package="vertebra-core[postgres]", install_package="vertebra-core[postgres]", extra="postgres")` and raises `ImproperConfigurationError` instructing callers to pass `executor=` implementing `PostgreSQLQueueExecutor` (for example wrapping `AsyncPostgreSQLDriver` and `PostgresNotificationSource`).
-`ch27:t03` deletes `SyncCloudSQLDialer.create_psycopg_connect_func`, `AsyncCloudSQLDialer.create_asyncpg_connect_func`, `SyncAlloyDBDialer.create_psycopg_connect_func`, and `AsyncAlloyDBDialer.create_asyncpg_connect_func` without aliases; native cloud dialing goes through `PostgreSQLConfig` cloud options.
-Before `ch27`, the existing public driver pair remains coherent; final-module test imports
-switch to canonical public imports at activation. `ch27:t03` then `ch27:t04` remove the
-private unreachable legacy async and sync bodies, preserving static validity at every
-commit. The delivered barrel only imports the final classes and declares `__all__`; no
-temporary module, fallback, duplicate body or compatibility alias survives.
+`ch05:t03` deletes `SyncCloudSQLDialer.create_psycopg_connect_func`, `AsyncCloudSQLDialer.create_asyncpg_connect_func`, `AsyncCloudSQLDialer.create_asyncmy_creator`, `SyncAlloyDBDialer.create_psycopg_connect_func`, and `AsyncAlloyDBDialer.create_asyncpg_connect_func` without aliases, validates `CloudSQLConfig` (`refresh_lead_seconds >= 0`, `ip_type`) and `AlloyDBConfig` (`ip_type`), adds async certificate fetching and thread/coroutine-safe refresh locks, and removes fake-key and silent token-cache fallbacks; native PostgreSQL cloud dialing goes through `PostgreSQLConfig` cloud options.
+Before `ch05`, the existing public driver pair remains coherent; final-module test imports
+switch to canonical public imports at activation in `ch05:t02`, replacing `driver.py` directly with the 12-line native barrel without `_Legacy*` aliases, fallback branches, or duplicate driver bodies.
 
 Both driver facades structurally satisfy adapter-owned event Protocols (`PostgresNotificationDriver` and `PostgresReplicationDriver` in `vertebra.db.adapters.postgres.events`) with real
 async hooks. PostgresNotificationDriver includes readonly config, async
-_publish_notification(channel:str,payload:str)->None and async listener opening (`PostgresNotificationSource` in `vertebra.db.adapters.postgres.notify` wires this signature in `ch21:t03` and verifies canonical public driver imports in `ch27:t02`).
+_publish_notification(channel:str,payload:str)->None and async listener opening (`PostgresNotificationSource` in `vertebra.db.adapters.postgres.notify` wires this signature and verifies canonical public driver imports in `ch05:t02`).
 Sources uniformly await publish, without mode inspection or int/awaitable unions.
 The async facade awaits its own numeric pg_notify execute in the same task and may
 join its ambient transaction. The sync facade rejects publication from its active

@@ -44,7 +44,7 @@ Shared checklist with stable IDs across all 8 review domains. Every rule require
 - **FFI-06**: No `unwrap`/`expect` on caller-controlled data in `#[pyfunction]`/`#[pymethods]`; errors map to typed `PyErr`. Verify: grep `unwrap()` in `vertebra-py/src`.
 - **FFI-07**: Long-lived `Py<T>` held in Rust structs have a defined drop path; `clone_ref` is deliberate; no reference leak in loops. Verify: `sys.getrefcount` assertions in tests.
 - **FFI-08**: Hot attribute/key names use `intern!`; no per-call `PyString::new` inside per-request loops. Verify: `asgi.rs`, `rsgi/scope.rs`, and `request.rs`.
-- **FFI-09**: `{_vertebra,_bundler,_storage,_bigquery,_spanner,_duckdb}.pyi` match every added or changed `#[pyfunction]`/`#[pymethods]` signature and return type across all 6 PyO3 extensions. Verify: diff Rust signatures vs stubs; `uv run --no-sync python -m mypy.stubtest vertebra._vertebra vertebra._bundler vertebra._storage vertebra._bigquery vertebra._spanner vertebra._duckdb` and `uv run --no-sync mypy src/py/vertebra`.
+- **FFI-09**: `{_vertebra,_bundler,_storage,_mysql,_bigquery,_mssql,_spanner,_duckdb,_oracle,_postgres}.pyi` match every added or changed `#[pyfunction]`/`#[pymethods]` signature and return type across every PyO3 extension. Verify: diff Rust signatures vs stubs; `uv run --no-sync python -m mypy.stubtest vertebra._vertebra vertebra._bundler vertebra._storage vertebra._mysql vertebra._bigquery vertebra._mssql vertebra._spanner vertebra._duckdb vertebra._oracle vertebra._postgres` and `uv run --no-sync mypy src/py/vertebra`.
 - **FFI-10**: Embedding registers `_vertebra` via `append_to_inittab!(pymodule_init)` (`use _vertebra::pymodule_init`) before Tokio/Python worker initialization. Verify: `src/rs/vertebra-http/src/main.rs`.
 
 ## PY: Python framework and server
@@ -80,7 +80,7 @@ Shared checklist with stable IDs across all 8 review domains. Every rule require
 - **PERF-03**: No added cross-thread wakeup or lock acquisition per request; batch granularity preserved. Verify: futex calls and lock traces.
 - **PERF-04**: No added copy across SHM or FFI (`try_send_with`, `try_recv_with`, `body_view` remain zero-copy). Verify: slice slicing and view lifetimes.
 - **PERF-05**: `import vertebra` stays within the documented in-process budget. Verify: `-X importtime`.
-- **PERF-06**: Benchmark-only packages stay in `[dependency-groups].bench`; every `make bench*` passes `--group bench`. Verify: `pyproject.toml` dependency groups.
+- **PERF-06**: Benchmark-only packages stay in `[dependency-groups].bench` (or `[dependency-groups].postgres-bench` for PostgreSQL reference comparators); every `make bench*` passes `--group bench` (and `make postgres-bench*` passes `--group postgres-bench`). Verify: `pyproject.toml` dependency groups.
 - **PERF-07**: Free-threaded mode: changes to dispatch, locks, or shared state are checked with `make bench-ft` or reasoned explicitly for 3.14t contention. Verify: `make bench-ft` execution.
 - **PERF-08**: Benchmarks are valid: warmup, fixed iterations or duration, results recorded with machine/commit metadata under `tools/benchmarks/results/`, no cross-machine comparisons. Verify: benchmark results schema.
 - **PERF-09**: Release profile (`lto = true`, `codegen-units = 1`, `opt-level = 3`) and PGO tooling are not regressed. Verify: `src/rs/Cargo.toml`.

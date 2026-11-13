@@ -4,7 +4,8 @@ description: Use when implementing or debugging HTTP/1.1, HTTP/2, HTTP/3, or gRP
 ---
 
 <!-- truth: start -->
-- **Crate**: `src/rs/vertebra-http` (`main.rs`, `server.rs`, `response.rs`, `routing.rs`, `batcher.rs`, `dispatcher/`, `http3.rs`, `grpc.rs`, `sse.rs`, `pubsub.rs`, `ws_mount.rs`, `cors.rs`, `compression.rs`, `assets.rs`, `payload.rs`, `multipart.rs`).
+- **Crate**: `src/rs/vertebra-http` (`main.rs`, `server.rs`, `response.rs`, `routing.rs`, `batcher.rs`, `dispatcher/{mod,bridge,shm,shm_reader,streams}.rs`, `http3.rs`, `grpc.rs`, `sse.rs`, `pubsub.rs`, `ws_mount.rs`, `cors.rs`, `compression.rs`, `assets.rs`, `payload.rs`, `multipart.rs`).
+- **Stream Delivery**: `ResponseStreamRegistry` (`dispatcher/streams.rs`) unifies progressive `PendingResponse::streaming` backpressure across `BridgeCorrelation` (`deliver_blocking`) and `shm_reader::drain_worker` (`deliver`).
 - **Payload Bounds**: Enforce `payload_limits`, `multipart_limits`, and `max_grpc_message_size` via `collect_bounded_body` before buffering into memory or SHM (`HTTP-01`).
 - **Backpressure**: `BackpressureController` sheds excess load with `503 Service Unavailable` and `Retry-After`; priority routes bypass admission shedding (`HTTP-02`).
 - **Protocol Framing**: Prior-knowledge h2c matches the exact 24-byte preface; gRPC validates the 5-byte length-prefixed header and `application/grpc` content type (`HTTP-04`, `HTTP-05`).

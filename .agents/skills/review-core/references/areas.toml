@@ -30,7 +30,6 @@ write_tools = [
 ]
 reviewer_required_tools = [
   "read_file",
-  "view_file",
   "grep_search",
   "find_by_name",
   "list_dir",
@@ -62,6 +61,7 @@ privacy_scan = [
   "AGENTS.md",
   ".agents/skills/**/*.md",
   ".agents/agents/*.md",
+  ".codex/agents/*.toml",
   ".agents/bundles/**/*.md",
   "docs/**/*.md"
 ]
@@ -91,10 +91,13 @@ knowledge = [
   ".agents/bundles/knowledge/architecture/ipc/ring-buffers-and-shm.md",
   ".agents/bundles/knowledge/architecture/ipc/tiered-rings-and-batch-bridge.md",
   ".agents/bundles/knowledge/architecture/runtime/shm-supervision-and-recovery.md",
-  ".agents/bundles/knowledge/domains/data/database-drivers-and-dialers.md"
+  ".agents/bundles/knowledge/domains/data/database-drivers-and-dialers.md",
+  ".agents/bundles/knowledge/domains/data/postgres-native-driver.md",
+  ".agents/bundles/knowledge/domains/data/postgres-limitations.md"
 ]
 focused_commands = [
-  "cargo test --manifest-path src/rs/Cargo.toml -p vertebra-core --test it"
+  "cargo test --manifest-path src/rs/Cargo.toml -p vertebra-core --test it",
+  "cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres"
 ]
 
 [[areas.runtime-ipc.shards]]
@@ -116,6 +119,14 @@ paths = [
   "src/rs/vertebra-core/src/sync.rs",
   "src/rs/vertebra-core/src/cleanup.rs",
   "src/rs/vertebra-core/src/process.rs"
+]
+
+[[areas.runtime-ipc.shards]]
+name = "database-and-postgres"
+paths = [
+  "src/rs/vertebra-db/**",
+  "src/rs/vertebra-postgres/**",
+  "src/rs/vertebra-storage/**"
 ]
 
 [areas.http-ingress]
@@ -198,9 +209,14 @@ knowledge = [
   ".agents/bundles/knowledge/architecture/worker/pyo3-ffi-and-batch-dispatch.md",
   ".agents/bundles/knowledge/gotchas/pyo3-and-python-runtime.md",
   ".agents/bundles/knowledge/patterns/rust/ffi-and-gil-discipline.md",
-  ".agents/bundles/knowledge/domains/data/gcp-bigquery-and-spanner-drivers.md"
+  ".agents/bundles/knowledge/domains/data/gcp-bigquery-and-spanner-drivers.md",
+  ".agents/bundles/knowledge/domains/data/postgres-native-driver.md",
+  ".agents/bundles/knowledge/domains/data/postgres-limitations.md"
 ]
-focused_commands = ["cargo test --manifest-path src/rs/Cargo.toml -p vertebra-py"]
+focused_commands = [
+  "cargo test --manifest-path src/rs/Cargo.toml -p vertebra-py",
+  "cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres"
+]
 
 [areas.python-framework]
 prefix = "PY"
@@ -299,6 +315,7 @@ paths = [
   ".agents/bundles/**",
   ".agents/skills/**",
   ".agents/agents/**",
+  ".codex/agents/**",
   "AGENTS.md",
   "docs/**",
   "README.md"

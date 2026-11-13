@@ -14,59 +14,92 @@ generated:
   by: flow/0.26.0
   at: "2026-11-04T04:33:00Z"
 verified:
-  - by: agent:chapter-sync
-    at: "2026-11-12T20:10:51.550371+00:00"
-    commit: a1340034
+  - by: agent:flow-setup
+    at: "2026-11-12T23:30:00Z"
+    commit: 18baadcd
 sources:
-- {id: src-postgres-stream-rs, resource: src/rs/vertebra-postgres/src/replication/stream.rs::ReplicationSession, title: Bounded replication session, publication leases and shutdown}
-- {id: src-postgres-pgoutput-rs, resource: src/rs/vertebra-postgres/src/replication/pgoutput.rs::PgOutputDecoder, title: Incremental pgoutput v1 transaction records and bounded queue}
-- {id: src-postgres-tenant-core, resource: src/py/vertebra/db/adapters/postgres/core.py, title: PostgreSQL tenant and session SQL builders}
-- {id: src-oracle-tenant-core, resource: src/py/vertebra/db/adapters/oracle/core.py, title: Oracle VPD trusted-package and SET_IDENTIFIER context SQL builders}
-- {id: src-oracle-driver-py, resource: src/py/vertebra/db/adapters/oracle/driver.py, title: SyncOraclePipeline, AsyncOraclePipeline, and VPD reset-or-evict pool hooks}
-- {id: src-db-oracle-notify-py, resource: src/py/vertebra/db/adapters/oracle/notify.py, title: OracleNotifyConfig and OracleNotificationSource TxEventQ / DBMS_AQ streaming}
-- {id: src-vertebra-oracle-notify-rs, resource: src/rs/vertebra-oracle/src/notify.rs, title: Dedicated AsyncOracleListener DBMS_AQ.DEQUEUE worker pump}
-- {id: src-extensions-apex-session-py, resource: src/py/vertebra/extensions/apex/session.py, title: OracleSessionManager APEX VPD propagation and ECID piggyback}
-- {id: src-tenant-native-tests, resource: src/py/tests/unit/db/test_native_db_drivers.py, title: Generic engine-purity positive and negative probes}
-- {id: src-tenant-enterprise-tests, resource: src/py/tests/unit/db/test_enterprise_olap_drivers.py, title: Session bind and failure identity acceptance}
-- {id: src-extensions-sqlspec-bigquery-py, resource: src/py/vertebra/extensions/sqlspec/bigquery.py, title: BigQuery SQLSpec native statement defaults and session execution}
-- {id: src-extensions-sqlspec-spanner-py, resource: src/py/vertebra/extensions/sqlspec/spanner.py, title: Spanner SQLSpec parser and native parameter defaults}
-- {id: src-extensions-sqlspec-adapters-py, resource: src/py/vertebra/extensions/sqlspec/adapters.py, title: SQLSpec native pipeline dispatch and sequential stack execution}
-- {id: src-db-duckdb-pipeline-py, resource: src/py/vertebra/db/adapters/duckdb/pipeline.py, title: Delayed-commit SyncDuckDBPipeline and AsyncDuckDBPipeline with savepoint nesting}
-- {id: src-db-cdc-py, resource: src/py/vertebra/db/cdc.py, title: Python implementation module (src/py/vertebra/db/cdc.py)}
-- {id: src-db-spanner-change-stream-py, resource: src/py/vertebra/db/adapters/spanner/change_stream.py, title: Spanner change-stream readers and partition record types}
-- {id: src-db-postgres-notify-py, resource: src/py/vertebra/db/adapters/postgres/notify.py, title: PostgreSQL notification transport and logical message builders}
-- {id: src-extensions-sqlspec-events-py, resource: src/py/vertebra/extensions/sqlspec/events.py, title: Engine-neutral SQLSpec change-feed event backends}
-- {id: src-tests-unit-db-test-pg-gateway-py, resource: src/py/tests/unit/db/test_pg_gateway.py, title: CDC spill bounds, key normalization, and storage error coverage}
-- {id: src-tests-unit-extensions-test-data-storage-integrations-py, resource: src/py/tests/unit/extensions/test_data_storage_integrations.py, title: SQLSpec event backend lifecycle and spill hydration coverage}
-- {id: src-db-rls-py, resource: src/py/vertebra/db/rls.py, title: Python implementation module (src/py/vertebra/db/rls.py)}
-- {id: src-db-datafusion-py, resource: src/py/vertebra/db/adapters/datafusion/__init__.py, title: Python implementation module (src/py/vertebra/db/adapters/datafusion/__init__.py)}
-- {id: src-db-datafusion-config-py, resource: src/py/vertebra/db/adapters/datafusion/config.py, title: Python implementation module (src/py/vertebra/db/adapters/datafusion/config.py)}
-- {id: src-db-datafusion-driver-py, resource: src/py/vertebra/db/adapters/datafusion/driver.py, title: Python implementation module (src/py/vertebra/db/adapters/datafusion/driver.py)}
-- {id: src-db-init-py, resource: src/py/vertebra/db/__init__.py, title: Python implementation module (src/py/vertebra/db/__init__.py)}
-- {id: src-db-registry-py, resource: src/py/vertebra/db/registry.py, title: Python implementation module (src/py/vertebra/db/registry.py)}
-- {id: src-db-driver-capabilities-py, resource: src/py/vertebra/db/driver/capabilities.py, title: Python implementation module (src/py/vertebra/db/driver/capabilities.py)}
-- {id: src-tests-unit-db-test-pg-dataplane-and-datafusion-py, resource: src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py, title: Python implementation module (src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py)}
+  - id: src-postgres-stream-rs
+    resource: src/rs/vertebra-postgres/src/replication/stream.rs::ReplicationSession
+    title: "Bounded replication session, publication leases and shutdown"
+  - id: src-postgres-pgoutput-rs
+    resource: src/rs/vertebra-postgres/src/replication/pgoutput.rs::PgOutputDecoder
+    title: "Incremental pgoutput v1 transaction records and bounded queue"
+  - id: src-postgres-tenant-core
+    resource: src/py/vertebra/db/adapters/postgres/core.py
+    title: "PostgreSQL tenant and session SQL builders"
+  - id: src-oracle-tenant-core
+    resource: src/py/vertebra/db/adapters/oracle/core.py
+    title: "Oracle VPD trusted-package and SET_IDENTIFIER context SQL builders"
+  - id: src-oracle-driver-py
+    resource: src/py/vertebra/db/adapters/oracle/driver.py
+    title: "SyncOraclePipeline, AsyncOraclePipeline, and VPD reset-or-evict pool hooks"
+  - id: src-db-oracle-notify-py
+    resource: src/py/vertebra/db/adapters/oracle/notify.py
+    title: "OracleNotifyConfig and OracleNotificationSource TxEventQ / DBMS_AQ streaming"
+  - id: src-vertebra-oracle-notify-rs
+    resource: src/rs/vertebra-oracle/src/notify.rs
+    title: "Dedicated AsyncOracleListener DBMS_AQ.DEQUEUE worker pump"
+  - id: src-extensions-apex-session-py
+    resource: src/py/vertebra/extensions/apex/session.py
+    title: "OracleSessionManager APEX VPD propagation and ECID piggyback"
+  - id: src-extensions-sqlspec-bigquery-py
+    resource: src/py/vertebra/extensions/sqlspec/bigquery.py
+    title: "BigQuery SQLSpec native statement defaults and session execution"
+  - id: src-extensions-sqlspec-spanner-py
+    resource: src/py/vertebra/extensions/sqlspec/spanner.py
+    title: "Spanner SQLSpec parser and native parameter defaults"
+  - id: src-extensions-sqlspec-adapters-py
+    resource: src/py/vertebra/extensions/sqlspec/adapters.py
+    title: "SQLSpec native pipeline dispatch and sequential stack execution"
+  - id: src-db-duckdb-pipeline-py
+    resource: src/py/vertebra/db/adapters/duckdb/pipeline.py
+    title: "Delayed-commit SyncDuckDBPipeline and AsyncDuckDBPipeline with savepoint nesting"
+  - id: src-db-cdc-py
+    resource: src/py/vertebra/db/cdc.py
+    title: "Engine-neutral ChangeFeed and spill hydration"
+  - id: src-db-spanner-change-stream-py
+    resource: src/py/vertebra/db/adapters/spanner/change_stream.py
+    title: "Spanner change-stream readers and partition record types"
+  - id: src-db-postgres-notify-py
+    resource: src/py/vertebra/db/adapters/postgres/notify.py
+    title: "PostgreSQL notification transport and logical message builders"
+  - id: src-extensions-sqlspec-events-py
+    resource: src/py/vertebra/extensions/sqlspec/events.py
+    title: "Engine-neutral SQLSpec change-feed event backends"
+  - id: src-db-rls-py
+    resource: src/py/vertebra/db/rls.py
+    title: "TenantScopeConfig, TenantPredicate, and reset-or-evict tenant scopes"
+  - id: src-db-datafusion-config-py
+    resource: src/py/vertebra/db/adapters/datafusion/config.py
+    title: "DataFusionConfig and TableRegistration"
+  - id: src-db-datafusion-driver-py
+    resource: src/py/vertebra/db/adapters/datafusion/driver.py
+    title: "DataFusionEngine federated Arrow SessionContext"
+  - id: src-db-registry-py
+    resource: src/py/vertebra/db/registry.py
+    title: "Polymorphic DatabaseRegistry URL and config resolution"
+  - id: src-db-driver-capabilities-py
+    resource: src/py/vertebra/db/driver/capabilities.py
+    title: "Sync/Async pipeline and change-source capability protocols"
 ---
 
 # Native Pipelines, Change Feeds, Tenant Predicates & DataFusion
 
 <!-- truth: start -->
-- **Native PostgreSQL Replication**: `PgOutputDecoder::next_record` emits ordered v1 transaction envelopes without buffering entire transactions. `ReplicationSession` transfers the dedicated CopyBoth socket and startup bytes into concurrent reader/writer loops with independent status writes. Queue limits are 1–1024 records, 8 MiB aggregate and 16 MiB per record, with one oversized bounded record admitted when empty. Delivery leases retain the single receiver reservation and restore dropped records ahead of the FIFO; only published Commit ends become acknowledgeable. Verified reconnect, Python handles and durable change sources remain in ch35, ch36 and ch24 [^src-postgres-pgoutput-rs] [^src-postgres-stream-rs].
+- **Native PostgreSQL Replication**: `PgOutputDecoder::next_record` emits ordered v1 transaction envelopes without buffering entire transactions. `ReplicationSession` transfers the dedicated CopyBoth socket and startup bytes into concurrent reader/writer loops with independent status writes. Queue limits are 1–1024 records, 8 MiB aggregate and 16 MiB per record, with one oversized bounded record admitted when empty. Delivery leases retain the single receiver reservation and restore dropped records ahead of the FIFO; only published Commit ends become acknowledgeable. Verified reconnect, Python handles, and durable change sources remain in `native-postgres-driver` chapters `ch01`–`ch03` [^src-postgres-pgoutput-rs] [^src-postgres-stream-rs].
 - **Delayed-Commit & Native Pipelines**: `SyncPipelineCapable` / `AsyncPipelineCapable` batch ordered statements via `driver.pipeline()`; `SyncOraclePipeline` and `AsyncOraclePipeline` (`ORACLESQL_NATIVE_TTC_PIPELINE_SUPPORTED = False`) hold an open transaction or `SAVEPOINT _vtb_pipe_<n>` across `results()` and commit only on clean `__exit__`/`__aexit__`, while SQLSpec `OracleSyncDriver` / `OracleAsyncDriver` set `_execution_parameter_style = ParameterStyle.NAMED_COLON`.
 - **Reset-or-Evict Tenant Scoping**: `TenantPredicate` stays engine-neutral while `TenantConnectionScope` / `AsyncTenantConnectionScope` (`vertebra.db.rls`), `OracleCore` (`context_package_proc` / `context_clear_proc` + `DBMS_SESSION.SET_IDENTIFIER` / `CLEAR_IDENTIFIER`), and `OracleSessionManager` always reset session context on lease exit and permanently evict pooled sessions when reset fails.
 - **Notifications & Change Streams**: `ChangeFeed` manages event envelopes and bounded spill hydration; `PostgresNotificationSource`, `OracleNotificationSource` (`AsyncOracleListener` `DBMS_AQ.DEQUEUE` / TxEventQ worker pump with 1s-sliced server waits and exponential reconnect backoff), and `SyncSpannerChangeStreamSource` / `AsyncSpannerChangeStreamSource` implement adapter streaming.
 - **Federated DataFusion**: `DataFusionEngine` (`vertebra.db.adapters.datafusion`) registers normalized PyArrow, BigQuery, and Spanner tables on a fail-closed `SessionContext` (`ensure_module("datafusion", package="datafusion")`), and all SQL builders validate identifiers via `validate_identifier`.
 <!-- truth: end -->
 
-The native pipeline capability protocols and tenant scopes in [`vertebra.db`](../../../../../src/py/vertebra/db/__init__.py)[^src-db-init-py] define engine batching and session isolation contracts. [`cdc.py`](../../../../../src/py/vertebra/db/cdc.py)[^src-db-cdc-py] manages engine-neutral change-feed envelopes, [`postgres.notify`](../../../../../src/py/vertebra/db/adapters/postgres/notify.py)[^src-db-postgres-notify-py] owns PostgreSQL notification SQL, [`oracle.notify`](../../../../../src/py/vertebra/db/adapters/oracle/notify.py)[^src-db-oracle-notify-py] and [`vertebra-oracle/src/notify.rs`](../../../../../src/rs/vertebra-oracle/src/notify.rs)[^src-vertebra-oracle-notify-rs] own Oracle 26ai TxEventQ / `DBMS_AQ` streaming, [`spanner.change_stream`](../../../../../src/py/vertebra/db/adapters/spanner/change_stream.py)[^src-db-spanner-change-stream-py] owns Spanner change streams, and [`vertebra.db.adapters.datafusion`](../../../../../src/py/vertebra/db/adapters/datafusion/__init__.py)[^src-db-datafusion-py] maintains federated analytical sessions. All SQL builders validate identifiers against `^[A-Za-z_][A-Za-z0-9_]*$` (`validate_identifier`, or AQ's `^[A-Za-z_][A-Za-z0-9_$#]{0,127}$`). Drivers and dialers live in [database-drivers-and-dialers](database-drivers-and-dialers.md).
+The native pipeline capability protocols and tenant scopes in [`vertebra.db`](../../../../../src/py/vertebra/db/__init__.py) define engine batching and session isolation contracts. [`cdc.py`](../../../../../src/py/vertebra/db/cdc.py)[^src-db-cdc-py] manages engine-neutral change-feed envelopes, [`postgres.notify`](../../../../../src/py/vertebra/db/adapters/postgres/notify.py)[^src-db-postgres-notify-py] owns PostgreSQL notification SQL, [`oracle.notify`](../../../../../src/py/vertebra/db/adapters/oracle/notify.py)[^src-db-oracle-notify-py] and [`vertebra-oracle/src/notify.rs`](../../../../../src/rs/vertebra-oracle/src/notify.rs)[^src-vertebra-oracle-notify-rs] own Oracle 26ai TxEventQ / `DBMS_AQ` streaming, [`spanner.change_stream`](../../../../../src/py/vertebra/db/adapters/spanner/change_stream.py)[^src-db-spanner-change-stream-py] owns Spanner change streams, and [`vertebra.db.adapters.datafusion`](../../../../../src/py/vertebra/db/adapters/datafusion/__init__.py) maintains federated analytical sessions. All SQL builders validate identifiers against `^[A-Za-z_][A-Za-z0-9_]*$` (`validate_identifier`, or AQ's `^[A-Za-z_][A-Za-z0-9_$#]{0,127}$`). Drivers and dialers live in [database-drivers-and-dialers](database-drivers-and-dialers.md).
 
 ## 1. Native Pipeline Capabilities
 
 [`SyncPipelineCapable` / `AsyncPipelineCapable`](../../../../../src/py/vertebra/db/driver/capabilities.py)[^src-db-driver-capabilities-py] expose `driver.pipeline()` as a sync or async context manager (`pipe.select(sql, params)`, `pipe.execute(sql, params)`, `pipe.results()`). On Oracle (`ORACLESQL_NATIVE_TTC_PIPELINE_SUPPORTED is False`), [`SyncOraclePipeline` and `AsyncOraclePipeline`](../../../../../src/py/vertebra/db/adapters/oracle/driver.py)[^src-oracle-driver-py] flush queued statements sequentially via `execute_pipeline_batch` (`OraclePipelineOutcome`) while holding an ambient transaction (or `SAVEPOINT _vtb_pipe_<n>` inside an outer transaction, using `ROLLBACK TO SAVEPOINT` with no `RELEASE SAVEPOINT`) open across `results()` and committing only on clean `__exit__`/`__aexit__` (`exc_type is None`); post-`results()` validation failures or unexecuted queued operations roll back automatically.
 
-[`BaseSyncDriver.execute_stack` / `BaseAsyncDriver.execute_stack`](../../../../../src/py/vertebra/extensions/sqlspec/adapters.py)[^src-extensions-sqlspec-adapters-py] dispatch multi-statement `execute` stacks with `continue_on_error=False` through `driver.pipeline()`, preserving prepared operation types (including `INSERT ... RETURNING`) in ordered `StackResult` entries. Driver-owned statement defaults preserve native bind styles without importing optional upstream SDKs: PostgreSQL sync uses positional pyformat and async uses numeric binds, MySQL uses positional pyformat, `OracleSyncDriver` and `OracleAsyncDriver` set `_execution_parameter_style = ParameterStyle.NAMED_COLON`, BigQuery owns `bigquery` named-`@` parameters, and Spanner selects `spanner` named-`@` (GoogleSQL) or `spangres` numeric parameters.[^src-extensions-sqlspec-bigquery-py][^src-extensions-sqlspec-spanner-py]
-
-Driver-owned default statement configuration preserves native execution syntax: PostgreSQL sync uses positional pyformat and async uses numeric binds; MySQL sync and async use positional pyformat. The private default hook is shared by direct driver construction and SQLSpec adapter configs. Explicit caller configurations retain identity and control processing. BigQuery owns its `bigquery` parser and named-at parameters; Spanner owns its supported `spanner` parser and named-at parameters for GoogleSQL, with `spangres` parsing and numeric parameters for the resolved Spangres configuration. These defaults preserve SQLSpec row metadata and native client binds without importing optional upstream adapter SDKs. [^src-extensions-sqlspec-bigquery-py][^src-extensions-sqlspec-spanner-py]
+[`BaseSyncDriver.execute_stack` / `BaseAsyncDriver.execute_stack`](../../../../../src/py/vertebra/extensions/sqlspec/adapters.py)[^src-extensions-sqlspec-adapters-py] dispatch multi-statement `execute` stacks with `continue_on_error=False` through `driver.pipeline()`, preserving prepared operation types (including `INSERT ... RETURNING`) in ordered `StackResult` entries. Driver-owned statement defaults preserve native bind styles without importing optional upstream SDKs (shared by direct driver construction and SQLSpec adapter configs while preserving explicit caller configurations): PostgreSQL sync uses positional pyformat and async uses numeric binds, MySQL uses positional pyformat, `OracleSyncDriver` and `OracleAsyncDriver` set `_execution_parameter_style = ParameterStyle.NAMED_COLON`, BigQuery owns `bigquery` named-`@` parameters, and Spanner selects `spanner` named-`@` (GoogleSQL) or `spangres` numeric parameters.[^src-extensions-sqlspec-bigquery-py][^src-extensions-sqlspec-spanner-py]
 
 Batch stack operations compile batched parameters through SQLSpec's `is_many` processing before native execution, retaining statement-config overrides and filters. Arrow stack operations prepare keyword or prebound SQL parameters through the same statement pipeline, keep standard Arrow options separate from bind values, and retain prepared statement metadata. Native BigQuery and Spanner `ArrowCursor` results are materialized through `to_arrow_table()` into SQLSpec `ArrowResult` at the stack boundary. Standalone Arrow option semantics remain owned by each adapter.
 
@@ -83,9 +116,9 @@ Single-operation stacks, non-pipeline drivers, stacks containing `execute_many`,
 | [`PostgreSQLCore`](../../../../../src/py/vertebra/db/adapters/postgres/core.py)[^src-postgres-tenant-core] | `build_session_guc_sql` binds `(setting_name, tenant_value, local)` in `SELECT set_config($1, $2, $3)`; `build_tenant_predicate_sql` renders `$N` with optional `::<type>` cast. |
 | [`OracleCore`](../../../../../src/py/vertebra/db/adapters/oracle/core.py)[^src-oracle-tenant-core] | `build_session_context_sql` and `build_clear_context_sql` route `OracleConfig.context_package_proc` / `context_clear_proc` (`validate_identifier(..., allow_dots=True)`) to trusted PL/SQL procedures (`BEGIN <proc>(:namespace, :attribute, :value); END;`) and default `namespace="USERENV"` to `DBMS_SESSION.SET_IDENTIFIER(:value)` / `DBMS_SESSION.CLEAR_IDENTIFIER` so Oracle 26ai never fails with unprivileged `ORA-01031`. |
 
-`BaseSyncDriver.apply_tenant_predicate` and its async counterpart refuse unsupported engines with native `NotSupportedError`. PostgreSQL adapters compile through their existing statement profiles: sync uses psycopg `%s`, async uses asyncpg `$N`; typed SQLSpec parameters are unwrapped before native transport. Oracle adapters bind the context setter and return a named predicate, propagating original setter exceptions unchanged.[^src-tenant-enterprise-tests]
+`BaseSyncDriver.apply_tenant_predicate` and its async counterpart refuse unsupported engines with native `NotSupportedError`. PostgreSQL adapters compile through their existing statement profiles: sync uses psycopg `%s`, async uses asyncpg `$N`; typed SQLSpec parameters are unwrapped before native transport. Oracle adapters bind the context setter and return a named predicate, propagating original setter exceptions unchanged.
 
-BigQuery and Spanner's eight SQLSpec config/driver constructors reject a non-None `tenant_predicate` as their first executable statement, before base initialization, core access, config resolution, broker allocation, or native side effects. Unsupported isolation sessions cannot be constructed; unconfigured sessions retain query, script, Arrow, batch, and snapshot behavior.[^src-tenant-enterprise-tests]
+BigQuery and Spanner's eight SQLSpec config/driver constructors reject a non-None `tenant_predicate` as their first executable statement, before base initialization, core access, config resolution, broker allocation, or native side effects. Unsupported isolation sessions cannot be constructed; unconfigured sessions retain query, script, Arrow, batch, and snapshot behavior.
 
 Because Oracle `SYS_CONTEXT` and `USERENV.CLIENT_IDENTIFIER` survive `ROLLBACK`, [`SyncOracleDriver` / `AsyncOracleDriver`](../../../../../src/py/vertebra/db/adapters/oracle/driver.py)[^src-oracle-driver-py] (`enter_tenant_scope`, `exit_tenant_scope`, `evict_connection`) and [`OracleSessionManager`](../../../../../src/py/vertebra/extensions/apex/session.py)[^src-extensions-apex-session-py] (`build_attach_plsql`, `build_detach_plsql`, `acquire_scoped`, plus TTC `ECID` `set_session_attrs` piggyback) execute explicit clear procedures before pool release and permanently evict the physical session if detach or reset raises. Live Oracle `DBMS_SESSION.SET_CONTEXT` execution requires a trusted package associated with `CREATE CONTEXT` in the call stack, and no helper provisions RLS or VPD policies ([Oracle DBMS_SESSION reference](https://docs.oracle.com/en/database/oracle/oracle-database/26/arpls/DBMS_SESSION.html)).
 
@@ -93,7 +126,7 @@ Because Oracle `SYS_CONTEXT` and `USERENV.CLIENT_IDENTIFIER` survive `ROLLBACK`,
 
 The AST gate scans `db/*.py` and `db/driver/*.py` for adapter imports, executable adapter-class use, literal adapter loading, and engine-specific SQL construction. It excludes docstrings, annotations, and engine metadata. The registry permits only module-level adapter config imports directly listed in `REGISTERED_CONFIG_TYPES`, their declarative tuple and annotation/type-alias uses, and guarded `TYPE_CHECKING` driver imports used in annotations/type aliases. `SCHEME_REGISTRY` derives URL schemes from that tuple. Runtime driver imports, engine-class branches, identity dispatch, and direct construction remain forbidden.
 
-Cloud SQL and AlloyDB remain transport dialers from `db.dialer`, so their existing registry branches stay valid. Polymorphic `config_cls.from_url`, `config.build_sync_driver`, `config.build_async_driver`, and `ensure_module(self.driver_module)` retain configuration-owned driver resolution. Stable broker dialect IDs remain valid metadata. [^src-db-registry-py][^src-tenant-native-tests]
+Cloud SQL and AlloyDB remain transport dialers from `db.dialer`, so their existing registry branches stay valid. Polymorphic `config_cls.from_url`, `config.build_sync_driver`, `config.build_async_driver`, and `ensure_module(self.driver_module)` retain configuration-owned driver resolution. Stable broker dialect IDs remain valid metadata. [^src-db-registry-py]
 
 ## 3. Change Feed (`cdc.py`)
 
@@ -132,23 +165,16 @@ Store keys use `spill_prefix.rstrip("/")`: a non-empty normalized prefix yields 
 | `DataFusionConfig` | `BaseDatabaseConfig` subclass (`url_schemes = ("datafusion",)`, `from_url`, `pool_key`, `build_sync_driver`, `build_async_driver`) resolved polymorphically via [`DatabaseRegistry`](../../../../../src/py/vertebra/db/registry.py)[^src-db-registry-py] and `provide_driver`. Configures `mode`, `target_partitions`, `memory_limit_mb`, `pgwire_host`, `pgwire_port=5434`, and `require_mtls_for_pgwire`. |
 | [`DataFusionEngine`](../../../../../src/py/vertebra/db/adapters/datafusion/driver.py)[^src-db-datafusion-driver-py] | Accepts `(config: DataFusionConfig \| None = None, *, ctx: Any = None)`, fetches BigQuery and Cloud Spanner datasets via `driver.select_to_arrow(...)`, normalizes `ArrowCursor` / PyArrow inputs into `pyarrow.Table`, resolves `SessionContext` via `ensure_module("datafusion", package="datafusion")` without any SQLite fallback, and propagates `MissingDependencyError` and `SessionContext.sql(...)` errors directly. |
 
-Provenance sources: [^src-tests-unit-db-test-pg-dataplane-and-datafusion-py], [^src-tests-unit-db-test-pg-gateway-py], [^src-tests-unit-extensions-test-data-storage-integrations-py].
-
 [^src-extensions-sqlspec-adapters-py]: `src/py/vertebra/extensions/sqlspec/adapters.py` — SQLSpec native pipeline dispatch and sequential stack execution.
 [^src-db-duckdb-pipeline-py]: `src/py/vertebra/db/adapters/duckdb/pipeline.py` — Delayed-commit SyncDuckDBPipeline and AsyncDuckDBPipeline with savepoint nesting.
-[^src-db-cdc-py]: `src/py/vertebra/db/cdc.py` — Python implementation module (src/py/vertebra/db/cdc.py).
-[^src-db-rls-py]: `src/py/vertebra/db/rls.py` — Python implementation module (src/py/vertebra/db/rls.py).
-[^src-db-datafusion-py]: `src/py/vertebra/db/adapters/datafusion/__init__.py` — Python implementation module (src/py/vertebra/db/adapters/datafusion/__init__.py).
-[^src-db-datafusion-config-py]: `src/py/vertebra/db/adapters/datafusion/config.py` — Python implementation module (src/py/vertebra/db/adapters/datafusion/config.py).
-[^src-db-datafusion-driver-py]: `src/py/vertebra/db/adapters/datafusion/driver.py` — Python implementation module (src/py/vertebra/db/adapters/datafusion/driver.py).
-[^src-db-init-py]: `src/py/vertebra/db/__init__.py` — Python implementation module (src/py/vertebra/db/__init__.py).
-[^src-db-registry-py]: `src/py/vertebra/db/registry.py` — Python implementation module (src/py/vertebra/db/registry.py).
-[^src-db-driver-capabilities-py]: `src/py/vertebra/db/driver/capabilities.py` — Python implementation module (src/py/vertebra/db/driver/capabilities.py).
-[^src-tests-unit-db-test-pg-dataplane-and-datafusion-py]: `src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py` — Python implementation module (src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py).
+[^src-db-cdc-py]: `src/py/vertebra/db/cdc.py` — Engine-neutral ChangeFeed and spill hydration.
+[^src-db-rls-py]: `src/py/vertebra/db/rls.py` — TenantScopeConfig, TenantPredicate, and reset-or-evict tenant scopes.
+[^src-db-datafusion-config-py]: `src/py/vertebra/db/adapters/datafusion/config.py` — DataFusionConfig and TableRegistration.
+[^src-db-datafusion-driver-py]: `src/py/vertebra/db/adapters/datafusion/driver.py` — DataFusionEngine federated Arrow SessionContext.
+[^src-db-registry-py]: `src/py/vertebra/db/registry.py` — Polymorphic DatabaseRegistry URL and config resolution.
+[^src-db-driver-capabilities-py]: `src/py/vertebra/db/driver/capabilities.py` — Sync/Async pipeline and change-source capability protocols.
 [^src-db-postgres-notify-py]: `src/py/vertebra/db/adapters/postgres/notify.py` — PostgreSQL notification transport and logical message builders.
 [^src-extensions-sqlspec-events-py]: `src/py/vertebra/extensions/sqlspec/events.py` — Engine-neutral SQLSpec change-feed event backends.
-[^src-tests-unit-db-test-pg-gateway-py]: `src/py/tests/unit/db/test_pg_gateway.py` — CDC spill bounds, key normalization, and storage error coverage.
-[^src-tests-unit-extensions-test-data-storage-integrations-py]: `src/py/tests/unit/extensions/test_data_storage_integrations.py` — SQLSpec event backend lifecycle and spill hydration coverage.
 [^src-db-spanner-change-stream-py]: `src/py/vertebra/db/adapters/spanner/change_stream.py` — Spanner readers, constructor-bound stream defaults, record parsing, and child-partition scheduling.
 [^src-extensions-sqlspec-bigquery-py]: `src/py/vertebra/extensions/sqlspec/bigquery.py` — BigQuery SQLSpec native statement defaults and session execution.
 [^src-extensions-sqlspec-spanner-py]: `src/py/vertebra/extensions/sqlspec/spanner.py` — Spanner SQLSpec parser and native parameter defaults.
@@ -158,9 +184,5 @@ Provenance sources: [^src-tests-unit-db-test-pg-dataplane-and-datafusion-py], [^
 [^src-db-oracle-notify-py]: `src/py/vertebra/db/adapters/oracle/notify.py` — OracleNotifyConfig and OracleNotificationSource TxEventQ / DBMS_AQ streaming.
 [^src-vertebra-oracle-notify-rs]: `src/rs/vertebra-oracle/src/notify.rs` — Dedicated AsyncOracleListener DBMS_AQ.DEQUEUE worker pump.
 [^src-extensions-apex-session-py]: `src/py/vertebra/extensions/apex/session.py` — OracleSessionManager APEX VPD propagation and ECID piggyback.
-[^src-tenant-native-tests]: `src/py/tests/unit/db/test_native_db_drivers.py` — Generic engine-purity positive and negative probes.
-[^src-tenant-enterprise-tests]: `src/py/tests/unit/db/test_enterprise_olap_drivers.py` — Session bind and failure identity acceptance.
-
 [^src-postgres-pgoutput-rs]: `src/rs/vertebra-postgres/src/replication/pgoutput.rs::PgOutputDecoder` — Incremental pgoutput v1 transaction records and bounded queue.
-
 [^src-postgres-stream-rs]: `src/rs/vertebra-postgres/src/replication/stream.rs::ReplicationSession` — Bounded replication session, publication leases and shutdown.

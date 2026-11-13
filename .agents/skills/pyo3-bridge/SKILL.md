@@ -1,20 +1,21 @@
 ---
 name: pyo3-bridge
-description: Use when implementing or debugging PyO3 native extension modules, GIL release discipline, free-threaded Python 3.14t/3.15t safety, zero-copy FFI buffer views, or msgspec C-API bridges in vertebra-py, vertebra-bundler, vertebra-storage, vertebra-bigquery, vertebra-spanner, and vertebra-duckdb.
+description: Use when implementing or debugging PyO3 native extension modules, GIL release discipline, free-threaded Python 3.14t/3.15t safety, zero-copy FFI buffer views, or msgspec C-API bridges in vertebra-py, vertebra-bundler, vertebra-storage, vertebra-mysql, vertebra-bigquery, vertebra-mssql, vertebra-spanner, vertebra-duckdb, vertebra-oracle, and vertebra-postgres.
 ---
 
 <!-- truth: start -->
-- **Crates & Stubs**: `src/rs/vertebra-py`, `src/rs/vertebra-bundler`, `src/rs/vertebra-storage`, `src/rs/vertebra-bigquery`, `src/rs/vertebra-spanner`, `src/rs/vertebra-duckdb`, and `src/py/vertebra/{_vertebra,_bundler,_storage,_bigquery,_spanner,_duckdb}.pyi`.
+- **Crates & Stubs**: `src/rs/{vertebra-py,vertebra-bundler,vertebra-storage,vertebra-mysql,vertebra-bigquery,vertebra-mssql,vertebra-spanner,vertebra-duckdb,vertebra-oracle,vertebra-postgres}` and `src/py/vertebra/{_vertebra,_bundler,_storage,_mysql,_bigquery,_mssql,_spanner,_duckdb,_oracle,_postgres}.pyi`.
 - **Free-Threaded Declaration**: Every `#[pymodule]` declares `#[pymodule(gil_used = false)]`, and `#[pyclass]` types set `immutable_type` with `#[cfg_attr(not(Py_GIL_DISABLED), pyclass(freelist = 128))]` (`FFI-01`).
 - **GIL Detachment**: Release the GIL via `py.detach(|| ...)` around all blocking I/O, SHM futex/ulock waits, compression, and bundler builds (`FFI-02`, `FFI-03`).
 - **View Lifetimes**: Zero-copy views (`Request.__getbuffer__`, `body_view`, `decode_msgspec`) anchor or borrow within the active `Arc<BatchSnapshot>` lease and never outlive their backing SHM slot (`FFI-04`).
+- **Cross-Wheel Ownership**: Optional driver extensions accept primitive constructor kwargs across `cdylib` boundaries, reuse canonical `DatabaseError`/`GoogleCloudAuthError`/`ArrowCursor` types on `vertebra._vertebra`, and transfer `VTBARROW` slices via producer-owned `vertebra.ShmCapsule`.
 - **Stub Parity**: Any `#[pyfunction]` or `#[pyclass]` signature change updates the corresponding `.pyi` stub and passes `mypy.stubtest` (`FFI-09`).
-- **Verify**: `make dev && uv run --no-sync python -m mypy.stubtest vertebra._vertebra vertebra._bundler vertebra._storage vertebra._bigquery vertebra._spanner vertebra._duckdb`
+- **Verify**: `make dev && uv run --no-sync python -m mypy.stubtest vertebra._vertebra vertebra._bundler vertebra._storage vertebra._mysql vertebra._bigquery vertebra._mssql vertebra._spanner vertebra._duckdb vertebra._oracle vertebra._postgres`
 <!-- truth: end -->
 
 # PyO3 Native Bridge & Free-Threaded Runtime (`pyo3-bridge`)
 
-Implementation guide for PyO3 native extensions (`_vertebra`, `_bundler`, `_storage`, `_bigquery`, `_spanner`, `_duckdb` across `vertebra-py`, `vertebra-bundler`, `vertebra-storage`, `vertebra-bigquery`, `vertebra-spanner`, and `vertebra-duckdb`), zero-copy batch dispatch (`AsgiProtocol`, `RsgiScope`, `WsgiInput`), C-API `msgspec` struct hydration (`msgspec_bridge.rs`), and free-threaded Python 3.14t/3.15t concurrency.
+Implementation guide for PyO3 native extensions (`_vertebra`, `_bundler`, `_storage`, `_mysql`, `_bigquery`, `_mssql`, `_spanner`, `_duckdb`, `_oracle`, `_postgres`), zero-copy batch dispatch (`AsgiProtocol`, `RsgiScope`, `WsgiInput`), C-API `msgspec` struct hydration (`msgspec_bridge.rs`), and free-threaded Python 3.14t/3.15t concurrency.
 
 ## Architecture & Domain References
 
@@ -40,12 +41,13 @@ Implementation guide for PyO3 native extensions (`_vertebra`, `_bundler`, `_stor
    - In `Request.__getbuffer__`, pass `slf.as_ptr()` (borrowed, letting `PyBuffer_FillInfo` `Py_INCREF` the owner once) rather than `slf.into_ptr()`.
    - Map all fallible Rust operations on caller inputs to typed `PyErr` (`PyValueError`, `PyRuntimeError`, `PyTimeoutError`); never `unwrap()` user input.
 
-4. **Rebuild & Type-Stub Synchronization (`FFI-09`)**:
+4. **Rebuild, Cross-Wheel Capsules, & Type-Stub Synchronization (`FFI-09`)**:
+   - Pass primitive scalar/bytes kwargs across companion `cdylib` boundaries, use producer-owned `vertebra.ShmCapsule` for `VTBARROW` zero-copy result transfer, and protect async stream `next()` futures with drop-restoring delivery guards (`PendingDeliveryGuard`).
    - After modifying any Rust crate under `src/rs/`, run `make dev` so `.venv` loads the updated native `.so`/`.abi3.so` binaries before running `pytest` or `stubtest`.
 
 ## Verification
 
 ```bash
 make dev
-uv run --no-sync python -m mypy.stubtest vertebra._vertebra vertebra._bundler vertebra._storage vertebra._bigquery vertebra._spanner vertebra._duckdb
+uv run --no-sync python -m mypy.stubtest vertebra._vertebra vertebra._bundler vertebra._storage vertebra._mysql vertebra._bigquery vertebra._mssql vertebra._spanner vertebra._duckdb vertebra._oracle vertebra._postgres
 ```

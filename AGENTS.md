@@ -1,12 +1,12 @@
 # Vertebra — Agent Instructions
 
-Vertebra is a Python web framework and server powered by a Rust runtime (`vertebra-core`, `vertebra-http`, `vertebra-py`, `vertebra-bundler`, `vertebra-storage`, `vertebra-db`, `vertebra-bigquery`, `vertebra-oracle`, `vertebra-spanner`, `vertebra-duckdb`) and a TypeScript SDK (`@vertebra/client`), supporting Python 3.12–3.15 and free-threaded 3.14t/3.15t.
+Vertebra is a Python web framework and server powered by a Rust runtime (`vertebra-core`, `vertebra-http`, `vertebra-py`, `vertebra-bundler`, `vertebra-storage`, `vertebra-db`, `vertebra-mysql`, `vertebra-bigquery`, `vertebra-mssql`, `vertebra-spanner`, `vertebra-duckdb`, `vertebra-oracle`, `vertebra-postgres`) and a TypeScript SDK (`@vertebra/client`), supporting Python 3.12–3.15 and free-threaded 3.14t/3.15t.
 
 ## Flow Operational Rule
 
-When a repository has `.agents/`, read its configured root (`.agents/setup-state.json`), bundle index ([`.agents/bundles/index.md`](.agents/bundles/index.md)), active specification (`specs/<flow_id>/spec.md`, plus `chapters/index.md` and `chapters/<ch_id>/spec.md` when `has_chapters: true`), authoritative task worksheet (`tasks/<id>-<slug>.md`), and applicable nested knowledge chapters before acting. Operational skills resolve only from `.agents/skills/` and paired subagents from `.agents/agents/`.
+When a repository has `.agents/`, read its configured root (`.agents/setup-state.json`; in linked `git worktree` checkouts, reuse the symlinked `.venv` via `uv run --no-sync` without running `make install`), bundle index ([`.agents/bundles/index.md`](.agents/bundles/index.md)), active specification (`specs/<flow_id>/spec.md`, plus `chapters/index.md` and `chapters/<ch_id>/spec.md` when `has_chapters: true`), authoritative task worksheet (`tasks/<id>-<slug>.md`), and applicable nested knowledge chapters before acting. Operational skills resolve only from `.agents/skills/` and paired subagents from `.agents/agents/` (with Codex CLI wrappers in `.codex/agents/`).
 
-Route through the `flow` skill and one matching lifecycle skill. Refine plans until every worksheet is executable, follow the selected worksheet without improvising, and route contradictions through revise/refine. Rewrite revised specifications, chapter catalogs, and worksheets in place in present tense without historical transcripts, standalone `---` horizontal rules, or frontmatter in subdirectory `index.md` files, and keep Markdown checklist markers (`[x] [<sha>]`, `[~]`, `[ ]`, `[!]`, `[-]`) synchronized with task `state` (`completed`, `in_progress`, `pending`, `blocked`, `deferred`). Apply direct Markdown frontmatter state synchronization and reconcile task-first.
+Route through the `flow` skill and one matching lifecycle skill. Refine plans until every worksheet is executable, execute one chapter per `/flow:implement` batch validating once with the `< 60s` Fast Chapter Gate (reserving full suites for `/flow:finish`), follow the selected worksheet without improvising, and route contradictions through revise/refine. Rewrite revised specifications, chapter catalogs, and worksheets in place in present tense without historical transcripts, standalone `---` horizontal rules, or frontmatter in subdirectory `index.md` files, and keep Markdown checklist markers (`[x] [<sha>]`, `[~]`, `[ ]`, `[!]`, `[-]`) synchronized with task `state` (`completed`, `in_progress`, `pending`, `blocked`, `deferred`). Apply direct Markdown frontmatter state synchronization and reconcile task-first.
 
 Close and archive completed specs on the working branch without waiting for branch merge; when scope grows beyond the active spec, finish the current spec and open a follow-up spec via `/flow:plan`. Before deleting any spec during archive, curate evidence-backed OKF chapters across nested domain, architecture, pattern, testing, and gotcha folders ([`knowledge/index.md`](.agents/bundles/knowledge/index.md)). Keep `specs/` and `research/` lazy (only materialized when active specs or research briefs exist).
 
@@ -33,16 +33,18 @@ Commits remain local unless the user explicitly asks for delivery. Never create,
 ```bash
 make setup-env   # Configure public uv, bun/npm, and cargo registries on hosts whose mirrors replace them; no-op elsewhere
 make install     # Fresh setup: destroy .venv + clean, setup-env, pin Python 3.12, uv sync --all-extras --dev --group doc --group duckdb, bun install/build, make dev
-make dev         # Build non-extension Rust crates and install debug PyO3 extensions (_vertebra, _bundler, _storage, _bigquery, _mssql, _mysql, _oracle, _spanner, _duckdb)
+make dev         # Build non-extension Rust crates and install debug PyO3 extensions (_vertebra, _bundler, _storage, _mysql, _bigquery, _mssql, _spanner, _duckdb, _oracle, _postgres)
 make lint        # Auto-fix TS (Biome), Python (Ruff), Rust (rustfmt + Clippy --features tls,compression,gcp), and run Mypy + stubtest + review-check
 make lint-all    # Read-only CI lint, type-check, Clippy (--features tls,compression,gcp), stubtest, and review-check gate across TS, Python, and Rust
 make review-check # Validate review capability manifests, skills, agents, and privacy constraints
 make review-route # Route changed files to owning review areas and shards (BASE=origin/main)
 make rs-test     # Remove /dev/shm/test-* and /dev/shm/*vertebra*, then run Rust workspace tests (--features tls,compression,gcp)
-make py-test     # Build debug extensions (make dev), verify mypy.stubtest across all 6 extensions, and run the Python pytest suite
+make py-test     # Build debug extensions (make dev), verify mypy.stubtest across every installed extension, and run the Python pytest suite
 make duckdb-test # Run vertebra-duckdb Rust tests, stubtest, and Python unit/conformance suites (make duckdb-wheel-check verifies wheel payload isolation)
-make oracle-test # Run vertebra-oracle Rust unit tests, _oracle stubtest, and Python Oracle adapter tests
-make oracle-wheel-check # Verify standalone vertebra-oracle wheel isolation, pure-Rust linkage, and fail-loud contract
+make mysql-test  # Run vertebra-mysql Rust tests, stubtest, and Python MySQL suites (make mysql-wheel-check verifies wheel isolation)
+make mssql-test  # Run vertebra-mssql Rust tests, stubtest, and Python MSSQL suites (make mssql-wheel-check verifies wheel isolation)
+make oracle-test # Run vertebra-oracle Rust unit tests, _oracle stubtest, and Python Oracle adapter tests (make oracle-wheel-check verifies wheel isolation)
+make postgres-test # Run vertebra-postgres Rust tests and _postgres stubtest (make postgres-wheel-check verifies wheel and sdist isolation)
 make ts-test     # Run the TypeScript Vitest suite with isolated localstorage
 make test        # Run all Rust, Python, and TypeScript test suites
 make coverage    # Run pytest with coverage (coverage.xml, htmlcov/)
@@ -52,7 +54,7 @@ make docs-serve  # Build docs and serve Zensical documentation locally at http:/
 make docs-check  # Build docs (`make docs`) and verify live `zensical serve` responds with HTTP 200
 make docs-clean  # Remove site/ and .cache/ documentation artifacts
 make docs-rust   # Build Rust workspace rustdoc and copy into site/rustdoc/
-make build       # Release build: TS client, non-extension Rust crates, release maturin develop for all 6 extensions, uv build
+make build       # Release build: TS client, non-extension Rust crates, release maturin develop across extensions, uv build
 make build-pgo   # Two-phase Rust PGO instrumentation and profile-use build (or PROFDATA=<path>)
 make bench       # make build, then tools.benchmarks (TARGETS=vtb, SCENARIOS=default by default)
 make bench-all   # make build, then tools.benchmarks across all targets and full scenarios

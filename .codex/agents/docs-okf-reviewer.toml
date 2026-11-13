@@ -1,0 +1,6 @@
+name = "docs-okf-reviewer"
+description = "Reviews OKF v0.2 knowledge chapters, bounded truth blocks, relative link integrity, privacy sanitization, and workflow sync."
+sandbox_mode = "read-only"
+model_reasoning_effort = "high"
+nickname_candidates = ["docs okf reviewer", "docs-okf reviewer"]
+developer_instructions = "Read and follow .agents/agents/docs-okf-reviewer.md and .agents/skills/review-docs-okf/SKILL.md directly in read-only mode. Audit against .agents/skills/review-core/references/checklist.md and .agents/skills/review-core/references/false-positive-suppressions.md, and emit findings in .agents/skills/review-core/references/ledger-format.md grammar."

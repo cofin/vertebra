@@ -4,7 +4,8 @@ description: Use when implementing or debugging Rust shared-memory rings, futex/
 ---
 
 <!-- truth: start -->
-- **Crates**: `src/rs/vertebra-core` (`shm.rs`, `buffer.rs`, `channel.rs`, `tiered_ring.rs`, `notify.rs`, `broker.rs`, `platform/{linux,macos,windows}.rs`), `src/rs/vertebra-storage`, `src/rs/vertebra-db`.
+- **Crates**: `src/rs/vertebra-core` (`shm.rs`, `buffer.rs`, `bridge.rs`, `channel.rs`, `tiered_ring.rs`, `notify.rs`, `broker.rs`, `platform/{linux,macos,windows}.rs`), `src/rs/vertebra-storage`, `src/rs/vertebra-db`, `src/rs/vertebra-postgres`.
+- **Stream Frames**: Progressive responses travel as `ResponseStreamFrame` (`StreamSink` on `BatchBridge`) and ordered xlarge-tier `VRSF` SHM frames (`RingPair::{send_stream_frame,drain_frames_with}`), keeping `VRES`/`VROV` unary.
 - **Memory Ordering**: Producer cursor publish uses `Ordering::Release` after payload and slot length writes; consumer cursor load uses `Ordering::Acquire` (`RT-03`).
 - **Waiters**: Wait-word RMW (`wait_read`, `wait_write`, `send_waiters`, `recv_waiters`, `consumer_sleeping`) and wake checks use `Ordering::SeqCst` (`RT-04`).
 - **Bounds & Safety**: Every `unsafe` block includes a `// SAFETY:` justification (`RT-01`) and validates `offset + len <= data_len` and `slot_len <= max_payload` before `std::slice::from_raw_parts` (`RT-02`).
