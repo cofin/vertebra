@@ -16,25 +16,26 @@ chapters:
   - ch05-framework-mounts-and-litestar-parity
   - ch06-stdio-serve-bridge-and-gcp-auth
   - ch07-docs-and-okf-sync
-current_chapter: ch01-guards-params-and-alias-cleanup
-current_task: "mcp-protocol-completeness:ch01:t01"
+current_chapter: ch02-version-negotiation-and-sessions
+current_task: "mcp-protocol-completeness:ch02:t01"
 parent_prd: integration-remediation
 depends_on_flows:
   - server-runtime-correctness
   - gcp-embeddings-and-identity
 plan_revision: 3
 plan_commit: 18baadcd
-last_verified_checkpoint: 18baadcd
-last_reviewed_commit: 18baadcd
+last_verified_checkpoint: 1f269a58
+last_reviewed_chapter: ch01-guards-params-and-alias-cleanup
+last_reviewed_commit: 1f269a58
 created_at: "2026-11-12T23:45:00Z"
-updated_at: "2026-11-12T23:45:00Z"
+updated_at: "2026-11-13T02:55:00Z"
 generated:
   by: flow-plan
   at: "2026-11-12T23:45:00Z"
 verified:
-  - by: agent:plan-generator
-    at: "2026-11-12T23:45:00Z"
-    commit: 18baadcd
+  - by: agent:code-reviewer
+    at: "2026-11-13T02:55:00Z"
+    commit: 1f269a58
 tags:
   - mcp
   - agent
@@ -162,8 +163,8 @@ class IapIdentitySource:
 
 ## 5. Implementation Plan
 
-- [~] [ch01-guards-params-and-alias-cleanup](chapters/ch01-guards-params-and-alias-cleanup/spec.md) — Single-pass guards, `Mcp-Param-*` validation, single-use expiring confirmation tickets, and `MCPService` alias removal (`4` tasks; `< 15s` gate)
-- [ ] [ch02-version-negotiation-and-sessions](chapters/ch02-version-negotiation-and-sessions/spec.md) — `SUPPORTED_PROTOCOL_VERSIONS` negotiation, `MCPSessionStore`, legacy `initialize`, `2025-03-26` batching, and `DELETE /mcp` ([#109](https://github.com/cofin/vertebra/issues/109)) (`3` tasks; `< 12s` gate)
+- [x] [1f269a58] [ch01-guards-params-and-alias-cleanup](chapters/ch01-guards-params-and-alias-cleanup/spec.md) — Single-pass guards, `Mcp-Param-*` validation, single-use expiring confirmation tickets, and `MCPService` alias removal (`4` tasks; `< 15s` gate)
+- [~] [ch02-version-negotiation-and-sessions](chapters/ch02-version-negotiation-and-sessions/spec.md) — `SUPPORTED_PROTOCOL_VERSIONS` negotiation, `MCPSessionStore`, legacy `initialize`, `2025-03-26` batching, and `DELETE /mcp` ([#109](https://github.com/cofin/vertebra/issues/109)) (`3` tasks; `< 12s` gate)
 - [ ] [ch03-sse-streams-and-resource-subscriptions](chapters/ch03-sse-streams-and-resource-subscriptions/spec.md) — `McpHttpResponse.stream`, `GET /mcp` SSE adapter writers, notifications, `resources/subscribe`, and `subscriptions/listen` ([#109](https://github.com/cofin/vertebra/issues/109), [#112](https://github.com/cofin/vertebra/issues/112)) (`4` tasks; `< 15s` gate)
 - [ ] [ch04-skills-and-mcp-apps-core](chapters/ch04-skills-and-mcp-apps-core/spec.md) — `SkillCatalog` disclosure, `io.modelcontextprotocol/skills`, and SEP-1865 `io.modelcontextprotocol/ui` models/projection ([#110](https://github.com/cofin/vertebra/issues/110), [#111](https://github.com/cofin/vertebra/issues/111)) (`4` tasks; `< 15s` gate)
 - [ ] [ch05-framework-mounts-and-litestar-parity](chapters/ch05-framework-mounts-and-litestar-parity/spec.md) — Native/Starlette/Flask/Django skill + UI validation wiring and `litestar-mcp>=0.20.0` pin (`3` tasks; `< 15s` gate)

@@ -5,22 +5,22 @@ chapter_id: ch01-guards-params-and-alias-cleanup
 title: "Chapter 01: Guards, Mcp-Param Validation, Confirmation Lifecycle, and Alias Cleanup"
 description: "Execute tool guards once with typed JSON-RPC errors, validate Mcp-Param-* headers, enforce single-use expiring confirmation tickets, and remove the no-op MCPService alias subclass."
 status: stable
-state: active
+state: completed
 planning_status: complete
 planning_quality: standard
 planning_degraded_reason: null
 depends_on_chapters: []
 replan_trigger: null
 plan_commit: 18baadcd
-last_reviewed_commit: null
-updated_at: "2026-11-12T23:45:00Z"
+last_reviewed_commit: 1f269a58
+updated_at: "2026-11-13T02:55:00Z"
 generated:
   by: flow-plan
   at: "2026-11-12T23:45:00Z"
 verified:
-  - by: agent:plan-generator
-    at: "2026-11-12T23:45:00Z"
-    commit: 18baadcd
+  - by: agent:code-reviewer
+    at: "2026-11-13T02:55:00Z"
+    commit: 1f269a58
 tags:
   - mcp
   - guards
@@ -84,7 +84,7 @@ Guard error codes, `Mcp-Param-*` validation, single-use confirmation tickets, an
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Implemented (`4/4` tasks at `e22452c5`, `177 passed`)**, awaiting Zero-Context Chapter Review closeout stamp.
+- **Completed & Reviewed (`1f269a58`)**: All `4` tasks in `ch01-guards-params-and-alias-cleanup` (`179 passed`, `mypy` clean) passed zero-context correctness and quality review. Next chapter: `ch02-version-negotiation-and-sessions`.
 - **Fast Chapter Gate (`< 15s`)**: `uv run --no-sync ruff check src/py/vertebra/agent src/py/vertebra/cli/ai.py && uv run --no-sync mypy src/py/vertebra/agent src/py/vertebra/cli/ai.py && uv run --no-sync pytest src/py/tests/unit/agent src/py/tests/unit/cli/test_mcp_cli.py -q`.
 
 [^tool-schema]: `src/py/vertebra/agent/core/schema.py::Tool.invoke` — Single-pass `Tool.authorize` and `Tool.call` composition.
