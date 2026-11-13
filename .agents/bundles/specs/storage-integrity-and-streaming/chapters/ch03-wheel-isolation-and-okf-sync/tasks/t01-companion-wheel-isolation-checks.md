@@ -6,7 +6,13 @@ chapter_id: ch03-wheel-isolation-and-okf-sync
 title: "Add Companion Wheel Isolation Verifier and Makefile/Release Gates"
 description: "Author tools/scripts/verify_storage_wheel.py supporting storage, bigquery, spanner, and bundler, add *-wheel-check targets to Makefile, and harden release.yaml _vertebra assertions."
 status: stable
-state: pending
+state: completed
+commit: 66e6913f
+last_verified_commit: 66e6913f
+last_verified_at: "2026-11-13T04:59:06Z"
+verification_evidence: "ruff + mypy + pytest test_optional_driver_wheels.py (24 passed, 1 skipped) + make -n"
+claimed_by: null
+claimed_at: null
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -78,8 +84,8 @@ uv run --no-sync ruff check tools/scripts/verify_storage_wheel.py src/py/tests/u
 
 ## Acceptance Criteria
 
-- [ ] `verify_storage_wheel.py`, `Makefile`, and `release.yaml` enforce payload isolation across `storage`, `bigquery`, `spanner`, and `bundler` (`R5`).
-- [ ] Zero regressions in `test_optional_driver_wheels.py`, Ruff, Mypy, and `make review-check`.
+- [x] `verify_storage_wheel.py`, `Makefile`, and `release.yaml` enforce payload isolation across `storage`, `bigquery`, `spanner`, and `bundler` (`R5`).
+- [x] Zero regressions in `test_optional_driver_wheels.py`, Ruff, Mypy, and `make review-check`.
 
 [^verify-ora-wheel]: `tools/scripts/verify_oracle_wheel.py` — Reference wheel/sdist/isolated-venv verifier.
 [^makefile]: `Makefile` — Existing `oracle-wheel-check` and `postgres-wheel-check` recipes.

@@ -6,7 +6,13 @@ chapter_id: ch03-wheel-isolation-and-okf-sync
 title: "Update Object Storage User Guides and Changelog"
 description: "Document CRC32C/MD5/SHA-256 receipts, verified reads, IntegrityError, create-only cloud copy, and direct Arrow writes in docs/usage/storage*.md and docs/changelog/index.md."
 status: stable
-state: pending
+state: completed
+commit: 66e6913f
+last_verified_commit: 66e6913f
+last_verified_at: "2026-11-13T04:59:06Z"
+verification_evidence: "make docs (exit 0)"
+claimed_by: null
+claimed_at: null
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -74,8 +80,8 @@ make docs
 
 ## Acceptance Criteria
 
-- [ ] `docs/usage/storage.md`, `docs/usage/storage-parquet-and-orm.md`, and `docs/changelog/index.md` accurately document receipts, verified reads, direct Arrow streaming, and changelog entries (`R6`).
-- [ ] `make docs` exits `0`.
+- [x] `docs/usage/storage.md`, `docs/usage/storage-parquet-and-orm.md`, and `docs/changelog/index.md` accurately document receipts, verified reads, direct Arrow streaming, and changelog entries (`R6`).
+- [x] `make docs` exits `0`.
 
 [^docs-storage]: `docs/usage/storage.md` — Object storage usage guide.
 [^docs-parquet]: `docs/usage/storage-parquet-and-orm.md` — Parquet, Arrow, and ORM storage guide.

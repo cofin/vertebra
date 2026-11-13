@@ -6,7 +6,13 @@ chapter_id: ch03-wheel-isolation-and-okf-sync
 title: "Synchronize Object Storage OKF Chapters Within 200 Lines and Draft Upstream SQLSpec Hook"
 description: "Update object-storage.md (<= 200L) and object-storage-limitations.md (<= 200L) with receipts, verified reads, and caveats, and author research/upstream-sqlspec-direct-arrow-write.md."
 status: stable
-state: pending
+state: completed
+commit: 66e6913f
+last_verified_commit: 66e6913f
+last_verified_at: "2026-11-13T04:59:06Z"
+verification_evidence: "make docs + make review-check (exit 0; 175L / 86L / 41L)"
+claimed_by: null
+claimed_at: null
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -78,8 +84,8 @@ python3 -c 'from pathlib import Path; [(_ for _ in ()).throw(AssertionError(f"{p
 
 ## Acceptance Criteria
 
-- [ ] `object-storage.md` (`<= 200L`), `object-storage-limitations.md` (`<= 200L`), and `research/upstream-sqlspec-direct-arrow-write.md` pass all OKF v0.2 and privacy checks (`R6`).
-- [ ] Zero regressions in `make docs && make review-check`.
+- [x] `object-storage.md` (`<= 200L`), `object-storage-limitations.md` (`<= 200L`), and `research/upstream-sqlspec-direct-arrow-write.md` pass all OKF v0.2 and privacy checks (`R6`).
+- [x] Zero regressions in `make docs && make review-check`.
 
 [^okf-storage]: `.agents/bundles/knowledge/domains/storage/object-storage.md` — Object storage OKF chapter.
 [^okf-limitations]: `.agents/bundles/knowledge/domains/storage/object-storage-limitations.md` — Object storage limitations OKF chapter.

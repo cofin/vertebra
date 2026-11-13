@@ -5,7 +5,7 @@ chapter_id: ch03-wheel-isolation-and-okf-sync
 title: "Chapter 03: Companion Wheel Payload Isolation, User Docs, and Storage OKF Sync"
 description: "Adds verify_storage_wheel.py and Makefile/release.yaml payload isolation checks across storage, bigquery, spanner, and bundler, updates storage user docs and changelog, and synchronizes object-storage OKF chapters within 200 lines."
 status: stable
-state: planned
+state: active
 planning_status: complete
 planning_quality: standard
 planning_degraded_reason: null
@@ -94,12 +94,13 @@ def main(argv: Sequence[str] | None = None) -> int: ...
 
 ## 5. Implementation Plan
 
-- [ ] [t01-companion-wheel-isolation-checks.md](tasks/t01-companion-wheel-isolation-checks.md) — Create `tools/scripts/verify_storage_wheel.py` (`storage`, `bigquery`, `spanner`, `bundler`) and wire `*-wheel-check` targets into `Makefile` and `.github/workflows/release.yaml`.
-- [ ] [t02-storage-user-docs-and-changelog.md](tasks/t02-storage-user-docs-and-changelog.md) — Update `docs/usage/storage.md`, `docs/usage/storage-parquet-and-orm.md`, and `docs/changelog/index.md`.
-- [ ] [t03-storage-okf-limitations-and-upstream-note.md](tasks/t03-storage-okf-limitations-and-upstream-note.md) — Synchronize `object-storage.md` (`<= 200L`), `object-storage-limitations.md` (`<= 200L`), and `research/upstream-sqlspec-direct-arrow-write.md`.
+- [x] [66e6913f] [t01-companion-wheel-isolation-checks.md](tasks/t01-companion-wheel-isolation-checks.md) — Create `tools/scripts/verify_storage_wheel.py` (`storage`, `bigquery`, `spanner`, `bundler`) and wire `*-wheel-check` targets into `Makefile` and `.github/workflows/release.yaml`.
+- [x] [66e6913f] [t02-storage-user-docs-and-changelog.md](tasks/t02-storage-user-docs-and-changelog.md) — Update `docs/usage/storage.md`, `docs/usage/storage-parquet-and-orm.md`, and `docs/changelog/index.md`.
+- [x] [66e6913f] [t03-storage-okf-limitations-and-upstream-note.md](tasks/t03-storage-okf-limitations-and-upstream-note.md) — Synchronize `object-storage.md` (`<= 200L`), `object-storage-limitations.md` (`<= 200L`), and `research/upstream-sqlspec-direct-arrow-write.md`.
 
 ## 6. Current State & Remaining Plan Snapshot
 
+- **Implemented (`3/3` tasks at `66e6913f`)**: `verify_storage_wheel.py`, `Makefile` / `release.yaml` isolation checks, storage user/reference docs, changelog, `object-storage.md` (`175L`), `object-storage-limitations.md` (`86L`), and `research/upstream-sqlspec-direct-arrow-write.md` (`41L`) are verified (`24` + `1` skipped `test_optional_driver_wheels.py`, `ruff`, `mypy`, `make docs`, and `make review-check` clean).
 - **Fast Chapter Gate (`< 45s`)**:
   `uv run --no-sync ruff check tools/scripts/verify_storage_wheel.py && uv run --no-sync mypy tools/scripts/verify_storage_wheel.py && uv run --no-sync pytest src/py/tests/unit/db/test_optional_driver_wheels.py -q && make docs && make review-check`
 
