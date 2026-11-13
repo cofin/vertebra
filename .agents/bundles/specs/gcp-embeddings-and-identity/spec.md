@@ -14,15 +14,15 @@ chapters:
   - ch03-pushdown-and-local-embedding-broker
   - ch04-docs-and-okf-sync
 current_chapter: ch04-docs-and-okf-sync
-current_task: "gcp-embeddings-and-identity:ch04:t01"
+current_task: null
 parent_prd: integration-remediation
 plan_revision: 2
 plan_commit: 18baadcd
-last_verified_checkpoint: 5771c8e3
+last_verified_checkpoint: 01a74272
 last_reviewed_chapter: ch03-pushdown-and-local-embedding-broker
 last_reviewed_commit: ef00252d
 created_at: "2026-11-12T00:35:00Z"
-updated_at: "2026-11-13T05:22:00Z"
+updated_at: "2026-11-13T05:35:00Z"
 generated:
   by: flow-plan
   at: "2026-11-12T23:45:00Z"
@@ -124,11 +124,11 @@ At baseline `18baadcd`, outbound calls to Cloud Run, Cloud Functions, and IAP-pr
 - [x] [b3253fee] [ch01-gcp-id-token-cache](chapters/ch01-gcp-id-token-cache/spec.md) — Audience-bound Rust & PyO3 `SyncGcpIdTokenCache` / `AsyncGcpIdTokenCache` (supporting GCE metadata, SA JWTs, IAM impersonation, `gcloud`, and `authorized_user` ADC), core ADC fallback, stubs, and `vertebra.storage` exports.
 - [x] [d031307b] [ch02-vertex-and-gemini-embedder-wire-parity](chapters/ch02-vertex-and-gemini-embedder-wire-parity/spec.md) — Gemini protobuf field-2 + inline/file media wire codec, `_GoogleEmbedder` per-loop auth base, Vertex AI REST `:predict` / `:embedContent` + multimodal, and `RemoteEmbedder` ID-token auth.
 - [x] [ef00252d] [ch03-pushdown-and-local-embedding-broker](chapters/ch03-pushdown-and-local-embedding-broker/spec.md) — Explicit Oracle credential rotation, BigQuery/Spanner/Postgres pushdown parity, per-event-loop `EmbeddingBroker` state + SHM cleanup, and `GemmaEmbedder` precision forwarding.
-- [~] [ch04-docs-and-okf-sync](chapters/ch04-docs-and-okf-sync/spec.md) — Embeddings and GCP identity user docs, `embeddings-and-vectors.md` (`<= 200L`) + FFI/storage OKF sync, and in-place `embeddings-limitations.md` update.
+- [x] [01a74272] [ch04-docs-and-okf-sync](chapters/ch04-docs-and-okf-sync/spec.md) — Embeddings and GCP identity user docs, `embeddings-and-vectors.md` (`<= 200L`) + FFI/storage OKF sync, and in-place `embeddings-limitations.md` update.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Active Frontier**: `ch01-gcp-id-token-cache` (`4/4` tasks), `ch02-vertex-and-gemini-embedder-wire-parity` (`4/4` tasks), and `ch03-pushdown-and-local-embedding-broker` (`4/4` tasks) are completed (`5771c8e3`); active frontier advances to final chapter `ch04-docs-and-okf-sync` (`gcp-embeddings-and-identity:ch04:t01`, `3` open `compact` tasks remain).
+- **Active Frontier**: All `4` chapters (`15/15` tasks) completed through `ch04-docs-and-okf-sync` (`01a74272`); awaiting Frontier Joint Review Gate and `/flow:finish` contraction.
 - **Cross-Flow Unblock**: `ch01-gcp-id-token-cache` is complete on `feat/gcp-embeddings-and-identity`, ready to unblock `mcp-protocol-completeness` `ch06` bridge OIDC token authentication ([#113](https://github.com/cofin/vertebra/issues/113)).
 - **Release Gate (`/flow:finish`)**: `make lint-all && make rs-test && make py-test && make docs && make review-check`.
 

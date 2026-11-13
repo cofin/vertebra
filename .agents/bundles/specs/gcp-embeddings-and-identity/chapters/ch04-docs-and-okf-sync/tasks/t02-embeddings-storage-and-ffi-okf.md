@@ -6,7 +6,8 @@ chapter_id: ch04-docs-and-okf-sync
 title: "Synchronize Embeddings, Storage, and PyO3 FFI OKF Chapters Within 200 Lines"
 description: "Update embeddings-and-vectors.md (trimming 211L to <= 200L), object-storage.md, and pyo3-ffi-and-batch-dispatch.md with shipped transports, broker/Gemma fixes, and ID token FFI bindings."
 status: stable
-state: pending
+state: completed
+commit: 01a74272
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact

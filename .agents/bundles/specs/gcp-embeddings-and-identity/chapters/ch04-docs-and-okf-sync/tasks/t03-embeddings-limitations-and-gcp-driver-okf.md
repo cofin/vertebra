@@ -6,7 +6,8 @@ chapter_id: ch04-docs-and-okf-sync
 title: "Update Existing embeddings-limitations.md In Place and Align GCP Driver ADC OKF"
 description: "Rewrite .agents/bundles/knowledge/domains/agent/embeddings-limitations.md in place without creating duplicate limitation files, and update canonical ADC order in gcp-bigquery-and-spanner-drivers.md."
 status: stable
-state: pending
+state: completed
+commit: 01a74272
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact

@@ -6,7 +6,8 @@ chapter_id: ch04-docs-and-okf-sync
 title: "Update User Guides and API Reference for Embeddings and GCP Identity Tokens"
 description: "Synchronize docs/usage/embeddings-and-vectors.md, docs/usage/storage-auth-and-signing.md, and docs/reference/storage.md with Vertex REST, Gemini multimodal, ADC order, and ID token caches."
 status: stable
-state: pending
+state: completed
+commit: 01a74272
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact

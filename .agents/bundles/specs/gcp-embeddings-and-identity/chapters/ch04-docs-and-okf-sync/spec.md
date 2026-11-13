@@ -5,7 +5,7 @@ chapter_id: ch04-docs-and-okf-sync
 title: "Chapter 04: User Documentation, OKF Sync, and Embeddings Limitations"
 description: "Updates embeddings and GCP authentication user guides, synchronizes embeddings-and-vectors.md within 200 lines alongside storage and PyO3 FFI OKF chapters, and updates embeddings-limitations.md in place."
 status: stable
-state: planned
+state: active
 planning_status: complete
 planning_quality: standard
 planning_degraded_reason: null
@@ -13,7 +13,7 @@ depends_on_chapters:
   - ch02-vertex-and-gemini-embedder-wire-parity
   - ch03-pushdown-and-local-embedding-broker
 plan_commit: 18baadcd
-updated_at: "2026-11-12T23:45:00Z"
+updated_at: "2026-11-13T05:35:00Z"
 generated:
   by: flow-plan
   at: "2026-11-12T23:45:00Z"
@@ -91,11 +91,13 @@ After `ch01`–`ch03` land, public documentation and OKF chapters must state pre
 
 ## 5. Implementation Plan
 
-- [ ] [t01-user-embeddings-and-identity-docs.md](tasks/t01-user-embeddings-and-identity-docs.md) — Update embeddings, GCP credentials/IAP/Cloud Run ID token guides, and `vertebra.storage` API reference.
-- [ ] [t02-embeddings-storage-and-ffi-okf.md](tasks/t02-embeddings-storage-and-ffi-okf.md) — Synchronize `embeddings-and-vectors.md` (`211L -> <= 200L`), `object-storage.md`, and `pyo3-ffi-and-batch-dispatch.md`.
-- [ ] [t03-embeddings-limitations-and-gcp-driver-okf.md](tasks/t03-embeddings-limitations-and-gcp-driver-okf.md) — Update `embeddings-limitations.md` in place without duplicate limitation files and align ADC order in `gcp-bigquery-and-spanner-drivers.md`.
+- [x] [01a74272] [t01-user-embeddings-and-identity-docs.md](tasks/t01-user-embeddings-and-identity-docs.md) — Update embeddings, GCP credentials/IAP/Cloud Run ID token guides, and `vertebra.storage` API reference.
+- [x] [01a74272] [t02-embeddings-storage-and-ffi-okf.md](tasks/t02-embeddings-storage-and-ffi-okf.md) — Synchronize `embeddings-and-vectors.md` (`211L -> <= 200L`), `object-storage.md`, and `pyo3-ffi-and-batch-dispatch.md`.
+- [x] [01a74272] [t03-embeddings-limitations-and-gcp-driver-okf.md](tasks/t03-embeddings-limitations-and-gcp-driver-okf.md) — Update `embeddings-limitations.md` in place without duplicate limitation files and align ADC order in `gcp-bigquery-and-spanner-drivers.md`.
 
 ## 6. Current State & Remaining Plan Snapshot
+
+Completed (`3/3` tasks at `01a74272`).
 
 - **Fast Chapter Gate (`< 45s`)**:
   `make docs && make review-check`
