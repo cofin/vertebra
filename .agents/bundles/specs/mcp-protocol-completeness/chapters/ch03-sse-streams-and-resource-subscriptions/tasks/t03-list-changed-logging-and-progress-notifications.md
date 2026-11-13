@@ -6,7 +6,13 @@ chapter_id: ch03-sse-streams-and-resource-subscriptions
 title: "Publish List-Changed, Level-Gated Logging, and Progress Notifications"
 description: "Wire ToolRegistry mutation kinds to list_changed broadcasts, add level-gated MCPCore.log, and deliver notifications/progress over POST SSE or session streams."
 status: stable
-state: pending
+state: completed
+commit: 2454dbef
+last_verified_commit: 2454dbef
+last_verified_at: "2026-11-13T05:02:00Z"
+verification_evidence: "ruff + mypy (41 files) + pytest (251 passed)"
+claimed_by: null
+claimed_at: null
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -68,8 +74,8 @@ uv run --no-sync ruff check src/py/vertebra/agent/mcp/registry.py src/py/vertebr
 
 ## Acceptance Criteria
 
-- [ ] Registry mutations, `MCPCore.log`, and `_meta.progressToken` emit spec-compliant JSON-RPC notifications.
-- [ ] Log messages below a session's configured severity are suppressed.
+- [x] Registry mutations, `MCPCore.log`, and `_meta.progressToken` emit spec-compliant JSON-RPC notifications.
+- [x] Log messages below a session's configured severity are suppressed.
 
 [^registry-py]: `src/py/vertebra/agent/mcp/registry.py::ToolRegistry.add_listener` — Registry mutation listener registration.
 [^progress-py]: `src/py/vertebra/agent/core/context.py::ProgressReporter` — Context progress callback carrier.

@@ -6,7 +6,13 @@ chapter_id: ch03-sse-streams-and-resource-subscriptions
 title: Add McpHttpResponse.stream and Legacy GET /mcp SSE Streams
 description: "Extend McpHttpResponse with stream, add SseStreamBroker.open_stream with replay/heartbeat/owner limits, and handle legacy GET /mcp in MCPCore."
 status: stable
-state: pending
+state: completed
+commit: 2454dbef
+last_verified_commit: 2454dbef
+last_verified_at: "2026-11-13T05:02:00Z"
+verification_evidence: "ruff + mypy (41 files) + pytest (251 passed)"
+claimed_by: null
+claimed_at: null
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -68,8 +74,8 @@ uv run --no-sync ruff check src/py/vertebra/agent/core/sse.py src/py/vertebra/ag
 
 ## Acceptance Criteria
 
-- [ ] Legacy `GET /mcp` opens bounded resumable SSE streams while `2026-07-28` `GET` returns `405`.
-- [ ] Closing or cancelling a stream releases subscriber and owner-quota state.
+- [x] Legacy `GET /mcp` opens bounded resumable SSE streams while `2026-07-28` `GET` returns `405`.
+- [x] Closing or cancelling a stream releases subscriber and owner-quota state.
 
 [^sse-broker]: `src/py/vertebra/agent/core/sse.py::SseStreamBroker` — SSE replay and subscriber broker.
 [^mcp-handle]: `src/py/vertebra/agent/mcp/service.py::MCPCore.handle` — HTTP verb dispatch.

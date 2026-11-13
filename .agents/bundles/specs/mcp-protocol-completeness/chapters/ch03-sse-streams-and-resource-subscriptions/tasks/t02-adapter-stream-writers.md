@@ -6,7 +6,13 @@ chapter_id: ch03-sse-streams-and-resource-subscriptions
 title: Write Incremental MCP SSE Streams Across All Framework Adapters
 description: "Wire McpHttpResponse.stream through AsgiMcpApp, Starlette, WsgiMcpApp, native AgentPlugin, Litestar fallback, and Django."
 status: stable
-state: pending
+state: completed
+commit: 2454dbef
+last_verified_commit: 2454dbef
+last_verified_at: "2026-11-13T05:02:00Z"
+verification_evidence: "ruff + mypy (41 files) + pytest (251 passed)"
+claimed_by: null
+claimed_at: null
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -74,8 +80,8 @@ uv run --no-sync ruff check src/py/vertebra/agent/mcp/routes.py src/py/vertebra/
 
 ## Acceptance Criteria
 
-- [ ] Every MCP HTTP adapter yields SSE chunks progressively and closes `resp.stream` on client disconnect.
-- [ ] `GET`, `POST`, `DELETE`, and `OPTIONS` are routed on every mount.
+- [x] Every MCP HTTP adapter yields SSE chunks progressively and closes `resp.stream` on client disconnect.
+- [x] `GET`, `POST`, `DELETE`, and `OPTIONS` are routed on every mount.
 
 [^mcp-routes]: `src/py/vertebra/agent/mcp/routes.py::AsgiMcpApp` — ASGI, Starlette, and WSGI MCP adapters.
 [^agent-plugin]: `src/py/vertebra/agent/plugin.py::AgentPlugin.mount_native` — Native App and Litestar fallback MCP mounts.

@@ -6,7 +6,13 @@ chapter_id: ch03-sse-streams-and-resource-subscriptions
 title: "Implement Resource Subscriptions, Update Fan-Out, and Stateless subscriptions/listen"
 description: "Add authorized resources/subscribe and unsubscribe, async notify_resource_updated fan-out with session cleanup, and 2026-07-28 subscriptions/listen SSE streams."
 status: stable
-state: pending
+state: completed
+commit: 2454dbef
+last_verified_commit: 2454dbef
+last_verified_at: "2026-11-13T05:02:00Z"
+verification_evidence: "ruff + mypy (41 files) + pytest (251 passed)"
+claimed_by: null
+claimed_at: null
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -69,8 +75,8 @@ uv run --no-sync ruff check src/py/vertebra/agent/mcp && uv run --no-sync mypy s
 
 ## Acceptance Criteria
 
-- [ ] `notify_resource_updated` delivers frames to subscribed legacy sessions and stateless `subscriptions/listen` streams.
-- [ ] Session expiry or `DELETE` removes reverse URI subscriptions with zero leaks.
+- [x] `notify_resource_updated` delivers frames to subscribed legacy sessions and stateless `subscriptions/listen` streams.
+- [x] Session expiry or `DELETE` removes reverse URI subscriptions with zero leaks.
 
 [^notify-py]: `src/py/vertebra/agent/mcp/service.py::MCPCore.notify_resource_updated` — Resource update notification method.
 [^resources-read]: `src/py/vertebra/agent/mcp/service.py::MCPCore._handle_resources_read` — Resource and template URI lookup.

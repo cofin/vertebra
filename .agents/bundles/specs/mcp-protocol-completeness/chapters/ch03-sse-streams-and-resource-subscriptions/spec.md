@@ -5,7 +5,7 @@ chapter_id: ch03-sse-streams-and-resource-subscriptions
 title: "Chapter 03: GET SSE Streams, Notifications, and Resource Subscriptions"
 description: "Add McpHttpResponse.stream, GET /mcp SSE streams across all adapters, list/log/progress notifications, authorized resources/subscribe fan-out, and 2026-07-28 subscriptions/listen."
 status: stable
-state: planned
+state: active
 planning_status: empirical_dependent
 planning_quality: standard
 planning_degraded_reason: null
@@ -14,7 +14,7 @@ depends_on_chapters:
 replan_trigger: "Confirm server-runtime-correctness ch01 progressive ASGI and native App (status, headers, AsyncIterable[bytes]) streaming before executing t02"
 plan_commit: 18baadcd
 last_reviewed_commit: null
-updated_at: "2026-11-12T23:45:00Z"
+updated_at: "2026-11-13T05:02:00Z"
 generated:
   by: flow-plan
   at: "2026-11-12T23:45:00Z"
@@ -78,13 +78,14 @@ SSE streaming, progress notifications, and resource subscriptions are documented
 
 ## 5. Implementation Plan
 
-- [ ] [t01-streaming-envelope-and-legacy-get-sse.md](tasks/t01-streaming-envelope-and-legacy-get-sse.md) — Add `McpHttpResponse.stream`, `SseStreamBroker.open_stream`, and legacy `GET /mcp` SSE negotiation
-- [ ] [t02-adapter-stream-writers.md](tasks/t02-adapter-stream-writers.md) — Stream `McpHttpResponse.stream` incrementally across ASGI, Starlette, WSGI, native `App`, Litestar fallback, and Django
-- [ ] [t03-list-changed-logging-and-progress-notifications.md](tasks/t03-list-changed-logging-and-progress-notifications.md) — Broadcast `list_changed`, level-gated `MCPCore.log`, and POST/session progress notifications
-- [ ] [t04-resource-subscriptions-fanout-and-stateless-listen.md](tasks/t04-resource-subscriptions-fanout-and-stateless-listen.md) — Implement `resources/subscribe`, async `notify_resource_updated` fan-out, and `2026-07-28` `subscriptions/listen`
+- [x] [2454dbef] [t01-streaming-envelope-and-legacy-get-sse.md](tasks/t01-streaming-envelope-and-legacy-get-sse.md) — Add `McpHttpResponse.stream`, `SseStreamBroker.open_stream`, and legacy `GET /mcp` SSE negotiation
+- [x] [2454dbef] [t02-adapter-stream-writers.md](tasks/t02-adapter-stream-writers.md) — Stream `McpHttpResponse.stream` incrementally across ASGI, Starlette, WSGI, native `App`, Litestar fallback, and Django
+- [x] [2454dbef] [t03-list-changed-logging-and-progress-notifications.md](tasks/t03-list-changed-logging-and-progress-notifications.md) — Broadcast `list_changed`, level-gated `MCPCore.log`, and POST/session progress notifications
+- [x] [2454dbef] [t04-resource-subscriptions-fanout-and-stateless-listen.md](tasks/t04-resource-subscriptions-fanout-and-stateless-listen.md) — Implement `resources/subscribe`, async `notify_resource_updated` fan-out, and `2026-07-28` `subscriptions/listen`
 
 ## 6. Current State & Remaining Plan Snapshot
 
+- **Status**: `t01`–`t04` are implemented and verified at `2454dbef` (`ruff`, `mypy` across 41 files, and `251` unit tests pass).
 - **Fast Chapter Gate (`< 15s`)**: `uv run --no-sync ruff check src/py/vertebra/agent src/py/vertebra/extensions/django/mcp.py && uv run --no-sync mypy src/py/vertebra/agent src/py/vertebra/extensions/django/mcp.py && uv run --no-sync pytest src/py/tests/unit/agent/test_core_and_observability.py src/py/tests/unit/agent/test_mcp_conformance.py -q`.
 
 [^sse-broker]: `src/py/vertebra/agent/core/sse.py::SseStreamBroker` — SSE replay buffers and subscriber channels.
