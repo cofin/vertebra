@@ -6,7 +6,13 @@ chapter_id: ch03-pushdown-and-local-embedding-broker
 title: "Make OracleEmbeddingPushdown Credential Rotation Explicit and Fail-Loud"
 description: "Rotate Oracle DBMS_VECTOR credentials only when token_cache is explicitly passed, normalize SyncGcpTokenCache via to_async(), propagate token errors, and enforce exact vector dimensions."
 status: stable
-state: pending
+state: completed
+commit: 5771c8e3
+last_verified_commit: 5771c8e3
+last_verified_at: "2026-11-13T05:20:15Z"
+verification_evidence: "ruff + mypy (12 files) + pytest (404 passed)"
+claimed_by: null
+claimed_at: null
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -67,7 +73,7 @@ uv run --no-sync ruff check src/py/vertebra/db/adapters/oracle/embeddings.py && 
 
 ## Acceptance Criteria
 
-- [ ] `OracleEmbeddingPushdown` never constructs implicit token caches or imports `vertebra.storage`, propagates token refresh failures, and validates `top_k` and exact `dimensions` (`R10`).
-- [ ] Zero regressions in Oracle embedding pushdown tests.
+- [x] `OracleEmbeddingPushdown` never constructs implicit token caches or imports `vertebra.storage`, propagates token refresh failures, and validates `top_k` and exact `dimensions` (`R10`).
+- [x] Zero regressions in Oracle embedding pushdown tests.
 
 [^py-oracle-pushdown]: `src/py/vertebra/db/adapters/oracle/embeddings.py::OracleEmbeddingPushdown._ensure_oracle_credential_fresh` — Oracle credential rotation with implicit metadata cache and silent `ValueError` skip.

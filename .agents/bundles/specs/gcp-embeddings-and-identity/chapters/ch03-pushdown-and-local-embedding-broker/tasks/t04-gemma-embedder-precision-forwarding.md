@@ -6,7 +6,13 @@ chapter_id: ch03-pushdown-and-local-embedding-broker
 title: "Validate and Forward GemmaEmbedder Precision Through BackendFactory"
 description: "Validate GemmaEmbedder precision against {'int8', 'q4', 'bf16', 'fp32'} and forward precision through BackendFactory.options into FastEmbedder.build_backend."
 status: stable
-state: pending
+state: completed
+commit: 5771c8e3
+last_verified_commit: 5771c8e3
+last_verified_at: "2026-11-13T05:20:15Z"
+verification_evidence: "ruff + mypy (12 files) + pytest (404 passed)"
+claimed_by: null
+claimed_at: null
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -66,7 +72,7 @@ uv run --no-sync ruff check src/py/vertebra/embeddings/_local.py src/py/tests/un
 
 ## Acceptance Criteria
 
-- [ ] `GemmaEmbedder` validates `precision`, serializes it in `BackendFactory.options`, and forwards quantization settings into `FastEmbedder.build_backend` (`R12`).
-- [ ] Zero regressions in the chapter's fast verification gate.
+- [x] `GemmaEmbedder` validates `precision`, serializes it in `BackendFactory.options`, and forwards quantization settings into `FastEmbedder.build_backend` (`R12`).
+- [x] Zero regressions in the chapter's fast verification gate.
 
 [^py-local]: `src/py/vertebra/embeddings/_local.py::GemmaEmbedder` — `GemmaEmbedder.__init__` and `FastEmbedder.build_backend`.

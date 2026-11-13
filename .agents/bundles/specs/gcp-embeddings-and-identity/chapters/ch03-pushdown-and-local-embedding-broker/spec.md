@@ -5,14 +5,15 @@ chapter_id: ch03-pushdown-and-local-embedding-broker
 title: "Chapter 03: SQL Embedding Pushdown Parity and Local EmbeddingBroker Hardening"
 description: "Makes Oracle credential rotation explicit and fail-loud, aligns BigQuery, Spanner, and PostgreSQL embedding pushdown contracts, isolates EmbeddingBroker state per event loop with verified SHM cleanup, and forwards GemmaEmbedder precision options."
 status: stable
-state: planned
+state: active
 planning_status: complete
 planning_quality: standard
 planning_degraded_reason: null
 depends_on_chapters:
   - ch01-gcp-id-token-cache
 plan_commit: 18baadcd
-updated_at: "2026-11-12T23:45:00Z"
+last_reviewed_commit: null
+updated_at: "2026-11-13T05:20:15Z"
 generated:
   by: flow-plan
   at: "2026-11-12T23:45:00Z"
@@ -115,13 +116,14 @@ Pushdown and local broker invariants are synchronized in `docs/usage/embeddings-
 
 ## 5. Implementation Plan
 
-- [ ] [t01-oracle-pushdown-explicit-credential-rotation.md](tasks/t01-oracle-pushdown-explicit-credential-rotation.md) — Remove implicit metadata/storage fallbacks from `OracleEmbeddingPushdown`, normalize sync token caches, propagate token errors, and enforce exact vector dimensions.
-- [ ] [t02-sql-embedding-pushdown-parity.md](tasks/t02-sql-embedding-pushdown-parity.md) — Add `embed_batch`, `top_k > 0`, boolean-element rejection, and exact `dimensions` checks across BigQuery/Spanner/Postgres pushdowns plus Spanner `AI.GENERATE_EMBEDDING` task/dimension binds.
-- [ ] [t03-embedding-broker-per-loop-and-shm-lifecycle.md](tasks/t03-embedding-broker-per-loop-and-shm-lifecycle.md) — Isolate `EmbeddingBroker` queue, lock, flush task, and sidecar per running event loop and guarantee `/dev/shm/vtb-qvec-*` unlink on success and error paths.
-- [ ] [t04-gemma-embedder-precision-forwarding.md](tasks/t04-gemma-embedder-precision-forwarding.md) — Validate `GemmaEmbedder` `precision` modes and forward `precision` through `BackendFactory.options` into `FastEmbedder.build_backend`.
+- [x] [5771c8e3] [t01-oracle-pushdown-explicit-credential-rotation.md](tasks/t01-oracle-pushdown-explicit-credential-rotation.md) — Remove implicit metadata/storage fallbacks from `OracleEmbeddingPushdown`, normalize sync token caches, propagate token errors, and enforce exact vector dimensions.
+- [x] [5771c8e3] [t02-sql-embedding-pushdown-parity.md](tasks/t02-sql-embedding-pushdown-parity.md) — Add `embed_batch`, `top_k > 0`, boolean-element rejection, and exact `dimensions` checks across BigQuery/Spanner/Postgres pushdowns plus Spanner `AI.GENERATE_EMBEDDING` task/dimension binds.
+- [x] [5771c8e3] [t03-embedding-broker-per-loop-and-shm-lifecycle.md](tasks/t03-embedding-broker-per-loop-and-shm-lifecycle.md) — Isolate `EmbeddingBroker` queue, lock, flush task, and sidecar per running event loop and guarantee `/dev/shm/vtb-qvec-*` unlink on success and error paths.
+- [x] [5771c8e3] [t04-gemma-embedder-precision-forwarding.md](tasks/t04-gemma-embedder-precision-forwarding.md) — Validate `GemmaEmbedder` `precision` modes and forward `precision` through `BackendFactory.options` into `FastEmbedder.build_backend`.
 
 ## 6. Current State & Remaining Plan Snapshot
 
+- **Status**: `t01`–`t04` are implemented and verified at `5771c8e3` (`ruff`, `mypy` across 12 source files, and `404` unit tests pass).
 - **Fast Chapter Gate (`< 20s`)**:
   `uv run --no-sync ruff check src/py/vertebra/embeddings src/py/vertebra/db/adapters/{oracle,bigquery,spanner,postgres}/embeddings.py && uv run --no-sync mypy src/py/vertebra/embeddings src/py/vertebra/db/adapters/{oracle,bigquery,spanner,postgres}/embeddings.py && uv run --no-sync pytest src/py/tests/unit/embeddings/test_embedding_broker.py src/py/tests/unit/embeddings/test_google_embedders.py src/py/tests/unit/db/test_bigquery.py src/py/tests/unit/db/test_spanner.py src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py -q`
 

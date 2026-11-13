@@ -6,7 +6,13 @@ chapter_id: ch03-pushdown-and-local-embedding-broker
 title: "Align BigQuery, Spanner, and PostgreSQL SQL Embedding Pushdown Contracts"
 description: "Add embed_batch, top_k > 0 validation, boolean rejection, and exact dimensions enforcement across BigQuery, Spanner, and PostgreSQL pushdowns, and bind task_type and output_dimensionality on Spanner AI.GENERATE_EMBEDDING."
 status: stable
-state: pending
+state: completed
+commit: 5771c8e3
+last_verified_commit: 5771c8e3
+last_verified_at: "2026-11-13T05:20:15Z"
+verification_evidence: "ruff + mypy (12 files) + pytest (404 passed)"
+claimed_by: null
+claimed_at: null
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -80,8 +86,8 @@ uv run --no-sync ruff check src/py/vertebra/db/adapters/{bigquery,spanner,postgr
 
 ## Acceptance Criteria
 
-- [ ] BigQuery, Spanner, and PostgreSQL pushdowns expose `embed_batch`, enforce `top_k > 0`, boolean-free vectors, and exact `dimensions`, and Spanner `AI.GENERATE_EMBEDDING` binds `task_type` and `output_dimensionality` (`R12`).
-- [ ] Zero regressions across BigQuery, Spanner, and PostgreSQL unit suites.
+- [x] BigQuery, Spanner, and PostgreSQL pushdowns expose `embed_batch`, enforce `top_k > 0`, boolean-free vectors, and exact `dimensions`, and Spanner `AI.GENERATE_EMBEDDING` binds `task_type` and `output_dimensionality` (`R12`).
+- [x] Zero regressions across BigQuery, Spanner, and PostgreSQL unit suites.
 
 [^py-bq-pushdown]: `src/py/vertebra/db/adapters/bigquery/embeddings.py::BigQueryEmbeddingPushdown` — BigQuery SQL embedding pushdown.
 [^py-spanner-pushdown]: `src/py/vertebra/db/adapters/spanner/embeddings.py::SpannerEmbeddingPushdown` — Spanner SQL embedding pushdown.

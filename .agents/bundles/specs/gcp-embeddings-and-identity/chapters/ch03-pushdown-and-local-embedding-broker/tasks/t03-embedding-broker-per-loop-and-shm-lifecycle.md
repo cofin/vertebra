@@ -6,7 +6,13 @@ chapter_id: ch03-pushdown-and-local-embedding-broker
 title: "Isolate EmbeddingBroker State Per Event Loop and Enforce Sidecar SHM Cleanup"
 description: "Replace cross-loop shared asyncio primitives on EmbeddingBroker with per-event-loop _BrokerLoopState and ensure /dev/shm/vtb-qvec-* segments are unlinked on both normal and error paths."
 status: stable
-state: pending
+state: completed
+commit: 5771c8e3
+last_verified_commit: 5771c8e3
+last_verified_at: "2026-11-13T05:20:15Z"
+verification_evidence: "ruff + mypy (12 files) + pytest (404 passed)"
+claimed_by: null
+claimed_at: null
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -65,7 +71,7 @@ uv run --no-sync ruff check src/py/vertebra/embeddings/_broker.py src/py/tests/u
 
 ## Acceptance Criteria
 
-- [ ] `EmbeddingBroker` isolates `asyncio` queues, tasks, locks, and sidecars per running event loop and leaves zero leaked `/dev/shm/vtb-qvec-*` segments on success or failure (`R12`).
-- [ ] Zero regressions in `test_embedding_broker.py`.
+- [x] `EmbeddingBroker` isolates `asyncio` queues, tasks, locks, and sidecars per running event loop and leaves zero leaked `/dev/shm/vtb-qvec-*` segments on success or failure (`R12`).
+- [x] Zero regressions in `test_embedding_broker.py`.
 
 [^py-broker]: `src/py/vertebra/embeddings/_broker.py::EmbeddingBroker` — `EmbeddingBroker` shared `_pending`, `_flush_task`, `_subprocess_lock`, and sidecar SHM RPC.
