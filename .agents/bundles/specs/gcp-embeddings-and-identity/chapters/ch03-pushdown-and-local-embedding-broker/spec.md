@@ -5,22 +5,22 @@ chapter_id: ch03-pushdown-and-local-embedding-broker
 title: "Chapter 03: SQL Embedding Pushdown Parity and Local EmbeddingBroker Hardening"
 description: "Makes Oracle credential rotation explicit and fail-loud, aligns BigQuery, Spanner, and PostgreSQL embedding pushdown contracts, isolates EmbeddingBroker state per event loop with verified SHM cleanup, and forwards GemmaEmbedder precision options."
 status: stable
-state: active
+state: completed
 planning_status: complete
 planning_quality: standard
 planning_degraded_reason: null
 depends_on_chapters:
   - ch01-gcp-id-token-cache
 plan_commit: 18baadcd
-last_reviewed_commit: null
-updated_at: "2026-11-13T05:20:15Z"
+last_reviewed_commit: ef00252d
+updated_at: "2026-11-13T05:22:00Z"
 generated:
   by: flow-plan
   at: "2026-11-12T23:45:00Z"
 verified:
-  - by: agent:plan-generator
-    at: "2026-11-12T23:45:00Z"
-    commit: 18baadcd
+  - by: agent:code-reviewer
+    at: "2026-11-13T05:22:00Z"
+    commit: ef00252d
 tags:
   - embeddings
   - pushdown
@@ -123,7 +123,7 @@ Pushdown and local broker invariants are synchronized in `docs/usage/embeddings-
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Status**: `t01`–`t04` are implemented and verified at `5771c8e3` (`ruff`, `mypy` across 12 source files, and `404` unit tests pass).
+- **Status**: `ch03-pushdown-and-local-embedding-broker` is completed at `5771c8e3` (`sync` `ef00252d`); next frontier is [`ch04-docs-and-okf-sync`](../ch04-docs-and-okf-sync/spec.md).
 - **Fast Chapter Gate (`< 20s`)**:
   `uv run --no-sync ruff check src/py/vertebra/embeddings src/py/vertebra/db/adapters/{oracle,bigquery,spanner,postgres}/embeddings.py && uv run --no-sync mypy src/py/vertebra/embeddings src/py/vertebra/db/adapters/{oracle,bigquery,spanner,postgres}/embeddings.py && uv run --no-sync pytest src/py/tests/unit/embeddings/test_embedding_broker.py src/py/tests/unit/embeddings/test_google_embedders.py src/py/tests/unit/db/test_bigquery.py src/py/tests/unit/db/test_spanner.py src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py -q`
 

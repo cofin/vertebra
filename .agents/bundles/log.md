@@ -1,5 +1,10 @@
 # Bundle Activity Log
 
+## [2026-11-13T05:22:00Z] chapter-complete | gcp-embeddings-and-identity ch03-pushdown-and-local-embedding-broker
+
+- Closed `ch03-pushdown-and-local-embedding-broker` at `5771c8e3` (sync `ef00252d`): removed implicit metadata/storage fallbacks from `OracleEmbeddingPushdown`, aligned `embed_batch`/`top_k`/boolean/dimension validation across BigQuery/Spanner/Postgres pushdowns and Spanner `AI.GENERATE_EMBEDDING` parameter binds, isolated `EmbeddingBroker` state per running event loop with `/dev/shm/vtb-qvec-*` cleanup, and forwarded `GemmaEmbedder` `precision` into `FastEmbedder.build_backend` (`ruff`, `mypy` across `12` source files, and `404` tests clean).
+- Advanced active frontier to `ch04-docs-and-okf-sync` (`gcp-embeddings-and-identity:ch04:t01`; `3` tasks remain).
+
 ## [2026-11-13T05:05:30Z] chapter-complete | gcp-embeddings-and-identity ch02-vertex-and-gemini-embedder-wire-parity
 
 - Closed `ch02-vertex-and-gemini-embedder-wire-parity` at `484568a7` (sync `d031307b`): fixed Gemini `Part.text` protobuf field `2` + `inline_data`/`file_data` PyO3 wire codecs, extracted `_GoogleEmbedder` per-loop auth/retry base, migrated `VertexEmbedder` onto Vertex AI v1 REST `:predict`/`:embedContent` with multimodal, and added `id_token_cache` + `audience` `401` retry to `RemoteEmbedder` (`vector::` `3`, `grpc` `8`, `stubtest`, `ruff`, `mypy`, and `135` unit tests clean).
