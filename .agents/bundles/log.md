@@ -1,5 +1,10 @@
 # Bundle Activity Log
 
+## [2026-11-13T15:15:00Z] finish | server-runtime-correctness
+
+- Completed `server-runtime-correctness` (`state: completed`) at `92b84a09` across all `7` chapters (`26/26` tasks) on `feat/server-runtime-correctness`, delivering progressive Python/ASGI/RSGI/native response streaming ([#81](https://github.com/cofin/vertebra/issues/81)), fail-loud `WorkerStartupError` lifespan and `__rsgi_init__` startup with SHM exit `78` ([#84](https://github.com/cofin/vertebra/issues/84)), public `vertebra.supervisor` exports ([#83](https://github.com/cofin/vertebra/issues/83)), co-located and `--worker-only` `QueueService` lanes ([#85](https://github.com/cofin/vertebra/issues/85)), relocatable wheel-bundled `vertebra-server` binaries and `core-wheel-check` ([#82](https://github.com/cofin/vertebra/issues/82)), opt-in `StandaloneBuilder` `.agents/skills` staging ([#115](https://github.com/cofin/vertebra/issues/115)), shared `CompiledRouteBase` / `__vertebra_fastpath__` consolidation, and fork-safe `getrandom` UUID entropy.
+- Synchronized runtime, worker, IPC, and product OKF chapters in present tense.
+
 ## [2026-11-13T06:14:45Z] chapter-complete | server-runtime-correctness ch07-docs-and-okf-sync
 
 - Closed `ch07-docs-and-okf-sync` at `d9475b72` (sync `8727830e`): regenerated `docs/reference/cli.md`, synchronized server/CLI/packaging usage and reference guides, compacted `pyo3-ffi-and-batch-dispatch.md` (`174L`), synced `tiered-rings-and-batch-bridge.md` (`132L`), `asgi-and-wsgi-runners.md` (`142L`), `worker-and-protocols.md` (`137L`), `server-runtime-limitations.md` (`69L`), and `product.md` (`191L`), and switched `cli/__init__.py` and `server/lanes.py` to `ensure_module` (`make docs`, `make review-check`, and `36` unit tests clean).

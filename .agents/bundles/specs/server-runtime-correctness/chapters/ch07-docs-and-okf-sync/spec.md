@@ -15,15 +15,15 @@ depends_on_chapters:
   - ch06-runtime-native-cleanup
 replan_trigger: null
 plan_commit: 18baadcd
-last_reviewed_commit: 8727830e
-updated_at: "2026-11-13T06:14:45Z"
+last_reviewed_commit: 92b84a09
+updated_at: "2026-11-13T15:15:00Z"
 generated:
   by: flow-plan
   at: "2026-11-12T23:45:00Z"
 verified:
   - by: agent:code-reviewer
-    at: "2026-11-13T06:14:45Z"
-    commit: 8727830e
+    at: "2026-11-13T15:15:00Z"
+    commit: 92b84a09
 tags:
   - docs
   - okf

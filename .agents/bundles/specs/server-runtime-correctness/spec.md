@@ -4,7 +4,7 @@ flow_id: server-runtime-correctness
 title: Server Runtime Correctness
 description: "Complete progressive Python/ASGI/RSGI/native response streaming, fail-loud lifespan startup, supervisor exports and worker-only lanes, wheel-shipped vertebra-server binaries with standalone skill staging, and FastPath/native runtime cleanup."
 status: stable
-state: active
+state: completed
 planning_quality: standard
 planning_degraded_reason: null
 has_chapters: true
@@ -21,18 +21,18 @@ current_task: null
 parent_prd: integration-remediation
 plan_revision: 3
 plan_commit: 18baadcd
-last_verified_checkpoint: d9475b72
+last_verified_checkpoint: 92b84a09
 last_reviewed_chapter: ch07-docs-and-okf-sync
-last_reviewed_commit: 8727830e
+last_reviewed_commit: 92b84a09
 created_at: "2026-11-12T23:45:00Z"
-updated_at: "2026-11-13T06:14:45Z"
+updated_at: "2026-11-13T15:15:00Z"
 generated:
   by: flow-plan
   at: "2026-11-12T23:45:00Z"
 verified:
   - by: agent:code-reviewer
-    at: "2026-11-13T06:14:45Z"
-    commit: 8727830e
+    at: "2026-11-13T15:15:00Z"
+    commit: 92b84a09
 tags:
   - server
   - streaming
