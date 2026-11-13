@@ -6,7 +6,13 @@ chapter_id: ch02-vertex-and-gemini-embedder-wire-parity
 title: "Add Audience-Bound ID Token Authentication to RemoteEmbedder"
 description: "Accept SyncGcpIdTokenCache or AsyncGcpIdTokenCache and optional audience on RemoteEmbedder with endpoint-origin defaults and single 401 invalidation retry."
 status: stable
-state: pending
+state: completed
+commit: 484568a7
+last_verified_commit: 484568a7
+last_verified_at: "2026-11-13T05:04:45Z"
+verification_evidence: "cargo clippy + test (vector:: 3, grpc 8) + stubtest + ruff + mypy (8 files) + pytest (135 passed)"
+claimed_by: null
+claimed_at: null
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -63,7 +69,7 @@ uv run --no-sync ruff check src/py/vertebra/embeddings/_remote.py src/py/tests/u
 
 ## Acceptance Criteria
 
-- [ ] `RemoteEmbedder` authenticates outbound gRPC requests with audience-bound ID tokens and retries once on `401` (`R11`).
-- [ ] Zero regressions in the chapter's fast verification gate.
+- [x] `RemoteEmbedder` authenticates outbound gRPC requests with audience-bound ID tokens and retries once on `401` (`R11`).
+- [x] Zero regressions in the chapter's fast verification gate.
 
 [^py-remote]: `src/py/vertebra/embeddings/_remote.py::RemoteEmbedder` — `RemoteEmbedder` gRPC client with static bearer authentication.

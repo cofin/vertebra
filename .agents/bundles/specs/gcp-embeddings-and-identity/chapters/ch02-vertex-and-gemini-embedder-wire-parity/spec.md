@@ -5,14 +5,15 @@ chapter_id: ch02-vertex-and-gemini-embedder-wire-parity
 title: "Chapter 02: Vertex AI REST, Gemini Multimodal Wire Parity, and Remote Identity"
 description: "Fixes the Gemini BatchEmbedContents protobuf field numbers and multimodal media encoding, introduces the shared _GoogleEmbedder runtime, moves VertexEmbedder onto Vertex AI v1 REST predict and embedContent, and adds ID token authentication to RemoteEmbedder."
 status: stable
-state: planned
+state: active
 planning_status: complete
 planning_quality: standard
 planning_degraded_reason: null
 depends_on_chapters:
   - ch01-gcp-id-token-cache
 plan_commit: 18baadcd
-updated_at: "2026-11-12T23:45:00Z"
+last_reviewed_commit: null
+updated_at: "2026-11-13T05:04:45Z"
 generated:
   by: flow-plan
   at: "2026-11-12T23:45:00Z"
@@ -145,13 +146,14 @@ User documentation and OKF updates for Vertex REST, Gemini multimodal, and `Remo
 
 ## 5. Implementation Plan
 
-- [ ] [t01-gemini-content-part-wire-codec.md](tasks/t01-gemini-content-part-wire-codec.md) — Fix `Part.text` to field `2`, add `GeminiContentPart` (`inline_data=3`, `file_data=6`) and `encode_gemini_embed_contents_grpc_frame`, and update `_vertebra.pyi`.
-- [ ] [t02-google-embedder-base-and-gemini-multimodal.md](tasks/t02-google-embedder-base-and-gemini-multimodal.md) — Extract `_GoogleEmbedder` (async cache normalization, `401` retry, `EmbeddingError`, per-loop batching) and wire real media parts in `GeminiEmbedder.embed_multimodal`.
-- [ ] [t03-vertex-rest-predict-and-multimodal.md](tasks/t03-vertex-rest-predict-and-multimodal.md) — Extend `ModelSpec` and migrate `VertexEmbedder` text and multimodal embedding onto Vertex AI v1 REST `:predict` and `:embedContent`.
-- [ ] [t04-remote-embedder-id-token-auth.md](tasks/t04-remote-embedder-id-token-auth.md) — Add `id_token_cache` and `audience` with `401` invalidation retry to `RemoteEmbedder`.
+- [x] [484568a7] [t01-gemini-content-part-wire-codec.md](tasks/t01-gemini-content-part-wire-codec.md) — Fix `Part.text` to field `2`, add `GeminiContentPart` (`inline_data=3`, `file_data=6`) and `encode_gemini_embed_contents_grpc_frame`, and update `_vertebra.pyi`.
+- [x] [484568a7] [t02-google-embedder-base-and-gemini-multimodal.md](tasks/t02-google-embedder-base-and-gemini-multimodal.md) — Extract `_GoogleEmbedder` (async cache normalization, `401` retry, `EmbeddingError`, per-loop batching) and wire real media parts in `GeminiEmbedder.embed_multimodal`.
+- [x] [484568a7] [t03-vertex-rest-predict-and-multimodal.md](tasks/t03-vertex-rest-predict-and-multimodal.md) — Extend `ModelSpec` and migrate `VertexEmbedder` text and multimodal embedding onto Vertex AI v1 REST `:predict` and `:embedContent`.
+- [x] [484568a7] [t04-remote-embedder-id-token-auth.md](tasks/t04-remote-embedder-id-token-auth.md) — Add `id_token_cache` and `audience` with `401` invalidation retry to `RemoteEmbedder`.
 
 ## 6. Current State & Remaining Plan Snapshot
 
+- **Status**: `t01`–`t04` are implemented and verified at `484568a7` (`cargo clippy`, `vector::` `3` passed, `vertebra-http grpc` `8` passed, `mypy.stubtest vertebra._vertebra`, `ruff`, `mypy`, and `135` Python tests pass).
 - **Fast Chapter Gate (`< 35s`)**:
   `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-core --lib vector:: && cargo test --manifest-path src/rs/Cargo.toml -p vertebra-http grpc && uv run --no-sync maturin develop --uv && uv run --no-sync python -m mypy.stubtest vertebra._vertebra && uv run --no-sync ruff check src/py/vertebra/embeddings && uv run --no-sync mypy src/py/vertebra/embeddings && uv run --no-sync pytest src/py/tests/unit/db/test_vector_wire_codecs.py src/py/tests/unit/embeddings/test_google_embedders.py -q`
 

@@ -6,7 +6,13 @@ chapter_id: ch02-vertex-and-gemini-embedder-wire-parity
 title: "Extract _GoogleEmbedder Base and Implement Real Gemini Multimodal Embedding"
 description: "Introduce _GoogleEmbedder with async token-cache normalization, 401 retry, EmbeddingError mapping, and per-loop micro-batching, and send real inline_data/file_data parts from GeminiEmbedder.embed_multimodal."
 status: stable
-state: pending
+state: completed
+commit: 484568a7
+last_verified_commit: 484568a7
+last_verified_at: "2026-11-13T05:04:45Z"
+verification_evidence: "cargo clippy + test (vector:: 3, grpc 8) + stubtest + ruff + mypy (8 files) + pytest (135 passed)"
+claimed_by: null
+claimed_at: null
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -68,8 +74,8 @@ uv run --no-sync ruff check src/py/vertebra/embeddings/_google.py src/py/tests/u
 
 ## Acceptance Criteria
 
-- [ ] `_GoogleEmbedder` enforces async token refreshes, per-loop micro-batching, and `EmbeddingError` invariants, and `GeminiEmbedder.embed_multimodal` sends real protobuf media parts (`R6`, `R9`).
-- [ ] Zero regressions in `test_google_embedders.py`.
+- [x] `_GoogleEmbedder` enforces async token refreshes, per-loop micro-batching, and `EmbeddingError` invariants, and `GeminiEmbedder.embed_multimodal` sends real protobuf media parts (`R6`, `R9`).
+- [x] Zero regressions in `test_google_embedders.py`.
 
 [^py-google]: `src/py/vertebra/embeddings/_google.py::GeminiEmbedder` — Current `VertexEmbedder`/`GeminiEmbedder` hierarchy, token handling, and descriptor multimodal path.
 [^py-base]: `src/py/vertebra/embeddings/_base.py::Embedder` — `Embedder` facade, `MultimodalPart`, `EmbeddingError`, and sync portal loop.

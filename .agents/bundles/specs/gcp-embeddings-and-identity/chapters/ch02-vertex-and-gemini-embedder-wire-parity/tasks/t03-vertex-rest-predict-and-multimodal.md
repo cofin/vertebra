@@ -6,7 +6,13 @@ chapter_id: ch02-vertex-and-gemini-embedder-wire-parity
 title: "Migrate VertexEmbedder to Vertex AI REST predict and embedContent with Multimodal"
 description: "Extend ModelSpec with vertex_method and max_instances_per_request, switch VertexEmbedder onto Vertex AI v1 REST JSON predict and embedContent, and implement Vertex multimodal embedding."
 status: stable
-state: pending
+state: completed
+commit: 484568a7
+last_verified_commit: 484568a7
+last_verified_at: "2026-11-13T05:04:45Z"
+verification_evidence: "cargo clippy + test (vector:: 3, grpc 8) + stubtest + ruff + mypy (8 files) + pytest (135 passed)"
+claimed_by: null
+claimed_at: null
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -70,8 +76,8 @@ uv run --no-sync ruff check src/py/vertebra/embeddings src/py/tests/unit/embeddi
 
 ## Acceptance Criteria
 
-- [ ] `VertexEmbedder` speaks real Vertex AI v1 `:predict` and `:embedContent` JSON for text and multimodal inputs with bounded concurrency and strict dimension/title validation (`R7`, `R8`).
-- [ ] Zero regressions in `test_google_embedders.py`.
+- [x] `VertexEmbedder` speaks real Vertex AI v1 `:predict` and `:embedContent` JSON for text and multimodal inputs with bounded concurrency and strict dimension/title validation (`R7`, `R8`).
+- [x] Zero regressions in `test_google_embedders.py`.
 
 [^py-models]: `src/py/vertebra/embeddings/_models.py::ModelSpec` — `MODEL_CATALOG` entries for `gemini-embedding-001`, `gemini-embedding-2`, and `text-embedding-005`.
 [^py-vertex]: `src/py/vertebra/embeddings/_google.py::VertexEmbedder` — `VertexEmbedder` transport and configuration.

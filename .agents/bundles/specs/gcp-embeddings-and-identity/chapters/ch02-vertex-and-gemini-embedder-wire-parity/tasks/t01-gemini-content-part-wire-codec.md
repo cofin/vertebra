@@ -6,7 +6,13 @@ chapter_id: ch02-vertex-and-gemini-embedder-wire-parity
 title: "Fix Gemini Part.text Field Number and Add Multimodal Part Wire Codec"
 description: "Encode Gemini Part.text on protobuf field 2, add GeminiContentPart inline_data and file_data encoding in vertebra-core, and bind encode_gemini_embed_contents_grpc_frame in vertebra-py and _vertebra.pyi."
 status: stable
-state: pending
+state: completed
+commit: 484568a7
+last_verified_commit: 484568a7
+last_verified_at: "2026-11-13T05:04:45Z"
+verification_evidence: "cargo clippy + test (vector:: 3, grpc 8) + stubtest + ruff + mypy (8 files) + pytest (135 passed)"
+claimed_by: null
+claimed_at: null
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -74,8 +80,8 @@ cargo test --manifest-path src/rs/Cargo.toml -p vertebra-core --lib vector:: && 
 
 ## Acceptance Criteria
 
-- [ ] `Part.text` encodes on field `2`, `inline_data` (`3`) and `file_data` (`6`) encode exact `content.proto` bytes, and `mypy.stubtest vertebra._vertebra` exits `0` (`R5`).
-- [ ] Zero regressions in `vertebra-core` and `test_vector_wire_codecs.py`.
+- [x] `Part.text` encodes on field `2`, `inline_data` (`3`) and `file_data` (`6`) encode exact `content.proto` bytes, and `mypy.stubtest vertebra._vertebra` exits `0` (`R5`).
+- [x] Zero regressions in `vertebra-core` and `test_vector_wire_codecs.py`.
 
 [^core-vector-codec]: `src/rs/vertebra-core/src/vector.rs::encode_batch_embed_grpc_request` — Existing `BatchEmbedContents` protobuf request encoder.
 [^py-vector-binding]: `src/rs/vertebra-py/src/vector.rs::encode_gemini_embed_grpc_frame` — Existing PyO3 LPM gRPC frame wrapper and `register_vector_bindings`.
