@@ -5,7 +5,7 @@ chapter_id: ch04-wheel-smoke-and-ci
 title: "Chapter 04: Wheel Binary Isolation Smoke Test and CI Matrix"
 description: "Verify clean-venv core wheel installation and vtb run execution locally via make core-wheel-check, in PR CI, and across the multi-platform release wheel matrix."
 status: stable
-state: active
+state: completed
 planning_status: complete
 planning_quality: standard
 planning_degraded_reason: null
@@ -13,15 +13,15 @@ depends_on_chapters:
   - ch03-relocatable-server-binary-and-packaging
 replan_trigger: null
 plan_commit: 18baadcd
-last_reviewed_commit: null
-updated_at: "2026-11-13T05:19:30Z"
+last_reviewed_commit: ca20d6ae
+updated_at: "2026-11-13T05:21:00Z"
 generated:
   by: flow-plan
   at: "2026-11-12T23:45:00Z"
 verified:
-  - by: agent:plan-generator
-    at: "2026-11-12T23:45:00Z"
-    commit: 18baadcd
+  - by: agent:code-reviewer
+    at: "2026-11-13T05:21:00Z"
+    commit: ca20d6ae
 tags:
   - wheel
   - smoke
@@ -80,7 +80,7 @@ Even after `ch03` includes `vertebra/bin/vertebra-server` in `[tool.maturin]`, n
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Status**: `t01`–`t03` are implemented and verified at `11731ca5` (`ruff`, `mypy`, `make -n core-wheel-check`, and `66` packaging/workflow tests pass).
+- **Status**: `ch04-wheel-smoke-and-ci` is completed at `11731ca5` (`sync` `ca20d6ae`); next frontier is [`ch05-fastpath-consolidation`](../ch05-fastpath-consolidation/spec.md).
 - **Fast Chapter Gate (`< 30s`)**: `uv run --no-sync ruff check tools/scripts/smoke_vtb_run.py && uv run --no-sync mypy tools/scripts/smoke_vtb_run.py && uv run --no-sync pytest src/py/tests/unit/build/test_packaging_and_pgo.py -q` (full `make core-wheel-check` runs in `/flow:finish`).
 
 [^makefile]: `Makefile` — Existing companion wheel isolation check targets.

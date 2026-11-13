@@ -1,5 +1,10 @@
 # Bundle Activity Log
 
+## [2026-11-13T05:21:00Z] chapter-complete | server-runtime-correctness ch04-wheel-smoke-and-ci
+
+- Closed `ch04-wheel-smoke-and-ci` at `11731ca5` (sync `ca20d6ae`): added `VtbRunSmoke` multi-wheel smoke harness in `tools/scripts/smoke_vtb_run.py`, wired `make core-wheel-check` and the `core-wheel-smoke` PR CI job, scoped core wheel `cibuildwheel` build/repair hooks and 4-OS `test_wheels` matrix in `release.yaml`, and added `linux-arm64` to `release-binaries.yml` (`ruff`, `mypy`, `make -n core-wheel-check`, and `66` packaging tests clean).
+- Advanced active frontier to `ch05-fastpath-consolidation` (`server-runtime-correctness:ch05:t01`; `11` tasks remain across `ch05`–`ch07`).
+
 ## [2026-11-13T05:08:50Z] chapter-complete | server-runtime-correctness ch03-relocatable-server-binary-and-packaging
 
 - Closed `ch03-relocatable-server-binary-and-packaging` at `7a5cbc61` (sync `0e03d7a1`): dropped build-host rpaths in `vertebra-http/build.rs`, implemented `ServerBinaryTarget` + `ServerBinaryBuilder` and wheel repair exclusions in `build_server_binary.py`, wired `EmbeddedPythonRuntime` shared-libpython detection into `_supervisor.py` and CLI runners, included `src/py/vertebra/bin/*` in core wheels, and added opt-in `.agents/skills` staging (`VERTEBRA_APP_ROOT`) to `StandaloneBuilder` and `vtb build` (`cargo clippy`/`build`, `readelf` 0 rpath, `ruff`, `mypy`, and `121` tests clean).
