@@ -15,12 +15,16 @@ from vertebra.utils.serializers import encode_json_bytes
 
 __all__ = (
     "BODYLESS_HTTP_METHODS",
+    "FASTPATH_ATTR",
     "UNSET_DEFAULT",
+    "CompiledRouteBase",
     "DirectPlan",
     "FastPathProvider",
     "QueryParamSpec",
     "coerce_path_param",
+    "get_attached_fastpath",
     "get_fastpath_providers",
+    "has_custom_exception_handlers",
     "parse_bool_query",
     "parse_lenient_bool_query",
     "register_fastpath_provider",
@@ -30,12 +34,80 @@ __all__ = (
     "scalar_query_converter",
     "serialize_litestar_http_exception",
     "serialize_starlette_http_exception",
+    "set_attached_fastpath",
     "step_coro_sync",
     "unregister_fastpath_provider",
 )
 
 BODYLESS_HTTP_METHODS: frozenset[str] = frozenset({"GET", "HEAD", "DELETE", "OPTIONS"})
+FASTPATH_ATTR: str = "__vertebra_fastpath__"
 UNSET_DEFAULT: object = object()
+
+
+class CompiledRouteBase(msgspec.Struct, frozen=True, gc=False, kw_only=True):
+    """Shared base struct for pre-compiled framework fastpath routes."""
+
+    handler_id: int
+    """Compiled router handler identifier."""
+
+    is_async: bool = False
+    """Whether the target handler is an asynchronous coroutine callable."""
+
+    status_code: int = 200
+    """Default HTTP response status code."""
+
+    param_converters: tuple[tuple[str, str], ...] = ()
+    """Ordered ``(param_name, converter_name)`` pairs extracted from the route pattern."""
+
+
+def get_attached_fastpath(app: Any) -> Any:
+    """Return the fastpath dispatcher attached to ``app`` or its ``state``."""
+    direct = getattr(app, FASTPATH_ATTR, None)
+    if direct is not None:
+        return direct
+    state = getattr(app, "state", None)
+    if state is None:
+        return None
+    if hasattr(state, "get"):
+        return state.get(FASTPATH_ATTR)
+    return getattr(state, FASTPATH_ATTR, None)
+
+
+def set_attached_fastpath(app: Any, fastpath: Any) -> None:
+    """Attach ``fastpath`` onto ``app`` or its ``state``, raising ``TypeError`` when unsupported."""
+    try:
+        setattr(app, FASTPATH_ATTR, fastpath)
+    except (AttributeError, TypeError) as exc:
+        state = getattr(app, "state", None)
+        if state is None:
+            msg = f"cannot attach {FASTPATH_ATTR} to {type(app).__name__!r}"
+            raise TypeError(msg) from exc
+        if hasattr(state, "__setitem__"):
+            try:
+                state[FASTPATH_ATTR] = fastpath
+            except (AttributeError, TypeError) as state_exc:
+                msg = f"cannot attach {FASTPATH_ATTR} to {type(app).__name__!r}"
+                raise TypeError(msg) from state_exc
+            return
+        try:
+            setattr(state, FASTPATH_ATTR, fastpath)
+        except (AttributeError, TypeError) as state_exc:
+            msg = f"cannot attach {FASTPATH_ATTR} to {type(app).__name__!r}"
+            raise TypeError(msg) from state_exc
+
+
+def has_custom_exception_handlers(
+    handlers: Any,
+    builtin_prefixes: tuple[str, ...],
+) -> bool:
+    """Return ``True`` when ``handlers`` maps any handler outside ``builtin_prefixes``."""
+    if not isinstance(handlers, dict) or not handlers:
+        return False
+    for handler_fn in handlers.values():
+        module_name = str(getattr(handler_fn, "__module__", "") or "")
+        if not module_name.startswith(builtin_prefixes):
+            return True
+    return False
 
 
 @runtime_checkable

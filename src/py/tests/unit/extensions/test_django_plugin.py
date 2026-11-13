@@ -69,9 +69,11 @@ from vertebra.extensions.django.db.backends.postgresql import (
 from vertebra.extensions.django.db.backends.sqlite3 import (
     DatabaseWrapper as SQLiteDatabaseWrapper,
 )
+from vertebra.extensions.django.fastpath import CompiledRoute as DjangoCompiledRoute
 from vertebra.extensions.django.templatetags.vertebra_vite import vite_asset, vite_hmr_client
 from vertebra.extensions.sqlalchemy.dialects import SyncDBAPIConnection
 from vertebra.extensions.sqlspec.adapters import PostgreSQLSyncConfig, SQLiteSyncConfig
+from vertebra.server._fastpath_core import CompiledRouteBase
 from vertebra.storage import (
     AsyncObjectStore,
     LocalConfig,
@@ -1063,3 +1065,8 @@ else:
 """
     result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, check=False)
     assert result.returncode == 0, result.stderr
+
+
+def test_django_compiled_route_inherits_compiled_route_base() -> None:
+    """Django CompiledRoute subclasses CompiledRouteBase."""
+    assert issubclass(DjangoCompiledRoute, CompiledRouteBase)

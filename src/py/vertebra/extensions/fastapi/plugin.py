@@ -24,6 +24,7 @@ from vertebra.extensions.starlette.plugin import (
     _mount_health_endpoint,
     _set_state_item,
 )
+from vertebra.server._fastpath_core import set_attached_fastpath
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -123,9 +124,8 @@ class VertebraPlugin:
                 app=app,
                 compiled_routes=self._compiled_routes or None,
             )
-            _set_state_item(state, "vertebra_fastpath_bypass", bypass)
-            with contextlib.suppress(AttributeError, TypeError):
-                app.__vertebra_fastpath__ = bypass
+            with contextlib.suppress(TypeError):
+                set_attached_fastpath(app, bypass)
 
     @contextlib.contextmanager
     def server_lifespan(self, app: Any) -> Iterator[None]:

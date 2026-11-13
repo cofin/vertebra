@@ -3,6 +3,7 @@
 import asyncio
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -37,6 +38,13 @@ from vertebra.server._asgi._wire import (
     is_static_route,
 )
 from vertebra.server._dispatch import compile_handler_spec
+from vertebra.server._fastpath_core import (
+    FASTPATH_ATTR,
+    CompiledRouteBase,
+    get_attached_fastpath,
+    has_custom_exception_handlers,
+    set_attached_fastpath,
+)
 from vertebra.server._loops import EventLoopPool
 from vertebra.server.worker import _AsgiMountRunner
 
@@ -1186,3 +1194,79 @@ def test_asgi_lifespan_startup_timeout_cancels_and_awaits_task() -> None:
         assert lifespan._task.done()
 
     asyncio.run(_run_check())
+
+
+class _SlottedDictStateApp:
+    __slots__ = ("state",)
+
+    def __init__(self) -> None:
+        self.state: dict[str, Any] = {}
+
+
+class _SlottedAttrStateApp:
+    __slots__ = ("state",)
+
+    def __init__(self) -> None:
+        self.state = SimpleNamespace()
+
+
+class _SlottedStatelessApp:
+    __slots__ = ()
+
+
+def _custom_exception_handler(_req: Any, _exc: Any) -> None:
+    return None
+
+
+@pytest.mark.parametrize("target_kind", ["dict_attr", "slotted_dict_state", "slotted_attr_state"])
+def test_attached_fastpath_helpers_store_and_read_single_attr(target_kind: str) -> None:
+    """set_attached_fastpath and get_attached_fastpath use __vertebra_fastpath__ across app and state."""
+    sentinel = SimpleNamespace(dispatch=lambda *_args, **_kwargs: None)
+    if target_kind == "dict_attr":
+        app: Any = SimpleNamespace()
+    elif target_kind == "slotted_dict_state":
+        app = _SlottedDictStateApp()
+    else:
+        app = _SlottedAttrStateApp()
+
+    set_attached_fastpath(app, sentinel)
+    assert get_attached_fastpath(app) is sentinel
+    if target_kind == "dict_attr":
+        assert getattr(app, FASTPATH_ATTR) is sentinel
+    elif target_kind == "slotted_dict_state":
+        assert app.state[FASTPATH_ATTR] is sentinel
+    else:
+        assert getattr(app.state, FASTPATH_ATTR) is sentinel
+
+
+def test_attached_fastpath_rejects_stateless_slots_and_legacy_aliases() -> None:
+    """Slotted stateless apps raise TypeError and legacy alias attributes are ignored."""
+    stateless = _SlottedStatelessApp()
+    sentinel = SimpleNamespace(dispatch=lambda *_args, **_kwargs: None)
+    with pytest.raises(TypeError, match="cannot attach"):
+        set_attached_fastpath(stateless, sentinel)
+    assert get_attached_fastpath(stateless) is None
+
+    legacy_app = SimpleNamespace(
+        fastpath=sentinel,
+        _vertebra_fastpath=sentinel,
+        state={"vertebra_fastpath_bypass": sentinel},
+        extensions={"vertebra": SimpleNamespace(fastpath=sentinel)},
+    )
+    assert get_attached_fastpath(legacy_app) is None
+    assert AsgiRunner._resolve_fastpath(legacy_app) is None
+
+
+def test_compiled_route_base_defaults_and_custom_exception_handlers() -> None:
+    """CompiledRouteBase provides shared fields and has_custom_exception_handlers filters builtin prefixes."""
+    route = CompiledRouteBase(handler_id=7)
+    assert route.handler_id == 7
+    assert route.is_async is False
+    assert route.status_code == 200
+    assert route.param_converters == ()
+
+    builtin_fn = SimpleNamespace(__module__="starlette.exceptions")
+    assert has_custom_exception_handlers(None, ("starlette.",)) is False
+    assert has_custom_exception_handlers({}, ("starlette.",)) is False
+    assert has_custom_exception_handlers({Exception: builtin_fn}, ("starlette.",)) is False
+    assert has_custom_exception_handlers({Exception: _custom_exception_handler}, ("starlette.",)) is True

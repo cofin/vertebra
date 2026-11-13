@@ -46,6 +46,7 @@ from vertebra.server._asgi._queues import (
     StreamSubmitter,
 )
 from vertebra.server._fastpath import PayloadTooLargeError, attach_framework_fastpath
+from vertebra.server._fastpath_core import get_attached_fastpath
 from vertebra.server._loops import EventLoopPool
 
 __all__ = (
@@ -614,14 +615,9 @@ class AsgiRunner:
                 if callable(ensure_fn):
                     ensure_fn(candidate_app)
 
-        direct = getattr(app, "__vertebra_fastpath__", None)
-        if direct is not None and callable(getattr(direct, "dispatch", None)):
-            return direct
-        state = getattr(app, "state", None)
-        if state is not None and hasattr(state, "get"):
-            candidate = state.get("vertebra_fastpath_bypass")
-            if candidate is not None and callable(getattr(candidate, "dispatch", None)):
-                return candidate
+        candidate = get_attached_fastpath(app)
+        if candidate is not None and callable(getattr(candidate, "dispatch", None)):
+            return candidate
         return None
 
     @staticmethod
