@@ -13,8 +13,8 @@ generated:
   at: "2026-11-07T04:15:00Z"
 verified:
   - by: agent:flow-setup
-    at: "2026-11-07T04:15:00Z"
-    commit: 9af810f5
+    at: "2026-11-12T23:45:00Z"
+    commit: 18baadcd
 sources:
   - id: pg-sasl
     resource: https://raw.githubusercontent.com/rust-postgres/rust-postgres/postgres-protocol-v0.6.12/postgres-protocol/src/authentication/sasl.rs

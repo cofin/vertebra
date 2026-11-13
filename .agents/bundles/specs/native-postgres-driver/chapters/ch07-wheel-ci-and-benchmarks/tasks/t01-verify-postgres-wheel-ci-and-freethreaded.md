@@ -1,0 +1,73 @@
+---
+type: Task
+id: "native-postgres-driver:ch07-wheel-ci-and-benchmarks:t01"
+flow_id: native-postgres-driver
+chapter_id: ch07-wheel-ci-and-benchmarks
+title: "Add verify_postgres_wheel.py, CI/release lanes, and 3.14t/3.15t pool tests"
+description: "Implement two-probe verify_postgres_wheel.py, 14-class release smoke checks, zero-skip CI PG14-18 lanes, and 8-thread free-threaded pool tests."
+status: stable
+state: pending
+planning_quality: standard
+planning_degraded_reason: null
+worksheet_format: compact
+strategy: regression_tdd
+plan_commit: 18baadcd
+depends_on: 
+  - "native-postgres-driver:ch06:t03"
+files: 
+  - tools/scripts/verify_postgres_wheel.py
+  - .github/workflows/ci.yml
+  - .github/workflows/release.yaml
+tests: 
+  - src/py/tests/unit/test_freethreaded_gil.py
+read_set:
+  - .github/workflows/ci.yml
+  - .github/workflows/release.yaml
+  - src/py/tests/unit/test_freethreaded_gil.py
+  - src/py/vertebra/_postgres.pyi
+estimated_loc: 245
+tags:
+  - postgres
+  - wheel
+  - ci
+  - free-threaded
+sources:
+  - id: ci-yml
+    resource: .github/workflows/ci.yml
+    title: "CI workflow"
+  - id: release-yml
+    resource: .github/workflows/release.yaml
+    title: "Release workflow"
+---
+
+# Task `t01`: Add verify_postgres_wheel.py, CI/release lanes, and 3.14t/3.15t pool tests
+
+## Objective & Scope Boundary
+
+Create `verify_postgres_wheel.py`, wire PG14–18 zero-skip CI + 14-class release smoke checks, and add `_postgres` immutable-type / 8-thread pool tests in `test_freethreaded_gil.py` [^ci-yml] [^release-yml].
+
+## Bounded Read Manifest
+
+- `ci.yml`, `release.yaml`, `test_freethreaded_gil.py`, and `_postgres.pyi`.
+
+## Contracts & Edge Cases
+
+- Verify all 14 `_postgres` classes reject `setattr` (`Py_TPFLAGS_IMMUTABLETYPE`) and sustain 8 concurrent worker threads on `3.14t`/`3.15t`.
+
+## Test Matrix
+
+- `test_freethreaded_gil.py` `_postgres` class immutability and concurrent client/pool tests.
+
+## Verification
+
+```bash
+uv run --no-sync pytest src/py/tests/unit/test_freethreaded_gil.py -q && uv run --no-sync ruff check tools/scripts/verify_postgres_wheel.py && uv run --no-sync mypy tools/scripts/verify_postgres_wheel.py
+```
+
+## Acceptance Criteria
+
+- [ ] `test_freethreaded_gil.py`, Ruff, and Mypy pass cleanly.
+- [ ] Zero regressions in `ch07-wheel-ci-and-benchmarks` fast verification gate.
+
+[^ci-yml]: `.github/workflows/ci.yml` — CI workflow.
+[^release-yml]: `.github/workflows/release.yaml` — Release workflow.

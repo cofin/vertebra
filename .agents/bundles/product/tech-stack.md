@@ -8,21 +8,15 @@ generated:
   by: flow/0.26.0
   at: "2026-11-04T04:33:00Z"
 verified:
+  - by: agent:flow-setup
+    at: "2026-11-12T23:30:00Z"
+    commit: 18baadcd
   - by: agent:flow-sync
     at: "2026-11-09T21:46:00Z"
     commit: 14aa83b8
   - by: agent:flow-executor
     at: "2026-11-09T15:21:00Z"
     commit: af1b3d30
-  - by: agent:docs-okf-specialist
-    at: "2026-11-09T20:48:51Z"
-    commit: 47da6820
-  - by: agent:docs-okf-specialist
-    at: "2026-11-08T14:48:48Z"
-    commit: 067fa901
-  - by: agent:flow-setup
-    at: "2026-11-07T03:55:00Z"
-    commit: 067fa901
 sources:
   - id: src-pyproject-toml
     resource: pyproject.toml
@@ -48,9 +42,15 @@ sources:
   - id: src-vertebra-db-cargo-toml
     resource: src/rs/vertebra-db/Cargo.toml
     title: "Rust crate manifest (src/rs/vertebra-db/Cargo.toml)"
+  - id: src-vertebra-mysql-cargo-toml
+    resource: src/rs/vertebra-mysql/Cargo.toml
+    title: "Rust crate manifest (src/rs/vertebra-mysql/Cargo.toml)"
   - id: src-vertebra-bigquery-cargo-toml
     resource: src/rs/vertebra-bigquery/Cargo.toml
     title: "Rust crate manifest (src/rs/vertebra-bigquery/Cargo.toml)"
+  - id: src-vertebra-mssql-cargo-toml
+    resource: src/rs/vertebra-mssql/Cargo.toml
+    title: "Rust crate manifest (src/rs/vertebra-mssql/Cargo.toml)"
   - id: src-vertebra-oracle-cargo-toml
     resource: src/rs/vertebra-oracle/Cargo.toml
     title: "Rust crate manifest (src/rs/vertebra-oracle/Cargo.toml)"
@@ -60,6 +60,9 @@ sources:
   - id: src-vertebra-duckdb-cargo-toml
     resource: src/rs/vertebra-duckdb/Cargo.toml
     title: "Rust crate manifest (src/rs/vertebra-duckdb/Cargo.toml)"
+  - id: src-vertebra-postgres-cargo-toml
+    resource: src/rs/vertebra-postgres/Cargo.toml
+    title: "Rust crate manifest (src/rs/vertebra-postgres/Cargo.toml)"
   - id: src-package-json
     resource: src/ts/vertebra-client/package.json
     title: "TypeScript package manifest (src/ts/vertebra-client/package.json)"
@@ -72,15 +75,6 @@ sources:
   - id: src-ci-yml
     resource: .github/workflows/ci.yml
     title: "GitHub Actions workflow (ci.yml)"
-  - id: src-docs-yml
-    resource: .github/workflows/docs.yml
-    title: "GitHub Actions workflow (docs.yml)"
-  - id: src-release-yaml
-    resource: .github/workflows/release.yaml
-    title: "GitHub Actions workflow (release.yaml)"
-  - id: src-zensical-toml
-    resource: zensical.toml
-    title: "Zensical documentation site configuration"
   - id: src-makefile
     resource: Makefile
     title: "Canonical polyglot build, test, lint, docs, and benchmark targets"
@@ -91,20 +85,14 @@ sources:
 <!-- truth: start -->
 ## Core Stack Invariants
 
-- **Python (`>=3.12`, CI & wheel matrix `3.12`, `3.13`, `3.14`, `3.14t`, `3.15`, `3.15t`)**: published on PyPI as `vertebra-core` (`0.3.0`, `import vertebra`), managed by `uv` (`pyproject.toml`, `uv.lock`), built with `maturin` (`>=1.5,<2`) and `pypa/cibuildwheel@v4.3.5` (`cp312-*`..`cp315t-*` across `vertebra-core` and companion wheels `vertebra-bundler`, `vertebra-storage`, `vertebra-bigquery`, `vertebra-oracle`, `vertebra-spanner`, and `vertebra-duckdb`). Runtime dependencies are `anyio>=4.0`, `msgspec>=0.18`, `rich>=13.0`, `rich-click>=1.7`, `uvloop>=0.23.0; sys_platform != 'win32'`, and `winloop>=0.8.1; sys_platform == 'win32'`.
-- **Rust (`edition = "2024"`, workspace version `0.3.0`, stable toolchain, `>=1.91.0` required by the `google-cloud-*` crates' `rust-version`)**: no `rust-version` or `rust-toolchain` file is pinned in the workspace; CI installs `dtolnay/rust-toolchain@stable`. The Cargo workspace under `src/rs/` has these member crates:
-  - `vertebra-core`: `crossbeam-channel 0.5`, `crossbeam-utils 0.8`, `hex 0.4`, `serde 1.0`, `serde_json 1.0`, `sha2 0.10`, `thiserror 2.0`, `tokio 1.54` (`sync`), `bytes 1.12`, `jsonwebtoken 11.1` (`rust_crypto`); default features `compression` (`lz4_flex 0.14`, `zstd 0.14`) and `gcp-auth` (`reqwest 0.13`, `url 2.5`, `chrono 0.4`, `tokio/process`, `tokio/time`), plus optional `macos-ulock`; `libc 0.2` on Unix, `windows-sys 0.61` on Windows.
-  - `vertebra-http`: `vertebra-server` binary and library (`vertebra-core`, `hyper 1`, `hyper-util 0.1`, `http 1.2`, `http-body-util 0.1`, `tokio 1.54`, `tokio-util 0.7`, `matchit 0.9`, `futures-util 0.3`, `tokio-tungstenite 0.30`, `base64 0.22`, `regex 1`, `serde 1.0`, `serde_json 1.0`, `brotli 7.0`, `flate2 1.1`, `zstd 0.14`, `multer 3.1`, `thiserror 2.0`, `bytes 1.12`, `dashmap 6`, `fnv 1.0`, `tracing 0.1`, `tracing-subscriber 0.3`, `libc 0.2` on Unix; optional `rustls 0.23` + `tokio-rustls 0.26` + `rustls-pemfile 2`, `quinn 0.11.12` + `h3 0.0.8` + `h3-quinn 0.0.10`, `mimalloc 0.1.52`, and `pyo3 0.30.1` with `auto-initialize` + `_vertebra`).
-  - `vertebra-py`: PyO3 `0.30.1` extension `vertebra._vertebra` (`vertebra-core`, `vertebra-db` [`pyo3`], `bytes 1.12`, `jsonwebtoken 11.1`, `serde_json 1.0`, `tokio 1.54`, `libc 0.2` on Unix; optional feature `gcp` [`vertebra-db/gcp`]).
-  - `vertebra-bundler`: PyO3 `0.30.1` extension `vertebra._bundler` (`[bundler]` extra `vertebra-bundler==0.3.0`; `oxc_* 0.155`, `rquickjs 0.14`, `rolldown-notify 11.0` + `rolldown-notify-debouncer-mini 0.9`, `crossbeam-channel 0.5`, `thiserror 2.0`).
-  - `vertebra-storage`: PyO3 `0.30.1` extension `vertebra._storage` (`[storage]` extra `vertebra-storage==0.3.0`; `vertebra-core`, `object_store 0.13.2` with `aws`/`gcp`/`azure`/`http`, `tokio 1.54`, `bytes 1.12`, `futures 0.3`, `http 1.2`, `reqwest 0.13` with `rustls`, `rsa 0.9`, `hmac 0.12`, `sha2 0.10`, `hex 0.4`, `chrono 0.4`, `url 2.5`, `base64 0.22`, `serde 1.0`, `serde_json 1.0`, `thiserror 2.0`, `async-trait 0.1`).
-  - `vertebra-db`: `rlib` `vertebra_db` (`vertebra-core`, `futures 0.3`, `http 1.2`, `http-body-util 0.1`, `hyper 1`, `hyper-util 0.1`, `reqwest 0.13`, `rustls 0.23`, `tokio-rustls 0.26`, `rustls-pemfile 2`, `webpki-root-certs 1`, `rcgen 0.14`, `rsa 0.9`, `hmac 0.12`, `hex 0.4`, `lz4_flex 0.14`, `zstd 0.14`, `dashmap 6`, `chrono 0.4`, `url 2.5`, `base64 0.22`, `bytes 1.12`, `serde 1.0`, `serde_json 1.0`, `thiserror 2.0`, `tokio 1.54`, plus `vertebra_db::connection::install_rustls_ring_provider`; optional features `gcp` [`google-cloud-{auth,gax,rpc,wkt}` with `default-features = false`; `opentelemetry` enters transitively via `google-cloud-gax` with no metrics exporter enabled] for `vertebra_db::gcp` (`GcpTokenCredentials`, `official_credentials`), `pyo3` [`py_async` completion bridge and `ShmCapsule`], and marker feature `duckdb`; `vertebra-db` does not depend on `google-cloud-spanner`, `google-cloud-bigquery`, `google-cloud-longrunning`, or `tonic`).
-  - `vertebra-bigquery`: PyO3 `0.30.1` `cdylib` + `rlib` extension `vertebra._bigquery` (`[bigquery]` extra `vertebra-bigquery==0.3.0`; owns `google-cloud-bigquery =0.19.0`, `google-cloud-gax 1.15`, `reqwest 0.13`, `vertebra-core`, `vertebra-db` [`gcp`, `pyo3`], and BigQuery REST v2 + Storage Read/Write v1 clients; `tonic 0.14` enters transitively via `google-cloud-bigquery`).
-  - `vertebra-oracle`: PyO3 `0.30.1` `cdylib` + `rlib` extension `vertebra._oracle` (`[oracle]` extra `vertebra-oracle==0.3.0`; owns pure-Rust `oracledb =26.0.0-beta.5` with `arrow`, crate-local `arrow-{array,buffer,ipc,schema} 59`, `zip 2` with `deflate`, `rustls 0.23`, `rustls-pemfile 2`, `tokio 1.54`, `url 2.5`, `thiserror 2.0`, `vertebra-core`, and `vertebra-db` [`pyo3`] with zero Instant Client linkage).
-  - `vertebra-spanner`: PyO3 `0.30.1` `cdylib` + `rlib` extension `vertebra._spanner` (`[spanner]` extra `vertebra-spanner==0.3.0`; owns `google-cloud-spanner =0.34.8-preview`, `google-cloud-longrunning 1.14`, `google-cloud-gax 1.15`, `vertebra-core`, `vertebra-db` [`gcp`, `pyo3`], and Spanner v1 gRPC + LRO clients; `tonic 0.14` enters transitively via `google-cloud-spanner`, and `google-cloud-spanner-admin-database-v1 1.15` is a dev-dependency).
-  - `vertebra-duckdb`: PyO3 `0.30.1` `cdylib` + `rlib` extension `vertebra._duckdb` (`[duckdb]` extra `vertebra-duckdb==0.3.0`; owns `duckdb =1.20000.1` with `bundled` + `appender-arrow`, `arrow-{array,buffer,ipc,schema} =60.1.0`, `tokio 1.54`, `thiserror 2.0`, `vertebra-core`, and `vertebra-db` [`gcp`, `pyo3`]).
+- **Python (`>=3.12`, CI & wheel matrix `3.12`, `3.13`, `3.14`, `3.14t`, `3.15`, `3.15t`)**: published on PyPI as `vertebra-core` (`0.3.0`, `import vertebra`), managed by `uv` (`pyproject.toml`, `uv.lock`), built with `maturin` (`>=1.5,<2`) and `pypa/cibuildwheel@v4.3.5` (`cp312-*`..`cp315t-*` across `vertebra-core` and companion wheels `vertebra-bundler`, `vertebra-storage`, `vertebra-mysql`, `vertebra-bigquery`, `vertebra-mssql`, `vertebra-spanner`, `vertebra-duckdb`, `vertebra-oracle`, and `vertebra-postgres`). Runtime dependencies are `anyio>=4.0`, `msgspec>=0.18`, `rich>=13.0`, `rich-click>=1.7`, `uvloop>=0.23.0; sys_platform != 'win32'`, and `winloop>=0.8.1; sys_platform == 'win32'`.
+- **Rust (`edition = "2024"`, workspace version `0.3.0`, stable toolchain, `>=1.91.0` required by `google-cloud-*` `rust-version`)**: CI installs `dtolnay/rust-toolchain@stable` across 13 workspace crates under `src/rs/`:
+  - **Runtime & HTTP (`vertebra-core`, `vertebra-http`, `vertebra-py`)**: `vertebra-core` (`SpscRing`, `MpmcRing`, `TieredRingSet`, `BatchBridge`, `ShmCapsule`, `jsonwebtoken 11.1`, `lz4_flex`/`zstd`, `gcp-auth`); `vertebra-http` (`vertebra-server` binary over `hyper 1`, `tokio 1.54`, `matchit 0.9`, `tokio-tungstenite 0.30`, optional `tls` [`rustls 0.23`], `http3` [`quinn`/`h3`], `mimalloc`, and `python`); `vertebra-py` (`PyO3 0.30.1` `vertebra._vertebra` with `gil_used = false`).
+  - **Frontend & Storage (`vertebra-bundler`, `vertebra-storage`)**: `vertebra-bundler` (`vertebra._bundler`, `oxc_* 0.155`, `rquickjs 0.14`, `rolldown-notify 11.0`); `vertebra-storage` (`vertebra._storage`, `object_store 0.13.2` with S3/GCS/Azure/OCI/R2/HTTP, SigV4/GCS V4/SAS/PAR signing).
+  - **Shared Database Core (`vertebra-db`)**: `rlib` `vertebra_db` (`TransportStream`, `rustls 0.23`, Cloud SQL/AlloyDB dialers, `arrow_shm`, wire codecs; optional `gcp` [`google-cloud-{auth,gax,rpc,wkt}` without `spanner`/`bigquery`/`tonic`], `pyo3` [`py_async` + `ShmCapsule`], and `duckdb` marker).
+  - **Standalone Database Extensions**: `vertebra-mysql` (`_mysql`, `mysql_async 0.37`, `arrow =60.1.0`), `vertebra-bigquery` (`_bigquery`, `google-cloud-bigquery =0.19.0`), `vertebra-mssql` (`_mssql`, `tiberius =0.13.0` + `rustls`, `arrow =60.1.0`), `vertebra-oracle` (`_oracle`, pure-Rust `oracledb =26.0.0-beta.5`, crate-local `arrow 59`), `vertebra-spanner` (`_spanner`, `google-cloud-spanner =0.34.8-preview`), `vertebra-duckdb` (`_duckdb`, bundled `duckdb =1.20000.1`, `arrow =60.1.0`), and `vertebra-postgres` (`_postgres`, `postgres-protocol =0.6.12`, SCRAM-SHA-256-PLUS, Cloud SQL/AlloyDB mTLS+IAM, single-`Sync` pipelines, `PGCOPY`, `VTBARROW`, `LISTEN/NOTIFY`, `pgoutput` v1 replication).
 - **TypeScript (`@vertebra/client` `0.3.0`)**: managed by `bun`, bundled with `tsup ^8.5.1`, type-checked with `typescript ^5.9.3`, linted with `@biomejs/biome ^2.6.6`, tested with `vitest ^5.1.0`, and packaged directly inside the `vertebra-core` wheel under `src/py/vertebra/server/_js/bundle/`. Optional peer dependencies are `react ^19.0.0`, `vue ^3.5.0`, `@angular/core ^22.0.0`, and `vite ^8.0.0`; `svelte ^5.57.3` is a dev dependency only, and the HTMX adapter has no dependency.
-- **Verification & Documentation Toolchain**: `ruff` (lint + format, `line-length = 120`, `target-version = "py312"`, rules `E,F,I,UP,B,SIM`, covering `src/py/vertebra`, `src/py/tests`, `tools/scripts`, `tools/pgo`, `tools/docs`, and `docs/examples`), `mypy` with `django-stubs>=6.1.2` for the real Django `Storage` base (`strict = true`, `files = ["src/py/vertebra", "tools/scripts", "tools/pgo", "tools/docs", "docs/examples"]`) + `mypy.stubtest` (`vertebra._vertebra`, `vertebra._bundler`, `vertebra._storage`, `vertebra._bigquery`, `vertebra._oracle`, `vertebra._spanner`, `vertebra._duckdb`), `pytest` + `pytest-cov`, `zensical` (`>=0.0.71`) + `mkdocstrings-python` (`>=2.0.3`) + `pymdown-extensions` (`>=10.16`) (`tools/docs/`, `site_url = "https://cofin.github.io/vertebra/"`, `repo_url = "https://github.com/cofin/vertebra"`, `repo_name = "cofin/vertebra"`), `cargo fmt`, `cargo clippy --workspace --all-targets --features tls,compression,gcp -- -D warnings`, `cargo test --workspace --features tls,compression,gcp`, `bunx biome check`, `criterion 0.8` microbenchmarks, and the `tools.benchmarks` harness.
+- **Verification & Documentation Toolchain**: `ruff` (lint + format, `line-length = 120`, `target-version = "py312"`, rules `E,F,I,UP,B,SIM`, covering `src/py/vertebra`, `src/py/tests`, `tools/scripts`, `tools/pgo`, `tools/docs`, and `docs/examples`), `mypy` with `django-stubs>=6.1.2` for the real Django `Storage` base (`strict = true`, `files = ["src/py/vertebra", "tools/scripts", "tools/pgo", "tools/docs", "docs/examples"]`) + `mypy.stubtest` (`vertebra._vertebra`, `vertebra._bundler`, `vertebra._storage`, `vertebra._mysql`, `vertebra._bigquery`, `vertebra._mssql`, `vertebra._spanner`, `vertebra._duckdb`, `vertebra._oracle`, `vertebra._postgres`), `pytest` + `pytest-cov`, `zensical` (`>=0.0.71`) + `mkdocstrings-python` (`>=2.0.3`) + `pymdown-extensions` (`>=10.16`) (`tools/docs/`, `site_url = "https://cofin.github.io/vertebra/"`, `repo_url = "https://github.com/cofin/vertebra"`, `repo_name = "cofin/vertebra"`), `cargo fmt`, `cargo clippy --workspace --all-targets --features tls,compression,gcp -- -D warnings`, `cargo test --workspace --features tls,compression,gcp`, `bunx biome check`, `criterion 0.8` microbenchmarks, and the `tools.benchmarks` harness.
 <!-- truth: end -->
 
 ## Rust Workspace Crates (`src/rs/Cargo.toml`)
@@ -117,20 +105,23 @@ sources:
 | `vertebra-bundler` | [`src/rs/vertebra-bundler`](../../../src/rs/vertebra-bundler/Cargo.toml)[^src-vertebra-bundler-cargo-toml] | `cdylib` + `rlib` (`_bundler`, `[bundler]` extra) + `ssr_render` bench | `extension-module` |
 | `vertebra-storage` | [`src/rs/vertebra-storage`](../../../src/rs/vertebra-storage/Cargo.toml)[^src-vertebra-storage-cargo-toml] | `cdylib` + `rlib` (`_storage`, `[storage]` extra) | `extension-module` |
 | `vertebra-db` | [`src/rs/vertebra-db`](../../../src/rs/vertebra-db/Cargo.toml)[^src-vertebra-db-cargo-toml] | `rlib` (`vertebra_db`) | `gcp` (`google-cloud-{auth,gax,rpc,wkt}`), `pyo3` (`py_async`), `duckdb` (marker) |
+| `vertebra-mysql` | [`src/rs/vertebra-mysql`](../../../src/rs/vertebra-mysql/Cargo.toml)[^src-vertebra-mysql-cargo-toml] | `cdylib` + `rlib` (`_mysql`, `[mysql]` extra) | `extension-module` |
 | `vertebra-bigquery` | [`src/rs/vertebra-bigquery`](../../../src/rs/vertebra-bigquery/Cargo.toml)[^src-vertebra-bigquery-cargo-toml] | `cdylib` + `rlib` (`_bigquery`, `[bigquery]` extra) | `extension-module` |
+| `vertebra-mssql` | [`src/rs/vertebra-mssql`](../../../src/rs/vertebra-mssql/Cargo.toml)[^src-vertebra-mssql-cargo-toml] | `cdylib` + `rlib` (`_mssql`, `[mssql]` extra) | `extension-module` |
 | `vertebra-oracle` | [`src/rs/vertebra-oracle`](../../../src/rs/vertebra-oracle/Cargo.toml)[^src-vertebra-oracle-cargo-toml] | `cdylib` + `rlib` (`_oracle`, `[oracle]` extra) | `extension-module` |
 | `vertebra-spanner` | [`src/rs/vertebra-spanner`](../../../src/rs/vertebra-spanner/Cargo.toml)[^src-vertebra-spanner-cargo-toml] | `cdylib` + `rlib` (`_spanner`, `[spanner]` extra) | `extension-module` |
 | `vertebra-duckdb` | [`src/rs/vertebra-duckdb`](../../../src/rs/vertebra-duckdb/Cargo.toml)[^src-vertebra-duckdb-cargo-toml] | `cdylib` + `rlib` (`_duckdb`, `[duckdb]` extra) | `extension-module` |
+| `vertebra-postgres` | [`src/rs/vertebra-postgres`](../../../src/rs/vertebra-postgres/Cargo.toml)[^src-vertebra-postgres-cargo-toml] | `cdylib` + `rlib` (`_postgres`, `[postgres]` extra) | `extension-module` |
 
 `rcgen 0.14` and `reqwest 0.13` are dev-dependencies of `vertebra-http` (test certificates and HTTP clients). The release profile sets `lto = true`, `codegen-units = 1`, `opt-level = 3`, and `panic = "abort"`.
 
 ## Python Package Configuration (`pyproject.toml`)
 
 - **Distribution & Import Namespace**: `[project] name = "vertebra-core"` publishes the PyPI distribution as `vertebra-core` (`vertebra_core-*.whl` and `vertebra_core-*.tar.gz`), while `[tool.maturin]` sets `python-source = "src/py"`, `python-packages = ["vertebra"]`, `module-name = "vertebra._vertebra"`, and `include` globs (`src/rs/Cargo.toml`, `src/rs/Cargo.lock`, and `src/rs/vertebra-*/**/*` for `sdist`; `src/py/vertebra/server/_js/bundle/**/*` and `src/py/vertebra/framework/assets/*` for both `sdist` and `wheel`) so installed packages expose the top-level `vertebra` import namespace with bundled client and framework assets, and source distributions contain the full Rust workspace.
-- **Build Backend**: `maturin` builds `src/rs/vertebra-py/Cargo.toml` into `vertebra._vertebra` (`python-source = "src/py"`, feature `extension-module`). `make dev` and `make build` run companion `maturin develop` calls that build `src/rs/vertebra-bundler/Cargo.toml` into `vertebra._bundler`, `src/rs/vertebra-storage/Cargo.toml` into `vertebra._storage`, `src/rs/vertebra-bigquery/Cargo.toml` into `vertebra._bigquery`, `src/rs/vertebra-mssql/Cargo.toml` into `vertebra._mssql`, `src/rs/vertebra-mysql/Cargo.toml` into `vertebra._mysql`, `src/rs/vertebra-oracle/Cargo.toml` into `vertebra._oracle`, `src/rs/vertebra-spanner/Cargo.toml` into `vertebra._spanner`, and `src/rs/vertebra-duckdb/Cargo.toml` into `vertebra._duckdb`; `make build-pgo` runs two-phase Rust PGO instrumentation and profile-use compilation via `tools/pgo/rust_pgo.py`.
+- **Build Backend**: `maturin` builds `src/rs/vertebra-py/Cargo.toml` into `vertebra._vertebra` (`python-source = "src/py"`, feature `extension-module`). `make dev` and `make build` run companion `maturin develop` calls that build `src/rs/vertebra-bundler/Cargo.toml` into `vertebra._bundler`, `src/rs/vertebra-storage/Cargo.toml` into `vertebra._storage`, `src/rs/vertebra-bigquery/Cargo.toml` into `vertebra._bigquery`, `src/rs/vertebra-mssql/Cargo.toml` into `vertebra._mssql`, `src/rs/vertebra-mysql/Cargo.toml` into `vertebra._mysql`, `src/rs/vertebra-oracle/Cargo.toml` into `vertebra._oracle`, `src/rs/vertebra-postgres/Cargo.toml` into `vertebra._postgres`, `src/rs/vertebra-spanner/Cargo.toml` into `vertebra._spanner`, and `src/rs/vertebra-duckdb/Cargo.toml` into `vertebra._duckdb`; `make build-pgo` runs two-phase Rust PGO instrumentation and profile-use compilation via `tools/pgo/rust_pgo.py`.
 - **CLI Entrypoint**: `vtb = "vertebra.cli:cli"` registers `vtb run [--topology auto|embedded|shm] [--interface auto|asgi|rsgi|wsgi] [--loop auto|uvloop|winloop|rloop|asyncio] [--jit/--no-jit]`, `vtb dev`, `vtb init`, `vtb js {add,remove,list,install,build,generate-types,exec}`, `vtb build [--target ...] [--profile debug|release] [--standalone|--onefile] [--server-binary ...] [--entrypoint ...] [--python-version 3.12|3.13|3.14|3.14t|3.15|3.15t] [--output ...] [--project-dir ...]`, `vtb ai models {list,pull,stage,warm}`, `vtb ai mcp {serve,bridge}`, `vtb workers run`, and entry-point plugin commands via `VertebraExtensionGroup` ([`cli/__init__.py`](../../../src/py/vertebra/cli/__init__.py)[^src-cli-init-py]).
 - **SQLAlchemy Dialect Entry Points**: `postgresql`, `oracle`, `mysql`, `sqlite`, `mssql`, `duckdb`, `bigquery`, `spanner`, and `spangres` each register `.vertebra`, `.vtb`, `.vertebra_async`, and `.vtb_async` dialects (36 entry points total) from `vertebra.extensions.sqlalchemy.dialects`.
-- **Optional Extras (`[project.optional-dependencies]`)**: `sqlspec` (`sqlspec>=0.69.0`), `alchemy` (`advanced-alchemy>=1.12.0`, `sqlalchemy>=2.0.36`, `alembic>=1.14.0`), `arrow` (`pyarrow>=18.0.0`), `pydantic` (`pydantic>=2.9.0`), `attrs` (`attrs>=24.0.0`), `polars` (`polars>=1.0.0`), `litestar` (`litestar>=2.15.0`), `starlette` (`starlette>=0.40.0`), `fastapi` (`fastapi>=0.115.0`, `pydantic>=2.9.0`), `flask` (`flask>=3.0.0`), `django` (`django>=5.1.0`), `queues` (`litestar-queues>=0.12.0`), `security` (`litestar-security>=0.6.0`), `autowire` (`litestar-autowire>=0.2.0`), `email` (`litestar-email>=0.4.0`), `mcp` (`litestar-mcp>=0.16.0`), `vite` (`litestar-vite>=0.32.0`), `asyncapi` (`litestar-asyncapi>=0.2.0`), `htmx` (`litestar-htmx>=0.5.0`), `saq` (`litestar-saq>=0.8.0`), `embeddings` (`fastembed>=0.6.0`), `bigquery` (`vertebra-bigquery==0.3.0`), `bundler` (`vertebra-bundler==0.3.0`), `duckdb` (`vertebra-duckdb==0.3.0`), `mssql` (`vertebra-mssql==0.3.0`), `mysql` (`vertebra-mysql==0.3.0`), `oracle` (`vertebra-oracle==0.3.0`), `spanner` (`vertebra-spanner==0.3.0`), `storage` (`vertebra-storage==0.3.0`), `rloop` (`rloop>=0.5.0; sys_platform != 'win32'`), and `all`; `make install` syncs all extras plus the `doc` and `duckdb` groups (`uv sync --all-extras --dev --group doc --group duckdb`).
+- **Optional Extras (`[project.optional-dependencies]`)**: `sqlspec` (`sqlspec>=0.69.0`), `alchemy` (`advanced-alchemy>=1.12.0`, `sqlalchemy>=2.0.36`, `alembic>=1.14.0`), `arrow` (`pyarrow>=18.0.0`), `pydantic` (`pydantic>=2.9.0`), `attrs` (`attrs>=24.0.0`), `polars` (`polars>=1.0.0`), `litestar` (`litestar>=2.15.0`), `starlette` (`starlette>=0.40.0`), `fastapi` (`fastapi>=0.115.0`, `pydantic>=2.9.0`), `flask` (`flask>=3.0.0`), `django` (`django>=5.1.0`), `queues` (`litestar-queues>=0.12.0`), `security` (`litestar-security>=0.6.0`), `autowire` (`litestar-autowire>=0.2.0`), `email` (`litestar-email>=0.4.0`), `mcp` (`litestar-mcp>=0.16.0`), `vite` (`litestar-vite>=0.32.0`), `asyncapi` (`litestar-asyncapi>=0.2.0`), `htmx` (`litestar-htmx>=0.5.0`), `saq` (`litestar-saq>=0.8.0`), `embeddings` (`fastembed>=0.6.0`), `bigquery` (`vertebra-bigquery==0.3.0`), `bundler` (`vertebra-bundler==0.3.0`), `duckdb` (`vertebra-duckdb==0.3.0`), `mssql` (`vertebra-mssql==0.3.0`), `mysql` (`vertebra-mysql==0.3.0`), `oracle` (`vertebra-oracle==0.3.0`), `postgres` (`vertebra-postgres==0.3.0`), `spanner` (`vertebra-spanner==0.3.0`), `storage` (`vertebra-storage==0.3.0`), `rloop` (`rloop>=0.5.0; sys_platform != 'win32'`), and `all`; `make install` syncs all extras plus the `doc` and `duckdb` groups (`uv sync --all-extras --dev --group doc --group duckdb`).
 - **Dependency Groups**:
   - `dev`: includes `test` (`pytest`, `pytest-cov>=5.0`, `pytest-databases>=0.20.0b1`, `pytest-xdist>=3.6.1`, `anyio`, plus ecosystem framework/ORM test dependencies), `lint` (`ruff`, `mypy`, `django-stubs>=6.1.2` for Django base-class and `File[bytes]` typing), and `build` (`bump-my-version>=0.31.1`, `maturin>=1.5,<2`).
   - `doc`: separate group (`anyio>=4.0`, `mkdocstrings-python>=2.0.3`, `msgspec>=0.18`, `pymdown-extensions>=10.16`, `rich>=13.0`, `rich-click>=1.7`, `ruff>=0.4`, `zensical>=0.0.71`), installed on demand via `--group doc`.
@@ -166,13 +157,9 @@ The `onSuccess` hook in [`tsup.config.ts`](../../../src/ts/vertebra-client/tsup.
 
 ## Related Context
 
-- [Product Definition](product.md)
-- [Product Guidelines](product-guidelines.md)
-- [Project Workflow](../knowledge/workflow.md)
-- [Polyglot Test Matrix](../knowledge/testing/polyglot-test-matrix.md)
-- [Benchmark Suite & Free-Threaded Python 3.14t/3.15t](../knowledge/testing/benchmarks-and-free-threaded.md)
+See [Product Definition](product.md), [Product Guidelines](product-guidelines.md), [Project Workflow](../knowledge/workflow.md), [Polyglot Test Matrix](../knowledge/testing/polyglot-test-matrix.md), and [Benchmark Suite & Free-Threaded Python 3.14t/3.15t](../knowledge/testing/benchmarks-and-free-threaded.md).
 
-Provenance sources: [^src-pyproject-toml], [^src-cargo-toml], [^src-package-json], [^src-ci-yml], [^src-docs-yml], [^src-release-yaml], [^src-zensical-toml], [^src-makefile].
+Provenance sources: [^src-pyproject-toml], [^src-cargo-toml], [^src-package-json], [^src-ci-yml], [^src-makefile].
 
 [^src-pyproject-toml]: `pyproject.toml` — Python package metadata, dependencies, and tool configuration.
 [^src-cargo-toml]: `src/rs/Cargo.toml` — Rust crate manifest (src/rs/Cargo.toml).
@@ -182,15 +169,15 @@ Provenance sources: [^src-pyproject-toml], [^src-cargo-toml], [^src-package-json
 [^src-vertebra-bundler-cargo-toml]: `src/rs/vertebra-bundler/Cargo.toml` — Rust crate manifest (src/rs/vertebra-bundler/Cargo.toml).
 [^src-vertebra-storage-cargo-toml]: `src/rs/vertebra-storage/Cargo.toml` — Rust crate manifest (src/rs/vertebra-storage/Cargo.toml).
 [^src-vertebra-db-cargo-toml]: `src/rs/vertebra-db/Cargo.toml` — Rust crate manifest (src/rs/vertebra-db/Cargo.toml).
+[^src-vertebra-mysql-cargo-toml]: `src/rs/vertebra-mysql/Cargo.toml` — Rust crate manifest (src/rs/vertebra-mysql/Cargo.toml).
 [^src-vertebra-bigquery-cargo-toml]: `src/rs/vertebra-bigquery/Cargo.toml` — Rust crate manifest (src/rs/vertebra-bigquery/Cargo.toml).
+[^src-vertebra-mssql-cargo-toml]: `src/rs/vertebra-mssql/Cargo.toml` — Rust crate manifest (src/rs/vertebra-mssql/Cargo.toml).
 [^src-vertebra-oracle-cargo-toml]: `src/rs/vertebra-oracle/Cargo.toml` — Rust crate manifest (src/rs/vertebra-oracle/Cargo.toml).
 [^src-vertebra-spanner-cargo-toml]: `src/rs/vertebra-spanner/Cargo.toml` — Rust crate manifest (src/rs/vertebra-spanner/Cargo.toml).
 [^src-vertebra-duckdb-cargo-toml]: `src/rs/vertebra-duckdb/Cargo.toml` — Rust crate manifest (src/rs/vertebra-duckdb/Cargo.toml).
+[^src-vertebra-postgres-cargo-toml]: `src/rs/vertebra-postgres/Cargo.toml` — Rust crate manifest (src/rs/vertebra-postgres/Cargo.toml).
 [^src-package-json]: `src/ts/vertebra-client/package.json` — TypeScript package manifest (src/ts/vertebra-client/package.json).
 [^src-tsup-config-ts]: `src/ts/vertebra-client/tsup.config.ts` — TypeScript client module (src/ts/vertebra-client/tsup.config.ts).
 [^src-cli-init-py]: `src/py/vertebra/cli/__init__.py` — Python implementation module (src/py/vertebra/cli/__init__.py).
 [^src-ci-yml]: `.github/workflows/ci.yml` — GitHub Actions workflow (ci.yml).
-[^src-docs-yml]: `.github/workflows/docs.yml` — GitHub Actions workflow (docs.yml).
-[^src-release-yaml]: `.github/workflows/release.yaml` — GitHub Actions workflow (release.yaml).
-[^src-zensical-toml]: `zensical.toml` — Zensical documentation site configuration.
 [^src-makefile]: `Makefile` — Canonical polyglot build, test, lint, docs, and benchmark targets.

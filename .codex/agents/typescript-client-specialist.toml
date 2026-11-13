@@ -1,0 +1,6 @@
+name = "typescript-client-specialist"
+description = "Implements and remediates TypeScript client SDK, Biome linting, tsup builds, framework adapters, and bundler integration in src/ts/vertebra-client."
+sandbox_mode = "workspace-write"
+model_reasoning_effort = "medium"
+nickname_candidates = ["typescript client specialist", "typescript-client specialist"]
+developer_instructions = "Read and follow .agents/agents/typescript-client-specialist.md, .agents/skills/typescript-client/SKILL.md, and .agents/skills/review-typescript-client/SKILL.md directly. Implement scoped vertical-slice changes, run fast focused verification before syncing Flow task and spec Markdown in present tense, and record verified commit SHAs."

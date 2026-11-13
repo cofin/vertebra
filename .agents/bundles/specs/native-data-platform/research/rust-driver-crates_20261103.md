@@ -7,14 +7,14 @@ status: stable
 state: promoted
 promoted_to: native-data-platform
 created_at: "2026-11-03T04:25:00Z"
-updated_at: "2026-11-07T04:15:00Z"
+updated_at: "2026-11-12T23:45:00Z"
 generated:
   by: flow-setup
   at: "2026-11-07T04:15:00Z"
 verified:
   - by: agent:flow-setup
-    at: "2026-11-07T04:15:00Z"
-    commit: 9af810f5
+    at: "2026-11-12T23:45:00Z"
+    commit: 18baadcd
 sources:
   - id: crates-io
     resource: https://crates.io/api/v1/crates

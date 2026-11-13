@@ -15,7 +15,6 @@ disallowedTools:
   - edit_file
 tools:
   - read_file
-  - view_file
   - grep_search
   - find_by_name
   - list_dir

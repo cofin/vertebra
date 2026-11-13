@@ -14,6 +14,9 @@ generated:
   at: "2026-11-04T04:33:00Z"
 verified:
   - by: agent:flow-setup
+    at: "2026-11-12T23:30:00Z"
+    commit: 18baadcd
+  - by: agent:flow-setup
     at: "2026-11-07T03:55:00Z"
     commit: 067fa901
   - by: agent:flow-setup
@@ -110,7 +113,7 @@ Both topologies move requests as `BatchSnapshot`s. Embedded mode hands zero-copy
 
 The first frame leaves the request timeout slab, so long-lived streams do not inherit the 30-second pending-request timeout. Closed receivers are reclaimed by dispatcher sweeps. SHM streams retain their worker ownership: a worker sweep closes its streams and wakes backpressured senders, while response-reader shutdown cancels delivery rather than waiting indefinitely on a full client channel. The unused `PendingRequests`/`handle_raw_response_slot` dispatcher path is absent; `ResponseSlot` remains a separate core codec and is not the SHM response-ring format [^src-vertebra-http-src-dispatcher-streams-rs] [^src-vertebra-http-src-dispatcher-shm-reader-rs] [^src-vertebra-core-src-ipc-rs].
 
-The Python `submit_raw_response` path still needs the stream-submission binding and ASGI/RSGI progressive producers supplied by `server-runtime-correctness` chapters `ch02` and `ch03` [^src-vertebra-py-src-transport-rs].
+The Python `submit_raw_response` path still needs the stream-submission binding and ASGI/RSGI progressive producers supplied by `server-runtime-correctness` chapter `ch01` [^src-vertebra-py-src-transport-rs].
 
 Provenance sources: [^src-vertebra-core-src-protocol-codec-rs].
 

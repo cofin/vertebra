@@ -2,85 +2,39 @@
 type: Spec
 flow_id: mcp-protocol-completeness
 title: MCP Protocol Completeness
-description: Trusted AgentContext propagation, single-pass guards and single-use confirmation tickets, dual-mode MCP version negotiation with legacy sessions and GET SSE streams, resource subscriptions, the skills extension, MCP Apps UI metadata, Litestar delegation parity, and the `vtb ai mcp serve` / `bridge` commands with OIDC identity.
-status: draft
+description: "Complete MCP guard/confirmation/Mcp-Param-* correctness, dual-mode version negotiation with sessions and GET SSE, resource subscriptions, skills and MCP Apps UI extensions, IAP/OIDC auth, and CLI serve/bridge parity."
+status: stable
 state: active
+planning_quality: standard
+planning_degraded_reason: null
 has_chapters: true
 chapters:
-  - ch01-agent-context-propagation
-  - ch02-guard-and-confirmation-correctness
-  - ch03-version-negotiation-and-sessions
-  - ch04-get-sse-streams
-  - ch05-resource-subscriptions
-  - ch06-skills-extension
-  - ch07-mcp-apps-ui-metadata
-  - ch08-litestar-delegation-parity
-  - ch09-stdio-and-serve
-  - ch10-bridge-dual-mode-and-oidc
-  - ch12-iap-identity-source
-  - ch11-docs-and-okf
-current_chapter: ch02-guard-and-confirmation-correctness
-current_task: "mcp-protocol-completeness:ch02:t01"
+  - ch01-guards-params-and-alias-cleanup
+  - ch02-version-negotiation-and-sessions
+  - ch03-sse-streams-and-resource-subscriptions
+  - ch04-skills-and-mcp-apps-core
+  - ch05-framework-mounts-and-litestar-parity
+  - ch06-stdio-serve-bridge-and-gcp-auth
+  - ch07-docs-and-okf-sync
+current_chapter: ch01-guards-params-and-alias-cleanup
+current_task: "mcp-protocol-completeness:ch01:t01"
 parent_prd: integration-remediation
 depends_on_flows:
   - server-runtime-correctness
   - gcp-embeddings-and-identity
-research: []
-plan_revision: 1
-plan_commit: null
-state_revision: 0
-last_verified_checkpoint: b0578ebc
-last_reviewed_chapter: ch01-agent-context-propagation
-last_reviewed_commit: b0578ebc
-created_at: "2026-11-12T00:30:00Z"
-updated_at: "2026-11-12T04:05:24Z"
+plan_revision: 3
+plan_commit: 18baadcd
+last_verified_checkpoint: 18baadcd
+last_reviewed_commit: 18baadcd
+created_at: "2026-11-12T23:45:00Z"
+updated_at: "2026-11-12T23:45:00Z"
 generated:
-  by: agent:plan-generator
-  at: "2026-11-12T00:30:00Z"
-verified: []
-sources:
-  - id: mcp-core
-    resource: src/py/vertebra/agent/mcp/service.py::MCPCore
-    title: Transport-agnostic MCP JSON-RPC and HTTP core
-  - id: mcp-routes
-    resource: src/py/vertebra/agent/mcp/routes.py::AsgiMcpApp
-    title: Shared ASGI and WSGI MCP adapters
-  - id: mcp-models
-    resource: src/py/vertebra/agent/mcp/models.py::MCPConfig
-    title: MCP configuration, envelopes, and resource models
-  - id: agent-context
-    resource: src/py/vertebra/agent/core/context.py::AgentContext
-    title: Caller identity, cancellation, and context variable binding
-  - id: guards
-    resource: src/py/vertebra/agent/core/guards.py::authorize
-    title: Guard chain execution and authorization entry point
-  - id: confirmation-gate
-    resource: src/py/vertebra/agent/runtime.py::ConfirmationGate
-    title: Human confirmation ticket store
-  - id: tool-invoke
-    resource: src/py/vertebra/agent/core/schema.py::Tool
-    title: Tool descriptor invocation, guard execution, and argument binding
-  - id: sse-broker
-    resource: src/py/vertebra/agent/core/sse.py::SseStreamBroker
-    title: SSE replay buffers and per-session subscriber channels
-  - id: skills
-    resource: src/py/vertebra/agent/mcp/skills.py::SkillCatalog
-    title: Skill catalog and filesystem skill source
-  - id: agent-plugin
-    resource: src/py/vertebra/agent/plugin.py::AgentPlugin
-    title: Native App and Litestar agent harness mounting
-  - id: cli-ai
-    resource: src/py/vertebra/cli/ai.py::serve
-    title: vtb ai mcp serve and bridge commands
-  - id: mcp-bridge
-    resource: src/py/vertebra/agent/mcp/bridge.py::run_stdio_http_bridge
-    title: Stdio-to-HTTP MCP bridge
-  - id: litestar-mcp-plugin
-    resource: src/py/vertebra/extensions/litestar/mcp/plugin.py::create_mcp_plugin
-    title: LitestarMCP factory and well-known document merge
-  - id: harness-okf
-    resource: .agents/bundles/knowledge/domains/agent/mcp-and-a2a-protocol-harness.md
-    title: Agent harness OKF chapter
+  by: flow-plan
+  at: "2026-11-12T23:45:00Z"
+verified:
+  - by: agent:plan-generator
+    at: "2026-11-12T23:45:00Z"
+    commit: 18baadcd
 tags:
   - mcp
   - agent
@@ -88,175 +42,89 @@ tags:
   - sessions
   - sse
   - skills
-  - cli
+sources:
+  - id: agent-context
+    resource: "src/py/vertebra/agent/core/context.py::AgentContext"
+    title: Trusted AgentContext constructors and context-variable binding landed in 18baadcd
+  - id: identity-py
+    resource: "src/py/vertebra/agent/core/identity.py::IdentitySource"
+    title: "IdentitySource protocol, MtlsIdentitySource, and CallableIdentitySource landed in 18baadcd"
+  - id: task-store
+    resource: "src/py/vertebra/agent/mcp/tasks.py::MCPTaskStore"
+    title: Owner-scoped MCP task store with isolated cancellation landed in 18baadcd
+  - id: mcp-core
+    resource: "src/py/vertebra/agent/mcp/service.py::MCPCore"
+    title: Transport-agnostic MCP JSON-RPC and HTTP engine and MCPService alias
+  - id: mcp-models
+    resource: "src/py/vertebra/agent/mcp/models.py::MCPConfig"
+    title: "MCP configuration, protocol constants, and resource descriptors"
+  - id: tool-schema
+    resource: "src/py/vertebra/agent/core/schema.py::Tool"
+    title: Tool invocation with duplicate inline guard execution
+  - id: conf-gate
+    resource: "src/py/vertebra/agent/runtime.py::ConfirmationGate"
+    title: Human confirmation ticket store lacking single-use consumption and TTL
+  - id: sse-broker
+    resource: "src/py/vertebra/agent/core/sse.py::SseStreamBroker"
+    title: SSE replay buffer and subscriber channel broker
+  - id: skills-py
+    resource: "src/py/vertebra/agent/mcp/skills.py::SkillCatalog"
+    title: Skill catalog and filesystem skill source
+  - id: cli-ai
+    resource: "src/py/vertebra/cli/ai.py::serve"
+    title: vtb ai mcp serve and bridge CLI commands
+  - id: litestar-mcp
+    resource: "src/py/vertebra/extensions/litestar/mcp/plugin.py::create_mcp_plugin"
+    title: LitestarMCP delegation factory and well-known handler
+  - id: harness-okf
+    resource: .agents/bundles/knowledge/domains/agent/mcp-and-a2a-protocol-harness.md
+    title: Agentic harness OKF chapter currently at 227 lines
 ---
 
-# Flow: MCP Protocol Completeness
+# Specification: MCP Protocol Completeness
 
 <!-- truth: start -->
-- **Canonical seam**: `MCPCore.handle(McpHttpRequest) -> McpHttpResponse` stays the single transport-agnostic engine for native `App`, Starlette, FastAPI, Flask, Django, stdio, and the Litestar fallback; Litestar apps with `LitestarMCP` delegate to `litestar-mcp`; `ch08` requires the `>=0.20.0` release [^mcp-core] [^litestar-mcp-plugin].
-- **Context first**: every adapter builds an `AgentContext` (`from_scope`, `from_headers`, `from_wsgi_environ`) and `MCPCore` binds it with `bind_agent_context` for the whole dispatch; proxy identity headers are ignored by default and set identity only when `MCPConfig.trust_proxy_identity=True` names an `identity_source` (mTLS subject from trusted proxy CIDRs or a custom callable; verified IAP JWT belongs to `ch12`) [^agent-context] [^mcp-routes].
-- **Authorization**: Remaining chapters require: guards run once per `tools/call` through `Tool.authorize` before confirmation and task promotion; denial maps to JSON-RPC `-32004`, rate or budget exhaustion to `-32005` [^guards] [^tool-invoke].
-- **Confirmation**: Remaining chapters require: tickets are decided only while `pending`, owner-bound tickets require the exact owner, approvals are consumed once through `ConfirmationGate.consume_call_approval`, and tickets expire after `ttl_seconds` (default `600`) [^confirmation-gate].
-- **Dual-mode transport**: Remaining chapters require: `SUPPORTED_PROTOCOL_VERSIONS = ("2026-07-28", "2025-11-25", "2025-06-18", "2025-03-26")`; `2026-07-28` requests stay stateless, legacy requests use `initialize`, `Mcp-Session-Id` sessions in `MCPSessionStore`, `GET` SSE streams, `DELETE` termination, `resources/subscribe`, and `logging/setLevel` [^mcp-core] [^sse-broker].
-- **Extensions**: Remaining chapters require: skills advertise `capabilities.extensions["io.modelcontextprotocol/skills"]`; MCP Apps (SEP-1865) advertise `capabilities.extensions["io.modelcontextprotocol/ui"]` with `ui://` resources and tool `_meta.ui` links validated at mount [^skills] [^mcp-models].
-- **CLI**: Remaining chapters require: `vtb ai mcp serve` serves the discovered application's MCP surface over incremental stdio; `vtb ai mcp bridge` forwards both protocol modes, relays legacy `GET` SSE notifications, and mints OIDC id_tokens for `--audience` through the `gcp-embeddings-and-identity` minting API [^cli-ai] [^mcp-bridge].
-- **Dependencies**: `ch04` waits for incremental ASGI streaming from `server-runtime-correctness` ([#81](https://github.com/cofin/vertebra/issues/81)); `ch10:t02` waits for id_token minting from `gcp-embeddings-and-identity` ([#113](https://github.com/cofin/vertebra/issues/113)); `ch08` waits for the `litestar-mcp` `0.20.0` release.
+- **Baseline (`18baadcd`)**: Trusted `AgentContext` propagation (`from_headers`, `from_scope`, `from_wsgi_environ`), `MtlsIdentitySource`, `CallableIdentitySource`, `MCPConfig` opt-in proxy validation, forked task `CancellationToken`s, and owner-bound `MCPTaskStore` are live on `main` [^agent-context] [^identity-py] [^task-store].
+- **Guards, `Mcp-Param-*` & Clean-Break Naming**: Guards run once via `Tool.authorize` (`-32004` / `-32005`), `ConfirmationGate` enforces pending-only exact-owner single-use expiring tickets, `MCPCore.handle` validates `Mcp-Param-*` headers (`-32020`), and the empty `MCPService(MCPCore)` alias subclass is deleted [^mcp-core] [^tool-schema] [^conf-gate].
+- **Dual-Mode Protocol, Sessions, `GET` SSE & Subscriptions**: `SUPPORTED_PROTOCOL_VERSIONS = ('2026-07-28', '2025-11-25', '2025-06-18', '2025-03-26')` pairs stateless `2026-07-28` with legacy `MCPSessionStore` `initialize`, `GET /mcp` SSE streams, `DELETE /mcp`, `resources/subscribe`, and `2026-07-28` `subscriptions/listen` ([#109](https://github.com/cofin/vertebra/issues/109), [#112](https://github.com/cofin/vertebra/issues/112)) [^mcp-models] [^sse-broker].
+- **Extensions, Mounts & GCP Auth**: Skills advertise `capabilities.extensions['io.modelcontextprotocol/skills']` ([#111](https://github.com/cofin/vertebra/issues/111)), MCP Apps advertise `capabilities.extensions['io.modelcontextprotocol/ui']` with validated `ui://` links ([#110](https://github.com/cofin/vertebra/issues/110)), `IapIdentitySource` verifies ES256 IAP JWTs, and `vtb ai mcp serve`/`bridge` discover real apps and mint OIDC `id_token`s via `AsyncGcpIdTokenCache` ([#114](https://github.com/cofin/vertebra/issues/114)) [^skills-py] [^cli-ai] [^litestar-mcp].
 <!-- truth: end -->
 
 ## 1. Specification, Context & Provenance
 
-### 1.1 Problem Statement & Objectives
+### 1.1 Merged Baseline (`18baadcd`) & Remaining Problem Statement
 
-Vertebra's MCP server implements only the stateless `2026-07-28` Streamable HTTP profile. Clients that speak `2025-11-25`, `2025-06-18`, or `2025-03-26` cannot connect: `initialize`, `ping`, `resources/subscribe`, and `logging/setLevel` return `-32601`, `GET /mcp` returns `405`, and any other `MCP-Protocol-Version` value returns `-32022` without the `data.supported` list clients need to retry ([#109](https://github.com/cofin/vertebra/issues/109)). `MCPCore.notify_resource_updated` reads a `_resource_subscriptions` map that nothing ever populates ([#112](https://github.com/cofin/vertebra/issues/112)). The skill catalog is never wired by `AgentPlugin` or the framework mounts and advertises a non-standard `capabilities.skills` key ([#111](https://github.com/cofin/vertebra/issues/111)). Resources and tools carry no `title`, `icons`, or `_meta`, so MCP Apps UI resources cannot be described ([#110](https://github.com/cofin/vertebra/issues/110)). `vtb ai mcp serve` starts an empty `MCPService`, reads all of stdin before answering, and ignores `--name`; `vtb ai mcp bridge` only forwards `2026-07-28` POSTs and accepts only a static bearer token ([#114](https://github.com/cofin/vertebra/issues/114)).
+Commit `18baadcd` ([PR #118](https://github.com/cofin/vertebra/pull/118)) landed trusted caller context propagation across ASGI, WSGI, Starlette, FastAPI, Flask, Django, Litestar fallback, native `App`, and `stdio`, alongside `MtlsIdentitySource`, `CallableIdentitySource`, `MCPConfig` proxy opt-in validation, forked task `CancellationToken`s, and owner-isolated `MCPTaskStore` records (documented in [mcp-and-a2a-protocol-harness.md](../../knowledge/domains/agent/mcp-and-a2a-protocol-harness.md)) [^agent-context] [^identity-py] [^task-store].
 
-Context construction and dispatch carry authenticated application identity through every adapter, and promoted tasks use independent cancellation tokens. Proxy identity requires an explicit configured source; anonymous callers cannot read, update, list, or cancel owner-bound tasks. Remaining correctness work covers duplicate guard execution and confirmation tickets: guards run in both `authorize` and `Tool.invoke`, denials surface as `-32603`, and `ConfirmationGate` still needs exact-owner, pending-only, expiring, single-use approval enforcement.
-
-This flow fixes the correctness layer first, then completes the protocol surface in dependency order: version negotiation and sessions, `GET` SSE, resource subscriptions, skills, MCP Apps metadata, Litestar delegation parity, the CLI commands, and documentation.
+Remaining protocol and harness gaps:
+1. **Guards, Confirmations, `Mcp-Param-*` & Alias Subclasses**: `Tool.invoke` re-runs guards after `MCPCore._handle_tools_call` and surfaces denials as `-32603`; `ConfirmationGate` lacks `ttl_seconds`, single-use `consume_call_approval`, `max_tickets`, and exact `owner_id=None` rejection; `MCPCore.handle` validates `Mcp-Method`/`Mcp-Name` without checking `Mcp-Param-*` headers; and `MCPService(MCPCore)` is an empty pass-through alias subclass [^mcp-core] [^tool-schema] [^conf-gate].
+2. **Protocol Version Negotiation, Sessions, `GET` SSE & Subscriptions ([#109](https://github.com/cofin/vertebra/issues/109), [#112](https://github.com/cofin/vertebra/issues/112))**: `MCPCore.handle` rejects `2025-11-25`, `2025-06-18`, and `2025-03-26` clients without `data.supported`, echoes unvalidated `Mcp-Session-Id` values, returns `405` on `GET /mcp` and `DELETE /mcp`, and leaves `_resource_subscriptions` unpopulated [^mcp-core] [^sse-broker].
+3. **Skills, MCP Apps UI, Litestar Parity, GCP Auth & CLI ([#110](https://github.com/cofin/vertebra/issues/110), [#111](https://github.com/cofin/vertebra/issues/111), [#114](https://github.com/cofin/vertebra/issues/114))**: Skills use non-standard `capabilities.skills` and are unwired on mounts; resources and tools lack SEP-1865 `title`/`icons`/`_meta` and `ui://` link validation; `litestar-mcp` is pinned below `0.20.0`; inbound IAP JWT verification (`IapIdentitySource`) is absent; and `vtb ai mcp serve`/`bridge` lack app discovery, dual-mode SSE relay, and `AsyncGcpIdTokenCache` `--audience` auth [^skills-py] [^cli-ai] [^litestar-mcp].
 
 ### 1.2 Non-Goals
 
-- TypeScript `McpClient` legacy-session support in `src/ts/vertebra-client/src/agent/index.ts`; the TypeScript client keeps the stateless `2026-07-28` profile (recorded as an open decision for the coordinator).
-- Changes to the unwired Rust `src/rs/vertebra-http/src/mcp_bridge.rs` library (no production caller; recorded as an open decision).
-- Persistent or cross-process session stores; `MCPSessionStore` is per-process in-memory and the limitation is recorded in the limitations chapter.
-- Re-implementing `litestar-mcp` behaviour inside Vertebra for Litestar apps that mount `LitestarMCP`.
-- Implementing OIDC id_token minting itself (owned by `gcp-embeddings-and-identity`).
-
-### 1.3 Upstream Execution Baseline
-
-- Branch base: `main @ c8722c76` (`feat/cleanup-2`).
-- Parent PRD: [`integration-remediation`](../integration-remediation/spec.md).
-- Upstream flows: `server-runtime-correctness` (incremental ASGI streaming, [#81](https://github.com/cofin/vertebra/issues/81)) gates `ch04`; `gcp-embeddings-and-identity` (id_token minting, [#113](https://github.com/cofin/vertebra/issues/113)) gates `ch10:t02`.
-- External release gate: `litestar-mcp` `0.20.0` on PyPI gates `ch08` and the Litestar branch of `ch09:t02` (`uv.lock` pins `0.19.0` today).
-
-### 1.4 Code Analysis & Seam Summary
-
-| Area | Files Examined (`path/to/file::Symbol`) | Verified consequence |
-| --- | --- | --- |
-| Core engine | `src/py/vertebra/agent/mcp/service.py::MCPCore.handle` [^mcp-core] | Rejects non-`POST` with `405`, accepts only `MCP_PROTOCOL_VERSION`, echoes any `Mcp-Session-Id`, and binds/restores the request context. |
-| Subscriptions | `src/py/vertebra/agent/mcp/service.py::MCPCore.notify_resource_updated` [^mcp-core] | Reads `_resource_subscriptions`, which no handler writes. |
-| Tool calls | `src/py/vertebra/agent/mcp/service.py::MCPCore._handle_tools_call` [^mcp-core] | Calls `authorize` and then `Tool.invoke`, which re-runs `self.guards` with `target(context)`. |
-| Tool invoke | `src/py/vertebra/agent/core/schema.py::Tool.invoke` [^tool-invoke] | Guard loop receives the bound context from MCP dispatch; direct invocations may supply `None`. |
-| Guards | `src/py/vertebra/agent/core/guards.py::GuardChain.execute` [^guards] | Two-parameter guards are called with one argument when `connection` is `None`. |
-| Confirmation | `src/py/vertebra/agent/runtime.py::ConfirmationGate` [^confirmation-gate] | `approve` skips the owner check for `owner_id=None`, ignores ticket status, never expires or consumes. |
-| Context | `src/py/vertebra/agent/core/context.py::AgentContext.from_request` [^agent-context] | Uses authenticated scope state safely, ignores proxy identity headers by default, and delegates configured proxy policies through `IdentitySource`. |
-| Adapters | `src/py/vertebra/agent/mcp/routes.py::AsgiMcpApp`, `WsgiMcpApp` [^mcp-routes] | Build `McpHttpRequest` with trusted context; responses are fully buffered `bytes`. |
-| Native & Litestar mounts | `src/py/vertebra/agent/plugin.py::AgentPlugin.mount_native`, `_mount_litestar_routes` [^agent-plugin] | Native endpoints pass normalized headers and context; Litestar fallback preserves status and headers. Skill catalog wiring remains pending. |
-| SSE | `src/py/vertebra/agent/core/sse.py::SseStreamBroker` [^sse-broker] | Replay buffers and channels exist but no `GET` handler or stream writer uses them. |
-| Skills | `src/py/vertebra/agent/mcp/skills.py::SkillCatalog` [^skills] | Loads once, no filters, no listeners, no resource projection; `MCPCore` exposes `capabilities.skills`. |
-| CLI | `src/py/vertebra/cli/ai.py::serve`, `bridge` [^cli-ai] | `serve` builds an empty `MCPService` and deletes `--name`; `bridge` takes `--token` only. |
-| Stdio | `src/py/vertebra/agent/mcp/stdio.py::run_stdio_server` | Default path reads every stdin line before dispatching; every frame shares a session context. Notification output remains pending. |
-| Bridge | `src/py/vertebra/agent/mcp/bridge.py::run_stdio_http_bridge` [^mcp-bridge] | Synchronous POST forwarding only; injects `MCP-Protocol-Version: 2026-07-28` on every frame. |
-| Litestar | `src/py/vertebra/extensions/litestar/mcp/plugin.py::create_mcp_plugin` [^litestar-mcp-plugin] | Merges registry tool names into the well-known document (done); pins `litestar-mcp>=0.16.0`. |
-
-### 1.5 Relevant OKF Knowledge Chapters & Skills
-
-- [Agentic Harness, MCP 2026-07-28 & A2A 1.0](../../knowledge/domains/agent/mcp-and-a2a-protocol-harness.md) [^harness-okf]
-- [`vtb` CLI](../../knowledge/domains/framework/cli.md), [Litestar extensions](../../knowledge/domains/extensions/litestar.md), [Polyglot test matrix](../../knowledge/testing/polyglot-test-matrix.md)
-- Skills: [`python-framework`](../../../skills/python-framework/SKILL.md), [`review-python-framework`](../../../skills/review-python-framework/SKILL.md), [`review-tests`](../../../skills/review-tests/SKILL.md)
+- Adding legacy stateful sessions to `@vertebra/client` `McpClient` (stays stateless `2026-07-28`) or cross-process session persistence (`MCPSessionStore` is per-process in-memory, recorded in [mcp-limitations.md](../../knowledge/domains/agent/mcp-limitations.md)).
+- Standalone `.agents/skills` bundle staging ([#115](https://github.com/cofin/vertebra/issues/115), owned by `server-runtime-correctness` `ch03:t04`) or dead Rust `McpStdioBridge` deletion (owned by `http3-and-http-hygiene` `t02`).
 
 ## 2. Requirements, Concrete Contracts & Architecture
 
 ### 2.1 Functional Requirements
 
-- **R1**: `AgentContext` construction from headers, ASGI scopes, and WSGI environs honors `scope["user"]` / `scope["auth"]` always and proxy identity headers only through an explicit `IdentitySource`; the mTLS preset accepts its header only from trusted proxy CIDRs; the IAP preset verifies the ES256 `x-goog-iap-jwt-assertion` against Google's IAP keys with the configured audience, issuer `https://cloud.google.com/iap`, and `exp`, and never trusts `x-goog-authenticated-user-email`; misconfiguration (opt-in without a source, IAP without audience, mTLS without CIDRs) fails at construction; Starlette requests without authentication middleware never raise.
-- **R2**: `MCPCore` binds the request `AgentContext` (anonymous when absent) for the full dispatch, runs promoted tasks under a forked context with its own `CancellationToken`, cancels the coroutine on `tasks/cancel`, and keeps terminal task states immutable.
-- **R3**: Every transport adapter (raw ASGI, Starlette/FastAPI, WSGI, Flask, Django, native `App`, Litestar fallback, stdio) passes an `AgentContext`; the Litestar fallback preserves HTTP status and headers.
-- **R4**: Guards run exactly once per `tools/call` before confirmation and task promotion; `PermissionDeniedError` maps to `-32004`, `RateLimitExceededError` / `BudgetExceededError` to `-32005`; two-parameter guards fail closed without a connection.
-- **R5**: Confirmation tickets are decided only while `pending` and unexpired, owner-bound tickets require the exact owner, approvals are single-use, tickets expire after `ttl_seconds`, and the store is bounded by `max_tickets`.
-- **R6**: Version negotiation recognizes `SUPPORTED_PROTOCOL_VERSIONS`, returns `-32022` with `data.supported`, `data.supportedVersions`, and `data.requested`, rejects legacy-only methods in `2026-07-28` mode with HTTP `200` and a JSON-RPC `-32601` `Method not found` body, returns the same HTTP `200` / `-32601` body for unknown methods (HTTP `404` is reserved for unknown or expired legacy `Mcp-Session-Id` values, which legacy clients treat as session expiry), and echoes the negotiated version header ([#109](https://github.com/cofin/vertebra/issues/109)).
-- **R7**: Legacy `initialize`, `ping`, and `notifications/initialized` work; `initialize` creates an owner-scoped `MCPSessionStore` session and returns `Mcp-Session-Id`; legacy POSTs validate sessions; `DELETE` terminates sessions; `OPTIONS` advertises `GET, POST, DELETE, OPTIONS` ([#109](https://github.com/cofin/vertebra/issues/109)).
-- **R8**: `server/discover` and `initialize` share one capability builder honoring config flags, standard `tasks` and `logging` shapes, and registered extensions; client capabilities are captured into `AgentContext.metadata`; legacy `logging/setLevel` updates the session log level ([#109](https://github.com/cofin/vertebra/issues/109)).
-- **R9**: Legacy `GET /mcp` with `Accept: text/event-stream` opens a session or anonymous SSE stream with `Last-Event-ID` replay, heartbeats, and per-owner stream limits, written incrementally by every adapter ([#109](https://github.com/cofin/vertebra/issues/109)).
-- **R10**: Registry mutations publish `notifications/{tools,resources,prompts}/list_changed`; `MCPCore.log` publishes level-gated `notifications/message`; legacy progress tokens publish `notifications/progress` to the caller's session stream.
-- **R11**: `resources/subscribe` / `resources/unsubscribe` bind URIs to legacy sessions behind a fail-closed authorizer; `notify_resource_updated` fans out to subscribed sessions and `2026-07-28` `subscriptions/listen` streams; termination and expiry drop subscriptions ([#112](https://github.com/cofin/vertebra/issues/112)).
-- **R12**: The skills extension filters and paginates `skills/list`, resolves `skill://` URIs, projects skills into `resources/list`, `resources/templates/list`, and optionally `prompts/*`, advertises `capabilities.extensions["io.modelcontextprotocol/skills"]`, publishes skills list changes, and is wired by `AgentPlugin` and every framework mount ([#111](https://github.com/cofin/vertebra/issues/111)).
-- **R13**: Resources, templates, and tools carry `title`, `icons`, and `_meta`; `ui://` resources and `_meta.ui.resourceUri` links are validated at mount; `capabilities.extensions["io.modelcontextprotocol/ui"]` advertises MIME types; app-only tools are hidden from clients without UI capability and from WebMCP manifests ([#110](https://github.com/cofin/vertebra/issues/110)).
-- **R14**: The `mcp` extra requires `litestar-mcp>=0.20.0`, and `create_mcp_plugin` forwards dual-mode transport options.
-- **R15**: `vtb ai mcp serve` reads stdio incrementally, supports legacy `initialize` sessions and notifications over stdout, and serves the discovered application's MCP surface, failing loud when none exists ([#114](https://github.com/cofin/vertebra/issues/114)).
-- **R16**: `vtb ai mcp bridge` forwards both protocol modes without injecting `2026-07-28` headers into legacy handshakes, relays legacy `GET` SSE notifications, terminates sessions on EOF, and authenticates with static tokens or OIDC id_tokens minted for `--audience` with refresh and one `401` retry ([#114](https://github.com/cofin/vertebra/issues/114)).
-- **R17**: User documentation, CLI reference, changelog, OKF chapters, and a limitations chapter describe the shipped behaviour.
+- **`R1` Single-Pass Guards & `Mcp-Param-*` Validation**: Split `Tool.authorize` + `Tool.call` (`Tool.invoke` composing both), map `PermissionDeniedError` to `-32004` and `RateLimitExceededError`/`BudgetExceededError` to `-32005`, fail closed on 2-arg connection guards without a connection, and validate `Mcp-Param-<key>` request headers against `params` / `params['arguments']` (`400` / `-32020`).
+- **`R2` Confirmation Lifecycle & `MCPService` Removal**: Enforce pending-only decisions, exact owner checks, single-use `ConfirmationGate.consume_call_approval`, `ttl_seconds=600.0`, and `max_tickets=10_000`; delete empty `MCPService(MCPCore)` and migrate callers to `MCPCore` / `ToolRegistry` (documenting extension `MCPRegistry` shims until host-extension cleanup).
+- **`R3` Version Negotiation, Capabilities & Sessions ([#109](https://github.com/cofin/vertebra/issues/109))**: Negotiate `SUPPORTED_PROTOCOL_VERSIONS`, return `-32022` with `data.supported`/`supportedVersions`/`requested`, return HTTP `200` / `-32601` for unknown or modern-disallowed legacy methods (reserving HTTP `404` for unknown/expired `Mcp-Session-Id`), manage owner-scoped `MCPSessionStore` via `initialize` and `DELETE /mcp`, allow JSON-RPC batch arrays only on `2025-03-26`, and unify `_server_capabilities` + `logging/setLevel`.
+- **`R4` `GET /mcp` SSE, Notifications & Subscriptions ([#109](https://github.com/cofin/vertebra/issues/109), [#112](https://github.com/cofin/vertebra/issues/112))**: Stream `McpHttpResponse.stream` across ASGI, Starlette, WSGI, Django, and native `App` `(status, headers, AsyncIterable[bytes])` writers with `Last-Event-ID` replay, heartbeats, and `max_streams_per_owner=8`; publish list-changed, level-gated `MCPCore.log`, and progress events; implement authorized `resources/subscribe`, `notify_resource_updated` fan-out, and `2026-07-28` `subscriptions/listen`.
+- **`R5` Skills & MCP Apps Extensions ([#110](https://github.com/cofin/vertebra/issues/110), [#111](https://github.com/cofin/vertebra/issues/111))**: Complete `SkillCatalog` filtering/URI/resource/prompt projection under `capabilities.extensions['io.modelcontextprotocol/skills']`; add `McpIcon`, `title`/`icons`/`meta` on resources and tools, `ToolRegistry.validate_ui_links` / `MCPCore.validate()` under `capabilities.extensions['io.modelcontextprotocol/ui']`, app-only tool filtering, and wiring across `AgentPlugin`, Starlette, Flask, Django, and `litestar-mcp>=0.20.0`.
+- **`R6` Stdio, `serve`/`bridge`, IAP & OIDC Auth ([#114](https://github.com/cofin/vertebra/issues/114))**: Run concurrent session-aware `run_stdio_server` against discovered app `MCPCore` in `vtb ai mcp serve`; support dual-mode HTTP + legacy SSE relay and `OidcTokenSource` (`AsyncGcpIdTokenCache`, `401` refresh retry) in `vtb ai mcp bridge --audience`; verify ES256 `x-goog-iap-jwt-assertion` in `IapIdentitySource`.
+- **`R7` Docs & OKF Sync**: Update user/CLI/agent docs, changelog, `mcp-and-a2a-protocol-harness.md` (`227L -> <= 200L`), and `mcp-limitations.md`.
 
-### 2.2 Full Public Type, Struct, Schema & Signature Contracts
+### 2.2 Key Public Signatures
 
 ```python
-# src/py/vertebra/agent/core/context.py
-class IdentityRequest(msgspec.Struct, frozen=True, kw_only=True):
-    headers: Mapping[str, str]
-    peer: str | None = None
-
-class IdentitySource(Protocol):
-    def resolve(self, request: IdentityRequest) -> CallerIdentity | None: ...
-
-class MtlsIdentitySource(msgspec.Struct, frozen=True, kw_only=True):
-    trusted_proxies: tuple[str, ...]
-    header: str = "x-vertebra-mtls-subject"
-
-class CallableIdentitySource(msgspec.Struct, frozen=True, kw_only=True):
-    resolver: Callable[[IdentityRequest], CallerIdentity | None]
-
-class IapIdentitySource:
-    def __init__(self, audience: str, *, key_url: str = IAP_PUBLIC_KEY_URL, key_cache_seconds: float = 3600.0, jwks: Mapping[str, Any] | None = None) -> None: ...
-    def resolve(self, request: IdentityRequest) -> CallerIdentity | None: ...
-
-class AgentContext:
-    @classmethod
-    def from_headers(
-        cls,
-        headers: Mapping[str, str],
-        *,
-        identity_source: IdentitySource | None = None,
-        peer: str | None = None,
-        user: Any = None,
-        auth: Any = None,
-        session_id: str | None = None,
-    ) -> "AgentContext": ...
-    @classmethod
-    def from_scope(cls, scope: Mapping[str, Any], *, identity_source: IdentitySource | None = None) -> "AgentContext": ...
-    @classmethod
-    def from_wsgi_environ(cls, environ: Mapping[str, Any], *, identity_source: IdentitySource | None = None) -> "AgentContext": ...
-    @classmethod
-    def from_request(cls, request_or_connection: Any, *, identity_source: IdentitySource | None = None, session_id: str | None = None, turn_id: str | None = None, progress_token: str | int | None = None, progress_callback: ProgressCallback | None = None) -> "AgentContext": ...
-    def fork(self) -> "AgentContext": ...
-
-def reset_agent_context(token: contextvars.Token[AgentContext | None]) -> None: ...
-
-# src/py/vertebra/agent/mcp/models.py
-MCP_PROTOCOL_VERSION: str = "2026-07-28"
-LEGACY_PROTOCOL_VERSIONS: tuple[str, ...] = ("2025-11-25", "2025-06-18", "2025-03-26")
-SUPPORTED_PROTOCOL_VERSIONS: tuple[str, ...] = (MCP_PROTOCOL_VERSION, *LEGACY_PROTOCOL_VERSIONS)
-MCP_FALLBACK_SESSION_VERSION: str = "2025-11-25"
-LEGACY_ONLY_METHODS: frozenset[str] = frozenset({"initialize", "ping", "resources/subscribe", "resources/unsubscribe", "logging/setLevel"})
-SESSION_CAPACITY_EXHAUSTED: int = -32000
+# src/py/vertebra/agent/mcp/models.py & sessions.py & service.py
+SUPPORTED_PROTOCOL_VERSIONS: tuple[str, ...] = ("2026-07-28", "2025-11-25", "2025-06-18", "2025-03-26")
 SKILLS_EXTENSION: str = "io.modelcontextprotocol/skills"
 UI_EXTENSION: str = "io.modelcontextprotocol/ui"
-UI_MIME_TYPE: str = "text/html;profile=mcp-app"
-type McpLogLevel = Literal["debug", "info", "notice", "warning", "error", "critical", "alert", "emergency"]
-
-class McpIcon(FrozenBaseStruct, frozen=True, kw_only=True):
-    src: str
-    mimeType: str | None = None
-    sizes: tuple[str, ...] = ()
-
-class NegotiatedProtocol(FrozenBaseStruct, frozen=True, kw_only=True):
-    version: str
-    modern: bool
-
-class MCPConfig(FrozenBaseStruct, frozen=True, kw_only=True):
-    # existing fields unchanged, plus:
-    trust_proxy_identity: bool = False
-    identity_source: IdentitySource | None = None
-    session_ttl_seconds: int = 3600
-    max_sessions: int = 10_000
-    enable_get_sse: bool = True
-    sse_heartbeat_seconds: float = 15.0
-    max_streams_per_owner: int = 8
-    logging: bool = False
-    default_log_level: McpLogLevel = "info"
-    resource_subscriptions: bool = True
-    subscription_authorizer: Callable[[AgentContext, str], bool | Awaitable[bool]] | None = None
-    ui_mime_types: tuple[str, ...] | None = None
-    hide_app_only_tools: bool = True
 
 class McpHttpResponse(FrozenBaseStruct, frozen=True, kw_only=True):
     status: int = 200
@@ -264,224 +132,60 @@ class McpHttpResponse(FrozenBaseStruct, frozen=True, kw_only=True):
     body: bytes = b""
     stream: AsyncIterator[bytes] | None = None
 
-class ResourceEntry(FrozenBaseStruct, frozen=True, kw_only=True):
-    uri: str
-    name: str
-    title: str = ""
-    description: str = ""
-    mimeType: str = "text/plain"
-    icons: tuple[McpIcon, ...] = ()
-    meta: dict[str, Any] | None = None
-    reader: Callable[..., Any] | None = None
-# ResourceTemplateEntry gains the same title / icons / meta fields.
-
-# src/py/vertebra/agent/mcp/sessions.py (new)
-class MCPSession(msgspec.Struct, frozen=True, gc=False, kw_only=True):
-    session_id: str
-    owner_id: str | None
-    protocol_version: str
-    client_capabilities: dict[str, Any]
-    client_info: dict[str, Any]
-    log_level: McpLogLevel
-    subscriptions: frozenset[str] = frozenset()
-    created_at_unix_ms: int
-    expires_at_unix_ms: int
-
-class SessionLimitExceededError(VertebraError, RuntimeError): ...
-
 class MCPSessionStore:
-    def __init__(self, *, ttl_seconds: int = 3600, max_sessions: int = 10_000, clock: Callable[[], float] = time.monotonic) -> None: ...
     async def create(self, *, owner_id: str | None, protocol_version: str, client_capabilities: Mapping[str, Any], client_info: Mapping[str, Any], log_level: McpLogLevel) -> MCPSession: ...
     async def get(self, session_id: str, owner_id: str | None) -> MCPSession | None: ...
     async def update(self, session_id: str, owner_id: str | None, *, log_level: McpLogLevel | None = None, subscriptions: frozenset[str] | None = None) -> MCPSession | None: ...
     async def delete(self, session_id: str, owner_id: str | None) -> MCPSession | None: ...
     async def subscribed_session_ids(self, uri: str) -> tuple[str, ...]: ...
-    async def active_session_ids(self) -> tuple[str, ...]: ...
 
-# src/py/vertebra/agent/core/sse.py
-class StreamLimitExceededError(VertebraError, RuntimeError): ...
-class SseStreamBroker:
-    def open_stream(self, session_id: str, *, owner_id: str | None, last_event_id: str | None = None, heartbeat_seconds: float = 15.0, max_streams_per_owner: int = 8) -> AsyncIterator[bytes]: ...
-    def close_session(self, session_id: str) -> None: ...
-
-# src/py/vertebra/agent/core/schema.py
-class ToolSpec(FrozenBaseStruct, frozen=True, kw_only=True):
-    # existing fields unchanged, plus:
-    meta: dict[str, Any] | None = None
-class Tool:
-    async def authorize(self, context: AgentContext | None = None) -> None: ...
-    async def call(self, arguments: dict[str, Any], context: Any = None) -> Any: ...
-    async def invoke(self, arguments: dict[str, Any], context: Any = None) -> Any: ...  # authorize + call
-
-# src/py/vertebra/agent/runtime.py
-class ConfirmationTicket(msgspec.Struct, frozen=True, gc=False, kw_only=True):
-    # existing fields, with:
-    status: Literal["pending", "approved", "rejected", "consumed", "expired"] = "pending"
-    expires_at_unix_ms: int = 0
-class ConfirmationCapacityError(VertebraError, RuntimeError): ...
-class ConfirmationGate:
-    def __init__(self, *, ttl_seconds: float = 600.0, max_tickets: int = 10_000, clock: Callable[[], float] = time.time) -> None: ...
-    def consume_call_approval(self, token: str | None, *, tool_name: str, arguments: Mapping[str, Any], owner_id: str | None) -> bool: ...
-    # is_call_approved is removed; approve / reject / is_approved keep their signatures with corrected semantics.
-
-# src/py/vertebra/agent/mcp/service.py
-CONFIRMATION_REQUIRED: int = -32003
-PERMISSION_DENIED: int = -32004
-RATE_LIMITED: int = -32005
-class MCPCore:
-    sessions: MCPSessionStore
-    def register_extension(self, name: str, payload: Callable[[], dict[str, Any]]) -> None: ...
-    async def log(self, level: McpLogLevel, data: Any, *, logger: str | None = None) -> int: ...
-    async def notify_resource_updated(self, uri: str) -> int: ...  # becomes async
+class IapIdentitySource:
+    def __init__(self, audience: str, *, key_url: str = IAP_PUBLIC_KEY_URL, key_cache_seconds: float = 3600.0, jwks: Mapping[str, Any] | None = None) -> None: ...
+    def resolve(self, request: IdentityRequest) -> CallerIdentity | None: ...
 ```
-
-### 2.3 Caller -> Seam -> Collaborator Integration Map
-
-| Caller | Seam | Collaborator |
-| --- | --- | --- |
-| `AsgiMcpApp.__call__`, `handle_starlette_request` | `AgentContext.from_scope` -> `MCPCore.handle` | `bind_agent_context`, `JSONRPCRouter.dispatch_payload` |
-| `WsgiMcpApp.handle_vertebra_request`, `handle_flask_view`, `__call__` | `AgentContext.from_headers` / `from_wsgi_environ` -> `PortalProvider.default().call(MCPCore.handle)` | Portal event loop |
-| `AgentPlugin.mount_native` endpoints, Litestar fallback | `AgentContext.from_headers(request.headers.as_dict())` / `from_scope(request.scope)` -> `MCPCore.handle` | Native DI `request` binding, `litestar.Response` |
-| `run_stdio_server` | stdio `AgentContext` + `MCPSessionStore` session -> `MCPCore.handle_payload` | `SseStreamBroker.open_stream` notification writer |
-| `MCPCore._handle_tools_call` | `Tool.authorize` -> `ConfirmationGate.consume_call_approval` -> `Tool.call` / `MCPTaskStore` | `GuardChain.execute`, forked `AgentContext` |
-| `MCPCore.handle` (`GET`) | `SseStreamBroker.open_stream` -> `McpHttpResponse.stream` | Adapter stream writers |
-| `ToolRegistry` listeners, `SkillCatalog` listeners | `MCPCore._publish_notification` | `SseStreamBroker.publish` for session streams |
-| `MCPCore.notify_resource_updated` | `MCPSessionStore.subscribed_session_ids` + listen registrations | `SseStreamBroker.publish` |
-| `vtb ai mcp serve` | `resolve_app_mcp_surface(app)` -> `run_stdio_server` or `litestar_mcp.mcp.stdio.run_stdio` | `VertebraEnv` |
-| `vtb ai mcp bridge` | `run_stdio_http_bridge` + `OidcTokenSource` | HTTP transport, id_token minting from `gcp-embeddings-and-identity` |
-
-### 2.4 Non-Functional Constraints & Edge-Case / Failure-Mode Matrix
-
-| Scenario / Boundary | Trigger / Input | Expected Behavior / Error Contract | Invariant Preserved |
-| --- | --- | --- | --- |
-| Spoofed identity header | `x-goog-authenticated-user-email: a@x` with default config | Header ignored; `auth_scheme == "anonymous"` | Identity only from trusted sources |
-| Starlette without auth middleware | `request.scope` lacks `user` | Context builds from scope; no `AssertionError` | Adapters never crash on identity |
-| Guard denial | `RequireRoles("admin")` vs caller without role | HTTP `200`, JSON-RPC `-32004`, `data.tool` set | Guards run once |
-| Token bucket | capacity `1`, one call | One token consumed per call | No double consumption |
-| Ticket replay | Same approved token twice | Second call returns `-32003` with a fresh token | Single-use approvals |
-| Rejected ticket approve | `approve` after `reject` | `False`, status stays `rejected` | Decisions only from `pending` |
-| Unsupported version | `MCP-Protocol-Version: 1900-01-01` | HTTP `400`, `-32022`, `data.supported` lists four versions | Clients can renegotiate |
-| Legacy method in modern mode | `initialize` with `2026-07-28` header | HTTP `200`, `-32601` | Stateless profile stays stateless |
-| Unknown method | `tasks/result`, any version | HTTP `200`, `{"jsonrpc":"2.0","id":<id>,"error":{"code":-32601,"message":"Method not found"}}` | Legacy clients never read a method error as session expiry |
-| Unknown session | Legacy POST with expired `Mcp-Session-Id` | HTTP `404`, `-32602` `Session not found or expired` | `404` is reserved for session expiry |
-| Proxy headers by default | IAP email, mTLS subject, `x-tenant-id`; default `MCPConfig` | Ignored; anonymous | No implicit header trust |
-| IAP assertion | Valid / bad signature / wrong audience / expired `x-goog-iap-jwt-assertion`; plain email header alone | Identity only for the valid token | Signed identity only |
-| mTLS subject | Peer inside vs outside `trusted_proxies` | Subject only from trusted proxies | Header origin checked |
-| Identity misconfiguration | `trust_proxy_identity=True` without source; IAP without audience; mTLS without CIDRs | `ValueError` at construction | Fail loud |
-| Session capacity | `max_sessions` reached | HTTP `503`, `-32000` | Bounded memory |
-| GET in modern mode | `GET` with `MCP-Protocol-Version: 2026-07-28` | HTTP `405`, `Allow: POST, DELETE, OPTIONS` | No server-push in stateless mode |
-| GET without SSE accept | `Accept: application/json` | HTTP `406` | Content negotiation |
-| Stream limit | 9th stream for one owner (limit `8`) | HTTP `503` | Bounded streams |
-| Subscription authorizer error | Authorizer raises | `-32004`, subscription not stored | Fail closed |
-| Broken UI link | Tool `_meta.ui.resourceUri = "ui://missing"` | `ImproperConfigurationError` at mount | Fail loud |
-| Serve without MCP | App with no MCP surface | `click.ClickException`, exit code `1` | Fail loud |
-| Bridge `401` | Expired id_token | Refresh once and retry; second `401` is written as JSON-RPC error | Bounded retries |
-
-### 2.5 Acceptance Scenarios (Given / When / Then)
-
-- Given a Starlette app mounted with `mount_mcp_routes` and a `2025-06-18` client, when it sends `initialize`, then it receives `protocolVersion: "2025-06-18"`, an `Mcp-Session-Id`, and can open `GET /mcp` to receive `notifications/tools/list_changed` after a tool registers.
-- Given a tool guarded by `RequireRoles("admin")`, when an ASGI caller whose `scope["user"]` has role `admin` calls it, then the guard sees that identity and the call succeeds; an anonymous caller receives `-32004`.
-- Given a confirmation-gated tool, when the approved token is reused for a second identical call, then the second call is blocked with `-32003`.
-- Given a legacy session subscribed to `config://app`, when application code awaits `core.notify_resource_updated("config://app")`, then the session stream receives one `notifications/resources/updated` frame.
-- Given `vtb ai mcp serve` in a project whose app mounts `AgentPlugin`, when a host writes `tools/list`, then the response lists the app's tools before stdin closes.
-
-### 2.6 Alternatives Considered
-
-| Decision | Chosen Design | Rejected Alternative & Why |
-| --- | --- | --- |
-| Legacy support location | Dual-mode inside `MCPCore` | A separate legacy service class duplicates routing, guards, and confirmation. |
-| Session storage | In-memory `MCPSessionStore` per process | A store abstraction over `vertebra.framework.stores` adds a seam with one adapter; recorded as a limitation. |
-| Guard de-duplication | `Tool.authorize` + `Tool.call` split with `invoke` composing both | A `guards_checked` flag on `invoke` leaks protocol state into the tool API. |
-| Approval replay | Consume on successful check | Counting uses per ticket adds policy surface without a use case. |
-| Streaming envelope | `McpHttpResponse.stream` field | A second response type forces every adapter to branch on type. |
-| Litestar | Delegate to `litestar-mcp>=0.20.0` | Duplicating sessions in the Vertebra Litestar fallback diverges from the upstream implementation. |
 
 ## 3. Documentation & OKF Knowledge Plan
 
-- **Progress**: `[3/12 files documented]` for current context, task, and adapter behavior; later chapter features remain pending.
-- `[x]` `docs/usage/agent-protocols.md` — Trusted context configuration, task ownership, and cancellation describe the current implementation; dual-mode transport, sessions, SSE, extensions, and guard changes remain assigned to `ch11:t01`.
-- `[ ]` `docs/usage/a2a-and-workflows.md` — Confirmation lifecycle and error codes (`ch11:t01`).
-- `[ ]` `docs/reference/agent.md` — New public symbols (`ch11:t01`).
-- `[ ]` `docs/getting-started/cli.md` — `vtb ai mcp serve` and `bridge --audience` (`ch11:t02`).
-- `[ ]` `docs/reference/cli.md` — Regenerated CLI reference (`ch11:t02`).
-- `[ ]` `docs/changelog/index.md` — Unreleased entries (`ch11:t02`).
-- `[x]` `.agents/bundles/knowledge/domains/agent/mcp-and-a2a-protocol-harness.md` — Current context, cancellation, and adapter contracts; remaining feature coverage belongs to `ch11:t03`.
-- `[x]` `.agents/bundles/knowledge/domains/agent/mcp-limitations.md` — Current protocol and caller limitations; later chapters reconcile their feature coverage through `ch11:t03`.
-- `[ ]` `.agents/bundles/knowledge/domains/index.md` — Catalog entry (`ch11:t03`).
-- `[ ]` `.agents/bundles/knowledge/domains/framework/cli.md` — CLI command table (`ch11:t04`).
-- `[ ]` `.agents/bundles/knowledge/domains/extensions/litestar.md` — `litestar-mcp>=0.20.0` delegation (`ch11:t04`).
-- `[ ]` `.agents/bundles/knowledge/testing/polyglot-test-matrix.md` — MCP conformance evidence (`ch11:t04`).
+`ch07-docs-and-okf-sync` updates `12` documentation and OKF files (`<= 200` lines per OKF chapter):
+- **Public Docs (`t01`–`t02`)**: `docs/usage/agent-protocols.md`, `docs/usage/a2a-and-workflows.md`, `docs/reference/agent.md`, `docs/getting-started/cli.md`, `docs/reference/cli.md`, and `docs/changelog/index.md`.
+- **OKF Knowledge (`t03`–`t04`)**: [mcp-and-a2a-protocol-harness.md](../../knowledge/domains/agent/mcp-and-a2a-protocol-harness.md) (`227L -> <= 200L`) [^harness-okf], [mcp-limitations.md](../../knowledge/domains/agent/mcp-limitations.md), [domains/index.md](../../knowledge/domains/index.md), [cli.md](../../knowledge/domains/framework/cli.md), [litestar.md](../../knowledge/domains/extensions/litestar.md), and [polyglot-test-matrix.md](../../knowledge/testing/polyglot-test-matrix.md).
 
 ## 4. Requirement-to-Task Traceability Matrix
 
-| Requirement / Doc Target | Owning Chapter / Task | Verification Strategy | Canonical Test / Doc Gate |
+| Requirement | Chapter / Tasks | Primary Files | Verification |
 | --- | --- | --- | --- |
-| R1 | `ch01 / t01`, `ch01 / t03` (`MCPConfig` validation), `ch12 / t01` (IAP preset) | `regression_tdd`, `behavior_tdd` | `src/py/tests/unit/agent/test_core_and_observability.py`, `test_mcp_conformance.py` |
-| R2 | `ch01 / t02` | `regression_tdd` | `src/py/tests/unit/agent/test_mcp_conformance.py` |
-| R3 | `ch01 / t03`, `ch01 / t04` | `regression_tdd` | `test_mcp_conformance.py`, `src/py/tests/unit/cli/test_mcp_cli.py` |
-| R4 | `ch02 / t01` | `regression_tdd` | `test_mcp_conformance.py`, `test_core_and_observability.py` |
-| R5 | `ch02 / t02` | `regression_tdd` | `test_mcp_conformance.py`, `src/py/tests/unit/agent/test_runtime_and_workflows.py` |
-| R6 | `ch03 / t01` | `behavior_tdd` | `test_mcp_conformance.py` |
-| R7 | `ch03 / t02`, `ch03 / t03` | `behavior_tdd` | `test_mcp_conformance.py` |
-| R8 | `ch03 / t04` | `behavior_tdd` | `test_mcp_conformance.py` |
-| R9 | `ch04 / t01`, `ch04 / t02` | `behavior_tdd` | `test_mcp_conformance.py`, `test_core_and_observability.py` |
-| R10 | `ch04 / t03`, `ch04 / t04` | `behavior_tdd` | `test_mcp_conformance.py` |
-| R11 | `ch05 / t01`–`t03` | `behavior_tdd` | `test_mcp_conformance.py` |
-| R12 | `ch06 / t01`–`t04` | `behavior_tdd` | `test_mcp_conformance.py` |
-| R13 | `ch07 / t01`–`t04` | `behavior_tdd` | `test_mcp_conformance.py`, `test_core_and_observability.py` |
-| R14 | `ch08 / t01` | `behavior_tdd` | `src/py/tests/unit/extensions/test_litestar_ecosystem_mcp.py` |
-| R15 | `ch09 / t01`, `ch09 / t02` | `behavior_tdd` | `test_mcp_cli.py` |
-| R16 | `ch10 / t01`, `ch10 / t02` | `behavior_tdd` | `test_mcp_cli.py` |
-| R17 / docs | `ch11 / t01`, `t02` | `documentation_validation` | `make docs` |
-| R17 / OKF | `ch11 / t03`, `t04` | `documentation_validation` | `make review-check` |
+| `R1`–`R2` Guards, Params, Tickets, Alias | `ch01` (`t01`–`t04`) | `agent/core/{schema,guards}.py`, `agent/runtime.py`, `agent/mcp/{service,__init__}.py`, `cli/ai.py` | `pytest src/py/tests/unit/agent src/py/tests/unit/cli/test_mcp_cli.py` |
+| `R3` Versions & Sessions | `ch02` (`t01`–`t03`) | `agent/mcp/{models,sessions,service}.py` | `pytest src/py/tests/unit/agent/test_mcp_conformance.py` |
+| `R4` `GET` SSE & Subscriptions | `ch03` (`t01`–`t04`) | `agent/core/sse.py`, `agent/mcp/{routes,registry,sessions,service}.py`, `plugin.py`, `django/mcp.py` | `pytest test_core_and_observability.py test_mcp_conformance.py` |
+| `R5` Skills, UI & Mounts | `ch04` (`t01`–`t04`), `ch05` (`t01`–`t03`) | `agent/mcp/{skills,controllers,registry,webmcp,service}.py`, `extensions/{starlette,flask,django,litestar}/*` | `pytest test_mcp_conformance.py test_litestar_ecosystem_mcp.py` |
+| `R6` Stdio, Bridge, IAP & OIDC | `ch06` (`t01`–`t03`) | `agent/mcp/{stdio,bridge,client}.py`, `agent/core/identity.py`, `cli/ai.py` | `pytest test_mcp_cli.py test_core_and_observability.py` |
+| `R7` Docs & OKF | `ch07` (`t01`–`t04`) | `docs/**`, `.agents/bundles/knowledge/**` | `make docs && make review-check` |
 
 ## 5. Implementation Plan
 
-- [x] [b0578ebc] ch01-agent-context-propagation — Trusted context construction, core binding, task cancellation, and adapter contexts (chapters/ch01-agent-context-propagation/spec.md)
-- [ ] ch02-guard-and-confirmation-correctness — Single-pass guards with typed errors and single-use, expiring confirmation tickets (chapters/ch02-guard-and-confirmation-correctness/spec.md)
-- [ ] ch03-version-negotiation-and-sessions — Version registry, legacy initialize and sessions, termination, and shared capabilities (chapters/ch03-version-negotiation-and-sessions/spec.md)
-- [ ] ch04-get-sse-streams — Streaming envelope, `GET` SSE, adapter writers, and session notifications (chapters/ch04-get-sse-streams/spec.md) [empirical_dependent: server-runtime-correctness lands incremental ASGI response streaming]
-- [ ] ch05-resource-subscriptions — Subscribe/unsubscribe, update fan-out, and stateless `subscriptions/listen` (chapters/ch05-resource-subscriptions/spec.md)
-- [ ] ch06-skills-extension — Catalog disclosure, core skill surface, and plugin/mount wiring (chapters/ch06-skills-extension/spec.md)
-- [ ] ch07-mcp-apps-ui-metadata — SEP-1865 metadata models, projection, validation, and visibility (chapters/ch07-mcp-apps-ui-metadata/spec.md)
-- [ ] ch08-litestar-delegation-parity — `litestar-mcp>=0.20.0` dual-mode delegation (chapters/ch08-litestar-delegation-parity/spec.md) [empirical_dependent: litestar-mcp 0.20.0 published to PyPI]
-- [ ] ch09-stdio-and-serve — Incremental stdio sessions and `vtb ai mcp serve` app discovery (chapters/ch09-stdio-and-serve/spec.md)
-- [ ] ch10-bridge-dual-mode-and-oidc — Dual-mode bridge with SSE relay and OIDC id_token authentication (chapters/ch10-bridge-dual-mode-and-oidc/spec.md) [empirical_dependent: gcp-embeddings-and-identity lands the id_token minting API]
-- [ ] ch12-iap-identity-source — Verified IAP signed-header JWT identity source (chapters/ch12-iap-identity-source/spec.md)
-- [ ] ch11-docs-and-okf — User docs, CLI reference, changelog, OKF chapters, and limitations (chapters/ch11-docs-and-okf/spec.md)
-- **Flow Recovery Checkpoint**: `uv run --no-sync pytest src/py/tests/unit/agent src/py/tests/unit/cli/test_mcp_cli.py src/py/tests/unit/extensions/test_litestar_ecosystem_mcp.py -q && make lint-all && make docs && make review-check` exits `0`.
+- [ ] [ch01-guards-params-and-alias-cleanup](chapters/ch01-guards-params-and-alias-cleanup/spec.md) — Single-pass guards, `Mcp-Param-*` validation, single-use expiring confirmation tickets, and `MCPService` alias removal (`4` tasks; `< 15s` gate)
+- [ ] [ch02-version-negotiation-and-sessions](chapters/ch02-version-negotiation-and-sessions/spec.md) — `SUPPORTED_PROTOCOL_VERSIONS` negotiation, `MCPSessionStore`, legacy `initialize`, `2025-03-26` batching, and `DELETE /mcp` ([#109](https://github.com/cofin/vertebra/issues/109)) (`3` tasks; `< 12s` gate)
+- [ ] [ch03-sse-streams-and-resource-subscriptions](chapters/ch03-sse-streams-and-resource-subscriptions/spec.md) — `McpHttpResponse.stream`, `GET /mcp` SSE adapter writers, notifications, `resources/subscribe`, and `subscriptions/listen` ([#109](https://github.com/cofin/vertebra/issues/109), [#112](https://github.com/cofin/vertebra/issues/112)) (`4` tasks; `< 15s` gate)
+- [ ] [ch04-skills-and-mcp-apps-core](chapters/ch04-skills-and-mcp-apps-core/spec.md) — `SkillCatalog` disclosure, `io.modelcontextprotocol/skills`, and SEP-1865 `io.modelcontextprotocol/ui` models/projection ([#110](https://github.com/cofin/vertebra/issues/110), [#111](https://github.com/cofin/vertebra/issues/111)) (`4` tasks; `< 15s` gate)
+- [ ] [ch05-framework-mounts-and-litestar-parity](chapters/ch05-framework-mounts-and-litestar-parity/spec.md) — Native/Starlette/Flask/Django skill + UI validation wiring and `litestar-mcp>=0.20.0` pin (`3` tasks; `< 15s` gate)
+- [ ] [ch06-stdio-serve-bridge-and-gcp-auth](chapters/ch06-stdio-serve-bridge-and-gcp-auth/spec.md) — Incremental stdio + `vtb ai mcp serve` discovery, dual-mode `bridge --audience` (`AsyncGcpIdTokenCache`), and `IapIdentitySource` ([#114](https://github.com/cofin/vertebra/issues/114)) (`3` tasks; `< 15s` gate)
+- [ ] [ch07-docs-and-okf-sync](chapters/ch07-docs-and-okf-sync/spec.md) — Agent/CLI docs, changelog, `mcp-and-a2a-protocol-harness.md` (`<= 200L`), and `mcp-limitations.md` sync (`4` tasks; `< 40s` gate)
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Progress**: `1/12` chapters and `4/35` tasks are complete; ch01 is reviewed at `b0578ebc`.
-- **Current Pointer**: `ch02-guard-and-confirmation-correctness`, task `mcp-protocol-completeness:ch02:t01`.
-- **Verification**: Focused behavior, lint/type checks, correctness review, and fresh quality review pass. Runtime and user-facing acceptance for remaining chapters stays open.
-- **Documentation**: Current chapter coverage is synchronized; later documentation targets remain in the full roadmap.
-- **Remaining Chapters**:
-  - `ch02-guard-and-confirmation-correctness`.
-  - `ch03-version-negotiation-and-sessions`.
-  - `ch04-get-sse-streams`.
-  - `ch05-resource-subscriptions`.
-  - `ch06-skills-extension`.
-  - `ch07-mcp-apps-ui-metadata`.
-  - `ch08-litestar-delegation-parity`.
-  - `ch09-stdio-and-serve`.
-  - `ch10-bridge-dual-mode-and-oidc`.
-  - `ch11-docs-and-okf`.
-  - `ch12-iap-identity-source`.
-- **Next Action**: `/flow:implement mcp-protocol-completeness ch02`. Commits remain local; this chapter boundary does not finish or archive the flow.
+- **Execution Frontier**: Active at `ch01-guards-params-and-alias-cleanup` (`mcp-protocol-completeness:ch01:t01`), anchored to `main @ 18baadcd` (`25` open `compact` tasks across `ch01`–`ch07`; prior `AgentContext` propagation chapter landed in `18baadcd`).
+- **Cross-Flow & External Gates**: `ch01` and `ch02` have zero upstream blockers; `ch03:t02` consumes progressive streaming from `server-runtime-correctness` `ch01`; `ch06:t02` consumes `AsyncGcpIdTokenCache` from `gcp-embeddings-and-identity` `ch02`; `ch05:t03` is gated on `litestar-mcp>=0.20.0` on PyPI without blocking `ch06`.
+- **Full Flow Finish Gate (`/flow:finish`)**: `uv run --no-sync pytest src/py/tests/unit/agent src/py/tests/unit/cli/test_mcp_cli.py src/py/tests/unit/extensions/test_litestar_ecosystem_mcp.py -q && make lint-all && make docs && make review-check`.
 
-[^mcp-core]: `src/py/vertebra/agent/mcp/service.py::MCPCore` — Transport-agnostic MCP JSON-RPC and HTTP core.
-[^mcp-routes]: `src/py/vertebra/agent/mcp/routes.py::AsgiMcpApp` — Shared ASGI and WSGI MCP adapters.
-[^mcp-models]: `src/py/vertebra/agent/mcp/models.py::MCPConfig` — MCP configuration, envelopes, and resource models.
-[^agent-context]: `src/py/vertebra/agent/core/context.py::AgentContext` — Caller identity, cancellation, and context variable binding.
-[^guards]: `src/py/vertebra/agent/core/guards.py::authorize` — Guard chain execution and authorization entry point.
-[^confirmation-gate]: `src/py/vertebra/agent/runtime.py::ConfirmationGate` — Human confirmation ticket store.
-[^tool-invoke]: `src/py/vertebra/agent/core/schema.py::Tool` — Tool descriptor invocation, guard execution, and argument binding.
-[^sse-broker]: `src/py/vertebra/agent/core/sse.py::SseStreamBroker` — SSE replay buffers and per-session subscriber channels.
-[^skills]: `src/py/vertebra/agent/mcp/skills.py::SkillCatalog` — Skill catalog and filesystem skill source.
-[^agent-plugin]: `src/py/vertebra/agent/plugin.py::AgentPlugin` — Native App and Litestar agent harness mounting.
-[^cli-ai]: `src/py/vertebra/cli/ai.py::serve` — `vtb ai mcp serve` and `bridge` commands.
-[^mcp-bridge]: `src/py/vertebra/agent/mcp/bridge.py::run_stdio_http_bridge` — Stdio-to-HTTP MCP bridge.
-[^litestar-mcp-plugin]: `src/py/vertebra/extensions/litestar/mcp/plugin.py::create_mcp_plugin` — LitestarMCP factory and well-known document merge.
-[^harness-okf]: `.agents/bundles/knowledge/domains/agent/mcp-and-a2a-protocol-harness.md` — Agent harness OKF chapter.
+[^agent-context]: `src/py/vertebra/agent/core/context.py::AgentContext` — Trusted AgentContext constructors and context-variable binding landed in 18baadcd.
+[^identity-py]: `src/py/vertebra/agent/core/identity.py::IdentitySource` — IdentitySource protocol, MtlsIdentitySource, and CallableIdentitySource landed in 18baadcd.
+[^task-store]: `src/py/vertebra/agent/mcp/tasks.py::MCPTaskStore` — Owner-scoped MCP task store with isolated cancellation landed in 18baadcd.
+[^mcp-core]: `src/py/vertebra/agent/mcp/service.py::MCPCore` — Transport-agnostic MCP JSON-RPC and HTTP engine and MCPService alias.
+[^mcp-models]: `src/py/vertebra/agent/mcp/models.py::MCPConfig` — MCP configuration, protocol constants, and resource descriptors.
+[^tool-schema]: `src/py/vertebra/agent/core/schema.py::Tool` — Tool invocation with duplicate inline guard execution.
+[^conf-gate]: `src/py/vertebra/agent/runtime.py::ConfirmationGate` — Human confirmation ticket store lacking single-use consumption and TTL.
+[^sse-broker]: `src/py/vertebra/agent/core/sse.py::SseStreamBroker` — SSE replay buffer and subscriber channel broker.
+[^skills-py]: `src/py/vertebra/agent/mcp/skills.py::SkillCatalog` — Skill catalog and filesystem skill source.
+[^cli-ai]: `src/py/vertebra/cli/ai.py::serve` — vtb ai mcp serve and bridge CLI commands.
+[^litestar-mcp]: `src/py/vertebra/extensions/litestar/mcp/plugin.py::create_mcp_plugin` — LitestarMCP delegation factory and well-known handler.
+[^harness-okf]: `.agents/bundles/knowledge/domains/agent/mcp-and-a2a-protocol-harness.md` — Agentic harness OKF chapter currently at 227 lines.

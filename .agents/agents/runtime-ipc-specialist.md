@@ -1,13 +1,12 @@
 ---
 name: runtime-ipc-specialist
-description: Implements and remediates Rust shared-memory rings, futex/ulock handshakes, atomic orderings, SHM lifecycle, and unsafe code across vertebra-core, vertebra-storage, and vertebra-db.
+description: Implements and remediates Rust shared-memory rings, futex/ulock handshakes, atomic orderings, SHM lifecycle, and unsafe code across vertebra-core, vertebra-storage, vertebra-db, and vertebra-postgres.
 model: inherit
 mainAgent: false
 subagent: true
 commandExecutionPolicy: sandbox
 tools:
   - read_file
-  - view_file
   - grep_search
   - find_by_name
   - list_dir
@@ -51,7 +50,7 @@ You are a write-enabled specialist executing fixes and implementations in `runti
 
 ## Verification
 
-1. Run `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-core -p vertebra-storage -p vertebra-db`.
+1. Run `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-core -p vertebra-storage -p vertebra-db -p vertebra-postgres`.
 2. Run `cargo clippy --manifest-path src/rs/Cargo.toml --workspace --all-targets --features tls,compression,gcp -- -D warnings`.
 
 # Output Contract

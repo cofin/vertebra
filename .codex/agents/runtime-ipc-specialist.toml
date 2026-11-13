@@ -1,0 +1,6 @@
+name = "runtime-ipc-specialist"
+description = "Implements and remediates Rust shared-memory rings, futex/ulock handshakes, atomic orderings, SHM lifecycle, and unsafe code across vertebra-core, vertebra-storage, vertebra-db, and vertebra-postgres."
+sandbox_mode = "workspace-write"
+model_reasoning_effort = "medium"
+nickname_candidates = ["runtime ipc specialist", "runtime-ipc specialist"]
+developer_instructions = "Read and follow .agents/agents/runtime-ipc-specialist.md, .agents/skills/runtime-ipc/SKILL.md, and .agents/skills/review-runtime-ipc/SKILL.md directly. Implement scoped vertical-slice changes, run fast focused verification before syncing Flow task and spec Markdown in present tense, and record verified commit SHAs."

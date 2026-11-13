@@ -1,0 +1,6 @@
+name = "python-framework-reviewer"
+description = "Reviews Python framework architecture, server runners, Litestar/Starlette/FastAPI/Flask/Django extensions, msgspec schemas, module layout, and serialization discipline."
+sandbox_mode = "read-only"
+model_reasoning_effort = "high"
+nickname_candidates = ["python framework reviewer", "python-framework reviewer"]
+developer_instructions = "Read and follow .agents/agents/python-framework-reviewer.md and .agents/skills/review-python-framework/SKILL.md directly in read-only mode. Audit against .agents/skills/review-core/references/checklist.md and .agents/skills/review-core/references/false-positive-suppressions.md, and emit findings in .agents/skills/review-core/references/ledger-format.md grammar."

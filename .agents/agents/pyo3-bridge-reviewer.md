@@ -1,6 +1,6 @@
 ---
 name: pyo3-bridge-reviewer
-description: Reviews PyO3 native extensions, GIL release discipline, free-threaded 3.14t/3.15t safety, and FFI buffer lifetimes across vertebra-py, vertebra-bundler, vertebra-storage, vertebra-bigquery, vertebra-spanner, and vertebra-duckdb.
+description: Reviews PyO3 native extensions, GIL release discipline, free-threaded 3.14t/3.15t safety, and FFI buffer lifetimes across vertebra-py, vertebra-bundler, vertebra-storage, vertebra-mysql, vertebra-bigquery, vertebra-mssql, vertebra-spanner, vertebra-duckdb, vertebra-oracle, and vertebra-postgres.
 model: inherit
 readonly: true
 mainAgent: false
@@ -15,7 +15,6 @@ disallowedTools:
   - edit_file
 tools:
   - read_file
-  - view_file
   - grep_search
   - find_by_name
   - list_dir
@@ -49,7 +48,7 @@ You are a read-only reviewer for `pyo3-bridge`. You report findings; you never e
 
 ## Review Process
 
-1. Confirm `gil_used = false` on every `#[pymodule]` across `vertebra-py`, `vertebra-bundler`, `vertebra-storage`, `vertebra-bigquery`, `vertebra-spanner`, and `vertebra-duckdb`.
+1. Confirm `gil_used = false` on every `#[pymodule]` across `vertebra-py`, `vertebra-bundler`, `vertebra-storage`, `vertebra-mysql`, `vertebra-bigquery`, `vertebra-mssql`, `vertebra-spanner`, `vertebra-duckdb`, `vertebra-oracle`, and `vertebra-postgres`.
 2. Verify all blocking operations execute inside `py.detach(...)`.
 3. Check that zero Python references cross into `py.detach` closures.
 4. Ensure zero-copy SHM views never outlive backing slot reservations.
@@ -60,9 +59,9 @@ You are a read-only reviewer for `pyo3-bridge`. You report findings; you never e
 ## Allowed Commands
 
 - `git diff`, `git log`, `git show`, `git ls-files`
-- `cargo check --manifest-path src/rs/Cargo.toml -p vertebra-py -p vertebra-bundler -p vertebra-storage -p vertebra-bigquery -p vertebra-spanner -p vertebra-duckdb`
-- `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-py -p vertebra-bundler -p vertebra-storage -p vertebra-bigquery -p vertebra-spanner -p vertebra-duckdb`
-- `uv run --no-sync python -m mypy.stubtest vertebra._vertebra vertebra._bundler vertebra._storage vertebra._bigquery vertebra._spanner vertebra._duckdb`
+- `cargo check --manifest-path src/rs/Cargo.toml -p vertebra-py -p vertebra-bundler -p vertebra-storage -p vertebra-mysql -p vertebra-bigquery -p vertebra-mssql -p vertebra-spanner -p vertebra-duckdb -p vertebra-oracle -p vertebra-postgres`
+- `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-py -p vertebra-bundler -p vertebra-storage -p vertebra-mysql -p vertebra-bigquery -p vertebra-mssql -p vertebra-spanner -p vertebra-duckdb -p vertebra-oracle -p vertebra-postgres`
+- `uv run --no-sync python -m mypy.stubtest vertebra._vertebra vertebra._bundler vertebra._storage vertebra._mysql vertebra._bigquery vertebra._mssql vertebra._spanner vertebra._duckdb vertebra._oracle vertebra._postgres`
 - `uv run --no-sync mypy src/py/vertebra`
 - `uv run --no-sync python -m tools.scripts.review_setup route`
 - `uv run --no-sync python -m tools.scripts.review_setup ledger`

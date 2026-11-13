@@ -1,6 +1,6 @@
 ---
 name: runtime-ipc-reviewer
-description: Reviews Rust shared-memory rings, futex and ulock handshakes, atomic orderings, SHM lifecycle, and unsafe code in src/rs/vertebra-core, vertebra-storage, and vertebra-db.
+description: Reviews Rust shared-memory rings, futex and ulock handshakes, atomic orderings, SHM lifecycle, and unsafe code across vertebra-core, vertebra-storage, vertebra-db, and vertebra-postgres.
 model: inherit
 readonly: true
 mainAgent: false
@@ -15,7 +15,6 @@ disallowedTools:
   - edit_file
 tools:
   - read_file
-  - view_file
   - grep_search
   - find_by_name
   - list_dir
@@ -60,9 +59,9 @@ You are a read-only reviewer for `runtime-ipc`. You report findings; you never e
 ## Allowed Commands
 
 - `git diff`, `git log`, `git show`, `git ls-files`
-- `cargo check --manifest-path src/rs/Cargo.toml -p vertebra-core -p vertebra-storage -p vertebra-db`
+- `cargo check --manifest-path src/rs/Cargo.toml -p vertebra-core -p vertebra-storage -p vertebra-db -p vertebra-postgres`
 - `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-core --test it`
-- `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-core -p vertebra-storage -p vertebra-db`
+- `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-core -p vertebra-storage -p vertebra-db -p vertebra-postgres`
 - `uv run --no-sync python -m tools.scripts.review_setup route`
 - `uv run --no-sync python -m tools.scripts.review_setup ledger`
 

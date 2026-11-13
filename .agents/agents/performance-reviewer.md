@@ -15,7 +15,6 @@ disallowedTools:
   - edit_file
 tools:
   - read_file
-  - view_file
   - grep_search
   - find_by_name
   - list_dir
@@ -51,7 +50,7 @@ You are a read-only reviewer for `performance`. You report findings; you never e
 2. Verify batch granularity for cross-thread wakeups and futex calls (`PERF-03`).
 3. Ensure zero-copy memoryview and SHM slice transfers are preserved (`PERF-04`).
 4. Validate in-process import time budgets with Python `-X importtime` (`PERF-05`).
-5. Confirm benchmark dependencies reside exclusively in `[dependency-groups].bench` (`PERF-06`).
+5. Confirm benchmark dependencies reside exclusively in `[dependency-groups].bench` and `[dependency-groups].postgres-bench` (`PERF-06`).
 6. Check [`false-positive-suppressions.md`](../skills/review-core/references/false-positive-suppressions.md).
 
 # Verification & Constraints
