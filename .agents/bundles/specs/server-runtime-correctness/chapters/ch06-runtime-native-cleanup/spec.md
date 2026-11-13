@@ -5,22 +5,22 @@ chapter_id: ch06-runtime-native-cleanup
 title: "Chapter 06: Runtime Entropy, Native Binding, and Spanner Signature Cleanup"
 description: "Enforce fail-loud getrandom UUID entropy with post-fork reseeding, delete _module_cache, bind _zero_copy helpers directly from _vertebra, and drop inert max_commit_delay_ms on Spanner batch_write."
 status: stable
-state: active
+state: completed
 planning_status: complete
 planning_quality: standard
 planning_degraded_reason: null
 depends_on_chapters: []
 replan_trigger: null
 plan_commit: 18baadcd
-last_reviewed_commit: null
-updated_at: "2026-11-13T06:01:30Z"
+last_reviewed_commit: 7e78e3f6
+updated_at: "2026-11-13T06:02:45Z"
 generated:
   by: flow-plan
   at: "2026-11-12T23:45:00Z"
 verified:
-  - by: agent:plan-generator
-    at: "2026-11-12T23:45:00Z"
-    commit: 18baadcd
+  - by: agent:code-reviewer
+    at: "2026-11-13T06:02:45Z"
+    commit: 7e78e3f6
 tags:
   - entropy
   - ffi

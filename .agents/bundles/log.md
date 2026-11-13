@@ -1,5 +1,10 @@
 # Bundle Activity Log
 
+## [2026-11-13T06:02:45Z] chapter-complete | server-runtime-correctness ch06-runtime-native-cleanup
+
+- Closed `ch06-runtime-native-cleanup` at `db02a0b6` (sync `7e78e3f6`): enforced fail-loud `getrandom::fill` panic and Unix `pthread_atfork` `FORK_GENERATION` reseed in `vertebra-core/src/id.rs`, removed duplicate `_module_cache` from `module_loader.py`/`_typing.py`/`typing.py`, bound `_zero_copy.py` helpers directly to `vertebra._vertebra`, and dropped inert `max_commit_delay_ms` from sync/async Spanner `batch_write` (`4` `id::` Rust tests, `clippy`, `ruff`, `mypy`, and `92` unit tests clean).
+- Advanced active frontier to `ch07-docs-and-okf-sync` (`server-runtime-correctness:ch07:t01`; `4` tasks remain).
+
 ## [2026-11-13T05:51:45Z] chapter-complete | server-runtime-correctness ch05-fastpath-consolidation
 
 - Closed `ch05-fastpath-consolidation` at `780338a4` (sync `d95d65d3`): extracted `FASTPATH_ATTR = "__vertebra_fastpath__"`, `CompiledRouteBase`, `get_attached_fastpath`/`set_attached_fastpath`, and `has_custom_exception_handlers` in `_fastpath_core.py`, removed alias probes across `_fastpath.py`/`_runner.py` and extension plugins, unified all five framework `CompiledRoute` structs, and enforced exact `BUFFERED_RESPONSE_TYPES` copy-free response serialization (`ruff`, `mypy` across `105` files, and `228` tests clean).
