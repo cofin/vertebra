@@ -6,7 +6,13 @@ chapter_id: ch04-wheel-smoke-and-ci
 title: Add core-wheel-smoke Job to Pull Request CI
 description: Wire core-wheel-smoke in .github/workflows/ci.yml to build vertebra-core wheel with vertebra-server and run smoke_vtb_run.py in a clean venv.
 status: stable
-state: pending
+state: completed
+commit: 11731ca5
+last_verified_commit: 11731ca5
+last_verified_at: "2026-11-13T05:19:30Z"
+verification_evidence: "ruff + mypy + make -n core-wheel-check + pytest (66 passed)"
+claimed_by: null
+claimed_at: null
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -63,7 +69,7 @@ uv run --no-sync pytest src/py/tests/unit/build/test_packaging_and_pgo.py -q
 
 ## Acceptance Criteria
 
-- [ ] `.github/workflows/ci.yml` parses cleanly and runs `core-wheel-smoke` on PRs.
-- [ ] Zero regressions in existing CI jobs.
+- [x] `.github/workflows/ci.yml` parses cleanly and runs `core-wheel-smoke` on PRs.
+- [x] Zero regressions in existing CI jobs.
 
 [^ci-yaml]: `.github/workflows/ci.yml` — Pull request CI workflow.

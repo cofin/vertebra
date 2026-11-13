@@ -5,7 +5,7 @@ chapter_id: ch04-wheel-smoke-and-ci
 title: "Chapter 04: Wheel Binary Isolation Smoke Test and CI Matrix"
 description: "Verify clean-venv core wheel installation and vtb run execution locally via make core-wheel-check, in PR CI, and across the multi-platform release wheel matrix."
 status: stable
-state: planned
+state: active
 planning_status: complete
 planning_quality: standard
 planning_degraded_reason: null
@@ -14,7 +14,7 @@ depends_on_chapters:
 replan_trigger: null
 plan_commit: 18baadcd
 last_reviewed_commit: null
-updated_at: "2026-11-12T23:45:00Z"
+updated_at: "2026-11-13T05:19:30Z"
 generated:
   by: flow-plan
   at: "2026-11-12T23:45:00Z"
@@ -74,12 +74,13 @@ Even after `ch03` includes `vertebra/bin/vertebra-server` in `[tool.maturin]`, n
 
 ## 5. Implementation Plan
 
-- [ ] [t01-vtb-run-wheel-smoke-harness.md](tasks/t01-vtb-run-wheel-smoke-harness.md) — Create `tools/scripts/smoke_vtb_run.py` and wire `make core-wheel-check` in `Makefile`
-- [ ] [t02-pr-ci-core-wheel-smoke-job.md](tasks/t02-pr-ci-core-wheel-smoke-job.md) — Add `core-wheel-smoke` clean-venv verification job to `.github/workflows/ci.yml`
-- [ ] [t03-release-wheel-matrix-and-arm64-binaries.md](tasks/t03-release-wheel-matrix-and-arm64-binaries.md) — Wire cibuildwheel binary hooks + matrix smoke tests in `release.yaml` and `linux-arm64` in `release-binaries.yml`
+- [x] [11731ca5] [t01-vtb-run-wheel-smoke-harness.md](tasks/t01-vtb-run-wheel-smoke-harness.md) — Create `tools/scripts/smoke_vtb_run.py` and wire `make core-wheel-check` in `Makefile`
+- [x] [11731ca5] [t02-pr-ci-core-wheel-smoke-job.md](tasks/t02-pr-ci-core-wheel-smoke-job.md) — Add `core-wheel-smoke` clean-venv verification job to `.github/workflows/ci.yml`
+- [x] [11731ca5] [t03-release-wheel-matrix-and-arm64-binaries.md](tasks/t03-release-wheel-matrix-and-arm64-binaries.md) — Wire cibuildwheel binary hooks + matrix smoke tests in `release.yaml` and `linux-arm64` in `release-binaries.yml`
 
 ## 6. Current State & Remaining Plan Snapshot
 
+- **Status**: `t01`–`t03` are implemented and verified at `11731ca5` (`ruff`, `mypy`, `make -n core-wheel-check`, and `66` packaging/workflow tests pass).
 - **Fast Chapter Gate (`< 30s`)**: `uv run --no-sync ruff check tools/scripts/smoke_vtb_run.py && uv run --no-sync mypy tools/scripts/smoke_vtb_run.py && uv run --no-sync pytest src/py/tests/unit/build/test_packaging_and_pgo.py -q` (full `make core-wheel-check` runs in `/flow:finish`).
 
 [^makefile]: `Makefile` — Existing companion wheel isolation check targets.

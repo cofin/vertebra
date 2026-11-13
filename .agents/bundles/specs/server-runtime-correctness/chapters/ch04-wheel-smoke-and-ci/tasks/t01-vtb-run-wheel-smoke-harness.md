@@ -6,7 +6,13 @@ chapter_id: ch04-wheel-smoke-and-ci
 title: Create smoke_vtb_run.py Wheel Smoke Harness and make core-wheel-check
 description: Implement SmokeScenario and VtbRunSmoke in tools/scripts/smoke_vtb_run.py and add the core-wheel-check target to Makefile.
 status: stable
-state: pending
+state: completed
+commit: 11731ca5
+last_verified_commit: 11731ca5
+last_verified_at: "2026-11-13T05:19:30Z"
+verification_evidence: "ruff + mypy + make -n core-wheel-check + pytest (66 passed)"
+claimed_by: null
+claimed_at: null
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -66,8 +72,8 @@ uv run --no-sync ruff check tools/scripts/smoke_vtb_run.py && uv run --no-sync m
 
 ## Acceptance Criteria
 
-- [ ] `smoke_vtb_run.py` passes `ruff`, `mypy`, and unit tests.
-- [ ] `Makefile` defines `core-wheel-check` using isolated `/tmp` build and venv directories.
+- [x] `smoke_vtb_run.py` passes `ruff`, `mypy`, and unit tests.
+- [x] `Makefile` defines `core-wheel-check` using isolated `/tmp` build and venv directories.
 
 [^makefile]: `Makefile` — Existing wheel-check Make targets.
 [^pyproject-toml]: `pyproject.toml` — Core package wheel configuration.

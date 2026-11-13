@@ -6,7 +6,13 @@ chapter_id: ch04-wheel-smoke-and-ci
 title: "Wire Release Wheel Binary Hooks, Multi-OS Smoke Matrix, and linux-arm64 Binaries"
 description: "Configure core-only cibuildwheel build/repair hooks and multi-OS test_wheels smoke in release.yaml, and add linux-arm64 to release-binaries.yml."
 status: stable
-state: pending
+state: completed
+commit: 11731ca5
+last_verified_commit: 11731ca5
+last_verified_at: "2026-11-13T05:19:30Z"
+verification_evidence: "ruff + mypy + make -n core-wheel-check + pytest (66 passed)"
+claimed_by: null
+claimed_at: null
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -69,8 +75,8 @@ uv run --no-sync pytest src/py/tests/unit/build/test_packaging_and_pgo.py -q
 
 ## Acceptance Criteria
 
-- [ ] `release.yaml` builds, repairs (excluding `libpython`), and smoke-tests core wheels across Linux `x86_64`/`aarch64`, macOS, and Windows.
-- [ ] `release-binaries.yml` includes `linux-arm64`.
+- [x] `release.yaml` builds, repairs (excluding `libpython`), and smoke-tests core wheels across Linux `x86_64`/`aarch64`, macOS, and Windows.
+- [x] `release-binaries.yml` includes `linux-arm64`.
 
 [^release-yaml]: `.github/workflows/release.yaml` — Release cibuildwheel and test_wheels workflow.
 [^release-binaries-yml]: `.github/workflows/release-binaries.yml` — Standalone server binary release matrix.
