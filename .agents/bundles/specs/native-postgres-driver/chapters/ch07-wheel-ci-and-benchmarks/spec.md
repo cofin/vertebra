@@ -6,7 +6,7 @@ title: "Chapter 07: Wheel Isolation, CI Lanes, Free-Threaded Proofs, and Benchma
 description: "Add verify_postgres_wheel.py, CI/release 14-class smoke checks, 3.14t/3.15t concurrent pool tests, postgres-bench comparator, Criterion benches, and testing OKF sync."
 status: stable
 state: active
-updated_at: "2026-11-13T22:41:00Z"
+updated_at: "2026-11-13T22:48:50Z"
 planning_status: complete
 planning_quality: standard
 planning_degraded_reason: null
@@ -85,14 +85,14 @@ Completes wheel packaging isolation, free-threaded 8-thread pool proofs, CI conf
 
 ## 5. Implementation Plan
 
-- [x] [e5943ca1] [t01-verify-postgres-wheel-ci-and-freethreaded.md](tasks/t01-verify-postgres-wheel-ci-and-freethreaded.md) — Implement two-probe verify_postgres_wheel.py, 14-class release smoke checks, zero-skip CI PG14-18 lanes, and 8-thread free-threaded pool tests.
+- [x] [480840a3] [t01-verify-postgres-wheel-ci-and-freethreaded.md](tasks/t01-verify-postgres-wheel-ci-and-freethreaded.md) — Implement two-probe verify_postgres_wheel.py, 14-class release smoke checks, zero-skip CI PG14-18 lanes, and 8-thread free-threaded pool tests.
 - [x] [e5943ca1] [t02-postgres-bench-group-and-comparator.md](tasks/t02-postgres-bench-group-and-comparator.md) — Declare [dependency-groups].postgres-bench and implement schema_version=1 PostgreSQL benchmark capture and threshold comparator CLI.
 - [x] [e5943ca1] [t03-criterion-benches-and-makefile-lanes.md](tasks/t03-criterion-benches-and-makefile-lanes.md) — Implement Criterion codec/wire/pipeline/arrow microbenchmarks in vertebra-postgres and wire postgres-test/wheel-check/bench targets in Makefile.
-- [x] [e5943ca1] [t04-testing-and-workflow-okf-sync.md](tasks/t04-testing-and-workflow-okf-sync.md) — Update benchmarks-and-free-threaded.md, trim polyglot-test-matrix.md (<= 200L), and add postgres-bench targets to workflow.md.
+- [x] [480840a3] [t04-testing-and-workflow-okf-sync.md](tasks/t04-testing-and-workflow-okf-sync.md) — Update benchmarks-and-free-threaded.md, trim polyglot-test-matrix.md (<= 200L), and add postgres-bench targets to workflow.md.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-Implemented and remediated through `e5943ca1` (`4/4` tasks verified offline after `maturin develop` rebuild, `mypy.stubtest vertebra._postgres`, shared `_wheel_verify.py` archive verifier extraction, zero-deselection `VERTEBRA_CONFORMANCE_ENGINES` / `VERTEBRA_CONFORMANCE_POSTGRES_VERSION` collection filters, and typed benchmark negative suites; awaiting zero-context chapter review). Offline gate passes cleanly across Rust (`postgres_native` Criterion test benches + Clippy + fmt), Python (Ruff, Mypy, wheel/packaging/benchmark/free-threaded/zero-skip-gate/conformance suites), and OKF validation; live wheel build and Docker/bench runs execute in `/flow:finish`.
+Implemented and remediated through `480840a3` (`4/4` tasks verified offline after `maturin develop` rebuild, `mypy.stubtest vertebra._postgres`, shared `_wheel_verify.py` archive verifier extraction, zero-deselection `VERTEBRA_CONFORMANCE_ENGINES` / `VERTEBRA_CONFORMANCE_POSTGRES_VERSION` DB and cache filter tests, and CI matrix OKF sync; awaiting final chapter review pass). Offline gate passes cleanly across Rust (`postgres_native` Criterion test benches + Clippy + fmt), Python (Ruff, Mypy, wheel/packaging/benchmark/free-threaded/zero-skip-gate/conformance suites), and OKF validation; live wheel build and Docker/bench runs execute in `/flow:finish`.
 
 ```bash
 PYTHONPATH="$(pwd)/src/py" cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --bench postgres_native --locked && uv run --no-sync pytest src/py/tests/unit/test_freethreaded_gil.py src/py/tests/unit/db/test_optional_driver_wheels.py src/py/tests/unit/tools/test_postgres_benchmarks.py -q && make review-check

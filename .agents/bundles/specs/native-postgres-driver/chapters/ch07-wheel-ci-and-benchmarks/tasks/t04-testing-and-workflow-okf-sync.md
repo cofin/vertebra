@@ -7,9 +7,9 @@ title: "Synchronize benchmarks, polyglot-test-matrix, and workflow OKF chapters"
 description: "Update benchmarks-and-free-threaded.md, trim polyglot-test-matrix.md (<= 200L), and add postgres-bench targets to workflow.md."
 status: stable
 state: completed
-commit: e5943ca1
-last_verified_at: "2026-11-13T22:41:00Z"
-last_verified_commit: e5943ca1
+commit: 480840a3
+last_verified_at: "2026-11-13T22:48:50Z"
+last_verified_commit: 480840a3
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
