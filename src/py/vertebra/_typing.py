@@ -203,13 +203,11 @@ def module_available(module_name: str) -> bool:
 
 
 def reset_dependency_cache(module_name: str | None = None) -> None:
-    """Clear cached availability and imported module instances for one module or the entire cache."""
+    """Clear cached availability flags for one module or the entire cache."""
     if module_name is None:
         _dependency_cache.clear()
-        _module_cache.clear()
         return
     _dependency_cache.pop(module_name, None)
-    _module_cache.pop(module_name, None)
 
 
 def dependency_flag(module_name: str) -> OptionalDependency:
@@ -231,7 +229,6 @@ UVLOOP_INSTALLED = dependency_flag("uvloop")
 UUID_UTILS_INSTALLED = dependency_flag("uuid_utils")
 
 _dependency_cache: dict[str, bool] = {}
-_module_cache: dict[str, Any] = {}
 
 
 def _attrs_has_stub(obj: Any) -> bool:

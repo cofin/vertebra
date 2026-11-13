@@ -10,7 +10,6 @@ from typing import Any
 
 from vertebra.typing import (
     MissingDependencyError,
-    _module_cache,
     dependency_flag,
     module_available,
     reset_dependency_cache,
@@ -47,25 +46,14 @@ def import_app(app_path: str) -> Any:
 
 def import_optional(module_name: str) -> Any | None:
     """Import and return a cached module when available, or None if not installed."""
-    loaded = sys.modules.get(module_name)
-    if loaded is not None:
-        _module_cache[module_name] = loaded
-        return loaded
     if module_name in sys.modules:
-        return None
-
-    cached = _module_cache.get(module_name)
-    if cached is not None:
-        return cached
-
+        return sys.modules[module_name]
     if not module_available(module_name):
         return None
     try:
-        mod = importlib.import_module(module_name)
+        return importlib.import_module(module_name)
     except ImportError:
         return None
-    _module_cache[module_name] = mod
-    return mod
 
 
 def import_optional_attr(module_name: str, attr_name: str, default: Any = None) -> Any:

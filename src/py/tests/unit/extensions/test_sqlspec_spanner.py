@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import inspect
 import threading
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import pytest
 from sqlspec import StatementStack
@@ -643,3 +644,25 @@ async def test_spanner_async_stores_offload_sync_driver_calls_off_event_loop() -
         assert set(tracking_client.call_threads).isdisjoint({loop_tid})
     finally:
         sync_core.close()
+
+
+@pytest.mark.anyio
+async def test_sqlspec_spanner_batch_write_rejects_max_commit_delay_ms() -> None:
+    """SQLSpec sync and async Spanner drivers reject max_commit_delay_ms on batch_write."""
+    sync_backing = FakeSpannerClient()
+    sync_core = SyncSpannerDriver(SpannerConfig(), client=sync_backing)
+    async_core = AsyncSpannerDriver(SpannerConfig(), client=FakeAsyncSpannerClient(sync_backing))
+    sync_cfg = SpannerSyncConfig(sync_core.config, connection_instance=sync_core)
+    async_cfg = SpannerAsyncConfig(async_core.config, connection_instance=async_core)
+    try:
+        with sync_cfg.provide_session() as sync_driver:
+            assert "max_commit_delay_ms" not in inspect.signature(sync_driver.batch_write).parameters
+            with pytest.raises(TypeError, match="max_commit_delay_ms"):
+                cast("Any", sync_driver).batch_write([], max_commit_delay_ms=10)
+        async with async_cfg.provide_session() as async_driver:
+            assert "max_commit_delay_ms" not in inspect.signature(async_driver.batch_write).parameters
+            with pytest.raises(TypeError, match="max_commit_delay_ms"):
+                await cast("Any", async_driver).batch_write([], max_commit_delay_ms=10)
+    finally:
+        sync_core.close()
+        await async_core.close()
