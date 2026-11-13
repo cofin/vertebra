@@ -1,5 +1,9 @@
 # Bundle Activity Log
 
+## [2026-11-13T20:42:00Z] archive | mcp-protocol-completeness
+
+- Archived `mcp-protocol-completeness` (`7` chapters, `25` tasks, `c4380215..e95e1f19`), delivering single-pass `Tool.authorize`/`Tool.call` (`-32004`/`-32005`), `Mcp-Param-*` validation (`-32020`), expiring single-use `ConfirmationGate`, dual-mode `SUPPORTED_PROTOCOL_VERSIONS` (`MCPSessionStore`, `GET /mcp` SSE, `DELETE /mcp`, `2025-03-26` batches), `resources/subscribe` & `subscriptions/listen`, `SKILLS_EXTENSION` + SEP-1865 `UI_EXTENSION` across mounts (`litestar-mcp>=0.20.0`), incremental `run_stdio_server` (`vtb ai mcp serve --app`), `OidcTokenSource` (`vtb ai mcp bridge --audience`), ES256 `IapIdentitySource`, updated docs/changelog, and present-tense OKF chapters (`mcp-and-a2a-protocol-harness.md` `147L`, `mcp-limitations.md` `58L`, `cli.md`, `litestar.md`, `polyglot-test-matrix.md`).
+
 ## [2026-11-13T20:35:00Z] chapter-complete | mcp-protocol-completeness ch06-stdio-serve-bridge-and-gcp-auth
 
 - Closed `ch06-stdio-serve-bridge-and-gcp-auth` at `7607f4d8`: implemented concurrent incremental `run_stdio_server` with `notifications/cancelled` cancellation, legacy session stdout relay, and EOF cleanup; added `resolve_app_mcp_core` / `is_litestar_mcp_app` app discovery (`vtb ai mcp serve --app`, removing `--name`); added headerless legacy `mcp_request_headers(..., protocol_version=None)`, `BridgeTransport` / `GET` SSE relay (`Last-Event-ID`, `5` reconnects, `404`/`405` stop, EOF `DELETE`), and `OidcTokenSource` (`AsyncGcpIdTokenCache`, single `401` retry) with `vtb ai mcp bridge --audience`; and shipped ES256 `IapIdentitySource` + `iap` extra (`uv lock --check --offline`, `ruff`, `mypy`, and `276` Python tests clean).
