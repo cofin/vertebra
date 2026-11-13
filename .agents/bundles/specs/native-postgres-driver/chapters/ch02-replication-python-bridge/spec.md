@@ -5,19 +5,20 @@ chapter_id: ch02-replication-python-bridge
 title: "Chapter 02: PyO3 Replication Bridge, Stubs, and FFI OKF Sync"
 description: "Expose cancel-safe AsyncPostgresReplication, AsyncPostgresClient.open_replication/replication_identity, 14-class _postgres.pyi, and PyO3 FFI OKF updates."
 status: stable
-state: active
+state: completed
 planning_status: complete
 planning_quality: standard
 planning_degraded_reason: null
 plan_commit: 18baadcd
-updated_at: "2026-11-13T00:25:00Z"
+last_reviewed_commit: 1eeeffb9
+updated_at: "2026-11-13T04:54:36Z"
 generated:
   by: flow-plan
   at: "2026-11-13T00:25:00Z"
 verified:
-  - by: agent:plan-generator
-    at: "2026-11-13T00:25:00Z"
-    commit: 18baadcd
+  - by: agent:code-reviewer
+    at: "2026-11-13T04:54:36Z"
+    commit: 1eeeffb9
 tags:
   - rust
   - pyo3
@@ -78,7 +79,7 @@ Task `t04` updates `ffi-and-gil-discipline.md`, `pyo3-and-python-runtime.md`, an
 
 ## 6. Current State & Remaining Plan Snapshot
 
-Implemented (`4/4` tasks at `f4d3d1eb`). Fast `< 60s` local `maturin` + `stubtest` + unit test gate verified (`11` `py_async` + `2` `replication` Rust tests, `110` Python unit tests, `stubtest`, `clippy`, `ruff`, `mypy`, and `review_setup.py validate` clean).
+Completed (`4/4` tasks at `f4d3d1eb`). Next chapter: `ch03-cdc-options-and-bind-compiler`.
 
 ```bash
 UV_NO_SYNC=1 PYO3_PYTHON=.venv/bin/python make dev && uv run --no-sync python -m mypy.stubtest vertebra._postgres && uv run --no-sync pytest src/py/tests/unit/db/test_postgres_native_replication.py -q && make review-check

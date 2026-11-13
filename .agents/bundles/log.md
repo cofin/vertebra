@@ -1,5 +1,10 @@
 # Bundle Activity Log
 
+## [2026-11-13T04:54:36Z] chapter-complete | native-postgres-driver ch02-replication-python-bridge
+
+- Closed `ch02-replication-python-bridge` at `f4d3d1eb` (sync `1eeeffb9`): added cancel-safe `spawn_rust_db_task_with_attr_and_future`, exposed frozen `AsyncPostgresReplication` and `AsyncPostgresClient.{replication_identity, open_replication}` with 14-class `_postgres.pyi`, and synchronized the 3 PyO3 FFI OKF chapters (`<= 200` lines each; `11` `py_async` + `2` `replication` Rust tests, `110` Python unit tests, `stubtest`, `clippy`, `ruff`, `mypy`, and `review_setup.py validate` clean).
+- Advanced active frontier to `ch03-cdc-options-and-bind-compiler` (`native-postgres-driver:ch03:t01`; `26` tasks remain across `ch03`–`ch09`).
+
 ## [2026-11-13T02:55:00Z] chapter-complete | native-postgres-driver ch01-replication-supervision
 
 - Closed `ch01-replication-supervision` at `bfa2dad7` (`57` wire tests passed, `cargo clippy --all-targets -- -D warnings` clean, `postgres-native-driver.md` and `postgres-limitations.md` synchronized).
