@@ -24,6 +24,7 @@ futures = { workspace = true }
 hex = { workspace = true }
 hmac = { workspace = true }
 http = { workspace = true }
+md-5 = "0.10"
 object_store = { version = "0.13.2", features = ["aws", "gcp", "azure", "http"] }
 pyo3 = { workspace = true }
 reqwest = { workspace = true }

@@ -42,6 +42,7 @@ __all__ = (
     "FrozenCamelizedStruct",
     "HandlerID",
     "ImproperConfigurationError",
+    "IntegrityError",
     "LifecycleHook",
     "MissingDependencyError",
     "NumpyArray",
@@ -115,6 +116,10 @@ class ImproperConfigurationError(VertebraError, ValueError):
 
 class PreconditionError(VertebraError, OSError):
     """Raised when a conditional storage or resource precondition fails."""
+
+
+class IntegrityError(VertebraError, OSError):
+    """Raised when an object storage content receipt or verified read mismatches an expected digest."""
 
 
 class UnsupportedBackendError(VertebraError):
