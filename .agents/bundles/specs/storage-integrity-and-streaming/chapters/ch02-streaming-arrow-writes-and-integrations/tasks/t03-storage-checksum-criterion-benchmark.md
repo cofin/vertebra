@@ -6,7 +6,13 @@ chapter_id: ch02-streaming-arrow-writes-and-integrations
 title: "Add Criterion put_checksum Benchmark for vertebra-storage"
 description: "Add benches/put_checksum.rs to vertebra-storage comparing default vs checksum 1 MiB and 64 MiB memory writes."
 status: stable
-state: pending
+state: completed
+commit: c9f54436
+last_verified_commit: c9f54436
+last_verified_at: "2026-11-13T04:45:30Z"
+verification_evidence: "cargo test --benches + clippy + cargo fmt clean"
+claimed_by: null
+claimed_at: null
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -66,8 +72,8 @@ cargo test --manifest-path src/rs/Cargo.toml -p vertebra-storage --benches && ca
 
 ## Acceptance Criteria
 
-- [ ] `benches/put_checksum.rs` compiles cleanly with zero Clippy warnings and reports separate `1MiB` and `64MiB` throughput for default vs checksum puts (`R2`).
-- [ ] Zero regressions in the chapter's fast verification gate.
+- [x] `benches/put_checksum.rs` compiles cleanly with zero Clippy warnings and reports separate `1MiB` and `64MiB` throughput for default vs checksum puts (`R2`).
+- [x] Zero regressions in the chapter's fast verification gate.
 
 [^core-cargo]: `src/rs/vertebra-core/Cargo.toml` — Workspace Criterion dev-dependency and `[[bench]]` stanza pattern.
 [^store-rs]: `src/rs/vertebra-storage/src/store.rs::ObjectStoreEngine` — `ObjectStoreEngine::put_opts` and `PutConditionalOptions`.

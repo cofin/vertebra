@@ -5,7 +5,7 @@ chapter_id: ch02-streaming-arrow-writes-and-integrations
 title: "Chapter 02: Streaming Arrow Multipart Writes, Ecosystem Adapters, and Checksum Benchmark"
 description: "Threads content-integrity digests and bounded-memory Arrow/Parquet multipart streaming across vertebra.storage, SQLSpec, Advanced Alchemy, and Django storage backends, and adds the put_checksum Criterion benchmark."
 status: stable
-state: planned
+state: active
 planning_status: complete
 planning_quality: standard
 planning_degraded_reason: null
@@ -102,12 +102,13 @@ Arrow streaming, digest forwarding, and the upstream SQLSpec hook note are docum
 
 ## 5. Implementation Plan
 
-- [ ] [t01-sqlspec-direct-arrow-and-stream-safety.md](tasks/t01-sqlspec-direct-arrow-and-stream-safety.md) — Thread digest options through `vertebra.storage._arrow`, set `supports_direct_arrow_write = True` on SQLSpec `ObjectStoreBackend`, and prove mid-stream abort safety and bounded memory.
-- [ ] [t02-alchemy-and-django-arrow-and-digest-integrations.md](tasks/t02-alchemy-and-django-arrow-and-digest-integrations.md) — Add streaming `save_arrow`/`save_arrow_async` and digest forwarding to Advanced Alchemy `ObjectStoreBackend` and `DjangoStorage._save`.
-- [ ] [t03-storage-checksum-criterion-benchmark.md](tasks/t03-storage-checksum-criterion-benchmark.md) — Add Criterion `put_checksum` benchmark comparing default vs checksum `1 MiB` and `64 MiB` memory writes.
+- [x] [c9f54436] [t01-sqlspec-direct-arrow-and-stream-safety.md](tasks/t01-sqlspec-direct-arrow-and-stream-safety.md) — Thread digest options through `vertebra.storage._arrow`, set `supports_direct_arrow_write = True` on SQLSpec `ObjectStoreBackend`, and prove mid-stream abort safety and bounded memory.
+- [x] [c9f54436] [t02-alchemy-and-django-arrow-and-digest-integrations.md](tasks/t02-alchemy-and-django-arrow-and-digest-integrations.md) — Add streaming `save_arrow`/`save_arrow_async` and digest forwarding to Advanced Alchemy `ObjectStoreBackend` and `DjangoStorage._save`.
+- [x] [c9f54436] [t03-storage-checksum-criterion-benchmark.md](tasks/t03-storage-checksum-criterion-benchmark.md) — Add Criterion `put_checksum` benchmark comparing default vs checksum `1 MiB` and `64 MiB` memory writes.
 
 ## 6. Current State & Remaining Plan Snapshot
 
+- **Implemented (`3/3` tasks at `c9f54436`)**: Streaming Arrow/Parquet digest forwarding, SQLSpec `supports_direct_arrow_write = True`, Alchemy `save_arrow*`, Django `content.{sha256,crc32c,md5}`, and `benches/put_checksum.rs` are verified (`640` + `82` Django Python tests, `cargo test -p vertebra-storage --benches`, `clippy`, `ruff`, `mypy` clean).
 - **Fast Chapter Gate (`< 25s`)**:
   `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-storage --benches && uv run --no-sync ruff check src/py/vertebra/storage/_arrow.py src/py/vertebra/extensions/{sqlspec,alchemy,django}/storage.py && uv run --no-sync mypy src/py/vertebra/storage/_arrow.py src/py/vertebra/extensions/{sqlspec,alchemy,django}/storage.py && uv run --no-sync pytest src/py/tests/unit/extensions/test_data_storage_integrations.py -q`
 

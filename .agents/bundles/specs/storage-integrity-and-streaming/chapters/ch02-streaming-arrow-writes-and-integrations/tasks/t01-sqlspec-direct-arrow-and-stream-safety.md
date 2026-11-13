@@ -6,7 +6,13 @@ chapter_id: ch02-streaming-arrow-writes-and-integrations
 title: "Add Streaming Arrow Digest Forwarding and SQLSpec Direct Arrow Write Capability"
 description: "Forward checksum and expected_* digests through vertebra.storage._arrow and SQLSpec ObjectStoreBackend, set supports_direct_arrow_write = True, and verify abort-safety and bounded memory."
 status: stable
-state: pending
+state: completed
+commit: c9f54436
+last_verified_commit: c9f54436
+last_verified_at: "2026-11-13T04:45:30Z"
+verification_evidence: "cargo test --benches + clippy + ruff + mypy + pytest (640 passed, 1 skipped; 82 Django)"
+claimed_by: null
+claimed_at: null
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -73,8 +79,8 @@ uv run --no-sync ruff check src/py/vertebra/storage/_arrow.py src/py/vertebra/ex
 
 ## Acceptance Criteria
 
-- [ ] `vertebra.storage._arrow` and SQLSpec `ObjectStoreBackend` stream Arrow/Parquet writes with bounded memory, abort safety, `supports_direct_arrow_write = True`, and `IntegrityError` digest enforcement (`R4`).
-- [ ] Zero regressions in `test_data_storage_integrations.py`.
+- [x] `vertebra.storage._arrow` and SQLSpec `ObjectStoreBackend` stream Arrow/Parquet writes with bounded memory, abort safety, `supports_direct_arrow_write = True`, and `IntegrityError` digest enforcement (`R4`).
+- [x] Zero regressions in `test_data_storage_integrations.py`.
 
 [^py-arrow]: `src/py/vertebra/storage/_arrow.py::write_batches_sync` — Incremental Arrow IPC and Parquet multipart streaming codecs.
 [^sqlspec-backend]: `src/py/vertebra/extensions/sqlspec/storage.py::ObjectStoreBackend` — SQLSpec `ObjectStoreBackend` `write_arrow_sync`/`async` and `_write_options`.

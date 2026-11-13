@@ -6,7 +6,13 @@ chapter_id: ch02-streaming-arrow-writes-and-integrations
 title: "Add Streaming Arrow Saves and Digest Forwarding to Alchemy and Django Storage"
 description: "Add save_arrow and save_arrow_async plus expected-digest forwarding to Advanced Alchemy ObjectStoreBackend, and forward content.{sha256,crc32c,md5} in DjangoStorage._save."
 status: stable
-state: pending
+state: completed
+commit: c9f54436
+last_verified_commit: c9f54436
+last_verified_at: "2026-11-13T04:45:30Z"
+verification_evidence: "cargo test --benches + clippy + ruff + mypy + pytest (640 passed, 1 skipped; 82 Django)"
+claimed_by: null
+claimed_at: null
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -70,8 +76,8 @@ uv run --no-sync ruff check src/py/vertebra/extensions/alchemy/storage.py src/py
 
 ## Acceptance Criteria
 
-- [ ] Advanced Alchemy and Django storage adapters forward expected digests, stream Arrow/Parquet writes on Alchemy without `to_thread`, and surface `vertebra.typing.IntegrityError` (`R4`).
-- [ ] Zero regressions in `test_data_storage_integrations.py` and `make review-check` (`PYO3-01`).
+- [x] Advanced Alchemy and Django storage adapters forward expected digests, stream Arrow/Parquet writes on Alchemy without `to_thread`, and surface `vertebra.typing.IntegrityError` (`R4`).
+- [x] Zero regressions in `test_data_storage_integrations.py` and `make review-check` (`PYO3-01`).
 
 [^aa-backend]: `src/py/vertebra/extensions/alchemy/storage.py::ObjectStoreBackend` — Advanced Alchemy `ObjectStoreBackend` `save_object` and `save_object_async`.
 [^django-storage]: `src/py/vertebra/extensions/django/storage.py::DjangoStorage` — Django `Storage` `_save` implementation.
