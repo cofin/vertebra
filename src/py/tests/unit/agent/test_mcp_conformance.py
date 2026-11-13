@@ -28,14 +28,25 @@ from vertebra.agent.core.guards import (
     authorize,
 )
 from vertebra.agent.core.identity import CallableIdentitySource, MtlsIdentitySource
-from vertebra.agent.core.jsonrpc import METHOD_NOT_FOUND, JSONRPCErrorException
+from vertebra.agent.core.jsonrpc import (
+    INVALID_PARAMS,
+    INVALID_REQUEST,
+    METHOD_NOT_FOUND,
+    JSONRPCErrorException,
+)
 from vertebra.agent.core.schema import tool
+from vertebra.agent.core.sse import SseFrame
 from vertebra.agent.mcp import (
     CONFIRMATION_REQUIRED,
     CONFIRMATION_TOKEN_META_KEY,
     HEADER_MISMATCH,
+    LEGACY_PROTOCOL_VERSIONS,
+    MCP_FALLBACK_SESSION_VERSION,
+    MCP_LOG_LEVELS,
     PERMISSION_DENIED,
     RATE_LIMITED,
+    SESSION_CAPACITY_EXHAUSTED,
+    SUPPORTED_PROTOCOL_VERSIONS,
     UNSUPPORTED_PROTOCOL_VERSION,
     BlobContent,
     MCPConfig,
@@ -44,12 +55,14 @@ from vertebra.agent.mcp import (
     McpHttpRequest,
     McpHttpResponse,
     MCPRegistry,
+    MCPSessionStore,
     MCPTaskStore,
     PromptArgument,
     PromptEntry,
     PromptMessage,
     ResourceEntry,
     ResourceTemplateEntry,
+    SessionLimitExceededError,
     Skill,
     SkillCatalog,
     SkillController,
@@ -114,6 +127,7 @@ async def test_mcp_core_discover_and_removed_2024_methods() -> None:
             McpHttpRequest(
                 method="POST",
                 path="/mcp",
+                headers={"MCP-Protocol-Version": "2026-07-28"},
                 body=encode_json_bytes({"jsonrpc": "2.0", "id": 99, "method": removed_method, "params": {}}),
             )
         )
@@ -1289,7 +1303,9 @@ async def test_native_plugin_context_and_delete_route(trusted: bool) -> None:
     assert status == 200
     assert decode_json(raw)["result"]["content"][0]["text"] == ("ana@example.com" if trusted else "None")
     delete_status, _, _ = await routes[("DELETE", "/mcp")](headers={})
-    assert delete_status == 405
+    assert delete_status == 400
+    delete_missing_status, _, _ = await routes[("DELETE", "/mcp")](headers={"Mcp-Session-Id": "missing"})
+    assert delete_missing_status == 404
 
 
 def test_litestar_fallback_preserves_core_responses_and_context() -> None:
@@ -1328,10 +1344,13 @@ def test_litestar_fallback_preserves_core_responses_and_context() -> None:
             headers={"x-user": "ana"},
         )
         assert called.json()["result"]["content"][0]["text"] == "ana"
-        for method in (client.get, client.delete):
-            refused = method("/mcp")
-            assert refused.status_code == 405
-            assert refused.headers["allow"] == "POST, OPTIONS"
+        refused_get = client.get("/mcp")
+        assert refused_get.status_code == 405
+        assert refused_get.headers["allow"] == "POST, DELETE, OPTIONS"
+        refused_delete = client.delete("/mcp")
+        assert refused_delete.status_code == 400
+        missing_delete = client.delete("/mcp", headers={"Mcp-Session-Id": "missing"})
+        assert missing_delete.status_code == 404
 
 
 @pytest.mark.anyio
@@ -1652,3 +1671,506 @@ def test_mcp_service_alias_removed_and_plugin_uses_mcp_core() -> None:
     plugin = AgentPlugin(AgentPluginConfig(mcp=MCPConfig(server_name="canonical-core")))
     assert type(plugin.mcp_service) is MCPCore
     assert type(plugin.mcp_registry) is ToolRegistry
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("version", SUPPORTED_PROTOCOL_VERSIONS)
+async def test_mcp_protocol_version_negotiation_echoes_supported_versions(version: str) -> None:
+    """All four supported protocol versions negotiate and echo MCP-Protocol-Version."""
+    core = MCPCore()
+    resp = await core.handle(
+        McpHttpRequest(
+            method="POST",
+            path="/mcp",
+            headers={"MCP-Protocol-Version": version},
+            body=encode_json_bytes({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}),
+        )
+    )
+    assert resp.status == 200
+    assert resp.headers["MCP-Protocol-Version"] == version
+    decoded = decode_json(resp.body)
+    assert decoded["result"]["_meta"]["io.modelcontextprotocol/protocolVersion"] == version
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("surface", ["header", "meta"])
+async def test_mcp_unsupported_protocol_version_returns_supported_versions_data(surface: str) -> None:
+    """Unsupported protocol version returns HTTP 400 and -32022 with supported version lists."""
+    core = MCPCore()
+    headers = {"MCP-Protocol-Version": "1900-01-01"} if surface == "header" else {}
+    params: dict[str, Any] = (
+        {"_meta": {"io.modelcontextprotocol/protocolVersion": "1900-01-01"}} if surface == "meta" else {}
+    )
+    resp = await core.handle(
+        McpHttpRequest(
+            method="POST",
+            path="/mcp",
+            headers=headers,
+            body=encode_json_bytes({"jsonrpc": "2.0", "id": 7, "method": "tools/list", "params": params}),
+        )
+    )
+    assert resp.status == 400
+    err = decode_json(resp.body)["error"]
+    assert err["code"] == UNSUPPORTED_PROTOCOL_VERSION
+    assert err["data"]["supported"] == list(SUPPORTED_PROTOCOL_VERSIONS)
+    assert err["data"]["supportedVersions"] == list(SUPPORTED_PROTOCOL_VERSIONS)
+    assert err["data"]["requested"] == "1900-01-01"
+
+
+@pytest.mark.anyio
+async def test_mcp_header_and_meta_version_conflict_returns_header_mismatch() -> None:
+    """Disagreeing MCP-Protocol-Version header and _meta version return HTTP 400 and -32020."""
+    core = MCPCore()
+    resp = await core.handle(
+        McpHttpRequest(
+            method="POST",
+            path="/mcp",
+            headers={"MCP-Protocol-Version": "2026-07-28"},
+            body=encode_json_bytes(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 9,
+                    "method": "tools/list",
+                    "params": {"_meta": {"io.modelcontextprotocol/protocolVersion": "2025-11-25"}},
+                }
+            ),
+        )
+    )
+    assert resp.status == 400
+    assert decode_json(resp.body)["error"]["code"] == HEADER_MISMATCH
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("config_kwargs", "disabled_key", "method", "params"),
+    [
+        ({"tools_enabled": False}, "tools", "tools/list", {}),
+        ({"resources_enabled": False}, "resources", "resources/list", {}),
+        ({"prompts_enabled": False}, "prompts", "prompts/list", {}),
+        ({"tasks_enabled": False}, "tasks", "tasks/list", {}),
+        ({"skills_enabled": False}, "skills", "skills/list", {}),
+        ({"logging": False}, "logging", "logging/setLevel", {"level": "info"}),
+    ],
+    ids=["tools", "resources", "prompts", "tasks", "skills", "logging"],
+)
+async def test_mcp_disabled_capabilities_omitted_and_gated_with_method_not_found(
+    config_kwargs: dict[str, Any],
+    disabled_key: str,
+    method: str,
+    params: dict[str, Any],
+) -> None:
+    """Disabled capability families are omitted from capabilities and return -32601 on dispatch."""
+    core = MCPCore(config=MCPConfig(**config_kwargs))
+    core.register_extension("io.modelcontextprotocol/custom", {"enabled": True})
+
+    discover_resp = await core.handle(
+        McpHttpRequest(
+            method="POST",
+            path="/mcp",
+            headers={"MCP-Protocol-Version": "2026-07-28"},
+            body=encode_json_bytes({"jsonrpc": "2.0", "id": 1, "method": "server/discover", "params": {}}),
+        )
+    )
+    caps = decode_json(discover_resp.body)["result"]["capabilities"]
+    assert disabled_key not in caps
+    assert caps["extensions"] == {"io.modelcontextprotocol/custom": {"enabled": True}}
+
+    init_resp = await core.handle(
+        McpHttpRequest(
+            method="POST",
+            path="/mcp",
+            body=encode_json_bytes(
+                {"jsonrpc": "2.0", "id": 2, "method": "initialize", "params": {"protocolVersion": "2025-11-25"}}
+            ),
+        )
+    )
+    init_caps = decode_json(init_resp.body)["result"]["capabilities"]
+    assert disabled_key not in init_caps
+    assert init_caps["extensions"] == {"io.modelcontextprotocol/custom": {"enabled": True}}
+
+    call_resp = await core.handle(
+        McpHttpRequest(
+            method="POST",
+            path="/mcp",
+            headers={"MCP-Protocol-Version": "2025-11-25"},
+            body=encode_json_bytes({"jsonrpc": "2.0", "id": 3, "method": method, "params": params}),
+        )
+    )
+    assert call_resp.status == 200
+    assert decode_json(call_resp.body)["error"]["code"] == METHOD_NOT_FOUND
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("level", MCP_LOG_LEVELS)
+async def test_mcp_legacy_logging_set_level_accepts_valid_levels(level: str) -> None:
+    """Legacy logging/setLevel updates session log_level across all RFC 5424 severity names."""
+    core = MCPCore()
+    init_resp = await core.handle(
+        McpHttpRequest(
+            method="POST",
+            path="/mcp",
+            body=encode_json_bytes(
+                {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-11-25"}}
+            ),
+        )
+    )
+    session_id = init_resp.headers["Mcp-Session-Id"]
+
+    set_resp = await core.handle(
+        McpHttpRequest(
+            method="POST",
+            path="/mcp",
+            headers={"Mcp-Session-Id": session_id, "MCP-Protocol-Version": "2025-11-25"},
+            body=encode_json_bytes(
+                {"jsonrpc": "2.0", "id": 2, "method": "logging/setLevel", "params": {"level": level}}
+            ),
+        )
+    )
+    assert set_resp.status == 200
+    assert decode_json(set_resp.body)["result"] == {}
+    stored = await core.session_store.get(session_id, None)
+    assert stored is not None
+    assert stored.log_level == level
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("bad_level", ["trace", "", 42, None])
+async def test_mcp_legacy_logging_set_level_rejects_invalid_levels(bad_level: Any) -> None:
+    """Invalid logging/setLevel arguments fail with JSON-RPC -32602."""
+    core = MCPCore()
+    resp = await core.handle(
+        McpHttpRequest(
+            method="POST",
+            path="/mcp",
+            headers={"MCP-Protocol-Version": "2025-11-25"},
+            body=encode_json_bytes(
+                {"jsonrpc": "2.0", "id": 1, "method": "logging/setLevel", "params": {"level": bad_level}}
+            ),
+        )
+    )
+    assert resp.status == 200
+    assert decode_json(resp.body)["error"]["code"] == INVALID_PARAMS
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("requested", "expected"),
+    [
+        ("2025-11-25", "2025-11-25"),
+        ("2025-06-18", "2025-06-18"),
+        ("2025-03-26", "2025-03-26"),
+        ("2026-07-28", MCP_FALLBACK_SESSION_VERSION),
+    ],
+)
+async def test_mcp_legacy_initialize_ping_and_client_capabilities(requested: str, expected: str) -> None:
+    """Bare legacy initialize negotiates version, captures client capabilities, and issues Mcp-Session-Id."""
+    core = MCPCore(config=MCPConfig(server_name="legacy-host", server_version="2.0.0", instructions="Be concise."))
+    seen_caps: list[dict[str, Any]] = []
+
+    @tool(name="inspect_caps")
+    def inspect_caps(context: AgentContext) -> str:
+        seen_caps.append(dict(context.metadata.get("mcp_client_capabilities", {})))
+        return str(context.session_id)
+
+    core.registry.register_tool(inspect_caps)
+    owner = AgentContext(identity=CallerIdentity(user_id="alice", tenant_id="t1"))
+
+    init_resp = await core.handle(
+        McpHttpRequest(
+            method="POST",
+            path="/mcp",
+            context=owner,
+            body=encode_json_bytes(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": {
+                        "protocolVersion": requested,
+                        "capabilities": {"roots": {"listChanged": True}},
+                        "clientInfo": {"name": "claude-cli", "version": "1.0"},
+                    },
+                }
+            ),
+        )
+    )
+    assert init_resp.status == 200
+    assert init_resp.headers["MCP-Protocol-Version"] == expected
+    session_id = init_resp.headers["Mcp-Session-Id"]
+    assert session_id.startswith("mcp_")
+    init_result = decode_json(init_resp.body)["result"]
+    assert init_result["protocolVersion"] == expected
+    assert init_result["instructions"] == "Be concise."
+    assert "tasks" in init_result["capabilities"]
+    assert "logging" in init_result["capabilities"]
+
+    notif_resp = await core.handle(
+        McpHttpRequest(
+            method="POST",
+            path="/mcp",
+            context=owner,
+            headers={"Mcp-Session-Id": session_id},
+            body=encode_json_bytes({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+        )
+    )
+    assert notif_resp.status == 202
+    assert notif_resp.headers["Mcp-Session-Id"] == session_id
+
+    ping_resp = await core.handle(
+        McpHttpRequest(
+            method="POST",
+            path="/mcp",
+            context=owner,
+            headers={"Mcp-Session-Id": session_id},
+            body=encode_json_bytes({"jsonrpc": "2.0", "id": 2, "method": "ping"}),
+        )
+    )
+    assert ping_resp.status == 200
+    assert decode_json(ping_resp.body)["result"] == {}
+
+    call_resp = await core.handle(
+        McpHttpRequest(
+            method="POST",
+            path="/mcp",
+            context=owner,
+            headers={"Mcp-Session-Id": session_id},
+            body=encode_json_bytes(
+                {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "inspect_caps"}}
+            ),
+        )
+    )
+    assert call_resp.status == 200
+    assert decode_json(call_resp.body)["result"]["content"][0]["text"] == session_id
+    assert seen_caps == [{"roots": {"listChanged": True}}]
+
+
+@pytest.mark.anyio
+async def test_mcp_session_store_ttl_owner_isolation_and_capacity() -> None:
+    """MCPSessionStore enforces deterministic TTL expiry, exact owner isolation, reverse index, and max_sessions."""
+    now = [100.0]
+    store = MCPSessionStore(ttl_seconds=60.0, max_sessions=2, clock=lambda: now[0])
+
+    s1 = await store.create(
+        owner_id="t1:alice",
+        protocol_version="2025-11-25",
+        client_capabilities={},
+        client_info={"name": "c1"},
+        log_level="info",
+    )
+    s2 = await store.create(
+        owner_id=None,
+        protocol_version="2025-06-18",
+        client_capabilities={},
+        client_info={"name": "c2"},
+        log_level="warning",
+    )
+    assert await store.active_session_ids() == (s1.session_id, s2.session_id)
+
+    with pytest.raises(SessionLimitExceededError):
+        await store.create(
+            owner_id="t1:bob",
+            protocol_version="2025-11-25",
+            client_capabilities={},
+            client_info={},
+            log_level="info",
+        )
+
+    assert await store.get(s1.session_id, None) is None
+    assert await store.get(s1.session_id, "t1:bob") is None
+    assert await store.get(s2.session_id, "t1:alice") is None
+    assert await store.get(s1.session_id, "t1:alice") is not None
+
+    updated = await store.update(
+        s1.session_id,
+        "t1:alice",
+        subscriptions=frozenset({"file:///a.txt", "file:///b.txt"}),
+    )
+    assert updated is not None
+    assert await store.subscribed_session_ids("file:///a.txt") == (s1.session_id,)
+    assert await store.subscribed_session_ids("file:///b.txt") == (s1.session_id,)
+
+    now[0] = 160.0
+    assert await store.get(s1.session_id, "t1:alice") is None
+    assert await store.subscribed_session_ids("file:///a.txt") == ()
+    assert await store.active_session_ids() == ()
+
+    s3 = await store.create(
+        owner_id="t1:bob",
+        protocol_version="2025-11-25",
+        client_capabilities={},
+        client_info={},
+        log_level="info",
+    )
+    assert s3.session_id in await store.active_session_ids()
+
+    core = MCPCore(config=MCPConfig(max_sessions=1))
+    first = await core.handle(
+        McpHttpRequest(
+            method="POST",
+            path="/mcp",
+            body=encode_json_bytes({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}),
+        )
+    )
+    assert first.status == 200
+    full = await core.handle(
+        McpHttpRequest(
+            method="POST",
+            path="/mcp",
+            body=encode_json_bytes({"jsonrpc": "2.0", "id": 2, "method": "initialize", "params": {}}),
+        )
+    )
+    assert full.status == 503
+    assert decode_json(full.body)["error"]["code"] == SESSION_CAPACITY_EXHAUSTED
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("bad_case", ["unknown", "expired", "wrong-owner", "anonymous-on-owned"])
+async def test_mcp_legacy_invalid_session_returns_404_and_modern_strips_session(bad_case: str) -> None:
+    """Unknown, expired, or wrong-owner legacy sessions return 404 while 2026-07-28 never echoes Mcp-Session-Id."""
+    now = [10.0]
+    store = MCPSessionStore(ttl_seconds=30.0, max_sessions=10, clock=lambda: now[0])
+    core = MCPCore(session_store=store)
+    alice = AgentContext(identity=CallerIdentity(user_id="alice", tenant_id="t1"))
+    bob = AgentContext(identity=CallerIdentity(user_id="bob", tenant_id="t1"))
+
+    init_resp = await core.handle(
+        McpHttpRequest(
+            method="POST",
+            path="/mcp",
+            context=alice,
+            body=encode_json_bytes({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}),
+        )
+    )
+    sid = init_resp.headers["Mcp-Session-Id"]
+
+    caller_ctx: AgentContext | None = alice
+    lookup_sid = sid
+    if bad_case == "unknown":
+        lookup_sid = "mcp_nonexistent"
+    elif bad_case == "expired":
+        now[0] = 50.0
+    elif bad_case == "wrong-owner":
+        caller_ctx = bob
+    elif bad_case == "anonymous-on-owned":
+        caller_ctx = None
+
+    bad_resp = await core.handle(
+        McpHttpRequest(
+            method="POST",
+            path="/mcp",
+            context=caller_ctx,
+            headers={"Mcp-Session-Id": lookup_sid},
+            body=encode_json_bytes({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}),
+        )
+    )
+    assert bad_resp.status == 404
+    err = decode_json(bad_resp.body)["error"]
+    assert err["code"] == INVALID_PARAMS
+    assert err["message"] == "Session not found or expired"
+
+    modern_resp = await core.handle(
+        McpHttpRequest(
+            method="POST",
+            path="/mcp",
+            headers={"MCP-Protocol-Version": "2026-07-28", "Mcp-Session-Id": "caller-invented-id"},
+            body=encode_json_bytes({"jsonrpc": "2.0", "id": 3, "method": "tools/list", "params": {}}),
+        )
+    )
+    assert modern_resp.status == 200
+    assert "Mcp-Session-Id" not in modern_resp.headers
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("version", [v for v in SUPPORTED_PROTOCOL_VERSIONS if v != "2025-03-26"])
+async def test_mcp_batch_arrays_rejected_outside_2025_03_26(version: str) -> None:
+    """JSON-RPC batch arrays return HTTP 400 and -32600 on 2025-06-18, 2025-11-25, and 2026-07-28."""
+    core = MCPCore()
+    resp = await core.handle(
+        McpHttpRequest(
+            method="POST",
+            path="/mcp",
+            headers={"MCP-Protocol-Version": version},
+            body=encode_json_bytes([{"jsonrpc": "2.0", "id": 1, "method": "tools/list"}]),
+        )
+    )
+    assert resp.status == 400
+    assert decode_json(resp.body)["error"]["code"] == INVALID_REQUEST
+
+
+@pytest.mark.anyio
+async def test_mcp_2025_03_26_batch_dispatch_and_delete_session_termination() -> None:
+    """2025-03-26 supports batch arrays (rejecting initialize inside batches) and DELETE /mcp terminates sessions."""
+    core = MCPCore()
+    alice = AgentContext(identity=CallerIdentity(user_id="alice", tenant_id="t1"))
+    bob = AgentContext(identity=CallerIdentity(user_id="bob", tenant_id="t1"))
+
+    init_resp = await core.handle(
+        McpHttpRequest(
+            method="POST",
+            path="/mcp",
+            context=alice,
+            body=encode_json_bytes(
+                {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-03-26"}}
+            ),
+        )
+    )
+    assert init_resp.status == 200
+    sid = init_resp.headers["Mcp-Session-Id"]
+
+    batch_resp = await core.handle(
+        McpHttpRequest(
+            method="POST",
+            path="/mcp",
+            context=alice,
+            headers={"Mcp-Session-Id": sid},
+            body=encode_json_bytes(
+                [
+                    {"jsonrpc": "2.0", "id": 10, "method": "initialize", "params": {}},
+                    {"jsonrpc": "2.0", "id": 11, "method": "ping"},
+                    {"jsonrpc": "2.0", "method": "notifications/initialized"},
+                ]
+            ),
+        )
+    )
+    assert batch_resp.status == 200
+    assert batch_resp.headers["MCP-Protocol-Version"] == "2025-03-26"
+    items = decode_json(batch_resp.body)
+    assert len(items) == 2
+    by_id = {entry["id"]: entry for entry in items}
+    assert by_id[10]["error"]["code"] == INVALID_REQUEST
+    assert by_id[11]["result"] == {}
+
+    options_resp = await core.handle(McpHttpRequest(method="OPTIONS", path="/mcp"))
+    assert options_resp.status == 204
+    assert options_resp.headers["Allow"] == "GET, POST, DELETE, OPTIONS"
+    assert options_resp.headers["Access-Control-Allow-Methods"] == "GET, POST, DELETE, OPTIONS"
+
+    recv_stream, _ = core.stream_broker.subscribe(sid)
+
+    wrong_owner_del = await core.handle(
+        McpHttpRequest(method="DELETE", path="/mcp", context=bob, headers={"Mcp-Session-Id": sid})
+    )
+    assert wrong_owner_del.status == 404
+    assert await core.session_store.get(sid, "t1:alice") is not None
+
+    del_resp = await core.handle(
+        McpHttpRequest(method="DELETE", path="/mcp", context=alice, headers={"Mcp-Session-Id": sid})
+    )
+    assert del_resp.status == 204
+    assert await core.session_store.get(sid, "t1:alice") is None
+
+    with pytest.raises(anyio.EndOfStream):
+        await recv_stream.receive()
+
+    post_del = await core.handle(
+        McpHttpRequest(
+            method="POST",
+            path="/mcp",
+            context=alice,
+            headers={"Mcp-Session-Id": sid},
+            body=encode_json_bytes({"jsonrpc": "2.0", "id": 12, "method": "ping"}),
+        )
+    )
+    assert post_del.status == 404
+    assert LEGACY_PROTOCOL_VERSIONS == ("2025-11-25", "2025-06-18", "2025-03-26")
+    assert isinstance(SseFrame(data="ok"), SseFrame)

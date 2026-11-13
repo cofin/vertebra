@@ -1,8 +1,9 @@
-"""Full Model Context Protocol (MCP) 2026-07-28 JSON-RPC and HTTP core engine.
+"""Full Model Context Protocol (MCP) JSON-RPC and Streamable HTTP core engine.
 
-This module provides MCPCore implementing transport-agnostic
-MCP 2026-07-28 HTTP handling, server/discover, tools/list, tools/call, resources/*,
-prompts/*, skills/*, tasks/*, and completions with OpenTelemetry observability.
+This module provides MCPCore implementing transport-agnostic MCP 2026-07-28
+and legacy Streamable HTTP handling, version negotiation, session lifecycle,
+server/discover, tools/*, resources/*, prompts/*, skills/*, tasks/*, logging,
+and completions with OpenTelemetry observability.
 """
 
 import asyncio
@@ -12,16 +13,25 @@ import logging
 from collections.abc import Callable, Mapping
 from typing import Any, NoReturn
 
+import anyio
 import msgspec
 
-from vertebra.agent.core.context import AgentContext, bind_agent_context, reset_agent_context
+from vertebra.agent.core.context import (
+    AgentContext,
+    bind_agent_context,
+    current_agent_context,
+    reset_agent_context,
+)
 from vertebra.agent.core.cursor import paginate_sequence
 from vertebra.agent.core.guards import BudgetExceededError, PermissionDeniedError, RateLimitExceededError
 from vertebra.agent.core.jsonrpc import (
     INVALID_PARAMS,
     INVALID_REQUEST,
+    METHOD_NOT_FOUND,
+    PARSE_ERROR,
     JSONRPCError,
     JSONRPCErrorException,
+    JSONRPCRequest,
     JSONRPCRouter,
 )
 from vertebra.agent.core.schema import ToolArgumentError
@@ -29,18 +39,27 @@ from vertebra.agent.core.sse import SseFrame, SseStreamBroker
 from vertebra.agent.mcp.client import MCP_NAME_FIELDS, decode_mcp_header_value
 from vertebra.agent.mcp.models import (
     HEADER_MISMATCH,
+    LEGACY_ONLY_METHODS,
+    LEGACY_PROTOCOL_VERSIONS,
+    MCP_FALLBACK_SESSION_VERSION,
+    MCP_LOG_LEVELS,
     MCP_PROTOCOL_VERSION,
+    SESSION_CAPACITY_EXHAUSTED,
+    SUPPORTED_PROTOCOL_VERSIONS,
     UNSUPPORTED_PROTOCOL_VERSION,
     BlobContent,
     MCPConfig,
     McpHttpRequest,
     McpHttpResponse,
+    McpLogLevel,
+    NegotiatedProtocol,
     PromptMessage,
     ResourceLinkContent,
     TextContent,
     ToolCallOutput,
 )
 from vertebra.agent.mcp.registry import ToolRegistry
+from vertebra.agent.mcp.sessions import MCPSession, MCPSessionStore, SessionLimitExceededError
 from vertebra.agent.mcp.tasks import MCPTaskStore, TaskLookupError, TaskRecord, TaskStateError
 from vertebra.agent.runtime import ConfirmationGate
 from vertebra.agent.telemetry import AgentTelemetryRecorder
@@ -80,7 +99,7 @@ CACHEABLE_METHODS: frozenset[str] = frozenset(
 
 
 class MCPCore:
-    """Transport-agnostic MCP 2026-07-28 HTTP and JSON-RPC protocol engine."""
+    """Transport-agnostic MCP HTTP and JSON-RPC protocol engine."""
 
     def __init__(
         self,
@@ -91,6 +110,7 @@ class MCPCore:
         task_store: MCPTaskStore | None = None,
         skill_catalog: Any | None = None,
         confirmation_gate: ConfirmationGate | None = None,
+        session_store: MCPSessionStore | None = None,
     ) -> None:
         self.config = config if config is not None else MCPConfig()
         self.confirmation_gate = confirmation_gate if confirmation_gate is not None else ConfirmationGate()
@@ -99,11 +119,119 @@ class MCPCore:
         self.stream_broker = stream_broker if stream_broker is not None else SseStreamBroker()
         self.task_store = task_store if task_store is not None else MCPTaskStore(stream_broker=self.stream_broker)
         self.skill_catalog = skill_catalog
+        self.session_store = (
+            session_store
+            if session_store is not None
+            else MCPSessionStore(
+                ttl_seconds=self.config.session_ttl_seconds,
+                max_sessions=self.config.max_sessions,
+            )
+        )
         self.router = JSONRPCRouter()
+        self._extensions: dict[str, dict[str, Any]] = {}
         self._resource_subscriptions: dict[str, set[str]] = {}
         self._task_runs: dict[str, tuple[asyncio.Task[None], AgentContext]] = {}
 
         self._register_handlers()
+
+    def register_extension(self, name: str, payload: Mapping[str, Any] | None = None) -> None:
+        """Register an MCP capability extension under ``capabilities.extensions``."""
+        self._extensions[name] = dict(payload) if payload is not None else {}
+
+    def _server_capabilities(self, *, protocol_version: str = MCP_PROTOCOL_VERSION) -> dict[str, Any]:
+        """Build the unified MCP capability map shared by server/discover and initialize."""
+        _ = protocol_version
+        capabilities: dict[str, Any] = {}
+        if self.config.tools_enabled:
+            capabilities["tools"] = {"listChanged": True}
+        if self.config.resources_enabled:
+            capabilities["resources"] = {"listChanged": True}
+        if self.config.prompts_enabled:
+            capabilities["prompts"] = {"listChanged": True}
+        if self.config.tasks_enabled:
+            capabilities["tasks"] = {
+                "list": {},
+                "cancel": {},
+                "requests": {"tools": {"call": {}}},
+            }
+        if self.config.logging:
+            capabilities["logging"] = {}
+        if self.config.skills_enabled:
+            capabilities["skills"] = {"listChanged": True}
+        if self._extensions:
+            capabilities["extensions"] = {name: dict(payload) for name, payload in self._extensions.items()}
+        return capabilities
+
+    def _is_method_enabled(self, method: str) -> bool:
+        """Return True when configuration enables the capability family owning method."""
+        if method.startswith("tools/"):
+            return self.config.tools_enabled
+        if method.startswith(("resources/", "subscriptions/")):
+            return self.config.resources_enabled
+        if method.startswith("prompts/"):
+            return self.config.prompts_enabled
+        if method.startswith("tasks/"):
+            return self.config.tasks_enabled
+        if method.startswith("skills/"):
+            return self.config.skills_enabled
+        if method.startswith("logging/"):
+            return self.config.logging
+        return True
+
+    def _unsupported_version_response(
+        self,
+        requested_version: str,
+        *,
+        req_id: Any = None,
+    ) -> McpHttpResponse:
+        return self._jsonrpc_http_error(
+            status=400,
+            code=UNSUPPORTED_PROTOCOL_VERSION,
+            message=f"Unsupported MCP protocol version: {requested_version}",
+            req_id=req_id,
+            data={
+                "supported": list(SUPPORTED_PROTOCOL_VERSIONS),
+                "supportedVersions": list(SUPPORTED_PROTOCOL_VERSIONS),
+                "requested": requested_version,
+            },
+        )
+
+    def _negotiate_protocol(
+        self,
+        *,
+        header_version: str | None,
+        meta_version: str | None,
+        session_id: str | None,
+        frame_method: str | None,
+        session_version: str | None = None,
+        req_id: Any = None,
+    ) -> NegotiatedProtocol | McpHttpResponse:
+        """Validate protocol version headers and metadata and resolve modern vs legacy mode."""
+        if header_version is not None and header_version not in SUPPORTED_PROTOCOL_VERSIONS:
+            return self._unsupported_version_response(header_version, req_id=req_id)
+        if meta_version is not None and meta_version not in SUPPORTED_PROTOCOL_VERSIONS:
+            return self._unsupported_version_response(meta_version, req_id=req_id)
+        if header_version is not None and meta_version is not None and header_version != meta_version:
+            return self._jsonrpc_http_error(
+                status=400,
+                code=HEADER_MISMATCH,
+                message=(
+                    f"Header MCP-Protocol-Version '{header_version}' "
+                    f"does not match _meta protocolVersion '{meta_version}'"
+                ),
+                req_id=req_id,
+            )
+
+        explicit_version = header_version or meta_version
+        if explicit_version == MCP_PROTOCOL_VERSION:
+            return NegotiatedProtocol(version=MCP_PROTOCOL_VERSION, modern=True)
+        if explicit_version is not None:
+            return NegotiatedProtocol(version=explicit_version, modern=False)
+        if session_version is not None:
+            return NegotiatedProtocol(version=session_version, modern=False)
+        if session_id is not None or frame_method in ("initialize", "ping", "notifications/initialized"):
+            return NegotiatedProtocol(version=MCP_FALLBACK_SESSION_VERSION, modern=False)
+        return NegotiatedProtocol(version=MCP_PROTOCOL_VERSION, modern=True)
 
     async def handle(self, request: McpHttpRequest) -> McpHttpResponse:
         """Process an HTTP request under its caller context and restore the prior binding."""
@@ -128,12 +256,135 @@ class MCPCore:
         frame = SseFrame(event="message", data=encode_json_bytes(payload).decode("utf-8"))
         return self.stream_broker.broadcast(frame, list(sessions))
 
+    async def _dispatch_request(
+        self,
+        req: JSONRPCRequest,
+        context: AgentContext,
+        *,
+        modern: bool,
+        in_batch: bool = False,
+    ) -> dict[str, Any] | None:
+        if in_batch and req.method == "initialize":
+            if req.is_notification:
+                return None
+            return {
+                "jsonrpc": "2.0",
+                "id": req.id,
+                "error": {
+                    "code": INVALID_REQUEST,
+                    "message": "initialize cannot be called inside a JSON-RPC batch",
+                },
+            }
+        if (modern and req.method in LEGACY_ONLY_METHODS) or not self._is_method_enabled(req.method):
+            if req.is_notification:
+                return None
+            return {
+                "jsonrpc": "2.0",
+                "id": req.id,
+                "error": {
+                    "code": METHOD_NOT_FOUND,
+                    "message": f"Method not found: {req.method}",
+                },
+            }
+        return await self.router.dispatch(req, context)
+
+    async def _dispatch_decoded(
+        self,
+        parsed: Any,
+        context: AgentContext,
+        *,
+        modern: bool,
+    ) -> bytes | None:
+        if isinstance(parsed, list):
+            if not parsed:
+                return encode_json_bytes(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": None,
+                        "error": {"code": INVALID_REQUEST, "message": "Invalid request: empty batch"},
+                    }
+                )
+            batch_results: list[dict[str, Any] | None] = [None] * len(parsed)
+
+            async def _process_entry(index: int, item: Any) -> None:
+                if not isinstance(item, dict) or item.get("jsonrpc") != "2.0" or "method" not in item:
+                    item_id = item.get("id") if isinstance(item, dict) else None
+                    batch_results[index] = {
+                        "jsonrpc": "2.0",
+                        "id": item_id,
+                        "error": {"code": INVALID_REQUEST, "message": "Invalid request envelope"},
+                    }
+                    return
+                req = JSONRPCRequest(
+                    method=str(item["method"]),
+                    jsonrpc=str(item.get("jsonrpc", "2.0")),
+                    params=item.get("params"),
+                    id=item.get("id"),
+                )
+                batch_results[index] = await self._dispatch_request(req, context, modern=modern, in_batch=True)
+
+            async with anyio.create_task_group() as tg:
+                for idx, entry in enumerate(parsed):
+                    tg.start_soon(_process_entry, idx, entry)
+
+            valid_responses = [res for res in batch_results if res is not None]
+            if not valid_responses:
+                return None
+            return encode_json_bytes(valid_responses)
+
+        if isinstance(parsed, dict):
+            if parsed.get("jsonrpc") != "2.0" or "method" not in parsed:
+                return encode_json_bytes(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": parsed.get("id"),
+                        "error": {"code": INVALID_REQUEST, "message": "Invalid request envelope"},
+                    }
+                )
+            req = JSONRPCRequest(
+                method=str(parsed["method"]),
+                jsonrpc=str(parsed.get("jsonrpc", "2.0")),
+                params=parsed.get("params"),
+                id=parsed.get("id"),
+            )
+            resp = await self._dispatch_request(req, context, modern=modern, in_batch=False)
+            if resp is None:
+                return None
+            return encode_json_bytes(resp)
+
+        return encode_json_bytes(
+            {
+                "jsonrpc": "2.0",
+                "id": None,
+                "error": {"code": INVALID_REQUEST, "message": "Invalid request: expected object or array"},
+            }
+        )
+
     async def handle_payload(self, raw_bytes: bytes, context: AgentContext | None = None) -> bytes | None:
         """Dispatch JSON-RPC under its caller context and restore the prior binding."""
         context = context if isinstance(context, AgentContext) else AgentContext()
         token = bind_agent_context(context)
         try:
-            return await self.router.dispatch_payload(raw_bytes, context)
+            if not raw_bytes or not raw_bytes.strip():
+                return encode_json_bytes(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": None,
+                        "error": {"code": PARSE_ERROR, "message": "Parse error: empty payload"},
+                    }
+                )
+            try:
+                parsed = decode_json(raw_bytes)
+            except Exception:
+                return encode_json_bytes(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": None,
+                        "error": {"code": PARSE_ERROR, "message": "Parse error: invalid JSON"},
+                    }
+                )
+            modern = bool(context.metadata.get("mcp_modern_mode", False))
+            return await self._dispatch_decoded(parsed, context, modern=modern)
         finally:
             reset_agent_context(token)
 
@@ -154,27 +405,45 @@ class MCPCore:
         if method == "OPTIONS":
             cors_headers = {
                 "Access-Control-Allow-Origin": origin or "*",
-                "Access-Control-Allow-Methods": "POST, OPTIONS",
+                "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
                 "Access-Control-Allow-Headers": (
                     "Content-Type, MCP-Protocol-Version, Mcp-Method, Mcp-Name, "
                     "Mcp-Session-Id, If-None-Match, Authorization"
                 ),
+                "Allow": "GET, POST, DELETE, OPTIONS",
             }
             return McpHttpResponse(status=204, headers=cors_headers, body=b"")
+
+        if method == "DELETE":
+            header_version = lower_headers.get("mcp-protocol-version")
+            if header_version is not None and header_version not in SUPPORTED_PROTOCOL_VERSIONS:
+                return self._unsupported_version_response(header_version)
+            session_id = lower_headers.get("mcp-session-id")
+            if not session_id:
+                return self._jsonrpc_http_error(
+                    status=400,
+                    code=INVALID_PARAMS,
+                    message="Missing Mcp-Session-Id header",
+                )
+            deleted = await self.session_store.delete(session_id, self._caller_owner(context))
+            if deleted is None:
+                return self._jsonrpc_http_error(
+                    status=404,
+                    code=INVALID_PARAMS,
+                    message="Session not found or expired",
+                )
+            self.stream_broker.disconnect(session_id)
+            return McpHttpResponse(
+                status=204,
+                headers={"MCP-Protocol-Version": deleted.protocol_version},
+                body=b"",
+            )
 
         if method != "POST":
             return McpHttpResponse(
                 status=405,
-                headers={"Content-Type": "text/plain", "Allow": "POST, OPTIONS"},
+                headers={"Content-Type": "text/plain", "Allow": "POST, DELETE, OPTIONS"},
                 body=b"Method Not Allowed",
-            )
-
-        proto_ver = lower_headers.get("mcp-protocol-version")
-        if proto_ver is not None and proto_ver != MCP_PROTOCOL_VERSION:
-            return self._jsonrpc_http_error(
-                status=400,
-                code=UNSUPPORTED_PROTOCOL_VERSION,
-                message=f"Unsupported MCP protocol version: {proto_ver}",
             )
 
         try:
@@ -182,25 +451,85 @@ class MCPCore:
         except Exception as exc:
             return self._jsonrpc_http_error(
                 status=400,
-                code=-32700,
+                code=PARSE_ERROR,
                 message=f"Parse error: {exc}",
             )
+
+        try:
+            decoded_body = decode_json(request.body) if request.body else {}
+        except Exception as exc:
+            return self._jsonrpc_http_error(
+                status=400,
+                code=PARSE_ERROR,
+                message=f"Parse error: {exc}",
+                req_id=frame_id,
+            )
+
+        raw_params = decoded_body.get("params") if isinstance(decoded_body, dict) else None
+        params = raw_params if isinstance(raw_params, dict) else {}
+        raw_meta = params.get("_meta")
+        meta_version_raw = (
+            raw_meta.get("io.modelcontextprotocol/protocolVersion") if isinstance(raw_meta, Mapping) else None
+        )
+        meta_version = str(meta_version_raw) if meta_version_raw is not None else None
+        header_version = lower_headers.get("mcp-protocol-version")
+        session_id = lower_headers.get("mcp-session-id")
+
+        prelim = self._negotiate_protocol(
+            header_version=header_version,
+            meta_version=meta_version,
+            session_id=session_id,
+            frame_method=frame_method,
+            req_id=frame_id,
+        )
+        if isinstance(prelim, McpHttpResponse):
+            return prelim
 
         mcp_method_header = lower_headers.get("mcp-method")
         mcp_name_header = lower_headers.get("mcp-name")
         has_mcp_param_header = any(key.startswith("mcp-param-") for key in lower_headers)
-        if frame_kind == 2:
-            if mcp_method_header is not None or mcp_name_header is not None or has_mcp_param_header:
-                return self._jsonrpc_http_error(
-                    status=400,
-                    code=HEADER_MISMATCH,
-                    message="Mcp-Method, Mcp-Name, and Mcp-Param-* headers cannot be used with JSON-RPC batch requests",
-                )
+        if frame_kind == 2 and (mcp_method_header is not None or mcp_name_header is not None or has_mcp_param_header):
             return self._jsonrpc_http_error(
                 status=400,
-                code=INVALID_REQUEST,
-                message="JSON-RPC batch arrays are not supported in MCP 2026-07-28",
+                code=HEADER_MISMATCH,
+                message="Mcp-Method, Mcp-Name, and Mcp-Param-* headers cannot be used with JSON-RPC batch requests",
             )
+
+        session: MCPSession | None = None
+        if not prelim.modern and session_id is not None and frame_method != "initialize":
+            session = await self.session_store.get(session_id, self._caller_owner(context))
+            if session is None:
+                return self._jsonrpc_http_error(
+                    status=404,
+                    code=INVALID_PARAMS,
+                    message="Session not found or expired",
+                    req_id=frame_id,
+                )
+
+        negotiated = self._negotiate_protocol(
+            header_version=header_version,
+            meta_version=meta_version,
+            session_id=session_id,
+            frame_method=frame_method,
+            session_version=session.protocol_version if session is not None else None,
+            req_id=frame_id,
+        )
+        if isinstance(negotiated, McpHttpResponse):
+            return negotiated
+
+        if frame_kind == 2:
+            if negotiated.version != "2025-03-26":
+                return self._jsonrpc_http_error(
+                    status=400,
+                    code=INVALID_REQUEST,
+                    message=f"JSON-RPC batch arrays are not supported in MCP {negotiated.version}",
+                )
+            if isinstance(decoded_body, list) and not decoded_body:
+                return self._jsonrpc_http_error(
+                    status=400,
+                    code=INVALID_REQUEST,
+                    message="Invalid request: empty batch",
+                )
 
         if mcp_method_header is not None and frame_method is not None and mcp_method_header != frame_method:
             return self._jsonrpc_http_error(
@@ -209,28 +538,6 @@ class MCPCore:
                 message=f"Header Mcp-Method '{mcp_method_header}' does not match body method '{frame_method}'",
                 req_id=frame_id,
             )
-
-        try:
-            body_dict = decode_json(request.body) if request.body else {}
-        except Exception as exc:
-            return self._jsonrpc_http_error(
-                status=400,
-                code=-32700,
-                message=f"Parse error: {exc}",
-                req_id=frame_id,
-            )
-        raw_params = body_dict.get("params") if isinstance(body_dict, dict) else None
-        params = raw_params if isinstance(raw_params, dict) else {}
-        raw_meta = params.get("_meta")
-        if isinstance(raw_meta, Mapping):
-            meta_version = raw_meta.get("io.modelcontextprotocol/protocolVersion")
-            if meta_version is not None and meta_version != MCP_PROTOCOL_VERSION:
-                return self._jsonrpc_http_error(
-                    status=400,
-                    code=UNSUPPORTED_PROTOCOL_VERSION,
-                    message=f"Unsupported MCP _meta protocol version: {meta_version}",
-                    req_id=frame_id,
-                )
 
         if mcp_name_header is not None and frame_method in MCP_NAME_FIELDS:
             decoded_name = decode_mcp_header_value(mcp_name_header)
@@ -255,30 +562,57 @@ class MCPCore:
         if param_mismatch is not None:
             return param_mismatch
 
-        current_etag = self.registry.etag()
-        if frame_method in CACHEABLE_METHODS and self._match_etag(lower_headers.get("if-none-match"), current_etag):
-            return McpHttpResponse(
-                status=304,
-                headers={"ETag": current_etag, "MCP-Protocol-Version": MCP_PROTOCOL_VERSION},
-                body=b"",
-            )
+        context.metadata["mcp_protocol_version"] = negotiated.version
+        context.metadata["mcp_modern_mode"] = negotiated.modern
+        explicit_version = header_version or meta_version
+        if explicit_version is not None:
+            context.metadata["mcp_explicit_protocol_version"] = explicit_version
+        if isinstance(raw_meta, Mapping):
+            client_caps = raw_meta.get("io.modelcontextprotocol/clientCapabilities")
+            if isinstance(client_caps, Mapping):
+                context.metadata["mcp_client_capabilities"] = dict(client_caps)
+        if session is not None:
+            context.session_id = session.session_id
+            context.metadata["mcp_session_id"] = session.session_id
+            context.metadata["mcp_log_level"] = session.log_level
+            context.metadata.setdefault("mcp_client_capabilities", dict(session.client_capabilities))
+            context.metadata["mcp_client_info"] = dict(session.client_info)
 
-        resp_bytes = await self.router.dispatch_payload(request.body, context)
+        current_etag = self.registry.etag()
+        if (
+            frame_method in CACHEABLE_METHODS
+            and self._is_method_enabled(frame_method)
+            and self._match_etag(lower_headers.get("if-none-match"), current_etag)
+        ):
+            not_mod_headers: dict[str, str] = {
+                "ETag": current_etag,
+                "MCP-Protocol-Version": negotiated.version,
+            }
+            if not negotiated.modern and session is not None:
+                not_mod_headers["Mcp-Session-Id"] = session.session_id
+            return McpHttpResponse(status=304, headers=not_mod_headers, body=b"")
+
+        resp_bytes = await self._dispatch_decoded(decoded_body, context, modern=negotiated.modern)
+        final_version = str(context.metadata.get("mcp_negotiated_protocol_version", negotiated.version))
         resp_headers: dict[str, str] = {
             "Content-Type": "application/json",
-            "MCP-Protocol-Version": MCP_PROTOCOL_VERSION,
+            "MCP-Protocol-Version": final_version,
         }
-        if frame_method in CACHEABLE_METHODS:
+        if frame_method in CACHEABLE_METHODS and self._is_method_enabled(frame_method):
             resp_headers["ETag"] = current_etag
 
-        session_id = lower_headers.get("mcp-session-id")
-        if session_id:
-            resp_headers["Mcp-Session-Id"] = session_id
+        if not negotiated.modern:
+            created_sid = context.metadata.get("mcp_created_session_id")
+            if isinstance(created_sid, str) and created_sid:
+                resp_headers["Mcp-Session-Id"] = created_sid
+            elif session is not None:
+                resp_headers["Mcp-Session-Id"] = session.session_id
 
         if frame_kind == 0 or resp_bytes is None:
             return McpHttpResponse(status=202, headers=resp_headers, body=b"")
 
-        return McpHttpResponse(status=200, headers=resp_headers, body=resp_bytes)
+        status = int(context.metadata.get("mcp_http_status", 200))
+        return McpHttpResponse(status=status, headers=resp_headers, body=resp_bytes)
 
     def _validate_mcp_param_headers(
         self,
@@ -401,21 +735,34 @@ class MCPCore:
         code: int,
         message: str,
         req_id: Any = None,
+        data: Any = None,
     ) -> McpHttpResponse:
-        err = JSONRPCError(code=code, message=message)
+        err = JSONRPCError(code=code, message=message, data=data)
         err_body = encode_json_bytes(
             {
                 "jsonrpc": "2.0",
                 "id": req_id,
-                "error": {"code": err.code, "message": err.message},
+                "error": err.to_dict(),
             }
         )
         return McpHttpResponse(status=status, headers={"Content-Type": "application/json"}, body=err_body)
 
     @staticmethod
-    def _with_meta(method: str, payload: dict[str, Any], *, cacheable: bool = False) -> dict[str, Any]:
+    def _with_meta(
+        method: str,
+        payload: dict[str, Any],
+        *,
+        cacheable: bool = False,
+        context: Any = None,
+    ) -> dict[str, Any]:
+        resolved_ctx = context if isinstance(context, AgentContext) else current_agent_context()
+        proto_version = (
+            str(resolved_ctx.metadata.get("mcp_protocol_version", MCP_PROTOCOL_VERSION))
+            if resolved_ctx is not None
+            else MCP_PROTOCOL_VERSION
+        )
         meta: dict[str, Any] = {
-            "io.modelcontextprotocol/protocolVersion": MCP_PROTOCOL_VERSION,
+            "io.modelcontextprotocol/protocolVersion": proto_version,
             "resultType": method,
         }
         if cacheable:
@@ -447,7 +794,10 @@ class MCPCore:
         return data
 
     def _register_handlers(self) -> None:
-        """Register all MCP 2026-07-28 protocol handlers on the JSON-RPC router."""
+        """Register all MCP protocol handlers on the JSON-RPC router."""
+        self.router.register("initialize", self._handle_initialize)
+        self.router.register("ping", self._handle_ping)
+        self.router.register("logging/setLevel", self._handle_logging_set_level)
         self.router.register("notifications/initialized", self._handle_initialized_notif)
         self.router.register("server/discover", self._handle_discover)
         self.router.register("tools/list", self._handle_tools_list)
@@ -466,12 +816,94 @@ class MCPCore:
         self.router.register("tasks/list", self._handle_tasks_list)
         self.router.register("completion/complete", self._handle_completion)
 
+    async def _handle_initialize(self, params: Any = None, context: Any = None) -> dict[str, Any]:
+        """Negotiate a legacy MCP protocol revision and issue an owner-scoped session."""
+        requested = params.get("protocolVersion") if isinstance(params, Mapping) else None
+        explicit_header = (
+            context.metadata.get("mcp_explicit_protocol_version") if isinstance(context, AgentContext) else None
+        )
+        if isinstance(requested, str) and requested in LEGACY_PROTOCOL_VERSIONS:
+            negotiated_version = requested
+        elif isinstance(explicit_header, str) and explicit_header in LEGACY_PROTOCOL_VERSIONS:
+            negotiated_version = explicit_header
+        else:
+            negotiated_version = MCP_FALLBACK_SESSION_VERSION
+
+        raw_caps = params.get("capabilities") if isinstance(params, Mapping) else None
+        client_caps = dict(raw_caps) if isinstance(raw_caps, Mapping) else {}
+        raw_info = params.get("clientInfo") if isinstance(params, Mapping) else None
+        client_info = dict(raw_info) if isinstance(raw_info, Mapping) else {}
+
+        try:
+            session = await self.session_store.create(
+                owner_id=self._caller_owner(context),
+                protocol_version=negotiated_version,
+                client_capabilities=client_caps,
+                client_info=client_info,
+                log_level=self.config.default_log_level,
+            )
+        except SessionLimitExceededError as exc:
+            if isinstance(context, AgentContext):
+                context.metadata["mcp_http_status"] = 503
+            raise JSONRPCErrorException(JSONRPCError(code=SESSION_CAPACITY_EXHAUSTED, message=str(exc))) from exc
+
+        if isinstance(context, AgentContext):
+            context.session_id = session.session_id
+            context.metadata["mcp_created_session_id"] = session.session_id
+            context.metadata["mcp_negotiated_protocol_version"] = session.protocol_version
+            context.metadata["mcp_client_capabilities"] = dict(session.client_capabilities)
+            context.metadata["mcp_client_info"] = dict(session.client_info)
+            context.metadata["mcp_log_level"] = session.log_level
+
+        result: dict[str, Any] = {
+            "protocolVersion": negotiated_version,
+            "capabilities": self._server_capabilities(protocol_version=negotiated_version),
+            "serverInfo": {"name": self.config.server_name, "version": self.config.server_version},
+        }
+        if self.config.instructions:
+            result["instructions"] = self.config.instructions
+        return result
+
+    async def _handle_ping(self, params: Any = None, context: Any = None) -> dict[str, Any]:
+        """Respond to legacy MCP ping liveness probes."""
+        _ = (params, context)
+        return {}
+
+    async def _handle_logging_set_level(self, params: Any = None, context: Any = None) -> dict[str, Any]:
+        """Validate and persist a legacy session minimum log severity level."""
+        level_map: dict[str, McpLogLevel] = {lvl: lvl for lvl in MCP_LOG_LEVELS}
+        raw_level = params.get("level") if isinstance(params, Mapping) else None
+        typed_level = level_map.get(raw_level) if isinstance(raw_level, str) else None
+        if typed_level is None:
+            raise JSONRPCErrorException(
+                JSONRPCError(
+                    code=INVALID_PARAMS,
+                    message=f"Invalid log level {raw_level!r}; expected one of {', '.join(MCP_LOG_LEVELS)}",
+                )
+            )
+        if isinstance(context, AgentContext):
+            context.metadata["mcp_log_level"] = typed_level
+            session_id = context.metadata.get("mcp_session_id") or context.session_id
+            if isinstance(session_id, str) and session_id:
+                await self.session_store.update(
+                    session_id,
+                    self._caller_owner(context),
+                    log_level=typed_level,
+                )
+        return {}
+
     async def _handle_initialized_notif(self, params: Any = None, context: Any = None) -> None:
         """Process notifications/initialized confirmation."""
         return None
 
     async def _handle_discover(self, params: Any = None, context: Any = None) -> dict[str, Any]:
         """Return server capability manifest and registered count summaries."""
+        resolved_ctx = context if isinstance(context, AgentContext) else current_agent_context()
+        proto_version = (
+            str(resolved_ctx.metadata.get("mcp_protocol_version", MCP_PROTOCOL_VERSION))
+            if resolved_ctx is not None
+            else MCP_PROTOCOL_VERSION
+        )
         tools_list = self.registry.list_specs(exposure="mcp")
         resources_list = self.registry.list_resources()
         prompts_list = self.registry.list_prompts()
@@ -479,24 +911,19 @@ class MCPCore:
         return self._with_meta(
             "server/discover",
             {
-                "protocolVersion": MCP_PROTOCOL_VERSION,
+                "protocolVersion": proto_version,
                 "serverInfo": {"name": self.config.server_name, "version": self.config.server_version},
                 "instructions": self.config.instructions,
-                "capabilities": {
-                    "tools": {"listChanged": True} if self.config.tools_enabled else {},
-                    "resources": {"listChanged": True} if self.config.resources_enabled else {},
-                    "prompts": {"listChanged": True} if self.config.prompts_enabled else {},
-                    "tasks": {"listChanged": True} if self.config.tasks_enabled else {},
-                    "skills": {"listChanged": True} if self.config.skills_enabled else {},
-                },
+                "capabilities": self._server_capabilities(protocol_version=proto_version),
                 "counts": {
-                    "tools": len(tools_list),
-                    "resources": len(resources_list),
-                    "prompts": len(prompts_list),
-                    "skills": len(skills_list),
+                    "tools": len(tools_list) if self.config.tools_enabled else 0,
+                    "resources": len(resources_list) if self.config.resources_enabled else 0,
+                    "prompts": len(prompts_list) if self.config.prompts_enabled else 0,
+                    "skills": len(skills_list) if self.config.skills_enabled else 0,
                 },
             },
             cacheable=True,
+            context=resolved_ctx,
         )
 
     async def _handle_tools_list(self, params: Any = None, context: Any = None) -> dict[str, Any]:

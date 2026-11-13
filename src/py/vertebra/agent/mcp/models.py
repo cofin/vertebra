@@ -1,7 +1,8 @@
-"""Model Context Protocol (MCP) 2026-07-28 frozen msgspec data models.
+"""Model Context Protocol (MCP) JSON-RPC and Streamable HTTP data models.
 
 This module provides data models for tools, resources, prompts, content blocks,
-and server configurations compliant with the MCP 2026-07-28 specification.
+protocol version constants, and server configurations across MCP 2026-07-28 and
+legacy Streamable HTTP protocol revisions.
 """
 
 from collections.abc import Callable, Mapping
@@ -16,13 +17,21 @@ if TYPE_CHECKING:
 
 __all__ = [
     "HEADER_MISMATCH",
+    "LEGACY_ONLY_METHODS",
+    "LEGACY_PROTOCOL_VERSIONS",
+    "MCP_FALLBACK_SESSION_VERSION",
+    "MCP_LOG_LEVELS",
     "MCP_PROTOCOL_VERSION",
+    "SESSION_CAPACITY_EXHAUSTED",
+    "SUPPORTED_PROTOCOL_VERSIONS",
     "UNSUPPORTED_PROTOCOL_VERSION",
     "BlobContent",
     "ContentBlock",
     "MCPConfig",
     "McpHttpRequest",
     "McpHttpResponse",
+    "McpLogLevel",
+    "NegotiatedProtocol",
     "PromptArgument",
     "PromptEntry",
     "PromptMessage",
@@ -34,8 +43,52 @@ __all__ = [
 ]
 
 MCP_PROTOCOL_VERSION: str = "2026-07-28"
+LEGACY_PROTOCOL_VERSIONS: tuple[str, ...] = ("2025-11-25", "2025-06-18", "2025-03-26")
+SUPPORTED_PROTOCOL_VERSIONS: tuple[str, ...] = (MCP_PROTOCOL_VERSION, *LEGACY_PROTOCOL_VERSIONS)
+MCP_FALLBACK_SESSION_VERSION: str = "2025-11-25"
+LEGACY_ONLY_METHODS: frozenset[str] = frozenset(
+    {
+        "initialize",
+        "ping",
+        "logging/setLevel",
+        "resources/subscribe",
+        "resources/unsubscribe",
+        "tasks/result",
+    }
+)
+SESSION_CAPACITY_EXHAUSTED: int = -32000
 HEADER_MISMATCH: int = -32020
 UNSUPPORTED_PROTOCOL_VERSION: int = -32022
+
+type McpLogLevel = Literal[
+    "debug",
+    "info",
+    "notice",
+    "warning",
+    "error",
+    "critical",
+    "alert",
+    "emergency",
+]
+MCP_LOG_LEVELS: tuple[McpLogLevel, ...] = (
+    "debug",
+    "info",
+    "notice",
+    "warning",
+    "error",
+    "critical",
+    "alert",
+    "emergency",
+)
+
+
+class NegotiatedProtocol(FrozenBaseStruct, frozen=True, kw_only=True):
+    """Negotiated MCP protocol version and stateless vs stateful mode."""
+
+    version: str
+    """Negotiated MCP protocol version string."""
+    modern: bool
+    """True when operating in stateless MCP 2026-07-28 mode."""
 
 
 class MCPConfig(FrozenBaseStruct, frozen=True, kw_only=True):
@@ -74,6 +127,14 @@ class MCPConfig(FrozenBaseStruct, frozen=True, kw_only=True):
     """Trust proxy identity only with an explicitly configured identity source."""
     identity_source: "IdentitySource | None" = None
     """Trusted IAP, mTLS, or application identity source from agent.core.identity."""
+    session_ttl_seconds: float = 3600.0
+    """Time-to-live in seconds for legacy stateful MCP sessions."""
+    max_sessions: int = 10_000
+    """Maximum number of concurrent legacy MCP sessions retained in memory."""
+    logging: bool = True
+    """Advertise and serve MCP logging capabilities and `logging/setLevel`."""
+    default_log_level: McpLogLevel = "info"
+    """Default minimum log severity assigned to newly created MCP sessions."""
 
     def __post_init__(self) -> None:
         if self.trust_proxy_identity and self.identity_source is None:
@@ -82,6 +143,12 @@ class MCPConfig(FrozenBaseStruct, frozen=True, kw_only=True):
             )
         if self.identity_source is not None and not self.trust_proxy_identity:
             raise ValueError("MCPConfig.identity_source requires trust_proxy_identity=True")
+        if self.session_ttl_seconds <= 0:
+            raise ValueError("MCPConfig.session_ttl_seconds must be positive")
+        if self.max_sessions < 0:
+            raise ValueError("MCPConfig.max_sessions must be non-negative")
+        if self.default_log_level not in MCP_LOG_LEVELS:
+            raise ValueError(f"MCPConfig.default_log_level must be one of {MCP_LOG_LEVELS}")
 
 
 class McpHttpRequest(FrozenBaseStruct, frozen=True, kw_only=True):
