@@ -25,7 +25,13 @@ endif
 
 export CARGO_TARGET_DIR ?= $(if $(CI),$(CURDIR)/src/rs/target,/tmp/vtb-cargo-target)
 export PATH := $(CURDIR)/.venv/bin:$(CURDIR)/.venv/Scripts:$(HOME)/.bun/bin:$(HOME)/.local/bin:$(PATH)
-export PYO3_PYTHON ?= $(shell if [ -x "$(CURDIR)/.venv/bin/python" ]; then echo "$(CURDIR)/.venv/bin/python"; elif [ -x "$(CURDIR)/.venv/Scripts/python.exe" ]; then echo "$(CURDIR)/.venv/Scripts/python.exe"; else uv run which python 2>/dev/null || which python3; fi)
+ifneq ($(wildcard $(CURDIR)/.venv/bin/python),)
+export PYO3_PYTHON ?= $(CURDIR)/.venv/bin/python
+else ifneq ($(wildcard $(CURDIR)/.venv/Scripts/python.exe),)
+export PYO3_PYTHON ?= $(CURDIR)/.venv/Scripts/python.exe
+else ifneq ($(origin PYO3_PYTHON),undefined)
+export PYO3_PYTHON
+endif
 
 PY_GIL_DISABLED = $(shell uv run --no-sync python -c "import sysconfig; print(int(bool(sysconfig.get_config_var('Py_GIL_DISABLED'))))" 2>/dev/null)
 PY_TEST_GROUPS = $(if $(filter 0,$(PY_GIL_DISABLED)),--group duckdb)

@@ -127,12 +127,22 @@ def _probe_python_shared_info(python_executable: str | Path) -> tuple[bool, str 
     ldlibrary = payload.get("ldlibrary")
     if isinstance(ldlibrary, str) and ldlibrary.endswith(".a"):
         return False, libdir if isinstance(libdir, str) else None, ldlibrary
-    shared_flag = str(enable_shared).strip().lower() in {"1", "true"} or enable_shared == 1
     if os.name == "nt":
         return True, libdir if isinstance(libdir, str) else None, ldlibrary if isinstance(ldlibrary, str) else None
-    is_shared = (
-        shared_flag and isinstance(libdir, str) and bool(libdir) and isinstance(ldlibrary, str) and bool(ldlibrary)
+    is_explicit_shared = (
+        enable_shared is True or enable_shared == 1 or str(enable_shared).strip().lower() in {"1", "true"}
     )
+    is_explicit_static = (
+        enable_shared is False or enable_shared == 0 or str(enable_shared).strip().lower() in {"0", "false"}
+    )
+    has_shared_path = isinstance(libdir, str) and bool(libdir) and isinstance(ldlibrary, str) and bool(ldlibrary)
+    if is_explicit_static or not has_shared_path:
+        is_shared = False
+    elif is_explicit_shared:
+        is_shared = True
+    else:
+        assert isinstance(libdir, str) and isinstance(ldlibrary, str)
+        is_shared = (Path(libdir) / ldlibrary).exists()
     return is_shared, libdir if isinstance(libdir, str) else None, ldlibrary if isinstance(ldlibrary, str) else None
 
 
