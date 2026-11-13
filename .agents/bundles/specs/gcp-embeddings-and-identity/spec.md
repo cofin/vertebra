@@ -13,23 +13,23 @@ chapters:
   - ch02-vertex-and-gemini-embedder-wire-parity
   - ch03-pushdown-and-local-embedding-broker
   - ch04-docs-and-okf-sync
-current_chapter: ch02-vertex-and-gemini-embedder-wire-parity
-current_task: "gcp-embeddings-and-identity:ch02:t01"
+current_chapter: ch03-pushdown-and-local-embedding-broker
+current_task: "gcp-embeddings-and-identity:ch03:t01"
 parent_prd: integration-remediation
 plan_revision: 2
 plan_commit: 18baadcd
-last_verified_checkpoint: a601dee4
-last_reviewed_chapter: ch01-gcp-id-token-cache
-last_reviewed_commit: b3253fee
+last_verified_checkpoint: 484568a7
+last_reviewed_chapter: ch02-vertex-and-gemini-embedder-wire-parity
+last_reviewed_commit: d031307b
 created_at: "2026-11-12T00:35:00Z"
-updated_at: "2026-11-13T04:50:11Z"
+updated_at: "2026-11-13T05:05:30Z"
 generated:
   by: flow-plan
   at: "2026-11-12T23:45:00Z"
 verified:
   - by: agent:code-reviewer
-    at: "2026-11-13T04:50:11Z"
-    commit: b3253fee
+    at: "2026-11-13T05:05:30Z"
+    commit: d031307b
 tags:
   - gcp
   - embeddings
@@ -122,13 +122,13 @@ At baseline `18baadcd`, outbound calls to Cloud Run, Cloud Functions, and IAP-pr
 ## 5. Implementation Plan
 
 - [x] [b3253fee] [ch01-gcp-id-token-cache](chapters/ch01-gcp-id-token-cache/spec.md) — Audience-bound Rust & PyO3 `SyncGcpIdTokenCache` / `AsyncGcpIdTokenCache` (supporting GCE metadata, SA JWTs, IAM impersonation, `gcloud`, and `authorized_user` ADC), core ADC fallback, stubs, and `vertebra.storage` exports.
-- [~] [ch02-vertex-and-gemini-embedder-wire-parity](chapters/ch02-vertex-and-gemini-embedder-wire-parity/spec.md) — Gemini protobuf field-2 + inline/file media wire codec, `_GoogleEmbedder` per-loop auth base, Vertex AI REST `:predict` / `:embedContent` + multimodal, and `RemoteEmbedder` ID-token auth.
-- [ ] [ch03-pushdown-and-local-embedding-broker](chapters/ch03-pushdown-and-local-embedding-broker/spec.md) — Explicit Oracle credential rotation, BigQuery/Spanner/Postgres pushdown parity, per-event-loop `EmbeddingBroker` state + SHM cleanup, and `GemmaEmbedder` precision forwarding.
+- [x] [d031307b] [ch02-vertex-and-gemini-embedder-wire-parity](chapters/ch02-vertex-and-gemini-embedder-wire-parity/spec.md) — Gemini protobuf field-2 + inline/file media wire codec, `_GoogleEmbedder` per-loop auth base, Vertex AI REST `:predict` / `:embedContent` + multimodal, and `RemoteEmbedder` ID-token auth.
+- [~] [ch03-pushdown-and-local-embedding-broker](chapters/ch03-pushdown-and-local-embedding-broker/spec.md) — Explicit Oracle credential rotation, BigQuery/Spanner/Postgres pushdown parity, per-event-loop `EmbeddingBroker` state + SHM cleanup, and `GemmaEmbedder` precision forwarding.
 - [ ] [ch04-docs-and-okf-sync](chapters/ch04-docs-and-okf-sync/spec.md) — Embeddings and GCP identity user docs, `embeddings-and-vectors.md` (`<= 200L`) + FFI/storage OKF sync, and in-place `embeddings-limitations.md` update.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Active Frontier**: `ch01-gcp-id-token-cache` (`4/4` tasks) is completed at `a601dee4`; active frontier advances to `ch02-vertex-and-gemini-embedder-wire-parity` (`gcp-embeddings-and-identity:ch02:t01`, `11` open `compact` tasks remain across `ch02`–`ch04`).
+- **Active Frontier**: `ch01-gcp-id-token-cache` (`4/4` tasks) and `ch02-vertex-and-gemini-embedder-wire-parity` (`4/4` tasks) are completed (`7` open `compact` tasks remain across `ch03`–`ch04`).
 - **Cross-Flow Unblock**: `ch01-gcp-id-token-cache` is complete on `feat/gcp-embeddings-and-identity`, ready to unblock `mcp-protocol-completeness` `ch06` bridge OIDC token authentication ([#113](https://github.com/cofin/vertebra/issues/113)).
 - **Release Gate (`/flow:finish`)**: `make lint-all && make rs-test && make py-test && make docs && make review-check`.
 

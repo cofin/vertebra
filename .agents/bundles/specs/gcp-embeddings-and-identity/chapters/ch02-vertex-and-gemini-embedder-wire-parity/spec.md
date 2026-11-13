@@ -5,22 +5,22 @@ chapter_id: ch02-vertex-and-gemini-embedder-wire-parity
 title: "Chapter 02: Vertex AI REST, Gemini Multimodal Wire Parity, and Remote Identity"
 description: "Fixes the Gemini BatchEmbedContents protobuf field numbers and multimodal media encoding, introduces the shared _GoogleEmbedder runtime, moves VertexEmbedder onto Vertex AI v1 REST predict and embedContent, and adds ID token authentication to RemoteEmbedder."
 status: stable
-state: active
+state: completed
 planning_status: complete
 planning_quality: standard
 planning_degraded_reason: null
 depends_on_chapters:
   - ch01-gcp-id-token-cache
 plan_commit: 18baadcd
-last_reviewed_commit: null
-updated_at: "2026-11-13T05:04:45Z"
+last_reviewed_commit: d031307b
+updated_at: "2026-11-13T05:05:30Z"
 generated:
   by: flow-plan
   at: "2026-11-12T23:45:00Z"
 verified:
-  - by: agent:plan-generator
-    at: "2026-11-12T23:45:00Z"
-    commit: 18baadcd
+  - by: agent:code-reviewer
+    at: "2026-11-13T05:05:30Z"
+    commit: d031307b
 tags:
   - embeddings
   - vertex-ai
@@ -153,7 +153,7 @@ User documentation and OKF updates for Vertex REST, Gemini multimodal, and `Remo
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Status**: `t01`–`t04` are implemented and verified at `484568a7` (`cargo clippy`, `vector::` `3` passed, `vertebra-http grpc` `8` passed, `mypy.stubtest vertebra._vertebra`, `ruff`, `mypy`, and `135` Python tests pass).
+- **Status**: `ch02-vertex-and-gemini-embedder-wire-parity` is completed at `484568a7` (`sync` `d031307b`); next frontier is [`ch03-pushdown-and-local-embedding-broker`](../ch03-pushdown-and-local-embedding-broker/spec.md).
 - **Fast Chapter Gate (`< 35s`)**:
   `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-core --lib vector:: && cargo test --manifest-path src/rs/Cargo.toml -p vertebra-http grpc && uv run --no-sync maturin develop --uv && uv run --no-sync python -m mypy.stubtest vertebra._vertebra && uv run --no-sync ruff check src/py/vertebra/embeddings && uv run --no-sync mypy src/py/vertebra/embeddings && uv run --no-sync pytest src/py/tests/unit/db/test_vector_wire_codecs.py src/py/tests/unit/embeddings/test_google_embedders.py -q`
 

@@ -1,5 +1,10 @@
 # Bundle Activity Log
 
+## [2026-11-13T05:05:30Z] chapter-complete | gcp-embeddings-and-identity ch02-vertex-and-gemini-embedder-wire-parity
+
+- Closed `ch02-vertex-and-gemini-embedder-wire-parity` at `484568a7` (sync `d031307b`): fixed Gemini `Part.text` protobuf field `2` + `inline_data`/`file_data` PyO3 wire codecs, extracted `_GoogleEmbedder` per-loop auth/retry base, migrated `VertexEmbedder` onto Vertex AI v1 REST `:predict`/`:embedContent` with multimodal, and added `id_token_cache` + `audience` `401` retry to `RemoteEmbedder` (`vector::` `3`, `grpc` `8`, `stubtest`, `ruff`, `mypy`, and `135` unit tests clean).
+- Advanced active frontier to `ch03-pushdown-and-local-embedding-broker` (`gcp-embeddings-and-identity:ch03:t01`; `7` tasks remain across `ch03`–`ch04`).
+
 ## [2026-11-13T04:50:11Z] chapter-complete | gcp-embeddings-and-identity ch01-gcp-id-token-cache
 
 - Closed `ch01-gcp-id-token-cache` at `a601dee4` (sync `b3253fee`): implemented per-audience `GcpIdTokenCache` across `ServiceAccount`, `MetadataServer`, `ImpersonatedServiceAccount`, `GcloudCli`, and `AuthorizedUser` ADC, finalized canonical ambient ADC fallback, and exposed `GcpIdTokenSnapshot`, `SyncGcpIdTokenCache`, and `AsyncGcpIdTokenCache` in `vertebra._vertebra` and `vertebra.storage` (`13` Rust `gcp_auth::` tests, `19` Python tests + `2` duckdb-skipped, `clippy`, `stubtest`, `ruff`, `mypy` clean).
