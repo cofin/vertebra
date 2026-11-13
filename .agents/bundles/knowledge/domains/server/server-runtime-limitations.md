@@ -14,10 +14,7 @@ generated:
 verified:
 - by: agent:flow-executor
   at: "2026-11-13T06:06:00Z"
-  commit: 1575427f
-- by: agent:flow-sync
-  at: "2026-11-13T02:38:00Z"
-  commit: 6a23bd18
+  commit: 05d88d00
 sources:
 - id: asgi-protocol-rs
   resource: src/rs/vertebra-py/src/asgi.rs::AsgiProtocol
