@@ -6,9 +6,9 @@ from typing import TYPE_CHECKING, Any
 
 import msgspec
 
-from vertebra.agent.core.schema import Tool, ToolSpec
+from vertebra.agent.core.schema import Tool, ToolSpec, is_app_only_tool
 from vertebra.agent.mcp.models import MCP_PROTOCOL_VERSION
-from vertebra.agent.mcp.registry import MCPRegistry, ToolRegistry
+from vertebra.agent.mcp.registry import ToolRegistry
 from vertebra.utils.serializers import format_json
 
 if TYPE_CHECKING:
@@ -83,24 +83,27 @@ class WebMCPManifest(
 
 
 def build_webmcp_manifest(
-    source: ToolRegistry | MCPRegistry | Sequence[Tool | ToolSpec],
+    source: ToolRegistry | Sequence[Tool | ToolSpec],
     config: WebMCPConfig | None = None,
 ) -> WebMCPManifest:
     """Build a WebMCPManifest projecting strictly from ``ToolSpec`` entries with ``"webmcp" in exposure``.
 
-    Tools whose ``ToolSpec.exposure`` does not contain ``"webmcp"`` are excluded by default.
+    Tools whose ``ToolSpec.exposure`` does not contain ``"webmcp"`` or whose UI visibility is
+    exclusively ``["app"]`` are excluded.
     """
     cfg = config or WebMCPConfig()
     descriptors: list[WebMCPToolDescriptor] = []
 
     if isinstance(source, ToolRegistry):
         for spec in source.list_specs(exposure="webmcp"):
+            if is_app_only_tool(spec):
+                continue
             tool_obj = source.get_tool(spec.name)
             descriptors.append(_descriptor_from_spec(spec, cfg.mcp_endpoint, tool_obj=tool_obj))
     else:
         for item in source:
             spec = item if isinstance(item, ToolSpec) else item.spec
-            if "webmcp" not in spec.exposure:
+            if "webmcp" not in spec.exposure or is_app_only_tool(spec):
                 continue
             tool_obj = item if isinstance(item, Tool) else None
             descriptors.append(_descriptor_from_spec(spec, cfg.mcp_endpoint, tool_obj=tool_obj))
@@ -113,7 +116,7 @@ def build_webmcp_manifest(
 
 
 def render_webmcp_manifest_json(
-    source: ToolRegistry | MCPRegistry | Sequence[Tool | ToolSpec],
+    source: ToolRegistry | Sequence[Tool | ToolSpec],
     config: WebMCPConfig | None = None,
 ) -> str:
     """Serialize the WebMCP manifest as formatted JSON."""

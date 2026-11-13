@@ -1,9 +1,11 @@
 """Conformance tests for MCP 2026-07-28 protocol, registry, HTTP handler, and tasks."""
 
 import asyncio
+import base64
 import dataclasses
 import io
 from collections.abc import AsyncIterator, Mapping
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -51,7 +53,10 @@ from vertebra.agent.mcp import (
     PERMISSION_DENIED,
     RATE_LIMITED,
     SESSION_CAPACITY_EXHAUSTED,
+    SKILLS_EXTENSION,
     SUPPORTED_PROTOCOL_VERSIONS,
+    UI_EXTENSION,
+    UI_MIME_TYPE,
     UNSUPPORTED_PROTOCOL_VERSION,
     BlobContent,
     MCPConfig,
@@ -59,8 +64,10 @@ from vertebra.agent.mcp import (
     MCPHttpHandler,
     McpHttpRequest,
     McpHttpResponse,
+    McpIcon,
     MCPRegistry,
     MCPSessionStore,
+    MCPSkillsConfig,
     MCPTaskStore,
     PromptArgument,
     PromptEntry,
@@ -69,6 +76,7 @@ from vertebra.agent.mcp import (
     ResourceTemplateEntry,
     SessionLimitExceededError,
     Skill,
+    SkillAccessError,
     SkillCatalog,
     SkillController,
     SkillIntegrityError,
@@ -79,6 +87,7 @@ from vertebra.agent.mcp import (
     build_webmcp_manifest,
     decode_mcp_header_value,
     encode_mcp_header_value,
+    mcp_resource,
     mcp_tool,
     prompt,
     render_webmcp_manifest_json,
@@ -92,7 +101,7 @@ from vertebra.extensions.django.mcp import dispatch_mcp_request as dispatch_djan
 from vertebra.extensions.flask.mcp import attach_mcp_routes as attach_flask_mcp
 from vertebra.extensions.starlette.mcp import mount_mcp_routes as mount_starlette_mcp
 from vertebra.framework._app import App
-from vertebra.typing import FrozenBaseStruct
+from vertebra.typing import FrozenBaseStruct, ImproperConfigurationError
 from vertebra.utils.module_loader import MissingDependencyError
 from vertebra.utils.serializers import decode_json, encode_json_bytes
 
@@ -1779,7 +1788,10 @@ async def test_mcp_disabled_capabilities_omitted_and_gated_with_method_not_found
     )
     caps = decode_json(discover_resp.body)["result"]["capabilities"]
     assert disabled_key not in caps
-    assert caps["extensions"] == {"io.modelcontextprotocol/custom": {"enabled": True}}
+    assert caps["extensions"]["io.modelcontextprotocol/custom"] == {"enabled": True}
+    assert caps["extensions"][UI_EXTENSION] == {"mimeTypes": [UI_MIME_TYPE]}
+    if disabled_key == "skills":
+        assert SKILLS_EXTENSION not in caps["extensions"]
 
     init_resp = await core.handle(
         McpHttpRequest(
@@ -1792,7 +1804,8 @@ async def test_mcp_disabled_capabilities_omitted_and_gated_with_method_not_found
     )
     init_caps = decode_json(init_resp.body)["result"]["capabilities"]
     assert disabled_key not in init_caps
-    assert init_caps["extensions"] == {"io.modelcontextprotocol/custom": {"enabled": True}}
+    assert init_caps["extensions"]["io.modelcontextprotocol/custom"] == {"enabled": True}
+    assert init_caps["extensions"][UI_EXTENSION] == {"mimeTypes": [UI_MIME_TYPE]}
 
     call_resp = await core.handle(
         McpHttpRequest(
@@ -2192,15 +2205,17 @@ async def _init_legacy_session(
     *,
     context: AgentContext | None = None,
     version: str = "2025-11-25",
+    capabilities: dict[str, Any] | None = None,
 ) -> str:
+    params: dict[str, Any] = {"protocolVersion": version}
+    if capabilities is not None:
+        params["capabilities"] = capabilities
     resp = await core.handle(
         McpHttpRequest(
             method="POST",
             path="/mcp",
             context=context,
-            body=encode_json_bytes(
-                {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": version}}
-            ),
+            body=encode_json_bytes({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": params}),
         )
     )
     assert resp.status == 200
@@ -2990,3 +3005,443 @@ async def test_mcp_resource_subscription_limits_and_disabled_flag() -> None:
             )
         )
         assert decode_json(err_resp.body)["error"]["code"] == METHOD_NOT_FOUND
+
+
+@pytest.mark.parametrize("raw_value", ["none", "config", "catalog"])
+def test_skill_catalog_coerce_accepts_valid_inputs(tmp_path: Path, raw_value: str) -> None:
+    """SkillCatalog.coerce handles None, MCPSkillsConfig, and existing SkillCatalog instances."""
+    if raw_value == "none":
+        assert SkillCatalog.coerce(None) is None
+        return
+    if raw_value == "config":
+        skill_dir = tmp_path / "db-tuner"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text("---\nname: db-tuner\ndescription: Tune SQL\n---\nBody\n", encoding="utf-8")
+        coerced = SkillCatalog.coerce(MCPSkillsConfig(paths=(tmp_path,)))
+        assert isinstance(coerced, SkillCatalog)
+        assert [s.name for s in coerced.list_skills()] == ["db-tuner"]
+        return
+    existing = SkillCatalog([Skill.build("alpha", "Alpha desc", body="Alpha body")])
+    assert SkillCatalog.coerce(existing) is existing
+
+
+@pytest.mark.parametrize("bad_value", ["not-a-config", 42, ["skill"]])
+def test_skill_catalog_coerce_rejects_invalid_types(bad_value: Any) -> None:
+    """SkillCatalog.coerce fails loud with TypeError on unsupported inputs."""
+    with pytest.raises(TypeError, match="MCPSkillsConfig"):
+        SkillCatalog.coerce(bad_value)
+
+
+@pytest.mark.parametrize("lookup", ["alpha-ops", "skill://alpha-ops", "skill://alpha-ops/SKILL.md"])
+def test_skill_catalog_filtering_uri_lookup_unregister_and_refresh(tmp_path: Path, lookup: str) -> None:
+    """SkillCatalog supports tag/query filtering, skill:// lookup forms, listeners, unregister, and refresh."""
+    alpha_dir = tmp_path / "alpha-ops"
+    alpha_dir.mkdir()
+    (alpha_dir / "SKILL.md").write_text(
+        '---\nname: alpha-ops\ntitle: "Alpha Operations"\ndescription: "Run Oracle playbooks"\ntags: [oracle, ops]\n---\nAlpha instructions\n',
+        encoding="utf-8",
+    )
+    beta_dir = tmp_path / "beta-docs"
+    beta_dir.mkdir()
+    (beta_dir / "SKILL.md").write_text(
+        '---\nname: beta-docs\ntitle: "Beta Writer"\ndescription: "Write guides"\ntags: [oracle]\n---\nBeta instructions\n',
+        encoding="utf-8",
+    )
+
+    catalog = SkillCatalog.from_config(MCPSkillsConfig(paths=(tmp_path,)))
+    listener_calls: list[int] = []
+    catalog.add_listener(lambda: listener_calls.append(1))
+
+    resolved = catalog.get_skill(lookup)
+    assert resolved is not None
+    assert resolved.name == "alpha-ops"
+    assert resolved.title == "Alpha Operations"
+    assert catalog.get_skill("skill://alpha-ops/references/other.md") is None
+
+    assert [s.name for s in catalog.list_skills(tags=["oracle"])] == ["alpha-ops", "beta-docs"]
+    assert [s.name for s in catalog.list_skills(tags=["oracle", "ops"])] == ["alpha-ops"]
+    assert [s.name for s in catalog.list_skills(query="writer")] == ["beta-docs"]
+    assert [s.name for s in catalog.list_skills(query="PLAYBOOKS")] == ["alpha-ops"]
+
+    entry_uris = [e.uri for e in catalog.resource_entries()]
+    assert "skill://alpha-ops/SKILL.md" in entry_uris
+
+    assert catalog.refresh() is False
+    assert listener_calls == []
+
+    (alpha_dir / "SKILL.md").write_text(
+        '---\nname: alpha-ops\ntitle: "Alpha Operations"\ndescription: "Updated Oracle playbooks"\ntags: [oracle, ops]\n---\nUpdated instructions\n',
+        encoding="utf-8",
+    )
+    assert catalog.refresh() is True
+    assert len(listener_calls) == 1
+    refreshed = catalog.get_skill("alpha-ops")
+    assert refreshed is not None
+    assert refreshed.description == "Updated Oracle playbooks"
+
+    manual = Skill.build("manual-one", "Manual skill", body="Manual body", files={"SKILL.md": "Manual body"})
+    catalog.register_skill(manual)
+    assert len(listener_calls) == 2
+    removed = catalog.unregister_skill("manual-one")
+    assert removed is not None
+    assert removed.name == "manual-one"
+    assert catalog.unregister_skill("manual-one") is None
+    assert len(listener_calls) == 3
+
+
+@pytest.mark.anyio
+async def test_mcp_skills_extension_pagination_blobs_prompts_and_notifications(tmp_path: Path) -> None:
+    """MCPCore exposes io.modelcontextprotocol/skills, binary PNG blobs, skill prompts, and list_changed SSE."""
+    png_bytes = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x01"
+    skill_dir = tmp_path / "vision-skill"
+    (skill_dir / "assets").mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        '---\nname: vision-skill\ntitle: "Vision Helper"\ndescription: "Inspect images"\ntags: [vision, ui]\n---\nUse vision steps.\n',
+        encoding="utf-8",
+    )
+    (skill_dir / "assets" / "logo.png").write_bytes(png_bytes)
+
+    extra_skills = [
+        Skill.build(
+            f"extra-{idx:03d}",
+            f"Extra skill {idx}",
+            body=f"Body {idx}",
+            tags=("batch",),
+            files={"SKILL.md": f"Body {idx}"},
+        )
+        for idx in range(55)
+    ]
+    catalog = SkillCatalog.from_config(
+        MCPSkillsConfig(paths=(tmp_path,), expose_as_prompts=True, list_changed=True, directory_read=True)
+    )
+    for item in extra_skills:
+        catalog.register_skill(item)
+
+    core = MCPCore(skill_catalog=catalog)
+    core.registry.register_prompt(
+        PromptEntry(
+            name="vision-skill",
+            description="Explicit prompt override",
+            getter=lambda: [PromptMessage(role="user", content=TextContent(text="Explicit prompt wins"))],
+        )
+    )
+
+    disc_resp = await core.handle(
+        McpHttpRequest(
+            method="POST",
+            path="/mcp",
+            headers={"MCP-Protocol-Version": "2026-07-28"},
+            body=encode_json_bytes({"jsonrpc": "2.0", "id": 1, "method": "server/discover"}),
+        )
+    )
+    caps = decode_json(disc_resp.body)["result"]["capabilities"]
+    assert "skills" not in caps
+    assert caps["extensions"][SKILLS_EXTENSION] == {"listChanged": True, "directoryRead": True}
+
+    page1_resp = await core.handle(
+        McpHttpRequest(
+            method="POST",
+            path="/mcp",
+            headers={"MCP-Protocol-Version": "2026-07-28"},
+            body=encode_json_bytes({"jsonrpc": "2.0", "id": 2, "method": "skills/list", "params": {}}),
+        )
+    )
+    page1 = decode_json(page1_resp.body)["result"]
+    assert len(page1["skills"]) == 50
+    next_cursor = page1["nextCursor"]
+
+    page2_resp = await core.handle(
+        McpHttpRequest(
+            method="POST",
+            path="/mcp",
+            headers={"MCP-Protocol-Version": "2026-07-28"},
+            body=encode_json_bytes(
+                {"jsonrpc": "2.0", "id": 3, "method": "skills/list", "params": {"cursor": next_cursor}}
+            ),
+        )
+    )
+    page2 = decode_json(page2_resp.body)["result"]
+    assert len(page2["skills"]) == 6
+    assert "nextCursor" not in page2
+
+    filtered_resp = await core.handle(
+        McpHttpRequest(
+            method="POST",
+            path="/mcp",
+            headers={"MCP-Protocol-Version": "2026-07-28"},
+            body=encode_json_bytes(
+                {"jsonrpc": "2.0", "id": 4, "method": "skills/list", "params": {"tags": ["vision"], "query": "Helper"}}
+            ),
+        )
+    )
+    filtered_skills = decode_json(filtered_resp.body)["result"]["skills"]
+    assert [s["name"] for s in filtered_skills] == ["vision-skill"]
+    assert filtered_skills[0]["title"] == "Vision Helper"
+
+    res_list = await core._handle_resources_list({"cursor": page2["skills"][-1].get("unused")})
+    res_uris = [r["uri"] for r in res_list["resources"]]
+    assert any(u.startswith("skill://") for u in res_uris)
+    tmpl_list = await core._handle_resources_templates_list()
+    assert any(t["uriTemplate"] == "skill://{name}/{path}" for t in tmpl_list["resourceTemplates"])
+
+    png_read = await core._handle_resources_read({"uri": "skill://vision-skill/assets/logo.png"})
+    png_content = png_read["contents"][0]
+    assert png_content["mimeType"] == "image/png"
+    assert "text" not in png_content
+    assert base64.b64decode(png_content["blob"]) == png_bytes
+
+    skill_prompt_get = await core._handle_prompts_get({"name": "extra-001"})
+    assert skill_prompt_get["messages"][0]["content"]["text"] == "Body 1"
+
+    override_prompt_get = await core._handle_prompts_get({"name": "vision-skill"})
+    assert override_prompt_get["messages"][0]["content"]["text"] == "Explicit prompt wins"
+
+    sid = await _init_legacy_session(core)
+    sse_resp = await core.handle(
+        McpHttpRequest(
+            method="GET",
+            path="/mcp",
+            headers={"Accept": "text/event-stream", "Mcp-Session-Id": sid},
+        )
+    )
+    assert sse_resp.stream is not None
+    try:
+        (skill_dir / "SKILL.md").write_text(
+            '---\nname: vision-skill\ntitle: "Vision Helper v2"\ndescription: "Inspect images"\ntags: [vision]\n---\nUpdated vision steps.\n',
+            encoding="utf-8",
+        )
+        assert catalog.refresh() is True
+        first_evt = decode_json((await anext(sse_resp.stream)).decode("utf-8").split("data: ", 1)[1].strip())
+        second_evt = decode_json((await anext(sse_resp.stream)).decode("utf-8").split("data: ", 1)[1].strip())
+        assert {first_evt["method"], second_evt["method"]} == {
+            "notifications/skills/list_changed",
+            "notifications/resources/list_changed",
+        }
+    finally:
+        await sse_resp.stream.aclose()
+
+    restricted_core = MCPCore(
+        skill_catalog=MCPSkillsConfig(paths=(tmp_path,), directory_read=False),
+    )
+    restricted_caps = (await restricted_core._handle_discover())["capabilities"]
+    assert restricted_caps["extensions"][SKILLS_EXTENSION]["directoryRead"] is False
+    with pytest.raises(SkillAccessError):
+        assert restricted_core.skill_catalog is not None
+        restricted_core.skill_catalog.read_directory("skill://vision-skill")
+    dir_resp = await restricted_core.handle(
+        McpHttpRequest(
+            method="POST",
+            path="/mcp",
+            headers={"MCP-Protocol-Version": "2026-07-28"},
+            body=encode_json_bytes(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 9,
+                    "method": "resources/directory/read",
+                    "params": {"uri": "skill://vision-skill"},
+                }
+            ),
+        )
+    )
+    assert dir_resp.status == 200
+    assert decode_json(dir_resp.body)["error"]["code"] == INVALID_PARAMS
+
+
+@pytest.mark.parametrize("bad_case", ["dangling", "legacy-dangling", "non-ui-scheme", "wrong-mime"])
+def test_mcp_apps_validate_ui_links_rejects_broken_configs(bad_case: str) -> None:
+    """MCPCore.validate() and ToolRegistry.validate_ui_links raise ImproperConfigurationError on invalid UI links."""
+    core = MCPCore()
+    if bad_case == "dangling":
+
+        @tool(name="t_dangling", meta={"ui": {"resourceUri": "ui://app/missing.html"}})
+        def t_dangling() -> str:
+            return "x"
+
+        core.registry.register_tool(t_dangling)
+    elif bad_case == "legacy-dangling":
+
+        @tool(name="t_legacy", meta={"ui/resourceUri": "ui://app/missing-legacy.html"})
+        def t_legacy() -> str:
+            return "x"
+
+        core.registry.register_tool(t_legacy)
+    elif bad_case == "non-ui-scheme":
+
+        @tool(name="t_http", meta={"ui": {"resourceUri": "https://evil.example/widget.html"}})
+        def t_http() -> str:
+            return "x"
+
+        core.registry.register_tool(t_http)
+    else:
+        core.registry.register_resource(
+            ResourceEntry(uri="ui://app/plain.html", name="plain", mimeType="text/plain", reader=lambda: "<div/>")
+        )
+
+        @tool(name="t_wrong_mime", meta={"ui": {"resourceUri": "ui://app/plain.html"}})
+        def t_wrong_mime() -> str:
+            return "x"
+
+        core.registry.register_tool(t_wrong_mime)
+
+    with pytest.raises(ImproperConfigurationError):
+        core.validate()
+
+
+@pytest.mark.anyio
+async def test_mcp_apps_projection_app_only_filtering_etag_and_webmcp() -> None:
+    """SEP-1865 UI metadata flows through tools/resources/templates/ETag, filters app-only tools, and excludes WebMCP."""
+
+    class DashboardController(SkillController):
+        @mcp_resource(
+            "ui://app/dashboard.html",
+            name="dashboard_ui",
+            title="Live Dashboard",
+            mime_type=UI_MIME_TYPE,
+            icons=[McpIcon(src="https://cdn.example/dash.png", mimeType="image/png", sizes=("64x64",))],
+            meta={"ui": {"prefersBorder": True}},
+        )
+        def dashboard_ui(self) -> str:
+            return "<html>dashboard</html>"
+
+        @mcp_resource(
+            "ui://app/item/{item_id}.html",
+            name="item_ui",
+            title="Item View",
+            mime_type=UI_MIME_TYPE,
+            meta={"ui": {"csp": {"frameDomains": []}}},
+        )
+        def item_ui(self, item_id: str) -> str:
+            return f"<html>{item_id}</html>"
+
+        @mcp_tool(
+            name="refresh_dashboard",
+            title="Refresh Dashboard",
+            webmcp=True,
+            ui_resource_uri="ui://app/dashboard.html",
+            ui_visibility=["app"],
+        )
+        def refresh_dashboard(self) -> str:
+            return "refreshed"
+
+        @mcp_tool(
+            name="open_dashboard",
+            title="Open Dashboard",
+            webmcp=True,
+            ui_resource_uri="ui://app/dashboard.html",
+            ui_visibility=["model", "app"],
+        )
+        def open_dashboard(self) -> str:
+            return "opened"
+
+    core = MCPCore()
+    core.registry.register_controller(DashboardController())
+    etag_before = core.registry.etag()
+    core.validate()
+
+    @tool(
+        name="open_dashboard",
+        title="Open Dashboard",
+        webmcp=True,
+        meta={"ui": {"resourceUri": "ui://app/dashboard.html", "visibility": ["model", "app"], "rev": 2}},
+    )
+    def open_dashboard_v2() -> str:
+        return "opened"
+
+    temp_reg = ToolRegistry()
+    temp_reg.register_controller(DashboardController())
+    temp_reg.register_tool(open_dashboard_v2)
+    assert temp_reg.etag() != etag_before
+
+    no_ui_tools = await core.handle(
+        McpHttpRequest(
+            method="POST",
+            path="/mcp",
+            headers={"MCP-Protocol-Version": "2026-07-28"},
+            body=encode_json_bytes({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}),
+        )
+    )
+    assert [t["name"] for t in decode_json(no_ui_tools.body)["result"]["tools"]] == ["open_dashboard"]
+    assert (
+        decode_json(no_ui_tools.body)["result"]["tools"][0]["_meta"]["ui"]["resourceUri"] == "ui://app/dashboard.html"
+    )
+
+    modern_ui_tools = await core.handle(
+        McpHttpRequest(
+            method="POST",
+            path="/mcp",
+            headers={"MCP-Protocol-Version": "2026-07-28"},
+            body=encode_json_bytes(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/list",
+                    "params": {
+                        "_meta": {
+                            "io.modelcontextprotocol/clientCapabilities": {
+                                "extensions": {UI_EXTENSION: {"mimeTypes": [UI_MIME_TYPE]}}
+                            }
+                        }
+                    },
+                }
+            ),
+        )
+    )
+    assert [t["name"] for t in decode_json(modern_ui_tools.body)["result"]["tools"]] == [
+        "open_dashboard",
+        "refresh_dashboard",
+    ]
+
+    app_only_call = await core.handle(
+        McpHttpRequest(
+            method="POST",
+            path="/mcp",
+            headers={"MCP-Protocol-Version": "2026-07-28"},
+            body=encode_json_bytes(
+                {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "refresh_dashboard"}}
+            ),
+        )
+    )
+    assert app_only_call.status == 200
+    assert decode_json(app_only_call.body)["result"]["content"][0]["text"] == "refreshed"
+
+    ui_sid = await _init_legacy_session(core, capabilities={"extensions": {UI_EXTENSION: {}}})
+    legacy_ui_list = await core.handle(
+        McpHttpRequest(
+            method="POST",
+            path="/mcp",
+            headers={"Mcp-Session-Id": ui_sid},
+            body=encode_json_bytes({"jsonrpc": "2.0", "id": 4, "method": "tools/list", "params": {}}),
+        )
+    )
+    assert [t["name"] for t in decode_json(legacy_ui_list.body)["result"]["tools"]] == [
+        "open_dashboard",
+        "refresh_dashboard",
+    ]
+
+    show_all_core = MCPCore(config=MCPConfig(hide_app_only_tools=False, ui_mime_types=()))
+    show_all_core.registry.register_controller(DashboardController())
+    show_all_disc = await show_all_core._handle_discover()
+    assert UI_EXTENSION not in show_all_disc["capabilities"].get("extensions", {})
+    assert [t["name"] for t in (await show_all_core._handle_tools_list())["tools"]] == [
+        "open_dashboard",
+        "refresh_dashboard",
+    ]
+
+    res_list = await core._handle_resources_list()
+    assert res_list["resources"][0]["title"] == "Live Dashboard"
+    assert res_list["resources"][0]["icons"] == [
+        {"src": "https://cdn.example/dash.png", "mimeType": "image/png", "sizes": ["64x64"]}
+    ]
+    assert res_list["resources"][0]["_meta"] == {"ui": {"prefersBorder": True}}
+
+    res_read = await core._handle_resources_read({"uri": "ui://app/dashboard.html"})
+    assert res_read["contents"][0]["_meta"] == {"ui": {"prefersBorder": True}}
+
+    tmpl_list = await core._handle_resources_templates_list()
+    assert tmpl_list["resourceTemplates"][0]["title"] == "Item View"
+    assert tmpl_list["resourceTemplates"][0]["_meta"] == {"ui": {"csp": {"frameDomains": []}}}
+
+    manifest = build_webmcp_manifest(core.registry)
+    assert [t.name for t in manifest.tools] == ["open_dashboard"]
+    seq_manifest = build_webmcp_manifest([t.spec for t in core.registry.list_tools()])
+    assert [t.name for t in seq_manifest.tools] == ["open_dashboard"]

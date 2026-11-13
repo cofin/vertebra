@@ -10,17 +10,25 @@ from __future__ import annotations
 
 import inspect
 import re
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Literal
 
-from vertebra.agent.core.schema import SchemaDigestCache, Tool, ToolExposure, ToolSpec
+from vertebra.agent.core.schema import (
+    SchemaDigestCache,
+    Tool,
+    ToolExposure,
+    ToolSpec,
+    extract_ui_resource_uris,
+)
 from vertebra.agent.mcp.models import (
+    UI_MIME_TYPE,
     PromptEntry,
     ResourceEntry,
     ResourceTemplateEntry,
+    coerce_mcp_icons,
 )
 from vertebra.agent.tools import build_tools
-from vertebra.typing import ToolProvider
+from vertebra.typing import ImproperConfigurationError, ToolProvider
 from vertebra.utils.serializers import encode_json_bytes
 
 if TYPE_CHECKING:
@@ -98,6 +106,7 @@ class ToolRegistry:
             "annotations": spec.annotations.to_mcp_dict(),
             "exposure": sorted(spec.exposure),
             "requires_confirmation": spec.requires_confirmation,
+            "meta": spec.meta,
         }
         self.schema_cache.put(f"tool:{spec.name}", encode_json_bytes(spec_payload))
         self._notify("tools")
@@ -147,8 +156,11 @@ class ToolRegistry:
         res_dict = {
             "uri": resource.uri,
             "name": resource.name,
+            "title": resource.title,
             "description": resource.description,
             "mimeType": resource.mimeType,
+            "icons": [icon.to_mcp_dict() for icon in resource.icons],
+            "meta": resource.meta,
         }
         self.schema_cache.put(f"resource:{resource.uri}", encode_json_bytes(res_dict))
         self._notify("resources")
@@ -167,11 +179,47 @@ class ToolRegistry:
         tmpl_dict = {
             "uriTemplate": template.uriTemplate,
             "name": template.name,
+            "title": template.title,
             "description": template.description,
             "mimeType": template.mimeType,
+            "icons": [icon.to_mcp_dict() for icon in template.icons],
+            "meta": template.meta,
         }
         self.schema_cache.put(f"template:{template.uriTemplate}", encode_json_bytes(tmpl_dict))
         self._notify("resources")
+
+    def validate_ui_links(self, *, allowed_mime_types: Sequence[str] = (UI_MIME_TYPE,)) -> None:
+        """Verify all ``ui://`` resources and tool UI resource links resolve with allowed MIME types."""
+        allowed = {mime.strip().lower() for mime in allowed_mime_types if isinstance(mime, str) and mime.strip()}
+
+        for res in self._resources.values():
+            if res.uri.startswith("ui://") and res.mimeType.strip().lower() not in allowed:
+                raise ImproperConfigurationError(
+                    f"UI resource {res.uri!r} has disallowed mimeType {res.mimeType!r}; expected one of {tuple(allowed_mime_types)}"
+                )
+
+        for tmpl in self._templates.values():
+            if tmpl.uriTemplate.startswith("ui://") and tmpl.mimeType.strip().lower() not in allowed:
+                raise ImproperConfigurationError(
+                    f"UI resource template {tmpl.uriTemplate!r} has disallowed mimeType {tmpl.mimeType!r}; expected one of {tuple(allowed_mime_types)}"
+                )
+
+        for spec, _ in self.entries():
+            for raw_uri in extract_ui_resource_uris(spec.meta):
+                if not isinstance(raw_uri, str) or not raw_uri.startswith("ui://") or raw_uri == "ui://":
+                    raise ImproperConfigurationError(
+                        f"Tool {spec.name!r} specifies invalid UI resourceUri {raw_uri!r}; expected 'ui://...'"
+                    )
+                target: ResourceEntry | ResourceTemplateEntry | None = self.get_resource(raw_uri)
+                if target is None:
+                    matched = self.match_resource_template(raw_uri)
+                    target = matched[0] if matched is not None else None
+                if target is None:
+                    raise ImproperConfigurationError(f"Tool {spec.name!r} references missing UI resource {raw_uri!r}")
+                if target.mimeType.strip().lower() not in allowed:
+                    raise ImproperConfigurationError(
+                        f"UI resource {raw_uri!r} referenced by tool {spec.name!r} has disallowed mimeType {target.mimeType!r}; expected one of {tuple(allowed_mime_types)}"
+                    )
 
     def list_resource_templates(self) -> list[ResourceTemplateEntry]:
         """Return all registered resource templates sorted by template string."""
@@ -286,6 +334,8 @@ class ToolRegistry:
                 options.get("mcp_annotations") or opt_tool_dict.get("annotations") or meta_dict.get("annotations") or {}
             )
             resolved_title = options.get("mcp_title") or opt_tool_dict.get("title") or meta_dict.get("title") or ""
+            raw_tool_meta = options.get("mcp_meta") or opt_tool_dict.get("meta") or meta_dict.get("meta")
+            resolved_tool_meta = dict(raw_tool_meta) if isinstance(raw_tool_meta, Mapping) else None
             self.register_tool(
                 Tool(
                     fn,
@@ -296,6 +346,7 @@ class ToolRegistry:
                     timeout_seconds=resolved_timeout,
                     webmcp=resolved_webmcp,
                     annotations=dict(raw_annotations),
+                    meta=resolved_tool_meta,
                 )
             )
 
@@ -306,8 +357,11 @@ class ToolRegistry:
                 ResourceEntry(
                     uri=res_meta["uri"],
                     name=res_meta["name"],
+                    title=res_meta.get("title"),
                     description=res_meta["description"],
                     mimeType=res_meta["mimeType"],
+                    icons=coerce_mcp_icons(res_meta.get("icons")),
+                    meta=dict(res_meta["meta"]) if isinstance(res_meta.get("meta"), Mapping) else None,
                     reader=fn,
                 )
             )
@@ -316,8 +370,15 @@ class ToolRegistry:
                 ResourceEntry(
                     uri=opt_res,
                     name=getattr(fn, "__name__", "resource"),
+                    title=options.get("mcp_resource_title"),
                     description=getattr(fn, "__doc__", "") or "",
                     mimeType="text/plain",
+                    icons=coerce_mcp_icons(options.get("mcp_resource_icons")),
+                    meta=(
+                        dict(options["mcp_resource_meta"])
+                        if isinstance(options.get("mcp_resource_meta"), Mapping)
+                        else None
+                    ),
                     reader=fn,
                 )
             )
@@ -329,8 +390,11 @@ class ToolRegistry:
                 ResourceTemplateEntry(
                     uriTemplate=tmpl_meta["uriTemplate"],
                     name=tmpl_meta["name"],
+                    title=tmpl_meta.get("title"),
                     description=tmpl_meta["description"],
                     mimeType=tmpl_meta["mimeType"],
+                    icons=coerce_mcp_icons(tmpl_meta.get("icons")),
+                    meta=dict(tmpl_meta["meta"]) if isinstance(tmpl_meta.get("meta"), Mapping) else None,
                     reader=fn,
                 )
             )

@@ -7,12 +7,14 @@ and completions with OpenTelemetry observability.
 """
 
 import asyncio
+import base64
 import contextlib
 import dataclasses
 import inspect
 import logging
+import mimetypes
 import secrets
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from typing import Any, NoReturn
 
 import anyio
@@ -37,7 +39,7 @@ from vertebra.agent.core.jsonrpc import (
     JSONRPCRequest,
     JSONRPCRouter,
 )
-from vertebra.agent.core.schema import ToolArgumentError
+from vertebra.agent.core.schema import ToolArgumentError, is_app_only_tool
 from vertebra.agent.core.sse import SseFrame, SseStreamBroker, StreamLimitExceededError
 from vertebra.agent.mcp.client import MCP_NAME_FIELDS, decode_mcp_header_value
 from vertebra.agent.mcp.models import (
@@ -48,7 +50,9 @@ from vertebra.agent.mcp.models import (
     MCP_LOG_LEVELS,
     MCP_PROTOCOL_VERSION,
     SESSION_CAPACITY_EXHAUSTED,
+    SKILLS_EXTENSION,
     SUPPORTED_PROTOCOL_VERSIONS,
+    UI_EXTENSION,
     UNSUPPORTED_PROTOCOL_VERSION,
     BlobContent,
     MCPConfig,
@@ -56,13 +60,17 @@ from vertebra.agent.mcp.models import (
     McpHttpResponse,
     McpLogLevel,
     NegotiatedProtocol,
+    PromptEntry,
     PromptMessage,
+    ResourceEntry,
     ResourceLinkContent,
+    ResourceTemplateEntry,
     TextContent,
     ToolCallOutput,
 )
 from vertebra.agent.mcp.registry import RegistryChangeKind, ToolRegistry
 from vertebra.agent.mcp.sessions import MCPSession, MCPSessionStore, SessionLimitExceededError
+from vertebra.agent.mcp.skills import SKILL_FILE_NAME, SkillAccessError, SkillCatalog
 from vertebra.agent.mcp.tasks import MCPTaskStore, TaskLookupError, TaskRecord, TaskStateError
 from vertebra.agent.runtime import ConfirmationGate
 from vertebra.agent.telemetry import AgentTelemetryRecorder
@@ -183,7 +191,7 @@ class MCPCore:
         self.telemetry = telemetry if telemetry is not None else AgentTelemetryRecorder()
         self.stream_broker = stream_broker if stream_broker is not None else SseStreamBroker()
         self.task_store = task_store if task_store is not None else MCPTaskStore(stream_broker=self.stream_broker)
-        self.skill_catalog = skill_catalog
+        self.skill_catalog: SkillCatalog | None = SkillCatalog.coerce(skill_catalog, telemetry=self.telemetry)
         self.session_store = (
             session_store
             if session_store is not None
@@ -200,6 +208,8 @@ class MCPCore:
 
         self._register_handlers()
         self.registry.add_listener(self._on_registry_changed)
+        if self.skill_catalog is not None:
+            self.skill_catalog.add_listener(self._on_skills_changed)
 
     def _next_event_id(self) -> str:
         self._event_counter += 1
@@ -219,10 +229,7 @@ class MCPCore:
             return self.config.resources_enabled
         return self.config.prompts_enabled
 
-    def _on_registry_changed(self, kind: RegistryChangeKind) -> None:
-        if not self._is_family_enabled(kind):
-            return
-        method = f"notifications/{kind}/list_changed"
+    def _emit_list_changed(self, method: str, *, kind: RegistryChangeKind | None = None) -> None:
         legacy_frame = self._make_sse_frame({"jsonrpc": "2.0", "method": method})
         task_ids = self.task_store._tasks if self.task_store is not None else {}
         listen_stream_ids = {reg.stream_id for reg in self._listen_registrations.values()}
@@ -233,16 +240,36 @@ class MCPCore:
         ]
         if legacy_targets:
             self.stream_broker.broadcast(legacy_frame, legacy_targets)
-        for reg in list(self._listen_registrations.values()):
-            if kind in reg.list_changed_kinds:
-                stamped = self._make_sse_frame(
-                    {
-                        "jsonrpc": "2.0",
-                        "method": method,
-                        "params": {"_meta": {"io.modelcontextprotocol/subscriptionId": reg.subscription_id}},
-                    }
-                )
-                self.stream_broker.publish(reg.stream_id, stamped)
+        if kind is not None:
+            for reg in list(self._listen_registrations.values()):
+                if kind in reg.list_changed_kinds:
+                    stamped = self._make_sse_frame(
+                        {
+                            "jsonrpc": "2.0",
+                            "method": method,
+                            "params": {"_meta": {"io.modelcontextprotocol/subscriptionId": reg.subscription_id}},
+                        }
+                    )
+                    self.stream_broker.publish(reg.stream_id, stamped)
+
+    def _on_registry_changed(self, kind: RegistryChangeKind) -> None:
+        if not self._is_family_enabled(kind):
+            return
+        self._emit_list_changed(f"notifications/{kind}/list_changed", kind=kind)
+
+    def _on_skills_changed(self) -> None:
+        if not self.config.skills_enabled or self.skill_catalog is None:
+            return
+        if self.skill_catalog.list_changed:
+            self._emit_list_changed("notifications/skills/list_changed")
+        if self.config.resources_enabled:
+            self._emit_list_changed("notifications/resources/list_changed", kind="resources")
+        if self.config.prompts_enabled and self.skill_catalog.expose_as_prompts:
+            self._emit_list_changed("notifications/prompts/list_changed", kind="prompts")
+
+    def validate(self) -> None:
+        """Validate tool and resource cross-references including SEP-1865 ``ui://`` links."""
+        self.registry.validate_ui_links(allowed_mime_types=self.config.ui_mime_types)
 
     def register_extension(self, name: str, payload: Mapping[str, Any] | None = None) -> None:
         """Register an MCP capability extension under ``capabilities.extensions``."""
@@ -269,14 +296,25 @@ class MCPCore:
             }
         if self.config.logging:
             capabilities["logging"] = {}
-        if self.config.skills_enabled:
-            capabilities["skills"] = {"listChanged": True}
-        if self._extensions:
-            capabilities["extensions"] = {name: dict(payload) for name, payload in self._extensions.items()}
+
+        extensions: dict[str, Any] = {}
+        if self.config.ui_mime_types:
+            extensions[UI_EXTENSION] = {"mimeTypes": list(self.config.ui_mime_types)}
+        if self.config.skills_enabled and self.skill_catalog is not None:
+            extensions[SKILLS_EXTENSION] = {
+                "listChanged": bool(self.skill_catalog.list_changed),
+                "directoryRead": bool(self.skill_catalog.directory_read),
+            }
+        for name, payload in self._extensions.items():
+            extensions[name] = dict(payload)
+        if extensions:
+            capabilities["extensions"] = extensions
         return capabilities
 
     def _is_method_enabled(self, method: str) -> bool:
         """Return True when configuration enables the capability family owning method."""
+        if method == "resources/directory/read":
+            return self.config.resources_enabled and self.config.skills_enabled
         if method in ("resources/subscribe", "resources/unsubscribe"):
             return self.config.resources_enabled and self.config.resource_subscriptions
         if method.startswith("tools/"):
@@ -1526,6 +1564,102 @@ class MCPCore:
         """Process notifications/initialized confirmation."""
         return None
 
+    @staticmethod
+    def _client_supports_ui(context: Any) -> bool:
+        if not isinstance(context, AgentContext):
+            return False
+        caps = context.metadata.get("mcp_client_capabilities")
+        if not isinstance(caps, Mapping):
+            return False
+        exts = caps.get("extensions")
+        if isinstance(exts, Mapping) and UI_EXTENSION in exts:
+            ui_val = exts[UI_EXTENSION]
+            return ui_val is not False and ui_val is not None
+        if UI_EXTENSION in caps:
+            direct_val = caps[UI_EXTENSION]
+            return direct_val is not False and direct_val is not None
+        return False
+
+    def _combined_resources(self) -> list[ResourceEntry]:
+        merged: dict[str, ResourceEntry] = {}
+        if self.config.skills_enabled and self.skill_catalog is not None:
+            for entry in self.skill_catalog.resource_entries():
+                merged[entry.uri] = entry
+        for entry in self.registry.list_resources():
+            merged[entry.uri] = entry
+        return [merged[k] for k in sorted(merged.keys())]
+
+    def _combined_resource_templates(self) -> list[ResourceTemplateEntry]:
+        merged: dict[str, ResourceTemplateEntry] = {t.uriTemplate: t for t in self.registry.list_resource_templates()}
+        skill_template_uri = "skill://{name}/{path}"
+        if self.config.skills_enabled and self.skill_catalog is not None and skill_template_uri not in merged:
+            merged[skill_template_uri] = ResourceTemplateEntry(
+                uriTemplate=skill_template_uri,
+                name="skill_file",
+                description="Read a file inside a configured skill package",
+                mimeType="application/octet-stream",
+            )
+        return [merged[k] for k in sorted(merged.keys())]
+
+    def _combined_prompts_map(self) -> dict[str, PromptEntry]:
+        merged: dict[str, PromptEntry] = {p.name: p for p in self.registry.list_prompts()}
+        if self.config.skills_enabled and self.skill_catalog is not None and self.skill_catalog.expose_as_prompts:
+            for skill in self.skill_catalog.list_skills():
+                if skill.name in merged:
+                    continue
+
+                def _skill_getter(_body: str = skill.body, **_: Any) -> list[PromptMessage]:
+                    return [PromptMessage(role="user", content=TextContent(text=_body))]
+
+                merged[skill.name] = PromptEntry(
+                    name=skill.name,
+                    description=skill.description,
+                    arguments=(),
+                    getter=_skill_getter,
+                )
+        return merged
+
+    @staticmethod
+    def _serialize_resource_entry(entry: ResourceEntry) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "uri": entry.uri,
+            "name": entry.name,
+            "description": entry.description,
+            "mimeType": entry.mimeType,
+        }
+        if entry.title:
+            payload["title"] = entry.title
+        if entry.icons:
+            payload["icons"] = [icon.to_mcp_dict() for icon in entry.icons]
+        if entry.meta:
+            payload["_meta"] = dict(entry.meta)
+        return payload
+
+    @staticmethod
+    def _serialize_template_entry(entry: ResourceTemplateEntry) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "uriTemplate": entry.uriTemplate,
+            "name": entry.name,
+            "description": entry.description,
+            "mimeType": entry.mimeType,
+        }
+        if entry.title:
+            payload["title"] = entry.title
+        if entry.icons:
+            payload["icons"] = [icon.to_mcp_dict() for icon in entry.icons]
+        if entry.meta:
+            payload["_meta"] = dict(entry.meta)
+        return payload
+
+    @staticmethod
+    def _is_binary_mime(mime_type: str) -> bool:
+        normalized = mime_type.split(";", 1)[0].strip().lower()
+        if normalized == "image/svg+xml":
+            return False
+        if normalized.startswith(("image/", "audio/", "video/", "font/")):
+            return True
+        return normalized in {"application/octet-stream", "application/pdf", "application/zip", "application/wasm"}
+
     async def _handle_discover(self, params: Any = None, context: Any = None) -> dict[str, Any]:
         """Return server capability manifest and registered count summaries."""
         resolved_ctx = context if isinstance(context, AgentContext) else current_agent_context()
@@ -1535,8 +1669,8 @@ class MCPCore:
             else MCP_PROTOCOL_VERSION
         )
         tools_list = self.registry.list_specs(exposure="mcp")
-        resources_list = self.registry.list_resources()
-        prompts_list = self.registry.list_prompts()
+        resources_list = self._combined_resources()
+        prompts_list = self._combined_prompts_map()
         skills_list = self.skill_catalog.list_skills() if self.skill_catalog is not None else ()
         return self._with_meta(
             "server/discover",
@@ -1557,9 +1691,12 @@ class MCPCore:
         )
 
     async def _handle_tools_list(self, params: Any = None, context: Any = None) -> dict[str, Any]:
-        """List registered tools with JSON-RPC cursor pagination."""
+        """List registered tools with JSON-RPC cursor pagination and visibility filtering."""
+        resolved_ctx = context if isinstance(context, AgentContext) else current_agent_context()
         cursor = params.get("cursor") if isinstance(params, Mapping) else None
         specs = self.registry.list_specs(exposure="mcp")
+        if self.config.hide_app_only_tools and not self._client_supports_ui(resolved_ctx):
+            specs = [s for s in specs if not is_app_only_tool(s)]
         page = paginate_sequence(specs, cursor=cursor, page_size=50)
 
         tool_dicts: list[dict[str, Any]] = []
@@ -1575,12 +1712,14 @@ class MCPCore:
             annotations_dict = s.annotations.to_mcp_dict()
             if annotations_dict:
                 item["annotations"] = annotations_dict
+            if s.meta:
+                item["_meta"] = dict(s.meta)
             tool_dicts.append(item)
 
         res: dict[str, Any] = {"tools": tool_dicts}
         if page.next_cursor is not None:
             res["nextCursor"] = page.next_cursor
-        return self._with_meta("tools/list", res, cacheable=True)
+        return self._with_meta("tools/list", res, cacheable=True, context=resolved_ctx)
 
     async def _handle_tools_call(self, params: Any = None, context: Any = None) -> dict[str, Any]:
         """Execute a tool invocation with parameter validation and structured outputs."""
@@ -1707,26 +1846,17 @@ class MCPCore:
         return payload
 
     async def _handle_resources_list(self, params: Any = None, context: Any = None) -> dict[str, Any]:
-        """List registered static resources with cursor pagination."""
+        """List registered static resources and projected skill entries with cursor pagination."""
         cursor = params.get("cursor") if isinstance(params, Mapping) else None
-        resources = self.registry.list_resources()
+        resources = self._combined_resources()
         page = paginate_sequence(resources, cursor=cursor, page_size=50)
 
-        res_dicts: list[dict[str, Any]] = []
-        for r in page.items:
-            res_dicts.append(
-                {
-                    "uri": r.uri,
-                    "name": r.name,
-                    "description": r.description,
-                    "mimeType": r.mimeType,
-                }
-            )
+        res_dicts = [self._serialize_resource_entry(r) for r in page.items]
 
         res: dict[str, Any] = {"resources": res_dicts}
         if page.next_cursor is not None:
             res["nextCursor"] = page.next_cursor
-        return self._with_meta("resources/list", res, cacheable=True)
+        return self._with_meta("resources/list", res, cacheable=True, context=context)
 
     async def _handle_resources_read(self, params: Any = None, context: Any = None) -> dict[str, Any]:
         """Read content of a static resource or matched template or skill."""
@@ -1738,19 +1868,32 @@ class MCPCore:
 
         if uri.startswith("skill://") and self.skill_catalog is not None:
             try:
+                descriptor = self.skill_catalog.get_file_descriptor(uri)
                 file_bytes = await self.skill_catalog.read_file(uri)
-                return self._with_meta(
-                    "resources/read",
-                    {
-                        "contents": [
-                            {
-                                "uri": uri,
-                                "mimeType": "text/markdown",
-                                "text": file_bytes.decode("utf-8", errors="replace"),
-                            }
-                        ]
-                    },
-                )
+                mime_type = "text/markdown"
+                content_meta: dict[str, Any] | None = None
+                if descriptor is not None:
+                    skill_obj, skill_file, subpath = descriptor
+                    if skill_file is not None:
+                        mime_type = skill_file.mime_type
+                    else:
+                        guessed, _ = mimetypes.guess_type(uri)
+                        mime_type = guessed or "text/markdown"
+                    if subpath == SKILL_FILE_NAME and skill_obj.meta:
+                        content_meta = dict(skill_obj.meta)
+                else:
+                    guessed, _ = mimetypes.guess_type(uri)
+                    mime_type = guessed or "text/markdown"
+                content_item: dict[str, Any] = {"uri": uri, "mimeType": mime_type}
+                try:
+                    if self._is_binary_mime(mime_type):
+                        raise UnicodeDecodeError("binary", b"", 0, 1, "binary media type")
+                    content_item["text"] = file_bytes.decode("utf-8")
+                except UnicodeDecodeError:
+                    content_item["blob"] = base64.b64encode(file_bytes).decode("ascii")
+                if content_meta:
+                    content_item["_meta"] = content_meta
+                return self._with_meta("resources/read", {"contents": [content_item]}, context=context)
             except Exception as exc:
                 msg = f"Failed to read skill resource '{uri}': {exc}"
                 raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message=msg)) from exc
@@ -1764,18 +1907,14 @@ class MCPCore:
                     if inspect.isawaitable(res_val):
                         res_val = await res_val
                     content_text = res_val if isinstance(res_val, str) else str(res_val)
-                return self._with_meta(
-                    "resources/read",
-                    {
-                        "contents": [
-                            {
-                                "uri": res_entry.uri,
-                                "mimeType": res_entry.mimeType,
-                                "text": content_text,
-                            }
-                        ]
-                    },
-                )
+                item: dict[str, Any] = {
+                    "uri": res_entry.uri,
+                    "mimeType": res_entry.mimeType,
+                    "text": content_text,
+                }
+                if res_entry.meta:
+                    item["_meta"] = dict(res_entry.meta)
+                return self._with_meta("resources/read", {"contents": [item]}, context=context)
 
             matched = self.registry.match_resource_template(uri)
             if matched is not None:
@@ -1786,18 +1925,14 @@ class MCPCore:
                     if inspect.isawaitable(res_val):
                         res_val = await res_val
                     content_text = res_val if isinstance(res_val, str) else str(res_val)
-                return self._with_meta(
-                    "resources/read",
-                    {
-                        "contents": [
-                            {
-                                "uri": uri,
-                                "mimeType": tmpl.mimeType,
-                                "text": content_text,
-                            }
-                        ]
-                    },
-                )
+                tmpl_item: dict[str, Any] = {
+                    "uri": uri,
+                    "mimeType": tmpl.mimeType,
+                    "text": content_text,
+                }
+                if tmpl.meta:
+                    tmpl_item["_meta"] = dict(tmpl.meta)
+                return self._with_meta("resources/read", {"contents": [tmpl_item]}, context=context)
 
         msg = f"Resource not found: {uri}"
         raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message=msg))
@@ -1871,31 +2006,23 @@ class MCPCore:
         return {}
 
     async def _handle_resources_templates_list(self, params: Any = None, context: Any = None) -> dict[str, Any]:
-        """List registered resource URI templates with cursor pagination."""
+        """List registered resource URI templates and skill templates with cursor pagination."""
         cursor = params.get("cursor") if isinstance(params, Mapping) else None
-        templates = self.registry.list_resource_templates()
+        templates = self._combined_resource_templates()
         page = paginate_sequence(templates, cursor=cursor, page_size=50)
 
-        tmpl_dicts: list[dict[str, Any]] = []
-        for t in page.items:
-            tmpl_dicts.append(
-                {
-                    "uriTemplate": t.uriTemplate,
-                    "name": t.name,
-                    "description": t.description,
-                    "mimeType": t.mimeType,
-                }
-            )
+        tmpl_dicts = [self._serialize_template_entry(t) for t in page.items]
 
         res: dict[str, Any] = {"resourceTemplates": tmpl_dicts}
         if page.next_cursor is not None:
             res["nextCursor"] = page.next_cursor
-        return self._with_meta("resources/templates/list", res, cacheable=True)
+        return self._with_meta("resources/templates/list", res, cacheable=True, context=context)
 
     async def _handle_prompts_list(self, params: Any = None, context: Any = None) -> dict[str, Any]:
-        """List registered prompt templates with cursor pagination."""
+        """List registered prompt templates and opt-in skill prompts with cursor pagination."""
         cursor = params.get("cursor") if isinstance(params, Mapping) else None
-        prompts = self.registry.list_prompts()
+        prompts_map = self._combined_prompts_map()
+        prompts = [prompts_map[k] for k in sorted(prompts_map.keys())]
         page = paginate_sequence(prompts, cursor=cursor, page_size=50)
 
         prompt_dicts: list[dict[str, Any]] = []
@@ -1913,7 +2040,7 @@ class MCPCore:
         res: dict[str, Any] = {"prompts": prompt_dicts}
         if page.next_cursor is not None:
             res["nextCursor"] = page.next_cursor
-        return self._with_meta("prompts/list", res, cacheable=True)
+        return self._with_meta("prompts/list", res, cacheable=True, context=context)
 
     async def _handle_prompts_get(self, params: Any = None, context: Any = None) -> dict[str, Any]:
         """Retrieve and instantiate an MCP prompt template."""
@@ -1927,7 +2054,7 @@ class MCPCore:
             arguments = {}
 
         with self.telemetry.span_prompt(prompt_name):
-            prompt_entry = self.registry.get_prompt(prompt_name)
+            prompt_entry = self._combined_prompts_map().get(prompt_name)
             if prompt_entry is None:
                 msg = f"Prompt not found: {prompt_name}"
                 raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message=msg))
@@ -1950,28 +2077,62 @@ class MCPCore:
                     "description": prompt_entry.description,
                     "messages": messages,
                 },
+                context=context,
             )
 
     async def _handle_skills_list(self, params: Any = None, context: Any = None) -> dict[str, Any]:
-        """List discovered skills from the configured skill catalog."""
+        """List discovered skills from the configured skill catalog with filtering and pagination."""
         if self.skill_catalog is None:
-            return self._with_meta("skills/list", {"skills": []}, cacheable=True)
-        skills = self.skill_catalog.list_skills()
-        return self._with_meta(
-            "skills/list",
-            {
-                "skills": [
-                    {
-                        "name": s.name,
-                        "description": s.description,
-                        "files": sorted(s.files.keys()),
-                        "frontmatter": s.frontmatter,
-                    }
-                    for s in skills
-                ]
-            },
-            cacheable=True,
-        )
+            return self._with_meta("skills/list", {"skills": []}, cacheable=True, context=context)
+
+        cursor: str | None = None
+        parsed_tags: list[str] | None = None
+        parsed_query: str | None = None
+        if isinstance(params, Mapping):
+            raw_cursor = params.get("cursor")
+            cursor = str(raw_cursor) if raw_cursor is not None else None
+            raw_tags = params.get("tags")
+            if raw_tags is not None:
+                if isinstance(raw_tags, str):
+                    parsed_tags = [raw_tags]
+                elif isinstance(raw_tags, Sequence) and not isinstance(raw_tags, bytes):
+                    parsed_tags = [str(t) for t in raw_tags]
+                else:
+                    raise JSONRPCErrorException(
+                        JSONRPCError(code=INVALID_PARAMS, message="Invalid 'tags' parameter in skills/list")
+                    )
+            raw_query = params.get("query")
+            if raw_query is not None:
+                if not isinstance(raw_query, str):
+                    raise JSONRPCErrorException(
+                        JSONRPCError(code=INVALID_PARAMS, message="Invalid 'query' parameter in skills/list")
+                    )
+                parsed_query = raw_query
+
+        skills = self.skill_catalog.list_skills(tags=parsed_tags, query=parsed_query)
+        page = paginate_sequence(skills, cursor=cursor, page_size=50)
+        skill_items: list[dict[str, Any]] = []
+        for s in page.items:
+            entry: dict[str, Any] = {
+                "name": s.name,
+                "description": s.description,
+                "files": sorted(s.files.keys()),
+                "frontmatter": s.frontmatter,
+            }
+            if s.title:
+                entry["title"] = s.title
+            if s.tags:
+                entry["tags"] = list(s.tags)
+            if s.icons:
+                entry["icons"] = [icon.to_mcp_dict() for icon in s.icons]
+            if s.meta:
+                entry["_meta"] = dict(s.meta)
+            skill_items.append(entry)
+
+        payload: dict[str, Any] = {"skills": skill_items}
+        if page.next_cursor is not None:
+            payload["nextCursor"] = page.next_cursor
+        return self._with_meta("skills/list", payload, cacheable=True, context=context)
 
     async def _handle_skills_get(self, params: Any = None, context: Any = None) -> dict[str, Any]:
         """Retrieve complete skill package details by name or uri."""
@@ -1992,18 +2153,22 @@ class MCPCore:
         files_summary = {
             k: {"digest": f.digest, "sizeBytes": f.size_bytes, "mimeType": f.mime_type} for k, f in skill.files.items()
         }
-        return self._with_meta(
-            "skills/get",
-            {
-                "skill": {
-                    "name": skill.name,
-                    "description": skill.description,
-                    "body": skill.body,
-                    "files": files_summary,
-                    "frontmatter": skill.frontmatter,
-                }
-            },
-        )
+        skill_payload: dict[str, Any] = {
+            "name": skill.name,
+            "description": skill.description,
+            "body": skill.body,
+            "files": files_summary,
+            "frontmatter": skill.frontmatter,
+        }
+        if skill.title:
+            skill_payload["title"] = skill.title
+        if skill.tags:
+            skill_payload["tags"] = list(skill.tags)
+        if skill.icons:
+            skill_payload["icons"] = [icon.to_mcp_dict() for icon in skill.icons]
+        if skill.meta:
+            skill_payload["_meta"] = dict(skill.meta)
+        return self._with_meta("skills/get", {"skill": skill_payload}, context=context)
 
     async def _handle_resources_directory_read(self, params: Any = None, context: Any = None) -> dict[str, Any]:
         """Read directory listing for a skill package URI."""
@@ -2011,10 +2176,13 @@ class MCPCore:
             msg = "Missing required 'uri' in resources/directory/read parameters"
             raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message=msg))
         if self.skill_catalog is None:
-            return self._with_meta("resources/directory/read", {"files": []})
+            return self._with_meta("resources/directory/read", {"files": []}, context=context)
         uri = str(params["uri"])
-        files = self.skill_catalog.read_directory(uri)
-        return self._with_meta("resources/directory/read", {"files": files})
+        try:
+            files = self.skill_catalog.read_directory(uri)
+        except SkillAccessError as exc:
+            raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message=str(exc))) from exc
+        return self._with_meta("resources/directory/read", {"files": files}, context=context)
 
     def _caller_owner(self, context: Any) -> str | None:
         if context is not None and getattr(context, "identity", None) is not None:

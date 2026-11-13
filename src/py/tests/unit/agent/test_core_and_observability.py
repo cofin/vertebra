@@ -65,6 +65,8 @@ from vertebra.agent.core.sse import (
     SseStreamBroker,
     StreamLimitExceededError,
 )
+from vertebra.agent.mcp.controllers import mcp_resource, mcp_tool, resource
+from vertebra.agent.mcp.models import McpIcon
 from vertebra.agent.telemetry import (
     AgentTelemetryRecorder,
 )
@@ -945,3 +947,78 @@ async def test_sse_broker_open_stream_replay_keepalive_limits_and_cleanup() -> N
         await anext(second)
     await second.aclose()
     assert broker.owner_stream_count("owner-a") == 0
+
+
+def test_ui_metadata_models_and_decorators() -> None:
+    """McpIcon serialization and SEP-1865 UI decorator fields merge cleanly into ToolSpec and resource descriptors."""
+    full_icon = McpIcon(src="https://cdn.example/icon.svg", mimeType="image/svg+xml", sizes=("32x32", "any"))
+    assert full_icon.to_mcp_dict() == {
+        "src": "https://cdn.example/icon.svg",
+        "mimeType": "image/svg+xml",
+        "sizes": ["32x32", "any"],
+    }
+    assert McpIcon("https://cdn.example/minimal.png").to_mcp_dict() == {"src": "https://cdn.example/minimal.png"}
+
+    @mcp_tool(
+        name="dash_action",
+        meta={"custom": "v1"},
+        ui_resource_uri="ui://app/dashboard.html",
+        ui_visibility=("model", "app"),
+    )
+    def dash_action(item_id: str) -> str:
+        return item_id
+
+    dash_tool = Tool(dash_action)
+    assert dash_tool.spec.meta == {
+        "custom": "v1",
+        "ui": {"resourceUri": "ui://app/dashboard.html", "visibility": ["model", "app"]},
+    }
+
+    @mcp_tool(name="no_vis", ui_resource_uri="ui://app/no-vis.html", ui_visibility=[])
+    def no_vis() -> str:
+        return "ok"
+
+    assert Tool(no_vis).spec.meta == {"ui": {"resourceUri": "ui://app/no-vis.html"}}
+
+    @tool(name="direct_meta", meta={"trace": True})
+    def direct_meta() -> str:
+        return "ok"
+
+    assert direct_meta.spec.meta == {"trace": True}
+
+    @mcp_resource(
+        "ui://app/dashboard.html",
+        title="Dashboard",
+        mime_type="text/html;profile=mcp-app",
+        icons=[full_icon],
+        meta={"ui": {"prefersBorder": True}},
+    )
+    def read_dash() -> str:
+        return "<div/>"
+
+    @resource(
+        "ui://app/item/{item_id}",
+        title="Item",
+        mime_type="text/html;profile=mcp-app",
+        icons=[{"src": "https://cdn.example/item.png", "sizes": ("16x16",)}],
+        meta={"x": 2},
+    )
+    def read_item(item_id: str) -> str:
+        return item_id
+
+    dash_meta = cast(Any, read_dash)._mcp_resource
+    assert dash_meta["title"] == "Dashboard"
+    assert dash_meta["icons"] == (full_icon,)
+    assert dash_meta["meta"] == {"ui": {"prefersBorder": True}}
+
+    item_meta = cast(Any, read_item)._mcp_resource
+    assert item_meta["title"] == "Item"
+    assert item_meta["icons"] == (McpIcon(src="https://cdn.example/item.png", sizes=("16x16",)),)
+    assert item_meta["meta"] == {"x": 2}
+
+
+@pytest.mark.parametrize("bad_visibility", [["robot"], ["model", "robot"], "app"])
+def test_mcp_tool_rejects_invalid_ui_visibility(bad_visibility: Any) -> None:
+    """Invalid SEP-1865 ui_visibility tokens raise ValueError at decoration time."""
+    with pytest.raises(ValueError, match="ui_visibility"):
+        mcp_tool(ui_visibility=bad_visibility)

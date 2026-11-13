@@ -5,7 +5,7 @@ protocol version constants, and server configurations across MCP 2026-07-28 and
 legacy Streamable HTTP protocol revisions.
 """
 
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Literal
 
 import msgspec
@@ -23,13 +23,17 @@ __all__ = [
     "MCP_LOG_LEVELS",
     "MCP_PROTOCOL_VERSION",
     "SESSION_CAPACITY_EXHAUSTED",
+    "SKILLS_EXTENSION",
     "SUPPORTED_PROTOCOL_VERSIONS",
+    "UI_EXTENSION",
+    "UI_MIME_TYPE",
     "UNSUPPORTED_PROTOCOL_VERSION",
     "BlobContent",
     "ContentBlock",
     "MCPConfig",
     "McpHttpRequest",
     "McpHttpResponse",
+    "McpIcon",
     "McpLogLevel",
     "NegotiatedProtocol",
     "PromptArgument",
@@ -40,12 +44,16 @@ __all__ = [
     "ResourceTemplateEntry",
     "TextContent",
     "ToolCallOutput",
+    "coerce_mcp_icons",
 ]
 
 MCP_PROTOCOL_VERSION: str = "2026-07-28"
 LEGACY_PROTOCOL_VERSIONS: tuple[str, ...] = ("2025-11-25", "2025-06-18", "2025-03-26")
 SUPPORTED_PROTOCOL_VERSIONS: tuple[str, ...] = (MCP_PROTOCOL_VERSION, *LEGACY_PROTOCOL_VERSIONS)
 MCP_FALLBACK_SESSION_VERSION: str = "2025-11-25"
+SKILLS_EXTENSION: str = "io.modelcontextprotocol/skills"
+UI_EXTENSION: str = "io.modelcontextprotocol/ui"
+UI_MIME_TYPE: str = "text/html;profile=mcp-app"
 LEGACY_ONLY_METHODS: frozenset[str] = frozenset(
     {
         "initialize",
@@ -147,6 +155,10 @@ class MCPConfig(FrozenBaseStruct, frozen=True, kw_only=True):
     """Maximum number of active resource URI subscriptions permitted per session."""
     subscription_authorizer: Callable[..., Any] | None = None
     """Optional sync or async callable authorizing resource subscription requests."""
+    ui_mime_types: tuple[str, ...] = (UI_MIME_TYPE,)
+    """Allowed MIME types for SEP-1865 ``ui://`` app resources; empty disables the UI extension."""
+    hide_app_only_tools: bool = True
+    """Hide app-only tools from ``tools/list`` when caller capabilities lack the UI extension."""
 
     def __post_init__(self) -> None:
         if self.trust_proxy_identity and self.identity_source is None:
@@ -169,6 +181,9 @@ class MCPConfig(FrozenBaseStruct, frozen=True, kw_only=True):
             raise ValueError("MCPConfig.max_subscriptions_per_session must be non-negative")
         if self.subscription_authorizer is not None and not callable(self.subscription_authorizer):
             raise TypeError("MCPConfig.subscription_authorizer must be callable")
+        for mime in self.ui_mime_types:
+            if not isinstance(mime, str) or not mime.strip():
+                raise ValueError("MCPConfig.ui_mime_types entries must be non-empty strings")
 
 
 class McpHttpRequest(FrozenBaseStruct, frozen=True, kw_only=True):
@@ -246,6 +261,48 @@ class ToolCallOutput(FrozenBaseStruct, frozen=True, kw_only=True):
     """Whether the tool execution resulted in an application-level error."""
 
 
+class McpIcon(FrozenBaseStruct, frozen=True, cache_hash=True):
+    """SEP-1865 / MCP icon metadata descriptor for resources, templates, and skills."""
+
+    src: str
+    """Icon source URL or data URI."""
+    mimeType: str | None = None
+    """Optional IANA media type of the icon asset."""
+    sizes: tuple[str, ...] = ()
+    """Optional size specifications such as ``("32x32", "any")``."""
+
+    def to_mcp_dict(self) -> dict[str, Any]:
+        """Serialize this icon into its wire MCP dictionary representation."""
+        out: dict[str, Any] = {"src": self.src}
+        if self.mimeType is not None:
+            out["mimeType"] = self.mimeType
+        if self.sizes:
+            out["sizes"] = list(self.sizes)
+        return out
+
+
+def coerce_mcp_icons(icons: Sequence[McpIcon | Mapping[str, Any]] | None) -> tuple[McpIcon, ...]:
+    """Normalize a sequence of ``McpIcon`` objects or mappings into a canonical tuple."""
+    if not icons:
+        return ()
+    resolved: list[McpIcon] = []
+    for item in icons:
+        if isinstance(item, McpIcon):
+            resolved.append(item)
+        elif isinstance(item, Mapping):
+            src = item.get("src")
+            if not isinstance(src, str) or not src:
+                raise ValueError("McpIcon mapping requires a non-empty 'src' string")
+            raw_mime = item.get("mimeType")
+            mime = str(raw_mime) if raw_mime is not None else None
+            raw_sizes = item.get("sizes") or ()
+            sizes = (raw_sizes,) if isinstance(raw_sizes, str) else tuple(str(sz) for sz in raw_sizes)
+            resolved.append(McpIcon(src=src, mimeType=mime, sizes=sizes))
+        else:
+            raise TypeError(f"Expected McpIcon or Mapping, got {type(item).__name__}")
+    return tuple(resolved)
+
+
 class ResourceEntry(FrozenBaseStruct, frozen=True, kw_only=True):
     """Static resource descriptor advertised via resources/list."""
 
@@ -253,10 +310,16 @@ class ResourceEntry(FrozenBaseStruct, frozen=True, kw_only=True):
     """Canonical URI identifying the resource."""
     name: str
     """Human-readable resource title."""
+    title: str | None = None
+    """Optional display title for SEP-1865 UI and client presentation."""
     description: str = ""
     """Summary describing the resource contents and usage."""
     mimeType: str = "text/plain"
     """IANA media type returned when reading the resource."""
+    icons: tuple[McpIcon, ...] = ()
+    """Optional icons advertised alongside this resource."""
+    meta: dict[str, Any] | None = None
+    """Optional ``_meta`` extension payload (for example SEP-1865 UI settings)."""
     reader: Callable[..., Any] | None = None
     """Sync or async callable invoked to read the resource payload."""
 
@@ -268,10 +331,16 @@ class ResourceTemplateEntry(FrozenBaseStruct, frozen=True, kw_only=True):
     """RFC 6570 URI template with `{param}` placeholders."""
     name: str
     """Human-readable template name."""
+    title: str | None = None
+    """Optional display title for SEP-1865 UI and client presentation."""
     description: str = ""
     """Description of the parameterized resource family."""
     mimeType: str = "text/plain"
     """Default IANA media type of resolved resources."""
+    icons: tuple[McpIcon, ...] = ()
+    """Optional icons advertised alongside this resource template."""
+    meta: dict[str, Any] | None = None
+    """Optional ``_meta`` extension payload."""
     reader: Callable[..., Any] | None = None
     """Sync or async callable receiving extracted URI template parameters."""
 
