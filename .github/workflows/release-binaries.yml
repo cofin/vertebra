@@ -22,6 +22,10 @@ jobs:
             os: ubuntu-latest
             bin_src: target/release/vertebra-server
             bin_name: vertebra-server-linux-x64
+          - target: linux-arm64
+            os: ubuntu-24.04-arm
+            bin_src: target/release/vertebra-server
+            bin_name: vertebra-server-linux-arm64
           - target: darwin-arm64
             os: macos-14
             bin_src: target/release/vertebra-server

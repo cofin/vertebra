@@ -6,10 +6,12 @@ import re
 import subprocess
 import sys
 import tomllib
+import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import yaml
 from click.testing import CliRunner
 from sqlalchemy.engine.interfaces import Dialect
 from tools.pgo import python_pgo as tools_python_pgo
@@ -42,7 +44,9 @@ from tools.pgo.rust_pgo import (
     validate_profdata,
 )
 from tools.scripts import build_server_binary as build_server_binary_mod
+from tools.scripts import smoke_vtb_run as smoke_vtb_run_mod
 from tools.scripts.build_server_binary import ServerBinaryBuilder, ServerBinaryTarget
+from tools.scripts.smoke_vtb_run import SmokeScenario, VtbRunSmoke
 
 import vertebra.build.packaging as packaging_mod
 from vertebra.agent.mcp.skills import FilesystemSkillSource, MCPSkillsConfig, SkillCatalog
@@ -1309,3 +1313,132 @@ def test_standalone_builder_include_agent_skills_staging_and_refusal(
     env["XDG_CACHE_HOME"] = str(tmp_path / "onefile_cache")
     proc = subprocess.run([str(onefile_bin)], cwd=unrelated_cwd, env=env, capture_output=True, text=True, check=False)
     assert proc.returncode == 0, proc.stderr
+
+
+def test_smoke_vtb_run_scenarios_wheel_inspection_and_early_exit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify SmokeScenario matrix, wheel binary/libpython checks, sample app generation, and early-exit errors."""
+    linux_scenarios = VtbRunSmoke.default_scenarios(platform="linux")
+    assert [item.name for item in linux_scenarios] == [
+        "embedded_unary",
+        "progressive_sse",
+        "shm_workers",
+        "worker_only_healthz",
+    ]
+    win_scenarios = VtbRunSmoke.default_scenarios(platform="win32")
+    assert [item.name for item in win_scenarios] == [
+        "embedded_unary",
+        "progressive_sse",
+        "worker_only_healthz",
+    ]
+
+    clean_whl = tmp_path / "vertebra_core-0.3.0-cp312-cp312-manylinux_x86_64.whl"
+    with zipfile.ZipFile(clean_whl, "w") as zf:
+        zf.writestr("vertebra/__init__.py", "")
+        zf.writestr("vertebra/bin/vertebra-server", b"ELF")
+    assert VtbRunSmoke.verify_wheel_archive(clean_whl, platform="linux") == ["vertebra/bin/vertebra-server"]
+
+    missing_bin_whl = tmp_path / "missing_bin.whl"
+    with zipfile.ZipFile(missing_bin_whl, "w") as zf:
+        zf.writestr("vertebra/__init__.py", "")
+    with pytest.raises(ValueError, match="missing packaged server binary"):
+        VtbRunSmoke.verify_wheel_archive(missing_bin_whl, platform="linux")
+
+    bundled_libpython_whl = tmp_path / "bundled_libpython.whl"
+    with zipfile.ZipFile(bundled_libpython_whl, "w") as zf:
+        zf.writestr("vertebra/bin/vertebra-server", b"ELF")
+        zf.writestr("vertebra_core.libs/libpython3.12.so.1.0", b"SO")
+    with pytest.raises(ValueError, match="unexpectedly bundled libpython"):
+        VtbRunSmoke.verify_wheel_archive(bundled_libpython_whl, platform="linux")
+
+    smoke = VtbRunSmoke(vtb_executable=tmp_path / "vtb", workdir=tmp_path / "app")
+    app_file = smoke.write_sample_app()
+    assert app_file.is_file()
+    assert "asgi_sse_app" in app_file.read_text(encoding="utf-8")
+
+    class _ExitedProc:
+        returncode = 2
+
+        def poll(self) -> int:
+            return self.returncode
+
+        def communicate(self, timeout: float | None = None) -> tuple[str, str]:
+            _ = timeout
+            return "boot output", "missing shared libpython"
+
+    monkeypatch.setattr(smoke_vtb_run_mod.subprocess, "Popen", lambda *_a, **_kw: _ExitedProc())
+    scenario = SmokeScenario(name="embedded_unary", args=("run", "smoke_app:app"), request_path="/health")
+    with pytest.raises(RuntimeError, match="missing shared libpython"):
+        smoke.run_scenario(scenario)
+
+    empty_dir = tmp_path / "empty_wheelhouse"
+    empty_dir.mkdir()
+    with pytest.raises(FileNotFoundError, match="found 0"):
+        smoke_vtb_run_mod.main(["--vtb", str(tmp_path / "vtb"), "--wheel-dir", str(empty_dir), "--verify-wheel-only"])
+
+    multi_dir = tmp_path / "multi_wheelhouse"
+    multi_dir.mkdir()
+    for tag in ("cp312-cp312", "cp313-cp313", "cp314-cp314", "cp314t-cp314t", "cp315-cp315", "cp315t-cp315t"):
+        whl = multi_dir / f"vertebra_core-0.3.0-{tag}-manylinux_x86_64.whl"
+        with zipfile.ZipFile(whl, "w") as zf:
+            zf.writestr("vertebra/__init__.py", "")
+            zf.writestr("vertebra/bin/vertebra-server", b"ELF")
+    assert (
+        smoke_vtb_run_mod.main(["--vtb", str(tmp_path / "vtb"), "--wheel-dir", str(multi_dir), "--verify-wheel-only"])
+        == 0
+    )
+
+    bad_extra_whl = multi_dir / "vertebra_core-0.3.0-cp315t-cp315t-manylinux_x86_64.whl"
+    with zipfile.ZipFile(bad_extra_whl, "w") as zf:
+        zf.writestr("vertebra/bin/vertebra-server", b"ELF")
+        zf.writestr("vertebra_core.libs/libpython3.15t.so.1.0", b"SO")
+    with pytest.raises(ValueError, match="unexpectedly bundled libpython"):
+        smoke_vtb_run_mod.main(["--vtb", str(tmp_path / "vtb"), "--wheel-dir", str(multi_dir), "--verify-wheel-only"])
+
+
+def test_makefile_and_ci_release_workflows_wire_core_wheel_smoke_and_arm64() -> None:
+    """Verify Makefile core-wheel-check, PR core-wheel-smoke, cibuildwheel hooks, and release-binaries linux-arm64."""
+    repo_root = Path(__file__).resolve().parents[5]
+    makefile_text = (repo_root / "Makefile").read_text(encoding="utf-8")
+    assert ".PHONY: core-wheel-check" in makefile_text
+    assert "build_server_binary.py build" in makefile_text
+    assert "smoke_vtb_run.py" in makefile_text
+    assert "/tmp/vtb-core-wheel" in makefile_text
+    assert "/tmp/vtb-core-smoke-venv" in makefile_text
+
+    ci_doc = yaml.safe_load((repo_root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8"))
+    ci_smoke = ci_doc["jobs"]["core-wheel-smoke"]
+    assert ci_smoke["runs-on"] == "ubuntu-latest"
+    ci_run_cmds = "\n".join(str(step.get("run", "")) for step in ci_smoke["steps"])
+    assert "make core-wheel-check" in ci_run_cmds
+
+    rel_doc = yaml.safe_load((repo_root / ".github" / "workflows" / "release.yaml").read_text(encoding="utf-8"))
+    build_steps = rel_doc["jobs"]["build_wheels"]["steps"]
+    core_step = next(step for step in build_steps if step.get("name") == "Build core wheel")
+    companion_step = next(step for step in build_steps if step.get("name") == "Build wheels")
+    assert "matrix.package.name == 'core'" in core_step["if"]
+    assert "build_server_binary.py build" in core_step["env"]["CIBW_BEFORE_BUILD"]
+    assert "build_server_binary.py repair" in core_step["env"]["CIBW_REPAIR_WHEEL_COMMAND_LINUX"]
+    assert "build_server_binary.py repair" in core_step["env"]["CIBW_REPAIR_WHEEL_COMMAND_MACOS"]
+    assert "matrix.package.name != 'core'" in companion_step["if"]
+    assert "CIBW_BEFORE_BUILD" not in companion_step.get("env", {})
+
+    test_wheels = rel_doc["jobs"]["test_wheels"]
+    assert test_wheels["strategy"]["matrix"]["os"] == [
+        "ubuntu-latest",
+        "ubuntu-24.04-arm",
+        "macos-latest",
+        "windows-latest",
+    ]
+    tw_cmds = "\n".join(str(step.get("run", "")) for step in test_wheels["steps"])
+    assert "smoke_vtb_run.py" in tw_cmds
+
+    rel_bin_doc = yaml.safe_load(
+        (repo_root / ".github" / "workflows" / "release-binaries.yml").read_text(encoding="utf-8")
+    )
+    targets = {entry["target"]: entry for entry in rel_bin_doc["jobs"]["build"]["strategy"]["matrix"]["include"]}
+    assert "linux-arm64" in targets
+    assert targets["linux-arm64"]["os"] == "ubuntu-24.04-arm"
+    assert targets["linux-arm64"]["bin_name"] == "vertebra-server-linux-arm64"
