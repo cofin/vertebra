@@ -1,5 +1,9 @@
 # Bundle Activity Log
 
+## [2026-11-13T02:21:00Z] chapter-checkpoint | storage-integrity-and-streaming ch01-integrity-receipts-and-verified-reads
+
+- Completed `ch01-integrity-receipts-and-verified-reads` (`t01`–`t03`) at `879eb46f` on `feat/storage-integrity-and-streaming`: added CRC32C, MD5, and SHA-256 receipts, abort-before-publish expected-digest checks, `get_verified`/`get_file_verified`/`get_stream_verified`, and `vertebra.typing.IntegrityError` + `vertebra.storage` re-exports (`47` Rust tests, `485` Python tests, `stubtest` and `mypy` clean).
+
 ## [2026-11-13T02:55:00Z] chapter-complete | mcp-protocol-completeness ch01-guards-params-and-alias-cleanup
 
 - Closed `ch01-guards-params-and-alias-cleanup` at `1f269a58` (`179 passed`, `mypy` and `ruff` clean, non-destructive multi-call confirmation gating, strict nested JSON `Mcp-Param-*` type comparison, and `ConfirmationCapacityError` package export).

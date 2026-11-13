@@ -5,7 +5,7 @@ chapter_id: ch01-integrity-receipts-and-verified-reads
 title: "Chapter 01: Content-Integrity Receipts, Verified Reads, and Storage IntegrityError"
 description: "Implements CRC32C, MD5, and SHA-256 content-integrity receipts on ObjectMeta and PutResult, abort-before-publish digest validation, verified streaming reads, and vertebra.typing.IntegrityError."
 status: stable
-state: planned
+state: active
 planning_status: complete
 planning_quality: standard
 planning_degraded_reason: null
@@ -125,14 +125,15 @@ User documentation and OKF updates for integrity receipts, verified reads, and `
 
 ## 5. Implementation Plan
 
-- [ ] [t01-rust-write-receipts-and-verified-reads.md](tasks/t01-rust-write-receipts-and-verified-reads.md) — Add CRC32C/MD5/SHA-256 receipts, expected-digest abort-before-publish, and `get_verified`/`get_file_verified`/`get_stream_verified` in `vertebra-storage`.
-- [ ] [t02-pyo3-integrity-bindings-and-stubs.md](tasks/t02-pyo3-integrity-bindings-and-stubs.md) — Define `IntegrityError` in `_typing.py`, map `StorageError::Integrity` and receipt/checksum kwargs in `lib.rs`, and update `_storage.pyi`.
-- [ ] [t03-typing-and-storage-facade-receipts.md](tasks/t03-typing-and-storage-facade-receipts.md) — Re-export storage `IntegrityError` in `src/py/vertebra/typing.py` and `vertebra.storage.__all__`, and wire receipts and verified reads across `SyncObjectStore` and `AsyncObjectStore`.
+- [x] [879eb46f] [t01-rust-write-receipts-and-verified-reads.md](tasks/t01-rust-write-receipts-and-verified-reads.md) — Add CRC32C/MD5/SHA-256 receipts, expected-digest abort-before-publish, and `get_verified`/`get_file_verified`/`get_stream_verified` in `vertebra-storage`.
+- [x] [879eb46f] [t02-pyo3-integrity-bindings-and-stubs.md](tasks/t02-pyo3-integrity-bindings-and-stubs.md) — Define `IntegrityError` in `_typing.py`, map `StorageError::Integrity` and receipt/checksum kwargs in `lib.rs`, and update `_storage.pyi`.
+- [x] [879eb46f] [t03-typing-and-storage-facade-receipts.md](tasks/t03-typing-and-storage-facade-receipts.md) — Re-export storage `IntegrityError` in `src/py/vertebra/typing.py` and `vertebra.storage.__all__`, and wire receipts and verified reads across `SyncObjectStore` and `AsyncObjectStore`.
 
 ## 6. Current State & Remaining Plan Snapshot
 
+- **Implemented (`3/3` tasks at `879eb46f`, `47` Rust + `485` Python tests passed)**, awaiting Zero-Context Chapter Review closeout stamp.
 - **Fast Chapter Gate (`< 35s`)**:
-  `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-storage && cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-storage --all-targets -- -D warnings && uv run --no-sync maturin develop --manifest-path src/rs/vertebra-storage/Cargo.toml --uv && uv run --no-sync python -m mypy.stubtest vertebra._storage && uv run --no-sync ruff check src/py/vertebra/_typing.py src/py/vertebra/typing.py src/py/vertebra/storage && uv run --no-sync mypy src/py/vertebra/typing.py src/py/vertebra/storage && uv run --no-sync pytest src/py/tests/unit/framework/test_typing.py src/py/tests/unit/storage/test_storage_store.py -q`
+  `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-storage && cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-storage --all-targets -- -D warnings && UV_CACHE_DIR=/tmp/uv-cache uv run --no-sync maturin develop --manifest-path src/rs/vertebra-storage/Cargo.toml --uv && uv run --no-sync python -m mypy.stubtest vertebra._storage && uv run --no-sync ruff check src/py/vertebra/_typing.py src/py/vertebra/typing.py src/py/vertebra/storage && uv run --no-sync mypy src/py/vertebra/typing.py src/py/vertebra/storage && uv run --no-sync pytest src/py/tests/unit/framework/test_typing.py src/py/tests/unit/storage/test_storage_store.py -q`
 
 [^store-rs]: `src/rs/vertebra-storage/src/store.rs::ObjectStoreEngine` — `ObjectStoreEngine` `put_opts`, `create_multipart`, `put_file`, `get`, `get_file`, and `get_stream`.
 [^session-rs]: `src/rs/vertebra-storage/src/store.rs::MultipartUploadSession` — `MultipartUploadSession` `write_chunk`, `complete_with_meta`, and `abort`.

@@ -6,7 +6,13 @@ chapter_id: ch01-integrity-receipts-and-verified-reads
 title: "Add PyO3 Integrity Bindings, _typing.IntegrityError, and _storage.pyi Stubs"
 description: "Define IntegrityError in _typing.py, map StorageError::Integrity and checksum/receipt attributes in vertebra-storage/src/lib.rs, and update _storage.pyi."
 status: stable
-state: pending
+state: completed
+commit: 879eb46f
+last_verified_commit: 879eb46f
+last_verified_at: "2026-11-13T02:21:00Z"
+verification_evidence: "cargo test -p vertebra-storage (47 passed) + clippy + stubtest + mypy + pytest (485 passed, 1 skipped) + review-check (exit 0)"
+claimed_by: null
+claimed_at: null
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -68,13 +74,13 @@ Define `IntegrityError(VertebraError, OSError)` in `src/py/vertebra/_typing.py`,
 ## Verification
 
 ```bash
-uv run --no-sync maturin develop --manifest-path src/rs/vertebra-storage/Cargo.toml --uv && uv run --no-sync python -m mypy.stubtest vertebra._storage && uv run --no-sync pytest src/py/tests/unit/framework/test_typing.py -q
+UV_CACHE_DIR=/tmp/uv-cache uv run --no-sync maturin develop --manifest-path src/rs/vertebra-storage/Cargo.toml --uv && uv run --no-sync python -m mypy.stubtest vertebra._storage && uv run --no-sync pytest src/py/tests/unit/framework/test_typing.py -q
 ```
 
 ## Acceptance Criteria
 
-- [ ] `_storage` bindings forward checksum/expected-digest kwargs, expose `sha256`/`crc32c`/`md5` on `PyObjectMeta`, map `StorageError::Integrity` to `IntegrityError`, and pass `mypy.stubtest vertebra._storage` (`R3`).
-- [ ] Zero regressions in `test_typing.py` and Clippy.
+- [x] `_storage` bindings forward checksum/expected-digest kwargs, expose `sha256`/`crc32c`/`md5` on `PyObjectMeta`, map `StorageError::Integrity` to `IntegrityError`, and pass `mypy.stubtest vertebra._storage` (`R3`).
+- [x] Zero regressions in `test_typing.py` and Clippy.
 
 [^lib-rs]: `src/rs/vertebra-storage/src/lib.rs::to_py_err` — `make_precondition_err`, `to_py_err`, `PyObjectMeta`, and sync/async store bindings.
 [^py-private-typing]: `src/py/vertebra/_typing.py::PreconditionError` — Storage exception hierarchy in `vertebra._typing`.
