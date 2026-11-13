@@ -10,7 +10,7 @@ planning_status: complete
 planning_quality: standard
 planning_degraded_reason: null
 plan_commit: 18baadcd
-last_reviewed_commit: bfa2dad7
+last_reviewed_commit: 9ec32183
 updated_at: "2026-11-13T02:55:00Z"
 generated:
   by: flow-plan
@@ -18,7 +18,7 @@ generated:
 verified:
   - by: agent:code-reviewer
     at: "2026-11-13T02:55:00Z"
-    commit: bfa2dad7
+    commit: 9ec32183
 tags:
   - rust
   - postgres
@@ -67,12 +67,12 @@ OKF updates are consolidated in `ch09` so `postgres-native-driver.md` and `postg
 
 ## 5. Implementation Plan
 
-- [x] [7c4a3996] [t01-replication-supervisor-worker-and-fencing.md](tasks/t01-replication-supervisor-worker-and-fencing.md) — Add ReplicationSupervisor worker loop, generation-fenced ReplicationEventDelivery leases, monotonic acknowledge(generation, commit_end_lsn), and synchronous Drop cancellation.
-- [x] [7c4a3996] [t02-verified-resume-and-reconnect-policy.md](tasks/t02-verified-resume-and-reconnect-policy.md) — Verify server/database/slot/publication identity across reconnects via connect_logical_verified, enforce confirmed_flush_lsn floors, and classify transient vs permanent errors.
+- [x] [ecf184e4] [t01-replication-supervisor-worker-and-fencing.md](tasks/t01-replication-supervisor-worker-and-fencing.md) — Add ReplicationSupervisor worker loop, generation-fenced ReplicationEventDelivery leases, monotonic acknowledge(generation, commit_end_lsn), and synchronous Drop cancellation.
+- [x] [ecf184e4] [t02-verified-resume-and-reconnect-policy.md](tasks/t02-verified-resume-and-reconnect-policy.md) — Verify server/database/slot/publication identity across reconnects via connect_logical_verified, enforce confirmed_flush_lsn floors, and classify transient vs permanent errors.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-Completed and zero-context dual-reviewed at `bfa2dad7` (`2/2` tasks, `57` wire tests + Clippy clean). Next chapter: `ch02-replication-python-bridge`.
+Completed and zero-context dual-reviewed at `9ec32183` (`2/2` tasks, `57` wire tests + Clippy clean). Next chapter: `ch02-replication-python-bridge`.
 
 ```bash
 PYO3_PYTHON="$(pwd)/.venv/bin/python" PYTHONPATH="$(pwd)/src/py:$(pwd)/.venv/lib/python3.12/site-packages" cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --locked replication:: && PYO3_PYTHON="$(pwd)/.venv/bin/python" PYTHONPATH="$(pwd)/src/py:$(pwd)/.venv/lib/python3.12/site-packages" cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --locked --test postgres_replication_wire_tests && PYO3_PYTHON="$(pwd)/.venv/bin/python" cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-postgres --all-targets -- -D warnings

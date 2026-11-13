@@ -7,8 +7,8 @@ title: "Wire AsyncPostgresClient.replication_identity/open_replication and 14-cl
 description: "Add replication_identity and open_replication on AsyncPostgresClient and finalize _postgres.pyi for stubtest parity."
 status: stable
 state: completed
-commit: a37cac43
-last_verified_commit: a37cac43
+commit: 355ff6e2
+last_verified_commit: 355ff6e2
 last_verified_at: "2026-11-13T04:53:53Z"
 verification_evidence: "stubtest vertebra._postgres + ruff + mypy + pytest (110 passed)"
 claimed_by: null

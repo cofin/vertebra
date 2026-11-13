@@ -7,9 +7,9 @@ title: "Enable PG14-18 conformance matrix and VERTEBRA_CONFORMANCE_POSTGRES_REQU
 description: "Set supports_pipeline=True and pending_flow_id=None for postgres in test_driver_conformance.py and enforce zero-skip terminal gating."
 status: stable
 state: completed
-commit: cc5e1533
+commit: 969540de
 last_verified_at: "2026-11-13T21:00:57Z"
-last_verified_commit: cc5e1533
+last_verified_commit: 969540de
 claimed_by: null
 claimed_at: null
 planning_quality: standard

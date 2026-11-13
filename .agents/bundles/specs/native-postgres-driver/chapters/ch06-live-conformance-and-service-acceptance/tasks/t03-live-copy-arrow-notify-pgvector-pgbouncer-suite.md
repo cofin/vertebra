@@ -7,9 +7,9 @@ title: "Create live PGCOPY, VTBARROW, LISTEN/NOTIFY, pgvector, and PgBouncer sui
 description: "Add test_postgres_native_features_live.py covering binary COPY, Arrow SHM, notifications, pgvector, and PgBouncer transaction/statement modes."
 status: stable
 state: completed
-commit: cc5e1533
+commit: 969540de
 last_verified_at: "2026-11-13T21:00:57Z"
-last_verified_commit: cc5e1533
+last_verified_commit: 969540de
 claimed_by: null
 claimed_at: null
 planning_quality: standard

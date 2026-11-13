@@ -7,8 +7,8 @@ title: "Synchronize extensions, queues, and database-driver-limitations OKF chap
 description: "Update sqlspec-alchemy-and-dialects.md, distributed-queues-and-email.md, and database-driver-limitations.md (<= 200L each) for native PostgreSQL."
 status: stable
 state: completed
-commit: 6d134bb4
-last_verified_commit: 19e9a251
+commit: c5289d56
+last_verified_commit: cffa8feb
 last_verified_at: "2026-11-13T15:43:00Z"
 verification_evidence: "review_setup.py validate + pytest test_review_setup.py clean"
 planning_quality: standard

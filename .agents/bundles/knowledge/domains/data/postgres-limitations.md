@@ -10,7 +10,7 @@ generated:
 verified:
   - by: agent:executor
     at: "2026-11-13T02:42:00Z"
-    commit: 7c4a3996
+    commit: ecf184e4
 sources:
   - id: pg-stream
     resource: src/rs/vertebra-postgres/src/replication/stream.rs::ReplicationSession

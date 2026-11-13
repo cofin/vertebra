@@ -7,8 +7,8 @@ title: "Implement options.py DSN, socket, multi-host, SSL, pooler, and cloud bri
 description: "Translate PostgreSQLConfig, libpq PG* env defaults, percent-decoded sockets, and Cloud SQL/AlloyDB settings into native client kwargs."
 status: stable
 state: completed
-commit: a2ea407d
-last_verified_commit: a2ea407d
+commit: a09818b9
+last_verified_commit: a09818b9
 last_verified_at: "2026-11-13T05:14:30Z"
 verification_evidence: "ruff + mypy (15 files) + pytest (111 passed)"
 claimed_by: null

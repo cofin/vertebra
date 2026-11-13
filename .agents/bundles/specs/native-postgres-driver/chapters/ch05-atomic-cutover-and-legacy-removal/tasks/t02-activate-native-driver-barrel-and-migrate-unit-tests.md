@@ -7,8 +7,8 @@ title: "Replace driver.py with 12-line native barrel and migrate PostgreSQL unit
 description: "Cut driver.py, __init__.py, and embeddings.py over to native PostgreSQL drivers and replace psycopg/SQLite test doubles with postgres_ports.py."
 status: stable
 state: completed
-commit: 19e9a251
-last_verified_commit: 19e9a251
+commit: cffa8feb
+last_verified_commit: cffa8feb
 last_verified_at: "2026-11-13T15:43:00Z"
 verification_evidence: "pytest test_postgres_driver.py test_pg_dataplane_and_datafusion.py test_google_embedders.py test_native_db_drivers.py + review_setup clean"
 planning_quality: standard

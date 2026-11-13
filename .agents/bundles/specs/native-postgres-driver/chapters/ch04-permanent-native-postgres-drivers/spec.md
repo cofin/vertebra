@@ -10,7 +10,7 @@ planning_status: complete
 planning_quality: standard
 planning_degraded_reason: null
 plan_commit: 18baadcd
-last_reviewed_commit: c97e037e
+last_reviewed_commit: 76ad8f3a
 updated_at: "2026-11-13T05:51:30Z"
 generated:
   by: flow-plan
@@ -18,7 +18,7 @@ generated:
 verified:
   - by: agent:code-reviewer
     at: "2026-11-13T05:51:30Z"
-    commit: c97e037e
+    commit: 76ad8f3a
 tags:
   - python
   - postgres
@@ -70,13 +70,13 @@ Public barrel activation and OKF/user docs follow in `ch05`, `ch08`, and `ch09`.
 
 ## 5. Implementation Plan
 
-- [x] [9a370dcc] [t01-permanent-sync-postgresql-driver.md](tasks/t01-permanent-sync-postgresql-driver.md) — Build SyncPostgreSQLDriver over SyncPostgresPool/SyncPostgresClient with queries, transactions/savepoints, RLS scopes, and binary COPY.
-- [x] [9a370dcc] [t02-permanent-async-postgresql-driver.md](tasks/t02-permanent-async-postgresql-driver.md) — Build native AsyncPostgreSQLDriver over AsyncPostgresPool/AsyncPostgresClient with shielded rollback and zero asyncio.to_thread.
-- [x] [9a370dcc] [t03-driver-pipelines-arrow-and-event-hooks.md](tasks/t03-driver-pipelines-arrow-and-event-hooks.md) — Connect pipeline.py, arrow.py, listen_notifications, open_replication, and EventSessionRegistry close hooks in _sync.py and _async.py.
+- [x] [bc86ed84] [t01-permanent-sync-postgresql-driver.md](tasks/t01-permanent-sync-postgresql-driver.md) — Build SyncPostgreSQLDriver over SyncPostgresPool/SyncPostgresClient with queries, transactions/savepoints, RLS scopes, and binary COPY.
+- [x] [bc86ed84] [t02-permanent-async-postgresql-driver.md](tasks/t02-permanent-async-postgresql-driver.md) — Build native AsyncPostgreSQLDriver over AsyncPostgresPool/AsyncPostgresClient with shielded rollback and zero asyncio.to_thread.
+- [x] [bc86ed84] [t03-driver-pipelines-arrow-and-event-hooks.md](tasks/t03-driver-pipelines-arrow-and-event-hooks.md) — Connect pipeline.py, arrow.py, listen_notifications, open_replication, and EventSessionRegistry close hooks in _sync.py and _async.py.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-Completed (`3/3` tasks at `9a370dcc`). Offline `< 25s` unit + Ruff + Mypy gate over `postgres_ports.py` doubles.
+Completed (`3/3` tasks at `bc86ed84`). Offline `< 25s` unit + Ruff + Mypy gate over `postgres_ports.py` doubles.
 
 ```bash
 uv run --no-sync pytest src/py/tests/unit/db/test_postgres_native_adapters.py src/py/tests/unit/db/test_postgres_native_adapter_pipeline.py src/py/tests/unit/db/test_postgres_native_adapter_arrow.py src/py/tests/unit/db/test_postgres_event_hooks.py -q && uv run --no-sync ruff check src/py/vertebra/db/adapters/postgres src/py/tests/unit/db && uv run --no-sync mypy src/py/vertebra/db/adapters/postgres

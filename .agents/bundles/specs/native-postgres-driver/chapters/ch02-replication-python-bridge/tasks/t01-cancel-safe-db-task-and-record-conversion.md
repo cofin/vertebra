@@ -7,8 +7,8 @@ title: "Add spawn_rust_db_task_with_attr_and_future and lossless Python record c
 description: "Extend vertebra-db py_async for cancel-safe lease restoration and convert ReplicationEventDelivery records to PostgresReplicationRecord on the event loop."
 status: stable
 state: completed
-commit: a37cac43
-last_verified_commit: a37cac43
+commit: 355ff6e2
+last_verified_commit: 355ff6e2
 last_verified_at: "2026-11-13T04:53:53Z"
 verification_evidence: "cargo test py_async:: (11 passed) + replication:: (2 passed) + clippy clean"
 claimed_by: null

@@ -7,7 +7,7 @@ title: "Wire pipeline(), ArrowCursor/COPY import, and dedicated event hooks on b
 description: "Connect pipeline.py, arrow.py, listen_notifications, open_replication, and EventSessionRegistry close hooks in _sync.py and _async.py."
 status: stable
 state: completed
-commit: 9a370dcc
+commit: bc86ed84
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
