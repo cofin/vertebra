@@ -5,7 +5,7 @@ chapter_id: ch03-sse-streams-and-resource-subscriptions
 title: "Chapter 03: GET SSE Streams, Notifications, and Resource Subscriptions"
 description: "Add McpHttpResponse.stream, GET /mcp SSE streams across all adapters, list/log/progress notifications, authorized resources/subscribe fan-out, and 2026-07-28 subscriptions/listen."
 status: stable
-state: active
+state: completed
 planning_status: empirical_dependent
 planning_quality: standard
 planning_degraded_reason: null
@@ -13,15 +13,15 @@ depends_on_chapters:
   - ch02-version-negotiation-and-sessions
 replan_trigger: "Confirm server-runtime-correctness ch01 progressive ASGI and native App (status, headers, AsyncIterable[bytes]) streaming before executing t02"
 plan_commit: 18baadcd
-last_reviewed_commit: null
-updated_at: "2026-11-13T05:02:00Z"
+last_reviewed_commit: 353c0d0c
+updated_at: "2026-11-13T05:03:00Z"
 generated:
   by: flow-plan
   at: "2026-11-12T23:45:00Z"
 verified:
-  - by: agent:plan-generator
-    at: "2026-11-12T23:45:00Z"
-    commit: 18baadcd
+  - by: agent:code-reviewer
+    at: "2026-11-13T05:03:00Z"
+    commit: 353c0d0c
 tags:
   - mcp
   - sse
@@ -85,7 +85,7 @@ SSE streaming, progress notifications, and resource subscriptions are documented
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Status**: `t01`–`t04` are implemented and verified at `2454dbef` (`ruff`, `mypy` across 41 files, and `251` unit tests pass).
+- **Status**: `ch03-sse-streams-and-resource-subscriptions` is completed at `2454dbef` (`sync` `353c0d0c`); all `4` chapter tasks passed `ruff`, `mypy` across 41 files, and `251` unit tests. Next frontier is [`ch04-skills-and-mcp-apps-core`](../ch04-skills-and-mcp-apps-core/spec.md).
 - **Fast Chapter Gate (`< 15s`)**: `uv run --no-sync ruff check src/py/vertebra/agent src/py/vertebra/extensions/django/mcp.py && uv run --no-sync mypy src/py/vertebra/agent src/py/vertebra/extensions/django/mcp.py && uv run --no-sync pytest src/py/tests/unit/agent/test_core_and_observability.py src/py/tests/unit/agent/test_mcp_conformance.py -q`.
 
 [^sse-broker]: `src/py/vertebra/agent/core/sse.py::SseStreamBroker` — SSE replay buffers and subscriber channels.

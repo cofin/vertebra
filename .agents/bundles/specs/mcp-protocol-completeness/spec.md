@@ -16,26 +16,26 @@ chapters:
   - ch05-framework-mounts-and-litestar-parity
   - ch06-stdio-serve-bridge-and-gcp-auth
   - ch07-docs-and-okf-sync
-current_chapter: ch03-sse-streams-and-resource-subscriptions
-current_task: "mcp-protocol-completeness:ch03:t01"
+current_chapter: ch04-skills-and-mcp-apps-core
+current_task: "mcp-protocol-completeness:ch04:t01"
 parent_prd: integration-remediation
 depends_on_flows:
   - server-runtime-correctness
   - gcp-embeddings-and-identity
 plan_revision: 3
 plan_commit: 18baadcd
-last_verified_checkpoint: 5f8fd173
-last_reviewed_chapter: ch02-version-negotiation-and-sessions
-last_reviewed_commit: d7839d5f
+last_verified_checkpoint: 2454dbef
+last_reviewed_chapter: ch03-sse-streams-and-resource-subscriptions
+last_reviewed_commit: 353c0d0c
 created_at: "2026-11-12T23:45:00Z"
-updated_at: "2026-11-13T04:43:42Z"
+updated_at: "2026-11-13T05:03:00Z"
 generated:
   by: flow-plan
   at: "2026-11-12T23:45:00Z"
 verified:
   - by: agent:code-reviewer
-    at: "2026-11-13T04:43:42Z"
-    commit: d7839d5f
+    at: "2026-11-13T05:03:00Z"
+    commit: 353c0d0c
 tags:
   - mcp
   - agent
@@ -165,15 +165,15 @@ class IapIdentitySource:
 
 - [x] [1f269a58] [ch01-guards-params-and-alias-cleanup](chapters/ch01-guards-params-and-alias-cleanup/spec.md) — Single-pass guards, `Mcp-Param-*` validation, single-use expiring confirmation tickets, and `MCPService` alias removal (`4` tasks; `< 15s` gate)
 - [x] [d7839d5f] [ch02-version-negotiation-and-sessions](chapters/ch02-version-negotiation-and-sessions/spec.md) — `SUPPORTED_PROTOCOL_VERSIONS` negotiation, `MCPSessionStore`, legacy `initialize`, `2025-03-26` batching, and `DELETE /mcp` ([#109](https://github.com/cofin/vertebra/issues/109)) (`3` tasks; `< 12s` gate)
-- [~] [ch03-sse-streams-and-resource-subscriptions](chapters/ch03-sse-streams-and-resource-subscriptions/spec.md) — `McpHttpResponse.stream`, `GET /mcp` SSE adapter writers, notifications, `resources/subscribe`, and `subscriptions/listen` ([#109](https://github.com/cofin/vertebra/issues/109), [#112](https://github.com/cofin/vertebra/issues/112)) (`4` tasks; `< 15s` gate)
-- [ ] [ch04-skills-and-mcp-apps-core](chapters/ch04-skills-and-mcp-apps-core/spec.md) — `SkillCatalog` disclosure, `io.modelcontextprotocol/skills`, and SEP-1865 `io.modelcontextprotocol/ui` models/projection ([#110](https://github.com/cofin/vertebra/issues/110), [#111](https://github.com/cofin/vertebra/issues/111)) (`4` tasks; `< 15s` gate)
+- [x] [353c0d0c] [ch03-sse-streams-and-resource-subscriptions](chapters/ch03-sse-streams-and-resource-subscriptions/spec.md) — `McpHttpResponse.stream`, `GET /mcp` SSE adapter writers, notifications, `resources/subscribe`, and `subscriptions/listen` ([#109](https://github.com/cofin/vertebra/issues/109), [#112](https://github.com/cofin/vertebra/issues/112)) (`4` tasks; `< 15s` gate)
+- [~] [ch04-skills-and-mcp-apps-core](chapters/ch04-skills-and-mcp-apps-core/spec.md) — `SkillCatalog` disclosure, `io.modelcontextprotocol/skills`, and SEP-1865 `io.modelcontextprotocol/ui` models/projection ([#110](https://github.com/cofin/vertebra/issues/110), [#111](https://github.com/cofin/vertebra/issues/111)) (`4` tasks; `< 15s` gate)
 - [ ] [ch05-framework-mounts-and-litestar-parity](chapters/ch05-framework-mounts-and-litestar-parity/spec.md) — Native/Starlette/Flask/Django skill + UI validation wiring and `litestar-mcp>=0.20.0` pin (`3` tasks; `< 15s` gate)
 - [ ] [ch06-stdio-serve-bridge-and-gcp-auth](chapters/ch06-stdio-serve-bridge-and-gcp-auth/spec.md) — Incremental stdio + `vtb ai mcp serve` discovery, dual-mode `bridge --audience` (`AsyncGcpIdTokenCache`), and `IapIdentitySource` ([#114](https://github.com/cofin/vertebra/issues/114)) (`3` tasks; `< 15s` gate)
 - [ ] [ch07-docs-and-okf-sync](chapters/ch07-docs-and-okf-sync/spec.md) — Agent/CLI docs, changelog, `mcp-and-a2a-protocol-harness.md` (`<= 200L`), and `mcp-limitations.md` sync (`4` tasks; `< 40s` gate)
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Execution Frontier**: `ch01-guards-params-and-alias-cleanup` (`4` tasks) and `ch02-version-negotiation-and-sessions` (`3` tasks) are completed (`18` open `compact` tasks remain across `ch03`–`ch07`; prior `AgentContext` propagation chapter landed in `18baadcd`).
+- **Execution Frontier**: `ch01-guards-params-and-alias-cleanup` (`4` tasks), `ch02-version-negotiation-and-sessions` (`3` tasks), and `ch03-sse-streams-and-resource-subscriptions` (`4` tasks) are completed (`14` open `compact` tasks remain across `ch04`–`ch07`; prior `AgentContext` propagation chapter landed in `18baadcd`).
 - **Cross-Flow & External Gates**: `ch02` has zero upstream blockers; `ch03:t02` consumes progressive streaming from `server-runtime-correctness` `ch01`; `ch06:t02` consumes `AsyncGcpIdTokenCache` from `gcp-embeddings-and-identity` `ch02`; `ch05:t03` is gated on `litestar-mcp>=0.20.0` on PyPI without blocking `ch06`.
 - **Full Flow Finish Gate (`/flow:finish`)**: `uv run --no-sync pytest src/py/tests/unit/agent src/py/tests/unit/cli/test_mcp_cli.py src/py/tests/unit/extensions/test_litestar_ecosystem_mcp.py -q && make lint-all && make docs && make review-check`.
 

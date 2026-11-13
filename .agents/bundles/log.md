@@ -1,5 +1,10 @@
 # Bundle Activity Log
 
+## [2026-11-13T05:03:00Z] chapter-complete | mcp-protocol-completeness ch03-sse-streams-and-resource-subscriptions
+
+- Closed `ch03-sse-streams-and-resource-subscriptions` at `2454dbef` (sync `353c0d0c`): `McpHttpResponse.stream` (`SseStreamBroker`), legacy `GET /mcp` SSE adapter writers across ASGI/Starlette/WSGI/native `App`/Litestar/Flask/Django, `list_changed` + severity-gated `MCPCore.log` + progress notifications, `resources/subscribe`, and `2026-07-28` `subscriptions/listen` (`251` unit tests, `ruff`, and `mypy` clean).
+- Advanced active frontier to `ch04-skills-and-mcp-apps-core` (`mcp-protocol-completeness:ch04:t01`; `14` tasks remain across `ch04`–`ch07`).
+
 ## [2026-11-13T04:43:42Z] chapter-complete | mcp-protocol-completeness ch02-version-negotiation-and-sessions
 
 - Closed `ch02-version-negotiation-and-sessions` at `5f8fd173` (sync `d7839d5f`): dual-mode `SUPPORTED_PROTOCOL_VERSIONS` negotiation, owner-scoped `MCPSessionStore`, legacy `initialize`/`ping`/`logging/setLevel`, `2025-03-26` JSON-RPC batching, `DELETE /mcp` termination, and unified `_server_capabilities` (`206` unit tests, `ruff`, and `mypy` clean).
