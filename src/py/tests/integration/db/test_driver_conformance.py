@@ -1811,6 +1811,34 @@ def test_live_engine_params_reject_unknown_postgres_version() -> None:
 
 
 @pytest.mark.parametrize(
+    ("cache_spec", "engines_env", "should_skip"),
+    [
+        (CACHE_ENGINE_SPECS[0], "postgres", True),
+        (CACHE_ENGINE_SPECS[1], "postgres", True),
+        (CACHE_ENGINE_SPECS[0], "redis", False),
+        (CACHE_ENGINE_SPECS[1], "postgres,valkey", False),
+    ],
+)
+def test_resolve_cache_config_honors_engine_env_filter(
+    cache_spec: CacheConformanceSpec,
+    engines_env: str,
+    should_skip: bool,
+    monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
+) -> None:
+    """Verify `_resolve_cache_config` skips non-selected cache engines before starting Docker fixtures."""
+    monkeypatch.setenv("VERTEBRA_CONFORMANCE_ENGINES", engines_env)
+    monkeypatch.setenv(cache_spec.env_dsn_vars[0], cache_spec.tcp_url)
+    if should_skip:
+        with pytest.raises(pytest.skip.Exception, match="excluded by VERTEBRA_CONFORMANCE_ENGINES"):
+            _resolve_cache_config(cache_spec, request)
+        return
+    resolved = _resolve_cache_config(cache_spec, request)
+    assert isinstance(resolved, cache_spec.config_cls)
+    assert resolved == cache_spec.config_cls.from_url(cache_spec.tcp_url)
+
+
+@pytest.mark.parametrize(
     "type_case",
     [case for case in SCALAR_TYPE_CASES if case.comparison_kind == "json"],
     ids=[case.name for case in SCALAR_TYPE_CASES if case.comparison_kind == "json"],

@@ -14,8 +14,8 @@ generated:
   at: "2026-11-04T04:33:00Z"
 verified:
   - by: agent:flow-executor
-    at: "2026-11-13T22:30:00Z"
-    commit: cb3a9fa6
+    at: "2026-11-13T22:41:00Z"
+    commit: e5943ca1
   - by: agent:flow-executor
     at: "2026-11-13T20:35:00Z"
     commit: b9429c6d
@@ -156,11 +156,11 @@ Vertebra runs verification gates across Rust (`cargo test`), Python (`pytest` + 
 | `build-docs` | `docs`, `ci`, or `workflow_dispatch` | `uv sync --frozen --no-install-project --only-group doc` + `make docs` | `ubuntu-latest` |
 | `core-wheel-smoke` | `python`, `rust`, `typescript`, `ci`, or `workflow_dispatch` | `uv sync --frozen --group build && make ts-install && make ts-build && make core-wheel-check` | `ubuntu-latest` |
 | `postgres-wheel-check` | `python`, `rust`, `ci`, or `workflow_dispatch` | `uv sync --frozen --group build && make ts-install && make ts-build && make postgres-wheel-check` | `ubuntu-latest` |
-| `postgres-conformance` | `python`, `rust`, `ci`, or `workflow_dispatch` | Zero-skip `test_driver_conformance.py -k "postgres-..."` (`VERTEBRA_CONFORMANCE_POSTGRES_REQUIRE_ZERO_SKIPS=1`), plus live replication/feature/deadline suites on PG `18` | PG `14`–`18` (`ubuntu-latest`) |
+| `postgres-conformance` | `python`, `rust`, `ci`, or `workflow_dispatch` | `test_driver_conformance.py -v` filtered by `VERTEBRA_CONFORMANCE_ENGINES=postgres`, `VERTEBRA_CONFORMANCE_POSTGRES_VERSION=<pg_version>`, and `VERTEBRA_CONFORMANCE_POSTGRES_REQUIRE_ZERO_SKIPS=1` (zero `-k` deselections), plus live replication/feature/deadline suites on PG `18` | PG `14`–`18` (`ubuntu-latest`) |
 
 ## 4. Suite Inventory, Shared-Memory Hygiene & Boundary Evidence
 
-- **Python (`fail_under = 80`)**: 1:1 module-mirrored `src/py/tests/unit/` packages with `__init__.py` and top-level imports (`PLC0415`) across server hotpaths[^src-tests-unit-server-stage1-hotpath-py], storage codecs and worker cancellation barriers[^src-storage-public-codec-tests], native drivers[^src-native-driver-tests], SQLite `RETURNING`[^src-sqlite-returning-tests], PostgreSQL transactions/RLS/CDC/benchmarks[^src-postgres-transaction-tests][^src-pg-dataplane-tests][^src-postgres-bench-tests], DuckDB/Arrow cursor retention[^src-storage-cursor-view-tests], loopback `resp3_server` Redis/Valkey tests[^src-tests-unit-conftest-py], SQLSpec/SQLAlchemy stacks[^src-stack-regressions][^src-bigquery-stack-regressions][^src-spanner-stack-regressions], and dual-mode MCP / SSE / skills / UI / ES256 IAP / stdio-bridge CLI / `litestar-mcp` parity suites[^src-tests-unit-agent-mcp-conformance-py][^src-agent-mcp-registry-py][^src-provider-regressions][^src-provider-schema-regressions][^src-provider-snapshot-regressions].
+- **Python**: 1:1 module-mirrored `src/py/tests/unit/` packages with `__init__.py` and top-level imports (`PLC0415`) across server hotpaths[^src-tests-unit-server-stage1-hotpath-py], storage codecs and worker cancellation barriers[^src-storage-public-codec-tests], native drivers[^src-native-driver-tests], SQLite `RETURNING`[^src-sqlite-returning-tests], PostgreSQL transactions/RLS/CDC/benchmarks[^src-postgres-transaction-tests][^src-pg-dataplane-tests][^src-postgres-bench-tests], DuckDB/Arrow cursor retention[^src-storage-cursor-view-tests], loopback `resp3_server` Redis/Valkey tests[^src-tests-unit-conftest-py], SQLSpec/SQLAlchemy stacks[^src-stack-regressions][^src-bigquery-stack-regressions][^src-spanner-stack-regressions], and dual-mode MCP / SSE / skills / UI / ES256 IAP / stdio-bridge CLI / `litestar-mcp` parity suites[^src-tests-unit-agent-mcp-conformance-py][^src-agent-mcp-registry-py][^src-provider-regressions][^src-provider-schema-regressions][^src-provider-snapshot-regressions].
 - **Rust & TypeScript**: Integration harnesses in `vertebra-core`, `vertebra-http`, `vertebra-storage`[^src-storage-native-tests], and `vertebra-db`[^src-storage-shm-tests]; Vitest suites in [`tests/agent.test.ts`](../../../../src/ts/vertebra-client/tests/agent.test.ts)[^src-ts-tests-agent-test-ts] and sibling client modules; and cross-engine SQL/Arrow conformance in [`test_driver_conformance.py`](../../../../src/py/tests/integration/db/test_driver_conformance.py)[^src-db-conformance].
 - **SHM Hygiene**: [`conftest.py`](../../../../src/py/tests/conftest.py)[^src-tests-conftest-py] pins AnyIO to `asyncio`, generates `test-<uuid8>` SHM names, and sweeps `/dev/shm/{test-*,vtb-*,*vertebra*}` post-test; use targeted `cargo test -p <crate>` during parallel runs to avoid `make rs-test` SHM sweeps.
 
