@@ -10,7 +10,7 @@ planning_status: complete
 planning_quality: standard
 planning_degraded_reason: null
 plan_commit: 18baadcd
-updated_at: "2026-11-13T21:42:30Z"
+updated_at: "2026-11-13T21:56:15Z"
 generated:
   by: flow-plan
   at: "2026-11-13T00:25:00Z"
@@ -57,7 +57,7 @@ Adds live server conformance and service-level acceptance suites after the `ch05
 
 - `conftest.py` & `test_driver_conformance.py`: `VERTEBRA_CONFORMANCE_POSTGRES_REQUIRE_ZERO_SKIPS=1` fails `pytest_terminal_summary` if any `postgres` conformance item is skipped or deselected.
 - `test_postgres_replication_live.py`: live `pgoutput` v1 transactions, `PG_UNCHANGED_TOAST`, invalid UTF-8 `bytea`, fresh `PostgresChangeSource` checkpoint resume, and `"already active"` `OperationalError` / `55006` slot contention [^pg-repl-live].
-- `test_postgres_native_features_live.py`: self-contained `pgvector:0.8.1-pg18` and `pgbouncer:v1.26.0` fixtures exercising binary `COPY`, `VTBARROW`, `LISTEN/NOTIFY`, `vector`/`halfvec`/`bit`, and unnamed-statement pooler safety plus unsupported pooler API refusals [^pg-feat-live] [^zero-skip-gate].
+- `test_postgres_native_features_live.py`: self-contained `pgvector/pgvector:pg18` (`pgvector_18_service`) and `pgbouncer:v1.26.0` fixtures exercising binary `COPY`, `VTBARROW`, `LISTEN/NOTIFY`, `vector`/`halfvec`/`bit`, and unnamed-statement pooler safety plus unsupported pooler API refusals [^pg-feat-live] [^zero-skip-gate].
 
 ## 3. Documentation & OKF Knowledge Plan
 
@@ -73,13 +73,13 @@ Testing matrix and workflow OKF updates land in `ch07:t04`.
 
 ## 5. Implementation Plan
 
-- [x] [93e19a3f] [t01-pg14-18-conformance-and-zero-skip-gate.md](tasks/t01-pg14-18-conformance-and-zero-skip-gate.md) — Set supports_pipeline=True and pending_flow_id=None for postgres in test_driver_conformance.py and enforce zero-skip terminal gating.
-- [x] [93e19a3f] [t02-live-logical-replication-acceptance-suite.md](tasks/t02-live-logical-replication-acceptance-suite.md) — Add test_postgres_replication_live.py covering PostgresChangeSource, unchanged TOAST, non-UTF-8 bytea, reconnect, and slot contention.
-- [x] [93e19a3f] [t03-live-copy-arrow-notify-pgvector-pgbouncer-suite.md](tasks/t03-live-copy-arrow-notify-pgvector-pgbouncer-suite.md) — Add test_postgres_native_features_live.py covering binary COPY, Arrow SHM, notifications, pgvector, and PgBouncer transaction/statement modes.
+- [x] [264b4684] [t01-pg14-18-conformance-and-zero-skip-gate.md](tasks/t01-pg14-18-conformance-and-zero-skip-gate.md) — Set supports_pipeline=True and pending_flow_id=None for postgres in test_driver_conformance.py and enforce zero-skip terminal gating.
+- [x] [264b4684] [t02-live-logical-replication-acceptance-suite.md](tasks/t02-live-logical-replication-acceptance-suite.md) — Add test_postgres_replication_live.py covering PostgresChangeSource, unchanged TOAST, non-UTF-8 bytea, reconnect, and slot contention.
+- [x] [264b4684] [t03-live-copy-arrow-notify-pgvector-pgbouncer-suite.md](tasks/t03-live-copy-arrow-notify-pgvector-pgbouncer-suite.md) — Add test_postgres_native_features_live.py covering binary COPY, Arrow SHM, notifications, pgvector, and PgBouncer transaction/statement modes.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-Implemented and remediated at `93e19a3f` (`3/3` tasks complete; pending verification pass before chapter closeout). Offline gate passes (`18 passed, 5 skipped` across zero-skip subprocess/unit + live skip collection; `61 passed, 242 skipped, 144 deselected` in targeted `test_driver_conformance.py`; Ruff and Mypy `5` source files clean); full Docker PG14–18 runs in `/flow:finish` and `ci.yml`.
+Implemented and remediated at `264b4684` (`3/3` tasks verified offline). Offline gate passes (`18 passed, 5 skipped` across zero-skip subprocess/unit + live skip collection; `63 passed, 242 skipped, 144 deselected` in targeted `test_driver_conformance.py`; Ruff and Mypy `5` source files clean); full Docker PG14–18 runs in `/flow:finish` and `ci.yml`.
 
 ```bash
 uv run --no-sync pytest src/py/tests/unit/db/test_postgres_zero_skip_gate.py src/py/tests/integration/db/test_driver_conformance.py src/py/tests/integration/db/test_postgres_replication_live.py src/py/tests/integration/db/test_postgres_native_features_live.py -q && uv run --no-sync ruff check src/py/tests/integration src/py/tests/unit/db/test_postgres_zero_skip_gate.py

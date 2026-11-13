@@ -7,9 +7,9 @@ title: "Create live PGCOPY, VTBARROW, LISTEN/NOTIFY, pgvector, and PgBouncer sui
 description: "Add test_postgres_native_features_live.py covering binary COPY, Arrow SHM, notifications, pgvector, and PgBouncer transaction/statement modes."
 status: stable
 state: completed
-commit: 93e19a3f
-last_verified_at: "2026-11-13T21:42:30Z"
-last_verified_commit: 93e19a3f
+commit: 264b4684
+last_verified_at: "2026-11-13T21:56:00Z"
+last_verified_commit: 264b4684
 claimed_by: null
 claimed_at: null
 planning_quality: standard
@@ -44,7 +44,7 @@ sources:
 
 ## Objective & Scope Boundary
 
-Author `test_postgres_native_features_live.py` with `pgvector:0.8.1-pg18` and `pgbouncer:v1.26.0` fixtures [^int-conftest].
+Author `test_postgres_native_features_live.py` with `pgvector/pgvector:pg18` (`pgvector_18_service`) and `pgbouncer:v1.26.0` fixtures [^int-conftest].
 
 ## Bounded Read Manifest
 

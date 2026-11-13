@@ -19,19 +19,19 @@ chapters:
   - ch08-user-and-reference-docs
   - ch09-data-packaging-okf-and-routing-sync
 current_chapter: ch06-live-conformance-and-service-acceptance
-current_task: "native-postgres-driver:ch06:t01"
+current_task: "native-postgres-driver:ch06:t03"
 parent_prd: native-data-platform
 research:
   - research/protocol-and-execution_20261105.md
   - research/cloud-material_20261105.md
 plan_revision: 9
 plan_commit: 18baadcd
-state_revision: 19
-last_verified_checkpoint: cffa8feb
+state_revision: 20
+last_verified_checkpoint: 264b4684
 last_reviewed_chapter: ch05-atomic-cutover-and-legacy-removal
 last_reviewed_commit: 780217cf
 created_at: "2026-11-03T04:05:00Z"
-updated_at: "2026-11-13T16:15:00Z"
+updated_at: "2026-11-13T21:56:15Z"
 generated:
   by: flow-plan
   at: "2026-11-13T00:25:00Z"
@@ -138,7 +138,7 @@ Nine cohesive chapters (`32` tasks) remain to finish logical replication supervi
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Active Frontier**: Chapters `ch01`–`ch05` (`17/32` tasks) are completed (`cffa8feb`, sync `780217cf`), eliminating `psycopg`, `asyncpg`, and `asyncmy` from `src/py/vertebra`; active frontier advances to `ch06-live-conformance-and-service-acceptance` (`native-postgres-driver:ch06:t01`, `15` open `compact` tasks remain across `ch06`–`ch09`).
+- **Active Frontier**: Chapters `ch01`–`ch05` (`17/32` tasks) are completed and reviewed; `ch06-live-conformance-and-service-acceptance` (`3/3` tasks) is implemented and verified offline at `264b4684` awaiting chapter review (`12` open `compact` tasks remain across `ch07`–`ch09`).
 - **Downstream Unlocks**: Completing `ch05` unblocks [`broker-pool-sharing`](../broker-pool-sharing/spec.md), [`driver-conformance-ci`](../driver-conformance-ci/spec.md), [`native-redis-driver`](../native-redis-driver/spec.md), [`native-adapter-organization`](../native-adapter-organization/spec.md), [`sqlspec-adapter-parity`](../sqlspec-adapter-parity/spec.md), and [`queues-tasks-and-channels`](../queues-tasks-and-channels/spec.md).
 - **`/flow:finish` Full Gate**: `make lint-all && make rs-test && make py-test && make postgres-wheel-check && make postgres-test && make postgres-bench-check && make docs-check && make review-check`.
 

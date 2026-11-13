@@ -7,9 +7,9 @@ title: "Create live wal_level=logical replication acceptance suite"
 description: "Add test_postgres_replication_live.py covering PostgresChangeSource, unchanged TOAST, non-UTF-8 bytea, reconnect, and slot contention."
 status: stable
 state: completed
-commit: 93e19a3f
-last_verified_at: "2026-11-13T21:42:30Z"
-last_verified_commit: 93e19a3f
+commit: 264b4684
+last_verified_at: "2026-11-13T21:56:00Z"
+last_verified_commit: 264b4684
 claimed_by: null
 claimed_at: null
 planning_quality: standard
