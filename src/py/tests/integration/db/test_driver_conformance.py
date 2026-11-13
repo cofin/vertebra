@@ -93,7 +93,6 @@ from vertebra.typing import FrozenBaseStruct, MissingDependencyError, reset_depe
 from vertebra.utils.module_loader import ensure_module, import_optional
 from vertebra.utils.serializers import decode_json, encode_json
 
-_FAIL_LOUD_DRIVER_ENGINES: frozenset[str] = frozenset()
 _DUCKDB_SKIP_REASON = "duckdb publishes no free-threaded wheel; DuckDB tests run on GIL interpreters"
 
 
@@ -141,6 +140,20 @@ _DUCKDB_TYPES_DDL = (
     "val_bytes BLOB, "
     "val_ts TIMESTAMP, "
     "val_json VARCHAR"
+    ")"
+)
+
+_POSTGRES_TYPES_DDL = (
+    "CREATE TABLE vtb_conformance_types ("
+    "id BIGINT PRIMARY KEY, "
+    "val_int BIGINT, "
+    "val_float DOUBLE PRECISION, "
+    "val_decimal NUMERIC(18, 4), "
+    "val_bool BOOLEAN, "
+    "val_text TEXT, "
+    "val_bytes BYTEA, "
+    "val_ts TIMESTAMPTZ, "
+    "val_json JSONB"
     ")"
 )
 
@@ -409,6 +422,7 @@ ENGINE_SPECS: tuple[EngineConformanceSpec, ...] = (
         async_driver_cls=AsyncPostgreSQLDriver,
         sample_url="postgresql://vtb:secret@127.0.0.1:5432/vtb",
         placeholder_style="dollar",
+        types_ddl=_POSTGRES_TYPES_DDL,
         supports_pipeline=True,
         native_extension_module="vertebra._postgres",
         pending_flow_id=None,
@@ -714,15 +728,6 @@ def _resolve_live_config(
             )
         )
         return SpannerConfig.from_url(resolved_dsn)
-    if spec.engine == "mssql":
-        dsn = os.environ.get("VERTEBRA_CONFORMANCE_MSSQL_DSN", "").strip()
-        if dsn:
-            return MSSQLConfig.from_url(dsn)
-        if spec.container_fixture is not None and os.environ.get("VERTEBRA_CONFORMANCE_DOCKER") == "1":
-            fixture_cfg = request.getfixturevalue(spec.container_fixture)
-            assert isinstance(fixture_cfg, BaseDatabaseConfig)
-            return fixture_cfg
-        pytest.skip("MSSQL conformance requires VERTEBRA_CONFORMANCE_MSSQL_DSN or VERTEBRA_CONFORMANCE_DOCKER=1")
     for env_key in spec.env_dsn_vars:
         env_dsn = os.environ.get(env_key, "").strip()
         if env_dsn:
@@ -736,6 +741,8 @@ def _resolve_live_config(
         loopback_server = mysql_mod.MySQLWireTestServer()
         request.addfinalizer(loopback_server.close)
         return MySQLConfig.from_url(loopback_server.dsn)
+    if spec.engine == "mssql":
+        pytest.skip("MSSQL conformance requires VERTEBRA_CONFORMANCE_MSSQL_DSN or VERTEBRA_CONFORMANCE_DOCKER=1")
     if spec.engine == "oracle":
         pytest.skip("Oracle conformance requires VERTEBRA_CONFORMANCE_ORACLE_DSN or VERTEBRA_CONFORMANCE_DOCKER=1")
     if spec.engine == "postgres":
@@ -882,7 +889,6 @@ def test_engine_url_parsing_and_pool_key_contract(spec: EngineConformanceSpec) -
 async def test_engine_driver_resolution_and_provide_driver(
     spec: EngineConformanceSpec,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Every SQL/analytical config resolves its paired sync/async driver classes and registers cleanly."""
     url = (
@@ -900,18 +906,6 @@ async def test_engine_driver_resolution_and_provide_driver(
     registry.register(spec.engine, config)
     if spec.engine == "duckdb":
         _require_native_module(spec)
-    if spec.engine in _FAIL_LOUD_DRIVER_ENGINES:
-        assert spec.native_extension_module is not None
-        monkeypatch.setitem(sys.modules, spec.native_extension_module, None)
-        reset_dependency_cache(spec.native_extension_module)
-        try:
-            with pytest.raises(MissingDependencyError, match=rf"vertebra-core\[{spec.engine}\]"):
-                provide_driver(spec.engine, sync=True, registry=registry)
-            with pytest.raises(MissingDependencyError, match=rf"vertebra-core\[{spec.engine}\]"):
-                provide_driver(spec.engine, sync=False, registry=registry)
-        finally:
-            reset_dependency_cache(spec.native_extension_module)
-        return
     sync_driver = provide_driver(spec.engine, sync=True, registry=registry)
     async_driver = provide_driver(spec.engine, sync=False, registry=registry)
     try:
@@ -1720,11 +1714,16 @@ def test_mssql_driver_raises_missing_dependency_when_wheel_absent(
 
 
 def test_postgres_conformance_spec_and_version_matrix() -> None:
-    """PostgreSQL conformance enables pipelines, clears pending gates, and expands versions 14 to 18."""
+    """PostgreSQL conformance enables pipelines, native types DDL, clears pending gates, and expands 14..18."""
     pg_spec = next(spec for spec in ENGINE_SPECS if spec.engine == "postgres")
     assert pg_spec.supports_pipeline is True
     assert pg_spec.pending_flow_id is None
     assert pg_spec.native_extension_module == "vertebra._postgres"
+    assert "BYTEA" in pg_spec.types_ddl
+    assert "NUMERIC(18, 4)" in pg_spec.types_ddl
+    assert "TIMESTAMPTZ" in pg_spec.types_ddl
+    assert "JSONB" in pg_spec.types_ddl
+    assert "BLOB" not in pg_spec.types_ddl
 
     params = _build_live_engine_params((pg_spec,))
     assert [param.id for param in params] == [

@@ -11,7 +11,7 @@ import pytest
 from vertebra.db.adapters.mssql import MSSQLConfig
 from vertebra.db.adapters.mysql import MySQLConfig, SyncMySQLDriver
 from vertebra.db.adapters.oracle import OracleConfig
-from vertebra.db.adapters.postgres import PostgreSQLConfig, SyncPostgreSQLDriver
+from vertebra.db.adapters.postgres import PoolerMode, PostgreSQLConfig, SyncPostgreSQLDriver
 from vertebra.db.adapters.redis import RedisConfig, SyncRedisDriver
 from vertebra.db.adapters.valkey import SyncValkeyDriver, ValkeyConfig
 from vertebra.extensions.sqlspec import OracleAsyncConfig, PostgreSQLAsyncConfig
@@ -50,7 +50,6 @@ def is_postgres_conformance_nodeid(nodeid: str) -> bool:
         "test_postgres_replication_live.py" in lowered
         or "test_postgres_native_features_live.py" in lowered
         or "test_postgres_command_deadlines.py" in lowered
-        or "postgres" in lowered
     )
 
 
@@ -237,16 +236,18 @@ def _container_bridge_host_and_port(service: PostgresService) -> tuple[str, int]
     return service.host, int(service.port)
 
 
-@pytest.fixture
+@pytest.fixture(params=["transaction", "statement"])
 def vtb_pgbouncer_config(
+    request: pytest.FixtureRequest,
     docker_service: DockerService,
     postgres_18_service: PostgresService,
 ) -> Iterator[tuple[PostgreSQLConfig, PostgreSQLConfig]]:
-    """Start a PgBouncer container fronting ``postgres_18_service`` and return transaction/direct configs."""
+    """Start a PgBouncer container in transaction or statement mode fronting ``postgres_18_service``."""
     net_helpers = import_optional("pytest_databases.helpers")
     if net_helpers is None:
         msg = "pytest-databases helpers are required for Docker PgBouncer tests"
         raise ImproperConfigurationError(msg)
+    pool_mode = str(request.param)
     tcp_port_open = net_helpers.tcp_port_open
     image = os.environ.get("VERTEBRA_CONFORMANCE_PGBOUNCER_IMAGE", "edoburu/pgbouncer:v1.26.0")
     direct_config = _postgres_config_from_service(postgres_18_service)
@@ -258,7 +259,7 @@ def vtb_pgbouncer_config(
     with docker_service.run(
         image=image,
         container_port=5432,
-        name="pgbouncer",
+        name=f"pgbouncer_{pool_mode}",
         env={
             "DB_HOST": pg_host,
             "DB_PORT": str(pg_port),
@@ -266,7 +267,7 @@ def vtb_pgbouncer_config(
             "DB_PASSWORD": postgres_18_service.password,
             "DB_NAME": postgres_18_service.database,
             "AUTH_TYPE": "plain",
-            "POOL_MODE": "transaction",
+            "POOL_MODE": pool_mode,
             "LISTEN_PORT": "5432",
             "MAX_CLIENT_CONN": "64",
             "DEFAULT_POOL_SIZE": "16",
@@ -279,12 +280,13 @@ def vtb_pgbouncer_config(
             f"postgresql://{postgres_18_service.user}:{postgres_18_service.password}"
             f"@{service.host}:{service.port}/{postgres_18_service.database}?sslmode=disable"
         )
+        resolved_mode: PoolerMode = "transaction" if pool_mode == "transaction" else "statement"
         yield (
             PostgreSQLConfig(
                 dsn=pooler_dsn,
                 direct_dsn=direct_config.dsn,
-                pooler_mode="transaction",
-                pgbouncer=True,
+                pooler_mode=resolved_mode,
+                pgbouncer=pool_mode == "transaction",
             ),
             direct_config,
         )

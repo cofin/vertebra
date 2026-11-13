@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -58,6 +61,8 @@ class _StubTerminalReporter:
         ("src/py/tests/integration/db/test_driver_conformance.py::test_sync_execution_contract[mysql]", False),
         ("src/py/tests/integration/db/test_postgres_replication_live.py::test_live_pgoutput_toast_and_bytea", True),
         ("src/py/tests/integration/db/test_postgres_native_features_live.py::test_live_pgvector_roundtrip", True),
+        ("src/py/tests/integration/db/test_postgres_command_deadlines.py::test_live_client_deadline[sync]", True),
+        ("src/py/tests/unit/db/test_postgres_driver.py::test_example", False),
         ("src/py/tests/integration/db/test_oracle_native.py::test_oracle_26ai_oson", False),
     ],
 )
@@ -124,7 +129,10 @@ def test_is_postgres_conformance_nodeid(nodeid: str, expected: bool) -> None:
                     _StubReport("test_driver_conformance.py::test_sync_execution_contract[postgres-14]"),
                     _StubReport("test_driver_conformance.py::test_sync_execution_contract[postgres-18]"),
                 ],
-                "skipped": [_StubReport("test_driver_conformance.py::test_sync_execution_contract[oracle]", "setup")],
+                "skipped": [
+                    _StubReport("test_driver_conformance.py::test_sync_execution_contract[oracle]", "setup"),
+                    _StubReport("src/py/tests/unit/db/test_postgres_driver.py::test_optional_skip", "setup"),
+                ],
             },
             None,
         ),
@@ -136,7 +144,7 @@ def test_is_postgres_conformance_nodeid(nodeid: str, expected: bool) -> None:
         "env_one_non_postgres_only_fails",
         "env_one_pg_skipped_fails",
         "env_one_pg_deselected_fails",
-        "env_one_pg_all_passed_other_skipped_ok",
+        "env_one_pg_all_passed_non_conformance_skipped_ok",
     ],
 )
 def test_evaluate_postgres_zero_skip_gate(
@@ -176,3 +184,43 @@ def test_pytest_terminal_summary_updates_session_exitstatus(monkeypatch: pytest.
     assert passing_reporter._session is not None
     assert passing_reporter._session.exitstatus == pytest.ExitCode.OK
     assert passing_reporter.messages == []
+
+
+@pytest.mark.parametrize(
+    ("require_zero_skips", "expected_returncode"),
+    [
+        ("1", 1),
+        ("0", 0),
+    ],
+    ids=["enforced_fails_on_skip", "disabled_allows_skip"],
+)
+def test_live_pytest_subprocess_enforces_zero_skip_gate(
+    require_zero_skips: str,
+    expected_returncode: int,
+) -> None:
+    """Subprocess pytest exits non-zero when zero-skip enforcement rejects skipped postgres-18 conformance."""
+    env = dict(os.environ)
+    env["VERTEBRA_CONFORMANCE_DOCKER"] = "0"
+    env.pop("VERTEBRA_CONFORMANCE_POSTGRES_DSN", None)
+    env.pop("VERTEBRA_CONFORMANCE_POSTGRES_18_DSN", None)
+    env["VERTEBRA_CONFORMANCE_POSTGRES_REQUIRE_ZERO_SKIPS"] = require_zero_skips
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "src/py/tests/integration/db/test_driver_conformance.py",
+            "-k",
+            "postgres-18",
+            "-q",
+        ],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
+        check=False,
+    )
+    assert proc.returncode == expected_returncode
+    output = proc.stdout + proc.stderr
+    if require_zero_skips == "1":
+        assert "VERTEBRA_CONFORMANCE_POSTGRES_REQUIRE_ZERO_SKIPS=1 rejected" in output

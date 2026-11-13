@@ -16,10 +16,9 @@ from vertebra.db.adapters.postgres import (
     MemoryPostgresCheckpointStore,
     PostgresChangeConfig,
     PostgreSQLConfig,
-    PostgresReplicationGapError,
 )
 from vertebra.db.cdc import ChangeEvent
-from vertebra.db.driver import DatabaseError, OperationalError
+from vertebra.db.driver import OperationalError
 from vertebra.typing import MissingDependencyError
 from vertebra.utils.module_loader import ensure_module
 
@@ -53,19 +52,62 @@ def logical_pg_config(request: pytest.FixtureRequest) -> PostgreSQLConfig:
     return _resolve_logical_postgres_config(request)
 
 
-async def _next_non_control_event(stream_iter: AsyncIterator[ChangeEvent], *, timeout: float = 10.0) -> ChangeEvent:
-    """Pull the next replication ChangeEvent skipping internal control notifications."""
+async def _collect_transaction_events(
+    stream_iter: AsyncIterator[ChangeEvent],
+    *,
+    expected_dml_kind: str,
+    timeout: float = 10.0,
+) -> tuple[list[ChangeEvent], list[ChangeEvent]]:
+    """Collect a begin/dml/commit transaction sequence alongside any observed control frames."""
+    dml_events: list[ChangeEvent] = []
+    control_events: list[ChangeEvent] = []
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
     while True:
-        event = await asyncio.wait_for(anext(stream_iter), timeout=timeout)
-        if event.operation != "control":
-            return event
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            raise TimeoutError(f"Timed out waiting for {expected_dml_kind} replication transaction")
+        event = await asyncio.wait_for(anext(stream_iter), timeout=remaining)
+        if event.operation == "control":
+            control_events.append(event)
+            continue
+        dml_events.append(event)
+        if len(dml_events) >= 3 and event.operation == "commit":
+            assert dml_events[0].operation == "begin"
+            assert dml_events[1].operation == expected_dml_kind
+            return dml_events, control_events
+
+
+async def _wait_for_slot_state(
+    admin: AsyncPostgreSQLDriver,
+    slot_name: str,
+    *,
+    expect_active: bool,
+    previous_pid: int | None = None,
+    timeout: float = 10.0,
+) -> int | None:
+    """Poll pg_replication_slots until slot activity matches ``expect_active`` and optional PID change."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while loop.time() < deadline:
+        row = await admin.select_one_or_none(
+            "SELECT active, active_pid FROM pg_replication_slots WHERE slot_name = $1",
+            (slot_name,),
+        )
+        if row is not None:
+            active = bool(row["active"])
+            active_pid = row["active_pid"]
+            if active is expect_active and (previous_pid is None or active_pid != previous_pid):
+                return int(active_pid) if active_pid is not None else None
+        await asyncio.sleep(0.05)
+    raise AssertionError(f"Slot {slot_name!r} did not reach active={expect_active!r} within {timeout}s")
 
 
 @pytest.mark.anyio
 async def test_live_pgoutput_toast_bytea_checkpoint_resume_and_slot_contention(
     logical_pg_config: PostgreSQLConfig,
 ) -> None:
-    """Verify pgoutput insert/update/delete, PG_UNCHANGED_TOAST, raw bytea, backend kill resume, and 55006 contention."""
+    """Verify pgoutput DML, PG_UNCHANGED_TOAST, raw bytea, kill resume, fresh source resume, and contention."""
     suffix = uuid.uuid4().hex[:8]
     table_name = f"vtb_cdc_live_{suffix}"
     pub_name = f"vtb_pub_live_{suffix}"
@@ -100,56 +142,80 @@ async def test_live_pgoutput_toast_bytea_checkpoint_resume_and_slot_contention(
                 f"INSERT INTO {table_name} (id, label, toast_body, raw_payload) VALUES ($1, $2, $3, $4)",
                 (1, "initial", large_toast, raw_bytes),
             )
-            begin_evt = await _next_non_control_event(events_iter)
-            insert_evt = await _next_non_control_event(events_iter)
-            commit_evt = await _next_non_control_event(events_iter)
-            assert begin_evt.operation == "begin"
-            assert insert_evt.operation == "insert"
+            insert_tx, _ = await _collect_transaction_events(events_iter, expected_dml_kind="insert")
+            insert_evt = insert_tx[1]
+            commit_evt = insert_tx[2]
             assert insert_evt.payload["new_tuple"]["label"] == "initial"
             assert insert_evt.payload["new_tuple"]["toast_body"] == large_toast
             assert insert_evt.payload["new_tuple"]["raw_payload"] == raw_bytes
-            assert commit_evt.operation == "commit"
             first_lsn = int(commit_evt.payload["commit_end_lsn"])
             saved_cp = await source.acknowledge(first_lsn)
             assert saved_cp.commit_end_lsn == first_lsn
 
             await admin.execute(f"UPDATE {table_name} SET label = $1 WHERE id = $2", ("updated", 1))
-            begin_upd = await _next_non_control_event(events_iter)
-            upd_evt = await _next_non_control_event(events_iter)
-            commit_upd = await _next_non_control_event(events_iter)
-            assert begin_upd.operation == "begin"
-            assert upd_evt.operation == "update"
+            update_tx, _ = await _collect_transaction_events(events_iter, expected_dml_kind="update")
+            upd_evt = update_tx[1]
+            commit_upd = update_tx[2]
             assert upd_evt.payload["new_tuple"]["label"] == "updated"
             assert upd_evt.payload["new_tuple"]["toast_body"] is PG_UNCHANGED_TOAST
-            assert commit_upd.operation == "commit"
             second_lsn = int(commit_upd.payload["commit_end_lsn"])
             assert second_lsn > first_lsn
             saved_cp = await source.acknowledge(second_lsn)
             assert saved_cp.commit_end_lsn == second_lsn
+            first_generation = int(commit_upd.payload["generation"])
 
-            await admin.execute(
-                "SELECT pg_terminate_backend(active_pid) "
-                "FROM pg_replication_slots WHERE slot_name = $1 AND active_pid IS NOT NULL",
-                (slot_name,),
+            initial_pid = await _wait_for_slot_state(admin, slot_name, expect_active=True)
+            assert initial_pid is not None
+            terminated = await admin.select_value(
+                "SELECT pg_terminate_backend($1::int4)",
+                (initial_pid,),
+                value_type=bool,
             )
+            assert terminated is True
+            await _wait_for_slot_state(admin, slot_name, expect_active=False, previous_pid=initial_pid)
 
             await admin.execute(f"DELETE FROM {table_name} WHERE id = $1", (1,))
-            resumed_kinds: list[str] = []
-            while len(resumed_kinds) < 3:
-                evt = await _next_non_control_event(events_iter)
-                resumed_kinds.append(evt.operation)
-                if evt.operation == "commit":
-                    assert int(evt.payload["commit_end_lsn"]) > second_lsn
-            assert resumed_kinds == ["begin", "delete", "commit"]
+            delete_tx, reconnect_controls = await _collect_transaction_events(
+                events_iter,
+                expected_dml_kind="delete",
+            )
+            del_evt = delete_tx[1]
+            commit_del = delete_tx[2]
+            assert del_evt.payload["old_tuple"]["id"] == 1
+            third_lsn = int(commit_del.payload["commit_end_lsn"])
+            assert third_lsn > second_lsn
+            assert reconnect_controls or int(commit_del.payload["generation"]) > first_generation
+            await source.acknowledge(third_lsn)
 
-            with pytest.raises((PostgresReplicationGapError, OperationalError, DatabaseError)):
+            with pytest.raises(OperationalError, match=r"(already active|55006|in use)"):
                 async with (
                     AsyncPostgreSQLDriver(logical_pg_config) as contender_driver,
                     contender_driver.open_replication(
                         PostgresChangeConfig(slot=slot_name, publication=pub_name, reconnect=False),
                     ) as contender_source,
                 ):
-                    await _next_non_control_event(contender_source.stream(), timeout=5.0)
+                    contender_iter = contender_source.stream()
+
+                    async def _pull_contender() -> ChangeEvent:
+                        return await anext(contender_iter)
+
+                    await asyncio.wait_for(_pull_contender(), timeout=5.0)
+
+        await _wait_for_slot_state(admin, slot_name, expect_active=False)
+        await admin.execute(
+            f"INSERT INTO {table_name} (id, label, toast_body, raw_payload) VALUES ($1, $2, $3, $4)",
+            (2, "resumed", "short_toast", b"\x00\x01"),
+        )
+        async with (
+            AsyncPostgreSQLDriver(logical_pg_config) as resume_driver,
+            resume_driver.open_replication(change_cfg, checkpoint_store=checkpoint_store) as resumed_source,
+        ):
+            resumed_iter = resumed_source.stream()
+            resumed_tx, _ = await _collect_transaction_events(resumed_iter, expected_dml_kind="insert")
+            assert resumed_tx[1].payload["new_tuple"]["id"] == 2
+            assert resumed_tx[1].payload["new_tuple"]["label"] == "resumed"
+            assert resumed_source.checkpoint is not None
+            assert resumed_source.checkpoint.commit_end_lsn == third_lsn
     finally:
         with contextlib.suppress(Exception):
             await admin.execute(

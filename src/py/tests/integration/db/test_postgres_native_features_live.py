@@ -5,8 +5,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import struct
 import uuid
-from typing import Any
+from collections.abc import AsyncIterator
 
 import pyarrow as pa
 import pytest
@@ -16,13 +17,14 @@ from vertebra.db.adapters.postgres import (
     AsyncPostgreSQLDriver,
     PgBitString,
     PgVector,
-    PoolerMode,
+    PostgresChangeConfig,
+    PostgresNotificationSource,
     PostgresNotifyConfig,
     PostgreSQLConfig,
     SyncPostgreSQLDriver,
 )
 from vertebra.db.arrow import ArrowCursor
-from vertebra.db.driver import InterfaceError
+from vertebra.db.driver import InterfaceError, NotificationEvent
 from vertebra.typing import ImproperConfigurationError, MissingDependencyError
 from vertebra.utils.module_loader import ensure_module
 
@@ -75,7 +77,7 @@ def test_live_pgvector_copy_and_arrow_roundtrip(
     pgvector_config: PostgreSQLConfig,
     vector_kind: str,
 ) -> None:
-    """Verify pgvector vector/halfvec, bitstrings, binary COPY, and Arrow SHM against live PostgreSQL."""
+    """Verify pgvector vector/halfvec, bitstrings, binary COPY, and VTBARROW SHM against live PostgreSQL."""
     table_name = f"vtb_feat_live_{uuid.uuid4().hex[:8]}"
     copy_table = f"vtb_copy_live_{uuid.uuid4().hex[:8]}"
     with SyncPostgreSQLDriver(pgvector_config) as driver:
@@ -105,7 +107,11 @@ def test_live_pgvector_copy_and_arrow_roundtrip(
                 f"COPY (SELECT id, label FROM {copy_table} ORDER BY id) TO STDOUT WITH (FORMAT binary)"
             ) as stream:
                 copied_rows = list(stream)
-            assert len(copied_rows) == 3
+            assert copied_rows == [
+                (struct.pack("!i", 1), b"alpha"),
+                (struct.pack("!i", 2), b"beta"),
+                (struct.pack("!i", 3), b"gamma"),
+            ]
 
             arrow_table = pa.table({"id": [10, 11], "label": ["arrow_x", "arrow_y"]})
             assert driver.load_from_arrow(copy_table, arrow_table) == 2
@@ -115,6 +121,8 @@ def test_live_pgvector_copy_and_arrow_roundtrip(
                 threshold_rows=min(1, ARROW_SHM_THRESHOLD_ROWS),
             ) as cursor:
                 assert isinstance(cursor, ArrowCursor)
+                assert cursor.used_shm is True
+                assert cursor.shm_name
                 assert cursor.row_count == 2
                 assert cursor.to_pylist() == [
                     {"id": 10, "label": "arrow_x"},
@@ -127,58 +135,89 @@ def test_live_pgvector_copy_and_arrow_roundtrip(
                 driver.execute(f"DROP TABLE IF EXISTS {copy_table}")
 
 
+async def _wait_for_listener_ready(
+    notify_source: PostgresNotificationSource,
+    listener_iter: AsyncIterator[NotificationEvent],
+    channel: str,
+    *,
+    timeout: float = 10.0,
+) -> None:
+    """Publish readiness probes deterministically until the active LISTEN stream consumes one."""
+    probe_token = f"vtb_ready_{uuid.uuid4().hex[:8]}".encode("ascii")
+
+    async def _pull_until_probe() -> None:
+        while True:
+            event = await anext(listener_iter)
+            if event.channel == channel and event.payload == probe_token:
+                return
+
+    wait_task = asyncio.create_task(_pull_until_probe())
+    try:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while not wait_task.done():
+            if loop.time() >= deadline:
+                raise TimeoutError(f"Listener did not become ready on channel {channel!r}")
+            await notify_source.publish(channel, probe_token)
+            done, _ = await asyncio.wait({wait_task}, timeout=0.05)
+            if done:
+                await wait_task
+                return
+        await wait_task
+    finally:
+        if not wait_task.done():
+            wait_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await wait_task
+
+
 @pytest.mark.anyio
 async def test_live_async_listen_notify_delivery(pgvector_config: PostgreSQLConfig) -> None:
-    """Verify asynchronous LISTEN/NOTIFY subscription, publish, and payload hydration."""
+    """Verify asynchronous LISTEN/NOTIFY subscription, publish, and binary payload hydration."""
     channel = f"vtb_live_ch_{uuid.uuid4().hex[:8]}"
     async with AsyncPostgreSQLDriver(pgvector_config) as driver:
         notify_source = driver.listen_notifications(PostgresNotifyConfig(channel=channel))
         async with notify_source:
             await notify_source.subscribe([channel])
             listener_iter = notify_source.listen()
+            await _wait_for_listener_ready(notify_source, listener_iter, channel)
+            await notify_source.publish(channel, b"binary\x00frame")
 
-            async def _pull_next() -> Any:
+            async def _pull_next() -> NotificationEvent:
                 return await anext(listener_iter)
 
-            next_event_task = asyncio.create_task(_pull_next())
-            await asyncio.sleep(0.05)
-            await notify_source.publish(channel, b"binary\x00frame")
-            event = await asyncio.wait_for(next_event_task, timeout=10.0)
+            event = await asyncio.wait_for(_pull_next(), timeout=10.0)
             assert event.channel == channel
             assert event.payload == b"binary\x00frame"
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("pooler_mode", ["transaction", "statement"])
 async def test_live_pgbouncer_unnamed_statement_and_capability_guards(
     pgbouncer_config_pair: tuple[PostgreSQLConfig, PostgreSQLConfig | None],
-    pooler_mode: PoolerMode,
 ) -> None:
-    """Verify PgBouncer transaction/statement mode unnamed statement execution and statement refusals."""
-    base_cfg, _ = pgbouncer_config_pair
-    mode_cfg = PostgreSQLConfig(
-        dsn=base_cfg.dsn,
-        direct_dsn=base_cfg.direct_dsn,
-        pooler_mode=pooler_mode,
-        pgbouncer=pooler_mode == "transaction",
-        protocol_level_pooler_cache=False,
-    )
+    """Verify PgBouncer transaction/statement mode unnamed statement execution and event/tx refusals."""
+    mode_cfg, _ = pgbouncer_config_pair
     assert mode_cfg.effective_statement_cache_size == 0
 
     async with AsyncPostgreSQLDriver(mode_cfg) as driver:
         results = [await driver.select_value("SELECT $1::int4 + 1", (idx,)) for idx in range(1, 6)]
         assert results == [2, 3, 4, 5, 6]
 
-        if pooler_mode == "statement":
-            no_direct_cfg = PostgreSQLConfig(
-                dsn=base_cfg.dsn,
-                direct_dsn=None,
-                pooler_mode="statement",
-                pgbouncer=False,
-            )
-            async with AsyncPostgreSQLDriver(no_direct_cfg) as restricted_driver:
-                with pytest.raises(ImproperConfigurationError, match="LISTEN/NOTIFY"):
-                    restricted_driver.listen_notifications()
+        no_direct_cfg = PostgreSQLConfig(
+            dsn=mode_cfg.dsn,
+            direct_dsn=None,
+            pooler_mode=mode_cfg.pooler_mode,
+            pgbouncer=mode_cfg.pgbouncer,
+        )
+        async with AsyncPostgreSQLDriver(no_direct_cfg) as restricted_driver:
+            with pytest.raises(ImproperConfigurationError, match="LISTEN/NOTIFY"):
+                restricted_driver.listen_notifications()
+            with pytest.raises(ImproperConfigurationError, match="logical replication"):
+                restricted_driver.open_replication(
+                    PostgresChangeConfig(slot="vtb_pooler_slot", publication="vtb_pooler_pub"),
+                )
+
+        if mode_cfg.pooler_mode == "statement":
             with pytest.raises(InterfaceError, match="Statement"):
                 async with driver.transaction():
                     await driver.select_value("SELECT 1")
