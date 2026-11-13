@@ -992,3 +992,26 @@ def test_bigquery_core_arrow_ipc_coercion_preserves_bytes_casts_dictionaries_and
         with pa.ipc.new_stream(batch_sink, batch.schema) as batch_writer:
             batch_writer.write_batch(batch)
         assert batch_sink.getvalue().size <= 9 * 1024 * 1024
+
+
+@pytest.mark.anyio
+async def test_bigquery_pushdown_embed_batch_top_k_and_vector_validation() -> None:
+    """BigQueryEmbeddingPushdown exposes embed_batch, validates top_k > 0, and rejects booleans and length drift."""
+    driver = _StubBigQuerySelectDriver([{"embedding": [3.0, 4.0]}, {"embedding": [0.0, 2.0]}])
+    embedder = BigQueryEmbeddingPushdown(driver, model="analytics.text_embedding_model", dimensions=2, normalize=False)
+    batch = await embedder.embed_batch(["alpha", "beta"])
+    assert batch.to_list() == [[3.0, 4.0], [0.0, 2.0]]
+
+    for bad_top_k in (0, -2):
+        with pytest.raises(ValueError, match="top_k must be positive"):
+            await embedder.similarity_search([1.0, 0.0], table="proj.ds.docs", top_k=bad_top_k)
+
+    for bad_vec in ([True, False], [1.0], [1.0, 2.0, 3.0]):
+        bad_embedder = BigQueryEmbeddingPushdown(
+            _StubBigQuerySelectDriver([{"embedding": bad_vec}]),
+            model="analytics.text_embedding_model",
+            dimensions=2,
+            normalize=False,
+        )
+        with pytest.raises(DataError, match="BigQuery embedding row"):
+            await bad_embedder.embed_documents(["alpha"])

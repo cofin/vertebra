@@ -130,6 +130,17 @@ class BigQueryEmbeddingPushdown:
         vectors = [self._extract_vector(row, dims) for row in rows]
         return VectorBatchView.from_f32_rows(vectors, normalize=normalize and self._normalize)
 
+    async def embed_batch(
+        self,
+        texts: Sequence[str],
+        *,
+        task: str = "document",
+        dimensions: int | None = None,
+        normalize: bool = True,
+    ) -> VectorBatchView:
+        """Embed a batch of texts in a single BigQuery SQL query."""
+        return await self.embed_documents(texts, task=task, dimensions=dimensions, normalize=normalize)
+
     async def embed_query(self, text: str, *, dimensions: int | None = None, normalize: bool = True) -> VectorView:
         """Generate a query vector with the retrieval-query task."""
         return (await self.embed_documents([text], task="query", dimensions=dimensions, normalize=normalize))[0]
@@ -144,6 +155,8 @@ class BigQueryEmbeddingPushdown:
         metric: str = "cosine",
     ) -> list[dict[str, Any]]:
         """Execute vector search with bound query vectors and limits."""
+        if top_k <= 0:
+            raise ValueError("top_k must be positive")
         distance_types: dict[str, Literal["COSINE", "EUCLIDEAN", "DOT_PRODUCT"]] = {
             "cosine": "COSINE",
             "euclidean": "EUCLIDEAN",
@@ -176,8 +189,13 @@ class BigQueryEmbeddingPushdown:
                 candidate = candidate.get("values")
             if isinstance(candidate, str):
                 candidate = decode_json(candidate)
-            if not isinstance(candidate, (list, tuple)) or len(candidate) < dimensions:
+            if not isinstance(candidate, (list, tuple)) or len(candidate) != dimensions:
                 raise ValueError("missing vector")
-            return [float(value) for value in candidate[:dimensions]]
+            result: list[float] = []
+            for value in candidate:
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    raise ValueError("invalid vector element")
+                result.append(float(value))
+            return result
         except (TypeError, ValueError) as exc:
             raise DataError("BigQuery embedding row has no valid vector") from exc

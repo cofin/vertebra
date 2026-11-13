@@ -30,7 +30,7 @@ from vertebra.db.adapters.datafusion import (
 from vertebra.db.adapters.postgres import AsyncPostgreSQLDriver, PostgresEmbeddingPushdown, SyncPostgreSQLDriver
 from vertebra.db.adapters.postgres.core import PostgreSQLCore
 from vertebra.db.adapters.postgres.notify import PostgresNotificationSource, PostgresNotifyConfig
-from vertebra.db.driver import NotificationSource, NotSupportedError
+from vertebra.db.driver import DataError, NotificationSource, NotSupportedError
 from vertebra.extensions.sqlspec.adapters import PostgreSQLSyncDriver
 from vertebra.server.platform import SHMAllocationPolicy
 from vertebra.typing import MissingDependencyError, reset_dependency_cache
@@ -473,3 +473,31 @@ class _PsycopgConnectionPort:
 
     def close(self) -> None:
         """Keep the externally owned connection port available for assertions."""
+
+
+@pytest.mark.anyio
+async def test_postgres_pushdown_embed_batch_top_k_and_vector_validation() -> None:
+    """PostgresEmbeddingPushdown exposes embed_batch, validates top_k > 0, and rejects booleans and length drift."""
+
+    class _RowPort:
+        def __init__(self, rows: list[dict[str, Any]]) -> None:
+            self.rows = rows
+            self.calls: list[tuple[str, Any]] = []
+
+        def select(self, sql: str, parameters: Any = None) -> list[dict[str, Any]]:
+            self.calls.append((sql, parameters))
+            return list(self.rows)
+
+    port = _RowPort([{"embedding": [3.0, 4.0]}, {"embedding": [0.0, 2.0]}])
+    pushdown = PostgresEmbeddingPushdown(port, dimensions=2, normalize=False)
+    batch = await pushdown.embed_batch(["alpha", "beta"])
+    assert batch.to_list() == [[3.0, 4.0], [0.0, 2.0]]
+
+    for bad_top_k in (0, -4):
+        with pytest.raises(ValueError, match="top_k must be positive"):
+            await pushdown.similarity_search([1.0, 0.0], table="docs", top_k=bad_top_k)
+
+    for bad_vec in ([True, False], [1.0], [1.0, 2.0, 3.0]):
+        bad_pushdown = PostgresEmbeddingPushdown(_RowPort([{"embedding": bad_vec}]), dimensions=2, normalize=False)
+        with pytest.raises(DataError, match="PostgreSQL embedding row"):
+            await bad_pushdown.embed_documents(["alpha"])

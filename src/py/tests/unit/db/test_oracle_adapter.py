@@ -2752,6 +2752,12 @@ def test_oracle_embedding_pushdown_extracts_native_vector_view_bytes_and_sequenc
         OracleEmbeddingPushdown._extract_vector({"vec": [0.25, -0.5]}, 3)
 
     with pytest.raises(DataError, match="Oracle embedding row has no valid vector"):
+        OracleEmbeddingPushdown._extract_vector({"vec": [0.25, -0.5, 1.0, 2.0]}, 3)
+
+    with pytest.raises(DataError, match="Oracle embedding row has no valid vector"):
+        OracleEmbeddingPushdown._extract_vector({"vec": [True, False, 1.0]}, 3)
+
+    with pytest.raises(DataError, match="Oracle embedding row has no valid vector"):
         OracleEmbeddingPushdown._extract_vector({"vec": "not-json"}, 3)
 
 

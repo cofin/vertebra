@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import sys
+import threading
 import uuid
 from collections import deque
 from collections.abc import Callable, Sequence
@@ -95,6 +97,25 @@ class _SubprocessRpcResponse(msgspec.Struct, frozen=True, gc=False):
     error: str | None = None
 
 
+class _BrokerLoopState(msgspec.Struct, gc=False):
+    """Per-event-loop queue, flush task, lock, and sidecar process state for `EmbeddingBroker`."""
+
+    pending: deque[_QueuedBrokerRequest]
+    subprocess_lock: asyncio.Lock
+    flush_task: asyncio.Task[None] | None = None
+    subprocess: asyncio.subprocess.Process | None = None
+
+
+def _unlink_shm_segment(shm_name: str) -> None:
+    """Best-effort unlink of a POSIX `/dev/shm` named embedding slab segment."""
+    clean_name = shm_name.lstrip("/")
+    if not clean_name:
+        return
+    shm_path = f"/dev/shm/{clean_name}"
+    with contextlib.suppress(FileNotFoundError, OSError):
+        os.unlink(shm_path)
+
+
 class EmbeddingBroker:
     """Single-instance embedding broker coordinating token-budgeted, length-sorted micro-batches."""
 
@@ -125,10 +146,51 @@ class EmbeddingBroker:
         self._backend_factory = backend_factory
         self._dimensions = dimensions
         self._config = config or EmbeddingBrokerConfig()
-        self._pending: deque[_QueuedBrokerRequest] = deque()
-        self._flush_task: asyncio.Task[None] | None = None
-        self._subprocess: asyncio.subprocess.Process | None = None
-        self._subprocess_lock = asyncio.Lock()
+        self._loop_states: dict[asyncio.AbstractEventLoop, _BrokerLoopState] = {}
+        self._loop_states_lock = threading.Lock()
+
+    @staticmethod
+    def _terminate_process_nowait(proc: asyncio.subprocess.Process | None) -> None:
+        """Close stdin and send SIGTERM to a sidecar subprocess whose owning loop has already closed."""
+        if proc is None:
+            return
+        if proc.stdin is not None:
+            with contextlib.suppress(Exception):
+                proc.stdin.close()
+        if proc.returncode is None:
+            with contextlib.suppress(ProcessLookupError, OSError):
+                proc.terminate()
+
+    def _state_for_loop(self, loop: asyncio.AbstractEventLoop | None = None) -> _BrokerLoopState:
+        """Return or create the per-event-loop state bucket while pruning closed loops."""
+        target_loop = loop or asyncio.get_running_loop()
+        with self._loop_states_lock:
+            closed_loops = [
+                existing for existing in self._loop_states if existing.is_closed() and existing is not target_loop
+            ]
+            for closed_loop in closed_loops:
+                closed_state = self._loop_states.pop(closed_loop)
+                self._terminate_process_nowait(closed_state.subprocess)
+            state = self._loop_states.get(target_loop)
+            if state is None:
+                state = _BrokerLoopState(pending=deque(), subprocess_lock=asyncio.Lock())
+                self._loop_states[target_loop] = state
+            return state
+
+    async def _reset_subprocess(self, state: _BrokerLoopState) -> None:
+        """Terminate and clear a broken or exited sidecar subprocess for the active loop."""
+        proc = state.subprocess
+        state.subprocess = None
+        if proc is None:
+            return
+        if proc.stdin is not None:
+            with contextlib.suppress(Exception):
+                proc.stdin.close()
+        if proc.returncode is None:
+            with contextlib.suppress(ProcessLookupError, OSError):
+                proc.kill()
+            with contextlib.suppress(Exception):
+                await proc.wait()
 
     @property
     def dimensions(self) -> int:
@@ -155,22 +217,23 @@ class EmbeddingBroker:
             batch = await self.submit_batch_in_subprocess([text])
             return batch[0]
 
-        if len(self._pending) >= self._config.max_pending_requests:
+        loop = asyncio.get_running_loop()
+        state = self._state_for_loop(loop)
+        if len(state.pending) >= self._config.max_pending_requests:
             msg = f"EmbeddingBroker pending queue exceeded max_pending_requests ({self._config.max_pending_requests})"
             raise RuntimeError(msg)
 
-        loop = asyncio.get_running_loop()
         fut: asyncio.Future[VectorView] = loop.create_future()
         est_tokens = max(1, len(text) // 4)
-        self._pending.append(
+        state.pending.append(
             _QueuedBrokerRequest(
                 text=text,
                 estimated_tokens=est_tokens,
                 future=fut,
             )
         )
-        if self._flush_task is None or self._flush_task.done():
-            self._flush_task = loop.create_task(self._flush_loop())
+        if state.flush_task is None or state.flush_task.done():
+            state.flush_task = loop.create_task(self._flush_loop(loop, state))
         return await fut
 
     async def submit_batch(self, texts: Sequence[str]) -> VectorBatchView:
@@ -181,22 +244,23 @@ class EmbeddingBroker:
         if self.should_quarantine_subprocess():
             return await self.submit_batch_in_subprocess(text_list)
 
+        state = self._state_for_loop()
         chunk_size = max(1, self._config.bulk_chunk_size)
         all_rows: list[list[float]] = [[] for _ in range(len(text_list))]
         for offset in range(0, len(text_list), chunk_size):
-            if self._pending:
-                await self._drain_pending_once()
+            if state.pending:
+                await self._drain_pending_once(state)
             await asyncio.sleep(0)
-            if self._pending:
-                await self._drain_pending_once()
+            if state.pending:
+                await self._drain_pending_once(state)
 
             chunk_texts = text_list[offset : offset + chunk_size]
             chunk_rows = await asyncio.to_thread(self._execute_length_sorted_rows, chunk_texts)
             for rel_idx, row in enumerate(chunk_rows):
                 all_rows[offset + rel_idx] = row
             await asyncio.sleep(0.002)
-            if self._pending:
-                await self._drain_pending_once()
+            if state.pending:
+                await self._drain_pending_once(state)
 
         return VectorBatchView.from_f32_rows(all_rows, normalize=True)
 
@@ -214,60 +278,104 @@ class EmbeddingBroker:
         if self._backend_factory is None:
             msg = "Subprocess inference requires a backend_factory"
             raise ImproperConfigurationError(msg)
-        async with self._subprocess_lock:
-            proc = await self._ensure_subprocess()
+        loop = asyncio.get_running_loop()
+        state = self._state_for_loop(loop)
+        async with state.subprocess_lock:
+            proc = await self._ensure_subprocess(state)
             shm_name = f"/vtb-qvec-{os.getpid()}-{uuid.uuid4().hex[:10]}"
+            shm_names_to_cleanup = {shm_name}
             req = _SubprocessRpcRequest(
                 shm_name=shm_name,
                 texts=text_list,
                 dimensions=self._dimensions,
                 factory=self._backend_factory,
             )
-            if proc.stdin is None or proc.stdout is None:
-                raise RuntimeError("Quarantined embedding subprocess stdio pipes are unavailable")
-            payload_line = encode_json(req) + "\n"
-            proc.stdin.write(payload_line.encode("utf-8"))
-            await proc.stdin.drain()
-            raw_line = await proc.stdout.readline()
-            if not raw_line:
-                raise RuntimeError("Quarantined embedding subprocess terminated unexpectedly")
-            resp = decode_json(raw_line, type=_SubprocessRpcResponse)
-            if resp.error:
-                raise RuntimeError(f"Quarantined embedding subprocess error: {resp.error}")
-            return VectorBatchView.open_shm(resp.shm_name)
+            try:
+                if proc.stdin is None or proc.stdout is None:
+                    await self._reset_subprocess(state)
+                    raise RuntimeError("Quarantined embedding subprocess stdio pipes are unavailable")
+                payload_line = encode_json(req) + "\n"
+                try:
+                    proc.stdin.write(payload_line.encode("utf-8"))
+                    await proc.stdin.drain()
+                    raw_line = await proc.stdout.readline()
+                except Exception:
+                    await self._reset_subprocess(state)
+                    raise
+                if not raw_line:
+                    await self._reset_subprocess(state)
+                    raise RuntimeError("Quarantined embedding subprocess terminated unexpectedly")
+                try:
+                    resp = decode_json(raw_line, type=_SubprocessRpcResponse)
+                except Exception:
+                    await self._reset_subprocess(state)
+                    raise
+                if resp.shm_name:
+                    shm_names_to_cleanup.add(resp.shm_name)
+                if resp.error:
+                    raise RuntimeError(f"Quarantined embedding subprocess error: {resp.error}")
+                return VectorBatchView.open_shm(resp.shm_name)
+            finally:
+                for segment_name in shm_names_to_cleanup:
+                    _unlink_shm_segment(segment_name)
 
     async def close(self) -> None:
-        """Terminate the quarantined sidecar subprocess if active."""
-        async with self._subprocess_lock:
-            if self._subprocess is not None:
-                if self._subprocess.stdin is not None:
-                    self._subprocess.stdin.close()
+        """Terminate the active event loop's quarantined sidecar subprocess and prune closed loops."""
+        loop = asyncio.get_running_loop()
+        with self._loop_states_lock:
+            closed_loops = [existing for existing in self._loop_states if existing.is_closed() and existing is not loop]
+            for closed_loop in closed_loops:
+                closed_state = self._loop_states.pop(closed_loop)
+                self._terminate_process_nowait(closed_state.subprocess)
+            state = self._loop_states.get(loop)
+        if state is None:
+            return
+        async with state.subprocess_lock:
+            proc = state.subprocess
+            if proc is not None:
+                if proc.stdin is not None:
+                    with contextlib.suppress(Exception):
+                        proc.stdin.close()
                 try:
-                    await asyncio.wait_for(self._subprocess.wait(), timeout=3.0)
+                    await asyncio.wait_for(proc.wait(), timeout=3.0)
                 except TimeoutError:
-                    self._subprocess.kill()
-                    await self._subprocess.wait()
-                self._subprocess = None
+                    with contextlib.suppress(ProcessLookupError, OSError):
+                        proc.kill()
+                    with contextlib.suppress(Exception):
+                        await proc.wait()
+                state.subprocess = None
 
-    async def _flush_loop(self) -> None:
-        """Wait for the coalesce window and drain pending singular requests."""
-        if self._config.coalesce_window_ms > 0.0:
-            await asyncio.sleep(self._config.coalesce_window_ms / 1000.0)
-        while self._pending:
-            await self._drain_pending_once()
+    async def _flush_loop(self, loop: asyncio.AbstractEventLoop, state: _BrokerLoopState) -> None:
+        """Wait for the coalesce window and drain pending singular requests on the owning loop."""
+        try:
+            if self._config.coalesce_window_ms > 0.0:
+                await asyncio.sleep(self._config.coalesce_window_ms / 1000.0)
+            while state.pending:
+                await self._drain_pending_once(state)
+        except asyncio.CancelledError:
+            while state.pending:
+                item = state.pending.popleft()
+                if not item.future.done():
+                    item.future.cancel()
+            raise
+        finally:
+            if state.pending and not loop.is_closed():
+                state.flush_task = loop.create_task(self._flush_loop(loop, state))
+            elif state.flush_task is asyncio.current_task():
+                state.flush_task = None
 
-    async def _drain_pending_once(self) -> None:
+    async def _drain_pending_once(self, state: _BrokerLoopState) -> None:
         """Drain one token-budgeted batch of singular requests and resolve their futures."""
-        if not self._pending:
+        if not state.pending:
             return
         batch_items: list[_QueuedBrokerRequest] = []
         token_sum = 0
-        while self._pending and len(batch_items) < self._config.max_batch_requests:
-            nxt = self._pending[0]
+        while state.pending and len(batch_items) < self._config.max_batch_requests:
+            nxt = state.pending[0]
             if batch_items and token_sum + nxt.estimated_tokens > self._config.max_batch_tokens:
                 break
             token_sum += nxt.estimated_tokens
-            batch_items.append(self._pending.popleft())
+            batch_items.append(state.pending.popleft())
 
         try:
             rows = await asyncio.to_thread(
@@ -331,18 +439,18 @@ class EmbeddingBroker:
         for out_pos, orig_idx in enumerate(sub_indices):
             scattered_rows[orig_idx] = sub_outputs[out_pos]
 
-    async def _ensure_subprocess(self) -> asyncio.subprocess.Process:
-        """Spawn the sidecar subprocess worker if not already running."""
-        if self._subprocess is not None and self._subprocess.returncode is None:
-            return self._subprocess
-        self._subprocess = await asyncio.create_subprocess_exec(
+    async def _ensure_subprocess(self, state: _BrokerLoopState) -> asyncio.subprocess.Process:
+        """Spawn the sidecar subprocess worker for ``state`` if not already running."""
+        if state.subprocess is not None and state.subprocess.returncode is None:
+            return state.subprocess
+        state.subprocess = await asyncio.create_subprocess_exec(
             sys.executable,
             "-c",
             "from vertebra.embeddings._broker import _run_sidecar_worker_main; _run_sidecar_worker_main()",
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
         )
-        return self._subprocess
+        return state.subprocess
 
     def _resolve_backend(self) -> BackendInferenceCallable:
         """Return the in-process backend, building it from ``backend_factory`` on first use."""

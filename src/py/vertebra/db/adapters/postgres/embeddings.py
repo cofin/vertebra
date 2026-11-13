@@ -73,6 +73,17 @@ class PostgresEmbeddingPushdown:
         vectors = [self._extract_vector(row, dims) for row in rows]
         return VectorBatchView.from_f32_rows(vectors, normalize=normalize and self._normalize)
 
+    async def embed_batch(
+        self,
+        texts: Sequence[str],
+        *,
+        task: str = "document",
+        dimensions: int | None = None,
+        normalize: bool = True,
+    ) -> VectorBatchView:
+        """Embed a batch of texts in a single PostgreSQL SQL query."""
+        return await self.embed_documents(texts, task=task, dimensions=dimensions, normalize=normalize)
+
     async def embed_query(self, text: str, *, dimensions: int | None = None, normalize: bool = True) -> VectorView:
         """Generate one query vector."""
         return (await self.embed_documents([text], task="query", dimensions=dimensions, normalize=normalize))[0]
@@ -87,6 +98,8 @@ class PostgresEmbeddingPushdown:
         metric: str = "cosine",
     ) -> list[dict[str, Any]]:
         """Search a pgvector column using a bound vector and row limit."""
+        if top_k <= 0:
+            raise ValueError("top_k must be positive")
         validate_identifier(table, "table")
         validate_identifier(embedding_column, "embedding_column", allow_dots=False)
         operators = {"cosine": "<=>", "euclidean": "<->", "dot": "<#>"}
@@ -137,8 +150,13 @@ class PostgresEmbeddingPushdown:
                 cell = decode_pgvector_f32(bytes(cell))
             elif isinstance(cell, str):
                 cell = decode_json(cell)
-            if not isinstance(cell, (tuple, list)) or len(cell) < dimensions:
+            if not isinstance(cell, (tuple, list)) or len(cell) != dimensions:
                 raise ValueError("missing vector")
-            return [float(value) for value in cell[:dimensions]]
+            result: list[float] = []
+            for value in cell:
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    raise ValueError("invalid vector element")
+                result.append(float(value))
+            return result
         except (TypeError, ValueError) as exc:
             raise DataError("PostgreSQL embedding row has no valid vector") from exc

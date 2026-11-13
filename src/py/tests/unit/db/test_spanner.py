@@ -1190,3 +1190,51 @@ async def test_spanner_batch_write_rejects_max_commit_delay_ms() -> None:
     finally:
         sync_driver.close()
         await async_driver.close()
+
+
+@pytest.mark.anyio
+async def test_spanner_pushdown_ai_function_binds_embed_batch_top_k_and_vector_validation() -> None:
+    """SpannerEmbeddingPushdown exposes embed_batch, AI.GENERATE_EMBEDDING options, top_k > 0, and strict vectors."""
+    ai_driver = _StubSpannerSelectDriver(rows=[{"embedding": [1.0, 2.0]}, {"embedding": [3.0, 4.0]}])
+    ai_embedder = SpannerEmbeddingPushdown(ai_driver, dimensions=2, use_ai_function=True, normalize=False)
+    ai_sql = ai_embedder.build_generate_embedding_sql()
+    assert (
+        "STRUCT(TRUE AS flatten_json_output, @task_type AS task_type, @output_dimensionality AS output_dimensionality)"
+        in ai_sql
+    )
+
+    batch = await ai_embedder.embed_batch(["alpha", "beta"], task="document")
+    assert batch.to_list() == [[1.0, 2.0], [3.0, 4.0]]
+    assert ai_driver.calls[0][1] == {
+        "texts": ["alpha", "beta"],
+        "task_type": "RETRIEVAL_DOCUMENT",
+        "output_dimensionality": 2,
+    }
+
+    query_driver = _StubSpannerSelectDriver(rows=[{"embedding": [0.5, 1.5]}])
+    query_ai = SpannerEmbeddingPushdown(query_driver, dimensions=2, use_ai_function=True, normalize=False)
+    await query_ai.embed_query("find me")
+    assert query_driver.calls[0][1] == {
+        "texts": ["find me"],
+        "task_type": "RETRIEVAL_QUERY",
+        "output_dimensionality": 2,
+    }
+
+    ml_driver = _StubSpannerSelectDriver(rows=[{"embedding": [0.5, 1.5]}])
+    ml_embedder = SpannerEmbeddingPushdown(ml_driver, dimensions=2, use_ai_function=False, normalize=False)
+    assert "STRUCT(" not in ml_embedder.build_generate_embedding_sql()
+    await ml_embedder.embed_query("find me")
+    assert ml_driver.calls[0][1] == {"texts": ["find me"]}
+
+    for bad_top_k in (0, -1):
+        with pytest.raises(ValueError, match="top_k must be positive"):
+            await ml_embedder.similarity_search([1.0, 0.0], table="docs", top_k=bad_top_k)
+
+    for bad_vec in ([True, False], [1.0], [1.0, 2.0, 3.0]):
+        bad_embedder = SpannerEmbeddingPushdown(
+            _StubSpannerSelectDriver(rows=[{"embedding": bad_vec}]),
+            dimensions=2,
+            normalize=False,
+        )
+        with pytest.raises(DataError, match="Spanner embedding row"):
+            await bad_embedder.embed_documents(["alpha"])

@@ -20,6 +20,7 @@ from vertebra._vertebra import (
     AsyncGcpTokenCache,
     GcpIdTokenSnapshot,
     GcpTokenSnapshot,
+    GoogleCloudAuthError,
     SyncGcpIdTokenCache,
     SyncGcpTokenCache,
     VectorBatchView,
@@ -303,6 +304,7 @@ async def test_pushdown_capability_dispatch_and_order(provider: Any, port_type: 
     assert pushdown.driver is port
     vector = await pushdown.embed_query("query", normalize=False)
     assert vector.to_list() == [3.0, 4.0, 0.0, 0.0]
+    port.rows = [{"embedding": [3.0, 4.0]}]
     batch = await pushdown.embed_documents(["document"], dimensions=2, normalize=True)
     assert batch.to_list() == [pytest.approx([0.6, 0.8])]
     assert all(
@@ -1102,3 +1104,61 @@ async def test_remote_embedder_id_token_auth_audience_and_401_retry(monkeypatch:
     )
     with pytest.raises(EmbeddingError, match="401"):
         await double_401_remote.embed_many(["fail"])
+
+
+@pytest.mark.anyio
+async def test_oracle_pushdown_explicit_cache_fail_loud_and_strict_bounds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify OracleEmbeddingPushdown avoids implicit token caches, propagates cache failures, and validates bounds."""
+    monkeypatch.setenv("GOOGLE_OAUTH_ACCESS_TOKEN", "mock-oauth-token")
+    monkeypatch.setenv("GCE_METADATA_HOST", "127.0.0.1:9")
+
+    port_no_cache = _AsyncSelectPort([{"embedding": encode_oracle_vector_f32([3.0, 4.0, 0.0, 0.0])}])
+    implicit_none = OracleEmbeddingPushdown(port_no_cache, project_number="123", dimensions=4)
+    vec = await implicit_none.embed_query("no-rotation", normalize=False)
+    assert vec.to_list() == [3.0, 4.0, 0.0, 0.0]
+    assert len(port_no_cache.calls) == 1
+    assert "UTL_TO_EMBEDDINGS" in port_no_cache.calls[0][0]
+    assert not any("CREATE_CREDENTIAL" in sql or "DROP_CREDENTIAL" in sql for sql, _, _ in port_no_cache.calls)
+
+    monkeypatch.setenv("HOME", "/nonexistent-home-for-vertebra-test")
+    monkeypatch.setenv("GCE_METADATA_HOST", "127.0.0.1:9")
+    sync_cache = SyncGcpTokenCache({"access_token": "mock-oauth-token"}, allow_ambient_adc=False)
+    port_sync_cache = _AsyncSelectPort([{"embedding": encode_oracle_vector_f32([1.0, 0.0, 0.0, 0.0])}])
+    with_sync_cache = OracleEmbeddingPushdown(
+        port_sync_cache,
+        project_number="123",
+        dimensions=4,
+        token_cache=sync_cache,
+    )
+    assert isinstance(with_sync_cache._token_cache, AsyncGcpTokenCache)
+    await with_sync_cache.embed_query("rotate-once")
+    assert sum("CREATE_CREDENTIAL" in sql for sql, _, _ in port_sync_cache.calls) == 1
+
+    class BrokenTokenCache:
+        def __init__(self, exc: Exception) -> None:
+            self._exc = exc
+
+        async def get_token(self) -> GcpTokenSnapshot:
+            raise self._exc
+
+    for exc in (RuntimeError("oauth daemon offline"), GoogleCloudAuthError("expired grant")):
+        broken: Any = BrokenTokenCache(exc)
+        failing_pushdown = OracleEmbeddingPushdown(
+            _AsyncSelectPort([]),
+            project_number="123",
+            dimensions=4,
+            token_cache=broken,
+        )
+        with pytest.raises(type(exc)):
+            await failing_pushdown.embed_query("fail-loud")
+
+    for bad_top_k in (0, -3):
+        with pytest.raises(ValueError, match="top_k must be positive"):
+            await implicit_none.similarity_search([1.0, 0.0, 0.0, 0.0], table="docs", top_k=bad_top_k)
+
+    oversized_port = _AsyncSelectPort([{"embedding": encode_oracle_vector_f32([1.0, 2.0, 3.0, 4.0, 5.0])}])
+    oversized_pushdown = OracleEmbeddingPushdown(oversized_port, project_number="123", dimensions=4)
+    with pytest.raises(DataError, match="Oracle embedding row"):
+        await oversized_pushdown.embed_query("oversized")
