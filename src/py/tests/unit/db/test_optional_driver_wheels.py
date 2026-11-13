@@ -12,6 +12,11 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from tools.scripts.verify_postgres_wheel import (
+    verify_core_wheel_excludes_postgres_binary_and_stub,
+    verify_postgres_sdist_contents,
+    verify_postgres_wheel_contents,
+)
 from tools.scripts.verify_storage_wheel import (
     COMPANION_SPECS,
     CompanionPackage,
@@ -34,6 +39,7 @@ SIBLING_WHEEL_MANIFESTS: tuple[tuple[str, str, str], ...] = (
     ("vertebra-duckdb", "src/rs/vertebra-duckdb/pyproject.toml", "_duckdb.pyi"),
     ("vertebra-mssql", "src/rs/vertebra-mssql/pyproject.toml", "_mssql.pyi"),
     ("vertebra-mysql", "src/rs/vertebra-mysql/pyproject.toml", "_mysql.pyi"),
+    ("vertebra-postgres", "src/rs/vertebra-postgres/pyproject.toml", "_postgres.pyi"),
     ("vertebra-bigquery", "src/rs/vertebra-bigquery/pyproject.toml", "_bigquery.pyi"),
     ("vertebra-spanner", "src/rs/vertebra-spanner/pyproject.toml", "_spanner.pyi"),
     ("vertebra-storage", "src/rs/vertebra-storage/pyproject.toml", "_storage.pyi"),
@@ -148,6 +154,8 @@ def test_optional_wheel_pyproject_isolation_and_exclusions(
         "_duckdb.pyi",
         "_mssql.pyi",
         "_mysql.pyi",
+        "_oracle.pyi",
+        "_postgres.pyi",
         "_bigquery.pyi",
         "_spanner.pyi",
         "_storage.pyi",
@@ -286,3 +294,93 @@ def test_companion_isolation_runtime_and_makefile_targets(tmp_path: Path, packag
     assert f"verify_storage_wheel.py --package {package}" in proc.stdout
     with pytest.raises(ValueError, match="cannot be combined with --all"):
         verify_storage_wheel_main(["--all", "--companion-wheel", str(tmp_path / "dummy.whl")])
+
+
+def test_postgres_wheel_and_sdist_verifier_checks_isolation(tmp_path: Path) -> None:
+    """verify_postgres_wheel validates core exclusion, stub+binary wheel layout, sdist, and Makefile."""
+    pg_binary = "vertebra/_postgres.cpython-312-x86_64-linux-gnu.so"
+    core_ok = _write_wheel_archive(
+        tmp_path / "core-pg-ok.whl",
+        {
+            "vertebra/db/adapters/postgres/driver.py": b"",
+            "vertebra/db/adapters/postgres/_sync.py": b"",
+            "vertebra/db/adapters/postgres/_async.py": b"",
+            "vertebra/_vertebra.cpython-312-x86_64-linux-gnu.so": b"",
+        },
+    )
+    verify_core_wheel_excludes_postgres_binary_and_stub(core_ok)
+
+    core_leaked = _write_wheel_archive(
+        tmp_path / "core-pg-leak.whl",
+        {
+            "vertebra/db/adapters/postgres/driver.py": b"",
+            "vertebra/db/adapters/postgres/_sync.py": b"",
+            "vertebra/db/adapters/postgres/_async.py": b"",
+            "vertebra/_postgres.pyi": b"",
+        },
+    )
+    with pytest.raises(RuntimeError, match="leaked optional extension artifacts"):
+        verify_core_wheel_excludes_postgres_binary_and_stub(core_leaked)
+
+    pg_ok = _write_wheel_archive(
+        tmp_path / "pg-ok.whl",
+        {"vertebra/_postgres.pyi": b"", pg_binary: b"\x7fELF"},
+    )
+    verify_postgres_wheel_contents(pg_ok)
+
+    pg_leaked = _write_wheel_archive(
+        tmp_path / "pg-leak.whl",
+        {"vertebra/_postgres.pyi": b"", pg_binary: b"", "vertebra/_oracle.pyi": b""},
+    )
+    with pytest.raises(RuntimeError, match="unexpected vertebra/ entries"):
+        verify_postgres_wheel_contents(pg_leaked)
+
+    sdist_ok = _write_sdist_archive(
+        tmp_path / "vertebra_postgres-0.3.0.tar.gz",
+        "vertebra_postgres-0.3.0",
+        {"Cargo.toml": b"", "build.rs": b"", "src/lib.rs": b"", "vertebra/_postgres.pyi": b""},
+    )
+    verify_postgres_sdist_contents(sdist_ok)
+
+    sdist_missing = _write_sdist_archive(
+        tmp_path / "vertebra_postgres-missing.tar.gz",
+        "vertebra_postgres-0.3.0",
+        {"Cargo.toml": b"", "build.rs": b"", "src/lib.rs": b""},
+    )
+    with pytest.raises(RuntimeError, match="missing required entries"):
+        verify_postgres_sdist_contents(sdist_missing)
+
+    proc = subprocess.run(
+        ["make", "-n", "postgres-wheel-check"],
+        cwd=_REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "verify_postgres_wheel.py" in proc.stdout
+
+
+def test_root_pyproject_isolates_postgres_bench_comparators() -> None:
+    """Third-party psycopg/asyncpg comparators live exclusively in dependency-groups.postgres-bench."""
+    data = tomllib.loads((_REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    groups = data.get("dependency-groups", {})
+    pg_bench = groups.get("postgres-bench", [])
+    assert any(isinstance(dep, str) and dep.startswith("psycopg") for dep in pg_bench)
+    assert any(isinstance(dep, str) and dep.startswith("asyncpg") for dep in pg_bench)
+    assert all(isinstance(dep, str) and "python_version < '3.14'" in dep for dep in pg_bench)
+
+    core_deps = data["project"].get("dependencies", [])
+    assert not any("psycopg" in str(dep) or "asyncpg" in str(dep) for dep in core_deps)
+
+    for extra_name, extra_deps in data["project"].get("optional-dependencies", {}).items():
+        assert not any("psycopg" in str(dep) or "asyncpg" in str(dep) for dep in extra_deps), (
+            f"project.optional-dependencies.{extra_name} unexpectedly contains third-party PG driver"
+        )
+
+    for group_name, group_deps in groups.items():
+        if group_name == "postgres-bench":
+            continue
+        assert not any(isinstance(dep, str) and ("psycopg" in dep or "asyncpg" in dep) for dep in group_deps), (
+            f"dependency-groups.{group_name} unexpectedly contains third-party PG comparator"
+        )

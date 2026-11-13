@@ -293,10 +293,9 @@ postgres-test:                                      ## Run vertebra-postgres Rus
 	@echo "${OK} PostgreSQL extension tests passed"
 
 .PHONY: postgres-wheel-check
-postgres-wheel-check:                               ## Build and verify standalone vertebra-postgres wheel and sdist archives
-	@rm -rf /tmp/vertebra-postgres-wheel-check
-	@uv build src/rs/vertebra-postgres --wheel --sdist --out-dir /tmp/vertebra-postgres-wheel-check
-	@uv run --no-sync python -c 'import glob, tarfile, zipfile; whls = glob.glob("/tmp/vertebra-postgres-wheel-check/vertebra_postgres-*.whl"); sdists = glob.glob("/tmp/vertebra-postgres-wheel-check/vertebra_postgres-*.tar.gz"); assert len(whls) == 1 and len(sdists) == 1, (whls, sdists); zf = zipfile.ZipFile(whls[0]); vtb = [n for n in zf.namelist() if n.startswith("vertebra/")]; assert "vertebra/_postgres.pyi" in vtb and len(vtb) == 2 and all(not n.endswith(".py") for n in vtb), vtb; tf = tarfile.open(sdists[0], "r:gz"); names = tf.getnames(); assert any(n.endswith("Cargo.toml") for n in names) and any(n.endswith("build.rs") for n in names) and any(n.endswith("src/lib.rs") for n in names), names'
+postgres-wheel-check:                               ## Build and verify standalone vertebra-postgres wheel, sdist, and 14-class isolation
+	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
+	@PYTHONPATH="src/py:." uv run --no-sync python tools/scripts/verify_postgres_wheel.py
 	@echo "${OK} PostgreSQL wheel and sdist verified"
 
 .PHONY: core-wheel-check
@@ -533,6 +532,19 @@ bench-baseline:                                     ## Record benchmark baseline
 .PHONY: bench-check
 bench-check:                                        ## Compare current benchmarks against baseline (BASELINE=pre-refactor)
 	@uv run --group bench python -m tools.benchmarks.baseline check --baseline $${BASELINE:-pre-refactor}
+
+.PHONY: postgres-bench
+postgres-bench:                                     ## Run comparative PostgreSQL benchmarks and Criterion benches
+	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
+	@cd src/rs && cargo bench -p vertebra-postgres --bench postgres_native --locked
+	@uv run --no-sync --group postgres-bench pytest -m postgres_benchmark src/py/tests/integration/db/test_postgres_benchmarks.py -v
+
+.PHONY: postgres-bench-check
+postgres-bench-check:                               ## Verify Criterion postgres_native benches compile and comparator unit suite passes offline
+	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
+	@cargo check --manifest-path src/rs/Cargo.toml -p vertebra-postgres --benches --locked
+	@uv run --no-sync pytest src/py/tests/unit/tools/test_postgres_benchmarks.py -q
+	@echo "${OK} PostgreSQL benchmark checks passed"
 
 # =============================================================================
 # Release

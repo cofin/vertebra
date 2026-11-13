@@ -11,14 +11,14 @@ license = { text = "MIT" }
 
 [tool.maturin]
 python-source = "../../py"
-python-packages = ["vertebra"]
 module-name = "vertebra._postgres"
 features = ["extension-module"]
-include = ["vertebra/_postgres.pyi"]
+include = [
+    { path = "vertebra/_postgres.pyi", format = ["sdist", "wheel"] },
+]
 exclude = [
     "**/py/vertebra/**/*.py",
     "**/py/vertebra/**/*.so",
-    "**/py/vertebra/**/*.pyd",
     "**/py/vertebra/py.typed",
     "**/py/vertebra/_bigquery.pyi",
     "**/py/vertebra/_bundler.pyi",

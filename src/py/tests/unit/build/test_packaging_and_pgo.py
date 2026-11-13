@@ -683,7 +683,6 @@ def test_optional_extension_pyproject_isolation_and_bundler_extra(
     expected_prefix = [
         "**/py/vertebra/**/*.py",
         "**/py/vertebra/**/*.so",
-        *(["**/py/vertebra/**/*.pyd"] if pkg_slug == "postgres" else []),
         "**/py/vertebra/py.typed",
     ]
     assert maturin_cfg["exclude"] == [*expected_prefix, *other_stubs]

@@ -259,3 +259,74 @@ jobs:
           CARGO_PROFILE_DEV_DEBUG: "0"
           CARGO_INCREMENTAL: "0"
         run: make core-wheel-check
+
+  postgres-wheel-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: [changes, lint]
+    if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.python == 'true' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.ci == 'true'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "src/rs"
+          shared-key: "vertebra"
+          cache-on-failure: true
+      - uses: oven-sh/setup-bun@v2
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          python-version: "3.12"
+      - name: Build TypeScript client bundle
+        run: make ts-install && make ts-build
+      - name: Verify vertebra-postgres wheel isolation and 14-class contract
+        env:
+          CARGO_PROFILE_DEV_DEBUG: "0"
+          CARGO_INCREMENTAL: "0"
+        run: make postgres-wheel-check
+
+  postgres-conformance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    needs: [changes, lint]
+    if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.python == 'true' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.ci == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        pg_version: ["14", "15", "16", "17", "18"]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "src/rs"
+          key: "pg-conformance-${{ matrix.pg_version }}"
+          shared-key: "vertebra"
+          cache-on-failure: true
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          python-version: "3.12"
+      - name: Build native extensions
+        env:
+          CARGO_PROFILE_DEV_DEBUG: "0"
+          CARGO_INCREMENTAL: "0"
+        run: uv sync --frozen --group test && make dev
+      - name: Run zero-skip PostgreSQL ${{ matrix.pg_version }} conformance
+        env:
+          VERTEBRA_CONFORMANCE_DOCKER: "1"
+          VERTEBRA_CONFORMANCE_POSTGRES_REQUIRE_ZERO_SKIPS: "1"
+          VERTEBRA_CONFORMANCE_ENGINES: postgres
+          VERTEBRA_CONFORMANCE_POSTGRES_VERSION: ${{ matrix.pg_version }}
+        run: uv run --no-sync pytest src/py/tests/integration/db/test_driver_conformance.py -k "postgres-${{ matrix.pg_version }}" -v
+      - name: Run live replication, feature, and deadline suites (PG18)
+        if: matrix.pg_version == '18'
+        env:
+          VERTEBRA_CONFORMANCE_DOCKER: "1"
+          VERTEBRA_CONFORMANCE_POSTGRES_REQUIRE_ZERO_SKIPS: "1"
+        run: uv run --no-sync pytest src/py/tests/integration/db/test_postgres_replication_live.py src/py/tests/integration/db/test_postgres_native_features_live.py src/py/tests/integration/db/test_postgres_command_deadlines.py -v

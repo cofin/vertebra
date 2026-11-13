@@ -199,7 +199,7 @@ class _BaseCloudSQLDialer:
             return pub_pem, priv_pem
 
         if native_mod is None:
-            ensure_module("vertebra._vertebra", package="vertebra-core", extra="gcp")
+            ensure_module("vertebra._vertebra", package="vertebra-core")
         ensure_module("cryptography.hazmat.primitives.asymmetric.rsa", package="cryptography")
         msg = "Ephemeral RSA keypair generation requires vertebra._vertebra or cryptography"
         raise RuntimeError(msg)

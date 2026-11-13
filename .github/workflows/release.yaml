@@ -56,7 +56,7 @@ jobs:
           - name: postgres
             path: src/rs/vertebra-postgres
             module: vertebra._postgres
-            exports: SyncPostgresClient AsyncPostgresClient
+            exports: SyncPostgresClient AsyncPostgresClient SyncPostgresPool AsyncPostgresPool SyncPostgresPortal AsyncPostgresPortal SyncPostgresArrowStream AsyncPostgresArrowStream SyncPostgresCopyOut SyncPostgresCopyIn AsyncPostgresCopyOut AsyncPostgresCopyIn AsyncPostgresListener AsyncPostgresReplication
           - name: spanner
             path: src/rs/vertebra-spanner
             module: vertebra._spanner
@@ -230,8 +230,35 @@ jobs:
               assert all(hasattr(module, export) for export in exports)
               assert importlib.metadata.version(f"vertebra-{name}") == vertebra.__version__
           pg_mod = importlib.import_module("vertebra._postgres")
+          assert pg_mod.GIL_USED is False
+          assert isinstance(pg_mod.FREE_THREADED, bool)
+          pg_classes = (
+              "SyncPostgresClient",
+              "AsyncPostgresClient",
+              "SyncPostgresPool",
+              "AsyncPostgresPool",
+              "SyncPostgresPortal",
+              "AsyncPostgresPortal",
+              "SyncPostgresArrowStream",
+              "AsyncPostgresArrowStream",
+              "SyncPostgresCopyOut",
+              "SyncPostgresCopyIn",
+              "AsyncPostgresCopyOut",
+              "AsyncPostgresCopyIn",
+              "AsyncPostgresListener",
+              "AsyncPostgresReplication",
+          )
+          assert all(isinstance(getattr(pg_mod, cls_name, None), type) for cls_name in pg_classes)
+          assert all(not hasattr(_vertebra, cls_name) for cls_name in pg_classes)
           assert pg_mod.SyncPostgresClient(user="u", database="d").closed is True
           assert pg_mod.AsyncPostgresClient(user="u", database="d").parameters == {}
+          sync_pool = pg_mod.SyncPostgresPool(user="u", database="d", sslmode="disable", min_size=0, max_size=2)
+          async_pool = pg_mod.AsyncPostgresPool(user="u", database="d", sslmode="disable", min_size=0, max_size=2)
+          sync_pool.validate_configuration(user="u", database="d", sslmode="disable", min_size=0, max_size=4)
+          async_pool.validate_configuration(user="u", database="d", sslmode="disable", min_size=0, max_size=4)
+          assert sync_pool.closed is False and async_pool.closed is False
+          sync_pool.close()
+          assert sync_pool.closed is True
           assert not hasattr(_vertebra, "Bundler")
           assert not hasattr(_vertebra, "SyncBigQueryClient")
           assert not hasattr(_vertebra, "SyncDuckDBClient")

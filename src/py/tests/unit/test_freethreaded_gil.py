@@ -62,6 +62,25 @@ def test_native_modules_declare_gil_used_false() -> None:
             assert getattr(ext_mod, "GIL_USED", None) is False
         if mod_name == "vertebra._postgres":
             assert isinstance(getattr(ext_mod, "FREE_THREADED", None), bool)
+            for pg_export in (
+                "SyncPostgresClient",
+                "AsyncPostgresClient",
+                "SyncPostgresPool",
+                "AsyncPostgresPool",
+                "SyncPostgresPortal",
+                "AsyncPostgresPortal",
+                "SyncPostgresArrowStream",
+                "AsyncPostgresArrowStream",
+                "SyncPostgresCopyOut",
+                "SyncPostgresCopyIn",
+                "AsyncPostgresCopyOut",
+                "AsyncPostgresCopyIn",
+                "AsyncPostgresListener",
+                "AsyncPostgresReplication",
+            ):
+                assert isinstance(getattr(ext_mod, pg_export, None), type), (
+                    f"Missing native PostgreSQL type {pg_export}"
+                )
 
     oracle_mod = pytest.importorskip("vertebra._oracle")
     assert oracle_mod.GIL_USED is False
@@ -138,6 +157,97 @@ def test_oracle_native_clients_concurrent_construction() -> None:
         outcomes = list(pool.map(_build, range(8)))
 
     assert outcomes == [(True, True, True)] * 8
+    if was_disabled and checker is not None:
+        assert checker() is False
+
+
+def test_postgres_native_clients_and_pools_concurrent_construction() -> None:
+    """Verify vertebra._postgres constructs clients and pools across 8 threads without enabling GIL."""
+    postgres_mod = pytest.importorskip("vertebra._postgres")
+    checker = getattr(sys, "_is_gil_enabled", None)
+    was_disabled = bool(checker is not None and not checker())
+    barrier = threading.Barrier(8)
+
+    def _build(worker_id: int) -> tuple[bool, bool, bool, bool]:
+        barrier.wait(timeout=5.0)
+        rejected_bad_tls = False
+        try:
+            postgres_mod.SyncPostgresClient(
+                user=f"ft_{worker_id}",
+                database="postgres",
+                unix_socket="/tmp/.s.PGSQL.5432",
+                sslmode="require",
+            )
+        except ValueError:
+            rejected_bad_tls = True
+
+        sync_client = postgres_mod.SyncPostgresClient(
+            user=f"ft_{worker_id}",
+            database="postgres",
+            host="127.0.0.1",
+            port=5432,
+            sslmode="disable",
+        )
+        async_client = postgres_mod.AsyncPostgresClient(
+            user=f"ft_async_{worker_id}",
+            database="postgres",
+            host="127.0.0.1",
+            port=5432,
+            sslmode="disable",
+        )
+        sync_pool = postgres_mod.SyncPostgresPool(
+            user=f"ft_pool_{worker_id}",
+            database="postgres",
+            host="127.0.0.1",
+            port=5432,
+            sslmode="disable",
+            min_size=0,
+            max_size=2,
+        )
+        async_pool = postgres_mod.AsyncPostgresPool(
+            user=f"ft_apool_{worker_id}",
+            database="postgres",
+            host="127.0.0.1",
+            port=5432,
+            sslmode="disable",
+            min_size=0,
+            max_size=2,
+        )
+        try:
+            sync_pool.validate_configuration(
+                user=f"ft_pool_{worker_id}",
+                database="postgres",
+                host="127.0.0.1",
+                port=5432,
+                sslmode="disable",
+                min_size=0,
+                max_size=4,
+            )
+            async_pool.validate_configuration(
+                user=f"ft_apool_{worker_id}",
+                database="postgres",
+                host="127.0.0.1",
+                port=5432,
+                sslmode="disable",
+                min_size=0,
+                max_size=4,
+            )
+            ok_pools = sync_pool.closed is False and async_pool.closed is False
+            ok_clients = sync_client.closed is True and async_client.closed is True
+            sync_pool.close()
+            sync_client.close()
+            ok_closed = sync_pool.closed is True and sync_client.closed is True
+            return (rejected_bad_tls, ok_pools, ok_clients, ok_closed)
+        finally:
+            if not sync_pool.closed:
+                sync_pool.close()
+            if not sync_client.closed:
+                sync_client.close()
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        outcomes = list(pool.map(_build, range(8)))
+
+    assert outcomes == [(True, True, True, True)] * 8
     if was_disabled and checker is not None:
         assert checker() is False
 
@@ -235,6 +345,18 @@ def test_native_pyclasses_enforce_immutable_type() -> None:
         oracle_mod.AsyncOracleListener,
         postgres_mod.SyncPostgresClient,
         postgres_mod.AsyncPostgresClient,
+        postgres_mod.SyncPostgresPool,
+        postgres_mod.AsyncPostgresPool,
+        postgres_mod.SyncPostgresPortal,
+        postgres_mod.AsyncPostgresPortal,
+        postgres_mod.SyncPostgresArrowStream,
+        postgres_mod.AsyncPostgresArrowStream,
+        postgres_mod.SyncPostgresCopyOut,
+        postgres_mod.SyncPostgresCopyIn,
+        postgres_mod.AsyncPostgresCopyOut,
+        postgres_mod.AsyncPostgresCopyIn,
+        postgres_mod.AsyncPostgresListener,
+        postgres_mod.AsyncPostgresReplication,
         spanner_mod.SyncSpannerClient,
         spanner_mod.AsyncSpannerClient,
         duckdb_mod.SyncDuckDBClient,

@@ -260,6 +260,10 @@ bench = [
 duckdb = [
     "duckdb>=1.0",
 ]
+postgres-bench = [
+    "asyncpg>=0.30; python_version < '3.14'",
+    "psycopg[binary]>=3.2,<3.4; python_version < '3.14'",
+]
 
 [tool.uv.sources]
 vertebra-bigquery = { path = "src/rs/vertebra-bigquery", editable = true }
@@ -321,6 +325,9 @@ known-first-party = ["vertebra"]
 [tool.pytest.ini_options]
 testpaths = ["src/py/tests"]
 pythonpath = [".", "src/py"]
+markers = [
+    "postgres_benchmark: live PostgreSQL comparative benchmark suite against psycopg and asyncpg",
+]
 
 [tool.coverage.report]
 ignore_errors = true
@@ -382,6 +389,10 @@ module = [
     "django.*",
     "pytest_databases",
     "pytest_databases.*",
+    "asyncpg",
+    "asyncpg.*",
+    "psycopg",
+    "psycopg.*",
     "concurrent.interpreters",
 ]
 ignore_missing_imports = true

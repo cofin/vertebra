@@ -6657,6 +6657,7 @@ dependencies = [
  "arrow-schema 60.1.0",
  "base64 0.22.1",
  "bytes",
+ "criterion",
  "fallible-iterator 0.2.0",
  "half",
  "hex",
