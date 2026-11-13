@@ -6739,6 +6739,7 @@ dependencies = [
  "hex",
  "hmac 0.12.1",
  "http",
+ "md-5 0.10.6",
  "object_store",
  "pyo3",
  "pyo3-build-config",

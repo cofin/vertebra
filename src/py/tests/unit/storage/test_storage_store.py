@@ -5,6 +5,7 @@ import asyncio
 import contextlib
 import gc
 import gzip
+import hashlib
 import io
 import os
 import sys
@@ -43,6 +44,9 @@ from vertebra.storage import (
     _arrow,
     parse_byte_range,
 )
+from vertebra.storage import (
+    IntegrityError as StorageIntegrityError,
+)
 from vertebra.storage._arrow import (
     iter_batches_async,
     read_table_async,
@@ -52,6 +56,7 @@ from vertebra.storage._arrow import (
 )
 from vertebra.typing import (
     ImproperConfigurationError,
+    IntegrityError,
     MissingDependencyError,
     PreconditionError,
     VertebraError,
@@ -2515,11 +2520,13 @@ async def test_async_writer_collected_after_finish_is_silent(finish: str) -> Non
 
 
 def test_storage_exports_writers_and_precondition_error() -> None:
-    """vertebra.storage re-exports the streaming writers and PreconditionError in a sorted __all__."""
+    """vertebra.storage re-exports the streaming writers, IntegrityError, and PreconditionError in a sorted __all__."""
+    assert storage.IntegrityError is IntegrityError
+    assert StorageIntegrityError is IntegrityError
     assert storage.PreconditionError is PreconditionError
     assert storage.SyncWritableFile is SyncWritableFile
     assert storage.AsyncWritableFile is AsyncWritableFile
-    assert {"AsyncWritableFile", "PreconditionError", "SyncWritableFile"} <= set(storage.__all__)
+    assert {"AsyncWritableFile", "IntegrityError", "PreconditionError", "SyncWritableFile"} <= set(storage.__all__)
     assert list(storage.__all__) == sorted(storage.__all__)
     assert issubclass(SyncWritableFile, io.RawIOBase)
 
@@ -2909,3 +2916,531 @@ async def test_compose_concatenates_sources_and_rejects_empty(asynchronous: bool
     with pytest.raises(ValueError, match="source"):
         await _resolve(store.compose([], "empty.bin"))
     assert not await _resolve(store.exists("empty.bin"))
+
+
+def _crc32c_table_entry(index: int) -> int:
+    """Compute the 8-bit Castagnoli CRC32C lookup table entry for `index`."""
+    crc = index
+    for _ in range(8):
+        crc = (crc >> 1) ^ 0x82F63B78 if crc & 1 else crc >> 1
+    return crc
+
+
+_CRC32C_TABLE: tuple[int, ...] = tuple(_crc32c_table_entry(idx) for idx in range(256))
+
+
+def _crc32c_hex(data: bytes) -> str:
+    """Compute the 8-character lowercase hexadecimal Castagnoli CRC32C digest of `data`."""
+    crc = 0xFFFFFFFF
+    for byte in data:
+        crc = _CRC32C_TABLE[(crc ^ byte) & 0xFF] ^ (crc >> 8)
+    return f"{crc ^ 0xFFFFFFFF:08x}"
+
+
+def _expected_digests(data: bytes) -> dict[str, str]:
+    """Return reference SHA-256, Castagnoli CRC32C, and MD5 lowercase hex digests for `data`."""
+    return {
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "crc32c": _crc32c_hex(data),
+        "md5": hashlib.md5(data).hexdigest(),
+    }
+
+
+def _split_chunks(payload: bytes) -> list[bytes]:
+    """Split `payload` into three slices for multipart and streaming upload helpers."""
+    if not payload:
+        return []
+    one = len(payload) // 3
+    two = (2 * len(payload)) // 3
+    return [part for part in (payload[:one], payload[one:two], payload[two:]) if part]
+
+
+async def _async_chunk_iter(chunks: list[bytes]) -> AsyncIterator[bytes]:
+    """Yield `chunks` asynchronously."""
+    for chunk in chunks:
+        yield chunk
+
+
+async def _write_with_method(
+    store: Any,
+    write_method: str,
+    key: str,
+    payload: bytes,
+    tmp_path: Path,
+    *,
+    asynchronous: bool,
+    part_size: int = 4096,
+    **kwargs: Any,
+) -> tuple[PutResult, Any]:
+    """Invoke `write_method` on `store` and return `(put_result, writer_or_none)`."""
+    if write_method == "put":
+        return await _resolve(store.put(key, payload, **kwargs)), None
+    if write_method == "put_stream":
+        chunks = _split_chunks(payload)
+        stream_input: Any = _async_chunk_iter(chunks) if asynchronous else iter(chunks)
+        return await _resolve(store.put_stream(key, stream_input, **kwargs)), None
+    if write_method == "put_multipart":
+        parts: list[Any] = [memoryview(chunk) for chunk in _split_chunks(payload)]
+        return await _resolve(store.put_multipart(key, parts, **kwargs)), None
+    if write_method == "put_file":
+        local_src = tmp_path / f"src-{key.replace('/', '_')}.bin"
+        local_src.parent.mkdir(parents=True, exist_ok=True)
+        local_src.write_bytes(payload)
+        return await _resolve(store.put_file(key, local_src, **kwargs)), None
+    writer = store.open_writer(key, part_size=part_size, **kwargs)
+    slices = _split_chunks(payload)
+    if asynchronous:
+        async with writer:
+            for piece in slices:
+                await writer.write(piece)
+    else:
+        with writer:
+            for piece in slices:
+                writer.write(piece)
+    assert isinstance(writer.result, PutResult)
+    return writer.result, writer
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("write_method", ["put", "put_stream", "put_multipart", "put_file", "open_writer"])
+async def test_write_default_checksum_false_returns_none_receipts(
+    tmp_path: Path,
+    asynchronous: bool,
+    write_method: str,
+) -> None:
+    """Default checksum=False writes return None for sha256, crc32c, and md5 across all write paths."""
+    store = _bulk_store(asynchronous)
+    payload = b"default-checksum-disabled-payload"
+    result, _ = await _write_with_method(
+        store,
+        write_method,
+        "items/default.bin",
+        payload,
+        tmp_path,
+        asynchronous=asynchronous,
+    )
+    assert isinstance(result, PutResult)
+    assert result.sha256 is None
+    assert result.crc32c is None
+    assert result.md5 is None
+    assert await _resolve(store.get("items/default.bin")) == payload
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("write_method", ["put", "put_stream", "put_multipart", "put_file", "open_writer"])
+@pytest.mark.parametrize(
+    "payload",
+    [
+        pytest.param(b"", id="empty"),
+        pytest.param(b"123456789", id="rfc3720"),
+        pytest.param(b"vertebra-integrity-chunk-" * 1024, id="multi-chunk"),
+    ],
+)
+async def test_write_checksum_true_populates_sha256_crc32c_and_md5_receipts(
+    tmp_path: Path,
+    asynchronous: bool,
+    write_method: str,
+    payload: bytes,
+) -> None:
+    """checksum=True populates SHA-256, Castagnoli CRC32C, and MD5 receipts across sync/async write paths."""
+    store = _bulk_store(asynchronous)
+    digests = _expected_digests(payload)
+    if payload == b"123456789":
+        assert digests["crc32c"] == "e3069283"
+    elif payload == b"":
+        assert digests["crc32c"] == "00000000"
+
+    result, _ = await _write_with_method(
+        store,
+        write_method,
+        "items/checked.bin",
+        payload,
+        tmp_path,
+        asynchronous=asynchronous,
+        part_size=4096,
+        checksum=True,
+    )
+    assert isinstance(result, PutResult)
+    assert result.size == len(payload)
+    assert result.sha256 == digests["sha256"]
+    assert result.crc32c == digests["crc32c"]
+    assert result.md5 == digests["md5"]
+    assert await _resolve(store.get("items/checked.bin")) == payload
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("write_method", ["put", "put_stream", "put_multipart", "put_file", "open_writer"])
+@pytest.mark.parametrize("digest_field", ["expected_sha256", "expected_crc32c", "expected_md5"])
+async def test_write_expected_digests_pass_and_selective_receipt_population(
+    tmp_path: Path,
+    asynchronous: bool,
+    write_method: str,
+    digest_field: str,
+) -> None:
+    """Matching expected_* digests succeed and populate only requested receipts when checksum=False."""
+    store = _bulk_store(asynchronous)
+    payload = b"selective-expected-digest-payload-" * 128
+    digests = _expected_digests(payload)
+    attr_name = digest_field.removeprefix("expected_")
+
+    result, _ = await _write_with_method(
+        store,
+        write_method,
+        "items/selective.bin",
+        payload,
+        tmp_path,
+        asynchronous=asynchronous,
+        part_size=1024,
+        **{digest_field: digests[attr_name]},
+    )
+    assert getattr(result, attr_name) == digests[attr_name]
+    assert (result.sha256 is not None) == (attr_name == "sha256")
+    assert (result.crc32c is not None) == (attr_name == "crc32c")
+    assert (result.md5 is not None) == (attr_name == "md5")
+
+    all_three, _ = await _write_with_method(
+        store,
+        write_method,
+        "items/all-three.bin",
+        payload,
+        tmp_path,
+        asynchronous=asynchronous,
+        part_size=1024,
+        checksum=True,
+        expected_sha256=digests["sha256"],
+        expected_crc32c=digests["crc32c"],
+        expected_md5=digests["md5"],
+    )
+    assert all_three.sha256 == digests["sha256"]
+    assert all_three.crc32c == digests["crc32c"]
+    assert all_three.md5 == digests["md5"]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("write_method", ["put", "put_stream", "put_multipart", "put_file", "open_writer"])
+@pytest.mark.parametrize(
+    ("digest_field", "wrong_hex"),
+    [
+        ("expected_sha256", "0" * 64),
+        ("expected_crc32c", "ffffffff"),
+        ("expected_md5", "0" * 32),
+    ],
+)
+async def test_write_expected_digest_mismatch_raises_integrity_error_and_preserves_prior_bytes(
+    tmp_path: Path,
+    asynchronous: bool,
+    write_method: str,
+    digest_field: str,
+    wrong_hex: str,
+) -> None:
+    """Mismatched expected_* digests raise IntegrityError before publish and preserve existing object bytes."""
+    store = _bulk_store(asynchronous)
+    await _resolve(store.put("items/guarded.bin", b"prior-intact-bytes"))
+
+    if write_method == "open_writer":
+        writer = store.open_writer("items/guarded.bin", part_size=4, **{digest_field: wrong_hex})
+        with pytest.raises(IntegrityError) as exc_info:
+            if asynchronous:
+                async with writer:
+                    await writer.write(b"corrupted-replacement")
+            else:
+                with writer:
+                    writer.write(b"corrupted-replacement")
+        assert writer.closed
+        assert writer.result is None
+    else:
+        with pytest.raises(IntegrityError) as exc_info:
+            await _write_with_method(
+                store,
+                write_method,
+                "items/guarded.bin",
+                b"corrupted-replacement",
+                tmp_path,
+                asynchronous=asynchronous,
+                **{digest_field: wrong_hex},
+            )
+
+    assert type(exc_info.value) is IntegrityError
+    assert isinstance(exc_info.value, VertebraError)
+    assert isinstance(exc_info.value, OSError)
+    assert await _resolve(store.get("items/guarded.bin")) == b"prior-intact-bytes"
+
+    with pytest.raises(IntegrityError) as fresh_exc:
+        await _write_with_method(
+            store,
+            write_method,
+            "items/never-committed.bin",
+            b"corrupted-fresh",
+            tmp_path,
+            asynchronous=asynchronous,
+            part_size=4,
+            **{digest_field: wrong_hex},
+        )
+    assert type(fresh_exc.value) is IntegrityError
+    assert not await _resolve(store.exists("items/never-committed.bin"))
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("write_method", ["put_stream", "put_file", "open_writer"])
+async def test_s3_multipart_write_receipts_and_mismatch_abort(
+    tmp_path: Path,
+    asynchronous: bool,
+    write_method: str,
+) -> None:
+    """Multi-part (>8 MiB) S3 uploads compute exact receipts and abort before completion on mismatch."""
+    payload = b"s3-multipart-block!!" * (450 * 1024)
+    assert len(payload) > 8 * 1024 * 1024
+    digests = _expected_digests(payload)
+
+    with _s3_multipart_completion_server() as (config, parts, completed):
+        store: Any = AsyncObjectStore(config) if asynchronous else SyncObjectStore(config)
+        with pytest.raises(IntegrityError) as exc_info:
+            await _write_with_method(
+                store,
+                write_method,
+                "output",
+                payload,
+                tmp_path,
+                asynchronous=asynchronous,
+                part_size=8_388_608,
+                expected_sha256="0" * 64,
+            )
+        assert type(exc_info.value) is IntegrityError
+        assert completed == []
+        assert len(parts) >= 1
+
+    with _s3_multipart_completion_server() as (config, parts, completed):
+        store = AsyncObjectStore(config) if asynchronous else SyncObjectStore(config)
+        result, _ = await _write_with_method(
+            store,
+            write_method,
+            "output",
+            payload,
+            tmp_path,
+            asynchronous=asynchronous,
+            part_size=8_388_608,
+            checksum=True,
+            expected_sha256=digests["sha256"],
+            expected_crc32c=digests["crc32c"],
+            expected_md5=digests["md5"],
+        )
+        assert len(completed) == 1
+        assert completed[0] == payload
+        assert len(parts) == 2
+        assert result.sha256 == digests["sha256"]
+        assert result.crc32c == digests["crc32c"]
+        assert result.md5 == digests["md5"]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+async def test_verified_get_and_get_file_pass_and_mismatch_preserves_destination(
+    tmp_path: Path,
+    asynchronous: bool,
+) -> None:
+    """Verified get and get_file enforce expected_sha256 and preserve local destinations on mismatch."""
+    store = _bulk_store(asynchronous)
+    payload = b"verified-download-payload-" * 512
+    good_sha = hashlib.sha256(payload).hexdigest()
+    bad_sha = "a" * 64
+    await _resolve(store.put("downloads/blob.bin", payload))
+
+    fetched = await _resolve(store.get("downloads/blob.bin", expected_sha256=good_sha))
+    assert fetched == payload
+
+    with pytest.raises(IntegrityError) as get_exc:
+        await _resolve(store.get("downloads/blob.bin", expected_sha256=bad_sha))
+    assert type(get_exc.value) is IntegrityError
+
+    good_dst = tmp_path / "good.bin"
+    meta = await _resolve(store.get_file("downloads/blob.bin", good_dst, expected_sha256=good_sha))
+    assert isinstance(meta, ObjectMeta)
+    assert meta.sha256 == good_sha
+    assert good_dst.read_bytes() == payload
+
+    existing_dst = tmp_path / "existing.bin"
+    existing_dst.write_bytes(b"caller-existing-file")
+    with pytest.raises(IntegrityError) as existing_exc:
+        await _resolve(store.get_file("downloads/blob.bin", existing_dst, expected_sha256=bad_sha))
+    assert type(existing_exc.value) is IntegrityError
+    assert existing_dst.read_bytes() == b"caller-existing-file"
+    assert not [item for item in tmp_path.iterdir() if item.name.endswith(".part")]
+
+    fresh_dst = tmp_path / "fresh-absent.bin"
+    with pytest.raises(IntegrityError) as fresh_exc:
+        await _resolve(store.get_file("downloads/blob.bin", fresh_dst, expected_sha256=bad_sha))
+    assert type(fresh_exc.value) is IntegrityError
+    assert not fresh_dst.exists()
+    assert not [item for item in tmp_path.iterdir() if item.name.endswith(".part")]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+async def test_verified_get_stream_and_open_reader_pass_mismatch_and_early_close(
+    asynchronous: bool,
+) -> None:
+    """Verified get_stream and open_reader verify SHA-256 on EOF and allow early close without raising."""
+    store = _bulk_store(asynchronous)
+    payload = b"0123456789abcdef" * 2048
+    good_sha = hashlib.sha256(payload).hexdigest()
+    bad_sha = "b" * 64
+    await _resolve(store.put("streams/blob.bin", payload))
+
+    if asynchronous:
+        stream_chunks = [
+            bytes(buf) async for buf in store.get_stream("streams/blob.bin", chunk_size=4096, expected_sha256=good_sha)
+        ]
+        assert b"".join(stream_chunks) == payload
+
+        with pytest.raises(IntegrityError) as stream_exc:
+            _ = [
+                bytes(buf)
+                async for buf in store.get_stream("streams/blob.bin", chunk_size=4096, expected_sha256=bad_sha)
+            ]
+        assert type(stream_exc.value) is IntegrityError
+
+        early_agen = store.get_stream("streams/blob.bin", chunk_size=4096, expected_sha256=bad_sha)
+        first = bytes(await anext(early_agen))
+        assert first == payload[:4096]
+        await early_agen.aclose()
+
+        async with store.open_reader("streams/blob.bin", chunk_size=4096, expected_sha256=good_sha) as reader:
+            assert await reader.read() == payload
+            assert reader.seek(0) == 0
+            head_part = await reader.read(5000)
+            tail_part = await reader.read()
+            assert head_part + tail_part == payload
+            assert reader.seek(0) == 0
+            iter_chunks = [chunk async for chunk in reader]
+            assert b"".join(iter_chunks) == payload
+
+        with pytest.raises(IntegrityError) as read_exc:
+            async with store.open_reader("streams/blob.bin", chunk_size=4096, expected_sha256=bad_sha) as bad_reader:
+                _ = await bad_reader.read()
+        assert type(read_exc.value) is IntegrityError
+
+        with pytest.raises(IntegrityError) as iter_exc:
+            async with store.open_reader(
+                "streams/blob.bin", chunk_size=4096, expected_sha256=bad_sha
+            ) as bad_iter_reader:
+                _ = [chunk async for chunk in bad_iter_reader]
+        assert type(iter_exc.value) is IntegrityError
+
+        async with store.open_reader("streams/blob.bin", chunk_size=4096, expected_sha256=bad_sha) as early_reader:
+            prefix = await early_reader.read(16)
+            assert prefix == payload[:16]
+    else:
+        stream_chunks = [
+            bytes(buf) for buf in store.get_stream("streams/blob.bin", chunk_size=4096, expected_sha256=good_sha)
+        ]
+        assert b"".join(stream_chunks) == payload
+
+        with pytest.raises(IntegrityError) as stream_exc:
+            _ = [bytes(buf) for buf in store.get_stream("streams/blob.bin", chunk_size=4096, expected_sha256=bad_sha)]
+        assert type(stream_exc.value) is IntegrityError
+
+        early_gen = store.get_stream("streams/blob.bin", chunk_size=4096, expected_sha256=bad_sha)
+        first = bytes(next(early_gen))
+        assert first == payload[:4096]
+        early_gen.close()
+
+        with store.open_reader("streams/blob.bin", chunk_size=4096, expected_sha256=good_sha) as reader:
+            assert reader.read() == payload
+            assert reader.seek(0) == 0
+            head_part = reader.read(5000)
+            tail_part = reader.read()
+            assert head_part + tail_part == payload
+            assert reader.seek(0) == 0
+            assert b"".join(reader) == payload
+
+        with (
+            pytest.raises(IntegrityError) as read_exc,
+            store.open_reader("streams/blob.bin", chunk_size=4096, expected_sha256=bad_sha) as bad_reader,
+        ):
+            _ = bad_reader.read()
+        assert type(read_exc.value) is IntegrityError
+
+        with (
+            pytest.raises(IntegrityError) as iter_exc,
+            store.open_reader("streams/blob.bin", chunk_size=4096, expected_sha256=bad_sha) as bad_iter_reader,
+        ):
+            _ = list(bad_iter_reader)
+        assert type(iter_exc.value) is IntegrityError
+
+        with store.open_reader("streams/blob.bin", chunk_size=4096, expected_sha256=bad_sha) as early_reader:
+            prefix = early_reader.read(16)
+            assert prefix == payload[:16]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize(
+    ("operation", "bad_kwargs"),
+    [
+        ("put", {"expected_sha256": "A" * 64}),
+        ("put", {"expected_sha256": "abcd"}),
+        ("put", {"expected_sha256": f"{'0' * 63}g"}),
+        ("put", {"expected_sha256": ""}),
+        ("put", {"expected_crc32c": "E3069283"}),
+        ("put", {"expected_crc32c": "e30692"}),
+        ("put", {"expected_crc32c": "zzzzzzzz"}),
+        ("put", {"expected_md5": "D" * 32}),
+        ("put", {"expected_md5": "d41d8c"}),
+        ("put", {"expected_md5": f"{'0' * 31}z"}),
+        ("put_stream", {"expected_sha256": "A" * 64}),
+        ("put_stream", {"expected_crc32c": "E3069283"}),
+        ("put_stream", {"expected_md5": "D" * 32}),
+        ("put_multipart", {"expected_sha256": "short"}),
+        ("put_multipart", {"expected_crc32c": "short"}),
+        ("put_multipart", {"expected_md5": "short"}),
+        ("put_file", {"expected_sha256": "A" * 64}),
+        ("put_file", {"expected_crc32c": "E3069283"}),
+        ("put_file", {"expected_md5": "D" * 32}),
+        ("open_writer", {"expected_sha256": "A" * 64}),
+        ("open_writer", {"expected_crc32c": "E3069283"}),
+        ("open_writer", {"expected_md5": "D" * 32}),
+        ("get", {"expected_sha256": "A" * 64}),
+        ("get", {"expected_sha256": "short"}),
+        ("get_file", {"expected_sha256": "A" * 64}),
+        ("get_stream", {"expected_sha256": "A" * 64}),
+        ("open_reader", {"expected_sha256": "A" * 64}),
+        ("open_reader", {"expected_sha256": ""}),
+    ],
+)
+async def test_malformed_expected_digest_raises_value_error_before_io(
+    tmp_path: Path,
+    asynchronous: bool,
+    operation: str,
+    bad_kwargs: dict[str, str],
+) -> None:
+    """Malformed expected digest hex strings raise ValueError prior to filesystem or backend I/O."""
+    store = _bulk_store(asynchronous)
+    with pytest.raises(ValueError, match="lowercase hexadecimal"):
+        if operation == "put":
+            await _resolve(store.put("bad/key.bin", b"x", **bad_kwargs))
+        elif operation == "put_stream":
+            await _resolve(store.put_stream("bad/key.bin", [b"x"], **bad_kwargs))
+        elif operation == "put_multipart":
+            await _resolve(store.put_multipart("bad/key.bin", [b"x"], **bad_kwargs))
+        elif operation == "put_file":
+            await _resolve(store.put_file("bad/key.bin", tmp_path / "does-not-exist.bin", **bad_kwargs))
+        elif operation == "open_writer":
+            store.open_writer("bad/key.bin", **bad_kwargs)
+        elif operation == "get":
+            await _resolve(store.get("bad/missing.bin", **bad_kwargs))
+        elif operation == "get_file":
+            await _resolve(store.get_file("bad/missing.bin", tmp_path / "out.bin", **bad_kwargs))
+        elif operation == "get_stream":
+            if asynchronous:
+                async for _ in store.get_stream("bad/missing.bin", **bad_kwargs):
+                    pass
+            else:
+                for _ in store.get_stream("bad/missing.bin", **bad_kwargs):
+                    pass
+        elif operation == "open_reader":
+            store.open_reader("bad/missing.bin", **bad_kwargs)
