@@ -125,7 +125,7 @@ Nine cohesive chapters (`32` tasks) remain to finish logical replication supervi
 
 ## 5. Implementation Plan
 
-- [ ] [ch01-replication-supervision](chapters/ch01-replication-supervision/spec.md) — Generation-fenced `ReplicationSupervisor`, bounded control/event channels, monotonic LSN acks, and identity-verified `connect_logical_verified` resume.
+- [~] [ch01-replication-supervision](chapters/ch01-replication-supervision/spec.md) — Generation-fenced `ReplicationSupervisor`, bounded control/event channels, monotonic LSN acks, and identity-verified `connect_logical_verified` resume.
 - [ ] [ch02-replication-python-bridge](chapters/ch02-replication-python-bridge/spec.md) — Cancel-safe `spawn_rust_db_task_with_attr_and_future`, frozen `AsyncPostgresReplication`, 14-class `_postgres.pyi`, and PyO3 FFI OKF sync.
 - [ ] [ch03-cdc-options-and-bind-compiler](chapters/ch03-cdc-options-and-bind-compiler/spec.md) — `PostgresChangeSource` CAS checkpoint-before-ack coordinator, `EventSessionRegistry`, libpq/cloud `options.py`, and single-pass lexer `binds.py`.
 - [ ] [ch04-permanent-native-postgres-drivers](chapters/ch04-permanent-native-postgres-drivers/spec.md) — Permanent `SyncPostgreSQLDriver` (`_sync.py`) and `AsyncPostgreSQLDriver` (`_async.py`) wiring native pools, pipelines, `VTBARROW`, and event hooks.

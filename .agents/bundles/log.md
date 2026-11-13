@@ -1,5 +1,9 @@
 # Bundle Activity Log
 
+## [2026-11-13T01:52:00Z] chapter-checkpoint | native-postgres-driver ch01-replication-supervision
+
+- Completed `ch01-replication-supervision` (`t01`–`t02`) at `7d50fd42` on `feat/postgres-driver-complete`: added `ReplicationSupervisor`, `ReplicationEventDelivery`, `ReplicationStreamEvent`, `PostgresReplicationResume`, `raw_reconnect_delay` (`MAX_RAW_RECONNECT_ATTEMPTS = 8`), and `PostgresReplicationConnection::connect_logical_verified`, verified across `56` wire tests (`postgres_replication_wire_tests`) and `cargo clippy --all-targets -- -D warnings`.
+
 ## [2026-11-13T20:42:00Z] archive | mcp-protocol-completeness
 
 - Archived `mcp-protocol-completeness` (`7` chapters, `25` tasks, `c4380215..e95e1f19`), delivering single-pass `Tool.authorize`/`Tool.call` (`-32004`/`-32005`), `Mcp-Param-*` validation (`-32020`), expiring single-use `ConfirmationGate`, dual-mode `SUPPORTED_PROTOCOL_VERSIONS` (`MCPSessionStore`, `GET /mcp` SSE, `DELETE /mcp`, `2025-03-26` batches), `resources/subscribe` & `subscriptions/listen`, `SKILLS_EXTENSION` + SEP-1865 `UI_EXTENSION` across mounts (`litestar-mcp>=0.20.0`), incremental `run_stdio_server` (`vtb ai mcp serve --app`), `OidcTokenSource` (`vtb ai mcp bridge --audience`), ES256 `IapIdentitySource`, updated docs/changelog, and present-tense OKF chapters (`mcp-and-a2a-protocol-harness.md` `147L`, `mcp-limitations.md` `58L`, `cli.md`, `litestar.md`, `polyglot-test-matrix.md`).
