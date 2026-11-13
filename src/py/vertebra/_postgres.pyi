@@ -11,6 +11,8 @@ from vertebra.db.adapters.postgres.types import (
     PostgresPipelineOperation,
     PostgresPipelineOutcome,
     PostgresQueryResult,
+    PostgresReplicationIdentity,
+    PostgresReplicationRecord,
     PostgresValue,
 )
 
@@ -394,6 +396,26 @@ class AsyncPostgresClient:
         reconnect: bool = False,
     ) -> Awaitable[AsyncPostgresListener]:
         """Open a dedicated non-pooled Direct/Session PostgreSQL LISTEN/NOTIFY session asynchronously."""
+        ...
+
+    def replication_identity(
+        self,
+        slot: str,
+        publication: str,
+    ) -> Awaitable[PostgresReplicationIdentity]:
+        """Verify slot and publication catalog metadata alongside IDENTIFY_SYSTEM without entering CopyBoth."""
+        ...
+
+    def open_replication(
+        self,
+        slot: str,
+        publication: str,
+        *,
+        start_lsn: int | None = None,
+        queue_capacity: int = 1024,
+        reconnect: bool = True,
+    ) -> Awaitable[AsyncPostgresReplication]:
+        """Open a dedicated non-pooled Direct/Session logical pgoutput replication stream asynchronously."""
         ...
 
     @property
@@ -876,6 +898,48 @@ class AsyncPostgresListener:
         """Idempotently close the listener on async context exit without suppressing exceptions."""
         ...
 
+@final
+class AsyncPostgresReplication:
+    """Dedicated non-pooled asynchronous PostgreSQL logical replication stream handle."""
+
+    @property
+    def closed(self) -> bool:
+        """Return a read-only zero-I/O snapshot of whether the replication supervisor has closed."""
+        ...
+
+    def next(self) -> Awaitable[PostgresReplicationRecord | None]:
+        """Resolve to the next PostgresReplicationRecord or None once permanently closed."""
+        ...
+
+    def __aiter__(self) -> AsyncPostgresReplication:
+        """Return self as an asynchronous replication record iterator."""
+        ...
+
+    def __anext__(self) -> Awaitable[PostgresReplicationRecord]:
+        """Resolve to the next PostgresReplicationRecord or raise StopAsyncIteration once closed."""
+        ...
+
+    def acknowledge(self, commit_end_lsn: int) -> int:
+        """Acknowledge a published commit boundary on the active generation and return the monotonic LSN."""
+        ...
+
+    def aclose(self) -> Awaitable[None]:
+        """Idempotently shut down the replication supervisor and terminate the active WAL stream."""
+        ...
+
+    def __aenter__(self) -> Awaitable[AsyncPostgresReplication]:
+        """Enter an async with block resolving to this AsyncPostgresReplication."""
+        ...
+
+    def __aexit__(
+        self,
+        exc_type: type[BaseException] | None = None,
+        exc_val: BaseException | None = None,
+        exc_tb: TracebackType | None = None,
+    ) -> Awaitable[None]:
+        """Idempotently close the replication stream on async context exit without suppressing exceptions."""
+        ...
+
 __all__ = [
     "FREE_THREADED",
     "GIL_USED",
@@ -886,6 +950,7 @@ __all__ = [
     "AsyncPostgresListener",
     "AsyncPostgresPool",
     "AsyncPostgresPortal",
+    "AsyncPostgresReplication",
     "SyncPostgresArrowStream",
     "SyncPostgresClient",
     "SyncPostgresCopyIn",

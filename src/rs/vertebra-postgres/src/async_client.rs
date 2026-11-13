@@ -2326,6 +2326,40 @@ impl PyAsyncPostgresClient {
         spawn_open_listener(py, &self.session, channels, queue_capacity, reconnect)
     }
 
+    /// Verify slot and publication catalog metadata alongside `IDENTIFY_SYSTEM` without entering `CopyBoth`.
+    pub fn replication_identity<'py>(
+        &self,
+        py: Python<'py>,
+        slot: String,
+        publication: String,
+    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+        crate::replication::spawn_replication_identity(py, &self.session, slot, publication)
+    }
+
+    /// Open a dedicated non-pooled `Direct`/`Session` logical `pgoutput` replication supervisor asynchronously
+    /// via `_vertebra_postgres_completion_drainer`.
+    #[pyo3(signature = (slot, publication, *, start_lsn = None, queue_capacity = 1024, reconnect = true))]
+    pub fn open_replication<'py>(
+        &self,
+        py: Python<'py>,
+        slot: String,
+        publication: String,
+        #[pyo3(from_py_with = crate::replication::extract_opt_lsn)] start_lsn: Option<u64>,
+        #[pyo3(from_py_with = crate::replication::extract_replication_queue_capacity)]
+        queue_capacity: usize,
+        #[pyo3(from_py_with = extract_strict_bool)] reconnect: bool,
+    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+        crate::replication::spawn_open_replication(
+            py,
+            &self.session,
+            slot,
+            publication,
+            start_lsn,
+            queue_capacity,
+            reconnect,
+        )
+    }
+
     /// Return `True` unless an authenticated session has reached `ReadyForQuery(Idle)` and has not been closed.
     #[getter]
     pub fn closed(&self) -> bool {

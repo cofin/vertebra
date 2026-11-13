@@ -13,20 +13,29 @@ pub use supervisor::{
 };
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use postgres_protocol::message::backend::Message;
 use postgres_protocol::message::frontend;
+use pyo3::exceptions::{PyStopAsyncIteration, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
-use pyo3::types::PyDict;
+use pyo3::types::{PyBool, PyBytes, PyDict, PyList};
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
+use tokio::sync::Notify;
 use tokio::time::Instant;
+use vertebra_db::py_async::{
+    RustDbTaskAwaitable, spawn_rust_db_task_with_attr, spawn_rust_db_task_with_attr_and_cancel,
+    spawn_rust_db_task_with_attr_and_future,
+};
 
+use crate::async_client::POSTGRES_COMPLETION_DRAINER_ATTR;
 use crate::codecs::{CodecContext, OID_OID, TEXT_OID};
 use crate::config::PostgresConfig;
-use crate::errors::PostgresError;
+use crate::errors::{PostgresError, postgres_error_to_py};
 use crate::extended::Parameter;
 use crate::protocol::{
     MAX_BACKEND_FRAME_LENGTH, ReplicationBackendMessage, TERMINATE_FRAME, parse_error_fields,
@@ -67,6 +76,7 @@ const SOCKET_DISCARD_GRACE: Duration = Duration::from_millis(50);
 struct CachedReplicationPyTypes {
     pg_unchanged_toast: Py<PyAny>,
     replication_identity: Py<PyAny>,
+    replication_record: Py<PyAny>,
 }
 
 static REPLICATION_PY_TYPES: PyOnceLock<CachedReplicationPyTypes> = PyOnceLock::new();
@@ -570,8 +580,674 @@ pub fn verified_identity_to_python(
         .unbind())
 }
 
-pub(crate) fn register_pymodule(_m: &Bound<'_, PyModule>) -> PyResult<()> {
-    Ok(())
+fn old_tuple_kind_str(kind: OldTupleKind) -> &'static str {
+    match kind {
+        OldTupleKind::Key => "key",
+        OldTupleKind::Full => "full",
+    }
+}
+
+fn dedup_key_to_python<'py>(
+    py: Python<'py>,
+    dedup: &ReplicationDedupKey,
+) -> PyResult<Bound<'py, PyDict>> {
+    let out = PyDict::new(py);
+    out.set_item("system_identifier", dedup.system_identifier.as_str())?;
+    out.set_item("slot", dedup.slot.as_str())?;
+    out.set_item("begin_final_lsn", dedup.begin_final_lsn)?;
+    out.set_item("transaction_ordinal", dedup.transaction_ordinal)?;
+    Ok(out)
+}
+
+fn relation_schema_to_python<'py>(
+    py: Python<'py>,
+    relation: &PgOutputRelationSchema,
+) -> PyResult<Bound<'py, PyDict>> {
+    let out = PyDict::new(py);
+    out.set_item("relation_oid", relation.relation_oid)?;
+    out.set_item("namespace", relation.namespace.as_str())?;
+    out.set_item("name", relation.name.as_str())?;
+    out.set_item(
+        "replica_identity",
+        char::from(relation.replica_identity).to_string(),
+    )?;
+    let cols = PyList::empty(py);
+    for col in relation.columns.iter() {
+        let col_dict = PyDict::new(py);
+        col_dict.set_item("is_key", col.is_key)?;
+        col_dict.set_item("name", col.name.as_str())?;
+        col_dict.set_item("type_oid", col.type_oid)?;
+        col_dict.set_item("type_modifier", col.type_modifier)?;
+        cols.append(col_dict)?;
+    }
+    out.set_item("columns", cols)?;
+    Ok(out)
+}
+
+/// Losslessly convert a [`ReplicationStreamEvent`] into `vertebra.db.adapters.postgres.types.PostgresReplicationRecord`.
+pub fn replication_stream_event_to_python(
+    py: Python<'_>,
+    event: &ReplicationStreamEvent,
+) -> PyResult<Py<PyAny>> {
+    let py_types = resolve_replication_py_types(py)?;
+    match event {
+        ReplicationStreamEvent::Control {
+            identity,
+            acknowledged_lsn,
+            generation,
+        } => {
+            let payload = PyDict::new(py);
+            payload.set_item("identity", verified_identity_to_python(py, identity)?)?;
+            payload.set_item("acknowledged_lsn", *acknowledged_lsn)?;
+            Ok(py_types
+                .replication_record
+                .bind(py)
+                .call1(("control", payload, py.None(), *generation))?
+                .unbind())
+        }
+        ReplicationStreamEvent::Record { record, generation } => {
+            let payload = PyDict::new(py);
+            let (kind, commit_end_lsn): (&str, Option<u64>) = match record {
+                ReplicationRecord::Begin {
+                    dedup,
+                    xid,
+                    begin_final_lsn,
+                    commit_time_pg_us,
+                } => {
+                    payload.set_item("dedup", dedup_key_to_python(py, dedup)?)?;
+                    payload.set_item("xid", *xid)?;
+                    payload.set_item("begin_final_lsn", *begin_final_lsn)?;
+                    payload.set_item("commit_time_pg_us", *commit_time_pg_us)?;
+                    ("begin", None)
+                }
+                ReplicationRecord::Insert {
+                    dedup,
+                    xid,
+                    relation,
+                    new_tuple,
+                } => {
+                    payload.set_item("dedup", dedup_key_to_python(py, dedup)?)?;
+                    payload.set_item("xid", *xid)?;
+                    payload.set_item("relation", relation_schema_to_python(py, relation)?)?;
+                    payload.set_item(
+                        "new_tuple",
+                        pgoutput_tuple_to_python_dict(py, relation, new_tuple)?,
+                    )?;
+                    ("insert", None)
+                }
+                ReplicationRecord::Update {
+                    dedup,
+                    xid,
+                    relation,
+                    old_kind,
+                    old_tuple,
+                    new_tuple,
+                } => {
+                    payload.set_item("dedup", dedup_key_to_python(py, dedup)?)?;
+                    payload.set_item("xid", *xid)?;
+                    payload.set_item("relation", relation_schema_to_python(py, relation)?)?;
+                    payload.set_item("old_kind", old_kind.map(old_tuple_kind_str))?;
+                    let old_py = match old_tuple {
+                        Some(tuple) => Some(pgoutput_tuple_to_python_dict(py, relation, tuple)?),
+                        None => None,
+                    };
+                    payload.set_item("old_tuple", old_py)?;
+                    payload.set_item(
+                        "new_tuple",
+                        pgoutput_tuple_to_python_dict(py, relation, new_tuple)?,
+                    )?;
+                    ("update", None)
+                }
+                ReplicationRecord::Delete {
+                    dedup,
+                    xid,
+                    relation,
+                    old_kind,
+                    old_tuple,
+                } => {
+                    payload.set_item("dedup", dedup_key_to_python(py, dedup)?)?;
+                    payload.set_item("xid", *xid)?;
+                    payload.set_item("relation", relation_schema_to_python(py, relation)?)?;
+                    payload.set_item("old_kind", old_tuple_kind_str(*old_kind))?;
+                    payload.set_item(
+                        "old_tuple",
+                        pgoutput_tuple_to_python_dict(py, relation, old_tuple)?,
+                    )?;
+                    ("delete", None)
+                }
+                ReplicationRecord::Truncate {
+                    dedup,
+                    xid,
+                    relations,
+                    cascade,
+                    restart_identity,
+                } => {
+                    payload.set_item("dedup", dedup_key_to_python(py, dedup)?)?;
+                    payload.set_item("xid", *xid)?;
+                    let rel_list = PyList::empty(py);
+                    for rel in relations {
+                        rel_list.append(relation_schema_to_python(py, rel)?)?;
+                    }
+                    payload.set_item("relations", rel_list)?;
+                    payload.set_item("cascade", *cascade)?;
+                    payload.set_item("restart_identity", *restart_identity)?;
+                    ("truncate", None)
+                }
+                ReplicationRecord::Message {
+                    dedup,
+                    xid,
+                    transactional,
+                    message_lsn,
+                    prefix,
+                    content,
+                } => {
+                    let dedup_py = match dedup {
+                        Some(key) => Some(dedup_key_to_python(py, key)?),
+                        None => None,
+                    };
+                    payload.set_item("dedup", dedup_py)?;
+                    payload.set_item("xid", *xid)?;
+                    payload.set_item("transactional", *transactional)?;
+                    payload.set_item("message_lsn", *message_lsn)?;
+                    payload.set_item("prefix", prefix.as_str())?;
+                    payload.set_item("content", PyBytes::new(py, content.as_ref()))?;
+                    ("message", None)
+                }
+                ReplicationRecord::Commit {
+                    dedup,
+                    xid,
+                    flags,
+                    commit_lsn,
+                    commit_end_lsn,
+                    commit_time_pg_us,
+                    origin_name,
+                    origin_lsn,
+                } => {
+                    payload.set_item("dedup", dedup_key_to_python(py, dedup)?)?;
+                    payload.set_item("xid", *xid)?;
+                    payload.set_item("flags", *flags)?;
+                    payload.set_item("commit_lsn", *commit_lsn)?;
+                    payload.set_item("commit_end_lsn", *commit_end_lsn)?;
+                    payload.set_item("commit_time_pg_us", *commit_time_pg_us)?;
+                    payload.set_item("origin_name", origin_name.as_deref())?;
+                    payload.set_item("origin_lsn", *origin_lsn)?;
+                    ("commit", Some(*commit_end_lsn))
+                }
+            };
+            Ok(py_types
+                .replication_record
+                .bind(py)
+                .call1((kind, payload, commit_end_lsn, *generation))?
+                .unbind())
+        }
+    }
+}
+
+pub(crate) fn extract_strict_lsn(obj: &Bound<'_, PyAny>, field_name: &str) -> PyResult<u64> {
+    if obj.is_instance_of::<PyBool>() {
+        return Err(PyTypeError::new_err(format!(
+            "expected int {field_name}, not bool"
+        )));
+    }
+    let val = obj
+        .extract::<i128>()
+        .map_err(|_| PyTypeError::new_err(format!("expected int {field_name}")))?;
+    u64::try_from(val).map_err(|_| {
+        PyValueError::new_err(format!(
+            "{field_name} must be in 0..={}, got {val}",
+            u64::MAX
+        ))
+    })
+}
+
+struct ReplicationNextState {
+    next_id: u64,
+    claimed: Option<(u64, Py<PyAny>)>,
+    in_flight: HashSet<u64>,
+}
+
+struct ReplicationNextControl {
+    state: Mutex<ReplicationNextState>,
+    retire_done: Notify,
+}
+
+impl ReplicationNextControl {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            state: Mutex::new(ReplicationNextState {
+                next_id: 0,
+                claimed: None,
+                in_flight: HashSet::new(),
+            }),
+            retire_done: Notify::new(),
+        })
+    }
+
+    fn try_claim(self: &Arc<Self>, py: Python<'_>) -> PyResult<(u64, ReplicationInFlightGuard)> {
+        let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((_, ref fut)) = st.claimed {
+            let done = fut
+                .bind(py)
+                .call_method0("done")
+                .and_then(|v| v.extract::<bool>())
+                .unwrap_or(false);
+            if !done {
+                return Err(postgres_error_to_py(
+                    py,
+                    PostgresError::Interface(
+                        "concurrent AsyncPostgresReplication.next() calls are not permitted"
+                            .to_string(),
+                    ),
+                ));
+            }
+            st.claimed = None;
+        }
+        st.next_id = st.next_id.wrapping_add(1);
+        let id = st.next_id;
+        st.in_flight.insert(id);
+        Ok((
+            id,
+            ReplicationInFlightGuard {
+                ctl: Arc::clone(self),
+                id,
+            },
+        ))
+    }
+
+    fn attach_future(&self, id: u64, future: Py<PyAny>) {
+        let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if st.in_flight.contains(&id) {
+            st.claimed = Some((id, future));
+        }
+    }
+
+    async fn wait_prior_retired(&self, my_id: u64) {
+        loop {
+            let notified = self.retire_done.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            {
+                let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                if !st.in_flight.iter().any(|&other| other != my_id) {
+                    return;
+                }
+            }
+            notified.await;
+        }
+    }
+}
+
+struct ReplicationInFlightGuard {
+    ctl: Arc<ReplicationNextControl>,
+    id: u64,
+}
+
+impl Drop for ReplicationInFlightGuard {
+    fn drop(&mut self) {
+        {
+            let mut st = self.ctl.state.lock().unwrap_or_else(|e| e.into_inner());
+            st.in_flight.remove(&self.id);
+            if st
+                .claimed
+                .as_ref()
+                .is_some_and(|(claimed_id, _)| *claimed_id == self.id)
+            {
+                st.claimed = None;
+            }
+        }
+        self.ctl.retire_done.notify_waiters();
+    }
+}
+
+struct PendingReplicationOutcome {
+    delivery: Option<ReplicationEventDelivery>,
+    _guard: ReplicationInFlightGuard,
+}
+
+struct PendingReplicationError {
+    err: PostgresError,
+    _guard: ReplicationInFlightGuard,
+}
+
+/// Dedicated non-pooled asynchronous PostgreSQL logical replication stream
+/// (`vertebra._postgres.AsyncPostgresReplication`).
+#[pyclass(
+    name = "AsyncPostgresReplication",
+    module = "vertebra._postgres",
+    frozen,
+    immutable_type
+)]
+pub struct PyAsyncPostgresReplication {
+    supervisor: Arc<ReplicationSupervisor>,
+    next_ctl: Arc<ReplicationNextControl>,
+    published_generation: Arc<AtomicU64>,
+}
+
+impl PyAsyncPostgresReplication {
+    /// Wrap an open [`ReplicationSupervisor`] in the frozen Python stream handle.
+    pub(crate) fn from_supervisor(supervisor: ReplicationSupervisor) -> Self {
+        Self {
+            supervisor: Arc::new(supervisor),
+            next_ctl: ReplicationNextControl::new(),
+            published_generation: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    fn spawn_next_inner<'py>(
+        &self,
+        py: Python<'py>,
+        stop_on_none: bool,
+    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+        let _ = py.import("asyncio")?.call_method0("get_running_loop")?;
+        let (call_id, guard) = self.next_ctl.try_claim(py)?;
+        let ctl_worker = Arc::clone(&self.next_ctl);
+        let supervisor = Arc::clone(&self.supervisor);
+        let published_gen = Arc::clone(&self.published_generation);
+
+        let awaitable = spawn_rust_db_task_with_attr_and_future(
+            py,
+            async move {
+                ctl_worker.wait_prior_retired(call_id).await;
+                match supervisor.next_event().await {
+                    Ok(opt_delivery) => Ok(PendingReplicationOutcome {
+                        delivery: opt_delivery,
+                        _guard: guard,
+                    }),
+                    Err(err) => Err(PendingReplicationError { err, _guard: guard }),
+                }
+            },
+            move |py, py_fut, mut outcome| {
+                let Some(delivery) = outcome.delivery.take() else {
+                    drop(outcome);
+                    return if stop_on_none {
+                        Err(PyStopAsyncIteration::new_err(()))
+                    } else {
+                        Ok(py.None())
+                    };
+                };
+                if py_fut.call_method0("cancelled")?.extract::<bool>()? {
+                    drop(delivery);
+                    drop(outcome);
+                    return Err(pyo3::exceptions::asyncio::CancelledError::new_err(
+                        "AsyncPostgresReplication.next() was cancelled",
+                    ));
+                }
+                let py_record = replication_stream_event_to_python(py, delivery.event())?;
+                if py_fut.call_method0("cancelled")?.extract::<bool>()? {
+                    drop(delivery);
+                    drop(outcome);
+                    return Err(pyo3::exceptions::asyncio::CancelledError::new_err(
+                        "AsyncPostgresReplication.next() was cancelled",
+                    ));
+                }
+                let event = match delivery.publish() {
+                    Ok(ev) => ev,
+                    Err(err) => {
+                        drop(outcome);
+                        return Err(postgres_error_to_py(py, err));
+                    }
+                };
+                let generation = match event {
+                    ReplicationStreamEvent::Control { generation, .. }
+                    | ReplicationStreamEvent::Record { generation, .. } => generation,
+                };
+                published_gen.store(generation, Ordering::Release);
+                drop(outcome);
+                Ok(py_record)
+            },
+            |py, pending_err| postgres_error_to_py(py, pending_err.err),
+            POSTGRES_COMPLETION_DRAINER_ATTR,
+        )?;
+        self.next_ctl
+            .attach_future(call_id, awaitable.future_handle(py));
+        Bound::new(py, awaitable)
+    }
+
+    fn spawn_aclose_inner<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+        let supervisor = Arc::clone(&self.supervisor);
+        spawn_rust_db_task_with_attr_and_cancel(
+            py,
+            async move { supervisor.shutdown().await },
+            |py, ()| Ok(py.None()),
+            postgres_error_to_py,
+            || {},
+            POSTGRES_COMPLETION_DRAINER_ATTR,
+        )
+    }
+}
+
+#[pymethods]
+impl PyAsyncPostgresReplication {
+    /// Return a read-only snapshot indicating whether the supervisor is permanently closed (`False` during reconnect backoff).
+    #[getter]
+    pub fn closed(&self) -> bool {
+        self.supervisor.is_closed()
+    }
+
+    /// Await the next `PostgresReplicationRecord` (`control`, `begin`, `insert`, `update`, `delete`, `truncate`, `message`, `commit`) or `None` once closed.
+    pub fn next<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+        self.spawn_next_inner(py, false)
+    }
+
+    /// Return the replication stream itself as an asynchronous iterator.
+    pub fn __aiter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    /// Await the next `PostgresReplicationRecord` or raise `StopAsyncIteration` once closed.
+    pub fn __anext__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+        self.spawn_next_inner(py, true)
+    }
+
+    /// Acknowledge a published commit boundary `commit_end_lsn` on the active published generation.
+    pub fn acknowledge(&self, py: Python<'_>, commit_end_lsn: &Bound<'_, PyAny>) -> PyResult<u64> {
+        let lsn = extract_strict_lsn(commit_end_lsn, "commit_end_lsn")?;
+        let generation = self.published_generation.load(Ordering::Acquire);
+        self.supervisor
+            .acknowledge(generation, lsn)
+            .map_err(|e| postgres_error_to_py(py, e))
+    }
+
+    /// Idempotently shut down the replication supervisor and terminate the active WAL stream cleanly.
+    pub fn aclose<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+        self.spawn_aclose_inner(py)
+    }
+
+    /// Enter an `async with` block resolving to this `AsyncPostgresReplication`.
+    pub fn __aenter__<'py>(slf: PyRef<'py, Self>) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+        let py = slf.py();
+        let py_self: Py<Self> = slf.into_pyobject(py)?.unbind();
+        let awaitable = spawn_rust_db_task_with_attr(
+            py,
+            async { Ok::<(), PostgresError>(()) },
+            move |_py, ()| Ok(py_self.into_any()),
+            postgres_error_to_py,
+            POSTGRES_COMPLETION_DRAINER_ATTR,
+        )?;
+        Bound::new(py, awaitable)
+    }
+
+    /// Idempotently close the replication stream on `async with` exit without suppressing exceptions.
+    #[pyo3(signature = (exc_type = None, exc_val = None, exc_tb = None))]
+    pub fn __aexit__<'py>(
+        &self,
+        py: Python<'py>,
+        exc_type: Option<&Bound<'py, PyAny>>,
+        exc_val: Option<&Bound<'py, PyAny>>,
+        exc_tb: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+        let _ = (exc_type, exc_val, exc_tb);
+        self.spawn_aclose_inner(py)
+    }
+
+    fn __repr__(&self) -> String {
+        let resume = self.supervisor.resume();
+        format!(
+            "AsyncPostgresReplication(generation={}, acknowledged_lsn={}, closed={})",
+            resume.generation,
+            resume.acknowledged_lsn,
+            self.supervisor.is_closed(),
+        )
+    }
+}
+
+pub(crate) fn register_pymodule(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_class::<PyAsyncPostgresReplication>()
+}
+
+struct PendingOpenReplicationGuard {
+    supervisor: Option<ReplicationSupervisor>,
+}
+
+impl PendingOpenReplicationGuard {
+    fn new(supervisor: ReplicationSupervisor) -> Self {
+        Self {
+            supervisor: Some(supervisor),
+        }
+    }
+
+    fn take_into_py_replication(&mut self) -> PyAsyncPostgresReplication {
+        let supervisor = self
+            .supervisor
+            .take()
+            .expect("PendingOpenReplicationGuard consumed exactly once");
+        PyAsyncPostgresReplication::from_supervisor(supervisor)
+    }
+}
+
+impl Drop for PendingOpenReplicationGuard {
+    fn drop(&mut self) {
+        if let Some(supervisor) = self.supervisor.take() {
+            supervisor.cancel();
+        }
+    }
+}
+
+pub(crate) fn extract_opt_lsn(obj: &Bound<'_, PyAny>) -> PyResult<Option<u64>> {
+    if obj.is_none() {
+        return Ok(None);
+    }
+    extract_strict_lsn(obj, "start_lsn").map(Some)
+}
+
+pub(crate) fn extract_replication_queue_capacity(obj: &Bound<'_, PyAny>) -> PyResult<usize> {
+    if obj.is_instance_of::<PyBool>() {
+        return Err(PyTypeError::new_err(
+            "expected int queue_capacity, not bool",
+        ));
+    }
+    let val = obj
+        .extract::<i128>()
+        .map_err(|_| PyTypeError::new_err("expected int queue_capacity"))?;
+    if !(1..=1024).contains(&val) {
+        return Err(PyValueError::new_err(format!(
+            "replication queue_capacity must be between 1 and 1024, got {val}"
+        )));
+    }
+    Ok(val as usize)
+}
+
+fn validate_replication_client_and_identifiers(
+    py: Python<'_>,
+    session: &crate::session::SessionHandle,
+    method: &str,
+    slot: &str,
+    publication: &str,
+) -> PyResult<PostgresConfig> {
+    if session.is_closed() {
+        return Err(postgres_error_to_py(
+            py,
+            PostgresError::Interface(format!(
+                "cannot call {method}() on a closed PostgreSQL client"
+            )),
+        ));
+    }
+    let config = session.config().clone();
+    if matches!(
+        config.pooler_mode,
+        PoolerMode::Transaction | PoolerMode::Statement
+    ) {
+        return Err(postgres_error_to_py(
+            py,
+            PostgresError::UnsupportedFeature(format!(
+                "PostgreSQL logical replication does not support pooler_mode `{}`",
+                config.pooler_mode.as_str()
+            )),
+        ));
+    }
+    ensure_session_capable_pooler(&config).map_err(|e| postgres_error_to_py(py, e))?;
+    validate_replication_identifier(slot, "slot").map_err(|e| postgres_error_to_py(py, e))?;
+    validate_replication_identifier(publication, "publication")
+        .map_err(|e| postgres_error_to_py(py, e))?;
+    Ok(config)
+}
+
+pub(crate) fn spawn_replication_identity<'py>(
+    py: Python<'py>,
+    session: &Arc<crate::session::SessionHandle>,
+    slot: String,
+    publication: String,
+) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    let config = validate_replication_client_and_identifiers(
+        py,
+        session,
+        "replication_identity",
+        &slot,
+        &publication,
+    )?;
+    let awaitable = spawn_rust_db_task_with_attr(
+        py,
+        async move { PostgresReplicationConnection::probe_identity(&config, &slot, &publication).await },
+        |py, identity| verified_identity_to_python(py, &identity),
+        postgres_error_to_py,
+        POSTGRES_COMPLETION_DRAINER_ATTR,
+    )?;
+    Bound::new(py, awaitable)
+}
+
+pub(crate) fn spawn_open_replication<'py>(
+    py: Python<'py>,
+    session: &Arc<crate::session::SessionHandle>,
+    slot: String,
+    publication: String,
+    start_lsn: Option<u64>,
+    queue_capacity: usize,
+    reconnect: bool,
+) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    let config = validate_replication_client_and_identifiers(
+        py,
+        session,
+        "open_replication",
+        &slot,
+        &publication,
+    )?;
+    let awaitable = spawn_rust_db_task_with_attr(
+        py,
+        async move {
+            let supervisor = ReplicationSupervisor::open(
+                config,
+                slot,
+                publication,
+                start_lsn,
+                queue_capacity,
+                reconnect,
+            )
+            .await?;
+            Ok::<PendingOpenReplicationGuard, PostgresError>(PendingOpenReplicationGuard::new(
+                supervisor,
+            ))
+        },
+        |py, mut open_guard| {
+            let py_repl = open_guard.take_into_py_replication();
+            Ok(Py::new(py, py_repl)?.into_any())
+        },
+        postgres_error_to_py,
+        POSTGRES_COMPLETION_DRAINER_ATTR,
+    )?;
+    Bound::new(py, awaitable)
 }
 
 fn resolve_replication_py_types(py: Python<'_>) -> PyResult<&CachedReplicationPyTypes> {
@@ -580,6 +1256,7 @@ fn resolve_replication_py_types(py: Python<'_>) -> PyResult<&CachedReplicationPy
         Ok(CachedReplicationPyTypes {
             pg_unchanged_toast: types_mod.getattr("PG_UNCHANGED_TOAST")?.unbind(),
             replication_identity: types_mod.getattr("PostgresReplicationIdentity")?.unbind(),
+            replication_record: types_mod.getattr("PostgresReplicationRecord")?.unbind(),
         })
     })
 }
@@ -1878,4 +2555,275 @@ async fn discard_raw_connection(conn: &mut PostgresConnection) {
     conn.read_buf.clear();
     conn.write_buf.clear();
     let _ = tokio::time::timeout(SOCKET_DISCARD_GRACE, conn.stream.shutdown()).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::CString;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
+
+    use bytes::Bytes;
+    use pyo3::types::{PyCFunction, PyDict, PyTuple};
+
+    use super::*;
+
+    fn sample_relation() -> Arc<PgOutputRelationSchema> {
+        Arc::new(PgOutputRelationSchema {
+            relation_oid: 16384,
+            namespace: "public".to_string(),
+            name: "events".to_string(),
+            replica_identity: b'f',
+            columns: Arc::from(vec![
+                PgOutputColumn {
+                    is_key: true,
+                    name: "id".to_string(),
+                    type_oid: 23,
+                    type_modifier: -1,
+                },
+                PgOutputColumn {
+                    is_key: false,
+                    name: "payload".to_string(),
+                    type_oid: 17,
+                    type_modifier: -1,
+                },
+                PgOutputColumn {
+                    is_key: false,
+                    name: "note".to_string(),
+                    type_oid: 25,
+                    type_modifier: -1,
+                },
+            ]),
+        })
+    }
+
+    fn sample_dedup(ordinal: u64) -> ReplicationDedupKey {
+        ReplicationDedupKey {
+            system_identifier: "7399123456789".to_string(),
+            slot: "vtb_slot".to_string(),
+            begin_final_lsn: 0x1_0000_0040,
+            transaction_ordinal: ordinal,
+        }
+    }
+
+    #[test]
+    fn lossless_stream_event_conversion_preserves_toast_bytes_and_schema() {
+        Python::initialize();
+        Python::attach(|py| {
+            let rel = sample_relation();
+            let toast_sentinel = resolve_replication_py_types(py)
+                .unwrap()
+                .pg_unchanged_toast
+                .clone_ref(py);
+
+            let events = [
+                ReplicationStreamEvent::Control {
+                    identity: VerifiedReplicationIdentity {
+                        system_identifier: "7399123456789".to_string(),
+                        timeline: 1,
+                        database: "appdb".to_string(),
+                        slot: "vtb_slot".to_string(),
+                        publication_fingerprint: "abcd1234".to_string(),
+                        confirmed_flush_lsn: 0x100,
+                        restart_lsn: 0x80,
+                    },
+                    acknowledged_lsn: 0x100,
+                    generation: 1,
+                },
+                ReplicationStreamEvent::Record {
+                    generation: 1,
+                    record: ReplicationRecord::Begin {
+                        dedup: sample_dedup(0),
+                        xid: 42,
+                        begin_final_lsn: 0x1_0000_0040,
+                        commit_time_pg_us: 123_456,
+                    },
+                },
+                ReplicationStreamEvent::Record {
+                    generation: 1,
+                    record: ReplicationRecord::Insert {
+                        dedup: sample_dedup(1),
+                        xid: 42,
+                        relation: Arc::clone(&rel),
+                        new_tuple: vec![
+                            PgOutputTupleValue::Value(PgValue::Int4(7)),
+                            PgOutputTupleValue::Value(PgValue::Bytes(b"\x00\xffraw".to_vec())),
+                            PgOutputTupleValue::Null,
+                        ],
+                    },
+                },
+                ReplicationStreamEvent::Record {
+                    generation: 1,
+                    record: ReplicationRecord::Update {
+                        dedup: sample_dedup(2),
+                        xid: 42,
+                        relation: Arc::clone(&rel),
+                        old_kind: Some(OldTupleKind::Key),
+                        old_tuple: Some(vec![
+                            PgOutputTupleValue::Value(PgValue::Int4(7)),
+                            PgOutputTupleValue::UnchangedToast,
+                            PgOutputTupleValue::Null,
+                        ]),
+                        new_tuple: vec![
+                            PgOutputTupleValue::Value(PgValue::Int4(7)),
+                            PgOutputTupleValue::UnchangedToast,
+                            PgOutputTupleValue::Value(PgValue::Text("updated".to_string())),
+                        ],
+                    },
+                },
+                ReplicationStreamEvent::Record {
+                    generation: 1,
+                    record: ReplicationRecord::Delete {
+                        dedup: sample_dedup(3),
+                        xid: 42,
+                        relation: Arc::clone(&rel),
+                        old_kind: OldTupleKind::Full,
+                        old_tuple: vec![
+                            PgOutputTupleValue::Value(PgValue::Int4(7)),
+                            PgOutputTupleValue::Null,
+                            PgOutputTupleValue::Value(PgValue::Text("bye".to_string())),
+                        ],
+                    },
+                },
+                ReplicationStreamEvent::Record {
+                    generation: 1,
+                    record: ReplicationRecord::Truncate {
+                        dedup: sample_dedup(4),
+                        xid: 42,
+                        relations: vec![Arc::clone(&rel)],
+                        cascade: true,
+                        restart_identity: false,
+                    },
+                },
+                ReplicationStreamEvent::Record {
+                    generation: 1,
+                    record: ReplicationRecord::Message {
+                        dedup: Some(sample_dedup(5)),
+                        xid: Some(42),
+                        transactional: true,
+                        message_lsn: 0x1_0000_0050,
+                        prefix: "cdc".to_string(),
+                        content: Bytes::from_static(b"\x01\x02\xfe\xff"),
+                    },
+                },
+                ReplicationStreamEvent::Record {
+                    generation: 1,
+                    record: ReplicationRecord::Commit {
+                        dedup: sample_dedup(6),
+                        xid: 42,
+                        flags: 0,
+                        commit_lsn: 0x1_0000_0060,
+                        commit_end_lsn: 0x1_0000_0080,
+                        commit_time_pg_us: 123_999,
+                        origin_name: Some("origin_a".to_string()),
+                        origin_lsn: Some(0x900),
+                    },
+                },
+            ];
+
+            let py_records: Vec<Py<PyAny>> = events
+                .iter()
+                .map(|ev| replication_stream_event_to_python(py, ev).unwrap())
+                .collect();
+
+            let locals = PyDict::new(py);
+            locals
+                .set_item("records", PyList::new(py, py_records).unwrap())
+                .unwrap();
+            locals.set_item("toast_sentinel", toast_sentinel).unwrap();
+
+            let script = CString::new(concat!(
+                "kinds = [r.kind for r in records]\n",
+                "assert kinds == ['control', 'begin', 'insert', 'update', 'delete', 'truncate', 'message', 'commit']\n",
+                "assert records[0].payload['identity'].slot == 'vtb_slot'\n",
+                "assert records[0].commit_end_lsn is None and records[0].generation == 1\n",
+                "assert records[2].payload['new_tuple']['payload'] == b'\\x00\\xffraw'\n",
+                "assert records[2].payload['relation']['columns'][1]['type_oid'] == 17\n",
+                "assert records[3].payload['old_kind'] == 'key'\n",
+                "assert records[3].payload['old_tuple']['payload'] is toast_sentinel\n",
+                "assert records[3].payload['new_tuple']['payload'] is toast_sentinel\n",
+                "assert records[4].payload['old_kind'] == 'full'\n",
+                "assert records[5].payload['cascade'] is True\n",
+                "assert records[6].payload['content'] == b'\\x01\\x02\\xfe\\xff'\n",
+                "assert records[7].commit_end_lsn == 0x1_0000_0080\n",
+                "assert records[7].payload['origin_name'] == 'origin_a'\n",
+            ))
+            .unwrap();
+            py.run(&script, None, Some(&locals)).unwrap();
+        });
+    }
+
+    #[test]
+    fn replication_next_control_retires_cancelled_future_before_next_claim() {
+        Python::initialize();
+        let released = Arc::new(AtomicBool::new(false));
+        let released_bg = Arc::clone(&released);
+
+        Python::attach(|py| {
+            let ctl = ReplicationNextControl::new();
+            let ctl_spawn = Arc::clone(&ctl);
+            let spawn_cancelled =
+                PyCFunction::new_closure(py, None, None, move |args: &Bound<'_, PyTuple>, _| {
+                    let (id, guard) = ctl_spawn.try_claim(args.py())?;
+                    let flag = Arc::clone(&released_bg);
+                    let aw = spawn_rust_db_task_with_attr_and_future(
+                        args.py(),
+                        async move {
+                            tokio::time::sleep(Duration::from_secs(5)).await;
+                            Ok::<(u64, ReplicationInFlightGuard), PostgresError>((id, guard))
+                        },
+                        move |py, _fut, (done_id, guard)| {
+                            flag.store(true, Ordering::SeqCst);
+                            drop(guard);
+                            Ok(done_id.into_pyobject(py)?.into_any().unbind())
+                        },
+                        postgres_error_to_py,
+                        POSTGRES_COMPLETION_DRAINER_ATTR,
+                    )?;
+                    ctl_spawn.attach_future(id, aw.future_handle(args.py()));
+                    Bound::new(args.py(), aw).map(Bound::unbind)
+                })
+                .unwrap();
+
+            let ctl_check = Arc::clone(&ctl);
+            let check_overlap =
+                PyCFunction::new_closure(py, None, None, move |args: &Bound<'_, PyTuple>, _| {
+                    let _ = ctl_check.try_claim(args.py())?;
+                    PyResult::Ok(())
+                })
+                .unwrap();
+
+            let globals = PyDict::new(py);
+            globals.set_item("spawn_next", spawn_cancelled).unwrap();
+            globals.set_item("check_overlap", check_overlap).unwrap();
+            let script = CString::new(concat!(
+                "import asyncio\n",
+                "async def main():\n",
+                "    aw = spawn_next()\n",
+                "    overlap_failed = False\n",
+                "    try:\n",
+                "        check_overlap()\n",
+                "    except Exception:\n",
+                "        overlap_failed = True\n",
+                "    assert overlap_failed\n",
+                "    del aw\n",
+                "    check_overlap()\n",
+                "asyncio.run(main())\n",
+            ))
+            .unwrap();
+            py.run(&script, Some(&globals), None).unwrap();
+
+            py.detach(|| {
+                let deadline = Instant::now() + Duration::from_secs(1);
+                while !released.load(Ordering::SeqCst)
+                    && ctl.state.lock().unwrap().in_flight.contains(&1)
+                    && Instant::now() < deadline
+                {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            });
+            assert!(ctl.state.lock().unwrap().in_flight.is_empty());
+        });
+    }
 }

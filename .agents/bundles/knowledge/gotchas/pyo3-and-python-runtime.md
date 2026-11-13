@@ -90,20 +90,26 @@ sources:
   - id: src-py-arrow-cursor
     resource: src/rs/vertebra-py/src/db.rs
     title: "Single-consumer ArrowCursor capsule adoption and release"
+  - id: src-vertebra-postgres-src-lib-rs
+    resource: src/rs/vertebra-postgres/src/lib.rs
+    title: "Native PostgreSQL PyO3 extension exports and gil_used = false"
+  - id: src-vertebra-postgres-src-replication-mod-rs
+    resource: src/rs/vertebra-postgres/src/replication/mod.rs
+    title: "Replication future cancellation and RAII delivery drop ordering"
 ---
 
 # PyO3 FFI, Embedded Globals & Python Runtime Gotchas
 
 <!-- truth: start -->
-- Declare `#[pymodule(gil_used = false)]` on all five PyO3 extensions, omit `#[pyclass(freelist = N)]` under `Py_GIL_DISABLED` (`3.14t`/`3.15t`), and register embedded `_vertebra` via `append_to_inittab!` plus `sys.modules` aliasing.
+- Declare `#[pymodule(gil_used = false)]` on all PyO3 extensions (`vertebra-py`, `vertebra-bundler`, `vertebra-storage`, `vertebra-bigquery`, `vertebra-spanner`, `vertebra-postgres`, and sibling database drivers), omit `#[pyclass(freelist = N)]` under `Py_GIL_DISABLED` (`3.14t`/`3.15t`), and register embedded `_vertebra` via `append_to_inittab!` plus `sys.modules` aliasing.
 - Pass borrowed `slf.as_ptr()` (never `into_ptr()`) to `PyBuffer_FillInfo`, run `maturin develop` for `vertebra-py` from repository root without `-m`, and keep `tools/docs/generate_cli_docs.py` `fallback_none_attrs` synchronized with `--only-group doc` builds.
-- Transfer cross-extension Arrow buffers exclusively through unregistered `ShmRegion` writers, `vertebra.ShmCapsule` single-claim adoption, and per-extension completion drainer attributes.
+- Transfer cross-extension Arrow buffers through unregistered `ShmRegion` writers, `vertebra.ShmCapsule` single-claim adoption, and per-extension completion drainer attributes; gate ordered stream commits with `spawn_rust_db_task_with_attr_and_future`, `PendingDeliveryGuard`, and `ReplicationEventDelivery` so cancelled futures retire without advancing stream state.
 <!-- truth: end -->
 
 ## 1. Embedded Split-Globals & Free-Threaded `3.14t`/`3.15t` Discipline
 
 - **Dual `.so` Split-Globals in `Topology::Embedded`**: `vertebra-server` statically links `vertebra-py` (`_vertebra`), whereas `.venv` holds a separate `_vertebra.cpython-*.so` with its own uninitialized `static BRIDGE: OnceLock<BatchBridge>`. [`main.rs`](../../../../src/rs/vertebra-http/src/main.rs)[^src-vertebra-http-src-main-rs] must call `pyo3::append_to_inittab!(pymodule_init)` before the first `Python::attach` and alias `sys.modules["vertebra._vertebra"] = sys.modules["_vertebra"]` before importing Vertebra Python modules.
-- **`#[pymodule(gil_used = false)]` & Conditional `freelist`**: All five extensions (`vertebra-py`, `vertebra-bundler`, `vertebra-storage`, `vertebra-bigquery`, `vertebra-spanner`) must declare `#[pymodule(gil_used = false)]` ([`vertebra-py/src/lib.rs`](../../../../src/rs/vertebra-py/src/lib.rs)[^src-vertebra-py-src-lib-rs]); [`GilAuditReport.audit()`](../../../../src/py/vertebra/server/_gil_audit.py)[^src-server-gil-audit-py] raises `RuntimeError` when `VERTEBRA_STRICT_FREE_THREADING=1`. Because PyO3 `0.30.1` guards `freelist` with a global `Mutex` under `Py_GIL_DISABLED`, gate `freelist = 128` behind `#[cfg_attr(not(Py_GIL_DISABLED), ...)]`.
+- **`#[pymodule(gil_used = false)]` & Conditional `freelist`**: All PyO3 extensions (`vertebra-py`, `vertebra-bundler`, `vertebra-storage`, `vertebra-bigquery`, `vertebra-spanner`, `vertebra-postgres`[^src-vertebra-postgres-src-lib-rs], and sibling database extensions) must declare `#[pymodule(gil_used = false)]` ([`vertebra-py/src/lib.rs`](../../../../src/rs/vertebra-py/src/lib.rs)[^src-vertebra-py-src-lib-rs]); [`GilAuditReport.audit()`](../../../../src/py/vertebra/server/_gil_audit.py)[^src-server-gil-audit-py] raises `RuntimeError` when `VERTEBRA_STRICT_FREE_THREADING=1`. Because PyO3 `0.30.1` guards `freelist` with a global `Mutex` under `Py_GIL_DISABLED`, gate `freelist = 128` behind `#[cfg_attr(not(Py_GIL_DISABLED), ...)]`.
 - **`RsgiReadyAwaitable` Must Be `frozen`**: In [`rsgi/http.rs`](../../../../src/rs/vertebra-py/src/rsgi/http.rs)[^src-vertebra-py-src-rsgi-http-rs], `_RsgiReadyAwaitable` is shared across concurrent coroutines on `3.14t`/`3.15t`; `__await__` and `__next__` must take `&self` (`frozen`) to avoid `PyBorrowMutError`.
 
 ## 2. Coroutine Stepping, PEP 3333 State, Buffer Refcounts & Multi-Extension Packaging
@@ -132,7 +138,8 @@ sources:
 ## Cross-extension Arrow capsules and release
 
 - **Unregistered SHM Writers & Single Ownership Claim**: Optional extensions have private static maps and must materialize capsule buffers via `write_shm_arrow_region_unregistered` or `ShmArrowStreamWriter::finish_unregistered` ([`arrow_shm.rs`](../../../../src/rs/vertebra-db/src/arrow_shm.rs)[^src-db-arrow-shm]). `ArrowCursor._from_shm_capsule` ([`db.rs`](../../../../src/rs/vertebra-py/src/db.rs)[^src-py-arrow-cursor]) validates the `vertebra.ShmCapsule` name, pointer, and length before atomically claiming `ctx` once (`ValueError` on second claim), leaving unconsumed cleanup in the producer's destructor ([`py_async.rs`](../../../../src/rs/vertebra-db/src/py_async.rs)[^src-db-py-async]).
-- **Unlink vs Unmap & Distinct Completion Drainers**: `release()` and `close()` unlink the Unix SHM name while retained cursor views keep the mapping readable until the producer's `drop_fn` runs ([`shm.rs`](../../../../src/rs/vertebra-core/src/shm.rs)[^src-core-shm-capsule]). Each separately linked extension must pass a unique drainer attribute name to `spawn_rust_db_task_with_attr` ([architecture](../architecture/worker/pyo3-ffi-and-batch-dispatch.md#database-extension-boundary), [ADR-004](../decisions/adr-004-optional-driver-wheels-and-shm-ownership.md)).
+- **Unlink vs Unmap & Distinct Completion Drainers**: `release()` and `close()` unlink the Unix SHM name while retained cursor views keep the mapping readable until the producer's `drop_fn` runs ([`shm.rs`](../../../../src/rs/vertebra-core/src/shm.rs)[^src-core-shm-capsule]). Each separately linked extension must pass a unique drainer attribute name to `spawn_rust_db_task_with_attr` (such as `_vertebra_postgres_completion_drainer` in `vertebra-postgres`; see [architecture](../architecture/worker/pyo3-ffi-and-batch-dispatch.md#database-extension-boundary) and [ADR-004](../decisions/adr-004-optional-driver-wheels-and-shm-ownership.md)).
+- **Cancelled Stream Futures & Ordered Delivery Leases**: Cancelling an `asyncio.Future` after a Tokio delivery resolves but before or during drainer execution skips delivery unless the outcome producer re-checks cancellation. Pair `spawn_rust_db_task_with_attr_and_future` (`py_fut.cancelled()`) with RAII `PendingDeliveryGuard` / `ReplicationEventDelivery` and retirement gating ([`replication/mod.rs`](../../../../src/rs/vertebra-postgres/src/replication/mod.rs)[^src-vertebra-postgres-src-replication-mod-rs]) so cancelled or dropped futures retire cleanly without losing ordered records or advancing generation state.
 
 [^src-vertebra-http-src-main-rs]: `src/rs/vertebra-http/src/main.rs` — Embedded interpreter init and inittab registration.
 [^src-vertebra-py-src-lib-rs]: `src/rs/vertebra-py/src/lib.rs` — Core PyO3 extension module exports and gil_used = false.
@@ -157,3 +164,5 @@ sources:
 [^src-db-py-async]: `src/rs/vertebra-db/src/py_async.rs` — Per-extension completion drainers and capsule destructors.
 [^src-core-shm-capsule]: `src/rs/vertebra-core/src/shm.rs` — Named vertebra.ShmCapsule ABI and unlink vs mapping lifetime.
 [^src-py-arrow-cursor]: `src/rs/vertebra-py/src/db.rs` — Single-consumer ArrowCursor capsule adoption and release.
+[^src-vertebra-postgres-src-lib-rs]: `src/rs/vertebra-postgres/src/lib.rs` — Native PostgreSQL PyO3 extension exports and gil_used = false.
+[^src-vertebra-postgres-src-replication-mod-rs]: `src/rs/vertebra-postgres/src/replication/mod.rs` — Replication future cancellation and RAII delivery drop ordering.
