@@ -5,22 +5,22 @@ chapter_id: ch01-python-stream-submission-and-flush
 title: "Chapter 01: Python Stream Submission and Progressive Protocol Flush"
 description: "Expose PyO3 submit_stream_frame and max_stream_frame_payload, flush mounted ASGI and RSGI streams progressively, and wire native App streaming responses in server/_dispatch.py."
 status: stable
-state: active
+state: completed
 planning_status: complete
 planning_quality: standard
 planning_degraded_reason: null
 depends_on_chapters: []
 replan_trigger: null
 plan_commit: 18baadcd
-last_reviewed_commit: null
-updated_at: "2026-11-13T02:38:00Z"
+last_reviewed_commit: c9e7b370
+updated_at: "2026-11-13T03:42:00Z"
 generated:
   by: flow-plan
   at: "2026-11-12T23:45:00Z"
 verified:
-  - by: agent:executor
-    at: "2026-11-13T02:38:00Z"
-    commit: 6a23bd18
+  - by: agent:code-reviewer
+    at: "2026-11-13T03:42:00Z"
+    commit: c9e7b370
 tags:
   - pyo3
   - streaming
@@ -101,7 +101,7 @@ Public streaming documentation (`docs/usage/server-and-workers.md`) and architec
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline (`6a23bd18`)**: All 4 tasks in `ch01-python-stream-submission-and-flush` pass `cargo test -p vertebra-py --lib` (`13 passed`), `cargo clippy --all-targets -- -D warnings`, `mypy.stubtest vertebra._vertebra`, `ruff`, `mypy`, and `120 passed` across unit and live `embedded`/`shm` `vertebra-server` streaming acceptance tests.
+- **Completed & Reviewed (`c9e7b370`)**: All 4 tasks in `ch01-python-stream-submission-and-flush` pass `cargo test -p vertebra-py --lib` (`14 passed`), `cargo clippy -p vertebra-core -p vertebra-py --all-targets -- -D warnings`, `mypy.stubtest vertebra._vertebra`, `ruff`, `mypy`, and `132 passed` across unit and live `embedded`/`shm` `vertebra-server` streaming acceptance tests (including native `StreamingStorageResponse`, `ArrowCursor`, and inline `drive_until_complete` async streams).
 - **Fast Chapter Gate (`< 45s`)**: `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-py --lib && cargo build --manifest-path src/rs/Cargo.toml -p vertebra-http --bin vertebra-server && UV_CACHE_DIR=/tmp/uv-cache uv run --no-sync maturin develop --uv --skip-install && uv run --no-sync python -m mypy.stubtest vertebra._vertebra && uv run --no-sync ruff check src/py/vertebra/server src/py/tests/integration/server && uv run --no-sync pytest src/py/tests/unit/ffi/test_ffi.py src/py/tests/unit/server/test_asgi.py src/py/tests/unit/server/test_asgi_sse.py src/py/tests/unit/server/test_rsgi_protocol.py src/py/tests/integration/server/test_vertebra_server.py -q`.
 
 [^transport-py-rs]: `src/rs/vertebra-py/src/transport.rs::ResponseSubmitter` — PyO3 unary response submission and SHM ring transport binding.

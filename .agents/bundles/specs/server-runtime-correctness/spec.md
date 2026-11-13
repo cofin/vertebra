@@ -16,22 +16,23 @@ chapters:
   - ch05-fastpath-consolidation
   - ch06-runtime-native-cleanup
   - ch07-docs-and-okf-sync
-current_chapter: ch01-python-stream-submission-and-flush
-current_task: "server-runtime-correctness:ch01:t01"
+current_chapter: ch02-lifespan-supervisor-and-worker-lanes
+current_task: "server-runtime-correctness:ch02:t01"
 parent_prd: integration-remediation
 plan_revision: 3
 plan_commit: 18baadcd
-last_verified_checkpoint: 6a23bd18
-last_reviewed_commit: 18baadcd
+last_verified_checkpoint: c9e7b370
+last_reviewed_chapter: ch01-python-stream-submission-and-flush
+last_reviewed_commit: c9e7b370
 created_at: "2026-11-12T23:45:00Z"
-updated_at: "2026-11-13T02:38:00Z"
+updated_at: "2026-11-13T03:42:00Z"
 generated:
   by: flow-plan
   at: "2026-11-12T23:45:00Z"
 verified:
-  - by: agent:executor
-    at: "2026-11-13T02:38:00Z"
-    commit: 6a23bd18
+  - by: agent:code-reviewer
+    at: "2026-11-13T03:42:00Z"
+    commit: c9e7b370
 tags:
   - server
   - streaming
@@ -87,9 +88,9 @@ sources:
 
 ## 1. Specification, Context & Provenance
 
-### 1.1 Merged Baseline (`18baadcd`), `ch01` Streaming (`6a23bd18`) & Remaining Problem Statement
+### 1.1 Merged Baseline (`18baadcd`), `ch01` Streaming (`c9e7b370`) & Remaining Problem Statement
 
-Commit `18baadcd` ([PR #118](https://github.com/cofin/vertebra/pull/118)) landed the native Rust streaming foundation documented in [tiered-rings-and-batch-bridge.md](../../knowledge/architecture/ipc/tiered-rings-and-batch-bridge.md): `ResponseStreamFrame` and `StreamSink` on `BatchBridge`, ordered `VRSF` (`0x56525346`) frames on the SHM xlarge response ring, `ResponseStreamRegistry` (`deliver_blocking` and `deliver`), and lossless `shm_reader::drain_worker` routing with the dead 16-byte `ResponseSlot` path removed [^bridge-core-rs] [^ring-pair-rs] [^streams-http-rs]. Commit `6a23bd18` (`ch01-python-stream-submission-and-flush`, [#81](https://github.com/cofin/vertebra/issues/81)) wires `_vertebra.submit_stream_frame`, `_vertebra.max_stream_frame_payload`, `AsgiProtocol`, `RsgiHttpProtocol`, `AsgiSend`, and native `App` `server/_dispatch.py` progressive streaming across embedded and SHM `vertebra-server` topologies [^transport-py-rs] [^asgi-protocol-rs] [^dispatch-py].
+Commit `18baadcd` ([PR #118](https://github.com/cofin/vertebra/pull/118)) landed the native Rust streaming foundation documented in [tiered-rings-and-batch-bridge.md](../../knowledge/architecture/ipc/tiered-rings-and-batch-bridge.md): `ResponseStreamFrame` and `StreamSink` on `BatchBridge`, ordered `VRSF` (`0x56525346`) frames on the SHM xlarge response ring, `ResponseStreamRegistry` (`deliver_blocking` and `deliver`), and lossless `shm_reader::drain_worker` routing with the dead 16-byte `ResponseSlot` path removed [^bridge-core-rs] [^ring-pair-rs] [^streams-http-rs]. Commits `6a23bd18` and `c9e7b370` (`ch01-python-stream-submission-and-flush`, [#81](https://github.com/cofin/vertebra/issues/81)) wire `_vertebra.submit_stream_frame`, `_vertebra.max_stream_frame_payload`, `AsgiProtocol`, `RsgiHttpProtocol`, `AsgiSend`, and native `App` `server/_dispatch.py` progressive streaming (including `StreamingStorageResponse`, `ArrowCursor`, and inline `drive_until_complete` async streams) across embedded and SHM `vertebra-server` topologies [^transport-py-rs] [^asgi-protocol-rs] [^dispatch-py].
 
 Remaining runtime gaps span three areas:
 1. **Lifespan, Supervisor & Worker Modes ([#83](https://github.com/cofin/vertebra/issues/83), [#84](https://github.com/cofin/vertebra/issues/84), [#85](https://github.com/cofin/vertebra/issues/85))**: `Worker.run` logs and swallows ASGI lifespan and RSGI `__rsgi_init__` exceptions while `Supervisor::poll_workers` respawns crashing startup workers; `vertebra.supervisor/__init__.py` is docstring-only; `vtb workers run` exits immediately without a bound `QueueService`; and `vtb run --worker-only` sets unread `VERTEBRA_WORKER_ONLY` and launches the HTTP server [^worker-py].
@@ -179,8 +180,8 @@ All public documentation and OKF chapters updated in `ch07-docs-and-okf-sync` st
 
 ## 5. Implementation Plan
 
-- [~] [ch01-python-stream-submission-and-flush](chapters/ch01-python-stream-submission-and-flush/spec.md) — PyO3 `submit_stream_frame` / `max_stream_frame_payload`, progressive ASGI & RSGI flush ([#81](https://github.com/cofin/vertebra/issues/81)), and native `App` `_dispatch.py` streaming (`4` tasks; `< 45s` gate)
-- [ ] [ch02-lifespan-supervisor-and-worker-lanes](chapters/ch02-lifespan-supervisor-and-worker-lanes/spec.md) — Fail-loud `WorkerStartupError` + SHM exit `78` ([#84](https://github.com/cofin/vertebra/issues/84)), `vertebra.supervisor` exports ([#83](https://github.com/cofin/vertebra/issues/83)), and `QueueService` / `--worker-only` lanes ([#85](https://github.com/cofin/vertebra/issues/85)) (`4` tasks; `< 35s` gate)
+- [x] [c9e7b370] [ch01-python-stream-submission-and-flush](chapters/ch01-python-stream-submission-and-flush/spec.md) — PyO3 `submit_stream_frame` / `max_stream_frame_payload`, progressive ASGI & RSGI flush ([#81](https://github.com/cofin/vertebra/issues/81)), and native `App` `_dispatch.py` streaming (`4` tasks; `< 45s` gate)
+- [~] [ch02-lifespan-supervisor-and-worker-lanes](chapters/ch02-lifespan-supervisor-and-worker-lanes/spec.md) — Fail-loud `WorkerStartupError` + SHM exit `78` ([#84](https://github.com/cofin/vertebra/issues/84)), `vertebra.supervisor` exports ([#83](https://github.com/cofin/vertebra/issues/83)), and `QueueService` / `--worker-only` lanes ([#85](https://github.com/cofin/vertebra/issues/85)) (`4` tasks; `< 35s` gate)
 - [ ] [ch03-relocatable-server-binary-and-packaging](chapters/ch03-relocatable-server-binary-and-packaging/spec.md) — Relocatable `vertebra-server` build, `EmbeddedPythonRuntime`, core wheel inclusion ([#82](https://github.com/cofin/vertebra/issues/82)), and opt-in `StandaloneBuilder` `.agents/skills` staging ([#115](https://github.com/cofin/vertebra/issues/115)) (`4` tasks; `< 25s` gate)
 - [ ] [ch04-wheel-smoke-and-ci](chapters/ch04-wheel-smoke-and-ci/spec.md) — `smoke_vtb_run.py`, `make core-wheel-check`, PR CI smoke job, and release wheel/arm64 binary matrix (`3` tasks; `< 30s` gate)
 - [ ] [ch05-fastpath-consolidation](chapters/ch05-fastpath-consolidation/spec.md) — Shared `CompiledRouteBase`, single `__vertebra_fastpath__` attribute, `has_custom_exception_handlers`, and copy-free response serialization (`4` tasks; `< 25s` gate)
@@ -189,7 +190,7 @@ All public documentation and OKF chapters updated in `ch07-docs-and-okf-sync` st
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Execution Frontier**: `ch01-python-stream-submission-and-flush` (`t01`–`t04`) is implemented and verified at `6a23bd18` (`1` of `6` knowledge/doc chapters updated so far via `server-runtime-limitations.md`; `22` open `compact` tasks remain across `ch02`–`ch07`).
+- **Execution Frontier**: `ch01-python-stream-submission-and-flush` (`t01`–`t04`) is completed at `c9e7b370`, advancing the active frontier to `ch02-lifespan-supervisor-and-worker-lanes` (`server-runtime-correctness:ch02:t01`; `1` of `6` knowledge/doc chapters updated so far via `server-runtime-limitations.md`; `22` open `compact` tasks remain across `ch02`–`ch07`).
 - **Downstream Unblock**: `ch01` progressive streaming (`_vertebra.submit_stream_frame`, `AsgiProtocol`, `RsgiHttpProtocol`, `AsgiSend`, and native `server/_dispatch.py`) unblocks `mcp-protocol-completeness` `ch03` (`GET /mcp` SSE adapter stream writers) and `http3-and-http-hygiene`.
 - **Full Flow Finish Gate (`/flow:finish`)**: `make lint-all && make rs-test && make py-test && make core-wheel-check && make docs-check && make review-check && make review-route BASE=18baadcd`.
 

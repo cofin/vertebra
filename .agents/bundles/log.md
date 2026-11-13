@@ -1,5 +1,10 @@
 # Bundle Activity Log
 
+## [2026-11-13T03:42:00Z] chapter-complete | Server runtime progressive streaming (`server-runtime-correctness/ch01`)
+
+- Closed `ch01-python-stream-submission-and-flush` at `c9e7b370` (`cargo test -p vertebra-py --lib` 14 passed, `cargo clippy -p vertebra-core -p vertebra-py` clean, `mypy.stubtest vertebra._vertebra` clean, `ruff` + `mypy` clean, and `132 passed` across unit and live embedded/SHM `vertebra-server` streaming suites including `StreamingStorageResponse`, `ArrowCursor`, and inline `drive_until_complete` async streams).
+- Advanced `server-runtime-correctness` to `ch02-lifespan-supervisor-and-worker-lanes` (`server-runtime-correctness:ch02:t01`; `4/26` tasks complete, `22` tasks remaining across `ch02`–`ch07`).
+
 ## [2026-11-13T02:38:00Z] chapter-checkpoint | Server runtime progressive streaming (`server-runtime-correctness/ch01`)
 
 - Completed `t01`–`t04` in `ch01-python-stream-submission-and-flush` at `6a23bd18` (`cargo test -p vertebra-py --lib` 13 passed, `mypy.stubtest vertebra._vertebra` clean, `ruff` + `mypy` clean, `120 passed` across unit and live embedded/SHM `vertebra-server` streaming suites).
