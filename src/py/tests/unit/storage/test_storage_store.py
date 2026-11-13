@@ -3478,3 +3478,105 @@ async def test_malformed_expected_digest_raises_value_error_before_io(
                     pass
         elif operation == "open_reader":
             store.open_reader("bad/missing.bin", **bad_kwargs)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("file_format", ["parquet", "arrow-ipc"])
+async def test_write_batches_checksum_and_expected_digests(asynchronous: bool, file_format: str) -> None:
+    """write_batches_sync and write_batches_async compute checksums and verify expected digests."""
+    pa = pytest.importorskip("pyarrow")
+    store = _bulk_store(asynchronous)
+    table = pa.table({"id": [1, 2, 3, 4], "name": ["alpha", "beta", "gamma", "delta"]})
+    key = f"arrow/integrity-{file_format}.bin"
+
+    if asynchronous:
+        res = await write_batches_async(
+            cast(AsyncObjectStore, store), key, table, file_format=file_format, checksum=True
+        )
+    else:
+        res = write_batches_sync(cast(SyncObjectStore, store), key, table, file_format=file_format, checksum=True)
+
+    stored = bytes(await _resolve(store.get(key)))
+    digests = _expected_digests(stored)
+    exp_sha, exp_crc, exp_md5 = digests["sha256"], digests["crc32c"], digests["md5"]
+    assert (res.sha256, res.crc32c, res.md5) == (exp_sha, exp_crc, exp_md5)
+
+    verified_key = f"arrow/verified-{file_format}.bin"
+    if asynchronous:
+        verified = await write_batches_async(
+            cast(AsyncObjectStore, store),
+            verified_key,
+            table,
+            file_format=file_format,
+            expected_sha256=exp_sha,
+            expected_crc32c=exp_crc,
+            expected_md5=exp_md5,
+        )
+    else:
+        verified = write_batches_sync(
+            cast(SyncObjectStore, store),
+            verified_key,
+            table,
+            file_format=file_format,
+            expected_sha256=exp_sha,
+            expected_crc32c=exp_crc,
+            expected_md5=exp_md5,
+        )
+    assert (verified.sha256, verified.crc32c, verified.md5) == (exp_sha, exp_crc, exp_md5)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize(
+    "bad_digest",
+    [
+        {"expected_sha256": "0" * 64},
+        {"expected_crc32c": "00000000"},
+        {"expected_md5": "0" * 32},
+    ],
+)
+async def test_write_batches_expected_digest_mismatch_preserves_prior_object(
+    asynchronous: bool, bad_digest: dict[str, str]
+) -> None:
+    """Mismatched expected digests abort write_batches uploads without clobbering existing bytes."""
+    pa = pytest.importorskip("pyarrow")
+    store = _bulk_store(asynchronous)
+    key = "arrow/preserved.parquet"
+    sentinel = b"prior-arrow-bytes"
+    await _resolve(store.put(key, sentinel))
+    table = pa.table({"id": [1, 2], "label": ["x", "y"]})
+
+    with pytest.raises(IntegrityError):
+        if asynchronous:
+            await write_batches_async(cast(AsyncObjectStore, store), key, table, file_format="parquet", **bad_digest)
+        else:
+            write_batches_sync(cast(SyncObjectStore, store), key, table, file_format="parquet", **bad_digest)
+
+    assert bytes(await _resolve(store.get(key))) == sentinel
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+async def test_write_batches_midstream_reader_failure_aborts_upload(asynchronous: bool) -> None:
+    """Mid-stream RecordBatchReader errors abort multipart upload and preserve prior bytes."""
+    pa = pytest.importorskip("pyarrow")
+    store = _bulk_store(asynchronous)
+    key = "arrow/midstream-abort.parquet"
+    sentinel = b"prior-valid-object"
+    await _resolve(store.put(key, sentinel))
+
+    schema = pa.schema([("id", pa.int64())])
+
+    def failing_batches() -> Iterator[Any]:
+        yield pa.record_batch([pa.array([1, 2, 3])], schema=schema)
+        raise RuntimeError("midstream reader failure")
+
+    reader = pa.RecordBatchReader.from_batches(schema, failing_batches())
+    with pytest.raises(RuntimeError, match="midstream reader failure"):
+        if asynchronous:
+            await write_batches_async(cast(AsyncObjectStore, store), key, reader, file_format="parquet")
+        else:
+            write_batches_sync(cast(SyncObjectStore, store), key, reader, file_format="parquet")
+
+    assert bytes(await _resolve(store.get(key))) == sentinel

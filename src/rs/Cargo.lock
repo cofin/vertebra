@@ -6735,6 +6735,7 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "chrono",
+ "criterion",
  "futures",
  "hex",
  "hmac 0.12.1",

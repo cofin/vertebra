@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import subprocess
 import sys
 import threading
@@ -20,6 +21,7 @@ import pytest
 from advanced_alchemy.types.file_object import FileObject, StorageBackend, StoredObject
 from advanced_alchemy.types.file_object.registry import StorageRegistry as AlchemyStorageRegistry
 from advanced_alchemy.types.file_object.session_tracker import FileObjectSessionTracker
+from django.core.files.base import ContentFile
 from sqlspec.protocols import ObjectStoreProtocol
 from sqlspec.storage.pipeline import AsyncStoragePipeline, SyncStoragePipeline
 from sqlspec.storage.registry import StorageRegistry as SQLSpecStorageRegistry
@@ -32,6 +34,7 @@ from vertebra.db.arrow import ArrowCursor
 from vertebra.db.cdc import CDCConfig
 from vertebra.extensions.alchemy.storage import ObjectStoreBackend as AlchemyObjectStoreBackend
 from vertebra.extensions.alchemy.storage import register_storage_backend
+from vertebra.extensions.django import DjangoStorage
 from vertebra.extensions.sqlspec.events import ChangeFeedAsyncEventBackend, ChangeFeedSyncEventBackend
 from vertebra.extensions.sqlspec.storage import (
     ArrowFlightSerializer,
@@ -51,7 +54,7 @@ from vertebra.storage import (
     SyncGcpTokenCache,
     SyncObjectStore,
 )
-from vertebra.typing import ImproperConfigurationError
+from vertebra.typing import ImproperConfigurationError, IntegrityError
 from vertebra.utils.module_loader import import_optional
 from vertebra.utils.serializers import decode_json
 
@@ -1431,3 +1434,323 @@ async def test_changefeed_async_event_backend_lifecycle() -> None:
     await backend.nack("2")
     assert await backend.dequeue("orders", 0) is None
     assert await backend.dequeue("other", 0) is None
+
+
+def _crc32c_hex(data: bytes) -> str:
+    """Compute Castagnoli CRC32C lowercase hexadecimal digest matching native checksums."""
+    crc = 0xFFFFFFFF
+    for byte in data:
+        crc ^= byte
+        for _ in range(8):
+            crc = (crc >> 1) ^ 0x82F63B78 if crc & 1 else crc >> 1
+    return f"{crc ^ 0xFFFFFFFF:08x}"
+
+
+def _expected_digests(data: bytes) -> tuple[str, str, str]:
+    """Return lowercase (sha256, crc32c, md5) digests for an arbitrary byte payload."""
+    return (
+        hashlib.sha256(data).hexdigest(),
+        _crc32c_hex(data),
+        hashlib.md5(data).hexdigest(),
+    )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+async def test_sqlspec_integrity_read_write_and_stream_options(asynchronous: bool) -> None:
+    """SQLSpec ObjectStoreBackend advertises direct Arrow writes and enforces integrity options."""
+    assert SQLSpecObjectStoreBackend.supports_direct_arrow_write is True
+    backend = SQLSpecObjectStoreBackend("memory://")
+    assert backend.supports_direct_arrow_write is True
+
+    payload = b"sqlspec-integrity-payload" * 8
+    exp_sha, exp_crc, exp_md5 = _expected_digests(payload)
+
+    if asynchronous:
+        await backend.write_bytes_async(
+            "bytes/item.bin",
+            payload,
+            checksum=True,
+            expected_sha256=exp_sha,
+            expected_crc32c=exp_crc,
+            expected_md5=exp_md5,
+        )
+        assert await backend.read_bytes_async("bytes/item.bin", expected_sha256=exp_sha) == payload
+        with pytest.raises(IntegrityError):
+            await backend.read_bytes_async("bytes/item.bin", expected_sha256="0" * 64)
+
+        async def async_chunks() -> AsyncIterator[bytes]:
+            yield payload[:32]
+            yield payload[32:]
+
+        stream_res = await backend.put_stream_async(
+            "stream/item.bin", async_chunks(), checksum=True, expected_sha256=exp_sha
+        )
+        assert (stream_res.sha256, stream_res.crc32c, stream_res.md5) == (exp_sha, exp_crc, exp_md5)
+    else:
+        backend.write_bytes_sync(
+            "bytes/item.bin",
+            payload,
+            checksum=True,
+            expected_sha256=exp_sha,
+            expected_crc32c=exp_crc,
+            expected_md5=exp_md5,
+        )
+        assert backend.read_bytes_sync("bytes/item.bin", expected_sha256=exp_sha) == payload
+        with pytest.raises(IntegrityError):
+            backend.read_bytes_sync("bytes/item.bin", expected_sha256="0" * 64)
+
+        stream_res = backend.put_stream_sync(
+            "stream/item.bin", [payload[:32], payload[32:]], checksum=True, expected_sha256=exp_sha
+        )
+        assert (stream_res.sha256, stream_res.crc32c, stream_res.md5) == (exp_sha, exp_crc, exp_md5)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+async def test_sqlspec_arrow_write_options_normalization_and_validation(asynchronous: bool) -> None:
+    """SQLSpec normalizes format_hint, write_options, and None compression while failing on bad kwargs."""
+    backend = SQLSpecObjectStoreBackend("memory://")
+    table = pa.table({"id": [1, 2, 3, 4], "city": ["nyc", "sfo", "lax", "sea"]})
+
+    if asynchronous:
+        await backend.write_arrow_async(
+            "norm/zstd.data",
+            table,
+            format_hint="parquet",
+            compression="zstd",
+            write_options={"row_group_size": 2},
+            checksum=True,
+        )
+        raw = await backend.read_bytes_async("norm/zstd.data")
+        roundtrip = await backend.read_arrow_async("norm/zstd.data", file_format="parquet")
+        await backend.write_arrow_async("norm/default.parquet", table, compression=None)
+        with pytest.raises(TypeError):
+            await backend.write_arrow_async("norm/bad.parquet", table, unknown_parquet_codec_opt=True)
+    else:
+        backend.write_arrow_sync(
+            "norm/zstd.data",
+            table,
+            format_hint="parquet",
+            compression="zstd",
+            write_options={"row_group_size": 2},
+            checksum=True,
+        )
+        raw = backend.read_bytes_sync("norm/zstd.data")
+        roundtrip = backend.read_arrow_sync("norm/zstd.data", file_format="parquet")
+        backend.write_arrow_sync("norm/default.parquet", table, compression=None)
+        with pytest.raises(TypeError):
+            backend.write_arrow_sync("norm/bad.parquet", table, unknown_parquet_codec_opt=True)
+
+    assert roundtrip.to_pydict() == table.to_pydict()
+    meta = pq.ParquetFile(BytesIO(raw)).metadata
+    assert meta.num_row_groups == 2
+    assert meta.row_group(0).column(0).compression == "ZSTD"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("method", ["write_arrow", "write_arrow_cursor"])
+async def test_sqlspec_arrow_integrity_mismatch_preserves_prior_object(asynchronous: bool, method: str) -> None:
+    """SQLSpec Arrow write methods reject mismatched expected digests and preserve prior bytes."""
+    backend = SQLSpecObjectStoreBackend("memory://")
+    key = f"arrow/{method}.parquet"
+    sentinel = b"sentinel-before-mismatch"
+    backend.write_bytes_sync(key, sentinel)
+    table = pa.table({"id": [1, 2, 3], "val": ["a", "b", "c"]})
+    payload: Any = table if method == "write_arrow" else table.to_reader()
+
+    with pytest.raises(IntegrityError):
+        if asynchronous:
+            if method == "write_arrow":
+                await backend.write_arrow_async(key, payload, expected_sha256="0" * 64)
+            else:
+                await backend.write_arrow_cursor_async(key, payload, expected_sha256="0" * 64)
+        elif method == "write_arrow":
+            backend.write_arrow_sync(key, payload, expected_sha256="0" * 64)
+        else:
+            backend.write_arrow_cursor_sync(key, payload, expected_sha256="0" * 64)
+
+    assert backend.read_bytes_sync(key) == sentinel
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+async def test_sqlspec_midstream_reader_failure_aborts_multipart_upload(asynchronous: bool) -> None:
+    """Mid-stream RecordBatchReader failure aborts multipart upload and keeps prior bytes intact."""
+    backend = SQLSpecObjectStoreBackend("memory://")
+    key = "cursor/abort.parquet"
+    prior = b"existing-valid-parquet"
+    backend.write_bytes_sync(key, prior)
+    schema = pa.schema([("id", pa.int64())])
+
+    def failing_stream() -> Iterator[pa.RecordBatch]:
+        yield pa.record_batch([pa.array([1, 2])], schema=schema)
+        raise RuntimeError("broken arrow reader")
+
+    reader = pa.RecordBatchReader.from_batches(schema, failing_stream())
+    with pytest.raises(RuntimeError, match="broken arrow reader"):
+        if asynchronous:
+            await backend.write_arrow_cursor_async(key, reader)
+        else:
+            backend.write_arrow_cursor_sync(key, reader)
+
+    assert backend.read_bytes_sync(key) == prior
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+async def test_sqlspec_large_arrow_write_emits_bounded_chunks(
+    asynchronous: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Direct SQLSpec Arrow writes stream 200k rows as bounded chunks instead of a monolithic buffer."""
+    backend = SQLSpecObjectStoreBackend("memory://")
+    row_count = 200_000
+    table = pa.table(
+        {
+            "id": pa.array(range(row_count), type=pa.int64()),
+            "tag": pa.array([f"item-{idx:06d}" for idx in range(row_count)]),
+        }
+    )
+    chunk_sizes: list[int] = []
+
+    if asynchronous:
+        orig_async_put_stream = AsyncObjectStore.put_stream
+
+        async def recording_async_put_stream(self: AsyncObjectStore, path: str, chunks: Any, **kwargs: Any) -> Any:
+            async def tracked() -> AsyncIterator[bytes]:
+                async for chunk in chunks:
+                    raw = bytes(chunk)
+                    chunk_sizes.append(len(raw))
+                    yield raw
+
+            return await orig_async_put_stream(self, path, tracked(), **kwargs)
+
+        monkeypatch.setattr(AsyncObjectStore, "put_stream", recording_async_put_stream)
+        await backend.write_arrow_async("large/table.parquet", table, row_group_size=10_000)
+        read_back = await backend.read_arrow_async("large/table.parquet")
+    else:
+        orig_sync_put_stream = SyncObjectStore.put_stream
+
+        def recording_sync_put_stream(self: SyncObjectStore, path: str, chunks: Any, **kwargs: Any) -> Any:
+            def tracked() -> Iterator[bytes]:
+                for chunk in chunks:
+                    raw = bytes(chunk)
+                    chunk_sizes.append(len(raw))
+                    yield raw
+
+            return orig_sync_put_stream(self, path, tracked(), **kwargs)
+
+        monkeypatch.setattr(SyncObjectStore, "put_stream", recording_sync_put_stream)
+        backend.write_arrow_sync("large/table.parquet", table, row_group_size=10_000)
+        read_back = backend.read_arrow_sync("large/table.parquet")
+
+    assert read_back.num_rows == row_count
+    assert len(chunk_sizes) >= 20
+    assert max(chunk_sizes) < table.nbytes / 5
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("mode", ["buffer", "file", "stream"])
+async def test_alchemy_save_object_integrity_options(tmp_path: Path, asynchronous: bool, mode: str) -> None:
+    """Advanced Alchemy ObjectStoreBackend enforces checksum and expected digests across input modes."""
+    backend = AlchemyObjectStoreBackend(key="alchemy-int", fs="memory://")
+    payload = b"alchemy-object-payload-" * 32
+    exp_sha, exp_crc, exp_md5 = _expected_digests(payload)
+    key = f"alchemy/{mode}.bin"
+
+    def make_source(raw: bytes) -> Any:
+        if mode == "buffer":
+            return raw
+        if mode == "file":
+            src = tmp_path / f"{mode}-{len(raw)}.bin"
+            src.write_bytes(raw)
+            return src
+        return iter((raw[:64], raw[64:]))
+
+    file_obj = FileObject(backend="alchemy-int", filename=key, content_type="application/octet-stream")
+    if asynchronous:
+        saved = await backend.save_object_async(
+            file_obj,
+            make_source(payload),
+            checksum=True,
+            expected_sha256=exp_sha,
+            expected_crc32c=exp_crc,
+            expected_md5=exp_md5,
+        )
+    else:
+        saved = backend.save_object(
+            file_obj,
+            make_source(payload),
+            checksum=True,
+            expected_sha256=exp_sha,
+            expected_crc32c=exp_crc,
+            expected_md5=exp_md5,
+        )
+
+    assert saved.size == len(payload)
+    assert bytes(backend.sync_store.get(key)) == payload
+
+    with pytest.raises(IntegrityError):
+        if asynchronous:
+            await backend.save_object_async(file_obj, make_source(payload), expected_sha256="0" * 64)
+        else:
+            backend.save_object(file_obj, make_source(payload), expected_sha256="0" * 64)
+
+    assert bytes(backend.sync_store.get(key)) == payload
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("file_format", ["parquet", "arrow-ipc"])
+async def test_alchemy_save_arrow_streaming_and_checksum(asynchronous: bool, file_format: str) -> None:
+    """Alchemy save_arrow and save_arrow_async stream batches natively without asyncio.to_thread."""
+    assert "to_thread" not in Path(alchemy_storage_mod.__file__).read_text(encoding="utf-8")
+    backend = AlchemyObjectStoreBackend(key="alchemy-arrow", fs="memory://")
+    table = pa.table({"id": [10, 20, 30], "kind": ["a", "b", "c"]})
+    ext = "parquet" if file_format == "parquet" else "arrow"
+    key = f"datasets/sample.{ext}"
+
+    if asynchronous:
+        res = await backend.save_arrow_async(key, table, format=file_format, checksum=True)
+    else:
+        res = backend.save_arrow(key, table, format=file_format, checksum=True)
+
+    stored = bytes(backend.sync_store.get(key))
+    exp_sha, exp_crc, exp_md5 = _expected_digests(stored)
+    assert (res.sha256, res.crc32c, res.md5) == (exp_sha, exp_crc, exp_md5)
+
+    with pytest.raises(IntegrityError):
+        if asynchronous:
+            await backend.save_arrow_async(key, table, format=file_format, expected_sha256="0" * 64)
+        else:
+            backend.save_arrow(key, table, format=file_format, expected_sha256="0" * 64)
+
+    assert bytes(backend.sync_store.get(key)) == stored
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("digest_attr", ["sha256", "crc32c", "md5"])
+async def test_django_storage_forwards_content_digests(asynchronous: bool, digest_attr: str) -> None:
+    """DjangoStorage forwards optional sha256/crc32c/md5 attributes and surfaces IntegrityError."""
+    store = SyncObjectStore("memory://")
+    storage = DjangoStorage(store=store, file_overwrite=True)
+    payload = b"django-verified-payload-" * 16
+    digests = dict(zip(("sha256", "crc32c", "md5"), _expected_digests(payload), strict=True))
+
+    valid = ContentFile(payload, name="verified.bin")
+    setattr(valid, digest_attr, digests[digest_attr])
+    saved_name = await storage.asave("verified.bin", valid) if asynchronous else storage.save("verified.bin", valid)
+    assert bytes(store.get(saved_name)) == payload
+
+    tampered = ContentFile(b"tampered-payload", name="verified.bin")
+    setattr(tampered, digest_attr, digests[digest_attr])
+    with pytest.raises(IntegrityError) as exc_info:
+        if asynchronous:
+            await storage.asave("verified.bin", tampered)
+        else:
+            storage.save("verified.bin", tampered)
+    assert type(exc_info.value) is IntegrityError
+    assert bytes(store.get(saved_name)) == payload

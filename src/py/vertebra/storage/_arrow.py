@@ -159,6 +159,10 @@ def write_batches_sync(
     batch_size: int = 65536,
     schema: Any = None,
     options: Mapping[str, Any] | None = None,
+    checksum: bool = False,
+    expected_sha256: str | None = None,
+    expected_crc32c: str | None = None,
+    expected_md5: str | None = None,
 ) -> PutResult:
     """Upload incremental codec output through the native synchronous multipart path.
 
@@ -185,7 +189,15 @@ def write_batches_sync(
 
     output = chunks()
     try:
-        return store.put_stream(key, output, content_type=_media_type(file_format))
+        return store.put_stream(
+            key,
+            output,
+            content_type=_media_type(file_format),
+            checksum=checksum,
+            expected_sha256=expected_sha256,
+            expected_crc32c=expected_crc32c,
+            expected_md5=expected_md5,
+        )
     finally:
         output.close()
 
@@ -199,6 +211,10 @@ async def write_batches_async(
     batch_size: int = 65536,
     schema: Any = None,
     options: Mapping[str, Any] | None = None,
+    checksum: bool = False,
+    expected_sha256: str | None = None,
+    expected_crc32c: str | None = None,
+    expected_md5: str | None = None,
 ) -> PutResult:
     """Encode batch-sized steps off-loop and await each native multipart write.
 
@@ -229,7 +245,15 @@ async def write_batches_async(
 
     output = chunks()
     try:
-        return await store.put_stream(key, output, content_type=_media_type(file_format))
+        return await store.put_stream(
+            key,
+            output,
+            content_type=_media_type(file_format),
+            checksum=checksum,
+            expected_sha256=expected_sha256,
+            expected_crc32c=expected_crc32c,
+            expected_md5=expected_md5,
+        )
     finally:
         await output.aclose()
 
@@ -500,6 +524,7 @@ class _BatchWriter:
             self._source = pa.ipc.open_stream(payload if isinstance(payload, pa.Buffer) else pa.py_buffer(payload))
             schema = schema if schema is not None else self._source.schema
         else:
+            schema = schema if schema is not None else getattr(data, "schema", None)
             self._source = iter(data)
         first = next(self._source, None)
         if schema is None:
