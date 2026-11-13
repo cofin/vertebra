@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from vertebra._vertebra import Request, Response, WsgiEnviron, run_wsgi_callable
 from vertebra.extensions.django.config import VertebraConfig
@@ -221,7 +221,7 @@ class VertebraPlugin:
             and self._config.mcp is not None
             and path == self._config.mcp.path
         ):
-            return dispatch_mcp_request(self._mcp_registry, request, self._config.mcp)
+            return cast("Response", dispatch_mcp_request(self._mcp_registry, request, self._config.mcp))
         if self._fastpath is not None:
             matched = self._fastpath.match(method, path)
             if matched is not None:
