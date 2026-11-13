@@ -7,9 +7,9 @@ title: "Add verify_postgres_wheel.py, CI/release lanes, and 3.14t/3.15t pool tes
 description: "Implement two-probe verify_postgres_wheel.py, 14-class release smoke checks, zero-skip CI PG14-18 lanes, and 8-thread free-threaded pool tests."
 status: stable
 state: completed
-commit: cb3a9fa6
-last_verified_at: "2026-11-13T22:30:00Z"
-last_verified_commit: cb3a9fa6
+commit: e5943ca1
+last_verified_at: "2026-11-13T22:41:00Z"
+last_verified_commit: e5943ca1
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -31,6 +31,7 @@ tests:
   - src/py/tests/unit/build/test_packaging_and_pgo.py
   - src/py/tests/unit/db/test_optional_driver_wheels.py
   - src/py/tests/unit/db/test_cloud_dialers.py
+  - src/py/tests/integration/db/test_driver_conformance.py
 read_set:
   - .github/workflows/ci.yml
   - .github/workflows/release.yaml

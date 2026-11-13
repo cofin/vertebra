@@ -7,9 +7,9 @@ title: "Synchronize benchmarks, polyglot-test-matrix, and workflow OKF chapters"
 description: "Update benchmarks-and-free-threaded.md, trim polyglot-test-matrix.md (<= 200L), and add postgres-bench targets to workflow.md."
 status: stable
 state: completed
-commit: cb3a9fa6
-last_verified_at: "2026-11-13T22:30:00Z"
-last_verified_commit: cb3a9fa6
+commit: e5943ca1
+last_verified_at: "2026-11-13T22:41:00Z"
+last_verified_commit: e5943ca1
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -43,7 +43,7 @@ sources:
 
 ## Objective & Scope Boundary
 
-Update and trim the 3 testing/workflow OKF chapters (`benchmarks-and-free-threaded.md`: `164L`, `polyglot-test-matrix.md`: `192L`, `workflow.md`: `119L`, all `<= 200L`) [^wf-okf].
+Update and trim the 3 testing/workflow OKF chapters (`benchmarks-and-free-threaded.md`: `170L`, `polyglot-test-matrix.md`: `196L`, `workflow.md`: `122L`, all `<= 200L`) [^wf-okf].
 
 ## Bounded Read Manifest
 

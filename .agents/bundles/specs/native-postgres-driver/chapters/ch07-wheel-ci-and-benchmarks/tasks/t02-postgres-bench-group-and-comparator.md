@@ -7,9 +7,9 @@ title: "Add postgres-bench dependency group and tools/benchmarks/postgres.py"
 description: "Declare [dependency-groups].postgres-bench and implement schema_version=1 PostgreSQL benchmark capture and threshold comparator CLI."
 status: stable
 state: completed
-commit: cb3a9fa6
-last_verified_at: "2026-11-13T22:30:00Z"
-last_verified_commit: cb3a9fa6
+commit: e5943ca1
+last_verified_at: "2026-11-13T22:41:00Z"
+last_verified_commit: e5943ca1
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
