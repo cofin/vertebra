@@ -7,8 +7,8 @@ title: "Enforce OracleNotifyConfig.wait_timeout_seconds idle session liveness in
 description: "Track idle dequeue elapsed time across 1-second AQ slices and run a SELECT 1 FROM DUAL liveness check when wait_timeout_seconds elapses."
 status: stable
 state: completed
-commit: 75f2d8d7
-last_verified_commit: 75f2d8d7
+commit: a8ca7b24
+last_verified_commit: a8ca7b24
 last_verified_at: "2026-11-13T15:25:00Z"
 verification_evidence: "cargo test -p vertebra-oracle notify:: (7 passed) + clippy + pytest test_oracle_adapter.py clean"
 planning_quality: standard

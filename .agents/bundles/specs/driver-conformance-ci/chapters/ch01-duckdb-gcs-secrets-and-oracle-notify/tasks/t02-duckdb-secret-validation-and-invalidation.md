@@ -7,8 +7,8 @@ title: "Harden DuckDBSecretConfig validation, 401/403 invalidation, and startup 
 description: "Validate DuckDBSecretConfig at construction, invalidate dynamic providers on HTTP 401/403 errors, and close _client on failed initial secret refresh."
 status: stable
 state: completed
-commit: a7face33
-last_verified_commit: a7face33
+commit: b3b113d1
+last_verified_commit: b3b113d1
 last_verified_at: "2026-11-13T15:25:00Z"
 verification_evidence: "pytest test_duckdb_driver.py test_gcs_token_refresh.py + ruff + mypy clean"
 planning_quality: standard

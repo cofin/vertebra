@@ -7,8 +7,8 @@ title: "Implement SyncGcsBearerSecretProvider and AsyncGcsBearerSecretProvider"
 description: "Ship sync and async GCS bearer secret providers wrapping GcpTokenCache in vertebra.storage."
 status: stable
 state: completed
-commit: a7face33
-last_verified_commit: a7face33
+commit: a8ca7b24
+last_verified_commit: a8ca7b24
 last_verified_at: "2026-11-13T15:25:00Z"
 verification_evidence: "pytest test_gcs_token_refresh.py + ruff + mypy clean"
 planning_quality: standard
