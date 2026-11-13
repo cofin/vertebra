@@ -6,7 +6,8 @@ chapter_id: ch05-fastpath-consolidation
 title: "Consolidate Litestar, Starlette, and FastAPI Plugins onto set_attached_fastpath"
 description: Replace vertebra_fastpath_bypass state writes and Litestar class-property mutation with set_attached_fastpath / get_attached_fastpath.
 status: stable
-state: pending
+state: completed
+commit: 780338a4
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact

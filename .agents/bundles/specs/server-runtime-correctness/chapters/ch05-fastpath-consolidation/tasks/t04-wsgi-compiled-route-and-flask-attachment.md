@@ -6,7 +6,8 @@ chapter_id: ch05-fastpath-consolidation
 title: Unify Flask and Django CompiledRoute Structs and Flask FastPath Attachment
 description: Subclass CompiledRouteBase in Flask and Django fastpath modules and attach Flask FastPath via set_attached_fastpath.
 status: stable
-state: pending
+state: completed
+commit: 780338a4
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact

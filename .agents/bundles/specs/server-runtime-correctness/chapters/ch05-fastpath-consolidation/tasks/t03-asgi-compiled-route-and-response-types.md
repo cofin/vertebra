@@ -6,7 +6,8 @@ chapter_id: ch05-fastpath-consolidation
 title: Unify ASGI CompiledRoute Structs and Copy-Free Exact-Type Response Serialization
 description: "Subclass CompiledRouteBase in Litestar, Starlette, and FastAPI fastpath modules, share has_custom_exception_handlers, and serialize BUFFERED_RESPONSE_TYPES without copying."
 status: stable
-state: pending
+state: completed
+commit: 780338a4
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact

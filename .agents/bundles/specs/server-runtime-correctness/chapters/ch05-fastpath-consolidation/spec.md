@@ -5,7 +5,7 @@ chapter_id: ch05-fastpath-consolidation
 title: "Chapter 05: FastPath Route Struct and Attribute Consolidation"
 description: "Unify the five framework CompiledRoute structs onto CompiledRouteBase, resolve FastPath solely through __vertebra_fastpath__, deduplicate exception-handler checks, and serialize Starlette/FastAPI responses copy-free by exact type."
 status: stable
-state: planned
+state: active
 planning_status: complete
 planning_quality: standard
 planning_degraded_reason: null
@@ -13,7 +13,7 @@ depends_on_chapters: []
 replan_trigger: null
 plan_commit: 18baadcd
 last_reviewed_commit: null
-updated_at: "2026-11-12T23:45:00Z"
+updated_at: "2026-11-13T05:37:00Z"
 generated:
   by: flow-plan
   at: "2026-11-12T23:45:00Z"
@@ -79,12 +79,14 @@ Host framework extensions currently duplicate five independent `CompiledRoute` s
 
 ## 5. Implementation Plan
 
-- [ ] [t01-fastpath-core-route-base-and-attr-helpers.md](tasks/t01-fastpath-core-route-base-and-attr-helpers.md) — Add `CompiledRouteBase`, `get_attached_fastpath` / `set_attached_fastpath`, and `has_custom_exception_handlers` in `_fastpath_core.py`
-- [ ] [t02-asgi-plugin-fastpath-attachment.md](tasks/t02-asgi-plugin-fastpath-attachment.md) — Consolidate Litestar, Starlette, and FastAPI plugins onto `set_attached_fastpath`
-- [ ] [t03-asgi-compiled-route-and-response-types.md](tasks/t03-asgi-compiled-route-and-response-types.md) — Unify ASGI `CompiledRoute(CompiledRouteBase)`, exception checks, and copy-free `BUFFERED_RESPONSE_TYPES`
-- [ ] [t04-wsgi-compiled-route-and-flask-attachment.md](tasks/t04-wsgi-compiled-route-and-flask-attachment.md) — Unify Flask and Django `CompiledRoute(CompiledRouteBase)` and Flask `set_attached_fastpath`
+- [x] [780338a4] [t01-fastpath-core-route-base-and-attr-helpers.md](tasks/t01-fastpath-core-route-base-and-attr-helpers.md) — Add `CompiledRouteBase`, `get_attached_fastpath` / `set_attached_fastpath`, and `has_custom_exception_handlers` in `_fastpath_core.py`
+- [x] [780338a4] [t02-asgi-plugin-fastpath-attachment.md](tasks/t02-asgi-plugin-fastpath-attachment.md) — Consolidate Litestar, Starlette, and FastAPI plugins onto `set_attached_fastpath`
+- [x] [780338a4] [t03-asgi-compiled-route-and-response-types.md](tasks/t03-asgi-compiled-route-and-response-types.md) — Unify ASGI `CompiledRoute(CompiledRouteBase)`, exception checks, and copy-free `BUFFERED_RESPONSE_TYPES`
+- [x] [780338a4] [t04-wsgi-compiled-route-and-flask-attachment.md](tasks/t04-wsgi-compiled-route-and-flask-attachment.md) — Unify Flask and Django `CompiledRoute(CompiledRouteBase)` and Flask `set_attached_fastpath`
 
 ## 6. Current State & Remaining Plan Snapshot
+
+Completed (`4/4` tasks at `780338a4`).
 
 - **Fast Chapter Gate (`< 25s`)**: `uv run --no-sync ruff check src/py/vertebra/server src/py/vertebra/extensions/{litestar,starlette,fastapi,flask,django} && uv run --no-sync mypy src/py/vertebra/server src/py/vertebra/extensions/{litestar,starlette,fastapi,flask,django} && uv run --no-sync pytest src/py/tests/unit/server/test_asgi.py src/py/tests/unit/server/test_litestar_direct_fastpath.py src/py/tests/unit/extensions/test_litestar_plugin.py src/py/tests/unit/extensions/test_starlette_plugin.py src/py/tests/unit/extensions/test_fastapi_plugin.py src/py/tests/unit/extensions/test_flask_plugin.py src/py/tests/unit/extensions/test_django_plugin.py -q`.
 

@@ -6,7 +6,8 @@ chapter_id: ch05-fastpath-consolidation
 title: Add CompiledRouteBase and Single __vertebra_fastpath__ Helpers in _fastpath_core
 description: "Define FASTPATH_ATTR, get_attached_fastpath, set_attached_fastpath, has_custom_exception_handlers, and CompiledRouteBase, removing alias probes in _fastpath.py and _runner.py."
 status: stable
-state: pending
+state: completed
+commit: 780338a4
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
