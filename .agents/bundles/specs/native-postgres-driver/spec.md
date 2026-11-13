@@ -26,12 +26,12 @@ research:
   - research/cloud-material_20261105.md
 plan_revision: 9
 plan_commit: 18baadcd
-state_revision: 27
-last_verified_checkpoint: 30c34daf
+state_revision: 28
+last_verified_checkpoint: d9d2fd01
 last_reviewed_chapter: ch07-wheel-ci-and-benchmarks
 last_reviewed_commit: af023efd
 created_at: "2026-11-03T04:05:00Z"
-updated_at: "2026-11-13T23:01:00Z"
+updated_at: "2026-11-13T23:12:00Z"
 generated:
   by: flow-plan
   at: "2026-11-13T00:25:00Z"
@@ -141,7 +141,7 @@ Nine cohesive chapters (`32` tasks) remain to finish logical replication supervi
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Active Frontier**: Chapters `ch01`–`ch07` (`24/32` tasks) are completed and reviewed; `ch08-user-and-reference-docs` (`4/4` tasks) is implemented and verified at `30c34daf` awaiting chapter review (`4` open `compact` tasks remain in `ch09`).
+- **Active Frontier**: Chapters `ch01`–`ch07` (`24/32` tasks) are completed and reviewed; `ch08-user-and-reference-docs` (`4/4` tasks) is implemented and remediated at `d9d2fd01` awaiting chapter re-review (`4` open `compact` tasks remain in `ch09`).
 - **Downstream Unlocks**: Completing `ch05` unblocks [`broker-pool-sharing`](../broker-pool-sharing/spec.md), [`driver-conformance-ci`](../driver-conformance-ci/spec.md), [`native-redis-driver`](../native-redis-driver/spec.md), [`native-adapter-organization`](../native-adapter-organization/spec.md), [`sqlspec-adapter-parity`](../sqlspec-adapter-parity/spec.md), and [`queues-tasks-and-channels`](../queues-tasks-and-channels/spec.md).
 - **`/flow:finish` Full Gate**: `make lint-all && make rs-test && make py-test && make postgres-wheel-check && make postgres-test && make postgres-bench-check && make docs-check && make review-check`.
 

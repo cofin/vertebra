@@ -7,9 +7,9 @@ title: "Update databases.md, analytics-and-cdc.md, and database-capabilities.md"
 description: "Document vertebra-core[postgres], $N binds, single-Sync pipeline(), Pg* types, PostgresChangeSource, and PostgresEmbeddingPushdown."
 status: stable
 state: completed
-commit: 30c34daf
-last_verified_at: "2026-11-13T23:01:00Z"
-last_verified_commit: 30c34daf
+commit: d9d2fd01
+last_verified_at: "2026-11-13T23:12:00Z"
+last_verified_commit: d9d2fd01
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
