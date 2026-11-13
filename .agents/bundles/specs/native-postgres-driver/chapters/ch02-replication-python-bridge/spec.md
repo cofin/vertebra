@@ -71,7 +71,7 @@ Task `t04` updates `ffi-and-gil-discipline.md`, `pyo3-and-python-runtime.md`, an
 
 ## 5. Implementation Plan
 
-- [ ] [t01-cancel-safe-db-task-and-record-conversion.md](tasks/t01-cancel-safe-db-task-and-record-conversion.md) — Extend vertebra-db py_async for cancel-safe lease restoration and convert SupervisedDelivery records to PostgresReplicationRecord on the event loop.
+- [ ] [t01-cancel-safe-db-task-and-record-conversion.md](tasks/t01-cancel-safe-db-task-and-record-conversion.md) — Extend vertebra-db py_async for cancel-safe lease restoration and convert ReplicationEventDelivery records to PostgresReplicationRecord on the event loop.
 - [ ] [t02-async-postgres-replication-pyclass.md](tasks/t02-async-postgres-replication-pyclass.md) — Expose AsyncPostgresReplication (#[pyclass(frozen)]) with cancel-safe next, fenced acknowledge, aclose, closed, and async context management.
 - [ ] [t03-client-open-replication-and-pyi-stubs.md](tasks/t03-client-open-replication-and-pyi-stubs.md) — Add replication_identity and open_replication on AsyncPostgresClient and finalize _postgres.pyi for stubtest parity.
 - [ ] [t04-pyo3-ffi-okf-sync.md](tasks/t04-pyo3-ffi-okf-sync.md) — Update the 3 PyO3 FFI OKF chapters (each <= 200 lines) for vertebra._postgres, ShmCapsule, and PendingDeliveryGuard.

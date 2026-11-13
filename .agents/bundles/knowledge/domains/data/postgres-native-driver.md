@@ -14,6 +14,9 @@ generated:
   by: flow-setup
   at: "2026-11-12T23:35:00Z"
 verified:
+  - by: agent:flow-executor
+    at: "2026-11-13T01:52:00Z"
+    commit: 7d50fd42
   - by: agent:flow-setup
     at: "2026-11-12T23:35:00Z"
     commit: 18baadcd
@@ -58,8 +61,11 @@ sources:
     resource: src/rs/vertebra-postgres/src/replication/feedback.rs::ReplicationFeedback
     title: "XLogData/keepalive codecs and commit-fenced StandbyStatusUpdate tracking"
   - id: pg-stream-rs
-    resource: src/rs/vertebra-postgres/src/replication/stream.rs::ReplicationSession
+    resource: "src/rs/vertebra-postgres/src/replication/stream.rs::ReplicationSession"
     title: "Bounded single-generation CopyBoth replication pump, delivery leases, and deadline shutdown"
+  - id: pg-supervisor-rs
+    resource: "src/rs/vertebra-postgres/src/replication/supervisor.rs::ReplicationSupervisor"
+    title: "Generation-fenced ReplicationSupervisor, ReplicationEventDelivery leases, and identity-verified reconnect recovery"
   - id: pg-types-py
     resource: src/py/vertebra/db/adapters/postgres/types.py
     title: "Python Pg* value wrappers,PgUnchangedToast sentinel, and replication structs"
@@ -73,7 +79,7 @@ sources:
 - **Lossless Binary & Text Codecs**: `codecs/` decodes and encodes booleans, integers, floats, `Decimal` (`NUMERIC` `NaN`/`±Infinity`), `UUID`, `BYTEA`, `INET`/`CIDR`, UTC/naive/ambiguous-zone timestamps, `DATE`/`TIME`/`TIMETZ`, `INTERVAL`, `JSON`/`JSONB` (`0x01` header), multidimensional binary/text arrays, session-introspected `pg_type` composites/domains/ranges, and `pgvector` (`vector` `f32`, `halfvec` `f16`, `bit`) [^pg-codecs-mod-rs].
 - **Pools, Portals, Single-`Sync` Pipelines & Cancellation**: `pool.rs`, `pipeline.rs`, and `portal.rs` provide LIFO physical pooling with reset-or-evict health checks, PgBouncer `transaction`/`statement` unnamed-statement gating, bounded portal batch cursors, per-command deadlines, out-of-band `CancelRequest` socket retirement, and single-`Sync` extended-query pipelines isolated in explicit or implicit savepoint scopes [^pg-pool-rs] [^pg-pipeline-rs].
 - **Binary `COPY`, `VTBARROW` & Notifications**: `copy.rs` and `arrow.rs` stream `PGCOPY\n\xff\r\n\0` binary frames, materialize `arrow =60.1.0` batches into inline IPC or `VTBARROW` `ShmCapsule` `ArrowCursor` regions, and bulk-load Arrow batches via binary `COPY FROM STDIN`; `notifications.rs` runs a dedicated `LISTEN`/`UNLISTEN` pump (`AsyncPostgresListener`) [^pg-copy-rs] [^pg-arrow-rs] [^pg-notifications-rs].
-- **Logical Replication (`CopyBoth` & `pgoutput` v1)**: `PgOutputDecoder` emits ordered `Begin`/`Relation`/`Insert`/`Update`/`Delete`/`Truncate`/`Message`/`Commit` records (`PgUnchangedToast`) within bounded `1..=1024` / `8 MiB` queues; `ReplicationFeedback` separates received, published, and acknowledged `Commit` end LSNs (`<= 1024` in flight); and `ReplicationSession` runs concurrent reader/heartbeat tasks with cancel-safe delivery leases and single-deadline `CopyDone` shutdown [^pg-pgoutput-rs] [^pg-feedback-rs] [^pg-stream-rs] [^pg-types-py].
+- **Logical Replication (`CopyBoth` & `pgoutput` v1)**: `PgOutputDecoder` emits ordered `Begin`/`Relation`/`Insert`/`Update`/`Delete`/`Truncate`/`Message`/`Commit` records (`PgUnchangedToast`) within bounded `1..=1024` / `8 MiB` queues; `ReplicationFeedback` separates received, published, and acknowledged `Commit` end LSNs (`<= 1024` in flight); `ReplicationSession` runs concurrent reader/heartbeat tasks with cancel-safe delivery leases and single-deadline `CopyDone` shutdown; and `ReplicationSupervisor` (`supervisor.rs`) manages replacement generations over `connect_logical_verified` with generation-fenced `ReplicationEventDelivery` leases and bounded `100ms..=5s` jittered reconnect (`MAX_RAW_RECONNECT_ATTEMPTS = 8`) [^pg-pgoutput-rs] [^pg-feedback-rs] [^pg-stream-rs] [^pg-supervisor-rs] [^pg-types-py].
 <!-- truth: end -->
 
 [`src/rs/vertebra-postgres`](../../../../../src/rs/vertebra-postgres/src/lib.rs)[^pg-lib-rs] and [`_postgres.pyi`](../../../../../src/py/vertebra/_postgres.pyi)[^pg-pyi] implement Vertebra's pure-Rust PostgreSQL `14`–`18` transport crate (`postgres-protocol =0.6.12`, zero `libpq` linkage). Public Python adapter cutover (`SyncPostgreSQLDriver` / `AsyncPostgreSQLDriver`) and remaining split-state boundaries are tracked in [PostgreSQL Native Driver Limitations](postgres-limitations.md).
@@ -110,4 +116,5 @@ sources:
 [^pg-pgoutput-rs]: `src/rs/vertebra-postgres/src/replication/pgoutput.rs::PgOutputDecoder` — Incremental `pgoutput` v1 logical decoding into bounded transaction envelopes.
 [^pg-feedback-rs]: `src/rs/vertebra-postgres/src/replication/feedback.rs::ReplicationFeedback` — `XLogData`/keepalive codecs and commit-fenced `StandbyStatusUpdate` tracking.
 [^pg-stream-rs]: `src/rs/vertebra-postgres/src/replication/stream.rs::ReplicationSession` — Bounded single-generation `CopyBoth` replication pump, delivery leases, and deadline shutdown.
+[^pg-supervisor-rs]: `src/rs/vertebra-postgres/src/replication/supervisor.rs::ReplicationSupervisor` — Generation-fenced `ReplicationSupervisor`, `ReplicationEventDelivery` leases, and identity-verified reconnect recovery.
 [^pg-types-py]: `src/py/vertebra/db/adapters/postgres/types.py` — Python `Pg*` value wrappers, `PgUnchangedToast` sentinel, and replication structs.

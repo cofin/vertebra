@@ -1,5 +1,9 @@
 # Bundle Activity Log
 
+## [2026-11-13T01:52:00Z] chapter-checkpoint | native-postgres-driver ch01-replication-supervision
+
+- Completed `ch01-replication-supervision` (`t01`–`t02`) at `7d50fd42` on `feat/postgres-driver-complete`: added `ReplicationSupervisor`, `ReplicationEventDelivery`, `ReplicationStreamEvent`, `PostgresReplicationResume`, `raw_reconnect_delay` (`MAX_RAW_RECONNECT_ATTEMPTS = 8`), and `PostgresReplicationConnection::connect_logical_verified`, verified across `56` wire tests (`postgres_replication_wire_tests`) and `cargo clippy --all-targets -- -D warnings`.
+
 ## [2026-11-13T02:56:00Z] chapter-complete | storage-integrity-and-streaming ch01-integrity-receipts-and-verified-reads
 
 - Closed `ch01-integrity-receipts-and-verified-reads` at `f6400423` (`47` Rust tests, `485` Python tests, unified verified `open_reader` cursor across `read()`/`__iter__()`/`__aiter__()`, and `io.UnsupportedOperation` on random-access `seek`/`read_at` when `expected_sha256` is set).

@@ -4,7 +4,7 @@ id: "native-postgres-driver:ch02-replication-python-bridge:t01"
 flow_id: native-postgres-driver
 chapter_id: ch02-replication-python-bridge
 title: "Add spawn_rust_db_task_with_attr_and_future and lossless Python record conversion"
-description: "Extend vertebra-db py_async for cancel-safe lease restoration and convert SupervisedDelivery records to PostgresReplicationRecord on the event loop."
+description: "Extend vertebra-db py_async for cancel-safe lease restoration and convert ReplicationEventDelivery records to PostgresReplicationRecord on the event loop."
 status: stable
 state: pending
 planning_quality: standard
