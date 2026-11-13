@@ -27,6 +27,7 @@ import vertebra.db.adapters.oracle as db_oracle_mod
 import vertebra.db.adapters.postgres as db_postgres_mod
 import vertebra.db.adapters.sqlite as db_sqlite_mod
 import vertebra.db.arrow as db_arrow_mod
+from tests.unit.db.postgres_ports import FakeAsyncPostgresPool, FakePostgresCluster, FakeSyncPostgresPool
 from vertebra._vertebra import ArrowCursor as NativeArrowCursor
 from vertebra.db import (
     ARROW_SHM_THRESHOLD_ROWS,
@@ -1038,54 +1039,44 @@ async def test_async_tenant_session_setting_preserves_failure_identity(
 
 
 @pytest.mark.parametrize("config_defaults", [False, True])
-def test_postgresql_tenant_session_prepares_psycopg_binds(config_defaults: bool) -> None:
-    """The native sync port receives psycopg binds and the exact session values."""
-
-    class Port:
-        def __init__(self) -> None:
-            self.calls: list[tuple[str, tuple[Any, ...]]] = []
-
-        def execute(self, sql: str, parameters: Any) -> list[Any]:
-            assert sql.casefold() == "select set_config(%s, %s, %s)"
-            self.calls.append((sql, tuple(parameters)))
-            return []
-
-    port = Port()
-    native = SyncPostgreSQLDriver(PostgreSQLConfig(dsn="postgresql://localhost:5432/app"), pool=port)
+def test_postgresql_tenant_session_prepares_numeric_binds(config_defaults: bool) -> None:
+    """The native sync port receives $N numeric binds and the exact session values."""
+    cluster = FakePostgresCluster()
+    native = SyncPostgreSQLDriver(
+        PostgreSQLConfig(dsn="postgresql://localhost:5432/app"),
+        pool=FakeSyncPostgresPool(cluster),
+    )
     config = PostgreSQLSyncConfig(native.config, broker=object(), share_pool=False)
     adapter = PostgreSQLSyncDriver(native, statement_config=config.statement_config if config_defaults else None)
     try:
         result = adapter.apply_tenant_predicate(TenantPredicate(table_alias="o", tenant_value="acme"))
         assert result == "o.tenant_id = $1"
-        assert len(port.calls) == 1
-        assert port.calls[0][1] == ("app.tenant_id", "acme", True)
+        assert len(cluster.recorded_queries) == 1
+        sql, params, _ = cluster.recorded_queries[0]
+        assert sql.casefold() == "select set_config($1, $2, $3)"
+        assert params == ("app.tenant_id", "acme", True)
     finally:
         native.close()
 
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("config_defaults", [False, True])
-async def test_postgresql_tenant_session_prepares_asyncpg_binds(config_defaults: bool) -> None:
+async def test_postgresql_tenant_session_prepares_async_numeric_binds(config_defaults: bool) -> None:
     """The async native port receives numeric binds and the exact session values."""
-
-    class Port:
-        def __init__(self) -> None:
-            self.calls: list[tuple[str, tuple[Any, ...]]] = []
-
-        async def execute_tuples(self, sql: str, parameters: Any) -> list[Any]:
-            assert sql.upper() == "SELECT SET_CONFIG($1, $2, $3)"
-            self.calls.append((sql, tuple(parameters)))
-            return []
-
-    port = Port()
-    native = AsyncPostgreSQLDriver(PostgreSQLConfig(dsn="postgresql://localhost:5432/app"), pool=port)
+    cluster = FakePostgresCluster()
+    native = AsyncPostgreSQLDriver(
+        PostgreSQLConfig(dsn="postgresql://localhost:5432/app"),
+        pool=FakeAsyncPostgresPool(cluster),
+    )
     config = PostgreSQLAsyncConfig(native.config, broker=object(), share_pool=False)
     adapter = PostgreSQLAsyncDriver(native, statement_config=config.statement_config if config_defaults else None)
     try:
         result = await adapter.apply_tenant_predicate(TenantPredicate(table_alias="o", tenant_value="acme"))
         assert result == "o.tenant_id = $1"
-        assert len(port.calls) == 1
-        assert port.calls[0][1] == ("app.tenant_id", "acme", True)
+        assert len(cluster.recorded_queries) == 1
+        sql, params, _ = cluster.recorded_queries[0]
+        assert sql.casefold() == "select set_config($1, $2, $3)"
+        assert params == ("app.tenant_id", "acme", True)
     finally:
         await native.close()
 

@@ -488,8 +488,7 @@ async def test_pushdown_decodes_supported_vector_cells(
     assert (await adapter.embed_query("decode", normalize=False)).to_list() == [3, 4, 0, 0]
     if provider is PostgresEmbeddingPushdown:
         assert port.calls[0][1] == ("gemini-embedding-001", ["decode"])
-        expected_model_parameter = "$1" if port_type is _AsyncSelectPort else "%s"
-        assert f"embedding({expected_model_parameter}, t.txt)::vector" in port.calls[0][0]
+        assert "embedding($1, t.txt)::vector" in port.calls[0][0]
         assert port.calls[0][0].endswith("ORDER BY t.idx")
 
 
@@ -613,56 +612,14 @@ async def test_pushdown_embedder_preserves_document_titles() -> None:
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize(
-    ("driver_kind", "expected_binds"),
-    [
-        ("sync", ("%s", "%s")),
-        ("asyncpg_pool", ("$1", "$2")),
-        ("psycopg_async_pool", ("%s", "%s")),
-        ("tx_asyncpg", ("$1", "$2")),
-        ("tx_psycopg", ("%s", "%s")),
-    ],
-)
-async def test_postgres_embedding_pushdown_placeholder_selection(
-    driver_kind: str,
-    expected_binds: tuple[str, str],
-) -> None:
-    """PostgresEmbeddingPushdown selects $1/$2 for asyncpg shapes and %s/%s for sync or psycopg pools."""
-
-    class AcquirePool:
-        def acquire(self) -> None:
-            return None
-
-    class ConnectionPool:
-        def connection(self) -> None:
-            return None
-
-    class AsyncpgTxConn:
-        def fetch(self) -> None:
-            return None
-
-    class PsycopgTxConn:
-        def cursor(self) -> None:
-            return None
-
+@pytest.mark.parametrize("driver_kind", ["sync", "async"])
+async def test_postgres_embedding_pushdown_placeholder_selection(driver_kind: str) -> None:
+    """PostgresEmbeddingPushdown unconditionally emits native $1/$2 positional parameters."""
     rows = [{"embedding": [1.0, 0.0, 0.0, 0.0]}]
-    if driver_kind == "sync":
-        port: Any = _SelectPort(rows)
-    else:
-        port = _AsyncSelectPort(rows)
-        if driver_kind == "asyncpg_pool":
-            port.pool = AcquirePool()
-        elif driver_kind == "psycopg_async_pool":
-            port.pool = ConnectionPool()
-        elif driver_kind == "tx_asyncpg":
-            port._tx_conn = AsyncpgTxConn()
-        elif driver_kind == "tx_psycopg":
-            port._tx_conn = PsycopgTxConn()
-
+    port: Any = _SelectPort(rows) if driver_kind == "sync" else _AsyncSelectPort(rows)
     pushdown = PostgresEmbeddingPushdown(port, dimensions=4, normalize=False)
     await pushdown.embed_query("alpha")
-    b1, b2 = expected_binds
-    assert f"embedding({b1}, t.txt)::vector FROM unnest({b2}::text[])" in port.calls[-1][0]
+    assert "embedding($1, t.txt)::vector FROM unnest($2::text[])" in port.calls[-1][0]
 
 
 @pytest.mark.anyio

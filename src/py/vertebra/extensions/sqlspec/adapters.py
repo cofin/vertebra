@@ -174,43 +174,19 @@ class BaseSyncDriver(SyncDriverAdapterBase):
         """Return data dictionary instance for metadata queries."""
         return None
 
-    def execute(
-        self,
-        statement: Any,
-        /,
-        *parameters: Any,
-        statement_config: Any | None = None,
-        **kwargs: Any,
-    ) -> Any:
-        """Execute a DML or DDL statement and return the affected row count."""
-        _ = (statement_config, kwargs)
-        if isinstance(statement, SQL):
-            sql, p = statement.compile()
-            res = self.native_driver.execute(sql, p) if p else self.native_driver.execute(sql)
-        else:
-            sql = str(statement)
-            params = self._normalize_params(parameters)
-            res = self.native_driver.execute(sql, params) if params is not None else self.native_driver.execute(sql)
+    def _execute_compiled(self, sql: str, params: Any) -> int:
+        """Execute pre-compiled SQL and parameters on the native driver."""
+        res = self.native_driver.execute(sql, params) if params is not None else self.native_driver.execute(sql)
         return len(res) if isinstance(res, list) else int(res)
 
-    def select(
+    def _select_compiled(
         self,
-        statement: Any,
-        /,
-        *parameters: Any,
+        sql: str,
+        params: Any,
+        *,
         schema_type: type[Any] | None = None,
-        statement_config: Any | None = None,
-        **kwargs: Any,
-    ) -> Any:
-        """Execute a query and return rows as dictionaries or converted schema instances."""
-        _ = (statement_config, kwargs)
-        if isinstance(statement, SQL):
-            sql, p = statement.compile()
-            params = p
-        else:
-            sql = str(statement)
-            params = self._normalize_params(parameters)
-
+    ) -> list[Any]:
+        """Execute a pre-compiled query and return hydrated or dict rows."""
         if schema_type is not None and schema_type is not dict:
             try:
                 res = (
@@ -234,6 +210,69 @@ class BaseSyncDriver(SyncDriverAdapterBase):
             tuple_rows = [tuple(r.get(c) for c in cols) for r in rows]
             return plan.hydrate_rows(tuple_rows, cols)
         return [msgspec.convert(row, type=schema_type) for row in rows]
+
+    def _select_to_arrow_compiled(
+        self,
+        sql: str,
+        params: Any,
+        fallback_parameters: tuple[Any, ...] = (),
+        *,
+        prepared: SQL | None = None,
+    ) -> ArrowResult:
+        """Execute a pre-compiled query and wrap its output as an ArrowResult."""
+        arrow_fn = getattr(self.native_driver, "select_to_arrow", None)
+        if callable(arrow_fn):
+            raw = arrow_fn(sql, params) if params is not None else arrow_fn(sql)
+            if hasattr(raw, "to_arrow_table"):
+                table = raw.to_arrow_table()
+            elif hasattr(raw, "read_all"):
+                table = raw.read_all()
+            else:
+                table = raw
+        else:
+            rows = (
+                self._select_compiled(sql, params) if prepared is not None else self.select(sql, *fallback_parameters)
+            )
+            pa = import_optional("pyarrow")
+            table = pa.Table.from_pylist(rows) if pa is not None else rows
+        num_rows = len(table) if hasattr(table, "__len__") else getattr(table, "num_rows", 0)
+        return ArrowResult(statement=prepared or SQL(sql), data=table, rows_affected=num_rows)
+
+    def execute(
+        self,
+        statement: Any,
+        /,
+        *parameters: Any,
+        statement_config: Any | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Execute a DML or DDL statement and return the affected row count."""
+        _ = (statement_config, kwargs)
+        if isinstance(statement, SQL):
+            sql, p = statement.compile()
+            return self._execute_compiled(sql, p if p else None)
+        sql = str(statement)
+        params = self._normalize_params(parameters)
+        return self._execute_compiled(sql, params)
+
+    def select(
+        self,
+        statement: Any,
+        /,
+        *parameters: Any,
+        schema_type: type[Any] | None = None,
+        statement_config: Any | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Execute a query and return rows as dictionaries or converted schema instances."""
+        _ = (statement_config, kwargs)
+        if isinstance(statement, SQL):
+            sql, p = statement.compile()
+            params = p
+        else:
+            sql = str(statement)
+            params = self._normalize_params(parameters)
+        return self._select_compiled(sql, params, schema_type=schema_type)
 
     def select_one(
         self,
@@ -312,24 +351,36 @@ class BaseSyncDriver(SyncDriverAdapterBase):
         **kwargs: Any,
     ) -> ArrowResult:
         """Execute a query and return an ArrowResult containing a PyArrow Table."""
-        _ = (statement_config, return_format, native_only, batch_size, arrow_schema)
+        _ = (statement_config, return_format, native_only, batch_size, arrow_schema, kwargs)
         sql = statement.sql if hasattr(statement, "sql") else str(statement)
         params = self._normalize_params(parameters)
-        arrow_fn = getattr(self.native_driver, "select_to_arrow", None)
-        if callable(arrow_fn):
-            raw = arrow_fn(sql, params) if params is not None else arrow_fn(sql)
-            if hasattr(raw, "to_arrow_table"):
-                table = raw.to_arrow_table()
-            elif hasattr(raw, "read_all"):
-                table = raw.read_all()
-            else:
-                table = raw
-        else:
-            rows = self.select(sql, *parameters)
-            pa = import_optional("pyarrow")
-            table = pa.Table.from_pylist(rows) if pa is not None else rows
-        num_rows = len(table) if hasattr(table, "__len__") else getattr(table, "num_rows", 0)
-        return ArrowResult(statement=SQL(sql), data=table, rows_affected=num_rows)
+        return self._select_to_arrow_compiled(sql, params, parameters)
+
+    def _compile_stack_entry(
+        self,
+        raw_statement: Any,
+        arguments: tuple[Any, ...],
+        *,
+        statement_config: StatementConfig | None = None,
+        kwargs: dict[str, Any] | None = None,
+    ) -> tuple[SQL, str, Any]:
+        """Compile a stack entry once according to the active adapter transport profile."""
+        if isinstance(self, PostgreSQLSyncDriver):
+            return _compile_postgres_numeric_transport(
+                self,
+                raw_statement,
+                arguments,
+                statement_config=statement_config,
+                kwargs=kwargs,
+            )
+        statement = self.prepare_statement(
+            raw_statement,
+            arguments,
+            statement_config=statement_config,
+            kwargs=kwargs or None,
+        )
+        sql, params = statement.compile()
+        return statement, sql, params
 
     def execute_stack(
         self,
@@ -352,14 +403,14 @@ class BaseSyncDriver(SyncDriverAdapterBase):
             prepared = []
             for op in operations:
                 kwargs = dict(op.keyword_arguments or {})
-                statement = self.prepare_statement(
-                    op.statement,
-                    op.arguments,
-                    statement_config=kwargs.pop("statement_config", None),
-                    kwargs=kwargs,
+                prepared.append(
+                    self._compile_stack_entry(
+                        op.statement,
+                        op.arguments,
+                        statement_config=kwargs.pop("statement_config", None),
+                        kwargs=kwargs,
+                    )
                 )
-                sql, params = statement.compile()
-                prepared.append((statement, sql, params))
             with self.native_driver.pipeline() as pipe:
                 for statement, sql, params in prepared:
                     if statement.returns_rows():
@@ -391,16 +442,15 @@ class BaseSyncDriver(SyncDriverAdapterBase):
                 try:
                     kwargs = dict(op.keyword_arguments or {})
                     if op.method == "execute":
-                        statement = self.prepare_statement(
+                        statement, sql, params = self._compile_stack_entry(
                             op.statement,
                             op.arguments,
                             statement_config=kwargs.pop("statement_config", None),
                             kwargs=kwargs,
                         )
-                        sql, params = statement.compile()
-                        args = (params,) if params is not None else ()
+                        normalized = params if params is not None else None
                         if statement.returns_rows():
-                            rows = self.select(sql, *args)
+                            rows = self._select_compiled(sql, normalized)
                             result = StackResult.from_sql_result(
                                 SQLResult(
                                     statement=statement,
@@ -410,7 +460,7 @@ class BaseSyncDriver(SyncDriverAdapterBase):
                                 )
                             )
                         else:
-                            result = StackResult(rows_affected=self.execute(sql, *args))
+                            result = StackResult(rows_affected=self._execute_compiled(sql, normalized))
                     elif op.method == "execute_many":
                         statement = _prepare_stack_many(self, op, kwargs)
                         sql, parameter_sets = statement.compile()
@@ -424,23 +474,29 @@ class BaseSyncDriver(SyncDriverAdapterBase):
                         )
                     else:
                         arrow_options = {key: kwargs.pop(key) for key in self._arrow_execution_options if key in kwargs}
-                        statement = self.prepare_statement(
+                        statement, sql, params = self._compile_stack_entry(
                             op.statement,
                             op.arguments,
                             statement_config=kwargs.pop("statement_config", None),
                             kwargs=kwargs,
                         )
-                        sql, params = statement.compile()
-                        args = (params,) if params is not None else ()
-                        arrow_result = self.select_to_arrow(sql, *args, **arrow_options)
-                        if isinstance(arrow_result, ArrowCursor):
-                            arrow_result = ArrowResult(
-                                statement=statement,
-                                data=arrow_result.to_arrow_table(),
-                                rows_affected=arrow_result.row_count,
+                        if isinstance(self, PostgreSQLSyncDriver):
+                            arrow_result = self._select_to_arrow_compiled(
+                                sql,
+                                params if params else None,
+                                prepared=statement,
                             )
                         else:
-                            arrow_result.statement = statement
+                            args = (params,) if params is not None else ()
+                            arrow_result = self.select_to_arrow(sql, *args, **arrow_options)
+                            if isinstance(arrow_result, ArrowCursor):
+                                arrow_result = ArrowResult(
+                                    statement=statement,
+                                    data=arrow_result.to_arrow_table(),
+                                    rows_affected=arrow_result.row_count,
+                                )
+                            else:
+                                arrow_result.statement = statement
                         result = StackResult.from_arrow_result(arrow_result)
                     if continue_on_error:
                         self.commit()
@@ -566,47 +622,23 @@ class BaseAsyncDriver(AsyncDriverAdapterBase):
         """Return data dictionary instance for metadata queries."""
         return None
 
-    async def execute(
-        self,
-        statement: Any,
-        /,
-        *parameters: Any,
-        statement_config: Any | None = None,
-        **kwargs: Any,
-    ) -> Any:
-        """Execute a DML or DDL statement asynchronously and return the affected row count."""
-        _ = (statement_config, kwargs)
-        if isinstance(statement, SQL):
-            sql, p = statement.compile()
-            res = await self.native_driver.execute(sql, p) if p else await self.native_driver.execute(sql)
-        else:
-            sql = str(statement)
-            params = BaseSyncDriver._normalize_params(parameters)
-            res = (
-                await self.native_driver.execute(sql, params)
-                if params is not None
-                else await self.native_driver.execute(sql)
-            )
+    async def _execute_compiled(self, sql: str, params: Any) -> int:
+        """Execute pre-compiled SQL and parameters asynchronously on the native driver."""
+        res = (
+            await self.native_driver.execute(sql, params)
+            if params is not None
+            else await self.native_driver.execute(sql)
+        )
         return len(res) if isinstance(res, list) else int(res)
 
-    async def select(
+    async def _select_compiled(
         self,
-        statement: Any,
-        /,
-        *parameters: Any,
+        sql: str,
+        params: Any,
+        *,
         schema_type: type[Any] | None = None,
-        statement_config: Any | None = None,
-        **kwargs: Any,
-    ) -> Any:
-        """Execute a query asynchronously and return rows as dictionaries or schema instances."""
-        _ = (statement_config, kwargs)
-        if isinstance(statement, SQL):
-            sql, p = statement.compile()
-            params = p
-        else:
-            sql = str(statement)
-            params = BaseSyncDriver._normalize_params(parameters)
-
+    ) -> list[Any]:
+        """Execute a pre-compiled query asynchronously and hydrate rows."""
         if schema_type is not None and schema_type is not dict:
             try:
                 res = (
@@ -632,6 +664,71 @@ class BaseAsyncDriver(AsyncDriverAdapterBase):
             tuple_rows = [tuple(r.get(c) for c in cols) for r in rows]
             return plan.hydrate_rows(tuple_rows, cols)
         return [msgspec.convert(row, type=schema_type) for row in rows]
+
+    async def _select_to_arrow_compiled(
+        self,
+        sql: str,
+        params: Any,
+        fallback_parameters: tuple[Any, ...] = (),
+        *,
+        prepared: SQL | None = None,
+    ) -> ArrowResult:
+        """Execute a pre-compiled query asynchronously and wrap its output as an ArrowResult."""
+        arrow_fn = getattr(self.native_driver, "select_to_arrow", None)
+        if callable(arrow_fn):
+            raw = await arrow_fn(sql, params) if params is not None else await arrow_fn(sql)
+            if hasattr(raw, "to_arrow_table"):
+                table = raw.to_arrow_table()
+            elif hasattr(raw, "read_all"):
+                table = raw.read_all()
+            else:
+                table = raw
+        else:
+            rows = (
+                await self._select_compiled(sql, params)
+                if prepared is not None
+                else await self.select(sql, *fallback_parameters)
+            )
+            pa = import_optional("pyarrow")
+            table = pa.Table.from_pylist(rows) if pa is not None else rows
+        num_rows = len(table) if hasattr(table, "__len__") else getattr(table, "num_rows", 0)
+        return ArrowResult(statement=prepared or SQL(sql), data=table, rows_affected=num_rows)
+
+    async def execute(
+        self,
+        statement: Any,
+        /,
+        *parameters: Any,
+        statement_config: Any | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Execute a DML or DDL statement asynchronously and return the affected row count."""
+        _ = (statement_config, kwargs)
+        if isinstance(statement, SQL):
+            sql, p = statement.compile()
+            return await self._execute_compiled(sql, p if p else None)
+        sql = str(statement)
+        params = BaseSyncDriver._normalize_params(parameters)
+        return await self._execute_compiled(sql, params)
+
+    async def select(
+        self,
+        statement: Any,
+        /,
+        *parameters: Any,
+        schema_type: type[Any] | None = None,
+        statement_config: Any | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Execute a query asynchronously and return rows as dictionaries or schema instances."""
+        _ = (statement_config, kwargs)
+        if isinstance(statement, SQL):
+            sql, p = statement.compile()
+            params = p
+        else:
+            sql = str(statement)
+            params = BaseSyncDriver._normalize_params(parameters)
+        return await self._select_compiled(sql, params, schema_type=schema_type)
 
     async def select_one(
         self,
@@ -716,24 +813,36 @@ class BaseAsyncDriver(AsyncDriverAdapterBase):
         **kwargs: Any,
     ) -> ArrowResult:
         """Execute a query asynchronously and return an ArrowResult containing a PyArrow Table."""
-        _ = (statement_config, return_format, native_only, batch_size, arrow_schema)
+        _ = (statement_config, return_format, native_only, batch_size, arrow_schema, kwargs)
         sql = statement.sql if hasattr(statement, "sql") else str(statement)
         params = BaseSyncDriver._normalize_params(parameters)
-        arrow_fn = getattr(self.native_driver, "select_to_arrow", None)
-        if callable(arrow_fn):
-            raw = await arrow_fn(sql, params) if params is not None else await arrow_fn(sql)
-            if hasattr(raw, "to_arrow_table"):
-                table = raw.to_arrow_table()
-            elif hasattr(raw, "read_all"):
-                table = raw.read_all()
-            else:
-                table = raw
-        else:
-            rows = await self.select(sql, *parameters)
-            pa = import_optional("pyarrow")
-            table = pa.Table.from_pylist(rows) if pa is not None else rows
-        num_rows = len(table) if hasattr(table, "__len__") else getattr(table, "num_rows", 0)
-        return ArrowResult(statement=SQL(sql), data=table, rows_affected=num_rows)
+        return await self._select_to_arrow_compiled(sql, params, parameters)
+
+    def _compile_stack_entry(
+        self,
+        raw_statement: Any,
+        arguments: tuple[Any, ...],
+        *,
+        statement_config: StatementConfig | None = None,
+        kwargs: dict[str, Any] | None = None,
+    ) -> tuple[SQL, str, Any]:
+        """Compile a stack entry once according to the active adapter transport profile."""
+        if isinstance(self, PostgreSQLAsyncDriver):
+            return _compile_postgres_numeric_transport(
+                self,
+                raw_statement,
+                arguments,
+                statement_config=statement_config,
+                kwargs=kwargs,
+            )
+        statement = self.prepare_statement(
+            raw_statement,
+            arguments,
+            statement_config=statement_config,
+            kwargs=kwargs or None,
+        )
+        sql, params = statement.compile()
+        return statement, sql, params
 
     async def execute_stack(
         self,
@@ -756,14 +865,14 @@ class BaseAsyncDriver(AsyncDriverAdapterBase):
             prepared = []
             for op in operations:
                 kwargs = dict(op.keyword_arguments or {})
-                statement = self.prepare_statement(
-                    op.statement,
-                    op.arguments,
-                    statement_config=kwargs.pop("statement_config", None),
-                    kwargs=kwargs,
+                prepared.append(
+                    self._compile_stack_entry(
+                        op.statement,
+                        op.arguments,
+                        statement_config=kwargs.pop("statement_config", None),
+                        kwargs=kwargs,
+                    )
                 )
-                sql, params = statement.compile()
-                prepared.append((statement, sql, params))
             async with self.native_driver.pipeline() as pipe:
                 for statement, sql, params in prepared:
                     if statement.returns_rows():
@@ -795,16 +904,15 @@ class BaseAsyncDriver(AsyncDriverAdapterBase):
                 try:
                     kwargs = dict(op.keyword_arguments or {})
                     if op.method == "execute":
-                        statement = self.prepare_statement(
+                        statement, sql, params = self._compile_stack_entry(
                             op.statement,
                             op.arguments,
                             statement_config=kwargs.pop("statement_config", None),
                             kwargs=kwargs,
                         )
-                        sql, params = statement.compile()
-                        args = (params,) if params is not None else ()
+                        normalized = params if params is not None else None
                         if statement.returns_rows():
-                            rows = await self.select(sql, *args)
+                            rows = await self._select_compiled(sql, normalized)
                             result = StackResult.from_sql_result(
                                 SQLResult(
                                     statement=statement,
@@ -814,7 +922,7 @@ class BaseAsyncDriver(AsyncDriverAdapterBase):
                                 )
                             )
                         else:
-                            result = StackResult(rows_affected=await self.execute(sql, *args))
+                            result = StackResult(rows_affected=await self._execute_compiled(sql, normalized))
                     elif op.method == "execute_many":
                         statement = _prepare_stack_many(self, op, kwargs)
                         sql, parameter_sets = statement.compile()
@@ -828,23 +936,29 @@ class BaseAsyncDriver(AsyncDriverAdapterBase):
                         )
                     else:
                         arrow_options = {key: kwargs.pop(key) for key in self._arrow_execution_options if key in kwargs}
-                        statement = self.prepare_statement(
+                        statement, sql, params = self._compile_stack_entry(
                             op.statement,
                             op.arguments,
                             statement_config=kwargs.pop("statement_config", None),
                             kwargs=kwargs,
                         )
-                        sql, params = statement.compile()
-                        args = (params,) if params is not None else ()
-                        arrow_result = await self.select_to_arrow(sql, *args, **arrow_options)
-                        if isinstance(arrow_result, ArrowCursor):
-                            arrow_result = ArrowResult(
-                                statement=statement,
-                                data=arrow_result.to_arrow_table(),
-                                rows_affected=arrow_result.row_count,
+                        if isinstance(self, PostgreSQLAsyncDriver):
+                            arrow_result = await self._select_to_arrow_compiled(
+                                sql,
+                                params if params else None,
+                                prepared=statement,
                             )
                         else:
-                            arrow_result.statement = statement
+                            args = (params,) if params is not None else ()
+                            arrow_result = await self.select_to_arrow(sql, *args, **arrow_options)
+                            if isinstance(arrow_result, ArrowCursor):
+                                arrow_result = ArrowResult(
+                                    statement=statement,
+                                    data=arrow_result.to_arrow_table(),
+                                    rows_affected=arrow_result.row_count,
+                                )
+                            else:
+                                arrow_result.statement = statement
                         result = StackResult.from_arrow_result(arrow_result)
                     if continue_on_error:
                         await self.commit()
@@ -965,12 +1079,72 @@ class PostgreSQLSyncDriver(BaseSyncDriver):
 
     dialect: str = "postgres"
 
-    _execution_parameter_style = ParameterStyle.POSITIONAL_PYFORMAT
+    _execution_parameter_style = ParameterStyle.NUMERIC
+
+    def execute(
+        self,
+        statement: Any,
+        /,
+        *parameters: Any,
+        statement_config: Any | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Execute a PostgreSQL DML/DDL statement using compiled $N numeric binds."""
+        _prepared, sql, params = _compile_postgres_numeric_transport(
+            self,
+            statement,
+            parameters,
+            statement_config=statement_config,
+            kwargs=kwargs or None,
+        )
+        return self._execute_compiled(sql, params if params else None)
+
+    def select(
+        self,
+        statement: Any,
+        /,
+        *parameters: Any,
+        schema_type: type[Any] | None = None,
+        statement_config: Any | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Execute a PostgreSQL query using compiled $N numeric binds."""
+        _prepared, sql, params = _compile_postgres_numeric_transport(
+            self,
+            statement,
+            parameters,
+            statement_config=statement_config,
+            kwargs=kwargs or None,
+        )
+        return self._select_compiled(sql, params if params else None, schema_type=schema_type)
+
+    def select_to_arrow(
+        self,
+        statement: Any,
+        /,
+        *parameters: Any,
+        statement_config: Any | None = None,
+        return_format: str = "table",
+        native_only: bool = False,
+        batch_size: int | None = None,
+        arrow_schema: Any | None = None,
+        **kwargs: Any,
+    ) -> ArrowResult:
+        """Execute a PostgreSQL query to Arrow using compiled $N numeric binds."""
+        _ = (return_format, native_only, batch_size, arrow_schema)
+        prepared, sql, params = _compile_postgres_numeric_transport(
+            self,
+            statement,
+            parameters,
+            statement_config=statement_config,
+            kwargs=kwargs or None,
+        )
+        return self._select_to_arrow_compiled(sql, params if params else None, prepared=prepared)
 
     def apply_tenant_predicate(self, predicate: TenantPredicate) -> str:
         """Set the owning engine's tenant session value and return its predicate."""
         sql, parameters = _prepare_postgres_tenant_session(self, predicate)
-        self.execute(sql, parameters)
+        self._execute_compiled(sql, parameters if parameters else None)
         return PostgreSQLCore.build_tenant_predicate_sql(predicate, param_index=1)
 
 
@@ -981,10 +1155,70 @@ class PostgreSQLAsyncDriver(BaseAsyncDriver):
 
     _execution_parameter_style = ParameterStyle.NUMERIC
 
+    async def execute(
+        self,
+        statement: Any,
+        /,
+        *parameters: Any,
+        statement_config: Any | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Execute an async PostgreSQL DML/DDL statement using compiled $N numeric binds."""
+        _prepared, sql, params = _compile_postgres_numeric_transport(
+            self,
+            statement,
+            parameters,
+            statement_config=statement_config,
+            kwargs=kwargs or None,
+        )
+        return await self._execute_compiled(sql, params if params else None)
+
+    async def select(
+        self,
+        statement: Any,
+        /,
+        *parameters: Any,
+        schema_type: type[Any] | None = None,
+        statement_config: Any | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Execute an async PostgreSQL query using compiled $N numeric binds."""
+        _prepared, sql, params = _compile_postgres_numeric_transport(
+            self,
+            statement,
+            parameters,
+            statement_config=statement_config,
+            kwargs=kwargs or None,
+        )
+        return await self._select_compiled(sql, params if params else None, schema_type=schema_type)
+
+    async def select_to_arrow(
+        self,
+        statement: Any,
+        /,
+        *parameters: Any,
+        statement_config: Any | None = None,
+        return_format: str = "table",
+        native_only: bool = False,
+        batch_size: int | None = None,
+        arrow_schema: Any | None = None,
+        **kwargs: Any,
+    ) -> ArrowResult:
+        """Execute an async PostgreSQL query to Arrow using compiled $N numeric binds."""
+        _ = (return_format, native_only, batch_size, arrow_schema)
+        prepared, sql, params = _compile_postgres_numeric_transport(
+            self,
+            statement,
+            parameters,
+            statement_config=statement_config,
+            kwargs=kwargs or None,
+        )
+        return await self._select_to_arrow_compiled(sql, params if params else None, prepared=prepared)
+
     async def apply_tenant_predicate(self, predicate: TenantPredicate) -> str:
         """Set the owning engine's tenant session value and return its predicate."""
         sql, parameters = _prepare_postgres_tenant_session(self, predicate)
-        await self.execute(sql, parameters)
+        await self._execute_compiled(sql, parameters if parameters else None)
         return PostgreSQLCore.build_tenant_predicate_sql(predicate, param_index=1)
 
 
@@ -1374,19 +1608,49 @@ class DuckDBAsyncConfig(AsyncAdapterConfig[DuckDBConfig, DuckDBAsyncDriver]):
     driver_type: ClassVar[type[DuckDBAsyncDriver]] = DuckDBAsyncDriver
 
 
+def _unwrap_typed_parameters(bound: Any) -> Any:
+    """Unwrap TypedParameter instances while preserving dict, sequence, or scalar shapes."""
+    if isinstance(bound, dict):
+        return {key: value.value if isinstance(value, TypedParameter) else value for key, value in bound.items()}
+    if isinstance(bound, tuple):
+        return tuple(value.value if isinstance(value, TypedParameter) else value for value in bound)
+    if isinstance(bound, list):
+        return [value.value if isinstance(value, TypedParameter) else value for value in bound]
+    if isinstance(bound, TypedParameter):
+        return bound.value
+    return bound
+
+
+def _compile_postgres_numeric_transport(
+    driver: BaseSyncDriver | BaseAsyncDriver,
+    statement: Any,
+    parameters: tuple[Any, ...] = (),
+    *,
+    statement_config: StatementConfig | None = None,
+    kwargs: dict[str, Any] | None = None,
+) -> tuple[SQL, str, Any]:
+    """Compile a PostgreSQL statement once to $N binds preserving transformers and filters."""
+    effective_config = statement_config or driver.statement_config
+    prepared = driver.prepare_statement(
+        statement,
+        parameters,
+        statement_config=effective_config,
+        kwargs=kwargs or None,
+    )
+    sql, bound = prepared.compile()
+    bound = driver.prepare_driver_parameters(bound, prepared.statement_config, prepared_statement=prepared)
+    return prepared, sql, _unwrap_typed_parameters(bound)
+
+
 def _prepare_postgres_tenant_session(
     driver: BaseSyncDriver | BaseAsyncDriver, predicate: TenantPredicate
 ) -> tuple[str, Any]:
     """Compile session SQL through its transport profile and unwrap typed bind values."""
     sql, parameters = PostgreSQLCore.build_session_guc_sql(str(predicate.tenant_value), predicate.config)
-    statement = driver.prepare_statement(sql, parameters)
-    sql, bound = statement.compile()
-    bound = driver.prepare_driver_parameters(bound, statement.statement_config, prepared_statement=statement)
+    _prepared, compiled_sql, bound = _compile_postgres_numeric_transport(driver, sql, (parameters,))
     if isinstance(bound, dict):
-        return sql, {key: value.value if isinstance(value, TypedParameter) else value for key, value in bound.items()}
-    return sql, tuple(
-        value.value if isinstance(value, TypedParameter) else value for value in cast("Sequence[Any]", bound)
-    )
+        return compiled_sql, bound
+    return compiled_sql, tuple(cast("Sequence[Any]", bound))
 
 
 def _native_statement_config(dialect: str, execution_style: ParameterStyle | None) -> StatementConfig:

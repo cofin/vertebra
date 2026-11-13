@@ -1,7 +1,7 @@
 ---
 type: Gotcha
 title: Database Driver Limitations
-description: Verified gaps in the database adapters, covering the unwired native PostgreSQL wheel and DuckDB GCS credential handling, that callers and maintainers must account for.
+description: Verified cross-driver runtime boundaries covering native PostgreSQL/Oracle/MSSQL wheel status and DuckDB GCS credential handling.
 status: stable
 tags:
 - data
@@ -19,16 +19,10 @@ verified:
 sources:
 - id: pg-driver
   resource: src/py/vertebra/db/adapters/postgres/driver.py::SyncPostgreSQLDriver
-  title: PostgreSQL drivers over psycopg_pool and asyncio.to_thread
-- id: pg-arrow
-  resource: src/py/vertebra/db/adapters/postgres/arrow.py
-  title: PostgreSQL Arrow helpers referencing vertebra._postgres under TYPE_CHECKING
-- id: pg-notify
-  resource: src/py/vertebra/db/adapters/postgres/notify.py
-  title: PostgreSQL notification source referencing vertebra._postgres under TYPE_CHECKING
+  title: PostgreSQL drivers re-exported over native _sync and _async engines
 - id: pg-queue
   resource: src/py/vertebra/framework/queues/postgres.py::PostgreSQLQueueBackend
-  title: PostgreSQL queue backend psycopg probe
+  title: PostgreSQL queue backend vertebra._postgres guard
 - id: pg-stub
   resource: src/py/vertebra/_postgres.pyi
   title: Native vertebra._postgres client, pool, COPY, Arrow, and listener stubs
@@ -43,24 +37,21 @@ sources:
 # Database Driver Limitations
 
 <!-- truth: start -->
-- The `vertebra-postgres` wheel (`vertebra._postgres`, `vertebra-core[postgres]`) ships `SyncPostgresClient`, `AsyncPostgresClient`, pools, portals, COPY streams, Arrow streams, and `AsyncPostgresListener`, but no production adapter calls it [^pg-stub].
-- `SyncPostgreSQLDriver` executes through `psycopg_pool.ConnectionPool` (`ensure_module("psycopg_pool", install_package="psycopg[binary,pool]")`), and `AsyncPostgreSQLDriver` offloads the sync driver with `asyncio.to_thread` [^pg-driver].
-- `adapters/postgres/arrow.py`, `events.py`, and `notify.py` import `vertebra._postgres` names only under `TYPE_CHECKING`; at runtime `pipeline.py` and `arrow.py` are exercised only by unit tests [^pg-arrow] [^pg-notify].
-- `PostgreSQLQueueBackend` probes `psycopg` when no `executor=` is passed and raises `MissingDependencyError` or `ImproperConfigurationError` [^pg-queue].
+- `SyncPostgreSQLDriver` and `AsyncPostgreSQLDriver` (`adapters/postgres/driver.py` re-exporting `_sync` / `_async`) execute natively through `vertebra._postgres` (`vertebra-core[postgres]`) with `$1..$N` SQLSpec (`ParameterStyle.NUMERIC`) and SQLAlchemy (`numeric_dollar`) compilation, COPY/Arrow streams, and `AsyncPostgresListener`; `psycopg`, `psycopg_pool`, and `asyncpg` runtime paths and legacy dialer helpers are removed [^pg-driver] [^pg-stub].
+- `PostgreSQLQueueBackend` probes `vertebra._postgres` (`vertebra-core[postgres]`, extra `postgres`) when no `executor=` is passed and raises `MissingDependencyError` or `ImproperConfigurationError`; no live executor ships for `PostgreSQLQueueBackend` or `OracleQueueBackend` (`oracledb`) [^pg-queue].
+- Native Oracle (`vertebra._oracle`) and SQL Server (`vertebra._mssql`) optional extension packages are not yet published; `OracleConfig` and `MSSQLConfig` construct while driver initialization raises `MissingDependencyError`.
 - `DuckDBCore` provides only `is_write_statement`; there is no GCS `CREATE SECRET` builder and no bundled GCS bearer-token secret provider. GCS `httpfs` access requires a caller-supplied `DuckDBSecretConfig` (`secret_type="gcs"`) with a static `value` mapping or a sync/async `value_provider` [^duckdb-core] [^duckdb-secret].
 <!-- truth: end -->
 
 ## Planned Fixes
 
-- The `native-postgres-driver` flow owns the atomic cutover of `SyncPostgreSQLDriver`, `AsyncPostgreSQLDriver`, the queue backend, SQLSpec, SQLAlchemy, and dialer helpers onto `vertebra._postgres`, and the removal of `psycopg`/`asyncpg` from runtime paths.
+- The `native-postgres-driver` verification and conformance chapters cover live PostgreSQL integration runs against `vertebra._postgres` and final legacy cleanup.
 - The `driver-conformance-ci` flow owns GCS bearer secret rotation for DuckDB and the live conformance lanes that exercise it.
 
 Current adapter behavior is described in [Database Drivers & Cloud Dialers](database-drivers-and-dialers.md).
 
-[^pg-driver]: `src/py/vertebra/db/adapters/postgres/driver.py::SyncPostgreSQLDriver` — PostgreSQL drivers over `psycopg_pool` and `asyncio.to_thread`.
-[^pg-arrow]: `src/py/vertebra/db/adapters/postgres/arrow.py` — PostgreSQL Arrow helpers referencing `vertebra._postgres` under `TYPE_CHECKING`.
-[^pg-notify]: `src/py/vertebra/db/adapters/postgres/notify.py` — PostgreSQL notification source referencing `vertebra._postgres` under `TYPE_CHECKING`.
-[^pg-queue]: `src/py/vertebra/framework/queues/postgres.py::PostgreSQLQueueBackend` — PostgreSQL queue backend `psycopg` probe.
+[^pg-driver]: `src/py/vertebra/db/adapters/postgres/driver.py::SyncPostgreSQLDriver` — Native PostgreSQL drivers over `vertebra._postgres`.
+[^pg-queue]: `src/py/vertebra/framework/queues/postgres.py::PostgreSQLQueueBackend` — PostgreSQL queue backend `vertebra._postgres` probe.
 [^pg-stub]: `src/py/vertebra/_postgres.pyi` — Native `vertebra._postgres` client, pool, COPY, Arrow, and listener stubs.
 [^duckdb-core]: `src/py/vertebra/db/adapters/duckdb/core.py::DuckDBCore` — `DuckDBCore` write-statement detection.
 [^duckdb-secret]: `src/py/vertebra/db/adapters/duckdb/config.py::DuckDBSecretConfig` — Cloud-agnostic DuckDB `CREATE SECRET` declaration.

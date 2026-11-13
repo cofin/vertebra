@@ -144,17 +144,17 @@ class PostgreSQLQueueBackend:
             executor: PostgreSQLQueueExecutor bound as given; required.
 
         Raises:
-            MissingDependencyError: When ``executor`` is None and ``psycopg`` is not installed.
-            ImproperConfigurationError: When ``executor`` is None and ``psycopg`` is installed.
+            MissingDependencyError: When ``executor`` is None and ``vertebra._postgres`` is not installed.
+            ImproperConfigurationError: When ``executor`` is None and ``vertebra._postgres`` is installed.
         """
         self._config = config or QueueConfig()
         self._postgres_config = postgres_config
         self._direct_dsn = postgres_config.effective_direct_dsn if postgres_config else self._config.backend_url
         if executor is None:
-            ensure_module("psycopg", package="psycopg", install_package="psycopg[binary,pool]")
+            ensure_module("vertebra._postgres", package="vertebra-core[postgres]", extra="postgres")
             msg = (
                 "PostgreSQLQueueBackend requires a PostgreSQLQueueExecutor; "
-                "pass executor= to bind a psycopg connection executor"
+                "pass executor= to bind a PostgreSQLQueueExecutor"
             )
             raise ImproperConfigurationError(msg)
         self._executor: PostgreSQLQueueExecutor = executor

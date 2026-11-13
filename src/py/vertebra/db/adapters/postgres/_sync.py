@@ -332,6 +332,9 @@ class SyncPostgreSQLDriver(SyncDatabaseDriver[PostgreSQLConfig]):
     def _ensure_pool(self) -> Any:
         """Lazily construct and cache the native ``SyncPostgresPool`` when not injected."""
         if self._pool is not None:
+            if not callable(getattr(self._pool, "acquire", None)):
+                msg = "Injected PostgreSQL pool must provide an acquire() method"
+                raise ImproperConfigurationError(msg)
             return self._pool
         pg_mod = _resolve_native_postgres_module()
         pool_kwargs = build_native_client_options(self.config).to_pool_kwargs()

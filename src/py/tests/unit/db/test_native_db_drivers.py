@@ -29,6 +29,7 @@ import vertebra
 import vertebra._vertebra as native_vertebra
 import vertebra.db as vertebra_db
 import vertebra.db.driver as vertebra_db_driver
+from tests.unit.db.postgres_ports import FakeAsyncPostgresPool, FakePostgresCluster, FakeSyncPostgresPool
 from vertebra._mysql import MySQLWireTestServer
 from vertebra._vertebra import VectorBatchView, VectorView
 from vertebra.db import (
@@ -1666,26 +1667,24 @@ def _make_contract_driver_pair(engine: str) -> tuple[Any, Any, str, Any, str, An
             lambda row_id: (row_id,),
         )
     if engine == "postgres":
-        sync_conn = sqlite3.connect(":memory:", check_same_thread=False)
-        sync_conn.execute(ddl)
-        sync_conn.execute("INSERT INTO contract_items (id, name, note) VALUES (1, 'seed', NULL)")
-        sync_conn.commit()
-        async_conn = sqlite3.connect(":memory:", check_same_thread=False)
-        async_conn.execute(ddl)
-        async_conn.execute("INSERT INTO contract_items (id, name, note) VALUES (1, 'seed', NULL)")
-        async_conn.commit()
+        sync_cluster = FakePostgresCluster()
+        sync_cluster._conn.execute(ddl)
+        sync_cluster._conn.execute("INSERT INTO contract_items (id, name, note) VALUES (1, 'seed', NULL)")
+        async_cluster = FakePostgresCluster()
+        async_cluster._conn.execute(ddl)
+        async_cluster._conn.execute("INSERT INTO contract_items (id, name, note) VALUES (1, 'seed', NULL)")
         sync_pg = SyncPostgreSQLDriver(
-            PostgreSQLConfig(dsn="postgresql://localhost/test"), pool=_ContractDBAPIPool(sync_conn)
+            PostgreSQLConfig(dsn="postgresql://localhost/test"), pool=FakeSyncPostgresPool(sync_cluster)
         )
         async_pg = AsyncPostgreSQLDriver(
-            PostgreSQLConfig(dsn="postgresql://localhost/test"), pool=_ContractDBAPIPool(async_conn)
+            PostgreSQLConfig(dsn="postgresql://localhost/test"), pool=FakeAsyncPostgresPool(async_cluster)
         )
         return (
             sync_pg,
             async_pg,
-            "INSERT INTO contract_items (id, name, note) VALUES (%s, %s, %s)",
+            "INSERT INTO contract_items (id, name, note) VALUES ($1, $2, $3)",
             lambda row_id, name: (row_id, name, None),
-            "SELECT id, name FROM contract_items WHERE id = %s",
+            "SELECT id, name FROM contract_items WHERE id = $1",
             lambda row_id: (row_id,),
         )
     if engine == "mysql":

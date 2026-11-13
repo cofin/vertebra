@@ -207,7 +207,18 @@ class PostgreSQLConfig(BaseDatabaseConfig, frozen=True, gc=False, kw_only=True):
     @classmethod
     def from_url(cls, url: str, **overrides: Any) -> Self:
         """Construct a ``PostgreSQLConfig`` from a ``postgresql://``, ``postgres://``, or libpq DSN."""
-        parsed = parse_postgres_dsn(url)
+        normalized_url = url
+        raw_scheme, sep, rest = url.partition("://")
+        if sep and "+" in raw_scheme:
+            prefix, _, driver_tag = raw_scheme.lower().rpartition("+")
+            if prefix in {"postgresql", "postgres"} and driver_tag in {
+                "vtb",
+                "vertebra",
+                "vtb_async",
+                "vertebra_async",
+            }:
+                normalized_url = f"{prefix}://{rest}"
+        parsed = parse_postgres_dsn(normalized_url)
         query_params = parsed.params
         kwargs = dict(overrides)
         if "pgbouncer" in query_params and "pgbouncer" not in kwargs:
@@ -227,7 +238,7 @@ class PostgreSQLConfig(BaseDatabaseConfig, frozen=True, gc=False, kw_only=True):
             kwargs["alloydb_instance_uri"] = query_params["alloydb_instance_uri"]
         if "direct_dsn" in query_params and "direct_dsn" not in kwargs:
             kwargs["direct_dsn"] = query_params["direct_dsn"]
-        return cls(dsn=url, **kwargs)
+        return cls(dsn=normalized_url, **kwargs)
 
     def pool_key(self) -> tuple[Any, ...]:
         """Return the canonical shared-pool fingerprint tuple."""
