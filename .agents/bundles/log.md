@@ -1,5 +1,10 @@
 # Bundle Activity Log
 
+## [2026-11-13T05:15:30Z] chapter-complete | native-postgres-driver ch03-cdc-options-and-bind-compiler
+
+- Closed `ch03-cdc-options-and-bind-compiler` at `bff04dcd` (sync `31024a23`): added `PostgresReplicationDriver` and `EventSessionRegistry`, CAS-before-wire-ack `PostgresChangeSource`, libpq/Unix-socket/multi-host/Cloud-SQL `options.py` normalization, and single-pass lexer `binds.py` (`ruff`, `mypy` across `15` source files, and `111` unit tests clean).
+- Advanced active frontier to `ch04-permanent-native-postgres-drivers` (`native-postgres-driver:ch04:t01`; `22` tasks remain across `ch04`–`ch09`).
+
 ## [2026-11-13T04:54:36Z] chapter-complete | native-postgres-driver ch02-replication-python-bridge
 
 - Closed `ch02-replication-python-bridge` at `f4d3d1eb` (sync `1eeeffb9`): added cancel-safe `spawn_rust_db_task_with_attr_and_future`, exposed frozen `AsyncPostgresReplication` and `AsyncPostgresClient.{replication_identity, open_replication}` with 14-class `_postgres.pyi`, and synchronized the 3 PyO3 FFI OKF chapters (`<= 200` lines each; `11` `py_async` + `2` `replication` Rust tests, `110` Python unit tests, `stubtest`, `clippy`, `ruff`, `mypy`, and `review_setup.py validate` clean).

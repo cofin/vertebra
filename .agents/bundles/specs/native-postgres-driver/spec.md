@@ -18,27 +18,27 @@ chapters:
   - ch07-wheel-ci-and-benchmarks
   - ch08-user-and-reference-docs
   - ch09-data-packaging-okf-and-routing-sync
-current_chapter: ch03-cdc-options-and-bind-compiler
-current_task: "native-postgres-driver:ch03:t01"
+current_chapter: ch04-permanent-native-postgres-drivers
+current_task: "native-postgres-driver:ch04:t01"
 parent_prd: native-data-platform
 research:
   - research/protocol-and-execution_20261105.md
   - research/cloud-material_20261105.md
 plan_revision: 9
 plan_commit: 18baadcd
-state_revision: 15
-last_verified_checkpoint: f4d3d1eb
-last_reviewed_chapter: ch02-replication-python-bridge
-last_reviewed_commit: 1eeeffb9
+state_revision: 16
+last_verified_checkpoint: bff04dcd
+last_reviewed_chapter: ch03-cdc-options-and-bind-compiler
+last_reviewed_commit: 31024a23
 created_at: "2026-11-03T04:05:00Z"
-updated_at: "2026-11-13T04:54:36Z"
+updated_at: "2026-11-13T05:15:30Z"
 generated:
   by: flow-plan
   at: "2026-11-13T00:25:00Z"
 verified:
   - by: agent:code-reviewer
-    at: "2026-11-13T04:54:36Z"
-    commit: 1eeeffb9
+    at: "2026-11-13T05:15:30Z"
+    commit: 31024a23
 tags:
   - rust
   - postgres
@@ -128,8 +128,8 @@ Nine cohesive chapters (`32` tasks) remain to finish logical replication supervi
 
 - [x] [bfa2dad7] [ch01-replication-supervision](chapters/ch01-replication-supervision/spec.md) — Generation-fenced `ReplicationSupervisor`, bounded control/event channels, monotonic LSN acks, and identity-verified `connect_logical_verified` resume.
 - [x] [1eeeffb9] [ch02-replication-python-bridge](chapters/ch02-replication-python-bridge/spec.md) — Cancel-safe `spawn_rust_db_task_with_attr_and_future`, frozen `AsyncPostgresReplication`, 14-class `_postgres.pyi`, and PyO3 FFI OKF sync.
-- [~] [ch03-cdc-options-and-bind-compiler](chapters/ch03-cdc-options-and-bind-compiler/spec.md) — `PostgresChangeSource` CAS checkpoint-before-ack coordinator, `EventSessionRegistry`, libpq/cloud `options.py`, and single-pass lexer `binds.py`.
-- [ ] [ch04-permanent-native-postgres-drivers](chapters/ch04-permanent-native-postgres-drivers/spec.md) — Permanent `SyncPostgreSQLDriver` (`_sync.py`) and `AsyncPostgreSQLDriver` (`_async.py`) wiring native pools, pipelines, `VTBARROW`, and event hooks.
+- [x] [31024a23] [ch03-cdc-options-and-bind-compiler](chapters/ch03-cdc-options-and-bind-compiler/spec.md) — `PostgresChangeSource` CAS checkpoint-before-ack coordinator, `EventSessionRegistry`, libpq/cloud `options.py`, and single-pass lexer `binds.py`.
+- [~] [ch04-permanent-native-postgres-drivers](chapters/ch04-permanent-native-postgres-drivers/spec.md) — Permanent `SyncPostgreSQLDriver` (`_sync.py`) and `AsyncPostgreSQLDriver` (`_async.py`) wiring native pools, pipelines, `VTBARROW`, and event hooks.
 - [ ] [ch05-atomic-cutover-and-legacy-removal](chapters/ch05-atomic-cutover-and-legacy-removal/spec.md) — Atomic SQLSpec (`NUMERIC`), SQLAlchemy (`numeric_dollar`), 12-line `driver.py` barrel, `PostgreSQLQueueBackend` guard, and `cloudsql.py`/`alloydb.py` legacy removal + TLS/async fixes.
 - [ ] [ch06-live-conformance-and-service-acceptance](chapters/ch06-live-conformance-and-service-acceptance/spec.md) — PostgreSQL 14–18 conformance matrix with zero-skip hook plus live `pgoutput` replication and `PGCOPY`/`VTBARROW`/`LISTEN`/`pgvector`/`PgBouncer` suites.
 - [ ] [ch07-wheel-ci-and-benchmarks](chapters/ch07-wheel-ci-and-benchmarks/spec.md) — `verify_postgres_wheel.py`, CI/release smoke lanes, free-threaded 8-thread pool proofs, `postgres-bench` group, Criterion benches, and testing OKF sync.
@@ -138,7 +138,7 @@ Nine cohesive chapters (`32` tasks) remain to finish logical replication supervi
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Active Frontier**: `ch01-replication-supervision` (`2/2` tasks) and `ch02-replication-python-bridge` (`4/4` tasks) are completed (`f4d3d1eb`); active frontier advances to `ch03-cdc-options-and-bind-compiler` (`native-postgres-driver:ch03:t01`, `26` open `compact` tasks remain across `ch03`–`ch09`).
+- **Active Frontier**: `ch01-replication-supervision` (`2/2` tasks), `ch02-replication-python-bridge` (`4/4` tasks), and `ch03-cdc-options-and-bind-compiler` (`4/4` tasks) are completed (`bff04dcd`); active frontier advances to `ch04-permanent-native-postgres-drivers` (`native-postgres-driver:ch04:t01`, `22` open `compact` tasks remain across `ch04`–`ch09`).
 - **Downstream Unlocks**: Completing `ch05` unblocks [`broker-pool-sharing`](../broker-pool-sharing/spec.md), [`driver-conformance-ci`](../driver-conformance-ci/spec.md), [`native-redis-driver`](../native-redis-driver/spec.md), [`native-adapter-organization`](../native-adapter-organization/spec.md), [`sqlspec-adapter-parity`](../sqlspec-adapter-parity/spec.md), and [`queues-tasks-and-channels`](../queues-tasks-and-channels/spec.md).
 - **`/flow:finish` Full Gate**: `make lint-all && make rs-test && make py-test && make postgres-wheel-check && make postgres-test && make postgres-bench-check && make docs-check && make review-check`.
 

@@ -5,20 +5,20 @@ chapter_id: ch03-cdc-options-and-bind-compiler
 title: "Chapter 03: PostgresChangeSource, Options Bridge, and Lexical Bind Compiler"
 description: "Implement EventSessionRegistry, CAS checkpoint-before-ack PostgresChangeSource, DSN/cloud options.py bridge, and single-pass lexer binds.py."
 status: stable
-state: active
+state: completed
 planning_status: complete
 planning_quality: standard
 planning_degraded_reason: null
 plan_commit: 18baadcd
-last_reviewed_commit: null
-updated_at: "2026-11-13T05:14:30Z"
+last_reviewed_commit: 31024a23
+updated_at: "2026-11-13T05:15:30Z"
 generated:
   by: flow-plan
   at: "2026-11-13T00:25:00Z"
 verified:
-  - by: agent:plan-generator
-    at: "2026-11-13T00:25:00Z"
-    commit: 18baadcd
+  - by: agent:code-reviewer
+    at: "2026-11-13T05:15:30Z"
+    commit: 31024a23
 tags:
   - python
   - postgres
