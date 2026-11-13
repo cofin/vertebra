@@ -14,8 +14,8 @@ generated:
   at: "2026-11-04T04:33:00Z"
 verified:
   - by: agent:flow-executor
-    at: "2026-11-13T22:11:30Z"
-    commit: 9a3631bb
+    at: "2026-11-13T22:30:00Z"
+    commit: cb3a9fa6
   - by: agent:flow-executor
     at: "2026-11-13T00:25:00Z"
     commit: 18baadcd
@@ -86,7 +86,7 @@ sources:
 
 <!-- truth: start -->
 - `duckdb>=1.0` lives in `[dependency-groups].duckdb` (`bench` includes it), third-party `psycopg[binary]` and `asyncpg` comparators live in `[dependency-groups].postgres-bench` (`python_version < '3.14'`), and `uvicorn`/`granian`/`spikard` stay in `[dependency-groups].bench`; free-threaded (`3.14t`/`3.15t`) runs install none of these groups.
-- Run `make bench`, `make bench-ft`, `make rs-bench`, `make bench-micro`, `make bench-check`, `make postgres-bench`, and `make postgres-bench-check` (`offline-testable`) against release/PGO builds, and validate 14 immutable `_postgres` classes plus 8-thread concurrent pool checks in `test_freethreaded_gil.py`.
+- Run `make bench`, `make bench-ft`, `make rs-bench`, `make bench-micro`, `make bench-check`, and `make postgres-bench` against release/PGO builds; run `make postgres-bench-check` offline for Criterion test execution, lint/type validation, and comparator unit tests, and validate 14 immutable `_postgres` classes plus 8-thread concurrent pool checks in `test_freethreaded_gil.py`.
 <!-- truth: end -->
 
 Vertebra has Rust Criterion microbenchmarks (`src/rs/vertebra-core/benches/`, `src/rs/vertebra-http/benches/`, `src/rs/vertebra-postgres/benches/`), a comparative PostgreSQL harness in [`tools/benchmarks/postgres.py`](../../../../tools/benchmarks/postgres.py)[^src-tools-benchmarks-postgres-py], and an end-to-end comparative HTTP harness in [`tools/benchmarks/`](../../../../tools/benchmarks/cli.py)[^src-tools-benchmarks-cli-py]. No throughput figures are recorded in the repository outside `tools/benchmarks/results/`.
@@ -99,7 +99,7 @@ Vertebra has Rust Criterion microbenchmarks (`src/rs/vertebra-core/benches/`, `s
 | `make bench-all` | `make build`, then `... run -t all -s full ${BENCH_ARGS}` | Every scenario (`full` adds `body_100k`) against all targets: `vtb-embedded-*`, `vtb-shm-*`, `vtb-ft-*`, and the `granian-asgi`, `granian-rsgi`, `uvicorn-httptools`, and `spikard` baselines. |
 | `make bench-ft` | Resolves `FT_PYTHON` (`3.15t` if installed, else `3.14t`), syncs `.venv-ft`, builds `src/rs/target-ft`, then `... run -t freethreaded -s ${SCENARIOS:-multiworker}` | Free-threaded Python `3.15t`/`3.14t` (`Py_GIL_DISABLED`). `multiworker` = `hello`, `json`, `echo`, `io_10ms`. |
 | `make postgres-bench` | `cd src/rs && cargo bench -p vertebra-postgres --bench postgres_native --locked`, then `uv run --no-sync --group postgres-bench pytest -m postgres_benchmark` | Native codecs/wire/`PGCOPY`/`pgoutput` Criterion benches plus live `vertebra` vs `psycopg`/`asyncpg` throughput and latency (`schema_version=1`). |
-| `make postgres-bench-check` | `cargo check --manifest-path src/rs/Cargo.toml -p vertebra-postgres --benches --locked` + `pytest src/py/tests/unit/tools/test_postgres_benchmarks.py` | Offline Criterion compilation check and deterministic comparator threshold unit gate. |
+| `make postgres-bench-check` | `PYTHONPATH="$(CURDIR)/src/py" cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --bench postgres_native --locked` + Ruff/Mypy + `pytest src/py/tests/unit/tools/test_postgres_benchmarks.py` | Offline Criterion test execution, script/benchmark lint and type check, and deterministic comparator threshold unit gate. |
 | `make bench-report` | `uv run --group bench python -m tools.benchmarks report` | Latest run summary (`make bench-diff` compares against previous). |
 | `cargo bench` | `cd src/rs && cargo bench` | Criterion: `spsc`, `mpmc`, `spin_wait`, `router`, `guards`, `ring_throughput`, `codec`, `shm_transport` (`vertebra-core`), `server_throughput` (`vertebra-http`), and `postgres_native` (`vertebra-postgres`)[^src-vertebra-postgres-cargo-toml] [^src-postgres-native-bench-rs]. |
 

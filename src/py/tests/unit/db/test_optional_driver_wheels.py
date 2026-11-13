@@ -380,7 +380,7 @@ def test_postgres_core_wheel_verifier_rejects_native_leaks(
                 "vertebra/_postgres.cpython-312-x86_64-linux-gnu.so": b"\x7fELF",
                 "vertebra/_postgres.abi3.so": b"\x7fELF",
             },
-            "Expected exactly 1 vertebra/_postgres shared library",
+            "Expected exactly 1 vertebra/_postgres",
         ),
         (
             {

@@ -13,6 +13,9 @@ generated:
   by: flow/0.29.1
   at: "2026-11-06T18:28:00Z"
 verified:
+  - by: agent:flow-executor
+    at: "2026-11-13T22:30:00Z"
+    commit: cb3a9fa6
   - by: agent:flow-setup
     at: "2026-11-12T22:30:00Z"
     commit: 18baadcd
@@ -79,7 +82,7 @@ make mysql-test      # vertebra-mysql Rust tests, stubtest, and Python MySQL sui
 make mssql-test      # vertebra-mssql Rust tests, stubtest, and Python MSSQL suites (make mssql-wheel-check verifies wheel isolation)
 make oracle-test     # vertebra-oracle Rust tests, stubtest, and Python Oracle suites (make oracle-wheel-check verifies wheel isolation)
 make postgres-test   # vertebra-postgres Rust tests and _postgres stubtest (make postgres-wheel-check runs verify_postgres_wheel.py)
-make postgres-bench-check # cargo check -p vertebra-postgres --benches --locked + offline comparator unit tests (make postgres-bench runs live + Criterion)
+make postgres-bench-check # PYTHONPATH="$(CURDIR)/src/py" cargo test -p vertebra-postgres --bench postgres_native --locked + Ruff/Mypy + comparator tests (make postgres-bench runs live + Criterion)
 make docs            # scan_public_docstrings + generate_cli_docs --check + zensical build --clean + postbuild + verify_docs_artifacts
 make docs-check      # make docs + live zensical serve HTTP 200 check (make docs-serve, make docs-clean, make docs-rust)
 

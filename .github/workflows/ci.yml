@@ -327,7 +327,7 @@ jobs:
           VERTEBRA_CONFORMANCE_POSTGRES_REQUIRE_ZERO_SKIPS: "1"
           VERTEBRA_CONFORMANCE_ENGINES: postgres
           VERTEBRA_CONFORMANCE_POSTGRES_VERSION: ${{ matrix.pg_version }}
-        run: uv run --no-sync pytest src/py/tests/integration/db/test_driver_conformance.py -k "postgres-${{ matrix.pg_version }}" -v
+        run: uv run --no-sync pytest src/py/tests/integration/db/test_driver_conformance.py -v
       - name: Run live replication, feature, and deadline suites (PG18)
         if: matrix.pg_version == '18'
         env:

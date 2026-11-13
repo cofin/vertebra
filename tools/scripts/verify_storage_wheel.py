@@ -4,16 +4,20 @@ from __future__ import annotations
 
 import argparse
 import sys
-import tarfile
 import tempfile
-import zipfile
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Literal, get_args
 
 import msgspec
 
-from tools.scripts._wheel_verify import NATIVE_SUFFIXES, build_dist, verify_isolated_wheel_pair
+from tools.scripts._wheel_verify import (
+    build_dist,
+    verify_core_wheel_excludes,
+    verify_extension_wheel_contents,
+    verify_isolated_wheel_pair,
+    verify_sdist_contents,
+)
 
 CompanionPackage = Literal["storage", "bigquery", "spanner", "bundler"]
 
@@ -26,21 +30,6 @@ __all__ = (
     "verify_companion_wheel_contents",
     "verify_core_wheel_excludes_companion",
     "verify_isolated_venv_contract",
-)
-
-ALL_KNOWN_STUBS: frozenset[str] = frozenset(
-    {
-        "vertebra/_vertebra.pyi",
-        "vertebra/_bigquery.pyi",
-        "vertebra/_bundler.pyi",
-        "vertebra/_duckdb.pyi",
-        "vertebra/_mssql.pyi",
-        "vertebra/_mysql.pyi",
-        "vertebra/_oracle.pyi",
-        "vertebra/_postgres.pyi",
-        "vertebra/_spanner.pyi",
-        "vertebra/_storage.pyi",
-    }
 )
 
 
@@ -162,71 +151,34 @@ COMPANION_SPECS: dict[CompanionPackage, CompanionWheelSpec] = {
 def verify_core_wheel_excludes_companion(wheel_path: Path, *, package: CompanionPackage) -> None:
     """Assert `vertebra_core-*.whl` ships the Python wrapper without companion binaries or stubs."""
     spec = COMPANION_SPECS[package]
-    with zipfile.ZipFile(wheel_path) as zf:
-        names = set(zf.namelist())
-
-    if spec.core_sentinel not in names:
-        msg = f"Core wheel {wheel_path.name} is missing {spec.core_sentinel}"
-        raise RuntimeError(msg)
-
-    leaked = sorted(
-        name
-        for name in names
-        if name == spec.stub_entry
-        or name.startswith(f"{spec.binary_prefix}.")
-        or (
-            name.startswith("vertebra/_")
-            and name.endswith(NATIVE_SUFFIXES)
-            and not name.startswith("vertebra/_vertebra.")
-        )
+    verify_core_wheel_excludes(
+        wheel_path,
+        required_entries=(spec.core_sentinel,),
+        stub_entry=spec.stub_entry,
+        binary_prefix=spec.binary_prefix,
+        package_label=package,
     )
-    if leaked:
-        msg = f"Core wheel {wheel_path.name} leaked optional extension artifacts for {package}: {leaked}"
-        raise RuntimeError(msg)
 
 
 def verify_companion_wheel_contents(wheel_path: Path, *, package: CompanionPackage) -> None:
     """Assert `vertebra_<pkg>-*.whl` ships solely its native binary and matching `.pyi` stub."""
     spec = COMPANION_SPECS[package]
-    with zipfile.ZipFile(wheel_path) as zf:
-        vtb_entries = sorted(name for name in zf.namelist() if name.startswith("vertebra/"))
-
-    if spec.stub_entry not in vtb_entries:
-        msg = f"{package} wheel {wheel_path.name} is missing {spec.stub_entry}: {vtb_entries}"
-        raise RuntimeError(msg)
-
-    binaries = [
-        name
-        for name in vtb_entries
-        if (name == f"{spec.binary_prefix}" or name.startswith(f"{spec.binary_prefix}."))
-        and name.endswith(NATIVE_SUFFIXES)
-    ]
-    if len(binaries) != 1:
-        msg = f"Expected exactly 1 {spec.binary_prefix} native binary in {wheel_path.name}, found: {binaries}"
-        raise RuntimeError(msg)
-
-    sibling_stubs = ALL_KNOWN_STUBS - {spec.stub_entry}
-    unexpected = [
-        name
-        for name in vtb_entries
-        if name not in {spec.stub_entry, binaries[0]} or name in sibling_stubs or name.endswith(".py")
-    ]
-    if unexpected:
-        msg = f"{package} wheel {wheel_path.name} contains unexpected vertebra/ entries: {unexpected}"
-        raise RuntimeError(msg)
+    verify_extension_wheel_contents(
+        wheel_path,
+        label=package,
+        stub_entry=spec.stub_entry,
+        binary_prefix=spec.binary_prefix,
+    )
 
 
 def verify_companion_sdist_contents(sdist_path: Path, *, package: CompanionPackage) -> None:
     """Assert `vertebra_<pkg>-*.tar.gz` contains the crate manifest, build script, source, and stub."""
     spec = COMPANION_SPECS[package]
-    with tarfile.open(sdist_path, "r:gz") as tf:
-        names = tf.getnames()
-
-    required_suffixes = ("Cargo.toml", "build.rs", "src/lib.rs", spec.stub_entry)
-    missing = [suffix for suffix in required_suffixes if not any(name.endswith(suffix) for name in names)]
-    if missing:
-        msg = f"{package} sdist {sdist_path.name} is missing required entries {missing}: {names}"
-        raise RuntimeError(msg)
+    verify_sdist_contents(
+        sdist_path,
+        label=package,
+        required_suffixes=("Cargo.toml", "build.rs", "src/lib.rs", spec.stub_entry),
+    )
 
 
 def verify_isolated_venv_contract(

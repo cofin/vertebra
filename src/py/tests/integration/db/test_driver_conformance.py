@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
-from collections.abc import AsyncIterator, Iterator, Sequence
+from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -631,14 +631,38 @@ _CONFORMANCE_DOCKER_ENV = "VERTEBRA_CONFORMANCE_DOCKER"
 POSTGRES_CONFORMANCE_VERSIONS: tuple[str, ...] = ("14", "15", "16", "17", "18")
 
 
-def _expand_live_engine_variants(specs: Sequence[EngineConformanceSpec]) -> list[tuple[str, EngineConformanceSpec]]:
-    """Expand ``postgres`` across supported PostgreSQL major versions `14`–`18` for live conformance."""
+def _parse_conformance_env_filter(env: Mapping[str, str], key: str) -> tuple[str, ...]:
+    """Return stripped non-empty comma-separated filter tokens from ``env[key]``."""
+    return tuple(token.strip() for token in env.get(key, "").split(",") if token.strip())
+
+
+def _expand_live_engine_variants(
+    specs: Sequence[EngineConformanceSpec],
+    *,
+    env: Mapping[str, str] | None = None,
+) -> list[tuple[str, EngineConformanceSpec]]:
+    """Expand ``postgres`` across selected major versions `14`–`18` and honor env engine filters."""
+    resolved_env = os.environ if env is None else env
+    selected_engines = _parse_conformance_env_filter(resolved_env, "VERTEBRA_CONFORMANCE_ENGINES")
+    selected_pg_versions = _parse_conformance_env_filter(resolved_env, "VERTEBRA_CONFORMANCE_POSTGRES_VERSION")
+    unknown_versions = [v for v in selected_pg_versions if v not in POSTGRES_CONFORMANCE_VERSIONS]
+    if unknown_versions:
+        msg = f"Unsupported VERTEBRA_CONFORMANCE_POSTGRES_VERSION entries: {unknown_versions}"
+        raise ValueError(msg)
+
     variants: list[tuple[str, EngineConformanceSpec]] = []
     for spec in specs:
+        if selected_engines and spec.engine not in selected_engines:
+            continue
         if spec.engine != "postgres":
             variants.append((spec.engine, spec))
             continue
-        for version in POSTGRES_CONFORMANCE_VERSIONS:
+        versions = (
+            tuple(v for v in POSTGRES_CONFORMANCE_VERSIONS if v in selected_pg_versions)
+            if selected_pg_versions
+            else POSTGRES_CONFORMANCE_VERSIONS
+        )
+        for version in versions:
             versioned_spec = structs.replace(
                 spec,
                 env_dsn_vars=(f"VERTEBRA_CONFORMANCE_POSTGRES_{version}_DSN", *spec.env_dsn_vars),
@@ -648,17 +672,22 @@ def _expand_live_engine_variants(specs: Sequence[EngineConformanceSpec]) -> list
     return variants
 
 
-def _build_live_engine_params(specs: Sequence[EngineConformanceSpec] = ENGINE_SPECS) -> list[Any]:
+def _build_live_engine_params(
+    specs: Sequence[EngineConformanceSpec] = ENGINE_SPECS,
+    *,
+    env: Mapping[str, str] | None = None,
+) -> list[Any]:
     """Build fixture parameters, marking pending engines strict ``xfail`` only when their native module imports.
 
     Args:
         specs: Engine specs to parametrize.
+        env: Optional environment mapping overriding ``VERTEBRA_CONFORMANCE_ENGINES`` and PostgreSQL version filters.
 
     Returns:
         One ``pytest.param`` per spec variant with stable parameter IDs.
     """
     params: list[Any] = []
-    for param_id, spec in _expand_live_engine_variants(specs):
+    for param_id, spec in _expand_live_engine_variants(specs, env=env):
         if spec.pending_flow_id is not None and not _native_module_missing(spec):
             params.append(
                 pytest.param(
@@ -1473,6 +1502,9 @@ def _resolve_cache_config(
     request: pytest.FixtureRequest,
 ) -> RedisConfig:
     """Resolve a live `RedisConfig` or `ValkeyConfig` from an env DSN or `pytest-databases` container, skipping otherwise."""
+    selected_engines = _parse_conformance_env_filter(os.environ, "VERTEBRA_CONFORMANCE_ENGINES")
+    if selected_engines and cache_spec.engine not in selected_engines:
+        pytest.skip(f"{cache_spec.engine} conformance excluded by VERTEBRA_CONFORMANCE_ENGINES")
     for env_key in cache_spec.env_dsn_vars:
         value = os.environ.get(env_key, "").strip()
         if value:
@@ -1679,7 +1711,7 @@ def test_live_engine_params_mark_strict_xfail_only_when_native_module_imports() 
         native_extension_module="vertebra._vtb_conformance_absent",
         pending_flow_id=None,
     )
-    params = _build_live_engine_params((absent_pending, present_pending, absent_plain))
+    params = _build_live_engine_params((absent_pending, present_pending, absent_plain), env={})
     assert [param.id for param in params] == ["absent", "present", "plain"]
     assert [[mark.name for mark in param.marks] for param in params] == [[], ["xfail"], []]
     assert params[1].marks[0].kwargs == {"strict": True, "reason": "Owned by native-probe-driver"}
@@ -1728,7 +1760,7 @@ def test_postgres_conformance_spec_and_version_matrix() -> None:
     assert "JSONB" in pg_spec.types_ddl
     assert "BLOB" not in pg_spec.types_ddl
 
-    params = _build_live_engine_params((pg_spec,))
+    params = _build_live_engine_params((pg_spec,), env={})
     assert [param.id for param in params] == [
         "postgres-14",
         "postgres-15",
@@ -1744,6 +1776,38 @@ def test_postgres_conformance_spec_and_version_matrix() -> None:
         "vtb_postgres_17_config",
         "vtb_postgres_18_config",
     ]
+
+
+@pytest.mark.parametrize(
+    ("env", "expected_ids"),
+    [
+        (
+            {"VERTEBRA_CONFORMANCE_ENGINES": "postgres", "VERTEBRA_CONFORMANCE_POSTGRES_VERSION": "17"},
+            ["postgres-17"],
+        ),
+        (
+            {"VERTEBRA_CONFORMANCE_ENGINES": "postgres", "VERTEBRA_CONFORMANCE_POSTGRES_VERSION": "14, 18"},
+            ["postgres-14", "postgres-18"],
+        ),
+        (
+            {"VERTEBRA_CONFORMANCE_ENGINES": "sqlite, postgres", "VERTEBRA_CONFORMANCE_POSTGRES_VERSION": "16"},
+            ["sqlite", "postgres-16"],
+        ),
+    ],
+)
+def test_live_engine_params_honor_engine_and_pg_version_env_filters(
+    env: dict[str, str],
+    expected_ids: list[str],
+) -> None:
+    """Verify conformance collection filters engines and PostgreSQL versions without pytest -k deselections."""
+    params = _build_live_engine_params(ENGINE_SPECS, env=env)
+    assert [param.id for param in params] == expected_ids
+
+
+def test_live_engine_params_reject_unknown_postgres_version() -> None:
+    """Verify unsupported VERTEBRA_CONFORMANCE_POSTGRES_VERSION tokens fail immediately at collection."""
+    with pytest.raises(ValueError, match="Unsupported VERTEBRA_CONFORMANCE_POSTGRES_VERSION"):
+        _build_live_engine_params(ENGINE_SPECS, env={"VERTEBRA_CONFORMANCE_POSTGRES_VERSION": "99"})
 
 
 @pytest.mark.parametrize(

@@ -4,16 +4,15 @@ from __future__ import annotations
 
 import argparse
 import sys
-import tarfile
 import tempfile
-import zipfile
 from pathlib import Path
 
 from tools.scripts._wheel_verify import (
-    NATIVE_SUFFIXES,
-    assert_zero_native_linkage,
     build_dist,
+    verify_core_wheel_excludes,
+    verify_extension_wheel_contents,
     verify_isolated_wheel_pair,
+    verify_sdist_contents,
 )
 
 __all__ = (
@@ -30,82 +29,37 @@ FORBIDDEN_NATIVE_LIBS: tuple[str, ...] = (
     "libodpic",
     "libociicus",
 )
-SIBLING_STUBS: frozenset[str] = frozenset(
-    {
-        "vertebra/_vertebra.pyi",
-        "vertebra/_bigquery.pyi",
-        "vertebra/_bundler.pyi",
-        "vertebra/_spanner.pyi",
-        "vertebra/_storage.pyi",
-    }
-)
 
 
 def verify_core_wheel_excludes_oracle_binary_and_stub(wheel_path: Path) -> None:
     """Assert `vertebra_core-*.whl` packs the Python Oracle adapter without `_oracle` binary or stub."""
-    with zipfile.ZipFile(wheel_path) as zf:
-        names = set(zf.namelist())
-
-    if "vertebra/db/adapters/oracle/driver.py" not in names:
-        msg = f"Core wheel {wheel_path.name} is missing vertebra/db/adapters/oracle/driver.py"
-        raise RuntimeError(msg)
-
-    leaked = sorted(
-        name
-        for name in names
-        if name == "vertebra/_oracle.pyi"
-        or name.startswith("vertebra/_oracle.")
-        or (
-            name.startswith("vertebra/_")
-            and name.endswith(NATIVE_SUFFIXES)
-            and not name.startswith("vertebra/_vertebra.")
-        )
+    verify_core_wheel_excludes(
+        wheel_path,
+        required_entries=("vertebra/db/adapters/oracle/driver.py",),
+        stub_entry="vertebra/_oracle.pyi",
+        binary_prefix="vertebra/_oracle",
     )
-    if leaked:
-        msg = f"Core wheel {wheel_path.name} leaked optional extension artifacts: {leaked}"
-        raise RuntimeError(msg)
 
 
 def verify_oracle_wheel_contents_and_pure_rust_linkage(wheel_path: Path) -> None:
     """Assert `vertebra_oracle-*.whl` ships only `_oracle` binary + stub with zero Instant Client linkage."""
-    with zipfile.ZipFile(wheel_path) as zf:
-        names = zf.namelist()
-        vtb_entries = sorted(name for name in names if name.startswith("vertebra/"))
-        if "vertebra/_oracle.pyi" not in vtb_entries:
-            msg = f"Oracle wheel {wheel_path.name} is missing vertebra/_oracle.pyi: {vtb_entries}"
-            raise RuntimeError(msg)
-
-        binaries = [
-            name for name in vtb_entries if name.startswith("vertebra/_oracle") and name.endswith(NATIVE_SUFFIXES)
-        ]
-        if len(binaries) != 1:
-            msg = f"Expected exactly 1 vertebra/_oracle shared library in {wheel_path.name}, found: {binaries}"
-            raise RuntimeError(msg)
-
-        unexpected = [
-            name
-            for name in vtb_entries
-            if name not in {"vertebra/_oracle.pyi", binaries[0]} or name in SIBLING_STUBS or name.endswith(".py")
-        ]
-        if unexpected:
-            msg = f"Oracle wheel {wheel_path.name} contains unexpected vertebra/ entries: {unexpected}"
-            raise RuntimeError(msg)
-
-        with tempfile.TemporaryDirectory(prefix="vtb-ora-link-") as tmp:
-            extracted_lib = Path(zf.extract(binaries[0], path=tmp))
-            assert_zero_native_linkage(extracted_lib, forbidden_libs=FORBIDDEN_NATIVE_LIBS, tech_label="Oracle")
+    verify_extension_wheel_contents(
+        wheel_path,
+        label="Oracle",
+        stub_entry="vertebra/_oracle.pyi",
+        binary_prefix="vertebra/_oracle",
+        forbidden_libs=FORBIDDEN_NATIVE_LIBS,
+        link_temp_prefix="vtb-ora-link-",
+    )
 
 
 def verify_oracle_sdist_contents(sdist_path: Path) -> None:
     """Assert `vertebra_oracle-*.tar.gz` contains the Rust crate manifest, build script, source, and stub."""
-    with tarfile.open(sdist_path, "r:gz") as tf:
-        names = tf.getnames()
-
-    required_suffixes = ("Cargo.toml", "build.rs", "src/lib.rs", "vertebra/_oracle.pyi")
-    missing = [suffix for suffix in required_suffixes if not any(name.endswith(suffix) for name in names)]
-    if missing:
-        msg = f"Oracle sdist {sdist_path.name} is missing required entries {missing}: {names}"
-        raise RuntimeError(msg)
+    verify_sdist_contents(
+        sdist_path,
+        label="Oracle",
+        required_suffixes=("Cargo.toml", "build.rs", "src/lib.rs", "vertebra/_oracle.pyi"),
+    )
 
 
 def verify_isolated_venv_install_and_fail_loud_contract(

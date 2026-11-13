@@ -8,6 +8,8 @@ from pathlib import Path
 
 import pytest
 from tools.benchmarks.postgres import (
+    DEFAULT_MAX_LATENCY_RATIO,
+    DEFAULT_MIN_THROUGHPUT_RATIO,
     SCHEMA_VERSION,
     PostgresBenchmarkCase,
     PostgresBenchmarkReport,
@@ -203,24 +205,46 @@ def test_redact_config_dsn_strips_password_and_query_tokens() -> None:
 
 
 @pytest.mark.parametrize(
-    ("kwargs", "match_pattern"),
+    ("min_throughput_ratio", "max_latency_ratio", "candidate_driver", "baseline_driver", "match_pattern"),
     [
-        ({"min_throughput_ratio": 0.0}, "min_throughput_ratio"),
-        ({"min_throughput_ratio": float("nan")}, "min_throughput_ratio"),
-        ({"max_latency_ratio": -1.0}, "max_latency_ratio"),
-        ({"max_latency_ratio": float("inf")}, "max_latency_ratio"),
-        ({"candidate_driver": "vertebra-sync"}, "Both candidate_driver and baseline_driver"),
-        ({"candidate_driver": "vertebra-sync", "baseline_driver": "missing-driver"}, "Missing comparison pair"),
+        (0.0, DEFAULT_MAX_LATENCY_RATIO, None, None, "min_throughput_ratio"),
+        (float("nan"), DEFAULT_MAX_LATENCY_RATIO, None, None, "min_throughput_ratio"),
+        (DEFAULT_MIN_THROUGHPUT_RATIO, -1.0, None, None, "max_latency_ratio"),
+        (DEFAULT_MIN_THROUGHPUT_RATIO, float("inf"), None, None, "max_latency_ratio"),
+        (
+            DEFAULT_MIN_THROUGHPUT_RATIO,
+            DEFAULT_MAX_LATENCY_RATIO,
+            "vertebra-sync",
+            None,
+            "Both candidate_driver and baseline_driver",
+        ),
+        (
+            DEFAULT_MIN_THROUGHPUT_RATIO,
+            DEFAULT_MAX_LATENCY_RATIO,
+            "vertebra-sync",
+            "missing-driver",
+            "Missing comparison pair",
+        ),
     ],
 )
 def test_compare_reports_rejects_invalid_thresholds_and_missing_pairs(
-    kwargs: dict[str, object],
+    min_throughput_ratio: float,
+    max_latency_ratio: float,
+    candidate_driver: str | None,
+    baseline_driver: str | None,
     match_pattern: str,
 ) -> None:
     """Verify compare_reports fails deterministically on invalid ratios and unmatched driver filters."""
     report = _sample_report()
     with pytest.raises(ValueError, match=match_pattern):
-        compare_reports(report, report, **kwargs)  # type: ignore[arg-type]
+        compare_reports(
+            report,
+            report,
+            candidate_driver=candidate_driver,
+            baseline_driver=baseline_driver,
+            min_throughput_ratio=min_throughput_ratio,
+            max_latency_ratio=max_latency_ratio,
+        )
 
 
 def test_compare_reports_rejects_empty_overlap_when_required() -> None:

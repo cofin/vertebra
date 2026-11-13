@@ -4,16 +4,15 @@ from __future__ import annotations
 
 import argparse
 import sys
-import tarfile
 import tempfile
-import zipfile
 from pathlib import Path
 
 from tools.scripts._wheel_verify import (
-    NATIVE_SUFFIXES,
-    assert_zero_native_linkage,
     build_dist,
+    verify_core_wheel_excludes,
+    verify_extension_wheel_contents,
     verify_isolated_wheel_pair,
+    verify_sdist_contents,
 )
 
 __all__ = (
@@ -50,71 +49,37 @@ POSTGRES_EXPORTED_CLASSES: tuple[str, ...] = (
 
 def verify_core_wheel_excludes_postgres_binary_and_stub(wheel_path: Path) -> None:
     """Assert `vertebra_core-*.whl` packs the Python PostgreSQL adapter without `_postgres` binary or stub."""
-    with zipfile.ZipFile(wheel_path) as zf:
-        names = set(zf.namelist())
-
-    required_py = (
-        "vertebra/db/adapters/postgres/driver.py",
-        "vertebra/db/adapters/postgres/_sync.py",
-        "vertebra/db/adapters/postgres/_async.py",
+    verify_core_wheel_excludes(
+        wheel_path,
+        required_entries=(
+            "vertebra/db/adapters/postgres/driver.py",
+            "vertebra/db/adapters/postgres/_sync.py",
+            "vertebra/db/adapters/postgres/_async.py",
+        ),
+        stub_entry="vertebra/_postgres.pyi",
+        binary_prefix="vertebra/_postgres",
     )
-    missing = [entry for entry in required_py if entry not in names]
-    if missing:
-        msg = f"Core wheel {wheel_path.name} is missing PostgreSQL adapter modules: {missing}"
-        raise RuntimeError(msg)
-
-    leaked = sorted(
-        name
-        for name in names
-        if name == "vertebra/_postgres.pyi"
-        or name.startswith("vertebra/_postgres.")
-        or (
-            name.startswith("vertebra/_")
-            and name.endswith(NATIVE_SUFFIXES)
-            and not name.startswith("vertebra/_vertebra.")
-        )
-    )
-    if leaked:
-        msg = f"Core wheel {wheel_path.name} leaked optional extension artifacts: {leaked}"
-        raise RuntimeError(msg)
 
 
 def verify_postgres_wheel_contents(wheel_path: Path) -> None:
     """Assert `vertebra_postgres-*.whl` ships only `_postgres` binary + stub with zero `libpq` linkage."""
-    with zipfile.ZipFile(wheel_path) as zf:
-        names = zf.namelist()
-        vtb_entries = sorted(name for name in names if name.startswith("vertebra/"))
-        if "vertebra/_postgres.pyi" not in vtb_entries:
-            msg = f"PostgreSQL wheel {wheel_path.name} is missing vertebra/_postgres.pyi: {vtb_entries}"
-            raise RuntimeError(msg)
-
-        binaries = [
-            name for name in vtb_entries if name.startswith("vertebra/_postgres") and name.endswith(NATIVE_SUFFIXES)
-        ]
-        if len(binaries) != 1:
-            msg = f"Expected exactly 1 vertebra/_postgres shared library in {wheel_path.name}, found: {binaries}"
-            raise RuntimeError(msg)
-
-        unexpected = [name for name in vtb_entries if name not in {"vertebra/_postgres.pyi", binaries[0]}]
-        if unexpected:
-            msg = f"PostgreSQL wheel {wheel_path.name} contains unexpected vertebra/ entries: {unexpected}"
-            raise RuntimeError(msg)
-
-        with tempfile.TemporaryDirectory(prefix="vtb-pg-link-") as tmp:
-            extracted_lib = Path(zf.extract(binaries[0], path=tmp))
-            assert_zero_native_linkage(extracted_lib, forbidden_libs=FORBIDDEN_NATIVE_LIBS, tech_label="PostgreSQL")
+    verify_extension_wheel_contents(
+        wheel_path,
+        label="PostgreSQL",
+        stub_entry="vertebra/_postgres.pyi",
+        binary_prefix="vertebra/_postgres",
+        forbidden_libs=FORBIDDEN_NATIVE_LIBS,
+        link_temp_prefix="vtb-pg-link-",
+    )
 
 
 def verify_postgres_sdist_contents(sdist_path: Path) -> None:
     """Assert `vertebra_postgres-*.tar.gz` contains crate manifest, build script, source, and stub."""
-    with tarfile.open(sdist_path, "r:gz") as tf:
-        names = tf.getnames()
-
-    required_suffixes = ("Cargo.toml", "build.rs", "src/lib.rs", "vertebra/_postgres.pyi")
-    missing = [suffix for suffix in required_suffixes if not any(name.endswith(suffix) for name in names)]
-    if missing:
-        msg = f"PostgreSQL sdist {sdist_path.name} is missing required entries {missing}: {names}"
-        raise RuntimeError(msg)
+    verify_sdist_contents(
+        sdist_path,
+        label="PostgreSQL",
+        required_suffixes=("Cargo.toml", "build.rs", "src/lib.rs", "vertebra/_postgres.pyi"),
+    )
 
 
 def verify_isolated_venv_install_and_fail_loud_contract(
