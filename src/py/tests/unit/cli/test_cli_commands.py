@@ -580,3 +580,102 @@ def test_vtb_run_worker_only_invokes_execute_worker_cli_without_server_spawn(
         "run_until_stopped": True,
         "health_probe": ("127.0.0.1", 9099),
     }
+
+
+def test_embedded_python_runtime_detection_guard_and_env_apply(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify packaged binary detection, static-interpreter guard, and loader path injection."""
+    pkg_bin_dir = Path(supervisor_mod.__file__).resolve().parent.parent / "bin"
+    pkg_bin = pkg_bin_dir / "vertebra-server"
+    dev_bin = tmp_path / "target" / "release" / "vertebra-server"
+
+    monkeypatch.delenv("VERTEBRA_SERVER_BINARY", raising=False)
+    assert supervisor_mod.is_packaged_server_binary(pkg_bin) is True
+    assert supervisor_mod.is_packaged_server_binary(dev_bin) is False
+
+    monkeypatch.setenv("VERTEBRA_SERVER_BINARY", str(pkg_bin))
+    assert supervisor_mod.is_packaged_server_binary(pkg_bin) is False
+    monkeypatch.delenv("VERTEBRA_SERVER_BINARY", raising=False)
+
+    monkeypatch.setattr(supervisor_mod.sys, "platform", "linux")
+    monkeypatch.setattr(supervisor_mod.sys, "base_prefix", str(tmp_path / "pyhome"))
+    monkeypatch.setattr(
+        supervisor_mod.sysconfig,
+        "get_config_var",
+        lambda key: {
+            "LIBDIR": str(tmp_path / "pyhome" / "lib"),
+            "LDLIBRARY": "libpython3.12.so.1.0",
+            "ENABLE_SHARED": 1,
+        }.get(key),
+    )
+    detected = supervisor_mod.EmbeddedPythonRuntime.detect()
+    assert detected.is_shared is True
+    assert detected.python_home == tmp_path / "pyhome"
+    detected.require_shared_library(pkg_bin)
+
+    linux_env: dict[str, str] = {"LD_LIBRARY_PATH": "/existing/lib"}
+    detected.apply(linux_env)
+    assert linux_env["PYTHONHOME"] == str(tmp_path / "pyhome")
+    assert linux_env["LD_LIBRARY_PATH"] == f"{tmp_path / 'pyhome' / 'lib'}{os.pathsep}/existing/lib"
+
+    mac_rt = supervisor_mod.EmbeddedPythonRuntime(
+        python_home=tmp_path / "pyhome",
+        library_dir=tmp_path / "pyhome" / "lib",
+        library_name="libpython3.12.dylib",
+        is_shared=True,
+        platform="darwin",
+    )
+    mac_env: dict[str, str] = {"DYLD_LIBRARY_PATH": "/opt/lib"}
+    mac_rt.apply(mac_env)
+    assert mac_env["DYLD_LIBRARY_PATH"] == f"{tmp_path / 'pyhome' / 'lib'}{os.pathsep}/opt/lib"
+
+    win_rt = supervisor_mod.EmbeddedPythonRuntime(
+        python_home=tmp_path / "pyhome",
+        library_dir=tmp_path / "pyhome",
+        library_name="python312.dll",
+        is_shared=True,
+        platform="win32",
+    )
+    win_env: dict[str, str] = {"PATH": "/usr/bin"}
+    win_rt.apply(win_env)
+    assert win_env["PATH"] == f"{tmp_path / 'pyhome'}{os.pathsep}/usr/bin"
+    win_rt.require_shared_library(pkg_bin)
+
+    static_rt = supervisor_mod.EmbeddedPythonRuntime(
+        python_home=tmp_path / "static-home",
+        library_dir=None,
+        library_name="libpython3.12.a",
+        is_shared=False,
+        platform="linux",
+    )
+    static_rt.require_shared_library(dev_bin)
+    with pytest.raises(SystemExit, match="shared libpython"):
+        static_rt.require_shared_library(pkg_bin)
+
+    monkeypatch.setattr(supervisor_mod, "find_server_binary", lambda: str(pkg_bin))
+    monkeypatch.setattr(supervisor_mod.EmbeddedPythonRuntime, "detect", classmethod(lambda cls: static_rt))
+    runner = CliRunner()
+    app_file = tmp_path / "sample_cli_app.py"
+    app_file.write_text('"""Minimal app."""\nfrom vertebra import App\napp = App()\n')
+    monkeypatch.syspath_prepend(str(tmp_path))
+    res = runner.invoke(cli, ["run", "sample_cli_app:app", "--no-banner"])
+    assert res.exit_code == 2
+    assert "shared libpython" in res.output
+
+    recorded_env: dict[str, str] = {}
+
+    class _FakePopen:
+        def __init__(self, _cmd: list[str], env: dict[str, str]) -> None:
+            recorded_env.update(env)
+
+        def wait(self, timeout: float | None = None) -> int:
+            return 0
+
+    monkeypatch.setattr(supervisor_mod.EmbeddedPythonRuntime, "detect", classmethod(lambda cls: detected))
+    monkeypatch.setattr(supervisor_mod.subprocess, "Popen", _FakePopen)
+    exit_code = supervisor_mod.run_supervisor(server_cmd=[str(dev_bin)], env={"CUSTOM_VAR": "1"})
+    assert exit_code == 0
+    assert recorded_env["PYTHONHOME"] == str(tmp_path / "pyhome")
+    assert recorded_env["LD_LIBRARY_PATH"].startswith(str(tmp_path / "pyhome" / "lib"))

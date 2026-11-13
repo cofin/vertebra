@@ -8,8 +8,12 @@ import logging
 import os
 import signal
 import subprocess
+import sys
+import sysconfig
 import tempfile
 import threading
+from collections.abc import MutableMapping
+from dataclasses import dataclass
 from pathlib import Path
 
 from vertebra.cli.banner import render_shutdown
@@ -17,13 +21,106 @@ from vertebra.cli.tui import LogBuffer, run_dev_tui, stderr_reader
 from vertebra.server.platform import SHMAllocationPolicy
 
 __all__ = (
+    "EmbeddedPythonRuntime",
     "build_server_command",
     "find_repo_root",
     "find_server_binary",
+    "is_packaged_server_binary",
     "run_supervisor",
 )
 
 logger = logging.getLogger("vertebra.supervisor")
+
+
+def is_packaged_server_binary(binary: str | Path) -> bool:
+    """Return True when ``binary`` resolves inside ``<vertebra>/bin`` without explicit env override."""
+    if os.getenv("VERTEBRA_SERVER_BINARY"):
+        return False
+    pkg_bin_dir = (Path(__file__).resolve().parent.parent / "bin").resolve()
+    try:
+        resolved = Path(binary).resolve()
+    except OSError:
+        return False
+    return resolved.is_relative_to(pkg_bin_dir)
+
+
+@dataclass(frozen=True, slots=True)
+class EmbeddedPythonRuntime:
+    """Host CPython embedding metadata exported to ``vertebra-server`` subprocesses."""
+
+    python_home: Path
+    library_dir: Path | None
+    library_name: str | None
+    is_shared: bool
+    platform: str = sys.platform
+
+    @classmethod
+    def detect(cls) -> "EmbeddedPythonRuntime":
+        """Inspect the running CPython interpreter for ``PYTHONHOME`` and shared ``libpython`` paths."""
+        python_home = Path(sys.base_prefix)
+        libdir_raw = sysconfig.get_config_var("LIBDIR")
+        ldlibrary_raw = sysconfig.get_config_var("LDLIBRARY")
+        enable_shared_raw = sysconfig.get_config_var("ENABLE_SHARED")
+        plat = sys.platform
+
+        library_dir = Path(libdir_raw) if isinstance(libdir_raw, str) and libdir_raw else None
+        library_name = str(ldlibrary_raw) if isinstance(ldlibrary_raw, str) and ldlibrary_raw else None
+
+        if plat == "win32" or os.name == "nt":
+            resolved_dir = library_dir or python_home
+            return cls(
+                python_home=python_home,
+                library_dir=resolved_dir,
+                library_name=library_name,
+                is_shared=True,
+                platform="win32",
+            )
+
+        is_static_archive = library_name is not None and library_name.endswith(".a")
+        shared_flag = enable_shared_raw == 1 or str(enable_shared_raw).strip().lower() in {"1", "true"}
+        is_shared = (not is_static_archive) and shared_flag and library_dir is not None and library_name is not None
+        return cls(
+            python_home=python_home,
+            library_dir=library_dir,
+            library_name=library_name,
+            is_shared=is_shared,
+            platform=plat,
+        )
+
+    def require_shared_library(self, binary: str | Path) -> None:
+        """Fail loudly when a packaged POSIX ``vertebra-server`` lacks a shared ``libpython`` runtime."""
+        if self.platform == "win32" or not is_packaged_server_binary(binary):
+            return
+        if not self.is_shared or self.library_dir is None or not self.library_name:
+            msg = (
+                "Packaged vertebra-server requires a shared libpython installation "
+                "(sysconfig LIBDIR/LDLIBRARY with ENABLE_SHARED=1), but this Python interpreter "
+                "is statically linked or missing shared library metadata. Install a shared CPython "
+                "build (for example via 'uv python install') or set VERTEBRA_SERVER_BINARY."
+            )
+            raise SystemExit(msg)
+
+    def apply(self, env: MutableMapping[str, str]) -> MutableMapping[str, str]:
+        """Export ``PYTHONHOME`` and prepend ``library_dir`` to the platform dynamic loader variable."""
+        env["PYTHONHOME"] = str(self.python_home)
+        if self.library_dir is None:
+            return env
+        lib_entry = str(self.library_dir)
+        if self.platform == "win32":
+            var_name = "PATH"
+        elif self.platform == "darwin":
+            var_name = "DYLD_LIBRARY_PATH"
+        else:
+            var_name = "LD_LIBRARY_PATH"
+        existing = env.get(var_name, "")
+        if not existing:
+            env[var_name] = lib_entry
+            return env
+        parts = [part for part in existing.split(os.pathsep) if part]
+        if parts and parts[0] == lib_entry:
+            return env
+        env[var_name] = os.pathsep.join([lib_entry, *parts])
+        return env
 
 
 def run_supervisor(
@@ -47,6 +144,10 @@ def run_supervisor(
     SHMAllocationPolicy().validate_environment()
 
     full_env = os.environ | env
+    runtime = EmbeddedPythonRuntime.detect()
+    if server_cmd:
+        runtime.require_shared_library(server_cmd[0])
+    runtime.apply(full_env)
     full_env["VERTEBRA_DRAIN_TIMEOUT_MS"] = str(drain_timeout_ms)
     full_env["VERTEBRA_SHUTDOWN_TIMEOUT_MS"] = str(shutdown_timeout_ms)
 
@@ -126,6 +227,7 @@ def find_server_binary() -> str:
 def build_server_command(binary: str | None = None) -> list[str]:
     """Build command to start the Rust server."""
     server_bin = binary or find_server_binary()
+    EmbeddedPythonRuntime.detect().require_shared_library(server_bin)
     return [server_bin]
 
 

@@ -41,8 +41,11 @@ from tools.pgo.rust_pgo import (
     run_pgo_pipeline,
     validate_profdata,
 )
+from tools.scripts import build_server_binary as build_server_binary_mod
+from tools.scripts.build_server_binary import ServerBinaryBuilder, ServerBinaryTarget
 
 import vertebra.build.packaging as packaging_mod
+from vertebra.agent.mcp.skills import FilesystemSkillSource, MCPSkillsConfig, SkillCatalog
 from vertebra.build.packaging import (
     ONEFILE_MAGIC,
     ONEFILE_TRAILER_SIZE,
@@ -1068,3 +1071,241 @@ def _callee_name(func: ast.expr) -> str | None:
     if isinstance(func, ast.Attribute):
         return func.attr
     return None
+
+
+def test_build_rs_and_maturin_wheel_include_for_relocatable_server() -> None:
+    """Verify build.rs omits host rpath and pyproject.toml includes packaged server binaries in wheels."""
+    repo_root = Path(__file__).resolve().parents[5]
+    build_rs = (repo_root / "src" / "rs" / "vertebra-http" / "build.rs").read_text(encoding="utf-8")
+    assert "-Wl,-rpath" not in build_rs
+    assert "pyo3_build_config::use_pyo3_cfgs()" in build_rs
+
+    pyproject = tomllib.loads((repo_root / "pyproject.toml").read_text(encoding="utf-8"))
+    maturin_include = pyproject["tool"]["maturin"]["include"]
+    assert {"path": "src/py/vertebra/bin/*", "format": "wheel"} in maturin_include
+
+
+def test_server_binary_builder_targets_python_fallback_macos_and_repair(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify ServerBinaryTarget, shared-Python fallback, cargo/otool/repair commands, and staging."""
+    mac_target = ServerBinaryTarget.from_host(
+        python_version="3.14t",
+        target_platform="darwin",
+        archflags="-arch arm64 -arch x86_64",
+    )
+    assert mac_target.free_threaded is True
+    assert mac_target.rust_target == "aarch64-apple-darwin"
+    assert mac_target.libpython_dylib == "libpython3.14t.dylib"
+    assert mac_target.delocate_archs == "arm64,x86_64"
+
+    linux_target = ServerBinaryTarget.from_host(
+        python_version="3.12",
+        free_threaded=False,
+        target_platform="linux",
+        archflags="",
+    )
+    assert linux_target.libpython_soname == "libpython3.12.so.1.0"
+    assert linux_target.binary_name == "vertebra-server"
+
+    win_target = ServerBinaryTarget.from_host(
+        python_version="3.14t",
+        target_platform="windows",
+        archflags="",
+    )
+    assert win_target.binary_name == "vertebra-server.exe"
+    assert win_target.libpython_soname == "python314t.dll"
+
+    builder = ServerBinaryBuilder(repo_root=tmp_path, target=linux_target)
+    cargo_cmd = builder.cargo_command()
+    assert "--bin" in cargo_cmd and "vertebra-server" in cargo_cmd
+    assert "--release" in cargo_cmd
+    assert "vertebra-http/python,vertebra-http/tls,vertebra-http/compression" in cargo_cmd
+
+    assert builder.repair_command(tmp_path / "vertebra.whl", tmp_path / "repaired") == [
+        "auditwheel",
+        "repair",
+        "-w",
+        str(tmp_path / "repaired"),
+        "--exclude",
+        "libpython3.12.so.1.0",
+        str(tmp_path / "vertebra.whl"),
+    ]
+    mac_builder = ServerBinaryBuilder(repo_root=tmp_path, target=mac_target)
+    assert mac_builder.repair_command(tmp_path / "vertebra.whl", tmp_path / "repaired") == [
+        "delocate-wheel",
+        "--require-archs",
+        "arm64,x86_64",
+        "-w",
+        str(tmp_path / "repaired"),
+        "-v",
+        "--exclude",
+        "libpython",
+        str(tmp_path / "vertebra.whl"),
+    ]
+
+    otool_sample = (
+        f"{tmp_path / 'vertebra-server'}:\n"
+        "\t/Library/Frameworks/Python.framework/Versions/3.14/lib/libpython3.14t.dylib (compatibility version 3.14.0)\n"
+        "\t/usr/lib/libSystem.B.dylib (compatibility version 1.0.0)\n"
+    )
+    mac_cmds = mac_builder.macos_install_name_changes(tmp_path / "vertebra-server", otool_output=otool_sample)
+    assert mac_cmds == [
+        [
+            "install_name_tool",
+            "-change",
+            "/Library/Frameworks/Python.framework/Versions/3.14/lib/libpython3.14t.dylib",
+            "@rpath/libpython3.14t.dylib",
+            str(tmp_path / "vertebra-server"),
+        ],
+        ["codesign", "--force", "--sign", "-", str(tmp_path / "vertebra-server")],
+    ]
+
+    static_py = tmp_path / "static-python"
+    shared_py = tmp_path / "uv-shared-python"
+    monkeypatch.setattr(build_server_binary_mod.shutil, "which", lambda _name: "/usr/bin/uv")
+    monkeypatch.setattr(
+        build_server_binary_mod,
+        "_probe_python_shared_info",
+        lambda exe: (Path(exe) == shared_py, "/opt/py/lib", "libpython3.12.so.1.0"),
+    )
+    monkeypatch.setattr(
+        build_server_binary_mod.subprocess,
+        "run",
+        lambda cmd, **_kwargs: SimpleNamespace(
+            returncode=0,
+            stdout=f"{shared_py}\n" if cmd[:3] == ["/usr/bin/uv", "python", "find"] else "",
+            stderr="",
+        ),
+    )
+    assert builder.select_build_python(static_py) == shared_py
+
+    monkeypatch.setattr(build_server_binary_mod.shutil, "which", lambda _name: None)
+    with pytest.raises(SystemExit, match="statically linked"):
+        builder.select_build_python(static_py)
+
+    recorded_cargo: dict[str, object] = {}
+    built_exe = tmp_path / "src" / "rs" / "target" / linux_target.rust_target / "release" / "vertebra-server"
+    built_exe.parent.mkdir(parents=True)
+    built_exe.write_bytes(b"ELF-SERVER")
+
+    monkeypatch.setattr(
+        build_server_binary_mod, "_probe_python_shared_info", lambda _exe: (True, "/lib", "libpython3.12.so")
+    )
+
+    def fake_cargo_run(cmd: list[str], *, env: dict[str, str], **_kwargs: object) -> SimpleNamespace:
+        recorded_cargo["cmd"] = cmd
+        recorded_cargo["PYO3_PYTHON"] = env["PYO3_PYTHON"]
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(build_server_binary_mod.subprocess, "run", fake_cargo_run)
+    staged = builder.build(build_python=shared_py)
+    assert staged == tmp_path / "src" / "py" / "vertebra" / "bin" / "vertebra-server"
+    assert staged.read_bytes() == b"ELF-SERVER"
+    assert recorded_cargo["PYO3_PYTHON"] == str(shared_py)
+
+
+def test_standalone_builder_include_agent_skills_staging_and_refusal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify --include-agent-skills stages app skills cleanly, refuses Vertebra repo root, and sets VERTEBRA_APP_ROOT."""
+    repo_root = Path(__file__).resolve().parents[5]
+    target = BuildTarget.resolve("linux-x86_64", python_version="3.12")
+    with pytest.raises(ValueError, match="Refusing to bundle Vertebra repository"):
+        StandaloneBuilder(
+            project_dir=repo_root,
+            target=target,
+            include_agent_skills=True,
+        ).build(tmp_path / "blocked_dist")
+
+    runner = CliRunner()
+    cli_refused = runner.invoke(
+        build_command,
+        [
+            "--project-dir",
+            str(repo_root),
+            "--standalone",
+            "--include-agent-skills",
+            "--target",
+            "linux-x86_64",
+            "--output",
+            str(tmp_path / "blocked_cli_dist"),
+        ],
+    )
+    assert cli_refused.exit_code != 0
+    assert "Refusing to bundle Vertebra repository" in cli_refused.output
+
+    app_project = tmp_path / "app_repo"
+    (app_project / "pyproject.toml").parent.mkdir(parents=True)
+    (app_project / "pyproject.toml").write_text('[project]\nname = "skills-app"\nversion = "0.1.0"\n')
+    (app_project / "app").mkdir()
+    (app_project / "app" / "__init__.py").write_text('"""App."""\n')
+    (app_project / "app" / "main.py").write_text(
+        '"""App entrypoint checking VERTEBRA_APP_ROOT and skills."""\n'
+        "from vertebra.agent.mcp.skills import FilesystemSkillSource, MCPSkillsConfig, SkillCatalog\n\n"
+        "def run() -> int:\n"
+        "    catalog = SkillCatalog.from_config(MCPSkillsConfig())\n"
+        "    direct = FilesystemSkillSource(['.agents/skills']).load_skills()\n"
+        "    ok = catalog.get_skill('billing-helper') is not None and len(direct) == 1\n"
+        "    return 0 if ok else 9\n"
+    )
+    skill_dir = app_project / ".agents" / "skills" / "billing-helper"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("---\nname: billing-helper\ndescription: Billing workflow\n---\nBody text.\n")
+    (skill_dir / "__pycache__").mkdir()
+    (skill_dir / "__pycache__" / "cached.pyc").write_bytes(b"pyc")
+    (skill_dir / ".DS_Store").write_bytes(b"ds")
+    (app_project / ".agents" / "bundles").mkdir()
+    (app_project / ".agents" / "bundles" / "internal.md").write_text("do not copy")
+
+    default_dist = StandaloneBuilder(
+        project_dir=app_project,
+        target=target,
+        entrypoint="app.main:run",
+    ).build(tmp_path / "dist_default")
+    assert not (default_dist / "app" / ".agents" / "skills").exists()
+    default_manifest = decode_json((default_dist / "manifest.json").read_bytes())
+    assert "agent_skills_staged" not in default_manifest
+
+    staged_dist = tmp_path / "dist_with_skills"
+    cli_ok = runner.invoke(
+        build_command,
+        [
+            "--project-dir",
+            str(app_project),
+            "--standalone",
+            "--include-agent-skills",
+            "--entrypoint",
+            "app.main:run",
+            "--target",
+            "linux-x86_64",
+            "--output",
+            str(staged_dist),
+        ],
+    )
+    assert cli_ok.exit_code == 0, cli_ok.output
+    assert (staged_dist / "app" / ".agents" / "skills" / "billing-helper" / "SKILL.md").is_file()
+    assert not (staged_dist / "app" / ".agents" / "skills" / "billing-helper" / "__pycache__").exists()
+    assert not (staged_dist / "app" / ".agents" / "skills" / "billing-helper" / ".DS_Store").exists()
+    assert not (staged_dist / "app" / ".agents" / "bundles").exists()
+    skills_manifest = decode_json((staged_dist / "manifest.json").read_bytes())
+    assert skills_manifest["agent_skills_staged"] is True
+
+    unrelated_cwd = tmp_path / "unrelated_cwd"
+    unrelated_cwd.mkdir()
+    monkeypatch.setenv("VERTEBRA_APP_ROOT", str(staged_dist / "app"))
+    monkeypatch.chdir(unrelated_cwd)
+    catalog = SkillCatalog.from_config(MCPSkillsConfig())
+    assert catalog.get_skill("billing-helper") is not None
+    assert len(FilesystemSkillSource([".agents/skills"]).load_skills()) == 1
+
+    onefile_bin = tmp_path / "skills-app-onefile"
+    OnefileBuilder(dist_dir=staged_dist, target=target).build(onefile_bin)
+    env = dict(os.environ)
+    env.pop("VERTEBRA_APP_ROOT", None)
+    env["PATH"] = f"{Path(sys.executable).parent}{os.pathsep}{env.get('PATH', '')}"
+    env["XDG_CACHE_HOME"] = str(tmp_path / "onefile_cache")
+    proc = subprocess.run([str(onefile_bin)], cwd=unrelated_cwd, env=env, capture_output=True, text=True, check=False)
+    assert proc.returncode == 0, proc.stderr

@@ -221,12 +221,19 @@ def run(
     with enter_app_server_lifespan(resolved_app, app_path=resolved_app, native=not asgi) as offload_json:
         if offload_json:
             env["VERTEBRA_OFFLOAD_CONFIG"] = offload_json
-        exit_code = run_supervisor(
-            server_cmd=server_cmd,
-            env=env,
-            drain_timeout_ms=drain_timeout,
-            shutdown_timeout_ms=shutdown_timeout,
-        )
+        try:
+            exit_code = run_supervisor(
+                server_cmd=server_cmd,
+                env=env,
+                drain_timeout_ms=drain_timeout,
+                shutdown_timeout_ms=shutdown_timeout,
+            )
+        except SystemExit as e:
+            raise CLIError(
+                str(e),
+                hint="Ensure shared libpython is available or set VERTEBRA_SERVER_BINARY.",
+                exit_code=EXIT_CONFIG_ERROR,
+            ) from e
     sys.exit(exit_code)
 
 

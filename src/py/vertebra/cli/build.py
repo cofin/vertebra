@@ -17,6 +17,31 @@ __all__ = ("build",)
 _LEGACY_TARGETS: frozenset[str] = frozenset({"frontend", "backend", "all"})
 
 
+def _stage_standalone_distribution(
+    *,
+    project_dir: Path,
+    target_tuple: BuildTarget,
+    entrypoint: str,
+    server_binary: Path | None,
+    profile: str,
+    include_agent_skills: bool,
+    dist_dir: Path,
+) -> Path:
+    """Build a standalone distribution directory, mapping validation failures to ClickException."""
+    builder = StandaloneBuilder(
+        project_dir=project_dir,
+        target=target_tuple,
+        entrypoint=entrypoint,
+        server_binary=server_binary,
+        profile=profile,
+        include_agent_skills=include_agent_skills,
+    )
+    try:
+        return builder.build(dist_dir)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
 @click.command()
 @click.option(
     "--target",
@@ -64,6 +89,12 @@ _LEGACY_TARGETS: frozenset[str] = frozenset({"frontend", "backend", "all"})
     default=Path("."),
     help="Project directory containing pyproject.toml and any frontend workspace",
 )
+@click.option(
+    "--include-agent-skills",
+    is_flag=True,
+    default=False,
+    help="Stage .agents/skills into the standalone bundle (application repositories only)",
+)
 def build(
     target: str,
     profile: str,
@@ -74,6 +105,7 @@ def build(
     python_version: str,
     output: Path | None,
     project_dir: Path,
+    include_agent_skills: bool,
 ) -> None:
     """Build Vertebra application assets, standalone distributions, or onefile binaries."""
     resolved_project = project_dir.resolve()
@@ -90,14 +122,15 @@ def build(
             if (standalone and not onefile and output is not None)
             else (resolved_project / "dist" / f"standalone-{target_tuple.rust_triple}")
         )
-        standalone_builder = StandaloneBuilder(
+        staged_dir = _stage_standalone_distribution(
             project_dir=resolved_project,
-            target=target_tuple,
+            target_tuple=target_tuple,
             entrypoint=entrypoint,
             server_binary=server_binary,
             profile=profile,
+            include_agent_skills=include_agent_skills,
+            dist_dir=dist_dir,
         )
-        staged_dir = standalone_builder.build(dist_dir)
         console.success(f"Standalone build staged -> {staged_dir}")
 
         if onefile:
@@ -122,12 +155,13 @@ def build(
         except ValueError as exc:
             raise click.ClickException(str(exc)) from exc
         dist_dir = output or (resolved_project / "dist" / "backend")
-        standalone_builder = StandaloneBuilder(
+        staged = _stage_standalone_distribution(
             project_dir=resolved_project,
-            target=target_tuple,
+            target_tuple=target_tuple,
             entrypoint=entrypoint,
             server_binary=server_binary,
             profile=profile,
+            include_agent_skills=include_agent_skills,
+            dist_dir=dist_dir,
         )
-        staged = standalone_builder.build(dist_dir)
         console.success(f"Backend build complete -> {staged}")

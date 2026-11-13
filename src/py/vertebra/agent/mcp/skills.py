@@ -6,6 +6,7 @@ to load and serve skill packages with SHA-256 integrity verification.
 
 import hashlib
 import mimetypes
+import os
 import re
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -160,6 +161,16 @@ def parse_skill_frontmatter(text: str) -> tuple[dict[str, Any], str]:
     return data, body
 
 
+def _resolve_skill_base_path(raw_path: str | Path) -> Path:
+    """Resolve relative skill directory paths against ``VERTEBRA_APP_ROOT`` when set."""
+    candidate = Path(raw_path)
+    if candidate.is_absolute():
+        return candidate
+    if app_root := os.environ.get("VERTEBRA_APP_ROOT", "").strip():
+        return Path(app_root) / candidate
+    return candidate
+
+
 class FilesystemSkillSource:
     """Discovers skills from directories on the local filesystem."""
 
@@ -169,7 +180,7 @@ class FilesystemSkillSource:
         max_files_per_skill: int = 128,
         max_bytes_per_skill: int = 2_097_152,
     ) -> None:
-        self.base_paths = [Path(p) for p in base_paths]
+        self.base_paths = [_resolve_skill_base_path(p) for p in base_paths]
         self.max_files_per_skill = max_files_per_skill
         self.max_bytes_per_skill = max_bytes_per_skill
 
@@ -243,6 +254,10 @@ class MCPSkillsConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Maximum number of files indexed per skill directory."""
     max_bytes_per_skill: int = 2_097_152
     """Maximum cumulative byte budget (`2 MiB` default) allowed per skill package."""
+
+    def resolved_paths(self) -> tuple[Path, ...]:
+        """Return configured skill search paths resolved against ``VERTEBRA_APP_ROOT`` when active."""
+        return tuple(_resolve_skill_base_path(p) for p in self.paths)
 
 
 class SkillCatalog:
