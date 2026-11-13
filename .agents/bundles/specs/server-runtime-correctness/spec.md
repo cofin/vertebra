@@ -16,23 +16,23 @@ chapters:
   - ch05-fastpath-consolidation
   - ch06-runtime-native-cleanup
   - ch07-docs-and-okf-sync
-current_chapter: ch07-docs-and-okf-sync
+current_chapter: null
 current_task: null
 parent_prd: integration-remediation
 plan_revision: 3
 plan_commit: 18baadcd
 last_verified_checkpoint: d9475b72
-last_reviewed_chapter: ch06-runtime-native-cleanup
-last_reviewed_commit: 7e78e3f6
+last_reviewed_chapter: ch07-docs-and-okf-sync
+last_reviewed_commit: 8727830e
 created_at: "2026-11-12T23:45:00Z"
-updated_at: "2026-11-13T06:14:00Z"
+updated_at: "2026-11-13T06:14:45Z"
 generated:
   by: flow-plan
   at: "2026-11-12T23:45:00Z"
 verified:
   - by: agent:code-reviewer
-    at: "2026-11-13T06:02:45Z"
-    commit: 7e78e3f6
+    at: "2026-11-13T06:14:45Z"
+    commit: 8727830e
 tags:
   - server
   - streaming

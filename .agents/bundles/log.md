@@ -1,5 +1,10 @@
 # Bundle Activity Log
 
+## [2026-11-13T06:14:45Z] chapter-complete | server-runtime-correctness ch07-docs-and-okf-sync
+
+- Closed `ch07-docs-and-okf-sync` at `d9475b72` (sync `8727830e`): regenerated `docs/reference/cli.md`, synchronized server/CLI/packaging usage and reference guides, compacted `pyo3-ffi-and-batch-dispatch.md` (`174L`), synced `tiered-rings-and-batch-bridge.md` (`132L`), `asgi-and-wsgi-runners.md` (`142L`), `worker-and-protocols.md` (`137L`), `server-runtime-limitations.md` (`69L`), and `product.md` (`191L`), and switched `cli/__init__.py` and `server/lanes.py` to `ensure_module` (`make docs`, `make review-check`, and `36` unit tests clean).
+- Completed all `7` chapters (`26/26` tasks) of `server-runtime-correctness`.
+
 ## [2026-11-13T06:02:45Z] chapter-complete | server-runtime-correctness ch06-runtime-native-cleanup
 
 - Closed `ch06-runtime-native-cleanup` at `db02a0b6` (sync `7e78e3f6`): enforced fail-loud `getrandom::fill` panic and Unix `pthread_atfork` `FORK_GENERATION` reseed in `vertebra-core/src/id.rs`, removed duplicate `_module_cache` from `module_loader.py`/`_typing.py`/`typing.py`, bound `_zero_copy.py` helpers directly to `vertebra._vertebra`, and dropped inert `max_commit_delay_ms` from sync/async Spanner `batch_write` (`4` `id::` Rust tests, `clippy`, `ruff`, `mypy`, and `92` unit tests clean).
