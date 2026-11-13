@@ -409,8 +409,9 @@ ENGINE_SPECS: tuple[EngineConformanceSpec, ...] = (
         async_driver_cls=AsyncPostgreSQLDriver,
         sample_url="postgresql://vtb:secret@127.0.0.1:5432/vtb",
         placeholder_style="dollar",
+        supports_pipeline=True,
         native_extension_module="vertebra._postgres",
-        pending_flow_id="native-postgres-driver",
+        pending_flow_id=None,
         env_dsn_vars=("VERTEBRA_CONFORMANCE_POSTGRES_DSN",),
         container_fixture="vtb_postgres_config",
     ),
@@ -610,6 +611,24 @@ CACHE_ENGINE_SPECS: tuple[CacheConformanceSpec, ...] = (
 
 
 _CONFORMANCE_DOCKER_ENV = "VERTEBRA_CONFORMANCE_DOCKER"
+POSTGRES_CONFORMANCE_VERSIONS: tuple[str, ...] = ("14", "15", "16", "17", "18")
+
+
+def _expand_live_engine_variants(specs: Sequence[EngineConformanceSpec]) -> list[tuple[str, EngineConformanceSpec]]:
+    """Expand ``postgres`` across supported PostgreSQL major versions `14`–`18` for live conformance."""
+    variants: list[tuple[str, EngineConformanceSpec]] = []
+    for spec in specs:
+        if spec.engine != "postgres":
+            variants.append((spec.engine, spec))
+            continue
+        for version in POSTGRES_CONFORMANCE_VERSIONS:
+            versioned_spec = structs.replace(
+                spec,
+                env_dsn_vars=(f"VERTEBRA_CONFORMANCE_POSTGRES_{version}_DSN", *spec.env_dsn_vars),
+                container_fixture=f"vtb_postgres_{version}_config",
+            )
+            variants.append((f"postgres-{version}", versioned_spec))
+    return variants
 
 
 def _build_live_engine_params(specs: Sequence[EngineConformanceSpec] = ENGINE_SPECS) -> list[Any]:
@@ -619,20 +638,20 @@ def _build_live_engine_params(specs: Sequence[EngineConformanceSpec] = ENGINE_SP
         specs: Engine specs to parametrize.
 
     Returns:
-        One ``pytest.param`` per spec with ``id=spec.engine``.
+        One ``pytest.param`` per spec variant with stable parameter IDs.
     """
     params: list[Any] = []
-    for spec in specs:
+    for param_id, spec in _expand_live_engine_variants(specs):
         if spec.pending_flow_id is not None and not _native_module_missing(spec):
             params.append(
                 pytest.param(
                     spec,
-                    id=spec.engine,
+                    id=param_id,
                     marks=pytest.mark.xfail(strict=True, reason=f"Owned by {spec.pending_flow_id}"),
                 )
             )
         else:
-            params.append(pytest.param(spec, id=spec.engine))
+            params.append(pytest.param(spec, id=param_id))
     return params
 
 
@@ -719,6 +738,8 @@ def _resolve_live_config(
         return MySQLConfig.from_url(loopback_server.dsn)
     if spec.engine == "oracle":
         pytest.skip("Oracle conformance requires VERTEBRA_CONFORMANCE_ORACLE_DSN or VERTEBRA_CONFORMANCE_DOCKER=1")
+    if spec.engine == "postgres":
+        pytest.skip(f"PostgreSQL conformance requires {' or '.join(spec.env_dsn_vars)} or {_CONFORMANCE_DOCKER_ENV}=1")
     return spec.config_cls.from_url(spec.sample_url)
 
 
@@ -1696,3 +1717,28 @@ def test_mssql_driver_raises_missing_dependency_when_wheel_absent(
             AsyncMSSQLDriver()
     finally:
         reset_dependency_cache("vertebra._mssql")
+
+
+def test_postgres_conformance_spec_and_version_matrix() -> None:
+    """PostgreSQL conformance enables pipelines, clears pending gates, and expands versions 14 to 18."""
+    pg_spec = next(spec for spec in ENGINE_SPECS if spec.engine == "postgres")
+    assert pg_spec.supports_pipeline is True
+    assert pg_spec.pending_flow_id is None
+    assert pg_spec.native_extension_module == "vertebra._postgres"
+
+    params = _build_live_engine_params((pg_spec,))
+    assert [param.id for param in params] == [
+        "postgres-14",
+        "postgres-15",
+        "postgres-16",
+        "postgres-17",
+        "postgres-18",
+    ]
+    assert all(param.marks == () for param in params)
+    assert [param.values[0].container_fixture for param in params] == [
+        "vtb_postgres_14_config",
+        "vtb_postgres_15_config",
+        "vtb_postgres_16_config",
+        "vtb_postgres_17_config",
+        "vtb_postgres_18_config",
+    ]
