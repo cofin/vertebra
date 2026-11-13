@@ -72,7 +72,7 @@ PYO3_PYTHON="$(pwd)/.venv/bin/python" PYTHONPATH="$(pwd)/src/py:$(pwd)/.venv/lib
 ## Acceptance Criteria
 
 - [x] Reconnect resumes without duplicate acknowledged commits or silent identity drift.
-- [x] Clippy `--all-targets --features gcp` passes with zero warnings.
+- [x] Clippy `--all-targets` passes with zero warnings.
 - [x] Zero regressions in `ch01-replication-supervision` fast verification gate.
 
 [^pg-repl-mod]: `src/rs/vertebra-postgres/src/replication/mod.rs` — probe_identity and connect_logical primitives.

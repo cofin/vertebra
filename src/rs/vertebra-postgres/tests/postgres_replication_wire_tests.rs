@@ -4857,3 +4857,157 @@ async fn supervisor_permanent_errors_and_disabled_reconnect_fail_immediately_and
     assert_eq!(backoff_dials.load(Ordering::SeqCst), 0);
     cancel_srv.abort();
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn supervisor_acknowledge_race_with_disconnect_and_current_thread_error_yield_reconnects_cleanly()
+ {
+    use _postgres::replication::pgoutput::ReplicationRecord;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let cfg = direct_config(listener.local_addr().unwrap().port());
+    let (drop_gen1_tx, drop_gen1_rx) = tokio::sync::oneshot::channel::<()>();
+    let (gen1_dropped_tx, gen1_dropped_rx) = tokio::sync::oneshot::channel::<()>();
+
+    let gen1_payload = session_wal_frame(&session_empty_transaction_payload(0x2_0000_0240, 77));
+    let gen2_payload = session_wal_frame(&session_empty_transaction_payload(0x2_0000_0280, 78));
+
+    let srv = tokio::spawn(async move {
+        let spec = ScriptedLogicalPeerSpec::default();
+        assert!(accept_preflight_peer(&listener, &spec, None).await);
+        let mut gen1 = accept_copyboth_peer(&listener, &spec, Some("0/0"), None, &gen1_payload)
+            .await
+            .unwrap();
+        drop_gen1_rx.await.unwrap();
+        gen1.shutdown().await.unwrap();
+        drop(gen1);
+        let _ = gen1_dropped_tx.send(());
+
+        assert!(accept_preflight_peer(&listener, &spec, None).await);
+        let mut gen2 = accept_copyboth_peer(&listener, &spec, Some("2/80"), None, &gen2_payload)
+            .await
+            .unwrap();
+        let FrontendExchange::Other(b'd', gen2_ack) = read_frontend_exchange(&mut gen2).await
+        else {
+            panic!("expected gen 2 StandbyStatusUpdate");
+        };
+        assert_eq!(
+            u64::from_be_bytes(gen2_ack[9..17].try_into().unwrap()),
+            0x2_0000_0280
+        );
+        gen2
+    });
+
+    let supervisor = ReplicationSupervisor::open(
+        cfg,
+        "vertebra_slot".into(),
+        "vertebra_pub".into(),
+        None,
+        8,
+        true,
+    )
+    .await
+    .unwrap();
+
+    assert!(matches!(
+        supervisor
+            .next_event()
+            .await
+            .unwrap()
+            .unwrap()
+            .publish()
+            .unwrap(),
+        ReplicationStreamEvent::Control { generation: 1, .. }
+    ));
+    assert!(matches!(
+        supervisor
+            .next_event()
+            .await
+            .unwrap()
+            .unwrap()
+            .publish()
+            .unwrap(),
+        ReplicationStreamEvent::Record {
+            record: ReplicationRecord::Begin { xid: 77, .. },
+            generation: 1
+        }
+    ));
+    assert!(matches!(
+        supervisor
+            .next_event()
+            .await
+            .unwrap()
+            .unwrap()
+            .publish()
+            .unwrap(),
+        ReplicationStreamEvent::Record {
+            record: ReplicationRecord::Commit {
+                commit_end_lsn: 0x2_0000_0240,
+                ..
+            },
+            generation: 1
+        }
+    ));
+
+    drop_gen1_tx.send(()).unwrap();
+    gen1_dropped_rx.await.unwrap();
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+
+    assert!(
+        supervisor.acknowledge(1, 0x2_0000_0240).is_err(),
+        "acknowledging after peer disconnect must fail without mutating resume_lsn or losing worker"
+    );
+    assert_eq!(supervisor.resume().acknowledged_lsn, 0x2_0000_0080);
+
+    let next_ev = tokio::time::timeout(Duration::from_secs(3), supervisor.next_event())
+        .await
+        .expect("current_thread next_event must yield to reconnect worker instead of hanging")
+        .unwrap()
+        .unwrap()
+        .publish()
+        .unwrap();
+    assert!(matches!(
+        next_ev,
+        ReplicationStreamEvent::Control {
+            generation: 2,
+            acknowledged_lsn: 0x2_0000_0080,
+            ..
+        }
+    ));
+    assert!(matches!(
+        supervisor
+            .next_event()
+            .await
+            .unwrap()
+            .unwrap()
+            .publish()
+            .unwrap(),
+        ReplicationStreamEvent::Record {
+            record: ReplicationRecord::Begin { xid: 78, .. },
+            generation: 2
+        }
+    ));
+    assert!(matches!(
+        supervisor
+            .next_event()
+            .await
+            .unwrap()
+            .unwrap()
+            .publish()
+            .unwrap(),
+        ReplicationStreamEvent::Record {
+            record: ReplicationRecord::Commit {
+                commit_end_lsn: 0x2_0000_0280,
+                ..
+            },
+            generation: 2
+        }
+    ));
+    assert_eq!(
+        supervisor.acknowledge(2, 0x2_0000_0280).unwrap(),
+        0x2_0000_0280
+    );
+    let _gen2_sock = srv.await.unwrap();
+    supervisor.cancel();
+}

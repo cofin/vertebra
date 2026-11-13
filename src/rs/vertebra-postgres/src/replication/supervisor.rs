@@ -321,21 +321,31 @@ impl ReplicationSupervisor {
                         Ok(()) => true,
                         Err(_) => false,
                     };
-                    let mut state = self.shared.state.lock().unwrap();
-                    if state.closing || state.reconnecting || matches!(state.terminal, Some(Err(_)))
-                    {
-                        continue;
-                    }
-                    if clean_eof
-                        && let Some(active) = state.active.as_ref()
-                        && active.generation == gen_num
-                        && active.front.is_none()
-                        && active.pending_control.is_none()
-                    {
-                        state.active = None;
-                        state.terminal.get_or_insert(Ok(()));
-                        drop(state);
-                        self.shared.notify();
+                    let should_wait = {
+                        let mut state = self.shared.state.lock().unwrap();
+                        if state.closing
+                            || state.reconnecting
+                            || matches!(state.terminal, Some(Err(_)))
+                        {
+                            false
+                        } else if clean_eof
+                            && let Some(active) = state.active.as_ref()
+                            && active.generation == gen_num
+                            && active.front.is_none()
+                            && active.pending_control.is_none()
+                        {
+                            state.active = None;
+                            state.terminal.get_or_insert(Ok(()));
+                            drop(state);
+                            self.shared.notify();
+                            return Ok(None);
+                        } else {
+                            !clean_eof
+                                && state.terminal.is_none()
+                                && state.active.as_ref().map(|a| a.generation) == Some(gen_num)
+                        }
+                    };
+                    if should_wait && events_rx.changed().await.is_err() {
                         return Ok(None);
                     }
                 }
@@ -407,17 +417,12 @@ impl ReplicationSupervisor {
                     active.generation
                 )));
             }
-            active.feedback.acknowledge(commit_end_lsn)?;
-            match active.session.acknowledge(commit_end_lsn) {
-                Ok(lsn) => {
-                    state.acknowledged_lsn = state.acknowledged_lsn.max(lsn);
-                    lsn
-                }
-                Err(err) => {
-                    state.active = None;
-                    return Err(err);
-                }
-            }
+            let mut candidate_feedback = active.feedback.clone();
+            candidate_feedback.acknowledge(commit_end_lsn)?;
+            let lsn = active.session.acknowledge(commit_end_lsn)?;
+            active.feedback = candidate_feedback;
+            state.acknowledged_lsn = state.acknowledged_lsn.max(lsn);
+            lsn
         };
         self.shared.notify();
         Ok(acked)
@@ -553,6 +558,30 @@ impl ReplicationEventDelivery {
     }
 }
 
+struct WorkerExitGuard {
+    shared: Arc<SupervisorShared>,
+}
+
+impl Drop for WorkerExitGuard {
+    fn drop(&mut self) {
+        let should_notify = {
+            let mut state = self.shared.state.lock().unwrap();
+            if !state.closing && state.terminal.is_none() && state.active.is_none() {
+                state.reconnecting = false;
+                state.terminal = Some(Err(PostgresError::Interface(
+                    "replication supervisor worker exited unexpectedly".into(),
+                )));
+                true
+            } else {
+                false
+            }
+        };
+        if should_notify {
+            self.shared.notify();
+        }
+    }
+}
+
 async fn run_supervisor_worker(
     shared: Arc<SupervisorShared>,
     config: PostgresConfig,
@@ -562,6 +591,9 @@ async fn run_supervisor_worker(
     reconnect: bool,
     seed_base: u64,
 ) {
+    let _exit_guard = WorkerExitGuard {
+        shared: Arc::clone(&shared),
+    };
     let mut control_rx = shared.events.subscribe();
 
     loop {
@@ -583,12 +615,7 @@ async fn run_supervisor_worker(
 
         let closed_outcome = tokio::select! {
             res = session.wait_closed() => Some(res),
-            changed = control_rx.changed() => {
-                if changed.is_err() {
-                    return;
-                }
-                None
-            }
+            () = wait_until_closing(&mut control_rx, &shared) => None,
         };
 
         let Some(outcome) = closed_outcome else {

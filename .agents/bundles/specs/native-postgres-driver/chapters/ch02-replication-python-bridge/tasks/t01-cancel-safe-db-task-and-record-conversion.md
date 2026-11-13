@@ -59,7 +59,7 @@ Implement cancel-safe `spawn_rust_db_task_with_attr_and_future` (`-> PyResult<Ru
 ## Verification
 
 ```bash
-cargo test --manifest-path src/rs/Cargo.toml -p vertebra-db --features pyo3 && cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --features gcp replication::
+PYO3_PYTHON="$(pwd)/.venv/bin/python" PYTHONPATH="$(pwd)/src/py:$(pwd)/.venv/lib/python3.12/site-packages" cargo test --manifest-path src/rs/Cargo.toml -p vertebra-db --features pyo3 && PYO3_PYTHON="$(pwd)/.venv/bin/python" PYTHONPATH="$(pwd)/src/py:$(pwd)/.venv/lib/python3.12/site-packages" cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --locked replication::
 ```
 
 ## Acceptance Criteria

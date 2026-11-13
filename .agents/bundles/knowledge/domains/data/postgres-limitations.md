@@ -8,13 +8,16 @@ generated:
   by: flow-implement
   at: "2026-11-12T02:22:54Z"
 verified:
-  - by: agent:flow-setup
-    at: "2026-11-12T23:30:00Z"
-    commit: 18baadcd
+  - by: agent:executor
+    at: "2026-11-13T02:42:00Z"
+    commit: 7d50fd42
 sources:
   - id: pg-stream
     resource: src/rs/vertebra-postgres/src/replication/stream.rs::ReplicationSession
     title: Bounded native session transport and explicit delivery publication
+  - id: pg-supervisor
+    resource: src/rs/vertebra-postgres/src/replication/supervisor.rs::ReplicationSupervisor
+    title: Multi-generation verified reconnect supervisor and delivery leases
   - id: pg-feedback
     resource: src/rs/vertebra-postgres/src/replication/feedback.rs::ReplicationFeedback
     title: Native payload codecs and bounded published-Commit acknowledgements
@@ -54,7 +57,7 @@ sources:
 - The PostgreSQL `pipeline.py` and `arrow.py` helpers have only unit-test importers. Public drivers do not expose native pipelines or Arrow COPY import through these helpers [^pg-pipeline-py] [^pg-arrow-py] [^pg-driver-py].
 - `test_postgres_driver.py` exercises the async driver with a SQLite-backed asyncpg pool double and the sync driver with psycopg pool mocks [^pg-driver-tests].
 - The title and body of [PR #104](https://github.com/cofin/vertebra/pull/104) describe a public-driver cutover absent from the merged source at `c8722c76`; the native PostgreSQL plan assigns that cutover to chapters `ch04`–`ch05` [^pg-driver-py].
-- Native Rust feedback primitives decode borrowed XLogData/keepalive payloads, encode status payloads, and compute bounded heartbeat intervals. `ReplicationFeedback` separates received, published, and acknowledged Commit positions, caps unacknowledged publications at 1024, and rejects invalid updates without mutation. `PostgresReplicationConnection::into_stream` composes them into a bounded single-generation Rust stream with explicit delivery publication and independent status writes [^pg-feedback] [^pg-stream].
+- Native Rust feedback primitives decode borrowed XLogData/keepalive payloads, encode status payloads, and compute bounded heartbeat intervals. `ReplicationFeedback` separates received, published, and acknowledged Commit positions, caps unacknowledged publications at 1024, and rejects invalid updates without mutation. `ReplicationSession` and `ReplicationSupervisor` (`connect_logical_verified`) provide bounded Rust streaming and identity-verified multi-generation reconnect supervision, while Python `AsyncPostgresReplication` (`ch02`) and `PostgresChangeSource` (`ch03`) are not yet exposed [^pg-feedback] [^pg-stream] [^pg-supervisor].
 <!-- truth: end -->
 
 ## Caller Guidance
@@ -68,7 +71,7 @@ sources:
 
 `ReplicationSession` owns a bounded socket pump and publication leases. Dropping a lease restores its record ahead of the FIFO; only publishing a Commit makes its exact end LSN acknowledgeable. Heartbeat writes continue under read backpressure. Explicit shutdown and cancellation fence outstanding leases; graceful shutdown uses one absolute deadline for final feedback, CopyDone and backend drain. Natural clean EOF permits already decoded records to drain and publish [^pg-stream].
 
-Verified reconnect supervision remains in `ch01`, and cancellation-safe Python replication handles remain in `ch02`. Feedback receipt alone never advances flush/apply positions. The standalone `ReplicationFeedback` accepts caller-supplied decoded Commit positions; the session supplies those boundaries from pgoutput, never server `wal_end` [^pg-feedback] [^pg-stream].
+`ReplicationSupervisor` and `connect_logical_verified` supervise multi-generation reconnect recovery from `acknowledged_lsn`, while cancellation-safe Python replication handles (`AsyncPostgresReplication`) remain in `ch02` and `PostgresChangeSource` remains in `ch03`. Feedback receipt alone never advances flush/apply positions. The standalone `ReplicationFeedback` accepts caller-supplied decoded Commit positions; the session supplies those boundaries from pgoutput, never server `wal_end` [^pg-feedback] [^pg-stream] [^pg-supervisor].
 
 Chapter `ch04` builds permanent native drivers and connects compiler, pipeline, Arrow, and event-hook seams. Chapter `ch05` switches public consumers, replaces legacy driver test doubles, removes psycopg/asyncpg dialer helpers, changes the queue dependency guard, and removes these split-state caveats. Runtime caveats for the completed native driver belong to chapter `ch09`.
 
@@ -84,3 +87,4 @@ Chapter `ch04` builds permanent native drivers and connects compiler, pipeline, 
 [^pg-feedback]: `src/rs/vertebra-postgres/src/replication/feedback.rs::ReplicationFeedback` — Native codecs, intervals, and bounded acknowledgement state.
 
 [^pg-stream]: `src/rs/vertebra-postgres/src/replication/stream.rs::ReplicationSession` — Bounded native session transport and explicit delivery publication.
+[^pg-supervisor]: `src/rs/vertebra-postgres/src/replication/supervisor.rs::ReplicationSupervisor` — Multi-generation verified reconnect supervisor and delivery leases.
