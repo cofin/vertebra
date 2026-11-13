@@ -1,5 +1,9 @@
 # Bundle Activity Log
 
+## [2026-11-13T16:02:30Z] archive | server-runtime-correctness
+
+- Archived `server-runtime-correctness` (`7` chapters, `26` tasks, `47143761..06ef86e9`) after verifying full mypy (`436` files), pure-Python doc postbuild/verifier lazy imports (`serializers/__init__.py`), and present-tense OKF knowledge chapters (`pyo3-ffi-and-batch-dispatch.md`, `asgi-and-wsgi-runners.md`, `tiered-rings-and-batch-bridge.md`, `worker-and-protocols.md`, `server-runtime-limitations.md`, `server-and-dispatch.md`, `product.md`).
+
 ## [2026-11-13T15:15:00Z] finish | server-runtime-correctness
 
 - Completed `server-runtime-correctness` (`state: completed`) at `92b84a09` across all `7` chapters (`26/26` tasks) on `feat/server-runtime-correctness`, delivering progressive Python/ASGI/RSGI/native response streaming ([#81](https://github.com/cofin/vertebra/issues/81)), fail-loud `WorkerStartupError` lifespan and `__rsgi_init__` startup with SHM exit `78` ([#84](https://github.com/cofin/vertebra/issues/84)), public `vertebra.supervisor` exports ([#83](https://github.com/cofin/vertebra/issues/83)), co-located and `--worker-only` `QueueService` lanes ([#85](https://github.com/cofin/vertebra/issues/85)), relocatable wheel-bundled `vertebra-server` binaries and `core-wheel-check` ([#82](https://github.com/cofin/vertebra/issues/82)), opt-in `StandaloneBuilder` `.agents/skills` staging ([#115](https://github.com/cofin/vertebra/issues/115)), shared `CompiledRouteBase` / `__vertebra_fastpath__` consolidation, and fork-safe `getrandom` UUID entropy.
