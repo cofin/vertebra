@@ -7,9 +7,9 @@ title: "Create live PGCOPY, VTBARROW, LISTEN/NOTIFY, pgvector, and PgBouncer sui
 description: "Add test_postgres_native_features_live.py covering binary COPY, Arrow SHM, notifications, pgvector, and PgBouncer transaction/statement modes."
 status: stable
 state: completed
-commit: 969540de
-last_verified_at: "2026-11-13T21:00:57Z"
-last_verified_commit: 969540de
+commit: 93e19a3f
+last_verified_at: "2026-11-13T21:42:30Z"
+last_verified_commit: 93e19a3f
 claimed_by: null
 claimed_at: null
 planning_quality: standard
@@ -52,7 +52,7 @@ Author `test_postgres_native_features_live.py` with `pgvector:0.8.1-pg18` and `p
 
 ## Contracts & Edge Cases
 
-- Verify `PGCOPY`, `VTBARROW` `ArrowCursor` + `load_from_arrow`, `LISTEN/NOTIFY`, `vector`/`halfvec`/`bit` round-trips, and `PoolerMode::{Transaction, Statement}` unnamed-statement execution + replication refusal.
+- Verify decoded binary `PGCOPY`, `VTBARROW` `ArrowCursor` + `load_from_arrow`, deterministic `LISTEN/NOTIFY` readiness, `vector`/`halfvec`/`bit` round-trips, and `PgBouncer` `transaction`/`statement` unnamed-statement execution plus `listen_notifications()`/`open_replication()`/`transaction()` refusals.
 
 ## Test Matrix
 

@@ -8,6 +8,8 @@ description: "Build SyncPostgreSQLDriver over SyncPostgresPool/SyncPostgresClien
 status: stable
 state: completed
 commit: bc86ed84
+last_verified_at: "2026-11-13T05:51:30Z"
+last_verified_commit: bc86ed84
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -63,7 +65,7 @@ uv run --no-sync pytest src/py/tests/unit/db/test_postgres_native_adapters.py -q
 
 ## Acceptance Criteria
 
-- [ ] `SyncPostgreSQLDriver` satisfies `SyncDatabaseDriver` with zero `psycopg` imports.
-- [ ] Zero regressions in `ch04-permanent-native-postgres-drivers` fast verification gate.
+- [x] `SyncPostgreSQLDriver` satisfies `SyncDatabaseDriver` with zero `psycopg` imports.
+- [x] Zero regressions in `ch04-permanent-native-postgres-drivers` fast verification gate.
 
 [^db-driver-base]: `src/py/vertebra/db/driver/__init__.py` — SyncDatabaseDriver contract.

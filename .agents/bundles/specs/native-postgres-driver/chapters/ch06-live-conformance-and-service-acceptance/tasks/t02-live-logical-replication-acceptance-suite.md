@@ -7,9 +7,9 @@ title: "Create live wal_level=logical replication acceptance suite"
 description: "Add test_postgres_replication_live.py covering PostgresChangeSource, unchanged TOAST, non-UTF-8 bytea, reconnect, and slot contention."
 status: stable
 state: completed
-commit: 969540de
-last_verified_at: "2026-11-13T21:00:57Z"
-last_verified_commit: 969540de
+commit: 93e19a3f
+last_verified_at: "2026-11-13T21:42:30Z"
+last_verified_commit: 93e19a3f
 claimed_by: null
 claimed_at: null
 planning_quality: standard
@@ -51,7 +51,7 @@ Author `test_postgres_replication_live.py` against a `wal_level=logical` Postgre
 
 ## Contracts & Edge Cases
 
-- Skip cleanly when `VERTEBRA_CONFORMANCE_DOCKER` is unset; assert live `PG_UNCHANGED_TOAST`, raw `bytea`, CAS checkpoint resume after backend termination, and `55006` slot contention.
+- Skip cleanly when `VERTEBRA_CONFORMANCE_DOCKER` is unset; assert live `PG_UNCHANGED_TOAST`, raw `bytea`, fresh `PostgresChangeSource` CAS checkpoint resume after `pg_terminate_backend`, and `"already active"` `OperationalError` / `55006` slot contention.
 
 ## Test Matrix
 

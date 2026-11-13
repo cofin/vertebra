@@ -8,6 +8,8 @@ description: "Build native AsyncPostgreSQLDriver over AsyncPostgresPool/AsyncPos
 status: stable
 state: completed
 commit: bc86ed84
+last_verified_at: "2026-11-13T05:51:30Z"
+last_verified_commit: bc86ed84
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -62,7 +64,7 @@ uv run --no-sync pytest src/py/tests/unit/db/test_postgres_native_adapters.py -q
 
 ## Acceptance Criteria
 
-- [ ] `AsyncPostgreSQLDriver` uses native Rust awaitables with zero thread offload.
-- [ ] Zero regressions in `ch04-permanent-native-postgres-drivers` fast verification gate.
+- [x] `AsyncPostgreSQLDriver` uses native Rust awaitables with zero thread offload.
+- [x] Zero regressions in `ch04-permanent-native-postgres-drivers` fast verification gate.
 
 [^pg-pyi]: `src/py/vertebra/_postgres.pyi` — AsyncPostgresPool and AsyncPostgresClient stubs.
