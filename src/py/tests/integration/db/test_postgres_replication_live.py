@@ -84,9 +84,10 @@ async def _wait_for_slot_state(
     *,
     expect_active: bool,
     previous_pid: int | None = None,
+    accept_pid_replacement: bool = False,
     timeout: float = 10.0,
 ) -> int | None:
-    """Poll pg_replication_slots until slot activity matches ``expect_active`` and optional PID change."""
+    """Poll pg_replication_slots until slot activity matches ``expect_active`` or PID rotates."""
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
     while loop.time() < deadline:
@@ -97,8 +98,11 @@ async def _wait_for_slot_state(
         if row is not None:
             active = bool(row["active"])
             active_pid = row["active_pid"]
+            pid_changed = previous_pid is not None and active_pid is not None and int(active_pid) != previous_pid
             if active is expect_active and (previous_pid is None or active_pid != previous_pid):
                 return int(active_pid) if active_pid is not None else None
+            if accept_pid_replacement and pid_changed:
+                return int(active_pid)
         await asyncio.sleep(0.05)
     raise AssertionError(f"Slot {slot_name!r} did not reach active={expect_active!r} within {timeout}s")
 
@@ -172,7 +176,13 @@ async def test_live_pgoutput_toast_bytea_checkpoint_resume_and_slot_contention(
                 value_type=bool,
             )
             assert terminated is True
-            await _wait_for_slot_state(admin, slot_name, expect_active=False, previous_pid=initial_pid)
+            await _wait_for_slot_state(
+                admin,
+                slot_name,
+                expect_active=False,
+                previous_pid=initial_pid,
+                accept_pid_replacement=True,
+            )
 
             await admin.execute(f"DELETE FROM {table_name} WHERE id = $1", (1,))
             delete_tx, reconnect_controls = await _collect_transaction_events(

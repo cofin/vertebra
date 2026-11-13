@@ -65,6 +65,7 @@ from vertebra.db.adapters.oracle import (
 )
 from vertebra.db.adapters.postgres import (
     AsyncPostgreSQLDriver,
+    PgJson,
     PostgreSQLConfig,
     SyncPostgreSQLDriver,
 )
@@ -288,6 +289,8 @@ class EngineConformanceSpec(FrozenBaseStruct, frozen=True, gc=False):
         """Encode `type_case.input_value` for engines requiring explicit `JSON` parameter descriptors."""
         if self.engine in {"bigquery", "spanner"} and type_case.comparison_kind == "json":
             return {"type": "JSON", "value": encode_json(type_case.input_value)}
+        if self.engine == "postgres" and type_case.comparison_kind == "json":
+            return PgJson(type_case.input_value)
         return type_case.input_value
 
     def typed_null_int64(self) -> Any:
@@ -1741,3 +1744,16 @@ def test_postgres_conformance_spec_and_version_matrix() -> None:
         "vtb_postgres_17_config",
         "vtb_postgres_18_config",
     ]
+
+
+@pytest.mark.parametrize(
+    "type_case",
+    [case for case in SCALAR_TYPE_CASES if case.comparison_kind == "json"],
+    ids=[case.name for case in SCALAR_TYPE_CASES if case.comparison_kind == "json"],
+)
+def test_postgres_conformance_wraps_json_cases_with_pg_json(type_case: ScalarTypeCase) -> None:
+    """PostgreSQL conformance binds dicts and heterogeneous JSON lists via ``PgJson``."""
+    pg_spec = next(spec for spec in ENGINE_SPECS if spec.engine == "postgres")
+    bound = pg_spec.bind_scalar_case(type_case)
+    assert isinstance(bound, PgJson)
+    assert bound.value == type_case.input_value

@@ -141,7 +141,7 @@ async def _wait_for_listener_ready(
     channel: str,
     *,
     timeout: float = 10.0,
-) -> None:
+) -> bytes:
     """Publish readiness probes deterministically until the active LISTEN stream consumes one."""
     probe_token = f"vtb_ready_{uuid.uuid4().hex[:8]}".encode("ascii")
 
@@ -159,11 +159,12 @@ async def _wait_for_listener_ready(
             if loop.time() >= deadline:
                 raise TimeoutError(f"Listener did not become ready on channel {channel!r}")
             await notify_source.publish(channel, probe_token)
-            done, _ = await asyncio.wait({wait_task}, timeout=0.05)
+            done, _ = await asyncio.wait({wait_task}, timeout=0.2)
             if done:
                 await wait_task
-                return
+                return probe_token
         await wait_task
+        return probe_token
     finally:
         if not wait_task.done():
             wait_task.cancel()
@@ -180,11 +181,14 @@ async def test_live_async_listen_notify_delivery(pgvector_config: PostgreSQLConf
         async with notify_source:
             await notify_source.subscribe([channel])
             listener_iter = notify_source.listen()
-            await _wait_for_listener_ready(notify_source, listener_iter, channel)
+            probe_token = await _wait_for_listener_ready(notify_source, listener_iter, channel)
             await notify_source.publish(channel, b"binary\x00frame")
 
             async def _pull_next() -> NotificationEvent:
-                return await anext(listener_iter)
+                while True:
+                    next_event = await anext(listener_iter)
+                    if next_event.payload != probe_token:
+                        return next_event
 
             event = await asyncio.wait_for(_pull_next(), timeout=10.0)
             assert event.channel == channel
