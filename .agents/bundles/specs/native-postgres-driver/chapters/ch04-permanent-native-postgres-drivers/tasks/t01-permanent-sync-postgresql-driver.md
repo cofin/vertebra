@@ -6,7 +6,8 @@ chapter_id: ch04-permanent-native-postgres-drivers
 title: "Implement permanent SyncPostgreSQLDriver in _sync.py and postgres_ports.py doubles"
 description: "Build SyncPostgreSQLDriver over SyncPostgresPool/SyncPostgresClient with queries, transactions/savepoints, RLS scopes, and binary COPY."
 status: stable
-state: pending
+state: completed
+commit: 50d7a1ef
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact

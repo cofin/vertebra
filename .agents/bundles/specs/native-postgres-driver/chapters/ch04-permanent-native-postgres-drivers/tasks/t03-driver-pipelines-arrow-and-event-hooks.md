@@ -6,7 +6,8 @@ chapter_id: ch04-permanent-native-postgres-drivers
 title: "Wire pipeline(), ArrowCursor/COPY import, and dedicated event hooks on both drivers"
 description: "Connect pipeline.py, arrow.py, listen_notifications, open_replication, and EventSessionRegistry close hooks in _sync.py and _async.py."
 status: stable
-state: pending
+state: completed
+commit: 50d7a1ef
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact

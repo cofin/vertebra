@@ -5,12 +5,12 @@ chapter_id: ch04-permanent-native-postgres-drivers
 title: "Chapter 04: Permanent Native Sync and Async PostgreSQL Drivers"
 description: "Build permanent SyncPostgreSQLDriver (_sync.py) and AsyncPostgreSQLDriver (_async.py) over vertebra._postgres pools, pipelines, Arrow, and event hooks."
 status: stable
-state: planned
+state: active
 planning_status: complete
 planning_quality: standard
 planning_degraded_reason: null
 plan_commit: 18baadcd
-updated_at: "2026-11-13T00:25:00Z"
+updated_at: "2026-11-13T05:35:00Z"
 generated:
   by: flow-plan
   at: "2026-11-13T00:25:00Z"
@@ -69,13 +69,13 @@ Public barrel activation and OKF/user docs follow in `ch05`, `ch08`, and `ch09`.
 
 ## 5. Implementation Plan
 
-- [ ] [t01-permanent-sync-postgresql-driver.md](tasks/t01-permanent-sync-postgresql-driver.md) — Build SyncPostgreSQLDriver over SyncPostgresPool/SyncPostgresClient with queries, transactions/savepoints, RLS scopes, and binary COPY.
-- [ ] [t02-permanent-async-postgresql-driver.md](tasks/t02-permanent-async-postgresql-driver.md) — Build native AsyncPostgreSQLDriver over AsyncPostgresPool/AsyncPostgresClient with shielded rollback and zero asyncio.to_thread.
-- [ ] [t03-driver-pipelines-arrow-and-event-hooks.md](tasks/t03-driver-pipelines-arrow-and-event-hooks.md) — Connect pipeline.py, arrow.py, listen_notifications, open_replication, and EventSessionRegistry close hooks in _sync.py and _async.py.
+- [x] [50d7a1ef] [t01-permanent-sync-postgresql-driver.md](tasks/t01-permanent-sync-postgresql-driver.md) — Build SyncPostgreSQLDriver over SyncPostgresPool/SyncPostgresClient with queries, transactions/savepoints, RLS scopes, and binary COPY.
+- [x] [50d7a1ef] [t02-permanent-async-postgresql-driver.md](tasks/t02-permanent-async-postgresql-driver.md) — Build native AsyncPostgreSQLDriver over AsyncPostgresPool/AsyncPostgresClient with shielded rollback and zero asyncio.to_thread.
+- [x] [50d7a1ef] [t03-driver-pipelines-arrow-and-event-hooks.md](tasks/t03-driver-pipelines-arrow-and-event-hooks.md) — Connect pipeline.py, arrow.py, listen_notifications, open_replication, and EventSessionRegistry close hooks in _sync.py and _async.py.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-Planned (`3` tasks). Offline `< 25s` unit + Ruff + Mypy gate over `postgres_ports.py` doubles.
+Completed (`3/3` tasks at `50d7a1ef`). Offline `< 25s` unit + Ruff + Mypy gate over `postgres_ports.py` doubles.
 
 ```bash
 uv run --no-sync pytest src/py/tests/unit/db/test_postgres_native_adapters.py src/py/tests/unit/db/test_postgres_native_adapter_pipeline.py src/py/tests/unit/db/test_postgres_native_adapter_arrow.py src/py/tests/unit/db/test_postgres_event_hooks.py -q && uv run --no-sync ruff check src/py/vertebra/db/adapters/postgres src/py/tests/unit/db && uv run --no-sync mypy src/py/vertebra/db/adapters/postgres

@@ -5,7 +5,7 @@ chapter_id: ch05-atomic-cutover-and-legacy-removal
 title: "Chapter 05: Atomic Consumer Cutover, Legacy Removal, and GCP Dialer Hardening"
 description: "Switch SQLSpec, SQLAlchemy, driver.py, embeddings, queues, and Cloud SQL/AlloyDB dialers atomically to vertebra._postgres with zero psycopg/asyncpg/asyncmy code."
 status: stable
-state: planned
+state: active
 planning_status: complete
 planning_quality: standard
 planning_degraded_reason: null

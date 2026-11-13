@@ -6,7 +6,8 @@ chapter_id: ch04-permanent-native-postgres-drivers
 title: "Implement permanent AsyncPostgreSQLDriver in _async.py"
 description: "Build native AsyncPostgreSQLDriver over AsyncPostgresPool/AsyncPostgresClient with shielded rollback and zero asyncio.to_thread."
 status: stable
-state: pending
+state: completed
+commit: 50d7a1ef
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
