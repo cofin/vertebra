@@ -126,6 +126,33 @@ except PreconditionError:
 
 The second conditional write fails because the first one changed the ETag. On GCS, `if_match` also accepts a numeric object generation from `ObjectMeta.version`.
 
+## Content integrity and verified reads
+
+`put()`, `put_stream()`, `put_multipart()`, `put_file()`, and `open_writer()` accept `checksum=True` to compute SHA-256, Castagnoli CRC32C, and MD5 lowercase hexadecimal receipts in `PutResult` (`PutResult.sha256`, `PutResult.crc32c`, `PutResult.md5`). Supply `expected_sha256`, `expected_crc32c`, or `expected_md5` on writes to verify payloads prior to commit; mismatches raise `vertebra.typing.IntegrityError` (distinct from `vertebra.db.IntegrityError`) and abort multipart uploads without overwriting existing destinations:
+
+```python
+import hashlib
+from vertebra.storage import MemoryConfig, SyncObjectStore
+from vertebra.typing import IntegrityError
+
+store = SyncObjectStore(MemoryConfig(namespace="integrity"))
+payload = b"verified-payload"
+digest = hashlib.sha256(payload).hexdigest()
+
+result = store.put("artifacts/data.bin", payload, checksum=True)
+assert result.sha256 is not None and result.crc32c is not None and result.md5 is not None
+
+store.put_stream("artifacts/stream.bin", [b"verified-", b"payload"], expected_sha256=digest)
+data = store.get("artifacts/stream.bin", expected_sha256=digest)
+
+try:
+    store.get("artifacts/stream.bin", expected_sha256="0" * 64)
+except IntegrityError:
+    print("checksum mismatch detected")
+```
+
+Reads (`get()`, `get_file()`, `get_stream()`, and `open_reader()`) accept `expected_sha256`. Malformed hex strings fail upfront with `ValueError` before I/O starts. Streaming reads (`get_stream()` and `open_reader()`) verify incrementally and raise `IntegrityError` on the final EOF poll if the downloaded stream does not match `expected_sha256`; `get_file()` removes the temporary `.part` file on mismatch before renaming.
+
 ## Files and bulk transfers
 
 `put_file(key, path)` uploads a local file and `get_file(key, path)` downloads one. Files larger than 8 MiB stream through multipart parts without loading the whole file. `get_file` writes to a temporary sibling file and renames it into place after the last byte arrives, so readers never see a partial file; parent directories are created.

@@ -52,6 +52,15 @@ First-party framework extensions connecting Vertebra's native HTTP/IPC runtime t
 ::: vertebra.extensions.alchemy.storage.ObjectStoreBackend
     options:
       heading_level: 3
+      members:
+        - save_object
+        - save_object_async
+        - save_arrow
+        - save_arrow_async
+        - get_content
+        - get_content_async
+        - delete_object
+        - delete_object_async
 
 ## Oracle APEX Gateway & Island Bridge (`vertebra.extensions.apex`)
 

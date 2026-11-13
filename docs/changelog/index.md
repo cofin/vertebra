@@ -25,6 +25,10 @@ Release introducing shared-memory vector embeddings, zero-copy PEP 3118 vector v
   - `vtb ai models list|pull|stage|warm` and `vtb ai mcp serve|bridge` in `vertebra.cli.ai` ([PR #64](https://github.com/cofin/vertebra/pull/64)).
   - Co-located `WorkerRunner` execution in `vtb run` and `vtb dev` (`--with-workers`, `--queues`, `--lane-concurrency`, `[tool.vertebra.workers]`) and `--oneshot` / `--payload` in `vtb workers run` ([PR #64](https://github.com/cofin/vertebra/pull/64)).
   - Automatic default `AgentInterface` synthesis on `AgentCard` and dynamic request-origin URL resolution (`Forwarded`, `X-Forwarded-Proto`, `X-Forwarded-Host`, `Host` with `Vary` headers) in `A2AHttpHandler` and `A2AService` ([PR #64](https://github.com/cofin/vertebra/pull/64)).
+- **Object Storage Content Integrity, Streaming Arrow & Wheel Isolation (`vertebra-storage`, `vertebra.storage`, `vertebra.extensions`)**:
+  - `PutConditionalOptions`, `PutResult`, and `ObjectMeta` SHA-256, Castagnoli CRC32C, and MD5 receipts (`checksum=True`), write-time digest verification (`expected_sha256`, `expected_crc32c`, `expected_md5`), verified reads (`get`, `get_file`, `get_stream`, `open_reader` with `expected_sha256`), and `vertebra.typing.IntegrityError` (`StorageError::Integrity`).
+  - SQLSpec `ObjectStoreBackend.supports_direct_arrow_write`, normalized `format_hint` / `compression` / `write_options` Arrow streaming (`write_arrow_*`, `write_arrow_cursor_*`), Advanced Alchemy `save_object` / `save_object_async` integrity arguments plus `save_arrow` / `save_arrow_async`, and `DjangoStorage` `content.{sha256,crc32c,md5}` digest forwarding.
+  - Companion wheel/sdist verifier `tools/scripts/verify_storage_wheel.py` (`{storage,bigquery,spanner,bundler}-wheel-check` `Makefile` targets, `release.yaml` non-leakage checks) and Criterion `put_checksum` micro-benchmark (`put_memory_default`, `put_memory_checksum`).
 
 ### Changed
 
@@ -51,6 +55,7 @@ Release introducing shared-memory vector embeddings, zero-copy PEP 3118 vector v
 - `EmbeddingBroker` runs the configured model in the free-threaded sidecar via `BackendFactory` or `backend_fn`, and `FastEmbedder` defers `TextEmbedding` initialization to worker execution ([PR #75](https://github.com/cofin/vertebra/pull/75), [PR #76](https://github.com/cofin/vertebra/pull/76)).
 - `EventLoopPool.stop` delivers task cancellation, runs `shutdown_asyncgens`, and closes loops after shard threads exit; buffered sharded ASGI mounts honor `VERTEBRA_ASGI_BATCH_TIMEOUT` (default `30s`, `0`/`none` disables) and return `504 Gateway Timeout` ([PR #75](https://github.com/cofin/vertebra/pull/75), [PR #76](https://github.com/cofin/vertebra/pull/76)).
 - Cancelled async Rust database tasks abort cleanly via `AbortHandle`, background panics surface as `TaskPanicError`, `gcloud` CLI token refreshes run non-blocking with `30s` timeouts, BigQuery REST queries with warnings succeed, BigQuery job/table URLs percent-encode path segments, and optional native wheel manifests (`vertebra-bundler`, `vertebra-storage`, `vertebra-bigquery`, `vertebra-spanner`) package isolated module files ([PR #77](https://github.com/cofin/vertebra/pull/77)).
+- Create-only `copy(..., overwrite=False)` and `rename(..., overwrite=False)` enforce destination non-existence on S3/B2 via conditional multipart completion and on R2 via `cf-copy-destination-if-none-match: *`, and `write_batches_sync` / `write_batches_async` abort active multipart uploads cleanly on mid-stream `RecordBatchReader` errors.
 
 ## 0.2.0
 

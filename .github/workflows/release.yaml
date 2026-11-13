@@ -232,10 +232,12 @@ jobs:
           pg_mod = importlib.import_module("vertebra._postgres")
           assert pg_mod.SyncPostgresClient(user="u", database="d").closed is True
           assert pg_mod.AsyncPostgresClient(user="u", database="d").parameters == {}
+          assert not hasattr(_vertebra, "Bundler")
           assert not hasattr(_vertebra, "SyncBigQueryClient")
           assert not hasattr(_vertebra, "SyncDuckDBClient")
           assert not hasattr(_vertebra, "SyncMSSQLClient")
           assert not hasattr(_vertebra, "SyncMySQLClient")
+          assert not hasattr(_vertebra, "SyncObjectStore")
           assert not hasattr(_vertebra, "SyncOracleClient")
           assert not hasattr(_vertebra, "SyncPostgresClient")
           assert not hasattr(_vertebra, "SyncSpannerClient")

@@ -85,6 +85,9 @@ sources:
 - id: tests-storage-integration
   resource: src/py/tests/integration/storage/conftest.py
   title: Emulator integration fixtures
+- id: verify-storage-wheel
+  resource: tools/scripts/verify_storage_wheel.py::main
+  title: Companion wheel and sdist isolation verifier for storage, bigquery, spanner, and bundler
 ---
 
 # Object Storage, Streaming & Presigning
@@ -110,6 +113,9 @@ sources:
 - Parquet batch readers open with `read_ahead=0` and `pre_buffer=False`; whole-table reads default to `pre_buffer=True`; `write_parquet` exposes `use_dictionary`, `use_byte_stream_split`, and `options` forwarded to `ParquetWriter` [^py-arrow] [^py-store].
 - `read_arrow_shm` wraps a shared-memory Arrow IPC or `VTBARROW` region in a zero-copy `ArrowCursor` that anchors the region views [^db-arrow].
 - Framework adapters accept only an explicit store, `StorageConfig`, or URI; `vertebra.extensions.django` exports Django integration types only, so stores and configs import from `vertebra.storage` [^ext-alchemy-storage] [^ext-sqlspec-storage] [^ext-django-storage].
+- Uploads (`put*`, `multipart`, `AsyncWritableFile.aclose()`) populate `PutResult` (`ObjectMeta` includes optional `sha256`, `crc32c`, `md5`), `checksum=True` hashes payloads locally, and reads (`get*`, `get_stream`, `open_reader`, `get_file`) enforce `expected_*` digests via `VerifyingStream`, raising `vertebra.typing.IntegrityError` (`OSError`) on mismatch [^storage-lib] [^py-typing] [^py-store] [^storage-store].
+- Advanced Alchemy adds `save_arrow` / `save_arrow_async` and forwards integrity options on `save_object*`, SQLSpec sets `supports_direct_arrow_write = True` and exposes `write_arrow_sync` / `write_arrow_async`, and `DjangoStorage` forwards `.sha256` / `.crc32c` / `.md5` digests [^ext-alchemy-storage] [^ext-sqlspec-storage] [^ext-django-storage].
+- `verify_storage_wheel.py` and `make {storage,bigquery,spanner,bundler}-wheel-check` verify wheel and sdist isolation boundaries across companion packages [^verify-storage-wheel].
 <!-- truth: end -->
 
 Known caveats (R2 custom domains, non-atomic cloud rename, unsupported provider conditions, `fsync`, cancellation windows, request timeouts) live in [Object Storage Implementation Limitations](object-storage-limitations.md).
@@ -138,11 +144,11 @@ Batch codecs drain each encoded chunk into native `put_stream` before advancing 
 
 `parse_byte_range` resolves one closed, open-ended, or suffix range and raises `RangeNotSatisfiableError` for malformed or unsatisfiable input; `StreamingStorageResponse.from_sync_store` / `from_async_store` perform one `head` and produce `200`, `206`, or an empty `416` with `Content-Range: bytes */<size>` [^py-streaming]. Async stores must await `to_async_fastpath_tuple()`; `to_fastpath_tuple()` rejects async stores [^py-streaming].
 
-`ObjectStoreLitestarStore` stores a versioned `VTBSTORE\x01` MessagePack envelope with the expiry deadline so TTL survives reconstruction, and `ObjectStoreFileSystemAdapter` confines static GET/HEAD to a base path [^ext-litestar-store]. Advanced Alchemy `ObjectStoreBackend` and `register_storage_backend` forward `signing` and `token_cache` only when building from a config or URI and reject them with a prebuilt store [^ext-alchemy-storage]. SQLSpec `ObjectStoreBackend` honors an explicit nonempty URI, including `"memory://"`, with a prebuilt store; an omitted or blank URI uses that store's URL. It implements the `*_sync` / `*_async` protocol and delegates `read_arrow_*` to whole-table reads and `stream_arrow_*` to batch readers; like the Alchemy backend, it forwards `signing` and `token_cache` only when building from a config or URI, raises `ImproperConfigurationError` when they accompany a prebuilt store, and lets native signing errors propagate unchanged [^ext-sqlspec-storage]. `DjangoStorage` subclasses Django `Storage`, deconstructs for migrations, and returns `File` handles over `SyncReadableFile` [^ext-django-storage].
+`ObjectStoreLitestarStore` stores a versioned `VTBSTORE\x01` MessagePack envelope with the expiry deadline so TTL survives reconstruction, and `ObjectStoreFileSystemAdapter` confines static GET/HEAD to a base path [^ext-litestar-store]. Advanced Alchemy `ObjectStoreBackend` and `register_storage_backend` forward `signing` and `token_cache` only when building from a config or URI, reject them with a prebuilt store, forward integrity kwargs on `save_object*`, and add `save_arrow` / `save_arrow_async` [^ext-alchemy-storage]. SQLSpec `ObjectStoreBackend` honors an explicit nonempty URI, including `"memory://"`, with a prebuilt store; an omitted or blank URI uses that store's URL. It sets `supports_direct_arrow_write = True`, implements the `*_sync` / `*_async` protocol (including `write_arrow_sync` / `write_arrow_async`), delegates `read_arrow_*` to whole-table reads and `stream_arrow_*` to batch readers, forwards `signing` and `token_cache` only when building from a config or URI (raising `ImproperConfigurationError` when they accompany a prebuilt store), and lets native signing errors propagate unchanged [^ext-sqlspec-storage]. `DjangoStorage` subclasses Django `Storage`, deconstructs for migrations, forwards `.sha256` / `.crc32c` / `.md5` digests, and returns `File` handles over `SyncReadableFile` [^ext-django-storage].
 
 ## Tests
 
-Rust engine, streaming, and signing tests run in `storage_engine_tests.rs`; Python contracts live under `src/py/tests/unit/storage/`; emulator fixtures for S3, Azure, GCS, and R2 live in the integration `conftest.py` [^tests-storage-engine] [^tests-storage-unit] [^tests-storage-integration].
+Rust engine, streaming, and signing tests run in `storage_engine_tests.rs`; Python contracts live under `src/py/tests/unit/storage/`; emulator fixtures for S3, Azure, GCS, and R2 live in the integration `conftest.py`; companion wheel and sdist isolation is checked by `verify_storage_wheel.py` and `make {storage,bigquery,spanner,bundler}-wheel-check` [^tests-storage-engine] [^tests-storage-unit] [^tests-storage-integration] [^verify-storage-wheel].
 
 [^core-gcp-auth]: `src/rs/vertebra-core/src/gcp_auth.rs` — Shared Rust GCP OAuth2 token cache and capsule name.
 [^py-gcp-auth]: `src/rs/vertebra-py/src/gcp_auth.rs` — PyO3 GCP token cache bindings in `vertebra._vertebra`.
@@ -166,3 +172,4 @@ Rust engine, streaming, and signing tests run in `storage_engine_tests.rs`; Pyth
 [^tests-storage-engine]: `src/rs/vertebra-storage/tests/storage_engine_tests.rs` — Rust integration tests for `vertebra-storage`.
 [^tests-storage-unit]: `src/py/tests/unit/storage/test_storage_store.py` — Python store, range, and response contract tests.
 [^tests-storage-integration]: `src/py/tests/integration/storage/conftest.py` — Emulator integration fixtures.
+[^verify-storage-wheel]: `tools/scripts/verify_storage_wheel.py::main` — Companion wheel and sdist isolation verifier for `storage`, `bigquery`, `spanner`, and `bundler`.

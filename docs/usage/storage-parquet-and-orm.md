@@ -43,7 +43,14 @@ backend.save_object(contract, b"%PDF-1.4...")
 print(contract.size)
 ```
 
-Output: `11`. Saves use native `put`, `put_file`, or streaming `put_stream`, and set the file's size and ETag from the result.
+Output: `11`. Saves use native `put`, `put_file`, or streaming `put_stream`, and set the file's size and ETag from the result. Both `save_object` and `save_object_async` also forward `checksum`, `expected_sha256`, `expected_crc32c`, and `expected_md5`. Use `save_arrow` and `save_arrow_async` to stream Arrow Tables, RecordBatches, or batch iterators directly through `write_batches_sync` / `write_batches_async` and receive the resulting `PutResult`:
+
+```python
+import pyarrow as pa
+
+res = backend.save_arrow("datasets/events.parquet", pa.table({"id": [1, 2]}), checksum=True)
+print(res.sha256)
+```
 
 To sign attachment URLs or share a GCS token cache, pass a configuration instead of a built store and forward `signing` and `token_cache`:
 
@@ -78,7 +85,9 @@ lake.write_arrow_sync("daily.parquet", pa.table({"events": [120, 98]}))
 print(lake.read_arrow_sync("daily.parquet").num_rows)
 ```
 
-Output: `2`. `base_path` prefixes every key. `read_arrow_*` returns a complete Table and defaults to `pre_buffer=True`; `stream_arrow_sync` and `stream_arrow_async` yield batches on demand across every object matching a pattern.
+Output: `2`. `base_path` prefixes every key. `ObjectStoreBackend` declares `supports_direct_arrow_write = True` and exposes `write_arrow_sync`, `write_arrow_async`, `write_arrow_cursor_sync`, and `write_arrow_cursor_async`, normalizing `format_hint`, `compression`, `write_options`, and `checksum` / `expected_*` integrity parameters while aborting multipart uploads on mid-stream `RecordBatchReader` errors. `read_arrow_*` returns a complete Table and defaults to `pre_buffer=True`; `stream_arrow_sync` and `stream_arrow_async` yield batches on demand across every object matching a pattern, and `read_bytes_*` / `write_bytes_*` / `put_stream_*` forward integrity options. Upstream `sqlspec` `<= 0.71.1` `SyncStoragePipeline.write_arrow` / `AsyncStoragePipeline.write_arrow` still materialize Arrow bytes before dispatching to backends; call `backend.write_arrow_*` directly for bounded-memory streaming until upstream SQLSpec dispatches on `supports_direct_arrow_write`.
+
+In Django applications, `DjangoStorage` automatically forwards optional `.sha256`, `.crc32c`, and `.md5` attributes attached to uploaded `ContentFile` / `File` instances through `save`, `asave`, and `_save`, surfacing `vertebra.typing.IntegrityError` on mismatch.
 
 The constructor also accepts a URI or `StorageConfig` with `signing=` and `token_cache=`, so SQLSpec exports to GCS can share the token cache used by your other stores:
 
