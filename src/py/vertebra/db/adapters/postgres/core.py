@@ -4,9 +4,14 @@ from __future__ import annotations
 
 import contextlib
 import struct
-from collections.abc import Buffer, Sequence
+from collections.abc import Buffer, Mapping, Sequence
 from typing import Any
 
+from vertebra.db.adapters.postgres.binds import (
+    CompiledPostgresBinds,
+    compile_postgres_binds,
+    normalize_postgres_parameters,
+)
 from vertebra.db.rls import TenantPredicate, TenantScopeConfig
 from vertebra.utils.module_loader import import_optional
 from vertebra.utils.serializers import encode_json_bytes
@@ -14,9 +19,11 @@ from vertebra.utils.serializers import encode_json_bytes
 __all__ = (
     "PGCOPY_BINARY_SIGNATURE",
     "PostgreSQLCore",
+    "compile_pg_binds",
     "decode_pgcopy_rows",
     "encode_pg_jsonb",
     "encode_pgcopy_rows",
+    "normalize_pg_parameters",
     "strip_pg_jsonb_header",
 )
 
@@ -202,8 +209,23 @@ class PostgreSQLCore:
         msg = "Unexpected EOF before PGCOPY trailer"
         raise ValueError(msg)
 
+    @staticmethod
+    def compile_binds(
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+    ) -> CompiledPostgresBinds:
+        """Compile PostgreSQL `%s`, `%(name)s`, or `$N` placeholders and normalize binds."""
+        return compile_postgres_binds(sql, parameters)
+
+    @staticmethod
+    def normalize_parameters(parameters: Sequence[Any] | None) -> tuple[Any, ...]:
+        """Copy mutable parameter buffers and FFI views into immutable owned values."""
+        return normalize_postgres_parameters(parameters)
+
 
 strip_pg_jsonb_header = PostgreSQLCore.strip_jsonb_header
 encode_pg_jsonb = PostgreSQLCore.encode_jsonb
 encode_pgcopy_rows = PostgreSQLCore.encode_pgcopy_rows
 decode_pgcopy_rows = PostgreSQLCore.decode_pgcopy_rows
+compile_pg_binds = PostgreSQLCore.compile_binds
+normalize_pg_parameters = PostgreSQLCore.normalize_parameters
