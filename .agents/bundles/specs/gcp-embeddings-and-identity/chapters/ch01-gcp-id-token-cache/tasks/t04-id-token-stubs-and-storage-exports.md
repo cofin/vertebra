@@ -6,7 +6,13 @@ chapter_id: ch01-gcp-id-token-cache
 title: "Add ID Token Stubs, Storage Re-Exports, and GCSConfig ADC Cleanup"
 description: "Declare GcpIdTokenSnapshot, SyncGcpIdTokenCache, and AsyncGcpIdTokenCache in _vertebra.pyi, re-export them from vertebra.storage, and delete manual metadata-server heuristics in GCSConfig."
 status: stable
-state: pending
+state: completed
+commit: a601dee4
+last_verified_commit: a601dee4
+last_verified_at: "2026-11-13T04:49:30Z"
+verification_evidence: "stubtest vertebra._vertebra + ruff + mypy + pytest (19 passed, 2 skipped)"
+claimed_by: null
+claimed_at: null
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -76,8 +82,8 @@ uv run --no-sync python -m mypy.stubtest vertebra._vertebra && uv run --no-sync 
 
 ## Acceptance Criteria
 
-- [ ] `mypy.stubtest vertebra._vertebra` exits `0`, `vertebra.storage` re-exports all three ID token classes, and `GCSConfig` uses canonical core ADC order (`R3`, `R4`).
-- [ ] Zero regressions in the chapter's fast verification gate.
+- [x] `mypy.stubtest vertebra._vertebra` exits `0`, `vertebra.storage` re-exports all three ID token classes, and `GCSConfig` uses canonical core ADC order (`R3`, `R4`).
+- [x] Zero regressions in the chapter's fast verification gate.
 
 [^py-stub]: `src/py/vertebra/_vertebra.pyi` — Native type stub definitions checked by `mypy.stubtest`.
 [^py-gcs-config]: `src/py/vertebra/storage/_store.py::GCSConfig` — `GCSConfig.to_token_cache_options` and GCP cache imports.

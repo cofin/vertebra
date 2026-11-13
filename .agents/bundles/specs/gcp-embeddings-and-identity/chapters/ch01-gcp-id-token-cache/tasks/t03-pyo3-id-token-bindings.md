@@ -6,7 +6,13 @@ chapter_id: ch01-gcp-id-token-cache
 title: "Add PyO3 SyncGcpIdTokenCache, AsyncGcpIdTokenCache, and GcpIdTokenSnapshot Bindings"
 description: "Expose detached-GIL SyncGcpIdTokenCache, AsyncGcpIdTokenCache, and GcpIdTokenSnapshot classes on vertebra._vertebra."
 status: stable
-state: pending
+state: completed
+commit: a601dee4
+last_verified_commit: a601dee4
+last_verified_at: "2026-11-13T04:49:30Z"
+verification_evidence: "maturin develop + stubtest vertebra._vertebra + pytest (19 passed, 2 skipped)"
+claimed_by: null
+claimed_at: null
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -74,8 +80,8 @@ uv run --no-sync maturin develop --uv && uv run --no-sync pytest src/py/tests/un
 
 ## Acceptance Criteria
 
-- [ ] `GcpIdTokenSnapshot`, `SyncGcpIdTokenCache`, and `AsyncGcpIdTokenCache` operate under `gil_used = false` with detached-GIL refreshes and exact `ValueError` / `GoogleCloudAuthError` semantics (`R3`).
-- [ ] Zero regressions in `test_gcs_token_refresh.py`.
+- [x] `GcpIdTokenSnapshot`, `SyncGcpIdTokenCache`, and `AsyncGcpIdTokenCache` operate under `gil_used = false` with detached-GIL refreshes and exact `ValueError` / `GoogleCloudAuthError` semantics (`R3`).
+- [x] Zero regressions in `test_gcs_token_refresh.py`.
 
 [^py-gcp-auth]: `src/rs/vertebra-py/src/gcp_auth.rs::PyAsyncGcpTokenCache` — Sibling PyO3 access-token cache binding pattern and detached-GIL execution.
 [^py-lib]: `src/rs/vertebra-py/src/lib.rs` — `vertebra._vertebra` module registration with `gil_used = false`.

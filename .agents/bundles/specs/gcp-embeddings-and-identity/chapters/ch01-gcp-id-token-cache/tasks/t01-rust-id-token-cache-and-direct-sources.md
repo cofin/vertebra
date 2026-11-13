@@ -6,7 +6,13 @@ chapter_id: ch01-gcp-id-token-cache
 title: "Add Rust GcpIdTokenCache with Service-Account and Metadata-Server Minting"
 description: "Create vertebra-core::gcp_identity with per-audience single-flight caching, JWT aud/exp validation, bounded eviction, and service-account plus metadata-server ID token exchange."
 status: stable
-state: pending
+state: completed
+commit: a601dee4
+last_verified_commit: a601dee4
+last_verified_at: "2026-11-13T04:49:30Z"
+verification_evidence: "cargo test gcp_auth:: (13 passed) + clippy + stubtest + pytest (19 passed, 2 skipped)"
+claimed_by: null
+claimed_at: null
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -71,8 +77,8 @@ cargo test --manifest-path src/rs/Cargo.toml -p vertebra-core --test it gcp_auth
 
 ## Acceptance Criteria
 
-- [ ] `GcpIdTokenCache` mints, validates, and caches per-audience tokens for `ServiceAccount` and `MetadataServer` sources with single-flight concurrency and bounded eviction (`R1`, `R2`).
-- [ ] Zero regressions in `gcp_auth` integration tests and Clippy.
+- [x] `GcpIdTokenCache` mints, validates, and caches per-audience tokens for `ServiceAccount` and `MetadataServer` sources with single-flight concurrency and bounded eviction (`R1`, `R2`).
+- [x] Zero regressions in `gcp_auth` integration tests and Clippy.
 
 [^core-gcp-auth]: `src/rs/vertebra-core/src/gcp_auth.rs::GcpTokenCache` — Credential resolution, RSA signing helpers, and `reqwest` HTTP clients.
 [^core-auth-tests]: `src/rs/vertebra-core/tests/it/gcp_auth.rs` — Loopback token/metadata server test harness.

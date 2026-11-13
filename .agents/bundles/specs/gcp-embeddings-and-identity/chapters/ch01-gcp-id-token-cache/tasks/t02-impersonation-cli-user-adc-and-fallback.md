@@ -6,7 +6,13 @@ chapter_id: ch01-gcp-id-token-cache
 title: "Add Impersonation, CLI, and User ADC ID Tokens and Finalize ADC Fallback"
 description: "Support IAM generateIdToken impersonation, gcloud print-identity-token, and authorized_user refresh-token ID minting, reject static tokens, and end ambient ADC discovery with MetadataServer."
 status: stable
-state: pending
+state: completed
+commit: a601dee4
+last_verified_commit: a601dee4
+last_verified_at: "2026-11-13T04:49:30Z"
+verification_evidence: "cargo test gcp_auth:: (13 passed) + clippy + stubtest + pytest (19 passed, 2 skipped)"
+claimed_by: null
+claimed_at: null
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -73,8 +79,8 @@ cargo test --manifest-path src/rs/Cargo.toml -p vertebra-core --test it gcp_auth
 
 ## Acceptance Criteria
 
-- [ ] Impersonation, `gcloud`, and `authorized_user` ADC (`client_id` audience) mint valid cached ID tokens, static sources fail at construction, and ambient ADC ends cleanly at `MetadataServer` (`R1`, `R4`).
-- [ ] Zero regressions in `vertebra-core` and `vertebra-storage` Clippy/tests.
+- [x] Impersonation, `gcloud`, and `authorized_user` ADC (`client_id` audience) mint valid cached ID tokens, static sources fail at construction, and ambient ADC ends cleanly at `MetadataServer` (`R1`, `R4`).
+- [x] Zero regressions in `vertebra-core` and `vertebra-storage` Clippy/tests.
 
 [^core-auth-source]: `src/rs/vertebra-core/src/gcp_auth.rs::GcpAuthSource` — `ImpersonatedServiceAccount`, `GcloudCli`, `AuthorizedUser`, `Static`, and `from_options` precedence.
 [^storage-signing]: `src/rs/vertebra-storage/src/signing.rs` — Duplicate metadata-server token-cache fallback in GCS signing.

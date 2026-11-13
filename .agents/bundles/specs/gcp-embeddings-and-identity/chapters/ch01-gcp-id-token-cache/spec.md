@@ -5,7 +5,7 @@ chapter_id: ch01-gcp-id-token-cache
 title: "Chapter 01: Audience-Bound GCP ID Token Cache and Python Surface"
 description: "Implements per-audience single-flight OIDC ID token minting across all GCP ADC credential sources in vertebra-core, standardizes ambient ADC metadata fallback, and exposes SyncGcpIdTokenCache and AsyncGcpIdTokenCache in vertebra._vertebra and vertebra.storage."
 status: stable
-state: planned
+state: active
 planning_status: complete
 planning_quality: standard
 planning_degraded_reason: null
@@ -166,13 +166,14 @@ User-facing credentials documentation and OKF updates for `GcpIdTokenCache` and 
 
 ## 5. Implementation Plan
 
-- [ ] [t01-rust-id-token-cache-and-direct-sources.md](tasks/t01-rust-id-token-cache-and-direct-sources.md) — Add `gcp_identity.rs` with per-audience single-flight `GcpIdTokenCache`, JWT claim validation, and service-account + metadata-server minting.
-- [ ] [t02-impersonation-cli-user-adc-and-fallback.md](tasks/t02-impersonation-cli-user-adc-and-fallback.md) — Add IAM `generateIdToken`, `gcloud`, and `authorized_user` ADC refresh-token ID minting, reject static sources, and finalize ambient ADC metadata fallback.
-- [ ] [t03-pyo3-id-token-bindings.md](tasks/t03-pyo3-id-token-bindings.md) — Expose `GcpIdTokenSnapshot`, `SyncGcpIdTokenCache`, and `AsyncGcpIdTokenCache` on `vertebra._vertebra` with detached-GIL refreshes.
-- [ ] [t04-id-token-stubs-and-storage-exports.md](tasks/t04-id-token-stubs-and-storage-exports.md) — Add `_vertebra.pyi` stubs, re-export ID token classes from `vertebra.storage`, and remove manual metadata-server heuristics from `GCSConfig`.
+- [x] [a601dee4] [t01-rust-id-token-cache-and-direct-sources.md](tasks/t01-rust-id-token-cache-and-direct-sources.md) — Add `gcp_identity.rs` with per-audience single-flight `GcpIdTokenCache`, JWT claim validation, and service-account + metadata-server minting.
+- [x] [a601dee4] [t02-impersonation-cli-user-adc-and-fallback.md](tasks/t02-impersonation-cli-user-adc-and-fallback.md) — Add IAM `generateIdToken`, `gcloud`, and `authorized_user` ADC refresh-token ID minting, reject static sources, and finalize ambient ADC metadata fallback.
+- [x] [a601dee4] [t03-pyo3-id-token-bindings.md](tasks/t03-pyo3-id-token-bindings.md) — Expose `GcpIdTokenSnapshot`, `SyncGcpIdTokenCache`, and `AsyncGcpIdTokenCache` on `vertebra._vertebra` with detached-GIL refreshes.
+- [x] [a601dee4] [t04-id-token-stubs-and-storage-exports.md](tasks/t04-id-token-stubs-and-storage-exports.md) — Add `_vertebra.pyi` stubs, re-export ID token classes from `vertebra.storage`, and remove manual metadata-server heuristics from `GCSConfig`.
 
 ## 6. Current State & Remaining Plan Snapshot
 
+- **Implemented (`4/4` tasks at `a601dee4`)**: `GcpIdTokenCache`, canonical ADC metadata fallback, `SyncGcpIdTokenCache` / `AsyncGcpIdTokenCache` / `GcpIdTokenSnapshot` PyO3 bindings, `_vertebra.pyi` stubs, and `vertebra.storage` re-exports are verified (`13` Rust `gcp_auth::` tests, `19` Python tests + `2` duckdb-skipped, `clippy`, `stubtest`, `ruff`, `mypy` clean).
 - **Fast Chapter Gate (`< 40s`)**:
   `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-core --test it gcp_auth:: && cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-core -p vertebra-storage -p vertebra-py --features vertebra-core/gcp-auth -- -D warnings && uv run --no-sync maturin develop --uv && uv run --no-sync python -m mypy.stubtest vertebra._vertebra && uv run --no-sync ruff check src/py/vertebra/storage && uv run --no-sync mypy src/py/vertebra/storage && uv run --no-sync pytest src/py/tests/unit/storage/test_gcs_token_refresh.py -q`
 
