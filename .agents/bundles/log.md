@@ -1,5 +1,10 @@
 # Bundle Activity Log
 
+## [2026-11-13T05:08:50Z] chapter-complete | server-runtime-correctness ch03-relocatable-server-binary-and-packaging
+
+- Closed `ch03-relocatable-server-binary-and-packaging` at `7a5cbc61` (sync `0e03d7a1`): dropped build-host rpaths in `vertebra-http/build.rs`, implemented `ServerBinaryTarget` + `ServerBinaryBuilder` and wheel repair exclusions in `build_server_binary.py`, wired `EmbeddedPythonRuntime` shared-libpython detection into `_supervisor.py` and CLI runners, included `src/py/vertebra/bin/*` in core wheels, and added opt-in `.agents/skills` staging (`VERTEBRA_APP_ROOT`) to `StandaloneBuilder` and `vtb build` (`cargo clippy`/`build`, `readelf` 0 rpath, `ruff`, `mypy`, and `121` tests clean).
+- Advanced active frontier to `ch04-wheel-smoke-and-ci` (`server-runtime-correctness:ch04:t01`; `14` tasks remain across `ch04`–`ch07`).
+
 ## [2026-11-13T04:57:32Z] chapter-complete | server-runtime-correctness ch02-lifespan-supervisor-and-worker-lanes
 
 - Closed `ch02-lifespan-supervisor-and-worker-lanes` at `d2da8fa0` (sync `f32c3234`): added `WorkerStartupError` + SHM exit code `78` supervisor halt, lazy `vertebra.supervisor` exports, `WorkerRunner.resolve_queue_service`, `vtb workers run` signal lifetime, and `vtb run --worker-only` `HealthProbeServer` (`14` Rust `workers` tests, `183` Python unit/integration tests, `clippy`, `ruff`, and `mypy` clean).

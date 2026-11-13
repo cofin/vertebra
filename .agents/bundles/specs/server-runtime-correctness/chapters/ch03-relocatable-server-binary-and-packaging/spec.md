@@ -5,7 +5,7 @@ chapter_id: ch03-relocatable-server-binary-and-packaging
 title: "Chapter 03: Relocatable Server Binary, Wheel Packaging, and Standalone Skills Staging"
 description: "Build relocatable per-ABI vertebra-server binaries, resolve shared libpython at launch, include vertebra/bin/* in core wheels, and add opt-in StandaloneBuilder .agents/skills staging."
 status: stable
-state: active
+state: completed
 planning_status: complete
 planning_quality: standard
 planning_degraded_reason: null
@@ -13,15 +13,15 @@ depends_on_chapters:
   - ch02-lifespan-supervisor-and-worker-lanes
 replan_trigger: null
 plan_commit: 18baadcd
-last_reviewed_commit: null
-updated_at: "2026-11-13T05:08:00Z"
+last_reviewed_commit: 0e03d7a1
+updated_at: "2026-11-13T05:08:50Z"
 generated:
   by: flow-plan
   at: "2026-11-12T23:45:00Z"
 verified:
-  - by: agent:plan-generator
-    at: "2026-11-12T23:45:00Z"
-    commit: 18baadcd
+  - by: agent:code-reviewer
+    at: "2026-11-13T05:08:50Z"
+    commit: 0e03d7a1
 tags:
   - packaging
   - wheel
@@ -90,7 +90,7 @@ Wheel binary installation, shared-libpython requirements, and `--include-agent-s
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Status**: `t01`–`t04` are implemented and verified at `7a5cbc61` (`cargo fmt`/`clippy`/`build`, `readelf -d` 0 RPATH/RUNPATH, `ruff`, `mypy`, and `121` targeted packaging/CLI/server integration tests pass).
+- **Status**: `ch03-relocatable-server-binary-and-packaging` is completed at `7a5cbc61` (`sync` `0e03d7a1`); next frontier is [`ch04-wheel-smoke-and-ci`](../ch04-wheel-smoke-and-ci/spec.md).
 - **Fast Chapter Gate (`< 25s`)**: `uv run --no-sync ruff check src/py/vertebra/supervisor src/py/vertebra/build/packaging/standalone.py src/py/vertebra/cli/build.py tools/scripts/build_server_binary.py && uv run --no-sync mypy src/py/vertebra/supervisor src/py/vertebra/build/packaging/standalone.py src/py/vertebra/cli/build.py tools/scripts/build_server_binary.py && uv run --no-sync pytest src/py/tests/unit/build/test_packaging_and_pgo.py src/py/tests/unit/cli/test_cli_commands.py -q`.
 
 [^http-build-rs]: `src/rs/vertebra-http/build.rs` — Current build script embedding absolute build-host rpaths.
