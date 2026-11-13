@@ -16,14 +16,18 @@ depends_on:
   - "native-postgres-driver:ch06:t03"
 files: 
   - tools/scripts/verify_postgres_wheel.py
+  - src/rs/vertebra-postgres/pyproject.toml
   - .github/workflows/ci.yml
   - .github/workflows/release.yaml
 tests: 
   - src/py/tests/unit/test_freethreaded_gil.py
+  - src/py/tests/unit/build/test_packaging_and_pgo.py
 read_set:
   - .github/workflows/ci.yml
   - .github/workflows/release.yaml
+  - src/rs/vertebra-postgres/pyproject.toml
   - src/py/tests/unit/test_freethreaded_gil.py
+  - src/py/tests/unit/build/test_packaging_and_pgo.py
   - src/py/vertebra/_postgres.pyi
 estimated_loc: 245
 tags:
@@ -53,15 +57,16 @@ Create `verify_postgres_wheel.py`, wire PG14–18 zero-skip CI + 14-class releas
 ## Contracts & Edge Cases
 
 - Verify all 14 `_postgres` classes reject `setattr` (`Py_TPFLAGS_IMMUTABLETYPE`) and sustain 8 concurrent worker threads on `3.14t`/`3.15t`.
+- Align `src/rs/vertebra-postgres/pyproject.toml` `maturin.exclude` with sibling extension manifests and register `("postgres", "vertebra._postgres")` + `"postgres"` in `other_stubs` inside `test_packaging_and_pgo.py::test_optional_extension_pyproject_isolation_and_bundler_extra`.
 
 ## Test Matrix
 
-- `test_freethreaded_gil.py` `_postgres` class immutability and concurrent client/pool tests.
+- `test_freethreaded_gil.py` `_postgres` class immutability and concurrent client/pool tests, plus `test_packaging_and_pgo.py -k optional_extension_pyproject_isolation`.
 
 ## Verification
 
 ```bash
-uv run --no-sync pytest src/py/tests/unit/test_freethreaded_gil.py -q && uv run --no-sync ruff check tools/scripts/verify_postgres_wheel.py && uv run --no-sync mypy tools/scripts/verify_postgres_wheel.py
+uv run --no-sync pytest src/py/tests/unit/test_freethreaded_gil.py src/py/tests/unit/build/test_packaging_and_pgo.py -k "freethreaded or optional_extension_pyproject_isolation" -q && uv run --no-sync ruff check tools/scripts/verify_postgres_wheel.py && uv run --no-sync mypy tools/scripts/verify_postgres_wheel.py
 ```
 
 ## Acceptance Criteria

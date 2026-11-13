@@ -55,7 +55,7 @@ Completes wheel packaging isolation, free-threaded 8-thread pool proofs, CI conf
 
 ## 2. Requirements, Concrete Contracts & Architecture
 
-- `tools/scripts/verify_postgres_wheel.py`: verifies sdist/wheel file isolation, `MissingDependencyError` when uninstalled, and all 14 `_postgres` classes when installed.
+- `tools/scripts/verify_postgres_wheel.py`: verifies sdist/wheel file isolation, `MissingDependencyError` when uninstalled, and all 14 `_postgres` classes when installed, alongside aligning `src/rs/vertebra-postgres/pyproject.toml` and `test_packaging_and_pgo.py::test_optional_extension_pyproject_isolation_and_bundler_extra` to include `("postgres", "vertebra._postgres")` and `"postgres"` in `other_stubs`.
 - `tools/benchmarks/postgres.py` + `benches/postgres_native.rs` + `Makefile`: `postgres-test`, `postgres-wheel-check`, `postgres-bench`, and offline-testable `postgres-bench-check`.
 
 ## 3. Documentation & OKF Knowledge Plan

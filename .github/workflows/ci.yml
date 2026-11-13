@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -18,6 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 2
     outputs:
+      agents: ${{ steps.filter.outputs.agents }}
       python: ${{ steps.filter.outputs.python }}
       rust: ${{ steps.filter.outputs.rust }}
       typescript: ${{ steps.filter.outputs.typescript }}
@@ -32,6 +34,11 @@ jobs:
         id: filter
         with:
           filters: |
+            agents:
+              - '.agents/**'
+              - '.codex/**'
+              - 'AGENTS.md'
+              - '.github/workflows/ci.yml'
             python:
               - 'src/py/**'
               - 'tools/**'
@@ -51,16 +58,32 @@ jobs:
               - 'pyproject.toml'
               - 'uv.lock'
             ci:
-              - '.github/**'
               - 'Makefile'
               - '.pre-commit-config.yaml'
               - 'biome.json'
+
+  review-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [changes]
+    if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.agents == 'true' || needs.changes.outputs.python == 'true' || needs.changes.outputs.ci == 'true'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          python-version: "3.12"
+      - name: Validate review setup and OKF bundles
+        run: uv run --no-project --python 3.12 --with "msgspec>=0.18" python -m tools.scripts.review_setup validate
 
   lint:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     needs: [changes]
-    if: needs.changes.outputs.python == 'true' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.typescript == 'true' || needs.changes.outputs.ci == 'true'
+    if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.python == 'true' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.typescript == 'true' || needs.changes.outputs.ci == 'true'
     steps:
       - uses: actions/checkout@v7
         with:
@@ -89,7 +112,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 35
     needs: [changes, lint]
-    if: needs.changes.outputs.python == 'true' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.ci == 'true'
+    if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.python == 'true' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.ci == 'true'
     strategy:
       fail-fast: true
       matrix:
@@ -128,7 +151,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     needs: [changes, lint]
-    if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.ci == 'true'
+    if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.ci == 'true'
     steps:
       - uses: actions/checkout@v7
         with:
@@ -152,19 +175,13 @@ jobs:
           CARGO_INCREMENTAL: "0"
         run: make rs-test
 
-  test-rust-features:
+  test-rust-macos:
     needs: [changes, lint]
-    if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.ci == 'true'
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/main' && (needs.changes.outputs.rust == 'true' || needs.changes.outputs.ci == 'true'))
+    runs-on: macos-latest
     timeout-minutes: 45
-    strategy:
-      fail-fast: true
-      matrix:
-        include:
-          - os: ubuntu-latest
-            features: tls,compression,gcp
-          - os: macos-latest
-            features: tls,compression,gcp,macos-ulock
-    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -175,19 +192,18 @@ jobs:
           workspaces: "src/rs"
           shared-key: "vertebra"
           cache-on-failure: true
-      - name: Test with feature flags
+      - name: Test with macOS ulock and feature flags
         working-directory: src/rs
         env:
-          CARGO_FEATURES: ${{ matrix.features }}
           CARGO_PROFILE_DEV_DEBUG: "0"
           CARGO_INCREMENTAL: "0"
-        run: cargo test --workspace --features "$CARGO_FEATURES"
+        run: cargo test --workspace --features tls,compression,gcp,macos-ulock
 
   test-typescript:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     needs: [changes, lint]
-    if: needs.changes.outputs.typescript == 'true' || needs.changes.outputs.ci == 'true'
+    if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.typescript == 'true' || needs.changes.outputs.ci == 'true'
     steps:
       - uses: actions/checkout@v7
         with:
@@ -204,7 +220,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     needs: [changes]
-    if: needs.changes.outputs.docs == 'true' || needs.changes.outputs.ci == 'true'
+    if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.docs == 'true' || needs.changes.outputs.ci == 'true'
     steps:
       - uses: actions/checkout@v7
         with:
