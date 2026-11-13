@@ -3,21 +3,17 @@
 from __future__ import annotations
 
 import argparse
-import os
-import platform
-import shutil
-import subprocess
 import sys
-import sysconfig
 import tarfile
 import tempfile
-import venv
 import zipfile
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Literal, get_args
 
 import msgspec
+
+from tools.scripts._wheel_verify import NATIVE_SUFFIXES, build_dist, verify_isolated_wheel_pair
 
 CompanionPackage = Literal["storage", "bigquery", "spanner", "bundler"]
 
@@ -31,8 +27,6 @@ __all__ = (
     "verify_core_wheel_excludes_companion",
     "verify_isolated_venv_contract",
 )
-
-NATIVE_SUFFIXES: tuple[str, ...] = (".so", ".pyd", ".dylib")
 
 ALL_KNOWN_STUBS: frozenset[str] = frozenset(
     {
@@ -243,50 +237,35 @@ def verify_isolated_venv_contract(
 ) -> None:
     """Verify outside-checkout `vertebra-core` fails loud pre-install and works cleanly post-install."""
     spec = COMPANION_SPECS[package]
-    with tempfile.TemporaryDirectory(prefix=f"vtb-{package}-venv-") as tmp:
-        root = Path(tmp).resolve()
-        venv_dir = root / "isolated-venv"
-        run_dir = root / "outside-checkout"
-        run_dir.mkdir(parents=True, exist_ok=True)
-
-        venv.EnvBuilder(with_pip=False, clear=True, symlinks=True).create(venv_dir)
-        venv_python = _venv_python_path(venv_dir)
-        venv_purelib = _query_venv_purelib(venv_python, run_dir)
-        _seed_third_party_runtime_deps(venv_purelib)
-
-        _install_wheel_no_deps(venv_python, venv_purelib, core_wheel, run_dir)
-        _run_isolated_python(
-            venv_python,
-            run_dir,
-            (
-                "import importlib.util, pathlib, sys\n"
-                "import vertebra\n"
-                "from vertebra.typing import MissingDependencyError\n"
-                "venv_root = pathlib.Path(sys.prefix).resolve()\n"
-                "assert pathlib.Path(vertebra.__file__).resolve().is_relative_to(venv_root), vertebra.__file__\n"
-                f"assert importlib.util.find_spec({spec.module_name!r}) is None\n"
-                f"{spec.preinstall_probe}"
-            ),
-        )
-
-        _install_wheel_no_deps(venv_python, venv_purelib, companion_wheel, run_dir)
-        gil_check = "assert mod.GIL_USED is False\n" if spec.expect_gil_used else ""
-        _run_isolated_python(
-            venv_python,
-            run_dir,
-            (
-                "import importlib, pathlib, sys\n"
-                f"mod = importlib.import_module({spec.module_name!r})\n"
-                "from vertebra import _vertebra\n"
-                "venv_root = pathlib.Path(sys.prefix).resolve()\n"
-                "assert pathlib.Path(mod.__file__).resolve().is_relative_to(venv_root), mod.__file__\n"
-                f"{gil_check}"
-                f"for export_name in {spec.exports!r}:\n"
-                "    assert hasattr(mod, export_name), export_name\n"
-                f"assert not hasattr(_vertebra, {spec.leaked_core_attr!r})\n"
-                f"{spec.postinstall_probe}"
-            ),
-        )
+    preinstall_code = (
+        "import importlib.util, pathlib, sys\n"
+        "import vertebra\n"
+        "from vertebra.typing import MissingDependencyError\n"
+        "venv_root = pathlib.Path(sys.prefix).resolve()\n"
+        "assert pathlib.Path(vertebra.__file__).resolve().is_relative_to(venv_root), vertebra.__file__\n"
+        f"assert importlib.util.find_spec({spec.module_name!r}) is None\n"
+        f"{spec.preinstall_probe}"
+    )
+    gil_check = "assert mod.GIL_USED is False\n" if spec.expect_gil_used else ""
+    postinstall_code = (
+        "import importlib, pathlib, sys\n"
+        f"mod = importlib.import_module({spec.module_name!r})\n"
+        "from vertebra import _vertebra\n"
+        "venv_root = pathlib.Path(sys.prefix).resolve()\n"
+        "assert pathlib.Path(mod.__file__).resolve().is_relative_to(venv_root), mod.__file__\n"
+        f"{gil_check}"
+        f"for export_name in {spec.exports!r}:\n"
+        "    assert hasattr(mod, export_name), export_name\n"
+        f"assert not hasattr(_vertebra, {spec.leaked_core_attr!r})\n"
+        f"{spec.postinstall_probe}"
+    )
+    verify_isolated_wheel_pair(
+        temp_prefix=f"vtb-{package}-venv-",
+        core_wheel=core_wheel,
+        ext_wheel=companion_wheel,
+        preinstall_code=preinstall_code,
+        postinstall_code=postinstall_code,
+    )
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -323,16 +302,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     repo_root = Path(__file__).resolve().parents[2]
     with tempfile.TemporaryDirectory(prefix="vtb-companion-wheel-check-") as tmp:
         out_dir = Path(tmp)
-        core_wheel = args.core_wheel or _build_dist(repo_root, repo_root, out_dir / "core", kind="wheel")
+        core_wheel = args.core_wheel or build_dist(repo_root, repo_root, out_dir / "core", kind="wheel")
         for pkg in packages:
             spec = COMPANION_SPECS[pkg]
-            companion_wheel = args.companion_wheel or _build_dist(
+            companion_wheel = args.companion_wheel or build_dist(
                 repo_root,
                 repo_root / spec.crate_dir,
                 out_dir / f"{pkg}-whl",
                 kind="wheel",
             )
-            companion_sdist = args.companion_sdist or _build_dist(
+            companion_sdist = args.companion_sdist or build_dist(
                 repo_root,
                 repo_root / spec.crate_dir,
                 out_dir / f"{pkg}-sdist",
@@ -345,127 +324,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             sys.stdout.write(f"Verified vertebra-core and vertebra-{pkg} wheel isolation and fail-loud contract.\n")
 
     return 0
-
-
-def _build_dist(repo_root: Path, package_dir: Path, out_dir: Path, *, kind: str) -> Path:
-    out_dir.mkdir(parents=True, exist_ok=True)
-    uv_bin = shutil.which("uv")
-    if uv_bin is None:
-        msg = "`uv` executable not found on PATH"
-        raise RuntimeError(msg)
-    flag = "--wheel" if kind == "wheel" else "--sdist"
-    cmd = [
-        uv_bin,
-        "build",
-        str(package_dir),
-        flag,
-        "--no-build-isolation",
-        "--python",
-        sys.executable,
-        "--out-dir",
-        str(out_dir),
-    ]
-    env = os.environ.copy()
-    env.setdefault("PYO3_PYTHON", sys.executable)
-    proc = subprocess.run(cmd, cwd=repo_root, env=env, capture_output=True, text=True, check=False)
-    if proc.returncode != 0:
-        sys.stderr.write(proc.stdout)
-        sys.stderr.write(proc.stderr)
-        msg = f"Failed to build {kind} for {package_dir}: exit code {proc.returncode}"
-        raise RuntimeError(msg)
-
-    pattern = "*.whl" if kind == "wheel" else "*.tar.gz"
-    matches = sorted(out_dir.glob(pattern))
-    if len(matches) != 1:
-        msg = f"Expected exactly 1 built {pattern} in {out_dir}, found: {matches}"
-        raise RuntimeError(msg)
-    return matches[0]
-
-
-def _venv_python_path(venv_dir: Path) -> Path:
-    if platform.system() == "Windows":
-        return venv_dir / "Scripts" / "python.exe"
-    return venv_dir / "bin" / "python"
-
-
-def _clean_isolated_env() -> dict[str, str]:
-    preserved_keys = ("PATH", "HOME", "TMPDIR", "TEMP", "TMP", "SYSTEMROOT", "LANG", "LC_ALL")
-    env = {key: os.environ[key] for key in preserved_keys if key in os.environ}
-    env["PYTHONNOUSERSITE"] = "1"
-    return env
-
-
-def _query_venv_purelib(venv_python: Path, cwd: Path) -> Path:
-    proc = subprocess.run(
-        [str(venv_python), "-I", "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"],
-        cwd=cwd,
-        env=_clean_isolated_env(),
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    return Path(proc.stdout.strip()).resolve()
-
-
-def _seed_third_party_runtime_deps(dest_site_packages: Path) -> None:
-    host_dirs = {
-        Path(sysconfig.get_path("purelib")).resolve(),
-        Path(sysconfig.get_path("platlib")).resolve(),
-    }
-    skip_prefixes = ("vertebra", "_vertebra", "__editable__", "_virtualenv")
-    for host_dir in host_dirs:
-        if not host_dir.is_dir() or host_dir == dest_site_packages:
-            continue
-        for item in host_dir.iterdir():
-            lower_name = item.name.lower()
-            if lower_name.startswith(skip_prefixes) or lower_name.endswith(".pth"):
-                continue
-            target = dest_site_packages / item.name
-            if not target.exists():
-                target.symlink_to(item, target_is_directory=item.is_dir())
-
-
-def _install_wheel_no_deps(venv_python: Path, venv_purelib: Path, wheel_path: Path, cwd: Path) -> None:
-    uv_bin = shutil.which("uv")
-    if uv_bin is not None:
-        proc = subprocess.run(
-            [
-                uv_bin,
-                "pip",
-                "install",
-                "--python",
-                str(venv_python),
-                "--no-index",
-                "--no-deps",
-                "--reinstall",
-                str(wheel_path),
-            ],
-            cwd=cwd,
-            env=_clean_isolated_env(),
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if proc.returncode == 0:
-            return
-    with zipfile.ZipFile(wheel_path) as zf:
-        zf.extractall(venv_purelib)
-
-
-def _run_isolated_python(venv_python: Path, cwd: Path, code: str) -> None:
-    proc = subprocess.run(
-        [str(venv_python), "-I", "-c", code],
-        cwd=cwd,
-        env=_clean_isolated_env(),
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if proc.returncode != 0:
-        sys.stderr.write(proc.stdout)
-        sys.stderr.write(proc.stderr)
-        msg = f"Isolated venv check failed with exit code {proc.returncode}"
-        raise RuntimeError(msg)
 
 
 if __name__ == "__main__":

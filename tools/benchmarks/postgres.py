@@ -40,6 +40,7 @@ __all__ = (
     "format_report_bytes",
     "main",
     "parse_report_bytes",
+    "redact_config_dsn",
 )
 
 
@@ -223,12 +224,13 @@ async def capture_live_report(
     return PostgresBenchmarkReport(
         schema_version=SCHEMA_VERSION,
         generated_at=datetime.now(UTC).isoformat().replace("+00:00", "Z"),
-        dsn_redacted=_redact_config_dsn(cfg),
+        dsn_redacted=redact_config_dsn(cfg),
         cases=tuple(cases),
     )
 
 
-def _redact_config_dsn(config: PostgreSQLConfig) -> str:
+def redact_config_dsn(config: PostgreSQLConfig) -> str:
+    """Return a credential-free PostgreSQL DSN string derived from pool key metadata."""
     _, host, port, database, user, *_ = config.pool_key()
     prefix = f"{user}@" if user else ""
     return f"postgresql://{prefix}{host}:{port}/{database}"

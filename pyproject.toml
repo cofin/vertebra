@@ -336,7 +336,7 @@ ignore_errors = true
 python_version = "3.12"
 strict = true
 mypy_path = ["src/py"]
-files = ["src/py/vertebra", "tools/scripts", "tools/pgo", "tools/docs", "docs/examples"]
+files = ["src/py/vertebra", "tools/scripts", "tools/pgo", "tools/docs", "tools/benchmarks/postgres.py", "docs/examples"]
 
 [[tool.mypy.overrides]]
 module = [
@@ -389,10 +389,6 @@ module = [
     "django.*",
     "pytest_databases",
     "pytest_databases.*",
-    "asyncpg",
-    "asyncpg.*",
-    "psycopg",
-    "psycopg.*",
     "concurrent.interpreters",
 ]
 ignore_missing_imports = true

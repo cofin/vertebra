@@ -11,12 +11,12 @@ from tools.benchmarks.postgres import (
     SCHEMA_VERSION,
     PostgresBenchmarkCase,
     PostgresBenchmarkReport,
-    _redact_config_dsn,
     compare_reports,
     compute_case_stats,
     format_report_bytes,
     main,
     parse_report_bytes,
+    redact_config_dsn,
 )
 
 from vertebra.db.adapters.postgres import PostgreSQLConfig
@@ -64,12 +64,13 @@ def test_compute_case_stats_calculates_exact_quantiles_and_ops() -> None:
     assert case.ops_per_sec == pytest.approx(100.0 / 0.109)
 
 
-def test_compute_case_stats_rejects_empty_and_non_positive_samples() -> None:
-    """Verify invalid or empty latency series raise ValueError."""
+@pytest.mark.parametrize("bad_samples", [[0.0], [-1.0], [float("nan")], [float("inf")]])
+def test_compute_case_stats_rejects_non_positive_and_non_finite_samples(bad_samples: list[float]) -> None:
+    """Verify empty, non-positive, or non-finite latency series raise ValueError."""
     with pytest.raises(ValueError, match="empty"):
         compute_case_stats(case="point_select_1", driver="vertebra-sync", latencies_ns=[])
     with pytest.raises(ValueError, match="positive finite"):
-        compute_case_stats(case="point_select_1", driver="vertebra-sync", latencies_ns=[0.0])
+        compute_case_stats(case="point_select_1", driver="vertebra-sync", latencies_ns=bad_samples)
 
 
 def test_report_serialization_roundtrip_and_schema_validation() -> None:
@@ -193,9 +194,53 @@ def test_postgres_benchmark_cli_compare_exit_codes(tmp_path: Path) -> None:
 
 
 def test_redact_config_dsn_strips_password_and_query_tokens() -> None:
-    """Verify _redact_config_dsn never retains credentials or secret query parameters."""
+    """Verify redact_config_dsn never retains credentials or secret query parameters."""
     cfg = PostgreSQLConfig.from_url("postgresql://alice:s3cr3t_pw@db.internal:5433/prod_db?password=leak")
-    redacted = _redact_config_dsn(cfg)
+    redacted = redact_config_dsn(cfg)
     assert redacted == "postgresql://alice@db.internal:5433/prod_db"
     assert "s3cr3t_pw" not in redacted
     assert "leak" not in redacted
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "match_pattern"),
+    [
+        ({"min_throughput_ratio": 0.0}, "min_throughput_ratio"),
+        ({"min_throughput_ratio": float("nan")}, "min_throughput_ratio"),
+        ({"max_latency_ratio": -1.0}, "max_latency_ratio"),
+        ({"max_latency_ratio": float("inf")}, "max_latency_ratio"),
+        ({"candidate_driver": "vertebra-sync"}, "Both candidate_driver and baseline_driver"),
+        ({"candidate_driver": "vertebra-sync", "baseline_driver": "missing-driver"}, "Missing comparison pair"),
+    ],
+)
+def test_compare_reports_rejects_invalid_thresholds_and_missing_pairs(
+    kwargs: dict[str, object],
+    match_pattern: str,
+) -> None:
+    """Verify compare_reports fails deterministically on invalid ratios and unmatched driver filters."""
+    report = _sample_report()
+    with pytest.raises(ValueError, match=match_pattern):
+        compare_reports(report, report, **kwargs)  # type: ignore[arg-type]
+
+
+def test_compare_reports_rejects_empty_overlap_when_required() -> None:
+    """Verify compare_reports rejects disjoint driver/case sets when require_nonempty=True."""
+    cand = _sample_report()
+    disjoint_base = PostgresBenchmarkReport(
+        schema_version=SCHEMA_VERSION,
+        generated_at="2026-11-13T22:00:00Z",
+        dsn_redacted="postgresql://postgres@127.0.0.1:5432/postgres",
+        cases=(
+            PostgresBenchmarkCase(
+                case="other_case",
+                driver="other-driver",
+                iterations=10,
+                median_ms=1.0,
+                p99_ms=1.5,
+                ops_per_sec=500.0,
+            ),
+        ),
+    )
+    with pytest.raises(ValueError, match="No matching benchmark cases"):
+        compare_reports(cand, disjoint_base, require_nonempty=True)
+    assert compare_reports(cand, disjoint_base, require_nonempty=False) == ()

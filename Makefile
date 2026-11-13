@@ -351,14 +351,14 @@ coverage:                                           ## Run tests with coverage r
 .PHONY: lint
 lint: ts-lint                                       ## Format and lint everything with auto-fixes (Python, Rust, TS)
 	@echo "${INFO} Linting and fixing Python (Ruff)..."
-	@uv run ruff check --fix --unsafe-fixes src/py/vertebra src/py/tests tools/scripts tools/pgo $(wildcard tools/docs docs/examples)
-	@uv run ruff format src/py/vertebra src/py/tests tools/scripts tools/pgo $(wildcard tools/docs docs/examples)
+	@uv run ruff check --fix --unsafe-fixes src/py/vertebra src/py/tests tools/scripts tools/pgo tools/benchmarks/postgres.py $(wildcard tools/docs docs/examples)
+	@uv run ruff format src/py/vertebra src/py/tests tools/scripts tools/pgo tools/benchmarks/postgres.py $(wildcard tools/docs docs/examples)
 	@echo "${INFO} Linting and fixing Rust (Fmt & Clippy)..."
 	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
 	@(cd src/rs && cargo fmt --all)
 	@(cd src/rs && cargo clippy --fix --allow-dirty --allow-staged --workspace --all-targets --features tls,compression,gcp -- -D warnings)
 	@echo "${INFO} Running type checks (Mypy)..."
-	@uv run mypy src/py/vertebra tools/scripts tools/pgo $(wildcard tools/docs docs/examples)
+	@uv run mypy src/py/vertebra tools/scripts tools/pgo tools/benchmarks/postgres.py $(wildcard tools/docs docs/examples)
 	@stub_mods="$$(uv run python -c 'import importlib.util; print(" ".join(m for m in ("vertebra._vertebra", "vertebra._bundler", "vertebra._storage", "vertebra._mysql", "vertebra._bigquery", "vertebra._mssql", "vertebra._spanner", "vertebra._duckdb", "vertebra._oracle", "vertebra._postgres") if importlib.util.find_spec(m) is not None))')"; \
 	if [ -n "$$stub_mods" ]; then \
 		uv run python -m mypy.stubtest $$stub_mods; \
@@ -371,9 +371,9 @@ lint-all:                                           ## Check formatting, linting
 	@echo "${INFO} Checking TS package (Biome)..."
 	@(cd src/ts/vertebra-client && bunx biome check .)
 	@echo "${INFO} Checking Python (Ruff & Mypy)..."
-	@uv run ruff check src/py/vertebra src/py/tests tools/scripts tools/pgo $(wildcard tools/docs docs/examples)
-	@uv run ruff format --check src/py/vertebra src/py/tests tools/scripts tools/pgo $(wildcard tools/docs docs/examples)
-	@uv run mypy src/py/vertebra tools/scripts tools/pgo $(wildcard tools/docs docs/examples)
+	@uv run ruff check src/py/vertebra src/py/tests tools/scripts tools/pgo tools/benchmarks/postgres.py $(wildcard tools/docs docs/examples)
+	@uv run ruff format --check src/py/vertebra src/py/tests tools/scripts tools/pgo tools/benchmarks/postgres.py $(wildcard tools/docs docs/examples)
+	@uv run mypy src/py/vertebra tools/scripts tools/pgo tools/benchmarks/postgres.py $(wildcard tools/docs docs/examples)
 	@stub_mods="$$(uv run python -c 'import importlib.util; print(" ".join(m for m in ("vertebra._vertebra", "vertebra._bundler", "vertebra._storage", "vertebra._mysql", "vertebra._bigquery", "vertebra._mssql", "vertebra._spanner", "vertebra._duckdb", "vertebra._oracle", "vertebra._postgres") if importlib.util.find_spec(m) is not None))')"; \
 	if [ -n "$$stub_mods" ]; then \
 		uv run python -m mypy.stubtest $$stub_mods; \
@@ -540,9 +540,12 @@ postgres-bench:                                     ## Run comparative PostgreSQ
 	@uv run --no-sync --group postgres-bench pytest -m postgres_benchmark src/py/tests/integration/db/test_postgres_benchmarks.py -v
 
 .PHONY: postgres-bench-check
-postgres-bench-check:                               ## Verify Criterion postgres_native benches compile and comparator unit suite passes offline
+postgres-bench-check:                               ## Verify Criterion postgres_native benches execute in test mode and comparator suite passes offline
 	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
-	@cargo check --manifest-path src/rs/Cargo.toml -p vertebra-postgres --benches --locked
+	@PYTHONPATH="$(CURDIR)/src/py" cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --bench postgres_native --locked
+	@uv run --no-sync ruff check tools/benchmarks/postgres.py tools/scripts/_wheel_verify.py tools/scripts/verify_postgres_wheel.py src/py/tests/unit/tools/test_postgres_benchmarks.py src/py/tests/integration/db/test_postgres_benchmarks.py
+	@uv run --no-sync ruff format --check tools/benchmarks/postgres.py tools/scripts/_wheel_verify.py tools/scripts/verify_postgres_wheel.py src/py/tests/unit/tools/test_postgres_benchmarks.py src/py/tests/integration/db/test_postgres_benchmarks.py
+	@uv run --no-sync mypy tools/benchmarks/postgres.py tools/scripts/_wheel_verify.py tools/scripts/verify_postgres_wheel.py
 	@uv run --no-sync pytest src/py/tests/unit/tools/test_postgres_benchmarks.py -q
 	@echo "${OK} PostgreSQL benchmark checks passed"
 

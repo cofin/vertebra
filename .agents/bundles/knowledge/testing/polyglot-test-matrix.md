@@ -151,7 +151,8 @@ Vertebra runs verification gates across Rust (`cargo test`), Python (`pytest` + 
 | `test-rust-macos` | `workflow_dispatch` | `cargo test --workspace --features tls,compression,gcp,macos-ulock` | `macos-latest` |
 | `test-typescript` | `typescript`, `ci`, or `workflow_dispatch` | `make ts-install` + `make ts-build` + `make ts-test` | `ubuntu-latest` |
 | `build-docs` | `docs`, `ci`, or `workflow_dispatch` | `uv sync --frozen --no-install-project --only-group doc` + `make docs` | `ubuntu-latest` |
-| `postgres-wheel-check` | `python`, `rust`, `ci`, or `workflow_dispatch` | `make ts-install && make ts-build && make postgres-wheel-check` | `ubuntu-latest` |
+| `core-wheel-smoke` | `python`, `rust`, `typescript`, `ci`, or `workflow_dispatch` | `uv sync --frozen --group build && make ts-install && make ts-build && make core-wheel-check` | `ubuntu-latest` |
+| `postgres-wheel-check` | `python`, `rust`, `ci`, or `workflow_dispatch` | `uv sync --frozen --group build && make ts-install && make ts-build && make postgres-wheel-check` | `ubuntu-latest` |
 | `postgres-conformance` | `python`, `rust`, `ci`, or `workflow_dispatch` | Zero-skip `test_driver_conformance.py -k "postgres-..."` (`VERTEBRA_CONFORMANCE_POSTGRES_REQUIRE_ZERO_SKIPS=1`), plus live replication/feature/deadline suites on PG `18` | PG `14`–`18` (`ubuntu-latest`) |
 
 ## 4. Suite Inventory, Shared-Memory Hygiene & Boundary Evidence

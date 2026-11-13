@@ -35,7 +35,13 @@ fn bench_postgres_codecs(c: &mut Criterion) {
     });
 
     let numeric_val = PgValue::Numeric(
-        PgNumeric::from_decimal_parts(false, b"12345678900123456789", -10, false).unwrap(),
+        PgNumeric::from_decimal_parts(
+            false,
+            &[1, 2, 3, 4, 5, 6, 7, 8, 9, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+            -10,
+            false,
+        )
+        .unwrap(),
     );
     group.bench_function("encode_decode_numeric_binary", |b| {
         b.iter(|| {

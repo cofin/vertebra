@@ -252,6 +252,8 @@ jobs:
         with:
           enable-cache: true
           python-version: "3.12"
+      - name: Install build and runtime dependencies
+        run: uv sync --frozen --group build
       - name: Build TypeScript client bundle
         run: make ts-install && make ts-build
       - name: Build core wheel and run vtb smoke suite
@@ -280,6 +282,8 @@ jobs:
         with:
           enable-cache: true
           python-version: "3.12"
+      - name: Install build and runtime dependencies
+        run: uv sync --frozen --group build
       - name: Build TypeScript client bundle
         run: make ts-install && make ts-build
       - name: Verify vertebra-postgres wheel isolation and 14-class contract

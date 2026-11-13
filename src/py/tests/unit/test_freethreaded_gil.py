@@ -12,98 +12,120 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from vertebra import _vertebra
-from vertebra._vertebra import (
-    ArrowCursor,
-    AsgiScope,
-    CloudSQLDialer,
-    Headers,
-    LeaseBroker,
-    Request,
-    RequestBatch,
-    Response,
-    RsgiHttpProtocol,
-    RsgiScope,
-    WsgiEnviron,
-)
+from vertebra._vertebra import ArrowCursor, Headers
 from vertebra.db.driver import InterfaceError
 
-NATIVE_MODULES: tuple[str, ...] = (
+_GIL_EXEMPT_MODULES: tuple[str, ...] = (
     "vertebra._vertebra",
     "vertebra._bundler",
-    "vertebra._bigquery",
-    "vertebra._oracle",
-    "vertebra._spanner",
     "vertebra._storage",
+    "vertebra._mysql",
+    "vertebra._bigquery",
+    "vertebra._mssql",
+    "vertebra._oracle",
+    "vertebra._postgres",
+    "vertebra._spanner",
+    "vertebra._duckdb",
+)
+_POSTGRES_CLASSES: tuple[str, ...] = (
+    "SyncPostgresClient",
+    "AsyncPostgresClient",
+    "SyncPostgresPool",
+    "AsyncPostgresPool",
+    "SyncPostgresPortal",
+    "AsyncPostgresPortal",
+    "SyncPostgresArrowStream",
+    "AsyncPostgresArrowStream",
+    "SyncPostgresCopyOut",
+    "SyncPostgresCopyIn",
+    "AsyncPostgresCopyOut",
+    "AsyncPostgresCopyIn",
+    "AsyncPostgresListener",
+    "AsyncPostgresReplication",
+)
+_ORACLE_CLASSES: tuple[str, ...] = (
+    "SyncOracleClient",
+    "AsyncOracleClient",
+    "SyncOraclePool",
+    "AsyncOraclePool",
+    "OracleColumn",
+    "OracleQueryResult",
+    "OraclePipelineOutcome",
+    "OracleNotification",
+    "AsyncOracleListener",
+)
+_IMMUTABLE_PYCLASSES: tuple[tuple[str, str], ...] = (
+    *(
+        ("vertebra._vertebra", cls_name)
+        for cls_name in (
+            "Request",
+            "Headers",
+            "Response",
+            "RequestBatch",
+            "AsgiScope",
+            "WsgiEnviron",
+            "RsgiScope",
+            "RsgiHttpProtocol",
+            "LeaseBroker",
+            "CloudSQLDialer",
+            "ArrowCursor",
+        )
+    ),
+    *(("vertebra._bundler", cls_name) for cls_name in ("Bundler", "BundleConfig", "SSRPool")),
+    *(
+        ("vertebra._storage", cls_name)
+        for cls_name in ("SyncObjectStore", "AsyncObjectStore", "StorageBuffer", "ObjectMeta")
+    ),
+    *(("vertebra._mysql", cls_name) for cls_name in ("SyncMySQLClient", "AsyncMySQLClient", "MySQLWireTestServer")),
+    *(("vertebra._bigquery", cls_name) for cls_name in ("SyncBigQueryClient", "AsyncBigQueryClient")),
+    *(("vertebra._mssql", cls_name) for cls_name in ("SyncMSSQLClient", "AsyncMSSQLClient")),
+    *(("vertebra._oracle", cls_name) for cls_name in _ORACLE_CLASSES),
+    *(("vertebra._postgres", cls_name) for cls_name in _POSTGRES_CLASSES),
+    *(("vertebra._spanner", cls_name) for cls_name in ("SyncSpannerClient", "AsyncSpannerClient")),
+    *(("vertebra._duckdb", cls_name) for cls_name in ("SyncDuckDBClient", "AsyncDuckDBClient")),
 )
 
 
-def test_native_modules_declare_gil_used_false() -> None:
+@pytest.mark.parametrize("mod_name", _GIL_EXEMPT_MODULES)
+def test_native_modules_declare_gil_used_false(mod_name: str) -> None:
     """Verify native PyO3 extension modules declare gil_used = false and do not re-enable the GIL."""
     checker = getattr(sys, "_is_gil_enabled", None)
     was_disabled = bool(checker is not None and not checker())
 
-    assert getattr(_vertebra, "GIL_USED", None) is False
-    for mod_name in (
-        "vertebra._bundler",
-        "vertebra._mysql",
-        "vertebra._bigquery",
-        "vertebra._mssql",
-        "vertebra._postgres",
-        "vertebra._spanner",
-        "vertebra._duckdb",
-    ):
-        ext_mod = pytest.importorskip(mod_name)
-        if mod_name == "vertebra._storage":
-            assert hasattr(ext_mod, "SyncObjectStore")
-            if hasattr(ext_mod, "GIL_USED"):
-                assert ext_mod.GIL_USED is False
-        else:
-            assert getattr(ext_mod, "GIL_USED", None) is False
-        if mod_name == "vertebra._postgres":
-            assert isinstance(getattr(ext_mod, "FREE_THREADED", None), bool)
-            for pg_export in (
-                "SyncPostgresClient",
-                "AsyncPostgresClient",
-                "SyncPostgresPool",
-                "AsyncPostgresPool",
-                "SyncPostgresPortal",
-                "AsyncPostgresPortal",
-                "SyncPostgresArrowStream",
-                "AsyncPostgresArrowStream",
-                "SyncPostgresCopyOut",
-                "SyncPostgresCopyIn",
-                "AsyncPostgresCopyOut",
-                "AsyncPostgresCopyIn",
-                "AsyncPostgresListener",
-                "AsyncPostgresReplication",
-            ):
-                assert isinstance(getattr(ext_mod, pg_export, None), type), (
-                    f"Missing native PostgreSQL type {pg_export}"
-                )
+    ext_mod = pytest.importorskip(mod_name)
+    if mod_name == "vertebra._storage":
+        assert hasattr(ext_mod, "SyncObjectStore")
+        if hasattr(ext_mod, "GIL_USED"):
+            assert ext_mod.GIL_USED is False
+    else:
+        assert getattr(ext_mod, "GIL_USED", None) is False
 
+    if was_disabled and checker is not None:
+        assert checker() is False
+        assert getattr(ext_mod, "FREE_THREADED", True) is True
+
+
+@pytest.mark.parametrize("export_name", _POSTGRES_CLASSES)
+def test_postgres_native_module_exports_classes(export_name: str) -> None:
+    """Verify vertebra._postgres declares GIL_USED = False and exports each native class."""
+    pg_mod = pytest.importorskip("vertebra._postgres")
+    assert pg_mod.GIL_USED is False
+    assert isinstance(pg_mod.FREE_THREADED, bool)
+    assert isinstance(pg_mod.__version__, str) and pg_mod.__version__
+    cls = getattr(pg_mod, export_name, None)
+    assert isinstance(cls, type), f"Missing native PostgreSQL type {export_name}"
+
+
+@pytest.mark.parametrize("export_name", _ORACLE_CLASSES)
+def test_oracle_native_module_exports_classes(export_name: str) -> None:
+    """Verify vertebra._oracle declares GIL_USED = False and exports each native class."""
     oracle_mod = pytest.importorskip("vertebra._oracle")
     assert oracle_mod.GIL_USED is False
     assert isinstance(oracle_mod.FREE_THREADED, bool)
     assert isinstance(oracle_mod.__version__, str)
     assert oracle_mod.ORACLESQL_NATIVE_TTC_PIPELINE_SUPPORTED is False
-    for export_name in (
-        "SyncOracleClient",
-        "AsyncOracleClient",
-        "SyncOraclePool",
-        "AsyncOraclePool",
-        "OracleColumn",
-        "OracleQueryResult",
-        "OraclePipelineOutcome",
-        "OracleNotification",
-        "AsyncOracleListener",
-    ):
-        cls = getattr(oracle_mod, export_name, None)
-        assert isinstance(cls, type), f"Missing native Oracle type {export_name}"
-
-    if was_disabled and checker is not None:
-        assert checker() is False
-        assert oracle_mod.FREE_THREADED is True
+    cls = getattr(oracle_mod, export_name, None)
+    assert isinstance(cls, type), f"Missing native Oracle type {export_name}"
 
 
 def test_oracle_native_clients_concurrent_construction() -> None:
@@ -296,77 +318,17 @@ def test_headers_interned_keys_and_concurrent_thread_access() -> None:
     assert all(r == ("application/json", "trace-99", 10) for r in results)
 
 
-def test_native_pyclasses_enforce_immutable_type() -> None:
-    """Verify non-subclassed native PyO3 types enforce Py_TPFLAGS_IMMUTABLETYPE."""
-    bundler_mod = pytest.importorskip("vertebra._bundler")
-    storage_mod = pytest.importorskip("vertebra._storage")
-    mysql_mod = pytest.importorskip("vertebra._mysql")
-    bigquery_mod = pytest.importorskip("vertebra._bigquery")
-    mssql_mod = pytest.importorskip("vertebra._mssql")
-    oracle_mod = pytest.importorskip("vertebra._oracle")
-    postgres_mod = pytest.importorskip("vertebra._postgres")
-    spanner_mod = pytest.importorskip("vertebra._spanner")
-    duckdb_mod = pytest.importorskip("vertebra._duckdb")
-
-    raw_classes: list[object] = [
-        Request,
-        Headers,
-        Response,
-        RequestBatch,
-        AsgiScope,
-        WsgiEnviron,
-        RsgiScope,
-        RsgiHttpProtocol,
-        LeaseBroker,
-        CloudSQLDialer,
-        ArrowCursor,
-        bundler_mod.Bundler,
-        bundler_mod.BundleConfig,
-        getattr(bundler_mod, "SSRPool", None),
-        storage_mod.SyncObjectStore,
-        storage_mod.AsyncObjectStore,
-        storage_mod.StorageBuffer,
-        storage_mod.ObjectMeta,
-        mysql_mod.SyncMySQLClient,
-        mysql_mod.AsyncMySQLClient,
-        mysql_mod.MySQLWireTestServer,
-        bigquery_mod.SyncBigQueryClient,
-        bigquery_mod.AsyncBigQueryClient,
-        mssql_mod.SyncMSSQLClient,
-        mssql_mod.AsyncMSSQLClient,
-        oracle_mod.SyncOracleClient,
-        oracle_mod.AsyncOracleClient,
-        oracle_mod.SyncOraclePool,
-        oracle_mod.AsyncOraclePool,
-        oracle_mod.OracleColumn,
-        oracle_mod.OracleQueryResult,
-        oracle_mod.OraclePipelineOutcome,
-        oracle_mod.OracleNotification,
-        oracle_mod.AsyncOracleListener,
-        postgres_mod.SyncPostgresClient,
-        postgres_mod.AsyncPostgresClient,
-        postgres_mod.SyncPostgresPool,
-        postgres_mod.AsyncPostgresPool,
-        postgres_mod.SyncPostgresPortal,
-        postgres_mod.AsyncPostgresPortal,
-        postgres_mod.SyncPostgresArrowStream,
-        postgres_mod.AsyncPostgresArrowStream,
-        postgres_mod.SyncPostgresCopyOut,
-        postgres_mod.SyncPostgresCopyIn,
-        postgres_mod.AsyncPostgresCopyOut,
-        postgres_mod.AsyncPostgresCopyIn,
-        postgres_mod.AsyncPostgresListener,
-        postgres_mod.AsyncPostgresReplication,
-        spanner_mod.SyncSpannerClient,
-        spanner_mod.AsyncSpannerClient,
-        duckdb_mod.SyncDuckDBClient,
-        duckdb_mod.AsyncDuckDBClient,
-    ]
-    classes: list[type[object]] = [cls for cls in raw_classes if isinstance(cls, type)]
+@pytest.mark.parametrize(("mod_name", "cls_name"), _IMMUTABLE_PYCLASSES)
+def test_native_pyclasses_enforce_immutable_type(mod_name: str, cls_name: str) -> None:
+    """Verify each non-subclassed native PyO3 type enforces Py_TPFLAGS_IMMUTABLETYPE."""
+    ext_mod = pytest.importorskip(mod_name)
+    if mod_name == "vertebra._bundler" and cls_name == "SSRPool" and not hasattr(ext_mod, cls_name):
+        pytest.skip("Optional bundler SSRPool built without SSR feature")
+    cls = getattr(ext_mod, cls_name)
+    assert isinstance(cls, type)
     attr_name = "_mutated_type_attr"
-    for cls in classes:
-        with pytest.raises(TypeError):
-            setattr(cls, attr_name, 1)
+    with pytest.raises(TypeError):
+        setattr(cls, attr_name, 1)
 
 
 def test_arrow_cursor_from_shm_capsule_concurrent_single_winner() -> None:
