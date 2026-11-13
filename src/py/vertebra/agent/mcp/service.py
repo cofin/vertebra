@@ -342,7 +342,9 @@ class MCPCore:
             return str(actual_val) == decoded_expected
         if isinstance(actual_val, (Mapping, list)):
             try:
-                return bool(decode_json(decoded_expected.encode("utf-8")) == actual_val)
+                decoded_header_val = decode_json(decoded_expected.encode("utf-8"))
+                normalized_actual = dict(actual_val) if isinstance(actual_val, Mapping) else actual_val
+                return ConfirmationGate.arguments_equal(decoded_header_val, normalized_actual)
             except Exception:
                 return False
         return str(actual_val) == decoded_expected

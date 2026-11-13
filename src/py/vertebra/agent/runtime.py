@@ -282,6 +282,24 @@ class ConfirmationGate:
             return False
         return self._owner_matches(ticket, owner_id)
 
+    def can_consume_call_approval(
+        self,
+        token: str | None,
+        *,
+        tool_name: str,
+        arguments: Mapping[str, Any],
+        owner_id: str | None = None,
+    ) -> bool:
+        """Check whether ``token`` is an unconsumed approved ticket matching ``tool_name``, ``arguments``, and ``owner_id``."""
+        if not token or not isinstance(token, str):
+            return False
+        ticket = self._refresh_ticket(token)
+        if ticket is None or ticket.status != "approved":
+            return False
+        if not self._owner_matches(ticket, owner_id):
+            return False
+        return ticket.tool_name == tool_name and self.arguments_equal(ticket.arguments, dict(arguments))
+
     def consume_call_approval(
         self,
         token: str | None,
@@ -291,15 +309,15 @@ class ConfirmationGate:
         owner_id: str | None = None,
     ) -> bool:
         """Atomically verify and consume a single-use approved ticket for a specific tool call."""
-        if not token or not isinstance(token, str):
+        if not self.can_consume_call_approval(
+            token,
+            tool_name=tool_name,
+            arguments=arguments,
+            owner_id=owner_id,
+        ):
             return False
-        ticket = self._refresh_ticket(token)
-        if ticket is None or ticket.status != "approved":
-            return False
-        if not self._owner_matches(ticket, owner_id):
-            return False
-        if ticket.tool_name != tool_name or not self.arguments_equal(ticket.arguments, dict(arguments)):
-            return False
+        assert token is not None
+        ticket = self._tickets[token]
         self._tickets[token] = msgspec.structs.replace(ticket, status="consumed")
         return True
 
@@ -623,26 +641,12 @@ class AgentRuntime:
                         )
                         continue
 
-                needs_confirm_ticket: ConfirmationTicket | None = None
-                for call in step_tool_calls:
-                    target_tool = active_agent.get_tool(call.name)
-                    if (
-                        target_tool is not None
-                        and target_tool.requires_confirmation
-                        and not self.confirmation_gate.consume_call_approval(
-                            request.confirmation_token,
-                            tool_name=call.name,
-                            arguments=call.arguments,
-                            owner_id=owner_id,
-                        )
-                    ):
-                        needs_confirm_ticket = self.confirmation_gate.request_confirmation(
-                            call.name,
-                            call.id,
-                            call.arguments,
-                            owner_id=owner_id,
-                        )
-                        break
+                needs_confirm_ticket = self._confirm_step_calls(
+                    active_agent,
+                    step_tool_calls,
+                    confirmation_token=request.confirmation_token,
+                    owner_id=owner_id,
+                )
 
                 if needs_confirm_ticket is not None:
                     return TurnResponse(
@@ -802,26 +806,12 @@ class AgentRuntime:
                         )
                         continue
 
-                needs_confirm_ticket: ConfirmationTicket | None = None
-                for call in step_tool_calls:
-                    target_tool = active_agent.get_tool(call.name)
-                    if (
-                        target_tool is not None
-                        and target_tool.requires_confirmation
-                        and not self.confirmation_gate.consume_call_approval(
-                            request.confirmation_token,
-                            tool_name=call.name,
-                            arguments=call.arguments,
-                            owner_id=owner_id,
-                        )
-                    ):
-                        needs_confirm_ticket = self.confirmation_gate.request_confirmation(
-                            call.name,
-                            call.id,
-                            call.arguments,
-                            owner_id=owner_id,
-                        )
-                        break
+                needs_confirm_ticket = self._confirm_step_calls(
+                    active_agent,
+                    step_tool_calls,
+                    confirmation_token=request.confirmation_token,
+                    owner_id=owner_id,
+                )
 
                 if needs_confirm_ticket is not None:
                     yield AgentStreamFrame(
@@ -874,3 +864,39 @@ class AgentRuntime:
         if default is not None:
             return default
         return self.agent.list_agents()[0]
+
+    def _confirm_step_calls(
+        self,
+        active_agent: Agent,
+        step_tool_calls: Sequence[ToolCall],
+        *,
+        confirmation_token: str | None,
+        owner_id: str | None,
+    ) -> ConfirmationTicket | None:
+        matched_call: ToolCall | None = None
+        for call in step_tool_calls:
+            target_tool = active_agent.get_tool(call.name)
+            if target_tool is None or not target_tool.requires_confirmation:
+                continue
+            if matched_call is None and self.confirmation_gate.can_consume_call_approval(
+                confirmation_token,
+                tool_name=call.name,
+                arguments=call.arguments,
+                owner_id=owner_id,
+            ):
+                matched_call = call
+                continue
+            return self.confirmation_gate.request_confirmation(
+                call.name,
+                call.id,
+                call.arguments,
+                owner_id=owner_id,
+            )
+        if matched_call is not None:
+            self.confirmation_gate.consume_call_approval(
+                confirmation_token,
+                tool_name=matched_call.name,
+                arguments=matched_call.arguments,
+                owner_id=owner_id,
+            )
+        return None

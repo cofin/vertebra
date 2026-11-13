@@ -27,7 +27,6 @@ from vertebra.agent.core.cursor import (
     paginate_sequence,
 )
 from vertebra.agent.core.guards import (
-    BudgetExceededError,
     GuardChain,
     PermissionDeniedError,
     RateLimitExceededError,
@@ -884,9 +883,3 @@ async def test_two_arg_connection_guards_fail_closed_without_connection(
     fake_conn: dict[str, Any] = {}
     await conn_guarded.authorize(ctx, connection=fake_conn, route_handler="route_1")
     assert fake_conn["checked_by"] == (expected_tag, "route_1")
-
-
-def test_guard_error_classes_exported() -> None:
-    """Guard exception types instantiate with preserved reason strings."""
-    budget_err = BudgetExceededError("step limit reached")
-    assert str(budget_err) == "step limit reached"

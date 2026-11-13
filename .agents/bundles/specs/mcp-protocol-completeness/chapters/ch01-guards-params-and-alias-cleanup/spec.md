@@ -29,19 +29,19 @@ tags:
 sources:
   - id: tool-schema
     resource: "src/py/vertebra/agent/core/schema.py::Tool.invoke"
-    title: Tool invocation re-running inline guards
+    title: Single-pass Tool.authorize and Tool.call composition
   - id: guards-py
     resource: "src/py/vertebra/agent/core/guards.py::GuardChain.execute"
-    title: Guard chain execution
+    title: Fail-closed 2-arg connection guard and GuardChain execution
   - id: mcp-service
     resource: "src/py/vertebra/agent/mcp/service.py::MCPCore"
-    title: MCPCore HTTP/tools handler and empty MCPService subclass
+    title: MCPCore HTTP/tools handler and Mcp-Param-* validation
   - id: conf-gate
     resource: "src/py/vertebra/agent/runtime.py::ConfirmationGate"
-    title: Confirmation ticket store
+    title: Expiring single-use ConfirmationGate ticket store
   - id: a2a-bridge
     resource: "src/py/vertebra/agent/bridges/a2a.py::A2aAgentBridge"
-    title: A2A bridge referencing MCPService
+    title: A2A bridge bound directly to MCPCore
 ---
 
 # Chapter 01: Guards, Mcp-Param Validation, Confirmation Lifecycle, and Alias Cleanup
@@ -55,7 +55,7 @@ sources:
 
 ## 1. Specification, Context & Provenance
 
-`MCPCore._handle_tools_call` currently runs `authorize` and then calls `Tool.invoke`, executing guards twice per call and mapping denials to `-32603` [^tool-schema] [^mcp-service]. `MCPCore.handle` checks `Mcp-Method` and `Mcp-Name` while ignoring `Mcp-Param-*` headers. `ConfirmationGate` allows `owner_id=None` approvals on owned tickets, replays approvals indefinitely via `is_call_approved`, and never expires tickets [^conf-gate]. Finally, `class MCPService(MCPCore)` adds zero behavior over `MCPCore` [^mcp-service] [^a2a-bridge].
+`MCPCore._handle_tools_call` runs `Tool.authorize(context)` once before confirmation and task promotion (mapping `PermissionDeniedError` to `-32004` and `RateLimitExceededError`/`BudgetExceededError` to `-32005`) and then invokes `Tool.call` without re-running guards [^tool-schema] [^mcp-service]. `MCPCore.handle` validates `Mcp-Method`, `Mcp-Name`, and every `Mcp-Param-*` header (including strict nested scalar-type checks without bool/int coercion). `ConfirmationGate` enforces exact `owner_id` matching, `ttl_seconds` expiry, `max_tickets` capacity, and non-destructive multi-call eligibility checks before single-use `consume_call_approval` [^conf-gate]. All callers across `agent/` and `cli/ai.py` bind directly to `MCPCore` and `ToolRegistry` [^mcp-service] [^a2a-bridge].
 
 ## 2. Requirements, Concrete Contracts & Architecture
 
@@ -87,8 +87,8 @@ Guard error codes, `Mcp-Param-*` validation, single-use confirmation tickets, an
 - **Implemented (`4/4` tasks at `e22452c5`, `177 passed`)**, awaiting Zero-Context Chapter Review closeout stamp.
 - **Fast Chapter Gate (`< 15s`)**: `uv run --no-sync ruff check src/py/vertebra/agent src/py/vertebra/cli/ai.py && uv run --no-sync mypy src/py/vertebra/agent src/py/vertebra/cli/ai.py && uv run --no-sync pytest src/py/tests/unit/agent src/py/tests/unit/cli/test_mcp_cli.py -q`.
 
-[^tool-schema]: `src/py/vertebra/agent/core/schema.py::Tool.invoke` — Tool invocation re-running inline guards.
-[^guards-py]: `src/py/vertebra/agent/core/guards.py::GuardChain.execute` — Guard chain execution.
-[^mcp-service]: `src/py/vertebra/agent/mcp/service.py::MCPCore` — MCPCore HTTP/tools handler and empty MCPService subclass.
-[^conf-gate]: `src/py/vertebra/agent/runtime.py::ConfirmationGate` — Confirmation ticket store.
-[^a2a-bridge]: `src/py/vertebra/agent/bridges/a2a.py::A2aAgentBridge` — A2A bridge referencing MCPService.
+[^tool-schema]: `src/py/vertebra/agent/core/schema.py::Tool.invoke` — Single-pass `Tool.authorize` and `Tool.call` composition.
+[^guards-py]: `src/py/vertebra/agent/core/guards.py::GuardChain.execute` — Fail-closed 2-arg connection guard and `GuardChain` execution.
+[^mcp-service]: `src/py/vertebra/agent/mcp/service.py::MCPCore` — `MCPCore` HTTP/tools handler and `Mcp-Param-*` validation.
+[^conf-gate]: `src/py/vertebra/agent/runtime.py::ConfirmationGate` — Expiring single-use `ConfirmationGate` ticket store.
+[^a2a-bridge]: `src/py/vertebra/agent/bridges/a2a.py::A2aAgentBridge` — A2A bridge bound directly to `MCPCore`.

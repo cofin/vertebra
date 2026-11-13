@@ -41,8 +41,8 @@ tags:
   - cleanup
 sources:
   - id: mcp-service
-    resource: "src/py/vertebra/agent/mcp/service.py::MCPService"
-    title: Empty MCPService(MCPCore) alias subclass
+    resource: "src/py/vertebra/agent/mcp/service.py::MCPCore"
+    title: Canonical MCPCore transport-agnostic JSON-RPC and HTTP engine
   - id: mcp-init
     resource: src/py/vertebra/agent/mcp/__init__.py
     title: Lazy exports of vertebra.agent.mcp
@@ -82,6 +82,6 @@ uv run --no-sync ruff check src/py/vertebra/agent src/py/vertebra/cli/ai.py && u
 - [x] Zero `MCPService` definitions or references remain in `src/py/vertebra` or `src/py/tests`.
 - [x] Chapter fast gate passes cleanly.
 
-[^mcp-service]: `src/py/vertebra/agent/mcp/service.py::MCPService` — Empty MCPService(MCPCore) alias subclass.
+[^mcp-service]: `src/py/vertebra/agent/mcp/service.py::MCPCore` — Canonical MCPCore transport-agnostic JSON-RPC and HTTP engine.
 [^mcp-init]: `src/py/vertebra/agent/mcp/__init__.py` — Lazy exports of vertebra.agent.mcp.
 [^cli-ai]: `src/py/vertebra/cli/ai.py::serve` — CLI serve command importing MCPService.
