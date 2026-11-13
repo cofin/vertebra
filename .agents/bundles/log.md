@@ -1,5 +1,10 @@
 # Bundle Activity Log
 
+## [2026-11-13T05:17:45Z] chapter-complete | mcp-protocol-completeness ch04-skills-and-mcp-apps-core
+
+- Closed `ch04-skills-and-mcp-apps-core` at `b0c0ae12` (sync `7ea0f382`): extended `SkillCatalog` filtering/URI resolution/listeners/refresh, advertised `io.modelcontextprotocol/skills` and `io.modelcontextprotocol/ui` extensions, added `McpIcon`/`ToolSpec.meta`/`@mcp_tool` UI metadata, implemented `ToolRegistry.validate_ui_links` and `MCPCore.validate()`, filtered app-only tools for non-UI clients and WebMCP manifests (`270` unit tests, `ruff`, and `mypy` clean).
+- Advanced active frontier to `ch05-framework-mounts-and-litestar-parity` (`mcp-protocol-completeness:ch05:t01`; `10` tasks remain across `ch05`–`ch07`).
+
 ## [2026-11-13T05:03:00Z] chapter-complete | mcp-protocol-completeness ch03-sse-streams-and-resource-subscriptions
 
 - Closed `ch03-sse-streams-and-resource-subscriptions` at `2454dbef` (sync `353c0d0c`): `McpHttpResponse.stream` (`SseStreamBroker`), legacy `GET /mcp` SSE adapter writers across ASGI/Starlette/WSGI/native `App`/Litestar/Flask/Django, `list_changed` + severity-gated `MCPCore.log` + progress notifications, `resources/subscribe`, and `2026-07-28` `subscriptions/listen` (`251` unit tests, `ruff`, and `mypy` clean).
