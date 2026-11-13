@@ -3,18 +3,22 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
+import urllib.parse
 import urllib.request
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import msgspec
 
 from vertebra._vertebra import (
+    AsyncGcpIdTokenCache,
+    SyncGcpIdTokenCache,
     VectorBatchView,
     VectorCache,
     decode_gemini_embed_grpc_frame_to_batch,
     encode_gemini_embed_grpc_response_frame,
 )
-from vertebra.embeddings._base import Embedder
+from vertebra.embeddings._base import Embedder, EmbeddingError
 from vertebra.extensions.grpc import (
     GrpcServiceRegistry,
     decode_lpm_frames,
@@ -62,14 +66,40 @@ class RemoteEmbedder(Embedder):
         *,
         dimensions: int = 768,
         bearer_token: str | None = None,
+        id_token_cache: SyncGcpIdTokenCache | AsyncGcpIdTokenCache | None = None,
+        audience: str | None = None,
         cache: VectorCache | None = None,
         transport: GrpcTransportCallable | None = None,
     ) -> None:
         """Initialize the remote cluster gRPC embedder."""
+        if bearer_token is not None and id_token_cache is not None:
+            raise ValueError("bearer_token and id_token_cache are mutually exclusive")
         super().__init__(model=model, dimensions=dimensions, cache=cache)
         self._endpoint = endpoint.rstrip("/")
         self._bearer_token = bearer_token
+        self._id_token_cache: Any = (
+            id_token_cache.to_async() if isinstance(id_token_cache, SyncGcpIdTokenCache) else id_token_cache
+        )
+        self._audience: str | None = None
+        if self._id_token_cache is not None:
+            if audience is not None:
+                cleaned = audience.strip()
+                if not cleaned:
+                    raise ValueError("audience must not be empty")
+                self._audience = cleaned
+            else:
+                parsed = urllib.parse.urlsplit(endpoint)
+                if not parsed.scheme or not parsed.netloc:
+                    raise ValueError(
+                        f"cannot derive ID token audience from endpoint {endpoint!r}: missing scheme or host"
+                    )
+                self._audience = f"{parsed.scheme}://{parsed.netloc}"
         self._transport = transport or self._default_http_transport
+
+    async def _fetch_id_token(self, audience: str, *, force_refresh: bool = False) -> Any:
+        """Fetch an OIDC ID token snapshot from the normalized async token cache."""
+        raw = self._id_token_cache.get_token(audience, force_refresh=force_refresh)
+        return await raw if inspect.isawaitable(raw) else raw
 
     async def _embed_batch_impl(
         self,
@@ -91,21 +121,34 @@ class RemoteEmbedder(Embedder):
             "content-type": "application/grpc+msgpack",
             "te": "trailers",
         }
-        if self._bearer_token:
-            headers["authorization"] = f"Bearer {self._bearer_token}"
-
         url = f"{self._endpoint}/vertebra.EmbeddingService/BatchEmbed"
-        status, resp_headers, resp_body = await self._transport(url, headers, wire_body)
+
+        if self._id_token_cache is not None:
+            assert self._audience is not None
+            snap = await self._fetch_id_token(self._audience, force_refresh=False)
+            req_headers = {**headers, "authorization": f"Bearer {snap.id_token}"}
+            status, resp_headers, resp_body = await self._transport(url, req_headers, wire_body)
+            if status == 401:
+                self._id_token_cache.invalidate(self._audience, snap.generation)
+                snap2 = await self._fetch_id_token(self._audience, force_refresh=True)
+                req_headers2 = {**headers, "authorization": f"Bearer {snap2.id_token}"}
+                status, resp_headers, resp_body = await self._transport(url, req_headers2, wire_body)
+        else:
+            if self._bearer_token:
+                headers["authorization"] = f"Bearer {self._bearer_token}"
+            status, resp_headers, resp_body = await self._transport(url, headers, wire_body)
+
+        normalized_headers = {k.lower(): v for k, v in resp_headers.items()}
         if status != 200:
-            raise RuntimeError(f"RemoteEmbedder HTTP status {status}")
-        grpc_status = resp_headers.get("grpc-status", "0")
+            raise EmbeddingError(f"RemoteEmbedder HTTP status {status}")
+        grpc_status = normalized_headers.get("grpc-status", "0")
         if grpc_status != "0":
-            msg = resp_headers.get("grpc-message", "unknown remote gRPC error")
-            raise RuntimeError(f"RemoteEmbedder gRPC status {grpc_status}: {msg}")
+            msg = normalized_headers.get("grpc-message", "unknown remote gRPC error")
+            raise EmbeddingError(f"RemoteEmbedder gRPC status {grpc_status}: {msg}")
 
         frames = decode_lpm_frames(resp_body)
         if not frames:
-            raise RuntimeError("RemoteEmbedder received empty gRPC response frame list")
+            raise EmbeddingError("RemoteEmbedder received empty gRPC response frame list")
         resp_msg = decode_msgpack(frames[0], type=RemoteEmbedResponse)
         return decode_gemini_embed_grpc_frame_to_batch(
             resp_msg.packed_frame,

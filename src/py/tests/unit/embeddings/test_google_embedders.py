@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import math
 import subprocess
 import sys
@@ -15,7 +16,12 @@ import pytest
 import vertebra
 from vertebra._vertebra import (
     ArrowCursor,
+    AsyncGcpIdTokenCache,
+    AsyncGcpTokenCache,
+    GcpIdTokenSnapshot,
     GcpTokenSnapshot,
+    SyncGcpIdTokenCache,
+    SyncGcpTokenCache,
     VectorBatchView,
     VectorCache,
     VectorView,
@@ -38,6 +44,11 @@ from vertebra.embeddings import (
     VertexEmbedder,
     create_embedding_grpc_service,
 )
+from vertebra.embeddings._models import get_model_spec
+from vertebra.embeddings._remote import RemoteEmbedResponse
+from vertebra.extensions.grpc import encode_lpm_frame
+from vertebra.typing import ImproperConfigurationError
+from vertebra.utils.serializers import encode_msgpack_bytes
 
 
 class _FakeTokenCache:
@@ -84,7 +95,7 @@ def test_clean_domain_naming_and_default_factory() -> None:
 
 @pytest.mark.anyio
 async def test_vertex_embedder_grpc_microbatching_adc_headers_and_401_retry() -> None:
-    """Verify VertexEmbedder coalesces concurrent embed_query calls, attaches ADC + quota project, and retries 401."""
+    """Verify VertexEmbedder coalesces concurrent embed_query calls onto Vertex REST predict, attaches ADC + quota project, and retries 401."""
     token_cache: Any = _FakeTokenCache(prefix="mock-vertex-token", quota_project="quota-proj-123")
 
     transport_calls: list[tuple[str, dict[str, str], bytes]] = []
@@ -92,16 +103,13 @@ async def test_vertex_embedder_grpc_microbatching_adc_headers_and_401_retry() ->
     async def fake_transport(url: str, headers: dict[str, str], body: bytes) -> tuple[int, dict[str, str], bytes]:
         transport_calls.append((url, dict(headers), body))
         if len(transport_calls) == 1:
-            return (401, {"content-type": "application/grpc+proto"}, b"")
-        src_batch = VectorBatchView.from_f32_rows(
-            [
-                [3.0, 4.0, 12.0, 0.0, 1.0, 2.0, 3.0, 4.0],
-                [0.0, 3.0, 4.0, 0.0, 5.0, 6.0, 7.0, 8.0],
-            ],
-            normalize=False,
-        )
-        grpc_resp = encode_gemini_embed_grpc_response_frame(src_batch)
-        return (200, {"content-type": "application/grpc+proto", "grpc-status": "0"}, grpc_resp)
+            return (401, {"content-type": "application/json"}, b"")
+        req_payload = json.loads(body.decode("utf-8"))
+        assert len(req_payload["instances"]) == 1
+        text = req_payload["instances"][0]["content"]
+        vec = [3.0, 4.0, 0.0, 0.0] if text == "first query" else [0.0, 3.0, 4.0, 0.0]
+        resp_body = json.dumps({"predictions": [{"embeddings": {"values": vec}}]}).encode("utf-8")
+        return (200, {"content-type": "application/json"}, resp_body)
 
     vec_cache = VectorCache(capacity=64, dimensions=4)
     embedder = VertexEmbedder(
@@ -119,10 +127,16 @@ async def test_vertex_embedder_grpc_microbatching_adc_headers_and_401_retry() ->
         embedder.embed_query("first query"),
         embedder.embed_query("second query"),
     )
-    assert len(transport_calls) == 2
+    assert len(transport_calls) == 3
+    assert all(
+        url
+        == "https://us-central1-aiplatform.googleapis.com/v1/projects/test-gcp-project/locations/us-central1/publishers/google/models/gemini-embedding-001:predict"
+        for url, _, _ in transport_calls
+    )
     assert transport_calls[0][1]["authorization"] == "Bearer mock-vertex-token-1"
     assert transport_calls[0][1]["x-goog-user-project"] == "quota-proj-123"
-    assert transport_calls[1][1]["authorization"] == "Bearer mock-vertex-token-2"
+    assert transport_calls[0][1]["content-type"] == "application/json"
+    assert transport_calls[-1][1]["authorization"] == "Bearer mock-vertex-token-2"
     assert v1.dimensions == 4
     assert v2.dimensions == 4
     norm1 = math.sqrt(sum(x * x for x in v1.to_list()))
@@ -131,7 +145,7 @@ async def test_vertex_embedder_grpc_microbatching_adc_headers_and_401_retry() ->
     assert norm2 == pytest.approx(1.0, rel=1e-5)
 
     cached_v1 = await embedder.embed_query("first query")
-    assert len(transport_calls) == 2
+    assert len(transport_calls) == 3
     assert cached_v1.to_list() == pytest.approx(v1.to_list(), rel=1e-6)
 
 
@@ -707,7 +721,9 @@ async def test_gemini_embedder_multimodal_preserves_full_inline_data_and_rust_ht
     part = MultimodalPart(mime_type="image/png", data=raw_media, text="architecture-diagram")
     batch = await embedder.embed_multimodal([part])
     assert batch.count == 1
-    assert expected_b64 in recorded_bodies[0]
+    assert raw_media in recorded_bodies[0]
+    assert b"architecture-diagram" in recorded_bodies[0]
+    assert expected_b64 not in recorded_bodies[0]
 
     assert hasattr(vertebra._vertebra, "gcp_http2_post_async")
     assert hasattr(vertebra._vertebra, "gcp_http2_post_sync")
@@ -722,20 +738,367 @@ async def test_gemini_embedder_multimodal_preserves_full_inline_data_and_rust_ht
     ) -> tuple[int, dict[str, str], bytes]:
         _ = timeout_ms
         called_native.append((url, dict(headers), body))
-        src_batch = VectorBatchView.from_f32_rows([[0.0, 1.0, 0.0, 0.0]], normalize=True)
-        return (
-            200,
-            {"content-type": "application/grpc+proto", "grpc-status": "0"},
-            encode_gemini_embed_grpc_response_frame(src_batch),
-        )
+        resp_body = json.dumps({"predictions": [{"embeddings": {"values": [0.0, 1.0, 0.0, 0.0]}}]}).encode("utf-8")
+        return (200, {"content-type": "application/json"}, resp_body)
 
     monkeypatch.setattr("vertebra.embeddings._google.gcp_http2_post_async", fake_native_http2, raising=False)
     default_vertex = VertexEmbedder(
         "gemini-embedding-001",
         dimensions=4,
+        project="test-gcp-project",
         token_cache=_FakeTokenCache(),
         coalesce_window_ms=0.0,
     )
     vec = await default_vertex.embed_query("native http2 transport")
     assert vec.dimensions == 4
     assert len(called_native) == 1
+
+
+class _FakeIdTokenCache:
+    """In-memory fake AsyncGcpIdTokenCache returning GcpIdTokenSnapshot with generation rotation."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, bool]] = []
+        self.invalidated: list[tuple[str, int]] = []
+        self._generation = 0
+        self._invalidated_up_to = 0
+
+    def invalidate(self, audience: str, failed_generation: int) -> None:
+        self.invalidated.append((audience, failed_generation))
+        if failed_generation >= self._invalidated_up_to:
+            self._invalidated_up_to = failed_generation
+
+    async def get_token(self, audience: str, *, force_refresh: bool = False) -> GcpIdTokenSnapshot:
+        self.calls.append((audience, force_refresh))
+        if force_refresh or self._generation == 0 or self._generation <= self._invalidated_up_to:
+            self._generation += 1
+        return GcpIdTokenSnapshot(
+            id_token=f"mock-id-token-{self._generation}",
+            audience=audience,
+            expires_at_unix_ms=4_102_444_800_000,
+            generation=self._generation,
+        )
+
+
+def test_google_embedder_sync_token_cache_normalization_and_model_catalog() -> None:
+    """Verify SyncGcpTokenCache normalizes to AsyncGcpTokenCache at init and ModelSpec encodes Vertex batch metadata."""
+    sync_tok = SyncGcpTokenCache(
+        {
+            "client_id": "cid",
+            "client_secret": "csec",
+            "refresh_token": "rtok",
+            "token_uri": "http://127.0.0.1:9/token",
+        },
+        allow_ambient_adc=False,
+    )
+    vertex = VertexEmbedder("gemini-embedding-001", project="p1", token_cache=sync_tok)
+    gemini = GeminiEmbedder("gemini-embedding-2", token_cache=sync_tok)
+    assert isinstance(vertex._token_cache, AsyncGcpTokenCache)
+    assert isinstance(gemini._token_cache, AsyncGcpTokenCache)
+
+    spec_001 = get_model_spec("gemini-embedding-001")
+    spec_005 = get_model_spec("text-embedding-005")
+    spec_multi = get_model_spec("text-multilingual-embedding-002")
+    spec_gem2 = get_model_spec("gemini-embedding-2")
+    assert spec_001 is not None and spec_001.vertex_method == "predict" and spec_001.max_instances_per_request == 1
+    assert spec_005 is not None and spec_005.vertex_method == "predict" and spec_005.max_instances_per_request == 250
+    assert (
+        spec_multi is not None and spec_multi.vertex_method == "predict" and spec_multi.max_instances_per_request == 250
+    )
+    assert (
+        spec_gem2 is not None
+        and spec_gem2.vertex_method == "embed_content"
+        and spec_gem2.max_instances_per_request == 1
+    )
+
+
+@pytest.mark.anyio
+async def test_google_and_gemini_error_mapping_and_missing_adc_isolation(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify HTTP 401 double-failure, non-zero grpc-status, row drift, and missing ambient ADC raise EmbeddingError or ImproperConfigurationError."""
+    monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
+    monkeypatch.delenv("CLOUDSDK_CONFIG", raising=False)
+    monkeypatch.delenv("GOOGLE_OAUTH_ACCESS_TOKEN", raising=False)
+    monkeypatch.delenv("CLOUDSDK_AUTH_ACCESS_TOKEN", raising=False)
+    monkeypatch.setenv("HOME", "/nonexistent-home-for-vertebra-test")
+    monkeypatch.setenv("GCE_METADATA_HOST", "127.0.0.1:9")
+
+    unconfigured = GeminiEmbedder("gemini-embedding-001", dimensions=4)
+    with pytest.raises(ImproperConfigurationError, match="ADC"):
+        await unconfigured.embed_many(["hello"])
+
+    async def double_401_transport(url: str, headers: dict[str, str], body: bytes) -> tuple[int, dict[str, str], bytes]:
+        _ = (url, headers, body)
+        return (401, {"content-type": "application/json"}, b"unauthorized")
+
+    failing_401 = GeminiEmbedder(
+        "gemini-embedding-001",
+        dimensions=4,
+        token_cache=_FakeTokenCache(),
+        transport=double_401_transport,
+    )
+    with pytest.raises(EmbeddingError, match="HTTP 401"):
+        await failing_401.embed_many(["hello"])
+
+    async def grpc_err_transport(url: str, headers: dict[str, str], body: bytes) -> tuple[int, dict[str, str], bytes]:
+        _ = (url, headers, body)
+        return (200, {"grpc-status": "3", "grpc-message": "invalid content"}, b"")
+
+    failing_grpc = GeminiEmbedder("gemini-embedding-001", dimensions=4, api_key="k", transport=grpc_err_transport)
+    with pytest.raises(EmbeddingError, match="gRPC status 3"):
+        await failing_grpc.embed_many(["hello"])
+
+    async def row_drift_transport(url: str, headers: dict[str, str], body: bytes) -> tuple[int, dict[str, str], bytes]:
+        _ = (url, headers, body)
+        one_row = VectorBatchView.from_f32_rows([[1.0, 0.0, 0.0, 0.0]], normalize=True)
+        return (200, {"grpc-status": "0"}, encode_gemini_embed_grpc_response_frame(one_row))
+
+    drifting = GeminiEmbedder("gemini-embedding-001", dimensions=4, api_key="k", transport=row_drift_transport)
+    with pytest.raises(EmbeddingError, match="expected 2"):
+        await drifting.embed_many(["one", "two"])
+
+
+@pytest.mark.anyio
+async def test_google_micro_batch_per_loop_isolation_and_gemini_multimodal_validation() -> None:
+    """Verify concurrent embed_query_sync (portal loop) and embed_query (main loop) isolate queues and Gemini validates multimodal parts."""
+    call_threads: list[int] = []
+
+    async def multi_loop_transport(url: str, headers: dict[str, str], body: bytes) -> tuple[int, dict[str, str], bytes]:
+        _ = (url, headers, body)
+        call_threads.append(threading.get_ident())
+        batch = VectorBatchView.from_f32_rows([[1.0, 0.0, 0.0, 0.0]], normalize=True)
+        return (200, {"grpc-status": "0"}, encode_gemini_embed_grpc_response_frame(batch))
+
+    embedder = GeminiEmbedder(
+        "gemini-embedding-2",
+        dimensions=4,
+        api_key="k",
+        coalesce_window_ms=2.0,
+        transport=multi_loop_transport,
+    )
+    async_task = embedder.embed_query("from-main-loop")
+    sync_task = asyncio.to_thread(embedder.embed_query_sync, "from-portal-loop")
+    v_async, v_sync = await asyncio.gather(async_task, sync_task)
+    assert v_async.dimensions == 4
+    assert v_sync.dimensions == 4
+    assert len(embedder._queues) == 0
+
+    for bad_part in (
+        MultimodalPart(mime_type="image/png", data=b"x", uri="https://example.com/a.png"),
+        MultimodalPart(mime_type="text/plain"),
+        MultimodalPart(mime_type="image/png", uri="gs://bucket/obj.png"),
+    ):
+        with pytest.raises(ValueError):
+            await embedder.embed_multimodal([bad_part])
+
+
+@pytest.mark.anyio
+async def test_vertex_rest_predict_chunking_embed_content_multimodal_and_validation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify Vertex REST :predict chunking (1 vs 250 instances & 20k tokens), :embedContent multimodal, global endpoint, titles, drift, and TaskGroup cancellation."""
+    monkeypatch.delenv("GOOGLE_CLOUD_PROJECT", raising=False)
+    monkeypatch.delenv("GCP_PROJECT", raising=False)
+
+    no_project = VertexEmbedder("gemini-embedding-001", token_cache=_FakeTokenCache(), coalesce_window_ms=0.0)
+    with pytest.raises(ImproperConfigurationError, match="project"):
+        await no_project.embed_many(["needs project"])
+
+    seen_calls: list[tuple[str, dict[str, Any]]] = []
+
+    async def predict_transport(url: str, headers: dict[str, str], body: bytes) -> tuple[int, dict[str, str], bytes]:
+        _ = headers
+        req = json.loads(body.decode("utf-8"))
+        seen_calls.append((url, req))
+        preds = [{"embeddings": {"values": [float(idx + 1), 1.0, 0.0, 0.0]}} for idx, _ in enumerate(req["instances"])]
+        return (200, {"content-type": "application/json"}, json.dumps({"predictions": preds}).encode("utf-8"))
+
+    emb_001 = VertexEmbedder(
+        "gemini-embedding-001",
+        dimensions=4,
+        project="p1",
+        location="global",
+        token_cache=_FakeTokenCache(),
+        max_concurrent_requests=2,
+        transport=predict_transport,
+    )
+    with pytest.raises(ValueError, match="document"):
+        await emb_001.embed_many(["q1"], task="query", titles=["Disallowed Title"])
+    assert len(seen_calls) == 0
+
+    batch_3 = await emb_001.embed_many(["a", "b", "c"], task="document", titles=["T1", None, "T3"])
+    assert batch_3.count == 3
+    assert len(seen_calls) == 3
+    assert all(
+        url.startswith("https://aiplatform.googleapis.com/v1/projects/p1/locations/global/") for url, _ in seen_calls
+    )
+    assert all(len(req["instances"]) == 1 for _, req in seen_calls)
+
+    seen_calls.clear()
+    emb_005 = VertexEmbedder(
+        "text-embedding-005",
+        dimensions=4,
+        project="p1",
+        token_cache=_FakeTokenCache(),
+        transport=predict_transport,
+    )
+    batch_300 = await emb_005.embed_many([f"doc-{i}" for i in range(300)])
+    assert batch_300.count == 300
+    assert sorted(len(req["instances"]) for _, req in seen_calls) == [50, 250]
+
+    seen_calls.clear()
+    big_text = "x" * (12_000 * 4)
+    batch_tok = await emb_005.embed_many([big_text, big_text])
+    assert batch_tok.count == 2
+    assert [len(req["instances"]) for _, req in seen_calls] == [1, 1]
+
+    with pytest.raises(ValueError, match="gemini-embedding-2"):
+        await emb_001.embed_multimodal([MultimodalPart(mime_type="image/png", data=b"\x89PNG")])
+
+    embed_content_calls: list[tuple[str, dict[str, Any]]] = []
+
+    async def embed_content_transport(
+        url: str, headers: dict[str, str], body: bytes
+    ) -> tuple[int, dict[str, str], bytes]:
+        _ = headers
+        req = json.loads(body.decode("utf-8"))
+        embed_content_calls.append((url, req))
+        return (
+            200,
+            {"content-type": "application/json"},
+            json.dumps({"embedding": {"values": [1.0, 2.0, 3.0, 4.0]}}).encode("utf-8"),
+        )
+
+    emb_gem2 = VertexEmbedder(
+        "gemini-embedding-2",
+        dimensions=4,
+        project="p1",
+        location="us-east1",
+        auto_truncate=False,
+        token_cache=_FakeTokenCache(),
+        transport=embed_content_transport,
+    )
+    mm_batch = await emb_gem2.embed_multimodal(
+        [
+            MultimodalPart(mime_type="image/png", data=b"\x89PNG", text="logo"),
+            MultimodalPart(mime_type="video/mp4", uri="gs://my-bucket/clip.mp4"),
+        ]
+    )
+    assert mm_batch.count == 2
+    assert all(url.endswith(":embedContent") for url, _ in embed_content_calls)
+    first_req = embed_content_calls[0][1]
+    assert first_req["content"]["role"] == "user"
+    assert first_req["autoTruncate"] is False
+    assert first_req["outputDimensionality"] == 4
+    assert first_req["content"]["parts"][0]["inlineData"]["mimeType"] == "image/png"
+    assert embed_content_calls[1][1]["content"]["parts"][0]["fileData"]["fileUri"] == "gs://my-bucket/clip.mp4"
+
+    async def drift_transport(url: str, headers: dict[str, str], body: bytes) -> tuple[int, dict[str, str], bytes]:
+        _ = (url, headers, body)
+        return (
+            200,
+            {"content-type": "application/json"},
+            json.dumps({"predictions": [{"embeddings": {"values": [1.0, 2.0]}}]}).encode("utf-8"),
+        )
+
+    drifting = VertexEmbedder(
+        "gemini-embedding-001",
+        dimensions=4,
+        project="p1",
+        token_cache=_FakeTokenCache(),
+        transport=drift_transport,
+    )
+    with pytest.raises(EmbeddingError, match="expected 4"):
+        await drifting.embed_many(["x"])
+
+    async def fail_500_transport(url: str, headers: dict[str, str], body: bytes) -> tuple[int, dict[str, str], bytes]:
+        _ = (url, headers, body)
+        return (500, {"content-type": "application/json"}, b"backend error")
+
+    failing = VertexEmbedder(
+        "gemini-embedding-001",
+        dimensions=4,
+        project="p1",
+        token_cache=_FakeTokenCache(),
+        transport=fail_500_transport,
+    )
+    with pytest.raises(EmbeddingError, match="HTTP 500"):
+        await failing.embed_many(["one", "two"])
+
+
+@pytest.mark.anyio
+async def test_remote_embedder_id_token_auth_audience_and_401_retry(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify RemoteEmbedder supports Sync/Async ID token caches, endpoint-origin default audience, mutual exclusion, and single 401 retry."""
+    fake_id: Any = _FakeIdTokenCache()
+
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        RemoteEmbedder(
+            endpoint="https://emb-svc.a.run.app/v1/",
+            bearer_token="static-tok",
+            id_token_cache=fake_id,
+        )
+
+    with pytest.raises(ValueError, match="scheme or host"):
+        RemoteEmbedder(endpoint="/relative-only", id_token_cache=fake_id)
+
+    monkeypatch.setenv("GCE_METADATA_HOST", "127.0.0.1:9")
+    sync_id_cache = SyncGcpIdTokenCache()
+    normalized_remote = RemoteEmbedder(
+        endpoint="https://emb-svc.a.run.app/v1/",
+        id_token_cache=sync_id_cache,
+    )
+    assert isinstance(normalized_remote._id_token_cache, AsyncGcpIdTokenCache)
+    assert normalized_remote._audience == "https://emb-svc.a.run.app"
+
+    sent_headers: list[dict[str, str]] = []
+    fail_first_401 = True
+
+    async def remote_transport(url: str, headers: dict[str, str], body: bytes) -> tuple[int, dict[str, str], bytes]:
+        nonlocal fail_first_401
+        _ = (url, body)
+        sent_headers.append(dict(headers))
+        if fail_first_401:
+            fail_first_401 = False
+            return (401, {"content-type": "application/grpc+msgpack"}, b"")
+        batch = VectorBatchView.from_f32_rows([[1.0, 0.0, 0.0, 0.0]], normalize=True)
+        resp_msg = RemoteEmbedResponse(
+            packed_frame=encode_gemini_embed_grpc_response_frame(batch),
+            count=1,
+            dimensions=4,
+        )
+        return (200, {"grpc-status": "0"}, encode_lpm_frame(encode_msgpack_bytes(resp_msg)))
+
+    remote = RemoteEmbedder(
+        endpoint="https://emb-svc.a.run.app/v1/",
+        dimensions=4,
+        id_token_cache=fake_id,
+        transport=remote_transport,
+    )
+    batch = await remote.embed_many(["hello"])
+    assert batch.count == 1
+    assert fake_id.calls == [("https://emb-svc.a.run.app", False), ("https://emb-svc.a.run.app", True)]
+    assert fake_id.invalidated == [("https://emb-svc.a.run.app", 1)]
+    assert sent_headers[0]["authorization"] == "Bearer mock-id-token-1"
+    assert sent_headers[1]["authorization"] == "Bearer mock-id-token-2"
+
+    explicit_remote = RemoteEmbedder(
+        endpoint="https://emb-svc.a.run.app/v1/",
+        dimensions=4,
+        id_token_cache=fake_id,
+        audience="custom-iap-audience",
+        transport=remote_transport,
+    )
+    await explicit_remote.embed_many(["world"])
+    assert fake_id.calls[-1] == ("custom-iap-audience", False)
+
+    async def double_401_transport(url: str, headers: dict[str, str], body: bytes) -> tuple[int, dict[str, str], bytes]:
+        _ = (url, headers, body)
+        return (401, {"content-type": "application/grpc+msgpack"}, b"")
+
+    double_401_remote = RemoteEmbedder(
+        endpoint="https://emb-svc.a.run.app/v1/",
+        dimensions=4,
+        id_token_cache=fake_id,
+        transport=double_401_transport,
+    )
+    with pytest.raises(EmbeddingError, match="401"):
+        await double_401_remote.embed_many(["fail"])

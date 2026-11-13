@@ -12,13 +12,14 @@ use pyo3::ffi;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 use vertebra_core::vector::{
-    EmbeddingTask, SimilarityMetric, StaticEmbedderCore as RsStaticEmbedderCore,
+    EmbeddingTask, GeminiContentPart, SimilarityMetric, StaticEmbedderCore as RsStaticEmbedderCore,
     VectorCache as RsVectorCache, VectorDtype, VectorSlab, compute_vector_cache_key,
     cosine_similarity_f32, decode_batch_embed_grpc_response_into_slab, dot_product_f32,
-    dot_product_i8, encode_batch_embed_grpc_request, encode_batch_embed_grpc_response_from_slab,
-    format_gemma_prompt as rs_format_gemma_prompt, hamming_distance_binary, l2_norm_f32,
-    l2_normalize_in_place, mrl_truncate_and_normalize, quantize_f32_to_binary, quantize_f32_to_i8,
-    splice_prefix_tokens as rs_splice_prefix_tokens, top_k_search,
+    dot_product_i8, encode_batch_embed_contents_grpc_request, encode_batch_embed_grpc_request,
+    encode_batch_embed_grpc_response_from_slab, format_gemma_prompt as rs_format_gemma_prompt,
+    hamming_distance_binary, l2_norm_f32, l2_normalize_in_place, mrl_truncate_and_normalize,
+    quantize_f32_to_binary, quantize_f32_to_i8, splice_prefix_tokens as rs_splice_prefix_tokens,
+    top_k_search,
 };
 use vertebra_db::arrow_shm::write_shm_arrow_region;
 use vertebra_db::oracle::{
@@ -1055,6 +1056,23 @@ pub fn splice_prefix_tokens(
     out
 }
 
+fn parse_gemini_task_type(task: Option<&str>) -> PyResult<Option<u32>> {
+    match task {
+        Some(t) if !t.is_empty() => Ok(Some(
+            EmbeddingTask::parse(t)
+                .ok_or_else(|| PyValueError::new_err(format!("unsupported task '{t}'")))?
+                .gemini_proto_task_type(),
+        )),
+        _ => Ok(None),
+    }
+}
+
+enum OwnedGeminiPart {
+    Text(String),
+    InlineData { mime_type: String, data: Vec<u8> },
+    FileData { mime_type: String, file_uri: String },
+}
+
 /// Encode a `BatchEmbedContentsRequest` wrapped in a 5-byte gRPC Length-Prefixed Message frame.
 #[pyfunction]
 #[pyo3(signature = (model, texts, task=None, titles=None, output_dimensionality=None))]
@@ -1066,14 +1084,7 @@ pub fn encode_gemini_embed_grpc_frame<'py>(
     titles: Option<Vec<Option<String>>>,
     output_dimensionality: Option<u32>,
 ) -> PyResult<Bound<'py, PyBytes>> {
-    let task_type = match task {
-        Some(t) if !t.is_empty() => Some(
-            EmbeddingTask::parse(t)
-                .ok_or_else(|| PyValueError::new_err(format!("unsupported task '{t}'")))?
-                .gemini_proto_task_type(),
-        ),
-        _ => None,
-    };
+    let task_type = parse_gemini_task_type(task)?;
     let frame = encode_batch_embed_grpc_request(
         model,
         &texts,
@@ -1081,10 +1092,85 @@ pub fn encode_gemini_embed_grpc_frame<'py>(
         titles.as_deref(),
         output_dimensionality,
     );
-    PyBytes::new_with(py, frame.len(), |buf| {
-        buf.copy_from_slice(&frame);
-        Ok(())
-    })
+    Ok(PyBytes::new(py, &frame))
+}
+
+/// Encode multimodal `(kind, mime_type, payload)` `Content` sequences into a 5-byte gRPC LPM `BatchEmbedContentsRequest` frame.
+#[pyfunction]
+#[pyo3(signature = (model, contents, task=None, titles=None, output_dimensionality=None))]
+pub fn encode_gemini_embed_contents_grpc_frame<'py>(
+    py: Python<'py>,
+    model: &str,
+    contents: Vec<Vec<(String, String, Bound<'py, PyAny>)>>,
+    task: Option<&str>,
+    titles: Option<Vec<Option<String>>>,
+    output_dimensionality: Option<u32>,
+) -> PyResult<Bound<'py, PyBytes>> {
+    let task_type = parse_gemini_task_type(task)?;
+    let mut owned_contents: Vec<Vec<OwnedGeminiPart>> = Vec::with_capacity(contents.len());
+    for item_parts in contents {
+        let mut parsed_parts = Vec::with_capacity(item_parts.len());
+        for (kind, mime_type, payload) in item_parts {
+            match kind.as_str() {
+                "text" => {
+                    let text = payload.extract::<String>()?;
+                    parsed_parts.push(OwnedGeminiPart::Text(text));
+                }
+                "inline_data" => {
+                    let data = payload.extract::<Vec<u8>>()?;
+                    parsed_parts.push(OwnedGeminiPart::InlineData { mime_type, data });
+                }
+                "file_data" => {
+                    let file_uri = payload.extract::<String>()?;
+                    parsed_parts.push(OwnedGeminiPart::FileData {
+                        mime_type,
+                        file_uri,
+                    });
+                }
+                other => {
+                    return Err(PyValueError::new_err(format!(
+                        "unsupported Gemini content part kind '{other}'"
+                    )));
+                }
+            }
+        }
+        owned_contents.push(parsed_parts);
+    }
+
+    let borrowed_contents: Vec<Vec<GeminiContentPart<'_>>> = owned_contents
+        .iter()
+        .map(|parts| {
+            parts
+                .iter()
+                .map(|part| match part {
+                    OwnedGeminiPart::Text(text) => GeminiContentPart::Text(text.as_str()),
+                    OwnedGeminiPart::InlineData { mime_type, data } => {
+                        GeminiContentPart::InlineData {
+                            mime_type: mime_type.as_str(),
+                            data: data.as_slice(),
+                        }
+                    }
+                    OwnedGeminiPart::FileData {
+                        mime_type,
+                        file_uri,
+                    } => GeminiContentPart::FileData {
+                        mime_type: mime_type.as_str(),
+                        file_uri: file_uri.as_str(),
+                    },
+                })
+                .collect()
+        })
+        .collect();
+
+    let frame = encode_batch_embed_contents_grpc_request(
+        model,
+        &borrowed_contents,
+        task_type,
+        titles.as_deref(),
+        output_dimensionality,
+    )
+    .map_err(PyValueError::new_err)?;
+    Ok(PyBytes::new(py, &frame))
 }
 
 /// Encode a `VectorBatchView` into a 5-byte gRPC LPM `BatchEmbedContentsResponse` frame.
@@ -1128,6 +1214,10 @@ pub fn register_vector_bindings(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(format_gemma_prompt, m)?)?;
     m.add_function(wrap_pyfunction!(splice_prefix_tokens, m)?)?;
     m.add_function(wrap_pyfunction!(encode_gemini_embed_grpc_frame, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        encode_gemini_embed_contents_grpc_frame,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(
         encode_gemini_embed_grpc_response_frame,
         m

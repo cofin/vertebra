@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import array
 import struct
+from typing import Any
 
 import pytest
 
@@ -17,6 +18,7 @@ from vertebra._vertebra import (
     decode_pgvector_bit,
     decode_pgvector_f16,
     decode_pgvector_f32,
+    encode_gemini_embed_contents_grpc_frame,
     encode_gemini_embed_grpc_frame,
     encode_gemini_embed_grpc_response_frame,
     encode_oracle_vector_f32,
@@ -177,3 +179,42 @@ def test_zero_copy_binds_native_helpers_directly_without_python_fallbacks() -> N
         "_py_pack_grpc_lpm_frame",
     ):
         assert not hasattr(_zero_copy, fallback_name)
+
+
+def test_gemini_content_part_wire_tags_and_multimodal_validation() -> None:
+    """Verify Part.text uses field 2, inline_data uses field 3, file_data uses field 6, and invalid inputs raise ValueError."""
+    text_frame = encode_gemini_embed_grpc_frame("gemini-embedding-001", ["hi"])
+    assert b"\x12\x02hi" in text_frame
+
+    media_frame = encode_gemini_embed_contents_grpc_frame(
+        "gemini-embedding-2",
+        [
+            [("inline_data", "image/png", b"\x89P"), ("text", "", "cap")],
+            [("file_data", "video/mp4", "https://example.com/v.mp4")],
+        ],
+        task="document",
+        titles=["Doc", None],
+        output_dimensionality=256,
+    )
+    assert b"\x1a\x0f\x0a\x09image/png\x12\x02\x89P" in media_frame
+    assert b"\x12\x03cap" in media_frame
+    assert b"\x32" in media_frame
+    assert b"https://example.com/v.mp4" in media_frame
+
+    bad_cases: list[Any] = [
+        [],
+        [[]],
+        [[("inline_data", "", b"\x89P")]],
+        [[("file_data", "video/mp4", "")]],
+        [[("unknown", "text/plain", "x")]],
+    ]
+    for bad_contents in bad_cases:
+        with pytest.raises(ValueError):
+            encode_gemini_embed_contents_grpc_frame("gemini-embedding-2", bad_contents)
+
+    with pytest.raises(ValueError):
+        encode_gemini_embed_contents_grpc_frame(
+            "gemini-embedding-2",
+            [[("text", "", "a")]],
+            titles=[None, None],
+        )

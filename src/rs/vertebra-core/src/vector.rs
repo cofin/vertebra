@@ -1572,10 +1572,23 @@ use crate::proto::{
     skip_field,
 };
 
-/// Encode a `BatchEmbedContentsRequest` wrapped in a 5-byte gRPC Length-Prefixed Message frame.
-pub fn encode_batch_embed_grpc_request(
+/// Single content part inside a Gemini `Content` message (`google.ai.generativelanguage.v1beta.Part`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GeminiContentPart<'a> {
+    Text(&'a str),
+    InlineData {
+        mime_type: &'a str,
+        data: &'a [u8],
+    },
+    FileData {
+        mime_type: &'a str,
+        file_uri: &'a str,
+    },
+}
+
+fn encode_batch_embed_contents_unchecked(
     model: &str,
-    texts: &[String],
+    contents: &[Vec<GeminiContentPart<'_>>],
     task_type: Option<u32>,
     titles: Option<&[Option<String>]>,
     output_dimensionality: Option<u32>,
@@ -1586,19 +1599,40 @@ pub fn encode_batch_embed_grpc_request(
         format!("models/{model}")
     };
 
-    let mut body = Vec::with_capacity(64 + texts.len() * 64);
+    let mut body = Vec::with_capacity(64 + contents.len() * 64);
     put_bytes_field(&mut body, 1, normalized_model.as_bytes());
 
+    let mut blob_buf = Vec::new();
     let mut part_buf = Vec::new();
     let mut content_buf = Vec::new();
     let mut req_buf = Vec::new();
 
-    for (idx, text) in texts.iter().enumerate() {
-        part_buf.clear();
-        put_bytes_field(&mut part_buf, 1, text.as_bytes());
-
+    for (idx, parts) in contents.iter().enumerate() {
         content_buf.clear();
-        put_bytes_field(&mut content_buf, 1, &part_buf);
+        for part in parts {
+            part_buf.clear();
+            match part {
+                GeminiContentPart::Text(text) => {
+                    put_bytes_field(&mut part_buf, 2, text.as_bytes());
+                }
+                GeminiContentPart::InlineData { mime_type, data } => {
+                    blob_buf.clear();
+                    put_bytes_field(&mut blob_buf, 1, mime_type.as_bytes());
+                    put_bytes_field(&mut blob_buf, 2, data);
+                    put_bytes_field(&mut part_buf, 3, &blob_buf);
+                }
+                GeminiContentPart::FileData {
+                    mime_type,
+                    file_uri,
+                } => {
+                    blob_buf.clear();
+                    put_bytes_field(&mut blob_buf, 1, mime_type.as_bytes());
+                    put_bytes_field(&mut blob_buf, 2, file_uri.as_bytes());
+                    put_bytes_field(&mut part_buf, 6, &blob_buf);
+                }
+            }
+            put_bytes_field(&mut content_buf, 1, &part_buf);
+        }
 
         req_buf.clear();
         put_bytes_field(&mut req_buf, 1, normalized_model.as_bytes());
@@ -1628,6 +1662,100 @@ pub fn encode_batch_embed_grpc_request(
     frame.extend_from_slice(&(body.len() as u32).to_be_bytes());
     frame.extend_from_slice(&body);
     frame
+}
+
+/// Encode multimodal `BatchEmbedContentsRequest` parts (`text=2`, `inline_data=3`, `file_data=6`) wrapped in a 5-byte gRPC LPM frame.
+pub fn encode_batch_embed_contents_grpc_request(
+    model: &str,
+    contents: &[Vec<GeminiContentPart<'_>>],
+    task_type: Option<u32>,
+    titles: Option<&[Option<String>]>,
+    output_dimensionality: Option<u32>,
+) -> Result<Vec<u8>, String> {
+    if contents.is_empty() {
+        return Err("contents must not be empty".to_string());
+    }
+    if let Some(title_list) = titles
+        && title_list.len() != contents.len()
+    {
+        return Err(format!(
+            "titles length ({}) must match contents length ({})",
+            title_list.len(),
+            contents.len()
+        ));
+    }
+    for (idx, parts) in contents.iter().enumerate() {
+        if parts.is_empty() {
+            return Err(format!("content at index {idx} must not be empty"));
+        }
+        for part in parts {
+            match part {
+                GeminiContentPart::Text(_) => {}
+                GeminiContentPart::InlineData { mime_type, .. } => {
+                    if mime_type.trim().is_empty() {
+                        return Err("inline_data mime_type must not be empty".to_string());
+                    }
+                }
+                GeminiContentPart::FileData {
+                    mime_type,
+                    file_uri,
+                } => {
+                    if mime_type.trim().is_empty() {
+                        return Err("file_data mime_type must not be empty".to_string());
+                    }
+                    if file_uri.trim().is_empty() {
+                        return Err("file_data file_uri must not be empty".to_string());
+                    }
+                }
+            }
+        }
+    }
+    Ok(encode_batch_embed_contents_unchecked(
+        model,
+        contents,
+        task_type,
+        titles,
+        output_dimensionality,
+    ))
+}
+
+/// Encode a `BatchEmbedContentsRequest` wrapped in a 5-byte gRPC Length-Prefixed Message frame.
+pub fn encode_batch_embed_grpc_request(
+    model: &str,
+    texts: &[String],
+    task_type: Option<u32>,
+    titles: Option<&[Option<String>]>,
+    output_dimensionality: Option<u32>,
+) -> Vec<u8> {
+    let contents: Vec<Vec<GeminiContentPart<'_>>> = texts
+        .iter()
+        .map(|text| vec![GeminiContentPart::Text(text.as_str())])
+        .collect();
+    if contents.is_empty() {
+        return encode_batch_embed_contents_unchecked(
+            model,
+            &[],
+            task_type,
+            titles,
+            output_dimensionality,
+        );
+    }
+    encode_batch_embed_contents_grpc_request(
+        model,
+        &contents,
+        task_type,
+        titles,
+        output_dimensionality,
+    )
+    .unwrap_or_else(|_| {
+        encode_batch_embed_contents_unchecked(
+            model,
+            &contents,
+            task_type,
+            titles,
+            output_dimensionality,
+        )
+    })
 }
 
 /// Encode a `BatchEmbedContentsResponse` wrapped in a 5-byte gRPC LPM frame (used by `RemoteEmbedder` servers and tests).
@@ -1805,5 +1933,92 @@ mod tests {
         let row0 = decoded.row_f32(0).expect("row0");
         assert!((row0[0] - 0.6).abs() < 1e-5);
         assert!((row0[1] - 0.8).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_gemini_batch_embed_contents_wire_tags_and_validation() {
+        let text_frame = encode_batch_embed_grpc_request(
+            "gemini-embedding-001",
+            &["hi".to_string()],
+            None,
+            None,
+            None,
+        );
+        assert!(text_frame.windows(4).any(|w| w == [0x12, 0x02, b'h', b'i']));
+
+        let media_contents = vec![
+            vec![
+                GeminiContentPart::InlineData {
+                    mime_type: "image/png",
+                    data: b"\x89P",
+                },
+                GeminiContentPart::Text("cap"),
+            ],
+            vec![GeminiContentPart::FileData {
+                mime_type: "video/mp4",
+                file_uri: "https://example.com/v.mp4",
+            }],
+        ];
+        let media_frame = encode_batch_embed_contents_grpc_request(
+            "gemini-embedding-2",
+            &media_contents,
+            Some(9),
+            Some(&[Some("T1".to_string()), None]),
+            Some(256),
+        )
+        .expect("multimodal encode");
+        assert!(
+            media_frame
+                .windows(17)
+                .any(|w| w.starts_with(&[0x1a, 0x0f, 0x0a, 0x09])
+                    && w.ends_with(&[0x12, 0x02, 0x89, b'P']))
+        );
+        assert!(
+            media_frame
+                .windows(5)
+                .any(|w| w == [0x12, 0x03, b'c', b'a', b'p'])
+        );
+        assert!(media_frame.contains(&0x32));
+
+        assert!(encode_batch_embed_contents_grpc_request("m", &[], None, None, None).is_err());
+        assert!(
+            encode_batch_embed_contents_grpc_request("m", &[vec![]], None, None, None).is_err()
+        );
+        assert!(
+            encode_batch_embed_contents_grpc_request(
+                "m",
+                &[vec![GeminiContentPart::InlineData {
+                    mime_type: "",
+                    data: b"x"
+                }]],
+                None,
+                None,
+                None,
+            )
+            .is_err()
+        );
+        assert!(
+            encode_batch_embed_contents_grpc_request(
+                "m",
+                &[vec![GeminiContentPart::FileData {
+                    mime_type: "video/mp4",
+                    file_uri: ""
+                }]],
+                None,
+                None,
+                None,
+            )
+            .is_err()
+        );
+        assert!(
+            encode_batch_embed_contents_grpc_request(
+                "m",
+                &[vec![GeminiContentPart::Text("a")]],
+                None,
+                Some(&[None, None]),
+                None,
+            )
+            .is_err()
+        );
     }
 }

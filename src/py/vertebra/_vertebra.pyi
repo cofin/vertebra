@@ -1,7 +1,7 @@
 """Type stubs for the vertebra._vertebra native extension module."""
 
 from collections.abc import Awaitable, Buffer, Callable, Generator, Sequence
-from typing import Any, Self, final
+from typing import Any, Literal, Self, final
 
 from vertebra.typing import VertebraError
 
@@ -111,6 +111,7 @@ __all__ = [
     "drive_wsgi_batch",
     "duckdb_bootstrap_statements",
     "encode_alloydb_metadata_exchange",
+    "encode_gemini_embed_contents_grpc_frame",
     "encode_gemini_embed_grpc_frame",
     "encode_gemini_embed_grpc_response_frame",
     "encode_hello3_handshake",
@@ -1269,6 +1270,13 @@ def splice_prefix_tokens(
 def encode_gemini_embed_grpc_frame(
     model: str,
     texts: Sequence[str],
+    task: str | None = None,
+    titles: Sequence[str | None] | None = None,
+    output_dimensionality: int | None = None,
+) -> bytes: ...
+def encode_gemini_embed_contents_grpc_frame(
+    model: str,
+    contents: Sequence[Sequence[tuple[Literal["text", "inline_data", "file_data"], str, str | bytes]]],
     task: str | None = None,
     titles: Sequence[str | None] | None = None,
     output_dimensionality: int | None = None,
