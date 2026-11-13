@@ -427,8 +427,9 @@ impl RsgiHttpProtocol {
                     error_stream_status = Some(st.status);
                 }
                 None
-            } else if st.submitted
-                && !(self.shared.direct_submit && st.streaming && !st.stream_started)
+            } else if st.stream_closed
+                || (st.submitted
+                    && !(self.shared.direct_submit && st.streaming && !st.stream_started))
             {
                 None
             } else {
@@ -544,7 +545,7 @@ impl RsgiHttpProtocol {
                     error_stream_status = Some(st.status);
                 }
                 false
-            } else if st.submitted && !(st.streaming && !st.stream_started) {
+            } else if st.stream_closed || (st.submitted && !(st.streaming && !st.stream_started)) {
                 false
             } else {
                 st.submitted = true;
@@ -1209,5 +1210,55 @@ pub fn drive_rsgi_batch(
             lp.call_method1(pyo3::intern!(py, "call_soon_threadsafe"), (cb,))?;
             Ok(0)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pyo3::types::PyList;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use vertebra_core::bridge::BatchBridge;
+
+    #[test]
+    fn disconnect_before_first_send_suppresses_spurious_500_on_error_finalization() {
+        crate::transport::init_transport("inprocess", 4096, 64, 64).expect("init bridge");
+        let bridge = BatchBridge::get().expect("bridge initialized");
+        let unary_count = Arc::new(AtomicUsize::new(0));
+        let unary_count_sink = Arc::clone(&unary_count);
+        bridge.set_response_sink(Arc::new(move |_| {
+            unary_count_sink.fetch_add(1, Ordering::SeqCst);
+        }));
+
+        Python::attach(|py| {
+            let proto = RsgiHttpProtocol {
+                body_source: RsgiBodySource::Owned(Bytes::new()),
+                shared: Arc::new(RsgiSharedState {
+                    request_id: 980,
+                    direct_submit: true,
+                    state: Mutex::new(HttpProtocolState {
+                        status: 200,
+                        ..HttpProtocolState::default()
+                    }),
+                    stream_chunks: Arc::new(Mutex::new(Vec::new())),
+                    disconnect_future: Mutex::new(None),
+                    disconnected: AtomicBool::new(false),
+                }),
+            };
+            proto.notify_disconnect(py).expect("notify disconnect");
+            let empty_hdrs = PyList::empty(py);
+            let transport = proto
+                .response_stream(py, 200, empty_hdrs.as_any())
+                .expect("create response_stream");
+            let _ = transport.send_str(py, "after-disconnect");
+
+            assert!(proto.take_error_for_batch(py).is_none());
+            proto
+                .finalize_async_error(py)
+                .expect("finalize_async_error must succeed without submitting 500");
+        });
+
+        bridge.clear_response_sink();
+        assert_eq!(unary_count.load(Ordering::SeqCst), 0);
     }
 }

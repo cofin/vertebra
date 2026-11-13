@@ -859,6 +859,7 @@ async def test_rust_asgi_protocol_flushes_progressive_chunks_before_gate_release
     frames: list[tuple[int, int, int, list[tuple[bytes, bytes]], bytes]] = []
     gate = asyncio.Event()
     first_flushed = asyncio.Event()
+    terminal_flushed = asyncio.Event()
 
     def sink(
         req_id: int,
@@ -870,6 +871,8 @@ async def test_rust_asgi_protocol_flushes_progressive_chunks_before_gate_release
         frames.append((req_id, status, flags, headers, body))
         if len(frames) == 1:
             first_flushed.set()
+        if (flags & (STREAM_FLAG_FINAL | STREAM_FLAG_ERROR)) != 0:
+            terminal_flushed.set()
         return True
 
     async def streaming_app(scope: Any, receive: Any, send: Any) -> None:
@@ -907,10 +910,7 @@ async def test_rust_asgi_protocol_flushes_progressive_chunks_before_gate_release
             )
         ]
         gate.set()
-        for _ in range(20):
-            if frames and (frames[-1][2] & STREAM_FLAG_FINAL) != 0:
-                break
-            await asyncio.sleep(0.005)
+        await asyncio.wait_for(terminal_flushed.wait(), timeout=1.0)
         assert len(frames) == 2
         assert frames[1] == (
             901,
@@ -924,11 +924,13 @@ async def test_rust_asgi_protocol_flushes_progressive_chunks_before_gate_release
 
 
 @pytest.mark.anyio
-async def test_rust_asgi_protocol_trailers_error_and_disconnect() -> None:
+@pytest.mark.parametrize("scenario", ["trailers", "mid_stream_error", "disconnect"])
+async def test_rust_asgi_protocol_trailers_error_and_disconnect(scenario: str) -> None:
     """Verify Rust AsgiProtocol defers FLAG_FINAL for trailers, emits FLAG_ERROR, and signals disconnect."""
     init_transport()
     frames: list[tuple[int, int, int, list[tuple[bytes, bytes]], bytes]] = []
-    accept_client = True
+    terminal_flushed = asyncio.Event()
+    accept_client = scenario != "disconnect"
 
     def sink(
         req_id: int,
@@ -938,75 +940,72 @@ async def test_rust_asgi_protocol_trailers_error_and_disconnect() -> None:
         body: bytes,
     ) -> bool:
         frames.append((req_id, status, flags, headers, body))
+        if (flags & (STREAM_FLAG_FINAL | STREAM_FLAG_ERROR)) != 0:
+            terminal_flushed.set()
         return accept_client
 
     _set_stream_sink(sink)
     try:
-        proto_trailers = AsgiProtocol(b"", request_id=910, direct_submit=True)
-        await proto_trailers.send(
-            {
-                "type": "http.response.start",
-                "status": 200,
-                "headers": [(b"content-type", b"application/grpc")],
-                "trailers": True,
-            }
-        )
-        await proto_trailers.send({"type": "http.response.body", "body": b"grpc-frame", "more_body": False})
-        assert len(frames) == 1
-        assert frames[0][2] == (STREAM_FLAG_STREAMING | STREAM_FLAG_HEADERS_SENT)
-        assert frames[0][4] == b"grpc-frame"
-        await proto_trailers.send(
-            {
-                "type": "http.response.trailers",
-                "headers": [(b"grpc-status", b"0")],
-                "more_trailers": False,
-            }
-        )
-        assert len(frames) == 2
-        assert frames[1] == (
-            910,
-            200,
-            STREAM_FLAG_STREAMING | STREAM_FLAG_TRAILERS | STREAM_FLAG_FINAL,
-            [(b"grpc-status", b"0")],
-            b"",
-        )
+        if scenario == "trailers":
+            proto_trailers = AsgiProtocol(b"", request_id=910, direct_submit=True)
+            await proto_trailers.send(
+                {
+                    "type": "http.response.start",
+                    "status": 200,
+                    "headers": [(b"content-type", b"application/grpc")],
+                    "trailers": True,
+                }
+            )
+            await proto_trailers.send({"type": "http.response.body", "body": b"grpc-frame", "more_body": False})
+            assert len(frames) == 1
+            assert frames[0][2] == (STREAM_FLAG_STREAMING | STREAM_FLAG_HEADERS_SENT)
+            assert frames[0][4] == b"grpc-frame"
+            await proto_trailers.send(
+                {
+                    "type": "http.response.trailers",
+                    "headers": [(b"grpc-status", b"0")],
+                    "more_trailers": False,
+                }
+            )
+            assert len(frames) == 2
+            assert frames[1] == (
+                910,
+                200,
+                STREAM_FLAG_STREAMING | STREAM_FLAG_TRAILERS | STREAM_FLAG_FINAL,
+                [(b"grpc-status", b"0")],
+                b"",
+            )
+        elif scenario == "mid_stream_error":
+            loop = asyncio.get_running_loop()
 
-        frames.clear()
-        loop = asyncio.get_running_loop()
+            async def crashing_stream_app(scope: Any, receive: Any, send: Any) -> None:
+                del scope, receive
+                await send({"type": "http.response.start", "status": 200, "headers": []})
+                await send({"type": "http.response.body", "body": b"partial", "more_body": True})
+                await asyncio.sleep(0)
+                msg = "stream failed mid-flight"
+                raise RuntimeError(msg)
 
-        async def crashing_stream_app(scope: Any, receive: Any, send: Any) -> None:
-            del scope, receive
-            await send({"type": "http.response.start", "status": 200, "headers": []})
-            await send({"type": "http.response.body", "body": b"partial", "more_body": True})
-            await asyncio.sleep(0)
-            msg = "stream failed mid-flight"
-            raise RuntimeError(msg)
-
-        drive_asgi_batch(
-            crashing_stream_app,
-            [Request.from_parts("GET", "/crash", b"", request_id=911)],
-            loop_obj=loop,
-        )
-        for _ in range(20):
-            if frames and (frames[-1][2] & STREAM_FLAG_ERROR) != 0:
-                break
-            await asyncio.sleep(0.005)
-        assert [f[2] for f in frames] == [
-            STREAM_FLAG_STREAMING | STREAM_FLAG_HEADERS_SENT,
-            STREAM_FLAG_STREAMING | STREAM_FLAG_ERROR,
-        ]
-        assert frames[0][4] == b"partial"
-
-        frames.clear()
-        accept_client = False
-        proto_disc = AsgiProtocol(b"", request_id=912, direct_submit=True)
-        await proto_disc.receive()
-        disc_fut = proto_disc.receive()
-        await proto_disc.send({"type": "http.response.start", "status": 200, "headers": []})
-        with pytest.raises(ConnectionResetError):
-            await proto_disc.send({"type": "http.response.body", "body": b"drop", "more_body": True})
-        disc_event = await asyncio.wait_for(disc_fut, timeout=1.0)
-        assert disc_event == {"type": "http.disconnect"}
+            drive_asgi_batch(
+                crashing_stream_app,
+                [Request.from_parts("GET", "/crash", b"", request_id=911)],
+                loop_obj=loop,
+            )
+            await asyncio.wait_for(terminal_flushed.wait(), timeout=1.0)
+            assert [f[2] for f in frames] == [
+                STREAM_FLAG_STREAMING | STREAM_FLAG_HEADERS_SENT,
+                STREAM_FLAG_STREAMING | STREAM_FLAG_ERROR,
+            ]
+            assert frames[0][4] == b"partial"
+        else:
+            proto_disc = AsgiProtocol(b"", request_id=912, direct_submit=True)
+            await proto_disc.receive()
+            disc_fut = proto_disc.receive()
+            await proto_disc.send({"type": "http.response.start", "status": 200, "headers": []})
+            with pytest.raises(ConnectionResetError):
+                await proto_disc.send({"type": "http.response.body", "body": b"drop", "more_body": True})
+            disc_event = await asyncio.wait_for(disc_fut, timeout=1.0)
+            assert disc_event == {"type": "http.disconnect"}
     finally:
         _set_stream_sink(None)
 

@@ -31,6 +31,10 @@ from vertebra._vertebra import (
     submit_response_raw,
     submit_stream_frame,
 )
+from vertebra._vertebra import (
+    ArrowCursor as RustArrowCursor,
+)
+from vertebra.db.arrow import ArrowCursor
 from vertebra.framework._router import (
     ParamSpec,
     Route,
@@ -49,6 +53,7 @@ from vertebra.framework.security import (
     SecurityContext,
 )
 from vertebra.server._fastpath import serialize_fastpath_special_result
+from vertebra.storage._streaming import StreamingStorageResponse
 from vertebra.typing import ImproperConfigurationError
 from vertebra.utils.serializers import (
     ZeroCopyCodecRegistry,
@@ -583,42 +588,6 @@ def _submit_coerced(
     stream_submitter: Callable[..., None] | None = None,
 ) -> None:
     """Submit a handler response using raw fastpath, progressive stream frames, or Py<Response> fallback."""
-    stream_match = _extract_streaming_response(raw, default_status=status_code)
-    if stream_match is not None:
-        st_status, st_headers, st_body = stream_match
-        if isinstance(st_body, AsyncIterable):
-            coro = _stream_async_iterable(
-                request_id,
-                st_status,
-                st_headers,
-                st_body,
-                stream_submitter=stream_submitter,
-            )
-            if scheduler is not None:
-                _schedule_coros(scheduler, [coro])
-                return
-            try:
-                running_loop = asyncio.get_running_loop()
-            except RuntimeError:
-                asyncio.run(coro)
-                return
-            running_loop.create_task(coro)
-            return
-        _stream_sync_iterable(
-            request_id,
-            st_status,
-            st_headers,
-            st_body,
-            stream_submitter=stream_submitter,
-        )
-        return
-
-    unary_tuple = _extract_unary_tuple_response(raw)
-    if unary_tuple is not None:
-        tup_status, tup_headers, tup_body = unary_tuple
-        submit(vr_cls(status=tup_status, body=tup_body, headers=tup_headers or None, request_id=request_id))
-        return
-
     if submit_raw is not None:
         if isinstance(raw, _RAW_BUFFER_TYPES):
             submit_raw(request_id, status_code, raw)
@@ -626,27 +595,35 @@ def _submit_coerced(
         if isinstance(raw, str):
             submit_raw(request_id, status_code, raw.encode("utf-8"))
             return
-        if isinstance(raw, vr_cls):
-            if getattr(raw, "request_id", 0) == 0:
-                raw.request_id = request_id
-            submit(raw)
+    if isinstance(raw, vr_cls):
+        if getattr(raw, "request_id", 0) == 0:
+            raw.request_id = request_id
+        submit(raw)
+        return
+
+    special_outcome = _dispatch_special_return(
+        raw,
+        request_id,
+        vr_cls,
+        submit,
+        status_code=status_code,
+        stream_submitter=stream_submitter,
+    )
+    if special_outcome is True:
+        return
+    if inspect.iscoroutine(special_outcome):
+        if scheduler is not None:
+            _schedule_coros(scheduler, [special_outcome])
             return
-        special = serialize_fastpath_special_result(raw, default_status=status_code)
-        if special is not None:
-            sp_status, sp_headers, sp_body = special
-            sp_str_headers = _to_str_header_pairs(list(sp_headers)) if sp_headers else None
-            if isinstance(sp_body, memoryview) and vr_cls is Response:
-                submit(Response.from_buffer(sp_status, sp_body, sp_str_headers, request_id))
-            else:
-                submit(
-                    vr_cls(
-                        status=sp_status,
-                        body=bytes(sp_body) if isinstance(sp_body, memoryview) else sp_body,
-                        headers=sp_str_headers,
-                        request_id=request_id,
-                    )
-                )
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            asyncio.run(special_outcome)
             return
+        _spawn_tracked_task(running_loop, special_outcome)
+        return
+
+    if submit_raw is not None:
         submit_raw(request_id, status_code, encode_json_bytes(raw), _JSON_CONTENT_TYPE_COMPACT)
         return
 
@@ -678,6 +655,17 @@ async def _invoke_async_handler(
     req_id = getattr(request, "request_id", 0)
     try:
         raw = await spec.invoker(request)
+        if _is_async_storage_response(raw):
+            sp_status, sp_headers, sp_body = await raw.to_async_fastpath_tuple()
+            sp_str_headers = _to_str_header_pairs(list(sp_headers)) if sp_headers else None
+            if isinstance(sp_body, memoryview) and vr_cls is Response:
+                return Response.from_buffer(sp_status, sp_body, sp_str_headers, req_id)
+            return vr_cls(
+                status=sp_status,
+                body=bytes(sp_body) if isinstance(sp_body, memoryview) else sp_body,
+                headers=sp_str_headers,
+                request_id=req_id,
+            )
         stream_match = _extract_streaming_response(raw, default_status=spec.status_code)
         if stream_match is not None:
             st_status, st_byte_headers, st_body = stream_match
@@ -712,35 +700,35 @@ async def _await_async_item(
     """Await a pre-invoked handler coroutine without pinning Request across suspension."""
     try:
         raw = await coro
-        stream_match = _extract_streaming_response(raw, default_status=status_code)
-        if stream_match is not None:
-            st_status, st_headers, st_body = stream_match
-            if isinstance(st_body, AsyncIterable):
-                await _stream_async_iterable(
-                    request_id,
-                    st_status,
-                    st_headers,
-                    st_body,
-                    stream_submitter=stream_submitter,
-                )
-            else:
-                _stream_sync_iterable(
-                    request_id,
-                    st_status,
-                    st_headers,
-                    st_body,
-                    stream_submitter=stream_submitter,
-                )
+        if active_submit_raw is not None:
+            if isinstance(raw, _RAW_BUFFER_TYPES):
+                active_submit_raw(request_id, status_code, raw)
+                return
+            if isinstance(raw, str):
+                active_submit_raw(request_id, status_code, raw.encode("utf-8"))
+                return
+        if isinstance(raw, vr_cls):
+            if getattr(raw, "request_id", 0) == 0:
+                raw.request_id = request_id
+            active_submit(raw)
             return
-        _submit_coerced(
+        special_outcome = _dispatch_special_return(
             raw,
             request_id,
             vr_cls,
             active_submit,
-            active_submit_raw,
             status_code=status_code,
             stream_submitter=stream_submitter,
         )
+        if special_outcome is True:
+            return
+        if inspect.iscoroutine(special_outcome):
+            await special_outcome
+            return
+        if active_submit_raw is not None:
+            active_submit_raw(request_id, status_code, encode_json_bytes(raw), _JSON_CONTENT_TYPE_COMPACT)
+            return
+        active_submit(_coerce_response(raw, request_id, vr_cls, status_code=status_code))
     except Exception as exc:
         err_resp = build_error_response(exc, err_target, error_handler, vr_cls)
         active_submit(err_resp)
@@ -818,10 +806,29 @@ def partition_batch(
     return plan
 
 
+_BACKGROUND_STREAM_TASKS: set[asyncio.Task[Any]] = set()
+
+
+def _spawn_tracked_task(
+    loop: asyncio.AbstractEventLoop,
+    coro: Coroutine[Any, Any, Any],
+) -> asyncio.Task[Any]:
+    """Create a background task on ``loop`` and retain a strong reference until completion."""
+    task = loop.create_task(coro)
+    _BACKGROUND_STREAM_TASKS.add(task)
+    task.add_done_callback(_BACKGROUND_STREAM_TASKS.discard)
+    return task
+
+
 def _create_tasks_batch(loop: asyncio.AbstractEventLoop, coros: list[Coroutine[Any, Any, Any]]) -> None:
-    """Create tasks for a list of coroutines inside the target event loop."""
+    """Create tracked tasks for a list of coroutines inside the target event loop."""
     for coro in coros:
-        loop.create_task(coro)
+        _spawn_tracked_task(loop, coro)
+
+
+async def _gather_coros_inline(coros: list[Coroutine[Any, Any, Any]]) -> None:
+    """Await a batch of coroutines inside an active event loop."""
+    await asyncio.gather(*coros)
 
 
 def _schedule_coros(scheduler: Any, coros: list[Coroutine[Any, Any, Any]]) -> None:
@@ -836,8 +843,9 @@ def _schedule_coros(scheduler: Any, coros: list[Coroutine[Any, Any, Any]]) -> No
         except RuntimeError:
             running = None
         if running is scheduler:
-            for coro in coros:
-                scheduler.create_task(coro)
+            _create_tasks_batch(scheduler, coros)
+        elif not scheduler.is_running():
+            scheduler.run_until_complete(_gather_coros_inline(coros))
         else:
             scheduler.call_soon_threadsafe(_create_tasks_batch, scheduler, coros)
     elif hasattr(scheduler, "primary_loop"):
@@ -1611,12 +1619,27 @@ def _resolve_asgi_batch_timeout() -> float | None:
 
 
 def _is_potential_special_return(raw: Any) -> bool:
-    """Return True when a handler result may be a streaming or status-header-body response."""
-    if raw is None or isinstance(raw, dict | list | bool | int | float | msgspec.Struct):
+    """Return True when a handler result may be a streaming, Arrow, storage, or tuple response."""
+    if raw is None or isinstance(
+        raw,
+        dict | list | bool | int | float | bytes | bytearray | memoryview | str | Response,
+    ):
         return False
-    if dataclasses.is_dataclass(raw):
+    if isinstance(raw, ArrowCursor | RustArrowCursor | StreamingStorageResponse):
+        return True
+    if isinstance(raw, msgspec.Struct) or dataclasses.is_dataclass(raw):
         return False
     return isinstance(raw, tuple | AsyncIterable) or hasattr(raw, "status_code") or hasattr(raw, "status")
+
+
+def _is_async_storage_response(raw: Any) -> bool:
+    """Return True when raw is a StreamingStorageResponse backed by an unloaded AsyncObjectStore."""
+    return (
+        isinstance(raw, StreamingStorageResponse)
+        and raw.data is None
+        and raw.store is not None
+        and type(raw.store).__name__ == "AsyncObjectStore"
+    )
 
 
 def _is_valid_response_headers(headers: Any) -> bool:
@@ -1683,13 +1706,23 @@ def _extract_streaming_response(
             return st, _normalize_header_pairs(hdrs), body
         return None
     if not isinstance(
-        raw, bytes | bytearray | memoryview | str | Mapping | Sequence | msgspec.Struct
+        raw,
+        bytes
+        | bytearray
+        | memoryview
+        | str
+        | Mapping
+        | Sequence
+        | msgspec.Struct
+        | Response
+        | ArrowCursor
+        | RustArrowCursor,
     ) and not dataclasses.is_dataclass(raw):
         raw_status = getattr(raw, "status_code", None)
         if raw_status is None:
             raw_status = getattr(raw, "status", None)
         if isinstance(raw_status, int) and not isinstance(raw_status, bool) and 100 <= raw_status <= 599:
-            for attr_name in ("stream", "iterator", "content", "body"):
+            for attr_name in ("stream", "iterator", "body_iterator", "content", "body"):
                 cand = getattr(raw, attr_name, None)
                 if cand is not None and _is_stream_body(cand):
                     return raw_status, _normalize_header_pairs(getattr(raw, "headers", None)), cand
@@ -1875,52 +1908,96 @@ async def _stream_async_iterable(
                     await res
 
 
-def _try_submit_native_special_return(
+def _submit_fastpath_tuple(
+    sp_status: int,
+    sp_headers: Sequence[tuple[bytes, bytes]],
+    sp_body: bytes | memoryview,
+    request_id: int,
+    vr_cls: Any,
+    submit: Callable[[Any], None],
+) -> None:
+    """Submit a pre-serialized (status, byte_headers, body_or_view) tuple."""
+    sp_str_headers = _to_str_header_pairs(list(sp_headers)) if sp_headers else None
+    if isinstance(sp_body, memoryview) and vr_cls is Response:
+        submit(Response.from_buffer(sp_status, sp_body, sp_str_headers, request_id))
+        return
+    submit(
+        vr_cls(
+            status=sp_status,
+            body=bytes(sp_body) if isinstance(sp_body, memoryview) else sp_body,
+            headers=sp_str_headers,
+            request_id=request_id,
+        )
+    )
+
+
+async def _submit_async_storage_response(
+    resp: StreamingStorageResponse,
+    request_id: int,
+    vr_cls: Any = Response,
+    submit: Callable[[Any], None] = submit_response,
+) -> None:
+    """Resolve an AsyncObjectStore-backed StreamingStorageResponse and submit its payload."""
+    sp_status, sp_headers, sp_body = await resp.to_async_fastpath_tuple()
+    _submit_fastpath_tuple(sp_status, sp_headers, sp_body, request_id, vr_cls, submit)
+
+
+def _dispatch_special_return(
     raw: Any,
     request_id: int,
-    default_status: int = 200,
-    loop_obj: asyncio.AbstractEventLoop | None = None,
-) -> Any:
-    """Handle streaming or tuple native handler returns from drive_native_batch, or return False."""
-    if isinstance(raw, msgspec.Struct) or dataclasses.is_dataclass(raw):
-        return False
+    vr_cls: Any,
+    submit: Callable[[Any], None],
+    *,
+    status_code: int = 200,
+    stream_submitter: Callable[..., None] | None = None,
+) -> bool | Coroutine[Any, Any, None]:
+    """Handle Arrow, StreamingStorageResponse, unary tuples, or sync/async streaming returns."""
+    if _is_async_storage_response(raw):
+        return _submit_async_storage_response(raw, request_id, vr_cls, submit)
 
-    stream_match = _extract_streaming_response(raw, default_status=default_status)
-    if stream_match is not None:
-        st_status, st_headers, st_body = stream_match
-        if isinstance(st_body, AsyncIterable):
-            coro = _stream_async_iterable(request_id, st_status, st_headers, st_body)
-            if isinstance(loop_obj, asyncio.AbstractEventLoop):
-                try:
-                    running = asyncio.get_running_loop()
-                except RuntimeError:
-                    running = None
-                if running is loop_obj or not loop_obj.is_running():
-                    return loop_obj.create_task(coro)
-                loop_obj.call_soon_threadsafe(loop_obj.create_task, coro)
-                return True
-            try:
-                return asyncio.get_running_loop().create_task(coro)
-            except RuntimeError:
-                asyncio.run(coro)
-                return True
-        _stream_sync_iterable(request_id, st_status, st_headers, st_body)
+    special = serialize_fastpath_special_result(raw, default_status=status_code)
+    if special is not None:
+        sp_status, sp_headers, sp_body = special
+        _submit_fastpath_tuple(sp_status, sp_headers, sp_body, request_id, vr_cls, submit)
         return True
 
     unary_tuple = _extract_unary_tuple_response(raw)
     if unary_tuple is not None:
         tup_status, tup_headers, tup_body = unary_tuple
-        submit_response(Response(tup_status, tup_body, tup_headers or None, request_id))
+        submit(vr_cls(status=tup_status, body=tup_body, headers=tup_headers or None, request_id=request_id))
         return True
 
-    special = serialize_fastpath_special_result(raw, default_status=default_status)
-    if special is not None:
-        sp_status, sp_headers, sp_body = special
-        sp_str_headers = _to_str_header_pairs(list(sp_headers)) if sp_headers else None
-        if isinstance(sp_body, memoryview):
-            submit_response(Response.from_buffer(sp_status, sp_body, sp_str_headers, request_id))
-        else:
-            submit_response(Response(sp_status, bytes(sp_body), sp_str_headers, request_id))
+    stream_match = _extract_streaming_response(raw, default_status=status_code)
+    if stream_match is not None:
+        st_status, st_headers, st_body = stream_match
+        if isinstance(st_body, AsyncIterable):
+            return _stream_async_iterable(
+                request_id,
+                st_status,
+                st_headers,
+                st_body,
+                stream_submitter=stream_submitter,
+            )
+        _stream_sync_iterable(
+            request_id,
+            st_status,
+            st_headers,
+            st_body,
+            stream_submitter=stream_submitter,
+        )
         return True
 
     return False
+
+
+def _try_submit_native_special_return(
+    raw: Any,
+    request_id: int,
+    default_status: int = 200,
+) -> bool | Coroutine[Any, Any, None]:
+    """Handle streaming, Arrow, storage, or tuple native handler returns from drive_native_batch."""
+    if isinstance(raw, ArrowCursor | RustArrowCursor | StreamingStorageResponse):
+        return _dispatch_special_return(raw, request_id, Response, submit_response, status_code=default_status)
+    if isinstance(raw, msgspec.Struct) or dataclasses.is_dataclass(raw):
+        return False
+    return _dispatch_special_return(raw, request_id, Response, submit_response, status_code=default_status)

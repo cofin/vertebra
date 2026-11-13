@@ -13,10 +13,15 @@ from pathlib import Path
 import msgspec
 import pytest
 
+import vertebra.cli as _vtb_cli
+from vertebra.supervisor._supervisor import find_server_binary
+
 __all__ = (
     "LiveServerHandle",
     "live_vertebra_server",
 )
+
+_ = _vtb_cli
 
 _STREAMING_FIXTURE_MODULE = textwrap.dedent(
     """\
@@ -120,9 +125,10 @@ def live_vertebra_server(
     """Start vertebra-server in embedded or SHM mode against the streaming fixture app."""
     topology = str(request.param)
     repo_root = Path(__file__).resolve().parents[5]
-    binary_path = _resolve_server_binary(repo_root)
-    if binary_path is None:
-        pytest.skip("vertebra-server binary not found")
+    try:
+        binary_path = find_server_binary()
+    except SystemExit:
+        pytest.skip("vertebra-server binary not built yet (https://github.com/cofin/vertebra/issues/82)")
 
     app_dir = tmp_path_factory.mktemp(f"vtb_srv_{topology}")
     module_name = f"vtb_live_stream_app_{topology}"
@@ -171,22 +177,6 @@ def live_vertebra_server(
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait(timeout=2.0)
-
-
-def _resolve_server_binary(repo_root: Path) -> Path | None:
-    """Locate the vertebra-server executable from VERTEBRA_SERVER_BINARY or target/debug."""
-    configured = os.environ.get("VERTEBRA_SERVER_BINARY", "").strip()
-    if configured:
-        cand = Path(configured)
-        if cand.is_file():
-            return cand
-    debug_bin = repo_root / "src" / "rs" / "target" / "debug" / "vertebra-server"
-    if debug_bin.is_file():
-        return debug_bin
-    release_bin = repo_root / "src" / "rs" / "target" / "release" / "vertebra-server"
-    if release_bin.is_file():
-        return release_bin
-    return None
 
 
 def _reserve_ephemeral_port() -> int:

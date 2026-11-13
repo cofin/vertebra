@@ -6,8 +6,7 @@
 //!
 //! The transport mode is selected by the `mode` parameter of `init_transport()`.
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -31,8 +30,6 @@ use crate::response::Response;
 
 /// Global SHM transport, set once by `init_transport(mode="shm")`.
 static SHM_TRANSPORT: OnceLock<Transport> = OnceLock::new();
-static PY_STREAM_SINK: RwLock<Option<Py<PyAny>>> = RwLock::new(None);
-static PY_STREAM_SINK_INSTALLED: AtomicBool = AtomicBool::new(false);
 const STREAM_FRAME_WIRE_OVERHEAD: usize = 22;
 
 /// Initialize the transport channel. Called once during worker startup.
@@ -437,16 +434,6 @@ impl ResponseSubmitter {
         let bridge = BatchBridge::get().ok_or_else(|| {
             PyRuntimeError::new_err("transport not initialized; call init_transport() first")
         })?;
-        if PY_STREAM_SINK_INSTALLED.load(Ordering::Acquire)
-            && PY_STREAM_SINK
-                .read()
-                .map(|guard| guard.is_none())
-                .unwrap_or(false)
-        {
-            return Err(PyRuntimeError::new_err(
-                "failed to submit stream frame: stream sink not registered",
-            ));
-        }
 
         let max_payload = default_max_stream_frame_payload();
         if max_payload == 0 || headers_raw.len() > max_payload {
@@ -602,56 +589,45 @@ pub fn submit_stream_frame(
 /// Register or clear an in-process Python stream sink callback for unit testing.
 #[pyfunction]
 #[pyo3(name = "_set_stream_sink", signature = (sink=None))]
-pub fn set_stream_sink_py(py: Python<'_>, sink: Option<Py<PyAny>>) -> PyResult<()> {
+pub fn set_stream_sink_py(_py: Python<'_>, sink: Option<Py<PyAny>>) -> PyResult<()> {
     let bridge = BatchBridge::get().ok_or_else(|| {
         PyRuntimeError::new_err("transport not initialized; call init_transport() first")
     })?;
-    {
-        let mut guard = PY_STREAM_SINK
-            .write()
-            .map_err(|_| PyRuntimeError::new_err("stream sink lock poisoned"))?;
-        *guard = sink.map(|s| s.clone_ref(py));
-    }
-    if !PY_STREAM_SINK_INSTALLED.swap(true, Ordering::AcqRel) {
-        bridge.set_stream_sink(Arc::new(|frame: ResponseStreamFrame| {
-            Python::attach(|py| {
-                let cb_opt = PY_STREAM_SINK
-                    .read()
-                    .ok()
-                    .and_then(|g| g.as_ref().map(|cb| cb.clone_ref(py)));
-                let Some(cb) = cb_opt else {
-                    return StreamDelivery::Closed;
-                };
-                let pairs: Vec<(Bound<'_, PyBytes>, Bound<'_, PyBytes>)> = frame
-                    .iter_headers()
-                    .map(|(k, v)| (PyBytes::new(py, k), PyBytes::new(py, v)))
-                    .collect();
-                let Ok(py_headers) = PyList::new(py, pairs) else {
-                    return StreamDelivery::Closed;
-                };
-                let py_body = PyBytes::new(py, &frame.body);
-                match cb.call1(
-                    py,
-                    (
-                        frame.request_id,
-                        frame.status,
-                        frame.flags,
-                        py_headers,
-                        py_body,
-                    ),
-                ) {
-                    Ok(ret) => {
-                        if ret.bind(py).is(PyBool::new(py, false)) {
-                            StreamDelivery::Closed
-                        } else {
-                            StreamDelivery::Accepted
-                        }
+    let Some(cb) = sink else {
+        bridge.clear_stream_sink();
+        return Ok(());
+    };
+    bridge.set_stream_sink(Arc::new(move |frame: ResponseStreamFrame| {
+        Python::attach(|py| {
+            let pairs: Vec<(Bound<'_, PyBytes>, Bound<'_, PyBytes>)> = frame
+                .iter_headers()
+                .map(|(k, v)| (PyBytes::new(py, k), PyBytes::new(py, v)))
+                .collect();
+            let Ok(py_headers) = PyList::new(py, pairs) else {
+                return StreamDelivery::Closed;
+            };
+            let py_body = PyBytes::new(py, &frame.body);
+            match cb.call1(
+                py,
+                (
+                    frame.request_id,
+                    frame.status,
+                    frame.flags,
+                    py_headers,
+                    py_body,
+                ),
+            ) {
+                Ok(ret) => {
+                    if ret.bind(py).is(PyBool::new(py, false)) {
+                        StreamDelivery::Closed
+                    } else {
+                        StreamDelivery::Accepted
                     }
-                    Err(_) => StreamDelivery::Closed,
                 }
-            })
-        }));
-    }
+                Err(_) => StreamDelivery::Closed,
+            }
+        })
+    }));
     Ok(())
 }
 
@@ -1007,37 +983,30 @@ pub fn submit_raw_response(
                 chunk,
             )?;
         } else if let Some(bridge) = BatchBridge::get() {
-            let py_sink_cleared = PY_STREAM_SINK_INSTALLED.load(Ordering::Acquire)
-                && PY_STREAM_SINK
-                    .read()
-                    .map(|guard| guard.is_none())
-                    .unwrap_or(false);
-            if !py_sink_cleared {
-                let stream_frame = ResponseStreamFrame {
-                    request_id,
-                    status,
-                    flags: chunk_flags,
-                    headers_raw: if headers_raw.is_empty() {
-                        Bytes::new()
-                    } else {
-                        Bytes::copy_from_slice(&headers_raw)
-                    },
-                    body: if chunk.is_empty() {
-                        Bytes::new()
-                    } else {
-                        Bytes::copy_from_slice(chunk)
-                    },
-                };
-                match py.detach(|| bridge.submit_stream_frame(stream_frame)) {
-                    Ok(StreamDelivery::Accepted) | Err(TransportError::Disconnected) => {}
-                    Ok(StreamDelivery::Closed) => {
-                        return Err(PyConnectionResetError::new_err("stream closed by peer"));
-                    }
-                    Err(err) => {
-                        return Err(PyRuntimeError::new_err(format!(
-                            "failed to submit stream frame: {err}"
-                        )));
-                    }
+            let stream_frame = ResponseStreamFrame {
+                request_id,
+                status,
+                flags: chunk_flags,
+                headers_raw: if headers_raw.is_empty() {
+                    Bytes::new()
+                } else {
+                    Bytes::copy_from_slice(&headers_raw)
+                },
+                body: if chunk.is_empty() {
+                    Bytes::new()
+                } else {
+                    Bytes::copy_from_slice(chunk)
+                },
+            };
+            match py.detach(|| bridge.submit_stream_frame(stream_frame)) {
+                Ok(StreamDelivery::Accepted) | Err(TransportError::Disconnected) => {}
+                Ok(StreamDelivery::Closed) => {
+                    return Err(PyConnectionResetError::new_err("stream closed by peer"));
+                }
+                Err(err) => {
+                    return Err(PyRuntimeError::new_err(format!(
+                        "failed to submit stream frame: {err}"
+                    )));
                 }
             }
         }
@@ -1383,6 +1352,32 @@ mod tests {
             )
             .expect_err("closed sink should raise ConnectionResetError");
             assert!(closed_err.is_instance_of::<PyConnectionResetError>(py));
+
+            let noop_cb = py.None();
+            set_stream_sink_py(py, Some(noop_cb)).expect("install py sink");
+            set_stream_sink_py(py, None).expect("clear py sink");
+            let unreg_err = ResponseSubmitter::submit_stream_frame_inner(
+                py,
+                10,
+                200,
+                FLAG_STREAMING | FLAG_HEADERS_SENT,
+                b"",
+                b"after-clear",
+            )
+            .expect_err("cleared sink should raise RuntimeError");
+            assert!(unreg_err.is_instance_of::<PyRuntimeError>(py));
+
+            bridge.set_stream_sink(Arc::new(|_| StreamDelivery::Accepted));
+            ResponseSubmitter::submit_stream_frame_inner(
+                py,
+                11,
+                200,
+                FLAG_STREAMING | FLAG_HEADERS_SENT | FLAG_FINAL,
+                b"",
+                b"rust-reinstalled",
+            )
+            .expect("rust sink works after _set_stream_sink(None)");
+            bridge.clear_stream_sink();
         });
     }
 }

@@ -9,6 +9,9 @@ from typing import Any, cast
 import msgspec
 
 from vertebra._vertebra import (
+    STREAM_FLAG_FINAL,
+    STREAM_FLAG_STREAMING,
+    STREAM_FLAG_TRAILERS,
     AsgiScope,
     RequestBatch,
     drive_asgi_batch,
@@ -54,9 +57,9 @@ __all__ = (
 
 logger = logging.getLogger(__name__)
 
-FLAG_STREAMING: int = 1 << 0
-FLAG_FINAL: int = 1 << 1
-FLAG_TRAILERS: int = 1 << 5
+FLAG_STREAMING: int = STREAM_FLAG_STREAMING
+FLAG_FINAL: int = STREAM_FLAG_FINAL
+FLAG_TRAILERS: int = STREAM_FLAG_TRAILERS
 
 
 class _InlineAsgiRequest(msgspec.Struct, frozen=True, gc=False):
@@ -349,38 +352,11 @@ class AsgiRunner:
         send = AsgiSend(request_id=request_id, on_chunk=self._on_chunk)
 
         try:
-            if self._fastpath is not None and self._on_chunk is None:
-                raw_req_body = body if isinstance(body, bytes) else bytes(body)
-                direct = await self._fastpath.dispatch(scope, receive, send, body=raw_req_body)
-                if direct is not None:
-                    status_code, encoded_headers, raw_body = direct
-                    decoded_headers = [(k.decode("latin-1"), v.decode("latin-1")) for k, v in encoded_headers]
-                    zc_buf = raw_body if isinstance(raw_body, memoryview) else None
-                    return AsgiResponse(
-                        status=status_code,
-                        headers=decoded_headers,
-                        body=raw_body,
-                        request_id=request_id,
-                        zero_copy_buffer=zc_buf,
-                        raw_headers=encoded_headers,
-                    )
-                if send.started:
-                    resp = send.response
-                    if resp.trailers:
-                        self._emit_trailers(resp, request_id)
-                    return resp
-
-            await self._app(scope, receive, send)
+            resp = await self._drive_asgi_once(scope, body, receive, send, request_id)
+            assert resp is not None
+            return resp
         except PayloadTooLargeError:
-            if not send.started:
-                return AsgiResponse(
-                    status=413,
-                    headers=[("content-type", "text/plain; charset=utf-8"), ("content-length", "17")],
-                    body=b"Payload Too Large",
-                    request_id=request_id,
-                    raw_headers=[(b"content-type", b"text/plain; charset=utf-8"), (b"content-length", b"17")],
-                )
-            return send.response
+            return self._payload_too_large_response(send, request_id)
         except Exception:
             logger.exception("Unhandled exception in ASGI application for %s", getattr(request, "path", "/"))
             if not send.started:
@@ -396,11 +372,6 @@ class AsgiRunner:
                 body=b"",
                 request_id=request_id,
             )
-
-        resp = send.response
-        if resp.trailers:
-            self._emit_trailers(resp, request_id)
-        return resp
 
     async def handle_path(
         self,
@@ -711,34 +682,7 @@ class AsgiRunner:
             stream_submitter=_forward_stream,
         )
         try:
-            if self._fastpath is not None and self._on_chunk is None:
-                raw_req_body = body if isinstance(body, bytes) else bytes(body)
-                direct = await self._fastpath.dispatch(scope, receive, send, body=raw_req_body)
-                if direct is not None:
-                    status_code, encoded_headers, raw_body = direct
-                    decoded_headers = [(k.decode("latin-1"), v.decode("latin-1")) for k, v in encoded_headers]
-                    zc_buf = raw_body if isinstance(raw_body, memoryview) else None
-                    direct_resp = AsgiResponse(
-                        status=status_code,
-                        headers=decoded_headers,
-                        body=raw_body,
-                        request_id=req_id,
-                        zero_copy_buffer=zc_buf,
-                        raw_headers=encoded_headers,
-                    )
-                    active_unary(self._to_native_response(direct_resp, req_id))
-                    return
-                if send.streamed:
-                    send.finish_stream()
-                    return
-                if send.started:
-                    resp = send.response
-                    if resp.trailers:
-                        self._emit_trailers(resp, req_id)
-                    active_unary(self._to_native_response(resp, req_id))
-                    return
-
-            await self._app(scope, receive, send)
+            resp_or_none = await self._drive_asgi_once(scope, body, receive, send, req_id, allow_stream=True)
         except ConnectionResetError:
             disconnect_event.set()
             return
@@ -746,55 +690,92 @@ class AsgiRunner:
             if send.streamed:
                 send.finish_stream(error=True)
                 return
-            if not send.started:
-                active_unary(
-                    _NativeResponse(
-                        413,
-                        b"Payload Too Large",
-                        [("content-type", "text/plain; charset=utf-8"), ("content-length", "17")],
-                        req_id,
-                    )
-                )
-                return
-            active_unary(self._to_native_response(send.response, req_id))
+            active_unary(self._to_native_response(self._payload_too_large_response(send, req_id), req_id))
             return
         except Exception:
             logger.exception("Unhandled error in spawned ASGI task (request_id=%d)", req_id)
             if send.streamed:
                 send.finish_stream(error=True)
                 return
-            try:
-                err_resp = _NativeResponse(
-                    500,
-                    b"Internal Server Error",
-                    [("content-type", "text/plain")],
-                    req_id,
-                )
-                active_unary(err_resp)
-            except Exception:
-                logger.exception("Failed to submit error response for request_id=%d", req_id)
+            self._submit_fallback_500(active_unary, req_id)
             return
 
-        if send.streamed:
-            send.finish_stream()
+        if resp_or_none is None:
             return
         try:
-            resp = send.response
-            if resp.trailers:
-                self._emit_trailers(resp, req_id)
-            active_unary(self._to_native_response(resp, req_id))
+            active_unary(self._to_native_response(resp_or_none, req_id))
         except Exception:
             logger.exception("Unhandled error finalizing spawned ASGI response (request_id=%d)", req_id)
-            try:
-                err_resp = _NativeResponse(
+            self._submit_fallback_500(active_unary, req_id)
+
+    async def _drive_asgi_once(
+        self,
+        scope: Any,
+        body: Any,
+        receive: AsgiReceive,
+        send: AsgiSend,
+        request_id: int,
+        *,
+        allow_stream: bool = False,
+    ) -> AsgiResponse | None:
+        if self._fastpath is not None and self._on_chunk is None:
+            raw_req_body = body if isinstance(body, bytes) else bytes(body)
+            direct = await self._fastpath.dispatch(scope, receive, send, body=raw_req_body)
+            if direct is not None:
+                status_code, encoded_headers, raw_body = direct
+                decoded_headers = [(k.decode("latin-1"), v.decode("latin-1")) for k, v in encoded_headers]
+                zc_buf = raw_body if isinstance(raw_body, memoryview) else None
+                return AsgiResponse(
+                    status=status_code,
+                    headers=decoded_headers,
+                    body=raw_body,
+                    request_id=request_id,
+                    zero_copy_buffer=zc_buf,
+                    raw_headers=encoded_headers,
+                )
+            if allow_stream and send.streamed:
+                send.finish_stream()
+                return None
+            if send.started:
+                resp = send.response
+                if resp.trailers:
+                    self._emit_trailers(resp, request_id)
+                return resp
+
+        await self._app(scope, receive, send)
+        if allow_stream and send.streamed:
+            send.finish_stream()
+            return None
+        resp = send.response
+        if resp.trailers:
+            self._emit_trailers(resp, request_id)
+        return resp
+
+    @staticmethod
+    def _payload_too_large_response(send: AsgiSend, request_id: int) -> AsgiResponse:
+        if not send.started:
+            return AsgiResponse(
+                status=413,
+                headers=[("content-type", "text/plain; charset=utf-8"), ("content-length", "17")],
+                body=b"Payload Too Large",
+                request_id=request_id,
+                raw_headers=[(b"content-type", b"text/plain; charset=utf-8"), (b"content-length", b"17")],
+            )
+        return send.response
+
+    @staticmethod
+    def _submit_fallback_500(active_unary: Callable[[_NativeResponse], None], request_id: int) -> None:
+        try:
+            active_unary(
+                _NativeResponse(
                     500,
                     b"Internal Server Error",
                     [("content-type", "text/plain")],
-                    req_id,
+                    request_id,
                 )
-                active_unary(err_resp)
-            except Exception:
-                logger.exception("Failed to submit error response for request_id=%d", req_id)
+            )
+        except Exception:
+            logger.exception("Failed to submit error response for request_id=%d", request_id)
 
     def _to_native_response(self, resp: AsgiResponse, request_id: int) -> _NativeResponse:
         """Convert an ``AsgiResponse`` to a Rust ``Response`` without extra body copies."""

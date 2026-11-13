@@ -14,6 +14,7 @@ from vertebra._vertebra import (
     Request,
     Response,
     _set_stream_sink,
+    drive_native_batch,
     init_transport,
 )
 from vertebra.server._asgi._sse import SseEvent, SseResponse, extract_last_event_id
@@ -24,6 +25,9 @@ from vertebra.server._dispatch import (
     compile_handler_spec,
     dispatch_batch,
 )
+from vertebra.server._loops import EventLoopPool
+from vertebra.storage import AsyncObjectStore, MemoryConfig, SyncObjectStore
+from vertebra.storage._streaming import StreamingStorageResponse
 from vertebra.utils.serializers import decode_json, encode_json_bytes
 
 
@@ -237,6 +241,7 @@ async def test_drive_native_batch_streams_async_generator_before_gate_release() 
     init_transport()
     gate = asyncio.Event()
     first_chunk_event = asyncio.Event()
+    terminal_flushed = asyncio.Event()
     frames: list[tuple[int, int, int, list[tuple[bytes, bytes]], bytes]] = []
 
     def sink(
@@ -249,6 +254,8 @@ async def test_drive_native_batch_streams_async_generator_before_gate_release() 
         frames.append((req_id, status, flags, headers, body))
         if body == b"data: first\n\n":
             first_chunk_event.set()
+        if (flags & (STREAM_FLAG_FINAL | STREAM_FLAG_ERROR)) != 0:
+            terminal_flushed.set()
         return True
 
     async def sse_endpoint() -> tuple[int, list[tuple[str, str]], AsyncIterator[bytes]]:
@@ -280,11 +287,134 @@ async def test_drive_native_batch_streams_async_generator_before_gate_release() 
             (790, 200, STREAM_FLAG_STREAMING, [], b"data: first\n\n"),
         ]
         gate.set()
-        for _ in range(20):
-            if frames and (frames[-1][2] & STREAM_FLAG_FINAL) != 0:
-                break
-            await asyncio.sleep(0.005)
+        await asyncio.wait_for(terminal_flushed.wait(), timeout=1.0)
         assert frames[-2] == (790, 200, STREAM_FLAG_STREAMING, [], b"data: second\n\n")
         assert frames[-1] == (790, 200, STREAM_FLAG_STREAMING | STREAM_FLAG_FINAL, [], b"")
     finally:
         _set_stream_sink(None)
+
+
+def test_stopped_inline_loop_and_suspended_native_async_stream_complete_fully() -> None:
+    """Verify drive_until_complete and inline_single_loop EventLoopPool finish async streams without hanging."""
+    init_transport()
+    frames: list[tuple[int, int, int, list[tuple[bytes, bytes]], bytes]] = []
+    _set_stream_sink(lambda rid, st, fl, hd, bd: frames.append((rid, st, fl, hd, bd)) or True)
+    pool = EventLoopPool(size=1, inline_single_loop=True)
+    try:
+
+        async def suspended_sse() -> tuple[int, list[tuple[str, str]], AsyncIterator[bytes]]:
+            await asyncio.sleep(0)
+
+            async def gen() -> AsyncIterator[bytes]:
+                await asyncio.sleep(0)
+                yield b"data: step-1\n\n"
+                await asyncio.sleep(0)
+                yield b"data: step-2\n\n"
+
+            return 200, [("content-type", "text/event-stream")], gen()
+
+        drive_native_batch([(991, suspended_sse(), 200)], loop_obj=pool.primary_loop)
+        assert [f[4] for f in frames if f[0] == 991] == [b"", b"data: step-1\n\n", b"data: step-2\n\n", b""]
+        assert (frames[-1][2] & STREAM_FLAG_FINAL) != 0
+
+        frames.clear()
+
+        def sync_returning_async_stream() -> tuple[int, list[tuple[str, str]], AsyncIterator[bytes]]:
+            async def gen() -> AsyncIterator[bytes]:
+                await asyncio.sleep(0)
+                yield b"sync-to-async"
+
+            return 200, [("x-mode", "inline")], gen()
+
+        _submit_coerced(
+            sync_returning_async_stream(),
+            992,
+            Response,
+            lambda _r: None,
+            scheduler=pool,
+        )
+        assert [f[4] for f in frames if f[0] == 992] == [b"", b"sync-to-async", b""]
+        assert (frames[-1][2] & STREAM_FLAG_FINAL) != 0
+    finally:
+        _set_stream_sink(None)
+        pool.stop()
+
+
+@pytest.mark.anyio
+async def test_native_special_returns_support_storage_response_and_body_iterator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify StreamingStorageResponse (sync + async) and .body_iterator stream objects dispatch cleanly."""
+    init_transport()
+    monkeypatch.setattr(SyncObjectStore, "_ensure_native_module", classmethod(lambda _cls: object()))
+    monkeypatch.setattr(AsyncObjectStore, "_ensure_native_module", classmethod(lambda _cls: object()))
+
+    class StubSyncNativeStore:
+        def get_buffer(self, _key: str) -> bytes:
+            return b"storage-payload"
+
+        def head(self, _key: str) -> Any:
+            return type("Meta", (), {"size": len(b"storage-payload")})()
+
+    class StubAsyncNativeStore:
+        async def get_buffer(self, _key: str) -> bytes:
+            await asyncio.sleep(0)
+            return b"storage-payload"
+
+        async def head(self, _key: str) -> Any:
+            return type("Meta", (), {"size": len(b"storage-payload")})()
+
+    sync_store = SyncObjectStore(MemoryConfig(), _native_instance=StubSyncNativeStore())
+    async_store = AsyncObjectStore(MemoryConfig(), _native_instance=StubAsyncNativeStore())
+
+    submitted_responses: list[Response] = []
+    sync_desc = StreamingStorageResponse(
+        store=sync_store,
+        key="hello.txt",
+        total_size=len(b"storage-payload"),
+        content_type="text/plain",
+    )
+    _submit_coerced(sync_desc, 995, Response, submitted_responses.append, submit_raw=lambda *_: None)
+    assert len(submitted_responses) == 1
+    assert bytes(submitted_responses[0].body) == b"storage-payload"
+
+    submitted_responses.clear()
+    async_desc = StreamingStorageResponse(
+        store=async_store,
+        key="hello.txt",
+        total_size=len(b"storage-payload"),
+        content_type="text/plain",
+    )
+
+    async def async_storage_handler() -> StreamingStorageResponse:
+        return async_desc
+
+    await _await_async_item(
+        async_storage_handler(),
+        996,
+        None,
+        None,
+        Response,
+        submitted_responses.append,
+        lambda *_: None,
+    )
+    assert len(submitted_responses) == 1
+    assert bytes(submitted_responses[0].body) == b"storage-payload"
+
+    class BodyIteratorResponse:
+        status_code = 202
+        headers = [("x-iter", "yes")]
+
+        def __init__(self) -> None:
+            self.body_iterator = iter([b"chunk-a", b"chunk-b"])
+
+    stream_frames: list[tuple[int, int, int, list[tuple[bytes, bytes]], bytes]] = []
+    _submit_coerced(
+        BodyIteratorResponse(),
+        997,
+        Response,
+        submitted_responses.append,
+        stream_submitter=lambda rid, st, fl, hd, bd: stream_frames.append((rid, st, fl, hd, bd)),
+    )
+    assert [f[4] for f in stream_frames] == [b"", b"chunk-a", b"chunk-b", b""]
+    assert stream_frames[0][1] == 202

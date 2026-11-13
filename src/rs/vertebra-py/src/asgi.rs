@@ -11,7 +11,9 @@ use pyo3::exceptions::{
 };
 use pyo3::ffi;
 use pyo3::prelude::*;
-use pyo3::types::{PyBool, PyBytes, PyDict, PyList, PyString, PyTuple};
+use pyo3::types::{
+    PyBool, PyByteArray, PyBytes, PyDict, PyFloat, PyInt, PyList, PyMemoryView, PyString, PyTuple,
+};
 
 use vertebra_core::ipc::{
     FLAG_ERROR, FLAG_FINAL, FLAG_HEADERS_SENT, FLAG_STREAMING, FLAG_TRAILERS,
@@ -2012,7 +2014,7 @@ static TRY_SUBMIT_NATIVE_SPECIAL_FN: pyo3::sync::PyOnceLock<Py<PyAny>> =
 enum NativeSpecialOutcome<'py> {
     NotSpecial,
     SubmittedInline,
-    SpawnedTask(Bound<'py, PyAny>),
+    StreamCoro(Bound<'py, PyAny>),
 }
 
 fn try_submit_native_special<'py>(
@@ -2020,19 +2022,24 @@ fn try_submit_native_special<'py>(
     request_id: u64,
     default_status: u16,
     raw: &Bound<'py, PyAny>,
-    active_loop: Option<&Bound<'py, PyAny>>,
 ) -> PyResult<NativeSpecialOutcome<'py>> {
     if raw.is_none()
+        || raw.is_instance_of::<PyBytes>()
+        || raw.is_instance_of::<PyString>()
+        || raw.is_instance_of::<PyByteArray>()
+        || raw.is_instance_of::<PyMemoryView>()
+        || raw.is_instance_of::<Response>()
         || raw.is_instance_of::<PyDict>()
         || raw.is_instance_of::<PyList>()
         || raw.is_instance_of::<PyBool>()
-        || raw.is_instance_of::<pyo3::types::PyInt>()
-        || raw.is_instance_of::<pyo3::types::PyFloat>()
+        || raw.is_instance_of::<PyInt>()
+        || raw.is_instance_of::<PyFloat>()
     {
         return Ok(NativeSpecialOutcome::NotSpecial);
     }
     let candidate = raw.is_instance_of::<PyTuple>()
         || raw.hasattr(pyo3::intern!(py, "__aiter__"))?
+        || raw.hasattr(pyo3::intern!(py, "buffer_view"))?
         || raw.hasattr(pyo3::intern!(py, "status_code"))?
         || raw.hasattr(pyo3::intern!(py, "status"))?;
     if !candidate {
@@ -2045,20 +2052,16 @@ fn try_submit_native_special<'py>(
                 .getattr(pyo3::intern!(py, "_try_submit_native_special_return"))?
                 .unbind())
         })?;
-    let loop_arg: Bound<'py, PyAny> = match active_loop {
-        Some(lp) => lp.clone(),
-        None => py.None().into_bound(py),
-    };
     let res = helper_fn
         .bind(py)
-        .call1((raw, request_id, default_status, loop_arg))?;
+        .call1((raw, request_id, default_status))?;
     if res.is(PyBool::new(py, false)) {
         return Ok(NativeSpecialOutcome::NotSpecial);
     }
     if res.is(PyBool::new(py, true)) || res.is_none() {
         return Ok(NativeSpecialOutcome::SubmittedInline);
     }
-    Ok(NativeSpecialOutcome::SpawnedTask(res))
+    Ok(NativeSpecialOutcome::StreamCoro(res))
 }
 
 fn prepare_native_flushed_response(
@@ -2166,20 +2169,28 @@ pub(crate) enum ProtocolFinalizer {
         request_id: u64,
         default_status: u16,
     },
+    StreamDone,
 }
 
 impl ProtocolFinalizer {
-    fn on_return(&self, py: Python<'_>, ret_val: &Bound<'_, PyAny>) -> PyResult<()> {
+    fn on_return(&self, py: Python<'_>, ret_val: &Bound<'_, PyAny>) -> PyResult<Option<Py<PyAny>>> {
         match self {
-            Self::Asgi(proto) => proto.bind(py).get().finalize_async_return(py),
-            Self::Rsgi(proto) => proto.bind(py).get().finalize_async_return(py),
+            Self::Asgi(proto) => {
+                proto.bind(py).get().finalize_async_return(py)?;
+                Ok(None)
+            }
+            Self::Rsgi(proto) => {
+                proto.bind(py).get().finalize_async_return(py)?;
+                Ok(None)
+            }
+            Self::StreamDone => Ok(None),
             Self::Native {
                 request_id,
                 default_status,
             } => {
-                match try_submit_native_special(py, *request_id, *default_status, ret_val, None)? {
-                    NativeSpecialOutcome::SubmittedInline
-                    | NativeSpecialOutcome::SpawnedTask(_) => return Ok(()),
+                match try_submit_native_special(py, *request_id, *default_status, ret_val)? {
+                    NativeSpecialOutcome::SubmittedInline => return Ok(None),
+                    NativeSpecialOutcome::StreamCoro(coro) => return Ok(Some(coro.unbind())),
                     NativeSpecialOutcome::NotSpecial => {}
                 }
                 let flushed =
@@ -2190,7 +2201,8 @@ impl ProtocolFinalizer {
                     flushed.status,
                     &flushed.headers_raw,
                     flushed.body.as_slice(py),
-                )
+                )?;
+                Ok(None)
             }
         }
     }
@@ -2199,6 +2211,7 @@ impl ProtocolFinalizer {
         match self {
             Self::Asgi(proto) => proto.bind(py).get().finalize_async_error(py),
             Self::Rsgi(proto) => proto.bind(py).get().finalize_async_error(py),
+            Self::StreamDone => Ok(()),
             Self::Native { request_id, .. } => {
                 let flushed = prepare_native_error_response(py, *request_id, err);
                 ResponseSubmitter::submit_raw_inner(
@@ -2244,41 +2257,48 @@ pub struct SteppedCoroutine {
 }
 
 impl SteppedCoroutine {
-    fn step_ptr(&mut self, py: Python<'_>, arg_ptr: *mut ffi::PyObject) -> PyResult<Py<PyAny>> {
+    fn step_ptr(&mut self, py: Python<'_>, mut arg_ptr: *mut ffi::PyObject) -> PyResult<Py<PyAny>> {
         if let Some(first) = self.first_yielded.take() {
             return Ok(first);
         }
-        let Some(ref coro) = self.coro else {
-            return Err(PyStopIteration::new_err(py.None()));
-        };
-        let mut yielded: *mut ffi::PyObject = std::ptr::null_mut();
-        let send_res = unsafe { ffi::PyIter_Send(coro.as_ptr(), arg_ptr, &mut yielded) };
-        match send_res {
-            ffi::PySendResult::PYGEN_NEXT => {
-                Ok(unsafe { Bound::from_owned_ptr(py, yielded) }.unbind())
-            }
-            ffi::PySendResult::PYGEN_RETURN => {
-                let ret_val = if yielded.is_null() {
-                    py.None()
-                } else {
-                    unsafe { Bound::from_owned_ptr(py, yielded) }.unbind()
-                };
-                self.coro = None;
-                self.self_task = None;
-                if let Some(fin) = self.finalizer.take() {
-                    fin.on_return(py, ret_val.bind(py))?;
+        loop {
+            let Some(ref coro) = self.coro else {
+                return Err(PyStopIteration::new_err(py.None()));
+            };
+            let mut yielded: *mut ffi::PyObject = std::ptr::null_mut();
+            let send_res = unsafe { ffi::PyIter_Send(coro.as_ptr(), arg_ptr, &mut yielded) };
+            match send_res {
+                ffi::PySendResult::PYGEN_NEXT => {
+                    return Ok(unsafe { Bound::from_owned_ptr(py, yielded) }.unbind());
                 }
-                Err(PyStopIteration::new_err(ret_val))
-            }
-            ffi::PySendResult::PYGEN_ERROR => {
-                let err = PyErr::fetch(py);
-                self.coro = None;
-                self.self_task = None;
-                log_app_exception(py, self.protocol_label, &err);
-                if let Some(fin) = self.finalizer.take() {
-                    let _ = fin.on_error(py, &err);
+                ffi::PySendResult::PYGEN_RETURN => {
+                    let ret_val = if yielded.is_null() {
+                        py.None()
+                    } else {
+                        unsafe { Bound::from_owned_ptr(py, yielded) }.unbind()
+                    };
+                    self.coro = None;
+                    if let Some(fin) = self.finalizer.take()
+                        && let Some(followup_coro) = fin.on_return(py, ret_val.bind(py))?
+                    {
+                        self.coro = Some(followup_coro);
+                        self.finalizer = Some(ProtocolFinalizer::StreamDone);
+                        arg_ptr = unsafe { ffi::Py_None() };
+                        continue;
+                    }
+                    self.self_task = None;
+                    return Err(PyStopIteration::new_err(ret_val));
                 }
-                Err(PyStopIteration::new_err(py.None()))
+                ffi::PySendResult::PYGEN_ERROR => {
+                    let err = PyErr::fetch(py);
+                    self.coro = None;
+                    self.self_task = None;
+                    log_app_exception(py, self.protocol_label, &err);
+                    if let Some(fin) = self.finalizer.take() {
+                        let _ = fin.on_error(py, &err);
+                    }
+                    return Err(PyStopIteration::new_err(py.None()));
+                }
             }
         }
     }
@@ -2334,17 +2354,22 @@ impl SteppedCoroutine {
             Ok(yielded) => Ok(yielded.unbind()),
             Err(err) => {
                 self.coro = None;
-                self.self_task = None;
                 if err.is_instance_of::<PyStopIteration>(py) {
                     if let Some(fin) = self.finalizer.take() {
                         let val_bound = err
                             .value(py)
                             .getattr(pyo3::intern!(py, "value"))
                             .unwrap_or_else(|_| py.None().into_bound(py));
-                        fin.on_return(py, &val_bound)?;
+                        if let Some(followup_coro) = fin.on_return(py, &val_bound)? {
+                            self.coro = Some(followup_coro);
+                            self.finalizer = Some(ProtocolFinalizer::StreamDone);
+                            return self.step_ptr(py, unsafe { ffi::Py_None() });
+                        }
                     }
+                    self.self_task = None;
                     return Err(err);
                 }
+                self.self_task = None;
                 if let Ok(asyncio) = py.import(pyo3::intern!(py, "asyncio"))
                     && let Ok(cancelled_cls) = asyncio.getattr(pyo3::intern!(py, "CancelledError"))
                     && err.value(py).is_instance(&cancelled_cls).unwrap_or(false)
@@ -2798,19 +2823,54 @@ fn drive_native_items_inline(
                 } else {
                     unsafe { Bound::from_owned_ptr(py, yielded) }
                 };
-                match try_submit_native_special(
-                    py,
-                    request_id,
-                    default_status,
-                    &ret_bound,
-                    active_loop,
-                ) {
+                match try_submit_native_special(py, request_id, default_status, &ret_bound) {
                     Ok(NativeSpecialOutcome::SubmittedInline) => {
                         completed_inline += 1;
                     }
-                    Ok(NativeSpecialOutcome::SpawnedTask(task)) => {
-                        if drive_until_complete {
-                            spawned_tasks.push(task);
+                    Ok(NativeSpecialOutcome::StreamCoro(stream_coro)) => {
+                        let mut stream_yielded: *mut ffi::PyObject = std::ptr::null_mut();
+                        let stream_send = unsafe {
+                            ffi::PyIter_Send(
+                                stream_coro.as_ptr(),
+                                ffi::Py_None(),
+                                &mut stream_yielded,
+                            )
+                        };
+                        match stream_send {
+                            ffi::PySendResult::PYGEN_RETURN => {
+                                if !stream_yielded.is_null() {
+                                    unsafe {
+                                        drop(Bound::from_owned_ptr(py, stream_yielded));
+                                    }
+                                }
+                                completed_inline += 1;
+                            }
+                            ffi::PySendResult::PYGEN_ERROR => {
+                                let err = PyErr::fetch(py);
+                                log_app_exception(py, "NativeStream", &err);
+                                completed_inline += 1;
+                            }
+                            ffi::PySendResult::PYGEN_NEXT => {
+                                let first_yielded =
+                                    unsafe { Bound::from_owned_ptr(py, stream_yielded) }.unbind();
+                                let lp = match active_loop {
+                                    Some(l) => l.clone(),
+                                    None => py
+                                        .import(pyo3::intern!(py, "asyncio"))?
+                                        .call_method0(pyo3::intern!(py, "get_running_loop"))?,
+                                };
+                                let task = spawn_stepped_coroutine(
+                                    py,
+                                    &lp,
+                                    stream_coro.unbind(),
+                                    first_yielded,
+                                    ProtocolFinalizer::StreamDone,
+                                    "NativeStream",
+                                )?;
+                                if drive_until_complete {
+                                    spawned_tasks.push(task);
+                                }
+                            }
                         }
                     }
                     Ok(NativeSpecialOutcome::NotSpecial) => {
