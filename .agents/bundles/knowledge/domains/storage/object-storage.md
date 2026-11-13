@@ -57,7 +57,7 @@ sources:
   title: Demand-driven Arrow and Parquet codec bridge
 - id: py-typing
   resource: src/py/vertebra/_typing.py
-  title: PreconditionError definition
+  title: PreconditionError and IntegrityError definitions
 - id: db-arrow
   resource: src/py/vertebra/db/arrow.py
   title: ArrowCursor and zero-copy read_arrow_shm
@@ -113,7 +113,7 @@ sources:
 - Parquet batch readers open with `read_ahead=0` and `pre_buffer=False`; whole-table reads default to `pre_buffer=True`; `write_parquet` exposes `use_dictionary`, `use_byte_stream_split`, and `options` forwarded to `ParquetWriter` [^py-arrow] [^py-store].
 - `read_arrow_shm` wraps a shared-memory Arrow IPC or `VTBARROW` region in a zero-copy `ArrowCursor` that anchors the region views [^db-arrow].
 - Framework adapters accept only an explicit store, `StorageConfig`, or URI; `vertebra.extensions.django` exports Django integration types only, so stores and configs import from `vertebra.storage` [^ext-alchemy-storage] [^ext-sqlspec-storage] [^ext-django-storage].
-- Uploads (`put*`, `multipart`, `AsyncWritableFile.aclose()`) populate `PutResult` (`ObjectMeta` includes optional `sha256`, `crc32c`, `md5`), `checksum=True` hashes payloads locally, and reads (`get*`, `get_stream`, `open_reader`, `get_file`) enforce `expected_*` digests via `VerifyingStream`, raising `vertebra.typing.IntegrityError` (`OSError`) on mismatch [^storage-lib] [^py-typing] [^py-store] [^storage-store].
+- Uploads (`put*`, `multipart`, `AsyncWritableFile.aclose()`) populate `PutResult` (`ObjectMeta` includes optional `sha256`, `crc32c`, `md5` computed over verified bytes; user metadata never populates receipt fields), `checksum=True` hashes payloads locally, and reads (`get`, `get_file`, `get_stream`, `open_reader`) enforce `expected_sha256` (`VerifyingStream` on streams), raising `vertebra.typing.IntegrityError` (`OSError`) on mismatch [^storage-lib] [^py-typing] [^py-store] [^storage-store].
 - Advanced Alchemy adds `save_arrow` / `save_arrow_async` and forwards integrity options on `save_object*`, SQLSpec sets `supports_direct_arrow_write = True` and exposes `write_arrow_sync` / `write_arrow_async`, and `DjangoStorage` forwards `.sha256` / `.crc32c` / `.md5` digests [^ext-alchemy-storage] [^ext-sqlspec-storage] [^ext-django-storage].
 - `verify_storage_wheel.py` and `make {storage,bigquery,spanner,bundler}-wheel-check` verify wheel and sdist isolation boundaries across companion packages [^verify-storage-wheel].
 <!-- truth: end -->
@@ -162,7 +162,7 @@ Rust engine, streaming, and signing tests run in `storage_engine_tests.rs`; Pyth
 [^py-store]: `src/py/vertebra/storage/_store.py` — Stores, configs, readers, and writers.
 [^py-streaming]: `src/py/vertebra/storage/_streaming.py` — `StreamingStorageResponse` and byte-range parsing.
 [^py-arrow]: `src/py/vertebra/storage/_arrow.py` — Demand-driven Arrow and Parquet codec bridge.
-[^py-typing]: `src/py/vertebra/_typing.py` — `PreconditionError` definition.
+[^py-typing]: `src/py/vertebra/_typing.py` — `PreconditionError` and `IntegrityError` definitions.
 [^db-arrow]: `src/py/vertebra/db/arrow.py` — `ArrowCursor` and zero-copy `read_arrow_shm`.
 [^core-notify]: `src/rs/vertebra-core/src/notify.rs` — Native `Notifier` event-loop completion wakeups.
 [^ext-litestar-store]: `src/py/vertebra/extensions/litestar/store.py` — Persistent Litestar Store and confined async filesystem.

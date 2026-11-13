@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 import sys
 import tarfile
 import tomllib
@@ -18,7 +19,11 @@ from tools.scripts.verify_storage_wheel import (
     verify_companion_wheel_contents,
     verify_core_wheel_excludes_companion,
 )
+from tools.scripts.verify_storage_wheel import (
+    main as verify_storage_wheel_main,
+)
 
+from vertebra import _vertebra
 from vertebra.db.adapters.duckdb import AsyncDuckDBDriver, DuckDBConfig, SyncDuckDBDriver
 from vertebra.typing import MissingDependencyError
 from vertebra.utils.module_loader import reset_dependency_cache
@@ -265,11 +270,19 @@ def test_companion_wheel_and_sdist_isolation_verifier(tmp_path: Path, package: C
         verify_companion_sdist_contents(sdist_missing, package=package)
 
 
-def test_release_workflow_and_makefile_enforce_companion_isolation() -> None:
-    """Makefile and release.yaml enforce wheel checks and non-leakage across storage and bundler."""
-    makefile_text = (_REPO_ROOT / "Makefile").read_text(encoding="utf-8")
-    for target in ("storage-wheel-check", "bigquery-wheel-check", "spanner-wheel-check", "bundler-wheel-check"):
-        assert f".PHONY: {target}" in makefile_text
-    release_text = (_REPO_ROOT / ".github/workflows/release.yaml").read_text(encoding="utf-8")
-    assert 'assert not hasattr(_vertebra, "SyncObjectStore")' in release_text
-    assert 'assert not hasattr(_vertebra, "Bundler")' in release_text
+@pytest.mark.parametrize("package", ["storage", "bigquery", "spanner", "bundler"])
+def test_companion_isolation_runtime_and_makefile_targets(tmp_path: Path, package: CompanionPackage) -> None:
+    """Core _vertebra excludes companion symbols, CLI rejects --all archive flags, and make -n resolves targets."""
+    spec = COMPANION_SPECS[package]
+    assert not hasattr(_vertebra, spec.leaked_core_attr)
+    proc = subprocess.run(
+        ["make", "-n", f"{package}-wheel-check"],
+        cwd=_REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert f"verify_storage_wheel.py --package {package}" in proc.stdout
+    with pytest.raises(ValueError, match="cannot be combined with --all"):
+        verify_storage_wheel_main(["--all", "--companion-wheel", str(tmp_path / "dummy.whl")])

@@ -1436,23 +1436,10 @@ async def test_changefeed_async_event_backend_lifecycle() -> None:
     assert await backend.dequeue("other", 0) is None
 
 
-def _crc32c_hex(data: bytes) -> str:
-    """Compute Castagnoli CRC32C lowercase hexadecimal digest matching native checksums."""
-    crc = 0xFFFFFFFF
-    for byte in data:
-        crc ^= byte
-        for _ in range(8):
-            crc = (crc >> 1) ^ 0x82F63B78 if crc & 1 else crc >> 1
-    return f"{crc ^ 0xFFFFFFFF:08x}"
-
-
-def _expected_digests(data: bytes) -> tuple[str, str, str]:
-    """Return lowercase (sha256, crc32c, md5) digests for an arbitrary byte payload."""
-    return (
-        hashlib.sha256(data).hexdigest(),
-        _crc32c_hex(data),
-        hashlib.md5(data).hexdigest(),
-    )
+_RFC3720_DIGITS = b"123456789"
+_RFC3720_DIGITS_CRC32C = "e3069283"
+_RFC3720_SEQ32 = bytes(range(32))
+_RFC3720_SEQ32_CRC32C = "46dd794e"
 
 
 @pytest.mark.anyio
@@ -1463,8 +1450,10 @@ async def test_sqlspec_integrity_read_write_and_stream_options(asynchronous: boo
     backend = SQLSpecObjectStoreBackend("memory://")
     assert backend.supports_direct_arrow_write is True
 
-    payload = b"sqlspec-integrity-payload" * 8
-    exp_sha, exp_crc, exp_md5 = _expected_digests(payload)
+    payload = _RFC3720_DIGITS
+    exp_sha = hashlib.sha256(payload).hexdigest()
+    exp_crc = _RFC3720_DIGITS_CRC32C
+    exp_md5 = hashlib.md5(payload).hexdigest()
 
     if asynchronous:
         await backend.write_bytes_async(
@@ -1480,8 +1469,8 @@ async def test_sqlspec_integrity_read_write_and_stream_options(asynchronous: boo
             await backend.read_bytes_async("bytes/item.bin", expected_sha256="0" * 64)
 
         async def async_chunks() -> AsyncIterator[bytes]:
-            yield payload[:32]
-            yield payload[32:]
+            yield payload[:4]
+            yield payload[4:]
 
         stream_res = await backend.put_stream_async(
             "stream/item.bin", async_chunks(), checksum=True, expected_sha256=exp_sha
@@ -1501,7 +1490,7 @@ async def test_sqlspec_integrity_read_write_and_stream_options(asynchronous: boo
             backend.read_bytes_sync("bytes/item.bin", expected_sha256="0" * 64)
 
         stream_res = backend.put_stream_sync(
-            "stream/item.bin", [payload[:32], payload[32:]], checksum=True, expected_sha256=exp_sha
+            "stream/item.bin", [payload[:4], payload[4:]], checksum=True, expected_sha256=exp_sha
         )
         assert (stream_res.sha256, stream_res.crc32c, stream_res.md5) == (exp_sha, exp_crc, exp_md5)
 
@@ -1656,8 +1645,10 @@ async def test_sqlspec_large_arrow_write_emits_bounded_chunks(
 async def test_alchemy_save_object_integrity_options(tmp_path: Path, asynchronous: bool, mode: str) -> None:
     """Advanced Alchemy ObjectStoreBackend enforces checksum and expected digests across input modes."""
     backend = AlchemyObjectStoreBackend(key="alchemy-int", fs="memory://")
-    payload = b"alchemy-object-payload-" * 32
-    exp_sha, exp_crc, exp_md5 = _expected_digests(payload)
+    payload = _RFC3720_SEQ32
+    exp_sha = hashlib.sha256(payload).hexdigest()
+    exp_crc = _RFC3720_SEQ32_CRC32C
+    exp_md5 = hashlib.md5(payload).hexdigest()
     key = f"alchemy/{mode}.bin"
 
     def make_source(raw: bytes) -> Any:
@@ -1667,7 +1658,7 @@ async def test_alchemy_save_object_integrity_options(tmp_path: Path, asynchronou
             src = tmp_path / f"{mode}-{len(raw)}.bin"
             src.write_bytes(raw)
             return src
-        return iter((raw[:64], raw[64:]))
+        return iter((raw[:16], raw[16:]))
 
     file_obj = FileObject(backend="alchemy-int", filename=key, content_type="application/octet-stream")
     if asynchronous:
@@ -1704,9 +1695,17 @@ async def test_alchemy_save_object_integrity_options(tmp_path: Path, asynchronou
 @pytest.mark.anyio
 @pytest.mark.parametrize("asynchronous", [False, True])
 @pytest.mark.parametrize("file_format", ["parquet", "arrow-ipc"])
-async def test_alchemy_save_arrow_streaming_and_checksum(asynchronous: bool, file_format: str) -> None:
+async def test_alchemy_save_arrow_streaming_and_checksum(
+    asynchronous: bool, file_format: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Alchemy save_arrow and save_arrow_async stream batches natively without asyncio.to_thread."""
-    assert "to_thread" not in Path(alchemy_storage_mod.__file__).read_text(encoding="utf-8")
+    if asynchronous:
+
+        async def reject_to_thread(*args: object, **kwargs: object) -> Any:
+            raise AssertionError("asyncio.to_thread is forbidden on the async storage path")
+
+        monkeypatch.setattr(asyncio, "to_thread", reject_to_thread)
+
     backend = AlchemyObjectStoreBackend(key="alchemy-arrow", fs="memory://")
     table = pa.table({"id": [10, 20, 30], "kind": ["a", "b", "c"]})
     ext = "parquet" if file_format == "parquet" else "arrow"
@@ -1718,8 +1717,10 @@ async def test_alchemy_save_arrow_streaming_and_checksum(asynchronous: bool, fil
         res = backend.save_arrow(key, table, format=file_format, checksum=True)
 
     stored = bytes(backend.sync_store.get(key))
-    exp_sha, exp_crc, exp_md5 = _expected_digests(stored)
-    assert (res.sha256, res.crc32c, res.md5) == (exp_sha, exp_crc, exp_md5)
+    assert res.sha256 == hashlib.sha256(stored).hexdigest()
+    assert res.md5 == hashlib.md5(stored).hexdigest()
+    assert res.crc32c is not None and len(res.crc32c) == 8
+    assert backend.sync_store.put("datasets/verify-crc.bin", stored, expected_crc32c=res.crc32c).crc32c == res.crc32c
 
     with pytest.raises(IntegrityError):
         if asynchronous:
@@ -1731,19 +1732,100 @@ async def test_alchemy_save_arrow_streaming_and_checksum(asynchronous: bool, fil
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("adapter", ["sqlspec", "alchemy"])
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize(
+    ("raw_format", "expected_parquet"),
+    [
+        ("Parquet", True),
+        (" PARQUET ", True),
+        ("ARROW", False),
+        ("Feather", False),
+        ("IPC", False),
+    ],
+)
+async def test_arrow_adapters_normalize_case_insensitive_formats(
+    adapter: str, asynchronous: bool, raw_format: str, expected_parquet: bool
+) -> None:
+    """SQLSpec and Alchemy Arrow writers normalize case-insensitive format names to Parquet or Arrow IPC."""
+    table = pa.table({"id": [1, 2], "tag": ["x", "y"]})
+    if adapter == "sqlspec":
+        sqlspec_backend = SQLSpecObjectStoreBackend("memory://")
+        if asynchronous:
+            await sqlspec_backend.write_arrow_async("items/out.parquet", table, file_format=raw_format)
+            raw = await sqlspec_backend.read_bytes_async("items/out.parquet")
+            decoded = await sqlspec_backend.read_arrow_async("items/out.parquet", file_format=raw_format)
+        else:
+            sqlspec_backend.write_arrow_sync("items/out.parquet", table, file_format=raw_format)
+            raw = sqlspec_backend.read_bytes_sync("items/out.parquet")
+            decoded = sqlspec_backend.read_arrow_sync("items/out.parquet", file_format=raw_format)
+        assert decoded.equals(table)
+    else:
+        alchemy_backend = AlchemyObjectStoreBackend(key="alchemy-fmt", fs="memory://")
+        if asynchronous:
+            await alchemy_backend.save_arrow_async("items/out.parquet", table, format=raw_format)
+        else:
+            alchemy_backend.save_arrow("items/out.parquet", table, format=raw_format)
+        raw = bytes(alchemy_backend.sync_store.get("items/out.parquet"))
+
+    assert (raw[:4] == b"PAR1" and raw[-4:] == b"PAR1") is expected_parquet
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("adapter", ["sqlspec", "alchemy"])
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("bad_format", ["csv", "jsonl", "json", "orc"])
+async def test_arrow_adapters_reject_unsupported_formats(adapter: str, asynchronous: bool, bad_format: str) -> None:
+    """SQLSpec and Alchemy Arrow methods reject non-Arrow formats instead of silently encoding IPC."""
+    table = pa.table({"id": [1]})
+    if adapter == "sqlspec":
+        sqlspec_backend = SQLSpecObjectStoreBackend("memory://")
+        with pytest.raises(ValueError, match="Unsupported Arrow format"):
+            if asynchronous:
+                await sqlspec_backend.write_arrow_async("items/out.parquet", table, file_format=bad_format)
+            else:
+                sqlspec_backend.write_arrow_sync("items/out.parquet", table, file_format=bad_format)
+        with pytest.raises(ValueError, match="Unsupported Arrow format"):
+            if asynchronous:
+                await sqlspec_backend.read_arrow_async("items/out.parquet", file_format=bad_format)
+            else:
+                sqlspec_backend.read_arrow_sync("items/out.parquet", file_format=bad_format)
+    else:
+        alchemy_backend = AlchemyObjectStoreBackend(key="alchemy-bad-fmt", fs="memory://")
+        with pytest.raises(ValueError, match="Unsupported Arrow format"):
+            if asynchronous:
+                await alchemy_backend.save_arrow_async("items/out.parquet", table, format=bad_format)
+            else:
+                alchemy_backend.save_arrow("items/out.parquet", table, format=bad_format)
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize("asynchronous", [False, True])
 @pytest.mark.parametrize("digest_attr", ["sha256", "crc32c", "md5"])
 async def test_django_storage_forwards_content_digests(asynchronous: bool, digest_attr: str) -> None:
-    """DjangoStorage forwards optional sha256/crc32c/md5 attributes and surfaces IntegrityError."""
+    """DjangoStorage forwards optional string sha256/crc32c/md5 attributes and ignores non-string attributes."""
     store = SyncObjectStore("memory://")
     storage = DjangoStorage(store=store, file_overwrite=True)
-    payload = b"django-verified-payload-" * 16
-    digests = dict(zip(("sha256", "crc32c", "md5"), _expected_digests(payload), strict=True))
+    payload = _RFC3720_DIGITS
+    digests = {
+        "sha256": hashlib.sha256(payload).hexdigest(),
+        "crc32c": _RFC3720_DIGITS_CRC32C,
+        "md5": hashlib.md5(payload).hexdigest(),
+    }
 
     valid = ContentFile(payload, name="verified.bin")
     setattr(valid, digest_attr, digests[digest_attr])
     saved_name = await storage.asave("verified.bin", valid) if asynchronous else storage.save("verified.bin", valid)
     assert bytes(store.get(saved_name)) == payload
+
+    callable_attr = ContentFile(payload, name="callable.bin")
+    setattr(callable_attr, digest_attr, lambda: "callable-method-not-a-digest")
+    callable_saved = (
+        await storage.asave("callable.bin", callable_attr)
+        if asynchronous
+        else storage.save("callable.bin", callable_attr)
+    )
+    assert bytes(store.get(callable_saved)) == payload
 
     tampered = ContentFile(b"tampered-payload", name="verified.bin")
     setattr(tampered, digest_attr, digests[digest_attr])

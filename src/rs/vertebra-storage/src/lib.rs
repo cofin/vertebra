@@ -41,22 +41,10 @@ use crate::store::{
     StoredObjectMeta, block_on_storage, runtime_handle, validate_expected_hex,
 };
 
-fn make_precondition_err(message: String) -> PyErr {
+fn make_typing_err(class_name: &'static str, message: String) -> PyErr {
     Python::attach(|py| {
         if let Ok(typing_mod) = py.import("vertebra.typing")
-            && let Ok(exc_attr) = typing_mod.getattr("PreconditionError")
-            && let Ok(exc_ty) = exc_attr.cast_into::<PyType>()
-        {
-            return PyErr::from_type(exc_ty, (message,));
-        }
-        PyOSError::new_err(message)
-    })
-}
-
-fn make_integrity_err(message: String) -> PyErr {
-    Python::attach(|py| {
-        if let Ok(typing_mod) = py.import("vertebra.typing")
-            && let Ok(exc_attr) = typing_mod.getattr("IntegrityError")
+            && let Ok(exc_attr) = typing_mod.getattr(class_name)
             && let Ok(exc_ty) = exc_attr.cast_into::<PyType>()
         {
             return PyErr::from_type(exc_ty, (message,));
@@ -72,10 +60,11 @@ fn to_py_err(err: StorageError) -> PyErr {
         StorageError::AlreadyExists { path, message } => {
             PyFileExistsError::new_err(format!("Object already exists at '{path}': {message}"))
         }
-        StorageError::Precondition { path, message } => {
-            make_precondition_err(format!("Precondition failed for '{path}': {message}"))
-        }
-        err @ StorageError::Integrity { .. } => make_integrity_err(err.to_string()),
+        StorageError::Precondition { path, message } => make_typing_err(
+            "PreconditionError",
+            format!("Precondition failed for '{path}': {message}"),
+        ),
+        err @ StorageError::Integrity { .. } => make_typing_err("IntegrityError", err.to_string()),
         StorageError::ObjectStore(object_store::Error::NotFound { path, source }) => {
             PyFileNotFoundError::new_err(format!("Object not found: {path} ({source})"))
         }
@@ -83,7 +72,10 @@ fn to_py_err(err: StorageError) -> PyErr {
             PyFileExistsError::new_err(format!("Object already exists at '{path}': {source}"))
         }
         StorageError::ObjectStore(object_store::Error::Precondition { path, source }) => {
-            make_precondition_err(format!("Precondition failed for '{path}': {source}"))
+            make_typing_err(
+                "PreconditionError",
+                format!("Precondition failed for '{path}': {source}"),
+            )
         }
         StorageError::Io(io_err) => match io_err.kind() {
             std::io::ErrorKind::NotFound => PyFileNotFoundError::new_err(io_err.to_string()),
@@ -716,6 +708,22 @@ impl PyAsyncStreamReader {
             },
             |py, ()| Ok(py.None()),
         )
+    }
+
+    fn close(&self, py: Python<'_>) {
+        let state = Arc::clone(&self.state);
+        py.detach(move || {
+            if let Ok(mut guard) = state.try_lock() {
+                guard.init = AsyncStreamInit::Open(None);
+                guard.pending = Bytes::new();
+            } else {
+                drop(runtime_handle().spawn(async move {
+                    let mut guard = state.lock().await;
+                    guard.init = AsyncStreamInit::Open(None);
+                    guard.pending = Bytes::new();
+                }));
+            }
+        });
     }
 }
 

@@ -4735,12 +4735,31 @@ async fn test_write_receipts_single_shot_empty_file_and_s3_multipart() {
 
     for engine in &engines {
         let default_meta = engine
-            .put("receipts/default.bin", Bytes::from_static(b"123456789"))
+            .put_opts(
+                "receipts/default.bin",
+                Bytes::from_static(b"123456789"),
+                PutConditionalOptions {
+                    attributes: HashMap::from([
+                        ("sha256".to_string(), "0".repeat(64)),
+                        ("x-amz-checksum-crc32c".to_string(), "00000000".to_string()),
+                        ("content-md5".to_string(), "0".repeat(32)),
+                    ]),
+                    ..Default::default()
+                },
+            )
             .await
             .expect("default put");
         assert_eq!(default_meta.sha256, None);
         assert_eq!(default_meta.crc32c, None);
         assert_eq!(default_meta.md5, None);
+        let head_default = engine.head("receipts/default.bin").await.expect("head");
+        assert_eq!(head_default.sha256, None);
+        assert_eq!(head_default.crc32c, None);
+        assert_eq!(head_default.md5, None);
+        assert_eq!(
+            head_default.attributes.get("sha256").map(String::as_str),
+            Some("0000000000000000000000000000000000000000000000000000000000000000")
+        );
 
         let single_meta = engine
             .put_opts(

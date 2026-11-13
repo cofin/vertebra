@@ -50,7 +50,7 @@ ALL_KNOWN_STUBS: frozenset[str] = frozenset(
 )
 
 
-class CompanionWheelSpec(msgspec.Struct, frozen=True):
+class CompanionWheelSpec(msgspec.Struct, frozen=True, gc=False):
     """Packaging and isolated-venv verification specification for a companion extension."""
 
     package: CompanionPackage

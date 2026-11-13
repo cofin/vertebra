@@ -156,6 +156,10 @@ Readers support `read`, `read_at`, `seek`, `tell`, and `close`; the async reader
 
 ## Errors
 
+::: vertebra.typing.IntegrityError
+    options:
+      heading_level: 4
+
 ::: vertebra.typing.PreconditionError
     options:
       heading_level: 4

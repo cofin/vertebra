@@ -286,17 +286,14 @@ class DjangoStorage(_StorageBase):
 
     @staticmethod
     def _digest_options(content: Any) -> _DigestOptions:
-        """Extract optional integrity digest attributes from a Django content object."""
+        """Extract optional string integrity digest attributes from a Django content object."""
         options: _DigestOptions = {}
-        sha256 = getattr(content, "sha256", None)
-        if sha256 is not None:
-            options["expected_sha256"] = str(sha256)
-        crc32c = getattr(content, "crc32c", None)
-        if crc32c is not None:
-            options["expected_crc32c"] = str(crc32c)
-        md5 = getattr(content, "md5", None)
-        if md5 is not None:
-            options["expected_md5"] = str(md5)
+        if isinstance(sha256 := getattr(content, "sha256", None), str):
+            options["expected_sha256"] = sha256
+        if isinstance(crc32c := getattr(content, "crc32c", None), str):
+            options["expected_crc32c"] = crc32c
+        if isinstance(md5 := getattr(content, "md5", None), str):
+            options["expected_md5"] = md5
         return options
 
     async def _aget_available_name(self, name: str, max_length: int | None) -> str:

@@ -235,16 +235,12 @@ impl Crc32cHasher {
     }
 }
 
-fn is_lowercase_hex(raw: &str, expected_len: usize) -> bool {
-    raw.len() == expected_len && raw.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
-}
-
 pub(crate) fn validate_expected_hex(
     field: &'static str,
     raw: &str,
     expected_len: usize,
 ) -> Result<(), StorageError> {
-    if !is_lowercase_hex(raw, expected_len) {
+    if raw.len() != expected_len || !raw.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
         return Err(StorageError::InvalidInput(format!(
             "{field} must be {expected_len} lowercase hexadecimal characters, got '{raw}'"
         )));
@@ -490,37 +486,13 @@ impl StoredObjectMeta {
     pub fn from_meta_and_attributes(value: object_store::ObjectMeta, attrs: &Attributes) -> Self {
         let mut content_type = None;
         let mut attributes = HashMap::new();
-        let mut sha256 = None;
-        let mut crc32c = None;
-        let mut md5 = None;
         for (key, val) in attrs.iter() {
             match key {
                 Attribute::ContentType => {
                     content_type = Some(val.as_ref().to_string());
                 }
                 Attribute::Metadata(name) => {
-                    let raw_name = name.as_ref();
-                    let raw_val = val.as_ref();
-                    if sha256.is_none()
-                        && (raw_name.eq_ignore_ascii_case("sha256")
-                            || raw_name.eq_ignore_ascii_case("x-amz-checksum-sha256"))
-                        && is_lowercase_hex(raw_val, 64)
-                    {
-                        sha256 = Some(raw_val.to_string());
-                    } else if crc32c.is_none()
-                        && (raw_name.eq_ignore_ascii_case("crc32c")
-                            || raw_name.eq_ignore_ascii_case("x-amz-checksum-crc32c"))
-                        && is_lowercase_hex(raw_val, 8)
-                    {
-                        crc32c = Some(raw_val.to_string());
-                    } else if md5.is_none()
-                        && (raw_name.eq_ignore_ascii_case("md5")
-                            || raw_name.eq_ignore_ascii_case("content-md5"))
-                        && is_lowercase_hex(raw_val, 32)
-                    {
-                        md5 = Some(raw_val.to_string());
-                    }
-                    attributes.insert(raw_name.to_string(), raw_val.to_string());
+                    attributes.insert(name.as_ref().to_string(), val.as_ref().to_string());
                 }
                 _ => {}
             }
@@ -533,9 +505,9 @@ impl StoredObjectMeta {
             version: value.version,
             content_type,
             attributes,
-            sha256,
-            crc32c,
-            md5,
+            sha256: None,
+            crc32c: None,
+            md5: None,
         }
     }
 }

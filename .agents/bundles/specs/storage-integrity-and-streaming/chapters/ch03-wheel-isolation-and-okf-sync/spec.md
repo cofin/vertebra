@@ -101,7 +101,7 @@ def main(argv: Sequence[str] | None = None) -> int: ...
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Completed (`66e6913f`)**: All `3` tasks in `ch03-wheel-isolation-and-okf-sync` (`24` + `1` skipped `test_optional_driver_wheels.py`, `ruff`, `mypy`, `make docs`, and `make review-check` clean) are complete. All `3` chapters (`ch01`–`ch03`) are ready for the Frontier Joint Cleanup & Review Gate.
+- **Completed (`66e6913f`)**: All `3` tasks in `ch03-wheel-isolation-and-okf-sync` (`24` + `1` skipped `test_optional_driver_wheels.py`, `ruff`, `mypy`, `make docs`, and `make review-check` clean) are complete.
 - **Fast Chapter Gate (`< 45s`)**:
   `uv run --no-sync ruff check tools/scripts/verify_storage_wheel.py && uv run --no-sync mypy tools/scripts/verify_storage_wheel.py && uv run --no-sync pytest src/py/tests/unit/db/test_optional_driver_wheels.py -q && make docs && make review-check`
 

@@ -28,7 +28,7 @@ from vertebra.storage import (
     SyncGcpTokenCache,
     SyncObjectStore,
 )
-from vertebra.storage._arrow import write_batches_async, write_batches_sync
+from vertebra.storage._arrow import normalize_arrow_format, write_batches_async, write_batches_sync
 from vertebra.typing import ImproperConfigurationError, MissingDependencyError
 
 try:
@@ -437,13 +437,7 @@ class ObjectStoreBackend(AAStorageBackend):
         """Qualify an Arrow object key, resolve its target format, and merge codec options."""
         qualified = self._qualify(path)
         raw_format = file_format if file_format is not None else format
-        if raw_format:
-            lowered = raw_format.strip().lower()
-            resolved_format = "arrow-ipc" if lowered in {"arrow", "ipc", "arrow-ipc", "feather"} else raw_format
-        elif Path(qualified).suffix.lower() in {".arrow", ".ipc", ".feather"}:
-            resolved_format = "arrow-ipc"
-        else:
-            resolved_format = "parquet"
+        resolved_format = normalize_arrow_format(raw_format, qualified)
         merged = {**(options or {}), **codec_options}
         return qualified, resolved_format, merged
 

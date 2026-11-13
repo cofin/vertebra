@@ -1144,39 +1144,31 @@ class _BaseObjectStore:
         cls._validate_expected_hex("expected_md5", expected_md5, 32)
 
     @staticmethod
-    def _native_to_put_result(native_meta: Any, fallback_etag: str = "") -> PutResult:
+    def _native_meta_fields(native_meta: Any, etag: str | None) -> dict[str, Any]:
+        raw_attrs = getattr(native_meta, "attributes", None)
+        return {
+            "path": str(native_meta.path),
+            "size": int(native_meta.size),
+            "last_modified": str(getattr(native_meta, "last_modified", "")),
+            "etag": etag,
+            "version": getattr(native_meta, "version", None),
+            "content_type": getattr(native_meta, "content_type", None),
+            "attributes": {str(k): str(v) for k, v in raw_attrs.items()} if isinstance(raw_attrs, Mapping) else {},
+            "sha256": getattr(native_meta, "sha256", None),
+            "crc32c": getattr(native_meta, "crc32c", None),
+            "md5": getattr(native_meta, "md5", None),
+        }
+
+    @classmethod
+    def _native_to_put_result(cls, native_meta: Any, fallback_etag: str = "") -> PutResult:
         """Convert a native ObjectMeta instance into a PutResult."""
         etag = getattr(native_meta, "etag", None) or fallback_etag
-        raw_attrs = getattr(native_meta, "attributes", None)
-        return PutResult(
-            path=str(native_meta.path),
-            size=int(native_meta.size),
-            last_modified=str(getattr(native_meta, "last_modified", "")),
-            etag=str(etag) if etag else None,
-            version=getattr(native_meta, "version", None),
-            content_type=getattr(native_meta, "content_type", None),
-            attributes={str(k): str(v) for k, v in raw_attrs.items()} if isinstance(raw_attrs, Mapping) else {},
-            sha256=getattr(native_meta, "sha256", None),
-            crc32c=getattr(native_meta, "crc32c", None),
-            md5=getattr(native_meta, "md5", None),
-        )
+        return PutResult(**cls._native_meta_fields(native_meta, str(etag) if etag else None))
 
-    @staticmethod
-    def _native_to_object_meta(native_meta: Any) -> ObjectMeta:
+    @classmethod
+    def _native_to_object_meta(cls, native_meta: Any) -> ObjectMeta:
         """Convert a native ObjectMeta instance into an ObjectMeta."""
-        raw_attrs = getattr(native_meta, "attributes", None)
-        return ObjectMeta(
-            path=str(native_meta.path),
-            size=int(native_meta.size),
-            last_modified=str(getattr(native_meta, "last_modified", "")),
-            etag=getattr(native_meta, "etag", None),
-            version=getattr(native_meta, "version", None),
-            content_type=getattr(native_meta, "content_type", None),
-            attributes={str(k): str(v) for k, v in raw_attrs.items()} if isinstance(raw_attrs, Mapping) else {},
-            sha256=getattr(native_meta, "sha256", None),
-            crc32c=getattr(native_meta, "crc32c", None),
-            md5=getattr(native_meta, "md5", None),
-        )
+        return ObjectMeta(**cls._native_meta_fields(native_meta, getattr(native_meta, "etag", None)))
 
     def _presign(
         self,
@@ -1714,11 +1706,6 @@ class SyncObjectStore(_BaseObjectStore):
     ) -> PutResult:
         """Write any Buffer (bytes, bytearray, memoryview) to the given object key."""
         key = self._key(path)
-        self._validate_expected_digests(
-            expected_sha256=expected_sha256,
-            expected_crc32c=expected_crc32c,
-            expected_md5=expected_md5,
-        )
         norm_attrs = {str(k): str(v) for k, v in attributes.items()} if attributes is not None else None
         native = self._require_native()
         native_meta = native.put(
@@ -1749,19 +1736,10 @@ class SyncObjectStore(_BaseObjectStore):
     ) -> PutResult:
         """Read a local file and upload it to the given object key."""
         key = self._key(path)
-        self._validate_expected_digests(
-            expected_sha256=expected_sha256,
-            expected_crc32c=expected_crc32c,
-            expected_md5=expected_md5,
-        )
-        resolved_src = Path(file_path)
-        if not resolved_src.exists():
-            msg = f"Source file not found: {resolved_src}"
-            raise FileNotFoundError(msg)
         native = self._require_native()
         native_meta = native.put_file(
             key,
-            str(resolved_src),
+            str(Path(file_path)),
             checksum=checksum,
             expected_sha256=expected_sha256,
             expected_crc32c=expected_crc32c,
@@ -1841,11 +1819,6 @@ class SyncObjectStore(_BaseObjectStore):
         `array("I")`, NumPy arrays, and `pyarrow.Buffer` upload as their raw bytes.
         """
         key = self._key(path)
-        self._validate_expected_digests(
-            expected_sha256=expected_sha256,
-            expected_crc32c=expected_crc32c,
-            expected_md5=expected_md5,
-        )
         norm_attrs = {str(k): str(v) for k, v in attributes.items()} if attributes is not None else None
         native = self._require_native()
         upload = native.create_multipart(
@@ -1874,7 +1847,6 @@ class SyncObjectStore(_BaseObjectStore):
     def get(self, path: str, *, expected_sha256: str | None = None) -> bytes:
         """Read full object bytes for the given key."""
         key = self._key(path)
-        self._validate_expected_hex("expected_sha256", expected_sha256, 64)
         return bytes(self._require_native().get(key, expected_sha256=expected_sha256))
 
     def get_file(
@@ -1886,7 +1858,6 @@ class SyncObjectStore(_BaseObjectStore):
     ) -> ObjectMeta:
         """Stream the object at the given key into a local file and return its metadata."""
         key = self._key(path)
-        self._validate_expected_hex("expected_sha256", expected_sha256, 64)
         return self._native_to_object_meta(
             self._require_native().get_file(key, str(Path(file_path)), expected_sha256=expected_sha256)
         )
@@ -1957,10 +1928,6 @@ class SyncObjectStore(_BaseObjectStore):
     ) -> Iterator[StorageBuffer]:
         """Stream object payload chunks as zero-copy StorageBuffer instances."""
         key = self._key(path)
-        if chunk_size is not None and chunk_size < 1:
-            msg = "chunk_size must be >= 1"
-            raise ValueError(msg)
-        self._validate_expected_hex("expected_sha256", expected_sha256, 64)
         reader = self._require_native().get_stream(key, chunk_size=chunk_size, expected_sha256=expected_sha256)
         try:
             yield from reader
@@ -2296,11 +2263,6 @@ class AsyncObjectStore(_BaseObjectStore):
     ) -> PutResult:
         """Asynchronously write any Buffer to the given object key."""
         key = self._key(path)
-        self._validate_expected_digests(
-            expected_sha256=expected_sha256,
-            expected_crc32c=expected_crc32c,
-            expected_md5=expected_md5,
-        )
         norm_attrs = {str(k): str(v) for k, v in attributes.items()} if attributes is not None else None
         native = self._require_native()
         native_meta = await native.put(
@@ -2331,19 +2293,10 @@ class AsyncObjectStore(_BaseObjectStore):
     ) -> PutResult:
         """Asynchronously read a local file and upload it to the given object key."""
         key = self._key(path)
-        self._validate_expected_digests(
-            expected_sha256=expected_sha256,
-            expected_crc32c=expected_crc32c,
-            expected_md5=expected_md5,
-        )
-        resolved_src = Path(file_path)
-        if not resolved_src.exists():
-            msg = f"Source file not found: {resolved_src}"
-            raise FileNotFoundError(msg)
         native = self._require_native()
         native_meta = await native.put_file(
             key,
-            str(resolved_src),
+            str(Path(file_path)),
             checksum=checksum,
             expected_sha256=expected_sha256,
             expected_crc32c=expected_crc32c,
@@ -2423,11 +2376,6 @@ class AsyncObjectStore(_BaseObjectStore):
         `array("I")`, NumPy arrays, and `pyarrow.Buffer` upload as their raw bytes.
         """
         key = self._key(path)
-        self._validate_expected_digests(
-            expected_sha256=expected_sha256,
-            expected_crc32c=expected_crc32c,
-            expected_md5=expected_md5,
-        )
         norm_attrs = {str(k): str(v) for k, v in attributes.items()} if attributes is not None else None
         native = self._require_native()
         upload = await native.create_multipart(
@@ -2460,7 +2408,6 @@ class AsyncObjectStore(_BaseObjectStore):
     async def get(self, path: str, *, expected_sha256: str | None = None) -> bytes:
         """Asynchronously read an object from the store via Rust Tokio awaitable."""
         key = self._key(path)
-        self._validate_expected_hex("expected_sha256", expected_sha256, 64)
         return bytes(await self._require_native().get(key, expected_sha256=expected_sha256))
 
     async def get_file(
@@ -2472,7 +2419,6 @@ class AsyncObjectStore(_BaseObjectStore):
     ) -> ObjectMeta:
         """Asynchronously stream the object at the given key into a local file and return its metadata."""
         key = self._key(path)
-        self._validate_expected_hex("expected_sha256", expected_sha256, 64)
         return self._native_to_object_meta(
             await self._require_native().get_file(key, str(Path(file_path)), expected_sha256=expected_sha256)
         )
@@ -2542,19 +2488,21 @@ class AsyncObjectStore(_BaseObjectStore):
         chunk_size: int | None = None,
         expected_sha256: str | None = None,
     ) -> AsyncIterator[StorageBuffer]:
-        """Asynchronously stream object payload chunks as zero-copy StorageBuffer instances."""
+        """Asynchronously stream object payload chunks as zero-copy StorageBuffer instances.
+
+        If an unclosed generator is garbage-collected after event-loop shutdown, ``reader.close()``
+        detaches the native stream synchronously without requiring a running asyncio loop.
+        """
         key = self._key(path)
-        if chunk_size is not None and chunk_size < 1:
-            msg = "chunk_size must be >= 1"
-            raise ValueError(msg)
-        self._validate_expected_hex("expected_sha256", expected_sha256, 64)
         reader = self._require_native().get_stream(key, chunk_size=chunk_size, expected_sha256=expected_sha256)
         try:
             async for chunk in reader:
                 yield chunk
         finally:
-            with contextlib.suppress(RuntimeError):
+            try:
                 await reader.aclose()
+            except RuntimeError:
+                reader.close()
 
     async def get_range(self, path: str, offset: int, length: int) -> bytes:
         """Asynchronously read a byte range from the store via Rust Tokio awaitable."""
@@ -3040,6 +2988,11 @@ class SyncReadableFile(io.RawIOBase):
         if len(collected) > size:
             self._stream_buf = bytes(collected[size:])
             del collected[size:]
+        elif not self._stream_eof and self._pos + len(collected) >= self._size:
+            while (extra := self._stream_reader.next_chunk()) is not None:
+                self._stream_buf += bytes(extra)
+            if not self._stream_buf:
+                self._stream_eof = True
         data = bytes(collected)
         self._pos += len(data)
         return data
@@ -3181,7 +3134,9 @@ class AsyncReadableFile:
                 msg = "Random-access seek to non-zero offset is not supported when expected_sha256 is set"
                 raise io.UnsupportedOperation(msg)
             if clamped == 0:
-                self._stream_reader = None
+                reader, self._stream_reader = self._stream_reader, None
+                if reader is not None:
+                    reader.close()
                 self._stream_buf = b""
                 self._stream_eof = False
         self._pos = clamped
@@ -3248,15 +3203,16 @@ class AsyncReadableFile:
         self._buf = b""
         self._stream_buf = b""
         if reader is not None:
-            with contextlib.suppress(RuntimeError):
-                await reader.aclose()
+            await reader.aclose()
 
     def close(self) -> None:
-        """Mark the file handle as closed and release the read-ahead window."""
+        """Close any active native stream reader and mark the file handle as closed."""
         self._closed = True
         self._buf = b""
         self._stream_buf = b""
-        self._stream_reader = None
+        reader, self._stream_reader = self._stream_reader, None
+        if reader is not None:
+            reader.close()
 
     def _ensure_open(self) -> None:
         if self._closed:
@@ -3306,6 +3262,11 @@ class AsyncReadableFile:
         if len(collected) > size:
             self._stream_buf = bytes(collected[size:])
             del collected[size:]
+        elif self._size is not None and not self._stream_eof and self._pos + len(collected) >= self._size:
+            while (extra := await self._stream_reader.next_chunk()) is not None:
+                self._stream_buf += bytes(extra)
+            if not self._stream_buf:
+                self._stream_eof = True
         data = bytes(collected)
         self._pos += len(data)
         if self._stream_eof and self._size is None:

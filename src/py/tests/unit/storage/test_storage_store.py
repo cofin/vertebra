@@ -2918,32 +2918,15 @@ async def test_compose_concatenates_sources_and_rejects_empty(asynchronous: bool
     assert not await _resolve(store.exists("empty.bin"))
 
 
-def _crc32c_table_entry(index: int) -> int:
-    """Compute the 8-bit Castagnoli CRC32C lookup table entry for `index`."""
-    crc = index
-    for _ in range(8):
-        crc = (crc >> 1) ^ 0x82F63B78 if crc & 1 else crc >> 1
-    return crc
+_SELECTIVE_PAYLOAD = b"selective-expected-digest-payload-" * 128
+_SELECTIVE_CRC32C = "14bf0fea"
+_S3_MULTIPART_PAYLOAD = b"s3-multipart-block!!" * (450 * 1024)
+_S3_MULTIPART_CRC32C = "744215fd"
 
 
-_CRC32C_TABLE: tuple[int, ...] = tuple(_crc32c_table_entry(idx) for idx in range(256))
-
-
-def _crc32c_hex(data: bytes) -> str:
-    """Compute the 8-character lowercase hexadecimal Castagnoli CRC32C digest of `data`."""
-    crc = 0xFFFFFFFF
-    for byte in data:
-        crc = _CRC32C_TABLE[(crc ^ byte) & 0xFF] ^ (crc >> 8)
-    return f"{crc ^ 0xFFFFFFFF:08x}"
-
-
-def _expected_digests(data: bytes) -> dict[str, str]:
-    """Return reference SHA-256, Castagnoli CRC32C, and MD5 lowercase hex digests for `data`."""
-    return {
-        "sha256": hashlib.sha256(data).hexdigest(),
-        "crc32c": _crc32c_hex(data),
-        "md5": hashlib.md5(data).hexdigest(),
-    }
+def _sha256_and_md5(data: bytes) -> tuple[str, str]:
+    """Return lowercase hexadecimal (sha256, md5) digests for `data`."""
+    return hashlib.sha256(data).hexdigest(), hashlib.md5(data).hexdigest()
 
 
 def _split_chunks(payload: bytes) -> list[bytes]:
@@ -3009,9 +2992,14 @@ async def test_write_default_checksum_false_returns_none_receipts(
     asynchronous: bool,
     write_method: str,
 ) -> None:
-    """Default checksum=False writes return None for sha256, crc32c, and md5 across all write paths."""
+    """Default checksum=False writes return None receipts and never promote user metadata to receipts."""
     store = _bulk_store(asynchronous)
     payload = b"default-checksum-disabled-payload"
+    extra_kwargs = (
+        {"attributes": {"sha256": "0" * 64, "crc32c": "00000000", "md5": "0" * 32}}
+        if write_method in {"put", "put_stream", "open_writer"}
+        else {}
+    )
     result, _ = await _write_with_method(
         store,
         write_method,
@@ -3019,11 +3007,14 @@ async def test_write_default_checksum_false_returns_none_receipts(
         payload,
         tmp_path,
         asynchronous=asynchronous,
+        **extra_kwargs,
     )
     assert isinstance(result, PutResult)
     assert result.sha256 is None
     assert result.crc32c is None
     assert result.md5 is None
+    head_meta = await _resolve(store.head("items/default.bin"))
+    assert (head_meta.sha256, head_meta.crc32c, head_meta.md5) == (None, None, None)
     assert await _resolve(store.get("items/default.bin")) == payload
 
 
@@ -3031,11 +3022,11 @@ async def test_write_default_checksum_false_returns_none_receipts(
 @pytest.mark.parametrize("asynchronous", [False, True])
 @pytest.mark.parametrize("write_method", ["put", "put_stream", "put_multipart", "put_file", "open_writer"])
 @pytest.mark.parametrize(
-    "payload",
+    ("payload", "expected_crc32c"),
     [
-        pytest.param(b"", id="empty"),
-        pytest.param(b"123456789", id="rfc3720"),
-        pytest.param(b"vertebra-integrity-chunk-" * 1024, id="multi-chunk"),
+        pytest.param(b"", "00000000", id="empty"),
+        pytest.param(b"123456789", "e3069283", id="rfc3720"),
+        pytest.param(b"vertebra-integrity-chunk-" * 1024, "5fcfbeb2", id="multi-chunk"),
     ],
 )
 async def test_write_checksum_true_populates_sha256_crc32c_and_md5_receipts(
@@ -3043,14 +3034,11 @@ async def test_write_checksum_true_populates_sha256_crc32c_and_md5_receipts(
     asynchronous: bool,
     write_method: str,
     payload: bytes,
+    expected_crc32c: str,
 ) -> None:
     """checksum=True populates SHA-256, Castagnoli CRC32C, and MD5 receipts across sync/async write paths."""
     store = _bulk_store(asynchronous)
-    digests = _expected_digests(payload)
-    if payload == b"123456789":
-        assert digests["crc32c"] == "e3069283"
-    elif payload == b"":
-        assert digests["crc32c"] == "00000000"
+    expected_sha256, expected_md5 = _sha256_and_md5(payload)
 
     result, _ = await _write_with_method(
         store,
@@ -3064,9 +3052,9 @@ async def test_write_checksum_true_populates_sha256_crc32c_and_md5_receipts(
     )
     assert isinstance(result, PutResult)
     assert result.size == len(payload)
-    assert result.sha256 == digests["sha256"]
-    assert result.crc32c == digests["crc32c"]
-    assert result.md5 == digests["md5"]
+    assert result.sha256 == expected_sha256
+    assert result.crc32c == expected_crc32c
+    assert result.md5 == expected_md5
     assert await _resolve(store.get("items/checked.bin")) == payload
 
 
@@ -3082,8 +3070,9 @@ async def test_write_expected_digests_pass_and_selective_receipt_population(
 ) -> None:
     """Matching expected_* digests succeed and populate only requested receipts when checksum=False."""
     store = _bulk_store(asynchronous)
-    payload = b"selective-expected-digest-payload-" * 128
-    digests = _expected_digests(payload)
+    payload = _SELECTIVE_PAYLOAD
+    exp_sha, exp_md5 = _sha256_and_md5(payload)
+    digests = {"sha256": exp_sha, "crc32c": _SELECTIVE_CRC32C, "md5": exp_md5}
     attr_name = digest_field.removeprefix("expected_")
 
     result, _ = await _write_with_method(
@@ -3193,9 +3182,10 @@ async def test_s3_multipart_write_receipts_and_mismatch_abort(
     write_method: str,
 ) -> None:
     """Multi-part (>8 MiB) S3 uploads compute exact receipts and abort before completion on mismatch."""
-    payload = b"s3-multipart-block!!" * (450 * 1024)
+    payload = _S3_MULTIPART_PAYLOAD
     assert len(payload) > 8 * 1024 * 1024
-    digests = _expected_digests(payload)
+    exp_sha, exp_md5 = _sha256_and_md5(payload)
+    digests = {"sha256": exp_sha, "crc32c": _S3_MULTIPART_CRC32C, "md5": exp_md5}
 
     with _s3_multipart_completion_server() as (config, parts, completed):
         store: Any = AsyncObjectStore(config) if asynchronous else SyncObjectStore(config)
@@ -3351,6 +3341,11 @@ async def test_verified_get_stream_and_open_reader_pass_mismatch_and_early_close
         async with store.open_reader("streams/blob.bin", chunk_size=4096, expected_sha256=bad_sha) as early_reader:
             prefix = await early_reader.read(16)
             assert prefix == payload[:16]
+
+        sync_closed_reader = store.open_reader("streams/blob.bin", chunk_size=4096, expected_sha256=bad_sha)
+        assert await sync_closed_reader.read(16) == payload[:16]
+        sync_closed_reader.close()
+        assert sync_closed_reader.closed
     else:
         stream_chunks = [
             bytes(buf) for buf in store.get_stream("streams/blob.bin", chunk_size=4096, expected_sha256=good_sha)
@@ -3409,6 +3404,59 @@ async def test_verified_get_stream_and_open_reader_pass_mismatch_and_early_close
         with store.open_reader("streams/blob.bin", chunk_size=4096, expected_sha256=bad_sha) as early_reader:
             prefix = early_reader.read(16)
             assert prefix == payload[:16]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("chunked_reads", [False, True], ids=["exact-size", "split-exact-size"])
+async def test_verified_open_reader_exact_length_reads_enforce_sha256(
+    asynchronous: bool,
+    chunked_reads: bool,
+) -> None:
+    """Exact-length sized reads reaching object EOF enforce expected_sha256 before returning bytes."""
+    store = _bulk_store(asynchronous)
+    payload = b"exact-size-verified-reader-" * 300
+    good_sha = hashlib.sha256(payload).hexdigest()
+    bad_sha = "c" * 64
+    total = len(payload)
+    half = total // 2
+    await _resolve(store.put("streams/exact.bin", payload))
+
+    if asynchronous:
+        async with store.open_reader(
+            "streams/exact.bin", size=total, chunk_size=2048, expected_sha256=good_sha
+        ) as ok_reader:
+            if chunked_reads:
+                data = await ok_reader.read(half) + await ok_reader.read(total - half)
+            else:
+                data = await ok_reader.read(total)
+            assert data == payload
+            assert await ok_reader.read(16) == b""
+
+        async with store.open_reader(
+            "streams/exact.bin", size=total, chunk_size=2048, expected_sha256=bad_sha
+        ) as bad_reader:
+            if chunked_reads:
+                assert await bad_reader.read(half) == payload[:half]
+                with pytest.raises(IntegrityError):
+                    await bad_reader.read(total - half)
+            else:
+                with pytest.raises(IntegrityError):
+                    await bad_reader.read(total)
+    else:
+        with store.open_reader("streams/exact.bin", chunk_size=2048, expected_sha256=good_sha) as ok_reader:
+            data = ok_reader.read(half) + ok_reader.read(total - half) if chunked_reads else ok_reader.read(total)
+            assert data == payload
+            assert ok_reader.read(16) == b""
+
+        with store.open_reader("streams/exact.bin", chunk_size=2048, expected_sha256=bad_sha) as bad_reader:
+            if chunked_reads:
+                assert bad_reader.read(half) == payload[:half]
+                with pytest.raises(IntegrityError):
+                    bad_reader.read(total - half)
+            else:
+                with pytest.raises(IntegrityError):
+                    bad_reader.read(total)
 
 
 @pytest.mark.anyio
@@ -3498,9 +3546,14 @@ async def test_write_batches_checksum_and_expected_digests(asynchronous: bool, f
         res = write_batches_sync(cast(SyncObjectStore, store), key, table, file_format=file_format, checksum=True)
 
     stored = bytes(await _resolve(store.get(key)))
-    digests = _expected_digests(stored)
-    exp_sha, exp_crc, exp_md5 = digests["sha256"], digests["crc32c"], digests["md5"]
-    assert (res.sha256, res.crc32c, res.md5) == (exp_sha, exp_crc, exp_md5)
+    exp_sha, exp_md5 = _sha256_and_md5(stored)
+    assert res.sha256 == exp_sha
+    assert res.md5 == exp_md5
+    assert res.crc32c is not None and len(res.crc32c) == 8
+    exp_crc = res.crc32c
+    assert (
+        await _resolve(store.put(f"arrow/crc-{file_format}.bin", stored, expected_crc32c=exp_crc))
+    ).crc32c == exp_crc
 
     verified_key = f"arrow/verified-{file_format}.bin"
     if asynchronous:

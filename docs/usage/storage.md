@@ -128,7 +128,7 @@ The second conditional write fails because the first one changed the ETag. On GC
 
 ## Content integrity and verified reads
 
-`put()`, `put_stream()`, `put_multipart()`, `put_file()`, and `open_writer()` accept `checksum=True` to compute SHA-256, Castagnoli CRC32C, and MD5 lowercase hexadecimal receipts in `PutResult` (`PutResult.sha256`, `PutResult.crc32c`, `PutResult.md5`). Supply `expected_sha256`, `expected_crc32c`, or `expected_md5` on writes to verify payloads prior to commit; mismatches raise `vertebra.typing.IntegrityError` (distinct from `vertebra.db.IntegrityError`) and abort multipart uploads without overwriting existing destinations:
+`put()`, `put_stream()`, `put_multipart()`, `put_file()`, and `open_writer()` accept `checksum=True` to compute SHA-256, Castagnoli CRC32C, and MD5 lowercase hexadecimal receipts in `PutResult` (`PutResult.sha256`, `PutResult.crc32c`, `PutResult.md5`; `head()` and `list()` leave digest fields `None` and never copy unverified user metadata into receipt fields). Supply `expected_sha256`, `expected_crc32c`, or `expected_md5` on writes to verify payloads prior to commit; mismatches raise `vertebra.typing.IntegrityError` (distinct from `vertebra.db.IntegrityError`) and abort multipart uploads without overwriting existing destinations:
 
 ```python
 import hashlib

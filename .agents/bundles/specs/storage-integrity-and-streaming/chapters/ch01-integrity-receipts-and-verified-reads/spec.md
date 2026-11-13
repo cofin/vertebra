@@ -109,7 +109,7 @@ class PutResult(ObjectMeta, frozen=True, gc=False, kw_only=True):
 
 - **Validation & Failure Contracts**:
   - Format checks run before I/O (`StorageError::InvalidInput` -> `ValueError`): `expected_sha256` = `64` lowercase hex chars, `expected_crc32c` = `8` lowercase hex chars (Castagnoli `0x82F63B78` polynomial), `expected_md5` = `32` lowercase hex chars (`md-5 = "0.10"`, already in `src/rs/Cargo.lock`).
-  - When `checksum=False` and all `expected_*` are `None`, zero hashers are allocated and `sha256`/`crc32c`/`md5` are `None` (unless provider metadata attributes supply them).
+  - When `checksum=False` and all `expected_*` are `None`, zero hashers are allocated and `sha256`/`crc32c`/`md5` remain `None` (never populated from unverified metadata attributes).
   - Single-shot `put_opts` hashes before building `PutPayload`; `MultipartUploadSession` updates active hashers in `write_chunk` and verifies in `complete_with_meta` before `complete()`, calling `self.abort().await` on mismatch so prior objects remain intact; `get_file_verified` unlinks `.part` before rename on mismatch; `VerifyingStream` yields `Err(StorageError::Integrity)` on the final stream poll without buffering the full object.
 
 ## 3. Documentation & OKF Knowledge Plan
@@ -132,7 +132,7 @@ User documentation and OKF updates for integrity receipts, verified reads, and `
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Completed & Reviewed (`b8b25207`)**: All `3` tasks in `ch01-integrity-receipts-and-verified-reads` (`47` Rust + `485` Python tests passed) passed zero-context correctness and quality review. Next chapter: `ch02-streaming-arrow-writes-and-integrations`.
+- **Completed (`b8b25207`)**: All `3` tasks in `ch01-integrity-receipts-and-verified-reads` (`47` Rust + `485` Python tests passed) are complete. Next chapter: `ch02-streaming-arrow-writes-and-integrations`.
 - **Fast Chapter Gate (`< 35s`)**:
   `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-storage && cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-storage --all-targets -- -D warnings && UV_CACHE_DIR=/tmp/uv-cache uv run --no-sync maturin develop --manifest-path src/rs/vertebra-storage/Cargo.toml --uv && uv run --no-sync python -m mypy.stubtest vertebra._storage && uv run --no-sync ruff check src/py/vertebra/_typing.py src/py/vertebra/typing.py src/py/vertebra/storage && uv run --no-sync mypy src/py/vertebra/typing.py src/py/vertebra/storage && uv run --no-sync pytest src/py/tests/unit/framework/test_typing.py src/py/tests/unit/storage/test_storage_store.py -q`
 

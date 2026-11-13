@@ -18,6 +18,7 @@ from collections.abc import (
     Sequence,
 )
 from concurrent.futures import Future
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from vertebra.utils.module_loader import ensure_module
@@ -29,11 +30,26 @@ if TYPE_CHECKING:
 __all__ = (
     "iter_batches_async",
     "iter_batches_sync",
+    "normalize_arrow_format",
     "read_table_async",
     "read_table_sync",
     "write_batches_async",
     "write_batches_sync",
 )
+
+
+def normalize_arrow_format(raw_format: Any, path: str | Path) -> str:
+    """Resolve an optional format hint or path suffix to ``'parquet'`` or ``'arrow-ipc'``."""
+    if not raw_format:
+        suffix = Path(str(path)).suffix.lower()
+        return "arrow-ipc" if suffix in {".arrow", ".ipc", ".feather"} else "parquet"
+    lowered = str(raw_format).strip().lower()
+    if lowered == "parquet":
+        return "parquet"
+    if lowered in {"arrow", "ipc", "arrow-ipc", "feather"}:
+        return "arrow-ipc"
+    msg = f"Unsupported Arrow format {raw_format!r}; expected 'parquet' or 'arrow-ipc'"
+    raise ValueError(msg)
 
 
 def iter_batches_sync(
@@ -50,6 +66,7 @@ def iter_batches_sync(
     Parquet sources open with ``read_ahead=0`` and ``pre_buffer=False`` so each
     rowgroup is fetched only when the consumer requests its batches.
     """
+    _validate_format(file_format)
     _validate_batch_size(batch_size)
     stream = None if file_format == "parquet" else store.get_stream(key)
     source = store.open_reader(key, read_ahead=0) if stream is None else _StreamFile(lambda: next(stream, None))
@@ -84,6 +101,7 @@ async def iter_batches_async(
     Parquet sources open with ``read_ahead=0`` and ``pre_buffer=False`` so each
     rowgroup is fetched only when the consumer requests its batches.
     """
+    _validate_format(file_format)
     _validate_batch_size(batch_size)
     bridge = _CodecBridge()
     stream = None if file_format == "parquet" else store.get_stream(key)
@@ -121,6 +139,7 @@ def read_table_sync(
     Parquet reads default to ``pre_buffer=True`` so column chunk ranges coalesce;
     ``options`` may override it.
     """
+    _validate_format(file_format)
     ensure_module("pyarrow", package="pyarrow", extra="arrow")
     with store.open_reader(key) as source:
         return _read_table(source, file_format, options)
@@ -138,6 +157,7 @@ async def read_table_async(
     Parquet reads default to ``pre_buffer=True`` so column chunk ranges coalesce;
     ``options`` may override it.
     """
+    _validate_format(file_format)
     ensure_module("pyarrow", package="pyarrow", extra="arrow")
     backing = store.open_reader(key, size=(await store.head(key)).size)
     bridge = _CodecBridge()
@@ -169,6 +189,7 @@ def write_batches_sync(
     ``data`` may be a Table, RecordBatch, batch iterable, or a serialized Arrow IPC
     stream exposed through the buffer protocol.
     """
+    _validate_format(file_format)
     kwargs = dict(options or {})
     if file_format == "parquet":
         batch_size = kwargs.pop("row_group_size", batch_size)
@@ -221,6 +242,7 @@ async def write_batches_async(
     ``data`` may be a Table, RecordBatch, batch iterable, or a serialized Arrow IPC
     stream exposed through the buffer protocol.
     """
+    _validate_format(file_format)
     kwargs = dict(options or {})
     if file_format == "parquet":
         batch_size = kwargs.pop("row_group_size", batch_size)
@@ -577,6 +599,12 @@ class _BatchWriter:
             for offset in range(0, batch.num_rows, self._batch_size):
                 yield batch.slice(offset, self._batch_size)
             batch = next(self._source, None)
+
+
+def _validate_format(file_format: str) -> None:
+    if file_format not in {"parquet", "arrow-ipc"}:
+        msg = f"Unsupported Arrow format {file_format!r}; expected 'parquet' or 'arrow-ipc'"
+        raise ValueError(msg)
 
 
 def _validate_batch_size(batch_size: int) -> None:
