@@ -216,6 +216,11 @@ class StandaloneBuilder:
             '        sys.stderr.write("vertebra-server binary not found; bundle with --server-binary or set VERTEBRA_SERVER_BINARY\\n")\n'
             "        return 1\n"
             "    srv_env = os.environ.copy()\n"
+            "    try:\n"
+            "        from vertebra.supervisor._supervisor import EmbeddedPythonRuntime\n\n"
+            "        EmbeddedPythonRuntime.detect().apply(srv_env)\n"
+            "    except ImportError:\n"
+            "        pass\n"
             '    srv_env.setdefault("VERTEBRA_APP", entrypoint_spec)\n'
             '    srv_env.setdefault("VERTEBRA_APP_ROOT", str(app_dir))\n'
             '    existing_py_path = srv_env.get("PYTHONPATH", "")\n'

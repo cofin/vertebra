@@ -1863,6 +1863,8 @@ async def _stream_async_iterable(
     active_submit = submit_stream_frame if stream_submitter is None else stream_submitter
     aiterator = aiter(body_iter)
     aclose_fn = getattr(aiterator, "aclose", None)
+    headers_sent = False
+    terminal_sent = False
     try:
         active_submit(
             request_id,
@@ -1871,6 +1873,7 @@ async def _stream_async_iterable(
             headers,
             b"",
         )
+        headers_sent = True
         async for item in aiterator:
             chunk = _coerce_stream_chunk(item)
             if chunk:
@@ -1888,18 +1891,31 @@ async def _stream_async_iterable(
             None,
             b"",
         )
+        terminal_sent = True
     except ConnectionResetError:
         return
+    except asyncio.CancelledError:
+        if headers_sent and not terminal_sent:
+            with contextlib.suppress(ConnectionResetError):
+                active_submit(
+                    request_id,
+                    status,
+                    STREAM_FLAG_STREAMING | STREAM_FLAG_ERROR,
+                    None,
+                    b"",
+                )
+        raise
     except Exception:
         log.exception("Streaming async iterator error for request %s", request_id)
-        with contextlib.suppress(ConnectionResetError):
-            active_submit(
-                request_id,
-                status,
-                STREAM_FLAG_STREAMING | STREAM_FLAG_ERROR,
-                None,
-                b"",
-            )
+        if not terminal_sent:
+            with contextlib.suppress(ConnectionResetError):
+                active_submit(
+                    request_id,
+                    status,
+                    STREAM_FLAG_STREAMING | STREAM_FLAG_ERROR,
+                    None,
+                    b"",
+                )
     finally:
         if callable(aclose_fn):
             with contextlib.suppress(Exception):

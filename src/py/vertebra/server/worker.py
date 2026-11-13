@@ -447,6 +447,7 @@ class Worker:
 
         colocated_runner: WorkerRunner | None = None
         colocated_future: concurrent.futures.Future[Any] | None = None
+        colocated_task: asyncio.Task[Any] | None = None
         lifespan_stack = ExitStack()
         lifespan_states: dict[str, dict[str, Any]] = {}
 
@@ -477,7 +478,13 @@ class Worker:
                     lame_duck=self._lame_duck,
                 )
                 if use_inline_event_loop:
-                    loop_pool.primary_loop.create_task(colocated_runner.run())
+                    colocated_task = loop_pool.primary_loop.create_task(colocated_runner.run())
+
+                    def _log_colocated_task_failure(task: asyncio.Task[Any]) -> None:
+                        if not task.cancelled() and (exc := task.exception()) is not None:
+                            logger.error("Co-located WorkerRunner task failed", exc_info=exc)
+
+                    colocated_task.add_done_callback(_log_colocated_task_failure)
                 else:
                     colocated_future = loop_pool.schedule(colocated_runner.run())
             mount_lookup = {prefix: (adapter, proto) for prefix, adapter, proto in mount_runners}
@@ -539,9 +546,13 @@ class Worker:
         finally:
             self._zpages.set_var("worker_state", "stopped")
             if colocated_runner is not None:
-                with suppress(Exception):
+                with suppress(Exception, asyncio.CancelledError):
                     if use_inline_event_loop:
                         loop_pool.primary_loop.run_until_complete(colocated_runner.stop())
+                        if colocated_task is not None:
+                            if not colocated_task.done():
+                                colocated_task.cancel()
+                            loop_pool.primary_loop.run_until_complete(asyncio.wait_for(colocated_task, timeout=2.0))
                     else:
                         loop_pool.schedule(colocated_runner.stop()).result(timeout=5.0)
                         if colocated_future is not None:

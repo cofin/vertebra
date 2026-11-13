@@ -642,6 +642,7 @@ def test_pyproject_sqlalchemy_dialect_entry_points_resolve(engine: str, suffix: 
         ("mssql", "vertebra._mssql"),
         ("mysql", "vertebra._mysql"),
         ("oracle", "vertebra._oracle"),
+        ("postgres", "vertebra._postgres"),
         ("spanner", "vertebra._spanner"),
         ("storage", "vertebra._storage"),
     ],
@@ -664,15 +665,27 @@ def test_optional_extension_pyproject_isolation_and_bundler_extra(
     assert maturin_cfg["module-name"] == expected_module
     other_stubs = [
         f"**/py/vertebra/_{other}.pyi"
-        for other in ("bigquery", "bundler", "duckdb", "mssql", "mysql", "oracle", "spanner", "storage", "vertebra")
+        for other in (
+            "bigquery",
+            "bundler",
+            "duckdb",
+            "mssql",
+            "mysql",
+            "oracle",
+            "postgres",
+            "spanner",
+            "storage",
+            "vertebra",
+        )
         if other != pkg_slug
     ]
-    assert maturin_cfg["exclude"] == [
+    expected_prefix = [
         "**/py/vertebra/**/*.py",
         "**/py/vertebra/**/*.so",
+        *(["**/py/vertebra/**/*.pyd"] if pkg_slug == "postgres" else []),
         "**/py/vertebra/py.typed",
-        *other_stubs,
     ]
+    assert maturin_cfg["exclude"] == [*expected_prefix, *other_stubs]
     assert all(not pattern.startswith("!") for pattern in maturin_cfg["exclude"])
 
     root_toml = tomllib.loads((repo_root / "pyproject.toml").read_text(encoding="utf-8"))

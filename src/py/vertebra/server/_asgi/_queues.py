@@ -440,7 +440,10 @@ class AsgiSend:
             )
 
     def _flush_stream_chunk(self, chunk: bytes, *, more_body: bool) -> None:
-        assert self._stream_submitter is not None
+        submitter = self._stream_submitter
+        if submitter is None:
+            msg = "stream_submitter is required for progressive stream flush"
+            raise RuntimeError(msg)
         if self._stream_closed:
             msg = "stream closed by peer"
             raise ConnectionResetError(msg)
@@ -453,7 +456,7 @@ class AsgiSend:
                     flags |= STREAM_FLAG_FINAL
                     self._stream_closed = True
             try:
-                self._stream_submitter(
+                submitter(
                     self._request_id,
                     self._status,
                     flags,

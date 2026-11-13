@@ -1,8 +1,6 @@
 """Run command."""
 
-import asyncio
 import logging
-import os
 import sys
 import tomllib
 from pathlib import Path
@@ -22,10 +20,8 @@ from vertebra.cli._logging import configure_logging
 from vertebra.cli.banner import render_banner
 from vertebra.cli.errors import EXIT_CONFIG_ERROR, CLIError
 from vertebra.cli.plugin_registry import enter_app_server_lifespan, resolve_cli_app_path
-from vertebra.framework.queues import WorkerRunner
 from vertebra.supervisor._supervisor import build_server_command, run_supervisor
 from vertebra.utils.config_tools import get_env
-from vertebra.utils.module_loader import import_app
 from vertebra.utils.serializers import decode_json
 
 __all__ = ("load_config", "run")
@@ -139,7 +135,7 @@ def run(
         )
 
     if oneshot_job:
-        sys.exit(_execute_oneshot_cli(resolved_app, oneshot_job))
+        sys.exit(cli_workers_mod.execute_worker_cli(resolved_app, oneshot_job=oneshot_job))
 
     cfg_enabled, cfg_queues, cfg_lanes = load_workers_pyproject_config(Path.cwd())
     effective_with_workers = cfg_enabled if with_workers is None else with_workers
@@ -276,15 +272,6 @@ def _parse_positive_int(raw: str | None, *, default: int) -> int:
         except ValueError:
             return default
     return default
-
-
-def _execute_oneshot_cli(app_path: str, job_name: str) -> int:
-    """Import app_path, enter its server lifespan, and execute a single named oneshot job."""
-    os.environ["LITESTAR_APP"] = app_path
-    os.environ["VERTEBRA_APP"] = app_path
-    target_app = import_app(app_path)
-    with enter_app_server_lifespan(target_app, app_path=app_path):
-        return asyncio.run(WorkerRunner.run_oneshot(target_app, job_name))
 
 
 def _resolve_static_dir(project_dir: Path) -> Path | None:

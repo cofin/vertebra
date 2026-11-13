@@ -3,6 +3,7 @@
 import asyncio
 import contextlib
 import logging
+import math
 import os
 from collections.abc import Awaitable, Buffer, Callable, Iterable, Mapping
 from typing import Any, cast
@@ -48,6 +49,7 @@ from vertebra.server._asgi._queues import (
 from vertebra.server._fastpath import PayloadTooLargeError, attach_framework_fastpath
 from vertebra.server._fastpath_core import get_attached_fastpath
 from vertebra.server._loops import EventLoopPool
+from vertebra.typing import ImproperConfigurationError
 
 __all__ = (
     "FLAG_FINAL",
@@ -107,7 +109,18 @@ class AsgiLifespan:
         self._state: dict[str, Any] = dict(state) if state is not None else {}
         if timeout is None:
             raw_timeout = os.environ.get("VERTEBRA_LIFESPAN_TIMEOUT", "").strip()
-            self._timeout = float(raw_timeout) if raw_timeout else 30.0
+            if not raw_timeout:
+                self._timeout = 30.0
+            else:
+                try:
+                    parsed = float(raw_timeout)
+                except ValueError as exc:
+                    msg = f"VERTEBRA_LIFESPAN_TIMEOUT must be a positive finite number of seconds, got {raw_timeout!r}"
+                    raise ImproperConfigurationError(msg) from exc
+                if not math.isfinite(parsed) or parsed <= 0.0:
+                    msg = f"VERTEBRA_LIFESPAN_TIMEOUT must be a positive finite number of seconds, got {raw_timeout!r}"
+                    raise ImproperConfigurationError(msg)
+                self._timeout = parsed
         else:
             self._timeout = timeout
         self._supported = False
@@ -216,12 +229,12 @@ class AsgiLifespan:
         return self._loop
 
     async def _run_app(self) -> None:
-        assert self._receive_queue is not None
-        assert self._startup_complete is not None
-        assert self._shutdown_complete is not None
         receive_queue = self._receive_queue
         startup_complete = self._startup_complete
         shutdown_complete = self._shutdown_complete
+        if receive_queue is None or startup_complete is None or shutdown_complete is None:
+            msg = "AsgiLifespan queues are not initialized"
+            raise RuntimeError(msg)
 
         scope: dict[str, Any] = {
             "type": "lifespan",
@@ -366,7 +379,9 @@ class AsgiRunner:
 
         try:
             resp = await self._drive_asgi_once(scope, body, receive, send, request_id)
-            assert resp is not None
+            if resp is None:
+                msg = "Unary ASGI execution returned no response"
+                raise RuntimeError(msg)
             return resp
         except PayloadTooLargeError:
             return self._payload_too_large_response(send, request_id)
@@ -694,6 +709,10 @@ class AsgiRunner:
         except ConnectionResetError:
             disconnect_event.set()
             return
+        except asyncio.CancelledError:
+            if send.streamed:
+                send.finish_stream(error=True)
+            raise
         except PayloadTooLargeError:
             if send.streamed:
                 send.finish_stream(error=True)
