@@ -13,15 +13,15 @@ depends_on_chapters:
   - ch02-vertex-and-gemini-embedder-wire-parity
   - ch03-pushdown-and-local-embedding-broker
 plan_commit: 18baadcd
-last_reviewed_commit: b518e289
-updated_at: "2026-11-13T05:52:30Z"
+last_reviewed_commit: 1cd60f53
+updated_at: "2026-11-13T15:20:00Z"
 generated:
   by: flow-plan
   at: "2026-11-12T23:45:00Z"
 verified:
   - by: agent:code-reviewer
-    at: "2026-11-13T05:52:30Z"
-    commit: b518e289
+    at: "2026-11-13T15:20:00Z"
+    commit: 1cd60f53
 tags:
   - docs
   - okf

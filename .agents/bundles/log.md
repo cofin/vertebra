@@ -1,5 +1,9 @@
 # Bundle Activity Log
 
+## [2026-11-13T15:20:00Z] finish | gcp-embeddings-and-identity
+
+- Completed `gcp-embeddings-and-identity` (`state: completed`) at `1cd60f53` across all `4` chapters (`15/15` tasks) on `feat/gcp-embeddings-and-identity`, delivering audience-bound OIDC `SyncGcpIdTokenCache`/`AsyncGcpIdTokenCache` across GCE metadata, service-account JWTs, IAM impersonation, `gcloud`, and `authorized_user` ADC ([#113](https://github.com/cofin/vertebra/issues/113)), canonical ambient ADC fallback, Gemini protobuf field-2 and inline/file multimodal wire codecs, Vertex AI v1 REST `:predict` / `:embedContent`, `RemoteEmbedder` ID-token auth, SQL pushdown parity, per-loop `EmbeddingBroker` SHM lifecycle, and `GemmaEmbedder` `precision` forwarding.
+
 ## [2026-11-13T05:52:30Z] chapter-complete | gcp-embeddings-and-identity ch04-docs-and-okf-sync
 
 - Closed `ch04-docs-and-okf-sync` at `01a74272` (sync `b518e289`): updated `docs/usage/embeddings-and-vectors.md`, `docs/usage/storage-auth-and-signing.md`, and `docs/reference/storage.md` with Vertex AI REST, Gemini multimodal parts, `RemoteEmbedder(id_token_cache=...)`, canonical ADC order, and `authorized_user` / IAP / Cloud Run ID token rules, synchronized `embeddings-and-vectors.md` (`181L`), `object-storage.md` (`179L`), `pyo3-ffi-and-batch-dispatch.md` (`175L`), and `gcp-bigquery-and-spanner-drivers.md` (`153L`), and updated `embeddings-limitations.md` (`53L`) in place (`make docs` and `make review-check` clean).

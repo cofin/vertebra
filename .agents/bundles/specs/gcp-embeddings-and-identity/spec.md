@@ -4,7 +4,7 @@ flow_id: gcp-embeddings-and-identity
 title: "Google Cloud Embedding Transports, Identity Tokens, and Local Broker Parity"
 description: "Implements audience-bound OIDC ID token caches across all ADC sources, repairs Vertex AI REST and Gemini multimodal embedding wire contracts, aligns SQL embedding pushdown adapters, and hardens local EmbeddingBroker multi-loop state and GemmaEmbedder precision forwarding."
 status: stable
-state: active
+state: completed
 planning_quality: standard
 planning_degraded_reason: null
 has_chapters: true
@@ -18,18 +18,18 @@ current_task: null
 parent_prd: integration-remediation
 plan_revision: 2
 plan_commit: 18baadcd
-last_verified_checkpoint: 01a74272
+last_verified_checkpoint: 1cd60f53
 last_reviewed_chapter: ch04-docs-and-okf-sync
-last_reviewed_commit: b518e289
+last_reviewed_commit: 1cd60f53
 created_at: "2026-11-12T00:35:00Z"
-updated_at: "2026-11-13T05:52:30Z"
+updated_at: "2026-11-13T15:20:00Z"
 generated:
   by: flow-plan
   at: "2026-11-12T23:45:00Z"
 verified:
   - by: agent:code-reviewer
-    at: "2026-11-13T05:52:30Z"
-    commit: b518e289
+    at: "2026-11-13T15:20:00Z"
+    commit: 1cd60f53
 tags:
   - gcp
   - embeddings
