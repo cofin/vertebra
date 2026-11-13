@@ -163,7 +163,7 @@ class IapIdentitySource:
 
 ## 5. Implementation Plan
 
-- [ ] [ch01-guards-params-and-alias-cleanup](chapters/ch01-guards-params-and-alias-cleanup/spec.md) — Single-pass guards, `Mcp-Param-*` validation, single-use expiring confirmation tickets, and `MCPService` alias removal (`4` tasks; `< 15s` gate)
+- [~] [ch01-guards-params-and-alias-cleanup](chapters/ch01-guards-params-and-alias-cleanup/spec.md) — Single-pass guards, `Mcp-Param-*` validation, single-use expiring confirmation tickets, and `MCPService` alias removal (`4` tasks; `< 15s` gate)
 - [ ] [ch02-version-negotiation-and-sessions](chapters/ch02-version-negotiation-and-sessions/spec.md) — `SUPPORTED_PROTOCOL_VERSIONS` negotiation, `MCPSessionStore`, legacy `initialize`, `2025-03-26` batching, and `DELETE /mcp` ([#109](https://github.com/cofin/vertebra/issues/109)) (`3` tasks; `< 12s` gate)
 - [ ] [ch03-sse-streams-and-resource-subscriptions](chapters/ch03-sse-streams-and-resource-subscriptions/spec.md) — `McpHttpResponse.stream`, `GET /mcp` SSE adapter writers, notifications, `resources/subscribe`, and `subscriptions/listen` ([#109](https://github.com/cofin/vertebra/issues/109), [#112](https://github.com/cofin/vertebra/issues/112)) (`4` tasks; `< 15s` gate)
 - [ ] [ch04-skills-and-mcp-apps-core](chapters/ch04-skills-and-mcp-apps-core/spec.md) — `SkillCatalog` disclosure, `io.modelcontextprotocol/skills`, and SEP-1865 `io.modelcontextprotocol/ui` models/projection ([#110](https://github.com/cofin/vertebra/issues/110), [#111](https://github.com/cofin/vertebra/issues/111)) (`4` tasks; `< 15s` gate)

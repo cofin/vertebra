@@ -6,7 +6,13 @@ chapter_id: ch01-guards-params-and-alias-cleanup
 title: "Enforce Pending-Only, Owner-Exact, Single-Use, Expiring Confirmation Tickets"
 description: "Harden ConfirmationGate with ttl_seconds, max_tickets, exact owner matching, and consume_call_approval across MCPCore, AgentRuntime, and ToolProvider bridges."
 status: stable
-state: pending
+state: completed
+commit: e22452c5
+last_verified_commit: e22452c5
+last_verified_at: "2026-11-13T01:59:00Z"
+verification_evidence: "ruff + mypy + pytest (177 passed) + review-check (exit 0)"
+claimed_by: null
+claimed_at: null
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -69,8 +75,8 @@ uv run --no-sync ruff check src/py/vertebra/agent/runtime.py src/py/vertebra/age
 
 ## Acceptance Criteria
 
-- [ ] Approved confirmation tokens work once and reject replays, wrong owners, and expired tickets.
-- [ ] `is_call_approved` is removed with zero remaining callers.
+- [x] Approved confirmation tokens work once and reject replays, wrong owners, and expired tickets.
+- [x] `is_call_approved` is removed with zero remaining callers.
 
 [^conf-gate]: `src/py/vertebra/agent/runtime.py::ConfirmationGate` — Confirmation ticket store.
 [^provider-tools]: `src/py/vertebra/agent/tools/__init__.py::build_tools` — ToolProvider confirmation bridge.

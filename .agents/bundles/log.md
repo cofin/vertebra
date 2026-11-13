@@ -1,5 +1,9 @@
 # Bundle Activity Log
 
+## [2026-11-13T01:59:00Z] chapter-checkpoint | mcp-protocol-completeness ch01-guards-params-and-alias-cleanup
+
+- Completed `ch01-guards-params-and-alias-cleanup` (`t01`–`t04`) at `e22452c5` on `feat/mcp-protocol-completeness`: split `Tool.authorize`/`Tool.call` with `-32004`/`-32005` JSON-RPC error mapping, validated `Mcp-Param-*` headers (`-32020`), hardened `ConfirmationGate` (`consume_call_approval`, `ttl_seconds`, `max_tickets`, exact owner checks), and removed the `MCPService` alias subclass (`177 passed`, `mypy` clean).
+
 ## [2026-11-13T20:14:00Z] archive | gcp-embeddings-and-identity
 
 - Archived `gcp-embeddings-and-identity` (`4` chapters, `15` tasks, `aecb5a12..6406bbef`), delivering audience-bound OIDC `SyncGcpIdTokenCache`/`AsyncGcpIdTokenCache` ([#113](https://github.com/cofin/vertebra/issues/113)) including `authorized_user` ADC, canonical ambient ADC fallback, Gemini protobuf field-2 and inline/file multimodal wire codecs, Vertex AI v1 REST `:predict`/`:embedContent`, `RemoteEmbedder` ID-token auth, SQL embedding pushdown parity, per-loop `EmbeddingBroker` SHM cleanup, `GemmaEmbedder` `precision` forwarding, and present-tense OKF chapters (`embeddings-and-vectors.md`, `embeddings-limitations.md`, `object-storage.md`, `pyo3-ffi-and-batch-dispatch.md`, `gcp-bigquery-and-spanner-drivers.md`).

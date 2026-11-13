@@ -6,7 +6,13 @@ chapter_id: ch01-guards-params-and-alias-cleanup
 title: "Run Tool Guards Once with Typed Errors and Validate Mcp-Param-* Headers"
 description: "Split Tool.authorize and Tool.call, map guard errors to -32004/-32005, fail closed on 2-arg connection guards, and validate Mcp-Param-* headers in MCPCore.handle."
 status: stable
-state: pending
+state: completed
+commit: e22452c5
+last_verified_commit: e22452c5
+last_verified_at: "2026-11-13T01:59:00Z"
+verification_evidence: "ruff + mypy + pytest (177 passed) + review-check (exit 0)"
+claimed_by: null
+claimed_at: null
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -70,8 +76,8 @@ uv run --no-sync ruff check src/py/vertebra/agent/core/schema.py src/py/vertebra
 
 ## Acceptance Criteria
 
-- [ ] Guards execute exactly once per `tools/call` and return `-32004` / `-32005` on denial or rate limit.
-- [ ] Mismatched or missing `Mcp-Param-*` body values return HTTP `400` with JSON-RPC `-32020`.
+- [x] Guards execute exactly once per `tools/call` and return `-32004` / `-32005` on denial or rate limit.
+- [x] Mismatched or missing `Mcp-Param-*` body values return HTTP `400` with JSON-RPC `-32020`.
 
 [^tool-schema]: `src/py/vertebra/agent/core/schema.py::Tool.invoke` — Inline guard execution inside Tool.invoke.
 [^mcp-handle]: `src/py/vertebra/agent/mcp/service.py::MCPCore.handle` — HTTP header validation and tools/call dispatch.
