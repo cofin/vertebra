@@ -5,21 +5,22 @@ chapter_id: ch02-streaming-arrow-writes-and-integrations
 title: "Chapter 02: Streaming Arrow Multipart Writes, Ecosystem Adapters, and Checksum Benchmark"
 description: "Threads content-integrity digests and bounded-memory Arrow/Parquet multipart streaming across vertebra.storage, SQLSpec, Advanced Alchemy, and Django storage backends, and adds the put_checksum Criterion benchmark."
 status: stable
-state: active
+state: completed
 planning_status: complete
 planning_quality: standard
 planning_degraded_reason: null
 depends_on_chapters:
   - ch01-integrity-receipts-and-verified-reads
 plan_commit: 18baadcd
-updated_at: "2026-11-12T23:55:00Z"
+last_reviewed_commit: 099753b4
+updated_at: "2026-11-13T04:46:07Z"
 generated:
   by: flow-plan
   at: "2026-11-12T23:55:00Z"
 verified:
-  - by: agent:plan-generator
-    at: "2026-11-12T23:55:00Z"
-    commit: 18baadcd
+  - by: agent:code-reviewer
+    at: "2026-11-13T04:46:07Z"
+    commit: 099753b4
 tags:
   - storage
   - arrow
@@ -108,7 +109,7 @@ Arrow streaming, digest forwarding, and the upstream SQLSpec hook note are docum
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Implemented (`3/3` tasks at `c9f54436`)**: Streaming Arrow/Parquet digest forwarding, SQLSpec `supports_direct_arrow_write = True`, Alchemy `save_arrow*`, Django `content.{sha256,crc32c,md5}`, and `benches/put_checksum.rs` are verified (`640` + `82` Django Python tests, `cargo test -p vertebra-storage --benches`, `clippy`, `ruff`, `mypy` clean).
+- **Completed (`c9f54436`)**: All `3` tasks in `ch02-streaming-arrow-writes-and-integrations` (`640` + `82` Django Python tests, `cargo test -p vertebra-storage --benches`, `clippy`, `ruff`, `mypy` clean) are complete. Next chapter: `ch03-wheel-isolation-and-okf-sync`.
 - **Fast Chapter Gate (`< 25s`)**:
   `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-storage --benches && uv run --no-sync ruff check src/py/vertebra/storage/_arrow.py src/py/vertebra/extensions/{sqlspec,alchemy,django}/storage.py && uv run --no-sync mypy src/py/vertebra/storage/_arrow.py src/py/vertebra/extensions/{sqlspec,alchemy,django}/storage.py && uv run --no-sync pytest src/py/tests/unit/extensions/test_data_storage_integrations.py -q`
 

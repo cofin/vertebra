@@ -1,5 +1,10 @@
 # Bundle Activity Log
 
+## [2026-11-13T04:46:07Z] chapter-complete | storage-integrity-and-streaming ch02-streaming-arrow-writes-and-integrations
+
+- Closed `ch02-streaming-arrow-writes-and-integrations` at `c9f54436` (sync `099753b4`): threaded `checksum` and `expected_*` digests through `vertebra.storage._arrow`, enabled SQLSpec `supports_direct_arrow_write = True`, added Advanced Alchemy `save_arrow*` + digest forwarding and Django `content.{sha256,crc32c,md5}` forwarding, and added `benches/put_checksum.rs` (`640` + `82` Django Python tests, `cargo test -p vertebra-storage --benches`, `clippy`, `ruff`, `mypy` clean).
+- Advanced active frontier to `ch03-wheel-isolation-and-okf-sync` (`storage-integrity-and-streaming:ch03:t01`; `3` tasks remain in `ch03`).
+
 ## [2026-11-13T02:56:00Z] chapter-complete | storage-integrity-and-streaming ch01-integrity-receipts-and-verified-reads
 
 - Closed `ch01-integrity-receipts-and-verified-reads` at `b8b25207` (`47` Rust tests, `485` Python tests, unified verified `open_reader` cursor across `read()`/`__iter__()`/`__aiter__()`, and `io.UnsupportedOperation` on random-access `seek`/`read_at` when `expected_sha256` is set).
