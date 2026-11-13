@@ -6,7 +6,12 @@ chapter_id: ch06-live-conformance-and-service-acceptance
 title: "Enable PG14-18 conformance matrix and VERTEBRA_CONFORMANCE_POSTGRES_REQUIRE_ZERO_SKIPS"
 description: "Set supports_pipeline=True and pending_flow_id=None for postgres in test_driver_conformance.py and enforce zero-skip terminal gating."
 status: stable
-state: pending
+state: completed
+commit: cc5e1533
+last_verified_at: "2026-11-13T21:00:57Z"
+last_verified_commit: cc5e1533
+claimed_by: null
+claimed_at: null
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -59,7 +64,7 @@ uv run --no-sync pytest src/py/tests/unit/db/test_postgres_zero_skip_gate.py -q
 
 ## Acceptance Criteria
 
-- [ ] Zero-skip hook fails on skipped/missing PG cases and passes on clean execution.
-- [ ] Zero regressions in `ch06-live-conformance-and-service-acceptance` fast verification gate.
+- [x] Zero-skip hook fails on skipped/missing PG cases and passes on clean execution.
+- [x] Zero regressions in `ch06-live-conformance-and-service-acceptance` fast verification gate.
 
 [^conformance-py]: `src/py/tests/integration/db/test_driver_conformance.py::ENGINE_SPECS` — Cross-engine conformance specs.

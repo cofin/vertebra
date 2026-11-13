@@ -64,13 +64,13 @@ Testing matrix and workflow OKF updates land in `ch07:t04`.
 
 ## 5. Implementation Plan
 
-- [ ] [t01-pg14-18-conformance-and-zero-skip-gate.md](tasks/t01-pg14-18-conformance-and-zero-skip-gate.md) — Set supports_pipeline=True and pending_flow_id=None for postgres in test_driver_conformance.py and enforce zero-skip terminal gating.
-- [ ] [t02-live-logical-replication-acceptance-suite.md](tasks/t02-live-logical-replication-acceptance-suite.md) — Add test_postgres_replication_live.py covering PostgresChangeSource, unchanged TOAST, non-UTF-8 bytea, reconnect, and slot contention.
-- [ ] [t03-live-copy-arrow-notify-pgvector-pgbouncer-suite.md](tasks/t03-live-copy-arrow-notify-pgvector-pgbouncer-suite.md) — Add test_postgres_native_features_live.py covering binary COPY, Arrow SHM, notifications, pgvector, and PgBouncer transaction/statement modes.
+- [x] [cc5e1533] [t01-pg14-18-conformance-and-zero-skip-gate.md](tasks/t01-pg14-18-conformance-and-zero-skip-gate.md) — Set supports_pipeline=True and pending_flow_id=None for postgres in test_driver_conformance.py and enforce zero-skip terminal gating.
+- [x] [cc5e1533] [t02-live-logical-replication-acceptance-suite.md](tasks/t02-live-logical-replication-acceptance-suite.md) — Add test_postgres_replication_live.py covering PostgresChangeSource, unchanged TOAST, non-UTF-8 bytea, reconnect, and slot contention.
+- [x] [cc5e1533] [t03-live-copy-arrow-notify-pgvector-pgbouncer-suite.md](tasks/t03-live-copy-arrow-notify-pgvector-pgbouncer-suite.md) — Add test_postgres_native_features_live.py covering binary COPY, Arrow SHM, notifications, pgvector, and PgBouncer transaction/statement modes.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-Planned (`3` tasks). Offline `< 30s` gate; full Docker PG14–18 runs in `/flow:finish` and `ci.yml`.
+Implemented at `cc5e1533` (`3/3` tasks complete; pending chapter review). Offline gate passes (`14 passed, 6 skipped` + `61 passed, 242 skipped, 144 deselected`, Ruff, and Mypy `5` source files clean; live `VERTEBRA_CONFORMANCE_POSTGRES_REQUIRE_ZERO_SKIPS=1` rejects skips exit `1`); full Docker PG14–18 runs in `/flow:finish` and `ci.yml`.
 
 ```bash
 uv run --no-sync pytest src/py/tests/unit/db/test_postgres_zero_skip_gate.py src/py/tests/integration/db/test_driver_conformance.py src/py/tests/integration/db/test_postgres_replication_live.py src/py/tests/integration/db/test_postgres_native_features_live.py -q && uv run --no-sync ruff check src/py/tests/integration src/py/tests/unit/db/test_postgres_zero_skip_gate.py

@@ -6,7 +6,12 @@ chapter_id: ch06-live-conformance-and-service-acceptance
 title: "Create live wal_level=logical replication acceptance suite"
 description: "Add test_postgres_replication_live.py covering PostgresChangeSource, unchanged TOAST, non-UTF-8 bytea, reconnect, and slot contention."
 status: stable
-state: pending
+state: completed
+commit: cc5e1533
+last_verified_at: "2026-11-13T21:00:57Z"
+last_verified_commit: cc5e1533
+claimed_by: null
+claimed_at: null
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -60,7 +65,7 @@ uv run --no-sync pytest src/py/tests/integration/db/test_postgres_replication_li
 
 ## Acceptance Criteria
 
-- [ ] Suite collects and skips cleanly offline and exercises full `pgoutput` v1 fidelity under Docker.
-- [ ] Zero regressions in `ch06-live-conformance-and-service-acceptance` fast verification gate.
+- [x] Suite collects and skips cleanly offline and exercises full `pgoutput` v1 fidelity under Docker.
+- [x] Zero regressions in `ch06-live-conformance-and-service-acceptance` fast verification gate.
 
 [^int-conftest]: `src/py/tests/integration/conftest.py` — Integration service fixtures.
