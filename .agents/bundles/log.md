@@ -1,5 +1,10 @@
 # Bundle Activity Log
 
+## [2026-11-13T05:52:30Z] chapter-complete | gcp-embeddings-and-identity ch04-docs-and-okf-sync
+
+- Closed `ch04-docs-and-okf-sync` at `01a74272` (sync `b518e289`): updated `docs/usage/embeddings-and-vectors.md`, `docs/usage/storage-auth-and-signing.md`, and `docs/reference/storage.md` with Vertex AI REST, Gemini multimodal parts, `RemoteEmbedder(id_token_cache=...)`, canonical ADC order, and `authorized_user` / IAP / Cloud Run ID token rules, synchronized `embeddings-and-vectors.md` (`181L`), `object-storage.md` (`179L`), `pyo3-ffi-and-batch-dispatch.md` (`175L`), and `gcp-bigquery-and-spanner-drivers.md` (`153L`), and updated `embeddings-limitations.md` (`53L`) in place (`make docs` and `make review-check` clean).
+- Completed all `4` chapters (`15/15` tasks) of `gcp-embeddings-and-identity`.
+
 ## [2026-11-13T05:22:00Z] chapter-complete | gcp-embeddings-and-identity ch03-pushdown-and-local-embedding-broker
 
 - Closed `ch03-pushdown-and-local-embedding-broker` at `5771c8e3` (sync `ef00252d`): removed implicit metadata/storage fallbacks from `OracleEmbeddingPushdown`, aligned `embed_batch`/`top_k`/boolean/dimension validation across BigQuery/Spanner/Postgres pushdowns and Spanner `AI.GENERATE_EMBEDDING` parameter binds, isolated `EmbeddingBroker` state per running event loop with `/dev/shm/vtb-qvec-*` cleanup, and forwarded `GemmaEmbedder` `precision` into `FastEmbedder.build_backend` (`ruff`, `mypy` across `12` source files, and `404` tests clean).

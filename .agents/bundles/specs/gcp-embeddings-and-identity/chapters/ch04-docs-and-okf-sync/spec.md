@@ -5,7 +5,7 @@ chapter_id: ch04-docs-and-okf-sync
 title: "Chapter 04: User Documentation, OKF Sync, and Embeddings Limitations"
 description: "Updates embeddings and GCP authentication user guides, synchronizes embeddings-and-vectors.md within 200 lines alongside storage and PyO3 FFI OKF chapters, and updates embeddings-limitations.md in place."
 status: stable
-state: active
+state: completed
 planning_status: complete
 planning_quality: standard
 planning_degraded_reason: null
@@ -13,14 +13,15 @@ depends_on_chapters:
   - ch02-vertex-and-gemini-embedder-wire-parity
   - ch03-pushdown-and-local-embedding-broker
 plan_commit: 18baadcd
-updated_at: "2026-11-13T05:35:00Z"
+last_reviewed_commit: b518e289
+updated_at: "2026-11-13T05:52:30Z"
 generated:
   by: flow-plan
   at: "2026-11-12T23:45:00Z"
 verified:
-  - by: agent:plan-generator
-    at: "2026-11-12T23:45:00Z"
-    commit: 18baadcd
+  - by: agent:code-reviewer
+    at: "2026-11-13T05:52:30Z"
+    commit: b518e289
 tags:
   - docs
   - okf
