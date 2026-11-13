@@ -5,20 +5,21 @@ chapter_id: ch01-gcp-id-token-cache
 title: "Chapter 01: Audience-Bound GCP ID Token Cache and Python Surface"
 description: "Implements per-audience single-flight OIDC ID token minting across all GCP ADC credential sources in vertebra-core, standardizes ambient ADC metadata fallback, and exposes SyncGcpIdTokenCache and AsyncGcpIdTokenCache in vertebra._vertebra and vertebra.storage."
 status: stable
-state: active
+state: completed
 planning_status: complete
 planning_quality: standard
 planning_degraded_reason: null
 depends_on_chapters: []
 plan_commit: 18baadcd
-updated_at: "2026-11-12T23:45:00Z"
+last_reviewed_commit: b3253fee
+updated_at: "2026-11-13T04:50:11Z"
 generated:
   by: flow-plan
   at: "2026-11-12T23:45:00Z"
 verified:
-  - by: agent:plan-generator
-    at: "2026-11-12T23:45:00Z"
-    commit: 18baadcd
+  - by: agent:code-reviewer
+    at: "2026-11-13T04:50:11Z"
+    commit: b3253fee
 tags:
   - gcp
   - identity
@@ -173,7 +174,7 @@ User-facing credentials documentation and OKF updates for `GcpIdTokenCache` and 
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Implemented (`4/4` tasks at `a601dee4`)**: `GcpIdTokenCache`, canonical ADC metadata fallback, `SyncGcpIdTokenCache` / `AsyncGcpIdTokenCache` / `GcpIdTokenSnapshot` PyO3 bindings, `_vertebra.pyi` stubs, and `vertebra.storage` re-exports are verified (`13` Rust `gcp_auth::` tests, `19` Python tests + `2` duckdb-skipped, `clippy`, `stubtest`, `ruff`, `mypy` clean).
+- **Completed (`a601dee4`)**: All `4` tasks in `ch01-gcp-id-token-cache` (`13` Rust `gcp_auth::` tests, `19` Python tests + `2` duckdb-skipped, `clippy`, `stubtest`, `ruff`, `mypy` clean) are complete. Next chapter: `ch02-vertex-and-gemini-embedder-wire-parity`.
 - **Fast Chapter Gate (`< 40s`)**:
   `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-core --test it gcp_auth:: && cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-core -p vertebra-storage -p vertebra-py --features vertebra-core/gcp-auth -- -D warnings && uv run --no-sync maturin develop --uv && uv run --no-sync python -m mypy.stubtest vertebra._vertebra && uv run --no-sync ruff check src/py/vertebra/storage && uv run --no-sync mypy src/py/vertebra/storage && uv run --no-sync pytest src/py/tests/unit/storage/test_gcs_token_refresh.py -q`
 

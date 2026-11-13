@@ -1,5 +1,10 @@
 # Bundle Activity Log
 
+## [2026-11-13T04:50:11Z] chapter-complete | gcp-embeddings-and-identity ch01-gcp-id-token-cache
+
+- Closed `ch01-gcp-id-token-cache` at `a601dee4` (sync `b3253fee`): implemented per-audience `GcpIdTokenCache` across `ServiceAccount`, `MetadataServer`, `ImpersonatedServiceAccount`, `GcloudCli`, and `AuthorizedUser` ADC, finalized canonical ambient ADC fallback, and exposed `GcpIdTokenSnapshot`, `SyncGcpIdTokenCache`, and `AsyncGcpIdTokenCache` in `vertebra._vertebra` and `vertebra.storage` (`13` Rust `gcp_auth::` tests, `19` Python tests + `2` duckdb-skipped, `clippy`, `stubtest`, `ruff`, `mypy` clean).
+- Advanced active frontier to `ch02-vertex-and-gemini-embedder-wire-parity` (`gcp-embeddings-and-identity:ch02:t01`; `11` tasks remain across `ch02`–`ch04`).
+
 ## [2026-11-13T16:11:30Z] archive | storage-integrity-and-streaming
 
 - Archived `storage-integrity-and-streaming` (`3` chapters, `9` tasks, `7f247d0e..61f0cd0e`), delivering CRC32C/MD5/SHA-256 receipts, verified streaming reads with `AsyncStreamReader.close()`, streaming Arrow/Parquet multipart writes across SQLSpec/Advanced Alchemy/Django, parameterized `{storage,bigquery,spanner,bundler}-wheel-check` isolation gates, promoted `.agents/bundles/research/upstream-sqlspec-direct-arrow-write.md`, and present-tense OKF storage chapters (`object-storage.md`, `object-storage-limitations.md`).
