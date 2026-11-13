@@ -1874,10 +1874,8 @@ class SyncObjectStore(_BaseObjectStore):
     def get(self, path: str, *, expected_sha256: str | None = None) -> bytes:
         """Read full object bytes for the given key."""
         key = self._key(path)
-        if expected_sha256 is not None:
-            self._validate_expected_hex("expected_sha256", expected_sha256, 64)
-            return bytes(self._require_native().get(key, expected_sha256=expected_sha256))
-        return bytes(self._require_native().get(key))
+        self._validate_expected_hex("expected_sha256", expected_sha256, 64)
+        return bytes(self._require_native().get(key, expected_sha256=expected_sha256))
 
     def get_file(
         self,
@@ -1888,12 +1886,10 @@ class SyncObjectStore(_BaseObjectStore):
     ) -> ObjectMeta:
         """Stream the object at the given key into a local file and return its metadata."""
         key = self._key(path)
-        if expected_sha256 is not None:
-            self._validate_expected_hex("expected_sha256", expected_sha256, 64)
-            return self._native_to_object_meta(
-                self._require_native().get_file(key, str(Path(file_path)), expected_sha256=expected_sha256)
-            )
-        return self._native_to_object_meta(self._require_native().get_file(key, str(Path(file_path))))
+        self._validate_expected_hex("expected_sha256", expected_sha256, 64)
+        return self._native_to_object_meta(
+            self._require_native().get_file(key, str(Path(file_path)), expected_sha256=expected_sha256)
+        )
 
     def download_many(self, keys: Sequence[str], destination: str | Path, *, concurrency: int = 16) -> list[Path]:
         """Download objects concurrently into `destination`, naming each file after its key basename.
@@ -1964,11 +1960,8 @@ class SyncObjectStore(_BaseObjectStore):
         if chunk_size is not None and chunk_size < 1:
             msg = "chunk_size must be >= 1"
             raise ValueError(msg)
-        if expected_sha256 is not None:
-            self._validate_expected_hex("expected_sha256", expected_sha256, 64)
-            reader = self._require_native().get_stream(key, chunk_size=chunk_size, expected_sha256=expected_sha256)
-        else:
-            reader = self._require_native().get_stream(key, chunk_size=chunk_size)
+        self._validate_expected_hex("expected_sha256", expected_sha256, 64)
+        reader = self._require_native().get_stream(key, chunk_size=chunk_size, expected_sha256=expected_sha256)
         try:
             yield from reader
         finally:
@@ -2467,10 +2460,8 @@ class AsyncObjectStore(_BaseObjectStore):
     async def get(self, path: str, *, expected_sha256: str | None = None) -> bytes:
         """Asynchronously read an object from the store via Rust Tokio awaitable."""
         key = self._key(path)
-        if expected_sha256 is not None:
-            self._validate_expected_hex("expected_sha256", expected_sha256, 64)
-            return bytes(await self._require_native().get(key, expected_sha256=expected_sha256))
-        return bytes(await self._require_native().get(key))
+        self._validate_expected_hex("expected_sha256", expected_sha256, 64)
+        return bytes(await self._require_native().get(key, expected_sha256=expected_sha256))
 
     async def get_file(
         self,
@@ -2481,12 +2472,10 @@ class AsyncObjectStore(_BaseObjectStore):
     ) -> ObjectMeta:
         """Asynchronously stream the object at the given key into a local file and return its metadata."""
         key = self._key(path)
-        if expected_sha256 is not None:
-            self._validate_expected_hex("expected_sha256", expected_sha256, 64)
-            return self._native_to_object_meta(
-                await self._require_native().get_file(key, str(Path(file_path)), expected_sha256=expected_sha256)
-            )
-        return self._native_to_object_meta(await self._require_native().get_file(key, str(Path(file_path))))
+        self._validate_expected_hex("expected_sha256", expected_sha256, 64)
+        return self._native_to_object_meta(
+            await self._require_native().get_file(key, str(Path(file_path)), expected_sha256=expected_sha256)
+        )
 
     async def download_many(self, keys: Sequence[str], destination: str | Path, *, concurrency: int = 16) -> list[Path]:
         """Asynchronously download objects into `destination`, naming each file after its key basename.
@@ -2558,11 +2547,8 @@ class AsyncObjectStore(_BaseObjectStore):
         if chunk_size is not None and chunk_size < 1:
             msg = "chunk_size must be >= 1"
             raise ValueError(msg)
-        if expected_sha256 is not None:
-            self._validate_expected_hex("expected_sha256", expected_sha256, 64)
-            reader = self._require_native().get_stream(key, chunk_size=chunk_size, expected_sha256=expected_sha256)
-        else:
-            reader = self._require_native().get_stream(key, chunk_size=chunk_size)
+        self._validate_expected_hex("expected_sha256", expected_sha256, 64)
+        reader = self._require_native().get_stream(key, chunk_size=chunk_size, expected_sha256=expected_sha256)
         try:
             async for chunk in reader:
                 yield chunk
@@ -2893,17 +2879,8 @@ class SyncReadableFile(io.RawIOBase):
     def __iter__(self) -> Iterator[bytes]:
         """Yield byte chunks from the current cursor position to EOF without buffering the full object."""
         self._ensure_open()
-        if self._pos == 0:
-            stream = (
-                self._store.get_stream(
-                    self._key,
-                    chunk_size=self._chunk_size,
-                    expected_sha256=self._expected_sha256,
-                )
-                if self._expected_sha256 is not None
-                else self._store.get_stream(self._key, chunk_size=self._chunk_size)
-            )
-            for buf in stream:
+        if self._pos == 0 and self._expected_sha256 is None:
+            for buf in self._store.get_stream(self._key, chunk_size=self._chunk_size):
                 self._ensure_open()
                 chunk = bytes(buf)
                 if chunk:
@@ -2952,12 +2929,16 @@ class SyncReadableFile(io.RawIOBase):
             msg = f"Negative seek position: {target}"
             raise ValueError(msg)
         clamped = min(target, self._size)
-        if self._expected_sha256 is not None and clamped != self._pos and clamped == 0:
-            reader, self._stream_reader = self._stream_reader, None
-            if reader is not None:
-                reader.close()
-            self._stream_buf = b""
-            self._stream_eof = False
+        if self._expected_sha256 is not None:
+            if clamped not in {0, self._pos}:
+                msg = "Random-access seek to non-zero offset is not supported when expected_sha256 is set"
+                raise io.UnsupportedOperation(msg)
+            if clamped == 0:
+                reader, self._stream_reader = self._stream_reader, None
+                if reader is not None:
+                    reader.close()
+                self._stream_buf = b""
+                self._stream_eof = False
         self._pos = clamped
         return self._pos
 
@@ -2998,6 +2979,9 @@ class SyncReadableFile(io.RawIOBase):
     def read_at(self, offset: int, length: int) -> bytes:
         """Read length bytes at offset without mutating the stream cursor or read-ahead window."""
         self._ensure_open()
+        if self._expected_sha256 is not None:
+            msg = "Random-access read_at is not supported when expected_sha256 is set"
+            raise io.UnsupportedOperation(msg)
         if offset < 0 or length < 0:
             msg = "offset and length must be non-negative"
             raise ValueError(msg)
@@ -3137,17 +3121,8 @@ class AsyncReadableFile:
     async def __aiter__(self) -> AsyncIterator[bytes]:
         """Asynchronously yield byte chunks from the current cursor position to EOF."""
         self._ensure_open()
-        if self._pos == 0:
-            stream = (
-                self._store.get_stream(
-                    self._key,
-                    chunk_size=self._chunk_size,
-                    expected_sha256=self._expected_sha256,
-                )
-                if self._expected_sha256 is not None
-                else self._store.get_stream(self._key, chunk_size=self._chunk_size)
-            )
-            async for buf in stream:
+        if self._pos == 0 and self._expected_sha256 is None:
+            async for buf in self._store.get_stream(self._key, chunk_size=self._chunk_size):
                 self._ensure_open()
                 chunk = bytes(buf)
                 if chunk:
@@ -3201,10 +3176,14 @@ class AsyncReadableFile:
             msg = f"Negative seek position: {target}"
             raise ValueError(msg)
         clamped = min(target, self._size) if self._size is not None else target
-        if self._expected_sha256 is not None and clamped != self._pos and clamped == 0:
-            self._stream_reader = None
-            self._stream_buf = b""
-            self._stream_eof = False
+        if self._expected_sha256 is not None:
+            if clamped not in {0, self._pos}:
+                msg = "Random-access seek to non-zero offset is not supported when expected_sha256 is set"
+                raise io.UnsupportedOperation(msg)
+            if clamped == 0:
+                self._stream_reader = None
+                self._stream_buf = b""
+                self._stream_eof = False
         self._pos = clamped
         return self._pos
 
@@ -3248,6 +3227,9 @@ class AsyncReadableFile:
     async def read_at(self, offset: int, length: int) -> bytes:
         """Asynchronously read length bytes at offset without mutating the stream cursor or read-ahead window."""
         self._ensure_open()
+        if self._expected_sha256 is not None:
+            msg = "Random-access read_at is not supported when expected_sha256 is set"
+            raise io.UnsupportedOperation(msg)
         if offset < 0 or length < 0:
             msg = "offset and length must be non-negative"
             raise ValueError(msg)

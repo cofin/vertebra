@@ -3313,11 +3313,28 @@ async def test_verified_get_stream_and_open_reader_pass_mismatch_and_early_close
             assert await reader.read() == payload
             assert reader.seek(0) == 0
             head_part = await reader.read(5000)
+            assert reader.seek(0, io.SEEK_CUR) == 5000
+            with pytest.raises(io.UnsupportedOperation):
+                reader.seek(4)
+            with pytest.raises(io.UnsupportedOperation):
+                await reader.read_at(0, 4)
             tail_part = await reader.read()
             assert head_part + tail_part == payload
             assert reader.seek(0) == 0
+            ait = aiter(reader)
+            first_iter = await anext(ait)
+            rest_read = await reader.read()
+            assert first_iter + rest_read == payload
+            assert reader.seek(0) == 0
             iter_chunks = [chunk async for chunk in reader]
             assert b"".join(iter_chunks) == payload
+
+        await store.put("streams/empty.bin", b"")
+        empty_sha = hashlib.sha256(b"").hexdigest()
+        async with store.open_reader("streams/empty.bin", expected_sha256=empty_sha) as empty_reader:
+            assert await empty_reader.read() == b""
+            assert empty_reader.seek(0) == 0
+            assert await empty_reader.read() == b""
 
         with pytest.raises(IntegrityError) as read_exc:
             async with store.open_reader("streams/blob.bin", chunk_size=4096, expected_sha256=bad_sha) as bad_reader:
@@ -3353,10 +3370,27 @@ async def test_verified_get_stream_and_open_reader_pass_mismatch_and_early_close
             assert reader.read() == payload
             assert reader.seek(0) == 0
             head_part = reader.read(5000)
+            assert reader.seek(0, io.SEEK_CUR) == 5000
+            with pytest.raises(io.UnsupportedOperation):
+                reader.seek(4)
+            with pytest.raises(io.UnsupportedOperation):
+                reader.read_at(0, 4)
             tail_part = reader.read()
             assert head_part + tail_part == payload
             assert reader.seek(0) == 0
+            it = iter(reader)
+            first_iter = next(it)
+            rest_read = reader.read()
+            assert first_iter + rest_read == payload
+            assert reader.seek(0) == 0
             assert b"".join(reader) == payload
+
+        store.put("streams/empty.bin", b"")
+        empty_sha = hashlib.sha256(b"").hexdigest()
+        with store.open_reader("streams/empty.bin", expected_sha256=empty_sha) as empty_reader:
+            assert empty_reader.read() == b""
+            assert empty_reader.seek(0) == 0
+            assert empty_reader.read() == b""
 
         with (
             pytest.raises(IntegrityError) as read_exc,
