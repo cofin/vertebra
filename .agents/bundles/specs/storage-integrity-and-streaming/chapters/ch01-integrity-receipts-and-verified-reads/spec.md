@@ -5,20 +5,21 @@ chapter_id: ch01-integrity-receipts-and-verified-reads
 title: "Chapter 01: Content-Integrity Receipts, Verified Reads, and Storage IntegrityError"
 description: "Implements CRC32C, MD5, and SHA-256 content-integrity receipts on ObjectMeta and PutResult, abort-before-publish digest validation, verified streaming reads, and vertebra.typing.IntegrityError."
 status: stable
-state: active
+state: completed
 planning_status: complete
 planning_quality: standard
 planning_degraded_reason: null
 depends_on_chapters: []
 plan_commit: 18baadcd
-updated_at: "2026-11-12T23:55:00Z"
+last_reviewed_commit: f6400423
+updated_at: "2026-11-13T02:56:00Z"
 generated:
   by: flow-plan
   at: "2026-11-12T23:55:00Z"
 verified:
-  - by: agent:plan-generator
-    at: "2026-11-12T23:55:00Z"
-    commit: 18baadcd
+  - by: agent:code-reviewer
+    at: "2026-11-13T02:56:00Z"
+    commit: f6400423
 tags:
   - storage
   - integrity
@@ -131,7 +132,7 @@ User documentation and OKF updates for integrity receipts, verified reads, and `
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Implemented (`3/3` tasks at `879eb46f`, `47` Rust + `485` Python tests passed)**, awaiting Zero-Context Chapter Review closeout stamp.
+- **Completed & Reviewed (`f6400423`)**: All `3` tasks in `ch01-integrity-receipts-and-verified-reads` (`47` Rust + `485` Python tests passed) passed zero-context correctness and quality review. Next chapter: `ch02-streaming-arrow-writes-and-integrations`.
 - **Fast Chapter Gate (`< 35s`)**:
   `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-storage && cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-storage --all-targets -- -D warnings && UV_CACHE_DIR=/tmp/uv-cache uv run --no-sync maturin develop --manifest-path src/rs/vertebra-storage/Cargo.toml --uv && uv run --no-sync python -m mypy.stubtest vertebra._storage && uv run --no-sync ruff check src/py/vertebra/_typing.py src/py/vertebra/typing.py src/py/vertebra/storage && uv run --no-sync mypy src/py/vertebra/typing.py src/py/vertebra/storage && uv run --no-sync pytest src/py/tests/unit/framework/test_typing.py src/py/tests/unit/storage/test_storage_store.py -q`
 

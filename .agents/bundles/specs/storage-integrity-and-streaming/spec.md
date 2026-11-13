@@ -12,22 +12,23 @@ chapters:
   - ch01-integrity-receipts-and-verified-reads
   - ch02-streaming-arrow-writes-and-integrations
   - ch03-wheel-isolation-and-okf-sync
-current_chapter: ch01-integrity-receipts-and-verified-reads
-current_task: "storage-integrity-and-streaming:ch01:t01"
+current_chapter: ch02-streaming-arrow-writes-and-integrations
+current_task: "storage-integrity-and-streaming:ch02:t01"
 parent_prd: native-data-platform
 plan_revision: 3
 plan_commit: 18baadcd
-last_verified_checkpoint: 18baadcd
-last_reviewed_commit: 18baadcd
+last_verified_checkpoint: f6400423
+last_reviewed_chapter: ch01-integrity-receipts-and-verified-reads
+last_reviewed_commit: f6400423
 created_at: "2026-11-12T01:30:00Z"
-updated_at: "2026-11-12T23:55:00Z"
+updated_at: "2026-11-13T02:56:00Z"
 generated:
   by: flow-plan
   at: "2026-11-12T23:55:00Z"
 verified:
-  - by: agent:plan-generator
-    at: "2026-11-12T23:55:00Z"
-    commit: 18baadcd
+  - by: agent:code-reviewer
+    at: "2026-11-13T02:56:00Z"
+    commit: f6400423
 tags:
   - storage
   - integrity
@@ -120,13 +121,13 @@ Three gaps remain open under parent PRD [native-data-platform](../native-data-pl
 
 ## 5. Implementation Plan
 
-- [~] [ch01-integrity-receipts-and-verified-reads](chapters/ch01-integrity-receipts-and-verified-reads/spec.md) — Rust & Python CRC32C/MD5/SHA-256 receipts, abort-before-publish digest checks, verified streaming reads, and `vertebra.typing.IntegrityError` + `vertebra.storage` re-exports.
-- [ ] [ch02-streaming-arrow-writes-and-integrations](chapters/ch02-streaming-arrow-writes-and-integrations/spec.md) — Streaming Arrow/Parquet multipart writes and digest forwarding across `vertebra.storage`, SQLSpec, Advanced Alchemy, and Django, plus Criterion `put_checksum` benchmark.
+- [x] [f6400423] [ch01-integrity-receipts-and-verified-reads](chapters/ch01-integrity-receipts-and-verified-reads/spec.md) — Rust & Python CRC32C/MD5/SHA-256 receipts, abort-before-publish digest checks, verified streaming reads, and `vertebra.typing.IntegrityError` + `vertebra.storage` re-exports.
+- [~] [ch02-streaming-arrow-writes-and-integrations](chapters/ch02-streaming-arrow-writes-and-integrations/spec.md) — Streaming Arrow/Parquet multipart writes and digest forwarding across `vertebra.storage`, SQLSpec, Advanced Alchemy, and Django, plus Criterion `put_checksum` benchmark.
 - [ ] [ch03-wheel-isolation-and-okf-sync](chapters/ch03-wheel-isolation-and-okf-sync/spec.md) — Companion wheel payload isolation (`storage`, `bigquery`, `spanner`, `bundler`) in `verify_storage_wheel.py` / `Makefile` / `release.yaml`, user docs sync, and `<= 200L` storage OKF + upstream SQLSpec note.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Active Frontier**: `state: active` at `18baadcd` (create-only S3/B2/R2 copy, streamed `put_multipart`, and explicit SQLSpec URI resolution merged); next action `/flow:implement storage-integrity-and-streaming` starting at `ch01-integrity-receipts-and-verified-reads` (`storage-integrity-and-streaming:ch01:t01`).
+- **Active Frontier**: `ch01-integrity-receipts-and-verified-reads` (`3/3` tasks) is completed and zero-context dual-reviewed at `f6400423`; active frontier advances to `ch02-streaming-arrow-writes-and-integrations` (`storage-integrity-and-streaming:ch02:t01`, `6` open `compact` tasks across `ch02`–`ch03`).
 - **Release Gate (`/flow:finish`)**: `make lint-all && make rs-test && make py-test && make storage-wheel-check && make bigquery-wheel-check && make spanner-wheel-check && make bundler-wheel-check && make docs && make review-check` (promoting `research/upstream-sqlspec-direct-arrow-write.md` to `.agents/bundles/research/` before `/flow:archive`).
 
 [^store-rs]: `src/rs/vertebra-storage/src/store.rs::ObjectStoreEngine` — `ObjectStoreEngine` conditional S3/R2 copy, multipart uploads, and file/stream reads.

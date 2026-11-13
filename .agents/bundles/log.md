@@ -1,5 +1,10 @@
 # Bundle Activity Log
 
+## [2026-11-13T02:56:00Z] chapter-complete | storage-integrity-and-streaming ch01-integrity-receipts-and-verified-reads
+
+- Closed `ch01-integrity-receipts-and-verified-reads` at `f6400423` (`47` Rust tests, `485` Python tests, unified verified `open_reader` cursor across `read()`/`__iter__()`/`__aiter__()`, and `io.UnsupportedOperation` on random-access `seek`/`read_at` when `expected_sha256` is set).
+- Advanced active frontier to `ch02-streaming-arrow-writes-and-integrations` (`storage-integrity-and-streaming:ch02:t01`; `6` tasks remain across `ch02`–`ch03`).
+
 ## [2026-11-13T02:21:00Z] chapter-checkpoint | storage-integrity-and-streaming ch01-integrity-receipts-and-verified-reads
 
 - Completed `ch01-integrity-receipts-and-verified-reads` (`t01`–`t03`) at `879eb46f` on `feat/storage-integrity-and-streaming`: added CRC32C, MD5, and SHA-256 receipts, abort-before-publish expected-digest checks, `get_verified`/`get_file_verified`/`get_stream_verified`, and `vertebra.typing.IntegrityError` + `vertebra.storage` re-exports (`47` Rust tests, `485` Python tests, `stubtest` and `mypy` clean).
