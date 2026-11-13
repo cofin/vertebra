@@ -5,19 +5,20 @@ chapter_id: ch01-duckdb-gcs-secrets-and-oracle-notify
 title: "Chapter 01: DuckDB GCS Bearer Secret Rotation and Oracle Notify Wait Budget"
 description: "Implement SyncGcsBearerSecretProvider and AsyncGcsBearerSecretProvider over GcpTokenCache, harden DuckDBSecretConfig validation and 401/403 credential invalidation with fail-closed startup cleanup, and enforce OracleNotifyConfig.wait_timeout_seconds idle session liveness."
 status: stable
-state: active
+state: completed
 planning_status: complete
 planning_quality: standard
 planning_degraded_reason: null
 plan_commit: 18baadcd
-updated_at: "2026-11-12T23:55:00Z"
+last_reviewed_commit: ec66f2a8
+updated_at: "2026-11-13T15:28:00Z"
 generated:
   by: flow-plan
   at: "2026-11-12T23:55:00Z"
 verified:
-  - by: agent:plan-generator
-    at: "2026-11-12T23:55:00Z"
-    commit: 18baadcd
+  - by: agent:code-reviewer
+    at: "2026-11-13T15:28:00Z"
+    commit: ec66f2a8
 tags:
   - duckdb
   - gcs

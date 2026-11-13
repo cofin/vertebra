@@ -4,7 +4,7 @@ flow_id: driver-conformance-ci
 title: "Live Driver Conformance CI, DuckDB GCS Secret Rotation, and Oracle Notify Liveness"
 description: "Ship GCS ADC bearer-token secret providers and DuckDB secret validation/invalidation, enforce Oracle AQ wait_timeout_seconds liveness, run versioned pytest-databases live conformance and native edge suites with zero-skip CI gates, and restrict PyPI duckdb to benchmarks."
 status: stable
-state: planned
+state: active
 planning_quality: standard
 planning_degraded_reason: null
 has_chapters: true
@@ -13,22 +13,25 @@ chapters:
   - ch02-conformance-harness-and-live-suites
   - ch03-make-lanes-bench-isolation-and-ci
   - ch04-docs-and-okf-sync
-current_chapter: ch01-duckdb-gcs-secrets-and-oracle-notify
-current_task: "driver-conformance-ci:ch01:t01"
+current_chapter: ch02-conformance-harness-and-live-suites
+current_task: "driver-conformance-ci:ch02:t01"
 parent_prd: native-data-platform
 depends_on_flows:
   - native-postgres-driver
 plan_revision: 3
 plan_commit: 18baadcd
+last_verified_checkpoint: a7face33
+last_reviewed_chapter: ch01-duckdb-gcs-secrets-and-oracle-notify
+last_reviewed_commit: ec66f2a8
 created_at: "2026-11-12T00:30:00Z"
-updated_at: "2026-11-12T23:55:00Z"
+updated_at: "2026-11-13T15:28:00Z"
 generated:
   by: flow-plan
   at: "2026-11-12T23:55:00Z"
 verified:
-  - by: agent:plan-generator
-    at: "2026-11-12T23:55:00Z"
-    commit: 18baadcd
+  - by: agent:code-reviewer
+    at: "2026-11-13T15:28:00Z"
+    commit: ec66f2a8
 tags:
   - conformance
   - ci
@@ -125,14 +128,14 @@ Four merged native database wheels lack live server CI gates and carry three run
 
 ## 5. Implementation Plan
 
-- [ ] [ch01-duckdb-gcs-secrets-and-oracle-notify](chapters/ch01-duckdb-gcs-secrets-and-oracle-notify/spec.md) — Ship sync/async GCS bearer secret providers, DuckDB secret validation/`401`-`403` invalidation/startup cleanup, and Oracle AQ `wait_timeout_seconds` liveness (`< 60s` offline Rust + unit gate).
-- [ ] [ch02-conformance-harness-and-live-suites](chapters/ch02-conformance-harness-and-live-suites/spec.md) — Implement `ConformanceGate`, `ServiceVersionMatrix`, `mariadb` matrix cleanup, and DuckDB, MySQL/MariaDB, SQL Server, and Oracle live suites (`< 60s` offline gate + embedded DuckDB/loopback GCS).
+- [x] [ec66f2a8] [ch01-duckdb-gcs-secrets-and-oracle-notify](chapters/ch01-duckdb-gcs-secrets-and-oracle-notify/spec.md) — Ship sync/async GCS bearer secret providers, DuckDB secret validation/`401`-`403` invalidation/startup cleanup, and Oracle AQ `wait_timeout_seconds` liveness (`< 60s` offline Rust + unit gate).
+- [~] [ch02-conformance-harness-and-live-suites](chapters/ch02-conformance-harness-and-live-suites/spec.md) — Implement `ConformanceGate`, `ServiceVersionMatrix`, `mariadb` matrix cleanup, and DuckDB, MySQL/MariaDB, SQL Server, and Oracle live suites (`< 60s` offline gate + embedded DuckDB/loopback GCS).
 - [ ] [ch03-make-lanes-bench-isolation-and-ci](chapters/ch03-make-lanes-bench-isolation-and-ci/spec.md) — Single-pass `Makefile` `db-conformance` + `bench`-only PyPI `duckdb` isolation and `.github/workflows/ci.yml` conformance matrix (`< 60s` infrastructure unit gate).
 - [ ] [ch04-docs-and-okf-sync](chapters/ch04-docs-and-okf-sync/spec.md) — Synchronize storage/analytics/database docs, changelog, `AGENTS.md`, testing/workflow OKF chapters, and `database-driver-limitations.md` (`< 60s` `make docs && make review-check` gate).
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **State**: `planned` (`0/4` chapters, `0/13` tasks completed; frontier at `driver-conformance-ci:ch01:t01`), gated on [`native-postgres-driver`](../native-postgres-driver/spec.md).
+- **State**: `active` (`1/4` chapters, `3/13` tasks completed through `ch01-duckdb-gcs-secrets-and-oracle-notify` at `a7face33`; active frontier advances to `ch02-conformance-harness-and-live-suites` / `driver-conformance-ci:ch02:t01`, with `10` tasks remaining across `ch02`–`ch04`).
 - **Full `/flow:finish` Verification**: `make lint-all && make rs-test && make py-test && make db-conformance ENGINE=duckdb && make db-conformance ENGINE=mysql VERSION=8.4 && make db-conformance ENGINE=mariadb VERSION=11.4 && make db-conformance ENGINE=mssql VERSION=2022 && make docs-check && make review-check`.
 
 [^conformance-suite]: `src/py/tests/integration/db/test_driver_conformance.py::ENGINE_SPECS` — Cross-engine driver conformance matrix and `_resolve_live_config`.
