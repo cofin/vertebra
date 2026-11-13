@@ -5,12 +5,13 @@ chapter_id: ch03-cdc-options-and-bind-compiler
 title: "Chapter 03: PostgresChangeSource, Options Bridge, and Lexical Bind Compiler"
 description: "Implement EventSessionRegistry, CAS checkpoint-before-ack PostgresChangeSource, DSN/cloud options.py bridge, and single-pass lexer binds.py."
 status: stable
-state: planned
+state: active
 planning_status: complete
 planning_quality: standard
 planning_degraded_reason: null
 plan_commit: 18baadcd
-updated_at: "2026-11-13T00:25:00Z"
+last_reviewed_commit: null
+updated_at: "2026-11-13T05:14:30Z"
 generated:
   by: flow-plan
   at: "2026-11-13T00:25:00Z"
@@ -54,7 +55,7 @@ Builds the pure-Python CDC coordinator, option normalizer, and SQL bind lexer co
 
 - `events.py` & `change_stream.py`: `PostgresReplicationDriver` protocol, `EventSessionRegistry`, `PostgresCheckpoint(FrozenBaseStruct)`, `PostgresCheckpointStore` protocol, `MemoryPostgresCheckpointStore`, and `PostgresChangeSource` (`AsyncChangeSource` with single-flight shielded CAS save-before-wire-ack, `ChangeFeed` integration, `replay_since`, `aclose`).
 - `options.py`: `NativeClientOptions` builder from `PostgreSQLConfig` (`sslmode=prefer` adapter default when unset, `disable` on Unix sockets, `verify-full` raw native default).
-- `binds.py`: `compile_postgres_binds(sql, params)` + owned parameter normalization (`_OwnedBytes`, `PG_JSONB_TEXT`, `VectorBatchView`).
+- `binds.py`: `compile_postgres_binds(sql, params)` + owned parameter normalization (`bytes` buffer copies, `PG_JSONB_TEXT`, `VectorBatchView`).
 
 ## 3. Documentation & OKF Knowledge Plan
 
@@ -71,14 +72,14 @@ User and OKF documentation for CDC, options, and `$N` binds land in `ch08` and `
 
 ## 5. Implementation Plan
 
-- [ ] [t01-event-session-registry-and-checkpoint-stores.md](tasks/t01-event-session-registry-and-checkpoint-stores.md) — Extend events.py with PostgresReplicationDriver and EventSessionRegistry and create checkpoint structs/stores in change_stream.py.
-- [ ] [t02-postgres-change-source-coordinator.md](tasks/t02-postgres-change-source-coordinator.md) — Build PostgresChangeSource streaming transaction records into ChangeFeed and persisting CAS checkpoints before wire WAL acks.
-- [ ] [t03-dsn-and-cloud-options-bridge.md](tasks/t03-dsn-and-cloud-options-bridge.md) — Translate PostgreSQLConfig, libpq PG* env defaults, percent-decoded sockets, and Cloud SQL/AlloyDB settings into native client kwargs.
-- [ ] [t04-lexer-bind-compiler-and-owned-params.md](tasks/t04-lexer-bind-compiler-and-owned-params.md) — Compile %s, %(name)s, and $N binds in one lexical pass while normalizing mutable buffers, JSONB text, and pgvector inputs.
+- [x] [bff04dcd] [t01-event-session-registry-and-checkpoint-stores.md](tasks/t01-event-session-registry-and-checkpoint-stores.md) — Extend events.py with PostgresReplicationDriver and EventSessionRegistry and create checkpoint structs/stores in change_stream.py.
+- [x] [bff04dcd] [t02-postgres-change-source-coordinator.md](tasks/t02-postgres-change-source-coordinator.md) — Build PostgresChangeSource streaming transaction records into ChangeFeed and persisting CAS checkpoints before wire WAL acks.
+- [x] [bff04dcd] [t03-dsn-and-cloud-options-bridge.md](tasks/t03-dsn-and-cloud-options-bridge.md) — Translate PostgreSQLConfig, libpq PG* env defaults, percent-decoded sockets, and Cloud SQL/AlloyDB settings into native client kwargs.
+- [x] [bff04dcd] [t04-lexer-bind-compiler-and-owned-params.md](tasks/t04-lexer-bind-compiler-and-owned-params.md) — Compile %s, %(name)s, and $N binds in one lexical pass while normalizing mutable buffers, JSONB text, and pgvector inputs.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-Planned (`4` tasks). Fast `< 20s` pure-Python unit, Ruff, and Mypy gate.
+Completed (`4/4` tasks at `bff04dcd`: `ruff`, `mypy` across `15` source files, and `111` unit tests pass). Fast `< 20s` pure-Python unit, Ruff, and Mypy gate.
 
 ```bash
 uv run --no-sync pytest src/py/tests/unit/db/test_postgres_change_stream.py src/py/tests/unit/db/test_postgres_options_and_binds.py -q && uv run --no-sync ruff check src/py/vertebra/db/adapters/postgres src/py/tests/unit/db/test_postgres_change_stream.py src/py/tests/unit/db/test_postgres_options_and_binds.py && uv run --no-sync mypy src/py/vertebra/db/adapters/postgres

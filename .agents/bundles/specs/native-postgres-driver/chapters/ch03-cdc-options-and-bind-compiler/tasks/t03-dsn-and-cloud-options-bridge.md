@@ -6,7 +6,13 @@ chapter_id: ch03-cdc-options-and-bind-compiler
 title: "Implement options.py DSN, socket, multi-host, SSL, pooler, and cloud bridge"
 description: "Translate PostgreSQLConfig, libpq PG* env defaults, percent-decoded sockets, and Cloud SQL/AlloyDB settings into native client kwargs."
 status: stable
-state: pending
+state: completed
+commit: bff04dcd
+last_verified_commit: bff04dcd
+last_verified_at: "2026-11-13T05:14:30Z"
+verification_evidence: "ruff + mypy (15 files) + pytest (111 passed)"
+claimed_by: null
+claimed_at: null
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -59,7 +65,7 @@ uv run --no-sync pytest src/py/tests/unit/db/test_postgres_options_and_binds.py 
 
 ## Acceptance Criteria
 
-- [ ] All DSN, socket, SSL, pooler, and cloud option combinations normalize deterministically.
-- [ ] Zero regressions in `ch03-cdc-options-and-bind-compiler` fast verification gate.
+- [x] All DSN, socket, SSL, pooler, and cloud option combinations normalize deterministically.
+- [x] Zero regressions in `ch03-cdc-options-and-bind-compiler` fast verification gate.
 
 [^pg-config]: `src/py/vertebra/db/adapters/postgres/config.py::PostgreSQLConfig` — PostgreSQLConfig URL and cloud fields.

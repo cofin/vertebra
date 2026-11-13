@@ -6,7 +6,13 @@ chapter_id: ch03-cdc-options-and-bind-compiler
 title: "Implement single-pass lexer binds.py and owned parameter normalization"
 description: "Compile %s, %(name)s, and $N binds in one lexical pass while normalizing mutable buffers, JSONB text, and pgvector inputs."
 status: stable
-state: pending
+state: completed
+commit: bff04dcd
+last_verified_commit: bff04dcd
+last_verified_at: "2026-11-13T05:14:30Z"
+verification_evidence: "ruff + mypy (15 files) + pytest (111 passed)"
+claimed_by: null
+claimed_at: null
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -61,7 +67,7 @@ uv run --no-sync pytest src/py/tests/unit/db/test_postgres_options_and_binds.py 
 
 ## Acceptance Criteria
 
-- [ ] Lexer preserves all SQL literals/operators and `mypy` passes across `db/adapters/postgres`.
-- [ ] Zero regressions in `ch03-cdc-options-and-bind-compiler` fast verification gate.
+- [x] Lexer preserves all SQL literals/operators and `mypy` passes across `db/adapters/postgres`.
+- [x] Zero regressions in `ch03-cdc-options-and-bind-compiler` fast verification gate.
 
 [^pg-core]: `src/py/vertebra/db/adapters/postgres/core.py::PostgreSQLCore` — PostgreSQL SQL and parameter helpers.

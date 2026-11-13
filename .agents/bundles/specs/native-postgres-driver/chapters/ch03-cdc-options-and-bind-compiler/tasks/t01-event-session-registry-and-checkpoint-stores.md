@@ -6,7 +6,13 @@ chapter_id: ch03-cdc-options-and-bind-compiler
 title: "Add PostgresReplicationDriver, EventSessionRegistry, and PostgresCheckpointStore"
 description: "Extend events.py with PostgresReplicationDriver and EventSessionRegistry and create checkpoint structs/stores in change_stream.py."
 status: stable
-state: pending
+state: completed
+commit: bff04dcd
+last_verified_commit: bff04dcd
+last_verified_at: "2026-11-13T05:14:30Z"
+verification_evidence: "ruff + mypy (15 files) + pytest (111 passed)"
+claimed_by: null
+claimed_at: null
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -62,7 +68,7 @@ uv run --no-sync pytest src/py/tests/unit/db/test_postgres_change_stream.py -q
 
 ## Acceptance Criteria
 
-- [ ] CAS checkpoint fencing and `EventSessionRegistry` cleanup pass all unit assertions.
-- [ ] Zero regressions in `ch03-cdc-options-and-bind-compiler` fast verification gate.
+- [x] CAS checkpoint fencing and `EventSessionRegistry` cleanup pass all unit assertions.
+- [x] Zero regressions in `ch03-cdc-options-and-bind-compiler` fast verification gate.
 
 [^pg-events]: `src/py/vertebra/db/adapters/postgres/events.py` — PostgreSQL notification and event protocols.

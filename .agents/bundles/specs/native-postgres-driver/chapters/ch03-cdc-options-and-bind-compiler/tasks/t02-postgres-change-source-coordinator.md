@@ -6,7 +6,13 @@ chapter_id: ch03-cdc-options-and-bind-compiler
 title: "Implement PostgresChangeSource serialized checkpoint-before-ack coordinator"
 description: "Build PostgresChangeSource streaming transaction records into ChangeFeed and persisting CAS checkpoints before wire WAL acks."
 status: stable
-state: pending
+state: completed
+commit: bff04dcd
+last_verified_commit: bff04dcd
+last_verified_at: "2026-11-13T05:14:30Z"
+verification_evidence: "ruff + mypy (15 files) + pytest (111 passed)"
+claimed_by: null
+claimed_at: null
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -61,8 +67,8 @@ uv run --no-sync pytest src/py/tests/unit/db/test_postgres_change_stream.py -q &
 
 ## Acceptance Criteria
 
-- [ ] Wire `acknowledge(lsn)` never precedes durable checkpoint persistence.
-- [ ] `mypy` passes cleanly.
-- [ ] Zero regressions in `ch03-cdc-options-and-bind-compiler` fast verification gate.
+- [x] Wire `acknowledge(lsn)` never precedes durable checkpoint persistence.
+- [x] `mypy` passes cleanly.
+- [x] Zero regressions in `ch03-cdc-options-and-bind-compiler` fast verification gate.
 
 [^db-cdc]: `src/py/vertebra/db/cdc.py::ChangeFeed` — ChangeFeed publish and spill hydration.
