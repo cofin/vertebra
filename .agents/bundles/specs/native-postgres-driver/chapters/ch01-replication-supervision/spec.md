@@ -5,19 +5,20 @@ chapter_id: ch01-replication-supervision
 title: "Chapter 01: Verified Replication Supervision and Resume"
 description: "Build generation-fenced ReplicationSupervisor worker loops, monotonic LSN acknowledgements, and identity-verified connect_logical_verified reconnect policies."
 status: stable
-state: active
+state: completed
 planning_status: complete
 planning_quality: standard
 planning_degraded_reason: null
 plan_commit: 18baadcd
-updated_at: "2026-11-13T00:25:00Z"
+last_reviewed_commit: bfa2dad7
+updated_at: "2026-11-13T02:55:00Z"
 generated:
   by: flow-plan
   at: "2026-11-13T00:25:00Z"
 verified:
-  - by: agent:plan-generator
-    at: "2026-11-13T00:25:00Z"
-    commit: 18baadcd
+  - by: agent:code-reviewer
+    at: "2026-11-13T02:55:00Z"
+    commit: bfa2dad7
 tags:
   - rust
   - postgres
@@ -71,7 +72,7 @@ OKF updates are consolidated in `ch09` so `postgres-native-driver.md` and `postg
 
 ## 6. Current State & Remaining Plan Snapshot
 
-Implemented (`2/2` tasks at `7d50fd42`, `56` wire tests + Clippy clean), awaiting Zero-Context Chapter Review closeout stamp.
+Completed and zero-context dual-reviewed at `bfa2dad7` (`2/2` tasks, `57` wire tests + Clippy clean). Next chapter: `ch02-replication-python-bridge`.
 
 ```bash
 PYO3_PYTHON="$(pwd)/.venv/bin/python" PYTHONPATH="$(pwd)/src/py:$(pwd)/.venv/lib/python3.12/site-packages" cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --locked replication:: && PYO3_PYTHON="$(pwd)/.venv/bin/python" PYTHONPATH="$(pwd)/src/py:$(pwd)/.venv/lib/python3.12/site-packages" cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --locked --test postgres_replication_wire_tests && PYO3_PYTHON="$(pwd)/.venv/bin/python" cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-postgres --all-targets -- -D warnings

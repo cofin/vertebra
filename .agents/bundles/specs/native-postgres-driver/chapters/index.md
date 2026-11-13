@@ -2,8 +2,8 @@
 
 | Chapter | State | Tasks | Summary & Fast Chapter Gate |
 | --- | --- | --- | --- |
-| [`ch01-replication-supervision`](ch01-replication-supervision/spec.md) | `active` | `2` | Generation-fenced `ReplicationSupervisor`, bounded control/event channels, monotonic LSN acks, and identity-verified `connect_logical_verified` resume. |
-| [`ch02-replication-python-bridge`](ch02-replication-python-bridge/spec.md) | `planned` | `4` | Cancel-safe `spawn_rust_db_task_with_attr_and_future`, frozen `AsyncPostgresReplication`, 14-class `_postgres.pyi`, and PyO3 FFI OKF sync. |
+| [`ch01-replication-supervision`](ch01-replication-supervision/spec.md) | `completed` | `2` | Generation-fenced `ReplicationSupervisor`, bounded control/event channels, monotonic LSN acks, and identity-verified `connect_logical_verified` resume (`bfa2dad7`). |
+| [`ch02-replication-python-bridge`](ch02-replication-python-bridge/spec.md) | `active` | `4` | Cancel-safe `spawn_rust_db_task_with_attr_and_future`, frozen `AsyncPostgresReplication`, 14-class `_postgres.pyi`, and PyO3 FFI OKF sync. |
 | [`ch03-cdc-options-and-bind-compiler`](ch03-cdc-options-and-bind-compiler/spec.md) | `planned` | `4` | `PostgresChangeSource` CAS checkpoint-before-ack coordinator, `EventSessionRegistry`, libpq/cloud `options.py`, and single-pass lexer `binds.py`. |
 | [`ch04-permanent-native-postgres-drivers`](ch04-permanent-native-postgres-drivers/spec.md) | `planned` | `3` | Permanent `SyncPostgreSQLDriver` (`_sync.py`) and `AsyncPostgreSQLDriver` (`_async.py`) wiring native pools, pipelines, `VTBARROW`, and event hooks. |
 | [`ch05-atomic-cutover-and-legacy-removal`](ch05-atomic-cutover-and-legacy-removal/spec.md) | `planned` | `4` | Atomic SQLSpec (`NUMERIC`), SQLAlchemy (`numeric_dollar`), 12-line `driver.py` barrel, `PostgreSQLQueueBackend` guard, and `cloudsql.py`/`alloydb.py` legacy removal + TLS/async fixes. |
