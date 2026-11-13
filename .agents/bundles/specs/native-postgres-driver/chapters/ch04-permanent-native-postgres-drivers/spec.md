@@ -5,19 +5,20 @@ chapter_id: ch04-permanent-native-postgres-drivers
 title: "Chapter 04: Permanent Native Sync and Async PostgreSQL Drivers"
 description: "Build permanent SyncPostgreSQLDriver (_sync.py) and AsyncPostgreSQLDriver (_async.py) over vertebra._postgres pools, pipelines, Arrow, and event hooks."
 status: stable
-state: active
+state: completed
 planning_status: complete
 planning_quality: standard
 planning_degraded_reason: null
 plan_commit: 18baadcd
-updated_at: "2026-11-13T05:35:00Z"
+last_reviewed_commit: c97e037e
+updated_at: "2026-11-13T05:51:30Z"
 generated:
   by: flow-plan
   at: "2026-11-13T00:25:00Z"
 verified:
-  - by: agent:plan-generator
-    at: "2026-11-13T00:25:00Z"
-    commit: 18baadcd
+  - by: agent:code-reviewer
+    at: "2026-11-13T05:51:30Z"
+    commit: c97e037e
 tags:
   - python
   - postgres

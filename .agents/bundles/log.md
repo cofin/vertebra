@@ -1,5 +1,10 @@
 # Bundle Activity Log
 
+## [2026-11-13T05:51:30Z] chapter-complete | native-postgres-driver ch04-permanent-native-postgres-drivers
+
+- Closed `ch04-permanent-native-postgres-drivers` at `50d7a1ef` (sync `c97e037e`): implemented permanent `SyncPostgreSQLDriver` (`_sync.py`) and native `AsyncPostgreSQLDriver` (`_async.py`) over `SyncPostgresPool`/`AsyncPostgresPool`, shielded async transaction rollback/eviction via `anyio.CancelScope(shield=True)`, wired `pipeline.py`, `arrow.py`, and `EventSessionRegistry`-tracked notification/replication hooks (`ruff`, `mypy` across `20` source files, and `131` PG unit tests clean).
+- Advanced active frontier to `ch05-atomic-cutover-and-legacy-removal` (`native-postgres-driver:ch05:t01`; `19` tasks remain across `ch05`–`ch09`).
+
 ## [2026-11-13T05:15:30Z] chapter-complete | native-postgres-driver ch03-cdc-options-and-bind-compiler
 
 - Closed `ch03-cdc-options-and-bind-compiler` at `bff04dcd` (sync `31024a23`): added `PostgresReplicationDriver` and `EventSessionRegistry`, CAS-before-wire-ack `PostgresChangeSource`, libpq/Unix-socket/multi-host/Cloud-SQL `options.py` normalization, and single-pass lexer `binds.py` (`ruff`, `mypy` across `15` source files, and `111` unit tests clean).

@@ -26,19 +26,19 @@ research:
   - research/cloud-material_20261105.md
 plan_revision: 9
 plan_commit: 18baadcd
-state_revision: 17
+state_revision: 18
 last_verified_checkpoint: 50d7a1ef
-last_reviewed_chapter: ch03-cdc-options-and-bind-compiler
-last_reviewed_commit: 31024a23
+last_reviewed_chapter: ch04-permanent-native-postgres-drivers
+last_reviewed_commit: c97e037e
 created_at: "2026-11-03T04:05:00Z"
-updated_at: "2026-11-13T05:35:00Z"
+updated_at: "2026-11-13T05:51:30Z"
 generated:
   by: flow-plan
   at: "2026-11-13T00:25:00Z"
 verified:
   - by: agent:code-reviewer
-    at: "2026-11-13T05:15:30Z"
-    commit: 31024a23
+    at: "2026-11-13T05:51:30Z"
+    commit: c97e037e
 tags:
   - rust
   - postgres
