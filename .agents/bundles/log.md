@@ -1,5 +1,9 @@
 # Bundle Activity Log
 
+## [2026-11-13T01:59:00Z] chapter-checkpoint | mcp-protocol-completeness ch01-guards-params-and-alias-cleanup
+
+- Completed `ch01-guards-params-and-alias-cleanup` (`t01`–`t04`) at `e22452c5` on `feat/mcp-protocol-completeness`: split `Tool.authorize`/`Tool.call` with `-32004`/`-32005` JSON-RPC error mapping, validated `Mcp-Param-*` headers (`-32020`), hardened `ConfirmationGate` (`consume_call_approval`, `ttl_seconds`, `max_tickets`, exact owner checks), and removed the `MCPService` alias subclass (`177 passed`, `mypy` clean).
+
 ## [2026-11-13T03:42:00Z] chapter-complete | Server runtime progressive streaming (`server-runtime-correctness/ch01`)
 
 - Closed `ch01-python-stream-submission-and-flush` at `c9e7b370` (`cargo test -p vertebra-py --lib` 14 passed, `cargo clippy -p vertebra-core -p vertebra-py` clean, `mypy.stubtest vertebra._vertebra` clean, `ruff` + `mypy` clean, and `132 passed` across unit and live embedded/SHM `vertebra-server` streaming suites including `StreamingStorageResponse`, `ArrowCursor`, and inline `drive_until_complete` async streams).

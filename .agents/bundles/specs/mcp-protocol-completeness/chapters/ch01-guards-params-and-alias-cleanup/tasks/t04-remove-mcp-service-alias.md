@@ -6,7 +6,13 @@ chapter_id: ch01-guards-params-and-alias-cleanup
 title: Delete Empty MCPService Alias Subclass Across agent/mcp and CLI
 description: "Remove class MCPService(MCPCore) from service.py, agent/mcp/__init__.py, and cli/ai.py, updating unit tests to canonical MCPCore."
 status: stable
-state: pending
+state: completed
+commit: e22452c5
+last_verified_commit: e22452c5
+last_verified_at: "2026-11-13T01:59:00Z"
+verification_evidence: "ruff + mypy + pytest (177 passed) + review-check (exit 0)"
+claimed_by: null
+claimed_at: null
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -73,8 +79,8 @@ uv run --no-sync ruff check src/py/vertebra/agent src/py/vertebra/cli/ai.py && u
 
 ## Acceptance Criteria
 
-- [ ] Zero `MCPService` definitions or references remain in `src/py/vertebra` or `src/py/tests`.
-- [ ] Chapter fast gate passes cleanly.
+- [x] Zero `MCPService` definitions or references remain in `src/py/vertebra` or `src/py/tests`.
+- [x] Chapter fast gate passes cleanly.
 
 [^mcp-service]: `src/py/vertebra/agent/mcp/service.py::MCPService` — Empty MCPService(MCPCore) alias subclass.
 [^mcp-init]: `src/py/vertebra/agent/mcp/__init__.py` — Lazy exports of vertebra.agent.mcp.

@@ -5,7 +5,7 @@ chapter_id: ch01-guards-params-and-alias-cleanup
 title: "Chapter 01: Guards, Mcp-Param Validation, Confirmation Lifecycle, and Alias Cleanup"
 description: "Execute tool guards once with typed JSON-RPC errors, validate Mcp-Param-* headers, enforce single-use expiring confirmation tickets, and remove the no-op MCPService alias subclass."
 status: stable
-state: planned
+state: active
 planning_status: complete
 planning_quality: standard
 planning_degraded_reason: null
@@ -77,13 +77,14 @@ Guard error codes, `Mcp-Param-*` validation, single-use confirmation tickets, an
 
 ## 5. Implementation Plan
 
-- [ ] [t01-guards-and-mcp-param-validation.md](tasks/t01-guards-and-mcp-param-validation.md) — Split `Tool.authorize`/`Tool.call`, map `-32004`/`-32005`, and validate `Mcp-Param-*` headers
-- [ ] [t02-confirmation-ticket-lifecycle.md](tasks/t02-confirmation-ticket-lifecycle.md) — Enforce pending-only, exact-owner, single-use, expiring `ConfirmationGate` tickets
-- [ ] [t03-mcp-service-caller-cutover.md](tasks/t03-mcp-service-caller-cutover.md) — Migrate `a2a.py`, `plugin.py`, and `stdio.py` from `MCPService` to `MCPCore` and `ToolRegistry`
-- [ ] [t04-remove-mcp-service-alias.md](tasks/t04-remove-mcp-service-alias.md) — Remove the `MCPService` alias subclass from `service.py`, `agent/mcp/__init__.py`, and `cli/ai.py`
+- [x] [e22452c5] [t01-guards-and-mcp-param-validation.md](tasks/t01-guards-and-mcp-param-validation.md) — Split `Tool.authorize`/`Tool.call`, map `-32004`/`-32005`, and validate `Mcp-Param-*` headers
+- [x] [e22452c5] [t02-confirmation-ticket-lifecycle.md](tasks/t02-confirmation-ticket-lifecycle.md) — Enforce pending-only, exact-owner, single-use, expiring `ConfirmationGate` tickets
+- [x] [e22452c5] [t03-mcp-service-caller-cutover.md](tasks/t03-mcp-service-caller-cutover.md) — Migrate `a2a.py`, `plugin.py`, and `stdio.py` from `MCPService` to `MCPCore` and `ToolRegistry`
+- [x] [e22452c5] [t04-remove-mcp-service-alias.md](tasks/t04-remove-mcp-service-alias.md) — Remove the `MCPService` alias subclass from `service.py`, `agent/mcp/__init__.py`, and `cli/ai.py`
 
 ## 6. Current State & Remaining Plan Snapshot
 
+- **Implemented (`4/4` tasks at `e22452c5`, `177 passed`)**, awaiting Zero-Context Chapter Review closeout stamp.
 - **Fast Chapter Gate (`< 15s`)**: `uv run --no-sync ruff check src/py/vertebra/agent src/py/vertebra/cli/ai.py && uv run --no-sync mypy src/py/vertebra/agent src/py/vertebra/cli/ai.py && uv run --no-sync pytest src/py/tests/unit/agent src/py/tests/unit/cli/test_mcp_cli.py -q`.
 
 [^tool-schema]: `src/py/vertebra/agent/core/schema.py::Tool.invoke` — Tool invocation re-running inline guards.

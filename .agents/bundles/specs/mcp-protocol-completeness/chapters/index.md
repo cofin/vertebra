@@ -2,7 +2,7 @@
 
 | Chapter | State | Tasks | Summary & Fast Chapter Gate |
 | --- | --- | --- | --- |
-| [`ch01-guards-params-and-alias-cleanup`](ch01-guards-params-and-alias-cleanup/spec.md) | `planned` | `4` | Single-pass `Tool.authorize`, `Mcp-Param-*` validation, single-use expiring `ConfirmationGate`, and `MCPService` alias removal (`ruff` + `mypy` + agent/CLI pytest) |
+| [`ch01-guards-params-and-alias-cleanup`](ch01-guards-params-and-alias-cleanup/spec.md) | `active` | `4` | Single-pass `Tool.authorize`, `Mcp-Param-*` validation, single-use expiring `ConfirmationGate`, and `MCPService` alias removal (`ruff` + `mypy` + agent/CLI pytest) |
 | [`ch02-version-negotiation-and-sessions`](ch02-version-negotiation-and-sessions/spec.md) | `planned` | `3` | `SUPPORTED_PROTOCOL_VERSIONS`, `MCPSessionStore`, legacy `initialize`, `2025-03-26` batching, `DELETE /mcp`, and unified capabilities (`ruff` + `mypy` + `test_mcp_conformance.py`) |
 | [`ch03-sse-streams-and-resource-subscriptions`](ch03-sse-streams-and-resource-subscriptions/spec.md) | `planned` | `4` | `McpHttpResponse.stream`, `GET /mcp` SSE adapter writers, list/log/progress notifications, `resources/subscribe`, and `subscriptions/listen` (`ruff` + `mypy` + `test_mcp_conformance.py`) |
 | [`ch04-skills-and-mcp-apps-core`](ch04-skills-and-mcp-apps-core/spec.md) | `planned` | `4` | `SkillCatalog` disclosure, `io.modelcontextprotocol/skills`, and SEP-1865 `io.modelcontextprotocol/ui` metadata & validation (`ruff` + `mypy` + `test_mcp_conformance.py`) |

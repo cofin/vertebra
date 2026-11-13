@@ -6,7 +6,13 @@ chapter_id: ch01-guards-params-and-alias-cleanup
 title: "Migrate Agent Bridges, Plugin, and Stdio Callers from MCPService to MCPCore"
 description: "Switch A2aAgentBridge, AgentPlugin, and run_stdio_server from MCPService (and MCPRegistry in AgentPlugin) to canonical MCPCore and ToolRegistry."
 status: stable
-state: pending
+state: completed
+commit: e22452c5
+last_verified_commit: e22452c5
+last_verified_at: "2026-11-13T01:59:00Z"
+verification_evidence: "ruff + mypy + pytest (177 passed) + review-check (exit 0)"
+claimed_by: null
+claimed_at: null
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -71,8 +77,8 @@ uv run --no-sync ruff check src/py/vertebra/agent/bridges/a2a.py src/py/vertebra
 
 ## Acceptance Criteria
 
-- [ ] Zero `MCPService` imports remain in `a2a.py`, `plugin.py`, or `stdio.py`.
-- [ ] A2A and MCP unit suites pass.
+- [x] Zero `MCPService` imports remain in `a2a.py`, `plugin.py`, or `stdio.py`.
+- [x] A2A and MCP unit suites pass.
 
 [^a2a-bridge]: `src/py/vertebra/agent/bridges/a2a.py::A2aAgentBridge` — A2A bridge typed against MCPService.
 [^agent-plugin]: `src/py/vertebra/agent/plugin.py::AgentPlugin` — AgentPlugin instantiating MCPService and MCPRegistry.
