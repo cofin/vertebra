@@ -4,22 +4,32 @@ title: Upstream SQLSpec Direct Arrow Write Dispatch
 description: Contract proposal for SQLSpec pipeline dispatch on supports_direct_arrow_write to stream Arrow tables without full payload buffering.
 status: stable
 tags:
-- storage
-- arrow
-- sqlspec
-- upstream
+  - storage
+  - arrow
+  - sqlspec
+  - upstream
+generated:
+  by: flow-learn
+  at: "2026-11-13T16:11:00Z"
+verified:
+  - by: agent:flow-learn
+    at: "2026-11-13T16:11:00Z"
+    commit: 61f0cd0e
 sources:
-- id: sqlspec-storage
-  resource: src/py/vertebra/extensions/sqlspec/storage.py::ObjectStoreBackend
-  title: Vertebra SQLSpec ObjectStoreBackend capability flag and direct Arrow writers
-- id: py-arrow
-  resource: src/py/vertebra/storage/_arrow.py::write_batches_sync
-  title: Bounded multipart Arrow and Parquet batch writer
+  - id: sqlspec-storage
+    resource: src/py/vertebra/extensions/sqlspec/storage.py::ObjectStoreBackend
+    title: Vertebra SQLSpec ObjectStoreBackend capability flag and direct Arrow writers
+  - id: py-arrow
+    resource: src/py/vertebra/storage/_arrow.py::write_batches_sync
+    title: Bounded multipart Arrow and Parquet batch writer
 ---
 
 # Upstream SQLSpec Direct Arrow Write Dispatch
 
-> **Archive Promotion Note:** Promote this research brief from `.agents/bundles/specs/storage-integrity-and-streaming/research/upstream-sqlspec-direct-arrow-write.md` to `.agents/bundles/research/upstream-sqlspec-direct-arrow-write.md` before running `/flow:archive` on `storage-integrity-and-streaming`.
+<!-- truth: start -->
+- `vertebra.extensions.sqlspec.storage.ObjectStoreBackend` declares `supports_direct_arrow_write = True` and implements `write_arrow_sync` and `write_arrow_async` over bounded multipart batch uploads [^sqlspec-storage] [^py-arrow].
+- Upstream `sqlspec` `0.71.1` `SyncStoragePipeline.write_arrow` and `AsyncStoragePipeline.write_arrow` serialize full `pyarrow.Table` payloads in memory before calling `write_bytes_*`; inspecting `supports_direct_arrow_write` upstream eliminates intermediate buffering [^sqlspec-storage].
+<!-- truth: end -->
 
 ## Problem Statement
 

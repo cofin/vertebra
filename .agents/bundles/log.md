@@ -1,5 +1,9 @@
 # Bundle Activity Log
 
+## [2026-11-13T16:11:30Z] archive | storage-integrity-and-streaming
+
+- Archived `storage-integrity-and-streaming` (`3` chapters, `9` tasks, `7f247d0e..61f0cd0e`), delivering CRC32C/MD5/SHA-256 receipts, verified streaming reads with `AsyncStreamReader.close()`, streaming Arrow/Parquet multipart writes across SQLSpec/Advanced Alchemy/Django, parameterized `{storage,bigquery,spanner,bundler}-wheel-check` isolation gates, promoted `.agents/bundles/research/upstream-sqlspec-direct-arrow-write.md`, and present-tense OKF storage chapters (`object-storage.md`, `object-storage-limitations.md`).
+
 ## [2026-11-13T04:59:52Z] chapter-complete | storage-integrity-and-streaming ch03-wheel-isolation-and-okf-sync
 
 - Closed `ch03-wheel-isolation-and-okf-sync` at `66e6913f` (sync `541d89b5`): added `tools/scripts/verify_storage_wheel.py`, `Makefile` (`{storage,bigquery,spanner,bundler}-wheel-check`), and `release.yaml` isolation checks, updated storage user/reference docs and changelog, and synchronized `object-storage.md` (`175L`), `object-storage-limitations.md` (`86L`), and `research/upstream-sqlspec-direct-arrow-write.md` (`41L`).
