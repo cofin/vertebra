@@ -6,7 +6,10 @@ chapter_id: ch08-user-and-reference-docs
 title: "Update native-stubs.md, docs/reference/index.md, and installation.md"
 description: "Add _mysql, _mssql, and _postgres to native-stubs.md within H2+H3/HTML budgets and sync reference/index.md and installation.md."
 status: stable
-state: pending
+state: completed
+commit: 30c34daf
+last_verified_at: "2026-11-13T23:01:00Z"
+last_verified_commit: 30c34daf
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -61,7 +64,7 @@ make docs
 
 ## Acceptance Criteria
 
-- [ ] `make docs` passes heading and HTML byte-budget gates.
-- [ ] Zero regressions in `ch08-user-and-reference-docs` fast verification gate.
+- [x] `make docs` passes heading and HTML byte-budget gates.
+- [x] Zero regressions in `ch08-user-and-reference-docs` fast verification gate.
 
 [^doc-stubs]: `docs/reference/native-stubs.md` — Native PyO3 stubs reference.

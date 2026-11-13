@@ -10,7 +10,7 @@ planning_status: complete
 planning_quality: standard
 planning_degraded_reason: null
 plan_commit: 18baadcd
-updated_at: "2026-11-13T22:53:00Z"
+updated_at: "2026-11-13T23:01:00Z"
 generated:
   by: flow-plan
   at: "2026-11-13T00:25:00Z"
@@ -67,14 +67,14 @@ Covers all 10 affected `docs/` pages plus `README.md` and `AGENTS.md`; OKF data/
 
 ## 5. Implementation Plan
 
-- [ ] [t01-databases-cdc-and-capabilities-docs.md](tasks/t01-databases-cdc-and-capabilities-docs.md) — Document vertebra-core[postgres], $N binds, single-Sync pipeline(), Pg* types, PostgresChangeSource, and PostgresEmbeddingPushdown.
-- [ ] [t02-native-stubs-reference-and-installation-docs.md](tasks/t02-native-stubs-reference-and-installation-docs.md) — Add _mysql, _mssql, and _postgres to native-stubs.md within H2+H3/HTML budgets and sync reference/index.md and installation.md.
-- [ ] [t03-dialers-packaging-and-queues-docs.md](tasks/t03-dialers-packaging-and-queues-docs.md) — Remove legacy psycopg/asyncpg dialer examples, drop false release-CI PGO prose, and document vertebra-core[postgres] queue guard.
-- [ ] [t04-extensions-readme-and-agents-sync.md](tasks/t04-extensions-readme-and-agents-sync.md) — Update +vtb dialect wheel extras in extensions.md, refresh README.md crate/wheel overview, and keep AGENTS.md <= 100 lines.
+- [x] [30c34daf] [t01-databases-cdc-and-capabilities-docs.md](tasks/t01-databases-cdc-and-capabilities-docs.md) — Document vertebra-core[postgres], $N binds, single-Sync pipeline(), Pg* types, PostgresChangeSource, and PostgresEmbeddingPushdown.
+- [x] [30c34daf] [t02-native-stubs-reference-and-installation-docs.md](tasks/t02-native-stubs-reference-and-installation-docs.md) — Add _mysql, _mssql, and _postgres to native-stubs.md within H2+H3/HTML budgets and sync reference/index.md and installation.md.
+- [x] [30c34daf] [t03-dialers-packaging-and-queues-docs.md](tasks/t03-dialers-packaging-and-queues-docs.md) — Remove legacy psycopg/asyncpg dialer examples, drop false release-CI PGO prose, and document vertebra-core[postgres] queue guard.
+- [x] [30c34daf] [t04-extensions-readme-and-agents-sync.md](tasks/t04-extensions-readme-and-agents-sync.md) — Update +vtb dialect wheel extras in extensions.md and usage/index.md, refresh README.md crate/wheel overview, and keep AGENTS.md <= 100 lines.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-Planned (`4` tasks). Offline `< 45s` `make docs && make review-check` gate.
+Implemented at `30c34daf` (`4/4` tasks verified offline via `make docs`, `native-stubs/index.html` = `114,861 <= 120,000` bytes, `AGENTS.md` = `69L <= 100L`, `27 passed` in `test_review_setup.py`, and `review_setup validate` clean; awaiting zero-context chapter review).
 
 ```bash
 make docs && make review-check

@@ -6,7 +6,10 @@ chapter_id: ch08-user-and-reference-docs
 title: "Update databases.md, analytics-and-cdc.md, and database-capabilities.md"
 description: "Document vertebra-core[postgres], $N binds, single-Sync pipeline(), Pg* types, PostgresChangeSource, and PostgresEmbeddingPushdown."
 status: stable
-state: pending
+state: completed
+commit: 30c34daf
+last_verified_at: "2026-11-13T23:01:00Z"
+last_verified_commit: 30c34daf
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -60,7 +63,7 @@ make docs
 
 ## Acceptance Criteria
 
-- [ ] `make docs` passes with updated PostgreSQL driver, CDC, and capability tables.
-- [ ] Zero regressions in `ch08-user-and-reference-docs` fast verification gate.
+- [x] `make docs` passes with updated PostgreSQL driver, CDC, and capability tables.
+- [x] Zero regressions in `ch08-user-and-reference-docs` fast verification gate.
 
 [^doc-db]: `docs/usage/databases.md` — Database usage guide.

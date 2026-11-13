@@ -6,7 +6,10 @@ chapter_id: ch08-user-and-reference-docs
 title: "Update cloud-dialers.md, packaging-and-deployment.md, and queues-and-realtime.md"
 description: "Remove legacy psycopg/asyncpg dialer examples, drop false release-CI PGO prose, and document vertebra-core[postgres] queue guard."
 status: stable
-state: pending
+state: completed
+commit: 30c34daf
+last_verified_at: "2026-11-13T23:01:00Z"
+last_verified_commit: 30c34daf
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -61,7 +64,7 @@ make docs
 
 ## Acceptance Criteria
 
-- [ ] Zero references to deleted `psycopg`/`asyncpg` dialer helpers remain in `docs/`.
-- [ ] Zero regressions in `ch08-user-and-reference-docs` fast verification gate.
+- [x] Zero references to deleted `psycopg`/`asyncpg` dialer helpers remain in `docs/`.
+- [x] Zero regressions in `ch08-user-and-reference-docs` fast verification gate.
 
 [^doc-dialers]: `docs/usage/cloud-dialers.md` — Cloud SQL and AlloyDB dialers guide.

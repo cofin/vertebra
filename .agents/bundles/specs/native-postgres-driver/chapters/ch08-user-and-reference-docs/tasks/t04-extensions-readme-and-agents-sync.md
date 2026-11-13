@@ -6,7 +6,10 @@ chapter_id: ch08-user-and-reference-docs
 title: "Fix docs/usage/extensions.md, README.md, and AGENTS.md"
 description: "Update +vtb dialect wheel extras in extensions.md, refresh README.md crate/wheel overview, and keep AGENTS.md <= 100 lines."
 status: stable
-state: pending
+state: completed
+commit: 30c34daf
+last_verified_at: "2026-11-13T23:01:00Z"
+last_verified_commit: 30c34daf
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -16,6 +19,7 @@ depends_on:
   - "native-postgres-driver:ch08:t03"
 files: 
   - docs/usage/extensions.md
+  - docs/usage/index.md
   - README.md
   - AGENTS.md
 tests: 
@@ -63,8 +67,8 @@ make docs && make review-check
 
 ## Acceptance Criteria
 
-- [ ] `make docs` and `make review-check` both exit `0`.
-- [ ] Zero regressions in `ch08-user-and-reference-docs` fast verification gate.
+- [x] `make docs` and `make review-check` both exit `0`.
+- [x] Zero regressions in `ch08-user-and-reference-docs` fast verification gate.
 
 [^doc-ext]: `docs/usage/extensions.md` — Extensions usage guide.
 [^readme]: `README.md` — Repository README.
