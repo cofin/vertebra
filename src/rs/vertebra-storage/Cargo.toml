@@ -24,6 +24,7 @@ futures = { workspace = true }
 hex = { workspace = true }
 hmac = { workspace = true }
 http = { workspace = true }
+md-5 = "0.10"
 object_store = { version = "0.13.2", features = ["aws", "gcp", "azure", "http"] }
 pyo3 = { workspace = true }
 reqwest = { workspace = true }
@@ -40,5 +41,10 @@ vertebra-core = { path = "../vertebra-core" }
 pyo3-build-config = { workspace = true }
 
 [dev-dependencies]
+criterion = { workspace = true }
 pyo3 = { workspace = true, features = ["auto-initialize"] }
 tempfile = "3.15"
+
+[[bench]]
+name = "put_checksum"
+harness = false

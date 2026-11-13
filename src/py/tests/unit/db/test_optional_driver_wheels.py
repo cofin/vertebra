@@ -2,13 +2,28 @@
 
 from __future__ import annotations
 
+import subprocess
 import sys
+import tarfile
 import tomllib
+import zipfile
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 
 import pytest
+from tools.scripts.verify_storage_wheel import (
+    COMPANION_SPECS,
+    CompanionPackage,
+    verify_companion_sdist_contents,
+    verify_companion_wheel_contents,
+    verify_core_wheel_excludes_companion,
+)
+from tools.scripts.verify_storage_wheel import (
+    main as verify_storage_wheel_main,
+)
 
+from vertebra import _vertebra
 from vertebra.db.adapters.duckdb import AsyncDuckDBDriver, DuckDBConfig, SyncDuckDBDriver
 from vertebra.typing import MissingDependencyError
 from vertebra.utils.module_loader import reset_dependency_cache
@@ -163,3 +178,111 @@ def test_vertebra_mysql_runtime_module_surface() -> None:
     assert hasattr(mysql_mod, "SyncMySQLClient")
     assert hasattr(mysql_mod, "AsyncMySQLClient")
     assert hasattr(mysql_mod, "MySQLWireTestServer")
+
+
+def _write_wheel_archive(path: Path, entries: dict[str, bytes]) -> Path:
+    with zipfile.ZipFile(path, "w") as zf:
+        for name, data in entries.items():
+            zf.writestr(name, data)
+    return path
+
+
+def _write_sdist_archive(path: Path, prefix: str, entries: dict[str, bytes]) -> Path:
+    with tarfile.open(path, "w:gz") as tf:
+        for rel, data in entries.items():
+            info = tarfile.TarInfo(name=f"{prefix}/{rel}")
+            info.size = len(data)
+            tf.addfile(info, BytesIO(data))
+    return path
+
+
+@pytest.mark.parametrize("package", ["storage", "bigquery", "spanner", "bundler"])
+def test_companion_wheel_and_sdist_isolation_verifier(tmp_path: Path, package: CompanionPackage) -> None:
+    """verify_storage_wheel accepts clean companion/core archives and rejects leaks or missing stubs."""
+    spec = COMPANION_SPECS[package]
+    binary_entry = f"{spec.binary_prefix}.cpython-312-x86_64-linux-gnu.so"
+
+    core_ok = _write_wheel_archive(
+        tmp_path / f"core-{package}-ok.whl",
+        {spec.core_sentinel: b"", "vertebra/_vertebra.cpython-312-x86_64-linux-gnu.so": b""},
+    )
+    verify_core_wheel_excludes_companion(core_ok, package=package)
+
+    core_leaked = _write_wheel_archive(
+        tmp_path / f"core-{package}-leak.whl",
+        {spec.core_sentinel: b"", spec.stub_entry: b""},
+    )
+    with pytest.raises(RuntimeError, match="leaked optional extension artifacts"):
+        verify_core_wheel_excludes_companion(core_leaked, package=package)
+
+    companion_ok = _write_wheel_archive(
+        tmp_path / f"{package}-ok.whl",
+        {spec.stub_entry: b"", binary_entry: b""},
+    )
+    verify_companion_wheel_contents(companion_ok, package=package)
+
+    leaked_py = _write_wheel_archive(
+        tmp_path / f"{package}-leaked-py.whl",
+        {spec.stub_entry: b"", binary_entry: b"", "vertebra/__init__.py": b""},
+    )
+    with pytest.raises(RuntimeError, match="unexpected vertebra/ entries"):
+        verify_companion_wheel_contents(leaked_py, package=package)
+
+    sibling_stub = "vertebra/_mysql.pyi"
+    leaked_stub = _write_wheel_archive(
+        tmp_path / f"{package}-leaked-stub.whl",
+        {spec.stub_entry: b"", binary_entry: b"", sibling_stub: b""},
+    )
+    with pytest.raises(RuntimeError, match="unexpected vertebra/ entries"):
+        verify_companion_wheel_contents(leaked_stub, package=package)
+
+    missing_stub = _write_wheel_archive(
+        tmp_path / f"{package}-missing-stub.whl",
+        {binary_entry: b""},
+    )
+    with pytest.raises(RuntimeError, match="missing"):
+        verify_companion_wheel_contents(missing_stub, package=package)
+
+    duplicate_so = _write_wheel_archive(
+        tmp_path / f"{package}-dup-so.whl",
+        {
+            spec.stub_entry: b"",
+            binary_entry: b"",
+            f"{spec.binary_prefix}.abi3.so": b"",
+        },
+    )
+    with pytest.raises(RuntimeError, match="Expected exactly 1"):
+        verify_companion_wheel_contents(duplicate_so, package=package)
+
+    sdist_ok = _write_sdist_archive(
+        tmp_path / f"vertebra_{package}-0.3.0.tar.gz",
+        f"vertebra_{package}-0.3.0",
+        {"Cargo.toml": b"", "build.rs": b"", "src/lib.rs": b"", f"src/py/{spec.stub_entry}": b""},
+    )
+    verify_companion_sdist_contents(sdist_ok, package=package)
+
+    sdist_missing = _write_sdist_archive(
+        tmp_path / f"vertebra_{package}-missing.tar.gz",
+        f"vertebra_{package}-0.3.0",
+        {"Cargo.toml": b"", "build.rs": b"", "src/lib.rs": b""},
+    )
+    with pytest.raises(RuntimeError, match="missing required entries"):
+        verify_companion_sdist_contents(sdist_missing, package=package)
+
+
+@pytest.mark.parametrize("package", ["storage", "bigquery", "spanner", "bundler"])
+def test_companion_isolation_runtime_and_makefile_targets(tmp_path: Path, package: CompanionPackage) -> None:
+    """Core _vertebra excludes companion symbols, CLI rejects --all archive flags, and make -n resolves targets."""
+    spec = COMPANION_SPECS[package]
+    assert not hasattr(_vertebra, spec.leaked_core_attr)
+    proc = subprocess.run(
+        ["make", "-n", f"{package}-wheel-check"],
+        cwd=_REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert f"verify_storage_wheel.py --package {package}" in proc.stdout
+    with pytest.raises(ValueError, match="cannot be combined with --all"):
+        verify_storage_wheel_main(["--all", "--companion-wheel", str(tmp_path / "dummy.whl")])

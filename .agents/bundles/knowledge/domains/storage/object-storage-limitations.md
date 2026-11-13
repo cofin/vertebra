@@ -39,6 +39,12 @@ sources:
 - id: storage-cargo
   resource: src/rs/vertebra-storage/Cargo.toml
   title: object_store dependency pin and enabled backends
+- id: ext-django-storage
+  resource: src/py/vertebra/extensions/django/storage.py::DjangoStorage
+  title: Django storage backend integration
+- id: ext-sqlspec-storage
+  resource: src/py/vertebra/extensions/sqlspec/storage.py::ObjectStoreBackend
+  title: SQLSpec storage backend and direct Arrow write support
 ---
 
 # Object Storage Implementation Limitations
@@ -54,6 +60,10 @@ sources:
 - Create-only copy and rename use conditional multipart completion on S3/B2 and the `cf-copy-destination-if-none-match: *` copy header on R2. Providers that reject these primitives surface their backend error; there is no racy read-then-overwrite fallback. Destination conflicts raise `FileExistsError` and preserve the source and destination bytes [^storage-store-rs] [^storage-cargo].
 - Cloud rename copies to the destination before deleting the source, so it is not atomic. A delete failure can leave both keys present [^storage-store-rs].
 - Pooled storage HTTP clients apply a `300 s` total request timeout that also bounds streamed response bodies, so single very large downloads on slow links must use `get_range` windows or `open_reader` [^storage-oci-rs] [^storage-store-rs].
+- `_BaseObjectStore.verify_presigned_url` checks HMAC and SigV4 signatures only and raises `NotImplementedError` on `gcs`, `azure`, and `oci` [^py-store].
+- `DjangoStorage.get_created_time` and `DjangoStorage.get_accessed_time` raise `NotImplementedError` because creation and access timestamps are not mapped separately from `get_modified_time` [^ext-django-storage].
+- `VerifyingStream` delivers streamed `get_stream` and `open_reader` chunks progressively and raises `IntegrityError` on the final EOF poll when `expected_sha256` mismatches; callers needing all-or-nothing atomicity must use `get_file` or verify before consuming chunks [^py-store].
+- SQLSpec `<= 0.71.1` `SyncStoragePipeline.write_arrow` and `AsyncStoragePipeline.write_arrow` materialize full Arrow payloads before invoking the backend until upstream SQLSpec dispatches on `ObjectStoreBackend.supports_direct_arrow_write` [^ext-sqlspec-storage].
 <!-- truth: end -->
 
 ## Caller Guidance
@@ -63,12 +73,14 @@ sources:
 - Parquet batch readers in `vertebra.storage._arrow` pass `read_ahead=0` to `open_reader` so row-group demand paging stays bounded; keep that default when adding new demand-paged codecs.
 - Use `overwrite=False` for create-only copy and rename only with providers supporting the configured conditional primitive. Handle backend refusal explicitly; a successful cloud rename does not provide an atomic move.
 
-## Planned Fixes
+## Open Limitations
 
-The `storage-integrity-and-streaming` flow has open chapters for content-integrity receipts, verified reads, Arrow-write integration, wheel isolation, and complete caveat documentation. `get_file` durability, cancellation cleanup windows, and total request timeouts remain limitations. The R2 presigned-host rule, whole-segment `list(prefix)` matching, and trailing-`/` normalization follow provider and `object_store` semantics and are documented behavior rather than defects.
+`get_file` durability (`fsync`), cancellation cleanup pool windows, `300 s` total client request timeouts, `verify_presigned_url` support on `gcs` / `azure` / `oci`, `DjangoStorage` created/accessed timestamps, and upstream SQLSpec `<= 0.71.1` pipeline buffering remain open limitations. The R2 presigned-host rule, whole-segment `list(prefix)` matching, progressive `VerifyingStream` EOF checks, and trailing-`/` normalization follow provider and `object_store` semantics and are documented behavior rather than engine defects.
 
 [^py-store]: `src/py/vertebra/storage/_store.py::SyncObjectStore` — Python `SyncObjectStore` and `AsyncObjectStore` facades.
 [^storage-lib-rs]: `src/rs/vertebra-storage/src/lib.rs::extract_buffer_bytes` — PyO3 buffer extraction for `vertebra._storage`.
 [^storage-store-rs]: `src/rs/vertebra-storage/src/store.rs::ObjectStoreEngine` — Rust `ObjectStoreEngine` file I/O and compose.
 [^storage-oci-rs]: `src/rs/vertebra-storage/src/oci.rs::OciObjectStore` — Native OCI Object Storage REST backend.
 [^storage-cargo]: `src/rs/vertebra-storage/Cargo.toml` — `object_store = "0.13.2"` dependency with the `aws`, `gcp`, `azure`, and `http` features.
+[^ext-django-storage]: `src/py/vertebra/extensions/django/storage.py::DjangoStorage` — Django storage backend integration.
+[^ext-sqlspec-storage]: `src/py/vertebra/extensions/sqlspec/storage.py::ObjectStoreBackend` — SQLSpec storage backend and direct Arrow write support.

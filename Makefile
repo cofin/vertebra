@@ -304,6 +304,30 @@ core-wheel-check:                                   ## Build relocatable vertebr
 	@uv run --no-sync python tools/scripts/smoke_vtb_run.py --vtb /tmp/vtb-core-smoke-venv/bin/vtb --wheel-dir /tmp/vtb-core-wheel --workdir /tmp/vtb-core-smoke-app
 	@echo "${OK} Core wheel and vtb run smoke verified"
 
+.PHONY: storage-wheel-check
+storage-wheel-check:                                ## Build vertebra-core and vertebra-storage wheels and verify isolated fail-loud contract
+	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
+	@PYTHONPATH="src/py:." uv run --no-sync python tools/scripts/verify_storage_wheel.py --package storage
+	@echo "${OK} Storage wheel isolation verified"
+
+.PHONY: bigquery-wheel-check
+bigquery-wheel-check:                               ## Build vertebra-core and vertebra-bigquery wheels and verify isolated fail-loud contract
+	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
+	@PYTHONPATH="src/py:." uv run --no-sync python tools/scripts/verify_storage_wheel.py --package bigquery
+	@echo "${OK} BigQuery wheel isolation verified"
+
+.PHONY: spanner-wheel-check
+spanner-wheel-check:                                ## Build vertebra-core and vertebra-spanner wheels and verify isolated fail-loud contract
+	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
+	@PYTHONPATH="src/py:." uv run --no-sync python tools/scripts/verify_storage_wheel.py --package spanner
+	@echo "${OK} Spanner wheel isolation verified"
+
+.PHONY: bundler-wheel-check
+bundler-wheel-check:                                ## Build vertebra-core and vertebra-bundler wheels and verify isolated fail-loud contract
+	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
+	@PYTHONPATH="src/py:." uv run --no-sync python tools/scripts/verify_storage_wheel.py --package bundler
+	@echo "${OK} Bundler wheel isolation verified"
+
 .PHONY: test
 test: rs-test py-test ts-test                       ## Run all tests (Rust, Python, TypeScript)
 	@echo "${OK} All tests passed"

@@ -38,13 +38,13 @@ use crate::signing::{
 };
 use crate::store::{
     MultipartUploadSession, ObjectStoreEngine, PutConditionalOptions, StorageError,
-    StoredObjectMeta, block_on_storage, runtime_handle,
+    StoredObjectMeta, block_on_storage, runtime_handle, validate_expected_hex,
 };
 
-fn make_precondition_err(message: String) -> PyErr {
+fn make_typing_err(class_name: &'static str, message: String) -> PyErr {
     Python::attach(|py| {
         if let Ok(typing_mod) = py.import("vertebra.typing")
-            && let Ok(exc_attr) = typing_mod.getattr("PreconditionError")
+            && let Ok(exc_attr) = typing_mod.getattr(class_name)
             && let Ok(exc_ty) = exc_attr.cast_into::<PyType>()
         {
             return PyErr::from_type(exc_ty, (message,));
@@ -60,9 +60,11 @@ fn to_py_err(err: StorageError) -> PyErr {
         StorageError::AlreadyExists { path, message } => {
             PyFileExistsError::new_err(format!("Object already exists at '{path}': {message}"))
         }
-        StorageError::Precondition { path, message } => {
-            make_precondition_err(format!("Precondition failed for '{path}': {message}"))
-        }
+        StorageError::Precondition { path, message } => make_typing_err(
+            "PreconditionError",
+            format!("Precondition failed for '{path}': {message}"),
+        ),
+        err @ StorageError::Integrity { .. } => make_typing_err("IntegrityError", err.to_string()),
         StorageError::ObjectStore(object_store::Error::NotFound { path, source }) => {
             PyFileNotFoundError::new_err(format!("Object not found: {path} ({source})"))
         }
@@ -70,7 +72,10 @@ fn to_py_err(err: StorageError) -> PyErr {
             PyFileExistsError::new_err(format!("Object already exists at '{path}': {source}"))
         }
         StorageError::ObjectStore(object_store::Error::Precondition { path, source }) => {
-            make_precondition_err(format!("Precondition failed for '{path}': {source}"))
+            make_typing_err(
+                "PreconditionError",
+                format!("Precondition failed for '{path}': {source}"),
+            )
         }
         StorageError::Io(io_err) => match io_err.kind() {
             std::io::ErrorKind::NotFound => PyFileNotFoundError::new_err(io_err.to_string()),
@@ -523,6 +528,12 @@ pub struct PyObjectMeta {
     pub content_type: Option<String>,
     #[pyo3(get)]
     pub attributes: HashMap<String, String>,
+    #[pyo3(get)]
+    pub sha256: Option<String>,
+    #[pyo3(get)]
+    pub crc32c: Option<String>,
+    #[pyo3(get)]
+    pub md5: Option<String>,
 }
 
 impl From<StoredObjectMeta> for PyObjectMeta {
@@ -535,6 +546,9 @@ impl From<StoredObjectMeta> for PyObjectMeta {
             version: value.version,
             content_type: value.content_type,
             attributes: value.attributes,
+            sha256: value.sha256,
+            crc32c: value.crc32c,
+            md5: value.md5,
         }
     }
 }
@@ -603,6 +617,7 @@ enum AsyncStreamInit {
     Pending {
         engine: ObjectStoreEngine,
         path: String,
+        expected_sha256: Option<String>,
     },
     Open(Option<BoxStream<'static, Result<Bytes, StorageError>>>),
 }
@@ -616,10 +631,16 @@ struct AsyncStreamState {
 impl AsyncStreamState {
     async fn next_bytes(&mut self) -> Result<Option<Bytes>, StorageError> {
         if matches!(self.init, AsyncStreamInit::Pending { .. })
-            && let AsyncStreamInit::Pending { engine, path } =
-                std::mem::replace(&mut self.init, AsyncStreamInit::Open(None))
+            && let AsyncStreamInit::Pending {
+                engine,
+                path,
+                expected_sha256,
+            } = std::mem::replace(&mut self.init, AsyncStreamInit::Open(None))
         {
-            let stream = engine.get_stream(&path).await?;
+            let stream = match expected_sha256.as_deref() {
+                Some(expected) => engine.get_stream_verified(&path, expected).await?,
+                None => engine.get_stream(&path).await?,
+            };
             self.init = AsyncStreamInit::Open(Some(stream));
         }
         let AsyncStreamInit::Open(ref mut stream_opt) = self.init else {
@@ -687,6 +708,22 @@ impl PyAsyncStreamReader {
             },
             |py, ()| Ok(py.None()),
         )
+    }
+
+    fn close(&self, py: Python<'_>) {
+        let state = Arc::clone(&self.state);
+        py.detach(move || {
+            if let Ok(mut guard) = state.try_lock() {
+                guard.init = AsyncStreamInit::Open(None);
+                guard.pending = Bytes::new();
+            } else {
+                drop(runtime_handle().spawn(async move {
+                    let mut guard = state.lock().await;
+                    guard.init = AsyncStreamInit::Open(None);
+                    guard.pending = Bytes::new();
+                }));
+            }
+        });
     }
 }
 
@@ -820,7 +857,7 @@ impl PySyncObjectStore {
         }
     }
 
-    #[pyo3(signature = (path, data, *, content_type=None, attributes=None, if_not_exists=false, if_match=None, if_none_match=None))]
+    #[pyo3(signature = (path, data, *, content_type=None, attributes=None, if_not_exists=false, if_match=None, if_none_match=None, checksum=false, expected_sha256=None, expected_crc32c=None, expected_md5=None))]
     #[allow(clippy::too_many_arguments)]
     fn put(
         &self,
@@ -832,6 +869,10 @@ impl PySyncObjectStore {
         if_not_exists: bool,
         if_match: Option<String>,
         if_none_match: Option<String>,
+        checksum: bool,
+        expected_sha256: Option<String>,
+        expected_crc32c: Option<String>,
+        expected_md5: Option<String>,
     ) -> PyResult<PyObjectMeta> {
         let payload = extract_buffer_bytes(py, data)?;
         let opts = PutConditionalOptions {
@@ -840,6 +881,10 @@ impl PySyncObjectStore {
             if_none_match,
             content_type,
             attributes: attributes.unwrap_or_default(),
+            checksum,
+            expected_sha256,
+            expected_crc32c,
+            expected_md5,
         };
         let engine = self.engine.clone();
         let meta = py
@@ -848,18 +893,52 @@ impl PySyncObjectStore {
         Ok(PyObjectMeta::from(meta))
     }
 
-    fn put_file(&self, py: Python<'_>, path: &str, file_path: &str) -> PyResult<PyObjectMeta> {
+    #[pyo3(signature = (path, file_path, *, checksum=false, expected_sha256=None, expected_crc32c=None, expected_md5=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn put_file(
+        &self,
+        py: Python<'_>,
+        path: &str,
+        file_path: &str,
+        checksum: bool,
+        expected_sha256: Option<String>,
+        expected_crc32c: Option<String>,
+        expected_md5: Option<String>,
+    ) -> PyResult<PyObjectMeta> {
+        let opts = PutConditionalOptions {
+            checksum,
+            expected_sha256,
+            expected_crc32c,
+            expected_md5,
+            ..Default::default()
+        };
         let engine = self.engine.clone();
         let meta = py
-            .detach(|| block_on_storage(async move { engine.put_file(path, file_path).await }))
+            .detach(|| {
+                block_on_storage(async move { engine.put_file_opts(path, file_path, opts).await })
+            })
             .map_err(to_py_err)?;
         Ok(PyObjectMeta::from(meta))
     }
 
-    fn get_file(&self, py: Python<'_>, path: &str, file_path: &str) -> PyResult<PyObjectMeta> {
+    #[pyo3(signature = (path, file_path, *, expected_sha256=None))]
+    fn get_file(
+        &self,
+        py: Python<'_>,
+        path: &str,
+        file_path: &str,
+        expected_sha256: Option<String>,
+    ) -> PyResult<PyObjectMeta> {
         let engine = self.engine.clone();
         let meta = py
-            .detach(|| block_on_storage(async move { engine.get_file(path, file_path).await }))
+            .detach(|| {
+                block_on_storage(async move {
+                    match expected_sha256.as_deref() {
+                        Some(expected) => engine.get_file_verified(path, file_path, expected).await,
+                        None => engine.get_file(path, file_path).await,
+                    }
+                })
+            })
             .map_err(to_py_err)?;
         Ok(PyObjectMeta::from(meta))
     }
@@ -911,7 +990,7 @@ impl PySyncObjectStore {
         Ok(PyObjectMeta::from(meta))
     }
 
-    #[pyo3(signature = (path, *, content_type=None, attributes=None, if_not_exists=false, if_match=None, if_none_match=None))]
+    #[pyo3(signature = (path, *, content_type=None, attributes=None, if_not_exists=false, if_match=None, if_none_match=None, checksum=false, expected_sha256=None, expected_crc32c=None, expected_md5=None))]
     #[allow(clippy::too_many_arguments)]
     fn create_multipart(
         &self,
@@ -922,6 +1001,10 @@ impl PySyncObjectStore {
         if_not_exists: bool,
         if_match: Option<String>,
         if_none_match: Option<String>,
+        checksum: bool,
+        expected_sha256: Option<String>,
+        expected_crc32c: Option<String>,
+        expected_md5: Option<String>,
     ) -> PyResult<PySyncMultipartUpload> {
         let opts = PutConditionalOptions {
             if_not_exists,
@@ -929,6 +1012,10 @@ impl PySyncObjectStore {
             if_none_match,
             content_type,
             attributes: attributes.unwrap_or_default(),
+            checksum,
+            expected_sha256,
+            expected_crc32c,
+            expected_md5,
         };
         let engine = self.engine.clone();
         let session = py
@@ -956,10 +1043,23 @@ impl PySyncObjectStore {
         Ok(PyObjectMeta::from(meta))
     }
 
-    fn get<'py>(&self, py: Python<'py>, path: &str) -> PyResult<Bound<'py, PyBytes>> {
+    #[pyo3(signature = (path, *, expected_sha256=None))]
+    fn get<'py>(
+        &self,
+        py: Python<'py>,
+        path: &str,
+        expected_sha256: Option<String>,
+    ) -> PyResult<Bound<'py, PyBytes>> {
         let engine = self.engine.clone();
         let data = py
-            .detach(|| block_on_storage(async move { engine.get(path).await }))
+            .detach(|| {
+                block_on_storage(async move {
+                    match expected_sha256.as_deref() {
+                        Some(expected) => engine.get_verified(path, expected).await,
+                        None => engine.get(path).await,
+                    }
+                })
+            })
             .map_err(to_py_err)?;
         Ok(PyBytes::new(py, &data))
     }
@@ -972,17 +1072,25 @@ impl PySyncObjectStore {
         Ok(StorageBuffer { data })
     }
 
-    #[pyo3(signature = (path, *, chunk_size=None))]
+    #[pyo3(signature = (path, *, chunk_size=None, expected_sha256=None))]
     fn get_stream(
         &self,
         py: Python<'_>,
         path: &str,
         chunk_size: Option<usize>,
+        expected_sha256: Option<String>,
     ) -> PyResult<PySyncStreamReader> {
         let chunk_size = validate_chunk_size(chunk_size)?;
         let engine = self.engine.clone();
         let stream = py
-            .detach(|| block_on_storage(async move { engine.get_stream(path).await }))
+            .detach(|| {
+                block_on_storage(async move {
+                    match expected_sha256.as_deref() {
+                        Some(expected) => engine.get_stream_verified(path, expected).await,
+                        None => engine.get_stream(path).await,
+                    }
+                })
+            })
             .map_err(to_py_err)?;
         Ok(PySyncStreamReader {
             state: Mutex::new(SyncStreamState {
@@ -1129,7 +1237,7 @@ impl PyAsyncObjectStore {
         }
     }
 
-    #[pyo3(signature = (path, data, *, content_type=None, attributes=None, if_not_exists=false, if_match=None, if_none_match=None))]
+    #[pyo3(signature = (path, data, *, content_type=None, attributes=None, if_not_exists=false, if_match=None, if_none_match=None, checksum=false, expected_sha256=None, expected_crc32c=None, expected_md5=None))]
     #[allow(clippy::too_many_arguments)]
     fn put(
         &self,
@@ -1141,6 +1249,10 @@ impl PyAsyncObjectStore {
         if_not_exists: bool,
         if_match: Option<String>,
         if_none_match: Option<String>,
+        checksum: bool,
+        expected_sha256: Option<String>,
+        expected_crc32c: Option<String>,
+        expected_md5: Option<String>,
     ) -> PyResult<RustTaskAwaitable> {
         let payload = extract_buffer_bytes(py, data)?;
         let opts = PutConditionalOptions {
@@ -1149,6 +1261,10 @@ impl PyAsyncObjectStore {
             if_none_match,
             content_type,
             attributes: attributes.unwrap_or_default(),
+            checksum,
+            expected_sha256,
+            expected_crc32c,
+            expected_md5,
         };
         let engine = self.engine.clone();
         spawn_rust_task(
@@ -1158,30 +1274,50 @@ impl PyAsyncObjectStore {
         )
     }
 
+    #[pyo3(signature = (path, file_path, *, checksum=false, expected_sha256=None, expected_crc32c=None, expected_md5=None))]
+    #[allow(clippy::too_many_arguments)]
     fn put_file(
         &self,
         py: Python<'_>,
         path: String,
         file_path: String,
+        checksum: bool,
+        expected_sha256: Option<String>,
+        expected_crc32c: Option<String>,
+        expected_md5: Option<String>,
     ) -> PyResult<RustTaskAwaitable> {
+        let opts = PutConditionalOptions {
+            checksum,
+            expected_sha256,
+            expected_crc32c,
+            expected_md5,
+            ..Default::default()
+        };
         let engine = self.engine.clone();
         spawn_rust_task(
             py,
-            async move { engine.put_file(&path, &file_path).await },
+            async move { engine.put_file_opts(&path, &file_path, opts).await },
             |py, meta| Ok(Py::new(py, PyObjectMeta::from(meta))?.into_any()),
         )
     }
 
+    #[pyo3(signature = (path, file_path, *, expected_sha256=None))]
     fn get_file(
         &self,
         py: Python<'_>,
         path: String,
         file_path: String,
+        expected_sha256: Option<String>,
     ) -> PyResult<RustTaskAwaitable> {
         let engine = self.engine.clone();
         spawn_rust_task(
             py,
-            async move { engine.get_file(&path, &file_path).await },
+            async move {
+                match expected_sha256.as_deref() {
+                    Some(expected) => engine.get_file_verified(&path, &file_path, expected).await,
+                    None => engine.get_file(&path, &file_path).await,
+                }
+            },
             |py, meta| Ok(Py::new(py, PyObjectMeta::from(meta))?.into_any()),
         )
     }
@@ -1234,7 +1370,7 @@ impl PyAsyncObjectStore {
         )
     }
 
-    #[pyo3(signature = (path, *, content_type=None, attributes=None, if_not_exists=false, if_match=None, if_none_match=None))]
+    #[pyo3(signature = (path, *, content_type=None, attributes=None, if_not_exists=false, if_match=None, if_none_match=None, checksum=false, expected_sha256=None, expected_crc32c=None, expected_md5=None))]
     #[allow(clippy::too_many_arguments)]
     fn create_multipart(
         &self,
@@ -1245,6 +1381,10 @@ impl PyAsyncObjectStore {
         if_not_exists: bool,
         if_match: Option<String>,
         if_none_match: Option<String>,
+        checksum: bool,
+        expected_sha256: Option<String>,
+        expected_crc32c: Option<String>,
+        expected_md5: Option<String>,
     ) -> PyResult<RustTaskAwaitable> {
         let opts = PutConditionalOptions {
             if_not_exists,
@@ -1252,6 +1392,10 @@ impl PyAsyncObjectStore {
             if_none_match,
             content_type,
             attributes: attributes.unwrap_or_default(),
+            checksum,
+            expected_sha256,
+            expected_crc32c,
+            expected_md5,
         };
         let engine = self.engine.clone();
         spawn_rust_task(
@@ -1287,11 +1431,24 @@ impl PyAsyncObjectStore {
         )
     }
 
-    fn get(&self, py: Python<'_>, path: String) -> PyResult<RustTaskAwaitable> {
+    #[pyo3(signature = (path, *, expected_sha256=None))]
+    fn get(
+        &self,
+        py: Python<'_>,
+        path: String,
+        expected_sha256: Option<String>,
+    ) -> PyResult<RustTaskAwaitable> {
         let engine = self.engine.clone();
-        spawn_rust_task(py, async move { engine.get(&path).await }, |py, data| {
-            Ok(PyBytes::new(py, &data).into_any().unbind())
-        })
+        spawn_rust_task(
+            py,
+            async move {
+                match expected_sha256.as_deref() {
+                    Some(expected) => engine.get_verified(&path, expected).await,
+                    None => engine.get(&path).await,
+                }
+            },
+            |py, data| Ok(PyBytes::new(py, &data).into_any().unbind()),
+        )
     }
 
     fn get_buffer(&self, py: Python<'_>, path: String) -> PyResult<RustTaskAwaitable> {
@@ -1301,14 +1458,23 @@ impl PyAsyncObjectStore {
         })
     }
 
-    #[pyo3(signature = (path, *, chunk_size=None))]
-    fn get_stream(&self, path: String, chunk_size: Option<usize>) -> PyResult<PyAsyncStreamReader> {
+    #[pyo3(signature = (path, *, chunk_size=None, expected_sha256=None))]
+    fn get_stream(
+        &self,
+        path: String,
+        chunk_size: Option<usize>,
+        expected_sha256: Option<String>,
+    ) -> PyResult<PyAsyncStreamReader> {
         let chunk_size = validate_chunk_size(chunk_size)?;
+        if let Some(ref expected) = expected_sha256 {
+            validate_expected_hex("expected_sha256", expected, 64).map_err(to_py_err)?;
+        }
         Ok(PyAsyncStreamReader {
             state: Arc::new(tokio::sync::Mutex::new(AsyncStreamState {
                 init: AsyncStreamInit::Pending {
                     engine: self.engine.clone(),
                     path,
+                    expected_sha256,
                 },
                 pending: Bytes::new(),
                 chunk_size,

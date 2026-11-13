@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import contextlib
-from collections.abc import AsyncGenerator, AsyncIterable, AsyncIterator, Buffer, Iterable, Iterator
+from collections.abc import AsyncGenerator, AsyncIterable, AsyncIterator, Buffer, Iterable, Iterator, Mapping
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast, overload
+from typing import TYPE_CHECKING, Any, ClassVar, cast, overload
 from urllib.parse import urlparse
 
 from vertebra.storage import (
@@ -32,6 +32,7 @@ from vertebra.storage import (
 from vertebra.storage._arrow import (
     iter_batches_async,
     iter_batches_sync,
+    normalize_arrow_format,
     read_table_async,
     read_table_sync,
     write_batches_async,
@@ -78,6 +79,7 @@ class ObjectStoreBackend:
     """SQLSpec ObjectStoreProtocol implementation backed by Vertebra's native ObjectStore."""
 
     backend_type: ClassVar[str] = "vertebra"
+    supports_direct_arrow_write: ClassVar[bool] = True
     __slots__ = ("_async_store", "_base_path", "_sync_store", "protocol", "store_uri")
 
     def __init__(
@@ -192,8 +194,7 @@ class ObjectStoreBackend:
 
     def read_bytes_sync(self, path: str | Path, **kwargs: Any) -> bytes:
         """Read full object bytes synchronously."""
-        _ = kwargs
-        return self._sync_store.get(self._qualify(path))
+        return self._sync_store.get(self._qualify(path), expected_sha256=kwargs.get("expected_sha256"))
 
     def write_bytes_sync(self, path: str | Path, data: bytes, **kwargs: Any) -> None:
         """Write full object bytes synchronously."""
@@ -272,35 +273,38 @@ class ObjectStoreBackend:
 
     def read_arrow_sync(self, path: str | Path, **kwargs: Any) -> ArrowTable:
         """Read a Parquet or Arrow IPC object into a `pyarrow.Table` synchronously."""
-        file_format = str(kwargs.pop("file_format", "") or self._infer_arrow_format(path))
+        file_format = normalize_arrow_format(kwargs.pop("file_format", None), path)
         return read_table_sync(self._sync_store, self._qualify(path), file_format=file_format, options=kwargs)
 
     def write_arrow_sync(self, path: str | Path, table: ArrowTable, **kwargs: Any) -> None:
         """Write a Table through bounded native multipart codec output."""
-        file_format = str(kwargs.pop("file_format", "") or self._infer_arrow_format(path))
-        self._normalize_arrow_write_options(file_format, kwargs)
-        write_batches_sync(self._sync_store, self._qualify(path), table, file_format=file_format, options=kwargs)
+        qualified, file_format, integrity, codec_options = self._prepare_arrow_write(path, kwargs)
+        write_batches_sync(
+            self._sync_store, qualified, table, file_format=file_format, options=codec_options, **integrity
+        )
 
     def write_arrow_cursor_sync(self, path: str | Path, cursor: ArrowCursor | Any, **kwargs: Any) -> None:
         """Write IPC cursor buffers through a persistent batch codec reader."""
-        file_format = str(kwargs.pop("file_format", "") or self._infer_arrow_format(path))
-        self._normalize_arrow_write_options(file_format, kwargs)
-        write_batches_sync(self._sync_store, self._qualify(path), cursor, file_format=file_format, options=kwargs)
+        qualified, file_format, integrity, codec_options = self._prepare_arrow_write(path, kwargs)
+        write_batches_sync(
+            self._sync_store, qualified, cursor, file_format=file_format, options=codec_options, **integrity
+        )
 
     def stream_arrow_sync(
         self,
         pattern: str,
         *,
-        file_format: Literal["parquet"] = "parquet",
+        file_format: str = "parquet",
         batch_size: int = 65_536,
         **kwargs: Any,
     ) -> Iterator[ArrowRecordBatch]:
         """Yield projected batches on demand from each matching native object."""
+        resolved_format = normalize_arrow_format(file_format, pattern)
         for rel_path in self._resolve_pattern_matches_sync(pattern):
             yield from iter_batches_sync(
                 self._sync_store,
                 self._qualify(rel_path),
-                file_format=file_format,
+                file_format=resolved_format,
                 batch_size=batch_size,
                 options=kwargs,
             )
@@ -383,8 +387,7 @@ class ObjectStoreBackend:
 
     async def read_bytes_async(self, path: str | Path, **kwargs: Any) -> bytes:
         """Read full object bytes asynchronously."""
-        _ = kwargs
-        return await self._async_store.get(self._qualify(path))
+        return await self._async_store.get(self._qualify(path), expected_sha256=kwargs.get("expected_sha256"))
 
     async def write_bytes_async(self, path: str | Path, data: bytes, **kwargs: Any) -> None:
         """Write full object bytes asynchronously."""
@@ -452,37 +455,36 @@ class ObjectStoreBackend:
 
     async def read_arrow_async(self, path: str | Path, **kwargs: Any) -> ArrowTable:
         """Read a Parquet or Arrow IPC object into a `pyarrow.Table` asynchronously."""
-        file_format = str(kwargs.pop("file_format", "") or self._infer_arrow_format(path))
+        file_format = normalize_arrow_format(kwargs.pop("file_format", None), path)
         return await read_table_async(self._async_store, self._qualify(path), file_format=file_format, options=kwargs)
 
     async def write_arrow_async(self, path: str | Path, table: ArrowTable, **kwargs: Any) -> None:
         """Encode off-loop and upload incrementally using native asynchronous I/O."""
-        file_format = str(kwargs.pop("file_format", "") or self._infer_arrow_format(path))
-        self._normalize_arrow_write_options(file_format, kwargs)
+        qualified, file_format, integrity, codec_options = self._prepare_arrow_write(path, kwargs)
         await write_batches_async(
-            self._async_store, self._qualify(path), table, file_format=file_format, options=kwargs
+            self._async_store, qualified, table, file_format=file_format, options=codec_options, **integrity
         )
 
     async def write_arrow_cursor_async(self, path: str | Path, cursor: ArrowCursor | Any, **kwargs: Any) -> None:
         """Write cursor or buffer IPC through the shared off-loop batch encoder."""
-        file_format = str(kwargs.pop("file_format", "") or self._infer_arrow_format(path))
-        self._normalize_arrow_write_options(file_format, kwargs)
+        qualified, file_format, integrity, codec_options = self._prepare_arrow_write(path, kwargs)
         await write_batches_async(
-            self._async_store, self._qualify(path), cursor, file_format=file_format, options=kwargs
+            self._async_store, qualified, cursor, file_format=file_format, options=codec_options, **integrity
         )
 
     def stream_arrow_async(
         self,
         pattern: str,
         *,
-        file_format: Literal["parquet"] = "parquet",
+        file_format: str = "parquet",
         batch_size: int = 65_536,
         **kwargs: Any,
     ) -> AsyncIterator[ArrowRecordBatch]:
         """Return an `AsyncIterator[ArrowRecordBatch]` streaming matching Parquet or IPC objects."""
+        resolved_format = normalize_arrow_format(file_format, pattern)
         return self._iter_arrow_async(
             pattern,
-            file_format=file_format,
+            file_format=resolved_format,
             batch_size=batch_size,
             **kwargs,
         )
@@ -548,7 +550,7 @@ class ObjectStoreBackend:
         self,
         pattern: str,
         *,
-        file_format: Literal["parquet"] = "parquet",
+        file_format: str = "parquet",
         batch_size: int = 65_536,
         **kwargs: Any,
     ) -> AsyncIterator[ArrowRecordBatch]:
@@ -675,10 +677,20 @@ class ObjectStoreBackend:
 
     @staticmethod
     def _write_options(kwargs: dict[str, Any]) -> dict[str, Any]:
-        """Select supported native conditional and metadata write options."""
+        """Select supported native conditional, metadata, and integrity write options."""
         return {
             key: kwargs[key]
-            for key in ("content_type", "attributes", "if_not_exists", "if_match", "if_none_match")
+            for key in (
+                "content_type",
+                "attributes",
+                "if_not_exists",
+                "if_match",
+                "if_none_match",
+                "checksum",
+                "expected_sha256",
+                "expected_crc32c",
+                "expected_md5",
+            )
             if key in kwargs
         }
 
@@ -698,19 +710,32 @@ class ObjectStoreBackend:
                 filtered.append(item)
         return filtered
 
-    @staticmethod
-    def _normalize_arrow_write_options(file_format: str, options: dict[str, Any]) -> None:
-        """Preserve PyArrow's default Parquet size for omitted, None, and -1 values."""
-        if file_format == "parquet" and options.get("row_group_size") in (None, -1):
-            options["row_group_size"] = 1024 * 1024
+    def _prepare_arrow_write(
+        self, path: str | Path, kwargs: dict[str, Any]
+    ) -> tuple[str, str, dict[str, Any], dict[str, Any]]:
+        """Resolve key, format, integrity arguments, and normalized Arrow codec options."""
+        raw_format = kwargs.pop("file_format", None) or kwargs.pop("format_hint", None)
+        file_format = normalize_arrow_format(raw_format, path)
+        self._normalize_arrow_write_options(file_format, kwargs)
+        integrity: dict[str, Any] = {
+            key: kwargs.pop(key)
+            for key in ("checksum", "expected_sha256", "expected_crc32c", "expected_md5")
+            if key in kwargs
+        }
+        return self._qualify(path), file_format, integrity, kwargs
 
     @staticmethod
-    def _infer_arrow_format(path: str | Path) -> str:
-        """Infer Parquet vs Arrow IPC format from file suffix."""
-        suffix = Path(str(path)).suffix.lower()
-        if suffix in {".arrow", ".ipc", ".feather"}:
-            return "arrow-ipc"
-        return "parquet"
+    def _normalize_arrow_write_options(file_format: str, options: dict[str, Any]) -> None:
+        """Normalize SQLSpec Arrow options while preserving PyArrow default settings."""
+        options.pop("format_hint", None)
+        extra_options = options.pop("write_options", None)
+        if isinstance(extra_options, Mapping):
+            for key, value in extra_options.items():
+                options.setdefault(key, value)
+        if "compression" in options and options["compression"] is None:
+            options.pop("compression", None)
+        if file_format == "parquet" and options.get("row_group_size") in (None, -1):
+            options["row_group_size"] = 1024 * 1024
 
     @staticmethod
     def _normalize_protocol(scheme: str) -> str:

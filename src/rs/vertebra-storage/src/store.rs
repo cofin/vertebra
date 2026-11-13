@@ -9,6 +9,7 @@ use std::time::Duration;
 use bytes::{BufMut, Bytes, BytesMut};
 use futures::stream::BoxStream;
 use futures::{StreamExt, TryStreamExt};
+use md5::Md5;
 use object_store::aws::{AmazonS3Builder, S3CopyIfNotExists};
 use object_store::azure::MicrosoftAzureBuilder;
 use object_store::gcp::{GcpCredential, GcpCredentialProvider, GoogleCloudStorageBuilder};
@@ -22,6 +23,7 @@ use object_store::{
     StaticCredentialProvider, UpdateVersion,
 };
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use url::Url;
@@ -105,6 +107,13 @@ pub enum StorageError {
     AlreadyExists { path: String, message: String },
     #[error("precondition failed for '{path}': {message}")]
     Precondition { path: String, message: String },
+    #[error("integrity check failed for '{path}' ({algorithm}): expected {expected}, got {actual}")]
+    Integrity {
+        path: String,
+        algorithm: &'static str,
+        expected: String,
+        actual: String,
+    },
     #[error("invalid argument: {0}")]
     InvalidInput(String),
     #[error("object_store error: {0}")]
@@ -149,6 +158,231 @@ impl StorageError {
             self,
             Self::Precondition { .. } | Self::ObjectStore(object_store::Error::Precondition { .. })
         )
+    }
+
+    pub fn is_integrity(&self) -> bool {
+        matches!(self, Self::Integrity { .. })
+    }
+}
+
+const CRC32C_TABLES: [[u32; 256]; 8] = {
+    let mut tables = [[0u32; 256]; 8];
+    let mut i = 0;
+    while i < 256 {
+        let mut crc = i as u32;
+        let mut bit = 0;
+        while bit < 8 {
+            if crc & 1 != 0 {
+                crc = (crc >> 1) ^ 0x82F6_3B78;
+            } else {
+                crc >>= 1;
+            }
+            bit += 1;
+        }
+        tables[0][i] = crc;
+        i += 1;
+    }
+    let mut slice = 1;
+    while slice < 8 {
+        let mut j = 0;
+        while j < 256 {
+            let prev = tables[slice - 1][j];
+            tables[slice][j] = (prev >> 8) ^ tables[0][(prev & 0xFF) as usize];
+            j += 1;
+        }
+        slice += 1;
+    }
+    tables
+};
+
+#[derive(Clone, Copy, Debug)]
+struct Crc32cHasher {
+    state: u32,
+}
+
+impl Crc32cHasher {
+    const fn new() -> Self {
+        Self { state: !0u32 }
+    }
+
+    fn update(&mut self, mut bytes: &[u8]) {
+        let mut crc = self.state;
+        while bytes.len() >= 8 {
+            let lo = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) ^ crc;
+            let hi = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+            crc = CRC32C_TABLES[7][(lo & 0xFF) as usize]
+                ^ CRC32C_TABLES[6][((lo >> 8) & 0xFF) as usize]
+                ^ CRC32C_TABLES[5][((lo >> 16) & 0xFF) as usize]
+                ^ CRC32C_TABLES[4][(lo >> 24) as usize]
+                ^ CRC32C_TABLES[3][(hi & 0xFF) as usize]
+                ^ CRC32C_TABLES[2][((hi >> 8) & 0xFF) as usize]
+                ^ CRC32C_TABLES[1][((hi >> 16) & 0xFF) as usize]
+                ^ CRC32C_TABLES[0][(hi >> 24) as usize];
+            bytes = &bytes[8..];
+        }
+        for &b in bytes {
+            crc = (crc >> 8) ^ CRC32C_TABLES[0][((crc ^ u32::from(b)) & 0xFF) as usize];
+        }
+        self.state = crc;
+    }
+
+    const fn finalize(self) -> u32 {
+        !self.state
+    }
+
+    fn finalize_hex(self) -> String {
+        format!("{:08x}", self.finalize())
+    }
+}
+
+pub(crate) fn validate_expected_hex(
+    field: &'static str,
+    raw: &str,
+    expected_len: usize,
+) -> Result<(), StorageError> {
+    if raw.len() != expected_len || !raw.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+        return Err(StorageError::InvalidInput(format!(
+            "{field} must be {expected_len} lowercase hexadecimal characters, got '{raw}'"
+        )));
+    }
+    Ok(())
+}
+
+#[derive(Clone, Debug, Default)]
+struct DigestReceipts {
+    sha256: Option<String>,
+    crc32c: Option<String>,
+    md5: Option<String>,
+}
+
+#[derive(Clone, Default)]
+struct DigestAccumulator {
+    sha256: Option<Sha256>,
+    crc32c: Option<Crc32cHasher>,
+    md5: Option<Md5>,
+    expected_sha256: Option<String>,
+    expected_crc32c: Option<String>,
+    expected_md5: Option<String>,
+}
+
+impl DigestAccumulator {
+    fn from_options(opts: &PutConditionalOptions) -> Result<Self, StorageError> {
+        opts.validate_expected_digests()?;
+        let want_sha256 = opts.checksum || opts.expected_sha256.is_some();
+        let want_crc32c = opts.checksum || opts.expected_crc32c.is_some();
+        let want_md5 = opts.checksum || opts.expected_md5.is_some();
+        Ok(Self {
+            sha256: want_sha256.then(Sha256::new),
+            crc32c: want_crc32c.then(Crc32cHasher::new),
+            md5: want_md5.then(Md5::new),
+            expected_sha256: opts.expected_sha256.clone(),
+            expected_crc32c: opts.expected_crc32c.clone(),
+            expected_md5: opts.expected_md5.clone(),
+        })
+    }
+
+    fn update(&mut self, bytes: &[u8]) {
+        if let Some(ref mut hasher) = self.sha256 {
+            hasher.update(bytes);
+        }
+        if let Some(ref mut hasher) = self.crc32c {
+            hasher.update(bytes);
+        }
+        if let Some(ref mut hasher) = self.md5 {
+            hasher.update(bytes);
+        }
+    }
+
+    fn finalize_and_verify(self, path: &str) -> Result<DigestReceipts, StorageError> {
+        let sha256 = self.sha256.map(|h| hex::encode(h.finalize()));
+        let crc32c = self.crc32c.map(Crc32cHasher::finalize_hex);
+        let md5 = self.md5.map(|h| hex::encode(h.finalize()));
+
+        if let (Some(expected), Some(actual)) = (&self.expected_sha256, &sha256)
+            && actual != expected
+        {
+            return Err(StorageError::Integrity {
+                path: path.to_string(),
+                algorithm: "sha256",
+                expected: expected.clone(),
+                actual: actual.clone(),
+            });
+        }
+        if let (Some(expected), Some(actual)) = (&self.expected_crc32c, &crc32c)
+            && actual != expected
+        {
+            return Err(StorageError::Integrity {
+                path: path.to_string(),
+                algorithm: "crc32c",
+                expected: expected.clone(),
+                actual: actual.clone(),
+            });
+        }
+        if let (Some(expected), Some(actual)) = (&self.expected_md5, &md5)
+            && actual != expected
+        {
+            return Err(StorageError::Integrity {
+                path: path.to_string(),
+                algorithm: "md5",
+                expected: expected.clone(),
+                actual: actual.clone(),
+            });
+        }
+        Ok(DigestReceipts {
+            sha256,
+            crc32c,
+            md5,
+        })
+    }
+}
+
+struct VerifyingStream {
+    inner: BoxStream<'static, object_store::Result<Bytes>>,
+    path: String,
+    expected_sha256: String,
+    hasher: Option<Sha256>,
+}
+
+impl futures::Stream for VerifyingStream {
+    type Item = Result<Bytes, StorageError>;
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        let this = self.as_mut().get_mut();
+        let Some(ref mut hasher) = this.hasher else {
+            return std::task::Poll::Ready(None);
+        };
+        match this.inner.as_mut().poll_next(cx) {
+            std::task::Poll::Pending => std::task::Poll::Pending,
+            std::task::Poll::Ready(Some(Ok(chunk))) => {
+                hasher.update(&chunk);
+                std::task::Poll::Ready(Some(Ok(chunk)))
+            }
+            std::task::Poll::Ready(Some(Err(err))) => {
+                this.hasher = None;
+                std::task::Poll::Ready(Some(Err(StorageError::from(err))))
+            }
+            std::task::Poll::Ready(None) => {
+                let finalized = this
+                    .hasher
+                    .take()
+                    .expect("hasher checked Some above")
+                    .finalize();
+                let actual = hex::encode(finalized);
+                if actual == this.expected_sha256 {
+                    std::task::Poll::Ready(None)
+                } else {
+                    std::task::Poll::Ready(Some(Err(StorageError::Integrity {
+                        path: this.path.clone(),
+                        algorithm: "sha256",
+                        expected: this.expected_sha256.clone(),
+                        actual,
+                    })))
+                }
+            }
+        }
     }
 }
 
@@ -226,6 +460,9 @@ pub struct StoredObjectMeta {
     pub version: Option<String>,
     pub content_type: Option<String>,
     pub attributes: HashMap<String, String>,
+    pub sha256: Option<String>,
+    pub crc32c: Option<String>,
+    pub md5: Option<String>,
 }
 
 impl From<object_store::ObjectMeta> for StoredObjectMeta {
@@ -238,6 +475,9 @@ impl From<object_store::ObjectMeta> for StoredObjectMeta {
             version: value.version,
             content_type: None,
             attributes: HashMap::new(),
+            sha256: None,
+            crc32c: None,
+            md5: None,
         }
     }
 }
@@ -265,6 +505,9 @@ impl StoredObjectMeta {
             version: value.version,
             content_type,
             attributes,
+            sha256: None,
+            crc32c: None,
+            md5: None,
         }
     }
 }
@@ -276,6 +519,25 @@ pub struct PutConditionalOptions {
     pub if_none_match: Option<String>,
     pub content_type: Option<String>,
     pub attributes: HashMap<String, String>,
+    pub checksum: bool,
+    pub expected_sha256: Option<String>,
+    pub expected_crc32c: Option<String>,
+    pub expected_md5: Option<String>,
+}
+
+impl PutConditionalOptions {
+    pub fn validate_expected_digests(&self) -> Result<(), StorageError> {
+        if let Some(ref sha) = self.expected_sha256 {
+            validate_expected_hex("expected_sha256", sha, 64)?;
+        }
+        if let Some(ref crc) = self.expected_crc32c {
+            validate_expected_hex("expected_crc32c", crc, 8)?;
+        }
+        if let Some(ref md5) = self.expected_md5 {
+            validate_expected_hex("expected_md5", md5, 32)?;
+        }
+        Ok(())
+    }
 }
 
 /// Stateful incremental multipart upload session.
@@ -288,6 +550,7 @@ pub struct MultipartUploadSession {
     path: String,
     upload: Option<Box<dyn MultipartUpload>>,
     accumulator: Option<UniformPartAccumulator>,
+    digests: DigestAccumulator,
     total_bytes: u64,
     flushed_part_sizes: Vec<usize>,
     content_type: Option<String>,
@@ -308,6 +571,7 @@ impl MultipartUploadSession {
         if chunk.is_empty() {
             return Ok(());
         }
+        self.digests.update(&chunk);
         self.total_bytes += chunk.len() as u64;
         if let Some(ref mut acc) = self.accumulator {
             for part in acc.push(chunk) {
@@ -329,21 +593,27 @@ impl MultipartUploadSession {
         Ok(())
     }
 
-    /// Flush any buffered tail and commit the upload.
-    ///
-    /// A session whose earlier part upload failed never commits: it returns an error and keeps
-    /// the upload so `abort` can release it. The upload stays owned by the session until the
-    /// commit succeeds, so a failed or cancelled commit can still be aborted.
-    pub async fn complete(&mut self) -> Result<PutResult, ObjectStoreError> {
-        let upload = self.upload.as_mut().ok_or_else(|| {
-            StorageError::InvalidInput("multipart upload session is already closed".to_string())
-        })?;
+    async fn complete_inner(&mut self) -> Result<(PutResult, DigestReceipts), ObjectStoreError> {
+        if self.upload.is_none() {
+            return Err(StorageError::InvalidInput(
+                "multipart upload session is already closed".to_string(),
+            ));
+        }
         if self.had_error {
             return Err(StorageError::InvalidInput(format!(
                 "multipart upload for '{}' had a failed part and cannot be completed; abort it",
                 self.path
             )));
         }
+        let receipts = match std::mem::take(&mut self.digests).finalize_and_verify(&self.path) {
+            Ok(receipts) => receipts,
+            Err(err) => {
+                self.had_error = true;
+                let _ = self.abort().await;
+                return Err(err);
+            }
+        };
+        let upload = self.upload.as_mut().expect("upload verified present above");
         if let Some(ref mut acc) = self.accumulator
             && let Some(tail) = acc.finish()
         {
@@ -375,7 +645,7 @@ impl MultipartUploadSession {
                         guard.remove(&self.path);
                     }
                 }
-                Ok(result)
+                Ok((result, receipts))
             }
             Err(err) => {
                 self.had_error = true;
@@ -384,8 +654,18 @@ impl MultipartUploadSession {
         }
     }
 
+    /// Flush any buffered tail and commit the upload.
+    ///
+    /// A session whose earlier part upload failed never commits: it returns an error and keeps
+    /// the upload so `abort` can release it. Expected-digest mismatches abort the upload before
+    /// publishing so prior objects remain intact.
+    pub async fn complete(&mut self) -> Result<PutResult, ObjectStoreError> {
+        let (result, _) = self.complete_inner().await?;
+        Ok(result)
+    }
+
     pub async fn complete_with_meta(&mut self) -> Result<StoredObjectMeta, ObjectStoreError> {
-        let result = self.complete().await?;
+        let (result, receipts) = self.complete_inner().await?;
         Ok(StoredObjectMeta {
             path: self.path.clone(),
             size: self.total_bytes,
@@ -394,6 +674,9 @@ impl MultipartUploadSession {
             version: result.version,
             content_type: self.content_type.clone(),
             attributes: self.attributes.clone(),
+            sha256: receipts.sha256,
+            crc32c: receipts.crc32c,
+            md5: receipts.md5,
         })
     }
 
@@ -1266,12 +1549,15 @@ impl ObjectStoreEngine {
         opts: PutConditionalOptions,
     ) -> Result<StoredObjectMeta, ObjectStoreError> {
         let location = validate_object_path(path)?;
+        let mut digests = DigestAccumulator::from_options(&opts)?;
         let create_only = opts.if_not_exists || opts.if_none_match.as_deref() == Some("*");
         if create_only && opts.if_match.is_some() {
             return Err(StorageError::InvalidInput(
                 "cannot combine if_not_exists or if_none_match='*' with if_match".to_string(),
             ));
         }
+        digests.update(&data);
+        let receipts = digests.finalize_and_verify(location.as_ref())?;
 
         let mode = if create_only {
             PutMode::Create
@@ -1409,6 +1695,9 @@ impl ObjectStoreEngine {
             version: result.version,
             content_type: opts.content_type,
             attributes: opts.attributes,
+            sha256: receipts.sha256,
+            crc32c: receipts.crc32c,
+            md5: receipts.md5,
         })
     }
 
@@ -1422,16 +1711,25 @@ impl ObjectStoreEngine {
         path: &str,
         file_path: &str,
     ) -> Result<StoredObjectMeta, StorageError> {
+        self.put_file_opts(path, file_path, PutConditionalOptions::default())
+            .await
+    }
+
+    pub async fn put_file_opts(
+        &self,
+        path: &str,
+        file_path: &str,
+        opts: PutConditionalOptions,
+    ) -> Result<StoredObjectMeta, StorageError> {
         let _ = validate_object_path(path)?;
+        opts.validate_expected_digests()?;
         let size = tokio::fs::metadata(file_path).await?.len();
         if size <= FILE_TRANSFER_CHUNK_SIZE as u64 {
             let raw = tokio::fs::read(file_path).await?;
-            return self.put(path, Bytes::from(raw)).await;
+            return self.put_opts(path, Bytes::from(raw), opts).await;
         }
         let mut file = tokio::fs::File::open(file_path).await?;
-        let mut session = self
-            .create_multipart(path, PutConditionalOptions::default())
-            .await?;
+        let mut session = self.create_multipart(path, opts).await?;
         let uploaded = async {
             Self::stream_file_into_session(&mut file, &mut session).await?;
             session.complete_with_meta().await
@@ -1454,7 +1752,28 @@ impl ObjectStoreEngine {
         path: &str,
         file_path: &str,
     ) -> Result<StoredObjectMeta, StorageError> {
+        self.get_file_inner(path, file_path, None).await
+    }
+
+    pub async fn get_file_verified(
+        &self,
+        path: &str,
+        dest: &str,
+        expected_sha256: &str,
+    ) -> Result<StoredObjectMeta, StorageError> {
+        self.get_file_inner(path, dest, Some(expected_sha256)).await
+    }
+
+    async fn get_file_inner(
+        &self,
+        path: &str,
+        file_path: &str,
+        expected_sha256: Option<&str>,
+    ) -> Result<StoredObjectMeta, StorageError> {
         let location = validate_object_path(path)?;
+        if let Some(expected) = expected_sha256 {
+            validate_expected_hex("expected_sha256", expected, 64)?;
+        }
         let target = FsPath::new(file_path);
         let file_name = target.file_name().ok_or_else(|| {
             StorageError::InvalidInput(format!(
@@ -1479,7 +1798,22 @@ impl ObjectStoreEngine {
             )),
             armed: true,
         };
-        Self::write_stream_to_file(result.into_stream(), &part.path).await?;
+        let computed_sha256 =
+            Self::write_stream_to_file(result.into_stream(), &part.path, expected_sha256.is_some())
+                .await?;
+        if let (Some(expected), Some(actual)) = (expected_sha256, computed_sha256) {
+            if actual != expected {
+                let _ = tokio::fs::remove_file(&part.path).await;
+                part.armed = false;
+                return Err(StorageError::Integrity {
+                    path: location.to_string(),
+                    algorithm: "sha256",
+                    expected: expected.to_string(),
+                    actual,
+                });
+            }
+            meta.sha256 = Some(actual);
+        }
         tokio::fs::rename(&part.path, target).await?;
         part.armed = false;
         Ok(meta)
@@ -1552,6 +1886,7 @@ impl ObjectStoreEngine {
         opts: PutConditionalOptions,
     ) -> Result<MultipartUploadSession, ObjectStoreError> {
         let location = validate_object_path(path)?;
+        let digests = DigestAccumulator::from_options(&opts)?;
         let create_only = opts.if_not_exists || opts.if_none_match.as_deref() == Some("*");
         if create_only && opts.if_match.is_some() {
             return Err(StorageError::InvalidInput(
@@ -1621,6 +1956,7 @@ impl ObjectStoreEngine {
             path: location.to_string(),
             upload: Some(upload),
             accumulator,
+            digests,
             total_bytes: 0,
             flushed_part_sizes: Vec::new(),
             content_type: opts.content_type,
@@ -1653,6 +1989,27 @@ impl ObjectStoreEngine {
         Ok(result.bytes().await?)
     }
 
+    pub async fn get_verified(
+        &self,
+        path: &str,
+        expected_sha256: &str,
+    ) -> Result<Bytes, StorageError> {
+        let location = validate_object_path(path)?;
+        validate_expected_hex("expected_sha256", expected_sha256, 64)?;
+        let result = self.inner.get(&location).await?;
+        let bytes = result.bytes().await?;
+        let actual = hex::encode(Sha256::digest(&bytes));
+        if actual != expected_sha256 {
+            return Err(StorageError::Integrity {
+                path: location.to_string(),
+                algorithm: "sha256",
+                expected: expected_sha256.to_string(),
+                actual,
+            });
+        }
+        Ok(bytes)
+    }
+
     pub async fn get_stream(
         &self,
         path: &str,
@@ -1660,6 +2017,23 @@ impl ObjectStoreEngine {
         let location = validate_object_path(path)?;
         let result = self.inner.get(&location).await?;
         Ok(result.into_stream().map_err(StorageError::from).boxed())
+    }
+
+    pub async fn get_stream_verified(
+        &self,
+        path: &str,
+        expected_sha256: &str,
+    ) -> Result<BoxStream<'static, Result<Bytes, StorageError>>, StorageError> {
+        let location = validate_object_path(path)?;
+        validate_expected_hex("expected_sha256", expected_sha256, 64)?;
+        let result = self.inner.get(&location).await?;
+        Ok(VerifyingStream {
+            inner: result.into_stream(),
+            path: location.to_string(),
+            expected_sha256: expected_sha256.to_string(),
+            hasher: Some(Sha256::new()),
+        }
+        .boxed())
     }
 
     pub async fn get_range(
@@ -1973,18 +2347,24 @@ impl ObjectStoreEngine {
     async fn write_stream_to_file(
         mut stream: BoxStream<'static, object_store::Result<Bytes>>,
         part_path: &FsPath,
-    ) -> Result<(), StorageError> {
+        compute_sha256: bool,
+    ) -> Result<Option<String>, StorageError> {
         let file = tokio::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(part_path)
             .await?;
         let mut writer = tokio::io::BufWriter::with_capacity(1024 * 1024, file);
+        let mut hasher = compute_sha256.then(Sha256::new);
         while let Some(chunk) = stream.next().await {
-            writer.write_all(&chunk?).await?;
+            let chunk = chunk?;
+            if let Some(ref mut h) = hasher {
+                h.update(&chunk);
+            }
+            writer.write_all(&chunk).await?;
         }
         writer.flush().await?;
-        Ok(())
+        Ok(hasher.map(|h| hex::encode(h.finalize())))
     }
 
     /// Run `op` over `pairs` with bounded concurrency, returning outcomes in input order.
@@ -2264,6 +2644,9 @@ impl ObjectStoreEngine {
                 .content_type
                 .or_else(|| content_type.map(str::to_string)),
             attributes: HashMap::new(),
+            sha256: None,
+            crc32c: None,
+            md5: None,
         })
     }
 

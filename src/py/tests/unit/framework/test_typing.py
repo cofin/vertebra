@@ -9,24 +9,29 @@ import msgspec
 import pytest
 
 import vertebra._typing as internal_typing
+import vertebra.db as vertebra_db
+import vertebra.storage as vertebra_storage
 from vertebra import typing as vertebra_typing
 from vertebra._typing import HandlerID, LifecycleHook, OptionalDependency, RawHeaders
+from vertebra._typing import IntegrityError as InternalIntegrityError
 from vertebra._typing import ToolPolicyError as InternalPolicyError
 from vertebra._typing import ToolProvider as InternalProvider
 from vertebra.typing import (
     HandlerID as PublicHandlerID,
 )
 from vertebra.typing import (
-    LifecycleHook as PublicLifecycleHook,
-)
-from vertebra.typing import (
-    RawHeaders as PublicRawHeaders,
-)
-from vertebra.typing import (
+    IntegrityError,
+    PreconditionError,
     Struct,
     ToolPolicyError,
     ToolProvider,
     VertebraError,
+)
+from vertebra.typing import (
+    LifecycleHook as PublicLifecycleHook,
+)
+from vertebra.typing import (
+    RawHeaders as PublicRawHeaders,
 )
 from vertebra.utils import module_loader
 from vertebra.utils.module_loader import (
@@ -120,6 +125,8 @@ def test_public_typing_facade_exports_structs_exceptions_and_sentinels() -> None
         "VertebraError",
         "MissingDependencyError",
         "ImproperConfigurationError",
+        "IntegrityError",
+        "PreconditionError",
         "UnsupportedBackendError",
         "Empty",
         "EmptyType",
@@ -249,8 +256,10 @@ def test_public_typing_imports_exceptions_and_sentinels_without_msgspec() -> Non
         "        return None\n"
         "blocker = BlockMsgspec()\n"
         "sys.meta_path.insert(0, blocker)\n"
-        "from vertebra.typing import Empty, EmptyType, PreconditionError, VertebraError\n"
+        "from vertebra.typing import Empty, EmptyType, IntegrityError, PreconditionError, VertebraError\n"
         "assert issubclass(PreconditionError, VertebraError)\n"
+        "assert issubclass(IntegrityError, VertebraError)\n"
+        "assert issubclass(IntegrityError, OSError)\n"
         "assert Empty is EmptyType.Empty\n"
         "assert 'msgspec' not in sys.modules\n"
         "sys.meta_path.remove(blocker)\n"
@@ -262,3 +271,25 @@ def test_public_typing_imports_exceptions_and_sentinels_without_msgspec() -> Non
     )
     res = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=False)
     assert res.returncode == 0, res.stderr
+
+
+def test_storage_integrity_error_hierarchy_and_separation_from_db() -> None:
+    """Verify storage IntegrityError shares identity across typing and storage without colliding with vertebra.db."""
+    assert IntegrityError is InternalIntegrityError
+    assert IntegrityError is vertebra_storage.IntegrityError
+    assert "IntegrityError" in vertebra_typing.__all__
+    assert "IntegrityError" in vertebra_storage.__all__
+    assert issubclass(IntegrityError, VertebraError)
+    assert issubclass(IntegrityError, OSError)
+    assert issubclass(PreconditionError, VertebraError)
+    assert issubclass(PreconditionError, OSError)
+    assert IntegrityError is not PreconditionError
+    assert IntegrityError is not vertebra_db.IntegrityError
+    assert not issubclass(IntegrityError, vertebra_db.DatabaseError)
+    assert issubclass(vertebra_db.IntegrityError, vertebra_db.DatabaseError)
+    assert not issubclass(vertebra_db.IntegrityError, OSError)
+
+    err = IntegrityError("sha256 digest mismatch")
+    assert isinstance(err, VertebraError)
+    assert isinstance(err, OSError)
+    assert not isinstance(err, vertebra_db.IntegrityError)

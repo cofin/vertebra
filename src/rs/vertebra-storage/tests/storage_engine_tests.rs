@@ -4458,3 +4458,882 @@ async fn test_gcs_compose_cancellation_deletes_temporaries() {
             .contains_key("out/cancelled.bin")
     );
 }
+
+fn ref_crc32c_hex(bytes: &[u8]) -> String {
+    let mut crc = !0u32;
+    for &byte in bytes {
+        crc ^= u32::from(byte);
+        for _ in 0..8 {
+            if crc & 1 != 0 {
+                crc = (crc >> 1) ^ 0x82F6_3B78;
+            } else {
+                crc >>= 1;
+            }
+        }
+    }
+    format!("{:08x}", !crc)
+}
+
+fn ref_digests(bytes: &[u8]) -> (String, String, String) {
+    use md5::Md5;
+    use sha2::{Digest, Sha256};
+
+    let sha256 = hex::encode(Sha256::digest(bytes));
+    let crc32c = ref_crc32c_hex(bytes);
+    let md5 = hex::encode(Md5::digest(bytes));
+    (sha256, crc32c, md5)
+}
+
+struct MockS3MultipartServer {
+    endpoint: String,
+    objects: std::sync::Arc<std::sync::Mutex<HashMap<String, Vec<u8>>>>,
+    aborted_uploads: std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>,
+    completed_uploads: std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>,
+    put_requests: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    server: tokio::task::JoinHandle<()>,
+}
+
+async fn spawn_mock_s3_multipart_server() -> MockS3MultipartServer {
+    use std::collections::BTreeMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    type InFlightUploads = HashMap<(String, String), BTreeMap<usize, Vec<u8>>>;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock s3");
+    let endpoint = format!("http://{}", listener.local_addr().expect("mock s3 addr"));
+    let objects = Arc::new(Mutex::new(HashMap::<String, Vec<u8>>::new()));
+    let uploads: Arc<Mutex<InFlightUploads>> = Arc::new(Mutex::new(HashMap::new()));
+    let aborted_uploads = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
+    let completed_uploads = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
+    let put_requests = Arc::new(AtomicUsize::new(0));
+    let next_upload_seq = Arc::new(AtomicUsize::new(1));
+
+    let objects_srv = Arc::clone(&objects);
+    let uploads_srv = Arc::clone(&uploads);
+    let aborted_srv = Arc::clone(&aborted_uploads);
+    let completed_srv = Arc::clone(&completed_uploads);
+    let put_requests_srv = Arc::clone(&put_requests);
+    let seq_srv = Arc::clone(&next_upload_seq);
+
+    let server = tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            let objects = Arc::clone(&objects_srv);
+            let uploads = Arc::clone(&uploads_srv);
+            let aborted = Arc::clone(&aborted_srv);
+            let completed = Arc::clone(&completed_srv);
+            let put_requests = Arc::clone(&put_requests_srv);
+            let seq = Arc::clone(&seq_srv);
+            tokio::spawn(async move {
+                let mut request = Vec::with_capacity(8192);
+                let mut chunk = vec![0u8; 65536];
+                let header_end = loop {
+                    let count = socket.read(&mut chunk).await.unwrap_or(0);
+                    if count == 0 {
+                        return;
+                    }
+                    request.extend_from_slice(&chunk[..count]);
+                    if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                        break end + 4;
+                    }
+                };
+                let headers = String::from_utf8_lossy(&request[..header_end]).into_owned();
+                let mut first = headers
+                    .lines()
+                    .next()
+                    .unwrap_or_default()
+                    .split_whitespace();
+                let method = first.next().unwrap_or_default().to_string();
+                let target = first.next().unwrap_or_default().to_string();
+                let parsed =
+                    url::Url::parse(&format!("http://localhost{target}")).expect("parse target");
+                let key = percent_decode_path(parsed.path())
+                    .trim_start_matches('/')
+                    .trim_start_matches("bucket/")
+                    .to_string();
+                let query: HashMap<String, String> = parsed.query_pairs().into_owned().collect();
+                let content_len = headers
+                    .lines()
+                    .skip(1)
+                    .find_map(|line| {
+                        let (k, v) = line.split_once(':')?;
+                        k.trim()
+                            .eq_ignore_ascii_case("content-length")
+                            .then(|| v.trim().parse::<usize>().ok())?
+                    })
+                    .unwrap_or(0);
+                if header_end + content_len > request.len() {
+                    request.reserve(header_end + content_len - request.len());
+                }
+                while request.len() < header_end + content_len {
+                    let count = socket.read(&mut chunk).await.unwrap_or(0);
+                    if count == 0 {
+                        return;
+                    }
+                    request.extend_from_slice(&chunk[..count]);
+                }
+                let body_slice = &request[header_end..header_end + content_len];
+
+                let (status, extra_headers, resp_body) = if method == "POST"
+                    && query.contains_key("uploads")
+                {
+                    let upload_id = format!("up-{}", seq.fetch_add(1, Ordering::SeqCst));
+                    uploads
+                        .lock()
+                        .expect("uploads lock")
+                        .insert((key.clone(), upload_id.clone()), BTreeMap::new());
+                    let xml = format!(
+                        "<InitiateMultipartUploadResult><Bucket>bucket</Bucket><Key>{key}</Key><UploadId>{upload_id}</UploadId></InitiateMultipartUploadResult>"
+                    );
+                    ("200 OK", String::new(), xml.into_bytes())
+                } else if method == "PUT"
+                    && let (Some(part_raw), Some(upload_id)) =
+                        (query.get("partNumber"), query.get("uploadId"))
+                {
+                    let part_no: usize = part_raw.parse().expect("partNumber");
+                    uploads
+                        .lock()
+                        .expect("uploads lock")
+                        .entry((key.clone(), upload_id.clone()))
+                        .or_default()
+                        .insert(part_no, body_slice.to_vec());
+                    (
+                        "200 OK",
+                        format!("ETag: \"part-{part_no}\"\r\n"),
+                        Vec::new(),
+                    )
+                } else if method == "POST"
+                    && let Some(upload_id) = query.get("uploadId")
+                {
+                    let parts_map = uploads
+                        .lock()
+                        .expect("uploads lock")
+                        .remove(&(key.clone(), upload_id.clone()))
+                        .unwrap_or_default();
+                    let mut combined = Vec::new();
+                    for part_bytes in parts_map.into_values() {
+                        combined.extend_from_slice(&part_bytes);
+                    }
+                    objects
+                        .lock()
+                        .expect("objects lock")
+                        .insert(key.clone(), combined);
+                    completed
+                        .lock()
+                        .expect("completed lock")
+                        .push((key.clone(), upload_id.clone()));
+                    let xml = format!(
+                        "<CompleteMultipartUploadResult><Bucket>bucket</Bucket><Key>{key}</Key><ETag>\"mp-complete\"</ETag></CompleteMultipartUploadResult>"
+                    );
+                    ("200 OK", String::new(), xml.into_bytes())
+                } else if method == "DELETE"
+                    && let Some(upload_id) = query.get("uploadId")
+                {
+                    uploads
+                        .lock()
+                        .expect("uploads lock")
+                        .remove(&(key.clone(), upload_id.clone()));
+                    aborted
+                        .lock()
+                        .expect("aborted lock")
+                        .push((key, upload_id.clone()));
+                    ("204 No Content", String::new(), Vec::new())
+                } else if method == "PUT" {
+                    put_requests.fetch_add(1, Ordering::SeqCst);
+                    objects
+                        .lock()
+                        .expect("objects lock")
+                        .insert(key, body_slice.to_vec());
+                    (
+                        "200 OK",
+                        "ETag: \"single-etag\"\r\n".to_string(),
+                        Vec::new(),
+                    )
+                } else if method == "GET" || method == "HEAD" {
+                    match objects.lock().expect("objects lock").get(&key).cloned() {
+                        Some(data) => (
+                            "200 OK",
+                            "ETag: \"stored-etag\"\r\nLast-Modified: Thu, 12 Nov 2026 00:00:00 GMT\r\n"
+                                .to_string(),
+                            data,
+                        ),
+                        None => (
+                            "404 Not Found",
+                            String::new(),
+                            b"<Error><Code>NoSuchKey</Code></Error>".to_vec(),
+                        ),
+                    }
+                } else if method == "DELETE" {
+                    objects.lock().expect("objects lock").remove(&key);
+                    ("204 No Content", String::new(), Vec::new())
+                } else {
+                    ("400 Bad Request", String::new(), Vec::new())
+                };
+
+                let head = format!(
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\n{extra_headers}Connection: close\r\n\r\n",
+                    resp_body.len()
+                );
+                let _ = socket.write_all(head.as_bytes()).await;
+                if method != "HEAD" && !resp_body.is_empty() {
+                    let _ = socket.write_all(&resp_body).await;
+                }
+            });
+        }
+    });
+
+    MockS3MultipartServer {
+        endpoint,
+        objects,
+        aborted_uploads,
+        completed_uploads,
+        put_requests,
+        server,
+    }
+}
+
+fn s3_engine_for_mock(endpoint: &str) -> ObjectStoreEngine {
+    let opts = HashMap::from([
+        ("endpoint".to_string(), endpoint.to_string()),
+        ("allow_http".to_string(), "true".to_string()),
+        ("access_key_id".to_string(), "test-ak".to_string()),
+        ("secret_access_key".to_string(), "test-sk".to_string()),
+        ("region".to_string(), "us-east-1".to_string()),
+    ]);
+    ObjectStoreEngine::from_url("s3://bucket", Some(&opts)).expect("mock s3 engine")
+}
+
+#[tokio::test]
+async fn test_write_receipts_single_shot_empty_file_and_s3_multipart() {
+    use _storage::store::PutConditionalOptions;
+
+    let (vec_sha, vec_crc, vec_md5) = ref_digests(b"123456789");
+    assert_eq!(vec_crc, "e3069283");
+    assert_eq!(
+        vec_sha,
+        "15e2b0d3c33891ebb0f1ef609ec419420c20e320ce94c65fbc8c3312448eb225"
+    );
+    assert_eq!(vec_md5, "25f9e794323b453885f5181f1b624d0b");
+
+    let (empty_sha, empty_crc, empty_md5) = ref_digests(b"");
+    assert_eq!(empty_crc, "00000000");
+    assert_eq!(
+        empty_sha,
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    );
+    assert_eq!(empty_md5, "d41d8cd98f00b204e9800998ecf8427e");
+
+    let tmp = TempDir::new().expect("tempdir");
+    let local_url = format!("file://{}", tmp.path().join("local-store").display());
+    let engines = [
+        ObjectStoreEngine::new(BackendConfig::Memory).expect("memory engine"),
+        ObjectStoreEngine::from_url(&local_url, None).expect("local engine"),
+    ];
+
+    for engine in &engines {
+        let default_meta = engine
+            .put_opts(
+                "receipts/default.bin",
+                Bytes::from_static(b"123456789"),
+                PutConditionalOptions {
+                    attributes: HashMap::from([
+                        ("sha256".to_string(), "0".repeat(64)),
+                        ("x-amz-checksum-crc32c".to_string(), "00000000".to_string()),
+                        ("content-md5".to_string(), "0".repeat(32)),
+                    ]),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("default put");
+        assert_eq!(default_meta.sha256, None);
+        assert_eq!(default_meta.crc32c, None);
+        assert_eq!(default_meta.md5, None);
+        let head_default = engine.head("receipts/default.bin").await.expect("head");
+        assert_eq!(head_default.sha256, None);
+        assert_eq!(head_default.crc32c, None);
+        assert_eq!(head_default.md5, None);
+        assert_eq!(
+            head_default.attributes.get("sha256").map(String::as_str),
+            Some("0000000000000000000000000000000000000000000000000000000000000000")
+        );
+
+        let single_meta = engine
+            .put_opts(
+                "receipts/vector.bin",
+                Bytes::from_static(b"123456789"),
+                PutConditionalOptions {
+                    checksum: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("checksum put");
+        assert_eq!(single_meta.sha256.as_deref(), Some(vec_sha.as_str()));
+        assert_eq!(single_meta.crc32c.as_deref(), Some("e3069283"));
+        assert_eq!(single_meta.md5.as_deref(), Some(vec_md5.as_str()));
+
+        let empty_meta = engine
+            .put_opts(
+                "receipts/empty.bin",
+                Bytes::new(),
+                PutConditionalOptions {
+                    checksum: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("empty checksum put");
+        assert_eq!(empty_meta.size, 0);
+        assert_eq!(empty_meta.sha256.as_deref(), Some(empty_sha.as_str()));
+        assert_eq!(empty_meta.crc32c.as_deref(), Some("00000000"));
+        assert_eq!(empty_meta.md5.as_deref(), Some(empty_md5.as_str()));
+
+        let selective = engine
+            .put_opts(
+                "receipts/selective.bin",
+                Bytes::from_static(b"123456789"),
+                PutConditionalOptions {
+                    checksum: false,
+                    expected_crc32c: Some("e3069283".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("selective expected_crc32c put");
+        assert_eq!(selective.sha256, None);
+        assert_eq!(selective.crc32c.as_deref(), Some("e3069283"));
+        assert_eq!(selective.md5, None);
+    }
+
+    let mock_s3 = spawn_mock_s3_multipart_server().await;
+    let s3 = s3_engine_for_mock(&mock_s3.endpoint);
+
+    let small_payload = patterned_payload(65_537, 11);
+    let (small_sha, small_crc, small_md5) = ref_digests(&small_payload);
+    let small_file = tmp.path().join("small-upload.bin");
+    std::fs::write(&small_file, &small_payload).expect("write small file");
+    let small_file_meta = s3
+        .put_file_opts(
+            "files/small.bin",
+            small_file.to_str().expect("utf8"),
+            PutConditionalOptions {
+                checksum: true,
+                expected_sha256: Some(small_sha.clone()),
+                expected_crc32c: Some(small_crc.clone()),
+                expected_md5: Some(small_md5.clone()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("put_file_opts small");
+    assert_eq!(small_file_meta.sha256.as_deref(), Some(small_sha.as_str()));
+    assert_eq!(small_file_meta.crc32c.as_deref(), Some(small_crc.as_str()));
+    assert_eq!(small_file_meta.md5.as_deref(), Some(small_md5.as_str()));
+
+    let chunk_sizes = [
+        3 * 1024 * 1024,
+        3 * 1024 * 1024,
+        3 * 1024 * 1024,
+        512 * 1024 + 19,
+    ];
+    let mut multi_payload = Vec::with_capacity(chunk_sizes.iter().sum());
+    let mut chunks = Vec::with_capacity(chunk_sizes.len());
+    for (idx, &len) in chunk_sizes.iter().enumerate() {
+        let part = patterned_payload(len, (idx as u8) * 13 + 5);
+        multi_payload.extend_from_slice(&part);
+        chunks.push(Bytes::from(part));
+    }
+    let (multi_sha, multi_crc, multi_md5) = ref_digests(&multi_payload);
+
+    let mut session = s3
+        .create_multipart(
+            "mp/large-session.bin",
+            PutConditionalOptions {
+                checksum: true,
+                expected_sha256: Some(multi_sha.clone()),
+                expected_crc32c: Some(multi_crc.clone()),
+                expected_md5: Some(multi_md5.clone()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create s3 multipart");
+    for chunk in chunks {
+        session.write_chunk(chunk).await.expect("write_chunk");
+    }
+    let mp_meta = session
+        .complete_with_meta()
+        .await
+        .expect("complete s3 multipart with receipts");
+    assert_eq!(
+        session.part_sizes_flushed(),
+        &[
+            R2_UNIFORM_PART_SIZE,
+            multi_payload.len() - R2_UNIFORM_PART_SIZE
+        ]
+    );
+    assert_eq!(mp_meta.size, multi_payload.len() as u64);
+    assert_eq!(mp_meta.sha256.as_deref(), Some(multi_sha.as_str()));
+    assert_eq!(mp_meta.crc32c.as_deref(), Some(multi_crc.as_str()));
+    assert_eq!(mp_meta.md5.as_deref(), Some(multi_md5.as_str()));
+    assert_eq!(
+        &s3.get("mp/large-session.bin").await.expect("get mp")[..],
+        &multi_payload[..]
+    );
+
+    let large_file = tmp.path().join("large-upload.bin");
+    std::fs::write(&large_file, &multi_payload).expect("write large file");
+    let large_file_meta = s3
+        .put_file_opts(
+            "files/large.bin",
+            large_file.to_str().expect("utf8"),
+            PutConditionalOptions {
+                checksum: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("put_file_opts >8MiB");
+    assert_eq!(large_file_meta.size, multi_payload.len() as u64);
+    assert_eq!(large_file_meta.sha256.as_deref(), Some(multi_sha.as_str()));
+    assert_eq!(large_file_meta.crc32c.as_deref(), Some(multi_crc.as_str()));
+    assert_eq!(large_file_meta.md5.as_deref(), Some(multi_md5.as_str()));
+    assert_eq!(
+        mock_s3.completed_uploads.lock().expect("lock").len(),
+        2,
+        "both session multipart and >8MiB put_file_opts must complete on mock S3"
+    );
+
+    let mut empty_mp = s3
+        .create_multipart(
+            "mp/empty.bin",
+            PutConditionalOptions {
+                checksum: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create empty multipart");
+    let empty_mp_meta = empty_mp
+        .complete_with_meta()
+        .await
+        .expect("complete empty multipart");
+    assert_eq!(empty_mp_meta.size, 0);
+    assert_eq!(empty_mp_meta.sha256.as_deref(), Some(empty_sha.as_str()));
+    assert_eq!(empty_mp_meta.crc32c.as_deref(), Some("00000000"));
+    assert_eq!(empty_mp_meta.md5.as_deref(), Some(empty_md5.as_str()));
+
+    mock_s3.server.abort();
+}
+
+#[tokio::test]
+async fn test_expected_digest_mismatch_aborts_before_publish_and_preserves_prior_object() {
+    use _storage::store::{PutConditionalOptions, StorageError};
+    use std::sync::atomic::Ordering;
+
+    let mock_s3 = spawn_mock_s3_multipart_server().await;
+    let s3 = s3_engine_for_mock(&mock_s3.endpoint);
+
+    let prior = b"prior-intact-s3-object-bytes";
+    s3.put("guarded/item.bin", Bytes::from_static(prior))
+        .await
+        .expect("seed prior object");
+    let puts_after_seed = mock_s3.put_requests.load(Ordering::SeqCst);
+    assert_eq!(puts_after_seed, 1);
+
+    let bad_sha = "0".repeat(64);
+    let bad_crc = "ffffffff".to_string();
+    let bad_md5 = "0".repeat(32);
+
+    let mismatch_cases = [
+        (
+            "sha256",
+            PutConditionalOptions {
+                expected_sha256: Some(bad_sha.clone()),
+                ..Default::default()
+            },
+        ),
+        (
+            "crc32c",
+            PutConditionalOptions {
+                expected_crc32c: Some(bad_crc.clone()),
+                ..Default::default()
+            },
+        ),
+        (
+            "md5",
+            PutConditionalOptions {
+                expected_md5: Some(bad_md5.clone()),
+                ..Default::default()
+            },
+        ),
+    ];
+
+    for (expected_alg, opts) in mismatch_cases.clone() {
+        let err = s3
+            .put_opts(
+                "guarded/item.bin",
+                Bytes::from_static(b"replacement-attempt"),
+                opts,
+            )
+            .await
+            .expect_err("mismatched single-shot put_opts must fail");
+        assert!(err.is_integrity());
+        match err {
+            StorageError::Integrity {
+                path, algorithm, ..
+            } => {
+                assert_eq!(path, "guarded/item.bin");
+                assert_eq!(algorithm, expected_alg);
+            }
+            other => panic!("expected Integrity error, got {other:?}"),
+        }
+        assert_eq!(
+            mock_s3.put_requests.load(Ordering::SeqCst),
+            puts_after_seed,
+            "single-shot digest mismatch must reject before sending HTTP PUT"
+        );
+        assert_eq!(
+            &s3.get("guarded/item.bin").await.expect("get prior")[..],
+            prior
+        );
+    }
+
+    let part_one = Bytes::from(patterned_payload(5 * 1024 * 1024, 21));
+    let part_two = Bytes::from(patterned_payload(4 * 1024 * 1024, 42));
+    for (idx, (expected_alg, opts)) in mismatch_cases.into_iter().enumerate() {
+        let target_key = if idx == 0 {
+            "guarded/item.bin"
+        } else {
+            "guarded/uncommitted.bin"
+        };
+        let mut session = s3
+            .create_multipart(target_key, opts)
+            .await
+            .expect("create multipart");
+        session
+            .write_chunk(part_one.clone())
+            .await
+            .expect("write chunk 1");
+        session
+            .write_chunk(part_two.clone())
+            .await
+            .expect("write chunk 2 flushing 8 MiB part to mock S3");
+        assert_eq!(session.part_sizes_flushed(), &[R2_UNIFORM_PART_SIZE]);
+
+        let err = session
+            .complete_with_meta()
+            .await
+            .expect_err("mismatched multipart must fail before complete");
+        match err {
+            StorageError::Integrity {
+                path, algorithm, ..
+            } => {
+                assert_eq!(path, target_key);
+                assert_eq!(algorithm, expected_alg);
+            }
+            other => panic!("expected Integrity error, got {other:?}"),
+        }
+        drop(session);
+        tokio::task::yield_now().await;
+
+        assert!(
+            mock_s3.completed_uploads.lock().expect("lock").is_empty(),
+            "mismatched multipart upload must never send CompleteMultipartUpload"
+        );
+        let aborted = mock_s3.aborted_uploads.lock().expect("lock").clone();
+        assert_eq!(
+            aborted.len(),
+            idx + 1,
+            "mismatch must issue exactly one DELETE ?uploadId without double-aborting on Drop"
+        );
+        assert_eq!(aborted[idx].0, target_key);
+        assert!(aborted[idx].1.starts_with("up-"));
+    }
+
+    assert_eq!(
+        &s3.get("guarded/item.bin").await.expect("prior intact")[..],
+        prior
+    );
+    assert!(
+        !s3.exists("guarded/uncommitted.bin")
+            .await
+            .expect("exists check")
+    );
+
+    let tmp = TempDir::new().expect("tempdir");
+    let large_src = tmp.path().join("bad-large.bin");
+    std::fs::write(&large_src, patterned_payload(9 * 1024 * 1024, 77)).expect("write >8MiB file");
+    let file_err = s3
+        .put_file_opts(
+            "guarded/item.bin",
+            large_src.to_str().expect("utf8"),
+            PutConditionalOptions {
+                expected_sha256: Some(bad_sha),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("mismatched >8MiB put_file_opts must abort before publish");
+    assert!(file_err.is_integrity());
+    assert_eq!(mock_s3.aborted_uploads.lock().expect("lock").len(), 4);
+    assert!(mock_s3.completed_uploads.lock().expect("lock").is_empty());
+    assert_eq!(
+        mock_s3
+            .objects
+            .lock()
+            .expect("lock")
+            .get("guarded/item.bin")
+            .map(Vec::as_slice),
+        Some(&prior[..])
+    );
+    assert_eq!(
+        &s3.get("guarded/item.bin").await.expect("prior intact")[..],
+        prior
+    );
+
+    mock_s3.server.abort();
+}
+
+#[tokio::test]
+async fn test_malformed_expected_digest_hex_rejected_before_io() {
+    use _storage::store::{PutConditionalOptions, StorageError};
+    use std::sync::Arc;
+    use std::sync::atomic::Ordering;
+
+    let counting = Arc::new(CountingStore::new(std::time::Duration::ZERO));
+    let engine = ObjectStoreEngine::with_store(counting.clone(), "memory");
+
+    let bad_sha_values = [
+        "",
+        "e3b0c442",
+        &"A".repeat(64),
+        &format!("{}g", "0".repeat(63)),
+        &"0".repeat(65),
+    ];
+    let bad_crc_values = ["", "e306928", "e30692830", "E3069283", "zzzzzzzz"];
+    let bad_md5_values = [
+        "",
+        "d41d8cd9",
+        &"D".repeat(32),
+        &format!("{}z", "0".repeat(31)),
+    ];
+
+    for bad in bad_sha_values {
+        let opts = PutConditionalOptions {
+            expected_sha256: Some(bad.to_string()),
+            ..Default::default()
+        };
+        assert!(matches!(
+            engine
+                .put_opts("k/obj", Bytes::from_static(b"x"), opts.clone())
+                .await,
+            Err(StorageError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            engine
+                .put_file_opts("k/obj", "/nonexistent/path/never/opened.bin", opts.clone())
+                .await,
+            Err(StorageError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            engine.create_multipart("k/obj", opts).await,
+            Err(StorageError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            engine.get_verified("k/obj", bad).await,
+            Err(StorageError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            engine
+                .get_file_verified("k/obj", "/tmp/never-written.bin", bad)
+                .await,
+            Err(StorageError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            engine.get_stream_verified("k/obj", bad).await,
+            Err(StorageError::InvalidInput(_))
+        ));
+    }
+
+    for bad in bad_crc_values {
+        let opts = PutConditionalOptions {
+            expected_crc32c: Some(bad.to_string()),
+            ..Default::default()
+        };
+        assert!(matches!(
+            engine
+                .put_opts("k/obj", Bytes::from_static(b"x"), opts)
+                .await,
+            Err(StorageError::InvalidInput(_))
+        ));
+    }
+
+    for bad in bad_md5_values {
+        let opts = PutConditionalOptions {
+            expected_md5: Some(bad.to_string()),
+            ..Default::default()
+        };
+        assert!(matches!(
+            engine
+                .put_opts("k/obj", Bytes::from_static(b"x"), opts)
+                .await,
+            Err(StorageError::InvalidInput(_))
+        ));
+    }
+
+    assert_eq!(counting.put_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(counting.multipart_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(counting.get_ok.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn test_verified_reads_get_get_file_and_verifying_stream() {
+    use _storage::store::StorageError;
+    use futures::StreamExt;
+
+    let tmp = TempDir::new().expect("tempdir");
+    let local_root = tmp.path().join("store");
+    let local_url = format!("file://{}", local_root.display());
+    let mem_engine = ObjectStoreEngine::new(BackendConfig::Memory).expect("memory engine");
+    let local_engine = ObjectStoreEngine::from_url(&local_url, None).expect("local engine");
+
+    let payload = patterned_payload(3 * 65536 + 37, 19);
+    let (good_sha, _, _) = ref_digests(&payload);
+    let wrong_sha = "f".repeat(64);
+
+    for (idx, engine) in [&mem_engine, &local_engine].into_iter().enumerate() {
+        engine
+            .put("verified/data.bin", Bytes::from(payload.clone()))
+            .await
+            .expect("seed verified/data.bin");
+
+        let fetched = engine
+            .get_verified("verified/data.bin", &good_sha)
+            .await
+            .expect("get_verified pass");
+        assert_eq!(&fetched[..], &payload[..]);
+
+        let bad_get = engine
+            .get_verified("verified/data.bin", &wrong_sha)
+            .await
+            .expect_err("get_verified mismatch");
+        match bad_get {
+            StorageError::Integrity {
+                path,
+                algorithm,
+                expected,
+                actual,
+            } => {
+                assert_eq!(path, "verified/data.bin");
+                assert_eq!(algorithm, "sha256");
+                assert_eq!(expected, wrong_sha);
+                assert_eq!(actual, good_sha);
+            }
+            other => panic!("expected Integrity error, got {other:?}"),
+        }
+
+        let dl_dir = tmp.path().join(format!("verified-dl-{idx}"));
+        let good_dest = dl_dir.join("good.bin");
+        let file_meta = engine
+            .get_file_verified(
+                "verified/data.bin",
+                good_dest.to_str().expect("utf8"),
+                &good_sha,
+            )
+            .await
+            .expect("get_file_verified pass");
+        assert_eq!(file_meta.sha256.as_deref(), Some(good_sha.as_str()));
+        assert_eq!(std::fs::read(&good_dest).expect("read good_dest"), payload);
+        assert!(leftover_part_files(&dl_dir).is_empty());
+
+        let preexisting = dl_dir.join("existing.bin");
+        std::fs::write(&preexisting, b"pre-existing-destination-bytes")
+            .expect("seed pre-existing target");
+        let bad_file_existing = engine
+            .get_file_verified(
+                "verified/data.bin",
+                preexisting.to_str().expect("utf8"),
+                &wrong_sha,
+            )
+            .await
+            .expect_err("get_file_verified mismatch over pre-existing file");
+        assert!(bad_file_existing.is_integrity());
+        assert_eq!(
+            std::fs::read(&preexisting).expect("preexisting intact"),
+            b"pre-existing-destination-bytes"
+        );
+        assert!(leftover_part_files(&dl_dir).is_empty());
+
+        let fresh_bad_dest = dl_dir.join("fresh-bad.bin");
+        let bad_file_fresh = engine
+            .get_file_verified(
+                "verified/data.bin",
+                fresh_bad_dest.to_str().expect("utf8"),
+                &wrong_sha,
+            )
+            .await
+            .expect_err("get_file_verified mismatch on fresh target");
+        assert!(bad_file_fresh.is_integrity());
+        assert!(!fresh_bad_dest.exists());
+        assert!(leftover_part_files(&dl_dir).is_empty());
+
+        let mut good_stream = engine
+            .get_stream_verified("verified/data.bin", &good_sha)
+            .await
+            .expect("open good get_stream_verified");
+        let mut streamed = Vec::with_capacity(payload.len());
+        while let Some(item) = good_stream.next().await {
+            streamed.extend_from_slice(&item.expect("good stream chunk"));
+        }
+        assert_eq!(streamed, payload);
+
+        let mut bad_stream = engine
+            .get_stream_verified("verified/data.bin", &wrong_sha)
+            .await
+            .expect("open mismatched get_stream_verified");
+        let mut bad_collected = Vec::new();
+        let mut terminal_err = None;
+        while let Some(item) = bad_stream.next().await {
+            match item {
+                Ok(chunk) => bad_collected.extend_from_slice(&chunk),
+                Err(err) => {
+                    assert!(terminal_err.is_none());
+                    terminal_err = Some(err);
+                }
+            }
+        }
+        assert_eq!(bad_collected, payload);
+        match terminal_err.expect("final stream poll must yield StorageError::Integrity") {
+            StorageError::Integrity {
+                path,
+                algorithm,
+                expected,
+                actual,
+            } => {
+                assert_eq!(path, "verified/data.bin");
+                assert_eq!(algorithm, "sha256");
+                assert_eq!(expected, wrong_sha);
+                assert_eq!(actual, good_sha);
+            }
+            other => panic!("expected Integrity error on stream EOF, got {other:?}"),
+        }
+        assert!(bad_stream.next().await.is_none());
+
+        let mut early_drop_stream = engine
+            .get_stream_verified("verified/data.bin", &wrong_sha)
+            .await
+            .expect("open early-drop get_stream_verified");
+        let first_chunk = early_drop_stream
+            .next()
+            .await
+            .expect("at least one chunk")
+            .expect("first chunk before EOF must not fail");
+        assert!(!first_chunk.is_empty());
+        drop(early_drop_stream);
+    }
+}

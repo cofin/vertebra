@@ -6,7 +6,7 @@ import posixpath
 from collections.abc import AsyncIterable, Buffer, Iterator
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING, Any, BinaryIO, Self, cast, get_args
+from typing import TYPE_CHECKING, Any, BinaryIO, Self, TypedDict, cast, get_args
 from urllib.parse import quote, unquote, urlparse
 
 from msgspec.structs import fields
@@ -80,6 +80,14 @@ class AsyncStorageRegistry:
         return self._stores[name]
 
 
+class _DigestOptions(TypedDict, total=False):
+    """Typed integrity kwargs forwarded to object store upload methods."""
+
+    expected_sha256: str
+    expected_crc32c: str
+    expected_md5: str
+
+
 @_deconstructible
 class DjangoStorage(_StorageBase):
     """Deconstructible Django storage backed by paired native object stores."""
@@ -150,7 +158,7 @@ class DjangoStorage(_StorageBase):
             msg = "A file name is required"
             raise ValueError(msg)
         name = self.get_available_name(self._validate_name(name), max_length=max_length)
-        self._store.put(self._qualified_name(name), self._encode_payload(content))
+        self._store.put(self._qualified_name(name), self._encode_payload(content), **self._digest_options(content))
         return name
 
     async def asave(self, name: str | None, content: Any, max_length: int | None = None) -> str:
@@ -165,13 +173,14 @@ class DjangoStorage(_StorageBase):
         name = self._validate_name(name if name is not None else content.name)
         name = await self._aget_available_name(name, max_length)
         key = self._qualified_name(name)
+        digests = self._digest_options(content)
         if isinstance(content, (Buffer, str)):
-            await self._async_store.put(key, self._encode_payload(content))
+            await self._async_store.put(key, self._encode_payload(content), **digests)
         elif isinstance(content, AsyncIterable):
-            await self._async_store.put_stream(key, content)
+            await self._async_store.put_stream(key, content, **digests)
         else:
             file = content if hasattr(content, "chunks") else File(content, name=name)
-            await self._async_store.put_stream(key, self._file_chunks(file))
+            await self._async_store.put_stream(key, self._file_chunks(file), **digests)
         return name
 
     def is_name_available(self, name: str, max_length: int | None = None) -> bool:
@@ -272,8 +281,20 @@ class DjangoStorage(_StorageBase):
 
     def _save(self, name: str, content: Any) -> str:
         """Stream Django's already allocated file chunk by chunk into a native multipart upload."""
-        self._store.put_stream(self._qualified_name(name), self._file_chunks(content))
+        self._store.put_stream(self._qualified_name(name), self._file_chunks(content), **self._digest_options(content))
         return name
+
+    @staticmethod
+    def _digest_options(content: Any) -> _DigestOptions:
+        """Extract optional string integrity digest attributes from a Django content object."""
+        options: _DigestOptions = {}
+        if isinstance(sha256 := getattr(content, "sha256", None), str):
+            options["expected_sha256"] = sha256
+        if isinstance(crc32c := getattr(content, "crc32c", None), str):
+            options["expected_crc32c"] = crc32c
+        if isinstance(md5 := getattr(content, "md5", None), str):
+            options["expected_md5"] = md5
+        return options
 
     async def _aget_available_name(self, name: str, max_length: int | None) -> str:
         """Apply Django's alternative-name and truncation rules with async probes."""

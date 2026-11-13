@@ -1,5 +1,28 @@
 # Bundle Activity Log
 
+## [2026-11-13T16:11:30Z] archive | storage-integrity-and-streaming
+
+- Archived `storage-integrity-and-streaming` (`3` chapters, `9` tasks, `7f247d0e..61f0cd0e`), delivering CRC32C/MD5/SHA-256 receipts, verified streaming reads with `AsyncStreamReader.close()`, streaming Arrow/Parquet multipart writes across SQLSpec/Advanced Alchemy/Django, parameterized `{storage,bigquery,spanner,bundler}-wheel-check` isolation gates, promoted `.agents/bundles/research/upstream-sqlspec-direct-arrow-write.md`, and present-tense OKF storage chapters (`object-storage.md`, `object-storage-limitations.md`).
+
+## [2026-11-13T04:59:52Z] chapter-complete | storage-integrity-and-streaming ch03-wheel-isolation-and-okf-sync
+
+- Closed `ch03-wheel-isolation-and-okf-sync` at `66e6913f` (sync `541d89b5`): added `tools/scripts/verify_storage_wheel.py`, `Makefile` (`{storage,bigquery,spanner,bundler}-wheel-check`), and `release.yaml` isolation checks, updated storage user/reference docs and changelog, and synchronized `object-storage.md` (`175L`), `object-storage-limitations.md` (`86L`), and `research/upstream-sqlspec-direct-arrow-write.md` (`41L`).
+- Completed all `3` chapters (`9/9` tasks) of `storage-integrity-and-streaming`.
+
+## [2026-11-13T04:46:07Z] chapter-complete | storage-integrity-and-streaming ch02-streaming-arrow-writes-and-integrations
+
+- Closed `ch02-streaming-arrow-writes-and-integrations` at `c9f54436` (sync `099753b4`): threaded `checksum` and `expected_*` digests through `vertebra.storage._arrow`, enabled SQLSpec `supports_direct_arrow_write = True`, added Advanced Alchemy `save_arrow*` + digest forwarding and Django `content.{sha256,crc32c,md5}` forwarding, and added `benches/put_checksum.rs` (`640` + `82` Django Python tests, `cargo test -p vertebra-storage --benches`, `clippy`, `ruff`, `mypy` clean).
+- Advanced active frontier to `ch03-wheel-isolation-and-okf-sync` (`storage-integrity-and-streaming:ch03:t01`; `3` tasks remain in `ch03`).
+
+## [2026-11-13T02:56:00Z] chapter-complete | storage-integrity-and-streaming ch01-integrity-receipts-and-verified-reads
+
+- Closed `ch01-integrity-receipts-and-verified-reads` at `b8b25207` (`47` Rust tests, `485` Python tests, unified verified `open_reader` cursor across `read()`/`__iter__()`/`__aiter__()`, and `io.UnsupportedOperation` on random-access `seek`/`read_at` when `expected_sha256` is set).
+- Advanced active frontier to `ch02-streaming-arrow-writes-and-integrations` (`storage-integrity-and-streaming:ch02:t01`; `6` tasks remain across `ch02`–`ch03`).
+
+## [2026-11-13T02:21:00Z] chapter-checkpoint | storage-integrity-and-streaming ch01-integrity-receipts-and-verified-reads
+
+- Completed `ch01-integrity-receipts-and-verified-reads` (`t01`–`t03`) at `85849b32` on `feat/storage-integrity-and-streaming`: added CRC32C, MD5, and SHA-256 receipts, abort-before-publish expected-digest checks, `get_verified`/`get_file_verified`/`get_stream_verified`, and `vertebra.typing.IntegrityError` + `vertebra.storage` re-exports (`47` Rust tests, `485` Python tests, `stubtest` and `mypy` clean).
+
 ## [2026-11-13T16:02:30Z] archive | server-runtime-correctness
 
 - Archived `server-runtime-correctness` (`7` chapters, `26` tasks, `47143761..06ef86e9`) after verifying full mypy (`436` files), pure-Python doc postbuild/verifier lazy imports (`serializers/__init__.py`), and present-tense OKF knowledge chapters (`pyo3-ffi-and-batch-dispatch.md`, `asgi-and-wsgi-runners.md`, `tiered-rings-and-batch-bridge.md`, `worker-and-protocols.md`, `server-runtime-limitations.md`, `server-and-dispatch.md`, `product.md`).

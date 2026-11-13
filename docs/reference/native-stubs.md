@@ -92,6 +92,7 @@ Low-level Rust/PyO3 classes and functions declared in PEP 561 `.pyi` stub files 
 ::: vertebra._storage.AsyncObjectStore
     options:
       heading_level: 3
+      separate_signature: false
       members:
         - put
         - get
@@ -99,8 +100,6 @@ Low-level Rust/PyO3 classes and functions declared in PEP 561 `.pyi` stub files 
         - delete
         - list
         - copy
-        - presign_get
-        - presign_put
 
 ## `vertebra._bigquery` & `vertebra._spanner` — Google Cloud Data-Plane Extensions
 

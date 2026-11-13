@@ -6,7 +6,7 @@ import builtins
 import datetime as dt
 import inspect
 import os
-from collections.abc import AsyncIterable, AsyncIterator, Buffer, Iterable, Iterator, Sequence
+from collections.abc import AsyncIterable, AsyncIterator, Buffer, Iterable, Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -20,6 +20,7 @@ from vertebra.storage import (
     MemoryConfig,
     ObjectMeta,
     OCIConfig,
+    PutResult,
     R2Config,
     S3Config,
     SigningConfig,
@@ -27,6 +28,7 @@ from vertebra.storage import (
     SyncGcpTokenCache,
     SyncObjectStore,
 )
+from vertebra.storage._arrow import normalize_arrow_format, write_batches_async, write_batches_sync
 from vertebra.typing import ImproperConfigurationError, MissingDependencyError
 
 try:
@@ -191,6 +193,10 @@ class ObjectStoreBackend(AAStorageBackend):
         use_multipart: bool | None = None,
         chunk_size: int = 5 * 1024 * 1024,
         max_concurrency: int = 12,
+        checksum: bool = False,
+        expected_sha256: str | None = None,
+        expected_crc32c: str | None = None,
+        expected_md5: str | None = None,
     ) -> FileObject:
         """Persist a FileObject payload synchronously and populate size, etag, and last_modified."""
         _ = max_concurrency
@@ -199,11 +205,32 @@ class ObjectStoreBackend(AAStorageBackend):
             raise ValueError(msg)
         qualified = self._qualify(file_object.path)
         if isinstance(data, Path):
-            put_res = self._sync_store.put_file(qualified, data)
+            put_res = self._sync_store.put_file(
+                qualified,
+                data,
+                checksum=checksum,
+                expected_sha256=expected_sha256,
+                expected_crc32c=expected_crc32c,
+                expected_md5=expected_md5,
+            )
         elif isinstance(data, Buffer) and not use_multipart:
-            put_res = self._sync_store.put(qualified, data)
+            put_res = self._sync_store.put(
+                qualified,
+                data,
+                checksum=checksum,
+                expected_sha256=expected_sha256,
+                expected_crc32c=expected_crc32c,
+                expected_md5=expected_md5,
+            )
         else:
-            put_res = self._sync_store.put_stream(qualified, self._iter_sync_data(data, chunk_size))
+            put_res = self._sync_store.put_stream(
+                qualified,
+                self._iter_sync_data(data, chunk_size),
+                checksum=checksum,
+                expected_sha256=expected_sha256,
+                expected_crc32c=expected_crc32c,
+                expected_md5=expected_md5,
+            )
         self._apply_put_metadata(file_object, put_res.size, put_res.etag)
         return file_object
 
@@ -215,6 +242,10 @@ class ObjectStoreBackend(AAStorageBackend):
         use_multipart: bool | None = None,
         chunk_size: int = 5 * 1024 * 1024,
         max_concurrency: int = 12,
+        checksum: bool = False,
+        expected_sha256: str | None = None,
+        expected_crc32c: str | None = None,
+        expected_md5: str | None = None,
     ) -> FileObject:
         """Persist a FileObject payload asynchronously and populate size, etag, and last_modified."""
         _ = max_concurrency
@@ -223,13 +254,110 @@ class ObjectStoreBackend(AAStorageBackend):
             raise ValueError(msg)
         qualified = self._qualify(file_object.path)
         if isinstance(data, Path):
-            put_res = await self._async_store.put_file(qualified, data)
+            put_res = await self._async_store.put_file(
+                qualified,
+                data,
+                checksum=checksum,
+                expected_sha256=expected_sha256,
+                expected_crc32c=expected_crc32c,
+                expected_md5=expected_md5,
+            )
         elif isinstance(data, Buffer) and not use_multipart:
-            put_res = await self._async_store.put(qualified, data)
+            put_res = await self._async_store.put(
+                qualified,
+                data,
+                checksum=checksum,
+                expected_sha256=expected_sha256,
+                expected_crc32c=expected_crc32c,
+                expected_md5=expected_md5,
+            )
         else:
-            put_res = await self._async_store.put_stream(qualified, self._iter_async_data(data, chunk_size))
+            put_res = await self._async_store.put_stream(
+                qualified,
+                self._iter_async_data(data, chunk_size),
+                checksum=checksum,
+                expected_sha256=expected_sha256,
+                expected_crc32c=expected_crc32c,
+                expected_md5=expected_md5,
+            )
         self._apply_put_metadata(file_object, put_res.size, put_res.etag)
         return file_object
+
+    def save_arrow(
+        self,
+        path: PathLike,
+        data: Any,
+        *,
+        format: str | None = None,
+        file_format: str | None = None,
+        batch_size: int = 65536,
+        schema: Any = None,
+        options: Mapping[str, Any] | None = None,
+        checksum: bool = False,
+        expected_sha256: str | None = None,
+        expected_crc32c: str | None = None,
+        expected_md5: str | None = None,
+        **codec_options: Any,
+    ) -> PutResult:
+        """Stream an Arrow Table, RecordBatch, or batch iterable directly to storage synchronously."""
+        qualified, resolved_format, merged_options = self._prepare_arrow_write(
+            path,
+            file_format=file_format,
+            format=format,
+            options=options,
+            codec_options=codec_options,
+        )
+        return write_batches_sync(
+            self._sync_store,
+            qualified,
+            data,
+            file_format=resolved_format,
+            batch_size=batch_size,
+            schema=schema,
+            options=merged_options,
+            checksum=checksum,
+            expected_sha256=expected_sha256,
+            expected_crc32c=expected_crc32c,
+            expected_md5=expected_md5,
+        )
+
+    async def save_arrow_async(
+        self,
+        path: PathLike,
+        data: Any,
+        *,
+        format: str | None = None,
+        file_format: str | None = None,
+        batch_size: int = 65536,
+        schema: Any = None,
+        options: Mapping[str, Any] | None = None,
+        checksum: bool = False,
+        expected_sha256: str | None = None,
+        expected_crc32c: str | None = None,
+        expected_md5: str | None = None,
+        **codec_options: Any,
+    ) -> PutResult:
+        """Stream an Arrow Table, RecordBatch, or batch iterable directly to storage asynchronously."""
+        qualified, resolved_format, merged_options = self._prepare_arrow_write(
+            path,
+            file_format=file_format,
+            format=format,
+            options=options,
+            codec_options=codec_options,
+        )
+        return await write_batches_async(
+            self._async_store,
+            qualified,
+            data,
+            file_format=resolved_format,
+            batch_size=batch_size,
+            schema=schema,
+            options=merged_options,
+            checksum=checksum,
+            expected_sha256=expected_sha256,
+            expected_crc32c=expected_crc32c,
+            expected_md5=expected_md5,
+        )
 
     def copy_object(self, src: PathLike, dst: PathLike) -> None:
         """Copy an object synchronously within the storage backend."""
@@ -296,6 +424,22 @@ class ObjectStoreBackend(AAStorageBackend):
         if isinstance(paths, (str, Path, os.PathLike)):
             return await self._sign_one_async(paths, expires_in=ttl, for_upload=for_upload)
         return [await self._sign_one_async(item, expires_in=ttl, for_upload=for_upload) for item in paths]
+
+    def _prepare_arrow_write(
+        self,
+        path: PathLike,
+        *,
+        file_format: str | None,
+        format: str | None,
+        options: Mapping[str, Any] | None,
+        codec_options: dict[str, Any],
+    ) -> tuple[str, str, dict[str, Any]]:
+        """Qualify an Arrow object key, resolve its target format, and merge codec options."""
+        qualified = self._qualify(path)
+        raw_format = file_format if file_format is not None else format
+        resolved_format = normalize_arrow_format(raw_format, qualified)
+        merged = {**(options or {}), **codec_options}
+        return qualified, resolved_format, merged
 
     def _require_signing(self) -> None:
         """Reject signing requests when the underlying store has no `SigningConfig`."""
