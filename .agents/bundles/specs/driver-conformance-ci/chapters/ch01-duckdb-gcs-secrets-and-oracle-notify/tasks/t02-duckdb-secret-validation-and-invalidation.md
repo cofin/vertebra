@@ -6,7 +6,11 @@ chapter_id: ch01-duckdb-gcs-secrets-and-oracle-notify
 title: "Harden DuckDBSecretConfig validation, 401/403 invalidation, and startup cleanup"
 description: "Validate DuckDBSecretConfig at construction, invalidate dynamic providers on HTTP 401/403 errors, and close _client on failed initial secret refresh."
 status: stable
-state: pending
+state: completed
+commit: a7face33
+last_verified_commit: a7face33
+last_verified_at: "2026-11-13T15:25:00Z"
+verification_evidence: "pytest test_duckdb_driver.py test_gcs_token_refresh.py + ruff + mypy clean"
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -71,8 +75,8 @@ uv run --no-sync pytest src/py/tests/unit/db/test_duckdb_driver.py src/py/tests/
 
 ## Acceptance Criteria
 
-- [ ] `vertebra.db.adapters.duckdb` imports zero `vertebra.storage` or GCP symbols while rotating and invalidating `SyncGcsBearerSecretProvider` / `AsyncGcsBearerSecretProvider`.
-- [ ] Invalid secret configs fail at construction, `401`/`403` errors invalidate applied generations, and failed startup refresh leaves zero leaked clients.
+- [x] `vertebra.db.adapters.duckdb` imports zero `vertebra.storage` or GCP symbols while rotating and invalidating `SyncGcsBearerSecretProvider` / `AsyncGcsBearerSecretProvider`.
+- [x] Invalid secret configs fail at construction, `401`/`403` errors invalidate applied generations, and failed startup refresh leaves zero leaked clients.
 
 [^duckdb-secret]: `src/py/vertebra/db/adapters/duckdb/config.py::DuckDBSecretConfig` — `DuckDBSecretConfig` declaration and interval handling.
 [^duckdb-driver]: `src/py/vertebra/db/adapters/duckdb/driver.py::SyncDuckDBDriver` — `SyncDuckDBDriver` and `AsyncDuckDBDriver` secret refresh and client bootstrap.

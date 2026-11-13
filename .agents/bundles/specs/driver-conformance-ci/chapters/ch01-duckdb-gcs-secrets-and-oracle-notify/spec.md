@@ -5,7 +5,7 @@ chapter_id: ch01-duckdb-gcs-secrets-and-oracle-notify
 title: "Chapter 01: DuckDB GCS Bearer Secret Rotation and Oracle Notify Wait Budget"
 description: "Implement SyncGcsBearerSecretProvider and AsyncGcsBearerSecretProvider over GcpTokenCache, harden DuckDBSecretConfig validation and 401/403 credential invalidation with fail-closed startup cleanup, and enforce OracleNotifyConfig.wait_timeout_seconds idle session liveness."
 status: stable
-state: planned
+state: active
 planning_status: complete
 planning_quality: standard
 planning_degraded_reason: null
@@ -106,12 +106,13 @@ Deferred to [`ch04-docs-and-okf-sync`](../ch04-docs-and-okf-sync/spec.md) so `st
 
 ## 5. Implementation Plan
 
-- [ ] [t01-gcs-bearer-secret-providers.md](tasks/t01-gcs-bearer-secret-providers.md) — Implement `SyncGcsBearerSecretProvider` and `AsyncGcsBearerSecretProvider` over `GcpTokenCache` and export from `vertebra.storage`.
-- [ ] [t02-duckdb-secret-validation-and-invalidation.md](tasks/t02-duckdb-secret-validation-and-invalidation.md) — Add `DuckDBSecretConfig.__post_init__` validation, `(HTTP 401)`/`(HTTP 403)` provider invalidation, and fail-closed startup `_client` cleanup.
-- [ ] [t03-oracle-notify-wait-budget.md](tasks/t03-oracle-notify-wait-budget.md) — Enforce `OracleNotifyConfig.wait_timeout_seconds` idle session liveness pings in `vertebra-oracle/src/notify.rs`.
+- [x] [a7face33] [t01-gcs-bearer-secret-providers.md](tasks/t01-gcs-bearer-secret-providers.md) — Implement `SyncGcsBearerSecretProvider` and `AsyncGcsBearerSecretProvider` over `GcpTokenCache` and export from `vertebra.storage`.
+- [x] [a7face33] [t02-duckdb-secret-validation-and-invalidation.md](tasks/t02-duckdb-secret-validation-and-invalidation.md) — Add `DuckDBSecretConfig.__post_init__` validation, `(HTTP 401)`/`(HTTP 403)` provider invalidation, and fail-closed startup `_client` cleanup.
+- [x] [75f2d8d7] [t03-oracle-notify-wait-budget.md](tasks/t03-oracle-notify-wait-budget.md) — Enforce `OracleNotifyConfig.wait_timeout_seconds` idle session liveness pings in `vertebra-oracle/src/notify.rs`.
 
 ## 6. Current State & Remaining Plan Snapshot
 
+- **Status**: All `3` tasks (`t01`–`t03`) completed (`75f2d8d7`, `a7face33`).
 - **Fast `< 60s` Offline Chapter Gate**: `UV_NO_SYNC=1 PYO3_PYTHON="$PWD/.venv/bin/python" make dev && cargo test --manifest-path src/rs/Cargo.toml -p vertebra-oracle notify:: && cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-oracle --all-targets -- -D warnings && uv run --no-sync pytest src/py/tests/unit/storage/test_gcs_token_refresh.py src/py/tests/unit/db/test_duckdb_driver.py src/py/tests/unit/db/test_oracle_adapter.py -q && uv run --no-sync ruff check src/py/vertebra/storage src/py/vertebra/db/adapters/duckdb src/py/tests/unit/storage/test_gcs_token_refresh.py src/py/tests/unit/db/test_duckdb_driver.py && uv run --no-sync mypy src/py/vertebra/storage src/py/vertebra/db/adapters/duckdb`.
 
 [^token-cache]: `src/py/vertebra/_vertebra.pyi::SyncGcpTokenCache` — Native GCP token cache with `generation`, `needs_refresh`, `invalidate`, and `get_token`.

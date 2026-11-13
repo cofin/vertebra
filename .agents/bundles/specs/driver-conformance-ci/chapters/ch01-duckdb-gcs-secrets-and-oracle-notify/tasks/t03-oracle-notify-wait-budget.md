@@ -6,7 +6,11 @@ chapter_id: ch01-duckdb-gcs-secrets-and-oracle-notify
 title: "Enforce OracleNotifyConfig.wait_timeout_seconds idle session liveness in vertebra-oracle"
 description: "Track idle dequeue elapsed time across 1-second AQ slices and run a SELECT 1 FROM DUAL liveness check when wait_timeout_seconds elapses."
 status: stable
-state: pending
+state: completed
+commit: 75f2d8d7
+last_verified_commit: 75f2d8d7
+last_verified_at: "2026-11-13T15:25:00Z"
+verification_evidence: "cargo test -p vertebra-oracle notify:: (7 passed) + clippy + pytest test_oracle_adapter.py clean"
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -65,8 +69,8 @@ UV_NO_SYNC=1 PYO3_PYTHON="$PWD/.venv/bin/python" cargo test --manifest-path src/
 
 ## Acceptance Criteria
 
-- [ ] `wait_timeout_seconds` actively governs idle AQ session liveness probes while keeping `close()` bounded to a `1s` slice.
-- [ ] Rust `notify::` unit tests, Clippy (`-D warnings`), and `test_oracle_adapter.py` pass with zero warnings.
+- [x] `wait_timeout_seconds` actively governs idle AQ session liveness probes while keeping `close()` bounded to a `1s` slice.
+- [x] Rust `notify::` unit tests, Clippy (`-D warnings`), and `test_oracle_adapter.py` pass with zero warnings.
 
 [^oracle-notify-rs]: `src/rs/vertebra-oracle/src/notify.rs::run_live_aq_worker` — Oracle AQ listener worker loop currently discarding `wait_timeout_seconds`.
 [^oracle-notify-py]: `src/py/vertebra/db/adapters/oracle/notify.py::OracleNotifyConfig` — Python `OracleNotifyConfig.wait_timeout_seconds` configuration seam.

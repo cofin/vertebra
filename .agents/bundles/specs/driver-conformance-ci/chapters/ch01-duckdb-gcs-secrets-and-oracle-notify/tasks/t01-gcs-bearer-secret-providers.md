@@ -6,7 +6,11 @@ chapter_id: ch01-duckdb-gcs-secrets-and-oracle-notify
 title: "Implement SyncGcsBearerSecretProvider and AsyncGcsBearerSecretProvider"
 description: "Ship sync and async GCS bearer secret providers wrapping GcpTokenCache in vertebra.storage."
 status: stable
-state: pending
+state: completed
+commit: a7face33
+last_verified_commit: a7face33
+last_verified_at: "2026-11-13T15:25:00Z"
+verification_evidence: "pytest test_gcs_token_refresh.py + ruff + mypy clean"
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -68,8 +72,8 @@ uv run --no-sync pytest src/py/tests/unit/storage/test_gcs_token_refresh.py -q &
 
 ## Acceptance Criteria
 
-- [ ] `SyncGcsBearerSecretProvider` and `AsyncGcsBearerSecretProvider` are exported in `vertebra.storage.__all__` with Google-style docstrings and zero inline `#` comments.
-- [ ] `test_gcs_token_refresh.py` exercises the shipped providers without inspecting private driver attributes.
+- [x] `SyncGcsBearerSecretProvider` and `AsyncGcsBearerSecretProvider` are exported in `vertebra.storage.__all__` with Google-style docstrings and zero inline `#` comments.
+- [x] `test_gcs_token_refresh.py` exercises the shipped providers without inspecting private driver attributes.
 
 [^token-cache]: `src/py/vertebra/_vertebra.pyi::SyncGcpTokenCache` — `SyncGcpTokenCache` and `AsyncGcpTokenCache` methods.
 [^gcs-config]: `src/py/vertebra/storage/_store.py::GCSConfig` — `GCSConfig` token cache builders and `GCS_DEFAULT_SCOPES`.
