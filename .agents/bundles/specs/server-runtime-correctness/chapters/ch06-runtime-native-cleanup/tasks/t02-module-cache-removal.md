@@ -6,7 +6,8 @@ chapter_id: ch06-runtime-native-cleanup
 title: Remove Duplicate _module_cache from module_loader and typing
 description: "Resolve import_optional directly against sys.modules and remove _module_cache from _typing.py, typing.py, and module_loader.py."
 status: stable
-state: pending
+state: completed
+commit: db02a0b6
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact

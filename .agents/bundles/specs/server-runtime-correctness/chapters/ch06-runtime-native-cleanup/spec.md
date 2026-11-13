@@ -13,7 +13,7 @@ depends_on_chapters: []
 replan_trigger: null
 plan_commit: 18baadcd
 last_reviewed_commit: null
-updated_at: "2026-11-12T23:45:00Z"
+updated_at: "2026-11-13T06:01:30Z"
 generated:
   by: flow-plan
   at: "2026-11-12T23:45:00Z"
@@ -74,11 +74,13 @@ The fail-loud OS entropy panic contract is recorded in `server-runtime-limitatio
 
 ## 5. Implementation Plan
 
-- [ ] [t01-uuid-entropy-fail-loud-and-fork-reseed.md](tasks/t01-uuid-entropy-fail-loud-and-fork-reseed.md) — Enforce `getrandom::fill` panic-on-failure and `pthread_atfork` pool reseeding in `vertebra-core/src/id.rs`
-- [ ] [t02-module-cache-removal.md](tasks/t02-module-cache-removal.md) — Remove `_module_cache` from `_typing.py`, `typing.py`, and `module_loader.py`
-- [ ] [t03-direct-native-bindings-and-spanner-batch-write.md](tasks/t03-direct-native-bindings-and-spanner-batch-write.md) — Bind `_zero_copy.py` helpers directly from `vertebra._vertebra` and remove `max_commit_delay_ms` from Spanner `batch_write`
+- [x] [db02a0b6] [t01-uuid-entropy-fail-loud-and-fork-reseed.md](tasks/t01-uuid-entropy-fail-loud-and-fork-reseed.md) — Enforce `getrandom::fill` panic-on-failure and `pthread_atfork` pool reseeding in `vertebra-core/src/id.rs`
+- [x] [db02a0b6] [t02-module-cache-removal.md](tasks/t02-module-cache-removal.md) — Remove `_module_cache` from `_typing.py`, `typing.py`, and `module_loader.py`
+- [x] [db02a0b6] [t03-direct-native-bindings-and-spanner-batch-write.md](tasks/t03-direct-native-bindings-and-spanner-batch-write.md) — Bind `_zero_copy.py` helpers directly from `vertebra._vertebra` and remove `max_commit_delay_ms` from Spanner `batch_write`
 
 ## 6. Current State & Remaining Plan Snapshot
+
+Completed (`3/3` tasks at `db02a0b6`).
 
 - **Fast Chapter Gate (`< 25s`)**: `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-core --lib id:: && cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-core -- -D warnings && uv run --no-sync ruff check src/py/vertebra/_typing.py src/py/vertebra/typing.py src/py/vertebra/utils src/py/vertebra/db/adapters/spanner/driver.py src/py/vertebra/extensions/sqlspec/spanner.py && uv run --no-sync mypy src/py/vertebra/typing.py src/py/vertebra/utils src/py/vertebra/db/adapters/spanner/driver.py src/py/vertebra/extensions/sqlspec/spanner.py && uv run --no-sync pytest src/py/tests/unit/framework/test_typing.py src/py/tests/unit/db/test_vector_wire_codecs.py src/py/tests/unit/db/test_spanner.py src/py/tests/unit/extensions/test_sqlspec_spanner.py -q`.
 

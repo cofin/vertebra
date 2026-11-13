@@ -5,7 +5,7 @@ chapter_id: ch07-docs-and-okf-sync
 title: "Chapter 07: Public Documentation and Runtime OKF Knowledge Synchronization"
 description: "Update server, CLI, and packaging docs, compact pyo3-ffi-and-batch-dispatch.md to <= 200 lines, and synchronize IPC, runner, worker, limitations, and product OKF chapters."
 status: stable
-state: planned
+state: active
 planning_status: complete
 planning_quality: standard
 planning_degraded_reason: null

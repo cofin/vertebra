@@ -6,7 +6,8 @@ chapter_id: ch06-runtime-native-cleanup
 title: Bind _zero_copy Helpers Directly and Remove Spanner batch_write max_commit_delay_ms
 description: Import the five native helpers directly from vertebra._vertebra in _zero_copy.py and drop the inert max_commit_delay_ms parameter from Spanner batch_write.
 status: stable
-state: pending
+state: completed
+commit: db02a0b6
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact

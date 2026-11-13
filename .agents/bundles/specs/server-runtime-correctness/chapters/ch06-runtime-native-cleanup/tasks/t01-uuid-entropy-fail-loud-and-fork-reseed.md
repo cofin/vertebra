@@ -6,7 +6,8 @@ chapter_id: ch06-runtime-native-cleanup
 title: Enforce Fail-Loud getrandom Entropy and Post-Fork Reseed in id.rs
 description: "Replace time-seeded fallback in vertebra-core/src/id.rs with getrandom::fill panic-on-failure and reseed thread entropy pools on fork()."
 status: stable
-state: pending
+state: completed
+commit: db02a0b6
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
