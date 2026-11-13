@@ -7,7 +7,9 @@ managing model generation, parallel tool execution, retry backoff, and human-in-
 import dataclasses
 import random
 import secrets
+import time
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from copy import deepcopy
 from datetime import UTC, datetime
 from typing import Any, Literal, Protocol, cast, runtime_checkable
 
@@ -21,8 +23,23 @@ from vertebra.agent.core.sse import SseFrame
 from vertebra.agent.spec import TRANSFER_TOOL_NAME, Agent, AgentGroup, AgentMessage
 from vertebra.agent.telemetry import AgentTelemetryRecorder
 from vertebra.telemetry.genai import GenAiUsage
+from vertebra.typing import VertebraError
 from vertebra.utils.module_loader import import_optional
 from vertebra.utils.serializers import decode_json, encode_json, encode_json_bytes
+
+__all__ = [
+    "AgentRuntime",
+    "AgentStreamFrame",
+    "ConfirmationCapacityError",
+    "ConfirmationGate",
+    "ConfirmationTicket",
+    "GoogleGenAIProvider",
+    "ModelDelta",
+    "ModelProvider",
+    "RetryPolicy",
+    "TurnRequest",
+    "TurnResponse",
+]
 
 
 class ModelDelta(msgspec.Struct, frozen=True, gc=False, kw_only=True, omit_defaults=True):
@@ -140,6 +157,10 @@ class AgentStreamFrame(msgspec.Struct, frozen=True, gc=False, kw_only=True, omit
         )
 
 
+class ConfirmationCapacityError(VertebraError, RuntimeError):
+    """Raised when ConfirmationGate reaches max_tickets without prunable entries."""
+
+
 class ConfirmationTicket(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Pending authorization ticket issued for a mutating tool call."""
 
@@ -155,10 +176,12 @@ class ConfirmationTicket(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Caller ownership key restricting who may approve or reject the ticket."""
     reason: str = ""
     """Human-readable explanation for the confirmation prompt or decision."""
-    status: Literal["pending", "approved", "rejected"] = "pending"
+    status: Literal["pending", "approved", "rejected", "consumed", "expired"] = "pending"
     """Current authorization state of the ticket."""
     created_at_iso: str = ""
     """ISO-8601 UTC timestamp when the ticket was issued."""
+    expires_at_unix_ms: int = 0
+    """UTC epoch timestamp in milliseconds after which the ticket expires."""
 
     def to_dict(self) -> dict[str, Any]:
         """Convert ticket to standard dictionary."""
@@ -168,7 +191,21 @@ class ConfirmationTicket(msgspec.Struct, frozen=True, gc=False, kw_only=True):
 class ConfirmationGate:
     """Human-in-the-loop gate controlling execution of sensitive mutating operations."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        ttl_seconds: float = 600.0,
+        max_tickets: int = 10_000,
+        clock: Callable[[], float] = time.time,
+    ) -> None:
+        if ttl_seconds <= 0:
+            msg = "ttl_seconds must be positive"
+            raise ValueError(msg)
+        if max_tickets < 1:
+            msg = "max_tickets must be at least 1"
+            raise ValueError(msg)
+        self.ttl_seconds = float(ttl_seconds)
+        self.max_tickets = int(max_tickets)
+        self._clock = clock
         self._tickets: dict[str, ConfirmationTicket] = {}
 
     def request_confirmation(
@@ -181,60 +218,71 @@ class ConfirmationGate:
         reason: str = "",
     ) -> ConfirmationTicket:
         """Issue a new confirmation ticket for a pending mutating tool invocation."""
+        now_s = float(self._clock())
+        now_ms = int(now_s * 1000)
+        if len(self._tickets) >= self.max_tickets:
+            self._prune_inactive(now_ms)
+            if len(self._tickets) >= self.max_tickets:
+                msg = f"ConfirmationGate capacity of {self.max_tickets} active tickets exceeded"
+                raise ConfirmationCapacityError(msg)
+
         token = secrets.token_urlsafe(16)
         ticket = ConfirmationTicket(
             token=token,
             tool_name=tool_name,
             call_id=call_id,
-            arguments=arguments,
+            arguments=deepcopy(dict(arguments)),
             owner_id=owner_id,
             reason=reason,
             status="pending",
-            created_at_iso=datetime.now(UTC).isoformat(),
+            created_at_iso=datetime.fromtimestamp(now_s, tz=UTC).isoformat(),
+            expires_at_unix_ms=int((now_s + self.ttl_seconds) * 1000),
         )
         self._tickets[token] = ticket
         return ticket
 
     def approve(self, token: str, *, owner_id: str | None = None) -> bool:
-        """Approve a pending confirmation ticket.
+        """Approve a pending, unexpired confirmation ticket.
 
         Returns:
-            True when the ticket exists and ``owner_id`` may decide it; False otherwise, with no
-            change to the gate.
+            True when the ticket is pending, unexpired, and ``owner_id`` matches; False otherwise.
         """
-        ticket = self._tickets.get(token)
-        if ticket is None:
+        ticket = self._refresh_ticket(token)
+        if ticket is None or ticket.status != "pending":
             return False
-        if owner_id is not None and ticket.owner_id is not None and ticket.owner_id != owner_id:
+        if not self._owner_matches(ticket, owner_id):
             return False
         self._tickets[token] = msgspec.structs.replace(ticket, status="approved")
         return True
 
     def reject(self, token: str, *, owner_id: str | None = None, reason: str = "") -> bool:
-        """Reject a pending confirmation ticket.
+        """Reject a pending, unexpired confirmation ticket.
 
         Returns:
-            True when the ticket exists and ``owner_id`` may decide it; False otherwise, with no
-            change to the gate.
+            True when the ticket is pending, unexpired, and ``owner_id`` matches; False otherwise.
         """
-        ticket = self._tickets.get(token)
-        if ticket is None:
+        ticket = self._refresh_ticket(token)
+        if ticket is None or ticket.status != "pending":
             return False
-        if owner_id is not None and ticket.owner_id is not None and ticket.owner_id != owner_id:
+        if not self._owner_matches(ticket, owner_id):
             return False
-        self._tickets[token] = msgspec.structs.replace(ticket, status="rejected", reason=reason or ticket.reason)
+        self._tickets[token] = msgspec.structs.replace(
+            ticket,
+            status="rejected",
+            reason=reason or ticket.reason,
+        )
         return True
 
     def is_approved(self, token: str | None, *, owner_id: str | None = None) -> bool:
-        """Check whether a token is approved under the specified owner."""
-        if not token:
+        """Check whether a token is currently approved and unexpired under the specified owner."""
+        if not token or not isinstance(token, str):
             return False
-        ticket = self._tickets.get(token)
+        ticket = self._refresh_ticket(token)
         if ticket is None or ticket.status != "approved":
             return False
-        return not (owner_id is not None and ticket.owner_id is not None and ticket.owner_id != owner_id)
+        return self._owner_matches(ticket, owner_id)
 
-    def is_call_approved(
+    def consume_call_approval(
         self,
         token: str | None,
         *,
@@ -242,19 +290,22 @@ class ConfirmationGate:
         arguments: Mapping[str, Any],
         owner_id: str | None = None,
     ) -> bool:
-        """Check whether a token authorizes a specific tool name, exact arguments, and caller owner."""
+        """Atomically verify and consume a single-use approved ticket for a specific tool call."""
         if not token or not isinstance(token, str):
             return False
-        ticket = self._tickets.get(token)
+        ticket = self._refresh_ticket(token)
         if ticket is None or ticket.status != "approved":
             return False
-        if ticket.owner_id is not None and ticket.owner_id != owner_id:
+        if not self._owner_matches(ticket, owner_id):
             return False
-        return ticket.tool_name == tool_name and self.arguments_equal(ticket.arguments, dict(arguments))
+        if ticket.tool_name != tool_name or not self.arguments_equal(ticket.arguments, dict(arguments)):
+            return False
+        self._tickets[token] = msgspec.structs.replace(ticket, status="consumed")
+        return True
 
     def get_ticket(self, token: str) -> ConfirmationTicket | None:
-        """Retrieve ticket details by token."""
-        return self._tickets.get(token)
+        """Retrieve ticket details by token, transitioning expired tickets."""
+        return self._refresh_ticket(token)
 
     @staticmethod
     def arguments_equal(left: Any, right: Any) -> bool:
@@ -291,6 +342,32 @@ class ConfirmationGate:
                 for field in dataclasses.fields(left)
             )
         return bool(left == right)
+
+    @staticmethod
+    def _owner_matches(ticket: ConfirmationTicket, owner_id: str | None) -> bool:
+        if ticket.owner_id is not None:
+            return ticket.owner_id == owner_id
+        return True
+
+    def _refresh_ticket(self, token: str, *, now_ms: int | None = None) -> ConfirmationTicket | None:
+        ticket = self._tickets.get(token)
+        if ticket is None:
+            return None
+        current_ms = int(self._clock() * 1000) if now_ms is None else now_ms
+        if (
+            ticket.status in ("pending", "approved")
+            and ticket.expires_at_unix_ms > 0
+            and current_ms >= ticket.expires_at_unix_ms
+        ):
+            ticket = msgspec.structs.replace(ticket, status="expired")
+            self._tickets[token] = ticket
+        return ticket
+
+    def _prune_inactive(self, now_ms: int) -> None:
+        for tok in list(self._tickets.keys()):
+            refreshed = self._refresh_ticket(tok, now_ms=now_ms)
+            if refreshed is not None and refreshed.status in ("rejected", "consumed", "expired"):
+                del self._tickets[tok]
 
 
 class RetryPolicy(msgspec.Struct, frozen=True, gc=False, kw_only=True):
@@ -410,18 +487,6 @@ class AgentRuntime:
         self.sessions = sessions
         self.telemetry = telemetry if telemetry is not None else AgentTelemetryRecorder()
         self.compaction_hook = compaction_hook
-
-    def _resolve_active_agent(self, agent_name: str | None = None) -> Agent:
-        if isinstance(self.agent, Agent):
-            return self.agent
-        if agent_name:
-            ag = self.agent.get_agent(agent_name)
-            if ag is not None:
-                return ag
-        default = self.agent.get_agent(self.agent.default_agent)
-        if default is not None:
-            return default
-        return self.agent.list_agents()[0]
 
     async def run_turn(
         self,
@@ -564,7 +629,7 @@ class AgentRuntime:
                     if (
                         target_tool is not None
                         and target_tool.requires_confirmation
-                        and not self.confirmation_gate.is_call_approved(
+                        and not self.confirmation_gate.consume_call_approval(
                             request.confirmation_token,
                             tool_name=call.name,
                             arguments=call.arguments,
@@ -743,7 +808,7 @@ class AgentRuntime:
                     if (
                         target_tool is not None
                         and target_tool.requires_confirmation
-                        and not self.confirmation_gate.is_call_approved(
+                        and not self.confirmation_gate.consume_call_approval(
                             request.confirmation_token,
                             tool_name=call.name,
                             arguments=call.arguments,
@@ -798,16 +863,14 @@ class AgentRuntime:
                 agent_name=active_agent.name,
             )
 
-
-__all__ = [
-    "AgentRuntime",
-    "AgentStreamFrame",
-    "ConfirmationGate",
-    "ConfirmationTicket",
-    "GoogleGenAIProvider",
-    "ModelDelta",
-    "ModelProvider",
-    "RetryPolicy",
-    "TurnRequest",
-    "TurnResponse",
-]
+    def _resolve_active_agent(self, agent_name: str | None = None) -> Agent:
+        if isinstance(self.agent, Agent):
+            return self.agent
+        if agent_name:
+            ag = self.agent.get_agent(agent_name)
+            if ag is not None:
+                return ag
+        default = self.agent.get_agent(self.agent.default_agent)
+        if default is not None:
+            return default
+        return self.agent.list_agents()[0]

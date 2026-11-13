@@ -46,7 +46,13 @@ from vertebra.agent.mcp.routes import (
     build_well_known_mcp_document,
     render_well_known_mcp_json,
 )
-from vertebra.agent.mcp.service import MCPCore, MCPService
+from vertebra.agent.mcp.service import (
+    CONFIRMATION_REQUIRED,
+    CONFIRMATION_TOKEN_META_KEY,
+    PERMISSION_DENIED,
+    RATE_LIMITED,
+    MCPCore,
+)
 from vertebra.agent.mcp.skills import (
     SKILL_FILE_NAME,
     SKILL_URI_PREFIX,
@@ -77,8 +83,12 @@ from vertebra.agent.mcp.webmcp import (
 )
 
 __all__ = [
+    "CONFIRMATION_REQUIRED",
+    "CONFIRMATION_TOKEN_META_KEY",
     "HEADER_MISMATCH",
     "MCP_PROTOCOL_VERSION",
+    "PERMISSION_DENIED",
+    "RATE_LIMITED",
     "UNSUPPORTED_PROTOCOL_VERSION",
     "AsgiMcpApp",
     "BlobContent",
@@ -88,7 +98,6 @@ __all__ = [
     "MCPCore",
     "MCPHttpHandler",
     "MCPRegistry",
-    "MCPService",
     "MCPSkillsConfig",
     "MCPStreamableHttpClient",
     "MCPTaskConfig",

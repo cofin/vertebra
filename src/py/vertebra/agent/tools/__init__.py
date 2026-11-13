@@ -80,7 +80,7 @@ def _build_tool(
             reason = provider.confirmation_reason(name, canonical)
             if reason is not None:
                 owner = context.identity.owner_key() if isinstance(context, AgentContext) else None
-                if not gate.is_call_approved(
+                if not gate.consume_call_approval(
                     token if isinstance(token, str) else None,
                     tool_name=name,
                     arguments=canonical,

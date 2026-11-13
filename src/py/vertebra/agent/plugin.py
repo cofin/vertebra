@@ -14,9 +14,9 @@ from vertebra.agent.controller import AgentChatController
 from vertebra.agent.core.context import AgentContext
 from vertebra.agent.mcp.controllers import PromptController, SkillController
 from vertebra.agent.mcp.models import MCPConfig, McpHttpRequest
-from vertebra.agent.mcp.registry import MCPRegistry
+from vertebra.agent.mcp.registry import ToolRegistry
 from vertebra.agent.mcp.routes import build_well_known_mcp_document
-from vertebra.agent.mcp.service import MCPService
+from vertebra.agent.mcp.service import MCPCore
 from vertebra.agent.mcp.webmcp import build_webmcp_manifest
 from vertebra.agent.runtime import AgentRuntime
 from vertebra.agent.telemetry import AgentTelemetryRecorder
@@ -61,9 +61,9 @@ class AgentPlugin:
         self.observability = self.config.observability or AgentTelemetryRecorder()
         recorder = getattr(self.observability, "recorder", self.observability)
         self.runtime = self.config.runtime or AgentRuntime(telemetry=recorder)
-        self.mcp_registry = MCPRegistry()
+        self.mcp_registry = ToolRegistry(confirmation_gate=self.runtime.confirmation_gate)
         self.mcp_service = (
-            MCPService(
+            MCPCore(
                 registry=self.mcp_registry,
                 config=self.config.mcp,
                 telemetry=recorder,

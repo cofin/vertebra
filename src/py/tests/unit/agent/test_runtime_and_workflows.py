@@ -56,12 +56,13 @@ from vertebra.agent import (
 )
 from vertebra.agent.mcp.controllers import SkillController
 from vertebra.agent.mcp.service import MCPConfig
+from vertebra.agent.runtime import ConfirmationCapacityError
 from vertebra.db.driver import DatabaseError
 from vertebra.framework._app import App
 from vertebra.framework.live import LiveStateRoom
 from vertebra.framework.stores import KeyValueStore
 from vertebra.telemetry.genai import GenAiUsage
-from vertebra.typing import ToolPolicyError
+from vertebra.typing import ToolPolicyError, VertebraError
 from vertebra.utils.serializers import decode_json, encode_json_bytes
 
 
@@ -724,22 +725,50 @@ async def test_provider_confirmation_binds_arguments_defaults_and_trusted_owner(
     assert ticket.call_id == "call-query"
     params["ids"].append(2)
     assert ticket.arguments["params"] == {"ids": [1]}
-    gate.approve(token)
-    for payload, context in (
-        ({"sql": "UPDATE t", "params": params}, owner),
-        ({"sql": "UPDATE other", "params": {"ids": [1]}}, owner),
-        ({"sql": "UPDATE t", "params": {"ids": [1]}}, other),
-        ({"sql": "UPDATE t", "params": {"ids": [1]}}, None),
-    ):
-        with pytest.raises(PermissionDeniedError):
-            await tool.invoke({**payload, "confirmation_token": token, "context": owner}, context=context)
-    assert len(provider.calls) == 1
-    for _ in range(2):
-        result = await tool.invoke(
-            {"sql": "UPDATE t", "params": {"ids": [1]}, "limit": 10, "confirmation_token": token}, context=owner
+    assert gate.approve(token) is False
+    assert gate.approve(token, owner_id="default:alice") is True
+
+    with pytest.raises(PermissionDeniedError):
+        await tool.invoke(
+            {"sql": "UPDATE t", "params": params, "confirmation_token": token, "context": owner},
+            context=owner,
         )
-        assert result == ticket.arguments
-    assert len(provider.calls) == 3
+    with pytest.raises(PermissionDeniedError):
+        await tool.invoke(
+            {"sql": "UPDATE other", "params": {"ids": [1]}, "confirmation_token": token, "context": owner},
+            context=owner,
+        )
+    with pytest.raises(PermissionDeniedError):
+        await tool.invoke(
+            {"sql": "UPDATE t", "params": {"ids": [1]}, "confirmation_token": token, "context": owner},
+            context=other,
+        )
+    with pytest.raises(PermissionDeniedError):
+        await tool.invoke(
+            {"sql": "UPDATE t", "params": {"ids": [1]}, "confirmation_token": token, "context": owner},
+            context=None,
+        )
+    assert len(provider.calls) == 1
+
+    result = await tool.invoke(
+        {"sql": "UPDATE t", "params": {"ids": [1]}, "limit": 10, "confirmation_token": token},
+        context=owner,
+    )
+    assert result == ticket.arguments
+    assert len(provider.calls) == 2
+
+    consumed_ticket = gate.get_ticket(token)
+    assert consumed_ticket is not None
+    assert consumed_ticket.status == "consumed"
+
+    with pytest.raises(PermissionDeniedError) as replay_exc:
+        await tool.invoke(
+            {"sql": "UPDATE t", "params": {"ids": [1]}, "limit": 10, "confirmation_token": token},
+            context=owner,
+        )
+    replay_token = str(replay_exc.value).split("ticket=", 1)[1].rstrip(")")
+    assert replay_token != token
+    assert len(provider.calls) == 2
 
 
 @pytest.mark.anyio
@@ -943,3 +972,218 @@ async def test_provider_confirmation_compares_container_element_types(container:
     )
     assert result["params"]["values"] == container([1, 2])
     assert len(provider.calls) == 1
+
+
+def test_confirmation_gate_removes_is_call_approved_and_enforces_exact_owner() -> None:
+    """ConfirmationGate removes is_call_approved and rejects owner_id=None on owned tickets."""
+    assert not hasattr(ConfirmationGate, "is_call_approved")
+    gate = ConfirmationGate()
+    ticket = gate.request_confirmation("drop_db", "call_1", {"db": "prod"}, owner_id="acme:alice")
+
+    assert gate.approve(ticket.token, owner_id=None) is False
+    assert gate.reject(ticket.token, owner_id=None) is False
+    assert gate.approve(ticket.token, owner_id="acme:bob") is False
+    assert gate.approve(ticket.token, owner_id="acme:alice") is True
+    assert gate.is_approved(ticket.token, owner_id=None) is False
+    assert gate.is_approved(ticket.token, owner_id="acme:bob") is False
+    assert gate.is_approved(ticket.token, owner_id="acme:alice") is True
+    assert (
+        gate.consume_call_approval(ticket.token, tool_name="drop_db", arguments={"db": "prod"}, owner_id=None) is False
+    )
+    assert (
+        gate.consume_call_approval(
+            ticket.token,
+            tool_name="drop_db",
+            arguments={"db": "prod"},
+            owner_id="acme:alice",
+        )
+        is True
+    )
+    assert (
+        gate.consume_call_approval(
+            ticket.token,
+            tool_name="drop_db",
+            arguments={"db": "prod"},
+            owner_id="acme:alice",
+        )
+        is False
+    )
+
+
+@pytest.mark.parametrize(
+    ("initial_action", "second_action", "expected_status"),
+    [
+        ("reject", "approve", "rejected"),
+        ("reject", "reject", "rejected"),
+        ("approve", "reject", "approved"),
+        ("approve", "approve", "approved"),
+        ("consume", "approve", "consumed"),
+        ("consume", "reject", "consumed"),
+    ],
+    ids=[
+        "reject-then-approve",
+        "reject-then-reject",
+        "approve-then-reject",
+        "approve-then-approve",
+        "consume-then-approve",
+        "consume-then-reject",
+    ],
+)
+def test_confirmation_gate_pending_only_immutability(
+    initial_action: str,
+    second_action: str,
+    expected_status: str,
+) -> None:
+    """Only pending tickets accept approve or reject transitions."""
+    gate = ConfirmationGate()
+    ticket = gate.request_confirmation("drop_db", "call_1", {"db": "prod"}, owner_id="acme:alice")
+    if initial_action == "reject":
+        assert gate.reject(ticket.token, owner_id="acme:alice", reason="denied") is True
+    elif initial_action == "approve":
+        assert gate.approve(ticket.token, owner_id="acme:alice") is True
+    else:
+        assert gate.approve(ticket.token, owner_id="acme:alice") is True
+        assert (
+            gate.consume_call_approval(
+                ticket.token,
+                tool_name="drop_db",
+                arguments={"db": "prod"},
+                owner_id="acme:alice",
+            )
+            is True
+        )
+
+    if second_action == "approve":
+        assert gate.approve(ticket.token, owner_id="acme:alice") is False
+    else:
+        assert gate.reject(ticket.token, owner_id="acme:alice") is False
+
+    current = gate.get_ticket(ticket.token)
+    assert current is not None
+    assert current.status == expected_status
+
+
+@pytest.mark.parametrize("approve_before_expiry", [False, True], ids=["pending-expiry", "approved-expiry"])
+def test_confirmation_gate_ttl_expiry_with_injected_clock(approve_before_expiry: bool) -> None:
+    """Injected clock advances past ttl_seconds and transitions tickets to expired."""
+    now = [1_700_000_000.0]
+    gate = ConfirmationGate(ttl_seconds=30.0, clock=lambda: now[0])
+    ticket = gate.request_confirmation("drop_db", "call_1", {"db": "prod"}, owner_id="acme:alice")
+    assert ticket.expires_at_unix_ms == 1_700_000_030_000
+
+    if approve_before_expiry:
+        assert gate.approve(ticket.token, owner_id="acme:alice") is True
+
+    now[0] += 30.0
+    assert gate.approve(ticket.token, owner_id="acme:alice") is False
+    assert gate.reject(ticket.token, owner_id="acme:alice") is False
+    assert gate.is_approved(ticket.token, owner_id="acme:alice") is False
+    assert (
+        gate.consume_call_approval(
+            ticket.token,
+            tool_name="drop_db",
+            arguments={"db": "prod"},
+            owner_id="acme:alice",
+        )
+        is False
+    )
+    expired = gate.get_ticket(ticket.token)
+    assert expired is not None
+    assert expired.status == "expired"
+
+
+@pytest.mark.parametrize("prune_kind", ["rejected", "consumed", "expired"])
+def test_confirmation_gate_max_tickets_pruning_and_capacity_error(prune_kind: str) -> None:
+    """Inactive entries are pruned at capacity before raising ConfirmationCapacityError on live tickets."""
+    now = [1_700_000_000.0]
+    gate = ConfirmationGate(ttl_seconds=60.0, max_tickets=2, clock=lambda: now[0])
+    first = gate.request_confirmation("op", "c1", {"id": 1})
+    second = gate.request_confirmation("op", "c2", {"id": 2})
+
+    if prune_kind == "rejected":
+        assert gate.reject(first.token) is True
+    elif prune_kind == "consumed":
+        assert gate.approve(first.token) is True
+        assert gate.consume_call_approval(first.token, tool_name="op", arguments={"id": 1}) is True
+    else:
+        now[0] += 60.0
+        second = gate.request_confirmation("op", "c2_fresh", {"id": 2})
+
+    third = gate.request_confirmation("op", "c3", {"id": 3})
+    assert gate.get_ticket(first.token) is None
+    assert gate.get_ticket(second.token) is not None
+    assert gate.get_ticket(third.token) is not None
+
+    with pytest.raises(ConfirmationCapacityError) as cap_exc:
+        gate.request_confirmation("op", "c4", {"id": 4})
+    assert isinstance(cap_exc.value, VertebraError)
+    assert isinstance(cap_exc.value, RuntimeError)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("mode", ["run_turn", "stream_turn"])
+async def test_agent_runtime_single_use_confirmation_rejects_replay(mode: str) -> None:
+    """Approved confirmation tokens execute once in run_turn and stream_turn and reject replay."""
+    gate = ConfirmationGate()
+    executed: list[str] = []
+
+    async def drop_db(db_name: str) -> str:
+        executed.append(db_name)
+        return f"dropped:{db_name}"
+
+    agent = Agent(
+        name="AdminAgent",
+        tools=(Tool(name="drop_db", description="Drop database", fn=drop_db, requires_confirmation=True),),
+    )
+    ticket = gate.request_confirmation("drop_db", "call_1", {"db_name": "staging"})
+    assert gate.approve(ticket.token) is True
+
+    call_step = [
+        ModelDelta(event_type="tool_call", tool_name="drop_db", call_id="call_1", arguments={"db_name": "staging"})
+    ]
+    done_step = [ModelDelta(event_type="delta", text="Completed.")]
+
+    if mode == "run_turn":
+        runtime = AgentRuntime(
+            model_provider=DummyMockModel([call_step, done_step, call_step]),
+            default_agent=agent,
+            confirmation_gate=gate,
+        )
+        first_resp = await runtime.run_turn(
+            TurnRequest(session_id="s1", message="Drop staging", confirmation_token=ticket.token)
+        )
+        assert first_resp.status == "completed"
+        assert executed == ["staging"]
+
+        replay_resp = await runtime.run_turn(
+            TurnRequest(session_id="s1", message="Drop staging again", confirmation_token=ticket.token)
+        )
+        assert replay_resp.status == "confirmation_required"
+        assert replay_resp.confirmation_token is not None
+        assert replay_resp.confirmation_token != ticket.token
+        assert executed == ["staging"]
+    else:
+        runtime = AgentRuntime(
+            model_provider=DummyMockModel([call_step, done_step, call_step]),
+            default_agent=agent,
+            confirmation_gate=gate,
+        )
+        first_frames = [
+            frame
+            async for frame in runtime.stream_turn(
+                TurnRequest(session_id="s1", message="Drop staging", confirmation_token=ticket.token)
+            )
+        ]
+        assert first_frames[-1].event_type == "done"
+        assert executed == ["staging"]
+
+        replay_frames = [
+            frame
+            async for frame in runtime.stream_turn(
+                TurnRequest(session_id="s1", message="Drop staging again", confirmation_token=ticket.token)
+            )
+        ]
+        assert replay_frames[-1].event_type == "confirmation_required"
+        assert replay_frames[-1].payload is not None
+        assert replay_frames[-1].payload["token"] != ticket.token
+        assert executed == ["staging"]

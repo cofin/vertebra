@@ -13,15 +13,29 @@ from flask import Flask
 from litestar.testing import create_test_client
 from starlette.requests import Request as StarletteRequest
 
+import vertebra.agent.mcp as mcp_pkg
+import vertebra.agent.mcp.service as mcp_service_mod
 from vertebra._vertebra import Request as NativeRequest
 from vertebra.agent.controller import ConfirmationDecisionRequest
 from vertebra.agent.core.context import AgentContext, CallerIdentity, bind_agent_context, reset_agent_context
-from vertebra.agent.core.guards import GuardProtocol, PermissionDeniedError, RequireRoles, authorize
+from vertebra.agent.core.guards import (
+    BudgetExceededError,
+    GuardProtocol,
+    PermissionDeniedError,
+    RateLimitExceededError,
+    RequireRoles,
+    TokenBucketGuard,
+    authorize,
+)
 from vertebra.agent.core.identity import CallableIdentitySource, MtlsIdentitySource
 from vertebra.agent.core.jsonrpc import METHOD_NOT_FOUND, JSONRPCErrorException
 from vertebra.agent.core.schema import tool
 from vertebra.agent.mcp import (
+    CONFIRMATION_REQUIRED,
+    CONFIRMATION_TOKEN_META_KEY,
     HEADER_MISMATCH,
+    PERMISSION_DENIED,
+    RATE_LIMITED,
     UNSUPPORTED_PROTOCOL_VERSION,
     BlobContent,
     MCPConfig,
@@ -30,7 +44,6 @@ from vertebra.agent.mcp import (
     McpHttpRequest,
     McpHttpResponse,
     MCPRegistry,
-    MCPService,
     MCPTaskStore,
     PromptArgument,
     PromptEntry,
@@ -54,7 +67,6 @@ from vertebra.agent.mcp import (
     resource,
 )
 from vertebra.agent.mcp.routes import AsgiMcpApp, WsgiMcpApp
-from vertebra.agent.mcp.service import CONFIRMATION_REQUIRED, CONFIRMATION_TOKEN_META_KEY
 from vertebra.agent.plugin import AgentPlugin, AgentPluginConfig
 from vertebra.agent.runtime import ConfirmationGate
 from vertebra.extensions.django.mcp import attach_mcp_routes as attach_django_mcp
@@ -113,7 +125,7 @@ async def test_mcp_core_discover_and_removed_2024_methods() -> None:
 @pytest.mark.anyio
 async def test_mcp_service_tools_list_and_call() -> None:
     """Verify tool registration, tools/list pagination, and tools/call invocation with structured output."""
-    service = MCPService()
+    service = MCPCore()
 
     @tool(name="calc_add", description="Add two integers")
     def add(a: int, b: int) -> int:
@@ -166,7 +178,7 @@ async def test_mcp_service_tools_list_and_call() -> None:
 @pytest.mark.anyio
 async def test_mcp_service_resources_and_templates() -> None:
     """Verify static resources, URI templates, subscription, and change notification."""
-    service = MCPService()
+    service = MCPCore()
     res = ResourceEntry(
         uri="file:///config.json",
         name="config",
@@ -202,7 +214,7 @@ async def test_mcp_service_resources_and_templates() -> None:
 @pytest.mark.anyio
 async def test_mcp_service_prompts_list_and_get() -> None:
     """Verify prompt template registration, prompts/list, and prompts/get instantiation."""
-    service = MCPService()
+    service = MCPCore()
     entry = PromptEntry(
         name="sql_review",
         description="Review SQL query",
@@ -379,7 +391,7 @@ async def test_mcp_skills_catalog_and_integrity_error() -> None:
         frontmatter={"name": "oracle-expert", "tags": ["oracle", "db"]},
     )
     catalog = SkillCatalog(skills=[skill])
-    service = MCPService(skill_catalog=catalog)
+    service = MCPCore(skill_catalog=catalog)
 
     skills_list = await service._handle_skills_list()
     assert len(skills_list["skills"]) == 1
@@ -492,7 +504,7 @@ async def test_mcp_tasks_store_and_async_promotion() -> None:
     assert completed.is_terminal is True
     assert completed.result == {"status": "ok", "processed": 100}
 
-    service = MCPService(task_store=store)
+    service = MCPCore(task_store=store)
 
     @tool(name="async_report", description="Generate complex report")
     def report(name: str) -> str:
@@ -520,7 +532,7 @@ async def test_mcp_tasks_store_and_async_promotion() -> None:
 async def test_mcp_tool_call_requires_approved_confirmation_token() -> None:
     """A confirmation-gated tool runs only with an approved ticket issued for that tool."""
     gate = ConfirmationGate()
-    service = MCPService(confirmation_gate=gate)
+    service = MCPCore(confirmation_gate=gate)
     calls: list[str] = []
 
     @tool(name="drop_workspace", description="Drop a workspace", requires_confirmation=True)
@@ -583,12 +595,28 @@ async def test_mcp_tool_call_requires_approved_confirmation_token() -> None:
     assert result["content"][0]["text"] == "dropped:w1"
     assert calls == ["w1"]
 
+    consumed = gate.get_ticket(token)
+    assert consumed is not None
+    assert consumed.status == "consumed"
+
+    with pytest.raises(JSONRPCErrorException) as replayed:
+        await service.handle_tool_call(
+            {
+                "name": "drop_workspace",
+                "arguments": {"workspace_id": "w1"},
+                "_meta": {CONFIRMATION_TOKEN_META_KEY: token},
+            }
+        )
+    assert replayed.value.error.code == CONFIRMATION_REQUIRED
+    assert replayed.value.error.data["confirmationToken"] != token
+    assert calls == ["w1"]
+
 
 @pytest.mark.anyio
 async def test_mcp_confirmation_rejects_approval_by_another_owner() -> None:
     """A failed approval by another owner changes no gate state and leaves the call blocked."""
     gate = ConfirmationGate()
-    service = MCPService(confirmation_gate=gate)
+    service = MCPCore(confirmation_gate=gate)
     calls: list[str] = []
 
     @tool(name="drop_workspace", description="Drop a workspace", requires_confirmation=True)
@@ -607,6 +635,8 @@ async def test_mcp_confirmation_rejects_approval_by_another_owner() -> None:
     assert ticket is not None
     assert ticket.owner_id == "default:alice"
 
+    assert gate.approve(token) is False
+    assert gate.reject(token) is False
     assert gate.approve(token, owner_id="default:mallory") is False
     ticket_after = gate.get_ticket(token)
     assert ticket_after is not None
@@ -677,7 +707,7 @@ _CALC_ADD_CALL = {
 )
 async def test_mcp_http_handler_rejects_mcp_name_without_body_name(payload: object) -> None:
     """An Mcp-Name header with no matching body name, or on a batch body, is rejected before the tool runs."""
-    service = MCPService()
+    service = MCPCore()
     calls: list[tuple[int, int]] = []
 
     @tool(name="calc_add", description="Add two integers")
@@ -1302,3 +1332,310 @@ def test_litestar_fallback_preserves_core_responses_and_context() -> None:
             refused = method("/mcp")
             assert refused.status_code == 405
             assert refused.headers["allow"] == "POST, OPTIONS"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("promoted", [False, True], ids=["sync", "promoted-task"])
+async def test_mcp_tool_guards_execute_once_with_token_bucket(promoted: bool) -> None:
+    """A capacity-1 TokenBucketGuard is evaluated once per tools/call and rejects the second call with -32005."""
+    core = MCPCore()
+    bucket = TokenBucketGuard(rate_per_second=0.0, capacity=1.0)
+    invocations: list[str] = []
+
+    @tool(name="limited_op", guards=(bucket,))
+    async def limited_op(item: str) -> str:
+        invocations.append(item)
+        return f"done:{item}"
+
+    core.registry.register_tool(limited_op)
+    ctx = AgentContext(identity=CallerIdentity(user_id="ana", tenant_id="t1"))
+    meta: dict[str, Any] = {"io.modelcontextprotocol/task": True} if promoted else {}
+
+    first_raw = await core.handle_payload(
+        encode_json_bytes(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": "limited_op", "arguments": {"item": "alpha"}, "_meta": meta},
+            }
+        ),
+        context=ctx,
+    )
+    assert first_raw is not None
+    first_parsed = decode_json(first_raw)
+    assert "result" in first_parsed
+    if promoted:
+        task_id = first_parsed["result"]["task"]["taskId"]
+        completed = await core.task_store.wait_for_result(task_id, owner_id="t1:ana", timeout_s=2)
+        assert completed.result is not None
+        assert completed.result["content"][0]["text"] == "done:alpha"
+    else:
+        assert first_parsed["result"]["content"][0]["text"] == "done:alpha"
+    assert invocations == ["alpha"]
+
+    second_raw = await core.handle_payload(
+        encode_json_bytes(
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {"name": "limited_op", "arguments": {"item": "beta"}, "_meta": meta},
+            }
+        ),
+        context=ctx,
+    )
+    assert second_raw is not None
+    second_parsed = decode_json(second_raw)
+    assert second_parsed["error"]["code"] == RATE_LIMITED
+    assert second_parsed["error"]["data"]["tool"] == "limited_op"
+    assert "Rate limit exceeded" in second_parsed["error"]["data"]["reason"]
+    assert invocations == ["alpha"]
+    tasks_for_owner, _ = core.task_store.list_for_owner("t1:ana")
+    assert len(tasks_for_owner) == (1 if promoted else 0)
+
+
+def _litestar_style_guard(connection: Any, route_handler: Any) -> None:
+    _ = (connection, route_handler)
+
+
+async def _budget_guard(ctx: AgentContext) -> None:
+    _ = ctx
+    msg = "Turn budget exhausted"
+    raise BudgetExceededError(msg)
+
+
+async def _rate_guard(ctx: AgentContext) -> None:
+    _ = ctx
+    msg = "Burst quota exceeded"
+    raise RateLimitExceededError(msg)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("promoted", [False, True], ids=["sync", "promoted-task"])
+@pytest.mark.parametrize(
+    ("guard_factory", "expected_code", "expected_reason"),
+    [
+        (lambda: RequireRoles("admin"), PERMISSION_DENIED, "Caller lacks any required role"),
+        (lambda: _litestar_style_guard, PERMISSION_DENIED, "Guard requires an HTTP connection"),
+        (lambda: _rate_guard, RATE_LIMITED, "Burst quota exceeded"),
+        (lambda: _budget_guard, RATE_LIMITED, "Turn budget exhausted"),
+    ],
+    ids=["role-denied", "two-arg-no-conn", "rate-limit", "budget-exceeded"],
+)
+async def test_mcp_tool_guard_errors_map_to_typed_codes_before_confirmation_and_promotion(
+    promoted: bool,
+    guard_factory: Any,
+    expected_code: int,
+    expected_reason: str,
+) -> None:
+    """Guard failures return -32004 or -32005 before issuing confirmation tickets or creating tasks."""
+    gate = ConfirmationGate()
+    core = MCPCore(confirmation_gate=gate)
+    executed: list[str] = []
+
+    @tool(name="guarded_mutator", requires_confirmation=True, guards=(guard_factory(),))
+    def guarded_mutator() -> str:
+        executed.append("ran")
+        return "ok"
+
+    core.registry.register_tool(guarded_mutator)
+    viewer = AgentContext(identity=CallerIdentity(user_id="bob", tenant_id="t1", roles=("viewer",)))
+    meta: dict[str, Any] = {"io.modelcontextprotocol/task": True} if promoted else {}
+
+    resp = await core.handle(
+        McpHttpRequest(
+            method="POST",
+            path="/mcp",
+            body=encode_json_bytes(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 9,
+                    "method": "tools/call",
+                    "params": {"name": "guarded_mutator", "arguments": {}, "_meta": meta},
+                }
+            ),
+            context=viewer,
+        )
+    )
+    assert resp.status == 200
+    parsed = decode_json(resp.body)
+    assert parsed["error"]["code"] == expected_code
+    assert parsed["error"]["data"]["tool"] == "guarded_mutator"
+    assert expected_reason in parsed["error"]["data"]["reason"]
+    assert executed == []
+    tasks_for_viewer, _ = core.task_store.list_for_owner("t1:bob")
+    assert tasks_for_viewer == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("headers", "payload", "expected_status", "expected_error_code"),
+    [
+        (
+            {
+                "Mcp-Method": "tools/call",
+                "Mcp-Name": "echo_ws",
+                "Mcp-Param-workspace_id": "ws-1",
+                "Mcp-Param-count": "3",
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": "echo_ws", "arguments": {"workspace_id": "ws-1", "count": 3}},
+            },
+            200,
+            None,
+        ),
+        (
+            {"Mcp-Param-workspace-id": "ws-1"},
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {"name": "echo_ws", "arguments": {"workspace_id": "ws-1", "count": 1}},
+            },
+            200,
+            None,
+        ),
+        (
+            {"Mcp-Param-query": encode_mcp_header_value("тест")},
+            {
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "prompts/get",
+                "params": {"name": "search_prompt", "arguments": {"query": "тест"}},
+            },
+            200,
+            None,
+        ),
+        (
+            {"Mcp-Param-uri": "file:///cfg.json"},
+            {"jsonrpc": "2.0", "id": 4, "method": "resources/read", "params": {"uri": "file:///cfg.json"}},
+            200,
+            None,
+        ),
+        (
+            {"Mcp-Param-workspace-id": "ws-other"},
+            {
+                "jsonrpc": "2.0",
+                "id": 5,
+                "method": "tools/call",
+                "params": {"name": "echo_ws", "arguments": {"workspace_id": "ws-1", "count": 1}},
+            },
+            400,
+            HEADER_MISMATCH,
+        ),
+        (
+            {"Mcp-Param-missing": "val"},
+            {
+                "jsonrpc": "2.0",
+                "id": 6,
+                "method": "tools/call",
+                "params": {"name": "echo_ws", "arguments": {"workspace_id": "ws-1", "count": 1}},
+            },
+            400,
+            HEADER_MISMATCH,
+        ),
+        (
+            {"Mcp-Param-query": encode_mcp_header_value("тест")},
+            {
+                "jsonrpc": "2.0",
+                "id": 7,
+                "method": "prompts/get",
+                "params": {"name": "search_prompt", "arguments": {"query": "иное"}},
+            },
+            400,
+            HEADER_MISMATCH,
+        ),
+        (
+            {"Mcp-Param-uri": "file:///cfg.json"},
+            {"jsonrpc": "2.0", "id": 8, "method": "resources/read", "params": {"uri": "file:///secret.json"}},
+            400,
+            HEADER_MISMATCH,
+        ),
+        (
+            {"Mcp-Param-workspace_id": "ws-1"},
+            [
+                {
+                    "jsonrpc": "2.0",
+                    "id": 9,
+                    "method": "tools/call",
+                    "params": {"name": "echo_ws", "arguments": {"workspace_id": "ws-1", "count": 1}},
+                }
+            ],
+            400,
+            HEADER_MISMATCH,
+        ),
+    ],
+    ids=[
+        "ascii-exact-match",
+        "hyphen-underscore-match",
+        "rfc2047-prompt-match",
+        "resource-uri-match",
+        "tool-arg-mismatch",
+        "tool-arg-missing",
+        "rfc2047-prompt-mismatch",
+        "resource-uri-mismatch",
+        "batch-with-mcp-param",
+    ],
+)
+async def test_mcp_http_param_header_validation(
+    headers: dict[str, str],
+    payload: object,
+    expected_status: int,
+    expected_error_code: int | None,
+) -> None:
+    """MCPCore.handle validates ASCII and RFC 2047 Mcp-Param-* headers against body arguments and params."""
+    core = MCPCore()
+    calls: list[tuple[str, int]] = []
+
+    @tool(name="echo_ws")
+    def echo_ws(workspace_id: str, count: int = 1) -> str:
+        calls.append((workspace_id, count))
+        return f"{workspace_id}:{count}"
+
+    core.registry.register_tool(echo_ws)
+    core.registry.register_prompt(
+        PromptEntry(
+            name="search_prompt",
+            description="Search prompt",
+            arguments=(PromptArgument(name="query", required=True),),
+            getter=lambda query: [PromptMessage(role="user", content=TextContent(text=query))],
+        )
+    )
+    core.registry.register_resource(
+        ResourceEntry(
+            uri="file:///cfg.json",
+            name="cfg",
+            description="Config",
+            mimeType="application/json",
+            reader=lambda: "{}",
+        )
+    )
+
+    resp = await core.handle(
+        McpHttpRequest(
+            method="POST",
+            path="/mcp",
+            headers=headers,
+            body=encode_json_bytes(payload),
+        )
+    )
+    assert resp.status == expected_status
+    decoded = decode_json(resp.body)
+    if expected_error_code is not None:
+        assert decoded["error"]["code"] == expected_error_code
+        assert calls == []
+    else:
+        assert "result" in decoded
+
+
+def test_mcp_service_alias_removed_and_plugin_uses_mcp_core() -> None:
+    """MCPService alias is removed from vertebra.agent.mcp and AgentPlugin instantiates MCPCore + ToolRegistry."""
+    assert not hasattr(mcp_pkg, "MCPService")
+    assert not hasattr(mcp_service_mod, "MCPService")
+    plugin = AgentPlugin(AgentPluginConfig(mcp=MCPConfig(server_name="canonical-core")))
+    assert type(plugin.mcp_service) is MCPCore
+    assert type(plugin.mcp_registry) is ToolRegistry
