@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import importlib
 import inspect
 import logging
 import signal
@@ -17,6 +16,7 @@ import msgspec
 from vertebra.server.platform import LameDuckController
 from vertebra.telemetry.otel import SpanData, SpanExporter, TraceContext
 from vertebra.typing import ImproperConfigurationError
+from vertebra.utils.module_loader import ensure_module
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
@@ -350,7 +350,7 @@ class WorkerRunner:
     @staticmethod
     def resolve_queue_service(target: Any) -> QueueService:
         """Resolve a configured QueueService directly or from ``target.state['vertebra_queue_service']``."""
-        queue_service_cls: type[QueueService] = importlib.import_module("vertebra.framework.queues.base").QueueService
+        queue_service_cls: type[QueueService] = ensure_module("vertebra.framework.queues.base").QueueService
         if isinstance(target, queue_service_cls):
             return target
 

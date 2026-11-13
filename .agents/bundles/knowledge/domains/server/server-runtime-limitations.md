@@ -1,7 +1,7 @@
 ---
 type: Gotcha
 title: Server Runtime Limitations
-description: Verified limitations in mid-stream error signaling, startup failure handling, the supervisor package surface, worker lanes, and wheel-shipped server binaries that callers and maintainers must account for.
+description: Residual runtime boundaries around mid-stream error signaling, SHM reader backpressure, client disconnect visibility, fail-loud OS entropy checks, and shared libpython requirements.
 status: stable
 tags:
 - server
@@ -12,6 +12,9 @@ generated:
   by: flow/0.28.0
   at: "2026-11-12T01:15:00Z"
 verified:
+- by: agent:flow-executor
+  at: "2026-11-13T06:06:00Z"
+  commit: 1575427f
 - by: agent:flow-sync
   at: "2026-11-13T02:38:00Z"
   commit: 6a23bd18
@@ -31,49 +34,36 @@ sources:
 - id: shm-reader-rs
   resource: src/rs/vertebra-http/src/dispatcher/shm_reader.rs::drain_worker
   title: Per-worker reader backpressure and shutdown cancellation
-- id: worker-py
-  resource: src/py/vertebra/server/worker.py::Worker
-  title: Worker lifespan entry and mount runner instantiation
-- id: supervisor-init-py
-  resource: src/py/vertebra/supervisor/__init__.py
-  title: Supervisor package docstring
-- id: run-cli-py
-  resource: src/py/vertebra/cli/run.py
-  title: vtb run command and worker-only flag
-- id: workers-cli-py
-  resource: src/py/vertebra/cli/workers.py::execute_worker_cli
-  title: vtb workers run entry point
+- id: streams-http-rs
+  resource: src/rs/vertebra-http/src/dispatcher/streams.rs::ResponseStreamRegistry
+  title: Stream frame receiver Infallible contract and disconnect notification
+- id: core-id-rs
+  resource: src/rs/vertebra-core/src/id.rs
+  title: Fail-loud OS entropy pool and Unix fork reseed hook
 - id: supervisor-py
-  resource: src/py/vertebra/supervisor/_supervisor.py::find_server_binary
-  title: Server binary resolution
+  resource: src/py/vertebra/supervisor/_supervisor.py::EmbeddedPythonRuntime
+  title: Shared libpython runtime verification for packaged vertebra-server
 ---
 
 # Server Runtime Limitations
 
 <!-- truth: start -->
-- Progressive ASGI, RSGI, and native `App` streaming flushes headers on the first non-final chunk, so mid-stream application exceptions emit `STREAM_FLAG_ERROR` and terminate the response body early rather than rewriting the already-sent HTTP status (`FrameReceiver` yields `Result<Frame<Bytes>, Infallible>`, and buffered `AsgiRunner.__call__` remains collecting by contract) [^asgi-protocol-rs] [^rsgi-http-rs] [^bridge-http-rs] [^ring-pair-rs].
-- `Worker.run` logs and swallows ASGI lifespan startup failures (`"ASGI lifespan startup failed for mount %r"`), and `_instantiate_mount_runners` logs and swallows RSGI `__rsgi_init__` failures; the worker then serves traffic without the resources startup was meant to create [^worker-py].
-- `vertebra.supervisor` (`supervisor/__init__.py`) contains only a docstring; it imports nothing and defines no `__all__`, so launcher symbols must be imported from `vertebra.supervisor._supervisor` [^supervisor-init-py].
-- `vtb run --worker-only` only sets `VERTEBRA_WORKER_ONLY`, which no module reads, and still launches the HTTP server [^run-cli-py].
-- `vtb workers run` calls `execute_worker_cli` without `run_until_stopped=True`, so it enters the app lifespan, stops the runner, and exits; `WorkerRunner` is built without a `QueueService`, so `process_once` has nothing to dequeue [^workers-cli-py].
-- `find_server_binary` checks for a packaged `vertebra/bin/vertebra-server[.exe]`, but the `vertebra-core` wheel does not ship one; installs resolve `VERTEBRA_SERVER_BINARY` or a locally built binary [^supervisor-py].
-- A slow streaming client stalls delivery of later responses from the same worker: its SHM reader awaits bounded channel capacity until the client drains or disconnects. Other worker readers continue independently [^shm-reader-rs].
+- Progressive ASGI, RSGI, and native `App` streaming flushes headers on the first non-final chunk; mid-stream application exceptions emit `STREAM_FLAG_ERROR` and terminate the body early because `FrameReceiver` yields `Result<Frame<Bytes>, Infallible>` and HTTP status/headers are already on the wire (`AsgiRunner.__call__` remains collecting by contract) [^asgi-protocol-rs] [^rsgi-http-rs] [^bridge-http-rs] [^ring-pair-rs].
+- A slow streaming client stalls delivery of later responses from the same worker while its SHM reader awaits bounded stream-channel capacity until the client drains or disconnects; other workers continue independently [^shm-reader-rs].
+- `BatchBridge::submit_stream_frame` detects client closure via `StreamDelivery::Closed` (`ConnectionResetError` in Python), whereas SHM worker streams learn of closed receivers asynchronously when dispatcher sweeps fire `notify_disconnect` or reader shutdown cancels delivery [^streams-http-rs] [^shm-reader-rs].
+- ID generation in `vertebra-core` requires a functioning OS entropy source (`getrandom::fill`) and panics on failure rather than falling back to time-seeded PRNG state; Unix worker forks automatically advance `FORK_GENERATION` via `pthread_atfork` to reseed child entropy pools [^core-id-rs].
+- Packaged POSIX `vertebra-server` wheels use `$ORIGIN`/`@loader_path` relative rpaths and require a dynamically linked shared `libpython` runtime (`ENABLE_SHARED=1`, checked by `EmbeddedPythonRuntime.require_shared_library` unless `VERTEBRA_SERVER_BINARY` is set) [^supervisor-py].
 <!-- truth: end -->
 
-## Planned Fixes
+## Operational Context
 
-The `server-runtime-correctness` flow owns fail-loud startup ([#84](https://github.com/cofin/vertebra/issues/84)), the supervisor package exports ([#83](https://github.com/cofin/vertebra/issues/83)), worker-only and worker-lane runtime behavior ([#85](https://github.com/cofin/vertebra/issues/85)), and the wheel-shipped relocatable server binary ([#82](https://github.com/cofin/vertebra/issues/82)).
-
-Current runtime behavior is described in [ASGI, RSGI & WSGI Runners](../../architecture/worker/asgi-and-wsgi-runners.md), [Python Server, Worker Loop & Protocol Adapters Domain](worker-and-protocols.md), and [Multi-Lane Worker Runner](worker-lanes.md).
+Current server architecture and streaming transport details live in [ASGI, RSGI & WSGI Runners](../../architecture/worker/asgi-and-wsgi-runners.md), [Python Server, Worker Loop & Protocol Adapters Domain](worker-and-protocols.md), and [Multi-Lane Worker Runner](worker-lanes.md).
 
 [^asgi-protocol-rs]: `src/rs/vertebra-py/src/asgi.rs::AsgiProtocol` — Rust ASGI progressive stream flush and mid-stream `FLAG_ERROR` emission.
 [^rsgi-http-rs]: `src/rs/vertebra-py/src/rsgi/http.rs::RsgiHttpProtocol` — Rust RSGI HTTP progressive `response_stream` flush.
 [^bridge-http-rs]: `src/rs/vertebra-http/src/dispatcher/bridge.rs::BridgeCorrelation` — Embedded bridge correlation completion.
 [^ring-pair-rs]: `src/rs/vertebra-core/src/transport/ring_pair.rs::RingPair` — SHM unary `VRES` and ordered `VRSF` streaming frames.
-[^worker-py]: `src/py/vertebra/server/worker.py::Worker` — Worker lifespan entry and mount runner instantiation.
-[^supervisor-init-py]: `src/py/vertebra/supervisor/__init__.py` — Supervisor package docstring.
-[^run-cli-py]: `src/py/vertebra/cli/run.py` — `vtb run` command and worker-only flag.
-[^workers-cli-py]: `src/py/vertebra/cli/workers.py::execute_worker_cli` — `vtb workers run` entry point.
-[^supervisor-py]: `src/py/vertebra/supervisor/_supervisor.py::find_server_binary` — Server binary resolution.
-
 [^shm-reader-rs]: `src/rs/vertebra-http/src/dispatcher/shm_reader.rs::drain_worker` — Per-worker reader backpressure and shutdown cancellation.
+[^streams-http-rs]: `src/rs/vertebra-http/src/dispatcher/streams.rs::ResponseStreamRegistry` — `FrameReceiver` `Infallible` contract and `notify_disconnect`.
+[^core-id-rs]: `src/rs/vertebra-core/src/id.rs` — Fail-loud OS entropy pool and Unix `pthread_atfork` reseed hook.
+[^supervisor-py]: `src/py/vertebra/supervisor/_supervisor.py::EmbeddedPythonRuntime` — Shared `libpython` validation for packaged `vertebra-server`.

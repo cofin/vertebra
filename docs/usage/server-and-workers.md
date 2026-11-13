@@ -22,18 +22,21 @@ To keep CPU-heavy or blocking I/O work from slowing down fast routes, Vertebra s
 | `cpu` | Compute-heavy work and background CPU tasks | Runs on a bounded CPU worker pool (`LaneConfig`) |
 | `blocking` | Synchronous file/network I/O and WSGI apps | Runs on a dedicated blocking `ThreadPoolExecutor` |
 
-For background queue workers (`vtb workers run`), `WorkerRunner` (`vertebra.framework.queues`) polls `cpu`, `io`, and `agent` lanes concurrently with configurable concurrency per lane:
+For background queue workers (`vtb workers run`, or `vtb run --worker-only` when paired with health probes), `WorkerRunner` (`vertebra.server.lanes`) calls `WorkerRunner.resolve_queue_service(app)` to resolve a `QueueService` directly or from `app.state["vertebra_queue_service"]` / `app.state.vertebra_queue_service` inside app lifespan and runs configured `cpu`, `io`, and `agent` lanes until shutdown:
 
 ```bash
 vtb workers run app:queue --queues io,cpu,agent --concurrency 8
+vtb run app:queue --worker-only --host 0.0.0.0 --port 8080
 ```
+
+When `--worker-only` is set on `vtb run`, Vertebra skips launching the Rust HTTP ingress server and serves `HealthProbeServer` (`/healthz`, `/readyz`, `/startupz`) alongside `WorkerRunner`. When an ASGI mount lifespan or RSGI `__rsgi_init__` hook fails at worker startup, `Worker` raises `WorkerStartupError` and exits with code `78` (`EXIT_STARTUP_FAILURE`) instead of serving degraded mounts.
 
 ## Multi-Protocol Adapters (ASGI, RSGI & WSGI)
 
-In addition to native `App` routes and controllers, `vertebra.server` runs standard Python web applications directly:
+In addition to native `App` routes and controllers returning `(status, headers, AsyncIterable | Iterable)` streams, `vertebra.server` runs standard Python web applications directly:
 
-- **ASGI 3.0 (`AsgiRunner`, `AsgiLifespan`)**: Runs Litestar, FastAPI, or Starlette apps with full lifespan state machines, Server-Sent Events (`SseEvent`, `SseResponse`), WebSockets (`WebSocketSession`), and file responses (`ZeroCopySendResponse`, `PathSendResponse`).
-- **RSGI 1.6 (`RsgiAdapter`, `detect_interface`)**: Runs RSGI HTTP and WebSocket applications directly over batched Rust-to-Python calls.
+- **ASGI 3.0 (`AsgiRunner`, `AsgiLifespan`, `AsgiProtocol`)**: Runs Litestar, FastAPI, or Starlette apps with startup/shutdown lifespan state machines, Server-Sent Events (`SseEvent`, `SseResponse`), WebSockets (`WebSocketSession`), progressive HTTP/1.1 & HTTP/2 streaming over `VRSF` frames (`submit_stream_frame` / `max_stream_frame_payload`), and file responses (`ZeroCopySendResponse`, `PathSendResponse`). Buffered `AsgiRunner.__call__` remains collecting by contract while live HTTP mounts flush response headers on the first non-final chunk (mid-stream exceptions emit `STREAM_FLAG_ERROR` to terminate the body early, and empty byte chunks are skipped).
+- **RSGI 1.6 (`RsgiAdapter`, `detect_interface`)**: Runs RSGI HTTP (including progressive `RsgiHttpProtocol.response_stream` streaming) and WebSocket applications directly over batched Rust-to-Python calls.
 - **WSGI (`WsgiAdapter`, `FlaskWsgiApp`, `DjangoWsgiApp`)**: Runs synchronous PEP 3333 applications (`Flask`, `Django`) inside the `blocking` thread pool.
 
 ```python

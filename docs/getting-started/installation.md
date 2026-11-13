@@ -29,6 +29,8 @@ Verify the installation and `vtb` CLI entrypoint:
 vtb --help
 ```
 
+Prebuilt `vertebra-core` wheels ship a relocatable `vertebra/bin/vertebra-server` binary across Linux (`linux-x86_64`, `linux-aarch64`) and macOS (`arm64`, `x86_64`). On POSIX hosts, the packaged binary requires a shared `libpython` runtime (`ENABLE_SHARED=1`, provided by `uv python install` and standard shared CPython builds) or an explicit `VERTEBRA_SERVER_BINARY` override.
+
 ## Optional Extras
 
 Vertebra keeps its base dependency footprint minimal (`msgspec` and `rich-click`) and exposes optional extras in `pyproject.toml`:

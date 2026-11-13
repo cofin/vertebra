@@ -95,6 +95,26 @@ Build orchestration (`BuildConfig`, `BuildOrchestrator`), end-to-end TypeScript/
     options:
       heading_level: 3
 
-::: vertebra.supervisor._supervisor.run_supervisor
+::: vertebra.supervisor.EmbeddedPythonRuntime
+    options:
+      heading_level: 4
+
+::: vertebra.supervisor.run_supervisor
+    options:
+      heading_level: 4
+
+::: vertebra.supervisor.build_server_command
+    options:
+      heading_level: 4
+
+::: vertebra.supervisor.find_server_binary
+    options:
+      heading_level: 4
+
+::: vertebra.supervisor.find_repo_root
+    options:
+      heading_level: 4
+
+::: vertebra.supervisor.worker_main
     options:
       heading_level: 4

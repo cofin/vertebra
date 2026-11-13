@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from importlib import import_module
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import click
+
+from vertebra.utils.module_loader import ensure_module
 
 if TYPE_CHECKING:
     from vertebra.cli.plugin_registry import (
@@ -39,16 +40,16 @@ _PLUGIN_EXPORTS: dict[str, tuple[str, str]] = {
 
 def _build_cli() -> Any:
     """Build and populate the root Click extension group on demand."""
-    vertebra_mod = import_module("vertebra")
-    config_mod = import_module("vertebra.cli.config")
-    plugin_registry = import_module("vertebra.cli.plugin_registry")
-    ai_mod = import_module("vertebra.cli.ai")
-    build_mod = import_module("vertebra.cli.build")
-    dev_mod = import_module("vertebra.cli.dev")
-    init_mod = import_module("vertebra.cli.init")
-    js_mod = import_module("vertebra.cli.js")
-    run_mod = import_module("vertebra.cli.run")
-    workers_mod = import_module("vertebra.cli.workers")
+    vertebra_mod = ensure_module("vertebra")
+    config_mod = ensure_module("vertebra.cli.config")
+    plugin_registry = ensure_module("vertebra.cli.plugin_registry")
+    ai_mod = ensure_module("vertebra.cli.ai")
+    build_mod = ensure_module("vertebra.cli.build")
+    dev_mod = ensure_module("vertebra.cli.dev")
+    init_mod = ensure_module("vertebra.cli.init")
+    js_mod = ensure_module("vertebra.cli.js")
+    run_mod = ensure_module("vertebra.cli.run")
+    workers_mod = ensure_module("vertebra.cli.workers")
 
     config_mod.configure_rich_click()
 
@@ -98,7 +99,7 @@ def __getattr__(name: str) -> Any:
     target = _PLUGIN_EXPORTS.get(name)
     if target is not None:
         module_path, attr_name = target
-        value = getattr(import_module(module_path), attr_name)
+        value = getattr(ensure_module(module_path), attr_name)
         globals()[name] = value
         return value
     msg = f"module {__name__!r} has no attribute {name!r}"
