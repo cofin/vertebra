@@ -6,7 +6,10 @@ chapter_id: ch07-wheel-ci-and-benchmarks
 title: "Synchronize benchmarks, polyglot-test-matrix, and workflow OKF chapters"
 description: "Update benchmarks-and-free-threaded.md, trim polyglot-test-matrix.md (<= 200L), and add postgres-bench targets to workflow.md."
 status: stable
-state: pending
+state: completed
+commit: 9a3631bb
+last_verified_at: "2026-11-13T22:11:30Z"
+last_verified_commit: 9a3631bb
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -40,7 +43,7 @@ sources:
 
 ## Objective & Scope Boundary
 
-Update the 3 testing/workflow OKF chapters and trim `polyglot-test-matrix.md` (`243L -> <= 200L`) [^wf-okf].
+Update and trim the 3 testing/workflow OKF chapters (`benchmarks-and-free-threaded.md`: `164L`, `polyglot-test-matrix.md`: `192L`, `workflow.md`: `119L`, all `<= 200L`) [^wf-okf].
 
 ## Bounded Read Manifest
 
@@ -62,7 +65,7 @@ make review-check && uv run --no-sync pytest src/py/tests/unit/test_review_setup
 
 ## Acceptance Criteria
 
-- [ ] All 3 OKF files are `<= 200` lines and pass `make review-check`.
-- [ ] Zero regressions in `ch07-wheel-ci-and-benchmarks` fast verification gate.
+- [x] All 3 OKF files are `<= 200` lines and pass `make review-check`.
+- [x] Zero regressions in `ch07-wheel-ci-and-benchmarks` fast verification gate.
 
 [^wf-okf]: `.agents/bundles/knowledge/workflow.md` — Project workflow and Make targets.

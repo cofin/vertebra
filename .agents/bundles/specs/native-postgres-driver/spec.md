@@ -19,19 +19,19 @@ chapters:
   - ch08-user-and-reference-docs
   - ch09-data-packaging-okf-and-routing-sync
 current_chapter: ch07-wheel-ci-and-benchmarks
-current_task: "native-postgres-driver:ch07:t01"
+current_task: "native-postgres-driver:ch07:t04"
 parent_prd: native-data-platform
 research:
   - research/protocol-and-execution_20261105.md
   - research/cloud-material_20261105.md
 plan_revision: 9
 plan_commit: 18baadcd
-state_revision: 21
-last_verified_checkpoint: 264b4684
+state_revision: 22
+last_verified_checkpoint: 9a3631bb
 last_reviewed_chapter: ch06-live-conformance-and-service-acceptance
 last_reviewed_commit: 7a7b5180
 created_at: "2026-11-03T04:05:00Z"
-updated_at: "2026-11-13T21:59:10Z"
+updated_at: "2026-11-13T22:11:30Z"
 generated:
   by: flow-plan
   at: "2026-11-13T00:25:00Z"
@@ -141,7 +141,7 @@ Nine cohesive chapters (`32` tasks) remain to finish logical replication supervi
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Active Frontier**: Chapters `ch01`–`ch06` (`20/32` tasks) are completed and reviewed (`264b4684`, sync `7a7b5180`); active frontier advances to `ch07-wheel-ci-and-benchmarks` (`native-postgres-driver:ch07:t01`, `12` open `compact` tasks remain across `ch07`–`ch09`).
+- **Active Frontier**: Chapters `ch01`–`ch06` (`20/32` tasks) are completed and reviewed; `ch07-wheel-ci-and-benchmarks` (`4/4` tasks) is implemented and verified offline at `9a3631bb` awaiting chapter review (`8` open `compact` tasks remain across `ch08`–`ch09`).
 - **Downstream Unlocks**: Completing `ch05` unblocks [`broker-pool-sharing`](../broker-pool-sharing/spec.md), [`driver-conformance-ci`](../driver-conformance-ci/spec.md), [`native-redis-driver`](../native-redis-driver/spec.md), [`native-adapter-organization`](../native-adapter-organization/spec.md), [`sqlspec-adapter-parity`](../sqlspec-adapter-parity/spec.md), and [`queues-tasks-and-channels`](../queues-tasks-and-channels/spec.md).
 - **`/flow:finish` Full Gate**: `make lint-all && make rs-test && make py-test && make postgres-wheel-check && make postgres-test && make postgres-bench-check && make docs-check && make review-check`.
 

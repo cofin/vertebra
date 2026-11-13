@@ -6,7 +6,10 @@ chapter_id: ch07-wheel-ci-and-benchmarks
 title: "Add verify_postgres_wheel.py, CI/release lanes, and 3.14t/3.15t pool tests"
 description: "Implement two-probe verify_postgres_wheel.py, 14-class release smoke checks, zero-skip CI PG14-18 lanes, and 8-thread free-threaded pool tests."
 status: stable
-state: pending
+state: completed
+commit: 9a3631bb
+last_verified_at: "2026-11-13T22:11:30Z"
+last_verified_commit: 9a3631bb
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -57,7 +60,8 @@ Create `verify_postgres_wheel.py`, wire PG14–18 zero-skip CI + 14-class releas
 ## Contracts & Edge Cases
 
 - Verify all 14 `_postgres` classes reject `setattr` (`Py_TPFLAGS_IMMUTABLETYPE`) and sustain 8 concurrent worker threads on `3.14t`/`3.15t`.
-- Align `src/rs/vertebra-postgres/pyproject.toml` `maturin.exclude` with sibling extension manifests and register `("postgres", "vertebra._postgres")` + `"postgres"` in `other_stubs` inside `test_packaging_and_pgo.py::test_optional_extension_pyproject_isolation_and_bundler_extra`.
+- Align `src/rs/vertebra-postgres/pyproject.toml` `maturin.exclude`/`include` uniformly with sibling extension manifests (`vertebra-oracle`) and remove the legacy `if pkg_slug == "postgres"` special case from `test_packaging_and_pgo.py::test_optional_extension_pyproject_isolation_and_bundler_extra`.
+- Fix `cloudsql.py` `ensure_module("vertebra._vertebra", package="vertebra-core")` so `test_optional_dependency_literals_name_declared_extras` passes with zero undeclared `extra="gcp"`.
 
 ## Test Matrix
 
@@ -71,8 +75,8 @@ uv run --no-sync pytest src/py/tests/unit/test_freethreaded_gil.py src/py/tests/
 
 ## Acceptance Criteria
 
-- [ ] `test_freethreaded_gil.py`, Ruff, and Mypy pass cleanly.
-- [ ] Zero regressions in `ch07-wheel-ci-and-benchmarks` fast verification gate.
+- [x] `test_freethreaded_gil.py`, Ruff, and Mypy pass cleanly.
+- [x] Zero regressions in `ch07-wheel-ci-and-benchmarks` fast verification gate.
 
 [^ci-yml]: `.github/workflows/ci.yml` — CI workflow.
 [^release-yml]: `.github/workflows/release.yaml` — Release workflow.

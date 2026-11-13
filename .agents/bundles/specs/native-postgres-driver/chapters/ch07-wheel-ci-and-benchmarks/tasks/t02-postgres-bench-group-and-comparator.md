@@ -6,7 +6,10 @@ chapter_id: ch07-wheel-ci-and-benchmarks
 title: "Add postgres-bench dependency group and tools/benchmarks/postgres.py"
 description: "Declare [dependency-groups].postgres-bench and implement schema_version=1 PostgreSQL benchmark capture and threshold comparator CLI."
 status: stable
-state: pending
+state: completed
+commit: 9a3631bb
+last_verified_at: "2026-11-13T22:11:30Z"
+last_verified_commit: 9a3631bb
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -60,7 +63,7 @@ uv run --no-sync pytest src/py/tests/unit/tools/test_postgres_benchmarks.py -q &
 
 ## Acceptance Criteria
 
-- [ ] Offline benchmark comparator unit tests, Ruff, and Mypy pass.
-- [ ] Zero regressions in `ch07-wheel-ci-and-benchmarks` fast verification gate.
+- [x] Offline benchmark comparator unit tests, Ruff, and Mypy pass.
+- [x] Zero regressions in `ch07-wheel-ci-and-benchmarks` fast verification gate.
 
 [^pyproject]: `pyproject.toml` — Dependency groups configuration.
