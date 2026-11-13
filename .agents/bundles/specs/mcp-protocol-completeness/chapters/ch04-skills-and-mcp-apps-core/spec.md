@@ -5,7 +5,7 @@ chapter_id: ch04-skills-and-mcp-apps-core
 title: "Chapter 04: Skills Catalog Disclosure and MCP Apps UI Metadata Core"
 description: "Complete SkillCatalog filtering/projection, expose io.modelcontextprotocol/skills, and add SEP-1865 io.modelcontextprotocol/ui metadata models, decorators, validation, and projection."
 status: stable
-state: planned
+state: active
 planning_status: complete
 planning_quality: standard
 planning_degraded_reason: null
@@ -14,7 +14,7 @@ depends_on_chapters:
 replan_trigger: null
 plan_commit: 18baadcd
 last_reviewed_commit: null
-updated_at: "2026-11-12T23:45:00Z"
+updated_at: "2026-11-13T05:17:00Z"
 generated:
   by: flow-plan
   at: "2026-11-12T23:45:00Z"
@@ -79,13 +79,14 @@ Skills and MCP Apps authoring are documented in `ch07` (`docs/usage/agent-protoc
 
 ## 5. Implementation Plan
 
-- [ ] [t01-skill-catalog-disclosure.md](tasks/t01-skill-catalog-disclosure.md) — Add `SkillCatalog` filtering, URI resolution, resource projection, listeners, and `refresh()`
-- [ ] [t02-core-skill-surface.md](tasks/t02-core-skill-surface.md) — Expose `io.modelcontextprotocol/skills`, binary skill blobs, prompt projection, and skill notifications in `MCPCore`
-- [ ] [t03-ui-metadata-models-and-decorators.md](tasks/t03-ui-metadata-models-and-decorators.md) — Add `McpIcon`, resource/tool `meta`, and SEP-1865 decorator arguments
-- [ ] [t04-registry-webmcp-and-core-ui-projection.md](tasks/t04-registry-webmcp-and-core-ui-projection.md) — Add `validate_ui_links` / `MCPCore.validate()`, UI extension projection, app-only filtering, and WebMCP exclusion
+- [x] [b0c0ae12] [t01-skill-catalog-disclosure.md](tasks/t01-skill-catalog-disclosure.md) — Add `SkillCatalog` filtering, URI resolution, resource projection, listeners, and `refresh()`
+- [x] [b0c0ae12] [t02-core-skill-surface.md](tasks/t02-core-skill-surface.md) — Expose `io.modelcontextprotocol/skills`, binary skill blobs, prompt projection, and skill notifications in `MCPCore`
+- [x] [b0c0ae12] [t03-ui-metadata-models-and-decorators.md](tasks/t03-ui-metadata-models-and-decorators.md) — Add `McpIcon`, resource/tool `meta`, and SEP-1865 decorator arguments
+- [x] [b0c0ae12] [t04-registry-webmcp-and-core-ui-projection.md](tasks/t04-registry-webmcp-and-core-ui-projection.md) — Add `validate_ui_links` / `MCPCore.validate()`, UI extension projection, app-only filtering, and WebMCP exclusion
 
 ## 6. Current State & Remaining Plan Snapshot
 
+- **Status**: `t01`–`t04` are implemented and verified at `b0c0ae12` (`ruff`, `mypy` across 39 files, and `270` unit tests pass).
 - **Fast Chapter Gate (`< 15s`)**: `uv run --no-sync ruff check src/py/vertebra/agent && uv run --no-sync mypy src/py/vertebra/agent && uv run --no-sync pytest src/py/tests/unit/agent/test_core_and_observability.py src/py/tests/unit/agent/test_mcp_conformance.py -q`.
 
 [^skills-py]: `src/py/vertebra/agent/mcp/skills.py::SkillCatalog` — Skill catalog and filesystem skill source.

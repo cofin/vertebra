@@ -6,7 +6,13 @@ chapter_id: ch04-skills-and-mcp-apps-core
 title: Expose io.modelcontextprotocol/skills Surface in MCPCore
 description: "Advertise capabilities.extensions['io.modelcontextprotocol/skills'], paginate/filter skills/list, project skill resources/prompts, read binary blobs, and notify skill changes."
 status: stable
-state: pending
+state: completed
+commit: b0c0ae12
+last_verified_commit: b0c0ae12
+last_verified_at: "2026-11-13T05:17:00Z"
+verification_evidence: "ruff + mypy (39 files) + pytest (270 passed)"
+claimed_by: null
+claimed_at: null
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -64,7 +70,7 @@ uv run --no-sync ruff check src/py/vertebra/agent/mcp && uv run --no-sync mypy s
 
 ## Acceptance Criteria
 
-- [ ] `capabilities.skills` is replaced by `capabilities.extensions['io.modelcontextprotocol/skills']`.
-- [ ] Binary skill assets, directory-read restrictions, and prompt projection pass conformance tests.
+- [x] `capabilities.skills` is replaced by `capabilities.extensions['io.modelcontextprotocol/skills']`.
+- [x] Binary skill assets, directory-read restrictions, and prompt projection pass conformance tests.
 
 [^skills-handlers]: `src/py/vertebra/agent/mcp/service.py::MCPCore._handle_skills_list` — MCPCore skill and resource handlers.

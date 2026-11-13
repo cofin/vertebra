@@ -6,7 +6,13 @@ chapter_id: ch04-skills-and-mcp-apps-core
 title: "Complete SkillCatalog Filtering, URI Lookup, Listeners, and Refresh"
 description: "Extend Skill, MCPSkillsConfig, and SkillCatalog in skills.py with coerce, tag/query filtering, skill:// URI resolution, resource_entries, listeners, and refresh."
 status: stable
-state: pending
+state: completed
+commit: b0c0ae12
+last_verified_commit: b0c0ae12
+last_verified_at: "2026-11-13T05:17:00Z"
+verification_evidence: "ruff + mypy (39 files) + pytest (270 passed)"
+claimed_by: null
+claimed_at: null
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -60,7 +66,7 @@ uv run --no-sync ruff check src/py/vertebra/agent/mcp/skills.py && uv run --no-s
 
 ## Acceptance Criteria
 
-- [ ] `SkillCatalog` supports filtering, `skill://` lookup, `resource_entries()`, listeners, and idempotent `refresh()`.
-- [ ] Invalid `SkillCatalog.coerce` arguments raise `TypeError`.
+- [x] `SkillCatalog` supports filtering, `skill://` lookup, `resource_entries()`, listeners, and idempotent `refresh()`.
+- [x] Invalid `SkillCatalog.coerce` arguments raise `TypeError`.
 
 [^skills-py]: `src/py/vertebra/agent/mcp/skills.py::SkillCatalog` — SkillCatalog and FilesystemSkillSource.

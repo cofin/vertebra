@@ -6,7 +6,13 @@ chapter_id: ch04-skills-and-mcp-apps-core
 title: Add SEP-1865 UI Metadata Models and Decorator Parameters
 description: "Add McpIcon, UI_EXTENSION, UI_MIME_TYPE, title/icons/meta on resources and ToolSpec, and UI metadata arguments on @tool, @mcp_tool, and @mcp_resource."
 status: stable
-state: pending
+state: completed
+commit: b0c0ae12
+last_verified_commit: b0c0ae12
+last_verified_at: "2026-11-13T05:17:00Z"
+verification_evidence: "ruff + mypy (39 files) + pytest (270 passed)"
+claimed_by: null
+claimed_at: null
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -68,8 +74,8 @@ uv run --no-sync ruff check src/py/vertebra/agent/core/schema.py src/py/vertebra
 
 ## Acceptance Criteria
 
-- [ ] Tools, resources, and templates carry typed SEP-1865 `title`, `icons`, and `meta` fields.
-- [ ] Invalid `ui_visibility` values fail loud at decoration time.
+- [x] Tools, resources, and templates carry typed SEP-1865 `title`, `icons`, and `meta` fields.
+- [x] Invalid `ui_visibility` values fail loud at decoration time.
 
 [^models-py]: `src/py/vertebra/agent/mcp/models.py::ResourceEntry` — ResourceEntry and ResourceTemplateEntry structs.
 [^decorators-py]: `src/py/vertebra/agent/mcp/controllers.py::mcp_tool` — MCP route and controller decorators.

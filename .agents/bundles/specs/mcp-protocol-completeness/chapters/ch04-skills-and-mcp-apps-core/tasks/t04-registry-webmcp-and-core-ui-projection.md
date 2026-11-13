@@ -6,7 +6,13 @@ chapter_id: ch04-skills-and-mcp-apps-core
 title: "Project SEP-1865 UI Metadata, Validate ui:// Links, and Filter App-Only Tools"
 description: "Propagate UI metadata in ToolRegistry and ETag digest, add validate_ui_links and MCPCore.validate(), advertise io.modelcontextprotocol/ui, and filter app-only tools."
 status: stable
-state: pending
+state: completed
+commit: b0c0ae12
+last_verified_commit: b0c0ae12
+last_verified_at: "2026-11-13T05:17:00Z"
+verification_evidence: "ruff + mypy (39 files) + pytest (270 passed)"
+claimed_by: null
+claimed_at: null
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -69,8 +75,8 @@ uv run --no-sync ruff check src/py/vertebra/agent/mcp && uv run --no-sync mypy s
 
 ## Acceptance Criteria
 
-- [ ] `MCPCore.validate()` fails loud on broken `ui://` links and invalid MIME types.
-- [ ] UI metadata projects across `tools/list`, `resources/*`, `ETag`, and app-only visibility filters.
+- [x] `MCPCore.validate()` fails loud on broken `ui://` links and invalid MIME types.
+- [x] UI metadata projects across `tools/list`, `resources/*`, `ETag`, and app-only visibility filters.
 
 [^registry-py]: `src/py/vertebra/agent/mcp/registry.py::ToolRegistry` — Tool and resource registration and ETag digest.
 [^webmcp-py]: `src/py/vertebra/agent/mcp/webmcp.py::build_webmcp_manifest` — Browser WebMCP manifest projection.
