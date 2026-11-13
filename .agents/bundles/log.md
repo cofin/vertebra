@@ -1,5 +1,10 @@
 # Bundle Activity Log
 
+## [2026-11-13T02:55:00Z] chapter-complete | native-postgres-driver ch01-replication-supervision
+
+- Closed `ch01-replication-supervision` at `bfa2dad7` (`57` wire tests passed, `cargo clippy --all-targets -- -D warnings` clean, `postgres-native-driver.md` and `postgres-limitations.md` synchronized).
+- Advanced active frontier to `ch02-replication-python-bridge` (`native-postgres-driver:ch02:t01`; `30` tasks remain across `ch02`–`ch09`).
+
 ## [2026-11-13T01:52:00Z] chapter-checkpoint | native-postgres-driver ch01-replication-supervision
 
 - Completed `ch01-replication-supervision` (`t01`–`t02`) at `7d50fd42` on `feat/postgres-driver-complete`: added `ReplicationSupervisor`, `ReplicationEventDelivery`, `ReplicationStreamEvent`, `PostgresReplicationResume`, `raw_reconnect_delay` (`MAX_RAW_RECONNECT_ATTEMPTS = 8`), and `PostgresReplicationConnection::connect_logical_verified`, verified across `56` wire tests (`postgres_replication_wire_tests`) and `cargo clippy --all-targets -- -D warnings`.
