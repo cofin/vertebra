@@ -12,14 +12,28 @@ flowchart LR
 
 ## Direct Zero-Sidecar Connections
 
-Configure `SyncCloudSQLDialer` / `AsyncCloudSQLDialer` or `SyncAlloyDBDialer` / `AsyncAlloyDBDialer` with Application Default Credentials and optional automatic IAM database authentication (`enable_iam_auth=True`):
+Configure `PostgreSQLConfig` with `cloud_sql_instance` / `alloydb_instance_uri` directly for integrated pooling, or construct `SyncCloudSQLDialer` / `AsyncCloudSQLDialer` and `SyncAlloyDBDialer` / `AsyncAlloyDBDialer` with Application Default Credentials and automatic IAM database authentication (`enable_iam_auth=True`):
 
 ```python
 from vertebra.db import (
     AlloyDBConfig,
     CloudSQLConfig,
+    PostgreSQLConfig,
     SyncAlloyDBDialer,
     SyncCloudSQLDialer,
+)
+
+pg_cloud_sql = PostgreSQLConfig(
+    dsn="postgresql://iam_user@localhost/orders",
+    cloud_sql_instance="my-project:us-central1:orders-db",
+    enable_iam_auth=True,
+)
+pg_alloydb = PostgreSQLConfig(
+    dsn="postgresql://iam_user@localhost/orders",
+    alloydb_instance_uri=(
+        "projects/my-project/locations/us-central1/clusters/prod/instances/primary"
+    ),
+    enable_iam_auth=True,
 )
 
 cloudsql = SyncCloudSQLDialer(

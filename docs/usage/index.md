@@ -41,7 +41,7 @@ Practical guides for building, scaling, testing, and deploying applications with
 | --- | --- |
 | **[MCP, Skills & Stdio Bridge](agent-protocols.md)** | Model Context Protocol (`@tool`, `@prompt`, `@resource`, `MCPRegistry`), `SKILL.md` bundles (`MCPSkillsConfig`), async tasks, and `vtb ai mcp serve|bridge`. |
 | **[A2A, WebMCP & Workflows](a2a-and-workflows.md)** | Agent-to-Agent (`A2AService`, `AgentCard` with automatic `AgentInterface` and dynamic URL resolution), browser WebMCP (`@vertebra/client/webmcp`), `SpecTree`, `DynamicWorkflow`, and `AgentRuntime`. |
-| **[Vector Embeddings & Slabs](embeddings-and-vectors.md)** | Shared-memory `VectorSlab` and `VectorCache`, PEP 3118 `VectorView` / `VectorBatchView`, `Embedder`, `VertexEmbedder`, `GeminiEmbedder`, `PushdownEmbedder` with BigQuery, Spanner, PostgreSQL/AlloyDB, and Oracle `EmbeddingPushdown` (Oracle requires the native Oracle driver, not yet published), `GemmaEmbedder`, `FastEmbedder`, `StaticEmbedder`, `RemoteEmbedder`, and `vtb ai models`. |
+| **[Vector Embeddings & Slabs](embeddings-and-vectors.md)** | Shared-memory `VectorSlab` and `VectorCache`, PEP 3118 `VectorView` / `VectorBatchView`, `Embedder`, `VertexEmbedder`, `GeminiEmbedder`, `PushdownEmbedder` with BigQuery, Spanner, PostgreSQL/AlloyDB (`vertebra-core[postgres]`), and Oracle (`vertebra-core[oracle]`), `GemmaEmbedder`, `FastEmbedder`, `StaticEmbedder`, `RemoteEmbedder`, and `vtb ai models`. |
 
 ## Frontend & Client SDK
 

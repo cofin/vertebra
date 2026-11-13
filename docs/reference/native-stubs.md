@@ -1,6 +1,6 @@
-# PyO3 Native Extension Stubs (`_vertebra`, `_bundler`, `_storage`, `_bigquery`, `_oracle`, `_spanner`, `_duckdb`)
+# PyO3 Native Extension Stubs (`_vertebra`, `_bundler`, `_storage`, `_bigquery`, `_duckdb`, `_mssql`, `_mysql`, `_oracle`, `_postgres`, `_spanner`)
 
-Low-level Rust/PyO3 classes and functions declared in PEP 561 `.pyi` stub files (`src/py/vertebra/_vertebra.pyi`, `_bundler.pyi`, `_storage.pyi`, `_bigquery.pyi`, `_oracle.pyi`, `_spanner.pyi`, `_duckdb.pyi`) and compiled with `gil_used = false` for free-threaded Python `3.14t`/`3.15t`. Most applications interact with these primitives through the higher-level [`vertebra`](vertebra.md), [`vertebra.server`](server.md), [`vertebra.db`](db.md), and [`vertebra.storage`](storage.md) facades.
+Low-level Rust/PyO3 classes and functions declared in PEP 561 `.pyi` stub files across all 10 native extensions (`_vertebra.pyi`, `_bundler.pyi`, `_storage.pyi`, `_bigquery.pyi`, `_duckdb.pyi`, `_mssql.pyi`, `_mysql.pyi`, `_oracle.pyi`, `_postgres.pyi`, `_spanner.pyi`) and compiled with `gil_used = false` for free-threaded Python `3.14t`/`3.15t`. Most applications interact with these primitives through the higher-level [`vertebra`](vertebra.md), [`vertebra.server`](server.md), [`vertebra.db`](db.md), and [`vertebra.storage`](storage.md) facades.
 
 | Native Module | Key Stub Classes | Backing Rust Crate |
 | --- | --- | --- |
@@ -8,9 +8,12 @@ Low-level Rust/PyO3 classes and functions declared in PEP 561 `.pyi` stub files 
 | **`vertebra._bundler`** | `BundleConfig`, `BuildResult`, `Bundler`, `SSRPool`, `IsolatedDeclarationsGenerator` | `vertebra-bundler` (Oxc, Rolldown, QuickJS) |
 | **`vertebra._storage`** | `StorageBuffer`, `ObjectMeta`, `SyncObjectStore`, `AsyncObjectStore` | `vertebra-storage` (Rust `object_store` + Tokio) |
 | **`vertebra._bigquery`** | `SyncBigQueryClient`, `AsyncBigQueryClient` | `vertebra-bigquery` (REST v2 + Storage Read/Write gRPC) |
-| **`vertebra._oracle`** | `SyncOracleClient`, `AsyncOracleClient`, `SyncOraclePool`, `AsyncOraclePool`, `AsyncOracleListener` | `vertebra-oracle` (Oracle 26ai Thin TNS/TTC + Arrow SHM) |
-| **`vertebra._spanner`** | `SyncSpannerClient`, `AsyncSpannerClient` | `vertebra-spanner` (Cloud Spanner Data + DatabaseAdmin) |
 | **`vertebra._duckdb`** | `SyncDuckDBClient`, `AsyncDuckDBClient` | `vertebra-duckdb` (Bundled DuckDB 2.0 + `VTBARROW` SHM) |
+| **`vertebra._mssql`** | `SyncMSSQLClient`, `AsyncMSSQLClient` | `vertebra-mssql` (TDS 7.4/8.0 + `BulkLoad` + `VTBARROW` SHM) |
+| **`vertebra._mysql`** | `SyncMySQLClient`, `AsyncMySQLClient`, `MySQLWireTestServer` | `vertebra-mysql` (MySQL Binary Protocol + `VTBARROW` SHM) |
+| **`vertebra._oracle`** | `SyncOracleClient`, `AsyncOracleClient`, `SyncOraclePool`, `AsyncOraclePool`, `AsyncOracleListener` | `vertebra-oracle` (Oracle 26ai Thin TNS/TTC + Arrow SHM) |
+| **`vertebra._postgres`** | `SyncPostgresClient`, `AsyncPostgresClient`, `SyncPostgresPool`, `AsyncPostgresPool`, `AsyncPostgresListener`, `AsyncPostgresReplication` | `vertebra-postgres` (PostgreSQL Protocol 3.0 + `PGCOPY` + `pgoutput` + `VTBARROW` SHM) |
+| **`vertebra._spanner`** | `SyncSpannerClient`, `AsyncSpannerClient` | `vertebra-spanner` (Cloud Spanner Data + DatabaseAdmin) |
 
 ## `vertebra._vertebra` — HTTP/IPC Transport, Request Batches & Protocol Drivers
 
@@ -30,21 +33,25 @@ Low-level Rust/PyO3 classes and functions declared in PEP 561 `.pyi` stub files 
     options:
       heading_level: 4
       members: false
+      show_signature: false
 
 ::: vertebra._vertebra.AsgiScope
     options:
       heading_level: 4
       members: false
+      show_signature: false
 
 ::: vertebra._vertebra.RsgiScope
     options:
       heading_level: 4
       members: false
+      show_signature: false
 
 ::: vertebra._vertebra.WsgiEnviron
     options:
       heading_level: 4
       members: false
+      show_signature: false
 
 ## `vertebra._bundler` — Embedded Rolldown/Oxc Bundler & QuickJS SSR Pool
 
@@ -52,11 +59,13 @@ Low-level Rust/PyO3 classes and functions declared in PEP 561 `.pyi` stub files 
     options:
       heading_level: 4
       members: false
+      show_signature: false
 
 ::: vertebra._bundler.BuildResult
     options:
       heading_level: 4
       members: false
+      show_signature: false
 
 ::: vertebra._bundler.Bundler
     options:
@@ -66,11 +75,13 @@ Low-level Rust/PyO3 classes and functions declared in PEP 561 `.pyi` stub files 
     options:
       heading_level: 4
       members: false
+      show_signature: false
 
 ::: vertebra._bundler.IsolatedDeclarationsGenerator
     options:
       heading_level: 4
       members: false
+      show_signature: false
 
 ## `vertebra._storage` — Rust `object_store` & Cloud Presigning Primitives
 
@@ -78,16 +89,19 @@ Low-level Rust/PyO3 classes and functions declared in PEP 561 `.pyi` stub files 
     options:
       heading_level: 4
       members: false
+      show_signature: false
 
 ::: vertebra._storage.ObjectMeta
     options:
       heading_level: 4
       members: false
+      show_signature: false
 
 ::: vertebra._storage.SyncObjectStore
     options:
       heading_level: 4
       members: false
+      show_signature: false
 
 ::: vertebra._storage.AsyncObjectStore
     options:
@@ -107,33 +121,25 @@ Low-level Rust/PyO3 classes and functions declared in PEP 561 `.pyi` stub files 
     options:
       heading_level: 4
       members: false
+      show_signature: false
 
 ::: vertebra._bigquery.AsyncBigQueryClient
     options:
       heading_level: 3
-      members:
-        - query
-        - dry_run
-        - read_table_arrow
-        - append_arrow
-        - close
+      members: false
+      show_signature: false
 
 ::: vertebra._spanner.SyncSpannerClient
     options:
       heading_level: 4
       members: false
+      show_signature: false
 
 ::: vertebra._spanner.AsyncSpannerClient
     options:
       heading_level: 3
-      members:
-        - query
-        - execute_dml
-        - execute_batch_dml
-        - apply_mutations
-        - batch_write
-        - update_ddl
-        - close
+      members: false
+      show_signature: false
 
 ## `vertebra._duckdb` — Embedded DuckDB 2.0 Analytical Client
 
@@ -141,13 +147,44 @@ Low-level Rust/PyO3 classes and functions declared in PEP 561 `.pyi` stub files 
     options:
       heading_level: 4
       members: false
+      show_signature: false
 
 ::: vertebra._duckdb.AsyncDuckDBClient
     options:
       heading_level: 4
-      members:
-        - execute
-        - fetch_all
-        - select_to_arrow
-        - load_from_arrow
-        - close
+      members: false
+      show_signature: false
+
+## Native SQL Drivers (`_postgres`, `_oracle`, `_mysql`, `_mssql`)
+
+Each companion database extension exposes `GIL_USED = False` and `FREE_THREADED` module constants alongside its synchronous/asynchronous native clients (`Sync*`, `Async*`) and extension-specific pooling or replication types listed in the summary table above (`SyncPostgresClient`, `AsyncPostgresClient`, `SyncPostgresPool`, `AsyncPostgresPool`, `AsyncPostgresReplication`, `SyncOracleClient`, `AsyncOracleClient`, `SyncOraclePool`, `AsyncOraclePool`, `SyncMySQLClient`, `AsyncMySQLClient`, `SyncMSSQLClient`, `AsyncMSSQLClient`).
+
+::: vertebra._postgres.AsyncPostgresClient
+    options:
+      heading_level: 4
+      members: false
+      show_signature: false
+
+::: vertebra._postgres.AsyncPostgresReplication
+    options:
+      heading_level: 4
+      members: false
+      show_signature: false
+
+::: vertebra._oracle.SyncOracleClient
+    options:
+      heading_level: 4
+      members: false
+      show_signature: false
+
+::: vertebra._mysql.SyncMySQLClient
+    options:
+      heading_level: 4
+      members: false
+      show_signature: false
+
+::: vertebra._mssql.SyncMSSQLClient
+    options:
+      heading_level: 4
+      members: false
+      show_signature: false

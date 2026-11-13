@@ -42,7 +42,8 @@ postgres_filter = PostgreSQLCore.build_tenant_predicate_sql(predicate)
 ```
 
 The SQLSpec PostgreSQL adapters' `apply_tenant_predicate()` prepares the session
-statement for psycopg `%s` or asyncpg `$N` binds and returns the PostgreSQL filter.
+statement for native PostgreSQL `$1` binds (`ParameterStyle.NUMERIC`) and returns the
+PostgreSQL filter.
 Setter failures propagate unchanged. Other base SQLSpec adapters raise
 `NotSupportedError`. BigQuery and Spanner configs and drivers reject a configured
 `tenant_predicate` before initialization; ordinary unconfigured sessions retain
@@ -84,6 +85,10 @@ notify_config = PostgresNotifyConfig(
 parameterized PostgreSQL notifications using the feed's spill envelopes. Its
 `build_emit_message_sql()` helper builds logical replication message SQL. Live
 `LISTEN` streaming requires a driver that implements `listen_notifications()`.
+For durable logical replication streaming over `pgoutput`, pass a replication
+driver and `PostgresChangeConfig(slot=..., publication=...)` to
+`PostgresChangeSource`, which commits checkpoint progress before sending wire
+`StandbyStatusUpdate` acknowledgments (`save-before-ack`).
 In-memory spills use a bounded LRU cache; hydrating an evicted spill raises
 `KeyError`. Attach a `SyncObjectStore` for persistent spill hydration; storage
 errors propagate to the caller.

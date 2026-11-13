@@ -1,6 +1,6 @@
 # API Reference
 
-Complete reference documentation for Vertebra's Python packages (`vertebra.*`), PEP 561 PyO3 native extension stubs (`_vertebra`, `_bundler`, `_storage`, `_bigquery`, `_spanner`), the `@vertebra/client` TypeScript SDK, and the `vtb` CLI.
+Complete reference documentation for Vertebra's Python packages (`vertebra.*`), PEP 561 PyO3 native extension stubs (`_vertebra`, `_bundler`, `_storage`, `_bigquery`, `_duckdb`, `_mssql`, `_mysql`, `_oracle`, `_postgres`, `_spanner`), the `@vertebra/client` TypeScript SDK, and the `vtb` CLI.
 
 ## Framework & Routing
 
@@ -24,7 +24,7 @@ Complete reference documentation for Vertebra's Python packages (`vertebra.*`), 
 | Module / Page | Summary |
 | --- | --- |
 | **[Database Drivers & Pools](db.md)** | Native `SyncPipelineCapable` / `AsyncPipelineCapable` batching, database drivers, and connection configs across PostgreSQL, MySQL, SQLite, Oracle 26ai, SQL Server, DuckDB, BigQuery, Spanner, DataFusion, Redis, Valkey, and Cloud SQL / AlloyDB dialers. |
-| **[Database Capabilities](database-capabilities.md)** | Adapter-owned BigQuery and Spanner operations consumed through the generic agent tool bridge. |
+| **[Database Capabilities](database-capabilities.md)** | Adapter-owned BigQuery and Spanner agent tools plus PostgreSQL (`PostgresChangeSource`, `PostgresEmbeddingPushdown`), Oracle, and Spanner change/notification sources. |
 | **[SQLSpec, Alchemy & Extensions](extensions.md)** | Integrations for Litestar (`VertebraPlugin`), SQLSpec (`create_sqlspec_plugin`), SQLAlchemy / Advanced Alchemy (`create_alchemy_plugin`), Oracle APEX (`ApexGateway`), gRPC (`GrpcServiceRegistry`), and SHM session brokers (`BrokerPlugin`). |
 
 ## Object Storage
@@ -45,4 +45,4 @@ Complete reference documentation for Vertebra's Python packages (`vertebra.*`), 
 | Module / Page | Summary |
 | --- | --- |
 | **[Agent Runtime (MCP & A2A)](agent.md)** | Model Context Protocol (`MCPRegistry`, `MCPConfig`, `MCPSkillsConfig`, `MCPTaskConfig`), Agent-to-Agent (`A2AService`, `A2AConfig`), `AgentRuntime`, and `WorkflowEngine`. |
-| **[PyO3 Native Stubs](native-stubs.md)** | Low-level Rust/PyO3 extension classes and functions declared in `vertebra._vertebra`, `vertebra._bundler`, `vertebra._storage`, `vertebra._bigquery`, and `vertebra._spanner`. |
+| **[PyO3 Native Stubs](native-stubs.md)** | Low-level Rust/PyO3 extension classes and functions across `vertebra._vertebra`, `_bundler`, `_storage`, `_bigquery`, `_duckdb`, `_mssql`, `_mysql`, `_oracle`, `_postgres`, and `_spanner`. |

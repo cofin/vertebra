@@ -60,16 +60,47 @@ Vertebra keeps its base dependency footprint minimal (`msgspec` and `rich-click`
 | `embeddings` | `uv add "vertebra-core[embeddings]"` | Local ONNX / `fastembed` embedding models via `1x` RAM `EmbeddingBroker` |
 | `bigquery` | `uv add "vertebra-core[bigquery]"` | Standalone native Rust `vertebra-bigquery` (`vertebra._bigquery`) driver wheel |
 | `bundler` | `uv add "vertebra-core[bundler]"` | Standalone native Rust `vertebra-bundler` (`vertebra._bundler`) Rolldown/Oxc & QuickJS SSR wheel |
+| `duckdb` | `uv add "vertebra-core[duckdb]"` | Standalone native Rust `vertebra-duckdb` (`vertebra._duckdb`) DuckDB 2.0 & Arrow wheel |
+| `mssql` | `uv add "vertebra-core[mssql]"` | Standalone native Rust `vertebra-mssql` (`vertebra._mssql`) SQL Server TDS 7.4/8.0 wheel |
+| `mysql` | `uv add "vertebra-core[mysql]"` | Standalone native Rust `vertebra-mysql` (`vertebra._mysql`) MySQL/MariaDB binary protocol wheel |
+| `oracle` | `uv add "vertebra-core[oracle]"` | Standalone native Rust `vertebra-oracle` (`vertebra._oracle`) Oracle 26ai Thin TNS/TTC wheel |
+| `postgres` | `uv add "vertebra-core[postgres]"` | Standalone native Rust `vertebra-postgres` (`vertebra._postgres`) pure-Rust PostgreSQL wheel |
 | `spanner` | `uv add "vertebra-core[spanner]"` | Standalone native Rust `vertebra-spanner` (`vertebra._spanner`) driver wheel |
 | `storage` | `uv add "vertebra-core[storage]"` | Standalone native Rust `vertebra-storage` (`vertebra._storage`) multicloud object storage wheel |
 | `rloop` | `uv add "vertebra-core[rloop]"` | Optional `rloop` asyncio event loop integration on POSIX hosts |
 | `all` | `uv add "vertebra-core[all]"` | Full ecosystem extras suite |
 
+Install optional database wheels with any package manager:
+
+=== "uv"
+
+    ```bash
+    uv add "vertebra-core[postgres]"
+    ```
+
+=== "pip"
+
+    ```bash
+    pip install "vertebra-core[postgres]"
+    ```
+
+=== "pdm"
+
+    ```bash
+    pdm add "vertebra-core[postgres]"
+    ```
+
+=== "poetry"
+
+    ```bash
+    poetry add "vertebra-core[postgres]"
+    ```
+
 Development, lint, type-checking, test, and benchmark dependencies are managed via PEP 735 `[dependency-groups]` (`uv sync --group dev`).
 
 ## Free-Threaded Python (`3.14t` / `3.15t`)
 
-All native Rust extensions (`vertebra._vertebra`, `vertebra._bundler`, `vertebra._storage`, `vertebra._bigquery`, `vertebra._spanner`) run without the GIL and support multi-core execution inside a single OS process under `--topology embedded`:
+All 10 native Rust extensions (`vertebra._vertebra`, `vertebra._bundler`, `vertebra._storage`, `vertebra._bigquery`, `vertebra._duckdb`, `vertebra._mssql`, `vertebra._mysql`, `vertebra._oracle`, `vertebra._postgres`, `vertebra._spanner`) run without the GIL and support multi-core execution inside a single OS process under `--topology embedded`:
 
 ```bash
 uv python install 3.14t
