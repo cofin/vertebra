@@ -6,7 +6,11 @@ chapter_id: ch05-atomic-cutover-and-legacy-removal
 title: "Replace driver.py with 12-line native barrel and migrate PostgreSQL unit suites"
 description: "Cut driver.py, __init__.py, and embeddings.py over to native PostgreSQL drivers and replace psycopg/SQLite test doubles with postgres_ports.py."
 status: stable
-state: pending
+state: completed
+commit: d635f818
+last_verified_commit: d635f818
+last_verified_at: "2026-11-13T15:43:00Z"
+verification_evidence: "pytest test_postgres_driver.py test_pg_dataplane_and_datafusion.py test_google_embedders.py test_native_db_drivers.py + review_setup clean"
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -66,7 +70,7 @@ uv run --no-sync pytest src/py/tests/unit/db/test_postgres_driver.py src/py/test
 
 ## Acceptance Criteria
 
-- [ ] All PostgreSQL adapter and pushdown unit suites pass over native driver classes.
-- [ ] Zero regressions in `ch05-atomic-cutover-and-legacy-removal` fast verification gate.
+- [x] All PostgreSQL adapter and pushdown unit suites pass over native driver classes.
+- [x] Zero regressions in `ch05-atomic-cutover-and-legacy-removal` fast verification gate.
 
 [^pg-driver]: `src/py/vertebra/db/adapters/postgres/driver.py::SyncPostgreSQLDriver` — Public PostgreSQL driver barrel.

@@ -6,7 +6,11 @@ chapter_id: ch05-atomic-cutover-and-legacy-removal
 title: "Update PostgreSQLQueueBackend guard and clean up Cloud SQL and AlloyDB dialers"
 description: "Switch PostgreSQLQueueBackend to vertebra._postgres, delete legacy psycopg/asyncpg/asyncmy dialer helpers, and fix TLS/RSA/async refresh bugs in cloudsql.py and alloydb.py."
 status: stable
-state: pending
+state: completed
+commit: d635f818
+last_verified_commit: d635f818
+last_verified_at: "2026-11-13T15:43:00Z"
+verification_evidence: "pytest test_distributed_queues.py test_cloud_dialers.py test_gcp_adapters_and_sqlalchemy.py + zero legacy grep matches"
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -73,8 +77,8 @@ uv run --no-sync pytest src/py/tests/unit/framework/test_distributed_queues.py s
 
 ## Acceptance Criteria
 
-- [ ] `git grep -E 'psycopg|asyncpg|asyncmy' -- src/py/vertebra` returns empty and dialer/queue unit suites pass.
-- [ ] Zero regressions in `ch05-atomic-cutover-and-legacy-removal` fast verification gate.
+- [x] `git grep -E 'psycopg|asyncpg|asyncmy' -- src/py/vertebra` returns empty and dialer/queue unit suites pass.
+- [x] Zero regressions in `ch05-atomic-cutover-and-legacy-removal` fast verification gate.
 
 [^pg-queue]: `src/py/vertebra/framework/queues/postgres.py::PostgreSQLQueueBackend` — PostgreSQLQueueBackend missing-executor guard.
 [^cloudsql-py]: `src/py/vertebra/db/dialer/cloudsql.py::CloudSQLConfig` — Cloud SQL Python dialer.

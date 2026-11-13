@@ -6,7 +6,11 @@ chapter_id: ch05-atomic-cutover-and-legacy-removal
 title: "Synchronize extensions, queues, and database-driver-limitations OKF chapters"
 description: "Update sqlspec-alchemy-and-dialects.md, distributed-queues-and-email.md, and database-driver-limitations.md (<= 200L each) for native PostgreSQL."
 status: stable
-state: pending
+state: completed
+commit: 6d134bb4
+last_verified_commit: d635f818
+last_verified_at: "2026-11-13T15:43:00Z"
+verification_evidence: "review_setup.py validate + pytest test_review_setup.py clean"
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -61,7 +65,7 @@ make review-check && uv run --no-sync pytest src/py/tests/unit/test_review_setup
 
 ## Acceptance Criteria
 
-- [ ] All 3 OKF chapters stay `<= 200` lines and pass `make review-check`.
-- [ ] Zero regressions in `ch05-atomic-cutover-and-legacy-removal` fast verification gate.
+- [x] All 3 OKF chapters stay `<= 200` lines and pass `make review-check`.
+- [x] Zero regressions in `ch05-atomic-cutover-and-legacy-removal` fast verification gate.
 
 [^drv-lim]: `.agents/bundles/knowledge/domains/data/database-driver-limitations.md` — Cross-driver limitations record.

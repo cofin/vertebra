@@ -6,7 +6,11 @@ chapter_id: ch05-atomic-cutover-and-legacy-removal
 title: "Switch SQLSpec and SQLAlchemy PostgreSQL adapters directly to $N numeric binds"
 description: "Cut PostgreSQLSyncDriver/PostgreSQLAsyncDriver to ParameterStyle.NUMERIC and SQLAlchemy PostgreSQL dialects to numeric_dollar."
 status: stable
-state: pending
+state: completed
+commit: d635f818
+last_verified_commit: d635f818
+last_verified_at: "2026-11-13T15:43:00Z"
+verification_evidence: "pytest test_postgres_compiler_transport.py test_sqlalchemy_and_sqlspec_vtb.py + ruff + mypy clean"
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -68,8 +72,8 @@ uv run --no-sync pytest src/py/tests/unit/extensions/test_postgres_compiler_tran
 
 ## Acceptance Criteria
 
-- [ ] Both sync and async PostgreSQL SQLSpec and SQLAlchemy paths emit `$1..$N` binds cleanly.
-- [ ] Zero regressions in `ch05-atomic-cutover-and-legacy-removal` fast verification gate.
+- [x] Both sync and async PostgreSQL SQLSpec and SQLAlchemy paths emit `$1..$N` binds cleanly.
+- [x] Zero regressions in `ch05-atomic-cutover-and-legacy-removal` fast verification gate.
 
 [^sqlspec-adp]: `src/py/vertebra/extensions/sqlspec/adapters.py::BaseSyncDriver` — SQLSpec statement compilation.
 [^sa-dialects]: `src/py/vertebra/extensions/sqlalchemy/dialects.py` — SQLAlchemy PostgreSQL dialects.
