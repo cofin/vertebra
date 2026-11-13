@@ -5,8 +5,9 @@ chapter_id: ch07-wheel-ci-and-benchmarks
 title: "Chapter 07: Wheel Isolation, CI Lanes, Free-Threaded Proofs, and Benchmarks"
 description: "Add verify_postgres_wheel.py, CI/release 14-class smoke checks, 3.14t/3.15t concurrent pool tests, postgres-bench comparator, Criterion benches, and testing OKF sync."
 status: stable
-state: active
-updated_at: "2026-11-13T22:48:50Z"
+state: completed
+last_reviewed_commit: af023efd
+updated_at: "2026-11-13T22:53:00Z"
 planning_status: complete
 planning_quality: standard
 planning_degraded_reason: null
@@ -15,9 +16,12 @@ generated:
   by: flow-plan
   at: "2026-11-13T00:25:00Z"
 verified:
-  - by: agent:plan-generator
-    at: "2026-11-13T00:25:00Z"
-    commit: 18baadcd
+  - by: agent:code-reviewer
+    at: "2026-11-13T22:52:13Z"
+    commit: af023efd
+  - by: agent:quality-reviewer
+    at: "2026-11-13T22:52:07Z"
+    commit: af023efd
 tags:
   - postgres
   - wheel
@@ -92,7 +96,7 @@ Completes wheel packaging isolation, free-threaded 8-thread pool proofs, CI conf
 
 ## 6. Current State & Remaining Plan Snapshot
 
-Implemented and remediated through `480840a3` (`4/4` tasks verified offline after `maturin develop` rebuild, `mypy.stubtest vertebra._postgres`, shared `_wheel_verify.py` archive verifier extraction, zero-deselection `VERTEBRA_CONFORMANCE_ENGINES` / `VERTEBRA_CONFORMANCE_POSTGRES_VERSION` DB and cache filter tests, and CI matrix OKF sync; awaiting final chapter review pass). Offline gate passes cleanly across Rust (`postgres_native` Criterion test benches + Clippy + fmt), Python (Ruff, Mypy, wheel/packaging/benchmark/free-threaded/zero-skip-gate/conformance suites), and OKF validation; live wheel build and Docker/bench runs execute in `/flow:finish`.
+Completed and reviewed through `480840a3` (sync `af023efd`; `4/4` tasks verified offline after `maturin develop` rebuild, `mypy.stubtest vertebra._postgres`, shared `_wheel_verify.py` archive verifier extraction, zero-deselection `VERTEBRA_CONFORMANCE_ENGINES` / `VERTEBRA_CONFORMANCE_POSTGRES_VERSION` DB and cache filter tests, and CI/benchmark OKF sync; both zero-context `code-reviewer` and `quality-reviewer` passes approved with zero findings). Live wheel build and Docker/bench lanes run in `/flow:finish`.
 
 ```bash
 PYTHONPATH="$(pwd)/src/py" cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --bench postgres_native --locked && uv run --no-sync pytest src/py/tests/unit/test_freethreaded_gil.py src/py/tests/unit/db/test_optional_driver_wheels.py src/py/tests/unit/tools/test_postgres_benchmarks.py -q && make review-check

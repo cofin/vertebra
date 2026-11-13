@@ -5,12 +5,12 @@ chapter_id: ch08-user-and-reference-docs
 title: "Chapter 08: User Guides, Reference Stubs, README, and AGENTS.md Sync"
 description: "Synchronize Zensical usage/reference pages, tabbed [postgres] install blocks, native-stubs.md, README.md, and AGENTS.md."
 status: stable
-state: planned
+state: active
 planning_status: complete
 planning_quality: standard
 planning_degraded_reason: null
 plan_commit: 18baadcd
-updated_at: "2026-11-13T00:25:00Z"
+updated_at: "2026-11-13T22:53:00Z"
 generated:
   by: flow-plan
   at: "2026-11-13T00:25:00Z"
