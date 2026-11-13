@@ -1,5 +1,10 @@
 # Bundle Activity Log
 
+## [2026-11-13T20:35:00Z] chapter-complete | mcp-protocol-completeness ch06-stdio-serve-bridge-and-gcp-auth
+
+- Closed `ch06-stdio-serve-bridge-and-gcp-auth` at `7607f4d8`: implemented concurrent incremental `run_stdio_server` with `notifications/cancelled` cancellation, legacy session stdout relay, and EOF cleanup; added `resolve_app_mcp_core` / `is_litestar_mcp_app` app discovery (`vtb ai mcp serve --app`, removing `--name`); added headerless legacy `mcp_request_headers(..., protocol_version=None)`, `BridgeTransport` / `GET` SSE relay (`Last-Event-ID`, `5` reconnects, `404`/`405` stop, EOF `DELETE`), and `OidcTokenSource` (`AsyncGcpIdTokenCache`, single `401` retry) with `vtb ai mcp bridge --audience`; and shipped ES256 `IapIdentitySource` + `iap` extra (`uv lock --check --offline`, `ruff`, `mypy`, and `276` Python tests clean).
+- Advanced active frontier to `ch07-docs-and-okf-sync` (`mcp-protocol-completeness:ch07:t01`; `4` tasks remain).
+
 ## [2026-11-13T05:29:35Z] chapter-complete | mcp-protocol-completeness ch05-framework-mounts-and-litestar-parity
 
 - Closed `ch05-framework-mounts-and-litestar-parity` at `63904aab` (sync `0166aa62`): wired `SkillCatalog` coercion, well-known `skills` lists, and startup `MCPCore.validate()` across `AgentPlugin`, Starlette/FastAPI, Flask, and Django MCP mounts, bumped `litestar-mcp>=0.20.0` in `pyproject.toml` + `uv.lock`, added pre-`0.20` capability guard in `create_mcp_plugin`, and merged Litestar `skill_catalog` names in `/.well-known/mcp.json` (`uv lock --check`, `ruff`, `mypy` across `48` source files, and `279` tests clean).

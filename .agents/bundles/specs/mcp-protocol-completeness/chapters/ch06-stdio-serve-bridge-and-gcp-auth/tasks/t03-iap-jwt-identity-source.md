@@ -6,7 +6,8 @@ chapter_id: ch06-stdio-serve-bridge-and-gcp-auth
 title: Implement IapIdentitySource ES256 Signed-Header JWT Verification
 description: Add IapIdentitySource verifying x-goog-iap-jwt-assertion against Google IAP JWKs in agent/core/identity.py and declare the iap optional dependency extra.
 status: stable
-state: pending
+state: completed
+commit: 7607f4d8
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -67,8 +68,8 @@ uv lock --check --offline && uv run --no-sync ruff check src/py/vertebra/agent/c
 
 ## Acceptance Criteria
 
-- [ ] `IapIdentitySource` authenticates only cryptographically verified ES256 `x-goog-iap-jwt-assertion` tokens.
-- [ ] Plain `x-goog-authenticated-user-email` headers never grant caller identity.
+- [x] `IapIdentitySource` authenticates only cryptographically verified ES256 `x-goog-iap-jwt-assertion` tokens.
+- [x] Plain `x-goog-authenticated-user-email` headers never grant caller identity.
 
 [^identity-py]: `src/py/vertebra/agent/core/identity.py::IdentitySource` — IdentitySource protocol and mTLS/callable presets.
 [^iap-docs]: `https://cloud.google.com/iap/docs/signed-headers-howto` — Google Cloud IAP signed JWT header specification.

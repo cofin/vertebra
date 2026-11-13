@@ -5,16 +5,16 @@ chapter_id: ch06-stdio-serve-bridge-and-gcp-auth
 title: "Chapter 06: Incremental Stdio, CLI Serve/Bridge Discovery, OIDC, and IAP Auth"
 description: "Make stdio incremental and session-aware, wire vtb ai mcp serve to discovered apps, upgrade bridge for dual-mode SSE relay and AsyncGcpIdTokenCache OIDC auth, and add IapIdentitySource."
 status: stable
-state: planned
-planning_status: empirical_dependent
+state: completed
+planning_status: complete
 planning_quality: standard
 planning_degraded_reason: null
 depends_on_chapters:
   - ch04-skills-and-mcp-apps-core
-replan_trigger: Confirm AsyncGcpIdTokenCache.get_token and invalidate signatures from gcp-embeddings-and-identity ch02 before executing t02
+replan_trigger: null
 plan_commit: 18baadcd
-last_reviewed_commit: null
-updated_at: "2026-11-12T23:45:00Z"
+last_reviewed_commit: 7607f4d8
+updated_at: "2026-11-13T20:35:00Z"
 generated:
   by: flow-plan
   at: "2026-11-12T23:45:00Z"
@@ -78,9 +78,9 @@ sources:
 
 ## 5. Implementation Plan
 
-- [ ] [t01-incremental-stdio-and-serve-discovery.md](tasks/t01-incremental-stdio-and-serve-discovery.md) — Make `run_stdio_server` incremental/session-aware and wire `vtb ai mcp serve` app discovery
-- [ ] [t02-bridge-dual-mode-and-oidc-auth.md](tasks/t02-bridge-dual-mode-and-oidc-auth.md) — Add dual-mode `run_stdio_http_bridge`, legacy SSE relay, and `OidcTokenSource` (`--audience`)
-- [ ] [t03-iap-jwt-identity-source.md](tasks/t03-iap-jwt-identity-source.md) — Implement `IapIdentitySource` ES256 signed-header JWT verification and `iap` extra
+- [x] [7607f4d8] [t01-incremental-stdio-and-serve-discovery.md](tasks/t01-incremental-stdio-and-serve-discovery.md) — Make `run_stdio_server` incremental/session-aware and wire `vtb ai mcp serve` app discovery
+- [x] [7607f4d8] [t02-bridge-dual-mode-and-oidc-auth.md](tasks/t02-bridge-dual-mode-and-oidc-auth.md) — Add dual-mode `run_stdio_http_bridge`, legacy SSE relay, and `OidcTokenSource` (`--audience`)
+- [x] [7607f4d8] [t03-iap-jwt-identity-source.md](tasks/t03-iap-jwt-identity-source.md) — Implement `IapIdentitySource` ES256 signed-header JWT verification and `iap` extra
 
 ## 6. Current State & Remaining Plan Snapshot
 

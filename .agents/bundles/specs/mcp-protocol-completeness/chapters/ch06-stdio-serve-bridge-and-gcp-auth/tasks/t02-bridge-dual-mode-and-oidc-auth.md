@@ -6,7 +6,8 @@ chapter_id: ch06-stdio-serve-bridge-and-gcp-auth
 title: Implement Dual-Mode Bridge SSE Relay and Refreshed OIDC Token Auth
 description: "Upgrade run_stdio_http_bridge with BridgeTransport, legacy handshake header preservation, GET SSE relay, EOF DELETE, and OidcTokenSource (--audience)."
 status: stable
-state: pending
+state: completed
+commit: 7607f4d8
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -70,8 +71,8 @@ uv run --no-sync ruff check src/py/vertebra/agent/mcp/bridge.py src/py/vertebra/
 
 ## Acceptance Criteria
 
-- [ ] `vtb ai mcp bridge` forwards both `2026-07-28` and legacy session/SSE protocols cleanly.
-- [ ] `--audience` authenticates via `AsyncGcpIdTokenCache` with bounded single-retry `401` refresh.
+- [x] `vtb ai mcp bridge` forwards both `2026-07-28` and legacy session/SSE protocols cleanly.
+- [x] `--audience` authenticates via `AsyncGcpIdTokenCache` with bounded single-retry `401` refresh.
 
 [^bridge-py]: `src/py/vertebra/agent/mcp/bridge.py::run_stdio_http_bridge` — Synchronous POST-only MCP bridge.
 [^headers-py]: `src/py/vertebra/agent/mcp/client.py::mcp_request_headers` — MCP request header builder.

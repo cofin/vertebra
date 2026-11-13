@@ -6,7 +6,8 @@ chapter_id: ch06-stdio-serve-bridge-and-gcp-auth
 title: Make Stdio Incremental/Session-Aware and Discover App MCP Surface in serve
 description: "Upgrade run_stdio_server for incremental concurrent frames, cancellation, and session notifications, and wire vtb ai mcp serve to discovered app MCPCore."
 status: stable
-state: pending
+state: completed
+commit: 7607f4d8
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -67,8 +68,8 @@ uv run --no-sync ruff check src/py/vertebra/agent/mcp/stdio.py src/py/vertebra/a
 
 ## Acceptance Criteria
 
-- [ ] `run_stdio_server` answers interactive frames while stdin remains open and cancels in-flight requests.
-- [ ] `vtb ai mcp serve` serves the discovered app's MCP surface and removes `--name`.
+- [x] `run_stdio_server` answers interactive frames while stdin remains open and cancels in-flight requests.
+- [x] `vtb ai mcp serve` serves the discovered app's MCP surface and removes `--name`.
 
 [^stdio-py]: `src/py/vertebra/agent/mcp/stdio.py::run_stdio_server` — Stdio runner reading full stdin before dispatch.
 [^cli-serve]: `src/py/vertebra/cli/ai.py::serve` — vtb ai mcp serve CLI command.
