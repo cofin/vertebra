@@ -3,13 +3,18 @@
 import ast
 import dataclasses
 import inspect
+import json
+import time
+import urllib.error
 from collections.abc import Mapping
 from types import SimpleNamespace
 from typing import Annotated, Any, Literal, TypedDict, cast
 
 import anyio
+import jwt
 import msgspec
 import pytest
+from cryptography.hazmat.primitives.asymmetric import ec
 from starlette.requests import Request
 
 import vertebra.agent as agent_pkg
@@ -35,7 +40,14 @@ from vertebra.agent.core.guards import (
     RequireScopes,
     TokenBucketGuard,
 )
-from vertebra.agent.core.identity import CallableIdentitySource, MtlsIdentitySource
+from vertebra.agent.core.identity import (
+    IAP_ASSERTION_HEADER,
+    IAP_ISSUER,
+    CallableIdentitySource,
+    IapIdentitySource,
+    IdentityRequest,
+    MtlsIdentitySource,
+)
 from vertebra.agent.core.jsonrpc import (
     FRAME_KIND_BATCH_REQUEST,
     FRAME_KIND_NOTIFICATION,
@@ -1022,3 +1034,84 @@ def test_mcp_tool_rejects_invalid_ui_visibility(bad_visibility: Any) -> None:
     """Invalid SEP-1865 ui_visibility tokens raise ValueError at decoration time."""
     with pytest.raises(ValueError, match="ui_visibility"):
         mcp_tool(ui_visibility=bad_visibility)
+
+
+@pytest.mark.parametrize("bad_audience", ["", "   ", "https://example.com", "/projects/abc/global/backendServices/1"])
+def test_iap_identity_source_rejects_malformed_audience(bad_audience: str) -> None:
+    """Verify IapIdentitySource validates Google Cloud /projects/<number>/... audience paths eagerly."""
+    with pytest.raises(ValueError, match="Invalid IAP audience"):
+        IapIdentitySource(bad_audience)
+
+
+@pytest.mark.parametrize(
+    ("scenario", "expected_user", "expected_email"),
+    [
+        ("valid", "accounts.google.com:12345", "alice@example.com"),
+        ("wrong_key", None, None),
+        ("wrong_audience", None, None),
+        ("expired", None, None),
+        ("plain_email_only", None, None),
+    ],
+)
+def test_iap_identity_source_es256_verification(
+    scenario: str,
+    expected_user: str | None,
+    expected_email: str | None,
+) -> None:
+    """Verify ES256 signed IAP assertion validation and fail-closed behavior on spoofed or expired headers."""
+    audience = "/projects/123456789/global/backendServices/987654321"
+    valid_key = ec.generate_private_key(ec.SECP256R1())
+    wrong_key = ec.generate_private_key(ec.SECP256R1())
+    public_jwk = json.loads(jwt.algorithms.ECAlgorithm.to_jwk(valid_key.public_key()))
+    public_jwk["kid"] = "iap-test-kid-1"
+    source = IapIdentitySource(audience, jwks={"keys": [public_jwk]})
+
+    if scenario == "plain_email_only":
+        headers = {"x-goog-authenticated-user-email": "accounts.google.com:attacker@example.com"}
+        assert source.resolve(IdentityRequest(headers=headers)) is None
+        return
+
+    now = int(time.time())
+    signing_key = wrong_key if scenario == "wrong_key" else valid_key
+    token_aud = "/projects/999/global/backendServices/1" if scenario == "wrong_audience" else audience
+    token_exp = now - 60 if scenario == "expired" else now + 300
+    token = jwt.encode(
+        {
+            "iss": IAP_ISSUER,
+            "aud": token_aud,
+            "sub": "accounts.google.com:12345",
+            "email": "alice@example.com",
+            "iat": now - 10,
+            "exp": token_exp,
+        },
+        signing_key,
+        algorithm="ES256",
+        headers={"kid": "iap-test-kid-1"},
+    )
+    resolved = source.resolve(IdentityRequest(headers={IAP_ASSERTION_HEADER: token}))
+    if expected_user is None:
+        assert resolved is None
+    else:
+        assert resolved is not None
+        assert resolved.user_id == expected_user
+        assert resolved.email == expected_email
+        assert resolved.auth_scheme == "iap"
+
+
+def test_iap_identity_source_unreachable_jwk_url_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify JWK endpoint transport errors fail closed (None) without leaking exceptions."""
+    audience = "/projects/123456789/global/backendServices/987654321"
+    key = ec.generate_private_key(ec.SECP256R1())
+    now = int(time.time())
+    token = jwt.encode(
+        {"iss": IAP_ISSUER, "aud": audience, "sub": "user-1", "iat": now, "exp": now + 60},
+        key,
+        algorithm="ES256",
+        headers={"kid": "missing-kid"},
+    )
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        lambda *_a, **_kw: (_ for _ in ()).throw(urllib.error.URLError("unreachable")),
+    )
+    source = IapIdentitySource(audience, key_url="https://127.0.0.1:1/unreachable-jwks")
+    assert source.resolve(IdentityRequest(headers={IAP_ASSERTION_HEADER: token})) is None

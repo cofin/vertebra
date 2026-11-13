@@ -17,11 +17,13 @@ import msgspec
 
 from vertebra.agent.mcp.bridge import run_stdio_http_bridge
 from vertebra.agent.mcp.client import mcp_request_headers
-from vertebra.agent.mcp.models import MCPConfig
 from vertebra.agent.mcp.service import MCPCore
 from vertebra.agent.mcp.stdio import run_stdio_server
+from vertebra.cli.errors import CLIError
+from vertebra.cli.plugin_registry import VertebraEnv
 from vertebra.embeddings._models import ModelSpec, get_model_spec, list_model_specs
 from vertebra.storage import SyncObjectStore
+from vertebra.utils.module_loader import ensure_module
 from vertebra.utils.serializers import decode_json, encode_json_bytes, format_json
 
 __all__ = (
@@ -30,10 +32,12 @@ __all__ = (
     "ai",
     "bridge",
     "extract_mcp_headers_from_jsonrpc",
+    "is_litestar_mcp_app",
     "list_models",
     "mcp",
     "models",
     "pull_model",
+    "resolve_app_mcp_core",
     "run_mcp_stdio_bridge",
     "serve",
     "stage_model",
@@ -70,6 +74,7 @@ def run_mcp_stdio_bridge(
     *,
     url: str,
     bearer_token: str | None = None,
+    audience: str | None = None,
     timeout_s: float = 30.0,
     max_message_bytes: int = 4_194_304,
     stdin: TextIO | None = None,
@@ -80,12 +85,69 @@ def run_mcp_stdio_bridge(
     return run_stdio_http_bridge(
         url=url,
         bearer_token=bearer_token,
+        audience=audience,
         timeout_s=timeout_s,
         max_message_bytes=max_message_bytes,
         stdin=stdin,
         stdout=stdout,
         transport=transport,
     )
+
+
+def resolve_app_mcp_core(target: Any) -> MCPCore | None:
+    """Discover an attached MCPCore from an application, plugin, state, or mounted carrier."""
+    if isinstance(target, MCPCore):
+        return target
+    if target is None:
+        return None
+
+    for attr in ("core", "mcp_core", "mcp_service", "mcp_app"):
+        candidate = getattr(target, attr, None)
+        if isinstance(candidate, MCPCore):
+            return candidate
+        nested_core = getattr(candidate, "core", None) if candidate is not None else None
+        if isinstance(nested_core, MCPCore):
+            return nested_core
+
+    state = getattr(target, "state", None)
+    if state is not None:
+        for key in ("mcp_service", "mcp_core", "mcp_app"):
+            candidate = (
+                state.get(key) if isinstance(state, dict) or hasattr(state, "get") else getattr(state, key, None)
+            )
+            if isinstance(candidate, MCPCore):
+                return candidate
+            nested_core = getattr(candidate, "core", None) if candidate is not None else None
+            if isinstance(nested_core, MCPCore):
+                return nested_core
+
+    extensions = getattr(target, "extensions", None)
+    if isinstance(extensions, dict):
+        ext_app = extensions.get("vertebra_mcp_app")
+        ext_core = getattr(ext_app, "core", None) if ext_app is not None else None
+        if isinstance(ext_core, MCPCore):
+            return ext_core
+
+    plugins = getattr(target, "plugins", ()) or ()
+    for plugin in plugins:
+        if isinstance(plugin, MCPCore):
+            return plugin
+        for attr in ("mcp_service", "mcp_core", "core"):
+            candidate = getattr(plugin, attr, None)
+            if isinstance(candidate, MCPCore):
+                return candidate
+    return None
+
+
+def is_litestar_mcp_app(target: Any) -> bool:
+    """Return True when target is a Litestar application configured with LitestarMCP."""
+    if target is None:
+        return False
+    state = getattr(target, "state", None)
+    if state is not None and hasattr(state, "get") and state.get("litestar_mcp_plugin") is not None:
+        return True
+    plugins = getattr(target, "plugins", ()) or ()
+    return any(type(plugin).__module__.startswith("litestar_mcp") for plugin in plugins)
 
 
 @click.group()
@@ -284,22 +346,63 @@ def mcp() -> None:
 @mcp.command()
 @click.option("--url", required=True, help="Remote MCP HTTP/SSE endpoint URL")
 @click.option("--token", "bearer_token", default=None, help="Bearer / OAuth2 / OIDC access token")
+@click.option("--audience", default=None, help="Target OIDC audience URL for AsyncGcpIdTokenCache")
 @click.option("--timeout", "timeout_s", type=float, default=30.0, help="Per-request HTTP timeout in seconds")
-def bridge(url: str, bearer_token: str | None, timeout_s: float) -> None:
+def bridge(url: str, bearer_token: str | None, audience: str | None, timeout_s: float) -> None:
     """Bridge local newline-delimited JSON-RPC 2.0 stdio to a remote HTTP/SSE MCP endpoint."""
-    exit_code = run_mcp_stdio_bridge(url=url, bearer_token=bearer_token, timeout_s=timeout_s)
+    if bearer_token is not None and audience is not None:
+        msg = "Options '--token' and '--audience' are mutually exclusive."
+        raise click.UsageError(msg)
+    kwargs: dict[str, Any] = {
+        "url": url,
+        "bearer_token": bearer_token,
+        "timeout_s": timeout_s,
+    }
+    if audience is not None:
+        kwargs["audience"] = audience
+    exit_code = run_mcp_stdio_bridge(**kwargs)
     if exit_code != 0:
         sys.exit(exit_code)
 
 
 @mcp.command()
-@click.option("--name", default="vertebra-mcp", help="Server name")
-def serve(name: str) -> None:
-    """Run an in-process MCP service over standard input/output (stdio)."""
-    service = MCPCore(config=MCPConfig(server_name=name))
-    exit_code = anyio.run(lambda: run_stdio_server(service))
-    if exit_code != 0:
-        sys.exit(exit_code)
+@click.option("--app", "app_path", default=None, help="Application import path in MODULE:ATTR format")
+@click.option(
+    "--app-dir",
+    type=click.Path(file_okay=False, dir_okay=True),
+    default=None,
+    help="Working directory for application autodiscovery",
+)
+def serve(app_path: str | None, app_dir: str | None) -> None:
+    """Serve a discovered application MCP surface over standard input/output (stdio)."""
+    resolved_dir = Path(app_dir) if app_dir is not None else None
+    try:
+        env = VertebraEnv.from_env(app_path=app_path, app_dir=resolved_dir)
+    except (CLIError, Exception) as exc:
+        msg = str(exc)
+        raise click.ClickException(msg) from exc
+
+    core = resolve_app_mcp_core(env.app)
+    if core is not None:
+        exit_code = anyio.run(lambda: run_stdio_server(core))
+        if exit_code != 0:
+            sys.exit(exit_code)
+        return
+
+    if is_litestar_mcp_app(env.app):
+        litestar_stdio = ensure_module(
+            "litestar_mcp.mcp.stdio",
+            package="litestar-mcp",
+            install_package="litestar-mcp>=0.20.0",
+            extra="mcp",
+        )
+        exit_code = anyio.run(lambda: litestar_stdio.run_stdio(env.app))
+        if exit_code != 0:
+            sys.exit(exit_code)
+        return
+
+    msg = f"Application {env.app_path!r} does not expose an MCP service."
+    raise click.ClickException(msg)
 
 
 def _model_slug(name: str) -> str:
