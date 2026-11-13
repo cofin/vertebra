@@ -6,7 +6,7 @@ title: "Chapter 07: Wheel Isolation, CI Lanes, Free-Threaded Proofs, and Benchma
 description: "Add verify_postgres_wheel.py, CI/release 14-class smoke checks, 3.14t/3.15t concurrent pool tests, postgres-bench comparator, Criterion benches, and testing OKF sync."
 status: stable
 state: active
-updated_at: "2026-11-13T22:13:00Z"
+updated_at: "2026-11-13T22:30:00Z"
 planning_status: complete
 planning_quality: standard
 planning_degraded_reason: null
@@ -43,6 +43,9 @@ sources:
   - id: verify-pg-wheel
     resource: tools/scripts/verify_postgres_wheel.py
     title: "PostgreSQL standalone wheel, sdist, and 14-class isolation verifier"
+  - id: wheel-verify-helper
+    resource: tools/scripts/_wheel_verify.py
+    title: "Shared wheel isolation, linkage, and isolated venv helper module"
   - id: pg-bench-py
     resource: tools/benchmarks/postgres.py
     title: "PostgreSQL comparative benchmark capture and threshold comparator CLI"
@@ -64,35 +67,35 @@ Completes wheel packaging isolation, free-threaded 8-thread pool proofs, CI conf
 
 ## 2. Requirements, Concrete Contracts & Architecture
 
-- `tools/scripts/verify_postgres_wheel.py` [^verify-pg-wheel]: verifies sdist/wheel file isolation, `MissingDependencyError` when uninstalled (`SyncPostgreSQLDriver`, `AsyncPostgreSQLDriver`, `PostgreSQLQueueBackend`), and all 14 `_postgres` classes + pure-Rust linkage when installed; aligns `src/rs/vertebra-postgres/pyproject.toml` uniformly with sibling extension manifests (`vertebra-oracle`) and clears the legacy `cloudsql.py` `extra="gcp"` violation flagged by `test_packaging_and_pgo.py`.
+- `tools/scripts/verify_postgres_wheel.py` [^verify-pg-wheel] + `tools/scripts/_wheel_verify.py` [^wheel-verify-helper]: verifies sdist/wheel file isolation, lazy-probe `MissingDependencyError` when uninstalled (`SyncPostgreSQLDriver().connect()`, `asyncio.run(AsyncPostgreSQLDriver().connect())`, `PostgreSQLQueueBackend()`), and all 14 `_postgres` classes + pure-Rust linkage when installed; aligns `src/rs/vertebra-postgres/pyproject.toml` uniformly with sibling extension manifests (`vertebra-oracle`) and clears the legacy `cloudsql.py` `extra="gcp"` violation flagged by `test_packaging_and_pgo.py`.
 - `tools/benchmarks/postgres.py` [^pg-bench-py] + `benches/postgres_native.rs` [^pg-bench-rs] + `Makefile`: `postgres-test`, `postgres-wheel-check`, `postgres-bench`, and offline-testable `postgres-bench-check`.
 
 ## 3. Documentation & OKF Knowledge Plan
 
-`t04` updates `benchmarks-and-free-threaded.md` (`164L`), `polyglot-test-matrix.md` (`192L <= 200L`), and `workflow.md` (`119L <= 200L`).
+`t04` updates `benchmarks-and-free-threaded.md` (`170L`), `polyglot-test-matrix.md` (`193L <= 200L`), and `workflow.md` (`119L <= 200L`).
 
 ## 4. Requirement-to-Task Traceability Matrix
 
 | Requirement | Task | Primary Files | Verification |
 | --- | --- | --- | --- |
-| `R4` Wheel verifier, CI/release & free-threaded pool proof | `t01` | `verify_postgres_wheel.py`, `ci.yml`, `release.yaml` | `pytest test_freethreaded_gil.py` |
+| `R4` Wheel verifier, CI/release & free-threaded pool proof | `t01` | `_wheel_verify.py`, `verify_postgres_wheel.py`, `ci.yml`, `release.yaml` | `pytest test_freethreaded_gil.py` |
 | `R4` `postgres-bench` group & comparator CLI | `t02` | `tools/benchmarks/postgres.py`, `pyproject.toml`, `uv.lock` | `pytest test_postgres_benchmarks.py` |
-| `R4` Criterion `postgres_native.rs` & `Makefile` targets | `t03` | `Cargo.toml`, `benches/postgres_native.rs`, `Makefile` | `cargo check -p vertebra-postgres --benches` |
+| `R4` Criterion `postgres_native.rs` & `Makefile` targets | `t03` | `Cargo.toml`, `benches/postgres_native.rs`, `Makefile` | `cargo test -p vertebra-postgres --bench postgres_native` |
 | `R5` Testing & workflow OKF sync (`<= 200L`) | `t04` | 3 OKF chapters | `make review-check` |
 
 ## 5. Implementation Plan
 
-- [x] [9a3631bb] [t01-verify-postgres-wheel-ci-and-freethreaded.md](tasks/t01-verify-postgres-wheel-ci-and-freethreaded.md) — Implement two-probe verify_postgres_wheel.py, 14-class release smoke checks, zero-skip CI PG14-18 lanes, and 8-thread free-threaded pool tests.
-- [x] [9a3631bb] [t02-postgres-bench-group-and-comparator.md](tasks/t02-postgres-bench-group-and-comparator.md) — Declare [dependency-groups].postgres-bench and implement schema_version=1 PostgreSQL benchmark capture and threshold comparator CLI.
-- [x] [9a3631bb] [t03-criterion-benches-and-makefile-lanes.md](tasks/t03-criterion-benches-and-makefile-lanes.md) — Implement Criterion codec/wire/pipeline/arrow microbenchmarks in vertebra-postgres and wire postgres-test/wheel-check/bench targets in Makefile.
-- [x] [9a3631bb] [t04-testing-and-workflow-okf-sync.md](tasks/t04-testing-and-workflow-okf-sync.md) — Update benchmarks-and-free-threaded.md, trim polyglot-test-matrix.md (<= 200L), and add postgres-bench targets to workflow.md.
+- [x] [cb3a9fa6] [t01-verify-postgres-wheel-ci-and-freethreaded.md](tasks/t01-verify-postgres-wheel-ci-and-freethreaded.md) — Implement two-probe verify_postgres_wheel.py, 14-class release smoke checks, zero-skip CI PG14-18 lanes, and 8-thread free-threaded pool tests.
+- [x] [cb3a9fa6] [t02-postgres-bench-group-and-comparator.md](tasks/t02-postgres-bench-group-and-comparator.md) — Declare [dependency-groups].postgres-bench and implement schema_version=1 PostgreSQL benchmark capture and threshold comparator CLI.
+- [x] [cb3a9fa6] [t03-criterion-benches-and-makefile-lanes.md](tasks/t03-criterion-benches-and-makefile-lanes.md) — Implement Criterion codec/wire/pipeline/arrow microbenchmarks in vertebra-postgres and wire postgres-test/wheel-check/bench targets in Makefile.
+- [x] [cb3a9fa6] [t04-testing-and-workflow-okf-sync.md](tasks/t04-testing-and-workflow-okf-sync.md) — Update benchmarks-and-free-threaded.md, trim polyglot-test-matrix.md (<= 200L), and add postgres-bench targets to workflow.md.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-Implemented at `9a3631bb` (`4/4` tasks verified offline; awaiting zero-context chapter review). Offline gate passes (`cargo check` / `clippy -D warnings` / `rustfmt --check` on `vertebra-postgres --benches --locked`; `172 passed, 6 skipped` across free-threaded/packaging/wheel/benchmark/review suites + `11 passed` cloud dialers + `9 passed, 1 skipped` postgres-bench offline tests; Ruff, Mypy `5` source files, `uv lock --check`, and `review_setup validate` clean); live wheel build and Docker/bench runs execute in `/flow:finish`.
+Implemented and remediated through `cb3a9fa6` (`4/4` tasks verified offline after `maturin develop` rebuild and `mypy.stubtest vertebra._postgres`; awaiting zero-context chapter re-review). Offline gate passes (7/7 `postgres_native` Criterion test benchmarks pass; `cargo clippy` / `fmt --check` clean; Ruff `check` / `format --check` clean; Mypy `446` source files + `13` touched/test files clean; `189 passed, 43 skipped` across free-threaded/wheel/packaging/postgres-bench suites with zero `_postgres` skips; `uv lock --check` and `review_setup validate` clean); live wheel build and Docker/bench runs execute in `/flow:finish`.
 
 ```bash
-cargo check --manifest-path src/rs/Cargo.toml -p vertebra-postgres --benches --locked && uv run --no-sync pytest src/py/tests/unit/test_freethreaded_gil.py src/py/tests/unit/db/test_optional_driver_wheels.py src/py/tests/unit/tools/test_postgres_benchmarks.py -q && make review-check
+PYTHONPATH="$(pwd)/src/py" cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --bench postgres_native --locked && uv run --no-sync pytest src/py/tests/unit/test_freethreaded_gil.py src/py/tests/unit/db/test_optional_driver_wheels.py src/py/tests/unit/tools/test_postgres_benchmarks.py -q && make review-check
 ```
 
 [^pg-cargo]: `src/rs/vertebra-postgres/Cargo.toml` — vertebra-postgres crate manifest.
@@ -101,5 +104,6 @@ cargo check --manifest-path src/rs/Cargo.toml -p vertebra-postgres --benches --l
 [^ci-yml]: `.github/workflows/ci.yml` — GitHub Actions CI workflow.
 [^release-yml]: `.github/workflows/release.yaml` — Release wheel build and smoke matrix.
 [^verify-pg-wheel]: `tools/scripts/verify_postgres_wheel.py` — PostgreSQL standalone wheel, sdist, and 14-class isolation verifier.
+[^wheel-verify-helper]: `tools/scripts/_wheel_verify.py` — Shared wheel isolation, linkage, and isolated venv helper module.
 [^pg-bench-py]: `tools/benchmarks/postgres.py` — PostgreSQL comparative benchmark capture and threshold comparator CLI.
 [^pg-bench-rs]: `src/rs/vertebra-postgres/benches/postgres_native.rs` — PostgreSQL Criterion codec, wire bind, PGCOPY, and pgoutput benchmarks.
