@@ -1,5 +1,10 @@
 # Bundle Activity Log
 
+## [2026-11-13T02:55:00Z] chapter-complete | mcp-protocol-completeness ch01-guards-params-and-alias-cleanup
+
+- Closed `ch01-guards-params-and-alias-cleanup` at `1f269a58` (`179 passed`, `mypy` and `ruff` clean, non-destructive multi-call confirmation gating, strict nested JSON `Mcp-Param-*` type comparison, and `ConfirmationCapacityError` package export).
+- Advanced active frontier to `ch02-version-negotiation-and-sessions` (`mcp-protocol-completeness:ch02:t01`; `21` tasks remain across `ch02`–`ch07`).
+
 ## [2026-11-13T01:59:00Z] chapter-checkpoint | mcp-protocol-completeness ch01-guards-params-and-alias-cleanup
 
 - Completed `ch01-guards-params-and-alias-cleanup` (`t01`–`t04`) at `e22452c5` on `feat/mcp-protocol-completeness`: split `Tool.authorize`/`Tool.call` with `-32004`/`-32005` JSON-RPC error mapping, validated `Mcp-Param-*` headers (`-32020`), hardened `ConfirmationGate` (`consume_call_approval`, `ttl_seconds`, `max_tickets`, exact owner checks), and removed the `MCPService` alias subclass (`177 passed`, `mypy` clean).
