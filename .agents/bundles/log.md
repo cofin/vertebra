@@ -1,5 +1,10 @@
 # Bundle Activity Log
 
+## [2026-11-13T05:51:45Z] chapter-complete | server-runtime-correctness ch05-fastpath-consolidation
+
+- Closed `ch05-fastpath-consolidation` at `780338a4` (sync `d95d65d3`): extracted `FASTPATH_ATTR = "__vertebra_fastpath__"`, `CompiledRouteBase`, `get_attached_fastpath`/`set_attached_fastpath`, and `has_custom_exception_handlers` in `_fastpath_core.py`, removed alias probes across `_fastpath.py`/`_runner.py` and extension plugins, unified all five framework `CompiledRoute` structs, and enforced exact `BUFFERED_RESPONSE_TYPES` copy-free response serialization (`ruff`, `mypy` across `105` files, and `228` tests clean).
+- Advanced active frontier to `ch06-runtime-native-cleanup` (`server-runtime-correctness:ch06:t01`; `7` tasks remain across `ch06`–`ch07`).
+
 ## [2026-11-13T05:21:00Z] chapter-complete | server-runtime-correctness ch04-wheel-smoke-and-ci
 
 - Closed `ch04-wheel-smoke-and-ci` at `11731ca5` (sync `ca20d6ae`): added `VtbRunSmoke` multi-wheel smoke harness in `tools/scripts/smoke_vtb_run.py`, wired `make core-wheel-check` and the `core-wheel-smoke` PR CI job, scoped core wheel `cibuildwheel` build/repair hooks and 4-OS `test_wheels` matrix in `release.yaml`, and added `linux-arm64` to `release-binaries.yml` (`ruff`, `mypy`, `make -n core-wheel-check`, and `66` packaging tests clean).

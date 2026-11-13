@@ -22,17 +22,17 @@ parent_prd: integration-remediation
 plan_revision: 3
 plan_commit: 18baadcd
 last_verified_checkpoint: 780338a4
-last_reviewed_chapter: ch04-wheel-smoke-and-ci
-last_reviewed_commit: ca20d6ae
+last_reviewed_chapter: ch05-fastpath-consolidation
+last_reviewed_commit: d95d65d3
 created_at: "2026-11-12T23:45:00Z"
-updated_at: "2026-11-13T05:37:00Z"
+updated_at: "2026-11-13T05:51:45Z"
 generated:
   by: flow-plan
   at: "2026-11-12T23:45:00Z"
 verified:
   - by: agent:code-reviewer
-    at: "2026-11-13T05:21:00Z"
-    commit: ca20d6ae
+    at: "2026-11-13T05:51:45Z"
+    commit: d95d65d3
 tags:
   - server
   - streaming
