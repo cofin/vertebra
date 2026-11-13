@@ -1,6 +1,6 @@
 """Full Model Context Protocol (MCP) 2026-07-28 JSON-RPC and HTTP core engine.
 
-This module provides MCPCore (and MCPService) implementing transport-agnostic
+This module provides MCPCore implementing transport-agnostic
 MCP 2026-07-28 HTTP handling, server/discover, tools/list, tools/call, resources/*,
 prompts/*, skills/*, tasks/*, and completions with OpenTelemetry observability.
 """
@@ -10,13 +10,13 @@ import dataclasses
 import inspect
 import logging
 from collections.abc import Callable, Mapping
-from typing import Any
+from typing import Any, NoReturn
 
 import msgspec
 
 from vertebra.agent.core.context import AgentContext, bind_agent_context, reset_agent_context
 from vertebra.agent.core.cursor import paginate_sequence
-from vertebra.agent.core.guards import authorize
+from vertebra.agent.core.guards import BudgetExceededError, PermissionDeniedError, RateLimitExceededError
 from vertebra.agent.core.jsonrpc import (
     INVALID_PARAMS,
     INVALID_REQUEST,
@@ -59,10 +59,13 @@ __all__ = [
     "CONFIRMATION_REQUIRED",
     "CONFIRMATION_TOKEN_META_KEY",
     "MCPCore",
-    "MCPService",
+    "PERMISSION_DENIED",
+    "RATE_LIMITED",
 ]
 
 CONFIRMATION_REQUIRED: int = -32003
+PERMISSION_DENIED: int = -32004
+RATE_LIMITED: int = -32005
 CONFIRMATION_TOKEN_META_KEY: str = "vertebra/confirmationToken"
 CACHEABLE_METHODS: frozenset[str] = frozenset(
     {
@@ -185,12 +188,13 @@ class MCPCore:
 
         mcp_method_header = lower_headers.get("mcp-method")
         mcp_name_header = lower_headers.get("mcp-name")
+        has_mcp_param_header = any(key.startswith("mcp-param-") for key in lower_headers)
         if frame_kind == 2:
-            if mcp_method_header is not None or mcp_name_header is not None:
+            if mcp_method_header is not None or mcp_name_header is not None or has_mcp_param_header:
                 return self._jsonrpc_http_error(
                     status=400,
                     code=HEADER_MISMATCH,
-                    message="Mcp-Method and Mcp-Name headers cannot be used with JSON-RPC batch requests",
+                    message="Mcp-Method, Mcp-Name, and Mcp-Param-* headers cannot be used with JSON-RPC batch requests",
                 )
             return self._jsonrpc_http_error(
                 status=400,
@@ -206,7 +210,15 @@ class MCPCore:
                 req_id=frame_id,
             )
 
-        body_dict = decode_json(request.body) if request.body else {}
+        try:
+            body_dict = decode_json(request.body) if request.body else {}
+        except Exception as exc:
+            return self._jsonrpc_http_error(
+                status=400,
+                code=-32700,
+                message=f"Parse error: {exc}",
+                req_id=frame_id,
+            )
         raw_params = body_dict.get("params") if isinstance(body_dict, dict) else None
         params = raw_params if isinstance(raw_params, dict) else {}
         raw_meta = params.get("_meta")
@@ -234,6 +246,15 @@ class MCPCore:
                     req_id=frame_id,
                 )
 
+        param_mismatch = self._validate_mcp_param_headers(
+            request.headers,
+            frame_method=frame_method,
+            params=params,
+            req_id=frame_id,
+        )
+        if param_mismatch is not None:
+            return param_mismatch
+
         current_etag = self.registry.etag()
         if frame_method in CACHEABLE_METHODS and self._match_etag(lower_headers.get("if-none-match"), current_etag):
             return McpHttpResponse(
@@ -258,6 +279,96 @@ class MCPCore:
             return McpHttpResponse(status=202, headers=resp_headers, body=b"")
 
         return McpHttpResponse(status=200, headers=resp_headers, body=resp_bytes)
+
+    def _validate_mcp_param_headers(
+        self,
+        headers: Mapping[str, str],
+        *,
+        frame_method: str | None,
+        params: Mapping[str, Any],
+        req_id: Any = None,
+    ) -> McpHttpResponse | None:
+        """Validate every Mcp-Param-<name> header against decoded JSON-RPC body parameters."""
+        param_headers = [
+            (raw_key, raw_val) for raw_key, raw_val in headers.items() if raw_key.lower().startswith("mcp-param-")
+        ]
+        if not param_headers:
+            return None
+
+        if frame_method in ("tools/call", "prompts/get"):
+            raw_args = params.get("arguments")
+            target_params: Mapping[str, Any] = raw_args if isinstance(raw_args, Mapping) else {}
+        else:
+            target_params = {k: v for k, v in params.items() if k != "_meta"}
+
+        for raw_key, raw_val in param_headers:
+            param_slug = raw_key[len("mcp-param-") :]
+            if not param_slug:
+                return self._jsonrpc_http_error(
+                    status=400,
+                    code=HEADER_MISMATCH,
+                    message="Empty parameter name in Mcp-Param-* header",
+                    req_id=req_id,
+                )
+            decoded_expected = decode_mcp_header_value(raw_val)
+            norm_slug = param_slug.lower().replace("-", "_")
+            matched_values = [
+                val
+                for key, val in target_params.items()
+                if isinstance(key, str) and key.lower().replace("-", "_") == norm_slug
+            ]
+            if not matched_values or not all(
+                self._mcp_param_value_matches(val, decoded_expected) for val in matched_values
+            ):
+                return self._jsonrpc_http_error(
+                    status=400,
+                    code=HEADER_MISMATCH,
+                    message=f"Header {raw_key} '{decoded_expected}' does not match body parameter {param_slug!r}",
+                    req_id=req_id,
+                )
+        return None
+
+    @staticmethod
+    def _mcp_param_value_matches(actual_val: Any, decoded_expected: str) -> bool:
+        if actual_val is None:
+            return False
+        if isinstance(actual_val, str):
+            return actual_val == decoded_expected
+        if isinstance(actual_val, bool):
+            return decoded_expected.lower() in ("true", "false") and (
+                ("true" if actual_val else "false") == decoded_expected.lower()
+            )
+        if isinstance(actual_val, (int, float)):
+            return str(actual_val) == decoded_expected
+        if isinstance(actual_val, (Mapping, list)):
+            try:
+                return bool(decode_json(decoded_expected.encode("utf-8")) == actual_val)
+            except Exception:
+                return False
+        return str(actual_val) == decoded_expected
+
+    @staticmethod
+    def _raise_guard_error(
+        tool_name: str,
+        exc: PermissionDeniedError | RateLimitExceededError | BudgetExceededError,
+    ) -> NoReturn:
+        if isinstance(exc, PermissionDeniedError):
+            reason = str(exc) or "Permission denied"
+            raise JSONRPCErrorException(
+                JSONRPCError(
+                    code=PERMISSION_DENIED,
+                    message=reason,
+                    data={"tool": tool_name, "reason": reason},
+                )
+            ) from exc
+        reason = str(exc) or "Rate limit exceeded"
+        raise JSONRPCErrorException(
+            JSONRPCError(
+                code=RATE_LIMITED,
+                message=reason,
+                data={"tool": tool_name, "reason": reason},
+            )
+        ) from exc
 
     def _is_origin_allowed(self, origin: str | None, host: str | None) -> bool:
         if not origin:
@@ -429,8 +540,10 @@ class MCPCore:
             msg = f"Unknown tool: {tool_name}"
             raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message=msg))
 
-        if spec is not None and spec.guards:
-            await authorize(context, spec)
+        try:
+            await target_tool.authorize(context)
+        except (PermissionDeniedError, RateLimitExceededError, BudgetExceededError) as exc:
+            self._raise_guard_error(tool_name, exc)
 
         meta = params.get("_meta", {})
         call_id = str(params.get("callId", "call_0"))
@@ -446,7 +559,7 @@ class MCPCore:
             async def _run_async_tool() -> None:
                 token = bind_agent_context(task_context)
                 try:
-                    res = await target_tool.invoke(arguments, context=task_context)
+                    res = await target_tool.call(arguments, context=task_context)
                     formatted = self._format_tool_output(res, is_error=False)
                     self.task_store.complete(task.task_id, formatted)
                 except asyncio.CancelledError:
@@ -466,13 +579,15 @@ class MCPCore:
 
         with self.telemetry.span_tool(tool_name, call_id):
             try:
-                raw_result = await target_tool.invoke(arguments, context=context)
+                raw_result = await target_tool.call(arguments, context=context)
                 return self._with_meta("tools/call", self._format_tool_output(raw_result, is_error=False))
             except ToolArgumentError as exc:
                 msg = f"Invalid arguments for tool '{tool_name}': {exc.message}"
                 raise JSONRPCErrorException(
                     JSONRPCError(code=INVALID_PARAMS, message=msg, data={"pointer": exc.pointer})
                 ) from exc
+            except (PermissionDeniedError, RateLimitExceededError, BudgetExceededError) as exc:
+                self._raise_guard_error(tool_name, exc)
             except Exception as exc:
                 logger.exception("Tool '%s' execution raised exception", tool_name)
                 return self._with_meta(
@@ -791,7 +906,7 @@ class MCPCore:
         """Raise unless the call carries a ticket approved for this tool, caller, and arguments."""
         owner_id = self._caller_owner(context)
         token = meta.get(CONFIRMATION_TOKEN_META_KEY) if isinstance(meta, Mapping) else None
-        if self.confirmation_gate.is_call_approved(
+        if self.confirmation_gate.consume_call_approval(
             token if isinstance(token, str) else None,
             tool_name=tool_name,
             arguments=arguments,
@@ -871,10 +986,6 @@ class MCPCore:
     async def _handle_completion(self, params: Any = None, context: Any = None) -> dict[str, Any]:
         """Handle argument completion request."""
         return self._with_meta("completion/complete", {"completion": {"values": [], "total": 0, "hasMore": False}})
-
-
-class MCPService(MCPCore):
-    """MCP 2026-07-28 protocol service specialization of MCPCore."""
 
 
 def _classify_jsonrpc_frame(payload: bytes) -> tuple[int, str | None, str | None]:

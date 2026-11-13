@@ -16,6 +16,8 @@ from typing import TYPE_CHECKING, Annotated, Any, Literal, Union, cast, get_args
 import anyio
 import msgspec
 
+from vertebra.agent.core.context import AgentContext
+from vertebra.agent.core.guards import authorize as authorize_guards
 from vertebra.typing import FrozenBaseStruct
 
 try:
@@ -609,20 +611,28 @@ class Tool:
             instance=instance,
         )
 
-    async def invoke(
+    async def authorize(
+        self,
+        context: AgentContext | None = None,
+        *,
+        connection: Any = None,
+        route_handler: Any = None,
+    ) -> None:
+        """Execute configured authorization guards against the caller context."""
+        if self.guards:
+            await authorize_guards(
+                context,
+                self,
+                connection=connection,
+                route_handler=route_handler,
+            )
+
+    async def call(
         self,
         arguments: dict[str, Any],
         context: Any = None,
     ) -> Any:
-        """Invoke the tool with validated arguments and context injection."""
-        if self.guards:
-            for guard in self.guards:
-                check_fn = getattr(guard, "check", None)
-                target = check_fn if callable(check_fn) else guard
-                guard_res = target(context)
-                if inspect.isawaitable(guard_res):
-                    await guard_res
-
+        """Bind validated arguments and execute the underlying tool callable without running guards."""
         sig = self._signature
         call_kwargs: dict[str, Any] = {}
         has_var_keyword = False
@@ -673,6 +683,15 @@ class Tool:
         if inspect.isawaitable(res):
             return await res
         return res
+
+    async def invoke(
+        self,
+        arguments: dict[str, Any],
+        context: Any = None,
+    ) -> Any:
+        """Authorize and invoke the tool with validated arguments and context injection."""
+        await self.authorize(context)
+        return await self.call(arguments, context=context)
 
     def _convert_argument(self, param_name: str, value: Any, annotation: Any) -> Any:
         """Convert and validate a single argument against its resolved parameter type hint."""

@@ -4,6 +4,8 @@ This module provides deterministic parent-to-child guard resolution across appli
 controller, and tool boundaries, supporting both native AgentContext guards and Litestar guards.
 """
 
+from __future__ import annotations
+
 import inspect
 import time
 from collections.abc import Callable, Coroutine, Sequence
@@ -142,7 +144,7 @@ class GuardChain:
         return tuple(self._guards)
 
     @classmethod
-    def merge(cls, *layers: Sequence[GuardCallable]) -> "GuardChain":
+    def merge(cls, *layers: Sequence[GuardCallable]) -> GuardChain:
         """Merge multiple layers of guards preserving app -> controller -> handler order."""
         combined: list[GuardCallable] = []
         for layer in layers:
@@ -163,15 +165,25 @@ class GuardChain:
             route_handler: Optional route handler object for Litestar guard compatibility.
 
         Raises:
-            PermissionDeniedError: If any guard denies access.
+            PermissionDeniedError: If any guard denies access or requires a missing HTTP connection.
         """
         for guard in self._guards:
             check_fn = getattr(guard, "check", None)
             target = check_fn if callable(check_fn) else guard
             sig = inspect.signature(target)
-            param_count = len(sig.parameters)
+            positional_params = [
+                param
+                for param in sig.parameters.values()
+                if param.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+            ]
 
-            res = target(connection, route_handler) if param_count == 2 and connection is not None else target(ctx)
+            if len(positional_params) == 2:
+                if connection is None:
+                    msg = "Guard requires an HTTP connection"
+                    raise PermissionDeniedError(msg)
+                res = target(connection, route_handler)
+            else:
+                res = target(ctx)
 
             if inspect.isawaitable(res):
                 await res

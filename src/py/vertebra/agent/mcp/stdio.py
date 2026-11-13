@@ -1,6 +1,6 @@
 """Standard input/output (stdio) transport runner for MCP 2026-07-28 services.
 
-This module provides run_stdio_server, allowing an MCPService to be hosted over standard I/O pipes.
+This module provides run_stdio_server, allowing an MCPCore instance to be hosted over standard I/O pipes.
 """
 
 import sys
@@ -11,12 +11,16 @@ import anyio
 import anyio.to_thread
 
 from vertebra.agent.core.context import AgentContext
-from vertebra.agent.mcp.service import MCPService
+from vertebra.agent.mcp.service import MCPCore
 from vertebra.utils.serializers import encode_json_bytes
+
+__all__ = [
+    "run_stdio_server",
+]
 
 
 async def run_stdio_server(
-    service: MCPService,
+    service: MCPCore,
     *,
     stdin: AsyncIterable[bytes] | None = None,
     stdout: Callable[[bytes], Awaitable[None]] | None = None,
@@ -93,8 +97,3 @@ async def run_stdio_server(
                 await write_fn(resp)
 
     return 0
-
-
-__all__ = [
-    "run_stdio_server",
-]

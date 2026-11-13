@@ -9,7 +9,7 @@ from click.testing import CliRunner
 
 from vertebra.agent.core.context import AgentContext, CallerIdentity
 from vertebra.agent.core.schema import tool
-from vertebra.agent.mcp.service import MCPService
+from vertebra.agent.mcp.service import MCPCore
 from vertebra.agent.mcp.stdio import run_stdio_server
 from vertebra.cli.ai import (
     extract_mcp_headers_from_jsonrpc,
@@ -181,7 +181,7 @@ def test_run_mcp_stdio_bridge_max_message_bytes_enforcement() -> None:
 @pytest.mark.parametrize("explicit", [False, True])
 async def test_mcp_stdio_context_session(explicit: bool) -> None:
     """A stdio session reuses one caller context for every dispatched frame."""
-    service = MCPService()
+    service = MCPCore()
     seen: list[AgentContext] = []
 
     @tool(name="whoami")
@@ -217,3 +217,19 @@ async def test_mcp_stdio_context_session(explicit: bool) -> None:
     values = [decode_json(raw)["result"]["content"][0]["text"] for raw in output]
     assert values[0] == values[1]
     assert values[0] == "cli" if explicit else values[0].startswith("stdio-")
+
+
+def test_vtb_mcp_serve_cli_uses_mcp_core(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify vtb ai mcp serve constructs a canonical MCPCore instance."""
+    captured: dict[str, Any] = {}
+
+    async def fake_stdio_runner(service: MCPCore) -> int:
+        captured["service"] = service
+        return 0
+
+    monkeypatch.setattr("vertebra.cli.ai.run_stdio_server", fake_stdio_runner)
+    runner = CliRunner()
+    result = runner.invoke(mcp, ["serve", "--name", "custom-mcp"])
+    assert result.exit_code == 0
+    assert type(captured["service"]) is MCPCore
+    assert captured["service"].config.server_name == "custom-mcp"

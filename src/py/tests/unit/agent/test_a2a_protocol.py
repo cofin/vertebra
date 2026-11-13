@@ -22,10 +22,10 @@ from vertebra.agent.a2a import (
     TaskStatus,
     TextPart,
 )
-from vertebra.agent.bridges import A2aAgentBridge, McpToolBridge
+from vertebra.agent.bridges import A2aAgentBridge, McpToolBridge, mcp_service_to_a2a
 from vertebra.agent.core.context import AgentContext, CallerIdentity
 from vertebra.agent.core.schema import tool
-from vertebra.agent.mcp import MCPConfig, MCPService, ToolRegistry
+from vertebra.agent.mcp import MCPConfig, MCPCore, ToolRegistry
 from vertebra.agent.plugin import AgentPlugin, AgentPluginConfig
 from vertebra.telemetry.otel import TraceContext
 from vertebra.typing import FrozenCamelizedStruct
@@ -562,7 +562,7 @@ async def test_a2a_push_notification_crud_delivery_and_ssrf_guard() -> None:
 @pytest.mark.anyio
 async def test_bidirectional_mcp_and_a2a_bridges_preserve_trace_context() -> None:
     """Verify MCP -> A2aAgentBridge -> McpToolBridge -> MCP preserves unified trace context."""
-    mcp_service = MCPService(config=MCPConfig(server_name="native-mcp"))
+    mcp_service = MCPCore(config=MCPConfig(server_name="native-mcp"))
 
     @tool(name="echo_uppercase", description="Converts input text to uppercase")
     def echo_uppercase(prompt: str) -> str:
@@ -578,6 +578,9 @@ async def test_bidirectional_mcp_and_a2a_bridges_preserve_trace_context() -> Non
     )
     assert a2a_service.config.agent_card is not None
     assert len(a2a_service.config.agent_card.skills) >= 1
+
+    helper_a2a = mcp_service_to_a2a(mcp_service, base_url="http://localhost:8000", path="/a2a")
+    assert helper_a2a.config.agent_card is not None
 
     bridged_tools = McpToolBridge.from_a2a_service(a2a_service, prefix="remote")
     assert len(bridged_tools) == 1
@@ -639,6 +642,10 @@ async def test_a2a_skill_card_projects_from_toolspec_exposure() -> None:
             a2a=A2AConfig(agent_card=AgentCard(name="DualAgent", description="Dual protocol")),
         )
     )
+    assert isinstance(plugin.mcp_service, MCPCore)
+    assert type(plugin.mcp_service) is MCPCore
+    assert isinstance(plugin.mcp_registry, ToolRegistry)
+    assert type(plugin.mcp_registry) is ToolRegistry
     plugin.mcp_registry.register_tool(a2a_visible_tool)
     plugin.mcp_registry.register_tool(mcp_private_tool)
     assert plugin.a2a_service is not None

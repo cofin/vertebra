@@ -17,7 +17,8 @@ import msgspec
 
 from vertebra.agent.mcp.bridge import run_stdio_http_bridge
 from vertebra.agent.mcp.client import mcp_request_headers
-from vertebra.agent.mcp.service import MCPService
+from vertebra.agent.mcp.models import MCPConfig
+from vertebra.agent.mcp.service import MCPCore
 from vertebra.agent.mcp.stdio import run_stdio_server
 from vertebra.embeddings._models import ModelSpec, get_model_spec, list_model_specs
 from vertebra.storage import SyncObjectStore
@@ -295,8 +296,7 @@ def bridge(url: str, bearer_token: str | None, timeout_s: float) -> None:
 @click.option("--name", default="vertebra-mcp", help="Server name")
 def serve(name: str) -> None:
     """Run an in-process MCP service over standard input/output (stdio)."""
-    del name
-    service = MCPService()
+    service = MCPCore(config=MCPConfig(server_name=name))
     exit_code = anyio.run(lambda: run_stdio_server(service))
     if exit_code != 0:
         sys.exit(exit_code)

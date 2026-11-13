@@ -27,11 +27,14 @@ from vertebra.agent.core.cursor import (
     paginate_sequence,
 )
 from vertebra.agent.core.guards import (
+    BudgetExceededError,
     GuardChain,
     PermissionDeniedError,
+    RateLimitExceededError,
     RequireAuthenticated,
     RequireRoles,
     RequireScopes,
+    TokenBucketGuard,
 )
 from vertebra.agent.core.identity import CallableIdentitySource, MtlsIdentitySource
 from vertebra.agent.core.jsonrpc import (
@@ -807,3 +810,83 @@ def test_identity_source_rejects_noncallable() -> None:
     """A non-callable identity resolver cannot produce a working policy."""
     with pytest.raises(TypeError, match="must be callable"):
         CallableIdentitySource(resolver=cast("Any", "x"))
+
+
+@pytest.mark.anyio
+async def test_tool_authorize_call_split_and_single_guard_execution() -> None:
+    """Tool.call bypasses guards, Tool.authorize runs guards once, and Tool.invoke composes both."""
+    bucket = TokenBucketGuard(rate_per_second=0.0, capacity=1.0)
+    invocations: list[int] = []
+
+    @tool(name="double_val", guards=(bucket,))
+    async def double_val(value: int) -> int:
+        invocations.append(value)
+        return value * 2
+
+    ctx = AgentContext(identity=CallerIdentity(user_id="alice", tenant_id="acme"))
+
+    direct_out = await double_val.call({"value": 4}, context=ctx)
+    assert direct_out == 8
+    assert invocations == [4]
+
+    invoked_out = await double_val.invoke({"value": 7}, context=ctx)
+    assert invoked_out == 14
+    assert invocations == [4, 7]
+
+    with pytest.raises(RateLimitExceededError, match="Rate limit exceeded"):
+        await double_val.invoke({"value": 9}, context=ctx)
+    assert invocations == [4, 7]
+
+
+def _sync_connection_guard(connection: Any, route_handler: Any) -> None:
+    connection["checked_by"] = ("sync", route_handler)
+
+
+async def _async_connection_guard(connection: Any, route_handler: Any) -> None:
+    connection["checked_by"] = ("async", route_handler)
+
+
+class _MethodConnectionGuard:
+    async def check(self, connection: Any, route_handler: Any) -> None:
+        connection["checked_by"] = ("method", route_handler)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("guard_obj", "expected_tag"),
+    [
+        (_sync_connection_guard, "sync"),
+        (_async_connection_guard, "async"),
+        (_MethodConnectionGuard(), "method"),
+    ],
+    ids=["sync-fn", "async-fn", "check-method"],
+)
+async def test_two_arg_connection_guards_fail_closed_without_connection(
+    guard_obj: Any,
+    expected_tag: str,
+) -> None:
+    """Two-argument Litestar connection guards raise PermissionDeniedError when connection is None."""
+    ctx = AgentContext(identity=CallerIdentity(user_id="alice", roles=("admin",)))
+
+    @tool(name="conn_guarded", guards=(guard_obj,))
+    def conn_guarded() -> str:
+        return "allowed"
+
+    with pytest.raises(PermissionDeniedError, match="Guard requires an HTTP connection"):
+        await GuardChain((guard_obj,)).execute(ctx)
+
+    with pytest.raises(PermissionDeniedError, match="Guard requires an HTTP connection"):
+        await conn_guarded.authorize(ctx)
+
+    with pytest.raises(PermissionDeniedError, match="Guard requires an HTTP connection"):
+        await conn_guarded.invoke({}, context=ctx)
+
+    fake_conn: dict[str, Any] = {}
+    await conn_guarded.authorize(ctx, connection=fake_conn, route_handler="route_1")
+    assert fake_conn["checked_by"] == (expected_tag, "route_1")
+
+
+def test_guard_error_classes_exported() -> None:
+    """Guard exception types instantiate with preserved reason strings."""
+    budget_err = BudgetExceededError("step limit reached")
+    assert str(budget_err) == "step limit reached"
