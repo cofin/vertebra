@@ -20,7 +20,7 @@ Vertebra is one unified runtime for Python and TypeScript across backend, fronte
 
 ```bash
 uv add vertebra-core
-uv add "vertebra-core[postgres]" # Optional native wheels: bigquery, duckdb, mssql, mysql, oracle, postgres, spanner, storage
+uv add "vertebra-core[postgres]" # Optional native wheels: bigquery, bundler, duckdb, mssql, mysql, oracle, postgres, spanner, storage
 ```
 
 ## CLI Usage (`vtb`)

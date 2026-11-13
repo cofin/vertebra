@@ -72,22 +72,14 @@ queue = QueueService(QueueConfig(backend_url="memory://"))
     name="emails.welcome",
     lane="io",
     retry_policy=TaskRetryPolicy(max_retries=3),
+    cron=CronSchedule(expression="0 * * * *"),
 )
-async def send_welcome_email(user_id: int) -> str:
+async def send_welcome_email(user_id: int = 0) -> str:
     return f"sent:{user_id}"
 
 
 queue.register(send_welcome_email)
-scheduler = CronScheduler(
-    queue,
-    schedules=[
-        CronSchedule(
-            name="hourly-sync",
-            cron="0 * * * *",
-            task_name="emails.welcome",
-        )
-    ],
-)
+scheduler = CronScheduler(queue)
 ```
 
 Run background workers standalone (`vtb workers run app:app`) or co-located with HTTP workers (`vtb run app:app --with-workers --queues default,io`).
