@@ -5,7 +5,8 @@ chapter_id: ch07-wheel-ci-and-benchmarks
 title: "Chapter 07: Wheel Isolation, CI Lanes, Free-Threaded Proofs, and Benchmarks"
 description: "Add verify_postgres_wheel.py, CI/release 14-class smoke checks, 3.14t/3.15t concurrent pool tests, postgres-bench comparator, Criterion benches, and testing OKF sync."
 status: stable
-state: planned
+state: active
+updated_at: "2026-11-13T21:59:10Z"
 planning_status: complete
 planning_quality: standard
 planning_degraded_reason: null

@@ -5,19 +5,23 @@ chapter_id: ch06-live-conformance-and-service-acceptance
 title: "Chapter 06: Live PostgreSQL 14-18 Conformance and Service Acceptance"
 description: "Enable parameterized PG14-18 conformance with zero-skip gating plus live pgoutput replication and PGCOPY/VTBARROW/LISTEN/pgvector/PgBouncer suites."
 status: stable
-state: active
+state: completed
 planning_status: complete
 planning_quality: standard
 planning_degraded_reason: null
 plan_commit: 18baadcd
-updated_at: "2026-11-13T21:56:15Z"
+last_reviewed_commit: 7a7b5180
+updated_at: "2026-11-13T21:59:10Z"
 generated:
   by: flow-plan
   at: "2026-11-13T00:25:00Z"
 verified:
-  - by: agent:plan-generator
-    at: "2026-11-13T00:25:00Z"
-    commit: 18baadcd
+  - by: agent:code-reviewer
+    at: "2026-11-13T21:58:37Z"
+    commit: 7a7b5180
+  - by: agent:quality-reviewer
+    at: "2026-11-13T21:58:55Z"
+    commit: 7a7b5180
 tags:
   - python
   - postgres
@@ -79,7 +83,7 @@ Testing matrix and workflow OKF updates land in `ch07:t04`.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-Implemented and remediated at `264b4684` (`3/3` tasks verified offline). Offline gate passes (`18 passed, 5 skipped` across zero-skip subprocess/unit + live skip collection; `63 passed, 242 skipped, 144 deselected` in targeted `test_driver_conformance.py`; Ruff and Mypy `5` source files clean); full Docker PG14–18 runs in `/flow:finish` and `ci.yml`.
+Completed and reviewed at `264b4684` (sync `7a7b5180`; `3/3` tasks complete). Offline gate passes (`18 passed, 5 skipped` across zero-skip subprocess/unit + live skip collection; `63 passed, 242 skipped, 144 deselected` in targeted `test_driver_conformance.py`; Ruff and Mypy `5` source files clean); full Docker PG14–18 runs in `/flow:finish` and `ci.yml`.
 
 ```bash
 uv run --no-sync pytest src/py/tests/unit/db/test_postgres_zero_skip_gate.py src/py/tests/integration/db/test_driver_conformance.py src/py/tests/integration/db/test_postgres_replication_live.py src/py/tests/integration/db/test_postgres_native_features_live.py -q && uv run --no-sync ruff check src/py/tests/integration src/py/tests/unit/db/test_postgres_zero_skip_gate.py

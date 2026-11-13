@@ -1,5 +1,10 @@
 # Bundle Activity Log
 
+## [2026-11-13T21:59:10Z] chapter-complete | native-postgres-driver ch06-live-conformance-and-service-acceptance
+
+- Closed `ch06-live-conformance-and-service-acceptance` at `264b4684` (sync `7a7b5180`): enabled PostgreSQL `14`–`18` (`supports_pipeline=True`, `pending_flow_id=None`, `_POSTGRES_TYPES_DDL`, `PgJson` scalar binding) in `test_driver_conformance.py`, added `VERTEBRA_CONFORMANCE_POSTGRES_REQUIRE_ZERO_SKIPS=1` terminal enforcement (`conftest.py` + `test_postgres_zero_skip_gate.py`), added `test_postgres_replication_live.py` (`wal_level=logical` `pgoutput`, `PG_UNCHANGED_TOAST`, raw `bytea`, fresh `PostgresChangeSource` resume, slot contention), and added `test_postgres_native_features_live.py` (`pgvector/pgvector:pg18`, binary `COPY`, `VTBARROW`, `LISTEN/NOTIFY`, `PgBouncer` `transaction`/`statement` modes; `18 passed, 5 skipped`, `63 passed, 242 skipped, 144 deselected`, `ruff`, `mypy`, and dual zero-context reviews clean).
+- Advanced active frontier to `ch07-wheel-ci-and-benchmarks` (`native-postgres-driver:ch07:t01`; `12` tasks remain across `ch07`–`ch09`).
+
 ## [2026-11-13T16:15:00Z] chapter-complete | native-postgres-driver ch05-atomic-cutover-and-legacy-removal
 
 - Closed `ch05-atomic-cutover-and-legacy-removal` at `d635f818` (sync `11c7c541`): cut SQLSpec (`ParameterStyle.NUMERIC`) and SQLAlchemy (`numeric_dollar`) over to `vertebra._postgres`, replaced `postgres/driver.py` with the native barrel, removed `psycopg`/`asyncpg`/`asyncmy` across drivers/queues/dialers, hardened `cloudsql.py` and `alloydb.py` TLS/RSA/async refresh paths, and synchronized OKF chapters (`715` Python tests, `11` `py_async` Rust tests, `stubtest`, `ruff`, `mypy`, and `review_setup.py validate` clean).
