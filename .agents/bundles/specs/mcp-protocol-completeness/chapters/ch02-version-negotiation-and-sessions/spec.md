@@ -5,7 +5,7 @@ chapter_id: ch02-version-negotiation-and-sessions
 title: "Chapter 02: Protocol Version Negotiation, Sessions, and Capabilities"
 description: "Implement dual-mode MCP version negotiation, owner-scoped MCPSessionStore, legacy initialize and DELETE termination, 2025-03-26 batching, and a unified capability builder."
 status: stable
-state: active
+state: completed
 planning_status: complete
 planning_quality: standard
 planning_degraded_reason: null
@@ -13,15 +13,15 @@ depends_on_chapters:
   - ch01-guards-params-and-alias-cleanup
 replan_trigger: null
 plan_commit: 18baadcd
-last_reviewed_commit: null
-updated_at: "2026-11-12T23:45:00Z"
+last_reviewed_commit: d7839d5f
+updated_at: "2026-11-13T04:43:42Z"
 generated:
   by: flow-plan
   at: "2026-11-12T23:45:00Z"
 verified:
-  - by: agent:plan-generator
-    at: "2026-11-12T23:45:00Z"
-    commit: 18baadcd
+  - by: agent:code-reviewer
+    at: "2026-11-13T04:43:42Z"
+    commit: d7839d5f
 tags:
   - mcp
   - protocol
@@ -77,7 +77,7 @@ Dual-mode negotiation and session lifecycle semantics are documented in `ch07` (
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Implemented (`3/3` tasks at `5f8fd173`, `206 passed`)**: Dual-mode protocol version negotiation, owner-scoped `MCPSessionStore`, legacy `initialize`/`ping`/`logging/setLevel`, `2025-03-26` batching, and `DELETE /mcp` termination are implemented and verified.
+- **Completed (`5f8fd173`)**: All `3` tasks in `ch02-version-negotiation-and-sessions` (`206` unit tests, `ruff`, and `mypy` clean) are complete. Next chapter: `ch03-sse-streams-and-resource-subscriptions`.
 - **Fast Chapter Gate (`< 12s`)**: `uv run --no-sync ruff check src/py/vertebra/agent/mcp && uv run --no-sync mypy src/py/vertebra/agent/mcp && uv run --no-sync pytest src/py/tests/unit/agent/test_mcp_conformance.py -q`.
 
 [^mcp-handle]: `src/py/vertebra/agent/mcp/service.py::MCPCore.handle` — HTTP validation and dispatch.

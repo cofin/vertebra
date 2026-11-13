@@ -1,5 +1,10 @@
 # Bundle Activity Log
 
+## [2026-11-13T04:43:42Z] chapter-complete | mcp-protocol-completeness ch02-version-negotiation-and-sessions
+
+- Closed `ch02-version-negotiation-and-sessions` at `5f8fd173` (sync `d7839d5f`): dual-mode `SUPPORTED_PROTOCOL_VERSIONS` negotiation, owner-scoped `MCPSessionStore`, legacy `initialize`/`ping`/`logging/setLevel`, `2025-03-26` JSON-RPC batching, `DELETE /mcp` termination, and unified `_server_capabilities` (`206` unit tests, `ruff`, and `mypy` clean).
+- Advanced active frontier to `ch03-sse-streams-and-resource-subscriptions` (`mcp-protocol-completeness:ch03:t01`; `18` tasks remain across `ch03`–`ch07`).
+
 ## [2026-11-13T02:55:00Z] chapter-complete | mcp-protocol-completeness ch01-guards-params-and-alias-cleanup
 
 - Closed `ch01-guards-params-and-alias-cleanup` at `1f269a58` (`179 passed`, `mypy` and `ruff` clean, non-destructive multi-call confirmation gating, strict nested JSON `Mcp-Param-*` type comparison, and `ConfirmationCapacityError` package export).
