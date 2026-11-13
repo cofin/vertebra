@@ -472,7 +472,7 @@ class AsgiSend:
             if not chunk:
                 return
             try:
-                self._stream_submitter(
+                submitter(
                     self._request_id,
                     self._status,
                     STREAM_FLAG_STREAMING,
@@ -488,7 +488,7 @@ class AsgiSend:
         if self._expects_trailers:
             if chunk:
                 try:
-                    self._stream_submitter(
+                    submitter(
                         self._request_id,
                         self._status,
                         STREAM_FLAG_STREAMING,
@@ -501,7 +501,7 @@ class AsgiSend:
             return
 
         self._stream_closed = True
-        self._stream_submitter(
+        submitter(
             self._request_id,
             self._status,
             STREAM_FLAG_STREAMING | STREAM_FLAG_FINAL,
