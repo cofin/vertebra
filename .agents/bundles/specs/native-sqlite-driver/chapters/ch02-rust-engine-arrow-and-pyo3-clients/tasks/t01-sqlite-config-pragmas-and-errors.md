@@ -3,8 +3,8 @@ type: Task
 id: native-sqlite-driver:ch02-rust-engine-arrow-and-pyo3-clients:t01
 flow_id: native-sqlite-driver
 chapter_id: ch02-rust-engine-arrow-and-pyo3-clients
-title: Implement Rust SQLiteConfig, Initialization Pragma Generator, and Extended Errors
-description: Implement SQLiteConfig, initialization_pragmas, URI/SQLCipher builder, and extended SQLite error mapping in vertebra-sqlite.
+title: Implement Rust SqliteClientConfig, Initialization Pragma Generator, and Extended Errors
+description: Implement SqliteClientConfig, initialization_pragmas, WAL/URI builder, and extended SQLite error mapping in vertebra-sqlite.
 status: stable
 state: pending
 planning_quality: standard
@@ -41,7 +41,7 @@ sources:
   title: Embedded worker-thread and VTBARROW PyO3 extension precedent
 ---
 
-# Task `t01`: Implement Rust SQLiteConfig, Initialization Pragma Generator, and Extended Errors
+# Task `t01`: Implement Rust SqliteClientConfig, Initialization Pragma Generator, and Extended Errors
 
 ## Objective & Scope Boundary
 

@@ -26,9 +26,9 @@ read_set:
 - pyproject.toml
 - src/py/vertebra/extensions/litestar/queues/backend.py
 - src/py/vertebra/extensions/litestar/queues/config.py
+- src/py/vertebra/extensions/litestar/queues/__init__.py
 - src/py/vertebra/db/driver/capabilities.py
-- src/py/vertebra/db/adapters/postgres/queue.py
-- src/py/vertebra/db/adapters/oracle/queue.py
+- src/py/vertebra/framework/di.py
 estimated_loc: 245
 tags:
 - litestar-queues
@@ -62,41 +62,26 @@ sources:
 
 ## Objective & Scope Boundary
 
-Bump `litestar-queues>=0.14.0` in `pyproject.toml` and implement slotted `SHMQueueBackend(BaseQueueBackend)` + `SHMQueueBackendConfig` (`@queue_backend('vertebra_shm')`) in `shm_backend.py` per [`../spec.md`](../spec.md) [^pyproject-lq] [^lq-backend].
-
-Implement engine-neutral slotted `StoreQueueBackend(BaseQueueBackend)` + `StoreQueueBackendConfig` (`@queue_backend('vertebra_store')`) in `extensions/litestar/queues/backend.py` per [`../spec.md`](../spec.md) [^lq-backend] [^queue-cap].
-
-Wire settings-driven `litestar-queues` selection (`StoreQueueBackendConfig`, `SHMQueueBackendConfig`, and `SQLSpecBackendConfig` honoring `queue_store_class` & `events_store_class`) plus `ContainerTaskDependencyProvider` per [`../spec.md`](../spec.md) [^lq-cfg] [^lq-init] [^fw-di].
+Bump `litestar-queues>=0.14.0` in `pyproject.toml`, implement slotted `SHMQueueBackend(BaseQueueBackend)` + `SHMQueueBackendConfig` (`@queue_backend('vertebra_shm')`) in `shm_backend.py` and engine-neutral slotted `StoreQueueBackend(BaseQueueBackend)` + `StoreQueueBackendConfig` (`@queue_backend('vertebra_store')`) in `backend.py`, and wire `SQLSpecBackendConfig` (`queue_store_class` & `events_store_class`) plus `ContainerTaskDependencyProvider` per [`../spec.md`](../spec.md) [^pyproject-lq] [^lq-backend] [^queue-cap] [^lq-cfg] [^lq-init] [^fw-di].
 
 ## Bounded Read Manifest
 
-- `pyproject.toml` — `[project.optional-dependencies].litestar`.
-- `src/py/vertebra/extensions/litestar/queues/backend.py` — existing `SHMQueueBackend` and broken `litestar_queues.records` import.
-
-- `src/py/vertebra/extensions/litestar/queues/backend.py` — remove broken `from litestar_queues.records import QueuedTaskRecord` import and engine-specific code.
-- `src/py/vertebra/db/driver/capabilities.py` — `AsyncQueueStore` and `AsyncNotificationSource`.
-
-- `src/py/vertebra/extensions/litestar/queues/{config,__init__}.py` — backend builders and DI wiring.
+- `pyproject.toml` — `[project.optional-dependencies].queues` and `all` extra (`litestar-queues>=0.12.0`).
+- `src/py/vertebra/extensions/litestar/queues/backend.py` — existing `SHMQueueBackend` and stale `litestar_queues.records` import to remove.
+- `src/py/vertebra/extensions/litestar/queues/config.py` — backend builders and `SQLSpecBackendConfig` wiring.
+- `src/py/vertebra/extensions/litestar/queues/__init__.py` — public `litestar-queues` extension exports.
+- `src/py/vertebra/db/driver/capabilities.py` — `AsyncQueueStore` and `AsyncNotificationSource` protocols.
 - `src/py/vertebra/framework/di.py` — `Container.scope()` context manager.
 
 ## Contracts & Edge Cases
 
-- Raise `litestar-queues>=0.14.0` in `pyproject.toml`.
-- Implement `__slots__`-equipped `SHMQueueBackend(BaseQueueBackend)` + `SHMQueueBackendConfig` over `vertebra._vertebra` SHM rings and futex/ulock wakeups (zero `asyncio.Queue` fake), supporting `list_tasks` pagination, `(status='running', retry_count)` fencing, `terminal_ttl` cleanup, uniqueness reservations, and maintenance leases.
-
-- `StoreQueueBackend(BaseQueueBackend)` declares `__slots__`, imports zero database engine packages, and adapts any `AsyncQueueStore` (`AsyncPostgresQueueStore`, `AsyncOracleQueueStore`, `AsyncSpannerQueueStore`) + optional `AsyncNotificationSource` to `litestar-queues>=0.14.0`.
-- Implement claim fencing (`retry_count == expected_retry_count`), `touch_heartbeats`, `requeue_stale_running`, `cleanup_terminal`, `list_tasks`, `get_statistics`, maintenance leases, uniqueness reservations, and external Cloud Tasks / Cloud Run dispatch reservation hooks.
-
-- Implement `ContainerTaskDependencyProvider(container)` matching `litestar_queues.config.TaskDependencyProvider` (`(task, record, context) -> AsyncContextManager[Mapping[str, Any]]`) entering `async with container.scope():` per task execution.
-- Support settings-driven selection between `StoreQueueBackend` (`postgres` / `oracle`), `SHMQueueBackend` (`shm`), and `SQLSpecBackendConfig` (attaching dialect `queue_store_class` and `events_store_class` onto Vertebra SQLSpec configs).
+- Raise `litestar-queues>=0.14.0` in `pyproject.toml` (`queues` and `all` extras) and remove the broken `from litestar_queues.records import QueuedTaskRecord` import.
+- Implement `__slots__`-equipped `SHMQueueBackend(BaseQueueBackend)` + `SHMQueueBackendConfig` over `vertebra._vertebra` SHM rings and futex/ulock wakeups (zero `asyncio.Queue` fake), and engine-neutral `__slots__`-equipped `StoreQueueBackend(BaseQueueBackend)` importing zero database engine packages and adapting any `AsyncQueueStore` + optional `AsyncNotificationSource` (`list_tasks` pagination, `(status='running', retry_count)` fencing, `touch_heartbeats`, `requeue_stale_running`, `cleanup_terminal` with `terminal_ttl`, `get_statistics`, uniqueness reservations, maintenance leases, and external Cloud Tasks / Cloud Run dispatch reservation hooks).
+- Implement `ContainerTaskDependencyProvider(container)` matching `litestar_queues.config.TaskDependencyProvider` (`(task, record, context) -> AsyncContextManager[Mapping[str, Any]]`) entering `async with container.scope():` per task execution, and support settings-driven selection between `StoreQueueBackend`, `SHMQueueBackend`, and `SQLSpecBackendConfig` (`queue_store_class` / `events_store_class`).
 
 ## Test Matrix
 
-- Parametrized `litestar-queues==0.14.0` `BaseQueueBackend` contract tests covering `enqueue`, fenced `claim_many`/`complete_task`/`fail_task`, `list_tasks` pagination, `terminal_ttl`, and futex wakeups.
-
-- End-to-end `litestar-queues` worker execution tests over `StoreQueueBackend` wrapping `AsyncPostgresQueueStore` and `AsyncOracleQueueStore` test harnesses, plus AST check confirming zero vendor imports in `backend.py`.
-
-- Parametrized tests verifying settings selection (`postgres`, `oracle`, `shm`, `sqlspec`), `queue_store_class` / `events_store_class` resolution in `litestar-queues==0.14.0`, and per-task `ContainerTaskDependencyProvider` injection.
+- Parametrized `litestar-queues==0.14.0` `BaseQueueBackend` contract tests covering `SHMQueueBackend` and `StoreQueueBackend` (`enqueue`, fenced `claim_many`/`complete_task`/`fail_task`, `list_tasks` pagination, `terminal_ttl`, futex wakeups, `AsyncPostgresQueueStore` / `AsyncOracleQueueStore` test harnesses, AST check forbidding vendor imports in `backend.py`), settings selection (`postgres`, `oracle`, `shm`, `sqlspec`), `queue_store_class`/`events_store_class` resolution, and per-task `ContainerTaskDependencyProvider` injection.
 
 ## Verification
 
@@ -106,7 +91,7 @@ uv run --no-sync ruff check src/py/vertebra/extensions/litestar/queues pyproject
 
 ## Acceptance Criteria
 
-- [ ] `pyproject.toml` requires `litestar-queues>=0.14.0` and `SHMQueueBackend` passes strict `mypy` (zero `ignore_missing_imports` masking) and `BaseQueueBackend` contract checks.
+- [ ] `pyproject.toml` requires `litestar-queues>=0.14.0` and `SHMQueueBackend` removes broken `litestar_queues.records` imports while passing `mypy` and `BaseQueueBackend` contract checks.
 - [ ] `StoreQueueBackend` passes `litestar-queues>=0.14.0` lifecycle, fencing, maintenance, and dispatch reservation tests with zero engine imports.
 - [ ] `litestar-queues` resolves `StoreQueueBackend`, `SHMQueueBackend`, `queue_store_class`/`events_store_class`, and `ContainerTaskDependencyProvider` cleanly.
 - [ ] Zero regressions in the fast verification gate.

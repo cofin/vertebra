@@ -36,7 +36,7 @@ sources:
     title: "Product technology stack Mypy Overrides and [tool.mypy].files bullets"
   - id: okf-test-matrix
     resource: .agents/bundles/knowledge/testing/polyglot-test-matrix.md
-    title: "Polyglot test matrix OKF chapter (196 lines on HEAD)"
+    title: "Polyglot test matrix OKF chapter (198 lines on HEAD)"
   - id: okf-workflow
     resource: .agents/bundles/knowledge/workflow.md
     title: "Project workflow Makefile lint and lint-all commands"
@@ -46,18 +46,19 @@ sources:
 
 ## Objective & Scope Boundary
 
-Update `.agents/bundles/product/tech-stack.md` (`<= 200L`), `.agents/bundles/knowledge/testing/polyglot-test-matrix.md` (already `196L <= 200L`), and `.agents/bundles/knowledge/workflow.md` (`<= 200L`) in present tense to match the pruned `[tool.mypy.overrides]` list and expanded `tools/benchmarks` + `src/py/tests/{unit,integration}` Ruff/Mypy gates per [`../spec.md` §2](../spec.md) [^okf-tech-stack] [^okf-test-matrix] [^okf-workflow].
+Update `.agents/bundles/product/tech-stack.md` (`<= 200L`), `.agents/bundles/knowledge/testing/polyglot-test-matrix.md` (`198L <= 200L`), and `.agents/bundles/knowledge/workflow.md` (`<= 200L`) in present tense to match the pruned `[tool.mypy.overrides]` list and expanded `tools/benchmarks` + `src/py/tests/{unit,integration}` Ruff/Mypy gates per [`../spec.md` §2](../spec.md) [^okf-tech-stack] [^okf-test-matrix] [^okf-workflow].
 
 ## Bounded Read Manifest
 
 - `.agents/bundles/product/tech-stack.md` — `Verification & Documentation Toolchain` and `Mypy Overrides` bullets (`<= 200L`) [^okf-tech-stack].
-- `.agents/bundles/knowledge/testing/polyglot-test-matrix.md` — `make lint` / `make lint-all` table and test standards (`196L`) [^okf-test-matrix].
+- `.agents/bundles/knowledge/testing/polyglot-test-matrix.md` — `make lint` / `make lint-all` table and test standards (`198L`) [^okf-test-matrix].
 - `.agents/bundles/knowledge/workflow.md` — Fast Chapter Gate and `Makefile` command summary (`<= 200L`) [^okf-workflow].
-- `pyproject.toml` and `Makefile` — shipped `[tool.mypy]` and `lint`/`lint-all` definitions from `t01`–`t03`.
+- `pyproject.toml` — shipped `[tool.mypy]` configuration from `t01` and `t03`.
+- `Makefile` — shipped `lint` and `lint-all` targets from `t03`.
 
 ## Contracts & Edge Cases
 
-- `product/tech-stack.md` (`<= 200` lines, expanded YAML `tags:` list): update `[tool.mypy].files` (`src/py/vertebra`, `src/py/tests/unit`, `src/py/tests/integration`, `tools/benchmarks`, `tools/scripts`, `tools/pgo`, `tools/docs`, `docs/examples`) and replace the `43+`-module `Mypy Overrides` list with the minimal untyped/optional C-package list; re-anchor `verified` commits to ancestors of `HEAD`.
+- `product/tech-stack.md` (`<= 200` lines, expanded YAML `tags:` list): update `[tool.mypy].files` (`src/py/vertebra`, `src/py/tests/unit`, `src/py/tests/integration`, `tools/benchmarks`, `tools/scripts`, `tools/pgo`, `tools/docs`, `docs/examples`) and replace the `40+`-module `Mypy Overrides` list with the minimal untyped/optional C-package list; re-anchor `verified` commits to ancestors of `HEAD`.
 - `knowledge/testing/polyglot-test-matrix.md` (`<= 200` lines, `<= 40`-line truth block): update `make lint` / `make lint-all` paths (`src/py/tests/{unit,integration}`) and 10-extension `stubtest` list while keeping `<= 200` lines, and re-anchor `verified` commits.
 - `knowledge/workflow.md` (`<= 200` lines): update `lint`/`lint-all` descriptions and companion `*-wheel-check` references.
 
@@ -77,5 +78,5 @@ python3 -c 'from pathlib import Path; [(_ for _ in ()).throw(AssertionError(f"{p
 - [ ] Zero regressions in OKF validation.
 
 [^okf-tech-stack]: `.agents/bundles/product/tech-stack.md` — Product technology stack `Mypy Overrides` and `[tool.mypy].files` bullets.
-[^okf-test-matrix]: `.agents/bundles/knowledge/testing/polyglot-test-matrix.md` — Polyglot test matrix OKF chapter (`196` lines on `HEAD`).
+[^okf-test-matrix]: `.agents/bundles/knowledge/testing/polyglot-test-matrix.md` — Polyglot test matrix OKF chapter (`198` lines on `HEAD`).
 [^okf-workflow]: `.agents/bundles/knowledge/workflow.md` — Project workflow `Makefile` `lint` and `lint-all` commands.

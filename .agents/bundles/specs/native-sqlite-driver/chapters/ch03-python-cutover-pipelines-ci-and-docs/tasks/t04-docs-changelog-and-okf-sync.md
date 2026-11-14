@@ -4,7 +4,7 @@ id: native-sqlite-driver:ch03-python-cutover-pipelines-ci-and-docs:t04
 flow_id: native-sqlite-driver
 chapter_id: ch03-python-cutover-pipelines-ci-and-docs
 title: Synchronize Public Documentation, Changelog, OKF SQLite Chapters, and Review Skills
-description: Update databases/installation/analytics docs, changelog, AGENTS.md, test_native_stubs.py, OKF sqlite-limitations.md and data/packaging/testing chapters, and review-python-framework.
+description: Update databases/native-stubs docs, changelog, AGENTS.md, OKF sqlite-limitations.md and database-drivers/workflow chapters, and review-pyo3-bridge skill.
 status: stable
 state: pending
 planning_quality: standard
@@ -30,8 +30,8 @@ read_set:
 - docs/reference/native-stubs.md
 - docs/changelog/index.md
 - .agents/bundles/knowledge/domains/data/database-drivers-and-dialers.md
-- .agents/bundles/knowledge/domains/data/postgres-limitations.md
-- .agents/bundles/knowledge/domains/index.md
+- AGENTS.md
+- .agents/bundles/knowledge/workflow.md
 estimated_loc: 220
 tags:
 - docs
@@ -72,57 +72,40 @@ sources:
 
 ## Objective & Scope Boundary
 
-Document `vertebra-core[sqlite]`, `SyncSQLitePipeline`/`AsyncSQLitePipeline`, `backup_to`/`restore_from`, and `vertebra._sqlite` stubs in `docs/` per [`../spec.md` §2](../spec.md) [^docs-db] [^docs-stubs] [^docs-changelog].
-
-Author `sqlite-limitations.md` (`<= 200` lines), update `database-drivers-and-dialers.md` (`<= 200` lines), and index in `domains/index.md` per [`../spec.md` §2](../spec.md) [^okf-drivers] [^domains-idx].
-
-Synchronize `vertebra-sqlite`, `make sqlite-test`, and `make sqlite-wheel-check` across `review-pyo3-bridge/SKILL.md`, `AGENTS.md`, and `workflow.md` per [`../spec.md` §2](../spec.md) [^review-pyo3-skill] [^agents-md] [^okf-workflow].
+Document `vertebra-core[sqlite]`, `SyncSQLitePipeline`/`AsyncSQLitePipeline`, `backup_to`/`restore_from`, and `vertebra._sqlite` stubs in `docs/`, author `sqlite-limitations.md` (`<= 200` lines), update `database-drivers-and-dialers.md` and `domains/index.md`, and synchronize `vertebra-sqlite`, `make sqlite-test`, and `make sqlite-wheel-check` across `review-pyo3-bridge/SKILL.md`, `AGENTS.md`, and `.agents/bundles/knowledge/workflow.md` per [`../spec.md` §2](../spec.md) [^docs-db] [^docs-stubs] [^docs-changelog] [^okf-drivers] [^domains-idx] [^review-pyo3-skill] [^agents-md] [^okf-workflow].
 
 ## Bounded Read Manifest
 
-- `docs/usage/databases.md` — SQLite configuration, WAL, pipeline, and Arrow examples.
+- `docs/usage/databases.md` — SQLite configuration, WAL, pipeline, backup, and Arrow examples.
 - `docs/reference/native-stubs.md` — TOC structure and `heading_level: 4` mkdocstrings blocks.
 - `docs/changelog/index.md` — `Unreleased` changelog section.
-
 - `.agents/bundles/knowledge/domains/data/database-drivers-and-dialers.md` — Driver wheel architecture chapter.
-- `.agents/bundles/knowledge/domains/data/postgres-limitations.md` — Canonical OKF limitations format.
-- `.agents/bundles/knowledge/domains/index.md` — Domains index catalog.
-
-- `.agents/skills/review-pyo3-bridge/SKILL.md` — Review skill crate list (`<= 200` lines).
 - `AGENTS.md` — Rust crate list and Quick Verification Commands block.
 - `.agents/bundles/knowledge/workflow.md` — Canonical Makefile target catalog (`<= 200` lines).
 
 ## Contracts & Edge Cases
 
-- Format install blocks with `=== "uv"`, `=== "pip"`, `=== "pdm"`, `=== "poetry"` tabs.
+- Format install blocks with `=== "uv"`, `=== "pip"`, `=== "pdm"`, `=== "poetry"` tabs and declare public `msgspec.Struct` examples without internal `frozen=True, gc=False` boilerplate.
 - Keep `docs/reference/native-stubs.md` within `<= 14` secondary TOC items and `< 120_000` HTML bytes using `heading_level: 4`.
-- **Edge Case**: Avoid internal `frozen=True, gc=False` boilerplate in public `msgspec.Struct` code examples.
-
 - Record WAL single-writer serialization, `:memory:` single-worker affinity vs shared URI, dynamic SQLite expression affinity in `VTBARROW`, and disabled `load_extension` in `sqlite-limitations.md`.
+- Keep `sqlite-limitations.md`, `database-drivers-and-dialers.md`, `review-pyo3-bridge/SKILL.md`, and `workflow.md` `<= 200` lines each, preserve `review-pyo3-bridge` `Suppressions Index` and `FP-FFI-*` entries verbatim, and keep every command in `AGENTS.md` identical to `Makefile` (`DOC-08`).
 - **Edge Case**: Keep `domains/index.md` free of YAML frontmatter and standalone `---` rules.
-
-- Keep `review-pyo3-bridge/SKILL.md` and `workflow.md` `<= 200` lines each and ensure every command in `AGENTS.md` matches `Makefile` (`DOC-08`).
-- **Edge Case**: Preserve `review-pyo3-bridge` `Suppressions Index` and `FP-FFI-*` entries verbatim.
 
 ## Test Matrix
 
-- `make docs` builds cleanly and passes `verify_docs_artifacts.py`.
-
-- `make review-check` validates frontmatter, truth blocks, links, and line caps.
-
-- `make review-check` exits `0`.
+- `uv run --no-sync python -m tools.docs.scan_public_docstrings` passes and Zensical output passes `tools/docs/verify_docs_artifacts.py`.
+- `make review-check` exits `0` with zero OKF, link, truth-budget, line-cap, or `DOC-08` errors.
 
 ## Verification
 
 ```bash
-make review-check
+uv run --no-sync python -m tools.docs.scan_public_docstrings && make review-check
 ```
 
 ## Acceptance Criteria
 
-- [ ] `make docs` passes with `vertebra._sqlite` and `vertebra-core[sqlite]` documented.
-- [ ] `sqlite-limitations.md` and `database-drivers-and-dialers.md` stay `<= 200` lines and pass `make review-check`.
-- [ ] `AGENTS.md`, `workflow.md`, and `review-pyo3-bridge/SKILL.md` pass `make review-check`.
+- [ ] Public docs and `Unreleased` changelog accurately cover `vertebra._sqlite`, `vertebra-core[sqlite]`, pipelines, and backups.
+- [ ] `sqlite-limitations.md`, `database-drivers-and-dialers.md`, `AGENTS.md`, `workflow.md`, and `review-pyo3-bridge/SKILL.md` pass `make review-check`.
 - [ ] Zero regressions in the fast verification gate.
 
 [^docs-db]: `docs/usage/databases.md` — Database drivers usage guide.

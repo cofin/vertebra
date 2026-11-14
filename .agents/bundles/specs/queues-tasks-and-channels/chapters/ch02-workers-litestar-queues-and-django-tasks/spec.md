@@ -11,6 +11,8 @@ planning_quality: standard
 planning_degraded_reason: null
 plan_commit: 1b191388
 updated_at: '2026-11-14T18:50:00Z'
+depends_on_chapters:
+- ch01-queue-stores-and-first-party-backends
 generated:
   by: flow/0.30.1
   at: '2026-11-14T18:50:00Z'
@@ -63,21 +65,13 @@ sources:
 # Chapter 02: WorkerRunner Scoped DI, CronScheduler Leases, litestar-queues>=0.14.0 & Django 6.0+ Tasks
 
 <!-- truth: start -->
-- **Baseline (`18baadcd`)**: Queue handlers lack per-task `Container.scope()` DI resolution, cron ticks lack multi-worker slot reservation, and Flask/Starlette queue extensions maintain isolated in-memory deques [^fw-di] [^queue-sched] [^flask-q].
-- **Target Architecture**: `WorkerRunner` enters `Container.scope()` per attempt with heartbeats and lane semaphores; `CronScheduler` reserves `{schedule_name}:{slot_epoch}` under lease; Starlette/FastAPI/Flask bind `QueueService` [^starlette-q].
-- **Baseline (`18baadcd`)**: `pyproject.toml` sets `litestar-queues>=0.12.1`, `extensions/litestar/queues/backend.py` contains a broken `litestar_queues.records` import masked by Mypy overrides, and no generic `AsyncQueueStore` adapter exists [^pyproject-lq] [^lq-backend].
-- **Target Architecture**: `litestar-queues>=0.14.0` runs over slotted `SHMQueueBackend` (`@queue_backend('vertebra_shm')`), engine-neutral `StoreQueueBackend` (`@queue_backend('vertebra_store')`), `SQLSpecBackendConfig` (`queue_store_class` + `events_store_class`), and `ContainerTaskDependencyProvider` [^lq-cfg] [^fw-di].
-- **Baseline (`18baadcd`)**: `extensions/django/queues.py` subclasses Flask's in-memory deque queue instead of Django `6.0+`'s `BaseTaskBackend`, and `cache.py`/`channels.py` rely on in-process dicts [^dj-queues] [^dj-cache] [^dj-channels].
-- **Target Architecture**: `extensions/django/tasks.py::TaskBackend(BaseTaskBackend)` routes sync `enqueue` to `SyncQueueStore` and async `aenqueue` to `AsyncQueueStore`, `vertebra_worker` executes tasks with `Container.scope()` DI, and `django/queues.py` is deleted.
+- **Baseline (`18baadcd`)**: Queue handlers lack per-task `Container.scope()` DI, cron ticks lack multi-worker slot leases, Flask/Starlette queue modules keep isolated in-memory deques, `pyproject.toml` pins `litestar-queues>=0.12.0` (`queues` and `all` extras) with a broken `litestar_queues.records` import in `extensions/litestar/queues/backend.py`, and `extensions/django/queues.py` subclasses Flask's deque instead of Django `6.0+`'s `BaseTaskBackend` [^fw-di] [^queue-sched] [^flask-q] [^pyproject-lq] [^lq-backend] [^dj-queues].
+- **Target Architecture**: `WorkerRunner` enters `Container.scope()` per task attempt with heartbeats and lane semaphores; `CronScheduler` reserves `{schedule_name}:{slot_epoch}` under distributed lease; Starlette/FastAPI/Flask bind `QueueService`; `litestar-queues>=0.14.0` runs over slotted `SHMQueueBackend` (`@queue_backend('vertebra_shm')`), engine-neutral `StoreQueueBackend` (`@queue_backend('vertebra_store')`), `SQLSpecBackendConfig` (`queue_store_class` + `events_store_class`), and `ContainerTaskDependencyProvider`; `extensions/django/tasks.py::TaskBackend(BaseTaskBackend)` routes sync `enqueue` to `SyncQueueStore` and async `aenqueue` to `AsyncQueueStore` with `vertebra_worker` DI while deleting `django/queues.py` [^starlette-q] [^lq-cfg].
 <!-- truth: end -->
 
 ## 1. Specification, Context & Provenance
 
-This chapter connects native queue backends to `WorkerRunner` (coordinating with `src/py/vertebra/server/lanes.py::MultiLaneWorkerRunner`), `framework/di.py::Container`, `CronScheduler`, and Starlette/FastAPI/Flask lifespans [^fw-di] [^queue-sched].
-
-This chapter upgrades Vertebra's `litestar-queues` integration to `0.14.0+`, providing single-host Rust-ring `SHMQueueBackend`, multi-node `StoreQueueBackend` over any `AsyncQueueStore`, SQLSpec `queue_store_class`/`events_store_class` wiring, and `Container` task DI [^lq-backend] [^lq-cfg].
-
-This chapter delivers native Django `6.0+` `django.tasks` support (`TaskBackend` + `vertebra_worker` management command with Vertebra `Container` DI) and upgrades Django `CacheBackend` and `ChannelLayer` onto native drivers [^dj-queues].
+This chapter wires native queue stores to `WorkerRunner` (`server/lanes.py::MultiLaneWorkerRunner`), `framework/di.py::Container` scoped DI, `CronScheduler` distributed leases, Starlette/FastAPI/Flask lifespans, `litestar-queues>=0.14.0` (`SHMQueueBackend`, `StoreQueueBackend`, `SQLSpecBackendConfig`, `ContainerTaskDependencyProvider`), and native Django `6.0+` `django.tasks` (`TaskBackend` + `vertebra_worker` management command) [^fw-di] [^queue-sched] [^lq-backend] [^lq-cfg] [^dj-queues].
 
 ## 2. Requirements, Concrete Contracts & Architecture
 
@@ -141,11 +135,7 @@ class TaskBackend(BaseTaskBackend):
 
 ## 3. Documentation & OKF Knowledge Plan
 
-Worker DI and cron configuration are documented in `ch03-distributed-channels-stores-and-docs` (`t04`).
-
-`litestar-queues` configuration and backend selection are documented in `ch03-distributed-channels-stores-and-docs` (`t04`).
-
-Django `TASKS`, `CACHES`, and `CHANNEL_LAYERS` guides are updated in `ch03-distributed-channels-stores-and-docs` (`t04`).
+Worker DI, cron configuration, `litestar-queues` backend selection, and Django `TASKS` / `CACHES` / `CHANNEL_LAYERS` guides are documented in `ch03-distributed-channels-stores-and-docs` (`t04`).
 
 ## 4. Requirement-to-Task Traceability Matrix
 
@@ -170,7 +160,7 @@ Chapter `ch02-workers-litestar-queues-and-django-tasks` is `planned` behind [`..
 Fast Chapter Gate (`< 60s` offline):
 
 ```bash
-uv run --no-sync ruff check src/py/vertebra/extensions/django && uv run --no-sync mypy src/py/vertebra/extensions/django && uv run --no-sync pytest src/py/tests/unit/extensions/test_django_plugin.py
+uv run --no-sync ruff check src/py/vertebra/framework/queues src/py/vertebra/framework/di.py src/py/vertebra/extensions/starlette/queues.py src/py/vertebra/extensions/flask/queues.py src/py/vertebra/extensions/fastapi/plugin.py src/py/vertebra/extensions/litestar/queues src/py/vertebra/extensions/django && uv run --no-sync mypy src/py/vertebra/framework/queues src/py/vertebra/framework/di.py src/py/vertebra/extensions/starlette/queues.py src/py/vertebra/extensions/flask/queues.py src/py/vertebra/extensions/fastapi/plugin.py src/py/vertebra/extensions/litestar/queues src/py/vertebra/extensions/django && uv run --no-sync pytest src/py/tests/unit/framework/test_distributed_queues.py src/py/tests/unit/extensions/test_starlette_plugin.py src/py/tests/unit/extensions/test_flask_plugin.py src/py/tests/unit/extensions/test_fastapi_plugin.py src/py/tests/unit/extensions/test_litestar_ecosystem_queues.py src/py/tests/unit/extensions/test_django_plugin.py
 ```
 
 [^fw-di]: `src/py/vertebra/framework/di.py` — Vertebra Container DI.

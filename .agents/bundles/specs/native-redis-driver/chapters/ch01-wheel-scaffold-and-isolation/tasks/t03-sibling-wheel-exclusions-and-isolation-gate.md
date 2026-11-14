@@ -4,7 +4,7 @@ id: native-redis-driver:ch01-wheel-scaffold-and-isolation:t03
 flow_id: native-redis-driver
 chapter_id: ch01-wheel-scaffold-and-isolation
 title: Enforce _redis Companion Wheel Exclusions Across All Sibling Extensions
-description: Exclude _redis* and vertebra-redis from all sibling extension pyproject.toml manifests and register redis/valkey in test_optional_driver_wheels.py.
+description: Exclude "**/py/vertebra/_redis.pyi" from all 9+ sibling extension pyproject.toml manifests and register redis/valkey in test_optional_driver_wheels.py.
 status: stable
 state: pending
 planning_quality: standard
@@ -31,8 +31,8 @@ read_set:
 - src/rs/vertebra-bundler/pyproject.toml
 - src/rs/vertebra-duckdb/pyproject.toml
 - src/rs/vertebra-mssql/pyproject.toml
-- src/rs/vertebra-mysql/pyproject.toml
-- src/rs/vertebra-oracle/pyproject.toml
+- src/rs/vertebra-postgres/pyproject.toml
+- src/py/tests/unit/db/test_optional_driver_wheels.py
 estimated_loc: 220
 tags:
 - redis
@@ -53,43 +53,28 @@ sources:
 
 ## Objective & Scope Boundary
 
-Add `"**/py/vertebra/_redis.pyi"` to `[tool.maturin].exclude` in `bigquery`, `bundler`, and `duckdb` per [`../spec.md` §2](../spec.md) [^pg-pyproj].
-
-Add `"**/py/vertebra/_redis.pyi"` to `[tool.maturin].exclude` in `mssql`, `mysql`, and `oracle` per [`../spec.md` §2](../spec.md) [^pg-pyproj].
-
-Exclude `_redis.pyi` in `postgres`, `spanner`, and `storage`, and update `test_optional_driver_wheels.py` to enforce `vertebra-redis`, `_redis.pyi`, and `[redis]`/`[valkey]` extras per [`../spec.md` §2](../spec.md) [^wheel-tests] [^pg-pyproj].
+Add `"**/py/vertebra/_redis.pyi"` in sorted order to `[tool.maturin].exclude` across all sibling PyO3 extension `pyproject.toml` manifests (`bigquery`, `bundler`, `duckdb`, `mssql`, `mysql`, `oracle`, `postgres`, `spanner`, `storage`, plus `sqlite` if present) and expand `test_optional_driver_wheels.py` to enforce `vertebra-redis`, `_redis.pyi`, and `[redis]`/`[valkey]` extras per [`../spec.md` §2](../spec.md) [^pg-pyproj] [^wheel-tests].
 
 ## Bounded Read Manifest
 
-- `src/rs/vertebra-bigquery/pyproject.toml` — Maturin exclude patterns.
-- `src/rs/vertebra-bundler/pyproject.toml` — Maturin exclude patterns.
-- `src/rs/vertebra-duckdb/pyproject.toml` — Maturin exclude patterns.
-
-- `src/rs/vertebra-mssql/pyproject.toml` — Maturin exclude patterns.
-- `src/rs/vertebra-mysql/pyproject.toml` — Maturin exclude patterns.
-- `src/rs/vertebra-oracle/pyproject.toml` — Maturin exclude patterns.
-
-- `src/rs/vertebra-postgres/pyproject.toml` — Maturin exclude patterns.
-- `src/rs/vertebra-spanner/pyproject.toml` — Maturin exclude patterns.
-- `src/rs/vertebra-storage/pyproject.toml` — Maturin exclude patterns.
-- `src/py/tests/unit/db/test_optional_driver_wheels.py` — `SIBLING_WHEEL_MANIFESTS` and extra assertions.
+- `src/rs/vertebra-bigquery/pyproject.toml` — Sibling `[tool.maturin].exclude` ordering precedent.
+- `src/rs/vertebra-bundler/pyproject.toml` — Sibling manifest pattern.
+- `src/rs/vertebra-duckdb/pyproject.toml` — Sibling manifest pattern (mirrored identically across `mssql`, `mysql`, `oracle`, `postgres`, `spanner`, `storage`).
+- `src/rs/vertebra-mssql/pyproject.toml` — Sibling manifest pattern.
+- `src/rs/vertebra-postgres/pyproject.toml` — Canonical wheel isolation manifest.
+- `src/py/tests/unit/db/test_optional_driver_wheels.py` — `SIBLING_WHEEL_MANIFESTS` and `[project.optional-dependencies]` checks.
 
 ## Contracts & Edge Cases
 
-- Append `"**/py/vertebra/_redis.pyi"` without altering crate `include` globs.
-- **Edge Case**: Keep TOML arrays clean and sorted.
-
-- Append `"**/py/vertebra/_redis.pyi"` to `[tool.maturin].exclude`.
-- **Edge Case**: Preserve existing sibling exclusions.
-
-- Add `vertebra-redis` and `_redis.pyi` to `SIBLING_WHEEL_MANIFESTS` and `sibling_stubs` and assert both `redis` and `valkey` extras map to `vertebra-redis`.
-- **Edge Case**: If `vertebra-sqlite` is already present on branch/main, reconcile reciprocal `_sqlite.pyi` <-> `_redis.pyi` exclusions so all sibling wheels stay pairwise disjoint.
+- Append `"**/py/vertebra/_redis.pyi"` in sorted order inside `[tool.maturin].exclude` without altering any crate's own included stub.
+- Add `vertebra-redis` and `_redis.pyi` to `SIBLING_WHEEL_MANIFESTS` and `sibling_stubs` in `test_optional_driver_wheels.py`, asserting both `[project.optional-dependencies].redis` and `[project.optional-dependencies].valkey` resolve to `vertebra-redis=={version}` with zero `.all` extra.
+- **Edge Case**: If `vertebra-sqlite` already landed, reconcile reciprocal `_sqlite.pyi` <-> `_redis.pyi` exclusions across both manifests so every sibling wheel stays pairwise disjoint.
+- **Edge Case**: Keep every modified TOML file valid under `tomllib`.
 
 ## Test Matrix
 
-- Verified by `test_optional_driver_wheels.py` in `t03`.
-
-- `@pytest.mark.parametrize` verifies every sibling wheel manifest and `make redis-wheel-check`.
+- `@pytest.mark.parametrize` verifies every sibling wheel manifest is pairwise disjoint on `.pyi` files.
+- `make redis-wheel-check` builds `vertebra_redis-*.whl` cleanly with zero foreign stubs or Python modules.
 
 ## Verification
 
@@ -99,9 +84,8 @@ make redis-wheel-check && uv run --no-sync pytest src/py/tests/unit/db/test_opti
 
 ## Acceptance Criteria
 
-- [ ] `bigquery`, `bundler`, and `duckdb` exclude `_redis.pyi`.
-- [ ] `mssql`, `mysql`, and `oracle` exclude `_redis.pyi`.
-- [ ] `make redis-wheel-check` and `test_optional_driver_wheels.py` pass.
+- [ ] Every sibling PyO3 extension `pyproject.toml` excludes `"**/py/vertebra/_redis.pyi"`.
+- [ ] `make redis-wheel-check` and `test_optional_driver_wheels.py` pass cleanly.
 - [ ] Zero regressions in the fast verification gate.
 
 [^pg-pyproj]: `src/rs/vertebra-postgres/pyproject.toml` — Maturin standalone wheel isolation precedent.

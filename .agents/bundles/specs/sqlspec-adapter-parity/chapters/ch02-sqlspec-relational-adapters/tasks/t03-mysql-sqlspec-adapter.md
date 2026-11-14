@@ -29,9 +29,9 @@ read_set:
 - src/py/vertebra/extensions/sqlspec/_driver.py
 - src/py/vertebra/db/adapters/mysql/driver.py
 - src/py/vertebra/db/adapters/mysql/core.py
+- src/py/vertebra/db/adapters/mysql/config.py
 - src/py/vertebra/extensions/sqlspec/adapters.py
-- src/py/vertebra/extensions/sqlspec/adapters/mysql/core.py
-- src/py/vertebra/extensions/sqlspec/adapters/mysql/driver.py
+- src/py/vertebra/storage/_store.py
 estimated_loc: 245
 tags:
 - sqlspec
@@ -60,41 +60,26 @@ sources:
 
 ## Objective & Scope Boundary
 
-Implement `src/py/vertebra/extensions/sqlspec/adapters/mysql/{core,driver,data_dictionary}.py` (`MySQLSyncDriver`, `MySQLAsyncDriver`, `MySQLSyncDataDictionary`, `MySQLAsyncDataDictionary`) per [`../spec.md`](../spec.md) [^mysql-drv] [^mysql-core] [^sqlspec-adapters].
-
-Implement `src/py/vertebra/extensions/sqlspec/adapters/mysql/{adk,events,litestar}.py` over upstream SDK-free base classes per [`../spec.md`](../spec.md) [^mysql-drv] [^storage-art] [^sqlspec-adapters].
-
-Implement `src/py/vertebra/extensions/sqlspec/adapters/mysql/{config,__init__}.py` declaring `adapter_name = 'vertebra_mysql'` and explicit store class attributes per [`../spec.md`](../spec.md) [^mysql-drv] [^sqlspec-adapters].
+Implement the complete `src/py/vertebra/extensions/sqlspec/adapters/mysql/{__init__,config,core,driver,data_dictionary,adk,events,litestar}.py` SQLSpec adapter package (`MySQLSyncDriver`/`MySQLAsyncDriver`, `MySQLSyncDataDictionary`/`MySQLAsyncDataDictionary`, SDK-free ADK/Events/Litestar stores, and `MySQLSyncConfig`/`MySQLAsyncConfig`) per [`../spec.md`](../spec.md) [^mysql-drv] [^mysql-core] [^sqlspec-adapters] [^storage-art].
 
 ## Bounded Read Manifest
 
-- `src/py/vertebra/extensions/sqlspec/_driver.py` — `BaseSyncDriver` and `BaseAsyncDriver` dispatch template.
-- `src/py/vertebra/db/adapters/mysql/driver.py` & `src/py/vertebra/db/adapters/mysql/core.py` — native MySQL & MariaDB execution and parameter encoding.
-
-- `src/py/vertebra/extensions/sqlspec/adapters/mysql/driver.py` & `src/py/vertebra/extensions/sqlspec/adapters/mysql/core.py` — MySQL & MariaDB SQLSpec session and dialect helpers.
-- `src/py/vertebra/storage/_store.py` — `ArtifactReference` contract.
-
-- `src/py/vertebra/extensions/sqlspec/adapters/mysql/driver.py`, `src/py/vertebra/extensions/sqlspec/adapters/mysql/adk.py`, `src/py/vertebra/extensions/sqlspec/adapters/mysql/events.py`, `src/py/vertebra/extensions/sqlspec/adapters/mysql/litestar.py` — adapter driver and store classes.
-- `src/py/vertebra/extensions/sqlspec/_driver.py` — shared config lifecycle and refcounted pool close.
+- `src/py/vertebra/extensions/sqlspec/_driver.py` — `BaseSyncDriver` and `BaseAsyncDriver` dispatch template, config lifecycle, and refcounted pool close.
+- `src/py/vertebra/db/adapters/mysql/driver.py` — native MySQL & MariaDB sync and async execution drivers.
+- `src/py/vertebra/db/adapters/mysql/core.py` — native MySQL & MariaDB binary `?` placeholder and parameter helpers.
+- `src/py/vertebra/db/adapters/mysql/config.py` — `MySQLConfig` connection options.
+- `src/py/vertebra/extensions/sqlspec/adapters.py` — legacy MySQL adapter setting `%s` execution style to fix and remove.
+- `src/py/vertebra/storage/_store.py` — storage-neutral `ArtifactReference` value struct.
 
 ## Contracts & Edge Cases
 
-- Fix the critical `%s` bug by setting `StatementConfig(dialect='mysql')` default and execution style to `ParameterStyle.QMARK` (`?` positional tuples required by `vertebra._mysql` binary prepared statements), map errno `1062`/`1451`/`1452`/`1213` to `sqlspec.exceptions.*`, and implement `MySQLSyncDataDictionary`/`MySQLAsyncDataDictionary` (MySQL 8/9 vs MariaDB JSON/version flags). Duplicate MySQL-family helpers strictly inside `adapters/mysql/core.py` (zero cross-adapter shared helper modules).
-- `MySQLSyncDataDictionary(SyncDataDictionaryBase)` and `MySQLAsyncDataDictionary(AsyncDataDictionaryBase)` execute upstream `sqlspec/data_dictionary/dialects/mysql/sql/*.sql` catalog queries (`get_version`, `get_feature_flag`, `get_optimal_type`, `get_tables`, `get_columns`, `get_indexes`, `get_foreign_keys`).
-
-- Implement SDK-free `MySQLSyncADKStore`/`MySQLAsyncADKStore`, `FULLTEXT` / MySQL 9 `VECTOR` `MySQLSyncADKMemoryStore`/`MySQLAsyncADKMemoryStore`, `MySQLSyncADKArtifactStore`/`MySQLAsyncADKArtifactStore` (`ArtifactReference`), `MySQLEventQueueStore` (companion `ALTER TABLE ... ADD INDEX` DDL), and MariaDB-compatible `MySQLLitestarStore` (`ON DUPLICATE KEY UPDATE`) with zero `pymysql`/`asyncmy` imports.
-- Never import `sqlspec.adapters.<third_party>.*` or third-party DB SDKs; execute all DDL and DML through `self._config.provide_session()`.
-
-- Define `MySQLSyncConfig` and `MySQLAsyncConfig` declaring `adapter_name = 'vertebra_mysql'` and explicit `adk_store_class`, `adk_session_store_class`, `adk_memory_store_class`, `adk_artifact_store_class`, `events_store_class`, and `litestar_store_class` with PEP 562 lazy `__init__.py`.
-- Verify `sqlspec.utils.adapters.resolve_adapter_name` returns `'vertebra_mysql'` and `resolve_extension_store_class` resolves every store without `_compat.py`.
+- Fix the critical `%s` bug by setting `StatementConfig(dialect='mysql')` default and execution style to `ParameterStyle.QMARK` (`?` positional tuples required by `vertebra._mysql` binary prepared statements), map errno `1062`/`1451`/`1452`/`1213` to `sqlspec.exceptions.*`, and implement `MySQLSyncDataDictionary`/`MySQLAsyncDataDictionary` (MySQL 8/9 vs MariaDB JSON/version flags) executing upstream `sqlspec/data_dictionary/dialects/mysql/sql/*.sql` catalog queries. Duplicate MySQL-family helpers strictly inside `adapters/mysql/core.py` (zero cross-adapter shared helper modules).
+- Implement SDK-free `MySQLSyncADKStore`/`MySQLAsyncADKStore`, `FULLTEXT` / MySQL 9 `VECTOR` `MySQLSyncADKMemoryStore`/`MySQLAsyncADKMemoryStore`, `MySQLSyncADKArtifactStore`/`MySQLAsyncADKArtifactStore` (`ArtifactReference`), `MySQLEventQueueStore` (companion `ALTER TABLE ... ADD INDEX` DDL), and MariaDB-compatible `MySQLLitestarStore` (`ON DUPLICATE KEY UPDATE`) executing via `self._config.provide_session()` with zero `pymysql`/`asyncmy`/`sqlspec.adapters.*` imports.
+- Define `MySQLSyncConfig` and `MySQLAsyncConfig` declaring `adapter_name = 'vertebra_mysql'`, explicit `adk_store_class`, `adk_memory_store_class`, `events_store_class`, and `litestar_store_class`, and PEP 562 lazy `__init__.py` (verified via `resolve_adapter_name` and `resolve_extension_store_class` without `_compat.py`).
 
 ## Test Matrix
 
-- Parametrized placeholder compilation, `TypedParameter` execution, zero-row `SELECT`, `RETURNING`/DML, `StatementConfig` override preservation, and `MySQLSyncDataDictionary`/`MySQLAsyncDataDictionary` catalog tests.
-
-- Parametrized unit/contract tests for `MySQLSyncADKStore`/`MySQLAsyncADKStore`, memory search, `ArtifactReference` metadata, `MySQLEventQueueStore`, and `MySQLLitestarStore` TTL/upsert/delete.
-
-- Resolver contract tests (`resolve_adapter_name`, `resolve_extension_store_class`, `_validate_adk_extension_config`), PEP 562 lazy import tests (zero eager `google.adk` import), and isolated `provide_session` transaction tests.
+- Parametrized QMARK `?` compilation, `TypedParameter` execution, zero-row `SELECT`, DML, `StatementConfig` override preservation, `MySQLSyncDataDictionary`/`MySQLAsyncDataDictionary` catalog tests, store contract tests (ADK/FULLTEXT/`ArtifactReference`/events/Litestar `ON DUPLICATE KEY UPDATE`), PEP 562 lazy `google.adk` import tests, and resolver contract checks.
 
 ## Verification
 

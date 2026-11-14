@@ -4,7 +4,7 @@ id: native-sqlite-driver:ch01-wheel-scaffold-and-isolation:t03
 flow_id: native-sqlite-driver
 chapter_id: ch01-wheel-scaffold-and-isolation
 title: Enforce _sqlite Companion Wheel Exclusions Across All Sibling Extensions
-description: Exclude _sqlite* and vertebra-sqlite from all 10 sibling extension pyproject.toml manifests and register sqlite in test_optional_driver_wheels.py.
+description: Exclude "**/py/vertebra/_sqlite.pyi" from all 9 sibling extension pyproject.toml manifests and register sqlite in test_optional_driver_wheels.py.
 status: stable
 state: pending
 planning_quality: standard
@@ -31,8 +31,8 @@ read_set:
 - src/rs/vertebra-bundler/pyproject.toml
 - src/rs/vertebra-duckdb/pyproject.toml
 - src/rs/vertebra-mssql/pyproject.toml
-- src/rs/vertebra-mysql/pyproject.toml
 - src/rs/vertebra-oracle/pyproject.toml
+- src/py/tests/unit/db/test_optional_driver_wheels.py
 estimated_loc: 220
 tags:
 - sqlite
@@ -52,43 +52,27 @@ sources:
 
 ## Objective & Scope Boundary
 
-Add `"**/py/vertebra/_sqlite.pyi"` to `[tool.maturin].exclude` in `bigquery`, `bundler`, and `duckdb` per [`../spec.md` §2](../spec.md) [^duckdb-pyproj].
-
-Add `"**/py/vertebra/_sqlite.pyi"` to `[tool.maturin].exclude` in `mssql`, `mysql`, and `oracle` per [`../spec.md` §2](../spec.md) [^duckdb-pyproj].
-
-Exclude `_sqlite.pyi` in `postgres`, `spanner`, and `storage`, and expand `test_optional_driver_wheels.py` to assert full reciprocal `.pyi` isolation across `oracle`, `postgres`, and `sqlite` per [`../spec.md` §2](../spec.md) [^wheel-tests] [^duckdb-pyproj].
+Add `"**/py/vertebra/_sqlite.pyi"` to `[tool.maturin].exclude` across all 9 sibling PyO3 extension manifests (`bigquery`, `bundler`, `duckdb`, `mssql`, `mysql`, `oracle`, `postgres`, `spanner`, `storage`) and expand `test_optional_driver_wheels.py` to enforce full reciprocal `.pyi` isolation across all extensions plus `[project.optional-dependencies].sqlite` per [`../spec.md` §2](../spec.md) [^duckdb-pyproj] [^wheel-tests].
 
 ## Bounded Read Manifest
 
-- `src/rs/vertebra-bigquery/pyproject.toml` — Maturin exclude patterns.
-- `src/rs/vertebra-bundler/pyproject.toml` — Maturin exclude patterns.
-- `src/rs/vertebra-duckdb/pyproject.toml` — Maturin exclude patterns.
-
-- `src/rs/vertebra-mssql/pyproject.toml` — Maturin exclude patterns.
-- `src/rs/vertebra-mysql/pyproject.toml` — Maturin exclude patterns.
-- `src/rs/vertebra-oracle/pyproject.toml` — Maturin exclude patterns.
-
-- `src/rs/vertebra-postgres/pyproject.toml` — Maturin exclude patterns.
-- `src/rs/vertebra-spanner/pyproject.toml` — Maturin exclude patterns.
-- `src/rs/vertebra-storage/pyproject.toml` — Maturin exclude patterns.
-- `src/py/tests/unit/db/test_optional_driver_wheels.py` — `SIBLING_WHEEL_MANIFESTS` and `sibling_stubs`.
+- `src/rs/vertebra-bigquery/pyproject.toml` — Canonical `[tool.maturin].exclude` ordering precedent.
+- `src/rs/vertebra-bundler/pyproject.toml` — Sibling manifest pattern.
+- `src/rs/vertebra-duckdb/pyproject.toml` — Sibling manifest pattern (mirrored identically to `mysql`, `postgres`, `spanner`, `storage`).
+- `src/rs/vertebra-mssql/pyproject.toml` — Sibling manifest pattern.
+- `src/rs/vertebra-oracle/pyproject.toml` — Sibling manifest pattern.
+- `src/py/tests/unit/db/test_optional_driver_wheels.py` — `SIBLING_WHEEL_MANIFESTS` and `[project.optional-dependencies]` checks.
 
 ## Contracts & Edge Cases
 
-- Keep exclusion globs sorted and identical in format to existing sibling `.pyi` entries.
-- **Edge Case**: Do not alter `include` globs for each crate's own `.pyi` stub.
-
-- Preserve existing `include` and `exclude` entries while appending `_sqlite.pyi`.
-- **Edge Case**: Ensure TOML syntax validates cleanly via `tomllib`.
-
-- Update `SIBLING_WHEEL_MANIFESTS` and `sibling_stubs` in `test_optional_driver_wheels.py` to cover `_oracle.pyi`, `_postgres.pyi`, and `_sqlite.pyi` plus `[project.optional-dependencies].sqlite`.
-- **Edge Case**: Every sibling wheel must exclude every other sibling's `.pyi` stub with zero missing pairs.
+- Insert `"**/py/vertebra/_sqlite.pyi"` in sorted order inside `[tool.maturin].exclude` across all 9 sibling extension `pyproject.toml` files without altering each crate's own included stub.
+- Expand `SIBLING_WHEEL_MANIFESTS` in `test_optional_driver_wheels.py` to cover `vertebra-sqlite` (`_sqlite.pyi`), `vertebra-oracle` (`_oracle.pyi`), and `vertebra-postgres` (`_postgres.pyi`) reciprocally, plus assert `[project.optional-dependencies].sqlite == [f"vertebra-sqlite=={version}"]`.
+- **Edge Case**: Every modified TOML manifest validates cleanly with `tomllib`, and zero sibling wheels leak `_sqlite.pyi`.
 
 ## Test Matrix
 
-- Verified by `test_optional_driver_wheels.py` in `t03`.
-
-- `@pytest.mark.parametrize` over all sibling `pyproject.toml` manifests asserts `include` and reciprocal `exclude` completeness.
+- `@pytest.mark.parametrize` over all sibling `pyproject.toml` manifests asserts reciprocal `include` and `exclude` completeness.
+- `make sqlite-wheel-check` verifies the built `vertebra_sqlite-*.whl` contains only `_sqlite.*` + `vertebra/_sqlite.pyi`.
 
 ## Verification
 
@@ -98,9 +82,8 @@ make sqlite-wheel-check && uv run --no-sync pytest src/py/tests/unit/db/test_opt
 
 ## Acceptance Criteria
 
-- [ ] `bigquery`, `bundler`, and `duckdb` manifests exclude `_sqlite.pyi`.
-- [ ] `mssql`, `mysql`, and `oracle` manifests exclude `_sqlite.pyi`.
-- [ ] `make sqlite-wheel-check` and `test_optional_driver_wheels.py` pass.
+- [ ] All 9 sibling `pyproject.toml` manifests exclude `"**/py/vertebra/_sqlite.pyi"`.
+- [ ] `make sqlite-wheel-check` and `test_optional_driver_wheels.py` pass with full reciprocal `.pyi` coverage.
 - [ ] Zero regressions in the fast verification gate.
 
 [^duckdb-pyproj]: `src/rs/vertebra-duckdb/pyproject.toml` — Maturin standalone wheel isolation manifest precedent.

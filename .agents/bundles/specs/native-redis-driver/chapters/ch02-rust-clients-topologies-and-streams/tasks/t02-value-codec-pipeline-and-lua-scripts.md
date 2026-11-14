@@ -43,7 +43,7 @@ Implement `value.rs` and `client_core.rs` for `HELLO 3`, core KV commands, `redi
 
 ## Bounded Read Manifest
 
-- `src/rs/vertebra-redis/src/config.rs` — `RedisClientConfig` and IAM token hook from `ch02:t04`.
+- `src/rs/vertebra-redis/src/config.rs` — `RedisClientConfig` and IAM token hook from `t01`.
 - `src/rs/vertebra-redis/src/errors.rs` — `RedisError` mapping.
 
 ## Contracts & Edge Cases

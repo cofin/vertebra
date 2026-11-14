@@ -73,11 +73,11 @@ sources:
 
 ## 1. Specification, Context & Provenance
 
-SQLAlchemy and Advanced Alchemy are the primary ORM/query path in Vertebra, alongside native Django `6.0+` database backends. Upstream `broker-pool-sharing:ch04` extracts `src/py/vertebra/db/dbapi/{__init__,_sync,_async,_errors}.py`, `extensions/sqlalchemy/async_adapter.py`, and `extensions/sqlalchemy/pool.py`, while `native-sqlite-driver` delivers the Rust-backed SQLite driver.
+SQLAlchemy and Advanced Alchemy are the primary ORM/query path in Vertebra, alongside native Django `6.0+` database backends. Upstream `broker-pool-sharing:ch04` extracts `src/py/vertebra/db/dbapi/{__init__,_sync,_async}.py`, `extensions/sqlalchemy/async_adapter.py`, and `extensions/sqlalchemy/pool.py`, while `native-sqlite-driver` delivers the Rust-backed SQLite driver.
 
 At `main @ 18baadcd`, three structural defects remain across SQLAlchemy, Advanced Alchemy, and Django [^sa-dbapi] [^sa-alembic] [^django-backends]:
 1. `SyncDBAPIConnection` opens a separate stdlib `sqlite3.connect` handle (`_sqlite_conn`), defaults empty URLs to `sqlite+vtb:///:memory:`, and dispatches autocommit/migration rules via `isinstance` checks on `BigQueryConfig`, `SpannerConfig`, `SQLiteConfig`, `PostgreSQLConfig`, and `MySQLConfig`.
-2. Monolithic `dialects.py` (`1,656` lines) and `alembic.py` (`418` lines) mix inline PEP 249 shims with partial hand-rolled cloud/analytical compilers, while `alchemy/cache.py` lacks real `dogpile.cache` backend registration (`dogpile.cache` is absent from `pyproject.toml`) and retains a duplicate `sqlalchemy/cache.py` shim [^aa-cache].
+2. Monolithic `dialects.py` (`1,659` lines) and `alembic.py` (`418` lines) mix inline PEP 249 shims with partial hand-rolled cloud/analytical compilers, while `alchemy/cache.py` lacks real `dogpile.cache` backend registration (`dogpile.cache` is absent from `pyproject.toml`) and retains a duplicate `sqlalchemy/cache.py` shim [^aa-cache].
 3. `extensions/django/db/backends/` routes through a generic vendor-dispatching `DatabaseWrapperMixin` and ships hollow stubs for `bigquery`, `duckdb`, and `mssql`, which have no built-in Django backends.
 
 **Non-Goals**: SQLSpec adapters (`sqlspec-adapter-parity`), Django `django.tasks` (`queues-tasks-and-channels`), `StatementCache` removal and initial `db/dbapi` extraction (`broker-pool-sharing`), and native SQLite wheel compilation (`native-sqlite-driver`).

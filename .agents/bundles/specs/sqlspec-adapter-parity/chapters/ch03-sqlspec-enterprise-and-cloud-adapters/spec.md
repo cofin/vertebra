@@ -11,6 +11,8 @@ planning_quality: standard
 planning_degraded_reason: null
 plan_commit: 1b191388
 updated_at: '2026-11-14T18:50:00Z'
+depends_on_chapters:
+- ch01-sqlspec-core-driver-and-artifact-ref
 generated:
   by: flow/0.30.1
   at: '2026-11-14T18:50:00Z'
@@ -66,31 +68,19 @@ sources:
 # Chapter 03: Per-Engine SQLSpec Adapter Packages for SQL Server, DuckDB, BigQuery, and Cloud Spanner
 
 <!-- truth: start -->
-- **Baseline (`18baadcd`)**: SQL Server (MSSQL) SQLSpec integration lacks modular `src/py/vertebra/extensions/sqlspec/adapters/mssql/` parity, complete data dictionaries, and zero-SDK ADK/Events/Litestar stores [^sqlspec-adapters].
-- **Target Architecture**: `src/py/vertebra/extensions/sqlspec/adapters/mssql/{__init__,config,core,driver,data_dictionary,adk,events,litestar}.py` implements full `sqlspec>=0.71.1` parity over native `src/py/vertebra/db/adapters/mssql/driver.py` with `adapter_name = 'vertebra_mssql'`, explicit `*_store_class` attributes, and zero cross-adapter SQL helper modules [^mssql-drv] [^mssql-core].
-- **Baseline (`18baadcd`)**: DuckDB SQLSpec integration lacks modular `src/py/vertebra/extensions/sqlspec/adapters/duckdb/` parity, complete data dictionaries, and zero-SDK ADK/Events/Litestar stores [^sqlspec-adapters].
-- **Target Architecture**: `src/py/vertebra/extensions/sqlspec/adapters/duckdb/{__init__,config,core,driver,data_dictionary,adk,events,litestar}.py` implements full `sqlspec>=0.71.1` parity over native `src/py/vertebra/db/adapters/duckdb/driver.py` with `adapter_name = 'vertebra_duckdb'`, explicit `*_store_class` attributes, and zero cross-adapter SQL helper modules [^duckdb-drv] [^duckdb-core].
-- **Baseline (`18baadcd`)**: Google BigQuery SQLSpec integration lacks modular `src/py/vertebra/extensions/sqlspec/adapters/bigquery/` parity, complete data dictionaries, and zero-SDK ADK/Events/Litestar stores [^sqlspec-bq].
-- **Target Architecture**: `src/py/vertebra/extensions/sqlspec/adapters/bigquery/{__init__,config,core,driver,data_dictionary,adk,events,litestar}.py` implements full `sqlspec>=0.71.1` parity over native `src/py/vertebra/db/adapters/bigquery/driver.py` with `adapter_name = 'vertebra_bigquery'`, explicit `*_store_class` attributes, and zero cross-adapter SQL helper modules [^bigquery-drv] [^bigquery-core].
-- **Baseline (`18baadcd`)**: Google Cloud Spanner & Spangres SQLSpec integration lacks modular `src/py/vertebra/extensions/sqlspec/adapters/spanner/` parity, complete data dictionaries, and zero-SDK ADK/Events/Litestar stores [^sqlspec-spn].
-- **Target Architecture**: `src/py/vertebra/extensions/sqlspec/adapters/spanner/{__init__,config,core,driver,data_dictionary,adk,events,litestar}.py` implements full `sqlspec>=0.71.1` parity over native `src/py/vertebra/db/adapters/spanner/driver.py` with `adapter_name = 'vertebra_spanner'`, explicit `*_store_class` attributes, and zero cross-adapter SQL helper modules [^spanner-drv] [^spanner-core].
+- **Baseline (`18baadcd`)**: Enterprise and cloud SQLSpec integration (`mssql`, `duckdb`, `bigquery`, `spanner`) lacks modular `src/py/vertebra/extensions/sqlspec/adapters/<engine>/` parity, DuckDB 2.0+ lexical `COPY` ordering and Arrow-divergent `fetchall()` fidelity, zero-SDK stores, and clean Spanner isolation (`spanner.py` sets invalid `sqlglot` dialect names `"googlesql"`/`"spangres"` and imports BigQuery `ObjectRef`) [^sqlspec-adapters] [^sqlspec-bq] [^sqlspec-spn].
+- **Target Architecture**: Each `extensions/sqlspec/adapters/{mssql,duckdb,bigquery,spanner}/{__init__,config,core,driver,data_dictionary,adk,events,litestar}.py` package implements full `sqlspec>=0.71.1` parity over its native `db/adapters/<engine>/driver.py`, declares `adapter_name = "vertebra_<engine>"` with explicit `adk_store_class`, `adk_memory_store_class`, `events_store_class`, and `litestar_store_class` attributes (plus lazy `*ADKArtifactStore` exports), maps Spanner `googlesql` -> `"spanner"` and `spangres` -> `"postgres"`, uses `vertebra.storage.ArtifactReference` with zero BigQuery imports in Spanner, and keeps SQL/parameter helpers strictly local to its own `core.py` [^mssql-drv] [^duckdb-drv] [^bigquery-drv] [^spanner-drv].
 <!-- truth: end -->
 
 ## 1. Specification, Context & Provenance
 
-This chapter builds the standalone `src/py/vertebra/extensions/sqlspec/adapters/mssql/` SQLSpec adapter package over Vertebra's native SQL Server (MSSQL) driver, keeping all dialect SQL and parameter helpers local to `src/py/vertebra/extensions/sqlspec/adapters/mssql/core.py` [^mssql-drv] [^mssql-core].
-
-This chapter builds the standalone `src/py/vertebra/extensions/sqlspec/adapters/duckdb/` SQLSpec adapter package over Vertebra's native DuckDB driver, keeping all dialect SQL and parameter helpers local to `src/py/vertebra/extensions/sqlspec/adapters/duckdb/core.py` [^duckdb-drv] [^duckdb-core].
-
-This chapter builds the standalone `src/py/vertebra/extensions/sqlspec/adapters/bigquery/` SQLSpec adapter package over Vertebra's native Google BigQuery driver, keeping all dialect SQL and parameter helpers local to `src/py/vertebra/extensions/sqlspec/adapters/bigquery/core.py` [^bigquery-drv] [^bigquery-core].
-
-This chapter builds the standalone `src/py/vertebra/extensions/sqlspec/adapters/spanner/` SQLSpec adapter package over Vertebra's native Google Cloud Spanner & Spangres driver, keeping all dialect SQL and parameter helpers local to `src/py/vertebra/extensions/sqlspec/adapters/spanner/core.py` [^spanner-drv] [^spanner-core].
+This chapter delivers standalone `src/py/vertebra/extensions/sqlspec/adapters/{mssql,duckdb,bigquery,spanner}/` packages over Vertebra's native SQL Server, DuckDB, BigQuery, and Cloud Spanner/Spangres drivers, keeping all dialect SQL and parameter helpers strictly inside each engine's own `core.py` with zero cross-adapter SQL helper modules and zero third-party DB SDK imports [^mssql-core] [^duckdb-core] [^bigquery-core] [^spanner-core].
 
 ## 2. Requirements, Concrete Contracts & Architecture
 
 - **Driver & DataDictionary**: Set `StatementConfig(dialect='tsql')` with `ParameterStyle.QMARK` (`?` positional tuples rewritten by `MSSQLCore.rewrite_placeholders` to `@P1..@Pn` for `vertebra._mssql`), `SAVE TRANSACTION` / `ROLLBACK TRANSACTION` savepoints, error `2601`/`2627`/`547`/`1205` mapping, and `MSSQLSyncDataDictionary`/`MSSQLAsyncDataDictionary`. Keep all T-SQL helpers strictly local to `adapters/mssql/core.py`.
 - **Sub-Extension Stores**: Implement SDK-free `MSSQLSyncADKStore`/`MSSQLAsyncADKStore` (`MERGE ... WITH (HOLDLOCK)`, `NVARCHAR(MAX)` JSON, `DATETIMEOFFSET(6)`), `MSSQLSyncADKMemoryStore`/`MSSQLAsyncADKMemoryStore`, `MSSQLSyncADKArtifactStore`/`MSSQLAsyncADKArtifactStore`, `MSSQLEventQueueStore` (`IF OBJECT_ID(...) IS NULL` table/index DDL guards), and `MSSQLLitestarStore` (`VARBINARY(MAX)`).
-- **Config & Lazy Exports**: Define `MSSQLSyncConfig` and `MSSQLAsyncConfig` declaring `adapter_name = 'vertebra_mssql'` and explicit `adk_store_class`, `adk_session_store_class`, `adk_memory_store_class`, `adk_artifact_store_class`, `events_store_class`, and `litestar_store_class` with PEP 562 lazy `__init__.py`.
+- **Config & Lazy Exports**: Define `MSSQLSyncConfig` and `MSSQLAsyncConfig` declaring `adapter_name = 'vertebra_mssql'` and explicit `adk_store_class`, `adk_memory_store_class`, `events_store_class`, and `litestar_store_class` attributes (plus lazy `*ADKArtifactStore` exports) with PEP 562 lazy `__init__.py`.
 
 ```python
 class MSSQLSyncDataDictionary(SyncDataDictionaryBase):
@@ -109,9 +99,7 @@ class MSSQLSyncConfig(SyncAdapterConfig):
     adapter_name: ClassVar[str] = "vertebra_mssql"
     driver_type = MSSQLSyncDriver
     adk_store_class: ClassVar[type[Any]]
-    adk_session_store_class: ClassVar[type[Any]]
     adk_memory_store_class: ClassVar[type[Any]]
-    adk_artifact_store_class: ClassVar[type[Any]]
     events_store_class: ClassVar[type[Any]]
     litestar_store_class: ClassVar[type[Any]]
 
@@ -122,7 +110,7 @@ class MSSQLAsyncConfig(AsyncAdapterConfig):
 
 - **Driver & DataDictionary**: Set `StatementConfig(dialect='duckdb')` supporting `{ParameterStyle.QMARK, ParameterStyle.NUMERIC}` (`?` and `$1`), DuckDB 2.0+ lexical `COPY (SELECT ... ?) TO ?` parameter ordering, native Python `fetchall()` preservation for Arrow-divergent types (`HUGEINT`, `UHUGEINT`, `BIT`, `TIMETZ`, `INTERVAL`, `MAP`) alongside zero-copy `select_to_arrow` / `load_from_arrow`, and `DuckDBSyncDataDictionary`/`DuckDBAsyncDataDictionary`. Keep all helpers local to `adapters/duckdb/core.py`.
 - **Sub-Extension Stores**: Implement `DuckDBSyncADKStore`/`DuckDBAsyncADKStore`, `array_cosine_similarity` / `fts` `DuckDBSyncADKMemoryStore`/`DuckDBAsyncADKMemoryStore`, `DuckDBSyncADKArtifactStore`/`DuckDBAsyncADKArtifactStore`, `DuckDBEventQueueStore`, and `DuckDBLitestarStore` (`ON CONFLICT DO UPDATE`).
-- **Config & Lazy Exports**: Define `DuckDBSyncConfig` and `DuckDBAsyncConfig` declaring `adapter_name = 'vertebra_duckdb'`, isolated `:memory:<name>` database handling, and explicit `adk_store_class`, `adk_session_store_class`, `adk_memory_store_class`, `adk_artifact_store_class`, `events_store_class`, and `litestar_store_class` with PEP 562 lazy `__init__.py`.
+- **Config & Lazy Exports**: Define `DuckDBSyncConfig` and `DuckDBAsyncConfig` declaring `adapter_name = 'vertebra_duckdb'`, isolated `:memory:<name>` database handling, and explicit `adk_store_class`, `adk_memory_store_class`, `events_store_class`, and `litestar_store_class` (plus lazy `*ADKArtifactStore`) with PEP 562 lazy `__init__.py`.
 
 ```python
 class DuckDBSyncDataDictionary(SyncDataDictionaryBase):
@@ -141,9 +129,7 @@ class DuckDBSyncConfig(SyncAdapterConfig):
     adapter_name: ClassVar[str] = "vertebra_duckdb"
     driver_type = DuckDBSyncDriver
     adk_store_class: ClassVar[type[Any]]
-    adk_session_store_class: ClassVar[type[Any]]
     adk_memory_store_class: ClassVar[type[Any]]
-    adk_artifact_store_class: ClassVar[type[Any]]
     events_store_class: ClassVar[type[Any]]
     litestar_store_class: ClassVar[type[Any]]
 
@@ -154,7 +140,7 @@ class DuckDBAsyncConfig(AsyncAdapterConfig):
 
 - **Driver & DataDictionary**: Lift BigQuery SQLSpec logic onto `BaseSyncDriver`/`BaseAsyncDriver` with `StatementConfig(dialect='bigquery')` and `ParameterStyle.NAMED_AT` (`@name`, preserving `TypedParameter` `STRUCT`/`ARRAY`/`NUMERIC`/`GEOGRAPHY`/`JSON` hints), unsplit procedural `BEGIN ... END` script execution, `session_id` transactions, `dry_run`, zero-copy `VTBARROW` `select_to_arrow`, Storage Write `PENDING` atomic `load_from_arrow`, and `BigQuerySyncDataDictionary`/`BigQueryAsyncDataDictionary`. Keep all helpers local to `adapters/bigquery/core.py`.
 - **Sub-Extension Stores**: Implement zero-SDK `BigQuerySyncADKStore`/`BigQueryAsyncADKStore`, `VECTOR_SEARCH` / `SEARCH` `BigQuerySyncADKMemoryStore`/`BigQueryAsyncADKMemoryStore`, `BigQuerySyncADKArtifactStore`/`BigQueryAsyncADKArtifactStore` translating native `vertebra.db.adapters.bigquery.ObjectRef` into `vertebra.storage.ArtifactReference` on the shared artifact surface (while keeping `ObjectRef` on native Object Tables), partitioned/clustered `BigQueryEventQueueStore`, and `BigQueryLitestarStore` (`MERGE`).
-- **Config & Lazy Exports**: Define `BigQuerySyncConfig` and `BigQueryAsyncConfig` declaring `adapter_name = 'vertebra_bigquery'`, fixing `BigQueryConnectionShim.query` to honor `job_config.query_parameters` and `BigQueryAsyncConfig.create_connection` to reuse a single driver, plus explicit `*_store_class` attributes and PEP 562 lazy `__init__.py`.
+- **Config & Lazy Exports**: Define `BigQuerySyncConfig` and `BigQueryAsyncConfig` declaring `adapter_name = 'vertebra_bigquery'`, fixing `BigQueryConnectionShim.query` to honor `job_config.query_parameters` and `BigQueryAsyncConfig.create_connection` to reuse a single driver, plus explicit `adk_store_class`, `adk_memory_store_class`, `events_store_class`, and `litestar_store_class` (and lazy `*ADKArtifactStore`) via PEP 562 lazy `__init__.py`.
 
 ```python
 class BigQuerySyncDataDictionary(SyncDataDictionaryBase):
@@ -173,9 +159,7 @@ class BigQuerySyncConfig(SyncAdapterConfig):
     adapter_name: ClassVar[str] = "vertebra_bigquery"
     driver_type = BigQuerySyncDriver
     adk_store_class: ClassVar[type[Any]]
-    adk_session_store_class: ClassVar[type[Any]]
     adk_memory_store_class: ClassVar[type[Any]]
-    adk_artifact_store_class: ClassVar[type[Any]]
     events_store_class: ClassVar[type[Any]]
     litestar_store_class: ClassVar[type[Any]]
 
@@ -186,7 +170,7 @@ class BigQueryAsyncConfig(AsyncAdapterConfig):
 
 - **Driver & DataDictionary**: Fix invalid `sqlglot` dialect names by setting `StatementConfig.dialect = 'spanner'` (`ParameterStyle.NAMED_AT` `@name`, `TypeCode.JSON` and `TypedParameter(semantic_name='ARRAY<FLOAT32>')`) when `spanner_dialect == 'googlesql'` and `StatementConfig.dialect = 'postgres'` (`ParameterStyle.NUMERIC` `$1 -> p1`) when `spanner_dialect == 'spangres'`. Support `execute_partitioned_dml`, `ExecuteBatchDml` `execute_stack`, and `SpannerSyncDataDictionary`/`SpannerAsyncDataDictionary` routing `googlesql` vs `postgresql` catalog SQL. Keep helpers strictly inside `adapters/spanner/core.py`.
 - **Sub-Extension Stores**: Implement zero-SDK `SpannerSyncADKStore`/`SpannerAsyncADKStore` (`provide_session(transaction=False)` lock-free snapshots on reads, `transaction=True` on writes), ScaNN/FTS/RRF/PropertyGraph `SpannerSyncADKMemoryStore`/`SpannerAsyncADKMemoryStore`, `SpannerSyncADKArtifactStore`/`SpannerAsyncADKArtifactStore` constructing `vertebra.storage.ArtifactReference` directly with ZERO `vertebra.db.adapters.bigquery` imports, hash-sharded `MOD(FARM_FINGERPRINT(...))` `BYTES` `SpannerEventQueueStore` (valid `ROW DELETION POLICY` / `TTL INTERVAL`, no invalid TTL on `updated_at`), and `SpannerLitestarStore`.
-- **Config & Lazy Exports**: Define `SpannerSyncConfig`/`SpannerAsyncConfig` and `SpangresSyncConfig`/`SpangresAsyncConfig` declaring `adapter_name = 'vertebra_spanner'`, isolated per-session transaction state on `provide_session`, and explicit `adk_store_class`, `adk_session_store_class`, `adk_memory_store_class`, `adk_artifact_store_class`, `events_store_class`, and `litestar_store_class` with PEP 562 lazy `__init__.py`.
+- **Config & Lazy Exports**: Define `SpannerSyncConfig`/`SpannerAsyncConfig` and `SpangresSyncConfig`/`SpangresAsyncConfig` declaring `adapter_name = 'vertebra_spanner'`, isolated per-session transaction state on `provide_session`, and explicit `adk_store_class`, `adk_memory_store_class`, `events_store_class`, and `litestar_store_class` (plus lazy `*ADKArtifactStore`) via PEP 562 lazy `__init__.py`.
 
 ```python
 class SpannerSyncDataDictionary(SyncDataDictionaryBase):
@@ -205,9 +189,7 @@ class SpannerSyncConfig(SyncAdapterConfig):
     adapter_name: ClassVar[str] = "vertebra_spanner"
     driver_type = SpannerSyncDriver
     adk_store_class: ClassVar[type[Any]]
-    adk_session_store_class: ClassVar[type[Any]]
     adk_memory_store_class: ClassVar[type[Any]]
-    adk_artifact_store_class: ClassVar[type[Any]]
     events_store_class: ClassVar[type[Any]]
     litestar_store_class: ClassVar[type[Any]]
 
@@ -243,7 +225,7 @@ Chapter `ch03-sqlspec-enterprise-and-cloud-adapters` is `planned` behind [`../..
 Fast Chapter Gate (`< 60s` offline):
 
 ```bash
-uv run --no-sync ruff check src/py/vertebra/extensions/sqlspec/adapters/spanner && uv run --no-sync mypy src/py/vertebra/extensions/sqlspec/adapters/spanner && uv run --no-sync pytest src/py/tests/unit/extensions/test_sqlspec_spanner.py
+uv run --no-sync ruff check src/py/vertebra/extensions/sqlspec/adapters/mssql src/py/vertebra/extensions/sqlspec/adapters/duckdb src/py/vertebra/extensions/sqlspec/adapters/bigquery src/py/vertebra/extensions/sqlspec/adapters/spanner && uv run --no-sync mypy src/py/vertebra/extensions/sqlspec/adapters/mssql src/py/vertebra/extensions/sqlspec/adapters/duckdb src/py/vertebra/extensions/sqlspec/adapters/bigquery src/py/vertebra/extensions/sqlspec/adapters/spanner && uv run --no-sync pytest src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py src/py/tests/unit/extensions/test_sqlspec_bigquery.py src/py/tests/unit/extensions/test_sqlspec_spanner.py
 ```
 
 [^mssql-drv]: `src/py/vertebra/db/adapters/mssql/driver.py` — Native SQL Server (MSSQL) sync and async drivers.

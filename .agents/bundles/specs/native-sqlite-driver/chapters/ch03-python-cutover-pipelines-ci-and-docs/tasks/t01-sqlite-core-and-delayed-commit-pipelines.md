@@ -58,41 +58,34 @@ sources:
 
 ## Objective & Scope Boundary
 
-Fix `SQLiteCore.initialization_pragmas` directly and delete `sqlite_initialization_pragmas` from `vertebra-py/src/db.rs` and `_vertebra.pyi` per [`../spec.md` §2](../spec.md) [^sqlite-core] [^vertebra-py-db] [^vertebra-pyi].
-
-Create `SyncSQLitePipeline` and `AsyncSQLitePipeline` in `src/py/vertebra/db/adapters/sqlite/pipeline.py` and lazy-export them in `sqlite/__init__.py` per [`../spec.md` §2](../spec.md) [^driver-caps] [^sqlite-drv].
+Fix `SQLiteCore.initialization_pragmas` directly, delete `sqlite_initialization_pragmas` from `vertebra-py/src/db.rs` and `src/py/vertebra/_vertebra.pyi`, create `SyncSQLitePipeline` and `AsyncSQLitePipeline` in `src/py/vertebra/db/adapters/sqlite/pipeline.py`, and lazy-export them in `sqlite/__init__.py` per [`../spec.md` §2](../spec.md) [^sqlite-core] [^vertebra-py-db] [^vertebra-pyi] [^driver-caps] [^sqlite-drv].
 
 ## Bounded Read Manifest
 
 - `src/py/vertebra/db/adapters/sqlite/core.py` — Broken 5-arg `native_fn` call and `contextlib.suppress(TypeError)`.
 - `src/rs/vertebra-py/src/db.rs` — `sqlite_initialization_pragmas` PyO3 function.
 - `src/py/vertebra/_vertebra.pyi` — `sqlite_initialization_pragmas` stub.
-
 - `src/py/vertebra/db/driver/capabilities.py` — `SyncPipeline`, `AsyncPipeline`, `SyncPipelineCapable`, and `AsyncPipelineCapable`.
 - `src/py/vertebra/db/adapters/sqlite/__init__.py` — Lazy package exports (`PY-06`).
 - `src/py/vertebra/_sqlite.pyi` — `execute_pipeline` signatures on `SyncSQLiteClient` and `AsyncSQLiteClient`.
 
 ## Contracts & Edge Cases
 
-- Remove `contextlib.suppress(TypeError)` and `_vertebra.sqlite_initialization_pragmas` lookup from `SQLiteCore.initialization_pragmas`.
-- Delete `sqlite_initialization_pragmas` from `vertebra-py/src/db.rs` and `src/py/vertebra/_vertebra.pyi`.
+- Remove `contextlib.suppress(TypeError)` and `_vertebra.sqlite_initialization_pragmas` lookup from `SQLiteCore.initialization_pragmas`, validating `synchronous` against `VALID_SQLITE_SYNCHRONOUS`.
+- Delete `sqlite_initialization_pragmas` from `src/rs/vertebra-py/src/db.rs` and `src/py/vertebra/_vertebra.pyi`.
+- Conform `SyncSQLitePipeline` and `AsyncSQLitePipeline` to `@runtime_checkable` `SyncPipeline` and `AsyncPipeline` (`execute`, `select`, `results`, context managers), flushing queued operations in one `execute_pipeline` worker turn inside delayed-commit `BEGIN IMMEDIATE ... COMMIT` when idle or `SAVEPOINT ... RELEASE SAVEPOINT` (`ROLLBACK TO SAVEPOINT` on error) when nested inside an outer transaction.
 - **Edge Case**: Invalid `synchronous` values raise `ValueError` consistently.
-
-- Conform to `@runtime_checkable` `SyncPipeline` and `AsyncPipeline` (`execute`, `select`, `results`, context managers).
-- Flush queued operations in one `execute_pipeline` worker turn: wrap in delayed-commit `BEGIN IMMEDIATE ... COMMIT` when idle, or `SAVEPOINT ... RELEASE SAVEPOINT` (`ROLLBACK TO SAVEPOINT` on error) when nested inside an active transaction.
-- **Edge Case**: Calling `results()` on an empty pipeline returns `[]` without starting a transaction.
-- **Edge Case**: Unhandled exception inside `with driver.pipeline():` discards un-flushed operations cleanly.
+- **Edge Case**: Calling `results()` on an empty pipeline returns `[]` without starting a transaction; an unhandled exception inside `with driver.pipeline():` discards un-flushed operations cleanly.
 
 ## Test Matrix
 
-- `@pytest.mark.parametrize` verifies `SQLiteCore.initialization_pragmas` for WAL/non-WAL, `:memory:`, and `foreign_keys` combinations; `mypy.stubtest vertebra._vertebra` passes.
-
+- `@pytest.mark.parametrize` verifies `SQLiteCore.initialization_pragmas` across WAL/non-WAL, `:memory:`, and `foreign_keys` combinations; `mypy.stubtest vertebra._vertebra` passes.
 - `@pytest.mark.parametrize` verifies standalone delayed-commit atomicity, nested savepoint rollback preserving outer transaction rows, and `isinstance(..., SyncPipeline | AsyncPipeline)`.
 
 ## Verification
 
 ```bash
-uv run --no-sync pytest src/py/tests/unit/db/test_sqlite_driver.py -q -k pipeline && uv run --no-sync ruff check src/py/vertebra/db/adapters/sqlite
+make dev && uv run --no-sync python -m mypy.stubtest vertebra._vertebra --concise && uv run --no-sync pytest src/py/tests/unit/db/test_sqlite_driver.py -q && uv run --no-sync ruff check src/py/vertebra/db/adapters/sqlite
 ```
 
 ## Acceptance Criteria

@@ -78,45 +78,31 @@ sources:
 
 ## Objective & Scope Boundary
 
-Update `docs/usage/queues-and-realtime.md` and `docs/reference/{queues,database-capabilities}.md` per [`../spec.md`](../spec.md) [^doc-qr] [^ref-q] [^ref-cap].
-
-Update `docs/usage/{extensions,databases,analytics-and-cdc}.md` per [`../spec.md`](../spec.md) [^doc-ext] [^doc-db] [^doc-cdc].
-
-Synchronize `distributed-queues-and-email.md`, `litestar.md`, and `server-runtime-limitations.md` per [`../spec.md`](../spec.md) [^okf-queues] [^okf-litestar] [^okf-srv-lim].
+Update `docs/usage/{queues-and-realtime,extensions,databases,analytics-and-cdc}.md` and `docs/reference/{queues,database-capabilities}.md`, and synchronize `.agents/bundles/knowledge/domains/{framework/distributed-queues-and-email,extensions/litestar,server/server-runtime-limitations}.md` per [`../spec.md`](../spec.md) [^doc-qr] [^ref-q] [^ref-cap] [^doc-ext] [^doc-db] [^doc-cdc] [^okf-queues] [^okf-litestar] [^okf-srv-lim].
 
 ## Bounded Read Manifest
 
 - `docs/usage/queues-and-realtime.md` — `QueueBackendSettings`, native PostgreSQL/Oracle/Redis/Valkey/SHM queues, and distributed channels.
-- `docs/reference/{queues,database-capabilities}.md` — `SyncQueueStore`/`AsyncQueueStore` and `SyncNotificationSource`/`AsyncNotificationSource`.
-
-- `docs/usage/extensions.md` — `litestar-queues>=0.14.0` (`StoreQueueBackend`, `SHMQueueBackend`, `ContainerTaskDependencyProvider`), Django `6.0+` `TaskBackend` + `vertebra_worker`, Litestar `ChannelsPlugin`, and `ValkeyStore`.
-- `docs/usage/{databases,analytics-and-cdc}.md` — synchronous `SyncNotificationSource` and asynchronous `AsyncNotificationSource` listener examples.
-
-- `.agents/bundles/knowledge/domains/framework/distributed-queues-and-email.md` — replace executor-or-raise baseline with live PostgreSQL, Oracle, Redis, and Valkey backends.
-- `.agents/bundles/knowledge/domains/extensions/litestar.md` & `domains/server/server-runtime-limitations.md` — Litestar `StoreQueueBackend`/`ChannelsPlugin`/`ValkeyStore` and delivery caveats.
+- `docs/reference/queues.md` — `SyncQueueStore` and `AsyncQueueStore` API reference.
+- `docs/reference/database-capabilities.md` — `SyncNotificationSource` and `AsyncNotificationSource` capability protocols.
+- `src/py/vertebra/db/driver/capabilities.py` — authoritative protocol signatures (`SyncQueueStore`, `AsyncQueueStore`, `SyncNotificationSource`, `AsyncNotificationSource`).
+- `docs/usage/extensions.md` — `litestar-queues>=0.14.0`, Django `6.0+` `TaskBackend` + `vertebra_worker`, Litestar `ChannelsPlugin`, and `ValkeyStore`.
+- `docs/usage/databases.md` — sync/async notification listener guidance (alongside `docs/usage/analytics-and-cdc.md` and the 3 OKF target files in `files:` / `sources:`).
 
 ## Contracts & Edge Cases
 
-- Document `SyncQueueStore`/`AsyncQueueStore`, `SyncPostgresQueueStore`/`AsyncPostgresQueueStore`, `SyncOracleQueueStore`/`AsyncOracleQueueStore`, `QueueBackendSettings`, and distributed `ChannelsBackend` across Memory, Redis, Valkey, PostgreSQL, and Oracle.
-- Use `pymdownx.tabbed` install tabs and 4–6 node conceptual Mermaid diagrams.
-
-- Provide concise code examples (`msgspec.Struct` without boilerplate flags, inline config dicts) for `litestar-queues`, Django `TASKS`, `ValkeyStore` RESP3 client-side tracking, and synchronous `Sync*NotificationSource.listen()` CLI/worker usage.
-
-- Keep every OKF file `<= 200` lines with `<= 40`-line bounded truth blocks.
-- Record explicit caveats: SHM queue/channels are single-host multi-worker; PostgreSQL `NOTIFY` frames cap at `8000` bytes (wakeup IDs only); Oracle TxEventQ vs polling fallback; Cloud Spanner `SyncSpannerQueueStore`/`AsyncSpannerQueueStore` lands in follow-up flow `spanner-queue-and-rw-transactions`.
+- Document `SyncQueueStore`/`AsyncQueueStore`, `SyncPostgresQueueStore`/`AsyncPostgresQueueStore`, `SyncOracleQueueStore`/`AsyncOracleQueueStore`, `QueueBackendSettings`, and distributed `ChannelsBackend` across Memory, Redis, Valkey, PostgreSQL, and Oracle using `pymdownx.tabbed` install tabs and 4–6 node conceptual Mermaid diagrams.
+- Provide concise code examples (`msgspec.Struct` without internal boilerplate flags, inline config dicts) for `litestar-queues`, Django `TASKS` / `CACHES` / `CHANNEL_LAYERS`, `ValkeyStore` RESP3 client-side tracking, and synchronous `Sync*NotificationSource.listen()` CLI/worker usage.
+- Keep every OKF file (`distributed-queues-and-email.md`, `litestar.md`, `server-runtime-limitations.md`) `<= 200` lines with `<= 40`-line bounded truth blocks, recording explicit caveats: SHM queue/channels are single-host multi-worker; PostgreSQL `NOTIFY` frames cap at `8000` bytes (wakeup IDs only); Oracle TxEventQ vs polling fallback; Cloud Spanner `SyncSpannerQueueStore`/`AsyncSpannerQueueStore` lands in follow-up flow `spanner-queue-and-rw-transactions`.
 
 ## Test Matrix
 
-- Run `pytest test_vite_and_docs_portal.py` and verify zero unprefixed `QueueStore` or `NotificationSource` references remain in `docs/`.
-
-- Run `pytest test_vite_and_docs_portal.py` and verify zero `swap_channels_backend` or `django.queues` references remain.
-
-- Run `python -m tools.scripts.review_setup validate`.
+- Run `python -m tools.docs.scan_public_docstrings`, `python -m tools.scripts.review_setup validate`, and `pytest test_vite_and_docs_portal.py test_drop_in_names_and_generics.py` verifying zero unprefixed `QueueStore`/`NotificationSource` and zero `swap_channels_backend`/`django.queues` references remain in `docs/`.
 
 ## Verification
 
 ```bash
-uv run --no-sync python -m tools.scripts.review_setup validate && uv run --no-sync pytest src/py/tests/unit/extensions/test_vite_and_docs_portal.py src/py/tests/unit/extensions/test_drop_in_names_and_generics.py
+uv run --no-sync python -m tools.docs.scan_public_docstrings && uv run --no-sync python -m tools.scripts.review_setup validate && uv run --no-sync pytest src/py/tests/unit/extensions/test_vite_and_docs_portal.py src/py/tests/unit/extensions/test_drop_in_names_and_generics.py
 ```
 
 ## Acceptance Criteria

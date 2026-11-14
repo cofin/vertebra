@@ -54,7 +54,10 @@ Consolidate `ValkeyStore`, `RedisStore`, and `MemoryStore` across `framework/sto
 ## Bounded Read Manifest
 
 - `src/py/vertebra/framework/stores.py` — remove duplicate `KeyValueStore` socket/dict wrappers.
-- `src/py/vertebra/extensions/litestar/store.py` & `starlette/store.py` — `litestar.stores.base.Store` and Starlette store wrappers.
+- `src/py/vertebra/extensions/litestar/store.py` — `litestar.stores.base.Store` Valkey/Redis/Memory adapters.
+- `src/py/vertebra/extensions/starlette/store.py` — Starlette store wrappers (eliminating `flushdb()`).
+- `src/py/vertebra/db/adapters/valkey/driver.py` — native `AsyncValkeyDriver` commands.
+- `src/py/vertebra/db/adapters/redis/driver.py` — native `AsyncRedisDriver` commands.
 
 ## Contracts & Edge Cases
 

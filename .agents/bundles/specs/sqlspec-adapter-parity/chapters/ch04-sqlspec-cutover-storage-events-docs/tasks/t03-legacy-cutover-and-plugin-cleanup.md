@@ -52,8 +52,11 @@ Delete `extensions/sqlspec/{adapters,bigquery,spanner}.py`, clean `plugin.py`, a
 
 ## Bounded Read Manifest
 
-- `src/py/vertebra/extensions/sqlspec/{adapters,bigquery,spanner}.py` — legacy monolithic files to remove via `git rm`.
+- `src/py/vertebra/extensions/sqlspec/__init__.py` — public PEP 562 lazy export barrel.
 - `src/py/vertebra/extensions/sqlspec/plugin.py` — remove `_inject_sqlspec_pool_defaults`, duplicate `resolve_*_config`, and standalone `_hydrate_*` helpers.
+- `src/py/vertebra/extensions/sqlspec/adapters.py` — monolithic legacy adapters module slated for `git rm`.
+- `src/py/vertebra/extensions/sqlspec/bigquery.py` — legacy top-level BigQuery module slated for `git rm`.
+- `src/py/vertebra/extensions/sqlspec/spanner.py` — legacy top-level Spanner module slated for `git rm`.
 
 ## Contracts & Edge Cases
 
@@ -68,7 +71,7 @@ Delete `extensions/sqlspec/{adapters,bigquery,spanner}.py`, clean `plugin.py`, a
 ## Verification
 
 ```bash
-uv run --no-sync ruff check src/py/vertebra/extensions/sqlspec && uv run --no-sync mypy src/py/vertebra/extensions/sqlspec && uv run --no-sync python -m tools.scripts.review_setup validate && uv run --no-sync pytest src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py src/py/tests/unit/extensions/test_sqlspec_bigquery.py src/py/tests/unit/extensions/test_sqlspec_spanner.py src/py/tests/unit/extensions/test_data_storage_integrations.py
+uv run --no-sync ruff check src/py/vertebra/extensions/sqlspec && uv run --no-sync mypy src/py/vertebra/extensions/sqlspec && uv run --no-sync pytest src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py src/py/tests/unit/extensions/test_sqlspec_bigquery.py src/py/tests/unit/extensions/test_sqlspec_spanner.py src/py/tests/unit/extensions/test_data_storage_integrations.py src/py/tests/unit/extensions/test_drop_in_names_and_generics.py
 ```
 
 ## Acceptance Criteria

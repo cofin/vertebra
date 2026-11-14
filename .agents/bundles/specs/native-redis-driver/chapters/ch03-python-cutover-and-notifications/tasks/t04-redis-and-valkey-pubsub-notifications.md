@@ -26,8 +26,8 @@ read_set:
 - src/py/vertebra/db/adapters/redis/driver.py
 - src/py/vertebra/db/adapters/redis/__init__.py
 - src/py/vertebra/_redis.pyi
-- src/py/vertebra/db/adapters/redis/notify.py
 - src/py/vertebra/db/adapters/valkey/config.py
+- src/py/vertebra/db/adapters/valkey/__init__.py
 estimated_loc: 220
 tags:
 - redis
@@ -50,40 +50,32 @@ sources:
 
 ## Objective & Scope Boundary
 
-Implement `SyncRedisNotificationSource` and `AsyncRedisNotificationSource` in `src/py/vertebra/db/adapters/redis/notify.py` and lazy-export them in `redis/__init__.py` per [`../spec.md` §2](../spec.md) [^driver-caps] [^redis-drv].
-
-Create `SyncValkeyNotificationSource` and `AsyncValkeyNotificationSource` in `src/py/vertebra/db/adapters/valkey/notify.py` and lazy-export them in `valkey/__init__.py` per [`../spec.md` §2](../spec.md) [^valkey-drv] [^driver-caps].
+Implement `SyncRedisNotificationSource` and `AsyncRedisNotificationSource` (`src/py/vertebra/db/adapters/redis/notify.py`) and `SyncValkeyNotificationSource` and `AsyncValkeyNotificationSource` (`src/py/vertebra/db/adapters/valkey/notify.py`), lazy-exporting them from `redis/__init__.py` and `valkey/__init__.py` per [`../spec.md` §2](../spec.md) [^driver-caps] [^redis-drv] [^valkey-drv].
 
 ## Bounded Read Manifest
 
 - `src/py/vertebra/db/driver/capabilities.py` — `SyncNotificationSource`, `AsyncNotificationSource`, and `NotificationEvent`.
-- `src/py/vertebra/db/adapters/redis/driver.py` — `SyncRedisDriver` and `AsyncRedisDriver`.
+- `src/py/vertebra/db/adapters/redis/driver.py` — `SyncRedisDriver` and `AsyncRedisDriver` (`vertebra._redis` client plumbing).
 - `src/py/vertebra/db/adapters/redis/__init__.py` — Lazy package exports (`PY-06`).
-- `src/py/vertebra/_redis.pyi` — `SyncRedisListener` and `AsyncRedisListener`.
-
-- `src/py/vertebra/db/adapters/redis/notify.py` — `SyncRedisNotificationSource` and `AsyncRedisNotificationSource` from `t03`.
+- `src/py/vertebra/_redis.pyi` — `SyncRedisListener` and `AsyncRedisListener` signatures.
 - `src/py/vertebra/db/adapters/valkey/config.py` — `ValkeyConfig` defaults.
 - `src/py/vertebra/db/adapters/valkey/__init__.py` — Lazy package exports (`PY-06`).
 
 ## Contracts & Edge Cases
 
-- Support `publish`, `subscribe`, `psubscribe`, `ssubscribe` (Cluster sharded pub/sub), `unsubscribe`, `listen()`, `close()`/`aclose()`, and optional `ChangeFeed` envelope hydration.
-- Record pattern/shard metadata on `NotificationEvent.metadata`.
-- **Edge Case**: Breaking out of `listen()` closes the dedicated `SyncRedisListener` / `AsyncRedisListener` handle.
-
-- Default to `ValkeyConfig()` and probe `ensure_module("vertebra._redis", package="vertebra-core[valkey]", extra="valkey")`.
-- **Edge Case**: Missing `vertebra._redis` raises `MissingDependencyError` naming `vertebra-core[valkey]`.
+- Support `publish`, `subscribe`, `psubscribe`, `ssubscribe` (Cluster sharded pub/sub), `unsubscribe`, `listen()`, `close()`/`aclose()`, and optional `ChangeFeed` envelope hydration while recording pattern/shard metadata on `NotificationEvent.metadata`.
+- Default Valkey sources to `ValkeyConfig()` and probe `ensure_module("vertebra._redis", package="vertebra-core[valkey]", extra="valkey")`.
+- **Edge Case**: Breaking out of `listen()` closes the dedicated `SyncRedisListener` / `AsyncRedisListener` handle deterministically.
+- **Edge Case**: Missing `vertebra._redis` raises `MissingDependencyError` naming `vertebra-core[redis]` or `vertebra-core[valkey]`.
 
 ## Test Matrix
 
-- Loopback tests in `test_redis_valkey_resp3.py` verify `isinstance(..., SyncNotificationSource | AsyncNotificationSource)`, channel/pattern/shard pub/sub, `ChangeFeed` hydration, and `ChannelBus` integration.
-
-- Parameterized tests verify `SyncValkeyNotificationSource` and `AsyncValkeyNotificationSource` protocol compliance, missing-wheel error hint, and loopback message delivery.
+- Loopback tests in `test_redis_valkey_resp3.py` verify `isinstance(..., SyncNotificationSource | AsyncNotificationSource)`, channel/pattern/shard pub/sub, `ChangeFeed` hydration, missing-wheel error hints, and `ChannelBus` integration.
 
 ## Verification
 
 ```bash
-uv run --no-sync pytest src/py/tests/unit/db/test_redis_valkey_resp3.py -q && uv run --no-sync mypy src/py/vertebra/db/adapters/valkey
+uv run --no-sync pytest src/py/tests/unit/db/test_redis_valkey_resp3.py -q && uv run --no-sync ruff check src/py/vertebra/db/adapters/redis src/py/vertebra/db/adapters/valkey && uv run --no-sync mypy src/py/vertebra/db/adapters/redis src/py/vertebra/db/adapters/valkey
 ```
 
 ## Acceptance Criteria

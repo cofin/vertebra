@@ -29,9 +29,9 @@ read_set:
 - src/py/vertebra/extensions/sqlspec/_driver.py
 - src/py/vertebra/db/adapters/spanner/driver.py
 - src/py/vertebra/db/adapters/spanner/core.py
+- src/py/vertebra/db/adapters/spanner/transactions.py
 - src/py/vertebra/extensions/sqlspec/spanner.py
-- src/py/vertebra/extensions/sqlspec/adapters/spanner/core.py
-- src/py/vertebra/extensions/sqlspec/adapters/spanner/driver.py
+- src/py/vertebra/storage/_store.py
 estimated_loc: 245
 tags:
 - sqlspec
@@ -60,41 +60,26 @@ sources:
 
 ## Objective & Scope Boundary
 
-Implement `src/py/vertebra/extensions/sqlspec/adapters/spanner/{core,driver,data_dictionary}.py` (`SpannerSyncDriver`, `SpannerAsyncDriver`, `SpannerSyncDataDictionary`, `SpannerAsyncDataDictionary`) per [`../spec.md`](../spec.md) [^spanner-drv] [^spanner-core] [^sqlspec-spn].
-
-Implement `src/py/vertebra/extensions/sqlspec/adapters/spanner/{adk,events,litestar}.py` over upstream SDK-free base classes per [`../spec.md`](../spec.md) [^spanner-drv] [^storage-art] [^sqlspec-spn].
-
-Implement `src/py/vertebra/extensions/sqlspec/adapters/spanner/{config,__init__}.py` declaring `adapter_name = 'vertebra_spanner'` and explicit store class attributes per [`../spec.md`](../spec.md) [^spanner-drv] [^sqlspec-spn].
+Implement the complete `src/py/vertebra/extensions/sqlspec/adapters/spanner/{__init__,config,core,driver,data_dictionary,adk,events,litestar}.py` SQLSpec adapter package (`SpannerSyncDriver`/`SpannerAsyncDriver`, `SpannerSyncDataDictionary`/`SpannerAsyncDataDictionary`, SDK-free ADK/Events/Litestar stores, and `SpannerSyncConfig`/`SpannerAsyncConfig` + `SpangresSyncConfig`/`SpangresAsyncConfig`) per [`../spec.md`](../spec.md) [^spanner-drv] [^spanner-core] [^sqlspec-spn] [^storage-art].
 
 ## Bounded Read Manifest
 
-- `src/py/vertebra/extensions/sqlspec/_driver.py` — `BaseSyncDriver` and `BaseAsyncDriver` dispatch template.
-- `src/py/vertebra/db/adapters/spanner/driver.py` & `src/py/vertebra/db/adapters/spanner/core.py` — native Google Cloud Spanner & Spangres execution and parameter encoding.
-
-- `src/py/vertebra/extensions/sqlspec/adapters/spanner/driver.py` & `src/py/vertebra/extensions/sqlspec/adapters/spanner/core.py` — Google Cloud Spanner & Spangres SQLSpec session and dialect helpers.
-- `src/py/vertebra/storage/_store.py` — `ArtifactReference` contract.
-
-- `src/py/vertebra/extensions/sqlspec/adapters/spanner/driver.py`, `src/py/vertebra/extensions/sqlspec/adapters/spanner/adk.py`, `src/py/vertebra/extensions/sqlspec/adapters/spanner/events.py`, `src/py/vertebra/extensions/sqlspec/adapters/spanner/litestar.py` — adapter driver and store classes.
-- `src/py/vertebra/extensions/sqlspec/_driver.py` — shared config lifecycle and refcounted pool close.
+- `src/py/vertebra/extensions/sqlspec/_driver.py` — `BaseSyncDriver` and `BaseAsyncDriver` dispatch template, config lifecycle, and refcounted pool close.
+- `src/py/vertebra/db/adapters/spanner/driver.py` — native Spanner/Spangres sync/async drivers and `execute_partitioned_dml`.
+- `src/py/vertebra/db/adapters/spanner/core.py` — native Spanner `@name` and Spangres `$1 -> p1` helpers.
+- `src/py/vertebra/db/adapters/spanner/transactions.py` — `SyncSpannerTransaction` / `AsyncSpannerTransaction` and `ExecuteBatchDml`.
+- `src/py/vertebra/extensions/sqlspec/spanner.py` — current top-level Spanner module with invalid `sqlglot` dialect names and BigQuery `ObjectRef` import to eliminate.
+- `src/py/vertebra/storage/_store.py` — storage-neutral `ArtifactReference` value struct.
 
 ## Contracts & Edge Cases
 
-- Fix invalid `sqlglot` dialect names by setting `StatementConfig.dialect = 'spanner'` (`ParameterStyle.NAMED_AT` `@name`, `TypeCode.JSON` and `TypedParameter(semantic_name='ARRAY<FLOAT32>')`) when `spanner_dialect == 'googlesql'` and `StatementConfig.dialect = 'postgres'` (`ParameterStyle.NUMERIC` `$1 -> p1`) when `spanner_dialect == 'spangres'`. Support `execute_partitioned_dml`, `ExecuteBatchDml` `execute_stack`, and `SpannerSyncDataDictionary`/`SpannerAsyncDataDictionary` routing `googlesql` vs `postgresql` catalog SQL. Keep helpers strictly inside `adapters/spanner/core.py`.
-- `SpannerSyncDataDictionary(SyncDataDictionaryBase)` and `SpannerAsyncDataDictionary(AsyncDataDictionaryBase)` execute upstream `sqlspec/data_dictionary/dialects/spanner/sql/*.sql` catalog queries (`get_version`, `get_feature_flag`, `get_optimal_type`, `get_tables`, `get_columns`, `get_indexes`, `get_foreign_keys`).
-
-- Implement zero-SDK `SpannerSyncADKStore`/`SpannerAsyncADKStore` (`provide_session(transaction=False)` lock-free snapshots on reads, `transaction=True` on writes), ScaNN/FTS/RRF/PropertyGraph `SpannerSyncADKMemoryStore`/`SpannerAsyncADKMemoryStore`, `SpannerSyncADKArtifactStore`/`SpannerAsyncADKArtifactStore` constructing `vertebra.storage.ArtifactReference` directly with ZERO `vertebra.db.adapters.bigquery` imports, hash-sharded `MOD(FARM_FINGERPRINT(...))` `BYTES` `SpannerEventQueueStore` (valid `ROW DELETION POLICY` / `TTL INTERVAL`, no invalid TTL on `updated_at`), and `SpannerLitestarStore`.
-- Never import `sqlspec.adapters.<third_party>.*` or third-party DB SDKs; execute all DDL and DML through `self._config.provide_session()`.
-
-- Define `SpannerSyncConfig`/`SpannerAsyncConfig` and `SpangresSyncConfig`/`SpangresAsyncConfig` declaring `adapter_name = 'vertebra_spanner'`, isolated per-session transaction state on `provide_session`, and explicit `adk_store_class`, `adk_session_store_class`, `adk_memory_store_class`, `adk_artifact_store_class`, `events_store_class`, and `litestar_store_class` with PEP 562 lazy `__init__.py`.
-- Verify `sqlspec.utils.adapters.resolve_adapter_name` returns `'vertebra_spanner'` and `resolve_extension_store_class` resolves every store without `_compat.py`.
+- Fix invalid `sqlglot` dialect names by setting `StatementConfig.dialect = 'spanner'` (`ParameterStyle.NAMED_AT` `@name`, `TypeCode.JSON` and `TypedParameter(semantic_name='ARRAY<FLOAT32>')`) when `spanner_dialect == 'googlesql'` and `StatementConfig.dialect = 'postgres'` (`ParameterStyle.NUMERIC` `$1 -> p1`) when `spanner_dialect == 'spangres'`. Support `execute_partitioned_dml`, `ExecuteBatchDml` `execute_stack`, and `SpannerSyncDataDictionary`/`SpannerAsyncDataDictionary` routing `googlesql` vs `postgresql` catalog SQL over `sqlspec/data_dictionary/dialects/spanner/sql/*.sql`. Keep helpers strictly inside `adapters/spanner/core.py`.
+- Implement zero-SDK `SpannerSyncADKStore`/`SpannerAsyncADKStore` (`provide_session(transaction=False)` lock-free snapshots on reads, `transaction=True` on writes), ScaNN/FTS/RRF/PropertyGraph `SpannerSyncADKMemoryStore`/`SpannerAsyncADKMemoryStore`, `SpannerSyncADKArtifactStore`/`SpannerAsyncADKArtifactStore` constructing `vertebra.storage.ArtifactReference` directly with ZERO `vertebra.db.adapters.bigquery` or `google.cloud.spanner` imports, hash-sharded `MOD(FARM_FINGERPRINT(...))` `BYTES` `SpannerEventQueueStore` (valid `ROW DELETION POLICY` / `TTL INTERVAL`, no invalid TTL on `updated_at`), and `SpannerLitestarStore`.
+- Define `SpannerSyncConfig`/`SpannerAsyncConfig` and `SpangresSyncConfig`/`SpangresAsyncConfig` declaring `adapter_name = 'vertebra_spanner'`, isolated per-session transaction state on `provide_session`, and explicit `adk_store_class`, `adk_memory_store_class`, `events_store_class`, and `litestar_store_class` (plus lazy `*ADKArtifactStore`) via PEP 562 `__init__.py` (verified via `resolve_adapter_name` and `resolve_extension_store_class` without `_compat.py`).
 
 ## Test Matrix
 
-- Parametrized placeholder compilation, `TypedParameter` execution, zero-row `SELECT`, `RETURNING`/DML, `StatementConfig` override preservation, and `SpannerSyncDataDictionary`/`SpannerAsyncDataDictionary` catalog tests.
-
-- Parametrized unit/contract tests for `SpannerSyncADKStore`/`SpannerAsyncADKStore`, memory search, `ArtifactReference` metadata, `SpannerEventQueueStore`, and `SpannerLitestarStore` TTL/upsert/delete.
-
-- Resolver contract tests (`resolve_adapter_name`, `resolve_extension_store_class`, `_validate_adk_extension_config`), PEP 562 lazy import tests (zero eager `google.adk` import), and isolated `provide_session` transaction tests.
+- Parametrized `googlesql` (`dialect='spanner'`) vs `spangres` (`dialect='postgres'`) placeholder compilation, `TypedParameter` execution, `execute_partitioned_dml` / `ExecuteBatchDml` stack tests, `SpannerSyncDataDictionary`/`SpannerAsyncDataDictionary` catalog tests, store contract tests (lock-free read snapshots, ScaNN/RRF memory, direct `ArtifactReference` with AST check forbidding BigQuery imports, hash-sharded TTL events, Litestar), PEP 562 lazy `google.adk` import tests, and resolver checks.
 
 ## Verification
 

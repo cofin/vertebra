@@ -20,6 +20,7 @@ files:
 - src/py/vertebra/extensions/fastapi/plugin.py
 tests:
 - src/py/tests/unit/extensions/test_starlette_plugin.py
+- src/py/tests/unit/extensions/test_fastapi_plugin.py
 - src/py/tests/unit/extensions/test_flask_plugin.py
 read_set:
 - src/py/vertebra/extensions/starlette/queues.py
@@ -53,8 +54,11 @@ Wire Starlette, FastAPI, and Flask queue integrations onto unified `QueueService
 
 ## Bounded Read Manifest
 
-- `src/py/vertebra/extensions/starlette/queues.py` & `fastapi/plugin.py` — ASGI queue lifespan and DI wiring.
+- `src/py/vertebra/extensions/starlette/queues.py` — ASGI queue lifespan and DI wiring.
 - `src/py/vertebra/extensions/flask/queues.py` — WSGI synchronous `SyncQueueStore` enqueue and worker dispatch.
+- `src/py/vertebra/extensions/fastapi/plugin.py` — FastAPI `VertebraPlugin` queue registration and lifespan.
+- `src/py/vertebra/framework/queues/worker.py` — `WorkerRunner` execution and drain contracts.
+- `src/py/vertebra/server/lanes.py` — `MultiLaneWorkerRunner` lane supervision.
 
 ## Contracts & Edge Cases
 
@@ -68,7 +72,7 @@ Wire Starlette, FastAPI, and Flask queue integrations onto unified `QueueService
 ## Verification
 
 ```bash
-uv run --no-sync ruff check src/py/vertebra/framework/queues src/py/vertebra/framework/di.py src/py/vertebra/extensions/starlette/queues.py src/py/vertebra/extensions/flask/queues.py && uv run --no-sync mypy src/py/vertebra/framework/queues src/py/vertebra/framework/di.py src/py/vertebra/extensions/starlette/queues.py src/py/vertebra/extensions/flask/queues.py && uv run --no-sync pytest src/py/tests/unit/framework/test_distributed_queues.py src/py/tests/unit/extensions/test_starlette_plugin.py src/py/tests/unit/extensions/test_flask_plugin.py
+uv run --no-sync ruff check src/py/vertebra/framework/queues src/py/vertebra/framework/di.py src/py/vertebra/extensions/starlette/queues.py src/py/vertebra/extensions/flask/queues.py src/py/vertebra/extensions/fastapi/plugin.py && uv run --no-sync mypy src/py/vertebra/framework/queues src/py/vertebra/framework/di.py src/py/vertebra/extensions/starlette/queues.py src/py/vertebra/extensions/flask/queues.py src/py/vertebra/extensions/fastapi/plugin.py && uv run --no-sync pytest src/py/tests/unit/framework/test_distributed_queues.py src/py/tests/unit/extensions/test_starlette_plugin.py src/py/tests/unit/extensions/test_fastapi_plugin.py src/py/tests/unit/extensions/test_flask_plugin.py
 ```
 
 ## Acceptance Criteria

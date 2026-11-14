@@ -45,12 +45,13 @@ sources:
 
 ## Objective & Scope Boundary
 
-Synchronize `gcp-bigquery-and-spanner-drivers.md`, `distributed-queues-and-email.md`, and `docs/usage/queues-and-realtime.md` per [`../spec.md`](spec.md) [^okf-gcp] [^okf-queues] [^doc-qr].
+Synchronize `gcp-bigquery-and-spanner-drivers.md`, `distributed-queues-and-email.md`, and `docs/usage/queues-and-realtime.md` per [`../spec.md`](../spec.md) [^okf-gcp] [^okf-queues] [^doc-qr].
 
 ## Bounded Read Manifest
 
 - `.agents/bundles/knowledge/domains/data/gcp-bigquery-and-spanner-drivers.md` — interactive `ReadWrite` transaction and `SpannerAbortedError` retry architecture.
-- `.agents/bundles/knowledge/domains/framework/distributed-queues-and-email.md` & `docs/usage/queues-and-realtime.md` — `SyncSpannerQueueStore` / `AsyncSpannerQueueStore` and `SpannerQueueBackend`.
+- `.agents/bundles/knowledge/domains/framework/distributed-queues-and-email.md` — `SyncSpannerQueueStore` / `AsyncSpannerQueueStore` truth block and capabilities.
+- `docs/usage/queues-and-realtime.md` — `SpannerQueueBackend` usage, caveats, and `pymdownx.tabbed` install tabs.
 
 ## Contracts & Edge Cases
 
@@ -59,12 +60,12 @@ Synchronize `gcp-bigquery-and-spanner-drivers.md`, `distributed-queues-and-email
 
 ## Test Matrix
 
-- Run `python -m tools.scripts.review_setup validate` and `pytest test_vite_and_docs_portal.py`.
+- Run `python -m tools.docs.scan_public_docstrings`, `python -m tools.scripts.review_setup validate`, and `pytest test_vite_and_docs_portal.py`.
 
 ## Verification
 
 ```bash
-uv run --no-sync ruff check src/py/vertebra/db/adapters/spanner src/py/vertebra/framework/queues && uv run --no-sync mypy src/py/vertebra/db/adapters/spanner src/py/vertebra/framework/queues && uv run --no-sync python -m tools.scripts.review_setup validate && uv run --no-sync pytest src/py/tests/unit/db/test_spanner_queue_and_cdc.py src/py/tests/unit/framework/test_distributed_queues.py
+uv run --no-sync ruff check src/py/vertebra/db/adapters/spanner src/py/vertebra/framework/queues && uv run --no-sync mypy src/py/vertebra/db/adapters/spanner src/py/vertebra/framework/queues && uv run --no-sync python -m tools.docs.scan_public_docstrings && uv run --no-sync python -m tools.scripts.review_setup validate && uv run --no-sync pytest src/py/tests/unit/db/test_spanner_queue_and_cdc.py src/py/tests/unit/framework/test_distributed_queues.py src/py/tests/unit/extensions/test_vite_and_docs_portal.py
 ```
 
 ## Acceptance Criteria

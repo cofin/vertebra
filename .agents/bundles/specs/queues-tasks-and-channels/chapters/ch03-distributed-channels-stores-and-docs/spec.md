@@ -11,6 +11,8 @@ planning_quality: standard
 planning_degraded_reason: null
 plan_commit: 1b191388
 updated_at: '2026-11-14T18:50:00Z'
+depends_on_chapters:
+- ch02-workers-litestar-queues-and-django-tasks
 generated:
   by: flow/0.30.1
   at: '2026-11-14T18:50:00Z'
@@ -66,21 +68,13 @@ sources:
 # Chapter 03: Distributed Channels Across 5 Backends, Django Cache/Channels, ValkeyStore & Docs/OKF
 
 <!-- truth: start -->
-- **Baseline (`18baadcd`)**: `extensions/django/queues.py` subclasses Flask's in-memory deque queue instead of Django `6.0+`'s `BaseTaskBackend`, and `cache.py`/`channels.py` rely on in-process dicts [^dj-queues] [^dj-cache] [^dj-channels].
-- **Target Architecture**: `extensions/django/tasks.py::TaskBackend(BaseTaskBackend)` routes sync `enqueue` to `SyncQueueStore` and async `aenqueue` to `AsyncQueueStore`, `vertebra_worker` executes tasks with `Container.scope()` DI, and `django/queues.py` is deleted.
-- **Baseline (`1b191388`)**: `ChannelBus` is single-node only, `extensions/litestar/channels.py` uses `swap_channels_backend` monkeypatching, and `stores.py` / `starlette/store.py` duplicate KV logic (while prefix-scoped `SCAN`+`UNLINK` already replaced `flushdb()` in `364c7cbe`) [^channel-bus] [^ls-channels] [^fw-stores].
-- **Target Architecture**: `ChannelBus`, Vertebra `ChannelsBackend`, and Litestar `ChannelsPlugin` bind `SyncNotificationSource` / `AsyncNotificationSource` across Memory, Redis, Valkey, PostgreSQL, and Oracle without monkeypatching; `ValkeyStore` consolidates onto `vertebra._redis` with RESP3 tracking and `SCAN`+`UNLINK` [^ls-store].
-- **Baseline (`18baadcd`)**: Docs and `distributed-queues-and-email.md` describe the interim fail-loud `executor=`-required baseline, unprefixed `QueueStore`/`NotificationSource`, and `swap_channels_backend` [^doc-qr] [^okf-queues].
-- **Target Architecture**: Present-tense `docs/` and `<= 200`-line OKF chapters document `SyncQueueStore`/`AsyncQueueStore`, live PostgreSQL/Oracle/Redis/Valkey queues, `litestar-queues>=0.14.0`, Django `6.0+` `TaskBackend`, distributed `ChannelsBackend`, `ValkeyStore`, and delivery caveats [^okf-litestar] [^okf-srv-lim].
+- **Baseline (`18baadcd`)**: `extensions/django/{cache,channels}.py` rely on in-process dicts, `ChannelBus` is single-node only, `extensions/litestar/channels.py` uses `swap_channels_backend` monkeypatching, `stores.py` / `starlette/store.py` duplicate KV logic (while prefix-scoped `SCAN`+`UNLINK` already replaced `flushdb()` in `364c7cbe`), and docs/`distributed-queues-and-email.md` still describe fail-loud `executor=` baselines and unprefixed protocols [^dj-cache] [^dj-channels] [^channel-bus] [^ls-channels] [^fw-stores] [^doc-qr] [^okf-queues].
+- **Target Architecture**: Django `CacheBackend`/`ChannelLayer` run on native `vertebra._redis` and `ChannelBus`; `ChannelBus`, Vertebra `ChannelsBackend`, Litestar `ChannelsPlugin`, Starlette, and Flask channels bind `SyncNotificationSource`/`AsyncNotificationSource` across Memory, Redis, Valkey, PostgreSQL, and Oracle without monkeypatching; `ValkeyStore`/`RedisStore` consolidate onto `vertebra._redis` with RESP3 `CLIENT TRACKING` and `SCAN`+`UNLINK`; docs and `<= 200`-line OKF chapters match present reality [^ls-store] [^okf-litestar] [^okf-srv-lim].
 <!-- truth: end -->
 
 ## 1. Specification, Context & Provenance
 
-This chapter delivers native Django `6.0+` `django.tasks` support (`TaskBackend` + `vertebra_worker` management command with Vertebra `Container` DI) and upgrades Django `CacheBackend` and `ChannelLayer` onto native drivers [^dj-queues].
-
-This chapter wires distributed pub/sub notifications (`SyncNotificationSource` / `AsyncNotificationSource` from `native-redis-driver:ch03`) into Vertebra, Litestar `ChannelsPlugin`, Starlette, and Flask channels, and consolidates `ValkeyStore` / `RedisStore` onto `vertebra._redis` [^channel-bus] [^ls-store].
-
-This chapter updates all public usage/reference documentation and OKF v0.2 knowledge chapters for queues, tasks, channels, and key-value stores [^doc-qr] [^okf-queues].
+This chapter upgrades Django `CacheBackend` and `ChannelLayer` onto native drivers, bridges `SyncNotificationSource`/`AsyncNotificationSource` (`native-redis-driver:ch03`) into `ChannelBus` and Litestar/Starlette/Flask channels (deleting `swap_channels_backend`), consolidates `ValkeyStore`/`RedisStore` onto `vertebra._redis`, and synchronizes all public usage/reference docs and OKF v0.2 knowledge chapters [^dj-cache] [^channel-bus] [^ls-store] [^doc-qr] [^okf-queues].
 
 ## 2. Requirements, Concrete Contracts & Architecture
 
@@ -135,11 +129,7 @@ Documentation & OKF Target Matrix:
 
 ## 3. Documentation & OKF Knowledge Plan
 
-Django `TASKS`, `CACHES`, and `CHANNEL_LAYERS` guides are updated in `ch03-distributed-channels-stores-and-docs` (`t04`).
-
-Realtime channels and KV store documentation land in `ch03-distributed-channels-stores-and-docs` (`t04`).
-
-Updates [distributed-queues-and-email.md](../../../../knowledge/domains/framework/distributed-queues-and-email.md), [litestar.md](../../../../knowledge/domains/extensions/litestar.md), and [server-runtime-limitations.md](../../../../knowledge/domains/server/server-runtime-limitations.md), keeping every OKF chapter `<= 200` lines.
+Updates `docs/usage/{queues-and-realtime,extensions,databases,analytics-and-cdc}.md`, `docs/reference/{queues,database-capabilities}.md`, [distributed-queues-and-email.md](../../../../knowledge/domains/framework/distributed-queues-and-email.md), [litestar.md](../../../../knowledge/domains/extensions/litestar.md), and [server-runtime-limitations.md](../../../../knowledge/domains/server/server-runtime-limitations.md) in `t04` (`CACHES`, `TASKS`, `CHANNEL_LAYERS`, realtime channels, and KV stores), keeping every OKF chapter `<= 200` lines.
 
 ## 4. Requirement-to-Task Traceability Matrix
 
@@ -164,7 +154,7 @@ Chapter `ch03-distributed-channels-stores-and-docs` (`t04`) is `planned` behind 
 Fast Chapter Gate (`< 60s` offline):
 
 ```bash
-uv run --no-sync python -m tools.scripts.review_setup validate && uv run --no-sync pytest src/py/tests/unit/extensions/test_vite_and_docs_portal.py src/py/tests/unit/extensions/test_drop_in_names_and_generics.py
+uv run --no-sync ruff check src/py/vertebra/server/_channels.py src/py/vertebra/framework/channels.py src/py/vertebra/framework/stores.py src/py/vertebra/extensions/django src/py/vertebra/extensions/litestar src/py/vertebra/extensions/starlette src/py/vertebra/extensions/flask/channels.py && uv run --no-sync mypy src/py/vertebra/server/_channels.py src/py/vertebra/framework/channels.py src/py/vertebra/framework/stores.py src/py/vertebra/extensions/django src/py/vertebra/extensions/litestar src/py/vertebra/extensions/starlette src/py/vertebra/extensions/flask/channels.py && uv run --no-sync python -m tools.docs.scan_public_docstrings && uv run --no-sync python -m tools.scripts.review_setup validate && uv run --no-sync pytest src/py/tests/unit/extensions/test_django_plugin.py src/py/tests/unit/server/test_realtime_backpressure.py src/py/tests/unit/extensions/test_litestar_plugin.py src/py/tests/unit/extensions/test_starlette_plugin.py src/py/tests/unit/extensions/test_vite_and_docs_portal.py src/py/tests/unit/extensions/test_drop_in_names_and_generics.py
 ```
 
 [^dj-queues]: `src/py/vertebra/extensions/django/queues.py` — Legacy Django deque queue module.

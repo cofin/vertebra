@@ -20,6 +20,8 @@ tests:
 - src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py
 read_set:
 - src/py/vertebra/extensions/sqlspec/adapters.py
+- src/py/vertebra/db/driver/_sync.py
+- src/py/vertebra/db/driver/_async.py
 - src/py/vertebra/db/driver/_common.py
 - src/py/vertebra/db/driver/capabilities.py
 - src/py/vertebra/db/registry.py
@@ -46,14 +48,15 @@ Create `src/py/vertebra/extensions/sqlspec/_driver.py` implementing the MyPyC-sa
 
 ## Bounded Read Manifest
 
-- `src/py/vertebra/extensions/sqlspec/adapters.py` — legacy overrides of `execute`/`select` to eliminate.
-- `src/py/vertebra/db/driver/_common.py` & `capabilities.py` — `DatabaseError`, `SyncPipelineCapable`/`AsyncPipelineCapable`, `SyncArrowCapable`/`AsyncArrowCapable`, `SyncStreamCapable`/`AsyncStreamCapable`.
+- `src/py/vertebra/extensions/sqlspec/adapters.py` — legacy overrides of `execute`/`select` and `DeferredSyncExceptionHandler`/`DeferredAsyncExceptionHandler` to eliminate/extract.
+- `src/py/vertebra/db/driver/_sync.py` & `_async.py` — `select_to_arrow`, `load_from_arrow`, `stream_arrow_batches`, `write_arrow_shm`, and `query_with_columns` hooks on `SyncDatabaseDriver`/`AsyncDatabaseDriver`.
+- `src/py/vertebra/db/driver/_common.py` & `capabilities.py` — `DatabaseError`, `SyncPipelineCapable`, `AsyncPipelineCapable`, `NotificationSource`, and `QueueStore`.
 - `src/py/vertebra/db/registry.py` — reference-counted shared pool lifecycle.
 
 ## Contracts & Edge Cases
 
 - `BaseSyncDriver(SyncDriverAdapterBase)` and `BaseAsyncDriver(AsyncDriverAdapterBase)` inherit `execute`, `execute_many`, `select`, `select_one`, `select_one_or_none`, `select_value`, and `@final dispatch_statement_execution` untouched.
-- Implement `with_cursor` (yielding `connection` so `cursor is self.connection` routes cache hits into `dispatch_execute`), `dispatch_execute`, `dispatch_execute_many`, `dispatch_execute_script`, `_connection_in_transaction`, `select_to_arrow`, `dispatch_select_stream`, and `execute_stack` (using `SyncPipelineCapable`/`AsyncPipelineCapable` when eligible, else `super().execute_stack`).
+- Implement `with_cursor` (yielding `connection` so `cursor is self.connection` routes cache hits into `dispatch_execute`), `dispatch_execute`, `dispatch_execute_many`, `dispatch_execute_script`, `_connection_in_transaction`, `select_to_arrow` / `stream_arrow_batches`, `dispatch_select_stream`, and `execute_stack` (using `SyncPipelineCapable`/`AsyncPipelineCapable` when eligible, else `super().execute_stack`).
 - Preserve explicit caller `StatementConfig` overrides via non-mutating `.replace(...)`, unwrap `TypedParameter` values cleanly, map `DatabaseError` & `GoogleCloudError` in `DeferredSyncExceptionHandler` / `DeferredAsyncExceptionHandler` (`pending_exception`), and release `DatabaseRegistry`-shared pools via reference counting on `close()`.
 
 ## Test Matrix

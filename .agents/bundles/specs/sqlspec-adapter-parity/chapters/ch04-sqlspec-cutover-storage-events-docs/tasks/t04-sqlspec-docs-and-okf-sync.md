@@ -16,6 +16,7 @@ depends_on:
 - sqlspec-adapter-parity:ch04-sqlspec-cutover-storage-events-docs:t03
 files:
 - docs/usage/extensions.md
+- docs/reference/extensions.md
 - .agents/bundles/knowledge/domains/extensions/sqlspec-alchemy-and-dialects.md
 - .agents/bundles/knowledge/domains/data/database-driver-limitations.md
 tests:
@@ -51,21 +52,23 @@ Synchronize public SQLSpec documentation and OKF chapters per [`../spec.md`](../
 ## Bounded Read Manifest
 
 - `docs/usage/extensions.md` — per-engine `vertebra.extensions.sqlspec.adapters.<engine>` guides, ADK/Events/Litestar stores, and `ArtifactReference`.
-- `.agents/bundles/knowledge/domains/extensions/sqlspec-alchemy-and-dialects.md` & `domains/data/database-driver-limitations.md` — OKF truth blocks and caveats.
+- `docs/reference/extensions.md` — API reference exports for `vertebra.extensions.sqlspec`.
+- `.agents/bundles/knowledge/domains/extensions/sqlspec-alchemy-and-dialects.md` — SQLSpec adapter parity truth block and architecture.
+- `.agents/bundles/knowledge/domains/data/database-driver-limitations.md` — engine/adapter caveats (`<= 200` lines).
 
 ## Contracts & Edge Cases
 
-- Document `vertebra.extensions.sqlspec.adapters.<engine>`, `adapter_name = 'vertebra_<engine>'`, explicit `*_store_class` attributes (`sqlspec>=0.71.1`), `vertebra.storage.ArtifactReference`, and `adk` optional extra (`pymdownx.tabbed` install tabs).
+- Document `vertebra.extensions.sqlspec.adapters.<engine>`, `adapter_name = 'vertebra_<engine>'`, explicit `*_store_class` attributes (`sqlspec>=0.71.1`), `vertebra.storage.ArtifactReference`, and `adk` optional extra (`pymdownx.tabbed` install tabs + 4–6 node conceptual Mermaid diagrams).
 - Record caveats in `database-driver-limitations.md` (`google-adk>=1.0.0` optional extra required for ADK memory/artifact services; Oracle TxEventQ commit-at-dequeue semantics; DuckDB `:memory:` vs `:memory:<name>` isolation), keeping every OKF chapter `<= 200` lines.
 
 ## Test Matrix
 
-- Run `python -m tools.scripts.review_setup validate` and `pytest test_vite_and_docs_portal.py`.
+- Run `python -m tools.docs.scan_public_docstrings`, `python -m tools.scripts.review_setup validate`, and `pytest test_vite_and_docs_portal.py` to confirm clean docstrings, OKF frontmatter/links/budgets, and docs rendering.
 
 ## Verification
 
 ```bash
-uv run --no-sync ruff check src/py/vertebra/extensions/sqlspec && uv run --no-sync mypy src/py/vertebra/extensions/sqlspec && uv run --no-sync python -m tools.scripts.review_setup validate && uv run --no-sync pytest src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py src/py/tests/unit/extensions/test_sqlspec_bigquery.py src/py/tests/unit/extensions/test_sqlspec_spanner.py src/py/tests/unit/extensions/test_data_storage_integrations.py
+uv run --no-sync ruff check src/py/vertebra/extensions/sqlspec && uv run --no-sync mypy src/py/vertebra/extensions/sqlspec && uv run --no-sync python -m tools.docs.scan_public_docstrings && uv run --no-sync python -m tools.scripts.review_setup validate && uv run --no-sync pytest src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py src/py/tests/unit/extensions/test_sqlspec_bigquery.py src/py/tests/unit/extensions/test_sqlspec_spanner.py src/py/tests/unit/extensions/test_data_storage_integrations.py src/py/tests/unit/extensions/test_drop_in_names_and_generics.py src/py/tests/unit/extensions/test_vite_and_docs_portal.py
 ```
 
 ## Acceptance Criteria
