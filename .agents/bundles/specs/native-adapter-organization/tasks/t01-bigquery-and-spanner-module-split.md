@@ -5,7 +5,8 @@ flow_id: native-adapter-organization
 title: "Extract BigQuery object_tables.py and Spanner mutations.py and split driver barrels"
 description: "Separate BigQuery Object Table helpers and Spanner mutation/transaction types from connection configs and split both driver.py modules into _sync.py and _async.py barrels."
 status: stable
-state: pending
+state: completed
+commit: 838c54d1
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -34,11 +35,11 @@ tags:
   - refactoring
 sources:
   - id: bq-config
-    resource: src/py/vertebra/db/adapters/bigquery/config.py::ObjectTableConfig
-    title: "ObjectRef, ObjectTableConfig, and BigQueryTableIdentifier currently inside bigquery/config.py"
+    resource: src/py/vertebra/db/adapters/bigquery/object_tables.py::ObjectTableConfig
+    title: "ObjectRef and ObjectTableConfig extracted into bigquery/object_tables.py"
   - id: sp-config
-    resource: src/py/vertebra/db/adapters/spanner/config.py::Mutation
-    title: "StalenessBound, Mutation, and MutationGroup currently inside spanner/config.py"
+    resource: src/py/vertebra/db/adapters/spanner/mutations.py::Mutation
+    title: "StalenessBound, Mutation, and MutationGroup extracted into spanner/mutations.py"
 ---
 
 # Task `t01`: Extract BigQuery `object_tables.py` and Spanner `mutations.py` and Split Driver Barrels
@@ -73,8 +74,8 @@ uv run --no-sync pytest src/py/tests/unit/db/test_bigquery.py src/py/tests/unit/
 
 ## Acceptance Criteria
 
-- [ ] `bigquery/config.py` and `spanner/config.py` hold only connection configuration structs (`BigQueryConfig`, `BigQueryDryRunResult`, `SpannerConfig`) with zero compatibility shims.
-- [ ] `bigquery/driver.py` and `spanner/driver.py` are clean barrels over `_sync.py`, `_async.py`, and `transactions.py`, and all unit, Ruff, and Mypy checks pass.
+- [x] `bigquery/config.py` and `spanner/config.py` hold only connection configuration structs (`BigQueryConfig`, `BigQueryDryRunResult`, `SpannerConfig`) with zero compatibility shims.
+- [x] `bigquery/driver.py` and `spanner/driver.py` are clean barrels over `_sync.py`, `_async.py`, and `transactions.py`, and all unit, Ruff, and Mypy checks pass.
 
-[^bq-config]: `src/py/vertebra/db/adapters/bigquery/config.py::ObjectTableConfig` — ObjectRef, ObjectTableConfig, and BigQueryTableIdentifier currently inside bigquery/config.py.
-[^sp-config]: `src/py/vertebra/db/adapters/spanner/config.py::Mutation` — StalenessBound, Mutation, and MutationGroup currently inside spanner/config.py.
+[^bq-config]: `src/py/vertebra/db/adapters/bigquery/object_tables.py::ObjectTableConfig` — ObjectRef and ObjectTableConfig extracted into bigquery/object_tables.py.
+[^sp-config]: `src/py/vertebra/db/adapters/spanner/mutations.py::Mutation` — StalenessBound, Mutation, and MutationGroup extracted into spanner/mutations.py.

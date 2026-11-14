@@ -4,11 +4,11 @@ flow_id: native-adapter-organization
 title: "Uniform Native Adapter Module Organization and DataFusion Cleanup"
 description: "Decompose monolithic BigQuery, Spanner, Oracle, SQL Server, MySQL, and DuckDB adapter modules into uniform domain files, remove unimplemented DataFusion pgwire_fdw config fields and vendor wrappers, and synchronize adapter documentation and OKF chapters."
 status: stable
-state: planned
+state: in_progress
 planning_quality: standard
 planning_degraded_reason: null
 has_chapters: false
-current_task: "native-adapter-organization:t01"
+current_task: null
 parent_prd: native-data-platform
 depends_on_flows:
   - native-postgres-driver
@@ -122,14 +122,14 @@ Across `src/py/vertebra/db/adapters/`, `postgres` establishes clean module bound
 
 ## 5. Implementation Plan
 
-- [ ] [t01-bigquery-and-spanner-module-split.md](tasks/t01-bigquery-and-spanner-module-split.md) — Extract BigQuery `object_tables.py` and Spanner `mutations.py`/`transactions.py`, and split both `driver.py` modules into `_sync.py` and `_async.py` barrels.
-- [ ] [t02-relational-and-duckdb-driver-decomposition.md](tasks/t02-relational-and-duckdb-driver-decomposition.md) — Extract `oracle/pipeline.py`, split `oracle`, `mysql`, `mssql`, and `duckdb` `driver.py` modules into `_sync.py`/`_async.py` barrels, and encapsulate loose module helpers.
-- [ ] [t03-datafusion-wrapper-and-pgwire-cleanup.md](tasks/t03-datafusion-wrapper-and-pgwire-cleanup.md) — Remove unimplemented `pgwire_fdw` fields from `DataFusionConfig` and vendor registration wrappers from `DataFusionEngine`.
-- [ ] [t04-adapter-layout-docs-and-okf-sync.md](tasks/t04-adapter-layout-docs-and-okf-sync.md) — Synchronize `analytics-and-cdc.md`, `database-drivers-and-dialers.md`, and `query-pipeline-cdc-and-tenancy.md`.
+- [x] [838c54d1] [t01-bigquery-and-spanner-module-split.md](tasks/t01-bigquery-and-spanner-module-split.md) — Extract BigQuery `object_tables.py` and Spanner `mutations.py`/`transactions.py`, and split both `driver.py` modules into `_sync.py` and `_async.py` barrels.
+- [x] [838c54d1] [t02-relational-and-duckdb-driver-decomposition.md](tasks/t02-relational-and-duckdb-driver-decomposition.md) — Extract `oracle/pipeline.py`, split `oracle`, `mysql`, `mssql`, and `duckdb` `driver.py` modules into `_sync.py`/`_async.py` barrels, and encapsulate loose module helpers.
+- [x] [838c54d1] [t03-datafusion-wrapper-and-pgwire-cleanup.md](tasks/t03-datafusion-wrapper-and-pgwire-cleanup.md) — Remove unimplemented `pgwire_fdw` fields from `DataFusionConfig` and vendor registration wrappers from `DataFusionEngine`.
+- [x] [838c54d1] [t04-adapter-layout-docs-and-okf-sync.md](tasks/t04-adapter-layout-docs-and-okf-sync.md) — Synchronize `analytics-and-cdc.md`, `database-drivers-and-dialers.md`, and `query-pipeline-cdc-and-tenancy.md`.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **State**: `planned` (`0/4` tasks completed; frontier at `native-adapter-organization:t01`), ready in the immediate wave after archived `native-postgres-driver` under [`native-data-platform`](../native-data-platform/spec.md).
+- **State**: `in_progress` (`4/4` tasks completed at `838c54d1`; `[3/3 files documented]`; awaiting zero-context review and `/flow:finish` + `/flow:archive`).
 - **Full `/flow:finish` Verification**: `PYTHONPATH="src/py:." uv run --no-sync python -m tools.docs.scan_public_docstrings --check-leaks --check-overloads --check-typeddicts src/py/vertebra/db/adapters && make lint-all && make py-test && make docs && make review-check`.
 
 [^bq-config]: `src/py/vertebra/db/adapters/bigquery/config.py::BigQueryConfig` — BigQueryConfig mixed with ObjectRef, ObjectTableConfig, and BigQueryTableIdentifier.

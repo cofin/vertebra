@@ -5,7 +5,8 @@ flow_id: native-adapter-organization
 title: "Synchronize analytics guide and data-domain OKF chapters for adapter layout"
 description: "Update docs/usage/analytics-and-cdc.md and data-domain OKF chapters to reflect uniform adapter module boundaries and in-process DataFusion registration."
 status: stable
-state: pending
+state: completed
+commit: 838c54d1
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -74,8 +75,8 @@ PYTHONPATH="src/py:." uv run --no-sync python -m tools.docs.scan_public_docstrin
 
 ## Acceptance Criteria
 
-- [ ] `docs/usage/analytics-and-cdc.md` builds cleanly via `make docs` with zero references to removed DataFusion wrappers or `pgwire_fdw`.
-- [ ] Both updated OKF chapters are `<= 200` lines with resolving `sources:` paths and `make review-check` exiting `0`.
+- [x] `docs/usage/analytics-and-cdc.md` builds cleanly via `make docs` with zero references to removed DataFusion wrappers or `pgwire_fdw`.
+- [x] Both updated OKF chapters are `<= 200` lines with resolving `sources:` paths and `make review-check` exiting `0`.
 
 [^doc-analytics]: `docs/usage/analytics-and-cdc.md` — User-facing Arrow analytics, Object Tables, and DataFusion federation guide.
 [^okf-drivers]: `.agents/bundles/knowledge/domains/data/database-drivers-and-dialers.md` — Cross-engine database drivers and adapter layout OKF chapter.

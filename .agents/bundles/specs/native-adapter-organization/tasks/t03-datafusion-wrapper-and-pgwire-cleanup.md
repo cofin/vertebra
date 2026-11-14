@@ -5,7 +5,8 @@ flow_id: native-adapter-organization
 title: "Remove unimplemented DataFusion pgwire_fdw fields and vendor registration wrappers"
 description: "Delete mode='pgwire_fdw' and pgwire_* fields from DataFusionConfig and remove BigQuery/Spanner convenience wrappers from DataFusionEngine."
 status: stable
-state: pending
+state: completed
+commit: 838c54d1
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -78,8 +79,8 @@ uv run --no-sync pytest src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py
 
 ## Acceptance Criteria
 
-- [ ] Zero `pgwire_fdw`, `pgwire_host`, `pgwire_port`, `require_mtls_for_pgwire`, `register_bigquery_*`, or `register_spanner_*` symbols remain in `src/py/vertebra/db/adapters/datafusion/`.
-- [ ] Unsupported `DataFusionConfig` modes/URLs raise `ImproperConfigurationError`, and all DataFusion/BigQuery/Spanner tests pass.
+- [x] Zero `pgwire_fdw`, `pgwire_host`, `pgwire_port`, `require_mtls_for_pgwire`, `register_bigquery_*`, or `register_spanner_*` symbols remain in `src/py/vertebra/db/adapters/datafusion/`.
+- [x] Unsupported `DataFusionConfig` modes/URLs raise `ImproperConfigurationError`, and all DataFusion/BigQuery/Spanner tests pass.
 
 [^df-config]: `src/py/vertebra/db/adapters/datafusion/config.py::DataFusionConfig` — DataFusionConfig with unimplemented pgwire_fdw mode and pgwire_* fields.
 [^df-driver]: `src/py/vertebra/db/adapters/datafusion/driver.py::DataFusionEngine` — DataFusionEngine register_bigquery_* and register_spanner_* wrappers.

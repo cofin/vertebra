@@ -5,7 +5,8 @@ flow_id: native-adapter-organization
 title: "Decompose Oracle, MySQL, SQL Server, and DuckDB drivers and encapsulate loose helpers"
 description: "Extract oracle/pipeline.py, split Oracle, MySQL, SQL Server, and DuckDB driver.py modules into _sync.py and _async.py barrels, and encapsulate loose module helpers onto domain classes."
 status: stable
-state: pending
+state: completed
+commit: 838c54d1
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -79,8 +80,8 @@ uv run --no-sync pytest src/py/tests/unit/db/test_oracle_adapter.py src/py/tests
 
 ## Acceptance Criteria
 
-- [ ] `oracle`, `mysql`, `mssql`, and `duckdb` each expose `_sync.py`, `_async.py`, `pipeline.py`, and a thin `driver.py` barrel with zero single-owner module-level `_...` functions.
-- [ ] All unit, Ruff, and Mypy gates pass with zero behavioral regressions.
+- [x] `oracle`, `mysql`, `mssql`, and `duckdb` each expose `_sync.py`, `_async.py`, `pipeline.py`, and a thin `driver.py` barrel with zero single-owner module-level `_...` functions.
+- [x] All unit, Ruff, and Mypy gates pass with zero behavioral regressions.
 
 [^ora-driver]: `src/py/vertebra/db/adapters/oracle/driver.py::SyncOraclePipeline` — SyncOraclePool, AsyncOraclePool, SyncOraclePipeline, and AsyncOraclePipeline embedded in oracle/driver.py.
 [^mysql-core]: `src/py/vertebra/db/adapters/mysql/core.py::compile_mysql_statement` — Loose module-level MySQL statement compilation and row normalization functions.
