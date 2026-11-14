@@ -7,8 +7,8 @@ title: "Synchronize polyglot-test-matrix.md, benchmarks-and-free-threaded.md, an
 description: "Update testing and workflow OKF chapters within <= 200 lines for ConformanceGate, make db-conformance, CI matrix lanes, and bench-only PyPI duckdb."
 status: stable
 state: completed
-commit: 57fed1c4
-last_verified_commit: 57fed1c4
+commit: cc75373f
+last_verified_commit: cc75373f
 updated_at: "2026-11-14T18:08:00Z"
 planning_quality: standard
 planning_degraded_reason: null

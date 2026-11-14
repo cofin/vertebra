@@ -7,8 +7,8 @@ title: "Synchronize database-drivers-and-dialers.md and update database-driver-l
 description: "Document DuckDB GCS secret lifecycle and Oracle AQ liveness in database-drivers-and-dialers.md and replace resolved caveats with live conformance boundaries in database-driver-limitations.md."
 status: stable
 state: completed
-commit: 57fed1c4
-last_verified_commit: 57fed1c4
+commit: cc75373f
+last_verified_commit: cc75373f
 updated_at: "2026-11-14T18:08:00Z"
 planning_quality: standard
 planning_degraded_reason: null

@@ -13,25 +13,25 @@ chapters:
   - ch02-conformance-harness-and-live-suites
   - ch03-make-lanes-bench-isolation-and-ci
   - ch04-docs-and-okf-sync
-current_chapter: ch04-docs-and-okf-sync
+current_chapter: null
 current_task: null
 parent_prd: native-data-platform
 depends_on_flows:
   - native-postgres-driver
 plan_revision: 4
 plan_commit: 37972f2a
-last_verified_checkpoint: 57fed1c4
-last_reviewed_chapter: ch03-make-lanes-bench-isolation-and-ci
-last_reviewed_commit: 5cf424fb
+last_verified_checkpoint: cc75373f
+last_reviewed_chapter: ch04-docs-and-okf-sync
+last_reviewed_commit: cc75373f
 created_at: "2026-11-12T00:30:00Z"
-updated_at: "2026-11-14T18:08:00Z"
+updated_at: "2026-11-14T18:20:00Z"
 generated:
   by: flow-plan
   at: "2026-11-12T23:55:00Z"
 verified:
   - by: agent:code-reviewer
-    at: "2026-11-14T17:59:00Z"
-    commit: 5cf424fb
+    at: "2026-11-14T18:20:00Z"
+    commit: cc75373f
 tags:
   - conformance
   - ci
@@ -71,10 +71,10 @@ sources:
     title: "GCSConfig sync_token_cache and async_token_cache factories"
   - id: oracle-notify
     resource: src/rs/vertebra-oracle/src/notify.rs::run_live_aq_worker
-    title: "Oracle AQ listener dequeue loop discarding wait_timeout_seconds"
+    title: "Oracle AQ listener dequeue loop with wait_timeout_seconds idle SELECT 1 FROM DUAL liveness"
   - id: oracle-native
     resource: src/py/tests/integration/db/test_oracle_native.py::_resolve_oracle_config
-    title: "Live Oracle 26ai native suite gated on VERTEBRA_CONFORMANCE_DOCKER"
+    title: "Live Oracle 26ai native suite gated by ConformanceGate and ServiceVersionMatrix"
   - id: driver-limits
     resource: .agents/bundles/knowledge/domains/data/database-driver-limitations.md
     title: "Canonical database driver limitations and operational boundaries chapter"
@@ -83,18 +83,18 @@ sources:
 # Specification: Live Driver Conformance CI, DuckDB GCS Secret Rotation, and Oracle Notify Liveness
 
 <!-- truth: start -->
-- **Baseline (`HEAD @ 57fed1c4`, `ch01`–`ch04` Implemented)**: `ch01` shipped `vertebra.storage.{SyncGcsBearerSecretProvider,AsyncGcsBearerSecretProvider}`, `DuckDBSecretConfig` validation + `(HTTP 401)`/`(HTTP 403)` invalidation + startup `_client` cleanup, and Oracle AQ `wait_timeout_seconds` idle liveness (`a8ca7b24`, `b3b113d1`); `ch02` shipped `ConformanceGate`, `ServiceVersionMatrix`, `mariadb` `EngineConformanceSpec`, and live DuckDB, MySQL/MariaDB, SQL Server, and Oracle native suites (`38e02b16`); `ch03` shipped single-pass `Makefile` `db-conformance`, `bench`-only PyPI `duckdb` isolation, and `.github/workflows/ci.yml` `test-db-conformance` + `conformance-oracle` jobs (`b45ebf84`); `ch04` synchronized public usage/reference docs, changelog, `AGENTS.md`, and OKF testing/workflow/data chapters (`57fed1c4`) [^conformance-suite] [^duckdb-secret] [^oracle-notify] [^makefile].
+- **Baseline (`HEAD @ cc75373f`, `ch01`–`ch04` Implemented)**: `ch01` shipped `vertebra.storage.{SyncGcsBearerSecretProvider,AsyncGcsBearerSecretProvider}`, `DuckDBSecretConfig` validation + `(HTTP 401)`/`(HTTP 403)` invalidation + startup `_client` cleanup, and Oracle AQ `wait_timeout_seconds` idle liveness (`a8ca7b24`, `b3b113d1`); `ch02` shipped `ConformanceGate`, `ServiceVersionMatrix`, `mariadb` `EngineConformanceSpec`, and live DuckDB, MySQL/MariaDB, SQL Server, and Oracle native suites (`38e02b16`); `ch03` shipped single-pass `Makefile` `db-conformance`, `bench`-only PyPI `duckdb` isolation, and `.github/workflows/ci.yml` `test-db-conformance` + `conformance-oracle` jobs (`b45ebf84`); `ch04` synchronized public usage/reference docs, changelog, `AGENTS.md`, and OKF testing/workflow/data chapters (`57fed1c4`, `cc75373f`) [^conformance-suite] [^duckdb-secret] [^oracle-notify] [^makefile].
 - **Target Architecture**: `ch02`–`ch04` wire `ConformanceGate` + `ServiceVersionMatrix` (`pytest-databases`) across DuckDB, MySQL, MariaDB, SQL Server, and Oracle via single-pass `make db-conformance` and `.github/workflows/ci.yml`, while delegating `VERTEBRA_CONFORMANCE_ENGINES=postgres` under `VERTEBRA_CONFORMANCE_POSTGRES_REQUIRE_ZERO_SKIPS=1` to `evaluate_postgres_zero_skip_gate` in `conftest.py` [^int-conftest] [^ci-workflow].
 - **Scope & Boundaries**: Sequenced after archived `native-postgres-driver` ([`postgres-native-driver.md`](../../knowledge/domains/data/postgres-native-driver.md)) so `src/py/tests/integration/conftest.py`, `Makefile`, and `.github/workflows/ci.yml` merge cleanly; updates existing [`database-driver-limitations.md`](../../knowledge/domains/data/database-driver-limitations.md) in place [^int-conftest] [^driver-limits].
 <!-- truth: end -->
 
 ## 1. Specification, Context & Provenance
 
-### 1.1 Problem Statement & Current Baseline
-Four merged native database wheels lack live server CI gates and carry three runtime/build gaps on `main @ 18baadcd`:
-1. **Unshipped DuckDB GCS Bearer Rotation & Permissive Secret Config**: Documentation advertises GCS ADC `httpfs` rotation, yet no public provider wraps `SyncGcpTokenCache` / `AsyncGcpTokenCache` [^gcs-token-cache] [^gcs-config]; `DuckDBSecretConfig` allows `persistent=True` with `value_provider` and clamps negative/non-finite `refresh_interval_seconds` [^duckdb-secret]; and `SyncDuckDBDriver` / `AsyncDuckDBDriver` neither invalidate rejected `(HTTP 401)`/`(HTTP 403)` credentials nor close `self._client` if initial `required=True` secret refresh raises [^duckdb-driver].
-2. **Ignored `OracleNotifyConfig.wait_timeout_seconds`**: `src/rs/vertebra-oracle/src/notify.rs` discards `let _ = wait_timeout_seconds.max(1);` without probing idle session liveness [^oracle-notify].
-3. **Missing Live Conformance Lanes & PyPI `duckdb` Leakage**: `test_driver_conformance.py` omits `mariadb` and retains unused `_DUCKDB_SKIP_REASON` and `VERTEBRA_CONFORMANCE_DUCKDB_DSN` [^conformance-suite]; `test_oracle_native.py` lacks `@pytest.mark.driver_engine("oracle")` tagging and `ServiceVersionMatrix` hookup [^oracle-native]; `Makefile` pulls PyPI `--group duckdb` into `PY_TEST_GROUPS` and `make install` and falls back to `test_freethreaded_gil.py` in `oracle-test` [^makefile] [^pyproject-pd].
+### 1.1 Problem Statement & Implemented Resolution
+Four merged native database wheels lacked live server CI gates and carried three runtime/build gaps on the `main @ 18baadcd` baseline, now resolved across `ch01`–`ch04`:
+1. **DuckDB GCS Bearer Rotation & Secret Config Validation (`ch01`)**: `SyncGcsBearerSecretProvider` and `AsyncGcsBearerSecretProvider` in `vertebra.storage` wrap `SyncGcpTokenCache` / `AsyncGcpTokenCache` [^gcs-token-cache] [^gcs-config]; `DuckDBSecretConfig` rejects `persistent=True` with `value_provider` and non-positive/boolean/non-finite `refresh_interval_seconds` [^duckdb-secret]; and `SyncDuckDBDriver` / `AsyncDuckDBDriver` invalidate rejected `(HTTP 401)`/`(HTTP 403)` credentials and close `self._client` if initial `required=True` secret refresh raises [^duckdb-driver].
+2. **`OracleNotifyConfig.wait_timeout_seconds` Idle Liveness (`ch01`)**: `src/rs/vertebra-oracle/src/notify.rs` probes idle session liveness via `SELECT 1 FROM DUAL` whenever accumulated idle `1s` dequeue slices reach `wait_timeout_seconds.max(1)` [^oracle-notify].
+3. **Live Conformance Lanes & PyPI `duckdb` Benchmark Isolation (`ch02`–`ch04`)**: `test_driver_conformance.py` includes `mariadb` and removes unused `_DUCKDB_SKIP_REASON` and `VERTEBRA_CONFORMANCE_DUCKDB_DSN` [^conformance-suite]; `test_oracle_native.py` carries `@pytest.mark.driver_engine("oracle")` tagging and `ServiceVersionMatrix` hookup [^oracle-native]; `Makefile` adds `make db-conformance`, removes `--group duckdb` from `PY_TEST_GROUPS`, `make install`, and `make upgrade`, and removes the `test_freethreaded_gil.py` fallback from `oracle-test` [^makefile] [^pyproject-pd].
 
 ### 1.2 Non-Goals
 - Modifying PostgreSQL live conformance or `VERTEBRA_CONFORMANCE_POSTGRES_REQUIRE_ZERO_SKIPS` (owned by archived `native-postgres-driver` / [`postgres-native-driver.md`](../../knowledge/domains/data/postgres-native-driver.md)).
@@ -131,11 +131,11 @@ Four merged native database wheels lack live server CI gates and carry three run
 - [x] [cae00a18] [ch01-duckdb-gcs-secrets-and-oracle-notify](chapters/ch01-duckdb-gcs-secrets-and-oracle-notify/spec.md) — Ship sync/async GCS bearer secret providers, DuckDB secret validation/`401`-`403` invalidation/startup cleanup, and Oracle AQ `wait_timeout_seconds` liveness (`< 60s` offline Rust + unit gate).
 - [x] [7d11fb2c] [ch02-conformance-harness-and-live-suites](chapters/ch02-conformance-harness-and-live-suites/spec.md) — Implement `ConformanceGate`, `ServiceVersionMatrix`, `mariadb` matrix cleanup, and DuckDB, MySQL/MariaDB, SQL Server, and Oracle live suites (`< 60s` offline gate + embedded DuckDB/loopback GCS).
 - [x] [5cf424fb] [ch03-make-lanes-bench-isolation-and-ci](chapters/ch03-make-lanes-bench-isolation-and-ci/spec.md) — Single-pass `Makefile` `db-conformance` + `bench`-only PyPI `duckdb` isolation and `.github/workflows/ci.yml` conformance matrix (`< 60s` infrastructure unit gate).
-- [x] [57fed1c4] [ch04-docs-and-okf-sync](chapters/ch04-docs-and-okf-sync/spec.md) — Synchronize storage/analytics/database docs, changelog, `AGENTS.md`, testing/workflow OKF chapters, and `database-driver-limitations.md` (`< 60s` `make docs && make review-check` gate).
+- [x] [cc75373f] [ch04-docs-and-okf-sync](chapters/ch04-docs-and-okf-sync/spec.md) — Synchronize storage/analytics/database docs, changelog, `AGENTS.md`, testing/workflow OKF chapters, and `database-driver-limitations.md` (`< 60s` `make docs && make review-check` gate).
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **State**: `active` (`4/4` chapters, `13/13` tasks implemented through `ch04-docs-and-okf-sync` at `57fed1c4`; ready for `ch04` zero-context review and `/flow:finish`).
+- **State**: `active` (`4/4` chapters, `13/13` tasks completed and reviewed through `ch04-docs-and-okf-sync` at `cc75373f`; ready for `/flow:finish`).
 - **Full `/flow:finish` Verification**: `make lint-all && make rs-test && make py-test && make db-conformance ENGINE=duckdb && make db-conformance ENGINE=mysql VERSION=8.4 && make db-conformance ENGINE=mariadb VERSION=11.4 && make db-conformance ENGINE=mssql VERSION=2022 && make docs-check && make review-check`.
 
 [^conformance-suite]: `src/py/tests/integration/db/test_driver_conformance.py::ENGINE_SPECS` — Cross-engine driver conformance matrix and `_resolve_live_config`.
@@ -147,6 +147,6 @@ Four merged native database wheels lack live server CI gates and carry three run
 [^duckdb-driver]: `src/py/vertebra/db/adapters/duckdb/driver.py::SyncDuckDBDriver` — DuckDB drivers with generation- and interval-driven dynamic secret refresh.
 [^gcs-token-cache]: `src/py/vertebra/_vertebra.pyi::SyncGcpTokenCache` — Native GCP token cache with `generation`, `needs_refresh`, `invalidate`, and `get_token`.
 [^gcs-config]: `src/py/vertebra/storage/_store.py::GCSConfig` — `GCSConfig` `sync_token_cache` and `async_token_cache` factories.
-[^oracle-notify]: `src/rs/vertebra-oracle/src/notify.rs::run_live_aq_worker` — Oracle AQ listener dequeue loop discarding `wait_timeout_seconds`.
-[^oracle-native]: `src/py/tests/integration/db/test_oracle_native.py::_resolve_oracle_config` — Live Oracle 26ai native suite gated on `VERTEBRA_CONFORMANCE_DOCKER`.
+[^oracle-notify]: `src/rs/vertebra-oracle/src/notify.rs::run_live_aq_worker` — Oracle AQ listener dequeue loop with `wait_timeout_seconds` idle `SELECT 1 FROM DUAL` liveness.
+[^oracle-native]: `src/py/tests/integration/db/test_oracle_native.py::_resolve_oracle_config` — Live Oracle 26ai native suite gated by `ConformanceGate` and `ServiceVersionMatrix`.
 [^driver-limits]: `.agents/bundles/knowledge/domains/data/database-driver-limitations.md` — Canonical database driver limitations and operational boundaries chapter.

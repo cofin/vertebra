@@ -7,8 +7,8 @@ title: "Document GCS bearer secret providers and DuckDB rotation in storage and 
 description: "Add SyncGcsBearerSecretProvider and AsyncGcsBearerSecretProvider usage and API reference directives across storage.md, analytics-and-cdc.md, and docs/reference/storage.md."
 status: stable
 state: completed
-commit: 57fed1c4
-last_verified_commit: 57fed1c4
+commit: cc75373f
+last_verified_commit: cc75373f
 updated_at: "2026-11-14T18:08:00Z"
 planning_quality: standard
 planning_degraded_reason: null

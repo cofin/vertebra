@@ -1,9 +1,9 @@
 # Bundle Activity Log
 
-## [2026-11-14T18:08:00Z] chapter-complete | driver-conformance-ci ch04-docs-and-okf-sync
+## [2026-11-14T18:20:00Z] chapter-complete | driver-conformance-ci ch04-docs-and-okf-sync
 
-- Completed `ch04-docs-and-okf-sync` (`t01`–`t04`) at `57fed1c4`: documented `SyncGcsBearerSecretProvider` and `AsyncGcsBearerSecretProvider` across `docs/usage/{storage,analytics-and-cdc,databases}.md` and `docs/reference/storage.md`, updated `docs/changelog/index.md` and `AGENTS.md` (`70` lines), and synchronized `.agents/bundles/knowledge/testing/{polyglot-test-matrix,benchmarks-and-free-threaded}.md`, `.agents/bundles/knowledge/workflow.md`, and `.agents/bundles/knowledge/domains/data/{database-drivers-and-dialers,database-driver-limitations}.md` (`<= 200` lines each; `make docs` and `make review-check` clean).
-- All `4/4` chapters (`13/13` tasks) of `driver-conformance-ci` are implemented and verified; ready for `/flow:finish`.
+- Closed `ch04-docs-and-okf-sync` (`t01`–`t04`) across `57fed1c4` and `cc75373f`: documented `SyncGcsBearerSecretProvider` and `AsyncGcsBearerSecretProvider` across `docs/usage/{storage,analytics-and-cdc,databases}.md` and rendered API directives in `docs/reference/storage.md`, updated `docs/changelog/index.md` and `AGENTS.md` (`70` lines), and synchronized `.agents/bundles/knowledge/testing/{polyglot-test-matrix,benchmarks-and-free-threaded}.md`, `.agents/bundles/knowledge/workflow.md`, and `.agents/bundles/knowledge/domains/data/{database-drivers-and-dialers,database-driver-limitations}.md` (`<= 200` lines each; `make docs` and `make review-check` clean).
+- All `4/4` chapters (`13/13` tasks) of `driver-conformance-ci` are complete and ready for `/flow:finish`.
 
 ## [2026-11-14T17:59:00Z] chapter-complete | driver-conformance-ci ch03-make-lanes-bench-isolation-and-ci
 

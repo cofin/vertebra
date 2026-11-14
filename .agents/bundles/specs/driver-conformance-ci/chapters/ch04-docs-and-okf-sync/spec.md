@@ -5,18 +5,22 @@ chapter_id: ch04-docs-and-okf-sync
 title: "Chapter 04: User Documentation, Workflow, Testing Matrix, and Limitations OKF Synchronization"
 description: "Document SyncGcsBearerSecretProvider and AsyncGcsBearerSecretProvider, update database/changelog/AGENTS docs, synchronize testing and workflow OKF chapters including benchmarks-and-free-threaded.md, and update database-driver-limitations.md in place."
 status: stable
-state: active
+state: completed
 planning_status: complete
 planning_quality: standard
 planning_degraded_reason: null
 plan_revision: 4
 plan_commit: 37972f2a
-last_verified_commit: 57fed1c4
-updated_at: "2026-11-14T18:08:00Z"
+last_verified_commit: cc75373f
+last_reviewed_commit: cc75373f
+updated_at: "2026-11-14T18:20:00Z"
 generated:
   by: flow-plan
   at: "2026-11-12T23:55:00Z"
 verified:
+  - by: agent:code-reviewer
+    at: "2026-11-14T18:20:00Z"
+    commit: cc75373f
   - by: agent:plan-generator
     at: "2026-11-14T17:24:00Z"
     commit: 37972f2a
@@ -84,10 +88,10 @@ After `ch01`–`ch03` land GCS secret providers, Oracle AQ liveness, live confor
 
 ## 5. Implementation Plan
 
-- [x] [57fed1c4] [t01-gcs-secret-provider-user-docs.md](tasks/t01-gcs-secret-provider-user-docs.md) — Document `SyncGcsBearerSecretProvider` / `AsyncGcsBearerSecretProvider` and DuckDB secret rotation across `storage.md`, `analytics-and-cdc.md`, and `docs/reference/storage.md`.
-- [x] [57fed1c4] [t02-databases-changelog-and-agents-docs.md](tasks/t02-databases-changelog-and-agents-docs.md) — Synchronize `docs/usage/databases.md`, `docs/changelog/index.md`, and `AGENTS.md` (`<= 100L`).
-- [x] [57fed1c4] [t03-testing-and-workflow-okf-sync.md](tasks/t03-testing-and-workflow-okf-sync.md) — Synchronize `polyglot-test-matrix.md`, `benchmarks-and-free-threaded.md`, and `workflow.md` (`<= 200L` each).
-- [x] [57fed1c4] [t04-data-drivers-and-limitations-okf-sync.md](tasks/t04-data-drivers-and-limitations-okf-sync.md) — Synchronize `database-drivers-and-dialers.md` and update `database-driver-limitations.md` in place (`<= 200L` each).
+- [x] [cc75373f] [t01-gcs-secret-provider-user-docs.md](tasks/t01-gcs-secret-provider-user-docs.md) — Document `SyncGcsBearerSecretProvider` / `AsyncGcsBearerSecretProvider` and DuckDB secret rotation across `storage.md`, `analytics-and-cdc.md`, and `docs/reference/storage.md`.
+- [x] [cc75373f] [t02-databases-changelog-and-agents-docs.md](tasks/t02-databases-changelog-and-agents-docs.md) — Synchronize `docs/usage/databases.md`, `docs/changelog/index.md`, and `AGENTS.md` (`<= 100L`).
+- [x] [cc75373f] [t03-testing-and-workflow-okf-sync.md](tasks/t03-testing-and-workflow-okf-sync.md) — Synchronize `polyglot-test-matrix.md`, `benchmarks-and-free-threaded.md`, and `workflow.md` (`<= 200L` each).
+- [x] [cc75373f] [t04-data-drivers-and-limitations-okf-sync.md](tasks/t04-data-drivers-and-limitations-okf-sync.md) — Synchronize `database-drivers-and-dialers.md` and update `database-driver-limitations.md` in place (`<= 200L` each).
 
 ## 6. Current State & Remaining Plan Snapshot
 

@@ -7,8 +7,8 @@ title: "Synchronize databases.md, changelog, and AGENTS.md for live conformance 
 description: "Update docs/usage/databases.md, docs/changelog/index.md, and AGENTS.md for native wheels, GCS secrets, Oracle notify liveness, make db-conformance, and bench-only duckdb."
 status: stable
 state: completed
-commit: 57fed1c4
-last_verified_commit: 57fed1c4
+commit: cc75373f
+last_verified_commit: cc75373f
 updated_at: "2026-11-14T18:08:00Z"
 planning_quality: standard
 planning_degraded_reason: null
