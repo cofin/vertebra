@@ -105,6 +105,7 @@ Result sets exceeding `ARROW_SHM_THRESHOLD_ROWS` (`256` rows or `64 KiB`) bypass
 ```python
 from vertebra.db.adapters.datafusion import DataFusionConfig, DataFusionEngine
 from vertebra.db.adapters.duckdb import DuckDBConfig, DuckDBSecretConfig
+from vertebra.storage import GCSConfig, SyncGcsBearerSecretProvider
 
 duck_cfg = DuckDBConfig(
     database=":memory:",
@@ -120,11 +121,19 @@ duck_cfg = DuckDBConfig(
                 "region": "us-east-1",
             },
         ),
+        DuckDBSecretConfig(
+            name="gcs_lake",
+            secret_type="gcs",
+            value_provider=SyncGcsBearerSecretProvider.from_config(
+                GCSConfig(bucket="lake"),
+            ),
+            scope="gs://lake/",
+        ),
     ),
 )
 engine = DataFusionEngine(DataFusionConfig(target_partitions=4))
 ```
 
 - **`ArrowCursor`**: Exposes a zero-copy `memoryview` (`buffer_view()`) and Arrow IPC payload over the shared-memory `ShmRegion` without requiring Python Arrow dependencies; materializes `to_arrow_table()`, `to_pyarrow()`, or `to_polars()` when `[arrow]` or `[polars]` is installed, and unlinks the `ShmRegion` deterministically on context-manager exit.
-- **Cloud-Agnostic DuckDB Secrets (`DuckDBSecretConfig`)**: Supports static `value` dictionaries and dynamic `value_provider` callables (sync or async) across any DuckDB secret type (`s3`, `gcs`, `r2`, `azure`, `http`, `bearer`, `iceberg`), refreshing `CREATE OR REPLACE SECRET` automatically when `refresh_interval_seconds` elapses or a credential provider's `.generation` counter advances.
+- **Cloud-Agnostic DuckDB Secrets (`DuckDBSecretConfig`)**: Supports static `value` dictionaries and dynamic `value_provider` callables (such as `SyncGcsBearerSecretProvider` and `AsyncGcsBearerSecretProvider` in `vertebra.storage`) across any DuckDB secret type (`s3`, `gcs`, `r2`, `azure`, `http`, `bearer`, `iceberg`). Dynamic `value_provider` secrets require `persistent=False` and a positive finite `refresh_interval_seconds`, refreshing `CREATE OR REPLACE SECRET` when `refresh_interval_seconds` elapses or `.generation` advances and invalidating the provider generation on `(HTTP 401)` / `(HTTP 403)` `httpfs` errors (re-raising without implicit query retry).
 - **Vector Columns to Arrow SHM**: Convert `VectorBatchView` embeddings directly into an `ArrowCursor` (`FixedSizeListArray(Float32, dims)`) via `batch.to_arrow_shm()` or `await embedder.embed_arrow(cursor, text_column="body")`.
