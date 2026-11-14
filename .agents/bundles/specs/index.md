@@ -7,11 +7,7 @@ Active specifications and promoted spec-scoped research notes anchored at `HEAD 
 - [`native-data-platform`](native-data-platform/spec.md) — Shared cross-worker connection pools via the shared-memory ring broker and per-engine standalone Rust PyO3 driver and storage wheels (`vertebra-<engine>`).
 - [`integration-remediation`](integration-remediation/spec.md) — Downward `vertebra.db` layering, SQLSpec `0.71.1+` adapter parity, SQLAlchemy/Advanced Alchemy/Django `6.0+` integration, native queues/tasks/channels, Spanner interactive `ReadWrite` transactions, progressive server streaming, HTTP/3, embeddings/OIDC identity, MCP `2026-07-28` completeness, and strict typing hygiene.
 
-## 2. Completed Feature Specifications (`state: completed`, Ready for `/flow:archive`)
-
-- [`driver-conformance-ci`](driver-conformance-ci/spec.md) — `SyncGcsBearerSecretProvider`/`AsyncGcsBearerSecretProvider` and DuckDB secret rotation (`ch01` complete at `cae00a18`), `ConformanceGate` + `ServiceVersionMatrix` and DuckDB/MySQL/MariaDB/MSSQL/Oracle live conformance suites (`ch02` complete at `7d11fb2c`), single-pass `Makefile` `db-conformance` + `bench`-only PyPI `duckdb` isolation + CI lanes (`ch03` complete at `5cf424fb`), and documentation/OKF synchronization (`ch04` complete at `cc75373f`; [`4 chapters`](driver-conformance-ci/chapters/index.md), `13/13` tasks complete).
-
-## 3. Planned Executable Specifications (`state: planned`)
+## 2. Planned Executable Specifications (`state: planned`)
 
 - [`native-adapter-organization`](native-adapter-organization/spec.md) — BigQuery `object_tables.py` and Spanner `mutations.py` module separation plus `DataFusionEngine` vendor-wrapper and unimplemented `DataFusionConfig` `pgwire_fdw` removal (`has_chapters: false`, `4` tasks).
 - [`broker-pool-sharing`](broker-pool-sharing/spec.md) — Atomic `ShmOwnerHeader` supervision, `dbrpc` + `VTBARROW` SHM lease execution, cross-`.so` C-ABI `BrokerEngineCapsule`, crash quarantine `ROLLBACK`, neutral `vertebra.db.dbapi` extraction, and SQLAlchemy/SQLSpec shared broker pools ([`8 chapters`](broker-pool-sharing/chapters/index.md), `27` tasks; depends on `native-postgres-driver`; covers [#95](https://github.com/cofin/vertebra/issues/95), [#96](https://github.com/cofin/vertebra/issues/96), [#97](https://github.com/cofin/vertebra/issues/97), [#98](https://github.com/cofin/vertebra/issues/98)).
@@ -24,7 +20,7 @@ Active specifications and promoted spec-scoped research notes anchored at `HEAD 
 - [`spanner-queue-and-rw-transactions`](spanner-queue-and-rw-transactions/spec.md) — Interactive multi-statement Spanner `ReadWrite` transactions (`BeginTransaction`/`seqno`/`precommit_token`/`Commit`/`Rollback` with `SpannerAbortedError` retry) in `vertebra-spanner` and `SyncSpannerQueueStore`/`AsyncSpannerQueueStore` across GoogleSQL and Spangres ([`2 chapters`](spanner-queue-and-rw-transactions/chapters/index.md), `6` tasks; depends on `queues-tasks-and-channels`).
 - [`strict-typing-hygiene`](strict-typing-hygiene/spec.md) — Pruning `43+` redundant `ignore_missing_imports` overrides in `pyproject.toml`, fixing masked `litestar_queues` and `tools/benchmarks/runner.py` typing defects, and enabling strict `mypy` across `tools/benchmarks` and `src/py/tests` (`has_chapters: false`, `4` tasks; depends on `queues-tasks-and-channels`, `sqlspec-adapter-parity`, `sqlalchemy-and-django-integration`; covers [#59](https://github.com/cofin/vertebra/issues/59)).
 
-## 4. Promoted Spec Research (`state: promoted`)
+## 3. Promoted Spec Research (`state: promoted`)
 
 - [`gap-analysis_20261103.md`](native-data-platform/research/gap-analysis_20261103.md) — Broker, native driver, and storage gap analysis (`native-data-platform`).
 - [`rust-driver-crates_20261103.md`](native-data-platform/research/rust-driver-crates_20261103.md) — Primary-source Rust client crate comparison and per-engine wheel packaging (`native-data-platform`).

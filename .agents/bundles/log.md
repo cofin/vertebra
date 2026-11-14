@@ -1,5 +1,9 @@
 # Bundle Activity Log
 
+## [2026-11-14T18:30:30Z] archive | driver-conformance-ci
+
+- Archived completed specification `driver-conformance-ci` (`ch01`–`ch04`, `13/13` tasks across `a8ca7b24..cc75373f`) into permanent OKF knowledge chapters (`object-storage.md`, `database-drivers-and-dialers.md`, `database-driver-limitations.md`, `polyglot-test-matrix.md`, `benchmarks-and-free-threaded.md`, `workflow.md`), updated Master PRD `native-data-platform` and bundle indexes (`index.md`, `specs/index.md`), and removed `.agents/bundles/specs/driver-conformance-ci/`.
+
 ## [2026-11-14T18:28:30Z] finish | driver-conformance-ci
 
 - Completed `driver-conformance-ci` (`ch01`–`ch04`, `13/13` tasks) through `cc75373f` / `596c32d6`: shipped `SyncGcsBearerSecretProvider` and `AsyncGcsBearerSecretProvider` in `vertebra.storage`, `DuckDBSecretConfig` validation + `(HTTP 401)`/`(HTTP 403)` provider invalidation + startup `_client` cleanup, Oracle AQ `wait_timeout_seconds` `SELECT 1 FROM DUAL` idle liveness probing, zero-skip `ConformanceGate` and `ServiceVersionMatrix`, `mariadb` `EngineConformanceSpec`, live `test_{duckdb,mysql,mssql,oracle}_native.py` suites, `make db-conformance`, `bench`-only PyPI `duckdb` isolation, `.github/workflows/ci.yml` `test-db-conformance` (10-row matrix) + `conformance-oracle` (`continue-on-error: true`), and public/OKF documentation synchronization (`43 passed, 0 skipped` in `make db-conformance ENGINE=duckdb`, `7 passed` in `cargo test -p vertebra-oracle notify::`, `137 passed` in unit suites, `make docs`, and `make lint-all` clean).

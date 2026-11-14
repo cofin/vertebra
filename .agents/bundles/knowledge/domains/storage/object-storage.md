@@ -9,18 +9,15 @@ tags:
 - object-store
 - signing
 verified:
+- by: agent:flow-archive
+  at: "2026-11-14T18:30:30Z"
+  commit: cc75373f
 - by: agent:flow-learn
   at: "2026-11-14T17:15:00Z"
   commit: 334dc98d
 - by: agent:flow-setup
   at: "2026-11-12T23:30:00Z"
   commit: 18baadcd
-- by: agent:flow-sync
-  at: '2026-11-12T01:15:00Z'
-  commit: c8722c76
-- by: agent:docs-okf-specialist
-  at: '2026-11-09T02:24:00Z'
-  commit: 067fa901
 sources:
 - id: core-gcp-auth
   resource: src/rs/vertebra-core/src/gcp_auth.rs
