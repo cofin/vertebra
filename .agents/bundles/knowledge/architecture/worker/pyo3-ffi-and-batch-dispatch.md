@@ -148,7 +148,7 @@ sources:
 - [`compile_handler_table`](../../../../../src/py/vertebra/server/_dispatch.py)[^src-server-dispatch-py] compiles routes into frozen `HandlerSpec` entries (`sync_to_thread=False` default runs inline and flushes via `submit_batch_raw`). `_serialize_result` accepts `_RAW_BUFFER_TYPES` copy-free; returning `(status, headers, AsyncIterable | Iterable)` streams non-empty chunks progressively over `submit_stream_frame` / `max_stream_frame_payload`.
 - `drive_native_batch` steps `async def` handlers in C via `PyIter_Send`, flushing `PYGEN_RETURN` with zero `asyncio.Task` allocations and promoting `PYGEN_NEXT` coroutines after dropping local `Request` pins.
 - [`_fastpath_core.py`](../../../../../src/py/vertebra/server/_fastpath_core.py)[^src-server-fastpath-core-py] defines `CompiledRouteBase`, canonical `__vertebra_fastpath__` attachment helpers (`get_attached_fastpath` / `set_attached_fastpath`), `FastPathProvider`, and `DirectPlan`; [`attach_framework_fastpath`](../../../../../src/py/vertebra/server/_fastpath.py)[^src-server-fastpath-py] wraps mounted Litestar, FastAPI, Starlette, Flask, and Django apps in `O(1)` (`MOUNT_HANDLER_BASE | mount_idx`).
-- [`_loops.py`](../../../../../src/py/vertebra/server/_loops.py)[^src-server-loops-py] resolves `LoopBackend` (`uvloop`, `winloop`, `rloop`, `asyncio`) via `create_event_loop`; single-loop workers register `loop.add_reader(notify_fd, ...)` with Dekker guards.
+- [`_loops.py`](../../../../../src/py/vertebra/server/_loops.py)[^src-server-loops-py] resolves `LoopBackend` (`uvloop`, `winloop`, `rloop`, `zuvloop`, `asyncio`) via `create_event_loop`; single-loop workers register `loop.add_reader(notify_fd, ...)` with Dekker guards.
 
 ## Database & storage extension boundaries
 

@@ -176,6 +176,10 @@ emulator_config = SpannerConfig(
 driver = SyncSpannerDriver(emulator_config)
 ```
 
+### PostgreSQL Native Driver
+
+The native PostgreSQL driver (`vertebra-core[postgres]`, backed by `vertebra._postgres`) supports Protocol 3.0 pipelining, `$1..$N` typed parameters (`PgJson`, `PgParameter`, `PgVector`), logical replication CDC, and pushdown vector embeddings:
+
 ```python
 import msgspec
 from vertebra.db.adapters.postgres import (

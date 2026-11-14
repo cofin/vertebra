@@ -4,13 +4,17 @@ import asyncio
 import os
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from click.testing import CliRunner
 
+from vertebra.cli import cli
 from vertebra.cli._launch import ServerLaunchEnv
 from vertebra.server._gil_audit import GilAuditReport, is_free_threaded
 from vertebra.server._loops import (
+    LOOP_BACKEND_CHOICES,
     EventLoopPool,
     LoopBackend,
     configure_worker_affinity,
@@ -359,6 +363,30 @@ def test_resolve_loop_backend_scopes_quarantine_to_candidate_modules(
     )
 
     assert resolve_loop_backend(requested, quarantined_modules=quarantined) == expected
+
+
+def test_create_event_loop_zuvloop_and_cli_choices(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify create_event_loop('zuvloop') and CLI --loop choices accept zuvloop from LoopBackend."""
+    sentinel_loop = asyncio.new_event_loop()
+    try:
+        fake_zuvloop = SimpleNamespace(new_event_loop=lambda: sentinel_loop)
+        monkeypatch.setattr("vertebra.server._loops.sys.platform", "linux")
+        monkeypatch.setattr(
+            "vertebra.server._loops.import_optional",
+            lambda name: fake_zuvloop if name == "zuvloop" else None,
+        )
+        assert create_event_loop(LoopBackend.ZUVLOOP) is sentinel_loop
+    finally:
+        sentinel_loop.close()
+
+    assert "zuvloop" in LOOP_BACKEND_CHOICES
+    assert tuple(backend.value for backend in LoopBackend) == LOOP_BACKEND_CHOICES
+
+    runner = CliRunner()
+    for subcommand in ("run", "dev"):
+        help_res = runner.invoke(cli, [subcommand, "--help"])
+        assert help_res.exit_code == 0
+        assert "zuvloop" in help_res.output
 
 
 def test_event_loop_pool_spawn_and_spawn_batch_dispatch_across_threads_and_inline() -> None:

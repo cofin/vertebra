@@ -79,7 +79,10 @@ Serve your discovered application MCP endpoints incrementally over stdio, or bri
 
 ```bash
 vtb ai mcp serve --app app:app
-vtb ai mcp bridge --url https://agent.example.com/mcp --audience https://agent.example.com --timeout 30
+vtb ai mcp bridge \
+  --url https://agent.example.com/mcp \
+  --audience https://agent.example.com \
+  --timeout 30
 ```
 
 ### Standalone Binary Packaging (`vtb build`)

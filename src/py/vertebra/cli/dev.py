@@ -17,6 +17,7 @@ from vertebra.cli._logging import configure_logging
 from vertebra.cli.banner.renderer import render_banner
 from vertebra.cli.errors import EXIT_CONFIG_ERROR, CLIError
 from vertebra.cli.plugin_registry import enter_app_server_lifespan, resolve_cli_app_path
+from vertebra.server._loops import LOOP_BACKEND_CHOICES
 from vertebra.supervisor._supervisor import build_server_command, run_supervisor
 
 __all__ = ("dev",)
@@ -39,7 +40,7 @@ logger = logging.getLogger("vertebra.cli.dev")
 )
 @click.option(
     "--loop",
-    type=click.Choice(["auto", "uvloop", "winloop", "rloop", "zuvloop", "asyncio"], case_sensitive=False),
+    type=click.Choice(LOOP_BACKEND_CHOICES, case_sensitive=False),
     default="auto",
     help="Event loop backend (auto, uvloop, winloop, rloop, zuvloop, or asyncio)",
 )

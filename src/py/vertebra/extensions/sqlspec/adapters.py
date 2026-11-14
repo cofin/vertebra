@@ -1399,15 +1399,14 @@ class DuckDBAsyncDriver(BaseAsyncDriver):
 class SyncAdapterConfig[ConfigT, DriverT: SyncDriverAdapterBase](SyncDatabaseConfig[Any, Any, DriverT]):
     """Base synchronous SQLSpec adapter configuration backed by a Vertebra native driver.
 
-    Defines a temporary ``connection_type = Any`` compatibility fallback
-    (tracked in https://github.com/cofin/vertebra/issues/131) so native
-    configs register with ``sqlspec.extensions.litestar.SQLSpecPlugin`` until
-    full ``DatabaseConfigProtocol`` parity replaces these shim base classes.
+    Concrete subclasses declare ``connection_type`` until full
+    ``DatabaseConfigProtocol`` parity (https://github.com/cofin/vertebra/issues/131)
+    replaces these shim base classes.
     """
 
     dialect: ClassVar[str] = "generic"
     is_async: ClassVar[bool] = False
-    connection_type: ClassVar[type[Any]] = Any
+    connection_type: ClassVar[type[Any]]
     _config_cls: ClassVar[type[Any]]
     _driver_cls: ClassVar[type[Any]]
     driver_type: ClassVar[type[Any]]
@@ -1491,15 +1490,14 @@ class SyncAdapterConfig[ConfigT, DriverT: SyncDriverAdapterBase](SyncDatabaseCon
 class AsyncAdapterConfig[ConfigT, DriverT: AsyncDriverAdapterBase](AsyncDatabaseConfig[Any, Any, DriverT]):
     """Base asynchronous SQLSpec adapter configuration backed by a Vertebra native driver.
 
-    Defines a temporary ``connection_type = Any`` compatibility fallback
-    (tracked in https://github.com/cofin/vertebra/issues/131) so native
-    configs register with ``sqlspec.extensions.litestar.SQLSpecPlugin`` until
-    full ``DatabaseConfigProtocol`` parity replaces these shim base classes.
+    Concrete subclasses declare ``connection_type`` until full
+    ``DatabaseConfigProtocol`` parity (https://github.com/cofin/vertebra/issues/131)
+    replaces these shim base classes.
     """
 
     dialect: ClassVar[str] = "generic"
     is_async: ClassVar[bool] = True
-    connection_type: ClassVar[type[Any]] = Any
+    connection_type: ClassVar[type[Any]]
     _config_cls: ClassVar[type[Any]]
     _driver_cls: ClassVar[type[Any]]
     driver_type: ClassVar[type[Any]]

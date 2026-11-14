@@ -20,7 +20,9 @@ Vertebra is one unified runtime for Python and TypeScript across backend, fronte
 
 ```bash
 uv add vertebra-core
-uv add "vertebra-core[postgres]" # Optional native wheels: bigquery, bundler, duckdb, mssql, mysql, oracle, postgres, spanner, storage
+# Optional native wheels:
+# bigquery, bundler, duckdb, mssql, mysql, oracle, postgres, spanner, storage
+uv add "vertebra-core[postgres]"
 ```
 
 ## CLI Usage (`vtb`)
@@ -45,8 +47,8 @@ make py-test     # Run Python test suite
 make oracle-test # Run Oracle 26ai Rust tests, stubtest, and Python unit tests
 make oracle-wheel-check # Verify vertebra-oracle wheel isolation
 make postgres-test # Run vertebra-postgres Rust tests and _postgres stubtest
-make postgres-wheel-check # Verify vertebra-postgres wheel, sdist, and 14-class isolation
-make postgres-bench-check # Run Criterion postgres_native test checks and comparator unit tests
+make postgres-wheel-check # Verify vertebra-postgres wheel and isolation
+make postgres-bench-check # Run Criterion tests and comparator unit suite
 make ts-test     # Run TypeScript client tests (Vitest)
 make lint        # Format and lint Python, Rust, and TypeScript
 make check       # Run full lint, type checks, all tests, and coverage
@@ -74,7 +76,7 @@ src/
     vertebra-mssql/    # SQL Server TDS 7.4/8.0 and BulkLoad (_mssql)
     vertebra-mysql/    # MySQL/MariaDB binary protocol (_mysql)
     vertebra-oracle/   # Oracle 26ai Thin client, DRCP pool, and Arrow SHM (_oracle)
-    vertebra-postgres/ # Pure-Rust PostgreSQL 3.0, PGCOPY, pgoutput, Arrow SHM (_postgres)
+    vertebra-postgres/ # PostgreSQL 3.0, PGCOPY, pgoutput, Arrow SHM (_postgres)
     vertebra-spanner/  # Spanner v1 gRPC and DatabaseAdmin (_spanner)
   ts/
     vertebra-client/   # @vertebra/client TypeScript SDK

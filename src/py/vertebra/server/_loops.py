@@ -19,6 +19,7 @@ from vertebra.server.platform import CgroupQuota
 from vertebra.utils.module_loader import import_optional
 
 __all__ = (
+    "LOOP_BACKEND_CHOICES",
     "EventLoopPool",
     "LoopBackend",
     "LoopBackendSpec",
@@ -42,6 +43,9 @@ class LoopBackend(StrEnum):
     RLOOP = "rloop"
     ZUVLOOP = "zuvloop"
     ASYNCIO = "asyncio"
+
+
+LOOP_BACKEND_CHOICES: tuple[str, ...] = tuple(backend.value for backend in LoopBackend)
 
 
 class LoopBackendSpec(msgspec.Struct, frozen=True, gc=False):

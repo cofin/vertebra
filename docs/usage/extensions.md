@@ -52,7 +52,7 @@ Vertebra provides modular, independently installable extensions for the Litestar
 | **AsyncAPI** | `vertebra.extensions.litestar.asyncapi` | `asyncapi` | Event and schema documentation for background tasks and WebSocket channels. |
 | **HTMX** | `vertebra.extensions.litestar.htmx` | `htmx` | HTMX response headers, partials, and push-URL directives. |
 
-Example of setting up Litestar with zero-boilerplate queues and security:
+Configure Litestar integration with `VertebraPlugin` and `VertebraConfig` (and attach any optional `vertebra.extensions.litestar.*` helper plugins listed above):
 
 ```python
 from litestar import Litestar
