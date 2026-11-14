@@ -1,5 +1,10 @@
 # Bundle Activity Log
 
+## [2026-11-14T18:08:00Z] chapter-complete | driver-conformance-ci ch04-docs-and-okf-sync
+
+- Completed `ch04-docs-and-okf-sync` (`t01`–`t04`) at `57fed1c4`: documented `SyncGcsBearerSecretProvider` and `AsyncGcsBearerSecretProvider` across `docs/usage/{storage,analytics-and-cdc,databases}.md` and `docs/reference/storage.md`, updated `docs/changelog/index.md` and `AGENTS.md` (`70` lines), and synchronized `.agents/bundles/knowledge/testing/{polyglot-test-matrix,benchmarks-and-free-threaded}.md`, `.agents/bundles/knowledge/workflow.md`, and `.agents/bundles/knowledge/domains/data/{database-drivers-and-dialers,database-driver-limitations}.md` (`<= 200` lines each; `make docs` and `make review-check` clean).
+- All `4/4` chapters (`13/13` tasks) of `driver-conformance-ci` are implemented and verified; ready for `/flow:finish`.
+
 ## [2026-11-14T17:59:00Z] chapter-complete | driver-conformance-ci ch03-make-lanes-bench-isolation-and-ci
 
 - Closed `ch03-make-lanes-bench-isolation-and-ci` (`t01`–`t02`) at `b45ebf84` (sync `5cf424fb`): added `make db-conformance` (`ENGINE=<duckdb|mysql|mariadb|mssql|oracle> [VERSION=<v>]`), removed the `test_freethreaded_gil.py` fallback from `oracle-test`, removed `--group duckdb` from `PY_TEST_GROUPS`, `make install`, and `make upgrade` while keeping `"duckdb>=1.0; python_version < '3.14'"` in `[dependency-groups].bench`, and added `test-db-conformance` (10 matrix rows) and `conformance-oracle` (`continue-on-error: true`) in `.github/workflows/ci.yml` (`35 passed` in `test_bench_infrastructure.py`, `ruff`, `make review-check`, and dual zero-context `code-reviewer` + `quality-reviewer` reviews clean).

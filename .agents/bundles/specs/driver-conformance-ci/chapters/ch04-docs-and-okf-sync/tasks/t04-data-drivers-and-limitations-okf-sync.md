@@ -6,7 +6,10 @@ chapter_id: ch04-docs-and-okf-sync
 title: "Synchronize database-drivers-and-dialers.md and update database-driver-limitations.md in place"
 description: "Document DuckDB GCS secret lifecycle and Oracle AQ liveness in database-drivers-and-dialers.md and replace resolved caveats with live conformance boundaries in database-driver-limitations.md."
 status: stable
-state: pending
+state: completed
+commit: 57fed1c4
+last_verified_commit: 57fed1c4
+updated_at: "2026-11-14T18:08:00Z"
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -69,8 +72,8 @@ for f in .agents/bundles/knowledge/domains/data/database-drivers-and-dialers.md 
 
 ## Acceptance Criteria
 
-- [ ] Both OKF files are `<= 200` lines with valid `sources:` and footnotes, and zero duplicate limitations files exist.
-- [ ] `make docs` and `make review-check` exit `0`.
+- [x] Both OKF files are `<= 200` lines with valid `sources:` and footnotes, and zero duplicate limitations files exist.
+- [x] `make docs` and `make review-check` exit `0`.
 
 [^okf-drivers]: `.agents/bundles/knowledge/domains/data/database-drivers-and-dialers.md` — Cross-engine database drivers and cloud dialers OKF chapter.
 [^okf-limits]: `.agents/bundles/knowledge/domains/data/database-driver-limitations.md` — Canonical database driver limitations OKF chapter.

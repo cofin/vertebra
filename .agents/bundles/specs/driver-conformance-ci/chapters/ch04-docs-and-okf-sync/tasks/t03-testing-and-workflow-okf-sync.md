@@ -6,7 +6,10 @@ chapter_id: ch04-docs-and-okf-sync
 title: "Synchronize polyglot-test-matrix.md, benchmarks-and-free-threaded.md, and workflow.md"
 description: "Update testing and workflow OKF chapters within <= 200 lines for ConformanceGate, make db-conformance, CI matrix lanes, and bench-only PyPI duckdb."
 status: stable
-state: pending
+state: completed
+commit: 57fed1c4
+last_verified_commit: 57fed1c4
+updated_at: "2026-11-14T18:08:00Z"
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -72,8 +75,8 @@ for f in .agents/bundles/knowledge/testing/polyglot-test-matrix.md .agents/bundl
 
 ## Acceptance Criteria
 
-- [ ] All three OKF chapters are `<= 200` lines in present tense with zero stale `--group duckdb` claims in `PY_TEST_GROUPS`.
-- [ ] `make review-check` exits `0`.
+- [x] All three OKF chapters are `<= 200` lines in present tense with zero stale `--group duckdb` claims in `PY_TEST_GROUPS`.
+- [x] `make review-check` exits `0`.
 
 [^okf-matrix]: `.agents/bundles/knowledge/testing/polyglot-test-matrix.md` — Polyglot test matrix and conformance OKF chapter.
 [^okf-bench]: `.agents/bundles/knowledge/testing/benchmarks-and-free-threaded.md` — Benchmarks and free-threaded Python OKF chapter.

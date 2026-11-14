@@ -6,7 +6,10 @@ chapter_id: ch04-docs-and-okf-sync
 title: "Synchronize databases.md, changelog, and AGENTS.md for live conformance and DuckDB isolation"
 description: "Update docs/usage/databases.md, docs/changelog/index.md, and AGENTS.md for native wheels, GCS secrets, Oracle notify liveness, make db-conformance, and bench-only duckdb."
 status: stable
-state: pending
+state: completed
+commit: 57fed1c4
+last_verified_commit: 57fed1c4
+updated_at: "2026-11-14T18:08:00Z"
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -70,8 +73,8 @@ test "$(wc -l < AGENTS.md)" -le 100 && make docs && make review-check
 
 ## Acceptance Criteria
 
-- [ ] `AGENTS.md` is `<= 100` lines and matches `Makefile` targets (`make install` without `--group duckdb`, `make db-conformance`, `make oracle-test`).
-- [ ] `make docs` and `make review-check` exit `0`.
+- [x] `AGENTS.md` is `<= 100` lines and matches `Makefile` targets (`make install` without `--group duckdb`, `make db-conformance`, `make oracle-test`).
+- [x] `make docs` and `make review-check` exit `0`.
 
 [^doc-databases]: `docs/usage/databases.md` — Database drivers overview and engine capability notes.
 [^doc-changelog]: `docs/changelog/index.md` — Release changelog `Unreleased` section.

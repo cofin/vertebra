@@ -11,7 +11,8 @@ planning_quality: standard
 planning_degraded_reason: null
 plan_revision: 4
 plan_commit: 37972f2a
-updated_at: "2026-11-14T17:24:00Z"
+last_verified_commit: 57fed1c4
+updated_at: "2026-11-14T18:08:00Z"
 generated:
   by: flow-plan
   at: "2026-11-12T23:55:00Z"
@@ -83,10 +84,10 @@ After `ch01`–`ch03` land GCS secret providers, Oracle AQ liveness, live confor
 
 ## 5. Implementation Plan
 
-- [ ] [t01-gcs-secret-provider-user-docs.md](tasks/t01-gcs-secret-provider-user-docs.md) — Document `SyncGcsBearerSecretProvider` / `AsyncGcsBearerSecretProvider` and DuckDB secret rotation across `storage.md`, `analytics-and-cdc.md`, and `docs/reference/storage.md`.
-- [ ] [t02-databases-changelog-and-agents-docs.md](tasks/t02-databases-changelog-and-agents-docs.md) — Synchronize `docs/usage/databases.md`, `docs/changelog/index.md`, and `AGENTS.md` (`<= 100L`).
-- [ ] [t03-testing-and-workflow-okf-sync.md](tasks/t03-testing-and-workflow-okf-sync.md) — Synchronize `polyglot-test-matrix.md`, `benchmarks-and-free-threaded.md`, and `workflow.md` (`<= 200L` each).
-- [ ] [t04-data-drivers-and-limitations-okf-sync.md](tasks/t04-data-drivers-and-limitations-okf-sync.md) — Synchronize `database-drivers-and-dialers.md` and update `database-driver-limitations.md` in place (`<= 200L` each).
+- [x] [57fed1c4] [t01-gcs-secret-provider-user-docs.md](tasks/t01-gcs-secret-provider-user-docs.md) — Document `SyncGcsBearerSecretProvider` / `AsyncGcsBearerSecretProvider` and DuckDB secret rotation across `storage.md`, `analytics-and-cdc.md`, and `docs/reference/storage.md`.
+- [x] [57fed1c4] [t02-databases-changelog-and-agents-docs.md](tasks/t02-databases-changelog-and-agents-docs.md) — Synchronize `docs/usage/databases.md`, `docs/changelog/index.md`, and `AGENTS.md` (`<= 100L`).
+- [x] [57fed1c4] [t03-testing-and-workflow-okf-sync.md](tasks/t03-testing-and-workflow-okf-sync.md) — Synchronize `polyglot-test-matrix.md`, `benchmarks-and-free-threaded.md`, and `workflow.md` (`<= 200L` each).
+- [x] [57fed1c4] [t04-data-drivers-and-limitations-okf-sync.md](tasks/t04-data-drivers-and-limitations-okf-sync.md) — Synchronize `database-drivers-and-dialers.md` and update `database-driver-limitations.md` in place (`<= 200L` each).
 
 ## 6. Current State & Remaining Plan Snapshot
 

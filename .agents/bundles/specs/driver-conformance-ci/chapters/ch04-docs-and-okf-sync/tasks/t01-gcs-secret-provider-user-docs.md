@@ -6,7 +6,10 @@ chapter_id: ch04-docs-and-okf-sync
 title: "Document GCS bearer secret providers and DuckDB rotation in storage and analytics docs"
 description: "Add SyncGcsBearerSecretProvider and AsyncGcsBearerSecretProvider usage and API reference directives across storage.md, analytics-and-cdc.md, and docs/reference/storage.md."
 status: stable
-state: pending
+state: completed
+commit: 57fed1c4
+last_verified_commit: 57fed1c4
+updated_at: "2026-11-14T18:08:00Z"
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -72,8 +75,8 @@ make docs
 
 ## Acceptance Criteria
 
-- [ ] `SyncGcsBearerSecretProvider` and `AsyncGcsBearerSecretProvider` are documented in usage guides and rendered in `docs/reference/storage.md`.
-- [ ] `make docs` exits `0` within all TOC and HTML byte budgets.
+- [x] `SyncGcsBearerSecretProvider` and `AsyncGcsBearerSecretProvider` are documented in usage guides and rendered in `docs/reference/storage.md`.
+- [x] `make docs` exits `0` within all TOC and HTML byte budgets.
 
 [^doc-storage]: `docs/usage/storage.md` — Object storage usage documentation.
 [^doc-analytics]: `docs/usage/analytics-and-cdc.md` — Analytics and DuckDB secrets documentation.
