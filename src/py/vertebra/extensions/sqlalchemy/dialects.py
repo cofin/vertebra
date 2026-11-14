@@ -965,12 +965,13 @@ class SyncPostgreSQLDialect(_NativeTransactionDialect, PGDialect):
 
     driver = "vtb"
     supports_statement_cache = True
-    paramstyle = "pyformat"
+    default_paramstyle = "numeric_dollar"
+    paramstyle = "numeric_dollar"
     use_insertmanyvalues = True
     insert_executemany_returning = True
     supports_native_jsonb = True
 
-    dbapi: Any = classmethod(lambda cls: SyncDBAPIModule(paramstyle="pyformat"))
+    dbapi: Any = classmethod(lambda cls: SyncDBAPIModule(paramstyle="numeric_dollar"))
 
     @classmethod
     def import_dbapi(cls) -> Any:
@@ -1017,8 +1018,10 @@ class AsyncPostgreSQLDialect(_NativeTransactionDialect, PGDialect):
     driver = "vtb_async"
     is_async = True
     supports_statement_cache = True
+    default_paramstyle = "numeric_dollar"
+    paramstyle = "numeric_dollar"
 
-    dbapi: Any = classmethod(lambda cls: AsyncDBAPIModule(paramstyle="pyformat"))
+    dbapi: Any = classmethod(lambda cls: AsyncDBAPIModule(paramstyle="numeric_dollar"))
 
     @classmethod
     def import_dbapi(cls) -> Any:

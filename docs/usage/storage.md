@@ -140,9 +140,14 @@ payload = b"verified-payload"
 digest = hashlib.sha256(payload).hexdigest()
 
 result = store.put("artifacts/data.bin", payload, checksum=True)
-assert result.sha256 is not None and result.crc32c is not None and result.md5 is not None
+assert result.sha256 is not None
+assert result.crc32c is not None and result.md5 is not None
 
-store.put_stream("artifacts/stream.bin", [b"verified-", b"payload"], expected_sha256=digest)
+store.put_stream(
+    "artifacts/stream.bin",
+    [b"verified-", b"payload"],
+    expected_sha256=digest,
+)
 data = store.get("artifacts/stream.bin", expected_sha256=digest)
 
 try:

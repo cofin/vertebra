@@ -1,16 +1,26 @@
 """Unit tests for event loop sharding, CPU affinity, GIL auditing, and protocol detection."""
 
 import asyncio
+import contextlib
 import os
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
+import click
 import pytest
+from click.testing import CliRunner
 
+from vertebra.cli import cli
+from vertebra.cli import dev as cli_dev_mod
+from vertebra.cli import run as cli_run_mod
 from vertebra.cli._launch import ServerLaunchEnv
+from vertebra.extensions.litestar import VertebraPlugin
+from vertebra.extensions.litestar import plugin as litestar_plugin_mod
 from vertebra.server._gil_audit import GilAuditReport, is_free_threaded
 from vertebra.server._loops import (
+    LOOP_BACKEND_CHOICES,
     EventLoopPool,
     LoopBackend,
     configure_worker_affinity,
@@ -271,6 +281,7 @@ def test_loop_backend_resolution_and_cli_launch_env(monkeypatch: pytest.MonkeyPa
     assert LoopBackend.UVLOOP == "uvloop"
     assert LoopBackend.WINLOOP == "winloop"
     assert LoopBackend.RLOOP == "rloop"
+    assert LoopBackend.ZUVLOOP == "zuvloop"
     assert LoopBackend.ASYNCIO == "asyncio"
 
     assert resolve_loop_backend("asyncio") == LoopBackend.ASYNCIO
@@ -288,6 +299,10 @@ def test_loop_backend_resolution_and_cli_launch_env(monkeypatch: pytest.MonkeyPa
     launch = ServerLaunchEnv(app_path="app:app", host="127.0.0.1", port=8000, loop="rloop")
     env = launch.to_environ(base={})
     assert env["VERTEBRA_LOOP"] == "rloop"
+
+    zuv_launch = ServerLaunchEnv(app_path="app:app", host="127.0.0.1", port=8000, loop="zuvloop")
+    zuv_env = zuv_launch.to_environ(base={})
+    assert zuv_env["VERTEBRA_LOOP"] == "zuvloop"
 
 
 def test_cgroup_quota_effective_cpu_count_and_launch_env(
@@ -329,7 +344,10 @@ def test_cgroup_quota_effective_cpu_count_and_launch_env(
         ),
         ("linux", frozenset({"rloop"}), frozenset({"other_ext==2.0"}), "rloop", LoopBackend.RLOOP),
         ("linux", frozenset({"rloop"}), frozenset({"rloop==0.5.0"}), "rloop", LoopBackend.ASYNCIO),
+        ("linux", frozenset({"zuvloop"}), frozenset({"legacy_c_ext==1.0"}), "auto", LoopBackend.ZUVLOOP),
+        ("linux", frozenset({"zuvloop"}), frozenset({"zuvloop==0.1.0"}), "zuvloop", LoopBackend.ASYNCIO),
         ("win32", frozenset({"winloop", "rloop"}), frozenset({"legacy_c_ext==1.0"}), "auto", LoopBackend.WINLOOP),
+        ("win32", frozenset({"zuvloop"}), frozenset({"legacy_c_ext==1.0"}), "auto", LoopBackend.ZUVLOOP),
         ("win32", frozenset({"winloop"}), frozenset({"winloop==0.8.0"}), "auto", LoopBackend.ASYNCIO),
     ],
 )
@@ -351,6 +369,101 @@ def test_resolve_loop_backend_scopes_quarantine_to_candidate_modules(
     )
 
     assert resolve_loop_backend(requested, quarantined_modules=quarantined) == expected
+
+
+@pytest.mark.parametrize("backend_arg", ["zuvloop", LoopBackend.ZUVLOOP], ids=["str", "enum"])
+def test_create_event_loop_zuvloop(
+    monkeypatch: pytest.MonkeyPatch,
+    backend_arg: LoopBackend | str,
+) -> None:
+    """Verify create_event_loop accepts 'zuvloop' and LoopBackend.ZUVLOOP and exports it in LOOP_BACKEND_CHOICES."""
+    sentinel_loop = asyncio.new_event_loop()
+    try:
+        fake_zuvloop = SimpleNamespace(new_event_loop=lambda: sentinel_loop)
+        monkeypatch.setattr("vertebra.server._loops.sys.platform", "linux")
+        monkeypatch.setattr(
+            "vertebra.server._loops.import_optional",
+            lambda name: fake_zuvloop if name == "zuvloop" else None,
+        )
+        assert create_event_loop(backend_arg) is sentinel_loop
+    finally:
+        sentinel_loop.close()
+
+    assert "zuvloop" in LOOP_BACKEND_CHOICES
+    assert tuple(backend.value for backend in LoopBackend) == LOOP_BACKEND_CHOICES
+
+
+@pytest.mark.parametrize(
+    ("command_name", "mod"),
+    [
+        ("run", cli_run_mod),
+        ("dev", cli_dev_mod),
+        ("litestar-run", litestar_plugin_mod),
+    ],
+    ids=["vtb-run", "vtb-dev", "litestar-run"],
+)
+def test_cli_loop_option_enforces_loop_backend_choices(
+    monkeypatch: pytest.MonkeyPatch,
+    command_name: str,
+    mod: Any,
+) -> None:
+    """Verify vtb run, vtb dev, and litestar run share LOOP_BACKEND_CHOICES and reject invalid --loop values."""
+    captured_env: dict[str, str] = {}
+
+    def fake_build_cmd() -> list[str]:
+        return ["/bin/true"]
+
+    def fake_supervisor(*, server_cmd: list[str], env: dict[str, str], **_kwargs: Any) -> int:
+        _ = server_cmd
+        captured_env.update(env)
+        return 0
+
+    @contextlib.contextmanager
+    def fake_lifespan(*_args: Any, **_kwargs: Any) -> Any:
+        yield None
+
+    monkeypatch.setattr(mod, "build_server_command", fake_build_cmd)
+    monkeypatch.setattr(mod, "run_supervisor", fake_supervisor)
+    if command_name == "litestar-run":
+        target_group = click.Group("litestar")
+        VertebraPlugin().on_cli_init(target_group)
+        subcommand = "run"
+    else:
+        monkeypatch.setattr(mod, "resolve_cli_app_path", lambda _app: "app:app")
+        monkeypatch.setattr(mod, "enter_app_server_lifespan", fake_lifespan)
+        target_group = cli
+        subcommand = command_name
+
+    cmd = target_group.commands[subcommand]
+    loop_option = next(param for param in cmd.params if param.name == "loop")
+    assert isinstance(loop_option.type, click.Choice)
+    assert tuple(loop_option.type.choices) == LOOP_BACKEND_CHOICES
+
+    runner = CliRunner()
+    env_keys = (
+        "LITESTAR_APP",
+        "VERTEBRA_APP",
+        "LITESTAR_HOST",
+        "LITESTAR_PORT",
+        "LITESTAR_DEBUG",
+        "LITESTAR_PDB",
+    )
+    saved_env = {key: os.environ.get(key) for key in env_keys}
+    try:
+        invalid_res = runner.invoke(target_group, [subcommand, "--loop", "invalid_loop"])
+        assert invalid_res.exit_code == 2
+        assert "Invalid value for '--loop'" in invalid_res.output
+        assert captured_env == {}
+
+        valid_res = runner.invoke(target_group, [subcommand, "--loop", "zuvloop", "--no-banner"])
+        assert valid_res.exit_code == 0, valid_res.output
+        assert captured_env["VERTEBRA_LOOP"] == "zuvloop"
+    finally:
+        for key, prev in saved_env.items():
+            if prev is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = prev
 
 
 def test_event_loop_pool_spawn_and_spawn_batch_dispatch_across_threads_and_inline() -> None:

@@ -1037,6 +1037,7 @@ class BigQuerySyncConfig(SyncAdapterConfig[BigQueryConfig, BigQuerySyncDriver]):
     """Synchronous SQLSpec configuration for Google Cloud BigQuery."""
 
     dialect: ClassVar[str] = "bigquery"
+    connection_type: ClassVar[type[Any]] = SyncBigQueryDriver
     _config_cls: ClassVar[type[BigQueryConfig]] = BigQueryConfig
     _driver_cls: ClassVar[type[SyncBigQueryDriver]] = SyncBigQueryDriver
     driver_type: ClassVar[type[BigQuerySyncDriver]] = BigQuerySyncDriver
@@ -1224,6 +1225,7 @@ class BigQueryAsyncConfig(AsyncAdapterConfig[BigQueryConfig, BigQueryAsyncDriver
     """Asynchronous SQLSpec configuration for Google Cloud BigQuery."""
 
     dialect: ClassVar[str] = "bigquery"
+    connection_type: ClassVar[type[Any]] = AsyncBigQueryDriver
     _config_cls: ClassVar[type[BigQueryConfig]] = BigQueryConfig
     _driver_cls: ClassVar[type[AsyncBigQueryDriver]] = AsyncBigQueryDriver
     driver_type: ClassVar[type[BigQueryAsyncDriver]] = BigQueryAsyncDriver

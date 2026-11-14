@@ -1269,6 +1269,7 @@ class SpannerSyncConfig(SyncAdapterConfig[SpannerConfig, SpannerSyncDriver]):
     """SQLSpec synchronous configuration for Google Cloud Spanner."""
 
     dialect: ClassVar[str] = "googlesql"
+    connection_type: ClassVar[type[Any]] = SyncSpannerDriver
     _config_cls: ClassVar[type[SpannerConfig]] = SpannerConfig
     _driver_cls: ClassVar[type[SyncSpannerDriver]] = SyncSpannerDriver
     driver_type: ClassVar[type[SpannerSyncDriver]] = SpannerSyncDriver
@@ -1453,6 +1454,7 @@ class SpannerAsyncConfig(AsyncAdapterConfig[SpannerConfig, SpannerAsyncDriver]):
     """SQLSpec asynchronous configuration for Google Cloud Spanner."""
 
     dialect: ClassVar[str] = "googlesql"
+    connection_type: ClassVar[type[Any]] = AsyncSpannerDriver
     _config_cls: ClassVar[type[SpannerConfig]] = SpannerConfig
     _driver_cls: ClassVar[type[AsyncSpannerDriver]] = AsyncSpannerDriver
     driver_type: ClassVar[type[SpannerAsyncDriver]] = SpannerAsyncDriver

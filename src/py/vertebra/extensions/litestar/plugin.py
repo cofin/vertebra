@@ -33,6 +33,7 @@ from vertebra.extensions.litestar.offload import (
 from vertebra.extensions.litestar.router import extract_routes
 from vertebra.extensions.litestar.store import swap_response_cache_store
 from vertebra.server._fastpath_core import FASTPATH_ATTR, get_attached_fastpath, set_attached_fastpath
+from vertebra.server._loops import LOOP_BACKEND_CHOICES
 from vertebra.supervisor._supervisor import build_server_command, run_supervisor
 from vertebra.typing import MissingDependencyError
 from vertebra.utils.module_loader import import_optional
@@ -350,7 +351,7 @@ def _build_litestar_run_command(plugin: VertebraPlugin) -> click.Command:
     @click.option("--jit/--no-jit", default=None, help="Enable or disable CPython experimental JIT")
     @click.option(
         "--loop",
-        type=click.Choice(["auto", "uvloop", "winloop", "rloop", "asyncio"], case_sensitive=False),
+        type=click.Choice(LOOP_BACKEND_CHOICES, case_sensitive=False),
         default="auto",
         help="Event loop backend",
     )

@@ -5,24 +5,29 @@ from __future__ import annotations
 import socket
 import ssl
 import subprocess
+import sys
 import tempfile
 import threading
 from pathlib import Path
 
+import anyio
 import pytest
 
 from vertebra.db.dialer.alloydb import (
     AlloyDBAuthType,
     AlloyDBClusterURI,
     AlloyDBConfig,
+    AsyncAlloyDBDialer,
     SyncAlloyDBDialer,
 )
 from vertebra.db.dialer.cloudsql import (
+    AsyncCloudSQLDialer,
     CloudSQLConfig,
     CloudSQLInstanceURI,
     EphemeralCertBundle,
     SyncCloudSQLDialer,
 )
+from vertebra.typing import MissingDependencyError, reset_dependency_cache
 from vertebra.utils.serializers import decode_json, encode_json_bytes
 
 
@@ -271,3 +276,140 @@ def test_end_to_end_mtls_loopback_handshake_for_cloudsql_and_alloydb() -> None:
         )
     srv_thread3.join(timeout=2.0)
     server_sock.close()
+
+
+def test_cloud_dialers_remove_legacy_driver_helpers_and_validate_configs() -> None:
+    """Cloud SQL and AlloyDB dialers remove legacy driver connect helpers and validate config inputs."""
+    assert not hasattr(SyncCloudSQLDialer, "create_psycopg_connect_func")
+    assert not hasattr(AsyncCloudSQLDialer, "create_asyncpg_connect_func")
+    assert not hasattr(AsyncCloudSQLDialer, "create_asyncmy_creator")
+    assert not hasattr(SyncAlloyDBDialer, "create_psycopg_connect_func")
+    assert not hasattr(AsyncAlloyDBDialer, "create_asyncpg_connect_func")
+
+    with pytest.raises(ValueError, match="ip_type"):
+        CloudSQLConfig(instance_connection_name="p:r:i", ip_type="ANYCAST")
+    with pytest.raises(ValueError, match="refresh_lead_seconds"):
+        CloudSQLConfig(instance_connection_name="p:r:i", refresh_lead_seconds=-1)
+    with pytest.raises(ValueError, match="ip_type"):
+        AlloyDBConfig(instance_uri="projects/p/locations/r/clusters/c/instances/i", ip_type="INTERNAL")
+
+    assert CloudSQLConfig(instance_connection_name="p:r:i", refresh_lead_seconds=0).refresh_lead_seconds == 0
+
+
+@pytest.mark.parametrize("dialer_kind", ["cloudsql", "alloydb"])
+def test_cloud_dialers_default_tls_cert_required_and_reject_fake_rsa_fallback(
+    dialer_kind: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default TLS contexts require certificate verification and keygen raises instead of returning static fake keys."""
+    dialer: SyncCloudSQLDialer | SyncAlloyDBDialer = (
+        SyncCloudSQLDialer(CloudSQLConfig(instance_connection_name="p:r:i"))
+        if dialer_kind == "cloudsql"
+        else SyncAlloyDBDialer(AlloyDBConfig(instance_uri="projects/p/locations/r/clusters/c/instances/i"))
+    )
+    ctx = dialer.build_tls_context(ca_pem=None)
+    assert ctx.minimum_version == ssl.TLSVersion.TLSv1_3
+    assert ctx.check_hostname is False
+    assert ctx.verify_mode == ssl.CERT_REQUIRED
+
+    monkeypatch.setitem(sys.modules, "vertebra._vertebra", None)
+    monkeypatch.setitem(sys.modules, "cryptography.hazmat.primitives.asymmetric.rsa", None)
+    reset_dependency_cache("vertebra._vertebra")
+    reset_dependency_cache("cryptography.hazmat.primitives.asymmetric.rsa")
+    try:
+        with pytest.raises(MissingDependencyError):
+            dialer.generate_ephemeral_keypair()
+    finally:
+        reset_dependency_cache("vertebra._vertebra")
+        reset_dependency_cache("cryptography.hazmat.primitives.asymmetric.rsa")
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("dialer_kind", ["cloudsql", "alloydb"])
+async def test_cloud_dialers_propagate_token_cache_errors_and_serialize_async_refresh(
+    dialer_kind: str,
+) -> None:
+    """Token cache exceptions propagate and async certificate refresh serializes concurrent callers."""
+
+    class _FailingSyncCache:
+        def get_token(self) -> str:
+            raise RuntimeError("adc-sync-boom")
+
+    class _FailingAsyncCache:
+        async def get_token(self) -> str:
+            raise RuntimeError("adc-async-boom")
+
+    if dialer_kind == "cloudsql":
+        cfg = CloudSQLConfig(instance_connection_name="my-proj:us-central1:my-pg")
+        sync_dialer = SyncCloudSQLDialer(cfg, token_cache=_FailingSyncCache())
+        with pytest.raises(RuntimeError, match="adc-sync-boom"):
+            sync_dialer.refresh_certificate(public_key_pem="PUB", private_key_pem="PRIV")
+
+        async_failing = AsyncCloudSQLDialer(cfg, token_cache=_FailingAsyncCache())
+        with pytest.raises(RuntimeError, match="adc-async-boom"):
+            await async_failing.refresh_certificate(public_key_pem="PUB", private_key_pem="PRIV")
+
+        async_dialer: AsyncCloudSQLDialer | AsyncAlloyDBDialer = AsyncCloudSQLDialer(cfg)
+    else:
+        cfg_alloy = AlloyDBConfig(instance_uri="projects/p1/locations/us-central1/clusters/c1/instances/i1")
+        sync_alloy = SyncAlloyDBDialer(cfg_alloy, token_cache=_FailingSyncCache())
+        with pytest.raises(RuntimeError, match="adc-sync-boom"):
+            sync_alloy.refresh_client_cert(public_key_pem="PUB", private_key_pem="PRIV")
+
+        async_alloy_fail = AsyncAlloyDBDialer(cfg_alloy, token_cache=_FailingAsyncCache())
+        with pytest.raises(RuntimeError, match="adc-async-boom"):
+            await async_alloy_fail.refresh_client_cert(public_key_pem="PUB", private_key_pem="PRIV")
+
+        async_dialer = AsyncAlloyDBDialer(cfg_alloy)
+
+    in_flight = 0
+    max_in_flight = 0
+    calls = 0
+    first_entered = anyio.Event()
+    release_first = anyio.Event()
+    second_started = anyio.Event()
+
+    async def _async_http(_url: str, _payload: bytes, _headers: dict[str, str]) -> bytes:
+        nonlocal in_flight, max_in_flight, calls
+        in_flight += 1
+        max_in_flight = max(max_in_flight, in_flight)
+        calls += 1
+        call_num = calls
+        if call_num == 1:
+            first_entered.set()
+            await release_first.wait()
+        in_flight -= 1
+        if dialer_kind == "cloudsql":
+            return b'{"ephemeralCert":{"cert":"CERT"},"serverCaCert":{"cert":"CA"},"ipAddress":"10.0.0.1"}'
+        return b'{"clientCert":"CERT","caCert":"CA"}'
+
+    async def _invoke(*, is_second: bool = False) -> None:
+        if is_second:
+            second_started.set()
+        if isinstance(async_dialer, AsyncCloudSQLDialer):
+            await async_dialer.refresh_certificate(
+                public_key_pem="PUB",
+                private_key_pem="PRIV",
+                access_token="tok",
+                http_transport=_async_http,
+            )
+        else:
+            await async_dialer.refresh_client_cert(
+                public_key_pem="PUB",
+                private_key_pem="PRIV",
+                access_token="tok",
+                http_transport=_async_http,
+            )
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(lambda: _invoke(is_second=False))
+        await first_entered.wait()
+        tg.start_soon(lambda: _invoke(is_second=True))
+        await second_started.wait()
+        await anyio.lowlevel.checkpoint()
+        assert calls == 1
+        assert in_flight == 1
+        release_first.set()
+
+    assert calls == 2
+    assert max_in_flight == 1

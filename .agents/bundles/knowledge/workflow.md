@@ -13,6 +13,9 @@ generated:
   by: flow/0.29.1
   at: "2026-11-06T18:28:00Z"
 verified:
+  - by: agent:flow-executor
+    at: "2026-11-13T22:48:50Z"
+    commit: 480840a3
   - by: agent:flow-setup
     at: "2026-11-12T22:30:00Z"
     commit: 18baadcd
@@ -78,7 +81,8 @@ make duckdb-test     # vertebra-duckdb Rust tests, stubtest, and Python unit/con
 make mysql-test      # vertebra-mysql Rust tests, stubtest, and Python MySQL suites (make mysql-wheel-check verifies wheel isolation)
 make mssql-test      # vertebra-mssql Rust tests, stubtest, and Python MSSQL suites (make mssql-wheel-check verifies wheel isolation)
 make oracle-test     # vertebra-oracle Rust tests, stubtest, and Python Oracle suites (make oracle-wheel-check verifies wheel isolation)
-make postgres-test   # vertebra-postgres Rust tests and _postgres stubtest (make postgres-wheel-check verifies wheel/sdist isolation)
+make postgres-test   # vertebra-postgres Rust tests and _postgres stubtest (make postgres-wheel-check runs verify_postgres_wheel.py)
+make postgres-bench-check # PYTHONPATH="$(CURDIR)/src/py" cargo test -p vertebra-postgres --bench postgres_native --locked + Ruff/Mypy + comparator tests (make postgres-bench runs live + Criterion)
 make docs            # scan_public_docstrings + generate_cli_docs --check + zensical build --clean + postbuild + verify_docs_artifacts
 make docs-check      # make docs + live zensical serve HTTP 200 check (make docs-serve, make docs-clean, make docs-rust)
 
@@ -98,7 +102,7 @@ make bench                                                            # make bui
 2. **PyPI Distribution vs. Import Namespace**: [`pyproject.toml`](../../../pyproject.toml)[^src-pyproject-toml] publishes `vertebra-core` while exposing the `vertebra` import namespace (`module-name = "vertebra._vertebra"`). Companion extensions build isolated PEP 420 wheels without `vertebra/*.py` files.
 3. **Codegen & Wheel-Bundled TypeScript Sync**: `make ts-build` compiles all 17 `@vertebra/client` entrypoints ([`package.json`](../../../src/ts/vertebra-client/package.json)[^src-package-json]) and copies `dist/` into `src/py/vertebra/server/_js/bundle/`.
 4. **Shared-Memory Cleanup**: `make rs-test` clears `/dev/shm/test-*` and `/dev/shm/*vertebra*`; parallel review or chapter agents must run targeted `cargo test -p <crate>` commands rather than `make rs-test` so concurrent SHM segments are not unlinked.
-5. **Dependency Group Isolation**: Keep `duckdb>=1.0` in `[dependency-groups].duckdb` (`PY_TEST_GROUPS` enables it only when `Py_GIL_DISABLED=0`), benchmark harnesses in `bench` (or `postgres-bench`), and Zensical packages in `doc` ([`pyproject.toml`](../../../pyproject.toml)[^src-pyproject-toml]).
+5. **Dependency Group Isolation**: Keep `duckdb>=1.0` in `[dependency-groups].duckdb` (`PY_TEST_GROUPS` enables it only when `Py_GIL_DISABLED=0`), HTTP benchmark harnesses in `bench`, `psycopg`/`asyncpg` PostgreSQL benchmark comparators in `postgres-bench` (`python_version < '3.14'`), and Zensical packages in `doc` ([`pyproject.toml`](../../../pyproject.toml)[^src-pyproject-toml]).
 6. **Documentation, Secret, & Git Hygiene**: Never enable `navigation.indexes` in `zensical.toml`; use `"mock-oauth-token"` in GCS/IAM tests (`git-secrets` blocks real OAuth2 prefixes); keep `extensions.worktreeConfig` and `core.hooksPath` unset in `.git/config`.
 
 ## Direct Markdown Continuity & Chapter-Batch Loop

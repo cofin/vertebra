@@ -1,5 +1,62 @@
 # Bundle Activity Log
 
+## [2026-11-14T04:01:30Z] archive | native-postgres-driver
+
+- Archived completed specification `native-postgres-driver` (`ch01`–`ch09`, `32/32` tasks across `18baadcd..d4b87471`) into permanent OKF knowledge chapters (`database-drivers-and-dialers.md`, `postgres-native-driver.md`, `postgres-limitations.md`, `database-driver-limitations.md`, `query-pipeline-cdc-and-tenancy.md`, `sqlspec-alchemy-and-dialects.md`, `distributed-queues-and-email.md`, `packaging-and-pgo.md`, `polyglot-test-matrix.md`, `benchmarks-and-free-threaded.md`, `workflow.md`, `adr-004`, product docs, and `areas.toml`) and removed `.agents/bundles/specs/native-postgres-driver/`.
+
+## [2026-11-14T03:59:30Z] finish | native-postgres-driver
+
+- Completed `native-postgres-driver` (`ch01`–`ch09`, `32/32` tasks) through `d63f9ade`: standalone `vertebra-postgres` (`vertebra._postgres`), verified replication supervision (`ReplicationSupervisor`), cancel-safe `AsyncPostgresReplication`, durable CAS `PostgresChangeSource`, permanent `_sync.py`/`_async.py` drivers, atomic removal of `psycopg`/`asyncpg`, GCP dialer cleanup, PG14–18 conformance, companion wheel isolation, Criterion + Python benchmark lanes, Zensical docs, and cross-bundle OKF reconciliation.
+
+## [2026-11-14T03:59:30Z] chapter-complete | native-postgres-driver ch09-data-packaging-okf-and-routing-sync
+
+- Closed `ch09-data-packaging-okf-and-routing-sync` through `b3ab1375` / `d63f9ade`: trimmed `database-drivers-and-dialers.md` (`<= 200L`), finalized `postgres-native-driver.md`, `postgres-limitations.md`, `database-driver-limitations.md`, `query-pipeline-cdc-and-tenancy.md`, `tech-stack.md`, `product.md`, `packaging-and-pgo.md`, `sqlspec-alchemy-and-dialects.md`, `adr-004`, knowledge/domain indexes, and `areas.toml` routing, resolved follow-up CDC lock/reconcile/cursor invariants (`test_postgres_change_stream.py`: `34 passed`), and obtained clean `PASS` verdicts across zero-context `code-reviewer`, `docs-okf-reviewer`, and `quality-reviewer`.
+- Advanced active frontier to completed state (`0` tasks remain).
+
+## [2026-11-14T01:12:30Z] chapter-complete | native-postgres-driver ch08-user-and-reference-docs
+
+- Closed `ch08-user-and-reference-docs` through `0eabc0a2`: synchronized all public Zensical usage/reference guides (`databases.md`, `analytics-and-cdc.md`, `database-capabilities.md`, `native-stubs.md`, `reference/index.md`, `installation.md`, `cloud-dialers.md`, `packaging-and-deployment.md`, `queues-and-realtime.md`, `extensions.md`, `usage/index.md`), `README.md`, and `AGENTS.md` (`<= 100L`), added optional `[loop]` extras (`uvloop`, `winloop`, `rloop`, `zuvloop`) and shared `LOOP_BACKEND_CHOICES` CLI flags across `vtb run`/`vtb dev`/`litestar run`, ensured concrete `connection_type` across all 16 SQLSpec adapter configs without Litestar deprecation warnings, and updated runtime/Litestar/product OKF chapters (`ruff`, `mypy`, `237 passed` offline docs/extension/server tests, `make docs`, `make review-check`, and dual zero-context reviews clean).
+- Advanced active frontier to `ch09-data-packaging-okf-and-routing-sync` (`native-postgres-driver:ch09:t01`; `4` tasks remain).
+
+## [2026-11-13T22:53:00Z] chapter-complete | native-postgres-driver ch07-wheel-ci-and-benchmarks
+
+- Closed `ch07-wheel-ci-and-benchmarks` at `480840a3` (sync `af023efd`): shared `tools/scripts/_wheel_verify.py` archive/linkage/isolated-venv primitives across `verify_postgres_wheel.py`, `verify_oracle_wheel.py`, and `verify_storage_wheel.py` with lazy fail-loud `.connect()` probes (`SyncPostgreSQLDriver`, `AsyncPostgreSQLDriver`, `PostgreSQLQueueBackend`) and 14-class smoke checks, fixed `cloudsql.py` `extra="gcp"`, aligned `src/rs/vertebra-postgres/pyproject.toml`, wired CI `postgres-wheel-check` + zero-deselection `VERTEBRA_CONFORMANCE_ENGINES` / `VERTEBRA_CONFORMANCE_POSTGRES_VERSION` PG14–18 lanes + 14-class release checks, added `[dependency-groups].postgres-bench` + `tools/benchmarks/postgres.py` + `benches/postgres_native.rs` (`cargo test --bench postgres_native --locked`) + `Makefile` `postgres-bench{,-check}` targets, rebuilt `vertebra._postgres` via `maturin develop`, verified parameterized free-threaded GIL/immutability/thread-pool suites, and synced testing/workflow OKF chapters (`170L`, `196L`, `122L`; dual zero-context reviews passed cleanly).
+- Advanced active frontier to `ch08-user-and-reference-docs` (`native-postgres-driver:ch08:t01`; `8` tasks remain across `ch08`–`ch09`).
+
+## [2026-11-13T21:59:10Z] chapter-complete | native-postgres-driver ch06-live-conformance-and-service-acceptance
+
+- Closed `ch06-live-conformance-and-service-acceptance` at `264b4684` (sync `7a7b5180`): enabled PostgreSQL `14`–`18` (`supports_pipeline=True`, `pending_flow_id=None`, `_POSTGRES_TYPES_DDL`, `PgJson` scalar binding) in `test_driver_conformance.py`, added `VERTEBRA_CONFORMANCE_POSTGRES_REQUIRE_ZERO_SKIPS=1` terminal enforcement (`conftest.py` + `test_postgres_zero_skip_gate.py`), added `test_postgres_replication_live.py` (`wal_level=logical` `pgoutput`, `PG_UNCHANGED_TOAST`, raw `bytea`, fresh `PostgresChangeSource` resume, slot contention), and added `test_postgres_native_features_live.py` (`pgvector/pgvector:pg18`, binary `COPY`, `VTBARROW`, `LISTEN/NOTIFY`, `PgBouncer` `transaction`/`statement` modes; `18 passed, 5 skipped`, `63 passed, 242 skipped, 144 deselected`, `ruff`, `mypy`, and dual zero-context reviews clean).
+- Advanced active frontier to `ch07-wheel-ci-and-benchmarks` (`native-postgres-driver:ch07:t01`; `12` tasks remain across `ch07`–`ch09`).
+
+## [2026-11-13T16:15:00Z] chapter-complete | native-postgres-driver ch05-atomic-cutover-and-legacy-removal
+
+- Closed `ch05-atomic-cutover-and-legacy-removal` at `d635f818` (sync `11c7c541`): cut SQLSpec (`ParameterStyle.NUMERIC`) and SQLAlchemy (`numeric_dollar`) over to `vertebra._postgres`, replaced `postgres/driver.py` with the native barrel, removed `psycopg`/`asyncpg`/`asyncmy` across drivers/queues/dialers, hardened `cloudsql.py` and `alloydb.py` TLS/RSA/async refresh paths, and synchronized OKF chapters (`715` Python tests, `11` `py_async` Rust tests, `stubtest`, `ruff`, `mypy`, and `review_setup.py validate` clean).
+- Advanced active frontier to `ch06-live-conformance-and-service-acceptance` (`native-postgres-driver:ch06:t01`; `15` tasks remain across `ch06`–`ch09`).
+
+## [2026-11-13T05:51:30Z] chapter-complete | native-postgres-driver ch04-permanent-native-postgres-drivers
+
+- Closed `ch04-permanent-native-postgres-drivers` at `50d7a1ef` (sync `c97e037e`): implemented permanent `SyncPostgreSQLDriver` (`_sync.py`) and native `AsyncPostgreSQLDriver` (`_async.py`) over `SyncPostgresPool`/`AsyncPostgresPool`, shielded async transaction rollback/eviction via `anyio.CancelScope(shield=True)`, wired `pipeline.py`, `arrow.py`, and `EventSessionRegistry`-tracked notification/replication hooks (`ruff`, `mypy` across `20` source files, and `131` PG unit tests clean).
+- Advanced active frontier to `ch05-atomic-cutover-and-legacy-removal` (`native-postgres-driver:ch05:t01`; `19` tasks remain across `ch05`–`ch09`).
+
+## [2026-11-13T05:15:30Z] chapter-complete | native-postgres-driver ch03-cdc-options-and-bind-compiler
+
+- Closed `ch03-cdc-options-and-bind-compiler` at `bff04dcd` (sync `31024a23`): added `PostgresReplicationDriver` and `EventSessionRegistry`, CAS-before-wire-ack `PostgresChangeSource`, libpq/Unix-socket/multi-host/Cloud-SQL `options.py` normalization, and single-pass lexer `binds.py` (`ruff`, `mypy` across `15` source files, and `111` unit tests clean).
+- Advanced active frontier to `ch04-permanent-native-postgres-drivers` (`native-postgres-driver:ch04:t01`; `22` tasks remain across `ch04`–`ch09`).
+
+## [2026-11-13T04:54:36Z] chapter-complete | native-postgres-driver ch02-replication-python-bridge
+
+- Closed `ch02-replication-python-bridge` at `f4d3d1eb` (sync `1eeeffb9`): added cancel-safe `spawn_rust_db_task_with_attr_and_future`, exposed frozen `AsyncPostgresReplication` and `AsyncPostgresClient.{replication_identity, open_replication}` with 14-class `_postgres.pyi`, and synchronized the 3 PyO3 FFI OKF chapters (`<= 200` lines each; `11` `py_async` + `2` `replication` Rust tests, `110` Python unit tests, `stubtest`, `clippy`, `ruff`, `mypy`, and `review_setup.py validate` clean).
+- Advanced active frontier to `ch03-cdc-options-and-bind-compiler` (`native-postgres-driver:ch03:t01`; `26` tasks remain across `ch03`–`ch09`).
+
+## [2026-11-13T02:55:00Z] chapter-complete | native-postgres-driver ch01-replication-supervision
+
+- Closed `ch01-replication-supervision` at `bfa2dad7` (`57` wire tests passed, `cargo clippy --all-targets -- -D warnings` clean, `postgres-native-driver.md` and `postgres-limitations.md` synchronized).
+- Advanced active frontier to `ch02-replication-python-bridge` (`native-postgres-driver:ch02:t01`; `30` tasks remain across `ch02`–`ch09`).
+
+## [2026-11-13T01:52:00Z] chapter-checkpoint | native-postgres-driver ch01-replication-supervision
+
+- Completed `ch01-replication-supervision` (`t01`–`t02`) at `7d50fd42` on `feat/postgres-driver-complete`: added `ReplicationSupervisor`, `ReplicationEventDelivery`, `ReplicationStreamEvent`, `PostgresReplicationResume`, `raw_reconnect_delay` (`MAX_RAW_RECONNECT_ATTEMPTS = 8`), and `PostgresReplicationConnection::connect_logical_verified`, verified across `56` wire tests (`postgres_replication_wire_tests`) and `cargo clippy --all-targets -- -D warnings`.
+
 ## [2026-11-13T20:42:00Z] archive | mcp-protocol-completeness
 
 - Archived `mcp-protocol-completeness` (`7` chapters, `25` tasks, `c4380215..e95e1f19`), delivering single-pass `Tool.authorize`/`Tool.call` (`-32004`/`-32005`), `Mcp-Param-*` validation (`-32020`), expiring single-use `ConfirmationGate`, dual-mode `SUPPORTED_PROTOCOL_VERSIONS` (`MCPSessionStore`, `GET /mcp` SSE, `DELETE /mcp`, `2025-03-26` batches), `resources/subscribe` & `subscriptions/listen`, `SKILLS_EXTENSION` + SEP-1865 `UI_EXTENSION` across mounts (`litestar-mcp>=0.20.0`), incremental `run_stdio_server` (`vtb ai mcp serve --app`), `OidcTokenSource` (`vtb ai mcp bridge --audience`), ES256 `IapIdentitySource`, updated docs/changelog, and present-tense OKF chapters (`mcp-and-a2a-protocol-harness.md` `147L`, `mcp-limitations.md` `58L`, `cli.md`, `litestar.md`, `polyglot-test-matrix.md`).

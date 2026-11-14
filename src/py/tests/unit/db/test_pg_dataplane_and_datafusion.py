@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 import socket
@@ -13,6 +14,7 @@ from unittest.mock import MagicMock
 import pyarrow as pa
 import pytest
 
+from tests.unit.db.postgres_ports import FakeDirectClientFactory, FakePostgresCluster, FakeSyncPostgresPool
 from vertebra.db import (
     ArrowCursor,
     CDCConfig,
@@ -30,6 +32,7 @@ from vertebra.db.adapters.datafusion import (
 from vertebra.db.adapters.postgres import AsyncPostgreSQLDriver, PostgresEmbeddingPushdown, SyncPostgreSQLDriver
 from vertebra.db.adapters.postgres.core import PostgreSQLCore
 from vertebra.db.adapters.postgres.notify import PostgresNotificationSource, PostgresNotifyConfig
+from vertebra.db.adapters.postgres.types import PostgresColumn, PostgresQueryResult
 from vertebra.db.driver import DataError, NotificationSource, NotSupportedError
 from vertebra.extensions.sqlspec.adapters import PostgreSQLSyncDriver
 from vertebra.server.platform import SHMAllocationPolicy
@@ -38,11 +41,6 @@ from vertebra.utils.module_loader import import_optional
 from vertebra.utils.serializers import decode_json
 
 datafusion = import_optional("datafusion")
-psycopg_queries = import_optional("psycopg._queries")
-psycopg_adapt = import_optional("psycopg.adapt")
-requires_psycopg = pytest.mark.skipif(
-    psycopg_queries is None or psycopg_adapt is None, reason="psycopg is not installed"
-)
 
 
 def test_rls_planner_unfenced_predicate_and_session_guc() -> None:
@@ -202,7 +200,7 @@ async def test_postgres_notify_publish(
     await source.publish("orders", payload)
     driver._publish_notification.assert_awaited_once()
     sql, parameters = driver.execute.call_args.args
-    assert sql == ("SELECT pg_notify($1, $2)" if driver_type is AsyncPostgreSQLDriver else "SELECT pg_notify(%s, %s)")
+    assert sql == "SELECT pg_notify($1, $2)"
     assert parameters[0] == "orders"
     if feed is None:
         assert parameters[1] == expected
@@ -235,95 +233,125 @@ async def test_postgres_notify_rejects_invalid_channels(action: str, channel: st
     driver.execute.assert_not_called()
 
 
-@pytest.mark.parametrize("use_real_driver", [False, True])
+@pytest.mark.parametrize("with_stream_support", [False, True])
 @pytest.mark.anyio
-async def test_postgres_notify_listen_without_native_stream(use_real_driver: bool) -> None:
-    """Legacy PostgreSQL drivers without _open_notification_listener fail explicitly on iteration."""
-    driver: Any = (
-        SyncPostgreSQLDriver(executor=lambda _s, _p: []) if use_real_driver else MagicMock(spec=SyncPostgreSQLDriver)
+async def test_postgres_notify_listen_native_and_unsupported_stream(with_stream_support: bool) -> None:
+    """Drivers without _open_notification_listener raise NotSupportedError; native drivers stream frames."""
+    if not with_stream_support:
+
+        class _NoListenerDriver:
+            async def _publish_notification(self, channel: str, payload: str) -> None:
+                _ = (channel, payload)
+
+        source = PostgresNotificationSource(_NoListenerDriver())
+        with pytest.raises(NotSupportedError, match="Live PostgreSQL LISTEN streaming requires"):
+            await anext(source.listen())
+        return
+
+    cluster = FakePostgresCluster()
+    driver = SyncPostgreSQLDriver(
+        pool=FakeSyncPostgresPool(cluster),
+        client_factory=FakeDirectClientFactory(cluster),
     )
-    assert not hasattr(SyncPostgreSQLDriver, "_open_notification_listener")
-    assert not hasattr(AsyncPostgreSQLDriver, "_open_notification_listener")
     source = PostgresNotificationSource(driver)
-    with pytest.raises(NotSupportedError, match="Live PostgreSQL LISTEN streaming requires"):
-        await anext(source.listen())
+    await source.subscribe(["orders"])
+    stream = source.listen()
+    next_task = asyncio.create_task(anext(stream))
+    while not cluster.listeners:
+        await asyncio.sleep(0)
+    cluster.publish_notification("orders", "hello-native", pid=42)
+    event = await next_task
+    assert event.channel == "orders"
+    assert event.payload == b"hello-native"
+    await source.aclose()
+    driver.close()
 
 
-@requires_psycopg
-def test_postgres_sync_rls_predicate_binds_with_real_psycopg_converter() -> None:
-    """The SQLSpec RLS predicate binds its session setter through the installed psycopg converter."""
-    connection = _PsycopgConnectionPort.with_installed_converter(("embedding",), [([3.0, 4.0],)])
-    driver = SyncPostgreSQLDriver(pool=connection)
+def test_postgres_sync_rls_predicate_binds_with_native_dollar_pool() -> None:
+    """The SQLSpec RLS predicate binds its session setter with $1..$3 placeholders."""
+    cluster = FakePostgresCluster()
+    driver = SyncPostgreSQLDriver(
+        pool=FakeSyncPostgresPool(cluster),
+        client_factory=FakeDirectClientFactory(cluster),
+    )
     try:
         adapter = PostgreSQLSyncDriver(driver)
         assert adapter.apply_tenant_predicate(TenantPredicate(tenant_value="tenant-1")) == "tenant_id = $1"
-        sql, parameters = connection.calls[0]
-        assert sql.casefold() == "select set_config(%s, %s, %s)"
-        assert tuple(parameters) == ("app.tenant_id", "tenant-1", True)
+        sql, parameters, _ = cluster.recorded_queries[0]
+        assert sql.casefold() == "select set_config($1, $2, $3)"
+        assert parameters == ("app.tenant_id", "tenant-1", True)
     finally:
         driver.close()
 
 
-@requires_psycopg
 def test_postgres_sync_rls_predicate_propagates_session_setter_failure() -> None:
     """A refused RLS session setter propagates the original driver error after binding the statement."""
-    connection = _PsycopgConnectionPort.with_installed_converter(("embedding",), [([3.0, 4.0],)])
-    connection.failure = RuntimeError("external session setter refused")
-    driver = SyncPostgreSQLDriver(pool=connection)
+    cluster = FakePostgresCluster()
+    failure = RuntimeError("external session setter refused")
+    orig_execute_sql = cluster.execute_sql
+
+    def _failing_execute(sql: str, parameters: Any, **kwargs: Any) -> Any:
+        cluster.recorded_queries.append((sql, tuple(parameters or ()), kwargs.get("timeout")))
+        raise failure
+
+    _ = orig_execute_sql
+    cluster.execute_sql = _failing_execute
+    driver = SyncPostgreSQLDriver(pool=FakeSyncPostgresPool(cluster))
     try:
         adapter = PostgreSQLSyncDriver(driver)
         with pytest.raises(RuntimeError) as raised:
             adapter.apply_tenant_predicate(TenantPredicate(tenant_value="tenant-1"))
-        assert raised.value is connection.failure
-        sql, parameters = connection.calls[0]
-        assert sql.casefold() == "select set_config(%s, %s, %s)"
-        assert tuple(parameters) == ("app.tenant_id", "tenant-1", True)
+        assert raised.value is failure
+        sql, parameters, _ = cluster.recorded_queries[0]
+        assert sql.casefold() == "select set_config($1, $2, $3)"
+        assert parameters == ("app.tenant_id", "tenant-1", True)
     finally:
         driver.close()
 
 
-@requires_psycopg
 @pytest.mark.anyio
-async def test_postgres_sync_notify_binds_with_real_psycopg_converter() -> None:
-    """NOTIFY publication keeps quotes and percent signs in bound parameters accepted by psycopg."""
-    connection = _PsycopgConnectionPort.with_installed_converter(("embedding",), [([3.0, 4.0],)])
-    driver = SyncPostgreSQLDriver(pool=connection)
+async def test_postgres_sync_notify_binds_with_native_dollar_pool() -> None:
+    """NOTIFY publication keeps quotes and percent signs cleanly bound with $1/$2 placeholders."""
+    cluster = FakePostgresCluster()
+    driver = SyncPostgreSQLDriver(
+        pool=FakeSyncPostgresPool(cluster),
+        client_factory=FakeDirectClientFactory(cluster),
+    )
     try:
-        legacy_driver: Any = driver
-        await PostgresNotificationSource(legacy_driver).publish("orders", "quote ' and % payload")
-        assert connection.calls == [("SELECT pg_notify(%s, %s)", ("orders", "quote ' and % payload"))]
+        await PostgresNotificationSource(driver).publish("orders", "quote ' and % payload")
+        assert [(sql, params) for sql, params, _ in cluster.recorded_queries] == [
+            ("SELECT pg_notify($1, $2)", ("orders", "quote ' and % payload"))
+        ]
     finally:
         driver.close()
 
 
-@requires_psycopg
 @pytest.mark.anyio
-async def test_postgres_sync_embedding_pushdown_binds_with_real_psycopg_converter() -> None:
-    """Embedding pushdown binds the model and documents through psycopg's two-placeholder SQL."""
-    connection = _PsycopgConnectionPort.with_installed_converter(("embedding",), [([3.0, 4.0],)])
-    driver = SyncPostgreSQLDriver(pool=connection)
+async def test_postgres_sync_embedding_pushdown_binds_with_native_dollar_pool() -> None:
+    """Embedding pushdown binds the model and documents through native $1/$2 SQL."""
+    port = _NativeEmbeddingQueryPort(("embedding",), [([3.0, 4.0],)])
+    driver = SyncPostgreSQLDriver(pool=port)
     try:
         pushdown = PostgresEmbeddingPushdown(driver, dimensions=2, normalize=False)
         assert (await pushdown.embed_query("document")).to_list() == [3.0, 4.0]
-        sql, parameters = connection.calls[0]
+        sql, parameters = port.calls[0]
         assert parameters == ("gemini-embedding-001", ["document"])
-        assert sql.count("%s") == 2
+        assert "$1" in sql and "$2" in sql
     finally:
         driver.close()
 
 
-@requires_psycopg
 @pytest.mark.anyio
-async def test_postgres_sync_similarity_search_binds_with_real_psycopg_converter() -> None:
-    """Similarity search binds the query vector and limit through psycopg's two-placeholder SQL."""
-    connection = _PsycopgConnectionPort.with_installed_converter(("id", "distance"), [(7, 0.25)])
-    driver = SyncPostgreSQLDriver(pool=connection)
+async def test_postgres_sync_similarity_search_binds_with_native_dollar_pool() -> None:
+    """Similarity search binds the query vector and limit through native $1/$2 SQL."""
+    port = _NativeEmbeddingQueryPort(("id", "distance"), [(7, 0.25)])
+    driver = SyncPostgreSQLDriver(pool=port)
     try:
         pushdown = PostgresEmbeddingPushdown(driver, dimensions=2, normalize=False)
         assert await pushdown.similarity_search([3.0, 4.0], table="docs", top_k=2) == [{"id": 7, "distance": 0.25}]
-        sql, parameters = connection.calls[0]
+        sql, parameters = port.calls[0]
         assert parameters == ([3.0, 4.0], 2)
-        assert sql.count("%s") == 2
+        assert "$1" in sql and "$2" in sql
     finally:
         driver.close()
 
@@ -425,54 +453,50 @@ class _DeterministicSessionContext:
         raise RuntimeError(msg)
 
 
-class _PsycopgConnectionPort:
-    """External connection port using psycopg's real SQL parameter converter."""
+class _NativeEmbeddingQueryPort:
+    """Native pool port returning structured PostgresQueryResult rows for embedding pushdown tests."""
 
-    __slots__ = ("calls", "description", "failure", "query_type", "rows", "transformer_type")
+    __slots__ = ("_columns", "_rows", "calls")
 
-    def __init__(
-        self,
-        query_type: Any,
-        transformer_type: Any,
-        columns: tuple[str, ...],
-        rows: list[tuple[Any, ...]],
-    ) -> None:
-        self.query_type = query_type
-        self.transformer_type = transformer_type
-        self.description = tuple((column,) for column in columns)
-        self.rows = rows
+    def __init__(self, columns: tuple[str, ...], rows: list[tuple[Any, ...]]) -> None:
+        self._columns = tuple(
+            PostgresColumn(
+                name=col,
+                type_oid=25,
+                format=0,
+                type_modifier=-1,
+                table_oid=0,
+                attribute_number=idx + 1,
+            )
+            for idx, col in enumerate(columns)
+        )
+        self._rows = tuple(tuple(r) for r in rows)
         self.calls: list[tuple[str, Any]] = []
-        self.failure: RuntimeError | None = None
 
-    @classmethod
-    def with_installed_converter(cls, columns: tuple[str, ...], rows: list[tuple[Any, ...]]) -> _PsycopgConnectionPort:
-        """Build a port that validates SQL through the installed psycopg query converter."""
-        assert psycopg_queries is not None
-        assert psycopg_adapt is not None
-        return cls(psycopg_queries.PostgresQuery, psycopg_adapt.Transformer, columns, rows)
-
-    def connection(self) -> _PsycopgConnectionPort:
-        """Return self as an active connection object."""
+    def acquire(self) -> _NativeEmbeddingQueryPort:
         return self
 
-    def cursor(self) -> _PsycopgConnectionPort:
-        """Return self as an active DB-API cursor."""
-        return self
-
-    def execute(self, sql: str, parameters: Any = None) -> None:
-        """Validate SQL parameter conversion through psycopg and record the call."""
-        query = self.query_type(self.transformer_type())
-        query.convert(sql, parameters)
-        self.calls.append((sql, parameters))
-        if self.failure is not None:
-            raise self.failure
-
-    def fetchall(self) -> list[tuple[Any, ...]]:
-        """Return the configured result rows."""
-        return self.rows
+    def query(
+        self,
+        sql: str,
+        parameters: Any = None,
+        *,
+        parameter_oids: Any = None,
+        timeout: float | None = None,
+    ) -> Any:
+        _ = (parameter_oids, timeout)
+        self.calls.append((sql, tuple(parameters) if parameters is not None else ()))
+        return PostgresQueryResult(
+            columns=self._columns,
+            rows=self._rows,
+            affected_rows=len(self._rows),
+            command_tag=f"SELECT {len(self._rows)}",
+            transaction_status="I",
+        )
 
     def close(self) -> None:
         """Keep the externally owned connection port available for assertions."""
+        return None
 
 
 class _PgEmbeddingRowPort:

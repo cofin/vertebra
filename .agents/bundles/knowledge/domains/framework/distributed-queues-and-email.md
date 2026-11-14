@@ -60,7 +60,7 @@ sources:
 
 <!-- truth: start -->
 - `QueueService` and `@task` execute priority, delayed, and dead-letter jobs across `MemoryQueueBackend`, `RedisQueueBackend`, `ValkeyQueueBackend`, `PostgreSQLQueueBackend`, `OracleQueueBackend`, and `SpannerQueueBackend` alongside lease-elected `CronScheduler` and `WorkerRunner` lanes.
-- `OracleQueueBackend`, `PostgreSQLQueueBackend`, and `SpannerQueueBackend` bind an injected `executor=`; without one they raise `MissingDependencyError` when `oracledb`, `psycopg`, or `vertebra._spanner` is missing and `ImproperConfigurationError` otherwise. No live executor ships for these backends.
+- `OracleQueueBackend`, `PostgreSQLQueueBackend`, and `SpannerQueueBackend` bind an injected `executor=`; without one they raise `MissingDependencyError` when `oracledb`, `vertebra._postgres` (`vertebra-core[postgres]`), or `vertebra._spanner` is missing and `ImproperConfigurationError` otherwise. No live executor ships for these backends.
 - `RedisQueueBackend` and `ValkeyQueueBackend` bind an injected `client=`; without one they raise `MissingDependencyError` when `redis.asyncio` is missing, `ImproperConfigurationError` when `backend_url` has no hostname (including hostless `unix://` URLs), and otherwise pass `backend_url` directly to `redis.asyncio.from_url` (`redis://` / `rediss://` schemes only; `valkey://`, `valkeys://`, and `unix://` targets require a `redis://` / `rediss://` host URL or an injected `client=`).
 - `QueueService` routes `""` and `memory` schemes to `MemoryQueueBackend`.
 - `EmailService` sends transactional email across `MemoryEmailTransport`, `SmtpEmailTransport`, `ResendEmailTransport`, `SendGridEmailTransport`, `MailgunEmailTransport`, and `SesEmailTransport` behind the `EmailTransport` protocol.

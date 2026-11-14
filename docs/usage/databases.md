@@ -1,6 +1,6 @@
 # Databases & Native Drivers
 
-Vertebra integrates first-class **SQLSpec** adapters (`vertebra.extensions.sqlspec`) on top of `vertebra.db` engine drivers; each engine lives in its own adapter package under `vertebra.db.adapters.<engine>`, keeping `import vertebra.db` lightweight until a concrete driver is requested. BigQuery, Spanner, and DuckDB run on their own native wheels, the other live engines use their Python client packages, and the Rust `vertebra-db` crate supplies shared wire codecs, Cloud SQL / AlloyDB dialers, and shared-memory Arrow transport. See the focused guides for [Cloud SQL & AlloyDB Dialers](cloud-dialers.md), [RLS, CDC & Arrow Analytics](analytics-and-cdc.md), and [SQLSpec & SQLAlchemy Extensions](extensions.md).
+Vertebra integrates first-class **SQLSpec** adapters (`vertebra.extensions.sqlspec`) on top of `vertebra.db` engine drivers; each engine lives in its own adapter package under `vertebra.db.adapters.<engine>`, keeping `import vertebra.db` lightweight until a concrete driver is requested. PostgreSQL, MySQL, Oracle 26ai, SQL Server, DuckDB, BigQuery, and Spanner run on standalone optional PyO3 native wheels, while SQLite, Redis, Valkey, and DataFusion run in core/protocol modules and the Rust `vertebra-db` crate supplies shared wire codecs, Cloud SQL / AlloyDB dialers, and shared-memory Arrow transport. See the focused guides for [Cloud SQL & AlloyDB Dialers](cloud-dialers.md), [RLS, CDC & Arrow Analytics](analytics-and-cdc.md), and [SQLSpec & SQLAlchemy Extensions](extensions.md).
 
 ```mermaid
 flowchart LR
@@ -17,6 +17,7 @@ Core SQL and RESP3 configuration contracts ship in `vertebra-core`, while standa
 === "uv"
 
     ```bash
+    uv add "vertebra-core[postgres]"
     uv add "vertebra-core[mysql]"
     uv add "vertebra-core[mssql]"
     uv add "vertebra-core[bigquery]"
@@ -28,6 +29,7 @@ Core SQL and RESP3 configuration contracts ship in `vertebra-core`, while standa
 === "pip"
 
     ```bash
+    pip install "vertebra-core[postgres]"
     pip install "vertebra-core[mysql]"
     pip install "vertebra-core[mssql]"
     pip install "vertebra-core[bigquery]"
@@ -39,6 +41,7 @@ Core SQL and RESP3 configuration contracts ship in `vertebra-core`, while standa
 === "pdm"
 
     ```bash
+    pdm add "vertebra-core[postgres]"
     pdm add "vertebra-core[mysql]"
     pdm add "vertebra-core[mssql]"
     pdm add "vertebra-core[bigquery]"
@@ -50,6 +53,7 @@ Core SQL and RESP3 configuration contracts ship in `vertebra-core`, while standa
 === "poetry"
 
     ```bash
+    poetry add "vertebra-core[postgres]"
     poetry add "vertebra-core[mysql]"
     poetry add "vertebra-core[mssql]"
     poetry add "vertebra-core[bigquery]"
@@ -58,9 +62,7 @@ Core SQL and RESP3 configuration contracts ship in `vertebra-core`, while standa
     poetry add "vertebra-core[spanner]"
     ```
 
-Installing `vertebra-core[duckdb]` provides the standalone `vertebra-duckdb` (`vertebra._duckdb`) native wheel across standard and free-threaded Python (`3.14t` / `3.15t`); without it `SyncDuckDBDriver` and `AsyncDuckDBDriver` raise `MissingDependencyError`.
-
-Oracle drivers execute through `vertebra._oracle` from the `oracle` extra and raise `MissingDependencyError` when it is absent. SQL Server drivers execute through `vertebra._mssql` from the `mssql` extra and raise `MissingDependencyError` when it is absent.
+Installing `vertebra-core[postgres]` provides the standalone pure-Rust `vertebra-postgres` (`vertebra._postgres`) wheel with zero `libpq` or `libecpg` C dependency and `GIL_USED = False` compatibility across Python `3.12`–`3.15` (`3.14t`/`3.15t`); without it, `SyncPostgreSQLDriver` and `AsyncPostgreSQLDriver` raise `MissingDependencyError`. Installing `vertebra-core[duckdb]` provides `vertebra-duckdb` (`vertebra._duckdb`). Oracle (`vertebra-core[oracle]`), MySQL (`vertebra-core[mysql]`), SQL Server (`vertebra-core[mssql]`), BigQuery (`vertebra-core[bigquery]`), and Cloud Spanner (`vertebra-core[spanner]`) drivers execute through their standalone native wheels and raise `MissingDependencyError` when absent.
 
 ## Unified Driver Contract & `provide_driver`
 
@@ -115,10 +117,10 @@ plugin = create_sqlspec_plugin(db_config)
 @get("/orders/{order_id:int}")
 async def get_order(
     order_id: int,
-    db: PostgreSQLAsyncDriver,
+    db_session: PostgreSQLAsyncDriver,
 ) -> dict:
     """Fetch order record using injected SQLSpec driver session."""
-    rows = await db.select(
+    rows = await db_session.select(
         "SELECT id, customer_id, total_cents FROM orders WHERE id = :id",
         {"id": order_id},
     )
@@ -137,7 +139,7 @@ app = Litestar(
 
 | Engine | SQLSpec Adapter Config | Native Config Class | Sync / Async Drivers | Key Capabilities |
 | --- | --- | --- | --- | --- |
-| **PostgreSQL** | `PostgreSQLAsyncConfig`, `PostgreSQLSyncConfig` | `PostgreSQLConfig` | `SyncPostgreSQLDriver`, `AsyncPostgreSQLDriver` | Binary `PGCOPY`, binary `pgvector` (`vector`/`halfvec`/`bit`), zero-copy `JSONB`, PgBouncer/PgCat/pgdog pooler modes, direct `:5432` IAM OAuth2 password or `:5433` AlloyDB / `:3307` Cloud SQL dialers |
+| **PostgreSQL** | `PostgreSQLAsyncConfig`, `PostgreSQLSyncConfig` | `PostgreSQLConfig` | `SyncPostgreSQLDriver`, `AsyncPostgreSQLDriver` | Pure-Rust Protocol 3.0 (`vertebra._postgres`) with `$1..$N` binds, single-`Sync` `pipeline()`, binary `PGCOPY`, `pgvector`, `JSONB`, typed `Pg*` wrappers, `PostgresChangeSource`, `PostgresEmbeddingPushdown`, PgBouncer/PgCat/pgdog modes, direct `:5432` IAM OAuth2 or `:5433` AlloyDB / `:3307` Cloud SQL dialers |
 | **MySQL / MariaDB** | `MySQLAsyncConfig`, `MySQLSyncConfig` | `MySQLConfig` | `SyncMySQLDriver`, `AsyncMySQLDriver` | Pure-Rust `vertebra._mysql` binary prepared statements (`COM_STMT_PREPARE` / `COM_STMT_EXECUTE`), `SyncMySQLPipeline` / `AsyncMySQLPipeline`, `VTBARROW` `ArrowCursor`, out-of-band `KILL QUERY` cancellation, direct `:3306` IAM OAuth2 token or Cloud SQL `:3307` mTLS dialer |
 | **SQLite / libSQL** | `SQLiteAsyncConfig`, `SQLiteSyncConfig` | `SQLiteConfig` | `SyncSQLiteDriver`, `AsyncSQLiteDriver` | WAL mode, `mmap_size`, SQLite 3.45+ binary `JSONB`, SHM single-writer/multi-reader leasing |
 | **Oracle 26ai** | `OracleAsyncConfig`, `OracleSyncConfig` | `OracleConfig` | `SyncOracleDriver`, `AsyncOracleDriver` | Pure-Rust Thin TNS/TTC (`vertebra._oracle`) with zero Instant Client dependency, `SyncOraclePool` / `AsyncOraclePool` + DRCP (`cclass`, `purity`, `connection_tag`), Autonomous Wallet mTLS & IAM token auth, 26ai `VECTOR` (`0xDB`) & `OSON` binary JSON, `VTBARROW` `ArrowCursor` (`select_to_arrow` / `load_from_arrow`), delayed-commit `pipeline()`, VPD tenancy, `OracleNotificationSource` |
@@ -149,7 +151,7 @@ app = Litestar(
 | **Valkey** | — | `ValkeyConfig` | `SyncValkeyDriver`, `AsyncValkeyDriver` | Valkey 8.0+/9.0+ RESP3 client-side caching, Cluster/Sentinel, GCP Memorystore IAM auth |
 | **DataFusion** | — | `DataFusionConfig` | `DataFusionEngine` | Federated SQL across PostgreSQL, MySQL, SQLite, DuckDB, BigQuery, Cloud Spanner, and Parquet/CSV object storage |
 
-`memory://` is not an engine URL. PostgreSQL, MySQL, Redis, and Valkey configs still construct from it, but their drivers raise `ImproperConfigurationError`, and so do the `from_valkey` / `from_redis` factories of `KeyValueStore`, the Litestar `MemoryStore`, the Starlette `CacheStore`, and `SQLAlchemyCacheBackend`. `DatabaseRegistry.parse_url("memory://")` raises `ValueError`. `QueueConfig(backend_url="memory://")`, `SyncObjectStore("memory://")`, and `SQLAlchemyCacheBackend.from_url("memory://")` keep their in-process backends.
+`memory://` is not an engine URL. `MySQLConfig` and `PostgreSQLConfig.from_url("memory://")` raise `ImproperConfigurationError` immediately during config construction; `PostgreSQLConfig(dsn="memory://")`, `RedisConfig`, and `ValkeyConfig` construct from it, while their drivers raise `ImproperConfigurationError` on initialization, and so do the `from_valkey` / `from_redis` factories of `KeyValueStore`, the Litestar `MemoryStore`, the Starlette `CacheStore`, and `SQLAlchemyCacheBackend`. `DatabaseRegistry.parse_url("memory://")` raises `ValueError`. `QueueConfig(backend_url="memory://")`, `SyncObjectStore("memory://")`, and `SQLAlchemyCacheBackend.from_url("memory://")` keep their in-process backends.
 
 ### Google Cloud Spanner and BigQuery
 
@@ -172,6 +174,61 @@ emulator_config = SpannerConfig(
     endpoint="http://localhost:9010",
 )
 driver = SyncSpannerDriver(emulator_config)
+```
+
+### PostgreSQL Native Driver
+
+The native PostgreSQL driver (`vertebra-core[postgres]`, backed by `vertebra._postgres`) supports Protocol 3.0 pipelining, `$1..$N` typed parameters (`PgJson`, `PgParameter`, `PgVector`), logical replication CDC, and pushdown vector embeddings:
+
+```python
+import msgspec
+from vertebra.db.adapters.postgres import (
+    AsyncPostgreSQLDriver,
+    PgJson,
+    PgParameter,
+    PgVector,
+    PostgreSQLConfig,
+)
+from vertebra.db.adapters.postgres.embeddings import PostgresEmbeddingPushdown
+from vertebra.embeddings import PushdownEmbedder
+
+
+class ArticleRow(msgspec.Struct):
+    id: int
+    metadata: dict[str, str]
+
+
+config = PostgreSQLConfig(
+    dsn="postgresql://app_user:secret@localhost:5432/app",
+    pooler_mode="transaction",
+    min_size=2,
+    max_size=16,
+)
+async with AsyncPostgreSQLDriver(config) as driver:
+    async with driver.pipeline() as pipe:
+        pipe.execute(
+            "INSERT INTO articles (id, metadata, embedding) VALUES ($1, $2, $3)",
+            (
+                1,
+                PgJson({"tier": "prod"}),
+                PgVector((0.12, 0.48, 0.87), kind="vector"),
+            ),
+        )
+        pipe.select(
+            "SELECT id, metadata FROM articles WHERE id = $1",
+            (PgParameter(1, type_oid=23),),
+        )
+        _, piped_rows = await pipe.results()
+
+    articles = await driver.select(
+        "SELECT id, metadata FROM articles WHERE id = $1",
+        (1,),
+        schema_type=ArticleRow,
+    )
+    embedder = PushdownEmbedder(
+        PostgresEmbeddingPushdown(driver, dimensions=768),
+        dimensions=768,
+    )
 ```
 
 ### Oracle 26ai Native Driver
@@ -220,7 +277,7 @@ async with AsyncOraclePool(
     max_size=16,
 ) as pool:
     async with (
-        pool.acquire() as driver,
+        pool.lease() as driver,
         AsyncTenantConnectionScope(
             driver,
             "tenant-acme",
@@ -306,4 +363,4 @@ SQLSpec `execute_stack` uses the capability when the stack contains multiple `ex
 | --- | --- |
 | **[Cloud SQL & AlloyDB Dialers](cloud-dialers.md)** | Connect directly to Cloud SQL (`:3307`) and AlloyDB (`:5433`) with ephemeral mTLS and IAM auth without sidecars. |
 | **[RLS, CDC & Arrow Analytics](analytics-and-cdc.md)** | Enforce `TenantPredicate` Row-Level Security, stream `ChangeFeed` events, and query zero-copy `ArrowCursor` tables. |
-| **[SQLSpec, SQLAlchemy & Extensions](extensions.md)** | Configure `SQLSpecPlugin`, Advanced Alchemy, SQLAlchemy 2.1 `+vtb` dialects, `Vector`, and `BinaryJSON` column types. |
+| **[SQLSpec, SQLAlchemy & Extensions](extensions.md)** | Configure `SQLSpecPlugin`, Advanced Alchemy, SQLAlchemy 2.0+ `+vtb` dialects, `Vector`, and `BinaryJSON` column types. |

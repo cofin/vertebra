@@ -52,7 +52,9 @@ registry.register_resource(list_warehouses)
 
 ```bash
 vtb ai mcp serve --app app:app
-vtb ai mcp bridge --url https://agent.example.com/mcp --audience https://agent.example.com
+vtb ai mcp bridge \
+  --url https://agent.example.com/mcp \
+  --audience https://agent.example.com
 ```
 
 ## Caller Identity, IAP Verification & Cancellation
@@ -65,7 +67,9 @@ from vertebra.agent.mcp import MCPConfig
 
 iap_config = MCPConfig(
     trust_proxy_identity=True,
-    identity_source=IapIdentitySource("/projects/123456789/global/backendServices/987"),
+    identity_source=IapIdentitySource(
+        "/projects/123456789/global/backendServices/987"
+    ),
 )
 mtls_config = MCPConfig(
     trust_proxy_identity=True,

@@ -48,7 +48,11 @@ Output: `11`. Saves use native `put`, `put_file`, or streaming `put_stream`, and
 ```python
 import pyarrow as pa
 
-res = backend.save_arrow("datasets/events.parquet", pa.table({"id": [1, 2]}), checksum=True)
+res = backend.save_arrow(
+    "datasets/events.parquet",
+    pa.table({"id": [1, 2]}),
+    checksum=True,
+)
 print(res.sha256)
 ```
 

@@ -20,6 +20,7 @@ from vertebra.cli._logging import configure_logging
 from vertebra.cli.banner import render_banner
 from vertebra.cli.errors import EXIT_CONFIG_ERROR, CLIError
 from vertebra.cli.plugin_registry import enter_app_server_lifespan, resolve_cli_app_path
+from vertebra.server._loops import LOOP_BACKEND_CHOICES
 from vertebra.supervisor._supervisor import build_server_command, run_supervisor
 from vertebra.utils.config_tools import get_env
 from vertebra.utils.serializers import decode_json
@@ -59,9 +60,9 @@ logger = logging.getLogger("vertebra.cli.run")
 )
 @click.option(
     "--loop",
-    type=click.Choice(["auto", "uvloop", "winloop", "rloop", "asyncio"], case_sensitive=False),
+    type=click.Choice(LOOP_BACKEND_CHOICES, case_sensitive=False),
     default="auto",
-    help="Event loop backend (auto, uvloop, winloop, rloop, or asyncio)",
+    help="Event loop backend (auto, uvloop, winloop, rloop, zuvloop, or asyncio)",
 )
 @click.option("--tls-cert", type=click.Path(exists=True), help="Path to PEM certificate for HTTPS")
 @click.option("--tls-key", type=click.Path(exists=True), help="Path to PEM private key for HTTPS")

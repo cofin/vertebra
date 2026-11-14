@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from typing import Any, ClassVar, Literal, Self
-from urllib.parse import parse_qsl, urlparse
 
 import msgspec
 
+from vertebra.db.adapters.postgres.options import parse_postgres_dsn
 from vertebra.db.dialer.alloydb import AlloyDBConfig
 from vertebra.db.dialer.cloudsql import CloudSQLConfig
 from vertebra.db.driver._common import POSTGRES_DIALECT_TAG, BaseDatabaseConfig
@@ -206,29 +206,48 @@ class PostgreSQLConfig(BaseDatabaseConfig, frozen=True, gc=False, kw_only=True):
 
     @classmethod
     def from_url(cls, url: str, **overrides: Any) -> Self:
-        """Construct a `PostgreSQLConfig` from a `postgresql://` or `postgres://` URI."""
-        parsed = urlparse(url)
-        query_params = dict(parse_qsl(parsed.query)) if parsed.query else {}
+        """Construct a ``PostgreSQLConfig`` from a ``postgresql://``, ``postgres://``, or libpq DSN."""
+        normalized_url = url
+        raw_scheme, sep, rest = url.partition("://")
+        if sep and "+" in raw_scheme:
+            prefix, _, driver_tag = raw_scheme.lower().rpartition("+")
+            if prefix in {"postgresql", "postgres"} and driver_tag in {
+                "vtb",
+                "vertebra",
+                "vtb_async",
+                "vertebra_async",
+            }:
+                normalized_url = f"{prefix}://{rest}"
+        parsed = parse_postgres_dsn(normalized_url)
+        query_params = parsed.params
         kwargs = dict(overrides)
         if "pgbouncer" in query_params and "pgbouncer" not in kwargs:
-            kwargs["pgbouncer"] = query_params["pgbouncer"].lower() in {"1", "true", "yes"}
+            kwargs["pgbouncer"] = query_params["pgbouncer"].lower() in {"1", "true", "yes", "on"}
         if "pooler_mode" in query_params and "pooler_mode" not in kwargs:
             kwargs["pooler_mode"] = query_params["pooler_mode"]
+        if "protocol_level_pooler_cache" in query_params and "protocol_level_pooler_cache" not in kwargs:
+            kwargs["protocol_level_pooler_cache"] = query_params["protocol_level_pooler_cache"].lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }
         if "cloud_sql_instance" in query_params and "cloud_sql_instance" not in kwargs:
             kwargs["cloud_sql_instance"] = query_params["cloud_sql_instance"]
         if "alloydb_instance_uri" in query_params and "alloydb_instance_uri" not in kwargs:
             kwargs["alloydb_instance_uri"] = query_params["alloydb_instance_uri"]
         if "direct_dsn" in query_params and "direct_dsn" not in kwargs:
             kwargs["direct_dsn"] = query_params["direct_dsn"]
-        return cls(dsn=url, **kwargs)
+        return cls(dsn=normalized_url, **kwargs)
 
     def pool_key(self) -> tuple[Any, ...]:
         """Return the canonical shared-pool fingerprint tuple."""
-        parsed = urlparse(self.dsn)
-        host = (parsed.hostname or "localhost").lower()
-        port = int(parsed.port or 5432)
-        user = parsed.username or ""
-        database = parsed.path.lstrip("/") if parsed.path else "postgres"
+        parsed = parse_postgres_dsn(self.dsn)
+        query_hosts = [item for item in parsed.params.get("host", "").split(",") if item]
+        host = (parsed.hosts[0] if parsed.hosts else (query_hosts[0] if query_hosts else "localhost")).lower()
+        port = int(parsed.ports[0] if parsed.ports and parsed.ports[0] is not None else 5432)
+        user = parsed.user or ""
+        database = parsed.database or "postgres"
         pooler_mode = (
             "transaction"
             if (self.pgbouncer or self.pgbouncer_mode or self.pooler_mode == "transaction")

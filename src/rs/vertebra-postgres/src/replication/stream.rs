@@ -540,36 +540,25 @@ async fn run_writer(
 async fn drain_backend(
     reader: &mut ReadHalf<ConnectionStream>,
     read_buf: &mut BytesMut,
-    mut saw_copy_done: bool,
+    saw_copy_done: bool,
 ) -> Result<(), PostgresError> {
-    let mut saw_command = false;
-    loop {
-        match read_session_message(reader, read_buf).await? {
-            ReplicationBackendMessage::Standard(Message::CopyDone) if !saw_copy_done => {
-                saw_copy_done = true
-            }
-            ReplicationBackendMessage::Standard(Message::CommandComplete(_))
-                if saw_copy_done && !saw_command =>
-            {
-                saw_command = true
-            }
-            ReplicationBackendMessage::Standard(Message::ReadyForQuery(_)) if saw_command => {
-                return Ok(());
-            }
-            ReplicationBackendMessage::Standard(Message::ErrorResponse(body)) => {
-                return Err(parse_error_fields(body.fields())?);
-            }
-            ReplicationBackendMessage::Standard(
-                Message::NoticeResponse(_) | Message::ParameterStatus(_),
-            ) => {}
-            ReplicationBackendMessage::Standard(Message::CopyData(_)) if !saw_copy_done => {}
-            _ => {
-                return Err(PostgresError::Protocol(
-                    "unexpected replication shutdown backend message".into(),
-                ));
-            }
-        }
+    let outcome = super::drain_copy_both_shutdown(
+        reader,
+        read_buf,
+        None,
+        saw_copy_done,
+        false,
+        true,
+        "unexpected replication shutdown backend message",
+    )
+    .await?;
+    outcome.tx_status?;
+    if !outcome.saw_copy_done || !outcome.saw_command_complete {
+        return Err(PostgresError::Protocol(
+            "unexpected replication shutdown backend message".into(),
+        ));
     }
+    Ok(())
 }
 
 async fn read_session_message(

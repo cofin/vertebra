@@ -35,6 +35,7 @@ pub use crate::async_client::{
     PyAsyncPostgresArrowStream, PyAsyncPostgresCopyIn, PyAsyncPostgresCopyOut,
     PyAsyncPostgresListener, PyAsyncPostgresPortal,
 };
+pub use crate::replication::PyAsyncPostgresReplication;
 pub use crate::session::statements::{
     CachedStatement, PoolerCapabilities, PoolerMode, StatementCache, StatementKey,
 };

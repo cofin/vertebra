@@ -28,7 +28,6 @@ where_clause = predicate.to_sql_fragment(":tenant_id")
 
 The fragment is `o.tenant_id = CAST(:tenant_id AS UUID)`. Without `parameter_cast`,
 it is `o.tenant_id = :tenant_id`; the default placeholder is `?`.
-`guc_name` and `TenantPredicate.build_session_guc_sql()` have been removed.
 
 PostgreSQL session SQL belongs to `PostgreSQLCore`:
 
@@ -42,7 +41,8 @@ postgres_filter = PostgreSQLCore.build_tenant_predicate_sql(predicate)
 ```
 
 The SQLSpec PostgreSQL adapters' `apply_tenant_predicate()` prepares the session
-statement for psycopg `%s` or asyncpg `$N` binds and returns the PostgreSQL filter.
+statement for native PostgreSQL `$1` binds (`ParameterStyle.NUMERIC`) and returns the
+PostgreSQL filter.
 Setter failures propagate unchanged. Other base SQLSpec adapters raise
 `NotSupportedError`. BigQuery and Spanner configs and drivers reject a configured
 `tenant_predicate` before initialization; ordinary unconfigured sessions retain
@@ -84,6 +84,10 @@ notify_config = PostgresNotifyConfig(
 parameterized PostgreSQL notifications using the feed's spill envelopes. Its
 `build_emit_message_sql()` helper builds logical replication message SQL. Live
 `LISTEN` streaming requires a driver that implements `listen_notifications()`.
+For durable logical replication streaming over `pgoutput`, pass a replication
+driver and `PostgresChangeConfig(slot=..., publication=...)` to
+`PostgresChangeSource`, which commits checkpoint progress before sending wire
+`StandbyStatusUpdate` acknowledgments (`save-before-ack`).
 In-memory spills use a bounded LRU cache; hydrating an evicted spill raises
 `KeyError`. Attach a `SyncObjectStore` for persistent spill hydration; storage
 errors propagate to the caller.
@@ -121,6 +125,6 @@ duck_cfg = DuckDBConfig(
 engine = DataFusionEngine(DataFusionConfig(target_partitions=4))
 ```
 
-- **`ArrowCursor`**: Exposes a zero-copy `memoryview` over the shared-memory `ShmRegion` (`buffer_view()`), materializes `pyarrow.Table` or `polars.DataFrame` without copying (`to_arrow_table()`, `to_pyarrow()`, `to_polars()`), and unlinks the `ShmRegion` deterministically on context-manager exit.
+- **`ArrowCursor`**: Exposes a zero-copy `memoryview` (`buffer_view()`) and Arrow IPC payload over the shared-memory `ShmRegion` without requiring Python Arrow dependencies; materializes `to_arrow_table()`, `to_pyarrow()`, or `to_polars()` when `[arrow]` or `[polars]` is installed, and unlinks the `ShmRegion` deterministically on context-manager exit.
 - **Cloud-Agnostic DuckDB Secrets (`DuckDBSecretConfig`)**: Supports static `value` dictionaries and dynamic `value_provider` callables (sync or async) across any DuckDB secret type (`s3`, `gcs`, `r2`, `azure`, `http`, `bearer`, `iceberg`), refreshing `CREATE OR REPLACE SECRET` automatically when `refresh_interval_seconds` elapses or a credential provider's `.generation` counter advances.
 - **Vector Columns to Arrow SHM**: Convert `VectorBatchView` embeddings directly into an `ArrowCursor` (`FixedSizeListArray(Float32, dims)`) via `batch.to_arrow_shm()` or `await embedder.embed_arrow(cursor, text_column="body")`.

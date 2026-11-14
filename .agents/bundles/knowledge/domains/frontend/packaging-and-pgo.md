@@ -13,6 +13,9 @@ generated:
   by: flow/0.26.0
   at: "2026-11-04T04:33:00Z"
 verified:
+  - by: agent:flow-executor
+    at: "2026-11-14T01:18:00Z"
+    commit: 8c615b73
   - by: agent:flow-setup
     at: "2026-11-07T03:55:00Z"
     commit: 067fa901
@@ -29,6 +32,15 @@ sources:
   - id: src-bigquery-wheel-manifest
     resource: src/rs/vertebra-bigquery/pyproject.toml
     title: "BigQuery wheel source ownership"
+  - id: src-postgres-wheel-manifest
+    resource: src/rs/vertebra-postgres/pyproject.toml
+    title: "PostgreSQL wheel source ownership"
+  - id: src-wheel-verify-py
+    resource: tools/scripts/_wheel_verify.py
+    title: "Shared wheel and sdist ownership verifier"
+  - id: src-verify-postgres-wheel-py
+    resource: tools/scripts/verify_postgres_wheel.py
+    title: "PostgreSQL wheel and sdist isolation verifier"
   - id: src-build-packaging-init-py
     resource: src/py/vertebra/build/packaging/__init__.py
     title: "Python implementation module (src/py/vertebra/build/packaging/__init__.py)"
@@ -83,7 +95,7 @@ sources:
 | [`OnefileBuilder`](../../../../../src/py/vertebra/build/packaging/onefile.py)[^src-build-packaging-onefile-py] | `vertebra.build.packaging.onefile` | Packs a staged standalone directory into a tar archive with normalized headers (`uid`/`gid` `0`, empty owner names, `SOURCE_DATE_EPOCH` or `0` mtimes) compressed with `zstandard` (`b"ZSTD"`, level 19) or `zlib` (`b"ZLIB"`, level 9), prepends a POSIX `/bin/sh` self-extracting stub, and appends a 48-byte `ONEFILE_TRAILER_STRUCT` (`<8sQ32s`: `ONEFILE_MAGIC = b"VTB1FILE"`, 8-byte payload length, 32-byte SHA-256 digest). |
 
 - **Verification & Safe Extraction**: `OnefileBuilder.inspect_trailer(binary_path)` validates the `VTB1FILE` magic, payload bounds, and SHA-256 digest; `extract_to(binary_path, destination)` enforces path-traversal checks and extracts with `filter="data"`.
-- **Release Wheel Matrix & Cargo Profile ([`release.yaml`](../../../../../.github/workflows/release.yaml)[^src-release-yaml], [`pyproject.toml`](../../../../../pyproject.toml), [`Cargo.toml`](../../../../../src/rs/Cargo.toml)[^src-cargo-toml])**: `.github/workflows/release.yaml` installs `dtolnay/rust-toolchain@stable` and `oven-sh/setup-bun@v2`, builds `src/ts/vertebra-client` (`dist/index.js` and `dist/hmr/index.js` copied into `src/py/vertebra/server/_js/bundle/`), provisions Rust inside manylinux containers via `CIBW_BEFORE_ALL_LINUX` / `CIBW_ENVIRONMENT_LINUX`, and runs `pypa/cibuildwheel@v4.3.5` (`CIBW_BUILD: "cp312-* cp313-* cp314-* cp314t-* cp315-* cp315t-*"`) and `uv build --sdist` across `vertebra-core` and the four companion extension manifests (`vertebra-bundler`, `vertebra-storage`, `vertebra-bigquery`, `vertebra-spanner`), while `src/rs/Cargo.toml` `[profile.release]` sets `lto = true`, `codegen-units = 1`, `opt-level = 3`, and `panic = "abort"`.
+- **Release Wheel Matrix & Cargo Profile ([`release.yaml`](../../../../../.github/workflows/release.yaml)[^src-release-yaml], [`pyproject.toml`](../../../../../pyproject.toml), [`Cargo.toml`](../../../../../src/rs/Cargo.toml)[^src-cargo-toml])**: `.github/workflows/release.yaml` installs `dtolnay/rust-toolchain@stable` and `oven-sh/setup-bun@v2`, builds `src/ts/vertebra-client` (`tsup` compiles 17 subpath entries and copies `dist/` recursively into `src/py/vertebra/server/_js/bundle/`), provisions Rust inside manylinux containers via `CIBW_BEFORE_ALL_LINUX` / `CIBW_ENVIRONMENT_LINUX`, and runs `pypa/cibuildwheel@v4.3.5` (`CIBW_BUILD: "cp312-* cp313-* cp314-* cp314t-* cp315-* cp315t-*"`) and `uv build --sdist` across `vertebra-core` and all nine companion extension manifests (`vertebra-bundler`, `vertebra-storage`, `vertebra-bigquery`, `vertebra-duckdb`, `vertebra-mssql`, `vertebra-mysql`, `vertebra-oracle`, `vertebra-postgres`, `vertebra-spanner`), while `src/rs/Cargo.toml` `[profile.release]` sets `lto = true`, `codegen-units = 1`, `opt-level = 3`, and `panic = "abort"`.
 
 ## 2. Contributor Rust & CPython PGO Tooling (`tools/pgo/`, `Makefile`)
 
@@ -93,9 +105,9 @@ sources:
 
 ## Optional extension distributions
 
-The release workflow builds `vertebra-core`, `vertebra-bundler`, `vertebra-bigquery`, `vertebra-spanner`, and `vertebra-storage` wheels and source distributions. Each companion wheel owns only its native `.so`/`.pyd` module and matching `.pyi` stub; its Maturin `include`/`exclude` rules explicitly exclude core-owned `.py` packages, `py.typed`, and sibling `.pyi` stubs during both wheel and sdist builds. Publication depends on a fresh environment installing the built core and its optional extras (`[bundler]`, `[bigquery]`, `[spanner]`, `[storage]`) together.
+The release workflow builds `vertebra-core` plus all nine companion distributions (`vertebra-bundler`, `vertebra-storage`, `vertebra-bigquery`, `vertebra-duckdb`, `vertebra-mssql`, `vertebra-mysql`, `vertebra-oracle`, `vertebra-postgres`, and `vertebra-spanner`) as platform wheels and source distributions. Every companion manifest declares Maturin `exclude` rules blocking `**/py/vertebra/**/*.py`, `**/py/vertebra/**/*.so`, `**/py/vertebra/py.typed`, and sibling `*.pyi` stubs during wheel and sdist builds, while `vertebra-postgres` and `vertebra-oracle` also declare explicit Maturin `include` rules for `vertebra/_postgres.pyi` and `vertebra/_oracle.pyi`. Fresh-environment installs pair `vertebra-core` with extras such as `[bundler]`, `[storage]`, `[bigquery]`, `[duckdb]`, `[mssql]`, `[mysql]`, `[oracle]`, `[postgres]`, or `[spanner]`.
 
-Verify direct wheels and wheels rebuilt from source distributions outside the checkout. Inspect their file ownership, test each extension independently, then test combined installation. Removing an optional wheel must preserve the core package and sibling extensions. A local Linux build verifies these contracts; platform-matrix acceptance comes from the hosted release workflow. [^src-release-yaml][^src-bundler-wheel-manifest][^src-bigquery-wheel-manifest][^src-spanner-wheel-manifest][^src-storage-wheel-manifest]
+[`tools/scripts/_wheel_verify.py`](../../../../../tools/scripts/_wheel_verify.py)[^src-wheel-verify-py] powers `make postgres-wheel-check` ([`verify_postgres_wheel.py`](../../../../../tools/scripts/verify_postgres_wheel.py)[^src-verify-postgres-wheel-py]), `make oracle-wheel-check`, and `make {storage,bigquery,spanner,bundler}-wheel-check`: it builds `.whl` and `.tar.gz` artifacts independently, audits archive entries, tests shared-library linkage, and installs each wheel alone inside an isolated environment without compiling extensions from sdist or testing combined multi-wheel installs. Meanwhile, `make {duckdb,mysql,mssql}-wheel-check` run `maturin build` plus inline `zipfile` entry checks. Removing an optional wheel leaves core and sibling extensions intact; cross-platform validation runs in the hosted release workflow. [^src-release-yaml][^src-bundler-wheel-manifest][^src-bigquery-wheel-manifest][^src-postgres-wheel-manifest][^src-spanner-wheel-manifest][^src-storage-wheel-manifest]
 
 Provenance sources: [^src-cli-build-py], [^src-tools-pgo-init-py], [^src-makefile].
 
@@ -112,8 +124,10 @@ Provenance sources: [^src-cli-build-py], [^src-tools-pgo-init-py], [^src-makefil
 [^src-release-yaml]: `.github/workflows/release.yaml` — GitHub Actions workflow (release.yaml).
 
 [^src-bigquery-wheel-manifest]: `src/rs/vertebra-bigquery/pyproject.toml` — BigQuery wheel source ownership.
-
+[^src-postgres-wheel-manifest]: `src/rs/vertebra-postgres/pyproject.toml` — PostgreSQL wheel source ownership.
 [^src-spanner-wheel-manifest]: `src/rs/vertebra-spanner/pyproject.toml` — Spanner wheel source ownership.
 
 [^src-storage-wheel-manifest]: `src/rs/vertebra-storage/pyproject.toml` — Storage wheel source ownership.
 [^src-bundler-wheel-manifest]: `src/rs/vertebra-bundler/pyproject.toml` — Bundler wheel source ownership.
+[^src-wheel-verify-py]: `tools/scripts/_wheel_verify.py` — Shared wheel and sdist ownership verifier.
+[^src-verify-postgres-wheel-py]: `tools/scripts/verify_postgres_wheel.py` — PostgreSQL wheel and sdist isolation verifier.

@@ -46,9 +46,14 @@ pyo3-build-config = { workspace = true }
 
 [dev-dependencies]
 base64 = { workspace = true }
+criterion = { workspace = true }
 hex = { workspace = true }
 hmac = { workspace = true }
 pyo3 = { workspace = true, features = ["auto-initialize"] }
 rcgen = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 tokio-postgres = "=0.7.18"
+
+[[bench]]
+name = "postgres_native"
+harness = false

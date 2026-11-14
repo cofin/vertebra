@@ -40,18 +40,18 @@ sources:
 # Multi-Lane Worker Runner
 
 <!-- truth: start -->
-- **Canonical Server Module (`vertebra.server.lanes`)**: [`LaneConfig`](../../../../../src/py/vertebra/server/lanes.py)[^src-server-lanes-py] and [`WorkerRunner`](../../../../../src/py/vertebra/server/lanes.py) live in `vertebra.server.lanes` and are re-exported by `vertebra.server` and `vertebra.cli.workers`.
-- **Co-Located & Standalone Worker Execution**: `vtb run` and `vtb dev` support `--with-workers / --no-workers`, `--queues`, `--lane-concurrency` (e.g. `high:16,default:8,embeddings:2`), and `[tool.vertebra.workers]` in `pyproject.toml` to co-locate `WorkerRunner` inside the server lifecycle, while `vtb workers run --oneshot <job> --payload <json>` runs standalone or Cloud Run Jobs / Kubernetes Job executions.
+- **Canonical Server Module (`vertebra.server.lanes`)**: [`LaneConfig`](../../../../../src/py/vertebra/server/lanes.py)[^src-server-lanes-py] and [`WorkerRunner`](../../../../../src/py/vertebra/server/lanes.py) live in `vertebra.server.lanes` (`vertebra.server` exports `Worker` and `run_worker`; `vertebra.cli.workers` exports `execute_worker_cli`, `run_workers`, `workers`).
+- **Co-Located & Standalone Worker Execution**: `vtb run` and `vtb dev` support `--with-workers / --no-workers`, `--queues`, `--lane-concurrency` (e.g. `high=16,default=8,embeddings=2`), and `[tool.vertebra.workers]` in `pyproject.toml` to co-locate `WorkerRunner` inside the server lifecycle, while `vtb workers run --oneshot <job> --payload <json>` runs standalone or Cloud Run Jobs / Kubernetes Job executions.
 <!-- truth: end -->
 
-[`vertebra.server.lanes`](../../../../../src/py/vertebra/server/lanes.py) (re-exported by [`vertebra.cli.workers`](../../../../../src/py/vertebra/cli/workers.py)[^src-cli-workers-py]) provides an admission-controlled background worker runner (`LaneConfig`, `WorkerRunner`) with per-queue `asyncio.Semaphore` isolation, co-located HTTP worker execution, and oneshot job execution.
+[`vertebra.server.lanes`](../../../../../src/py/vertebra/server/lanes.py) defines [`LaneConfig`](../../../../../src/py/vertebra/server/lanes.py) and [`WorkerRunner`](../../../../../src/py/vertebra/server/lanes.py), which [`vertebra.cli.workers`](../../../../../src/py/vertebra/cli/workers.py)[^src-cli-workers-py] drives for admission-controlled background queues (`asyncio.Semaphore` isolation), co-located HTTP worker execution, and oneshot job execution.
 
 ## 1. Domain Types (`server/lanes.py`)
 
 | Symbol | Source | Responsibility |
 |---|---|---|
 | [`LaneConfig`](../../../../../src/py/vertebra/server/lanes.py) | `vertebra.server.lanes` | Frozen `msgspec.Struct(gc=False, kw_only=True)` defining a queue lane's `queue_name`, `concurrency: int = 10`, and `drain_timeout_s: float = 30.0`. |
-| [`WorkerRunner`](../../../../../src/py/vertebra/server/lanes.py) | `vertebra.server.lanes` | Manages per-lane `asyncio.Semaphore` pools and in-flight task tracking (`submit`, `stop`, `parse_lanes`, `parse_lane_concurrency`, `resolve_job`, `run_oneshot`, `execute_cli`). |
+| [`WorkerRunner`](../../../../../src/py/vertebra/server/lanes.py) | `vertebra.server.lanes` | Manages per-lane `asyncio.Semaphore` pools and in-flight task tracking (`submit`, `process_once`, `run`, `stop`, `parse_lanes`, `parse_lane_concurrency`, `resolve_job`, `resolve_queue_service`, `run_oneshot`). |
 
 ## 2. Admission Control, Draining & Oneshot Execution
 
@@ -62,7 +62,7 @@ sources:
 
 ## 3. CLI Integration (`cli/workers.py`)
 
-- **[`vtb workers run APP`](../../../../../src/py/vertebra/cli/workers.py)** (`WorkerRunner.execute_cli`): Sets `LITESTAR_APP` and `VERTEBRA_APP`, imports `APP` via `import_app`, attaches `WorkerRunner` to `app.state["vertebra_worker_runner"]` when `app.state` is a `dict`, enters [`enter_litestar_server_lifespan`](../../../../../src/py/vertebra/extensions/litestar/plugin.py)[^src-extensions-litestar-plugin-py], and drains all lanes via `runner.stop()` on exit. The command calls `execute_worker_cli` without `run_until_stopped=True` and builds `WorkerRunner` without a `QueueService`, so it enters and leaves the lifespan immediately without processing queued work ([Server Runtime Limitations](server-runtime-limitations.md)).
+- **[`vtb workers run APP`](../../../../../src/py/vertebra/cli/workers.py)** (`execute_worker_cli`): Sets `LITESTAR_APP` and `VERTEBRA_APP`, imports `APP` via `import_app`, enters lifespan via `enter_app_server_lifespan`, resolves `queue_service = WorkerRunner.resolve_queue_service(app)`, attaches `WorkerRunner(lanes, queue_service=queue_service, lame_duck=lame_duck)`, `LameDuckController`, and `ZPagesRegistry` to `app.state`, runs `await runner.run(install_signal_handlers=True)` continuously when `run_until_stopped=oneshot_job is None`, drains via `runner.stop()` on shutdown, and executes `--oneshot` jobs through `WorkerRunner.run_oneshot`.
 
 Provenance sources: [^src-cli-run-py], [^src-cli-dev-py].
 

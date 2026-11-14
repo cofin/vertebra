@@ -91,7 +91,7 @@ Multi-worker Python servers traditionally maintain isolated connection pools per
 
 The registry's declarative config registration and annotation-only driver imports are composition metadata. They do not authorize concrete driver imports or engine-class dispatch inside generic modules; construction still delegates polymorphically to the owning config. Broker dialect integers likewise identify protocol/cache domains; keep their numeric identities rather than treating every engine name as executable coupling.[^src-db-registry][^src-db-contracts][^src-db-boundary-tests]
 
-`server/_channels.py::ChannelBus` supplies engine-neutral fan-out and replay to framework and extension consumers. Its optional notification/change-source bridges consume DB capability protocols; SQL, transport setup and engine-specific configuration stay on adapters. This preserves a downward dependency from application integration to DB contracts.[^src-channel-bus]
+`server/_channels.py::ChannelBus` supplies engine-neutral fan-out and replay to framework and extension consumers. Its optional notification/change-source bridges consume DB capability protocols; SQL, transport setup, and engine-specific configuration live on adapters. This preserves a downward dependency from application integration to DB contracts.[^src-channel-bus]
 
 ## Alternatives Considered
 
@@ -104,7 +104,7 @@ The registry's declarative config registration and annotation-only driver import
 
 ## Consequences
 
-- `vertebra-db` implements pure-Rust protocol codecs and cloud dialers (`CloudSqlDialer` `:3307`, `AlloyDbDialer` `:5433`, Oracle wallet/`tnsnames.ora` parsing and 26ai `VECTOR`/OSON codecs, SQL Server `@P1` rewriting, RESP3 client tracking) with zero external C client libraries required at runtime; `vertebra-bigquery` and `vertebra-spanner` execute over native Rust clients in standalone PyO3 wheels, while PostgreSQL, MySQL, SQLite, DuckDB, Redis, and Valkey adapters execute through Python client bindings or the shared-memory broker proxy, and Oracle and SQL Server drivers raise `MissingDependencyError` until their native modules ship.
+- `vertebra-db` implements shared transport, framing, completion queues, `VTBARROW` SHM cursors, cloud dialers (`CloudSqlDialer` `:3307`, `AlloyDbDialer` `:5433`), and RESP3 codecs with zero external C client libraries required at runtime; `vertebra-bigquery`, `vertebra-spanner`, `vertebra-postgres`, `vertebra-mysql`, `vertebra-mssql`, `vertebra-oracle`, and `vertebra-duckdb` ship standalone PyO3 driver wheels (`vertebra._*`), `sqlite` uses Python stdlib `sqlite3`, and `redis`/`valkey` pair `vertebra-db` RESP3 codecs with Python network streams.
 - `vertebra.extensions.sqlspec`, `vertebra.extensions.alchemy`, and `vertebra.extensions.sqlalchemy` expose drop-in adapter configs and `+vtb` dialects backed by `LeaseBroker`, `StatementCache`, and `hydrate_rows_vectorcall`.
 
 Provenance sources: [^src-vertebra-core-src-broker-rs], [^src-vertebra-db-src-lib-rs], [^src-db-init-py], [^src-extensions-sqlspec-init-py], [^src-extensions-alchemy-init-py], [^src-extensions-sqlalchemy-dialects-py].

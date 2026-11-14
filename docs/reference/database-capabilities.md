@@ -52,6 +52,36 @@ agent bridge. Creating providers and registering their tools opens no database c
       members: false
       summary: false
 
+::: vertebra.db.adapters.postgres.change_stream.PostgresChangeConfig
+    options:
+      heading_level: 4
+      members: false
+      summary: false
+
+::: vertebra.db.adapters.postgres.change_stream.PostgresChangeSource
+    options:
+      heading_level: 4
+      members: false
+      summary: false
+
+::: vertebra.db.adapters.postgres.change_stream.PostgresCheckpoint
+    options:
+      heading_level: 4
+      members: false
+      summary: false
+
+::: vertebra.db.adapters.postgres.change_stream.MemoryPostgresCheckpointStore
+    options:
+      heading_level: 4
+      members: false
+      summary: false
+
+::: vertebra.db.adapters.postgres.embeddings.PostgresEmbeddingPushdown
+    options:
+      heading_level: 4
+      members: false
+      summary: false
+
 ::: vertebra.db.adapters.oracle.notify.OracleNotifyConfig
     options:
       heading_level: 4

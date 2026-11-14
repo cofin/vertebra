@@ -23,6 +23,7 @@ from sqlspec.core.filters import NullFilter
 from sqlspec.core.statement import StatementConfig
 
 import vertebra.extensions.sqlspec as sqlspec_extension
+from tests.unit.db.postgres_ports import FakeAsyncPostgresPool, FakePostgresCluster, FakeSyncPostgresPool
 from vertebra._vertebra import LeaseBroker
 from vertebra.db import DatabaseRegistry
 from vertebra.db.adapters.mysql import AsyncMySQLDriver, MySQLConfig, SyncMySQLDriver
@@ -439,22 +440,21 @@ def test_sqlalchemy_dialects_dbapi_and_alembic_integration() -> None:
 def test_postgres_vtb_dialect_dbapi_and_compiler_features() -> None:
     """Verify SyncPostgreSQLDialect, SyncDBAPIModule paramstyles, compiler hooks, and cursor descriptions."""
     pg_dbapi = SyncPostgreSQLDialect.dbapi()
-    assert pg_dbapi.paramstyle == "pyformat"
-    assert SyncPostgreSQLDialect.import_dbapi().paramstyle == "pyformat"
+    assert SyncPostgreSQLDialect.default_paramstyle == "numeric_dollar"
+    assert SyncPostgreSQLDialect.paramstyle == "numeric_dollar"
+    assert pg_dbapi.paramstyle == "numeric_dollar"
+    assert SyncPostgreSQLDialect.import_dbapi().paramstyle == "numeric_dollar"
     assert SyncSQLiteDialect.dbapi().paramstyle == "qmark"
     assert SyncMySQLDialect.dbapi().paramstyle == "format"
     assert SyncOracleDialect.dbapi().paramstyle == "named"
 
-    class Port:
-        def execute_with_description(
-            self,
-            sql: str,
-            parameters: Any,
-        ) -> tuple[list[tuple[int, str]], tuple[tuple[str], ...]]:
-            _ = (sql, parameters)
-            return [(1, "item1"), (2, "item2")], (("id",), ("name",))
-
-    driver = SyncPostgreSQLDriver(PostgreSQLConfig(dsn="postgresql://localhost:5432/app"), pool=Port())
+    cluster = FakePostgresCluster()
+    cluster._conn.execute("CREATE TABLE items (id INTEGER, name TEXT)")
+    cluster._conn.execute("INSERT INTO items (id, name) VALUES (1, 'item1'), (2, 'item2')")
+    driver = SyncPostgreSQLDriver(
+        PostgreSQLConfig(dsn="postgresql://localhost:5432/app"),
+        pool=FakeSyncPostgresPool(cluster),
+    )
 
     conn = pg_dbapi.connect("postgresql+vtb://localhost:5432/app", driver=driver)
     cur = conn.cursor()
@@ -1049,12 +1049,8 @@ class _NativeBindConnection:
 
             def execute(self, sql: str, params: Any = None) -> None:
                 port.calls.append((sql, params))
-                bound = (
-                    {str(index): value for index, value in enumerate(params, 1)}
-                    if "$1" in sql and params is not None
-                    else params or ()
-                )
-                cursor.execute(sql.replace("%s", "?"), bound)
+                adapted_sql, bound = port._adapt_sqlite(sql, params)
+                cursor.execute(adapted_sql, bound)
 
             def fetchall(self) -> list[Any]:
                 return cursor.fetchall()
@@ -1064,12 +1060,19 @@ class _NativeBindConnection:
 
         return Cursor()
 
+    @staticmethod
+    def _adapt_sqlite(sql: str, params: Any = None) -> tuple[str, Any]:
+        if "$1" in sql and params is not None:
+            return sql, {str(index): value for index, value in enumerate(params, 1)}
+        return sql.replace("%s", "?"), list(params) if isinstance(params, (list, tuple)) else (params or ())
+
     def execute(self, sql: str, params: Any = None) -> int:
         bound = list(params) if params is not None else []
         self.calls.append((sql, bound))
+        adapted_sql, adapted_bound = self._adapt_sqlite(sql, bound)
         cur = self.raw.cursor()
         try:
-            cur.execute(sql.replace("%s", "?"), bound)
+            cur.execute(adapted_sql, adapted_bound)
             return int(cur.rowcount) if cur.rowcount >= 0 else 0
         finally:
             cur.close()
@@ -1083,9 +1086,10 @@ class _NativeBindConnection:
     def execute_with_description(self, sql: str, params: Any = None) -> tuple[list[tuple[Any, ...]], list[str]]:
         bound = list(params) if params is not None else []
         self.calls.append((sql, bound))
+        adapted_sql, adapted_bound = self._adapt_sqlite(sql, bound)
         cur = self.raw.cursor()
         try:
-            cur.execute(sql.replace("%s", "?"), bound)
+            cur.execute(adapted_sql, adapted_bound)
             rows = [tuple(row) for row in cur.fetchall()]
             cols = [str(col[0]) for col in (cur.description or ())]
             return rows, cols
@@ -1166,7 +1170,10 @@ class _AsyncNativeBindConnection(_NativeBindConnection):
         return super().execute(sql, params)
 
     async def execute_many(self, sql: str, param_sets: Any) -> int:
-        return super().execute_many(sql, param_sets)
+        total = 0
+        for params in param_sets:
+            total += await self.execute(sql, params)
+        return total
 
     async def execute_with_description(self, sql: str, params: Any = None) -> tuple[list[tuple[Any, ...]], list[str]]:
         return super().execute_with_description(sql, params)
@@ -1205,18 +1212,41 @@ class _AsyncNativeBindConnection(_NativeBindConnection):
 @pytest.mark.parametrize("engine", ["postgres", "mysql"])
 @pytest.mark.parametrize("config_defaults", [False, True])
 def test_sqlspec_stack_preserves_native_dbapi_binds_and_rows(engine: str, config_defaults: bool) -> None:
-    """Native DBAPI execution retains placeholders, binds, row counts, and independent reads."""
-    port = _NativeBindConnection()
+    """Native driver execution retains placeholders, binds, row counts, and independent reads."""
     if engine == "postgres":
-        native = SyncPostgreSQLDriver(PostgreSQLConfig(dsn="postgresql://localhost/db"), pool=port)
-        config = PostgreSQLSyncConfig(native.config)
-        driver = SQLSpecPostgreSQLSyncDriver(
+        cluster = FakePostgresCluster()
+        cluster._conn.execute("CREATE TABLE stack_items (id INTEGER)")
+        native: Any = SyncPostgreSQLDriver(
+            PostgreSQLConfig(dsn="postgresql://localhost/db"),
+            pool=FakeSyncPostgresPool(cluster),
+        )
+        config: Any = PostgreSQLSyncConfig(native.config)
+        driver: Any = SQLSpecPostgreSQLSyncDriver(
             native, statement_config=config.statement_config if config_defaults else None
         )
-    else:
-        native = SyncMySQLDriver(MySQLConfig(dsn="mysql://localhost/db"), client=port)
-        config = MySQLSyncConfig(native.config)
-        driver = SQLSpecMySQLSyncDriver(native, statement_config=config.statement_config if config_defaults else None)
+        insert_sql = "INSERT INTO stack_items VALUES ($1)"
+        update_sql = "UPDATE stack_items SET id = $1 WHERE id = $2"
+        select_sql = "SELECT id FROM stack_items WHERE id = $1"
+        try:
+            result = driver.execute_stack(
+                StatementStack().push_execute(insert_sql, 7).push_execute(update_sql, 9, 7).push_execute(select_sql, 9)
+            )
+            assert [item.rows_affected for item in result] == [1, 1, 1]
+            assert result[2].get_result().get_data() == [{"id": 9}]
+            assert [(sql, list(params)) for sql, params, _ in cluster.recorded_queries] == [
+                (insert_sql, [7]),
+                (update_sql, [9, 7]),
+                (select_sql, [9]),
+            ]
+            assert cluster._conn.execute("SELECT id FROM stack_items").fetchall() == [(9,)]
+        finally:
+            native.close()
+        return
+
+    port = _NativeBindConnection()
+    native = SyncMySQLDriver(MySQLConfig(dsn="mysql://localhost/db"), client=port)
+    config = MySQLSyncConfig(native.config)
+    driver = SQLSpecMySQLSyncDriver(native, statement_config=config.statement_config if config_defaults else None)
     try:
         result = driver.execute_stack(
             StatementStack()
@@ -1241,25 +1271,44 @@ def test_sqlspec_stack_preserves_native_dbapi_binds_and_rows(engine: str, config
 @pytest.mark.parametrize("config_defaults", [False, True])
 async def test_sqlspec_async_stack_preserves_native_dbapi_binds_and_rows(engine: str, config_defaults: bool) -> None:
     """Async native client ports observe engine placeholder syntax and complete ordered results."""
-    port = _AsyncNativeBindConnection()
     if engine == "postgres":
-        native = AsyncPostgreSQLDriver(PostgreSQLConfig(dsn="postgresql://localhost/db"), pool=port)
-        config = PostgreSQLAsyncConfig(native.config)
-        driver = SQLSpecPostgreSQLAsyncDriver(
+        cluster = FakePostgresCluster()
+        cluster._conn.execute("CREATE TABLE stack_items (id INTEGER)")
+        native: Any = AsyncPostgreSQLDriver(
+            PostgreSQLConfig(dsn="postgresql://localhost/db"),
+            pool=FakeAsyncPostgresPool(cluster),
+        )
+        config: Any = PostgreSQLAsyncConfig(native.config)
+        driver: Any = SQLSpecPostgreSQLAsyncDriver(
             native, statement_config=config.statement_config if config_defaults else None
         )
-        marker = "$"
         insert_sql = "INSERT INTO stack_items VALUES ($1)"
         update_sql = "UPDATE stack_items SET id = $1 WHERE id = $2"
         select_sql = "SELECT id FROM stack_items WHERE id = $1"
-    else:
-        native = AsyncMySQLDriver(MySQLConfig(dsn="mysql://localhost/db"), client=port)
-        config = MySQLAsyncConfig(native.config)
-        driver = SQLSpecMySQLAsyncDriver(native, statement_config=config.statement_config if config_defaults else None)
-        marker = "%s"
-        insert_sql = "INSERT INTO stack_items VALUES (%s)"
-        update_sql = "UPDATE stack_items SET id = %s WHERE id = %s"
-        select_sql = "SELECT id FROM stack_items WHERE id = %s"
+        try:
+            result = await driver.execute_stack(
+                StatementStack().push_execute(insert_sql, 7).push_execute(update_sql, 9, 7).push_execute(select_sql, 9)
+            )
+            assert [item.rows_affected for item in result] == [1, 1, 1]
+            assert result[2].get_result().get_data() == [{"id": 9}]
+            assert [(sql, list(params)) for sql, params, _ in cluster.recorded_queries] == [
+                (insert_sql, [7]),
+                (update_sql, [9, 7]),
+                (select_sql, [9]),
+            ]
+            assert all("$" in sql for sql, _, _ in cluster.recorded_queries)
+            assert cluster._conn.execute("SELECT id FROM stack_items").fetchall() == [(9,)]
+        finally:
+            await native.close()
+        return
+
+    port = _AsyncNativeBindConnection()
+    native = AsyncMySQLDriver(MySQLConfig(dsn="mysql://localhost/db"), client=port)
+    config = MySQLAsyncConfig(native.config)
+    driver = SQLSpecMySQLAsyncDriver(native, statement_config=config.statement_config if config_defaults else None)
+    insert_sql = "INSERT INTO stack_items VALUES (%s)"
+    update_sql = "UPDATE stack_items SET id = %s WHERE id = %s"
+    select_sql = "SELECT id FROM stack_items WHERE id = %s"
     try:
         result = await driver.execute_stack(
             StatementStack().push_execute(insert_sql, 7).push_execute(update_sql, 9, 7).push_execute(select_sql, 9)
@@ -1268,7 +1317,7 @@ async def test_sqlspec_async_stack_preserves_native_dbapi_binds_and_rows(engine:
         assert result[2].get_result().get_data() == [{"id": 9}]
         assert [sql for sql, _ in port.calls] == [insert_sql, update_sql, select_sql]
         assert [list(params) for _, params in port.calls] == [[7], [9, 7], [9]]
-        assert all(marker in sql for sql, _ in port.calls)
+        assert all("%s" in sql for sql, _ in port.calls)
         assert port.raw.execute("SELECT id FROM stack_items").fetchall() == [(9,)]
     finally:
         await native.close()
@@ -1277,10 +1326,9 @@ async def test_sqlspec_async_stack_preserves_native_dbapi_binds_and_rows(engine:
 def test_sqlspec_explicit_statement_config_remains_authoritative() -> None:
     """Caller-owned statement configuration controls compilation and retains object identity."""
     port = _NativeBindConnection()
-    native = SyncPostgreSQLDriver(PostgreSQLConfig(dsn="postgresql://localhost/db"), pool=port)
     statement_config = SQL("SELECT 1").statement_config
-    config = PostgreSQLSyncConfig(native.config, statement_config=statement_config)
-    driver = SQLSpecPostgreSQLSyncDriver(native, statement_config=config.statement_config)
+    config = PostgreSQLSyncConfig(PostgreSQLConfig(dsn="postgresql://localhost/db"), statement_config=statement_config)
+    driver = SQLSpecPostgreSQLSyncDriver(port, statement_config=config.statement_config)
     try:
         result = driver.execute_stack(StatementStack().push_execute("INSERT INTO stack_items VALUES (:id)", id=7))
         assert config.statement_config is statement_config
@@ -1289,17 +1337,16 @@ def test_sqlspec_explicit_statement_config_remains_authoritative() -> None:
         assert port.calls[0][0] == "INSERT INTO stack_items VALUES (?)"
         assert list(port.calls[0][1]) == [7]
     finally:
-        native.close()
+        port.close()
 
 
 @pytest.mark.anyio
 async def test_sqlspec_async_explicit_statement_config_remains_authoritative() -> None:
     """Async native defaults yield to the caller's SQLSpec parameter configuration."""
     port = _AsyncNativeBindConnection()
-    native = AsyncPostgreSQLDriver(PostgreSQLConfig(dsn="postgresql://localhost/db"), pool=port)
     statement_config = SQL("SELECT 1").statement_config
-    config = PostgreSQLAsyncConfig(native.config, statement_config=statement_config)
-    driver = SQLSpecPostgreSQLAsyncDriver(native, statement_config=config.statement_config)
+    config = PostgreSQLAsyncConfig(PostgreSQLConfig(dsn="postgresql://localhost/db"), statement_config=statement_config)
+    driver = SQLSpecPostgreSQLAsyncDriver(port, statement_config=config.statement_config)
     try:
         result = await driver.execute_stack(StatementStack().push_execute("INSERT INTO stack_items VALUES (:id)", id=7))
         assert config.statement_config is statement_config
@@ -1308,7 +1355,7 @@ async def test_sqlspec_async_explicit_statement_config_remains_authoritative() -
         assert port.calls[0][0] == "INSERT INTO stack_items VALUES (?)"
         assert list(port.calls[0][1]) == [7]
     finally:
-        await native.close()
+        await port.close()
 
 
 @pytest.mark.parametrize("prebound", [False, True])
@@ -1379,22 +1426,39 @@ async def test_sqlspec_async_arrow_stack_prepares_binds_and_retains_statement(
 @pytest.mark.parametrize("override_config", [False, True])
 def test_sqlspec_batch_stack_compiles_native_binds(override_config: bool) -> None:
     """Batch stack processing applies the same native parameter profile as single execution."""
-    port = _NativeBindConnection()
-    native = SyncPostgreSQLDriver(PostgreSQLConfig(dsn="postgresql://localhost/db"), pool=port)
+    if override_config:
+        port = _NativeBindConnection()
+        driver = SQLSpecPostgreSQLSyncDriver(port)
+        config: StatementConfig | None = StatementConfig(dialect="postgres")
+        try:
+            result = driver.execute_stack(
+                StatementStack().push_execute_many(
+                    "INSERT INTO stack_items VALUES (?)", [(7,), (9,)], statement_config=config
+                )
+            )
+            assert result[0].rows_affected == 2
+            assert [sql for sql, _ in port.calls] == ["INSERT INTO stack_items VALUES (?)"] * 2
+            assert [list(params) for _, params in port.calls] == [[7], [9]]
+            assert port.raw.execute("SELECT id FROM stack_items ORDER BY id").fetchall() == [(7,), (9,)]
+        finally:
+            port.close()
+        return
+
+    cluster = FakePostgresCluster()
+    cluster._conn.execute("CREATE TABLE stack_items (id INTEGER)")
+    native = SyncPostgreSQLDriver(
+        PostgreSQLConfig(dsn="postgresql://localhost/db"),
+        pool=FakeSyncPostgresPool(cluster),
+    )
     driver = SQLSpecPostgreSQLSyncDriver(native)
-    config = StatementConfig(dialect="postgres") if override_config else None
     try:
         result = driver.execute_stack(
-            StatementStack().push_execute_many(
-                "INSERT INTO stack_items VALUES (?)", [(7,), (9,)], statement_config=config
-            )
+            StatementStack().push_execute_many("INSERT INTO stack_items VALUES (?)", [(7,), (9,)])
         )
         assert result[0].rows_affected == 2
-        assert [sql for sql, _ in port.calls] == [
-            "INSERT INTO stack_items VALUES (?)" if override_config else "INSERT INTO stack_items VALUES (%s)"
-        ] * 2
-        assert [list(params) for _, params in port.calls] == [[7], [9]]
-        assert port.raw.execute("SELECT id FROM stack_items ORDER BY id").fetchall() == [(7,), (9,)]
+        assert [sql for sql, _, _ in cluster.recorded_queries] == ["INSERT INTO stack_items VALUES ($1)"] * 2
+        assert [list(params) for _, params, _ in cluster.recorded_queries] == [[7], [9]]
+        assert cluster._conn.execute("SELECT id FROM stack_items ORDER BY id").fetchall() == [(7,), (9,)]
     finally:
         native.close()
 
@@ -1403,22 +1467,39 @@ def test_sqlspec_batch_stack_compiles_native_binds(override_config: bool) -> Non
 @pytest.mark.parametrize("override_config", [False, True])
 async def test_sqlspec_async_batch_stack_compiles_native_binds(override_config: bool) -> None:
     """Async batch stack parameters compile to native numeric binds or the explicit override."""
-    port = _AsyncNativeBindConnection()
-    native = AsyncPostgreSQLDriver(PostgreSQLConfig(dsn="postgresql://localhost/db"), pool=port)
+    if override_config:
+        port = _AsyncNativeBindConnection()
+        driver = SQLSpecPostgreSQLAsyncDriver(port)
+        config: StatementConfig | None = StatementConfig(dialect="postgres")
+        try:
+            result = await driver.execute_stack(
+                StatementStack().push_execute_many(
+                    "INSERT INTO stack_items VALUES (?)", [(7,), (9,)], statement_config=config
+                )
+            )
+            assert result[0].rows_affected == 2
+            assert [sql for sql, _ in port.calls] == ["INSERT INTO stack_items VALUES (?)"] * 2
+            assert [list(params) for _, params in port.calls] == [[7], [9]]
+            assert port.raw.execute("SELECT id FROM stack_items ORDER BY id").fetchall() == [(7,), (9,)]
+        finally:
+            await port.close()
+        return
+
+    cluster = FakePostgresCluster()
+    cluster._conn.execute("CREATE TABLE stack_items (id INTEGER)")
+    native = AsyncPostgreSQLDriver(
+        PostgreSQLConfig(dsn="postgresql://localhost/db"),
+        pool=FakeAsyncPostgresPool(cluster),
+    )
     driver = SQLSpecPostgreSQLAsyncDriver(native)
-    config = StatementConfig(dialect="postgres") if override_config else None
     try:
         result = await driver.execute_stack(
-            StatementStack().push_execute_many(
-                "INSERT INTO stack_items VALUES (?)", [(7,), (9,)], statement_config=config
-            )
+            StatementStack().push_execute_many("INSERT INTO stack_items VALUES (?)", [(7,), (9,)])
         )
         assert result[0].rows_affected == 2
-        assert [sql for sql, _ in port.calls] == [
-            "INSERT INTO stack_items VALUES (?)" if override_config else "INSERT INTO stack_items VALUES ($1)"
-        ] * 2
-        assert [list(params) for _, params in port.calls] == [[7], [9]]
-        assert port.raw.execute("SELECT id FROM stack_items ORDER BY id").fetchall() == [(7,), (9,)]
+        assert [sql for sql, _, _ in cluster.recorded_queries] == ["INSERT INTO stack_items VALUES ($1)"] * 2
+        assert [list(params) for _, params, _ in cluster.recorded_queries] == [[7], [9]]
+        assert cluster._conn.execute("SELECT id FROM stack_items ORDER BY id").fetchall() == [(7,), (9,)]
     finally:
         await native.close()
 

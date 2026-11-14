@@ -14,6 +14,9 @@ generated:
   at: "2026-11-04T04:33:00Z"
 verified:
   - by: agent:flow-executor
+    at: "2026-11-13T22:48:50Z"
+    commit: 480840a3
+  - by: agent:flow-executor
     at: "2026-11-13T20:35:00Z"
     commit: b9429c6d
   - by: agent:flow-setup
@@ -83,9 +86,15 @@ sources:
   - id: src-spanner-stack-regressions
     resource: src/py/tests/unit/extensions/test_sqlspec_spanner.py
     title: Actual Spanner driver stack execution over external client ports
-  - id: src-psycopg-bind-regressions
+  - id: src-verify-postgres-wheel
+    resource: tools/scripts/verify_postgres_wheel.py
+    title: Standalone vertebra-postgres wheel, sdist, and 14-class isolation verifier
+  - id: src-pg-dataplane-tests
     resource: src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py
-    title: Optional real psycopg converter acceptance for PostgreSQL primitives
+    title: PostgreSQL RLS tenant predicates, CDC spill bridge, DataFusion, and memfd SHM unit tests
+  - id: src-postgres-bench-tests
+    resource: src/py/tests/unit/tools/test_postgres_benchmarks.py
+    title: Offline PostgreSQL benchmark schema and comparator CLI unit tests
   - id: src-provider-regressions
     resource: src/py/tests/unit/extensions/test_gcp_adapters_and_sqlalchemy.py
     title: Native provider ownership, lazy resolution, policy and driver error regressions
@@ -126,7 +135,7 @@ Vertebra runs verification gates across Rust (`cargo test`), Python (`pytest` + 
 | `make dev` | `cargo build --workspace` (non-extension crates) + `maturin develop --uv` across all 10 extensions (`_vertebra`, `_bundler`, `_storage`, `_mysql`, `_bigquery`, `_mssql`, `_spanner`, `_duckdb`, `_oracle`, `_postgres`) | Debug native build required after Rust edits before `pytest` (`make build` runs the `--release` counterpart). |
 | `make rs-test` | `rm -rf /dev/shm/test-* /dev/shm/*vertebra*` + `cargo test --workspace --features tls,compression,gcp` | Unit and integration tests across all 13 workspace crates. |
 | `make py-test` | `make dev` + `mypy.stubtest` across all 10 extensions + `uv run $(PY_TEST_GROUPS) pytest src/py/tests -v` | `.pyi` stub parity plus Python suites under [`src/py/tests/`](../../../../src/py/tests/conftest.py)[^src-tests-conftest-py] (`PY_TEST_GROUPS` enables `--group duckdb` when `Py_GIL_DISABLED=0`). |
-| `make {duckdb,mysql,mssql,oracle,postgres}-test` | Per-crate `cargo test`, `mypy.stubtest vertebra._<engine>`, and engine Python suites (`*-wheel-check` verifies isolated companion wheels) | Scoped native database crate, stub, adapter, and PEP 420 wheel isolation gates. |
+| `make {duckdb,mysql,mssql,oracle,postgres}-test` | Per-crate `cargo test`, `mypy.stubtest vertebra._<engine>`, and engine Python suites (`postgres-wheel-check` runs [`verify_postgres_wheel.py`](../../../../tools/scripts/verify_postgres_wheel.py)[^src-verify-postgres-wheel]; `postgres-bench-check` checks Criterion + [`test_postgres_benchmarks.py`](../../../../src/py/tests/unit/tools/test_postgres_benchmarks.py)[^src-postgres-bench-tests]) | Scoped native database crate, stub, benchmark comparator, and PEP 420 wheel isolation gates. |
 | `make ts-test` | `cd src/ts/vertebra-client && NODE_OPTIONS="--localstorage-file=..." bun run test` | Vitest suites under [`package.json`](../../../../src/ts/vertebra-client/package.json)[^src-package-json]. |
 | `make lint-all` | `biome check .` + `ruff check` & `ruff format --check` + `mypy` + `mypy.stubtest` + `cargo fmt --check` + `cargo clippy --workspace --all-targets --features tls,compression,gcp -- -D warnings` + `make review-check` | Read-only CI lint, type, stub, and review-manifest gate (`make lint` applies auto-fixes). |
 | `make docs` | `scan_public_docstrings` + `generate_cli_docs --check` + `zensical build --clean` + `postbuild` + `verify_docs_artifacts` | Docstring/CLI parity, Zensical build, `llms.txt`, and `<= 120 KB` / `<= 14` TOC HTML bounds. |
@@ -145,10 +154,13 @@ Vertebra runs verification gates across Rust (`cargo test`), Python (`pytest` + 
 | `test-rust-macos` | `workflow_dispatch` | `cargo test --workspace --features tls,compression,gcp,macos-ulock` | `macos-latest` |
 | `test-typescript` | `typescript`, `ci`, or `workflow_dispatch` | `make ts-install` + `make ts-build` + `make ts-test` | `ubuntu-latest` |
 | `build-docs` | `docs`, `ci`, or `workflow_dispatch` | `uv sync --frozen --no-install-project --only-group doc` + `make docs` | `ubuntu-latest` |
+| `core-wheel-smoke` | `python`, `rust`, `typescript`, `ci`, or `workflow_dispatch` | `uv sync --frozen --group build && make ts-install && make ts-build && make core-wheel-check` | `ubuntu-latest` |
+| `postgres-wheel-check` | `python`, `rust`, `ci`, or `workflow_dispatch` | `uv sync --frozen --group build && make ts-install && make ts-build && make postgres-wheel-check` | `ubuntu-latest` |
+| `postgres-conformance` | `python`, `rust`, `ci`, or `workflow_dispatch` | `test_driver_conformance.py -v` filtered by `VERTEBRA_CONFORMANCE_ENGINES=postgres`, `VERTEBRA_CONFORMANCE_POSTGRES_VERSION=<pg_version>`, and `VERTEBRA_CONFORMANCE_POSTGRES_REQUIRE_ZERO_SKIPS=1` (zero `-k` deselections), plus live replication/feature/deadline suites on PG `18` | PG `14`–`18` (`ubuntu-latest`) |
 
 ## 4. Suite Inventory, Shared-Memory Hygiene & Boundary Evidence
 
-- **Python (`fail_under = 80`)**: 1:1 module-mirrored `src/py/tests/unit/` packages with `__init__.py` and top-level imports (`PLC0415`) across server hotpaths[^src-tests-unit-server-stage1-hotpath-py], storage codecs and worker cancellation barriers[^src-storage-public-codec-tests], native drivers[^src-native-driver-tests], SQLite `RETURNING`[^src-sqlite-returning-tests], PostgreSQL transactions[^src-postgres-transaction-tests], DuckDB/Arrow cursor retention[^src-storage-cursor-view-tests], loopback `resp3_server` Redis/Valkey tests[^src-tests-unit-conftest-py], SQLSpec/SQLAlchemy stacks[^src-stack-regressions][^src-bigquery-stack-regressions][^src-spanner-stack-regressions][^src-psycopg-bind-regressions], and dual-mode MCP / SSE / skills / UI / ES256 IAP / stdio-bridge CLI / `litestar-mcp` parity suites[^src-tests-unit-agent-mcp-conformance-py][^src-agent-mcp-registry-py][^src-provider-regressions][^src-provider-schema-regressions][^src-provider-snapshot-regressions].
+- **Python**: 1:1 module-mirrored `src/py/tests/unit/` packages with `__init__.py` and top-level imports (`PLC0415`) across server hotpaths[^src-tests-unit-server-stage1-hotpath-py], storage codecs and worker cancellation barriers[^src-storage-public-codec-tests], native drivers[^src-native-driver-tests], SQLite `RETURNING`[^src-sqlite-returning-tests], PostgreSQL transactions/RLS/CDC/benchmarks[^src-postgres-transaction-tests][^src-pg-dataplane-tests][^src-postgres-bench-tests], DuckDB/Arrow cursor retention[^src-storage-cursor-view-tests], loopback `resp3_server` Redis/Valkey tests[^src-tests-unit-conftest-py], SQLSpec/SQLAlchemy stacks[^src-stack-regressions][^src-bigquery-stack-regressions][^src-spanner-stack-regressions], and dual-mode MCP / SSE / skills / UI / ES256 IAP / stdio-bridge CLI / `litestar-mcp` parity suites[^src-tests-unit-agent-mcp-conformance-py][^src-agent-mcp-registry-py][^src-provider-regressions][^src-provider-schema-regressions][^src-provider-snapshot-regressions].
 - **Rust & TypeScript**: Integration harnesses in `vertebra-core`, `vertebra-http`, `vertebra-storage`[^src-storage-native-tests], and `vertebra-db`[^src-storage-shm-tests]; Vitest suites in [`tests/agent.test.ts`](../../../../src/ts/vertebra-client/tests/agent.test.ts)[^src-ts-tests-agent-test-ts] and sibling client modules; and cross-engine SQL/Arrow conformance in [`test_driver_conformance.py`](../../../../src/py/tests/integration/db/test_driver_conformance.py)[^src-db-conformance].
 - **SHM Hygiene**: [`conftest.py`](../../../../src/py/tests/conftest.py)[^src-tests-conftest-py] pins AnyIO to `asyncio`, generates `test-<uuid8>` SHM names, and sweeps `/dev/shm/{test-*,vtb-*,*vertebra*}` post-test; use targeted `cargo test -p <crate>` during parallel runs to avoid `make rs-test` SHM sweeps.
 
@@ -173,7 +185,9 @@ Vertebra runs verification gates across Rust (`cargo test`), Python (`pytest` + 
 [^src-stack-regressions]: `src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py` — Native pipeline and fallback statement/result/bind regressions.
 [^src-bigquery-stack-regressions]: `src/py/tests/unit/extensions/test_sqlspec_bigquery.py` — Actual BigQuery driver stack execution over loopback REST.
 [^src-spanner-stack-regressions]: `src/py/tests/unit/extensions/test_sqlspec_spanner.py` — Actual Spanner driver stack execution over external client ports.
-[^src-psycopg-bind-regressions]: `src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py` — Optional real psycopg converter acceptance for PostgreSQL primitives.
+[^src-verify-postgres-wheel]: `tools/scripts/verify_postgres_wheel.py` — Standalone vertebra-postgres wheel, sdist, and 14-class isolation verifier.
+[^src-pg-dataplane-tests]: `src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py` — PostgreSQL RLS tenant predicates, CDC spill bridge, DataFusion, and memfd SHM unit tests.
+[^src-postgres-bench-tests]: `src/py/tests/unit/tools/test_postgres_benchmarks.py` — Offline PostgreSQL benchmark schema and comparator CLI unit tests.
 [^src-provider-regressions]: `src/py/tests/unit/extensions/test_gcp_adapters_and_sqlalchemy.py` — Native provider ownership, lazy resolution, policy and driver error regressions.
 [^src-provider-schema-regressions]: `src/py/tests/unit/agent/test_core_and_observability.py` — Neutral provider schema and validation boundaries.
 [^src-provider-snapshot-regressions]: `src/py/tests/unit/agent/test_runtime_and_workflows.py` — Approval binding and nested invocation ownership across controlled suspension.

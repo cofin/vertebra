@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
-from collections.abc import AsyncIterator, Iterator, Sequence
+from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -65,6 +65,7 @@ from vertebra.db.adapters.oracle import (
 )
 from vertebra.db.adapters.postgres import (
     AsyncPostgreSQLDriver,
+    PgJson,
     PostgreSQLConfig,
     SyncPostgreSQLDriver,
 )
@@ -93,7 +94,6 @@ from vertebra.typing import FrozenBaseStruct, MissingDependencyError, reset_depe
 from vertebra.utils.module_loader import ensure_module, import_optional
 from vertebra.utils.serializers import decode_json, encode_json
 
-_FAIL_LOUD_DRIVER_ENGINES: frozenset[str] = frozenset()
 _DUCKDB_SKIP_REASON = "duckdb publishes no free-threaded wheel; DuckDB tests run on GIL interpreters"
 
 
@@ -141,6 +141,20 @@ _DUCKDB_TYPES_DDL = (
     "val_bytes BLOB, "
     "val_ts TIMESTAMP, "
     "val_json VARCHAR"
+    ")"
+)
+
+_POSTGRES_TYPES_DDL = (
+    "CREATE TABLE vtb_conformance_types ("
+    "id BIGINT PRIMARY KEY, "
+    "val_int BIGINT, "
+    "val_float DOUBLE PRECISION, "
+    "val_decimal NUMERIC(18, 4), "
+    "val_bool BOOLEAN, "
+    "val_text TEXT, "
+    "val_bytes BYTEA, "
+    "val_ts TIMESTAMPTZ, "
+    "val_json JSONB"
     ")"
 )
 
@@ -275,6 +289,8 @@ class EngineConformanceSpec(FrozenBaseStruct, frozen=True, gc=False):
         """Encode `type_case.input_value` for engines requiring explicit `JSON` parameter descriptors."""
         if self.engine in {"bigquery", "spanner"} and type_case.comparison_kind == "json":
             return {"type": "JSON", "value": encode_json(type_case.input_value)}
+        if self.engine == "postgres" and type_case.comparison_kind == "json":
+            return PgJson(type_case.input_value)
         return type_case.input_value
 
     def typed_null_int64(self) -> Any:
@@ -409,8 +425,10 @@ ENGINE_SPECS: tuple[EngineConformanceSpec, ...] = (
         async_driver_cls=AsyncPostgreSQLDriver,
         sample_url="postgresql://vtb:secret@127.0.0.1:5432/vtb",
         placeholder_style="dollar",
+        types_ddl=_POSTGRES_TYPES_DDL,
+        supports_pipeline=True,
         native_extension_module="vertebra._postgres",
-        pending_flow_id="native-postgres-driver",
+        pending_flow_id=None,
         env_dsn_vars=("VERTEBRA_CONFORMANCE_POSTGRES_DSN",),
         container_fixture="vtb_postgres_config",
     ),
@@ -610,29 +628,76 @@ CACHE_ENGINE_SPECS: tuple[CacheConformanceSpec, ...] = (
 
 
 _CONFORMANCE_DOCKER_ENV = "VERTEBRA_CONFORMANCE_DOCKER"
+POSTGRES_CONFORMANCE_VERSIONS: tuple[str, ...] = ("14", "15", "16", "17", "18")
 
 
-def _build_live_engine_params(specs: Sequence[EngineConformanceSpec] = ENGINE_SPECS) -> list[Any]:
+def _parse_conformance_env_filter(env: Mapping[str, str], key: str) -> tuple[str, ...]:
+    """Return stripped non-empty comma-separated filter tokens from ``env[key]``."""
+    return tuple(token.strip() for token in env.get(key, "").split(",") if token.strip())
+
+
+def _expand_live_engine_variants(
+    specs: Sequence[EngineConformanceSpec],
+    *,
+    env: Mapping[str, str] | None = None,
+) -> list[tuple[str, EngineConformanceSpec]]:
+    """Expand ``postgres`` across selected major versions `14`–`18` and honor env engine filters."""
+    resolved_env = os.environ if env is None else env
+    selected_engines = _parse_conformance_env_filter(resolved_env, "VERTEBRA_CONFORMANCE_ENGINES")
+    selected_pg_versions = _parse_conformance_env_filter(resolved_env, "VERTEBRA_CONFORMANCE_POSTGRES_VERSION")
+    unknown_versions = [v for v in selected_pg_versions if v not in POSTGRES_CONFORMANCE_VERSIONS]
+    if unknown_versions:
+        msg = f"Unsupported VERTEBRA_CONFORMANCE_POSTGRES_VERSION entries: {unknown_versions}"
+        raise ValueError(msg)
+
+    variants: list[tuple[str, EngineConformanceSpec]] = []
+    for spec in specs:
+        if selected_engines and spec.engine not in selected_engines:
+            continue
+        if spec.engine != "postgres":
+            variants.append((spec.engine, spec))
+            continue
+        versions = (
+            tuple(v for v in POSTGRES_CONFORMANCE_VERSIONS if v in selected_pg_versions)
+            if selected_pg_versions
+            else POSTGRES_CONFORMANCE_VERSIONS
+        )
+        for version in versions:
+            versioned_spec = structs.replace(
+                spec,
+                env_dsn_vars=(f"VERTEBRA_CONFORMANCE_POSTGRES_{version}_DSN", *spec.env_dsn_vars),
+                container_fixture=f"vtb_postgres_{version}_config",
+            )
+            variants.append((f"postgres-{version}", versioned_spec))
+    return variants
+
+
+def _build_live_engine_params(
+    specs: Sequence[EngineConformanceSpec] = ENGINE_SPECS,
+    *,
+    env: Mapping[str, str] | None = None,
+) -> list[Any]:
     """Build fixture parameters, marking pending engines strict ``xfail`` only when their native module imports.
 
     Args:
         specs: Engine specs to parametrize.
+        env: Optional environment mapping overriding ``VERTEBRA_CONFORMANCE_ENGINES`` and PostgreSQL version filters.
 
     Returns:
-        One ``pytest.param`` per spec with ``id=spec.engine``.
+        One ``pytest.param`` per spec variant with stable parameter IDs.
     """
     params: list[Any] = []
-    for spec in specs:
+    for param_id, spec in _expand_live_engine_variants(specs, env=env):
         if spec.pending_flow_id is not None and not _native_module_missing(spec):
             params.append(
                 pytest.param(
                     spec,
-                    id=spec.engine,
+                    id=param_id,
                     marks=pytest.mark.xfail(strict=True, reason=f"Owned by {spec.pending_flow_id}"),
                 )
             )
         else:
-            params.append(pytest.param(spec, id=spec.engine))
+            params.append(pytest.param(spec, id=param_id))
     return params
 
 
@@ -695,15 +760,6 @@ def _resolve_live_config(
             )
         )
         return SpannerConfig.from_url(resolved_dsn)
-    if spec.engine == "mssql":
-        dsn = os.environ.get("VERTEBRA_CONFORMANCE_MSSQL_DSN", "").strip()
-        if dsn:
-            return MSSQLConfig.from_url(dsn)
-        if spec.container_fixture is not None and os.environ.get("VERTEBRA_CONFORMANCE_DOCKER") == "1":
-            fixture_cfg = request.getfixturevalue(spec.container_fixture)
-            assert isinstance(fixture_cfg, BaseDatabaseConfig)
-            return fixture_cfg
-        pytest.skip("MSSQL conformance requires VERTEBRA_CONFORMANCE_MSSQL_DSN or VERTEBRA_CONFORMANCE_DOCKER=1")
     for env_key in spec.env_dsn_vars:
         env_dsn = os.environ.get(env_key, "").strip()
         if env_dsn:
@@ -717,8 +773,12 @@ def _resolve_live_config(
         loopback_server = mysql_mod.MySQLWireTestServer()
         request.addfinalizer(loopback_server.close)
         return MySQLConfig.from_url(loopback_server.dsn)
+    if spec.engine == "mssql":
+        pytest.skip("MSSQL conformance requires VERTEBRA_CONFORMANCE_MSSQL_DSN or VERTEBRA_CONFORMANCE_DOCKER=1")
     if spec.engine == "oracle":
         pytest.skip("Oracle conformance requires VERTEBRA_CONFORMANCE_ORACLE_DSN or VERTEBRA_CONFORMANCE_DOCKER=1")
+    if spec.engine == "postgres":
+        pytest.skip(f"PostgreSQL conformance requires {' or '.join(spec.env_dsn_vars)} or {_CONFORMANCE_DOCKER_ENV}=1")
     return spec.config_cls.from_url(spec.sample_url)
 
 
@@ -861,7 +921,6 @@ def test_engine_url_parsing_and_pool_key_contract(spec: EngineConformanceSpec) -
 async def test_engine_driver_resolution_and_provide_driver(
     spec: EngineConformanceSpec,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Every SQL/analytical config resolves its paired sync/async driver classes and registers cleanly."""
     url = (
@@ -879,18 +938,6 @@ async def test_engine_driver_resolution_and_provide_driver(
     registry.register(spec.engine, config)
     if spec.engine == "duckdb":
         _require_native_module(spec)
-    if spec.engine in _FAIL_LOUD_DRIVER_ENGINES:
-        assert spec.native_extension_module is not None
-        monkeypatch.setitem(sys.modules, spec.native_extension_module, None)
-        reset_dependency_cache(spec.native_extension_module)
-        try:
-            with pytest.raises(MissingDependencyError, match=rf"vertebra-core\[{spec.engine}\]"):
-                provide_driver(spec.engine, sync=True, registry=registry)
-            with pytest.raises(MissingDependencyError, match=rf"vertebra-core\[{spec.engine}\]"):
-                provide_driver(spec.engine, sync=False, registry=registry)
-        finally:
-            reset_dependency_cache(spec.native_extension_module)
-        return
     sync_driver = provide_driver(spec.engine, sync=True, registry=registry)
     async_driver = provide_driver(spec.engine, sync=False, registry=registry)
     try:
@@ -1455,6 +1502,9 @@ def _resolve_cache_config(
     request: pytest.FixtureRequest,
 ) -> RedisConfig:
     """Resolve a live `RedisConfig` or `ValkeyConfig` from an env DSN or `pytest-databases` container, skipping otherwise."""
+    selected_engines = _parse_conformance_env_filter(os.environ, "VERTEBRA_CONFORMANCE_ENGINES")
+    if selected_engines and cache_spec.engine not in selected_engines:
+        pytest.skip(f"{cache_spec.engine} conformance excluded by VERTEBRA_CONFORMANCE_ENGINES")
     for env_key in cache_spec.env_dsn_vars:
         value = os.environ.get(env_key, "").strip()
         if value:
@@ -1661,7 +1711,7 @@ def test_live_engine_params_mark_strict_xfail_only_when_native_module_imports() 
         native_extension_module="vertebra._vtb_conformance_absent",
         pending_flow_id=None,
     )
-    params = _build_live_engine_params((absent_pending, present_pending, absent_plain))
+    params = _build_live_engine_params((absent_pending, present_pending, absent_plain), env={})
     assert [param.id for param in params] == ["absent", "present", "plain"]
     assert [[mark.name for mark in param.marks] for param in params] == [[], ["xfail"], []]
     assert params[1].marks[0].kwargs == {"strict": True, "reason": "Owned by native-probe-driver"}
@@ -1696,3 +1746,106 @@ def test_mssql_driver_raises_missing_dependency_when_wheel_absent(
             AsyncMSSQLDriver()
     finally:
         reset_dependency_cache("vertebra._mssql")
+
+
+def test_postgres_conformance_spec_and_version_matrix() -> None:
+    """PostgreSQL conformance enables pipelines, native types DDL, clears pending gates, and expands 14..18."""
+    pg_spec = next(spec for spec in ENGINE_SPECS if spec.engine == "postgres")
+    assert pg_spec.supports_pipeline is True
+    assert pg_spec.pending_flow_id is None
+    assert pg_spec.native_extension_module == "vertebra._postgres"
+    assert "BYTEA" in pg_spec.types_ddl
+    assert "NUMERIC(18, 4)" in pg_spec.types_ddl
+    assert "TIMESTAMPTZ" in pg_spec.types_ddl
+    assert "JSONB" in pg_spec.types_ddl
+    assert "BLOB" not in pg_spec.types_ddl
+
+    params = _build_live_engine_params((pg_spec,), env={})
+    assert [param.id for param in params] == [
+        "postgres-14",
+        "postgres-15",
+        "postgres-16",
+        "postgres-17",
+        "postgres-18",
+    ]
+    assert all(param.marks == () for param in params)
+    assert [param.values[0].container_fixture for param in params] == [
+        "vtb_postgres_14_config",
+        "vtb_postgres_15_config",
+        "vtb_postgres_16_config",
+        "vtb_postgres_17_config",
+        "vtb_postgres_18_config",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("env", "expected_ids"),
+    [
+        (
+            {"VERTEBRA_CONFORMANCE_ENGINES": "postgres", "VERTEBRA_CONFORMANCE_POSTGRES_VERSION": "17"},
+            ["postgres-17"],
+        ),
+        (
+            {"VERTEBRA_CONFORMANCE_ENGINES": "postgres", "VERTEBRA_CONFORMANCE_POSTGRES_VERSION": "14, 18"},
+            ["postgres-14", "postgres-18"],
+        ),
+        (
+            {"VERTEBRA_CONFORMANCE_ENGINES": "sqlite, postgres", "VERTEBRA_CONFORMANCE_POSTGRES_VERSION": "16"},
+            ["sqlite", "postgres-16"],
+        ),
+    ],
+)
+def test_live_engine_params_honor_engine_and_pg_version_env_filters(
+    env: dict[str, str],
+    expected_ids: list[str],
+) -> None:
+    """Verify conformance collection filters engines and PostgreSQL versions without pytest -k deselections."""
+    params = _build_live_engine_params(ENGINE_SPECS, env=env)
+    assert [param.id for param in params] == expected_ids
+
+
+def test_live_engine_params_reject_unknown_postgres_version() -> None:
+    """Verify unsupported VERTEBRA_CONFORMANCE_POSTGRES_VERSION tokens fail immediately at collection."""
+    with pytest.raises(ValueError, match="Unsupported VERTEBRA_CONFORMANCE_POSTGRES_VERSION"):
+        _build_live_engine_params(ENGINE_SPECS, env={"VERTEBRA_CONFORMANCE_POSTGRES_VERSION": "99"})
+
+
+@pytest.mark.parametrize(
+    ("cache_spec", "engines_env", "should_skip"),
+    [
+        (CACHE_ENGINE_SPECS[0], "postgres", True),
+        (CACHE_ENGINE_SPECS[1], "postgres", True),
+        (CACHE_ENGINE_SPECS[0], "redis", False),
+        (CACHE_ENGINE_SPECS[1], "postgres,valkey", False),
+    ],
+)
+def test_resolve_cache_config_honors_engine_env_filter(
+    cache_spec: CacheConformanceSpec,
+    engines_env: str,
+    should_skip: bool,
+    monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
+) -> None:
+    """Verify `_resolve_cache_config` skips non-selected cache engines before starting Docker fixtures."""
+    monkeypatch.setenv("VERTEBRA_CONFORMANCE_ENGINES", engines_env)
+    monkeypatch.setenv(cache_spec.env_dsn_vars[0], cache_spec.tcp_url)
+    if should_skip:
+        with pytest.raises(pytest.skip.Exception, match="excluded by VERTEBRA_CONFORMANCE_ENGINES"):
+            _resolve_cache_config(cache_spec, request)
+        return
+    resolved = _resolve_cache_config(cache_spec, request)
+    assert isinstance(resolved, cache_spec.config_cls)
+    assert resolved == cache_spec.config_cls.from_url(cache_spec.tcp_url)
+
+
+@pytest.mark.parametrize(
+    "type_case",
+    [case for case in SCALAR_TYPE_CASES if case.comparison_kind == "json"],
+    ids=[case.name for case in SCALAR_TYPE_CASES if case.comparison_kind == "json"],
+)
+def test_postgres_conformance_wraps_json_cases_with_pg_json(type_case: ScalarTypeCase) -> None:
+    """PostgreSQL conformance binds dicts and heterogeneous JSON lists via ``PgJson``."""
+    pg_spec = next(spec for spec in ENGINE_SPECS if spec.engine == "postgres")
+    bound = pg_spec.bind_scalar_case(type_case)
+    assert isinstance(bound, PgJson)
+    assert bound.value == type_case.input_value

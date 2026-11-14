@@ -56,7 +56,7 @@ jobs:
           - name: postgres
             path: src/rs/vertebra-postgres
             module: vertebra._postgres
-            exports: SyncPostgresClient AsyncPostgresClient
+            exports: SyncPostgresClient AsyncPostgresClient SyncPostgresPool AsyncPostgresPool SyncPostgresPortal AsyncPostgresPortal SyncPostgresArrowStream AsyncPostgresArrowStream SyncPostgresCopyOut SyncPostgresCopyIn AsyncPostgresCopyOut AsyncPostgresCopyIn AsyncPostgresListener AsyncPostgresReplication
           - name: spanner
             path: src/rs/vertebra-spanner
             module: vertebra._spanner
@@ -221,17 +221,51 @@ jobs:
               "mssql": ("SyncMSSQLClient", "AsyncMSSQLClient"),
               "mysql": ("SyncMySQLClient", "AsyncMySQLClient"),
               "oracle": ("SyncOracleClient", "AsyncOracleClient", "SyncOraclePool", "AsyncOraclePool"),
-              "postgres": ("SyncPostgresClient", "AsyncPostgresClient"),
+              "postgres": (
+                  "SyncPostgresClient",
+                  "AsyncPostgresClient",
+                  "SyncPostgresPool",
+                  "AsyncPostgresPool",
+                  "SyncPostgresPortal",
+                  "AsyncPostgresPortal",
+                  "SyncPostgresArrowStream",
+                  "AsyncPostgresArrowStream",
+                  "SyncPostgresCopyOut",
+                  "SyncPostgresCopyIn",
+                  "AsyncPostgresCopyOut",
+                  "AsyncPostgresCopyIn",
+                  "AsyncPostgresListener",
+                  "AsyncPostgresReplication",
+              ),
               "spanner": ("SyncSpannerClient", "AsyncSpannerClient"),
               "storage": ("SyncObjectStore", "AsyncObjectStore"),
           }.items():
               module = importlib.import_module(f"vertebra._{name}")
               assert pathlib.Path(module.__file__).is_relative_to(sys.prefix)
               assert all(hasattr(module, export) for export in exports)
+              assert all(isinstance(getattr(module, export), type) for export in exports if export[0].isupper())
+              assert all(not hasattr(_vertebra, export) for export in exports)
               assert importlib.metadata.version(f"vertebra-{name}") == vertebra.__version__
-          pg_mod = importlib.import_module("vertebra._postgres")
-          assert pg_mod.SyncPostgresClient(user="u", database="d").closed is True
-          assert pg_mod.AsyncPostgresClient(user="u", database="d").parameters == {}
+              if name == "postgres":
+                  assert module.GIL_USED is False
+                  assert isinstance(module.FREE_THREADED, bool)
+                  assert module.SyncPostgresClient(user="u", database="d").closed is True
+                  assert module.AsyncPostgresClient(user="u", database="d").parameters == {}
+                  sync_pool = module.SyncPostgresPool(
+                      user="u", database="d", sslmode="disable", min_size=0, max_size=2
+                  )
+                  async_pool = module.AsyncPostgresPool(
+                      user="u", database="d", sslmode="disable", min_size=0, max_size=2
+                  )
+                  sync_pool.validate_configuration(
+                      user="u", database="d", sslmode="disable", min_size=0, max_size=4
+                  )
+                  async_pool.validate_configuration(
+                      user="u", database="d", sslmode="disable", min_size=0, max_size=4
+                  )
+                  assert sync_pool.closed is False and async_pool.closed is False
+                  sync_pool.close()
+                  assert sync_pool.closed is True
           assert not hasattr(_vertebra, "Bundler")
           assert not hasattr(_vertebra, "SyncBigQueryClient")
           assert not hasattr(_vertebra, "SyncDuckDBClient")

@@ -26,7 +26,7 @@ app = Litestar(
 
 ### CLI Integration (`litestar run` Override & `vtb` CLI Extensions)
 
-- **`litestar run` CLI Override**: `VertebraPlugin` implements Litestar's `CLIPluginProtocol` (`on_cli_init(cli)` and `server_lifespan(app)`). When `VertebraPlugin` is registered on a `Litestar` app, running `litestar --app app:app run` launches the native Vertebra HTTP/IPC server supervisor while supporting all standard `litestar run` flags (`--host`, `--port`, `--wc` / `--web-concurrency`, `--reload`, `--debug`, `--pdb`) plus Vertebra runtime options (`--workers`, `--topology`, `--threads`, `--drain-timeout`, `--jit` / `--no-jit`, `--no-banner`).
+- **`litestar run` CLI Override**: `VertebraPlugin` implements Litestar's `CLIPluginProtocol` (`on_cli_init(cli)` and `server_lifespan(app)`). When `VertebraPlugin` is registered on a `Litestar` app, running `litestar --app app:app run` launches the native Vertebra HTTP/IPC server supervisor while supporting all standard `litestar run` flags (`--host`, `--port`, `--wc` / `--web-concurrency`, `--reload`, `--debug`, `--pdb`) plus Vertebra runtime options (`--workers`, `--topology`, `--threads`, `--loop`, `--drain-timeout`, `--jit` / `--no-jit`, `--no-banner`).
 - **Auto-Integration on `vtb run` / `vtb dev`**: Running an unmodified `Litestar`, `FastAPI`, `Starlette`, or `Flask` application with `vtb run app:app` (or `vtb --app app:app run`) automatically attaches and finalizes the corresponding `VertebraPlugin` (`ensure_vertebra_integration`) when native acceleration is enabled.
 - **Pluggable `vtb` CLI (`CLIPlugin`, `VertebraExtensionGroup`, `VertebraEnv`)**: Both `vertebra.App(plugins=[...])` and host-framework plugins implementing `on_cli_init(cli)` can register custom subcommands on `vtb`. Command callbacks declaring `app` or `env: VertebraEnv` parameters automatically receive the resolved application instance and `VertebraEnv` context when invoked via `vtb --app app:app <subcommand>`.
 
@@ -51,18 +51,15 @@ Vertebra provides modular, independently installable extensions for the Litestar
 | **Vite** | `vertebra.extensions.litestar.vite` | `vite` | `VitePlugin` integration with automatic resolution of wheel-native `@vertebra/client` assets. |
 | **AsyncAPI** | `vertebra.extensions.litestar.asyncapi` | `asyncapi` | Event and schema documentation for background tasks and WebSocket channels. |
 | **HTMX** | `vertebra.extensions.litestar.htmx` | `htmx` | HTMX response headers, partials, and push-URL directives. |
-| **SAQ** | `vertebra.extensions.litestar.saq` | `saq` | Redis/Valkey-backed task scheduling and worker integration. |
 
-Example of setting up Litestar with zero-boilerplate queues and security:
+Configure Litestar integration with `VertebraPlugin` and `VertebraConfig` (and attach any optional `vertebra.extensions.litestar.*` helper plugins listed above):
 
 ```python
 from litestar import Litestar
 from vertebra.extensions.litestar import (
     VertebraConfig,
     VertebraPlugin,
-    create_shm_queue_config,
 )
-from vertebra.extensions.litestar.security import JWTAuthenticationMechanism
 
 app = Litestar(
     plugins=[
@@ -82,23 +79,20 @@ Vertebra provides first-class support for `sqlspec` (`>=0.69.0`) across 8 databa
 - **Object Storage & Arrow Export**: `ObjectStoreBackend` integrates with `sqlspec.storage.storage_registry` and provides PyArrow IPC and Parquet dataset streaming.
 
 ```python
-from sqlspec.adapters.sqlite.config import SqliteConfig
 from vertebra.extensions.sqlspec import (
     SQLiteSyncConfig,
     create_sqlspec_plugin,
 )
 
-config = SQLiteSyncConfig(
-    connection_config=SqliteConfig(path=":memory:"),
-)
+config = SQLiteSyncConfig(path=":memory:")
 sqlspec_plugin = create_sqlspec_plugin(config)
 ```
 
-## SQLAlchemy 2.1, Advanced Alchemy 1.12 & `+vtb` Dialects (`vertebra.extensions.alchemy`, `vertebra.extensions.sqlalchemy`)
+## SQLAlchemy 2.0+, Advanced Alchemy 1.12 & `+vtb` Dialects (`vertebra.extensions.alchemy`, `vertebra.extensions.sqlalchemy`)
 
-`vertebra.extensions.alchemy` and `vertebra.extensions.sqlalchemy` provide drop-in SQLAlchemy 2.1 and Advanced Alchemy 1.12 support backed by Vertebra's native drivers and connection leasing:
+`vertebra.extensions.alchemy` and `vertebra.extensions.sqlalchemy` provide drop-in SQLAlchemy 2.0.36+ and Advanced Alchemy 1.12+ support backed by Vertebra's native drivers and connection leasing:
 
-- **Dialects**: Registers `+vertebra`, `+vtb`, `+vertebra_async`, and `+vtb_async` URL schemes (`postgresql+vtb://`, `postgresql+vtb_async://`, `mysql+vtb://`, `sqlite+vtb://`, `oracle+vtb://`, `mssql+vtb://`, `duckdb+vtb://`, `bigquery+vtb://`, `spanner+vtb://`, `spangres+vtb://`) with automatic `NullPool` wiring and Cloud SQL / AlloyDB dialers. `oracle+vtb://` and `mssql+vtb://` connections raise `MissingDependencyError` because their native driver packages are not yet published, `duckdb+vtb://` requires the `duckdb` package, and any URL that `DatabaseRegistry.parse_url` cannot parse raises the DB-API `InterfaceError`.
+- **Dialects**: Registers `+vertebra`, `+vtb`, `+vertebra_async`, and `+vtb_async` URL schemes (`postgresql+vtb://`, `postgresql+vtb_async://`, `mysql+vtb://`, `sqlite+vtb://`, `oracle+vtb://`, `mssql+vtb://`, `duckdb+vtb://`, `bigquery+vtb://`, `spanner+vtb://`, `spangres+vtb://`) with automatic `NullPool` wiring and Cloud SQL / AlloyDB dialers. Engine wheels install via `vertebra-core[postgres]`, `[mysql]`, `[oracle]`, `[mssql]`, `[duckdb]`, `[bigquery]`, and `[spanner]` (raising `MissingDependencyError` if the corresponding extra wheel is absent, and DB-API `InterfaceError` when `DatabaseRegistry.parse_url` rejects a malformed URL).
 - **Type System**: Native `Vector(dimensions)` for vector embeddings and `BinaryJSON` for PostgreSQL `JSONB` and Oracle `OSON`.
 - **Object Storage Attachments**: `ObjectStoreBackend` implements Advanced Alchemy's `advanced_alchemy.types.file_object.StorageBackend`, enabling transactional file attachments on models via `FileObject` and `StoredObject`.
 - **Alembic Custom Operations**: Autogenerates vector index and view DDL operations (`CreateVectorIndexOp`, `CreateViewOp`, `DropViewOp`).
@@ -111,13 +105,11 @@ buffers writes until commit. Use the native driver's transaction or batching API
 for its engine-specific scope, separately from the SQLAlchemy connection.
 
 ```python
-from advanced_alchemy.types.file_object import FileObject
 from vertebra.extensions.alchemy import (
     ObjectStoreBackend,
     create_alchemy_plugin,
     create_async_alchemy_config,
 )
-from vertebra.extensions.sqlalchemy import Vector
 from vertebra.storage import SyncObjectStore
 
 alchemy_config = create_async_alchemy_config(
@@ -152,16 +144,17 @@ class LookupReply(msgspec.Struct):
     available: int
 
 
-class InventoryService:
-    @grpc_method("/inventory.Inventory/Lookup")
-    async def lookup(self, request: LookupRequest, ctx: GrpcContext) -> LookupReply:
-        return LookupReply(sku=request.sku, available=42)
-
-
 registry = GrpcServiceRegistry()
-registry.register(InventoryService())
+
+
+@grpc_method(service="Inventory", package="inventory", name="Lookup")
+async def lookup(request: LookupRequest, ctx: GrpcContext) -> LookupReply:
+    return LookupReply(sku=request.sku, available=42)
+
+
+registry.register(lookup)
 schema_gen = ProtobufSchemaGenerator(package="inventory")
-proto_source = schema_gen.generate([LookupRequest, LookupReply])
+proto_source = schema_gen.generate_from_registry(registry)
 ```
 
 ## Oracle APEX Gateway, Islands & 26ai Duality Views (`vertebra.extensions.apex`)
@@ -174,4 +167,4 @@ Modernize Oracle APEX applications incrementally without a full rewrite using `v
 
 ## Shared-Memory Session Broker (`vertebra.extensions.broker`)
 
-`BrokerPlugin` (`BrokerConfig`, `SyncSHMSessionBroker / AsyncSHMSessionBroker`, `LeaseBroker`, `StatementCache`) manages cross-worker database connection leases and prepared statement plans over shared memory so N Python worker processes never multiply database connection counts.
+`BrokerPlugin` (`BrokerConfig`, `SyncSHMBrokerTransport` / `AsyncSHMBrokerTransport`, `SyncInMemoryBrokerTransport` / `AsyncInMemoryBrokerTransport`, `SyncConnectionLease` / `AsyncConnectionLease`, `StatementPlan`) manages cross-worker database connection leases and prepared statement plans over shared memory so N Python worker processes never multiply database connection counts.

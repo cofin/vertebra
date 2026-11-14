@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import warnings
+from collections.abc import Callable
 from types import SimpleNamespace
+from typing import Any
 
 import click
 import msgspec
@@ -11,7 +14,12 @@ import pytest
 from advanced_alchemy.extensions.litestar import SQLAlchemyPlugin
 from advanced_alchemy.types.file_object import FileObject
 from advanced_alchemy.types.file_object.registry import storages
+from litestar import Litestar, get
 from litestar.config.app import AppConfig
+from litestar.di import NamedDependency
+from litestar.exceptions import LitestarDeprecationWarning
+from litestar.params import SkipValidation
+from litestar.testing import TestClient
 
 import vertebra
 import vertebra.extensions.alchemy as alchemy_ext
@@ -29,6 +37,14 @@ from vertebra.cli.plugin_registry import (
     discover_entry_point_commands,
     register_app_cli_plugins,
 )
+from vertebra.db.adapters.bigquery import AsyncBigQueryDriver, SyncBigQueryDriver
+from vertebra.db.adapters.duckdb import AsyncDuckDBDriver, SyncDuckDBDriver
+from vertebra.db.adapters.mssql import AsyncMSSQLDriver, SyncMSSQLDriver
+from vertebra.db.adapters.mysql import AsyncMySQLDriver, SyncMySQLDriver
+from vertebra.db.adapters.oracle import AsyncOracleDriver, SyncOracleDriver
+from vertebra.db.adapters.postgres import AsyncPostgreSQLDriver, SyncPostgreSQLDriver
+from vertebra.db.adapters.spanner import AsyncSpannerDriver, SyncSpannerDriver
+from vertebra.db.adapters.sqlite import AsyncSQLiteDriver, SyncSQLiteDriver
 from vertebra.extensions.alchemy import (
     AsyncSHMBrokerTransport,
     AsyncSHMSessionBroker,
@@ -55,8 +71,40 @@ from vertebra.extensions.litestar import (
 )
 from vertebra.extensions.sqlalchemy.dialects import ALL_DIALECT_SCHEMES, DIALECT_DESCRIPTORS
 from vertebra.extensions.sqlspec import (
+    BigQueryAsyncConfig,
+    BigQueryAsyncDriver,
+    BigQuerySyncConfig,
+    BigQuerySyncDriver,
+    DuckDBAsyncConfig,
+    DuckDBAsyncDriver,
+    DuckDBSyncConfig,
+    DuckDBSyncDriver,
+    MSSQLAsyncConfig,
+    MSSQLAsyncDriver,
+    MSSQLSyncConfig,
+    MSSQLSyncDriver,
+    MySQLAsyncConfig,
+    MySQLAsyncDriver,
+    MySQLSyncConfig,
+    MySQLSyncDriver,
+    OracleAsyncConfig,
+    OracleAsyncDriver,
+    OracleSyncConfig,
+    OracleSyncDriver,
+    PostgreSQLAsyncConfig,
+    PostgreSQLAsyncDriver,
+    PostgreSQLSyncConfig,
+    PostgreSQLSyncDriver,
     ProxyAsyncConfig,
     ProxySyncConfig,
+    SpannerAsyncConfig,
+    SpannerAsyncDriver,
+    SpannerSyncConfig,
+    SpannerSyncDriver,
+    SQLiteAsyncConfig,
+    SQLiteAsyncDriver,
+    SQLiteSyncConfig,
+    SQLiteSyncDriver,
     SQLSpecPlugin,
     create_sqlspec_plugin,
 )
@@ -179,6 +227,140 @@ def test_sqlspec_generic_configs_and_pool_defaults() -> None:
     assert "sqlspec" in app_config.state
     assert "db_session" in app_config.dependencies
     assert "db_connection" in app_config.dependencies
+
+
+@pytest.mark.parametrize(
+    ("config_factory", "expected_connection_type", "expected_driver_type"),
+    [
+        (lambda: SQLiteSyncConfig(path=":memory:", share_pool=False), SyncSQLiteDriver, SQLiteSyncDriver),
+        (lambda: SQLiteAsyncConfig(path=":memory:", share_pool=False), AsyncSQLiteDriver, SQLiteAsyncDriver),
+        (
+            lambda: PostgreSQLSyncConfig(dsn="postgresql://user@localhost:5432/app", share_pool=False),
+            SyncPostgreSQLDriver,
+            PostgreSQLSyncDriver,
+        ),
+        (
+            lambda: PostgreSQLAsyncConfig(dsn="postgresql://user@localhost:5432/app", share_pool=False),
+            AsyncPostgreSQLDriver,
+            PostgreSQLAsyncDriver,
+        ),
+        (
+            lambda: MySQLSyncConfig(dsn="mysql://user@localhost:3306/app", share_pool=False),
+            SyncMySQLDriver,
+            MySQLSyncDriver,
+        ),
+        (
+            lambda: MySQLAsyncConfig(dsn="mysql://user@localhost:3306/app", share_pool=False),
+            AsyncMySQLDriver,
+            MySQLAsyncDriver,
+        ),
+        (
+            lambda: OracleSyncConfig(dsn="oracle://user@localhost:1521/orclpdb1", share_pool=False),
+            SyncOracleDriver,
+            OracleSyncDriver,
+        ),
+        (
+            lambda: OracleAsyncConfig(dsn="oracle://user@localhost:1521/orclpdb1", share_pool=False),
+            AsyncOracleDriver,
+            OracleAsyncDriver,
+        ),
+        (
+            lambda: MSSQLSyncConfig(dsn="mssql://user@localhost:1433/app", share_pool=False),
+            SyncMSSQLDriver,
+            MSSQLSyncDriver,
+        ),
+        (
+            lambda: MSSQLAsyncConfig(dsn="mssql://user@localhost:1433/app", share_pool=False),
+            AsyncMSSQLDriver,
+            MSSQLAsyncDriver,
+        ),
+        (lambda: DuckDBSyncConfig(path=":memory:", share_pool=False), SyncDuckDBDriver, DuckDBSyncDriver),
+        (lambda: DuckDBAsyncConfig(path=":memory:", share_pool=False), AsyncDuckDBDriver, DuckDBAsyncDriver),
+        (lambda: BigQuerySyncConfig(project_id="proj", share_pool=False), SyncBigQueryDriver, BigQuerySyncDriver),
+        (lambda: BigQueryAsyncConfig(project_id="proj", share_pool=False), AsyncBigQueryDriver, BigQueryAsyncDriver),
+        (
+            lambda: SpannerSyncConfig(
+                project_id="proj",
+                instance_id="inst",
+                database_id="db",
+                share_pool=False,
+            ),
+            SyncSpannerDriver,
+            SpannerSyncDriver,
+        ),
+        (
+            lambda: SpannerAsyncConfig(
+                project_id="proj",
+                instance_id="inst",
+                database_id="db",
+                share_pool=False,
+            ),
+            AsyncSpannerDriver,
+            SpannerAsyncDriver,
+        ),
+    ],
+    ids=[
+        "sqlite-sync",
+        "sqlite-async",
+        "postgres-sync",
+        "postgres-async",
+        "mysql-sync",
+        "mysql-async",
+        "oracle-sync",
+        "oracle-async",
+        "mssql-sync",
+        "mssql-async",
+        "duckdb-sync",
+        "duckdb-async",
+        "bigquery-sync",
+        "bigquery-async",
+        "spanner-sync",
+        "spanner-async",
+    ],
+)
+def test_sqlspec_native_adapter_configs_wire_litestar_di(
+    config_factory: Callable[[], Any],
+    expected_connection_type: type[Any],
+    expected_driver_type: type[Any],
+) -> None:
+    """Verify every native SQLSpec adapter config declares concrete connection_type and wires Litestar DI."""
+    cfg = config_factory()
+    assert cfg.connection_type is expected_connection_type
+    assert cfg.connection_type is not Any
+    assert cfg.driver_type is expected_driver_type
+
+    app_config = AppConfig()
+    create_sqlspec_plugin(cfg).on_app_init(app_config)
+    assert "db_session" in app_config.dependencies
+    assert "db_connection" in app_config.dependencies
+    assert expected_connection_type in app_config.signature_types
+    assert expected_driver_type in app_config.signature_types
+
+
+def test_sqlspec_sqlite_litestar_di_runtime_execution() -> None:
+    """Verify SQLiteSyncConfig injects both db_session and db_connection through Litestar without warnings."""
+    sqlite_cfg = SQLiteSyncConfig(path=":memory:", share_pool=False)
+
+    @get("/health-db", sync_to_thread=False)
+    def check_sqlite(
+        db_session: NamedDependency[SkipValidation[SQLiteSyncDriver]],
+        db_connection: NamedDependency[SkipValidation[SyncSQLiteDriver]],
+    ) -> dict[str, Any]:
+        return {
+            "rows": db_session.select("SELECT 1 AS ok"),
+            "same_driver": db_session.native_driver is db_connection,
+        }
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        app = Litestar(route_handlers=[check_sqlite], plugins=[create_sqlspec_plugin(sqlite_cfg)])
+        with TestClient(app) as client:
+            response = client.get("/health-db")
+            assert response.status_code == 200
+            assert response.json() == {"rows": [{"ok": 1}], "same_driver": True}
+
+    litestar_deprecations = [record for record in caught if issubclass(record.category, LitestarDeprecationWarning)]
+    assert litestar_deprecations == []
 
 
 def test_alchemy_generic_configs_and_attachment_storage() -> None:

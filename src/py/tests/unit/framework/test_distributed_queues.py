@@ -1121,22 +1121,21 @@ async def test_oracle_queue_backend_requires_oracledb_and_executor(
 
 
 @pytest.mark.anyio
-async def test_postgres_queue_backend_requires_psycopg_and_executor(
+async def test_postgres_queue_backend_requires_native_postgres_and_executor(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """PostgreSQLQueueBackend raises MissingDependencyError when psycopg is absent and ImproperConfigurationError without executor."""
-    monkeypatch.setitem(sys.modules, "psycopg", None)
-    reset_dependency_cache("psycopg")
+    """PostgreSQLQueueBackend raises MissingDependencyError when vertebra._postgres is absent and ImproperConfigurationError without executor."""
+    monkeypatch.setitem(sys.modules, "vertebra._postgres", None)
+    reset_dependency_cache("vertebra._postgres")
     try:
         with pytest.raises(MissingDependencyError) as exc_info:
             PostgreSQLQueueBackend(QueueConfig(backend_url="postgresql://localhost:5432/vtb"))
-        assert exc_info.value.package == "psycopg"
-        assert exc_info.value.install_package == "psycopg[binary,pool]"
-        assert exc_info.value.hint == "Install it with: uv add psycopg[binary,pool]"
+        assert exc_info.value.package == "vertebra-core[postgres]"
+        assert "vertebra-core[postgres]" in exc_info.value.hint
 
         with pytest.raises(MissingDependencyError) as svc_exc:
             QueueService(QueueConfig(backend_url="postgres://localhost:5432/vtb"))
-        assert svc_exc.value.package == "psycopg"
+        assert svc_exc.value.package == "vertebra-core[postgres]"
 
         fake = _FakePostgreSQLQueueExecutor()
         assert isinstance(fake, PostgreSQLQueueExecutor)
@@ -1158,12 +1157,12 @@ async def test_postgres_queue_backend_requires_psycopg_and_executor(
         assert await service.drain_once(("io",)) == [42]
         await service.close()
 
-        monkeypatch.setitem(sys.modules, "psycopg", types.ModuleType("psycopg"))
-        reset_dependency_cache("psycopg")
+        monkeypatch.setitem(sys.modules, "vertebra._postgres", types.ModuleType("vertebra._postgres"))
+        reset_dependency_cache("vertebra._postgres")
         with pytest.raises(ImproperConfigurationError, match="requires a PostgreSQLQueueExecutor"):
             PostgreSQLQueueBackend(QueueConfig(backend_url="postgresql://localhost:5432/vtb"))
     finally:
-        reset_dependency_cache("psycopg")
+        reset_dependency_cache("vertebra._postgres")
 
 
 def test_redis_queue_backend_requires_redis_and_host(

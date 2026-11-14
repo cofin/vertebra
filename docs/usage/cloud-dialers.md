@@ -12,7 +12,7 @@ flowchart LR
 
 ## Direct Zero-Sidecar Connections
 
-Configure `SyncCloudSQLDialer` / `AsyncCloudSQLDialer` or `SyncAlloyDBDialer` / `AsyncAlloyDBDialer` with Application Default Credentials and optional automatic IAM database authentication (`enable_iam_auth=True`):
+Configure `PostgreSQLConfig` with `cloud_sql_instance` / `alloydb_instance_uri` directly for integrated pooling, or construct `SyncCloudSQLDialer` / `AsyncCloudSQLDialer` and `SyncAlloyDBDialer` / `AsyncAlloyDBDialer` with Application Default Credentials and automatic IAM database authentication (`enable_iam_auth=True`):
 
 ```python
 from vertebra.db import (
@@ -20,6 +20,20 @@ from vertebra.db import (
     CloudSQLConfig,
     SyncAlloyDBDialer,
     SyncCloudSQLDialer,
+)
+from vertebra.db.adapters.postgres import PostgreSQLConfig
+
+pg_cloud_sql = PostgreSQLConfig(
+    dsn="postgresql://iam_user@localhost/orders",
+    cloud_sql_instance="my-project:us-central1:orders-db",
+    enable_iam_auth=True,
+)
+pg_alloydb = PostgreSQLConfig(
+    dsn="postgresql://iam_user@localhost/orders",
+    alloydb_instance_uri=(
+        "projects/my-project/locations/us-central1/clusters/prod/instances/primary"
+    ),
+    enable_iam_auth=True,
 )
 
 cloudsql = SyncCloudSQLDialer(
@@ -43,5 +57,5 @@ alloydb = SyncAlloyDBDialer(
 
 - **Cloud SQL (`CloudSQLConfig`, `SyncCloudSQLDialer`, `AsyncCloudSQLDialer`)**: Parses `project:region:instance` (including domain-scoped projects), fetches ephemeral X.509 client certificates via the SQL Admin `generateEphemeralCert` API, and establishes TLS 1.3 connections on port `3307` with custom `project:instance` server certificate verification across PostgreSQL, MySQL, and SQL Server.
 - **AlloyDB (`AlloyDBConfig`, `SyncAlloyDBDialer`, `AsyncAlloyDBDialer`)**: Parses `projects/<p>/locations/<l>/clusters/<c>/instances/<i>` URIs, negotiates client certificates via `generateClientCertificate`, and executes the port `5433` protobuf `MetadataExchangeRequest` handshake (`BUILT_IN` or `IAM` token auth).
-- **Automatic Session GUCs**: When connected to AlloyDB or when `enable_columnar_engine=True` is set on `PostgreSQLConfig`, `build_session_gucs` enables `alloydb.enable_columnar_engine=on`.
+- **Automatic Session GUCs**: When `alloydb_instance_uri` is set or `enable_alloydb_columnar_engine=True` is configured on `PostgreSQLConfig`, `build_session_gucs` enables both `google_columnar_engine.enabled=on` and `alloydb.enable_columnar_engine=on`.
 - **In-Database Vector Embeddings**: Pair AlloyDB connections with [`PushdownEmbedder` with `PostgresEmbeddingPushdown`](embeddings-and-vectors.md) to push `embedding()` execution directly into SQL.

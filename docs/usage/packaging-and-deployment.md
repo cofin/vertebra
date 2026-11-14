@@ -4,7 +4,7 @@ Deploy Vertebra applications as standard Python wheels (`vtb run ...`), containe
 
 ## Standalone & Single-File Binaries (`vtb build`)
 
-`vertebra.build.packaging` bundles your Python application, compiled Rust extensions (`_vertebra`, `_bundler`, `_storage`, `_bigquery`, `_spanner`), Python Build Standalone runtime, and frontend assets into a relocatable directory (`StandaloneBuilder`) or a self-extracting single-file binary with SHA-256 verification (`OnefileBuilder`):
+`vertebra.build.packaging` bundles your Python application, compiled Rust extensions (`_vertebra`, `_bundler`, `_storage`, `_bigquery`, `_duckdb`, `_mssql`, `_mysql`, `_oracle`, `_postgres`, `_spanner`), Python Build Standalone runtime, and frontend assets into a relocatable directory (`StandaloneBuilder`) or a self-extracting single-file binary with SHA-256 verification (`OnefileBuilder`):
 
 ```bash
 vtb build --standalone --onefile
@@ -20,12 +20,14 @@ from vertebra.build import BuildConfig
 from vertebra.build.packaging import BuildTarget, OnefileBuilder, StandaloneBuilder
 
 config = BuildConfig.load(Path("."))
+target = BuildTarget.detect_host()
 standalone = StandaloneBuilder(
     project_dir=Path("."),
-    target=BuildTarget.current(),
+    target=target,
     entrypoint=config.app or "app:app",
 )
-onefile = OnefileBuilder(project_dir=Path("."), entrypoint=config.app or "app:app")
+dist_dir = standalone.build(Path("dist/standalone"))
+onefile = OnefileBuilder(dist_dir=dist_dir, target=target)
 ```
 
 ## TypeScript, Zod, OpenAPI & Protobuf Codegen (`vertebra.build.codegen`)
@@ -38,14 +40,14 @@ vtb js generate-types
 
 ## Production Performance & Compiler Optimization
 
-Vertebra official release distribution wheels (`vertebra-core` across `linux-x86_64`, `linux-aarch64`, and macOS `arm64`/`x86_64`) ship the pre-compiled relocatable `vertebra/bin/vertebra-server` binary optimized with LLVM Profile-Guided Optimization (PGO) using `$ORIGIN`/`@loader_path` relative rpaths. At runtime, `EmbeddedPythonRuntime.require_shared_library` verifies a shared `libpython` installation (`ENABLE_SHARED=1`, such as `uv python install`) unless `VERTEBRA_SERVER_BINARY` overrides the binary path. Wheel packaging and relocatable `vtb run` smoke execution can be verified with `make core-wheel-check`.
+Vertebra official release distribution wheels (`vertebra-core` across `linux-x86_64`, `linux-aarch64`, and macOS `arm64`/`x86_64`) ship the pre-compiled relocatable `vertebra/bin/vertebra-server` release binary using `$ORIGIN`/`@loader_path` relative rpaths. At runtime, `EmbeddedPythonRuntime.require_shared_library` verifies a shared `libpython` installation (`ENABLE_SHARED=1`, such as `uv python install`) unless `VERTEBRA_SERVER_BINARY` overrides the binary path.
 
 ## Container Deployment & Process Supervision
 
 When running inside Docker, Kubernetes, or Cloud Run:
 
 1. **Automatic CPU & Memory Detection**: `CgroupQuota.effective_cpu_count()` reads `/sys/fs/cgroup/cpu.max` so `VERTEBRA_THREADS` matches the container's CPU limit automatically.
-2. **Shared-Memory Allocation (`ShmAllocationPolicy`)**: Uses anonymous `memfd_create` descriptors passed over `SCM_RIGHTS` UNIX sockets (or `/dev/shm` when available) so `--topology shm` works cleanly even on read-only container root filesystems.
+2. **Shared-Memory Allocation (`SHMAllocationPolicy`)**: Uses anonymous `memfd_create` descriptors passed over `SCM_RIGHTS` UNIX sockets (or `/dev/shm` when available) so `--topology shm` works cleanly even on read-only container root filesystems.
 3. **Process Supervision (`vertebra.supervisor`)**: In multi-worker deployments (`--workers > 1`), `run_supervisor` monitors worker processes, coordinates graceful `SIGTERM` drains, and restarts crashed workers.
 4. **TLS Trust Store for Google Cloud Clients**: The Spanner Data and BigQuery Storage gRPC clients trust the operating system certificate store plus bundled Mozilla roots (`webpki-roots`). Spanner Database Admin DDL (`update_database_ddl`) runs over REST and uses the operating system trust store (`rustls-native-certs`), so minimal container images that execute Spanner DDL must include a system CA bundle (such as `ca-certificates`). Standard proxy environment variables (`HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`, `NO_PROXY`) apply to REST calls.
 
@@ -61,6 +63,11 @@ policy = WASMSandboxPolicy(
     max_fuel=5_000_000,
     epoch_timeout_ms=250,
     allow_network=False,
+)
+module = WASMModuleConfig(
+    name="transform",
+    wasm_source="plugins/transform.wasm",
+    policy=policy,
 )
 host = WASMPluginHost()
 ```

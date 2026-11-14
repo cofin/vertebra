@@ -93,7 +93,8 @@ knowledge = [
   ".agents/bundles/knowledge/architecture/runtime/shm-supervision-and-recovery.md",
   ".agents/bundles/knowledge/domains/data/database-drivers-and-dialers.md",
   ".agents/bundles/knowledge/domains/data/postgres-native-driver.md",
-  ".agents/bundles/knowledge/domains/data/postgres-limitations.md"
+  ".agents/bundles/knowledge/domains/data/postgres-limitations.md",
+  ".agents/bundles/knowledge/domains/data/database-driver-limitations.md"
 ]
 focused_commands = [
   "cargo test --manifest-path src/rs/Cargo.toml -p vertebra-core --test it",
@@ -229,7 +230,11 @@ knowledge = [
   ".agents/bundles/knowledge/patterns/python/serialization-and-utils.md",
   ".agents/bundles/knowledge/patterns/python/hot-path-and-async-dispatch.md",
   ".agents/bundles/knowledge/domains/framework/routing-and-app.md",
-  ".agents/bundles/knowledge/domains/framework/subdomains.md"
+  ".agents/bundles/knowledge/domains/framework/subdomains.md",
+  ".agents/bundles/knowledge/domains/data/database-drivers-and-dialers.md",
+  ".agents/bundles/knowledge/domains/data/postgres-native-driver.md",
+  ".agents/bundles/knowledge/domains/data/postgres-limitations.md",
+  ".agents/bundles/knowledge/domains/extensions/sqlspec-alchemy-and-dialects.md"
 ]
 focused_commands = ["uv run pytest src/py/tests/unit"]
 

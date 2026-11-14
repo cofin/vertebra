@@ -39,9 +39,9 @@ sources:
 
 <!-- truth: start -->
 - `MCPSessionStore` stores legacy `initialize` sessions and `resources/subscribe` subscriptions strictly in per-process memory with no cross-worker or external backing store [^mcp-sessions].
-- `@vertebra/client` `McpClient` remains a stateless MCP `2026-07-28` HTTP client and does not negotiate legacy `initialize` / `GET /mcp` SSE sessions [^mcp-ts-client].
+- `@vertebra/client` `McpClient` operates as a stateless MCP `2026-07-28` HTTP client and does not negotiate legacy `initialize` / `GET /mcp` SSE sessions [^mcp-ts-client].
 - Native `App` routes constructed via `AgentPlugin.mount_native` supply headers without socket peer addresses, so `MtlsIdentitySource` refuses header identity on header-only native paths [^mcp-identity] [^agent-plugin].
-- `MCPRegistry(ToolRegistry)` remains as a host-extension compatibility shim pending unified extension registry cleanup [^mcp-registry].
+- `MCPRegistry(ToolRegistry)` acts as a host-extension compatibility alias over `ToolRegistry` [^mcp-registry].
 <!-- truth: end -->
 
 ## Scope & Operational Notes
