@@ -14,9 +14,9 @@ generated:
   by: flow/0.30.1
   at: "2026-11-04T04:33:00Z"
 verified:
-  - by: agent:flow-executor
-    at: "2026-11-14T20:49:30Z"
-    commit: 838c54d1
+  - by: agent:flow-completion
+    at: "2026-11-14T21:38:00Z"
+    commit: 8a836024
 sources:
   - id: src-postgres-stream-rs
     resource: src/rs/vertebra-postgres/src/replication/stream.rs::ReplicationSession
@@ -170,7 +170,7 @@ Store keys use `spill_prefix.rstrip("/")`: a non-empty normalized prefix yields 
 | `ARROW_STREAM_MEDIA_TYPE` | `"application/vnd.apache.arrow.stream"`, also exposed as `DataFusionEngine.ARROW_STREAM_MEDIA_TYPE`. |
 | `DataFusionMode` | `Literal["in_process"]` (`pgwire_fdw` and `host:port` endpoints raise `ImproperConfigurationError`). |
 | [`TableRegistration`](../../../../../src/py/vertebra/db/adapters/datafusion/config.py)[^src-db-datafusion-config-py] | `name`, `uri`, `format` (`parquet`, `vortex`, `arrow`, `csv`, `ndjson`, `duckdb`, `postgres`, `oracle`, `bigquery`, `spanner`). |
-| `DataFusionConfig` | `BaseDatabaseConfig` subclass (`url_schemes = ("datafusion",)`, `from_url`, `pool_key`, `build_sync_driver`, `build_async_driver`) resolved polymorphically via [`DatabaseRegistry`](../../../../../src/py/vertebra/db/registry.py)[^src-db-registry-py] and `provide_driver`. Configures `mode="in_process"`, `target_partitions >= 1`, and `memory_limit_mb >= 1`. |
+| `DataFusionConfig` | `BaseDatabaseConfig` subclass (`url_schemes = ("datafusion",)`, `from_url`, `pool_key`, `build_sync_driver`, `build_async_driver`) resolved polymorphically via [`DatabaseRegistry`](../../../../../src/py/vertebra/db/registry.py)[^src-db-registry-py] and `provide_driver`. Validates `scheme == "datafusion"` (when present), `path in {"", "/"}`, `parse_qsl(..., keep_blank_values=True)`, `mode="in_process"`, `target_partitions >= 1`, and `memory_limit_mb >= 1`. |
 | [`DataFusionEngine`](../../../../../src/py/vertebra/db/adapters/datafusion/driver.py)[^src-db-datafusion-driver-py] | Accepts `(config: DataFusionConfig \| None = None, *, ctx: Any = None)`, registers relational and cloud `ArrowCursor` / PyArrow tables via `register_arrow_table(name, driver.select_to_arrow(...))` (zero vendor-specific registration wrappers), resolves `SessionContext` via `ensure_module("datafusion", package="datafusion")`, and propagates `MissingDependencyError` and `SessionContext.sql(...)` errors directly. |
 
 [^src-extensions-sqlspec-adapters-py]: `src/py/vertebra/extensions/sqlspec/adapters.py` — SQLSpec native pipeline dispatch and sequential stack execution.

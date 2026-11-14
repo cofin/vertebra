@@ -15,6 +15,9 @@ generated:
   by: flow/0.26.0
   at: "2026-11-07T03:55:00Z"
 verified:
+  - by: agent:flow-completion
+    at: "2026-11-14T21:38:00Z"
+    commit: 8a836024
   - by: agent:flow-executor
     at: "2026-11-13T05:25:00Z"
     commit: 93d7fb1f
@@ -113,7 +116,7 @@ sources:
 
 ## `vertebra-bigquery` Submodules & Wire Pipeline (`vertebra._bigquery`)
 
-[`adapters/bigquery/`](../../../../../src/py/vertebra/db/adapters/bigquery/__init__.py)[^src-db-bigquery-init-py] (`BigQueryConfig`, `BigQueryCore`, [`object_tables.py`](../../../../../src/py/vertebra/db/adapters/bigquery/object_tables.py)[^src-db-bigquery-object-tables-py], `SyncBigQueryDriver` / `AsyncBigQueryDriver` in `_sync.py` / `_async.py`) wraps the five-module `vertebra-bigquery` crate:
+[`adapters/bigquery/`](../../../../../src/py/vertebra/db/adapters/bigquery/__init__.py)[^src-db-bigquery-init-py] (`BigQueryConfig`, `BigQueryCore`, [`object_tables.py`](../../../../../src/py/vertebra/db/adapters/bigquery/object_tables.py)[^src-db-bigquery-object-tables-py] validating `limit > 0`, single-pass `_split_uri_bucket_and_key`, and `(DatabaseError, OSError)` fallback, plus `SyncBigQueryDriver` / `AsyncBigQueryDriver` in `_sync.py` / `_async.py`) wraps the five-module `vertebra-bigquery` crate:
 
 | Module | Key Types & Responsibilities |
 |---|---|
@@ -125,7 +128,7 @@ sources:
 
 ## `vertebra-spanner` Submodules & Wire Pipeline (`vertebra._spanner`)
 
-[`adapters/spanner/`](../../../../../src/py/vertebra/db/adapters/spanner/__init__.py)[^src-db-spanner-init-py] (`SpannerConfig`, `SpannerCore`, [`mutations.py`](../../../../../src/py/vertebra/db/adapters/spanner/mutations.py)[^src-db-spanner-mutations-py], [`transactions.py`](../../../../../src/py/vertebra/db/adapters/spanner/transactions.py)[^src-db-spanner-transactions-py], `SyncSpannerDriver` / `AsyncSpannerDriver` in `_sync.py` / `_async.py`) wraps the five-module `vertebra-spanner` crate across GoogleSQL and Spangres dialects:
+[`adapters/spanner/`](../../../../../src/py/vertebra/db/adapters/spanner/__init__.py)[^src-db-spanner-init-py] (`SpannerConfig`, `SpannerCore` with `_encode_parameters_payload`, [`mutations.py`](../../../../../src/py/vertebra/db/adapters/spanner/mutations.py)[^src-db-spanner-mutations-py] keeping `gc=True` on `Mutation`/`MutationGroup` and validating `Mutation.coerce` ops, [`transactions.py`](../../../../../src/py/vertebra/db/adapters/spanner/transactions.py)[^src-db-spanner-transactions-py], `SyncSpannerDriver` / `AsyncSpannerDriver` in `_sync.py` / `_async.py` with `0.01 * attempt` `SpannerAbortedError` async retry backoff) wraps the five-module `vertebra-spanner` crate across GoogleSQL and Spangres dialects:
 
 | Module | Key Types & Responsibilities |
 |---|---|
