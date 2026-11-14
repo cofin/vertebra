@@ -40,11 +40,11 @@ sources:
 # Multi-Lane Worker Runner
 
 <!-- truth: start -->
-- **Canonical Server Module (`vertebra.server.lanes`)**: [`LaneConfig`](../../../../../src/py/vertebra/server/lanes.py)[^src-server-lanes-py] and [`WorkerRunner`](../../../../../src/py/vertebra/server/lanes.py) live in `vertebra.server.lanes` and are re-exported by `vertebra.server` and `vertebra.cli.workers`.
-- **Co-Located & Standalone Worker Execution**: `vtb run` and `vtb dev` support `--with-workers / --no-workers`, `--queues`, `--lane-concurrency` (e.g. `high:16,default:8,embeddings:2`), and `[tool.vertebra.workers]` in `pyproject.toml` to co-locate `WorkerRunner` inside the server lifecycle, while `vtb workers run --oneshot <job> --payload <json>` runs standalone or Cloud Run Jobs / Kubernetes Job executions.
+- **Canonical Server Module (`vertebra.server.lanes`)**: [`LaneConfig`](../../../../../src/py/vertebra/server/lanes.py)[^src-server-lanes-py] and [`WorkerRunner`](../../../../../src/py/vertebra/server/lanes.py) live in `vertebra.server.lanes` (`vertebra.server` exports `Worker` and `run_worker`; `vertebra.cli.workers` exports `execute_worker_cli`, `run_workers`, `workers`).
+- **Co-Located & Standalone Worker Execution**: `vtb run` and `vtb dev` support `--with-workers / --no-workers`, `--queues`, `--lane-concurrency` (e.g. `high=16,default=8,embeddings=2`), and `[tool.vertebra.workers]` in `pyproject.toml` to co-locate `WorkerRunner` inside the server lifecycle, while `vtb workers run --oneshot <job> --payload <json>` runs standalone or Cloud Run Jobs / Kubernetes Job executions.
 <!-- truth: end -->
 
-[`vertebra.server.lanes`](../../../../../src/py/vertebra/server/lanes.py) (re-exported by [`vertebra.cli.workers`](../../../../../src/py/vertebra/cli/workers.py)[^src-cli-workers-py]) provides an admission-controlled background worker runner (`LaneConfig`, `WorkerRunner`) with per-queue `asyncio.Semaphore` isolation, co-located HTTP worker execution, and oneshot job execution.
+[`vertebra.server.lanes`](../../../../../src/py/vertebra/server/lanes.py) defines [`LaneConfig`](../../../../../src/py/vertebra/server/lanes.py) and [`WorkerRunner`](../../../../../src/py/vertebra/server/lanes.py), which [`vertebra.cli.workers`](../../../../../src/py/vertebra/cli/workers.py)[^src-cli-workers-py] drives for admission-controlled background queues (`asyncio.Semaphore` isolation), co-located HTTP worker execution, and oneshot job execution.
 
 ## 1. Domain Types (`server/lanes.py`)
 
