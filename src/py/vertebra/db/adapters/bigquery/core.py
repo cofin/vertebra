@@ -7,7 +7,6 @@ from collections.abc import Mapping, Sequence
 from datetime import date, datetime, time
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, ClassVar, Final
-from urllib.parse import urlparse
 
 import msgspec
 
@@ -490,59 +489,6 @@ class BigQueryCore:
         if not allow_empty and not ("a" <= result[0] <= "z"):
             result = ("l_" + result)[:63]
         return result
-
-    @staticmethod
-    def _extract_bucket_prefix_from_uri(uri: str) -> tuple[str, str]:
-        if "://" not in uri:
-            return "", uri.lstrip("/").rstrip("*")
-        parsed = urlparse(uri)
-        bucket = parsed.netloc
-        prefix = parsed.path.lstrip("/").rstrip("*")
-        return bucket, prefix
-
-    @staticmethod
-    def _normalize_store_item_to_row(
-        item: Any,
-        *,
-        scheme: str,
-        bucket: str,
-    ) -> dict[str, Any]:
-        if isinstance(item, str):
-            loc = item.lstrip("/")
-            full_uri = f"{scheme}://{bucket}/{loc}" if bucket else f"{scheme}://{loc}"
-            return {
-                "uri": full_uri,
-                "generation": None,
-                "content_type": None,
-                "size": 0,
-                "md5_hash": None,
-                "updated": None,
-            }
-        if isinstance(item, Mapping):
-            loc = str(item.get("location") or item.get("path") or "").lstrip("/")
-            full_uri = f"{scheme}://{bucket}/{loc}" if bucket else loc
-            return {
-                "uri": full_uri,
-                "generation": item.get("version") or item.get("e_tag") or item.get("etag"),
-                "content_type": item.get("content_type"),
-                "size": int(item.get("size", 0) or 0),
-                "md5_hash": item.get("e_tag") or item.get("etag"),
-                "updated": item.get("last_modified"),
-            }
-        loc = str(getattr(item, "path", None) or getattr(item, "location", "") or "").lstrip("/")
-        full_uri = f"{scheme}://{bucket}/{loc}" if bucket else loc
-        etag = getattr(item, "etag", None) or getattr(item, "e_tag", None)
-        version = getattr(item, "version", None) or etag
-        return {
-            "uri": full_uri,
-            "generation": version,
-            "content_type": getattr(item, "content_type", None),
-            "size": int(getattr(item, "size", 0) or 0),
-            "md5_hash": etag,
-            "updated": str(getattr(item, "last_modified", ""))
-            if getattr(item, "last_modified", None) is not None
-            else None,
-        }
 
     @classmethod
     def _serialize_pyarrow_for_append(cls, pa: Any, data: Any) -> bytes:

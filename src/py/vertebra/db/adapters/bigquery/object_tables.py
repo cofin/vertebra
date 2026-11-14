@@ -171,20 +171,10 @@ class ObjectTableConfig(FrozenBaseStruct, frozen=True, kw_only=True):
                 expires_in_secs=expires_in_secs,
                 fallback_to_authenticated_url=fallback_to_authenticated_url,
             )
-        refs: list[ObjectRef] = []
-        for item in rows:
-            if isinstance(item, ObjectRef):
-                signed = item.signed_url
-                if signed is None and fallback_to_authenticated_url and item.uri.startswith("gs://"):
-                    signed = self._build_authenticated_gcs_browser_url(item.uri)
-                refs.append(msgspec.structs.replace(item, signed_url=signed))
-            else:
-                uri = str(item.get("uri") or item.get("object_uri") or "")
-                signed = None
-                if fallback_to_authenticated_url and uri.startswith("gs://"):
-                    signed = self._build_authenticated_gcs_browser_url(uri)
-                refs.append(self._row_to_object_ref(item, signed_url=signed))
-        return refs
+        return self._hydrate_refs_without_store(
+            rows,
+            fallback_to_authenticated_url=fallback_to_authenticated_url,
+        )
 
     async def hydrate_object_refs_async(
         self,
@@ -203,20 +193,51 @@ class ObjectTableConfig(FrozenBaseStruct, frozen=True, kw_only=True):
                 expires_in_secs=expires_in_secs,
                 fallback_to_authenticated_url=fallback_to_authenticated_url,
             )
+        return self._hydrate_refs_without_store(
+            rows,
+            fallback_to_authenticated_url=fallback_to_authenticated_url,
+        )
+
+    @classmethod
+    def _hydrate_refs_without_store(
+        cls,
+        rows: Sequence[Mapping[str, Any]] | Sequence[ObjectRef],
+        *,
+        fallback_to_authenticated_url: bool,
+    ) -> list[ObjectRef]:
         refs: list[ObjectRef] = []
         for item in rows:
-            if isinstance(item, ObjectRef):
-                signed = item.signed_url
-                if signed is None and fallback_to_authenticated_url and item.uri.startswith("gs://"):
-                    signed = self._build_authenticated_gcs_browser_url(item.uri)
-                refs.append(msgspec.structs.replace(item, signed_url=signed))
-            else:
-                uri = str(item.get("uri") or item.get("object_uri") or "")
-                signed = None
-                if fallback_to_authenticated_url and uri.startswith("gs://"):
-                    signed = self._build_authenticated_gcs_browser_url(uri)
-                refs.append(self._row_to_object_ref(item, signed_url=signed))
+            uri, _ = cls._extract_item_uri_and_key(item)
+            signed_url = item.signed_url if isinstance(item, ObjectRef) else None
+            refs.append(
+                cls._finalize_hydrated_ref(
+                    item,
+                    uri,
+                    signed_url,
+                    fallback_to_authenticated_url=fallback_to_authenticated_url,
+                )
+            )
         return refs
+
+    @classmethod
+    def _extract_item_uri_and_key(cls, item: ObjectRef | Mapping[str, Any]) -> tuple[str, str]:
+        uri = item.uri if isinstance(item, ObjectRef) else str(item.get("uri") or item.get("object_uri") or "")
+        return uri, cls._extract_object_key_from_uri(uri)
+
+    @classmethod
+    def _finalize_hydrated_ref(
+        cls,
+        item: ObjectRef | Mapping[str, Any],
+        uri: str,
+        signed_url: str | None,
+        *,
+        fallback_to_authenticated_url: bool,
+    ) -> ObjectRef:
+        if signed_url is None and fallback_to_authenticated_url and uri.startswith("gs://"):
+            signed_url = cls._build_authenticated_gcs_browser_url(uri)
+        if isinstance(item, ObjectRef):
+            return msgspec.structs.replace(item, signed_url=signed_url)
+        return cls._row_to_object_ref(item, signed_url=signed_url)
 
     @staticmethod
     def _extract_bucket_prefix_from_uri(uri: str) -> tuple[str, str]:
@@ -325,30 +346,21 @@ def hydrate_object_refs_sync(
     """Hydrate zero-RTT presigned GET URLs onto ObjectRef structs synchronously."""
     hydrated: list[ObjectRef] = []
     for item in refs:
-        if isinstance(item, ObjectRef):
-            uri = item.uri
-            object_key = ObjectTableConfig._extract_object_key_from_uri(uri)
-            signed_url: str | None = None
-            if object_key:
-                try:
-                    signed_url = store.presign_get(object_key, expires_in_secs=expires_in_secs)
-                except (VertebraError, OSError, ValueError):
-                    signed_url = None
-            if signed_url is None and fallback_to_authenticated_url and uri.startswith("gs://"):
-                signed_url = ObjectTableConfig._build_authenticated_gcs_browser_url(uri)
-            hydrated.append(msgspec.structs.replace(item, signed_url=signed_url))
-        else:
-            uri = str(item.get("uri") or item.get("object_uri") or "")
-            signed_url = None
-            if uri:
-                object_key = ObjectTableConfig._extract_object_key_from_uri(uri)
-                try:
-                    signed_url = store.presign_get(object_key, expires_in_secs=expires_in_secs)
-                except (VertebraError, OSError, ValueError):
-                    signed_url = None
-            if signed_url is None and fallback_to_authenticated_url and uri.startswith("gs://"):
-                signed_url = ObjectTableConfig._build_authenticated_gcs_browser_url(uri)
-            hydrated.append(ObjectTableConfig._row_to_object_ref(item, signed_url=signed_url))
+        uri, object_key = ObjectTableConfig._extract_item_uri_and_key(item)
+        signed_url: str | None = None
+        if object_key:
+            try:
+                signed_url = store.presign_get(object_key, expires_in_secs=expires_in_secs)
+            except (VertebraError, OSError, ValueError):
+                signed_url = None
+        hydrated.append(
+            ObjectTableConfig._finalize_hydrated_ref(
+                item,
+                uri,
+                signed_url,
+                fallback_to_authenticated_url=fallback_to_authenticated_url,
+            )
+        )
     return hydrated
 
 
@@ -362,28 +374,19 @@ async def hydrate_object_refs_async(
     """Asynchronously hydrate zero-RTT presigned GET URLs onto ObjectRef structs."""
     hydrated: list[ObjectRef] = []
     for item in refs:
-        if isinstance(item, ObjectRef):
-            uri = item.uri
-            object_key = ObjectTableConfig._extract_object_key_from_uri(uri)
-            signed_url: str | None = None
-            if object_key:
-                try:
-                    signed_url = await store.presign_get(object_key, expires_in_secs=expires_in_secs)
-                except (VertebraError, OSError, ValueError):
-                    signed_url = None
-            if signed_url is None and fallback_to_authenticated_url and uri.startswith("gs://"):
-                signed_url = ObjectTableConfig._build_authenticated_gcs_browser_url(uri)
-            hydrated.append(msgspec.structs.replace(item, signed_url=signed_url))
-        else:
-            uri = str(item.get("uri") or item.get("object_uri") or "")
-            signed_url = None
-            if uri:
-                object_key = ObjectTableConfig._extract_object_key_from_uri(uri)
-                try:
-                    signed_url = await store.presign_get(object_key, expires_in_secs=expires_in_secs)
-                except (VertebraError, OSError, ValueError):
-                    signed_url = None
-            if signed_url is None and fallback_to_authenticated_url and uri.startswith("gs://"):
-                signed_url = ObjectTableConfig._build_authenticated_gcs_browser_url(uri)
-            hydrated.append(ObjectTableConfig._row_to_object_ref(item, signed_url=signed_url))
+        uri, object_key = ObjectTableConfig._extract_item_uri_and_key(item)
+        signed_url: str | None = None
+        if object_key:
+            try:
+                signed_url = await store.presign_get(object_key, expires_in_secs=expires_in_secs)
+            except (VertebraError, OSError, ValueError):
+                signed_url = None
+        hydrated.append(
+            ObjectTableConfig._finalize_hydrated_ref(
+                item,
+                uri,
+                signed_url,
+                fallback_to_authenticated_url=fallback_to_authenticated_url,
+            )
+        )
     return hydrated

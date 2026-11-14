@@ -290,64 +290,48 @@ class MySQLCore:
         return mapped
 
     @staticmethod
+    def _consume_literal_or_comment(sql: str, index: int, length: int) -> int | None:
+        ch = sql[index]
+        if ch in {"'", '"', "`"}:
+            quote = ch
+            cursor = index + 1
+            while cursor < length:
+                c = sql[cursor]
+                if c == "\\" and quote != "`" and cursor + 1 < length:
+                    cursor += 2
+                    continue
+                if c == quote:
+                    if cursor + 1 < length and sql[cursor + 1] == quote:
+                        cursor += 2
+                        continue
+                    return cursor + 1
+                cursor += 1
+            return length
+        if (ch == "-" and index + 1 < length and sql[index + 1] == "-") or ch == "#":
+            newline_idx = sql.find("\n", index + (2 if ch == "-" else 1))
+            return length if newline_idx == -1 else newline_idx + 1
+        if ch == "/" and index + 1 < length and sql[index + 1] == "*":
+            end_idx = sql.find("*/", index + 2)
+            return length if end_idx == -1 else end_idx + 2
+        return None
+
+    @staticmethod
     def _rewrite_placeholders_outside_literals(sql: str, source_token: str, target_token: str) -> str:
         out: list[str] = []
         n = len(sql)
         i = 0
         src_len = len(source_token)
         while i < n:
-            ch = sql[i]
-            if ch in {"'", '"', "`"}:
-                quote = ch
-                out.append(ch)
-                i += 1
-                while i < n:
-                    c = sql[i]
-                    out.append(c)
-                    if c == "\\" and quote != "`" and i + 1 < n:
-                        i += 1
-                        out.append(sql[i])
-                        i += 1
-                        continue
-                    if c == quote:
-                        if i + 1 < n and sql[i + 1] == quote:
-                            i += 1
-                            out.append(sql[i])
-                            i += 1
-                            continue
-                        i += 1
-                        break
-                    i += 1
-                continue
-            if ch == "-" and i + 1 < n and sql[i + 1] == "-":
-                newline_idx = sql.find("\n", i + 2)
-                if newline_idx == -1:
-                    out.append(sql[i:])
-                    break
-                out.append(sql[i : newline_idx + 1])
-                i = newline_idx + 1
-                continue
-            if ch == "#":
-                newline_idx = sql.find("\n", i + 1)
-                if newline_idx == -1:
-                    out.append(sql[i:])
-                    break
-                out.append(sql[i : newline_idx + 1])
-                i = newline_idx + 1
-                continue
-            if ch == "/" and i + 1 < n and sql[i + 1] == "*":
-                end_idx = sql.find("*/", i + 2)
-                if end_idx == -1:
-                    out.append(sql[i:])
-                    break
-                out.append(sql[i : end_idx + 2])
-                i = end_idx + 2
+            next_i = MySQLCore._consume_literal_or_comment(sql, i, n)
+            if next_i is not None:
+                out.append(sql[i:next_i])
+                i = next_i
                 continue
             if sql.startswith(source_token, i):
                 out.append(target_token)
                 i += src_len
                 continue
-            out.append(ch)
+            out.append(sql[i])
             i += 1
         return "".join(out)
 
@@ -362,53 +346,12 @@ class MySQLCore:
         n = len(sql)
         i = 0
         while i < n:
+            next_i = MySQLCore._consume_literal_or_comment(sql, i, n)
+            if next_i is not None:
+                out.append(sql[i:next_i])
+                i = next_i
+                continue
             ch = sql[i]
-            if ch in {"'", '"', "`"}:
-                quote = ch
-                out.append(ch)
-                i += 1
-                while i < n:
-                    c = sql[i]
-                    out.append(c)
-                    if c == "\\" and quote != "`" and i + 1 < n:
-                        i += 1
-                        out.append(sql[i])
-                        i += 1
-                        continue
-                    if c == quote:
-                        if i + 1 < n and sql[i + 1] == quote:
-                            i += 1
-                            out.append(sql[i])
-                            i += 1
-                            continue
-                        i += 1
-                        break
-                    i += 1
-                continue
-            if ch == "-" and i + 1 < n and sql[i + 1] == "-":
-                newline_idx = sql.find("\n", i + 2)
-                if newline_idx == -1:
-                    out.append(sql[i:])
-                    break
-                out.append(sql[i : newline_idx + 1])
-                i = newline_idx + 1
-                continue
-            if ch == "#":
-                newline_idx = sql.find("\n", i + 1)
-                if newline_idx == -1:
-                    out.append(sql[i:])
-                    break
-                out.append(sql[i : newline_idx + 1])
-                i = newline_idx + 1
-                continue
-            if ch == "/" and i + 1 < n and sql[i + 1] == "*":
-                end_idx = sql.find("*/", i + 2)
-                if end_idx == -1:
-                    out.append(sql[i:])
-                    break
-                out.append(sql[i : end_idx + 2])
-                i = end_idx + 2
-                continue
             if ch == "%" and i + 2 < n and sql[i + 1] == "(":
                 close_idx = sql.find(")s", i + 2)
                 if close_idx != -1:

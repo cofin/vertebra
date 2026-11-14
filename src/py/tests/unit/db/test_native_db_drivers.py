@@ -2479,7 +2479,7 @@ _TEMPORARY_UPWARD_IMPORT_ALLOWLIST: frozenset[str] = frozenset()
         ("rediss://localhost:6379/0", RedisConfig),
         ("valkey://localhost:6379/0", ValkeyConfig),
         ("valkeys://localhost:6379/0", ValkeyConfig),
-        ("datafusion://embedded?target_partitions=4", DataFusionConfig),
+        ("datafusion://in_process?target_partitions=4", DataFusionConfig),
         ("cloudsql://proj:us-central1:inst", CloudSQLConfig),
         ("alloydb:///projects/p/locations/l/clusters/c/instances/i", AlloyDBConfig),
     ],
@@ -2510,7 +2510,7 @@ def test_registry_parse_url_executes_zero_eager_driver_imports() -> None:
         "spanner://projects/p/instances/i/databases/d",
         "redis://localhost:6379/0",
         "valkey://localhost:6379/0",
-        "datafusion://embedded",
+        "datafusion://in_process",
         "cloudsql://proj:us-central1:inst",
         "alloydb:///projects/p/locations/l/clusters/c/instances/i",
     )
@@ -2627,7 +2627,7 @@ async def test_pool_key_memory_isolation_and_provide_driver_resolution(
         df_async = provide_driver(df_cfg, sync=False, registry=reg)
         assert isinstance(df_sync, DataFusionEngine)
         assert isinstance(df_async, DataFusionEngine)
-        assert provide_driver("datafusion://embedded?target_partitions=2", sync=True, registry=reg) is df_sync
+        assert provide_driver("datafusion://in_process?target_partitions=2", sync=True, registry=reg) is df_sync
 
         vk_sync = provide_driver("valkey://localhost:6379/0", sync=True, registry=reg)
         vk_async = provide_driver("valkey://localhost:6379/0", sync=False, registry=reg)
