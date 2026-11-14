@@ -141,7 +141,7 @@ Nine cohesive chapters (`32` tasks) remain to finish logical replication supervi
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Active Frontier**: Chapters `ch01`–`ch07` (`24/32` tasks) are completed and reviewed; `ch08-user-and-reference-docs` (`4/4` tasks) is implemented and remediated at `1dc528f8` awaiting chapter re-review (`4` open `compact` tasks remain in `ch09`).
+- **Active Frontier**: Chapters `ch01`–`ch07` (`24/32` tasks) are completed and reviewed; `ch08-user-and-reference-docs` (`4/4` tasks) is implemented and remediated through `a2fff702` awaiting chapter re-review (`4` open `compact` tasks remain in `ch09`).
 - **Downstream Unlocks**: Completing `ch05` unblocks [`broker-pool-sharing`](../broker-pool-sharing/spec.md), [`driver-conformance-ci`](../driver-conformance-ci/spec.md), [`native-redis-driver`](../native-redis-driver/spec.md), [`native-adapter-organization`](../native-adapter-organization/spec.md), [`sqlspec-adapter-parity`](../sqlspec-adapter-parity/spec.md), and [`queues-tasks-and-channels`](../queues-tasks-and-channels/spec.md).
 - **`/flow:finish` Full Gate**: `make lint-all && make rs-test && make py-test && make postgres-wheel-check && make postgres-test && make postgres-bench-check && make docs-check && make review-check`.
 

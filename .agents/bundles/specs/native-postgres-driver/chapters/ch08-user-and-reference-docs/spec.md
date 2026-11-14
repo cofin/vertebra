@@ -10,7 +10,7 @@ planning_status: complete
 planning_quality: standard
 planning_degraded_reason: null
 plan_commit: 18baadcd
-updated_at: "2026-11-14T00:20:00Z"
+updated_at: "2026-11-14T00:42:00Z"
 generated:
   by: flow-plan
   at: "2026-11-13T00:25:00Z"
@@ -67,14 +67,14 @@ Covers all 10 affected `docs/` pages plus `README.md` and `AGENTS.md`; OKF data/
 
 ## 5. Implementation Plan
 
-- [x] [1dc528f8] [t01-databases-cdc-and-capabilities-docs.md](tasks/t01-databases-cdc-and-capabilities-docs.md) — Document vertebra-core[postgres], $N binds, single-Sync pipeline(), Pg* types, PostgresChangeSource, and PostgresEmbeddingPushdown.
+- [x] [a2fff702] [t01-databases-cdc-and-capabilities-docs.md](tasks/t01-databases-cdc-and-capabilities-docs.md) — Document vertebra-core[postgres], $N binds, single-Sync pipeline(), Pg* types, PostgresChangeSource, and PostgresEmbeddingPushdown.
 - [x] [1dc528f8] [t02-native-stubs-reference-and-installation-docs.md](tasks/t02-native-stubs-reference-and-installation-docs.md) — Add _mysql, _mssql, and _postgres to native-stubs.md within H2+H3/HTML budgets and sync reference/index.md and installation.md.
 - [x] [1dc528f8] [t03-dialers-packaging-and-queues-docs.md](tasks/t03-dialers-packaging-and-queues-docs.md) — Remove legacy psycopg/asyncpg dialer examples, drop false release-CI PGO prose, and document vertebra-core[postgres] queue guard.
-- [x] [1dc528f8] [t04-extensions-readme-and-agents-sync.md](tasks/t04-extensions-readme-and-agents-sync.md) — Update +vtb dialect wheel extras in extensions.md and usage/index.md, refresh README.md crate/wheel overview, and keep AGENTS.md <= 100 lines.
+- [x] [a2fff702] [t04-extensions-readme-and-agents-sync.md](tasks/t04-extensions-readme-and-agents-sync.md) — Update +vtb dialect wheel extras in extensions.md and usage/index.md, refresh README.md crate/wheel overview, and keep AGENTS.md <= 100 lines.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-Implemented and remediated at `1dc528f8` (`4/4` tasks verified offline via `make docs`, `uv lock --check --offline`, `ruff check`, `mypy`, `228 passed` unit tests including Litestar `SQLSpecPlugin` DI checks, `review_setup validate`, and regenerated `docs/reference/cli.md`; awaiting zero-context chapter review).
+Implemented and remediated through `a2fff702` (combining `ch08` Zensical docs, optional `uvloop`/`winloop`/`rloop`/`zuvloop` loop extras with `[saq]`/`[all]` removal, shared `LOOP_BACKEND_CHOICES` CLI options, concrete `connection_type` across all 16 native SQLSpec configs, `<= 84`-char markdown fences, and synchronized runtime/Litestar/product OKF chapters; `ruff`, `mypy`, `237 passed` offline docs/extension/server tests with zero Litestar deprecation warnings, `make docs`, and `make review-check` green; awaiting zero-context re-review).
 
 ```bash
 make docs && make review-check
