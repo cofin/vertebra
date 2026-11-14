@@ -873,7 +873,7 @@ async def test_change_source_anext_after_aclose_timeout_and_interruptible_backof
         PostgresChangeConfig(
             slot="cdc_slot",
             publication="pub_orders",
-            checkpoint_timeout_seconds=0.02,
+            checkpoint_timeout_seconds=5.0,
             reconnect=False,
         ),
         store,
@@ -883,6 +883,12 @@ async def test_change_source_anext_after_aclose_timeout_and_interruptible_backof
     await store.save_started.wait()
     blocked_next: asyncio.Task[ChangeEvent] = asyncio.create_task(source.__anext__())
     await asyncio.sleep(0)
+    source._config = PostgresChangeConfig(
+        slot="cdc_slot",
+        publication="pub_orders",
+        checkpoint_timeout_seconds=0.01,
+        reconnect=False,
+    )
     with pytest.raises(PostgresReplicationGapError) as close_err:
         await source.aclose()
     assert close_err.value.reason == "checkpoint_uncertain"
@@ -892,8 +898,46 @@ async def test_change_source_anext_after_aclose_timeout_and_interruptible_backof
     with pytest.raises(StopAsyncIteration):
         await asyncio.wait_for(source.__anext__(), timeout=1.0)
     store.save_gate.set()
-    with pytest.raises(PostgresReplicationGapError):
-        await ack_task
+    saved_after_close = await ack_task
+    assert saved_after_close.commit_end_lsn == 100
+
+    reconcile_store = _OrderRecordingCheckpointStore(MemoryPostgresCheckpointStore(), [])
+    reconcile_source = PostgresChangeSource(
+        _FakeReplicationDriver(
+            ident,
+            [
+                _FakeNativeStream(
+                    [
+                        PostgresReplicationRecord(kind="insert", payload={"id": 1}, commit_end_lsn=100),
+                        PostgresReplicationRecord(kind="insert", payload={"id": 2}, commit_end_lsn=200),
+                    ]
+                )
+            ],
+        ),
+        PostgresChangeConfig(slot="cdc_slot", publication="pub_orders", reconnect=False),
+        reconcile_store,
+    )
+    await reconcile_source.__anext__()
+    await reconcile_source.__anext__()
+    reconcile_store.fail_next_save = TimeoutError("uncertain timeout")
+    with pytest.raises(PostgresReplicationGapError) as uncertain_gap:
+        await reconcile_source.acknowledge(100)
+    assert uncertain_gap.value.reason == "checkpoint_uncertain"
+    reconcile_source._store = _OrderRecordingCheckpointStore(
+        MemoryPostgresCheckpointStore(),
+        [],
+    )
+    pre_committed = PostgresCheckpoint(
+        identity_key=ident.identity_key,
+        commit_end_lsn=100,
+        next_event_id=2,
+        version=1,
+    )
+    await reconcile_source._store.save(pre_committed, expected=None)
+    reconciled_ack = await reconcile_source.acknowledge(200)
+    assert reconciled_ack.version == 2
+    assert reconciled_ack.commit_end_lsn == 200
+    await reconcile_source.aclose()
 
     backoff_stream = _FakeNativeStream([ConnectionError("transient drop")])
     backoff_driver = _FakeReplicationDriver(ident, [backoff_stream])

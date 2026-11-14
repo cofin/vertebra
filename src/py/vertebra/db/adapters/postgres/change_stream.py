@@ -295,7 +295,6 @@ class PostgresChangeSource(AsyncChangeSource):
         self._stop_event = asyncio.Event()
         self._op_lock = asyncio.Lock()
         self._ack_task: asyncio.Task[PostgresCheckpoint] | None = None
-        self._ack_target_lsn: int | None = None
         self._pending_record: PostgresReplicationRecord | None = None
         self._lsn_to_event_id: dict[int, int] = {}
 
@@ -332,6 +331,7 @@ class PostgresChangeSource(AsyncChangeSource):
                     continue
                 self._ack_task = None
             async with self._op_lock:
+                self._check_lifecycle()
                 if self._needs_reconcile:
                     await self._reconcile_uncertainty()
                 if not self._yield_gate.is_set():
@@ -367,33 +367,23 @@ class PostgresChangeSource(AsyncChangeSource):
         """
         if commit_end_lsn < 0:
             raise ValueError("commit_end_lsn must be non-negative")
-        if self._closed:
-            raise PostgresReplicationGapError(
-                "CDC change source is closed",
-                reason="closed",
-                identity_key=self._identity.identity_key if self._identity else None,
-            )
+        self._check_ack_lifecycle()
         await self._ensure_initialized()
         while self._ack_task is not None and not self._ack_task.done():
             await asyncio.shield(self._ack_task)
-        if self._closed:
-            raise PostgresReplicationGapError(
-                "CDC change source is closed",
-                reason="closed",
-                identity_key=self._identity.identity_key if self._identity else None,
-            )
-        if self._terminated:
-            raise PostgresCheckpointConflictError(
-                "CDC ownership terminated after checkpoint conflict",
-                identity_key=self._identity.identity_key if self._identity else None,
-            )
+        self._check_ack_lifecycle()
+        if self._needs_reconcile or self._uncertain:
+            async with self._op_lock:
+                self._check_ack_lifecycle()
+                if self._needs_reconcile:
+                    await self._reconcile_uncertainty()
+            self._check_ack_lifecycle()
         if self._checkpoint is not None and commit_end_lsn <= self._checkpoint.commit_end_lsn:
             return self._checkpoint
         self._yield_gate.clear()
         task = asyncio.create_task(self._run_ack_transaction(commit_end_lsn))
         task.add_done_callback(_consume_task_exception)
         self._ack_task = task
-        self._ack_target_lsn = commit_end_lsn
         try:
             return await asyncio.shield(task)
         finally:
@@ -479,6 +469,20 @@ class PostgresChangeSource(AsyncChangeSource):
             )
         if self._closed:
             raise StopAsyncIteration
+
+    def _check_ack_lifecycle(self) -> None:
+        """Raise closed-gap or termination conflict before checkpoint acknowledgement."""
+        if self._closed:
+            raise PostgresReplicationGapError(
+                "CDC change source is closed",
+                reason="closed",
+                identity_key=self._identity.identity_key if self._identity else None,
+            )
+        if self._terminated:
+            raise PostgresCheckpointConflictError(
+                "CDC ownership terminated after checkpoint conflict",
+                identity_key=self._identity.identity_key if self._identity else None,
+            )
 
     async def _wait_backoff(self, seconds: float) -> None:
         """Wait up to ``seconds`` for reconnect backoff unless closed or fenced."""
@@ -610,10 +614,14 @@ class PostgresChangeSource(AsyncChangeSource):
         )
         if loaded is not None:
             _validate_identity_match(self._identity, loaded)
-            self._checkpoint = loaded
-            self._sync_feed_cursor(loaded.next_event_id)
-            self._prune_acked_lsns(loaded.commit_end_lsn)
-        else:
+            if self._checkpoint is None or (loaded.version, loaded.commit_end_lsn) >= (
+                self._checkpoint.version,
+                self._checkpoint.commit_end_lsn,
+            ):
+                self._checkpoint = loaded
+                self._sync_feed_cursor(loaded.next_event_id)
+                self._prune_acked_lsns(loaded.commit_end_lsn)
+        elif self._checkpoint is None:
             self._sync_feed_cursor(1)
         self._uncertain = False
         self._needs_reconcile = False
@@ -769,8 +777,6 @@ class PostgresChangeSource(AsyncChangeSource):
             ) from exc
         finally:
             self._yield_gate.set()
-            if self._ack_target_lsn == commit_end_lsn:
-                self._ack_target_lsn = None
 
 
 _RETRYABLE_RECONNECT_REASONS = frozenset({"connection_closed", "disconnected", "transport", "transient"})
