@@ -208,7 +208,7 @@ build-pgo: ts-build                                 ## Build PGO-optimized relea
 rs-test:                                            ## Run Rust tests (all features)
 	@rm -rf /dev/shm/test-* /dev/shm/*vertebra* 2>/dev/null || true
 	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
-	@cd src/rs && cargo test --workspace --features tls,compression,gcp
+	@cd src/rs && cargo test --workspace --features tls,http3,compression,gcp
 	@echo "${OK} Rust tests passed"
 
 .PHONY: py-test
@@ -360,7 +360,7 @@ lint: ts-lint                                       ## Format and lint everythin
 	@echo "${INFO} Linting and fixing Rust (Fmt & Clippy)..."
 	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
 	@(cd src/rs && cargo fmt --all)
-	@(cd src/rs && cargo clippy --fix --allow-dirty --allow-staged --workspace --all-targets --features tls,compression,gcp -- -D warnings)
+	@(cd src/rs && cargo clippy --fix --allow-dirty --allow-staged --workspace --all-targets --features tls,http3,compression,gcp -- -D warnings)
 	@echo "${INFO} Running type checks (Mypy)..."
 	@uv run mypy src/py/vertebra tools/scripts tools/pgo tools/benchmarks $(wildcard tools/docs docs/examples)
 	@stub_mods="$$(uv run python -c 'import importlib.util; print(" ".join(m for m in ("vertebra._vertebra", "vertebra._bundler", "vertebra._storage", "vertebra._mysql", "vertebra._bigquery", "vertebra._mssql", "vertebra._spanner", "vertebra._duckdb", "vertebra._oracle", "vertebra._postgres") if importlib.util.find_spec(m) is not None))')"; \
@@ -385,7 +385,7 @@ lint-all:                                           ## Check formatting, linting
 	@echo "${INFO} Checking Rust (Fmt & Clippy)..."
 	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
 	@(cd src/rs && cargo fmt --all -- --check)
-	@(cd src/rs && cargo clippy --workspace --all-targets --features tls,compression,gcp -- -D warnings)
+	@(cd src/rs && cargo clippy --workspace --all-targets --features tls,http3,compression,gcp -- -D warnings)
 	@$(MAKE) review-check
 	@echo "${OK} All lint checks passed"
 
