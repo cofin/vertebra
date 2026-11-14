@@ -1,85 +1,81 @@
 ---
 type: Spec
 flow_id: broker-pool-sharing
-title: "Shared Pools for Any SQLSpec, Advanced Alchemy, or SQLAlchemy Config"
-description: "Route SQLSpec, Advanced Alchemy, and SQLAlchemy database configurations through the POSIX shared-memory ring broker so worker processes share one broker-owned pool per pool_key with atomic segment ownership, UDS authenticated attach, C-ABI engine capsules, fail-loud quarantine, crash ROLLBACK reclamation, and standalone vertebra.db.dbapi."
+title: Shared Pools for Any SQLSpec, Advanced Alchemy, or SQLAlchemy Config
+description: Route SQLSpec, Advanced Alchemy, and SQLAlchemy database configurations through the POSIX shared-memory ring broker so worker processes share one broker-owned pool per pool_key with atomic segment ownership, UDS authenticated attach, C-ABI engine capsules, fail-loud quarantine, crash ROLLBACK reclamation, and standalone vertebra.db.dbapi.
 status: stable
 state: planned
 planning_quality: standard
 planning_degraded_reason: null
 has_chapters: true
 chapters:
-  - ch01-shm-ownership-and-lifecycle
-  - ch02-broker-ipc-identity-and-wire
-  - ch03-engine-capsules-core
-  - ch04-engine-capsules-enterprise
-  - ch05-lease-safety-and-uds-attach
-  - ch06-sqlspec-seams-and-multiprocess
-  - ch07-standalone-dbapi-and-sqlalchemy
-  - ch08-docs-and-knowledge-sync
-current_chapter: ch01-shm-ownership-and-lifecycle
-current_task: "broker-pool-sharing:ch01:t01"
+- ch01-shm-ownership-and-broker-wire
+- ch02-engine-capsules-and-discovery
+- ch03-lease-safety-and-uds-attach
+- ch04-python-pooling-sqlspec-sqlalchemy-and-docs
+current_chapter: ch01-shm-ownership-and-broker-wire
+current_task: broker-pool-sharing:ch01:t01
 parent_prd: native-data-platform
 depends_on_flows:
-  - native-postgres-driver
+- native-postgres-driver
 plan_revision: 1
-plan_commit: 18baadcd
-created_at: "2026-11-12T23:45:00Z"
-updated_at: "2026-11-12T23:45:00Z"
+plan_commit: 104fd6fa
+created_at: '2026-11-12T23:45:00Z'
+updated_at: '2026-11-14T18:50:00Z'
 generated:
-  by: flow-plan
-  at: "2026-11-12T23:45:00Z"
+  by: flow/0.30.1
+  at: '2026-11-14T18:50:00Z'
 verified:
-  - by: agent:plan-generator
-    at: "2026-11-12T23:45:00Z"
-    commit: 18baadcd
+- by: agent:plan-generator
+  at: '2026-11-14T18:50:00Z'
+  commit: 104fd6fa
 tags:
-  - broker
-  - shm
-  - pool
-  - sqlspec
-  - sqlalchemy
-  - dbapi
+- broker
+- shm
+- pool
+- sqlspec
+- sqlalchemy
+- dbapi
 sources:
-  - id: core-shm
-    resource: src/rs/vertebra-core/src/shm.rs::ShmRegion
-    title: "Named POSIX shared-memory regions"
-  - id: core-cleanup
-    resource: src/rs/vertebra-core/src/cleanup.rs::cleanup_all
-    title: "Process SHM cleanup hook"
-  - id: worker-factory
-    resource: src/rs/vertebra-http/src/workers/factory.rs::cleanup_stale_shm
-    title: "Supervisor worker spawning, panic hook, and stale SHM reaper"
-  - id: core-broker
-    resource: src/rs/vertebra-core/src/broker.rs::ShmLeaseTable
-    title: "Shared-memory lease table, statement cache, dialect tags, and worker reclamation"
-  - id: db-registry
-    resource: src/rs/vertebra-db/src/lib.rs::BrokerEngineBackend
-    title: "Per-cdylib static BrokerEngineBackend registry in vertebra-db"
-  - id: gcp-capsule
-    resource: src/rs/vertebra-core/src/gcp_auth.rs::GcpTokenCacheCapsule
-    title: "Versioned C-ABI vtable PyCapsule precedent across PyO3 cdylibs"
-  - id: py-broker
-    resource: src/rs/vertebra-py/src/broker.rs::LeaseBroker
-    title: "PyO3 LeaseBroker and StatementCache bindings"
-  - id: broker-transport
-    resource: src/py/vertebra/extensions/broker/transport.py::_BaseSHMBrokerTransport
-    title: "Python SHM broker transports and lease objects"
-  - id: sqlspec-provider
-    resource: src/py/vertebra/extensions/sqlspec/provider.py::_BaseSQLSpecProvider
-    title: "Broker-side SQLSpec provider session and lease management"
-  - id: sqlspec-proxy
-    resource: src/py/vertebra/extensions/sqlspec/proxy.py::ProxySyncDriver
-    title: "Worker-side SQLSpec proxy drivers"
-  - id: sa-dialects
-    resource: src/py/vertebra/extensions/sqlalchemy/dialects.py::SyncDBAPIModule
-    title: "SQLAlchemy-embedded PEP 249 module, connection, cursor, and dialect classes"
-  - id: postgres-rs
-    resource: src/rs/vertebra-postgres/src/pool.rs::PostgresPool
-    title: "PostgreSQL native Protocol 3.0 pool"
-  - id: broker-okf
-    resource: .agents/bundles/knowledge/domains/data/broker-and-shm-leases.md
-    title: "Broker and SHM leases OKF chapter"
+- id: core-shm
+  resource: src/rs/vertebra-core/src/shm.rs::ShmRegion
+  title: Named POSIX shared-memory regions
+- id: core-cleanup
+  resource: src/rs/vertebra-core/src/cleanup.rs::cleanup_all
+  title: Process SHM cleanup hook
+- id: worker-factory
+  resource: src/rs/vertebra-http/src/workers/factory.rs::cleanup_stale_shm
+  title: Supervisor worker spawning, panic hook, and stale SHM reaper
+- id: core-broker
+  resource: src/rs/vertebra-core/src/broker.rs::ShmLeaseTable
+  title: Shared-memory lease table, statement cache, dialect tags, and worker reclamation
+- id: db-registry
+  resource: src/rs/vertebra-db/src/lib.rs::BrokerEngineBackend
+  title: Per-cdylib static BrokerEngineBackend registry in vertebra-db
+- id: gcp-capsule
+  resource: src/rs/vertebra-core/src/gcp_auth.rs::GcpTokenCacheCapsule
+  title: Versioned C-ABI vtable PyCapsule precedent across PyO3 cdylibs
+- id: py-broker
+  resource: src/rs/vertebra-py/src/broker.rs::LeaseBroker
+  title: PyO3 LeaseBroker and StatementCache bindings
+- id: broker-transport
+  resource: src/py/vertebra/extensions/broker/transport.py::_BaseSHMBrokerTransport
+  title: Python SHM broker transports and lease objects
+- id: sqlspec-provider
+  resource: src/py/vertebra/extensions/sqlspec/provider.py::_BaseSQLSpecProvider
+  title: Broker-side SQLSpec provider session and lease management
+- id: sqlspec-proxy
+  resource: src/py/vertebra/extensions/sqlspec/proxy.py::ProxySyncDriver
+  title: Worker-side SQLSpec proxy drivers
+- id: sa-dialects
+  resource: src/py/vertebra/extensions/sqlalchemy/dialects.py::SyncDBAPIModule
+  title: SQLAlchemy-embedded PEP 249 module, connection, cursor, and dialect classes
+- id: postgres-rs
+  resource: src/rs/vertebra-postgres/src/pool.rs::PostgresPool
+  title: PostgreSQL native Protocol 3.0 pool
+- id: broker-okf
+  resource: .agents/bundles/knowledge/domains/data/broker-and-shm-leases.md
+  title: Broker and SHM leases OKF chapter
 ---
 
 # Specification: Shared Pools for Any SQLSpec, Advanced Alchemy, or SQLAlchemy Config
@@ -114,10 +110,10 @@ Multi-worker Vertebra deployments wrapping upstream `sqlspec` configs (`ProxySyn
 - **R1–R3**: Atomic `ShmRegion::open_or_create_named` with `ShmOwnerHeader` PID liveness, async-signal-safe `cleanup_all()` + PID-aware `reap_dead_owner_segments`, and explicit Python `owner`/`worker` broker attach (`ch01`).
 - **R4–R7**: XXH3-64 `stable_hash64` cross-process keys, up to 64 per-`pool_key` partitions with lease heartbeats, versioned `dbrpc` frames, and removal of in-memory broker transports + `alchemy/broker.py::StatementCache` (`ch02`).
 - **R8–R10**: C-ABI `BrokerEngineCapsule` + `_vertebra.BrokerEngineRegistry`, `BrokerEngineDiscovery` via `import_optional`, and capsules across MySQL (`2`), DuckDB (`6`), Oracle (`4`), MSSQL (`5`), and PostgreSQL (`1`) (`ch03`–`ch04`).
-- **R11–R14, R19, R21**: `LeaseState::Quarantined`, `0600` UDS `SCM_RIGHTS` authenticated attach, `BrokerHost` (`vtb broker serve`) crash `ROLLBACK` + owning-thread disposal, session affinity + `VTBARROW` streaming, and `PoolMetrics` (`ch05`).
-- **R15–R16, R20**: Typed `SQLSpec` provider Protocols with zero `inspect.signature` or `contextlib.suppress(Exception)`, `SyncDriverAdapterBase`/`AsyncDriverAdapterBase` proxy drivers, and 4-worker multi-process acceptance (`ch06`).
-- **R17–R18**: Standalone `vertebra.db.dbapi` (`SyncDBAPIConnection`, `AsyncDBAPIConnection`, `SyncDBAPIModule`, `AsyncDBAPIModule`) with zero upward imports, `extensions/sqlalchemy/async_adapter.py`, and `BrokerPool`/`AsyncBrokerPool` (`ch07`).
-- **R22**: Synchronized `docs/usage/{extensions,databases}.md`, `docs/changelog/index.md`, `broker-and-shm-leases.md`, and `shm-broker-limitations.md` (`ch08`).
+- **R11–R14, R19, R21**: `LeaseState::Quarantined`, `0600` UDS `SCM_RIGHTS` authenticated attach, `BrokerHost` (`vtb broker serve`) crash `ROLLBACK` + owning-thread disposal, session affinity + `VTBARROW` streaming, and `PoolMetrics` (`ch03`).
+- **R15–R16, R20**: Typed `SQLSpec` provider Protocols with zero `inspect.signature` or `contextlib.suppress(Exception)`, `SyncDriverAdapterBase`/`AsyncDriverAdapterBase` proxy drivers, and 4-worker multi-process acceptance (`ch04:t01`–`t02`).
+- **R17–R18**: Standalone `vertebra.db.dbapi` (`SyncDBAPIConnection`, `AsyncDBAPIConnection`, `SyncDBAPIModule`, `AsyncDBAPIModule`) with zero upward imports, `extensions/sqlalchemy/async_adapter.py`, and `BrokerPool`/`AsyncBrokerPool` (`ch04:t03`).
+- **R22**: Synchronized `docs/usage/{extensions,databases}.md`, `docs/changelog/index.md`, `broker-and-shm-leases.md`, and `shm-broker-limitations.md` (`ch04:t04`).
 
 ```rust
 pub enum NamedAttach { Created(ShmRegion), Attached(ShmRegion) }
@@ -154,40 +150,32 @@ class LeaseQuarantinedError(VertebraError): ...
 
 ## 3. Documentation & OKF Knowledge Plan
 
-- `[ ]` `docs/usage/extensions.md` — shared broker pools, UDS attach boundary, quarantine, `ProxySyncConfig`/`ProxyAsyncConfig`, and `BrokerPool` (`ch08:t01`).
-- `[ ]` `docs/usage/databases.md` — native engine `BrokerEngineCapsule` matrix and `vertebra.db.dbapi` (`ch08:t01`).
-- `[ ]` `docs/changelog/index.md` — `Unreleased` entries (`ch08:t01`).
-- `[ ]` `.agents/bundles/knowledge/domains/data/broker-and-shm-leases.md` — updated broker architecture (`<= 200` lines, `ch08:t02`).
-- `[ ]` `.agents/bundles/knowledge/domains/data/shm-broker-limitations.md` — operational caveats and engine exclusions (`<= 200` lines, `ch08:t02`).
-- `[ ]` `.agents/bundles/knowledge/domains/index.md` — index link to `shm-broker-limitations.md` (`ch08:t02`).
+- `[ ]` `docs/usage/extensions.md` — shared broker pools, UDS attach boundary, quarantine, `ProxySyncConfig`/`ProxyAsyncConfig`, and `BrokerPool` (`ch04:t04`).
+- `[ ]` `docs/usage/databases.md` — native engine `BrokerEngineCapsule` matrix and `vertebra.db.dbapi` (`ch04:t04`).
+- `[ ]` `docs/changelog/index.md` — `Unreleased` entries (`ch04:t04`).
+- `[ ]` `.agents/bundles/knowledge/domains/data/broker-and-shm-leases.md` — updated broker architecture (`<= 200` lines, `ch04:t04`).
+- `[ ]` `.agents/bundles/knowledge/domains/data/shm-broker-limitations.md` — operational caveats and engine exclusions (`<= 200` lines, `ch04:t04`).
+- `[ ]` `.agents/bundles/knowledge/domains/index.md` — index link to `shm-broker-limitations.md` (`ch04:t04`).
 
 ## 4. Requirement-to-Task Traceability Matrix
 
-| Requirement | Chapter / Task | Primary Files | Verification |
+| Chapter | Title | Tasks | Verification |
 | --- | --- | --- | --- |
-| `R1`–`R3` ([#95](https://github.com/cofin/vertebra/issues/95), [#96](https://github.com/cofin/vertebra/issues/96)) | `ch01` (`t01`–`t04`) | `vertebra-core/src/{shm,cleanup,broker}.rs`, `extensions/broker/{errors,transport,plugin}.py` | `cargo test -p vertebra-core && pytest test_shm_lease_broker.py` |
-| `R4`–`R7` | `ch02` (`t01`–`t04`) | `vertebra-core/src/{broker.rs,dbrpc/mod.rs}`, `extensions/broker/{dbrpc,transport,plugin}.py` | `cargo test -p vertebra-core && pytest test_broker_transport.py` |
-| `R8`–`R10` (Core) | `ch03` (`t01`–`t04`) | `vertebra-db/src/lib.rs`, `vertebra-{py,mysql,duckdb}`, `extensions/broker/engines.py` | `cargo test -p vertebra-db && pytest test_shm_broker.py` |
-| `R10` (Enterprise) | `ch04` (`t01`–`t03`) | `vertebra-{oracle,mssql,postgres}/src/lib.rs`, `_{oracle,mssql,postgres}.pyi` | `cargo test -p vertebra-oracle -p vertebra-mssql -p vertebra-postgres` |
-| `R11`–`R14`, `R19`, `R21` ([#97](https://github.com/cofin/vertebra/issues/97), [#98](https://github.com/cofin/vertebra/issues/98)) | `ch05` (`t01`–`t04`) | `vertebra-core/src/{broker,broker_attach}.rs`, `extensions/broker/{host,transport,plugin}.py` | `cargo test -p vertebra-core && pytest test_shm_broker.py` |
-| `R15`–`R16`, `R20` ([#98](https://github.com/cofin/vertebra/issues/98)) | `ch06` (`t01`–`t03`) | `extensions/sqlspec/{provider,proxy,plugin}.py`, `telemetry/otel.py` | `pytest test_sqlalchemy_and_sqlspec_vtb.py test_multiprocess_pool_sharing.py` |
-| `R17`–`R18` | `ch07` (`t01`–`t03`) | `vertebra/db/dbapi/*`, `extensions/sqlalchemy/{async_adapter,dialects,pool}.py` | `pytest test_dbapi_standalone.py test_gcp_adapters_and_sqlalchemy.py` |
-| `R22` | `ch08` (`t01`–`t02`) | `docs/usage/*.md`, `docs/changelog/index.md`, `.agents/bundles/knowledge/domains/data/*.md` | `make docs && make review-check` |
+| `ch01` | Chapter 01: Atomic SHM Ownership, Supervisor Lifecycle, Pool Identity, and DBRPC Wire Protocol | `4` tasks | `pytest shm.rs` |
+| `ch02` | Chapter 02: BrokerEngineCapsule ABI v1, Python Discovery, and Relational/OLAP Engine Capsules | `4` tasks | `pytest broker_engine_capsule_tests.rs` |
+| `ch03` | Chapter 03: Quarantine Reclamation, Authenticated UDS Broker Attach, Session Affinity, and CLI | `4` tasks | `pytest broker.rs` |
+| `ch04` | Chapter 04: Proxy Drivers, Multi-Process SQLSpec & SQLAlchemy Pool Sharing, and Docs/OKF | `4` tasks | `pytest test_sqlalchemy_and_sqlspec_vtb.py` |
 
 ## 5. Implementation Plan
 
-- [ ] [ch01-shm-ownership-and-lifecycle](chapters/ch01-shm-ownership-and-lifecycle/spec.md) — Atomic `open_or_create_named` owner headers, signal/panic cleanup registry, and fail-loud Python owner/worker attach (Gate: `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-core -p vertebra-http && uv run --no-sync pytest src/py/tests/unit/extensions/test_shm_lease_broker.py`)
-- [ ] [ch02-broker-ipc-identity-and-wire](chapters/ch02-broker-ipc-identity-and-wire/spec.md) — XXH3-64 `stable_hash64`, per-`pool_key` lease partitions + heartbeats, `dbrpc` frames, and dead transport/cache removal (Gate: `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-core -p vertebra-py && uv run --no-sync pytest src/py/tests/unit/extensions/test_broker_transport.py`)
-- [ ] [ch03-engine-capsules-core](chapters/ch03-engine-capsules-core/spec.md) — C-ABI `BrokerEngineCapsule` + `BrokerEngineRegistry`, `BrokerEngineDiscovery`, and MySQL/DuckDB capsules (Gate: `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-db -p vertebra-py -p vertebra-mysql -p vertebra-duckdb && uv run --no-sync pytest src/py/tests/unit/extensions/test_shm_broker.py`)
-- [ ] [ch04-engine-capsules-enterprise](chapters/ch04-engine-capsules-enterprise/spec.md) — Oracle (`tag=4`), SQL Server (`tag=5`), and PostgreSQL (`tag=1`) `BrokerPoolBackend` capsules (Gate: `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-oracle -p vertebra-mssql -p vertebra-postgres && uv run --no-sync pytest src/py/tests/unit/extensions/test_shm_broker.py`)
-- [ ] [ch05-lease-safety-and-uds-attach](chapters/ch05-lease-safety-and-uds-attach/spec.md) — `LeaseState::Quarantined`, `0600` UDS `SCM_RIGHTS` attach, `BrokerHost` (`vtb broker serve`) crash `ROLLBACK`, and pool metrics (Gate: `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-core -p vertebra-py && uv run --no-sync pytest src/py/tests/unit/extensions/test_shm_broker.py src/py/tests/unit/extensions/test_shm_lease_broker.py`)
-- [ ] [ch06-sqlspec-seams-and-multiprocess](chapters/ch06-sqlspec-seams-and-multiprocess/spec.md) — Typed `SQLSpec` provider protocols + quarantine, `SyncDriverAdapterBase`/`AsyncDriverAdapterBase` proxies, and multi-process acceptance (Gate: `uv run --no-sync pytest src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py src/py/tests/unit/extensions/test_shm_broker.py`)
-- [ ] [ch07-standalone-dbapi-and-sqlalchemy](chapters/ch07-standalone-dbapi-and-sqlalchemy/spec.md) — Standalone `vertebra.db.dbapi` extraction, `extensions/sqlalchemy/async_adapter.py`, and SQLAlchemy/Advanced Alchemy `BrokerPool` (Gate: `uv run --no-sync pytest src/py/tests/unit/db/test_dbapi_standalone.py src/py/tests/unit/extensions/test_gcp_adapters_and_sqlalchemy.py src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py`)
-- [ ] [ch08-docs-and-knowledge-sync](chapters/ch08-docs-and-knowledge-sync/spec.md) — Public `docs/` guides + changelog and OKF `broker-and-shm-leases.md` + `shm-broker-limitations.md` (`<= 200` lines) (Gate: `make review-check && uv run --no-sync python -m tools.docs.scan_public_docstrings`)
+- [ ] [ch01-shm-ownership-and-broker-wire](chapters/ch01-shm-ownership-and-broker-wire/spec.md) — Enforce O_CREAT | O_EXCL SHM ownership, OwnedShmRegistry crash/shutdown unlink, explicit owner/worker broker roles, cross-process FNV-1a pool identity, partitioned pools/heartbeats, and binary DBRPC frames.
+- [ ] [ch02-engine-capsules-and-discovery](chapters/ch02-engine-capsules-and-discovery/spec.md) — Define BrokerEngineCapsule ABI v1 and BrokerEngineRegistry, implement Python BrokerEngineDiscovery, and export broker_engine_capsule() across MySQL, DuckDB, Oracle, SQL Server, and PostgreSQL.
+- [ ] [ch03-lease-safety-and-uds-attach](chapters/ch03-lease-safety-and-uds-attach/spec.md) — Implement crashed-worker lease quarantine and reclamation, SCM_RIGHTS/peercred UDS broker attach,DatabaseBrokerHost reclamation loop, transaction session affinity, streaming Arrow cursors, and vtb db broker CLI.
+- [ ] [ch04-python-pooling-sqlspec-sqlalchemy-and-docs](chapters/ch04-python-pooling-sqlspec-sqlalchemy-and-docs/spec.md) — Refactor SQLSpec provider seams and ProxySyncDriver/ProxyAsyncDriver, prove 4-worker single-pool sharing, extract standalone vertebra.db.dbapi and wire SQLAlchemy/Advanced Alchemy broker pooling, and sync docs/OKF.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Baseline (`18baadcd`)**: `0/8` chapters and `0/27` tasks completed; frontier at `ch01-shm-ownership-and-lifecycle` (`broker-pool-sharing:ch01:t01`).
+- **Baseline (`18baadcd`)**: `0/8` chapters and `0/27` tasks completed; frontier at `ch01-shm-ownership-and-broker-wire` (`broker-pool-sharing:ch01:t01`).
 - **Upstream Flow Dependencies**: `native-postgres-driver`.
 - **Active Invariants**: `vertebra-core` never links engine crates; live SHM segments are never unlinked; `extensions/sqlspec` contains zero `inspect.signature` or `contextlib.suppress(Exception)`; `vertebra.db.dbapi` has zero upward imports.
 - **Full `/flow:finish` Gate**: `make lint-all && make rs-test && make py-test && make docs && make review-check`

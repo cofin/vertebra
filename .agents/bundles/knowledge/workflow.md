@@ -10,15 +10,15 @@ tags:
   - testing
   - ci
 generated:
-  by: flow/0.29.1
+  by: flow/0.30.1
   at: "2026-11-06T18:28:00Z"
 verified:
+  - by: agent:flow-setup
+    at: "2026-11-14T18:43:00Z"
+    commit: 104fd6fa
   - by: agent:flow-executor
     at: "2026-11-14T18:05:00Z"
     commit: 8290822e
-  - by: agent:flow-executor
-    at: "2026-11-13T22:48:50Z"
-    commit: 480840a3
 sources:
   - id: src-makefile
     resource: Makefile
@@ -97,7 +97,7 @@ make bench                                                            # make bui
 2. **PyPI Distribution vs. Import Namespace**: [`pyproject.toml`](../../../pyproject.toml)[^src-pyproject-toml] publishes `vertebra-core` while exposing the `vertebra` import namespace (`module-name = "vertebra._vertebra"`). Companion extensions build isolated PEP 420 wheels without `vertebra/*.py` files.
 3. **Codegen & Wheel-Bundled TypeScript Sync**: `make ts-build` compiles all 17 `@vertebra/client` entrypoints ([`package.json`](../../../src/ts/vertebra-client/package.json)[^src-package-json]) and copies `dist/` into `src/py/vertebra/server/_js/bundle/`.
 4. **Shared-Memory Cleanup**: `make rs-test` clears `/dev/shm/test-*` and `/dev/shm/*vertebra*`; parallel review or chapter agents must run targeted `cargo test -p <crate>` commands rather than `make rs-test` so concurrent SHM segments are not unlinked.
-5. **Dependency Group Isolation**: Keep third-party `duckdb>=1.0; python_version < '3.14'` in `[dependency-groups].duckdb` and `bench` (`make install`, `make upgrade`, `make py-test`, and `make coverage` never sync `--group duckdb`), HTTP benchmark harnesses in `bench`, `psycopg`/`asyncpg` PostgreSQL benchmark comparators in `postgres-bench` (`python_version < '3.14'`), and Zensical packages in `doc` ([`pyproject.toml`](../../../pyproject.toml)[^src-pyproject-toml]).
+5. **Dependency Group Isolation**: Keep third-party `duckdb>=1.1.0; python_version < '3.14'` strictly inside `[dependency-groups].bench` (`make install`, `make upgrade`, `make py-test`, and `make coverage` never sync `--group bench`), HTTP benchmark harnesses in `bench`, `psycopg`/`asyncpg` PostgreSQL benchmark comparators in `postgres-bench` (`python_version < '3.14'`), and Zensical packages in `doc` ([`pyproject.toml`](../../../pyproject.toml)[^src-pyproject-toml]).
 6. **Documentation, Secret, & Git Hygiene**: Never enable `navigation.indexes` in `zensical.toml`; use `"mock-oauth-token"` in GCS/IAM tests (`git-secrets` blocks real OAuth2 prefixes); keep `extensions.worktreeConfig` and `core.hooksPath` unset in `.git/config`.
 
 ## Direct Markdown Continuity & Chapter-Batch Loop

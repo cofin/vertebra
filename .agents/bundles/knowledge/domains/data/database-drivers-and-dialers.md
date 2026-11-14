@@ -11,12 +11,14 @@ tags:
   - oracle
   - cloud-sql
   - alloydb
-  - arrow
   - shm
 generated:
-  by: flow/0.26.0
+  by: flow/0.30.1
   at: "2026-11-04T04:33:00Z"
 verified:
+  - by: agent:flow-setup
+    at: "2026-11-14T18:43:00Z"
+    commit: 104fd6fa
   - by: agent:flow-executor
     at: "2026-11-14T18:05:00Z"
     commit: 8290822e

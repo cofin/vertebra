@@ -59,8 +59,12 @@ Verify `tools/benchmarks/{runner.py,apps/asgi.py,apps/spikard_app.py}` typing in
 
 ## Contracts & Edge Cases
 
-- **`tools/benchmarks/{runner.py,apps/asgi.py,apps/spikard_app.py}` (`334dc98d`, landed)**: Already updated (`ServerRunner._process: subprocess.Popen[bytes] | None`, `encode_json_bytes`, typed `spikard` routes with zero `# type: ignore`); keep strict compliance clean without regressions.
+- **`tools/benchmarks/{runner.py,apps/asgi.py,apps/spikard_app.py}` (`334dc98d` / `8290822e`, landed)**: Already updated (`ServerRunner._process: subprocess.Popen[bytes] | None`, `encode_json_bytes`, typed `spikard.app.App` routes with zero `# type: ignore`); keep strict compliance clean without regressions.
 - **`src/py/tests/unit/test_bench_infrastructure.py` (remaining)**: Add unit regression test exercising `ServerRunner` when a child command writes UTF-8 and non-UTF-8 bytes to `stderr` and exits non-zero before opening its port, asserting `RuntimeError` includes the decoded stderr tail; verify `mypy --strict tools/benchmarks` and `ruff check tools/benchmarks` exit `0`.
+
+## Test Matrix
+
+- Unit regression test in `src/py/tests/unit/test_bench_infrastructure.py` spawning a child process that writes UTF-8 and invalid UTF-8 (`\xff\xfe`) bytes to `stderr` and exits non-zero, verifying `ServerRunner` raises `RuntimeError` containing the decoded replacement stderr tail without `AttributeError: 'str' object has no attribute 'decode'`.
 
 ## Verification
 

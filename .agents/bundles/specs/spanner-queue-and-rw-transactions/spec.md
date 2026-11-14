@@ -1,60 +1,56 @@
 ---
 type: Spec
 flow_id: spanner-queue-and-rw-transactions
-title: "Cloud Spanner Interactive ReadWrite Transactions and Native Queue Store"
-description: "Implement genuine multi-statement interactive ReadWrite transactions in vertebra-spanner and Python Spanner drivers, build SyncSpannerQueueStore and AsyncSpannerQueueStore across GoogleSQL and Spangres, and remediate SpannerQueueBackend claim, lease, and memory-leak defects."
+title: Cloud Spanner Interactive ReadWrite Transactions and Native Queue Store
+description: Implement genuine multi-statement interactive ReadWrite transactions in vertebra-spanner and Python Spanner drivers, build SyncSpannerQueueStore and AsyncSpannerQueueStore across GoogleSQL and Spangres, and remediate SpannerQueueBackend claim, lease, and memory-leak defects.
 status: stable
 state: planned
 planning_quality: standard
 planning_degraded_reason: null
-has_chapters: true
-chapters:
-  - ch01-interactive-rw-transactions
-  - ch02-spanner-queue-store-and-docs
-current_chapter: ch01-interactive-rw-transactions
-current_task: "spanner-queue-and-rw-transactions:ch01:t01"
+has_chapters: false
+current_task: spanner-queue-and-rw-transactions:t01
 parent_prd: integration-remediation
 depends_on_flows:
-  - queues-tasks-and-channels
+- queues-tasks-and-channels
 plan_revision: 1
-plan_commit: 18baadcd
-created_at: "2026-11-12T23:58:00Z"
-updated_at: "2026-11-12T23:58:00Z"
+plan_commit: 104fd6fa
+created_at: '2026-11-12T23:58:00Z'
+updated_at: '2026-11-14T18:50:00Z'
 generated:
-  by: flow-plan
-  at: "2026-11-12T23:58:00Z"
+  by: flow/0.30.1
+  at: '2026-11-14T18:50:00Z'
 verified:
-  - by: agent:plan-generator
-    at: "2026-11-12T23:58:00Z"
-    commit: 18baadcd
+- by: agent:plan-generator
+  at: '2026-11-14T18:50:00Z'
+  commit: 104fd6fa
 tags:
-  - spanner
-  - spangres
-  - transactions
-  - queues
-  - rust
+- spanner
+- spangres
+- transactions
+- queues
+- rust
 sources:
-  - id: spn-client-rs
-    resource: src/rs/vertebra-spanner/src/client.rs
-    title: "Single-shot execute_dml and execute_batch_dml RPC runners in vertebra-spanner"
-  - id: spn-lib-rs
-    resource: src/rs/vertebra-spanner/src/lib.rs
-    title: "PyO3 bindings for SyncSpannerClient and AsyncSpannerClient"
-  - id: spn-pyi
-    resource: src/py/vertebra/_spanner.pyi
-    title: "Type stubs for vertebra._spanner"
-  - id: spn-driver
-    resource: src/py/vertebra/db/adapters/spanner/driver.py::SyncSpannerTransaction
-    title: "SyncSpannerTransaction and AsyncSpannerTransaction delegating to non-atomic single-shot RPCs"
-  - id: queue-spanner
-    resource: src/py/vertebra/framework/queues/spanner.py::SpannerQueueBackend
-    title: "SpannerQueueBackend passing 6 args to 3-param CLAIM_SPANNER_JOBS_SQL and skipping UPDATE_CLAIM_SPANNER_JOBS_SQL"
-  - id: okf-gcp
-    resource: .agents/bundles/knowledge/domains/data/gcp-bigquery-and-spanner-drivers.md
-    title: "BigQuery and Cloud Spanner drivers OKF chapter"
-  - id: okf-queues
-    resource: .agents/bundles/knowledge/domains/framework/distributed-queues-and-email.md
-    title: "Distributed queues and email OKF chapter"
+- id: spn-client-rs
+  resource: src/rs/vertebra-spanner/src/client.rs
+  title: Single-shot execute_dml and execute_batch_dml RPC runners in vertebra-spanner
+- id: spn-lib-rs
+  resource: src/rs/vertebra-spanner/src/lib.rs
+  title: PyO3 bindings for SyncSpannerClient and AsyncSpannerClient
+- id: spn-pyi
+  resource: src/py/vertebra/_spanner.pyi
+  title: Type stubs for vertebra._spanner
+- id: spn-driver
+  resource: src/py/vertebra/db/adapters/spanner/driver.py::SyncSpannerTransaction
+  title: SyncSpannerTransaction and AsyncSpannerTransaction delegating to non-atomic single-shot RPCs
+- id: queue-spanner
+  resource: src/py/vertebra/framework/queues/spanner.py::SpannerQueueBackend
+  title: SpannerQueueBackend passing 6 args to 3-param CLAIM_SPANNER_JOBS_SQL and skipping UPDATE_CLAIM_SPANNER_JOBS_SQL
+- id: okf-gcp
+  resource: .agents/bundles/knowledge/domains/data/gcp-bigquery-and-spanner-drivers.md
+  title: BigQuery and Cloud Spanner drivers OKF chapter
+- id: okf-queues
+  resource: .agents/bundles/knowledge/domains/framework/distributed-queues-and-email.md
+  title: Distributed queues and email OKF chapter
 ---
 
 # Specification: Cloud Spanner Interactive ReadWrite Transactions and Native Queue Store
@@ -97,26 +93,29 @@ class AsyncSpannerQueueStore: ...
 
 ## 3. Documentation & OKF Knowledge Plan
 
-- Public documentation (`ch02:t03`): `docs/usage/queues-and-realtime.md`.
-- OKF knowledge chapters (`ch02:t03`, each `<= 200` lines): [gcp-bigquery-and-spanner-drivers.md](../../knowledge/domains/data/gcp-bigquery-and-spanner-drivers.md) and [distributed-queues-and-email.md](../../knowledge/domains/framework/distributed-queues-and-email.md).
+- Public documentation (`t04`): `docs/usage/queues-and-realtime.md`.
+- OKF knowledge chapters (`t04`, each `<= 200` lines): [gcp-bigquery-and-spanner-drivers.md](../../knowledge/domains/data/gcp-bigquery-and-spanner-drivers.md) and [distributed-queues-and-email.md](../../knowledge/domains/framework/distributed-queues-and-email.md).
 
 ## 4. Requirement-to-Task Traceability Matrix
 
-| Requirement | Chapter / Task | Primary Files | Verification |
+| Task | Title | Primary Files | Verification |
 | --- | --- | --- | --- |
-| `R1`–`R3` Interactive `ReadWrite` transactions & retries | `ch01` (`t01`–`t03`) | `src/rs/vertebra-spanner/src/{client,errors,lib}.rs`, `_spanner.pyi`, `db/adapters/spanner/driver.py` | `cargo test -p vertebra-spanner && pytest test_spanner.py` |
-| `R4`–`R5` `Sync/AsyncSpannerQueueStore` & backend fixes | `ch02` (`t01`–`t02`) | `db/adapters/spanner/queue.py`, `framework/queues/{spanner,base}.py` | `pytest test_spanner_queue_and_cdc.py test_distributed_queues.py` |
-| `R6` Docs & OKF sync | `ch02` (`t03`) | `gcp-bigquery-and-spanner-drivers.md`, `distributed-queues-and-email.md`, `queues-and-realtime.md` | `review_setup.py validate` |
+| `t01` | Implement Rust Interactive Spanner ReadWrite Engine and PyO3 Bindings | `src/rs/vertebra-spanner/src/client.rs`, `src/rs/vertebra-spanner/src/errors.rs`, `src/rs/vertebra-spanner/src/lib.rs` | `src/py/tests/unit/db/test_spanner.py` |
+| `t02` | Wire SyncSpannerDriver / AsyncSpannerDriver Interactive Transactions & Aborted Closure Retries | `src/py/vertebra/db/adapters/spanner/driver.py`, `src/py/vertebra/db/adapters/spanner/__init__.py` | `src/py/tests/unit/db/test_spanner.py` |
+| `t03` | Implement Sync/AsyncSpannerQueueStore and Remediate SpannerQueueBackend | `src/py/vertebra/db/adapters/spanner/queue.py`, `src/py/vertebra/db/adapters/spanner/__init__.py`, `src/py/vertebra/framework/queues/spanner.py` | `src/py/tests/unit/db/test_spanner_queue_and_cdc.py`, `src/py/tests/unit/framework/test_distributed_queues.py` |
+| `t04` | Synchronize Spanner ReadWrite Transactions & Queue Store Docs and OKF Chapters | `.agents/bundles/knowledge/domains/data/gcp-bigquery-and-spanner-drivers.md`, `.agents/bundles/knowledge/domains/framework/distributed-queues-and-email.md`, `docs/usage/queues-and-realtime.md` | `src/py/tests/unit/extensions/test_vite_and_docs_portal.py` |
 
 ## 5. Implementation Plan
 
-- [ ] [ch01-interactive-rw-transactions](chapters/ch01-interactive-rw-transactions/spec.md) — Implement interactive multi-statement `ReadWrite` transactions (`TransactionSelector::Id` + `seqno` + `precommit_token` + `SpannerAbortedError` retries) in `vertebra-spanner` and Python Spanner drivers.
-- [ ] [ch02-spanner-queue-store-and-docs](chapters/ch02-spanner-queue-store-and-docs/spec.md) — Implement `SyncSpannerQueueStore`/`AsyncSpannerQueueStore` across GoogleSQL and Spangres, fix `SpannerQueueBackend` claim/lease/leak defects, and sync docs/OKF.
+- [ ] [t01-rust-and-pyo3-rw-transactions.md](tasks/t01-rust-and-pyo3-rw-transactions.md) — Build stateful ReadWrite transaction handles in vertebra-spanner/src/{client,errors,lib}.rs and expose Sync/AsyncSpannerReadWriteTransaction in _spanner.pyi.
+- [ ] [t02-python-driver-rw-transactions-and-retries.md](tasks/t02-python-driver-rw-transactions-and-retries.md) — Route SyncSpannerTransaction, AsyncSpannerTransaction, run_in_transaction, and transaction() through interactive ReadWrite handles with SpannerAbortedError retry backoff.
+- [ ] [t03-spanner-queue-store-and-backend-wiring.md](tasks/t03-spanner-queue-store-and-backend-wiring.md) — Build SyncSpannerQueueStore and AsyncSpannerQueueStore across GoogleSQL and Spangres, fix SpannerQueueBackend claim/lease/leak defects, and auto-wire QueueService.
+- [ ] [t04-spanner-rw-and-queue-docs-okf-sync.md](tasks/t04-spanner-rw-and-queue-docs-okf-sync.md) — Update gcp-bigquery-and-spanner-drivers.md, distributed-queues-and-email.md, and docs/usage/queues-and-realtime.md.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Current Frontier**: `state: planned` at `ch01-interactive-rw-transactions` (`spanner-queue-and-rw-transactions:ch01:t01`, `0/6` tasks completed across `2` chapters).
-- **Upstream Flow Gates**: `ch02` requires `queues-tasks-and-channels` (`SyncQueueStore` / `AsyncQueueStore` protocols and `QueueBackendSettings`); `ch01` touches only `vertebra-spanner` and `db/adapters/spanner`.
+- **Current Frontier**: `state: planned` at `spanner-queue-and-rw-transactions:t01` (`0/4` tasks completed).
+- **Upstream Flow Gates**: `t03`–`t04` require `queues-tasks-and-channels` (`SyncQueueStore` / `AsyncQueueStore` protocols and `QueueBackendSettings`); `t01`–`t02` touch only `vertebra-spanner` and `db/adapters/spanner`.
 - **Full `/flow:finish` Gate**: `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-spanner && make lint-all && make py-test && make docs`.
 
 [^spn-client-rs]: `src/rs/vertebra-spanner/src/client.rs` — Single-shot execute_dml and execute_batch_dml RPC runners in vertebra-spanner.

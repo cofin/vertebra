@@ -1,44 +1,44 @@
 ---
 type: Task
-id: "sqlspec-adapter-parity:ch01-sqlspec-core-driver-and-artifact-ref:t02"
+id: sqlspec-adapter-parity:ch01-sqlspec-core-driver-and-artifact-ref:t02
 flow_id: sqlspec-adapter-parity
 chapter_id: ch01-sqlspec-core-driver-and-artifact-ref
-title: "Implement extensions/sqlspec/_driver.py Template-Method Driver & Config Bases"
-description: "Implement BaseSyncDriver, BaseAsyncDriver, SyncAdapterConfig, AsyncAdapterConfig, StatementConfig preservation, and exception mapping."
+title: Implement _driver.py Template-Method Dispatch Bases and Pipeline Stack Execution
+description: Implement extensions/sqlspec/_driver.py template-method bases, execute_stack pipelining, and refcounted pool close.
 status: stable
 state: pending
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
 strategy: regression_tdd
-plan_commit: 18baadcd
+plan_commit: 104fd6fa
 depends_on:
-  - t01
+- sqlspec-adapter-parity:ch01-sqlspec-core-driver-and-artifact-ref:t01
 files:
-  - src/py/vertebra/extensions/sqlspec/_driver.py
+- src/py/vertebra/extensions/sqlspec/_driver.py
 tests:
-  - src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py
+- src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py
 read_set:
-  - src/py/vertebra/extensions/sqlspec/adapters.py
-  - src/py/vertebra/db/driver/_common.py
-  - src/py/vertebra/db/driver/capabilities.py
-  - src/py/vertebra/db/registry.py
+- src/py/vertebra/extensions/sqlspec/adapters.py
+- src/py/vertebra/db/driver/_common.py
+- src/py/vertebra/db/driver/capabilities.py
+- src/py/vertebra/db/registry.py
 estimated_loc: 245
 tags:
-  - sqlspec
-  - driver
-  - pipeline
-  - arrow
+- sqlspec
+- driver
+- pipeline
+- arrow
 sources:
-  - id: sqlspec-adapters
-    resource: src/py/vertebra/extensions/sqlspec/adapters.py
-    title: "Current monolithic SQLSpec BaseSyncDriver and BaseAsyncDriver"
-  - id: db-common
-    resource: src/py/vertebra/db/driver/_common.py
-    title: "Canonical DatabaseError hierarchy"
+- id: sqlspec-adapters
+  resource: src/py/vertebra/extensions/sqlspec/adapters.py
+  title: Current monolithic SQLSpec BaseSyncDriver and BaseAsyncDriver
+- id: db-common
+  resource: src/py/vertebra/db/driver/_common.py
+  title: Canonical DatabaseError hierarchy
 ---
 
-# Task `t02`: Implement extensions/sqlspec/_driver.py Template-Method Driver & Config Bases
+# Task `t02`: Implement _driver.py Template-Method Dispatch Bases and Pipeline Stack Execution
 
 ## Objective & Scope Boundary
 
@@ -70,7 +70,7 @@ uv run --no-sync ruff check src/py/vertebra/db/driver src/py/vertebra/extensions
 
 - [ ] `_driver.py` implements full `sqlspec>=0.71.1` MyPyC-compatible dispatch without overriding `execute` or `select*`.
 - [ ] Zero `_compat.py` monkeypatching is introduced anywhere in `extensions/sqlspec/`.
-- [ ] Zero regressions in the chapter fast verification gate.
+- [ ] Zero regressions in the fast verification gate.
 
 [^sqlspec-adapters]: `src/py/vertebra/extensions/sqlspec/adapters.py` — Current monolithic SQLSpec BaseSyncDriver and BaseAsyncDriver.
 [^db-common]: `src/py/vertebra/db/driver/_common.py` — Canonical DatabaseError hierarchy.

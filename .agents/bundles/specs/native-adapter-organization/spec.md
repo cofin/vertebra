@@ -12,19 +12,17 @@ current_task: "native-adapter-organization:t01"
 parent_prd: native-data-platform
 depends_on_flows:
   - native-postgres-driver
-  - native-sqlite-driver
-  - native-redis-driver
-plan_revision: 1
-plan_commit: 18baadcd
+plan_revision: 2
+plan_commit: 104fd6fa
 created_at: "2026-11-12T23:45:00Z"
-updated_at: "2026-11-12T23:45:00Z"
+updated_at: "2026-11-14T18:43:00Z"
 generated:
   by: flow-plan
   at: "2026-11-12T23:45:00Z"
 verified:
-  - by: agent:plan-generator
-    at: "2026-11-12T23:45:00Z"
-    commit: 18baadcd
+  - by: agent:flow-setup
+    at: "2026-11-14T18:43:00Z"
+    commit: 104fd6fa
 tags:
   - database
   - adapters
@@ -76,7 +74,7 @@ sources:
 <!-- truth: start -->
 - **Baseline (`334dc98d`)**: `bigquery/config.py` (`619L`) and `spanner/config.py` (`543L`) mix connection configs with `ObjectRef`/`ObjectTableConfig` and `StalenessBound`/`Mutation`/`MutationGroup`; `bigquery`, `spanner` (`2,011L`), `oracle` (`2,340L`), `mysql` (`1,244L`), `duckdb` (`1,251L`), and `mssql` (`855L`) bundle sync/async drivers (and Oracle pools/pipelines) into monolithic `driver.py` files; and `DataFusionConfig` / `DataFusionEngine` carry unimplemented `pgwire_fdw` fields and vendor-specific registration wrappers [^bq-config] [^sp-config] [^ora-driver] [^df-config] [^df-driver].
 - **Target Architecture**: Every native database adapter under `src/py/vertebra/db/adapters/<engine>/` follows uniform single-responsibility module boundaries (`config.py`, `core.py`, `_sync.py`, `_async.py`, thin `driver.py` barrel, `pipeline.py`, `object_tables.py`, `mutations.py`, and lazy `__init__.py` exports with zero re-export shims in `config.py`), while `DataFusionConfig` supports only implemented `mode="in_process"` and `DataFusionEngine` registers upstream queries strictly via `register_arrow_table(name, cursor)`.
-- **Scope & Boundaries**: Sequenced after archived `native-postgres-driver` ([`postgres-native-driver.md`](../../knowledge/domains/data/postgres-native-driver.md)), [`native-sqlite-driver`](../native-sqlite-driver/spec.md), and [`native-redis-driver`](../native-redis-driver/spec.md) so all engine adapters align without merge conflicts; preserves public `vertebra.db.adapters.<engine>` lazy exports (`__all__` / `_EXPORT_MAP`) consumed by SQLSpec and SQLAlchemy extensions [^okf-drivers].
+- **Scope & Boundaries**: Ready in the immediate wave after archived `native-postgres-driver` ([`postgres-native-driver.md`](../../knowledge/domains/data/postgres-native-driver.md)) with zero overlap against `sqlite` or `redis`/`valkey`; preserves public `vertebra.db.adapters.<engine>` lazy exports (`__all__` / `_EXPORT_MAP`) consumed by SQLSpec and SQLAlchemy extensions [^okf-drivers].
 <!-- truth: end -->
 
 ## 1. Specification, Context & Provenance
@@ -131,7 +129,7 @@ Across `src/py/vertebra/db/adapters/`, `postgres` establishes clean module bound
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **State**: `planned` (`0/4` tasks completed; frontier at `native-adapter-organization:t01`), sequenced after `native-postgres-driver`, `native-sqlite-driver`, and `native-redis-driver` under [`native-data-platform`](../native-data-platform/spec.md).
+- **State**: `planned` (`0/4` tasks completed; frontier at `native-adapter-organization:t01`), ready in the immediate wave after archived `native-postgres-driver` under [`native-data-platform`](../native-data-platform/spec.md).
 - **Full `/flow:finish` Verification**: `PYTHONPATH="src/py:." uv run --no-sync python -m tools.docs.scan_public_docstrings --check-leaks --check-overloads --check-typeddicts src/py/vertebra/db/adapters && make lint-all && make py-test && make docs && make review-check`.
 
 [^bq-config]: `src/py/vertebra/db/adapters/bigquery/config.py::BigQueryConfig` — BigQueryConfig mixed with ObjectRef, ObjectTableConfig, and BigQueryTableIdentifier.

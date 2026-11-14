@@ -1,5 +1,10 @@
 # Bundle Activity Log
 
+## [2026-11-14T20:02:00Z] align | flow-setup
+
+- Executed `/flow-setup` (`Align & True-Up`) against `fix/audit-remediation @ 104fd6fa` (`main @ 4773e2fc`): fixed OKF v0.2 tag/heading validation errors in `database-drivers-and-dialers.md` and `strict-typing-hygiene:t02`, updated `workflow.md` (`[dependency-groups].bench` `duckdb` isolation), reconciled unstarted spec blueprint drift across `native-adapter-organization` (`depends_on_flows`), `native-sqlite-driver` (`[all]` extra removal, `ConformanceGate`/`registry.py`, `py_async.rs`), `native-redis-driver` (`[all]` extra removal, workspace `Cargo.toml`), `broker-pool-sharing` (`MssqlBrokerBackend` in `src/rs/vertebra-mssql/src/broker.rs`), `sqlspec-adapter-parity` (`execute_with_description` reuse), and `queues-tasks-and-channels` (`MultiLaneWorkerRunner` `read_set`, preserved `SCAN`+`UNLINK`), and removed legacy untracked `.agents/studio-live-state.json`.
+- Consolidated chapter structure across all planned multi-chapter specifications (`47` chapters / `150` multi-chapter tasks -> `21` chapters / `85` multi-chapter tasks + flattened `spanner-queue-and-rw-transactions` to `4` flat tasks, keeping `100%` of requirements, contracts, files, and tests intact): `broker-pool-sharing` (`8 -> 4` chapters), `native-sqlite-driver` (`5 -> 3` chapters), `native-redis-driver` (`8 -> 4` chapters), `sqlalchemy-and-django-integration` (`7 -> 3` chapters), `sqlspec-adapter-parity` (`10 -> 4` chapters), `queues-tasks-and-channels` (`7 -> 3` chapters), and `spanner-queue-and-rw-transactions` (`2 -> 0` chapters, flat `t01`–`t04`).
+
 ## [2026-11-14T18:30:30Z] archive | driver-conformance-ci
 
 - Archived completed specification `driver-conformance-ci` (`ch01`–`ch04`, `13/13` tasks across `a8ca7b24..cc75373f`) into permanent OKF knowledge chapters (`object-storage.md`, `database-drivers-and-dialers.md`, `database-driver-limitations.md`, `polyglot-test-matrix.md`, `benchmarks-and-free-threaded.md`, `workflow.md`), updated Master PRD `native-data-platform` and bundle indexes (`index.md`, `specs/index.md`), and removed `.agents/bundles/specs/driver-conformance-ci/`.

@@ -1,70 +1,64 @@
 ---
 type: Spec
 flow_id: sqlspec-adapter-parity
-title: "Feature-Complete SQLSpec Adapters"
-description: "Deliver full-parity per-engine SQLSpec adapter packages across all 8 engines on sqlspec>=0.71.1 without MyPyC monkeypatching or cross-adapter shared SQL helpers, fixing MySQL qmark binds and Spanner sqlglot dialects, cutting provider.py over to VTBARROW ArrowCursor, and adding vertebra.storage.ArtifactReference."
+title: Feature-Complete SQLSpec Adapters
+description: Deliver full-parity per-engine SQLSpec adapter packages across all 8 engines on sqlspec>=0.71.1 without MyPyC monkeypatching or cross-adapter shared SQL helpers, fixing MySQL qmark binds and Spanner sqlglot dialects, cutting provider.py over to VTBARROW ArrowCursor, and adding vertebra.storage.ArtifactReference.
 status: stable
 state: planned
 planning_quality: standard
 planning_degraded_reason: null
 has_chapters: true
 chapters:
-  - ch01-sqlspec-core-driver-and-artifact-ref
-  - ch02-sqlspec-postgres
-  - ch03-sqlspec-sqlite
-  - ch04-sqlspec-mysql
-  - ch05-sqlspec-oracle
-  - ch06-sqlspec-mssql
-  - ch07-sqlspec-duckdb
-  - ch08-sqlspec-bigquery
-  - ch09-sqlspec-spanner
-  - ch10-sqlspec-cutover-storage-events-docs
+- ch01-sqlspec-core-driver-and-artifact-ref
+- ch02-sqlspec-relational-adapters
+- ch03-sqlspec-enterprise-and-cloud-adapters
+- ch04-sqlspec-cutover-storage-events-docs
 current_chapter: ch01-sqlspec-core-driver-and-artifact-ref
-current_task: "sqlspec-adapter-parity:ch01:t01"
+current_task: sqlspec-adapter-parity:ch01:t01
 parent_prd: integration-remediation
 depends_on_flows:
-  - broker-pool-sharing
-  - native-sqlite-driver
-  - native-redis-driver
+- broker-pool-sharing
+- native-sqlite-driver
+- native-redis-driver
 plan_revision: 3
-plan_commit: 18baadcd
-created_at: "2026-11-03T03:30:00Z"
-updated_at: "2026-11-12T23:50:00Z"
+plan_commit: 104fd6fa
+created_at: '2026-11-03T03:30:00Z'
+updated_at: '2026-11-14T18:50:00Z'
 generated:
-  by: flow-plan
-  at: "2026-11-12T23:50:00Z"
+  by: flow/0.30.1
+  at: '2026-11-14T18:50:00Z'
 verified:
-  - by: agent:plan-generator
-    at: "2026-11-12T23:50:00Z"
-    commit: 18baadcd
+- by: agent:plan-generator
+  at: '2026-11-14T18:50:00Z'
+  commit: 104fd6fa
 tags:
-  - sqlspec
-  - adapters
-  - adk
-  - events
-  - litestar
+- sqlspec
+- adapters
+- adk
+- events
+- litestar
 sources:
-  - id: pyproject-sqlspec
-    resource: pyproject.toml
-    title: "sqlspec floor and optional adk extra"
-  - id: sqlspec-adapters
-    resource: src/py/vertebra/extensions/sqlspec/adapters.py
-    title: "Monolithic SQLSpec adapter definitions slated for per-engine split"
-  - id: sqlspec-bq
-    resource: src/py/vertebra/extensions/sqlspec/bigquery.py
-    title: "Current BigQuery SQLSpec module"
-  - id: sqlspec-spn
-    resource: src/py/vertebra/extensions/sqlspec/spanner.py
-    title: "Current Spanner SQLSpec module with invalid sqlglot dialect names and BigQuery ObjectRef import"
-  - id: sqlspec-provider
-    resource: src/py/vertebra/extensions/sqlspec/provider.py
-    title: "SQLSpecSyncProvider and SQLSpecAsyncProvider slated for VTBARROW ArrowCursor cutover"
-  - id: sqlspec-plugin
-    resource: src/py/vertebra/extensions/sqlspec/plugin.py
-    title: "SQLSpecPlugin lifecycle and session configuration"
-  - id: storage-store
-    resource: src/py/vertebra/storage/_store.py
-    title: "Native storage metadata structs where ArtifactReference is defined"
+- id: pyproject-sqlspec
+  resource: pyproject.toml
+  title: sqlspec floor and optional adk extra
+- id: sqlspec-adapters
+  resource: src/py/vertebra/extensions/sqlspec/adapters.py
+  title: Monolithic SQLSpec adapter definitions slated for per-engine split
+- id: sqlspec-bq
+  resource: src/py/vertebra/extensions/sqlspec/bigquery.py
+  title: Current BigQuery SQLSpec module
+- id: sqlspec-spn
+  resource: src/py/vertebra/extensions/sqlspec/spanner.py
+  title: Current Spanner SQLSpec module with invalid sqlglot dialect names and BigQuery ObjectRef import
+- id: sqlspec-provider
+  resource: src/py/vertebra/extensions/sqlspec/provider.py
+  title: SQLSpecSyncProvider and SQLSpecAsyncProvider slated for VTBARROW ArrowCursor cutover
+- id: sqlspec-plugin
+  resource: src/py/vertebra/extensions/sqlspec/plugin.py
+  title: SQLSpecPlugin lifecycle and session configuration
+- id: storage-store
+  resource: src/py/vertebra/storage/_store.py
+  title: Native storage metadata structs where ArtifactReference is defined
 ---
 
 # Specification: Feature-Complete SQLSpec Adapters
@@ -90,7 +84,7 @@ Primary-source verification against `sqlspec==0.71.1` (MyPyC-compiled) confirms:
 ## 2. Requirements, Concrete Contracts & Architecture
 
 - **R1 (`sqlspec>=0.71.1`, `adk` Extra & Zero Monkeypatching)**: Bump `sqlspec>=0.71.1`, add `adk = ["google-adk>=1.0.0"]`, forbid `_compat.py`, and declare `adapter_name = "vertebra_<engine>"` plus explicit `adk_store_class`, `adk_session_store_class`, `adk_memory_store_class`, `adk_artifact_store_class`, `events_store_class`, and `litestar_store_class` attributes on every `<Engine>SyncConfig` / `<Engine>AsyncConfig` (and `SpangresSyncConfig` / `SpangresAsyncConfig`).
-- **R2 (`_driver.py` Dispatch Contract & Parameter Fidelity)**: Inherit `execute`/`select*` and `@final dispatch_statement_execution` from `SyncDriverAdapterBase`/`AsyncDriverAdapterBase`; implement `dispatch_execute*`, `query_with_columns` (preserving columns on zero-row `SELECT`/`RETURNING`), `execute_stack` over `SyncPipelineCapable`/`AsyncPipelineCapable`, non-mutating `StatementConfig` merge, `TypedParameter` unwrapping, `DatabaseError` -> `sqlspec.exceptions.*` mapping, and reference-counted `DatabaseRegistry` pool `close()`.
+- **R2 (`_driver.py` Dispatch Contract & Parameter Fidelity)**: Inherit `execute`/`select*` and `@final dispatch_statement_execution` from `SyncDriverAdapterBase`/`AsyncDriverAdapterBase`; implement `dispatch_execute*`, `query_with_columns` (delegating to existing `execute_with_description` + `hydrate_rows` to preserve columns on zero-row `SELECT`/`RETURNING`), `execute_stack` over `SyncPipelineCapable`/`AsyncPipelineCapable`, non-mutating `StatementConfig` merge, `TypedParameter` unwrapping, `DatabaseError` -> `sqlspec.exceptions.*` mapping, and reference-counted `DatabaseRegistry` pool `close()`.
 - **R3 (Engine Placeholder & Dialect Fixes, Zero Shared Helpers)**: PostgreSQL `$1` (`NUMERIC`), SQLite `?`/`:name`, MySQL `?` (`ParameterStyle.QMARK`), Oracle `:name`/`:1`, MSSQL `? -> @P1` (`dialect="tsql"`), DuckDB `?`/`$1` (2.0+ lexical `COPY` order + `fetchall()` for Arrow-divergent types), BigQuery `@name` (`NAMED_AT`), Spanner GoogleSQL `dialect="spanner"` (`@name`) and Spangres `dialect="postgres"` (`$1 -> p1`). Duplicate adapter-family helpers inside each `adapters/<engine>/core.py` (zero cross-adapter SQL helper modules).
 - **R4 (`SyncDataDictionaryBase` / `AsyncDataDictionaryBase`)**: Implement `<Engine>SyncDataDictionary` and `<Engine>AsyncDataDictionary` across all 8 engines reusing upstream `sqlspec/data_dictionary/dialects/<engine>/sql/*.sql`.
 - **R5 (SDK-Free ADK, Events & Litestar Stores + `ArtifactReference`)**: Subclass `BaseSyncADKStore`/`BaseAsyncADKStore`, `Base*ADKMemoryStore`, `Base*ADKArtifactStore`, `BaseEventQueueStore`, and `BaseSQLSpecStore` with zero third-party DB SDK imports; define `vertebra.storage.ArtifactReference` (`uri`, `version`, `content_type`, `size`, `updated`, `signed_url`) for shared artifact surfaces while retaining `ObjectRef` on native BigQuery Object Tables (zero BigQuery imports in Spanner).
@@ -98,35 +92,28 @@ Primary-source verification against `sqlspec==0.71.1` (MyPyC-compiled) confirms:
 
 ## 3. Documentation & OKF Knowledge Plan
 
-- Public documentation (`ch10:t04`): `docs/usage/extensions.md` and `docs/reference/extensions.md` (`pymdownx.tabbed` install tabs, 4–6 node conceptual Mermaid diagrams).
-- OKF knowledge chapters (`ch10:t04`, each `<= 200` lines): [sqlspec-alchemy-and-dialects.md](../../knowledge/domains/extensions/sqlspec-alchemy-and-dialects.md) and [database-driver-limitations.md](../../knowledge/domains/data/database-driver-limitations.md).
+- Public documentation (`ch04:t04`): `docs/usage/extensions.md` and `docs/reference/extensions.md` (`pymdownx.tabbed` install tabs, 4–6 node conceptual Mermaid diagrams).
+- OKF knowledge chapters (`ch04:t04`, each `<= 200` lines): [sqlspec-alchemy-and-dialects.md](../../knowledge/domains/extensions/sqlspec-alchemy-and-dialects.md) and [database-driver-limitations.md](../../knowledge/domains/data/database-driver-limitations.md).
 
 ## 4. Requirement-to-Task Traceability Matrix
 
-| Requirement | Chapter / Task | Primary Files | Verification |
+| Chapter | Title | Tasks | Verification |
 | --- | --- | --- | --- |
-| `R1`, `R2`, `R6` Core `_driver.py`, `VTBARROW` & `ArtifactReference` | `ch01` (`t01`–`t03`) | `pyproject.toml`, `db/driver/{_sync,_async}.py`, `extensions/sqlspec/{_driver,provider}.py`, `storage/_store.py` | `pytest test_sqlspec_shm_proxy.py` |
-| `R3`–`R5` PostgreSQL & SQLite adapter packages | `ch02`–`ch03` (`6` tasks) | `extensions/sqlspec/adapters/{postgres,sqlite}/*` | `pytest test_sqlalchemy_and_sqlspec_vtb.py` |
-| `R3`–`R5` MySQL (`?` fix), Oracle & MSSQL packages | `ch04`–`ch06` (`9` tasks) | `extensions/sqlspec/adapters/{mysql,oracle,mssql}/*` | `pytest test_sqlalchemy_and_sqlspec_vtb.py` |
-| `R3`–`R5` DuckDB, BigQuery & Spanner (`sqlglot` fix) | `ch07`–`ch09` (`9` tasks) | `extensions/sqlspec/adapters/{duckdb,bigquery,spanner}/*` | `pytest test_sqlspec_{bigquery,spanner}.py` |
-| `R7`–`R8` `ObjectStoreBase`, CDC events, cutover & docs | `ch10` (`t01`–`t04`) | `extensions/sqlspec/{storage,events,plugin,__init__}.py`, `docs/`, `sqlspec-alchemy-and-dialects.md` | `review_setup.py validate` |
+| `ch01` | Chapter 01: SQLSpec Dispatch Foundation, VTBARROW Provider & Storage ArtifactReference | `3` tasks | `pytest test_native_db_drivers.py` |
+| `ch02` | Chapter 02: Per-Engine SQLSpec Adapter Packages for PostgreSQL, SQLite, MySQL, and Oracle | `4` tasks | `pytest test_sqlalchemy_and_sqlspec_vtb.py` |
+| `ch03` | Chapter 03: Per-Engine SQLSpec Adapter Packages for SQL Server, DuckDB, BigQuery, and Cloud Spanner | `4` tasks | `pytest test_sqlalchemy_and_sqlspec_vtb.py` |
+| `ch04` | Chapter 04: ObjectStoreBase Parity, ChangeFeed Event Backends, Legacy Cutover & Docs/OKF | `4` tasks | `pytest test_data_storage_integrations.py` |
 
 ## 5. Implementation Plan
 
-- [ ] [ch01-sqlspec-core-driver-and-artifact-ref](chapters/ch01-sqlspec-core-driver-and-artifact-ref/spec.md) — Bump `sqlspec>=0.71.1` + `adk` extra, implement `_driver.py` dispatch bases, `VTBARROW` `provider.py` cutover, and `vertebra.storage.ArtifactReference`.
-- [ ] [ch02-sqlspec-postgres](chapters/ch02-sqlspec-postgres/spec.md) — Deliver `adapters/postgres/` (`$1` `NUMERIC`, Arrow `COPY`, portals, `DataDictionary`, ADK/Events/Litestar stores, `adapter_name='vertebra_postgres'`).
-- [ ] [ch03-sqlspec-sqlite](chapters/ch03-sqlspec-sqlite/spec.md) — Deliver `adapters/sqlite/` (`QMARK` + `NAMED_COLON`, WAL pragmas, `DataDictionary`, `FTS5` ADK/Events/Litestar stores, `adapter_name='vertebra_sqlite'`).
-- [ ] [ch04-sqlspec-mysql](chapters/ch04-sqlspec-mysql/spec.md) — Deliver `adapters/mysql/` (fixing `%s` -> `ParameterStyle.QMARK` `?`, MariaDB/MySQL `DataDictionary`, ADK/Events/Litestar stores, `adapter_name='vertebra_mysql'`).
-- [ ] [ch05-sqlspec-oracle](chapters/ch05-sqlspec-oracle/spec.md) — Deliver `adapters/oracle/` (`:name`/`:1` binds, 23ai `VECTOR`/`OSON` `DataDictionary`, TxEventQ Events/ADK/Litestar stores, `adapter_name='vertebra_oracle'`).
-- [ ] [ch06-sqlspec-mssql](chapters/ch06-sqlspec-mssql/spec.md) — Deliver `adapters/mssql/` (`dialect='tsql'`, `? -> @P1`, `MERGE HOLDLOCK` ADK/Events/Litestar stores, `DataDictionary`, `adapter_name='vertebra_mssql'`).
-- [ ] [ch07-sqlspec-duckdb](chapters/ch07-sqlspec-duckdb/spec.md) — Deliver `adapters/duckdb/` (DuckDB 2.0+ `COPY` ordering, Arrow-divergent `fetchall()` fidelity, `DataDictionary`, ADK/Events/Litestar stores, `adapter_name='vertebra_duckdb'`).
-- [ ] [ch08-sqlspec-bigquery](chapters/ch08-sqlspec-bigquery/spec.md) — Deliver `adapters/bigquery/` (`@name` binds, unsplit `BEGIN...END`, `VECTOR_SEARCH` ADK + `ArtifactReference`, `DataDictionary`, `adapter_name='vertebra_bigquery'`).
-- [ ] [ch09-sqlspec-spanner](chapters/ch09-sqlspec-spanner/spec.md) — Deliver `adapters/spanner/` (`sqlglot` `'spanner'`/`'postgres'` dialect fix, ScaNN/RRF ADK + `ArtifactReference`, sharded stores, `adapter_name='vertebra_spanner'`).
-- [ ] [ch10-sqlspec-cutover-storage-events-docs](chapters/ch10-sqlspec-cutover-storage-events-docs/spec.md) — Upgrade `ObjectStoreBackend(ObjectStoreBase)`, harden `ChangeFeed*EventBackend`, delete `{adapters,bigquery,spanner}.py`, and sync docs/OKF.
+- [ ] [ch01-sqlspec-core-driver-and-artifact-ref](chapters/ch01-sqlspec-core-driver-and-artifact-ref/spec.md) — Bump sqlspec>=0.71.1 + adk extra, implement MyPyC-safe BaseSyncDriver / BaseAsyncDriver dispatch in _driver.py, cut provider.py over to VTBARROW ArrowCursor, and define vertebra.storage.ArtifactReference.
+- [ ] [ch02-sqlspec-relational-adapters](chapters/ch02-sqlspec-relational-adapters/spec.md) — Deliver feature-complete per-engine SQLSpec packages (core, sync/async drivers, DataDictionary, ADK/Events/Litestar stores, and explicit adapter_name configs) for PostgreSQL, SQLite, MySQL (fixing ? qmark binds), and Oracle.
+- [ ] [ch03-sqlspec-enterprise-and-cloud-adapters](chapters/ch03-sqlspec-enterprise-and-cloud-adapters/spec.md) — Deliver feature-complete per-engine SQLSpec packages for SQL Server, DuckDB, BigQuery, and Cloud Spanner (fixing sqlglot 'spanner'/'postgres' dialect names and removing cross-engine BigQuery ObjectRef imports).
+- [ ] [ch04-sqlspec-cutover-storage-events-docs](chapters/ch04-sqlspec-cutover-storage-events-docs/spec.md) — Upgrade ObjectStoreBackend(ObjectStoreBase), harden ChangeFeed*EventBackend with durable checkpoint/spill, delete monolithic {adapters,bigquery,spanner}.py, and synchronize docs and OKF chapters.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Current Frontier**: `state: planned` at `ch01-sqlspec-core-driver-and-artifact-ref` (`sqlspec-adapter-parity:ch01:t01`, `0/31` tasks completed across `10` chapters; `ch02`–`ch09` are mutually independent after `ch01`).
+- **Current Frontier**: `state: planned` at `ch01-sqlspec-core-driver-and-artifact-ref` (`sqlspec-adapter-parity:ch01:t01`, `0/15` tasks completed across `4` chapters; `ch02`–`ch03` are mutually independent after `ch01`).
 - **Upstream Flow Gates**: Requires `broker-pool-sharing` (pooled `Proxy*Driver` and `VTBARROW` lease lifecycles), `native-sqlite-driver`, and `native-redis-driver`.
 - **Full `/flow:finish` Gate**: `make lint-all && make py-test && make docs`.
 
