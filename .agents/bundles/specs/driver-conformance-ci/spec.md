@@ -14,17 +14,17 @@ chapters:
   - ch03-make-lanes-bench-isolation-and-ci
   - ch04-docs-and-okf-sync
 current_chapter: ch03-make-lanes-bench-isolation-and-ci
-current_task: "driver-conformance-ci:ch03:t01"
+current_task: null
 parent_prd: native-data-platform
 depends_on_flows:
   - native-postgres-driver
 plan_revision: 4
 plan_commit: 37972f2a
-last_verified_checkpoint: 38e02b16
+last_verified_checkpoint: b45ebf84
 last_reviewed_chapter: ch02-conformance-harness-and-live-suites
 last_reviewed_commit: 7d11fb2c
 created_at: "2026-11-12T00:30:00Z"
-updated_at: "2026-11-14T17:48:00Z"
+updated_at: "2026-11-14T17:56:00Z"
 generated:
   by: flow-plan
   at: "2026-11-12T23:55:00Z"
@@ -83,9 +83,9 @@ sources:
 # Specification: Live Driver Conformance CI, DuckDB GCS Secret Rotation, and Oracle Notify Liveness
 
 <!-- truth: start -->
-- **Baseline (`HEAD @ 38e02b16`, `ch01`–`ch02` Implemented)**: `ch01` shipped `vertebra.storage.{SyncGcsBearerSecretProvider,AsyncGcsBearerSecretProvider}`, `DuckDBSecretConfig` validation + `(HTTP 401)`/`(HTTP 403)` invalidation + startup `_client` cleanup, and Oracle AQ `wait_timeout_seconds` idle liveness (`a8ca7b24`, `b3b113d1`); `ch02` shipped `ConformanceGate`, `ServiceVersionMatrix`, `mariadb` `EngineConformanceSpec`, and live DuckDB, MySQL/MariaDB, SQL Server, and Oracle native suites (`38e02b16`); `Makefile` `db-conformance`, `bench`-only PyPI `duckdb` isolation, `.github/workflows/ci.yml` live lanes, and documentation sync remain in `ch03`–`ch04` [^conformance-suite] [^duckdb-secret] [^oracle-notify] [^makefile].
+- **Baseline (`HEAD @ b45ebf84`, `ch01`–`ch03` Implemented)**: `ch01` shipped `vertebra.storage.{SyncGcsBearerSecretProvider,AsyncGcsBearerSecretProvider}`, `DuckDBSecretConfig` validation + `(HTTP 401)`/`(HTTP 403)` invalidation + startup `_client` cleanup, and Oracle AQ `wait_timeout_seconds` idle liveness (`a8ca7b24`, `b3b113d1`); `ch02` shipped `ConformanceGate`, `ServiceVersionMatrix`, `mariadb` `EngineConformanceSpec`, and live DuckDB, MySQL/MariaDB, SQL Server, and Oracle native suites (`38e02b16`); `ch03` shipped single-pass `Makefile` `db-conformance`, `bench`-only PyPI `duckdb` isolation, and `.github/workflows/ci.yml` `test-db-conformance` + `conformance-oracle` jobs (`b45ebf84`); user and OKF documentation synchronization remains in `ch04` [^conformance-suite] [^duckdb-secret] [^oracle-notify] [^makefile].
 - **Target Architecture**: `ch02`–`ch04` wire `ConformanceGate` + `ServiceVersionMatrix` (`pytest-databases`) across DuckDB, MySQL, MariaDB, SQL Server, and Oracle via single-pass `make db-conformance` and `.github/workflows/ci.yml`, while delegating `VERTEBRA_CONFORMANCE_ENGINES=postgres` under `VERTEBRA_CONFORMANCE_POSTGRES_REQUIRE_ZERO_SKIPS=1` to `evaluate_postgres_zero_skip_gate` in `conftest.py` [^int-conftest] [^ci-workflow].
-- **Scope & Boundaries**: Sequenced after archived `native-postgres-driver` ([`postgres-native-driver.md`](../../knowledge/domains/data/postgres-native-driver.md)) so `src/py/tests/integration/conftest.py`, `Makefile`, and `.github/workflows/ci.yml` merge cleanly; updates existing [`database-driver-limitations.md`](../../knowledge/domains/data/database-driver-limitations.md) in place (`db-conformance` still pending) [^int-conftest] [^driver-limits].
+- **Scope & Boundaries**: Sequenced after archived `native-postgres-driver` ([`postgres-native-driver.md`](../../knowledge/domains/data/postgres-native-driver.md)) so `src/py/tests/integration/conftest.py`, `Makefile`, and `.github/workflows/ci.yml` merge cleanly; updates existing [`database-driver-limitations.md`](../../knowledge/domains/data/database-driver-limitations.md) in place [^int-conftest] [^driver-limits].
 <!-- truth: end -->
 
 ## 1. Specification, Context & Provenance
@@ -135,7 +135,7 @@ Four merged native database wheels lack live server CI gates and carry three run
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **State**: `active` (`2/4` chapters, `7/13` tasks completed through `ch02-conformance-harness-and-live-suites` at `38e02b16` / `7d11fb2c`; active frontier advances to `ch03-make-lanes-bench-isolation-and-ci` / `driver-conformance-ci:ch03:t01`, with `6` tasks remaining across `ch03`–`ch04`).
+- **State**: `active` (`2/4` chapters reviewed, `9/13` tasks completed through `ch03-make-lanes-bench-isolation-and-ci` at `b45ebf84`; `4` tasks remain in `ch04`).
 - **Full `/flow:finish` Verification**: `make lint-all && make rs-test && make py-test && make db-conformance ENGINE=duckdb && make db-conformance ENGINE=mysql VERSION=8.4 && make db-conformance ENGINE=mariadb VERSION=11.4 && make db-conformance ENGINE=mssql VERSION=2022 && make docs-check && make review-check`.
 
 [^conformance-suite]: `src/py/tests/integration/db/test_driver_conformance.py::ENGINE_SPECS` — Cross-engine driver conformance matrix and `_resolve_live_config`.

@@ -6,7 +6,11 @@ chapter_id: ch03-make-lanes-bench-isolation-and-ci
 title: "Update Makefile with db-conformance, clean oracle-test, and isolate PyPI duckdb to bench"
 description: "Single-pass Makefile and pyproject.toml update adding make db-conformance, dropping the oracle-test fallback, and restricting PyPI duckdb to benchmark runs."
 status: stable
-state: pending
+state: completed
+commit: b45ebf84
+last_verified_commit: b45ebf84
+last_verified_at: "2026-11-14T17:56:00Z"
+verification_evidence: "make -n db-conformance + make -n oracle-test + pytest test_bench_infrastructure.py (35 passed) + ruff + make review-check clean"
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -68,8 +72,8 @@ make -n db-conformance ENGINE=mysql VERSION=8.4 && make -n db-conformance ENGINE
 
 ## Acceptance Criteria
 
-- [ ] `Makefile` contains zero `--group duckdb` flags outside benchmark recipes and zero fallback branches in `oracle-test`.
-- [ ] `test_bench_infrastructure.py` passes cleanly.
+- [x] `Makefile` contains zero `--group duckdb` flags outside benchmark recipes and zero fallback branches in `oracle-test`.
+- [x] `test_bench_infrastructure.py` passes cleanly.
 
 [^makefile]: `Makefile` — `Makefile` `PY_TEST_GROUPS`, `install`, `upgrade`, `oracle-test`, and driver test targets.
 [^bench-infra]: `src/py/tests/unit/test_bench_infrastructure.py` — Benchmark and `Makefile` target structure unit tests.

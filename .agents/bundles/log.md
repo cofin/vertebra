@@ -1,5 +1,9 @@
 # Bundle Activity Log
 
+## [2026-11-14T17:56:00Z] chapter-checkpoint | driver-conformance-ci ch03-make-lanes-bench-isolation-and-ci
+
+- Completed `ch03-make-lanes-bench-isolation-and-ci` (`t01`–`t02`) at `b45ebf84`: added `make db-conformance` (`ENGINE=<duckdb|mysql|mariadb|mssql|oracle> [VERSION=<v>]`), removed the `test_freethreaded_gil.py` fallback from `oracle-test`, removed `--group duckdb` from `PY_TEST_GROUPS`, `make install`, and `make upgrade` while keeping `"duckdb>=1.0; python_version < '3.14'"` in `[dependency-groups].bench`, and added `test-db-conformance` (10 matrix rows) and `conformance-oracle` (`continue-on-error: true`) in `.github/workflows/ci.yml` (`35 passed` in `test_bench_infrastructure.py`, `ruff`, and `make review-check` clean).
+
 ## [2026-11-14T17:48:00Z] chapter-complete | driver-conformance-ci ch02-conformance-harness-and-live-suites
 
 - Closed `ch02-conformance-harness-and-live-suites` (`t01`–`t04`) at `38e02b16` (sync `7d11fb2c`): added `ConformanceGate` and `ServiceVersionMatrix` in `src/py/tests/integration/conformance_gate.py`, wired zero-skip session hooks and versioned `vtb_{mysql,mariadb,oracle,mssql}_config` fixtures in `src/py/tests/integration/conftest.py`, added `mariadb` `EngineConformanceSpec` and removed dead `_DUCKDB_SKIP_REASON` / `VERTEBRA_CONFORMANCE_DUCKDB_DSN` in `test_driver_conformance.py`, and created `test_conformance_gate.py`, `test_duckdb_native.py`, `test_mysql_native.py`, `test_mssql_native.py`, and updated `test_oracle_native.py` (`192 passed, 369 skipped` offline; `42 passed, 0 skipped` under `VERTEBRA_CONFORMANCE_ENGINES=duckdb`; `ruff`, `mypy`, `make review-check`, and dual zero-context `code-reviewer` + `quality-reviewer` reviews clean).

@@ -6,7 +6,11 @@ chapter_id: ch03-make-lanes-bench-isolation-and-ci
 title: "Add test-db-conformance matrix and conformance-oracle jobs to ci.yml"
 description: "Wire live DuckDB, MySQL, MariaDB, and SQL Server matrix rows plus a non-blocking Oracle 23ai job in .github/workflows/ci.yml."
 status: stable
-state: pending
+state: completed
+commit: b45ebf84
+last_verified_commit: b45ebf84
+last_verified_at: "2026-11-14T17:56:00Z"
+verification_evidence: "pytest test_bench_infrastructure.py (35 passed) + ruff + make review-check clean"
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -66,8 +70,8 @@ uv run --no-sync pytest src/py/tests/unit/test_bench_infrastructure.py -q && uv 
 
 ## Acceptance Criteria
 
-- [ ] `.github/workflows/ci.yml` parses cleanly and defines both `test-db-conformance` and `conformance-oracle` invoking `make db-conformance`.
-- [ ] `test_bench_infrastructure.py` and `make review-check` exit `0`.
+- [x] `.github/workflows/ci.yml` parses cleanly and defines both `test-db-conformance` and `conformance-oracle` invoking `make db-conformance`.
+- [x] `test_bench_infrastructure.py` and `make review-check` exit `0`.
 
 [^ci-yml]: `.github/workflows/ci.yml` — GitHub Actions CI workflow definition.
 [^bench-infra]: `src/py/tests/unit/test_bench_infrastructure.py` — CI and `Makefile` structure assertions.

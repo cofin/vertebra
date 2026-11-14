@@ -11,7 +11,7 @@ planning_quality: standard
 planning_degraded_reason: null
 plan_revision: 4
 plan_commit: 37972f2a
-updated_at: "2026-11-14T17:24:00Z"
+updated_at: "2026-11-14T17:56:00Z"
 generated:
   by: flow-plan
   at: "2026-11-12T23:55:00Z"
@@ -74,8 +74,8 @@ Deferred to [`ch04-docs-and-okf-sync`](../ch04-docs-and-okf-sync/spec.md) (`AGEN
 
 ## 5. Implementation Plan
 
-- [ ] [t01-makefile-conformance-and-duckdb-bench-isolation.md](tasks/t01-makefile-conformance-and-duckdb-bench-isolation.md) — Add `make db-conformance`, remove the `oracle-test` fallback, and restrict PyPI `duckdb` to benchmarks in `Makefile` and `pyproject.toml`.
-- [ ] [t02-ci-conformance-matrix.md](tasks/t02-ci-conformance-matrix.md) — Add `test-db-conformance` matrix and non-blocking `conformance-oracle` jobs in `.github/workflows/ci.yml`.
+- [x] [b45ebf84] [t01-makefile-conformance-and-duckdb-bench-isolation.md](tasks/t01-makefile-conformance-and-duckdb-bench-isolation.md) — Add `make db-conformance`, remove the `oracle-test` fallback, and restrict PyPI `duckdb` to benchmarks in `Makefile` and `pyproject.toml`.
+- [x] [b45ebf84] [t02-ci-conformance-matrix.md](tasks/t02-ci-conformance-matrix.md) — Add `test-db-conformance` matrix and non-blocking `conformance-oracle` jobs in `.github/workflows/ci.yml`.
 
 ## 6. Current State & Remaining Plan Snapshot
 
