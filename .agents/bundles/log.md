@@ -1,5 +1,13 @@
 # Bundle Activity Log
 
+## [2026-11-14T22:49:30Z] archive | http3-and-http-hygiene
+
+- Archived completed specification `http3-and-http-hygiene` (`t01`–`t03` across `9b44d409..f277a29b`) into permanent OKF knowledge and product chapters (`ingress-and-routing.md`, `protocol-and-offload-modules.md`, `server-and-dispatch.md`, `lock-free-shm-and-sharding.md`, `polyglot-test-matrix.md`, `workflow.md`, `product.md`, `tech-stack.md`), updated Master PRD `integration-remediation` and bundle indexes (`index.md`, `specs/index.md`), and removed `.agents/bundles/specs/http3-and-http-hygiene/`.
+
+## [2026-11-14T22:49:00Z] finish | http3-and-http-hygiene
+
+- Completed `http3-and-http-hygiene` (`t01`–`t03`) across `9b44d409..f277a29b`: parsed `VERTEBRA_HTTP3*` config settings with upfront `validate_http3()` checks in `main.rs` and `server::run_with_listener`, installed the `ring` crypto provider in `TlsAcceptor::from_config`, bound `quinn::Endpoint` over `bind_udp_listener` (`socket2` `SO_REUSEADDR` and Unix `SO_REUSEPORT`), enforced pre-buffering `Content-Length` and chunked `max_body_size` bounds (`stop_sending` + `413 Payload Too Large`) and RFC 9114 hop-by-hop header stripping (`strip_hop_by_hop_headers`) in `http3::handle_h3_request`, added `SseHub::close_all()` and bounded `JoinSet` + `h3_conn.shutdown(0)` + `endpoint.wait_idle()` draining, shared `payload::decode_buffered_body` between streaming and buffered ingress paths, gated `Alt-Svc` strictly on bound `ServerState::http3_port`, removed dead `McpBridgeConfig`/`McpStdioBridge` in `mcp_bridge.rs`, aligned `Makefile`, CI, release binary, and PGO builds/docs with `--features http3`, and verified `make rs-test`, `make docs`, `make review-check`, Ruff, Mypy, and Clippy.
+
 ## [2026-11-14T21:38:30Z] archive | native-adapter-organization
 
 - Archived completed specification `native-adapter-organization` (`t01`–`t04` across `838c54d1..8a836024`) into permanent OKF knowledge chapters (`database-drivers-and-dialers.md`, `gcp-bigquery-and-spanner-drivers.md`, `query-pipeline-cdc-and-tenancy.md`, `module-and-class-layout.md`), updated Master PRD `native-data-platform` and bundle indexes (`index.md`, `specs/index.md`), and removed `.agents/bundles/specs/native-adapter-organization/`.
