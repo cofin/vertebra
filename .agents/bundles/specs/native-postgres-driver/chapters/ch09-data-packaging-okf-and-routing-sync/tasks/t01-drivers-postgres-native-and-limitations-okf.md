@@ -18,6 +18,7 @@ files:
   - .agents/bundles/knowledge/domains/data/database-drivers-and-dialers.md
   - .agents/bundles/knowledge/domains/data/postgres-native-driver.md
   - .agents/bundles/knowledge/domains/data/postgres-limitations.md
+  - .agents/bundles/knowledge/domains/data/database-driver-limitations.md
 tests: 
   - src/py/tests/unit/test_review_setup.py
 read_set:

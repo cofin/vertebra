@@ -1,90 +1,56 @@
 ---
 type: Gotcha
 title: PostgreSQL Native Driver Limitations
-description: The native PostgreSQL wheel is available while public drivers and consumer guards retain legacy PostgreSQL dependencies.
+description: Operational boundaries for native PostgreSQL pooler modes, logical replication slots/publications, queue executors, Arrow conversion, and SQLSpec protocol alignment.
 status: stable
-tags: [postgres, limitations, driver]
+tags: [postgres, limitations, driver, replication]
 generated:
   by: flow-implement
   at: "2026-11-12T02:22:54Z"
 verified:
   - by: agent:executor
-    at: "2026-11-13T02:42:00Z"
-    commit: ecf184e4
+    at: "2026-11-14T01:15:00Z"
+    commit: 8c615b73
 sources:
-  - id: pg-stream
-    resource: src/rs/vertebra-postgres/src/replication/stream.rs::ReplicationSession
-    title: Bounded native session transport and explicit delivery publication
+  - id: pg-config-py
+    resource: src/py/vertebra/db/adapters/postgres/config.py::PostgreSQLConfig
+    title: Pooler mode gating, derive_direct_config, and direct_dsn resolution
   - id: pg-supervisor
     resource: src/rs/vertebra-postgres/src/replication/supervisor.rs::ReplicationSupervisor
-    title: Multi-generation verified reconnect supervisor and delivery leases
-  - id: pg-feedback
-    resource: src/rs/vertebra-postgres/src/replication/feedback.rs::ReplicationFeedback
-    title: Native payload codecs and bounded published-Commit acknowledgements
-  - id: pg-driver-py
-    resource: src/py/vertebra/db/adapters/postgres/driver.py::SyncPostgreSQLDriver
-    title: Public PostgreSQL drivers over psycopg_pool and asyncio.to_thread
+    title: Multi-generation verified reconnect supervisor and pooler/identity checks
+  - id: pg-change-stream
+    resource: src/py/vertebra/db/adapters/postgres/change_stream.py::PostgresChangeSource
+    title: Durable CAS checkpoint-before-ack change stream coordinator
   - id: pg-queue-py
     resource: src/py/vertebra/framework/queues/postgres.py::PostgreSQLQueueBackend
-    title: Caller-supplied queue executor and psycopg dependency guard
-  - id: pg-dialer-cloudsql
-    resource: src/py/vertebra/db/dialer/cloudsql.py::CloudSQLConfig
-    title: Cloud SQL dialer configuration and legacy connection helpers
-  - id: pg-dialer-alloydb
-    resource: src/py/vertebra/db/dialer/alloydb.py::AlloyDBConfig
-    title: AlloyDB dialer configuration and legacy connection helpers
-  - id: pg-driver-tests
-    resource: src/py/tests/unit/db/test_postgres_driver.py::test_asyncpg_pool_transaction_and_affected_rows
-    title: SQLite-backed asyncpg and psycopg pool test doubles
-  - id: pg-pipeline-py
-    resource: src/py/vertebra/db/adapters/postgres/pipeline.py::SyncPostgresPipeline
-    title: Native PostgreSQL pipeline facade awaiting driver integration
+    title: Caller-supplied queue executor and vertebra._postgres dependency guard
+  - id: pg-sqlspec-py
+    resource: src/py/vertebra/extensions/sqlspec/adapters.py::PostgreSQLSyncConfig
+    title: PostgreSQL SQLSpec adapter configs and ParameterStyle.NUMERIC driver
   - id: pg-arrow-py
-    resource: src/py/vertebra/db/adapters/postgres/arrow.py::load_arrow_sync
-    title: Native Arrow COPY helper awaiting driver integration
-  - id: pg-wheel
-    resource: src/rs/vertebra-postgres/src/lib.rs
-    title: Standalone native PostgreSQL extension registration
+    resource: src/py/vertebra/db/arrow.py::ArrowCursor
+    title: Zero-copy VTBARROW cursor and optional pyarrow/polars conversion
 ---
 
 # PostgreSQL Native Driver Limitations
 
 <!-- truth: start -->
-- `vertebra._postgres` is available through `vertebra-core[postgres]`. `make dev` and `make build` build the extension; `make postgres-test` and `make postgres-wheel-check` define its verification lanes. Public PostgreSQL drivers do not use the native wheel yet [^pg-wheel] [^pg-driver-py].
-- `SyncPostgreSQLDriver` uses `psycopg_pool.ConnectionPool`; its missing-dependency guard names `psycopg[binary,pool]`. `AsyncPostgreSQLDriver` offloads sync-driver operations with `asyncio.to_thread` [^pg-driver-py].
-- `PostgreSQLQueueBackend` probes `psycopg` before raising `ImproperConfigurationError` when `executor=` is absent [^pg-queue-py].
-- Cloud SQL and AlloyDB dialers retain `create_psycopg_connect_func` and `create_asyncpg_connect_func` [^pg-dialer-cloudsql] [^pg-dialer-alloydb].
-- The PostgreSQL `pipeline.py` and `arrow.py` helpers have only unit-test importers. Public drivers do not expose native pipelines or Arrow COPY import through these helpers [^pg-pipeline-py] [^pg-arrow-py] [^pg-driver-py].
-- `test_postgres_driver.py` exercises the async driver with a SQLite-backed asyncpg pool double and the sync driver with psycopg pool mocks [^pg-driver-tests].
-- The title and body of [PR #104](https://github.com/cofin/vertebra/pull/104) describe a public-driver cutover absent from the merged source at `c8722c76`; the native PostgreSQL plan assigns that cutover to chapters `ch04`–`ch05` [^pg-driver-py].
-- Native Rust feedback primitives decode borrowed XLogData/keepalive payloads, encode status payloads, and compute bounded heartbeat intervals. `ReplicationFeedback` separates received, published, and acknowledged Commit positions, caps unacknowledged publications at 1024, and rejects invalid updates without mutation. `ReplicationSession` and `ReplicationSupervisor` (`connect_logical_verified`) provide bounded Rust streaming and identity-verified multi-generation reconnect supervision, while Python `AsyncPostgresReplication` (`ch02`) and `PostgresChangeSource` (`ch03`) are not yet exposed [^pg-feedback] [^pg-stream] [^pg-supervisor].
+- `PostgreSQLQueueBackend` (`vertebra.framework.queues.postgres`) requires a caller-supplied `executor=`; omitting `executor=` probes `vertebra._postgres` via `ensure_module(..., extra="postgres")` (`MissingDependencyError`) and raises `ImproperConfigurationError` when present without `executor=` [^pg-queue-py].
+- External transaction/statement poolers (`PgBouncer`, `PgCat`, `pgdog`) disable named prepared statement caching unless `protocol_level_pooler_cache=True`, and `ReplicationSupervisor` rejects `PoolerMode` `transaction`, `statement`, or `auto` modes before dialing (`LISTEN/NOTIFY`, migrations, and logical replication require a session-mode `direct_dsn` / `derive_direct_config()`) [^pg-config-py] [^pg-supervisor].
+- `pgoutput` v1 replication does not implicitly create or drop PostgreSQL replication slots or publications (`ReplicationSupervisor` / `PostgresChangeSource` fail closed on identity mismatch, WAL gap, or CAS conflict; pending published commits cap at `1024`, queues `1..=1024` / `8 MiB`) [^pg-supervisor] [^pg-change-stream].
+- `ArrowCursor.buffer_view()` exports zero-copy `VTBARROW` IPC memory with no optional Arrow packages, whereas `to_arrow_table()` / `load_from_arrow` stream conversion and `to_polars()` require `[arrow]` (`pyarrow>=18.0.0`) or `[polars]` (`polars>=1.0.0`); direct Rust C Data Interface `FFI_ArrowArrayStream` export is tracked in GitHub issue `#128` [^pg-arrow-py].
+- `PostgreSQLSyncConfig` and `PostgreSQLAsyncConfig` declare concrete `connection_type` and `driver_type` attributes for native `ParameterStyle.NUMERIC` execution; upstream `sqlspec` `DatabaseConfigProtocol` structural typing alignment is tracked in GitHub issue `#131` [^pg-sqlspec-py].
 <!-- truth: end -->
 
-## Caller Guidance
+## Operational Boundaries
 
-- Install `vertebra-core[postgres]` for raw `SyncPostgresClient`, `AsyncPostgresClient`, and native pool use.
-- Install `psycopg[binary,pool]` for the public PostgreSQL drivers until the native cutover completes.
-- Pass an `executor=` to `PostgreSQLQueueBackend`; installing the native wheel does not provide a queue executor.
-- Treat the native wheel and public driver surfaces separately when selecting dependency and conformance gates.
+- **Queue Executor Ownership**: [`PostgreSQLQueueBackend`](../../../../../src/py/vertebra/framework/queues/postgres.py)[^pg-queue-py] executes `FOR UPDATE SKIP LOCKED` and `LISTEN/NOTIFY` queries through an injected `PostgreSQLQueueExecutor` until dedicated native queue stores ship under the `queues-tasks-and-channels` specification.
+- **Session-Pinned Features Behind Poolers**: Set `direct_dsn` on [`PostgreSQLConfig`](../../../../../src/py/vertebra/db/adapters/postgres/config.py)[^pg-config-py] when running behind PgBouncer `transaction` or `statement` pooling so `derive_direct_config()` isolates `LISTEN/NOTIFY`, logical replication (`ReplicationSupervisor`), and DDL/migrations onto direct session connections.
+- **SQL Compilation & Pyformat Emulation**: Native drivers normalize Python parameters to immutable `Pg*`/`bytes` values; `pyformat` emulation in [`binds.py`](../../../../../src/py/vertebra/db/adapters/postgres/binds.py) rejects ambiguous ordinary-string backslash escapes in favor of explicit `E'...'` or `$1..$N` numeric placeholders.
 
-## Remaining Integration
-
-`ReplicationSession` owns a bounded socket pump and publication leases. Dropping a lease restores its record ahead of the FIFO; only publishing a Commit makes its exact end LSN acknowledgeable. Heartbeat writes continue under read backpressure. Explicit shutdown and cancellation fence outstanding leases; graceful shutdown uses one absolute deadline for final feedback, CopyDone and backend drain. Natural clean EOF permits already decoded records to drain and publish [^pg-stream].
-
-`ReplicationSupervisor` and `connect_logical_verified` supervise multi-generation reconnect recovery from `acknowledged_lsn`, while cancellation-safe Python replication handles (`AsyncPostgresReplication`) remain in `ch02` and `PostgresChangeSource` remains in `ch03`. Feedback receipt alone never advances flush/apply positions. The standalone `ReplicationFeedback` accepts caller-supplied decoded Commit positions; the session supplies those boundaries from pgoutput, never server `wal_end` [^pg-feedback] [^pg-stream] [^pg-supervisor].
-
-Chapter `ch04` builds permanent native drivers and connects compiler, pipeline, Arrow, and event-hook seams. Chapter `ch05` switches public consumers, replaces legacy driver test doubles, removes psycopg/asyncpg dialer helpers, changes the queue dependency guard, and removes these split-state caveats. Runtime caveats for the completed native driver belong to chapter `ch09`.
-
-[^pg-driver-py]: `src/py/vertebra/db/adapters/postgres/driver.py::SyncPostgreSQLDriver` — Public PostgreSQL drivers over psycopg_pool and asyncio.to_thread.
-[^pg-queue-py]: `src/py/vertebra/framework/queues/postgres.py::PostgreSQLQueueBackend` — Caller-supplied queue executor and psycopg dependency guard.
-[^pg-dialer-cloudsql]: `src/py/vertebra/db/dialer/cloudsql.py::CloudSQLConfig` — Cloud SQL dialer configuration and legacy connection helpers.
-[^pg-dialer-alloydb]: `src/py/vertebra/db/dialer/alloydb.py::AlloyDBConfig` — AlloyDB dialer configuration and legacy connection helpers.
-[^pg-driver-tests]: `src/py/tests/unit/db/test_postgres_driver.py::test_asyncpg_pool_transaction_and_affected_rows` — SQLite-backed asyncpg and psycopg pool test doubles.
-[^pg-pipeline-py]: `src/py/vertebra/db/adapters/postgres/pipeline.py::SyncPostgresPipeline` — Native PostgreSQL pipeline facade awaiting driver integration.
-[^pg-arrow-py]: `src/py/vertebra/db/adapters/postgres/arrow.py::load_arrow_sync` — Native Arrow COPY helper awaiting driver integration.
-[^pg-wheel]: `src/rs/vertebra-postgres/src/lib.rs` — Standalone native PostgreSQL extension registration.
-
-[^pg-feedback]: `src/rs/vertebra-postgres/src/replication/feedback.rs::ReplicationFeedback` — Native codecs, intervals, and bounded acknowledgement state.
-
-[^pg-stream]: `src/rs/vertebra-postgres/src/replication/stream.rs::ReplicationSession` — Bounded native session transport and explicit delivery publication.
-[^pg-supervisor]: `src/rs/vertebra-postgres/src/replication/supervisor.rs::ReplicationSupervisor` — Multi-generation verified reconnect supervisor and delivery leases.
+[^pg-config-py]: `src/py/vertebra/db/adapters/postgres/config.py::PostgreSQLConfig` — Pooler mode gating, `derive_direct_config`, and `direct_dsn` resolution.
+[^pg-supervisor]: `src/rs/vertebra-postgres/src/replication/supervisor.rs::ReplicationSupervisor` — Multi-generation verified reconnect supervisor and pooler/identity checks.
+[^pg-change-stream]: `src/py/vertebra/db/adapters/postgres/change_stream.py::PostgresChangeSource` — Durable CAS checkpoint-before-ack change stream coordinator.
+[^pg-queue-py]: `src/py/vertebra/framework/queues/postgres.py::PostgreSQLQueueBackend` — Caller-supplied queue executor and `vertebra._postgres` dependency guard.
+[^pg-sqlspec-py]: `src/py/vertebra/extensions/sqlspec/adapters.py::PostgreSQLSyncConfig` — PostgreSQL SQLSpec adapter configs and `ParameterStyle.NUMERIC` driver.
+[^pg-arrow-py]: `src/py/vertebra/db/arrow.py::ArrowCursor` — Zero-copy `VTBARROW` cursor and optional `pyarrow`/`polars` conversion.

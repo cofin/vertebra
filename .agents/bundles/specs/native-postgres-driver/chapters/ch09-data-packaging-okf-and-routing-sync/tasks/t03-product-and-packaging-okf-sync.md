@@ -18,6 +18,7 @@ files:
   - .agents/bundles/product/tech-stack.md
   - .agents/bundles/product/product.md
   - .agents/bundles/knowledge/domains/frontend/packaging-and-pgo.md
+  - .agents/bundles/knowledge/domains/extensions/sqlspec-alchemy-and-dialects.md
 tests: 
   - src/py/tests/unit/test_review_setup.py
 read_set:
