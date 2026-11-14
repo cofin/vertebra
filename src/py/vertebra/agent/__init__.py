@@ -40,6 +40,7 @@ __all__ = (
     "CallerIdentity",
     "CancellationToken",
     "ChatRequest",
+    "ConfirmationCapacityError",
     "ConfirmationDecisionRequest",
     "ConfirmationGate",
     "ConfirmationTicket",
@@ -215,6 +216,7 @@ _RUNTIME_EXPORTS = frozenset(
     {
         "AgentRuntime",
         "AgentStreamFrame",
+        "ConfirmationCapacityError",
         "ConfirmationGate",
         "ConfirmationTicket",
         "GoogleGenAIProvider",

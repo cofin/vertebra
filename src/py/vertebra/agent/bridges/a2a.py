@@ -1,6 +1,6 @@
 """Bridge projecting MCP tools, prompts, and skills into an A2A 1.0 agent.
 
-This module provides A2aAgentBridge exposing an MCPRegistry or MCPService
+This module provides A2aAgentBridge exposing a ToolRegistry or MCPCore
 as a full A2A 1.0 AgentCard and executable A2AService.
 """
 
@@ -20,7 +20,7 @@ from vertebra.agent.a2a.models import (
 )
 from vertebra.agent.a2a.service import A2AConfig, A2AService
 from vertebra.agent.core.context import AgentContext
-from vertebra.agent.mcp.service import MCPService
+from vertebra.agent.mcp.service import MCPCore
 
 __all__ = [
     "A2aAgentBridge",
@@ -29,19 +29,19 @@ __all__ = [
 
 
 class A2aAgentBridge:
-    """Projects an MCP service and registry into an A2A 1.0 compliant agent service."""
+    """Projects an MCP core engine and registry into an A2A 1.0 compliant agent service."""
 
     @classmethod
     def from_mcp_service(
         cls,
-        mcp_service: MCPService,
+        mcp_service: MCPCore,
         *,
         base_url: str | None = None,
         path: str = "/a2a",
         name: str | None = None,
         description: str = "",
     ) -> A2AService:
-        """Create an A2AService wrapping an MCPService."""
+        """Create an A2AService wrapping an MCPCore instance."""
         skills: list[AgentSkill] = []
 
         skill_controllers = getattr(mcp_service.registry, "skill_controllers", {})
@@ -212,14 +212,14 @@ class A2aAgentBridge:
 
 
 def mcp_service_to_a2a(
-    mcp_service: MCPService,
+    mcp_service: MCPCore,
     *,
     base_url: str | None = None,
     path: str = "/a2a",
     name: str | None = None,
     description: str = "",
 ) -> A2AService:
-    """Helper shortcut projecting an MCPService to an A2AService."""
+    """Project an MCPCore instance into an A2AService."""
     return A2aAgentBridge.from_mcp_service(
         mcp_service,
         base_url=base_url,

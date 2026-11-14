@@ -12,6 +12,9 @@ generated:
   by: flow/0.26.0
   at: "2026-11-04T04:33:00Z"
 verified:
+  - by: agent:flow-executor
+    at: "2026-11-13T20:35:00Z"
+    commit: b9429c6d
   - by: agent:flow-setup
     at: "2026-11-07T03:55:00Z"
     commit: 067fa901
@@ -82,7 +85,7 @@ sources:
 | `vtb js <subcmd>` | [`cli/js.py`](../../../../../src/py/vertebra/cli/js.py)[^src-cli-js-py] | Frontend toolchain subcommands: `add`, `remove`, `list`, `install`, `build`, `generate-types` (`TypeExtractor` + TS/Zod/Valibot/OpenAPI/Protobuf/procedures), and `exec`. |
 | `vtb init` | [`cli/init.py`](../../../../../src/py/vertebra/cli/init.py)[^src-cli-init-py-2] | Scaffolds a new Vertebra project layout declaring `dependencies = ["vertebra-core"]` in the generated `pyproject.toml`. |
 | `vtb ai models <subcmd>` | [`cli/ai.py`](../../../../../src/py/vertebra/cli/ai.py)[^src-cli-ai-py] | Embedding model lifecycle subcommands: `list` (`--provider`, `--json`), `pull` (`--quant`, `--cache-dir`, `--source`), `stage` (`--to`, `--quant`), and `warm` (`--from`, `--shm`) with SHA-256 manifest verification and `/dev/shm` `1x` RAM warming. |
-| `vtb ai mcp <subcmd>` | [`cli/ai.py`](../../../../../src/py/vertebra/cli/ai.py) | Model Context Protocol subcommands: `bridge` (`--url`, `--token`, `--timeout`) and `serve` (`--name`) over newline-delimited JSON-RPC 2.0 `stdin`/`stdout`. |
+| `vtb ai mcp <subcmd>` | [`cli/ai.py`](../../../../../src/py/vertebra/cli/ai.py) | Model Context Protocol subcommands: `bridge` (`--url`, `--token`, `--audience`, `--timeout` with `OidcTokenSource` `AsyncGcpIdTokenCache` auth and dual-mode `GET` SSE relay) and `serve` (`--app`, `--app-dir`, discovering app `MCPCore` via `resolve_app_mcp_core` or delegating `is_litestar_mcp_app` to `litestar_mcp.mcp.stdio`). |
 | `vtb workers run [APP]` | [`cli/workers.py`](../../../../../src/py/vertebra/cli/workers.py)[^src-cli-workers-py] | Launches admission-controlled [`WorkerRunner`](../server/worker-lanes.md) lanes (`--queues`, `--concurrency`, `--drain-timeout`) or executes a single background job via `--oneshot <job> [--payload <json>]`. |
 
 ## 2. Pluggable CLI Extension System, TUI, Theme & Logging

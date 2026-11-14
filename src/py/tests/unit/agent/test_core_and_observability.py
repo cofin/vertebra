@@ -3,13 +3,18 @@
 import ast
 import dataclasses
 import inspect
+import json
+import time
+import urllib.error
 from collections.abc import Mapping
 from types import SimpleNamespace
 from typing import Annotated, Any, Literal, TypedDict, cast
 
 import anyio
+import jwt
 import msgspec
 import pytest
+from cryptography.hazmat.primitives.asymmetric import ec
 from starlette.requests import Request
 
 import vertebra.agent as agent_pkg
@@ -29,11 +34,20 @@ from vertebra.agent.core.cursor import (
 from vertebra.agent.core.guards import (
     GuardChain,
     PermissionDeniedError,
+    RateLimitExceededError,
     RequireAuthenticated,
     RequireRoles,
     RequireScopes,
+    TokenBucketGuard,
 )
-from vertebra.agent.core.identity import CallableIdentitySource, MtlsIdentitySource
+from vertebra.agent.core.identity import (
+    IAP_ASSERTION_HEADER,
+    IAP_ISSUER,
+    CallableIdentitySource,
+    IapIdentitySource,
+    IdentityRequest,
+    MtlsIdentitySource,
+)
 from vertebra.agent.core.jsonrpc import (
     FRAME_KIND_BATCH_REQUEST,
     FRAME_KIND_NOTIFICATION,
@@ -61,7 +75,10 @@ from vertebra.agent.core.schema import (
 from vertebra.agent.core.sse import (
     SseFrame,
     SseStreamBroker,
+    StreamLimitExceededError,
 )
+from vertebra.agent.mcp.controllers import mcp_resource, mcp_tool, resource
+from vertebra.agent.mcp.models import McpIcon
 from vertebra.agent.telemetry import (
     AgentTelemetryRecorder,
 )
@@ -807,3 +824,294 @@ def test_identity_source_rejects_noncallable() -> None:
     """A non-callable identity resolver cannot produce a working policy."""
     with pytest.raises(TypeError, match="must be callable"):
         CallableIdentitySource(resolver=cast("Any", "x"))
+
+
+@pytest.mark.anyio
+async def test_tool_authorize_call_split_and_single_guard_execution() -> None:
+    """Tool.call bypasses guards, Tool.authorize runs guards once, and Tool.invoke composes both."""
+    bucket = TokenBucketGuard(rate_per_second=0.0, capacity=1.0)
+    invocations: list[int] = []
+
+    @tool(name="double_val", guards=(bucket,))
+    async def double_val(value: int) -> int:
+        invocations.append(value)
+        return value * 2
+
+    ctx = AgentContext(identity=CallerIdentity(user_id="alice", tenant_id="acme"))
+
+    direct_out = await double_val.call({"value": 4}, context=ctx)
+    assert direct_out == 8
+    assert invocations == [4]
+
+    invoked_out = await double_val.invoke({"value": 7}, context=ctx)
+    assert invoked_out == 14
+    assert invocations == [4, 7]
+
+    with pytest.raises(RateLimitExceededError, match="Rate limit exceeded"):
+        await double_val.invoke({"value": 9}, context=ctx)
+    assert invocations == [4, 7]
+
+
+def _sync_connection_guard(connection: Any, route_handler: Any) -> None:
+    connection["checked_by"] = ("sync", route_handler)
+
+
+async def _async_connection_guard(connection: Any, route_handler: Any) -> None:
+    connection["checked_by"] = ("async", route_handler)
+
+
+class _MethodConnectionGuard:
+    async def check(self, connection: Any, route_handler: Any) -> None:
+        connection["checked_by"] = ("method", route_handler)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("guard_obj", "expected_tag"),
+    [
+        (_sync_connection_guard, "sync"),
+        (_async_connection_guard, "async"),
+        (_MethodConnectionGuard(), "method"),
+    ],
+    ids=["sync-fn", "async-fn", "check-method"],
+)
+async def test_two_arg_connection_guards_fail_closed_without_connection(
+    guard_obj: Any,
+    expected_tag: str,
+) -> None:
+    """Two-argument Litestar connection guards raise PermissionDeniedError when connection is None."""
+    ctx = AgentContext(identity=CallerIdentity(user_id="alice", roles=("admin",)))
+
+    @tool(name="conn_guarded", guards=(guard_obj,))
+    def conn_guarded() -> str:
+        return "allowed"
+
+    with pytest.raises(PermissionDeniedError, match="Guard requires an HTTP connection"):
+        await GuardChain((guard_obj,)).execute(ctx)
+
+    with pytest.raises(PermissionDeniedError, match="Guard requires an HTTP connection"):
+        await conn_guarded.authorize(ctx)
+
+    with pytest.raises(PermissionDeniedError, match="Guard requires an HTTP connection"):
+        await conn_guarded.invoke({}, context=ctx)
+
+    fake_conn: dict[str, Any] = {}
+    await conn_guarded.authorize(ctx, connection=fake_conn, route_handler="route_1")
+    assert fake_conn["checked_by"] == (expected_tag, "route_1")
+
+
+@pytest.mark.anyio
+async def test_sse_broker_open_stream_replay_keepalive_limits_and_cleanup() -> None:
+    """SseStreamBroker.open_stream replays missed frames, emits keepalives, enforces owner limits, and cleans up."""
+    broker = SseStreamBroker(replay_capacity=16)
+    broker.publish("sess-1", SseFrame(id="e1", event="message", data="first"))
+    broker.publish("sess-1", SseFrame(id="e2", event="message", data="second"))
+
+    resumed = broker.open_stream(
+        "sess-1",
+        owner_id="owner-a",
+        last_event_id="e1",
+        heartbeat_seconds=0.02,
+        max_streams_per_owner=2,
+    )
+    assert broker.owner_stream_count("owner-a") == 1
+    first_chunk = await anext(resumed)
+    assert first_chunk == b"id: e2\ndata: second\n\n"
+
+    keepalive_chunk = await anext(resumed)
+    assert keepalive_chunk == b": keepalive\n\n"
+
+    second = broker.open_stream(
+        "sess-1",
+        owner_id="owner-a",
+        heartbeat_seconds=1.0,
+        max_streams_per_owner=2,
+    )
+    assert broker.owner_stream_count("owner-a") == 2
+
+    with pytest.raises(StreamLimitExceededError):
+        broker.open_stream(
+            "sess-1",
+            owner_id="owner-a",
+            heartbeat_seconds=1.0,
+            max_streams_per_owner=2,
+        )
+
+    other_owner_stream = broker.open_stream(
+        "anon-other",
+        owner_id="owner-b",
+        heartbeat_seconds=1.0,
+        max_streams_per_owner=2,
+    )
+    assert broker.owner_stream_count("owner-b") == 1
+    broker.publish("anon-other", SseFrame(id="e3", event="message", data="anon-msg"))
+    assert await anext(other_owner_stream) == b"id: e3\ndata: anon-msg\n\n"
+    await other_owner_stream.aclose()
+    assert broker.owner_stream_count("owner-b") == 0
+    assert "anon-other" not in broker._buffers
+
+    await resumed.aclose()
+    assert broker.owner_stream_count("owner-a") == 1
+
+    broker.close_session("sess-1")
+    assert "sess-1" not in broker._buffers
+    with pytest.raises(StopAsyncIteration):
+        await anext(second)
+    await second.aclose()
+    assert broker.owner_stream_count("owner-a") == 0
+
+
+def test_ui_metadata_models_and_decorators() -> None:
+    """McpIcon serialization and SEP-1865 UI decorator fields merge cleanly into ToolSpec and resource descriptors."""
+    full_icon = McpIcon(src="https://cdn.example/icon.svg", mimeType="image/svg+xml", sizes=("32x32", "any"))
+    assert full_icon.to_mcp_dict() == {
+        "src": "https://cdn.example/icon.svg",
+        "mimeType": "image/svg+xml",
+        "sizes": ["32x32", "any"],
+    }
+    assert McpIcon("https://cdn.example/minimal.png").to_mcp_dict() == {"src": "https://cdn.example/minimal.png"}
+
+    @mcp_tool(
+        name="dash_action",
+        meta={"custom": "v1"},
+        ui_resource_uri="ui://app/dashboard.html",
+        ui_visibility=("model", "app"),
+    )
+    def dash_action(item_id: str) -> str:
+        return item_id
+
+    dash_tool = Tool(dash_action)
+    assert dash_tool.spec.meta == {
+        "custom": "v1",
+        "ui": {"resourceUri": "ui://app/dashboard.html", "visibility": ["model", "app"]},
+    }
+
+    @mcp_tool(name="no_vis", ui_resource_uri="ui://app/no-vis.html", ui_visibility=[])
+    def no_vis() -> str:
+        return "ok"
+
+    assert Tool(no_vis).spec.meta == {"ui": {"resourceUri": "ui://app/no-vis.html"}}
+
+    @tool(name="direct_meta", meta={"trace": True})
+    def direct_meta() -> str:
+        return "ok"
+
+    assert direct_meta.spec.meta == {"trace": True}
+
+    @mcp_resource(
+        "ui://app/dashboard.html",
+        title="Dashboard",
+        mime_type="text/html;profile=mcp-app",
+        icons=[full_icon],
+        meta={"ui": {"prefersBorder": True}},
+    )
+    def read_dash() -> str:
+        return "<div/>"
+
+    @resource(
+        "ui://app/item/{item_id}",
+        title="Item",
+        mime_type="text/html;profile=mcp-app",
+        icons=[{"src": "https://cdn.example/item.png", "sizes": ("16x16",)}],
+        meta={"x": 2},
+    )
+    def read_item(item_id: str) -> str:
+        return item_id
+
+    dash_meta = cast(Any, read_dash)._mcp_resource
+    assert dash_meta["title"] == "Dashboard"
+    assert dash_meta["icons"] == (full_icon,)
+    assert dash_meta["meta"] == {"ui": {"prefersBorder": True}}
+
+    item_meta = cast(Any, read_item)._mcp_resource
+    assert item_meta["title"] == "Item"
+    assert item_meta["icons"] == (McpIcon(src="https://cdn.example/item.png", sizes=("16x16",)),)
+    assert item_meta["meta"] == {"x": 2}
+
+
+@pytest.mark.parametrize("bad_visibility", [["robot"], ["model", "robot"], "app"])
+def test_mcp_tool_rejects_invalid_ui_visibility(bad_visibility: Any) -> None:
+    """Invalid SEP-1865 ui_visibility tokens raise ValueError at decoration time."""
+    with pytest.raises(ValueError, match="ui_visibility"):
+        mcp_tool(ui_visibility=bad_visibility)
+
+
+@pytest.mark.parametrize("bad_audience", ["", "   ", "https://example.com", "/projects/abc/global/backendServices/1"])
+def test_iap_identity_source_rejects_malformed_audience(bad_audience: str) -> None:
+    """Verify IapIdentitySource validates Google Cloud /projects/<number>/... audience paths eagerly."""
+    with pytest.raises(ValueError, match="Invalid IAP audience"):
+        IapIdentitySource(bad_audience)
+
+
+@pytest.mark.parametrize(
+    ("scenario", "expected_user", "expected_email"),
+    [
+        ("valid", "accounts.google.com:12345", "alice@example.com"),
+        ("wrong_key", None, None),
+        ("wrong_audience", None, None),
+        ("expired", None, None),
+        ("plain_email_only", None, None),
+    ],
+)
+def test_iap_identity_source_es256_verification(
+    scenario: str,
+    expected_user: str | None,
+    expected_email: str | None,
+) -> None:
+    """Verify ES256 signed IAP assertion validation and fail-closed behavior on spoofed or expired headers."""
+    audience = "/projects/123456789/global/backendServices/987654321"
+    valid_key = ec.generate_private_key(ec.SECP256R1())
+    wrong_key = ec.generate_private_key(ec.SECP256R1())
+    public_jwk = json.loads(jwt.algorithms.ECAlgorithm.to_jwk(valid_key.public_key()))
+    public_jwk["kid"] = "iap-test-kid-1"
+    source = IapIdentitySource(audience, jwks={"keys": [public_jwk]})
+
+    if scenario == "plain_email_only":
+        headers = {"x-goog-authenticated-user-email": "accounts.google.com:attacker@example.com"}
+        assert source.resolve(IdentityRequest(headers=headers)) is None
+        return
+
+    now = int(time.time())
+    signing_key = wrong_key if scenario == "wrong_key" else valid_key
+    token_aud = "/projects/999/global/backendServices/1" if scenario == "wrong_audience" else audience
+    token_exp = now - 60 if scenario == "expired" else now + 300
+    token = jwt.encode(
+        {
+            "iss": IAP_ISSUER,
+            "aud": token_aud,
+            "sub": "accounts.google.com:12345",
+            "email": "alice@example.com",
+            "iat": now - 10,
+            "exp": token_exp,
+        },
+        signing_key,
+        algorithm="ES256",
+        headers={"kid": "iap-test-kid-1"},
+    )
+    resolved = source.resolve(IdentityRequest(headers={IAP_ASSERTION_HEADER: token}))
+    if expected_user is None:
+        assert resolved is None
+    else:
+        assert resolved is not None
+        assert resolved.user_id == expected_user
+        assert resolved.email == expected_email
+        assert resolved.auth_scheme == "iap"
+
+
+def test_iap_identity_source_unreachable_jwk_url_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify JWK endpoint transport errors fail closed (None) without leaking exceptions."""
+    audience = "/projects/123456789/global/backendServices/987654321"
+    key = ec.generate_private_key(ec.SECP256R1())
+    now = int(time.time())
+    token = jwt.encode(
+        {"iss": IAP_ISSUER, "aud": audience, "sub": "user-1", "iat": now, "exp": now + 60},
+        key,
+        algorithm="ES256",
+        headers={"kid": "missing-kid"},
+    )
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        lambda *_a, **_kw: (_ for _ in ()).throw(urllib.error.URLError("unreachable")),
+    )
+    source = IapIdentitySource(audience, key_url="https://127.0.0.1:1/unreachable-jwks")
+    assert source.resolve(IdentityRequest(headers={IAP_ASSERTION_HEADER: token})) is None

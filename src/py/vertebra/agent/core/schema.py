@@ -16,6 +16,8 @@ from typing import TYPE_CHECKING, Annotated, Any, Literal, Union, cast, get_args
 import anyio
 import msgspec
 
+from vertebra.agent.core.context import AgentContext
+from vertebra.agent.core.guards import authorize as authorize_guards
 from vertebra.typing import FrozenBaseStruct
 
 try:
@@ -38,6 +40,8 @@ __all__ = [
     "ToolResult",
     "ToolSpec",
     "execute_tool_calls",
+    "extract_ui_resource_uris",
+    "is_app_only_tool",
     "tool",
 ]
 
@@ -201,6 +205,34 @@ class ToolSpec(FrozenBaseStruct, frozen=True, kw_only=True):
     """Ordered sequence of authorization guards enforced before tool execution."""
     timeout_seconds: float | None = None
     """Optional execution timeout in seconds."""
+    meta: dict[str, Any] | None = None
+    """Optional MCP extension ``_meta`` payload attached to this tool descriptor."""
+
+
+def extract_ui_resource_uris(meta: Mapping[str, Any] | None) -> tuple[Any, ...]:
+    """Extract declared UI resource URIs from ``meta['ui']['resourceUri']`` and legacy ``meta['ui/resourceUri']``."""
+    if not isinstance(meta, Mapping):
+        return ()
+    uris: list[Any] = []
+    ui_meta = meta.get("ui")
+    if isinstance(ui_meta, Mapping) and ui_meta.get("resourceUri") is not None:
+        uris.append(ui_meta["resourceUri"])
+    if meta.get("ui/resourceUri") is not None:
+        uris.append(meta["ui/resourceUri"])
+    return tuple(uris)
+
+
+def is_app_only_tool(spec: ToolSpec) -> bool:
+    """Return True when tool metadata marks SEP-1865 visibility strictly ``['app']``."""
+    if not isinstance(spec.meta, Mapping):
+        return False
+    ui_meta = spec.meta.get("ui")
+    if not isinstance(ui_meta, Mapping):
+        return False
+    visibility = ui_meta.get("visibility")
+    if not isinstance(visibility, Sequence) or isinstance(visibility, (str, bytes)):
+        return False
+    return [str(v) for v in visibility] == ["app"]
 
 
 class ToolCall(msgspec.Struct, frozen=True, gc=False, kw_only=True):
@@ -502,11 +534,12 @@ class Tool:
         exposure: Iterable[ToolExposure] | None = None,
         annotations: ToolAnnotations | Mapping[str, Any] | None = None,
         guards: Sequence[Any] = (),
+        meta: Mapping[str, Any] | None = None,
         spec: ToolSpec | None = None,
         instance: Any = None,
     ) -> None:
-        meta = getattr(fn, "_mcp_tool_meta", None)
-        meta_dict = meta if isinstance(meta, dict) else {}
+        meta_attr = getattr(fn, "_mcp_tool_meta", None)
+        meta_dict = meta_attr if isinstance(meta_attr, dict) else {}
         self.fn = fn
         self._instance = instance
         self._signature = inspect.signature(fn)
@@ -514,9 +547,12 @@ class Tool:
 
         if spec is not None:
             resolved_guards = tuple(guards) if guards else spec.guards
-            self.spec = (
+            resolved_spec = (
                 msgspec.structs.replace(spec, guards=resolved_guards) if resolved_guards != spec.guards else spec
             )
+            if meta is not None:
+                resolved_spec = msgspec.structs.replace(resolved_spec, meta=dict(meta))
+            self.spec = resolved_spec
             self.name = self.spec.name
             self.title = self.spec.title
             self.description = self.spec.description
@@ -527,6 +563,7 @@ class Tool:
             self.exposure = self.spec.exposure
             self.webmcp = "webmcp" in self.spec.exposure
             self.guards = self.spec.guards
+            self.meta = self.spec.meta
             raw_ann = annotations if isinstance(annotations, Mapping) else meta_dict.get("annotations")
             self.annotations: dict[str, Any] = (
                 dict(raw_ann) if isinstance(raw_ann, Mapping) else self.spec.annotations.to_mcp_dict()
@@ -564,6 +601,8 @@ class Tool:
         dict_annotations = (
             dict(raw_annotations) if isinstance(raw_annotations, Mapping) else struct_annotations.to_mcp_dict()
         )
+        raw_meta = meta if meta is not None else meta_dict.get("meta")
+        resolved_meta = dict(raw_meta) if isinstance(raw_meta, Mapping) else None
 
         builder = SchemaBuilder()
         resolved_input_schema = builder.build_callable_schema(fn) if input_schema is None else dict(input_schema)
@@ -585,6 +624,7 @@ class Tool:
             requires_confirmation=resolved_confirmation,
             guards=resolved_guards,
             timeout_seconds=resolved_timeout,
+            meta=resolved_meta,
         )
         self.name = self.spec.name
         self.title = self.spec.title
@@ -597,6 +637,7 @@ class Tool:
         self.webmcp = "webmcp" in self.spec.exposure
         self.annotations = dict_annotations
         self.guards = self.spec.guards
+        self.meta = self.spec.meta
 
     def __get__(self, instance: Any, owner: Any = None) -> Tool:
         """Bind tool to an instance when accessed as an attribute on an object."""
@@ -609,20 +650,28 @@ class Tool:
             instance=instance,
         )
 
-    async def invoke(
+    async def authorize(
+        self,
+        context: AgentContext | None = None,
+        *,
+        connection: Any = None,
+        route_handler: Any = None,
+    ) -> None:
+        """Execute configured authorization guards against the caller context."""
+        if self.guards:
+            await authorize_guards(
+                context,
+                self,
+                connection=connection,
+                route_handler=route_handler,
+            )
+
+    async def call(
         self,
         arguments: dict[str, Any],
         context: Any = None,
     ) -> Any:
-        """Invoke the tool with validated arguments and context injection."""
-        if self.guards:
-            for guard in self.guards:
-                check_fn = getattr(guard, "check", None)
-                target = check_fn if callable(check_fn) else guard
-                guard_res = target(context)
-                if inspect.isawaitable(guard_res):
-                    await guard_res
-
+        """Bind validated arguments and execute the underlying tool callable without running guards."""
         sig = self._signature
         call_kwargs: dict[str, Any] = {}
         has_var_keyword = False
@@ -674,6 +723,15 @@ class Tool:
             return await res
         return res
 
+    async def invoke(
+        self,
+        arguments: dict[str, Any],
+        context: Any = None,
+    ) -> Any:
+        """Authorize and invoke the tool with validated arguments and context injection."""
+        await self.authorize(context)
+        return await self.call(arguments, context=context)
+
     def _convert_argument(self, param_name: str, value: Any, annotation: Any) -> Any:
         """Convert and validate a single argument against its resolved parameter type hint."""
         if annotation is inspect.Parameter.empty or annotation is Any:
@@ -705,6 +763,7 @@ def tool(
     exposure: Iterable[ToolExposure] | None = None,
     annotations: ToolAnnotations | Mapping[str, Any] | None = None,
     guards: Sequence[Any] = (),
+    meta: Mapping[str, Any] | None = None,
 ) -> Callable[[Callable[..., Any]], Tool]:
     """Decorator converting a function or method into a Tool descriptor."""
 
@@ -720,6 +779,7 @@ def tool(
             exposure=exposure,
             annotations=annotations,
             guards=guards,
+            meta=meta,
         )
 
     return decorator

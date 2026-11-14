@@ -15,6 +15,7 @@ from vertebra.agent.mcp.models import MCPConfig
 from vertebra.agent.mcp.registry import MCPRegistry, ToolRegistry
 from vertebra.agent.mcp.routes import WsgiMcpApp, render_well_known_mcp_json
 from vertebra.agent.mcp.service import MCPCore
+from vertebra.agent.mcp.skills import MCPSkillsConfig, SkillCatalog
 from vertebra.agent.mcp.webmcp import (
     WebMCPConfig,
     WebMCPManifest,
@@ -46,6 +47,8 @@ __all__ = (
 def attach_mcp_routes(
     app: Any,
     config: MCPConfig | None = None,
+    *,
+    skills: MCPSkillsConfig | SkillCatalog | None = None,
 ) -> MCPRegistry:
     """Scan Flask ``view_functions`` for ``@mcp_tool``, ``@mcp_resource``, and ``@mcp_prompt``."""
     resolved = config or MCPConfig(server_name="vertebra-flask-mcp")
@@ -55,7 +58,9 @@ def attach_mcp_routes(
     for view_fn in list(view_functions.values()):
         registry.register_route_handler(view_fn)
 
-    core = MCPCore(config=resolved, registry=registry)
+    resolved_skills = SkillCatalog.coerce(skills)
+    core = MCPCore(config=resolved, registry=registry, skill_catalog=resolved_skills)
+    core.validate()
     mcp_app = WsgiMcpApp(core)
     cast("Any", registry)._mcp_app = mcp_app
     extensions = getattr(app, "extensions", None)
@@ -66,7 +71,8 @@ def attach_mcp_routes(
         existing_endpoints = set(view_functions.keys())
 
         if resolved.expose_well_known and "vertebra_mcp_well_known" not in existing_endpoints:
-            well_known_bytes = render_well_known_mcp_json(resolved, registry)
+            skill_names = [s.name for s in resolved_skills.list_skills()] if resolved_skills is not None else None
+            well_known_bytes = render_well_known_mcp_json(resolved, registry, skill_names=skill_names)
 
             def _serve_well_known() -> tuple[bytes, int, dict[str, str]]:
                 return well_known_bytes, 200, {"Content-Type": "application/json"}
@@ -110,7 +116,7 @@ def attach_mcp_routes(
                 resolved.path,
                 endpoint="vertebra_mcp_rpc",
                 view_func=_serve_mcp_rpc,
-                methods=["POST", "GET", "OPTIONS"],
+                methods=["POST", "GET", "DELETE", "OPTIONS"],
             )
 
     return registry

@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import litestar_mcp
 import pytest
 from litestar import Litestar, get
 from litestar.testing import TestClient
+from litestar_mcp import MCPConfig as LitestarMCPConfig
+from litestar_mcp import MCPSkillsConfig as LitestarMCPSkillsConfig
 
 from vertebra.agent.mcp import MCPConfig
 from vertebra.agent.plugin import AgentPlugin, AgentPluginConfig
@@ -146,6 +151,7 @@ def test_litestar_mcp_delegation_no_duplicate_opt_mcp_tool_and_canonical_well_kn
         assert wk_doc["serverInfo"]["name"] == "litestar-orders-mcp"
         assert wk_doc["endpoint"] == "/mcp"
         assert "list_orders" in wk_doc["tools"]
+        assert wk_doc["skills"] == []
 
     offload = WellKnownAgentCardOffload.from_mcp_config(
         MCPConfig(server_name="litestar-orders-mcp", server_version="1.0.0"),
@@ -159,5 +165,65 @@ def test_litestar_mcp_delegation_no_duplicate_opt_mcp_tool_and_canonical_well_kn
         "serverInfo",
         "endpoint",
         "tools",
+        "skills",
     }
     assert offload_doc["protocolVersion"] == "2026-07-28"
+    assert offload_doc["skills"] == []
+
+
+def test_create_mcp_plugin_requires_litestar_mcp_0_20_protocol_versions(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify create_mcp_plugin fails loud when litestar_mcp lacks 2025-11-25 support."""
+    monkeypatch.setattr(
+        "vertebra.extensions.litestar.mcp.plugin.ensure_module",
+        lambda *_args, **_kwargs: SimpleNamespace(SUPPORTED_PROTOCOL_VERSIONS=("2026-07-28", "2025-06-18")),
+    )
+    with pytest.raises(MissingDependencyError) as exc_info:
+        create_mcp_plugin(name="Old MCP", enable_tasks=False)
+    assert exc_info.value.package == "litestar-mcp"
+    assert exc_info.value.install_package == "litestar-mcp>=0.20.0"
+
+
+def test_litestar_mcp_well_known_merges_skill_catalog_names(tmp_path: Path) -> None:
+    """Verify _vertebra_mcp_well_known injects skill_catalog and includes its skill names."""
+    skill_dir = tmp_path / "deploy-check"
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: deploy-check\ndescription: Check deploy readiness\ntitle: Deploy Check\n---\n# Deploy Check\n",
+        encoding="utf-8",
+    )
+
+    assert "2025-11-25" in litestar_mcp.SUPPORTED_PROTOCOL_VERSIONS
+
+    @get("/status", opt={"mcp_tool": "check_status"})
+    async def check_status() -> dict[str, bool]:
+        """Check status."""
+        return {"ok": True}
+
+    mcp_plugin = create_mcp_plugin(
+        config=LitestarMCPConfig(
+            name="litestar-skills-mcp",
+            tasks=False,
+            skills=LitestarMCPSkillsConfig(paths=[tmp_path]),
+        )
+    )
+    app = Litestar(route_handlers=[check_status], plugins=[mcp_plugin])
+
+    with TestClient(app=app) as client:
+        wk_resp = client.get("/.well-known/mcp.json")
+        assert wk_resp.status_code == 200
+        wk_doc = wk_resp.json()
+        assert "check_status" in wk_doc["tools"]
+        assert wk_doc["skills"] == ["deploy-check"]
+
+        init_resp = client.post(
+            "/mcp",
+            headers={"Accept": "application/json, text/event-stream"},
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {"protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": {"name": "test"}},
+            },
+        )
+        assert init_resp.status_code == 200
+        assert init_resp.json()["result"]["protocolVersion"] == "2025-11-25"

@@ -1,5 +1,43 @@
 # Bundle Activity Log
 
+## [2026-11-13T20:42:00Z] archive | mcp-protocol-completeness
+
+- Archived `mcp-protocol-completeness` (`7` chapters, `25` tasks, `c4380215..e95e1f19`), delivering single-pass `Tool.authorize`/`Tool.call` (`-32004`/`-32005`), `Mcp-Param-*` validation (`-32020`), expiring single-use `ConfirmationGate`, dual-mode `SUPPORTED_PROTOCOL_VERSIONS` (`MCPSessionStore`, `GET /mcp` SSE, `DELETE /mcp`, `2025-03-26` batches), `resources/subscribe` & `subscriptions/listen`, `SKILLS_EXTENSION` + SEP-1865 `UI_EXTENSION` across mounts (`litestar-mcp>=0.20.0`), incremental `run_stdio_server` (`vtb ai mcp serve --app`), `OidcTokenSource` (`vtb ai mcp bridge --audience`), ES256 `IapIdentitySource`, updated docs/changelog, and present-tense OKF chapters (`mcp-and-a2a-protocol-harness.md` `147L`, `mcp-limitations.md` `58L`, `cli.md`, `litestar.md`, `polyglot-test-matrix.md`).
+
+## [2026-11-13T20:35:00Z] chapter-complete | mcp-protocol-completeness ch06-stdio-serve-bridge-and-gcp-auth
+
+- Closed `ch06-stdio-serve-bridge-and-gcp-auth` at `7607f4d8`: implemented concurrent incremental `run_stdio_server` with `notifications/cancelled` cancellation, legacy session stdout relay, and EOF cleanup; added `resolve_app_mcp_core` / `is_litestar_mcp_app` app discovery (`vtb ai mcp serve --app`, removing `--name`); added headerless legacy `mcp_request_headers(..., protocol_version=None)`, `BridgeTransport` / `GET` SSE relay (`Last-Event-ID`, `5` reconnects, `404`/`405` stop, EOF `DELETE`), and `OidcTokenSource` (`AsyncGcpIdTokenCache`, single `401` retry) with `vtb ai mcp bridge --audience`; and shipped ES256 `IapIdentitySource` + `iap` extra (`uv lock --check --offline`, `ruff`, `mypy`, and `276` Python tests clean).
+- Advanced active frontier to `ch07-docs-and-okf-sync` (`mcp-protocol-completeness:ch07:t01`; `4` tasks remain).
+
+## [2026-11-13T05:29:35Z] chapter-complete | mcp-protocol-completeness ch05-framework-mounts-and-litestar-parity
+
+- Closed `ch05-framework-mounts-and-litestar-parity` at `63904aab` (sync `0166aa62`): wired `SkillCatalog` coercion, well-known `skills` lists, and startup `MCPCore.validate()` across `AgentPlugin`, Starlette/FastAPI, Flask, and Django MCP mounts, bumped `litestar-mcp>=0.20.0` in `pyproject.toml` + `uv.lock`, added pre-`0.20` capability guard in `create_mcp_plugin`, and merged Litestar `skill_catalog` names in `/.well-known/mcp.json` (`uv lock --check`, `ruff`, `mypy` across `48` source files, and `279` tests clean).
+- Advanced active frontier to `ch06-stdio-serve-bridge-and-gcp-auth` (`mcp-protocol-completeness:ch06:t01`; `7` tasks remain across `ch06`–`ch07`).
+
+## [2026-11-13T05:17:45Z] chapter-complete | mcp-protocol-completeness ch04-skills-and-mcp-apps-core
+
+- Closed `ch04-skills-and-mcp-apps-core` at `b0c0ae12` (sync `7ea0f382`): extended `SkillCatalog` filtering/URI resolution/listeners/refresh, advertised `io.modelcontextprotocol/skills` and `io.modelcontextprotocol/ui` extensions, added `McpIcon`/`ToolSpec.meta`/`@mcp_tool` UI metadata, implemented `ToolRegistry.validate_ui_links` and `MCPCore.validate()`, filtered app-only tools for non-UI clients and WebMCP manifests (`270` unit tests, `ruff`, and `mypy` clean).
+- Advanced active frontier to `ch05-framework-mounts-and-litestar-parity` (`mcp-protocol-completeness:ch05:t01`; `10` tasks remain across `ch05`–`ch07`).
+
+## [2026-11-13T05:03:00Z] chapter-complete | mcp-protocol-completeness ch03-sse-streams-and-resource-subscriptions
+
+- Closed `ch03-sse-streams-and-resource-subscriptions` at `2454dbef` (sync `353c0d0c`): `McpHttpResponse.stream` (`SseStreamBroker`), legacy `GET /mcp` SSE adapter writers across ASGI/Starlette/WSGI/native `App`/Litestar/Flask/Django, `list_changed` + severity-gated `MCPCore.log` + progress notifications, `resources/subscribe`, and `2026-07-28` `subscriptions/listen` (`251` unit tests, `ruff`, and `mypy` clean).
+- Advanced active frontier to `ch04-skills-and-mcp-apps-core` (`mcp-protocol-completeness:ch04:t01`; `14` tasks remain across `ch04`–`ch07`).
+
+## [2026-11-13T04:43:42Z] chapter-complete | mcp-protocol-completeness ch02-version-negotiation-and-sessions
+
+- Closed `ch02-version-negotiation-and-sessions` at `5f8fd173` (sync `d7839d5f`): dual-mode `SUPPORTED_PROTOCOL_VERSIONS` negotiation, owner-scoped `MCPSessionStore`, legacy `initialize`/`ping`/`logging/setLevel`, `2025-03-26` JSON-RPC batching, `DELETE /mcp` termination, and unified `_server_capabilities` (`206` unit tests, `ruff`, and `mypy` clean).
+- Advanced active frontier to `ch03-sse-streams-and-resource-subscriptions` (`mcp-protocol-completeness:ch03:t01`; `18` tasks remain across `ch03`–`ch07`).
+
+## [2026-11-13T02:55:00Z] chapter-complete | mcp-protocol-completeness ch01-guards-params-and-alias-cleanup
+
+- Closed `ch01-guards-params-and-alias-cleanup` at `1f269a58` (`179 passed`, `mypy` and `ruff` clean, non-destructive multi-call confirmation gating, strict nested JSON `Mcp-Param-*` type comparison, and `ConfirmationCapacityError` package export).
+- Advanced active frontier to `ch02-version-negotiation-and-sessions` (`mcp-protocol-completeness:ch02:t01`; `21` tasks remain across `ch02`–`ch07`).
+
+## [2026-11-13T01:59:00Z] chapter-checkpoint | mcp-protocol-completeness ch01-guards-params-and-alias-cleanup
+
+- Completed `ch01-guards-params-and-alias-cleanup` (`t01`–`t04`) at `e22452c5` on `feat/mcp-protocol-completeness`: split `Tool.authorize`/`Tool.call` with `-32004`/`-32005` JSON-RPC error mapping, validated `Mcp-Param-*` headers (`-32020`), hardened `ConfirmationGate` (`consume_call_approval`, `ttl_seconds`, `max_tickets`, exact owner checks), and removed the `MCPService` alias subclass (`177 passed`, `mypy` clean).
+
 ## [2026-11-13T20:14:00Z] archive | gcp-embeddings-and-identity
 
 - Archived `gcp-embeddings-and-identity` (`4` chapters, `15` tasks, `aecb5a12..6406bbef`), delivering audience-bound OIDC `SyncGcpIdTokenCache`/`AsyncGcpIdTokenCache` ([#113](https://github.com/cofin/vertebra/issues/113)) including `authorized_user` ADC, canonical ambient ADC fallback, Gemini protobuf field-2 and inline/file multimodal wire codecs, Vertex AI v1 REST `:predict`/`:embedContent`, `RemoteEmbedder` ID-token auth, SQL embedding pushdown parity, per-loop `EmbeddingBroker` SHM cleanup, `GemmaEmbedder` `precision` forwarding, and present-tense OKF chapters (`embeddings-and-vectors.md`, `embeddings-limitations.md`, `object-storage.md`, `pyo3-ffi-and-batch-dispatch.md`, `gcp-bigquery-and-spanner-drivers.md`).

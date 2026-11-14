@@ -5,6 +5,8 @@ A2A 1.0, AgentChatController, and .well-known discovery manifests on both native
 vertebra.framework.App and Litestar applications with automatic opt-attribute handler discovery.
 """
 
+import contextlib
+from collections.abc import AsyncIterable, AsyncIterator, Callable
 from typing import TYPE_CHECKING, Any, cast
 
 import msgspec
@@ -14,9 +16,10 @@ from vertebra.agent.controller import AgentChatController
 from vertebra.agent.core.context import AgentContext
 from vertebra.agent.mcp.controllers import PromptController, SkillController
 from vertebra.agent.mcp.models import MCPConfig, McpHttpRequest
-from vertebra.agent.mcp.registry import MCPRegistry
+from vertebra.agent.mcp.registry import ToolRegistry
 from vertebra.agent.mcp.routes import build_well_known_mcp_document
-from vertebra.agent.mcp.service import MCPService
+from vertebra.agent.mcp.service import MCPCore
+from vertebra.agent.mcp.skills import MCPSkillsConfig, SkillCatalog
 from vertebra.agent.mcp.webmcp import build_webmcp_manifest
 from vertebra.agent.runtime import AgentRuntime
 from vertebra.agent.telemetry import AgentTelemetryRecorder
@@ -51,6 +54,8 @@ class AgentPluginConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Optional background `QueueService` for durable async turn execution."""
     session_store: Any = None
     """Optional `AgentSessionStore` backend persisting multi-turn conversation history."""
+    skills: MCPSkillsConfig | SkillCatalog | None = None
+    """Optional MCP skills configuration or pre-built SkillCatalog."""
 
 
 class AgentPlugin:
@@ -61,13 +66,15 @@ class AgentPlugin:
         self.observability = self.config.observability or AgentTelemetryRecorder()
         recorder = getattr(self.observability, "recorder", self.observability)
         self.runtime = self.config.runtime or AgentRuntime(telemetry=recorder)
-        self.mcp_registry = MCPRegistry()
+        self.mcp_registry = ToolRegistry(confirmation_gate=self.runtime.confirmation_gate)
+        self.skill_catalog = SkillCatalog.coerce(self.config.skills, telemetry=recorder)
         self.mcp_service = (
-            MCPService(
+            MCPCore(
                 registry=self.mcp_registry,
                 config=self.config.mcp,
                 telemetry=recorder,
                 confirmation_gate=self.runtime.confirmation_gate,
+                skill_catalog=self.skill_catalog,
             )
             if self.config.mcp is not None
             else None
@@ -95,10 +102,14 @@ class AgentPlugin:
 
         if self.mcp_service is not None:
             srv = self.mcp_service
+            srv.validate()
 
             @app.get(srv.config.well_known_path)
             async def _mcp_well_known() -> dict[str, Any]:
-                return build_well_known_mcp_document(srv.config, srv.registry)
+                skill_names = (
+                    [s.name for s in srv.skill_catalog.list_skills()] if srv.skill_catalog is not None else None
+                )
+                return build_well_known_mcp_document(srv.config, srv.registry, skill_names=skill_names)
 
             if srv.config.webmcp is not None and srv.config.webmcp.enabled:
                 webmcp_cfg = srv.config.webmcp
@@ -107,53 +118,30 @@ class AgentPlugin:
                 async def _webmcp_well_known() -> dict[str, Any]:
                     return cast(dict[str, Any], msgspec.to_builtins(build_webmcp_manifest(srv.registry, webmcp_cfg)))
 
-            @app.post(srv.config.path)
-            async def _mcp_endpoint(
-                body: bytes = b"",
-                headers: Any = None,
-            ) -> tuple[int, dict[str, str], bytes]:
-                header_map = self._header_dict(headers)
-                mcp_resp = await srv.handle(
-                    McpHttpRequest(
-                        method="POST",
-                        path=srv.config.path,
-                        headers=header_map,
-                        body=body,
-                        context=AgentContext.from_headers(header_map, identity_source=srv.config.identity_source),
+            def _make_native_mcp_handler(http_method: str) -> Callable[..., Any]:
+                async def _mcp_native_endpoint(
+                    body: bytes = b"",
+                    headers: Any = None,
+                ) -> tuple[int, dict[str, str], bytes | AsyncIterable[bytes]]:
+                    header_map = self._header_dict(headers)
+                    mcp_resp = await srv.handle(
+                        McpHttpRequest(
+                            method=http_method,
+                            path=srv.config.path,
+                            headers=header_map,
+                            body=body,
+                            context=AgentContext.from_headers(header_map, identity_source=srv.config.identity_source),
+                        )
                     )
-                )
-                return mcp_resp.status, mcp_resp.headers, mcp_resp.body
+                    payload: bytes | AsyncIterable[bytes] = (
+                        mcp_resp.stream if mcp_resp.stream is not None else mcp_resp.body
+                    )
+                    return mcp_resp.status, mcp_resp.headers, payload
 
-            @app.get(srv.config.path)
-            async def _mcp_get_endpoint(
-                body: bytes = b"",
-                headers: Any = None,
-            ) -> tuple[int, dict[str, str], bytes]:
-                header_map = self._header_dict(headers)
-                mcp_resp = await srv.handle(
-                    McpHttpRequest(
-                        method="GET",
-                        path=srv.config.path,
-                        headers=header_map,
-                        body=body,
-                        context=AgentContext.from_headers(header_map, identity_source=srv.config.identity_source),
-                    )
-                )
-                return mcp_resp.status, mcp_resp.headers, mcp_resp.body
+                return _mcp_native_endpoint
 
-            @app.delete(srv.config.path)
-            async def _mcp_delete_endpoint(body: bytes = b"", headers: Any = None) -> tuple[int, dict[str, str], bytes]:
-                header_map = self._header_dict(headers)
-                mcp_resp = await srv.handle(
-                    McpHttpRequest(
-                        method="DELETE",
-                        path=srv.config.path,
-                        headers=header_map,
-                        body=body,
-                        context=AgentContext.from_headers(header_map, identity_source=srv.config.identity_source),
-                    )
-                )
-                return mcp_resp.status, mcp_resp.headers, mcp_resp.body
+            for http_method in ("POST", "GET", "DELETE", "OPTIONS"):
+                app._route(http_method, srv.config.path)(_make_native_mcp_handler(http_method))
 
         if self.a2a_service is not None:
             a2a_srv = self.a2a_service
@@ -210,6 +198,7 @@ class AgentPlugin:
         if hasattr(app_config, "state"):
             app_config.state["mcp_registry"] = self.mcp_registry
             app_config.state["mcp_service"] = self.mcp_service
+            app_config.state["skill_catalog"] = self.skill_catalog
             app_config.state["a2a_service"] = self.a2a_service
             app_config.state["agent_runtime"] = self.runtime
             app_config.state["agent_observability"] = self.observability
@@ -234,6 +223,8 @@ class AgentPlugin:
         handlers = getattr(app_config, "route_handlers", None)
         if handlers is not None:
             self._discover_handlers(handlers)
+            if self.mcp_service is not None:
+                self.mcp_service.validate()
             self._mount_litestar_routes(handlers, app_config=app_config)
 
         return app_config
@@ -310,7 +301,10 @@ class AgentPlugin:
             if not well_known_already_mounted:
 
                 async def _litestar_mcp_well_known() -> dict[str, Any]:
-                    return build_well_known_mcp_document(srv.config, srv.registry)
+                    skill_names = (
+                        [s.name for s in srv.skill_catalog.list_skills()] if srv.skill_catalog is not None else None
+                    )
+                    return build_well_known_mcp_document(srv.config, srv.registry, skill_names=skill_names)
 
                 route_handlers.append(
                     get_fn(
@@ -324,7 +318,7 @@ class AgentPlugin:
 
                 async def _litestar_mcp_endpoint(
                     request: "LitestarRequest[Any, Any, Any]",
-                ) -> "LitestarResponse[bytes]":
+                ) -> "LitestarResponse[bytes] | Any":
                     mcp_resp = await srv.handle(
                         McpHttpRequest(
                             method=request.method,
@@ -334,20 +328,44 @@ class AgentPlugin:
                             context=AgentContext.from_scope(request.scope, identity_source=srv.config.identity_source),
                         )
                     )
+                    if mcp_resp.stream is not None:
+                        response_mod = getattr(litestar_mod, "response", None) or import_optional("litestar.response")
+                        stream_cls = getattr(response_mod, "Stream", None) if response_mod is not None else None
+                        if stream_cls is not None:
+                            stream = mcp_resp.stream
+
+                            async def _litestar_stream() -> AsyncIterator[bytes]:
+                                try:
+                                    async for chunk in stream:
+                                        yield chunk
+                                finally:
+                                    aclose = getattr(stream, "aclose", None)
+                                    if callable(aclose):
+                                        with contextlib.suppress(BaseException):
+                                            await aclose()
+
+                            return stream_cls(
+                                _litestar_stream(),
+                                status_code=mcp_resp.status,
+                                headers=mcp_resp.headers,
+                                media_type=mcp_resp.headers.get("Content-Type")
+                                or mcp_resp.headers.get("content-type", "text/event-stream"),
+                            )
                     return cast(
                         "LitestarResponse[bytes]",
                         litestar_mod.Response(
                             content=mcp_resp.body,
                             status_code=mcp_resp.status,
                             headers=mcp_resp.headers,
-                            media_type=mcp_resp.headers.get("Content-Type", "application/json"),
+                            media_type=mcp_resp.headers.get("Content-Type")
+                            or mcp_resp.headers.get("content-type", "application/json"),
                         ),
                     )
 
                 route_handlers.append(
                     litestar_mod.route(
                         srv.config.path,
-                        http_method=["POST", "GET", "DELETE"],
+                        http_method=["POST", "GET", "DELETE", "OPTIONS"],
                         include_in_schema=False,
                         signature_namespace={
                             "LitestarRequest": litestar_mod.Request,

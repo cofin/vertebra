@@ -71,6 +71,7 @@ from vertebra.agent.core.sse import (
     SseFrame,
     SseReplayBuffer,
     SseStreamBroker,
+    StreamLimitExceededError,
 )
 
 __all__ = [
@@ -110,6 +111,7 @@ __all__ = [
     "SseFrame",
     "SseReplayBuffer",
     "SseStreamBroker",
+    "StreamLimitExceededError",
     "TenantIsolationGuard",
     "TokenBucketGuard",
     "Tool",

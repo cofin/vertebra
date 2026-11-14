@@ -58,12 +58,13 @@ class WellKnownAgentCardOffload(msgspec.Struct, frozen=True, gc=False, kw_only=T
         registry: Any = None,
         *,
         tool_names: Iterable[str] | None = None,
+        skill_names: Iterable[str] | None = None,
         path: str = "/.well-known/mcp.json",
         max_age: int = 300,
     ) -> WellKnownAgentCardOffload:
         """Construct an offload descriptor for canonical `/.well-known/mcp.json` discovery."""
         ensure_module("litestar_mcp", extra="mcp")
-        payload = render_well_known_mcp_json(config, registry, tool_names=tool_names)
+        payload = render_well_known_mcp_json(config, registry, tool_names=tool_names, skill_names=skill_names)
         digest = hashlib.sha256(payload).hexdigest()
         etag = f'"{digest}"'
         return cls(path=path, body_bytes=payload, etag=etag, max_age=max_age)

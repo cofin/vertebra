@@ -5,8 +5,11 @@ request validation, Origin checking, ETag 304 Not Modified caching, and JSON-RPC
 dispatch to MCPCore.
 """
 
-from collections.abc import AsyncIterable, Callable, Iterable, Mapping
+import contextlib
+from collections.abc import AsyncIterable, AsyncIterator, Callable, Iterable, Mapping
 from typing import Any
+
+import anyio
 
 from vertebra._vertebra import Request, Response, WsgiEnviron
 from vertebra.agent.core.context import AgentContext
@@ -35,6 +38,7 @@ def build_well_known_mcp_document(
     registry: ToolRegistry | None = None,
     *,
     tool_names: Iterable[str] | None = None,
+    skill_names: Iterable[str] | None = None,
 ) -> dict[str, Any]:
     """Build the canonical ``/.well-known/mcp.json`` discovery document for MCP 2026-07-28."""
     if tool_names is not None:
@@ -43,6 +47,7 @@ def build_well_known_mcp_document(
         resolved_tools = [spec.name for spec in registry.list_specs(exposure="mcp")]
     else:
         resolved_tools = []
+    resolved_skills = sorted({str(name) for name in (skill_names or ())})
     return {
         "protocolVersion": MCP_PROTOCOL_VERSION,
         "mcp_version": MCP_PROTOCOL_VERSION,
@@ -53,6 +58,7 @@ def build_well_known_mcp_document(
         },
         "endpoint": config.path,
         "tools": resolved_tools,
+        "skills": resolved_skills,
     }
 
 
@@ -61,9 +67,17 @@ def render_well_known_mcp_json(
     registry: ToolRegistry | None = None,
     *,
     tool_names: Iterable[str] | None = None,
+    skill_names: Iterable[str] | None = None,
 ) -> bytes:
     """Serialize the canonical ``/.well-known/mcp.json`` discovery document to UTF-8 JSON bytes."""
-    return encode_json_bytes(build_well_known_mcp_document(config, registry, tool_names=tool_names))
+    return encode_json_bytes(
+        build_well_known_mcp_document(
+            config,
+            registry,
+            tool_names=tool_names,
+            skill_names=skill_names,
+        )
+    )
 
 
 class MCPHttpHandler:
@@ -91,7 +105,8 @@ class MCPHttpHandler:
                 context=context,
             )
         )
-        return response.status, response.headers, response.body
+        payload: bytes | AsyncIterable[bytes] = response.stream if response.stream is not None else response.body
+        return response.status, response.headers, payload
 
 
 class AsgiMcpApp:
@@ -128,12 +143,60 @@ class AsgiMcpApp:
             )
         )
         raw_headers = [(k.encode("latin-1"), v.encode("latin-1")) for k, v in resp.headers.items()]
+        if resp.stream is not None:
+            await self._send_streaming_response(resp.status, raw_headers, resp.stream, receive, send)
+            return
         raw_sender = getattr(send, "send_raw_response", None)
         if callable(raw_sender):
             await raw_sender(resp.status, raw_headers, resp.body)
             return
         await send({"type": "http.response.start", "status": resp.status, "headers": raw_headers})
         await send({"type": "http.response.body", "body": resp.body, "more_body": False})
+
+    @staticmethod
+    async def _close_async_stream(stream: AsyncIterator[bytes]) -> None:
+        aclose = getattr(stream, "aclose", None)
+        if callable(aclose):
+            with contextlib.suppress(BaseException):
+                await aclose()
+
+    async def _send_streaming_response(
+        self,
+        status: int,
+        raw_headers: list[tuple[bytes, bytes]],
+        stream: AsyncIterator[bytes],
+        receive: Callable[..., Any],
+        send: Callable[..., Any],
+    ) -> None:
+        await send({"type": "http.response.start", "status": status, "headers": raw_headers})
+        try:
+            async with anyio.create_task_group() as tg:
+
+                async def _watch_disconnect() -> None:
+                    while True:
+                        try:
+                            event = await receive()
+                        except BaseException:
+                            return
+                        if isinstance(event, Mapping) and event.get("type") == "http.disconnect":
+                            tg.cancel_scope.cancel()
+                            return
+                        if not isinstance(event, Mapping) or event.get("type") == "http.request":
+                            return
+
+                async def _pump_stream() -> None:
+                    try:
+                        async for chunk in stream:
+                            data = chunk if isinstance(chunk, bytes) else bytes(chunk)
+                            await send({"type": "http.response.body", "body": data, "more_body": True})
+                        await send({"type": "http.response.body", "body": b"", "more_body": False})
+                    finally:
+                        tg.cancel_scope.cancel()
+
+                tg.start_soon(_watch_disconnect)
+                tg.start_soon(_pump_stream)
+        finally:
+            await self._close_async_stream(stream)
 
     async def handle_starlette_request(self, request: Any) -> Any:
         """Handle a Starlette or FastAPI ``Request`` and return a framework response."""
@@ -154,7 +217,9 @@ class AsgiMcpApp:
             headers = {}
 
         body_fn = getattr(request, "body", None)
-        if callable(body_fn):
+        if method in {"GET", "HEAD", "DELETE", "OPTIONS"}:
+            raw_body = b""
+        elif callable(body_fn):
             raw_body = bytes(await body_fn())
         elif scope is not None and hasattr(scope, "body_bytes"):
             raw_body = bytes(scope.body_bytes())
@@ -173,14 +238,32 @@ class AsgiMcpApp:
             )
         )
         responses_mod = import_optional("starlette.responses")
-        if responses_mod is not None and hasattr(responses_mod, "Response"):
-            return responses_mod.Response(
-                content=resp.body,
-                status_code=resp.status,
-                headers=resp.headers,
-                media_type=resp.headers.get("content-type", "application/json"),
-            )
-        return resp.body
+        if responses_mod is not None:
+            if resp.stream is not None and hasattr(responses_mod, "StreamingResponse"):
+                stream = resp.stream
+
+                async def _starlette_stream() -> AsyncIterator[bytes]:
+                    try:
+                        async for chunk in stream:
+                            yield chunk
+                    finally:
+                        await self._close_async_stream(stream)
+
+                return responses_mod.StreamingResponse(
+                    _starlette_stream(),
+                    status_code=resp.status,
+                    headers=resp.headers,
+                    media_type=resp.headers.get("Content-Type")
+                    or resp.headers.get("content-type", "text/event-stream"),
+                )
+            if hasattr(responses_mod, "Response"):
+                return responses_mod.Response(
+                    content=resp.body,
+                    status_code=resp.status,
+                    headers=resp.headers,
+                    media_type=resp.headers.get("Content-Type") or resp.headers.get("content-type", "application/json"),
+                )
+        return resp.stream if resp.stream is not None else resp.body
 
     @staticmethod
     def _scope_value(scope: Any, key: str) -> Any:
@@ -224,6 +307,48 @@ class AsgiMcpApp:
         return b"".join(chunks)
 
 
+class _WsgiStreamIterator:
+    """Closeable synchronous PEP 3333 iterator bridging an async SSE stream via Portal."""
+
+    def __init__(self, stream: AsyncIterator[bytes], portal: Portal) -> None:
+        self._stream = stream
+        self._portal = portal
+        self._closed = False
+
+    def __iter__(self) -> "_WsgiStreamIterator":
+        return self
+
+    def __next__(self) -> bytes:
+        if self._closed:
+            raise StopIteration
+        try:
+            chunk = self._portal.call(self._next_chunk)
+        except BaseException:
+            self.close()
+            raise
+        if chunk is None:
+            self.close()
+            raise StopIteration
+        return chunk
+
+    async def _next_chunk(self) -> bytes | None:
+        try:
+            chunk = await self._stream.__anext__()
+        except StopAsyncIteration:
+            return None
+        return chunk if isinstance(chunk, bytes) else bytes(chunk)
+
+    def close(self) -> None:
+        """Close the underlying async stream immediately."""
+        if self._closed:
+            return
+        self._closed = True
+        aclose = getattr(self._stream, "aclose", None)
+        if callable(aclose):
+            with contextlib.suppress(BaseException):
+                self._portal.call(aclose)
+
+
 class WsgiMcpApp:
     """Shared PEP 3333 WSGI application and synchronous Request adapter over MCPCore.
 
@@ -235,6 +360,11 @@ class WsgiMcpApp:
         self.core = core
         self.config: MCPConfig = core.config
         self._portal = portal
+
+    def iter_stream(self, stream: AsyncIterator[bytes]) -> _WsgiStreamIterator:
+        """Wrap an async byte stream into a closeable PEP 3333 WSGI iterator."""
+        portal = self._portal if self._portal is not None else PortalProvider.default()
+        return _WsgiStreamIterator(stream, portal)
 
     def handle_http(
         self,
@@ -265,6 +395,25 @@ class WsgiMcpApp:
         default_path: str | None = None,
     ) -> Response:
         """Execute an MCP HTTP request from a native ``Request`` or raw ``bytes``."""
+        resp, req_id = self._dispatch_vertebra_http(
+            request,
+            default_method=default_method,
+            default_path=default_path,
+        )
+        return Response(
+            status=resp.status,
+            headers=list(resp.headers.items()),
+            body=resp.body,
+            request_id=req_id,
+        )
+
+    def _dispatch_vertebra_http(
+        self,
+        request: Request | bytes,
+        *,
+        default_method: str = "POST",
+        default_path: str | None = None,
+    ) -> tuple[McpHttpResponse, int]:
         resolved_path = default_path or self.config.path
         if isinstance(request, Request):
             method = request.method.upper()
@@ -281,14 +430,11 @@ class WsgiMcpApp:
             req_id = 0
             context = AgentContext()
         resp = self.handle_http(method, path, headers, body, context=context)
-        return Response(
-            status=resp.status,
-            headers=list(resp.headers.items()),
-            body=resp.body,
-            request_id=req_id,
-        )
+        return resp, req_id
 
-    def handle_flask_view(self, request: Request | Any = None) -> Response | tuple[bytes, int, dict[str, str]]:
+    def handle_flask_view(
+        self, request: Request | Any = None
+    ) -> Response | tuple[bytes | Iterable[bytes], int, dict[str, str]] | Any:
         """Handle a Flask view invocation via either Vertebra FastPath or ``flask.request``."""
         if isinstance(request, Request):
             return self.handle_vertebra_request(request)
@@ -303,6 +449,8 @@ class WsgiMcpApp:
             )
             context = AgentContext.from_headers(headers, identity_source=self.config.identity_source)
             resp = self.handle_http(method, path, headers, bytes(request.body or b""), context=context)
+            if resp.stream is not None:
+                return self.iter_stream(resp.stream), resp.status, resp.headers
             return resp.body, resp.status, resp.headers
 
         flask_mod = import_optional("flask")
@@ -316,20 +464,27 @@ class WsgiMcpApp:
         else:
             raise MissingDependencyError("flask", install_package="flask")
         resp = self.handle_http(method, path, headers, raw, context=context)
+        if resp.stream is not None:
+            stream_iter = self.iter_stream(resp.stream)
+            if hasattr(flask_mod, "Response"):
+                return flask_mod.Response(stream_iter, status=resp.status, headers=resp.headers)
+            return stream_iter, resp.status, resp.headers
         return resp.body, resp.status, resp.headers
 
     def __call__(
         self,
         environ: WsgiEnviron | Mapping[str, Any],
         start_response: Callable[..., Any],
-    ) -> list[bytes]:
+    ) -> Iterable[bytes]:
         """Handle a PEP 3333 WSGI request and invoke ``start_response``."""
         if isinstance(environ, WsgiEnviron):
-            vtb_resp = self.handle_vertebra_request(environ.request())
-            hdrs = [(k.decode("latin-1"), v.decode("latin-1")) for k, v in vtb_resp.headers]
-            status_line = f"{vtb_resp.status} OK" if vtb_resp.status < 400 else f"{vtb_resp.status} ERROR"
+            resp, _ = self._dispatch_vertebra_http(environ.request())
+            hdrs = list(resp.headers.items())
+            status_line = f"{resp.status} OK" if resp.status < 400 else f"{resp.status} ERROR"
             start_response(status_line, hdrs)
-            return [bytes(vtb_resp.body)]
+            if resp.stream is not None:
+                return self.iter_stream(resp.stream)
+            return [resp.body]
 
         method = str(environ.get("REQUEST_METHOD", "POST") or "POST").upper()
         path = str(environ.get("PATH_INFO", self.config.path) or self.config.path)
@@ -340,6 +495,8 @@ class WsgiMcpApp:
         resp = self.handle_http(method, path, headers, raw, context=context)
         status_line = f"{resp.status} OK" if resp.status < 400 else f"{resp.status} ERROR"
         start_response(status_line, list(resp.headers.items()))
+        if resp.stream is not None:
+            return self.iter_stream(resp.stream)
         return [resp.body]
 
     @staticmethod

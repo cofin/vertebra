@@ -6,21 +6,24 @@ decorators for grouping tools, prompts, and resources with shared guards and ins
 
 import functools
 import inspect
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 from vertebra.agent.core.guards import GuardChain, GuardProtocol
 from vertebra.agent.core.schema import Tool
 from vertebra.agent.mcp.models import (
+    McpIcon,
     PromptArgument,
     PromptEntry,
     PromptMessage,
     ResourceEntry,
     ResourceTemplateEntry,
     TextContent,
+    coerce_mcp_icons,
 )
 
 __all__ = [
+    "UI_VISIBILITY_VALUES",
     "PromptController",
     "SkillController",
     "mcp_prompt",
@@ -29,6 +32,8 @@ __all__ = [
     "prompt",
     "resource",
 ]
+
+UI_VISIBILITY_VALUES: frozenset[str] = frozenset({"model", "app"})
 
 
 def mcp_tool(
@@ -40,6 +45,9 @@ def mcp_tool(
     timeout_seconds: float | None = None,
     annotations: dict[str, Any] | None = None,
     webmcp: bool = False,
+    meta: Mapping[str, Any] | None = None,
+    ui_resource_uri: str | None = None,
+    ui_visibility: Sequence[str] | None = None,
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """Decorator marking a route handler or function as an explicit MCP tool without wrapping its type.
 
@@ -52,7 +60,35 @@ def mcp_tool(
         annotations: Optional metadata dictionary attached to the tool descriptor.
         webmcp: List the tool in the browser WebMCP manifest. Defaults to `False`; browser
             exposure is opt-in per tool.
+        meta: Optional extension ``_meta`` payload attached to the tool specification.
+        ui_resource_uri: Optional SEP-1865 ``ui://`` resource URI merged into ``_meta['ui']['resourceUri']``.
+        ui_visibility: Optional sequence of SEP-1865 visibility targets (`'model'`, `'app'`).
     """
+    validated_visibility: list[str] | None = None
+    if ui_visibility is not None:
+        if isinstance(ui_visibility, (str, bytes)):
+            raise ValueError("ui_visibility must be a sequence of 'model' and/or 'app'")
+        seen_vis: list[str] = []
+        for token in ui_visibility:
+            if not isinstance(token, str) or token not in UI_VISIBILITY_VALUES:
+                raise ValueError(
+                    f"Invalid ui_visibility value {token!r}; expected entries from {sorted(UI_VISIBILITY_VALUES)}"
+                )
+            if token not in seen_vis:
+                seen_vis.append(token)
+        validated_visibility = seen_vis
+
+    merged_meta: dict[str, Any] = dict(meta) if meta is not None else {}
+    if ui_resource_uri is not None or validated_visibility:
+        raw_ui = merged_meta.get("ui")
+        ui_block: dict[str, Any] = dict(raw_ui) if isinstance(raw_ui, Mapping) else {}
+        if ui_resource_uri is not None:
+            ui_block["resourceUri"] = ui_resource_uri
+        if validated_visibility:
+            ui_block["visibility"] = validated_visibility
+        if ui_block:
+            merged_meta["ui"] = ui_block
+    final_meta = merged_meta if merged_meta else None
 
     def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
         target_fn: Any = fn
@@ -64,10 +100,51 @@ def mcp_tool(
             "timeout_seconds": timeout_seconds,
             "annotations": dict(annotations or {}),
             "webmcp": webmcp,
+            "meta": final_meta,
         }
         return fn
 
     return decorator
+
+
+def _attach_resource_meta(
+    fn: Callable[..., Any],
+    *,
+    uri: str,
+    name: str | None,
+    description: str | None,
+    mime_type: str,
+    title: str | None,
+    icons: Sequence[McpIcon | Mapping[str, Any]] | None,
+    meta: Mapping[str, Any] | None,
+    allow_template: bool,
+) -> Callable[..., Any]:
+    res_name = name or fn.__name__
+    res_desc = description or inspect.getdoc(fn) or ""
+    normalized_icons = coerce_mcp_icons(icons)
+    resolved_meta = dict(meta) if meta is not None else None
+    target_fn: Any = fn
+    if allow_template and "{" in uri and "}" in uri:
+        target_fn._mcp_resource_template = {
+            "uriTemplate": uri,
+            "name": res_name,
+            "title": title,
+            "description": res_desc,
+            "mimeType": mime_type,
+            "icons": normalized_icons,
+            "meta": resolved_meta,
+        }
+    else:
+        target_fn._mcp_resource = {
+            "uri": uri,
+            "name": res_name,
+            "title": title,
+            "description": res_desc,
+            "mimeType": mime_type,
+            "icons": normalized_icons,
+            "meta": resolved_meta,
+        }
+    return fn
 
 
 def mcp_resource(
@@ -75,28 +152,25 @@ def mcp_resource(
     name: str | None = None,
     description: str | None = None,
     mime_type: str = "text/plain",
+    *,
+    title: str | None = None,
+    icons: Sequence[McpIcon | Mapping[str, Any]] | None = None,
+    meta: Mapping[str, Any] | None = None,
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """Decorator marking a route handler or method as an MCP resource or resource template."""
 
     def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
-        res_name = name or fn.__name__
-        res_desc = description or inspect.getdoc(fn) or ""
-        target_fn: Any = fn
-        if "{" in uri and "}" in uri:
-            target_fn._mcp_resource_template = {
-                "uriTemplate": uri,
-                "name": res_name,
-                "description": res_desc,
-                "mimeType": mime_type,
-            }
-        else:
-            target_fn._mcp_resource = {
-                "uri": uri,
-                "name": res_name,
-                "description": res_desc,
-                "mimeType": mime_type,
-            }
-        return fn
+        return _attach_resource_meta(
+            fn,
+            uri=uri,
+            name=name,
+            description=description,
+            mime_type=mime_type,
+            title=title,
+            icons=icons,
+            meta=meta,
+            allow_template=True,
+        )
 
     return decorator
 
@@ -136,20 +210,25 @@ def resource(
     name: str | None = None,
     description: str | None = None,
     mime_type: str = "text/plain",
+    *,
+    title: str | None = None,
+    icons: Sequence[McpIcon | Mapping[str, Any]] | None = None,
+    meta: Mapping[str, Any] | None = None,
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """Decorator marking a method as an MCP resource provider."""
 
     def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
-        res_name = name or fn.__name__
-        res_desc = description or inspect.getdoc(fn) or ""
-        target_fn: Any = fn
-        target_fn._mcp_resource = {
-            "uri": uri,
-            "name": res_name,
-            "description": res_desc,
-            "mimeType": mime_type,
-        }
-        return fn
+        return _attach_resource_meta(
+            fn,
+            uri=uri,
+            name=name,
+            description=description,
+            mime_type=mime_type,
+            title=title,
+            icons=icons,
+            meta=meta,
+            allow_template=False,
+        )
 
     return decorator
 
@@ -267,6 +346,7 @@ class SkillController(PromptController):
                             webmcp=bool(meta.get("webmcp", False)),
                             annotations=dict(meta.get("annotations", {})),
                             guards=tuple(self.guards),
+                            meta=meta.get("meta"),
                         )
                     )
         return tools
@@ -282,8 +362,11 @@ class SkillController(PromptController):
                     ResourceTemplateEntry(
                         uriTemplate=meta["uriTemplate"],
                         name=meta["name"],
+                        title=meta.get("title"),
                         description=meta["description"],
                         mimeType=meta["mimeType"],
+                        icons=meta.get("icons", ()),
+                        meta=meta.get("meta"),
                         reader=val,
                     )
                 )
@@ -301,8 +384,11 @@ class SkillController(PromptController):
                     ResourceEntry(
                         uri=meta["uri"],
                         name=meta["name"],
+                        title=meta.get("title"),
                         description=meta["description"],
                         mimeType=meta["mimeType"],
+                        icons=meta.get("icons", ()),
+                        meta=meta.get("meta"),
                         reader=val,
                     )
                 )

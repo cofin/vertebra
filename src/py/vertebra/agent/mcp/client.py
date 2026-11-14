@@ -95,17 +95,18 @@ def decode_mcp_header_value(value: str) -> str:
 def mcp_request_headers(
     payload: bytes | Mapping[str, Any],
     *,
-    protocol_version: str = MCP_PROTOCOL_VERSION,
+    protocol_version: str | None = MCP_PROTOCOL_VERSION,
     session_id: str | None = None,
     bearer_token: str | None = None,
     trace_context: Any | None = None,
 ) -> dict[str, str]:
-    """Derive standard MCP 2026-07-28 request headers from a JSON-RPC frame."""
+    """Derive standard MCP 2026-07-28 or legacy request headers from a JSON-RPC frame."""
     headers: dict[str, str] = {
         "Content-Type": "application/json",
         "Accept": "application/json, text/event-stream",
-        "MCP-Protocol-Version": protocol_version,
     }
+    if protocol_version is not None:
+        headers["MCP-Protocol-Version"] = protocol_version
     if session_id:
         headers["Mcp-Session-Id"] = session_id
     if bearer_token:

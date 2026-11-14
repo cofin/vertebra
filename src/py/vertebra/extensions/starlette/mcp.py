@@ -16,6 +16,7 @@ from vertebra.agent.mcp.models import MCPConfig
 from vertebra.agent.mcp.registry import MCPRegistry, ToolRegistry
 from vertebra.agent.mcp.routes import AsgiMcpApp, render_well_known_mcp_json
 from vertebra.agent.mcp.service import MCPCore
+from vertebra.agent.mcp.skills import MCPSkillsConfig, SkillCatalog
 from vertebra.agent.mcp.webmcp import (
     WebMCPConfig,
     WebMCPManifest,
@@ -51,6 +52,7 @@ def mount_mcp_routes(
     registry: ToolRegistry | None = None,
     config: MCPConfig | None = None,
     webmcp_config: WebMCPConfig | None = None,
+    skills: MCPSkillsConfig | SkillCatalog | None = None,
 ) -> MCPRegistry:
     """Discover @mcp_tool/@mcp_resource/@mcp_prompt on ``app`` routes and mount shared AsgiMcpApp."""
     resolved_config = config or MCPConfig(webmcp=webmcp_config)
@@ -60,7 +62,9 @@ def mount_mcp_routes(
     resolved_registry = registry if isinstance(registry, MCPRegistry) else MCPRegistry()
     resolved_registry.discover_app_routes(app)
 
-    core = MCPCore(config=resolved_config, registry=resolved_registry)
+    resolved_skills = SkillCatalog.coerce(skills)
+    core = MCPCore(config=resolved_config, registry=resolved_registry, skill_catalog=resolved_skills)
+    core.validate()
     mcp_app = AsgiMcpApp(core)
 
     state = getattr(app, "state", None)
@@ -101,7 +105,12 @@ def mount_mcp_routes(
                 )
 
         if resolved_config.expose_well_known and resolved_config.well_known_path not in existing_paths:
-            well_known_bytes = render_well_known_mcp_json(resolved_config, resolved_registry)
+            skill_names = [s.name for s in resolved_skills.list_skills()] if resolved_skills is not None else None
+            well_known_bytes = render_well_known_mcp_json(
+                resolved_config,
+                resolved_registry,
+                skill_names=skill_names,
+            )
 
             async def _serve_well_known(_request: Any) -> Any:
                 if responses_mod is not None and hasattr(responses_mod, "Response"):

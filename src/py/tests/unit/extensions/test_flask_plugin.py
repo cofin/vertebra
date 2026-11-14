@@ -405,7 +405,10 @@ def test_flask_mcp_shares_wsgi_mcp_app_and_reuses_persistent_portal() -> None:
     init_req = Request.from_parts(
         method="POST",
         path="/mcp",
-        headers=[(b"content-type", b"application/json")],
+        headers=[
+            (b"content-type", b"application/json"),
+            (b"mcp-protocol-version", b"2026-07-28"),
+        ],
         body=b'{"jsonrpc":"2.0","id":2,"method":"initialize"}',
     )
     init_resp = plugin.handle_request(init_req)
