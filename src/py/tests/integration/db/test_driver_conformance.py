@@ -94,8 +94,6 @@ from vertebra.typing import FrozenBaseStruct, MissingDependencyError, reset_depe
 from vertebra.utils.module_loader import ensure_module, import_optional
 from vertebra.utils.serializers import decode_json, encode_json
 
-_DUCKDB_SKIP_REASON = "duckdb publishes no free-threaded wheel; DuckDB tests run on GIL interpreters"
-
 
 class _RollbackSentinelError(RuntimeError):
     """Sentinel exception used to verify transaction rollback semantics."""
@@ -464,6 +462,21 @@ ENGINE_SPECS: tuple[EngineConformanceSpec, ...] = (
         container_fixture="vtb_mysql_config",
     ),
     EngineConformanceSpec(
+        engine="mariadb",
+        config_cls=MySQLConfig,
+        sync_driver_cls=SyncMySQLDriver,
+        async_driver_cls=AsyncMySQLDriver,
+        sample_url="mariadb://vtb:secret@127.0.0.1:3306/vtb",
+        placeholder_style="qmark",
+        items_ddl=_MYSQL_ITEMS_DDL,
+        types_ddl=_MYSQL_TYPES_DDL,
+        supports_pipeline=True,
+        native_extension_module="vertebra._mysql",
+        pending_flow_id=None,
+        env_dsn_vars=("VERTEBRA_CONFORMANCE_MARIADB_DSN",),
+        container_fixture="vtb_mariadb_config",
+    ),
+    EngineConformanceSpec(
         engine="mssql",
         config_cls=MSSQLConfig,
         sync_driver_cls=SyncMSSQLDriver,
@@ -489,7 +502,6 @@ ENGINE_SPECS: tuple[EngineConformanceSpec, ...] = (
         types_ddl=_DUCKDB_TYPES_DDL,
         supports_pipeline=True,
         native_extension_module="vertebra._duckdb",
-        env_dsn_vars=("VERTEBRA_CONFORMANCE_DUCKDB_DSN",),
     ),
     EngineConformanceSpec(
         engine="bigquery",
@@ -764,7 +776,10 @@ def _resolve_live_config(
         env_dsn = os.environ.get(env_key, "").strip()
         if env_dsn:
             return spec.config_cls.from_url(env_dsn)
-    if spec.container_fixture is not None and os.environ.get(_CONFORMANCE_DOCKER_ENV) == "1":
+    selected_engines = _parse_conformance_env_filter(os.environ, "VERTEBRA_CONFORMANCE_ENGINES")
+    if spec.container_fixture is not None and (
+        os.environ.get(_CONFORMANCE_DOCKER_ENV) == "1" or spec.engine in selected_engines
+    ):
         fixture_cfg = request.getfixturevalue(spec.container_fixture)
         assert isinstance(fixture_cfg, BaseDatabaseConfig)
         return fixture_cfg
@@ -773,6 +788,8 @@ def _resolve_live_config(
         loopback_server = mysql_mod.MySQLWireTestServer()
         request.addfinalizer(loopback_server.close)
         return MySQLConfig.from_url(loopback_server.dsn)
+    if spec.engine == "mariadb":
+        pytest.skip("MariaDB conformance requires VERTEBRA_CONFORMANCE_MARIADB_DSN or VERTEBRA_CONFORMANCE_DOCKER=1")
     if spec.engine == "mssql":
         pytest.skip("MSSQL conformance requires VERTEBRA_CONFORMANCE_MSSQL_DSN or VERTEBRA_CONFORMANCE_DOCKER=1")
     if spec.engine == "oracle":

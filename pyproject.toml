@@ -295,6 +295,8 @@ known-first-party = ["vertebra"]
 testpaths = ["src/py/tests"]
 pythonpath = [".", "src/py"]
 markers = [
+    "conformance(engine): mark integration test with its target conformance database engine",
+    "driver_engine(engine): mark integration test with its target database driver engine",
     "postgres_benchmark: live PostgreSQL comparative benchmark suite against psycopg and asyncpg",
 ]
 
