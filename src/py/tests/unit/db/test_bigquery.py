@@ -540,11 +540,8 @@ async def test_bigquery_embedder_and_datafusion_registration(monkeypatch: pytest
 
         ctx = None if import_optional("datafusion") is not None else _BigQuerySessionContext()
         engine = DataFusionEngine(ctx=ctx)
-        engine.register_bigquery_query(
-            "bq_metrics",
-            sync_driver,
-            "SELECT id, name, score FROM metrics",
-        )
+        cursor = sync_driver.select_to_arrow("SELECT id, name, score FROM metrics")
+        engine.register_arrow_table("bq_metrics", cursor)
         rows = engine.execute_dicts("SELECT id, name FROM bq_metrics WHERE id = 1")
         assert rows == [{"id": 1, "name": "alpha"}]
         with pytest.raises(Exception, match="missing_bq_table"):
@@ -1033,3 +1030,89 @@ async def test_bigquery_pushdown_rejects_invalid_vector_rows(bad_vec: list[Any])
     )
     with pytest.raises(DataError, match="BigQuery embedding row"):
         await bad_embedder.embed_documents(["alpha"])
+
+
+@pytest.mark.parametrize("symbol", ["ObjectRef", "ObjectTableConfig"])
+def test_bigquery_lazy_package_exports_present(symbol: str) -> None:
+    """Verify package root exports ObjectRef and ObjectTableConfig lazily."""
+    import vertebra.db.adapters.bigquery as bq_pkg
+
+    assert hasattr(bq_pkg, symbol)
+    assert getattr(bq_pkg, symbol) is not None
+
+
+@pytest.mark.parametrize("symbol", ["ObjectRef", "ObjectTableConfig", "BigQueryTableIdentifier"])
+def test_bigquery_config_module_rejects_moved_symbols(symbol: str) -> None:
+    """Verify bigquery.config does not export or retain shims for moved domain symbols."""
+    import vertebra.db.adapters.bigquery.config as bq_config
+
+    with pytest.raises(AttributeError):
+        getattr(bq_config, symbol)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+async def test_bigquery_object_table_hydration_and_presigning(
+    tmp_path: Path,
+    asynchronous: bool,
+) -> None:
+    """Verify ObjectTableConfig and module functions hydrate and presign ObjectRef entries."""
+    from vertebra.db.adapters.bigquery.object_tables import (
+        ObjectTableConfig,
+        hydrate_object_refs_async,
+        hydrate_object_refs_sync,
+    )
+    from vertebra.storage import SigningConfig, SyncObjectStore
+
+    signing = SigningConfig(
+        provider="hmac",
+        hmac_secret="test-secret-key-32-bytes-minimum!",
+        endpoint="https://storage.example.com",
+    )
+    store = SyncObjectStore(f"file://{tmp_path}", signing=signing)
+    raw_rows = [
+        {
+            "uri": "gs://test-bucket/docs/report.pdf",
+            "generation": 101,
+            "content_type": "application/pdf",
+            "size": 2048,
+            "md5_hash": "abc123md5",
+            "updated": "2026-11-14T00:00:00Z",
+        },
+        {
+            "uri": "gs://test-bucket/images/logo.png",
+            "generation": 102,
+            "content_type": "image/png",
+            "size": 4096,
+            "md5_hash": "def456md5",
+            "updated": "2026-11-14T01:00:00Z",
+        },
+    ]
+    cfg = ObjectTableConfig(
+        table_name="analytics.docs_obj",
+        connection_id="us.gcs-conn",
+        uris=("gs://test-bucket/docs/*",),
+    )
+    if asynchronous:
+        async_store = store.to_async()
+        try:
+            refs = await cfg.hydrate_object_refs_async(raw_rows, async_store)
+            assert len(refs) == 2
+            assert refs[0].signed_url is not None
+            assert refs[0].uri == "gs://test-bucket/docs/report.pdf"
+            assert refs[0].size == 2048
+            fn_refs = await hydrate_object_refs_async(refs, async_store)
+            assert len(fn_refs) == 2
+            assert fn_refs[1].signed_url is not None
+        finally:
+            async_store.close()
+    else:
+        refs = cfg.hydrate_object_refs_sync(raw_rows, store)
+        assert len(refs) == 2
+        assert refs[0].signed_url is not None
+        assert refs[0].uri == "gs://test-bucket/docs/report.pdf"
+        assert refs[0].size == 2048
+        fn_refs = hydrate_object_refs_sync(refs, store)
+        assert len(fn_refs) == 2
+        assert fn_refs[1].signed_url is not None
+    store.close()

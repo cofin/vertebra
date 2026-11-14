@@ -7,8 +7,9 @@ import re
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any, cast
 
-from vertebra.db.adapters.spanner.config import SpannerConfig, StalenessBound
+from vertebra.db.adapters.spanner.config import SpannerConfig
 from vertebra.db.adapters.spanner.driver import AsyncSpannerDriver, SyncSpannerDriver
+from vertebra.db.adapters.spanner.mutations import StalenessBound
 from vertebra.db.driver import AsyncDatabaseDriver
 from vertebra.db.registry import DatabaseRegistry, provide_driver
 from vertebra.typing import ToolPolicyError, ToolProvider

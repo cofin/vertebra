@@ -2846,3 +2846,33 @@ def test_oracle_notify_config_validates_wait_timeout_seconds(
     else:
         with pytest.raises(ValueError, match="wait_timeout_seconds"):
             OracleNotifyConfig(wait_timeout_seconds=wait_timeout_seconds)
+
+
+@pytest.mark.parametrize(
+    ("symbol_name", "target_module", "expected_module"),
+    [
+        ("SyncOracleDriver", "vertebra.db.adapters.oracle", "vertebra.db.adapters.oracle._sync"),
+        ("SyncOracleDriver", "vertebra.db.adapters.oracle.driver", "vertebra.db.adapters.oracle._sync"),
+        ("SyncOracleDriver", "vertebra.db.adapters.oracle._sync", "vertebra.db.adapters.oracle._sync"),
+        ("AsyncOracleDriver", "vertebra.db.adapters.oracle", "vertebra.db.adapters.oracle._async"),
+        ("AsyncOracleDriver", "vertebra.db.adapters.oracle.driver", "vertebra.db.adapters.oracle._async"),
+        ("AsyncOracleDriver", "vertebra.db.adapters.oracle._async", "vertebra.db.adapters.oracle._async"),
+        ("SyncOraclePipeline", "vertebra.db.adapters.oracle", "vertebra.db.adapters.oracle.pipeline"),
+        ("SyncOraclePipeline", "vertebra.db.adapters.oracle.driver", "vertebra.db.adapters.oracle.pipeline"),
+        ("SyncOraclePipeline", "vertebra.db.adapters.oracle.pipeline", "vertebra.db.adapters.oracle.pipeline"),
+        ("AsyncOraclePipeline", "vertebra.db.adapters.oracle", "vertebra.db.adapters.oracle.pipeline"),
+        ("AsyncOraclePipeline", "vertebra.db.adapters.oracle.driver", "vertebra.db.adapters.oracle.pipeline"),
+        ("AsyncOraclePipeline", "vertebra.db.adapters.oracle.pipeline", "vertebra.db.adapters.oracle.pipeline"),
+    ],
+)
+def test_oracle_driver_and_pipeline_resolution_identity(
+    symbol_name: str,
+    target_module: str,
+    expected_module: str,
+) -> None:
+    """Verify Oracle sync/async driver and pipeline classes resolve identically across import paths."""
+    import importlib
+
+    mod = importlib.import_module(target_module)
+    exp_mod = importlib.import_module(expected_module)
+    assert getattr(mod, symbol_name) is getattr(exp_mod, symbol_name)

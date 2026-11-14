@@ -783,3 +783,33 @@ async def test_duckdb_driver_closes_client_when_initial_required_secret_refresh_
             await tx_driver.select("SELECT 1 AS ok")
     assert tx_proxy.close_calls == 1
     assert tx_driver._client is None
+
+
+@pytest.mark.parametrize(
+    ("symbol_name", "target_module", "expected_module"),
+    [
+        ("SyncDuckDBDriver", "vertebra.db.adapters.duckdb", "vertebra.db.adapters.duckdb._sync"),
+        ("SyncDuckDBDriver", "vertebra.db.adapters.duckdb.driver", "vertebra.db.adapters.duckdb._sync"),
+        ("SyncDuckDBDriver", "vertebra.db.adapters.duckdb._sync", "vertebra.db.adapters.duckdb._sync"),
+        ("AsyncDuckDBDriver", "vertebra.db.adapters.duckdb", "vertebra.db.adapters.duckdb._async"),
+        ("AsyncDuckDBDriver", "vertebra.db.adapters.duckdb.driver", "vertebra.db.adapters.duckdb._async"),
+        ("AsyncDuckDBDriver", "vertebra.db.adapters.duckdb._async", "vertebra.db.adapters.duckdb._async"),
+        ("SyncDuckDBPipeline", "vertebra.db.adapters.duckdb", "vertebra.db.adapters.duckdb.pipeline"),
+        ("SyncDuckDBPipeline", "vertebra.db.adapters.duckdb.pipeline", "vertebra.db.adapters.duckdb.pipeline"),
+        ("AsyncDuckDBPipeline", "vertebra.db.adapters.duckdb", "vertebra.db.adapters.duckdb.pipeline"),
+        ("AsyncDuckDBPipeline", "vertebra.db.adapters.duckdb.pipeline", "vertebra.db.adapters.duckdb.pipeline"),
+        ("_SyncDuckDBCursor", "vertebra.db.adapters.duckdb.driver", "vertebra.db.adapters.duckdb._sync"),
+        ("_AsyncDuckDBCursor", "vertebra.db.adapters.duckdb.driver", "vertebra.db.adapters.duckdb._async"),
+    ],
+)
+def test_duckdb_driver_and_pipeline_resolution_identity(
+    symbol_name: str,
+    target_module: str,
+    expected_module: str,
+) -> None:
+    """Verify DuckDB sync/async driver and pipeline classes resolve identically across import paths."""
+    import importlib
+
+    mod = importlib.import_module(target_module)
+    exp_mod = importlib.import_module(expected_module)
+    assert getattr(mod, symbol_name) is getattr(exp_mod, symbol_name)

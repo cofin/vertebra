@@ -17,7 +17,7 @@ from vertebra.db.driver import DataError
 from vertebra.db.driver._common import ORACLE_DIALECT_TAG
 from vertebra.db.rls import TenantScopeConfig
 from vertebra.typing import VertebraError
-from vertebra.utils.module_loader import import_optional
+from vertebra.utils.module_loader import ensure_module, import_optional
 from vertebra.utils.serializers import decode_json, encode_json_bytes
 from vertebra.utils.text import validate_identifier
 
@@ -34,23 +34,6 @@ __all__ = (
     "ORACLE_VECTOR_VERSION",
     "OSON_MAGIC",
     "OracleCore",
-    "decode_oson",
-    "decode_oson_payload",
-    "decode_tns_packet",
-    "decode_ttc_session_attrs",
-    "decode_vector_binary",
-    "decode_vector_f32",
-    "decode_vector_f64",
-    "decode_vector_i8",
-    "encode_oson",
-    "encode_oson_payload",
-    "encode_tns_connect_packet",
-    "encode_tns_data_packet",
-    "encode_ttc_session_attrs",
-    "encode_vector_binary",
-    "encode_vector_f32",
-    "encode_vector_f64",
-    "encode_vector_i8",
 )
 
 ORACLE_VECTOR_MAGIC = 0xDB
@@ -749,6 +732,37 @@ class OracleCore:
         return rewritten, seq
 
     @staticmethod
+    def is_dml_or_plsql(sql: str) -> bool:
+        """Return `True` when `sql` begins with a DML, DDL, or PL/SQL keyword rather than `SELECT`/`WITH`."""
+        trimmed = sql.lstrip()
+        while trimmed.startswith("/*"):
+            end = trimmed.find("*/")
+            if end == -1:
+                break
+            trimmed = trimmed[end + 2 :].lstrip()
+        upper = trimmed.upper()
+        return not (upper.startswith("SELECT") or upper.startswith("WITH"))
+
+    @staticmethod
+    def is_fatal_transport_error(exc: BaseException) -> bool:
+        """Return `True` when `exc` indicates a broken transport session (`08006` or fatal ORA codes)."""
+        sqlstate = getattr(exc, "sqlstate", None)
+        if sqlstate == "08006":
+            return True
+        vendor_code = getattr(exc, "vendor_code", None)
+        return vendor_code in (3113, 3114, 3135, 12537)
+
+    @staticmethod
+    def require_native_module() -> Any:
+        """Import and return the native `vertebra._oracle` extension module."""
+        return ensure_module(
+            "vertebra._oracle",
+            package="vertebra-core[oracle]",
+            install_package="vertebra-core[oracle]",
+            extra="oracle",
+        )
+
+    @staticmethod
     def _data_error(message: str) -> DataError:
         err = DataError(message)
         err.sqlstate = "22000"
@@ -770,22 +784,3 @@ class OracleCore:
         if fmt != expected_fmt:
             raise OracleCore._data_error(f"Oracle VECTOR format mismatch: expected {expected_fmt}, got {fmt}")
         return dims, memoryview(buf)[8:]
-
-
-encode_tns_connect_packet = OracleCore.encode_tns_connect_packet
-encode_tns_data_packet = OracleCore.encode_tns_data_packet
-decode_tns_packet = OracleCore.decode_tns_packet
-encode_ttc_session_attrs = OracleCore.encode_ttc_session_attrs
-decode_ttc_session_attrs = OracleCore.decode_ttc_session_attrs
-encode_vector_f32 = OracleCore.encode_vector_f32
-decode_vector_f32 = OracleCore.decode_vector_f32
-encode_vector_f64 = OracleCore.encode_vector_f64
-decode_vector_f64 = OracleCore.decode_vector_f64
-encode_vector_i8 = OracleCore.encode_vector_i8
-decode_vector_i8 = OracleCore.decode_vector_i8
-encode_vector_binary = OracleCore.encode_vector_binary
-decode_vector_binary = OracleCore.decode_vector_binary
-encode_oson_payload = OracleCore.encode_oson_payload
-decode_oson_payload = OracleCore.decode_oson_payload
-encode_oson = OracleCore.encode_oson
-decode_oson = OracleCore.decode_oson

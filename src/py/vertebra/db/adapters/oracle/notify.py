@@ -32,15 +32,6 @@ __all__ = (
 _TRANSIENT_ORA_CODES: frozenset[int] = frozenset({3113, 3114, 3135, 4061, 4068, 12170, 12514, 12537, 12541, 12545})
 
 
-def _is_valid_aq_identifier(value: str) -> bool:
-    if not value or len(value) > 128:
-        return False
-    first = value[0]
-    if not (first.isascii() and (first.isalpha() or first == "_")):
-        return False
-    return all(ch.isascii() and (ch.isalnum() or ch in ("_", "$", "#")) for ch in value[1:])
-
-
 def validate_oracle_channel_name(channel: str, *, queue_prefix: str = "VTB_AQ_") -> str:
     """Validate a logical channel or queue name and return its uppercase Oracle AQ queue identifier.
 
@@ -83,6 +74,15 @@ def validate_oracle_channel_name(channel: str, *, queue_prefix: str = "VTB_AQ_")
         err.sqlstate = "42602"
         raise err
     return resolved
+
+
+def _is_valid_aq_identifier(value: str) -> bool:
+    if not value or len(value) > 128:
+        return False
+    first = value[0]
+    if not (first.isascii() and (first.isalpha() or first == "_")):
+        return False
+    return all(ch.isascii() and (ch.isalnum() or ch in ("_", "$", "#")) for ch in value[1:])
 
 
 class OracleNotifyConfig(FrozenBaseStruct, frozen=True, gc=False, kw_only=True):

@@ -131,7 +131,8 @@ duck_cfg = DuckDBConfig(
         ),
     ),
 )
-engine = DataFusionEngine(DataFusionConfig(target_partitions=4))
+engine = DataFusionEngine(DataFusionConfig(mode="in_process", target_partitions=4))
+engine.register_arrow_table("orders", pg_driver.select_to_arrow("SELECT * FROM orders"))
 ```
 
 - **`ArrowCursor`**: Exposes a zero-copy `memoryview` (`buffer_view()`) and Arrow IPC payload over the shared-memory `ShmRegion` without requiring Python Arrow dependencies; materializes `to_arrow_table()`, `to_pyarrow()`, or `to_polars()` when `[arrow]` or `[polars]` is installed, and unlinks the `ShmRegion` deterministically on context-manager exit.

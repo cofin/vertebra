@@ -80,7 +80,7 @@ class DuckDBSecretConfig(FrozenBaseStruct, frozen=True, gc=True):
     def __repr__(self) -> str:
         """Render a debug representation with sensitive secret values redacted."""
         redacted_value = {
-            k: ("<redacted>" if _is_sensitive_secret_key(k) and v not in ("", None) else v)
+            k: ("<redacted>" if self._is_sensitive_secret_key(k) and v not in ("", None) else v)
             for k, v in self.value.items()
         }
         has_provider = self.value_provider is not None
@@ -125,11 +125,11 @@ class DuckDBSecretConfig(FrozenBaseStruct, frozen=True, gc=True):
 
     def to_create_secret_sql(self, dynamic_values: Mapping[str, Any] | None = None) -> str:
         """Render a DuckDB `CREATE [OR REPLACE] [PERSISTENT] SECRET` DDL statement."""
-        secret_name = _validate_duckdb_identifier(self.name, "secret.name")
-        secret_type = _validate_duckdb_identifier(self.secret_type, "secret.secret_type")
+        secret_name = self._validate_identifier(self.name, "secret.name")
+        secret_type = self._validate_identifier(self.secret_type, "secret.secret_type")
         parts = [f"TYPE {secret_type}"]
         if self.provider is not None:
-            provider_ident = _validate_duckdb_identifier(self.provider, "secret.provider")
+            provider_ident = self._validate_identifier(self.provider, "secret.provider")
             parts.append(f"PROVIDER {provider_ident}")
 
         merged_values: dict[str, Any] = dict(self.value)
@@ -143,14 +143,14 @@ class DuckDBSecretConfig(FrozenBaseStruct, frozen=True, gc=True):
         for raw_key, raw_val in merged_values.items():
             if raw_val is None:
                 continue
-            option_key = _validate_duckdb_identifier(str(raw_key), "secret.value_key").upper()
-            if isinstance(raw_val, str) and not raw_val.strip() and _is_sensitive_secret_key(raw_key):
+            option_key = self._validate_identifier(str(raw_key), "secret.value_key").upper()
+            if isinstance(raw_val, str) and not raw_val.strip() and self._is_sensitive_secret_key(raw_key):
                 msg = f"DuckDB secret {secret_name!r} option {option_key} must not be empty or whitespace"
                 raise ImproperConfigurationError(msg)
-            parts.append(f"{option_key} {_format_secret_literal(raw_val, f'secret.{raw_key}')}")
+            parts.append(f"{option_key} {self._format_literal(raw_val, f'secret.{raw_key}')}")
 
         if self.scope is not None:
-            formatted_scope = _format_secret_scope(self.scope)
+            formatted_scope = self._format_scope(self.scope)
             if formatted_scope is not None:
                 parts.append(f"SCOPE {formatted_scope}")
 
@@ -163,6 +163,47 @@ class DuckDBSecretConfig(FrozenBaseStruct, frozen=True, gc=True):
         )
         inner = ", ".join(parts)
         return f"{header} ({inner})"
+
+    @staticmethod
+    def _is_sensitive_secret_key(key: str) -> bool:
+        """Return True when `key` represents credential material that must be redacted and non-blank."""
+        lowered = key.strip().lower()
+        return lowered in _SENSITIVE_SECRET_KEYS or lowered.endswith(("_secret", "_token", "_password", "_key"))
+
+    @staticmethod
+    def _validate_identifier(value: str, field_name: str) -> str:
+        """Validate a single SQL identifier for DuckDB DDL/SET configuration."""
+        DuckDBConfig._reject_nul(value, field_name)
+        cleaned = value.strip()
+        try:
+            return validate_identifier(cleaned, f"DuckDB {field_name}", allow_dots=False)
+        except ValueError as exc:
+            raise InterfaceError(str(exc)) from exc
+
+    @staticmethod
+    def _format_literal(value: Any, field_name: str) -> str:
+        """Format a scalar or sequence DuckDB secret option literal safely."""
+        if isinstance(value, bool):
+            return "true" if value else "false"
+        if isinstance(value, (int, float)):
+            return str(value)
+        if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+            items = [f"'{DuckDBConfig._escape_literal(str(item), field_name)}'" for item in value]
+            return f"[{', '.join(items)}]"
+        return f"'{DuckDBConfig._escape_literal(str(value), field_name)}'"
+
+    @staticmethod
+    def _format_scope(scope: str | Sequence[str]) -> str | None:
+        """Format a single URI prefix or sequence of URI prefixes for `SCOPE`."""
+        if isinstance(scope, str):
+            escaped = DuckDBConfig._escape_literal(scope, "secret.scope")
+            return f"'{escaped}'" if scope else None
+        items = [f"'{DuckDBConfig._escape_literal(str(item), 'secret.scope')}'" for item in scope if str(item)]
+        if not items:
+            return None
+        if len(items) == 1:
+            return items[0]
+        return f"[{', '.join(items)}]"
 
 
 class DuckDBConfig(BaseDatabaseConfig, frozen=True, gc=False):
@@ -217,7 +258,7 @@ class DuckDBConfig(BaseDatabaseConfig, frozen=True, gc=False):
     def resolved_path(self) -> str:
         """Resolve the effective database path from `path` or `database`."""
         target = self.path if self.path != ":memory:" else self.database
-        return _reject_nul(target, "path")
+        return self._reject_nul(target, "path")
 
     def bootstrap_statements(self) -> list[str]:
         """Return post-initialization `SET` and static `CREATE SECRET` statements."""
@@ -245,24 +286,24 @@ class DuckDBConfig(BaseDatabaseConfig, frozen=True, gc=False):
                 f"SET enable_http_metadata_cache = {http_meta_flag}",
             ]
         if self.temp_directory is not None:
-            escaped_dir = _escape_sql_literal(self.temp_directory, "temp_directory")
+            escaped_dir = self._escape_literal(self.temp_directory, "temp_directory")
             stmts.append(f"SET temp_directory = '{escaped_dir}'")
         for key, val in self.config.items():
-            clean_key = _validate_duckdb_identifier(str(key), "config.key")
-            escaped_val = _escape_sql_literal(str(val), "config.value")
+            clean_key = DuckDBSecretConfig._validate_identifier(str(key), "config.key")
+            escaped_val = self._escape_literal(str(val), "config.value")
             stmts.append(f"SET {clean_key} = '{escaped_val}'")
         for secret in self.normalized_secrets():
             if secret.value_provider is None:
                 stmts.append(secret.to_create_secret_sql())
         for stmt in self.init_statements:
-            _reject_nul(stmt, "init_statements")
+            self._reject_nul(stmt, "init_statements")
             stmts.append(stmt)
         return stmts
 
     @classmethod
     def from_url(cls, url: str, **overrides: Any) -> Self:
         """Construct a `DuckDBConfig` from a `duckdb://` URI."""
-        _reject_nul(url, "url")
+        cls._reject_nul(url, "url")
         parsed = urlparse(url)
         if parsed.netloc == ":memory:" or (not parsed.netloc and parsed.path in ("", "/", "/:memory:", ":memory:")):
             db_path = ":memory:"
@@ -286,66 +327,25 @@ class DuckDBConfig(BaseDatabaseConfig, frozen=True, gc=False):
             return None
         return ("duckdb", os.path.abspath(resolved), bool(self.read_only))
 
+    @staticmethod
+    def _reject_nul(value: str, field_name: str) -> str:
+        """Raise `InterfaceError` when `value` contains an embedded NUL byte."""
+        if "\0" in value:
+            msg = f"DuckDB {field_name} must not contain NUL bytes"
+            raise InterfaceError(msg)
+        return value
+
+    @staticmethod
+    def _escape_literal(value: str, field_name: str) -> str:
+        """Reject NUL, CR, and LF characters and double single quotes for SQL literals."""
+        DuckDBConfig._reject_nul(value, field_name)
+        if "\r" in value or "\n" in value:
+            msg = f"DuckDB {field_name} must not contain CR or LF characters"
+            raise InterfaceError(msg)
+        return value.replace("'", "''")
+
 
 def duckdb_bootstrap_statements(config: DuckDBConfig | None = None) -> list[str]:
     """Generate post-init DuckDB `SET` statements for the given `DuckDBConfig`."""
     cfg = config or DuckDBConfig()
     return cfg.bootstrap_statements()
-
-
-def _is_sensitive_secret_key(key: str) -> bool:
-    """Return True when `key` represents credential material that must be redacted and non-blank."""
-    lowered = key.strip().lower()
-    return lowered in _SENSITIVE_SECRET_KEYS or lowered.endswith(("_secret", "_token", "_password", "_key"))
-
-
-def _reject_nul(value: str, field_name: str) -> str:
-    """Raise `InterfaceError` when `value` contains an embedded NUL byte."""
-    if "\0" in value:
-        msg = f"DuckDB {field_name} must not contain NUL bytes"
-        raise InterfaceError(msg)
-    return value
-
-
-def _validate_duckdb_identifier(value: str, field_name: str) -> str:
-    """Validate a single SQL identifier for DuckDB DDL/SET configuration."""
-    _reject_nul(value, field_name)
-    cleaned = value.strip()
-    try:
-        return validate_identifier(cleaned, f"DuckDB {field_name}", allow_dots=False)
-    except ValueError as exc:
-        raise InterfaceError(str(exc)) from exc
-
-
-def _escape_sql_literal(value: str, field_name: str) -> str:
-    """Reject NUL, CR, and LF characters and double single quotes for SQL literals."""
-    _reject_nul(value, field_name)
-    if "\r" in value or "\n" in value:
-        msg = f"DuckDB {field_name} must not contain CR or LF characters"
-        raise InterfaceError(msg)
-    return value.replace("'", "''")
-
-
-def _format_secret_literal(value: Any, field_name: str) -> str:
-    """Format a scalar or sequence DuckDB secret option literal safely."""
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if isinstance(value, (int, float)):
-        return str(value)
-    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-        items = [f"'{_escape_sql_literal(str(item), field_name)}'" for item in value]
-        return f"[{', '.join(items)}]"
-    return f"'{_escape_sql_literal(str(value), field_name)}'"
-
-
-def _format_secret_scope(scope: str | Sequence[str]) -> str | None:
-    """Format a single URI prefix or sequence of URI prefixes for `SCOPE`."""
-    if isinstance(scope, str):
-        escaped = _escape_sql_literal(scope, "secret.scope")
-        return f"'{escaped}'" if scope else None
-    items = [f"'{_escape_sql_literal(str(item), 'secret.scope')}'" for item in scope if str(item)]
-    if not items:
-        return None
-    if len(items) == 1:
-        return items[0]
-    return f"[{', '.join(items)}]"

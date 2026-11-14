@@ -34,44 +34,6 @@ class MSSQLCore:
             extra="mssql",
         )
 
-    @staticmethod
-    def _resolve_dialer_fields(
-        config: MSSQLConfig,
-        dialer: Any = None,
-    ) -> tuple[str | None, str, str, bytes | None, bytes | None, bytes | None]:
-        """Extract Cloud SQL instance, IP type, auth mode, and optional mTLS PEMs from `config` and `dialer`."""
-        cloudsql_instance = config.cloud_sql_instance
-        cloudsql_ip_type = config.cloudsql_ip_type
-        cloudsql_auth_type = config.cloudsql_auth_type
-        ca_pem = config.ca_pem
-        client_cert_pem = config.client_cert_pem
-        client_key_pem = config.client_key_pem
-
-        if dialer is not None:
-            dialer_cfg = getattr(dialer, "config", None)
-            if dialer_cfg is not None and not cloudsql_instance:
-                cloudsql_instance = getattr(dialer_cfg, "instance_connection_name", None)
-                cloudsql_ip_type = str(getattr(dialer_cfg, "ip_type", cloudsql_ip_type))
-                if getattr(dialer_cfg, "enable_iam_auth", False):
-                    cloudsql_auth_type = "IAM"
-            bundle = getattr(dialer, "_cached_cert_bundle", None)
-            if bundle is not None:
-                if ca_pem is None:
-                    ca_pem = getattr(bundle, "ca_cert_pem", None)
-                if client_cert_pem is None:
-                    client_cert_pem = getattr(bundle, "client_cert_pem", None)
-                if client_key_pem is None:
-                    client_key_pem = getattr(bundle, "private_key_pem", None)
-
-        return (
-            cloudsql_instance,
-            cloudsql_ip_type,
-            cloudsql_auth_type,
-            ca_pem,
-            client_cert_pem,
-            client_key_pem,
-        )
-
     @classmethod
     def create_sync_rust_client(
         cls,
@@ -317,5 +279,45 @@ class MSSQLCore:
 
         return "".join(out), max_param
 
+    @staticmethod
+    def _resolve_dialer_fields(
+        config: MSSQLConfig,
+        dialer: Any = None,
+    ) -> tuple[str | None, str, str, bytes | None, bytes | None, bytes | None]:
+        """Extract Cloud SQL instance, IP type, auth mode, and optional mTLS PEMs from `config` and `dialer`."""
+        cloudsql_instance = config.cloud_sql_instance
+        cloudsql_ip_type = config.cloudsql_ip_type
+        cloudsql_auth_type = config.cloudsql_auth_type
+        ca_pem = config.ca_pem
+        client_cert_pem = config.client_cert_pem
+        client_key_pem = config.client_key_pem
 
-rewrite_mssql_placeholders = MSSQLCore.rewrite_placeholders
+        if dialer is not None:
+            dialer_cfg = getattr(dialer, "config", None)
+            if dialer_cfg is not None and not cloudsql_instance:
+                cloudsql_instance = getattr(dialer_cfg, "instance_connection_name", None)
+                cloudsql_ip_type = str(getattr(dialer_cfg, "ip_type", cloudsql_ip_type))
+                if getattr(dialer_cfg, "enable_iam_auth", False):
+                    cloudsql_auth_type = "IAM"
+            bundle = getattr(dialer, "_cached_cert_bundle", None)
+            if bundle is not None:
+                if ca_pem is None:
+                    ca_pem = getattr(bundle, "ca_cert_pem", None)
+                if client_cert_pem is None:
+                    client_cert_pem = getattr(bundle, "client_cert_pem", None)
+                if client_key_pem is None:
+                    client_key_pem = getattr(bundle, "private_key_pem", None)
+
+        return (
+            cloudsql_instance,
+            cloudsql_ip_type,
+            cloudsql_auth_type,
+            ca_pem,
+            client_cert_pem,
+            client_key_pem,
+        )
+
+
+def rewrite_mssql_placeholders(sql: str) -> tuple[str, int]:
+    """Rewrite `?` and `$1`/`$2` placeholders to T-SQL `@P1, @P2, ...` outside quotes, brackets, and comments."""
+    return MSSQLCore.rewrite_placeholders(sql)

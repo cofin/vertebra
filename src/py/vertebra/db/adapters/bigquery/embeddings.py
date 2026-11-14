@@ -7,7 +7,7 @@ from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Literal
 
 from vertebra._vertebra import VectorBatchView, VectorView
-from vertebra.db.adapters.bigquery.config import BigQueryTableIdentifier
+from vertebra.db.adapters.bigquery.core import BigQueryTableIdentifier
 from vertebra.db.driver import AsyncDatabaseDriver, DataError
 from vertebra.utils.serializers import decode_json
 from vertebra.utils.text import validate_identifier

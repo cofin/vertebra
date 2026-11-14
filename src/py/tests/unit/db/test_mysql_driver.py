@@ -445,6 +445,8 @@ def test_mysql_missing_extension_raises_missing_dependency_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Verify SyncMySQLDriver and AsyncMySQLDriver raise MissingDependencyError when vertebra._mysql is absent."""
+    monkeypatch.setattr("vertebra.db.adapters.mysql._sync._mysql_ext", None)
+    monkeypatch.setattr("vertebra.db.adapters.mysql._async._mysql_ext", None)
     monkeypatch.setattr(mysql_driver_mod, "_mysql_ext", None)
     monkeypatch.setitem(sys.modules, "vertebra._mysql", None)
     reset_dependency_cache("vertebra._mysql")
@@ -489,3 +491,33 @@ def test_dbapi_connection_routes_mysql_and_dialect_compilation(
     assert SyncMySQLDialect.type_descriptor(vec) is vec
     assert SyncMySQLClient is not None
     assert AsyncMySQLClient is not None
+
+
+@pytest.mark.parametrize(
+    ("symbol_name", "target_module", "expected_module"),
+    [
+        ("SyncMySQLDriver", "vertebra.db.adapters.mysql", "vertebra.db.adapters.mysql._sync"),
+        ("SyncMySQLDriver", "vertebra.db.adapters.mysql.driver", "vertebra.db.adapters.mysql._sync"),
+        ("SyncMySQLDriver", "vertebra.db.adapters.mysql._sync", "vertebra.db.adapters.mysql._sync"),
+        ("AsyncMySQLDriver", "vertebra.db.adapters.mysql", "vertebra.db.adapters.mysql._async"),
+        ("AsyncMySQLDriver", "vertebra.db.adapters.mysql.driver", "vertebra.db.adapters.mysql._async"),
+        ("AsyncMySQLDriver", "vertebra.db.adapters.mysql._async", "vertebra.db.adapters.mysql._async"),
+        ("SyncMySQLPipeline", "vertebra.db.adapters.mysql", "vertebra.db.adapters.mysql.pipeline"),
+        ("SyncMySQLPipeline", "vertebra.db.adapters.mysql.driver", "vertebra.db.adapters.mysql.pipeline"),
+        ("SyncMySQLPipeline", "vertebra.db.adapters.mysql.pipeline", "vertebra.db.adapters.mysql.pipeline"),
+        ("AsyncMySQLPipeline", "vertebra.db.adapters.mysql", "vertebra.db.adapters.mysql.pipeline"),
+        ("AsyncMySQLPipeline", "vertebra.db.adapters.mysql.driver", "vertebra.db.adapters.mysql.pipeline"),
+        ("AsyncMySQLPipeline", "vertebra.db.adapters.mysql.pipeline", "vertebra.db.adapters.mysql.pipeline"),
+    ],
+)
+def test_mysql_driver_and_pipeline_resolution_identity(
+    symbol_name: str,
+    target_module: str,
+    expected_module: str,
+) -> None:
+    """Verify MySQL sync/async driver and pipeline classes resolve identically across import paths."""
+    import importlib
+
+    mod = importlib.import_module(target_module)
+    exp_mod = importlib.import_module(expected_module)
+    assert getattr(mod, symbol_name) is getattr(exp_mod, symbol_name)

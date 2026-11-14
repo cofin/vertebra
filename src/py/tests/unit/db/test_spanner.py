@@ -884,14 +884,11 @@ async def test_async_spanner_driver_and_embedder_and_datafusion() -> None:
     sync_driver = SyncSpannerDriver(cfg, client=fake_sync)
     sync_driver.execute("INSERT INTO docs (doc_id, title) VALUES ('d2', 'DataBoost')", None)
     engine = DataFusionEngine()
-    reg_table = engine.register_spanner_table("df_docs", sync_driver, "docs", data_boost_enabled=True)
+    cursor_table = sync_driver.select_to_arrow("docs", data_boost_enabled=True)
+    reg_table = engine.register_arrow_table("df_docs", cursor_table)
     assert reg_table.name == "df_docs"
-    reg_query = engine.register_spanner_query(
-        "df_docs_query",
-        sync_driver,
-        "SELECT doc_id, title FROM docs",
-        data_boost_enabled=True,
-    )
+    cursor_query = sync_driver.select_to_arrow("SELECT doc_id, title FROM docs", data_boost_enabled=True)
+    reg_query = engine.register_arrow_table("df_docs_query", cursor_query)
     assert reg_query.name == "df_docs_query"
     await driver.close()
     sync_driver.close()
@@ -1259,3 +1256,83 @@ async def test_spanner_pushdown_rejects_invalid_vector_rows(bad_vec: list[Any]) 
     )
     with pytest.raises(DataError, match="Spanner embedding row"):
         await bad_embedder.embed_documents(["alpha"])
+
+
+@pytest.mark.parametrize("symbol", ["Mutation", "MutationGroup", "StalenessBound"])
+def test_spanner_lazy_package_exports_present(symbol: str) -> None:
+    """Verify package root exports Mutation, MutationGroup, and StalenessBound lazily."""
+    import vertebra.db.adapters.spanner as sp_pkg
+
+    assert hasattr(sp_pkg, symbol)
+    assert getattr(sp_pkg, symbol) is not None
+
+
+@pytest.mark.parametrize("symbol", ["Mutation", "MutationGroup", "StalenessBound"])
+def test_spanner_config_module_rejects_moved_symbols(symbol: str) -> None:
+    """Verify spanner.config does not export or retain shims for moved domain symbols."""
+    import vertebra.db.adapters.spanner.config as sp_config
+
+    with pytest.raises(AttributeError):
+        getattr(sp_config, symbol)
+
+
+@pytest.mark.parametrize(
+    ("raw_item", "expected_op", "expected_table"),
+    [
+        (
+            {"op": "insert", "table": "users", "columns": ["id", "name"], "values": [(1, "alice")]},
+            "insert",
+            "users",
+        ),
+        (
+            {"op": "update", "table": "users", "columns": ["id", "name"], "values": [(1, "alice")]},
+            "update",
+            "users",
+        ),
+        (
+            {"op": "replace", "table": "users", "columns": ["id", "name"], "values": [(1, "alice")]},
+            "replace",
+            "users",
+        ),
+        (
+            {"op": "delete", "table": "users", "keys": [(1,)]},
+            "delete",
+            "users",
+        ),
+    ],
+)
+def test_spanner_mutation_coerce(
+    raw_item: dict[str, Any],
+    expected_op: str,
+    expected_table: str,
+) -> None:
+    """Verify Mutation.coerce normalizes dictionary payloads into typed Mutation structs."""
+    from vertebra.db.adapters.spanner.mutations import Mutation, MutationGroup
+
+    mut = Mutation.coerce(raw_item)
+    assert mut.op == expected_op
+    assert mut.table == expected_table
+    group = MutationGroup.coerce([raw_item, mut])
+    assert len(group.mutations) == 2
+    assert group.to_dict()["mutations"][0]["op"] == expected_op
+
+
+@pytest.mark.parametrize(
+    ("cell_counts", "max_cells", "expected_batch_lengths"),
+    [
+        ([10, 20, 30], 100, [3]),
+        ([50, 60, 40], 70, [1, 1, 1]),
+        ([30, 40, 50], 70, [2, 1]),
+    ],
+)
+def test_spanner_mutation_chunk_by_cell_limit(
+    cell_counts: list[int],
+    max_cells: int,
+    expected_batch_lengths: list[int],
+) -> None:
+    """Verify Mutation.chunk_by_cell_limit partitions batches against max_cells boundaries."""
+    from vertebra.db.adapters.spanner.mutations import Mutation
+
+    mutations = [Mutation.insert("users", [f"col_{i}" for i in range(count)], [[1] * count]) for count in cell_counts]
+    chunks = Mutation.chunk_by_cell_limit(mutations, max_cells=max_cells)
+    assert [len(batch) for batch in chunks] == expected_batch_lengths

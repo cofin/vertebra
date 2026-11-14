@@ -11,15 +11,12 @@ tags:
   - cdc
   - tenancy
 generated:
-  by: flow/0.26.0
+  by: flow/0.30.1
   at: "2026-11-04T04:33:00Z"
 verified:
   - by: agent:flow-executor
-    at: "2026-11-14T01:15:00Z"
-    commit: 7116ba13
-  - by: agent:flow-setup
-    at: "2026-11-12T23:30:00Z"
-    commit: 18baadcd
+    at: "2026-11-14T20:46:00Z"
+    commit: 1b191388
 sources:
   - id: src-postgres-stream-rs
     resource: src/rs/vertebra-postgres/src/replication/stream.rs::ReplicationSession
@@ -33,9 +30,12 @@ sources:
   - id: src-oracle-tenant-core
     resource: src/py/vertebra/db/adapters/oracle/core.py
     title: "Oracle VPD trusted-package and SET_IDENTIFIER context SQL builders"
+  - id: src-oracle-pipeline-py
+    resource: src/py/vertebra/db/adapters/oracle/pipeline.py
+    title: "SyncOraclePipeline and AsyncOraclePipeline delayed-commit batching"
   - id: src-oracle-driver-py
     resource: src/py/vertebra/db/adapters/oracle/driver.py
-    title: "SyncOraclePipeline, AsyncOraclePipeline, and VPD reset-or-evict pool hooks"
+    title: "SyncOracleDriver and AsyncOracleDriver VPD reset-or-evict pool hooks"
   - id: src-db-oracle-notify-py
     resource: src/py/vertebra/db/adapters/oracle/notify.py
     title: "OracleNotifyConfig and OracleNotificationSource TxEventQ / DBMS_AQ streaming"
@@ -99,20 +99,18 @@ sources:
 - **Delayed-Commit & Native Pipelines**: `SyncPipelineCapable` / `AsyncPipelineCapable` batch ordered statements via `driver.pipeline()`; `SyncOraclePipeline` and `AsyncOraclePipeline` (`ORACLESQL_NATIVE_TTC_PIPELINE_SUPPORTED = False`) hold an open transaction or `SAVEPOINT _vtb_pipe_<n>` across `results()` and commit only on clean `__exit__`/`__aexit__`, while SQLSpec `OracleSyncDriver` / `OracleAsyncDriver` set `_execution_parameter_style = ParameterStyle.NAMED_COLON`.
 - **Reset-or-Evict Tenant Scoping**: `TenantPredicate` is engine-neutral while `TenantConnectionScope` / `AsyncTenantConnectionScope` (`vertebra.db.rls`), `OracleCore` (`context_package_proc` / `context_clear_proc` + `DBMS_SESSION.SET_IDENTIFIER` / `CLEAR_IDENTIFIER`), and `OracleSessionManager` always reset session context on lease exit and permanently evict pooled sessions when reset fails.
 - **Notifications & Change Streams**: `ChangeFeed` manages event envelopes and bounded spill hydration; `PostgresNotificationSource`, `OracleNotificationSource` (`AsyncOracleListener` `DBMS_AQ.DEQUEUE` / TxEventQ worker pump with 1s-sliced server waits and exponential reconnect backoff), and `SyncSpannerChangeStreamSource` / `AsyncSpannerChangeStreamSource` implement adapter streaming.
-- **Federated DataFusion**: `DataFusionEngine` (`vertebra.db.adapters.datafusion`) registers normalized PyArrow, BigQuery, and Spanner tables on a fail-closed `SessionContext` (`ensure_module("datafusion", package="datafusion")`), and all SQL builders validate identifiers via `validate_identifier`.
+- **Federated DataFusion**: `DataFusionEngine` (`vertebra.db.adapters.datafusion`, `mode="in_process"` only) registers normalized `ArrowCursor` / PyArrow tables via `register_arrow_table` (`driver.select_to_arrow(...)`) on a fail-closed `SessionContext` (`ensure_module("datafusion", package="datafusion")`), and all SQL builders validate identifiers via `validate_identifier`.
 <!-- truth: end -->
 
 The native pipeline capability protocols and tenant scopes in [`vertebra.db`](../../../../../src/py/vertebra/db/__init__.py) define engine batching and session isolation contracts. [`cdc.py`](../../../../../src/py/vertebra/db/cdc.py)[^src-db-cdc-py] manages engine-neutral change-feed envelopes, [`postgres.notify`](../../../../../src/py/vertebra/db/adapters/postgres/notify.py)[^src-db-postgres-notify-py] owns PostgreSQL notification SQL, [`oracle.notify`](../../../../../src/py/vertebra/db/adapters/oracle/notify.py)[^src-db-oracle-notify-py] and [`vertebra-oracle/src/notify.rs`](../../../../../src/rs/vertebra-oracle/src/notify.rs)[^src-vertebra-oracle-notify-rs] own Oracle 26ai TxEventQ / `DBMS_AQ` streaming, [`spanner.change_stream`](../../../../../src/py/vertebra/db/adapters/spanner/change_stream.py)[^src-db-spanner-change-stream-py] owns Spanner change streams, and [`vertebra.db.adapters.datafusion`](../../../../../src/py/vertebra/db/adapters/datafusion/__init__.py) maintains federated analytical sessions. All SQL builders validate identifiers against `^[A-Za-z_][A-Za-z0-9_]*$` (`validate_identifier`, or AQ's `^[A-Za-z_][A-Za-z0-9_$#]{0,127}$`). Drivers and dialers live in [database-drivers-and-dialers](database-drivers-and-dialers.md).
 
 ## 1. Native Pipeline Capabilities
 
-[`SyncPipelineCapable` / `AsyncPipelineCapable`](../../../../../src/py/vertebra/db/driver/capabilities.py)[^src-db-driver-capabilities-py] expose `driver.pipeline()` as a sync or async context manager (`pipe.select(sql, params)`, `pipe.execute(sql, params)`, `pipe.results()`). On Oracle (`ORACLESQL_NATIVE_TTC_PIPELINE_SUPPORTED is False`), [`SyncOraclePipeline` and `AsyncOraclePipeline`](../../../../../src/py/vertebra/db/adapters/oracle/driver.py)[^src-oracle-driver-py] flush queued statements sequentially via `execute_pipeline_batch` (`OraclePipelineOutcome`) while holding an ambient transaction (or `SAVEPOINT _vtb_pipe_<n>` inside an outer transaction, using `ROLLBACK TO SAVEPOINT` with no `RELEASE SAVEPOINT`) open across `results()` and committing only on clean `__exit__`/`__aexit__` (`exc_type is None`); post-`results()` validation failures or unexecuted queued operations roll back automatically.
+[`SyncPipelineCapable` / `AsyncPipelineCapable`](../../../../../src/py/vertebra/db/driver/capabilities.py)[^src-db-driver-capabilities-py] expose `driver.pipeline()` as a sync or async context manager (`pipe.select(sql, params)`, `pipe.execute(sql, params)`, `pipe.results()`). On Oracle (`ORACLESQL_NATIVE_TTC_PIPELINE_SUPPORTED is False`), [`SyncOraclePipeline` and `AsyncOraclePipeline`](../../../../../src/py/vertebra/db/adapters/oracle/pipeline.py)[^src-oracle-pipeline-py] flush queued statements sequentially via `execute_pipeline_batch` (`OraclePipelineOutcome`) while holding an ambient transaction (or `SAVEPOINT _vtb_pipe_<n>` inside an outer transaction, using `ROLLBACK TO SAVEPOINT` with no `RELEASE SAVEPOINT`) open across `results()` and committing only on clean `__exit__`/`__aexit__` (`exc_type is None`); post-`results()` validation failures or unexecuted queued operations roll back automatically.
 
 [`BaseSyncDriver.execute_stack` / `BaseAsyncDriver.execute_stack`](../../../../../src/py/vertebra/extensions/sqlspec/adapters.py)[^src-extensions-sqlspec-adapters-py] dispatch multi-statement `execute` stacks with `continue_on_error=False` through `driver.pipeline()`, preserving prepared operation types (including `INSERT ... RETURNING`) in ordered `StackResult` entries. Driver-owned statement defaults preserve native bind styles without importing optional upstream SDKs (shared by direct driver construction and SQLSpec adapter configs while preserving explicit caller configurations): PostgreSQL sync and async both compile to `$1..$N` numeric binds (`ParameterStyle.NUMERIC`) over `vertebra._postgres`, MySQL uses positional pyformat, `OracleSyncDriver` and `OracleAsyncDriver` set `_execution_parameter_style = ParameterStyle.NAMED_COLON`, BigQuery owns `bigquery` named-`@` parameters, and Spanner selects `spanner` named-`@` (GoogleSQL) or `spangres` numeric parameters.[^src-extensions-sqlspec-bigquery-py][^src-extensions-sqlspec-spanner-py]
 
-Batch stack operations compile batched parameters through SQLSpec's `is_many` processing before native execution, applying statement-config overrides and filters. Arrow stack operations prepare keyword or prebound SQL parameters through the same statement pipeline, keep standard Arrow options separate from bind values, and propagate prepared statement metadata. Native BigQuery and Spanner `ArrowCursor` results materialize through `to_arrow_table()` into SQLSpec `ArrowResult` at the stack boundary, while each adapter owns its standalone Arrow option semantics.
-
-Arrow stack execution separates the owning driver's public execution options from bind values before SQLSpec preparation. BigQuery declares `selected_fields`, `row_restriction`, and `max_streams`; Spanner declares `data_boost`, `max_partitions`, and `staleness` alongside standard Arrow options through private class-owned declarations without engine-name dispatch or per-operation reflection.
+Batch stack operations compile batched parameters through SQLSpec's `is_many` processing before native execution, applying statement-config overrides and filters. Arrow stack operations prepare keyword or prebound SQL parameters through the same statement pipeline, separate class-owned execution options (`selected_fields`, `row_restriction`, `max_streams` on BigQuery; `data_boost`, `max_partitions`, `staleness` on Spanner) from bind values without engine-name dispatch, and materialize native `ArrowCursor` results through `to_arrow_table()` into SQLSpec `ArrowResult` at the stack boundary.
 
 Single-operation stacks, non-pipeline drivers, stacks containing `execute_many`, `execute_script`, or `execute_arrow`, and `continue_on_error=True` use adapter primitives sequentially. Fail-fast execution uses one transaction and rolls back on failure. Continue-on-error execution commits or rolls back each operation, records an error result at the failed operation's position, and continues. Raw Spanner all-DML stacks execute via `execute_batch_dml`, raw BigQuery stacks execute inside session transactions, and [`SyncDuckDBPipeline` / `AsyncDuckDBPipeline`](../../../../../src/py/vertebra/db/adapters/duckdb/pipeline.py)[^src-db-duckdb-pipeline-py] batch queued `execute`/`select` operations atomically with delayed commit on normal context exit or `_vtb_pipe_<n>` savepoint isolation when `driver.in_transaction` is already `True`.
 
@@ -170,10 +168,10 @@ Store keys use `spill_prefix.rstrip("/")`: a non-empty normalized prefix yields 
 | Symbol | Responsibility |
 |---|---|
 | `ARROW_STREAM_MEDIA_TYPE` | `"application/vnd.apache.arrow.stream"`, also exposed as `DataFusionEngine.ARROW_STREAM_MEDIA_TYPE`. |
-| `DataFusionMode` | `Literal["in_process", "pgwire_fdw"]`. |
+| `DataFusionMode` | `Literal["in_process"]` (`pgwire_fdw` and `host:port` endpoints raise `ImproperConfigurationError`). |
 | [`TableRegistration`](../../../../../src/py/vertebra/db/adapters/datafusion/config.py)[^src-db-datafusion-config-py] | `name`, `uri`, `format` (`parquet`, `vortex`, `arrow`, `csv`, `ndjson`, `duckdb`, `postgres`, `oracle`, `bigquery`, `spanner`). |
-| `DataFusionConfig` | `BaseDatabaseConfig` subclass (`url_schemes = ("datafusion",)`, `from_url`, `pool_key`, `build_sync_driver`, `build_async_driver`) resolved polymorphically via [`DatabaseRegistry`](../../../../../src/py/vertebra/db/registry.py)[^src-db-registry-py] and `provide_driver`. Configures `mode`, `target_partitions`, `memory_limit_mb`, `pgwire_host`, `pgwire_port=5434`, and `require_mtls_for_pgwire`. |
-| [`DataFusionEngine`](../../../../../src/py/vertebra/db/adapters/datafusion/driver.py)[^src-db-datafusion-driver-py] | Accepts `(config: DataFusionConfig \| None = None, *, ctx: Any = None)`, fetches BigQuery and Cloud Spanner datasets via `driver.select_to_arrow(...)`, normalizes `ArrowCursor` / PyArrow inputs into `pyarrow.Table`, resolves `SessionContext` via `ensure_module("datafusion", package="datafusion")` without any SQLite fallback, and propagates `MissingDependencyError` and `SessionContext.sql(...)` errors directly. |
+| `DataFusionConfig` | `BaseDatabaseConfig` subclass (`url_schemes = ("datafusion",)`, `from_url`, `pool_key`, `build_sync_driver`, `build_async_driver`) resolved polymorphically via [`DatabaseRegistry`](../../../../../src/py/vertebra/db/registry.py)[^src-db-registry-py] and `provide_driver`. Configures `mode="in_process"`, `target_partitions >= 1`, and `memory_limit_mb >= 1`. |
+| [`DataFusionEngine`](../../../../../src/py/vertebra/db/adapters/datafusion/driver.py)[^src-db-datafusion-driver-py] | Accepts `(config: DataFusionConfig \| None = None, *, ctx: Any = None)`, registers relational and cloud `ArrowCursor` / PyArrow tables via `register_arrow_table(name, driver.select_to_arrow(...))` (zero vendor-specific registration wrappers), resolves `SessionContext` via `ensure_module("datafusion", package="datafusion")`, and propagates `MissingDependencyError` and `SessionContext.sql(...)` errors directly. |
 
 [^src-extensions-sqlspec-adapters-py]: `src/py/vertebra/extensions/sqlspec/adapters.py` — SQLSpec native pipeline dispatch and sequential stack execution.
 [^src-db-duckdb-pipeline-py]: `src/py/vertebra/db/adapters/duckdb/pipeline.py` — Delayed-commit SyncDuckDBPipeline and AsyncDuckDBPipeline with savepoint nesting.
@@ -190,7 +188,8 @@ Store keys use `spill_prefix.rstrip("/")`: a non-empty normalized prefix yields 
 [^src-extensions-sqlspec-spanner-py]: `src/py/vertebra/extensions/sqlspec/spanner.py` — Spanner SQLSpec parser and native parameter defaults.
 [^src-postgres-tenant-core]: `src/py/vertebra/db/adapters/postgres/core.py` — PostgreSQL tenant and session SQL builders.
 [^src-oracle-tenant-core]: `src/py/vertebra/db/adapters/oracle/core.py` — Oracle VPD trusted-package and SET_IDENTIFIER context SQL builders.
-[^src-oracle-driver-py]: `src/py/vertebra/db/adapters/oracle/driver.py` — SyncOraclePipeline, AsyncOraclePipeline, and VPD reset-or-evict pool hooks.
+[^src-oracle-pipeline-py]: `src/py/vertebra/db/adapters/oracle/pipeline.py` — SyncOraclePipeline and AsyncOraclePipeline delayed-commit batching.
+[^src-oracle-driver-py]: `src/py/vertebra/db/adapters/oracle/driver.py` — SyncOracleDriver and AsyncOracleDriver VPD reset-or-evict pool hooks.
 [^src-db-oracle-notify-py]: `src/py/vertebra/db/adapters/oracle/notify.py` — OracleNotifyConfig and OracleNotificationSource TxEventQ / DBMS_AQ streaming.
 [^src-vertebra-oracle-notify-rs]: `src/rs/vertebra-oracle/src/notify.rs` — Dedicated AsyncOracleListener DBMS_AQ.DEQUEUE worker pump.
 [^src-extensions-apex-session-py]: `src/py/vertebra/extensions/apex/session.py` — OracleSessionManager APEX VPD propagation and ECID piggyback.

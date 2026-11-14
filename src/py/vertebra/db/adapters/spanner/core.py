@@ -14,11 +14,7 @@ from vertebra._vertebra import (
     SpannerError,
     hydrate_rows_vectorcall,
 )
-from vertebra.db.adapters.spanner.config import (
-    Mutation,
-    MutationGroup,
-    SpannerConfig,
-)
+from vertebra.db.adapters.spanner.config import SpannerConfig
 from vertebra.db.arrow import ArrowCursor, write_arrow_shm
 from vertebra.telemetry.db_propagation import SqlTracePropagator
 from vertebra.telemetry.otel import TraceContext
@@ -38,7 +34,6 @@ if TYPE_CHECKING:
 
 __all__ = ("SpannerCore",)
 
-_MAX_MUTATION_CELLS_PER_BATCH: Final[int] = 80_000
 _PARTITIONED_QUERY_FALLBACK_CODES: Final[frozenset[int]] = frozenset({3, 7, 9, 12, 14})
 
 
@@ -106,61 +101,6 @@ class SpannerCore:
         `PartitionQuery` unimplemented), and `14` (`UNAVAILABLE`, endpoint unavailable).
         """
         return isinstance(exc, SpannerError) and getattr(exc, "code", None) in _PARTITIONED_QUERY_FALLBACK_CODES
-
-    @staticmethod
-    def coerce_mutation(item: Mutation | Mapping[str, Any]) -> Mutation:
-        """Coerce a `Mutation` or dictionary representation into a typed `Mutation` struct."""
-        if isinstance(item, Mutation):
-            return item
-        op_raw = str(item.get("op", "insert_or_update")).lower()
-        table = str(item.get("table", ""))
-        if op_raw == "delete":
-            return Mutation.delete(
-                table,
-                item.get("keys", ()),
-                all_rows=bool(item.get("all", item.get("all_rows", False))),
-            )
-        cols = [str(c) for c in item.get("columns", ())]
-        vals = [tuple(r) for r in item.get("values", ())]
-        if op_raw == "insert":
-            return Mutation.insert(table, cols, vals)
-        if op_raw == "update":
-            return Mutation.update(table, cols, vals)
-        if op_raw == "replace":
-            return Mutation.replace(table, cols, vals)
-        return Mutation.insert_or_update(table, cols, vals)
-
-    @classmethod
-    def coerce_mutation_group(
-        cls,
-        group: MutationGroup | Sequence[Mutation | Mapping[str, Any]],
-    ) -> MutationGroup:
-        """Coerce a `MutationGroup` or sequence of mutations into a `MutationGroup` struct."""
-        if isinstance(group, MutationGroup):
-            return group
-        return MutationGroup(mutations=tuple(cls.coerce_mutation(m) for m in group))
-
-    @staticmethod
-    def chunk_mutations_by_cell_limit(
-        mutations: Sequence[Mutation],
-        *,
-        max_cells: int = _MAX_MUTATION_CELLS_PER_BATCH,
-    ) -> list[list[Mutation]]:
-        """Partition `mutations` into batches that respect Spanner's per-commit cell limit."""
-        batches: list[list[Mutation]] = []
-        current: list[Mutation] = []
-        current_cells = 0
-        for mut in mutations:
-            cells = mut.cell_count()
-            if current and current_cells + cells > max_cells:
-                batches.append(current)
-                current = []
-                current_cells = 0
-            current.append(mut)
-            current_cells += cells
-        if current:
-            batches.append(current)
-        return batches
 
     @classmethod
     def encode_parameters_json(
