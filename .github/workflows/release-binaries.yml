@@ -72,7 +72,7 @@ jobs:
             --manifest-path src/rs/Cargo.toml \
             --bin vertebra-server \
             --release \
-            --features vertebra-http/python,vertebra-http/tls,vertebra-http/compression
+            --features vertebra-http/python,vertebra-http/tls,vertebra-http/compression,vertebra-http/http3
           mkdir -p dist
           cp "${{ matrix.bin_src }}" "dist/${{ matrix.bin_name }}"
 

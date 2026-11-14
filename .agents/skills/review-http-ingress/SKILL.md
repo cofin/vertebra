@@ -46,6 +46,7 @@ Shared catalog: [`false-positive-suppressions.md`](../review-core/references/fal
 ## Focused Commands
 
 ```bash
-cargo test --manifest-path src/rs/Cargo.toml -p vertebra-http --features tls,compression
+cargo test --manifest-path src/rs/Cargo.toml -p vertebra-http --features tls,http3,compression
+cargo check --manifest-path src/rs/Cargo.toml -p vertebra-http --no-default-features --features tls,compression
 cargo check --manifest-path src/rs/Cargo.toml -p vertebra-http --no-default-features --features tls,compression,http3
 ```

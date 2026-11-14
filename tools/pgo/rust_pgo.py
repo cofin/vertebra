@@ -101,6 +101,8 @@ class RustPGOConfig(msgspec.Struct, frozen=True, gc=False, cache_hash=True):
     """Explicit `llvm-profdata` executable path or empty string for auto-discovery."""
     maturin_features: str = "extension-module"
     """Cargo feature list passed to `maturin develop` for PyO3 extensions."""
+    server_features: str = "python,tls,compression,http3"
+    """Cargo feature list passed to `cargo build` for `vertebra-http`."""
     extension_manifests: tuple[Path, ...] = EXTENSION_MANIFESTS
     """Ordered tuple of PyO3 Cargo.toml manifests built during extension PGO stages."""
 
@@ -293,11 +295,19 @@ def check_profdata_size(profdata_path: Path) -> int:
     return profdata_path.stat().st_size
 
 
+def _server_cargo_command(config: RustPGOConfig) -> list[str]:
+    """Assemble the `cargo build --release` command for the server crate."""
+    cmd = ["cargo", "build", "--release", "--manifest-path", str(config.manifest_path)]
+    if config.server_features:
+        cmd.extend(["--features", config.server_features])
+    return cmd
+
+
 def build_instrumented(config: RustPGOConfig) -> Path:
     """Compile the Rust server crate with -Cprofile-generate instrumentation enabled."""
     config.profile_dir.mkdir(parents=True, exist_ok=True)
     env = build_cargo_pgo_env(build_flags(config, pgo_mode="generate"))
-    cmd = ["cargo", "build", "--release", "--manifest-path", str(config.manifest_path)]
+    cmd = _server_cargo_command(config)
     subprocess.run(cmd, check=True, env=env)
     return resolve_cargo_release_dir(config, env=env)
 
@@ -580,7 +590,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 def _build_optimized_cargo(config: RustPGOConfig, profdata_path: Path, *, valid: bool) -> Path:
     """Compile the Rust server crate using pre-validated profdata status."""
-    cmd = ["cargo", "build", "--release", "--manifest-path", str(config.manifest_path)]
+    cmd = _server_cargo_command(config)
     if not valid:
         logger.warning("PGO profdata %s is missing or invalid; falling back to standard release build.", profdata_path)
         subprocess.run(cmd, check=True)

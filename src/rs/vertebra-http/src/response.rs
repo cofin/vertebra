@@ -27,7 +27,9 @@ use crate::grpc::{
 use crate::health::HealthState;
 use crate::hmr;
 use crate::mcp_bridge::extract_mcp_observability_headers;
-use crate::payload::{PayloadError, collect_bounded_body, decode_request_payload};
+use crate::payload::{
+    PayloadError, collect_bounded_body, decode_buffered_body, is_active_content_encoding,
+};
 use crate::routing::RouterError;
 use crate::server::ServerState;
 
@@ -310,11 +312,13 @@ async fn dispatch_request_inner(
         .get(header::CONTENT_LENGTH)
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.trim().parse::<usize>().ok());
-    let content_encoding_owned = parts
-        .headers
-        .get(header::CONTENT_ENCODING)
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_owned);
+    let active_encoding = is_active_content_encoding(
+        parts
+            .headers
+            .get(header::CONTENT_ENCODING)
+            .and_then(|v| v.to_str().ok()),
+    )
+    .map(str::to_owned);
 
     let collected_res: Result<(Bytes, bool), PayloadError> = match body {
         RequestBodySource::Incoming(incoming) => {
@@ -324,47 +328,24 @@ async fn dispatch_request_inner(
                 collect_bounded_body(
                     incoming,
                     content_length,
-                    content_encoding_owned.as_deref(),
+                    active_encoding.as_deref(),
                     &state.config.payload_limits,
                 )
                 .await
-                .map(|bytes| (bytes, true))
+                .map(|bytes| (bytes, active_encoding.is_some()))
             }
         }
-        RequestBodySource::Buffered(raw_bytes) => {
-            let limits = &state.config.payload_limits;
-            if let Some(len) = content_length
-                && len > limits.max_body_size
-            {
-                Err(PayloadError::TooLarge {
-                    actual: len,
-                    limit: limits.max_body_size,
-                })
-            } else if raw_bytes.len() > limits.max_body_size {
-                Err(PayloadError::TooLarge {
-                    actual: raw_bytes.len(),
-                    limit: limits.max_body_size,
-                })
-            } else if raw_bytes.is_empty() {
-                Ok((Bytes::new(), false))
-            } else if let Some(ref enc) = content_encoding_owned
-                && !enc.trim().is_empty()
-                && !enc.trim().eq_ignore_ascii_case("identity")
-            {
-                decode_request_payload(&raw_bytes, Some(enc), limits).map(|bytes| (bytes, true))
-            } else {
-                Ok((raw_bytes, false))
-            }
-        }
+        RequestBodySource::Buffered(raw_bytes) => decode_buffered_body(
+            raw_bytes,
+            content_length,
+            active_encoding.as_deref(),
+            &state.config.payload_limits,
+        ),
     };
 
     let body_bytes = match collected_res {
-        Ok((bytes, check_encoding_headers)) => {
-            if check_encoding_headers
-                && let Some(ref enc) = content_encoding_owned
-                && !enc.trim().is_empty()
-                && !enc.trim().eq_ignore_ascii_case("identity")
-            {
+        Ok((bytes, was_decompressed)) => {
+            if was_decompressed {
                 parts.headers.remove(header::CONTENT_ENCODING);
                 if let Ok(cl_val) = HeaderValue::from_str(&bytes.len().to_string()) {
                     parts.headers.insert(header::CONTENT_LENGTH, cl_val);

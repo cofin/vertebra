@@ -67,7 +67,7 @@ sources:
 - Partition ingress batching and correlation across power-of-two shards (`RequestBatcher::spawn_pool`, 8 `InFlightRequests` shards) and release shard locks before waking responders.
 <!-- truth: end -->
 
-All crates use `edition = "2024"`, and `make lint-all` runs `cargo clippy --workspace --all-targets --features tls,compression,gcp -- -D warnings`. The patterns below apply to [`vertebra-core`](../../../../../src/rs/vertebra-core/src/lib.rs) rings and the [`vertebra-http`](../../../../../src/rs/vertebra-http/src/lib.rs) dispatch path.
+All crates use `edition = "2024"`, and `make lint-all` runs `cargo clippy --workspace --all-targets --features tls,http3,compression,gcp -- -D warnings`. The patterns below apply to [`vertebra-core`](../../../../../src/rs/vertebra-core/src/lib.rs) rings and the [`vertebra-http`](../../../../../src/rs/vertebra-http/src/lib.rs) dispatch path.
 
 ## Cache-Line Isolation (`ABI_VERSION = 3`) & Padded MPMC Sequence Slots
 

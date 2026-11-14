@@ -246,13 +246,6 @@ impl ServerConfig {
         Ok(())
     }
 
-    /// Build config from environment variables, falling back to defaults.
-    ///
-    /// Reads `VERTEBRA_HOST` and `VERTEBRA_PORT` to construct the bind address.
-    pub fn from_env() -> Self {
-        Self::from_env_with(|key| std::env::var(key).ok())
-    }
-
     /// Return `true` when HTTP/3 over QUIC is enabled in configuration.
     pub fn enable_http3(&self) -> bool {
         self.http3.enabled
@@ -305,10 +298,10 @@ impl ServerConfig {
         }
     }
 
-    fn from_env_with<F>(get_env: F) -> Self
-    where
-        F: Fn(&str) -> Option<String>,
-    {
+    /// Build config from environment variables, falling back to defaults.
+    ///
+    /// Reads `VERTEBRA_HOST`, `VERTEBRA_PORT`, TLS, and HTTP/3 settings from environment variables.
+    pub fn from_env() -> Self {
         let mut config = Self::default();
 
         let host = std::env::var("VERTEBRA_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
@@ -530,7 +523,7 @@ impl ServerConfig {
             }
         }
 
-        config.apply_http3_env(&get_env);
+        config.apply_http3_env(|key| std::env::var(key).ok());
         config
     }
 }
@@ -642,6 +635,32 @@ mod tests {
         assert_eq!(cfg.http3.max_concurrent_bidi_streams, 512);
         assert_eq!(cfg.http3.keep_alive_interval_ms, 2500);
 
+        cfg.apply_http3_env(|key| match key {
+            "VERTEBRA_HTTP3" => Some("1".to_string()),
+            "VERTEBRA_HTTP3_ALT_SVC_MAX_AGE" => Some("not-a-number".to_string()),
+            "VERTEBRA_HTTP3_MAX_STREAMS" => Some("0".to_string()),
+            "VERTEBRA_HTTP3_KEEP_ALIVE_MS" => Some("invalid".to_string()),
+            _ => None,
+        });
+        assert!(cfg.enable_http3());
+        assert_eq!(cfg.http3.alt_svc_max_age, 3600);
+        assert_eq!(cfg.http3.max_concurrent_bidi_streams, 512);
+        assert_eq!(cfg.http3.keep_alive_interval_ms, 2500);
+
+        cfg.apply_http3_env(|key| match key {
+            "VERTEBRA_HTTP3" => Some("false".to_string()),
+            _ => None,
+        });
+        assert!(!cfg.enable_http3());
+        assert!(cfg.validate_http3().is_ok());
+
+        cfg.apply_http3_env(|key| match key {
+            "VERTEBRA_HTTP3" => Some("invalid".to_string()),
+            _ => None,
+        });
+        assert!(!cfg.enable_http3());
+
+        cfg.http3.enabled = true;
         let err = cfg
             .validate_http3()
             .expect_err("http3 without tls must fail loud");

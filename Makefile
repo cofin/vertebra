@@ -176,7 +176,7 @@ dev:                                                ## Install native extensions
 .PHONY: build
 build: ts-build                                     ## Build optimized release binaries + native extension + TS client
 	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
-	@(cd src/rs && PYO3_PYTHON="$(PYO3_PYTHON)" cargo build --workspace --exclude vertebra-py --exclude vertebra-bundler --exclude vertebra-storage --exclude vertebra-mysql --exclude vertebra-bigquery --exclude vertebra-mssql --exclude vertebra-spanner --exclude vertebra-duckdb --exclude vertebra-oracle --exclude vertebra-postgres --release --features vertebra-http/python,vertebra-http/tls,vertebra-http/compression)
+	@(cd src/rs && PYO3_PYTHON="$(PYO3_PYTHON)" cargo build --workspace --exclude vertebra-py --exclude vertebra-bundler --exclude vertebra-storage --exclude vertebra-mysql --exclude vertebra-bigquery --exclude vertebra-mssql --exclude vertebra-spanner --exclude vertebra-duckdb --exclude vertebra-oracle --exclude vertebra-postgres --release --features vertebra-http/python,vertebra-http/tls,vertebra-http/compression,vertebra-http/http3)
 	@uv run maturin develop --uv -r
 	@uv run maturin develop --uv -r -m src/rs/vertebra-bundler/Cargo.toml
 	@uv run maturin develop --uv -r -m src/rs/vertebra-storage/Cargo.toml
@@ -205,11 +205,14 @@ build-pgo: ts-build                                 ## Build PGO-optimized relea
 # Test
 # =============================================================================
 .PHONY: rs-test
-rs-test:                                            ## Run Rust tests (all features)
+rs-test:                                            ## Run Rust tests (all features + non-http3 fail-loud check)
 	@rm -rf /dev/shm/test-* /dev/shm/*vertebra* 2>/dev/null || true
-	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
-	@cd src/rs && cargo test --workspace --features tls,http3,compression,gcp
-	@echo "${OK} Rust tests passed"
+	if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
+	cd src/rs
+	cargo test --workspace --features tls,http3,compression,gcp
+	cargo test -p vertebra-http --features tls,compression --lib config::tests
+	cargo test -p vertebra-http --features tls,compression --test it test_run_with_listener_fails_loud_without_http3_feature
+	echo "${OK} Rust tests passed"
 
 .PHONY: py-test
 py-test: dev                                        ## Run Python tests

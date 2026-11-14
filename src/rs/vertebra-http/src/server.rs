@@ -274,6 +274,25 @@ pub fn bind_listener(addr: SocketAddr, reuse_port: bool) -> io::Result<TcpListen
     socket.listen(2048)
 }
 
+/// Bind a non-blocking `std::net::UdpSocket` with `SO_REUSEADDR` and optional Unix `SO_REUSEPORT`.
+pub fn bind_udp_listener(addr: SocketAddr, reuse_port: bool) -> io::Result<std::net::UdpSocket> {
+    let socket = socket2::Socket::new(
+        socket2::Domain::for_address(addr),
+        socket2::Type::DGRAM,
+        Some(socket2::Protocol::UDP),
+    )?;
+    socket.set_reuse_address(true)?;
+    #[cfg(unix)]
+    if reuse_port {
+        socket.set_reuse_port(true)?;
+    }
+    #[cfg(not(unix))]
+    let _ = reuse_port;
+    socket.set_nonblocking(true)?;
+    socket.bind(&addr.into())?;
+    Ok(socket.into())
+}
+
 /// Run the HTTP server with sharded collector channels until the shutdown signal resolves.
 pub async fn run_with_collector(
     config: Arc<ServerConfig>,
@@ -328,7 +347,13 @@ pub async fn run_with_listener(
         let rustls_cfg = (*tls_acc.rustls_config()).clone();
         let quic_cfg = crate::http3::build_quic_server_config(rustls_cfg, &config.http3)?;
         let udp_addr = SocketAddr::new(bound_addr.ip(), bound_addr.port());
-        let endpoint = quinn::Endpoint::server(quic_cfg, udp_addr)?;
+        let udp_socket = bind_udp_listener(udp_addr, config.reuse_port)?;
+        let endpoint = quinn::Endpoint::new(
+            quinn::EndpointConfig::default(),
+            Some(quic_cfg),
+            udp_socket,
+            Arc::new(quinn::TokioRuntime),
+        )?;
         let quic_port = endpoint.local_addr()?.port();
         info!(udp_addr = %udp_addr, quic_port, "vertebra-http HTTP/3 QUIC listening");
         (Some((endpoint, quic_port)), Some(quic_port))
@@ -358,10 +383,12 @@ pub async fn run_with_listener(
                 }
             }
         });
+        let h3_max_body_size = state.config.payload_limits.max_body_size;
         let join = tokio::spawn(crate::http3::serve_http3_endpoint(
             endpoint,
             quic_port,
             h3_cfg,
+            h3_max_body_size,
             h3_handler,
             h3_shutdown_rx,
         ));
@@ -407,6 +434,7 @@ pub async fn run_with_listener(
         }
     }
 
+    state.sse_hub.close_all();
     state
         .ws_registry
         .close_all(1001, "Server shutting down")
@@ -415,8 +443,18 @@ pub async fn run_with_listener(
     #[cfg(feature = "http3")]
     if let Some((h3_shutdown_tx, join)) = h3_handle.take() {
         let _ = h3_shutdown_tx.send(true);
-        if let Ok(Err(e)) = join.await {
-            debug!(error = %e, "HTTP/3 endpoint shutdown error");
+        match join.await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                error!(error = %e, "HTTP/3 endpoint shutdown error");
+                return Err(Box::new(e));
+            }
+            Err(join_err) => {
+                error!(error = %join_err, "HTTP/3 endpoint task panicked during shutdown");
+                return Err(Box::new(io::Error::other(format!(
+                    "HTTP/3 endpoint task failed: {join_err}"
+                ))));
+            }
         }
     }
 

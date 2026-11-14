@@ -129,14 +129,53 @@ where
         first_chunk.unwrap_or_default()
     };
 
-    if let Some(enc) = content_encoding {
-        let trimmed = enc.trim();
-        if !trimmed.is_empty() && !trimmed.eq_ignore_ascii_case("identity") {
-            return decode_request_payload(&raw_bytes, Some(trimmed), limits);
-        }
+    if let Some(enc) = is_active_content_encoding(content_encoding) {
+        return decode_request_payload(&raw_bytes, Some(enc), limits);
     }
 
     Ok(raw_bytes)
+}
+
+/// Return the trimmed `Content-Encoding` directive when decompression is required.
+pub(crate) fn is_active_content_encoding(raw: Option<&str>) -> Option<&str> {
+    let trimmed = raw?.trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("identity") {
+        None
+    } else {
+        Some(trimmed)
+    }
+}
+
+/// Validate a pre-buffered request payload (HTTP/3 QUIC) and decompress when `Content-Encoding` is active.
+///
+/// Returns `(decoded_bytes, was_decompressed)` so uncompressed payloads remain zero-copy `Bytes` slices.
+pub fn decode_buffered_body(
+    body: Bytes,
+    content_length: Option<usize>,
+    content_encoding: Option<&str>,
+    limits: &PayloadLimits,
+) -> Result<(Bytes, bool), PayloadError> {
+    if let Some(len) = content_length
+        && len > limits.max_body_size
+    {
+        return Err(PayloadError::TooLarge {
+            actual: len,
+            limit: limits.max_body_size,
+        });
+    }
+    if body.len() > limits.max_body_size {
+        return Err(PayloadError::TooLarge {
+            actual: body.len(),
+            limit: limits.max_body_size,
+        });
+    }
+    if body.is_empty() {
+        return Ok((Bytes::new(), false));
+    }
+    if let Some(enc) = is_active_content_encoding(content_encoding) {
+        return decode_request_payload(&body, Some(enc), limits).map(|decoded| (decoded, true));
+    }
+    Ok((body, false))
 }
 
 fn read_bounded<R: Read>(reader: R, max_decompressed_size: usize) -> Result<Bytes, PayloadError> {

@@ -49,8 +49,8 @@ You are a write-enabled specialist executing fixes and implementations in `http-
 
 ## Verification
 
-1. Run `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-http --features tls,compression`.
-2. Run `cargo check --manifest-path src/rs/Cargo.toml -p vertebra-http --features tls,compression,http3`.
+1. Run `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-http --features tls,http3,compression`.
+2. Run `cargo check --manifest-path src/rs/Cargo.toml -p vertebra-http --no-default-features --features tls,compression`.
 
 # Output Contract
 
