@@ -6,7 +6,10 @@ chapter_id: ch09-data-packaging-okf-and-routing-sync
 title: "Trim database-drivers-and-dialers.md (<= 200L) and finalize postgres-native-driver.md, postgres-limitations.md, and database-driver-limitations.md"
 description: "Update database-drivers-and-dialers.md (<= 200L), postgres-native-driver.md, postgres-limitations.md, and database-driver-limitations.md."
 status: stable
-state: pending
+state: completed
+commit: 04c0f1ff
+last_verified_at: "2026-11-14T03:58:57Z"
+last_verified_commit: d63f9ade
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -66,8 +69,8 @@ make review-check
 
 ## Acceptance Criteria
 
-- [ ] All 4 data OKF chapters are `<= 200` lines and pass `make review-check`.
-- [ ] Zero regressions in `ch09-data-packaging-okf-and-routing-sync` fast verification gate.
+- [x] All 4 data OKF chapters are `<= 200` lines and pass `make review-check`.
+- [x] Zero regressions in `ch09-data-packaging-okf-and-routing-sync` fast verification gate.
 
 [^drivers-okf]: `.agents/bundles/knowledge/domains/data/database-drivers-and-dialers.md` — Database drivers overview.
 [^pg-native-okf]: `.agents/bundles/knowledge/domains/data/postgres-native-driver.md` — PostgreSQL native extension chapter.

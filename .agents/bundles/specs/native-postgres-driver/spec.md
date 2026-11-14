@@ -4,7 +4,7 @@ flow_id: native-postgres-driver
 title: "Complete Standalone Native PostgreSQL Driver"
 description: "Complete verified replication reconnect supervision, Python replication handles, durable PostgresChangeSource, permanent native Python drivers, atomic psycopg/asyncpg removal and GCP dialer cleanup, PG14-18 conformance, benchmarks, and docs over the merged vertebra-postgres wheel."
 status: stable
-state: active
+state: completed
 planning_quality: standard
 planning_degraded_reason: null
 has_chapters: true
@@ -18,30 +18,33 @@ chapters:
   - ch07-wheel-ci-and-benchmarks
   - ch08-user-and-reference-docs
   - ch09-data-packaging-okf-and-routing-sync
-current_chapter: ch09-data-packaging-okf-and-routing-sync
-current_task: "native-postgres-driver:ch09:t01"
+current_chapter: null
+current_task: null
 parent_prd: native-data-platform
 research:
   - research/protocol-and-execution_20261105.md
   - research/cloud-material_20261105.md
 plan_revision: 9
 plan_commit: 18baadcd
-state_revision: 30
-last_verified_checkpoint: 0eabc0a2
-last_reviewed_chapter: ch08-user-and-reference-docs
-last_reviewed_commit: 0eabc0a2
+state_revision: 31
+last_verified_checkpoint: d63f9ade
+last_reviewed_chapter: ch09-data-packaging-okf-and-routing-sync
+last_reviewed_commit: d63f9ade
 created_at: "2026-11-03T04:05:00Z"
-updated_at: "2026-11-14T01:12:30Z"
+updated_at: "2026-11-14T03:59:30Z"
 generated:
   by: flow-plan
   at: "2026-11-13T00:25:00Z"
 verified:
   - by: agent:code-reviewer
-    at: "2026-11-14T01:12:01Z"
-    commit: 0eabc0a2
+    at: "2026-11-14T03:58:57Z"
+    commit: d63f9ade
+  - by: agent:docs-okf-reviewer
+    at: "2026-11-14T03:37:23Z"
+    commit: b3ab1375
   - by: agent:quality-reviewer
-    at: "2026-11-14T01:06:30Z"
-    commit: 0eabc0a2
+    at: "2026-11-14T03:57:54Z"
+    commit: d63f9ade
 tags:
   - rust
   - postgres
@@ -137,12 +140,12 @@ Nine cohesive chapters (`32` tasks) remain to finish logical replication supervi
 - [x] [7a7b5180] [ch06-live-conformance-and-service-acceptance](chapters/ch06-live-conformance-and-service-acceptance/spec.md) — PostgreSQL 14–18 conformance matrix with zero-skip hook plus live `pgoutput` replication and `PGCOPY`/`VTBARROW`/`LISTEN`/`pgvector`/`PgBouncer` suites.
 - [x] [af023efd] [ch07-wheel-ci-and-benchmarks](chapters/ch07-wheel-ci-and-benchmarks/spec.md) — `verify_postgres_wheel.py`, CI/release smoke lanes, free-threaded 8-thread pool proofs, `postgres-bench` group, Criterion benches, and testing OKF sync.
 - [x] [0eabc0a2] [ch08-user-and-reference-docs](chapters/ch08-user-and-reference-docs/spec.md) — Zensical user guides (`databases.md`, `analytics-and-cdc.md`, `cloud-dialers.md`, `extensions.md`), `native-stubs.md`, `README.md`, and `AGENTS.md`.
-- [~] [ch09-data-packaging-okf-and-routing-sync](chapters/ch09-data-packaging-okf-and-routing-sync/spec.md) — Final `database-drivers-and-dialers.md` (`<= 200L`), `postgres-native-driver.md`, `postgres-limitations.md`, `tech-stack.md`, `adr-004`, and `areas.toml` sync.
+- [x] [d63f9ade] [ch09-data-packaging-okf-and-routing-sync](chapters/ch09-data-packaging-okf-and-routing-sync/spec.md) — Final `database-drivers-and-dialers.md` (`<= 200L`), `postgres-native-driver.md`, `postgres-limitations.md`, `tech-stack.md`, `adr-004`, and `areas.toml` sync.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Active Frontier**: Chapters `ch01`–`ch08` (`28/32` tasks) are completed and reviewed; `ch09-data-packaging-okf-and-routing-sync` is the active chapter (`4` open `compact` tasks remain).
-- **Downstream Unlocks**: Completing `ch05` unblocks [`broker-pool-sharing`](../broker-pool-sharing/spec.md), [`driver-conformance-ci`](../driver-conformance-ci/spec.md), [`native-redis-driver`](../native-redis-driver/spec.md), [`native-adapter-organization`](../native-adapter-organization/spec.md), [`sqlspec-adapter-parity`](../sqlspec-adapter-parity/spec.md), and [`queues-tasks-and-channels`](../queues-tasks-and-channels/spec.md).
+- **Completed Frontier**: All `9` chapters (`32/32` tasks) are completed and reviewed through `d63f9ade`; zero tasks remain.
+- **Downstream Unlocks**: [`broker-pool-sharing`](../broker-pool-sharing/spec.md), [`driver-conformance-ci`](../driver-conformance-ci/spec.md), [`native-redis-driver`](../native-redis-driver/spec.md), [`native-adapter-organization`](../native-adapter-organization/spec.md), [`sqlspec-adapter-parity`](../sqlspec-adapter-parity/spec.md), and [`queues-tasks-and-channels`](../queues-tasks-and-channels/spec.md).
 - **`/flow:finish` Full Gate**: `make lint-all && make rs-test && make py-test && make postgres-wheel-check && make postgres-test && make postgres-bench-check && make docs-check && make review-check`.
 
 [^pg-native-okf]: `.agents/bundles/knowledge/domains/data/postgres-native-driver.md` — Merged standalone vertebra-postgres wheel and bounded ReplicationSession baseline.

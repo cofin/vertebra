@@ -6,7 +6,10 @@ chapter_id: ch09-data-packaging-okf-and-routing-sync
 title: "Synchronize query-pipeline-cdc-and-tenancy.md and knowledge indexes"
 description: "Update query-pipeline-cdc-and-tenancy.md for $N PostgreSQL SQLSpec binds and PostgresChangeSource and sync knowledge/domains indexes."
 status: stable
-state: pending
+state: completed
+commit: 6b630ad6
+last_verified_at: "2026-11-14T03:58:57Z"
+last_verified_commit: d63f9ade
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -62,7 +65,7 @@ make review-check
 
 ## Acceptance Criteria
 
-- [ ] CDC/tenancy chapter and indexes reflect permanent PostgreSQL state cleanly.
-- [ ] Zero regressions in `ch09-data-packaging-okf-and-routing-sync` fast verification gate.
+- [x] CDC/tenancy chapter and indexes reflect permanent PostgreSQL state cleanly.
+- [x] Zero regressions in `ch09-data-packaging-okf-and-routing-sync` fast verification gate.
 
 [^cdc-okf]: `.agents/bundles/knowledge/domains/data/query-pipeline-cdc-and-tenancy.md` — Pipelines, CDC, and tenancy OKF chapter.

@@ -5,16 +5,26 @@ chapter_id: ch09-data-packaging-okf-and-routing-sync
 title: "Chapter 09: Data, Product, Packaging OKF, and Review Routing Sync"
 description: "Finalize database-drivers-and-dialers.md (<= 200L), postgres-native-driver.md, postgres-limitations.md, tech-stack.md, product.md, adr-004, and areas.toml."
 status: stable
-state: active
+state: completed
+last_reviewed_commit: d63f9ade
 planning_status: complete
 planning_quality: standard
 planning_degraded_reason: null
 plan_commit: 18baadcd
-updated_at: "2026-11-14T01:12:30Z"
+updated_at: "2026-11-14T03:59:30Z"
 generated:
   by: flow-plan
   at: "2026-11-13T00:25:00Z"
 verified:
+  - by: agent:code-reviewer
+    at: "2026-11-14T03:58:57Z"
+    commit: d63f9ade
+  - by: agent:docs-okf-reviewer
+    at: "2026-11-14T03:37:23Z"
+    commit: b3ab1375
+  - by: agent:quality-reviewer
+    at: "2026-11-14T03:57:54Z"
+    commit: d63f9ade
   - by: agent:plan-generator
     at: "2026-11-13T00:25:00Z"
     commit: 18baadcd
@@ -68,14 +78,14 @@ Completes the 5-dimension OKF curation required before `/flow:finish` and `/flow
 
 ## 5. Implementation Plan
 
-- [ ] [t01-drivers-postgres-native-and-limitations-okf.md](tasks/t01-drivers-postgres-native-and-limitations-okf.md) — Update database-drivers-and-dialers.md (<= 200L), postgres-native-driver.md, and postgres-limitations.md removing psycopg_pool split-state caveats.
-- [ ] [t02-cdc-tenancy-and-index-okf-sync.md](tasks/t02-cdc-tenancy-and-index-okf-sync.md) — Update query-pipeline-cdc-and-tenancy.md for $N PostgreSQL SQLSpec binds and PostgresChangeSource and sync knowledge/domains indexes.
-- [ ] [t03-product-and-packaging-okf-sync.md](tasks/t03-product-and-packaging-okf-sync.md) — Update product/tech-stack.md, product/product.md, and domains/frontend/packaging-and-pgo.md (<= 200L each) for postgres-bench and companion wheel checks.
-- [ ] [t04-adr-004-and-review-routing-sync.md](tasks/t04-adr-004-and-review-routing-sync.md) — Update adr-004-optional-driver-wheels-and-shm-ownership.md and verify areas.toml routes all vertebra-postgres and adapter files cleanly.
+- [x] [04c0f1ff] [t01-drivers-postgres-native-and-limitations-okf.md](tasks/t01-drivers-postgres-native-and-limitations-okf.md) — Update database-drivers-and-dialers.md (<= 200L), postgres-native-driver.md, and postgres-limitations.md removing psycopg_pool split-state caveats.
+- [x] [6b630ad6] [t02-cdc-tenancy-and-index-okf-sync.md](tasks/t02-cdc-tenancy-and-index-okf-sync.md) — Update query-pipeline-cdc-and-tenancy.md for $N PostgreSQL SQLSpec binds and PostgresChangeSource and sync knowledge/domains indexes.
+- [x] [6b630ad6] [t03-product-and-packaging-okf-sync.md](tasks/t03-product-and-packaging-okf-sync.md) — Update product/tech-stack.md, product/product.md, and domains/frontend/packaging-and-pgo.md (<= 200L each) for postgres-bench and companion wheel checks.
+- [x] [04c0f1ff] [t04-adr-004-and-review-routing-sync.md](tasks/t04-adr-004-and-review-routing-sync.md) — Update adr-004-optional-driver-wheels-and-shm-ownership.md and verify areas.toml routes all vertebra-postgres and adapter files cleanly.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-Active frontier (`4` `compact` tasks remaining in `ch09`), followed by `/flow:finish` full polyglot + live Docker/wheel/bench verification and `/flow:review`.
+All `4` `ch09` tasks are completed and verified through `b3ab1375` / `d63f9ade`; zero tasks remain.
 
 ```bash
 make review-check && make review-route BASE=18baadcd

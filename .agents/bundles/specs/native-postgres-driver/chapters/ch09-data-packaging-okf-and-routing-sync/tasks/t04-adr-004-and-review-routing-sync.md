@@ -6,7 +6,10 @@ chapter_id: ch09-data-packaging-okf-and-routing-sync
 title: "Synchronize adr-004 and verify review-core areas.toml routing"
 description: "Update adr-004-optional-driver-wheels-and-shm-ownership.md and verify areas.toml routes all vertebra-postgres and adapter files cleanly."
 status: stable
-state: pending
+state: completed
+commit: 04c0f1ff
+last_verified_at: "2026-11-14T03:58:57Z"
+last_verified_commit: d63f9ade
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -59,7 +62,7 @@ make review-check && make review-route BASE=18baadcd && uv run --no-sync pytest 
 
 ## Acceptance Criteria
 
-- [ ] `make review-check` and `make review-route` pass with `0` issues.
-- [ ] Zero regressions in `ch09-data-packaging-okf-and-routing-sync` fast verification gate.
+- [x] `make review-check` and `make review-route` pass with `0` issues.
+- [x] Zero regressions in `ch09-data-packaging-okf-and-routing-sync` fast verification gate.
 
 [^areas-toml]: `.agents/skills/review-core/references/areas.toml` — Review areas manifest.

@@ -1,5 +1,14 @@
 # Bundle Activity Log
 
+## [2026-11-14T03:59:30Z] finish | native-postgres-driver
+
+- Completed `native-postgres-driver` (`ch01`–`ch09`, `32/32` tasks) through `d63f9ade`: standalone `vertebra-postgres` (`vertebra._postgres`), verified replication supervision (`ReplicationSupervisor`), cancel-safe `AsyncPostgresReplication`, durable CAS `PostgresChangeSource`, permanent `_sync.py`/`_async.py` drivers, atomic removal of `psycopg`/`asyncpg`, GCP dialer cleanup, PG14–18 conformance, companion wheel isolation, Criterion + Python benchmark lanes, Zensical docs, and cross-bundle OKF reconciliation.
+
+## [2026-11-14T03:59:30Z] chapter-complete | native-postgres-driver ch09-data-packaging-okf-and-routing-sync
+
+- Closed `ch09-data-packaging-okf-and-routing-sync` through `b3ab1375` / `d63f9ade`: trimmed `database-drivers-and-dialers.md` (`<= 200L`), finalized `postgres-native-driver.md`, `postgres-limitations.md`, `database-driver-limitations.md`, `query-pipeline-cdc-and-tenancy.md`, `tech-stack.md`, `product.md`, `packaging-and-pgo.md`, `sqlspec-alchemy-and-dialects.md`, `adr-004`, knowledge/domain indexes, and `areas.toml` routing, resolved follow-up CDC lock/reconcile/cursor invariants (`test_postgres_change_stream.py`: `34 passed`), and obtained clean `PASS` verdicts across zero-context `code-reviewer`, `docs-okf-reviewer`, and `quality-reviewer`.
+- Advanced active frontier to completed state (`0` tasks remain).
+
 ## [2026-11-14T01:12:30Z] chapter-complete | native-postgres-driver ch08-user-and-reference-docs
 
 - Closed `ch08-user-and-reference-docs` through `0eabc0a2`: synchronized all public Zensical usage/reference guides (`databases.md`, `analytics-and-cdc.md`, `database-capabilities.md`, `native-stubs.md`, `reference/index.md`, `installation.md`, `cloud-dialers.md`, `packaging-and-deployment.md`, `queues-and-realtime.md`, `extensions.md`, `usage/index.md`), `README.md`, and `AGENTS.md` (`<= 100L`), added optional `[loop]` extras (`uvloop`, `winloop`, `rloop`, `zuvloop`) and shared `LOOP_BACKEND_CHOICES` CLI flags across `vtb run`/`vtb dev`/`litestar run`, ensured concrete `connection_type` across all 16 SQLSpec adapter configs without Litestar deprecation warnings, and updated runtime/Litestar/product OKF chapters (`ruff`, `mypy`, `237 passed` offline docs/extension/server tests, `make docs`, `make review-check`, and dual zero-context reviews clean).
