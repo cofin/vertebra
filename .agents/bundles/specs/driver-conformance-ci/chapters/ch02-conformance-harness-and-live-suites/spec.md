@@ -5,20 +5,21 @@ chapter_id: ch02-conformance-harness-and-live-suites
 title: "Chapter 02: Conformance Gate, Versioned Fixtures, and Engine Live Suites"
 description: "Implement ConformanceGate and ServiceVersionMatrix, clean test_driver_conformance.py with MariaDB support, and add live native suites for DuckDB, MySQL/MariaDB, SQL Server, and Oracle."
 status: stable
-state: active
+state: completed
 planning_status: complete
 planning_quality: standard
 planning_degraded_reason: null
 plan_revision: 4
 plan_commit: 37972f2a
-updated_at: "2026-11-14T17:42:00Z"
+last_reviewed_commit: 7d11fb2c
+updated_at: "2026-11-14T17:48:00Z"
 generated:
   by: flow-plan
   at: "2026-11-12T23:55:00Z"
 verified:
-  - by: agent:plan-generator
-    at: "2026-11-14T17:24:00Z"
-    commit: 37972f2a
+  - by: agent:code-reviewer
+    at: "2026-11-14T17:48:00Z"
+    commit: 7d11fb2c
 tags:
   - conformance
   - pytest-databases

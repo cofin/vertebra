@@ -1,8 +1,9 @@
 # Bundle Activity Log
 
-## [2026-11-14T17:42:00Z] chapter-checkpoint | driver-conformance-ci ch02-conformance-harness-and-live-suites
+## [2026-11-14T17:48:00Z] chapter-complete | driver-conformance-ci ch02-conformance-harness-and-live-suites
 
-- Completed `ch02-conformance-harness-and-live-suites` (`t01`–`t04`) at `38e02b16`: added `ConformanceGate` and `ServiceVersionMatrix` in `src/py/tests/integration/conformance_gate.py`, wired zero-skip session hooks and versioned `vtb_{mysql,mariadb,oracle,mssql}_config` fixtures in `src/py/tests/integration/conftest.py`, added `mariadb` `EngineConformanceSpec` and removed dead `_DUCKDB_SKIP_REASON` / `VERTEBRA_CONFORMANCE_DUCKDB_DSN` in `test_driver_conformance.py`, and created `test_conformance_gate.py`, `test_duckdb_native.py`, `test_mysql_native.py`, `test_mssql_native.py`, and updated `test_oracle_native.py` (`192 passed, 369 skipped` offline; `42 passed, 0 skipped` under `VERTEBRA_CONFORMANCE_ENGINES=duckdb`; `ruff`, `mypy`, and `make review-check` clean).
+- Closed `ch02-conformance-harness-and-live-suites` (`t01`–`t04`) at `38e02b16` (sync `7d11fb2c`): added `ConformanceGate` and `ServiceVersionMatrix` in `src/py/tests/integration/conformance_gate.py`, wired zero-skip session hooks and versioned `vtb_{mysql,mariadb,oracle,mssql}_config` fixtures in `src/py/tests/integration/conftest.py`, added `mariadb` `EngineConformanceSpec` and removed dead `_DUCKDB_SKIP_REASON` / `VERTEBRA_CONFORMANCE_DUCKDB_DSN` in `test_driver_conformance.py`, and created `test_conformance_gate.py`, `test_duckdb_native.py`, `test_mysql_native.py`, `test_mssql_native.py`, and updated `test_oracle_native.py` (`192 passed, 369 skipped` offline; `42 passed, 0 skipped` under `VERTEBRA_CONFORMANCE_ENGINES=duckdb`; `ruff`, `mypy`, `make review-check`, and dual zero-context `code-reviewer` + `quality-reviewer` reviews clean).
+- Advanced active frontier to `ch03-make-lanes-bench-isolation-and-ci` (`driver-conformance-ci:ch03:t01`; `6` tasks remain across `ch03`–`ch04`).
 
 ## [2026-11-14T17:26:00Z] revise | driver-conformance-ci
 
