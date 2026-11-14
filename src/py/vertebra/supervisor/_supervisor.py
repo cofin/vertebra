@@ -13,8 +13,9 @@ import sysconfig
 import tempfile
 import threading
 from collections.abc import MutableMapping
-from dataclasses import dataclass
 from pathlib import Path
+
+import msgspec
 
 from vertebra.cli.banner import render_shutdown
 from vertebra.cli.tui import LogBuffer, run_dev_tui, stderr_reader
@@ -44,8 +45,7 @@ def is_packaged_server_binary(binary: str | Path) -> bool:
     return resolved.is_relative_to(pkg_bin_dir)
 
 
-@dataclass(frozen=True, slots=True)
-class EmbeddedPythonRuntime:
+class EmbeddedPythonRuntime(msgspec.Struct, frozen=True, gc=False):
     """Host CPython embedding metadata exported to ``vertebra-server`` subprocesses."""
 
     python_home: Path

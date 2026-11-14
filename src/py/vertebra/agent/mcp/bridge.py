@@ -39,7 +39,7 @@ _MAX_SSE_RECONNECTS = 5
 _PRE_NEGOTIATION_HEADERLESS_METHODS = frozenset({"ping", "notifications/initialized"})
 
 
-class BridgeResponse(msgspec.Struct, frozen=True, gc=False):
+class BridgeResponse(msgspec.Struct, frozen=True):
     """Normalized HTTP response returned by a BridgeTransport."""
 
     status: int
@@ -104,22 +104,6 @@ class OidcTokenSource:
             self.cache.invalidate(self.audience, self._last_generation)
 
 
-class _CallableTokenSource:
-    """Adapter wrapping a legacy zero-arg token_provider callable."""
-
-    def __init__(self, provider: Callable[[], Awaitable[str | None] | str | None]) -> None:
-        self._provider = provider
-
-    async def get_token(self) -> str | None:
-        resolved = self._provider()
-        if inspect.isawaitable(resolved):
-            resolved = await resolved
-        return str(resolved) if resolved else None
-
-    def invalidate(self) -> None:
-        return None
-
-
 @runtime_checkable
 class BridgeTransport(Protocol):
     """HTTP transport abstraction supporting POST, streaming GET SSE, and DELETE."""
@@ -181,6 +165,60 @@ class UrllibBridgeTransport:
         finally:
             resp.close()
         return BridgeResponse(status=int(resp.status), headers=resp_headers, body=resp_bytes)
+
+
+def run_stdio_http_bridge(
+    *,
+    url: str,
+    bearer_token: str | None = None,
+    token_source: BridgeTokenSource | None = None,
+    token_provider: Callable[[], Awaitable[str | None] | str | None] | None = None,
+    audience: str | None = None,
+    timeout_s: float = 30.0,
+    max_message_bytes: int = 4_194_304,
+    stdin: TextIO | AsyncIterable[bytes] | None = None,
+    stdout: TextIO | Callable[[bytes], Awaitable[None]] | None = None,
+    transport: BridgeTransport | Callable[..., Any] | None = None,
+    reconnect_base_delay_s: float = 0.5,
+) -> int:
+    """Forward newline-delimited JSON-RPC frames over HTTP/SSE with optional OIDC auth."""
+    if token_source is not None:
+        resolved_source = token_source
+    elif audience is not None:
+        resolved_source = OidcTokenSource(audience)
+    elif token_provider is not None:
+        resolved_source = _CallableTokenSource(token_provider)
+    else:
+        resolved_source = StaticTokenSource(bearer_token or os.environ.get("VERTEBRA_MCP_TOKEN"))
+
+    return anyio.run(
+        lambda: _run_bridge_async(
+            url=url,
+            token_source=resolved_source,
+            timeout_s=timeout_s,
+            max_message_bytes=max_message_bytes,
+            stdin=stdin,
+            stdout=stdout,
+            transport=transport,
+            reconnect_base_delay_s=reconnect_base_delay_s,
+        )
+    )
+
+
+class _CallableTokenSource:
+    """Adapter wrapping a legacy zero-arg token_provider callable."""
+
+    def __init__(self, provider: Callable[[], Awaitable[str | None] | str | None]) -> None:
+        self._provider = provider
+
+    async def get_token(self) -> str | None:
+        resolved = self._provider()
+        if inspect.isawaitable(resolved):
+            resolved = await resolved
+        return str(resolved) if resolved else None
+
+    def invalidate(self) -> None:
+        return None
 
 
 async def _iter_urllib_stream(resp: Any) -> AsyncIterator[bytes]:
@@ -559,41 +597,3 @@ async def _run_bridge_async(
             await _send_http("DELETE", delete_headers, b"")
 
     return 0
-
-
-def run_stdio_http_bridge(
-    *,
-    url: str,
-    bearer_token: str | None = None,
-    token_source: BridgeTokenSource | None = None,
-    token_provider: Callable[[], Awaitable[str | None] | str | None] | None = None,
-    audience: str | None = None,
-    timeout_s: float = 30.0,
-    max_message_bytes: int = 4_194_304,
-    stdin: TextIO | AsyncIterable[bytes] | None = None,
-    stdout: TextIO | Callable[[bytes], Awaitable[None]] | None = None,
-    transport: BridgeTransport | Callable[..., Any] | None = None,
-    reconnect_base_delay_s: float = 0.5,
-) -> int:
-    """Forward newline-delimited JSON-RPC frames over HTTP/SSE with optional OIDC auth."""
-    if token_source is not None:
-        resolved_source = token_source
-    elif audience is not None:
-        resolved_source = OidcTokenSource(audience)
-    elif token_provider is not None:
-        resolved_source = _CallableTokenSource(token_provider)
-    else:
-        resolved_source = StaticTokenSource(bearer_token or os.environ.get("VERTEBRA_MCP_TOKEN"))
-
-    return anyio.run(
-        lambda: _run_bridge_async(
-            url=url,
-            token_source=resolved_source,
-            timeout_s=timeout_s,
-            max_message_bytes=max_message_bytes,
-            stdin=stdin,
-            stdout=stdout,
-            transport=transport,
-            reconnect_base_delay_s=reconnect_base_delay_s,
-        )
-    )

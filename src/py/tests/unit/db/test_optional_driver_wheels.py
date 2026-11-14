@@ -37,6 +37,10 @@ from vertebra.typing import MissingDependencyError
 from vertebra.utils.module_loader import reset_dependency_cache
 
 _REPO_ROOT = Path(__file__).resolve().parents[5]
+_ROOT_PYPROJECT_DATA = tomllib.loads((_REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+_NON_DUCKDB_DEPENDENCY_GROUPS = tuple(
+    group_name for group_name in _ROOT_PYPROJECT_DATA.get("dependency-groups", {}) if group_name != "duckdb"
+)
 
 SIBLING_WHEEL_MANIFESTS: tuple[tuple[str, str, str], ...] = (
     ("vertebra-duckdb", "src/rs/vertebra-duckdb/pyproject.toml", "_duckdb.pyi"),
@@ -51,27 +55,28 @@ SIBLING_WHEEL_MANIFESTS: tuple[tuple[str, str, str], ...] = (
 
 
 def test_root_pyproject_omits_pypi_duckdb_from_core_and_non_duckdb_groups() -> None:
-    """Root `pyproject.toml` declares `vertebra-core[duckdb]` matching project version and isolates PyPI `duckdb`."""
-    data = tomllib.loads((_REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
-    version = data["project"]["version"]
+    """Root `pyproject.toml` declares `vertebra-duckdb` matching project version and isolates PyPI `duckdb`."""
+    version = _ROOT_PYPROJECT_DATA["project"]["version"]
     pinned = f"vertebra-duckdb=={version}"
-    opt_deps = data["project"]["optional-dependencies"]
+    opt_deps = _ROOT_PYPROJECT_DATA["project"]["optional-dependencies"]
     assert opt_deps["duckdb"] == [pinned]
     assert "all" not in opt_deps
 
-    uv_sources = data["tool"]["uv"]["sources"]
+    uv_sources = _ROOT_PYPROJECT_DATA["tool"]["uv"]["sources"]
     assert uv_sources["vertebra-duckdb"] == {"path": "src/rs/vertebra-duckdb", "editable": True}
 
-    core_deps = data["project"].get("dependencies", [])
+    core_deps = _ROOT_PYPROJECT_DATA["project"].get("dependencies", [])
     assert not any(str(dep).startswith("duckdb") and not str(dep).startswith("vertebra-duckdb") for dep in core_deps)
 
-    for group_name, group_deps in data.get("dependency-groups", {}).items():
-        if group_name == "duckdb":
-            continue
-        assert not any(
-            isinstance(dep, str) and dep.startswith("duckdb") and not dep.startswith("vertebra-duckdb")
-            for dep in group_deps
-        ), f"dependency-groups.{group_name} unexpectedly contains PyPI duckdb"
+
+@pytest.mark.parametrize("group_name", _NON_DUCKDB_DEPENDENCY_GROUPS)
+def test_root_pyproject_dependency_group_omits_pypi_duckdb(group_name: str) -> None:
+    """Non-duckdb dependency groups in `pyproject.toml` do not include PyPI `duckdb`."""
+    group_deps = _ROOT_PYPROJECT_DATA.get("dependency-groups", {})[group_name]
+    assert not any(
+        isinstance(dep, str) and dep.startswith("duckdb") and not dep.startswith("vertebra-duckdb")
+        for dep in group_deps
+    ), f"dependency-groups.{group_name} unexpectedly contains PyPI duckdb"
 
 
 def test_vertebra_duckdb_wheel_pyproject_includes_only_duckdb_stub() -> None:

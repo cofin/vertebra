@@ -43,7 +43,7 @@ class EmbeddingBrokerConfig(msgspec.Struct, frozen=True, gc=False):
     outlier_length_ratio: float = 4.0
 
 
-class BackendFactory(msgspec.Struct, frozen=True, gc=False, kw_only=True):
+class BackendFactory(msgspec.Struct, frozen=True, kw_only=True):
     """Importable factory that builds an embedding inference callable.
 
     The quarantined sidecar receives this value over its JSON pipe and imports ``target`` itself,
@@ -70,51 +70,6 @@ class BackendFactory(msgspec.Struct, frozen=True, gc=False, kw_only=True):
         for attr in qualname.split("."):
             resolved = getattr(resolved, attr)
         return cast("BackendInferenceCallable", resolved(**self.options))
-
-
-class _QueuedBrokerRequest(msgspec.Struct, gc=False):
-    """Pending singular embedding request queued in `EmbeddingBroker`."""
-
-    text: str
-    estimated_tokens: int
-    future: asyncio.Future[VectorView]
-
-
-class _SubprocessRpcRequest(msgspec.Struct, frozen=True, gc=False):
-    """Line-delimited JSON request sent to the quarantined sidecar worker."""
-
-    shm_name: str
-    texts: list[str]
-    dimensions: int
-    factory: BackendFactory
-
-
-class _SubprocessRpcResponse(msgspec.Struct, frozen=True, gc=False):
-    """Line-delimited JSON response returned by the quarantined sidecar worker."""
-
-    shm_name: str
-    count: int
-    dimensions: int
-    error: str | None = None
-
-
-class _BrokerLoopState(msgspec.Struct, weakref=True):
-    """Per-event-loop queue, flush task, lock, and sidecar process state for `EmbeddingBroker`."""
-
-    pending: deque[_QueuedBrokerRequest]
-    subprocess_lock: asyncio.Lock
-    flush_task: asyncio.Task[None] | None = None
-    subprocess: asyncio.subprocess.Process | None = None
-
-
-def _unlink_shm_segment(shm_name: str) -> None:
-    """Best-effort unlink of a POSIX `/dev/shm` named embedding slab segment."""
-    clean_name = shm_name.lstrip("/")
-    if not clean_name:
-        return
-    shm_path = f"/dev/shm/{clean_name}"
-    with contextlib.suppress(FileNotFoundError, OSError):
-        os.unlink(shm_path)
 
 
 class EmbeddingBroker:
@@ -152,83 +107,6 @@ class EmbeddingBroker:
         )
         self._loop_states_lock = threading.Lock()
         self._reap_tasks: set[asyncio.Task[None]] = set()
-
-    @staticmethod
-    def _terminate_process_nowait(proc: asyncio.subprocess.Process | None) -> None:
-        """Close stdin and kill a sidecar subprocess without awaiting inside cancelled or foreign-loop paths."""
-        if proc is None:
-            return
-        if proc.stdin is not None:
-            with contextlib.suppress(Exception):
-                proc.stdin.close()
-        if proc.returncode is None:
-            with contextlib.suppress(ProcessLookupError, OSError):
-                proc.kill()
-
-    @staticmethod
-    def _terminate_state_ref(state_ref: weakref.ref[_BrokerLoopState]) -> None:
-        """Best-effort finalizer terminating any sidecar held by a garbage-collected loop state."""
-        state = state_ref()
-        if state is not None:
-            EmbeddingBroker._terminate_process_nowait(state.subprocess)
-            state.subprocess = None
-
-    def _schedule_reap_and_cleanup(
-        self,
-        loop: asyncio.AbstractEventLoop,
-        proc: asyncio.subprocess.Process,
-        shm_names: list[str],
-    ) -> bool:
-        """Schedule background process reaping and post-exit `/dev/shm` cleanup on an open event loop."""
-        if loop.is_closed():
-            return False
-
-        async def _reap() -> None:
-            try:
-                if proc.returncode is None:
-                    with contextlib.suppress(Exception):
-                        await asyncio.wait_for(proc.wait(), timeout=5.0)
-            finally:
-                for segment_name in shm_names:
-                    _unlink_shm_segment(segment_name)
-
-        task = loop.create_task(_reap())
-        self._reap_tasks.add(task)
-        task.add_done_callback(self._reap_tasks.discard)
-        return True
-
-    def _state_for_loop(self, loop: asyncio.AbstractEventLoop | None = None) -> _BrokerLoopState:
-        """Return or create the per-event-loop state bucket while pruning closed loops."""
-        target_loop = loop or asyncio.get_running_loop()
-        with self._loop_states_lock:
-            closed_loops = [
-                existing for existing in list(self._loop_states) if existing.is_closed() and existing is not target_loop
-            ]
-            for closed_loop in closed_loops:
-                closed_state = self._loop_states.pop(closed_loop, None)
-                if closed_state is not None:
-                    self._terminate_process_nowait(closed_state.subprocess)
-            state = self._loop_states.get(target_loop)
-            if state is None:
-                state = _BrokerLoopState(pending=deque(), subprocess_lock=asyncio.Lock())
-                self._loop_states[target_loop] = state
-                weakref.finalize(target_loop, self._terminate_state_ref, weakref.ref(state))
-            return state
-
-    async def _reset_subprocess(self, state: _BrokerLoopState) -> None:
-        """Terminate and clear a broken or exited sidecar subprocess for the active loop."""
-        proc = state.subprocess
-        state.subprocess = None
-        if proc is None:
-            return
-        if proc.stdin is not None:
-            with contextlib.suppress(Exception):
-                proc.stdin.close()
-        if proc.returncode is None:
-            with contextlib.suppress(ProcessLookupError, OSError):
-                proc.kill()
-            with contextlib.suppress(Exception):
-                await proc.wait()
 
     @property
     def dimensions(self) -> int:
@@ -403,6 +281,83 @@ class EmbeddingBroker:
         if loop_reap_tasks:
             await asyncio.gather(*loop_reap_tasks, return_exceptions=True)
 
+    @staticmethod
+    def _terminate_process_nowait(proc: asyncio.subprocess.Process | None) -> None:
+        """Close stdin and kill a sidecar subprocess without awaiting inside cancelled or foreign-loop paths."""
+        if proc is None:
+            return
+        if proc.stdin is not None:
+            with contextlib.suppress(Exception):
+                proc.stdin.close()
+        if proc.returncode is None:
+            with contextlib.suppress(ProcessLookupError, OSError):
+                proc.kill()
+
+    @staticmethod
+    def _terminate_state_ref(state_ref: weakref.ref[_BrokerLoopState]) -> None:
+        """Best-effort finalizer terminating any sidecar held by a garbage-collected loop state."""
+        state = state_ref()
+        if state is not None:
+            EmbeddingBroker._terminate_process_nowait(state.subprocess)
+            state.subprocess = None
+
+    def _schedule_reap_and_cleanup(
+        self,
+        loop: asyncio.AbstractEventLoop,
+        proc: asyncio.subprocess.Process,
+        shm_names: list[str],
+    ) -> bool:
+        """Schedule background process reaping and post-exit `/dev/shm` cleanup on an open event loop."""
+        if loop.is_closed():
+            return False
+
+        async def _reap() -> None:
+            try:
+                if proc.returncode is None:
+                    with contextlib.suppress(Exception):
+                        await asyncio.wait_for(proc.wait(), timeout=5.0)
+            finally:
+                for segment_name in shm_names:
+                    _unlink_shm_segment(segment_name)
+
+        task = loop.create_task(_reap())
+        self._reap_tasks.add(task)
+        task.add_done_callback(self._reap_tasks.discard)
+        return True
+
+    def _state_for_loop(self, loop: asyncio.AbstractEventLoop | None = None) -> _BrokerLoopState:
+        """Return or create the per-event-loop state bucket while pruning closed loops."""
+        target_loop = loop or asyncio.get_running_loop()
+        with self._loop_states_lock:
+            closed_loops = [
+                existing for existing in list(self._loop_states) if existing.is_closed() and existing is not target_loop
+            ]
+            for closed_loop in closed_loops:
+                closed_state = self._loop_states.pop(closed_loop, None)
+                if closed_state is not None:
+                    self._terminate_process_nowait(closed_state.subprocess)
+            state = self._loop_states.get(target_loop)
+            if state is None:
+                state = _BrokerLoopState(pending=deque(), subprocess_lock=asyncio.Lock())
+                self._loop_states[target_loop] = state
+                weakref.finalize(target_loop, self._terminate_state_ref, weakref.ref(state))
+            return state
+
+    async def _reset_subprocess(self, state: _BrokerLoopState) -> None:
+        """Terminate and clear a broken or exited sidecar subprocess for the active loop."""
+        proc = state.subprocess
+        state.subprocess = None
+        if proc is None:
+            return
+        if proc.stdin is not None:
+            with contextlib.suppress(Exception):
+                proc.stdin.close()
+        if proc.returncode is None:
+            with contextlib.suppress(ProcessLookupError, OSError):
+                proc.kill()
+            with contextlib.suppress(Exception):
+                await proc.wait()
+
     async def _flush_loop(self, loop: asyncio.AbstractEventLoop, state: _BrokerLoopState) -> None:
         """Wait for the coalesce window and drain pending singular requests on the owning loop."""
         try:
@@ -515,6 +470,51 @@ class EmbeddingBroker:
         if self._backend_fn is None:
             self._backend_fn = cast("BackendFactory", self._backend_factory).build()
         return self._backend_fn
+
+
+class _QueuedBrokerRequest(msgspec.Struct):
+    """Pending singular embedding request queued in `EmbeddingBroker`."""
+
+    text: str
+    estimated_tokens: int
+    future: asyncio.Future[VectorView]
+
+
+class _SubprocessRpcRequest(msgspec.Struct, frozen=True):
+    """Line-delimited JSON request sent to the quarantined sidecar worker."""
+
+    shm_name: str
+    texts: list[str]
+    dimensions: int
+    factory: BackendFactory
+
+
+class _SubprocessRpcResponse(msgspec.Struct, frozen=True, gc=False):
+    """Line-delimited JSON response returned by the quarantined sidecar worker."""
+
+    shm_name: str
+    count: int
+    dimensions: int
+    error: str | None = None
+
+
+class _BrokerLoopState(msgspec.Struct, weakref=True):
+    """Per-event-loop queue, flush task, lock, and sidecar process state for `EmbeddingBroker`."""
+
+    pending: deque[_QueuedBrokerRequest]
+    subprocess_lock: asyncio.Lock
+    flush_task: asyncio.Task[None] | None = None
+    subprocess: asyncio.subprocess.Process | None = None
+
+
+def _unlink_shm_segment(shm_name: str) -> None:
+    """Best-effort unlink of a POSIX `/dev/shm` named embedding slab segment."""
+    clean_name = shm_name.lstrip("/")
+    if not clean_name:
+        return
+    shm_path = f"/dev/shm/{clean_name}"
+    with contextlib.suppress(FileNotFoundError, OSError):
+        os.unlink(shm_path)
 
 
 def _run_sidecar_worker_main() -> None:

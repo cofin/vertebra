@@ -233,7 +233,7 @@ duckdb-test:                                        ## Run vertebra-duckdb Rust 
 duckdb-wheel-check:                                 ## Build vertebra-duckdb wheel and verify payload isolation
 	@mkdir -p /tmp/vtb-wheels-duckdb && rm -f /tmp/vtb-wheels-duckdb/*.whl
 	@uv run maturin build --manifest-path src/rs/vertebra-duckdb/Cargo.toml --out /tmp/vtb-wheels-duckdb
-	@uv run python -c 'import glob, zipfile; whl = sorted(glob.glob("/tmp/vtb-wheels-duckdb/vertebra_duckdb-*.whl"))[-1]; zf = zipfile.ZipFile(whl); names = zf.namelist(); assert any(n.startswith("vertebra/_duckdb") and (n.endswith(".so") or n.endswith(".pyd") or n.endswith(".dylib")) for n in names), names; bad = [n for n in names if n.startswith("vertebra/") and not n.startswith("vertebra/_duckdb")]; assert not bad, f"Unexpected files in vertebra-duckdb wheel: {bad}"'
+	@PYTHONPATH="src/py:." uv run --no-sync python tools/scripts/_wheel_verify.py --wheel-dir /tmp/vtb-wheels-duckdb --wheel-glob "vertebra_duckdb-*.whl" --extension-prefix "vertebra/_duckdb"
 	@echo "${OK} vertebra-duckdb wheel isolation verified"
 
 .PHONY: mysql-test
@@ -248,7 +248,7 @@ mysql-test:                                         ## Run MySQL Rust crate test
 mysql-wheel-check:                                  ## Build vertebra-mysql wheel and verify PEP 420 namespace isolation
 	@rm -rf /tmp/vtb-wheels-mysql && mkdir -p /tmp/vtb-wheels-mysql
 	@uv run maturin build --manifest-path src/rs/vertebra-mysql/Cargo.toml --out /tmp/vtb-wheels-mysql
-	@uv run python -c 'import glob, zipfile; whls = glob.glob("/tmp/vtb-wheels-mysql/vertebra_mysql-*.whl"); assert whls, "No vertebra-mysql wheel built"; zf = zipfile.ZipFile(whls[0]); names = zf.namelist(); assert any(n.startswith("vertebra/_mysql") and n.endswith((".so", ".pyd", ".dylib")) for n in names), names; assert "vertebra/__init__.py" not in names, names; assert not any(n.endswith(".py") for n in names), names'
+	@PYTHONPATH="src/py:." uv run --no-sync python tools/scripts/_wheel_verify.py --wheel-dir /tmp/vtb-wheels-mysql --wheel-glob "vertebra_mysql-*.whl" --extension-prefix "vertebra/_mysql" --forbid-python-files
 	@echo "${OK} vertebra-mysql wheel isolation verified"
 
 .PHONY: mssql-test
@@ -264,7 +264,7 @@ mssql-wheel-check:                                  ## Build vertebra-mssql whee
 	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
 	@rm -rf /tmp/vtb-wheels-mssql && mkdir -p /tmp/vtb-wheels-mssql
 	@uv run maturin build --manifest-path src/rs/vertebra-mssql/Cargo.toml --out /tmp/vtb-wheels-mssql
-	@uv run python -c 'import glob, zipfile; wheels = sorted(glob.glob("/tmp/vtb-wheels-mssql/vertebra_mssql-*.whl")); assert wheels, "No vertebra-mssql wheel produced"; zf = zipfile.ZipFile(wheels[-1]); names = zf.namelist(); assert any(n.startswith("vertebra/_mssql") and n.endswith((".so", ".pyd", ".dylib")) for n in names), names; assert not any(n.endswith(".py") and n.startswith("vertebra/") for n in names), names; assert not any(n.startswith("vertebra/_") and not n.startswith("vertebra/_mssql") for n in names), names'
+	@PYTHONPATH="src/py:." uv run --no-sync python tools/scripts/_wheel_verify.py --wheel-dir /tmp/vtb-wheels-mssql --wheel-glob "vertebra_mssql-*.whl" --extension-prefix "vertebra/_mssql" --forbid-python-files
 	@echo "${OK} vertebra-mssql wheel layout verified"
 
 .PHONY: oracle-test
@@ -351,14 +351,14 @@ coverage:                                           ## Run tests with coverage r
 .PHONY: lint
 lint: ts-lint                                       ## Format and lint everything with auto-fixes (Python, Rust, TS)
 	@echo "${INFO} Linting and fixing Python (Ruff)..."
-	@uv run ruff check --fix --unsafe-fixes src/py/vertebra src/py/tests tools/scripts tools/pgo tools/benchmarks/postgres.py $(wildcard tools/docs docs/examples)
-	@uv run ruff format src/py/vertebra src/py/tests tools/scripts tools/pgo tools/benchmarks/postgres.py $(wildcard tools/docs docs/examples)
+	@uv run ruff check --fix --unsafe-fixes src/py/vertebra src/py/tests tools/scripts tools/pgo tools/benchmarks $(wildcard tools/docs docs/examples)
+	@uv run ruff format src/py/vertebra src/py/tests tools/scripts tools/pgo tools/benchmarks $(wildcard tools/docs docs/examples)
 	@echo "${INFO} Linting and fixing Rust (Fmt & Clippy)..."
 	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
 	@(cd src/rs && cargo fmt --all)
 	@(cd src/rs && cargo clippy --fix --allow-dirty --allow-staged --workspace --all-targets --features tls,compression,gcp -- -D warnings)
 	@echo "${INFO} Running type checks (Mypy)..."
-	@uv run mypy src/py/vertebra tools/scripts tools/pgo tools/benchmarks/postgres.py $(wildcard tools/docs docs/examples)
+	@uv run mypy src/py/vertebra tools/scripts tools/pgo tools/benchmarks $(wildcard tools/docs docs/examples)
 	@stub_mods="$$(uv run python -c 'import importlib.util; print(" ".join(m for m in ("vertebra._vertebra", "vertebra._bundler", "vertebra._storage", "vertebra._mysql", "vertebra._bigquery", "vertebra._mssql", "vertebra._spanner", "vertebra._duckdb", "vertebra._oracle", "vertebra._postgres") if importlib.util.find_spec(m) is not None))')"; \
 	if [ -n "$$stub_mods" ]; then \
 		uv run python -m mypy.stubtest $$stub_mods; \
@@ -371,9 +371,9 @@ lint-all:                                           ## Check formatting, linting
 	@echo "${INFO} Checking TS package (Biome)..."
 	@(cd src/ts/vertebra-client && bunx biome check .)
 	@echo "${INFO} Checking Python (Ruff & Mypy)..."
-	@uv run ruff check src/py/vertebra src/py/tests tools/scripts tools/pgo tools/benchmarks/postgres.py $(wildcard tools/docs docs/examples)
-	@uv run ruff format --check src/py/vertebra src/py/tests tools/scripts tools/pgo tools/benchmarks/postgres.py $(wildcard tools/docs docs/examples)
-	@uv run mypy src/py/vertebra tools/scripts tools/pgo tools/benchmarks/postgres.py $(wildcard tools/docs docs/examples)
+	@uv run ruff check src/py/vertebra src/py/tests tools/scripts tools/pgo tools/benchmarks $(wildcard tools/docs docs/examples)
+	@uv run ruff format --check src/py/vertebra src/py/tests tools/scripts tools/pgo tools/benchmarks $(wildcard tools/docs docs/examples)
+	@uv run mypy src/py/vertebra tools/scripts tools/pgo tools/benchmarks $(wildcard tools/docs docs/examples)
 	@stub_mods="$$(uv run python -c 'import importlib.util; print(" ".join(m for m in ("vertebra._vertebra", "vertebra._bundler", "vertebra._storage", "vertebra._mysql", "vertebra._bigquery", "vertebra._mssql", "vertebra._spanner", "vertebra._duckdb", "vertebra._oracle", "vertebra._postgres") if importlib.util.find_spec(m) is not None))')"; \
 	if [ -n "$$stub_mods" ]; then \
 		uv run python -m mypy.stubtest $$stub_mods; \

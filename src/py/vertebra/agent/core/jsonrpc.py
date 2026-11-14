@@ -112,51 +112,6 @@ class JSONRPCRouter:
         """Return True when a handler is registered for the specified method."""
         return method in self._handlers
 
-    async def _invoke_handler(
-        self,
-        handler: HandlerCallable,
-        params: Any,
-        context: Any,
-    ) -> Any:
-        """Invoke a handler with params and optional context injection.
-
-        A dict ``params`` is passed as ``params=<dict>`` to handlers that declare a ``params``
-        parameter and unpacked as keyword arguments otherwise. Nested ``params`` keys are never
-        unwrapped.
-        """
-        sig = inspect.signature(handler)
-        kwargs: dict[str, Any] = {}
-        accepts_context = "context" in sig.parameters or any(
-            p.annotation.__name__ == "AgentContext"
-            for p in sig.parameters.values()
-            if hasattr(p.annotation, "__name__")
-        )
-
-        if accepts_context and context is not None:
-            for p_name, p in sig.parameters.items():
-                if p_name == "context" or (
-                    hasattr(p.annotation, "__name__") and p.annotation.__name__ == "AgentContext"
-                ):
-                    kwargs[p_name] = context
-
-        if params is None:
-            result = handler(**kwargs) if kwargs else handler()
-        elif isinstance(params, dict):
-            if "params" in sig.parameters:
-                result = handler(params=params, **kwargs)
-            else:
-                call_kwargs = dict(params)
-                call_kwargs.update(kwargs)
-                result = handler(**call_kwargs)
-        elif isinstance(params, (list, tuple)):
-            result = handler(*params, **kwargs) if kwargs else handler(*params)
-        else:
-            result = handler(params, **kwargs) if kwargs else handler(params)
-
-        if inspect.isawaitable(result):
-            return await result
-        return result
-
     async def dispatch(
         self,
         request: JSONRPCRequest,
@@ -292,6 +247,51 @@ class JSONRPCRouter:
             "error": {"code": INVALID_REQUEST, "message": "Invalid request: expected object or array"},
         }
         return encode_json_bytes(error_resp)
+
+    async def _invoke_handler(
+        self,
+        handler: HandlerCallable,
+        params: Any,
+        context: Any,
+    ) -> Any:
+        """Invoke a handler with params and optional context injection.
+
+        A dict ``params`` is passed as ``params=<dict>`` to handlers that declare a ``params``
+        parameter and unpacked as keyword arguments otherwise. Nested ``params`` keys are never
+        unwrapped.
+        """
+        sig = inspect.signature(handler)
+        kwargs: dict[str, Any] = {}
+        accepts_context = "context" in sig.parameters or any(
+            p.annotation.__name__ == "AgentContext"
+            for p in sig.parameters.values()
+            if hasattr(p.annotation, "__name__")
+        )
+
+        if accepts_context and context is not None:
+            for p_name, p in sig.parameters.items():
+                if p_name == "context" or (
+                    hasattr(p.annotation, "__name__") and p.annotation.__name__ == "AgentContext"
+                ):
+                    kwargs[p_name] = context
+
+        if params is None:
+            result = handler(**kwargs) if kwargs else handler()
+        elif isinstance(params, dict):
+            if "params" in sig.parameters:
+                result = handler(params=params, **kwargs)
+            else:
+                call_kwargs = dict(params)
+                call_kwargs.update(kwargs)
+                result = handler(**call_kwargs)
+        elif isinstance(params, (list, tuple)):
+            result = handler(*params, **kwargs) if kwargs else handler(*params)
+        else:
+            result = handler(params, **kwargs) if kwargs else handler(params)
+
+        if inspect.isawaitable(result):
+            return await result
+        return result
 
 
 __all__ = [

@@ -45,7 +45,6 @@ class CompanionWheelSpec(msgspec.Struct, frozen=True, gc=False):
     install_target: str
     exports: tuple[str, ...]
     leaked_core_attr: str
-    expect_gil_used: bool
     preinstall_probe: str
     postinstall_probe: str
 
@@ -59,9 +58,8 @@ COMPANION_SPECS: dict[CompanionPackage, CompanionWheelSpec] = {
         binary_prefix="vertebra/_storage",
         core_sentinel="vertebra/storage/_store.py",
         install_target="vertebra-core[storage]",
-        exports=("SyncObjectStore", "AsyncObjectStore"),
+        exports=("SyncObjectStore", "AsyncObjectStore", "FREE_THREADED", "GIL_USED"),
         leaked_core_attr="SyncObjectStore",
-        expect_gil_used=False,
         preinstall_probe=(
             "from vertebra.storage import SyncObjectStore\n"
             "try:\n"
@@ -82,9 +80,8 @@ COMPANION_SPECS: dict[CompanionPackage, CompanionWheelSpec] = {
         binary_prefix="vertebra/_bigquery",
         core_sentinel="vertebra/db/adapters/bigquery/driver.py",
         install_target="vertebra-core[bigquery]",
-        exports=("SyncBigQueryClient", "AsyncBigQueryClient", "GIL_USED"),
+        exports=("SyncBigQueryClient", "AsyncBigQueryClient", "FREE_THREADED", "GIL_USED"),
         leaked_core_attr="SyncBigQueryClient",
-        expect_gil_used=True,
         preinstall_probe=(
             "from vertebra.db.adapters.bigquery import BigQueryConfig, SyncBigQueryDriver\n"
             "driver = SyncBigQueryDriver(BigQueryConfig(project_id='test-project'))\n"
@@ -106,9 +103,8 @@ COMPANION_SPECS: dict[CompanionPackage, CompanionWheelSpec] = {
         binary_prefix="vertebra/_spanner",
         core_sentinel="vertebra/db/adapters/spanner/driver.py",
         install_target="vertebra-core[spanner]",
-        exports=("SyncSpannerClient", "AsyncSpannerClient", "GIL_USED"),
+        exports=("SyncSpannerClient", "AsyncSpannerClient", "FREE_THREADED", "GIL_USED"),
         leaked_core_attr="SyncSpannerClient",
-        expect_gil_used=True,
         preinstall_probe=(
             "from vertebra.db.adapters.spanner import SpannerConfig, SyncSpannerDriver\n"
             "driver = SyncSpannerDriver(SpannerConfig(database='projects/p/instances/i/databases/d'))\n"
@@ -130,9 +126,8 @@ COMPANION_SPECS: dict[CompanionPackage, CompanionWheelSpec] = {
         binary_prefix="vertebra/_bundler",
         core_sentinel="vertebra/build/_orchestrator.py",
         install_target="vertebra-core[bundler]",
-        exports=("Bundler", "BundleConfig", "GIL_USED", "minify_css"),
+        exports=("Bundler", "BundleConfig", "FREE_THREADED", "GIL_USED", "minify_css"),
         leaked_core_attr="Bundler",
-        expect_gil_used=True,
         preinstall_probe=(
             "from vertebra.utils.module_loader import ensure_module\n"
             "try:\n"
@@ -198,14 +193,14 @@ def verify_isolated_venv_contract(
         f"assert importlib.util.find_spec({spec.module_name!r}) is None\n"
         f"{spec.preinstall_probe}"
     )
-    gil_check = "assert mod.GIL_USED is False\n" if spec.expect_gil_used else ""
     postinstall_code = (
         "import importlib, pathlib, sys\n"
         f"mod = importlib.import_module({spec.module_name!r})\n"
         "from vertebra import _vertebra\n"
         "venv_root = pathlib.Path(sys.prefix).resolve()\n"
         "assert pathlib.Path(mod.__file__).resolve().is_relative_to(venv_root), mod.__file__\n"
-        f"{gil_check}"
+        "assert mod.GIL_USED is False\n"
+        "assert isinstance(mod.FREE_THREADED, bool)\n"
         f"for export_name in {spec.exports!r}:\n"
         "    assert hasattr(mod, export_name), export_name\n"
         f"assert not hasattr(_vertebra, {spec.leaked_core_attr!r})\n"

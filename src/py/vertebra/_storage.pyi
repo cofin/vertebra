@@ -3,10 +3,15 @@
 from collections.abc import Buffer
 from typing import Any, final
 
+FREE_THREADED: bool
+GIL_USED: bool
+
 __all__ = [
     "AsyncMultipartUpload",
     "AsyncObjectStore",
     "AsyncStreamReader",
+    "FREE_THREADED",
+    "GIL_USED",
     "ObjectMeta",
     "RustTaskAwaitable",
     "StorageBuffer",

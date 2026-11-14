@@ -2,6 +2,7 @@
 
 from typing import final
 
+FREE_THREADED: bool
 GIL_USED: bool
 
 __all__ = [
@@ -9,6 +10,7 @@ __all__ = [
     "BundleConfig",
     "Bundler",
     "DevConfig",
+    "FREE_THREADED",
     "GIL_USED",
     "IsolatedDeclarationsGenerator",
     "OutputFile",

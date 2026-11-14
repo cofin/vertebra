@@ -29,10 +29,6 @@ if TYPE_CHECKING:
     from vertebra.db.adapters.postgres.core import (
         PGCOPY_BINARY_SIGNATURE,
         PostgreSQLCore,
-        decode_pgcopy_rows,
-        encode_pg_jsonb,
-        encode_pgcopy_rows,
-        strip_pg_jsonb_header,
     )
     from vertebra.db.adapters.postgres.embeddings import PostgresEmbeddingPushdown
     from vertebra.db.adapters.postgres.events import (
@@ -146,16 +142,12 @@ __all__ = (
     "TemporalSpecial",
     "build_native_client_options",
     "compile_postgres_binds",
-    "decode_pgcopy_rows",
-    "encode_pg_jsonb",
-    "encode_pgcopy_rows",
     "normalize_postgres_parameter",
     "normalize_postgres_parameters",
     "parse_libpq_conninfo",
     "parse_postgres_dsn",
     "parse_query_pairs_strict",
     "read_arrow_shm",
-    "strip_pg_jsonb_header",
     "write_arrow_shm",
 )
 
@@ -235,16 +227,12 @@ _EXPORT_MAP: dict[str, tuple[str, str]] = {
     "TemporalSpecial": ("vertebra.db.adapters.postgres.types", "TemporalSpecial"),
     "build_native_client_options": ("vertebra.db.adapters.postgres.options", "build_native_client_options"),
     "compile_postgres_binds": ("vertebra.db.adapters.postgres.binds", "compile_postgres_binds"),
-    "decode_pgcopy_rows": ("vertebra.db.adapters.postgres.core", "decode_pgcopy_rows"),
-    "encode_pg_jsonb": ("vertebra.db.adapters.postgres.core", "encode_pg_jsonb"),
-    "encode_pgcopy_rows": ("vertebra.db.adapters.postgres.core", "encode_pgcopy_rows"),
     "normalize_postgres_parameter": ("vertebra.db.adapters.postgres.binds", "normalize_postgres_parameter"),
     "normalize_postgres_parameters": ("vertebra.db.adapters.postgres.binds", "normalize_postgres_parameters"),
     "parse_libpq_conninfo": ("vertebra.db.adapters.postgres.options", "parse_libpq_conninfo"),
     "parse_postgres_dsn": ("vertebra.db.adapters.postgres.options", "parse_postgres_dsn"),
     "parse_query_pairs_strict": ("vertebra.db.adapters.postgres.options", "parse_query_pairs_strict"),
     "read_arrow_shm": ("vertebra.db.arrow", "read_arrow_shm"),
-    "strip_pg_jsonb_header": ("vertebra.db.adapters.postgres.core", "strip_pg_jsonb_header"),
     "write_arrow_shm": ("vertebra.db.arrow", "write_arrow_shm"),
 }
 

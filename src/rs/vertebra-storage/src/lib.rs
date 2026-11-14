@@ -1996,6 +1996,8 @@ fn assemble_gcs_iam_v4_url(
 
 #[pymodule(gil_used = false)]
 pub fn _storage(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add("FREE_THREADED", cfg!(Py_GIL_DISABLED))?;
+    m.add("GIL_USED", false)?;
     m.add_class::<PySyncObjectStore>()?;
     m.add_class::<PyAsyncObjectStore>()?;
     m.add_class::<PyObjectMeta>()?;

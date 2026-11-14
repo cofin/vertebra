@@ -135,25 +135,33 @@ async def test_mcp_core_discover_and_removed_2024_methods() -> None:
     assert discover_res["_meta"]["ttlMs"] == 60000
     assert discover_res["_meta"]["cacheScope"] == "public"
 
-    for removed_method in (
+
+@pytest.mark.parametrize(
+    "removed_method",
+    (
         "initialize",
         "ping",
         "logging/setLevel",
         "resources/subscribe",
         "resources/unsubscribe",
         "tasks/result",
-    ):
-        resp = await core.handle(
-            McpHttpRequest(
-                method="POST",
-                path="/mcp",
-                headers={"MCP-Protocol-Version": "2026-07-28"},
-                body=encode_json_bytes({"jsonrpc": "2.0", "id": 99, "method": removed_method, "params": {}}),
-            )
+    ),
+)
+@pytest.mark.anyio
+async def test_mcp_core_rejects_removed_2024_methods(removed_method: str) -> None:
+    """Verify server/discover 2026-07-28 mode rejects removed 2024-11-05 methods with -32601."""
+    core = MCPCore(config=MCPConfig(server_name="test-mcp", server_version="1.2.3"))
+    resp = await core.handle(
+        McpHttpRequest(
+            method="POST",
+            path="/mcp",
+            headers={"MCP-Protocol-Version": "2026-07-28"},
+            body=encode_json_bytes({"jsonrpc": "2.0", "id": 99, "method": removed_method, "params": {}}),
         )
-        assert resp.status == 200
-        err_payload = decode_json(resp.body)
-        assert err_payload["error"]["code"] == METHOD_NOT_FOUND
+    )
+    assert resp.status == 200
+    err_payload = decode_json(resp.body)
+    assert err_payload["error"]["code"] == METHOD_NOT_FOUND
 
 
 @pytest.mark.anyio
@@ -204,9 +212,10 @@ async def test_mcp_service_tools_list_and_call() -> None:
     blob = BlobContent(data="YmluYXJ5")
     arg = PromptArgument(name="topic")
     msg = PromptMessage(role="user", content=txt)
-    for model in (txt, blob, arg, msg):
-        assert isinstance(model, FrozenBaseStruct)
-        assert isinstance(hash(model), int)
+    assert isinstance(txt, FrozenBaseStruct) and isinstance(hash(txt), int)
+    assert isinstance(blob, FrozenBaseStruct) and isinstance(hash(blob), int)
+    assert isinstance(arg, FrozenBaseStruct) and isinstance(hash(arg), int)
+    assert isinstance(msg, FrozenBaseStruct) and isinstance(hash(msg), int)
 
 
 @pytest.mark.anyio
@@ -2555,8 +2564,7 @@ async def test_mcp_adapters_stream_incrementally_and_close_on_disconnect() -> No
     native_app = App()
     native_plugin.mount_native(native_app)
     native_routes = {(r.method.upper(), r.path): r.handler for r in native_app.routes}
-    for required_verb in ("POST", "GET", "DELETE", "OPTIONS"):
-        assert (required_verb, "/mcp") in native_routes
+    assert {("POST", "/mcp"), ("GET", "/mcp"), ("DELETE", "/mcp"), ("OPTIONS", "/mcp")}.issubset(native_routes)
 
     assert native_plugin.mcp_service is not None
     native_sid = await _init_legacy_session(native_plugin.mcp_service)
@@ -2999,17 +3007,24 @@ async def test_mcp_resource_subscription_limits_and_disabled_flag() -> None:
         )
     )
     assert decode_json(disc.body)["result"]["capabilities"]["resources"]["subscribe"] is False
+
+
+@pytest.mark.parametrize("method", ("resources/subscribe", "resources/unsubscribe"))
+@pytest.mark.anyio
+async def test_mcp_resource_subscriptions_disabled_rejects_methods(method: str) -> None:
+    """Reject subscription methods with -32601 when resource_subscriptions=False."""
+    disabled_core = MCPCore(config=MCPConfig(resource_subscriptions=False))
+    disabled_core.registry.register_resource(ResourceEntry(uri="doc://1", name="doc1", reader=lambda: "1"))
     disabled_sid = await _init_legacy_session(disabled_core)
-    for method in ("resources/subscribe", "resources/unsubscribe"):
-        err_resp = await disabled_core.handle(
-            McpHttpRequest(
-                method="POST",
-                path="/mcp",
-                headers={"Mcp-Session-Id": disabled_sid},
-                body=encode_json_bytes({"jsonrpc": "2.0", "id": 4, "method": method, "params": {"uri": "doc://1"}}),
-            )
+    err_resp = await disabled_core.handle(
+        McpHttpRequest(
+            method="POST",
+            path="/mcp",
+            headers={"Mcp-Session-Id": disabled_sid},
+            body=encode_json_bytes({"jsonrpc": "2.0", "id": 4, "method": method, "params": {"uri": "doc://1"}}),
         )
-        assert decode_json(err_resp.body)["error"]["code"] == METHOD_NOT_FOUND
+    )
+    assert decode_json(err_resp.body)["error"]["code"] == METHOD_NOT_FOUND
 
 
 @pytest.mark.parametrize("raw_value", ["none", "config", "catalog"])

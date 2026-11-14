@@ -1257,8 +1257,9 @@ def test_gcp_id_token_cache_storage_exports() -> None:
     assert SyncGcpIdTokenCache is CoreSyncGcpIdTokenCache
     assert AsyncGcpIdTokenCache is CoreAsyncGcpIdTokenCache
     assert GcpIdTokenSnapshot is CoreGcpIdTokenSnapshot
-    for name in ("SyncGcpIdTokenCache", "AsyncGcpIdTokenCache", "GcpIdTokenSnapshot"):
-        assert name in storage_mod.__all__
+    assert "SyncGcpIdTokenCache" in storage_mod.__all__
+    assert "AsyncGcpIdTokenCache" in storage_mod.__all__
+    assert "GcpIdTokenSnapshot" in storage_mod.__all__
 
     snap = GcpIdTokenSnapshot(
         id_token="mock-oidc-secret-token",

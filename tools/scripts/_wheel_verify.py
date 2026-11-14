@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import os
 import platform
 import shutil
@@ -22,6 +23,7 @@ __all__ = (
     "verify_extension_wheel_contents",
     "verify_isolated_wheel_pair",
     "verify_sdist_contents",
+    "verify_standalone_extension_wheel",
 )
 
 NATIVE_SUFFIXES: tuple[str, ...] = (".so", ".pyd", ".dylib")
@@ -298,3 +300,55 @@ def _run_isolated_python(venv_python: Path, cwd: Path, code: str) -> None:
         sys.stderr.write(proc.stderr)
         msg = f"Isolated venv check failed with exit code {proc.returncode}"
         raise RuntimeError(msg)
+
+
+def verify_standalone_extension_wheel(
+    wheel_dir: Path,
+    *,
+    wheel_glob: str,
+    extension_prefix: str,
+    forbid_python_files: bool = False,
+) -> Path:
+    """Verify a standalone extension wheel ships its binary without unrelated namespace files."""
+    wheels = sorted(wheel_dir.glob(wheel_glob))
+    if not wheels:
+        msg = f"No wheel matching {wheel_glob!r} produced in {wheel_dir}"
+        raise RuntimeError(msg)
+    wheel_path = wheels[-1]
+    with zipfile.ZipFile(wheel_path) as zf:
+        names = zf.namelist()
+    if not any(name.startswith(extension_prefix) and name.endswith(NATIVE_SUFFIXES) for name in names):
+        msg = f"No {extension_prefix} native binary found in {wheel_path.name}: {names}"
+        raise RuntimeError(msg)
+    unexpected = [
+        name
+        for name in names
+        if name.startswith("vertebra/")
+        and not name.startswith(extension_prefix)
+        or (forbid_python_files and name.endswith(".py"))
+    ]
+    if unexpected:
+        msg = f"Unexpected payload files in {wheel_path.name}: {unexpected}"
+        raise RuntimeError(msg)
+    return wheel_path
+
+
+def main(argv: list[str] | None = None) -> int:
+    """CLI entrypoint for standalone wheel payload verification."""
+    parser = argparse.ArgumentParser(description="Verify standalone Vertebra extension wheel isolation.")
+    parser.add_argument("--wheel-dir", type=Path, required=True)
+    parser.add_argument("--wheel-glob", required=True)
+    parser.add_argument("--extension-prefix", required=True)
+    parser.add_argument("--forbid-python-files", action="store_true")
+    args = parser.parse_args(argv)
+    verify_standalone_extension_wheel(
+        args.wheel_dir,
+        wheel_glob=args.wheel_glob,
+        extension_prefix=args.extension_prefix,
+        forbid_python_files=args.forbid_python_files,
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

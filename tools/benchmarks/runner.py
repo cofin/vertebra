@@ -132,7 +132,7 @@ class ServerRunner:
         self.host = host
         self.port = port
         self.env = env or {}
-        self._process: subprocess.Popen[str] | None = None
+        self._process: subprocess.Popen[bytes] | None = None
 
     def __enter__(self) -> Self:
         self.start()

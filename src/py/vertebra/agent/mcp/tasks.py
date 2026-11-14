@@ -6,8 +6,7 @@ with owner isolation, TTL expiry, and background queue lane integration.
 
 import secrets
 from datetime import UTC, datetime
-from enum import Enum
-from typing import Any, Literal
+from typing import Any, Literal, overload
 
 import anyio
 import msgspec
@@ -18,10 +17,7 @@ from vertebra.agent.telemetry import AgentTelemetryRecorder
 from vertebra.utils.serializers import encode_json_bytes
 
 MCPTaskStatus = Literal["working", "input_required", "completed", "failed", "cancelled"]
-
-
-class _OwnerLookup(Enum):
-    UNSCOPED = "unscoped"
+_UNSCOPED_OWNER: Any = object()
 
 
 class TaskLookupError(Exception):
@@ -32,7 +28,7 @@ class TaskStateError(Exception):
     """Raised when a task operation is invalid for the current task state."""
 
 
-class TaskRecord(msgspec.Struct, frozen=True, gc=False, kw_only=True):
+class TaskRecord(msgspec.Struct, frozen=True, kw_only=True):
     """Immutable snapshot of an MCP io.modelcontextprotocol/tasks execution record."""
 
     task_id: str
@@ -98,34 +94,6 @@ class MCPTaskStore:
         self._tasks: dict[str, TaskRecord] = {}
         self._events: dict[str, anyio.Event] = {}
 
-    def _now_iso(self) -> str:
-        return datetime.now(UTC).isoformat()
-
-    def _get_event(self, task_id: str) -> anyio.Event:
-        if task_id not in self._events:
-            self._events[task_id] = anyio.Event()
-        return self._events[task_id]
-
-    def _emit_status(self, task: TaskRecord) -> None:
-        if self.stream_broker is not None:
-            payload = encode_json_bytes(
-                {
-                    "jsonrpc": "2.0",
-                    "method": "notifications/tasks/status",
-                    "params": {
-                        "taskId": task.task_id,
-                        "status": task.status,
-                        "statusMessage": task.status_message,
-                        "isTerminal": task.is_terminal,
-                    },
-                }
-            )
-            frame = SseFrame(
-                event="notifications/tasks/status",
-                data=payload.decode("utf-8"),
-            )
-            self.stream_broker.broadcast(frame)
-
     def create(
         self,
         tool_name: str,
@@ -154,12 +122,18 @@ class MCPTaskStore:
         self._emit_status(task)
         return task
 
-    def get(self, task_id: str, owner_id: str | None | _OwnerLookup = _OwnerLookup.UNSCOPED) -> TaskRecord:
+    @overload
+    def get(self, task_id: str) -> TaskRecord: ...
+
+    @overload
+    def get(self, task_id: str, owner_id: str | None) -> TaskRecord: ...
+
+    def get(self, task_id: str, owner_id: str | None = _UNSCOPED_OWNER) -> TaskRecord:
         """Retrieve a task record enforcing owner isolation."""
         task = self._tasks.get(task_id)
         if task is None:
             raise TaskLookupError(f"Task '{task_id}' not found")
-        if owner_id is not _OwnerLookup.UNSCOPED and task.owner_id != owner_id:
+        if owner_id is not _UNSCOPED_OWNER and task.owner_id != owner_id:
             raise TaskLookupError(f"Task '{task_id}' not found")
         return task
 
@@ -337,6 +311,34 @@ class MCPTaskStore:
         self._get_event(task_id).set()
         self._emit_status(updated)
         return updated
+
+    def _now_iso(self) -> str:
+        return datetime.now(UTC).isoformat()
+
+    def _get_event(self, task_id: str) -> anyio.Event:
+        if task_id not in self._events:
+            self._events[task_id] = anyio.Event()
+        return self._events[task_id]
+
+    def _emit_status(self, task: TaskRecord) -> None:
+        if self.stream_broker is not None:
+            payload = encode_json_bytes(
+                {
+                    "jsonrpc": "2.0",
+                    "method": "notifications/tasks/status",
+                    "params": {
+                        "taskId": task.task_id,
+                        "status": task.status,
+                        "statusMessage": task.status_message,
+                        "isTerminal": task.is_terminal,
+                    },
+                }
+            )
+            frame = SseFrame(
+                event="notifications/tasks/status",
+                data=payload.decode("utf-8"),
+            )
+            self.stream_broker.broadcast(frame)
 
 
 __all__ = [

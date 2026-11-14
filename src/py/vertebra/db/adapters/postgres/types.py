@@ -141,7 +141,7 @@ class PostgresQueryResult(msgspec.Struct, frozen=True, gc=False):
             raise ValueError(msg)
 
 
-class PostgresArrowResult(msgspec.Struct, frozen=True, gc=False):
+class PostgresArrowResult(msgspec.Struct, frozen=True):
     """Owned PostgreSQL Arrow selection result over inline IPC bytes or a VTBARROW SHM cursor."""
 
     buffer: bytes | Any

@@ -28,54 +28,6 @@ __all__ = [
 ]
 
 
-def _extract_request_key(decoded: Any) -> tuple[type[str] | type[int], str | int] | None:
-    if isinstance(decoded, Mapping):
-        req_id = decoded.get("id")
-        if isinstance(req_id, (str, int)) and not isinstance(req_id, bool):
-            return (type(req_id), req_id)
-    return None
-
-
-def _extract_cancelled_key(decoded: Any) -> tuple[type[str] | type[int], str | int] | None:
-    if not isinstance(decoded, Mapping) or decoded.get("method") != "notifications/cancelled":
-        return None
-    params = decoded.get("params")
-    if not isinstance(params, Mapping):
-        return None
-    req_id = params.get("requestId")
-    if isinstance(req_id, (str, int)) and not isinstance(req_id, bool):
-        return (type(req_id), req_id)
-    return None
-
-
-def _extract_sse_data_lines(chunk: bytes) -> list[bytes]:
-    payloads: list[bytes] = []
-    data_buf: list[str] = []
-    for raw_line in chunk.decode("utf-8", errors="replace").splitlines():
-        line = raw_line.rstrip("\r")
-        if not line:
-            if data_buf:
-                payloads.append("\n".join(data_buf).encode("utf-8"))
-                data_buf.clear()
-            continue
-        if line.startswith(":"):
-            continue
-        if line.startswith("data:"):
-            data_buf.append(line[5:].lstrip())
-    if data_buf:
-        payloads.append("\n".join(data_buf).encode("utf-8"))
-    return payloads
-
-
-async def _default_stdout_writer(data: bytes) -> None:
-    def _write() -> None:
-        sys.stdout.buffer.write(data)
-        sys.stdout.buffer.write(b"\n")
-        sys.stdout.buffer.flush()
-
-    await anyio.to_thread.run_sync(_write)
-
-
 async def run_stdio_server(
     service: MCPCore,
     *,
@@ -196,3 +148,51 @@ async def run_stdio_server(
             await service.session_store.delete(created_session_id, created_owner_id)
 
     return 0
+
+
+def _extract_request_key(decoded: Any) -> tuple[type[str] | type[int], str | int] | None:
+    if isinstance(decoded, Mapping):
+        req_id = decoded.get("id")
+        if isinstance(req_id, (str, int)) and not isinstance(req_id, bool):
+            return (type(req_id), req_id)
+    return None
+
+
+def _extract_cancelled_key(decoded: Any) -> tuple[type[str] | type[int], str | int] | None:
+    if not isinstance(decoded, Mapping) or decoded.get("method") != "notifications/cancelled":
+        return None
+    params = decoded.get("params")
+    if not isinstance(params, Mapping):
+        return None
+    req_id = params.get("requestId")
+    if isinstance(req_id, (str, int)) and not isinstance(req_id, bool):
+        return (type(req_id), req_id)
+    return None
+
+
+def _extract_sse_data_lines(chunk: bytes) -> list[bytes]:
+    payloads: list[bytes] = []
+    data_buf: list[str] = []
+    for raw_line in chunk.decode("utf-8", errors="replace").splitlines():
+        line = raw_line.rstrip("\r")
+        if not line:
+            if data_buf:
+                payloads.append("\n".join(data_buf).encode("utf-8"))
+                data_buf.clear()
+            continue
+        if line.startswith(":"):
+            continue
+        if line.startswith("data:"):
+            data_buf.append(line[5:].lstrip())
+    if data_buf:
+        payloads.append("\n".join(data_buf).encode("utf-8"))
+    return payloads
+
+
+async def _default_stdout_writer(data: bytes) -> None:
+    def _write() -> None:
+        sys.stdout.buffer.write(data)
+        sys.stdout.buffer.write(b"\n")
+        sys.stdout.buffer.flush()
+
+    await anyio.to_thread.run_sync(_write)

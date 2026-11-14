@@ -27,7 +27,7 @@ class SessionLimitExceededError(VertebraError):
     """Raised when creating a new MCP session would exceed max_sessions capacity."""
 
 
-class MCPSession(msgspec.Struct, frozen=True, gc=False, kw_only=True):
+class MCPSession(msgspec.Struct, frozen=True, kw_only=True):
     """Immutable snapshot of a stateful legacy MCP protocol session."""
 
     session_id: str
@@ -69,25 +69,6 @@ class MCPSessionStore:
         self._lock = anyio.Lock()
         self._sessions: dict[str, tuple[MCPSession, float]] = {}
         self._uri_subscribers: dict[str, set[str]] = {}
-
-    def _remove_subscriptions_from_index(self, session_id: str, subscriptions: frozenset[str]) -> None:
-        for uri in subscriptions:
-            subscribers = self._uri_subscribers.get(uri)
-            if subscribers is not None:
-                subscribers.discard(session_id)
-                if not subscribers:
-                    self._uri_subscribers.pop(uri, None)
-
-    def _add_subscriptions_to_index(self, session_id: str, subscriptions: frozenset[str]) -> None:
-        for uri in subscriptions:
-            self._uri_subscribers.setdefault(uri, set()).add(session_id)
-
-    def _prune_expired(self, now_mono: float) -> None:
-        expired_ids = [session_id for session_id, (_, deadline) in self._sessions.items() if now_mono >= deadline]
-        for session_id in expired_ids:
-            entry = self._sessions.pop(session_id, None)
-            if entry is not None:
-                self._remove_subscriptions_from_index(session_id, entry[0].subscriptions)
 
     async def create(
         self,
@@ -197,3 +178,22 @@ class MCPSessionStore:
         async with self._lock:
             self._prune_expired(self._clock())
             return tuple(session for session, _ in self._sessions.values())
+
+    def _remove_subscriptions_from_index(self, session_id: str, subscriptions: frozenset[str]) -> None:
+        for uri in subscriptions:
+            subscribers = self._uri_subscribers.get(uri)
+            if subscribers is not None:
+                subscribers.discard(session_id)
+                if not subscribers:
+                    self._uri_subscribers.pop(uri, None)
+
+    def _add_subscriptions_to_index(self, session_id: str, subscriptions: frozenset[str]) -> None:
+        for uri in subscriptions:
+            self._uri_subscribers.setdefault(uri, set()).add(session_id)
+
+    def _prune_expired(self, now_mono: float) -> None:
+        expired_ids = [session_id for session_id, (_, deadline) in self._sessions.items() if now_mono >= deadline]
+        for session_id in expired_ids:
+            entry = self._sessions.pop(session_id, None)
+            if entry is not None:
+                self._remove_subscriptions_from_index(session_id, entry[0].subscriptions)

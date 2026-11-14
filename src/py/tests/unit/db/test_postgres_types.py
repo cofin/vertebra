@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -142,7 +142,7 @@ def test_pg_bitstring_padding_and_length_invariants(data: bytes, bit_length: int
             PgBitString(data=data, bit_length=bit_length)
 
     with pytest.raises(TypeError):
-        PgBitString(data=bytearray(b"\x80"), bit_length=1)  # type: ignore[arg-type]
+        PgBitString(data=cast("Any", bytearray(b"\x80")), bit_length=1)
 
 
 def test_pg_vector_bounds_and_finiteness() -> None:
@@ -214,7 +214,7 @@ def test_pg_json_parameter_pipeline_and_public_row_projection() -> None:
     assert projected == (None, j_str_null, {"k": None}, None, PgBitString(b"\x80", 1))
 
     with pytest.raises(TypeError, match="Unsupported PgJson"):
-        PgJson(Decimal("1.23"))  # type: ignore[arg-type]
+        PgJson(cast("Any", Decimal("1.23")))
     with pytest.raises(ValueError, match="finite"):
         PgJson(float("nan"))
 
@@ -226,7 +226,7 @@ def test_pg_json_parameter_pipeline_and_public_row_projection() -> None:
     p = PgParameter(value=42, type_oid=23)
     assert p.type_oid == 23
     with pytest.raises(ValueError, match="nested"):
-        PgParameter(value=p, type_oid=23)  # type: ignore[arg-type]
+        PgParameter(value=cast("Any", p), type_oid=23)
 
     op = PostgresPipelineOperation(sql="SELECT $1", parameters=(p,), parameter_oids=(23,), kind="select")
     assert op.kind == "select"

@@ -160,25 +160,34 @@ def test_gemini_grpc_proto_frame_roundtrip_and_malformed_varint_rejection() -> N
         decode_gemini_embed_grpc_frame_to_batch(overflow_varint)
 
 
-def test_zero_copy_binds_native_helpers_directly_without_python_fallbacks() -> None:
-    """Verify _zero_copy binds its vectorcall and gRPC LPM helpers directly from vertebra._vertebra."""
-    for helper_name in (
+@pytest.mark.parametrize(
+    "helper_name",
+    [
         "hydrate_one_vectorcall",
         "hydrate_rows_vectorcall",
         "instantiate_struct_vectorcall",
         "orm_to_struct_vectorcall",
         "pack_grpc_lpm_frame",
-    ):
-        assert getattr(_zero_copy, helper_name) is getattr(native_vtb, helper_name)
+    ],
+)
+def test_zero_copy_binds_native_helpers_directly(helper_name: str) -> None:
+    """Verify _zero_copy binds vectorcall and gRPC LPM helpers directly from vertebra._vertebra."""
+    assert getattr(_zero_copy, helper_name) is getattr(native_vtb, helper_name)
 
-    for fallback_name in (
+
+@pytest.mark.parametrize(
+    "fallback_name",
+    [
         "_py_hydrate_one_vectorcall",
         "_py_hydrate_rows_vectorcall",
         "_py_instantiate_struct_vectorcall",
         "_py_orm_to_struct_vectorcall",
         "_py_pack_grpc_lpm_frame",
-    ):
-        assert not hasattr(_zero_copy, fallback_name)
+    ],
+)
+def test_zero_copy_omits_python_fallbacks(fallback_name: str) -> None:
+    """Verify _zero_copy exposes no legacy pure-Python fallback helpers."""
+    assert not hasattr(_zero_copy, fallback_name)
 
 
 def test_gemini_content_part_wire_tags_encoding() -> None:

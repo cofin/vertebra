@@ -5,6 +5,8 @@ request validation, Origin checking, ETag 304 Not Modified caching, and JSON-RPC
 dispatch to MCPCore.
 """
 
+from __future__ import annotations
+
 import contextlib
 from collections.abc import AsyncIterable, AsyncIterator, Callable, Iterable, Mapping
 from typing import Any
@@ -153,51 +155,6 @@ class AsgiMcpApp:
         await send({"type": "http.response.start", "status": resp.status, "headers": raw_headers})
         await send({"type": "http.response.body", "body": resp.body, "more_body": False})
 
-    @staticmethod
-    async def _close_async_stream(stream: AsyncIterator[bytes]) -> None:
-        aclose = getattr(stream, "aclose", None)
-        if callable(aclose):
-            with contextlib.suppress(BaseException):
-                await aclose()
-
-    async def _send_streaming_response(
-        self,
-        status: int,
-        raw_headers: list[tuple[bytes, bytes]],
-        stream: AsyncIterator[bytes],
-        receive: Callable[..., Any],
-        send: Callable[..., Any],
-    ) -> None:
-        await send({"type": "http.response.start", "status": status, "headers": raw_headers})
-        try:
-            async with anyio.create_task_group() as tg:
-
-                async def _watch_disconnect() -> None:
-                    while True:
-                        try:
-                            event = await receive()
-                        except BaseException:
-                            return
-                        if isinstance(event, Mapping) and event.get("type") == "http.disconnect":
-                            tg.cancel_scope.cancel()
-                            return
-                        if not isinstance(event, Mapping) or event.get("type") == "http.request":
-                            return
-
-                async def _pump_stream() -> None:
-                    try:
-                        async for chunk in stream:
-                            data = chunk if isinstance(chunk, bytes) else bytes(chunk)
-                            await send({"type": "http.response.body", "body": data, "more_body": True})
-                        await send({"type": "http.response.body", "body": b"", "more_body": False})
-                    finally:
-                        tg.cancel_scope.cancel()
-
-                tg.start_soon(_watch_disconnect)
-                tg.start_soon(_pump_stream)
-        finally:
-            await self._close_async_stream(stream)
-
     async def handle_starlette_request(self, request: Any) -> Any:
         """Handle a Starlette or FastAPI ``Request`` and return a framework response."""
         method = str(getattr(request, "method", "POST") or "POST").upper()
@@ -266,6 +223,51 @@ class AsgiMcpApp:
         return resp.stream if resp.stream is not None else resp.body
 
     @staticmethod
+    async def _close_async_stream(stream: AsyncIterator[bytes]) -> None:
+        aclose = getattr(stream, "aclose", None)
+        if callable(aclose):
+            with contextlib.suppress(BaseException):
+                await aclose()
+
+    async def _send_streaming_response(
+        self,
+        status: int,
+        raw_headers: list[tuple[bytes, bytes]],
+        stream: AsyncIterator[bytes],
+        receive: Callable[..., Any],
+        send: Callable[..., Any],
+    ) -> None:
+        await send({"type": "http.response.start", "status": status, "headers": raw_headers})
+        try:
+            async with anyio.create_task_group() as tg:
+
+                async def _watch_disconnect() -> None:
+                    while True:
+                        try:
+                            event = await receive()
+                        except BaseException:
+                            return
+                        if isinstance(event, Mapping) and event.get("type") == "http.disconnect":
+                            tg.cancel_scope.cancel()
+                            return
+                        if not isinstance(event, Mapping) or event.get("type") == "http.request":
+                            return
+
+                async def _pump_stream() -> None:
+                    try:
+                        async for chunk in stream:
+                            data = chunk if isinstance(chunk, bytes) else bytes(chunk)
+                            await send({"type": "http.response.body", "body": data, "more_body": True})
+                        await send({"type": "http.response.body", "body": b"", "more_body": False})
+                    finally:
+                        tg.cancel_scope.cancel()
+
+                tg.start_soon(_watch_disconnect)
+                tg.start_soon(_pump_stream)
+        finally:
+            await self._close_async_stream(stream)
+
+    @staticmethod
     def _scope_value(scope: Any, key: str) -> Any:
         """Read authenticated scope state without evaluating request properties."""
         return scope.get(key) if hasattr(scope, "get") else None
@@ -305,48 +307,6 @@ class AsgiMcpApp:
             if not event.get("more_body", False):
                 break
         return b"".join(chunks)
-
-
-class _WsgiStreamIterator:
-    """Closeable synchronous PEP 3333 iterator bridging an async SSE stream via Portal."""
-
-    def __init__(self, stream: AsyncIterator[bytes], portal: Portal) -> None:
-        self._stream = stream
-        self._portal = portal
-        self._closed = False
-
-    def __iter__(self) -> "_WsgiStreamIterator":
-        return self
-
-    def __next__(self) -> bytes:
-        if self._closed:
-            raise StopIteration
-        try:
-            chunk = self._portal.call(self._next_chunk)
-        except BaseException:
-            self.close()
-            raise
-        if chunk is None:
-            self.close()
-            raise StopIteration
-        return chunk
-
-    async def _next_chunk(self) -> bytes | None:
-        try:
-            chunk = await self._stream.__anext__()
-        except StopAsyncIteration:
-            return None
-        return chunk if isinstance(chunk, bytes) else bytes(chunk)
-
-    def close(self) -> None:
-        """Close the underlying async stream immediately."""
-        if self._closed:
-            return
-        self._closed = True
-        aclose = getattr(self._stream, "aclose", None)
-        if callable(aclose):
-            with contextlib.suppress(BaseException):
-                self._portal.call(aclose)
 
 
 class WsgiMcpApp:
@@ -406,31 +366,6 @@ class WsgiMcpApp:
             body=resp.body,
             request_id=req_id,
         )
-
-    def _dispatch_vertebra_http(
-        self,
-        request: Request | bytes,
-        *,
-        default_method: str = "POST",
-        default_path: str | None = None,
-    ) -> tuple[McpHttpResponse, int]:
-        resolved_path = default_path or self.config.path
-        if isinstance(request, Request):
-            method = request.method.upper()
-            path = request.path or resolved_path
-            headers = request.headers.as_dict()
-            body = bytes(request.body or b"")
-            req_id = int(request.request_id)
-            context = AgentContext.from_headers(headers, identity_source=self.config.identity_source)
-        else:
-            method = default_method.upper()
-            path = resolved_path
-            headers = {"content-type": "application/json"}
-            body = bytes(request)
-            req_id = 0
-            context = AgentContext()
-        resp = self.handle_http(method, path, headers, body, context=context)
-        return resp, req_id
 
     def handle_flask_view(
         self, request: Request | Any = None
@@ -499,6 +434,31 @@ class WsgiMcpApp:
             return self.iter_stream(resp.stream)
         return [resp.body]
 
+    def _dispatch_vertebra_http(
+        self,
+        request: Request | bytes,
+        *,
+        default_method: str = "POST",
+        default_path: str | None = None,
+    ) -> tuple[McpHttpResponse, int]:
+        resolved_path = default_path or self.config.path
+        if isinstance(request, Request):
+            method = request.method.upper()
+            path = request.path or resolved_path
+            headers = request.headers.as_dict()
+            body = bytes(request.body or b"")
+            req_id = int(request.request_id)
+            context = AgentContext.from_headers(headers, identity_source=self.config.identity_source)
+        else:
+            method = default_method.upper()
+            path = resolved_path
+            headers = {"content-type": "application/json"}
+            body = bytes(request)
+            req_id = 0
+            context = AgentContext()
+        resp = self.handle_http(method, path, headers, body, context=context)
+        return resp, req_id
+
     @staticmethod
     def _extract_wsgi_headers(environ: Mapping[str, Any]) -> dict[str, str]:
         headers: dict[str, str] = {}
@@ -513,3 +473,45 @@ class WsgiMcpApp:
                 header_name = key[5:].replace("_", "-").lower()
                 headers[header_name] = str(value)
         return headers
+
+
+class _WsgiStreamIterator:
+    """Closeable synchronous PEP 3333 iterator bridging an async SSE stream via Portal."""
+
+    def __init__(self, stream: AsyncIterator[bytes], portal: Portal) -> None:
+        self._stream = stream
+        self._portal = portal
+        self._closed = False
+
+    def __iter__(self) -> _WsgiStreamIterator:
+        return self
+
+    def __next__(self) -> bytes:
+        if self._closed:
+            raise StopIteration
+        try:
+            chunk = self._portal.call(self._next_chunk)
+        except BaseException:
+            self.close()
+            raise
+        if chunk is None:
+            self.close()
+            raise StopIteration
+        return chunk
+
+    def close(self) -> None:
+        """Close the underlying async stream immediately."""
+        if self._closed:
+            return
+        self._closed = True
+        aclose = getattr(self._stream, "aclose", None)
+        if callable(aclose):
+            with contextlib.suppress(BaseException):
+                self._portal.call(aclose)
+
+    async def _next_chunk(self) -> bytes | None:
+        try:
+            chunk = await self._stream.__anext__()
+        except StopAsyncIteration:
+            return None
+        return chunk if isinstance(chunk, bytes) else bytes(chunk)

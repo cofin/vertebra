@@ -58,10 +58,13 @@ impl RateLimiter {
     }
 
     pub fn allow(&self, key: &str) -> bool {
+        self.allow_at(key, Instant::now())
+    }
+
+    pub(crate) fn allow_at(&self, key: &str, now: Instant) -> bool {
         if self.max_tokens <= 0.0 {
             return false;
         }
-        let now = Instant::now();
         let mut buckets = self
             .buckets
             .lock()
@@ -71,7 +74,9 @@ impl RateLimiter {
             last_refill: now,
         });
 
-        let elapsed = now.duration_since(bucket.last_refill).as_secs_f64();
+        let elapsed = now
+            .saturating_duration_since(bucket.last_refill)
+            .as_secs_f64();
         if elapsed > 0.0 {
             let refill = elapsed * self.refill_per_second;
             bucket.tokens = (bucket.tokens + refill).min(self.max_tokens);
@@ -161,9 +166,9 @@ mod tests {
     #[test]
     fn rate_limiter_refills_tokens() {
         let limiter = RateLimiter::new(1.0, 1000.0);
-        assert!(limiter.allow("user"));
-        assert!(!limiter.allow("user"));
-        std::thread::sleep(Duration::from_millis(5));
-        assert!(limiter.allow("user"));
+        let t0 = Instant::now();
+        assert!(limiter.allow_at("user", t0));
+        assert!(!limiter.allow_at("user", t0));
+        assert!(limiter.allow_at("user", t0 + Duration::from_millis(5)));
     }
 }

@@ -88,12 +88,9 @@ from vertebra.db.adapters.oracle import (
 from vertebra.db.adapters.postgres import (
     AsyncPostgreSQLDriver,
     PostgreSQLConfig,
+    PostgreSQLCore,
     SyncPostgreSQLDriver,
-    decode_pgcopy_rows,
-    encode_pg_jsonb,
-    encode_pgcopy_rows,
     read_arrow_shm,
-    strip_pg_jsonb_header,
     write_arrow_shm,
 )
 from vertebra.db.adapters.sqlite import (
@@ -318,14 +315,14 @@ class _MockMSSQLClient:
 
 def test_postgres_jsonb_pgcopy_and_arrow_shm_cursor() -> None:
     """Verify PostgreSQL JSONB wire helpers, PGCOPY binary framing, and zero-copy Arrow SHM cursor."""
-    encoded_jsonb = encode_pg_jsonb({"tenant": "acme", "active": True})
+    encoded_jsonb = PostgreSQLCore.encode_jsonb({"tenant": "acme", "active": True})
     assert encoded_jsonb[:1] == b"\x01"
-    stripped = strip_pg_jsonb_header(memoryview(encoded_jsonb))
+    stripped = PostgreSQLCore.strip_jsonb_header(memoryview(encoded_jsonb))
     assert bytes(stripped).startswith(b"{")
 
     rows = [(1, "alpha", b"\x00\xff"), (2, None, "beta")]
-    copy_buf = encode_pgcopy_rows(rows)
-    decoded_rows = decode_pgcopy_rows(copy_buf)
+    copy_buf = PostgreSQLCore.encode_pgcopy_rows(rows)
+    decoded_rows = PostgreSQLCore.decode_pgcopy_rows(copy_buf)
     assert len(decoded_rows) == 2
     assert decoded_rows[0][0] == b"1"
     assert decoded_rows[0][1] == b"alpha"

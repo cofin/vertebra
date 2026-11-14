@@ -39,7 +39,7 @@ __all__ = (
 )
 
 
-class RemoteEmbedRequest(msgspec.Struct, frozen=True, gc=False):
+class RemoteEmbedRequest(msgspec.Struct, frozen=True):
     """Wire request struct for `/vertebra.EmbeddingService/BatchEmbed`."""
 
     model: str

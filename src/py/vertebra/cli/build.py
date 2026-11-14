@@ -17,31 +17,6 @@ __all__ = ("build",)
 _LEGACY_TARGETS: frozenset[str] = frozenset({"frontend", "backend", "all"})
 
 
-def _stage_standalone_distribution(
-    *,
-    project_dir: Path,
-    target_tuple: BuildTarget,
-    entrypoint: str,
-    server_binary: Path | None,
-    profile: str,
-    include_agent_skills: bool,
-    dist_dir: Path,
-) -> Path:
-    """Build a standalone distribution directory, mapping validation failures to ClickException."""
-    builder = StandaloneBuilder(
-        project_dir=project_dir,
-        target=target_tuple,
-        entrypoint=entrypoint,
-        server_binary=server_binary,
-        profile=profile,
-        include_agent_skills=include_agent_skills,
-    )
-    try:
-        return builder.build(dist_dir)
-    except ValueError as exc:
-        raise click.ClickException(str(exc)) from exc
-
-
 @click.command()
 @click.option(
     "--target",
@@ -165,3 +140,28 @@ def build(
             dist_dir=dist_dir,
         )
         console.success(f"Backend build complete -> {staged}")
+
+
+def _stage_standalone_distribution(
+    *,
+    project_dir: Path,
+    target_tuple: BuildTarget,
+    entrypoint: str,
+    server_binary: Path | None,
+    profile: str,
+    include_agent_skills: bool,
+    dist_dir: Path,
+) -> Path:
+    """Build a standalone distribution directory, mapping validation failures to ClickException."""
+    builder = StandaloneBuilder(
+        project_dir=project_dir,
+        target=target_tuple,
+        entrypoint=entrypoint,
+        server_binary=server_binary,
+        profile=profile,
+        include_agent_skills=include_agent_skills,
+    )
+    try:
+        return builder.build(dist_dir)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc

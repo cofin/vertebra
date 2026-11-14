@@ -101,106 +101,6 @@ pub fn encode_pg_jsonb(json_bytes: &[u8]) -> Bytes {
     buf.freeze()
 }
 
-/// Encode a PostgreSQL v3.0 (`196608`) `StartupMessage` wire frame.
-pub fn encode_startup_message(user: &str, database: &str, application_name: &str) -> Bytes {
-    let mut body = BytesMut::with_capacity(128);
-    body.put_u32(0x0003_0000);
-    body.extend_from_slice(b"user\0");
-    body.extend_from_slice(user.as_bytes());
-    body.put_u8(0);
-    body.extend_from_slice(b"database\0");
-    body.extend_from_slice(database.as_bytes());
-    body.put_u8(0);
-    body.extend_from_slice(b"application_name\0");
-    body.extend_from_slice(application_name.as_bytes());
-    body.put_u8(0);
-    body.put_u8(0);
-
-    let total_len = (4 + body.len()) as u32;
-    let mut frame = BytesMut::with_capacity(total_len as usize);
-    frame.put_u32(total_len);
-    frame.extend_from_slice(&body);
-    frame.freeze()
-}
-
-/// Encode a PostgreSQL v3 extended-query `Parse` (`'P'`) wire frame.
-pub fn encode_parse_frame(stmt_name: &str, sql: &str, param_oids: &[u32]) -> Bytes {
-    let body_len = 4 + stmt_name.len() + 1 + sql.len() + 1 + 2 + (param_oids.len() * 4);
-    let mut buf = BytesMut::with_capacity(1 + body_len);
-    buf.put_u8(b'P');
-    buf.put_u32(body_len as u32);
-    buf.extend_from_slice(stmt_name.as_bytes());
-    buf.put_u8(0);
-    buf.extend_from_slice(sql.as_bytes());
-    buf.put_u8(0);
-    buf.put_i16(param_oids.len() as i16);
-    for &oid in param_oids {
-        buf.put_u32(oid);
-    }
-    buf.freeze()
-}
-
-/// Encode a PostgreSQL v3 extended-query `Bind` (`'B'`) wire frame.
-pub fn encode_bind_frame(portal: &str, stmt_name: &str, params: &[Option<Vec<u8>>]) -> Bytes {
-    let mut payload = BytesMut::with_capacity(64 + params.len() * 16);
-    payload.extend_from_slice(portal.as_bytes());
-    payload.put_u8(0);
-    payload.extend_from_slice(stmt_name.as_bytes());
-    payload.put_u8(0);
-    // Single binary parameter format code (1) applied to all parameters
-    payload.put_i16(1);
-    payload.put_i16(1);
-    payload.put_i16(params.len() as i16);
-    for param in params {
-        match param {
-            Some(bytes) => {
-                payload.put_i32(bytes.len() as i32);
-                payload.extend_from_slice(bytes);
-            }
-            None => {
-                payload.put_i32(-1);
-            }
-        }
-    }
-    // Request binary result format (1) for all output columns
-    payload.put_i16(1);
-    payload.put_i16(1);
-
-    let mut frame = BytesMut::with_capacity(5 + payload.len());
-    frame.put_u8(b'B');
-    frame.put_u32((4 + payload.len()) as u32);
-    frame.extend_from_slice(&payload);
-    frame.freeze()
-}
-
-/// Encode a PostgreSQL v3 extended-query `Execute` (`'E'`) wire frame.
-pub fn encode_execute_frame(portal: &str, max_rows: u32) -> Bytes {
-    let body_len = 4 + portal.len() + 1 + 4;
-    let mut buf = BytesMut::with_capacity(1 + body_len);
-    buf.put_u8(b'E');
-    buf.put_u32(body_len as u32);
-    buf.extend_from_slice(portal.as_bytes());
-    buf.put_u8(0);
-    buf.put_u32(max_rows);
-    buf.freeze()
-}
-
-/// Encode a PostgreSQL v3 extended-query `Sync` (`'S'`) wire frame.
-pub fn encode_sync_frame() -> Bytes {
-    Bytes::from_static(b"S\x00\x00\x00\x04")
-}
-
-/// Encode a PostgreSQL v3 simple `Query` (`'Q'`) wire frame.
-pub fn encode_query_frame(sql: &str) -> Bytes {
-    let body_len = 4 + sql.len() + 1;
-    let mut buf = BytesMut::with_capacity(1 + body_len);
-    buf.put_u8(b'Q');
-    buf.put_u32(body_len as u32);
-    buf.extend_from_slice(sql.as_bytes());
-    buf.put_u8(0);
-    buf.freeze()
-}
-
 /// Encode rows into a PostgreSQL binary `COPY` stream (`PGCOPY\n\xff\r\n\0` + flags + rows + `-1i16` trailer).
 pub fn encode_pgcopy_binary_rows(rows: &[Vec<Option<Vec<u8>>>]) -> Bytes {
     let mut buf = BytesMut::with_capacity(64 + rows.len() * 32);
@@ -502,28 +402,6 @@ mod tests {
         assert_eq!(stripped, raw_json);
         assert!(strip_pg_jsonb_header(b"").is_err());
         assert!(strip_pg_jsonb_header(b"\x02{}").is_err());
-    }
-
-    #[test]
-    fn test_postgres_wire_frames() {
-        let startup = encode_startup_message("postgres", "appdb", "vertebra");
-        let len = u32::from_be_bytes([startup[0], startup[1], startup[2], startup[3]]) as usize;
-        assert_eq!(len, startup.len());
-
-        let parse = encode_parse_frame("s1", "SELECT $1::int4", &[23]);
-        assert_eq!(parse[0], b'P');
-
-        let bind = encode_bind_frame("", "s1", &[Some(vec![0, 0, 0, 7]), None]);
-        assert_eq!(bind[0], b'B');
-
-        let exec = encode_execute_frame("", 0);
-        assert_eq!(exec[0], b'E');
-
-        let sync = encode_sync_frame();
-        assert_eq!(&sync[..], b"S\x00\x00\x00\x04");
-
-        let query = encode_query_frame("SELECT 1");
-        assert_eq!(query[0], b'Q');
     }
 
     #[test]

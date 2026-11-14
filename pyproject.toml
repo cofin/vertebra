@@ -305,7 +305,7 @@ ignore_errors = true
 python_version = "3.12"
 strict = true
 mypy_path = ["src/py"]
-files = ["src/py/vertebra", "tools/scripts", "tools/pgo", "tools/docs", "tools/benchmarks/postgres.py", "docs/examples"]
+files = ["src/py/vertebra", "tools/scripts", "tools/pgo", "tools/docs", "tools/benchmarks", "docs/examples"]
 
 [[tool.mypy.overrides]]
 module = [
@@ -358,6 +358,9 @@ module = [
     "pytest_databases",
     "pytest_databases.*",
     "concurrent.interpreters",
+    "duckdb",
+    "spikard",
+    "spikard.*",
 ]
 ignore_missing_imports = true
 

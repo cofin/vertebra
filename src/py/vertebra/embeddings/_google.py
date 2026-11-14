@@ -61,57 +61,10 @@ _VERTEX_TASK_MAP: dict[str, str] = {
 _PREDICT_MAX_ESTIMATED_TOKENS = 20_000
 
 
-class _PendingMicroBatchItem(msgspec.Struct, gc=False):
-    """Queued singular embedding request waiting in an event-loop micro-batch queue."""
-
-    text: str
-    task: str
-    title: str | None
-    estimated_tokens: int
-    future: asyncio.Future[VectorView]
-
-
-class _LoopMicroBatchQueue(msgspec.Struct, gc=False):
-    """Per-event-loop pending micro-batch buffer and active drain task."""
-
-    pending: list[_PendingMicroBatchItem] = msgspec.field(default_factory=list)
-    flush_task: asyncio.Task[None] | None = None
-
-
 class _GoogleEmbedder(Embedder):
     """Shared base for Google Cloud Vertex AI and Gemini embedders."""
 
     DEFAULT_SCOPES: ClassVar[tuple[str, ...]] = ("https://www.googleapis.com/auth/cloud-platform",)
-
-    @staticmethod
-    def _decode_error_snippet(body: bytes, *, limit: int = 256) -> str:
-        """Decode an HTTP error response snippet safely for diagnostics."""
-        if not body:
-            return ""
-        snippet = body[:limit].decode("utf-8", errors="replace").strip()
-        return f": {snippet}" if snippet else ""
-
-    @staticmethod
-    def _validate_multimodal_part(part: MultimodalPart, *, allow_gcs: bool, provider: str) -> None:
-        """Validate MultimodalPart payload fields before serialization."""
-        if part.data is not None and part.uri is not None:
-            raise ValueError("MultimodalPart cannot specify both data and uri")
-        if part.uri is not None:
-            if not part.uri.strip():
-                raise ValueError("MultimodalPart uri must not be empty")
-            if not allow_gcs and part.uri.startswith("gs://"):
-                raise ValueError(f"{provider} does not support gs:// URIs; use VertexEmbedder for GCS media URIs")
-            if not part.mime_type.strip():
-                raise ValueError("MultimodalPart mime_type must not be empty")
-            return
-        if part.data is not None:
-            if len(part.data) == 0:
-                raise ValueError("MultimodalPart data must not be empty")
-            if not part.mime_type.strip():
-                raise ValueError("MultimodalPart mime_type must not be empty")
-            return
-        if part.text is None or not part.text:
-            raise ValueError("MultimodalPart must specify data, uri, or text")
 
     def __init__(
         self,
@@ -152,6 +105,36 @@ class _GoogleEmbedder(Embedder):
         if self._model.startswith(("models/", "projects/")):
             return self._model
         return f"models/{self._model}"
+
+    @staticmethod
+    def _decode_error_snippet(body: bytes, *, limit: int = 256) -> str:
+        """Decode an HTTP error response snippet safely for diagnostics."""
+        if not body:
+            return ""
+        snippet = body[:limit].decode("utf-8", errors="replace").strip()
+        return f": {snippet}" if snippet else ""
+
+    @staticmethod
+    def _validate_multimodal_part(part: MultimodalPart, *, allow_gcs: bool, provider: str) -> None:
+        """Validate MultimodalPart payload fields before serialization."""
+        if part.data is not None and part.uri is not None:
+            raise ValueError("MultimodalPart cannot specify both data and uri")
+        if part.uri is not None:
+            if not part.uri.strip():
+                raise ValueError("MultimodalPart uri must not be empty")
+            if not allow_gcs and part.uri.startswith("gs://"):
+                raise ValueError(f"{provider} does not support gs:// URIs; use VertexEmbedder for GCS media URIs")
+            if not part.mime_type.strip():
+                raise ValueError("MultimodalPart mime_type must not be empty")
+            return
+        if part.data is not None:
+            if len(part.data) == 0:
+                raise ValueError("MultimodalPart data must not be empty")
+            if not part.mime_type.strip():
+                raise ValueError("MultimodalPart mime_type must not be empty")
+            return
+        if part.text is None or not part.text:
+            raise ValueError("MultimodalPart must specify data, uri, or text")
 
     def _validate_single_request(self, text: str, *, task: str, title: str | None) -> None:
         """Hook for subclasses to validate per-request task/title constraints before queuing."""
@@ -416,6 +399,48 @@ class VertexEmbedder(_GoogleEmbedder):
         """Return the configured Google Cloud region."""
         return self._location
 
+    async def embed_multimodal(
+        self,
+        items: Sequence[MultimodalPart | str],
+        *,
+        task: str = "document",
+    ) -> VectorBatchView:
+        """Embed multimodal parts (`inlineData`, `fileData` including `gs://`, `text`) via Vertex `:embedContent`."""
+        method, _ = self._vertex_model_spec()
+        if method != "embed_content":
+            raise ValueError(
+                f"VertexEmbedder.embed_multimodal requires an embedContent model such as gemini-embedding-2, "
+                f"got {self._model!r}"
+            )
+        if not items:
+            raise ValueError("items must not be empty")
+        api_task = self._resolve_task_type(task)
+        _ = self._require_project()
+
+        item_parts: list[list[dict[str, Any]]] = []
+        usage_texts: list[str] = []
+        for item in items:
+            if isinstance(item, str):
+                item_parts.append([{"text": item}])
+                usage_texts.append(item)
+                continue
+            self._validate_multimodal_part(item, allow_gcs=True, provider="VertexEmbedder")
+            parts: list[dict[str, Any]] = []
+            if item.uri is not None:
+                parts.append({"fileData": {"mimeType": item.mime_type, "fileUri": item.uri}})
+            elif item.data is not None:
+                b64_data = base64.b64encode(item.data).decode("ascii")
+                parts.append({"inlineData": {"mimeType": item.mime_type, "data": b64_data}})
+            if item.text:
+                parts.append({"text": item.text})
+                usage_texts.append(item.text)
+            item_parts.append(parts)
+
+        self._record_usage(usage_texts)
+        rows = await self._run_embed_content_batch(item_parts, api_task=api_task)
+        batch = VectorBatchView.from_f32_rows(rows, normalize=True)
+        return self._require_rows(batch, len(items), "VertexEmbedder")
+
     def _require_project(self) -> str:
         """Return configured GCP project ID or raise `ImproperConfigurationError`."""
         if not self._project:
@@ -629,48 +654,6 @@ class VertexEmbedder(_GoogleEmbedder):
         batch = VectorBatchView.from_f32_rows(rows, normalize=True)
         return self._require_rows(batch, len(texts), "VertexEmbedder")
 
-    async def embed_multimodal(
-        self,
-        items: Sequence[MultimodalPart | str],
-        *,
-        task: str = "document",
-    ) -> VectorBatchView:
-        """Embed multimodal parts (`inlineData`, `fileData` including `gs://`, `text`) via Vertex `:embedContent`."""
-        method, _ = self._vertex_model_spec()
-        if method != "embed_content":
-            raise ValueError(
-                f"VertexEmbedder.embed_multimodal requires an embedContent model such as gemini-embedding-2, "
-                f"got {self._model!r}"
-            )
-        if not items:
-            raise ValueError("items must not be empty")
-        api_task = self._resolve_task_type(task)
-        _ = self._require_project()
-
-        item_parts: list[list[dict[str, Any]]] = []
-        usage_texts: list[str] = []
-        for item in items:
-            if isinstance(item, str):
-                item_parts.append([{"text": item}])
-                usage_texts.append(item)
-                continue
-            self._validate_multimodal_part(item, allow_gcs=True, provider="VertexEmbedder")
-            parts: list[dict[str, Any]] = []
-            if item.uri is not None:
-                parts.append({"fileData": {"mimeType": item.mime_type, "fileUri": item.uri}})
-            elif item.data is not None:
-                b64_data = base64.b64encode(item.data).decode("ascii")
-                parts.append({"inlineData": {"mimeType": item.mime_type, "data": b64_data}})
-            if item.text:
-                parts.append({"text": item.text})
-                usage_texts.append(item.text)
-            item_parts.append(parts)
-
-        self._record_usage(usage_texts)
-        rows = await self._run_embed_content_batch(item_parts, api_task=api_task)
-        batch = VectorBatchView.from_f32_rows(rows, normalize=True)
-        return self._require_rows(batch, len(items), "VertexEmbedder")
-
 
 class GeminiEmbedder(_GoogleEmbedder):
     """Gemini Developer API gRPC embedder supporting text and native multimodal protobuf parts."""
@@ -707,6 +690,44 @@ class GeminiEmbedder(_GoogleEmbedder):
             provider_label="GeminiEmbedder",
         )
         self._api_key = api_key or os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+
+    async def embed_multimodal(
+        self,
+        items: Sequence[MultimodalPart | str],
+        *,
+        task: str = "document",
+    ) -> VectorBatchView:
+        """Embed multimodal parts (`inline_data` raw bytes, `file_data` HTTPS URI, text) via Gemini protobuf."""
+        if not items:
+            raise ValueError("items must not be empty")
+        contents: list[list[tuple[Literal["text", "inline_data", "file_data"], str, str | bytes]]] = []
+        usage_texts: list[str] = []
+
+        for item in items:
+            if isinstance(item, str):
+                contents.append([("text", "", item)])
+                usage_texts.append(item)
+                continue
+            self._validate_multimodal_part(item, allow_gcs=False, provider="GeminiEmbedder")
+            parts: list[tuple[Literal["text", "inline_data", "file_data"], str, str | bytes]] = []
+            if item.uri is not None:
+                parts.append(("file_data", item.mime_type, item.uri))
+            elif item.data is not None:
+                parts.append(("inline_data", item.mime_type, item.data))
+            if item.text:
+                parts.append(("text", "", item.text))
+                usage_texts.append(item.text)
+            contents.append(parts)
+
+        self._record_usage(usage_texts)
+        grpc_frame = encode_gemini_embed_contents_grpc_frame(
+            self.resource_model_name,
+            contents,
+            task=task,
+            output_dimensionality=self._dimensions,
+        )
+        batch = await self._dispatch_gemini(grpc_frame)
+        return self._require_rows(batch, len(items), "GeminiEmbedder")
 
     def _rpc_url(self) -> str:
         """Return the Gemini `GenerativeService/BatchEmbedContents` RPC URL."""
@@ -752,40 +773,19 @@ class GeminiEmbedder(_GoogleEmbedder):
         batch = await self._dispatch_gemini(grpc_frame)
         return self._require_rows(batch, len(texts), "GeminiEmbedder")
 
-    async def embed_multimodal(
-        self,
-        items: Sequence[MultimodalPart | str],
-        *,
-        task: str = "document",
-    ) -> VectorBatchView:
-        """Embed multimodal parts (`inline_data` raw bytes, `file_data` HTTPS URI, text) via Gemini protobuf."""
-        if not items:
-            raise ValueError("items must not be empty")
-        contents: list[list[tuple[Literal["text", "inline_data", "file_data"], str, str | bytes]]] = []
-        usage_texts: list[str] = []
 
-        for item in items:
-            if isinstance(item, str):
-                contents.append([("text", "", item)])
-                usage_texts.append(item)
-                continue
-            self._validate_multimodal_part(item, allow_gcs=False, provider="GeminiEmbedder")
-            parts: list[tuple[Literal["text", "inline_data", "file_data"], str, str | bytes]] = []
-            if item.uri is not None:
-                parts.append(("file_data", item.mime_type, item.uri))
-            elif item.data is not None:
-                parts.append(("inline_data", item.mime_type, item.data))
-            if item.text:
-                parts.append(("text", "", item.text))
-                usage_texts.append(item.text)
-            contents.append(parts)
+class _PendingMicroBatchItem(msgspec.Struct):
+    """Queued singular embedding request waiting in an event-loop micro-batch queue."""
 
-        self._record_usage(usage_texts)
-        grpc_frame = encode_gemini_embed_contents_grpc_frame(
-            self.resource_model_name,
-            contents,
-            task=task,
-            output_dimensionality=self._dimensions,
-        )
-        batch = await self._dispatch_gemini(grpc_frame)
-        return self._require_rows(batch, len(items), "GeminiEmbedder")
+    text: str
+    task: str
+    title: str | None
+    estimated_tokens: int
+    future: asyncio.Future[VectorView]
+
+
+class _LoopMicroBatchQueue(msgspec.Struct):
+    """Per-event-loop pending micro-batch buffer and active drain task."""
+
+    pending: list[_PendingMicroBatchItem] = msgspec.field(default_factory=list)
+    flush_task: asyncio.Task[None] | None = None

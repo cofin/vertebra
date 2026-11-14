@@ -6,6 +6,7 @@ from typing import Any
 
 import msgspec
 
+from vertebra.build.codegen._manifest import ManifestGenerator
 from vertebra.build.codegen._metadata import RouteCollector
 from vertebra.build.codegen._typescript import TypeScriptGenerator, format_typescript
 from vertebra.build.codegen.openapi import OpenAPIGenerator
@@ -13,8 +14,9 @@ from vertebra.build.codegen.protobuf import ProtobufGenerator, ProtobufParser
 from vertebra.build.codegen.valibot import ValibotGenerator
 from vertebra.build.codegen.zod import ZodGenerator
 from vertebra.framework._app import App
+from vertebra.framework._router import Route
 from vertebra.framework.procedures import ProcedureRouter
-from vertebra.utils.serializers import decode_grpc_frame, encode_grpc_frame_into
+from vertebra.utils.serializers import decode_grpc_frame, decode_json, encode_grpc_frame_into
 
 
 class User(msgspec.Struct):
@@ -138,10 +140,6 @@ def test_bidirectional_protobuf_routes_and_procedures() -> None:
 
 
 def test_websocket_route_extraction_and_ws_url_codegen() -> None:
-    from vertebra.build.codegen._manifest import ManifestGenerator
-    from vertebra.framework._router import Route
-    from vertebra.utils.serializers import decode_json
-
     app = App()
 
     @app.get("/users/{user_id:int}")

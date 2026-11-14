@@ -13,6 +13,7 @@ import pyarrow.parquet as pq
 import pytest
 
 from vertebra.db.adapters.datafusion import DataFusionConfig, DataFusionEngine
+from vertebra.db.adapters.oracle.core import OracleCore
 from vertebra.db.cdc import CDCConfig, ChangeFeed
 from vertebra.db.rls import TenantPredicate, TenantScopeConfig
 from vertebra.storage import SyncObjectStore
@@ -299,8 +300,6 @@ def test_rls_identifier_validation_and_predicate() -> None:
 
 def test_oracle_tenant_context_builder_binds_values_and_validates_identifiers() -> None:
     """Oracle context names are validated while the tenant stays a bind value."""
-    from vertebra.db.adapters.oracle.core import OracleCore
-
     scope = TenantScopeConfig(setting_name="app.tenant_id")
     assert OracleCore.build_session_context_sql("tenant'; DROP", scope) == (
         "BEGIN DBMS_SESSION.SET_IDENTIFIER(:value); END;",

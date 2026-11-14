@@ -7,7 +7,7 @@ import io
 from datetime import UTC, date, datetime, time
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import Any, TypedDict, cast
 from uuid import UUID
 
 import msgspec
@@ -166,7 +166,7 @@ def schema_hydration_case(
     request: pytest.FixtureRequest,
 ) -> tuple[Any, dict[str, Any], type[Any]]:
     """Parameterize schema hydration targets across msgspec, dataclass, and TypedDict."""
-    return request.param  # type: ignore[no-any-return]
+    return cast("tuple[Any, dict[str, Any], type[Any]]", request.param)
 
 
 @pytest.fixture

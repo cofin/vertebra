@@ -94,6 +94,7 @@ from vertebra.db.registry import REGISTERED_CONFIG_TYPES
 from vertebra.extensions.litestar import ChannelsBackend, MemoryStore
 from vertebra.extensions.sqlalchemy import dialects
 from vertebra.framework.channels import ChannelBus
+from vertebra.server._channels import ChannelBus as ServerChannelBus
 from vertebra.storage import GcpTokenSnapshot
 from vertebra.typing import ImproperConfigurationError, MissingDependencyError, VertebraError, reset_dependency_cache
 from vertebra.utils.serializers import (
@@ -599,8 +600,6 @@ def test_database_registry_url_schemes() -> None:
 
 def test_channel_bus_clean_break_imports() -> None:
     """Framework and server expose one bus and remove the database backend."""
-    from vertebra.server._channels import ChannelBus as ServerChannelBus
-
     assert ServerChannelBus is ChannelBus
     with pytest.raises(ModuleNotFoundError):
         importlib.import_module("vertebra.db.channels")

@@ -50,37 +50,7 @@ class SkillFile(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Resolved filesystem path for on-disk skill files."""
 
 
-def _extract_skill_tags(frontmatter: Mapping[str, Any], explicit: Sequence[str] = ()) -> tuple[str, ...]:
-    if explicit:
-        return tuple(str(t) for t in explicit if str(t))
-    raw = frontmatter.get("tags")
-    if isinstance(raw, str):
-        return (raw,) if raw else ()
-    if isinstance(raw, Sequence) and not isinstance(raw, bytes):
-        return tuple(str(t) for t in raw if str(t))
-    return ()
-
-
-def _extract_skill_icons(
-    frontmatter: Mapping[str, Any],
-    explicit: Sequence[McpIcon | Mapping[str, Any]] = (),
-) -> tuple[McpIcon, ...]:
-    if explicit:
-        return coerce_mcp_icons(explicit)
-    raw = frontmatter.get("icons")
-    if isinstance(raw, Sequence) and not isinstance(raw, (str, bytes)):
-        return coerce_mcp_icons(raw)
-    return ()
-
-
-def _extract_skill_meta(frontmatter: Mapping[str, Any], explicit: Mapping[str, Any] | None = None) -> dict[str, Any]:
-    if explicit is not None:
-        return dict(explicit)
-    raw = frontmatter.get("meta")
-    return dict(raw) if isinstance(raw, Mapping) else {}
-
-
-class Skill(msgspec.Struct, frozen=True, gc=False, kw_only=True):
+class Skill(msgspec.Struct, frozen=True, kw_only=True):
     """Immutable representation of an MCP progressive skill package."""
 
     name: str
@@ -220,16 +190,6 @@ def parse_skill_frontmatter(text: str) -> tuple[dict[str, Any], str]:
     return data, body
 
 
-def _resolve_skill_base_path(raw_path: str | Path) -> Path:
-    """Resolve relative skill directory paths against ``VERTEBRA_APP_ROOT`` when set."""
-    candidate = Path(raw_path)
-    if candidate.is_absolute():
-        return candidate
-    if app_root := os.environ.get("VERTEBRA_APP_ROOT", "").strip():
-        return Path(app_root) / candidate
-    return candidate
-
-
 class FilesystemSkillSource:
     """Discovers skills from directories on the local filesystem."""
 
@@ -305,7 +265,7 @@ class FilesystemSkillSource:
         return skills
 
 
-class MCPSkillsConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
+class MCPSkillsConfig(msgspec.Struct, frozen=True, kw_only=True):
     """Configuration for MCP progressive skill discovery."""
 
     paths: tuple[str | Path, ...] = (".agents/skills",)
@@ -396,37 +356,9 @@ class SkillCatalog:
                 sources.append(src)
         return cls(telemetry=telemetry, sources=sources, config=config)
 
-    def _load_from_sources(self) -> dict[str, Skill]:
-        loaded: dict[str, Skill] = {}
-        for src in self._sources:
-            for skill in src.load_skills():
-                loaded[skill.name] = skill
-        return loaded
-
     def add_listener(self, listener: Callable[..., Any]) -> None:
         """Register a listener invoked when the skill catalog changes."""
         self._listeners.append(listener)
-
-    @staticmethod
-    def _listener_accepts_arg(listener: Callable[..., Any]) -> bool:
-        try:
-            sig = inspect.signature(listener)
-        except (TypeError, ValueError):
-            return False
-        positional = [
-            p
-            for p in sig.parameters.values()
-            if p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
-        ]
-        has_varargs = any(p.kind == inspect.Parameter.VAR_POSITIONAL for p in sig.parameters.values())
-        return has_varargs or len(positional) >= 1
-
-    def _notify(self) -> None:
-        for listener in list(self._listeners):
-            if self._listener_accepts_arg(listener):
-                listener("skills")
-            else:
-                listener()
 
     def register_skill(self, skill: Skill) -> None:
         """Register or replace a skill in the catalog and notify listeners if changed."""
@@ -606,6 +538,74 @@ class SkillCatalog:
 
         with self.telemetry.span_rpc("mcp", f"skill://{skill_name}/{subpath}"):
             return content
+
+    def _load_from_sources(self) -> dict[str, Skill]:
+        loaded: dict[str, Skill] = {}
+        for src in self._sources:
+            for skill in src.load_skills():
+                loaded[skill.name] = skill
+        return loaded
+
+    @staticmethod
+    def _listener_accepts_arg(listener: Callable[..., Any]) -> bool:
+        try:
+            sig = inspect.signature(listener)
+        except (TypeError, ValueError):
+            return False
+        positional = [
+            p
+            for p in sig.parameters.values()
+            if p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+        ]
+        has_varargs = any(p.kind == inspect.Parameter.VAR_POSITIONAL for p in sig.parameters.values())
+        return has_varargs or len(positional) >= 1
+
+    def _notify(self) -> None:
+        for listener in list(self._listeners):
+            if self._listener_accepts_arg(listener):
+                listener("skills")
+            else:
+                listener()
+
+
+def _extract_skill_tags(frontmatter: Mapping[str, Any], explicit: Sequence[str] = ()) -> tuple[str, ...]:
+    if explicit:
+        return tuple(str(t) for t in explicit if str(t))
+    raw = frontmatter.get("tags")
+    if isinstance(raw, str):
+        return (raw,) if raw else ()
+    if isinstance(raw, Sequence) and not isinstance(raw, bytes):
+        return tuple(str(t) for t in raw if str(t))
+    return ()
+
+
+def _extract_skill_icons(
+    frontmatter: Mapping[str, Any],
+    explicit: Sequence[McpIcon | Mapping[str, Any]] = (),
+) -> tuple[McpIcon, ...]:
+    if explicit:
+        return coerce_mcp_icons(explicit)
+    raw = frontmatter.get("icons")
+    if isinstance(raw, Sequence) and not isinstance(raw, (str, bytes)):
+        return coerce_mcp_icons(raw)
+    return ()
+
+
+def _extract_skill_meta(frontmatter: Mapping[str, Any], explicit: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    if explicit is not None:
+        return dict(explicit)
+    raw = frontmatter.get("meta")
+    return dict(raw) if isinstance(raw, Mapping) else {}
+
+
+def _resolve_skill_base_path(raw_path: str | Path) -> Path:
+    """Resolve relative skill directory paths against ``VERTEBRA_APP_ROOT`` when set."""
+    candidate = Path(raw_path)
+    if candidate.is_absolute():
+        return candidate
+    if app_root := os.environ.get("VERTEBRA_APP_ROOT", "").strip():
+        return Path(app_root) / candidate
+    return candidate
 
 
 __all__ = [

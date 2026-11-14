@@ -12,27 +12,9 @@ from typing import Any
 from vertebra.agent.a2a.models import AgentCard, AgentCardSignature
 from vertebra.utils.serializers import decode_json, encode_json_bytes
 
-
-def _b64url_encode(data: bytes) -> str:
-    """Encode bytes using URL-safe Base64 without trailing '=' padding."""
-    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
-
-
-def _b64url_decode(s: str) -> bytes:
-    """Decode URL-safe Base64 string with optional stripped padding."""
-    rem = len(s) % 4
-    if rem:
-        s += "=" * (4 - rem)
-    return base64.urlsafe_b64decode(s.encode("ascii"))
-
-
-def _canonicalize_value(obj: Any) -> Any:
-    """Recursively sort dictionary keys for deterministic canonical JSON encoding."""
-    if isinstance(obj, dict):
-        return {k: _canonicalize_value(v) for k, v in sorted(obj.items())}
-    if isinstance(obj, (list, tuple)):
-        return [_canonicalize_value(item) for item in obj]
-    return obj
+__all__ = [
+    "AgentCardSigner",
+]
 
 
 class AgentCardSigner:
@@ -45,21 +27,21 @@ class AgentCardSigner:
         """Serialize card dictionary without signatures in key-sorted canonical JSON."""
         data = card.to_dict()
         data.pop("signatures", None)
-        canonical = _canonicalize_value(data)
+        canonical = cls._canonicalize_value(data)
         return encode_json_bytes(canonical)
 
     @classmethod
     def sign(cls, card: AgentCard, secret: bytes | str) -> AgentCard:
         """Sign an AgentCard with HMAC-SHA256 and return a new AgentCard with signature."""
         secret_bytes = secret.encode("utf-8") if isinstance(secret, str) else secret
-        protected_header_json = encode_json_bytes(_canonicalize_value(cls.PROTECTED_HEADER))
-        protected_b64 = _b64url_encode(protected_header_json)
+        protected_header_json = encode_json_bytes(cls._canonicalize_value(cls.PROTECTED_HEADER))
+        protected_b64 = cls._b64url_encode(protected_header_json)
         payload_bytes = cls.canonical_payload_bytes(card)
-        payload_b64 = _b64url_encode(payload_bytes)
+        payload_b64 = cls._b64url_encode(payload_bytes)
 
         signing_input = f"{protected_b64}.{payload_b64}".encode("ascii")
         sig = hmac.new(secret_bytes, signing_input, hashlib.sha256).digest()
-        sig_b64 = _b64url_encode(sig)
+        sig_b64 = cls._b64url_encode(sig)
 
         card_sig = AgentCardSignature(
             protected=protected_b64,
@@ -87,18 +69,18 @@ class AgentCardSigner:
 
         secret_bytes = secret.encode("utf-8") if isinstance(secret, str) else secret
         payload_bytes = cls.canonical_payload_bytes(card)
-        payload_b64 = _b64url_encode(payload_bytes)
+        payload_b64 = cls._b64url_encode(payload_bytes)
 
         for sig in card.signatures:
             try:
-                header_raw = _b64url_decode(sig.protected)
+                header_raw = cls._b64url_decode(sig.protected)
                 header = decode_json(header_raw)
                 if not isinstance(header, dict) or header.get("alg") != "HS256":
                     continue
 
                 signing_input = f"{sig.protected}.{payload_b64}".encode("ascii")
                 expected_sig = hmac.new(secret_bytes, signing_input, hashlib.sha256).digest()
-                actual_sig = _b64url_decode(sig.signature)
+                actual_sig = cls._b64url_decode(sig.signature)
 
                 if hmac.compare_digest(actual_sig, expected_sig):
                     return True
@@ -107,7 +89,24 @@ class AgentCardSigner:
 
         return False
 
+    @staticmethod
+    def _b64url_encode(data: bytes) -> str:
+        """Encode bytes using URL-safe Base64 without trailing '=' padding."""
+        return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
 
-__all__ = [
-    "AgentCardSigner",
-]
+    @staticmethod
+    def _b64url_decode(s: str) -> bytes:
+        """Decode URL-safe Base64 string with optional stripped padding."""
+        rem = len(s) % 4
+        if rem:
+            s += "=" * (4 - rem)
+        return base64.urlsafe_b64decode(s.encode("ascii"))
+
+    @classmethod
+    def _canonicalize_value(cls, obj: Any) -> Any:
+        """Recursively sort dictionary keys for deterministic canonical JSON encoding."""
+        if isinstance(obj, dict):
+            return {k: cls._canonicalize_value(v) for k, v in sorted(obj.items())}
+        if isinstance(obj, (list, tuple)):
+            return [cls._canonicalize_value(item) for item in obj]
+        return obj

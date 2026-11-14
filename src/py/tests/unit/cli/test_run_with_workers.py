@@ -201,8 +201,6 @@ def test_worker_starts_and_drains_colocated_worker_runner(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Verify Worker.run starts and drains a co-located WorkerRunner when VERTEBRA_WITH_WORKERS=1."""
-    from vertebra.server.worker import Worker
-
     lifecycle_events: list[tuple[str, Any]] = []
 
     async def fake_run(self: WorkerRunner, **_kwargs: Any) -> None:

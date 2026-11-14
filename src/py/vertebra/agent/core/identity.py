@@ -35,7 +35,7 @@ __all__ = [
 ]
 
 
-class IdentityRequest(msgspec.Struct, frozen=True, gc=False, kw_only=True):
+class IdentityRequest(msgspec.Struct, frozen=True, kw_only=True):
     """Normalized request headers and immediate peer for an identity policy."""
 
     headers: Mapping[str, str]
@@ -79,7 +79,7 @@ class MtlsIdentitySource(msgspec.Struct, frozen=True, gc=False, kw_only=True):
         return None
 
 
-class CallableIdentitySource(msgspec.Struct, frozen=True, gc=False, kw_only=True):
+class CallableIdentitySource(msgspec.Struct, frozen=True, kw_only=True):
     """Delegate caller resolution to an application-owned synchronous policy."""
 
     resolver: Callable[[IdentityRequest], "CallerIdentity | None"]

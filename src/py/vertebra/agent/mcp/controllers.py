@@ -107,46 +107,6 @@ def mcp_tool(
     return decorator
 
 
-def _attach_resource_meta(
-    fn: Callable[..., Any],
-    *,
-    uri: str,
-    name: str | None,
-    description: str | None,
-    mime_type: str,
-    title: str | None,
-    icons: Sequence[McpIcon | Mapping[str, Any]] | None,
-    meta: Mapping[str, Any] | None,
-    allow_template: bool,
-) -> Callable[..., Any]:
-    res_name = name or fn.__name__
-    res_desc = description or inspect.getdoc(fn) or ""
-    normalized_icons = coerce_mcp_icons(icons)
-    resolved_meta = dict(meta) if meta is not None else None
-    target_fn: Any = fn
-    if allow_template and "{" in uri and "}" in uri:
-        target_fn._mcp_resource_template = {
-            "uriTemplate": uri,
-            "name": res_name,
-            "title": title,
-            "description": res_desc,
-            "mimeType": mime_type,
-            "icons": normalized_icons,
-            "meta": resolved_meta,
-        }
-    else:
-        target_fn._mcp_resource = {
-            "uri": uri,
-            "name": res_name,
-            "title": title,
-            "description": res_desc,
-            "mimeType": mime_type,
-            "icons": normalized_icons,
-            "meta": resolved_meta,
-        }
-    return fn
-
-
 def mcp_resource(
     uri: str,
     name: str | None = None,
@@ -406,3 +366,43 @@ class SkillController(PromptController):
             "tags": list(self.tags),
             "examples": list(self.examples),
         }
+
+
+def _attach_resource_meta(
+    fn: Callable[..., Any],
+    *,
+    uri: str,
+    name: str | None,
+    description: str | None,
+    mime_type: str,
+    title: str | None,
+    icons: Sequence[McpIcon | Mapping[str, Any]] | None,
+    meta: Mapping[str, Any] | None,
+    allow_template: bool,
+) -> Callable[..., Any]:
+    res_name = name or fn.__name__
+    res_desc = description or inspect.getdoc(fn) or ""
+    normalized_icons = coerce_mcp_icons(icons)
+    resolved_meta = dict(meta) if meta is not None else None
+    target_fn: Any = fn
+    if allow_template and "{" in uri and "}" in uri:
+        target_fn._mcp_resource_template = {
+            "uriTemplate": uri,
+            "name": res_name,
+            "title": title,
+            "description": res_desc,
+            "mimeType": mime_type,
+            "icons": normalized_icons,
+            "meta": resolved_meta,
+        }
+    else:
+        target_fn._mcp_resource = {
+            "uri": uri,
+            "name": res_name,
+            "title": title,
+            "description": res_desc,
+            "mimeType": mime_type,
+            "icons": normalized_icons,
+            "meta": resolved_meta,
+        }
+    return fn

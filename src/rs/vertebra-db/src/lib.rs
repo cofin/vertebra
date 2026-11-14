@@ -63,9 +63,7 @@ pub use oracle::{
 };
 pub use postgres::{
     PGCOPY_SIGNATURE, PoolerMode, compute_worker_pool_budget, decode_pgcopy_binary_rows,
-    encode_bind_frame, encode_execute_frame, encode_parse_frame, encode_pg_jsonb,
-    encode_pgcopy_binary_rows, encode_query_frame, encode_startup_message, encode_sync_frame,
-    strip_pg_jsonb_header,
+    encode_pg_jsonb, encode_pgcopy_binary_rows, strip_pg_jsonb_header,
 };
 pub use resp3::{
     ClusterRedirect, RedirectKind, Resp3Frame, crc16_xmodem, encode_hello3_handshake,

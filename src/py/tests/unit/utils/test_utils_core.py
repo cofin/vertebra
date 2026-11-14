@@ -6,7 +6,7 @@ import sys
 import types
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -106,7 +106,7 @@ def optional_data_module_case(
     request: pytest.FixtureRequest,
 ) -> tuple[Any, str]:
     """Parameterize optional data science module loaders (pyarrow, numpy, pandas)."""
-    return request.param  # type: ignore[no-any-return]
+    return cast("tuple[Any, str]", request.param)
 
 
 @pytest.mark.parametrize(

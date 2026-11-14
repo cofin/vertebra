@@ -94,9 +94,9 @@ def test_endpoint_coverage_vertebra_native_app_has_handlers() -> None:
     assert len(native_app._handlers) > 0
 
 
-def test_shm_and_embedded_multiworker_targets_pass_explicit_cli_flags() -> None:
-    """Verify multi-worker benchmark targets pass explicit --topology and --workers CLI flags."""
-    for name, expected_topology, expected_workers in (
+@pytest.mark.parametrize(
+    ("name", "expected_topology", "expected_workers"),
+    [
         ("vtb-shm-native-1w", "shm", "1"),
         ("vtb-shm-native-4w", "shm", "4"),
         ("vtb-shm-native-8w", "shm", "8"),
@@ -105,13 +105,20 @@ def test_shm_and_embedded_multiworker_targets_pass_explicit_cli_flags() -> None:
         ("vtb-shm-asgi-8w", "shm", "8"),
         ("vtb-embedded-native-4w", "embedded", "4"),
         ("vtb-embedded-native-8w", "embedded", "8"),
-    ):
-        assert name in ALL_TARGETS
-        cmd = ALL_TARGETS[name].cmd
-        assert "--topology" in cmd
-        assert cmd[cmd.index("--topology") + 1] == expected_topology
-        assert "--workers" in cmd
-        assert cmd[cmd.index("--workers") + 1] == expected_workers
+    ],
+)
+def test_shm_and_embedded_multiworker_targets_pass_explicit_cli_flags(
+    name: str,
+    expected_topology: str,
+    expected_workers: str,
+) -> None:
+    """Verify multi-worker benchmark targets pass explicit --topology and --workers CLI flags."""
+    assert name in ALL_TARGETS
+    cmd = ALL_TARGETS[name].cmd
+    assert "--topology" in cmd
+    assert cmd[cmd.index("--topology") + 1] == expected_topology
+    assert "--workers" in cmd
+    assert cmd[cmd.index("--workers") + 1] == expected_workers
 
 
 def test_granian_rsgi_baseline_target_exists() -> None:

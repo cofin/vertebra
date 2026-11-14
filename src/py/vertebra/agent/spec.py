@@ -105,6 +105,21 @@ class AgentGroup:
 
         self.transfer_tool: Tool = self._synthesize_transfer_tool()
 
+    def get_agent(self, name: str) -> Agent | None:
+        """Retrieve a member agent by name."""
+        return self._agents.get(name)
+
+    def get_agent_tools(self, agent_name: str) -> tuple[Tool, ...]:
+        """Return member agent tools augmented with the synthesized transfer tool."""
+        ag = self._agents.get(agent_name)
+        if ag is None:
+            raise KeyError(f"Agent '{agent_name}' not in group '{self.name}'")
+        return ag.tools + (self.transfer_tool,)
+
+    def list_agents(self) -> list[Agent]:
+        """Return all member agents in the group."""
+        return list(self._agents.values())
+
     def _synthesize_transfer_tool(self) -> Tool:
         agent_names = sorted(self._agents.keys())
 
@@ -138,21 +153,6 @@ class AgentGroup:
             description="Transfer conversation control to another specialist agent in the group.",
             input_schema=schema,
         )
-
-    def get_agent(self, name: str) -> Agent | None:
-        """Retrieve a member agent by name."""
-        return self._agents.get(name)
-
-    def get_agent_tools(self, agent_name: str) -> tuple[Tool, ...]:
-        """Return member agent tools augmented with the synthesized transfer tool."""
-        ag = self._agents.get(agent_name)
-        if ag is None:
-            raise KeyError(f"Agent '{agent_name}' not in group '{self.name}'")
-        return ag.tools + (self.transfer_tool,)
-
-    def list_agents(self) -> list[Agent]:
-        """Return all member agents in the group."""
-        return list(self._agents.values())
 
 
 class SpecNode(msgspec.Struct, frozen=True, gc=False, kw_only=True):
@@ -270,36 +270,6 @@ class SpecTree:
                 ready.append(node)
         return ready
 
-    def _update_status(self, node_id: str, status: SpecNodeStatus, output: Any = None) -> None:
-        node = self._nodes.get(node_id)
-        if node is None:
-            raise ValueError(f"Node '{node_id}' not found")
-        updated = SpecNode(
-            id=node.id,
-            title=node.title,
-            description=node.description,
-            parent_id=node.parent_id,
-            depends_on=node.depends_on,
-            assigned_agent=node.assigned_agent,
-            status=status,
-            output=output if output is not None else node.output,
-            children=node.children,
-            metadata=node.metadata,
-        )
-        self._nodes[node_id] = updated
-
-        if status == "completed" and node.parent_id:
-            parent = self._nodes.get(node.parent_id)
-            if (
-                parent is not None
-                and parent.children
-                and all(
-                    self._nodes.get(cid) is not None and self._nodes[cid].status == "completed"
-                    for cid in parent.children
-                )
-            ):
-                self._update_status(parent.id, "completed")
-
     def mark_running(self, node_id: str) -> None:
         """Mark a node as running."""
         self._update_status(node_id, "running")
@@ -347,14 +317,6 @@ class SpecTree:
             node_id = node.id
             assigned_agent = agent_map.get(node.assigned_agent) if node.assigned_agent else None
 
-            async def _make_step(target_id: str, agent: Agent | None) -> Any:
-                async def _step(ctx: Any) -> Any:
-                    if agent is not None:
-                        return f"Completed {target_id} using agent {agent.name}"
-                    return f"Completed {target_id}"
-
-                return _step
-
             async def _executor(ctx: Any, tid: str = node_id, ag: Agent | None = assigned_agent) -> Any:
                 if ag is not None:
                     return f"Executed {tid} with {ag.name}"
@@ -369,6 +331,36 @@ class SpecTree:
             workflow.add_node(wf_node)
 
         return workflow
+
+    def _update_status(self, node_id: str, status: SpecNodeStatus, output: Any = None) -> None:
+        node = self._nodes.get(node_id)
+        if node is None:
+            raise ValueError(f"Node '{node_id}' not found")
+        updated = SpecNode(
+            id=node.id,
+            title=node.title,
+            description=node.description,
+            parent_id=node.parent_id,
+            depends_on=node.depends_on,
+            assigned_agent=node.assigned_agent,
+            status=status,
+            output=output if output is not None else node.output,
+            children=node.children,
+            metadata=node.metadata,
+        )
+        self._nodes[node_id] = updated
+
+        if status == "completed" and node.parent_id:
+            parent = self._nodes.get(node.parent_id)
+            if (
+                parent is not None
+                and parent.children
+                and all(
+                    self._nodes.get(cid) is not None and self._nodes[cid].status == "completed"
+                    for cid in parent.children
+                )
+            ):
+                self._update_status(parent.id, "completed")
 
 
 __all__ = [

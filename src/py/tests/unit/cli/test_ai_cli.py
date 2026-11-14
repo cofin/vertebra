@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 import hashlib
+import sys
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 
 import pytest
 from click.testing import CliRunner
 
+from vertebra.agent.mcp.models import MCPConfig
+from vertebra.agent.mcp.service import MCPCore
+from vertebra.agent.plugin import AgentPlugin, AgentPluginConfig
 from vertebra.cli import cli
 from vertebra.cli.ai import (
     ModelBundleManifest,
@@ -18,6 +23,7 @@ from vertebra.cli.ai import (
     models,
     run_mcp_stdio_bridge,
 )
+from vertebra.framework._app import App
 from vertebra.utils.serializers import decode_json
 
 
@@ -257,14 +263,20 @@ def test_vtb_ai_mcp_serve_and_bridge_commands(
         "timeout_s": 12.0,
     }
 
-    serve_called: list[str] = []
+    app_core = MCPCore(config=MCPConfig(server_name="test-mcp"))
+    plugin = AgentPlugin(AgentPluginConfig(mcp=MCPConfig(server_name="test-mcp")))
+    plugin.mcp_service = app_core
+    serve_mod = ModuleType("vertebra_test_ai_serve_app")
+    serve_mod.__dict__["app"] = App(plugins=[plugin])
+    monkeypatch.setitem(sys.modules, serve_mod.__name__, serve_mod)
 
-    def fake_stdio_server(_svc: Any) -> int:
-        serve_called.append("ok")
+    serve_called: list[MCPCore] = []
+
+    async def fake_stdio_server(svc: MCPCore) -> int:
+        serve_called.append(svc)
         return 0
 
     monkeypatch.setattr("vertebra.cli.ai.run_stdio_server", fake_stdio_server)
-    monkeypatch.setattr("vertebra.cli.ai.anyio.run", lambda fn: fn())
-    res_serve = runner.invoke(cli, ["ai", "mcp", "serve", "--name", "test-mcp"])
+    res_serve = runner.invoke(cli, ["ai", "mcp", "serve", "--app", f"{serve_mod.__name__}:app"])
     assert res_serve.exit_code == 0, res_serve.output
-    assert serve_called == ["ok"]
+    assert serve_called == [app_core]

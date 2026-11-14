@@ -93,12 +93,8 @@ def test_native_modules_declare_gil_used_false(mod_name: str) -> None:
     was_disabled = bool(checker is not None and not checker())
 
     ext_mod = pytest.importorskip(mod_name)
-    if mod_name == "vertebra._storage":
-        assert hasattr(ext_mod, "SyncObjectStore")
-        if hasattr(ext_mod, "GIL_USED"):
-            assert ext_mod.GIL_USED is False
-    else:
-        assert getattr(ext_mod, "GIL_USED", None) is False
+    assert getattr(ext_mod, "GIL_USED", None) is False
+    assert isinstance(getattr(ext_mod, "FREE_THREADED", None), bool)
 
     if was_disabled and checker is not None:
         assert checker() is False

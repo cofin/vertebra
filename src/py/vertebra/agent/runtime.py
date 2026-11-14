@@ -90,16 +90,6 @@ class GoogleGenAIProvider:
         self.api_key = api_key
         self._client = client
 
-    def _get_client(self) -> Any:
-        if self._client is not None:
-            return self._client
-        genai_module = import_optional("google.genai")
-        if genai_module is None:
-            msg = "The 'google-genai' package is required to use GoogleGenAIProvider"
-            raise RuntimeError(msg)
-        self._client = genai_module.Client(api_key=self.api_key)
-        return self._client
-
     async def stream_chat(
         self,
         messages: Sequence[AgentMessage],
@@ -117,6 +107,16 @@ class GoogleGenAIProvider:
         )
         yield ModelDelta(event_type="delta", text=response.text or "")
         yield ModelDelta(event_type="usage", usage=GenAiUsage(input_tokens=10, output_tokens=10))
+
+    def _get_client(self) -> Any:
+        if self._client is not None:
+            return self._client
+        genai_module = import_optional("google.genai")
+        if genai_module is None:
+            msg = "The 'google-genai' package is required to use GoogleGenAIProvider"
+            raise RuntimeError(msg)
+        self._client = genai_module.Client(api_key=self.api_key)
+        return self._client
 
 
 class AgentStreamFrame(msgspec.Struct, frozen=True, gc=False, kw_only=True, omit_defaults=True):
