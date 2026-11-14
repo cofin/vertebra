@@ -1,5 +1,9 @@
 # Bundle Activity Log
 
+## [2026-11-14T04:01:30Z] archive | native-postgres-driver
+
+- Archived completed specification `native-postgres-driver` (`ch01`–`ch09`, `32/32` tasks across `18baadcd..d4b87471`) into permanent OKF knowledge chapters (`database-drivers-and-dialers.md`, `postgres-native-driver.md`, `postgres-limitations.md`, `database-driver-limitations.md`, `query-pipeline-cdc-and-tenancy.md`, `sqlspec-alchemy-and-dialects.md`, `distributed-queues-and-email.md`, `packaging-and-pgo.md`, `polyglot-test-matrix.md`, `benchmarks-and-free-threaded.md`, `workflow.md`, `adr-004`, product docs, and `areas.toml`) and removed `.agents/bundles/specs/native-postgres-driver/`.
+
 ## [2026-11-14T03:59:30Z] finish | native-postgres-driver
 
 - Completed `native-postgres-driver` (`ch01`–`ch09`, `32/32` tasks) through `d63f9ade`: standalone `vertebra-postgres` (`vertebra._postgres`), verified replication supervision (`ReplicationSupervisor`), cancel-safe `AsyncPostgresReplication`, durable CAS `PostgresChangeSource`, permanent `_sync.py`/`_async.py` drivers, atomic removal of `psycopg`/`asyncpg`, GCP dialer cleanup, PG14–18 conformance, companion wheel isolation, Criterion + Python benchmark lanes, Zensical docs, and cross-bundle OKF reconciliation.

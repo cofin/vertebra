@@ -9,7 +9,7 @@ Active specifications and promoted spec-scoped research notes anchored at `main 
 
 ## 2. Active Feature Specifications (`state: active`)
 
-- [`native-postgres-driver`](native-postgres-driver/spec.md) — Verified `ReplicationSupervisor` reconnect, cancel-safe Python `AsyncPostgresReplication`, `PostgresChangeSource` CAS checkpointing, `options.py`/`binds.py`, permanent `_sync.py`/`_async.py` drivers, atomic `psycopg`/`asyncpg` removal + `cloudsql.py`/`alloydb.py` cleanup, PG14–18 conformance, wheel/benchmark gates, and docs over the merged `vertebra-postgres` wheel ([`9 chapters`](native-postgres-driver/chapters/index.md), `ch01`–`ch08` complete, `4` remaining tasks in `ch09`).
+- none
 
 ## 3. Planned Executable Specifications (`state: planned`)
 
@@ -29,7 +29,5 @@ Active specifications and promoted spec-scoped research notes anchored at `main 
 
 - [`gap-analysis_20261103.md`](native-data-platform/research/gap-analysis_20261103.md) — Broker, native driver, and storage gap analysis (`native-data-platform`).
 - [`rust-driver-crates_20261103.md`](native-data-platform/research/rust-driver-crates_20261103.md) — Primary-source Rust client crate comparison and per-engine wheel packaging (`native-data-platform`).
-- [`protocol-and-execution_20261105.md`](native-postgres-driver/research/protocol-and-execution_20261105.md) — PostgreSQL v3.0 extended query, single-Sync pipeline, COPY, and pgoutput v1 wire semantics (`native-postgres-driver`).
-- [`cloud-material_20261105.md`](native-postgres-driver/research/cloud-material_20261105.md) — Cloud SQL Admin and AlloyDB ephemeral mTLS certificate and IAM token lifecycle (`native-postgres-driver`).
 - [`audit-findings_20261103.md`](integration-remediation/research/audit-findings_20261103.md) — Audit findings across database extensions, framework, GCP drivers, MCP/WebMCP, and `vertebra.db` (`integration-remediation`).
 - [`google-cloud-rust_20261103.md`](integration-remediation/research/google-cloud-rust_20261103.md) — Evaluation of official `googleapis/google-cloud-rust` crates for Spanner, BigQuery Storage, and auth (`integration-remediation`).
