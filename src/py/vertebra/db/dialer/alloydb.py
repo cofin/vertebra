@@ -3,32 +3,25 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
-import inspect
-import os
 import socket
 import ssl
 import struct
-import tempfile
 import time
-import urllib.request
 from collections.abc import Callable
 from enum import IntEnum
-from pathlib import Path
-from typing import Any, ClassVar, Final, Self
+from typing import Any, ClassVar, Self
 from urllib.parse import urlparse
 
 import anyio
 
-from vertebra.db.dialer.cloudsql import (
+from vertebra.db.dialer._base import (
+    VALID_GCP_IP_TYPES,
     EphemeralCertBundle,
-    generate_ephemeral_keypair,
+    _BaseGCPDialer,
 )
 from vertebra.typing import FrozenBaseStruct
 from vertebra.utils.module_loader import import_optional
 from vertebra.utils.serializers import decode_json, encode_json_bytes
-
-_VALID_IP_TYPES: Final[frozenset[str]] = frozenset({"PUBLIC", "PRIVATE", "PSC"})
 
 __all__ = (
     "AlloyDBAuthType",
@@ -104,7 +97,7 @@ class AlloyDBConfig(FrozenBaseStruct, frozen=True, gc=False, kw_only=True):
 
     def __post_init__(self) -> None:
         """Validate AlloyDB IP connectivity type."""
-        if self.ip_type not in _VALID_IP_TYPES:
+        if self.ip_type not in VALID_GCP_IP_TYPES:
             msg = f"Invalid AlloyDB ip_type {self.ip_type!r}; expected one of 'PUBLIC', 'PRIVATE', 'PSC'"
             raise ValueError(msg)
 
@@ -120,55 +113,26 @@ class AlloyDBConfig(FrozenBaseStruct, frozen=True, gc=False, kw_only=True):
         return ("alloydb", self.instance_uri)
 
 
-class _BaseAlloyDBDialer:
+class _BaseAlloyDBDialer(_BaseGCPDialer):
     """Base zero-sidecar AlloyDB mTLS dialer foundation."""
 
-    __slots__ = (
-        "_cached_cert_bundle",
-        "_cached_expiry",
-        "_cached_token",
-        "_config",
-        "_native_dialer",
-        "_uri",
-    )
+    _tls_temp_prefix: ClassVar[str] = "vtb-adb-tls-"
 
-    def __init__(self, config: AlloyDBConfig) -> None:
-        self._config = config
-        self._uri = AlloyDBClusterURI.parse(config.instance_uri)
-        self._cached_token: str | None = None
-        self._cached_expiry: float = 0.0
-        self._cached_cert_bundle: EphemeralCertBundle | None = None
-        self._native_dialer: Any = None
-        native_mod = import_optional("vertebra._vertebra")
-        native_cls = getattr(native_mod, "AlloyDBDialer", None)
-        if native_cls is not None:
-            with contextlib.suppress(TypeError, ValueError, RuntimeError):
-                self._native_dialer = native_cls(config.instance_uri)
+    __slots__ = ()
 
-    @property
-    def config(self) -> AlloyDBConfig:
-        """Return the configuration for this AlloyDB dialer."""
-        return self._config
-
-    @property
-    def uri(self) -> AlloyDBClusterURI:
-        """Return the parsed AlloyDBClusterURI."""
-        return self._uri
-
-    @property
-    def port(self) -> int:
-        """Return the AlloyDB mTLS server proxy port (default 5433)."""
-        return self._config.port
-
-    @staticmethod
-    def generate_ephemeral_keypair(bits: int = 2048) -> tuple[str, str]:
-        """Generate an ephemeral client public/private keypair in PEM format."""
-        return generate_ephemeral_keypair(bits)
-
-    def build_handshake_frame(self, oauth2_token: str = "") -> bytes:
-        """Build the initial MetadataExchangeRequest wire frame for port 5433."""
-        mode = AlloyDBAuthType.IAM if self._config.enable_iam_auth else AlloyDBAuthType.BUILT_IN
-        return self.encode_metadata_exchange(self._config.user_agent, mode, oauth2_token)
+    def __init__(
+        self,
+        config: AlloyDBConfig,
+        *,
+        token_cache: Any = None,
+        default_cache_cls_name: str | None = None,
+    ) -> None:
+        super().__init__(
+            config,
+            AlloyDBClusterURI.parse(config.instance_uri),
+            token_cache=token_cache,
+            default_cache_cls_name=default_cache_cls_name,
+        )
 
     @staticmethod
     def encode_metadata_exchange(
@@ -177,21 +141,12 @@ class _BaseAlloyDBDialer:
         oauth2_token: str = "",
     ) -> bytes:
         """Encode a 4-byte big-endian length-prefixed AlloyDB MetadataExchangeRequest protobuf frame."""
+        mode = int(auth_type)
         native_mod = import_optional("vertebra._vertebra")
-        if native_mod is not None:
-            native_cls = getattr(native_mod, "AlloyDBDialer", None)
-            if native_cls is not None and hasattr(native_cls, "encode_metadata_exchange"):
-                with contextlib.suppress(TypeError, ValueError, RuntimeError):
-                    res = native_cls.encode_metadata_exchange(user_agent, int(auth_type), oauth2_token)
-                    if isinstance(res, (bytes, bytearray)):
-                        return bytes(res)
-            for fn_name in ("encode_alloydb_metadata_exchange", "encode_alloydb_metadata_exchange_native"):
-                native_fn = getattr(native_mod, fn_name, None)
-                if callable(native_fn):
-                    with contextlib.suppress(TypeError, ValueError, RuntimeError):
-                        res = native_fn(user_agent, int(auth_type), oauth2_token)
-                        if isinstance(res, (bytes, bytearray)):
-                            return bytes(res)
+        if native_mod is not None and mode in (AlloyDBAuthType.BUILT_IN, AlloyDBAuthType.IAM):
+            native_fn = getattr(native_mod, "encode_alloydb_metadata_exchange", None)
+            if callable(native_fn):
+                return bytes(native_fn(user_agent, oauth2_token, mode == AlloyDBAuthType.IAM))
 
         body = bytearray()
         if user_agent:
@@ -200,7 +155,7 @@ class _BaseAlloyDBDialer:
             body.extend(_BaseAlloyDBDialer._encode_varint(len(ua_bytes)))
             body.extend(ua_bytes)
         body.append(0x10)
-        body.extend(_BaseAlloyDBDialer._encode_varint(int(auth_type)))
+        body.extend(_BaseAlloyDBDialer._encode_varint(mode))
         if oauth2_token:
             tok_bytes = oauth2_token.encode("utf-8")
             body.append(0x1A)
@@ -230,27 +185,11 @@ class _BaseAlloyDBDialer:
             field_num = tag_byte >> 3
             wire_type = tag_byte & 0x07
             if wire_type == 0:
-                val = 0
-                shift = 0
-                while idx < len(body):
-                    b = body[idx]
-                    idx += 1
-                    val |= (b & 0x7F) << shift
-                    if not (b & 0x80):
-                        break
-                    shift += 7
+                val, idx = _BaseAlloyDBDialer._decode_varint(body, idx)
                 if field_num == 2:
                     auth_type = AlloyDBAuthType(val)
             elif wire_type == 2:
-                length = 0
-                shift = 0
-                while idx < len(body):
-                    b = body[idx]
-                    idx += 1
-                    length |= (b & 0x7F) << shift
-                    if not (b & 0x80):
-                        break
-                    shift += 7
+                length, idx = _BaseAlloyDBDialer._decode_varint(body, idx)
                 str_bytes = body[idx : idx + length]
                 idx += length
                 if field_num == 1:
@@ -299,27 +238,11 @@ class _BaseAlloyDBDialer:
             field_num = tag_byte >> 3
             wire_type = tag_byte & 0x07
             if wire_type == 0:
-                val = 0
-                shift = 0
-                while idx < len(body):
-                    b = body[idx]
-                    idx += 1
-                    val |= (b & 0x7F) << shift
-                    if not (b & 0x80):
-                        break
-                    shift += 7
+                val, idx = _BaseAlloyDBDialer._decode_varint(body, idx)
                 if field_num == 1:
                     code = val
             elif wire_type == 2:
-                length = 0
-                shift = 0
-                while idx < len(body):
-                    b = body[idx]
-                    idx += 1
-                    length |= (b & 0x7F) << shift
-                    if not (b & 0x80):
-                        break
-                    shift += 7
+                length, idx = _BaseAlloyDBDialer._decode_varint(body, idx)
                 str_bytes = body[idx : idx + length]
                 idx += length
                 if field_num == 2:
@@ -332,33 +255,10 @@ class _BaseAlloyDBDialer:
             raise PermissionError(msg)
         return code, error_msg
 
-    def build_tls_context(
-        self,
-        *,
-        ca_pem: str | None = None,
-        client_cert_pem: str | None = None,
-        client_key_pem: str | None = None,
-    ) -> ssl.SSLContext:
-        """Build a TLS 1.3 SSLContext with peer verification enabled for AlloyDB port 5433."""
-        if ca_pem:
-            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-            ctx.load_verify_locations(cadata=ca_pem)
-        else:
-            ctx = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
-        ctx.minimum_version = ssl.TLSVersion.TLSv1_3
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_REQUIRED
-        if client_cert_pem and client_key_pem:
-            with tempfile.TemporaryDirectory(prefix="vtb-adb-tls-") as tmpdir:
-                os.chmod(tmpdir, 0o700)
-                cert_file = Path(tmpdir) / "cert.pem"
-                key_file = Path(tmpdir) / "key.pem"
-                cert_file.write_text(client_cert_pem, encoding="utf-8")
-                key_file.write_text(client_key_pem, encoding="utf-8")
-                os.chmod(cert_file, 0o600)
-                os.chmod(key_file, 0o600)
-                ctx.load_cert_chain(certfile=str(cert_file), keyfile=str(key_file))
-        return ctx
+    def build_handshake_frame(self, oauth2_token: str = "") -> bytes:
+        """Build the initial MetadataExchangeRequest wire frame for port 5433."""
+        mode = AlloyDBAuthType.IAM if self._config.enable_iam_auth else AlloyDBAuthType.BUILT_IN
+        return self.encode_metadata_exchange(self._config.user_agent, mode, oauth2_token)
 
     def _build_client_cert_request(
         self,
@@ -390,44 +290,6 @@ class _BaseAlloyDBDialer:
         )
 
     @staticmethod
-    def _post_client_cert_urllib(url: str, payload: bytes, headers: dict[str, str]) -> bytes:
-        req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
-        with urllib.request.urlopen(req, timeout=10.0) as resp:
-            return bytes(resp.read())
-
-    def _execute_client_cert_http(
-        self,
-        public_key_pem: str,
-        access_token: str,
-        http_transport: Callable[[str, bytes, dict[str, str]], bytes] | None = None,
-        private_key_pem: str = "",
-    ) -> EphemeralCertBundle:
-        url, payload, headers = self._build_client_cert_request(public_key_pem, access_token)
-        if http_transport is not None:
-            resp_bytes = http_transport(url, payload, headers)
-        else:
-            resp_bytes = self._post_client_cert_urllib(url, payload, headers)
-        return self._parse_client_cert_response(resp_bytes, private_key_pem)
-
-    async def _execute_client_cert_http_async(
-        self,
-        public_key_pem: str,
-        access_token: str,
-        http_transport: Callable[[str, bytes, dict[str, str]], Any] | None = None,
-        private_key_pem: str = "",
-    ) -> EphemeralCertBundle:
-        url, payload, headers = self._build_client_cert_request(public_key_pem, access_token)
-        if http_transport is not None:
-            if inspect.iscoroutinefunction(http_transport):
-                resp_bytes = await http_transport(url, payload, headers)
-            else:
-                res = await anyio.to_thread.run_sync(http_transport, url, payload, headers)
-                resp_bytes = await res if inspect.isawaitable(res) else res
-        else:
-            resp_bytes = await anyio.to_thread.run_sync(self._post_client_cert_urllib, url, payload, headers)
-        return self._parse_client_cert_response(resp_bytes, private_key_pem)
-
-    @staticmethod
     def _encode_varint(value: int) -> bytes:
         out = bytearray()
         val = value
@@ -438,27 +300,27 @@ class _BaseAlloyDBDialer:
         return bytes(out)
 
     @staticmethod
-    def _unwrap_access_token(raw: Any) -> str:
-        if raw is None:
-            return ""
-        if hasattr(raw, "access_token"):
-            return str(raw.access_token or "")
-        return str(raw or "")
+    def _decode_varint(body: bytes, start: int) -> tuple[int, int]:
+        val = 0
+        shift = 0
+        idx = start
+        while idx < len(body):
+            byte_val = body[idx]
+            idx += 1
+            val |= (byte_val & 0x7F) << shift
+            if not (byte_val & 0x80):
+                break
+            shift += 7
+        return val, idx
 
 
 class SyncAlloyDBDialer(_BaseAlloyDBDialer):
     """Synchronous zero-sidecar AlloyDB mTLS dialer with MetadataExchange handshake on port 5433."""
 
-    __slots__ = ("_token_cache",)
+    __slots__ = ()
 
     def __init__(self, config: AlloyDBConfig, *, token_cache: Any = None) -> None:
-        super().__init__(config)
-        self._token_cache = token_cache
-        if self._token_cache is None:
-            native_mod = import_optional("vertebra._vertebra")
-            cache_cls = getattr(native_mod, "SyncGcpTokenCache", None) if native_mod is not None else None
-            if cache_cls is not None:
-                self._token_cache = cache_cls()
+        super().__init__(config, token_cache=token_cache, default_cache_cls_name="SyncGcpTokenCache")
 
     def refresh_client_cert(
         self,
@@ -469,28 +331,14 @@ class SyncAlloyDBDialer(_BaseAlloyDBDialer):
         http_transport: Callable[[str, bytes, dict[str, str]], bytes] | None = None,
     ) -> EphemeralCertBundle:
         """Exchange an ephemeral client RSA/ECDSA public key for an AlloyDB client certificate."""
-        resolved_token = self._unwrap_access_token(access_token) if access_token is not None else ""
-        if access_token is None:
-            if self._token_cache is not None and hasattr(self._token_cache, "get_token"):
-                resolved_token = self._unwrap_access_token(self._token_cache.get_token())
-            if not resolved_token and self._cached_token:
-                resolved_token = self._cached_token
-        if resolved_token:
-            self._cached_token = resolved_token
-        resolved_pub = public_key_pem
-        resolved_priv = private_key_pem
-        if resolved_pub is None or resolved_priv is None:
-            gen_pub, gen_priv = self.generate_ephemeral_keypair()
-            resolved_pub = resolved_pub or gen_pub
-            resolved_priv = resolved_priv or gen_priv
-        bundle = self._execute_client_cert_http(
-            resolved_pub,
-            resolved_token,
+        return self._refresh_bundle_sync(
+            self._build_client_cert_request,
+            self._parse_client_cert_response,
+            public_key_pem=public_key_pem,
+            private_key_pem=private_key_pem,
+            access_token=access_token,
             http_transport=http_transport,
-            private_key_pem=resolved_priv,
         )
-        self._cached_cert_bundle = bundle
-        return bundle
 
     def connect(
         self,
@@ -501,18 +349,11 @@ class SyncAlloyDBDialer(_BaseAlloyDBDialer):
         timeout: float = 10.0,
     ) -> ssl.SSLSocket:
         """Establish a synchronous TLS 1.3 mTLS connection to AlloyDB and perform MetadataExchange."""
-        resolved_token = self._unwrap_access_token(oauth2_token) if oauth2_token is not None else ""
-        if oauth2_token is None:
-            if self._config.enable_iam_auth:
-                if self._token_cache is not None and hasattr(self._token_cache, "get_token"):
-                    resolved_token = self._unwrap_access_token(self._token_cache.get_token())
-                if not resolved_token and self._cached_token:
-                    resolved_token = self._cached_token
-                if resolved_token:
-                    self._cached_token = resolved_token
-        elif resolved_token:
-            self._cached_token = resolved_token
-        ctx = ssl_context or self.build_tls_context()
+        resolved_token = self._resolve_sync_token(
+            oauth2_token,
+            use_cache=self._config.enable_iam_auth,
+        )
+        ctx = self._resolve_ssl_context(ssl_context)
         raw_sock = socket.create_connection((host, self.port), timeout=timeout)
         try:
             tls_sock = ctx.wrap_socket(raw_sock)
@@ -537,15 +378,13 @@ class SyncAlloyDBDialer(_BaseAlloyDBDialer):
 
     def close(self) -> None:
         """Clear cached tokens and certificates."""
-        self._cached_token = None
-        self._cached_cert_bundle = None
-        self._cached_expiry = 0.0
+        self._clear_cached_credentials()
 
     def __call__(
         self,
         host: str = "127.0.0.1",
         *,
-        oauth2_token: str = "",
+        oauth2_token: str | None = None,
         ssl_context: ssl.SSLContext | None = None,
         timeout: float = 10.0,
     ) -> ssl.SSLSocket:
@@ -556,17 +395,11 @@ class SyncAlloyDBDialer(_BaseAlloyDBDialer):
 class AsyncAlloyDBDialer(_BaseAlloyDBDialer):
     """Asynchronous zero-sidecar AlloyDB mTLS dialer with MetadataExchange handshake on port 5433."""
 
-    __slots__ = ("_refresh_lock", "_token_cache")
+    __slots__ = ("_refresh_lock",)
 
     def __init__(self, config: AlloyDBConfig, *, token_cache: Any = None) -> None:
-        super().__init__(config)
+        super().__init__(config, token_cache=token_cache, default_cache_cls_name="AsyncGcpTokenCache")
         self._refresh_lock = anyio.Lock()
-        self._token_cache = token_cache
-        if self._token_cache is None:
-            native_mod = import_optional("vertebra._vertebra")
-            cache_cls = getattr(native_mod, "AsyncGcpTokenCache", None) if native_mod is not None else None
-            if cache_cls is not None:
-                self._token_cache = cache_cls()
 
     async def refresh_client_cert(
         self,
@@ -578,30 +411,14 @@ class AsyncAlloyDBDialer(_BaseAlloyDBDialer):
     ) -> EphemeralCertBundle:
         """Asynchronously exchange an ephemeral client public key for an AlloyDB client certificate."""
         async with self._refresh_lock:
-            resolved_token = self._unwrap_access_token(access_token) if access_token is not None else ""
-            if access_token is None:
-                if self._token_cache is not None and hasattr(self._token_cache, "get_token"):
-                    res = self._token_cache.get_token()
-                    raw_token = await res if inspect.isawaitable(res) else res
-                    resolved_token = self._unwrap_access_token(raw_token)
-                if not resolved_token and self._cached_token:
-                    resolved_token = self._cached_token
-            if resolved_token:
-                self._cached_token = resolved_token
-            resolved_pub = public_key_pem
-            resolved_priv = private_key_pem
-            if resolved_pub is None or resolved_priv is None:
-                gen_pub, gen_priv = await anyio.to_thread.run_sync(self.generate_ephemeral_keypair)
-                resolved_pub = resolved_pub or gen_pub
-                resolved_priv = resolved_priv or gen_priv
-            bundle = await self._execute_client_cert_http_async(
-                resolved_pub,
-                resolved_token,
+            return await self._refresh_bundle_async(
+                self._build_client_cert_request,
+                self._parse_client_cert_response,
+                public_key_pem=public_key_pem,
+                private_key_pem=private_key_pem,
+                access_token=access_token,
                 http_transport=http_transport,
-                private_key_pem=resolved_priv,
             )
-            self._cached_cert_bundle = bundle
-            return bundle
 
     async def connect(
         self,
@@ -611,20 +428,11 @@ class AsyncAlloyDBDialer(_BaseAlloyDBDialer):
         ssl_context: ssl.SSLContext | None = None,
     ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
         """Establish an asynchronous TLS 1.3 mTLS connection to AlloyDB and perform MetadataExchange."""
-        resolved_token = self._unwrap_access_token(oauth2_token) if oauth2_token is not None else ""
-        if oauth2_token is None:
-            if self._config.enable_iam_auth:
-                if self._token_cache is not None and hasattr(self._token_cache, "get_token"):
-                    res = self._token_cache.get_token()
-                    raw_token = await res if inspect.isawaitable(res) else res
-                    resolved_token = self._unwrap_access_token(raw_token)
-                if not resolved_token and self._cached_token:
-                    resolved_token = self._cached_token
-                if resolved_token:
-                    self._cached_token = resolved_token
-        elif resolved_token:
-            self._cached_token = resolved_token
-        ctx = ssl_context or self.build_tls_context()
+        resolved_token = await self._resolve_async_token(
+            oauth2_token,
+            use_cache=self._config.enable_iam_auth,
+        )
+        ctx = self._resolve_ssl_context(ssl_context)
         reader, writer = await asyncio.open_connection(host, self.port, ssl=ctx)
         try:
             req_frame = self.build_handshake_frame(resolved_token)
@@ -642,6 +450,4 @@ class AsyncAlloyDBDialer(_BaseAlloyDBDialer):
 
     async def close(self) -> None:
         """Clear cached tokens and certificates."""
-        self._cached_token = None
-        self._cached_cert_bundle = None
-        self._cached_expiry = 0.0
+        self._clear_cached_credentials()

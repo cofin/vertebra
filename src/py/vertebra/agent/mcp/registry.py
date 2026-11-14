@@ -71,20 +71,6 @@ class ToolRegistry:
         """Return deterministic weak ETag across all registered tools, resources, templates, and prompts."""
         return self.schema_cache.combined_etag()
 
-    @staticmethod
-    def _accepts_kind_arg(listener: Callable[..., Any]) -> bool:
-        try:
-            sig = inspect.signature(listener)
-        except (TypeError, ValueError):
-            return False
-        positional = [
-            param
-            for param in sig.parameters.values()
-            if param.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
-        ]
-        has_varargs = any(param.kind == inspect.Parameter.VAR_POSITIONAL for param in sig.parameters.values())
-        return has_varargs or len(positional) >= 1
-
     def add_listener(
         self,
         listener: Callable[[], None] | Callable[[RegistryChangeKind], None],
@@ -457,6 +443,20 @@ class ToolRegistry:
                 listener(kind)
             else:
                 listener()
+
+    @staticmethod
+    def _accepts_kind_arg(listener: Callable[..., Any]) -> bool:
+        try:
+            sig = inspect.signature(listener)
+        except (TypeError, ValueError):
+            return False
+        positional = [
+            param
+            for param in sig.parameters.values()
+            if param.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+        ]
+        has_varargs = any(param.kind == inspect.Parameter.VAR_POSITIONAL for param in sig.parameters.values())
+        return has_varargs or len(positional) >= 1
 
 
 class MCPRegistry(ToolRegistry):

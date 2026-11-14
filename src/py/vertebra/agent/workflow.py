@@ -182,14 +182,6 @@ class DynamicWorkflow:
         self.add_node(node)
         return node
 
-    def _validate_dependencies(self) -> None:
-        """Validate that all referenced dependencies exist and the graph is acyclic."""
-        for name, node in self.nodes.items():
-            for dep in node.depends_on:
-                if dep not in self.nodes:
-                    raise ValueError(f"Unknown dependency '{dep}' for node '{name}'")
-        self.topological_waves()
-
     def topological_waves(self) -> list[list[WorkflowNode]]:
         """Compute execution waves via Kahn's topological sort algorithm."""
         for name, node in self.nodes.items():
@@ -222,6 +214,14 @@ class DynamicWorkflow:
         if visited_count != len(self.nodes):
             raise RuntimeError(f"Cycle detected in workflow DAG '{self.name}'")
         return waves
+
+    def _validate_dependencies(self) -> None:
+        """Validate that all referenced dependencies exist and the graph is acyclic."""
+        for name, node in self.nodes.items():
+            for dep in node.depends_on:
+                if dep not in self.nodes:
+                    raise ValueError(f"Unknown dependency '{dep}' for node '{name}'")
+        self.topological_waves()
 
 
 class WorkflowEngine:

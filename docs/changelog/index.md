@@ -11,10 +11,16 @@ All notable changes to Vertebra are documented on this page.
 - `SKILLS_EXTENSION` (`io.modelcontextprotocol/skills`) filtering/URI resolution across `SkillCatalog` and framework mounts ([#111](https://github.com/cofin/vertebra/issues/111)), plus SEP-1865 `UI_EXTENSION` (`io.modelcontextprotocol/ui`) metadata (`McpIcon`, `ToolSpec.meta`, `ToolRegistry.validate_ui_links`, `MCPCore.validate()`) and app-only tool filtering ([#110](https://github.com/cofin/vertebra/issues/110)).
 - Google Cloud `IapIdentitySource` ES256 signed JWT header verification (`vertebra-core[iap]`), `OidcTokenSource` (`AsyncGcpIdTokenCache` + `401` single retry) for `vtb ai mcp bridge --audience`, incremental cancellable `run_stdio_server`, and `resolve_app_mcp_core` / `is_litestar_mcp_app` discovery in `vtb ai mcp serve --app` ([#114](https://github.com/cofin/vertebra/issues/114)).
 - `Tool.authorize` single-pass guard splitting (`-32004` / `-32005`), `Mcp-Param-*` header validation (`-32020`), and single-use expiring confirmation consumption (`ConfirmationGate.consume_call_approval`).
+- `SyncGcsBearerSecretProvider` and `AsyncGcsBearerSecretProvider` in `vertebra.storage` wrapping `SyncGcpTokenCache` and `AsyncGcpTokenCache` (`from_config`, `token_cache`, `generation`, `needs_refresh`, `invalidate`) for `DuckDBSecretConfig(secret_type="gcs", value_provider=...)` OAuth2 bearer-token rotation.
 
 ### Changed
 
 - Consolidated `MCPCore` well-known discovery and `SkillCatalog` / UI validation wiring across `AgentPlugin`, Starlette, FastAPI, Flask, Django, and `litestar-mcp>=0.20.0` (`create_mcp_plugin`) ([#110](https://github.com/cofin/vertebra/issues/110), [#111](https://github.com/cofin/vertebra/issues/111)).
+- `DuckDBSecretConfig` rejects `persistent=True` with dynamic `value_provider` callables and validates `refresh_interval_seconds` as a positive finite number; `SyncDuckDBDriver` and `AsyncDuckDBDriver` invalidate dynamic secret providers on `(HTTP 401)` / `(HTTP 403)` `httpfs` errors and close the underlying `_client` if startup initialization fails.
+
+### Fixed
+
+- `OracleNotificationSource` executes an idle `SELECT 1 FROM DUAL` session liveness probe whenever an `OracleNotifyConfig.wait_timeout_seconds` poll cycle yields no queued messages so dropped connections trigger reconnect backoff immediately.
 
 ### Removed
 

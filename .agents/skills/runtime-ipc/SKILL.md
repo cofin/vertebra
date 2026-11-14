@@ -10,7 +10,7 @@ description: Use when implementing or debugging Rust shared-memory rings, futex/
 - **Waiters**: Wait-word RMW (`wait_read`, `wait_write`, `send_waiters`, `recv_waiters`, `consumer_sleeping`) and wake checks use `Ordering::SeqCst` (`RT-04`).
 - **Bounds & Safety**: Every `unsafe` block includes a `// SAFETY:` justification (`RT-01`) and validates `offset + len <= data_len` and `slot_len <= max_payload` before `std::slice::from_raw_parts` (`RT-02`).
 - **Platform IPC**: macOS `shm_open` names `<= 31` bytes (`/vtb-{pid:x}-{seq:x}-{attempt:x}`), `__ulock_wait` treats `rc >= 0` as success, and Linux `futex` loops handle `EAGAIN` and `EINTR` (`RT-08`).
-- **Verify**: `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-core -p vertebra-storage -p vertebra-db`
+- **Verify**: `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-core -p vertebra-storage -p vertebra-db -p vertebra-postgres`
 <!-- truth: end -->
 
 # Runtime & Shared-Memory IPC (`runtime-ipc`)
@@ -51,6 +51,6 @@ Implementation guide for Rust lock-free shared-memory ring buffers (`SpscRing`, 
 ## Verification
 
 ```bash
-cargo test --manifest-path src/rs/Cargo.toml -p vertebra-core -p vertebra-storage -p vertebra-db
+cargo test --manifest-path src/rs/Cargo.toml -p vertebra-core -p vertebra-storage -p vertebra-db -p vertebra-postgres
 cargo clippy --manifest-path src/rs/Cargo.toml --workspace --all-targets --features tls,compression,gcp -- -D warnings
 ```

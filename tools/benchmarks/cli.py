@@ -21,6 +21,7 @@ from tools.benchmarks.scenarios import (
     QUICK_SCENARIOS,
     SCENARIOS,
 )
+from tools.benchmarks.store import BenchmarkStore
 from tools.benchmarks.targets import (
     ALL_TARGETS,
     BASELINE_TARGETS,
@@ -30,44 +31,6 @@ from tools.benchmarks.targets import (
 
 console = Console()
 _RESULTS_DIR = Path(__file__).parent / "results"
-
-
-def _resolve_scenarios(preset: str) -> list[str]:
-    """Resolve a scenario preset name to a list of scenario keys."""
-    presets: dict[str, list[str]] = {
-        "quick": QUICK_SCENARIOS,
-        "default": DEFAULT_SCENARIOS,
-        "full": FULL_SCENARIOS,
-        "multiworker": MULTIWORKER_SCENARIOS,
-    }
-    if preset in presets:
-        return presets[preset]
-    # Allow comma-separated scenario names
-    names = [s.strip() for s in preset.split(",")]
-    for name in names:
-        if name not in SCENARIOS:
-            msg = f"Unknown scenario: {name}. Available: {', '.join(SCENARIOS)}"
-            raise click.BadParameter(msg)
-    return names
-
-
-def _resolve_targets(target_spec: str) -> list[str]:
-    """Resolve a target spec to a list of target names."""
-    if target_spec == "all":
-        return list(ALL_TARGETS)
-    if target_spec == "vtb":
-        return VERTEBRA_TARGETS
-    if target_spec == "baselines":
-        return BASELINE_TARGETS
-    if target_spec == "freethreaded":
-        return FREETHREADED_TARGETS
-    # Allow comma-separated or single target name
-    names = [t.strip() for t in target_spec.split(",")]
-    for name in names:
-        if name not in ALL_TARGETS:
-            msg = f"Unknown target: {name}. Available: {', '.join(ALL_TARGETS)}"
-            raise click.BadParameter(msg)
-    return names
 
 
 @click.group()
@@ -120,7 +83,6 @@ def run(
                         url = build_url(target.host, target.port, scenario.path)
                         console.print(f"  [dim]{scenario_name}[/dim] c={conc} ({scenario.method} {scenario.path})")
 
-                        # Warmup
                         if warmup > 0:
                             warmup_runner = OhaRunner(
                                 url=url,
@@ -134,7 +96,6 @@ def run(
                             except Exception:
                                 console.print("    [yellow]Warmup failed, continuing...[/yellow]")
 
-                        # Measure
                         runner = OhaRunner(
                             url=url, duration=duration, concurrency=conc, method=scenario.method, body=scenario.body
                         )
@@ -157,7 +118,6 @@ def run(
                         }
                         results.append(result_row)
 
-                        # Append to JSONL
                         with jsonl_path.open("a") as f:
                             f.write(json.dumps(result_row) + "\n")
 
@@ -178,10 +138,7 @@ def run(
         console.print()
         print_summary_table(results)
 
-        # Auto-ingest into DuckDB if available
         try:
-            from tools.benchmarks.store import BenchmarkStore
-
             store = BenchmarkStore()
             run_id = store.create_run(note=note)
             for r in results:
@@ -238,8 +195,6 @@ def list_targets() -> None:
 @click.option("--note", default="", help="Note to attach to the ingested run")
 def ingest(jsonl_path: str, note: str) -> None:
     """Ingest a JSONL results file into DuckDB."""
-    from tools.benchmarks.store import BenchmarkStore
-
     store = BenchmarkStore()
     run_id = store.ingest_jsonl(jsonl_path, note=note)
     store.close()
@@ -251,8 +206,6 @@ def ingest(jsonl_path: str, note: str) -> None:
 @click.option("--baseline", "baseline_id", default=None, help="Baseline run ID (default: previous)")
 def compare(current_id: str | None, baseline_id: str | None) -> None:
     """Compare two benchmark runs."""
-    from tools.benchmarks.store import BenchmarkStore
-
     store = BenchmarkStore()
 
     if current_id is None:
@@ -281,8 +234,6 @@ def compare(current_id: str | None, baseline_id: str | None) -> None:
 @click.option("--run-id", default=None, help="Run ID to report (default: latest)")
 def report(run_id: str | None) -> None:
     """Show results for a benchmark run."""
-    from tools.benchmarks.store import BenchmarkStore
-
     store = BenchmarkStore()
 
     if run_id is None:
@@ -306,8 +257,6 @@ def report(run_id: str | None) -> None:
 @click.option("-n", "--limit", default=20, type=int, help="Number of runs to show")
 def runs(limit: int) -> None:
     """List benchmark runs stored in DuckDB."""
-    from tools.benchmarks.store import BenchmarkStore
-
     store = BenchmarkStore()
     run_list = store.list_runs(limit=limit)
     store.close()
@@ -317,3 +266,39 @@ def runs(limit: int) -> None:
         return
 
     print_runs_table(run_list)
+
+
+def _resolve_scenarios(preset: str) -> list[str]:
+    """Resolve a scenario preset or comma-separated names to a list of scenario keys."""
+    presets: dict[str, list[str]] = {
+        "quick": QUICK_SCENARIOS,
+        "default": DEFAULT_SCENARIOS,
+        "full": FULL_SCENARIOS,
+        "multiworker": MULTIWORKER_SCENARIOS,
+    }
+    if preset in presets:
+        return presets[preset]
+    names = [s.strip() for s in preset.split(",")]
+    for name in names:
+        if name not in SCENARIOS:
+            msg = f"Unknown scenario: {name}. Available: {', '.join(SCENARIOS)}"
+            raise click.BadParameter(msg)
+    return names
+
+
+def _resolve_targets(target_spec: str) -> list[str]:
+    """Resolve a target spec or comma-separated target names to a list of target keys."""
+    if target_spec == "all":
+        return list(ALL_TARGETS)
+    if target_spec == "vtb":
+        return VERTEBRA_TARGETS
+    if target_spec == "baselines":
+        return BASELINE_TARGETS
+    if target_spec == "freethreaded":
+        return FREETHREADED_TARGETS
+    names = [t.strip() for t in target_spec.split(",")]
+    for name in names:
+        if name not in ALL_TARGETS:
+            msg = f"Unknown target: {name}. Available: {', '.join(ALL_TARGETS)}"
+            raise click.BadParameter(msg)
+    return names

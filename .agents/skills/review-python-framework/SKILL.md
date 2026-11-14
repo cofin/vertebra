@@ -50,7 +50,7 @@ Shared catalog: [`false-positive-suppressions.md`](../review-core/references/fal
 ## Focused Commands
 
 ```bash
-uv run ruff check src/py/vertebra
-uv run mypy src/py/vertebra
-uv run pytest src/py/tests/unit
+uv run --no-sync ruff check src/py/vertebra tools
+uv run --no-sync mypy src/py/vertebra tools/scripts tools/pgo tools/docs tools/benchmarks
+uv run --no-sync pytest src/py/tests/unit
 ```

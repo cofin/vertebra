@@ -2,39 +2,43 @@
 
 from __future__ import annotations
 
-import contextlib
 import struct
-from collections.abc import Buffer, Mapping, Sequence
-from typing import Any
+from collections.abc import Buffer, Callable, Iterable, Iterator, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Final
 
 from vertebra.db.adapters.postgres.binds import (
     CompiledPostgresBinds,
     compile_postgres_binds,
     normalize_postgres_parameters,
 )
+from vertebra.db.adapters.postgres.options import build_native_client_options
+from vertebra.db.adapters.postgres.types import PostgresArrowResult, PostgresQueryResult, _project_public_row
+from vertebra.db.arrow import ArrowCursor
+from vertebra.db.driver import ProgrammingError
 from vertebra.db.rls import TenantPredicate, TenantScopeConfig
-from vertebra.utils.module_loader import import_optional
+from vertebra.typing import ImproperConfigurationError
+from vertebra.utils.module_loader import ensure_module, import_optional
 from vertebra.utils.serializers import encode_json_bytes
+from vertebra.utils.text import validate_identifier
+
+if TYPE_CHECKING:
+    from vertebra.db.adapters.postgres.config import PostgreSQLConfig
 
 __all__ = (
     "PGCOPY_BINARY_SIGNATURE",
     "PostgreSQLCore",
-    "compile_pg_binds",
-    "decode_pgcopy_rows",
-    "encode_pg_jsonb",
-    "encode_pgcopy_rows",
-    "normalize_pg_parameters",
-    "strip_pg_jsonb_header",
 )
 
 PGCOPY_BINARY_SIGNATURE: bytes = b"PGCOPY\n\xff\r\n\x00"
-
 
 _DEFAULT_TENANT_SCOPE = TenantScopeConfig()
 
 
 class PostgreSQLCore:
-    """Protocol codecs and wire helpers for PostgreSQL binary JSONB and PGCOPY."""
+    """Protocol codecs, validation helpers, and wire primitives for PostgreSQL drivers."""
+
+    DEFAULT_ARROW_MAX_RESULT_BYTES: Final[int] = 268_435_456
+    DEFAULT_TENANT_SCOPE: Final[TenantScopeConfig] = _DEFAULT_TENANT_SCOPE
 
     @staticmethod
     def build_session_guc_sql(
@@ -44,7 +48,8 @@ class PostgreSQLCore:
         is_local: bool = True,
     ) -> tuple[str, tuple[str, str, bool]]:
         """Build a bound PostgreSQL session setting statement."""
-        return "SELECT set_config($1, $2, $3)", (config.setting_name, tenant_value, is_local)
+        setting_name = PostgreSQLCore.validate_tenant_setting_name(config.setting_name)
+        return "SELECT set_config($1, $2, $3)", (setting_name, tenant_value, is_local)
 
     @staticmethod
     def build_tenant_predicate_sql(predicate: TenantPredicate, *, param_index: int = 1) -> str:
@@ -55,15 +60,6 @@ class PostgreSQLCore:
     @staticmethod
     def strip_jsonb_header(payload: Buffer) -> memoryview:
         """Strip the 1-byte PostgreSQL binary JSONB version prefix (`\\x01`) with zero copy."""
-        native_mod = import_optional("vertebra._vertebra")
-        if native_mod is not None:
-            for fn_name in ("strip_pg_jsonb_header", "strip_pg_jsonb_header_native"):
-                native_fn = getattr(native_mod, fn_name, None)
-                if callable(native_fn):
-                    res = native_fn(bytes(payload))
-                    if isinstance(res, (bytes, bytearray, memoryview)):
-                        return memoryview(res)
-
         view = memoryview(payload).cast("B")
         if len(view) == 0:
             msg = "Empty PostgreSQL binary JSONB payload"
@@ -76,29 +72,20 @@ class PostgreSQLCore:
     @staticmethod
     def encode_jsonb(value: Any) -> bytes:
         """Encode a Python value or UTF-8 JSON buffer with the 1-byte PostgreSQL `\\x01` JSONB header."""
+        raw_arg = (
+            bytes(value)
+            if isinstance(value, (bytes, bytearray, memoryview))
+            else (value.encode("utf-8") if isinstance(value, str) else encode_json_bytes(value))
+        )
         native_mod = import_optional("vertebra._vertebra")
         if native_mod is not None:
-            for fn_name in ("encode_pg_jsonb", "encode_pg_jsonb_native"):
-                native_fn = getattr(native_mod, fn_name, None)
-                if callable(native_fn):
-                    with contextlib.suppress(TypeError, ValueError, RuntimeError):
-                        raw_arg = (
-                            value
-                            if isinstance(value, (bytes, bytearray))
-                            else (value.encode("utf-8") if isinstance(value, str) else encode_json_bytes(value))
-                        )
-                        res = native_fn(raw_arg)
-                        if isinstance(res, (bytes, bytearray)):
-                            return bytes(res)
+            native_fn = getattr(native_mod, "encode_pg_jsonb", None)
+            if callable(native_fn):
+                return bytes(native_fn(raw_arg))
 
-        if isinstance(value, (bytes, bytearray, memoryview)):
-            raw_bytes = bytes(value)
-            if raw_bytes.startswith(b"\x01"):
-                return raw_bytes
-            return b"\x01" + raw_bytes
-        if isinstance(value, str):
-            return b"\x01" + value.encode("utf-8")
-        return b"\x01" + encode_json_bytes(value)
+        if isinstance(value, (bytes, bytearray, memoryview)) and raw_arg.startswith(b"\x01"):
+            return raw_arg
+        return b"\x01" + raw_arg
 
     @staticmethod
     def encode_pgcopy_rows(
@@ -125,14 +112,10 @@ class PostgreSQLCore:
             for row in rows
         ]
         native_mod = import_optional("vertebra._vertebra")
-        if native_mod is not None:
-            for fn_name in ("encode_pgcopy_rows", "encode_pgcopy_rows_native"):
-                native_fn = getattr(native_mod, fn_name, None)
-                if callable(native_fn) and flags == 0 and not ext_bytes:
-                    with contextlib.suppress(TypeError, ValueError, RuntimeError):
-                        res = native_fn(normalized_rows)
-                        if isinstance(res, (bytes, bytearray)):
-                            return bytes(res)
+        if native_mod is not None and flags == 0 and not ext_bytes:
+            native_fn = getattr(native_mod, "encode_pgcopy_rows", None)
+            if callable(native_fn):
+                return bytes(native_fn(normalized_rows))
 
         buf = bytearray(PGCOPY_BINARY_SIGNATURE)
         buf.extend(struct.pack(">II", flags, len(ext_bytes)))
@@ -151,15 +134,6 @@ class PostgreSQLCore:
     @staticmethod
     def decode_pgcopy_rows(payload: Buffer) -> list[tuple[bytes | None, ...]]:
         """Decode a PostgreSQL binary COPY stream into row tuples of bytes or None."""
-        native_mod = import_optional("vertebra._vertebra")
-        if native_mod is not None:
-            for fn_name in ("decode_pgcopy_rows", "parse_pgcopy_binary_native", "parse_pgcopy_binary_rows"):
-                native_fn = getattr(native_mod, fn_name, None)
-                if callable(native_fn):
-                    with contextlib.suppress(TypeError, ValueError):
-                        res = native_fn(bytes(payload))
-                        return [tuple(None if f is None else bytes(f) for f in r) for r in res]
-
         raw = memoryview(payload)
         sig_len = len(PGCOPY_BINARY_SIGNATURE)
         if len(raw) < sig_len or bytes(raw[:sig_len]) != PGCOPY_BINARY_SIGNATURE:
@@ -175,6 +149,19 @@ class PostgreSQLCore:
         if pos > len(raw):
             msg = "Corrupted PGCOPY header extension"
             raise ValueError(msg)
+
+        native_mod = import_optional("vertebra._vertebra")
+        if native_mod is not None:
+            native_fn = getattr(native_mod, "decode_pgcopy_rows", None)
+            if callable(native_fn):
+                try:
+                    res = native_fn(bytes(raw))
+                except ValueError as exc:
+                    if "trailer" in str(exc):
+                        msg = "Unexpected EOF before PGCOPY trailer"
+                        raise ValueError(msg) from exc
+                    raise
+                return [tuple(None if field is None else bytes(field) for field in row) for row in res]
 
         rows: list[tuple[bytes | None, ...]] = []
         while pos + 2 <= len(raw):
@@ -222,10 +209,133 @@ class PostgreSQLCore:
         """Copy mutable parameter buffers and FFI views into immutable owned values."""
         return normalize_postgres_parameters(parameters)
 
+    @staticmethod
+    def reject_memory_dsn(dsn: str) -> None:
+        """Reject unsupported ``memory://`` DSNs cleanly with ``ImproperConfigurationError``."""
+        if dsn.strip().lower().startswith("memory://"):
+            msg = "PostgreSQL drivers do not support memory:// DSNs; pass a postgresql:// DSN or inject pool="
+            raise ImproperConfigurationError(msg)
 
-strip_pg_jsonb_header = PostgreSQLCore.strip_jsonb_header
-encode_pg_jsonb = PostgreSQLCore.encode_jsonb
-encode_pgcopy_rows = PostgreSQLCore.encode_pgcopy_rows
-decode_pgcopy_rows = PostgreSQLCore.decode_pgcopy_rows
-compile_pg_binds = PostgreSQLCore.compile_binds
-normalize_pg_parameters = PostgreSQLCore.normalize_parameters
+    @staticmethod
+    def resolve_native_module() -> Any:
+        """Resolve the compiled ``vertebra._postgres`` extension or raise ``MissingDependencyError``."""
+        return ensure_module(
+            "vertebra._postgres",
+            package="vertebra-core[postgres]",
+            extra="postgres",
+        )
+
+    @staticmethod
+    def prepare_query(
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+    ) -> tuple[str, tuple[Any, ...]]:
+        """Compile SQL placeholders and normalize parameters for native execution and pipelining."""
+        compiled = compile_postgres_binds(sql, parameters)
+        return compiled.sql, compiled.params
+
+    @staticmethod
+    def project_query_rows(result: PostgresQueryResult) -> tuple[list[tuple[Any, ...]], tuple[str, ...], int]:
+        """Convert a native ``PostgresQueryResult`` into ``(rows, column_names, affected_rows)``."""
+        cols = tuple(col.name for col in result.columns)
+        rows = [_project_public_row(row) for row in result.rows]
+        return rows, cols, int(result.affected_rows)
+
+    @staticmethod
+    def arrow_result_to_cursor(result: PostgresArrowResult) -> ArrowCursor:
+        """Wrap an inline IPC or native SHM ``PostgresArrowResult`` into ``ArrowCursor`` without row copies."""
+        if result.used_shm:
+            return ArrowCursor(
+                result.buffer,
+                columns=result.columns,
+                used_shm=True,
+                shm_cursor=result.buffer,
+                row_count=result.row_count,
+            )
+        return ArrowCursor(
+            result.buffer,
+            columns=result.columns,
+            used_shm=False,
+            row_count=result.row_count,
+        )
+
+    @staticmethod
+    def validate_arrow_target_identifiers(
+        table_name: str,
+        *,
+        columns: Sequence[str] | None,
+        schema_name: str | None,
+    ) -> None:
+        """Validate SQL identifiers passed to bulk Arrow COPY ingestion."""
+        if schema_name is not None:
+            validate_identifier(schema_name, "schema_name", allow_dots=False)
+        validate_identifier(table_name, "table_name", allow_dots=schema_name is None)
+        if columns is not None:
+            for col in columns:
+                validate_identifier(str(col), "column", allow_dots=False)
+
+    @staticmethod
+    def coerce_arrow_source(data: Any, columns: Sequence[str] | None) -> Any | None:
+        """Normalize plain row sequences into ``ArrowCursor`` payloads while preserving native Arrow inputs."""
+        if (
+            isinstance(data, Sequence)
+            and not isinstance(data, (str, bytes, bytearray, memoryview, ArrowCursor))
+            and not hasattr(data, "__arrow_c_stream__")
+            and not hasattr(data, "to_batches")
+        ):
+            if not data and columns is None:
+                return None
+            return ArrowCursor.from_rows(data, columns)
+        return data
+
+    @staticmethod
+    def validate_direct_session_config(config: PostgreSQLConfig, *, feature: str) -> PostgreSQLConfig:
+        """Ensure direct non-pooled configuration is active before opening LISTEN or CDC streams."""
+        direct_cfg = config.derive_direct_config()
+        PostgreSQLCore.reject_memory_dsn(direct_cfg.dsn)
+        if direct_cfg.pooler_mode not in ("direct", "session") or direct_cfg.pgbouncer:
+            msg = (
+                f"PostgreSQL {feature} requires a direct or session-mode connection "
+                f"(got pooler_mode={direct_cfg.pooler_mode!r}); configure direct_dsn for pooled deployments"
+            )
+            raise ImproperConfigurationError(msg)
+        return direct_cfg
+
+    @staticmethod
+    def build_direct_client_kwargs(config: PostgreSQLConfig, *, feature: str) -> dict[str, Any]:
+        """Resolve dedicated non-pooled ``AsyncPostgresClient`` keyword arguments from ``config``."""
+        direct_cfg = PostgreSQLCore.validate_direct_session_config(config, feature=feature)
+        return build_native_client_options(direct_cfg).to_client_kwargs()
+
+    @staticmethod
+    def validate_tenant_setting_name(setting_name: str) -> str:
+        """Validate a dotted PostgreSQL GUC setting name for tenant scoping."""
+        if not setting_name:
+            msg = "Tenant scope setting_name cannot be empty"
+            raise ProgrammingError(msg)
+        for segment in setting_name.split("."):
+            validate_identifier(segment, "setting_name", allow_dots=False)
+        return setting_name
+
+    @staticmethod
+    def validate_savepoint_token(token: int | None, allocator: Callable[[], int]) -> int:
+        """Validate or allocate a numeric savepoint token."""
+        if token is None:
+            return allocator()
+        if isinstance(token, bool) or not isinstance(token, int) or token < 0:
+            msg = "Savepoint token must be a non-negative integer"
+            raise ProgrammingError(msg)
+        return token
+
+    @staticmethod
+    def chunk_iterable[ItemT](items: Iterable[ItemT], size: int) -> Iterator[list[ItemT]]:
+        """Yield fixed-size slices from an arbitrary iterable without full buffering."""
+        chunk_limit = max(1, int(size))
+        buf: list[ItemT] = []
+        for item in items:
+            buf.append(item)
+            if len(buf) >= chunk_limit:
+                yield buf
+                buf = []
+        if buf:
+            yield buf

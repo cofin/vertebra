@@ -55,13 +55,6 @@ class StandaloneBuilder:
         self.profile = profile
         self.include_agent_skills = include_agent_skills
 
-    @staticmethod
-    def _is_vertebra_repo_root(project_root: Path) -> bool:
-        """Return True when ``project_root`` is Vertebra's own framework source repository."""
-        return (project_root / "src" / "rs" / "vertebra-core").exists() and (
-            project_root / "src" / "py" / "vertebra"
-        ).exists()
-
     def build(self, output_dir: Path) -> Path:
         """Stage application sources, compile hash-checked .pyc files, and write manifest.json and __main__.py.
 
@@ -166,6 +159,13 @@ class StandaloneBuilder:
         (dist_root / "build-manifest.json").write_text(formatted + "\n")
         (dist_root / "__main__.py").write_text(self._render_bootstrap(server_binary_rel=staged_binary_rel))
         return dist_root
+
+    @staticmethod
+    def _is_vertebra_repo_root(project_root: Path) -> bool:
+        """Return True when ``project_root`` is Vertebra's own framework source repository."""
+        return (project_root / "src" / "rs" / "vertebra-core").exists() and (
+            project_root / "src" / "py" / "vertebra"
+        ).exists()
 
     def _render_bootstrap(self, *, server_binary_rel: str | None = None) -> str:
         module_name, _, attr_name = self.entrypoint.partition(":")

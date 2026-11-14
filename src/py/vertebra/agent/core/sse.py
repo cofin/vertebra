@@ -80,13 +80,178 @@ class SseReplayBuffer:
         return tuple(self._buffer)
 
 
+class SseStreamBroker:
+    """Manages SSE subscriber channels, replay buffers, and message distribution."""
+
+    def __init__(self, replay_capacity: int = 1024) -> None:
+        self.replay_capacity = replay_capacity
+        self._buffers: dict[str, SseReplayBuffer] = {}
+        self._subscribers: dict[str, list[MemoryObjectSendStream[SseFrame]]] = {}
+        self._owner_stream_counts: dict[str | None, int] = {}
+
+    def subscribe(
+        self,
+        session_id: str,
+        last_event_id: str | None = None,
+    ) -> tuple[MemoryObjectReceiveStream[SseFrame], SseReplayBuffer]:
+        """Create or resume an SSE stream subscription for a session.
+
+        Args:
+            session_id: Unique identifier for the client session or stream.
+            last_event_id: Optional event ID for replaying missed frames.
+
+        Returns:
+            A tuple of (receive_stream, replay_buffer).
+        """
+        _, recv_stream, replay_buf = self._subscribe_raw(session_id, last_event_id=last_event_id)
+        return recv_stream, replay_buf
+
+    def open_stream(
+        self,
+        session_id: str,
+        *,
+        owner_id: str | None = None,
+        last_event_id: str | None = None,
+        heartbeat_seconds: float = 15.0,
+        max_streams_per_owner: int = 8,
+    ) -> AsyncIterator[bytes]:
+        """Open a bounded, resumable SSE byte stream enforcing per-owner concurrency limits."""
+        if heartbeat_seconds <= 0:
+            raise ValueError("heartbeat_seconds must be positive")
+        if max_streams_per_owner < 0:
+            raise ValueError("max_streams_per_owner must be non-negative")
+        active_count = self._owner_stream_counts.get(owner_id, 0)
+        if active_count >= max_streams_per_owner:
+            raise StreamLimitExceededError(
+                f"Maximum concurrent SSE streams ({max_streams_per_owner}) exceeded for owner"
+            )
+        self._owner_stream_counts[owner_id] = active_count + 1
+        send_stream, recv_stream, _ = self._subscribe_raw(session_id, last_event_id=last_event_id)
+        return _ManagedSseStream(
+            broker=self,
+            session_id=session_id,
+            owner_id=owner_id,
+            send_stream=send_stream,
+            recv_stream=recv_stream,
+            heartbeat_seconds=heartbeat_seconds,
+        )
+
+    def publish(self, session_id: str, frame: SseFrame) -> bool:
+        """Publish a frame to a specific session's replay buffer and active streams."""
+        if session_id not in self._buffers:
+            self._buffers[session_id] = SseReplayBuffer(capacity=self.replay_capacity)
+        replay_buf = self._buffers[session_id]
+        replay_buf.append(frame)
+
+        streams = self._subscribers.get(session_id, [])
+        alive_streams: list[MemoryObjectSendStream[SseFrame]] = []
+        sent = False
+
+        for send_stream in streams:
+            try:
+                send_stream.send_nowait(frame)
+                alive_streams.append(send_stream)
+                sent = True
+            except anyio.ClosedResourceError:
+                pass
+            except anyio.WouldBlock:
+                alive_streams.append(send_stream)
+
+        if alive_streams:
+            self._subscribers[session_id] = alive_streams
+        else:
+            self._subscribers.pop(session_id, None)
+        return sent or bool(alive_streams)
+
+    def broadcast(self, frame: SseFrame, session_ids: Sequence[str] | None = None) -> int:
+        """Broadcast a frame to all active sessions or a filtered subset."""
+        target_ids = session_ids if session_ids is not None else list(self._buffers.keys())
+        sent_count = 0
+        for sid in target_ids:
+            if self.publish(sid, frame):
+                sent_count += 1
+        return sent_count
+
+    def disconnect(self, session_id: str) -> None:
+        """Close and remove active SSE subscriber streams for a session."""
+        streams = self._subscribers.pop(session_id, [])
+        for send_stream in streams:
+            with contextlib.suppress(Exception):
+                send_stream.close()
+
+    def close_session(self, session_id: str) -> None:
+        """Close active SSE streams and delete replay buffers for a session."""
+        self.disconnect(session_id)
+        self._buffers.pop(session_id, None)
+
+    def active_stream_ids(self) -> tuple[str, ...]:
+        """Return session IDs that currently have one or more active SSE subscribers."""
+        return tuple(sid for sid, streams in self._subscribers.items() if streams)
+
+    def owner_stream_count(self, owner_id: str | None = None) -> int:
+        """Return the number of currently open SSE streams tracked for owner_id."""
+        return self._owner_stream_counts.get(owner_id, 0)
+
+    def _subscribe_raw(
+        self,
+        session_id: str,
+        last_event_id: str | None = None,
+    ) -> tuple[MemoryObjectSendStream[SseFrame], MemoryObjectReceiveStream[SseFrame], SseReplayBuffer]:
+        if session_id not in self._buffers:
+            self._buffers[session_id] = SseReplayBuffer(capacity=self.replay_capacity)
+        replay_buf = self._buffers[session_id]
+
+        send_stream, recv_stream = anyio.create_memory_object_stream[SseFrame](128)
+        self._subscribers.setdefault(session_id, []).append(send_stream)
+
+        if last_event_id:
+            missed_frames = replay_buf.replay_since(last_event_id)
+            for frame in missed_frames:
+                try:
+                    send_stream.send_nowait(frame)
+                except anyio.WouldBlock:
+                    break
+
+        return send_stream, recv_stream, replay_buf
+
+    def _release_open_stream(
+        self,
+        session_id: str,
+        owner_id: str | None,
+        send_stream: MemoryObjectSendStream[SseFrame],
+        recv_stream: MemoryObjectReceiveStream[SseFrame],
+    ) -> None:
+        current = self._owner_stream_counts.get(owner_id, 0)
+        if current <= 1:
+            self._owner_stream_counts.pop(owner_id, None)
+        else:
+            self._owner_stream_counts[owner_id] = current - 1
+
+        subscribers = self._subscribers.get(session_id)
+        if subscribers is not None:
+            remaining = [stream for stream in subscribers if stream is not send_stream]
+            if remaining:
+                self._subscribers[session_id] = remaining
+            else:
+                self._subscribers.pop(session_id, None)
+
+        with contextlib.suppress(Exception):
+            send_stream.close()
+        with contextlib.suppress(Exception):
+            recv_stream.close()
+
+        if session_id.startswith("anon-") and not self._subscribers.get(session_id):
+            self._buffers.pop(session_id, None)
+            self._subscribers.pop(session_id, None)
+
+
 class _ManagedSseStream(AsyncIterator[bytes]):
     """Async byte iterator wrapping a broker SSE subscription with heartbeat and cleanup."""
 
     def __init__(
         self,
         *,
-        broker: "SseStreamBroker",
+        broker: SseStreamBroker,
         session_id: str,
         owner_id: str | None,
         send_stream: MemoryObjectSendStream[SseFrame],
@@ -149,171 +314,6 @@ class _ManagedSseStream(AsyncIterator[bytes]):
             self._send_stream,
             self._recv_stream,
         )
-
-
-class SseStreamBroker:
-    """Manages SSE subscriber channels, replay buffers, and message distribution."""
-
-    def __init__(self, replay_capacity: int = 1024) -> None:
-        self.replay_capacity = replay_capacity
-        self._buffers: dict[str, SseReplayBuffer] = {}
-        self._subscribers: dict[str, list[MemoryObjectSendStream[SseFrame]]] = {}
-        self._owner_stream_counts: dict[str | None, int] = {}
-
-    def _subscribe_raw(
-        self,
-        session_id: str,
-        last_event_id: str | None = None,
-    ) -> tuple[MemoryObjectSendStream[SseFrame], MemoryObjectReceiveStream[SseFrame], SseReplayBuffer]:
-        if session_id not in self._buffers:
-            self._buffers[session_id] = SseReplayBuffer(capacity=self.replay_capacity)
-        replay_buf = self._buffers[session_id]
-
-        send_stream, recv_stream = anyio.create_memory_object_stream[SseFrame](128)
-        self._subscribers.setdefault(session_id, []).append(send_stream)
-
-        if last_event_id:
-            missed_frames = replay_buf.replay_since(last_event_id)
-            for frame in missed_frames:
-                try:
-                    send_stream.send_nowait(frame)
-                except anyio.WouldBlock:
-                    break
-
-        return send_stream, recv_stream, replay_buf
-
-    def subscribe(
-        self,
-        session_id: str,
-        last_event_id: str | None = None,
-    ) -> tuple[MemoryObjectReceiveStream[SseFrame], SseReplayBuffer]:
-        """Create or resume an SSE stream subscription for a session.
-
-        Args:
-            session_id: Unique identifier for the client session or stream.
-            last_event_id: Optional event ID for replaying missed frames.
-
-        Returns:
-            A tuple of (receive_stream, replay_buffer).
-        """
-        _, recv_stream, replay_buf = self._subscribe_raw(session_id, last_event_id=last_event_id)
-        return recv_stream, replay_buf
-
-    def open_stream(
-        self,
-        session_id: str,
-        *,
-        owner_id: str | None = None,
-        last_event_id: str | None = None,
-        heartbeat_seconds: float = 15.0,
-        max_streams_per_owner: int = 8,
-    ) -> AsyncIterator[bytes]:
-        """Open a bounded, resumable SSE byte stream enforcing per-owner concurrency limits."""
-        if heartbeat_seconds <= 0:
-            raise ValueError("heartbeat_seconds must be positive")
-        if max_streams_per_owner < 0:
-            raise ValueError("max_streams_per_owner must be non-negative")
-        active_count = self._owner_stream_counts.get(owner_id, 0)
-        if active_count >= max_streams_per_owner:
-            raise StreamLimitExceededError(
-                f"Maximum concurrent SSE streams ({max_streams_per_owner}) exceeded for owner"
-            )
-        self._owner_stream_counts[owner_id] = active_count + 1
-        send_stream, recv_stream, _ = self._subscribe_raw(session_id, last_event_id=last_event_id)
-        return _ManagedSseStream(
-            broker=self,
-            session_id=session_id,
-            owner_id=owner_id,
-            send_stream=send_stream,
-            recv_stream=recv_stream,
-            heartbeat_seconds=heartbeat_seconds,
-        )
-
-    def _release_open_stream(
-        self,
-        session_id: str,
-        owner_id: str | None,
-        send_stream: MemoryObjectSendStream[SseFrame],
-        recv_stream: MemoryObjectReceiveStream[SseFrame],
-    ) -> None:
-        current = self._owner_stream_counts.get(owner_id, 0)
-        if current <= 1:
-            self._owner_stream_counts.pop(owner_id, None)
-        else:
-            self._owner_stream_counts[owner_id] = current - 1
-
-        subscribers = self._subscribers.get(session_id)
-        if subscribers is not None:
-            remaining = [stream for stream in subscribers if stream is not send_stream]
-            if remaining:
-                self._subscribers[session_id] = remaining
-            else:
-                self._subscribers.pop(session_id, None)
-
-        with contextlib.suppress(Exception):
-            send_stream.close()
-        with contextlib.suppress(Exception):
-            recv_stream.close()
-
-        if session_id.startswith("anon-") and not self._subscribers.get(session_id):
-            self._buffers.pop(session_id, None)
-            self._subscribers.pop(session_id, None)
-
-    def publish(self, session_id: str, frame: SseFrame) -> bool:
-        """Publish a frame to a specific session's replay buffer and active streams."""
-        if session_id not in self._buffers:
-            self._buffers[session_id] = SseReplayBuffer(capacity=self.replay_capacity)
-        replay_buf = self._buffers[session_id]
-        replay_buf.append(frame)
-
-        streams = self._subscribers.get(session_id, [])
-        alive_streams: list[MemoryObjectSendStream[SseFrame]] = []
-        sent = False
-
-        for send_stream in streams:
-            try:
-                send_stream.send_nowait(frame)
-                alive_streams.append(send_stream)
-                sent = True
-            except anyio.ClosedResourceError:
-                pass
-            except anyio.WouldBlock:
-                alive_streams.append(send_stream)
-
-        if alive_streams:
-            self._subscribers[session_id] = alive_streams
-        else:
-            self._subscribers.pop(session_id, None)
-        return sent or bool(alive_streams)
-
-    def broadcast(self, frame: SseFrame, session_ids: Sequence[str] | None = None) -> int:
-        """Broadcast a frame to all active sessions or a filtered subset."""
-        target_ids = session_ids if session_ids is not None else list(self._buffers.keys())
-        sent_count = 0
-        for sid in target_ids:
-            if self.publish(sid, frame):
-                sent_count += 1
-        return sent_count
-
-    def disconnect(self, session_id: str) -> None:
-        """Close and remove active SSE subscriber streams for a session."""
-        streams = self._subscribers.pop(session_id, [])
-        for send_stream in streams:
-            with contextlib.suppress(Exception):
-                send_stream.close()
-
-    def close_session(self, session_id: str) -> None:
-        """Close active SSE streams and delete replay buffers for a session."""
-        self.disconnect(session_id)
-        self._buffers.pop(session_id, None)
-
-    def active_stream_ids(self) -> tuple[str, ...]:
-        """Return session IDs that currently have one or more active SSE subscribers."""
-        return tuple(sid for sid, streams in self._subscribers.items() if streams)
-
-    def owner_stream_count(self, owner_id: str | None = None) -> int:
-        """Return the number of currently open SSE streams tracked for owner_id."""
-        return self._owner_stream_counts.get(owner_id, 0)
 
 
 __all__ = [

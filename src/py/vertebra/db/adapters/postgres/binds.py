@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import copy
 from collections.abc import Buffer, Mapping, Sequence
-from dataclasses import dataclass
 from typing import Any, Final
+
+import msgspec
 
 from vertebra._vertebra import VectorBatchView, VectorView
 from vertebra.db.adapters.postgres.types import (
@@ -30,26 +31,12 @@ __all__ = (
 PG_JSONB_TEXT: Final[int] = 3802
 
 
-def _is_ident_char(ch: str) -> bool:
-    """Return whether ``ch`` can be part of an unquoted SQL identifier."""
-    return ch.isalnum() or ch == "_" or ch == "$"
+class CompiledPostgresBinds(msgspec.Struct, frozen=True):
+    """Result of single-pass PostgreSQL bind compilation and parameter normalization."""
 
-
-def _is_dollar_tag_start(ch: str) -> bool:
-    """Return whether ``ch`` is valid as the first character of a ``$tag$`` delimiter."""
-    return ch.isalpha() or ch == "_"
-
-
-def _is_dollar_tag_char(ch: str) -> bool:
-    """Return whether ``ch`` is valid inside a ``$tag$`` delimiter."""
-    return ch.isalnum() or ch == "_"
-
-
-def _copy_json_container(value: Any) -> Any:
-    """Deep-copy mutable dict/list containers inside JSON trees so caller mutations cannot alias."""
-    if isinstance(value, (dict, list)):
-        return copy.deepcopy(value)
-    return value
+    sql: str
+    params: tuple[Any, ...]
+    style: str
 
 
 def normalize_postgres_parameter(value: Any) -> Any:
@@ -114,142 +101,6 @@ def normalize_postgres_parameters(parameters: Sequence[Any] | None) -> tuple[Any
     if not parameters:
         return ()
     return tuple(normalize_postgres_parameter(item) for item in parameters)
-
-
-@dataclass(frozen=True, slots=True)
-class CompiledPostgresBinds:
-    """Result of single-pass PostgreSQL bind compilation and parameter normalization."""
-
-    sql: str
-    params: tuple[Any, ...]
-    style: str
-
-
-@dataclass(slots=True)
-class _ScanState:
-    """Mutable single-pass lexical scanner accumulator."""
-
-    positional_count: int = 0
-    named_order: list[str] | None = None
-    named_slots: dict[str, int] | None = None
-    numeric_indices: list[int] | None = None
-    has_escaped_percent: bool = False
-    has_ambiguous_backslash_quote: bool = False
-    out: list[str] | None = None
-
-    def ensure_named(self) -> tuple[list[str], dict[str, int]]:
-        """Lazily initialize named placeholder tracking structures."""
-        if self.named_order is None:
-            self.named_order = []
-        if self.named_slots is None:
-            self.named_slots = {}
-        return self.named_order, self.named_slots
-
-    def record_numeric(self, index: int) -> None:
-        """Record an observed native numeric ``$N`` bind index, rejecting mixed styles."""
-        if self.positional_count > 0 or self.named_order is not None:
-            raise ProgrammingError(
-                "Cannot mix numeric `$N` placeholders with positional `%s` or named `%(name)s` placeholders"
-            )
-        if self.numeric_indices is None:
-            self.numeric_indices = []
-        self.numeric_indices.append(index)
-
-
-def _match_dollar_quote(sql: str, pos: int) -> int | None:
-    """Return end index after closing ``$`` of a ``$tag$`` opener, or ``None``."""
-    n = len(sql)
-    if pos + 1 >= n:
-        return None
-    if sql[pos + 1] == "$":
-        return pos + 2
-    if not _is_dollar_tag_start(sql[pos + 1]):
-        return None
-    j = pos + 2
-    while j < n and _is_dollar_tag_char(sql[j]):
-        j += 1
-    if j < n and sql[j] == "$":
-        return j + 1
-    return None
-
-
-def _scan_single_quoted(sql: str, pos: int, state: _ScanState, *, c_escape: bool) -> int:
-    """Advance past an ordinary or ``E'...'`` single-quoted SQL string literal."""
-    n = len(sql)
-    i = pos + (2 if c_escape else 1)
-    trailing_backslashes = 0
-    while i < n:
-        ch = sql[i]
-        if c_escape:
-            if ch == "\\":
-                i += 2
-                continue
-            if ch == "'":
-                if i + 1 < n and sql[i + 1] == "'":
-                    i += 2
-                    continue
-                return i + 1
-            i += 1
-            continue
-        if ch == "\\":
-            trailing_backslashes += 1
-            i += 1
-            continue
-        if ch == "'":
-            if trailing_backslashes % 2 == 1:
-                state.has_ambiguous_backslash_quote = True
-            trailing_backslashes = 0
-            if i + 1 < n and sql[i + 1] == "'":
-                i += 2
-                continue
-            return i + 1
-        trailing_backslashes = 0
-        i += 1
-    return n
-
-
-def _scan_double_quoted(sql: str, pos: int) -> int:
-    """Advance past a ``"..."`` double-quoted SQL identifier."""
-    n = len(sql)
-    i = pos + 1
-    while i < n:
-        if sql[i] == '"':
-            if i + 1 < n and sql[i + 1] == '"':
-                i += 2
-                continue
-            return i + 1
-        i += 1
-    return n
-
-
-def _scan_block_comment(sql: str, pos: int) -> int:
-    """Advance past nested ``/* ... */`` PostgreSQL block comments."""
-    n = len(sql)
-    depth = 1
-    i = pos + 2
-    while i < n and depth > 0:
-        if sql[i] == "/" and i + 1 < n and sql[i + 1] == "*":
-            depth += 1
-            i += 2
-        elif sql[i] == "*" and i + 1 < n and sql[i + 1] == "/":
-            depth -= 1
-            i += 2
-        else:
-            i += 1
-    return i
-
-
-def _emit_chunk(state: _ScanState, sql: str, start: int, end: int) -> None:
-    """Append slice ``sql[start:end]`` when rewriting pyformat output."""
-    if state.out is not None and end > start:
-        state.out.append(sql[start:end])
-
-
-def _activate_rewrite(state: _ScanState, sql: str, copy_until: int) -> list[str]:
-    """Lazily allocate output chunk buffer preserving untouched prefix."""
-    if state.out is None:
-        state.out = [sql[:copy_until]] if copy_until > 0 else []
-    return state.out
 
 
 def compile_postgres_binds(
@@ -420,3 +271,151 @@ def compile_postgres_binds(
     raise ProgrammingError(
         f"Positional parameters ({len(parameters)}) were supplied for a SQL statement with 0 placeholders"
     )
+
+
+class _ScanState(msgspec.Struct):
+    """Mutable single-pass lexical scanner accumulator."""
+
+    positional_count: int = 0
+    named_order: list[str] | None = None
+    named_slots: dict[str, int] | None = None
+    numeric_indices: list[int] | None = None
+    has_escaped_percent: bool = False
+    has_ambiguous_backslash_quote: bool = False
+    out: list[str] | None = None
+
+    def ensure_named(self) -> tuple[list[str], dict[str, int]]:
+        """Lazily initialize named placeholder tracking structures."""
+        if self.named_order is None:
+            self.named_order = []
+        if self.named_slots is None:
+            self.named_slots = {}
+        return self.named_order, self.named_slots
+
+    def record_numeric(self, index: int) -> None:
+        """Record an observed native numeric ``$N`` bind index, rejecting mixed styles."""
+        if self.positional_count > 0 or self.named_order is not None:
+            raise ProgrammingError(
+                "Cannot mix numeric `$N` placeholders with positional `%s` or named `%(name)s` placeholders"
+            )
+        if self.numeric_indices is None:
+            self.numeric_indices = []
+        self.numeric_indices.append(index)
+
+
+def _is_ident_char(ch: str) -> bool:
+    """Return whether ``ch`` can be part of an unquoted SQL identifier."""
+    return ch.isalnum() or ch == "_" or ch == "$"
+
+
+def _is_dollar_tag_start(ch: str) -> bool:
+    """Return whether ``ch`` is valid as the first character of a ``$tag$`` delimiter."""
+    return ch.isalpha() or ch == "_"
+
+
+def _is_dollar_tag_char(ch: str) -> bool:
+    """Return whether ``ch`` is valid inside a ``$tag$`` delimiter."""
+    return ch.isalnum() or ch == "_"
+
+
+def _copy_json_container(value: Any) -> Any:
+    """Deep-copy mutable dict/list containers inside JSON trees so caller mutations cannot alias."""
+    if isinstance(value, (dict, list)):
+        return copy.deepcopy(value)
+    return value
+
+
+def _match_dollar_quote(sql: str, pos: int) -> int | None:
+    """Return end index after closing ``$`` of a ``$tag$`` opener, or ``None``."""
+    n = len(sql)
+    if pos + 1 >= n:
+        return None
+    if sql[pos + 1] == "$":
+        return pos + 2
+    if not _is_dollar_tag_start(sql[pos + 1]):
+        return None
+    j = pos + 2
+    while j < n and _is_dollar_tag_char(sql[j]):
+        j += 1
+    if j < n and sql[j] == "$":
+        return j + 1
+    return None
+
+
+def _scan_single_quoted(sql: str, pos: int, state: _ScanState, *, c_escape: bool) -> int:
+    """Advance past an ordinary or ``E'...'`` single-quoted SQL string literal."""
+    n = len(sql)
+    i = pos + (2 if c_escape else 1)
+    trailing_backslashes = 0
+    while i < n:
+        ch = sql[i]
+        if c_escape:
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == "'":
+                if i + 1 < n and sql[i + 1] == "'":
+                    i += 2
+                    continue
+                return i + 1
+            i += 1
+            continue
+        if ch == "\\":
+            trailing_backslashes += 1
+            i += 1
+            continue
+        if ch == "'":
+            if trailing_backslashes % 2 == 1:
+                state.has_ambiguous_backslash_quote = True
+            trailing_backslashes = 0
+            if i + 1 < n and sql[i + 1] == "'":
+                i += 2
+                continue
+            return i + 1
+        trailing_backslashes = 0
+        i += 1
+    return n
+
+
+def _scan_double_quoted(sql: str, pos: int) -> int:
+    """Advance past a ``"..."`` double-quoted SQL identifier."""
+    n = len(sql)
+    i = pos + 1
+    while i < n:
+        if sql[i] == '"':
+            if i + 1 < n and sql[i + 1] == '"':
+                i += 2
+                continue
+            return i + 1
+        i += 1
+    return n
+
+
+def _scan_block_comment(sql: str, pos: int) -> int:
+    """Advance past nested ``/* ... */`` PostgreSQL block comments."""
+    n = len(sql)
+    depth = 1
+    i = pos + 2
+    while i < n and depth > 0:
+        if sql[i] == "/" and i + 1 < n and sql[i + 1] == "*":
+            depth += 1
+            i += 2
+        elif sql[i] == "*" and i + 1 < n and sql[i + 1] == "/":
+            depth -= 1
+            i += 2
+        else:
+            i += 1
+    return i
+
+
+def _emit_chunk(state: _ScanState, sql: str, start: int, end: int) -> None:
+    """Append slice ``sql[start:end]`` when rewriting pyformat output."""
+    if state.out is not None and end > start:
+        state.out.append(sql[start:end])
+
+
+def _activate_rewrite(state: _ScanState, sql: str, copy_until: int) -> list[str]:
+    """Lazily allocate output chunk buffer preserving untouched prefix."""
+    if state.out is None:
+        state.out = [sql[:copy_until]] if copy_until > 0 else []
+    return state.out

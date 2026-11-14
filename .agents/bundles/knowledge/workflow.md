@@ -10,21 +10,15 @@ tags:
   - testing
   - ci
 generated:
-  by: flow/0.29.1
+  by: flow/0.30.1
   at: "2026-11-06T18:28:00Z"
 verified:
-  - by: agent:flow-executor
-    at: "2026-11-13T22:48:50Z"
-    commit: 480840a3
   - by: agent:flow-setup
-    at: "2026-11-12T22:30:00Z"
-    commit: 18baadcd
-  - by: agent:flow-sync
-    at: "2026-11-09T21:46:00Z"
-    commit: 14aa83b8
+    at: "2026-11-14T18:43:00Z"
+    commit: 104fd6fa
   - by: agent:flow-executor
-    at: "2026-11-09T15:21:00Z"
-    commit: af1b3d30
+    at: "2026-11-14T18:05:00Z"
+    commit: 8290822e
 sources:
   - id: src-makefile
     resource: Makefile
@@ -61,7 +55,7 @@ sources:
 ```bash
 # 1. Bootstrap & Native PyO3 Extension Rebuild (primary checkout; symlinked in linked worktrees)
 make setup-env                                                        # Configure public registries where needed; no-op elsewhere
-make install                                                          # destroy + clean + setup-env, pin Python 3.12, uv sync --all-extras --dev --group doc --group duckdb, ts-install/build, dev
+make install                                                          # destroy + clean + setup-env, pin Python 3.12, uv sync --all-extras --dev --group doc, ts-install/build, dev
 make dev                                                              # cargo build non-extension crates + maturin develop across _vertebra, _bundler, _storage, _mysql, _bigquery, _mssql, _spanner, _duckdb, _oracle, _postgres
 make upgrade                                                          # uv lock --upgrade + uv sync, cargo update, bun update, pre-commit autoupdate
 make clean                                                            # Remove Python/Rust/TS build artifacts and caches (keeps .venv)
@@ -80,8 +74,9 @@ make ts-test                                                          # Vitest s
 make duckdb-test     # vertebra-duckdb Rust tests, stubtest, and Python unit/conformance suites (make duckdb-wheel-check verifies wheel isolation)
 make mysql-test      # vertebra-mysql Rust tests, stubtest, and Python MySQL suites (make mysql-wheel-check verifies wheel isolation)
 make mssql-test      # vertebra-mssql Rust tests, stubtest, and Python MSSQL suites (make mssql-wheel-check verifies wheel isolation)
-make oracle-test     # vertebra-oracle Rust tests, stubtest, and Python Oracle suites (make oracle-wheel-check verifies wheel isolation)
+make oracle-test     # vertebra-oracle Rust tests, stubtest, and Python Oracle adapter + native suites (make oracle-wheel-check verifies wheel isolation)
 make postgres-test   # vertebra-postgres Rust tests and _postgres stubtest (make postgres-wheel-check runs verify_postgres_wheel.py)
+make db-conformance  # Live database conformance suite (ENGINE=<duckdb|mysql|mariadb|mssql|oracle> [VERSION=<v>] required; zero-skip ConformanceGate)
 make postgres-bench-check # PYTHONPATH="$(CURDIR)/src/py" cargo test -p vertebra-postgres --bench postgres_native --locked + Ruff/Mypy + comparator tests (make postgres-bench runs live + Criterion)
 make docs            # scan_public_docstrings + generate_cli_docs --check + zensical build --clean + postbuild + verify_docs_artifacts
 make docs-check      # make docs + live zensical serve HTTP 200 check (make docs-serve, make docs-clean, make docs-rust)
@@ -102,7 +97,7 @@ make bench                                                            # make bui
 2. **PyPI Distribution vs. Import Namespace**: [`pyproject.toml`](../../../pyproject.toml)[^src-pyproject-toml] publishes `vertebra-core` while exposing the `vertebra` import namespace (`module-name = "vertebra._vertebra"`). Companion extensions build isolated PEP 420 wheels without `vertebra/*.py` files.
 3. **Codegen & Wheel-Bundled TypeScript Sync**: `make ts-build` compiles all 17 `@vertebra/client` entrypoints ([`package.json`](../../../src/ts/vertebra-client/package.json)[^src-package-json]) and copies `dist/` into `src/py/vertebra/server/_js/bundle/`.
 4. **Shared-Memory Cleanup**: `make rs-test` clears `/dev/shm/test-*` and `/dev/shm/*vertebra*`; parallel review or chapter agents must run targeted `cargo test -p <crate>` commands rather than `make rs-test` so concurrent SHM segments are not unlinked.
-5. **Dependency Group Isolation**: Keep `duckdb>=1.0` in `[dependency-groups].duckdb` (`PY_TEST_GROUPS` enables it only when `Py_GIL_DISABLED=0`), HTTP benchmark harnesses in `bench`, `psycopg`/`asyncpg` PostgreSQL benchmark comparators in `postgres-bench` (`python_version < '3.14'`), and Zensical packages in `doc` ([`pyproject.toml`](../../../pyproject.toml)[^src-pyproject-toml]).
+5. **Dependency Group Isolation**: Keep third-party `duckdb>=1.1.0; python_version < '3.14'` strictly inside `[dependency-groups].bench` (`make install`, `make upgrade`, `make py-test`, and `make coverage` never sync `--group bench`), HTTP benchmark harnesses in `bench`, `psycopg`/`asyncpg` PostgreSQL benchmark comparators in `postgres-bench` (`python_version < '3.14'`), and Zensical packages in `doc` ([`pyproject.toml`](../../../pyproject.toml)[^src-pyproject-toml]).
 6. **Documentation, Secret, & Git Hygiene**: Never enable `navigation.indexes` in `zensical.toml`; use `"mock-oauth-token"` in GCS/IAM tests (`git-secrets` blocks real OAuth2 prefixes); keep `extensions.worktreeConfig` and `core.hooksPath` unset in `.git/config`.
 
 ## Direct Markdown Continuity & Chapter-Batch Loop

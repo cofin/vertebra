@@ -12,19 +12,17 @@ current_task: "native-adapter-organization:t01"
 parent_prd: native-data-platform
 depends_on_flows:
   - native-postgres-driver
-  - native-sqlite-driver
-  - native-redis-driver
-plan_revision: 1
-plan_commit: 18baadcd
+plan_revision: 2
+plan_commit: 104fd6fa
 created_at: "2026-11-12T23:45:00Z"
-updated_at: "2026-11-12T23:45:00Z"
+updated_at: "2026-11-14T18:43:00Z"
 generated:
   by: flow-plan
   at: "2026-11-12T23:45:00Z"
 verified:
-  - by: agent:plan-generator
-    at: "2026-11-12T23:45:00Z"
-    commit: 18baadcd
+  - by: agent:flow-setup
+    at: "2026-11-14T18:43:00Z"
+    commit: 104fd6fa
 tags:
   - database
   - adapters
@@ -74,17 +72,17 @@ sources:
 # Specification: Uniform Native Adapter Module Organization and DataFusion Cleanup
 
 <!-- truth: start -->
-- **Baseline (`18baadcd`)**: `bigquery/config.py` (`619L`) and `spanner/config.py` (`543L`) mix connection configs with `ObjectRef`/`ObjectTableConfig` and `StalenessBound`/`Mutation`/`MutationGroup`; `bigquery`, `spanner` (`2,015L`), `oracle` (`2,340L`), `mysql` (`1,244L`), `duckdb` (`1,090L`), and `mssql` (`855L`) bundle sync/async drivers (and Oracle pools/pipelines) into monolithic `driver.py` files; and `DataFusionConfig` / `DataFusionEngine` carry unimplemented `pgwire_fdw` fields and vendor-specific registration wrappers [^bq-config] [^sp-config] [^ora-driver] [^df-config] [^df-driver].
+- **Baseline (`334dc98d`)**: `bigquery/config.py` (`619L`) and `spanner/config.py` (`543L`) mix connection configs with `ObjectRef`/`ObjectTableConfig` and `StalenessBound`/`Mutation`/`MutationGroup`; `bigquery`, `spanner` (`2,011L`), `oracle` (`2,340L`), `mysql` (`1,244L`), `duckdb` (`1,251L`), and `mssql` (`855L`) bundle sync/async drivers (and Oracle pools/pipelines) into monolithic `driver.py` files; and `DataFusionConfig` / `DataFusionEngine` carry unimplemented `pgwire_fdw` fields and vendor-specific registration wrappers [^bq-config] [^sp-config] [^ora-driver] [^df-config] [^df-driver].
 - **Target Architecture**: Every native database adapter under `src/py/vertebra/db/adapters/<engine>/` follows uniform single-responsibility module boundaries (`config.py`, `core.py`, `_sync.py`, `_async.py`, thin `driver.py` barrel, `pipeline.py`, `object_tables.py`, `mutations.py`, and lazy `__init__.py` exports with zero re-export shims in `config.py`), while `DataFusionConfig` supports only implemented `mode="in_process"` and `DataFusionEngine` registers upstream queries strictly via `register_arrow_table(name, cursor)`.
-- **Scope & Boundaries**: Sequenced after [`native-postgres-driver`](../native-postgres-driver/spec.md), [`native-sqlite-driver`](../native-sqlite-driver/spec.md), and [`native-redis-driver`](../native-redis-driver/spec.md) so all engine adapters align without merge conflicts; preserves public `vertebra.db.adapters.<engine>` lazy exports (`__all__` / `_EXPORT_MAP`) consumed by SQLSpec and SQLAlchemy extensions [^okf-drivers].
+- **Scope & Boundaries**: Ready in the immediate wave after archived `native-postgres-driver` ([`postgres-native-driver.md`](../../knowledge/domains/data/postgres-native-driver.md)) with zero overlap against `sqlite` or `redis`/`valkey`; preserves public `vertebra.db.adapters.<engine>` lazy exports (`__all__` / `_EXPORT_MAP`) consumed by SQLSpec and SQLAlchemy extensions [^okf-drivers].
 <!-- truth: end -->
 
 ## 1. Specification, Context & Provenance
 
 ### 1.1 Problem Statement & Current Baseline
-Across `src/py/vertebra/db/adapters/`, `postgres` establishes clean module boundaries (`config.py`, `options.py`, `binds.py`, `core.py`, `types.py`, `arrow.py`, `pipeline.py`, `_sync.py`, `_async.py`, and a 12-line `driver.py` barrel), whereas earlier companion-wheel adapters carry structural debt:
+Across `src/py/vertebra/db/adapters/`, `postgres` establishes clean module boundaries (`config.py`, `options.py`, `binds.py`, `core.py`, `types.py`, `arrow.py`, `pipeline.py`, `_sync.py`, `_async.py`, and an 11-line `driver.py` barrel), whereas earlier companion-wheel adapters carry structural debt:
 1. **BigQuery (`bigquery/`)**: `config.py` mixes `BigQueryConfig` and `BigQueryDryRunResult` with `ObjectRef`, `ObjectTableConfig` (performing duck-typed `getattr` signing and `inspect.isawaitable`), and `BigQueryTableIdentifier`; `core.py` embeds Object Table fallback store listing; and `driver.py` (`1,041L`) combines `SyncBigQueryDriver` and `AsyncBigQueryDriver` [^bq-config] [^bq-core] [^bq-driver].
-2. **Spanner (`spanner/`)**: `config.py` mixes `SpannerConfig` with `StalenessBound`, `Mutation`, and `MutationGroup`; `core.py` holds mutation coercion/chunking helpers; and `driver.py` (`2,015L`) combines `SyncSpannerSnapshot`, `AsyncSpannerSnapshot`, `SyncSpannerTransaction`, `AsyncSpannerTransaction`, `SyncSpannerDriver`, and `AsyncSpannerDriver` [^sp-config] [^sp-driver].
+2. **Spanner (`spanner/`)**: `config.py` mixes `SpannerConfig` with `StalenessBound`, `Mutation`, and `MutationGroup`; `core.py` holds mutation coercion/chunking helpers; and `driver.py` (`2,011L`) combines `SyncSpannerSnapshot`, `AsyncSpannerSnapshot`, `SyncSpannerTransaction`, `AsyncSpannerTransaction`, `SyncSpannerDriver`, and `AsyncSpannerDriver` [^sp-config] [^sp-driver].
 3. **Oracle, MySQL, SQL Server & DuckDB (`oracle/`, `mysql/`, `mssql/`, `duckdb/`)**: `oracle/driver.py` (`2,340L`) embeds `SyncOraclePool`, `AsyncOraclePool`, `SyncOraclePipeline`, `AsyncOraclePipeline`, and both drivers plus module-level `_...` functions [^ora-driver]; `mysql`, `mssql`, and `duckdb` combine sync/async drivers in `driver.py` alongside loose module-level helper functions in `mysql/core.py`, `mssql/{config,driver}.py`, and `duckdb/{config,core,driver}.py` [^mysql-driver] [^mssql-driver] [^duckdb-driver].
 4. **DataFusion (`datafusion/`)**: `DataFusionConfig` advertises `mode="pgwire_fdw"`, `pgwire_host`, `pgwire_port`, and `require_mtls_for_pgwire` with zero runtime listener implementation [^df-config], and `DataFusionEngine` carries four vendor-specific `register_bigquery_*` / `register_spanner_*` wrappers duplicating `driver.select_to_arrow(...)` + `register_arrow_table(name, cursor)` [^df-driver].
 
@@ -99,17 +97,17 @@ Across `src/py/vertebra/db/adapters/`, `postgres` establishes clean module bound
   - Create `src/py/vertebra/db/adapters/bigquery/object_tables.py` owning `ObjectRef(FrozenBaseStruct, frozen=True, gc=False, kw_only=True)` and `ObjectTableConfig(FrozenBaseStruct, frozen=True, kw_only=True)` with explicit `hydrate_object_refs_sync(refs, store: SyncObjectStore)` / `hydrate_object_refs_async(refs, store: AsyncObjectStore)` and class-encapsulated SQL/fallback listing (zero `inspect.isawaitable` or broad `except Exception`). Move `BigQueryTableIdentifier` into `bigquery/core.py`, split `bigquery/driver.py` into `_sync.py::SyncBigQueryDriver` + `_async.py::AsyncBigQueryDriver` + 12-line `driver.py` barrel, and update `bigquery/{driver,embeddings,tools,__init__}.py` imports.
   - Create `src/py/vertebra/db/adapters/spanner/mutations.py` owning `StalenessBound`, `Mutation`, and `MutationGroup` with class-encapsulated `Mutation.coerce(...)`, `MutationGroup.coerce(...)`, and `Mutation.chunk_by_cell_limit(...)`. Extract `SyncSpannerSnapshot`, `AsyncSpannerSnapshot`, `SyncSpannerTransaction`, and `AsyncSpannerTransaction` into `spanner/transactions.py`, split `spanner/driver.py` into `_sync.py` + `_async.py` + `driver.py` barrel, and update `spanner/{core,tools,__init__}.py`.
 - **`R2` Oracle, MySQL, SQL Server & DuckDB Decomposition & Class Encapsulation (`t02`)**:
-  - Extract `SyncOraclePipeline` and `AsyncOraclePipeline` into `src/py/vertebra/db/adapters/oracle/pipeline.py`, split `oracle/driver.py` into `_sync.py` (`SyncOraclePool`, `SyncOracleDriver`) + `_async.py` (`AsyncOraclePool`, `AsyncOracleDriver`) + 16-line `driver.py` barrel, and encapsulate loose `_...` helpers onto `OracleConfig`, `OracleCore`, and `OracleNotificationSource`.
-  - Split `mssql/driver.py`, `mysql/driver.py`, and `duckdb/driver.py` into `_sync.py` + `_async.py` + 12-line `driver.py` barrels (`_SyncDuckDBCursor` in `duckdb/_sync.py`, `_AsyncDuckDBCursor` in `duckdb/_async.py`) and consolidate loose module-level functions onto `MySQLCore`, `MSSQLConfig`, `DuckDBSecretConfig`, and `DuckDBCore` while preserving `mysql/core.py` public exports via staticmethod bindings.
+  - Extract `SyncOraclePipeline` and `AsyncOraclePipeline` into `src/py/vertebra/db/adapters/oracle/pipeline.py`, split `oracle/driver.py` into `_sync.py` (`SyncOraclePool`, `SyncOracleDriver`) + `_async.py` (`AsyncOraclePool`, `AsyncOracleDriver`) + 16-line `driver.py` barrel, fold loose `_...` helpers onto `OracleConfig`, `OracleCore`, and `OracleNotificationSource` (with public-before-private ordering in `notify.py`), and remove module-level alias shims from `oracle/core.py` and `oracle/__init__.py` (updating test callers to `OracleCore.*`).
+  - Split `mssql/driver.py`, `mysql/driver.py`, and `duckdb/driver.py` into `_sync.py` + `_async.py` + 12-line `driver.py` barrels (`_SyncDuckDBCursor` in `duckdb/_sync.py`, `_AsyncDuckDBCursor` in `duckdb/_async.py`), consolidate loose module-level functions onto `MySQLCore`, `MSSQLConfig`, `DuckDBSecretConfig`, and `DuckDBCore` while preserving `mysql/core.py` public exports via staticmethod bindings, and enforce public-before-private member ordering in `mssql/{core,pipeline}.py`.
 - **`R3` `DataFusionConfig` `pgwire_fdw` Removal & `DataFusionEngine` Cleanup (`t03`)**:
   - Narrow `type DataFusionMode = Literal["in_process"]` in `datafusion/config.py`, delete `pgwire_host`, `pgwire_port`, and `require_mtls_for_pgwire` fields and `pool_key()` entries, and raise `ImproperConfigurationError` when `DataFusionConfig.from_url` or `__post_init__` receives `mode="pgwire_fdw"` or `host:port` netlocs.
   - Delete `register_bigquery_table`, `register_bigquery_query`, `register_spanner_table`, and `register_spanner_query` from `DataFusionEngine` (`datafusion/driver.py`), migrating unit/conformance test callers to `engine.register_arrow_table(name, driver.select_to_arrow(...))`.
 - **`R4` Documentation & OKF Knowledge Synchronization (`t04`)**:
-  - Update `docs/usage/analytics-and-cdc.md` DataFusion federation snippets to use `select_to_arrow` + `register_arrow_table` (`mode="in_process"` only) and synchronize [`database-drivers-and-dialers.md`](../../knowledge/domains/data/database-drivers-and-dialers.md) and [`query-pipeline-cdc-and-tenancy.md`](../../knowledge/domains/data/query-pipeline-cdc-and-tenancy.md) (`<= 200` lines each).
+  - Update `docs/usage/analytics-and-cdc.md` DataFusion federation snippets to use `select_to_arrow` + `register_arrow_table` (`mode="in_process"` only; already free of legacy `register_bigquery_*` / `pgwire_fdw` text on `HEAD`) and synchronize [`database-drivers-and-dialers.md`](../../knowledge/domains/data/database-drivers-and-dialers.md) and [`query-pipeline-cdc-and-tenancy.md`](../../knowledge/domains/data/query-pipeline-cdc-and-tenancy.md) (`<= 200` lines each).
 
 ## 3. Documentation & OKF Knowledge Plan
 
-- `docs/usage/analytics-and-cdc.md` (`t04`): Replace `register_bigquery_*` / `register_spanner_*` and `pgwire_fdw` mentions with `driver.select_to_arrow(...)` + `engine.register_arrow_table(...)`.
+- `docs/usage/analytics-and-cdc.md` (`t04`): Ensure DataFusion federation snippets document `driver.select_to_arrow(...)` + `engine.register_arrow_table(...)` and `mode="in_process"` (no `register_bigquery_*` / `register_spanner_*` or `pgwire_fdw` mentions exist on `HEAD`).
 - `.agents/bundles/knowledge/domains/data/database-drivers-and-dialers.md` (`t04`, `<= 200L`): Document uniform per-adapter module responsibilities (`config.py`, `core.py`, `_sync.py`, `_async.py`, `driver.py` barrel, `pipeline.py`, `arrow.py`, `types.py`, `object_tables.py`, `mutations.py`) and `DataFusionEngine`'s embedded exemption.
 - `.agents/bundles/knowledge/domains/data/query-pipeline-cdc-and-tenancy.md` (`t04`, `<= 200L`): Synchronize `oracle/pipeline.py`, `spanner/mutations.py`, `bigquery/object_tables.py`, and `DataFusionEngine` federation references.
 
@@ -131,7 +129,7 @@ Across `src/py/vertebra/db/adapters/`, `postgres` establishes clean module bound
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **State**: `planned` (`0/4` tasks completed; frontier at `native-adapter-organization:t01`), sequenced after `native-postgres-driver`, `native-sqlite-driver`, and `native-redis-driver` under [`native-data-platform`](../native-data-platform/spec.md).
+- **State**: `planned` (`0/4` tasks completed; frontier at `native-adapter-organization:t01`), ready in the immediate wave after archived `native-postgres-driver` under [`native-data-platform`](../native-data-platform/spec.md).
 - **Full `/flow:finish` Verification**: `PYTHONPATH="src/py:." uv run --no-sync python -m tools.docs.scan_public_docstrings --check-leaks --check-overloads --check-typeddicts src/py/vertebra/db/adapters && make lint-all && make py-test && make docs && make review-check`.
 
 [^bq-config]: `src/py/vertebra/db/adapters/bigquery/config.py::BigQueryConfig` — BigQueryConfig mixed with ObjectRef, ObjectTableConfig, and BigQueryTableIdentifier.

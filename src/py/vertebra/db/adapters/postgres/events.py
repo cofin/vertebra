@@ -20,44 +20,6 @@ __all__ = (
 )
 
 
-async def _close_awaitable(fn: Callable[[], Any]) -> None:
-    """Invoke a sync or async close callable and await if needed."""
-    result = fn()
-    if inspect.isawaitable(result):
-        await result
-
-
-async def _close_entry(handle: Any, client: Any) -> None:
-    """Close a tracked handle and its owning client cleanly."""
-    handle_error: BaseException | None = None
-    try:
-        aclose = getattr(handle, "aclose", None)
-        if callable(aclose):
-            await _close_awaitable(aclose)
-        else:
-            close = getattr(handle, "close", None)
-            if callable(close):
-                await _close_awaitable(close)
-    except BaseException as exc:
-        handle_error = exc
-    finally:
-        client_error: BaseException | None = None
-        try:
-            client_close = getattr(client, "close", None)
-            if callable(client_close):
-                await _close_awaitable(client_close)
-            else:
-                client_aclose = getattr(client, "aclose", None)
-                if callable(client_aclose):
-                    await _close_awaitable(client_aclose)
-        except BaseException as exc:
-            client_error = exc
-        if handle_error is not None:
-            raise handle_error
-        if client_error is not None:
-            raise client_error
-
-
 class PostgresNotificationDriver(Protocol):
     """Structural protocol for PostgreSQL drivers supporting notification publish and listen."""
 
@@ -122,15 +84,6 @@ class EventSessionRegistry:
         self._entries: list[tuple[Any, Any]] = []
         self._lock = asyncio.Lock()
 
-    def _is_closed(self, handle: Any) -> bool:
-        """Return whether a tracked handle reports itself as closed."""
-        closed_attr = getattr(handle, "closed", None)
-        if callable(closed_attr):
-            return bool(closed_attr())
-        if isinstance(closed_attr, bool):
-            return closed_attr
-        return False
-
     def prune_closed(self) -> int:
         """Remove entries whose handles are already closed and return removed count."""
         before = len(self._entries)
@@ -175,3 +128,50 @@ class EventSessionRegistry:
                     first_error = exc
         if first_error is not None:
             raise first_error
+
+    def _is_closed(self, handle: Any) -> bool:
+        """Return whether a tracked handle reports itself as closed."""
+        closed_attr = getattr(handle, "closed", None)
+        if callable(closed_attr):
+            return bool(closed_attr())
+        if isinstance(closed_attr, bool):
+            return closed_attr
+        return False
+
+
+async def _close_awaitable(fn: Callable[[], Any]) -> None:
+    """Invoke a sync or async close callable and await if needed."""
+    result = fn()
+    if inspect.isawaitable(result):
+        await result
+
+
+async def _close_entry(handle: Any, client: Any) -> None:
+    """Close a tracked handle and its owning client cleanly."""
+    handle_error: BaseException | None = None
+    try:
+        aclose = getattr(handle, "aclose", None)
+        if callable(aclose):
+            await _close_awaitable(aclose)
+        else:
+            close = getattr(handle, "close", None)
+            if callable(close):
+                await _close_awaitable(close)
+    except BaseException as exc:
+        handle_error = exc
+    finally:
+        client_error: BaseException | None = None
+        try:
+            client_close = getattr(client, "close", None)
+            if callable(client_close):
+                await _close_awaitable(client_close)
+            else:
+                client_aclose = getattr(client, "aclose", None)
+                if callable(client_aclose):
+                    await _close_awaitable(client_aclose)
+        except BaseException as exc:
+            client_error = exc
+        if handle_error is not None:
+            raise handle_error
+        if client_error is not None:
+            raise client_error

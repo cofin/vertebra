@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any, ClassVar, Self
@@ -64,6 +65,18 @@ class DuckDBSecretConfig(FrozenBaseStruct, frozen=True, gc=True):
     required: bool = True
     """When True, fail loudly when secret creation or `value_provider` resolution fails."""
 
+    def __post_init__(self) -> None:
+        if self.persistent and self.value_provider is not None:
+            msg = f"DuckDB secret {self.name!r} cannot set persistent=True with a dynamic value_provider"
+            raise ImproperConfigurationError(msg)
+        if self.refresh_interval_seconds is not None and (
+            isinstance(self.refresh_interval_seconds, bool)
+            or not math.isfinite(self.refresh_interval_seconds)
+            or self.refresh_interval_seconds <= 0
+        ):
+            msg = f"DuckDB secret {self.name!r} refresh_interval_seconds must be a positive finite number"
+            raise ImproperConfigurationError(msg)
+
     def __repr__(self) -> str:
         """Render a debug representation with sensitive secret values redacted."""
         redacted_value = {
@@ -107,7 +120,7 @@ class DuckDBSecretConfig(FrozenBaseStruct, frozen=True, gc=True):
     def effective_refresh_interval(self) -> float:
         """Return the active refresh interval in seconds when `value_provider` is configured."""
         if self.refresh_interval_seconds is not None:
-            return max(0.0, float(self.refresh_interval_seconds))
+            return float(self.refresh_interval_seconds)
         return 1800.0
 
     def to_create_secret_sql(self, dynamic_values: Mapping[str, Any] | None = None) -> str:

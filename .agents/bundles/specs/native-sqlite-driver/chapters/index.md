@@ -1,9 +1,7 @@
-# Chapters: Standalone Rust SQLite Wheel (vertebra-sqlite) (`native-sqlite-driver`)
+# Chapter Catalog — `native-sqlite-driver`
 
-| Chapter | State | Tasks | Summary & Fast Chapter Gate |
+| Chapter | Title | Tasks | State |
 | --- | --- | --- | --- |
-| [`ch01-wheel-scaffold-and-packaging`](ch01-wheel-scaffold-and-packaging/spec.md) | `planned` | `4` | Scaffold `src/rs/vertebra-sqlite` (`vertebra._sqlite`), `vertebra-core[sqlite]`, `Makefile` targets, `release.yaml`, and review manifests (`cargo test --manifest-path src/rs/Cargo.toml -p vertebra-sqlite && make review-check`) |
-| [`ch02-wheel-isolation-and-core-config`](ch02-wheel-isolation-and-core-config/spec.md) | `planned` | `4` | Sibling `.pyi` exclusions, `test_optional_driver_wheels.py` gate, `SqliteClientConfig`, and extended SQLite error mapping (`make sqlite-wheel-check && uv run --no-sync pytest src/py/tests/unit/db/test_optional_driver_wheels.py && cargo test --manifest-path src/rs/Cargo.toml -p vertebra-sqlite`) |
-| [`ch03-worker-pool-arrow-and-pyo3-clients`](ch03-worker-pool-arrow-and-pyo3-clients/spec.md) | `planned` | `4` | Single-writer + multi-reader WAL pool, `JSONB`, `InterruptHandle` `cancel()`, `backup_to`/`restore_from`, `VTBARROW`, `SyncSQLiteClient`/`AsyncSQLiteClient`, and broker capsule (`make sqlite-test && uv run --no-sync pytest src/py/tests/unit/test_freethreaded_gil.py`) |
-| [`ch04-python-cutover-pipelines-and-ci`](ch04-python-cutover-pipelines-and-ci/spec.md) | `planned` | `4` | Delayed-commit `SyncSQLitePipeline`/`AsyncSQLitePipeline`, `SyncSQLiteDriver`/`AsyncSQLiteDriver` cutover (zero `sqlite3`), backup hooks, and CI (`uv run --no-sync pytest src/py/tests/unit/db/test_sqlite_driver.py src/py/tests/unit/db/test_enterprise_olap_drivers.py src/py/tests/integration/db/test_driver_conformance.py -k sqlite`) |
-| [`ch05-docs-and-knowledge-sync`](ch05-docs-and-knowledge-sync/spec.md) | `planned` | `3` | Public `docs/` + `native-stubs.md`, `sqlite-limitations.md` (`<= 200` lines), `AGENTS.md`, `workflow.md`, and `review-pyo3-bridge` (`make review-check && make docs`) |
+| [ch01-wheel-scaffold-and-isolation](ch01-wheel-scaffold-and-isolation/spec.md) | Chapter 01: Standalone vertebra-sqlite Crate, Companion Wheel Isolation, and Review Manifests | `4` | `planned` |
+| [ch02-rust-engine-arrow-and-pyo3-clients](ch02-rust-engine-arrow-and-pyo3-clients/spec.md) | Chapter 02: Rust SQLite Config, WAL Worker Pool, VTBARROW SHM, and PyO3 Clients | `4` | `planned` |
+| [ch03-python-cutover-pipelines-ci-and-docs](ch03-python-cutover-pipelines-ci-and-docs/spec.md) | Chapter 03: Python SQLite Adapter Cutover, Delayed-Commit Pipelines, Conformance CI, and Docs/OKF | `4` | `planned` |

@@ -15,10 +15,7 @@ from vertebra.db.adapters.postgres.binds import (
     normalize_postgres_parameter,
 )
 from vertebra.db.adapters.postgres.config import PostgreSQLConfig
-from vertebra.db.adapters.postgres.core import (
-    compile_pg_binds,
-    normalize_pg_parameters,
-)
+from vertebra.db.adapters.postgres.core import PostgreSQLCore
 from vertebra.db.adapters.postgres.options import (
     build_native_client_options,
     parse_libpq_conninfo,
@@ -304,7 +301,7 @@ def test_compile_postgres_binds_valid_cases(
     expected_style: str,
 ) -> None:
     """Verify single-pass SQL lexical compilation across literals, comments, casts, and JSONB ops."""
-    compiled = compile_pg_binds(sql, params)
+    compiled = PostgreSQLCore.compile_binds(sql, params)
     assert compiled.sql == expected_sql
     assert compiled.params == expected_params
     assert compiled.style == expected_style
@@ -380,7 +377,7 @@ def test_parameter_normalization_copies_mutable_buffers_and_ffi_views() -> None:
     raw_mv.obj[:] = b"YYYYY"
     json_payload["nested"].append(999)
 
-    out = normalize_pg_parameters(compiled.params)
+    out = PostgreSQLCore.normalize_parameters(compiled.params)
     assert type(out[0]) is bytes and out[0] == b"hello"
     assert type(out[1]) is bytes and out[1] == b"world"
     assert isinstance(out[2], PgJson) and out[2].value == {"nested": [1, 2]}

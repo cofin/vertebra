@@ -6,6 +6,8 @@ server/discover, tools/*, resources/*, prompts/*, skills/*, tasks/*, logging,
 and completions with OpenTelemetry observability.
 """
 
+from __future__ import annotations
+
 import asyncio
 import base64
 import contextlib
@@ -76,12 +78,6 @@ from vertebra.agent.runtime import ConfirmationGate
 from vertebra.agent.telemetry import AgentTelemetryRecorder
 from vertebra.utils.serializers import decode_json, encode_json_bytes
 
-_native_classify_jsonrpc_frame: Callable[[bytes], tuple[int, str | None, str | None]] | None = None
-try:
-    from vertebra._vertebra import classify_jsonrpc_frame as _native_classify_jsonrpc_frame
-except ImportError:
-    _native_classify_jsonrpc_frame = None
-
 logger = logging.getLogger(__name__)
 
 __all__ = [
@@ -109,66 +105,6 @@ CACHEABLE_METHODS: frozenset[str] = frozenset(
 )
 MCP_LOG_LEVEL_INDEX: dict[McpLogLevel, int] = {lvl: idx for idx, lvl in enumerate(MCP_LOG_LEVELS)}
 _REGISTRY_CHANGE_KINDS: tuple[RegistryChangeKind, ...] = ("tools", "resources", "prompts")
-
-
-class _ListenRegistration(msgspec.Struct, frozen=True, gc=False, kw_only=True):
-    """Active 2026-07-28 stateless subscriptions/listen SSE registration."""
-
-    subscription_id: str
-    stream_id: str
-    resource_uris: frozenset[str]
-    list_changed_kinds: frozenset[RegistryChangeKind]
-    owner_id: str | None = None
-
-
-class _ListenStreamWrapper(AsyncIterator[bytes]):
-    """Wrap an SSE stream to unregister subscriptions/listen state on close."""
-
-    def __init__(
-        self,
-        core: "MCPCore",
-        subscription_id: str,
-        stream_id: str,
-        inner: AsyncIterator[bytes],
-    ) -> None:
-        self._core = core
-        self._subscription_id = subscription_id
-        self._stream_id = stream_id
-        self._inner = inner
-        self._closed = False
-
-    def __aiter__(self) -> "_ListenStreamWrapper":
-        return self
-
-    async def __anext__(self) -> bytes:
-        if self._closed:
-            self._cleanup()
-            raise StopAsyncIteration
-        try:
-            return await self._inner.__anext__()
-        except StopAsyncIteration:
-            await self.aclose()
-            raise
-        except BaseException:
-            await self.aclose()
-            raise
-
-    async def aclose(self) -> None:
-        """Close the underlying stream and remove the listen registration."""
-        if self._closed:
-            return
-        self._closed = True
-        try:
-            aclose = getattr(self._inner, "aclose", None)
-            if callable(aclose):
-                with contextlib.suppress(BaseException):
-                    await aclose()
-        finally:
-            self._cleanup()
-
-    def _cleanup(self) -> None:
-        self._core._listen_registrations.pop(self._subscription_id, None)
-        self._core.stream_broker.close_session(self._stream_id)
 
 
 class MCPCore:
@@ -210,6 +146,104 @@ class MCPCore:
         self.registry.add_listener(self._on_registry_changed)
         if self.skill_catalog is not None:
             self.skill_catalog.add_listener(self._on_skills_changed)
+
+    def validate(self) -> None:
+        """Validate tool and resource cross-references including SEP-1865 ``ui://`` links."""
+        self.registry.validate_ui_links(allowed_mime_types=self.config.ui_mime_types)
+
+    def register_extension(self, name: str, payload: Mapping[str, Any] | None = None) -> None:
+        """Register an MCP capability extension under ``capabilities.extensions``."""
+        self._extensions[name] = dict(payload) if payload is not None else {}
+
+    async def handle(self, request: McpHttpRequest) -> McpHttpResponse:
+        """Process an HTTP request under its caller context and restore the prior binding."""
+        context = request.context if isinstance(request.context, AgentContext) else AgentContext()
+        token = bind_agent_context(context)
+        try:
+            return await self._handle_http(request, context)
+        finally:
+            reset_agent_context(token)
+
+    async def handle_tool_call(self, params: Any = None, context: Any = None) -> dict[str, Any]:
+        """Execute a tool invocation with parameter validation and structured outputs."""
+        return await self._handle_tools_call(params, context=context)
+
+    async def log(self, level: McpLogLevel, data: Any, *, logger: str | None = None) -> int:
+        """Broadcast a level-gated notifications/message SSE frame to active legacy streams."""
+        if level not in MCP_LOG_LEVEL_INDEX:
+            raise ValueError(f"Invalid MCP log level {level!r}; expected one of {', '.join(MCP_LOG_LEVELS)}")
+        if not self.config.logging:
+            return 0
+        level_rank = MCP_LOG_LEVEL_INDEX[level]
+        log_params: dict[str, Any] = {"level": level, "data": data}
+        if logger is not None:
+            log_params["logger"] = logger
+        frame = self._make_sse_frame({"jsonrpc": "2.0", "method": "notifications/message", "params": log_params})
+        delivered = 0
+        seen_sessions: set[str] = set()
+        for session in await self.session_store.active_sessions():
+            seen_sessions.add(session.session_id)
+            if level_rank >= MCP_LOG_LEVEL_INDEX[session.log_level] and self.stream_broker.publish(
+                session.session_id, frame
+            ):
+                delivered += 1
+        default_rank = MCP_LOG_LEVEL_INDEX[self.config.default_log_level]
+        if level_rank >= default_rank:
+            for sid in self.stream_broker.active_stream_ids():
+                if sid not in seen_sessions and sid.startswith("anon-") and self.stream_broker.publish(sid, frame):
+                    delivered += 1
+        return delivered
+
+    async def notify_resource_updated(self, uri: str) -> int:
+        """Push notifications/resources/updated to subscribed legacy sessions and listen streams."""
+        delivered = 0
+        session_ids = await self.session_store.subscribed_session_ids(uri)
+        if session_ids:
+            payload = {"jsonrpc": "2.0", "method": "notifications/resources/updated", "params": {"uri": uri}}
+            frame = self._make_sse_frame(payload)
+            delivered += self.stream_broker.broadcast(frame, list(session_ids))
+
+        for reg in list(self._listen_registrations.values()):
+            if uri in reg.resource_uris:
+                listen_payload = {
+                    "jsonrpc": "2.0",
+                    "method": "notifications/resources/updated",
+                    "params": {
+                        "uri": uri,
+                        "_meta": {"io.modelcontextprotocol/subscriptionId": reg.subscription_id},
+                    },
+                }
+                if self.stream_broker.publish(reg.stream_id, self._make_sse_frame(listen_payload)):
+                    delivered += 1
+        return delivered
+
+    async def handle_payload(self, raw_bytes: bytes, context: AgentContext | None = None) -> bytes | None:
+        """Dispatch JSON-RPC under its caller context and restore the prior binding."""
+        context = context if isinstance(context, AgentContext) else AgentContext()
+        token = bind_agent_context(context)
+        try:
+            if not raw_bytes or not raw_bytes.strip():
+                return encode_json_bytes(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": None,
+                        "error": {"code": PARSE_ERROR, "message": "Parse error: empty payload"},
+                    }
+                )
+            try:
+                parsed = decode_json(raw_bytes)
+            except Exception:
+                return encode_json_bytes(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": None,
+                        "error": {"code": PARSE_ERROR, "message": "Parse error: invalid JSON"},
+                    }
+                )
+            modern = bool(context.metadata.get("mcp_modern_mode", False))
+            return await self._dispatch_decoded(parsed, context, modern=modern)
+        finally:
+            reset_agent_context(token)
 
     def _next_event_id(self) -> str:
         self._event_counter += 1
@@ -266,14 +300,6 @@ class MCPCore:
             self._emit_list_changed("notifications/resources/list_changed", kind="resources")
         if self.config.prompts_enabled and self.skill_catalog.expose_as_prompts:
             self._emit_list_changed("notifications/prompts/list_changed", kind="prompts")
-
-    def validate(self) -> None:
-        """Validate tool and resource cross-references including SEP-1865 ``ui://`` links."""
-        self.registry.validate_ui_links(allowed_mime_types=self.config.ui_mime_types)
-
-    def register_extension(self, name: str, payload: Mapping[str, Any] | None = None) -> None:
-        """Register an MCP capability extension under ``capabilities.extensions``."""
-        self._extensions[name] = dict(payload) if payload is not None else {}
 
     def _server_capabilities(self, *, protocol_version: str = MCP_PROTOCOL_VERSION) -> dict[str, Any]:
         """Build the unified MCP capability map shared by server/discover and initialize."""
@@ -385,68 +411,6 @@ class MCPCore:
         if session_id is not None or frame_method in ("initialize", "ping", "notifications/initialized"):
             return NegotiatedProtocol(version=MCP_FALLBACK_SESSION_VERSION, modern=False)
         return NegotiatedProtocol(version=MCP_PROTOCOL_VERSION, modern=True)
-
-    async def handle(self, request: McpHttpRequest) -> McpHttpResponse:
-        """Process an HTTP request under its caller context and restore the prior binding."""
-        context = request.context if isinstance(request.context, AgentContext) else AgentContext()
-        token = bind_agent_context(context)
-        try:
-            return await self._handle_http(request, context)
-        finally:
-            reset_agent_context(token)
-
-    async def handle_tool_call(self, params: Any = None, context: Any = None) -> dict[str, Any]:
-        """Execute a tool invocation with parameter validation and structured outputs."""
-        return await self._handle_tools_call(params, context=context)
-
-    async def log(self, level: McpLogLevel, data: Any, *, logger: str | None = None) -> int:
-        """Broadcast a level-gated notifications/message SSE frame to active legacy streams."""
-        if level not in MCP_LOG_LEVEL_INDEX:
-            raise ValueError(f"Invalid MCP log level {level!r}; expected one of {', '.join(MCP_LOG_LEVELS)}")
-        if not self.config.logging:
-            return 0
-        level_rank = MCP_LOG_LEVEL_INDEX[level]
-        log_params: dict[str, Any] = {"level": level, "data": data}
-        if logger is not None:
-            log_params["logger"] = logger
-        frame = self._make_sse_frame({"jsonrpc": "2.0", "method": "notifications/message", "params": log_params})
-        delivered = 0
-        seen_sessions: set[str] = set()
-        for session in await self.session_store.active_sessions():
-            seen_sessions.add(session.session_id)
-            if level_rank >= MCP_LOG_LEVEL_INDEX[session.log_level] and self.stream_broker.publish(
-                session.session_id, frame
-            ):
-                delivered += 1
-        default_rank = MCP_LOG_LEVEL_INDEX[self.config.default_log_level]
-        if level_rank >= default_rank:
-            for sid in self.stream_broker.active_stream_ids():
-                if sid not in seen_sessions and sid.startswith("anon-") and self.stream_broker.publish(sid, frame):
-                    delivered += 1
-        return delivered
-
-    async def notify_resource_updated(self, uri: str) -> int:
-        """Push notifications/resources/updated to subscribed legacy sessions and listen streams."""
-        delivered = 0
-        session_ids = await self.session_store.subscribed_session_ids(uri)
-        if session_ids:
-            payload = {"jsonrpc": "2.0", "method": "notifications/resources/updated", "params": {"uri": uri}}
-            frame = self._make_sse_frame(payload)
-            delivered += self.stream_broker.broadcast(frame, list(session_ids))
-
-        for reg in list(self._listen_registrations.values()):
-            if uri in reg.resource_uris:
-                listen_payload = {
-                    "jsonrpc": "2.0",
-                    "method": "notifications/resources/updated",
-                    "params": {
-                        "uri": uri,
-                        "_meta": {"io.modelcontextprotocol/subscriptionId": reg.subscription_id},
-                    },
-                }
-                if self.stream_broker.publish(reg.stream_id, self._make_sse_frame(listen_payload)):
-                    delivered += 1
-        return delivered
 
     async def _dispatch_request(
         self,
@@ -586,34 +550,6 @@ class MCPCore:
                 "error": {"code": INVALID_REQUEST, "message": "Invalid request: expected object or array"},
             }
         )
-
-    async def handle_payload(self, raw_bytes: bytes, context: AgentContext | None = None) -> bytes | None:
-        """Dispatch JSON-RPC under its caller context and restore the prior binding."""
-        context = context if isinstance(context, AgentContext) else AgentContext()
-        token = bind_agent_context(context)
-        try:
-            if not raw_bytes or not raw_bytes.strip():
-                return encode_json_bytes(
-                    {
-                        "jsonrpc": "2.0",
-                        "id": None,
-                        "error": {"code": PARSE_ERROR, "message": "Parse error: empty payload"},
-                    }
-                )
-            try:
-                parsed = decode_json(raw_bytes)
-            except Exception:
-                return encode_json_bytes(
-                    {
-                        "jsonrpc": "2.0",
-                        "id": None,
-                        "error": {"code": PARSE_ERROR, "message": "Parse error: invalid JSON"},
-                    }
-                )
-            modern = bool(context.metadata.get("mcp_modern_mode", False))
-            return await self._dispatch_decoded(parsed, context, modern=modern)
-        finally:
-            reset_agent_context(token)
 
     async def _handle_http(self, request: McpHttpRequest, context: AgentContext) -> McpHttpResponse:
         """Validate HTTP metadata and dispatch with the bound caller context."""
@@ -2281,6 +2217,73 @@ class MCPCore:
     async def _handle_completion(self, params: Any = None, context: Any = None) -> dict[str, Any]:
         """Handle argument completion request."""
         return self._with_meta("completion/complete", {"completion": {"values": [], "total": 0, "hasMore": False}})
+
+
+class _ListenRegistration(msgspec.Struct, frozen=True, gc=False, kw_only=True):
+    """Active 2026-07-28 stateless subscriptions/listen SSE registration."""
+
+    subscription_id: str
+    stream_id: str
+    resource_uris: frozenset[str]
+    list_changed_kinds: frozenset[RegistryChangeKind]
+    owner_id: str | None = None
+
+
+class _ListenStreamWrapper(AsyncIterator[bytes]):
+    """Wrap an SSE stream to unregister subscriptions/listen state on close."""
+
+    def __init__(
+        self,
+        core: MCPCore,
+        subscription_id: str,
+        stream_id: str,
+        inner: AsyncIterator[bytes],
+    ) -> None:
+        self._core = core
+        self._subscription_id = subscription_id
+        self._stream_id = stream_id
+        self._inner = inner
+        self._closed = False
+
+    def __aiter__(self) -> _ListenStreamWrapper:
+        return self
+
+    async def __anext__(self) -> bytes:
+        if self._closed:
+            self._cleanup()
+            raise StopAsyncIteration
+        try:
+            return await self._inner.__anext__()
+        except StopAsyncIteration:
+            await self.aclose()
+            raise
+        except BaseException:
+            await self.aclose()
+            raise
+
+    async def aclose(self) -> None:
+        """Close the underlying stream and remove the listen registration."""
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            aclose = getattr(self._inner, "aclose", None)
+            if callable(aclose):
+                with contextlib.suppress(BaseException):
+                    await aclose()
+        finally:
+            self._cleanup()
+
+    def _cleanup(self) -> None:
+        self._core._listen_registrations.pop(self._subscription_id, None)
+        self._core.stream_broker.close_session(self._stream_id)
+
+
+_native_classify_jsonrpc_frame: Callable[[bytes], tuple[int, str | None, str | None]] | None = None
+try:
+    from vertebra._vertebra import classify_jsonrpc_frame as _native_classify_jsonrpc_frame
+except ImportError:
+    _native_classify_jsonrpc_frame = None
 
 
 def _classify_jsonrpc_frame(payload: bytes) -> tuple[int, str | None, str | None]:

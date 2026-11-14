@@ -16,9 +16,7 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
 use tokio::signal;
-#[cfg(feature = "python")]
-use tracing::error;
-use tracing::info;
+use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
 use vertebra_core::bridge::BatchBridge;

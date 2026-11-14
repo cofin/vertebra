@@ -9,8 +9,19 @@ SELECT
     r.python_version,
     r.started_at,
     r.note,
-    (SELECT COUNT(*) FROM benchmark_results br WHERE br.run_id = r.run_id) AS result_count
+    COUNT(br.run_id) AS result_count
 FROM benchmark_runs r
+LEFT JOIN benchmark_results br ON br.run_id = r.run_id
+GROUP BY
+    r.run_id,
+    r.git_sha,
+    r.git_branch,
+    r.machine_os,
+    r.machine_arch,
+    r.machine_cpu,
+    r.python_version,
+    r.started_at,
+    r.note
 ORDER BY r.started_at DESC
 LIMIT $1;
 

@@ -219,7 +219,7 @@ build = [
     "maturin>=1.5,<2",
 ]
 bench = [
-    { include-group = "duckdb" },
+    "duckdb>=1.0; python_version < '3.14'",
     "uvicorn[standard]>=0.30",
     "httptools>=0.6",
     "uvloop>=0.23.0; sys_platform != 'win32'",
@@ -227,7 +227,7 @@ bench = [
     "spikard>=0.12",
 ]
 duckdb = [
-    "duckdb>=1.0",
+    "duckdb>=1.0; python_version < '3.14'",
 ]
 postgres-bench = [
     "asyncpg>=0.30; python_version < '3.14'",
@@ -295,6 +295,8 @@ known-first-party = ["vertebra"]
 testpaths = ["src/py/tests"]
 pythonpath = [".", "src/py"]
 markers = [
+    "conformance(engine): mark integration test with its target conformance database engine",
+    "driver_engine(engine): mark integration test with its target database driver engine",
     "postgres_benchmark: live PostgreSQL comparative benchmark suite against psycopg and asyncpg",
 ]
 
@@ -305,7 +307,7 @@ ignore_errors = true
 python_version = "3.12"
 strict = true
 mypy_path = ["src/py"]
-files = ["src/py/vertebra", "tools/scripts", "tools/pgo", "tools/docs", "tools/benchmarks/postgres.py", "docs/examples"]
+files = ["src/py/vertebra", "tools/scripts", "tools/pgo", "tools/docs", "tools/benchmarks", "docs/examples"]
 
 [[tool.mypy.overrides]]
 module = [
@@ -358,6 +360,9 @@ module = [
     "pytest_databases",
     "pytest_databases.*",
     "concurrent.interpreters",
+    "duckdb",
+    "spikard",
+    "spikard.*",
 ]
 ignore_missing_imports = true
 

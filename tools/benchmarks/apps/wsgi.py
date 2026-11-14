@@ -18,17 +18,8 @@ from tools.benchmarks.apps.asgi import (
     PLAINTEXT_BODY,
 )
 
-# Type aliases
 StartResponse = Any
 
-
-def _respond(start_response: StartResponse, body: bytes, content_type: str, status: str = "200 OK") -> list[bytes]:
-    headers = [("Content-Type", content_type), ("Content-Length", str(len(body)))]
-    start_response(status, headers)
-    return [body]
-
-
-# Static routes: path -> (body, content_type)
 _STATIC: dict[str, tuple[bytes, str]] = {
     "/hello": (HELLO_BODY, "application/json"),
     "/plaintext": (PLAINTEXT_BODY, "text/plain"),
@@ -41,7 +32,7 @@ _STATIC: dict[str, tuple[bytes, str]] = {
 
 
 def app(environ: dict[str, Any], start_response: StartResponse) -> list[bytes]:
-    """WSGI application."""
+    """WSGI application dispatching static and dynamic benchmark routes."""
     path = environ.get("PATH_INFO", "/")
 
     if path in _STATIC:
@@ -58,3 +49,9 @@ def app(environ: dict[str, Any], start_response: StartResponse) -> list[bytes]:
         return _respond(start_response, b"ok", "text/plain")
 
     return _respond(start_response, b"Not Found", "text/plain", "404 Not Found")
+
+
+def _respond(start_response: StartResponse, body: bytes, content_type: str, status: str = "200 OK") -> list[bytes]:
+    headers = [("Content-Type", content_type), ("Content-Length", str(len(body)))]
+    start_response(status, headers)
+    return [body]

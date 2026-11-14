@@ -14,20 +14,14 @@ generated:
   at: "2026-11-04T04:33:00Z"
 verified:
   - by: agent:flow-executor
-    at: "2026-11-13T22:48:50Z"
-    commit: 480840a3
-  - by: agent:flow-executor
+    at: "2026-11-14T18:05:00Z"
+    commit: 8290822e
+  - by: agent:flow-learn
+    at: "2026-11-14T17:15:00Z"
+    commit: 334dc98d
+  - by: agent:flow-setup
     at: "2026-11-13T00:25:00Z"
     commit: 18baadcd
-  - by: agent:flow-sync
-    at: "2026-11-09T21:46:00Z"
-    commit: 14aa83b8
-  - by: agent:flow-executor
-    at: "2026-11-09T15:21:00Z"
-    commit: af1b3d30
-  - by: agent:flow-setup
-    at: "2026-11-07T03:55:00Z"
-    commit: 067fa901
 sources:
   - id: src-makefile
     resource: Makefile
@@ -85,7 +79,7 @@ sources:
 # Benchmark Suite & Free-Threaded Python 3.14t/3.15t
 
 <!-- truth: start -->
-- `duckdb>=1.0` lives in `[dependency-groups].duckdb` (`bench` includes it), third-party `psycopg[binary]` and `asyncpg` comparators live in `[dependency-groups].postgres-bench` (`python_version < '3.14'`), and `uvicorn`/`granian`/`spikard` live in `[dependency-groups].bench`; free-threaded (`3.14t`/`3.15t`) runs install none of these groups.
+- Third-party `duckdb>=1.0; python_version < '3.14'` lives in `[dependency-groups].duckdb` (`bench` includes a direct `"duckdb>=1.0; python_version < '3.14'"` marker strictly for `tools.benchmarks.store`), third-party `psycopg[binary]` and `asyncpg` comparators live in `[dependency-groups].postgres-bench` (`python_version < '3.14'`), and `uvicorn`/`granian`/`spikard` live in `[dependency-groups].bench`; `make install`, `make upgrade`, `make py-test`, and `make coverage` never sync `--group duckdb`.
 - Run `make bench`, `make bench-ft`, `make rs-bench`, `make bench-micro`, `make bench-check`, and `make postgres-bench` against release/PGO builds; run `make postgres-bench-check` offline for Criterion test execution, lint/type validation, and comparator unit tests, and validate 14 immutable `_postgres` classes plus 8-thread concurrent pool checks in `test_freethreaded_gil.py`.
 <!-- truth: end -->
 
@@ -101,7 +95,7 @@ Vertebra has Rust Criterion microbenchmarks (`src/rs/vertebra-core/benches/`, `s
 | `make postgres-bench` | `cd src/rs && cargo bench -p vertebra-postgres --bench postgres_native --locked`, then `uv run --no-sync --group postgres-bench pytest -m postgres_benchmark` | Native codecs/wire/`PGCOPY`/`pgoutput` Criterion benches plus live `vertebra` vs `psycopg`/`asyncpg` throughput and latency (`schema_version=1`). |
 | `make postgres-bench-check` | `PYTHONPATH="$(CURDIR)/src/py" cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --bench postgres_native --locked` + Ruff/Mypy + `pytest src/py/tests/unit/tools/test_postgres_benchmarks.py` | Offline Criterion test execution, script/benchmark lint and type check, and deterministic comparator threshold unit gate. |
 | `make bench-report` | `uv run --group bench python -m tools.benchmarks report` | Latest run summary (`make bench-diff` compares against previous). |
-| `cargo bench` | `cd src/rs && cargo bench` | Criterion: `spsc`, `mpmc`, `spin_wait`, `router`, `guards`, `ring_throughput`, `codec`, `shm_transport` (`vertebra-core`), `server_throughput` (`vertebra-http`), and `postgres_native` (`vertebra-postgres`)[^src-vertebra-postgres-cargo-toml] [^src-postgres-native-bench-rs]. |
+| `cargo bench` | `cd src/rs && cargo bench` | Criterion: `spsc`, `guards`, `ring_throughput`, `codec`, `shm_transport` (`vertebra-core`), `put_checksum` (`vertebra-storage`), `ssr_render` (`vertebra-bundler`), `server_throughput` (`vertebra-http`), and `postgres_native` (`vertebra-postgres`)[^src-vertebra-postgres-cargo-toml] [^src-postgres-native-bench-rs]. |
 
 `FREETHREADED_TARGETS` require `src/rs/target-ft/release/vertebra-server` and raise `FileNotFoundError` immediately if `make bench-ft` has not built the free-threaded binary.
 
@@ -116,7 +110,7 @@ Vertebra has Rust Criterion microbenchmarks (`src/rs/vertebra-core/benches/`, `s
 
 ## 3. Scheduled Benchmarks (`.github/workflows/benchmark.yml`)
 
-The workflow runs on `workflow_dispatch` (input `full_benchmark`), on published releases, and weekly (`cron: '0 6 * * 1'`). It installs `oha` with `cargo install oha`, runs `make install` and `make build`, then `make bench` (or `make bench-all` when `full_benchmark` is true), uploads `tools/benchmarks/results/` with 90-day retention, and on `main` commits `tools/benchmarks/results/*.duckdb`.
+The workflow runs on `workflow_dispatch` (input `full_benchmark`) and published `release` events. It installs `oha` with `taiki-e/install-action@v2`, runs `uv sync --all-extras --dev`, `make ts-install`, and `make build`, then executes `make bench` (or `make bench-all` when `full_benchmark` is `"true"`) and uploads `tools/benchmarks/results/` via `actions/upload-artifact@v7` with 90-day retention.
 
 ## 4. Profile-Guided Optimization (`tools/pgo/`)
 
@@ -127,10 +121,10 @@ The workflow runs on `workflow_dispatch` (input `full_benchmark`), on published 
 
 ## 5. Isolating `--group bench`, `--group duckdb`, and `--group postgres-bench` (`pyproject.toml`)
 
-Keep benchmark-only dependencies (`duckdb>=1.0` reaching `bench` via `{ include-group = "duckdb" }`, `uvicorn`/`httptools`/`uvloop`/`granian`/`spikard` in `bench`, and `asyncpg>=0.30` / `psycopg[binary]>=3.2,<3.4` with `python_version < '3.14'` in `postgres-bench`) strictly in `[dependency-groups]` in [`pyproject.toml`](../../../../pyproject.toml)[^src-pyproject-toml], never in `[project.dependencies]`, `[project.optional-dependencies]`, or `dev`:
+Keep benchmark-only dependencies (`duckdb>=1.0; python_version < '3.14'` in `duckdb` and `bench` solely for `tools.benchmarks.store` result persistence, `uvicorn`/`httptools`/`uvloop`/`granian`/`spikard` in `bench`, and `asyncpg>=0.30` / `psycopg[binary]>=3.2,<3.4` with `python_version < '3.14'` in `postgres-bench`) strictly in `[dependency-groups]` in [`pyproject.toml`](../../../../pyproject.toml)[^src-pyproject-toml], never in `[project.dependencies]`, `[project.optional-dependencies]`, or `dev`:
 
-- `pyproject.toml` sets no `[tool.uv] default-groups`; `make py-test` builds all 10 native PyO3 extensions while `PY_TEST_GROUPS` enables `--group duckdb` only on GIL builds.
-- `make bench*` passes `--group bench`, `make postgres-bench` passes `--group postgres-bench`, and `test_optional_driver_wheels.py` guards group isolation offline.
+- `pyproject.toml` sets no `[tool.uv] default-groups`; `make install`, `make upgrade`, `make py-test`, and `make coverage` build and exercise all 10 native PyO3 extensions (`vertebra._duckdb` included) without syncing `--group duckdb`.
+- `make bench*` passes `--group bench`, `make postgres-bench` passes `--group postgres-bench`, and `test_bench_infrastructure.py` plus `test_optional_driver_wheels.py` guard group isolation offline.
 
 ## 6. Free-Threaded Build (`make bench-ft`)
 

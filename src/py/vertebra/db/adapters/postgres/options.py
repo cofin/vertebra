@@ -6,10 +6,11 @@ import getpass
 import os
 import posixpath
 from collections.abc import Mapping
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import unquote
+
+import msgspec
 
 from vertebra.typing import ImproperConfigurationError
 
@@ -34,189 +35,7 @@ _BOOL_TRUE = frozenset({"1", "true", "yes", "on"})
 _BOOL_FALSE = frozenset({"0", "false", "no", "off"})
 
 
-def _unquote_strict(raw: str, *, field_name: str) -> str:
-    """Percent-decode ``raw`` as strict UTF-8 without turning ``+`` into space."""
-    try:
-        return unquote(raw, encoding="utf-8", errors="strict")
-    except UnicodeDecodeError as exc:
-        raise ImproperConfigurationError(f"Invalid UTF-8 percent-encoding in PostgreSQL {field_name}: {raw!r}") from exc
-
-
-def parse_query_pairs_strict(query: str) -> dict[str, str]:
-    """Parse URI query parameters preserving literal ``+`` characters."""
-    params: dict[str, str] = {}
-    if not query:
-        return params
-    for part in query.split("&"):
-        if not part:
-            continue
-        if "=" in part:
-            raw_key, raw_val = part.split("=", 1)
-        else:
-            raw_key, raw_val = part, ""
-        key = _unquote_strict(raw_key, field_name="query key")
-        val = _unquote_strict(raw_val, field_name="query value")
-        params[key] = val
-    return params
-
-
-def parse_libpq_conninfo(conninfo: str) -> dict[str, str]:
-    """Parse a libpq keyword=value connection string respecting single quotes and escapes."""
-    params: dict[str, str] = {}
-    n = len(conninfo)
-    i = 0
-    while i < n:
-        while i < n and conninfo[i].isspace():
-            i += 1
-        if i >= n:
-            break
-        key_start = i
-        while i < n and conninfo[i] not in ("=", " ", "\t", "\n", "\r"):
-            i += 1
-        key = conninfo[key_start:i]
-        while i < n and conninfo[i].isspace():
-            i += 1
-        if i >= n or conninfo[i] != "=" or not key:
-            raise ImproperConfigurationError(f"Malformed libpq keyword-value parameter near {conninfo[key_start:]!r}")
-        i += 1
-        while i < n and conninfo[i].isspace():
-            i += 1
-        if i < n and conninfo[i] == "'":
-            i += 1
-            chars: list[str] = []
-            closed = False
-            while i < n:
-                ch = conninfo[i]
-                if ch == "\\":
-                    i += 1
-                    if i >= n:
-                        raise ImproperConfigurationError("Unterminated escape in quoted libpq conninfo value")
-                    chars.append(conninfo[i])
-                    i += 1
-                elif ch == "'":
-                    closed = True
-                    i += 1
-                    break
-                else:
-                    chars.append(ch)
-                    i += 1
-            if not closed:
-                raise ImproperConfigurationError(f"Unterminated single-quoted value for libpq parameter {key!r}")
-            params[key] = "".join(chars)
-        else:
-            val_start = i
-            while i < n and not conninfo[i].isspace():
-                if conninfo[i] == "\\" and i + 1 < n:
-                    i += 2
-                    continue
-                i += 1
-            raw_val = conninfo[val_start:i]
-            params[key] = raw_val.replace("\\\\", "\\").replace("\\'", "'")
-    return params
-
-
-def _parse_int(value: Any, *, field_name: str, minimum: int | None = None, maximum: int | None = None) -> int:
-    """Parse strict integer option rejecting booleans and out-of-range values."""
-    if isinstance(value, bool):
-        raise ImproperConfigurationError(f"{field_name} cannot be a boolean")
-    if isinstance(value, int):
-        parsed = value
-    elif isinstance(value, str):
-        stripped = value.strip()
-        if not stripped:
-            raise ImproperConfigurationError(f"{field_name} cannot be empty")
-        try:
-            parsed = int(stripped, 10)
-        except ValueError as exc:
-            raise ImproperConfigurationError(f"Invalid integer for {field_name}: {value!r}") from exc
-    else:
-        raise ImproperConfigurationError(f"Invalid type for {field_name}: {type(value).__name__}")
-    if minimum is not None and parsed < minimum:
-        raise ImproperConfigurationError(f"{field_name} must be >= {minimum}, got {parsed}")
-    if maximum is not None and parsed > maximum:
-        raise ImproperConfigurationError(f"{field_name} must be <= {maximum}, got {parsed}")
-    return parsed
-
-
-def _parse_float(value: Any, *, field_name: str, positive: bool = False) -> float:
-    """Parse float duration option rejecting booleans and non-positive values when requested."""
-    if isinstance(value, bool):
-        raise ImproperConfigurationError(f"{field_name} cannot be a boolean")
-    try:
-        parsed = float(value)
-    except (TypeError, ValueError) as exc:
-        raise ImproperConfigurationError(f"Invalid float for {field_name}: {value!r}") from exc
-    if positive and parsed <= 0.0:
-        raise ImproperConfigurationError(f"{field_name} must be > 0, got {parsed}")
-    return parsed
-
-
-def _parse_bool(value: Any, *, field_name: str) -> bool:
-    """Parse libpq boolean flag string or Python bool."""
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, int) and value in (0, 1):
-        return bool(value)
-    if isinstance(value, str):
-        norm = value.strip().lower()
-        if norm in _BOOL_TRUE:
-            return True
-        if norm in _BOOL_FALSE:
-            return False
-    raise ImproperConfigurationError(f"Invalid boolean value for {field_name}: {value!r}")
-
-
-def _split_authority_hosts(host_section: str) -> list[tuple[str, int | None]]:
-    """Split comma-separated URI authority hosts while preserving IPv6 brackets."""
-    entries: list[str] = []
-    start = 0
-    in_brackets = False
-    for idx, ch in enumerate(host_section):
-        if ch == "[":
-            in_brackets = True
-        elif ch == "]":
-            in_brackets = False
-        elif ch == "," and not in_brackets:
-            entries.append(host_section[start:idx])
-            start = idx + 1
-    if in_brackets:
-        raise ImproperConfigurationError("Unclosed IPv6 bracket '[' in PostgreSQL URI")
-    entries.append(host_section[start:])
-
-    parsed: list[tuple[str, int | None]] = []
-    for raw_entry in entries:
-        if not raw_entry:
-            if len(entries) == 1:
-                continue
-            raise ImproperConfigurationError("Empty host entry in multi-host PostgreSQL URI")
-        if raw_entry.startswith("["):
-            close_idx = raw_entry.find("]")
-            if close_idx == -1:
-                raise ImproperConfigurationError("Malformed IPv6 host in PostgreSQL URI")
-            host_part = raw_entry[1:close_idx]
-            rest = raw_entry[close_idx + 1 :]
-            if not rest:
-                parsed.append((_unquote_strict(host_part, field_name="host"), None))
-            elif rest.startswith(":"):
-                port_text = rest[1:]
-                port_val = _parse_int(port_text, field_name="port", minimum=1, maximum=65535)
-                parsed.append((_unquote_strict(host_part, field_name="host"), port_val))
-            else:
-                raise ImproperConfigurationError(f"Invalid authority suffix after IPv6 host: {raw_entry!r}")
-        else:
-            if ":" in raw_entry:
-                host_part, port_text = raw_entry.rsplit(":", 1)
-                if ":" in host_part:
-                    raise ImproperConfigurationError(f"IPv6 host must be enclosed in brackets: {raw_entry!r}")
-                port_val = _parse_int(port_text, field_name="port", minimum=1, maximum=65535)
-                parsed.append((_unquote_strict(host_part, field_name="host"), port_val))
-            else:
-                parsed.append((_unquote_strict(raw_entry, field_name="host"), None))
-    return parsed
-
-
-@dataclass(frozen=True, slots=True)
-class ParsedPostgresDsn:
+class ParsedPostgresDsn(msgspec.Struct, frozen=True):
     """Structured decomposition of either a PostgreSQL URI or libpq conninfo string."""
 
     scheme: str | None = None
@@ -227,141 +46,10 @@ class ParsedPostgresDsn:
     database: str | None = None
     explicit_empty_user: bool = False
     explicit_empty_database: bool = False
-    params: dict[str, str] = field(default_factory=dict)
+    params: dict[str, str] = msgspec.field(default_factory=dict)
 
 
-def parse_postgres_dsn(dsn: str) -> ParsedPostgresDsn:
-    """Parse a ``postgresql://``/``postgres://`` URI or libpq keyword-value string."""
-    stripped = dsn.strip()
-    if not stripped:
-        raise ImproperConfigurationError("PostgreSQL DSN cannot be empty")
-    if "://" in stripped:
-        scheme, remainder = stripped.split("://", 1)
-        scheme_lower = scheme.lower()
-        if scheme_lower not in {"postgresql", "postgres"}:
-            raise ImproperConfigurationError(f"Unsupported PostgreSQL DSN scheme: {scheme!r}")
-        if "?" in remainder:
-            path_and_auth, query = remainder.split("?", 1)
-        else:
-            path_and_auth, query = remainder, ""
-        params = parse_query_pairs_strict(query)
-        if "/" in path_and_auth:
-            authority, raw_path = path_and_auth.split("/", 1)
-        else:
-            authority, raw_path = path_and_auth, ""
-
-        user: str | None = None
-        password: str | None = None
-        explicit_empty_user = False
-        if "@" in authority:
-            userinfo, host_section = authority.rsplit("@", 1)
-            if ":" in userinfo:
-                raw_user, raw_password = userinfo.split(":", 1)
-                password = _unquote_strict(raw_password, field_name="password")
-            else:
-                raw_user = userinfo
-            decoded_user = _unquote_strict(raw_user, field_name="user")
-            if raw_user != "" or decoded_user != "":
-                user = decoded_user
-        else:
-            host_section = authority
-
-        host_pairs = _split_authority_hosts(host_section)
-        hosts = tuple(pair[0] for pair in host_pairs)
-        ports = tuple(pair[1] for pair in host_pairs)
-
-        database: str | None = None
-        if raw_path:
-            decoded_db = _unquote_strict(raw_path, field_name="database")
-            if decoded_db:
-                database = decoded_db
-
-        explicit_empty_database = False
-        if "user" in params:
-            if params["user"] == "":
-                explicit_empty_user = True
-            else:
-                user = params["user"]
-        if "password" in params:
-            password = params["password"]
-        db_param_key = "dbname" if "dbname" in params else ("database" if "database" in params else None)
-        if db_param_key is not None:
-            if params[db_param_key] == "":
-                explicit_empty_database = True
-            else:
-                database = params[db_param_key]
-
-        return ParsedPostgresDsn(
-            scheme=scheme_lower,
-            hosts=hosts,
-            ports=ports,
-            user=user,
-            password=password,
-            database=database,
-            explicit_empty_user=explicit_empty_user,
-            explicit_empty_database=explicit_empty_database,
-            params=params,
-        )
-
-    params = parse_libpq_conninfo(stripped)
-    user = params.get("user")
-    explicit_empty_user = "user" in params and params["user"] == ""
-    db_val = params["dbname"] if "dbname" in params else params.get("database")
-    explicit_empty_database = ("dbname" in params and params["dbname"] == "") or (
-        "database" in params and params["database"] == ""
-    )
-    kv_hosts: tuple[str, ...] = ()
-    kv_ports: tuple[int | None, ...] = ()
-    if "host" in params and params["host"] != "":
-        kv_hosts = tuple(item for item in params["host"].split(",") if item)
-    elif "hostaddr" in params and params["hostaddr"] != "":
-        kv_hosts = tuple(item for item in params["hostaddr"].split(",") if item)
-    if "port" in params and params["port"] != "":
-        kv_ports = tuple(_parse_int(p, field_name="port", minimum=1, maximum=65535) for p in params["port"].split(","))
-    return ParsedPostgresDsn(
-        scheme=None,
-        hosts=kv_hosts,
-        ports=kv_ports,
-        user=None if explicit_empty_user else user,
-        password=params.get("password"),
-        database=None if explicit_empty_database else db_val,
-        explicit_empty_user=explicit_empty_user,
-        explicit_empty_database=explicit_empty_database,
-        params=params,
-    )
-
-
-def _normalize_unix_socket_path(directory_or_socket: str, port: int) -> str:
-    """Convert a Unix socket directory or full ``.s.PGSQL.<port>`` path into canonical socket path."""
-    cleaned = directory_or_socket.rstrip("/") or "/"
-    basename = posixpath.basename(cleaned)
-    if basename.startswith(".s.PGSQL."):
-        return cleaned
-    return posixpath.join(cleaned, f".s.PGSQL.{port}")
-
-
-def _read_pem_file(path: str, *, field_name: str) -> bytes:
-    """Read a PEM certificate/key file preserving OS errors when the path is missing."""
-    if not path:
-        raise ImproperConfigurationError(f"{field_name} path cannot be empty")
-    return Path(path).read_bytes()
-
-
-def _resolve_os_username() -> str:
-    """Resolve current OS username via ``getpass.getuser()`` as libpq final fallback."""
-    try:
-        username = getpass.getuser()
-    except Exception as exc:
-        raise ImproperConfigurationError(
-            "Unable to determine PostgreSQL user from config, DSN, PGUSER, or OS user"
-        ) from exc
-    if not username:
-        raise ImproperConfigurationError("OS username fallback returned empty string for PostgreSQL user")
-    return username
-
-
-@dataclass(frozen=True, slots=True)
-class PostgresTarget:
+class PostgresTarget(msgspec.Struct, frozen=True, gc=False):
     """Normalized PostgreSQL endpoint target (TCP or Unix domain socket)."""
 
     host: str
@@ -371,8 +59,7 @@ class PostgresTarget:
     sslmode: str = "prefer"
 
 
-@dataclass(frozen=True, slots=True)
-class PostgresClientOptions:
+class PostgresClientOptions(msgspec.Struct, frozen=True):
     """Validated kwargs container matching ``SyncPostgresClient`` / ``AsyncPostgresClient`` / Pools."""
 
     user: str
@@ -503,167 +190,178 @@ class PostgresClientOptions:
         return kwargs
 
 
-def _resolve_scalar(
-    explicit: Mapping[str, Any],
-    dsn_params: Mapping[str, str],
-    env: Mapping[str, str],
-    *,
-    explicit_keys: tuple[str, ...],
-    dsn_keys: tuple[str, ...] = (),
-    env_key: str | None = None,
-) -> Any:
-    """Resolve the highest-precedence non-None value across explicit, DSN, and env."""
-    for key in explicit_keys:
-        if key in explicit and explicit[key] is not None:
-            return explicit[key]
-    for key in dsn_keys:
-        if key in dsn_params:
-            return dsn_params[key]
-    if env_key is not None and env_key in env and env[env_key] != "":
-        return env[env_key]
-    return None
-
-
-def _resolve_targets(
-    parsed_dsn: ParsedPostgresDsn,
-    explicit: Mapping[str, Any],
-    env: Mapping[str, str],
-    *,
-    explicit_sslmode: str | None,
-) -> tuple[PostgresTarget, ...]:
-    """Build normalized TCP or Unix socket target tuples enforcing port/TLS parity."""
-    raw_hosts: list[str] = []
-    explicit_ports: list[int | None] = []
-
-    if explicit.get("unix_socket") is not None:
-        sock = str(explicit["unix_socket"])
-        if not sock:
-            raise ImproperConfigurationError("unix_socket cannot be empty")
-        port_raw = _resolve_scalar(
-            explicit,
-            parsed_dsn.params,
-            env,
-            explicit_keys=("port",),
-            dsn_keys=("port",),
-            env_key="PGPORT",
-        )
-        port_val = (
-            _parse_int(port_raw, field_name="port", minimum=1, maximum=65535)
-            if port_raw is not None
-            else (parsed_dsn.ports[0] if parsed_dsn.ports and parsed_dsn.ports[0] is not None else 5432)
-        )
-        sslmode = explicit_sslmode or "disable"
-        if sslmode != "disable":
-            raise ImproperConfigurationError(f"sslmode={sslmode!r} is incompatible with Unix socket connections")
-        return (
-            PostgresTarget(
-                host="localhost",
-                port=port_val,
-                unix_socket=_normalize_unix_socket_path(sock, port_val),
-                is_unix=True,
-                sslmode="disable",
-            ),
-        )
-
-    if explicit.get("host") is not None:
-        host_val = str(explicit["host"])
-        if not host_val:
-            raise ImproperConfigurationError("host cannot be empty")
-        raw_hosts = [part for part in host_val.split(",") if part]
-    elif "host" in parsed_dsn.params and parsed_dsn.params["host"] != "":
-        raw_hosts = [part for part in parsed_dsn.params["host"].split(",") if part]
-    elif parsed_dsn.hosts:
-        raw_hosts = list(parsed_dsn.hosts)
-        explicit_ports = list(parsed_dsn.ports)
-    elif env.get("PGHOST"):
-        raw_hosts = [part for part in env["PGHOST"].split(",") if part]
-    elif env.get("PGHOSTADDR"):
-        raw_hosts = [part for part in env["PGHOSTADDR"].split(",") if part]
-    else:
-        raw_hosts = ["localhost"]
-
-    if not explicit_ports:
-        port_raw = _resolve_scalar(
-            explicit,
-            parsed_dsn.params,
-            env,
-            explicit_keys=("port",),
-            dsn_keys=("port",),
-            env_key="PGPORT",
-        )
-        if port_raw is not None:
-            if isinstance(port_raw, str) and "," in port_raw:
-                explicit_ports = [
-                    _parse_int(item, field_name="port", minimum=1, maximum=65535) for item in port_raw.split(",")
-                ]
-            else:
-                explicit_ports = [_parse_int(port_raw, field_name="port", minimum=1, maximum=65535)]
-    elif explicit.get("port") is not None:
-        override_port = _parse_int(explicit["port"], field_name="port", minimum=1, maximum=65535)
-        explicit_ports = [override_port] * len(raw_hosts)
-
-    if len(explicit_ports) == 1 and len(raw_hosts) > 1:
-        explicit_ports = explicit_ports * len(raw_hosts)
-    elif explicit_ports and len(explicit_ports) != len(raw_hosts):
-        raise ImproperConfigurationError(
-            f"Multi-host target count ({len(raw_hosts)}) does not match port count ({len(explicit_ports)})"
-        )
-
-    default_port_raw = _resolve_scalar(
-        explicit,
-        parsed_dsn.params,
-        env,
-        explicit_keys=(),
-        dsn_keys=("port",),
-        env_key="PGPORT",
-    )
-    fallback_port = (
-        _parse_int(default_port_raw, field_name="port", minimum=1, maximum=65535)
-        if default_port_raw is not None
-        else 5432
-    )
-
-    targets: list[PostgresTarget] = []
-    seen_unix: bool | None = None
-    for idx, raw_host in enumerate(raw_hosts):
-        explicit_port = explicit_ports[idx] if idx < len(explicit_ports) else None
-        port_val = explicit_port if explicit_port is not None else fallback_port
-        if not raw_host:
-            raise ImproperConfigurationError("PostgreSQL host cannot be empty")
-        is_unix = raw_host.startswith("/")
-        if seen_unix is None:
-            seen_unix = is_unix
-        elif seen_unix != is_unix:
-            raise ImproperConfigurationError("Cannot mix TCP hosts and Unix domain sockets in a single DSN")
-        if is_unix:
-            target_sslmode = explicit_sslmode or "disable"
-            if target_sslmode != "disable":
-                raise ImproperConfigurationError(
-                    f"sslmode={target_sslmode!r} is incompatible with Unix socket connections"
-                )
-            targets.append(
-                PostgresTarget(
-                    host="localhost",
-                    port=port_val,
-                    unix_socket=_normalize_unix_socket_path(raw_host, port_val),
-                    is_unix=True,
-                    sslmode="disable",
-                )
-            )
+def parse_query_pairs_strict(query: str) -> dict[str, str]:
+    """Parse URI query parameters preserving literal ``+`` characters."""
+    params: dict[str, str] = {}
+    if not query:
+        return params
+    for part in query.split("&"):
+        if not part:
+            continue
+        if "=" in part:
+            raw_key, raw_val = part.split("=", 1)
         else:
-            if "://" in raw_host or "/" in raw_host:
-                raise ImproperConfigurationError(f"TCP host must not contain '/' or URI scheme: {raw_host!r}")
-            target_sslmode = explicit_sslmode or "prefer"
-            targets.append(
-                PostgresTarget(
-                    host=raw_host,
-                    port=port_val,
-                    unix_socket=None,
-                    is_unix=False,
-                    sslmode=target_sslmode,
-                )
-            )
-    return tuple(targets)
+            raw_key, raw_val = part, ""
+        key = _unquote_strict(raw_key, field_name="query key")
+        val = _unquote_strict(raw_val, field_name="query value")
+        params[key] = val
+    return params
+
+
+def parse_libpq_conninfo(conninfo: str) -> dict[str, str]:
+    """Parse a libpq keyword=value connection string respecting single quotes and escapes."""
+    params: dict[str, str] = {}
+    n = len(conninfo)
+    i = 0
+    while i < n:
+        while i < n and conninfo[i].isspace():
+            i += 1
+        if i >= n:
+            break
+        key_start = i
+        while i < n and conninfo[i] not in ("=", " ", "\t", "\n", "\r"):
+            i += 1
+        key = conninfo[key_start:i]
+        while i < n and conninfo[i].isspace():
+            i += 1
+        if i >= n or conninfo[i] != "=" or not key:
+            raise ImproperConfigurationError(f"Malformed libpq keyword-value parameter near {conninfo[key_start:]!r}")
+        i += 1
+        while i < n and conninfo[i].isspace():
+            i += 1
+        if i < n and conninfo[i] == "'":
+            i += 1
+            chars: list[str] = []
+            closed = False
+            while i < n:
+                ch = conninfo[i]
+                if ch == "\\":
+                    i += 1
+                    if i >= n:
+                        raise ImproperConfigurationError("Unterminated escape in quoted libpq conninfo value")
+                    chars.append(conninfo[i])
+                    i += 1
+                elif ch == "'":
+                    closed = True
+                    i += 1
+                    break
+                else:
+                    chars.append(ch)
+                    i += 1
+            if not closed:
+                raise ImproperConfigurationError(f"Unterminated single-quoted value for libpq parameter {key!r}")
+            params[key] = "".join(chars)
+        else:
+            val_start = i
+            while i < n and not conninfo[i].isspace():
+                if conninfo[i] == "\\" and i + 1 < n:
+                    i += 2
+                    continue
+                i += 1
+            raw_val = conninfo[val_start:i]
+            params[key] = raw_val.replace("\\\\", "\\").replace("\\'", "'")
+    return params
+
+
+def parse_postgres_dsn(dsn: str) -> ParsedPostgresDsn:
+    """Parse a ``postgresql://``/``postgres://`` URI or libpq keyword-value string."""
+    stripped = dsn.strip()
+    if not stripped:
+        raise ImproperConfigurationError("PostgreSQL DSN cannot be empty")
+    if "://" in stripped:
+        scheme, remainder = stripped.split("://", 1)
+        scheme_lower = scheme.lower()
+        if scheme_lower not in {"postgresql", "postgres"}:
+            raise ImproperConfigurationError(f"Unsupported PostgreSQL DSN scheme: {scheme!r}")
+        if "?" in remainder:
+            path_and_auth, query = remainder.split("?", 1)
+        else:
+            path_and_auth, query = remainder, ""
+        params = parse_query_pairs_strict(query)
+        if "/" in path_and_auth:
+            authority, raw_path = path_and_auth.split("/", 1)
+        else:
+            authority, raw_path = path_and_auth, ""
+
+        user: str | None = None
+        password: str | None = None
+        explicit_empty_user = False
+        if "@" in authority:
+            userinfo, host_section = authority.rsplit("@", 1)
+            if ":" in userinfo:
+                raw_user, raw_password = userinfo.split(":", 1)
+                password = _unquote_strict(raw_password, field_name="password")
+            else:
+                raw_user = userinfo
+            decoded_user = _unquote_strict(raw_user, field_name="user")
+            if raw_user != "" or decoded_user != "":
+                user = decoded_user
+        else:
+            host_section = authority
+
+        host_pairs = _split_authority_hosts(host_section)
+        hosts = tuple(pair[0] for pair in host_pairs)
+        ports = tuple(pair[1] for pair in host_pairs)
+
+        database: str | None = None
+        if raw_path:
+            decoded_db = _unquote_strict(raw_path, field_name="database")
+            if decoded_db:
+                database = decoded_db
+
+        explicit_empty_database = False
+        if "user" in params:
+            if params["user"] == "":
+                explicit_empty_user = True
+            else:
+                user = params["user"]
+        if "password" in params:
+            password = params["password"]
+        db_param_key = "dbname" if "dbname" in params else ("database" if "database" in params else None)
+        if db_param_key is not None:
+            if params[db_param_key] == "":
+                explicit_empty_database = True
+            else:
+                database = params[db_param_key]
+
+        return ParsedPostgresDsn(
+            scheme=scheme_lower,
+            hosts=hosts,
+            ports=ports,
+            user=user,
+            password=password,
+            database=database,
+            explicit_empty_user=explicit_empty_user,
+            explicit_empty_database=explicit_empty_database,
+            params=params,
+        )
+
+    params = parse_libpq_conninfo(stripped)
+    user = params.get("user")
+    explicit_empty_user = "user" in params and params["user"] == ""
+    db_val = params["dbname"] if "dbname" in params else params.get("database")
+    explicit_empty_database = ("dbname" in params and params["dbname"] == "") or (
+        "database" in params and params["database"] == ""
+    )
+    kv_hosts: tuple[str, ...] = ()
+    kv_ports: tuple[int | None, ...] = ()
+    if "host" in params and params["host"] != "":
+        kv_hosts = tuple(item for item in params["host"].split(",") if item)
+    elif "hostaddr" in params and params["hostaddr"] != "":
+        kv_hosts = tuple(item for item in params["hostaddr"].split(",") if item)
+    if "port" in params and params["port"] != "":
+        kv_ports = tuple(_parse_int(p, field_name="port", minimum=1, maximum=65535) for p in params["port"].split(","))
+    return ParsedPostgresDsn(
+        scheme=None,
+        hosts=kv_hosts,
+        ports=kv_ports,
+        user=None if explicit_empty_user else user,
+        password=params.get("password"),
+        database=None if explicit_empty_database else db_val,
+        explicit_empty_user=explicit_empty_user,
+        explicit_empty_database=explicit_empty_database,
+        params=params,
+    )
 
 
 def build_native_client_options(
@@ -1077,3 +775,303 @@ def build_native_client_options(
         close_timeout=close_timeout,
         targets=targets,
     )
+
+
+def _unquote_strict(raw: str, *, field_name: str) -> str:
+    """Percent-decode ``raw`` as strict UTF-8 without turning ``+`` into space."""
+    try:
+        return unquote(raw, encoding="utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise ImproperConfigurationError(f"Invalid UTF-8 percent-encoding in PostgreSQL {field_name}: {raw!r}") from exc
+
+
+def _parse_int(value: Any, *, field_name: str, minimum: int | None = None, maximum: int | None = None) -> int:
+    """Parse strict integer option rejecting booleans and out-of-range values."""
+    if isinstance(value, bool):
+        raise ImproperConfigurationError(f"{field_name} cannot be a boolean")
+    if isinstance(value, int):
+        parsed = value
+    elif isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            raise ImproperConfigurationError(f"{field_name} cannot be empty")
+        try:
+            parsed = int(stripped, 10)
+        except ValueError as exc:
+            raise ImproperConfigurationError(f"Invalid integer for {field_name}: {value!r}") from exc
+    else:
+        raise ImproperConfigurationError(f"Invalid type for {field_name}: {type(value).__name__}")
+    if minimum is not None and parsed < minimum:
+        raise ImproperConfigurationError(f"{field_name} must be >= {minimum}, got {parsed}")
+    if maximum is not None and parsed > maximum:
+        raise ImproperConfigurationError(f"{field_name} must be <= {maximum}, got {parsed}")
+    return parsed
+
+
+def _parse_float(value: Any, *, field_name: str, positive: bool = False) -> float:
+    """Parse float duration option rejecting booleans and non-positive values when requested."""
+    if isinstance(value, bool):
+        raise ImproperConfigurationError(f"{field_name} cannot be a boolean")
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ImproperConfigurationError(f"Invalid float for {field_name}: {value!r}") from exc
+    if positive and parsed <= 0.0:
+        raise ImproperConfigurationError(f"{field_name} must be > 0, got {parsed}")
+    return parsed
+
+
+def _parse_bool(value: Any, *, field_name: str) -> bool:
+    """Parse libpq boolean flag string or Python bool."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        norm = value.strip().lower()
+        if norm in _BOOL_TRUE:
+            return True
+        if norm in _BOOL_FALSE:
+            return False
+    raise ImproperConfigurationError(f"Invalid boolean value for {field_name}: {value!r}")
+
+
+def _split_authority_hosts(host_section: str) -> list[tuple[str, int | None]]:
+    """Split comma-separated URI authority hosts while preserving IPv6 brackets."""
+    entries: list[str] = []
+    start = 0
+    in_brackets = False
+    for idx, ch in enumerate(host_section):
+        if ch == "[":
+            in_brackets = True
+        elif ch == "]":
+            in_brackets = False
+        elif ch == "," and not in_brackets:
+            entries.append(host_section[start:idx])
+            start = idx + 1
+    if in_brackets:
+        raise ImproperConfigurationError("Unclosed IPv6 bracket '[' in PostgreSQL URI")
+    entries.append(host_section[start:])
+
+    parsed: list[tuple[str, int | None]] = []
+    for raw_entry in entries:
+        if not raw_entry:
+            if len(entries) == 1:
+                continue
+            raise ImproperConfigurationError("Empty host entry in multi-host PostgreSQL URI")
+        if raw_entry.startswith("["):
+            close_idx = raw_entry.find("]")
+            if close_idx == -1:
+                raise ImproperConfigurationError("Malformed IPv6 host in PostgreSQL URI")
+            host_part = raw_entry[1:close_idx]
+            rest = raw_entry[close_idx + 1 :]
+            if not rest:
+                parsed.append((_unquote_strict(host_part, field_name="host"), None))
+            elif rest.startswith(":"):
+                port_text = rest[1:]
+                port_val = _parse_int(port_text, field_name="port", minimum=1, maximum=65535)
+                parsed.append((_unquote_strict(host_part, field_name="host"), port_val))
+            else:
+                raise ImproperConfigurationError(f"Invalid authority suffix after IPv6 host: {raw_entry!r}")
+        else:
+            if ":" in raw_entry:
+                host_part, port_text = raw_entry.rsplit(":", 1)
+                if ":" in host_part:
+                    raise ImproperConfigurationError(f"IPv6 host must be enclosed in brackets: {raw_entry!r}")
+                port_val = _parse_int(port_text, field_name="port", minimum=1, maximum=65535)
+                parsed.append((_unquote_strict(host_part, field_name="host"), port_val))
+            else:
+                parsed.append((_unquote_strict(raw_entry, field_name="host"), None))
+    return parsed
+
+
+def _normalize_unix_socket_path(directory_or_socket: str, port: int) -> str:
+    """Convert a Unix socket directory or full ``.s.PGSQL.<port>`` path into canonical socket path."""
+    cleaned = directory_or_socket.rstrip("/") or "/"
+    basename = posixpath.basename(cleaned)
+    if basename.startswith(".s.PGSQL."):
+        return cleaned
+    return posixpath.join(cleaned, f".s.PGSQL.{port}")
+
+
+def _read_pem_file(path: str, *, field_name: str) -> bytes:
+    """Read a PEM certificate/key file preserving OS errors when the path is missing."""
+    if not path:
+        raise ImproperConfigurationError(f"{field_name} path cannot be empty")
+    return Path(path).read_bytes()
+
+
+def _resolve_os_username() -> str:
+    """Resolve current OS username via ``getpass.getuser()`` as libpq final fallback."""
+    try:
+        username = getpass.getuser()
+    except Exception as exc:
+        raise ImproperConfigurationError(
+            "Unable to determine PostgreSQL user from config, DSN, PGUSER, or OS user"
+        ) from exc
+    if not username:
+        raise ImproperConfigurationError("OS username fallback returned empty string for PostgreSQL user")
+    return username
+
+
+def _resolve_scalar(
+    explicit: Mapping[str, Any],
+    dsn_params: Mapping[str, str],
+    env: Mapping[str, str],
+    *,
+    explicit_keys: tuple[str, ...],
+    dsn_keys: tuple[str, ...] = (),
+    env_key: str | None = None,
+) -> Any:
+    """Resolve the highest-precedence non-None value across explicit, DSN, and env."""
+    for key in explicit_keys:
+        if key in explicit and explicit[key] is not None:
+            return explicit[key]
+    for key in dsn_keys:
+        if key in dsn_params:
+            return dsn_params[key]
+    if env_key is not None and env_key in env and env[env_key] != "":
+        return env[env_key]
+    return None
+
+
+def _resolve_targets(
+    parsed_dsn: ParsedPostgresDsn,
+    explicit: Mapping[str, Any],
+    env: Mapping[str, str],
+    *,
+    explicit_sslmode: str | None,
+) -> tuple[PostgresTarget, ...]:
+    """Build normalized TCP or Unix socket target tuples enforcing port/TLS parity."""
+    raw_hosts: list[str] = []
+    explicit_ports: list[int | None] = []
+
+    if explicit.get("unix_socket") is not None:
+        sock = str(explicit["unix_socket"])
+        if not sock:
+            raise ImproperConfigurationError("unix_socket cannot be empty")
+        port_raw = _resolve_scalar(
+            explicit,
+            parsed_dsn.params,
+            env,
+            explicit_keys=("port",),
+            dsn_keys=("port",),
+            env_key="PGPORT",
+        )
+        port_val = (
+            _parse_int(port_raw, field_name="port", minimum=1, maximum=65535)
+            if port_raw is not None
+            else (parsed_dsn.ports[0] if parsed_dsn.ports and parsed_dsn.ports[0] is not None else 5432)
+        )
+        sslmode = explicit_sslmode or "disable"
+        if sslmode != "disable":
+            raise ImproperConfigurationError(f"sslmode={sslmode!r} is incompatible with Unix socket connections")
+        return (
+            PostgresTarget(
+                host="localhost",
+                port=port_val,
+                unix_socket=_normalize_unix_socket_path(sock, port_val),
+                is_unix=True,
+                sslmode="disable",
+            ),
+        )
+
+    if explicit.get("host") is not None:
+        host_val = str(explicit["host"])
+        if not host_val:
+            raise ImproperConfigurationError("host cannot be empty")
+        raw_hosts = [part for part in host_val.split(",") if part]
+    elif "host" in parsed_dsn.params and parsed_dsn.params["host"] != "":
+        raw_hosts = [part for part in parsed_dsn.params["host"].split(",") if part]
+    elif parsed_dsn.hosts:
+        raw_hosts = list(parsed_dsn.hosts)
+        explicit_ports = list(parsed_dsn.ports)
+    elif env.get("PGHOST"):
+        raw_hosts = [part for part in env["PGHOST"].split(",") if part]
+    elif env.get("PGHOSTADDR"):
+        raw_hosts = [part for part in env["PGHOSTADDR"].split(",") if part]
+    else:
+        raw_hosts = ["localhost"]
+
+    if not explicit_ports:
+        port_raw = _resolve_scalar(
+            explicit,
+            parsed_dsn.params,
+            env,
+            explicit_keys=("port",),
+            dsn_keys=("port",),
+            env_key="PGPORT",
+        )
+        if port_raw is not None:
+            if isinstance(port_raw, str) and "," in port_raw:
+                explicit_ports = [
+                    _parse_int(item, field_name="port", minimum=1, maximum=65535) for item in port_raw.split(",")
+                ]
+            else:
+                explicit_ports = [_parse_int(port_raw, field_name="port", minimum=1, maximum=65535)]
+    elif explicit.get("port") is not None:
+        override_port = _parse_int(explicit["port"], field_name="port", minimum=1, maximum=65535)
+        explicit_ports = [override_port] * len(raw_hosts)
+
+    if len(explicit_ports) == 1 and len(raw_hosts) > 1:
+        explicit_ports = explicit_ports * len(raw_hosts)
+    elif explicit_ports and len(explicit_ports) != len(raw_hosts):
+        raise ImproperConfigurationError(
+            f"Multi-host target count ({len(raw_hosts)}) does not match port count ({len(explicit_ports)})"
+        )
+
+    default_port_raw = _resolve_scalar(
+        explicit,
+        parsed_dsn.params,
+        env,
+        explicit_keys=(),
+        dsn_keys=("port",),
+        env_key="PGPORT",
+    )
+    fallback_port = (
+        _parse_int(default_port_raw, field_name="port", minimum=1, maximum=65535)
+        if default_port_raw is not None
+        else 5432
+    )
+
+    targets: list[PostgresTarget] = []
+    seen_unix: bool | None = None
+    for idx, raw_host in enumerate(raw_hosts):
+        explicit_port = explicit_ports[idx] if idx < len(explicit_ports) else None
+        port_val = explicit_port if explicit_port is not None else fallback_port
+        if not raw_host:
+            raise ImproperConfigurationError("PostgreSQL host cannot be empty")
+        is_unix = raw_host.startswith("/")
+        if seen_unix is None:
+            seen_unix = is_unix
+        elif seen_unix != is_unix:
+            raise ImproperConfigurationError("Cannot mix TCP hosts and Unix domain sockets in a single DSN")
+        if is_unix:
+            target_sslmode = explicit_sslmode or "disable"
+            if target_sslmode != "disable":
+                raise ImproperConfigurationError(
+                    f"sslmode={target_sslmode!r} is incompatible with Unix socket connections"
+                )
+            targets.append(
+                PostgresTarget(
+                    host="localhost",
+                    port=port_val,
+                    unix_socket=_normalize_unix_socket_path(raw_host, port_val),
+                    is_unix=True,
+                    sslmode="disable",
+                )
+            )
+        else:
+            if "://" in raw_host or "/" in raw_host:
+                raise ImproperConfigurationError(f"TCP host must not contain '/' or URI scheme: {raw_host!r}")
+            target_sslmode = explicit_sslmode or "prefer"
+            targets.append(
+                PostgresTarget(
+                    host=raw_host,
+                    port=port_val,
+                    unix_socket=None,
+                    is_unix=False,
+                    sslmode=target_sslmode,
+                )
+            )
+    return tuple(targets)

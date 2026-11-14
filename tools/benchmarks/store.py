@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import platform
+import shutil
 import subprocess
 import sys
 import uuid
@@ -10,64 +12,21 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from vertebra.utils.module_loader import ensure_module
+
 _SQL_DIR = Path(__file__).parent / "sql"
 _DEFAULT_DB = Path(__file__).parent / "results" / "benchmarks.duckdb"
-
-
-def _git(*args: str) -> str:
-    """Run a git command and return stripped stdout, or empty string on failure."""
-    try:
-        result = subprocess.run(
-            ["git", *args],  # noqa: S607
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=5,
-        )
-        return result.stdout.strip() if result.returncode == 0 else ""
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return ""
-
-
-def _read_sql(filename: str) -> str:
-    """Read a SQL file from the sql/ directory."""
-    return (_SQL_DIR / filename).read_text()
-
-
-def _parse_named_queries(sql_text: str) -> dict[str, str]:
-    """Parse SQL file with ``-- name: query_name`` comments into a dict."""
-    queries: dict[str, str] = {}
-    current_name: str | None = None
-    current_lines: list[str] = []
-
-    for line in sql_text.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("-- name:"):
-            if current_name is not None:
-                queries[current_name] = "\n".join(current_lines).strip()
-            name = stripped.removeprefix("-- name:").strip().rstrip("!")
-            current_name = name
-            current_lines = []
-        elif current_name is not None:
-            current_lines.append(line)
-
-    if current_name is not None:
-        queries[current_name] = "\n".join(current_lines).strip()
-
-    return queries
 
 
 class BenchmarkStore:
     """Manages benchmark data in a DuckDB database."""
 
     def __init__(self, db_path: str | Path | None = None) -> None:
-        import duckdb
-
+        duckdb_mod = ensure_module("duckdb", package="duckdb")
         self.db_path = Path(db_path) if db_path else _DEFAULT_DB
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = duckdb.connect(str(self.db_path))
+        self._conn = duckdb_mod.connect(str(self.db_path))
 
-        # Pre-parse all SQL files
         self._schema = _parse_named_queries(_read_sql("schema.sql"))
         self._inserts = _parse_named_queries(_read_sql("insert.sql"))
         self._queries = _parse_named_queries(_read_sql("queries.sql"))
@@ -142,8 +101,6 @@ class BenchmarkStore:
         Returns:
             The run_id created for the ingested data.
         """
-        import json
-
         jsonl_path = Path(jsonl_path)
         if not jsonl_path.exists():
             msg = f"JSONL file not found: {jsonl_path}"
@@ -201,3 +158,49 @@ class BenchmarkStore:
     def close(self) -> None:
         """Close the database connection."""
         self._conn.close()
+
+
+def _git(*args: str) -> str:
+    """Run a git command and return stripped stdout, or empty string on failure."""
+    git_bin = shutil.which("git")
+    if git_bin is None:
+        return ""
+    try:
+        result = subprocess.run(
+            [git_bin, *args],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+        return result.stdout.strip() if result.returncode == 0 else ""
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return ""
+
+
+def _read_sql(filename: str) -> str:
+    """Read a SQL file from the sql/ directory."""
+    return (_SQL_DIR / filename).read_text()
+
+
+def _parse_named_queries(sql_text: str) -> dict[str, str]:
+    """Parse SQL file with ``-- name: query_name`` comments into a dict."""
+    queries: dict[str, str] = {}
+    current_name: str | None = None
+    current_lines: list[str] = []
+
+    for line in sql_text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("-- name:"):
+            if current_name is not None:
+                queries[current_name] = "\n".join(current_lines).strip()
+            name = stripped.removeprefix("-- name:").strip().rstrip("!")
+            current_name = name
+            current_lines = []
+        elif current_name is not None:
+            current_lines.append(line)
+
+    if current_name is not None:
+        queries[current_name] = "\n".join(current_lines).strip()
+
+    return queries

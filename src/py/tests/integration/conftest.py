@@ -5,11 +5,13 @@ from __future__ import annotations
 import os
 import socket
 import struct
-from collections.abc import Iterator, Mapping
+from collections.abc import Generator, Iterator, Mapping
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import pytest
 
+from tests.integration.conformance_gate import ConformanceGate, ServiceVersionMatrix
 from vertebra.db.adapters.mssql import MSSQLConfig
 from vertebra.db.adapters.mysql import MySQLConfig, SyncMySQLDriver
 from vertebra.db.adapters.oracle import OracleConfig
@@ -33,6 +35,57 @@ if TYPE_CHECKING:
     from pytest_databases.types import ServiceContainer
 
 _ZERO_SKIP_ENV = "VERTEBRA_CONFORMANCE_POSTGRES_REQUIRE_ZERO_SKIPS"
+_INTEGRATION_ROOT = Path(__file__).resolve().parent
+_GATE_STASH_KEY = pytest.StashKey[ConformanceGate]()
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Register conformance markers and initialize the active ``ConformanceGate``."""
+    config.addinivalue_line(
+        "markers",
+        "driver_engine(engine): mark integration test with its target database driver engine",
+    )
+    config.addinivalue_line(
+        "markers",
+        "conformance(engine): mark integration test with its target conformance database engine",
+    )
+    config.stash[_GATE_STASH_KEY] = ConformanceGate.from_environ(os.environ)
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """Filter integration items to the requested ``VERTEBRA_CONFORMANCE_ENGINES`` lane."""
+    gate = config.stash.get(_GATE_STASH_KEY, None)
+    if gate is None or not gate.active:
+        return
+    selected: list[pytest.Item] = []
+    deselected: list[pytest.Item] = []
+    for item in items:
+        if gate.selects(item, _INTEGRATION_ROOT):
+            selected.append(item)
+        else:
+            deselected.append(item)
+    if deselected:
+        config.hook.pytest_deselected(items=deselected)
+        items[:] = selected
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[None]) -> Generator[None, Any, None]:
+    """Record setup and call outcomes for items matching ``VERTEBRA_CONFORMANCE_ENGINES``."""
+    _ = call
+    outcome = yield
+    gate = item.config.stash.get(_GATE_STASH_KEY, None)
+    if gate is not None and gate.active:
+        report: pytest.TestReport = outcome.get_result()
+        gate.record(item.nodeid, ConformanceGate.item_engines(item), report)
+
+
+def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
+    """Fail the pytest session when ``ConformanceGate`` records skips, xfails, or zero runs."""
+    _ = exitstatus
+    gate = session.config.stash.get(_GATE_STASH_KEY, None)
+    if gate is not None and gate.active and gate.failures():
+        session.exitstatus = pytest.ExitCode.TESTS_FAILED
 
 
 def _postgres_config_from_service(service: PostgresService) -> PostgreSQLConfig:
@@ -102,12 +155,19 @@ def evaluate_postgres_zero_skip_gate(
 
 
 def pytest_terminal_summary(terminalreporter: Any, exitstatus: int, config: pytest.Config) -> None:
-    """Fail the pytest session when PostgreSQL conformance zero-skip enforcement detects skips or zero runs."""
-    _ = (exitstatus, config)
-    failure = evaluate_postgres_zero_skip_gate(terminalreporter)
-    if failure is None:
+    """Fail the pytest session when zero-skip conformance enforcement detects skips or zero runs."""
+    _ = exitstatus
+    failures: list[str] = []
+    pg_failure = evaluate_postgres_zero_skip_gate(terminalreporter)
+    if pg_failure is not None:
+        failures.append(pg_failure)
+    gate = config.stash.get(_GATE_STASH_KEY, None)
+    if gate is not None and gate.active:
+        failures.extend(gate.failures())
+    if not failures:
         return
-    terminalreporter.write_sep("=", failure, red=True, bold=True)
+    for failure in failures:
+        terminalreporter.write_sep("=", failure, red=True, bold=True)
     session = getattr(terminalreporter, "_session", None)
     if session is not None:
         session.exitstatus = pytest.ExitCode.TESTS_FAILED
@@ -324,8 +384,10 @@ def vtb_postgres_driver(vtb_postgres_config: PostgreSQLConfig) -> SyncPostgreSQL
 
 
 @pytest.fixture
-def vtb_mysql_config(mysql_service: MySQLService) -> MySQLConfig:
-    """Return a MySQLConfig wired to the pytest-databases MySQLService container."""
+def vtb_mysql_config(request: pytest.FixtureRequest) -> MySQLConfig:
+    """Return a MySQLConfig wired to the version-selected pytest-databases MySQLService container."""
+    fixture_name = ServiceVersionMatrix.fixture_name("mysql", os.environ)
+    mysql_service: MySQLService = request.getfixturevalue(fixture_name)
     return MySQLConfig.from_url(
         f"mysql://{mysql_service.user}:{mysql_service.password}"
         f"@{mysql_service.host}:{mysql_service.port}/{mysql_service.db}"
@@ -339,8 +401,10 @@ def vtb_mysql_driver(vtb_mysql_config: MySQLConfig) -> SyncMySQLDriver:
 
 
 @pytest.fixture
-def vtb_mariadb_config(mariadb_service: MariaDBService) -> MySQLConfig:
-    """Return a MySQLConfig wired to the pytest-databases MariaDBService container."""
+def vtb_mariadb_config(request: pytest.FixtureRequest) -> MySQLConfig:
+    """Return a MySQLConfig wired to the version-selected pytest-databases MariaDBService container."""
+    fixture_name = ServiceVersionMatrix.fixture_name("mariadb", os.environ)
+    mariadb_service: MariaDBService = request.getfixturevalue(fixture_name)
     return MySQLConfig.from_url(
         f"mysql://{mariadb_service.user}:{mariadb_service.password}"
         f"@{mariadb_service.host}:{mariadb_service.port}/{mariadb_service.db}"
@@ -348,20 +412,24 @@ def vtb_mariadb_config(mariadb_service: MariaDBService) -> MySQLConfig:
 
 
 @pytest.fixture
-def vtb_oracle_config(oracle_23ai_service: OracleService) -> OracleConfig:
-    """Return an OracleConfig wired to the pytest-databases Oracle 23ai Free container."""
+def vtb_oracle_config(request: pytest.FixtureRequest) -> OracleConfig:
+    """Return an OracleConfig wired to the version-selected pytest-databases Oracle container."""
+    fixture_name = ServiceVersionMatrix.fixture_name("oracle", os.environ)
+    oracle_service: OracleService = request.getfixturevalue(fixture_name)
     return OracleConfig(
-        host=oracle_23ai_service.host,
-        port=oracle_23ai_service.port,
-        user=oracle_23ai_service.user,
-        password=oracle_23ai_service.password,
-        service_name=oracle_23ai_service.service_name,
+        host=oracle_service.host,
+        port=oracle_service.port,
+        user=oracle_service.user,
+        password=oracle_service.password,
+        service_name=oracle_service.service_name,
     )
 
 
 @pytest.fixture
-def vtb_mssql_config(mssql_service: MSSQLService) -> MSSQLConfig:
-    """Return a MSSQLConfig wired to the pytest-databases MSSQLService container."""
+def vtb_mssql_config(request: pytest.FixtureRequest) -> MSSQLConfig:
+    """Return a MSSQLConfig wired to the version-selected pytest-databases MSSQLService container."""
+    fixture_name = ServiceVersionMatrix.fixture_name("mssql", os.environ)
+    mssql_service: MSSQLService = request.getfixturevalue(fixture_name)
     return MSSQLConfig(
         host=mssql_service.host,
         port=mssql_service.port,

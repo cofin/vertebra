@@ -11,22 +11,6 @@ from typing import TYPE_CHECKING, Any, ClassVar
 from anyio import CancelScope
 
 from vertebra._vertebra import InterfaceError
-from vertebra.db.adapters.postgres._sync import (
-    _DEFAULT_ARROW_MAX_RESULT_BYTES,
-    _DEFAULT_TENANT_SCOPE,
-    _arrow_result_to_cursor,
-    _build_direct_client_kwargs,
-    _chunk_iterable,
-    _coerce_arrow_source,
-    _prepare_postgres_query,
-    _project_query_rows,
-    _reject_memory_dsn,
-    _resolve_native_postgres_module,
-    _validate_arrow_target_identifiers,
-    _validate_direct_session_config,
-    _validate_savepoint_token,
-    _validate_tenant_setting_name,
-)
 from vertebra.db.adapters.postgres.arrow import load_arrow_async
 from vertebra.db.adapters.postgres.change_stream import (
     PostgresChangeConfig,
@@ -62,64 +46,6 @@ if TYPE_CHECKING:
 __all__ = ("AsyncPostgreSQLDriver",)
 
 
-async def _maybe_await(value: Any) -> Any:
-    """Await ``value`` when awaitable, otherwise return it directly."""
-    if inspect.isawaitable(value):
-        return await value
-    return value
-
-
-class _PooledAsyncPipelineLease:
-    """Lazy asynchronous pooled client adapter binding ``AsyncPostgresPipeline`` to one lease."""
-
-    __slots__ = ("_acquire", "_client", "_release")
-
-    def __init__(
-        self,
-        acquire: Callable[[], Any],
-        release: Callable[[Any, bool], Any],
-    ) -> None:
-        self._acquire = acquire
-        self._release = release
-        self._client: Any = None
-
-    async def pipeline_begin(self) -> int:
-        """Acquire a pooled client when entering the pipeline and open its retained scope."""
-        client = await self._acquire()
-        self._client = client
-        try:
-            return int(await client.pipeline_begin())
-        except BaseException:
-            with CancelScope(shield=True):
-                await self.release(evict=True)
-            raise
-
-    async def pipeline_results(
-        self,
-        scope_id: int,
-        operations: Sequence[PostgresPipelineOperation],
-    ) -> tuple[PostgresPipelineOutcome, ...]:
-        """Submit batched pipeline operations asynchronously on the leased client."""
-        outcomes: tuple[PostgresPipelineOutcome, ...] = tuple(await self._client.pipeline_results(scope_id, operations))
-        return outcomes
-
-    async def pipeline_finish(self, scope_id: int, success: bool) -> None:
-        """Finish the async pipeline scope and evict the client if completion fails."""
-        try:
-            await self._client.pipeline_finish(scope_id, success)
-        except BaseException:
-            with CancelScope(shield=True):
-                await self.release(evict=True)
-            raise
-
-    async def release(self, *, evict: bool = False) -> None:
-        """Return or evict the leased pooled client at most once."""
-        client = self._client
-        self._client = None
-        if client is not None:
-            await _maybe_await(self._release(client, evict))
-
-
 class AsyncPostgreSQLDriver(AsyncDatabaseDriver[PostgreSQLConfig]):
     """Asynchronous PostgreSQL driver directly wrapping ``AsyncPostgresPool`` and ``AsyncPostgresClient``."""
 
@@ -153,9 +79,9 @@ class AsyncPostgreSQLDriver(AsyncDatabaseDriver[PostgreSQLConfig]):
     ) -> None:
         """Initialize the asynchronous PostgreSQL driver without performing network I/O."""
         resolved = config or PostgreSQLConfig()
-        _reject_memory_dsn(resolved.dsn)
+        PostgreSQLCore.reject_memory_dsn(resolved.dsn)
         if resolved.direct_dsn is not None:
-            _reject_memory_dsn(resolved.direct_dsn)
+            PostgreSQLCore.reject_memory_dsn(resolved.direct_dsn)
         super().__init__(resolved, broker=broker)
         self._pool = pool
         self._owns_pool = pool is None
@@ -170,11 +96,6 @@ class AsyncPostgreSQLDriver(AsyncDatabaseDriver[PostgreSQLConfig]):
         self._savepoint_tokens: list[int] = []
         self._next_savepoint_token = 0
         self._session_context: dict[str, str] = {}
-
-    @property
-    def _config(self) -> PostgreSQLConfig:
-        """Return the active ``PostgreSQLConfig``."""
-        return self.config
 
     @property
     def pool(self) -> Any:
@@ -214,51 +135,6 @@ class AsyncPostgreSQLDriver(AsyncDatabaseDriver[PostgreSQLConfig]):
     def parse_pgcopy_binary_rows(payload: Buffer) -> list[tuple[bytes | None, ...]]:
         """Parse PostgreSQL binary COPY format stream into row tuples of byte values."""
         return PostgreSQLCore.decode_pgcopy_rows(payload)
-
-    def _ensure_pool(self) -> Any:
-        """Lazily construct and cache the native ``AsyncPostgresPool`` when not injected."""
-        if self._pool is not None:
-            if not callable(getattr(self._pool, "acquire", None)):
-                msg = "Injected PostgreSQL pool must provide an acquire() method"
-                raise ImproperConfigurationError(msg)
-            return self._pool
-        pg_mod = _resolve_native_postgres_module()
-        pool_kwargs = build_native_client_options(self.config).to_pool_kwargs()
-        self._pool = pg_mod.AsyncPostgresPool(**pool_kwargs)
-        self._owns_pool = True
-        return self._pool
-
-    def _ensure_open(self) -> None:
-        """Raise ``InterfaceError`` when an operation targets a closed driver."""
-        if self._closed:
-            msg = "PostgreSQL driver is closed"
-            raise InterfaceError(msg)
-
-    async def _acquire_session_client(self) -> tuple[Any, bool]:
-        """Return ``(client, owns_lease)`` pinning active transaction or tenant sessions."""
-        self._ensure_open()
-        if self._tx_conn is not None:
-            return self._tx_conn, False
-        if self._tenant_conn is not None:
-            return self._tenant_conn, False
-        pool = self._ensure_pool()
-        return await pool.acquire(), True
-
-    async def _release_pooled_client(self, client: Any, *, evict: bool = False) -> None:
-        """Return ``client`` to the pool or evict it when state cannot be trusted."""
-        if evict and self._pool is not None:
-            evict_fn = getattr(self._pool, "evict", None)
-            if callable(evict_fn):
-                await _maybe_await(evict_fn(client))
-                return
-        close_fn = getattr(client, "close", None)
-        if callable(close_fn):
-            await _maybe_await(close_fn())
-
-    def _next_token(self) -> int:
-        """Return the next monotonic numeric savepoint identifier."""
-        self._next_savepoint_token += 1
-        return self._next_savepoint_token
 
     async def connect(self) -> AsyncPostgreSQLDriver:
         """Initialize or reopen the asynchronous connection pool."""
@@ -338,7 +214,7 @@ class AsyncPostgreSQLDriver(AsyncDatabaseDriver[PostgreSQLConfig]):
         if not self._in_transaction or self._tx_conn is None:
             msg = "Savepoints require an active PostgreSQL transaction"
             raise InterfaceError(msg)
-        resolved = _validate_savepoint_token(token, self._next_token)
+        resolved = PostgreSQLCore.validate_savepoint_token(token, self._next_token)
         await self._tx_conn.savepoint(resolved)
         self._savepoint_tokens.append(resolved)
         return resolved
@@ -349,7 +225,7 @@ class AsyncPostgreSQLDriver(AsyncDatabaseDriver[PostgreSQLConfig]):
         if not self._in_transaction or self._tx_conn is None:
             msg = "Savepoints require an active PostgreSQL transaction"
             raise InterfaceError(msg)
-        resolved = _validate_savepoint_token(token, self._next_token)
+        resolved = PostgreSQLCore.validate_savepoint_token(token, self._next_token)
         await self._tx_conn.release_savepoint(resolved)
         with contextlib.suppress(ValueError):
             self._savepoint_tokens.remove(resolved)
@@ -360,26 +236,31 @@ class AsyncPostgreSQLDriver(AsyncDatabaseDriver[PostgreSQLConfig]):
         if not self._in_transaction or self._tx_conn is None:
             msg = "Savepoints require an active PostgreSQL transaction"
             raise InterfaceError(msg)
-        resolved = _validate_savepoint_token(token, self._next_token)
+        resolved = PostgreSQLCore.validate_savepoint_token(token, self._next_token)
         await self._tx_conn.rollback_to_savepoint(resolved)
 
     async def enter_tenant_scope(
         self,
         tenant_value: str,
-        config: TenantScopeConfig = _DEFAULT_TENANT_SCOPE,
+        config: TenantScopeConfig = PostgreSQLCore.DEFAULT_TENANT_SCOPE,
     ) -> str:
         """Pin an async session and bind ``config.setting_name`` via parameterized ``set_config``."""
         self._ensure_open()
-        setting_name = _validate_tenant_setting_name(config.setting_name)
         tenant_str = str(tenant_value)
+        sql, params = PostgreSQLCore.build_session_guc_sql(
+            tenant_str,
+            config,
+            is_local=self._tx_conn is not None,
+        )
+        setting_name = params[0]
         if self._tx_conn is not None:
-            await self.execute("SELECT set_config($1, $2, $3)", (setting_name, tenant_str, True))
+            await self.execute(sql, params)
             self._session_context[setting_name] = tenant_str
             return tenant_str
         if self._tenant_conn is None:
             self._tenant_conn = await self._ensure_pool().acquire()
         try:
-            await self.execute("SELECT set_config($1, $2, $3)", (setting_name, tenant_str, False))
+            await self.execute(sql, params)
         except BaseException:
             with CancelScope(shield=True):
                 await self.evict_connection()
@@ -387,13 +268,17 @@ class AsyncPostgreSQLDriver(AsyncDatabaseDriver[PostgreSQLConfig]):
         self._session_context[setting_name] = tenant_str
         return tenant_str
 
-    async def exit_tenant_scope(self, config: TenantScopeConfig = _DEFAULT_TENANT_SCOPE) -> None:
+    async def exit_tenant_scope(self, config: TenantScopeConfig = PostgreSQLCore.DEFAULT_TENANT_SCOPE) -> None:
         """Reset the tenant session setting asynchronously, evicting tainted connections on error."""
-        setting_name = _validate_tenant_setting_name(config.setting_name)
-        self._session_context.pop(setting_name, None)
+        sql, params = PostgreSQLCore.build_session_guc_sql(
+            "",
+            config,
+            is_local=self._tx_conn is not None,
+        )
+        self._session_context.pop(params[0], None)
         if self._tx_conn is not None:
             try:
-                await self.execute("SELECT set_config($1, $2, $3)", (setting_name, "", True))
+                await self.execute(sql, params)
             except BaseException:
                 with CancelScope(shield=True):
                     await self.evict_connection()
@@ -403,7 +288,7 @@ class AsyncPostgreSQLDriver(AsyncDatabaseDriver[PostgreSQLConfig]):
         if tenant_conn is None:
             return
         try:
-            await self.execute("SELECT set_config($1, $2, $3)", (setting_name, "", False))
+            await self.execute(sql, params)
         except BaseException:
             with CancelScope(shield=True):
                 await self.evict_connection()
@@ -412,22 +297,6 @@ class AsyncPostgreSQLDriver(AsyncDatabaseDriver[PostgreSQLConfig]):
             self._tenant_conn = None
             with CancelScope(shield=True):
                 await self._release_pooled_client(tenant_conn, evict=False)
-
-    async def _evict_pinned_connections(self) -> None:
-        """Evict any pinned async transaction or tenant-scoped session from the pool."""
-        tx_conn = self._tx_conn
-        tenant_conn = self._tenant_conn
-        self._tx_conn = None
-        self._tx_owns_conn = False
-        self._tenant_conn = None
-        self._in_transaction = False
-        self._savepoint_tokens.clear()
-        if tx_conn is not None:
-            with contextlib.suppress(Exception):
-                await self._release_pooled_client(tx_conn, evict=True)
-        if tenant_conn is not None and tenant_conn is not tx_conn:
-            with contextlib.suppress(Exception):
-                await self._release_pooled_client(tenant_conn, evict=True)
 
     async def evict_connection(self) -> None:
         """Clear session tenant context and discard any pinned physical connection."""
@@ -476,48 +345,6 @@ class AsyncPostgreSQLDriver(AsyncDatabaseDriver[PostgreSQLConfig]):
         if first_error is not None:
             raise first_error
 
-    async def _run_query(
-        self,
-        sql: str,
-        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
-        **kwargs: Any,
-    ) -> PostgresQueryResult:
-        """Compile parameters, execute natively on ``AsyncPostgresClient``, and handle unwind safely."""
-        timeout = kwargs.pop("timeout", None)
-        parameter_oids = kwargs.pop("parameter_oids", None)
-        compiled_sql, compiled_params = _prepare_postgres_query(sql, parameters)
-        annotated_sql = self._annotate_sql(compiled_sql, **kwargs)
-        if self.config.effective_statement_cache_size > 0:
-            self._lookup_or_cache_statement(annotated_sql)
-        lease = self._acquire_broker_lease()
-        client: Any = None
-        owns_client = False
-        try:
-            client, owns_client = await self._acquire_session_client()
-            prev_active = self._active_client
-            self._active_client = client
-            try:
-                result: PostgresQueryResult = await client.query(
-                    annotated_sql,
-                    compiled_params if compiled_params else None,
-                    parameter_oids=parameter_oids,
-                    timeout=timeout,
-                )
-            finally:
-                self._active_client = prev_active
-        except BaseException:
-            if owns_client and client is not None:
-                with CancelScope(shield=True), contextlib.suppress(Exception):
-                    await self._release_pooled_client(client, evict=True)
-            raise
-        else:
-            if owns_client and client is not None:
-                with CancelScope(shield=True):
-                    await self._release_pooled_client(client, evict=False)
-            return result
-        finally:
-            self._release_broker_lease(lease)
-
     async def execute(
         self,
         sql: str,
@@ -536,7 +363,7 @@ class AsyncPostgreSQLDriver(AsyncDatabaseDriver[PostgreSQLConfig]):
     ) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
         """Asynchronously execute a query returning projected tuple rows and ordered column names."""
         result = await self._run_query(sql, parameters, **kwargs)
-        rows, cols, _ = _project_query_rows(result)
+        rows, cols, _ = PostgreSQLCore.project_query_rows(result)
         return rows, cols
 
     async def execute_many(
@@ -553,7 +380,7 @@ class AsyncPostgreSQLDriver(AsyncDatabaseDriver[PostgreSQLConfig]):
         parameter_oids = kwargs.pop("parameter_oids", None)
         compiled_batch = [
             (self._annotate_sql(c_sql, **kwargs), c_params)
-            for c_sql, c_params in (_prepare_postgres_query(sql, item) for item in parameter_sets)
+            for c_sql, c_params in (PostgreSQLCore.prepare_query(sql, item) for item in parameter_sets)
         ]
         lease = self._acquire_broker_lease()
         client: Any = None
@@ -592,14 +419,14 @@ class AsyncPostgreSQLDriver(AsyncDatabaseDriver[PostgreSQLConfig]):
         self._ensure_open()
         pinned = self._tx_conn or self._tenant_conn
         if pinned is not None:
-            return AsyncPostgresPipeline(pinned, prepare=_prepare_postgres_query, release=None)
+            return AsyncPostgresPipeline(pinned, prepare=PostgreSQLCore.prepare_query, release=None)
         lease = _PooledAsyncPipelineLease(
             lambda: self._ensure_pool().acquire(),
             lambda client, evict: self._release_pooled_client(client, evict=evict),
         )
         return AsyncPostgresPipeline(
             lease,
-            prepare=_prepare_postgres_query,
+            prepare=PostgreSQLCore.prepare_query,
             release=lease.release,
         )
 
@@ -609,13 +436,13 @@ class AsyncPostgreSQLDriver(AsyncDatabaseDriver[PostgreSQLConfig]):
         parameters: Sequence[Any] | Mapping[str, Any] | None = None,
         *,
         threshold_rows: int = ARROW_SHM_THRESHOLD_ROWS,
-        max_result_bytes: int = _DEFAULT_ARROW_MAX_RESULT_BYTES,
+        max_result_bytes: int = PostgreSQLCore.DEFAULT_ARROW_MAX_RESULT_BYTES,
         **kwargs: Any,
     ) -> ArrowCursor:
         """Execute a query directly into inline Arrow IPC bytes or a ``VTBARROW`` SHM cursor."""
         timeout = kwargs.pop("timeout", None)
         parameter_oids = kwargs.pop("parameter_oids", None)
-        compiled_sql, compiled_params = _prepare_postgres_query(sql, parameters)
+        compiled_sql, compiled_params = PostgreSQLCore.prepare_query(sql, parameters)
         annotated_sql = self._annotate_sql(compiled_sql, **kwargs)
         lease = self._acquire_broker_lease()
         client: Any = None
@@ -644,7 +471,7 @@ class AsyncPostgreSQLDriver(AsyncDatabaseDriver[PostgreSQLConfig]):
             if owns_client and client is not None:
                 with CancelScope(shield=True):
                     await self._release_pooled_client(client, evict=False)
-            return _arrow_result_to_cursor(result)
+            return PostgreSQLCore.arrow_result_to_cursor(result)
         finally:
             self._release_broker_lease(lease)
 
@@ -659,7 +486,7 @@ class AsyncPostgreSQLDriver(AsyncDatabaseDriver[PostgreSQLConfig]):
     ) -> AsyncGenerator[ArrowCursor, None]:
         """Stream server-portal Arrow SHM batches asynchronously while pinning any leased client."""
         parameter_oids = kwargs.pop("parameter_oids", None)
-        compiled_sql, compiled_params = _prepare_postgres_query(sql, parameters)
+        compiled_sql, compiled_params = PostgreSQLCore.prepare_query(sql, parameters)
         annotated_sql = self._annotate_sql(compiled_sql, **kwargs)
         self._ensure_open()
 
@@ -714,8 +541,8 @@ class AsyncPostgreSQLDriver(AsyncDatabaseDriver[PostgreSQLConfig]):
         """Bulk-load an Arrow source or sequence into ``table_name`` over async binary COPY."""
         _ = kwargs
         self._ensure_open()
-        _validate_arrow_target_identifiers(table_name, columns=columns, schema_name=schema_name)
-        source = _coerce_arrow_source(data, columns)
+        PostgreSQLCore.validate_arrow_target_identifiers(table_name, columns=columns, schema_name=schema_name)
+        source = PostgreSQLCore.coerce_arrow_source(data, columns)
         if source is None:
             return 0
         lease = self._acquire_broker_lease()
@@ -797,7 +624,7 @@ class AsyncPostgreSQLDriver(AsyncDatabaseDriver[PostgreSQLConfig]):
                 if buf:
                     await copy_in.write(buf, column_oids)
             else:
-                for chunk in _chunk_iterable(rows, chunk_limit):
+                for chunk in PostgreSQLCore.chunk_iterable(rows, chunk_limit):
                     await copy_in.write(chunk, column_oids)
             return int(await copy_in.finish())
         except BaseException:
@@ -811,18 +638,6 @@ class AsyncPostgreSQLDriver(AsyncDatabaseDriver[PostgreSQLConfig]):
                 with CancelScope(shield=True), contextlib.suppress(Exception):
                     await self._release_pooled_client(client, evict=failed)
 
-    async def _open_direct_async_client(self, *, feature: str) -> Any:
-        """Dial a dedicated non-pooled ``AsyncPostgresClient`` for event streaming."""
-        self._ensure_open()
-        client_kwargs = _build_direct_client_kwargs(self.config, feature=feature)
-        if self._client_factory is not None:
-            client = self._client_factory(**client_kwargs)
-        else:
-            pg_mod = _resolve_native_postgres_module()
-            client = pg_mod.AsyncPostgresClient(**client_kwargs)
-        await client.connect()
-        return client
-
     def listen_notifications(
         self,
         config: PostgresNotifyConfig | None = None,
@@ -833,7 +648,7 @@ class AsyncPostgreSQLDriver(AsyncDatabaseDriver[PostgreSQLConfig]):
     ) -> PostgresNotificationSource:
         """Create a ``PostgresNotificationSource`` backed by dedicated non-pooled listener connections."""
         self._ensure_open()
-        _validate_direct_session_config(self.config, feature="LISTEN/NOTIFY")
+        PostgreSQLCore.validate_direct_session_config(self.config, feature="LISTEN/NOTIFY")
         return PostgresNotificationSource(
             self,
             config,
@@ -841,6 +656,138 @@ class AsyncPostgreSQLDriver(AsyncDatabaseDriver[PostgreSQLConfig]):
             queue_capacity=queue_capacity,
             reconnect=reconnect,
         )
+
+    def open_replication(
+        self,
+        config: PostgresChangeConfig,
+        checkpoint_store: PostgresCheckpointStore | None = None,
+        *,
+        feed: ChangeFeed | None = None,
+    ) -> PostgresChangeSource:
+        """Create a ``PostgresChangeSource`` backed by dedicated non-pooled WAL replication streams."""
+        self._ensure_open()
+        PostgreSQLCore.validate_direct_session_config(self.config, feature="logical replication")
+        return PostgresChangeSource(self, config, checkpoint_store, feed=feed)
+
+    @property
+    def _config(self) -> PostgreSQLConfig:
+        """Return the active ``PostgreSQLConfig``."""
+        return self.config
+
+    def _ensure_pool(self) -> Any:
+        """Lazily construct and cache the native ``AsyncPostgresPool`` when not injected."""
+        if self._pool is not None:
+            if not callable(getattr(self._pool, "acquire", None)):
+                msg = "Injected PostgreSQL pool must provide an acquire() method"
+                raise ImproperConfigurationError(msg)
+            return self._pool
+        pg_mod = PostgreSQLCore.resolve_native_module()
+        pool_kwargs = build_native_client_options(self.config).to_pool_kwargs()
+        self._pool = pg_mod.AsyncPostgresPool(**pool_kwargs)
+        self._owns_pool = True
+        return self._pool
+
+    def _ensure_open(self) -> None:
+        """Raise ``InterfaceError`` when an operation targets a closed driver."""
+        if self._closed:
+            msg = "PostgreSQL driver is closed"
+            raise InterfaceError(msg)
+
+    async def _acquire_session_client(self) -> tuple[Any, bool]:
+        """Return ``(client, owns_lease)`` pinning active transaction or tenant sessions."""
+        self._ensure_open()
+        if self._tx_conn is not None:
+            return self._tx_conn, False
+        if self._tenant_conn is not None:
+            return self._tenant_conn, False
+        pool = self._ensure_pool()
+        return await pool.acquire(), True
+
+    async def _release_pooled_client(self, client: Any, *, evict: bool = False) -> None:
+        """Return ``client`` to the pool or evict it when state cannot be trusted."""
+        if evict and self._pool is not None:
+            evict_fn = getattr(self._pool, "evict", None)
+            if callable(evict_fn):
+                await _maybe_await(evict_fn(client))
+                return
+        close_fn = getattr(client, "close", None)
+        if callable(close_fn):
+            await _maybe_await(close_fn())
+
+    def _next_token(self) -> int:
+        """Return the next monotonic numeric savepoint identifier."""
+        self._next_savepoint_token += 1
+        return self._next_savepoint_token
+
+    async def _evict_pinned_connections(self) -> None:
+        """Evict any pinned async transaction or tenant-scoped session from the pool."""
+        tx_conn = self._tx_conn
+        tenant_conn = self._tenant_conn
+        self._tx_conn = None
+        self._tx_owns_conn = False
+        self._tenant_conn = None
+        self._in_transaction = False
+        self._savepoint_tokens.clear()
+        if tx_conn is not None:
+            with contextlib.suppress(Exception):
+                await self._release_pooled_client(tx_conn, evict=True)
+        if tenant_conn is not None and tenant_conn is not tx_conn:
+            with contextlib.suppress(Exception):
+                await self._release_pooled_client(tenant_conn, evict=True)
+
+    async def _run_query(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> PostgresQueryResult:
+        """Compile parameters, execute natively on ``AsyncPostgresClient``, and handle unwind safely."""
+        timeout = kwargs.pop("timeout", None)
+        parameter_oids = kwargs.pop("parameter_oids", None)
+        compiled_sql, compiled_params = PostgreSQLCore.prepare_query(sql, parameters)
+        annotated_sql = self._annotate_sql(compiled_sql, **kwargs)
+        if self.config.effective_statement_cache_size > 0:
+            self._lookup_or_cache_statement(annotated_sql)
+        lease = self._acquire_broker_lease()
+        client: Any = None
+        owns_client = False
+        try:
+            client, owns_client = await self._acquire_session_client()
+            prev_active = self._active_client
+            self._active_client = client
+            try:
+                result: PostgresQueryResult = await client.query(
+                    annotated_sql,
+                    compiled_params if compiled_params else None,
+                    parameter_oids=parameter_oids,
+                    timeout=timeout,
+                )
+            finally:
+                self._active_client = prev_active
+        except BaseException:
+            if owns_client and client is not None:
+                with CancelScope(shield=True), contextlib.suppress(Exception):
+                    await self._release_pooled_client(client, evict=True)
+            raise
+        else:
+            if owns_client and client is not None:
+                with CancelScope(shield=True):
+                    await self._release_pooled_client(client, evict=False)
+            return result
+        finally:
+            self._release_broker_lease(lease)
+
+    async def _open_direct_async_client(self, *, feature: str) -> Any:
+        """Dial a dedicated non-pooled ``AsyncPostgresClient`` for event streaming."""
+        self._ensure_open()
+        client_kwargs = PostgreSQLCore.build_direct_client_kwargs(self.config, feature=feature)
+        if self._client_factory is not None:
+            client = self._client_factory(**client_kwargs)
+        else:
+            pg_mod = PostgreSQLCore.resolve_native_module()
+            client = pg_mod.AsyncPostgresClient(**client_kwargs)
+        await client.connect()
+        return client
 
     async def _open_notification_listener(
         self,
@@ -867,18 +814,6 @@ class AsyncPostgreSQLDriver(AsyncDatabaseDriver[PostgreSQLConfig]):
     async def _publish_notification(self, channel: str, payload: str) -> None:
         """Asynchronously publish a parameterized PostgreSQL ``pg_notify`` message natively."""
         await self.execute("SELECT pg_notify($1, $2)", (channel, payload))
-
-    def open_replication(
-        self,
-        config: PostgresChangeConfig,
-        checkpoint_store: PostgresCheckpointStore | None = None,
-        *,
-        feed: ChangeFeed | None = None,
-    ) -> PostgresChangeSource:
-        """Create a ``PostgresChangeSource`` backed by dedicated non-pooled WAL replication streams."""
-        self._ensure_open()
-        _validate_direct_session_config(self.config, feature="logical replication")
-        return PostgresChangeSource(self, config, checkpoint_store, feed=feed)
 
     async def _replication_identity(
         self,
@@ -917,3 +852,61 @@ class AsyncPostgreSQLDriver(AsyncDatabaseDriver[PostgreSQLConfig]):
             raise
         self._events.register(stream, client)
         return stream
+
+
+class _PooledAsyncPipelineLease:
+    """Lazy asynchronous pooled client adapter binding ``AsyncPostgresPipeline`` to one lease."""
+
+    __slots__ = ("_acquire", "_client", "_release")
+
+    def __init__(
+        self,
+        acquire: Callable[[], Any],
+        release: Callable[[Any, bool], Any],
+    ) -> None:
+        self._acquire = acquire
+        self._release = release
+        self._client: Any = None
+
+    async def pipeline_begin(self) -> int:
+        """Acquire a pooled client when entering the pipeline and open its retained scope."""
+        client = await self._acquire()
+        self._client = client
+        try:
+            return int(await client.pipeline_begin())
+        except BaseException:
+            with CancelScope(shield=True):
+                await self.release(evict=True)
+            raise
+
+    async def pipeline_results(
+        self,
+        scope_id: int,
+        operations: Sequence[PostgresPipelineOperation],
+    ) -> tuple[PostgresPipelineOutcome, ...]:
+        """Submit batched pipeline operations asynchronously on the leased client."""
+        outcomes: tuple[PostgresPipelineOutcome, ...] = tuple(await self._client.pipeline_results(scope_id, operations))
+        return outcomes
+
+    async def pipeline_finish(self, scope_id: int, success: bool) -> None:
+        """Finish the async pipeline scope and evict the client if completion fails."""
+        try:
+            await self._client.pipeline_finish(scope_id, success)
+        except BaseException:
+            with CancelScope(shield=True):
+                await self.release(evict=True)
+            raise
+
+    async def release(self, *, evict: bool = False) -> None:
+        """Return or evict the leased pooled client at most once."""
+        client = self._client
+        self._client = None
+        if client is not None:
+            await _maybe_await(self._release(client, evict))
+
+
+async def _maybe_await(value: Any) -> Any:
+    """Await ``value`` when awaitable, otherwise return it directly."""
+    if inspect.isawaitable(value):
+        return await value
+    return value

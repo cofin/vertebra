@@ -413,3 +413,164 @@ async def test_cloud_dialers_propagate_token_cache_errors_and_serialize_async_re
 
     assert calls == 2
     assert max_in_flight == 1
+
+
+@pytest.mark.parametrize("auth_type", [AlloyDBAuthType.IAM, AlloyDBAuthType.BUILT_IN])
+def test_alloydb_encode_metadata_exchange_uses_native_extension(auth_type: AlloyDBAuthType) -> None:
+    """Native encode_alloydb_metadata_exchange produces frames matching pure-Python decoding."""
+    frame = SyncAlloyDBDialer.encode_metadata_exchange("vertebra/0.9", auth_type, "tok-xyz")
+    decoded = SyncAlloyDBDialer.decode_metadata_exchange(frame)
+    assert decoded == {
+        "user_agent": "vertebra/0.9",
+        "auth_type": auth_type,
+        "oauth2_token": "tok-xyz",
+    }
+
+
+def test_cloud_dialers_sync_connect_uses_cached_cert_bundle_and_callable_token_cache() -> None:
+    """Sync CloudSQL/AlloyDB connect uses cached mTLS cert bundles and SyncAlloyDBDialer.__call__ resolves cached tokens."""
+    cert_pem, key_pem = _generate_test_tls_credentials()
+    server_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    server_ctx.minimum_version = ssl.TLSVersion.TLSv1_3
+    server_ctx.verify_mode = ssl.CERT_REQUIRED
+    server_ctx.load_verify_locations(cadata=cert_pem)
+
+    with tempfile.TemporaryDirectory(prefix="vtb-srv-mtls-") as tmpdir:
+        cfile = Path(tmpdir) / "cert.pem"
+        kfile = Path(tmpdir) / "key.pem"
+        cfile.write_text(cert_pem, encoding="utf-8")
+        kfile.write_text(key_pem, encoding="utf-8")
+        server_ctx.load_cert_chain(str(cfile), str(kfile))
+
+    server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server_sock.bind(("127.0.0.1", 0))
+    server_sock.listen(4)
+    port = server_sock.getsockname()[1]
+    seen_tokens: list[str] = []
+
+    def _serve_mtls(is_alloydb: bool) -> None:
+        raw_conn, _ = server_sock.accept()
+        tls_conn = server_ctx.wrap_socket(raw_conn, server_side=True)
+        try:
+            if is_alloydb:
+                header = tls_conn.recv(4)
+                body_len = int.from_bytes(header, "big")
+                frame = header + tls_conn.recv(body_len)
+                seen_tokens.append(SyncAlloyDBDialer.decode_metadata_exchange(frame)["oauth2_token"])
+                tls_conn.sendall(SyncAlloyDBDialer.encode_metadata_exchange_response(1, ""))
+            else:
+                tls_conn.sendall(b"MTLS_OK")
+        finally:
+            tls_conn.close()
+
+    try:
+        csql_dialer = SyncCloudSQLDialer(CloudSQLConfig(instance_connection_name="p:r:i", port=port))
+        csql_dialer.refresh_certificate(
+            public_key_pem="PUB",
+            private_key_pem=key_pem,
+            access_token="tok",
+            http_transport=lambda _u, _p, _h: encode_json_bytes(
+                {"ephemeralCert": {"cert": cert_pem}, "serverCaCert": {"cert": cert_pem}, "ipAddress": "127.0.0.1"}
+            ),
+        )
+        t1 = threading.Thread(target=_serve_mtls, args=(False,), daemon=True)
+        t1.start()
+        sock = csql_dialer.connect("127.0.0.1")
+        assert sock.recv(7) == b"MTLS_OK"
+        sock.close()
+        t1.join(timeout=2.0)
+
+        class _TokenCache:
+            def get_token(self) -> str:
+                return "resolved-callable-token"
+
+        adb_dialer = SyncAlloyDBDialer(
+            AlloyDBConfig(instance_uri="projects/p/locations/r/clusters/c/instances/i", port=port),
+            token_cache=_TokenCache(),
+        )
+        adb_dialer.refresh_client_cert(
+            public_key_pem="PUB",
+            private_key_pem=key_pem,
+            http_transport=lambda _u, _p, _h: encode_json_bytes({"clientCert": cert_pem, "caCert": cert_pem}),
+        )
+        t2 = threading.Thread(target=_serve_mtls, args=(True,), daemon=True)
+        t2.start()
+        adb_sock = adb_dialer("127.0.0.1")
+        adb_sock.close()
+        t2.join(timeout=2.0)
+        assert seen_tokens == ["resolved-callable-token"]
+    finally:
+        server_sock.close()
+
+
+@pytest.mark.anyio
+async def test_cloud_dialers_async_connect_uses_cached_cert_bundle() -> None:
+    """Async CloudSQL/AlloyDB connect uses cached mTLS cert bundles when ssl_context is omitted."""
+    cert_pem, key_pem = _generate_test_tls_credentials()
+    server_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    server_ctx.minimum_version = ssl.TLSVersion.TLSv1_3
+    server_ctx.verify_mode = ssl.CERT_REQUIRED
+    server_ctx.load_verify_locations(cadata=cert_pem)
+
+    with tempfile.TemporaryDirectory(prefix="vtb-asrv-mtls-") as tmpdir:
+        cfile = Path(tmpdir) / "cert.pem"
+        kfile = Path(tmpdir) / "key.pem"
+        cfile.write_text(cert_pem, encoding="utf-8")
+        kfile.write_text(key_pem, encoding="utf-8")
+        server_ctx.load_cert_chain(str(cfile), str(kfile))
+
+    server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server_sock.bind(("127.0.0.1", 0))
+    server_sock.listen(4)
+    port = server_sock.getsockname()[1]
+
+    def _serve_once(is_alloydb: bool) -> None:
+        raw_conn, _ = server_sock.accept()
+        tls_conn = server_ctx.wrap_socket(raw_conn, server_side=True)
+        try:
+            if is_alloydb:
+                header = tls_conn.recv(4)
+                body_len = int.from_bytes(header, "big")
+                _ = tls_conn.recv(body_len)
+                tls_conn.sendall(SyncAlloyDBDialer.encode_metadata_exchange_response(1, ""))
+            else:
+                tls_conn.sendall(b"ASYNC_MTLS")
+        finally:
+            tls_conn.close()
+
+    try:
+        csql_async = AsyncCloudSQLDialer(CloudSQLConfig(instance_connection_name="p:r:i", port=port))
+        await csql_async.refresh_certificate(
+            public_key_pem="PUB",
+            private_key_pem=key_pem,
+            access_token="tok",
+            http_transport=lambda _u, _p, _h: encode_json_bytes(
+                {"ephemeralCert": {"cert": cert_pem}, "serverCaCert": {"cert": cert_pem}, "ipAddress": "127.0.0.1"}
+            ),
+        )
+        t1 = threading.Thread(target=_serve_once, args=(False,), daemon=True)
+        t1.start()
+        reader, writer = await csql_async.connect("127.0.0.1")
+        assert await reader.readexactly(10) == b"ASYNC_MTLS"
+        writer.close()
+        await writer.wait_closed()
+        t1.join(timeout=2.0)
+
+        adb_async = AsyncAlloyDBDialer(
+            AlloyDBConfig(instance_uri="projects/p/locations/r/clusters/c/instances/i", port=port),
+        )
+        await adb_async.refresh_client_cert(
+            public_key_pem="PUB",
+            private_key_pem=key_pem,
+            access_token="tok",
+            http_transport=lambda _u, _p, _h: encode_json_bytes({"clientCert": cert_pem, "caCert": cert_pem}),
+        )
+        t2 = threading.Thread(target=_serve_once, args=(True,), daemon=True)
+        t2.start()
+        adb_reader, adb_writer = await adb_async.connect("127.0.0.1", oauth2_token="tok")
+        assert adb_reader is not None
+        adb_writer.close()
+        await adb_writer.wait_closed()
+        t2.join(timeout=2.0)
+    finally:
+        server_sock.close()

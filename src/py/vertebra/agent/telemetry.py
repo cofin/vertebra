@@ -70,49 +70,6 @@ class AgentTelemetryRecorder:
             genai_recorder if genai_recorder is not None else GenAiRecorder(cost_table=self.cost_table)
         )
 
-    def _record_lifecycle(
-        self,
-        name: str,
-        ctx: TraceContext,
-        parent_ctx: TraceContext | None,
-        start_ns: int,
-        attributes: dict[str, Any],
-        error: BaseException | None = None,
-    ) -> None:
-        """Finalize and export span and audit event."""
-        duration_ns = time.perf_counter_ns() - start_ns
-        status_code = 200 if error is None else 500
-        status_str = "ok" if error is None else "error"
-
-        if error is not None:
-            attributes["error.type"] = type(error).__name__
-            attributes["error.message"] = str(error)
-
-        parent_span_id = parent_ctx.span_id if parent_ctx is not None else None
-
-        span = SpanData(
-            name=name,
-            trace_id=ctx.trace_id,
-            span_id=ctx.span_id,
-            parent_span_id=parent_span_id,
-            start_ns=start_ns,
-            duration_ns=duration_ns,
-            status_code=status_code,
-            attributes=attributes,
-        )
-        self.span_exporter.record_span(span)
-
-        audit_event = AgentAuditEvent(
-            event_type=name,
-            trace_id=ctx.trace_id,
-            span_id=ctx.span_id,
-            parent_span_id=parent_span_id,
-            duration_ns=duration_ns,
-            status=status_str,
-            attributes=attributes,
-        )
-        self.log_sink.write_bytes(encode_json_bytes(audit_event))
-
     @contextmanager
     def span_rpc(
         self,
@@ -419,6 +376,49 @@ class AgentTelemetryRecorder:
             raise
         finally:
             TraceContext.set_current(parent_ctx)
+
+    def _record_lifecycle(
+        self,
+        name: str,
+        ctx: TraceContext,
+        parent_ctx: TraceContext | None,
+        start_ns: int,
+        attributes: dict[str, Any],
+        error: BaseException | None = None,
+    ) -> None:
+        """Finalize and export span and audit event."""
+        duration_ns = time.perf_counter_ns() - start_ns
+        status_code = 200 if error is None else 500
+        status_str = "ok" if error is None else "error"
+
+        if error is not None:
+            attributes["error.type"] = type(error).__name__
+            attributes["error.message"] = str(error)
+
+        parent_span_id = parent_ctx.span_id if parent_ctx is not None else None
+
+        span = SpanData(
+            name=name,
+            trace_id=ctx.trace_id,
+            span_id=ctx.span_id,
+            parent_span_id=parent_span_id,
+            start_ns=start_ns,
+            duration_ns=duration_ns,
+            status_code=status_code,
+            attributes=attributes,
+        )
+        self.span_exporter.record_span(span)
+
+        audit_event = AgentAuditEvent(
+            event_type=name,
+            trace_id=ctx.trace_id,
+            span_id=ctx.span_id,
+            parent_span_id=parent_span_id,
+            duration_ns=duration_ns,
+            status=status_str,
+            attributes=attributes,
+        )
+        self.log_sink.write_bytes(encode_json_bytes(audit_event))
 
 
 __all__ = [

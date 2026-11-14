@@ -13,9 +13,10 @@ from pathlib import Path
 import msgspec
 
 from tools.benchmarks.micro import run_all_micro_benchmarks
+from vertebra.utils.module_loader import import_optional
 
 
-class BaselineRecord(msgspec.Struct, frozen=True, gc=False):
+class BaselineRecord(msgspec.Struct, frozen=True):
     """Immutable baseline performance recording."""
 
     name: str
@@ -97,10 +98,12 @@ def find_latest_e2e_results(repo_root: Path) -> dict[str, float]:
     if not db_path.exists():
         return {}
 
-    try:
-        import duckdb
+    duckdb_mod = import_optional("duckdb")
+    if duckdb_mod is None:
+        return {}
 
-        conn = duckdb.connect(str(db_path), read_only=True)
+    try:
+        conn = duckdb_mod.connect(str(db_path), read_only=True)
         query = (
             "SELECT target, scenario, rps FROM benchmark_results "
             "WHERE run_id = (SELECT run_id FROM benchmark_runs ORDER BY started_at DESC LIMIT 1)"

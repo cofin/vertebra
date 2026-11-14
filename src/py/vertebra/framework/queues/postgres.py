@@ -219,7 +219,7 @@ class PostgreSQLQueueBackend:
 
         if not rows and timeout_seconds > 0:
             min_row = await self._executor.fetch_one(
-                "SELECT MIN(scheduled_at) FROM vertebra_queue_jobs WHERE lane = ANY($1) AND status = 'pending' AND scheduled_at > $2",
+                "SELECT MIN(scheduled_at) AS min_scheduled FROM vertebra_queue_jobs WHERE lane = ANY($1) AND status = 'pending' AND scheduled_at > $2",
                 list(lanes),
                 now,
             )

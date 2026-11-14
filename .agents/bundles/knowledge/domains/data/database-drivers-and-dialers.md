@@ -11,18 +11,20 @@ tags:
   - oracle
   - cloud-sql
   - alloydb
-  - arrow
   - shm
 generated:
-  by: flow/0.26.0
+  by: flow/0.30.1
   at: "2026-11-04T04:33:00Z"
 verified:
+  - by: agent:flow-setup
+    at: "2026-11-14T18:43:00Z"
+    commit: 104fd6fa
   - by: agent:flow-executor
-    at: "2026-11-14T01:15:00Z"
-    commit: 8c615b73
-  - by: agent:flow-sync
-    at: "2026-11-12T01:15:00Z"
-    commit: c8722c76
+    at: "2026-11-14T18:05:00Z"
+    commit: 8290822e
+  - by: agent:flow-learn
+    at: "2026-11-14T17:15:00Z"
+    commit: 334dc98d
 sources:
   - id: src-vertebra-core-src-shm-rs
     resource: src/rs/vertebra-core/src/shm.rs
@@ -45,6 +47,9 @@ sources:
   - id: src-vertebra-db-src-dialer-rs
     resource: src/rs/vertebra-db/src/dialer.rs
     title: Zero-sidecar Cloud SQL and AlloyDB mTLS dialers
+  - id: src-dialer-base-py
+    resource: src/py/vertebra/db/dialer/_base.py
+    title: Shared _BaseGCPDialer, EphemeralCertBundle, and VALID_GCP_IP_TYPES primitives
   - id: src-vertebra-postgres-src-lib-rs
     resource: src/rs/vertebra-postgres/src/lib.rs
     title: Standalone vertebra._postgres free-threaded extension exports
@@ -120,9 +125,9 @@ sources:
 | [`adapters/postgres/`](../../../../../src/py/vertebra/db/adapters/postgres/__init__.py)[^src-postgres-driver-py] / [`vertebra-postgres`](../../../../../src/rs/vertebra-postgres/src/lib.rs)[^src-vertebra-postgres-src-lib-rs] | `PostgreSQLConfig`, `PostgreSQLCore`, `binds.py`, `options.py`, `PostgresChangeSource` | Pure-Rust `vertebra._postgres` (`SyncPostgreSQLDriver` / `AsyncPostgreSQLDriver`), Protocol `3.0` (`14`–`18`), SCRAM-SHA-256-PLUS, Cloud SQL (`:3307`) / AlloyDB (`:5433`) mTLS + `:5432` IAM, `PoolerMode` cache gating, single-pass `$N` lexer (`binds.py`), libpq/Unix-socket/multi-host `options.py`, single-`Sync` pipelines, `PGCOPY`, `VTBARROW`, `AsyncPostgresListener`, `AsyncPostgresReplication`, and shielded CAS `PostgresChangeSource`; rejects `memory://`. |
 | [`adapters/mysql/`](../../../../../src/py/vertebra/db/adapters/mysql/__init__.py) / [`vertebra-mysql`](../../../../../src/rs/vertebra-mysql/src/lib.rs)[^src-vertebra-mysql-src-lib-rs] | `MySQLConfig` | Pure-Rust `vertebra._mysql`, Handshake v10 (`caching_sha2_password`), LRU `COM_STMT_PREPARE`/`EXECUTE`, MySQL 9 `VECTOR(N)`, `SyncMySQLPipeline` / `AsyncMySQLPipeline`, `VTBARROW`, `:3306` IAM + `:3307` Cloud SQL mTLS, and `KILL QUERY`. |
 | [`adapters/sqlite/`](../../../../../src/py/vertebra/db/adapters/sqlite/__init__.py) / [`sqlite/mod.rs`](../../../../../src/rs/vertebra-db/src/sqlite/mod.rs) | `SQLiteConfig`, `SQLiteCore` | `SqliteConfig` WAL pragmas, `LeaseBroker`-serialized writes, `RETURNING` finalization before commit, and `ArrowCursor` streaming. |
-| [`adapters/oracle/`](../../../../../src/py/vertebra/db/adapters/oracle/driver.py)[^src-oracle-driver-py] / [`vertebra-oracle`](../../../../../src/rs/vertebra-oracle/src/lib.rs)[^src-vertebra-oracle-src-lib-rs] | `OracleConfig`, `OracleCore`, `SyncOraclePool`, `AsyncOraclePool` | Standalone `vertebra._oracle` pure-Rust `oracledb` (`=26.0.0-beta.5`, zero Instant Client), per-connection worker threads + `OracleBreakHandle` cancellation, `.zip`/`ewallet.pem` mTLS + IAM, DRCP (`cclass`/`purity`), TTC `[0x11, 0x6e]` piggyback, 26ai `VECTOR`/`OSON`, `arrow 59` -> `VTBARROW` `ArrowCursor`, and delayed-commit pipelines. |
+| [`adapters/oracle/`](../../../../../src/py/vertebra/db/adapters/oracle/driver.py)[^src-oracle-driver-py] / [`vertebra-oracle`](../../../../../src/rs/vertebra-oracle/src/lib.rs)[^src-vertebra-oracle-src-lib-rs] | `OracleConfig`, `OracleCore`, `SyncOraclePool`, `AsyncOraclePool` | Standalone `vertebra._oracle` pure-Rust `oracledb` (`=26.0.0-beta.5`, zero Instant Client), per-connection worker threads + `OracleBreakHandle` cancellation, `.zip`/`ewallet.pem` mTLS + IAM, DRCP (`cclass`/`purity`), TTC `[0x11, 0x6e]` piggyback, 26ai `VECTOR`/`OSON`, `arrow 59` -> `VTBARROW` `ArrowCursor`, delayed-commit pipelines, and `OracleNotificationSource` `wait_timeout_seconds` `SELECT 1 FROM DUAL` idle liveness probing. |
 | [`adapters/mssql/`](../../../../../src/py/vertebra/db/adapters/mssql/driver.py)[^src-mssql-driver-py] / [`vertebra-mssql`](../../../../../src/rs/vertebra-mssql/src/lib.rs) | `MSSQLConfig`, `MSSQLCore` | Standalone `vertebra._mssql` (`tiberius` + `rustls`), TDS 7.4/8.0, `sp_executesql` RPC, `BulkLoad`, `ATTENTION` cancel, `@P1` rewriter, `VTBARROW`, pipelines, and Cloud SQL `:3307` mTLS. |
-| [`adapters/duckdb/`](../../../../../src/py/vertebra/db/adapters/duckdb/driver.py)[^src-duckdb-driver-py] / [`vertebra-duckdb`](../../../../../src/rs/vertebra-duckdb/src/lib.rs)[^src-vertebra-duckdb-src-lib-rs] | `DuckDBConfig`, `DuckDBSecretConfig`, `DuckDBCore` | Native `vertebra._duckdb` (bundled `duckdb`, `arrow 60`), single-writer / multi-reader pool, `TxJournal` savepoints, pipelines, `VTBARROW`, `Appender` bulk load, `InterruptHandle`, and `CREATE SECRET` rotation. |
+| [`adapters/duckdb/`](../../../../../src/py/vertebra/db/adapters/duckdb/driver.py)[^src-duckdb-driver-py] / [`vertebra-duckdb`](../../../../../src/rs/vertebra-duckdb/src/lib.rs)[^src-vertebra-duckdb-src-lib-rs] | `DuckDBConfig`, `DuckDBSecretConfig`, `DuckDBCore` | Native `vertebra._duckdb` (bundled `duckdb`, `arrow 60`), single-writer / multi-reader pool, `TxJournal` savepoints, pipelines, `VTBARROW`, `Appender` bulk load, `InterruptHandle`, `SyncGcsBearerSecretProvider` / `AsyncGcsBearerSecretProvider` `CREATE SECRET` rotation with `(HTTP 401)`/`(HTTP 403)` invalidation, and startup `_client` cleanup on secret failure. |
 | [`adapters/redis/`](../../../../../src/py/vertebra/db/adapters/redis/__init__.py) & [`valkey/`](../../../../../src/py/vertebra/db/adapters/valkey/__init__.py) | `RedisConfig`, `ValkeyConfig` | `RESP2`/`RESP3` (`HELLO 3`), `CLIENT TRACKING` invalidation, Sentinel, Cluster CRC16 slot routing, and Valkey IAM; reject `memory://`. |
 | [`adapters/datafusion/`](../../../../../src/py/vertebra/db/adapters/datafusion/__init__.py) | `DataFusionConfig`, `DataFusionEngine` | Embedded DataFusion SQL federation joining Parquet/CSV object stores with live relational and [GCP BigQuery & Spanner](gcp-bigquery-and-spanner-drivers.md) `ArrowCursor` tables. |
 
@@ -130,11 +135,11 @@ sources:
 
 - **Transport & Drainers**: [`connection.rs`](../../../../../src/rs/vertebra-db/src/connection.rs)[^src-vertebra-db-src-connection-rs] normalizes TCP, `rustls`, Unix socket, Cloud SQL `:3307`, and AlloyDB `:5433` streams with `is_transient()` / SQLSTATE mapping. [`py_async.rs`](../../../../../src/rs/vertebra-db/src/py_async.rs)[^src-vertebra-db-src-py-async-rs] attaches per-extension `AsyncCompletionQueue` drainers (`_vertebra_{core,bigquery,mysql,mssql,oracle,spanner,duckdb,postgres}_completion_drainer`), converting panics to `TaskPanicError`, binding Python future cancellation to Tokio `AbortHandle` (`spawn_rust_db_task_with_attr_and_future` / `DbTaskCanceller`) or cancel callbacks (`spawn_rust_db_task_with_attr_and_cancel` / `CustomDbTaskCanceller`), and wrapping [`ShmRegion`](../../../../../src/rs/vertebra-core/src/shm.rs)[^src-vertebra-core-src-shm-rs] ownership in `c"vertebra.ShmCapsule"` via `construct_py_arrow_cursor`. [`arrow_shm.rs`](../../../../../src/rs/vertebra-db/src/arrow_shm.rs)[^src-vertebra-db-src-arrow-shm-rs] handles `VTBARROW` IPC framing and `allocate_shm_region`, while `ArrowCursor.release()`, `close()`, `__exit__()`, and `Drop` (`src/rs/vertebra-py/src/db.rs`) trigger `ShmRegion::unlink_now()`.
 - **Missing Dependencies**: [`ensure_module`](../../../../../src/py/vertebra/utils/module_loader.py)[^src-module-loader] raises `MissingDependencyError` defaulting `install_package="vertebra-core[<extra>]"`, enforced by AST scanning in [`test_packaging_and_pgo.py`](../../../../../src/py/tests/unit/build/test_packaging_and_pgo.py)[^src-packaging-extras-gate].
-- **Cloud Dialers (`cloudsql.py`, `alloydb.py`, `dialer.rs`)**: Zero-sidecar async cert refresh (`generateEphemeralCert` `:3307` / `generateClientCertificate` `:5433`), RSA keygen, verified mTLS, and explicit IAM token propagation using pure-Rust dialers and Python TLS/IAM helpers with zero third-party driver packages.
+- **Cloud Dialers (`_base.py`, `cloudsql.py`, `alloydb.py`, `dialer.rs`)**: `_BaseGCPDialer`, `EphemeralCertBundle`, and `VALID_GCP_IP_TYPES` (`dialer/_base.py`) share async cert refresh (`generateEphemeralCert` `:3307` / `generateClientCertificate` `:5433`), RSA keygen, verified TLS 1.3 mTLS, and explicit IAM token propagation with `cloudsql.py`, `alloydb.py`, and pure-Rust dialers (`zero third-party driver packages`) [^src-dialer-base-py].
 
 ## Database Driver Conformance
 
-Driver transaction scopes roll back on `BaseException` (shielding async rollback/eviction via `anyio.CancelScope(shield=True)`). Cross-engine parity is enforced by [`test_driver_conformance.py`](../../../../../src/py/tests/integration/db/test_driver_conformance.py)[^src-tests-integration-db-conformance-py] covering `sqlite`, `postgres` (`14`–`18` with `VERTEBRA_CONFORMANCE_POSTGRES_REQUIRE_ZERO_SKIPS=1` fail-closed enforcement and dedicated live replication/extension suites), `oracle` (`26ai Free`), `mysql`, `mssql`, `duckdb`, `bigquery`, and `spanner`. While all seven native SQL/cloud engines execute over pure-Rust PyO3 wheels, `sqlite` runs on stdlib `sqlite3` and `redis`/`valkey` pair `vertebra-db` RESP3 parsers with Python network streams.
+Driver transaction scopes roll back on `BaseException` (shielding async rollback/eviction via `anyio.CancelScope(shield=True)`). Cross-engine parity is enforced by [`test_driver_conformance.py`](../../../../../src/py/tests/integration/db/test_driver_conformance.py)[^src-tests-integration-db-conformance-py] and `test_{duckdb,mysql,mssql,oracle}_native.py` under zero-skip `ConformanceGate` (`VERTEBRA_CONFORMANCE_ENGINES`) and `ServiceVersionMatrix` (`VERTEBRA_CONFORMANCE_{MYSQL,MARIADB,MSSQL,ORACLE}_VERSION`) covering `duckdb`, `mysql` (`8.0`, `8.4`, `9.6`, `9.7`), `mariadb` (`11.3`, `11.4`, `11.8`, `12.2`, `12.3`, `13.0`), `mssql` (`2022`, `2025`), and `oracle` (`23ai` / `26ai Free`), alongside `postgres` (`14`–`18` under `VERTEBRA_CONFORMANCE_POSTGRES_REQUIRE_ZERO_SKIPS=1`), `sqlite`, `bigquery`, and `spanner`. While all seven native SQL/cloud engines execute over pure-Rust PyO3 wheels, `sqlite` runs on stdlib `sqlite3` and `redis`/`valkey` pair `vertebra-db` RESP3 parsers with Python network streams.
 
 [^src-vertebra-core-src-shm-rs]: `src/rs/vertebra-core/src/shm.rs` — ShmRegion and ShmCapsule shared-memory primitives.
 [^src-vertebra-core-src-proto-rs]: `src/rs/vertebra-core/src/proto.rs` — Zero-dependency Protobuf v3 wire helpers.
@@ -143,6 +148,7 @@ Driver transaction scopes roll back on `BaseException` (shielding async rollback
 [^src-vertebra-db-src-connection-rs]: `src/rs/vertebra-db/src/connection.rs` — TransportStream, TlsMode, EndpointTarget, and Connection traits.
 [^src-vertebra-db-src-py-async-rs]: `src/rs/vertebra-db/src/py_async.rs` — Per-extension event-loop completion drainer and ShmCapsule bridge.
 [^src-vertebra-db-src-dialer-rs]: `src/rs/vertebra-db/src/dialer.rs` — Zero-sidecar Cloud SQL and AlloyDB mTLS dialers.
+[^src-dialer-base-py]: `src/py/vertebra/db/dialer/_base.py` — Shared `_BaseGCPDialer`, `EphemeralCertBundle`, and `VALID_GCP_IP_TYPES` primitives.
 [^src-vertebra-postgres-src-lib-rs]: `src/rs/vertebra-postgres/src/lib.rs` — Standalone `vertebra._postgres` extension exports.
 [^src-postgres-driver-py]: `src/py/vertebra/db/adapters/postgres/driver.py` — PostgreSQL `SyncPostgreSQLDriver` and `AsyncPostgreSQLDriver` re-exports.
 [^src-vertebra-mysql-src-lib-rs]: `src/rs/vertebra-mysql/src/lib.rs` — Native MySQL and MariaDB binary wire extension crate.

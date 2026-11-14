@@ -8,6 +8,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+import anyio
 import msgspec
 import pytest
 
@@ -26,6 +27,8 @@ from vertebra.db.driver import NotFoundError, QueryCancelledError
 from vertebra.db.rls import AsyncTenantConnectionScope, TenantConnectionScope
 from vertebra.utils.module_loader import ensure_module
 
+pytestmark = [pytest.mark.driver_engine("oracle")]
+
 
 def _resolve_oracle_config(request: pytest.FixtureRequest) -> OracleConfig:
     """Resolve a live `OracleConfig` from `VERTEBRA_CONFORMANCE_ORACLE_DSN` or the Docker fixture."""
@@ -38,7 +41,12 @@ def _resolve_oracle_config(request: pytest.FixtureRequest) -> OracleConfig:
     dsn = os.environ.get("VERTEBRA_CONFORMANCE_ORACLE_DSN", "").strip()
     if dsn:
         return OracleConfig.from_url(dsn)
-    if os.environ.get("VERTEBRA_CONFORMANCE_DOCKER") == "1":
+    selected_engines = {
+        token.strip().lower()
+        for token in os.environ.get("VERTEBRA_CONFORMANCE_ENGINES", "").split(",")
+        if token.strip()
+    }
+    if os.environ.get("VERTEBRA_CONFORMANCE_DOCKER") == "1" or "oracle" in selected_engines:
         fixture_cfg = request.getfixturevalue("vtb_oracle_config")
         assert isinstance(fixture_cfg, OracleConfig)
         return fixture_cfg
@@ -430,7 +438,9 @@ async def test_oracle_26ai_aq_raw_binary_notification_and_clean_close(
                 assert event.sender_id == msg_id
             finally:
                 close_start = time.monotonic()
-                await stream.aclose()
+                aclose = getattr(stream, "aclose", None)
+                if aclose is not None:
+                    await aclose()
                 assert (time.monotonic() - close_start) < 4.0
 
             second_payload = b"\xff\x00vtb-aq-second\x7f"
@@ -444,8 +454,58 @@ async def test_oracle_26ai_aq_raw_binary_notification_and_clean_close(
             finally:
                 source_close_start = time.monotonic()
                 await source.close()
-                await aq_stream.aclose()
+                aq_aclose = getattr(aq_stream, "aclose", None)
+                if aq_aclose is not None:
+                    await aq_aclose()
                 assert (time.monotonic() - source_close_start) < 4.0
+        finally:
+            await source.close()
+            await driver.execute(cleanup_plsql)
+
+
+@pytest.mark.anyio
+async def test_oracle_26ai_aq_wait_timeout_seconds_idle_liveness_and_delivery(
+    oracle_config: OracleConfig,
+) -> None:
+    """Verify ``OracleNotifyConfig(wait_timeout_seconds=2)`` probes liveness across an idle window and delivers messages."""
+    qtable = "VTB_AQ_LIVENESS_QT"
+    qname = "VTB_AQ_LIVENESS_Q"
+    cleanup_plsql = (
+        "BEGIN "
+        f"  BEGIN DBMS_AQADM.STOP_QUEUE(queue_name => '{qname}'); EXCEPTION WHEN OTHERS THEN NULL; END; "
+        f"  BEGIN DBMS_AQADM.DROP_QUEUE(queue_name => '{qname}'); EXCEPTION WHEN OTHERS THEN NULL; END; "
+        f"  BEGIN DBMS_AQADM.DROP_QUEUE_TABLE(queue_table => '{qtable}', force => TRUE); EXCEPTION WHEN OTHERS THEN NULL; END; "
+        "END;"
+    )
+    setup_plsql = (
+        "BEGIN "
+        f"  DBMS_AQADM.CREATE_QUEUE_TABLE(queue_table => '{qtable}', queue_payload_type => 'RAW'); "
+        f"  DBMS_AQADM.CREATE_QUEUE(queue_name => '{qname}', queue_table => '{qtable}'); "
+        f"  DBMS_AQADM.START_QUEUE(queue_name => '{qname}'); "
+        "END;"
+    )
+    payload = b"vtb-aq-after-idle-liveness-probe"
+
+    async with AsyncOracleDriver(oracle_config) as driver:
+        await driver.execute(cleanup_plsql)
+        await driver.execute(setup_plsql)
+        notify_cfg = OracleNotifyConfig(wait_timeout_seconds=2, poll_timeout=0.5)
+        source = OracleNotificationSource(driver, notify_cfg)
+        try:
+            stream = source.listen_aq(qname)
+            try:
+                await anyio.sleep(2.4)
+                msg_id = await source.publish_aq(qname, payload)
+                event = await anext(stream)
+                assert event.channel == qname
+                assert event.payload == payload
+                assert event.sender_id == msg_id
+            finally:
+                close_start = time.monotonic()
+                aclose = getattr(stream, "aclose", None)
+                if aclose is not None:
+                    await aclose()
+                assert (time.monotonic() - close_start) < 2.0
         finally:
             await source.close()
             await driver.execute(cleanup_plsql)

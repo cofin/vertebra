@@ -235,7 +235,7 @@ def is_app_only_tool(spec: ToolSpec) -> bool:
     return [str(v) for v in visibility] == ["app"]
 
 
-class ToolCall(msgspec.Struct, frozen=True, gc=False, kw_only=True):
+class ToolCall(msgspec.Struct, frozen=True, kw_only=True):
     """Tool execution request from a model or caller."""
 
     id: str
@@ -246,7 +246,7 @@ class ToolCall(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Input argument dictionary validated against the tool's JSON Schema."""
 
 
-class ToolResult(msgspec.Struct, frozen=True, gc=False, kw_only=True):
+class ToolResult(msgspec.Struct, frozen=True, kw_only=True):
     """Normalized result of a tool execution."""
 
     call_id: str

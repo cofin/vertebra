@@ -48,7 +48,7 @@ sources:
 
 ## Objective & Scope Boundary
 
-Resolve all `16` `mypy --strict` errors and the `ServerRunner` subprocess stderr decoding mismatch across `tools/benchmarks/runner.py`, `tools/benchmarks/apps/asgi.py`, and `tools/benchmarks/apps/spikard_app.py` per [`../spec.md` §2](../spec.md) [^bench-runner] [^bench-asgi] [^bench-spikard]. Out of scope: `src/py/tests` typing (`t03`).
+Verify `tools/benchmarks/{runner.py,apps/asgi.py,apps/spikard_app.py}` typing invariants landed at `334dc98d` (`mypy --strict tools/benchmarks` and `ruff check tools/benchmarks` already exit `0`) and add the missing `ServerRunner` binary-stderr regression test in `src/py/tests/unit/test_bench_infrastructure.py` per [`../spec.md` §2](../spec.md) [^bench-runner] [^bench-asgi] [^bench-spikard]. Out of scope: `src/py/tests` typing (`t03`).
 
 ## Bounded Read Manifest
 
@@ -59,13 +59,12 @@ Resolve all `16` `mypy --strict` errors and the `ServerRunner` subprocess stderr
 
 ## Contracts & Edge Cases
 
-- `tools/benchmarks/runner.py`: change `self._process: subprocess.Popen[bytes] | None = None` (matching `subprocess.Popen` without `text=True`) and decode `raw_stderr = self._process.stderr.read()` via `raw_stderr.decode("utf-8", errors="replace").strip()` so crashed benchmark servers report their last `20` stderr lines cleanly without `Popen[str]`/`str.decode` mismatches.
-- `tools/benchmarks/apps/asgi.py`: route JSON serialization through `encode_json_bytes` (returning typed `bytes`, eliminating `no-any-return`).
-- `tools/benchmarks/apps/spikard_app.py`: type generic `dict[str, Any]` payloads, type route handler wrappers cleanly without `# type: ignore`, and pass `str` (`body.decode("utf-8", errors="replace")`) or the exact `Response` content type expected by `spikard`, with zero inline `#` comments across all edited files.
+- **`tools/benchmarks/{runner.py,apps/asgi.py,apps/spikard_app.py}` (`334dc98d` / `8290822e`, landed)**: Already updated (`ServerRunner._process: subprocess.Popen[bytes] | None`, `encode_json_bytes`, typed `spikard.app.App` routes with zero `# type: ignore`); keep strict compliance clean without regressions.
+- **`src/py/tests/unit/test_bench_infrastructure.py` (remaining)**: Add unit regression test exercising `ServerRunner` when a child command writes UTF-8 and non-UTF-8 bytes to `stderr` and exits non-zero before opening its port, asserting `RuntimeError` includes the decoded stderr tail; verify `mypy --strict tools/benchmarks` and `ruff check tools/benchmarks` exit `0`.
 
 ## Test Matrix
 
-- Add unit regression test in `src/py/tests/unit/test_bench_infrastructure.py` exercising `ServerRunner` when a child command writes UTF-8 and non-UTF-8 bytes to `stderr` and exits non-zero before opening its port, asserting `RuntimeError` includes the decoded stderr tail; verify `mypy --strict tools/benchmarks` and `ruff check tools/benchmarks` exit `0`.
+- Unit regression test in `src/py/tests/unit/test_bench_infrastructure.py` spawning a child process that writes UTF-8 and invalid UTF-8 (`\xff\xfe`) bytes to `stderr` and exits non-zero, verifying `ServerRunner` raises `RuntimeError` containing the decoded replacement stderr tail without `AttributeError: 'str' object has no attribute 'decode'`.
 
 ## Verification
 
@@ -75,7 +74,7 @@ uv run --no-sync ruff check tools/benchmarks src/py/tests/unit/test_bench_infras
 
 ## Acceptance Criteria
 
-- [ ] `ServerRunner` decodes binary subprocess `stderr` cleanly on early exit and `uv run --no-sync mypy --strict tools/benchmarks` exits `0` with `0` errors (`R2`).
+- [ ] `ServerRunner` binary-stderr regression test passes in `test_bench_infrastructure.py` and `uv run --no-sync mypy --strict tools/benchmarks` exits `0` with `0` errors (`R2`).
 - [ ] Zero regressions in `test_bench_infrastructure.py` and `test_benchmarks_cli.py`.
 
 [^bench-runner]: `tools/benchmarks/runner.py::ServerRunner` — `ServerRunner._process` `Popen[str]` mismatch and `stderr` `.read().decode()` at lines 135, 149, 170.

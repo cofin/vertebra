@@ -13,6 +13,9 @@ generated:
   by: flow/0.26.0
   at: "2026-11-04T04:33:00Z"
 verified:
+  - by: agent:flow-learn
+    at: "2026-11-14T17:15:00Z"
+    commit: 334dc98d
   - by: agent:flow-setup
     at: "2026-11-07T03:55:00Z"
     commit: 067fa901
@@ -101,7 +104,7 @@ The `vertebra-server` binary ([`main.rs`](../../../../../src/rs/vertebra-http/sr
 
 ## Accept loop (`server.rs`)
 
-[`run_with_listener`](../../../../../src/rs/vertebra-http/src/server.rs)[^src-vertebra-http-src-server-rs] (and `run_with_collector`, which binds via [`bind_listener`](../../../../../src/rs/vertebra-http/src/server.rs) using `TcpSocket` with `SO_REUSEADDR`, Unix `SO_REUSEPORT` when `config.reuse_port` is true, `TCP_NODELAY`, and `listen(2048)`) constructs a shared [`ServerState`](../../../../../src/rs/vertebra-http/src/server.rs) caching `Arc<Router>`, `Arc<Dispatcher>`, `Arc<ServerConfig>`, `collector_shards`, `HmrState`, `health_endpoint: HealthEndpoint`, `profile_endpoint: ProfileEndpoint`, `access_logger: Option<Arc<AccessLogger>>`, `discovery: Option<Arc<WellKnownDiscoveryCache>>`, `sse_hub: Arc<SseHub>`, `pubsub_broker: Arc<PubSubBroker>`, `ws_registry: Arc<WsConnectionRegistry>`, `cors: Option<CompiledCorsOffload>`, `compression: Option<CompressionOffloadConfig>`, `static_mounts: Vec<StaticAssetMount>`, and `openapi_cache: Option<CompiledOpenApiCache>`. Graceful shutdown invokes `ws_registry.close_all(1001, "Server shutting down")` before waiting for active connections.
+[`run_with_listener`](../../../../../src/rs/vertebra-http/src/server.rs)[^src-vertebra-http-src-server-rs] (and `run_with_collector`, which binds via [`bind_listener`](../../../../../src/rs/vertebra-http/src/server.rs) using `TcpSocket` with `SO_REUSEADDR`, Unix `SO_REUSEPORT` when `config.reuse_port` is true, `TCP_NODELAY`, and `listen(2048)`) constructs a shared [`ServerState`](../../../../../src/rs/vertebra-http/src/server.rs) caching `Arc<Router>`, `Arc<Dispatcher>`, `Arc<ServerConfig>`, `collector_shards`, `HmrState`, `health_endpoint: HealthEndpoint`, `profile_endpoint: ProfileEndpoint`, `access_logger: Option<Arc<AccessLogger>>`, `discovery_cache: WellKnownDiscoveryCache`, `sse_hub: Arc<SseHub>`, `pubsub_broker: Arc<PubSubBroker>`, `ws_registry: Arc<WsConnectionRegistry>`, `cors: Option<CompiledCorsOffload>`, `compression: Option<CompressionOffloadConfig>`, `static_mounts: Vec<StaticAssetMount>`, and `openapi_cache: Option<CompiledOpenApiCache>`. Graceful shutdown invokes `ws_registry.close_all(1001, "Server shutting down")` before waiting for active connections.
 
 - Every accepted stream gets `TCP_NODELAY`.
 - When `enable_h2c_prior_knowledge` (`VERTEBRA_H2C`) is `false` (the default), `serve_plain` skips `MSG_PEEK` (`h2c::detect_cleartext_protocol`) and serves cleartext HTTP/1.1 directly through `hyper::server::conn::http1::Builder::new().keep_alive(true).pipeline_flush(false).max_buf_size(65_536).timer(TokioTimer::new())` with upgrades enabled. When `enable_h2c_prior_knowledge` is `true`, `serve_plain` runs `detect_cleartext_protocol` and `AutoBuilder` (`http1` + `http2` stream/connection windows from `ServerConfig`).
@@ -114,8 +117,8 @@ The `vertebra-server` binary ([`main.rs`](../../../../../src/rs/vertebra-http/sr
 
 1. **Dev HMR**: when `dev_mode` (`VERTEBRA_DEV=1`) and `hmr::is_hmr_path(path)` matches `/__vertebra/hmr` or `/__vertebra/hmr/signal`, [`hmr::handle`](../../../../../src/rs/vertebra-http/src/hmr.rs)[^src-vertebra-http-src-hmr-rs] answers.
 2. **Health probes**: `/__vertebra/health` returns `200` JSON with the live `BackpressureMetricsSnapshot` when healthy, and the cached `state.health_endpoint.try_intercept(path)` answers `/healthz`, `/livez`, `/__vertebra/health`, and `/readyz` with zero per-request `HealthEndpoint` allocation.
-3. **Runtime profile endpoint**: when `state.profile_endpoint` (`VERTEBRA_PROFILE=1`) is enabled, `ProfileEndpoint::try_handle` serves `/debug/pprof/profile` and `/debug/pprof/heap` (requiring constant-time `Authorization: Bearer <token>` matching against `VERTEBRA_PROFILE_TOKEN`).
-4. **Discovery manifests**: when `state.discovery` is configured, `GET`/`HEAD` requests for `/.well-known/*` documents (`/.well-known/agent-card.json`, `/.well-known/mcp.json`) return cached JSON with `ETag`/`304 Not Modified` support via `WellKnownDiscoveryCache::serve`.
+3. **Runtime profile endpoint**: when `state.profile_endpoint` (`VERTEBRA_PPROF_ENABLED=1`) is enabled, `ProfileEndpoint::try_handle` serves `/debug/pprof/profile` and `/debug/pprof/heap` (requiring constant-time `Authorization: Bearer <token>` matching against `VERTEBRA_PPROF_TOKEN`).
+4. **Discovery manifests**: `GET`/`HEAD` requests for `/.well-known/*` documents (`/.well-known/agent-card.json`, `/.well-known/mcp.json`) check `state.discovery_cache.serve` and return cached JSON with `ETag`/`304 Not Modified` support when populated.
 5. **CORS `OPTIONS` preflight offload**: when `state.cors` is configured and an `OPTIONS` request carries `Origin` and `Access-Control-Request-Method`, `CompiledCorsOffload::evaluate_preflight` returns immediately without acquiring Python or backpressure permits.
 6. **OpenAPI schema cache offload**: `GET`/`HEAD` requests matching `state.openapi_cache.schema_path` serve the pre-rendered OpenAPI payload (with `If-None-Match` -> `304 Not Modified`, `ETag`, `Cache-Control`, and optional CORS headers).
 7. **Static asset mounts**: `GET`/`HEAD` requests matching `state.static_mounts` serve files directly via `AssetManager::serve_static_request` (pre-compressed sidecars, `ETag`/`304`, `Range`/`206`, SPA HTML fallback, custom headers, `Content-Disposition: attachment`, and CORS headers).
@@ -140,9 +143,9 @@ The `vertebra-server` binary ([`main.rs`](../../../../../src/rs/vertebra-http/sr
 | `VERTEBRA_H2C` | `enable_h2c_prior_knowledge` | `false` |
 | `VERTEBRA_OFFLOAD_CONFIG` | `cors`, `compression`, `static_mounts`, `openapi_cache`, `discovery`, `payload_limits`, `multipart_limits`, `max_grpc_message_size`, `access_log`, `profile` JSON | auto-extracted from `app.state` |
 | `VERTEBRA_MAX_BODY_SIZE`, `VERTEBRA_MAX_DECOMPRESSED_SIZE`, `VERTEBRA_DECOMPRESSION` | `payload_limits` | `10 MiB`, `50 MiB`, `true` |
-| `VERTEBRA_MULTIPART_MAX_PARTS`, `VERTEBRA_MULTIPART_MAX_FIELD_SIZE`, `VERTEBRA_MULTIPART_MAX_FILE_SIZE`, `VERTEBRA_MULTIPART_MAX_TOTAL_SIZE` | `multipart_limits` | `100`, `1 MiB`, `50 MiB`, `100 MiB` |
+| `VERTEBRA_MULTIPART_MAX_FIELDS`, `VERTEBRA_MULTIPART_MAX_FILE_SIZE`, `VERTEBRA_MULTIPART_MAX_TOTAL_SIZE` | `multipart_limits` | `128`, `16 MiB`, `32 MiB` |
 | `VERTEBRA_GRPC_MAX_MESSAGE_SIZE` | `max_grpc_message_size` | `4 MiB` |
-| `VERTEBRA_PROFILE`, `VERTEBRA_PROFILE_TOKEN` | `profile` | `false` (`true` in `dev_mode`), `None` |
+| `VERTEBRA_PPROF_ENABLED`, `VERTEBRA_PPROF_TOKEN` | `profile` | `false`, `None` |
 | `VERTEBRA_ACCESS_LOG` (`1`/`clf`/`common`, `json`, `0`/`off`) | `access_log` | `None` |
 | `VERTEBRA_TLS_CERT`, `VERTEBRA_TLS_KEY` | `tls` | `None` |
 | `VERTEBRA_TOPOLOGY` (`auto`, `embedded`, `shm`) | `topology` (`auto` resolves to `Embedded` on Unix) | `Embedded` |

@@ -147,24 +147,6 @@ def mcp_request_headers(
     return headers
 
 
-def _default_http_request(
-    url: str,
-    headers: dict[str, str],
-    body: bytes,
-    timeout_s: float,
-) -> tuple[int, dict[str, str], bytes]:
-    req = urllib.request.Request(url, data=body, headers=headers, method="POST")
-    try:
-        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
-            resp_headers = dict(resp.headers)
-            resp_bytes = resp.read()
-            return resp.status, resp_headers, resp_bytes
-    except urllib.error.HTTPError as exc:
-        resp_headers = dict(exc.headers)
-        resp_bytes = exc.read()
-        return exc.code, resp_headers, resp_bytes
-
-
 class MCPStreamableHttpClient:
     """Async client for interacting with remote MCP servers."""
 
@@ -280,6 +262,24 @@ class MCPStreamableHttpClient:
     async def get_skill(self, name: str) -> dict[str, Any]:
         """Retrieve full details of a specific skill."""
         return await self.call("skills/get", {"name": name})
+
+
+def _default_http_request(
+    url: str,
+    headers: dict[str, str],
+    body: bytes,
+    timeout_s: float,
+) -> tuple[int, dict[str, str], bytes]:
+    req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+            resp_headers = dict(resp.headers)
+            resp_bytes = resp.read()
+            return resp.status, resp_headers, resp_bytes
+    except urllib.error.HTTPError as exc:
+        resp_headers = dict(exc.headers)
+        resp_bytes = exc.read()
+        return exc.code, resp_headers, resp_bytes
 
 
 __all__ = [

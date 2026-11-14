@@ -60,6 +60,27 @@ Pass a URI or configuration as the constructor's required positional target. Emp
 
 Import configurations from `vertebra.storage`. `from_config(config)` accepts the same configurations. Each memory store owns a private in-memory backend: the namespace is a label, and two stores built from the same `memory://` URI or `MemoryConfig` do not see each other's objects. Only handles derived with `to_async()` or `to_sync()` share data. Use local or cloud storage for persistence or cross-store sharing. See [authentication and signing](storage-auth-and-signing.md) for provider credentials.
 
+For DuckDB `httpfs` `gs://` queries, `SyncGcsBearerSecretProvider` and `AsyncGcsBearerSecretProvider` in `vertebra.storage` wrap `SyncGcpTokenCache` and `AsyncGcpTokenCache` (`from_config(GCSConfig(...), allow_ambient_adc=True, scopes=GCS_DEFAULT_SCOPES)`) to supply rotating `{"bearer_token": <token>}` dictionaries to `DuckDBSecretConfig(secret_type="gcs", value_provider=...)`. Dynamic `value_provider` secrets require `persistent=False` and a positive finite `refresh_interval_seconds`; when DuckDB surfaces an `httpfs` `(HTTP 401)` or `(HTTP 403)` response, the driver calls `provider.invalidate(used_generation)` and re-raises without retrying the failed statement so the next query rotates `CREATE OR REPLACE SECRET` automatically:
+
+```python
+from vertebra.db.adapters.duckdb import DuckDBConfig, DuckDBSecretConfig
+from vertebra.storage import GCSConfig, SyncGcsBearerSecretProvider
+
+duck_config = DuckDBConfig(
+    database=":memory:",
+    secrets=(
+        DuckDBSecretConfig(
+            name="gcs_lake",
+            secret_type="gcs",
+            value_provider=SyncGcsBearerSecretProvider.from_config(
+                GCSConfig(bucket="lake"),
+            ),
+            scope="gs://lake/",
+        ),
+    ),
+)
+```
+
 A few backend options change addressing rather than credentials:
 
 - `S3Config(virtual_hosted_style=True)` addresses the bucket as a host subdomain (`<bucket>.s3.<region>.amazonaws.com`) for data requests and SigV4 presigned URLs. `endpoint` targets an S3-compatible service; local `http://` endpoints also need `allow_http=True`.

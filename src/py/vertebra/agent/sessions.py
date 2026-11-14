@@ -44,25 +44,6 @@ class AgentSessionStore(Protocol):
         ...
 
 
-class _LockManager:
-    """Manages per-session async mutual exclusion locks."""
-
-    def __init__(self) -> None:
-        self._locks: dict[tuple[str, str], anyio.Lock] = {}
-        self._meta_lock = anyio.Lock()
-
-    @asynccontextmanager
-    async def acquire(self, owner: str, session_id: str) -> AsyncIterator[None]:
-        """Acquire the lock for a specific (owner, session_id) pair."""
-        key = (owner, session_id)
-        async with self._meta_lock:
-            if key not in self._locks:
-                self._locks[key] = anyio.Lock()
-            target_lock = self._locks[key]
-        async with target_lock:
-            yield
-
-
 class MemorySessionStore:
     """Process-local monotonic-TTL LRU OrderedDict session store with per-session locking."""
 
@@ -132,9 +113,6 @@ class CacheSessionStore:
         """Acquire a per-session lock for mutual exclusion."""
         return self._locks.acquire(owner, session_id)
 
-    def _format_key(self, owner: str, session_id: str) -> str:
-        return f"{self.key_prefix}:{owner}:{session_id}"
-
     async def load(self, owner: str, session_id: str) -> list[AgentMessage] | None:
         """Load conversation history from the backing cache store."""
         key = self._format_key(owner, session_id)
@@ -155,6 +133,9 @@ class CacheSessionStore:
         key = self._format_key(owner, session_id)
         await self.store.delete(key)
 
+    def _format_key(self, owner: str, session_id: str) -> str:
+        return f"{self.key_prefix}:{owner}:{session_id}"
+
 
 class SQLSpecSessionStore:
     """Session store persisting conversation history via parameterized SQL statements or ADK store."""
@@ -174,40 +155,6 @@ class SQLSpecSessionStore:
     def lock(self, owner: str, session_id: str) -> AbstractAsyncContextManager[None]:
         """Acquire a per-session lock for mutual exclusion."""
         return self._locks.acquire(owner, session_id)
-
-    async def _execute(self, query: str, params: dict[str, Any] | tuple[Any, ...]) -> Any:
-        """Execute query across async or sync drivers."""
-        if self.driver is None:
-            return None
-        if hasattr(self.driver, "execute"):
-            fn = self.driver.execute
-            if inspect.iscoroutinefunction(fn):
-                return await fn(query, params)
-            outcome = fn(query, params)
-            if inspect.isawaitable(outcome):
-                return await outcome
-            return outcome
-        return await anyio.to_thread.run_sync(self.driver, query, params)
-
-    async def _fetch_one(self, query: str, params: dict[str, Any] | tuple[Any, ...]) -> Any:
-        """Fetch single result row across async or sync drivers."""
-        if self.driver is None:
-            return None
-        if hasattr(self.driver, "fetch_one"):
-            fn = self.driver.fetch_one
-            if inspect.iscoroutinefunction(fn):
-                return await fn(query, params)
-            outcome = fn(query, params)
-            if inspect.isawaitable(outcome):
-                return await outcome
-            return outcome
-        cursor = await self._execute(query, params)
-        if hasattr(cursor, "fetchone"):
-            fn = cursor.fetchone
-            if inspect.iscoroutinefunction(fn):
-                return await fn()
-            return fn()
-        return None
 
     async def load(self, owner: str, session_id: str) -> list[AgentMessage] | None:
         """Load session messages from the database table or ADK store."""
@@ -299,13 +246,39 @@ class SQLSpecSessionStore:
         params = {"owner": owner, "session_id": session_id}
         await self._execute(query, params)
 
+    async def _execute(self, query: str, params: dict[str, Any] | tuple[Any, ...]) -> Any:
+        """Execute query across async or sync drivers."""
+        if self.driver is None:
+            return None
+        if hasattr(self.driver, "execute"):
+            fn = self.driver.execute
+            if inspect.iscoroutinefunction(fn):
+                return await fn(query, params)
+            outcome = fn(query, params)
+            if inspect.isawaitable(outcome):
+                return await outcome
+            return outcome
+        return await anyio.to_thread.run_sync(self.driver, query, params)
 
-def _sql_text(statement: str) -> Any:
-    """Safely build a SQLAlchemy text clause if sqlalchemy is installed, else return statement."""
-    sa = import_optional("sqlalchemy")
-    if sa is not None and hasattr(sa, "text"):
-        return sa.text(statement)
-    return statement
+    async def _fetch_one(self, query: str, params: dict[str, Any] | tuple[Any, ...]) -> Any:
+        """Fetch single result row across async or sync drivers."""
+        if self.driver is None:
+            return None
+        if hasattr(self.driver, "fetch_one"):
+            fn = self.driver.fetch_one
+            if inspect.iscoroutinefunction(fn):
+                return await fn(query, params)
+            outcome = fn(query, params)
+            if inspect.isawaitable(outcome):
+                return await outcome
+            return outcome
+        cursor = await self._execute(query, params)
+        if hasattr(cursor, "fetchone"):
+            fn = cursor.fetchone
+            if inspect.iscoroutinefunction(fn):
+                return await fn()
+            return fn()
+        return None
 
 
 class AlchemySessionStore:
@@ -397,9 +370,6 @@ class ObjectStoreSessionStore:
         """Acquire a per-session lock for mutual exclusion."""
         return self._locks.acquire(owner, session_id)
 
-    def _format_path(self, owner: str, session_id: str) -> str:
-        return f"{self.prefix}{owner}/{session_id}.json"
-
     async def load(self, owner: str, session_id: str) -> list[AgentMessage] | None:
         """Load session object from bucket store."""
         path = self._format_path(owner, session_id)
@@ -445,6 +415,36 @@ class ObjectStoreSessionStore:
         outcome = deleter(path)
         if inspect.isawaitable(outcome):
             await outcome
+
+    def _format_path(self, owner: str, session_id: str) -> str:
+        return f"{self.prefix}{owner}/{session_id}.json"
+
+
+class _LockManager:
+    """Manages per-session async mutual exclusion locks."""
+
+    def __init__(self) -> None:
+        self._locks: dict[tuple[str, str], anyio.Lock] = {}
+        self._meta_lock = anyio.Lock()
+
+    @asynccontextmanager
+    async def acquire(self, owner: str, session_id: str) -> AsyncIterator[None]:
+        """Acquire the lock for a specific (owner, session_id) pair."""
+        key = (owner, session_id)
+        async with self._meta_lock:
+            if key not in self._locks:
+                self._locks[key] = anyio.Lock()
+            target_lock = self._locks[key]
+        async with target_lock:
+            yield
+
+
+def _sql_text(statement: str) -> Any:
+    """Safely build a SQLAlchemy text clause if sqlalchemy is installed, else return statement."""
+    sa = import_optional("sqlalchemy")
+    if sa is not None and hasattr(sa, "text"):
+        return sa.text(statement)
+    return statement
 
 
 __all__ = [

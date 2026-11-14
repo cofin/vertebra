@@ -37,7 +37,7 @@ def _fmt_delta(pct: float) -> str:
 
 
 def print_summary_table(results: list[dict[str, Any]]) -> None:
-    """Print a Rich table summarizing benchmark results."""
+    """Print a Rich table summarizing both live (seconds) and stored DuckDB (ms) results."""
     table = Table(title="Benchmark Results", show_lines=True)
     table.add_column("Target", style="cyan", no_wrap=True)
     table.add_column("Topology", style="yellow")
@@ -49,7 +49,6 @@ def print_summary_table(results: list[dict[str, Any]]) -> None:
     table.add_column("Errors", justify="right")
 
     for r in results:
-        # Support both live results (seconds) and DuckDB results (ms)
         if "latency_mean_ms" in r:
             avg_ms = f"{r['latency_mean_ms']:.2f}"
             p99_ms = f"{r['latency_p99_ms']:.2f}"
@@ -72,7 +71,7 @@ def print_summary_table(results: list[dict[str, Any]]) -> None:
 
 
 def print_comparison_table(rows: list[dict[str, Any]], current_label: str, baseline_label: str) -> None:
-    """Print a comparison table between two benchmark runs."""
+    """Print a comparison table between two benchmark runs, inverting P99 delta sign."""
     table = Table(title=f"Comparison: {current_label} vs {baseline_label}", show_lines=True)
     table.add_column("Target", style="cyan", no_wrap=True)
     table.add_column("Scenario", style="magenta")
@@ -97,7 +96,7 @@ def print_comparison_table(rows: list[dict[str, Any]], current_label: str, basel
             _fmt_delta(rps_delta),
             f"{r.get('current_p99_ms', 0.0):.2f}",
             f"{r.get('baseline_p99_ms', 0.0):.2f}",
-            _fmt_delta(-p99_delta),  # Lower latency is better, so invert sign
+            _fmt_delta(-p99_delta),
         )
 
     console.print(table)
