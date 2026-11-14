@@ -1,5 +1,33 @@
 # Bundle Activity Log
 
+## [2026-11-13T20:14:00Z] archive | gcp-embeddings-and-identity
+
+- Archived `gcp-embeddings-and-identity` (`4` chapters, `15` tasks, `aecb5a12..6406bbef`), delivering audience-bound OIDC `SyncGcpIdTokenCache`/`AsyncGcpIdTokenCache` ([#113](https://github.com/cofin/vertebra/issues/113)) including `authorized_user` ADC, canonical ambient ADC fallback, Gemini protobuf field-2 and inline/file multimodal wire codecs, Vertex AI v1 REST `:predict`/`:embedContent`, `RemoteEmbedder` ID-token auth, SQL embedding pushdown parity, per-loop `EmbeddingBroker` SHM cleanup, `GemmaEmbedder` `precision` forwarding, and present-tense OKF chapters (`embeddings-and-vectors.md`, `embeddings-limitations.md`, `object-storage.md`, `pyo3-ffi-and-batch-dispatch.md`, `gcp-bigquery-and-spanner-drivers.md`).
+
+## [2026-11-13T15:20:00Z] finish | gcp-embeddings-and-identity
+
+- Completed `gcp-embeddings-and-identity` (`state: completed`) at `1cd60f53` across all `4` chapters (`15/15` tasks) on `feat/gcp-embeddings-and-identity`, delivering audience-bound OIDC `SyncGcpIdTokenCache`/`AsyncGcpIdTokenCache` across GCE metadata, service-account JWTs, IAM impersonation, `gcloud`, and `authorized_user` ADC ([#113](https://github.com/cofin/vertebra/issues/113)), canonical ambient ADC fallback, Gemini protobuf field-2 and inline/file multimodal wire codecs, Vertex AI v1 REST `:predict` / `:embedContent`, `RemoteEmbedder` ID-token auth, SQL pushdown parity, per-loop `EmbeddingBroker` SHM lifecycle, and `GemmaEmbedder` `precision` forwarding.
+
+## [2026-11-13T05:52:30Z] chapter-complete | gcp-embeddings-and-identity ch04-docs-and-okf-sync
+
+- Closed `ch04-docs-and-okf-sync` at `01a74272` (sync `b518e289`): updated `docs/usage/embeddings-and-vectors.md`, `docs/usage/storage-auth-and-signing.md`, and `docs/reference/storage.md` with Vertex AI REST, Gemini multimodal parts, `RemoteEmbedder(id_token_cache=...)`, canonical ADC order, and `authorized_user` / IAP / Cloud Run ID token rules, synchronized `embeddings-and-vectors.md` (`181L`), `object-storage.md` (`179L`), `pyo3-ffi-and-batch-dispatch.md` (`175L`), and `gcp-bigquery-and-spanner-drivers.md` (`153L`), and updated `embeddings-limitations.md` (`53L`) in place (`make docs` and `make review-check` clean).
+- Completed all `4` chapters (`15/15` tasks) of `gcp-embeddings-and-identity`.
+
+## [2026-11-13T05:22:00Z] chapter-complete | gcp-embeddings-and-identity ch03-pushdown-and-local-embedding-broker
+
+- Closed `ch03-pushdown-and-local-embedding-broker` at `5771c8e3` (sync `ef00252d`): removed implicit metadata/storage fallbacks from `OracleEmbeddingPushdown`, aligned `embed_batch`/`top_k`/boolean/dimension validation across BigQuery/Spanner/Postgres pushdowns and Spanner `AI.GENERATE_EMBEDDING` parameter binds, isolated `EmbeddingBroker` state per running event loop with `/dev/shm/vtb-qvec-*` cleanup, and forwarded `GemmaEmbedder` `precision` into `FastEmbedder.build_backend` (`ruff`, `mypy` across `12` source files, and `404` tests clean).
+- Advanced active frontier to `ch04-docs-and-okf-sync` (`gcp-embeddings-and-identity:ch04:t01`; `3` tasks remain).
+
+## [2026-11-13T05:05:30Z] chapter-complete | gcp-embeddings-and-identity ch02-vertex-and-gemini-embedder-wire-parity
+
+- Closed `ch02-vertex-and-gemini-embedder-wire-parity` at `484568a7` (sync `d031307b`): fixed Gemini `Part.text` protobuf field `2` + `inline_data`/`file_data` PyO3 wire codecs, extracted `_GoogleEmbedder` per-loop auth/retry base, migrated `VertexEmbedder` onto Vertex AI v1 REST `:predict`/`:embedContent` with multimodal, and added `id_token_cache` + `audience` `401` retry to `RemoteEmbedder` (`vector::` `3`, `grpc` `8`, `stubtest`, `ruff`, `mypy`, and `135` unit tests clean).
+- Advanced active frontier to `ch03-pushdown-and-local-embedding-broker` (`gcp-embeddings-and-identity:ch03:t01`; `7` tasks remain across `ch03`–`ch04`).
+
+## [2026-11-13T04:50:11Z] chapter-complete | gcp-embeddings-and-identity ch01-gcp-id-token-cache
+
+- Closed `ch01-gcp-id-token-cache` at `a601dee4` (sync `b3253fee`): implemented per-audience `GcpIdTokenCache` across `ServiceAccount`, `MetadataServer`, `ImpersonatedServiceAccount`, `GcloudCli`, and `AuthorizedUser` ADC, finalized canonical ambient ADC fallback, and exposed `GcpIdTokenSnapshot`, `SyncGcpIdTokenCache`, and `AsyncGcpIdTokenCache` in `vertebra._vertebra` and `vertebra.storage` (`13` Rust `gcp_auth::` tests, `19` Python tests + `2` duckdb-skipped, `clippy`, `stubtest`, `ruff`, `mypy` clean).
+- Advanced active frontier to `ch02-vertex-and-gemini-embedder-wire-parity` (`gcp-embeddings-and-identity:ch02:t01`; `11` tasks remain across `ch02`–`ch04`).
+
 ## [2026-11-13T16:11:30Z] archive | storage-integrity-and-streaming
 
 - Archived `storage-integrity-and-streaming` (`3` chapters, `9` tasks, `7f247d0e..61f0cd0e`), delivering CRC32C/MD5/SHA-256 receipts, verified streaming reads with `AsyncStreamReader.close()`, streaming Arrow/Parquet multipart writes across SQLSpec/Advanced Alchemy/Django, parameterized `{storage,bigquery,spanner,bundler}-wheel-check` isolation gates, promoted `.agents/bundles/research/upstream-sqlspec-direct-arrow-write.md`, and present-tense OKF storage chapters (`object-storage.md`, `object-storage-limitations.md`).

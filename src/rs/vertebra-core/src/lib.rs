@@ -10,6 +10,8 @@ pub mod channel;
 pub mod cleanup;
 #[cfg(feature = "gcp-auth")]
 pub mod gcp_auth;
+#[cfg(feature = "gcp-auth")]
+pub mod gcp_identity;
 pub mod guards;
 pub mod id;
 pub mod ipc;

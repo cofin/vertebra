@@ -22,9 +22,13 @@ _DISTANCE_TYPES: frozenset[str] = frozenset({"COSINE", "EUCLIDEAN", "DOT_PRODUCT
 _TASK_TO_VERTEX_TASK_TYPE: dict[str, str] = {
     "query": "RETRIEVAL_QUERY",
     "search_query": "RETRIEVAL_QUERY",
+    "retrieval_query": "RETRIEVAL_QUERY",
     "document": "RETRIEVAL_DOCUMENT",
     "search_document": "RETRIEVAL_DOCUMENT",
+    "retrieval_document": "RETRIEVAL_DOCUMENT",
+    "qa": "QUESTION_ANSWERING",
     "question_answering": "QUESTION_ANSWERING",
+    "fact": "FACT_VERIFICATION",
     "fact_verification": "FACT_VERIFICATION",
     "classification": "CLASSIFICATION",
     "clustering": "CLUSTERING",
@@ -120,15 +124,26 @@ class BigQueryEmbeddingPushdown:
             raise ValueError("dimensions must be positive")
         if not texts:
             raise ValueError("texts must not be empty")
-        params: dict[str, Any] = {"texts": list(texts)}
-        params.update(
-            task_type=_TASK_TO_VERTEX_TASK_TYPE.get(task.lower(), "RETRIEVAL_DOCUMENT"), output_dimensionality=dims
-        )
+        task_type = _TASK_TO_VERTEX_TASK_TYPE.get(task.strip().lower())
+        if task_type is None:
+            raise ValueError(f"Unsupported embedding task {task!r}")
+        params: dict[str, Any] = {"texts": list(texts), "task_type": task_type, "output_dimensionality": dims}
         rows = await self._select(self.build_generate_embedding_sql(), params)
         if len(rows) != len(texts):
             raise DataError(f"BigQuery returned {len(rows)} embedding rows for {len(texts)} texts")
         vectors = [self._extract_vector(row, dims) for row in rows]
         return VectorBatchView.from_f32_rows(vectors, normalize=normalize and self._normalize)
+
+    async def embed_batch(
+        self,
+        texts: Sequence[str],
+        *,
+        task: str = "document",
+        dimensions: int | None = None,
+        normalize: bool = True,
+    ) -> VectorBatchView:
+        """Embed a batch of texts in a single BigQuery SQL query."""
+        return await self.embed_documents(texts, task=task, dimensions=dimensions, normalize=normalize)
 
     async def embed_query(self, text: str, *, dimensions: int | None = None, normalize: bool = True) -> VectorView:
         """Generate a query vector with the retrieval-query task."""
@@ -144,6 +159,8 @@ class BigQueryEmbeddingPushdown:
         metric: str = "cosine",
     ) -> list[dict[str, Any]]:
         """Execute vector search with bound query vectors and limits."""
+        if top_k <= 0:
+            raise ValueError("top_k must be positive")
         distance_types: dict[str, Literal["COSINE", "EUCLIDEAN", "DOT_PRODUCT"]] = {
             "cosine": "COSINE",
             "euclidean": "EUCLIDEAN",
@@ -176,8 +193,13 @@ class BigQueryEmbeddingPushdown:
                 candidate = candidate.get("values")
             if isinstance(candidate, str):
                 candidate = decode_json(candidate)
-            if not isinstance(candidate, (list, tuple)) or len(candidate) < dimensions:
+            if not isinstance(candidate, (list, tuple)) or len(candidate) != dimensions:
                 raise ValueError("missing vector")
-            return [float(value) for value in candidate[:dimensions]]
+            result: list[float] = []
+            for value in candidate:
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    raise ValueError("invalid vector element")
+                result.append(float(value))
+            return result
         except (TypeError, ValueError) as exc:
             raise DataError("BigQuery embedding row has no valid vector") from exc

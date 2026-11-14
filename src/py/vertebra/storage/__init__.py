@@ -1,11 +1,13 @@
 """Native object storage, Arrow file bridge, and V4/OCI/Azure/GCS signing package for Vertebra."""
 
 from vertebra.storage._store import (
+    AsyncGcpIdTokenCache,
     AsyncGcpTokenCache,
     AsyncObjectStore,
     AsyncReadableFile,
     AsyncWritableFile,
     AzureConfig,
+    GcpIdTokenSnapshot,
     GcpTokenSnapshot,
     GCSConfig,
     HTTPConfig,
@@ -20,6 +22,7 @@ from vertebra.storage._store import (
     S3Config,
     SigningConfig,
     StorageConfig,
+    SyncGcpIdTokenCache,
     SyncGcpTokenCache,
     SyncObjectStore,
     SyncReadableFile,
@@ -28,6 +31,7 @@ from vertebra.storage._store import (
 from vertebra.storage._streaming import ByteRange, RangeNotSatisfiableError, StreamingStorageResponse, parse_byte_range
 
 __all__ = (
+    "AsyncGcpIdTokenCache",
     "AsyncGcpTokenCache",
     "AsyncObjectStore",
     "AsyncReadableFile",
@@ -35,6 +39,7 @@ __all__ = (
     "AzureConfig",
     "ByteRange",
     "GCSConfig",
+    "GcpIdTokenSnapshot",
     "GcpTokenSnapshot",
     "HTTPConfig",
     "IntegrityError",
@@ -50,6 +55,7 @@ __all__ = (
     "SigningConfig",
     "StorageConfig",
     "StreamingStorageResponse",
+    "SyncGcpIdTokenCache",
     "SyncGcpTokenCache",
     "SyncObjectStore",
     "SyncReadableFile",

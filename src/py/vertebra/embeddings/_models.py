@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 import msgspec
 
 __all__ = (
@@ -25,6 +27,8 @@ class ModelSpec(msgspec.Struct, frozen=True, gc=False):
     forbid_fp16: bool = False
     task_prefixes: bool = False
     default_files: tuple[str, ...] = ()
+    vertex_method: Literal["predict", "embed_content"] = "predict"
+    max_instances_per_request: int = 1
 
 
 MODEL_CATALOG: dict[str, ModelSpec] = {
@@ -35,6 +39,8 @@ MODEL_CATALOG: dict[str, ModelSpec] = {
         supported_dimensions=(128, 256, 512, 768, 1536, 3072),
         max_tokens=2048,
         quantizations=("fp32", "int8", "binary"),
+        vertex_method="predict",
+        max_instances_per_request=1,
     ),
     "gemini-embedding-2": ModelSpec(
         name="gemini-embedding-2",
@@ -43,6 +49,8 @@ MODEL_CATALOG: dict[str, ModelSpec] = {
         supported_dimensions=(128, 256, 512, 768, 1536, 3072),
         max_tokens=8192,
         quantizations=("fp32", "int8", "binary"),
+        vertex_method="embed_content",
+        max_instances_per_request=1,
     ),
     "text-embedding-005": ModelSpec(
         name="text-embedding-005",
@@ -51,6 +59,18 @@ MODEL_CATALOG: dict[str, ModelSpec] = {
         supported_dimensions=(128, 256, 512, 768),
         max_tokens=2048,
         quantizations=("fp32", "int8", "binary"),
+        vertex_method="predict",
+        max_instances_per_request=250,
+    ),
+    "text-multilingual-embedding-002": ModelSpec(
+        name="text-multilingual-embedding-002",
+        provider="vertex",
+        default_dimensions=768,
+        supported_dimensions=(128, 256, 512, 768),
+        max_tokens=2048,
+        quantizations=("fp32", "int8", "binary"),
+        vertex_method="predict",
+        max_instances_per_request=250,
     ),
     "embeddinggemma-2-270m": ModelSpec(
         name="embeddinggemma-2-270m",

@@ -615,6 +615,34 @@ def test_embedded_python_runtime_detection_guard_and_env_apply(
     assert detected.python_home == tmp_path / "pyhome"
     detected.require_shared_library(pkg_bin)
 
+    standalone_lib = tmp_path / "standalone-home" / "lib" / "libpython3.12.so"
+    standalone_lib.parent.mkdir(parents=True)
+    standalone_lib.write_bytes(b"ELF")
+    monkeypatch.setattr(supervisor_mod.sys, "base_prefix", str(tmp_path / "standalone-home"))
+    monkeypatch.setattr(
+        supervisor_mod.sysconfig,
+        "get_config_var",
+        lambda key: {
+            "LIBDIR": str(standalone_lib.parent),
+            "LDLIBRARY": "libpython3.12.so",
+            "ENABLE_SHARED": None,
+        }.get(key),
+    )
+    assert supervisor_mod.EmbeddedPythonRuntime.detect().is_shared is True
+
+    monkeypatch.setattr(
+        supervisor_mod.sysconfig,
+        "get_config_var",
+        lambda key: {
+            "LIBDIR": str(tmp_path / "missing-home" / "lib"),
+            "LDLIBRARY": "libpython3.12.so",
+            "ENABLE_SHARED": None,
+        }.get(key),
+    )
+    assert supervisor_mod.EmbeddedPythonRuntime.detect().is_shared is False
+
+    monkeypatch.setattr(supervisor_mod.sys, "base_prefix", str(tmp_path / "pyhome"))
+
     linux_env: dict[str, str] = {"LD_LIBRARY_PATH": "/existing/lib"}
     detected.apply(linux_env)
     assert linux_env["PYTHONHOME"] == str(tmp_path / "pyhome")

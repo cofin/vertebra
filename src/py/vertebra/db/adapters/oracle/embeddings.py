@@ -16,7 +16,6 @@ from vertebra._vertebra import (
     decode_oracle_vector_f32,
 )
 from vertebra.db.driver import AsyncDatabaseDriver, DataError
-from vertebra.utils.module_loader import import_optional
 from vertebra.utils.serializers import decode_json, encode_json
 from vertebra.utils.text import validate_identifier
 
@@ -55,7 +54,7 @@ class OracleEmbeddingPushdown:
         self._driver = driver
         self._provider = provider.lower()
         self._credential_name = credential_name
-        self._token_cache = token_cache
+        self._token_cache: Any = token_cache.to_async() if isinstance(token_cache, SyncGcpTokenCache) else token_cache
         self._applied_token_generation = 0
 
         if self._provider == "vertexai":
@@ -166,6 +165,8 @@ class OracleEmbeddingPushdown:
         metric: str = "cosine",
     ) -> list[dict[str, Any]]:
         """Search an Oracle VECTOR column using bound vectors and limits."""
+        if top_k <= 0:
+            raise ValueError("top_k must be positive")
         validate_identifier(table, "table")
         validate_identifier(embedding_column, "embedding_column", allow_dots=False)
         metrics = {"cosine": "COSINE", "euclidean": "EUCLIDEAN", "dot": "DOT"}
@@ -176,18 +177,7 @@ class OracleEmbeddingPushdown:
         return await self._select(sql, {"query_vector": encode_json(values), "top_k": top_k})
 
     async def _ensure_oracle_credential_fresh(self) -> None:
-        """Rotate `DBMS_VECTOR.CREATE_CREDENTIAL` when the token cache advances to a new generation."""
-        if self._token_cache is None and self._provider == "vertexai":
-            opts = {"use_metadata_server": "true"}
-            try:
-                self._token_cache = AsyncGcpTokenCache(opts)
-            except TypeError:
-                fallback_mod = import_optional("vertebra.storage._store")
-                if fallback_mod is None:
-                    return
-                self._token_cache = fallback_mod.AsyncGcpTokenCache(opts)
-            except ValueError:
-                return
+        """Rotate `DBMS_VECTOR.CREATE_CREDENTIAL` when an explicit token cache advances to a new generation."""
         if self._token_cache is None:
             return
         raw_snap = self._token_cache.get_token()
@@ -293,10 +283,10 @@ class OracleEmbeddingPushdown:
                     cell = OracleEmbeddingPushdown._extract_mapping_value(cell)
                 else:
                     break
-            if not isinstance(cell, (tuple, list)) or len(cell) < dimensions:
+            if not isinstance(cell, (tuple, list)) or len(cell) != dimensions:
                 raise ValueError("missing vector")
             result: list[float] = []
-            for value in cell[:dimensions]:
+            for value in cell:
                 if isinstance(value, bool) or not isinstance(value, (int, float)):
                     raise ValueError("invalid vector element")
                 result.append(float(value))

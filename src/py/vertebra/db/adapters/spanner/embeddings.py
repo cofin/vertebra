@@ -25,6 +25,23 @@ _DISTANCE_FUNCTIONS: dict[bool, dict[str, str]] = {
     False: {"COSINE": "COSINE_DISTANCE", "EUCLIDEAN": "EUCLIDEAN_DISTANCE", "DOT_PRODUCT": "DOT_PRODUCT"},
 }
 
+_TASK_TO_VERTEX_TASK_TYPE: dict[str, str] = {
+    "query": "RETRIEVAL_QUERY",
+    "search_query": "RETRIEVAL_QUERY",
+    "retrieval_query": "RETRIEVAL_QUERY",
+    "document": "RETRIEVAL_DOCUMENT",
+    "search_document": "RETRIEVAL_DOCUMENT",
+    "retrieval_document": "RETRIEVAL_DOCUMENT",
+    "qa": "QUESTION_ANSWERING",
+    "question_answering": "QUESTION_ANSWERING",
+    "fact": "FACT_VERIFICATION",
+    "fact_verification": "FACT_VERIFICATION",
+    "classification": "CLASSIFICATION",
+    "clustering": "CLUSTERING",
+    "semantic_similarity": "SEMANTIC_SIMILARITY",
+    "code_retrieval": "CODE_RETRIEVAL_QUERY",
+}
+
 
 class SpannerEmbeddingPushdown:
     """Execute Spanner embedding SQL through a sync or async database driver."""
@@ -68,10 +85,17 @@ class SpannerEmbeddingPushdown:
             ValueError: When ``model_endpoint`` is not a valid SQL identifier.
         """
         model_endpoint = validate_identifier(self._model_endpoint, "model_endpoint")
-        fn_name = "AI.GENERATE_EMBEDDING" if self._use_ai_function else "ML.PREDICT"
+        if self._use_ai_function:
+            return (
+                "SELECT embeddings.values AS embedding, idx "
+                f"FROM AI.GENERATE_EMBEDDING(MODEL {model_endpoint}, "
+                "(SELECT content, idx FROM UNNEST(@texts) AS content WITH OFFSET AS idx), "
+                "STRUCT(TRUE AS flatten_json_output, @task_type AS task_type, @output_dimensionality AS output_dimensionality)"
+                ") ORDER BY idx"
+            )
         return (
             "SELECT embeddings.values AS embedding, idx "
-            f"FROM {fn_name}(MODEL {model_endpoint}, "
+            f"FROM ML.PREDICT(MODEL {model_endpoint}, "
             "(SELECT content, idx FROM UNNEST(@texts) AS content WITH OFFSET AS idx)) "
             "ORDER BY idx"
         )
@@ -121,12 +145,29 @@ class SpannerEmbeddingPushdown:
             raise ValueError("dimensions must be positive")
         if not texts:
             raise ValueError("texts must not be empty")
+        task_type = _TASK_TO_VERTEX_TASK_TYPE.get(task.strip().lower())
+        if task_type is None:
+            raise ValueError(f"Unsupported embedding task {task!r}")
         params: dict[str, Any] = {"texts": list(texts)}
+        if self._use_ai_function:
+            params["task_type"] = task_type
+            params["output_dimensionality"] = dims
         rows = await self._select(self.build_generate_embedding_sql(), params)
         if len(rows) != len(texts):
             raise DataError(f"Spanner returned {len(rows)} embedding rows for {len(texts)} texts")
         vectors = [self._extract_vector(row, dims) for row in rows]
         return VectorBatchView.from_f32_rows(vectors, normalize=normalize and self._normalize)
+
+    async def embed_batch(
+        self,
+        texts: Sequence[str],
+        *,
+        task: str = "document",
+        dimensions: int | None = None,
+        normalize: bool = True,
+    ) -> VectorBatchView:
+        """Embed a batch of texts in a single Spanner SQL query."""
+        return await self.embed_documents(texts, task=task, dimensions=dimensions, normalize=normalize)
 
     async def embed_query(self, text: str, *, dimensions: int | None = None, normalize: bool = True) -> VectorView:
         """Generate a query vector with the retrieval-query task."""
@@ -142,6 +183,8 @@ class SpannerEmbeddingPushdown:
         metric: str = "cosine",
     ) -> list[dict[str, Any]]:
         """Execute vector search with bound query vectors and limits."""
+        if top_k <= 0:
+            raise ValueError("top_k must be positive")
         distance_types: dict[str, Literal["COSINE", "EUCLIDEAN", "DOT_PRODUCT"]] = {
             "cosine": "COSINE",
             "euclidean": "EUCLIDEAN",
@@ -174,8 +217,13 @@ class SpannerEmbeddingPushdown:
                 candidate = candidate.get("values")
             if isinstance(candidate, str):
                 candidate = decode_json(candidate)
-            if not isinstance(candidate, (list, tuple)) or len(candidate) < dimensions:
+            if not isinstance(candidate, (list, tuple)) or len(candidate) != dimensions:
                 raise ValueError("missing vector")
-            return [float(value) for value in candidate[:dimensions]]
+            result: list[float] = []
+            for value in candidate:
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    raise ValueError("invalid vector element")
+                result.append(float(value))
+            return result
         except (TypeError, ValueError) as exc:
             raise DataError("Spanner embedding row has no valid vector") from exc

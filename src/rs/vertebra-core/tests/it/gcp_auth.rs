@@ -12,6 +12,10 @@ use tokio::net::TcpListener;
 use vertebra_core::gcp_auth::{
     DEFAULT_GCP_SCOPES, DEFAULT_REFRESH_SKEW_MS, GcpAuthSource, GcpTokenCache, ProxyPolicy,
 };
+use vertebra_core::gcp_identity::{
+    DEFAULT_ID_TOKEN_REFRESH_SKEW_MS, DEFAULT_MAX_ID_TOKEN_AUDIENCES, GcpIdTokenCache,
+    GcpIdTokenOptions, MetadataIdTokenFormat, validate_id_token_audience,
+};
 
 const TEST_RSA_PRIVATE_KEY_PEM: &str = concat!(
     "-----BEGIN PRIVATE KEY-----\n",
@@ -673,4 +677,668 @@ async fn explicit_login_scopes_passed_to_gcloud_without_unscoped_fallback() {
         .await
         .expect_err("must not fall back to unscoped gcloud auth print-access-token");
     assert!(err.contains("adc failed"));
+}
+
+static ENV_MUTATION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+struct EnvVarGuard {
+    saved: Vec<(&'static str, Option<String>)>,
+}
+
+impl EnvVarGuard {
+    fn set(vars: &[(&'static str, Option<&str>)]) -> Self {
+        let mut saved = Vec::with_capacity(vars.len());
+        for (key, val) in vars {
+            saved.push((*key, std::env::var(key).ok()));
+            // SAFETY: Caller holds `ENV_MUTATION_LOCK` for the full lifetime of this guard.
+            unsafe {
+                match val {
+                    Some(v) => std::env::set_var(key, v),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+        Self { saved }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        for (key, prev) in self.saved.iter().rev() {
+            // SAFETY: Caller holds `ENV_MUTATION_LOCK` across construction and drop.
+            unsafe {
+                match prev {
+                    Some(v) => std::env::set_var(key, v),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
+}
+
+#[derive(serde::Serialize)]
+struct MockIdTokenJwtClaims<'a> {
+    iss: &'a str,
+    aud: serde_json::Value,
+    iat: u64,
+    exp: u64,
+}
+
+fn sign_test_id_token(aud: serde_json::Value, exp_offset_secs: i64) -> String {
+    let now_secs = vertebra_core::gcp_auth::current_unix_ms() / 1_000;
+    let exp = if exp_offset_secs >= 0 {
+        now_secs.saturating_add(exp_offset_secs as u64)
+    } else {
+        now_secs.saturating_sub(exp_offset_secs.unsigned_abs())
+    };
+    let claims = MockIdTokenJwtClaims {
+        iss: "https://accounts.google.com",
+        aud,
+        iat: now_secs,
+        exp,
+    };
+    let encoding_key = jsonwebtoken::EncodingKey::from_rsa_pem(TEST_RSA_PRIVATE_KEY_PEM.as_bytes())
+        .expect("rsa encoding key");
+    jsonwebtoken::encode(
+        &jsonwebtoken::Header::new(Algorithm::RS256),
+        &claims,
+        &encoding_key,
+    )
+    .expect("encode mock id_token")
+}
+
+#[derive(Debug, Deserialize)]
+struct DecodedIdAssertionClaims {
+    iss: String,
+    sub: String,
+    #[serde(default)]
+    scope: Option<String>,
+    aud: String,
+    target_audience: String,
+    iat: u64,
+    exp: u64,
+}
+
+#[tokio::test]
+async fn id_token_service_account_single_flight_skew_invalidation_and_redaction() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local_addr");
+    let token_uri = format!("http://127.0.0.1:{}/token", addr.port());
+    let expected_token_uri = token_uri.clone();
+    let call_count = Arc::new(AtomicUsize::new(0));
+    let call_count_server = Arc::clone(&call_count);
+
+    tokio::spawn(async move {
+        let decoding_key =
+            DecodingKey::from_rsa_pem(TEST_RSA_PUBLIC_KEY_PEM.as_bytes()).expect("rsa pubkey");
+        let mut validation = Validation::new(Algorithm::RS256);
+        validation.set_audience(&[&expected_token_uri]);
+
+        while let Ok((mut stream, _)) = listener.accept().await {
+            let count = Arc::clone(&call_count_server);
+            let decoding_key = decoding_key.clone();
+            let validation = validation.clone();
+            let expected_token_uri = expected_token_uri.clone();
+            tokio::spawn(async move {
+                let req = read_http_request(&mut stream).await;
+                let (_, body) = req.split_once("\r\n\r\n").expect("http body");
+                let form: HashMap<String, String> = url::form_urlencoded::parse(body.as_bytes())
+                    .into_owned()
+                    .collect();
+                assert_eq!(
+                    form.get("grant_type").map(String::as_str),
+                    Some("urn:ietf:params:oauth:grant-type:jwt-bearer")
+                );
+                let assertion = form.get("assertion").expect("jwt assertion");
+                let token_data =
+                    decode::<DecodedIdAssertionClaims>(assertion, &decoding_key, &validation)
+                        .expect("valid RS256 ID assertion");
+                assert_eq!(token_data.claims.iss, "id-sa@proj.iam.gserviceaccount.com");
+                assert_eq!(token_data.claims.sub, "id-sa@proj.iam.gserviceaccount.com");
+                assert_eq!(token_data.claims.aud, expected_token_uri);
+                assert_eq!(token_data.claims.target_audience, "https://svc-a.run.app");
+                assert!(token_data.claims.scope.is_none());
+                assert_eq!(token_data.claims.exp - token_data.claims.iat, 3600);
+
+                let seq = count.fetch_add(1, Ordering::SeqCst) + 1;
+                let exp_offset = if seq == 1 { 3600 } else { 3700 };
+                let id_tok =
+                    sign_test_id_token(serde_json::json!("https://svc-a.run.app"), exp_offset);
+                let resp_body = format!(r#"{{"id_token":"{id_tok}"}}"#);
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    resp_body.len(),
+                    resp_body
+                );
+                let _ = stream.write_all(resp.as_bytes()).await;
+            });
+        }
+    });
+
+    let sa_json = serde_json::json!({
+        "type": "service_account",
+        "project_id": "proj",
+        "private_key": TEST_RSA_PRIVATE_KEY_PEM,
+        "client_email": "id-sa@proj.iam.gserviceaccount.com",
+        "token_uri": token_uri
+    })
+    .to_string();
+
+    let mut opts = HashMap::new();
+    opts.insert("service_account_key".to_string(), sa_json);
+    opts.insert("proxy_policy".to_string(), "direct".to_string());
+    let cache = GcpIdTokenCache::from_options(&opts).expect("id token cache");
+    assert_eq!(cache.refresh_skew_ms(), DEFAULT_ID_TOKEN_REFRESH_SKEW_MS);
+
+    let mut tasks = Vec::new();
+    for _ in 0..8 {
+        let c = Arc::clone(&cache);
+        tasks.push(tokio::spawn(async move {
+            c.get_or_refresh("https://svc-a.run.app", false)
+                .await
+                .expect("id token")
+        }));
+    }
+    let mut first_tok = String::new();
+    for task in tasks {
+        let snap = task.await.expect("join");
+        assert_eq!(snap.audience, "https://svc-a.run.app");
+        assert_eq!(snap.generation, 1);
+        let debug_str = format!("{snap:?}");
+        assert!(debug_str.contains("[REDACTED]"));
+        assert!(!debug_str.contains(&snap.id_token));
+        first_tok = snap.id_token.clone();
+    }
+    assert_eq!(call_count.load(Ordering::SeqCst), 1);
+
+    let cached_again = cache
+        .get_or_refresh("https://svc-a.run.app", false)
+        .await
+        .expect("cached hit");
+    assert_eq!(cached_again.id_token, first_tok);
+    assert_eq!(call_count.load(Ordering::SeqCst), 1);
+
+    assert!(!cache.needs_refresh(
+        "https://svc-a.run.app",
+        cached_again.expires_at_unix_ms - 400_000
+    ));
+    assert!(cache.needs_refresh(
+        "https://svc-a.run.app",
+        cached_again.expires_at_unix_ms - 100_000
+    ));
+
+    cache.invalidate("https://svc-a.run.app", 999);
+    let still_cached = cache
+        .get_or_refresh("https://svc-a.run.app", false)
+        .await
+        .expect("stale invalidate is no-op");
+    assert_eq!(still_cached.generation, 1);
+    assert_eq!(call_count.load(Ordering::SeqCst), 1);
+
+    cache.invalidate("https://svc-a.run.app", 1);
+    let refreshed = cache
+        .get_or_refresh("https://svc-a.run.app", false)
+        .await
+        .expect("refreshed after matching generation invalidate");
+    assert_eq!(refreshed.generation, 2);
+    assert_eq!(call_count.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn id_token_metadata_formats_claims_validation_and_eviction() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local_addr");
+    let endpoint = format!("http://127.0.0.1:{}", addr.port());
+    let request_urls = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let request_urls_srv = Arc::clone(&request_urls);
+    let mode = Arc::new(std::sync::Mutex::new(String::from("normal")));
+    let mode_srv = Arc::clone(&mode);
+
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            let urls = Arc::clone(&request_urls_srv);
+            let mode_ref = Arc::clone(&mode_srv);
+            tokio::spawn(async move {
+                let req = read_http_request(&mut stream).await;
+                let first_line = req.lines().next().unwrap_or_default().to_string();
+                assert!(req.to_ascii_lowercase().contains("metadata-flavor: google"));
+                urls.lock().expect("lock").push(first_line.clone());
+
+                let path_query = first_line.split_whitespace().nth(1).unwrap_or_default();
+                let parsed =
+                    url::Url::parse(&format!("http://localhost{path_query}")).expect("url");
+                let aud = parsed
+                    .query_pairs()
+                    .find(|(k, _)| k == "audience")
+                    .map(|(_, v)| v.into_owned())
+                    .unwrap_or_default();
+
+                let cur_mode = mode_ref.lock().expect("lock").clone();
+                let body = match cur_mode.as_str() {
+                    "malformed" => "not-a-jwt".to_string(),
+                    "expired" => sign_test_id_token(serde_json::json!(aud), -10),
+                    "short_ttl" => sign_test_id_token(serde_json::json!(aud), 60),
+                    "wrong_aud" => {
+                        sign_test_id_token(serde_json::json!("https://other.run.app"), 3600)
+                    }
+                    _ => {
+                        let exp_offset = if aud.ends_with("aud-1") {
+                            600
+                        } else if aud.ends_with("aud-2") {
+                            1200
+                        } else {
+                            1800
+                        };
+                        sign_test_id_token(serde_json::json!([aud]), exp_offset)
+                    }
+                };
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(resp.as_bytes()).await;
+            });
+        }
+    });
+
+    assert!(validate_id_token_audience("").is_err());
+    assert!(validate_id_token_audience("   ").is_err());
+    assert!(validate_id_token_audience("https://bad\n.run.app").is_err());
+    assert!(validate_id_token_audience(&"a".repeat(2049)).is_err());
+
+    let mut bad_skew = HashMap::new();
+    bad_skew.insert("use_metadata_server".to_string(), "true".to_string());
+    bad_skew.insert("id_token_refresh_skew_ms".to_string(), "nope".to_string());
+    assert!(
+        GcpIdTokenCache::from_options(&bad_skew)
+            .unwrap_err()
+            .contains("id_token_refresh_skew_ms")
+    );
+
+    let mut bad_fmt = HashMap::new();
+    bad_fmt.insert("use_metadata_server".to_string(), "true".to_string());
+    bad_fmt.insert(
+        "metadata_id_token_format".to_string(),
+        "compact".to_string(),
+    );
+    assert!(
+        GcpIdTokenCache::from_options(&bad_fmt)
+            .unwrap_err()
+            .contains("metadata_id_token_format")
+    );
+
+    let mut bad_max = HashMap::new();
+    bad_max.insert("use_metadata_server".to_string(), "true".to_string());
+    bad_max.insert("max_id_token_audiences".to_string(), "0".to_string());
+    assert!(
+        GcpIdTokenCache::from_options(&bad_max)
+            .unwrap_err()
+            .contains("max_id_token_audiences")
+    );
+
+    let mut std_opts = HashMap::new();
+    std_opts.insert("use_metadata_server".to_string(), "true".to_string());
+    std_opts.insert("metadata_host".to_string(), endpoint.clone());
+    std_opts.insert(
+        "metadata_id_token_format".to_string(),
+        "standard".to_string(),
+    );
+    std_opts.insert("max_id_token_audiences".to_string(), "2".to_string());
+    let std_cache = GcpIdTokenCache::from_options(&std_opts).expect("standard metadata cache");
+
+    assert!(
+        std_cache
+            .get_or_refresh("https://bad\x00.run.app", false)
+            .await
+            .is_err()
+    );
+    assert!(request_urls.lock().expect("lock").is_empty());
+
+    let _s1 = std_cache
+        .get_or_refresh("https://aud-1", false)
+        .await
+        .expect("aud-1");
+    let _s2 = std_cache
+        .get_or_refresh("https://aud-2", false)
+        .await
+        .expect("aud-2");
+    let _s3 = std_cache
+        .get_or_refresh("https://aud-3", false)
+        .await
+        .expect("aud-3 evicts earliest aud-1");
+
+    let urls = request_urls.lock().expect("lock").clone();
+    assert!(urls[0].contains("/computeMetadata/v1/instance/service-accounts/default/identity?"));
+    assert!(urls[0].contains("format=standard"));
+    assert!(urls[0].contains("audience=https%3A%2F%2Faud-1"));
+
+    let now_ms = vertebra_core::gcp_auth::current_unix_ms();
+    assert!(std_cache.get_cached("https://aud-1", now_ms).is_none());
+    assert!(std_cache.get_cached("https://aud-2", now_ms).is_some());
+    assert!(std_cache.get_cached("https://aud-3", now_ms).is_some());
+
+    let mut full_opts = HashMap::new();
+    full_opts.insert("use_metadata_server".to_string(), "true".to_string());
+    full_opts.insert("metadata_host".to_string(), endpoint);
+    let full_cache = GcpIdTokenCache::from_options(&full_opts).expect("full metadata cache");
+    assert_eq!(DEFAULT_MAX_ID_TOKEN_AUDIENCES, 64);
+    assert!(
+        full_cache
+            .get_or_refresh("https://aud-full", false)
+            .await
+            .is_ok()
+    );
+    assert!(
+        request_urls
+            .lock()
+            .expect("lock")
+            .last()
+            .expect("last")
+            .contains("format=full")
+    );
+
+    *mode.lock().expect("lock") = "malformed".to_string();
+    assert!(
+        full_cache
+            .get_or_refresh("https://aud-bad-1", false)
+            .await
+            .is_err()
+    );
+    *mode.lock().expect("lock") = "expired".to_string();
+    assert!(
+        full_cache
+            .get_or_refresh("https://aud-bad-2", false)
+            .await
+            .unwrap_err()
+            .contains("expired")
+    );
+    *mode.lock().expect("lock") = "wrong_aud".to_string();
+    assert!(
+        full_cache
+            .get_or_refresh("https://aud-bad-3", false)
+            .await
+            .unwrap_err()
+            .contains("mismatch")
+    );
+
+    *mode.lock().expect("lock") = "short_ttl".to_string();
+    let urls_before_short = request_urls.lock().expect("lock").len();
+    let short_first = full_cache
+        .get_or_refresh("https://aud-short-ttl", false)
+        .await
+        .expect("short ttl mint");
+    let short_second = full_cache
+        .get_or_refresh("https://aud-short-ttl", false)
+        .await
+        .expect("short ttl cached hit");
+    assert_eq!(short_second.generation, short_first.generation);
+    assert_eq!(
+        request_urls.lock().expect("lock").len(),
+        urls_before_short + 1
+    );
+
+    let full_default = GcpIdTokenOptions::default();
+    assert_eq!(full_default.metadata_format, MetadataIdTokenFormat::Full);
+}
+
+#[tokio::test]
+async fn id_token_impersonation_user_adc_cli_and_static_rejection() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local_addr");
+    let base_url = format!("http://127.0.0.1:{}", addr.port());
+    let token_calls = Arc::new(AtomicUsize::new(0));
+    let token_calls_srv = Arc::clone(&token_calls);
+    let omit_id_token = Arc::new(AtomicBool::new(false));
+    let omit_id_token_srv = Arc::clone(&omit_id_token);
+    let saw_include_email = Arc::new(AtomicBool::new(false));
+    let saw_include_email_srv = Arc::clone(&saw_include_email);
+
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            let tc = Arc::clone(&token_calls_srv);
+            let omit = Arc::clone(&omit_id_token_srv);
+            let inc = Arc::clone(&saw_include_email_srv);
+            tokio::spawn(async move {
+                let req = read_http_request(&mut stream).await;
+                let (_, body) = req.split_once("\r\n\r\n").expect("body");
+                let resp_body = if req.starts_with("POST /token ") {
+                    tc.fetch_add(1, Ordering::SeqCst);
+                    let form: HashMap<String, String> =
+                        url::form_urlencoded::parse(body.as_bytes())
+                            .into_owned()
+                            .collect();
+                    assert_eq!(
+                        form.get("grant_type").map(String::as_str),
+                        Some("refresh_token")
+                    );
+                    assert!(!form.contains_key("scope"));
+                    if omit.load(Ordering::SeqCst) {
+                        r#"{"access_token":"mock-oauth-token-only","expires_in":3600,"token_type":"Bearer"}"#.to_string()
+                    } else {
+                        let cid = form.get("client_id").map(String::as_str).unwrap_or("cid");
+                        let id_tok = sign_test_id_token(serde_json::json!(cid), 3600);
+                        format!(
+                            r#"{{"access_token":"mock-oauth-token","expires_in":3600,"id_token":"{id_tok}"}}"#
+                        )
+                    }
+                } else {
+                    assert!(req.contains(":generateIdToken"));
+                    assert!(req.contains("Bearer mock-oauth-token"));
+                    let parsed: serde_json::Value = serde_json::from_str(body).expect("json body");
+                    let aud = parsed["audience"].as_str().expect("audience");
+                    if parsed["includeEmail"].as_bool() == Some(true) {
+                        inc.store(true, Ordering::SeqCst);
+                    }
+                    let id_tok = sign_test_id_token(serde_json::json!(aud), 3600);
+                    format!(r#"{{"token":"{id_tok}"}}"#)
+                };
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    resp_body.len(),
+                    resp_body
+                );
+                let _ = stream.write_all(resp.as_bytes()).await;
+            });
+        }
+    });
+
+    let mut static_opts = HashMap::new();
+    static_opts.insert("access_token".to_string(), "mock-oauth-token".to_string());
+    static_opts.insert("allow_ambient_adc".to_string(), "false".to_string());
+    let static_err = GcpIdTokenCache::from_options(&static_opts)
+        .expect_err("static access tokens must fail at construction");
+    assert!(static_err.contains("static access tokens cannot mint ID tokens"));
+
+    let mut user_opts = HashMap::new();
+    user_opts.insert(
+        "client_id".to_string(),
+        "my-adc-client-id.apps.googleusercontent.com".to_string(),
+    );
+    user_opts.insert("client_secret".to_string(), "my-secret".to_string());
+    user_opts.insert("refresh_token".to_string(), "my-refresh".to_string());
+    user_opts.insert("token_uri".to_string(), format!("{base_url}/token"));
+    user_opts.insert("proxy_policy".to_string(), "direct".to_string());
+
+    let user_cache = GcpIdTokenCache::from_options(&user_opts).expect("authorized_user id cache");
+    let snap = user_cache
+        .get_or_refresh("my-adc-client-id.apps.googleusercontent.com", false)
+        .await
+        .expect("authorized_user client_id audience");
+    assert_eq!(snap.audience, "my-adc-client-id.apps.googleusercontent.com");
+    assert_eq!(token_calls.load(Ordering::SeqCst), 1);
+
+    let mismatch_err = user_cache
+        .get_or_refresh("https://cloudrun-svc-abc.a.run.app", false)
+        .await
+        .expect_err("non-client_id audience must fail pre-network");
+    assert!(mismatch_err.contains("target_service_account"));
+    assert!(mismatch_err.contains("programmaticClients"));
+    assert!(mismatch_err.contains("my-adc-client-id.apps.googleusercontent.com"));
+    assert_eq!(token_calls.load(Ordering::SeqCst), 1);
+
+    omit_id_token.store(true, Ordering::SeqCst);
+    let missing_tok_err = user_cache
+        .get_or_refresh("my-adc-client-id.apps.googleusercontent.com", true)
+        .await
+        .expect_err("missing id_token must fail loud without CLI fallback");
+    assert!(missing_tok_err.contains("contained no id_token"));
+    assert!(missing_tok_err.contains("gcloud auth application-default login"));
+    omit_id_token.store(false, Ordering::SeqCst);
+
+    let mut imp_opts = user_opts.clone();
+    imp_opts.insert(
+        "target_service_account".to_string(),
+        "runner@proj.iam.gserviceaccount.com".to_string(),
+    );
+    imp_opts.insert("iam_endpoint".to_string(), base_url.clone());
+    imp_opts.insert("include_email".to_string(), "true".to_string());
+    let imp_cache = GcpIdTokenCache::from_options(&imp_opts).expect("impersonated user adc cache");
+    let imp_a = imp_cache
+        .get_or_refresh("https://cloudrun-a.run.app", false)
+        .await
+        .expect("impersonated aud A");
+    let imp_b = imp_cache
+        .get_or_refresh("https://cloudrun-b.run.app", false)
+        .await
+        .expect("impersonated aud B");
+    assert_eq!(imp_a.audience, "https://cloudrun-a.run.app");
+    assert_eq!(imp_b.audience, "https://cloudrun-b.run.app");
+    assert!(saw_include_email.load(Ordering::SeqCst));
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ok_cli = dir.path().join("mock-gcloud-id");
+        let cli_tok = sign_test_id_token(serde_json::json!("https://cli-aud.run.app"), 3600);
+        std::fs::write(
+            &ok_cli,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = \"auth\" ] && [ \"$2\" = \"print-identity-token\" ] && [ \"$3\" = \"--audiences=https://cli-aud.run.app\" ] && [ \"$4\" = \"--quiet\" ]; then\n  echo \"{cli_tok}\"\n  exit 0\nfi\nexit 1\n"
+            ),
+        )
+        .expect("write cli");
+        std::fs::set_permissions(&ok_cli, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod cli");
+        let cli_cache = GcpIdTokenCache::new(
+            Arc::new(GcpTokenCache::new(
+                GcpAuthSource::GcloudCli {
+                    binary: ok_cli,
+                    timeout: Duration::from_secs(2),
+                    quota_project_id: None,
+                    impersonate_service_account: None,
+                },
+                DEFAULT_REFRESH_SKEW_MS,
+            )),
+            GcpIdTokenOptions::default(),
+        )
+        .expect("cli id cache");
+        let cli_snap = cli_cache
+            .get_or_refresh("https://cli-aud.run.app", false)
+            .await
+            .expect("cli id token");
+        assert_eq!(cli_snap.id_token, cli_tok);
+
+        let timeout_cli = dir.path().join("mock-gcloud-timeout");
+        std::fs::write(&timeout_cli, "#!/bin/sh\nsleep 60\n").expect("write sleep");
+        std::fs::set_permissions(&timeout_cli, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod sleep");
+        let timeout_cache = GcpIdTokenCache::new(
+            Arc::new(GcpTokenCache::new(
+                GcpAuthSource::GcloudCli {
+                    binary: timeout_cli,
+                    timeout: Duration::from_millis(150),
+                    quota_project_id: None,
+                    impersonate_service_account: None,
+                },
+                DEFAULT_REFRESH_SKEW_MS,
+            )),
+            GcpIdTokenOptions::default(),
+        )
+        .expect("timeout cli cache");
+        let timeout_err = timeout_cache
+            .get_or_refresh("https://cli-aud.run.app", false)
+            .await
+            .expect_err("cli timeout must err");
+        assert!(timeout_err.contains("timed out after 150 ms"));
+    }
+}
+
+#[test]
+fn canonical_adc_explicit_error_isolation_and_metadata_fallback() {
+    let _lock = ENV_MUTATION_LOCK.lock().expect("env lock");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let valid_sa_path = dir.path().join("ambient_sa.json");
+    std::fs::write(
+        &valid_sa_path,
+        serde_json::json!({
+            "type": "service_account",
+            "project_id": "ambient-proj",
+            "private_key": TEST_RSA_PRIVATE_KEY_PEM,
+            "client_email": "ambient@ambient-proj.iam.gserviceaccount.com",
+            "token_uri": "http://127.0.0.1:9/token"
+        })
+        .to_string(),
+    )
+    .expect("write ambient sa");
+
+    let empty_home = dir.path().join("empty_home");
+    std::fs::create_dir_all(&empty_home).expect("mkdir");
+    let valid_sa_str = valid_sa_path.to_string_lossy().into_owned();
+    let empty_home_str = empty_home.to_string_lossy().into_owned();
+
+    let _guard = EnvVarGuard::set(&[
+        (
+            "GOOGLE_APPLICATION_CREDENTIALS",
+            Some(valid_sa_str.as_str()),
+        ),
+        ("CLOUDSDK_CONFIG", Some(empty_home_str.as_str())),
+        ("HOME", Some(empty_home_str.as_str())),
+        ("GOOGLE_OAUTH_ACCESS_TOKEN", None),
+        ("CLOUDSDK_AUTH_ACCESS_TOKEN", None),
+    ]);
+
+    let mut bad_opts = HashMap::new();
+    bad_opts.insert(
+        "service_account_path".to_string(),
+        dir.path()
+            .join("does-not-exist.json")
+            .to_string_lossy()
+            .into_owned(),
+    );
+    assert!(
+        GcpTokenCache::from_options(&bad_opts, DEFAULT_GCP_SCOPES).is_none(),
+        "explicit missing service_account_path must not fall through to ambient ADC"
+    );
+
+    let mut bad_json_opts = HashMap::new();
+    bad_json_opts.insert("service_account_key".to_string(), "{not-json".to_string());
+    assert!(
+        GcpTokenCache::from_options(&bad_json_opts, DEFAULT_GCP_SCOPES).is_none(),
+        "explicit malformed service_account_key must not fall through to ambient ADC"
+    );
+
+    drop(_guard);
+    let _no_adc_guard = EnvVarGuard::set(&[
+        ("GOOGLE_APPLICATION_CREDENTIALS", None),
+        ("CLOUDSDK_CONFIG", Some(empty_home_str.as_str())),
+        ("HOME", Some(empty_home_str.as_str())),
+        ("GOOGLE_OAUTH_ACCESS_TOKEN", None),
+        ("CLOUDSDK_AUTH_ACCESS_TOKEN", None),
+    ]);
+
+    let fallback_cache = GcpTokenCache::from_options(&HashMap::new(), DEFAULT_GCP_SCOPES)
+        .expect("ambient ADC discovery must end with MetadataServer");
+    assert!(matches!(
+        fallback_cache.auth_source(),
+        GcpAuthSource::MetadataServer { .. }
+    ));
+
+    let mut no_ambient_opts = HashMap::new();
+    no_ambient_opts.insert("allow_ambient_adc".to_string(), "false".to_string());
+    assert!(
+        GcpTokenCache::from_options(&no_ambient_opts, DEFAULT_GCP_SCOPES).is_none(),
+        "allow_ambient_adc=false must disable MetadataServer fallback"
+    );
 }

@@ -202,12 +202,13 @@ def test_vtb_workers_run_and_vtb_run_oneshot_cli(monkeypatch: pytest.MonkeyPatch
 
     oneshot_recorded: dict[str, str] = {}
 
-    def fake_oneshot_cli(app_path: str, job_name: str) -> int:
+    def fake_oneshot_worker_cli(app_path: str, *, oneshot_job: str | None = None, **_kwargs: object) -> int:
+        assert oneshot_job is not None
         oneshot_recorded["app_path"] = app_path
-        oneshot_recorded["job_name"] = job_name
+        oneshot_recorded["job_name"] = oneshot_job
         return 0
 
-    monkeypatch.setattr("vertebra.cli.run._execute_oneshot_cli", fake_oneshot_cli)
+    monkeypatch.setattr("vertebra.cli.workers.execute_worker_cli", fake_oneshot_worker_cli)
     run_res = cli_runner.invoke(run, ["example.app:app", "--oneshot-job", "sync_catalog", "--no-banner"])
     assert run_res.exit_code == 0
     assert oneshot_recorded == {"app_path": "example.app:app", "job_name": "sync_catalog"}

@@ -1,8 +1,0 @@
-# Chapters: Google Cloud Embedding Transports, Identity Tokens, and Local Broker Parity (`gcp-embeddings-and-identity`)
-
-| Chapter | State | Tasks | Summary & Fast Chapter Gate |
-| --- | --- | --- | --- |
-| [`ch01-gcp-id-token-cache`](ch01-gcp-id-token-cache/spec.md) | `planned` | `4` | Audience-bound Rust & PyO3 `SyncGcpIdTokenCache` / `AsyncGcpIdTokenCache` across GCE metadata, SA JWTs, IAM impersonation, `gcloud`, and `authorized_user` ADC, plus canonical ADC fallback and `vertebra.storage` exports (`cargo test -p vertebra-core --test it gcp_auth::` + `maturin develop` + `stubtest` + `pytest test_gcs_token_refresh.py`). |
-| [`ch02-vertex-and-gemini-embedder-wire-parity`](ch02-vertex-and-gemini-embedder-wire-parity/spec.md) | `planned` | `4` | Gemini protobuf field-2 + inline/file media codec, `_GoogleEmbedder` auth/batch base, Vertex AI v1 REST `:predict` / `:embedContent` + multimodal, and `RemoteEmbedder` ID-token auth (`cargo test -p vertebra-core --lib vector::` + `maturin develop` + `pytest test_vector_wire_codecs.py test_google_embedders.py`). |
-| [`ch03-pushdown-and-local-embedding-broker`](ch03-pushdown-and-local-embedding-broker/spec.md) | `planned` | `4` | Explicit-cache Oracle credential rotation, BigQuery/Spanner/Postgres pushdown parity, per-event-loop `EmbeddingBroker` state + SHM cleanup, and `GemmaEmbedder` precision forwarding (`ruff` + `mypy` + targeted embedding/pushdown `pytest`). |
-| [`ch04-docs-and-okf-sync`](ch04-docs-and-okf-sync/spec.md) | `planned` | `3` | Embeddings and GCP identity user docs, `embeddings-and-vectors.md` (`<= 200L`) + storage/FFI OKF sync, and in-place `embeddings-limitations.md` update (`make docs && make review-check`). |

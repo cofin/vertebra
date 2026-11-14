@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import math
+import os
 import sys
 import threading
+import time
 import types
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -36,6 +39,38 @@ def build_length_backend(scale: float = 1.0) -> BackendInferenceCallable:
 
     def _infer(texts: list[str], dims: int) -> list[list[float]]:
         return [[float(len(text)) * scale, 1.0, 0.0, 0.0][:dims] for text in texts]
+
+    return _infer
+
+
+def build_failing_backend() -> BackendInferenceCallable:
+    """Return a backend that raises RuntimeError on inference."""
+
+    def _infer(texts: list[str], dims: int) -> list[list[float]]:
+        _ = (texts, dims)
+        raise RuntimeError("injected sidecar failure")
+
+    return _infer
+
+
+def build_crash_backend() -> BackendInferenceCallable:
+    """Return a backend that abruptly exits the sidecar process mid-RPC."""
+
+    def _infer(texts: list[str], dims: int) -> list[list[float]]:
+        _ = (texts, dims)
+        os._exit(1)
+
+    return _infer
+
+
+def build_slow_tagged_backend(delay_s: float = 0.18) -> BackendInferenceCallable:
+    """Return a backend that delays ``slow-cancel`` inputs and emits distinct rows per text."""
+
+    def _infer(texts: list[str], dims: int) -> list[list[float]]:
+        if texts and texts[0] == "slow-cancel":
+            time.sleep(delay_s)
+            return [[99.0, 1.0, 0.0, 0.0][:dims] for _ in texts]
+        return [[float(len(text)), 1.0, 0.0, 0.0][:dims] for text in texts]
 
     return _infer
 
@@ -253,7 +288,7 @@ async def test_subprocess_quarantine_shm_slab_exchange_and_fastembed_optional_gu
     assert ft_quarantined_gemma.broker.should_quarantine_subprocess() is True
     assert ft_quarantined_gemma.broker.backend_factory == BackendFactory(
         target=_FASTEMBED_BACKEND_TARGET,
-        options={"model_name": "embeddinggemma-2-270m", "specific_model_path": "/models/gemma"},
+        options={"model_name": "embeddinggemma-2-270m", "specific_model_path": "/models/gemma", "precision": "int8"},
     )
 
 
@@ -366,3 +401,263 @@ async def test_embedding_broker_max_pending_requests_and_thread_offload() -> Non
     assert batch.count == 3
     assert inference_tids
     assert all(tid != loop_tid for tid in inference_tids)
+
+
+def test_embedding_broker_multi_loop_thread_isolation() -> None:
+    """EmbeddingBroker constructed outside a loop isolates pending queues and locks across threaded loops."""
+    broker = EmbeddingBroker(
+        backend_fn=lambda texts, dims: [[float(len(t)), 1.0, 0.0, 0.0][:dims] for t in texts],
+        dimensions=4,
+        config=EmbeddingBrokerConfig(coalesce_window_ms=1.0, bulk_chunk_size=2, isolate_gil_subprocess=False),
+    )
+    results: dict[int, list[float]] = {}
+    errors: list[BaseException] = []
+    start_barrier = threading.Barrier(2)
+
+    def worker(idx: int) -> None:
+        async def _run() -> None:
+            start_barrier.wait(timeout=5.0)
+            single = await broker.submit_single(f"worker-{idx}")
+            batch = await broker.submit_batch([f"a-{idx}", f"ab-{idx}"])
+            results[idx] = [single.to_list()[0], float(batch.count)]
+            await broker.close()
+
+        try:
+            asyncio.run(_run())
+        except BaseException as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10.0)
+
+    assert not errors
+    assert results[0][1] == 2.0
+    assert results[1][1] == 2.0
+
+    async def _prune_check() -> int:
+        await broker.submit_single("prune-check")
+        return len(broker._loop_states)
+
+    assert asyncio.run(_prune_check()) == 1
+    assert len(broker._loop_states) == 0
+
+
+@pytest.mark.anyio
+async def test_embedding_broker_sidecar_shm_cleanup_and_crash_recovery(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Sidecar execution unlinks /dev/shm/vtb-qvec-* segments on success, errors, and EOF crash recovery."""
+    shm_prefix = f"vtb-qvec-{os.getpid()}-"
+
+    def _current_pid_shm_entries() -> list[str]:
+        shm_dir = Path("/dev/shm")
+        if not shm_dir.is_dir():
+            return []
+        return [p.name for p in shm_dir.iterdir() if p.name.startswith(shm_prefix)]
+
+    healthy = EmbeddingBroker(
+        dimensions=4,
+        config=EmbeddingBrokerConfig(isolate_gil_subprocess=True, coalesce_window_ms=0.0),
+        backend_factory=BackendFactory(target=_LENGTH_BACKEND_TARGET),
+    )
+    try:
+        batch = await healthy.submit_batch_in_subprocess(["one", "two"])
+        assert batch.count == 2
+        assert _current_pid_shm_entries() == []
+
+        state = healthy._state_for_loop()
+        assert state.subprocess is not None
+        first_pid = state.subprocess.pid
+        state.subprocess.kill()
+        await state.subprocess.wait()
+        recovered = await healthy.submit_batch_in_subprocess(["recovered-item"])
+        assert recovered.count == 1
+        assert state.subprocess is not None and state.subprocess.pid != first_pid
+        assert _current_pid_shm_entries() == []
+    finally:
+        await healthy.close()
+
+    crashing = EmbeddingBroker(
+        dimensions=4,
+        config=EmbeddingBrokerConfig(isolate_gil_subprocess=True, coalesce_window_ms=0.0),
+        backend_factory=BackendFactory(target="tests.unit.embeddings.test_embedding_broker:build_crash_backend"),
+    )
+    try:
+        with pytest.raises(RuntimeError, match="terminated unexpectedly"):
+            await crashing.submit_batch_in_subprocess(["abrupt-eof"])
+        assert crashing._state_for_loop().subprocess is None
+        assert _current_pid_shm_entries() == []
+    finally:
+        await crashing.close()
+
+    failing = EmbeddingBroker(
+        dimensions=4,
+        config=EmbeddingBrokerConfig(isolate_gil_subprocess=True, coalesce_window_ms=0.0),
+        backend_factory=BackendFactory(target="tests.unit.embeddings.test_embedding_broker:build_failing_backend"),
+    )
+    try:
+        created_segments: list[str] = []
+
+        class _ResidualShmStdin:
+            def __init__(self, target_name_holder: list[str]) -> None:
+                self._holder = target_name_holder
+
+            def write(self, data: bytes) -> None:
+                text = data.decode("utf-8")
+                marker = '"shm_name":"'
+                idx = text.find(marker)
+                if idx != -1:
+                    rest = text[idx + len(marker) :]
+                    seg = rest.split('"', 1)[0]
+                    self._holder.append(seg)
+                    Path(f"/dev/shm/{seg.lstrip('/')}").write_bytes(b"stale-shm")
+
+            async def drain(self) -> None:
+                return None
+
+            def close(self) -> None:
+                return None
+
+        class _EofStdout:
+            async def readline(self) -> bytes:
+                return b""
+
+        class _CrashProc:
+            returncode = None
+            stdin = _ResidualShmStdin(created_segments)
+            stdout = _EofStdout()
+
+            def kill(self) -> None:
+                self.returncode = -9
+
+            async def wait(self) -> int:
+                return -9
+
+        async def _fake_ensure(state: Any) -> Any:
+            state.subprocess = _CrashProc()
+            return state.subprocess
+
+        monkeypatch.setattr(failing, "_ensure_subprocess", _fake_ensure)
+        with pytest.raises(RuntimeError, match="terminated unexpectedly"):
+            await failing.submit_batch_in_subprocess(["boom"])
+        assert created_segments
+        assert not Path(f"/dev/shm/{created_segments[0].lstrip('/')}").exists()
+    finally:
+        monkeypatch.undo()
+        await failing.close()
+
+    real_error_broker = EmbeddingBroker(
+        dimensions=4,
+        config=EmbeddingBrokerConfig(isolate_gil_subprocess=True, coalesce_window_ms=0.0),
+        backend_factory=BackendFactory(target="tests.unit.embeddings.test_embedding_broker:build_failing_backend"),
+    )
+    try:
+        with pytest.raises(RuntimeError, match="injected sidecar failure"):
+            await real_error_broker.submit_batch_in_subprocess(["fail-rpc"])
+        assert _current_pid_shm_entries() == []
+    finally:
+        await real_error_broker.close()
+
+
+@pytest.mark.parametrize(
+    ("precision", "expected_quantize"),
+    [
+        ("int8", True),
+        ("q4", True),
+        ("bf16", False),
+        ("fp32", False),
+    ],
+)
+def test_gemma_embedder_precision_validation_and_fastembed_forwarding(
+    monkeypatch: pytest.MonkeyPatch,
+    precision: str,
+    expected_quantize: bool,
+) -> None:
+    """GemmaEmbedder validates precision, records it in BackendFactory.options, and forwards quantize."""
+    recorded_kwargs: list[dict[str, Any]] = []
+
+    class SpyTextEmbedding:
+        def __init__(self, model_name: str, *, quantize: bool = True, **kwargs: Any) -> None:
+            recorded_kwargs.append({"model_name": model_name, "quantize": quantize, **kwargs})
+
+        def embed(self, texts: list[str]) -> list[list[float]]:
+            return [[1.0, 0.0] for _ in texts]
+
+    fake_module = types.ModuleType("fastembed")
+    monkeypatch.setattr(fake_module, "TextEmbedding", SpyTextEmbedding, raising=False)
+    monkeypatch.setitem(sys.modules, "fastembed", fake_module)
+
+    embedder = GemmaEmbedder(
+        "embeddinggemma-2-270m",
+        dimensions=2,
+        precision=precision,
+        source="/models/gemma",
+        backend_fn=lambda texts, dims: [[1.0] * dims for _ in texts],
+    )
+    assert embedder.broker.backend_factory is not None
+    assert embedder.broker.backend_factory.options["precision"] == precision
+
+    backend = embedder.broker.backend_factory.build()
+    assert backend(["hello"], 2) == [[1.0, 0.0]]
+    assert recorded_kwargs == [
+        {
+            "model_name": "embeddinggemma-2-270m",
+            "specific_model_path": "/models/gemma",
+            "quantize": expected_quantize,
+        }
+    ]
+
+    with pytest.raises(ValueError, match="Unsupported precision"):
+        GemmaEmbedder("embeddinggemma-2-270m", precision="int4_unknown")
+
+    strict_kwargs: list[dict[str, Any]] = []
+
+    class StrictTextEmbedding:
+        def __init__(self, model_name: str, specific_model_path: str | None = None) -> None:
+            strict_kwargs.append({"model_name": model_name, "specific_model_path": specific_model_path})
+
+        def embed(self, texts: list[str]) -> list[list[float]]:
+            return [[0.5, 0.5] for _ in texts]
+
+    monkeypatch.setattr(fake_module, "TextEmbedding", StrictTextEmbedding, raising=False)
+    fallback_backend = FastEmbedder.build_backend("embeddinggemma-2-270m", precision="fp32")
+    assert fallback_backend(["hi"], 2) == [[0.5, 0.5]]
+    assert strict_kwargs == [{"model_name": "embeddinggemma-2-270m", "specific_model_path": None}]
+
+
+@pytest.mark.anyio
+async def test_embedding_broker_sidecar_cancellation_kills_stale_pipe_and_recovers() -> None:
+    """Cancelling submit_batch_in_subprocess mid-readline kills the sidecar so the next request gets its own vectors."""
+    shm_prefix = f"vtb-qvec-{os.getpid()}-"
+    broker = EmbeddingBroker(
+        dimensions=4,
+        config=EmbeddingBrokerConfig(isolate_gil_subprocess=True, coalesce_window_ms=0.0),
+        backend_factory=BackendFactory(
+            target="tests.unit.embeddings.test_embedding_broker:build_slow_tagged_backend",
+            options={"delay_s": 0.18},
+        ),
+    )
+    try:
+        warmup = await broker.submit_batch_in_subprocess(["w"])
+        assert warmup.count == 1
+        first_proc = broker._state_for_loop().subprocess
+        assert first_proc is not None
+        first_pid = first_proc.pid
+
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(broker.submit_batch_in_subprocess(["slow-cancel"]), timeout=0.04)
+        assert broker._state_for_loop().subprocess is None
+
+        await asyncio.sleep(0.22)
+        recovered = await broker.submit_batch_in_subprocess(["ab"])
+        assert recovered.count == 1
+        second_proc = broker._state_for_loop().subprocess
+        assert second_proc is not None and second_proc.pid != first_pid
+        expected_norm = math.sqrt(5.0)
+        assert recovered.to_list() == [pytest.approx([2.0 / expected_norm, 1.0 / expected_norm, 0.0, 0.0], rel=1e-5)]
+        shm_dir = Path("/dev/shm")
+        if shm_dir.is_dir():
+            assert [p.name for p in shm_dir.iterdir() if p.name.startswith(shm_prefix)] == []
+    finally:
+        await broker.close()

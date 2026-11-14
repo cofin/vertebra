@@ -1,19 +1,19 @@
 # Vector Embeddings & Shared-Memory Slabs
 
-`vertebra.embeddings` provides shared-memory vector embeddings (`VectorView`, `VectorBatchView`) backed by a POSIX shared-memory `VectorSlab` and a set-associative seqlock `VectorCache`. It defaults to zero-weight Google HTTP/2 gRPC (`VertexEmbedder`, `GeminiEmbedder`) and in-database SQL pushdown (`PushdownEmbedder` with engine adapters), while supporting `1x` RAM local models (`GemmaEmbedder`, `FastEmbedder`, `StaticEmbedder`) through `EmbeddingBroker`.
+`vertebra.embeddings` provides shared-memory vector embeddings (`VectorView`, `VectorBatchView`) backed by a POSIX shared-memory `VectorSlab` and a set-associative seqlock `VectorCache`. It defaults to zero-weight Google Cloud transports (`VertexEmbedder` over HTTP/2 REST and `GeminiEmbedder` / `RemoteEmbedder` over HTTP/2 gRPC) and in-database SQL pushdown (`PushdownEmbedder` with engine adapters), while supporting `1x` RAM local models (`GemmaEmbedder`, `FastEmbedder`, `StaticEmbedder`) through `EmbeddingBroker`.
 
 ```mermaid
 flowchart LR
     Route["Route / Worker"] --> Embedder["Embedder Facade"]
     Embedder --> Cache["SHM VectorCache"]
-    Embedder --> Backend["Cloud gRPC / DB SQL / Local Broker"]
+    Embedder --> Backend["Cloud REST & gRPC / DB SQL / Local Broker"]
     Backend --> View["PEP 3118 VectorView / VectorBatchView"]
     View --> Store["pgvector / Oracle 26ai / Arrow IPC"]
 ```
 
 ## Installation
 
-Zero-weight cloud gRPC (`VertexEmbedder`, `GeminiEmbedder`, `RemoteEmbedder`), database SQL pushdown (`PushdownEmbedder` with engine adapters), pure-Rust `StaticEmbedder`, and `VectorView` / `VectorBatchView` ship in base `vertebra-core`. Install the `[embeddings]` extra only when running local ONNX / `EmbeddingGemma` weights:
+Zero-weight cloud clients (`VertexEmbedder`, `GeminiEmbedder`, `RemoteEmbedder`), database SQL pushdown (`PushdownEmbedder` with engine adapters), pure-Rust `StaticEmbedder`, and `VectorView` / `VectorBatchView` ship in base `vertebra-core`. Install the `[embeddings]` extra only when running local ONNX / `EmbeddingGemma` weights:
 
 === "uv"
 
@@ -48,24 +48,26 @@ Zero-weight cloud gRPC (`VertexEmbedder`, `GeminiEmbedder`, `RemoteEmbedder`), d
 | Class | Default Model | Transport / Engine | Extra Required |
 | --- | --- | --- | --- |
 | `Embedder` | `gemini-embedding-001` (`768` dims) | Delegates to `VertexEmbedder` by default | None |
-| `VertexEmbedder` | `gemini-embedding-001` (`768` dims) | Rust HTTP/2 gRPC + `RefreshingGcpCredentialProvider` | None |
+| `VertexEmbedder` | `gemini-embedding-001` (`768` dims) | Rust HTTP/2 REST (`:predict` / `:embedContent`) + `SyncGcpTokenCache` | None |
 | `GeminiEmbedder` | `gemini-embedding-001` (`768` dims) | Rust HTTP/2 gRPC (`x-goog-api-key` or ADC) | None |
 | `PushdownEmbedder` | `gemini-embedding-001` (`768` dims) | BigQuery, Spanner, PostgreSQL/AlloyDB, or Oracle SQL via `EmbeddingPushdown` | Driver extra for BigQuery/Spanner; Oracle needs the `oracle` extra (`vertebra._oracle`) |
 | `StaticEmbedder` | `potion-base-8M` (`512` dims) | Pure-Rust `mmap` token lookup (`<50 µs`) | None |
 | `GemmaEmbedder` | `embeddinggemma-2-270m` (`768` dims) | `1x` RAM `EmbeddingBroker` (`int8` / `q4` / `bf16` / `fp32`) | `[embeddings]` |
 | `FastEmbedder` | `BAAI/bge-small-en-v1.5` (`384` dims) | `1x` RAM `EmbeddingBroker` (ONNX Runtime) | `[embeddings]` |
-| `RemoteEmbedder` | `embeddinggemma-2-270m` (`768` dims) | Rust HTTP/2 gRPC `BatchEmbed` | None |
+| `RemoteEmbedder` | `gemini-embedding-001` (`768` dims) | Rust HTTP/2 gRPC `BatchEmbed` (optional `id_token_cache`) | None |
 
 ## Google Cloud & In-Database SQL Pushdown
 
-`Embedder()` defaults to `VertexEmbedder("gemini-embedding-001", dimensions=768)` and decodes Protobuf v3 packed-`f32` fields directly into `VectorSlab` off-GIL:
+`Embedder()` defaults to `VertexEmbedder("gemini-embedding-001", dimensions=768)`. `VertexEmbedder` dispatches `gemini-embedding-001` (`1` instance per request), `text-embedding-005`, and `text-multilingual-embedding-002` (`250` instances per request) to the Vertex AI v1 `:predict` REST endpoint and `gemini-embedding-2` (plus `embed_multimodal(...)`) to `:embedContent` over HTTP/2 with `SyncGcpTokenCache` / `AsyncGcpTokenCache` and `autoTruncate=False` by default. `GeminiEmbedder` uses HTTP/2 gRPC (`BatchEmbedContents`) with `x-goog-api-key` or `SyncGcpTokenCache` and encodes text and binary media parts via `embed_multimodal(...)`. `RemoteEmbedder` accepts an optional `id_token_cache` (`SyncGcpIdTokenCache` or `AsyncGcpIdTokenCache`) and `audience` for Cloud Run and IAP-protected gRPC endpoints:
 
 ```python
 from vertebra.embeddings import (
     Embedder,
     GeminiEmbedder,
+    RemoteEmbedder,
     VertexEmbedder,
 )
+from vertebra.storage import SyncGcpIdTokenCache
 
 default_emb = Embedder()
 vertex_emb = VertexEmbedder(
@@ -75,9 +77,15 @@ vertex_emb = VertexEmbedder(
     dimensions=768,
 )
 gemini_emb = GeminiEmbedder("gemini-embedding-001")
+remote_emb = RemoteEmbedder(
+    endpoint="https://embed-svc-xyz.a.run.app",
+    id_token_cache=SyncGcpIdTokenCache(),
+)
 ```
 
-SQL generation belongs to the database adapters. Pass an existing sync or async driver to `BigQueryEmbeddingPushdown`, `SpannerEmbeddingPushdown`, `PostgresEmbeddingPushdown` (including AlloyDB), or `OracleEmbeddingPushdown`, then wrap it with `PushdownEmbedder` for caching, sync methods, Arrow output, and in-memory similarity search. `OracleEmbeddingPushdown` takes a `SyncOracleDriver` or `AsyncOracleDriver`. The native Oracle driver package is not yet published, so constructing either driver raises `MissingDependencyError`:
+`EmbeddingBroker` sidecar calls unlink per-call `/dev/shm/vtb-qvec-*` shared-memory segments on teardown, and database pushdown adapters expose a uniform `embed_batch(...)` contract that validates dimensions, positive `top_k`, and strict numeric vector cells (rejecting booleans).
+
+SQL generation belongs to the database adapters. Pass an existing sync or async driver to `BigQueryEmbeddingPushdown`, `SpannerEmbeddingPushdown`, `PostgresEmbeddingPushdown` (including AlloyDB), or `OracleEmbeddingPushdown`, then wrap it with `PushdownEmbedder` for caching, `embed_many` / `embed_many_sync`, Arrow output, and in-memory similarity search. `OracleEmbeddingPushdown` takes a `SyncOracleDriver` or `AsyncOracleDriver` from the `vertebra-core[oracle]` extra (`vertebra._oracle`):
 
 ```python
 from vertebra.db.adapters.postgres import (
@@ -95,9 +103,9 @@ def create_sql_embedder(
     return PushdownEmbedder(pushdown, dimensions=768)
 ```
 
-Call `await embedder.vector_search("query", table="documents")` to search inside the database. `embedder.similarity_search(query, candidates)` searches an in-memory `VectorBatchView`. The capability methods also accept `dimensions` and `normalize` per call. BigQuery uses `ML.GENERATE_EMBEDDING` or `AI.GENERATE_EMBEDDING`; Spanner uses `ML.PREDICT` or `AI.GENERATE_EMBEDDING`. Both retain input order with `ORDER BY idx`.
+Call `await embedder.vector_search("query", table="documents")` to search inside the database. `embedder.similarity_search(query, candidates)` searches an in-memory `VectorBatchView`. The capability methods also accept `dimensions` and `normalize` per call. BigQuery uses `ML.GENERATE_EMBEDDING` or `AI.GENERATE_EMBEDDING`; Spanner uses `ML.PREDICT` or `AI.GENERATE_EMBEDDING` (when `use_ai_function=True`, binding `@task_type` and `@output_dimensionality` parameters alongside `ORDER BY idx`).
 
-Adapters raise `DataError` when the database returns empty or malformed vector rows; the facade translates inference `DataError` into `EmbeddingError`. Other driver errors propagate. SQL builders validate table and column identifiers; BigQuery model and table identifiers support hyphenated project IDs. PostgreSQL model strings are bound values. Oracle passes the model (including the Vertex `:predict` suffix) in JSON, batches both document and query embedding calls through `DBMS_VECTOR.UTL_TO_EMBEDDINGS` (`VECTOR_ARRAY_T`), validates Vertex endpoint URLs against its 128-byte UTF-8 limit, and rotates database credentials when the token cache generation advances.
+Adapters raise `DataError` when the database returns empty or malformed vector rows; the facade translates inference `DataError` into `EmbeddingError`. Other driver errors propagate. SQL builders validate table and column identifiers; BigQuery model and table identifiers support hyphenated project IDs. PostgreSQL model strings are bound values. Oracle passes the model (including the Vertex `:predict` suffix) in JSON, batches both document and query embedding calls through `DBMS_VECTOR.UTL_TO_EMBEDDINGS` (`VECTOR_ARRAY_T`), validates Vertex endpoint URLs against its 128-byte UTF-8 limit, and rotates credentials from an explicit `token_cache` (`SyncGcpTokenCache` or `AsyncGcpTokenCache`) when the token generation advances.
 
 ## Local `1x` RAM Broker & `EmbeddingGemma`
 
@@ -120,9 +128,9 @@ static_emb = StaticEmbedder(dimensions=256)
 ```
 
 !!! warning "`EmbeddingGemma` Precision"
-    `EmbeddingGemma` activations overflow IEEE 754 `fp16`. `GemmaEmbedder` enforces `precision` in `{"int8", "q4", "bf16", "fp32"}` and raises `ValueError` if `precision="fp16"` is requested.
+    `EmbeddingGemma` activations overflow IEEE 754 `fp16`. `GemmaEmbedder` enforces `precision` in `{"int8", "q4", "bf16", "fp32"}`, forwards the validated setting to the broker backend, and raises `ValueError` if `precision="fp16"` is requested.
 
-On free-threaded Python (`3.14t`/`3.15t`) the broker runs the configured model in a quarantined subprocess. Custom brokers pass either `backend_fn` (in-process callable, offloaded via `asyncio.to_thread` with `max_pending_requests` queue-cap backpressure when subprocess quarantine is not active) or `BackendFactory(target="package.module:callable", options={...})`, which the subprocess imports and runs.
+When running outside subprocess quarantine, async `EmbeddingBroker` and the default `_GoogleEmbedder` helpers isolate state per running event loop so concurrent loops do not share futures or client handles. Custom brokers pass either `backend_fn` (in-process callable, offloaded via `asyncio.to_thread` with `max_pending_requests` queue-cap backpressure) or `BackendFactory(target="package.module:callable", options={...})`, which the quarantined child process imports and runs on free-threaded Python (`3.14t`/`3.15t`).
 
 ## Zero-Copy `VectorView`, Matryoshka Truncation & Binary Wire Codecs
 

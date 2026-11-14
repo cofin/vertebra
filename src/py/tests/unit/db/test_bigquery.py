@@ -992,3 +992,44 @@ def test_bigquery_core_arrow_ipc_coercion_preserves_bytes_casts_dictionaries_and
         with pa.ipc.new_stream(batch_sink, batch.schema) as batch_writer:
             batch_writer.write_batch(batch)
         assert batch_sink.getvalue().size <= 9 * 1024 * 1024
+
+
+@pytest.mark.anyio
+async def test_bigquery_pushdown_embed_batch() -> None:
+    """BigQueryEmbeddingPushdown exposes embed_batch delegating to embed_documents."""
+    driver = _StubBigQuerySelectDriver([{"embedding": [3.0, 4.0]}, {"embedding": [0.0, 2.0]}])
+    embedder = BigQueryEmbeddingPushdown(driver, model="analytics.text_embedding_model", dimensions=2, normalize=False)
+    batch = await embedder.embed_batch(["alpha", "beta"], task="retrieval_document")
+    assert batch.to_list() == [[3.0, 4.0], [0.0, 2.0]]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("bad_top_k", [0, -2])
+async def test_bigquery_pushdown_rejects_non_positive_top_k(bad_top_k: int) -> None:
+    """BigQueryEmbeddingPushdown.similarity_search rejects non-positive top_k."""
+    embedder = BigQueryEmbeddingPushdown(_StubBigQuerySelectDriver([]), dimensions=2, normalize=False)
+    with pytest.raises(ValueError, match="top_k must be positive"):
+        await embedder.similarity_search([1.0, 0.0], table="proj.ds.docs", top_k=bad_top_k)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("bad_task", ["", "   ", "unknown_task", "summarize"])
+async def test_bigquery_pushdown_rejects_unsupported_task(bad_task: str) -> None:
+    """BigQueryEmbeddingPushdown.embed_documents rejects unknown embedding task names."""
+    embedder = BigQueryEmbeddingPushdown(_StubBigQuerySelectDriver([]), dimensions=2, normalize=False)
+    with pytest.raises(ValueError, match="Unsupported embedding task"):
+        await embedder.embed_documents(["alpha"], task=bad_task)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("bad_vec", [[True, False], [1.0], [1.0, 2.0, 3.0]])
+async def test_bigquery_pushdown_rejects_invalid_vector_rows(bad_vec: list[Any]) -> None:
+    """BigQueryEmbeddingPushdown rejects boolean elements and dimension drift with DataError."""
+    bad_embedder = BigQueryEmbeddingPushdown(
+        _StubBigQuerySelectDriver([{"embedding": bad_vec}]),
+        model="analytics.text_embedding_model",
+        dimensions=2,
+        normalize=False,
+    )
+    with pytest.raises(DataError, match="BigQuery embedding row"):
+        await bad_embedder.embed_documents(["alpha"])

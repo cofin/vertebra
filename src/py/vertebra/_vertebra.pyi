@@ -1,7 +1,7 @@
 """Type stubs for the vertebra._vertebra native extension module."""
 
 from collections.abc import Awaitable, Buffer, Callable, Generator, Sequence
-from typing import Any, Self, final
+from typing import Any, Literal, Self, final
 
 from vertebra.typing import VertebraError
 
@@ -27,6 +27,7 @@ __all__ = [
     "AsgiProtocol",
     "AsgiScope",
     "AsgiScopeIterator",
+    "AsyncGcpIdTokenCache",
     "AsyncGcpTokenCache",
     "BigQueryError",
     "BigQueryRowError",
@@ -35,6 +36,7 @@ __all__ = [
     "ConnectionFailure",
     "DataError",
     "DatabaseError",
+    "GcpIdTokenSnapshot",
     "GcpTokenSnapshot",
     "GoogleCloudAuthError",
     "GoogleCloudError",
@@ -73,6 +75,7 @@ __all__ = [
     "StatementCacheStats",
     "StatementPlan",
     "StaticEmbedderCore",
+    "SyncGcpIdTokenCache",
     "SyncGcpTokenCache",
     "TaskPanicError",
     "VectorBatchView",
@@ -108,6 +111,7 @@ __all__ = [
     "drive_wsgi_batch",
     "duckdb_bootstrap_statements",
     "encode_alloydb_metadata_exchange",
+    "encode_gemini_embed_contents_grpc_frame",
     "encode_gemini_embed_grpc_frame",
     "encode_gemini_embed_grpc_response_frame",
     "encode_hello3_handshake",
@@ -1270,6 +1274,13 @@ def encode_gemini_embed_grpc_frame(
     titles: Sequence[str | None] | None = None,
     output_dimensionality: int | None = None,
 ) -> bytes: ...
+def encode_gemini_embed_contents_grpc_frame(
+    model: str,
+    contents: Sequence[Sequence[tuple[Literal["text", "inline_data", "file_data"], str, str | bytes]]],
+    task: str | None = None,
+    titles: Sequence[str | None] | None = None,
+    output_dimensionality: int | None = None,
+) -> bytes: ...
 def encode_gemini_embed_grpc_response_frame(batch: VectorBatchView) -> bytes: ...
 def decode_gemini_embed_grpc_frame_to_batch(
     frame: bytes,
@@ -1492,3 +1503,57 @@ def gcp_http2_post_async(
     body: bytes,
     timeout_ms: int = 30000,
 ) -> RustDbTaskAwaitable[tuple[int, dict[str, str], bytes]]: ...
+
+@final
+class GcpIdTokenSnapshot:
+    def __new__(
+        cls,
+        *,
+        id_token: str,
+        audience: str,
+        expires_at_unix_ms: int,
+        generation: int,
+    ) -> GcpIdTokenSnapshot: ...
+    @property
+    def id_token(self) -> str: ...
+    @property
+    def audience(self) -> str: ...
+    @property
+    def expires_at_unix_ms(self) -> int: ...
+    @property
+    def generation(self) -> int: ...
+    def __repr__(self) -> str: ...
+
+@final
+class SyncGcpIdTokenCache:
+    def __new__(
+        cls,
+        options: dict[str, str] | None = None,
+        *,
+        allow_ambient_adc: bool = True,
+    ) -> SyncGcpIdTokenCache: ...
+    @property
+    def generation(self) -> int: ...
+    @property
+    def refresh_skew_ms(self) -> int: ...
+    def needs_refresh(self, audience: str, *, now_unix_ms: int | None = None) -> bool: ...
+    def invalidate(self, audience: str, failed_generation: int) -> None: ...
+    def to_async(self) -> AsyncGcpIdTokenCache: ...
+    def get_token(self, audience: str, *, force_refresh: bool = False) -> GcpIdTokenSnapshot: ...
+
+@final
+class AsyncGcpIdTokenCache:
+    def __new__(
+        cls,
+        options: dict[str, str] | None = None,
+        *,
+        allow_ambient_adc: bool = True,
+    ) -> AsyncGcpIdTokenCache: ...
+    @property
+    def generation(self) -> int: ...
+    @property
+    def refresh_skew_ms(self) -> int: ...
+    def needs_refresh(self, audience: str, *, now_unix_ms: int | None = None) -> bool: ...
+    def invalidate(self, audience: str, failed_generation: int) -> None: ...
+    def to_sync(self) -> SyncGcpIdTokenCache: ...
+    def get_token(self, audience: str, *, force_refresh: bool = False) -> RustDbTaskAwaitable[GcpIdTokenSnapshot]: ...

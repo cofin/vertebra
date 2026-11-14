@@ -1,6 +1,7 @@
 """Unit tests for vertebra.build (targets, standalone, onefile), CLI flags, and tools/pgo."""
 
 import ast
+import json
 import os
 import re
 import subprocess
@@ -1221,6 +1222,43 @@ def test_server_binary_builder_targets_python_fallback_macos_and_repair(
     assert staged == tmp_path / "src" / "py" / "vertebra" / "bin" / "vertebra-server"
     assert staged.read_bytes() == b"ELF-SERVER"
     assert recorded_cargo["PYO3_PYTHON"] == str(shared_py)
+
+
+@pytest.mark.parametrize(
+    ("enable_shared", "create_lib", "ldlibrary", "expected_shared"),
+    [
+        (1, False, "libpython3.12.so", True),
+        (None, True, "libpython3.12.so", True),
+        (None, False, "libpython3.12.so", False),
+        (0, True, "libpython3.12.so", False),
+        (1, True, "libpython3.12.a", False),
+    ],
+)
+def test_probe_python_shared_info_handles_standalone_and_static_builds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    enable_shared: int | None,
+    create_lib: bool,
+    ldlibrary: str,
+    expected_shared: bool,
+) -> None:
+    """Verify _probe_python_shared_info detects python-build-standalone shared libs when ENABLE_SHARED is None."""
+    libdir = tmp_path / "lib"
+    libdir.mkdir(parents=True)
+    if create_lib:
+        (libdir / ldlibrary).write_bytes(b"ELF")
+    payload = {"enable_shared": enable_shared, "libdir": str(libdir), "ldlibrary": ldlibrary}
+    monkeypatch.setattr(
+        build_server_binary_mod.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr=""),
+    )
+    is_shared, probed_libdir, probed_ldlibrary = build_server_binary_mod._probe_python_shared_info(
+        tmp_path / "bin" / "python"
+    )
+    assert is_shared is expected_shared
+    assert probed_libdir == str(libdir)
+    assert probed_ldlibrary == ldlibrary
 
 
 def test_standalone_builder_include_agent_skills_staging_and_refusal(

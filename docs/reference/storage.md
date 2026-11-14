@@ -142,7 +142,7 @@ Readers support `read`, `read_at`, `seek`, `tell`, and `close`; the async reader
 
 ## GCS token caches
 
-`vertebra.storage` re-exports `SyncGcpTokenCache`, `AsyncGcpTokenCache`, and `GcpTokenSnapshot` from the core `vertebra._vertebra` extension. One cache passed as `token_cache=` to several stores shares a single token and refresh schedule. `SyncGcpTokenCache.get_token(*, force_refresh=False)` returns a `GcpTokenSnapshot`; `AsyncGcpTokenCache` awaits the same call, and `to_async()` / `to_sync()` convert between handles over one native cache. The [authentication guide](../usage/storage-auth-and-signing.md#google-cloud-credentials-and-token-caches) covers construction and sharing.
+`vertebra.storage` re-exports `SyncGcpTokenCache`, `AsyncGcpTokenCache`, and `GcpTokenSnapshot` (OAuth bearer tokens) alongside `SyncGcpIdTokenCache`, `AsyncGcpIdTokenCache`, and `GcpIdTokenSnapshot` (audience-bound OIDC ID tokens) from the core `vertebra._vertebra` extension. One cache passed as `token_cache=` or `id_token_cache=` to several stores or embedders shares a single token and refresh schedule. `SyncGcpTokenCache.get_token(*, force_refresh=False)` returns a `GcpTokenSnapshot`, and `SyncGcpIdTokenCache.get_token(audience, *, force_refresh=False)` returns a `GcpIdTokenSnapshot`; the async variants await the same calls, and `to_async()` / `to_sync()` convert between handles over one native cache. The [authentication guide](../usage/storage-auth-and-signing.md#google-cloud-credentials-and-token-caches) covers construction, ADC discovery order, and sharing.
 
 ## HTTP Range responses
 

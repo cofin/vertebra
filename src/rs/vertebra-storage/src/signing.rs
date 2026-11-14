@@ -806,16 +806,7 @@ fn get_or_create_signing_token_cache(
         {
             return Some(Arc::clone(existing));
         }
-        let created = GcpTokenCache::from_options(opts, crate::gcp_auth::GCS_OAUTH_SCOPES)
-            .or_else(|| {
-                if iam_base_url.contains("googleapis.com") {
-                    let mut fallback = opts.clone();
-                    fallback.insert("use_metadata_server".to_string(), "true".to_string());
-                    GcpTokenCache::from_options(&fallback, crate::gcp_auth::GCS_OAUTH_SCOPES)
-                } else {
-                    None
-                }
-            })?;
+        let created = GcpTokenCache::from_options(opts, crate::gcp_auth::GCS_OAUTH_SCOPES)?;
         let mut guard = SIGNING_TOKEN_CACHES
             .write()
             .unwrap_or_else(|e| e.into_inner());
@@ -844,12 +835,7 @@ fn get_or_create_signing_token_cache(
     {
         return Some(Arc::clone(existing));
     }
-    let created = GcpTokenCache::from_options(&HashMap::new(), crate::gcp_auth::GCS_OAUTH_SCOPES)
-        .or_else(|| {
-        let mut fallback = HashMap::new();
-        fallback.insert("use_metadata_server".to_string(), "true".to_string());
-        GcpTokenCache::from_options(&fallback, crate::gcp_auth::GCS_OAUTH_SCOPES)
-    })?;
+    let created = GcpTokenCache::from_options(&HashMap::new(), crate::gcp_auth::GCS_OAUTH_SCOPES)?;
     let mut guard = SIGNING_TOKEN_CACHES
         .write()
         .unwrap_or_else(|e| e.into_inner());

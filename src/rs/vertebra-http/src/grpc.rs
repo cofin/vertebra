@@ -394,7 +394,8 @@ mod tests {
             Some(2),
             Some(&titles),
             Some(4),
-        );
+        )
+        .expect("encode_batch_embed_grpc_request must succeed");
         assert_eq!(req_frame[0], 0);
         let mut src_slab = VectorSlab::new_in_memory(2, 8, VectorDtype::Float32, false).unwrap();
         for i in 0..2 {

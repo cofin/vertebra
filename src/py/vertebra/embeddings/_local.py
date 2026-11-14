@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import inspect
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, cast
@@ -50,11 +52,20 @@ class GemmaEmbedder(Embedder):
         """Initialize the local Gemma embedder and enforce precision invariants."""
         spec = get_model_spec(model)
         norm_prec = precision.lower().strip()
-        if norm_prec in ("fp16", "float16") and ((spec is not None and spec.forbid_fp16) or "gemma-2" in model.lower()):
+        forbid_fp16 = (spec is not None and spec.forbid_fp16) or "gemma-2" in model.lower()
+        if norm_prec in ("fp16", "float16") and forbid_fp16:
             raise ValueError(
                 f"Model {model!r} (EmbeddingGemma 2) does not support float16 (fp16) due to activation overflow; "
                 "use 'int8', 'q4', 'bf16', or 'fp32'."
             )
+        allowed_precisions = {"int8", "q4", "bf16", "fp32"}
+        if not forbid_fp16:
+            allowed_precisions.add("fp16")
+            if norm_prec == "float16":
+                norm_prec = "fp16"
+        if norm_prec not in allowed_precisions:
+            supported = ", ".join(sorted(allowed_precisions))
+            raise ValueError(f"Unsupported precision {precision!r} for {model!r}; expected one of: {supported}")
         super().__init__(model=model, dimensions=dimensions, cache=cache)
         self._precision = norm_prec
         self._source = str(source) if source is not None else None
@@ -64,7 +75,11 @@ class GemmaEmbedder(Embedder):
             config=broker_config,
             backend_factory=BackendFactory(
                 target=_FASTEMBED_BACKEND_TARGET,
-                options={"model_name": model, "specific_model_path": self._source},
+                options={
+                    "model_name": model,
+                    "specific_model_path": self._source,
+                    "precision": self._precision,
+                },
             ),
         )
 
@@ -159,6 +174,7 @@ class FastEmbedder(Embedder):
         cache_dir: str | None = None,
         specific_model_path: str | None = None,
         threads: int | None = None,
+        precision: str | None = None,
     ) -> BackendInferenceCallable:
         """Return an inference callable that lazily loads ``fastembed.TextEmbedding``.
 
@@ -172,12 +188,29 @@ class FastEmbedder(Embedder):
             init_kwargs["specific_model_path"] = specific_model_path
         if threads is not None:
             init_kwargs["threads"] = threads
+        quantize_setting: bool | None = None
+        if precision is not None:
+            norm_prec = precision.lower().strip()
+            if norm_prec in ("int8", "q4"):
+                quantize_setting = True
+            elif norm_prec in ("bf16", "fp32", "fp16", "float16"):
+                quantize_setting = False
         loaded: list[Any] = []
 
         def _infer(texts: list[str], dims: int) -> list[list[float]]:
             if not loaded:
                 fe_mod = ensure_module("fastembed", extra="embeddings")
-                loaded.append(fe_mod.TextEmbedding(**init_kwargs))
+                call_kwargs = dict(init_kwargs)
+                if quantize_setting is not None:
+                    accepts_quantize = False
+                    with contextlib.suppress(TypeError, ValueError):
+                        params = inspect.signature(fe_mod.TextEmbedding).parameters.values()
+                        accepts_quantize = any(
+                            p.name == "quantize" or p.kind is inspect.Parameter.VAR_KEYWORD for p in params
+                        )
+                    if accepts_quantize:
+                        call_kwargs["quantize"] = quantize_setting
+                loaded.append(fe_mod.TextEmbedding(**call_kwargs))
             return [[float(v) for v in row[:dims]] for row in loaded[0].embed(texts)]
 
         return _infer

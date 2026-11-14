@@ -1,43 +1,53 @@
 ---
 type: Gotcha
 title: Embeddings Limitations
-description: Verified gaps in the Google cloud embedders, covering the Vertex AI wire target and Gemini multimodal handling, that callers and maintainers must account for.
+description: Verified runtime boundaries and non-goals for Google Cloud OIDC identity caches, remote gRPC embeddings, and Oracle SQL pushdown.
 status: stable
 tags:
 - agent
 - embeddings
-- gemini
+- gcp-identity
 - vertex-ai
+- gemini
 - limitations
 generated:
   by: flow/0.28.0
   at: "2026-11-12T01:15:00Z"
 verified:
+- by: agent:flow-executor
+  at: "2026-11-13T05:25:00Z"
+  commit: 77280bcb
 - by: agent:flow-sync
   at: "2026-11-12T01:15:00Z"
   commit: c8722c76
 sources:
-- id: vertex-embedder
-  resource: src/py/vertebra/embeddings/_google.py::VertexEmbedder
-  title: VertexEmbedder endpoint and BatchEmbedContents request path
-- id: gemini-embedder
-  resource: src/py/vertebra/embeddings/_google.py::GeminiEmbedder.embed_multimodal
-  title: GeminiEmbedder multimodal descriptor conversion
+- id: core-gcp-identity
+  resource: src/rs/vertebra-core/src/gcp_identity.rs
+  title: Audience-scoped GCP OIDC ID token cache and credential paths
+- id: google-embedder
+  resource: src/py/vertebra/embeddings/_google.py
+  title: VertexEmbedder REST and GeminiEmbedder gRPC embedders
+- id: remote-embedder
+  resource: src/py/vertebra/embeddings/_remote.py
+  title: RemoteEmbedder optional id_token_cache bearer attachment
+- id: oracle-embeddings
+  resource: src/py/vertebra/db/adapters/oracle/embeddings.py
+  title: OracleEmbeddingPushdown optional token_cache and DBA credential boundary
 ---
 
 # Embeddings Limitations
 
 <!-- truth: start -->
-- `VertexEmbedder` defaults its endpoint to `https://{location}-aiplatform.googleapis.com` but posts to the Generative Language method path `google.ai.generativelanguage.v1beta.GenerativeService/BatchEmbedContents`; it does not call a Vertex AI `PredictionService` method [^vertex-embedder].
-- `GeminiEmbedder.embed_multimodal(items, *, task="document")` sends no image, audio, video, or PDF parts. Each `MultimodalPart` becomes the text string `"[<mime_type>:<uri or base64(data)>]<text>"`, and the batch is embedded through `embed_many` as plain text, so the returned vectors embed the descriptor string rather than the media [^gemini-embedder].
-- Because inline data is base64-encoded into the text descriptor, large media payloads count against text token budgets (`max_batch_tokens`) instead of being sent as inline-data or file-data parts [^gemini-embedder].
+- **`authorized_user` ADC OIDC audience boundary**: Google's OAuth token endpoint rejects custom `audience` targets on `authorized_user` refresh-token exchanges and returns an `id_token` whose `aud` claim equals the credential's own `client_id`. Callers targeting Cloud Run service URLs pass `target_service_account` for IAM Credentials `generateIdToken` impersonation, or add the `authorized_user` `client_id` to an IAP backend's `programmaticClients` allowlist [^core-gcp-identity].
+- **Workload Identity Federation (`external_account`)**: `external_account` credential files are outside the supported credential sources for `SyncGcpTokenCache` and `SyncGcpIdTokenCache` and raise `GoogleCloudAuthError` (`GCP_AUTH_CONFIG_INVALID`) [^core-gcp-identity].
+- **Outbound-only OIDC attachment**: `SyncGcpIdTokenCache`, `AsyncGcpIdTokenCache`, and `RemoteEmbedder(id_token_cache=...)` mint and attach outbound `Authorization: Bearer` ID tokens; inbound HTTP/gRPC JWKS signature verification is out of scope for `vertebra-http` [^remote-embedder].
+- **Oracle pushdown without explicit `token_cache`**: `OracleEmbeddingPushdown(..., token_cache=None)` omits OAuth token injection and requires DBA-configured database credentials such as `DBMS_VECTOR_CHAIN` credential objects [^oracle-embeddings].
+- **Loopback CI verification**: Unit suites validate Vertex REST, Gemini multimodal gRPC protobuf frames, and OIDC token exchanges against in-process loopback HTTP/2 mock servers rather than live Google Cloud endpoints [^google-embedder].
 <!-- truth: end -->
 
-## Planned Fixes
+Current embedder architecture is documented in [Shared-Memory Vector Slabs, Zero-Weight Cloud & SQL Embeddings, and Local Broker](embeddings-and-vectors.md).
 
-The `gcp-embeddings-and-identity` flow owns the Google embedder runtime, the Gemini wire encoding with real inline-data and file-data parts for `embed_multimodal`, and the Vertex AI REST target.
-
-Current embedder behavior is described in [Shared-Memory Vector Slabs, Zero-Weight Cloud & SQL Embeddings, and Local Broker](embeddings-and-vectors.md).
-
-[^vertex-embedder]: `src/py/vertebra/embeddings/_google.py::VertexEmbedder` — `VertexEmbedder` endpoint and `BatchEmbedContents` request path.
-[^gemini-embedder]: `src/py/vertebra/embeddings/_google.py::GeminiEmbedder.embed_multimodal` — `GeminiEmbedder` multimodal descriptor conversion.
+[^core-gcp-identity]: `src/rs/vertebra-core/src/gcp_identity.rs` — Audience-scoped GCP OIDC ID token cache and credential paths.
+[^google-embedder]: `src/py/vertebra/embeddings/_google.py` — `VertexEmbedder` REST and `GeminiEmbedder` gRPC embedders.
+[^remote-embedder]: `src/py/vertebra/embeddings/_remote.py` — `RemoteEmbedder` optional `id_token_cache` bearer attachment.
+[^oracle-embeddings]: `src/py/vertebra/db/adapters/oracle/embeddings.py` — `OracleEmbeddingPushdown` optional `token_cache` and DBA credential boundary.

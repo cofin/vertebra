@@ -77,8 +77,24 @@ class EmbeddedPythonRuntime:
             )
 
         is_static_archive = library_name is not None and library_name.endswith(".a")
-        shared_flag = enable_shared_raw == 1 or str(enable_shared_raw).strip().lower() in {"1", "true"}
-        is_shared = (not is_static_archive) and shared_flag and library_dir is not None and library_name is not None
+        is_explicit_shared = (
+            enable_shared_raw is True
+            or enable_shared_raw == 1
+            or str(enable_shared_raw).strip().lower() in {"1", "true"}
+        )
+        is_explicit_static = (
+            enable_shared_raw is False
+            or enable_shared_raw == 0
+            or str(enable_shared_raw).strip().lower() in {"0", "false"}
+        )
+        has_shared_path = (not is_static_archive) and library_dir is not None and library_name is not None
+        if is_explicit_static or not has_shared_path:
+            is_shared = False
+        elif is_explicit_shared:
+            is_shared = True
+        else:
+            assert library_dir is not None and library_name is not None
+            is_shared = (Path(library_dir) / library_name).exists()
         return cls(
             python_home=python_home,
             library_dir=library_dir,

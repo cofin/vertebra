@@ -12,6 +12,7 @@ pub mod db;
 pub mod errors;
 pub mod file_io;
 pub mod gcp_auth;
+pub mod gcp_identity;
 pub mod headers;
 pub mod msgspec_bridge;
 pub mod request;
@@ -38,6 +39,7 @@ pub use gcp_auth::{
     PyAsyncGcpTokenCache, PyGcpTokenSnapshot, PySyncGcpTokenCache, gcp_http2_post_async,
     gcp_http2_post_sync,
 };
+pub use gcp_identity::{PyAsyncGcpIdTokenCache, PyGcpIdTokenSnapshot, PySyncGcpIdTokenCache};
 pub use headers::{Headers, HeadersIterator};
 pub use msgspec_bridge::{
     call_vectorcall, hydrate_one_vectorcall, hydrate_rows_vectorcall,
@@ -160,6 +162,7 @@ pub fn pymodule_init(m: &Bound<'_, PyModule>) -> PyResult<()> {
     async_bridge::register(m)?;
     errors::register(m)?;
     gcp_auth::register(m)?;
+    gcp_identity::register(m)?;
     db::register_db_bindings(m)?;
     vector::register_vector_bindings(m)?;
     text::register(m)?;

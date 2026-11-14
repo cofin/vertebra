@@ -30,7 +30,7 @@ from vertebra.db.adapters.datafusion import (
 from vertebra.db.adapters.postgres import AsyncPostgreSQLDriver, PostgresEmbeddingPushdown, SyncPostgreSQLDriver
 from vertebra.db.adapters.postgres.core import PostgreSQLCore
 from vertebra.db.adapters.postgres.notify import PostgresNotificationSource, PostgresNotifyConfig
-from vertebra.db.driver import NotificationSource, NotSupportedError
+from vertebra.db.driver import DataError, NotificationSource, NotSupportedError
 from vertebra.extensions.sqlspec.adapters import PostgreSQLSyncDriver
 from vertebra.server.platform import SHMAllocationPolicy
 from vertebra.typing import MissingDependencyError, reset_dependency_cache
@@ -473,3 +473,46 @@ class _PsycopgConnectionPort:
 
     def close(self) -> None:
         """Keep the externally owned connection port available for assertions."""
+
+
+class _PgEmbeddingRowPort:
+    """Observable row port for PostgreSQL embedding pushdown unit tests."""
+
+    def __init__(self, rows: list[dict[str, Any]]) -> None:
+        self.rows = rows
+        self.calls: list[tuple[str, Any]] = []
+
+    def select(self, sql: str, parameters: Any = None) -> list[dict[str, Any]]:
+        self.calls.append((sql, parameters))
+        return list(self.rows)
+
+
+@pytest.mark.anyio
+async def test_postgres_pushdown_embed_batch() -> None:
+    """PostgresEmbeddingPushdown exposes embed_batch delegating to embed_documents."""
+    port = _PgEmbeddingRowPort([{"embedding": [3.0, 4.0]}, {"embedding": [0.0, 2.0]}])
+    pushdown = PostgresEmbeddingPushdown(port, dimensions=2, normalize=False)
+    batch = await pushdown.embed_batch(["alpha", "beta"])
+    assert batch.to_list() == [[3.0, 4.0], [0.0, 2.0]]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("bad_top_k", [0, -4])
+async def test_postgres_pushdown_rejects_non_positive_top_k(bad_top_k: int) -> None:
+    """PostgresEmbeddingPushdown.similarity_search rejects non-positive top_k."""
+    pushdown = PostgresEmbeddingPushdown(_PgEmbeddingRowPort([]), dimensions=2, normalize=False)
+    with pytest.raises(ValueError, match="top_k must be positive"):
+        await pushdown.similarity_search([1.0, 0.0], table="docs", top_k=bad_top_k)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("bad_vec", [[True, False], [1.0], [1.0, 2.0, 3.0]])
+async def test_postgres_pushdown_rejects_invalid_vector_rows(bad_vec: list[Any]) -> None:
+    """PostgresEmbeddingPushdown rejects boolean elements and dimension drift with DataError."""
+    bad_pushdown = PostgresEmbeddingPushdown(
+        _PgEmbeddingRowPort([{"embedding": bad_vec}]),
+        dimensions=2,
+        normalize=False,
+    )
+    with pytest.raises(DataError, match="PostgreSQL embedding row"):
+        await bad_pushdown.embed_documents(["alpha"])

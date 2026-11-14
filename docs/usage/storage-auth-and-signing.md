@@ -37,15 +37,27 @@ config = GCSConfig(
 store = SyncObjectStore(config)
 ```
 
-`application_credentials` accepts an ADC file. A service-account JSON key can instead be supplied through `service_account_path` or inline `service_account_key`. Without explicit credentials, ADC resolution uses the runtime's configured identity. `access_token` provides an explicit bearer token when the caller manages its lifecycle.
+`application_credentials` accepts an ADC file. A service-account JSON key can instead be supplied through `service_account_path` or inline `service_account_key`. `access_token` provides an explicit bearer token when the caller manages its lifecycle. When no explicit credential is supplied, canonical ADC discovery evaluates sources in strict order:
+
+1. Explicit options (`access_token`, `service_account_key` / `service_account_path`, or `application_credentials`, plus optional `target_service_account` impersonation).
+2. Ambient ADC file (`GOOGLE_APPLICATION_CREDENTIALS`, then the platform's well-known gcloud `application_default_credentials.json`).
+3. Ambient environment bearer tokens (`GOOGLE_OAUTH_ACCESS_TOKEN` or `CLOUDSDK_AUTH_ACCESS_TOKEN`).
+4. GCE metadata server (`metadata.google.internal`).
 
 The token cache types come from the core `vertebra._vertebra` extension and are re-exported from `vertebra.storage`:
 
 ```python
-from vertebra.storage import AsyncGcpTokenCache, GcpTokenSnapshot, SyncGcpTokenCache
+from vertebra.storage import (
+    AsyncGcpIdTokenCache,
+    AsyncGcpTokenCache,
+    GcpIdTokenSnapshot,
+    GcpTokenSnapshot,
+    SyncGcpIdTokenCache,
+    SyncGcpTokenCache,
+)
 ```
 
-`GCSConfig.sync_token_cache()` and `async_token_cache()` build them with GCS scopes; both factories accept `allow_ambient_adc` and `scopes`. Without an explicit cache, each GCS store builds its own.
+`GCSConfig.sync_token_cache()` and `async_token_cache()` build OAuth bearer caches with GCS scopes; both factories accept `allow_ambient_adc` and `scopes`. Without an explicit cache, each GCS store builds its own.
 
 Pass one cache as `token_cache=` to several stores so they share a single token and refresh schedule:
 
@@ -67,6 +79,25 @@ The cache reaches the storage extension as a named C-ABI capsule, so both module
 The cache refreshes tokens before expiry using `refresh_skew_seconds` (default `300`) and coalesces concurrent refreshes. When IAM signing or `compose` receives a `401`, the store discards the rejected token and retries once with a fresh one. `quota_project_id` is sent as the `x-goog-user-project` header on storage and IAM requests.
 
 To stop the store from falling back to ambient credentials (environment variables, the gcloud ADC file, or the metadata server), pass `options={"allow_ambient_adc": "false"}`; only explicitly configured credentials are then used. `skip_signature=True` sends unauthenticated requests for public buckets and emulators. When `STORAGE_EMULATOR_HOST` is set and no `endpoint` or explicit credentials are configured, the store targets the emulator without signing.
+
+### Audience-bound ID tokens (Cloud Run and IAP)
+
+`SyncGcpIdTokenCache` and `AsyncGcpIdTokenCache` mint, cache, and coalesce OIDC ID tokens keyed by `audience`. `get_token(audience, *, force_refresh=False)` returns a `GcpIdTokenSnapshot` (with `.to_async()` / `.to_sync()` converting handles over the same native cache):
+
+```python
+from vertebra.embeddings import RemoteEmbedder
+from vertebra.storage import SyncGcpIdTokenCache
+
+id_cache = SyncGcpIdTokenCache()
+snapshot = id_cache.get_token("https://embed-svc-xyz.a.run.app")
+embedder = RemoteEmbedder(
+    endpoint="https://embed-svc-xyz.a.run.app",
+    id_token_cache=id_cache,
+)
+```
+
+- **Service-account keys, GCE metadata, and impersonation**: Mint arbitrary target audiences, including Cloud Run service URLs (`https://...run.app`) and IAP OAuth client IDs (`<client_id>.apps.googleusercontent.com`).
+- **Developer `authorized_user` ADC (`gcloud auth application-default login`)**: Exchanges the stored refresh token at Google's OAuth token endpoint. Google's OAuth token endpoint accepts only the credential's own `client_id` as the returned `id_token` `aud` claim; pass `target_service_account` to impersonate a service account via IAM Credentials `generateIdToken` when invoking Cloud Run, or add the ADC `client_id` to the IAP backend's `programmaticClients` allowlist.
 
 ## GCS V4: local RSA or IAM signing
 

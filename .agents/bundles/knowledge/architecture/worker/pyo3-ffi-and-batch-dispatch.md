@@ -16,7 +16,7 @@ generated:
 verified:
 - by: agent:flow-executor
   at: '2026-11-13T06:06:00Z'
-  commit: 1575427f
+  commit: 05d88d00
 - by: agent:flow-learn
   at: '2026-11-08T18:26:31.591504Z'
   commit: 067fa901
@@ -42,6 +42,9 @@ sources:
 - id: src-vertebra-py-src-gcp-auth-rs
   resource: src/rs/vertebra-py/src/gcp_auth.rs
   title: Native GCP token cache and HTTP/2 post exports in vertebra._vertebra
+- id: src-vertebra-py-src-gcp-identity-rs
+  resource: src/rs/vertebra-py/src/gcp_identity.rs
+  title: Native GCP OIDC ID token cache exports in vertebra._vertebra
 - id: src-vertebra-py-src-errors-rs
   resource: src/rs/vertebra-py/src/errors.rs
   title: Canonical DatabaseError and GoogleCloudError exception hierarchy
@@ -122,7 +125,7 @@ sources:
 - **Runtime flags & hot classes**: `__version__`, `FREE_THREADED` (`cfg(Py_GIL_DISABLED)`), `GIL_USED` (`False`), `Request`, `Headers`, `HeadersIterator`, `Response`, `RequestBatch`, and `RequestBatchIterator`. Non-subclassed `#[pyclass]` types declare `immutable_type` (`Py_TPFLAGS_IMMUTABLETYPE`) and gate `freelist = 128` behind `#[cfg_attr(not(Py_GIL_DISABLED), ...)]` to avoid free-threaded global mutex contention.
 - **Protocol & stream drivers**: `AsgiScope`, `AsgiProtocol` (`body_bytes()`, `send_raw_response`, progressive `submit_stream_frame`), `PyEmptyAwaitable`, `PyValueAwaitable`, `drive_asgi_batch`, `drive_native_batch`, `RsgiScope`, `RsgiHttpProtocol`, `RsgiTransport`, `_RsgiReadyAwaitable`, `drive_rsgi_batch`, `WsgiEnviron`, `WsgiInput`, `_WsgiStartResponse`, `drive_wsgi_batch`, and `stream_file_chunks` (see [ASGI, RSGI & WSGI Runners](asgi-and-wsgi-runners.md)).
 - **Transport & Dekker sleep FFI**: `init_transport(mode="inprocess", ...)` attaches `BatchBridge` or inherited `RingPair::from_env` FDs. `get_batch` and `try_get_batch` return zero-copy `RequestBatch` views checking `poll_batch_async` / `try_poll_batch` before `py.detach`. `get_request_notify_fd`, `clear_request_notification`, `prepare_request_sleep`, and `cancel_request_sleep` drive Dekker `SeqCst` wakeups. `submit_response_raw` and `submit_batch_raw` accept contiguous buffer-protocol objects inline for `<= 64 KiB` payloads; `submit_stream_frame` and `max_stream_frame_payload` manage chunked `VRSF` delivery (alongside `submit_response`, `submit_results`, `submit_raw_response`).
-- **Database, GCP auth, vectors & text**: [`gcp_auth.rs`](../../../../../src/rs/vertebra-py/src/gcp_auth.rs)[^src-vertebra-py-src-gcp-auth-rs] exports `SyncGcpTokenCache`, `AsyncGcpTokenCache`, `GcpTokenSnapshot`, and `gcp_http2_post_{sync,async}`; [`db.rs`](../../../../../src/rs/vertebra-py/src/db.rs)[^src-py-arrow-cursor] & [`errors.rs`](../../../../../src/rs/vertebra-py/src/errors.rs)[^src-vertebra-py-src-errors-rs] export `RustDbTaskAwaitable`, `TaskPanicError`, canonical `DatabaseError`/`GoogleCloudError` subclasses, dialers, `ArrowCursor`, and `LeaseBroker`/`StatementCache`; [`vector.rs`](../../../../../src/rs/vertebra-py/src/vector.rs)[^src-vertebra-py-src-vector-rs] & [`text.rs`](../../../../../src/rs/vertebra-py/src/text.rs)[^src-vertebra-py-src-text-rs] export `VectorView`/`VectorCache`/`StaticEmbedderCore` and fail-loud `getrandom` UUID/NanoID primitives.
+- **Database, GCP auth/identity, vectors & text**: [`gcp_auth.rs`](../../../../../src/rs/vertebra-py/src/gcp_auth.rs)[^src-vertebra-py-src-gcp-auth-rs] & [`gcp_identity.rs`](../../../../../src/rs/vertebra-py/src/gcp_identity.rs)[^src-vertebra-py-src-gcp-identity-rs] export `SyncGcpTokenCache`, `AsyncGcpTokenCache`, `GcpTokenSnapshot`, `SyncGcpIdTokenCache`, `AsyncGcpIdTokenCache`, `GcpIdTokenSnapshot`, and `gcp_http2_post_{sync,async}`; [`db.rs`](../../../../../src/rs/vertebra-py/src/db.rs)[^src-py-arrow-cursor] & [`errors.rs`](../../../../../src/rs/vertebra-py/src/errors.rs)[^src-vertebra-py-src-errors-rs] export `RustDbTaskAwaitable`, `TaskPanicError`, canonical `DatabaseError`/`GoogleCloudError` subclasses, dialers, `ArrowCursor`, and `LeaseBroker`/`StatementCache`; [`vector.rs`](../../../../../src/rs/vertebra-py/src/vector.rs)[^src-vertebra-py-src-vector-rs] & [`text.rs`](../../../../../src/rs/vertebra-py/src/text.rs)[^src-vertebra-py-src-text-rs] export `VectorView`/`VectorCache`/`StaticEmbedderCore`, `encode_gemini_embed_contents_grpc_frame`, `decode_gemini_batch_embed_contents_grpc_frame`, and fail-loud `getrandom` UUID/NanoID primitives.
 
 ## Snapshot types & C-API zero-copy bridge (`request.rs`, `msgspec_bridge.rs`)
 
@@ -151,6 +154,7 @@ Provenance sources: [^src-vertebra-py-src-transport-rs].
 [^src-vertebra-py-src-response-rs]: `src/rs/vertebra-py/src/response.rs` — `Response` native wrapper.
 [^src-vertebra-py-src-msgspec-bridge-rs]: `src/rs/vertebra-py/src/msgspec_bridge.rs` — C-API decode, vectorcall & LPM codecs.
 [^src-vertebra-py-src-gcp-auth-rs]: `src/rs/vertebra-py/src/gcp_auth.rs` — Native GCP token cache & HTTP/2 post.
+[^src-vertebra-py-src-gcp-identity-rs]: `src/rs/vertebra-py/src/gcp_identity.rs` — Native GCP OIDC ID token cache exports.
 [^src-vertebra-py-src-errors-rs]: `src/rs/vertebra-py/src/errors.rs` — Canonical DB & Google Cloud exception classes.
 [^src-vertebra-py-src-vector-rs]: `src/rs/vertebra-py/src/vector.rs` — Vector views, cache & embedder core.
 [^src-vertebra-py-src-text-rs]: `src/rs/vertebra-py/src/text.rs` — Native text & fail-loud UUID/NanoID bindings.
