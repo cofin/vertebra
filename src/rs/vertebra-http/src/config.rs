@@ -250,6 +250,65 @@ impl ServerConfig {
     ///
     /// Reads `VERTEBRA_HOST` and `VERTEBRA_PORT` to construct the bind address.
     pub fn from_env() -> Self {
+        Self::from_env_with(|key| std::env::var(key).ok())
+    }
+
+    /// Return `true` when HTTP/3 over QUIC is enabled in configuration.
+    pub fn enable_http3(&self) -> bool {
+        self.http3.enabled
+    }
+
+    /// Validate that enabled HTTP/3 settings are backed by TLS configuration and the `http3` feature.
+    pub fn validate_http3(&self) -> Result<(), String> {
+        if !self.http3.enabled {
+            return Ok(());
+        }
+        if self.tls.is_none() {
+            return Err(
+                "HTTP/3 requires TLS configuration (set VERTEBRA_TLS_CERT and VERTEBRA_TLS_KEY)"
+                    .to_string(),
+            );
+        }
+        #[cfg(not(feature = "http3"))]
+        {
+            Err(
+                "HTTP/3 is enabled in ServerConfig, but vertebra-http was compiled without `--features http3`"
+                    .to_string(),
+            )
+        }
+        #[cfg(feature = "http3")]
+        Ok(())
+    }
+
+    fn apply_http3_env<F>(&mut self, get_env: F)
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        if let Some(raw) = get_env("VERTEBRA_HTTP3") {
+            self.http3.enabled = matches!(raw.trim().to_ascii_lowercase().as_str(), "1" | "true");
+        }
+        if let Some(raw) = get_env("VERTEBRA_HTTP3_ALT_SVC_MAX_AGE")
+            && let Ok(n) = raw.trim().parse::<u64>()
+        {
+            self.http3.alt_svc_max_age = n;
+        }
+        if let Some(raw) = get_env("VERTEBRA_HTTP3_MAX_STREAMS")
+            && let Ok(n) = raw.trim().parse::<u32>()
+            && n > 0
+        {
+            self.http3.max_concurrent_bidi_streams = n;
+        }
+        if let Some(raw) = get_env("VERTEBRA_HTTP3_KEEP_ALIVE_MS")
+            && let Ok(n) = raw.trim().parse::<u64>()
+        {
+            self.http3.keep_alive_interval_ms = n;
+        }
+    }
+
+    fn from_env_with<F>(get_env: F) -> Self
+    where
+        F: Fn(&str) -> Option<String>,
+    {
         let mut config = Self::default();
 
         let host = std::env::var("VERTEBRA_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
@@ -471,6 +530,7 @@ impl ServerConfig {
             }
         }
 
+        config.apply_http3_env(&get_env);
         config
     }
 }
@@ -562,5 +622,39 @@ mod tests {
         let openapi = cfg.openapi_cache.expect("openapi cache populated");
         assert_eq!(openapi.schema_path, "/schema/openapi.json");
         assert_eq!(openapi.etag, "\"abc123\"");
+    }
+
+    #[test]
+    fn http3_env_parsing_and_validation() {
+        let mut cfg = ServerConfig::default();
+        assert!(!cfg.enable_http3());
+        assert!(cfg.validate_http3().is_ok());
+
+        cfg.apply_http3_env(|key| match key {
+            "VERTEBRA_HTTP3" => Some("true".to_string()),
+            "VERTEBRA_HTTP3_ALT_SVC_MAX_AGE" => Some("3600".to_string()),
+            "VERTEBRA_HTTP3_MAX_STREAMS" => Some("512".to_string()),
+            "VERTEBRA_HTTP3_KEEP_ALIVE_MS" => Some("2500".to_string()),
+            _ => None,
+        });
+        assert!(cfg.enable_http3());
+        assert_eq!(cfg.http3.alt_svc_max_age, 3600);
+        assert_eq!(cfg.http3.max_concurrent_bidi_streams, 512);
+        assert_eq!(cfg.http3.keep_alive_interval_ms, 2500);
+
+        let err = cfg
+            .validate_http3()
+            .expect_err("http3 without tls must fail loud");
+        assert!(err.contains("TLS"));
+
+        cfg.tls = Some(TlsConfig::default());
+        #[cfg(feature = "http3")]
+        assert!(cfg.validate_http3().is_ok());
+        #[cfg(not(feature = "http3"))]
+        assert!(
+            cfg.validate_http3()
+                .expect_err("http3 without feature must fail loud")
+                .contains("http3")
+        );
     }
 }

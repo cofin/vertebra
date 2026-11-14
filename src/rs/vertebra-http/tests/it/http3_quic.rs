@@ -1,20 +1,31 @@
 #![cfg(feature = "http3")]
 
 use std::convert::Infallible;
+use std::io::Write as _;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use bytes::Bytes;
 use http::{HeaderMap, HeaderValue, Request, Response, StatusCode};
 use http_body_util::{Either, Full};
 use hyper::body::Frame;
-use tokio::sync::{mpsc, watch};
+use tempfile::NamedTempFile;
+use tokio::net::TcpListener;
+use tokio::sync::{mpsc, oneshot, watch};
 
-use vertebra_http::body::FrameReceiver;
+use vertebra_http::batcher::PendingRequest;
+use vertebra_http::body::{FrameReceiver, PendingResponse};
+use vertebra_http::config::{ServerConfig, TlsConfig};
+use vertebra_http::dispatcher::Dispatcher;
 use vertebra_http::http3::{
     Http3Config, build_quic_server_config, format_alt_svc_header, inject_alt_svc_header,
     serve_http3_endpoint,
 };
+use vertebra_http::payload::PayloadLimits;
+use vertebra_http::response::handle_buffered;
+use vertebra_http::routing::{RouteTable, Router};
+use vertebra_http::server::{self, ServerState};
 
 #[test]
 fn test_inject_alt_svc_header_formats_port_and_max_age() {
@@ -170,4 +181,345 @@ async fn test_http3_quic_unary_and_streaming_roundtrip() {
 
     let _ = shutdown_tx.send(true);
     let _ = server_task.await;
+}
+
+fn generate_test_tls_files() -> (NamedTempFile, NamedTempFile, Vec<u8>) {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let cert_params = rcgen::CertificateParams::new(vec!["localhost".to_string()]).unwrap();
+    let key_pair = rcgen::KeyPair::generate().unwrap();
+    let cert = cert_params.self_signed(&key_pair).unwrap();
+
+    let mut cert_file = NamedTempFile::new().unwrap();
+    cert_file.write_all(cert.pem().as_bytes()).unwrap();
+    cert_file.flush().unwrap();
+
+    let mut key_file = NamedTempFile::new().unwrap();
+    key_file
+        .write_all(key_pair.serialize_pem().as_bytes())
+        .unwrap();
+    key_file.flush().unwrap();
+
+    (cert_file, key_file, cert.der().to_vec())
+}
+
+fn spawn_echo_and_stream_worker() -> mpsc::Sender<PendingRequest> {
+    let (tx, mut rx) = mpsc::channel::<PendingRequest>(32);
+    tokio::spawn(async move {
+        while let Some(pending) = rx.recv().await {
+            let path = pending.path_and_query.path();
+            if path == "/stream" {
+                let (frame_tx, frame_rx) = mpsc::channel::<Result<Frame<Bytes>, Infallible>>(8);
+                tokio::spawn(async move {
+                    let _ = frame_tx
+                        .send(Ok(Frame::data(Bytes::from_static(b"stream-1|"))))
+                        .await;
+                    let _ = frame_tx
+                        .send(Ok(Frame::data(Bytes::from_static(b"stream-2"))))
+                        .await;
+                    let mut trailers = HeaderMap::new();
+                    trailers.insert("x-stream-done", HeaderValue::from_static("yes"));
+                    let _ = frame_tx.send(Ok(Frame::trailers(trailers))).await;
+                });
+                let _ = pending
+                    .reply
+                    .send(PendingResponse::streaming(200, Bytes::new(), frame_rx));
+            } else {
+                let mut out = b"h3-worker:".to_vec();
+                out.extend_from_slice(&pending.body);
+                let _ =
+                    pending
+                        .reply
+                        .send(PendingResponse::unary(200, Bytes::new(), Bytes::from(out)));
+            }
+        }
+    });
+    tx
+}
+
+#[tokio::test]
+async fn test_run_with_listener_serves_live_http3_and_advertises_alt_svc() {
+    let (cert_file, key_file, cert_der) = generate_test_tls_files();
+
+    let mut table = RouteTable::new();
+    table.insert("POST", "/echo");
+    table.insert("GET", "/stream");
+    let router = Arc::new(Router::from_entries(table.into_entries()).unwrap());
+    let dispatcher = Arc::new(Dispatcher::new());
+    let collector_tx = spawn_echo_and_stream_worker();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let config = Arc::new(ServerConfig {
+        bind: addr,
+        tls: Some(TlsConfig {
+            cert_path: cert_file.path().to_path_buf(),
+            key_path: key_file.path().to_path_buf(),
+            ..Default::default()
+        }),
+        http3: Http3Config {
+            enabled: true,
+            alt_svc_max_age: 7200,
+            max_concurrent_bidi_streams: 64,
+            keep_alive_interval_ms: 5_000,
+        },
+        ..ServerConfig::default()
+    });
+
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let server_handle = tokio::spawn(async move {
+        server::run_with_listener(
+            listener,
+            config,
+            router,
+            dispatcher,
+            vec![collector_tx],
+            async move {
+                let _ = shutdown_rx.await;
+            },
+        )
+        .await
+        .unwrap();
+    });
+
+    let reqwest_cert = reqwest::Certificate::from_der(&cert_der).unwrap();
+    let https_client = reqwest::Client::builder()
+        .add_root_certificate(reqwest_cert)
+        .resolve("localhost", addr)
+        .no_proxy()
+        .build()
+        .unwrap();
+
+    let tcp_resp = https_client
+        .post(format!("https://localhost:{}/echo", addr.port()))
+        .body("via-tcp")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(tcp_resp.status(), reqwest::StatusCode::OK);
+    let expected_alt_svc = format!("h3=\":{}\"; ma=7200", addr.port());
+    assert_eq!(
+        tcp_resp.headers().get("alt-svc").unwrap().to_str().unwrap(),
+        expected_alt_svc
+    );
+    assert_eq!(
+        tcp_resp.bytes().await.unwrap().as_ref(),
+        b"h3-worker:via-tcp"
+    );
+
+    let mut roots = rustls::RootCertStore::empty();
+    roots
+        .add(rustls::pki_types::CertificateDer::from(cert_der))
+        .unwrap();
+    let mut client_tls = rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    client_tls.alpn_protocols = vec![b"h3".to_vec()];
+
+    let quic_client_cfg = quinn::crypto::rustls::QuicClientConfig::try_from(client_tls).unwrap();
+    let mut client_endpoint = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+    client_endpoint.set_default_client_config(quinn::ClientConfig::new(Arc::new(quic_client_cfg)));
+
+    let conn = client_endpoint
+        .connect(addr, "localhost")
+        .unwrap()
+        .await
+        .unwrap();
+    let (mut driver, mut send_req) = h3::client::new(h3_quinn::Connection::new(conn))
+        .await
+        .unwrap();
+    let driver_task = tokio::spawn(async move {
+        let _ = futures_util::future::poll_fn(|cx| driver.poll_close(cx)).await;
+    });
+
+    let unary_req = Request::builder()
+        .method("POST")
+        .uri("https://localhost/echo")
+        .body(())
+        .unwrap();
+    let mut unary_stream = send_req.send_request(unary_req).await.unwrap();
+    unary_stream
+        .send_data(Bytes::from_static(b"via-h3"))
+        .await
+        .unwrap();
+    unary_stream.finish().await.unwrap();
+
+    let unary_resp = unary_stream.recv_response().await.unwrap();
+    assert_eq!(unary_resp.status(), StatusCode::OK);
+    assert_eq!(
+        unary_resp.headers().get("alt-svc").unwrap(),
+        expected_alt_svc.as_str()
+    );
+    let mut received = Vec::new();
+    while let Some(mut chunk) = unary_stream.recv_data().await.unwrap() {
+        use bytes::Buf as _;
+        received.extend_from_slice(&chunk.copy_to_bytes(chunk.remaining()));
+    }
+    assert_eq!(received, b"h3-worker:via-h3");
+
+    let stream_req = Request::builder()
+        .method("GET")
+        .uri("https://localhost/stream")
+        .body(())
+        .unwrap();
+    let mut h3_stream = send_req.send_request(stream_req).await.unwrap();
+    h3_stream.finish().await.unwrap();
+
+    let stream_resp = h3_stream.recv_response().await.unwrap();
+    assert_eq!(stream_resp.status(), StatusCode::OK);
+    let mut streamed = Vec::new();
+    while let Some(mut chunk) = h3_stream.recv_data().await.unwrap() {
+        use bytes::Buf as _;
+        streamed.extend_from_slice(&chunk.copy_to_bytes(chunk.remaining()));
+    }
+    assert_eq!(streamed, b"stream-1|stream-2");
+    let trailers = h3_stream
+        .recv_trailers()
+        .await
+        .unwrap()
+        .expect("stream trailers expected");
+    assert_eq!(trailers.get("x-stream-done").unwrap(), "yes");
+
+    drop(send_req);
+    client_endpoint.close(0u32.into(), b"done");
+    let _ = shutdown_tx.send(());
+    tokio::time::timeout(Duration::from_secs(5), server_handle)
+        .await
+        .expect("server must drain cleanly on shutdown")
+        .unwrap();
+    let _ = driver_task.await;
+}
+
+#[tokio::test]
+async fn test_run_with_listener_omits_alt_svc_when_http3_disabled_and_fails_loud_without_tls() {
+    let (cert_file, key_file, cert_der) = generate_test_tls_files();
+
+    let mut table = RouteTable::new();
+    table.insert("POST", "/echo");
+    let router = Arc::new(Router::from_entries(table.into_entries()).unwrap());
+    let dispatcher = Arc::new(Dispatcher::new());
+    let collector_tx = spawn_echo_and_stream_worker();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let disabled_cfg = Arc::new(ServerConfig {
+        bind: addr,
+        tls: Some(TlsConfig {
+            cert_path: cert_file.path().to_path_buf(),
+            key_path: key_file.path().to_path_buf(),
+            ..Default::default()
+        }),
+        http3: Http3Config {
+            enabled: false,
+            ..Default::default()
+        },
+        ..ServerConfig::default()
+    });
+
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let server_handle = tokio::spawn(async move {
+        server::run_with_listener(
+            listener,
+            disabled_cfg,
+            router,
+            dispatcher,
+            vec![collector_tx],
+            async move {
+                let _ = shutdown_rx.await;
+            },
+        )
+        .await
+        .unwrap();
+    });
+
+    let reqwest_cert = reqwest::Certificate::from_der(&cert_der).unwrap();
+    let https_client = reqwest::Client::builder()
+        .add_root_certificate(reqwest_cert)
+        .resolve("localhost", addr)
+        .no_proxy()
+        .build()
+        .unwrap();
+
+    let tcp_resp = https_client
+        .post(format!("https://localhost:{}/echo", addr.port()))
+        .body("no-h3")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(tcp_resp.status(), reqwest::StatusCode::OK);
+    assert!(
+        tcp_resp.headers().get("alt-svc").is_none(),
+        "alt-svc must be omitted when http3.enabled is false"
+    );
+    let _ = shutdown_tx.send(());
+    let _ = server_handle.await;
+
+    let fail_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let invalid_cfg = Arc::new(ServerConfig {
+        bind: fail_listener.local_addr().unwrap(),
+        tls: None,
+        http3: Http3Config {
+            enabled: true,
+            ..Default::default()
+        },
+        ..ServerConfig::default()
+    });
+    let mut table = RouteTable::new();
+    table.insert("POST", "/echo");
+    let router = Arc::new(Router::from_entries(table.into_entries()).unwrap());
+    let (tx, _rx) = mpsc::channel(4);
+    let res = server::run_with_listener(
+        fail_listener,
+        invalid_cfg,
+        router,
+        Arc::new(Dispatcher::new()),
+        vec![tx],
+        std::future::pending::<()>(),
+    )
+    .await;
+    assert!(
+        res.is_err(),
+        "http3.enabled=true with tls=None must fail loud"
+    );
+}
+
+#[tokio::test]
+async fn test_handle_buffered_enforces_payload_limits_and_gates_alt_svc() {
+    let mut table = RouteTable::new();
+    table.insert("POST", "/echo");
+    let router = Arc::new(Router::from_entries(table.into_entries()).unwrap());
+    let collector_tx = spawn_echo_and_stream_worker();
+
+    let cfg = Arc::new(ServerConfig {
+        payload_limits: PayloadLimits {
+            max_body_size: 4,
+            max_decompressed_size: 16,
+        },
+        http3: Http3Config {
+            enabled: true,
+            ..Default::default()
+        },
+        ..ServerConfig::default()
+    });
+    let state = Arc::new(ServerState::new(
+        router,
+        Arc::new(Dispatcher::new()),
+        cfg,
+        vec![collector_tx],
+    ));
+
+    let oversized = Request::builder()
+        .method("POST")
+        .uri("/echo")
+        .body(Bytes::from_static(b"too-long"))
+        .unwrap();
+    let resp = handle_buffered(oversized, Arc::clone(&state))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert!(
+        resp.headers().get("alt-svc").is_none(),
+        "alt-svc must not be emitted without a bound http3_port"
+    );
 }

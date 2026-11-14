@@ -158,6 +158,8 @@ pub struct ServerState {
     pub sse_hub: Arc<SseHub>,
     pub pubsub_broker: Arc<PubSubBroker>,
     pub ws_registry: Arc<WsConnectionRegistry>,
+    /// Bound UDP port of the active HTTP/3 QUIC listener (`None` when inactive).
+    pub http3_port: Option<u16>,
 }
 
 impl ServerState {
@@ -220,7 +222,14 @@ impl ServerState {
             sse_hub,
             pubsub_broker,
             ws_registry,
+            http3_port: None,
         }
+    }
+
+    /// Set the bound UDP HTTP/3 QUIC port on this `ServerState`.
+    pub fn with_http3_port(mut self, port: Option<u16>) -> Self {
+        self.http3_port = port;
+        self
     }
 
     /// Get a collector shard sender (round-robin).
@@ -294,27 +303,72 @@ pub async fn run_with_listener(
     collector_shards: Vec<tokio::sync::mpsc::Sender<PendingRequest>>,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    config.validate_http3()?;
+
     let bound_addr = listener.local_addr().unwrap_or(config.bind);
     info!(addr = %bound_addr, reuse_port = config.reuse_port, "vertebra-http listening");
-
-    let state = Arc::new(ServerState::new(
-        router,
-        dispatcher,
-        Arc::clone(&config),
-        collector_shards,
-    ));
 
     #[cfg(feature = "tls")]
     let tls_acceptor: Option<TlsAcceptor> = config
         .tls
         .as_ref()
-        .map(|tc| TlsAcceptor::from_config(tc))
+        .map(TlsAcceptor::from_config)
         .transpose()?;
 
     #[cfg(not(feature = "tls"))]
     let tls_acceptor: Option<()> = None;
 
     let _ = &tls_acceptor; // suppress unused warning in non-tls builds
+
+    #[cfg(feature = "http3")]
+    let (h3_endpoint_setup, quic_port) = if config.enable_http3() {
+        let tls_acc = tls_acceptor
+            .as_ref()
+            .ok_or("HTTP/3 requires TLS configuration")?;
+        let rustls_cfg = (*tls_acc.rustls_config()).clone();
+        let quic_cfg = crate::http3::build_quic_server_config(rustls_cfg, &config.http3)?;
+        let udp_addr = SocketAddr::new(bound_addr.ip(), bound_addr.port());
+        let endpoint = quinn::Endpoint::server(quic_cfg, udp_addr)?;
+        let quic_port = endpoint.local_addr()?.port();
+        info!(udp_addr = %udp_addr, quic_port, "vertebra-http HTTP/3 QUIC listening");
+        (Some((endpoint, quic_port)), Some(quic_port))
+    } else {
+        (None, None)
+    };
+
+    #[cfg(not(feature = "http3"))]
+    let quic_port: Option<u16> = None;
+
+    let state = Arc::new(
+        ServerState::new(router, dispatcher, Arc::clone(&config), collector_shards)
+            .with_http3_port(quic_port),
+    );
+
+    #[cfg(feature = "http3")]
+    let mut h3_handle = if let Some((endpoint, quic_port)) = h3_endpoint_setup {
+        let (h3_shutdown_tx, h3_shutdown_rx) = tokio::sync::watch::channel(false);
+        let h3_state = Arc::clone(&state);
+        let h3_cfg = config.http3.clone();
+        let h3_handler = Arc::new(move |req: http::Request<Bytes>| {
+            let state = Arc::clone(&h3_state);
+            async move {
+                match crate::response::handle_buffered(req, state).await {
+                    Ok(resp) => resp,
+                    Err(infallible) => match infallible {},
+                }
+            }
+        });
+        let join = tokio::spawn(crate::http3::serve_http3_endpoint(
+            endpoint,
+            quic_port,
+            h3_cfg,
+            h3_handler,
+            h3_shutdown_rx,
+        ));
+        Some((h3_shutdown_tx, join))
+    } else {
+        None
+    };
 
     tokio::pin!(shutdown);
 
@@ -357,6 +411,14 @@ pub async fn run_with_listener(
         .ws_registry
         .close_all(1001, "Server shutting down")
         .await;
+
+    #[cfg(feature = "http3")]
+    if let Some((h3_shutdown_tx, join)) = h3_handle.take() {
+        let _ = h3_shutdown_tx.send(true);
+        if let Ok(Err(e)) = join.await {
+            debug!(error = %e, "HTTP/3 endpoint shutdown error");
+        }
+    }
 
     Ok(())
 }
