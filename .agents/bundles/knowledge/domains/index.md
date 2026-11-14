@@ -26,7 +26,7 @@ Vertebra uses one domain naming model across Python, Rust, and TypeScript: each 
 ## IPC & HTTP (`ipc/`, `http/`)
 
 - [Rust IPC, Shared Memory & Ring Transport Domain](ipc/transport-and-rings.md) — `ShmRegion`, `ShmHeader`, `SpscRing`, `SlotView`, `MpmcRing`, `RingPair`, `TieredRingSet`, `BatchBridge`, `TransportArena`, `DataSlab`, `TransportNode`, `BatchSnapshot`, and `CompressionCodec`.
-- [Rust HTTP Ingress, Batching & Dispatch Domain](http/server-and-dispatch.md) — `ServerState`, `Router`, `RouteTable`, `RequestBatcher`, `BatchLimit`, `Dispatcher`, `ShmDispatcher`, `InFlightRequests`, `PendingRequests`, `BackpressureController`, and `RingFactory`.
+- [Rust HTTP Ingress, Batching & Dispatch Domain](http/server-and-dispatch.md) — `ServerState`, `Router`, `RouteTable`, `RequestBatcher`, `BatchLimit`, `Dispatcher`, `ShmDispatcher`, `InFlightRequests`, `ResponseStreamRegistry`, `BackpressureController`, and `RingFactory`.
 
 ## Frontend, Packaging & WASM (`frontend/`)
 

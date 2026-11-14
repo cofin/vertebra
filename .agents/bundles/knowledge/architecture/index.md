@@ -9,12 +9,12 @@
 ## IPC & Shared Memory (`ipc/`)
 
 - [Lock-Free Ring Buffers & Shared Memory](ipc/ring-buffers-and-shm.md) — `ShmHeader` (`ABI_VERSION = 3`) layout with Dekker `consumer_sleeping` and `active_flags` cache lines, cached-head `SpscRing` + `SlotView` zero-copy borrow/release, cache-line-padded Vyukov `MpmcRing` + `MpmcSlotView`, LZ4/Zstd payload compression, and Linux (`futex`/`eventfd`) / macOS (`pipe`/`__ulock_wait`) wake primitives.
-- [Tiered Rings & In-Process Batch Bridge](ipc/tiered-rings-and-batch-bridge.md) — `RingPair`, right-sized `TieredRingSet` (`small` 4 KiB×512, `medium` 32 KiB×128, `large` 256 KiB×32, `xlarge` 2 MiB×8 with 20-byte `VRES` wire headers and `active_flags` bitmask), `ResponseSlot` streaming frames, and lock-free `BatchBridge` (`InProcessRequest`, `ResponseSink`, Dekker request `Notifier`).
+- [Tiered Rings & In-Process Batch Bridge](ipc/tiered-rings-and-batch-bridge.md) — `RingPair`, right-sized `TieredRingSet` (`small` 4 KiB×512, `medium` 32 KiB×128, `large` 256 KiB×32, `xlarge` 2 MiB×8 with 20-byte `VRES` wire headers and `active_flags` bitmask), `VRSF` (`ResponseStreamFrame`) streaming frames, and lock-free `BatchBridge` (`InProcessRequest`, `ResponseSink`, Dekker request `Notifier`).
 
 ## HTTP Ingress & Dispatch (`http/`)
 
 - [HTTP Ingress, Request Pipeline & Native Routing](http/ingress-and-routing.md) — `run_with_listener` `SO_REUSEPORT` accept loop (`ServerState`), tuned `http1::Builder`, ALPN `TlsAcceptor` (`h2` + mTLS), `Router` (`normalize_typed_path` + FNV-1a `HandlerId`), and `RouteTable` (`MOUNT_HANDLER_BASE`).
-- [Request Batching, Dispatch & Backpressure](http/batching-dispatch-and-backpressure.md) — Double-buffered `RequestBatcher` shard pool (`BatchLimit`, compact binary headers), `Dispatcher` (`DispatchBackend::{Direct, Bridge, Shm}`), lock-free batch-affinitized `ShmDispatcher` 8-shard `Mutex<InFlightRequests>` slabs, `PendingRequests` streaming `DashMap`, and lock-free atomic `BackpressureController`.
+- [Request Batching, Dispatch & Backpressure](http/batching-dispatch-and-backpressure.md) — Double-buffered `RequestBatcher` shard pool (`BatchLimit`, compact binary headers), `Dispatcher` (`DispatchBackend::{Direct, Bridge, Shm}`), lock-free batch-affinitized `ShmDispatcher` 8-shard `Mutex<InFlightRequests>` slabs, `ResponseStreamRegistry` bounded response streams, and lock-free atomic `BackpressureController`.
 - [Protocol and Offload Modules in vertebra-http](http/protocol-and-offload-modules.md) — Inventory of wired `vertebra-http` offloads (`cors`, `compression`, `assets`, `openapi_cache`, `health` via `VERTEBRA_OFFLOAD_CONFIG`), wire protocols (`h2c`, `http3`, `grpc`), realtime and protocol bridges (`sse`, `ws_mount`, `pubsub`, `mcp_bridge`), and library helpers (`payload`, `multipart`, `access_log`, `profile`, `discovery`, `dispatcher/direct`).
 
 ## Python Worker & Protocols (`worker/`)
