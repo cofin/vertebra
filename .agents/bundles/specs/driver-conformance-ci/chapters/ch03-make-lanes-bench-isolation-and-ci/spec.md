@@ -5,20 +5,21 @@ chapter_id: ch03-make-lanes-bench-isolation-and-ci
 title: "Chapter 03: Make Conformance Lanes, Bench-Only DuckDB Isolation, and CI Matrix"
 description: "Update Makefile in a single pass with make db-conformance, fail-loud oracle-test, and bench-only PyPI duckdb isolation, and add test-db-conformance and conformance-oracle jobs in .github/workflows/ci.yml."
 status: stable
-state: active
+state: completed
 planning_status: complete
 planning_quality: standard
 planning_degraded_reason: null
 plan_revision: 4
 plan_commit: 37972f2a
-updated_at: "2026-11-14T17:56:00Z"
+last_reviewed_commit: 5cf424fb
+updated_at: "2026-11-14T17:59:00Z"
 generated:
   by: flow-plan
   at: "2026-11-12T23:55:00Z"
 verified:
-  - by: agent:plan-generator
-    at: "2026-11-14T17:24:00Z"
-    commit: 37972f2a
+  - by: agent:code-reviewer
+    at: "2026-11-14T17:59:00Z"
+    commit: 5cf424fb
 tags:
   - makefile
   - ci

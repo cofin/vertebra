@@ -1,8 +1,9 @@
 # Bundle Activity Log
 
-## [2026-11-14T17:56:00Z] chapter-checkpoint | driver-conformance-ci ch03-make-lanes-bench-isolation-and-ci
+## [2026-11-14T17:59:00Z] chapter-complete | driver-conformance-ci ch03-make-lanes-bench-isolation-and-ci
 
-- Completed `ch03-make-lanes-bench-isolation-and-ci` (`t01`–`t02`) at `b45ebf84`: added `make db-conformance` (`ENGINE=<duckdb|mysql|mariadb|mssql|oracle> [VERSION=<v>]`), removed the `test_freethreaded_gil.py` fallback from `oracle-test`, removed `--group duckdb` from `PY_TEST_GROUPS`, `make install`, and `make upgrade` while keeping `"duckdb>=1.0; python_version < '3.14'"` in `[dependency-groups].bench`, and added `test-db-conformance` (10 matrix rows) and `conformance-oracle` (`continue-on-error: true`) in `.github/workflows/ci.yml` (`35 passed` in `test_bench_infrastructure.py`, `ruff`, and `make review-check` clean).
+- Closed `ch03-make-lanes-bench-isolation-and-ci` (`t01`–`t02`) at `b45ebf84` (sync `5cf424fb`): added `make db-conformance` (`ENGINE=<duckdb|mysql|mariadb|mssql|oracle> [VERSION=<v>]`), removed the `test_freethreaded_gil.py` fallback from `oracle-test`, removed `--group duckdb` from `PY_TEST_GROUPS`, `make install`, and `make upgrade` while keeping `"duckdb>=1.0; python_version < '3.14'"` in `[dependency-groups].bench`, and added `test-db-conformance` (10 matrix rows) and `conformance-oracle` (`continue-on-error: true`) in `.github/workflows/ci.yml` (`35 passed` in `test_bench_infrastructure.py`, `ruff`, `make review-check`, and dual zero-context `code-reviewer` + `quality-reviewer` reviews clean).
+- Advanced active frontier to `ch04-docs-and-okf-sync` (`driver-conformance-ci:ch04:t01`; `4` tasks remain in `ch04`).
 
 ## [2026-11-14T17:48:00Z] chapter-complete | driver-conformance-ci ch02-conformance-harness-and-live-suites
 

@@ -5,7 +5,7 @@ chapter_id: ch04-docs-and-okf-sync
 title: "Chapter 04: User Documentation, Workflow, Testing Matrix, and Limitations OKF Synchronization"
 description: "Document SyncGcsBearerSecretProvider and AsyncGcsBearerSecretProvider, update database/changelog/AGENTS docs, synchronize testing and workflow OKF chapters including benchmarks-and-free-threaded.md, and update database-driver-limitations.md in place."
 status: stable
-state: planned
+state: active
 planning_status: complete
 planning_quality: standard
 planning_degraded_reason: null

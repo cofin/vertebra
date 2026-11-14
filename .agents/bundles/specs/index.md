@@ -9,7 +9,7 @@ Active specifications and promoted spec-scoped research notes anchored at `HEAD 
 
 ## 2. Active Feature Specifications (`state: active`)
 
-- [`driver-conformance-ci`](driver-conformance-ci/spec.md) — `SyncGcsBearerSecretProvider`/`AsyncGcsBearerSecretProvider` and DuckDB secret rotation (`ch01` complete at `cae00a18`), `ConformanceGate` + `ServiceVersionMatrix` and DuckDB/MySQL/MariaDB/MSSQL/Oracle live conformance suites (`ch02` complete at `38e02b16`/`7d11fb2c`), and single-pass `Makefile` `db-conformance` + `bench`-only PyPI `duckdb` isolation + CI lanes (`ch03` next; [`4 chapters`](driver-conformance-ci/chapters/index.md), `7/13` tasks complete).
+- [`driver-conformance-ci`](driver-conformance-ci/spec.md) — `SyncGcsBearerSecretProvider`/`AsyncGcsBearerSecretProvider` and DuckDB secret rotation (`ch01` complete at `cae00a18`), `ConformanceGate` + `ServiceVersionMatrix` and DuckDB/MySQL/MariaDB/MSSQL/Oracle live conformance suites (`ch02` complete at `7d11fb2c`), single-pass `Makefile` `db-conformance` + `bench`-only PyPI `duckdb` isolation + CI lanes (`ch03` complete at `5cf424fb`), and documentation/OKF synchronization (`ch04` next; [`4 chapters`](driver-conformance-ci/chapters/index.md), `9/13` tasks complete).
 
 ## 3. Planned Executable Specifications (`state: planned`)
 
