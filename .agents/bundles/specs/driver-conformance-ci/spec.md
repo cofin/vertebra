@@ -4,7 +4,7 @@ flow_id: driver-conformance-ci
 title: "Live Driver Conformance CI, DuckDB GCS Secret Rotation, and Oracle Notify Liveness"
 description: "Ship GCS ADC bearer-token secret providers and DuckDB secret validation/invalidation, enforce Oracle AQ wait_timeout_seconds liveness, run versioned pytest-databases live conformance and native edge suites with zero-skip CI gates, and restrict PyPI duckdb to benchmarks."
 status: stable
-state: active
+state: completed
 planning_quality: standard
 planning_degraded_reason: null
 has_chapters: true
@@ -20,11 +20,11 @@ depends_on_flows:
   - native-postgres-driver
 plan_revision: 4
 plan_commit: 37972f2a
-last_verified_checkpoint: cc75373f
+last_verified_checkpoint: 596c32d6
 last_reviewed_chapter: ch04-docs-and-okf-sync
 last_reviewed_commit: cc75373f
 created_at: "2026-11-12T00:30:00Z"
-updated_at: "2026-11-14T18:20:00Z"
+updated_at: "2026-11-14T18:28:30Z"
 generated:
   by: flow-plan
   at: "2026-11-12T23:55:00Z"
@@ -135,7 +135,7 @@ Four merged native database wheels lacked live server CI gates and carried three
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **State**: `active` (`4/4` chapters, `13/13` tasks completed and reviewed through `ch04-docs-and-okf-sync` at `cc75373f`; ready for `/flow:finish`).
+- **State**: `completed` (`4/4` chapters, `13/13` tasks completed and reviewed through `ch04-docs-and-okf-sync` at `cc75373f` / `596c32d6`; `Remaining Plan: none`).
 - **Full `/flow:finish` Verification**: `make lint-all && make rs-test && make py-test && make db-conformance ENGINE=duckdb && make db-conformance ENGINE=mysql VERSION=8.4 && make db-conformance ENGINE=mariadb VERSION=11.4 && make db-conformance ENGINE=mssql VERSION=2022 && make docs-check && make review-check`.
 
 [^conformance-suite]: `src/py/tests/integration/db/test_driver_conformance.py::ENGINE_SPECS` — Cross-engine driver conformance matrix and `_resolve_live_config`.

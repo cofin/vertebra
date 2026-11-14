@@ -1,5 +1,9 @@
 # Bundle Activity Log
 
+## [2026-11-14T18:28:30Z] finish | driver-conformance-ci
+
+- Completed `driver-conformance-ci` (`ch01`–`ch04`, `13/13` tasks) through `cc75373f` / `596c32d6`: shipped `SyncGcsBearerSecretProvider` and `AsyncGcsBearerSecretProvider` in `vertebra.storage`, `DuckDBSecretConfig` validation + `(HTTP 401)`/`(HTTP 403)` provider invalidation + startup `_client` cleanup, Oracle AQ `wait_timeout_seconds` `SELECT 1 FROM DUAL` idle liveness probing, zero-skip `ConformanceGate` and `ServiceVersionMatrix`, `mariadb` `EngineConformanceSpec`, live `test_{duckdb,mysql,mssql,oracle}_native.py` suites, `make db-conformance`, `bench`-only PyPI `duckdb` isolation, `.github/workflows/ci.yml` `test-db-conformance` (10-row matrix) + `conformance-oracle` (`continue-on-error: true`), and public/OKF documentation synchronization (`43 passed, 0 skipped` in `make db-conformance ENGINE=duckdb`, `7 passed` in `cargo test -p vertebra-oracle notify::`, `137 passed` in unit suites, `make docs`, and `make lint-all` clean).
+
 ## [2026-11-14T18:20:00Z] chapter-complete | driver-conformance-ci ch04-docs-and-okf-sync
 
 - Closed `ch04-docs-and-okf-sync` (`t01`–`t04`) across `57fed1c4` and `cc75373f`: documented `SyncGcsBearerSecretProvider` and `AsyncGcsBearerSecretProvider` across `docs/usage/{storage,analytics-and-cdc,databases}.md` and rendered API directives in `docs/reference/storage.md`, updated `docs/changelog/index.md` and `AGENTS.md` (`70` lines), and synchronized `.agents/bundles/knowledge/testing/{polyglot-test-matrix,benchmarks-and-free-threaded}.md`, `.agents/bundles/knowledge/workflow.md`, and `.agents/bundles/knowledge/domains/data/{database-drivers-and-dialers,database-driver-limitations}.md` (`<= 200` lines each; `make docs` and `make review-check` clean).

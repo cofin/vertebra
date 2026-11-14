@@ -7,9 +7,9 @@ Active specifications and promoted spec-scoped research notes anchored at `HEAD 
 - [`native-data-platform`](native-data-platform/spec.md) — Shared cross-worker connection pools via the shared-memory ring broker and per-engine standalone Rust PyO3 driver and storage wheels (`vertebra-<engine>`).
 - [`integration-remediation`](integration-remediation/spec.md) — Downward `vertebra.db` layering, SQLSpec `0.71.1+` adapter parity, SQLAlchemy/Advanced Alchemy/Django `6.0+` integration, native queues/tasks/channels, Spanner interactive `ReadWrite` transactions, progressive server streaming, HTTP/3, embeddings/OIDC identity, MCP `2026-07-28` completeness, and strict typing hygiene.
 
-## 2. Active Feature Specifications (`state: active`)
+## 2. Completed Feature Specifications (`state: completed`, Ready for `/flow:archive`)
 
-- [`driver-conformance-ci`](driver-conformance-ci/spec.md) — `SyncGcsBearerSecretProvider`/`AsyncGcsBearerSecretProvider` and DuckDB secret rotation (`ch01` complete at `cae00a18`), `ConformanceGate` + `ServiceVersionMatrix` and DuckDB/MySQL/MariaDB/MSSQL/Oracle live conformance suites (`ch02` complete at `7d11fb2c`), single-pass `Makefile` `db-conformance` + `bench`-only PyPI `duckdb` isolation + CI lanes (`ch03` complete at `5cf424fb`), and documentation/OKF synchronization (`ch04` complete; [`4 chapters`](driver-conformance-ci/chapters/index.md), `13/13` tasks complete).
+- [`driver-conformance-ci`](driver-conformance-ci/spec.md) — `SyncGcsBearerSecretProvider`/`AsyncGcsBearerSecretProvider` and DuckDB secret rotation (`ch01` complete at `cae00a18`), `ConformanceGate` + `ServiceVersionMatrix` and DuckDB/MySQL/MariaDB/MSSQL/Oracle live conformance suites (`ch02` complete at `7d11fb2c`), single-pass `Makefile` `db-conformance` + `bench`-only PyPI `duckdb` isolation + CI lanes (`ch03` complete at `5cf424fb`), and documentation/OKF synchronization (`ch04` complete at `cc75373f`; [`4 chapters`](driver-conformance-ci/chapters/index.md), `13/13` tasks complete).
 
 ## 3. Planned Executable Specifications (`state: planned`)
 
