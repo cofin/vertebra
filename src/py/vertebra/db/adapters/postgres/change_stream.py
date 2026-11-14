@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
@@ -411,13 +412,17 @@ class PostgresChangeSource(AsyncChangeSource):
         """Align the backing ChangeFeed event sequence counter with a durable cursor."""
         self._feed._next_id = max(1, int(next_event_id))
 
-    async def _close_active_stream(self) -> None:
+    async def _close_active_stream(self, *, suppress_error: bool = False) -> None:
         """Close any currently attached native stream generation and advance generation."""
         stream = self._stream
         self._stream = None
         self._stream_generation += 1
         if stream is not None:
-            await stream.aclose()
+            if suppress_error:
+                with contextlib.suppress(Exception):
+                    await stream.aclose()
+            else:
+                await stream.aclose()
 
     def _effective_start_lsn(self) -> int | None:
         """Compute the resume LSN from persisted checkpoint or initial configuration."""
@@ -525,7 +530,7 @@ class PostgresChangeSource(AsyncChangeSource):
                         reason=gap_reason,
                         identity_key=self._identity.identity_key if self._identity else None,
                     ) from exc
-                await self._close_active_stream()
+                await self._close_active_stream(suppress_error=True)
                 if not self._config.reconnect or not _is_retryable_stream_error(exc):
                     raise
                 attempts += 1

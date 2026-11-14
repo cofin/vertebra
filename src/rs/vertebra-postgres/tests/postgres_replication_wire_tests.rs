@@ -3323,6 +3323,38 @@ fn session_shutdown_response() -> Vec<u8> {
     response
 }
 
+#[tokio::test]
+async fn session_shutdown_accepts_post_copydone_keepalive_and_multiple_command_complete() {
+    let (connection, mut peer) = session_writer_connection(None).await;
+    let session = connection
+        .into_stream(1, Duration::from_secs(3600), Duration::from_secs(2))
+        .unwrap();
+    let peer_close = async {
+        assert!(matches!(
+            read_frontend_exchange(&mut peer).await,
+            FrontendExchange::Other(b'd', _)
+        ));
+        assert_eq!(
+            read_frontend_exchange(&mut peer).await,
+            FrontendExchange::CopyDone
+        );
+        let mut response = copy_done_frame();
+        let keepalive = [b'k', 0, 0, 0, 2, 0, 0, 0, 16, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        response.extend(copy_data_frame(&keepalive));
+        response.extend(command_complete_frame("COPY 0"));
+        response.extend(command_complete_frame("START_REPLICATION"));
+        response.extend(ready_for_query_frame(b'I'));
+        peer.write_all(&response).await.unwrap();
+        assert_eq!(
+            read_frontend_exchange(&mut peer).await,
+            FrontendExchange::Eof
+        );
+    };
+    let (res, ()) = tokio::join!(session.shutdown(), peer_close);
+    res.unwrap();
+    assert!(session.is_closed());
+}
+
 #[tokio::test(start_paused = true)]
 async fn session_shutdown_unresponsive_peer_expires_once_and_closes_socket() {
     use std::future::Future;

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import socket
+import struct
 from collections.abc import Iterator, Mapping
 from typing import TYPE_CHECKING, Any
 
@@ -236,25 +238,31 @@ def _container_bridge_host_and_port(service: PostgresService) -> tuple[str, int]
     return service.host, int(service.port)
 
 
-@pytest.fixture(params=["transaction", "statement"])
-def vtb_pgbouncer_config(
-    request: pytest.FixtureRequest,
+def _run_pgbouncer_service(
+    pool_mode: PoolerMode,
     docker_service: DockerService,
     postgres_18_service: PostgresService,
 ) -> Iterator[tuple[PostgreSQLConfig, PostgreSQLConfig]]:
-    """Start a PgBouncer container in transaction or statement mode fronting ``postgres_18_service``."""
+    """Start a PgBouncer container in the requested mode fronting ``postgres_18_service``."""
     net_helpers = import_optional("pytest_databases.helpers")
     if net_helpers is None:
         msg = "pytest-databases helpers are required for Docker PgBouncer tests"
         raise ImproperConfigurationError(msg)
-    pool_mode = str(request.param)
     tcp_port_open = net_helpers.tcp_port_open
-    image = os.environ.get("VERTEBRA_CONFORMANCE_PGBOUNCER_IMAGE", "edoburu/pgbouncer:v1.26.0")
+    image = os.environ.get("VERTEBRA_CONFORMANCE_PGBOUNCER_IMAGE", "edoburu/pgbouncer:v1.26.0-p0")
     direct_config = _postgres_config_from_service(postgres_18_service)
     pg_host, pg_port = _container_bridge_host_and_port(postgres_18_service)
 
     def _pgbouncer_ready(service: ServiceContainer) -> bool:
-        return bool(tcp_port_open(service.host, service.port))
+        if not tcp_port_open(service.host, service.port):
+            return False
+        try:
+            with socket.create_connection((service.host, int(service.port)), timeout=1.0) as sock:
+                sock.settimeout(1.0)
+                sock.sendall(struct.pack("!II", 8, 80877103))
+                return sock.recv(1) in (b"N", b"S")
+        except OSError:
+            return False
 
     with docker_service.run(
         image=image,
@@ -280,16 +288,44 @@ def vtb_pgbouncer_config(
             f"postgresql://{postgres_18_service.user}:{postgres_18_service.password}"
             f"@{service.host}:{service.port}/{postgres_18_service.database}?sslmode=disable"
         )
-        resolved_mode: PoolerMode = "transaction" if pool_mode == "transaction" else "statement"
         yield (
             PostgreSQLConfig(
                 dsn=pooler_dsn,
                 direct_dsn=direct_config.dsn,
-                pooler_mode=resolved_mode,
+                pooler_mode=pool_mode,
                 pgbouncer=pool_mode == "transaction",
             ),
             direct_config,
         )
+
+
+@pytest.fixture
+def vtb_pgbouncer_transaction_config(
+    docker_service: DockerService,
+    postgres_18_service: PostgresService,
+) -> Iterator[tuple[PostgreSQLConfig, PostgreSQLConfig]]:
+    """Start a PgBouncer transaction-pooling container fronting ``postgres_18_service``."""
+    yield from _run_pgbouncer_service("transaction", docker_service, postgres_18_service)
+
+
+@pytest.fixture
+def vtb_pgbouncer_statement_config(
+    docker_service: DockerService,
+    postgres_18_service: PostgresService,
+) -> Iterator[tuple[PostgreSQLConfig, PostgreSQLConfig]]:
+    """Start a PgBouncer statement-pooling container fronting ``postgres_18_service``."""
+    yield from _run_pgbouncer_service("statement", docker_service, postgres_18_service)
+
+
+@pytest.fixture(params=["transaction", "statement"])
+def vtb_pgbouncer_config(
+    request: pytest.FixtureRequest,
+    docker_service: DockerService,
+    postgres_18_service: PostgresService,
+) -> Iterator[tuple[PostgreSQLConfig, PostgreSQLConfig]]:
+    """Start a PgBouncer container in transaction or statement mode fronting ``postgres_18_service``."""
+    mode: PoolerMode = "transaction" if str(request.param) == "transaction" else "statement"
+    yield from _run_pgbouncer_service(mode, docker_service, postgres_18_service)
 
 
 @pytest.fixture

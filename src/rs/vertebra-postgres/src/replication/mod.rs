@@ -427,7 +427,12 @@ impl PostgresReplicationConnection {
             };
 
             match msg {
-                ReplicationBackendMessage::Standard(Message::CopyData(_)) if !saw_copy_done => {}
+                ReplicationBackendMessage::Standard(Message::CopyData(body))
+                    if !saw_copy_done
+                        || matches!(
+                            feedback::decode_replication_copy_data(body.data()),
+                            Ok(feedback::ReplicationCopyData::PrimaryKeepalive { .. })
+                        ) => {}
                 ReplicationBackendMessage::Standard(Message::CopyDone) if !saw_copy_done => {
                     saw_copy_done = true;
                 }

@@ -548,9 +548,7 @@ async fn drain_backend(
             ReplicationBackendMessage::Standard(Message::CopyDone) if !saw_copy_done => {
                 saw_copy_done = true
             }
-            ReplicationBackendMessage::Standard(Message::CommandComplete(_))
-                if saw_copy_done && !saw_command =>
-            {
+            ReplicationBackendMessage::Standard(Message::CommandComplete(_)) if saw_copy_done => {
                 saw_command = true
             }
             ReplicationBackendMessage::Standard(Message::ReadyForQuery(_)) if saw_command => {
@@ -562,7 +560,12 @@ async fn drain_backend(
             ReplicationBackendMessage::Standard(
                 Message::NoticeResponse(_) | Message::ParameterStatus(_),
             ) => {}
-            ReplicationBackendMessage::Standard(Message::CopyData(_)) if !saw_copy_done => {}
+            ReplicationBackendMessage::Standard(Message::CopyData(body))
+                if !saw_copy_done
+                    || matches!(
+                        decode_replication_copy_data(body.data()),
+                        Ok(ReplicationCopyData::PrimaryKeepalive { .. })
+                    ) => {}
             _ => {
                 return Err(PostgresError::Protocol(
                     "unexpected replication shutdown backend message".into(),

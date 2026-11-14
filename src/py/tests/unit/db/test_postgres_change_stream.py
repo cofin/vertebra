@@ -571,3 +571,46 @@ async def test_change_source_retries_exhausted_and_bounded_uncertain_aclose() ->
     store.save_gate.set()
     with pytest.raises(PostgresReplicationGapError):
         await hung_ack
+
+
+@pytest.mark.anyio
+async def test_change_source_reconnects_and_closes_cleanly_when_dead_stream_aclose_raises() -> None:
+    """Verify terminal stream errors stored on dead native generations do not block reconnect or close."""
+    ident = _identity()
+    term_err = OperationalError("terminating connection due to administrator command")
+
+    class _TerminalAclStream(_FakeNativeStream):
+        async def aclose(self) -> None:
+            await super().aclose()
+            raise term_err
+
+    broken_gen = _TerminalAclStream([term_err])
+    recovered_gen = _FakeNativeStream(
+        [PostgresReplicationRecord(kind="insert", payload={"ok": True}, commit_end_lsn=200)]
+    )
+    driver = _FakeReplicationDriver(ident, [broken_gen, recovered_gen])
+    source = PostgresChangeSource(
+        driver,
+        PostgresChangeConfig(
+            slot="cdc_slot",
+            publication="pub_orders",
+            reconnect=True,
+            initial_backoff_seconds=0.0,
+            max_backoff_seconds=0.0,
+        ),
+    )
+
+    event = await anext(source.stream())
+    assert event.payload == {"kind": "insert", "generation": 0, "commit_end_lsn": 200, "ok": True}
+    assert broken_gen.closed is True
+    assert driver.open_count == 2
+    await source.aclose()
+
+    failing_driver = _FakeReplicationDriver(ident, [_TerminalAclStream([term_err])])
+    no_retry_source = PostgresChangeSource(
+        failing_driver,
+        PostgresChangeConfig(slot="cdc_slot", publication="pub_orders", reconnect=False),
+    )
+    async with no_retry_source:
+        with pytest.raises(OperationalError, match="administrator command"):
+            await anext(no_retry_source.stream())

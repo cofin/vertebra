@@ -8,6 +8,7 @@ import os
 import struct
 import uuid
 from collections.abc import AsyncIterator
+from typing import Literal
 
 import pyarrow as pa
 import pytest
@@ -58,15 +59,21 @@ def pgvector_config(request: pytest.FixtureRequest) -> PostgreSQLConfig:
     pytest.skip(f"Live pgvector tests require {_PGVECTOR_DSN_ENV} or {_DOCKER_ENV}=1")
 
 
-@pytest.fixture
-def pgbouncer_config_pair(request: pytest.FixtureRequest) -> tuple[PostgreSQLConfig, PostgreSQLConfig | None]:
+def _resolve_pgbouncer_config_pair(
+    request: pytest.FixtureRequest,
+    pool_mode: Literal["transaction", "statement"],
+) -> tuple[PostgreSQLConfig, PostgreSQLConfig | None]:
     """Resolve live PgBouncer pooled and optional direct PostgreSQL configs."""
     _ensure_postgres_extension_for_live()
     env_dsn = os.environ.get(_PGBOUNCER_DSN_ENV, "").strip()
     if env_dsn:
-        return PostgreSQLConfig(dsn=env_dsn, pooler_mode="transaction", pgbouncer=True), None
+        mode: Literal["transaction", "statement"] = "transaction" if pool_mode == "transaction" else "statement"
+        return PostgreSQLConfig(dsn=env_dsn, pooler_mode=mode, pgbouncer=mode == "transaction"), None
     if os.environ.get(_DOCKER_ENV) == "1":
-        pair = request.getfixturevalue("vtb_pgbouncer_config")
+        fixture_name = (
+            "vtb_pgbouncer_transaction_config" if pool_mode == "transaction" else "vtb_pgbouncer_statement_config"
+        )
+        pair = request.getfixturevalue(fixture_name)
         assert isinstance(pair, tuple) and len(pair) == 2
         return pair
     pytest.skip(f"Live PgBouncer tests require {_PGBOUNCER_DSN_ENV} or {_DOCKER_ENV}=1")
@@ -195,12 +202,14 @@ async def test_live_async_listen_notify_delivery(pgvector_config: PostgreSQLConf
             assert event.payload == b"binary\x00frame"
 
 
+@pytest.mark.parametrize("pool_mode", ["transaction", "statement"])
 @pytest.mark.anyio
 async def test_live_pgbouncer_unnamed_statement_and_capability_guards(
-    pgbouncer_config_pair: tuple[PostgreSQLConfig, PostgreSQLConfig | None],
+    request: pytest.FixtureRequest,
+    pool_mode: Literal["transaction", "statement"],
 ) -> None:
     """Verify PgBouncer transaction/statement mode unnamed statement execution and event/tx refusals."""
-    mode_cfg, _ = pgbouncer_config_pair
+    mode_cfg, _ = _resolve_pgbouncer_config_pair(request, pool_mode)
     assert mode_cfg.effective_statement_cache_size == 0
 
     async with AsyncPostgreSQLDriver(mode_cfg) as driver:
