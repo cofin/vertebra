@@ -440,14 +440,30 @@ def test_cli_loop_option_enforces_loop_backend_choices(
     assert tuple(loop_option.type.choices) == LOOP_BACKEND_CHOICES
 
     runner = CliRunner()
-    invalid_res = runner.invoke(target_group, [subcommand, "--loop", "invalid_loop"])
-    assert invalid_res.exit_code == 2
-    assert "Invalid value for '--loop'" in invalid_res.output
-    assert captured_env == {}
+    env_keys = (
+        "LITESTAR_APP",
+        "VERTEBRA_APP",
+        "LITESTAR_HOST",
+        "LITESTAR_PORT",
+        "LITESTAR_DEBUG",
+        "LITESTAR_PDB",
+    )
+    saved_env = {key: os.environ.get(key) for key in env_keys}
+    try:
+        invalid_res = runner.invoke(target_group, [subcommand, "--loop", "invalid_loop"])
+        assert invalid_res.exit_code == 2
+        assert "Invalid value for '--loop'" in invalid_res.output
+        assert captured_env == {}
 
-    valid_res = runner.invoke(target_group, [subcommand, "--loop", "zuvloop", "--no-banner"])
-    assert valid_res.exit_code == 0, valid_res.output
-    assert captured_env["VERTEBRA_LOOP"] == "zuvloop"
+        valid_res = runner.invoke(target_group, [subcommand, "--loop", "zuvloop", "--no-banner"])
+        assert valid_res.exit_code == 0, valid_res.output
+        assert captured_env["VERTEBRA_LOOP"] == "zuvloop"
+    finally:
+        for key, prev in saved_env.items():
+            if prev is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = prev
 
 
 def test_event_loop_pool_spawn_and_spawn_batch_dispatch_across_threads_and_inline() -> None:
