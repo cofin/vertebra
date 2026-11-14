@@ -9,7 +9,6 @@ from pathlib import Path
 
 from vertebra.extensions.broker import (
     BrokerConfig,
-    SyncInMemoryBrokerTransport,
     SyncSHMBrokerTransport,
 )
 
@@ -97,7 +96,7 @@ def test_shm_broker_colocated_statement_cache_single_region_and_fd() -> None:
 
 
 def test_shm_broker_active_leases_for_worker_and_reclaim() -> None:
-    """Verify active_leases_for_worker and reclaim_worker on SyncSHMBrokerTransport and SyncInMemoryBrokerTransport."""
+    """Verify active_leases_for_worker and reclaim_worker on SyncSHMBrokerTransport."""
     cfg = BrokerConfig(pool_size=3, max_overflow=1, statement_cache_capacity=16)
     shm_transport = SyncSHMBrokerTransport(cfg)
 
@@ -122,13 +121,6 @@ def test_shm_broker_active_leases_for_worker_and_reclaim() -> None:
 
     assert shm_transport.release(l3.lease_id) is True
     assert shm_transport.metrics().active_leases == 0
-
-    mem_transport = SyncInMemoryBrokerTransport(cfg)
-    ml1 = mem_transport.acquire(worker_id=5100, bind_key="primary")
-    assert len(mem_transport.active_leases_for_worker(5100)) == 1
-    assert mem_transport.reclaim_worker(5100) == 1
-    assert mem_transport.active_leases_for_worker(5100) == []
-    assert mem_transport.release(ml1.lease_id) is False
 
 
 def test_shm_broker_cross_process_publish_and_drain_channel() -> None:

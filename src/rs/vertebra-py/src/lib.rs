@@ -106,6 +106,7 @@ pub fn pymodule_init(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<broker::StatementPlan>()?;
     m.add_class::<broker::StatementCacheStats>()?;
     m.add_class::<broker::StatementCache>()?;
+    m.add_function(wrap_pyfunction!(broker::stable_hash64, m)?)?;
     m.add_class::<agent::SchemaDigestCache>()?;
 
     // Agentic JSON-RPC fastpath

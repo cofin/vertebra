@@ -8,6 +8,7 @@ pub mod broker;
 pub mod buffer;
 pub mod channel;
 pub mod cleanup;
+pub mod dbrpc;
 #[cfg(feature = "gcp-auth")]
 pub mod gcp_auth;
 #[cfg(feature = "gcp-auth")]
@@ -38,8 +39,9 @@ pub use bridge::{
     WriteRequest,
 };
 pub use broker::{
-    BrokerError, LeaseGrant, LeaseSlot, LeaseTableStats, ShmLeaseTable, ShmStatementCache,
-    StatementCacheStats, StatementPlanEntry, StatementSlot,
+    BrokerError, LeaseGrant, LeaseSlot, LeaseTableStats, MAX_POOL_PARTITIONS, PoolPartitionSpec,
+    ShmLeaseTable, ShmStatementCache, StatementCacheStats, StatementPlanEntry, StatementSlot,
+    stable_hash64,
 };
 pub use channel::{MpmcSlotView, SlotView};
 pub use layout::CacheLine;

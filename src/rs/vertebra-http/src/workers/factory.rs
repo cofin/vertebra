@@ -798,37 +798,20 @@ impl EmbeddedSupervisor {
     }
 }
 
-/// Clean up stale shared memory regions from previous crashed supervisors.
+/// Clean up stale shared memory regions whose owning process is dead.
 pub fn cleanup_stale_shm() {
-    #[cfg(unix)]
-    {
-        use std::fs;
-
-        let shm_dir = std::path::Path::new("/dev/shm");
-        if !shm_dir.exists() {
-            return;
-        }
-
-        match fs::read_dir(shm_dir) {
-            Ok(entries) => {
-                for entry in entries.flatten() {
-                    if let Some(name) = entry.file_name().to_str()
-                        && (name.starts_with("vertebra-") || name.starts_with("vertebra_"))
-                    {
-                        tracing::warn!(name, "cleaning up stale SHM region");
-                        let _ = fs::remove_file(entry.path());
-                    }
-                }
-            }
-            Err(e) => {
-                tracing::debug!(error = %e, "could not scan /dev/shm for stale regions");
-            }
-        }
+    let reaped =
+        vertebra_core::cleanup::reap_dead_owner_segments(&["/vertebra-", "/vertebra_", "/vtb-"]);
+    if reaped > 0 {
+        info!(reaped, "reaped dead-owner shared memory segments");
     }
 }
 
-/// Install panic hook that calls `cleanup_all()` for SHM cleanup.
+/// Install panic and termination signal hooks that call `cleanup_all()` for SHM cleanup.
 pub fn install_panic_cleanup_hook() {
+    if let Err(err) = vertebra_core::cleanup::install_signal_cleanup() {
+        tracing::debug!(error = %err, "failed to install SHM signal cleanup handler");
+    }
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         vertebra_core::cleanup::cleanup_all();

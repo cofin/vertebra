@@ -12,11 +12,10 @@ import pytest
 from advanced_alchemy.extensions.litestar import SQLAlchemyPlugin
 
 from vertebra.extensions.alchemy import (
-    AsyncInMemoryBrokerTransport,
+    AsyncSHMBrokerTransport,
     AsyncSHMSessionBroker,
     BrokerConfig,
     BrokerPlugin,
-    SyncInMemoryBrokerTransport,
     SyncSHMBrokerTransport,
     SyncSHMSessionBroker,
     create_alchemy_plugin,
@@ -40,12 +39,9 @@ from vertebra.utils.module_loader import import_optional
 from vertebra.utils.serializers import encode_json_bytes
 
 
-def _create_broker(config: BrokerConfig) -> SyncSHMBrokerTransport | SyncInMemoryBrokerTransport:
-    """Create a SyncSHMBrokerTransport when native signature matches or fall back to SyncInMemoryBrokerTransport."""
-    try:
-        return SyncSHMBrokerTransport(config)
-    except TypeError:
-        return SyncInMemoryBrokerTransport(config)
+def _create_broker(config: BrokerConfig) -> SyncSHMBrokerTransport:
+    """Create a SyncSHMBrokerTransport for SQLSpec proxy tests."""
+    return SyncSHMBrokerTransport(config)
 
 
 class ItemRow(msgspec.Struct, frozen=True, gc=False):
@@ -156,7 +152,7 @@ def test_proxy_sync_driver_small_inline_results() -> None:
         driver_instance=upstream,
         provide_session=lambda: upstream,
     )
-    broker = SyncInMemoryBrokerTransport(BrokerConfig(pool_size=4, max_overflow=2))
+    broker = _create_broker(BrokerConfig(pool_size=4, max_overflow=2))
     provider = SQLSpecSyncProvider(cfg, broker=broker, pool_name="primary", arrow_threshold_rows=256)
 
     with ProxySyncSessionContext(provider, broker=broker, pool_name="primary") as driver:
@@ -507,7 +503,7 @@ async def test_alchemy_plugin_and_shm_session_broker_proxied_sessions() -> None:
     sa_mod = import_optional("sqlalchemy")
     if sa_mod is not None:
         engine = sa_mod.create_engine("sqlite:///:memory:")
-        broker_plugin = BrokerPlugin(BrokerConfig(pool_size=4, max_overflow=1), use_shm=True)
+        broker_plugin = BrokerPlugin(BrokerConfig(pool_size=4, max_overflow=1))
         sa_session_broker = SyncSHMSessionBroker(transport=broker_plugin.transport, bind_key="sa_engine")
         sa_session_broker.attach_to_engine(engine)
 
@@ -530,14 +526,14 @@ async def test_alchemy_plugin_and_shm_session_broker_proxied_sessions() -> None:
 
 @pytest.mark.anyio
 async def test_proxy_async_driver_and_provider_reclaim_async_broker_leases() -> None:
-    """Verify ProxyAsyncDriver and SQLSpecAsyncProvider await async lease releases on AsyncInMemoryBrokerTransport."""
+    """Verify ProxyAsyncDriver and SQLSpecAsyncProvider await async lease releases on AsyncSHMBrokerTransport."""
     upstream = _SQLiteAsyncUpstreamDriver()
     cfg = SimpleNamespace(
         bind_key="single_slot_async",
         driver_instance=upstream,
         provide_session=lambda: upstream,
     )
-    async_broker = AsyncInMemoryBrokerTransport(BrokerConfig(pool_size=1, max_overflow=0, acquire_timeout=0.05))
+    async_broker = AsyncSHMBrokerTransport(BrokerConfig(pool_size=1, max_overflow=0, acquire_timeout=0.05))
     provider = SQLSpecAsyncProvider(cfg, broker=async_broker, pool_name="single_slot_async")
 
     with warnings.catch_warnings(record=True) as caught:

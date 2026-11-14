@@ -8,11 +8,9 @@ import logging
 from typing import Any, ClassVar, cast
 
 from vertebra.extensions.broker import (
-    AsyncInMemoryBrokerTransport,
     AsyncSHMBrokerTransport,
     BrokerPlugin,
     ChannelMessage,
-    SyncInMemoryBrokerTransport,
     SyncSHMBrokerTransport,
 )
 from vertebra.extensions.sqlspec.provider import (
@@ -36,8 +34,8 @@ try:
 except ImportError as exc:
     raise MissingDependencyError("sqlspec", install_package="sqlspec", extra="sqlspec") from exc
 
-type SyncBrokerTransport = SyncSHMBrokerTransport | SyncInMemoryBrokerTransport | Any
-type AsyncBrokerTransport = AsyncSHMBrokerTransport | AsyncInMemoryBrokerTransport | Any
+type SyncBrokerTransport = SyncSHMBrokerTransport | Any
+type AsyncBrokerTransport = AsyncSHMBrokerTransport | Any
 
 logger = logging.getLogger(__name__)
 

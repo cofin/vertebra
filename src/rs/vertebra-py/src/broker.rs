@@ -3,10 +3,11 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use pyo3::buffer::PyBuffer;
 use pyo3::prelude::*;
-use pyo3::types::{PyAnyMethods, PyBytes};
+use pyo3::types::{PyAnyMethods, PyByteArray, PyBytes, PyString};
 use vertebra_core::broker::{
-    BrokerError, LeaseGrant as RsLeaseGrant, LeaseTableStats, ShmLeaseHeader, ShmLeaseTable,
+    BrokerError, LeaseGrant as RsLeaseGrant, LeaseTableStats, PoolPartitionSpec, ShmLeaseTable,
     ShmStatementCache, StatementCacheStats as RsStatementCacheStats, StatementPlanEntry,
 };
 use vertebra_core::shm::ShmRegion;
@@ -23,18 +24,56 @@ fn extract_bytes_or_str(obj: &Bound<'_, PyAny>) -> PyResult<Vec<u8>> {
     }
 }
 
+/// Compute a deterministic unseeded XXH3-64 digest across Python worker processes.
+#[pyfunction]
+pub fn stable_hash64(data: &Bound<'_, PyAny>) -> PyResult<u64> {
+    if let Ok(b) = data.cast::<PyBytes>() {
+        return Ok(vertebra_core::broker::stable_hash64(b.as_bytes()));
+    }
+    if let Ok(s) = data.cast::<PyString>() {
+        let utf8 = s.to_str()?;
+        return Ok(vertebra_core::broker::stable_hash64(utf8.as_bytes()));
+    }
+    if let Ok(ba) = data.cast::<PyByteArray>() {
+        // SAFETY: GIL or immutable borrow within Python scope holds `ba` alive cleanly.
+        let bytes = unsafe { ba.as_bytes() };
+        return Ok(vertebra_core::broker::stable_hash64(bytes));
+    }
+    if let Ok(buf) = PyBuffer::<u8>::get(data)
+        && let Ok(vec) = buf.to_vec(data.py())
+    {
+        return Ok(vertebra_core::broker::stable_hash64(&vec));
+    }
+    Err(pyo3::exceptions::PyTypeError::new_err(
+        "stable_hash64 expects bytes, bytearray, memoryview, or str",
+    ))
+}
+
 fn broker_err_to_py(err: BrokerError) -> PyErr {
     match err {
-        BrokerError::InvalidCapacity => pyo3::exceptions::PyValueError::new_err(err.to_string()),
+        BrokerError::InvalidCapacity | BrokerError::InvalidPartition(_) => {
+            pyo3::exceptions::PyValueError::new_err(err.to_string())
+        }
         BrokerError::RegionTooSmall { .. } => {
             pyo3::exceptions::PyValueError::new_err(err.to_string())
         }
-        BrokerError::InvalidMagic(_) | BrokerError::UnsupportedAbi(_) => {
-            pyo3::exceptions::PyRuntimeError::new_err(err.to_string())
+        BrokerError::PoolExhausted | BrokerError::InitTimeout => {
+            pyo3::exceptions::PyTimeoutError::new_err(err.to_string())
         }
-        BrokerError::PoolExhausted => pyo3::exceptions::PyTimeoutError::new_err(err.to_string()),
         BrokerError::LeaseNotFound => pyo3::exceptions::PyKeyError::new_err(err.to_string()),
-        BrokerError::GenerationMismatch => {
+        BrokerError::SegmentInUse { owner_pid } => pyo3::exceptions::PyFileExistsError::new_err(
+            format!("shared memory segment in use by owner_pid={owner_pid}"),
+        ),
+        BrokerError::NotFound => pyo3::exceptions::PyFileNotFoundError::new_err(err.to_string()),
+        BrokerError::PermissionDenied => {
+            pyo3::exceptions::PyPermissionError::new_err(err.to_string())
+        }
+        BrokerError::SystemError(errno) => PyErr::from(std::io::Error::from_raw_os_error(errno)),
+        BrokerError::InvalidMagic(_)
+        | BrokerError::UnsupportedAbi(_)
+        | BrokerError::GenerationMismatch
+        | BrokerError::StaleGeneration
+        | BrokerError::PartitionsExhausted => {
             pyo3::exceptions::PyRuntimeError::new_err(err.to_string())
         }
     }
@@ -148,31 +187,32 @@ impl LeaseBroker {
     #[staticmethod]
     #[pyo3(signature = (name, pool_size=20, max_overflow=10, stmt_capacity=512))]
     pub fn create_named(
+        py: Python<'_>,
         name: &str,
         pool_size: u32,
         max_overflow: u32,
         stmt_capacity: u32,
     ) -> PyResult<Self> {
-        let req_size =
-            ShmLeaseTable::required_size_with_statements(pool_size, max_overflow, stmt_capacity);
         #[cfg(unix)]
         {
-            let region = ShmRegion::create_named(name, req_size)
-                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-            let table = ShmLeaseTable::init_in_region_with_statements(
-                region,
-                pool_size,
-                max_overflow,
-                stmt_capacity,
-            )
-            .map_err(broker_err_to_py)?;
+            let table = py
+                .detach(|| {
+                    ShmLeaseTable::create_with_statements(
+                        name,
+                        pool_size,
+                        max_overflow,
+                        stmt_capacity,
+                    )
+                })
+                .map_err(broker_err_to_py)?
+                .0;
             Ok(Self {
                 table: Arc::new(table),
             })
         }
         #[cfg(not(unix))]
         {
-            let _ = (name, pool_size, max_overflow, stmt_capacity, req_size);
+            let _ = (py, name, pool_size, max_overflow, stmt_capacity);
             Err(pyo3::exceptions::PyNotImplementedError::new_err(
                 "named SHM regions only supported on Unix",
             ))
@@ -182,38 +222,95 @@ impl LeaseBroker {
     #[staticmethod]
     #[pyo3(signature = (name, pool_size=20, max_overflow=10, stmt_capacity=512))]
     pub fn open_named(
+        py: Python<'_>,
         name: &str,
         pool_size: u32,
         max_overflow: u32,
         stmt_capacity: u32,
     ) -> PyResult<Self> {
-        let req_size =
-            ShmLeaseTable::required_size_with_statements(pool_size, max_overflow, stmt_capacity);
         #[cfg(unix)]
         {
-            let mut region = ShmRegion::open_named(name, req_size)
-                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-            if region.len() >= std::mem::size_of::<ShmLeaseHeader>() {
-                let total_size =
-                    unsafe { (*(region.as_ptr() as *const ShmLeaseHeader)).total_size as usize };
-                if total_size > region.len() {
-                    drop(region);
-                    region = ShmRegion::open_named(name, total_size)
-                        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-                }
-            }
-            let table = ShmLeaseTable::attach_region(region).map_err(broker_err_to_py)?;
+            let table = py
+                .detach(|| {
+                    ShmLeaseTable::open_with_statements_matching(
+                        name,
+                        pool_size,
+                        max_overflow,
+                        stmt_capacity,
+                    )
+                })
+                .map_err(broker_err_to_py)?
+                .0;
             Ok(Self {
                 table: Arc::new(table),
             })
         }
         #[cfg(not(unix))]
         {
-            let _ = (name, pool_size, max_overflow, stmt_capacity, req_size);
+            let _ = (py, name, pool_size, max_overflow, stmt_capacity);
             Err(pyo3::exceptions::PyNotImplementedError::new_err(
                 "named SHM regions only supported on Unix",
             ))
         }
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (name, pool_size=20, max_overflow=10, stmt_capacity=512))]
+    pub fn open_or_create_named(
+        py: Python<'_>,
+        name: &str,
+        pool_size: u32,
+        max_overflow: u32,
+        stmt_capacity: u32,
+    ) -> PyResult<(Self, bool)> {
+        #[cfg(unix)]
+        {
+            let (table, _, created) = py
+                .detach(|| {
+                    ShmLeaseTable::open_or_create_with_statements(
+                        name,
+                        pool_size,
+                        max_overflow,
+                        stmt_capacity,
+                    )
+                })
+                .map_err(broker_err_to_py)?;
+            Ok((
+                Self {
+                    table: Arc::new(table),
+                },
+                created,
+            ))
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (py, name, pool_size, max_overflow, stmt_capacity);
+            Err(pyo3::exceptions::PyNotImplementedError::new_err(
+                "named SHM regions only supported on Unix",
+            ))
+        }
+    }
+
+    #[staticmethod]
+    pub fn probe_owner_pid(name: &str) -> Option<u32> {
+        #[cfg(unix)]
+        {
+            vertebra_core::shm::probe_owner_pid(name)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = name;
+            None
+        }
+    }
+
+    pub fn unlink(&self) -> bool {
+        self.table.unlink()
+    }
+
+    #[getter]
+    pub fn owner_pid(&self) -> Option<u32> {
+        self.table.owner_pid()
     }
 
     #[staticmethod]
@@ -386,6 +483,69 @@ impl LeaseBroker {
         }
     }
 
+    #[pyo3(signature = (pool_key_hash, pool_size, max_overflow=0))]
+    pub fn register_partition(
+        &self,
+        pool_key_hash: u64,
+        pool_size: u32,
+        max_overflow: u32,
+    ) -> PyResult<u16> {
+        self.table
+            .register_partition(PoolPartitionSpec {
+                pool_key_hash,
+                pool_size,
+                max_overflow,
+            })
+            .map_err(broker_err_to_py)
+    }
+
+    #[pyo3(signature = (partition, worker_pid, ttl_ns=0, bind_key_hash=0))]
+    pub fn try_acquire_in(
+        &self,
+        partition: u16,
+        worker_pid: u32,
+        ttl_ns: u64,
+        bind_key_hash: u64,
+    ) -> PyResult<Option<LeaseGrant>> {
+        self.table
+            .try_acquire_in(partition, worker_pid, ttl_ns, bind_key_hash)
+            .map(|opt| opt.map(LeaseGrant::from))
+            .map_err(broker_err_to_py)
+    }
+
+    #[pyo3(signature = (partition, worker_pid, ttl_ns=0, timeout_ms=5000, bind_key_hash=0))]
+    pub fn acquire_in(
+        &self,
+        py: Python<'_>,
+        partition: u16,
+        worker_pid: u32,
+        ttl_ns: u64,
+        timeout_ms: u64,
+        bind_key_hash: u64,
+    ) -> PyResult<Option<LeaseGrant>> {
+        let table = Arc::clone(&self.table);
+        let result = py.detach(move || {
+            table.acquire_in(
+                partition,
+                worker_pid,
+                ttl_ns,
+                Duration::from_millis(timeout_ms),
+                bind_key_hash,
+            )
+        });
+        match result {
+            Ok(grant) => Ok(Some(LeaseGrant::from(grant))),
+            Err(BrokerError::PoolExhausted) => Ok(None),
+            Err(err) => Err(broker_err_to_py(err)),
+        }
+    }
+
+    pub fn heartbeat(&self, slot_index: u32, generation: u64) -> PyResult<()> {
+        self.table
+            .heartbeat(slot_index, generation)
+            .map_err(broker_err_to_py)
+    }
+
     pub fn release(&self, slot_index: u32, generation: u64) -> PyResult<bool> {
         match self.table.release(slot_index, generation) {
             Ok(()) => Ok(true),
@@ -531,12 +691,26 @@ impl StatementCache {
 
     #[staticmethod]
     #[pyo3(signature = (name, capacity=512))]
-    pub fn create_named(name: &str, capacity: u32) -> PyResult<Self> {
+    pub fn create_named(py: Python<'_>, name: &str, capacity: u32) -> PyResult<Self> {
         let req_size = ShmStatementCache::required_size(capacity);
         #[cfg(unix)]
         {
-            let region = ShmRegion::create_named(name, req_size)
-                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+            let region = py
+                .detach(|| ShmRegion::create_named(name, req_size))
+                .map_err(|e| match e {
+                    vertebra_core::shm::ShmError::InUse { owner_pid } => {
+                        broker_err_to_py(BrokerError::SegmentInUse { owner_pid })
+                    }
+                    vertebra_core::shm::ShmError::InitTimeout => {
+                        broker_err_to_py(BrokerError::InitTimeout)
+                    }
+                    vertebra_core::shm::ShmError::Sys(ref io_err)
+                        if io_err.kind() == std::io::ErrorKind::PermissionDenied =>
+                    {
+                        broker_err_to_py(BrokerError::PermissionDenied)
+                    }
+                    other => pyo3::exceptions::PyRuntimeError::new_err(other.to_string()),
+                })?;
             let cache =
                 ShmStatementCache::init_in_region(region, capacity).map_err(broker_err_to_py)?;
             Ok(Self {
@@ -545,7 +719,7 @@ impl StatementCache {
         }
         #[cfg(not(unix))]
         {
-            let _ = (name, capacity, req_size);
+            let _ = (py, name, capacity, req_size);
             Err(pyo3::exceptions::PyNotImplementedError::new_err(
                 "named SHM regions only supported on Unix",
             ))
@@ -554,12 +728,28 @@ impl StatementCache {
 
     #[staticmethod]
     #[pyo3(signature = (name, capacity=512))]
-    pub fn open_named(name: &str, capacity: u32) -> PyResult<Self> {
+    pub fn open_named(py: Python<'_>, name: &str, capacity: u32) -> PyResult<Self> {
         let req_size = ShmStatementCache::required_size(capacity);
         #[cfg(unix)]
         {
-            let region = ShmRegion::open_named(name, req_size)
-                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+            let region = py
+                .detach(|| ShmRegion::open_named(name, req_size))
+                .map_err(|e| match e {
+                    vertebra_core::shm::ShmError::InUse { owner_pid } => {
+                        broker_err_to_py(BrokerError::SegmentInUse { owner_pid })
+                    }
+                    vertebra_core::shm::ShmError::Sys(ref io_err)
+                        if io_err.kind() == std::io::ErrorKind::NotFound =>
+                    {
+                        broker_err_to_py(BrokerError::NotFound)
+                    }
+                    vertebra_core::shm::ShmError::Sys(ref io_err)
+                        if io_err.kind() == std::io::ErrorKind::PermissionDenied =>
+                    {
+                        broker_err_to_py(BrokerError::PermissionDenied)
+                    }
+                    other => pyo3::exceptions::PyRuntimeError::new_err(other.to_string()),
+                })?;
             let cache =
                 ShmStatementCache::attach_region(region, capacity).map_err(broker_err_to_py)?;
             Ok(Self {
@@ -568,11 +758,48 @@ impl StatementCache {
         }
         #[cfg(not(unix))]
         {
-            let _ = (name, capacity, req_size);
+            let _ = (py, name, capacity, req_size);
             Err(pyo3::exceptions::PyNotImplementedError::new_err(
                 "named SHM regions only supported on Unix",
             ))
         }
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (name, capacity=512))]
+    pub fn open_or_create_named(
+        py: Python<'_>,
+        name: &str,
+        capacity: u32,
+    ) -> PyResult<(Self, bool)> {
+        #[cfg(unix)]
+        {
+            let (cache, created) = py
+                .detach(|| ShmStatementCache::open_or_create_named(name, capacity))
+                .map_err(broker_err_to_py)?;
+            Ok((
+                Self {
+                    cache: Arc::new(cache),
+                },
+                created,
+            ))
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (py, name, capacity);
+            Err(pyo3::exceptions::PyNotImplementedError::new_err(
+                "named SHM regions only supported on Unix",
+            ))
+        }
+    }
+
+    pub fn unlink(&self) -> bool {
+        self.cache.unlink()
+    }
+
+    #[getter]
+    pub fn owner_pid(&self) -> Option<u32> {
+        self.cache.owner_pid()
     }
 
     pub fn lookup(&self, dialect_tag: u8, raw_sql: &[u8]) -> Option<StatementPlan> {

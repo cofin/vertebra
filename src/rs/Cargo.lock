@@ -6457,6 +6457,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "twox-hash",
  "url",
  "windows-sys 0.61.2",
  "zstd",

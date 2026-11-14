@@ -267,3 +267,100 @@ fn test_shm_lease_table_colocated_statement_cache_and_channel_ring_across_named_
     assert_eq!(vertebra_core::broker::DIALECT_TAG_SPANNER, 8);
     assert_eq!(vertebra_core::broker::DIALECT_TAG_SPANGRES, 9);
 }
+
+#[test]
+fn test_stable_hash64_and_partition_admission_bounds() {
+    use vertebra_core::broker::{MAX_POOL_PARTITIONS, PoolPartitionSpec, stable_hash64};
+
+    let empty = stable_hash64(b"");
+    assert_eq!(empty, stable_hash64(b""));
+    assert_ne!(empty, stable_hash64(b"primary"));
+    assert_eq!(
+        ShmStatementCache::compute_sql_hash(1, b"SELECT 1"),
+        stable_hash64(b"\x01SELECT 1")
+    );
+
+    let req_size = ShmLeaseTable::required_size(8, 2);
+    let region = ShmRegion::create(req_size).unwrap();
+    let table = ShmLeaseTable::init_in_region(region, 8, 2).unwrap();
+
+    let h_a = stable_hash64(b"part_a");
+    let h_b = stable_hash64(b"part_b");
+    let p_a = table
+        .register_partition(PoolPartitionSpec {
+            pool_key_hash: h_a,
+            pool_size: 1,
+            max_overflow: 0,
+        })
+        .unwrap();
+    assert_eq!(
+        table
+            .register_partition(PoolPartitionSpec {
+                pool_key_hash: h_a,
+                pool_size: 1,
+                max_overflow: 0,
+            })
+            .unwrap(),
+        p_a
+    );
+    let p_b = table
+        .register_partition(PoolPartitionSpec {
+            pool_key_hash: h_b,
+            pool_size: 1,
+            max_overflow: 0,
+        })
+        .unwrap();
+    assert_ne!(p_a, p_b);
+
+    let g_a = table.try_acquire_in(p_a, 1001, 0, h_a).unwrap().unwrap();
+    assert!(table.try_acquire_in(p_a, 1002, 0, h_a).unwrap().is_none());
+    let g_b = table.try_acquire_in(p_b, 1003, 0, h_b).unwrap().unwrap();
+
+    table.release(g_a.slot_index, g_a.generation).unwrap();
+    table.release(g_b.slot_index, g_b.generation).unwrap();
+
+    for idx in 2..MAX_POOL_PARTITIONS {
+        let key = format!("extra_part_{idx}");
+        table
+            .register_partition(PoolPartitionSpec {
+                pool_key_hash: stable_hash64(key.as_bytes()),
+                pool_size: 1,
+                max_overflow: 0,
+            })
+            .unwrap();
+    }
+    assert_eq!(
+        table.register_partition(PoolPartitionSpec {
+            pool_key_hash: stable_hash64(b"overflow_65th"),
+            pool_size: 1,
+            max_overflow: 0,
+        }),
+        Err(BrokerError::PartitionsExhausted)
+    );
+}
+
+#[test]
+fn test_heartbeat_extends_lease_and_rejects_stale_generation() {
+    let req_size = ShmLeaseTable::required_size(2, 0);
+    let region = ShmRegion::create(req_size).unwrap();
+    let table = ShmLeaseTable::init_in_region(region, 2, 0).unwrap();
+
+    let g = table.try_acquire(2001, 30_000_000, 0).unwrap();
+    std::thread::sleep(Duration::from_millis(18));
+    table.heartbeat(g.slot_index, g.generation).unwrap();
+    std::thread::sleep(Duration::from_millis(18));
+    assert_eq!(
+        table.reap_expired(vertebra_core::broker::monotonic_now_ns()),
+        0
+    );
+
+    std::thread::sleep(Duration::from_millis(38));
+    assert_eq!(
+        table.reap_expired(vertebra_core::broker::monotonic_now_ns()),
+        1
+    );
+    assert_eq!(
+        table.heartbeat(g.slot_index, g.generation),
+        Err(BrokerError::StaleGeneration)
+    );
+}

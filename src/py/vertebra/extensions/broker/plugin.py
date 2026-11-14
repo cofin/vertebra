@@ -5,10 +5,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from vertebra.extensions.broker.transport import (
-    AsyncInMemoryBrokerTransport,
     AsyncSHMBrokerTransport,
     BrokerConfig,
-    SyncInMemoryBrokerTransport,
     SyncSHMBrokerTransport,
 )
 from vertebra.telemetry.otel import DbPoolMetricSample
@@ -24,49 +22,31 @@ class BrokerPlugin:
     def __init__(
         self,
         config: BrokerConfig | None = None,
-        use_shm: bool = True,
         zpages: ZPagesRegistry | None = None,
         otel_recorder: DbPoolRecorder | None = None,
         name: str = "default",
         async_mode: bool = False,
     ) -> None:
         self.config = config or BrokerConfig()
-        self.use_shm = use_shm
         self.name = name
         self.zpages = zpages
         self.otel_recorder = otel_recorder
         self.async_mode = async_mode
 
-        self._transport: (
-            SyncSHMBrokerTransport
-            | AsyncSHMBrokerTransport
-            | SyncInMemoryBrokerTransport
-            | AsyncInMemoryBrokerTransport
+        self._transport: SyncSHMBrokerTransport | AsyncSHMBrokerTransport = (
+            AsyncSHMBrokerTransport(self.config) if self.async_mode else SyncSHMBrokerTransport(self.config)
         )
-        if self.use_shm:
-            self._transport = (
-                AsyncSHMBrokerTransport(self.config) if self.async_mode else SyncSHMBrokerTransport(self.config)
-            )
-        else:
-            self._transport = (
-                AsyncInMemoryBrokerTransport(self.config)
-                if self.async_mode
-                else SyncInMemoryBrokerTransport(self.config)
-            )
+        self._partition_id: int | None = None
 
         if self.zpages is not None:
             self._register_zpages(self.zpages)
 
     @property
-    def transport(
-        self,
-    ) -> SyncSHMBrokerTransport | AsyncSHMBrokerTransport | SyncInMemoryBrokerTransport | AsyncInMemoryBrokerTransport:
+    def transport(self) -> SyncSHMBrokerTransport | AsyncSHMBrokerTransport:
         """Return the active broker transport."""
         return self._transport
 
-    def install_state(
-        self, state_mapping: dict[str, Any]
-    ) -> SyncSHMBrokerTransport | AsyncSHMBrokerTransport | SyncInMemoryBrokerTransport | AsyncInMemoryBrokerTransport:
+    def install_state(self, state_mapping: dict[str, Any]) -> SyncSHMBrokerTransport | AsyncSHMBrokerTransport:
         """Register the broker transport and metrics snapshot in state_mapping."""
         state_mapping[self.config.state_key] = self._transport
         state_mapping[self.config.metrics_state_key] = self._transport.metrics()
@@ -93,6 +73,11 @@ class BrokerPlugin:
 
     def on_app_init(self, app: Any) -> None:
         """Hook called during application initialization."""
+        self._partition_id = self._transport.register_partition(
+            self.name,
+            pool_size=self.config.pool_size,
+            max_overflow=self.config.max_overflow,
+        )
         target_state = getattr(app, "state", None)
         if isinstance(target_state, dict):
             target_state["db_broker"] = self._transport

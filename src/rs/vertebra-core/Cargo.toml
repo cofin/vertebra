@@ -21,6 +21,7 @@ serde_json = { workspace = true }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, default-features = false, features = ["sync"] }
+twox-hash = { version = "2.1", default-features = false, features = ["xxhash3_64"] }
 bytes = { workspace = true }
 chrono = { workspace = true, optional = true }
 jsonwebtoken = { workspace = true }
