@@ -2,13 +2,10 @@
 
 from __future__ import annotations
 
-import asyncio
-import os
-import threading
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from contextvars import ContextVar
-from typing import TYPE_CHECKING, Any, ClassVar, Self
+from typing import Any, ClassVar, Self
 
 from vertebra.db.adapters.oracle.config import OracleConfig, OracleSessionAttrs
 from vertebra.db.adapters.oracle.core import ORACLE_DIALECT_TAG, OracleCore
@@ -24,30 +21,16 @@ from vertebra.db.driver import InterfaceError, SyncDatabaseDriver
 from vertebra.db.rls import TenantScopeConfig
 from vertebra.utils.text import validate_identifier
 
-if TYPE_CHECKING:
-    pass
-
-_DEFAULT_TENANT_SCOPE = TenantScopeConfig()
-
 __all__ = (
     "SyncOracleDriver",
     "SyncOraclePool",
 )
 
+_DEFAULT_TENANT_SCOPE = TenantScopeConfig()
 _SYNC_PINNED_TX: ContextVar[dict[int, tuple[int, int | None, Any, bool]] | None] = ContextVar(
     "_SYNC_PINNED_TX",
     default=None,
 )
-
-
-def _current_execution_identity() -> tuple[int, int | None]:
-    """Return `(thread_ident, current_asyncio_task_id)` for ContextVar transaction isolation."""
-    thread_id = threading.get_ident()
-    try:
-        task = asyncio.current_task()
-    except RuntimeError:
-        task = None
-    return (thread_id, id(task) if task is not None else None)
 
 
 class SyncOraclePool:
@@ -264,12 +247,6 @@ class SyncOracleDriver(SyncDatabaseDriver[OracleConfig]):
         """Return the ordered history of transaction lifecycle commands issued on this driver."""
         return tuple(self._tx_events)
 
-    def pipeline(self) -> SyncOraclePipeline:
-        """Create a delayed-commit synchronous query pipeline bound to this driver."""
-        if self._pipeline_active:
-            raise InterfaceError("An Oracle pipeline is already active on this driver")
-        return SyncOraclePipeline(self)
-
     @property
     def pool(self) -> SyncOraclePool | Any | None:
         """Return the optional `SyncOraclePool` attached to this driver."""
@@ -300,6 +277,12 @@ class SyncOracleDriver(SyncDatabaseDriver[OracleConfig]):
             if native_frame is not None:
                 return bytes(native_frame)
         return self._last_piggyback_frame
+
+    def pipeline(self) -> SyncOraclePipeline:
+        """Create a delayed-commit synchronous query pipeline bound to this driver."""
+        if self._pipeline_active:
+            raise InterfaceError("An Oracle pipeline is already active on this driver")
+        return SyncOraclePipeline(self)
 
     def set_session_attrs(
         self,
@@ -523,12 +506,12 @@ class SyncOracleDriver(SyncDatabaseDriver[OracleConfig]):
     ) -> int:
         """Execute a DML, DDL, or PL/SQL statement and return the affected row count."""
         out_binds = kwargs.get("out_binds")
-        coerced = self._coerce_parameters(parameters)
+        coerced = OracleCore.coerce_parameters(parameters, features=self.config.driver_features)
         param_count = len(coerced) if coerced is not None else 0
-        grant = self._acquire_oracle_broker_lease(sql, param_count)
+        grant = OracleCore.acquire_broker_lease(self._broker, sql, param_count)
         try:
             with self._checkout_client() as active_client:
-                self._track_session_context_sql(sql, parameters)
+                OracleCore.track_session_context_sql(self._session_context, sql, parameters)
                 result = active_client.execute(
                     sql,
                     coerced,
@@ -540,7 +523,7 @@ class SyncOracleDriver(SyncDatabaseDriver[OracleConfig]):
                     return max(result, 0)
                 return max(int(result.rowcount), 0)
         finally:
-            self._release_oracle_broker_lease(grant)
+            OracleCore.release_broker_lease(self._broker, grant)
 
     def execute_many(
         self,
@@ -552,14 +535,16 @@ class SyncOracleDriver(SyncDatabaseDriver[OracleConfig]):
         _ = kwargs
         if not parameter_sets:
             return 0
-        coerced_seq = [self._coerce_parameters(p) or () for p in parameter_sets]
+        coerced_seq = [
+            OracleCore.coerce_parameters(p, features=self.config.driver_features) or () for p in parameter_sets
+        ]
         first_len = len(coerced_seq[0]) if coerced_seq else 0
-        grant = self._acquire_oracle_broker_lease(sql, first_len)
+        grant = OracleCore.acquire_broker_lease(self._broker, sql, first_len)
         try:
             with self._checkout_client() as active_client:
                 return int(active_client.execute_many(sql, coerced_seq))
         finally:
-            self._release_oracle_broker_lease(grant)
+            OracleCore.release_broker_lease(self._broker, grant)
 
     def execute_tuples(
         self,
@@ -579,12 +564,12 @@ class SyncOracleDriver(SyncDatabaseDriver[OracleConfig]):
     ) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
         """Execute SQL and return `(rows, column_names)` with configured column-casing and cell coercion."""
         out_binds = kwargs.get("out_binds")
-        coerced = self._coerce_parameters(parameters)
+        coerced = OracleCore.coerce_parameters(parameters, features=self.config.driver_features)
         param_count = len(coerced) if coerced is not None else 0
-        grant = self._acquire_oracle_broker_lease(sql, param_count)
+        grant = OracleCore.acquire_broker_lease(self._broker, sql, param_count)
         try:
             with self._checkout_client() as active_client:
-                self._track_session_context_sql(sql, parameters)
+                OracleCore.track_session_context_sql(self._session_context, sql, parameters)
                 lowercase = self.config.driver_features.enable_lowercase_column_names
                 fetch_decimals = self.config.driver_features.fetch_decimals
                 if OracleCore.is_dml_or_plsql(sql):
@@ -603,9 +588,9 @@ class SyncOracleDriver(SyncDatabaseDriver[OracleConfig]):
                         fetch_decimals=fetch_decimals,
                         enable_lowercase_column_names=lowercase,
                     )
-                return self._coerce_result_rows_and_cols(result)
+                return OracleCore.coerce_result_rows_and_cols(result, features=self.config.driver_features)
         finally:
-            self._release_oracle_broker_lease(grant)
+            OracleCore.release_broker_lease(self._broker, grant)
 
     def select(
         self,
@@ -635,12 +620,12 @@ class SyncOracleDriver(SyncDatabaseDriver[OracleConfig]):
         if hasattr(self._client, "query_arrow") and (
             force_shm is not None or threshold_rows == ARROW_SHM_THRESHOLD_ROWS
         ):
-            coerced = self._coerce_parameters(parameters)
+            coerced = OracleCore.coerce_parameters(parameters, features=self.config.driver_features)
             param_count = len(coerced) if coerced is not None else 0
-            grant = self._acquire_oracle_broker_lease(sql, param_count)
+            grant = OracleCore.acquire_broker_lease(self._broker, sql, param_count)
             try:
                 with self._checkout_client() as active_client:
-                    self._track_session_context_sql(sql, parameters)
+                    OracleCore.track_session_context_sql(self._session_context, sql, parameters)
                     effective_batch = int(batch_size) if batch_size is not None and batch_size > 0 else 8192
                     cursor: ArrowCursor = active_client.query_arrow(
                         sql,
@@ -651,7 +636,7 @@ class SyncOracleDriver(SyncDatabaseDriver[OracleConfig]):
                     )
                     return cursor
             finally:
-                self._release_oracle_broker_lease(grant)
+                OracleCore.release_broker_lease(self._broker, grant)
         rows, raw_cols = self.execute_with_description(sql, parameters, **kwargs)
         cols = [col.lower() if self.config.driver_features.enable_lowercase_column_names else col for col in raw_cols]
         return ArrowCursor.from_rows(rows, cols, threshold_rows=threshold_rows)
@@ -728,13 +713,13 @@ class SyncOracleDriver(SyncDatabaseDriver[OracleConfig]):
         if entry is None:
             return None
         stored_thread, stored_task, lease, _ = entry
-        curr_thread, curr_task = _current_execution_identity()
+        curr_thread, curr_task = OracleCore.current_execution_identity()
         if stored_thread != curr_thread or stored_task != curr_task:
             return None
         return lease
 
     def _set_pinned_lease(self, lease: Any, *, from_pool: bool) -> None:
-        curr_thread, curr_task = _current_execution_identity()
+        curr_thread, curr_task = OracleCore.current_execution_identity()
         existing = _SYNC_PINNED_TX.get()
         updated = dict(existing) if existing is not None else {}
         updated[id(self)] = (curr_thread, curr_task, lease, from_pool)
@@ -748,7 +733,7 @@ class SyncOracleDriver(SyncDatabaseDriver[OracleConfig]):
         if entry is None:
             return None
         stored_thread, stored_task, _, _ = entry
-        curr_thread, curr_task = _current_execution_identity()
+        curr_thread, curr_task = OracleCore.current_execution_identity()
         if stored_thread != curr_thread or stored_task != curr_task:
             return None
         updated = dict(mapping)
@@ -757,19 +742,11 @@ class SyncOracleDriver(SyncDatabaseDriver[OracleConfig]):
         return entry
 
     def _acquire_pool_client(self) -> Any:
-        assert self._pool is not None
+        if self._pool is None:
+            raise InterfaceError("Oracle connection pool is not configured")
         attrs = self._pending_session_attrs
         self._pending_session_attrs = None
-        acquire_kwargs: dict[str, Any] = {}
-        if attrs is not None:
-            if attrs.client_identifier is not None:
-                acquire_kwargs["client_identifier"] = attrs.client_identifier
-            if attrs.module is not None:
-                acquire_kwargs["module"] = attrs.module
-            if attrs.action is not None:
-                acquire_kwargs["action"] = attrs.action
-            if attrs.ecid is not None:
-                acquire_kwargs["ecid"] = attrs.ecid
+        acquire_kwargs = OracleCore.build_session_attr_acquire_kwargs(attrs)
         if hasattr(self._pool, "acquire_from_pool"):
             return self._pool.acquire_from_pool(**acquire_kwargs)
         return self._pool.acquire(**acquire_kwargs)
@@ -832,142 +809,3 @@ class SyncOracleDriver(SyncDatabaseDriver[OracleConfig]):
         frame = getattr(client, "last_piggyback_frame", None)
         if frame is not None:
             self._last_piggyback_frame = bytes(frame)
-
-    def _coerce_parameters(
-        self,
-        parameters: Sequence[Any] | Mapping[str, Any] | None,
-    ) -> list[Any] | dict[str, Any] | None:
-        if parameters is None:
-            return None
-        features = self.config.driver_features
-        if isinstance(parameters, Mapping):
-            return {
-                str(k).lstrip(":"): OracleCore.coerce_bind_parameter(v, features=features)
-                for k, v in parameters.items()
-            }
-        if isinstance(parameters, Sequence) and not isinstance(parameters, (str, bytes, bytearray)):
-            return [OracleCore.coerce_bind_parameter(v, features=features) for v in parameters]
-        return [OracleCore.coerce_bind_parameter(v, features=features) for v in parameters]
-
-    def _coerce_result_rows_and_cols(
-        self,
-        result: Any,
-    ) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
-        features = self.config.driver_features
-        lowercase = features.enable_lowercase_column_names
-        raw_columns = getattr(result, "columns", ()) or ()
-        cols = tuple(str(col.name).lower() if lowercase else str(col.name) for col in raw_columns)
-        col_types = tuple(
-            str(getattr(col, "oracle_type", getattr(col, "type_name", "VARCHAR2"))) for col in raw_columns
-        )
-        raw_rows = getattr(result, "rows", ()) or ()
-        if raw_rows:
-            coerced_rows = [
-                tuple(
-                    OracleCore.coerce_row_cell(
-                        cell,
-                        col_types[idx] if idx < len(col_types) else None,
-                        features=features,
-                    )
-                    for idx, cell in enumerate(row)
-                )
-                for row in raw_rows
-            ]
-            return coerced_rows, cols
-
-        out_binds = getattr(result, "out_binds", None)
-        if out_binds is not None:
-            if isinstance(out_binds, Mapping):
-                out_cols = cols or tuple(
-                    str(k).lstrip(":").lower() if lowercase else str(k).lstrip(":") for k in out_binds
-                )
-                row_tuple = tuple(
-                    OracleCore.coerce_row_cell(
-                        val,
-                        col_types[idx] if idx < len(col_types) else None,
-                        features=features,
-                    )
-                    for idx, val in enumerate(out_binds.values())
-                )
-                return [row_tuple], out_cols
-            if isinstance(out_binds, Sequence) and not isinstance(out_binds, (str, bytes, bytearray)):
-                out_cols = cols or tuple(f"out_{i + 1}" for i in range(len(out_binds)))
-                row_tuple = tuple(
-                    OracleCore.coerce_row_cell(
-                        val,
-                        col_types[idx] if idx < len(col_types) else None,
-                        features=features,
-                    )
-                    for idx, val in enumerate(out_binds)
-                )
-                return [row_tuple], out_cols
-
-        return [], cols
-
-    def _track_session_context_sql(
-        self,
-        sql: str,
-        parameters: Sequence[Any] | Mapping[str, Any] | None,
-    ) -> None:
-        upper = sql.strip().upper()
-        if "SET_IDENTIFIER" in upper and isinstance(parameters, Mapping):
-            norm = {str(k).lstrip(":").lower(): v for k, v in parameters.items()}
-            val = norm.get("value", norm.get("identifier"))
-            if val is not None:
-                self._session_context[("USERENV", "CLIENT_IDENTIFIER")] = str(val)
-            return
-        if "CLEAR_IDENTIFIER" in upper:
-            self._session_context.pop(("USERENV", "CLIENT_IDENTIFIER"), None)
-            return
-        if isinstance(parameters, Mapping):
-            norm = {str(k).lstrip(":").lower(): v for k, v in parameters.items()}
-            if "namespace" in norm and "attribute" in norm:
-                key = (str(norm["namespace"]), str(norm["attribute"]))
-                if "value" in norm:
-                    self._session_context[key] = str(norm["value"])
-                else:
-                    self._session_context.pop(key, None)
-
-    def _acquire_oracle_broker_lease(self, sql: str, param_count: int) -> Any:
-        if self._broker is None:
-            return None
-        if hasattr(self._broker, "statement_cache"):
-            sc_attr = self._broker.statement_cache
-            sc = sc_attr() if callable(sc_attr) else sc_attr
-            if sc is not None and hasattr(sc, "lookup") and hasattr(sc, "insert"):
-                sql_bytes = sql.encode("utf-8")
-                try:
-                    cached = sc.lookup(ORACLE_DIALECT_TAG, sql)
-                    if cached is None:
-                        sc.insert(
-                            ORACLE_DIALECT_TAG,
-                            sql,
-                            param_count,
-                            sql_bytes,
-                            b"\x00\x01",
-                        )
-                except TypeError:
-                    cached = sc.lookup(ORACLE_DIALECT_TAG, sql_bytes)
-                    if cached is None:
-                        sc.insert(
-                            ORACLE_DIALECT_TAG,
-                            sql_bytes,
-                            param_count,
-                            sql_bytes,
-                            b"\x00\x01",
-                        )
-        if hasattr(self._broker, "lease_table") and self._broker.lease_table is not None:
-            return self._broker.lease_table.acquire(os.getpid())
-        if hasattr(self._broker, "acquire"):
-            try:
-                return self._broker.acquire(os.getpid())
-            except TypeError:
-                return self._broker.acquire(bind_key="oracle")
-        return None
-
-    def _release_oracle_broker_lease(self, grant: Any) -> None:
-        if grant is not None and self._broker is not None:
-            if hasattr(self._broker, "lease_table") and self._broker.lease_table is not None:
-                self._broker.lease_table.release(grant.slot_index, grant.generation)
-            elif hasattr(self._broker, "release") and hasattr(grant, "slot_index"):
-                self._broker.release(grant.slot_index, grant.generation)

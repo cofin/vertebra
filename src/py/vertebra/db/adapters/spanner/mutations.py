@@ -70,7 +70,7 @@ class StalenessBound(FrozenBaseStruct, frozen=True, gc=False):
         return int(self.milliseconds)
 
 
-class Mutation(FrozenBaseStruct, frozen=True, gc=False):
+class Mutation(FrozenBaseStruct, frozen=True, gc=True):
     """Single Cloud Spanner table mutation (`insert`, `update`, `insert_or_update`, `replace`, `delete`)."""
 
     op: Literal["insert", "update", "insert_or_update", "replace", "delete"]
@@ -194,7 +194,10 @@ class Mutation(FrozenBaseStruct, frozen=True, gc=False):
             return cls.update(table, cols, vals)
         if op_raw == "replace":
             return cls.replace(table, cols, vals)
-        return cls.insert_or_update(table, cols, vals)
+        if op_raw == "insert_or_update":
+            return cls.insert_or_update(table, cols, vals)
+        msg = f"Unsupported Spanner mutation op {op_raw!r}"
+        raise ValueError(msg)
 
     @staticmethod
     def chunk_by_cell_limit(
@@ -257,7 +260,7 @@ class Mutation(FrozenBaseStruct, frozen=True, gc=False):
         return str(val)
 
 
-class MutationGroup(FrozenBaseStruct, frozen=True, gc=False):
+class MutationGroup(FrozenBaseStruct, frozen=True, gc=True):
     """Independent group of mutations committed atomically via Cloud Spanner `BatchWrite`."""
 
     mutations: tuple[Mutation, ...]

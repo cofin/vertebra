@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import inspect
 import itertools
-import os
-import re
 import time
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
@@ -35,7 +33,6 @@ __all__ = (
 )
 
 _TX_SAVEPOINT_COUNTER = itertools.count(1)
-_CREDENTIAL_REJECTION_PATTERN = re.compile(r"\(HTTP (?:401|403)\)")
 
 
 class AsyncDuckDBDriver(AsyncDatabaseDriver[DuckDBConfig]):
@@ -210,14 +207,14 @@ class AsyncDuckDBDriver(AsyncDatabaseDriver[DuckDBConfig]):
         await self._refresh_dynamic_secrets_async()
         client = self._require_client()
         bound = DuckDBCore.normalize_parameters(parameters)
-        grant = self._acquire_duckdb_lease(sql, DuckDBCore.param_len(bound))
+        grant = DuckDBCore.acquire_broker_lease(self._broker, sql, DuckDBCore.param_len(bound))
         try:
             return int(await client.execute(sql, bound))
         except Exception as exc:
-            self._invalidate_rejected_credentials(exc)
+            DuckDBCore.invalidate_rejected_credentials(exc, self._dynamic_secrets, self._secret_generations)
             raise
         finally:
-            self._release_duckdb_lease(grant)
+            DuckDBCore.release_broker_lease(self._broker, grant)
 
     async def execute_many(
         self,
@@ -232,14 +229,14 @@ class AsyncDuckDBDriver(AsyncDatabaseDriver[DuckDBConfig]):
         await self._refresh_dynamic_secrets_async()
         client = self._require_client()
         normalized_sets = [DuckDBCore.normalize_parameters(item) or () for item in parameter_sets]
-        grant = self._acquire_duckdb_lease(sql, DuckDBCore.param_len(normalized_sets[0]))
+        grant = DuckDBCore.acquire_broker_lease(self._broker, sql, DuckDBCore.param_len(normalized_sets[0]))
         try:
             return int(await client.execute_many(sql, normalized_sets))
         except Exception as exc:
-            self._invalidate_rejected_credentials(exc)
+            DuckDBCore.invalidate_rejected_credentials(exc, self._dynamic_secrets, self._secret_generations)
             raise
         finally:
-            self._release_duckdb_lease(grant)
+            DuckDBCore.release_broker_lease(self._broker, grant)
 
     async def execute_tuples(
         self,
@@ -252,15 +249,15 @@ class AsyncDuckDBDriver(AsyncDatabaseDriver[DuckDBConfig]):
         await self._refresh_dynamic_secrets_async()
         client = self._require_client()
         bound = DuckDBCore.normalize_parameters(parameters)
-        grant = self._acquire_duckdb_lease(sql, DuckDBCore.param_len(bound))
+        grant = DuckDBCore.acquire_broker_lease(self._broker, sql, DuckDBCore.param_len(bound))
         try:
             rows = await client.execute_tuples(sql, bound)
             return list(rows)
         except Exception as exc:
-            self._invalidate_rejected_credentials(exc)
+            DuckDBCore.invalidate_rejected_credentials(exc, self._dynamic_secrets, self._secret_generations)
             raise
         finally:
-            self._release_duckdb_lease(grant)
+            DuckDBCore.release_broker_lease(self._broker, grant)
 
     async def execute_with_description(
         self,
@@ -273,15 +270,15 @@ class AsyncDuckDBDriver(AsyncDatabaseDriver[DuckDBConfig]):
         await self._refresh_dynamic_secrets_async()
         client = self._require_client()
         bound = DuckDBCore.normalize_parameters(parameters)
-        grant = self._acquire_duckdb_lease(sql, DuckDBCore.param_len(bound))
+        grant = DuckDBCore.acquire_broker_lease(self._broker, sql, DuckDBCore.param_len(bound))
         try:
             rows, cols = await client.execute_with_description(sql, bound)
             return list(rows), tuple(str(c) for c in cols)
         except Exception as exc:
-            self._invalidate_rejected_credentials(exc)
+            DuckDBCore.invalidate_rejected_credentials(exc, self._dynamic_secrets, self._secret_generations)
             raise
         finally:
-            self._release_duckdb_lease(grant)
+            DuckDBCore.release_broker_lease(self._broker, grant)
 
     async def select_with_total(
         self,
@@ -309,7 +306,7 @@ class AsyncDuckDBDriver(AsyncDatabaseDriver[DuckDBConfig]):
         await self._refresh_dynamic_secrets_async()
         client = self._require_client()
         bound = DuckDBCore.normalize_parameters(parameters)
-        grant = self._acquire_duckdb_lease(sql, DuckDBCore.param_len(bound))
+        grant = DuckDBCore.acquire_broker_lease(self._broker, sql, DuckDBCore.param_len(bound))
         try:
             native_cursor = await client.select_to_arrow(
                 sql,
@@ -319,10 +316,10 @@ class AsyncDuckDBDriver(AsyncDatabaseDriver[DuckDBConfig]):
             )
             return native_cursor if isinstance(native_cursor, ArrowCursor) else ArrowCursor(native_cursor)
         except Exception as exc:
-            self._invalidate_rejected_credentials(exc)
+            DuckDBCore.invalidate_rejected_credentials(exc, self._dynamic_secrets, self._secret_generations)
             raise
         finally:
-            self._release_duckdb_lease(grant)
+            DuckDBCore.release_broker_lease(self._broker, grant)
 
     def stream_arrow(
         self,
@@ -349,7 +346,7 @@ class AsyncDuckDBDriver(AsyncDatabaseDriver[DuckDBConfig]):
         await self._refresh_dynamic_secrets_async()
         client = self._require_client()
         bound = DuckDBCore.normalize_parameters(parameters)
-        grant = self._acquire_duckdb_lease(sql, DuckDBCore.param_len(bound))
+        grant = DuckDBCore.acquire_broker_lease(self._broker, sql, DuckDBCore.param_len(bound))
         try:
             native_cursors = await client.stream_arrow_batches(
                 sql,
@@ -357,10 +354,10 @@ class AsyncDuckDBDriver(AsyncDatabaseDriver[DuckDBConfig]):
                 batch_size=chunk,
             )
         except Exception as exc:
-            self._invalidate_rejected_credentials(exc)
+            DuckDBCore.invalidate_rejected_credentials(exc, self._dynamic_secrets, self._secret_generations)
             raise
         finally:
-            self._release_duckdb_lease(grant)
+            DuckDBCore.release_broker_lease(self._broker, grant)
 
         idx_cur = 0
         try:
@@ -379,7 +376,7 @@ class AsyncDuckDBDriver(AsyncDatabaseDriver[DuckDBConfig]):
                         for idx in range(0, len(rows), chunk):
                             yield rows[idx : idx + chunk]
         except Exception as exc:
-            self._invalidate_rejected_credentials(exc)
+            DuckDBCore.invalidate_rejected_credentials(exc, self._dynamic_secrets, self._secret_generations)
             raise
         finally:
             for remaining in native_cursors[idx_cur:]:
@@ -414,7 +411,7 @@ class AsyncDuckDBDriver(AsyncDatabaseDriver[DuckDBConfig]):
                 for field_name in getattr(data.schema, "names", ()):
                     validate_identifier(str(field_name), "column", allow_dots=False)
             payload = data.buffer_view() if isinstance(data, ArrowCursor) and data.used_shm else data
-            grant = self._acquire_duckdb_lease(f"APPENDER {table_name}", len(col_list or ()))
+            grant = DuckDBCore.acquire_broker_lease(self._broker, f"APPENDER {table_name}", len(col_list or ()))
             try:
                 return int(
                     await client.load_from_arrow(
@@ -425,10 +422,10 @@ class AsyncDuckDBDriver(AsyncDatabaseDriver[DuckDBConfig]):
                     )
                 )
             except Exception as exc:
-                self._invalidate_rejected_credentials(exc)
+                DuckDBCore.invalidate_rejected_credentials(exc, self._dynamic_secrets, self._secret_generations)
                 raise
             finally:
-                self._release_duckdb_lease(grant)
+                DuckDBCore.release_broker_lease(self._broker, grant)
 
         rows, cols = _table_to_rows_and_cols(data, columns)
         for col in cols:
@@ -436,7 +433,7 @@ class AsyncDuckDBDriver(AsyncDatabaseDriver[DuckDBConfig]):
         if not rows or not cols:
             return 0
         dict_rows = [{str(col): DuckDBCore.normalize_param(row[idx]) for idx, col in enumerate(cols)} for row in rows]
-        grant = self._acquire_duckdb_lease(f"APPENDER {table_name}", len(cols))
+        grant = DuckDBCore.acquire_broker_lease(self._broker, f"APPENDER {table_name}", len(cols))
         try:
             return int(
                 await client.load_from_arrow(
@@ -447,10 +444,10 @@ class AsyncDuckDBDriver(AsyncDatabaseDriver[DuckDBConfig]):
                 )
             )
         except Exception as exc:
-            self._invalidate_rejected_credentials(exc)
+            DuckDBCore.invalidate_rejected_credentials(exc, self._dynamic_secrets, self._secret_generations)
             raise
         finally:
-            self._release_duckdb_lease(grant)
+            DuckDBCore.release_broker_lease(self._broker, grant)
 
     def _require_client(self) -> AsyncDuckDBClient:
         client = self._client
@@ -479,8 +476,8 @@ class AsyncDuckDBDriver(AsyncDatabaseDriver[DuckDBConfig]):
                 if provider is None:
                     continue
                 key = secret.name.lower()
-                provider_gen = self._probe_provider_generation(provider)
-                provider_needs_refresh = self._probe_provider_needs_refresh(provider)
+                provider_gen = DuckDBCore.probe_provider_generation(provider)
+                provider_needs_refresh = DuckDBCore.probe_provider_needs_refresh(provider)
                 last_refreshed = self._secret_refresh_times.get(key)
                 applied_gen = self._secret_generations.get(key)
                 interval_due = (
@@ -499,7 +496,7 @@ class AsyncDuckDBDriver(AsyncDatabaseDriver[DuckDBConfig]):
                         raise
                 else:
                     self._secret_refresh_times[key] = now_monotonic
-                    updated_gen = self._probe_provider_generation(provider)
+                    updated_gen = DuckDBCore.probe_provider_generation(provider)
                     if updated_gen is not None:
                         self._secret_generations[key] = updated_gen
         except BaseException:
@@ -507,83 +504,6 @@ class AsyncDuckDBDriver(AsyncDatabaseDriver[DuckDBConfig]):
                 await self._cleanup_failed_startup_client()
             raise
         self._initial_secrets_applied = True
-
-    def _acquire_duckdb_lease(self, sql: str, param_count: int) -> Any:
-        if self._broker is None:
-            return None
-        if hasattr(self._broker, "statement_cache"):
-            sc_attr = self._broker.statement_cache
-            sc = sc_attr() if callable(sc_attr) else sc_attr
-            if sc is not None and hasattr(sc, "lookup") and hasattr(sc, "insert"):
-                sql_bytes = sql.encode("utf-8")
-                try:
-                    cached = sc.lookup(DUCKDB_DIALECT_TAG, sql)
-                    if cached is None:
-                        sc.insert(
-                            DUCKDB_DIALECT_TAG,
-                            sql,
-                            param_count,
-                            sql_bytes,
-                            b"",
-                        )
-                except TypeError:
-                    cached = sc.lookup(DUCKDB_DIALECT_TAG, sql_bytes)
-                    if cached is None:
-                        sc.insert(
-                            DUCKDB_DIALECT_TAG,
-                            sql_bytes,
-                            param_count,
-                            sql_bytes,
-                            b"",
-                        )
-        if hasattr(self._broker, "lease_table") and self._broker.lease_table is not None:
-            return self._broker.lease_table.acquire(os.getpid())
-        if hasattr(self._broker, "acquire"):
-            try:
-                return self._broker.acquire(os.getpid())
-            except TypeError:
-                return self._broker.acquire(bind_key="duckdb")
-        return None
-
-    def _release_duckdb_lease(self, grant: Any) -> None:
-        if grant is not None and self._broker is not None:
-            if hasattr(self._broker, "lease_table") and self._broker.lease_table is not None:
-                self._broker.lease_table.release(grant.slot_index, grant.generation)
-            elif hasattr(self._broker, "release") and hasattr(grant, "slot_index"):
-                self._broker.release(grant.slot_index, grant.generation)
-
-    def _invalidate_rejected_credentials(self, exc: BaseException) -> None:
-        if not _CREDENTIAL_REJECTION_PATTERN.search(str(exc)):
-            return
-        for secret in self._dynamic_secrets:
-            provider = secret.value_provider
-            if provider is None:
-                continue
-            key = secret.name.lower()
-            applied_gen = self._secret_generations.get(key)
-            if applied_gen is None:
-                continue
-            target = getattr(provider, "__self__", provider)
-            invalidate_fn = getattr(target, "invalidate", None)
-            if callable(invalidate_fn):
-                invalidate_fn(applied_gen)
-                self._secret_generations.pop(key, None)
-
-    @staticmethod
-    def _probe_provider_generation(provider: Any) -> int | None:
-        target = getattr(provider, "__self__", provider)
-        gen = getattr(target, "generation", None)
-        if isinstance(gen, int) and not isinstance(gen, bool):
-            return gen
-        return None
-
-    @staticmethod
-    def _probe_provider_needs_refresh(provider: Any) -> bool:
-        target = getattr(provider, "__self__", provider)
-        fn = getattr(target, "needs_refresh", None)
-        if callable(fn):
-            return bool(fn())
-        return False
 
 
 class _AsyncDuckDBCursor:

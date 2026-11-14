@@ -2,22 +2,26 @@
 
 from __future__ import annotations
 
+import asyncio
 import datetime
 import decimal
+import os
 import re
 import struct
+import threading
 import uuid
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Final, Literal
 
 import msgspec
 
+import vertebra._vertebra as _vertebra_mod
 from vertebra._vertebra import VectorView
 from vertebra.db.driver import DataError
 from vertebra.db.driver._common import ORACLE_DIALECT_TAG
 from vertebra.db.rls import TenantScopeConfig
 from vertebra.typing import VertebraError
-from vertebra.utils.module_loader import ensure_module, import_optional
+from vertebra.utils.module_loader import ensure_module
 from vertebra.utils.serializers import decode_json, encode_json_bytes
 from vertebra.utils.text import validate_identifier
 
@@ -172,9 +176,9 @@ class OracleCore:
     @staticmethod
     def parse_tnsnames_ora(contents: str) -> dict[str, str]:
         """Parse a `tnsnames.ora` file into a dictionary mapping aliases to TNS descriptors."""
-        native = import_optional("vertebra._vertebra")
-        if native is not None and hasattr(native, "parse_tnsnames_ora"):
-            res = native.parse_tnsnames_ora(contents)
+        native_fn = getattr(_vertebra_mod, "parse_tnsnames_ora", None)
+        if native_fn is not None:
+            res = native_fn(contents)
             if isinstance(res, dict):
                 return {str(k).upper(): str(v) for k, v in res.items()}
 
@@ -229,9 +233,9 @@ class OracleCore:
     @staticmethod
     def resolve_tns_alias_raw(contents: str, alias: str) -> str | dict[str, Any] | None:
         """Resolve a TNS alias from `tnsnames.ora` contents into a descriptor string or dict."""
-        native = import_optional("vertebra._vertebra")
-        if native is not None and hasattr(native, "resolve_tns_alias"):
-            resolved = native.resolve_tns_alias(contents, alias)
+        native_fn = getattr(_vertebra_mod, "resolve_tns_alias", None)
+        if native_fn is not None:
+            resolved = native_fn(contents, alias)
             if resolved is not None and isinstance(resolved, (str, dict)):
                 return resolved
         mapping = OracleCore.parse_tnsnames_ora(contents)
@@ -240,9 +244,9 @@ class OracleCore:
     @staticmethod
     def encode_tns_connect_packet(descriptor: str) -> bytes:
         """Encode an Oracle TNS `Connect` (`type = 1`) packet wrapping a `(DESCRIPTION=...)` descriptor."""
-        native = import_optional("vertebra._vertebra")
-        if native is not None and hasattr(native, "encode_tns_connect_packet"):
-            return bytes(native.encode_tns_connect_packet(descriptor))
+        native_fn = getattr(_vertebra_mod, "encode_tns_connect_packet", None)
+        if native_fn is not None:
+            return bytes(native_fn(descriptor))
         desc_bytes = descriptor.encode("utf-8")
         connect_header_len = 58
         total_len = connect_header_len + len(desc_bytes)
@@ -272,9 +276,9 @@ class OracleCore:
     @staticmethod
     def encode_tns_data_packet(data_flags: int, payload: bytes) -> bytes:
         """Encode an Oracle TNS `Data` (`type = 6`) packet with 2-byte big-endian `data_flags`."""
-        native = import_optional("vertebra._vertebra")
-        if native is not None and hasattr(native, "encode_tns_data_packet"):
-            return bytes(native.encode_tns_data_packet(data_flags, payload))
+        native_fn = getattr(_vertebra_mod, "encode_tns_data_packet", None)
+        if native_fn is not None:
+            return bytes(native_fn(data_flags, payload))
         total_len = 10 + len(payload)
         header = struct.pack(">HHBBHH", total_len, 0, 6, 0, 0, data_flags & 0xFFFF)
         return header + payload
@@ -308,9 +312,9 @@ class OracleCore:
         ecid: str | None = None,
     ) -> bytes:
         """Encode a zero-RTT TTC piggyback frame (`0x11 0x6e`) carrying session tracing attributes."""
-        native = import_optional("vertebra._vertebra")
-        if native is not None and hasattr(native, "encode_ttc_session_attrs"):
-            return bytes(native.encode_ttc_session_attrs(client_identifier, module, action, ecid))
+        native_fn = getattr(_vertebra_mod, "encode_ttc_session_attrs", None)
+        if native_fn is not None:
+            return bytes(native_fn(client_identifier, module, action, ecid))
 
         fields: list[tuple[int, bytes]] = []
         if client_identifier is not None:
@@ -355,9 +359,10 @@ class OracleCore:
     @staticmethod
     def encode_vector_f32(values: Sequence[float]) -> bytes:
         """Encode a sequence of `float` values into an Oracle 26ai `VECTOR(*, FLOAT32)` binary frame."""
-        native = import_optional("vertebra._vertebra")
-        if native is not None and hasattr(native, "encode_oracle_vector_f32"):
-            return bytes(native.encode_oracle_vector_f32(list(values)))
+        native_fn = getattr(_vertebra_mod, "encode_oracle_vector_f32", None)
+        if native_fn is not None:
+            val_list = values if isinstance(values, list) else list(values)
+            return bytes(native_fn(val_list))
         dims = len(values)
         return OracleCore._encode_vector_header(ORACLE_VECTOR_FMT_F32, dims) + struct.pack(f">{dims}f", *values)
 
@@ -365,10 +370,10 @@ class OracleCore:
     def decode_vector_f32(payload: bytes | bytearray | memoryview) -> list[float]:
         """Decode an Oracle 26ai `VECTOR(*, FLOAT32)` binary frame into a list of floats."""
         raw = bytes(payload)
-        native = import_optional("vertebra._vertebra")
-        if native is not None and hasattr(native, "decode_oracle_vector_f32"):
+        native_fn = getattr(_vertebra_mod, "decode_oracle_vector_f32", None)
+        if native_fn is not None:
             try:
-                return list(native.decode_oracle_vector_f32(raw))
+                return list(native_fn(raw))
             except ValueError as exc:
                 raise OracleCore._data_error(str(exc)) from exc
         dims, body = OracleCore._decode_vector_header(raw, ORACLE_VECTOR_FMT_F32)
@@ -381,9 +386,10 @@ class OracleCore:
     @staticmethod
     def encode_vector_f64(values: Sequence[float]) -> bytes:
         """Encode a sequence of `float` values into an Oracle 26ai `VECTOR(*, FLOAT64)` binary frame."""
-        native = import_optional("vertebra._vertebra")
-        if native is not None and hasattr(native, "encode_oracle_vector_f64"):
-            return bytes(native.encode_oracle_vector_f64(list(values)))
+        native_fn = getattr(_vertebra_mod, "encode_oracle_vector_f64", None)
+        if native_fn is not None:
+            val_list = values if isinstance(values, list) else list(values)
+            return bytes(native_fn(val_list))
         dims = len(values)
         return OracleCore._encode_vector_header(ORACLE_VECTOR_FMT_F64, dims) + struct.pack(f">{dims}d", *values)
 
@@ -391,10 +397,10 @@ class OracleCore:
     def decode_vector_f64(payload: bytes | bytearray | memoryview) -> list[float]:
         """Decode an Oracle 26ai `VECTOR(*, FLOAT64)` binary frame into a list of floats."""
         raw = bytes(payload)
-        native = import_optional("vertebra._vertebra")
-        if native is not None and hasattr(native, "decode_oracle_vector_f64"):
+        native_fn = getattr(_vertebra_mod, "decode_oracle_vector_f64", None)
+        if native_fn is not None:
             try:
-                return list(native.decode_oracle_vector_f64(raw))
+                return list(native_fn(raw))
             except ValueError as exc:
                 raise OracleCore._data_error(str(exc)) from exc
         dims, body = OracleCore._decode_vector_header(raw, ORACLE_VECTOR_FMT_F64)
@@ -407,9 +413,10 @@ class OracleCore:
     @staticmethod
     def encode_vector_i8(values: Sequence[int]) -> bytes:
         """Encode a sequence of signed 8-bit integers into an Oracle 26ai `VECTOR(*, INT8)` binary frame."""
-        native = import_optional("vertebra._vertebra")
-        if native is not None and hasattr(native, "encode_oracle_vector_i8"):
-            return bytes(native.encode_oracle_vector_i8(list(values)))
+        native_fn = getattr(_vertebra_mod, "encode_oracle_vector_i8", None)
+        if native_fn is not None:
+            val_list = values if isinstance(values, list) else list(values)
+            return bytes(native_fn(val_list))
         dims = len(values)
         return OracleCore._encode_vector_header(ORACLE_VECTOR_FMT_I8, dims) + struct.pack(f">{dims}b", *values)
 
@@ -417,10 +424,10 @@ class OracleCore:
     def decode_vector_i8(payload: bytes | bytearray | memoryview) -> list[int]:
         """Decode an Oracle 26ai `VECTOR(*, INT8)` binary frame into a list of signed 8-bit integers."""
         raw = bytes(payload)
-        native = import_optional("vertebra._vertebra")
-        if native is not None and hasattr(native, "decode_oracle_vector_i8"):
+        native_fn = getattr(_vertebra_mod, "decode_oracle_vector_i8", None)
+        if native_fn is not None:
             try:
-                return list(native.decode_oracle_vector_i8(raw))
+                return list(native_fn(raw))
             except ValueError as exc:
                 raise OracleCore._data_error(str(exc)) from exc
         dims, body = OracleCore._decode_vector_header(raw, ORACLE_VECTOR_FMT_I8)
@@ -434,9 +441,9 @@ class OracleCore:
     def encode_vector_binary(packed_bits: bytes | Sequence[int]) -> bytes:
         """Encode packed uint8 bytes into an Oracle 26ai `VECTOR(*, BINARY)` binary frame."""
         raw_bits = bytes(packed_bits)
-        native = import_optional("vertebra._vertebra")
-        if native is not None and hasattr(native, "encode_oracle_vector_binary"):
-            return bytes(native.encode_oracle_vector_binary(raw_bits))
+        native_fn = getattr(_vertebra_mod, "encode_oracle_vector_binary", None)
+        if native_fn is not None:
+            return bytes(native_fn(raw_bits))
         dims = len(raw_bits) * 8
         return OracleCore._encode_vector_header(ORACLE_VECTOR_FMT_BINARY, dims) + raw_bits
 
@@ -444,10 +451,10 @@ class OracleCore:
     def decode_vector_binary(payload: bytes | bytearray | memoryview) -> bytes:
         """Decode an Oracle 26ai `VECTOR(*, BINARY)` binary frame into packed bytes."""
         raw = bytes(payload)
-        native = import_optional("vertebra._vertebra")
-        if native is not None and hasattr(native, "decode_oracle_vector_binary"):
+        native_fn = getattr(_vertebra_mod, "decode_oracle_vector_binary", None)
+        if native_fn is not None:
             try:
-                return bytes(native.decode_oracle_vector_binary(raw))
+                return bytes(native_fn(raw))
             except ValueError as exc:
                 raise OracleCore._data_error(str(exc)) from exc
         dims, body = OracleCore._decode_vector_header(raw, ORACLE_VECTOR_FMT_BINARY)
@@ -605,9 +612,9 @@ class OracleCore:
     @staticmethod
     def encode_oson_payload(json_bytes: bytes) -> bytes:
         """Wrap raw UTF-8 JSON bytes with an 8-byte Oracle 26ai `OSON` binary header."""
-        native = import_optional("vertebra._vertebra")
-        if native is not None and hasattr(native, "encode_oson_payload"):
-            return bytes(native.encode_oson_payload(json_bytes))
+        native_fn = getattr(_vertebra_mod, "encode_oson_payload", None)
+        if native_fn is not None:
+            return bytes(native_fn(json_bytes))
         return OSON_MAGIC + b"\x01" + struct.pack(">I", len(json_bytes)) + json_bytes
 
     @staticmethod
@@ -616,10 +623,10 @@ class OracleCore:
         raw = bytes(payload)
         if len(raw) < 8 or raw[:3] != OSON_MAGIC or raw[3] != 0x01:
             raise OracleCore._data_error("Invalid Oracle OSON magic/version header (expected \\xff\\x4a\\x5a\\x01)")
-        native = import_optional("vertebra._vertebra")
-        if native is not None and hasattr(native, "decode_oson_payload"):
+        native_fn = getattr(_vertebra_mod, "decode_oson_payload", None)
+        if native_fn is not None:
             try:
-                return bytes(native.decode_oson_payload(raw))
+                return bytes(native_fn(raw))
             except ValueError as exc:
                 raise OracleCore._data_error(str(exc)) from exc
         length = struct.unpack(">I", raw[4:8])[0]
@@ -761,6 +768,168 @@ class OracleCore:
             install_package="vertebra-core[oracle]",
             extra="oracle",
         )
+
+    @staticmethod
+    def current_execution_identity() -> tuple[int, int | None]:
+        """Return `(thread_ident, current_asyncio_task_id)` for ContextVar transaction isolation."""
+        thread_id = threading.get_ident()
+        try:
+            task = asyncio.current_task()
+        except RuntimeError:
+            task = None
+        return (thread_id, id(task) if task is not None else None)
+
+    @staticmethod
+    def build_session_attr_acquire_kwargs(attrs: Any) -> dict[str, Any]:
+        """Build pool acquire keyword arguments for pending Oracle session tracing attributes."""
+        acquire_kwargs: dict[str, Any] = {}
+        if attrs is not None:
+            if attrs.client_identifier is not None:
+                acquire_kwargs["client_identifier"] = attrs.client_identifier
+            if attrs.module is not None:
+                acquire_kwargs["module"] = attrs.module
+            if attrs.action is not None:
+                acquire_kwargs["action"] = attrs.action
+            if attrs.ecid is not None:
+                acquire_kwargs["ecid"] = attrs.ecid
+        return acquire_kwargs
+
+    @staticmethod
+    def coerce_parameters(
+        parameters: Sequence[Any] | Mapping[str, Any] | None,
+        *,
+        features: OracleDriverFeatures,
+    ) -> list[Any] | dict[str, Any] | None:
+        """Coerce mapping or positional bind parameters according to `features`."""
+        if parameters is None:
+            return None
+        if isinstance(parameters, Mapping):
+            return {
+                str(k).lstrip(":"): OracleCore.coerce_bind_parameter(v, features=features)
+                for k, v in parameters.items()
+            }
+        if isinstance(parameters, Sequence) and not isinstance(parameters, (str, bytes, bytearray)):
+            return [OracleCore.coerce_bind_parameter(v, features=features) for v in parameters]
+        return [OracleCore.coerce_bind_parameter(v, features=features) for v in parameters]
+
+    @staticmethod
+    def coerce_result_rows_and_cols(
+        result: Any,
+        *,
+        features: OracleDriverFeatures,
+    ) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
+        """Normalize native result rows or OUT binds and column metadata according to `features`."""
+        lowercase = features.enable_lowercase_column_names
+        raw_columns = getattr(result, "columns", ()) or ()
+        cols = tuple(str(col.name).lower() if lowercase else str(col.name) for col in raw_columns)
+        col_types = tuple(
+            str(getattr(col, "oracle_type", getattr(col, "type_name", "VARCHAR2"))) for col in raw_columns
+        )
+        raw_rows = getattr(result, "rows", ()) or ()
+        if raw_rows:
+            coerced_rows = [
+                tuple(
+                    OracleCore.coerce_row_cell(
+                        cell,
+                        col_types[idx] if idx < len(col_types) else None,
+                        features=features,
+                    )
+                    for idx, cell in enumerate(row)
+                )
+                for row in raw_rows
+            ]
+            return coerced_rows, cols
+
+        out_binds = getattr(result, "out_binds", None)
+        if out_binds is not None:
+            if isinstance(out_binds, Mapping):
+                out_cols = cols or tuple(
+                    str(k).lstrip(":").lower() if lowercase else str(k).lstrip(":") for k in out_binds
+                )
+                row_tuple = tuple(
+                    OracleCore.coerce_row_cell(
+                        val,
+                        col_types[idx] if idx < len(col_types) else None,
+                        features=features,
+                    )
+                    for idx, val in enumerate(out_binds.values())
+                )
+                return [row_tuple], out_cols
+            if isinstance(out_binds, Sequence) and not isinstance(out_binds, (str, bytes, bytearray)):
+                out_cols = cols or tuple(f"out_{i + 1}" for i in range(len(out_binds)))
+                row_tuple = tuple(
+                    OracleCore.coerce_row_cell(
+                        val,
+                        col_types[idx] if idx < len(col_types) else None,
+                        features=features,
+                    )
+                    for idx, val in enumerate(out_binds)
+                )
+                return [row_tuple], out_cols
+
+        return [], cols
+
+    @staticmethod
+    def track_session_context_sql(
+        session_context: dict[tuple[str, str], str],
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None,
+    ) -> None:
+        """Track DBMS_SESSION identifier and context mutations in the local session map."""
+        upper = sql.strip().upper()
+        if "SET_IDENTIFIER" in upper and isinstance(parameters, Mapping):
+            norm = {str(k).lstrip(":").lower(): v for k, v in parameters.items()}
+            val = norm.get("value", norm.get("identifier"))
+            if val is not None:
+                session_context[("USERENV", "CLIENT_IDENTIFIER")] = str(val)
+            return
+        if "CLEAR_IDENTIFIER" in upper:
+            session_context.pop(("USERENV", "CLIENT_IDENTIFIER"), None)
+            return
+        if isinstance(parameters, Mapping):
+            norm = {str(k).lstrip(":").lower(): v for k, v in parameters.items()}
+            if "namespace" in norm and "attribute" in norm:
+                key = (str(norm["namespace"]), str(norm["attribute"]))
+                if "value" in norm:
+                    session_context[key] = str(norm["value"])
+                else:
+                    session_context.pop(key, None)
+
+    @staticmethod
+    def acquire_broker_lease(broker: Any, sql: str, param_count: int) -> Any:
+        """Register SQL in the broker statement cache and acquire an Oracle lease grant."""
+        if broker is None:
+            return None
+        if hasattr(broker, "statement_cache"):
+            sc_attr = broker.statement_cache
+            sc = sc_attr() if callable(sc_attr) else sc_attr
+            if sc is not None and hasattr(sc, "lookup") and hasattr(sc, "insert"):
+                sql_bytes = sql.encode("utf-8")
+                try:
+                    cached = sc.lookup(ORACLE_DIALECT_TAG, sql)
+                    if cached is None:
+                        sc.insert(ORACLE_DIALECT_TAG, sql, param_count, sql_bytes, b"\x00\x01")
+                except TypeError:
+                    cached = sc.lookup(ORACLE_DIALECT_TAG, sql_bytes)
+                    if cached is None:
+                        sc.insert(ORACLE_DIALECT_TAG, sql_bytes, param_count, sql_bytes, b"\x00\x01")
+        if hasattr(broker, "lease_table") and broker.lease_table is not None:
+            return broker.lease_table.acquire(os.getpid())
+        if hasattr(broker, "acquire"):
+            try:
+                return broker.acquire(os.getpid())
+            except TypeError:
+                return broker.acquire(bind_key="oracle")
+        return None
+
+    @staticmethod
+    def release_broker_lease(broker: Any, grant: Any) -> None:
+        """Release a previously acquired Oracle broker lease grant."""
+        if grant is not None and broker is not None:
+            if hasattr(broker, "lease_table") and broker.lease_table is not None:
+                broker.lease_table.release(grant.slot_index, grant.generation)
+            elif hasattr(broker, "release") and hasattr(grant, "slot_index"):
+                broker.release(grant.slot_index, grant.generation)
 
     @staticmethod
     def _data_error(message: str) -> DataError:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import importlib
 import socket
 import struct
 import sys
@@ -772,8 +773,6 @@ def test_mssql_driver_and_pipeline_resolution_identity(
     expected_module: str,
 ) -> None:
     """Verify SQL Server sync/async driver and pipeline classes resolve identically across import paths."""
-    import importlib
-
     mod = importlib.import_module(target_module)
     exp_mod = importlib.import_module(expected_module)
     assert getattr(mod, symbol_name) is getattr(exp_mod, symbol_name)

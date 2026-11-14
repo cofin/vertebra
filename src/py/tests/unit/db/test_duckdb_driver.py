@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import importlib
 import math
 from pathlib import Path
 from typing import Any, cast
@@ -14,6 +15,8 @@ import pyarrow.ipc as pa_ipc
 import pytest
 
 import vertebra._duckdb as native_duckdb_mod
+import vertebra.db.adapters.duckdb._async as duckdb_async_mod
+import vertebra.db.adapters.duckdb._sync as duckdb_sync_mod
 import vertebra.db.adapters.duckdb.config as duckdb_config_mod
 import vertebra.db.adapters.duckdb.core as duckdb_core_mod
 import vertebra.db.adapters.duckdb.driver as duckdb_driver_mod
@@ -56,8 +59,10 @@ class _PipelineAbortError(RuntimeError):
         duckdb_core_mod,
         duckdb_driver_mod,
         duckdb_pipeline_mod,
+        duckdb_sync_mod,
+        duckdb_async_mod,
     ],
-    ids=["config", "core", "driver", "pipeline"],
+    ids=["config", "core", "driver", "pipeline", "sync", "async"],
 )
 def test_duckdb_adapter_modules_contain_zero_thread_offload_or_legacy_imports(
     module_obj: Any,
@@ -808,8 +813,38 @@ def test_duckdb_driver_and_pipeline_resolution_identity(
     expected_module: str,
 ) -> None:
     """Verify DuckDB sync/async driver and pipeline classes resolve identically across import paths."""
-    import importlib
-
     mod = importlib.import_module(target_module)
     exp_mod = importlib.import_module(expected_module)
     assert getattr(mod, symbol_name) is getattr(exp_mod, symbol_name)
+
+
+def test_duckdb_unclosed_comment_and_sync_property_guards() -> None:
+    """Verify DuckDBCore handles unclosed block comments and SyncDuckDBDriver rejects async secret providers."""
+    assert DuckDBCore.is_write_statement("SELECT /* *") is False
+    assert DuckDBCore.is_write_statement("INSERT /* *") is True
+
+    async def _async_secret() -> dict[str, str]:
+        return {"token": "abc"}
+
+    cfg = DuckDBConfig(
+        database=":memory:",
+        secrets=(
+            DuckDBSecretConfig(
+                name="dyn",
+                secret_type="bearer",
+                value_provider=_async_secret,
+                persistent=False,
+                required=False,
+            ),
+        ),
+    )
+    with pytest.raises(ImproperConfigurationError, match="requires a synchronous `value_provider`"):
+        SyncDuckDBDriver(cfg)
+
+    sync_drv = SyncDuckDBDriver(DuckDBConfig(database=":memory:"))
+    try:
+        assert isinstance(sync_drv.executed_bootstrap_statements, tuple)
+        with pytest.raises(AttributeError):
+            sync_drv.executed_bootstrap_statements = ()
+    finally:
+        sync_drv.close()

@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import importlib
 import io
 import socket
+import sys
 import time
 import uuid
 import zipfile
@@ -21,6 +23,8 @@ from sqlspec import StatementStack
 from sqlspec.core.parameters import ParameterStyle
 
 import vertebra._oracle as _oracle
+import vertebra.db.adapters.oracle as oracle_pkg
+import vertebra.db.adapters.oracle.core as oracle_core_mod
 from vertebra._vertebra import VectorBatchView, VectorView
 from vertebra.db.adapters.oracle import (
     AsyncOracleDriver,
@@ -2863,6 +2867,12 @@ def test_oracle_notify_config_validates_wait_timeout_seconds(
         ("AsyncOraclePipeline", "vertebra.db.adapters.oracle", "vertebra.db.adapters.oracle.pipeline"),
         ("AsyncOraclePipeline", "vertebra.db.adapters.oracle.driver", "vertebra.db.adapters.oracle.pipeline"),
         ("AsyncOraclePipeline", "vertebra.db.adapters.oracle.pipeline", "vertebra.db.adapters.oracle.pipeline"),
+        ("SyncOraclePool", "vertebra.db.adapters.oracle", "vertebra.db.adapters.oracle._sync"),
+        ("SyncOraclePool", "vertebra.db.adapters.oracle.driver", "vertebra.db.adapters.oracle._sync"),
+        ("SyncOraclePool", "vertebra.db.adapters.oracle._sync", "vertebra.db.adapters.oracle._sync"),
+        ("AsyncOraclePool", "vertebra.db.adapters.oracle", "vertebra.db.adapters.oracle._async"),
+        ("AsyncOraclePool", "vertebra.db.adapters.oracle.driver", "vertebra.db.adapters.oracle._async"),
+        ("AsyncOraclePool", "vertebra.db.adapters.oracle._async", "vertebra.db.adapters.oracle._async"),
     ],
 )
 def test_oracle_driver_and_pipeline_resolution_identity(
@@ -2870,9 +2880,56 @@ def test_oracle_driver_and_pipeline_resolution_identity(
     target_module: str,
     expected_module: str,
 ) -> None:
-    """Verify Oracle sync/async driver and pipeline classes resolve identically across import paths."""
-    import importlib
-
+    """Verify Oracle sync/async driver, pool, and pipeline classes resolve identically across import paths."""
     mod = importlib.import_module(target_module)
     exp_mod = importlib.import_module(expected_module)
     assert getattr(mod, symbol_name) is getattr(exp_mod, symbol_name)
+
+
+@pytest.mark.parametrize(
+    "removed_alias",
+    [
+        "decode_oson",
+        "decode_oson_payload",
+        "decode_tns_packet",
+        "decode_ttc_session_attrs",
+        "decode_vector_binary",
+        "decode_vector_f32",
+        "decode_vector_f64",
+        "decode_vector_i8",
+        "encode_oson",
+        "encode_oson_payload",
+        "encode_tns_connect_packet",
+        "encode_tns_data_packet",
+        "encode_ttc_session_attrs",
+        "encode_vector_binary",
+        "encode_vector_f32",
+        "encode_vector_f64",
+        "encode_vector_i8",
+    ],
+)
+def test_oracle_removed_alias_shims_raise_attribute_error(removed_alias: str) -> None:
+    """Verify removed module-level Oracle codec alias shims are absent from oracle and oracle.core."""
+    with pytest.raises(AttributeError):
+        getattr(oracle_core_mod, removed_alias)
+    with pytest.raises(AttributeError):
+        getattr(oracle_pkg, removed_alias)
+
+
+def test_oracle_driver_defers_native_extension_import() -> None:
+    """Verify importing vertebra.db.adapters.oracle.driver does not eagerly import vertebra._oracle."""
+    saved = {
+        name: sys.modules.pop(name)
+        for name in list(sys.modules)
+        if name == "vertebra._oracle"
+        or name == "vertebra.db.adapters.oracle.driver"
+        or name == "vertebra.db.adapters.oracle._sync"
+        or name == "vertebra.db.adapters.oracle._async"
+    }
+    try:
+        drv_mod = importlib.import_module("vertebra.db.adapters.oracle.driver")
+        assert "vertebra._oracle" not in sys.modules
+        flag = drv_mod.ORACLESQL_NATIVE_TTC_PIPELINE_SUPPORTED
+        assert isinstance(flag, bool)
+    finally:
+        sys.modules.update(saved)

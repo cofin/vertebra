@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, Self
 
@@ -35,7 +36,6 @@ from vertebra.db.adapters.spanner.transactions import (
 from vertebra.db.arrow import ARROW_SHM_THRESHOLD_ROWS, ArrowCursor
 from vertebra.db.driver._async import AsyncDatabaseDriver
 from vertebra.telemetry.db_propagation import SqlTracePropagator
-from vertebra.utils.module_loader import ensure_module
 from vertebra.utils.schema import to_value_type
 from vertebra.utils.serializers import encode_json
 from vertebra.utils.text import validate_identifier
@@ -419,6 +419,7 @@ class AsyncSpannerDriver(AsyncDatabaseDriver[SpannerConfig]):
             except SpannerAbortedError:
                 if attempt >= attempts:
                     raise
+                await asyncio.sleep(0.01 * attempt)
         return None
 
     async def apply_mutations(
@@ -693,7 +694,6 @@ class AsyncSpannerDriver(AsyncDatabaseDriver[SpannerConfig]):
 
     def _ensure_client(self) -> AsyncSpannerClient:
         if self._client is None:
-            ensure_module("vertebra._spanner", package="vertebra-core[spanner]", extra="spanner")
             self._client = SpannerCore.create_async_rust_client(self.config)
         return self._client
 

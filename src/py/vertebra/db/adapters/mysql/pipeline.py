@@ -22,6 +22,15 @@ class SyncMySQLPipeline:
     releasing the savepoint on clean context exit and rolling back on error.
     """
 
+    __slots__ = (
+        "_driver",
+        "_executed_results",
+        "_ops",
+        "_owns_tx",
+        "_savepoint_name",
+        "_settled",
+    )
+
     def __init__(self, driver: SyncMySQLDriver) -> None:
         self._driver = driver
         self._ops: list[tuple[str, str, Sequence[Any] | Mapping[str, Any] | None]] = []
@@ -126,6 +135,15 @@ class AsyncMySQLPipeline:
     transaction or nested `SAVEPOINT` when `await results()` is invoked,
     committing or releasing the savepoint on clean context exit and rolling back on error.
     """
+
+    __slots__ = (
+        "_driver",
+        "_executed_results",
+        "_ops",
+        "_owns_tx",
+        "_savepoint_name",
+        "_settled",
+    )
 
     def __init__(self, driver: AsyncMySQLDriver) -> None:
         self._driver = driver

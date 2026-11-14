@@ -132,6 +132,19 @@ class SpannerConfig(BaseDatabaseConfig, frozen=True, gc=False):
     broker: Any = None
     """Optional shared-memory `LeaseBroker` instance."""
 
+    @property
+    def database_uri(self) -> str:
+        """Return the canonical `projects/{p}/instances/{i}/databases/{d}` resource path."""
+        p = self.effective_project_id()
+        i = self.effective_instance_id()
+        d = self.effective_database_id()
+        return f"projects/{p}/instances/{i}/databases/{d}"
+
+    @property
+    def database_path(self) -> str:
+        """Return the canonical `projects/{p}/instances/{i}/databases/{d}` resource path."""
+        return self.database_uri
+
     @classmethod
     def from_dsn(cls, dsn: str, **overrides: Any) -> Self:
         """Construct a `SpannerConfig` from a `spanner://` or `spangres://` URI."""
@@ -250,19 +263,6 @@ class SpannerConfig(BaseDatabaseConfig, frozen=True, gc=False):
             self.dialect,
             self.endpoint,
         )
-
-    @property
-    def database_uri(self) -> str:
-        """Return the canonical `projects/{p}/instances/{i}/databases/{d}` resource path."""
-        p = self.effective_project_id()
-        i = self.effective_instance_id()
-        d = self.effective_database_id()
-        return f"projects/{p}/instances/{i}/databases/{d}"
-
-    @property
-    def database_path(self) -> str:
-        """Return the canonical `projects/{p}/instances/{i}/databases/{d}` resource path."""
-        return self.database_uri
 
     def effective_project_id(self) -> str:
         """Resolve the Google Cloud project ID from config or environment."""

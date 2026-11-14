@@ -80,6 +80,13 @@ class DataFusionConfig(BaseDatabaseConfig, frozen=True, gc=False, kw_only=True):
     def from_url(cls, url: str, **overrides: Any) -> Self:
         """Construct a `DataFusionConfig` from a `datafusion://` URI."""
         parsed = urlparse(url)
+        scheme = parsed.scheme.strip().lower()
+        if scheme and scheme != "datafusion":
+            msg = f"Unsupported DataFusion URI scheme {parsed.scheme!r}; expected 'datafusion'"
+            raise ImproperConfigurationError(msg)
+        if parsed.path not in {"", "/"}:
+            msg = f"Unsupported DataFusion URI path {parsed.path!r}; expected 'datafusion://in_process'"
+            raise ImproperConfigurationError(msg)
         host_token = parsed.netloc.strip().lower()
         if host_token == "pgwire_fdw" or url.startswith("datafusion://pgwire_fdw"):
             msg = "DataFusionConfig does not support mode='pgwire_fdw'; only mode='in_process' is supported"
@@ -91,7 +98,7 @@ class DataFusionConfig(BaseDatabaseConfig, frozen=True, gc=False, kw_only=True):
             msg = f"Unsupported DataFusion host or mode {host_token!r}; expected 'in_process'"
             raise ImproperConfigurationError(msg)
 
-        query_params = dict(parse_qsl(parsed.query)) if parsed.query else {}
+        query_params = dict(parse_qsl(parsed.query, keep_blank_values=True)) if parsed.query else {}
         for key in query_params:
             if key.startswith("pgwire_") or key == "require_mtls_for_pgwire":
                 msg = f"Unsupported DataFusion pgwire parameter {key!r}"

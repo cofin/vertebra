@@ -36,7 +36,6 @@ from vertebra.db.adapters.spanner.transactions import (
 from vertebra.db.arrow import ARROW_SHM_THRESHOLD_ROWS, ArrowCursor
 from vertebra.db.driver._sync import SyncDatabaseDriver
 from vertebra.telemetry.db_propagation import SqlTracePropagator
-from vertebra.utils.module_loader import ensure_module
 from vertebra.utils.schema import to_value_type
 from vertebra.utils.serializers import encode_json
 from vertebra.utils.text import validate_identifier
@@ -696,7 +695,6 @@ class SyncSpannerDriver(SyncDatabaseDriver[SpannerConfig]):
 
     def _ensure_client(self) -> SyncSpannerClient:
         if self._client is None:
-            ensure_module("vertebra._spanner", package="vertebra-core[spanner]", extra="spanner")
             self._client = SpannerCore.create_sync_rust_client(self.config)
         return self._client
 

@@ -117,6 +117,8 @@ class ObjectTableConfig(FrozenBaseStruct, frozen=True, kw_only=True):
         limit: int | None = None,
     ) -> list[dict[str, Any]]:
         """List objects directly from `store` when the Object Table catalog query is unavailable."""
+        if limit is not None and limit <= 0:
+            return []
         sync_store = store.to_sync() if hasattr(store, "to_sync") else store
         rows: list[dict[str, Any]] = []
         for pattern in self.uris:
@@ -139,6 +141,8 @@ class ObjectTableConfig(FrozenBaseStruct, frozen=True, kw_only=True):
         limit: int | None = None,
     ) -> list[dict[str, Any]]:
         """Asynchronously list objects directly from `store` when the Object Table catalog is unavailable."""
+        if limit is not None and limit <= 0:
+            return []
         async_store = store.to_async() if hasattr(store, "to_async") else store
         rows: list[dict[str, Any]] = []
         for pattern in self.uris:
@@ -171,7 +175,7 @@ class ObjectTableConfig(FrozenBaseStruct, frozen=True, kw_only=True):
                 expires_in_secs=expires_in_secs,
                 fallback_to_authenticated_url=fallback_to_authenticated_url,
             )
-        return self._hydrate_refs_without_store(
+        return _hydrate_refs_without_store(
             rows,
             fallback_to_authenticated_url=fallback_to_authenticated_url,
         )
@@ -193,51 +197,10 @@ class ObjectTableConfig(FrozenBaseStruct, frozen=True, kw_only=True):
                 expires_in_secs=expires_in_secs,
                 fallback_to_authenticated_url=fallback_to_authenticated_url,
             )
-        return self._hydrate_refs_without_store(
+        return _hydrate_refs_without_store(
             rows,
             fallback_to_authenticated_url=fallback_to_authenticated_url,
         )
-
-    @classmethod
-    def _hydrate_refs_without_store(
-        cls,
-        rows: Sequence[Mapping[str, Any]] | Sequence[ObjectRef],
-        *,
-        fallback_to_authenticated_url: bool,
-    ) -> list[ObjectRef]:
-        refs: list[ObjectRef] = []
-        for item in rows:
-            uri, _ = cls._extract_item_uri_and_key(item)
-            signed_url = item.signed_url if isinstance(item, ObjectRef) else None
-            refs.append(
-                cls._finalize_hydrated_ref(
-                    item,
-                    uri,
-                    signed_url,
-                    fallback_to_authenticated_url=fallback_to_authenticated_url,
-                )
-            )
-        return refs
-
-    @classmethod
-    def _extract_item_uri_and_key(cls, item: ObjectRef | Mapping[str, Any]) -> tuple[str, str]:
-        uri = item.uri if isinstance(item, ObjectRef) else str(item.get("uri") or item.get("object_uri") or "")
-        return uri, cls._extract_object_key_from_uri(uri)
-
-    @classmethod
-    def _finalize_hydrated_ref(
-        cls,
-        item: ObjectRef | Mapping[str, Any],
-        uri: str,
-        signed_url: str | None,
-        *,
-        fallback_to_authenticated_url: bool,
-    ) -> ObjectRef:
-        if signed_url is None and fallback_to_authenticated_url and uri.startswith("gs://"):
-            signed_url = cls._build_authenticated_gcs_browser_url(uri)
-        if isinstance(item, ObjectRef):
-            return msgspec.structs.replace(item, signed_url=signed_url)
-        return cls._row_to_object_ref(item, signed_url=signed_url)
 
     @staticmethod
     def _extract_bucket_prefix_from_uri(uri: str) -> tuple[str, str]:
@@ -268,7 +231,7 @@ class ObjectTableConfig(FrozenBaseStruct, frozen=True, kw_only=True):
             }
         if isinstance(item, Mapping):
             loc = str(item.get("location") or item.get("path") or "").lstrip("/")
-            full_uri = f"{scheme}://{bucket}/{loc}" if bucket else loc
+            full_uri = f"{scheme}://{bucket}/{loc}" if bucket else f"{scheme}://{loc}"
             return {
                 "uri": full_uri,
                 "generation": item.get("version") or item.get("e_tag") or item.get("etag"),
@@ -278,7 +241,7 @@ class ObjectTableConfig(FrozenBaseStruct, frozen=True, kw_only=True):
                 "updated": item.get("last_modified"),
             }
         loc = str(getattr(item, "path", None) or getattr(item, "location", "") or "").lstrip("/")
-        full_uri = f"{scheme}://{bucket}/{loc}" if bucket else loc
+        full_uri = f"{scheme}://{bucket}/{loc}" if bucket else f"{scheme}://{loc}"
         etag = getattr(item, "etag", None) or getattr(item, "e_tag", None)
         version = getattr(item, "version", None) or etag
         md5_val = getattr(item, "md5", None) or etag
@@ -292,49 +255,6 @@ class ObjectTableConfig(FrozenBaseStruct, frozen=True, kw_only=True):
             "updated": str(updated_val) if updated_val is not None else None,
         }
 
-    @staticmethod
-    def _extract_object_key_from_uri(uri: str) -> str:
-        if "://" not in uri:
-            return uri.lstrip("/")
-        parsed = urlparse(uri)
-        return parsed.path.lstrip("/")
-
-    @staticmethod
-    def _build_authenticated_gcs_browser_url(uri: str) -> str | None:
-        parsed = urlparse(uri)
-        bucket = parsed.netloc.strip("/")
-        key = parsed.path.lstrip("/")
-        if not bucket or not key:
-            return None
-        return f"https://storage.cloud.google.com/{bucket}/{key}"
-
-    @staticmethod
-    def _row_to_object_ref(
-        row: Mapping[str, Any],
-        *,
-        signed_url: str | None = None,
-    ) -> ObjectRef:
-        uri = str(row.get("uri") or row.get("object_uri") or "")
-        version_raw = row.get("generation") or row.get("version")
-        version = str(version_raw) if version_raw is not None else None
-        content_type_raw = row.get("content_type")
-        content_type = str(content_type_raw) if content_type_raw is not None else None
-        size_raw = row.get("size", 0)
-        size = int(size_raw) if size_raw is not None else 0
-        md5_raw = row.get("md5_hash") or row.get("md5") or row.get("md5_hex") or row.get("e_tag")
-        md5_hex = str(md5_raw) if md5_raw is not None else None
-        updated_raw = row.get("updated") or row.get("last_modified")
-        updated = str(updated_raw) if updated_raw is not None else None
-        return ObjectRef(
-            uri=uri,
-            version=version,
-            content_type=content_type,
-            size=size,
-            md5_hex=md5_hex,
-            updated=updated,
-            signed_url=signed_url,
-        )
-
 
 def hydrate_object_refs_sync(
     refs: Sequence[ObjectRef] | Sequence[Mapping[str, Any]],
@@ -346,7 +266,8 @@ def hydrate_object_refs_sync(
     """Hydrate zero-RTT presigned GET URLs onto ObjectRef structs synchronously."""
     hydrated: list[ObjectRef] = []
     for item in refs:
-        uri, object_key = ObjectTableConfig._extract_item_uri_and_key(item)
+        uri = _extract_item_uri(item)
+        bucket, object_key = _split_uri_bucket_and_key(uri)
         signed_url: str | None = None
         if object_key:
             try:
@@ -354,9 +275,11 @@ def hydrate_object_refs_sync(
             except (VertebraError, OSError, ValueError):
                 signed_url = None
         hydrated.append(
-            ObjectTableConfig._finalize_hydrated_ref(
+            _finalize_hydrated_ref(
                 item,
                 uri,
+                bucket,
+                object_key,
                 signed_url,
                 fallback_to_authenticated_url=fallback_to_authenticated_url,
             )
@@ -374,7 +297,8 @@ async def hydrate_object_refs_async(
     """Asynchronously hydrate zero-RTT presigned GET URLs onto ObjectRef structs."""
     hydrated: list[ObjectRef] = []
     for item in refs:
-        uri, object_key = ObjectTableConfig._extract_item_uri_and_key(item)
+        uri = _extract_item_uri(item)
+        bucket, object_key = _split_uri_bucket_and_key(uri)
         signed_url: str | None = None
         if object_key:
             try:
@@ -382,11 +306,92 @@ async def hydrate_object_refs_async(
             except (VertebraError, OSError, ValueError):
                 signed_url = None
         hydrated.append(
-            ObjectTableConfig._finalize_hydrated_ref(
+            _finalize_hydrated_ref(
                 item,
                 uri,
+                bucket,
+                object_key,
                 signed_url,
                 fallback_to_authenticated_url=fallback_to_authenticated_url,
             )
         )
     return hydrated
+
+
+def _hydrate_refs_without_store(
+    rows: Sequence[Mapping[str, Any]] | Sequence[ObjectRef],
+    *,
+    fallback_to_authenticated_url: bool,
+) -> list[ObjectRef]:
+    refs: list[ObjectRef] = []
+    for item in rows:
+        uri = _extract_item_uri(item)
+        bucket, object_key = (
+            _split_uri_bucket_and_key(uri) if (fallback_to_authenticated_url and uri.startswith("gs://")) else ("", "")
+        )
+        signed_url = item.signed_url if isinstance(item, ObjectRef) else None
+        refs.append(
+            _finalize_hydrated_ref(
+                item,
+                uri,
+                bucket,
+                object_key,
+                signed_url,
+                fallback_to_authenticated_url=fallback_to_authenticated_url,
+            )
+        )
+    return refs
+
+
+def _extract_item_uri(item: ObjectRef | Mapping[str, Any]) -> str:
+    return item.uri if isinstance(item, ObjectRef) else str(item.get("uri") or item.get("object_uri") or "")
+
+
+def _split_uri_bucket_and_key(uri: str) -> tuple[str, str]:
+    if "://" not in uri:
+        return "", uri.lstrip("/")
+    parsed = urlparse(uri)
+    return parsed.netloc.strip("/"), parsed.path.lstrip("/")
+
+
+def _finalize_hydrated_ref(
+    item: ObjectRef | Mapping[str, Any],
+    uri: str,
+    bucket: str,
+    object_key: str,
+    signed_url: str | None,
+    *,
+    fallback_to_authenticated_url: bool,
+) -> ObjectRef:
+    if signed_url is None and fallback_to_authenticated_url and uri.startswith("gs://") and bucket and object_key:
+        signed_url = f"https://storage.cloud.google.com/{bucket}/{object_key}"
+    if isinstance(item, ObjectRef):
+        return msgspec.structs.replace(item, signed_url=signed_url)
+    return _row_to_object_ref(item, signed_url=signed_url)
+
+
+def _row_to_object_ref(
+    row: Mapping[str, Any],
+    *,
+    signed_url: str | None = None,
+) -> ObjectRef:
+    uri = str(row.get("uri") or row.get("object_uri") or "")
+    version_raw = row.get("generation") or row.get("version")
+    version = str(version_raw) if version_raw is not None else None
+    content_type_raw = row.get("content_type")
+    content_type = str(content_type_raw) if content_type_raw is not None else None
+    size_raw = row.get("size", 0)
+    size = int(size_raw) if size_raw is not None else 0
+    md5_raw = row.get("md5_hash") or row.get("md5") or row.get("md5_hex") or row.get("e_tag")
+    md5_hex = str(md5_raw) if md5_raw is not None else None
+    updated_raw = row.get("updated") or row.get("last_modified")
+    updated = str(updated_raw) if updated_raw is not None else None
+    return ObjectRef(
+        uri=uri,
+        version=version,
+        content_type=content_type,
+        size=size,
+        md5_hex=md5_hex,
+        updated=updated,
+        signed_url=signed_url,
+    )

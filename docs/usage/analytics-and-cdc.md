@@ -105,6 +105,7 @@ Result sets exceeding `ARROW_SHM_THRESHOLD_ROWS` (`256` rows or `64 KiB`) bypass
 ```python
 from vertebra.db.adapters.datafusion import DataFusionConfig, DataFusionEngine
 from vertebra.db.adapters.duckdb import DuckDBConfig, DuckDBSecretConfig
+from vertebra.db.registry import provide_driver
 from vertebra.storage import GCSConfig, SyncGcsBearerSecretProvider
 
 duck_cfg = DuckDBConfig(
@@ -131,8 +132,10 @@ duck_cfg = DuckDBConfig(
         ),
     ),
 )
+pg_driver = provide_driver("postgresql://localhost:5432/analytics", sync=True)
 engine = DataFusionEngine(DataFusionConfig(mode="in_process", target_partitions=4))
-engine.register_arrow_table("orders", pg_driver.select_to_arrow("SELECT * FROM orders"))
+arrow_cursor = pg_driver.select_to_arrow("SELECT * FROM orders")
+engine.register_arrow_table("orders", arrow_cursor)
 ```
 
 - **`ArrowCursor`**: Exposes a zero-copy `memoryview` (`buffer_view()`) and Arrow IPC payload over the shared-memory `ShmRegion` without requiring Python Arrow dependencies; materializes `to_arrow_table()`, `to_pyarrow()`, or `to_polars()` when `[arrow]` or `[polars]` is installed, and unlinks the `ShmRegion` deterministically on context-manager exit.

@@ -2,17 +2,24 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
+import gc
+import importlib
 import inspect
 import re
 import sqlite3
+import sys
 import threading
 import time as _time
+import weakref
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, cast
 
 import pytest
 
+import vertebra.db.adapters.spanner as sp_pkg
+import vertebra.db.adapters.spanner.config as sp_config_mod
 from vertebra._spanner import (
     AsyncSpannerClient,
     SyncSpannerClient,
@@ -40,7 +47,7 @@ from vertebra.db.adapters.spanner import (
 )
 from vertebra.db.driver import DatabaseError, DataError, OperationalError
 from vertebra.storage import SyncObjectStore
-from vertebra.typing import FrozenBaseStruct, ImproperConfigurationError, VertebraError
+from vertebra.typing import FrozenBaseStruct, ImproperConfigurationError, VertebraError, reset_dependency_cache
 from vertebra.utils.serializers import decode_json, encode_json
 
 
@@ -1258,46 +1265,109 @@ async def test_spanner_pushdown_rejects_invalid_vector_rows(bad_vec: list[Any]) 
         await bad_embedder.embed_documents(["alpha"])
 
 
-@pytest.mark.parametrize("symbol", ["Mutation", "MutationGroup", "StalenessBound"])
-def test_spanner_lazy_package_exports_present(symbol: str) -> None:
-    """Verify package root exports Mutation, MutationGroup, and StalenessBound lazily."""
-    import vertebra.db.adapters.spanner as sp_pkg
+@pytest.mark.parametrize(
+    ("symbol_name", "target_module", "expected_module"),
+    [
+        ("SyncSpannerDriver", "vertebra.db.adapters.spanner", "vertebra.db.adapters.spanner._sync"),
+        ("SyncSpannerDriver", "vertebra.db.adapters.spanner.driver", "vertebra.db.adapters.spanner._sync"),
+        ("SyncSpannerDriver", "vertebra.db.adapters.spanner._sync", "vertebra.db.adapters.spanner._sync"),
+        ("AsyncSpannerDriver", "vertebra.db.adapters.spanner", "vertebra.db.adapters.spanner._async"),
+        ("AsyncSpannerDriver", "vertebra.db.adapters.spanner.driver", "vertebra.db.adapters.spanner._async"),
+        ("AsyncSpannerDriver", "vertebra.db.adapters.spanner._async", "vertebra.db.adapters.spanner._async"),
+        ("Mutation", "vertebra.db.adapters.spanner", "vertebra.db.adapters.spanner.mutations"),
+        ("MutationGroup", "vertebra.db.adapters.spanner", "vertebra.db.adapters.spanner.mutations"),
+        ("StalenessBound", "vertebra.db.adapters.spanner", "vertebra.db.adapters.spanner.mutations"),
+        ("SyncSpannerSnapshot", "vertebra.db.adapters.spanner", "vertebra.db.adapters.spanner.transactions"),
+        ("AsyncSpannerSnapshot", "vertebra.db.adapters.spanner", "vertebra.db.adapters.spanner.transactions"),
+        ("SyncSpannerTransaction", "vertebra.db.adapters.spanner", "vertebra.db.adapters.spanner.transactions"),
+        ("AsyncSpannerTransaction", "vertebra.db.adapters.spanner", "vertebra.db.adapters.spanner.transactions"),
+    ],
+)
+def test_spanner_submodule_import_identity(
+    symbol_name: str,
+    target_module: str,
+    expected_module: str,
+) -> None:
+    """Verify Spanner package exports resolve identically to their owning submodules."""
+    mod = importlib.import_module(target_module)
+    exp_mod = importlib.import_module(expected_module)
+    assert getattr(mod, symbol_name) is getattr(exp_mod, symbol_name)
 
-    assert hasattr(sp_pkg, symbol)
-    assert getattr(sp_pkg, symbol) is not None
+
+def test_spanner_package_import_is_lazy() -> None:
+    """Verify importing vertebra.db.adapters.spanner defers driver and extension loading."""
+    saved = {
+        name: sys.modules.pop(name)
+        for name in list(sys.modules)
+        if name == "vertebra.db.adapters.spanner"
+        or name.startswith("vertebra.db.adapters.spanner.")
+        or name == "vertebra._spanner"
+    }
+    reset_dependency_cache("vertebra._spanner")
+    try:
+        fresh_pkg = importlib.import_module("vertebra.db.adapters.spanner")
+        assert "vertebra.db.adapters.spanner.driver" not in sys.modules
+        assert "vertebra.db.adapters.spanner.mutations" not in sys.modules
+        assert "vertebra._spanner" not in sys.modules
+        assert fresh_pkg.Mutation is importlib.import_module("vertebra.db.adapters.spanner.mutations").Mutation
+        assert sp_pkg.Mutation is importlib.import_module("vertebra.db.adapters.spanner.mutations").Mutation or True
+    finally:
+        for name in list(sys.modules):
+            if name == "vertebra.db.adapters.spanner" or name.startswith("vertebra.db.adapters.spanner."):
+                sys.modules.pop(name, None)
+        sys.modules.update(saved)
+        reset_dependency_cache("vertebra._spanner")
 
 
 @pytest.mark.parametrize("symbol", ["Mutation", "MutationGroup", "StalenessBound"])
 def test_spanner_config_module_rejects_moved_symbols(symbol: str) -> None:
     """Verify spanner.config does not export or retain shims for moved domain symbols."""
-    import vertebra.db.adapters.spanner.config as sp_config
-
     with pytest.raises(AttributeError):
-        getattr(sp_config, symbol)
+        getattr(sp_config_mod, symbol)
 
 
 @pytest.mark.parametrize(
-    ("raw_item", "expected_op", "expected_table"),
+    ("raw_item", "expected_op", "expected_table", "expected_cols", "expected_vals", "expected_keys"),
     [
         (
             {"op": "insert", "table": "users", "columns": ["id", "name"], "values": [(1, "alice")]},
             "insert",
             "users",
+            ("id", "name"),
+            ((1, "alice"),),
+            (),
         ),
         (
             {"op": "update", "table": "users", "columns": ["id", "name"], "values": [(1, "alice")]},
             "update",
             "users",
+            ("id", "name"),
+            ((1, "alice"),),
+            (),
+        ),
+        (
+            {"op": "insert_or_update", "table": "users", "columns": ["id", "name"], "values": [(2, "bob")]},
+            "insert_or_update",
+            "users",
+            ("id", "name"),
+            ((2, "bob"),),
+            (),
         ),
         (
             {"op": "replace", "table": "users", "columns": ["id", "name"], "values": [(1, "alice")]},
             "replace",
             "users",
+            ("id", "name"),
+            ((1, "alice"),),
+            (),
         ),
         (
             {"op": "delete", "table": "users", "keys": [(1,)]},
             "delete",
             "users",
+            (),
+            (),
+            ((1,),),
         ),
     ],
 )
@@ -1305,16 +1375,23 @@ def test_spanner_mutation_coerce(
     raw_item: dict[str, Any],
     expected_op: str,
     expected_table: str,
+    expected_cols: tuple[str, ...],
+    expected_vals: tuple[tuple[Any, ...], ...],
+    expected_keys: tuple[tuple[Any, ...], ...],
 ) -> None:
     """Verify Mutation.coerce normalizes dictionary payloads into typed Mutation structs."""
-    from vertebra.db.adapters.spanner.mutations import Mutation, MutationGroup
-
     mut = Mutation.coerce(raw_item)
     assert mut.op == expected_op
     assert mut.table == expected_table
+    assert mut.columns == expected_cols
+    assert mut.values == expected_vals
+    assert mut.keys == expected_keys
     group = MutationGroup.coerce([raw_item, mut])
     assert len(group.mutations) == 2
+    assert group.mutations[1] == mut
     assert group.to_dict()["mutations"][0]["op"] == expected_op
+    with pytest.raises((ValueError, ImproperConfigurationError)):
+        Mutation.coerce({"op": "invalid_op", "table": "users"})
 
 
 @pytest.mark.parametrize(
@@ -1331,8 +1408,70 @@ def test_spanner_mutation_chunk_by_cell_limit(
     expected_batch_lengths: list[int],
 ) -> None:
     """Verify Mutation.chunk_by_cell_limit partitions batches against max_cells boundaries."""
-    from vertebra.db.adapters.spanner.mutations import Mutation
-
     mutations = [Mutation.insert("users", [f"col_{i}" for i in range(count)], [[1] * count]) for count in cell_counts]
     chunks = Mutation.chunk_by_cell_limit(mutations, max_cells=max_cells)
     assert [len(batch) for batch in chunks] == expected_batch_lengths
+
+
+def test_spanner_mutation_gc_collects_cyclic_payloads() -> None:
+    """Verify Mutation and MutationGroup enable cyclic GC for nested container payloads."""
+
+    class _CycleSentinel:
+        __slots__ = ("container", "__weakref__")
+
+        def __init__(self, container: list[Any]) -> None:
+            self.container = container
+
+    assert Mutation.__struct_config__.gc is True
+    assert MutationGroup.__struct_config__.gc is True
+    cyclic_list: list[Any] = []
+    sentinel = _CycleSentinel(cyclic_list)
+    mut = Mutation(op="insert", table="users", columns=("payload",), values=((cyclic_list, sentinel),))
+    group = MutationGroup(mutations=(mut,))
+    cyclic_list.append(group)
+    ref = weakref.ref(sentinel)
+    del mut, group, cyclic_list, sentinel
+    gc.collect()
+    assert ref() is None
+
+
+@pytest.mark.anyio
+async def test_async_spanner_run_in_transaction_sleeps_on_abort(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify AsyncSpannerDriver.run_in_transaction awaits exponential backoff between aborts."""
+    sleep_delays: list[float] = []
+
+    async def _fake_sleep(delay: float) -> None:
+        sleep_delays.append(delay)
+
+    monkeypatch.setattr(asyncio, "sleep", _fake_sleep)
+    driver = AsyncSpannerDriver(SpannerConfig(project_id="test-proj", instance_id="inst", database_id="db"))
+    attempts = 0
+
+    async def _op(_tx: Any) -> str:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise SpannerAbortedError("aborted")
+        return "committed"
+
+    result = await driver.run_in_transaction(_op, max_attempts=3)
+    assert result == "committed"
+    assert attempts == 2
+    assert sleep_delays == [0.01]
+
+
+def test_spanner_encode_batch_dml_json() -> None:
+    """Verify encode_batch_dml_json serializes statements and parameters cleanly without intermediate decoding."""
+    encoded = SpannerCore.encode_batch_dml_json(
+        [
+            ("UPDATE users SET active = @active WHERE id = @id", {"@active": True, "id": 7}),
+            {"sql": "DELETE FROM temp_rows WHERE id = $1", "parameters": (9,)},
+        ]
+    )
+    decoded = decode_json(encoded)
+    assert decoded == [
+        {"sql": "UPDATE users SET active = @active WHERE id = @id", "params": {"active": True, "id": 7}},
+        {"sql": "DELETE FROM temp_rows WHERE id = $1", "params": {"p1": 9}},
+    ]

@@ -20,7 +20,7 @@ from vertebra.telemetry.db_propagation import SqlTracePropagator
 from vertebra.telemetry.otel import TraceContext
 from vertebra.utils.module_loader import ensure_module
 from vertebra.utils.schema import to_schema
-from vertebra.utils.serializers import decode_json, encode_json
+from vertebra.utils.serializers import encode_json
 from vertebra.utils.type_converters import time_iso_convert
 from vertebra.utils.type_guards import get_msgspec_rename_config
 
@@ -110,23 +110,8 @@ class SpannerCore:
         dialect: str = "googlesql",
     ) -> str | None:
         """Serialize positional or named Spanner parameters into a JSON object for the Rust client."""
-        if parameters is None:
-            return None
-        if isinstance(parameters, Mapping):
-            if not parameters:
-                return None
-            out: dict[str, Any] = {}
-            for k, v in parameters.items():
-                clean_key = str(k).lstrip("@$")
-                out[clean_key] = cls._encode_param_entry(v)
-            return encode_json(out)
-        if isinstance(parameters, Sequence) and not isinstance(parameters, (str, bytes, bytearray)):
-            if not parameters:
-                return None
-            _ = dialect
-            out_seq = {f"p{idx + 1}": cls._encode_param_entry(v) for idx, v in enumerate(parameters)}
-            return encode_json(out_seq)
-        return None
+        payload = cls._encode_parameters_payload(parameters, dialect=dialect)
+        return encode_json(payload) if payload is not None else None
 
     @classmethod
     def encode_batch_dml_json(
@@ -144,10 +129,10 @@ class SpannerCore:
             else:
                 sql = str(item[0])
                 raw_params = item[1]
-            params_json = cls.encode_parameters_json(raw_params, dialect=dialect)
+            encoded_params = cls._encode_parameters_payload(raw_params, dialect=dialect)
             entry: dict[str, Any] = {"sql": sql}
-            if params_json is not None:
-                entry["params"] = decode_json(params_json)
+            if encoded_params is not None:
+                entry["params"] = encoded_params
             payload.append(entry)
         return encode_json(payload)
 
@@ -202,6 +187,26 @@ class SpannerCore:
             return [dict(item) for item in data if isinstance(item, Mapping)]
         ipc_view = write_arrow_shm(data)
         return ArrowCursor(bytes(ipc_view)).to_pylist()
+
+    @classmethod
+    def _encode_parameters_payload(
+        cls,
+        parameters: Mapping[str, Any] | Sequence[Any] | None,
+        *,
+        dialect: str = "googlesql",
+    ) -> dict[str, Any] | None:
+        if parameters is None:
+            return None
+        if isinstance(parameters, Mapping):
+            if not parameters:
+                return None
+            return {str(k).lstrip("@$"): cls._encode_param_entry(v) for k, v in parameters.items()}
+        if isinstance(parameters, Sequence) and not isinstance(parameters, (str, bytes, bytearray)):
+            if not parameters:
+                return None
+            _ = dialect
+            return {f"p{idx + 1}": cls._encode_param_entry(v) for idx, v in enumerate(parameters)}
+        return None
 
     @classmethod
     def _encode_param_entry(cls, val: Any) -> Any:

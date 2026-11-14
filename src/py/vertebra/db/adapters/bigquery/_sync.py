@@ -27,15 +27,15 @@ from vertebra.db.adapters.bigquery.object_tables import (
     ObjectTableConfig,
 )
 from vertebra.db.arrow import ARROW_SHM_THRESHOLD_ROWS, ArrowCursor
+from vertebra.db.driver import DatabaseError
 from vertebra.db.driver._sync import SyncDatabaseDriver
 from vertebra.telemetry.db_propagation import SqlTracePropagator
-from vertebra.utils.module_loader import ensure_module
 from vertebra.utils.schema import to_value_type
 from vertebra.utils.text import quote_dialect_identifier, validate_identifier
 
 if TYPE_CHECKING:
     from vertebra._bigquery import SyncBigQueryClient
-    from vertebra.storage import SyncObjectStore
+    from vertebra.storage import AsyncObjectStore, SyncObjectStore
 
 __all__ = ("SyncBigQueryDriver",)
 
@@ -206,8 +206,7 @@ class SyncBigQueryDriver(SyncDatabaseDriver[BigQueryConfig]):
         **kwargs: Any,
     ) -> Any:
         """Execute a query and return the first row, raising `NotFoundError` when 0 rows match."""
-        _ = kwargs
-        rows = self.select(sql, parameters, schema_type=schema_type)
+        rows = self.select(sql, parameters, schema_type=schema_type, **kwargs)
         if not rows:
             msg = "Query returned no rows"
             raise NotFoundError(msg)
@@ -222,8 +221,7 @@ class SyncBigQueryDriver(SyncDatabaseDriver[BigQueryConfig]):
         **kwargs: Any,
     ) -> Any | None:
         """Execute a query and return the first row or `None` when 0 rows match."""
-        _ = kwargs
-        rows = self.select(sql, parameters, schema_type=schema_type)
+        rows = self.select(sql, parameters, schema_type=schema_type, **kwargs)
         return rows[0] if rows else None
 
     def query(
@@ -298,7 +296,7 @@ class SyncBigQueryDriver(SyncDatabaseDriver[BigQueryConfig]):
         """Read a table or query into a zero-copy `VTBARROW` shared-memory `ArrowCursor`."""
         _ = kwargs
         client = self._ensure_client()
-        streams = max_streams or self.config.max_read_streams
+        streams = max_streams if max_streams is not None else self.config.max_read_streams
         table_parts = BigQueryCore.try_parse_table_reference(
             sql,
             default_project=self.project_id,
@@ -485,7 +483,7 @@ class SyncBigQueryDriver(SyncDatabaseDriver[BigQueryConfig]):
         self,
         config: ObjectTableConfig,
         *,
-        store: SyncObjectStore | None = None,
+        store: SyncObjectStore | AsyncObjectStore | None = None,
         where: str | None = None,
         limit: int | None = None,
         presign: bool = True,
@@ -495,7 +493,7 @@ class SyncBigQueryDriver(SyncDatabaseDriver[BigQueryConfig]):
         sql = config.build_select_sql(where=where, limit=limit)
         try:
             rows = self.select(sql)
-        except Exception:
+        except (DatabaseError, OSError):
             if store is not None:
                 rows = config.list_from_store_sync(store, limit=limit)
             else:
@@ -508,7 +506,6 @@ class SyncBigQueryDriver(SyncDatabaseDriver[BigQueryConfig]):
 
     def _ensure_client(self) -> SyncBigQueryClient:
         if self._client is None:
-            ensure_module("vertebra._bigquery", package="vertebra-core[bigquery]", extra="bigquery")
             self._client = BigQueryCore.create_sync_rust_client(self.config)
         return self._client
 
@@ -556,7 +553,7 @@ class SyncBigQueryDriver(SyncDatabaseDriver[BigQueryConfig]):
             False,
             destination_table,
             write_disposition,
-            maximum_bytes_billed or self.config.maximum_bytes_billed,
+            maximum_bytes_billed if maximum_bytes_billed is not None else self.config.maximum_bytes_billed,
             self.config.job_timeout_ms,
             self.config.priority,
             merged_labels or None,

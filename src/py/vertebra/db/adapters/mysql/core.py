@@ -6,7 +6,7 @@ import datetime
 import re
 from collections.abc import Mapping, Sequence
 from decimal import Decimal
-from typing import Any
+from typing import Any, Final
 from uuid import UUID
 
 import msgspec
@@ -22,6 +22,8 @@ from vertebra.db.driver import (
     QueryCancelledError,
     SerializationFailure,
 )
+from vertebra.utils.module_loader import ensure_module
+from vertebra.utils.schema import to_value_type
 from vertebra.utils.serializers import encode_json
 
 __all__ = (
@@ -59,6 +61,8 @@ MYSQL_TRANSIENT_ERRNOS: frozenset[int] = frozenset(
         2013,
     }
 )
+
+_LITERAL_COMMENT_PREFIXES: Final[frozenset[str]] = frozenset({"'", '"', "`", "-", "#", "/"})
 
 _INTEGRITY_ERRNOS: frozenset[int] = frozenset({1048, 1062, 1216, 1217, 1364, 1451, 1452, 3819, 4025})
 _SERIALIZATION_ERRNOS: frozenset[int] = frozenset({1205, 1213})
@@ -154,12 +158,37 @@ class MySQLCore:
             compiled_sql, ordered_values = MySQLCore._compile_named_mysql_binds(sql, parameters, placeholder)
             return compiled_sql, tuple(MySQLCore.coerce_param(v) for v in ordered_values)
 
-        rewritten_sql = (
-            MySQLCore._rewrite_placeholders_outside_literals(sql, "?", "%s")
-            if target_style == "format"
-            else MySQLCore._rewrite_placeholders_outside_literals(sql, "%s", "?")
-        )
+        if target_style == "format":
+            rewritten_sql = MySQLCore._rewrite_placeholders_outside_literals(sql, "?", "%s") if "?" in sql else sql
+        else:
+            rewritten_sql = MySQLCore._rewrite_placeholders_outside_literals(sql, "%s", "?") if "%s" in sql else sql
         return rewritten_sql, tuple(MySQLCore.coerce_param(v) for v in parameters)
+
+    @staticmethod
+    def compile_for_driver(
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+    ) -> tuple[str, tuple[Any, ...]]:
+        """Compile named binds via `compile_statement` while preserving positional SQL placeholders."""
+        if not parameters:
+            return sql, ()
+        if isinstance(parameters, Mapping):
+            return MySQLCore.compile_statement(sql, parameters, target_style="qmark")
+        return sql, tuple(MySQLCore.coerce_param(v) for v in parameters)
+
+    @staticmethod
+    def require_native_module() -> Any:
+        """Import and return `vertebra._mysql`, raising `MissingDependencyError` when absent."""
+        return ensure_module("vertebra._mysql", package="vertebra-core[mysql]", extra="mysql")
+
+    @staticmethod
+    def coerce_scalar_value(val: Any, value_type: type[Any] | None) -> Any:
+        """Coerce a scalar value to `value_type`, normalizing naive `datetime` values to UTC."""
+        if value_type is None or val is None:
+            return val
+        if value_type is datetime.datetime and isinstance(val, datetime.datetime) and val.tzinfo is None:
+            return val.replace(tzinfo=datetime.UTC)
+        return to_value_type(val, value_type)
 
     @staticmethod
     def normalize_rows(
@@ -321,17 +350,21 @@ class MySQLCore:
         n = len(sql)
         i = 0
         src_len = len(source_token)
+        consume = MySQLCore._consume_literal_or_comment
+        prefixes = _LITERAL_COMMENT_PREFIXES
         while i < n:
-            next_i = MySQLCore._consume_literal_or_comment(sql, i, n)
-            if next_i is not None:
-                out.append(sql[i:next_i])
-                i = next_i
-                continue
+            ch = sql[i]
+            if ch in prefixes:
+                next_i = consume(sql, i, n)
+                if next_i is not None:
+                    out.append(sql[i:next_i])
+                    i = next_i
+                    continue
             if sql.startswith(source_token, i):
                 out.append(target_token)
                 i += src_len
                 continue
-            out.append(sql[i])
+            out.append(ch)
             i += 1
         return "".join(out)
 
@@ -345,13 +378,16 @@ class MySQLCore:
         values: list[Any] = []
         n = len(sql)
         i = 0
+        consume = MySQLCore._consume_literal_or_comment
+        prefixes = _LITERAL_COMMENT_PREFIXES
         while i < n:
-            next_i = MySQLCore._consume_literal_or_comment(sql, i, n)
-            if next_i is not None:
-                out.append(sql[i:next_i])
-                i = next_i
-                continue
             ch = sql[i]
+            if ch in prefixes:
+                next_i = consume(sql, i, n)
+                if next_i is not None:
+                    out.append(sql[i:next_i])
+                    i = next_i
+                    continue
             if ch == "%" and i + 2 < n and sql[i + 1] == "(":
                 close_idx = sql.find(")s", i + 2)
                 if close_idx != -1:

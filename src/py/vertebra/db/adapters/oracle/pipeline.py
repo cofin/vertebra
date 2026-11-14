@@ -6,6 +6,7 @@ from collections.abc import Mapping, Sequence
 from types import TracebackType
 from typing import TYPE_CHECKING, Any, Self
 
+from vertebra.db.adapters.oracle.core import OracleCore
 from vertebra.db.arrow import _hydrate_rows_with_schema
 from vertebra.db.driver import InterfaceError
 
@@ -123,9 +124,10 @@ class SyncOraclePipeline:
             return []
 
         batch_payload: list[tuple[str, Any, bool]] = []
+        features = self._driver.config.driver_features
         for sql, params, returns_rows in ops:
-            coerced = self._driver._coerce_parameters(params)
-            self._driver._track_session_context_sql(sql, params)
+            coerced = OracleCore.coerce_parameters(params, features=features)
+            OracleCore.track_session_context_sql(self._driver._session_context, sql, params)
             batch_payload.append((sql, coerced, returns_rows))
 
         with self._driver._checkout_client() as active_client:
@@ -141,7 +143,7 @@ class SyncOraclePipeline:
         hydrated: list[Any] = []
         for (_, _, returns_rows), outcome in zip(ops, raw_outcomes, strict=True):
             if returns_rows:
-                rows, cols = self._driver._coerce_result_rows_and_cols(outcome.result)
+                rows, cols = OracleCore.coerce_result_rows_and_cols(outcome.result, features=features)
                 hydrated.append(_hydrate_rows_with_schema(rows, cols, None) if rows else [])
             else:
                 rc = int(outcome.result.rowcount) if outcome.result is not None else 0
@@ -253,9 +255,10 @@ class AsyncOraclePipeline:
             return []
 
         batch_payload: list[tuple[str, Any, bool]] = []
+        features = self._driver.config.driver_features
         for sql, params, returns_rows in ops:
-            coerced = self._driver._coerce_parameters(params)
-            self._driver._track_session_context_sql(sql, params)
+            coerced = OracleCore.coerce_parameters(params, features=features)
+            OracleCore.track_session_context_sql(self._driver._session_context, sql, params)
             batch_payload.append((sql, coerced, returns_rows))
 
         async with self._driver._checkout_client() as active_client:
@@ -271,7 +274,7 @@ class AsyncOraclePipeline:
         hydrated: list[Any] = []
         for (_, _, returns_rows), outcome in zip(ops, raw_outcomes, strict=True):
             if returns_rows:
-                rows, cols = self._driver._coerce_result_rows_and_cols(outcome.result)
+                rows, cols = OracleCore.coerce_result_rows_and_cols(outcome.result, features=features)
                 hydrated.append(_hydrate_rows_with_schema(rows, cols, None) if rows else [])
             else:
                 rc = int(outcome.result.rowcount) if outcome.result is not None else 0

@@ -62,26 +62,12 @@ from vertebra.db.adapters.oracle import (
     AsyncOracleDriver,
     OracleConfig,
     OracleConnectDescriptor,
+    OracleCore,
     OracleDriverFeatures,
     OracleEmbeddingPushdown,
     OracleTopologyConfig,
     OracleWallet,
     SyncOracleDriver,
-    decode_oson,
-    decode_tns_packet,
-    decode_ttc_session_attrs,
-    decode_vector_binary,
-    decode_vector_f32,
-    decode_vector_f64,
-    decode_vector_i8,
-    encode_oson,
-    encode_tns_connect_packet,
-    encode_tns_data_packet,
-    encode_ttc_session_attrs,
-    encode_vector_binary,
-    encode_vector_f32,
-    encode_vector_f64,
-    encode_vector_i8,
     parse_tnsnames_ora,
     resolve_tns_alias,
 )
@@ -454,53 +440,53 @@ def test_oracle_tns_descriptor_and_wallet_extraction(tmp_path: Path) -> None:
 def test_oracle_26ai_vector_oson_and_ttc_piggyback_codecs() -> None:
     """Verify Oracle 26ai VECTOR (FLOAT32/FLOAT64/INT8/BINARY), OSON, TNS packets, and TTC session piggybacking."""
     vec_f32 = [0.25, -0.5, 1.0, 3.5]
-    enc_f32 = encode_vector_f32(vec_f32)
-    assert decode_vector_f32(enc_f32) == pytest.approx(vec_f32)
+    enc_f32 = OracleCore.encode_vector_f32(vec_f32)
+    assert OracleCore.decode_vector_f32(enc_f32) == pytest.approx(vec_f32)
 
     vec_f64 = [1.125, -2.5, 42.0]
-    enc_f64 = encode_vector_f64(vec_f64)
-    assert decode_vector_f64(enc_f64) == pytest.approx(vec_f64)
+    enc_f64 = OracleCore.encode_vector_f64(vec_f64)
+    assert OracleCore.decode_vector_f64(enc_f64) == pytest.approx(vec_f64)
 
     vec_i8 = [-128, -1, 0, 1, 127]
-    enc_i8 = encode_vector_i8(vec_i8)
-    assert decode_vector_i8(enc_i8) == vec_i8
+    enc_i8 = OracleCore.encode_vector_i8(vec_i8)
+    assert OracleCore.decode_vector_i8(enc_i8) == vec_i8
 
     vec_bin = bytes([0b1010_0101, 0b1111_0000])
-    enc_bin = encode_vector_binary(vec_bin)
-    assert decode_vector_binary(enc_bin) == vec_bin
+    enc_bin = OracleCore.encode_vector_binary(vec_bin)
+    assert OracleCore.decode_vector_binary(enc_bin) == vec_bin
 
     with pytest.raises(VertebraError):
-        decode_vector_f32(b"\x00\x01\x02\x00\x00\x00\x00\x01\x00\x00\x00\x00")
+        OracleCore.decode_vector_f32(b"\x00\x01\x02\x00\x00\x00\x00\x01\x00\x00\x00\x00")
 
     payload_obj = {"doc_id": 101, "title": "Oracle 26ai Duality View", "tags": ["json", "oson"]}
-    oson_bytes = encode_oson(payload_obj)
+    oson_bytes = OracleCore.encode_oson(payload_obj)
     assert oson_bytes[:3] == OSON_MAGIC
-    assert decode_oson(oson_bytes) == payload_obj
+    assert OracleCore.decode_oson(oson_bytes) == payload_obj
 
     with pytest.raises(VertebraError):
-        decode_oson(b"invalid")
+        OracleCore.decode_oson(b"invalid")
 
     tns_desc = "(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=localhost)(PORT=1521))(CONNECT_DATA=(SERVICE_NAME=FREEPDB1)))"
-    connect_pkt = encode_tns_connect_packet(tns_desc)
-    pkt_type, flags, pkt_body = decode_tns_packet(connect_pkt)
+    connect_pkt = OracleCore.encode_tns_connect_packet(tns_desc)
+    pkt_type, flags, pkt_body = OracleCore.decode_tns_packet(connect_pkt)
     assert pkt_type == 1
     assert flags == 0
     assert pkt_body == tns_desc.encode("utf-8")
 
-    data_pkt = encode_tns_data_packet(0x0040, b"TTC_QUERY")
-    d_type, d_flags, d_body = decode_tns_packet(data_pkt)
+    data_pkt = OracleCore.encode_tns_data_packet(0x0040, b"TTC_QUERY")
+    d_type, d_flags, d_body = OracleCore.decode_tns_packet(data_pkt)
     assert d_type == 6
     assert d_flags == 0x0040
     assert d_body == b"TTC_QUERY"
 
-    ttc_frame = encode_ttc_session_attrs(
+    ttc_frame = OracleCore.encode_ttc_session_attrs(
         client_identifier="user-42",
         module="vertebra-api",
         action="GET /orders",
         ecid="00af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
     )
     assert ttc_frame[:3] == b"\x11\x6e\x04"
-    decoded_attrs = decode_ttc_session_attrs(ttc_frame)
+    decoded_attrs = OracleCore.decode_ttc_session_attrs(ttc_frame)
     assert decoded_attrs["client_identifier"] == "user-42"
     assert decoded_attrs["module"] == "vertebra-api"
     assert decoded_attrs["action"] == "GET /orders"
@@ -1181,9 +1167,9 @@ async def test_oracle_embedding_pushdown_batches_via_utl_to_embeddings() -> None
         def select(self, sql: str, parameters: dict[str, Any]) -> list[dict[str, Any]]:
             self.calls.append((sql, dict(parameters)))
             return [
-                {"embedding": encode_vector_f32([3.0, 4.0, 0.0, 0.0])},
-                {"embedding": encode_vector_f32([0.0, 5.0, 12.0, 0.0])},
-                {"embedding": encode_vector_f32([8.0, 0.0, 15.0, 0.0])},
+                {"embedding": OracleCore.encode_vector_f32([3.0, 4.0, 0.0, 0.0])},
+                {"embedding": OracleCore.encode_vector_f32([0.0, 5.0, 12.0, 0.0])},
+                {"embedding": OracleCore.encode_vector_f32([8.0, 0.0, 15.0, 0.0])},
             ]
 
         def execute(self, sql: str, parameters: dict[str, Any]) -> None:
