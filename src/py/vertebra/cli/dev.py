@@ -39,9 +39,9 @@ logger = logging.getLogger("vertebra.cli.dev")
 )
 @click.option(
     "--loop",
-    type=click.Choice(["auto", "uvloop", "winloop", "rloop", "asyncio"], case_sensitive=False),
+    type=click.Choice(["auto", "uvloop", "winloop", "rloop", "zuvloop", "asyncio"], case_sensitive=False),
     default="auto",
-    help="Event loop backend (auto, uvloop, winloop, rloop, or asyncio)",
+    help="Event loop backend (auto, uvloop, winloop, rloop, zuvloop, or asyncio)",
 )
 @click.option("--no-banner", is_flag=True, help="Suppress startup banner")
 @click.option("--no-tui", is_flag=True, help="Disable interactive TUI dashboard")

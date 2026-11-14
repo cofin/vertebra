@@ -33,44 +33,48 @@ Prebuilt `vertebra-core` wheels ship a relocatable `vertebra/bin/vertebra-server
 
 ## Optional Extras
 
-Vertebra keeps its base dependency footprint minimal (`msgspec` and `rich-click`) and exposes optional extras in `pyproject.toml`:
+Vertebra keeps its base dependency footprint minimal (`anyio`, `msgspec`, `rich`, and `rich-click`) and exposes optional extras in `pyproject.toml`:
 
-| Extra | Install Command | Included Capabilities |
+| Extra | Package Specifier | Included Capabilities |
 | --- | --- | --- |
-| `sqlspec` | `uv add "vertebra-core[sqlspec]"` | First-class `sqlspec` (`>=0.69.0`) driver adapters, configs, and PyArrow integration |
-| `alchemy` | `uv add "vertebra-core[alchemy]"` | `advanced-alchemy` (1.12+), `sqlalchemy` (2.0.36+), and `alembic` (1.14+) |
-| `arrow` | `uv add "vertebra-core[arrow]"` | Native PyArrow IPC streaming and Parquet datasets |
-| `pydantic` | `uv add "vertebra-core[pydantic]"` | Zero-copy `pydantic-core` (`validate_json` / `to_json`) schema integration |
-| `attrs` | `uv add "vertebra-core[attrs]"` | Zero-copy `attrs` (`@attrs.define`) schema integration |
-| `polars` | `uv add "vertebra-core[polars]"` | Zero-copy Polars `DataFrame` / `LazyFrame` Arrow PyCapsule integration |
-| `litestar` | `uv add "vertebra-core[litestar]"` | Core Litestar route compiler, fast-path bypass, channels, and response cache store |
-| `starlette` | `uv add "vertebra-core[starlette]"` | First-class Starlette route compiler, 24-slot `AsgiScope` fastpath, and middleware offload |
-| `fastapi` | `uv add "vertebra-core[fastapi]"` | First-class FastAPI `CompiledDependantPlan` DI solver and zero-copy `pydantic-core` fastpath |
-| `flask` | `uv add "vertebra-core[flask]"` | First-class Flask route compiler, PEP 3118 `WsgiInput` fastpath, and ecosystem bridges |
-| `django` | `uv add "vertebra-core[django]"` | First-class Django route compiler, `vertebra.extensions.django.db.*` backends, and ecosystem bridges |
-| `queues` | `uv add "vertebra-core[queues]"` | `litestar-queues` integration (`vertebra.extensions.litestar.queues`) with SHM backends and SQLSpec queues |
-| `security` | `uv add "vertebra-core[security]"` | `litestar-security` integration with native JWT and mTLS identity mechanisms |
-| `autowire` | `uv add "vertebra-core[autowire]"` | `litestar-autowire` automatic controller discovery and bridge |
-| `email` | `uv add "vertebra-core[email]"` | `litestar-email` transactional email with native AWS SigV4 SES backend |
-| `mcp` | `uv add "vertebra-core[mcp]"` | `litestar-mcp` tools, resources, and agent cards |
-| `vite` | `uv add "vertebra-core[vite]"` | `litestar-vite` bundling and client integration |
-| `asyncapi` | `uv add "vertebra-core[asyncapi]"` | `litestar-asyncapi` AsyncAPI 3.0 specification and channel integration |
-| `htmx` | `uv add "vertebra-core[htmx]"` | `litestar-htmx` server-driven fragment and response helpers |
-| `saq` | `uv add "vertebra-core[saq]"` | `litestar-saq` background worker and queue integration |
-| `embeddings` | `uv add "vertebra-core[embeddings]"` | Local ONNX / `fastembed` embedding models via `1x` RAM `EmbeddingBroker` |
-| `bigquery` | `uv add "vertebra-core[bigquery]"` | Standalone native Rust `vertebra-bigquery` (`vertebra._bigquery`) driver wheel |
-| `bundler` | `uv add "vertebra-core[bundler]"` | Standalone native Rust `vertebra-bundler` (`vertebra._bundler`) Rolldown/Oxc & QuickJS SSR wheel |
-| `duckdb` | `uv add "vertebra-core[duckdb]"` | Standalone native Rust `vertebra-duckdb` (`vertebra._duckdb`) DuckDB 2.0 & Arrow wheel |
-| `mssql` | `uv add "vertebra-core[mssql]"` | Standalone native Rust `vertebra-mssql` (`vertebra._mssql`) SQL Server TDS 7.4/8.0 wheel |
-| `mysql` | `uv add "vertebra-core[mysql]"` | Standalone native Rust `vertebra-mysql` (`vertebra._mysql`) MySQL/MariaDB binary protocol wheel |
-| `oracle` | `uv add "vertebra-core[oracle]"` | Standalone native Rust `vertebra-oracle` (`vertebra._oracle`) Oracle 26ai Thin TNS/TTC wheel |
-| `postgres` | `uv add "vertebra-core[postgres]"` | Standalone native Rust `vertebra-postgres` (`vertebra._postgres`) pure-Rust PostgreSQL wheel |
-| `spanner` | `uv add "vertebra-core[spanner]"` | Standalone native Rust `vertebra-spanner` (`vertebra._spanner`) driver wheel |
-| `storage` | `uv add "vertebra-core[storage]"` | Standalone native Rust `vertebra-storage` (`vertebra._storage`) multicloud object storage wheel |
-| `rloop` | `uv add "vertebra-core[rloop]"` | Optional `rloop` asyncio event loop integration on POSIX hosts |
-| `all` | `uv add "vertebra-core[all]"` | Full ecosystem extras suite |
+| `sqlspec` | `"vertebra-core[sqlspec]"` | First-class `sqlspec` (`>=0.69.0`) driver adapters, configs, and PyArrow integration |
+| `alchemy` | `"vertebra-core[alchemy]"` | `advanced-alchemy` (1.12+), `sqlalchemy` (2.0.36+), and `alembic` (1.14+) |
+| `arrow` | `"vertebra-core[arrow]"` | Optional `pyarrow` (`>=18.0.0`) materialization (`to_arrow_table()`) and Parquet dataset staging |
+| `pydantic` | `"vertebra-core[pydantic]"` | Zero-copy `pydantic-core` (`validate_json` / `to_json`) schema integration |
+| `attrs` | `"vertebra-core[attrs]"` | Zero-copy `attrs` (`@attrs.define`) schema integration |
+| `polars` | `"vertebra-core[polars]"` | Zero-copy Polars `DataFrame` / `LazyFrame` Arrow integration |
+| `litestar` | `"vertebra-core[litestar]"` | Core Litestar route compiler, fast-path bypass, channels, and response cache store |
+| `starlette` | `"vertebra-core[starlette]"` | First-class Starlette route compiler, 24-slot `AsgiScope` fastpath, and middleware offload |
+| `fastapi` | `"vertebra-core[fastapi]"` | First-class FastAPI `CompiledDependantPlan` DI solver and zero-copy `pydantic-core` fastpath |
+| `flask` | `"vertebra-core[flask]"` | First-class Flask route compiler, PEP 3118 `WsgiInput` fastpath, and ecosystem bridges |
+| `django` | `"vertebra-core[django]"` | First-class Django route compiler, `vertebra.extensions.django.db.*` database backends, `ArrowQuerySet`, `CacheBackend`, `DjangoStorage`, `EmailBackend`, `ChannelLayer`, and `ORMBridge` |
+| `queues` | `"vertebra-core[queues]"` | `litestar-queues` integration (`vertebra.extensions.litestar.queues`) with SHM backends and SQLSpec queues |
+| `security` | `"vertebra-core[security]"` | `litestar-security` integration with native JWT and mTLS identity mechanisms |
+| `autowire` | `"vertebra-core[autowire]"` | `litestar-autowire` automatic controller discovery and bridge |
+| `email` | `"vertebra-core[email]"` | `litestar-email` transactional email with native AWS SigV4 SES backend |
+| `mcp` | `"vertebra-core[mcp]"` | `litestar-mcp` tools, resources, and agent cards |
+| `vite` | `"vertebra-core[vite]"` | `litestar-vite` bundling and client integration |
+| `asyncapi` | `"vertebra-core[asyncapi]"` | `litestar-asyncapi` AsyncAPI 3.0 specification and channel integration |
+| `htmx` | `"vertebra-core[htmx]"` | `litestar-htmx` server-driven fragment and response helpers |
+| `embeddings` | `"vertebra-core[embeddings]"` | Local ONNX / `fastembed` embedding models via `1x` RAM `EmbeddingBroker` |
+| `iap` | `"vertebra-core[iap]"` | Google Cloud Identity-Aware Proxy / OIDC JWT signature verification (`pyjwt[crypto]`) |
+| `bigquery` | `"vertebra-core[bigquery]"` | Standalone native Rust `vertebra-bigquery` (`vertebra._bigquery`) driver wheel |
+| `bundler` | `"vertebra-core[bundler]"` | Standalone native Rust `vertebra-bundler` (`vertebra._bundler`) Rolldown/Oxc & QuickJS SSR wheel |
+| `duckdb` | `"vertebra-core[duckdb]"` | Standalone native Rust `vertebra-duckdb` (`vertebra._duckdb`) DuckDB 2.0 & Arrow wheel |
+| `mssql` | `"vertebra-core[mssql]"` | Standalone native Rust `vertebra-mssql` (`vertebra._mssql`) SQL Server TDS 7.4/8.0 wheel |
+| `mysql` | `"vertebra-core[mysql]"` | Standalone native Rust `vertebra-mysql` (`vertebra._mysql`) MySQL/MariaDB binary protocol wheel |
+| `oracle` | `"vertebra-core[oracle]"` | Standalone native Rust `vertebra-oracle` (`vertebra._oracle`) Oracle 26ai Thin TNS/TTC wheel |
+| `postgres` | `"vertebra-core[postgres]"` | Standalone native Rust `vertebra-postgres` (`vertebra._postgres`) pure-Rust PostgreSQL wheel |
+| `spanner` | `"vertebra-core[spanner]"` | Standalone native Rust `vertebra-spanner` (`vertebra._spanner`) driver wheel |
+| `storage` | `"vertebra-core[storage]"` | Standalone native Rust `vertebra-storage` (`vertebra._storage`) multicloud object storage wheel |
+| `uvloop` | `"vertebra-core[uvloop]"` | Optional `uvloop` asyncio event loop integration on POSIX hosts |
+| `winloop` | `"vertebra-core[winloop]"` | Optional `winloop` asyncio event loop integration on Windows |
+| `rloop` | `"vertebra-core[rloop]"` | Optional `rloop` asyncio event loop integration on POSIX hosts |
+| `zuvloop` | `"vertebra-core[zuvloop]"` | Optional Zig-backed `zuvloop` asyncio event loop integration on Python 3.14+ |
 
-Install optional database wheels with any package manager:
+Native database drivers produce `VTBARROW` Apache Arrow IPC buffers directly in shared memory (`ArrowCursor.buffer_view()`) without requiring any Python Arrow dependency. Install `[arrow]` for `pyarrow.Table` materialization and Parquet staging, or `[polars]` independently.
+
+Install any extra with your preferred package manager (shown with `[postgres]`):
 
 === "uv"
 

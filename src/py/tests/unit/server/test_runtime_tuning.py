@@ -271,6 +271,7 @@ def test_loop_backend_resolution_and_cli_launch_env(monkeypatch: pytest.MonkeyPa
     assert LoopBackend.UVLOOP == "uvloop"
     assert LoopBackend.WINLOOP == "winloop"
     assert LoopBackend.RLOOP == "rloop"
+    assert LoopBackend.ZUVLOOP == "zuvloop"
     assert LoopBackend.ASYNCIO == "asyncio"
 
     assert resolve_loop_backend("asyncio") == LoopBackend.ASYNCIO
@@ -288,6 +289,10 @@ def test_loop_backend_resolution_and_cli_launch_env(monkeypatch: pytest.MonkeyPa
     launch = ServerLaunchEnv(app_path="app:app", host="127.0.0.1", port=8000, loop="rloop")
     env = launch.to_environ(base={})
     assert env["VERTEBRA_LOOP"] == "rloop"
+
+    zuv_launch = ServerLaunchEnv(app_path="app:app", host="127.0.0.1", port=8000, loop="zuvloop")
+    zuv_env = zuv_launch.to_environ(base={})
+    assert zuv_env["VERTEBRA_LOOP"] == "zuvloop"
 
 
 def test_cgroup_quota_effective_cpu_count_and_launch_env(
@@ -329,7 +334,10 @@ def test_cgroup_quota_effective_cpu_count_and_launch_env(
         ),
         ("linux", frozenset({"rloop"}), frozenset({"other_ext==2.0"}), "rloop", LoopBackend.RLOOP),
         ("linux", frozenset({"rloop"}), frozenset({"rloop==0.5.0"}), "rloop", LoopBackend.ASYNCIO),
+        ("linux", frozenset({"zuvloop"}), frozenset({"legacy_c_ext==1.0"}), "auto", LoopBackend.ZUVLOOP),
+        ("linux", frozenset({"zuvloop"}), frozenset({"zuvloop==0.1.0"}), "zuvloop", LoopBackend.ASYNCIO),
         ("win32", frozenset({"winloop", "rloop"}), frozenset({"legacy_c_ext==1.0"}), "auto", LoopBackend.WINLOOP),
+        ("win32", frozenset({"zuvloop"}), frozenset({"legacy_c_ext==1.0"}), "auto", LoopBackend.ZUVLOOP),
         ("win32", frozenset({"winloop"}), frozenset({"winloop==0.8.0"}), "auto", LoopBackend.ASYNCIO),
     ],
 )

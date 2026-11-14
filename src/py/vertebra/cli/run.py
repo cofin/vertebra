@@ -59,9 +59,9 @@ logger = logging.getLogger("vertebra.cli.run")
 )
 @click.option(
     "--loop",
-    type=click.Choice(["auto", "uvloop", "winloop", "rloop", "asyncio"], case_sensitive=False),
+    type=click.Choice(["auto", "uvloop", "winloop", "rloop", "zuvloop", "asyncio"], case_sensitive=False),
     default="auto",
-    help="Event loop backend (auto, uvloop, winloop, rloop, or asyncio)",
+    help="Event loop backend (auto, uvloop, winloop, rloop, zuvloop, or asyncio)",
 )
 @click.option("--tls-cert", type=click.Path(exists=True), help="Path to PEM certificate for HTTPS")
 @click.option("--tls-key", type=click.Path(exists=True), help="Path to PEM private key for HTTPS")

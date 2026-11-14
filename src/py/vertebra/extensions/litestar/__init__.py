@@ -62,7 +62,6 @@ if TYPE_CHECKING:
         extract_routes,
         normalize_path_for_matchit,
     )
-    from vertebra.extensions.litestar.saq import create_saq_plugin
     from vertebra.extensions.litestar.security import (
         BearerTokenSlot,
         IngressIdentityAuthenticator,
@@ -137,7 +136,6 @@ __all__ = (
     "create_ingress_identity_mechanism",
     "create_jwt_authentication_mechanism",
     "create_mcp_plugin",
-    "create_saq_plugin",
     "create_shm_mcp_task_config",
     "create_shm_queue_config",
     "create_sqlspec_queue_config",
@@ -161,7 +159,6 @@ __all__ = (
     "preseed_scope_body",
     "provide_driver",
     "queues",
-    "saq",
     "security",
     "swap_channels_backend",
     "swap_response_cache_store",
@@ -220,7 +217,6 @@ _EXPORT_MAP: dict[str, tuple[str, str]] = {
         "create_jwt_authentication_mechanism",
     ),
     "create_mcp_plugin": ("vertebra.extensions.litestar.mcp", "create_mcp_plugin"),
-    "create_saq_plugin": ("vertebra.extensions.litestar.saq", "create_saq_plugin"),
     "create_shm_mcp_task_config": ("vertebra.extensions.litestar.mcp", "create_shm_mcp_task_config"),
     "create_shm_queue_config": ("vertebra.extensions.litestar.queues", "create_shm_queue_config"),
     "create_sqlspec_queue_config": ("vertebra.extensions.litestar.queues", "create_sqlspec_queue_config"),
@@ -250,7 +246,6 @@ _EXPORT_MAP: dict[str, tuple[str, str]] = {
     "preseed_scope_body": ("vertebra.extensions.litestar.fastpath", "preseed_scope_body"),
     "provide_driver": ("vertebra.db.registry", "provide_driver"),
     "queues": ("vertebra.extensions.litestar.queues", ""),
-    "saq": ("vertebra.extensions.litestar.saq", ""),
     "security": ("vertebra.extensions.litestar.security", ""),
     "swap_channels_backend": ("vertebra.extensions.litestar.channels", "swap_channels_backend"),
     "swap_response_cache_store": ("vertebra.extensions.litestar.store", "swap_response_cache_store"),

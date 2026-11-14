@@ -18,10 +18,10 @@ Configure `PostgreSQLConfig` with `cloud_sql_instance` / `alloydb_instance_uri` 
 from vertebra.db import (
     AlloyDBConfig,
     CloudSQLConfig,
-    PostgreSQLConfig,
     SyncAlloyDBDialer,
     SyncCloudSQLDialer,
 )
+from vertebra.db.adapters.postgres import PostgreSQLConfig
 
 pg_cloud_sql = PostgreSQLConfig(
     dsn="postgresql://iam_user@localhost/orders",

@@ -116,12 +116,12 @@ from vertebra.framework.email import EmailConfig, EmailMessage, EmailService
 from vertebra.framework.stores import KeyValueStore
 
 cache = KeyValueStore(key_prefix="app-cache")
-email_service = EmailService.from_config(
+email_service = EmailService(
     EmailConfig(backend="memory", default_from="noreply@example.com")
 )
 await email_service.send(
     EmailMessage(
-        to=["user@example.com"],
+        to=("user@example.com",),
         subject="Welcome",
         text_body="Hello from Vertebra",
     )
@@ -135,7 +135,6 @@ Configure structured JSON logging (`LoggingConfig`), W3C trace propagation (`Tra
 ```python
 from vertebra.telemetry import (
     GenAiRecorder,
-    GenAiUsage,
     LoggingConfig,
     TraceContext,
 )
@@ -143,7 +142,10 @@ from vertebra.telemetry import (
 log_config = LoggingConfig(level="INFO", json_format=True)
 trace = TraceContext.generate()
 genai_metrics = GenAiRecorder()
-genai_metrics.record(
-    GenAiUsage(model="gemini-2.5-flash", input_tokens=120, output_tokens=45)
+genai_metrics.record_generation(
+    model="gemini-2.5-flash",
+    input_tokens=120,
+    output_tokens=45,
+    duration_seconds=0.12,
 )
 ```

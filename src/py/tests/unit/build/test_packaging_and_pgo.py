@@ -693,7 +693,7 @@ def test_optional_extension_pyproject_isolation_and_bundler_extra(
     opt_deps = root_toml["project"]["optional-dependencies"]
     pinned = f"vertebra-{pkg_slug}=={version}"
     assert opt_deps[pkg_slug] == [pinned]
-    assert pinned in opt_deps["all"]
+    assert "all" not in opt_deps
     assert f"vertebra-{pkg_slug}" in root_toml["tool"]["uv"]["sources"]
 
 

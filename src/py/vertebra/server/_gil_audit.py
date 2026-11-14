@@ -15,7 +15,7 @@ __all__ = (
 
 log = logging.getLogger(__name__)
 _NATIVE_SUFFIXES = (".so", ".pyd", ".dylib")
-_LOOP_MODULE_NAMES = frozenset({"uvloop", "winloop", "rloop"})
+_LOOP_MODULE_NAMES = frozenset({"uvloop", "winloop", "rloop", "zuvloop"})
 
 
 def is_free_threaded() -> bool:

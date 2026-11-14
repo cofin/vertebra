@@ -40,6 +40,7 @@ class LoopBackend(StrEnum):
     UVLOOP = "uvloop"
     WINLOOP = "winloop"
     RLOOP = "rloop"
+    ZUVLOOP = "zuvloop"
     ASYNCIO = "asyncio"
 
 
@@ -62,6 +63,7 @@ class LoopBackendSpec(msgspec.Struct, frozen=True, gc=False):
 _LOOP_BACKEND_SPECS: tuple[LoopBackendSpec, ...] = (
     LoopBackendSpec(backend=LoopBackend.WINLOOP, module_name="winloop", platforms="win32"),
     LoopBackendSpec(backend=LoopBackend.UVLOOP, module_name="uvloop", platforms="posix"),
+    LoopBackendSpec(backend=LoopBackend.ZUVLOOP, module_name="zuvloop", platforms="all"),
     LoopBackendSpec(backend=LoopBackend.RLOOP, module_name="rloop", platforms="posix"),
 )
 _LOOP_SPEC_BY_BACKEND: dict[LoopBackend, LoopBackendSpec] = {spec.backend: spec for spec in _LOOP_BACKEND_SPECS}

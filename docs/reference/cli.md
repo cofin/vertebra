@@ -50,7 +50,7 @@ vtb run [OPTIONS] [APP]
 | `--shutdown-timeout` | `integer` | `30000` | Shutdown timeout in milliseconds |
 | `--asgi` | `flag` | `False` | Run in ASGI mode (disable native pipeline) |
 | `--interface` | `choice(auto | asgi | rsgi | wsgi)` | `"auto"` | Gateway protocol interface (auto, asgi, rsgi, or wsgi) |
-| `--loop` | `choice(auto | uvloop | winloop | rloop | asyncio)` | `"auto"` | Event loop backend (auto, uvloop, winloop, rloop, or asyncio) |
+| `--loop` | `choice(auto | uvloop | winloop | rloop | zuvloop | asyncio)` | `"auto"` | Event loop backend (auto, uvloop, winloop, rloop, zuvloop, or asyncio) |
 | `--tls-cert` | `path` | - | Path to PEM certificate for HTTPS |
 | `--tls-key` | `path` | - | Path to PEM private key for HTTPS |
 | `--worker-only` | `flag` | `False` | Run background worker lanes with health probes only |
@@ -84,7 +84,7 @@ vtb dev [OPTIONS] [APP]
 | `--no-reload` | `flag` | `False` | Disable file watching and auto-reload |
 | `--asgi` | `flag` | `False` | Use standard ASGI instead of native C ABI offload |
 | `--interface` | `choice(auto | asgi | rsgi | wsgi)` | `"auto"` | Gateway protocol interface (auto, asgi, rsgi, or wsgi) |
-| `--loop` | `choice(auto | uvloop | winloop | rloop | asyncio)` | `"auto"` | Event loop backend (auto, uvloop, winloop, rloop, or asyncio) |
+| `--loop` | `choice(auto | uvloop | winloop | rloop | zuvloop | asyncio)` | `"auto"` | Event loop backend (auto, uvloop, winloop, rloop, zuvloop, or asyncio) |
 | `--no-banner` | `flag` | `False` | Suppress startup banner |
 | `--no-tui` | `flag` | `False` | Disable interactive TUI dashboard |
 | `--verbose` | `flag` | `False` | Enable verbose tracebacks with local variables |

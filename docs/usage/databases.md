@@ -117,10 +117,10 @@ plugin = create_sqlspec_plugin(db_config)
 @get("/orders/{order_id:int}")
 async def get_order(
     order_id: int,
-    db: PostgreSQLAsyncDriver,
+    db_session: PostgreSQLAsyncDriver,
 ) -> dict:
     """Fetch order record using injected SQLSpec driver session."""
-    rows = await db.select(
+    rows = await db_session.select(
         "SELECT id, customer_id, total_cents FROM orders WHERE id = :id",
         {"id": order_id},
     )
@@ -151,7 +151,7 @@ app = Litestar(
 | **Valkey** | — | `ValkeyConfig` | `SyncValkeyDriver`, `AsyncValkeyDriver` | Valkey 8.0+/9.0+ RESP3 client-side caching, Cluster/Sentinel, GCP Memorystore IAM auth |
 | **DataFusion** | — | `DataFusionConfig` | `DataFusionEngine` | Federated SQL across PostgreSQL, MySQL, SQLite, DuckDB, BigQuery, Cloud Spanner, and Parquet/CSV object storage |
 
-`memory://` is not an engine URL. `MySQLConfig` raises `ImproperConfigurationError` immediately during config construction; PostgreSQL, Redis, and Valkey configs construct from it, while their drivers raise `ImproperConfigurationError` on initialization, and so do the `from_valkey` / `from_redis` factories of `KeyValueStore`, the Litestar `MemoryStore`, the Starlette `CacheStore`, and `SQLAlchemyCacheBackend`. `DatabaseRegistry.parse_url("memory://")` raises `ValueError`. `QueueConfig(backend_url="memory://")`, `SyncObjectStore("memory://")`, and `SQLAlchemyCacheBackend.from_url("memory://")` keep their in-process backends.
+`memory://` is not an engine URL. `MySQLConfig` and `PostgreSQLConfig.from_url("memory://")` raise `ImproperConfigurationError` immediately during config construction; `PostgreSQLConfig(dsn="memory://")`, `RedisConfig`, and `ValkeyConfig` construct from it, while their drivers raise `ImproperConfigurationError` on initialization, and so do the `from_valkey` / `from_redis` factories of `KeyValueStore`, the Litestar `MemoryStore`, the Starlette `CacheStore`, and `SQLAlchemyCacheBackend`. `DatabaseRegistry.parse_url("memory://")` raises `ValueError`. `QueueConfig(backend_url="memory://")`, `SyncObjectStore("memory://")`, and `SQLAlchemyCacheBackend.from_url("memory://")` keep their in-process backends.
 
 ### Google Cloud Spanner and BigQuery
 
@@ -273,7 +273,7 @@ async with AsyncOraclePool(
     max_size=16,
 ) as pool:
     async with (
-        pool.acquire() as driver,
+        pool.lease() as driver,
         AsyncTenantConnectionScope(
             driver,
             "tenant-acme",
@@ -359,4 +359,4 @@ SQLSpec `execute_stack` uses the capability when the stack contains multiple `ex
 | --- | --- |
 | **[Cloud SQL & AlloyDB Dialers](cloud-dialers.md)** | Connect directly to Cloud SQL (`:3307`) and AlloyDB (`:5433`) with ephemeral mTLS and IAM auth without sidecars. |
 | **[RLS, CDC & Arrow Analytics](analytics-and-cdc.md)** | Enforce `TenantPredicate` Row-Level Security, stream `ChangeFeed` events, and query zero-copy `ArrowCursor` tables. |
-| **[SQLSpec, SQLAlchemy & Extensions](extensions.md)** | Configure `SQLSpecPlugin`, Advanced Alchemy, SQLAlchemy 2.1 `+vtb` dialects, `Vector`, and `BinaryJSON` column types. |
+| **[SQLSpec, SQLAlchemy & Extensions](extensions.md)** | Configure `SQLSpecPlugin`, Advanced Alchemy, SQLAlchemy 2.0+ `+vtb` dialects, `Vector`, and `BinaryJSON` column types. |

@@ -14,7 +14,7 @@ Complete reference documentation for Vertebra's Python packages (`vertebra.*`), 
 
 | Module / Page | Summary |
 | --- | --- |
-| **[Server & Workers](server.md)** | Worker execution loop (`Worker`, `run_worker`), worker lanes (`LaneConfig`, `WorkerRunner`), `EventLoopPool`, ASGI/RSGI/WSGI adapters, free-threaded GIL audit (`GilAuditReport`), and cgroup platform utilities (`CgroupQuota`, `ShmAllocationPolicy`). |
+| **[Server & Workers](server.md)** | Worker execution loop (`Worker`, `run_worker`), worker lanes (`LaneConfig`, `WorkerRunner`), `EventLoopPool`, ASGI/RSGI/WSGI adapters, free-threaded GIL audit (`GilAuditReport`), and cgroup platform utilities (`CgroupQuota`, `SHMAllocationPolicy`). |
 | **[Telemetry & Logging](telemetry.md)** | OpenTelemetry spans (`TraceContext`, `SpanExporter`), GenAI token/cost metrics (`GenAiRecorder`), DB pool metrics (`DbPoolRecorder`), SQL trace propagation (`SqlTracePropagator`), and structured logging (`LoggingConfig`). |
 | **[Build, Wasm & Supervisor](build-and-wasm.md)** | Build orchestration (`BuildConfig`, `BuildOrchestrator`), TypeScript/Zod/Valibot/OpenAPI/Protobuf codegen, standalone/onefile packaging, Wasm sandboxes (`WASMPluginHost`), and process supervision. |
 | **[CLI Reference](cli.md)** | Generated reference for all `vtb` CLI commands (`run`, `dev`, `init`, `build`, `js`, `ai`, `workers`), arguments, and options. |

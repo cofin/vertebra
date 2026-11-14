@@ -64,5 +64,10 @@ policy = WASMSandboxPolicy(
     epoch_timeout_ms=250,
     allow_network=False,
 )
+module = WASMModuleConfig(
+    name="transform",
+    wasm_source="plugins/transform.wasm",
+    policy=policy,
+)
 host = WASMPluginHost()
 ```

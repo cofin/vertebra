@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
+from typing import Any
 
 import click
 import msgspec
@@ -11,7 +12,9 @@ import pytest
 from advanced_alchemy.extensions.litestar import SQLAlchemyPlugin
 from advanced_alchemy.types.file_object import FileObject
 from advanced_alchemy.types.file_object.registry import storages
+from litestar import Litestar, get
 from litestar.config.app import AppConfig
+from litestar.testing import TestClient
 
 import vertebra
 import vertebra.extensions.alchemy as alchemy_ext
@@ -55,8 +58,11 @@ from vertebra.extensions.litestar import (
 )
 from vertebra.extensions.sqlalchemy.dialects import ALL_DIALECT_SCHEMES, DIALECT_DESCRIPTORS
 from vertebra.extensions.sqlspec import (
+    PostgreSQLAsyncConfig,
     ProxyAsyncConfig,
     ProxySyncConfig,
+    SQLiteSyncConfig,
+    SQLiteSyncDriver,
     SQLSpecPlugin,
     create_sqlspec_plugin,
 )
@@ -179,6 +185,28 @@ def test_sqlspec_generic_configs_and_pool_defaults() -> None:
     assert "sqlspec" in app_config.state
     assert "db_session" in app_config.dependencies
     assert "db_connection" in app_config.dependencies
+
+
+def test_sqlspec_native_adapter_configs_wire_litestar_di() -> None:
+    """Verify native SQLSpec adapter configs expose connection_type and execute via Litestar DI."""
+    sqlite_cfg = SQLiteSyncConfig(path=":memory:", share_pool=False)
+
+    @get("/health-db", sync_to_thread=False)
+    def check_sqlite(db_session: SQLiteSyncDriver) -> dict[str, Any]:
+        return {"rows": db_session.select("SELECT 1 AS ok")}
+
+    app = Litestar(route_handlers=[check_sqlite], plugins=[create_sqlspec_plugin(sqlite_cfg)])
+    with TestClient(app) as client:
+        response = client.get("/health-db")
+        assert response.status_code == 200
+        assert response.json() == {"rows": [{"ok": 1}]}
+
+    pg_cfg = PostgreSQLAsyncConfig(dsn="postgresql://user@localhost:5432/app", share_pool=False)
+    pg_plugin = create_sqlspec_plugin(pg_cfg)
+    pg_app_config = AppConfig()
+    pg_plugin.on_app_init(pg_app_config)
+    assert "db_session" in pg_app_config.dependencies
+    assert "db_connection" in pg_app_config.dependencies
 
 
 def test_alchemy_generic_configs_and_attachment_storage() -> None:

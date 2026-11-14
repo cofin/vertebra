@@ -25,7 +25,7 @@ Practical guides for building, scaling, testing, and deploying applications with
 | **[Overview & Drivers](databases.md)** | First-class SQLSpec & Litestar integration (`create_sqlspec_plugin`) and the 11 database, analytical, cloud, and cache adapters. |
 | **[Cloud Dialers (Cloud SQL & AlloyDB)](cloud-dialers.md)** | Zero-sidecar Cloud SQL (`:3307`) and AlloyDB (`:5433`) ephemeral mTLS certificate dialers and IAM database authentication. |
 | **[RLS, CDC & Arrow Analytics](analytics-and-cdc.md)** | Multi-tenant Row-Level Security (`TenantPredicate`), logical replication CDC (`ChangeFeed`), zero-copy `ArrowCursor`, DuckDB `httpfs` ADC rotation, and `DataFusionEngine`. |
-| **[SQLSpec, SQLAlchemy & Extensions](extensions.md)** | `VertebraPlugin`, `create_sqlspec_plugin`, `create_alchemy_plugin`, SQLAlchemy 2.1 `+vtb` dialects, `Vector` & `BinaryJSON` column types, `GrpcServiceRegistry`, `ApexGateway`, and `BrokerPlugin`. |
+| **[SQLSpec, SQLAlchemy & Extensions](extensions.md)** | `VertebraPlugin`, `create_sqlspec_plugin`, `create_alchemy_plugin`, SQLAlchemy 2.0+ `+vtb` dialects, `Vector` & `BinaryJSON` column types, `GrpcServiceRegistry`, `ApexGateway`, and `BrokerPlugin`. |
 
 ## Object Storage
 

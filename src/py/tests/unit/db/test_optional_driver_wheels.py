@@ -57,7 +57,7 @@ def test_root_pyproject_omits_pypi_duckdb_from_core_and_non_duckdb_groups() -> N
     pinned = f"vertebra-duckdb=={version}"
     opt_deps = data["project"]["optional-dependencies"]
     assert opt_deps["duckdb"] == [pinned]
-    assert pinned in opt_deps["all"]
+    assert "all" not in opt_deps
 
     uv_sources = data["tool"]["uv"]["sources"]
     assert uv_sources["vertebra-duckdb"] == {"path": "src/rs/vertebra-duckdb", "editable": True}
@@ -176,7 +176,7 @@ def test_root_pyproject_declares_optional_driver_extra(extra_name: str) -> None:
     pkg_name = f"vertebra-{extra_name}"
     optional_deps = root_toml["project"]["optional-dependencies"]
     assert any(dep.startswith(pkg_name) for dep in optional_deps[extra_name])
-    assert any(dep.startswith(pkg_name) for dep in optional_deps["all"])
+    assert "all" not in optional_deps
     uv_sources = root_toml["tool"]["uv"]["sources"]
     assert uv_sources[pkg_name] == {"path": f"src/rs/{pkg_name}", "editable": True}
 

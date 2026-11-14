@@ -605,18 +605,6 @@ wheels = [
 ]
 
 [[package]]
-name = "croniter"
-version = "6.2.4"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "python-dateutil" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/37/57/2e2a65aee2a70483cb28e2b7e15a072d00a523207593b44400d4717bb100/croniter-6.2.4.tar.gz", hash = "sha256:fc124f751b1b04805c2a04b061898b436b45ab2320b045e1e052ea895de65189", size = 166267, upload-time = "2026-07-10T09:52:59.955Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/cd/ba/d678e5bd329646ca51d3c92addbc77804e86d21f4b6b6a027218e6abb010/croniter-6.2.4-py3-none-any.whl", hash = "sha256:8ef3d544107a5c05a150a2d78f8bf5a8eb9c5c4d93405a736b824109574e3f4d", size = 46677, upload-time = "2026-07-10T09:52:58.425Z" },
-]
-
-[[package]]
 name = "cryptography"
 version = "50.0.2"
 source = { registry = "https://pypi.org/simple" }
@@ -1454,19 +1442,6 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/78/ac/263d73d6126b733358a857394dfb2d0fccbcd31a706f33f72825a5d8da31/litestar_queues-0.14.0.tar.gz", hash = "sha256:f3e3d353e445b6dcf23cbe95166591b2015b12889aa1aa9d9921f758525344d1", size = 1260670, upload-time = "2026-11-03T22:59:33.726Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/51/93/d944f1348c07c871583a9228114ea6517afd7c93c8a831d186e1e6b51538/litestar_queues-0.14.0-py3-none-any.whl", hash = "sha256:334358bc008d28b5f4f05515cccdd71239b6dcf55037dd4dc34e361b8d5aa468", size = 418017, upload-time = "2026-11-03T22:59:32.036Z" },
-]
-
-[[package]]
-name = "litestar-saq"
-version = "0.8.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "litestar" },
-    { name = "saq" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/be/80/054b7b73f384c0a5ea555130e0f18233e98d3341a7b8fadcf42f1968b75f/litestar_saq-0.8.0.tar.gz", hash = "sha256:4d6b6bd6e8c76a6dbf8537f51f71180a78ff7ba4a09294fbb62965653bb04a31", size = 286634, upload-time = "2026-06-03T21:07:52.184Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/4a/e7/205c29fa6c60fb6d841f8cb3880147963a4f26efa6f3f4815edb189082f8/litestar_saq-0.8.0-py3-none-any.whl", hash = "sha256:0a47fd054aef997c9870f821638af4dfb2804bfb4652549c96689d81d8f99a92", size = 39793, upload-time = "2026-06-03T21:07:50.989Z" },
 ]
 
 [[package]]
@@ -3119,18 +3094,6 @@ wheels = [
 ]
 
 [[package]]
-name = "saq"
-version = "0.26.5"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "croniter" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/2b/c1/22381822245402fbff14a990e76a6a8373312e26bf0fdaaba81db27f45c6/saq-0.26.5.tar.gz", hash = "sha256:75e8664ca1351f46a400d28d0441612be4feb6c51ab206cdfad9dc06fcb42acc", size = 79129, upload-time = "2026-10-29T03:38:20.069Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/34/48/e43331d49a341b977d5574783f0e6d54dbcef0a62593c8d7c9948ce1b6c0/saq-0.26.5-py3-none-any.whl", hash = "sha256:7305d3fadedd7aaceebe36b9d298377f322385e38187b8869ba49b73e4e07693", size = 64696, upload-time = "2026-10-29T03:38:18.898Z" },
-]
-
-[[package]]
 name = "sniffio"
 version = "1.3.1"
 source = { registry = "https://pypi.org/simple" }
@@ -3544,8 +3507,6 @@ dependencies = [
     { name = "msgspec" },
     { name = "rich" },
     { name = "rich-click" },
-    { name = "uvloop", marker = "sys_platform != 'win32'" },
-    { name = "winloop", marker = "sys_platform == 'win32'" },
 ]
 
 [package.optional-dependencies]
@@ -3553,42 +3514,6 @@ alchemy = [
     { name = "advanced-alchemy" },
     { name = "alembic" },
     { name = "sqlalchemy" },
-]
-all = [
-    { name = "advanced-alchemy" },
-    { name = "alembic" },
-    { name = "attrs" },
-    { name = "django" },
-    { name = "fastapi" },
-    { name = "fastembed" },
-    { name = "flask" },
-    { name = "litestar" },
-    { name = "litestar-asyncapi" },
-    { name = "litestar-autowire" },
-    { name = "litestar-email" },
-    { name = "litestar-htmx" },
-    { name = "litestar-mcp" },
-    { name = "litestar-queues" },
-    { name = "litestar-saq" },
-    { name = "litestar-security" },
-    { name = "litestar-vite" },
-    { name = "polars" },
-    { name = "pyarrow" },
-    { name = "pydantic" },
-    { name = "pyjwt", extra = ["crypto"] },
-    { name = "rloop", marker = "sys_platform != 'win32'" },
-    { name = "sqlalchemy" },
-    { name = "sqlspec" },
-    { name = "starlette" },
-    { name = "vertebra-bigquery" },
-    { name = "vertebra-bundler" },
-    { name = "vertebra-duckdb" },
-    { name = "vertebra-mssql" },
-    { name = "vertebra-mysql" },
-    { name = "vertebra-oracle" },
-    { name = "vertebra-postgres" },
-    { name = "vertebra-spanner" },
-    { name = "vertebra-storage" },
 ]
 arrow = [
     { name = "pyarrow" },
@@ -3663,9 +3588,6 @@ queues = [
 rloop = [
     { name = "rloop", marker = "sys_platform != 'win32'" },
 ]
-saq = [
-    { name = "litestar-saq" },
-]
 security = [
     { name = "litestar-security" },
 ]
@@ -3681,8 +3603,17 @@ starlette = [
 storage = [
     { name = "vertebra-storage" },
 ]
+uvloop = [
+    { name = "uvloop", marker = "sys_platform != 'win32'" },
+]
 vite = [
     { name = "litestar-vite" },
+]
+winloop = [
+    { name = "winloop", marker = "sys_platform == 'win32'" },
+]
+zuvloop = [
+    { name = "zuvloop", marker = "python_full_version >= '3.14'" },
 ]
 
 [package.dev-dependencies]
@@ -3715,7 +3646,6 @@ dev = [
     { name = "litestar-htmx" },
     { name = "litestar-mcp" },
     { name = "litestar-queues" },
-    { name = "litestar-saq" },
     { name = "litestar-security" },
     { name = "litestar-vite" },
     { name = "maturin" },
@@ -3730,6 +3660,8 @@ dev = [
     { name = "sqlalchemy" },
     { name = "sqlspec" },
     { name = "starlette" },
+    { name = "uvloop", marker = "sys_platform != 'win32'" },
+    { name = "winloop", marker = "sys_platform == 'win32'" },
 ]
 doc = [
     { name = "anyio" },
@@ -3768,7 +3700,6 @@ test = [
     { name = "litestar-htmx" },
     { name = "litestar-mcp" },
     { name = "litestar-queues" },
-    { name = "litestar-saq" },
     { name = "litestar-security" },
     { name = "litestar-vite" },
     { name = "pyarrow" },
@@ -3780,87 +3711,55 @@ test = [
     { name = "sqlalchemy" },
     { name = "sqlspec" },
     { name = "starlette" },
+    { name = "uvloop", marker = "sys_platform != 'win32'" },
+    { name = "winloop", marker = "sys_platform == 'win32'" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "advanced-alchemy", marker = "extra == 'alchemy'", specifier = ">=1.12.0" },
-    { name = "advanced-alchemy", marker = "extra == 'all'", specifier = ">=1.12.0" },
     { name = "alembic", marker = "extra == 'alchemy'", specifier = ">=1.14.0" },
-    { name = "alembic", marker = "extra == 'all'", specifier = ">=1.14.0" },
     { name = "anyio", specifier = ">=4.0" },
-    { name = "attrs", marker = "extra == 'all'", specifier = ">=24.0.0" },
     { name = "attrs", marker = "extra == 'attrs'", specifier = ">=24.0.0" },
-    { name = "django", marker = "extra == 'all'", specifier = ">=5.1.0" },
     { name = "django", marker = "extra == 'django'", specifier = ">=5.1.0" },
-    { name = "fastapi", marker = "extra == 'all'", specifier = ">=0.115.0" },
     { name = "fastapi", marker = "extra == 'fastapi'", specifier = ">=0.115.0" },
-    { name = "fastembed", marker = "extra == 'all'", specifier = ">=0.6.0" },
     { name = "fastembed", marker = "extra == 'embeddings'", specifier = ">=0.6.0" },
-    { name = "flask", marker = "extra == 'all'", specifier = ">=3.0.0" },
     { name = "flask", marker = "extra == 'flask'", specifier = ">=3.0.0" },
-    { name = "litestar", marker = "extra == 'all'", specifier = ">=2.15.0" },
     { name = "litestar", marker = "extra == 'litestar'", specifier = ">=2.15.0" },
-    { name = "litestar-asyncapi", marker = "extra == 'all'", specifier = ">=0.2.0" },
     { name = "litestar-asyncapi", marker = "extra == 'asyncapi'", specifier = ">=0.2.0" },
-    { name = "litestar-autowire", marker = "extra == 'all'", specifier = ">=0.2.0" },
     { name = "litestar-autowire", marker = "extra == 'autowire'", specifier = ">=0.2.0" },
-    { name = "litestar-email", marker = "extra == 'all'", specifier = ">=0.4.0" },
     { name = "litestar-email", marker = "extra == 'email'", specifier = ">=0.4.0" },
-    { name = "litestar-htmx", marker = "extra == 'all'", specifier = ">=0.5.0" },
     { name = "litestar-htmx", marker = "extra == 'htmx'", specifier = ">=0.5.0" },
-    { name = "litestar-mcp", marker = "extra == 'all'", specifier = ">=0.20.0" },
     { name = "litestar-mcp", marker = "extra == 'mcp'", specifier = ">=0.20.0" },
-    { name = "litestar-queues", marker = "extra == 'all'", specifier = ">=0.12.0" },
     { name = "litestar-queues", marker = "extra == 'queues'", specifier = ">=0.12.0" },
-    { name = "litestar-saq", marker = "extra == 'all'", specifier = ">=0.8.0" },
-    { name = "litestar-saq", marker = "extra == 'saq'", specifier = ">=0.8.0" },
-    { name = "litestar-security", marker = "extra == 'all'", specifier = ">=0.6.0" },
     { name = "litestar-security", marker = "extra == 'security'", specifier = ">=0.6.0" },
-    { name = "litestar-vite", marker = "extra == 'all'", specifier = ">=0.32.0" },
     { name = "litestar-vite", marker = "extra == 'vite'", specifier = ">=0.32.0" },
     { name = "msgspec", specifier = ">=0.18" },
-    { name = "polars", marker = "extra == 'all'", specifier = ">=1.0.0" },
     { name = "polars", marker = "extra == 'polars'", specifier = ">=1.0.0" },
-    { name = "pyarrow", marker = "extra == 'all'", specifier = ">=18.0.0" },
     { name = "pyarrow", marker = "extra == 'arrow'", specifier = ">=18.0.0" },
-    { name = "pydantic", marker = "extra == 'all'", specifier = ">=2.9.0" },
     { name = "pydantic", marker = "extra == 'fastapi'", specifier = ">=2.9.0" },
     { name = "pydantic", marker = "extra == 'pydantic'", specifier = ">=2.9.0" },
-    { name = "pyjwt", extras = ["crypto"], marker = "extra == 'all'", specifier = ">=2.9.0" },
     { name = "pyjwt", extras = ["crypto"], marker = "extra == 'iap'", specifier = ">=2.9.0" },
     { name = "rich", specifier = ">=13.0" },
     { name = "rich-click", specifier = ">=1.7" },
-    { name = "rloop", marker = "sys_platform != 'win32' and extra == 'all'", specifier = ">=0.5.0" },
     { name = "rloop", marker = "sys_platform != 'win32' and extra == 'rloop'", specifier = ">=0.5.0" },
     { name = "sqlalchemy", marker = "extra == 'alchemy'", specifier = ">=2.0.36" },
-    { name = "sqlalchemy", marker = "extra == 'all'", specifier = ">=2.0.36" },
-    { name = "sqlspec", marker = "extra == 'all'", specifier = ">=0.69.0" },
     { name = "sqlspec", marker = "extra == 'sqlspec'", specifier = ">=0.69.0" },
-    { name = "starlette", marker = "extra == 'all'", specifier = ">=0.40.0" },
     { name = "starlette", marker = "extra == 'starlette'", specifier = ">=0.40.0" },
-    { name = "uvloop", marker = "sys_platform != 'win32'", specifier = ">=0.23.0" },
-    { name = "vertebra-bigquery", marker = "extra == 'all'", editable = "src/rs/vertebra-bigquery" },
+    { name = "uvloop", marker = "sys_platform != 'win32' and extra == 'uvloop'", specifier = ">=0.23.0" },
     { name = "vertebra-bigquery", marker = "extra == 'bigquery'", editable = "src/rs/vertebra-bigquery" },
-    { name = "vertebra-bundler", marker = "extra == 'all'", editable = "src/rs/vertebra-bundler" },
     { name = "vertebra-bundler", marker = "extra == 'bundler'", editable = "src/rs/vertebra-bundler" },
-    { name = "vertebra-duckdb", marker = "extra == 'all'", editable = "src/rs/vertebra-duckdb" },
     { name = "vertebra-duckdb", marker = "extra == 'duckdb'", editable = "src/rs/vertebra-duckdb" },
-    { name = "vertebra-mssql", marker = "extra == 'all'", editable = "src/rs/vertebra-mssql" },
     { name = "vertebra-mssql", marker = "extra == 'mssql'", editable = "src/rs/vertebra-mssql" },
-    { name = "vertebra-mysql", marker = "extra == 'all'", editable = "src/rs/vertebra-mysql" },
     { name = "vertebra-mysql", marker = "extra == 'mysql'", editable = "src/rs/vertebra-mysql" },
-    { name = "vertebra-oracle", marker = "extra == 'all'", editable = "src/rs/vertebra-oracle" },
     { name = "vertebra-oracle", marker = "extra == 'oracle'", editable = "src/rs/vertebra-oracle" },
-    { name = "vertebra-postgres", marker = "extra == 'all'", editable = "src/rs/vertebra-postgres" },
     { name = "vertebra-postgres", marker = "extra == 'postgres'", editable = "src/rs/vertebra-postgres" },
-    { name = "vertebra-spanner", marker = "extra == 'all'", editable = "src/rs/vertebra-spanner" },
     { name = "vertebra-spanner", marker = "extra == 'spanner'", editable = "src/rs/vertebra-spanner" },
-    { name = "vertebra-storage", marker = "extra == 'all'", editable = "src/rs/vertebra-storage" },
     { name = "vertebra-storage", marker = "extra == 'storage'", editable = "src/rs/vertebra-storage" },
-    { name = "winloop", marker = "sys_platform == 'win32'", specifier = ">=0.8.1" },
+    { name = "winloop", marker = "sys_platform == 'win32' and extra == 'winloop'", specifier = ">=0.8.1" },
+    { name = "zuvloop", marker = "python_full_version >= '3.14' and extra == 'zuvloop'", specifier = ">=0.0.17" },
 ]
-provides-extras = ["sqlspec", "alchemy", "arrow", "pydantic", "attrs", "polars", "litestar", "starlette", "fastapi", "flask", "django", "queues", "security", "autowire", "email", "mcp", "vite", "asyncapi", "htmx", "saq", "embeddings", "iap", "bigquery", "bundler", "duckdb", "mssql", "mysql", "oracle", "postgres", "spanner", "storage", "rloop", "all"]
+provides-extras = ["sqlspec", "alchemy", "arrow", "pydantic", "attrs", "polars", "litestar", "starlette", "fastapi", "flask", "django", "queues", "security", "autowire", "email", "mcp", "vite", "asyncapi", "htmx", "embeddings", "iap", "bigquery", "bundler", "duckdb", "mssql", "mysql", "oracle", "postgres", "spanner", "storage", "uvloop", "winloop", "rloop", "zuvloop"]
 
 [package.metadata.requires-dev]
 bench = [
@@ -3892,7 +3791,6 @@ dev = [
     { name = "litestar-htmx", specifier = ">=0.5.0" },
     { name = "litestar-mcp", specifier = ">=0.20.0" },
     { name = "litestar-queues", specifier = ">=0.12.0" },
-    { name = "litestar-saq", specifier = ">=0.8.0" },
     { name = "litestar-security", specifier = ">=0.6.0" },
     { name = "litestar-vite", specifier = ">=0.32.0" },
     { name = "maturin", specifier = ">=1.5,<2" },
@@ -3907,6 +3805,8 @@ dev = [
     { name = "sqlalchemy", specifier = ">=2.0.36" },
     { name = "sqlspec", specifier = ">=0.69.0" },
     { name = "starlette", specifier = ">=0.40.0" },
+    { name = "uvloop", marker = "sys_platform != 'win32'", specifier = ">=0.23.0" },
+    { name = "winloop", marker = "sys_platform == 'win32'", specifier = ">=0.8.1" },
 ]
 doc = [
     { name = "anyio", specifier = ">=4.0" },
@@ -3943,7 +3843,6 @@ test = [
     { name = "litestar-htmx", specifier = ">=0.5.0" },
     { name = "litestar-mcp", specifier = ">=0.20.0" },
     { name = "litestar-queues", specifier = ">=0.12.0" },
-    { name = "litestar-saq", specifier = ">=0.8.0" },
     { name = "litestar-security", specifier = ">=0.6.0" },
     { name = "litestar-vite", specifier = ">=0.32.0" },
     { name = "pyarrow", specifier = ">=18.0.0" },
@@ -3955,6 +3854,8 @@ test = [
     { name = "sqlalchemy", specifier = ">=2.0.36" },
     { name = "sqlspec", specifier = ">=0.69.0" },
     { name = "starlette", specifier = ">=0.40.0" },
+    { name = "uvloop", marker = "sys_platform != 'win32'", specifier = ">=0.23.0" },
+    { name = "winloop", marker = "sys_platform == 'win32'", specifier = ">=0.8.1" },
 ]
 
 [[package]]
@@ -4335,4 +4236,48 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/7e/a7/77f1d045900f37f703bef9f64af8c8ca3e9419ca6dbfbc7885e33ca8f2a1/zensical_ui-0.0.41.tar.gz", hash = "sha256:2268e3533a2e186eb7b67dcc8ccdbfc5994fe114cda9382a505f306256df3d88", size = 4063232, upload-time = "2026-10-30T19:06:00.915Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/ce/84/bb9f8022f2a4fc57c53e135d24318c880205038da644432d443598e752d1/zensical_ui-0.0.41-py3-none-any.whl", hash = "sha256:f0cd5b4351c130257df65b2100fc7116e72c777b1fbc596fee64a9f5de4ccdad", size = 9961148, upload-time = "2026-10-30T19:05:58.612Z" },
+]
+
+[[package]]
+name = "zuvloop"
+version = "0.0.17"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "opentelemetry-api" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/80/14/0c3bf1be773bffbd68876e38def6bf2cc4d1882060950a468653dcebb021/zuvloop-0.0.17.tar.gz", hash = "sha256:7f1a098de36ad257c939ba3ca1803a61ad4360cd07760dec7d2aedce5d979452", size = 1454154, upload-time = "2026-09-15T15:44:30.381Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/99/a6/353e0772a49360ff3a763933c6ee6f9582319694942c226a9e3f82c355dc/zuvloop-0.0.17-cp314-cp314-macosx_10_15_x86_64.whl", hash = "sha256:8ef6c5cbde35940bccee0ca566400e59a4e1c678f44dd78d66b99016b8b65a4a", size = 344488, upload-time = "2026-09-15T15:43:44.598Z" },
+    { url = "https://files.pythonhosted.org/packages/39/f5/e178fee6758d46e995342c5ebb5387046cf63ec23d0dad68662939338a20/zuvloop-0.0.17-cp314-cp314-macosx_11_0_arm64.whl", hash = "sha256:28d5d39763e536950c04ad26ffb1d60957d20c5ef916203bb15293d8bdd7ab4b", size = 342929, upload-time = "2026-09-15T15:43:46.029Z" },
+    { url = "https://files.pythonhosted.org/packages/8a/21/187cb3f4b04b3a3f580ffee498a77cf2ff1bf7dbab6cbf978ad8924f9dfe/zuvloop-0.0.17-cp314-cp314-manylinux_2_28_aarch64.whl", hash = "sha256:98a39087e145f8c68bacd417ddd6b1ce9bf2d763ef56867aa08ddbee5f673310", size = 1555167, upload-time = "2026-09-15T15:43:47.334Z" },
+    { url = "https://files.pythonhosted.org/packages/b5/e6/853ce4b9d5c935889a97bc33f98bf5dfc6b8e04b8c0f8dde1e4b57741e3f/zuvloop-0.0.17-cp314-cp314-manylinux_2_28_x86_64.whl", hash = "sha256:c23e81fcbdb1d93a81da76e5747b75748edeafd5c95da9afaf165c73f1525231", size = 1588331, upload-time = "2026-09-15T15:43:48.813Z" },
+    { url = "https://files.pythonhosted.org/packages/60/c0/877fa6b3cd1ca775e0260d94d56af283edc2ff5c06ebfa6ebff63ea183a3/zuvloop-0.0.17-cp314-cp314-musllinux_1_2_aarch64.whl", hash = "sha256:274fd02e3a915224e4489718f4d783df2b6080a45f43596b486e8aad71152a1e", size = 1531655, upload-time = "2026-09-15T15:43:50.412Z" },
+    { url = "https://files.pythonhosted.org/packages/f4/57/60f419e00b3a8b1a7fd65f5943a2900c3980332d58494c5c0650439e2ada/zuvloop-0.0.17-cp314-cp314-musllinux_1_2_x86_64.whl", hash = "sha256:d88fcf91a30ec443f5d5a0561d91f80ecf337c3ab63ba587655ce2df328f8462", size = 1563108, upload-time = "2026-09-15T15:43:51.937Z" },
+    { url = "https://files.pythonhosted.org/packages/72/da/729614358f0759ff576e11accf3cd8c4396672e44096d853ff4175de65f4/zuvloop-0.0.17-cp314-cp314-win_amd64.whl", hash = "sha256:5359f99edc564f911e0071b2197fc8efb4fbac3b6a8f700d5bbc65df60972627", size = 442722, upload-time = "2026-09-15T15:43:53.423Z" },
+    { url = "https://files.pythonhosted.org/packages/1f/17/f6649283cc006d631860191fb94c439a4e4caaae06712aec7f752f6bf95f/zuvloop-0.0.17-cp314-cp314-win_arm64.whl", hash = "sha256:bee2fbf1533c08a77eb1b34404b589fd59922bb9f956040d304827ec8f8774ed", size = 423827, upload-time = "2026-09-15T15:43:54.781Z" },
+    { url = "https://files.pythonhosted.org/packages/9f/b0/79a211a72e6f484dc5aa2f04d9ca52fd1a33f72a69c973132353dc381391/zuvloop-0.0.17-cp314-cp314t-macosx_10_15_x86_64.whl", hash = "sha256:3dded18ccd7a8a1da9b6362dafd906db69b8a9e1b7fd067ddcbb25e2dd37878a", size = 339944, upload-time = "2026-09-15T15:43:56.067Z" },
+    { url = "https://files.pythonhosted.org/packages/e4/9c/106e2e96d7150d2b75439e2d29b765ca24a012f129c3b42cc831904ebdf0/zuvloop-0.0.17-cp314-cp314t-macosx_11_0_arm64.whl", hash = "sha256:149b7444fd3e32be12ff8389001c3872e444c7591c4225ca6feb4ef72d3c1c18", size = 337526, upload-time = "2026-09-15T15:43:57.543Z" },
+    { url = "https://files.pythonhosted.org/packages/8a/71/e640f4d2cf38a0be81bbdaf5444b59899375f623ba53ce9d359144e53eb3/zuvloop-0.0.17-cp314-cp314t-manylinux_2_28_aarch64.whl", hash = "sha256:6594d48bcd6881f4e91aa8914f8cc974e97cdbc9092f644d4d6cd57a8374aae5", size = 1525845, upload-time = "2026-09-15T15:43:58.969Z" },
+    { url = "https://files.pythonhosted.org/packages/6f/db/94579747d53017e23582b123f4168f0fa5874edf74b5a10c9648da20dd78/zuvloop-0.0.17-cp314-cp314t-manylinux_2_28_x86_64.whl", hash = "sha256:1ae2827209ad18c9892b346d5bbbceeb29ff3d6d0a10ffaa54d8d06fe37489a3", size = 1562489, upload-time = "2026-09-15T15:44:00.712Z" },
+    { url = "https://files.pythonhosted.org/packages/1b/dc/fc5dd6388d343ed612fa1171fac46128c40c63acedd475d575e0825e3ba5/zuvloop-0.0.17-cp314-cp314t-musllinux_1_2_aarch64.whl", hash = "sha256:78738ea00cb58e954e3803b156dfb5d9563bac28bb683d36bcb3017774de63c6", size = 1503251, upload-time = "2026-09-15T15:44:02.152Z" },
+    { url = "https://files.pythonhosted.org/packages/d1/4a/b8a38cd6b9da02759f66f717aed7b3bf06a0cc564482a9414087790dd29c/zuvloop-0.0.17-cp314-cp314t-musllinux_1_2_x86_64.whl", hash = "sha256:ce44b18617dd2d877f8e78ecadc1766d2bdecbccb2760f0c35877d6256b633f0", size = 1537567, upload-time = "2026-09-15T15:44:03.491Z" },
+    { url = "https://files.pythonhosted.org/packages/df/38/65e7be13848b1404caad6a354780dacc158706abf6d36e94b38420ccca72/zuvloop-0.0.17-cp314-cp314t-win_amd64.whl", hash = "sha256:ba21d79efe4c1c5b2dd8b0a101de742e80feebf1df535174d0e990b1922afb8f", size = 440033, upload-time = "2026-09-15T15:44:05.051Z" },
+    { url = "https://files.pythonhosted.org/packages/6f/24/65916a589cb368beba10ef42cd650d2717ecd34df088929e0fb5c4cc4abf/zuvloop-0.0.17-cp314-cp314t-win_arm64.whl", hash = "sha256:23b48eaac2e295e3732e4870b478b0c6896b2548bb6a295d785825c0af0eca58", size = 420372, upload-time = "2026-09-15T15:44:06.292Z" },
+    { url = "https://files.pythonhosted.org/packages/c7/7f/e7ee3dce3bb346e988b0dd1d86f86f306b9258618a80d63a4e69e55926f3/zuvloop-0.0.17-cp315-cp315-macosx_10_15_x86_64.whl", hash = "sha256:506eacc31c98917acd17e48efb825a72c3d8b666724d78a6564a3cca5548a421", size = 344472, upload-time = "2026-09-15T15:44:07.495Z" },
+    { url = "https://files.pythonhosted.org/packages/f5/18/d7558d0649cac3544f53e83e6f980e58e283edcd87c9e2f828ab33eb4863/zuvloop-0.0.17-cp315-cp315-macosx_11_0_arm64.whl", hash = "sha256:2bb6948a4baaf0d3ec917a934370e256be602fa9c007214014a9b7bc7d166697", size = 343023, upload-time = "2026-09-15T15:44:08.909Z" },
+    { url = "https://files.pythonhosted.org/packages/b8/89/1180eaa593596ef71633ee7a4fcb765c77ee5b0fe560d0d6ca3411fbf693/zuvloop-0.0.17-cp315-cp315-manylinux_2_28_aarch64.whl", hash = "sha256:d5b65a975af87bd9e1dec6ea5b12c8440716f35271c27c97bd544cb4272c4e9e", size = 1555471, upload-time = "2026-09-15T15:44:10.455Z" },
+    { url = "https://files.pythonhosted.org/packages/83/6c/b6bd615234254142a360dcbe1de9a118f6886ba347bdbaa4e6086930e116/zuvloop-0.0.17-cp315-cp315-manylinux_2_28_x86_64.whl", hash = "sha256:bbd9dea80218acd77e6b2d9e2014bd1fdcba3fe43e7df99471632c70c942e002", size = 1588504, upload-time = "2026-09-15T15:44:11.909Z" },
+    { url = "https://files.pythonhosted.org/packages/87/1d/e6d5b6e0a8f51486171c3362dde7592f3d274daf6ca63b70ef3ffbfa196c/zuvloop-0.0.17-cp315-cp315-musllinux_1_2_aarch64.whl", hash = "sha256:9a86e74256a569df19eefd2fc34bff558757796c953cb0eda516557a02dab964", size = 1531890, upload-time = "2026-09-15T15:44:13.262Z" },
+    { url = "https://files.pythonhosted.org/packages/8c/7f/33cd0a98ae7a6c1ab7fd473b596364a4a1ecf727ab634997d0696292bb26/zuvloop-0.0.17-cp315-cp315-musllinux_1_2_x86_64.whl", hash = "sha256:df59a9e3d4c8db838e366777c870b15f2f9f2e992578608aa01c7145a3cb8224", size = 1563255, upload-time = "2026-09-15T15:44:14.81Z" },
+    { url = "https://files.pythonhosted.org/packages/df/be/918c10d0a58ee975455a5e2dd41dfcbad811bd5774cc5166b6f8e6f45cce/zuvloop-0.0.17-cp315-cp315-win_amd64.whl", hash = "sha256:b3c176e7efb7e8329d6de2803b6161984be72904408deac9abf06acab62c8f2a", size = 442743, upload-time = "2026-09-15T15:44:16.227Z" },
+    { url = "https://files.pythonhosted.org/packages/73/b8/9c712a916b8dbe30552617e9a5af5e4b8d51c3610b9b84ea51cb5a7699de/zuvloop-0.0.17-cp315-cp315-win_arm64.whl", hash = "sha256:0c80ac05f80dd64eef614456802eb0dc97198c1066064a9177b0d70af35e69f0", size = 423892, upload-time = "2026-09-15T15:44:17.53Z" },
+    { url = "https://files.pythonhosted.org/packages/f0/74/270f8c69e5077a2aa330a575cbd11dda4f7ce2493d9c57fda432d6f1d0ce/zuvloop-0.0.17-cp315-cp315t-macosx_10_15_x86_64.whl", hash = "sha256:137c99ddb6120bd19c265714d931f1d0ca2e019331623be38863d14362d268a1", size = 339952, upload-time = "2026-09-15T15:44:19.036Z" },
+    { url = "https://files.pythonhosted.org/packages/ae/2f/1273957fde2779ad8b6e5057ed4493f1364877eb9218c51118e5143f159c/zuvloop-0.0.17-cp315-cp315t-macosx_11_0_arm64.whl", hash = "sha256:32f74a05c73f09765139f8fa6e2fb588b538d270bef6cda7394bd05e8dfdd8ab", size = 337516, upload-time = "2026-09-15T15:44:20.423Z" },
+    { url = "https://files.pythonhosted.org/packages/e4/dc/8ce16954cd3872cd72e5c3e442df8d08c8ba2c09afecca3493442df9ce37/zuvloop-0.0.17-cp315-cp315t-manylinux_2_28_aarch64.whl", hash = "sha256:a1fdc6b98334e71eaecd2176b48f89b0bd1428bcf294d2b478a0c5eadba171ac", size = 1525955, upload-time = "2026-09-15T15:44:21.938Z" },
+    { url = "https://files.pythonhosted.org/packages/c2/1c/946ab2b0a4f8f2e23b275d3184fe212bf4530dbd459d939e2d6e9c984fee/zuvloop-0.0.17-cp315-cp315t-manylinux_2_28_x86_64.whl", hash = "sha256:c6fe1afcf83a1bba1d0962dc26afb4e18c905b7a2fda3159aa963c28295a2d3e", size = 1562511, upload-time = "2026-09-15T15:44:23.45Z" },
+    { url = "https://files.pythonhosted.org/packages/ef/e7/1b172171c706ec267b7e37cb55d4a531b377488d0678b66c95daa974a6f7/zuvloop-0.0.17-cp315-cp315t-musllinux_1_2_aarch64.whl", hash = "sha256:f53b315e2deba89ec23419b492c00109b8daabb413c86428292450e1805651d9", size = 1503449, upload-time = "2026-09-15T15:44:24.911Z" },
+    { url = "https://files.pythonhosted.org/packages/0f/37/59ade3f23c8a4394f0d56c0b426b769a7378e39c883a0c0a2b862c98f93e/zuvloop-0.0.17-cp315-cp315t-musllinux_1_2_x86_64.whl", hash = "sha256:d44fce96b84f9ff50b27bbee602dbddf589590c816dd8859a2b2bdbf82ac9e82", size = 1537480, upload-time = "2026-09-15T15:44:26.362Z" },
+    { url = "https://files.pythonhosted.org/packages/66/cf/17e9b354e33d0f05db02c956f006df24d69a5ec645701399272790a8d486/zuvloop-0.0.17-cp315-cp315t-win_amd64.whl", hash = "sha256:39e2f148814dbe67bd8b4f3095a305949d0ed3bd8ff1aa00ec897a8d05ad7187", size = 440032, upload-time = "2026-09-15T15:44:27.773Z" },
+    { url = "https://files.pythonhosted.org/packages/6c/f3/a979a18d2fc26f3ba9ec2354d345603882d7e993b1496c28652aa8d8e26f/zuvloop-0.0.17-cp315-cp315t-win_arm64.whl", hash = "sha256:a5abfbfd38add31380b0a6620300cd1f70a712f4ff885302d8a1110fa02f9c49", size = 420377, upload-time = "2026-09-15T15:44:29.045Z" },
 ]

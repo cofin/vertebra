@@ -350,7 +350,7 @@ def _build_litestar_run_command(plugin: VertebraPlugin) -> click.Command:
     @click.option("--jit/--no-jit", default=None, help="Enable or disable CPython experimental JIT")
     @click.option(
         "--loop",
-        type=click.Choice(["auto", "uvloop", "winloop", "rloop", "asyncio"], case_sensitive=False),
+        type=click.Choice(["auto", "uvloop", "winloop", "rloop", "zuvloop", "asyncio"], case_sensitive=False),
         default="auto",
         help="Event loop backend",
     )

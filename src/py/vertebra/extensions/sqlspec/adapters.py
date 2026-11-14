@@ -1397,10 +1397,17 @@ class DuckDBAsyncDriver(BaseAsyncDriver):
 
 
 class SyncAdapterConfig[ConfigT, DriverT: SyncDriverAdapterBase](SyncDatabaseConfig[Any, Any, DriverT]):
-    """Base synchronous SQLSpec adapter configuration backed by a Vertebra native driver."""
+    """Base synchronous SQLSpec adapter configuration backed by a Vertebra native driver.
+
+    Defines a temporary ``connection_type = Any`` compatibility fallback
+    (tracked in https://github.com/cofin/vertebra/issues/131) so native
+    configs register with ``sqlspec.extensions.litestar.SQLSpecPlugin`` until
+    full ``DatabaseConfigProtocol`` parity replaces these shim base classes.
+    """
 
     dialect: ClassVar[str] = "generic"
     is_async: ClassVar[bool] = False
+    connection_type: ClassVar[type[Any]] = Any
     _config_cls: ClassVar[type[Any]]
     _driver_cls: ClassVar[type[Any]]
     driver_type: ClassVar[type[Any]]
@@ -1482,10 +1489,17 @@ class SyncAdapterConfig[ConfigT, DriverT: SyncDriverAdapterBase](SyncDatabaseCon
 
 
 class AsyncAdapterConfig[ConfigT, DriverT: AsyncDriverAdapterBase](AsyncDatabaseConfig[Any, Any, DriverT]):
-    """Base asynchronous SQLSpec adapter configuration backed by a Vertebra native driver."""
+    """Base asynchronous SQLSpec adapter configuration backed by a Vertebra native driver.
+
+    Defines a temporary ``connection_type = Any`` compatibility fallback
+    (tracked in https://github.com/cofin/vertebra/issues/131) so native
+    configs register with ``sqlspec.extensions.litestar.SQLSpecPlugin`` until
+    full ``DatabaseConfigProtocol`` parity replaces these shim base classes.
+    """
 
     dialect: ClassVar[str] = "generic"
     is_async: ClassVar[bool] = True
+    connection_type: ClassVar[type[Any]] = Any
     _config_cls: ClassVar[type[Any]]
     _driver_cls: ClassVar[type[Any]]
     driver_type: ClassVar[type[Any]]
@@ -1572,6 +1586,7 @@ class PostgreSQLSyncConfig(SyncAdapterConfig[PostgreSQLConfig, PostgreSQLSyncDri
     """Synchronous SQLSpec adapter configuration for PostgreSQL (postgres+vtb)."""
 
     dialect: ClassVar[str] = "postgres"
+    connection_type: ClassVar[type[Any]] = SyncPostgreSQLDriver
     _config_cls: ClassVar[type[PostgreSQLConfig]] = PostgreSQLConfig
     _driver_cls: ClassVar[type[SyncPostgreSQLDriver]] = SyncPostgreSQLDriver
     driver_type: ClassVar[type[PostgreSQLSyncDriver]] = PostgreSQLSyncDriver
@@ -1592,6 +1607,7 @@ class PostgreSQLAsyncConfig(AsyncAdapterConfig[PostgreSQLConfig, PostgreSQLAsync
     """Asynchronous SQLSpec adapter configuration for PostgreSQL (postgres+vtb)."""
 
     dialect: ClassVar[str] = "postgres"
+    connection_type: ClassVar[type[Any]] = AsyncPostgreSQLDriver
     _config_cls: ClassVar[type[PostgreSQLConfig]] = PostgreSQLConfig
     _driver_cls: ClassVar[type[AsyncPostgreSQLDriver]] = AsyncPostgreSQLDriver
     driver_type: ClassVar[type[PostgreSQLAsyncDriver]] = PostgreSQLAsyncDriver
@@ -1612,6 +1628,7 @@ class MySQLSyncConfig(SyncAdapterConfig[MySQLConfig, MySQLSyncDriver]):
     """Synchronous SQLSpec adapter configuration for MySQL/MariaDB (mysql+vtb)."""
 
     dialect: ClassVar[str] = "mysql"
+    connection_type: ClassVar[type[Any]] = SyncMySQLDriver
     _config_cls: ClassVar[type[MySQLConfig]] = MySQLConfig
     _driver_cls: ClassVar[type[SyncMySQLDriver]] = SyncMySQLDriver
     driver_type: ClassVar[type[MySQLSyncDriver]] = MySQLSyncDriver
@@ -1621,6 +1638,7 @@ class MySQLAsyncConfig(AsyncAdapterConfig[MySQLConfig, MySQLAsyncDriver]):
     """Asynchronous SQLSpec adapter configuration for MySQL/MariaDB (mysql+vtb)."""
 
     dialect: ClassVar[str] = "mysql"
+    connection_type: ClassVar[type[Any]] = AsyncMySQLDriver
     _config_cls: ClassVar[type[MySQLConfig]] = MySQLConfig
     _driver_cls: ClassVar[type[AsyncMySQLDriver]] = AsyncMySQLDriver
     driver_type: ClassVar[type[MySQLAsyncDriver]] = MySQLAsyncDriver
@@ -1630,6 +1648,7 @@ class SQLiteSyncConfig(SyncAdapterConfig[SQLiteConfig, SQLiteSyncDriver]):
     """Synchronous SQLSpec adapter configuration for SQLite (sqlite+vtb)."""
 
     dialect: ClassVar[str] = "sqlite"
+    connection_type: ClassVar[type[Any]] = SyncSQLiteDriver
     _config_cls: ClassVar[type[SQLiteConfig]] = SQLiteConfig
     _driver_cls: ClassVar[type[SyncSQLiteDriver]] = SyncSQLiteDriver
     driver_type: ClassVar[type[SQLiteSyncDriver]] = SQLiteSyncDriver
@@ -1639,6 +1658,7 @@ class SQLiteAsyncConfig(AsyncAdapterConfig[SQLiteConfig, SQLiteAsyncDriver]):
     """Asynchronous SQLSpec adapter configuration for SQLite (sqlite+vtb)."""
 
     dialect: ClassVar[str] = "sqlite"
+    connection_type: ClassVar[type[Any]] = AsyncSQLiteDriver
     _config_cls: ClassVar[type[SQLiteConfig]] = SQLiteConfig
     _driver_cls: ClassVar[type[AsyncSQLiteDriver]] = AsyncSQLiteDriver
     driver_type: ClassVar[type[SQLiteAsyncDriver]] = SQLiteAsyncDriver
@@ -1648,6 +1668,7 @@ class OracleSyncConfig(SyncAdapterConfig[OracleConfig, OracleSyncDriver]):
     """Synchronous SQLSpec adapter configuration for Oracle Thin (oracle+vtb)."""
 
     dialect: ClassVar[str] = "oracle"
+    connection_type: ClassVar[type[Any]] = SyncOracleDriver
     _config_cls: ClassVar[type[OracleConfig]] = OracleConfig
     _driver_cls: ClassVar[type[SyncOracleDriver]] = SyncOracleDriver
     driver_type: ClassVar[type[OracleSyncDriver]] = OracleSyncDriver
@@ -1657,6 +1678,7 @@ class OracleAsyncConfig(AsyncAdapterConfig[OracleConfig, OracleAsyncDriver]):
     """Asynchronous SQLSpec adapter configuration for Oracle Thin (oracle+vtb)."""
 
     dialect: ClassVar[str] = "oracle"
+    connection_type: ClassVar[type[Any]] = AsyncOracleDriver
     _config_cls: ClassVar[type[OracleConfig]] = OracleConfig
     _driver_cls: ClassVar[type[AsyncOracleDriver]] = AsyncOracleDriver
     driver_type: ClassVar[type[OracleAsyncDriver]] = OracleAsyncDriver
@@ -1666,6 +1688,7 @@ class MSSQLSyncConfig(SyncAdapterConfig[MSSQLConfig, MSSQLSyncDriver]):
     """Synchronous SQLSpec adapter configuration for SQL Server (mssql+vtb)."""
 
     dialect: ClassVar[str] = "mssql"
+    connection_type: ClassVar[type[Any]] = SyncMSSQLDriver
     _config_cls: ClassVar[type[MSSQLConfig]] = MSSQLConfig
     _driver_cls: ClassVar[type[SyncMSSQLDriver]] = SyncMSSQLDriver
     driver_type: ClassVar[type[MSSQLSyncDriver]] = MSSQLSyncDriver
@@ -1675,6 +1698,7 @@ class MSSQLAsyncConfig(AsyncAdapterConfig[MSSQLConfig, MSSQLAsyncDriver]):
     """Asynchronous SQLSpec adapter configuration for SQL Server (mssql+vtb)."""
 
     dialect: ClassVar[str] = "mssql"
+    connection_type: ClassVar[type[Any]] = AsyncMSSQLDriver
     _config_cls: ClassVar[type[MSSQLConfig]] = MSSQLConfig
     _driver_cls: ClassVar[type[AsyncMSSQLDriver]] = AsyncMSSQLDriver
     driver_type: ClassVar[type[MSSQLAsyncDriver]] = MSSQLAsyncDriver
@@ -1684,6 +1708,7 @@ class DuckDBSyncConfig(SyncAdapterConfig[DuckDBConfig, DuckDBSyncDriver]):
     """Synchronous SQLSpec adapter configuration for DuckDB (duckdb+vtb)."""
 
     dialect: ClassVar[str] = "duckdb"
+    connection_type: ClassVar[type[Any]] = SyncDuckDBDriver
     _config_cls: ClassVar[type[DuckDBConfig]] = DuckDBConfig
     _driver_cls: ClassVar[type[SyncDuckDBDriver]] = SyncDuckDBDriver
     driver_type: ClassVar[type[DuckDBSyncDriver]] = DuckDBSyncDriver
@@ -1693,6 +1718,7 @@ class DuckDBAsyncConfig(AsyncAdapterConfig[DuckDBConfig, DuckDBAsyncDriver]):
     """Asynchronous SQLSpec adapter configuration for DuckDB (duckdb+vtb)."""
 
     dialect: ClassVar[str] = "duckdb"
+    connection_type: ClassVar[type[Any]] = AsyncDuckDBDriver
     _config_cls: ClassVar[type[DuckDBConfig]] = DuckDBConfig
     _driver_cls: ClassVar[type[AsyncDuckDBDriver]] = AsyncDuckDBDriver
     driver_type: ClassVar[type[DuckDBAsyncDriver]] = DuckDBAsyncDriver
