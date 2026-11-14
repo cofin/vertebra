@@ -9,15 +9,16 @@ state: planned
 planning_status: complete
 planning_quality: standard
 planning_degraded_reason: null
-plan_commit: 18baadcd
-updated_at: "2026-11-12T23:55:00Z"
+plan_revision: 4
+plan_commit: 37972f2a
+updated_at: "2026-11-14T17:24:00Z"
 generated:
   by: flow-plan
   at: "2026-11-12T23:55:00Z"
 verified:
   - by: agent:plan-generator
-    at: "2026-11-12T23:55:00Z"
-    commit: 18baadcd
+    at: "2026-11-14T17:24:00Z"
+    commit: 37972f2a
 tags:
   - makefile
   - ci

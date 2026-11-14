@@ -9,15 +9,16 @@ state: active
 planning_status: complete
 planning_quality: standard
 planning_degraded_reason: null
-plan_commit: 18baadcd
-updated_at: "2026-11-12T23:55:00Z"
+plan_revision: 4
+plan_commit: 37972f2a
+updated_at: "2026-11-14T17:42:00Z"
 generated:
   by: flow-plan
   at: "2026-11-12T23:55:00Z"
 verified:
   - by: agent:plan-generator
-    at: "2026-11-12T23:55:00Z"
-    commit: 18baadcd
+    at: "2026-11-14T17:24:00Z"
+    commit: 37972f2a
 tags:
   - conformance
   - pytest-databases
@@ -51,7 +52,7 @@ sources:
 
 <!-- truth: start -->
 - **Zero-Skip Lane Gate & Version Matrix (`t01`)**: `ConformanceGate` (`VERTEBRA_CONFORMANCE_ENGINES`) selects tagged integration tests and fails the session on any skip, xfail, or `0`-test engine; `ServiceVersionMatrix` maps `VERTEBRA_CONFORMANCE_{MYSQL,MARIADB,MSSQL,ORACLE}_VERSION` onto `pytest-databases` `0.20.0b1` fixtures without citing machine-local `.venv` paths [^int-conftest] [^pyproject-pd].
-- **Clean Matrix + Embedded/Loopback DuckDB (`t02`)**: `test_driver_conformance.py` adds `mariadb` (`EngineConformanceSpec` and `ConformanceGate` have already removed legacy `_FAIL_LOUD_DRIVER_ENGINES`, `_DUCKDB_SKIP_REASON`, `VERTEBRA_CONFORMANCE_DUCKDB_DSN`, and duplicate `mssql` skips) and registers `duckdb` with embedded `:memory:` `VTBARROW`/pipelines/savepoints + offline loopback HTTPS GCS rotation + opt-in `VERTEBRA_CONFORMANCE_DUCKDB_HTTPFS=1` in `test_duckdb_native.py` [^conformance-suite].
+- **Clean Matrix + Embedded/Loopback DuckDB (`t02`)**: `test_driver_conformance.py` adds `mariadb`, removes dead `_DUCKDB_SKIP_REASON` and unused `VERTEBRA_CONFORMANCE_DUCKDB_DSN`, and attaches `driver_engine` markers; `test_duckdb_native.py` covers embedded `:memory:` `VTBARROW`/pipelines/savepoints + offline loopback HTTPS GCS rotation + opt-in `VERTEBRA_CONFORMANCE_DUCKDB_HTTPFS=1` [^conformance-suite].
 - **Live MySQL/MariaDB, SQL Server & Oracle Suites (`t03`–`t04`)**: Parameterized `test_mysql_native.py`, `test_mssql_native.py`, and tagged `test_oracle_native.py` verify binary prepared statements, LOB/decimal/temporal fidelity, `VTBARROW` `/dev/shm` hygiene, `pipeline()`, active query cancellation, and Oracle AQ `wait_timeout_seconds` liveness [^mysql-driver] [^mssql-driver] [^oracle-native].
 <!-- truth: end -->
 
@@ -94,7 +95,7 @@ class ServiceVersionMatrix:
     def fixture_name(cls, family: str, environ: Mapping[str, str]) -> str: ...
 ```
 
-- **Gate Ownership Boundary (Requires `/flow:revise`)**: The current `t01` design specifies that `VERTEBRA_CONFORMANCE_ENGINES=postgres` raises `pytest.UsageError` pointing callers to `VERTEBRA_CONFORMANCE_POSTGRES_REQUIRE_ZERO_SKIPS=1`, which conflicts with `.github/workflows/ci.yml` (`postgres-conformance` passes `VERTEBRA_CONFORMANCE_ENGINES: postgres` while `test_driver_conformance.py` actively routes `postgres` through `EngineConformanceSpec`). Revise `ch02:t01` (or `ci.yml` in coordination) before implementing `ch02`; unknown engines or versions still raise `pytest.UsageError` listing allowed values.
+- **Gate Ownership Boundary**: When `"postgres"` is passed in `VERTEBRA_CONFORMANCE_ENGINES` alongside `VERTEBRA_CONFORMANCE_POSTGRES_REQUIRE_ZERO_SKIPS=1` (as in `.github/workflows/ci.yml` `postgres-conformance`), `ConformanceGate.from_environ` delegates `"postgres"` to `evaluate_postgres_zero_skip_gate` in `conftest.py` and excludes `"postgres"` from `self.engines` (remaining inactive when `"postgres"` is the sole engine). Passing `"postgres"` without `VERTEBRA_CONFORMANCE_POSTGRES_REQUIRE_ZERO_SKIPS=1` raises `pytest.UsageError` pointing the caller to `VERTEBRA_CONFORMANCE_POSTGRES_REQUIRE_ZERO_SKIPS=1`, and any unknown engine or version raises `pytest.UsageError` listing allowed values.
 - **Offline Safety**: When `VERTEBRA_CONFORMANCE_DOCKER != "1"` and `VERTEBRA_CONFORMANCE_<ENGINE>_DSN` is unset, container-backed suites skip cleanly before `request.getfixturevalue(...)` touches Docker; embedded DuckDB and loopback GCS tests run offline in `< 5s`.
 
 ## 3. Documentation & OKF Knowledge Plan
@@ -112,10 +113,10 @@ Deferred to [`ch04-docs-and-okf-sync`](../ch04-docs-and-okf-sync/spec.md).
 
 ## 5. Implementation Plan
 
-- [ ] [t01-conformance-gate-and-version-matrix.md](tasks/t01-conformance-gate-and-version-matrix.md) — Implement `ConformanceGate`, `ServiceVersionMatrix`, and `integration/conftest.py` zero-skip hooks and versioned fixtures.
-- [ ] [t02-mariadb-matrix-cleanup-and-duckdb-suite.md](tasks/t02-mariadb-matrix-cleanup-and-duckdb-suite.md) — Add `mariadb` to `ENGINE_SPECS`, remove dead conformance surface, and create `test_duckdb_native.py`.
-- [ ] [t03-mysql-mariadb-and-mssql-live-suites.md](tasks/t03-mysql-mariadb-and-mssql-live-suites.md) — Create parameterized live `test_mysql_native.py` (MySQL/MariaDB) and `test_mssql_native.py` (SQL Server) suites.
-- [ ] [t04-oracle-live-suite-tagging-and-liveness.md](tasks/t04-oracle-live-suite-tagging-and-liveness.md) — Tag `test_oracle_native.py` for `ConformanceGate`, wire `vtb_oracle_config`, and add live AQ `wait_timeout_seconds` liveness coverage.
+- [x] [38e02b16] [t01-conformance-gate-and-version-matrix.md](tasks/t01-conformance-gate-and-version-matrix.md) — Implement `ConformanceGate`, `ServiceVersionMatrix`, and `integration/conftest.py` zero-skip hooks and versioned fixtures.
+- [x] [38e02b16] [t02-mariadb-matrix-cleanup-and-duckdb-suite.md](tasks/t02-mariadb-matrix-cleanup-and-duckdb-suite.md) — Add `mariadb` to `ENGINE_SPECS`, remove dead conformance surface, and create `test_duckdb_native.py`.
+- [x] [38e02b16] [t03-mysql-mariadb-and-mssql-live-suites.md](tasks/t03-mysql-mariadb-and-mssql-live-suites.md) — Create parameterized live `test_mysql_native.py` (MySQL/MariaDB) and `test_mssql_native.py` (SQL Server) suites.
+- [x] [38e02b16] [t04-oracle-live-suite-tagging-and-liveness.md](tasks/t04-oracle-live-suite-tagging-and-liveness.md) — Tag `test_oracle_native.py` for `ConformanceGate`, wire `vtb_oracle_config`, and add live AQ `wait_timeout_seconds` liveness coverage.
 
 ## 6. Current State & Remaining Plan Snapshot
 

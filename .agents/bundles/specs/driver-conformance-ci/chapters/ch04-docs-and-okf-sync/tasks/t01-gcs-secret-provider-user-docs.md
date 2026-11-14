@@ -11,7 +11,8 @@ planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
 strategy: documentation_validation
-plan_commit: 18baadcd
+plan_revision: 4
+plan_commit: 37972f2a
 depends_on: []
 files:
   - docs/usage/storage.md

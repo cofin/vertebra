@@ -1,5 +1,13 @@
 # Bundle Activity Log
 
+## [2026-11-14T17:42:00Z] chapter-checkpoint | driver-conformance-ci ch02-conformance-harness-and-live-suites
+
+- Completed `ch02-conformance-harness-and-live-suites` (`t01`–`t04`) at `38e02b16`: added `ConformanceGate` and `ServiceVersionMatrix` in `src/py/tests/integration/conformance_gate.py`, wired zero-skip session hooks and versioned `vtb_{mysql,mariadb,oracle,mssql}_config` fixtures in `src/py/tests/integration/conftest.py`, added `mariadb` `EngineConformanceSpec` and removed dead `_DUCKDB_SKIP_REASON` / `VERTEBRA_CONFORMANCE_DUCKDB_DSN` in `test_driver_conformance.py`, and created `test_conformance_gate.py`, `test_duckdb_native.py`, `test_mysql_native.py`, `test_mssql_native.py`, and updated `test_oracle_native.py` (`192 passed, 369 skipped` offline; `42 passed, 0 skipped` under `VERTEBRA_CONFORMANCE_ENGINES=duckdb`; `ruff`, `mypy`, and `make review-check` clean).
+
+## [2026-11-14T17:26:00Z] revise | driver-conformance-ci
+
+- Revised `driver-conformance-ci` (`plan_revision: 4`, `plan_commit: 37972f2a`) across root `spec.md` and `ch02`–`ch04`: reconciled `ConformanceGate.from_environ` so `VERTEBRA_CONFORMANCE_ENGINES=postgres` delegates to `evaluate_postgres_zero_skip_gate` when `VERTEBRA_CONFORMANCE_POSTGRES_REQUIRE_ZERO_SKIPS=1` is set (coexisting cleanly with `.github/workflows/ci.yml` `postgres-conformance`) while raising `pytest.UsageError` when `"postgres"` is passed without `VERTEBRA_CONFORMANCE_POSTGRES_REQUIRE_ZERO_SKIPS=1`, added `pyproject.toml` to `ch02:t01` `files:` for `driver_engine` marker registration, and aligned `ch02:t02` to remove unused `_DUCKDB_SKIP_REASON` and `VERTEBRA_CONFORMANCE_DUCKDB_DSN` from `test_driver_conformance.py`.
+
 ## [2026-11-14T17:16:00Z] synthesize | flow-learn-sync
 
 - Audited all `13` Flow specifications line by line against `fix/audit-remediation @ 334dc98d` (`main @ 14b70b07`): confirmed `driver-conformance-ci ch01` (`3/13` tasks, `a8ca7b24`/`b3b113d1`/`cae00a18`) complete while `ch02`–`ch04`, `strict-typing-hygiene`, `http3-and-http-hygiene`, `native-adapter-organization`, `broker-pool-sharing`, `native-sqlite-driver`, `native-redis-driver`, `queues-tasks-and-channels`, `spanner-queue-and-rw-transactions`, `sqlalchemy-and-django-integration`, and `sqlspec-adapter-parity` remain `PARTIAL` or `NOT DONE`.

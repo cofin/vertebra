@@ -6,16 +6,22 @@ chapter_id: ch02-conformance-harness-and-live-suites
 title: "Implement ConformanceGate, ServiceVersionMatrix, and conftest zero-skip hooks"
 description: "Create conformance_gate.py and wire engine selection, zero-skip session enforcement, and versioned pytest-databases fixtures in integration/conftest.py."
 status: stable
-state: pending
+state: completed
+commit: 38e02b16
+last_verified_commit: 38e02b16
+last_verified_at: "2026-11-14T17:42:00Z"
+verification_evidence: "pytest test_conformance_gate.py + ruff + mypy + make review-check clean"
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
 strategy: regression_tdd
-plan_commit: 18baadcd
+plan_revision: 4
+plan_commit: 37972f2a
 depends_on: []
 files:
   - src/py/tests/integration/conformance_gate.py
   - src/py/tests/integration/conftest.py
+  - pyproject.toml
 tests:
   - src/py/tests/unit/db/test_conformance_gate.py
 read_set:
@@ -50,7 +56,7 @@ Create `src/py/tests/integration/conformance_gate.py` (`ConformanceGate`, `Servi
 
 ## Contracts & Edge Cases
 
-- `ConformanceGate.from_environ` (Requires `/flow:revise`): Currently specifies raising `pytest.UsageError` on `"postgres"`, which conflicts with `.github/workflows/ci.yml` (`postgres-conformance` sets `VERTEBRA_CONFORMANCE_ENGINES=postgres`) and `test_driver_conformance.py` on `HEAD`; revise `t01` or `ci.yml` in coordination before executing this task. Unknown engines still raise `pytest.UsageError`; unset/blank env leaves the gate inactive after stripping whitespace and lowercasing tokens.
+- `ConformanceGate.from_environ`: When `"postgres"` is present in `VERTEBRA_CONFORMANCE_ENGINES` alongside `VERTEBRA_CONFORMANCE_POSTGRES_REQUIRE_ZERO_SKIPS == "1"` (as in `.github/workflows/ci.yml` `postgres-conformance`), delegate `"postgres"` to `evaluate_postgres_zero_skip_gate` in `conftest.py` and exclude `"postgres"` from `self.engines` (remaining inactive when `"postgres"` is the sole engine). When `"postgres"` is passed without `VERTEBRA_CONFORMANCE_POSTGRES_REQUIRE_ZERO_SKIPS=1`, raise `pytest.UsageError` pointing the caller to `VERTEBRA_CONFORMANCE_POSTGRES_REQUIRE_ZERO_SKIPS=1`; any unknown engine token raises `pytest.UsageError` listing `sorted(SUPPORTED_ENGINES)`, and unset/blank env leaves the gate inactive after stripping whitespace and lowercasing tokens.
 - `item_engines(item)`: unions `@pytest.mark.driver_engine("<name>")` args and `callspec.params.values()` string `.engine` attributes; `selects` never deselects unit tests outside `src/py/tests/integration`.
 - `record` & `failures`: flags setup/call `skipped`, `wasxfail` (`xfailed`/`xpassed`), and any requested engine with `0` executed `call`-phase reports; `ServiceVersionMatrix.fixture_name` raises `pytest.UsageError` on unknown `VERTEBRA_CONFORMANCE_<FAMILY>_VERSION`.
 
@@ -66,8 +72,8 @@ uv run --no-sync pytest src/py/tests/unit/db/test_conformance_gate.py -q && uv r
 
 ## Acceptance Criteria
 
-- [ ] `ConformanceGate` and `ServiceVersionMatrix` enforce zero-skip lane execution and version resolution while remaining a no-op when `VERTEBRA_CONFORMANCE_ENGINES` is unset.
-- [ ] Zero `.venv/...` paths appear anywhere in code, docstrings, or `sources:`.
+- [x] `ConformanceGate` and `ServiceVersionMatrix` enforce zero-skip lane execution and version resolution while remaining a no-op when `VERTEBRA_CONFORMANCE_ENGINES` is unset.
+- [x] Zero `.venv/...` paths appear anywhere in code, docstrings, or `sources:`.
 
 [^int-conftest]: `src/py/tests/integration/conftest.py::vtb_mysql_config` — Existing MySQL, MariaDB, SQL Server, and Oracle `pytest-databases` fixtures.
 [^pyproject-pd]: `pyproject.toml` — `pytest-databases>=0.20.0b1` dependency declaration.

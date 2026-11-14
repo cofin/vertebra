@@ -6,12 +6,17 @@ chapter_id: ch02-conformance-harness-and-live-suites
 title: "Create live MySQL/MariaDB and SQL Server native integration suites"
 description: "Implement parameterized test_mysql_native.py and test_mssql_native.py covering binary prepared statements, engine types, Arrow SHM, pipelines, and active query cancellation."
 status: stable
-state: pending
+state: completed
+commit: 38e02b16
+last_verified_commit: 38e02b16
+last_verified_at: "2026-11-14T17:42:00Z"
+verification_evidence: "pytest test_conformance_gate.py test_mysql_native.py test_mssql_native.py + ruff + mypy clean"
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
 strategy: regression_tdd
-plan_commit: 18baadcd
+plan_revision: 4
+plan_commit: 37972f2a
 depends_on:
   - "driver-conformance-ci:ch02:t01"
 files:
@@ -67,8 +72,8 @@ uv run --no-sync pytest src/py/tests/unit/db/test_conformance_gate.py src/py/tes
 
 ## Acceptance Criteria
 
-- [ ] Both suites use `@pytest.mark.parametrize` / `@pytest.fixture(params=...)` with zero `for`-loop test iteration and clean `finally` table teardown.
-- [ ] Offline pytest collection/execution, Ruff, and Mypy pass cleanly in `< 10s`.
+- [x] Both suites use `@pytest.mark.parametrize` / `@pytest.fixture(params=...)` with zero `for`-loop test iteration and clean `finally` table teardown.
+- [x] Offline pytest collection/execution, Ruff, and Mypy pass cleanly in `< 10s`.
 
 [^mysql-driver]: `src/py/vertebra/db/adapters/mysql/driver.py::SyncMySQLDriver` — `SyncMySQLDriver` and `AsyncMySQLDriver` native protocol methods.
 [^mssql-driver]: `src/py/vertebra/db/adapters/mssql/driver.py::SyncMSSQLDriver` — `SyncMSSQLDriver` and `AsyncMSSQLDriver` native TDS methods.

@@ -6,12 +6,17 @@ chapter_id: ch02-conformance-harness-and-live-suites
 title: "Tag test_oracle_native.py for lane selection and verify AQ wait_timeout_seconds liveness"
 description: "Attach driver_engine('oracle') to test_oracle_native.py, resolve config via vtb_oracle_config, and add a live AQ idle wait_timeout_seconds liveness test."
 status: stable
-state: pending
+state: completed
+commit: 38e02b16
+last_verified_commit: 38e02b16
+last_verified_at: "2026-11-14T17:42:00Z"
+verification_evidence: "pytest test_conformance_gate.py test_oracle_native.py + ruff + mypy clean"
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
 strategy: regression_tdd
-plan_commit: 18baadcd
+plan_revision: 4
+plan_commit: 37972f2a
 depends_on:
   - "driver-conformance-ci:ch02:t01"
   - "driver-conformance-ci:ch01:t03"
@@ -68,8 +73,8 @@ uv run --no-sync pytest src/py/tests/unit/db/test_conformance_gate.py src/py/tes
 
 ## Acceptance Criteria
 
-- [ ] Every test in `test_oracle_native.py` is selected under `VERTEBRA_CONFORMANCE_ENGINES=oracle` and skips cleanly offline without Docker calls.
-- [ ] Live AQ `wait_timeout_seconds=2` idle liveness and post-idle delivery are covered with clean queue teardown.
+- [x] Every test in `test_oracle_native.py` is selected under `VERTEBRA_CONFORMANCE_ENGINES=oracle` and skips cleanly offline without Docker calls.
+- [x] Live AQ `wait_timeout_seconds=2` idle liveness and post-idle delivery are covered with clean queue teardown.
 
 [^oracle-native]: `src/py/tests/integration/db/test_oracle_native.py::_resolve_oracle_config` — Existing live Oracle native suite and DSN/Docker resolution.
 [^oracle-notify-py]: `src/py/vertebra/db/adapters/oracle/notify.py::OracleNotificationSource` — `OracleNotificationSource` and `OracleNotifyConfig(wait_timeout_seconds=...)`.
