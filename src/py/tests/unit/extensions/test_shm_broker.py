@@ -4,12 +4,27 @@ from __future__ import annotations
 
 import multiprocessing as mp
 import os
+import struct
+import sys
 import time
+import types
 from pathlib import Path
+from typing import Any
 
+import pytest
+
+from vertebra._vertebra import ArrowCursor, BrokerEngineRegistry
 from vertebra.extensions.broker import (
+    DBRPC_VERSION,
     BrokerConfig,
+    BrokerEngineDiscovery,
+    DbRpcOp,
+    DbRpcRequest,
     SyncSHMBrokerTransport,
+)
+from vertebra.extensions.broker.dbrpc import (
+    decode_dbrpc_response,
+    encode_dbrpc_request,
 )
 
 
@@ -184,3 +199,191 @@ def test_shm_broker_channel_isolation_and_ring_wraparound() -> None:
     assert len(wrapped) == 64
     assert wrapped[0].payload == b"msg-6"
     assert wrapped[-1].payload == b"msg-69"
+
+
+def test_broker_engine_registry_rejects_invalid_capsules_and_unknown_tag() -> None:
+    """Verify invalid capsules raise TypeError and unregistered tags raise RuntimeError."""
+    with pytest.raises(TypeError, match="BrokerEngineCapsule"):
+        BrokerEngineRegistry.register(object())
+
+    with pytest.raises(RuntimeError, match="no broker engine registered for dialect_tag 65530"):
+        BrokerEngineRegistry.normalize(65530, "SELECT 1")
+
+    with pytest.raises(RuntimeError, match="no broker engine registered for dialect_tag 65530"):
+        BrokerEngineRegistry.open_pool(65530, "postgres://localhost/db", 2)
+
+
+def test_broker_engine_discovery_skips_missing_and_fails_on_broken_module(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify discovery uses import_optional cleanly, skips missing wheels, and fails loud on broken modules."""
+    BrokerEngineDiscovery.register_installed()
+    tags = BrokerEngineRegistry.registered_tags()
+    assert {1, 2, 4, 5, 6}.issubset(set(tags))
+
+    monkeypatch.setattr(
+        "vertebra.extensions.broker.engines.import_optional",
+        lambda name: None if name == "vertebra._oracle" else sys.modules.get(name),
+    )
+    partial_tags = BrokerEngineDiscovery.register_installed()
+    assert 4 not in partial_tags
+    assert {1, 2, 5, 6}.issubset(set(partial_tags))
+
+    broken_mod = types.ModuleType("vertebra._fake_broken")
+
+    def fake_loader(name: str) -> Any:
+        if name == "vertebra._oracle":
+            return broken_mod
+        return None
+
+    monkeypatch.setattr("vertebra.extensions.broker.engines.import_optional", fake_loader)
+    with pytest.raises(AttributeError, match="broker_engine_capsule"):
+        BrokerEngineDiscovery.register_installed()
+
+
+@pytest.mark.parametrize(
+    ("module_name", "tag", "raw_sql", "expected_sql", "expected_count", "invalid_dsn"),
+    [
+        ("vertebra._postgres", 1, "SELECT :id", "SELECT $1", 1, "invalid://localhost/db"),
+        ("vertebra._mysql", 2, "SELECT :id", "SELECT ?", 1, "invalid://localhost/db"),
+        ("vertebra._oracle", 4, "SELECT :id", "SELECT :1", 1, "invalid://localhost/freepdb1"),
+        (
+            "vertebra._mssql",
+            5,
+            "SELECT $1 AND active = ?",
+            "SELECT @P1 AND active = @P2",
+            2,
+            "invalid://localhost/master",
+        ),
+        ("vertebra._duckdb", 6, "SELECT :id", "SELECT ?", 1, "invalid://localhost/db"),
+    ],
+)
+def test_engine_capsules_register_normalize_and_fail_loud(
+    module_name: str,
+    tag: int,
+    raw_sql: str,
+    expected_sql: str,
+    expected_count: int,
+    invalid_dsn: str,
+) -> None:
+    """Verify every relational/OLAP engine capsule registers, normalizes SQL, and rejects invalid DSNs."""
+    mod = __import__(module_name, fromlist=["broker_engine_capsule"])
+    registered_tag = BrokerEngineRegistry.register(mod.broker_engine_capsule())
+    assert registered_tag == tag
+    assert tag in BrokerEngineRegistry.registered_tags()
+    assert BrokerEngineRegistry.normalize(tag, raw_sql) == (expected_sql, expected_count)
+
+    with pytest.raises(RuntimeError):
+        BrokerEngineRegistry.open_pool(tag, invalid_dsn, 2)
+
+    unknown_frame = encode_dbrpc_request(
+        DbRpcRequest(DBRPC_VERSION, int(DbRpcOp.EXECUTE), 1, 0, 1, "SELECT 1", (), None, 0)
+    )
+    with pytest.raises(RuntimeError, match="unknown pool id 999999"):
+        BrokerEngineRegistry.execute(tag, 999999, unknown_frame)
+
+    BrokerEngineRegistry.close_pool(tag, 999999)
+
+
+def test_duckdb_broker_capsule_execute_vtbarrow_and_error_handling() -> None:
+    """Verify end-to-end DuckDB pool execution, parameterized query, VTBARROW spill, and SQL error mapping."""
+    BrokerEngineDiscovery.register_installed()
+    pool_id = BrokerEngineRegistry.open_pool(6, "duckdb:///:memory:", 2)
+    try:
+        ddl_req = encode_dbrpc_request(
+            DbRpcRequest(
+                DBRPC_VERSION,
+                int(DbRpcOp.EXECUTE),
+                1,
+                0,
+                1,
+                "CREATE TABLE items (id BIGINT, label VARCHAR)",
+                (),
+                None,
+                0,
+            )
+        )
+        ddl_resp = decode_dbrpc_response(BrokerEngineRegistry.execute(6, pool_id, ddl_req))
+        assert ddl_resp.request_id == 1
+        assert ddl_resp.status == 0
+
+        ins_req = encode_dbrpc_request(
+            DbRpcRequest(
+                DBRPC_VERSION,
+                int(DbRpcOp.EXECUTE),
+                2,
+                0,
+                1,
+                "INSERT INTO items VALUES (?, ?)",
+                (42, "alpha"),
+                None,
+                0,
+            )
+        )
+        ins_resp = decode_dbrpc_response(BrokerEngineRegistry.execute(6, pool_id, ins_req))
+        assert ins_resp.status == 0
+        assert ins_resp.rowcount == 1
+
+        sel_req = encode_dbrpc_request(
+            DbRpcRequest(
+                DBRPC_VERSION,
+                int(DbRpcOp.EXECUTE),
+                3,
+                0,
+                1,
+                "SELECT id, label FROM items WHERE id = ?",
+                (42,),
+                None,
+                0,
+            )
+        )
+        sel_resp = decode_dbrpc_response(BrokerEngineRegistry.execute(6, pool_id, sel_req))
+        assert sel_resp.status == 0
+        assert sel_resp.columns == ("id", "label")
+        assert sel_resp.rows == ((42, "alpha"),)
+
+        err_req = encode_dbrpc_request(
+            DbRpcRequest(
+                DBRPC_VERSION,
+                int(DbRpcOp.EXECUTE),
+                4,
+                0,
+                1,
+                "SELECT * FROM missing_table_xyz",
+                (),
+                None,
+                0,
+            )
+        )
+        err_resp = decode_dbrpc_response(BrokerEngineRegistry.execute(6, pool_id, err_req))
+        assert err_resp.request_id == 4
+        assert err_resp.status != 0
+        assert err_resp.error_class == "DuckDBError"
+        assert err_resp.error_message is not None and "missing_table_xyz" in err_resp.error_message
+
+        arrow_req = encode_dbrpc_request(
+            DbRpcRequest(
+                DBRPC_VERSION,
+                int(DbRpcOp.EXECUTE),
+                5,
+                0,
+                1,
+                "SELECT i AS n FROM range(300) t(i)",
+                (),
+                None,
+                128,
+            )
+        )
+        arrow_resp = decode_dbrpc_response(BrokerEngineRegistry.execute(6, pool_id, arrow_req))
+        assert arrow_resp.status == 0
+        assert arrow_resp.arrow_shm is not None and arrow_resp.arrow_shm.startswith("/vtb-dd-")
+        assert arrow_resp.rowcount == 300
+        shm_bytes = Path(f"/dev/shm/{arrow_resp.arrow_shm.lstrip('/')}").read_bytes()
+        assert shm_bytes[:8] == b"VTBARROW"
+        byte_len = struct.unpack("<Q", shm_bytes[8:16])[0]
+        cursor = ArrowCursor(arrow_resp.arrow_shm, byte_len, 300)
+        assert cursor.row_count == 300
+        assert len(memoryview(cursor)) == byte_len
+    finally:
+        BrokerEngineRegistry.close_pool(6, pool_id)
+        BrokerEngineRegistry.close_pool(6, pool_id)

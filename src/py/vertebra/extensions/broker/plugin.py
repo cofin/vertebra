@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from vertebra.extensions.broker.engines import BrokerEngineDiscovery
 from vertebra.extensions.broker.transport import (
     AsyncSHMBrokerTransport,
     BrokerConfig,
@@ -73,6 +74,7 @@ class BrokerPlugin:
 
     def on_app_init(self, app: Any) -> None:
         """Hook called during application initialization."""
+        BrokerEngineDiscovery.register_installed()
         self._partition_id = self._transport.register_partition(
             self.name,
             pool_size=self.config.pool_size,

@@ -1,6 +1,24 @@
 //! Native Rust PostgreSQL Protocol 3.0 client and pool extension (`vertebra._postgres`).
 
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, RwLock};
+use std::time::Duration;
+
 use pyo3::prelude::*;
+use pyo3::types::PyCapsule;
+use url::Url;
+use vertebra_core::broker::DIALECT_TAG_POSTGRES;
+use vertebra_core::dbrpc::DbRpcOp;
+use vertebra_db::py_async::block_on_db;
+use vertebra_db::{
+    BrokerEngineBackend, BrokerPoolBackend, DbRpcEncodedResponse, DbRpcScalar, PlaceholderStyle,
+    decode_dbrpc_request_frame, encode_dbrpc_response_frame, new_broker_engine_pycapsule,
+    normalize_placeholders,
+};
+
+use crate::config::{PostgresConfig, RawPostgresOptions};
+use crate::errors::PostgresError;
 
 pub mod arrow;
 pub mod async_client;
@@ -84,11 +102,360 @@ pub const FREE_THREADED: bool = cfg!(Py_GIL_DISABLED);
 /// Whether the `vertebra._postgres` module requires the GIL on import (`false`).
 pub const GIL_USED: bool = false;
 
+fn parse_postgres_broker_dsn(dsn: &str) -> Result<PostgresConfig, String> {
+    let trimmed = dsn.trim();
+    if trimmed.is_empty() || trimmed.contains('\0') {
+        return Err("PostgreSQL DSN must not be empty or contain NUL bytes".to_string());
+    }
+    if trimmed.eq_ignore_ascii_case(":memory:") || trimmed.starts_with("memory://") {
+        return Err(
+            "PostgreSQL DSN `memory://` is unsupported; configure a real PostgreSQL endpoint"
+                .to_string(),
+        );
+    }
+
+    let Some((scheme, rest)) = trimmed.split_once("://") else {
+        return Err(format!(
+            "invalid PostgreSQL DSN `{trimmed}`; expected postgresql:// or postgres://"
+        ));
+    };
+    let lower_scheme = scheme.to_ascii_lowercase();
+    let rewritten = match lower_scheme.as_str() {
+        "postgresql"
+        | "postgres"
+        | "postgresql+vertebra"
+        | "postgres+vertebra"
+        | "postgresql+vtb"
+        | "postgres+vtb"
+        | "postgresql+asyncpg"
+        | "postgres+asyncpg"
+        | "postgresql+psycopg"
+        | "postgres+psycopg" => format!("postgresql://{rest}"),
+        other => return Err(format!("unsupported PostgreSQL DSN scheme `{other}://`")),
+    };
+
+    let parsed = Url::parse(&rewritten).map_err(|e| format!("invalid PostgreSQL DSN: {e}"))?;
+    let user = if parsed.username().is_empty() {
+        "postgres".to_string()
+    } else {
+        parsed.username().to_string()
+    };
+    let password = parsed.password().map(ToOwned::to_owned);
+    let path_db = parsed.path().trim_start_matches('/');
+    let database = if path_db.is_empty() {
+        "postgres".to_string()
+    } else {
+        path_db.to_string()
+    };
+
+    let mut raw = RawPostgresOptions::new(
+        parsed
+            .host_str()
+            .unwrap_or("localhost")
+            .trim_matches(['[', ']']),
+        user,
+        database,
+    );
+    raw.password = password;
+    raw.port = i64::from(parsed.port().unwrap_or(5432));
+    raw.sslmode = "prefer".to_string();
+
+    for (k, v) in parsed.query_pairs() {
+        match k.to_ascii_lowercase().as_str() {
+            "host" if v.starts_with('/') => {
+                raw.unix_socket = Some(v.into_owned());
+                raw.sslmode = "disable".to_string();
+            }
+            "sslmode" if !v.is_empty() => raw.sslmode = v.into_owned(),
+            "application_name" if !v.is_empty() => raw.application_name = v.into_owned(),
+            "channel_binding" if !v.is_empty() => raw.channel_binding = v.into_owned(),
+            _ => {}
+        }
+    }
+
+    if parsed.host_str().is_none_or(str::is_empty) && raw.unix_socket.is_none() {
+        return Err("PostgreSQL DSN is missing a host or unix_socket".to_string());
+    }
+
+    PostgresConfig::validate(raw).map_err(|e| e.to_string())
+}
+
+fn scalar_to_pg_param(scalar: &DbRpcScalar) -> Parameter {
+    match scalar {
+        DbRpcScalar::Null => Parameter::new(PgValue::Null),
+        DbRpcScalar::Bool(b) => Parameter::new(PgValue::Bool(*b)),
+        DbRpcScalar::Int(v) => Parameter::new(PgValue::Int8(*v)),
+        DbRpcScalar::UInt(v) => match i64::try_from(*v) {
+            Ok(i) => Parameter::new(PgValue::Int8(i)),
+            Err(_) => Parameter::new(PgValue::Text(v.to_string())),
+        },
+        DbRpcScalar::Float(v) => Parameter::new(PgValue::Float8(*v)),
+        DbRpcScalar::Str(s) => Parameter::new(PgValue::Text(s.clone())),
+        DbRpcScalar::Bytes(b) => Parameter::new(PgValue::Bytes(b.clone())),
+    }
+}
+
+fn pg_value_to_scalar(val: &PgValue) -> DbRpcScalar {
+    match val {
+        PgValue::Null => DbRpcScalar::Null,
+        PgValue::Bool(b) => DbRpcScalar::Bool(*b),
+        PgValue::Int2(v) => DbRpcScalar::Int(i64::from(*v)),
+        PgValue::Int4(v) => DbRpcScalar::Int(i64::from(*v)),
+        PgValue::Int8(v) => DbRpcScalar::Int(*v),
+        PgValue::Float4(v) => DbRpcScalar::Float(f64::from(*v)),
+        PgValue::Float8(v) => DbRpcScalar::Float(*v),
+        PgValue::Text(s) => DbRpcScalar::Str(s.clone()),
+        PgValue::Bytes(b) => DbRpcScalar::Bytes(b.clone()),
+        PgValue::Numeric(num) => DbRpcScalar::Str(num.to_canonical_string()),
+        PgValue::Json(raw) => DbRpcScalar::Str(String::from_utf8_lossy(raw).into_owned()),
+        other => DbRpcScalar::Str(format!("{other:?}")),
+    }
+}
+
+fn is_valid_savepoint_ident(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= 63
+        && (bytes[0].is_ascii_alphabetic() || bytes[0] == b'_')
+        && bytes[1..]
+            .iter()
+            .all(|b| b.is_ascii_alphanumeric() || *b == b'_')
+}
+
+fn encode_postgres_err(request_id: u64, err: &PostgresError) -> Vec<u8> {
+    encode_dbrpc_response_frame(&DbRpcEncodedResponse::error(
+        request_id,
+        "PostgresError",
+        err.to_string(),
+    ))
+}
+
+/// Shared-memory broker backend managing broker-hosted `PostgresPool` instances (`DIALECT_TAG_POSTGRES = 1`).
+pub struct PostgresBrokerBackend {
+    pools: RwLock<HashMap<u64, Arc<PostgresPool>>>,
+    next_pool_id: AtomicU64,
+}
+
+impl Default for PostgresBrokerBackend {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PostgresBrokerBackend {
+    /// Construct a new [`PostgresBrokerBackend`].
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            pools: RwLock::new(HashMap::new()),
+            next_pool_id: AtomicU64::new(1),
+        }
+    }
+}
+
+impl BrokerEngineBackend for PostgresBrokerBackend {
+    fn dialect_tag(&self) -> u16 {
+        DIALECT_TAG_POSTGRES
+    }
+
+    fn dialect_name(&self) -> &'static str {
+        "postgresql"
+    }
+
+    fn normalize_statement(&self, sql: &str) -> (String, usize) {
+        normalize_placeholders(sql, PlaceholderStyle::DollarNumbered)
+    }
+}
+
+impl BrokerPoolBackend for PostgresBrokerBackend {
+    fn open_pool(&self, dsn: &str, max_size: u32) -> Result<u64, String> {
+        if max_size == 0 {
+            return Err("PostgreSQL pool max_size must be >= 1".to_string());
+        }
+        let cfg = parse_postgres_broker_dsn(dsn)?;
+        let pool_max = max_size as usize;
+        let opts = PostgresPoolOptions {
+            min_size: 1usize.min(pool_max),
+            max_size: pool_max,
+            ..PostgresPoolOptions::default()
+        };
+        let pool = PostgresPool::new(cfg, opts).map_err(|e| e.to_string())?;
+        let pool_id = self.next_pool_id.fetch_add(1, Ordering::Relaxed);
+        let mut guard = self
+            .pools
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.insert(pool_id, pool);
+        Ok(pool_id)
+    }
+
+    fn execute(&self, pool_id: u64, frame: &[u8]) -> Result<Vec<u8>, String> {
+        let pool = {
+            let guard = self
+                .pools
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            guard.get(&pool_id).cloned()
+        }
+        .ok_or_else(|| format!("unknown pool id {pool_id}"))?;
+
+        let req = decode_dbrpc_request_frame(frame)?;
+        let req_id = req.request_id;
+        match req.op {
+            DbRpcOp::Close => {
+                self.close_pool(pool_id);
+                Ok(encode_dbrpc_response_frame(
+                    &DbRpcEncodedResponse::ok_count(req_id, 0, None),
+                ))
+            }
+            DbRpcOp::Execute => {
+                let raw_sql = req
+                    .sql
+                    .as_deref()
+                    .ok_or_else(|| "DBRPC Execute frame missing SQL".to_string())?;
+                let (norm_sql, _) = self.normalize_statement(raw_sql);
+                let params: Vec<Parameter> = req.params.iter().map(scalar_to_pg_param).collect();
+                let outcome: Result<QueryResult, PostgresError> = block_on_db(async move {
+                    let mut conn = pool.acquire().await?;
+                    let res = conn.query(&norm_sql, &params, None).await;
+                    let _ = conn.release().await;
+                    res
+                });
+                match outcome {
+                    Ok(qr) => {
+                        let resp = if qr.columns.is_empty() {
+                            DbRpcEncodedResponse::ok_count(
+                                req_id,
+                                i64::try_from(qr.affected_rows).unwrap_or(i64::MAX),
+                                None,
+                            )
+                        } else {
+                            let cols = qr.columns.into_iter().map(|c| c.name).collect();
+                            let rows = qr
+                                .rows
+                                .iter()
+                                .map(|row| row.iter().map(pg_value_to_scalar).collect())
+                                .collect();
+                            DbRpcEncodedResponse::ok_rows(
+                                req_id,
+                                i64::try_from(qr.affected_rows).unwrap_or(i64::MAX),
+                                cols,
+                                rows,
+                            )
+                        };
+                        Ok(encode_dbrpc_response_frame(&resp))
+                    }
+                    Err(err) => Ok(encode_postgres_err(req_id, &err)),
+                }
+            }
+            DbRpcOp::Begin => {
+                let outcome = block_on_db(async move {
+                    let mut conn = pool.acquire().await?;
+                    let res = conn.begin().await;
+                    let _ = conn.release().await;
+                    res
+                });
+                match outcome {
+                    Ok(_) => Ok(encode_dbrpc_response_frame(
+                        &DbRpcEncodedResponse::ok_count(req_id, 0, None),
+                    )),
+                    Err(err) => Ok(encode_postgres_err(req_id, &err)),
+                }
+            }
+            DbRpcOp::Commit => {
+                let outcome = block_on_db(async move {
+                    let mut conn = pool.acquire().await?;
+                    let res = conn.commit().await;
+                    let _ = conn.release().await;
+                    res
+                });
+                match outcome {
+                    Ok(_) => Ok(encode_dbrpc_response_frame(
+                        &DbRpcEncodedResponse::ok_count(req_id, 0, None),
+                    )),
+                    Err(err) => Ok(encode_postgres_err(req_id, &err)),
+                }
+            }
+            DbRpcOp::Rollback => {
+                let outcome = if let Some(sp) = req.savepoint {
+                    if !is_valid_savepoint_ident(&sp) {
+                        return Err(format!("invalid savepoint identifier `{sp}`"));
+                    }
+                    let stmt = format!("ROLLBACK TO SAVEPOINT {sp}");
+                    block_on_db(async move {
+                        let mut conn = pool.acquire().await?;
+                        let res = conn.simple_query(&stmt).await.map(|_| ());
+                        let _ = conn.release().await;
+                        res
+                    })
+                } else {
+                    block_on_db(async move {
+                        let mut conn = pool.acquire().await?;
+                        let res = conn.rollback().await.map(|_| ());
+                        let _ = conn.release().await;
+                        res
+                    })
+                };
+                match outcome {
+                    Ok(()) => Ok(encode_dbrpc_response_frame(
+                        &DbRpcEncodedResponse::ok_count(req_id, 0, None),
+                    )),
+                    Err(err) => Ok(encode_postgres_err(req_id, &err)),
+                }
+            }
+            DbRpcOp::Savepoint => {
+                let sp = req
+                    .savepoint
+                    .ok_or_else(|| "DBRPC Savepoint frame missing savepoint name".to_string())?;
+                if !is_valid_savepoint_ident(&sp) {
+                    return Err(format!("invalid savepoint identifier `{sp}`"));
+                }
+                let stmt = format!("SAVEPOINT {sp}");
+                let outcome = block_on_db(async move {
+                    let mut conn = pool.acquire().await?;
+                    let res = conn.simple_query(&stmt).await.map(|_| ());
+                    let _ = conn.release().await;
+                    res
+                });
+                match outcome {
+                    Ok(()) => Ok(encode_dbrpc_response_frame(
+                        &DbRpcEncodedResponse::ok_count(req_id, 0, None),
+                    )),
+                    Err(err) => Ok(encode_postgres_err(req_id, &err)),
+                }
+            }
+            other => Err(format!(
+                "unsupported DBRPC op {other:?} in PostgreSQL broker pool"
+            )),
+        }
+    }
+
+    fn close_pool(&self, pool_id: u64) {
+        let removed = {
+            let mut guard = self
+                .pools
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            guard.remove(&pool_id)
+        };
+        if let Some(pool) = removed {
+            let _ = block_on_db(async move { pool.close(Duration::from_secs(5)).await });
+        }
+    }
+}
+
+/// Export the `vertebra.BrokerEngineCapsule` PyCapsule for PostgreSQL (`DIALECT_TAG_POSTGRES = 1`).
+#[pyfunction]
+pub fn broker_engine_capsule(py: Python<'_>) -> PyResult<Bound<'_, PyCapsule>> {
+    new_broker_engine_pycapsule(py, Arc::new(PostgresBrokerBackend::new()))
+}
+
 #[pymodule(gil_used = false)]
 fn _postgres(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add("FREE_THREADED", FREE_THREADED)?;
     m.add("GIL_USED", GIL_USED)?;
+    m.add_function(wrap_pyfunction!(broker_engine_capsule, m)?)?;
     sync_client::PySyncPostgresClient::register(m)?;
     async_client::PyAsyncPostgresClient::register(m)?;
     python_pool::register(m)?;

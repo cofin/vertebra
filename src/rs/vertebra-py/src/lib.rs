@@ -32,7 +32,8 @@ pub use asgi::{
 };
 pub use async_bridge::{RustDbTaskAwaitable, TaskPanicError};
 pub use broker::{
-    BrokerStats, LeaseBroker, LeaseGrant, StatementCache, StatementCacheStats, StatementPlan,
+    BrokerEngineRegistry, BrokerStats, LeaseBroker, LeaseGrant, StatementCache,
+    StatementCacheStats, StatementPlan,
 };
 pub use db::{AlloyDBDialer, ArrowCursor, CloudSQLDialer};
 pub use gcp_auth::{
@@ -100,6 +101,7 @@ pub fn pymodule_init(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<telemetry::LogSink>()?;
     m.add_class::<telemetry::JWTGuard>()?;
     m.add_class::<telemetry::RateLimiter>()?;
+    m.add_class::<broker::BrokerEngineRegistry>()?;
     m.add_class::<broker::LeaseGrant>()?;
     m.add_class::<broker::BrokerStats>()?;
     m.add_class::<broker::LeaseBroker>()?;

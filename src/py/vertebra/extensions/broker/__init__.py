@@ -10,6 +10,7 @@ from vertebra.extensions.broker.dbrpc import (
     DbRpcRequest,
     DbRpcResponse,
 )
+from vertebra.extensions.broker.engines import BrokerEngineDiscovery
 from vertebra.extensions.broker.errors import (
     BrokerAttachError,
     BrokerAuthenticationError,
@@ -36,6 +37,7 @@ __all__ = (
     "BrokerAttachError",
     "BrokerAuthenticationError",
     "BrokerConfig",
+    "BrokerEngineDiscovery",
     "BrokerMetrics",
     "BrokerPlugin",
     "BrokerSegmentInUseError",

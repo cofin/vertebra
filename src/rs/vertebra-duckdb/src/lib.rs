@@ -11,7 +11,7 @@ pub mod errors;
 use std::collections::HashMap;
 use std::io::Cursor;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Mutex, RwLock, mpsc};
 use std::thread::{self, JoinHandle};
 
 use arrow_array::RecordBatch;
@@ -23,14 +23,21 @@ use duckdb::{AccessMode, Config, Connection, InterruptHandle, params_from_iter};
 use pyo3::buffer::PyBuffer;
 use pyo3::prelude::*;
 use pyo3::types::{
-    PyBool, PyByteArray, PyBytes, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple,
+    PyBool, PyByteArray, PyBytes, PyCapsule, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple,
 };
+use vertebra_core::broker::DIALECT_TAG_DUCKDB;
+use vertebra_core::dbrpc::DbRpcOp;
 use vertebra_core::notify::SyncCompletionQueue;
 use vertebra_core::shm::ShmRegion;
 use vertebra_db::arrow_shm::{ShmArrowFrameHeader, ShmArrowStreamWriter};
 use vertebra_db::duckdb::DuckdbConfig;
 use vertebra_db::py_async::{
     RustDbTaskAwaitable, construct_py_arrow_cursor, spawn_rust_db_task_with_attr,
+};
+use vertebra_db::{
+    BrokerEngineBackend, BrokerPoolBackend, DbRpcEncodedResponse, DbRpcScalar, PlaceholderStyle,
+    decode_dbrpc_request_frame, encode_dbrpc_response_frame, new_broker_engine_pycapsule,
+    normalize_placeholders,
 };
 
 use crate::errors::DuckDBClientError;
@@ -3502,12 +3509,376 @@ impl AsyncDuckDBClient {
     }
 }
 
+const DUCKDB_BROKER_ARROW_SPILL_ROWS: usize = 256;
+
+struct DuckDBPoolEntry {
+    inner: Arc<DuckDBInner>,
+    active_shm: Mutex<Vec<Arc<ShmRegion>>>,
+}
+
+/// Shared-memory broker backend managing single-writer DuckDB pools (`DIALECT_TAG_DUCKDB = 6`).
+pub struct DuckDBBrokerBackend {
+    pools: RwLock<HashMap<u64, Arc<DuckDBPoolEntry>>>,
+    next_pool_id: AtomicU64,
+}
+
+impl Default for DuckDBBrokerBackend {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl DuckDBBrokerBackend {
+    /// Construct a new [`DuckDBBrokerBackend`].
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            pools: RwLock::new(HashMap::new()),
+            next_pool_id: AtomicU64::new(1),
+        }
+    }
+}
+
+fn parse_duckdb_broker_dsn(dsn: &str) -> Result<String, String> {
+    let trimmed = dsn.trim();
+    if trimmed.is_empty() || trimmed.contains('\0') {
+        return Err("DuckDB DSN must not be empty or contain NUL bytes".to_string());
+    }
+    if trimmed == ":memory:" {
+        return Ok(":memory:".to_string());
+    }
+    if let Some((scheme, rest)) = trimmed.split_once("://") {
+        let lower_scheme = scheme.to_ascii_lowercase();
+        if lower_scheme != "duckdb" && lower_scheme != "file" {
+            return Err(format!("invalid DuckDB DSN scheme `{scheme}://`"));
+        }
+        let target = rest.split_once('?').map_or(rest, |(path, _)| path).trim();
+        if target.is_empty()
+            || target == ":memory:"
+            || target == "/:memory:"
+            || target.eq_ignore_ascii_case("memory")
+        {
+            return Ok(":memory:".to_string());
+        }
+        return Ok(target.to_string());
+    }
+    Ok(trimmed.to_string())
+}
+
+fn scalar_to_duck_value(scalar: &DbRpcScalar) -> DuckValue {
+    match scalar {
+        DbRpcScalar::Null => DuckValue::Null,
+        DbRpcScalar::Bool(b) => DuckValue::Boolean(*b),
+        DbRpcScalar::Int(v) => DuckValue::BigInt(*v),
+        DbRpcScalar::UInt(v) => DuckValue::UBigInt(*v),
+        DbRpcScalar::Float(v) => DuckValue::Double(*v),
+        DbRpcScalar::Str(s) => DuckValue::Text(s.clone()),
+        DbRpcScalar::Bytes(b) => DuckValue::Blob(b.clone()),
+    }
+}
+
+fn duck_value_to_scalar(val: &DuckValue) -> DbRpcScalar {
+    match val {
+        DuckValue::Null => DbRpcScalar::Null,
+        DuckValue::Boolean(b) => DbRpcScalar::Bool(*b),
+        DuckValue::TinyInt(v) => DbRpcScalar::Int(i64::from(*v)),
+        DuckValue::SmallInt(v) => DbRpcScalar::Int(i64::from(*v)),
+        DuckValue::Int(v) => DbRpcScalar::Int(i64::from(*v)),
+        DuckValue::BigInt(v) => DbRpcScalar::Int(*v),
+        DuckValue::HugeInt(v) => match i64::try_from(*v) {
+            Ok(i) => DbRpcScalar::Int(i),
+            Err(_) => DbRpcScalar::Str(v.to_string()),
+        },
+        DuckValue::UTinyInt(v) => DbRpcScalar::Int(i64::from(*v)),
+        DuckValue::USmallInt(v) => DbRpcScalar::Int(i64::from(*v)),
+        DuckValue::UInt(v) => DbRpcScalar::Int(i64::from(*v)),
+        DuckValue::UBigInt(v) => match i64::try_from(*v) {
+            Ok(i) => DbRpcScalar::Int(i),
+            Err(_) => DbRpcScalar::UInt(*v),
+        },
+        DuckValue::Float(v) => DbRpcScalar::Float(f64::from(*v)),
+        DuckValue::Double(v) => DbRpcScalar::Float(*v),
+        DuckValue::Decimal(d) => DbRpcScalar::Str(d.to_string()),
+        DuckValue::Text(s) | DuckValue::Enum(s) => DbRpcScalar::Str(s.clone()),
+        DuckValue::Blob(b) => DbRpcScalar::Bytes(b.clone()),
+        DuckValue::Union(inner) => duck_value_to_scalar(inner),
+        other => DbRpcScalar::Str(format!("{other:?}")),
+    }
+}
+
+fn sql_returns_rows(sql: &str) -> bool {
+    let upper = sql.to_ascii_uppercase();
+    is_read_only_sql(sql) || upper.contains(" RETURNING ")
+}
+
+fn encode_duckdb_err(request_id: u64, err: &DuckDBClientError) -> Vec<u8> {
+    encode_dbrpc_response_frame(&DbRpcEncodedResponse::error(
+        request_id,
+        "DuckDBError",
+        err.to_string(),
+    ))
+}
+
+impl BrokerEngineBackend for DuckDBBrokerBackend {
+    fn dialect_tag(&self) -> u16 {
+        DIALECT_TAG_DUCKDB
+    }
+
+    fn dialect_name(&self) -> &'static str {
+        "duckdb"
+    }
+
+    fn normalize_statement(&self, sql: &str) -> (String, usize) {
+        normalize_placeholders(sql, PlaceholderStyle::QuestionMark)
+    }
+}
+
+impl BrokerPoolBackend for DuckDBBrokerBackend {
+    fn open_pool(&self, dsn: &str, max_size: u32) -> Result<u64, String> {
+        if max_size == 0 {
+            return Err("DuckDB pool max_size must be >= 1".to_string());
+        }
+        let db_path = parse_duckdb_broker_dsn(dsn)?;
+        let inner = DuckDBInner::open(
+            &db_path,
+            false,
+            max_size as usize,
+            None,
+            None,
+            None,
+            true,
+            true,
+            true,
+            None,
+            None,
+            None,
+        )
+        .map_err(|e| e.to_string())?;
+        let entry = Arc::new(DuckDBPoolEntry {
+            inner,
+            active_shm: Mutex::new(Vec::new()),
+        });
+        let pool_id = self.next_pool_id.fetch_add(1, Ordering::Relaxed);
+        let mut guard = self
+            .pools
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.insert(pool_id, entry);
+        Ok(pool_id)
+    }
+
+    fn execute(&self, pool_id: u64, frame: &[u8]) -> Result<Vec<u8>, String> {
+        let entry = {
+            let guard = self
+                .pools
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            guard.get(&pool_id).cloned()
+        }
+        .ok_or_else(|| format!("unknown pool id {pool_id}"))?;
+
+        let req = decode_dbrpc_request_frame(frame)?;
+        let req_id = req.request_id;
+        let cancel_flag = entry.inner.register_cancel_flag();
+        match req.op {
+            DbRpcOp::Execute => {
+                let raw_sql = req
+                    .sql
+                    .as_deref()
+                    .ok_or_else(|| "DBRPC Execute frame missing SQL".to_string())?;
+                let (norm_sql, _) = self.normalize_statement(raw_sql);
+                let bound = if req.params.is_empty() {
+                    BoundParams::Empty
+                } else {
+                    BoundParams::Positional(req.params.iter().map(scalar_to_duck_value).collect())
+                };
+                if sql_returns_rows(&norm_sql) {
+                    if req.chunk_rows > 0 {
+                        let batch_size = usize::try_from(req.chunk_rows.max(1024)).unwrap_or(65536);
+                        return match entry.inner.query_arrow_payload(
+                            norm_sql,
+                            bound,
+                            batch_size,
+                            0,
+                            &cancel_flag,
+                        ) {
+                            Ok(ArrowResultPayload::Shm {
+                                shm_name,
+                                row_count,
+                                region,
+                                ..
+                            }) => {
+                                entry
+                                    .active_shm
+                                    .lock()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                    .push(region);
+                                Ok(encode_dbrpc_response_frame(
+                                    &DbRpcEncodedResponse::ok_arrow_shm(
+                                        req_id,
+                                        i64::try_from(row_count).unwrap_or(i64::MAX),
+                                        Vec::new(),
+                                        shm_name,
+                                    ),
+                                ))
+                            }
+                            Ok(ArrowResultPayload::Inline { .. }) => {
+                                unreachable!("threshold_rows=0 enforces SHM")
+                            }
+                            Err(err) => Ok(encode_duckdb_err(req_id, &err)),
+                        };
+                    }
+                    match entry
+                        .inner
+                        .query_sql(norm_sql.clone(), bound.clone(), &cancel_flag)
+                    {
+                        Ok(res) if res.rows.len() > DUCKDB_BROKER_ARROW_SPILL_ROWS => {
+                            let columns = res.columns;
+                            match entry.inner.query_arrow_payload(
+                                norm_sql,
+                                bound,
+                                1024,
+                                0,
+                                &cancel_flag,
+                            ) {
+                                Ok(ArrowResultPayload::Shm {
+                                    shm_name,
+                                    row_count,
+                                    region,
+                                    ..
+                                }) => {
+                                    entry
+                                        .active_shm
+                                        .lock()
+                                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                        .push(region);
+                                    Ok(encode_dbrpc_response_frame(
+                                        &DbRpcEncodedResponse::ok_arrow_shm(
+                                            req_id,
+                                            i64::try_from(row_count).unwrap_or(i64::MAX),
+                                            columns,
+                                            shm_name,
+                                        ),
+                                    ))
+                                }
+                                Ok(ArrowResultPayload::Inline { .. }) => {
+                                    unreachable!("threshold_rows=0 enforces SHM")
+                                }
+                                Err(err) => Ok(encode_duckdb_err(req_id, &err)),
+                            }
+                        }
+                        Ok(res) => {
+                            let rows: Vec<Vec<DbRpcScalar>> = res
+                                .rows
+                                .iter()
+                                .map(|row| row.iter().map(duck_value_to_scalar).collect())
+                                .collect();
+                            let rowcount = i64::try_from(rows.len()).unwrap_or(i64::MAX);
+                            Ok(encode_dbrpc_response_frame(&DbRpcEncodedResponse::ok_rows(
+                                req_id,
+                                rowcount,
+                                res.columns,
+                                rows,
+                            )))
+                        }
+                        Err(err) => Ok(encode_duckdb_err(req_id, &err)),
+                    }
+                } else {
+                    match entry.inner.execute_sql(norm_sql, bound, &cancel_flag) {
+                        Ok(changed) => Ok(encode_dbrpc_response_frame(
+                            &DbRpcEncodedResponse::ok_count(req_id, changed, None),
+                        )),
+                        Err(err) => Ok(encode_duckdb_err(req_id, &err)),
+                    }
+                }
+            }
+            DbRpcOp::Begin => match entry.inner.begin_tx(&cancel_flag) {
+                Ok(()) => Ok(encode_dbrpc_response_frame(
+                    &DbRpcEncodedResponse::ok_count(req_id, 0, None),
+                )),
+                Err(err) => Ok(encode_duckdb_err(req_id, &err)),
+            },
+            DbRpcOp::Commit => match entry.inner.commit_tx(&cancel_flag) {
+                Ok(()) => Ok(encode_dbrpc_response_frame(
+                    &DbRpcEncodedResponse::ok_count(req_id, 0, None),
+                )),
+                Err(err) => Ok(encode_duckdb_err(req_id, &err)),
+            },
+            DbRpcOp::Rollback => {
+                let res = if let Some(sp) = req.savepoint.as_deref() {
+                    entry.inner.rollback_to_savepoint_tx(sp, &cancel_flag)
+                } else {
+                    entry.inner.rollback_tx(&cancel_flag)
+                };
+                match res {
+                    Ok(()) => Ok(encode_dbrpc_response_frame(
+                        &DbRpcEncodedResponse::ok_count(req_id, 0, None),
+                    )),
+                    Err(err) => Ok(encode_duckdb_err(req_id, &err)),
+                }
+            }
+            DbRpcOp::Savepoint => {
+                let sp = req
+                    .savepoint
+                    .as_deref()
+                    .ok_or_else(|| "DBRPC Savepoint frame missing savepoint name".to_string())?;
+                match entry.inner.savepoint_tx(sp) {
+                    Ok(()) => Ok(encode_dbrpc_response_frame(
+                        &DbRpcEncodedResponse::ok_count(req_id, 0, None),
+                    )),
+                    Err(err) => Ok(encode_duckdb_err(req_id, &err)),
+                }
+            }
+            DbRpcOp::Cancel => {
+                entry.inner.interrupt_all();
+                Ok(encode_dbrpc_response_frame(
+                    &DbRpcEncodedResponse::ok_count(req_id, 0, None),
+                ))
+            }
+            DbRpcOp::Close => {
+                self.close_pool(pool_id);
+                Ok(encode_dbrpc_response_frame(
+                    &DbRpcEncodedResponse::ok_count(req_id, 0, None),
+                ))
+            }
+            other => Err(format!(
+                "unsupported DBRPC op {other:?} in DuckDB broker pool"
+            )),
+        }
+    }
+
+    fn close_pool(&self, pool_id: u64) {
+        let removed = {
+            let mut guard = self
+                .pools
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            guard.remove(&pool_id)
+        };
+        if let Some(entry) = removed {
+            entry.inner.close_all();
+            entry
+                .active_shm
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clear();
+        }
+    }
+}
+
+/// Export the `vertebra.BrokerEngineCapsule` PyCapsule for DuckDB (`DIALECT_TAG_DUCKDB = 6`).
+#[pyfunction]
+pub fn broker_engine_capsule(py: Python<'_>) -> PyResult<Bound<'_, PyCapsule>> {
+    new_broker_engine_pycapsule(py, Arc::new(DuckDBBrokerBackend::new()))
+}
+
 /// Native `vertebra._duckdb` Python extension module.
 #[pymodule(gil_used = false)]
 pub fn _duckdb(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add("FREE_THREADED", FREE_THREADED)?;
     m.add("GIL_USED", false)?;
+    m.add_function(wrap_pyfunction!(broker_engine_capsule, m)?)?;
     m.add_class::<SyncDuckDBClient>()?;
     m.add_class::<AsyncDuckDBClient>()?;
     m.add(
@@ -3518,6 +3889,7 @@ pub fn _duckdb(m: &Bound<'_, PyModule>) -> PyResult<()> {
             "AsyncDuckDBClient",
             "SyncDuckDBClient",
             "__version__",
+            "broker_engine_capsule",
         ],
     )?;
     Ok(())

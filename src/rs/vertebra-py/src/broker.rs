@@ -1,16 +1,19 @@
 //! PyO3 bindings for shared-memory connection broker and statement cache.
 
-use std::sync::Arc;
+use std::collections::BTreeMap;
+use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Duration;
 
 use pyo3::buffer::PyBuffer;
+use pyo3::exceptions::{PyRuntimeError, PyTypeError};
 use pyo3::prelude::*;
-use pyo3::types::{PyAnyMethods, PyByteArray, PyBytes, PyString};
+use pyo3::types::{PyAnyMethods, PyByteArray, PyBytes, PyCapsule, PyString};
 use vertebra_core::broker::{
     BrokerError, LeaseGrant as RsLeaseGrant, LeaseTableStats, PoolPartitionSpec, ShmLeaseTable,
     ShmStatementCache, StatementCacheStats as RsStatementCacheStats, StatementPlanEntry,
 };
 use vertebra_core::shm::ShmRegion;
+use vertebra_db::{BROKER_ENGINE_CAPSULE_NAME, BrokerEngineCapsule, ForeignEngineCapsule};
 
 type PyChannelFrame<'py> = (String, Bound<'py, PyBytes>, u64, Option<String>);
 
@@ -831,5 +834,106 @@ impl StatementCache {
     #[getter]
     pub fn capacity(&self) -> u32 {
         self.cache.capacity()
+    }
+}
+
+static ENGINE_REGISTRY: OnceLock<RwLock<BTreeMap<u16, ForeignEngineCapsule>>> = OnceLock::new();
+
+fn engine_registry() -> &'static RwLock<BTreeMap<u16, ForeignEngineCapsule>> {
+    ENGINE_REGISTRY.get_or_init(|| RwLock::new(BTreeMap::new()))
+}
+
+fn lookup_engine_handle(dialect_tag: u16) -> PyResult<ForeignEngineCapsule> {
+    let guard = engine_registry()
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    guard.get(&dialect_tag).cloned().ok_or_else(|| {
+        PyRuntimeError::new_err(format!(
+            "no broker engine registered for dialect_tag {dialect_tag}"
+        ))
+    })
+}
+
+/// Process-wide registry of imported `BrokerEngineCapsule` vtables keyed by dialect tag.
+#[pyclass(module = "vertebra._vertebra", frozen, immutable_type)]
+pub struct BrokerEngineRegistry;
+
+#[pymethods]
+impl BrokerEngineRegistry {
+    #[staticmethod]
+    #[pyo3(signature = (capsule))]
+    pub fn register(capsule: &Bound<'_, PyAny>) -> PyResult<u16> {
+        let cap = capsule.cast::<PyCapsule>().map_err(|_| {
+            PyTypeError::new_err("capsule must be a vertebra.BrokerEngineCapsule PyCapsule")
+        })?;
+        let ptr = cap
+            .pointer_checked(Some(BROKER_ENGINE_CAPSULE_NAME))
+            .map_err(|_| {
+                PyTypeError::new_err(
+                    "PyCapsule name mismatch; expected vertebra.BrokerEngineCapsule",
+                )
+            })?
+            .as_ptr()
+            .cast::<BrokerEngineCapsule>();
+        // SAFETY: `pointer_checked` verified `BROKER_ENGINE_CAPSULE_NAME` on a live `PyCapsule`
+        // holding a `BrokerEngineCapsule` value initialized by `new_broker_engine_pycapsule`.
+        let handle = unsafe { ForeignEngineCapsule::from_capsule_ptr(ptr) }
+            .map_err(PyRuntimeError::new_err)?;
+        let tag = handle.dialect_tag();
+        let replaced = {
+            let mut guard = engine_registry()
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            guard.insert(tag, handle)
+        };
+        drop(replaced);
+        Ok(tag)
+    }
+
+    #[staticmethod]
+    pub fn registered_tags() -> Vec<u16> {
+        let guard = engine_registry()
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.keys().copied().collect()
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (dialect_tag, sql))]
+    pub fn normalize(py: Python<'_>, dialect_tag: u16, sql: &str) -> PyResult<(String, usize)> {
+        let handle = lookup_engine_handle(dialect_tag)?;
+        py.detach(|| handle.normalize(sql))
+            .map_err(PyRuntimeError::new_err)
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (dialect_tag, dsn, max_size))]
+    pub fn open_pool(py: Python<'_>, dialect_tag: u16, dsn: &str, max_size: u32) -> PyResult<u64> {
+        let handle = lookup_engine_handle(dialect_tag)?;
+        py.detach(|| handle.open_pool(dsn, max_size))
+            .map_err(PyRuntimeError::new_err)
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (dialect_tag, pool_id, frame))]
+    pub fn execute<'py>(
+        py: Python<'py>,
+        dialect_tag: u16,
+        pool_id: u64,
+        frame: &[u8],
+    ) -> PyResult<Bound<'py, PyBytes>> {
+        let handle = lookup_engine_handle(dialect_tag)?;
+        let response = py
+            .detach(|| handle.execute(pool_id, frame))
+            .map_err(PyRuntimeError::new_err)?;
+        Ok(PyBytes::new(py, &response))
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (dialect_tag, pool_id))]
+    pub fn close_pool(py: Python<'_>, dialect_tag: u16, pool_id: u64) -> PyResult<()> {
+        let handle = lookup_engine_handle(dialect_tag)?;
+        py.detach(|| handle.close_pool(pool_id));
+        Ok(())
     }
 }

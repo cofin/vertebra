@@ -31,6 +31,7 @@ __all__ = [
     "AsyncGcpTokenCache",
     "BigQueryError",
     "BigQueryRowError",
+    "BrokerEngineRegistry",
     "BrokerStats",
     "CloudSQLDialer",
     "ConnectionFailure",
@@ -991,6 +992,22 @@ class StatementCache:
     def invalidate_all(self) -> None: ...
     @property
     def capacity(self) -> int: ...
+
+@final
+class BrokerEngineRegistry:
+    @staticmethod
+    def register(capsule: object) -> int: ...
+    @staticmethod
+    def registered_tags() -> list[int]: ...
+    @staticmethod
+    def normalize(dialect_tag: int, sql: str) -> tuple[str, int]: ...
+    @staticmethod
+    def open_pool(dialect_tag: int, dsn: str, max_size: int) -> int: ...
+    @staticmethod
+    def execute(dialect_tag: int, pool_id: int, frame: bytes) -> bytes: ...
+    @staticmethod
+    def close_pool(dialect_tag: int, pool_id: int) -> None: ...
+
 
 def stable_hash64(data: bytes | str) -> int: ...
 
