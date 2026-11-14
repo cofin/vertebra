@@ -3,8 +3,8 @@ type: Task
 id: "native-postgres-driver:ch09-data-packaging-okf-and-routing-sync:t03"
 flow_id: native-postgres-driver
 chapter_id: ch09-data-packaging-okf-and-routing-sync
-title: "Synchronize tech-stack.md, product.md, and packaging-and-pgo.md"
-description: "Update product/tech-stack.md, product/product.md, and domains/frontend/packaging-and-pgo.md (<= 200L each) for postgres-bench and companion wheel checks."
+title: "Synchronize tech-stack.md, product.md, packaging-and-pgo.md, and sqlspec-alchemy-and-dialects.md"
+description: "Update product/tech-stack.md, product/product.md, domains/frontend/packaging-and-pgo.md, and domains/extensions/sqlspec-alchemy-and-dialects.md (<= 200L each)."
 status: stable
 state: pending
 planning_quality: standard
@@ -25,6 +25,7 @@ read_set:
   - .agents/bundles/product/tech-stack.md
   - .agents/bundles/product/product.md
   - .agents/bundles/knowledge/domains/frontend/packaging-and-pgo.md
+  - .agents/bundles/knowledge/domains/extensions/sqlspec-alchemy-and-dialects.md
 estimated_loc: 140
 tags:
   - docs
@@ -36,19 +37,19 @@ sources:
     title: "Vertebra technology stack"
 ---
 
-# Task `t03`: Synchronize tech-stack.md, product.md, and packaging-and-pgo.md
+# Task `t03`: Synchronize tech-stack.md, product.md, packaging-and-pgo.md, and sqlspec-alchemy-and-dialects.md
 
 ## Objective & Scope Boundary
 
-Add `postgres-bench`, standalone `vertebra._postgres` + `PostgresChangeSource`, and `verify_postgres_wheel.py` across `tech-stack.md`, `product.md`, and `packaging-and-pgo.md` (`<= 200L` each) [^tech-stack].
+Update `tech-stack.md`, `product.md`, `packaging-and-pgo.md`, and `sqlspec-alchemy-and-dialects.md` (`<= 200L` each) for `postgres-bench`, standalone `vertebra._postgres` + `PostgresChangeSource`, companion wheel checks, and SQLSpec `DatabaseConfigProtocol` typing alignment (`#131`) [^tech-stack].
 
 ## Bounded Read Manifest
 
-- `tech-stack.md`, `product.md`, and `packaging-and-pgo.md`.
+- `tech-stack.md`, `product.md`, `packaging-and-pgo.md`, and `sqlspec-alchemy-and-dialects.md`.
 
 ## Contracts & Edge Cases
 
-- Keep all 3 files `<= 200` lines with `<= 40` truth-block lines.
+- Keep all 4 files `<= 200` lines with `<= 40` truth-block lines.
 
 ## Test Matrix
 
@@ -62,7 +63,7 @@ make review-check
 
 ## Acceptance Criteria
 
-- [ ] All 3 product/packaging OKF files pass `make review-check` within `<= 200` lines.
+- [ ] All 4 product/packaging/extensions OKF files pass `make review-check` within `<= 200` lines.
 - [ ] Zero regressions in `ch09-data-packaging-okf-and-routing-sync` fast verification gate.
 
 [^tech-stack]: `.agents/bundles/product/tech-stack.md` — Vertebra technology stack.

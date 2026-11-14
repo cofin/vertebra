@@ -108,7 +108,7 @@ Shared plugin behavior:
 | [`ProxySyncConfig` / `ProxyAsyncConfig`](../../../../../src/py/vertebra/extensions/sqlspec/proxy.py)[^src-extensions-sqlspec-proxy-py] | `sqlspec/proxy.py` | **Tier-2 universal SHM broker proxy**: wraps *any* existing SQLSpec or Advanced Alchemy driver (`asyncpg`, `psycopg`, `oracledb`, `duckdb`, `adbc`, etc.) with `LeaseBroker` slot acquisition, `StatementCache` plan lookup, and zero-copy `ShmRegion` Arrow IPC transfer. |
 | [`ChangeFeedSyncEventBackend` / `ChangeFeedAsyncEventBackend`](../../../../../src/py/vertebra/extensions/sqlspec/events.py)[^src-extensions-sqlspec-events-py] | `sqlspec/events.py` | SQLSpec event backends bridging database transactions to Vertebra CDC `ChangeFeed`. |
 
-BigQuery and Spanner configs and drivers reject non-None `tenant_predicate` before base initialization, supplied-core access, resolver/default-broker access, or native effects. These eight constructor guards prevent unsupported isolation sessions from existing. Ordinary None-predicate queries, scripts, Arrow, batch, and snapshots retain their previous preparation and results.
+BigQuery and Spanner configs and drivers reject non-None `tenant_predicate` before base initialization, supplied-core access, resolver/default-broker access, or native effects. These eight constructor guards prevent unsupported isolation sessions from existing. Unconfigured sessions retain query, script, Arrow, batch, and snapshot behavior.
 
 Pool defaults: when a broker is attached to a `+vtb` dialect (`poolclass="NullPool"`), SQLAlchemy's per-process `QueuePool` is bypassed so the cross-process `LeaseBroker` governs connection concurrency.
 

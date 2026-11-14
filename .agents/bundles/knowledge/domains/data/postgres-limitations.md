@@ -44,7 +44,7 @@ sources:
 
 ## Operational Boundaries
 
-- **Queue Executor Ownership**: [`PostgreSQLQueueBackend`](../../../../../src/py/vertebra/framework/queues/postgres.py)[^pg-queue-py] executes `FOR UPDATE SKIP LOCKED` and `LISTEN/NOTIFY` queries through an injected `PostgreSQLQueueExecutor` until dedicated native queue stores ship under the `queues-tasks-and-channels` specification.
+- **Queue Executor Ownership**: [`PostgreSQLQueueBackend`](../../../../../src/py/vertebra/framework/queues/postgres.py)[^pg-queue-py] executes `FOR UPDATE SKIP LOCKED` and `LISTEN/NOTIFY` queries through an injected `PostgreSQLQueueExecutor` without a built-in native SQL queue store.
 - **Session-Pinned Features Behind Poolers**: Set `direct_dsn` on [`PostgreSQLConfig`](../../../../../src/py/vertebra/db/adapters/postgres/config.py)[^pg-config-py] when running behind PgBouncer `transaction` or `statement` pooling so `derive_direct_config()` isolates `LISTEN/NOTIFY`, logical replication (`ReplicationSupervisor`), and DDL/migrations onto direct session connections.
 - **SQL Compilation & Pyformat Emulation**: Native drivers normalize Python parameters to immutable `Pg*`/`bytes` values; `pyformat` emulation in [`binds.py`](../../../../../src/py/vertebra/db/adapters/postgres/binds.py) rejects ambiguous ordinary-string backslash escapes in favor of explicit `E'...'` or `$1..$N` numeric placeholders.
 

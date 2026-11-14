@@ -1,7 +1,7 @@
 ---
 type: Gotcha
 title: Database Driver Limitations
-description: Verified cross-driver runtime boundaries covering native PostgreSQL/Oracle/MSSQL wheel status and DuckDB GCS credential handling.
+description: Cross-driver runtime caveats covering companion wheel loading, GIL-only DuckDB benchmark packaging, queue executors, and GCS secret configuration.
 status: stable
 tags:
 - data
@@ -40,18 +40,16 @@ sources:
 # Database Driver Limitations
 
 <!-- truth: start -->
-- `SyncPostgreSQLDriver` and `AsyncPostgreSQLDriver` (`adapters/postgres/driver.py` re-exporting `_sync` / `_async`) execute natively through `vertebra._postgres` (`vertebra-core[postgres]`) with `$1..$N` SQLSpec (`ParameterStyle.NUMERIC`) and SQLAlchemy (`numeric_dollar`) compilation, COPY/Arrow streams, `AsyncPostgresListener`, `AsyncPostgresReplication`, `PostgresChangeSource`, and PG14–18 live conformance (`pending_flow_id=None`, `VERTEBRA_CONFORMANCE_POSTGRES_REQUIRE_ZERO_SKIPS=1`); legacy `psycopg`/`psycopg_pool`/`asyncpg` runtime paths and dialer helpers are removed [^pg-driver] [^pg-stub].
+- `SyncPostgreSQLDriver` and `AsyncPostgreSQLDriver` (`adapters/postgres/driver.py` re-exporting `_sync` / `_async`) execute natively through `vertebra._postgres` (`vertebra-core[postgres]`) with `$1..$N` dialect compilation; runtime pooler, logical replication slot, and Arrow interface boundaries are detailed in [PostgreSQL Native Driver Limitations](postgres-limitations.md) [^pg-driver] [^pg-stub].
 - `PostgreSQLQueueBackend` probes `vertebra._postgres` (`vertebra-core[postgres]`, extra `postgres`) when no `executor=` is passed and raises `MissingDependencyError` when absent or `ImproperConfigurationError` when present without `executor=`; `OracleQueueBackend` (`oracledb`) likewise requires a caller-supplied executor [^pg-queue].
 - Optional companion driver wheels (`vertebra-postgres`, `vertebra-mysql`, `vertebra-oracle`, `vertebra-mssql`, `vertebra-duckdb`, `vertebra-bigquery`, `vertebra-spanner`) load dynamically via `ensure_module` and fail loud with `MissingDependencyError(install_package="vertebra-core[<extra>]")` when omitted from the active environment; upstream `duckdb` publishes no free-threaded wheel so `[duckdb]` / `dependency-groups.duckdb` benchmark history stays GIL-only while `vertebra._duckdb` builds across all supported CPython ABIs.
 - `DuckDBCore` provides only `is_write_statement`; there is no GCS `CREATE SECRET` builder and no bundled GCS bearer-token secret provider. GCS `httpfs` access requires a caller-supplied `DuckDBSecretConfig` (`secret_type="gcs"`) with a static `value` mapping or a sync/async `value_provider` [^duckdb-core] [^duckdb-secret].
 <!-- truth: end -->
 
-## Companion Flows
+## Related Context
 
-- The `driver-conformance-ci` flow owns shared DuckDB GCS bearer secret rotation and CI matrix automation across optional database wheels.
-- Detailed PostgreSQL operational caveats live in [PostgreSQL Native Driver Limitations](postgres-limitations.md).
-
-Current adapter behavior is described in [Database Drivers & Cloud Dialers](database-drivers-and-dialers.md).
+- PostgreSQL operational caveats: [PostgreSQL Native Driver Limitations](postgres-limitations.md).
+- Driver and cloud dialer behavior: [Database Drivers & Cloud Dialers](database-drivers-and-dialers.md).
 
 [^pg-driver]: `src/py/vertebra/db/adapters/postgres/driver.py::SyncPostgreSQLDriver` — Native PostgreSQL drivers over `vertebra._postgres`.
 [^pg-queue]: `src/py/vertebra/framework/queues/postgres.py::PostgreSQLQueueBackend` — PostgreSQL queue backend `vertebra._postgres` probe.
