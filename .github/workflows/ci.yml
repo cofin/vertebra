@@ -334,3 +334,97 @@ jobs:
           VERTEBRA_CONFORMANCE_DOCKER: "1"
           VERTEBRA_CONFORMANCE_POSTGRES_REQUIRE_ZERO_SKIPS: "1"
         run: uv run --no-sync pytest src/py/tests/integration/db/test_postgres_replication_live.py src/py/tests/integration/db/test_postgres_native_features_live.py src/py/tests/integration/db/test_postgres_command_deadlines.py -v
+
+  test-db-conformance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    needs: [changes, lint]
+    if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.python == 'true' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.ci == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - engine: duckdb
+            version: ""
+            python-version: "3.12"
+          - engine: duckdb
+            version: ""
+            python-version: "3.14t"
+          - engine: mysql
+            version: "8.0"
+            python-version: "3.12"
+          - engine: mysql
+            version: "8.4"
+            python-version: "3.12"
+          - engine: mysql
+            version: "9.7"
+            python-version: "3.12"
+          - engine: mysql
+            version: "8.4"
+            python-version: "3.14t"
+          - engine: mariadb
+            version: "11.4"
+            python-version: "3.12"
+          - engine: mariadb
+            version: "11.8"
+            python-version: "3.12"
+          - engine: mssql
+            version: "2022"
+            python-version: "3.12"
+          - engine: mssql
+            version: "2025"
+            python-version: "3.12"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "src/rs"
+          key: "db-conformance-${{ matrix.engine }}-${{ matrix.python-version }}"
+          shared-key: "vertebra"
+          cache-on-failure: true
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          python-version: ${{ matrix.python-version }}
+      - name: Install free-threaded Python
+        if: matrix.python-version == '3.14t'
+        run: uv python install 3.14t
+      - name: Build native extensions
+        env:
+          CARGO_PROFILE_DEV_DEBUG: "0"
+          CARGO_INCREMENTAL: "0"
+        run: uv sync --frozen --group test && make dev
+      - name: Run zero-skip ${{ matrix.engine }} ${{ matrix.version }} conformance
+        run: make db-conformance ENGINE=${{ matrix.engine }} VERSION=${{ matrix.version }}
+
+  conformance-oracle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    continue-on-error: true
+    needs: [changes, lint]
+    if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.python == 'true' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.ci == 'true'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "src/rs"
+          key: "db-conformance-oracle-23ai"
+          shared-key: "vertebra"
+          cache-on-failure: true
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          python-version: "3.12"
+      - name: Build native extensions
+        env:
+          CARGO_PROFILE_DEV_DEBUG: "0"
+          CARGO_INCREMENTAL: "0"
+        run: uv sync --frozen --group test && make dev
+      - name: Run zero-skip Oracle 23ai conformance
+        run: make db-conformance ENGINE=oracle VERSION=23ai

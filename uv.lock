@@ -3618,7 +3618,7 @@ zuvloop = [
 
 [package.dev-dependencies]
 bench = [
-    { name = "duckdb" },
+    { name = "duckdb", marker = "python_full_version < '3.14'" },
     { name = "granian" },
     { name = "httptools" },
     { name = "spikard" },
@@ -3674,7 +3674,7 @@ doc = [
     { name = "zensical" },
 ]
 duckdb = [
-    { name = "duckdb" },
+    { name = "duckdb", marker = "python_full_version < '3.14'" },
 ]
 lint = [
     { name = "django-stubs" },
@@ -3763,7 +3763,7 @@ provides-extras = ["sqlspec", "alchemy", "arrow", "pydantic", "attrs", "polars",
 
 [package.metadata.requires-dev]
 bench = [
-    { name = "duckdb", specifier = ">=1.0" },
+    { name = "duckdb", marker = "python_full_version < '3.14'", specifier = ">=1.0" },
     { name = "granian", specifier = ">=1.6" },
     { name = "httptools", specifier = ">=0.6" },
     { name = "spikard", specifier = ">=0.12" },
@@ -3818,7 +3818,7 @@ doc = [
     { name = "ruff", specifier = ">=0.4" },
     { name = "zensical", specifier = ">=0.0.71" },
 ]
-duckdb = [{ name = "duckdb", specifier = ">=1.0" }]
+duckdb = [{ name = "duckdb", marker = "python_full_version < '3.14'", specifier = ">=1.0" }]
 lint = [
     { name = "django-stubs", specifier = ">=6.1.2" },
     { name = "mypy" },

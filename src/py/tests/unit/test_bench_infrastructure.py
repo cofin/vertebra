@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+import subprocess
+import tomllib
+from pathlib import Path
+
 import pytest
+import yaml
 from tools.benchmarks import targets as bench_targets
 from tools.benchmarks.apps.asgi import app as asgi_app
 from tools.benchmarks.apps.vertebra_app import native_app
@@ -149,3 +154,153 @@ def test_ft_env_prefers_315t_before_314t(monkeypatch: pytest.MonkeyPatch) -> Non
     env = bench_targets._ft_env()
     assert calls == ["3.15t"]
     assert "3.15t" in env["LD_LIBRARY_PATH"]
+
+
+_REPO_ROOT = Path(__file__).resolve().parents[4]
+
+
+@pytest.mark.parametrize(
+    ("engine", "version", "expected_tokens", "forbidden_tokens"),
+    [
+        (
+            "mysql",
+            "8.4",
+            (
+                "VERTEBRA_CONFORMANCE_DOCKER=1",
+                "VERTEBRA_CONFORMANCE_ENGINES=mysql",
+                "VERTEBRA_CONFORMANCE_MYSQL_VERSION=8.4",
+                "pytest src/py/tests/integration/db -v -rs",
+            ),
+            ("VERTEBRA_CONFORMANCE_DUCKDB_HTTPFS",),
+        ),
+        (
+            "mariadb",
+            "11.4",
+            (
+                "VERTEBRA_CONFORMANCE_DOCKER=1",
+                "VERTEBRA_CONFORMANCE_ENGINES=mariadb",
+                "VERTEBRA_CONFORMANCE_MARIADB_VERSION=11.4",
+                "pytest src/py/tests/integration/db -v -rs",
+            ),
+            ("VERTEBRA_CONFORMANCE_DUCKDB_HTTPFS",),
+        ),
+        (
+            "mssql",
+            "2022",
+            (
+                "VERTEBRA_CONFORMANCE_DOCKER=1",
+                "VERTEBRA_CONFORMANCE_ENGINES=mssql",
+                "VERTEBRA_CONFORMANCE_MSSQL_VERSION=2022",
+                "pytest src/py/tests/integration/db -v -rs",
+            ),
+            ("VERTEBRA_CONFORMANCE_DUCKDB_HTTPFS",),
+        ),
+        (
+            "oracle",
+            "23ai",
+            (
+                "VERTEBRA_CONFORMANCE_DOCKER=1",
+                "VERTEBRA_CONFORMANCE_ENGINES=oracle",
+                "VERTEBRA_CONFORMANCE_ORACLE_VERSION=23ai",
+                "pytest src/py/tests/integration/db -v -rs",
+            ),
+            ("VERTEBRA_CONFORMANCE_DUCKDB_HTTPFS",),
+        ),
+        (
+            "duckdb",
+            "",
+            (
+                "VERTEBRA_CONFORMANCE_DOCKER=1",
+                "VERTEBRA_CONFORMANCE_ENGINES=duckdb",
+                "VERTEBRA_CONFORMANCE_DUCKDB_HTTPFS=1",
+                "pytest src/py/tests/integration/db -v -rs",
+            ),
+            ("VERTEBRA_CONFORMANCE_DUCKDB_VERSION",),
+        ),
+    ],
+)
+def test_db_conformance_dry_run_env_expansion(
+    engine: str,
+    version: str,
+    expected_tokens: tuple[str, ...],
+    forbidden_tokens: tuple[str, ...],
+) -> None:
+    """Verify ``make -n db-conformance`` expands engine, version, and DuckDB httpfs env variables."""
+    cmd = ["make", "-n", "db-conformance", f"ENGINE={engine}"]
+    if version:
+        cmd.append(f"VERSION={version}")
+    proc = subprocess.run(cmd, cwd=_REPO_ROOT, capture_output=True, text=True, check=True)
+    for token in expected_tokens:
+        assert token in proc.stdout
+    for token in forbidden_tokens:
+        assert token not in proc.stdout
+
+
+def test_db_conformance_missing_engine_exits_two() -> None:
+    """Verify ``make db-conformance`` without ``ENGINE`` exits ``2`` with the required usage error."""
+    proc = subprocess.run(
+        ["make", "db-conformance"],
+        cwd=_REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 2
+    assert "ENGINE is required: duckdb, mysql, mariadb, mssql, oracle" in proc.stderr
+
+
+def test_makefile_isolates_pypi_duckdb_and_oracle_test_has_no_fallback() -> None:
+    """Verify PyPI ``duckdb`` is restricted to ``bench`` and ``oracle-test`` has no ``test_freethreaded_gil.py`` fallback."""
+    makefile_text = (_REPO_ROOT / "Makefile").read_text(encoding="utf-8")
+    assert "--group duckdb" not in makefile_text
+    assert "PY_TEST_GROUPS" not in makefile_text
+
+    pyproject = tomllib.loads((_REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    dep_groups = pyproject["dependency-groups"]
+    assert "duckdb>=1.0; python_version < '3.14'" in dep_groups["bench"]
+    assert all("duckdb" not in str(entry) for entry in dep_groups["test"])
+
+    oracle_dry_run = subprocess.run(
+        ["make", "-n", "oracle-test"],
+        cwd=_REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert "src/py/tests/unit/db/test_oracle_adapter.py" in oracle_dry_run.stdout
+    assert "src/py/tests/integration/db/test_oracle_native.py" in oracle_dry_run.stdout
+    assert "test_freethreaded_gil.py" not in oracle_dry_run.stdout
+
+
+def test_ci_workflow_defines_db_conformance_matrix_and_oracle_job() -> None:
+    """Verify ``.github/workflows/ci.yml`` defines ``test-db-conformance`` (10 rows) and non-blocking ``conformance-oracle``."""
+    ci_data = yaml.safe_load((_REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8"))
+    jobs = ci_data["jobs"]
+
+    db_job = jobs["test-db-conformance"]
+    assert db_job["needs"] == ["changes", "lint"]
+    assert db_job["timeout-minutes"] == 45
+    assert db_job["strategy"]["fail-fast"] is False
+    matrix_rows = db_job["strategy"]["matrix"]["include"]
+    assert matrix_rows == [
+        {"engine": "duckdb", "version": "", "python-version": "3.12"},
+        {"engine": "duckdb", "version": "", "python-version": "3.14t"},
+        {"engine": "mysql", "version": "8.0", "python-version": "3.12"},
+        {"engine": "mysql", "version": "8.4", "python-version": "3.12"},
+        {"engine": "mysql", "version": "9.7", "python-version": "3.12"},
+        {"engine": "mysql", "version": "8.4", "python-version": "3.14t"},
+        {"engine": "mariadb", "version": "11.4", "python-version": "3.12"},
+        {"engine": "mariadb", "version": "11.8", "python-version": "3.12"},
+        {"engine": "mssql", "version": "2022", "python-version": "3.12"},
+        {"engine": "mssql", "version": "2025", "python-version": "3.12"},
+    ]
+    assert any(
+        step.get("run") == "make db-conformance ENGINE=${{ matrix.engine }} VERSION=${{ matrix.version }}"
+        for step in db_job["steps"]
+    )
+
+    oracle_job = jobs["conformance-oracle"]
+    assert oracle_job["needs"] == ["changes", "lint"]
+    assert oracle_job["timeout-minutes"] == 45
+    assert oracle_job["continue-on-error"] is True
+    assert any(step.get("run") == "make db-conformance ENGINE=oracle VERSION=23ai" for step in oracle_job["steps"])

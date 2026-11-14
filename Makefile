@@ -33,10 +33,6 @@ else ifneq ($(origin PYO3_PYTHON),undefined)
 export PYO3_PYTHON
 endif
 
-PY_GIL_DISABLED = $(shell uv run --no-sync python -c "import sysconfig; print(int(bool(sysconfig.get_config_var('Py_GIL_DISABLED'))))" 2>/dev/null)
-PY_TEST_GROUPS = $(if $(filter 0,$(PY_GIL_DISABLED)),--group duckdb)
-unexport PY_GIL_DISABLED PY_TEST_GROUPS
-
 BLUE := $(shell printf "\033[1;34m")
 GREEN := $(shell printf "\033[1;32m")
 RED := $(shell printf "\033[1;31m")
@@ -94,7 +90,7 @@ install: destroy clean setup-env                    ## Install everything (Pytho
 	fi
 	@uv python pin 3.12 >/dev/null 2>&1
 	@uv venv --clear >/dev/null 2>&1
-	@uv sync --all-extras --dev --group doc --group duckdb
+	@uv sync --all-extras --dev --group doc
 	@$(MAKE) ts-install
 	@$(MAKE) ts-build
 	@$(MAKE) dev
@@ -122,7 +118,7 @@ destroy:                                            ## Destroy virtual environme
 .PHONY: upgrade
 upgrade: setup-env                                  ## Upgrade all dependencies (Python, Rust, TS, CI)
 	@echo "${INFO} Upgrading Python dependencies (uv)..."
-	@uv lock --upgrade && uv sync --all-extras --dev --group doc $(PY_TEST_GROUPS)
+	@uv lock --upgrade && uv sync --all-extras --dev --group doc
 	@echo "${INFO} Upgrading Rust dependencies (cargo)..."
 	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
 	@(cd src/rs && cargo update)
@@ -218,15 +214,27 @@ rs-test:                                            ## Run Rust tests (all featu
 .PHONY: py-test
 py-test: dev                                        ## Run Python tests
 	@uv run python -m mypy.stubtest vertebra._vertebra vertebra._bundler vertebra._storage vertebra._mysql vertebra._bigquery vertebra._mssql vertebra._spanner vertebra._duckdb vertebra._oracle vertebra._postgres
-	@uv run $(PY_TEST_GROUPS) pytest src/py/tests -v
+	@uv run pytest src/py/tests -v
 	@echo "${OK} Python tests passed"
+
+.PHONY: db-conformance
+db-conformance:                                     ## Run live zero-skip conformance lane (ENGINE=duckdb|mysql|mariadb|mssql|oracle [VERSION=<v>])
+ifeq ($(strip $(ENGINE)),)
+	@echo "ENGINE is required: duckdb, mysql, mariadb, mssql, oracle" >&2; exit 2
+else
+	@export VERTEBRA_CONFORMANCE_DOCKER=1 \
+		VERTEBRA_CONFORMANCE_ENGINES=$(strip $(ENGINE))$(if $(strip $(VERSION)), \
+		VERTEBRA_CONFORMANCE_$(shell printf '%s' '$(strip $(ENGINE))' | tr '[:lower:]' '[:upper:]')_VERSION=$(strip $(VERSION)))$(if $(filter duckdb,$(strip $(ENGINE))), \
+		VERTEBRA_CONFORMANCE_DUCKDB_HTTPFS=1); \
+	uv run --no-sync pytest src/py/tests/integration/db -v -rs
+endif
 
 .PHONY: duckdb-test
 duckdb-test:                                        ## Run vertebra-duckdb Rust + Python unit and conformance tests
 	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
 	@(cd src/rs && cargo test -p vertebra-duckdb --locked)
 	@uv run python -m mypy.stubtest vertebra._duckdb
-	@uv run pytest src/py/tests/unit/db/test_duckdb_driver.py src/py/tests/unit/db/test_optional_driver_wheels.py src/py/tests/integration/db/test_driver_conformance.py -k duckdb -v
+	@uv run pytest src/py/tests/unit/db/test_duckdb_driver.py src/py/tests/unit/db/test_optional_driver_wheels.py src/py/tests/integration/db/test_duckdb_native.py src/py/tests/integration/db/test_driver_conformance.py -k duckdb -v
 	@echo "${OK} DuckDB tests passed"
 
 .PHONY: duckdb-wheel-check
@@ -241,7 +249,7 @@ mysql-test:                                         ## Run MySQL Rust crate test
 	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
 	@(cd src/rs && cargo test -p vertebra-mysql -p vertebra-db --features gcp)
 	@uv run python -m mypy.stubtest vertebra._mysql
-	@uv run pytest src/py/tests/unit/db/test_mysql_driver.py src/py/tests/unit/db/test_optional_driver_wheels.py src/py/tests/integration/db/test_driver_conformance.py -k "mysql" -v
+	@uv run pytest src/py/tests/unit/db/test_mysql_driver.py src/py/tests/unit/db/test_optional_driver_wheels.py src/py/tests/integration/db/test_mysql_native.py src/py/tests/integration/db/test_driver_conformance.py -k "mysql" -v
 	@echo "${OK} MySQL tests passed"
 
 .PHONY: mysql-wheel-check
@@ -256,7 +264,7 @@ mssql-test:                                         ## Run Rust and Python SQL S
 	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
 	@(cd src/rs && cargo test -p vertebra-mssql --locked)
 	@uv run python -m mypy.stubtest vertebra._mssql
-	@uv run pytest src/py/tests/unit/db/test_mssql_driver.py src/py/tests/unit/db/test_optional_driver_wheels.py src/py/tests/integration/db/test_driver_conformance.py -k "mssql" -v
+	@uv run pytest src/py/tests/unit/db/test_mssql_driver.py src/py/tests/unit/db/test_optional_driver_wheels.py src/py/tests/integration/db/test_mssql_native.py src/py/tests/integration/db/test_driver_conformance.py -k "mssql" -v
 	@echo "${OK} MSSQL tests passed"
 
 .PHONY: mssql-wheel-check
@@ -272,11 +280,7 @@ oracle-test:                                        ## Run Oracle Rust unit test
 	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
 	@cargo test --manifest-path src/rs/Cargo.toml -p vertebra-oracle --locked
 	@PYTHONPATH="src/py:." uv run --no-sync python -m mypy.stubtest vertebra._oracle
-	@if [ -f "src/py/tests/unit/db/test_oracle_adapter.py" ]; then \
-		PYTHONPATH="src/py:." uv run --no-sync pytest src/py/tests/unit/db/test_oracle_adapter.py -v; \
-	else \
-		PYTHONPATH="src/py:." uv run --no-sync pytest src/py/tests/unit/test_freethreaded_gil.py -v; \
-	fi
+	@PYTHONPATH="src/py:." uv run --no-sync pytest src/py/tests/unit/db/test_oracle_adapter.py src/py/tests/integration/db/test_oracle_native.py -v
 	@echo "${OK} Oracle tests passed"
 
 .PHONY: oracle-wheel-check
@@ -339,7 +343,7 @@ test: rs-test py-test ts-test                       ## Run all tests (Rust, Pyth
 
 .PHONY: coverage
 coverage:                                           ## Run tests with coverage report
-	@uv run $(PY_TEST_GROUPS) pytest src/py/tests --cov --quiet
+	@uv run pytest src/py/tests --cov --quiet
 	@uv run coverage xml -i >/dev/null 2>&1
 	@uv run coverage html -i >/dev/null 2>&1
 	@echo "${OK} Coverage report: htmlcov/index.html"
@@ -387,11 +391,11 @@ lint-all:                                           ## Check formatting, linting
 
 .PHONY: review-check
 review-check:                                       ## Validate agentic review setup, skills, and manifests
-	@uv run python -m tools.scripts.review_setup validate
+	@uv run --no-sync python -m tools.scripts.review_setup validate
 
 .PHONY: review-route
 review-route:                                       ## Route changed files to owning review areas and shards
-	@BASE=$${BASE:-origin/main}; uv run python -m tools.scripts.review_setup route --base "$$BASE"
+	@BASE=$${BASE:-origin/main}; uv run --no-sync python -m tools.scripts.review_setup route --base "$$BASE"
 
 .PHONY: check
 check: lint test coverage                           ## Everything: lint, type check, all tests, coverage
