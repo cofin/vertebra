@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import warnings
 from collections.abc import Callable
 from types import SimpleNamespace
 from typing import Any
@@ -16,6 +17,7 @@ from advanced_alchemy.types.file_object.registry import storages
 from litestar import Litestar, get
 from litestar.config.app import AppConfig
 from litestar.di import NamedDependency
+from litestar.exceptions import LitestarDeprecationWarning
 from litestar.params import SkipValidation
 from litestar.testing import TestClient
 
@@ -297,6 +299,24 @@ def test_sqlspec_generic_configs_and_pool_defaults() -> None:
             SpannerAsyncDriver,
         ),
     ],
+    ids=[
+        "sqlite-sync",
+        "sqlite-async",
+        "postgres-sync",
+        "postgres-async",
+        "mysql-sync",
+        "mysql-async",
+        "oracle-sync",
+        "oracle-async",
+        "mssql-sync",
+        "mssql-async",
+        "duckdb-sync",
+        "duckdb-async",
+        "bigquery-sync",
+        "bigquery-async",
+        "spanner-sync",
+        "spanner-async",
+    ],
 )
 def test_sqlspec_native_adapter_configs_wire_litestar_di(
     config_factory: Callable[[], Any],
@@ -331,11 +351,16 @@ def test_sqlspec_sqlite_litestar_di_runtime_execution() -> None:
             "same_driver": db_session.native_driver is db_connection,
         }
 
-    app = Litestar(route_handlers=[check_sqlite], plugins=[create_sqlspec_plugin(sqlite_cfg)])
-    with TestClient(app) as client:
-        response = client.get("/health-db")
-        assert response.status_code == 200
-        assert response.json() == {"rows": [{"ok": 1}], "same_driver": True}
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        app = Litestar(route_handlers=[check_sqlite], plugins=[create_sqlspec_plugin(sqlite_cfg)])
+        with TestClient(app) as client:
+            response = client.get("/health-db")
+            assert response.status_code == 200
+            assert response.json() == {"rows": [{"ok": 1}], "same_driver": True}
+
+    litestar_deprecations = [record for record in caught if issubclass(record.category, LitestarDeprecationWarning)]
+    assert litestar_deprecations == []
 
 
 def test_alchemy_generic_configs_and_attachment_storage() -> None:

@@ -1,17 +1,23 @@
 """Unit tests for event loop sharding, CPU affinity, GIL auditing, and protocol detection."""
 
 import asyncio
+import contextlib
 import os
 import threading
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import click
 import pytest
 from click.testing import CliRunner
 
 from vertebra.cli import cli
+from vertebra.cli import dev as cli_dev_mod
+from vertebra.cli import run as cli_run_mod
 from vertebra.cli._launch import ServerLaunchEnv
+from vertebra.extensions.litestar import VertebraPlugin
+from vertebra.extensions.litestar import plugin as litestar_plugin_mod
 from vertebra.server._gil_audit import GilAuditReport, is_free_threaded
 from vertebra.server._loops import (
     LOOP_BACKEND_CHOICES,
@@ -365,8 +371,12 @@ def test_resolve_loop_backend_scopes_quarantine_to_candidate_modules(
     assert resolve_loop_backend(requested, quarantined_modules=quarantined) == expected
 
 
-def test_create_event_loop_zuvloop_and_cli_choices(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify create_event_loop('zuvloop') and CLI --loop choices accept zuvloop from LoopBackend."""
+@pytest.mark.parametrize("backend_arg", ["zuvloop", LoopBackend.ZUVLOOP], ids=["str", "enum"])
+def test_create_event_loop_zuvloop(
+    monkeypatch: pytest.MonkeyPatch,
+    backend_arg: LoopBackend | str,
+) -> None:
+    """Verify create_event_loop accepts 'zuvloop' and LoopBackend.ZUVLOOP and exports it in LOOP_BACKEND_CHOICES."""
     sentinel_loop = asyncio.new_event_loop()
     try:
         fake_zuvloop = SimpleNamespace(new_event_loop=lambda: sentinel_loop)
@@ -375,18 +385,69 @@ def test_create_event_loop_zuvloop_and_cli_choices(monkeypatch: pytest.MonkeyPat
             "vertebra.server._loops.import_optional",
             lambda name: fake_zuvloop if name == "zuvloop" else None,
         )
-        assert create_event_loop(LoopBackend.ZUVLOOP) is sentinel_loop
+        assert create_event_loop(backend_arg) is sentinel_loop
     finally:
         sentinel_loop.close()
 
     assert "zuvloop" in LOOP_BACKEND_CHOICES
     assert tuple(backend.value for backend in LoopBackend) == LOOP_BACKEND_CHOICES
 
+
+@pytest.mark.parametrize(
+    ("command_name", "mod"),
+    [
+        ("run", cli_run_mod),
+        ("dev", cli_dev_mod),
+        ("litestar-run", litestar_plugin_mod),
+    ],
+    ids=["vtb-run", "vtb-dev", "litestar-run"],
+)
+def test_cli_loop_option_enforces_loop_backend_choices(
+    monkeypatch: pytest.MonkeyPatch,
+    command_name: str,
+    mod: Any,
+) -> None:
+    """Verify vtb run, vtb dev, and litestar run share LOOP_BACKEND_CHOICES and reject invalid --loop values."""
+    captured_env: dict[str, str] = {}
+
+    def fake_build_cmd() -> list[str]:
+        return ["/bin/true"]
+
+    def fake_supervisor(*, server_cmd: list[str], env: dict[str, str], **_kwargs: Any) -> int:
+        _ = server_cmd
+        captured_env.update(env)
+        return 0
+
+    @contextlib.contextmanager
+    def fake_lifespan(*_args: Any, **_kwargs: Any) -> Any:
+        yield None
+
+    monkeypatch.setattr(mod, "build_server_command", fake_build_cmd)
+    monkeypatch.setattr(mod, "run_supervisor", fake_supervisor)
+    if command_name == "litestar-run":
+        target_group = click.Group("litestar")
+        VertebraPlugin().on_cli_init(target_group)
+        subcommand = "run"
+    else:
+        monkeypatch.setattr(mod, "resolve_cli_app_path", lambda _app: "app:app")
+        monkeypatch.setattr(mod, "enter_app_server_lifespan", fake_lifespan)
+        target_group = cli
+        subcommand = command_name
+
+    cmd = target_group.commands[subcommand]
+    loop_option = next(param for param in cmd.params if param.name == "loop")
+    assert isinstance(loop_option.type, click.Choice)
+    assert tuple(loop_option.type.choices) == LOOP_BACKEND_CHOICES
+
     runner = CliRunner()
-    for subcommand in ("run", "dev"):
-        help_res = runner.invoke(cli, [subcommand, "--help"])
-        assert help_res.exit_code == 0
-        assert "zuvloop" in help_res.output
+    invalid_res = runner.invoke(target_group, [subcommand, "--loop", "invalid_loop"])
+    assert invalid_res.exit_code == 2
+    assert "Invalid value for '--loop'" in invalid_res.output
+    assert captured_env == {}
+
+    valid_res = runner.invoke(target_group, [subcommand, "--loop", "zuvloop", "--no-banner"])
+    assert valid_res.exit_code == 0, valid_res.output
+    assert captured_env["VERTEBRA_LOOP"] == "zuvloop"
 
 
 def test_event_loop_pool_spawn_and_spawn_batch_dispatch_across_threads_and_inline() -> None:

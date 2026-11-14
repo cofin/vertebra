@@ -147,7 +147,7 @@ Migration serialization uses Django's public `MigrationWriter.register_serialize
 
 ## 3. First-Party Litestar Ecosystem Subpackages (`extensions/litestar/*`)
 
-All `litestar-*` ecosystem integrations are nested strictly under [`vertebra.extensions.litestar`](../../../../../src/py/vertebra/extensions/litestar/__init__.py)[^src-extensions-litestar-init-py]:
+All `litestar-*` ecosystem integrations live under [`vertebra.extensions.litestar`](../../../../../src/py/vertebra/extensions/litestar/__init__.py)[^src-extensions-litestar-init-py].
 
 | Subpackage | Canonical Helpers & Adapters | Upstream Integration |
 |---|---|---|
