@@ -11,7 +11,7 @@ All notable changes to Vertebra are documented on this page.
 - `SKILLS_EXTENSION` (`io.modelcontextprotocol/skills`) filtering/URI resolution across `SkillCatalog` and framework mounts ([#111](https://github.com/cofin/vertebra/issues/111)), plus SEP-1865 `UI_EXTENSION` (`io.modelcontextprotocol/ui`) metadata (`McpIcon`, `ToolSpec.meta`, `ToolRegistry.validate_ui_links`, `MCPCore.validate()`) and app-only tool filtering ([#110](https://github.com/cofin/vertebra/issues/110)).
 - Google Cloud `IapIdentitySource` ES256 signed JWT header verification (`vertebra-core[iap]`), `OidcTokenSource` (`AsyncGcpIdTokenCache` + `401` single retry) for `vtb ai mcp bridge --audience`, incremental cancellable `run_stdio_server`, and `resolve_app_mcp_core` / `is_litestar_mcp_app` discovery in `vtb ai mcp serve --app` ([#114](https://github.com/cofin/vertebra/issues/114)).
 - `Tool.authorize` single-pass guard splitting (`-32004` / `-32005`), `Mcp-Param-*` header validation (`-32020`), and single-use expiring confirmation consumption (`ConfirmationGate.consume_call_approval`).
-- `SyncGcsBearerSecretProvider` and `AsyncGcsBearerSecretProvider` in `vertebra.storage` wrapping `SyncGcpTokenCache` and `AsyncGcpTokenCache` (`from_config`, `generation`, `invalidate`, `to_async`, `to_sync`) for `DuckDBSecretConfig(secret_type="gcs", value_provider=...)` OAuth2 bearer-token rotation.
+- `SyncGcsBearerSecretProvider` and `AsyncGcsBearerSecretProvider` in `vertebra.storage` wrapping `SyncGcpTokenCache` and `AsyncGcpTokenCache` (`from_config`, `token_cache`, `generation`, `needs_refresh`, `invalidate`) for `DuckDBSecretConfig(secret_type="gcs", value_provider=...)` OAuth2 bearer-token rotation.
 
 ### Changed
 

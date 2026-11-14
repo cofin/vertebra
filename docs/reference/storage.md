@@ -4,13 +4,14 @@ Backend configurations, GIL-free `SyncObjectStore` and `AsyncObjectStore`, file-
 
 ## Object stores
 
-Construct a store from a URI or configuration: `SyncObjectStore(target, *, options=None, signing=None, token_cache=None)`. The class methods `from_config`, `from_local`, `from_s3`, `from_gcs`, `from_azure`, `from_oci`, `from_r2`, `from_http`, and `from_memory` build the same store from configuration fields. Every store exposes the read-only properties `url`, `scheme`, `options`, `token_cache`, and `supports_signing`, batch transfer helpers (`upload_many`, `download_many`, `staged_download`), paginated listing (`list_page`, `list_with_delimiter`), `to_async()`, `close()`, and the context-manager protocol. `put_multipart(key, parts)` uploads a sequence of buffers as one object.
+Construct a store from a URI or configuration: `SyncObjectStore(target, *, options=None, signing=None, token_cache=None)`. The class methods `from_config`, `from_local`, `from_s3`, `from_gcs`, `from_azure`, `from_oci`, `from_r2`, `from_http`, and `from_memory` build the same store from configuration fields. Every store exposes the read-only properties `url`, `scheme`, `options`, `token_cache`, and `supports_signing`, batch transfer helpers (`upload_many`, `download_many`, `staged_download`), paginated listing (`list_page`, `list_with_delimiter`), URL signing (`sign`, `presign_get`, `presign_put`, `verify_presigned_url`), `to_async()`, `close()`, and the context-manager protocol. `put_multipart(key, parts)` uploads a sequence of buffers as one object.
 
 `AsyncObjectStore` mirrors `SyncObjectStore` with the same constructor, class methods, properties, and method signatures. Its I/O methods are awaited, except `get_stream`, `iter_arrow_batches`, `iter_parquet_batches`, `open_reader`, and `open_writer`, which return async iterators or file objects directly. `staged_download` is an async context manager, `verify_presigned_url` stays synchronous, and `to_sync()` returns a `SyncObjectStore` sharing the same native engine.
 
 ::: vertebra.storage._store.SyncObjectStore
     options:
       heading_level: 3
+      show_bases: false
       inherited_members: true
       members:
         - put
@@ -36,8 +37,6 @@ Construct a store from a URI or configuration: `SyncObjectStore(target, *, optio
         - iter_arrow_batches
         - iter_parquet_batches
         - sign
-        - presign_get
-        - presign_put
         - verify_presigned_url
 
 ::: vertebra.storage._store.AsyncObjectStore
@@ -142,7 +141,21 @@ Readers support `read`, `read_at`, `seek`, `tell`, and `close`; the async reader
 
 ## GCS token caches
 
-`vertebra.storage` re-exports `SyncGcpTokenCache`, `AsyncGcpTokenCache`, and `GcpTokenSnapshot` (OAuth bearer tokens) alongside `SyncGcpIdTokenCache`, `AsyncGcpIdTokenCache`, and `GcpIdTokenSnapshot` (audience-bound OIDC ID tokens) from the core `vertebra._vertebra` extension, and provides `SyncGcsBearerSecretProvider` and `AsyncGcsBearerSecretProvider` (`vertebra.storage._secrets`) for `DuckDBSecretConfig(secret_type="gcs", value_provider=...)` bearer-token rotation (`from_config(config, *, allow_ambient_adc=True, scopes=GCS_DEFAULT_SCOPES)`, `token_cache`, `generation`, `needs_refresh()`, `invalidate(failed_generation=None)`, `to_async()`, `to_sync()`, and `__call__() -> dict[str, str]` / `Awaitable[dict[str, str]]`). One cache passed as `token_cache=` or `id_token_cache=` to several stores, secret providers, or embedders shares a single token and refresh schedule. `SyncGcpTokenCache.get_token(*, force_refresh=False)` returns a `GcpTokenSnapshot`, and `SyncGcpIdTokenCache.get_token(audience, *, force_refresh=False)` returns a `GcpIdTokenSnapshot`; the async variants await the same calls, and `to_async()` / `to_sync()` convert between handles over one native cache. The [authentication guide](../usage/storage-auth-and-signing.md#google-cloud-credentials-and-token-caches) covers construction, ADC discovery order, and sharing.
+`vertebra.storage` re-exports `SyncGcpTokenCache`, `AsyncGcpTokenCache`, and `GcpTokenSnapshot` (OAuth bearer tokens) alongside `SyncGcpIdTokenCache`, `AsyncGcpIdTokenCache`, and `GcpIdTokenSnapshot` (audience-bound OIDC ID tokens) from the core `vertebra._vertebra` extension, and provides `SyncGcsBearerSecretProvider` and `AsyncGcsBearerSecretProvider` (`vertebra.storage._secrets`) for `DuckDBSecretConfig(secret_type="gcs", value_provider=...)` bearer-token rotation (`from_config(config, *, allow_ambient_adc=True, scopes=GCS_DEFAULT_SCOPES)`, `token_cache`, `generation`, `needs_refresh()`, `invalidate(failed_generation)`, and `__call__() -> dict[str, str]` / `Awaitable[dict[str, str]]`). One cache passed as `token_cache=` or `id_token_cache=` to several stores, secret providers, or embedders shares a single token and refresh schedule. `SyncGcpTokenCache.get_token(*, force_refresh=False)` returns a `GcpTokenSnapshot`, and `SyncGcpIdTokenCache.get_token(audience, *, force_refresh=False)` returns a `GcpIdTokenSnapshot`; the async variants await the same calls, and `to_async()` / `to_sync()` convert between handles over one native cache. The [authentication guide](../usage/storage-auth-and-signing.md#google-cloud-credentials-and-token-caches) covers construction, ADC discovery order, and sharing.
+
+::: vertebra.storage._secrets.SyncGcsBearerSecretProvider
+    options:
+      heading_level: 4
+      show_bases: false
+      show_source: false
+      members: false
+
+::: vertebra.storage._secrets.AsyncGcsBearerSecretProvider
+    options:
+      heading_level: 4
+      show_bases: false
+      show_source: false
+      members: false
 
 ## HTTP Range responses
 
@@ -152,6 +165,7 @@ Readers support `read`, `read_at`, `seek`, `tell`, and `close`; the async reader
     options:
       heading_level: 4
       show_bases: false
+      show_source: false
       members: false
 
 ## Errors

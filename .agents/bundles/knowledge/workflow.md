@@ -74,9 +74,9 @@ make ts-test                                                          # Vitest s
 make duckdb-test     # vertebra-duckdb Rust tests, stubtest, and Python unit/conformance suites (make duckdb-wheel-check verifies wheel isolation)
 make mysql-test      # vertebra-mysql Rust tests, stubtest, and Python MySQL suites (make mysql-wheel-check verifies wheel isolation)
 make mssql-test      # vertebra-mssql Rust tests, stubtest, and Python MSSQL suites (make mssql-wheel-check verifies wheel isolation)
-make oracle-test     # vertebra-oracle Rust tests, stubtest, and Python Oracle unit/conformance suites (make oracle-wheel-check verifies wheel isolation)
+make oracle-test     # vertebra-oracle Rust tests, stubtest, and Python Oracle adapter + native suites (make oracle-wheel-check verifies wheel isolation)
 make postgres-test   # vertebra-postgres Rust tests and _postgres stubtest (make postgres-wheel-check runs verify_postgres_wheel.py)
-make db-conformance  # Cross-engine and native live database conformance suites (VERTEBRA_CONFORMANCE_ENGINES=sqlite,duckdb by default)
+make db-conformance  # Live database conformance suite (ENGINE=<duckdb|mysql|mariadb|mssql|oracle> [VERSION=<v>] required; zero-skip ConformanceGate)
 make postgres-bench-check # PYTHONPATH="$(CURDIR)/src/py" cargo test -p vertebra-postgres --bench postgres_native --locked + Ruff/Mypy + comparator tests (make postgres-bench runs live + Criterion)
 make docs            # scan_public_docstrings + generate_cli_docs --check + zensical build --clean + postbuild + verify_docs_artifacts
 make docs-check      # make docs + live zensical serve HTTP 200 check (make docs-serve, make docs-clean, make docs-rust)

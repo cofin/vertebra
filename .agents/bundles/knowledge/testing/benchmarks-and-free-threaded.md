@@ -79,7 +79,7 @@ sources:
 # Benchmark Suite & Free-Threaded Python 3.14t/3.15t
 
 <!-- truth: start -->
-- Third-party `duckdb>=1.0; python_version < '3.14'` lives in `[dependency-groups].duckdb` (`bench` includes both `{ include-group = "duckdb" }` and a direct `"duckdb>=1.0; python_version < '3.14'"` marker strictly for `tools.benchmarks.store`), third-party `psycopg[binary]` and `asyncpg` comparators live in `[dependency-groups].postgres-bench` (`python_version < '3.14'`), and `uvicorn`/`granian`/`spikard` live in `[dependency-groups].bench`; `make install`, `make upgrade`, `make py-test`, and `make coverage` never sync `--group duckdb`.
+- Third-party `duckdb>=1.0; python_version < '3.14'` lives in `[dependency-groups].duckdb` (`bench` includes a direct `"duckdb>=1.0; python_version < '3.14'"` marker strictly for `tools.benchmarks.store`), third-party `psycopg[binary]` and `asyncpg` comparators live in `[dependency-groups].postgres-bench` (`python_version < '3.14'`), and `uvicorn`/`granian`/`spikard` live in `[dependency-groups].bench`; `make install`, `make upgrade`, `make py-test`, and `make coverage` never sync `--group duckdb`.
 - Run `make bench`, `make bench-ft`, `make rs-bench`, `make bench-micro`, `make bench-check`, and `make postgres-bench` against release/PGO builds; run `make postgres-bench-check` offline for Criterion test execution, lint/type validation, and comparator unit tests, and validate 14 immutable `_postgres` classes plus 8-thread concurrent pool checks in `test_freethreaded_gil.py`.
 <!-- truth: end -->
 

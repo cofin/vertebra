@@ -43,9 +43,9 @@ make py-test     # Build debug extensions (make dev), verify mypy.stubtest acros
 make duckdb-test # Run vertebra-duckdb Rust tests, stubtest, and Python unit/conformance suites (make duckdb-wheel-check verifies wheel payload isolation)
 make mysql-test  # Run vertebra-mysql Rust tests, stubtest, and Python MySQL suites (make mysql-wheel-check verifies wheel isolation)
 make mssql-test  # Run vertebra-mssql Rust tests, stubtest, and Python MSSQL suites (make mssql-wheel-check verifies wheel isolation)
-make oracle-test # Run vertebra-oracle Rust unit tests, _oracle stubtest, and Python Oracle unit/conformance suites (make oracle-wheel-check verifies wheel isolation)
+make oracle-test # Run vertebra-oracle Rust unit tests, _oracle stubtest, and Python Oracle adapter + native suites (make oracle-wheel-check verifies wheel isolation)
 make postgres-test # Run vertebra-postgres Rust tests and _postgres stubtest (make postgres-wheel-check verifies wheel and sdist isolation)
-make db-conformance # Run cross-engine and native live database conformance suites (VERTEBRA_CONFORMANCE_ENGINES=sqlite,duckdb by default)
+make db-conformance # Run live database conformance suite (ENGINE=<duckdb|mysql|mariadb|mssql|oracle> [VERSION=<v>] required)
 make postgres-bench-check # Run Criterion postgres_native test mode, script lint/mypy, and comparator unit suite
 make ts-test     # Run the TypeScript Vitest suite with isolated localstorage
 make test        # Run all Rust, Python, and TypeScript test suites
