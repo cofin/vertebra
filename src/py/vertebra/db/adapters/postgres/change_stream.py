@@ -33,16 +33,6 @@ __all__ = (
     "PostgresReplicationGapError",
 )
 
-
-def _consume_task_exception(task: asyncio.Task[PostgresCheckpoint]) -> None:
-    """Retrieve task exceptions when detached after cancellation to avoid GC noise."""
-    if not task.cancelled():
-        task.exception()
-
-
-_RETRYABLE_RECONNECT_REASONS = frozenset({"connection_closed", "disconnected", "transport", "transient"})
-_FAIL_CLOSED_REASONS = frozenset({"wal_unavailable", "identity_mismatch"})
-
 type IdentityKey = tuple[str, str, str, str]
 
 
@@ -265,57 +255,6 @@ class MemoryPostgresCheckpointStore:
             return checkpoint
 
 
-def _validate_identity_match(
-    expected: PostgresReplicationIdentity,
-    stored: PostgresCheckpoint,
-) -> None:
-    """Verify stored checkpoint matches the live server/slot replication identity."""
-    if stored.identity_key != expected.identity_key:
-        raise PostgresReplicationGapError(
-            "PostgreSQL replication identity mismatch against persisted checkpoint",
-            reason="identity_mismatch",
-            identity_key=expected.identity_key,
-        )
-
-
-def _classify_gap_reason(exc: BaseException) -> str | None:
-    """Extract an explicit fail-closed replication gap reason when present."""
-    reason = getattr(exc, "reason", None)
-    if isinstance(reason, str) and reason in _FAIL_CLOSED_REASONS:
-        return reason
-    code = getattr(exc, "code", None)
-    if isinstance(code, str) and code in _FAIL_CLOSED_REASONS:
-        return code
-    text = str(exc).lower()
-    if "wal_unavailable" in text or ("wal segment" in text and "removed" in text):
-        return "wal_unavailable"
-    if "identity_mismatch" in text or ("system_identifier" in text and "mismatch" in text):
-        return "identity_mismatch"
-    return None
-
-
-def _is_retryable_stream_error(exc: BaseException) -> bool:
-    """Determine whether a stream failure is a retryable disconnect vs fail-closed error."""
-    if _classify_gap_reason(exc) is not None:
-        return False
-    reason = getattr(exc, "reason", None)
-    if isinstance(reason, str) and reason in _RETRYABLE_RECONNECT_REASONS:
-        return True
-    return isinstance(exc, (ConnectionError, TimeoutError, EOFError, OperationalError))
-
-
-def _record_to_payload(record: PostgresReplicationRecord) -> dict[str, Any]:
-    """Convert a native logical replication record to a serializable ChangeFeed payload."""
-    payload: dict[str, Any] = {
-        "kind": record.kind,
-        "commit_end_lsn": record.commit_end_lsn,
-        "generation": record.generation,
-        **record.payload,
-    }
-    encode_json_bytes(payload)
-    return payload
-
-
 class PostgresChangeSource(AsyncChangeSource):
     """Durable PostgreSQL logical replication change source backed by ChangeFeed.
 
@@ -347,19 +286,17 @@ class PostgresChangeSource(AsyncChangeSource):
         self._identity: PostgresReplicationIdentity | None = None
         self._checkpoint: PostgresCheckpoint | None = None
         self._stream: AsyncPostgresReplication | None = None
-        self._stream_generation = 0
         self._closed = False
         self._terminated = False
         self._uncertain = False
         self._needs_reconcile = False
         self._yield_gate = asyncio.Event()
         self._yield_gate.set()
+        self._stop_event = asyncio.Event()
         self._op_lock = asyncio.Lock()
         self._ack_task: asyncio.Task[PostgresCheckpoint] | None = None
         self._ack_target_lsn: int | None = None
         self._pending_record: PostgresReplicationRecord | None = None
-        self._pending_lsn: int | None = None
-        self._highest_yielded_lsn: int | None = None
         self._lsn_to_event_id: dict[int, int] = {}
 
     @property
@@ -382,233 +319,18 @@ class PostgresChangeSource(AsyncChangeSource):
         """Return whether this change source has been closed."""
         return self._closed
 
-    async def _ensure_initialized(self) -> None:
-        """Resolve replication identity before loading or initializing durable state."""
-        if self._identity is not None:
-            return
-        try:
-            identity = await self._driver._replication_identity(
-                self._config.slot,
-                self._config.publication,
-            )
-        except PostgresReplicationGapError:
-            raise
-        except Exception as exc:
-            gap_reason = _classify_gap_reason(exc)
-            if gap_reason is not None:
-                raise PostgresReplicationGapError(
-                    str(exc),
-                    reason=gap_reason,
-                ) from exc
-            raise
-        self._identity = identity
-        loaded = await self._store.load(identity.identity_key)
-        if loaded is not None:
-            _validate_identity_match(identity, loaded)
-            self._checkpoint = loaded
-            self._sync_feed_cursor(loaded.next_event_id)
-
-    def _sync_feed_cursor(self, next_event_id: int) -> None:
-        """Align the backing ChangeFeed event sequence counter with a durable cursor."""
-        self._feed._next_id = max(1, int(next_event_id))
-
-    async def _close_active_stream(self, *, suppress_error: bool = False) -> None:
-        """Close any currently attached native stream generation and advance generation."""
-        stream = self._stream
-        self._stream = None
-        self._stream_generation += 1
-        if stream is not None:
-            if suppress_error:
-                with contextlib.suppress(Exception):
-                    await stream.aclose()
-            else:
-                await stream.aclose()
-
-    def _effective_start_lsn(self) -> int | None:
-        """Compute the resume LSN from persisted checkpoint or initial configuration."""
-        if self._checkpoint is not None:
-            return self._checkpoint.commit_end_lsn
-        return self._config.start_lsn
-
-    def _check_lifecycle(self) -> None:
-        """Raise termination conflict or StopAsyncIteration when closed or fenced."""
-        if self._terminated:
-            raise PostgresCheckpointConflictError(
-                "CDC ownership terminated after checkpoint conflict",
-                identity_key=self._identity.identity_key if self._identity else None,
-            )
-        if self._closed:
-            raise StopAsyncIteration
-
-    async def _open_fresh_stream(self) -> AsyncPostgresReplication:
-        """Open a single native replication stream generation with reconnect=False."""
-        await self._ensure_initialized()
-        assert self._identity is not None
-        attempts = 0
-        backoff = self._config.initial_backoff_seconds
-        last_exc: BaseException | None = None
-        while True:
-            self._check_lifecycle()
-            try:
-                stream = await self._driver._open_replication_stream(
-                    self._config,
-                    start_lsn=self._effective_start_lsn(),
-                    reconnect=False,
-                )
-            except PostgresReplicationGapError:
-                self._check_lifecycle()
-                raise
-            except Exception as exc:
-                self._check_lifecycle()
-                gap_reason = _classify_gap_reason(exc)
-                if gap_reason is not None:
-                    raise PostgresReplicationGapError(
-                        str(exc),
-                        reason=gap_reason,
-                        identity_key=self._identity.identity_key,
-                    ) from exc
-                if not self._config.reconnect or not _is_retryable_stream_error(exc):
-                    raise
-                last_exc = exc
-                attempts += 1
-                if attempts > self._config.max_reconnect_attempts:
-                    raise PostgresReplicationGapError(
-                        f"Exhausted {self._config.max_reconnect_attempts} replication reconnect attempts",
-                        reason="retries_exhausted",
-                        identity_key=self._identity.identity_key,
-                    ) from last_exc
-                if backoff > 0.0:
-                    await asyncio.sleep(backoff)
-                    backoff = min(self._config.max_backoff_seconds, backoff * 2.0)
-                continue
-            if self._closed or self._terminated:
-                with contextlib.suppress(Exception):
-                    await stream.aclose()
-                self._check_lifecycle()
-            self._stream = stream
-            self._stream_generation += 1
-            return stream
-
-    async def _reconcile_uncertainty(self) -> None:
-        """Reload durable checkpoint and reset feed/pending state after uncertain commit."""
-        if not self._needs_reconcile:
-            return
-        await self._ensure_initialized()
-        assert self._identity is not None
-        self._pending_record = None
-        self._pending_lsn = None
-        await self._close_active_stream(suppress_error=True)
-        loaded = await asyncio.wait_for(
-            self._store.load(self._identity.identity_key),
-            timeout=self._config.checkpoint_timeout_seconds,
-        )
-        if loaded is not None:
-            _validate_identity_match(self._identity, loaded)
-            self._checkpoint = loaded
-            self._sync_feed_cursor(loaded.next_event_id)
-            self._prune_acked_lsns(loaded.commit_end_lsn)
-        else:
-            self._sync_feed_cursor(1)
-        self._uncertain = False
-        self._needs_reconcile = False
-
-    def _prune_acked_lsns(self, commit_end_lsn: int) -> None:
-        """Drop LSN-to-event mappings at or below a durably acknowledged commit_end_lsn."""
-        stale = [lsn for lsn in self._lsn_to_event_id if lsn <= commit_end_lsn]
-        for lsn in stale:
-            del self._lsn_to_event_id[lsn]
-
-    async def _next_native_record(self) -> PostgresReplicationRecord:
-        """Pull the next raw replication record, driving adapter-owned reconnects cleanly."""
-        attempts = 0
-        backoff = self._config.initial_backoff_seconds
-        while True:
-            self._check_lifecycle()
-            if self._pending_record is not None:
-                record = self._pending_record
-                self._pending_record = None
-                self._pending_lsn = None
-                return record
-            stream = self._stream
-            if stream is None:
-                stream = await self._open_fresh_stream()
-            try:
-                next_record = await stream.next()
-            except PostgresReplicationGapError:
-                await self._close_active_stream(suppress_error=True)
-                self._check_lifecycle()
-                raise
-            except StopAsyncIteration:
-                self._check_lifecycle()
-                raise
-            except Exception as exc:
-                await self._close_active_stream(suppress_error=True)
-                self._check_lifecycle()
-                if self._needs_reconcile:
-                    await self._reconcile_uncertainty()
-                    continue
-                gap_reason = _classify_gap_reason(exc)
-                if gap_reason is not None:
-                    raise PostgresReplicationGapError(
-                        str(exc),
-                        reason=gap_reason,
-                        identity_key=self._identity.identity_key if self._identity else None,
-                    ) from exc
-                if not self._config.reconnect or not _is_retryable_stream_error(exc):
-                    raise
-                attempts += 1
-                if attempts > self._config.max_reconnect_attempts:
-                    raise PostgresReplicationGapError(
-                        f"Exhausted {self._config.max_reconnect_attempts} replication reconnect attempts",
-                        reason="retries_exhausted",
-                        identity_key=self._identity.identity_key if self._identity else None,
-                    ) from exc
-                if backoff > 0.0:
-                    await asyncio.sleep(backoff)
-                    backoff = min(self._config.max_backoff_seconds, backoff * 2.0)
-                continue
-            if next_record is None:
-                await self._close_active_stream(suppress_error=True)
-                self._check_lifecycle()
-                if self._needs_reconcile:
-                    await self._reconcile_uncertainty()
-                    continue
-                if not self._config.reconnect:
-                    raise StopAsyncIteration
-                attempts += 1
-                if attempts > self._config.max_reconnect_attempts:
-                    raise PostgresReplicationGapError(
-                        f"Exhausted {self._config.max_reconnect_attempts} replication reconnect attempts",
-                        reason="retries_exhausted",
-                        identity_key=self._identity.identity_key if self._identity else None,
-                    ) from None
-                if backoff > 0.0:
-                    await asyncio.sleep(backoff)
-                    backoff = min(self._config.max_backoff_seconds, backoff * 2.0)
-                continue
-            self._check_lifecycle()
-            return next_record
-
-    def _publish_record(self, record: PostgresReplicationRecord) -> ChangeEvent:
-        """Append a native record into ChangeFeed and track its LSN boundary."""
-        payload = _record_to_payload(record)
-        _, event = self._feed.publish_event(record.kind, payload)
-        if record.commit_end_lsn is not None and record.commit_end_lsn >= 0:
-            self._lsn_to_event_id[record.commit_end_lsn] = self._feed._next_id
-            if self._highest_yielded_lsn is None or record.commit_end_lsn > self._highest_yielded_lsn:
-                self._highest_yielded_lsn = record.commit_end_lsn
-        return event
-
     async def __anext__(self) -> ChangeEvent:
         """Yield the next durable ChangeEvent when the yield gate permits."""
         while True:
+            self._check_lifecycle()
             await self._yield_gate.wait()
-            if self._ack_task is not None:
-                if not self._ack_task.done():
-                    await self._yield_gate.wait()
+            self._check_lifecycle()
+            pending_ack = self._ack_task
+            if pending_ack is not None:
+                if not pending_ack.done():
+                    await self._await_pending_ack(pending_ack)
                     continue
                 self._ack_task = None
-            self._check_lifecycle()
             async with self._op_lock:
                 if self._needs_reconcile:
                     await self._reconcile_uncertainty()
@@ -621,7 +343,6 @@ class PostgresChangeSource(AsyncChangeSource):
                     continue
                 if not self._yield_gate.is_set():
                     self._pending_record = record
-                    self._pending_lsn = record.commit_end_lsn
                     continue
                 return self._publish_record(record)
 
@@ -636,77 +357,6 @@ class PostgresChangeSource(AsyncChangeSource):
     def replay_since(self, last_event_id: int) -> list[ChangeEvent]:
         """Return buffered ``ChangeEvent`` items emitted after ``last_event_id``."""
         return self._feed.replay_since(last_event_id)
-
-    def _build_next_checkpoint(self, commit_end_lsn: int) -> PostgresCheckpoint:
-        """Construct the target monotonic checkpoint for ``commit_end_lsn``."""
-        assert self._identity is not None
-        next_event_id = self._lsn_to_event_id.get(commit_end_lsn, self._feed._next_id)
-        if self._checkpoint is None:
-            return PostgresCheckpoint(
-                identity_key=self._identity.identity_key,
-                commit_end_lsn=commit_end_lsn,
-                next_event_id=max(1, next_event_id),
-                version=1,
-            )
-        return self._checkpoint.advance(
-            commit_end_lsn=commit_end_lsn,
-            next_event_id=max(self._checkpoint.next_event_id, next_event_id),
-        )
-
-    async def _run_ack_transaction(self, commit_end_lsn: int) -> PostgresCheckpoint:
-        """Execute CAS save before native wire acknowledge under single-flight gating."""
-        await self._ensure_initialized()
-        assert self._identity is not None
-        self._yield_gate.clear()
-        saved: PostgresCheckpoint | None = None
-        try:
-            target = self._build_next_checkpoint(commit_end_lsn)
-            self._uncertain = True
-            saved = await asyncio.wait_for(
-                self._store.save(target, expected=self._checkpoint),
-                timeout=self._config.checkpoint_timeout_seconds,
-            )
-            self._checkpoint = saved
-            self._prune_acked_lsns(saved.commit_end_lsn)
-            stream = self._stream
-            if stream is not None:
-                stream.acknowledge(commit_end_lsn)
-            self._uncertain = False
-            self._needs_reconcile = False
-            self._yield_gate.set()
-            return saved
-        except PostgresCheckpointConflictError:
-            self._terminated = True
-            self._uncertain = False
-            self._pending_record = None
-            self._pending_lsn = None
-            await self._close_active_stream(suppress_error=True)
-            raise
-        except SerializationFailure as exc:
-            self._terminated = True
-            self._uncertain = False
-            self._pending_record = None
-            self._pending_lsn = None
-            await self._close_active_stream(suppress_error=True)
-            raise PostgresCheckpointConflictError(
-                str(exc),
-                identity_key=self._identity.identity_key if self._identity else None,
-            ) from exc
-        except Exception as exc:
-            self._uncertain = saved is None
-            self._needs_reconcile = True
-            self._pending_record = None
-            self._pending_lsn = None
-            await self._close_active_stream(suppress_error=True)
-            raise PostgresReplicationGapError(
-                f"Checkpoint acknowledgement failed for lsn {commit_end_lsn}: {exc}",
-                reason="checkpoint_uncertain",
-                identity_key=self._identity.identity_key if self._identity else None,
-            ) from exc
-        finally:
-            self._yield_gate.set()
-            if self._ack_target_lsn == commit_end_lsn:
-                self._ack_target_lsn = None
 
     async def acknowledge(self, commit_end_lsn: int) -> PostgresCheckpoint:
         """Durably persist checkpoint via CAS before acknowledging ``commit_end_lsn`` to Postgres.
@@ -753,6 +403,7 @@ class PostgresChangeSource(AsyncChangeSource):
     async def aclose(self) -> None:
         """Close the change source within bounded timeout, reconciling uncertain state."""
         self._closed = True
+        self._stop_event.set()
         deadline = asyncio.get_running_loop().time() + self._config.checkpoint_timeout_seconds
         pending_task = self._ack_task
         primary_error: BaseException | None = None
@@ -808,7 +459,6 @@ class PostgresChangeSource(AsyncChangeSource):
             raise
         finally:
             self._pending_record = None
-            self._pending_lsn = None
             self._yield_gate.set()
             await self._close_active_stream(suppress_error=primary_error is not None)
 
@@ -819,3 +469,366 @@ class PostgresChangeSource(AsyncChangeSource):
     async def __aexit__(self, *args: object) -> None:
         """Exit async context manager by calling ``aclose()``."""
         await self.aclose()
+
+    def _check_lifecycle(self) -> None:
+        """Raise termination conflict or StopAsyncIteration when closed or fenced."""
+        if self._terminated:
+            raise PostgresCheckpointConflictError(
+                "CDC ownership terminated after checkpoint conflict",
+                identity_key=self._identity.identity_key if self._identity else None,
+            )
+        if self._closed:
+            raise StopAsyncIteration
+
+    async def _wait_backoff(self, seconds: float) -> None:
+        """Wait up to ``seconds`` for reconnect backoff unless closed or fenced."""
+        if seconds <= 0.0:
+            self._check_lifecycle()
+            return
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(self._stop_event.wait(), timeout=seconds)
+        self._check_lifecycle()
+
+    async def _await_pending_ack(self, pending_ack: asyncio.Task[PostgresCheckpoint]) -> None:
+        """Wait for an active single-flight acknowledgement or immediate stop without cancelling it."""
+        stop_waiter = asyncio.create_task(self._stop_event.wait())
+        try:
+            await asyncio.wait(
+                {pending_ack, stop_waiter},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+        finally:
+            if not stop_waiter.done():
+                stop_waiter.cancel()
+
+    async def _ensure_initialized(self) -> None:
+        """Resolve replication identity before loading or initializing durable state."""
+        if self._identity is not None:
+            return
+        try:
+            identity = await self._driver._replication_identity(
+                self._config.slot,
+                self._config.publication,
+            )
+        except PostgresReplicationGapError:
+            raise
+        except Exception as exc:
+            gap_reason = _classify_gap_reason(exc)
+            if gap_reason is not None:
+                raise PostgresReplicationGapError(
+                    str(exc),
+                    reason=gap_reason,
+                ) from exc
+            raise
+        self._identity = identity
+        loaded = await self._store.load(identity.identity_key)
+        if loaded is not None:
+            _validate_identity_match(identity, loaded)
+            self._checkpoint = loaded
+            self._sync_feed_cursor(loaded.next_event_id)
+
+    def _sync_feed_cursor(self, next_event_id: int) -> None:
+        """Align the backing ChangeFeed event sequence counter with a durable cursor."""
+        self._feed._next_id = max(1, int(next_event_id))
+
+    async def _close_active_stream(self, *, suppress_error: bool = False) -> None:
+        """Close any currently attached native stream generation."""
+        stream = self._stream
+        self._stream = None
+        if stream is not None:
+            if suppress_error:
+                with contextlib.suppress(Exception):
+                    await stream.aclose()
+            else:
+                await stream.aclose()
+
+    def _effective_start_lsn(self) -> int | None:
+        """Compute the resume LSN from persisted checkpoint or initial configuration."""
+        if self._checkpoint is not None:
+            return self._checkpoint.commit_end_lsn
+        return self._config.start_lsn
+
+    async def _open_fresh_stream(self) -> AsyncPostgresReplication:
+        """Open a single native replication stream generation with reconnect=False."""
+        await self._ensure_initialized()
+        assert self._identity is not None
+        attempts = 0
+        backoff = self._config.initial_backoff_seconds
+        last_exc: BaseException | None = None
+        while True:
+            self._check_lifecycle()
+            try:
+                stream = await self._driver._open_replication_stream(
+                    self._config,
+                    start_lsn=self._effective_start_lsn(),
+                    reconnect=False,
+                )
+            except PostgresReplicationGapError:
+                self._check_lifecycle()
+                raise
+            except Exception as exc:
+                self._check_lifecycle()
+                gap_reason = _classify_gap_reason(exc)
+                if gap_reason is not None:
+                    raise PostgresReplicationGapError(
+                        str(exc),
+                        reason=gap_reason,
+                        identity_key=self._identity.identity_key,
+                    ) from exc
+                if not self._config.reconnect or not _is_retryable_stream_error(exc):
+                    raise
+                last_exc = exc
+                attempts += 1
+                if attempts > self._config.max_reconnect_attempts:
+                    raise PostgresReplicationGapError(
+                        f"Exhausted {self._config.max_reconnect_attempts} replication reconnect attempts",
+                        reason="retries_exhausted",
+                        identity_key=self._identity.identity_key,
+                    ) from last_exc
+                await self._wait_backoff(backoff)
+                if backoff > 0.0:
+                    backoff = min(self._config.max_backoff_seconds, backoff * 2.0)
+                continue
+            if self._closed or self._terminated:
+                with contextlib.suppress(Exception):
+                    await stream.aclose()
+                self._check_lifecycle()
+            self._stream = stream
+            return stream
+
+    async def _reconcile_uncertainty(self) -> None:
+        """Reload durable checkpoint and reset feed/pending state after uncertain commit."""
+        if not self._needs_reconcile:
+            return
+        await self._ensure_initialized()
+        assert self._identity is not None
+        self._pending_record = None
+        await self._close_active_stream(suppress_error=True)
+        loaded = await asyncio.wait_for(
+            self._store.load(self._identity.identity_key),
+            timeout=self._config.checkpoint_timeout_seconds,
+        )
+        if loaded is not None:
+            _validate_identity_match(self._identity, loaded)
+            self._checkpoint = loaded
+            self._sync_feed_cursor(loaded.next_event_id)
+            self._prune_acked_lsns(loaded.commit_end_lsn)
+        else:
+            self._sync_feed_cursor(1)
+        self._uncertain = False
+        self._needs_reconcile = False
+
+    def _prune_acked_lsns(self, commit_end_lsn: int) -> None:
+        """Drop LSN-to-event mappings at or below a durably acknowledged commit_end_lsn."""
+        stale = [lsn for lsn in self._lsn_to_event_id if lsn <= commit_end_lsn]
+        for lsn in stale:
+            del self._lsn_to_event_id[lsn]
+
+    async def _next_native_record(self) -> PostgresReplicationRecord:
+        """Pull the next raw replication record, driving adapter-owned reconnects cleanly."""
+        attempts = 0
+        backoff = self._config.initial_backoff_seconds
+        while True:
+            self._check_lifecycle()
+            if self._pending_record is not None:
+                record = self._pending_record
+                self._pending_record = None
+                return record
+            stream = self._stream
+            if stream is None:
+                stream = await self._open_fresh_stream()
+            try:
+                next_record = await stream.next()
+            except PostgresReplicationGapError:
+                await self._close_active_stream(suppress_error=True)
+                self._check_lifecycle()
+                raise
+            except StopAsyncIteration:
+                self._check_lifecycle()
+                raise
+            except Exception as exc:
+                await self._close_active_stream(suppress_error=True)
+                self._check_lifecycle()
+                if self._needs_reconcile:
+                    await self._reconcile_uncertainty()
+                    continue
+                gap_reason = _classify_gap_reason(exc)
+                if gap_reason is not None:
+                    raise PostgresReplicationGapError(
+                        str(exc),
+                        reason=gap_reason,
+                        identity_key=self._identity.identity_key if self._identity else None,
+                    ) from exc
+                if not self._config.reconnect or not _is_retryable_stream_error(exc):
+                    raise
+                attempts += 1
+                if attempts > self._config.max_reconnect_attempts:
+                    raise PostgresReplicationGapError(
+                        f"Exhausted {self._config.max_reconnect_attempts} replication reconnect attempts",
+                        reason="retries_exhausted",
+                        identity_key=self._identity.identity_key if self._identity else None,
+                    ) from exc
+                await self._wait_backoff(backoff)
+                if backoff > 0.0:
+                    backoff = min(self._config.max_backoff_seconds, backoff * 2.0)
+                continue
+            if next_record is None:
+                await self._close_active_stream(suppress_error=True)
+                self._check_lifecycle()
+                if self._needs_reconcile:
+                    await self._reconcile_uncertainty()
+                    continue
+                if not self._config.reconnect:
+                    raise StopAsyncIteration
+                attempts += 1
+                if attempts > self._config.max_reconnect_attempts:
+                    raise PostgresReplicationGapError(
+                        f"Exhausted {self._config.max_reconnect_attempts} replication reconnect attempts",
+                        reason="retries_exhausted",
+                        identity_key=self._identity.identity_key if self._identity else None,
+                    ) from None
+                await self._wait_backoff(backoff)
+                if backoff > 0.0:
+                    backoff = min(self._config.max_backoff_seconds, backoff * 2.0)
+                continue
+            self._check_lifecycle()
+            return next_record
+
+    def _publish_record(self, record: PostgresReplicationRecord) -> ChangeEvent:
+        """Append a native record into ChangeFeed and track its LSN boundary."""
+        payload = _record_to_payload(record)
+        _, event = self._feed.publish_event(record.kind, payload)
+        if record.commit_end_lsn is not None and record.commit_end_lsn >= 0:
+            self._lsn_to_event_id[record.commit_end_lsn] = self._feed._next_id
+        return event
+
+    def _build_next_checkpoint(self, commit_end_lsn: int) -> PostgresCheckpoint:
+        """Construct the target monotonic checkpoint for ``commit_end_lsn``."""
+        assert self._identity is not None
+        next_event_id = self._lsn_to_event_id.get(commit_end_lsn, self._feed._next_id)
+        if self._checkpoint is None:
+            return PostgresCheckpoint(
+                identity_key=self._identity.identity_key,
+                commit_end_lsn=commit_end_lsn,
+                next_event_id=max(1, next_event_id),
+                version=1,
+            )
+        return self._checkpoint.advance(
+            commit_end_lsn=commit_end_lsn,
+            next_event_id=max(self._checkpoint.next_event_id, next_event_id),
+        )
+
+    async def _run_ack_transaction(self, commit_end_lsn: int) -> PostgresCheckpoint:
+        """Execute CAS save before native wire acknowledge under single-flight gating."""
+        await self._ensure_initialized()
+        assert self._identity is not None
+        self._yield_gate.clear()
+        saved: PostgresCheckpoint | None = None
+        try:
+            target = self._build_next_checkpoint(commit_end_lsn)
+            self._uncertain = True
+            saved = await asyncio.wait_for(
+                self._store.save(target, expected=self._checkpoint),
+                timeout=self._config.checkpoint_timeout_seconds,
+            )
+            self._checkpoint = saved
+            self._prune_acked_lsns(saved.commit_end_lsn)
+            stream = self._stream
+            if stream is not None:
+                stream.acknowledge(commit_end_lsn)
+            self._uncertain = False
+            self._needs_reconcile = False
+            self._yield_gate.set()
+            return saved
+        except PostgresCheckpointConflictError:
+            self._terminated = True
+            self._stop_event.set()
+            self._uncertain = False
+            self._pending_record = None
+            await self._close_active_stream(suppress_error=True)
+            raise
+        except SerializationFailure as exc:
+            self._terminated = True
+            self._stop_event.set()
+            self._uncertain = False
+            self._pending_record = None
+            await self._close_active_stream(suppress_error=True)
+            raise PostgresCheckpointConflictError(
+                str(exc),
+                identity_key=self._identity.identity_key if self._identity else None,
+            ) from exc
+        except Exception as exc:
+            self._uncertain = saved is None
+            self._needs_reconcile = True
+            self._pending_record = None
+            await self._close_active_stream(suppress_error=True)
+            raise PostgresReplicationGapError(
+                f"Checkpoint acknowledgement failed for lsn {commit_end_lsn}: {exc}",
+                reason="checkpoint_uncertain",
+                identity_key=self._identity.identity_key if self._identity else None,
+            ) from exc
+        finally:
+            self._yield_gate.set()
+            if self._ack_target_lsn == commit_end_lsn:
+                self._ack_target_lsn = None
+
+
+_RETRYABLE_RECONNECT_REASONS = frozenset({"connection_closed", "disconnected", "transport", "transient"})
+_FAIL_CLOSED_REASONS = frozenset({"wal_unavailable", "identity_mismatch"})
+
+
+def _consume_task_exception(task: asyncio.Task[PostgresCheckpoint]) -> None:
+    """Retrieve task exceptions when detached after cancellation to avoid GC noise."""
+    if not task.cancelled():
+        task.exception()
+
+
+def _validate_identity_match(
+    expected: PostgresReplicationIdentity,
+    stored: PostgresCheckpoint,
+) -> None:
+    """Verify stored checkpoint matches the live server/slot replication identity."""
+    if stored.identity_key != expected.identity_key:
+        raise PostgresReplicationGapError(
+            "PostgreSQL replication identity mismatch against persisted checkpoint",
+            reason="identity_mismatch",
+            identity_key=expected.identity_key,
+        )
+
+
+def _classify_gap_reason(exc: BaseException) -> str | None:
+    """Extract an explicit fail-closed replication gap reason when present."""
+    reason = getattr(exc, "reason", None)
+    if isinstance(reason, str) and reason in _FAIL_CLOSED_REASONS:
+        return reason
+    code = getattr(exc, "code", None)
+    if isinstance(code, str) and code in _FAIL_CLOSED_REASONS:
+        return code
+    text = str(exc).lower()
+    if "wal_unavailable" in text or ("wal segment" in text and "removed" in text):
+        return "wal_unavailable"
+    if "identity_mismatch" in text or ("system_identifier" in text and "mismatch" in text):
+        return "identity_mismatch"
+    return None
+
+
+def _is_retryable_stream_error(exc: BaseException) -> bool:
+    """Determine whether a stream failure is a retryable disconnect vs fail-closed error."""
+    if _classify_gap_reason(exc) is not None:
+        return False
+    reason = getattr(exc, "reason", None)
+    if isinstance(reason, str) and reason in _RETRYABLE_RECONNECT_REASONS:
+        return True
+    return isinstance(exc, (ConnectionError, TimeoutError, EOFError, OperationalError))
+
+
+def _record_to_payload(record: PostgresReplicationRecord) -> dict[str, Any]:
+    """Convert a native logical replication record to a serializable ChangeFeed payload."""
+    payload: dict[str, Any] = {
+        "kind": record.kind,
+        "commit_end_lsn": record.commit_end_lsn,
+        "generation": record.generation,
+        **record.payload,
+    }
+    encode_json_bytes(payload)
+    return payload
