@@ -3479,6 +3479,12 @@ async fn session_shutdown_rejects_late_xlog_data_after_copydone_and_premature_re
             ready_for_query_frame(b'I'),
         ]
         .concat(),
+        [
+            command_complete_frame("COPY 0"),
+            copy_done_frame(),
+            ready_for_query_frame(b'I'),
+        ]
+        .concat(),
         [ready_for_query_frame(b'I')].concat(),
     ] {
         let (connection, mut peer) = session_writer_connection(None).await;

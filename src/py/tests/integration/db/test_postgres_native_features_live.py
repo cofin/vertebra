@@ -67,13 +67,9 @@ def _resolve_pgbouncer_config_pair(
     _ensure_postgres_extension_for_live()
     env_dsn = os.environ.get(_PGBOUNCER_DSN_ENV, "").strip()
     if env_dsn:
-        mode: Literal["transaction", "statement"] = "transaction" if pool_mode == "transaction" else "statement"
-        return PostgreSQLConfig(dsn=env_dsn, pooler_mode=mode, pgbouncer=mode == "transaction"), None
+        return PostgreSQLConfig(dsn=env_dsn, pooler_mode=pool_mode, pgbouncer=pool_mode == "transaction"), None
     if os.environ.get(_DOCKER_ENV) == "1":
-        fixture_name = (
-            "vtb_pgbouncer_transaction_config" if pool_mode == "transaction" else "vtb_pgbouncer_statement_config"
-        )
-        pair = request.getfixturevalue(fixture_name)
+        pair = request.getfixturevalue(f"vtb_pgbouncer_{pool_mode}_config")
         assert isinstance(pair, tuple) and len(pair) == 2
         return pair
     pytest.skip(f"Live PgBouncer tests require {_PGBOUNCER_DSN_ENV} or {_DOCKER_ENV}=1")

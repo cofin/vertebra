@@ -317,17 +317,6 @@ def vtb_pgbouncer_statement_config(
     yield from _run_pgbouncer_service("statement", docker_service, postgres_18_service)
 
 
-@pytest.fixture(params=["transaction", "statement"])
-def vtb_pgbouncer_config(
-    request: pytest.FixtureRequest,
-    docker_service: DockerService,
-    postgres_18_service: PostgresService,
-) -> Iterator[tuple[PostgreSQLConfig, PostgreSQLConfig]]:
-    """Start a PgBouncer container in transaction or statement mode fronting ``postgres_18_service``."""
-    mode: PoolerMode = "transaction" if str(request.param) == "transaction" else "statement"
-    yield from _run_pgbouncer_service(mode, docker_service, postgres_18_service)
-
-
 @pytest.fixture
 def vtb_postgres_driver(vtb_postgres_config: PostgreSQLConfig) -> SyncPostgreSQLDriver:
     """Return a native SyncPostgreSQLDriver wired to the pytest-databases PostgresService container."""

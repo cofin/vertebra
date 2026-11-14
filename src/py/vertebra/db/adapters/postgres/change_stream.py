@@ -480,7 +480,7 @@ class PostgresChangeSource(AsyncChangeSource):
         assert self._identity is not None
         self._pending_record = None
         self._pending_lsn = None
-        await self._close_active_stream()
+        await self._close_active_stream(suppress_error=True)
         loaded = await asyncio.wait_for(
             self._store.load(self._identity.identity_key),
             timeout=self._config.checkpoint_timeout_seconds,
@@ -524,8 +524,11 @@ class PostgresChangeSource(AsyncChangeSource):
             except StopAsyncIteration:
                 raise
             except Exception as exc:
-                gap_reason = _classify_gap_reason(exc)
                 await self._close_active_stream(suppress_error=True)
+                if self._needs_reconcile:
+                    await self._reconcile_uncertainty()
+                    continue
+                gap_reason = _classify_gap_reason(exc)
                 if gap_reason is not None:
                     raise PostgresReplicationGapError(
                         str(exc),
@@ -546,7 +549,10 @@ class PostgresChangeSource(AsyncChangeSource):
                     backoff = min(self._config.max_backoff_seconds, backoff * 2.0)
                 continue
             if next_record is None:
-                await self._close_active_stream()
+                await self._close_active_stream(suppress_error=True)
+                if self._needs_reconcile:
+                    await self._reconcile_uncertainty()
+                    continue
                 if not self._config.reconnect:
                     raise StopAsyncIteration
                 attempts += 1
@@ -739,6 +745,7 @@ class PostgresChangeSource(AsyncChangeSource):
         self._closed = True
         deadline = asyncio.get_running_loop().time() + self._config.checkpoint_timeout_seconds
         pending_task = self._ack_task
+        primary_error: BaseException | None = None
         try:
             if pending_task is not None and not pending_task.done():
                 remaining = deadline - asyncio.get_running_loop().time()
@@ -786,11 +793,14 @@ class PostgresChangeSource(AsyncChangeSource):
                         reason="checkpoint_uncertain",
                         identity_key=self._identity.identity_key if self._identity else None,
                     ) from exc
+        except BaseException as exc:
+            primary_error = exc
+            raise
         finally:
             self._pending_record = None
             self._pending_lsn = None
             self._yield_gate.set()
-            await self._close_active_stream()
+            await self._close_active_stream(suppress_error=primary_error is not None)
 
     async def __aenter__(self) -> PostgresChangeSource:
         """Enter async context manager returning the change source."""

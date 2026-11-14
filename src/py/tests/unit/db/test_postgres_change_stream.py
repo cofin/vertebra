@@ -25,7 +25,7 @@ from vertebra.db.adapters.postgres.types import (
     PostgresReplicationIdentity,
     PostgresReplicationRecord,
 )
-from vertebra.db.cdc import CDCConfig, ChangeFeed
+from vertebra.db.cdc import CDCConfig, ChangeEvent, ChangeFeed
 from vertebra.db.driver import AsyncChangeSource, OperationalError, SerializationFailure
 from vertebra.storage import MemoryConfig, SyncObjectStore
 
@@ -646,3 +646,78 @@ async def test_change_source_reconnects_and_closes_cleanly_when_dead_stream_aclo
         assert ack_dead_stream.closed is True
         resumed = await asyncio.wait_for(anext(ack_source.stream()), timeout=1.0)
         assert resumed.payload == {"kind": "insert", "generation": 0, "commit_end_lsn": 200, "n": 2}
+
+
+@pytest.mark.anyio
+async def test_change_source_eof_retries_reconcile_and_aclose_timeout_error_preservation() -> None:
+    """Verify None EOF retry cap, concurrent ack uncertainty before EOF, and aclose error preservation."""
+    ident = _identity()
+
+    class _TerminalAclStream(_FakeNativeStream):
+        async def aclose(self) -> None:
+            await super().aclose()
+            raise OperationalError("terminating connection due to administrator command")
+
+    eof_source = PostgresChangeSource(
+        _FakeReplicationDriver(ident, [_FakeNativeStream([])]),
+        PostgresChangeConfig(
+            slot="cdc_slot",
+            publication="pub_orders",
+            reconnect=True,
+            max_reconnect_attempts=0,
+            initial_backoff_seconds=0.0,
+            max_backoff_seconds=0.0,
+        ),
+    )
+    async with eof_source:
+        with pytest.raises(PostgresReplicationGapError) as eof_gap:
+            await anext(eof_source.stream())
+        assert eof_gap.value.reason == "retries_exhausted"
+
+    store = _OrderRecordingCheckpointStore(MemoryPostgresCheckpointStore(), [])
+    reconcile_stream1 = _FakeNativeStream(
+        [PostgresReplicationRecord(kind="insert", payload={"n": 1}, commit_end_lsn=100)]
+    )
+    reconcile_stream2 = _FakeNativeStream(
+        [PostgresReplicationRecord(kind="insert", payload={"n": 2}, commit_end_lsn=200)]
+    )
+    conc_source = PostgresChangeSource(
+        _FakeReplicationDriver(ident, [reconcile_stream1, reconcile_stream2]),
+        PostgresChangeConfig(slot="cdc_slot", publication="pub_orders", reconnect=False),
+        store,
+    )
+    await conc_source.__anext__()
+    reconcile_stream1.next_started.clear()
+    reconcile_stream1.block_next_gate = asyncio.Event()
+    reconcile_stream1.fail_ack_exc = ConnectionError("ack failed")
+
+    next_task: asyncio.Task[ChangeEvent] = asyncio.create_task(conc_source.__anext__())
+    await reconcile_stream1.next_started.wait()
+    with pytest.raises(PostgresReplicationGapError) as conc_ack_err:
+        await conc_source.acknowledge(100)
+    assert conc_ack_err.value.reason == "checkpoint_uncertain"
+    reconcile_stream1.block_next_gate.set()
+    resumed_after_eof = await asyncio.wait_for(next_task, timeout=1.0)
+    assert resumed_after_eof.payload == {"kind": "insert", "generation": 0, "commit_end_lsn": 200, "n": 2}
+    await conc_source.aclose()
+
+    hung_store = _OrderRecordingCheckpointStore(MemoryPostgresCheckpointStore(), [])
+    hung_store.save_gate = asyncio.Event()
+    dead_acl_stream = _TerminalAclStream(
+        [PostgresReplicationRecord(kind="insert", payload={"n": 3}, commit_end_lsn=300)]
+    )
+    timeout_source = PostgresChangeSource(
+        _FakeReplicationDriver(ident, [dead_acl_stream]),
+        PostgresChangeConfig(slot="cdc_slot", publication="pub_orders", checkpoint_timeout_seconds=0.05),
+        hung_store,
+    )
+    await anext(timeout_source.stream())
+    hung_ack = asyncio.create_task(timeout_source.acknowledge(300))
+    await hung_store.save_started.wait()
+    with pytest.raises(PostgresReplicationGapError) as close_gap:
+        await timeout_source.aclose()
+    assert close_gap.value.reason == "checkpoint_uncertain"
+    assert dead_acl_stream.closed is True
+    hung_store.save_gate.set()
+    with pytest.raises(PostgresReplicationGapError):
+        await hung_ack

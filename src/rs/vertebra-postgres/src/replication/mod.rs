@@ -398,102 +398,57 @@ impl PostgresReplicationConnection {
             }
         }
 
-        let mut saw_copy_done = false;
-        let mut saw_command_complete = false;
-        let mut backend_err: Option<PostgresError> = None;
-
-        loop {
-            let msg = match read_replication_message(
-                &mut self.conn.stream,
-                &mut self.conn.read_buf,
-                MAX_BACKEND_FRAME_LENGTH,
-                Some(deadline),
-            )
-            .await
-            {
-                Ok(m) => m,
-                Err(err) => {
-                    let timed_out =
-                        matches!(&err, PostgresError::Transport(m) if m.contains("timed out"));
-                    self.discard_socket().await;
-                    if timed_out {
-                        return Err(PostgresError::Operational(
-                            "PostgreSQL replication shutdown timed out awaiting ReadyForQuery"
-                                .to_string(),
-                        ));
-                    }
-                    return Err(err);
-                }
-            };
-
-            match msg {
-                ReplicationBackendMessage::Standard(Message::CopyData(body))
-                    if !saw_copy_done
-                        || matches!(
-                            feedback::decode_replication_copy_data(body.data()),
-                            Ok(feedback::ReplicationCopyData::PrimaryKeepalive { .. })
-                        ) => {}
-                ReplicationBackendMessage::Standard(Message::CopyDone) if !saw_copy_done => {
-                    saw_copy_done = true;
-                }
-                ReplicationBackendMessage::Standard(Message::RowDescription(_))
-                | ReplicationBackendMessage::Standard(Message::DataRow(_))
-                    if saw_copy_done && !saw_command_complete => {}
-                ReplicationBackendMessage::Standard(Message::CommandComplete(_))
-                    if saw_copy_done =>
-                {
-                    saw_command_complete = true;
-                }
-                ReplicationBackendMessage::Standard(Message::NoticeResponse(_)) => {}
-                ReplicationBackendMessage::Standard(Message::ParameterStatus(body)) => {
-                    if let Err(err) = self.conn.handle_parameter_status_frame(&body) {
-                        self.discard_socket().await;
-                        return Err(err);
-                    }
+        match self.drain_connection_shutdown(deadline).await {
+            Ok(outcome) => {
+                for (name, val) in outcome.parameter_updates {
+                    self.conn.apply_parameter_status_kv(name, val);
                     self.codec_ctx = CodecContext::from_parameters(self.conn.parameters());
                 }
-                ReplicationBackendMessage::Standard(Message::NotificationResponse(body)) => {
-                    if let Err(err) = self.conn.handle_notification_frame(&body) {
-                        self.discard_socket().await;
-                        return Err(err);
-                    }
+                for (pid, channel, payload) in outcome.notification_updates {
+                    self.conn.dispatch_notification(pid, channel, payload);
                 }
-                ReplicationBackendMessage::Standard(Message::ErrorResponse(body)) => {
-                    match parse_error_fields(body.fields()) {
-                        Ok(srv_err) => {
-                            if backend_err.is_none() {
-                                backend_err = Some(srv_err);
-                            }
-                        }
-                        Err(proto_err) => {
-                            self.discard_socket().await;
-                            return Err(proto_err);
-                        }
-                    }
+                self.terminate_at_deadline(deadline).await;
+                outcome.tx_status?;
+                if let Some(err) = outcome.backend_err {
+                    return Err(err);
                 }
-                ReplicationBackendMessage::Standard(Message::ReadyForQuery(body)) => {
-                    let status_res = TransactionStatus::from_wire_tag(body.status());
-                    self.terminate_at_deadline(deadline).await;
-                    status_res?;
-                    if let Some(err) = backend_err {
-                        return Err(err);
-                    }
-                    if !saw_copy_done || !saw_command_complete {
-                        return Err(PostgresError::Protocol(format!(
-                            "PostgreSQL replication CopyBoth shutdown reached ReadyForQuery with copy_done={saw_copy_done} command_complete={saw_command_complete}"
-                        )));
-                    }
-                    return Ok(());
+                if !outcome.saw_copy_done || !outcome.saw_command_complete {
+                    return Err(PostgresError::Protocol(format!(
+                        "PostgreSQL replication CopyBoth shutdown reached ReadyForQuery with copy_done={} command_complete={}",
+                        outcome.saw_copy_done, outcome.saw_command_complete
+                    )));
                 }
-                _ => {
-                    self.discard_socket().await;
-                    return Err(PostgresError::Protocol(
-                        "unexpected backend frame during PostgreSQL replication CopyDone shutdown"
+                Ok(())
+            }
+            Err(err) => {
+                let timed_out =
+                    matches!(&err, PostgresError::Transport(m) if m.contains("timed out"));
+                self.discard_socket().await;
+                if timed_out {
+                    return Err(PostgresError::Operational(
+                        "PostgreSQL replication shutdown timed out awaiting ReadyForQuery"
                             .to_string(),
                     ));
                 }
+                Err(err)
             }
         }
+    }
+
+    async fn drain_connection_shutdown(
+        &mut self,
+        deadline: Instant,
+    ) -> Result<CopyBothShutdownOutcome, PostgresError> {
+        drain_copy_both_shutdown(
+            &mut self.conn.stream,
+            &mut self.conn.read_buf,
+            Some(deadline),
+            false,
+            true,
+            false,
+            "unexpected backend frame during PostgreSQL replication CopyDone shutdown",
+        )
+        .await
     }
 
     async fn terminate_at_deadline(&mut self, deadline: Instant) {
@@ -524,6 +479,120 @@ impl PostgresReplicationConnection {
         self.conn.read_buf.clear();
         self.conn.write_buf.clear();
         let _ = tokio::time::timeout(SOCKET_DISCARD_GRACE, self.conn.stream.shutdown()).await;
+    }
+}
+
+pub(super) struct CopyBothShutdownOutcome {
+    pub(super) backend_err: Option<PostgresError>,
+    pub(super) tx_status: Result<(), PostgresError>,
+    pub(super) saw_copy_done: bool,
+    pub(super) saw_command_complete: bool,
+    pub(super) parameter_updates: Vec<(String, String)>,
+    pub(super) notification_updates: Vec<(i32, String, String)>,
+}
+
+pub(super) async fn drain_copy_both_shutdown<R>(
+    reader: &mut R,
+    read_buf: &mut bytes::BytesMut,
+    deadline: Option<Instant>,
+    mut saw_copy_done: bool,
+    defer_backend_error: bool,
+    map_truncated_eof: bool,
+    unexpected_msg: &str,
+) -> Result<CopyBothShutdownOutcome, PostgresError>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let mut saw_command_complete = false;
+    let mut backend_err: Option<PostgresError> = None;
+    let mut parameter_updates = Vec::new();
+    let mut notification_updates = Vec::new();
+    loop {
+        let msg = read_replication_message(reader, read_buf, MAX_BACKEND_FRAME_LENGTH, deadline)
+            .await
+            .map_err(|error| match error {
+                PostgresError::Transport(message) if map_truncated_eof && !read_buf.is_empty() => {
+                    PostgresError::Protocol(format!(
+                        "truncated replication backend frame: {message}"
+                    ))
+                }
+                other => other,
+            })?;
+        match msg {
+            ReplicationBackendMessage::Standard(Message::CopyData(body))
+                if !saw_copy_done
+                    || matches!(
+                        feedback::decode_replication_copy_data(body.data()),
+                        Ok(feedback::ReplicationCopyData::PrimaryKeepalive { .. })
+                    ) => {}
+            ReplicationBackendMessage::Standard(Message::CopyDone) if !saw_copy_done => {
+                saw_copy_done = true;
+            }
+            ReplicationBackendMessage::Standard(Message::RowDescription(_))
+            | ReplicationBackendMessage::Standard(Message::DataRow(_))
+                if saw_copy_done && !saw_command_complete => {}
+            ReplicationBackendMessage::Standard(Message::CommandComplete(_)) if saw_copy_done => {
+                saw_command_complete = true;
+            }
+            ReplicationBackendMessage::Standard(Message::NoticeResponse(_)) => {}
+            ReplicationBackendMessage::Standard(Message::ParameterStatus(body)) => {
+                let name = body
+                    .name()
+                    .map_err(|e| {
+                        PostgresError::Protocol(format!("invalid ParameterStatus name UTF-8: {e}"))
+                    })?
+                    .to_owned();
+                let val = body
+                    .value()
+                    .map_err(|e| {
+                        PostgresError::Protocol(format!("invalid ParameterStatus value UTF-8: {e}"))
+                    })?
+                    .to_owned();
+                parameter_updates.push((name, val));
+            }
+            ReplicationBackendMessage::Standard(Message::NotificationResponse(body)) => {
+                let channel = body
+                    .channel()
+                    .map_err(|e| {
+                        PostgresError::Protocol(format!(
+                            "invalid NotificationResponse channel UTF-8: {e}"
+                        ))
+                    })?
+                    .to_owned();
+                let payload = body
+                    .message()
+                    .map_err(|e| {
+                        PostgresError::Protocol(format!(
+                            "invalid NotificationResponse payload UTF-8: {e}"
+                        ))
+                    })?
+                    .to_owned();
+                notification_updates.push((body.process_id(), channel, payload));
+            }
+            ReplicationBackendMessage::Standard(Message::ErrorResponse(body)) => {
+                let err = parse_error_fields(body.fields())?;
+                if !defer_backend_error {
+                    return Err(err);
+                }
+                if backend_err.is_none() {
+                    backend_err = Some(err);
+                }
+            }
+            ReplicationBackendMessage::Standard(Message::ReadyForQuery(body)) => {
+                let tx_status = TransactionStatus::from_wire_tag(body.status()).map(|_| ());
+                return Ok(CopyBothShutdownOutcome {
+                    backend_err,
+                    tx_status,
+                    saw_copy_done,
+                    saw_command_complete,
+                    parameter_updates,
+                    notification_updates,
+                });
+            }
+            _ => {
+                return Err(PostgresError::Protocol(unexpected_msg.to_string()));
+            }
+        }
     }
 }
 
