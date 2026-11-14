@@ -8,8 +8,8 @@ description: "Update +vtb dialect wheel extras in extensions.md, refresh README.
 status: stable
 state: completed
 commit: a2fff702
-last_verified_at: "2026-11-14T00:42:00Z"
-last_verified_commit: a2fff702
+last_verified_at: "2026-11-14T01:02:00Z"
+last_verified_commit: 0eabc0a2
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -22,8 +22,14 @@ files:
   - docs/usage/index.md
   - README.md
   - AGENTS.md
+  - .agents/bundles/knowledge/architecture/runtime/platform-and-lifecycle.md
+  - .agents/bundles/knowledge/architecture/worker/asgi-and-wsgi-runners.md
+  - .agents/bundles/knowledge/domains/extensions/litestar.md
+  - .agents/bundles/knowledge/domains/server/worker-and-protocols.md
 tests: 
   - src/py/tests/unit/test_review_setup.py
+  - src/py/tests/unit/extensions/test_drop_in_names_and_generics.py
+  - src/py/tests/unit/server/test_runtime_tuning.py
 read_set:
   - docs/usage/extensions.md
   - README.md

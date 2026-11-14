@@ -5,16 +5,23 @@ chapter_id: ch08-user-and-reference-docs
 title: "Chapter 08: User Guides, Reference Stubs, README, and AGENTS.md Sync"
 description: "Synchronize Zensical usage/reference pages, tabbed [postgres] install blocks, native-stubs.md, README.md, and AGENTS.md."
 status: stable
-state: active
+state: completed
+last_reviewed_commit: 0eabc0a2
 planning_status: complete
 planning_quality: standard
 planning_degraded_reason: null
 plan_commit: 18baadcd
-updated_at: "2026-11-14T00:42:00Z"
+updated_at: "2026-11-14T01:12:30Z"
 generated:
   by: flow-plan
   at: "2026-11-13T00:25:00Z"
 verified:
+  - by: agent:code-reviewer
+    at: "2026-11-14T01:12:01Z"
+    commit: 0eabc0a2
+  - by: agent:quality-reviewer
+    at: "2026-11-14T01:06:30Z"
+    commit: 0eabc0a2
   - by: agent:plan-generator
     at: "2026-11-13T00:25:00Z"
     commit: 18baadcd
@@ -74,7 +81,7 @@ Covers all 10 affected `docs/` pages plus `README.md` and `AGENTS.md`; OKF data/
 
 ## 6. Current State & Remaining Plan Snapshot
 
-Implemented and remediated through `a2fff702` (combining `ch08` Zensical docs, optional `uvloop`/`winloop`/`rloop`/`zuvloop` loop extras with `[saq]`/`[all]` removal, shared `LOOP_BACKEND_CHOICES` CLI options, concrete `connection_type` across all 16 native SQLSpec configs, `<= 84`-char markdown fences, and synchronized runtime/Litestar/product OKF chapters; `ruff`, `mypy`, `237 passed` offline docs/extension/server tests with zero Litestar deprecation warnings, `make docs`, and `make review-check` green; awaiting zero-context re-review).
+Completed and zero-context reviewed through `0eabc0a2` (`make docs`, `make review-check`, `ruff`, `mypy`, and targeted offline server/extension/doc tests pass cleanly).
 
 ```bash
 make docs && make review-check

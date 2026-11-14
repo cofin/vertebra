@@ -5,12 +5,12 @@ chapter_id: ch09-data-packaging-okf-and-routing-sync
 title: "Chapter 09: Data, Product, Packaging OKF, and Review Routing Sync"
 description: "Finalize database-drivers-and-dialers.md (<= 200L), postgres-native-driver.md, postgres-limitations.md, tech-stack.md, product.md, adr-004, and areas.toml."
 status: stable
-state: planned
+state: active
 planning_status: complete
 planning_quality: standard
 planning_degraded_reason: null
 plan_commit: 18baadcd
-updated_at: "2026-11-13T00:25:00Z"
+updated_at: "2026-11-14T01:12:30Z"
 generated:
   by: flow-plan
   at: "2026-11-13T00:25:00Z"
@@ -75,7 +75,7 @@ Completes the 5-dimension OKF curation required before `/flow:finish` and `/flow
 
 ## 6. Current State & Remaining Plan Snapshot
 
-Planned (`4` tasks). Followed by `/flow:finish` full polyglot + live Docker/wheel/bench verification and `/flow:review`.
+Active frontier (`4` `compact` tasks remaining in `ch09`), followed by `/flow:finish` full polyglot + live Docker/wheel/bench verification and `/flow:review`.
 
 ```bash
 make review-check && make review-route BASE=18baadcd

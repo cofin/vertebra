@@ -18,30 +18,30 @@ chapters:
   - ch07-wheel-ci-and-benchmarks
   - ch08-user-and-reference-docs
   - ch09-data-packaging-okf-and-routing-sync
-current_chapter: ch08-user-and-reference-docs
-current_task: "native-postgres-driver:ch08:t04"
+current_chapter: ch09-data-packaging-okf-and-routing-sync
+current_task: "native-postgres-driver:ch09:t01"
 parent_prd: native-data-platform
 research:
   - research/protocol-and-execution_20261105.md
   - research/cloud-material_20261105.md
 plan_revision: 9
 plan_commit: 18baadcd
-state_revision: 29
-last_verified_checkpoint: 1dc528f8
-last_reviewed_chapter: ch07-wheel-ci-and-benchmarks
-last_reviewed_commit: af023efd
+state_revision: 30
+last_verified_checkpoint: 0eabc0a2
+last_reviewed_chapter: ch08-user-and-reference-docs
+last_reviewed_commit: 0eabc0a2
 created_at: "2026-11-03T04:05:00Z"
-updated_at: "2026-11-14T00:20:00Z"
+updated_at: "2026-11-14T01:12:30Z"
 generated:
   by: flow-plan
   at: "2026-11-13T00:25:00Z"
 verified:
   - by: agent:code-reviewer
-    at: "2026-11-13T22:52:13Z"
-    commit: af023efd
+    at: "2026-11-14T01:12:01Z"
+    commit: 0eabc0a2
   - by: agent:quality-reviewer
-    at: "2026-11-13T22:52:07Z"
-    commit: af023efd
+    at: "2026-11-14T01:06:30Z"
+    commit: 0eabc0a2
 tags:
   - rust
   - postgres
@@ -136,12 +136,12 @@ Nine cohesive chapters (`32` tasks) remain to finish logical replication supervi
 - [x] [780217cf] [ch05-atomic-cutover-and-legacy-removal](chapters/ch05-atomic-cutover-and-legacy-removal/spec.md) — Atomic SQLSpec (`NUMERIC`), SQLAlchemy (`numeric_dollar`), 12-line `driver.py` barrel, `PostgreSQLQueueBackend` guard, and `cloudsql.py`/`alloydb.py` legacy removal + TLS/async fixes.
 - [x] [7a7b5180] [ch06-live-conformance-and-service-acceptance](chapters/ch06-live-conformance-and-service-acceptance/spec.md) — PostgreSQL 14–18 conformance matrix with zero-skip hook plus live `pgoutput` replication and `PGCOPY`/`VTBARROW`/`LISTEN`/`pgvector`/`PgBouncer` suites.
 - [x] [af023efd] [ch07-wheel-ci-and-benchmarks](chapters/ch07-wheel-ci-and-benchmarks/spec.md) — `verify_postgres_wheel.py`, CI/release smoke lanes, free-threaded 8-thread pool proofs, `postgres-bench` group, Criterion benches, and testing OKF sync.
-- [~] [ch08-user-and-reference-docs](chapters/ch08-user-and-reference-docs/spec.md) — Zensical user guides (`databases.md`, `analytics-and-cdc.md`, `cloud-dialers.md`, `extensions.md`), `native-stubs.md`, `README.md`, and `AGENTS.md`.
-- [ ] [ch09-data-packaging-okf-and-routing-sync](chapters/ch09-data-packaging-okf-and-routing-sync/spec.md) — Final `database-drivers-and-dialers.md` (`<= 200L`), `postgres-native-driver.md`, `postgres-limitations.md`, `tech-stack.md`, `adr-004`, and `areas.toml` sync.
+- [x] [0eabc0a2] [ch08-user-and-reference-docs](chapters/ch08-user-and-reference-docs/spec.md) — Zensical user guides (`databases.md`, `analytics-and-cdc.md`, `cloud-dialers.md`, `extensions.md`), `native-stubs.md`, `README.md`, and `AGENTS.md`.
+- [~] [ch09-data-packaging-okf-and-routing-sync](chapters/ch09-data-packaging-okf-and-routing-sync/spec.md) — Final `database-drivers-and-dialers.md` (`<= 200L`), `postgres-native-driver.md`, `postgres-limitations.md`, `tech-stack.md`, `adr-004`, and `areas.toml` sync.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Active Frontier**: Chapters `ch01`–`ch07` (`24/32` tasks) are completed and reviewed; `ch08-user-and-reference-docs` (`4/4` tasks) is implemented and remediated through `a2fff702` awaiting chapter re-review (`4` open `compact` tasks remain in `ch09`).
+- **Active Frontier**: Chapters `ch01`–`ch08` (`28/32` tasks) are completed and reviewed; `ch09-data-packaging-okf-and-routing-sync` is the active chapter (`4` open `compact` tasks remain).
 - **Downstream Unlocks**: Completing `ch05` unblocks [`broker-pool-sharing`](../broker-pool-sharing/spec.md), [`driver-conformance-ci`](../driver-conformance-ci/spec.md), [`native-redis-driver`](../native-redis-driver/spec.md), [`native-adapter-organization`](../native-adapter-organization/spec.md), [`sqlspec-adapter-parity`](../sqlspec-adapter-parity/spec.md), and [`queues-tasks-and-channels`](../queues-tasks-and-channels/spec.md).
 - **`/flow:finish` Full Gate**: `make lint-all && make rs-test && make py-test && make postgres-wheel-check && make postgres-test && make postgres-bench-check && make docs-check && make review-check`.
 
