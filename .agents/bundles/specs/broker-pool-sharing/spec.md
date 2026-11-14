@@ -13,8 +13,8 @@ chapters:
 - ch02-engine-capsules-and-discovery
 - ch03-lease-safety-and-uds-attach
 - ch04-python-pooling-sqlspec-sqlalchemy-and-docs
-current_chapter: ch02-engine-capsules-and-discovery
-current_task: broker-pool-sharing:ch02:t01
+current_chapter: ch03-lease-safety-and-uds-attach
+current_task: broker-pool-sharing:ch03:t01
 parent_prd: native-data-platform
 depends_on_flows:
 - native-postgres-driver
@@ -169,13 +169,13 @@ class LeaseQuarantinedError(VertebraError): ...
 ## 5. Implementation Plan
 
 - [x] [936110fc] [ch01-shm-ownership-and-broker-wire](chapters/ch01-shm-ownership-and-broker-wire/spec.md) — Enforce O_CREAT | O_EXCL SHM ownership, OwnedShmRegistry crash/shutdown unlink, explicit owner/worker broker roles, cross-process XXH3-64 pool identity, partitioned pools/heartbeats, and binary DBRPC frames.
-- [ ] [ch02-engine-capsules-and-discovery](chapters/ch02-engine-capsules-and-discovery/spec.md) — Define BrokerEngineCapsule ABI v1 and BrokerEngineRegistry, implement Python BrokerEngineDiscovery, and export broker_engine_capsule() across MySQL, DuckDB, Oracle, SQL Server, and PostgreSQL.
-- [ ] [ch03-lease-safety-and-uds-attach](chapters/ch03-lease-safety-and-uds-attach/spec.md) — Implement crashed-worker lease quarantine and reclamation, SCM_RIGHTS/peercred UDS broker attach,DatabaseBrokerHost reclamation loop, transaction session affinity, streaming Arrow cursors, and vtb db broker CLI.
+- [x] [673051f1] [ch02-engine-capsules-and-discovery](chapters/ch02-engine-capsules-and-discovery/spec.md) — Define BrokerEngineCapsule ABI v1 and BrokerEngineRegistry, implement Python BrokerEngineDiscovery, and export broker_engine_capsule() across MySQL, DuckDB, Oracle, SQL Server, and PostgreSQL.
+- [ ] [ch03-lease-safety-and-uds-attach](chapters/ch03-lease-safety-and-uds-attach/spec.md) — Implement crashed-worker lease quarantine and reclamation, SCM_RIGHTS/peercred UDS broker attach, BrokerHost reclamation loop, transaction session affinity, streaming Arrow cursors, and vtb broker CLI.
 - [ ] [ch04-python-pooling-sqlspec-sqlalchemy-and-docs](chapters/ch04-python-pooling-sqlspec-sqlalchemy-and-docs/spec.md) — Refactor SQLSpec provider seams and ProxySyncDriver/ProxyAsyncDriver, prove 4-worker single-pool sharing, extract standalone vertebra.db.dbapi and wire SQLAlchemy/Advanced Alchemy broker pooling, and sync docs/OKF.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Progress (`936110fc`)**: `1/4` chapters and `4/16` tasks completed; frontier at `ch02-engine-capsules-and-discovery` (`broker-pool-sharing:ch02:t01`).
+- **Progress (`673051f1`)**: `2/4` chapters and `8/16` tasks completed; frontier at `ch03-lease-safety-and-uds-attach` (`broker-pool-sharing:ch03:t01`).
 - **Upstream Flow Dependencies**: `native-postgres-driver`.
 - **Active Invariants**: `vertebra-core` never links engine crates; live SHM segments are never unlinked; `extensions/sqlspec` contains zero `inspect.signature` or `contextlib.suppress(Exception)`; `vertebra.db.dbapi` has zero upward imports.
 - **Full `/flow:finish` Gate**: `make lint-all && make rs-test && make py-test && make docs && make review-check`

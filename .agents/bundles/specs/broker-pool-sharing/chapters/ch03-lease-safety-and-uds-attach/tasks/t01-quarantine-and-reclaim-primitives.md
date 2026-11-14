@@ -59,7 +59,7 @@ Implement `LeaseState::Quarantined`, `quarantine`, `dispose_quarantined`, `quara
 - Transition `Leased -> Quarantined` while keeping `active_leases` admission reserved until `dispose_quarantined` marks the slot `Free`.
 - Return `Vec<ReclaimedLease>` in `Quarantined`/pending-rollback state from `reclaim_worker_leases(worker_pid)` so the host runs `ROLLBACK` before slots return to `Free`.
 - **Edge Case**: `dispose_quarantined` on a `Free` or `Leased` slot returns `BrokerError::InvalidState`.
-- **Edge Case**: Stale `generation` on `quarantine` returns `BrokerError::StaleGeneration`.
+- **Edge Case**: Mismatched `generation` on `quarantine` or `dispose_quarantined` returns existing `BrokerError::GenerationMismatch`.
 
 ## Test Matrix
 

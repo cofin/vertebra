@@ -3,8 +3,8 @@ type: Task
 id: broker-pool-sharing:ch03-lease-safety-and-uds-attach:t04
 flow_id: broker-pool-sharing
 chapter_id: ch03-lease-safety-and-uds-attach
-title: Implement Transaction Session Affinity, Streaming Cursors, Broker Metrics, and vtb db broker CLI
-description: Pin active transactions to backend sessions, stream multi-batch VTBARROW frames, expose broker telemetry, and wire vtb db broker CLI commands.
+title: Implement Transaction Session Affinity, Streaming Cursors, Broker Metrics, and vtb broker CLI
+description: Pin active transactions to backend sessions, stream multi-batch VTBARROW frames, expose broker telemetry, and wire vtb broker serve CLI commands.
 status: stable
 state: pending
 planning_quality: standard
@@ -44,7 +44,7 @@ sources:
   title: Root vtb Click command group
 ---
 
-# Task `t04`: Implement Transaction Session Affinity, Streaming Cursors, Broker Metrics, and vtb db broker CLI
+# Task `t04`: Implement Transaction Session Affinity, Streaming Cursors, Broker Metrics, and vtb broker CLI
 
 ## Objective & Scope Boundary
 

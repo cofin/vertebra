@@ -3,20 +3,22 @@ type: Spec
 flow_id: broker-pool-sharing
 chapter_id: ch03-lease-safety-and-uds-attach
 title: 'Chapter 03: Quarantine Reclamation, Authenticated UDS Broker Attach, Session Affinity, and CLI'
-description: Implement crashed-worker lease quarantine and reclamation, SCM_RIGHTS/peercred UDS broker attach,DatabaseBrokerHost reclamation loop, transaction session affinity, streaming Arrow cursors, and vtb db broker CLI.
+description: Implement crashed-worker lease quarantine and reclamation, SCM_RIGHTS/peercred UDS broker attach, BrokerHost reclamation loop, transaction session affinity, streaming Arrow cursors, and vtb broker CLI.
 status: stable
 state: planned
 planning_status: complete
 planning_quality: standard
 planning_degraded_reason: null
+depends_on_chapters:
+- ch02-engine-capsules-and-discovery
 plan_commit: 1b191388
-updated_at: '2026-11-14T18:50:00Z'
+updated_at: '2026-11-14T23:06:00Z'
 generated:
   by: flow/0.30.1
-  at: '2026-11-14T18:50:00Z'
+  at: '2026-11-14T23:06:00Z'
 verified:
 - by: agent:plan-generator
-  at: '2026-11-14T18:50:00Z'
+  at: '2026-11-14T23:06:00Z'
   commit: 1b191388
 tags:
 - quarantine
@@ -127,21 +129,21 @@ Security boundary and quarantine semantics are documented in `ch04:t04`.
 | --- | --- | --- | --- |
 | `t01` | Implement Lease Quarantine State Machine and Dead-Worker Slot Reclamation | `src/rs/vertebra-core/src/broker.rs`, `src/rs/vertebra-py/src/broker.rs`, `src/py/vertebra/_vertebra.pyi` | `src/rs/vertebra-core/tests/it/broker.rs`, `src/py/tests/unit/extensions/test_shm_lease_broker.py` |
 | `t02` | Implement Peer-Credential Authenticated UDS Broker Handshake and FD Passing | `src/rs/vertebra-core/src/broker_attach.rs`, `src/rs/vertebra-core/src/lib.rs` | `src/rs/vertebra-core/tests/it/shm.rs` |
-| `t03` | Wire DatabaseBrokerHost Background Reclaimer and Standalone Broker Daemon Lifecycle | `src/rs/vertebra-py/src/broker.rs`, `src/py/vertebra/_vertebra.pyi`, `src/py/vertebra/extensions/broker/host.py` | `src/py/tests/unit/extensions/test_shm_broker.py` |
-| `t04` | Implement Transaction Session Affinity, Streaming Cursors, Broker Metrics, and vtb db broker CLI | `src/py/vertebra/extensions/broker/transport.py`, `src/py/vertebra/extensions/broker/plugin.py`, `src/py/vertebra/cli/__init__.py` | `src/py/tests/unit/extensions/test_shm_broker.py`, `src/py/tests/unit/extensions/test_broker_transport.py` |
+| `t03` | Wire BrokerHost Background Reclaimer and Standalone Broker Daemon Lifecycle | `src/rs/vertebra-py/src/broker.rs`, `src/py/vertebra/_vertebra.pyi`, `src/py/vertebra/extensions/broker/host.py` | `src/py/tests/unit/extensions/test_shm_broker.py` |
+| `t04` | Implement Transaction Session Affinity, Streaming Cursors, Broker Metrics, and vtb broker CLI | `src/py/vertebra/extensions/broker/transport.py`, `src/py/vertebra/extensions/broker/plugin.py`, `src/py/vertebra/cli/__init__.py` | `src/py/tests/unit/extensions/test_shm_broker.py`, `src/py/tests/unit/extensions/test_broker_transport.py` |
 
 ## 5. Implementation Plan
 
-- [ ] [t01-quarantine-and-reclaim-primitives.md](tasks/t01-quarantine-and-reclaim-primitives.md) — Add Quarantine/Resetting slot states and generation-fenced reclamation in ShmLeaseTable.
-- [ ] [t02-uds-authenticated-attach.md](tasks/t02-uds-authenticated-attach.md) — Build Unix domain socket SO_PEERCRED/LOCAL_PEERCRED handshake and SCM_RIGHTS SHM file-descriptor passing.
-- [ ] [t03-broker-host-reclamation-and-cli.md](tasks/t03-broker-host-reclamation-and-cli.md) — Add background heartbeat sweep and backend connection reset in DatabaseBrokerHost.
-- [ ] [t04-affinity-streaming-metrics-and-cli.md](tasks/t04-affinity-streaming-metrics-and-cli.md) — Pin active transactions to backend sessions, stream multi-batch VTBARROW frames, expose broker telemetry, and wire vtb db broker CLI commands.
+- [ ] [t01-quarantine-and-reclaim-primitives.md](tasks/t01-quarantine-and-reclaim-primitives.md) — Add `LeaseState::Quarantined` and generation-fenced reclamation (`quarantine`, `dispose_quarantined`, `reclaim_worker_leases`) in `ShmLeaseTable`.
+- [ ] [t02-uds-authenticated-attach.md](tasks/t02-uds-authenticated-attach.md) — Build Unix domain socket `SO_PEERCRED`/`LOCAL_PEERCRED` handshake and `SCM_RIGHTS` SHM file-descriptor passing.
+- [ ] [t03-broker-host-reclamation-and-cli.md](tasks/t03-broker-host-reclamation-and-cli.md) — Expose UDS attach in `_vertebra` and implement `BrokerHost` reclamation and `ShutdownReport` in `host.py`.
+- [ ] [t04-affinity-streaming-metrics-and-cli.md](tasks/t04-affinity-streaming-metrics-and-cli.md) — Pin active transactions to backend sessions, stream multi-batch `VTBARROW` frames, expose `PoolMetrics`, and wire `vtb broker serve` CLI commands.
 
 ## 6. Current State & Remaining Plan Snapshot
 
 - **Baseline (`18baadcd`)**: `state: planned`; `0/4` tasks completed.
 - **Active Invariants**: Quarantined slots count toward pool admission until disposed; attach secrets never appear in `repr`, logs, or metrics.
-- **Fast Chapter Gate (`< 60s`)**: `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-core -p vertebra-py && uv run --no-sync pytest src/py/tests/unit/extensions/test_shm_broker.py src/py/tests/unit/extensions/test_shm_lease_broker.py`
+- **Fast Chapter Gate (`< 60s`)**: `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-core --features tls,compression,gcp && make dev && uv run --no-sync python -m mypy.stubtest vertebra._vertebra --concise && uv run --no-sync pytest src/py/tests/unit/extensions/test_shm_broker.py src/py/tests/unit/extensions/test_shm_lease_broker.py src/py/tests/unit/extensions/test_broker_transport.py -q`
 
 [^core-broker]: `src/rs/vertebra-core/src/broker.rs::ShmLeaseTable` — Shared-memory lease table, statement cache, dialect tags, and worker reclamation.
 [^py-broker]: `src/rs/vertebra-py/src/broker.rs::LeaseBroker` — PyO3 LeaseBroker and StatementCache bindings.

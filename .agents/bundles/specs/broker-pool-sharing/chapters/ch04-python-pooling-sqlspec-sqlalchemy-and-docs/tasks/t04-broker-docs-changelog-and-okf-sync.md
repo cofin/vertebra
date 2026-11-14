@@ -26,9 +26,9 @@ read_set:
 - docs/usage/extensions.md
 - docs/usage/databases.md
 - docs/changelog/index.md
-- src/py/vertebra/extensions/sqlalchemy/pool.py
 - .agents/bundles/knowledge/domains/data/broker-and-shm-leases.md
 - .agents/bundles/knowledge/domains/data/postgres-limitations.md
+- .agents/bundles/knowledge/domains/index.md
 estimated_loc: 220
 tags:
 - docs
@@ -59,47 +59,40 @@ sources:
 
 ## Objective & Scope Boundary
 
-Update `docs/usage/extensions.md`, `docs/usage/databases.md`, and `docs/changelog/index.md` per [`../spec.md` §2](../spec.md) [^docs-ext] [^docs-db] [^docs-changelog].
-
-Refresh `broker-and-shm-leases.md`, author `shm-broker-limitations.md` (`<= 200` lines each), and link `shm-broker-limitations.md` in `domains/index.md` per [`../spec.md` §2](../spec.md) [^broker-okf] [^domains-idx].
+Update `docs/usage/extensions.md`, `docs/usage/databases.md`, and `docs/changelog/index.md` (`Unreleased`), refresh `.agents/bundles/knowledge/domains/data/broker-and-shm-leases.md`, author `.agents/bundles/knowledge/domains/data/shm-broker-limitations.md` (`<= 200` lines each), and link `shm-broker-limitations.md` in `.agents/bundles/knowledge/domains/index.md` per [`../spec.md` §2](../spec.md) [^docs-ext] [^docs-db] [^docs-changelog] [^broker-okf] [^domains-idx].
 
 ## Bounded Read Manifest
 
 - `docs/usage/extensions.md` — Broker, SQLSpec proxy, and SQLAlchemy extension docs.
 - `docs/usage/databases.md` — Database driver and broker capability matrix.
 - `docs/changelog/index.md` — `Unreleased` changelog section.
-- `src/py/vertebra/extensions/sqlalchemy/pool.py` — `BrokerPool` and `broker_creator` public signatures.
-
 - `.agents/bundles/knowledge/domains/data/broker-and-shm-leases.md` — Current broker OKF chapter.
 - `.agents/bundles/knowledge/domains/data/postgres-limitations.md` — Canonical OKF limitations chapter format.
-- `.agents/bundles/knowledge/domains/index.md` — Domains index catalog.
+- `.agents/bundles/knowledge/domains/index.md` — Domains catalog index.
 
 ## Contracts & Edge Cases
 
-- Use `pymdownx.tabbed` (`uv`, `pip`, `pdm`, `poetry`) for any install snippets, keep Mermaid diagrams conceptual (`4–6` nodes), and remove all `SyncInMemoryBrokerTransport` / `use_shm=False` references.
+- Use `pymdownx.tabbed` (`uv`, `pip`, `pdm`, `poetry`) for install snippets, keep Mermaid diagrams conceptual (`4–6` nodes), declare public `msgspec.Struct` examples concisely without internal `frozen=True, gc=False` boilerplate, and remove all `SyncInMemoryBrokerTransport` / `AsyncInMemoryBrokerTransport` / `use_shm=False` references.
 - Record concise `Added`, `Changed`, and `Removed` entries under `Unreleased` in `docs/changelog/index.md`.
-- **Edge Case**: Declare `msgspec.Struct` examples concisely without internal `frozen=True, gc=False` boilerplate in public docs.
-
-- Document `ShmOwnerHeader`, `BrokerEngineCapsule` ABI v1, `LeaseState::Quarantined`, UDS `SCM_RIGHTS` attach, `BrokerHost` crash `ROLLBACK`, `vertebra.db.dbapi`, and `BrokerPool` in `broker-and-shm-leases.md`.
+- Document `ShmOwnerHeader`, `BrokerEngineCapsule` ABI v1, `LeaseState::Quarantined`, UDS `SCM_RIGHTS` attach, `BrokerHost` (`vtb broker serve`) crash `ROLLBACK`, `vertebra.db.dbapi`, and `BrokerPool`/`AsyncBrokerPool`/`broker_creator` in `broker-and-shm-leases.md`.
 - Record BigQuery/Spanner native broker exclusion, Windows named-SHM exclusion, `MAX_POOL_PARTITIONS = 64`, 256-slot signal cleanup cap, and macOS 31-byte `shm_open` name limit in `shm-broker-limitations.md`.
-- **Edge Case**: Every `sources:` path and relative link resolves on disk; `domains/index.md` carries zero YAML frontmatter.
+- **Edge Case**: Every `sources:` path and relative link resolves on disk, every OKF chapter stays `<= 200` lines in present tense, and `.agents/bundles/knowledge/domains/index.md` carries zero YAML frontmatter.
 
 ## Test Matrix
 
-- `make docs` builds Zensical site cleanly and `scan_public_docstrings` reports zero issues.
-
+- `make docs` (`python -m tools.docs.scan_public_docstrings` + Zensical site build) exits `0` with zero missing docstrings or build errors.
 - `make review-check` exits `0` with zero OKF, link, truth-budget, or privacy errors.
 
 ## Verification
 
 ```bash
-make review-check
+uv run --no-sync python -m tools.docs.scan_public_docstrings && make review-check
 ```
 
 ## Acceptance Criteria
 
-- [ ] Public docs and changelog accurately describe shipped broker pool-sharing APIs and pass `make docs`.
-- [ ] Both OKF chapters are `<= 200` lines, present-tense, and pass `make review-check`.
+- [ ] Public docs and changelog accurately describe shipped broker pool-sharing APIs and pass docstring scans.
+- [ ] Both OKF chapters are `<= 200` lines, present-tense, indexed without frontmatter drift, and pass `make review-check`.
 - [ ] Zero regressions in the fast verification gate.
 
 [^docs-ext]: `docs/usage/extensions.md` — Extensions usage documentation.

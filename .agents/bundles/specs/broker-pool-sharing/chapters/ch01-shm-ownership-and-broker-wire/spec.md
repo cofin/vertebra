@@ -6,6 +6,7 @@ title: 'Chapter 01: Atomic SHM Ownership, Supervisor Lifecycle, Pool Identity, a
 description: Enforce O_CREAT | O_EXCL SHM ownership, OwnedShmRegistry crash/shutdown unlink, explicit owner/worker broker roles, cross-process FNV-1a pool identity, partitioned pools/heartbeats, and binary DBRPC frames.
 status: stable
 state: completed
+last_reviewed_commit: 936110fc
 planning_status: complete
 planning_quality: standard
 planning_degraded_reason: null

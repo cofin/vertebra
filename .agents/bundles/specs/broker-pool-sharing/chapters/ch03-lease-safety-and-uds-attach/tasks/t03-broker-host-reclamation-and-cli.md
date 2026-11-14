@@ -3,8 +3,8 @@ type: Task
 id: broker-pool-sharing:ch03-lease-safety-and-uds-attach:t03
 flow_id: broker-pool-sharing
 chapter_id: ch03-lease-safety-and-uds-attach
-title: Wire DatabaseBrokerHost Background Reclaimer and Standalone Broker Daemon Lifecycle
-description: Add background heartbeat sweep and backend connection reset in DatabaseBrokerHost.
+title: Wire BrokerHost Background Reclaimer and Standalone Broker Daemon Lifecycle
+description: Expose BrokerAttachServer/BrokerAttachClient in PyO3 and implement BrokerHost crash ROLLBACK reclamation and ShutdownReport.
 status: stable
 state: pending
 planning_quality: standard
@@ -43,7 +43,7 @@ sources:
   title: Shared-memory lease table, statement cache, dialect tags, and worker reclamation
 ---
 
-# Task `t03`: Wire DatabaseBrokerHost Background Reclaimer and Standalone Broker Daemon Lifecycle
+# Task `t03`: Wire BrokerHost Background Reclaimer and Standalone Broker Daemon Lifecycle
 
 ## Objective & Scope Boundary
 

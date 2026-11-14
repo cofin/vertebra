@@ -6,7 +6,9 @@ chapter_id: ch02-engine-capsules-and-discovery
 title: Implement PostgreSQL BrokerPoolBackend Over PostgresPool and broker_engine_capsule Export
 description: Implement PostgresBrokerBackend (tag 1) over PostgresPool and export broker_engine_capsule() in _postgres.
 status: stable
-state: pending
+state: completed
+commit: 673051f1
+completed_at: '2026-11-14T23:42:28Z'
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -70,8 +72,8 @@ make dev && uv run --no-sync python -m mypy.stubtest vertebra._postgres --concis
 
 ## Acceptance Criteria
 
-- [ ] `vertebra._postgres.broker_engine_capsule()` registers tag `1` and passes `stubtest`.
-- [ ] Zero regressions in the fast verification gate.
+- [x] `vertebra._postgres.broker_engine_capsule()` registers tag `1` and passes `stubtest`.
+- [x] Zero regressions in the fast verification gate.
 
 [^postgres-rs]: `src/rs/vertebra-postgres/src/pool.rs::PostgresPool` — PostgreSQL native Protocol 3.0 pool.
 [^db-registry]: `src/rs/vertebra-db/src/lib.rs::BrokerEngineBackend` — Per-cdylib static BrokerEngineBackend registry in vertebra-db.
