@@ -614,3 +614,35 @@ async def test_change_source_reconnects_and_closes_cleanly_when_dead_stream_aclo
     async with no_retry_source:
         with pytest.raises(OperationalError, match="administrator command"):
             await anext(no_retry_source.stream())
+
+    gap_stream = _TerminalAclStream([OperationalError("requested WAL segment has already been removed")])
+    gap_source = PostgresChangeSource(
+        _FakeReplicationDriver(ident, [gap_stream]),
+        PostgresChangeConfig(slot="cdc_slot", publication="pub_orders", reconnect=True),
+    )
+    async with gap_source:
+        with pytest.raises(PostgresReplicationGapError) as gap_err:
+            await anext(gap_source.stream())
+        assert gap_err.value.reason == "wal_unavailable"
+    assert gap_stream.closed is True
+
+    ack_dead_stream = _TerminalAclStream(
+        [PostgresReplicationRecord(kind="insert", payload={"n": 1}, commit_end_lsn=100)]
+    )
+    ack_dead_stream.fail_ack_exc = ConnectionError("wire ack lost")
+    ack_recovery_stream = _FakeNativeStream(
+        [PostgresReplicationRecord(kind="insert", payload={"n": 2}, commit_end_lsn=200)]
+    )
+    ack_source = PostgresChangeSource(
+        _FakeReplicationDriver(ident, [ack_dead_stream, ack_recovery_stream]),
+        PostgresChangeConfig(slot="cdc_slot", publication="pub_orders", reconnect=True),
+        MemoryPostgresCheckpointStore(),
+    )
+    async with ack_source:
+        await anext(ack_source.stream())
+        with pytest.raises(PostgresReplicationGapError) as ack_gap:
+            await ack_source.acknowledge(100)
+        assert ack_gap.value.reason == "checkpoint_uncertain"
+        assert ack_dead_stream.closed is True
+        resumed = await asyncio.wait_for(anext(ack_source.stream()), timeout=1.0)
+        assert resumed.payload == {"kind": "insert", "generation": 0, "commit_end_lsn": 200, "n": 2}

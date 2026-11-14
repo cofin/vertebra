@@ -439,7 +439,9 @@ impl PostgresReplicationConnection {
                 ReplicationBackendMessage::Standard(Message::RowDescription(_))
                 | ReplicationBackendMessage::Standard(Message::DataRow(_))
                     if saw_copy_done && !saw_command_complete => {}
-                ReplicationBackendMessage::Standard(Message::CommandComplete(_)) => {
+                ReplicationBackendMessage::Standard(Message::CommandComplete(_))
+                    if saw_copy_done =>
+                {
                     saw_command_complete = true;
                 }
                 ReplicationBackendMessage::Standard(Message::NoticeResponse(_)) => {}

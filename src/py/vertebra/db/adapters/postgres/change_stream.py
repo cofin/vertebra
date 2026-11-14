@@ -519,18 +519,19 @@ class PostgresChangeSource(AsyncChangeSource):
             try:
                 next_record = await stream.next()
             except PostgresReplicationGapError:
+                await self._close_active_stream(suppress_error=True)
                 raise
             except StopAsyncIteration:
                 raise
             except Exception as exc:
                 gap_reason = _classify_gap_reason(exc)
+                await self._close_active_stream(suppress_error=True)
                 if gap_reason is not None:
                     raise PostgresReplicationGapError(
                         str(exc),
                         reason=gap_reason,
                         identity_key=self._identity.identity_key if self._identity else None,
                     ) from exc
-                await self._close_active_stream(suppress_error=True)
                 if not self._config.reconnect or not _is_retryable_stream_error(exc):
                     raise
                 attempts += 1
@@ -663,16 +664,14 @@ class PostgresChangeSource(AsyncChangeSource):
             self._uncertain = False
             self._pending_record = None
             self._pending_lsn = None
-            await self._close_active_stream()
-            self._yield_gate.set()
+            await self._close_active_stream(suppress_error=True)
             raise
         except SerializationFailure as exc:
             self._terminated = True
             self._uncertain = False
             self._pending_record = None
             self._pending_lsn = None
-            await self._close_active_stream()
-            self._yield_gate.set()
+            await self._close_active_stream(suppress_error=True)
             raise PostgresCheckpointConflictError(
                 str(exc),
                 identity_key=self._identity.identity_key if self._identity else None,
@@ -682,14 +681,14 @@ class PostgresChangeSource(AsyncChangeSource):
             self._needs_reconcile = True
             self._pending_record = None
             self._pending_lsn = None
-            await self._close_active_stream()
-            self._yield_gate.set()
+            await self._close_active_stream(suppress_error=True)
             raise PostgresReplicationGapError(
                 f"Checkpoint acknowledgement failed for lsn {commit_end_lsn}: {exc}",
                 reason="checkpoint_uncertain",
                 identity_key=self._identity.identity_key if self._identity else None,
             ) from exc
         finally:
+            self._yield_gate.set()
             if self._ack_target_lsn == commit_end_lsn:
                 self._ack_target_lsn = None
 

@@ -2184,6 +2184,120 @@ async fn copyboth_preserves_sqlstate_55006_and_rejects_beyond_wal_malformed_w_an
         assert!(repl.is_closed());
         srv.await.expect("premature ReadyForQuery closed cleanly");
     }
+
+    {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let srv = tokio::spawn(async move {
+            let (mut meta, _) = listener.accept().await.expect("meta");
+            run_preflight(&mut meta).await;
+            let (mut repl, _) = listener.accept().await.expect("repl");
+            let _ = complete_startup_ready_version(&mut repl, 610, "18.1").await;
+            let _ = read_frontend_exchange(&mut repl).await;
+            repl.write_all(&identify_system_response(
+                "12345",
+                "1",
+                "1/500",
+                Some("appdb"),
+            ))
+            .await
+            .expect("identify");
+            repl.flush().await.expect("flush");
+            let _ = read_frontend_exchange(&mut repl).await;
+            repl.write_all(&copy_both_response_frame(0, &[]))
+                .await
+                .expect("write W");
+            repl.flush().await.expect("flush");
+            assert_eq!(
+                read_frontend_exchange(&mut repl).await,
+                FrontendExchange::CopyDone
+            );
+            let mut frames = copy_done_frame();
+            let keepalive = [b'k', 0, 0, 0, 1, 0, 0, 0, 16, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+            frames.extend(copy_data_frame(&keepalive));
+            frames.extend(command_complete_frame("COPY 0"));
+            frames.extend(command_complete_frame("START_REPLICATION"));
+            frames.extend(ready_for_query_frame(b'I'));
+            repl.write_all(&frames).await.expect("write pg18 close");
+            repl.flush().await.expect("flush");
+            assert_clean_terminate_to_eof(&mut repl).await;
+        });
+        let mut repl = PostgresReplicationConnection::connect_logical(
+            &direct_config(port),
+            "vertebra_slot",
+            "vertebra_pub",
+            None,
+        )
+        .await
+        .expect("connect");
+        repl.shutdown(Instant::now() + Duration::from_secs(2))
+            .await
+            .expect("post-CopyDone keepalive and double CommandComplete must pass");
+        srv.await.expect("pg18 close server");
+    }
+
+    for early_or_late_frames in [
+        [
+            command_complete_frame("COPY 0"),
+            copy_done_frame(),
+            ready_for_query_frame(b'I'),
+        ]
+        .concat(),
+        [
+            copy_done_frame(),
+            copy_data_frame(&[b'w'; 25]),
+            command_complete_frame("COPY 0"),
+            ready_for_query_frame(b'I'),
+        ]
+        .concat(),
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let srv = tokio::spawn(async move {
+            let (mut meta, _) = listener.accept().await.expect("meta");
+            run_preflight(&mut meta).await;
+            let (mut repl, _) = listener.accept().await.expect("repl");
+            let _ = complete_startup_ready_version(&mut repl, 611, "18.1").await;
+            let _ = read_frontend_exchange(&mut repl).await;
+            repl.write_all(&identify_system_response(
+                "12345",
+                "1",
+                "1/500",
+                Some("appdb"),
+            ))
+            .await
+            .expect("identify");
+            repl.flush().await.expect("flush");
+            let _ = read_frontend_exchange(&mut repl).await;
+            repl.write_all(&copy_both_response_frame(0, &[]))
+                .await
+                .expect("write W");
+            repl.flush().await.expect("flush");
+            assert_eq!(
+                read_frontend_exchange(&mut repl).await,
+                FrontendExchange::CopyDone
+            );
+            let _ = repl.write_all(&early_or_late_frames).await;
+            let _ = repl.flush().await;
+            let mut drain = [0_u8; 64];
+            let _ = tokio::io::AsyncReadExt::read(&mut repl, &mut drain).await;
+        });
+        let mut repl = PostgresReplicationConnection::connect_logical(
+            &direct_config(port),
+            "vertebra_slot",
+            "vertebra_pub",
+            None,
+        )
+        .await
+        .expect("connect");
+        let err = repl
+            .shutdown(Instant::now() + Duration::from_secs(2))
+            .await
+            .expect_err("out-of-order CommandComplete or late XLogData must fail");
+        assert!(matches!(err, PostgresError::Protocol(_)), "got {err:?}");
+        assert!(repl.is_closed());
+        srv.await.expect("rejected shutdown peer finished");
+    }
 }
 
 #[tokio::test]
@@ -3353,6 +3467,45 @@ async fn session_shutdown_accepts_post_copydone_keepalive_and_multiple_command_c
     let (res, ()) = tokio::join!(session.shutdown(), peer_close);
     res.unwrap();
     assert!(session.is_closed());
+}
+
+#[tokio::test]
+async fn session_shutdown_rejects_late_xlog_data_after_copydone_and_premature_ready() {
+    for bad_response in [
+        [
+            copy_done_frame(),
+            copy_data_frame(&[b'w'; 25]),
+            command_complete_frame("COPY 0"),
+            ready_for_query_frame(b'I'),
+        ]
+        .concat(),
+        [ready_for_query_frame(b'I')].concat(),
+    ] {
+        let (connection, mut peer) = session_writer_connection(None).await;
+        let session = connection
+            .into_stream(1, Duration::from_secs(3600), Duration::from_secs(2))
+            .unwrap();
+        let peer_close = async {
+            assert!(matches!(
+                read_frontend_exchange(&mut peer).await,
+                FrontendExchange::Other(b'd', _)
+            ));
+            assert_eq!(
+                read_frontend_exchange(&mut peer).await,
+                FrontendExchange::CopyDone
+            );
+            let _ = peer.write_all(&bad_response).await;
+            let _ = peer.flush().await;
+            let mut drain = [0_u8; 64];
+            let _ = tokio::io::AsyncReadExt::read(&mut peer, &mut drain).await;
+        };
+        let (res, ()) = tokio::join!(session.shutdown(), peer_close);
+        assert!(
+            matches!(res, Err(PostgresError::Protocol(_))),
+            "got {res:?}"
+        );
+        assert!(session.is_closed());
+    }
 }
 
 #[tokio::test(start_paused = true)]
