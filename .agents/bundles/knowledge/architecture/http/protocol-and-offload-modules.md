@@ -97,7 +97,7 @@ sources:
 - Realtime, body-streaming, and framing modules (`body.rs`, `grpc.rs`, `sse.rs`, `ws_mount.rs`, `pubsub.rs`, `multipart.rs`, `mcp_bridge.rs`, `http3.rs`) expose Rust protocol primitives wired into `ServerState`, `response::handle`, and CLI bridge entrypoints.
 <!-- truth: end -->
 
-[`lib.rs`](../../../../../src/rs/vertebra-http/src/lib.rs)[^src-vertebra-http-src-lib-rs] exports every module as `pub mod`. The modules in the first table below are wired directly into `main.rs`, `server.rs`, and [`response::handle`](../../../../../src/rs/vertebra-http/src/response.rs)[^src-vertebra-http-src-response-rs]. The remaining modules are standalone library components exercised by `src/rs/vertebra-http/tests/` and unit tests (`vertebra-py` does not depend on `vertebra-http`).
+[`lib.rs`](../../../../../src/rs/vertebra-http/src/lib.rs)[^src-vertebra-http-src-lib-rs] exports every top-level module as `pub mod` (whereas `dispatcher::direct` in [`dispatcher/mod.rs`](../../../../../src/rs/vertebra-http/src/dispatcher/mod.rs) is a private `mod direct;`). The modules in the first table below are wired directly into `main.rs`, `server.rs`, and [`response::handle`](../../../../../src/rs/vertebra-http/src/response.rs)[^src-vertebra-http-src-response-rs]. The remaining modules are standalone library components exercised by `src/rs/vertebra-http/tests/` and `benches/support/` (`vertebra-py` does not depend on `vertebra-http`).
 
 ## Wired into the server
 
@@ -129,7 +129,7 @@ sources:
 | `h2c.rs` (upgrade helpers) | `parse_h2c_upgrade_headers`, `build_h2c_switching_protocols_response`, `decode_base64url`, `PrependStream`, `H2cUpgradeParams` | RFC 9113 `Upgrade: h2c` parsing helpers |
 | `http3.rs` (QUIC listener) | `build_quic_server_config`, `serve_http3_endpoint`, `handle_h3_request`, `H3ChannelBody` | Feature `http3`; standalone QUIC endpoint helpers |
 | `tls.rs` (identity helpers) | `IpCidr`, `TrustedProxyConfig`, `ClientIdentity`, `ProxyAuthMetadata`, `extract_client_identity_from_der`, `normalize_trusted_proxy_headers` | Certificate CN and proxy XFCC/IAP header helpers |
-| [`dispatcher/direct.rs`](../../../../../src/rs/vertebra-http/src/dispatcher/direct.rs)[^src-vertebra-http-src-dispatcher-direct-rs] | `DirectWorkerPool`, `AdaptiveWorkerConfig`, `run_adaptive_worker`, `BatchHandler` | Consumer for `DispatchBackend::Direct` |
+| [`dispatcher/direct.rs`](../../../../../src/rs/vertebra-http/src/dispatcher/direct.rs)[^src-vertebra-http-src-dispatcher-direct-rs] & `benches/support/mod.rs` | `dispatch_direct_vec` (`dispatcher/direct.rs`); `DirectWorkerPool`, `AdaptiveWorkerConfig`, `run_adaptive_worker`, `BatchHandler` (`benches/support/mod.rs`) | Direct-mode channel producer and benchmark consumer helpers for `DispatchBackend::Direct` |
 
 Additional domain-specific modules:
 
