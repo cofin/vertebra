@@ -11,7 +11,7 @@ The completed server runtime & wheel-binary baseline (`server-runtime-correctnes
 
 ## 2. Active Feature Specifications (`state: active`)
 
-- [`native-postgres-driver`](native-postgres-driver/spec.md) — Verified `ReplicationSupervisor` reconnect, cancel-safe Python `AsyncPostgresReplication`, `PostgresChangeSource` CAS checkpointing, `options.py`/`binds.py`, permanent `_sync.py`/`_async.py` drivers, atomic `psycopg`/`asyncpg` removal + `cloudsql.py`/`alloydb.py` cleanup, PG14–18 conformance, wheel/benchmark gates, and docs over the merged `vertebra-postgres` wheel ([`9 chapters`](native-postgres-driver/chapters/index.md), `32` `compact` tasks remaining).
+- [`native-postgres-driver`](native-postgres-driver/spec.md) — Verified `ReplicationSupervisor` reconnect, cancel-safe Python `AsyncPostgresReplication`, `PostgresChangeSource` CAS checkpointing, `options.py`/`binds.py`, permanent `_sync.py`/`_async.py` drivers, atomic `psycopg`/`asyncpg` removal + `cloudsql.py`/`alloydb.py` cleanup, PG14–18 conformance, wheel/benchmark gates, and docs over the merged `vertebra-postgres` wheel ([`9 chapters`](native-postgres-driver/chapters/index.md), `ch01`–`ch08` complete, `4` remaining tasks in `ch09`).
 
 ## 3. Planned Executable Specifications (`state: planned`)
 

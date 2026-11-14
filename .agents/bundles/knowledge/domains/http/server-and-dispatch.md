@@ -86,7 +86,7 @@ sources:
 <!-- truth: start -->
 - `vertebra-http` packages `ServerConfig`, `ServerState`, `Router` (`matchit 0.9`), `RequestBatcher`, `Dispatcher` / `ShmDispatcher`, and `BackpressureController` as both a Rust library and the `vertebra-server` binary.
 - Ingress offloads (CORS, compression, static mounts, OpenAPI cache, health, HMR) execute natively in Rust before Python worker dispatch.
-- The native bridge and SHM reader route progressive response frames through bounded `ResponseStreamRegistry` channels; Python submission and mounted ASGI/RSGI producers remain buffered until their separate cutover [^src-vertebra-http-src-dispatcher-streams-rs].
+- The native bridge and SHM reader route progressive response frames from Python workers, mounted ASGI/RSGI producers, and native `App` routes through bounded `ResponseStreamRegistry` channels [^src-vertebra-http-src-dispatcher-streams-rs].
 <!-- truth: end -->
 
 [`vertebra-http`](../../../../../src/rs/vertebra-http/src/lib.rs)[^src-vertebra-http-src-lib-rs] is both a library and the `vertebra-server` binary. The crate root re-exports `Batch`, `BatchLimit`, `PendingRequest`, `RequestBatcher`, `CorrelationId`, `InFlightRequests`, `HandlerId`, `RouteTable`, `Router`, and `RouterError`. Mechanics are in [HTTP Ingress](../../architecture/http/ingress-and-routing.md) and [Request Batching, Dispatch & Backpressure](../../architecture/http/batching-dispatch-and-backpressure.md); protocol and offload modules are listed in [Protocol and Offload Modules](../../architecture/http/protocol-and-offload-modules.md).
@@ -124,7 +124,7 @@ sources:
 
 [`ResponseStreamRegistry`](../../../../../src/rs/vertebra-http/src/dispatcher/streams.rs)[^src-vertebra-http-src-dispatcher-streams-rs] handles first frames, ordered data, trailers, final/error frames, and disconnected clients. Its default capacity is 64 frames per response. The embedded sink calls `deliver_blocking` from a producer outside Tokio; the SHM reader calls `Dispatcher::deliver_stream_frame(...).await`, which forwards to `ShmDispatcher::deliver_stream_frame` and the same registry implementation. No send drops a frame merely because the queue is full.
 
-First frames complete their correlation as `PendingResponse::streaming`, removing the pending-request timeout entry. Final or error frames close the channel; periodic dispatcher sweeps reclaim dropped receivers. `set_worker`, `close_worker`, and `sweep_closed` retain SHM worker ownership and cancel blocked async delivery when the worker exits. Unary `VRES` and overflow `VROV` responses retain their completion batching path [^src-vertebra-http-src-dispatcher-streams-rs] [^src-vertebra-http-src-dispatcher-shm-reader-rs].
+First frames complete their correlation as `PendingResponse::streaming`, removing the pending-request timeout entry. Final or error frames close the channel; periodic dispatcher sweeps reclaim dropped receivers. `set_worker`, `close_worker`, and `sweep_closed` own SHM worker stream cleanup and cancel blocked async delivery when the worker exits. Unary `VRES` and overflow `VROV` responses use the unary completion batching path [^src-vertebra-http-src-dispatcher-streams-rs] [^src-vertebra-http-src-dispatcher-shm-reader-rs].
 
 Python workers emit `ResponseStreamFrame` chunks through `submit_stream_frame` / `max_stream_frame_payload`, flushing mounted ASGI (`AsgiProtocol`, `AsgiSend`), RSGI (`RsgiHttpProtocol`), and native `App` (`_dispatch.py`, `StreamingStorageResponse`, `ArrowCursor`) responses progressively across both embedded `BatchBridge` and `Shm` topologies.
 

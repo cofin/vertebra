@@ -85,7 +85,7 @@ sources:
 # Benchmark Suite & Free-Threaded Python 3.14t/3.15t
 
 <!-- truth: start -->
-- `duckdb>=1.0` lives in `[dependency-groups].duckdb` (`bench` includes it), third-party `psycopg[binary]` and `asyncpg` comparators live in `[dependency-groups].postgres-bench` (`python_version < '3.14'`), and `uvicorn`/`granian`/`spikard` stay in `[dependency-groups].bench`; free-threaded (`3.14t`/`3.15t`) runs install none of these groups.
+- `duckdb>=1.0` lives in `[dependency-groups].duckdb` (`bench` includes it), third-party `psycopg[binary]` and `asyncpg` comparators live in `[dependency-groups].postgres-bench` (`python_version < '3.14'`), and `uvicorn`/`granian`/`spikard` live in `[dependency-groups].bench`; free-threaded (`3.14t`/`3.15t`) runs install none of these groups.
 - Run `make bench`, `make bench-ft`, `make rs-bench`, `make bench-micro`, `make bench-check`, and `make postgres-bench` against release/PGO builds; run `make postgres-bench-check` offline for Criterion test execution, lint/type validation, and comparator unit tests, and validate 14 immutable `_postgres` classes plus 8-thread concurrent pool checks in `test_freethreaded_gil.py`.
 <!-- truth: end -->
 

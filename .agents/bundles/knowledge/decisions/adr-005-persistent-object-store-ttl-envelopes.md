@@ -55,7 +55,7 @@ Always write the envelope, including immortal values with a `None` deadline. Val
 
 Each stored value carries envelope and decoding overhead. One object write publishes payload and deadline together; no separate TTL index needs synchronization. Wall-clock deadlines inherit clock adjustment/skew behavior. The private persistent format requires an explicit migration or version change if its representation changes; unknown or malformed envelopes fail explicitly [^litestar-store].
 
-Native consumer tests retain cross-instance Local expiration and renewal, immortal-value behavior, corrupt-envelope rejection, and confined namespace deletion. Preserve these consumer contracts when changing the encoding or metadata path [^store-consumers].
+Native consumer tests cover cross-instance Local expiration and renewal, immortal-value behavior, corrupt-envelope rejection, and confined namespace deletion. Preserve these consumer contracts when changing the encoding or metadata path [^store-consumers].
 
 [^litestar-store]: `src/py/vertebra/extensions/litestar/store.py::ObjectStoreLitestarStore` — Authoritative persistent value envelope and Store behavior.
 [^native-storage]: `src/rs/vertebra-storage/src/store.rs::ObjectStoreEngine` — Native backend attributes and Local fallback.

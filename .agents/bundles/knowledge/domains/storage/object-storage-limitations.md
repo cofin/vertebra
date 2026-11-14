@@ -53,7 +53,7 @@ sources:
 - `R2Config.custom_domain` is forwarded as a store option, but presigned URLs always target `https://<account_id>.r2.cloudflarestorage.com` because Cloudflare only honors presigned URLs on the S3 API domain ([Cloudflare R2 presigned URLs](https://developers.cloudflare.com/r2/api/s3/presigned-urls/)) [^py-store].
 - Native `list(prefix)` matches whole path segments, so `glob()` lists the literal text before the first wildcard truncated to its last `/` and filters the full pattern with `fnmatch.fnmatchcase` [^py-store].
 - Native `put` normalizes away trailing `/`, so directory placeholder keys cannot be created through `vertebra.storage`; `glob()` still skips placeholder keys returned by external writers [^py-store].
-- Native `extract_buffer_bytes` accepts only byte-format buffers (`B`, `b`, `c`); the Python facade casts typed buffers (`pyarrow.Buffer`, `array.array`, NumPy) to a flat `B` view before crossing FFI, while `bytes` and `StorageBuffer` stay zero-copy [^storage-lib-rs] [^py-store].
+- Native `extract_buffer_bytes` accepts only byte-format buffers (`B`, `b`, `c`); the Python facade casts typed buffers (`pyarrow.Buffer`, `array.array`, NumPy) to a flat `B` view before crossing FFI, while `bytes` and `StorageBuffer` transfer zero-copy [^storage-lib-rs] [^py-store].
 - `ObjectStoreEngine::get_file` flushes and atomically renames the `.part` file but does not call `fsync`; durability across power loss depends on the filesystem [^storage-store-rs].
 - Cancellation cleanup (`PartFileGuard`, `CreatedFilesGuard`, `MultipartUploadSession` `Drop`, `ComposeTemporariesGuard`) runs when an aborted Tokio task drops its future; a `tokio::fs` open or rename already running on the blocking pool can still complete after the guard runs, so a `.part` or target file can survive that narrow window [^storage-store-rs].
 - `OciObjectStore::copy_opts` fails closed with `Generic` when `copyObject` returns `202` without an `opc-work-request-id` header because completion cannot be confirmed [^storage-oci-rs].
@@ -75,7 +75,7 @@ sources:
 
 ## Open Limitations
 
-`get_file` durability (`fsync`), cancellation cleanup pool windows, `300 s` total client request timeouts, `verify_presigned_url` support on `gcs` / `azure` / `oci`, `DjangoStorage` created/accessed timestamps, and upstream SQLSpec `<= 0.71.1` pipeline buffering remain open limitations. The R2 presigned-host rule, whole-segment `list(prefix)` matching, progressive `VerifyingStream` EOF checks, and trailing-`/` normalization follow provider and `object_store` semantics and are documented behavior rather than engine defects.
+`get_file` durability (`fsync`), cancellation cleanup pool windows, `300 s` total client request timeouts, `verify_presigned_url` support on `gcs` / `azure` / `oci`, `DjangoStorage` created/accessed timestamps, and upstream SQLSpec `<= 0.71.1` pipeline buffering are open limitations. The R2 presigned-host rule, whole-segment `list(prefix)` matching, progressive `VerifyingStream` EOF checks, and trailing-`/` normalization follow provider and `object_store` semantics and are documented behavior rather than engine defects.
 
 [^py-store]: `src/py/vertebra/storage/_store.py::SyncObjectStore` — Python `SyncObjectStore` and `AsyncObjectStore` facades.
 [^storage-lib-rs]: `src/rs/vertebra-storage/src/lib.rs::extract_buffer_bytes` — PyO3 buffer extraction for `vertebra._storage`.
