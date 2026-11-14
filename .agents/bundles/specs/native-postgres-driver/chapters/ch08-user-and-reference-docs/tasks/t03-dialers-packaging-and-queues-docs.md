@@ -7,9 +7,9 @@ title: "Update cloud-dialers.md, packaging-and-deployment.md, and queues-and-rea
 description: "Remove legacy psycopg/asyncpg dialer examples, drop false release-CI PGO prose, and document vertebra-core[postgres] queue guard."
 status: stable
 state: completed
-commit: d9d2fd01
-last_verified_at: "2026-11-13T23:12:00Z"
-last_verified_commit: d9d2fd01
+commit: 1dc528f8
+last_verified_at: "2026-11-14T00:20:00Z"
+last_verified_commit: 1dc528f8
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact

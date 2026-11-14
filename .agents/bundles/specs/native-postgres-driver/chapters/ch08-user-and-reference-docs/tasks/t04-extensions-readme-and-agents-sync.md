@@ -7,9 +7,9 @@ title: "Fix docs/usage/extensions.md, README.md, and AGENTS.md"
 description: "Update +vtb dialect wheel extras in extensions.md, refresh README.md crate/wheel overview, and keep AGENTS.md <= 100 lines."
 status: stable
 state: completed
-commit: d9d2fd01
-last_verified_at: "2026-11-13T23:12:00Z"
-last_verified_commit: d9d2fd01
+commit: 1dc528f8
+last_verified_at: "2026-11-14T00:20:00Z"
+last_verified_commit: 1dc528f8
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
