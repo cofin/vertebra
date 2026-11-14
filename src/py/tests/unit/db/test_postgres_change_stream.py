@@ -72,7 +72,6 @@ class _FakeNativeStream:
         self.acks: list[int] = []
         self.ack_called = asyncio.Event()
         self.aclose_called = asyncio.Event()
-        self.aclose_calls = 0
         self.next_started = asyncio.Event()
         self.block_next_gate: asyncio.Event | None = None
         self.fail_ack_exc: BaseException | None = None
@@ -99,7 +98,6 @@ class _FakeNativeStream:
         return commit_end_lsn
 
     async def aclose(self) -> None:
-        self.aclose_calls += 1
         self.closed = True
         self.aclose_called.set()
         if self.fail_aclose_exc is not None:
@@ -113,13 +111,10 @@ class _FakeReplicationDriver:
         self,
         identity: PostgresReplicationIdentity,
         streams: list[_FakeNativeStream | BaseException],
-        *,
-        identity_error: BaseException | None = None,
     ) -> None:
         self._config = PostgreSQLConfig(dsn="postgresql://postgres@127.0.0.1:5432/app")
         self._identity = identity
         self._streams = list(streams)
-        self._identity_error = identity_error
         self.calls: list[str] = []
         self.opened_args: list[tuple[int | None, bool]] = []
         self.open_count = 0
@@ -134,8 +129,6 @@ class _FakeReplicationDriver:
         publication: str,
     ) -> PostgresReplicationIdentity:
         self.calls.append(f"identity:{slot}:{publication}")
-        if self._identity_error is not None:
-            raise self._identity_error
         return self._identity
 
     async def _open_replication_stream(
@@ -160,15 +153,17 @@ class _OrderRecordingCheckpointStore:
     def __init__(self, inner: MemoryPostgresCheckpointStore, log: list[str]) -> None:
         self._inner = inner
         self._log = log
+        self.load_started = asyncio.Event()
+        self.load_gate: asyncio.Event | None = None
         self.save_started = asyncio.Event()
         self.save_gate: asyncio.Event | None = None
         self.fail_next_save: BaseException | None = None
-        self.fail_load: BaseException | None = None
 
     async def load(self, identity_key: tuple[str, str, str, str]) -> PostgresCheckpoint | None:
         self._log.append("store.load")
-        if self.fail_load is not None:
-            raise self.fail_load
+        self.load_started.set()
+        if self.load_gate is not None:
+            await self.load_gate.wait()
         return await self._inner.load(identity_key)
 
     async def save(
@@ -937,7 +932,70 @@ async def test_change_source_anext_after_aclose_timeout_and_interruptible_backof
     reconciled_ack = await reconcile_source.acknowledge(200)
     assert reconciled_ack.version == 2
     assert reconciled_ack.commit_end_lsn == 200
+    assert reconciled_ack.next_event_id <= reconcile_source.feed._next_id
     await reconcile_source.aclose()
+
+    conc_ack_inner = MemoryPostgresCheckpointStore()
+    conc_ack_store = _OrderRecordingCheckpointStore(conc_ack_inner, [])
+    conc_s1 = _FakeNativeStream([PostgresReplicationRecord(kind="insert", payload={"id": 1}, commit_end_lsn=100)])
+    conc_s2 = _FakeNativeStream([PostgresReplicationRecord(kind="insert", payload={"id": 2}, commit_end_lsn=200)])
+    conc_s2.block_next_gate = asyncio.Event()
+    conc_ack_source = PostgresChangeSource(
+        _FakeReplicationDriver(ident, [conc_s1, conc_s2]),
+        PostgresChangeConfig(slot="cdc_slot", publication="pub_orders", reconnect=True),
+        conc_ack_store,
+    )
+    await conc_ack_source.__anext__()
+    conc_ack_store.fail_next_save = TimeoutError("uncertain first save")
+    with pytest.raises(PostgresReplicationGapError):
+        await conc_ack_source.acknowledge(100)
+    conc_ack_store.load_gate = asyncio.Event()
+    ack_first = asyncio.create_task(conc_ack_source.acknowledge(100))
+    await conc_ack_store.load_started.wait()
+    ack_second = asyncio.create_task(conc_ack_source.acknowledge(100))
+    await asyncio.sleep(0)
+    conc_ack_store.load_gate.set()
+    cp_first, cp_second = await asyncio.wait_for(asyncio.gather(ack_first, ack_second), timeout=1.0)
+    assert cp_first.version == 1
+    assert cp_second.version == 1
+
+    idle_next_task: asyncio.Task[ChangeEvent] = asyncio.create_task(conc_ack_source.__anext__())
+    await conc_s2.next_started.wait()
+    idle_ack = await asyncio.wait_for(conc_ack_source.acknowledge(150), timeout=1.0)
+    assert idle_ack.commit_end_lsn == 150
+    conc_s2.block_next_gate.set()
+    idle_event = await asyncio.wait_for(idle_next_task, timeout=1.0)
+    assert idle_event.payload["commit_end_lsn"] == 200
+    assert idle_event.payload["id"] == 2
+    await conc_ack_source.aclose()
+
+    dup_store = _OrderRecordingCheckpointStore(MemoryPostgresCheckpointStore(), [])
+    dup_s1 = _FakeNativeStream(
+        [
+            PostgresReplicationRecord(kind="insert", payload={"n": 1}, commit_end_lsn=100),
+            PostgresReplicationRecord(kind="insert", payload={"n": 2}, commit_end_lsn=200),
+        ]
+    )
+    dup_s2 = _FakeNativeStream(
+        [
+            PostgresReplicationRecord(kind="insert", payload={"n": 3}, commit_end_lsn=300),
+        ]
+    )
+    dup_source = PostgresChangeSource(
+        _FakeReplicationDriver(ident, [dup_s1, dup_s2]),
+        PostgresChangeConfig(slot="cdc_slot", publication="pub_orders", reconnect=True),
+        dup_store,
+    )
+    await dup_source.__anext__()
+    await dup_source.__anext__()
+    dup_store.fail_next_save = TimeoutError("uncertain save")
+    with pytest.raises(PostgresReplicationGapError):
+        await dup_source.acknowledge(100)
+    dup_ack = await dup_source.acknowledge(200)
+    assert dup_ack.next_event_id == 1
+    ev_after_reconcile = await dup_source.__anext__()
+    assert ev_after_reconcile.event_id >= dup_ack.next_event_id
+    await dup_source.aclose()
 
     backoff_stream = _FakeNativeStream([ConnectionError("transient drop")])
     backoff_driver = _FakeReplicationDriver(ident, [backoff_stream])

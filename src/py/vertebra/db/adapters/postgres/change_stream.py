@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from vertebra.db.adapters.postgres.types import PostgresReplicationIdentity, PostgresReplicationRecord
@@ -15,7 +14,7 @@ from vertebra.db.driver import (
     OperationalError,
     SerializationFailure,
 )
-from vertebra.typing import ImproperConfigurationError
+from vertebra.typing import FrozenBaseStruct, ImproperConfigurationError
 from vertebra.utils.serializers import encode_json_bytes
 from vertebra.utils.text import validate_identifier
 
@@ -70,22 +69,38 @@ class PostgresReplicationGapError(OperationalError):
         self.identity_key = identity_key
 
 
-@dataclass(frozen=True, slots=True)
-class PostgresChangeConfig:
+class PostgresChangeConfig(FrozenBaseStruct, frozen=True, gc=False):
     """Configuration for PostgreSQL logical replication CDC streaming."""
 
     slot: str
+    """Logical replication slot identifier."""
+
     publication: str
+    """PostgreSQL publication name to subscribe to."""
+
     start_lsn: int | None = None
+    """Optional starting LSN override when no durable checkpoint exists."""
+
     reconnect: bool = True
+    """Whether to reconnect across retryable stream drops."""
+
     max_reconnect_attempts: int = 5
+    """Maximum consecutive reconnect attempts before failing closed."""
+
     initial_backoff_seconds: float = 0.05
+    """Initial delay before the first reconnect attempt in seconds."""
+
     max_backoff_seconds: float = 1.0
+    """Maximum exponential reconnect backoff delay in seconds."""
+
     checkpoint_timeout_seconds: float = 5.0
-    status_interval_seconds: float = 10.0
-    batch_size: int = 256
+    """Bounded timeout in seconds for checkpoint store loads, saves, and close."""
+
     queue_capacity: int = 1024
+    """Bounded native replication delivery queue capacity."""
+
     cdc_config: CDCConfig | None = None
+    """Optional ChangeFeed spill and replay configuration."""
 
     def __post_init__(self) -> None:
         """Validate identifiers, LSN bounds, and numeric lifecycle parameters."""
@@ -101,22 +116,24 @@ class PostgresChangeConfig:
             raise ImproperConfigurationError("max_backoff_seconds must be >= initial_backoff_seconds")
         if self.checkpoint_timeout_seconds <= 0.0:
             raise ImproperConfigurationError("checkpoint_timeout_seconds must be > 0")
-        if self.status_interval_seconds <= 0.0:
-            raise ImproperConfigurationError("status_interval_seconds must be > 0")
-        if self.batch_size <= 0:
-            raise ImproperConfigurationError("batch_size must be > 0")
         if self.queue_capacity <= 0:
             raise ImproperConfigurationError("queue_capacity must be > 0")
 
 
-@dataclass(frozen=True, slots=True)
-class PostgresCheckpoint:
+class PostgresCheckpoint(FrozenBaseStruct, frozen=True, gc=False):
     """Durable CAS-versioned replication cursor paired with ChangeFeed position."""
 
     identity_key: IdentityKey
+    """Four-tuple identity ``(system_identifier, database, slot, publication_fingerprint)``."""
+
     commit_end_lsn: int
+    """Monotonic durably acknowledged WAL commit end LSN."""
+
     next_event_id: int
+    """Monotonic next ChangeFeed event sequence identifier."""
+
     version: int = 1
+    """Monotonic optimistic CAS version counter."""
 
     def __post_init__(self) -> None:
         """Validate 4-part replication identity key and monotone counters."""
@@ -294,6 +311,8 @@ class PostgresChangeSource(AsyncChangeSource):
         self._yield_gate.set()
         self._stop_event = asyncio.Event()
         self._op_lock = asyncio.Lock()
+        self._ack_lock = asyncio.Lock()
+        self._reconcile_lock = asyncio.Lock()
         self._ack_task: asyncio.Task[PostgresCheckpoint] | None = None
         self._pending_record: PostgresReplicationRecord | None = None
         self._lsn_to_event_id: dict[int, int] = {}
@@ -369,21 +388,26 @@ class PostgresChangeSource(AsyncChangeSource):
             raise ValueError("commit_end_lsn must be non-negative")
         self._check_ack_lifecycle()
         await self._ensure_initialized()
-        while self._ack_task is not None and not self._ack_task.done():
-            await asyncio.shield(self._ack_task)
-        self._check_ack_lifecycle()
-        if self._needs_reconcile or self._uncertain:
-            async with self._op_lock:
+        while True:
+            active_task = self._ack_task
+            if active_task is not None and not active_task.done():
+                await asyncio.shield(active_task)
+                continue
+            async with self._ack_lock:
+                active_task = self._ack_task
+                if active_task is not None and not active_task.done():
+                    continue
                 self._check_ack_lifecycle()
-                if self._needs_reconcile:
+                if self._needs_reconcile or self._uncertain:
                     await self._reconcile_uncertainty()
-            self._check_ack_lifecycle()
-        if self._checkpoint is not None and commit_end_lsn <= self._checkpoint.commit_end_lsn:
-            return self._checkpoint
-        self._yield_gate.clear()
-        task = asyncio.create_task(self._run_ack_transaction(commit_end_lsn))
-        task.add_done_callback(_consume_task_exception)
-        self._ack_task = task
+                    self._check_ack_lifecycle()
+                if self._checkpoint is not None and commit_end_lsn <= self._checkpoint.commit_end_lsn:
+                    return self._checkpoint
+                self._yield_gate.clear()
+                task = asyncio.create_task(self._run_ack_transaction(commit_end_lsn))
+                task.add_done_callback(_consume_task_exception)
+                self._ack_task = task
+                break
         try:
             return await asyncio.shield(task)
         finally:
@@ -433,9 +457,7 @@ class PostgresChangeSource(AsyncChangeSource):
                         timeout=remaining,
                     )
                     if loaded is not None:
-                        _validate_identity_match(self._identity, loaded)
-                        self._checkpoint = loaded
-                        self._sync_feed_cursor(loaded.next_event_id)
+                        self._apply_reconciled_checkpoint(loaded, reset_feed_on_none=False)
                     self._uncertain = False
                     self._needs_reconcile = False
                 except TimeoutError as exc:
@@ -600,19 +622,15 @@ class PostgresChangeSource(AsyncChangeSource):
             self._stream = stream
             return stream
 
-    async def _reconcile_uncertainty(self) -> None:
-        """Reload durable checkpoint and reset feed/pending state after uncertain commit."""
-        if not self._needs_reconcile:
-            return
-        await self._ensure_initialized()
-        assert self._identity is not None
-        self._pending_record = None
-        await self._close_active_stream(suppress_error=True)
-        loaded = await asyncio.wait_for(
-            self._store.load(self._identity.identity_key),
-            timeout=self._config.checkpoint_timeout_seconds,
-        )
+    def _apply_reconciled_checkpoint(
+        self,
+        loaded: PostgresCheckpoint | None,
+        *,
+        reset_feed_on_none: bool,
+    ) -> None:
+        """Validate and monotonically apply a durable checkpoint snapshot."""
         if loaded is not None:
+            assert self._identity is not None
             _validate_identity_match(self._identity, loaded)
             if self._checkpoint is None or (loaded.version, loaded.commit_end_lsn) >= (
                 self._checkpoint.version,
@@ -620,11 +638,32 @@ class PostgresChangeSource(AsyncChangeSource):
             ):
                 self._checkpoint = loaded
                 self._sync_feed_cursor(loaded.next_event_id)
-                self._prune_acked_lsns(loaded.commit_end_lsn)
-        elif self._checkpoint is None:
-            self._sync_feed_cursor(1)
-        self._uncertain = False
-        self._needs_reconcile = False
+            else:
+                self._sync_feed_cursor(self._checkpoint.next_event_id)
+            self._prune_acked_lsns(self._checkpoint.commit_end_lsn)
+        elif reset_feed_on_none:
+            if self._checkpoint is None:
+                self._sync_feed_cursor(1)
+            else:
+                self._sync_feed_cursor(self._checkpoint.next_event_id)
+
+    async def _reconcile_uncertainty(self) -> None:
+        """Reload durable checkpoint and reset feed/pending state after uncertain commit."""
+        async with self._reconcile_lock:
+            if not self._needs_reconcile:
+                return
+            await self._ensure_initialized()
+            assert self._identity is not None
+            self._pending_record = None
+            await self._close_active_stream(suppress_error=True)
+            loaded = await asyncio.wait_for(
+                self._store.load(self._identity.identity_key),
+                timeout=self._config.checkpoint_timeout_seconds,
+            )
+            self._lsn_to_event_id.clear()
+            self._apply_reconciled_checkpoint(loaded, reset_feed_on_none=True)
+            self._uncertain = False
+            self._needs_reconcile = False
 
     def _prune_acked_lsns(self, commit_end_lsn: int) -> None:
         """Drop LSN-to-event mappings at or below a durably acknowledged commit_end_lsn."""
@@ -740,6 +779,8 @@ class PostgresChangeSource(AsyncChangeSource):
                 timeout=self._config.checkpoint_timeout_seconds,
             )
             self._checkpoint = saved
+            if saved.next_event_id > self._feed._next_id:
+                self._sync_feed_cursor(saved.next_event_id)
             self._prune_acked_lsns(saved.commit_end_lsn)
             stream = self._stream
             if stream is not None:
