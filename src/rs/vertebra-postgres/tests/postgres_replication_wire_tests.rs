@@ -2141,6 +2141,61 @@ async fn copyboth_preserves_sqlstate_55006_and_rejects_beyond_wal_malformed_w_an
             let (mut meta, _) = listener.accept().await.expect("meta");
             run_preflight(&mut meta).await;
             let (mut repl, _) = listener.accept().await.expect("repl");
+            let _ = complete_startup_ready_version(&mut repl, 613, "16.4").await;
+            let _ = read_frontend_exchange(&mut repl).await;
+            repl.write_all(&identify_system_response(
+                "12345",
+                "1",
+                "1/500",
+                Some("appdb"),
+            ))
+            .await
+            .expect("identify");
+            repl.flush().await.expect("flush");
+            let _ = read_frontend_exchange(&mut repl).await;
+            repl.write_all(&copy_both_response_frame(0, &[]))
+                .await
+                .expect("write W");
+            repl.flush().await.expect("flush");
+            assert_eq!(
+                read_frontend_exchange(&mut repl).await,
+                FrontendExchange::CopyDone
+            );
+            repl.write_all(&error_response_frame(
+                "FATAL",
+                "57P01",
+                "terminating connection due to administrator command",
+            ))
+            .await
+            .expect("write fatal err");
+            repl.flush().await.expect("flush");
+            drop(repl);
+        });
+
+        let mut repl = PostgresReplicationConnection::connect_logical(
+            &direct_config(port),
+            "vertebra_slot",
+            "vertebra_pub",
+            None,
+        )
+        .await
+        .expect("connect");
+        let err = repl
+            .shutdown(Instant::now() + Duration::from_secs(2))
+            .await
+            .expect_err("shutdown must preserve FATAL ErrorResponse SQLSTATE on immediate EOF");
+        assert_eq!(err.sqlstate(), Some("57P01"));
+        assert!(repl.is_closed());
+        srv.await.expect("fatal shutdown server completed");
+    }
+
+    {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let srv = tokio::spawn(async move {
+            let (mut meta, _) = listener.accept().await.expect("meta");
+            run_preflight(&mut meta).await;
+            let (mut repl, _) = listener.accept().await.expect("repl");
             let _ = complete_startup_ready_version(&mut repl, 609, "16.4").await;
             let _ = read_frontend_exchange(&mut repl).await;
             repl.write_all(&identify_system_response(

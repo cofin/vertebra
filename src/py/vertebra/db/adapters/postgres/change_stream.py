@@ -430,6 +430,16 @@ class PostgresChangeSource(AsyncChangeSource):
             return self._checkpoint.commit_end_lsn
         return self._config.start_lsn
 
+    def _check_lifecycle(self) -> None:
+        """Raise termination conflict or StopAsyncIteration when closed or fenced."""
+        if self._terminated:
+            raise PostgresCheckpointConflictError(
+                "CDC ownership terminated after checkpoint conflict",
+                identity_key=self._identity.identity_key if self._identity else None,
+            )
+        if self._closed:
+            raise StopAsyncIteration
+
     async def _open_fresh_stream(self) -> AsyncPostgresReplication:
         """Open a single native replication stream generation with reconnect=False."""
         await self._ensure_initialized()
@@ -438,6 +448,7 @@ class PostgresChangeSource(AsyncChangeSource):
         backoff = self._config.initial_backoff_seconds
         last_exc: BaseException | None = None
         while True:
+            self._check_lifecycle()
             try:
                 stream = await self._driver._open_replication_stream(
                     self._config,
@@ -445,8 +456,10 @@ class PostgresChangeSource(AsyncChangeSource):
                     reconnect=False,
                 )
             except PostgresReplicationGapError:
+                self._check_lifecycle()
                 raise
             except Exception as exc:
+                self._check_lifecycle()
                 gap_reason = _classify_gap_reason(exc)
                 if gap_reason is not None:
                     raise PostgresReplicationGapError(
@@ -468,6 +481,10 @@ class PostgresChangeSource(AsyncChangeSource):
                     await asyncio.sleep(backoff)
                     backoff = min(self._config.max_backoff_seconds, backoff * 2.0)
                 continue
+            if self._closed or self._terminated:
+                with contextlib.suppress(Exception):
+                    await stream.aclose()
+                self._check_lifecycle()
             self._stream = stream
             self._stream_generation += 1
             return stream
@@ -506,8 +523,7 @@ class PostgresChangeSource(AsyncChangeSource):
         attempts = 0
         backoff = self._config.initial_backoff_seconds
         while True:
-            if self._closed or self._terminated:
-                raise StopAsyncIteration
+            self._check_lifecycle()
             if self._pending_record is not None:
                 record = self._pending_record
                 self._pending_record = None
@@ -520,11 +536,14 @@ class PostgresChangeSource(AsyncChangeSource):
                 next_record = await stream.next()
             except PostgresReplicationGapError:
                 await self._close_active_stream(suppress_error=True)
+                self._check_lifecycle()
                 raise
             except StopAsyncIteration:
+                self._check_lifecycle()
                 raise
             except Exception as exc:
                 await self._close_active_stream(suppress_error=True)
+                self._check_lifecycle()
                 if self._needs_reconcile:
                     await self._reconcile_uncertainty()
                     continue
@@ -550,6 +569,7 @@ class PostgresChangeSource(AsyncChangeSource):
                 continue
             if next_record is None:
                 await self._close_active_stream(suppress_error=True)
+                self._check_lifecycle()
                 if self._needs_reconcile:
                     await self._reconcile_uncertainty()
                     continue
@@ -561,11 +581,12 @@ class PostgresChangeSource(AsyncChangeSource):
                         f"Exhausted {self._config.max_reconnect_attempts} replication reconnect attempts",
                         reason="retries_exhausted",
                         identity_key=self._identity.identity_key if self._identity else None,
-                    )
+                    ) from None
                 if backoff > 0.0:
                     await asyncio.sleep(backoff)
                     backoff = min(self._config.max_backoff_seconds, backoff * 2.0)
                 continue
+            self._check_lifecycle()
             return next_record
 
     def _publish_record(self, record: PostgresReplicationRecord) -> ChangeEvent:
@@ -587,26 +608,15 @@ class PostgresChangeSource(AsyncChangeSource):
                     await self._yield_gate.wait()
                     continue
                 self._ack_task = None
-            if self._terminated:
-                raise PostgresCheckpointConflictError(
-                    "CDC ownership terminated after checkpoint conflict",
-                    identity_key=self._identity.identity_key if self._identity else None,
-                )
-            if self._closed:
-                raise StopAsyncIteration
+            self._check_lifecycle()
             async with self._op_lock:
                 if self._needs_reconcile:
                     await self._reconcile_uncertainty()
                 if not self._yield_gate.is_set():
                     continue
-                if self._terminated:
-                    raise PostgresCheckpointConflictError(
-                        "CDC ownership terminated after checkpoint conflict",
-                        identity_key=self._identity.identity_key if self._identity else None,
-                    )
-                if self._closed:
-                    raise StopAsyncIteration
+                self._check_lifecycle()
                 record = await self._next_native_record()
+                self._check_lifecycle()
                 if self._needs_reconcile:
                     continue
                 if not self._yield_gate.is_set():

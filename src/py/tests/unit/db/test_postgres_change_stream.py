@@ -721,3 +721,134 @@ async def test_change_source_eof_retries_reconcile_and_aclose_timeout_error_pres
     hung_store.save_gate.set()
     with pytest.raises(PostgresReplicationGapError):
         await hung_ack
+
+
+@pytest.mark.anyio
+async def test_change_source_concurrent_close_and_fencing_during_open_and_next() -> None:
+    """Verify concurrent aclose or CAS fencing interrupts pending open and next waits cleanly."""
+    ident = _identity()
+
+    class _BlockedOpenDriver(_FakeReplicationDriver):
+        def __init__(self, stream: _FakeNativeStream) -> None:
+            super().__init__(ident, [stream])
+            self.open_started = asyncio.Event()
+            self.open_gate = asyncio.Event()
+
+        async def _open_replication_stream(
+            self,
+            config: PostgresChangeConfig,
+            *,
+            start_lsn: int | None = None,
+            reconnect: bool = False,
+        ) -> Any:
+            self.open_started.set()
+            await self.open_gate.wait()
+            return await super()._open_replication_stream(
+                config,
+                start_lsn=start_lsn,
+                reconnect=reconnect,
+            )
+
+    late_stream = _FakeNativeStream([])
+    blocked_driver = _BlockedOpenDriver(late_stream)
+    open_close_source = PostgresChangeSource(
+        blocked_driver,
+        PostgresChangeConfig(
+            slot="cdc_slot",
+            publication="pub_orders",
+            reconnect=True,
+            max_reconnect_attempts=0,
+        ),
+        MemoryPostgresCheckpointStore(),
+    )
+    open_task: asyncio.Task[ChangeEvent] = asyncio.create_task(open_close_source.__anext__())
+    await blocked_driver.open_started.wait()
+    await open_close_source.aclose()
+    blocked_driver.open_gate.set()
+    with pytest.raises(StopAsyncIteration):
+        await asyncio.wait_for(open_task, timeout=1.0)
+    assert late_stream.closed is True
+    assert blocked_driver.open_count == 1
+
+    blocking_stream = _FakeNativeStream([])
+    blocking_stream.block_next_gate = asyncio.Event()
+    next_close_driver = _FakeReplicationDriver(ident, [blocking_stream])
+    next_close_source = PostgresChangeSource(
+        next_close_driver,
+        PostgresChangeConfig(
+            slot="cdc_slot",
+            publication="pub_orders",
+            reconnect=True,
+            max_reconnect_attempts=0,
+            initial_backoff_seconds=5.0,
+            max_backoff_seconds=5.0,
+        ),
+        MemoryPostgresCheckpointStore(),
+    )
+    awaiting_next_task: asyncio.Task[ChangeEvent] = asyncio.create_task(next_close_source.__anext__())
+    await blocking_stream.next_started.wait()
+    await next_close_source.aclose()
+    blocking_stream.block_next_gate.set()
+    with pytest.raises(StopAsyncIteration):
+        await asyncio.wait_for(awaiting_next_task, timeout=1.0)
+    assert blocking_stream.closed is True
+    assert next_close_driver.open_count == 1
+
+    store = MemoryPostgresCheckpointStore()
+    seed = PostgresCheckpoint(
+        identity_key=ident.identity_key,
+        commit_end_lsn=50,
+        next_event_id=5,
+        version=1,
+    )
+    await store.save(seed, expected=None)
+    fenced_stream = _FakeNativeStream(
+        [
+            PostgresReplicationRecord(kind="insert", payload={"n": 1}, commit_end_lsn=100),
+            ConnectionError("closed during CAS fence"),
+        ]
+    )
+    fenced_source = PostgresChangeSource(
+        _FakeReplicationDriver(ident, [fenced_stream]),
+        PostgresChangeConfig(
+            slot="cdc_slot",
+            publication="pub_orders",
+            reconnect=True,
+            max_reconnect_attempts=0,
+        ),
+        store,
+    )
+    await fenced_source.__anext__()
+    fenced_stream.next_started.clear()
+    fenced_stream.block_next_gate = asyncio.Event()
+    fenced_next_task: asyncio.Task[ChangeEvent] = asyncio.create_task(fenced_source.__anext__())
+    await fenced_stream.next_started.wait()
+    await store.save(seed.advance(commit_end_lsn=80, next_event_id=6), expected=seed)
+    with pytest.raises(PostgresCheckpointConflictError):
+        await fenced_source.acknowledge(100)
+    fenced_stream.block_next_gate.set()
+    with pytest.raises(PostgresCheckpointConflictError):
+        await asyncio.wait_for(fenced_next_task, timeout=1.0)
+    await fenced_source.aclose()
+
+    eof_source = PostgresChangeSource(
+        _FakeReplicationDriver(ident, [_FakeNativeStream([])]),
+        PostgresChangeConfig(
+            slot="cdc_slot",
+            publication="pub_orders",
+            reconnect=True,
+            max_reconnect_attempts=0,
+            initial_backoff_seconds=0.0,
+            max_backoff_seconds=0.0,
+        ),
+    )
+    try:
+        try:
+            raise RuntimeError("unrelated outer failure")
+        except RuntimeError:
+            with pytest.raises(PostgresReplicationGapError) as eof_exc:
+                await anext(eof_source.stream())
+            assert eof_exc.value.__cause__ is None
+            assert eof_exc.value.__suppress_context__ is True
+    finally:
+        await eof_source.aclose()

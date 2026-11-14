@@ -508,16 +508,27 @@ where
     let mut parameter_updates = Vec::new();
     let mut notification_updates = Vec::new();
     loop {
-        let msg = read_replication_message(reader, read_buf, MAX_BACKEND_FRAME_LENGTH, deadline)
-            .await
-            .map_err(|error| match error {
-                PostgresError::Transport(message) if map_truncated_eof && !read_buf.is_empty() => {
-                    PostgresError::Protocol(format!(
-                        "truncated replication backend frame: {message}"
-                    ))
+        let msg =
+            match read_replication_message(reader, read_buf, MAX_BACKEND_FRAME_LENGTH, deadline)
+                .await
+            {
+                Ok(msg) => msg,
+                Err(error) => {
+                    if let Some(err) = backend_err.take() {
+                        return Err(err);
+                    }
+                    return Err(match error {
+                        PostgresError::Transport(message)
+                            if map_truncated_eof && !read_buf.is_empty() =>
+                        {
+                            PostgresError::Protocol(format!(
+                                "truncated replication backend frame: {message}"
+                            ))
+                        }
+                        other => other,
+                    });
                 }
-                other => other,
-            })?;
+            };
         match msg {
             ReplicationBackendMessage::Standard(Message::CopyData(body))
                 if !saw_copy_done
