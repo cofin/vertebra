@@ -6,7 +6,8 @@ chapter_id: ch01-shm-ownership-and-broker-wire
 title: Implement Binary DBRPC Wire Frames, SHM Transport Keys, and In-Memory Fallback Removal
 description: Define binary DBRPC request/response frames, propagate deterministic SHM transport keys, and remove silent in-memory broker fallbacks.
 status: stable
-state: pending
+state: completed
+commit: 936110fc
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -55,8 +56,8 @@ sources:
   resource: src/py/vertebra/extensions/broker/plugin.py::BrokerPlugin
   title: BrokerPlugin lifecycle and metric snapshot integration
 - id: alchemy-cache
-  resource: src/py/vertebra/extensions/alchemy/broker.py::StatementCache
-  title: Unused Python StatementCache in alchemy broker module
+  resource: src/py/vertebra/extensions/alchemy/broker.py::SyncSHMSessionBroker
+  title: Alchemy session broker after StatementCache removal
 ---
 
 # Task `t04`: Implement Binary DBRPC Wire Frames, SHM Transport Keys, and In-Memory Fallback Removal
@@ -106,11 +107,11 @@ uv run --no-sync pytest src/py/tests/unit/extensions/test_broker_transport.py sr
 
 ## Acceptance Criteria
 
-- [ ] Rust `dbrpc` and Python `dbrpc.py` agree byte-for-byte on header layout and op codes.
-- [ ] `DbRpcRequest` and `DbRpcResponse` obey `PY-04` acyclic `gc=False, array_like=True` rules.
-- [ ] Zero salted `hash()` calls remain in `extensions/broker/transport.py`.
-- [ ] In-memory broker transports and `alchemy/broker.py::StatementCache` are deleted cleanly.
-- [ ] Zero regressions in the fast verification gate.
+- [x] Rust `dbrpc` and Python `dbrpc.py` agree byte-for-byte on header layout and op codes.
+- [x] `DbRpcRequest` and `DbRpcResponse` obey `PY-04` acyclic `gc=False, array_like=True` rules.
+- [x] Zero salted `hash()` calls remain in `extensions/broker/transport.py`.
+- [x] In-memory broker transports and `alchemy/broker.py::StatementCache` are deleted cleanly.
+- [x] Zero regressions in the fast verification gate.
 
 [^ring-pair]: `src/rs/vertebra-core/src/transport/ring_pair.rs` — Bidirectional SHM ring pair transport.
 [^core-broker]: `src/rs/vertebra-core/src/broker.rs::ShmLeaseTable` — Shared-memory lease table, statement cache, dialect tags, and worker reclamation.

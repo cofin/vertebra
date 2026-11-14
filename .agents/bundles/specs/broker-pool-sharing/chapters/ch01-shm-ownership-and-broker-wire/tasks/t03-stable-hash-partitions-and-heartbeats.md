@@ -6,7 +6,8 @@ chapter_id: ch01-shm-ownership-and-broker-wire
 title: Implement Deterministic Cross-Process Pool Hash, Partitioned Lease Slots, and Worker Heartbeats
 description: Replace DefaultHasher with deterministic 64-bit FNV-1a pool_key hashing and partition ShmLeaseTable slots with atomic worker heartbeats.
 status: stable
-state: pending
+state: completed
+commit: 936110fc
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -94,11 +95,11 @@ cargo test --manifest-path src/rs/Cargo.toml -p vertebra-core --features tls,com
 
 ## Acceptance Criteria
 
-- [ ] `stable_hash64` produces identical digests across randomized Python interpreters.
-- [ ] `ShmStatementCache` keys match `stable_hash64`.
-- [ ] Up to 64 `pool_key` partitions enforce independent admission limits in one SHM segment.
-- [ ] `LeaseBroker` partition and heartbeat bindings match `_vertebra.pyi`.
-- [ ] Zero regressions in the fast verification gate.
+- [x] `stable_hash64` produces identical digests across randomized Python interpreters.
+- [x] `ShmStatementCache` keys match `stable_hash64`.
+- [x] Up to 64 `pool_key` partitions enforce independent admission limits in one SHM segment.
+- [x] `LeaseBroker` partition and heartbeat bindings match `_vertebra.pyi`.
+- [x] Zero regressions in the fast verification gate.
 
 [^core-broker]: `src/rs/vertebra-core/src/broker.rs::ShmLeaseTable` — Shared-memory lease table, statement cache, dialect tags, and worker reclamation.
 [^py-broker]: `src/rs/vertebra-py/src/broker.rs::LeaseBroker` — PyO3 LeaseBroker and StatementCache bindings.

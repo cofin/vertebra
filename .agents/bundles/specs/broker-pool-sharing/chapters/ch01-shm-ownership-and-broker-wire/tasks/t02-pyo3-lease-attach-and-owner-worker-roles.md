@@ -6,7 +6,8 @@ chapter_id: ch01-shm-ownership-and-broker-wire
 title: Expose PyO3 Lease Broker Attach and Explicit Owner vs Worker Server Roles
 description: Bind ShmLeaseTable.attach in vertebra-py and enforce explicit owner vs worker broker roles in Python server startup.
 status: stable
-state: pending
+state: completed
+commit: 936110fc
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -103,11 +104,11 @@ uv run --no-sync pytest src/py/tests/unit/extensions/test_shm_lease_broker.py -q
 
 ## Acceptance Criteria
 
-- [ ] `LeaseBroker.open_or_create_named` and `StatementCache.open_or_create_named` match `_vertebra.pyi`.
-- [ ] Owned segments unregister cleanly when `LeaseBroker.unlink()` is called by the owner.
-- [ ] Bare `except Exception:` fallback to `LeaseBroker.create_named` is completely removed.
-- [ ] Ruff, Mypy, and `test_shm_lease_broker.py` pass with zero inline `#` comments.
-- [ ] Zero regressions in the fast verification gate.
+- [x] `LeaseBroker.open_or_create_named` and `StatementCache.open_or_create_named` match `_vertebra.pyi`.
+- [x] Owned segments unregister cleanly when `LeaseBroker.unlink()` is called by the owner.
+- [x] Bare `except Exception:` fallback to `LeaseBroker.create_named` is completely removed.
+- [x] Ruff, Mypy, and `test_shm_lease_broker.py` pass with zero inline `#` comments.
+- [x] Zero regressions in the fast verification gate.
 
 [^core-broker]: `src/rs/vertebra-core/src/broker.rs::ShmLeaseTable` — Shared-memory lease table, statement cache, dialect tags, and worker reclamation.
 [^py-broker]: `src/rs/vertebra-py/src/broker.rs::LeaseBroker` — PyO3 LeaseBroker and StatementCache bindings.

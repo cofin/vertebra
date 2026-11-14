@@ -5,12 +5,12 @@ chapter_id: ch01-shm-ownership-and-broker-wire
 title: 'Chapter 01: Atomic SHM Ownership, Supervisor Lifecycle, Pool Identity, and DBRPC Wire Protocol'
 description: Enforce O_CREAT | O_EXCL SHM ownership, OwnedShmRegistry crash/shutdown unlink, explicit owner/worker broker roles, cross-process FNV-1a pool identity, partitioned pools/heartbeats, and binary DBRPC frames.
 status: stable
-state: planned
+state: completed
 planning_status: complete
 planning_quality: standard
 planning_degraded_reason: null
 plan_commit: 1b191388
-updated_at: '2026-11-14T18:50:00Z'
+updated_at: '2026-11-14T23:20:00Z'
 generated:
   by: flow/0.30.1
   at: '2026-11-14T18:50:00Z'
@@ -30,8 +30,8 @@ sources:
   resource: src/rs/vertebra-core/src/shm.rs::ShmRegion
   title: Named POSIX shared-memory regions
 - id: shm-it
-  resource: src/rs/vertebra-core/tests/it/shm.rs::stale_region_replaced_on_create_named
-  title: Existing SHM integration test suite
+  resource: src/rs/vertebra-core/tests/it/shm.rs::live_owner_blocks_create_named_with_in_use_and_reaps_dead_owner
+  title: SHM ownership and cleanup integration test suite
 - id: core-cleanup
   resource: src/rs/vertebra-core/src/cleanup.rs::cleanup_all
   title: Process SHM cleanup hook
@@ -57,8 +57,8 @@ sources:
   resource: src/py/vertebra/extensions/broker/plugin.py::BrokerPlugin
   title: BrokerPlugin lifecycle and metric snapshot integration
 - id: alchemy-cache
-  resource: src/py/vertebra/extensions/alchemy/broker.py::StatementCache
-  title: Unused Python StatementCache in alchemy broker module
+  resource: src/py/vertebra/extensions/alchemy/broker.py::SyncSHMSessionBroker
+  title: Alchemy session broker after StatementCache removal
 ---
 
 # Chapter 01: Atomic SHM Ownership, Supervisor Lifecycle, Pool Identity, and DBRPC Wire Protocol
@@ -230,14 +230,14 @@ Removal of `SyncInMemoryBrokerTransport`, `AsyncInMemoryBrokerTransport`, and `u
 
 ## 5. Implementation Plan
 
-- [ ] [t01-atomic-shm-and-owned-segment-registry.md](tasks/t01-atomic-shm-and-owned-segment-registry.md) — Separate create_exclusive vs attach_existing SHM constructors and track owned segments in OwnedShmRegistry for deterministic unlink.
-- [ ] [t02-pyo3-lease-attach-and-owner-worker-roles.md](tasks/t02-pyo3-lease-attach-and-owner-worker-roles.md) — Bind ShmLeaseTable.attach in vertebra-py and enforce explicit owner vs worker broker roles in Python server startup.
-- [ ] [t03-stable-hash-partitions-and-heartbeats.md](tasks/t03-stable-hash-partitions-and-heartbeats.md) — Replace DefaultHasher with deterministic 64-bit FNV-1a pool_key hashing and partition ShmLeaseTable slots with atomic worker heartbeats.
-- [ ] [t04-dbrpc-frames-and-shm-transport-keys.md](tasks/t04-dbrpc-frames-and-shm-transport-keys.md) — Define binary DBRPC request/response frames, propagate deterministic SHM transport keys, and remove silent in-memory broker fallbacks.
+- [x] [936110fc] [t01-atomic-shm-and-owned-segment-registry.md](tasks/t01-atomic-shm-and-owned-segment-registry.md) — Separate create_exclusive vs attach_existing SHM constructors and track owned segments in OwnedShmRegistry for deterministic unlink.
+- [x] [936110fc] [t02-pyo3-lease-attach-and-owner-worker-roles.md](tasks/t02-pyo3-lease-attach-and-owner-worker-roles.md) — Bind ShmLeaseTable.attach in vertebra-py and enforce explicit owner vs worker broker roles in Python server startup.
+- [x] [936110fc] [t03-stable-hash-partitions-and-heartbeats.md](tasks/t03-stable-hash-partitions-and-heartbeats.md) — Replace DefaultHasher with deterministic XXH3-64 pool_key hashing and partition ShmLeaseTable slots with atomic worker heartbeats.
+- [x] [936110fc] [t04-dbrpc-frames-and-shm-transport-keys.md](tasks/t04-dbrpc-frames-and-shm-transport-keys.md) — Define binary DBRPC request/response frames, propagate deterministic SHM transport keys, and remove silent in-memory broker fallbacks.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Baseline (`18baadcd`)**: `state: planned`; `0/4` tasks completed.
+- **Current (`936110fc`)**: `state: completed`; `4/4` tasks completed (`t01`–`t04`).
 - **Active Invariants**: Built-in Python `hash()` is never used for statement keys, pool keys, or bind affinity hashes.
 - **Fast Chapter Gate (`< 60s`)**: `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-core -p vertebra-py && uv run --no-sync pytest src/py/tests/unit/extensions/test_broker_transport.py`
 

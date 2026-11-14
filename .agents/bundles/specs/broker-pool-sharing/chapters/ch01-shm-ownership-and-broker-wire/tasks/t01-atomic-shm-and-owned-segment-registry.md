@@ -6,7 +6,8 @@ chapter_id: ch01-shm-ownership-and-broker-wire
 title: Enforce Atomic O_CREAT | O_EXCL SHM Creation and Supervisor OwnedShmRegistry
 description: Separate create_exclusive vs attach_existing SHM constructors and track owned segments in OwnedShmRegistry for deterministic unlink.
 status: stable
-state: pending
+state: completed
+commit: 936110fc
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -37,8 +38,8 @@ sources:
   resource: src/rs/vertebra-core/src/shm.rs::ShmRegion
   title: Named POSIX shared-memory regions
 - id: shm-it
-  resource: src/rs/vertebra-core/tests/it/shm.rs::stale_region_replaced_on_create_named
-  title: Existing SHM integration test suite
+  resource: src/rs/vertebra-core/tests/it/shm.rs::live_owner_blocks_create_named_with_in_use_and_reaps_dead_owner
+  title: SHM ownership and cleanup integration test suite
 - id: core-cleanup
   resource: src/rs/vertebra-core/src/cleanup.rs::cleanup_all
   title: Process SHM cleanup hook
@@ -95,11 +96,11 @@ cargo test --manifest-path src/rs/Cargo.toml -p vertebra-core -p vertebra-http -
 
 ## Acceptance Criteria
 
-- [ ] `ShmRegion::create_named` and `open_or_create_named` never unlink a segment owned by a live PID.
-- [ ] All `shm` integration tests pass with unique segment names and clean `/dev/shm` teardown.
-- [ ] `cleanup_all()` unlinks all registered owned segments on panic and `SIGTERM`/`SIGINT`.
-- [ ] Startup reaping checks `ShmOwnerHeader` PID liveness before unlinking.
-- [ ] Zero regressions in the fast verification gate.
+- [x] `ShmRegion::create_named` and `open_or_create_named` never unlink a segment owned by a live PID.
+- [x] All `shm` integration tests pass with unique segment names and clean `/dev/shm` teardown.
+- [x] `cleanup_all()` unlinks all registered owned segments on panic and `SIGTERM`/`SIGINT`.
+- [x] Startup reaping checks `ShmOwnerHeader` PID liveness before unlinking.
+- [x] Zero regressions in the fast verification gate.
 
 [^core-shm]: `src/rs/vertebra-core/src/shm.rs::ShmRegion` — Named POSIX shared-memory regions.
 [^shm-it]: `src/rs/vertebra-core/tests/it/shm.rs::stale_region_replaced_on_create_named` — Existing SHM integration test suite.
