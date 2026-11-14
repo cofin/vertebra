@@ -5,7 +5,8 @@ flow_id: http3-and-http-hygiene
 title: Wire QUIC HTTP/3 UDP Listener into server.rs and Gate Alt-Svc Advertisement
 description: "Parse VERTEBRA_HTTP3 config, share response::handle_buffered across TCP and QUIC, spawn serve_http3_endpoint in run_with_listener, and gate Alt-Svc on live QUIC binding."
 status: stable
-state: pending
+state: completed
+commit: d7b603b1
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -71,8 +72,8 @@ cargo test --manifest-path src/rs/Cargo.toml -p vertebra-http --features tls,htt
 
 ## Acceptance Criteria
 
-- [ ] `run_with_listener` serves live HTTP/3 QUIC unary and streaming requests alongside HTTPS TCP.
-- [ ] `Alt-Svc` is never emitted without a bound UDP QUIC listener, and invalid `http3` configs fail loud.
+- [x] `run_with_listener` serves live HTTP/3 QUIC unary and streaming requests alongside HTTPS TCP.
+- [x] `Alt-Svc` is never emitted without a bound UDP QUIC listener, and invalid `http3` configs fail loud.
 
 [^http3-rs]: `src/rs/vertebra-http/src/http3.rs::serve_http3_endpoint` — QUIC HTTP/3 endpoint runner.
 [^server-rs]: `src/rs/vertebra-http/src/server.rs::run_with_listener` — Server listener startup and shutdown loop.

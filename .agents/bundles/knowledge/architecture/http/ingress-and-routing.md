@@ -13,6 +13,9 @@ generated:
   by: flow/0.26.0
   at: "2026-11-04T04:33:00Z"
 verified:
+  - by: agent:flow-executor
+    at: "2026-11-14T22:27:00Z"
+    commit: afa74da5
   - by: agent:flow-learn
     at: "2026-11-14T17:15:00Z"
     commit: 1b191388
@@ -82,8 +85,8 @@ sources:
 # HTTP Ingress, Request Pipeline & Native Routing
 
 <!-- truth: start -->
-- `vertebra-server` loads `ServerConfig::from_env`, terminates TCP/TLS, and runs a fixed-order ingress pipeline in `response::handle` (backpressure, health, Rust CORS/static/OpenAPI/HMR offloads, `matchit 0.9` routing, and batch dispatch).
-- `Topology::Embedded` registers `_vertebra` via `pyo3::append_to_inittab!(pymodule_init)` prior to CPython startup and aliases `sys.modules["vertebra._vertebra"]` so Rust and Python share a single `BRIDGE` static.
+- `vertebra-server` loads `ServerConfig::from_env`, validates HTTP/3 prerequisites (`validate_http3`), terminates TCP/TLS and optional UDP HTTP/3 QUIC (`--features http3`), and shares a fixed-order ingress pipeline across `response::handle` and `response::handle_buffered`.
+- `Alt-Svc` is emitted strictly when `ServerState::http3_port` holds a live bound QUIC port; `Topology::Embedded` registers `_vertebra` via `pyo3::append_to_inittab!(pymodule_init)` prior to CPython startup so Rust and Python share `BRIDGE`.
 <!-- truth: end -->
 
 The `vertebra-server` binary ([`main.rs`](../../../../../src/rs/vertebra-http/src/main.rs)[^src-vertebra-http-src-main-rs], package `vertebra-http`) terminates TCP or TLS, executes zero-GIL Rust offloads (health, CORS, OpenAPI schema cache, static assets, response compression), matches every request against a Rust route table, and hands matched requests to the batching pipeline described in [Request Batching, Dispatch & Backpressure](batching-dispatch-and-backpressure.md). Additional library modules in the crate are inventoried in [Protocol and Offload Modules](protocol-and-offload-modules.md).
@@ -104,16 +107,16 @@ The `vertebra-server` binary ([`main.rs`](../../../../../src/rs/vertebra-http/sr
 
 ## Accept loop (`server.rs`)
 
-[`run_with_listener`](../../../../../src/rs/vertebra-http/src/server.rs)[^src-vertebra-http-src-server-rs] (and `run_with_collector`, which binds via [`bind_listener`](../../../../../src/rs/vertebra-http/src/server.rs) using `TcpSocket` with `SO_REUSEADDR`, Unix `SO_REUSEPORT` when `config.reuse_port` is true, `TCP_NODELAY`, and `listen(2048)`) constructs a shared [`ServerState`](../../../../../src/rs/vertebra-http/src/server.rs) caching `Arc<Router>`, `Arc<Dispatcher>`, `Arc<ServerConfig>`, `collector_shards`, `HmrState`, `health_endpoint: HealthEndpoint`, `profile_endpoint: ProfileEndpoint`, `access_logger: Option<Arc<AccessLogger>>`, `discovery_cache: WellKnownDiscoveryCache`, `sse_hub: Arc<SseHub>`, `pubsub_broker: Arc<PubSubBroker>`, `ws_registry: Arc<WsConnectionRegistry>`, `cors: Option<CompiledCorsOffload>`, `compression: Option<CompressionOffloadConfig>`, `static_mounts: Vec<StaticAssetMount>`, and `openapi_cache: Option<CompiledOpenApiCache>`. Graceful shutdown invokes `ws_registry.close_all(1001, "Server shutting down")` before waiting for active connections.
+[`run_with_listener`](../../../../../src/rs/vertebra-http/src/server.rs)[^src-vertebra-http-src-server-rs] (and `run_with_collector`, which binds via [`bind_listener`](../../../../../src/rs/vertebra-http/src/server.rs) using `TcpSocket` with `SO_REUSEADDR`, Unix `SO_REUSEPORT` when `config.reuse_port` is true, `TCP_NODELAY`, and `listen(2048)`) calls `config.validate_http3()?` upfront and constructs a shared [`ServerState`](../../../../../src/rs/vertebra-http/src/server.rs) caching `Arc<Router>`, `Arc<Dispatcher>`, `Arc<ServerConfig>`, `collector_shards`, `HmrState`, `health_endpoint: HealthEndpoint`, `profile_endpoint: ProfileEndpoint`, `access_logger: Option<Arc<AccessLogger>>`, `discovery_cache: WellKnownDiscoveryCache`, `sse_hub: Arc<SseHub>`, `pubsub_broker: Arc<PubSubBroker>`, `ws_registry: Arc<WsConnectionRegistry>`, `cors: Option<CompiledCorsOffload>`, `compression: Option<CompressionOffloadConfig>`, `static_mounts: Vec<StaticAssetMount>`, `openapi_cache: Option<CompiledOpenApiCache>`, and `http3_port: Option<u16>`. Under `--features http3` and `config.enable_http3()`, `run_with_listener` builds a `quinn::ServerConfig` from `(*tls_acc.rustls_config()).clone()`, binds a UDP `quinn::Endpoint` at `bound_addr`, sets `state.http3_port = Some(quic_port)`, and spawns `http3::serve_http3_endpoint` targeting `response::handle_buffered`. Graceful shutdown closes WebSockets (`ws_registry.close_all(1001, "Server shutting down")`) and signals + awaits the QUIC endpoint drain via `watch`.
 
 - Every accepted stream gets `TCP_NODELAY`.
 - When `enable_h2c_prior_knowledge` (`VERTEBRA_H2C`) is `false` (the default), `serve_plain` skips `MSG_PEEK` (`h2c::detect_cleartext_protocol`) and serves cleartext HTTP/1.1 directly through `hyper::server::conn::http1::Builder::new().keep_alive(true).pipeline_flush(false).max_buf_size(65_536).timer(TokioTimer::new())` with upgrades enabled. When `enable_h2c_prior_knowledge` is `true`, `serve_plain` runs `detect_cleartext_protocol` and `AutoBuilder` (`http1` + `http2` stream/connection windows from `ServerConfig`).
-- When `ServerConfig::tls` is set (both `VERTEBRA_TLS_CERT` and `VERTEBRA_TLS_KEY`), [`TlsAcceptor::from_config`](../../../../../src/rs/vertebra-http/src/tls.rs)[^src-vertebra-http-src-tls-rs] loads PEM certificates and advertises ALPN `h2` and `http/1.1` (with `WebPkiClientVerifier` when `MtlsConfig.mode` is `Optional` or `Required`).
+- When `ServerConfig::tls` is set (`VERTEBRA_TLS_CERT` and `VERTEBRA_TLS_KEY`), [`TlsAcceptor::from_config`](../../../../../src/rs/vertebra-http/src/tls.rs)[^src-vertebra-http-src-tls-rs] installs `rustls::crypto::ring::default_provider()`, loads PEM certificates, and advertises ALPN `h2` and `http/1.1` (with `WebPkiClientVerifier` when `MtlsConfig.mode` is `Optional` or `Required`).
 - `ServerState::get_collector` short-circuits directly to `collector_shards[0]` when `len == 1` and selects round-robin via `Relaxed` `AtomicUsize` otherwise.
 
 ## Per-request pipeline (`response::handle`)
 
-[`handle`](../../../../../src/rs/vertebra-http/src/response.rs)[^src-vertebra-http-src-response-rs] executes in order:
+[`handle`](../../../../../src/rs/vertebra-http/src/response.rs)[^src-vertebra-http-src-response-rs] (for Hyper `Request<Incoming>`, handling dev HMR WebSockets first) and `handle_buffered` (for QUIC HTTP/3 `Request<Bytes>`) share `dispatch_request`, executing in order:
 
 1. **Dev HMR**: when `dev_mode` (`VERTEBRA_DEV=1`) and `hmr::is_hmr_path(path)` matches `/__vertebra/hmr` or `/__vertebra/hmr/signal`, [`hmr::handle`](../../../../../src/rs/vertebra-http/src/hmr.rs)[^src-vertebra-http-src-hmr-rs] answers.
 2. **Health probes**: `/__vertebra/health` returns `200` JSON with the live `BackpressureMetricsSnapshot` when healthy, and the cached `state.health_endpoint.try_intercept(path)` answers `/healthz`, `/livez`, `/__vertebra/health`, and `/readyz` with zero per-request `HealthEndpoint` allocation.
@@ -124,8 +127,8 @@ The `vertebra-server` binary ([`main.rs`](../../../../../src/rs/vertebra-http/sr
 7. **Static asset mounts**: `GET`/`HEAD` requests matching `state.static_mounts` serve files directly via `AssetManager::serve_static_request` (pre-compressed sidecars, `ETag`/`304`, `Range`/`206`, SPA HTML fallback, custom headers, `Content-Disposition: attachment`, and CORS headers).
 8. **Admission**: `BackpressureController::try_acquire_for_path` acquires an atomic in-flight permit (or returns `503`/`429` with `retry-after: 1`).
 9. **Route lookup**: `Router::lookup_method` returns a matched `HandlerId` (`MOUNT_HANDLER_BASE | mount_idx` for mounted apps), `404 Not Found`, or `405 Method Not Allowed` with an `allow` header.
-10. **Bounded body, decompression, multipart & gRPC validation**: `response::handle` fast-paths bodiless requests (`body.size_hint().exact() == Some(0)`) directly to `Bytes::new()` before inspecting `Content-Length` or `Content-Encoding` headers or awaiting `payload::collect_bounded_body`. When a body is present, `payload::collect_bounded_body` enforces `PayloadLimits` (`max_body_size` via `Content-Length`, `size_hint().lower()`, and streaming frame accumulation, returning `413 Payload Too Large` on overflow) and bounded `Content-Encoding` decompression (`gzip`, `deflate`, `br`, `zstd`). `multipart/form-data` bodies are pre-validated against `MultipartLimits` (`parse_multipart_body`) and `application/grpc` bodies are validated against `grpc::decode_grpc_frames(..., max_grpc_message_size)` before `HeaderMap` is encoded in one pass into compact binary `Bytes` via `encode_header_map_compact` and sent as a `PendingRequest` to a `RequestBatcher` shard (`503` if shutting down).
-11. **Response, post-filters & access log**: awaits the `oneshot` reply, applies `build_response_with_offloads` (`CompiledCorsOffload::apply_response_headers` and `CompressionOffloadConfig::compress_if_eligible` with compressible `Content-Type` filtering and multi-token `Vary` preservation, streaming when `stream_rx` is set, or `500 worker error` on dropped channel), injects `Alt-Svc` when `http3.enabled`, records lock-free circuit-breaker `record_failure` (`5xx`) or `record_success`, and records an `AccessLogEntry` when `state.access_logger` (`VERTEBRA_ACCESS_LOG`) is enabled.
+10. **Bounded body, decompression, multipart & gRPC validation**: `handle` fast-paths bodiless requests (`body.size_hint().exact() == Some(0)`) and uses `payload::collect_bounded_body`, while `handle_buffered` validates buffered lengths and delegates compressed `Content-Encoding` (`gzip`, `deflate`, `br`, `zstd`) to `payload::decode_request_payload` (`413 Payload Too Large` on overflow). `multipart/form-data` bodies are checked against `MultipartLimits`, and `application/grpc` bodies are checked against `max_grpc_message_size` before `HeaderMap` is compact-encoded and sent to a `RequestBatcher` shard (`503` if shutting down).
+11. **Response, post-filters & access log**: awaits the `oneshot` reply, applies `build_response_with_offloads` (`CompiledCorsOffload::apply_response_headers` and `CompressionOffloadConfig::compress_if_eligible` with compressible `Content-Type` filtering and multi-token `Vary` preservation, streaming when `stream_rx` is set, or `500 worker error` on dropped channel), records lock-free circuit-breaker `record_failure` (`5xx`) or `record_success`, logs `AccessLogEntry` when `state.access_logger` is enabled, and attaches `Alt-Svc` strictly when `state.http3_port` is `Some(port)`.
 
 ## Routing (`routing.rs`)
 
@@ -148,6 +151,7 @@ The `vertebra-server` binary ([`main.rs`](../../../../../src/rs/vertebra-http/sr
 | `VERTEBRA_PPROF_ENABLED`, `VERTEBRA_PPROF_TOKEN` | `profile` | `false`, `None` |
 | `VERTEBRA_ACCESS_LOG` (`1`/`clf`/`common`, `json`, `0`/`off`) | `access_log` | `None` |
 | `VERTEBRA_TLS_CERT`, `VERTEBRA_TLS_KEY` | `tls` | `None` |
+| `VERTEBRA_HTTP3`, `VERTEBRA_HTTP3_ALT_SVC_MAX_AGE`, `VERTEBRA_HTTP3_MAX_STREAMS`, `VERTEBRA_HTTP3_KEEP_ALIVE_MS` | `http3` (`--features http3` + TLS) | `false`, `86400`, `256`, `15000 ms` |
 | `VERTEBRA_TOPOLOGY` (`auto`, `embedded`, `shm`) | `topology` (`auto` resolves to `Embedded` on Unix) | `Embedded` |
 | `VERTEBRA_WORKERS` | `workers.count` | `0` (`1` active worker) |
 | `VERTEBRA_THREADS`, `VERTEBRA_TOKIO_THREADS` | `thread_count`, `worker_threads` (`VERTEBRA_THREADS` clamps `worker_threads` to cgroup/affinity-aware `num_cpus()`) | cgroup/affinity CPU count |

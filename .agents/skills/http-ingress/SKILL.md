@@ -10,7 +10,7 @@ description: Use when implementing or debugging HTTP/1.1, HTTP/2, HTTP/3, or gRP
 - **Backpressure**: `BackpressureController` sheds excess load with `503 Service Unavailable` and `Retry-After`; priority routes bypass admission shedding (`HTTP-02`).
 - **Protocol Framing**: Prior-knowledge h2c matches the exact 24-byte preface; gRPC validates the 5-byte length-prefixed header and `application/grpc` content type (`HTTP-04`, `HTTP-05`).
 - **Router Parity**: `normalize_typed_path` and FNV-1a `handler_id` match Python route table compilation across all 7 HTTP methods (`HTTP-10`).
-- **Verify**: `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-http --features tls,compression`
+- **Verify**: `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-http --features tls,http3,compression`
 <!-- truth: end -->
 
 # HTTP Ingress & Protocol Dispatch (`http-ingress`)
@@ -48,7 +48,7 @@ Implementation guide for the Rust Hyper/Tokio/Quinn ingress engine, `response::h
 ## Verification
 
 ```bash
-cargo test --manifest-path src/rs/Cargo.toml -p vertebra-http --features tls,compression
-cargo check --manifest-path src/rs/Cargo.toml -p vertebra-http --features tls,compression,http3
-cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-http --all-targets --features tls,compression -- -D warnings
+cargo test --manifest-path src/rs/Cargo.toml -p vertebra-http --features tls,http3,compression
+cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-http --all-targets --features tls,http3,compression -- -D warnings
+cargo check --manifest-path src/rs/Cargo.toml -p vertebra-http --all-targets --features tls,compression
 ```

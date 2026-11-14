@@ -13,11 +13,11 @@ generated:
   by: flow/0.30.1
   at: "2026-11-06T18:28:00Z"
 verified:
+  - by: agent:flow-executor
+    at: "2026-11-14T22:27:00Z"
+    commit: afa74da5
   - by: agent:flow-setup
     at: "2026-11-14T18:43:00Z"
-    commit: 1b191388
-  - by: agent:flow-executor
-    at: "2026-11-14T18:05:00Z"
     commit: 1b191388
 sources:
   - id: src-makefile
@@ -62,8 +62,8 @@ make clean                                                            # Remove P
 make release bump=patch                                               # Synchronize versions across manifests via bump-my-version
 
 # 2. Fast Chapter Gate (< 60s — run once per chapter batch) & Focused Suites
-make lint-all                                                         # Read-only CI lint, Ruff, Mypy, stubtest, rustfmt --check, Clippy (-D warnings), review-check
-make lint                                                             # Auto-fix Biome, Ruff, rustfmt + Clippy, then Mypy + stubtest + review-check
+make lint-all                                                         # Read-only CI lint, Ruff, Mypy, stubtest, rustfmt --check, Clippy (--features tls,http3,compression,gcp), review-check
+make lint                                                             # Auto-fix Biome, Ruff, rustfmt + Clippy (--features tls,http3,compression,gcp), then Mypy + stubtest + review-check
 make review-check                                                     # Validate review capability manifests, skills, agents, OKF bundles, and privacy constraints
 make review-route                                                     # Route changed files to owning review areas and shards (BASE=origin/main)
 uv run --no-sync pytest src/py/tests/unit/server/test_runner.py -q    # Targeted Python unit test file
@@ -82,7 +82,7 @@ make docs            # scan_public_docstrings + generate_cli_docs --check + zens
 make docs-check      # make docs + live zensical serve HTTP 200 check (make docs-serve, make docs-clean, make docs-rust)
 
 # 4. Full Release Gate (run once at /flow:finish or CI, never per-step) & Benchmarks
-make rs-test                                                          # Clean /dev/shm/{test-*,*vertebra*}, then cargo test --workspace --features tls,compression,gcp
+make rs-test                                                          # Clean /dev/shm/{test-*,*vertebra*}, then cargo test --workspace --features tls,http3,compression,gcp
 make py-test                                                          # make dev, mypy.stubtest across every extension, then pytest src/py/tests -v
 make test                                                             # rs-test + py-test + ts-test
 make coverage                                                         # pytest --cov -> coverage.xml + htmlcov/

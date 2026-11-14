@@ -5,7 +5,8 @@ flow_id: http3-and-http-hygiene
 title: Remove Unwired McpStdioBridge and Enable --features http3 in Make and CI
 description: "Delete dead McpBridgeConfig and McpStdioBridge in mcp_bridge.rs and add --features tls,http3,compression verification to Makefile and .github/workflows/ci.yml."
 status: stable
-state: pending
+state: completed
+commit: 2fb2ec5b
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -72,8 +73,8 @@ cargo clippy --manifest-path src/rs/Cargo.toml --workspace --all-targets --featu
 
 ## Acceptance Criteria
 
-- [ ] Zero unwired `McpStdioBridge` / `McpBridgeConfig` code remains in `vertebra-http`.
-- [ ] `Makefile` and `.github/workflows/ci.yml` run `clippy` and `cargo test` with `http3` enabled.
+- [x] Zero unwired `McpStdioBridge` / `McpBridgeConfig` code remains in `vertebra-http`.
+- [x] `Makefile` and `.github/workflows/ci.yml` run `clippy` and `cargo test` with `http3` enabled.
 
 [^mcp-bridge-rs]: `src/rs/vertebra-http/src/mcp_bridge.rs::McpStdioBridge` — Dead McpStdioBridge and active extract_mcp_observability_headers.
 [^makefile]: `Makefile` — Rust workspace lint and test Make targets.

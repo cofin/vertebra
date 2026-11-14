@@ -12,9 +12,9 @@ generated:
   by: flow/0.26.0
   at: "2026-11-04T04:33:00Z"
 verified:
-  - by: agent:flow-learn
-    at: "2026-11-13T16:02:00Z"
-    commit: 05d88d00
+  - by: agent:flow-executor
+    at: "2026-11-14T22:27:00Z"
+    commit: afa74da5
   - by: agent:flow-setup
     at: "2026-11-07T03:55:00Z"
     commit: 067fa901
@@ -95,9 +95,9 @@ sources:
 
 | Symbol | Module | Responsibility |
 |---|---|---|
-| [`ServerConfig`](../../../../../src/rs/vertebra-http/src/config.rs)[^src-vertebra-http-src-config-rs] / `Topology` (`Embedded`, `Shm`) / `WorkerConfig` / `TlsConfig` / `StaticMountConfig` / `OpenApiCacheConfig` | `vertebra_http::config` | Environment-driven configuration (`ServerConfig::from_env`, `apply_offload_json`). |
-| [`ServerState`](../../../../../src/rs/vertebra-http/src/server.rs)[^src-vertebra-http-src-server-rs] / `StaticAssetMount` / `CompiledOpenApiCache` / `bind_listener` / `run_with_listener` / `run_with_collector` | `vertebra_http::server` | `SO_REUSEADDR` / `SO_REUSEPORT` listener binding (`listen(2048)`), `TCP_NODELAY`, zero-peek tuned `http1::Builder` (or opt-in `VERTEBRA_H2C=1` `AutoBuilder`), optional TLS, cached health/CORS/compression/static/OpenAPI state, and graceful drain. |
-| [`handle`](../../../../../src/rs/vertebra-http/src/response.rs)[^src-vertebra-http-src-response-rs] / `ResponseBody` / `HttpResponse` / `FrameReceiver` / `full_body` / `stream_body` | `vertebra_http::response` (`vertebra_http::body`) | Per-request pipeline (`HMR` -> health -> profile -> discovery -> CORS preflight -> OpenAPI cache -> static mounts -> admission -> route lookup -> bodiless `size_hint().exact() == Some(0)` fast-path / `collect_bounded_body` / multipart / gRPC -> compact header encode -> batcher -> `build_response_with_offloads` -> circuit breaker -> access log). |
+| [`ServerConfig`](../../../../../src/rs/vertebra-http/src/config.rs)[^src-vertebra-http-src-config-rs] / `Topology` (`Embedded`, `Shm`) / `WorkerConfig` / `TlsConfig` / `StaticMountConfig` / `OpenApiCacheConfig` | `vertebra_http::config` | Environment-driven configuration (`ServerConfig::from_env`, `apply_offload_json`, `enable_http3`, `validate_http3`). |
+| [`ServerState`](../../../../../src/rs/vertebra-http/src/server.rs)[^src-vertebra-http-src-server-rs] / `StaticAssetMount` / `CompiledOpenApiCache` / `bind_listener` / `run_with_listener` / `run_with_collector` | `vertebra_http::server` | `SO_REUSEADDR` / `SO_REUSEPORT` listener binding (`listen(2048)`), `TCP_NODELAY`, zero-peek tuned `http1::Builder` (or opt-in `VERTEBRA_H2C=1` `AutoBuilder`), optional TLS + UDP HTTP/3 (`http3_port`), cached offloads, and graceful drain. |
+| [`handle`](../../../../../src/rs/vertebra-http/src/response.rs)[^src-vertebra-http-src-response-rs] / `handle_buffered` / `ResponseBody` / `HttpResponse` / `FrameReceiver` / `full_body` / `stream_body` | `vertebra_http::response` (`vertebra_http::body`) | Shared TCP/QUIC ingress pipeline (`HMR` -> health -> profile -> discovery -> CORS preflight -> OpenAPI -> static mounts -> admission -> route lookup -> `collect_bounded_body` / `decode_request_payload` -> batcher -> offloads -> `Alt-Svc` -> circuit breaker -> access log). |
 | [`CorsOffloadConfig`](../../../../../src/rs/vertebra-http/src/cors.rs)[^src-vertebra-http-src-cors-rs] / `CompiledCorsOffload` / `append_vary_token` | `vertebra_http::cors` | Zero-GIL CORS preflight and response header injection with multi-token `Vary` preservation. |
 | [`CompressionOffloadConfig`](../../../../../src/rs/vertebra-http/src/compression.rs)[^src-vertebra-http-src-compression-rs] / `CompressionBackend` | `vertebra_http::compression` | Zero-GIL `Zstd`/`Brotli`/`Gzip` response compression skipping incompressible `Content-Type`s and preserving `Vary`. |
 | [`TlsAcceptor`](../../../../../src/rs/vertebra-http/src/tls.rs)[^src-vertebra-http-src-tls-rs] / `MtlsConfig` / `ClientAuthMode` / `ClientIdentity` | `vertebra_http::tls` (feature `tls`) | PEM loading, optional mTLS via `WebPkiClientVerifier`, ALPN `h2` and `http/1.1`, `peer_identity`, `rustls_config`. |

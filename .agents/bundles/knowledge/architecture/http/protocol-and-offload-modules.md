@@ -12,6 +12,9 @@ generated:
   by: flow/0.26.0
   at: "2026-11-04T04:33:00Z"
 verified:
+  - by: agent:flow-executor
+    at: "2026-11-14T22:27:00Z"
+    commit: afa74da5
   - by: agent:flow-setup
     at: "2026-11-07T03:55:00Z"
     commit: 067fa901
@@ -94,7 +97,7 @@ sources:
 
 <!-- truth: start -->
 - `vertebra-http` executes health checks, CORS preflight/response headers, `zstd`/`brotli`/`gzip` compression, static mounts, OpenAPI caching, HMR WebSockets, and `.well-known` endpoints directly in Rust without waking Python workers.
-- Realtime, body-streaming, and framing modules (`body.rs`, `grpc.rs`, `sse.rs`, `ws_mount.rs`, `pubsub.rs`, `multipart.rs`, `mcp_bridge.rs`, `http3.rs`) expose Rust protocol primitives wired into `ServerState` and `response::handle` (alongside standalone library helpers).
+- Realtime, body-streaming, and framing modules (`body.rs`, `grpc.rs`, `sse.rs`, `ws_mount.rs`, `pubsub.rs`, `multipart.rs`, `mcp_bridge.rs`, `http3.rs`) expose Rust protocol primitives wired into `ServerState`, `server::run_with_listener`, `response::handle`, and `response::handle_buffered` (alongside standalone library helpers).
 <!-- truth: end -->
 
 [`lib.rs`](../../../../../src/rs/vertebra-http/src/lib.rs)[^src-vertebra-http-src-lib-rs] exports every top-level module as `pub mod` (whereas `dispatcher::direct` in [`dispatcher/mod.rs`](../../../../../src/rs/vertebra-http/src/dispatcher/mod.rs) is a private `mod direct;`). The modules in the first table below are wired directly into `main.rs`, `server.rs`, and [`response::handle`](../../../../../src/rs/vertebra-http/src/response.rs)[^src-vertebra-http-src-response-rs]. The remaining modules are standalone library components exercised by `src/rs/vertebra-http/tests/`, unit tests, and `benches/server_throughput.rs` (`vertebra-py` does not depend on `vertebra-http`).
@@ -109,7 +112,7 @@ sources:
 | [`compression.rs`](../../../../../src/rs/vertebra-http/src/compression.rs)[^src-vertebra-http-src-compression-rs] | `CompressionBackend` (`Zstd`, `Brotli`, `Gzip`), `CompressionOffloadConfig` (`compress_if_eligible`) | Configured via `VERTEBRA_OFFLOAD_CONFIG` / `VertebraPlugin`; negotiates `Accept-Encoding`, skips incompressible `Content-Type`s, compresses unary bodies >= `minimum_size`, and delegates `Vary: Accept-Encoding` to `cors::append_vary_token` |
 | [`assets.rs`](../../../../../src/rs/vertebra-http/src/assets.rs)[^src-vertebra-http-src-assets-rs] & [`server.rs`](../../../../../src/rs/vertebra-http/src/server.rs)[^src-vertebra-http-src-server-rs] | `AssetManager`, `StaticAssetServeConfig`, `StaticAssetMount`, `CompiledOpenApiCache` | Configured via `VERTEBRA_OFFLOAD_CONFIG` / `VertebraPlugin`; serves pre-rendered OpenAPI JSON (`ETag`/`304`) and static directories (pre-compressed sidecars, `ETag`/`304`, `Range`/`206`, SPA fallback) before backpressure/Python |
 | [`h2c.rs`](../../../../../src/rs/vertebra-http/src/h2c.rs)[^src-vertebra-http-src-h2c-rs] | `H2C_PREFACE`, `CleartextProtocol`, `detect_cleartext_protocol` | Gated behind `ServerConfig::enable_h2c_prior_knowledge` (`VERTEBRA_H2C=1`); skipped on the default zero-peek `http1::Builder` fastpath |
-| [`http3.rs`](../../../../../src/rs/vertebra-http/src/http3.rs)[^src-vertebra-http-src-http3-rs] | `Http3Config` (`enabled: false`, `alt_svc_max_age: 86_400`, `max_concurrent_bidi_streams: 256`, `keep_alive_interval_ms: 15_000`), `inject_alt_svc_header` | Appends `Alt-Svc` when `http3.enabled` is true |
+| [`http3.rs`](../../../../../src/rs/vertebra-http/src/http3.rs)[^src-vertebra-http-src-http3-rs] | `Http3Config` (`enabled: false`, `alt_svc_max_age: 86_400`, `max_concurrent_bidi_streams: 256`, `keep_alive_interval_ms: 15_000`), `build_quic_server_config`, `serve_http3_endpoint`, `handle_h3_request`, `inject_alt_svc_header` | Feature `http3`; `server::run_with_listener` validates TLS + feature flags (`validate_http3`), binds the UDP `quinn::Endpoint`, dispatches QUIC streams through `response::handle_buffered`, and gates `Alt-Svc` strictly on `ServerState::http3_port` |
 | [`tls.rs`](../../../../../src/rs/vertebra-http/src/tls.rs)[^src-vertebra-http-src-tls-rs] | `TlsAcceptor` (`from_config`, `accept`, `rustls_config`, `peer_identity`), `MtlsConfig`, `ClientAuthMode` | Acceptor used by `serve_tls` (feature `tls`) |
 | [`profile.rs`](../../../../../src/rs/vertebra-http/src/profile.rs)[^src-vertebra-http-src-profile-rs] | `ProfileConfig`, `ProfileEndpoint` | Cached on `ServerState::profile_endpoint` (`VERTEBRA_PPROF_ENABLED` / `VERTEBRA_PPROF_TOKEN`); `try_handle` serves `/debug/pprof/profile` and `/debug/pprof/heap` with constant-time Bearer token validation |
 | [`discovery.rs`](../../../../../src/rs/vertebra-http/src/discovery.rs)[^src-vertebra-http-src-discovery-rs] | `WellKnownDiscoveryCache`, `CachedDiscoveryDoc`, `DiscoveryResponse` | Cached on `ServerState::discovery_cache`; `serve` answers `/.well-known/agent-card.json` and `/.well-known/mcp.json` (`ETag`/`304 Not Modified`) before backpressure |
@@ -125,9 +128,7 @@ sources:
 
 | Module | Symbols | Notes |
 |---|---|---|
-| `mcp_bridge.rs` (stdio bridge) | `McpStdioBridge` (`new`, `run_with_responder`), `McpBridgeConfig` | Standalone stdio-to-HTTP JSON-RPC 2.0 helper (`vtb ai mcp bridge` executes Python `run_mcp_stdio_bridge`) |
 | `h2c.rs` (upgrade helpers) | `parse_h2c_upgrade_headers`, `build_h2c_switching_protocols_response`, `decode_base64url`, `PrependStream`, `H2cUpgradeParams` | RFC 9113 `Upgrade: h2c` parsing helpers |
-| `http3.rs` (QUIC listener) | `Http3Config`, `Http3Error`, `format_alt_svc_header`, `build_quic_server_config`, `serve_http3_endpoint`, `handle_h3_request` | Feature `http3`; standalone QUIC endpoint helpers |
 | `tls.rs` (identity helpers) | `IpCidr`, `TrustedProxyConfig`, `ClientIdentity`, `ProxyAuthMetadata`, `extract_client_identity_from_der`, `normalize_trusted_proxy_headers` | Certificate CN and proxy XFCC/IAP header helpers |
 | [`dispatcher/direct.rs`](../../../../../src/rs/vertebra-http/src/dispatcher/direct.rs)[^src-vertebra-http-src-dispatcher-direct-rs] & `benches/support/mod.rs` | `dispatch_direct_vec` (`dispatcher/direct.rs`); `DirectWorkerPool`, `AdaptiveWorkerConfig`, `run_adaptive_worker`, `BatchHandler` (`benches/support/mod.rs`, uncompiled sketch) | Direct-mode channel producer for `DispatchBackend::Direct` |
 

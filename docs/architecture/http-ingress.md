@@ -11,7 +11,7 @@ Calling into Python or waking a worker process once per HTTP request adds overhe
 | Protocol | Implementation Details |
 | --- | --- |
 | **HTTP/1.1 & HTTP/2** | Hyper connection handlers with keep-alive, pipelining, and ALPN TLS negotiation via `rustls`. |
-| **HTTP/3 (QUIC)** | Optional UDP/QUIC listener (`QuicConfig`) advertising `Alt-Svc` headers alongside TCP HTTP/2. |
+| **HTTP/3 (QUIC)** | Optional UDP/QUIC listener (`Http3Config`, `VERTEBRA_HTTP3=1` with TLS and `--features http3`) advertising `Alt-Svc` headers alongside TCP HTTP/2. |
 | **gRPC Framing** | 5-byte length-prefixed gRPC frame parser and `grpc-status` trailer encoder connected to `vertebra.extensions.grpc.GrpcServiceRegistry`. |
 | **WebSocket & SSE** | RFC 6455 WebSocket upgrade and frame handling plus Server-Sent Events streaming. |
 

@@ -15,4 +15,4 @@
 
 - **WebSockets (`ws_mount.rs`)**: Enforce `max_frame_size` and `max_message_size`, respond to ping frames, and clean up topic subscriptions in `Drop`/disconnect paths.
 - **SSE & PubSub (`sse.rs`, `pubsub.rs`)**: Emit `id:`, `event:`, `data:`, and `retry:` fields with `\n\n` framing, bounded per-subscriber buffers, and periodic keep-alive comments (`: keepalive\n\n`).
-- **MCP Bridge (`mcp_bridge.rs`)**: Serve `/.well-known/mcp` discovery metadata and stream MCP JSON-RPC frames over bounded SSE/HTTP ingress channels.
+- **MCP Bridge (`mcp_bridge.rs`)**: Extract JSON-RPC 2.0 `method` and `params.name` observability headers (`extract_mcp_observability_headers`) on `/mcp` requests while Python `vertebra.agent.mcp` and `discovery.rs` serve discovery and stdio/SSE transports.
