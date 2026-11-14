@@ -11,7 +11,7 @@ planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
 strategy: documentation_validation
-plan_commit: 104fd6fa
+plan_commit: 1b191388
 depends_on:
 - native-redis-driver:ch04-queues-conformance-and-docs:t03
 files:

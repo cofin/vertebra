@@ -9,7 +9,7 @@ state: planned
 planning_status: complete
 planning_quality: standard
 planning_degraded_reason: null
-plan_commit: 104fd6fa
+plan_commit: 1b191388
 updated_at: '2026-11-14T18:50:00Z'
 generated:
   by: flow/0.30.1
@@ -17,7 +17,7 @@ generated:
 verified:
 - by: agent:plan-generator
   at: '2026-11-14T18:50:00Z'
-  commit: 104fd6fa
+  commit: 1b191388
 tags:
 - django
 - tasks
@@ -68,7 +68,7 @@ sources:
 <!-- truth: start -->
 - **Baseline (`18baadcd`)**: `extensions/django/queues.py` subclasses Flask's in-memory deque queue instead of Django `6.0+`'s `BaseTaskBackend`, and `cache.py`/`channels.py` rely on in-process dicts [^dj-queues] [^dj-cache] [^dj-channels].
 - **Target Architecture**: `extensions/django/tasks.py::TaskBackend(BaseTaskBackend)` routes sync `enqueue` to `SyncQueueStore` and async `aenqueue` to `AsyncQueueStore`, `vertebra_worker` executes tasks with `Container.scope()` DI, and `django/queues.py` is deleted.
-- **Baseline (`104fd6fa`)**: `ChannelBus` is single-node only, `extensions/litestar/channels.py` uses `swap_channels_backend` monkeypatching, and `stores.py` / `starlette/store.py` duplicate KV logic (while prefix-scoped `SCAN`+`UNLINK` already replaced `flushdb()` in `364c7cbe`) [^channel-bus] [^ls-channels] [^fw-stores].
+- **Baseline (`1b191388`)**: `ChannelBus` is single-node only, `extensions/litestar/channels.py` uses `swap_channels_backend` monkeypatching, and `stores.py` / `starlette/store.py` duplicate KV logic (while prefix-scoped `SCAN`+`UNLINK` already replaced `flushdb()` in `364c7cbe`) [^channel-bus] [^ls-channels] [^fw-stores].
 - **Target Architecture**: `ChannelBus`, Vertebra `ChannelsBackend`, and Litestar `ChannelsPlugin` bind `SyncNotificationSource` / `AsyncNotificationSource` across Memory, Redis, Valkey, PostgreSQL, and Oracle without monkeypatching; `ValkeyStore` consolidates onto `vertebra._redis` with RESP3 tracking and `SCAN`+`UNLINK` [^ls-store].
 - **Baseline (`18baadcd`)**: Docs and `distributed-queues-and-email.md` describe the interim fail-loud `executor=`-required baseline, unprefixed `QueueStore`/`NotificationSource`, and `swap_channels_backend` [^doc-qr] [^okf-queues].
 - **Target Architecture**: Present-tense `docs/` and `<= 200`-line OKF chapters document `SyncQueueStore`/`AsyncQueueStore`, live PostgreSQL/Oracle/Redis/Valkey queues, `litestar-queues>=0.14.0`, Django `6.0+` `TaskBackend`, distributed `ChannelsBackend`, `ValkeyStore`, and delivery caveats [^okf-litestar] [^okf-srv-lim].

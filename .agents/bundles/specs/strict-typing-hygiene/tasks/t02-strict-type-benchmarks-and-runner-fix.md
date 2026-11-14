@@ -48,7 +48,7 @@ sources:
 
 ## Objective & Scope Boundary
 
-Verify `tools/benchmarks/{runner.py,apps/asgi.py,apps/spikard_app.py}` typing invariants landed at `334dc98d` (`mypy --strict tools/benchmarks` and `ruff check tools/benchmarks` already exit `0`) and add the missing `ServerRunner` binary-stderr regression test in `src/py/tests/unit/test_bench_infrastructure.py` per [`../spec.md` §2](../spec.md) [^bench-runner] [^bench-asgi] [^bench-spikard]. Out of scope: `src/py/tests` typing (`t03`).
+Verify `tools/benchmarks/{runner.py,apps/asgi.py,apps/spikard_app.py}` typing invariants landed at `1b191388` (`mypy --strict tools/benchmarks` and `ruff check tools/benchmarks` already exit `0`) and add the missing `ServerRunner` binary-stderr regression test in `src/py/tests/unit/test_bench_infrastructure.py` per [`../spec.md` §2](../spec.md) [^bench-runner] [^bench-asgi] [^bench-spikard]. Out of scope: `src/py/tests` typing (`t03`).
 
 ## Bounded Read Manifest
 
@@ -59,7 +59,7 @@ Verify `tools/benchmarks/{runner.py,apps/asgi.py,apps/spikard_app.py}` typing in
 
 ## Contracts & Edge Cases
 
-- **`tools/benchmarks/{runner.py,apps/asgi.py,apps/spikard_app.py}` (`334dc98d` / `8290822e`, landed)**: Already updated (`ServerRunner._process: subprocess.Popen[bytes] | None`, `encode_json_bytes`, typed `spikard.app.App` routes with zero `# type: ignore`); keep strict compliance clean without regressions.
+- **`tools/benchmarks/{runner.py,apps/asgi.py,apps/spikard_app.py}` (`1b191388` / `1b191388`, landed)**: Already updated (`ServerRunner._process: subprocess.Popen[bytes] | None`, `encode_json_bytes`, typed `spikard.app.App` routes with zero `# type: ignore`); keep strict compliance clean without regressions.
 - **`src/py/tests/unit/test_bench_infrastructure.py` (remaining)**: Add unit regression test exercising `ServerRunner` when a child command writes UTF-8 and non-UTF-8 bytes to `stderr` and exits non-zero before opening its port, asserting `RuntimeError` includes the decoded stderr tail; verify `mypy --strict tools/benchmarks` and `ruff check tools/benchmarks` exit `0`.
 
 ## Test Matrix

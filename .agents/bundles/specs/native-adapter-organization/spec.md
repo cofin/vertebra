@@ -13,7 +13,7 @@ parent_prd: native-data-platform
 depends_on_flows:
   - native-postgres-driver
 plan_revision: 2
-plan_commit: 104fd6fa
+plan_commit: 1b191388
 created_at: "2026-11-12T23:45:00Z"
 updated_at: "2026-11-14T18:43:00Z"
 generated:
@@ -22,7 +22,7 @@ generated:
 verified:
   - by: agent:flow-setup
     at: "2026-11-14T18:43:00Z"
-    commit: 104fd6fa
+    commit: 1b191388
 tags:
   - database
   - adapters
@@ -72,7 +72,7 @@ sources:
 # Specification: Uniform Native Adapter Module Organization and DataFusion Cleanup
 
 <!-- truth: start -->
-- **Baseline (`334dc98d`)**: `bigquery/config.py` (`619L`) and `spanner/config.py` (`543L`) mix connection configs with `ObjectRef`/`ObjectTableConfig` and `StalenessBound`/`Mutation`/`MutationGroup`; `bigquery`, `spanner` (`2,011L`), `oracle` (`2,340L`), `mysql` (`1,244L`), `duckdb` (`1,251L`), and `mssql` (`855L`) bundle sync/async drivers (and Oracle pools/pipelines) into monolithic `driver.py` files; and `DataFusionConfig` / `DataFusionEngine` carry unimplemented `pgwire_fdw` fields and vendor-specific registration wrappers [^bq-config] [^sp-config] [^ora-driver] [^df-config] [^df-driver].
+- **Baseline (`1b191388`)**: `bigquery/config.py` (`619L`) and `spanner/config.py` (`543L`) mix connection configs with `ObjectRef`/`ObjectTableConfig` and `StalenessBound`/`Mutation`/`MutationGroup`; `bigquery`, `spanner` (`2,011L`), `oracle` (`2,340L`), `mysql` (`1,244L`), `duckdb` (`1,251L`), and `mssql` (`855L`) bundle sync/async drivers (and Oracle pools/pipelines) into monolithic `driver.py` files; and `DataFusionConfig` / `DataFusionEngine` carry unimplemented `pgwire_fdw` fields and vendor-specific registration wrappers [^bq-config] [^sp-config] [^ora-driver] [^df-config] [^df-driver].
 - **Target Architecture**: Every native database adapter under `src/py/vertebra/db/adapters/<engine>/` follows uniform single-responsibility module boundaries (`config.py`, `core.py`, `_sync.py`, `_async.py`, thin `driver.py` barrel, `pipeline.py`, `object_tables.py`, `mutations.py`, and lazy `__init__.py` exports with zero re-export shims in `config.py`), while `DataFusionConfig` supports only implemented `mode="in_process"` and `DataFusionEngine` registers upstream queries strictly via `register_arrow_table(name, cursor)`.
 - **Scope & Boundaries**: Ready in the immediate wave after archived `native-postgres-driver` ([`postgres-native-driver.md`](../../knowledge/domains/data/postgres-native-driver.md)) with zero overlap against `sqlite` or `redis`/`valkey`; preserves public `vertebra.db.adapters.<engine>` lazy exports (`__all__` / `_EXPORT_MAP`) consumed by SQLSpec and SQLAlchemy extensions [^okf-drivers].
 <!-- truth: end -->

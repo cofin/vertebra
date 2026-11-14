@@ -11,7 +11,7 @@ planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
 strategy: regression_tdd
-plan_commit: 104fd6fa
+plan_commit: 1b191388
 depends_on:
 - queues-tasks-and-channels:ch03-distributed-channels-stores-and-docs:t02
 files:

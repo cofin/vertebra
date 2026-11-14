@@ -16,7 +16,7 @@ generated:
 verified:
   - by: agent:flow-learn
     at: "2026-11-14T17:15:00Z"
-    commit: 334dc98d
+    commit: 1b191388
   - by: agent:flow-setup
     at: "2026-11-12T23:35:00Z"
     commit: 18baadcd

@@ -9,7 +9,7 @@ state: planned
 planning_status: complete
 planning_quality: standard
 planning_degraded_reason: null
-plan_commit: 104fd6fa
+plan_commit: 1b191388
 updated_at: '2026-11-14T18:50:00Z'
 generated:
   by: flow/0.30.1
@@ -17,7 +17,7 @@ generated:
 verified:
 - by: agent:plan-generator
   at: '2026-11-14T18:50:00Z'
-  commit: 104fd6fa
+  commit: 1b191388
 tags:
 - queues
 - streams

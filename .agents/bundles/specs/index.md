@@ -1,6 +1,6 @@
 # Active Specifications & Research (`specs/`)
 
-Active specifications and promoted spec-scoped research notes anchored at `HEAD @ 104fd6fa` (`main @ 4773e2fc`); synthesized documentation lives in [`../knowledge/`](../knowledge/index.md) and bundle activity is logged in [`../log.md`](../log.md).
+Active specifications and promoted spec-scoped research notes anchored at `HEAD @ 1b191388` (`main @ 1b191388`); synthesized documentation lives in [`../knowledge/`](../knowledge/index.md) and bundle activity is logged in [`../log.md`](../log.md).
 
 ## 1. Master PRDs (`state: planned`)
 
