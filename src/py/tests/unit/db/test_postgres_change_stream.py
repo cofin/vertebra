@@ -111,10 +111,13 @@ class _FakeReplicationDriver:
         self,
         identity: PostgresReplicationIdentity,
         streams: list[_FakeNativeStream | BaseException],
+        *,
+        log: list[str] | None = None,
     ) -> None:
         self._config = PostgreSQLConfig(dsn="postgresql://postgres@127.0.0.1:5432/app")
         self._identity = identity
         self._streams = list(streams)
+        self._log = log
         self.calls: list[str] = []
         self.opened_args: list[tuple[int | None, bool]] = []
         self.open_count = 0
@@ -129,6 +132,8 @@ class _FakeReplicationDriver:
         publication: str,
     ) -> PostgresReplicationIdentity:
         self.calls.append(f"identity:{slot}:{publication}")
+        if self._log is not None:
+            self._log.append("driver.identity")
         return self._identity
 
     async def _open_replication_stream(
@@ -139,6 +144,8 @@ class _FakeReplicationDriver:
         reconnect: bool = False,
     ) -> Any:
         self.calls.append(f"open:{start_lsn}:{reconnect}")
+        if self._log is not None:
+            self._log.append("driver.open")
         self.opened_args.append((start_lsn, reconnect))
         self.open_count += 1
         entry = self._streams.pop(0)
@@ -280,8 +287,8 @@ async def test_change_source_identity_before_load_and_no_ack_on_yield_or_close()
     """Verify identity resolution precedes store load, reconnect=False, and yield/close never ack."""
     ident = _identity()
     inner_store = MemoryPostgresCheckpointStore()
-    log: list[str] = []
-    store = _OrderRecordingCheckpointStore(inner_store, log)
+    timeline: list[str] = []
+    store = _OrderRecordingCheckpointStore(inner_store, timeline)
     stream = _FakeNativeStream(
         [
             PostgresReplicationRecord(
@@ -291,7 +298,7 @@ async def test_change_source_identity_before_load_and_no_ack_on_yield_or_close()
             ),
         ]
     )
-    driver = _FakeReplicationDriver(ident, [stream])
+    driver = _FakeReplicationDriver(ident, [stream], log=timeline)
     assert isinstance(driver, PostgresReplicationDriver)
     config = PostgresChangeConfig(slot="cdc_slot", publication="pub_orders", reconnect=False)
     source = PostgresChangeSource(driver, config, store)
@@ -302,9 +309,7 @@ async def test_change_source_identity_before_load_and_no_ack_on_yield_or_close()
     assert event.event_id == 1
     assert driver.opened_args == [(None, False)]
     assert stream.acks == []
-    assert driver.calls[0].startswith("identity:")
-    assert "store.load" in log
-    assert log.index("store.load") == 0
+    assert timeline == ["driver.identity", "store.load", "driver.open"]
 
     await source.aclose()
     assert stream.acks == []
@@ -363,7 +368,7 @@ async def test_change_source_shielded_save_before_wire_ack_preserves_stream() ->
 
 @pytest.mark.anyio
 async def test_change_source_uncertain_failure_reconciles_and_discards_stale_pending() -> None:
-    """Verify uncertain ack/save closes old stream generation and reconciles from durable store."""
+    """Verify uncertain ack closes old generation, discards gated _pending_record, and reconciles."""
     ident = _identity()
     inner_store = MemoryPostgresCheckpointStore()
     seed = PostgresCheckpoint(
@@ -374,14 +379,13 @@ async def test_change_source_uncertain_failure_reconciles_and_discards_stale_pen
     )
     await inner_store.save(seed, expected=None)
 
-    log: list[str] = []
-    store = _OrderRecordingCheckpointStore(inner_store, log)
+    store = _OrderRecordingCheckpointStore(inner_store)
     stream1 = _FakeNativeStream(
         [
             PostgresReplicationRecord(kind="insert", payload={"n": 1}, commit_end_lsn=100),
+            PostgresReplicationRecord(kind="insert", payload={"n": "stale"}, commit_end_lsn=125),
         ]
     )
-    stream1.fail_ack_exc = ConnectionError("wire ack lost")
     stream2 = _FakeNativeStream(
         [
             PostgresReplicationRecord(kind="insert", payload={"n": 2}, commit_end_lsn=150),
@@ -397,13 +401,28 @@ async def test_change_source_uncertain_failure_reconciles_and_discards_stale_pen
     ev1 = await source.__anext__()
     assert ev1.event_id == 10
 
+    stream1.next_started.clear()
+    stream1.block_next_gate = asyncio.Event()
+    gated_next_task: asyncio.Task[ChangeEvent] = asyncio.create_task(source.__anext__())
+    await stream1.next_started.wait()
+
+    store.save_gate = asyncio.Event()
+    ack_task = asyncio.create_task(source.acknowledge(100))
+    await store.save_started.wait()
+
+    stream1.block_next_gate.set()
+    await asyncio.sleep(0)
+
+    stream1.fail_ack_exc = ConnectionError("wire ack lost")
+    store.save_gate.set()
     with pytest.raises(PostgresReplicationGapError) as gap_info:
-        await source.acknowledge(100)
+        await ack_task
     assert gap_info.value.reason == "checkpoint_uncertain"
     assert stream1.closed is True
 
-    ev2 = await source.__anext__()
+    ev2 = await asyncio.wait_for(gated_next_task, timeout=1.0)
     assert ev2.event_id == 11
+    assert ev2.payload["n"] == 2
     assert driver.open_count == 2
     assert driver.opened_args[1] == (100, False)
     await source.aclose()
@@ -542,8 +561,8 @@ async def test_change_source_fail_closed_gap_errors(
 
 
 @pytest.mark.anyio
-async def test_change_source_retries_exhausted_and_bounded_uncertain_aclose() -> None:
-    """Verify reconnect exhaustion raises retries_exhausted and bounded aclose raises checkpoint_uncertain."""
+async def test_change_source_retries_exhausted_without_chaining_outer_exception() -> None:
+    """Verify connect/EOF retry exhaustion raises retries_exhausted with clean exception chaining."""
     ident = _identity()
     driver = _FakeReplicationDriver(
         ident,
@@ -565,13 +584,42 @@ async def test_change_source_retries_exhausted_and_bounded_uncertain_aclose() ->
     assert gap_info.value.reason == "retries_exhausted"
     await source.aclose()
 
-    inner_store = MemoryPostgresCheckpointStore()
-    store = _OrderRecordingCheckpointStore(inner_store, [])
+    eof_source = PostgresChangeSource(
+        _FakeReplicationDriver(ident, [_FakeNativeStream([])]),
+        PostgresChangeConfig(
+            slot="cdc_slot",
+            publication="pub_orders",
+            reconnect=True,
+            max_reconnect_attempts=0,
+            initial_backoff_seconds=0.0,
+            max_backoff_seconds=0.0,
+        ),
+    )
+    try:
+        try:
+            raise RuntimeError("unrelated outer failure")
+        except RuntimeError:
+            with pytest.raises(PostgresReplicationGapError) as eof_exc:
+                await anext(eof_source.stream())
+            assert eof_exc.value.reason == "retries_exhausted"
+            assert eof_exc.value.__cause__ is None
+            assert eof_exc.value.__suppress_context__ is True
+    finally:
+        await eof_source.aclose()
+
+
+@pytest.mark.anyio
+async def test_change_source_bounded_aclose_raises_when_in_flight_ack_stalls() -> None:
+    """Verify bounded aclose fails closed with checkpoint_uncertain when save stalls past deadline."""
+    ident = _identity()
+    store = _OrderRecordingCheckpointStore(MemoryPostgresCheckpointStore())
     store.save_gate = asyncio.Event()
-    stream = _FakeNativeStream([PostgresReplicationRecord(kind="insert", payload={"k": 1}, commit_end_lsn=100)])
-    driver2 = _FakeReplicationDriver(ident, [stream])
-    source2 = PostgresChangeSource(
-        driver2,
+    stream = _FakeNativeStream(
+        [PostgresReplicationRecord(kind="insert", payload={"k": 1}, commit_end_lsn=100)],
+        fail_aclose_exc=OperationalError("terminating connection due to administrator command"),
+    )
+    source = PostgresChangeSource(
+        _FakeReplicationDriver(ident, [stream]),
         PostgresChangeConfig(
             slot="cdc_slot",
             publication="pub_orders",
@@ -580,11 +628,11 @@ async def test_change_source_retries_exhausted_and_bounded_uncertain_aclose() ->
         ),
         store,
     )
-    await source2.__anext__()
-    hung_ack = asyncio.create_task(source2.acknowledge(100))
+    await source.__anext__()
+    hung_ack = asyncio.create_task(source.acknowledge(100))
     await store.save_started.wait()
     with pytest.raises(PostgresReplicationGapError) as close_gap:
-        await source2.aclose()
+        await source.aclose()
     assert close_gap.value.reason == "checkpoint_uncertain"
     assert stream.closed is True
     store.save_gate.set()
@@ -593,11 +641,10 @@ async def test_change_source_retries_exhausted_and_bounded_uncertain_aclose() ->
 
 
 @pytest.mark.anyio
-async def test_change_source_reconnects_and_closes_cleanly_when_dead_stream_aclose_raises() -> None:
-    """Verify terminal stream errors stored on dead native generations do not block reconnect or close."""
+async def test_change_source_reconnects_when_dead_stream_aclose_raises() -> None:
+    """Verify failed cleanup on a dead native stream does not prevent reconnect recovery."""
     ident = _identity()
     term_err = OperationalError("terminating connection due to administrator command")
-
     broken_gen = _FakeNativeStream([term_err], fail_aclose_exc=term_err)
     recovered_gen = _FakeNativeStream(
         [PostgresReplicationRecord(kind="insert", payload={"ok": True}, commit_end_lsn=200)]
@@ -613,133 +660,107 @@ async def test_change_source_reconnects_and_closes_cleanly_when_dead_stream_aclo
             max_backoff_seconds=0.0,
         ),
     )
-
     event = await anext(source.stream())
     assert event.payload == {"kind": "insert", "generation": 0, "commit_end_lsn": 200, "ok": True}
     assert broken_gen.closed is True
     assert driver.open_count == 2
     await source.aclose()
 
-    failing_driver = _FakeReplicationDriver(ident, [_FakeNativeStream([term_err], fail_aclose_exc=term_err)])
-    no_retry_source = PostgresChangeSource(
-        failing_driver,
+
+@pytest.mark.anyio
+async def test_change_source_no_reconnect_propagates_terminal_stream_error() -> None:
+    """Verify reconnect=False propagates terminal native stream errors directly."""
+    ident = _identity()
+    term_err = OperationalError("terminating connection due to administrator command")
+    source = PostgresChangeSource(
+        _FakeReplicationDriver(ident, [_FakeNativeStream([term_err], fail_aclose_exc=term_err)]),
         PostgresChangeConfig(slot="cdc_slot", publication="pub_orders", reconnect=False),
     )
-    async with no_retry_source:
+    async with source:
         with pytest.raises(OperationalError, match="administrator command"):
-            await anext(no_retry_source.stream())
+            await anext(source.stream())
 
+
+@pytest.mark.anyio
+async def test_change_source_wal_unavailable_closes_dead_stream_without_retry() -> None:
+    """Verify removed WAL error fails closed with wal_unavailable and closes dead generation."""
+    ident = _identity()
+    term_err = OperationalError("terminating connection due to administrator command")
     gap_stream = _FakeNativeStream(
         [OperationalError("requested WAL segment has already been removed")],
         fail_aclose_exc=term_err,
     )
-    gap_source = PostgresChangeSource(
-        _FakeReplicationDriver(ident, [gap_stream]),
+    driver = _FakeReplicationDriver(ident, [gap_stream])
+    source = PostgresChangeSource(
+        driver,
         PostgresChangeConfig(slot="cdc_slot", publication="pub_orders", reconnect=True),
     )
-    async with gap_source:
+    async with source:
         with pytest.raises(PostgresReplicationGapError) as gap_err:
-            await anext(gap_source.stream())
+            await anext(source.stream())
         assert gap_err.value.reason == "wal_unavailable"
     assert gap_stream.closed is True
+    assert driver.open_count == 1
 
-    ack_dead_stream = _FakeNativeStream(
+
+@pytest.mark.anyio
+async def test_change_source_wire_ack_failure_recovers_on_next_generation() -> None:
+    """Verify wire ack loss marks checkpoint_uncertain and resumes cleanly on next generation."""
+    ident = _identity()
+    term_err = OperationalError("terminating connection due to administrator command")
+    dead_stream = _FakeNativeStream(
         [PostgresReplicationRecord(kind="insert", payload={"n": 1}, commit_end_lsn=100)],
         fail_aclose_exc=term_err,
     )
-    ack_dead_stream.fail_ack_exc = ConnectionError("wire ack lost")
-    ack_recovery_stream = _FakeNativeStream(
+    dead_stream.fail_ack_exc = ConnectionError("wire ack lost")
+    recovery_stream = _FakeNativeStream(
         [PostgresReplicationRecord(kind="insert", payload={"n": 2}, commit_end_lsn=200)]
     )
-    ack_source = PostgresChangeSource(
-        _FakeReplicationDriver(ident, [ack_dead_stream, ack_recovery_stream]),
+    source = PostgresChangeSource(
+        _FakeReplicationDriver(ident, [dead_stream, recovery_stream]),
         PostgresChangeConfig(slot="cdc_slot", publication="pub_orders", reconnect=True),
         MemoryPostgresCheckpointStore(),
     )
-    async with ack_source:
-        await anext(ack_source.stream())
+    async with source:
+        await anext(source.stream())
         with pytest.raises(PostgresReplicationGapError) as ack_gap:
-            await ack_source.acknowledge(100)
+            await source.acknowledge(100)
         assert ack_gap.value.reason == "checkpoint_uncertain"
-        assert ack_dead_stream.closed is True
-        resumed = await asyncio.wait_for(anext(ack_source.stream()), timeout=1.0)
+        assert dead_stream.closed is True
+        resumed = await asyncio.wait_for(anext(source.stream()), timeout=1.0)
         assert resumed.payload == {"kind": "insert", "generation": 0, "commit_end_lsn": 200, "n": 2}
 
 
 @pytest.mark.anyio
-async def test_change_source_eof_retries_reconcile_and_aclose_timeout_error_preservation() -> None:
-    """Verify None EOF retry cap, concurrent ack uncertainty before EOF, and aclose error preservation."""
+async def test_change_source_concurrent_uncertain_ack_reconciles_on_stream_eof() -> None:
+    """Verify concurrent stream EOF reconciles after wire ack failure even with reconnect=False."""
     ident = _identity()
-
-    eof_source = PostgresChangeSource(
-        _FakeReplicationDriver(ident, [_FakeNativeStream([])]),
-        PostgresChangeConfig(
-            slot="cdc_slot",
-            publication="pub_orders",
-            reconnect=True,
-            max_reconnect_attempts=0,
-            initial_backoff_seconds=0.0,
-            max_backoff_seconds=0.0,
-        ),
-    )
-    async with eof_source:
-        with pytest.raises(PostgresReplicationGapError) as eof_gap:
-            await anext(eof_source.stream())
-        assert eof_gap.value.reason == "retries_exhausted"
-
-    store = MemoryPostgresCheckpointStore()
-    reconcile_stream1 = _FakeNativeStream(
-        [PostgresReplicationRecord(kind="insert", payload={"n": 1}, commit_end_lsn=100)]
-    )
-    reconcile_stream2 = _FakeNativeStream(
-        [PostgresReplicationRecord(kind="insert", payload={"n": 2}, commit_end_lsn=200)]
-    )
-    conc_source = PostgresChangeSource(
-        _FakeReplicationDriver(ident, [reconcile_stream1, reconcile_stream2]),
+    stream1 = _FakeNativeStream([PostgresReplicationRecord(kind="insert", payload={"n": 1}, commit_end_lsn=100)])
+    stream2 = _FakeNativeStream([PostgresReplicationRecord(kind="insert", payload={"n": 2}, commit_end_lsn=200)])
+    source = PostgresChangeSource(
+        _FakeReplicationDriver(ident, [stream1, stream2]),
         PostgresChangeConfig(slot="cdc_slot", publication="pub_orders", reconnect=False),
-        store,
+        MemoryPostgresCheckpointStore(),
     )
-    await conc_source.__anext__()
-    reconcile_stream1.next_started.clear()
-    reconcile_stream1.block_next_gate = asyncio.Event()
-    reconcile_stream1.fail_ack_exc = ConnectionError("ack failed")
+    await source.__anext__()
+    stream1.next_started.clear()
+    stream1.block_next_gate = asyncio.Event()
+    stream1.fail_ack_exc = ConnectionError("ack failed")
 
-    next_task: asyncio.Task[ChangeEvent] = asyncio.create_task(conc_source.__anext__())
-    await reconcile_stream1.next_started.wait()
-    with pytest.raises(PostgresReplicationGapError) as conc_ack_err:
-        await conc_source.acknowledge(100)
-    assert conc_ack_err.value.reason == "checkpoint_uncertain"
-    reconcile_stream1.block_next_gate.set()
-    resumed_after_eof = await asyncio.wait_for(next_task, timeout=1.0)
-    assert resumed_after_eof.payload == {"kind": "insert", "generation": 0, "commit_end_lsn": 200, "n": 2}
-    await conc_source.aclose()
-
-    hung_store = _OrderRecordingCheckpointStore(MemoryPostgresCheckpointStore())
-    hung_store.save_gate = asyncio.Event()
-    dead_acl_stream = _FakeNativeStream(
-        [PostgresReplicationRecord(kind="insert", payload={"n": 3}, commit_end_lsn=300)],
-        fail_aclose_exc=OperationalError("terminating connection due to administrator command"),
-    )
-    timeout_source = PostgresChangeSource(
-        _FakeReplicationDriver(ident, [dead_acl_stream]),
-        PostgresChangeConfig(slot="cdc_slot", publication="pub_orders", checkpoint_timeout_seconds=0.05),
-        hung_store,
-    )
-    await anext(timeout_source.stream())
-    hung_ack = asyncio.create_task(timeout_source.acknowledge(300))
-    await hung_store.save_started.wait()
-    with pytest.raises(PostgresReplicationGapError) as close_gap:
-        await timeout_source.aclose()
-    assert close_gap.value.reason == "checkpoint_uncertain"
-    assert dead_acl_stream.closed is True
-    hung_store.save_gate.set()
-    with pytest.raises(PostgresReplicationGapError):
-        await hung_ack
+    next_task: asyncio.Task[ChangeEvent] = asyncio.create_task(source.__anext__())
+    await stream1.next_started.wait()
+    with pytest.raises(PostgresReplicationGapError) as ack_err:
+        await source.acknowledge(100)
+    assert ack_err.value.reason == "checkpoint_uncertain"
+    stream1.block_next_gate.set()
+    resumed = await asyncio.wait_for(next_task, timeout=1.0)
+    assert resumed.payload == {"kind": "insert", "generation": 0, "commit_end_lsn": 200, "n": 2}
+    await source.aclose()
 
 
 @pytest.mark.anyio
-async def test_change_source_concurrent_close_and_fencing_during_open_and_next() -> None:
-    """Verify concurrent aclose or CAS fencing interrupts pending open and next waits cleanly."""
+async def test_change_source_concurrent_close_during_open() -> None:
+    """Verify concurrent aclose aborts pending stream open cleanly and closes late-arriving stream."""
     ident = _identity()
 
     class _BlockedOpenDriver(_FakeReplicationDriver):
@@ -764,31 +785,31 @@ async def test_change_source_concurrent_close_and_fencing_during_open_and_next()
             )
 
     late_stream = _FakeNativeStream([])
-    blocked_driver = _BlockedOpenDriver(late_stream)
-    open_close_source = PostgresChangeSource(
-        blocked_driver,
-        PostgresChangeConfig(
-            slot="cdc_slot",
-            publication="pub_orders",
-            reconnect=True,
-            max_reconnect_attempts=0,
-        ),
+    driver = _BlockedOpenDriver(late_stream)
+    source = PostgresChangeSource(
+        driver,
+        PostgresChangeConfig(slot="cdc_slot", publication="pub_orders", reconnect=True, max_reconnect_attempts=0),
         MemoryPostgresCheckpointStore(),
     )
-    open_task: asyncio.Task[ChangeEvent] = asyncio.create_task(open_close_source.__anext__())
-    await blocked_driver.open_started.wait()
-    await open_close_source.aclose()
-    blocked_driver.open_gate.set()
+    open_task: asyncio.Task[ChangeEvent] = asyncio.create_task(source.__anext__())
+    await driver.open_started.wait()
+    await source.aclose()
+    driver.open_gate.set()
     with pytest.raises(StopAsyncIteration):
         await asyncio.wait_for(open_task, timeout=1.0)
     assert late_stream.closed is True
-    assert blocked_driver.open_count == 1
+    assert driver.open_count == 1
 
-    blocking_stream = _FakeNativeStream([])
-    blocking_stream.block_next_gate = asyncio.Event()
-    next_close_driver = _FakeReplicationDriver(ident, [blocking_stream])
-    next_close_source = PostgresChangeSource(
-        next_close_driver,
+
+@pytest.mark.anyio
+async def test_change_source_concurrent_close_during_next() -> None:
+    """Verify concurrent aclose terminates an awaited idle stream without triggering reconnect."""
+    ident = _identity()
+    stream = _FakeNativeStream([])
+    stream.block_next_gate = asyncio.Event()
+    driver = _FakeReplicationDriver(ident, [stream])
+    source = PostgresChangeSource(
+        driver,
         PostgresChangeConfig(
             slot="cdc_slot",
             publication="pub_orders",
@@ -799,15 +820,20 @@ async def test_change_source_concurrent_close_and_fencing_during_open_and_next()
         ),
         MemoryPostgresCheckpointStore(),
     )
-    awaiting_next_task: asyncio.Task[ChangeEvent] = asyncio.create_task(next_close_source.__anext__())
-    await blocking_stream.next_started.wait()
-    await next_close_source.aclose()
-    blocking_stream.block_next_gate.set()
+    awaiting_task: asyncio.Task[ChangeEvent] = asyncio.create_task(source.__anext__())
+    await stream.next_started.wait()
+    await source.aclose()
+    stream.block_next_gate.set()
     with pytest.raises(StopAsyncIteration):
-        await asyncio.wait_for(awaiting_next_task, timeout=1.0)
-    assert blocking_stream.closed is True
-    assert next_close_driver.open_count == 1
+        await asyncio.wait_for(awaiting_task, timeout=1.0)
+    assert stream.closed is True
+    assert driver.open_count == 1
 
+
+@pytest.mark.anyio
+async def test_change_source_cas_conflict_interrupts_blocked_next() -> None:
+    """Verify CAS fencing mid-ack terminates an awaited stream iteration with conflict error."""
+    ident = _identity()
     store = MemoryPostgresCheckpointStore()
     seed = PostgresCheckpoint(
         identity_key=ident.identity_key,
@@ -816,61 +842,34 @@ async def test_change_source_concurrent_close_and_fencing_during_open_and_next()
         version=1,
     )
     await store.save(seed, expected=None)
-    fenced_stream = _FakeNativeStream(
+    stream = _FakeNativeStream(
         [
             PostgresReplicationRecord(kind="insert", payload={"n": 1}, commit_end_lsn=100),
             ConnectionError("closed during CAS fence"),
         ]
     )
-    fenced_source = PostgresChangeSource(
-        _FakeReplicationDriver(ident, [fenced_stream]),
-        PostgresChangeConfig(
-            slot="cdc_slot",
-            publication="pub_orders",
-            reconnect=True,
-            max_reconnect_attempts=0,
-        ),
+    source = PostgresChangeSource(
+        _FakeReplicationDriver(ident, [stream]),
+        PostgresChangeConfig(slot="cdc_slot", publication="pub_orders", reconnect=True, max_reconnect_attempts=0),
         store,
     )
-    await fenced_source.__anext__()
-    fenced_stream.next_started.clear()
-    fenced_stream.block_next_gate = asyncio.Event()
-    fenced_next_task: asyncio.Task[ChangeEvent] = asyncio.create_task(fenced_source.__anext__())
-    await fenced_stream.next_started.wait()
+    await source.__anext__()
+    stream.next_started.clear()
+    stream.block_next_gate = asyncio.Event()
+    next_task: asyncio.Task[ChangeEvent] = asyncio.create_task(source.__anext__())
+    await stream.next_started.wait()
     await store.save(seed.advance(commit_end_lsn=80, next_event_id=6), expected=seed)
     with pytest.raises(PostgresCheckpointConflictError):
-        await fenced_source.acknowledge(100)
-    fenced_stream.block_next_gate.set()
+        await source.acknowledge(100)
+    stream.block_next_gate.set()
     with pytest.raises(PostgresCheckpointConflictError):
-        await asyncio.wait_for(fenced_next_task, timeout=1.0)
-    await fenced_source.aclose()
-
-    eof_source = PostgresChangeSource(
-        _FakeReplicationDriver(ident, [_FakeNativeStream([])]),
-        PostgresChangeConfig(
-            slot="cdc_slot",
-            publication="pub_orders",
-            reconnect=True,
-            max_reconnect_attempts=0,
-            initial_backoff_seconds=0.0,
-            max_backoff_seconds=0.0,
-        ),
-    )
-    try:
-        try:
-            raise RuntimeError("unrelated outer failure")
-        except RuntimeError:
-            with pytest.raises(PostgresReplicationGapError) as eof_exc:
-                await anext(eof_source.stream())
-            assert eof_exc.value.__cause__ is None
-            assert eof_exc.value.__suppress_context__ is True
-    finally:
-        await eof_source.aclose()
+        await asyncio.wait_for(next_task, timeout=1.0)
+    await source.aclose()
 
 
 @pytest.mark.anyio
-async def test_change_source_aclose_timeout_stops_anext_without_cancelling_shielded_ack() -> None:
-    """Verify timed-out aclose fails closed, stops blocked __anext__ without spinning, and shields ack."""
+async def test_change_source_aclose_external_timeout_stops_anext_and_shields_ack() -> None:
+    """Verify external wait_for cancellation of aclose shields in-flight ack and halts __anext__."""
     ident = _identity()
     store = _OrderRecordingCheckpointStore(MemoryPostgresCheckpointStore())
     store.save_gate = asyncio.Event()
@@ -901,30 +900,176 @@ async def test_change_source_aclose_timeout_stops_anext_without_cancelling_shiel
     saved_after_close = await asyncio.wait_for(ack_task, timeout=1.0)
     assert saved_after_close.commit_end_lsn == 100
 
-    bounded_store = _OrderRecordingCheckpointStore(MemoryPostgresCheckpointStore())
-    bounded_store.save_gate = asyncio.Event()
-    bounded_stream = _FakeNativeStream(
-        [PostgresReplicationRecord(kind="insert", payload={"id": 2}, commit_end_lsn=200)]
+
+@pytest.mark.anyio
+async def test_change_source_aclose_reconciles_after_post_commit_timeout() -> None:
+    """Verify aclose reconciles uncertain state after a committed-before-timeout save failure."""
+    ident = _identity()
+    store = _OrderRecordingCheckpointStore(MemoryPostgresCheckpointStore())
+    stream = _FakeNativeStream([PostgresReplicationRecord(kind="insert", payload={"id": 1}, commit_end_lsn=100)])
+    source = PostgresChangeSource(
+        _FakeReplicationDriver(ident, [stream]),
+        PostgresChangeConfig(slot="cdc_slot", publication="pub_orders", reconnect=False),
+        store,
     )
-    bounded_source = PostgresChangeSource(
-        _FakeReplicationDriver(ident, [bounded_stream]),
+    await source.__anext__()
+    store.fail_after_commit = True
+    store.fail_next_save = TimeoutError("post-commit ack timeout")
+    with pytest.raises(PostgresReplicationGapError):
+        await source.acknowledge(100)
+    await source.aclose()
+    assert store.load_count == 2
+    assert source.checkpoint is not None
+    assert source.checkpoint.commit_end_lsn == 100
+    assert source.checkpoint.version == 1
+
+
+@pytest.mark.anyio
+async def test_change_source_aclose_reconciles_after_in_flight_ack_cancellation() -> None:
+    """Verify aclose handles a cancelled pending ack task and reconciles durable checkpoint state."""
+    ident = _identity()
+    store = _OrderRecordingCheckpointStore(MemoryPostgresCheckpointStore())
+    store.fail_next_save = asyncio.CancelledError("cancelled mid save")
+    store.save_gate = asyncio.Event()
+    source = PostgresChangeSource(
+        _FakeReplicationDriver(
+            ident,
+            [_FakeNativeStream([PostgresReplicationRecord(kind="insert", payload={"id": 2}, commit_end_lsn=150)])],
+        ),
+        PostgresChangeConfig(slot="cdc_slot", publication="pub_orders", reconnect=False),
+        store,
+    )
+    await source.__anext__()
+    pending_ack = asyncio.create_task(source.acknowledge(150))
+    await store.save_started.wait()
+    close_task = asyncio.create_task(source.aclose())
+    await asyncio.sleep(0)
+    store.save_gate.set()
+    await asyncio.wait_for(close_task, timeout=1.0)
+    with pytest.raises(asyncio.CancelledError):
+        await pending_ack
+    assert store.load_count == 2
+
+
+@pytest.mark.anyio
+async def test_change_source_aclose_reconciles_after_pending_gap_and_conflict_errors() -> None:
+    """Verify aclose reconciles uncertain pending GapError and finishes cleanly on CAS conflict."""
+    ident = _identity()
+    gap_store = _OrderRecordingCheckpointStore(MemoryPostgresCheckpointStore())
+    gap_store.save_gate = asyncio.Event()
+    gap_store.fail_after_commit = True
+    gap_store.fail_next_save = TimeoutError("in-flight uncertain save")
+    gap_source = PostgresChangeSource(
+        _FakeReplicationDriver(
+            ident,
+            [_FakeNativeStream([PostgresReplicationRecord(kind="insert", payload={"id": 1}, commit_end_lsn=100)])],
+        ),
+        PostgresChangeConfig(slot="cdc_slot", publication="pub_orders", reconnect=False),
+        gap_store,
+    )
+    await gap_source.__anext__()
+    gap_ack = asyncio.create_task(gap_source.acknowledge(100))
+    await gap_store.save_started.wait()
+    gap_close = asyncio.create_task(gap_source.aclose())
+    await asyncio.sleep(0)
+    gap_store.save_gate.set()
+    await asyncio.wait_for(gap_close, timeout=1.0)
+    with pytest.raises(PostgresReplicationGapError):
+        await gap_ack
+    assert gap_store.load_count == 2
+    assert gap_source.checkpoint is not None
+    assert gap_source.checkpoint.commit_end_lsn == 100
+
+    inner_conflict = MemoryPostgresCheckpointStore()
+    seed = PostgresCheckpoint(identity_key=ident.identity_key, commit_end_lsn=50, next_event_id=2, version=1)
+    await inner_conflict.save(seed, expected=None)
+    conflict_store = _OrderRecordingCheckpointStore(inner_conflict)
+    conflict_store.save_gate = asyncio.Event()
+    conflict_source = PostgresChangeSource(
+        _FakeReplicationDriver(
+            ident,
+            [_FakeNativeStream([PostgresReplicationRecord(kind="insert", payload={"id": 2}, commit_end_lsn=100)])],
+        ),
+        PostgresChangeConfig(slot="cdc_slot", publication="pub_orders", reconnect=False),
+        conflict_store,
+    )
+    await conflict_source.__anext__()
+    conflict_ack = asyncio.create_task(conflict_source.acknowledge(100))
+    await conflict_store.save_started.wait()
+    await inner_conflict.save(seed.advance(commit_end_lsn=75, next_event_id=3), expected=seed)
+    conflict_close = asyncio.create_task(conflict_source.aclose())
+    await asyncio.sleep(0)
+    conflict_store.save_gate.set()
+    await asyncio.wait_for(conflict_close, timeout=1.0)
+    with pytest.raises(PostgresCheckpointConflictError):
+        await conflict_ack
+    assert conflict_store.load_count == 1
+
+
+@pytest.mark.anyio
+async def test_change_source_aclose_enforces_deadline_across_contended_reconcile() -> None:
+    """Verify aclose fails closed within checkpoint_timeout_seconds even when _reconcile_lock is contended."""
+    ident = _identity()
+    store = _OrderRecordingCheckpointStore(MemoryPostgresCheckpointStore())
+    source = PostgresChangeSource(
+        _FakeReplicationDriver(
+            ident,
+            [_FakeNativeStream([PostgresReplicationRecord(kind="insert", payload={"id": 1}, commit_end_lsn=100)])],
+        ),
         PostgresChangeConfig(
             slot="cdc_slot",
             publication="pub_orders",
-            checkpoint_timeout_seconds=0.02,
+            checkpoint_timeout_seconds=0.05,
             reconnect=False,
         ),
-        bounded_store,
+        store,
     )
-    await bounded_source.__anext__()
-    bounded_ack = asyncio.create_task(bounded_source.acknowledge(200))
-    await bounded_store.save_started.wait()
-    with pytest.raises(PostgresReplicationGapError) as close_err:
-        await bounded_source.aclose()
-    assert close_err.value.reason == "checkpoint_uncertain"
-    bounded_store.save_gate.set()
+    await source.__anext__()
+    store.fail_next_save = TimeoutError("initial failure")
     with pytest.raises(PostgresReplicationGapError):
-        await bounded_ack
+        await source.acknowledge(100)
+
+    store.load_started.clear()
+    store.load_gate = asyncio.Event()
+    contending_ack = asyncio.create_task(source.acknowledge(100))
+    await store.load_started.wait()
+    started = asyncio.get_running_loop().time()
+    with pytest.raises(PostgresReplicationGapError) as close_timeout:
+        await source.aclose()
+    elapsed = asyncio.get_running_loop().time() - started
+    assert close_timeout.value.reason == "checkpoint_uncertain"
+    assert elapsed < 0.25
+    store.load_gate.set()
+    with pytest.raises(TimeoutError):
+        await contending_ack
+
+
+@pytest.mark.anyio
+async def test_change_source_aclose_preserves_caller_cancellation_on_cancelled_ack_tick() -> None:
+    """Verify cancelling the task calling aclose is not masked if pending ack also cancelled."""
+    ident = _identity()
+    store = _OrderRecordingCheckpointStore(MemoryPostgresCheckpointStore())
+    store.save_gate = asyncio.Event()
+    store.fail_next_save = asyncio.CancelledError("pending ack cancelled")
+    source = PostgresChangeSource(
+        _FakeReplicationDriver(
+            ident,
+            [_FakeNativeStream([PostgresReplicationRecord(kind="insert", payload={"id": 1}, commit_end_lsn=100)])],
+        ),
+        PostgresChangeConfig(slot="cdc_slot", publication="pub_orders", reconnect=False),
+        store,
+    )
+    await source.__anext__()
+    ack_task = asyncio.create_task(source.acknowledge(100))
+    await store.save_started.wait()
+    close_task = asyncio.create_task(source.aclose())
+    await asyncio.sleep(0)
+    close_task.cancel()
+    store.save_gate.set()
+    with pytest.raises(asyncio.CancelledError):
+        await close_task
+    with pytest.raises(asyncio.CancelledError):
+        await ack_task
 
 
 @pytest.mark.anyio
@@ -1002,17 +1147,15 @@ async def test_change_source_retry_ack_without_commit_preserves_monotonic_event_
 
 
 @pytest.mark.anyio
-async def test_change_source_concurrent_ack_single_flight_and_nonblocking_idle_next() -> None:
-    """Verify concurrent uncertain acks serialize single-flight and never deadlock idle next."""
+async def test_change_source_concurrent_ack_serializes_single_flight() -> None:
+    """Verify concurrent uncertain acknowledge callers serialize onto a single reconcile and save."""
     ident = _identity()
     conc_log: list[str] = []
     store = _OrderRecordingCheckpointStore(MemoryPostgresCheckpointStore(), conc_log)
     s1 = _FakeNativeStream([PostgresReplicationRecord(kind="insert", payload={"id": 1}, commit_end_lsn=100)])
-    s2 = _FakeNativeStream([PostgresReplicationRecord(kind="insert", payload={"id": 2}, commit_end_lsn=200)])
-    s2.block_next_gate = asyncio.Event()
     source = PostgresChangeSource(
-        _FakeReplicationDriver(ident, [s1, s2]),
-        PostgresChangeConfig(slot="cdc_slot", publication="pub_orders", reconnect=True),
+        _FakeReplicationDriver(ident, [s1]),
+        PostgresChangeConfig(slot="cdc_slot", publication="pub_orders", reconnect=False),
         store,
     )
     await source.__anext__()
@@ -1032,12 +1175,25 @@ async def test_change_source_concurrent_ack_single_flight_and_nonblocking_idle_n
     assert store.load_count == 2
     assert store.save_count == 2
     assert conc_log == ["store.load", "store.save:100:v1", "store.load", "store.save:100:v1"]
+    await source.aclose()
 
+
+@pytest.mark.anyio
+async def test_change_source_acknowledge_does_not_block_on_idle_stream_next() -> None:
+    """Verify acknowledge completes immediately even while __anext__ is parked on an idle stream."""
+    ident = _identity()
+    stream = _FakeNativeStream([PostgresReplicationRecord(kind="insert", payload={"id": 2}, commit_end_lsn=200)])
+    stream.block_next_gate = asyncio.Event()
+    source = PostgresChangeSource(
+        _FakeReplicationDriver(ident, [stream]),
+        PostgresChangeConfig(slot="cdc_slot", publication="pub_orders", reconnect=False),
+        MemoryPostgresCheckpointStore(),
+    )
     idle_next_task: asyncio.Task[ChangeEvent] = asyncio.create_task(source.__anext__())
-    await s2.next_started.wait()
+    await stream.next_started.wait()
     idle_ack = await asyncio.wait_for(source.acknowledge(150), timeout=1.0)
     assert idle_ack.commit_end_lsn == 150
-    s2.block_next_gate.set()
+    stream.block_next_gate.set()
     idle_event = await asyncio.wait_for(idle_next_task, timeout=1.0)
     assert idle_event.payload["commit_end_lsn"] == 200
     assert idle_event.payload["id"] == 2
@@ -1045,8 +1201,8 @@ async def test_change_source_concurrent_ack_single_flight_and_nonblocking_idle_n
 
 
 @pytest.mark.anyio
-async def test_change_source_concurrent_initialize_and_cancelled_ack_reconciles() -> None:
-    """Verify _init_lock prevents partial checkpoint reads and BaseException ack cancellation reconciles."""
+async def test_change_source_concurrent_initialize_serializes_checkpoint_load() -> None:
+    """Verify _init_lock prevents concurrent callers from observing uninitialized checkpoint state."""
     ident = _identity()
     seed_store = MemoryPostgresCheckpointStore()
     seeded = PostgresCheckpoint(
@@ -1057,8 +1213,7 @@ async def test_change_source_concurrent_initialize_and_cancelled_ack_reconciles(
     )
     await seed_store.save(seeded, expected=None)
 
-    init_log: list[str] = []
-    init_store = _OrderRecordingCheckpointStore(seed_store, init_log)
+    init_store = _OrderRecordingCheckpointStore(seed_store)
     init_store.load_gate = asyncio.Event()
     s1 = _FakeNativeStream([PostgresReplicationRecord(kind="insert", payload={"id": 5}, commit_end_lsn=200)])
     init_driver = _FakeReplicationDriver(ident, [s1])
@@ -1078,17 +1233,116 @@ async def test_change_source_concurrent_initialize_and_cancelled_ack_reconciles(
     assert init_store.load_count == 1
     assert ack_cp.version == 2
     assert ack_cp.commit_end_lsn == 150
-    assert init_driver.opened_args == [(150, False)] or init_driver.opened_args == [(100, False)]
+    assert init_driver.opened_args in ([(100, False)], [(150, False)])
     assert ev5.event_id == 5
-
-    init_store.fail_next_save = asyncio.CancelledError("cancelled during CAS save")
-    with pytest.raises(asyncio.CancelledError):
-        await init_source.acknowledge(200)
-    reconciled_after_cancel = await init_source.acknowledge(200)
-    assert init_store.load_count == 2
-    assert reconciled_after_cancel.version == 3
-    assert reconciled_after_cancel.commit_end_lsn == 200
     await init_source.aclose()
+
+
+@pytest.mark.anyio
+async def test_change_source_initialize_bounds_stalled_store_load() -> None:
+    """Verify initial checkpoint store load under _init_lock obeys checkpoint_timeout_seconds."""
+    ident = _identity()
+    stalled_store = _OrderRecordingCheckpointStore(MemoryPostgresCheckpointStore())
+    stalled_store.load_gate = asyncio.Event()
+    stalled_driver = _FakeReplicationDriver(ident, [])
+    stalled_source = PostgresChangeSource(
+        stalled_driver,
+        PostgresChangeConfig(
+            slot="cdc_slot",
+            publication="pub_orders",
+            checkpoint_timeout_seconds=0.05,
+            reconnect=False,
+        ),
+        stalled_store,
+    )
+    with pytest.raises(TimeoutError):
+        await stalled_source.__anext__()
+    stalled_store.load_gate.set()
+    assert stalled_driver.open_count == 0
+    await stalled_source.aclose()
+
+
+@pytest.mark.anyio
+async def test_change_source_open_fresh_stream_reconciles_mid_connect_ack_failure() -> None:
+    """Verify _open_fresh_stream discards a stream opened with stale LSN after concurrent ack failure."""
+    ident = _identity()
+    seed_store = MemoryPostgresCheckpointStore()
+    seed = PostgresCheckpoint(
+        identity_key=ident.identity_key,
+        commit_end_lsn=50,
+        next_event_id=3,
+        version=1,
+    )
+    await seed_store.save(seed, expected=None)
+
+    class _MidConnectDriver(_FakeReplicationDriver):
+        def __init__(self, streams: list[_FakeNativeStream | BaseException]) -> None:
+            super().__init__(ident, streams)
+            self.first_open_started = asyncio.Event()
+            self.first_open_gate = asyncio.Event()
+
+        async def _open_replication_stream(
+            self,
+            config: PostgresChangeConfig,
+            *,
+            start_lsn: int | None = None,
+            reconnect: bool = False,
+        ) -> Any:
+            if self.open_count == 0:
+                self.first_open_started.set()
+                await self.first_open_gate.wait()
+            return await super()._open_replication_stream(
+                config,
+                start_lsn=start_lsn,
+                reconnect=reconnect,
+            )
+
+    stale_stream = _FakeNativeStream([])
+    fresh_stream = _FakeNativeStream([PostgresReplicationRecord(kind="insert", payload={"id": 3}, commit_end_lsn=120)])
+    store = _OrderRecordingCheckpointStore(seed_store)
+    driver = _MidConnectDriver([stale_stream, fresh_stream])
+    source = PostgresChangeSource(
+        driver,
+        PostgresChangeConfig(slot="cdc_slot", publication="pub_orders", reconnect=False),
+        store,
+    )
+
+    next_task: asyncio.Task[ChangeEvent] = asyncio.create_task(source.__anext__())
+    await driver.first_open_started.wait()
+    store.fail_after_commit = True
+    store.fail_next_save = TimeoutError("concurrent ack uncertain after commit")
+    with pytest.raises(PostgresReplicationGapError):
+        await source.acknowledge(90)
+
+    driver.first_open_gate.set()
+    ev = await asyncio.wait_for(next_task, timeout=1.0)
+    assert stale_stream.closed is True
+    assert driver.opened_args == [(50, False), (90, False)]
+    assert ev.event_id == 3
+    assert ev.payload["commit_end_lsn"] == 120
+    await source.aclose()
+
+
+@pytest.mark.anyio
+async def test_change_source_cancelled_ack_marks_reconcile() -> None:
+    """Verify BaseException cancellation inside checkpoint save triggers reconciliation on retry."""
+    ident = _identity()
+    store = _OrderRecordingCheckpointStore(MemoryPostgresCheckpointStore())
+    stream = _FakeNativeStream([PostgresReplicationRecord(kind="insert", payload={"id": 1}, commit_end_lsn=100)])
+    source = PostgresChangeSource(
+        _FakeReplicationDriver(ident, [stream]),
+        PostgresChangeConfig(slot="cdc_slot", publication="pub_orders", reconnect=False),
+        store,
+    )
+    await source.__anext__()
+    store.fail_next_save = asyncio.CancelledError("cancelled during CAS save")
+    with pytest.raises(asyncio.CancelledError):
+        await source.acknowledge(100)
+    reconciled = await source.acknowledge(100)
+    assert store.load_count == 2
+    assert reconciled.version == 1
+    assert reconciled.commit_end_lsn == 100
+    await source.aclose()
 
 
 @pytest.mark.anyio

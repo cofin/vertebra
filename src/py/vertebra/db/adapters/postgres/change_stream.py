@@ -468,22 +468,16 @@ class PostgresChangeSource(AsyncChangeSource):
                         identity_key=self._identity.identity_key if self._identity else None,
                     ) from exc
                 except asyncio.CancelledError:
-                    if not pending_task.cancelled():
+                    current_task = asyncio.current_task()
+                    if not pending_task.cancelled() or (current_task is not None and current_task.cancelling() > 0):
                         raise
                 except PostgresCheckpointConflictError:
                     pass
                 except PostgresReplicationGapError:
                     pass
             if self._needs_reconcile:
-                remaining = deadline - asyncio.get_running_loop().time()
-                if remaining <= 0.0:
-                    raise PostgresReplicationGapError(
-                        "Checkpoint state remains uncertain during bounded aclose",
-                        reason="checkpoint_uncertain",
-                        identity_key=self._identity.identity_key if self._identity else None,
-                    )
                 await self._reconcile_under_lock(
-                    timeout_seconds=remaining,
+                    deadline=deadline,
                     clear_pending_and_stream=False,
                     timeout_message="Timed out reconciling uncertain checkpoint during aclose",
                 )
@@ -570,7 +564,10 @@ class PostgresChangeSource(AsyncChangeSource):
                         reason=gap_reason,
                     ) from exc
                 raise
-            loaded = await self._store.load(identity.identity_key)
+            loaded = await asyncio.wait_for(
+                self._store.load(identity.identity_key),
+                timeout=self._config.checkpoint_timeout_seconds,
+            )
             if loaded is not None:
                 self._validate_identity_match(identity, loaded)
                 self._checkpoint = loaded
@@ -629,6 +626,9 @@ class PostgresChangeSource(AsyncChangeSource):
         backoff = self._config.initial_backoff_seconds
         while True:
             self._check_lifecycle()
+            if self._needs_reconcile:
+                await self._reconcile_uncertainty()
+                continue
             try:
                 stream = await self._driver._open_replication_stream(
                     self._config,
@@ -640,6 +640,9 @@ class PostgresChangeSource(AsyncChangeSource):
                 raise
             except Exception as exc:
                 self._check_lifecycle()
+                if self._needs_reconcile:
+                    await self._reconcile_uncertainty()
+                    continue
                 gap_reason = self._classify_gap_reason(exc)
                 if gap_reason is not None:
                     raise PostgresReplicationGapError(
@@ -651,10 +654,12 @@ class PostgresChangeSource(AsyncChangeSource):
                     raise
                 attempts, backoff = await self._advance_reconnect_backoff(attempts, backoff, cause=exc)
                 continue
-            if self._closed or self._terminated:
+            if self._closed or self._terminated or self._needs_reconcile:
                 with contextlib.suppress(Exception):
                     await stream.aclose()
                 self._check_lifecycle()
+                await self._reconcile_uncertainty()
+                continue
             self._stream = stream
             return stream
 
@@ -677,42 +682,50 @@ class PostgresChangeSource(AsyncChangeSource):
     async def _reconcile_under_lock(
         self,
         *,
-        timeout_seconds: float,
+        deadline: float | None = None,
         clear_pending_and_stream: bool,
         timeout_message: str | None,
     ) -> None:
-        """Load the latest durable checkpoint under ``_reconcile_lock`` within ``timeout_seconds``."""
-        async with self._reconcile_lock:
-            if not self._needs_reconcile:
-                return
-            if clear_pending_and_stream:
-                await self._ensure_initialized()
-                self._pending_record = None
-                await self._close_active_stream(suppress_error=True)
-                self._lsn_to_event_id.clear()
-            if self._identity is None:
-                self._needs_reconcile = False
-                return
-            try:
-                loaded = await asyncio.wait_for(
-                    self._store.load(self._identity.identity_key),
-                    timeout=timeout_seconds,
-                )
-            except TimeoutError as exc:
-                if timeout_message is not None:
-                    raise PostgresReplicationGapError(
-                        timeout_message,
-                        reason="checkpoint_uncertain",
-                        identity_key=self._identity.identity_key,
-                    ) from exc
-                raise
-            self._apply_reconciled_checkpoint(loaded)
-            self._needs_reconcile = False
+        """Load the latest durable checkpoint under ``_reconcile_lock`` within optional ``deadline``."""
+        effective_deadline = (
+            deadline
+            if deadline is not None
+            else asyncio.get_running_loop().time() + self._config.checkpoint_timeout_seconds
+        )
+        if effective_deadline - asyncio.get_running_loop().time() <= 0.0:
+            raise PostgresReplicationGapError(
+                timeout_message or "Checkpoint state remains uncertain during bounded aclose",
+                reason="checkpoint_uncertain",
+                identity_key=self._identity.identity_key if self._identity else None,
+            )
+        try:
+            async with asyncio.timeout_at(effective_deadline):
+                async with self._reconcile_lock:
+                    if not self._needs_reconcile:
+                        return
+                    if clear_pending_and_stream:
+                        await self._ensure_initialized()
+                        self._pending_record = None
+                        await self._close_active_stream(suppress_error=True)
+                        self._lsn_to_event_id.clear()
+                    if self._identity is None:
+                        self._needs_reconcile = False
+                        return
+                    loaded = await self._store.load(self._identity.identity_key)
+                    self._apply_reconciled_checkpoint(loaded)
+                    self._needs_reconcile = False
+        except TimeoutError as exc:
+            if timeout_message is not None:
+                raise PostgresReplicationGapError(
+                    timeout_message,
+                    reason="checkpoint_uncertain",
+                    identity_key=self._identity.identity_key if self._identity else None,
+                ) from exc
+            raise
 
     async def _reconcile_uncertainty(self) -> None:
         """Reload durable checkpoint and reset pending state after uncertain commit."""
         await self._reconcile_under_lock(
-            timeout_seconds=self._config.checkpoint_timeout_seconds,
             clear_pending_and_stream=True,
             timeout_message=None,
         )
@@ -803,7 +816,6 @@ class PostgresChangeSource(AsyncChangeSource):
         """Execute CAS save before native wire acknowledge under single-flight gating."""
         await self._ensure_initialized()
         assert self._identity is not None
-        saved: PostgresCheckpoint | None = None
         try:
             target = self._build_next_checkpoint(commit_end_lsn)
             saved = await asyncio.wait_for(
@@ -811,8 +823,7 @@ class PostgresChangeSource(AsyncChangeSource):
                 timeout=self._config.checkpoint_timeout_seconds,
             )
             self._checkpoint = saved
-            if saved.next_event_id > self._feed._next_id:
-                self._sync_feed_cursor(saved.next_event_id)
+            self._sync_feed_cursor(saved.next_event_id)
             self._prune_acked_lsns(saved.commit_end_lsn)
             stream = self._stream
             if stream is not None:
