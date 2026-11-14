@@ -4,11 +4,11 @@ flow_id: http3-and-http-hygiene
 title: HTTP/3 QUIC Listener Wiring and HTTP Ingress Hygiene
 description: "Wire the feature-gated QUIC HTTP/3 UDP listener into vertebra-http server startup, gate Alt-Svc on active QUIC sockets, remove dead McpStdioBridge code, and enforce --features http3 in Make and CI."
 status: stable
-state: planned
+state: in_progress
 planning_quality: standard
 planning_degraded_reason: null
 has_chapters: false
-current_task: "http3-and-http-hygiene:t01"
+current_task: null
 parent_prd: integration-remediation
 depends_on_flows:
   - server-runtime-correctness
@@ -128,13 +128,13 @@ pub async fn handle_buffered(
 
 ## 5. Implementation Plan
 
-- [ ] [t01-quic-http3-server-listener-wiring.md](tasks/t01-quic-http3-server-listener-wiring.md) — Wire UDP QUIC `serve_http3_endpoint` into `server.rs`, share `response::handle_buffered`, and gate `Alt-Svc` on active QUIC binding
-- [ ] [t02-http-dead-code-hygiene-and-feature-gates.md](tasks/t02-http-dead-code-hygiene-and-feature-gates.md) — Delete dead `McpStdioBridge` in `mcp_bridge.rs` and enable `--features tls,http3,compression` in `Makefile` and `ci.yml`
-- [ ] [t03-http3-architecture-okf-sync.md](tasks/t03-http3-architecture-okf-sync.md) — Synchronize `protocol-and-offload-modules.md` and `ingress-and-routing.md` (`<= 200L`)
+- [x] [9b44d409] [t01-quic-http3-server-listener-wiring.md](tasks/t01-quic-http3-server-listener-wiring.md) — Wire UDP QUIC `serve_http3_endpoint` into `server.rs`, share `response::handle_buffered`, and gate `Alt-Svc` on active QUIC binding
+- [x] [afa74da5] [t02-http-dead-code-hygiene-and-feature-gates.md](tasks/t02-http-dead-code-hygiene-and-feature-gates.md) — Delete dead `McpStdioBridge` in `mcp_bridge.rs` and enable `--features tls,http3,compression` in `Makefile` and `ci.yml`
+- [x] [f20adf9d] [t03-http3-architecture-okf-sync.md](tasks/t03-http3-architecture-okf-sync.md) — Synchronize `protocol-and-offload-modules.md` and `ingress-and-routing.md` (`<= 200L`)
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Execution Frontier**: Planned at `http3-and-http-hygiene:t01` (`3` `compact` tasks), sequenced after `server-runtime-correctness` (`Makefile` and `.github/workflows/ci.yml` coordination).
+- **State**: `in_progress` (`3/3` tasks completed at `9b44d409`, `afa74da5`, `f20adf9d`; `[2/2 files documented]`; awaiting zero-context review and `/flow:finish` + `/flow:archive`).
 - **Full Flow Finish Gate (`/flow:finish`)**: `make lint-all && make rs-test && make review-check`.
 
 [^http3-rs]: `src/rs/vertebra-http/src/http3.rs::serve_http3_endpoint` — QUIC HTTP/3 accept loop and Alt-Svc header formatter.

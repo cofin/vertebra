@@ -6,7 +6,7 @@ title: Remove Unwired McpStdioBridge and Enable --features http3 in Make and CI
 description: "Delete dead McpBridgeConfig and McpStdioBridge in mcp_bridge.rs and add --features tls,http3,compression verification to Makefile and .github/workflows/ci.yml."
 status: stable
 state: completed
-commit: 2fb2ec5b
+commit: afa74da5
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact

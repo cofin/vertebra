@@ -5,7 +5,8 @@ flow_id: http3-and-http-hygiene
 title: Synchronize HTTP Ingress and Protocol Offload OKF Chapters
 description: "Update protocol-and-offload-modules.md and ingress-and-routing.md in place to reflect live QUIC HTTP/3 server wiring, Alt-Svc gating, and McpStdioBridge removal."
 status: stable
-state: pending
+state: completed
+commit: f20adf9d
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -66,8 +67,8 @@ python3 -c 'import pathlib; [assert_ok := (len(pathlib.Path(p).read_text().split
 
 ## Acceptance Criteria
 
-- [ ] Both HTTP architecture OKF chapters are `<= 200` lines with accurate `sources:` and footnotes.
-- [ ] `make review-check` exits `0`.
+- [x] Both HTTP architecture OKF chapters are `<= 200` lines with accurate `sources:` and footnotes.
+- [x] `make review-check` exits `0`.
 
 [^protocol-okf]: `.agents/bundles/knowledge/architecture/http/protocol-and-offload-modules.md` — HTTP protocol and offload modules OKF chapter.
 [^ingress-okf]: `.agents/bundles/knowledge/architecture/http/ingress-and-routing.md` — HTTP ingress and routing OKF chapter.

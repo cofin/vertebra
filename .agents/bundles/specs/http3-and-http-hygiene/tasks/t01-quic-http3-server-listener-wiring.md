@@ -6,7 +6,7 @@ title: Wire QUIC HTTP/3 UDP Listener into server.rs and Gate Alt-Svc Advertiseme
 description: "Parse VERTEBRA_HTTP3 config, share response::handle_buffered across TCP and QUIC, spawn serve_http3_endpoint in run_with_listener, and gate Alt-Svc on live QUIC binding."
 status: stable
 state: completed
-commit: d7b603b1
+commit: 9b44d409
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
