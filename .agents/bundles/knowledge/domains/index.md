@@ -31,7 +31,7 @@ Vertebra uses one domain naming model across Python, Rust, and TypeScript: each 
 ## Frontend, Packaging & WASM (`frontend/`)
 
 - [Frontend Bundler, Codegen & Client SDK Domain](frontend/bundler-and-client-sdk.md) — `Bundler`, `SourceWatcher`, `SSRPool`, `BuildOrchestrator`, `DevServerProcess`, `TypeExtractor`, `HttpClient`, `QueryCache`, `SseClient`, `WebSocketClient`, `SessionStore`, `HotReloadClient`, `routeUrl`, `registerWebMCPTools`, `McpClient`, `A2aClient`, and `Console`.
-- [Standalone & Onefile Packaging and PGO Tooling](frontend/packaging-and-pgo.md) — `BuildTarget`, `StandaloneBuilder`, `OnefileBuilder` (`ONEFILE_MAGIC = b"VTB1FILE"`), `RustPgoConfig` (`tools/pgo/rust_pgo.py`), and `PythonBuildInfo` (`tools/pgo/python_pgo.py`).
+- [Standalone & Onefile Packaging and PGO Tooling](frontend/packaging-and-pgo.md) — `BuildTarget`, `StandaloneBuilder`, `OnefileBuilder` (`ONEFILE_MAGIC = b"VTB1FILE"`), `RustPGOConfig` (`tools/pgo/rust_pgo.py`), and `PythonBuildInfo` (`tools/pgo/python_pgo.py`).
 - [WASM Plugin Host & Browser Bridge](frontend/wasm.md) — `WASMPluginHost`, `WASMSandboxPolicy`, `WASMModuleConfig`, `WASMExecutionError`, `UnsupportedBackendError`, and `@vertebra/client/wasm` `WASMClient`.
 
 ## Storage, Data, Telemetry & Extensions (`storage/`, `data/`, `telemetry/`, `extensions/`)

@@ -79,7 +79,7 @@ Required Unix Arrow mappings use `allocate_shm_region` and propagate named-alloc
 
 Core and optional engine distributions need coordinated versions, artifact builds, and installed-wheel checks (`tools/scripts/_wheel_verify.py`, `tools/scripts/verify_postgres_wheel.py`, `make {duckdb,mysql,mssql,oracle,postgres}-wheel-check`). The capsule layout and callback ownership form a cross-extension compatibility seam. Changes must preserve validation, single adoption, failure cleanup, and live-view lifetime; unlinking a Unix SHM name does not unmap retained cursor backing.[^src-python-packaging][^src-core-shm][^src-py-arrow-cursor]
 
-The [extension architecture](../architecture/worker/pyo3-ffi-and-batch-dispatch.md#database-extension-boundary), [FFI pattern](../patterns/rust/ffi-and-gil-discipline.md#cross-extension-ownership), and [runtime gotchas](../gotchas/pyo3-and-python-runtime.md#cross-extension-arrow-capsules-and-release) define the implementation rules.
+The [extension architecture](../architecture/worker/pyo3-ffi-and-batch-dispatch.md#database--storage-extension-boundaries), [FFI pattern](../patterns/rust/ffi-and-gil-discipline.md#cross-extension-ownership), and [runtime gotchas](../gotchas/pyo3-and-python-runtime.md#cross-extension-arrow-capsules-and-release) define the implementation rules.
 
 [^src-python-packaging]: `pyproject.toml` — Core distribution and optional engine dependencies.
 [^src-db-manifest]: `src/rs/vertebra-db/Cargo.toml` — Shared Rust primitives and optional GCP and PyO3 features.
