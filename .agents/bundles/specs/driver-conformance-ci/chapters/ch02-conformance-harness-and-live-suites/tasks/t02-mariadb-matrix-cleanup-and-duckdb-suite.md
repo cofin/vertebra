@@ -53,7 +53,7 @@ Update `src/py/tests/integration/db/test_driver_conformance.py` (`mariadb` `Engi
 
 ## Contracts & Edge Cases
 
-- **`test_driver_conformance.py`**: Add a `mariadb` `EngineConformanceSpec` resolving `VERTEBRA_CONFORMANCE_MARIADB_DSN` or `vtb_mariadb_config` (skipping offline with `"mariadb conformance requires VERTEBRA_CONFORMANCE_MARIADB_DSN or VERTEBRA_CONFORMANCE_DOCKER=1"`); delete `_FAIL_LOUD_DRIVER_ENGINES`, `_DUCKDB_SKIP_REASON`, DuckDB's unread `VERTEBRA_CONFORMANCE_DUCKDB_DSN`, and the duplicated `mssql` `elif` branch.
+- **`test_driver_conformance.py`**: Add a `mariadb` `EngineConformanceSpec` resolving `VERTEBRA_CONFORMANCE_MARIADB_DSN` or `vtb_mariadb_config` (skipping offline with `"mariadb conformance requires VERTEBRA_CONFORMANCE_MARIADB_DSN or VERTEBRA_CONFORMANCE_DOCKER=1"`); `_FAIL_LOUD_DRIVER_ENGINES`, `_DUCKDB_SKIP_REASON`, `VERTEBRA_CONFORMANCE_DUCKDB_DSN`, and the duplicate `mssql` branch are already removed on `HEAD` (`EngineConformanceSpec` / `ConformanceGate`).
 - **`test_duckdb_native.py` (`pytestmark = [pytest.mark.driver_engine("duckdb")]`)**:
   - Offline embedded `:memory:` tests (always executed, zero skips): parameterized sync/async `select_to_arrow` (`VTBARROW` SHM above threshold + `/dev/shm` cleanup), `stream_arrow_batches`, `load_from_arrow`, `pipeline()` rollback on mid-batch error, savepoints, and loopback token-server + `SyncGcsBearerSecretProvider` / `AsyncGcsBearerSecretProvider` `(HTTP 401)` invalidation & generation rotation.
   - Opt-in live `httpfs` test gated on `VERTEBRA_CONFORMANCE_DUCKDB_HTTPFS == "1"` reading `gs://` against a loopback GCS server across token invalidation (`Bearer tok-1` -> `Bearer tok-2`).

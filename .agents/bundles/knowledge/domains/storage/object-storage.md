@@ -9,9 +9,9 @@ tags:
 - object-store
 - signing
 verified:
-- by: agent:flow-executor
-  at: "2026-11-13T05:25:00Z"
-  commit: 77280bcb
+- by: agent:flow-learn
+  at: "2026-11-14T17:15:00Z"
+  commit: 334dc98d
 - by: agent:flow-setup
   at: "2026-11-12T23:30:00Z"
   commit: 18baadcd
@@ -58,6 +58,9 @@ sources:
 - id: py-store
   resource: src/py/vertebra/storage/_store.py
   title: SyncObjectStore, AsyncObjectStore, configs, readers, and writers
+- id: py-secrets
+  resource: src/py/vertebra/storage/_secrets.py
+  title: SyncGcsBearerSecretProvider and AsyncGcsBearerSecretProvider for DuckDB GCS rotation
 - id: py-streaming
   resource: src/py/vertebra/storage/_streaming.py
   title: StreamingStorageResponse and byte-range parsing
@@ -139,7 +142,7 @@ Known caveats (R2 custom domains, non-atomic cloud rename, unsupported provider 
 
 ## Python Facade
 
-Provider configs are frozen `msgspec.Struct` types implementing `to_url_and_options()`; constructors require an explicit target, raise `ImproperConfigurationError` for `None`, empty, or unsupported targets, and raise `MissingDependencyError` (`vertebra-core[storage]`) when `vertebra._storage` is absent [^py-store]. Configs with credentials derive `SigningConfig` automatically: S3 and R2 access keys, GCS service-account identities, Azure shared keys, and OCI PAR tokens or prefixes [^py-store]. GCS stores without `access_token` or `target_service_account` build a token cache from their options when none is supplied [^py-store].
+Provider configs are frozen `msgspec.Struct` types implementing `to_url_and_options()`; constructors require an explicit target, raise `ImproperConfigurationError` for `None`, empty, or unsupported targets, and raise `MissingDependencyError` (`vertebra-core[storage]`) when `vertebra._storage` is absent [^py-store]. Configs with credentials derive `SigningConfig` automatically: S3 and R2 access keys, GCS service-account identities, Azure shared keys, and OCI PAR tokens or prefixes [^py-store]. GCS stores without `access_token` or `target_service_account` build a token cache from their options when none is supplied, while `SyncGcsBearerSecretProvider` and `AsyncGcsBearerSecretProvider` (`from_config(config, ...)`, `needs_refresh()`, `invalidate(failed_generation)`, `__call__()`) expose GCS OAuth2 bearer tokens to DuckDB secret rotation via `vertebra.storage` [^py-store] [^py-secrets].
 
 `put_multipart(path, parts)` accepts a synchronous buffer iterable on both store facades and delegates to the incremental `put_stream` path. Each part reaches the native upload before the next part is requested, and producer failure aborts the upload before publishing.
 
@@ -171,6 +174,7 @@ Rust engine, streaming, and signing tests run in `storage_engine_tests.rs`; Pyth
 [^storage-signing]: `src/rs/vertebra-storage/src/signing.rs` — Multicloud URL and header signing with pooled IAM clients.
 [^storage-pyi]: `src/py/vertebra/_storage.pyi` — Type stubs for `vertebra._storage`.
 [^py-store]: `src/py/vertebra/storage/_store.py` — Stores, configs, readers, and writers.
+[^py-secrets]: `src/py/vertebra/storage/_secrets.py` — `SyncGcsBearerSecretProvider` and `AsyncGcsBearerSecretProvider` for DuckDB GCS rotation.
 [^py-streaming]: `src/py/vertebra/storage/_streaming.py` — `StreamingStorageResponse` and byte-range parsing.
 [^py-arrow]: `src/py/vertebra/storage/_arrow.py` — Demand-driven Arrow and Parquet codec bridge.
 [^py-typing]: `src/py/vertebra/_typing.py` — `PreconditionError` and `IntegrityError` definitions.

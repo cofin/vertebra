@@ -13,9 +13,9 @@ generated:
   by: flow/0.29.1
   at: "2026-11-04T04:33:00Z"
 verified:
-  - by: agent:flow-executor
-    at: "2026-11-13T22:48:50Z"
-    commit: 480840a3
+  - by: agent:flow-learn
+    at: "2026-11-14T17:15:00Z"
+    commit: 334dc98d
   - by: agent:flow-executor
     at: "2026-11-13T20:35:00Z"
     commit: b9429c6d
@@ -137,7 +137,7 @@ Vertebra runs verification gates across Rust (`cargo test`), Python (`pytest` + 
 | `make py-test` | `make dev` + `mypy.stubtest` across all 10 extensions + `uv run $(PY_TEST_GROUPS) pytest src/py/tests -v` | `.pyi` stub parity plus Python suites under [`src/py/tests/`](../../../../src/py/tests/conftest.py)[^src-tests-conftest-py] (`PY_TEST_GROUPS` enables `--group duckdb` when `Py_GIL_DISABLED=0`). |
 | `make {duckdb,mysql,mssql,oracle,postgres}-test` | Per-crate `cargo test`, `mypy.stubtest vertebra._<engine>`, and engine Python suites (`postgres-wheel-check` runs [`verify_postgres_wheel.py`](../../../../tools/scripts/verify_postgres_wheel.py)[^src-verify-postgres-wheel]; `postgres-bench-check` checks Criterion + [`test_postgres_benchmarks.py`](../../../../src/py/tests/unit/tools/test_postgres_benchmarks.py)[^src-postgres-bench-tests]) | Scoped native database crate, stub, benchmark comparator, and PEP 420 wheel isolation gates. |
 | `make ts-test` | `cd src/ts/vertebra-client && NODE_OPTIONS="--localstorage-file=..." bun run test` | Vitest suites under [`package.json`](../../../../src/ts/vertebra-client/package.json)[^src-package-json]. |
-| `make lint-all` | `biome check .` + `ruff check` & `ruff format --check` + `mypy` + `mypy.stubtest` + `cargo fmt --check` + `cargo clippy --workspace --all-targets --features tls,compression,gcp -- -D warnings` + `make review-check` | Read-only CI lint, type, stub, and review-manifest gate (`make lint` applies auto-fixes). |
+| `make lint-all` | `biome check .` + `ruff check` & `ruff format --check` (`src/py`, `tools`, `docs/examples`) + `mypy` (`tools/benchmarks` included) + `mypy.stubtest` + `cargo fmt --check` + `cargo clippy --workspace --all-targets --features tls,compression,gcp -- -D warnings` + `make review-check` | Read-only CI lint, type, stub, and review-manifest gate (`make lint` applies auto-fixes). |
 | `make docs` | `scan_public_docstrings` + `generate_cli_docs --check` + `zensical build --clean` + `postbuild` + `verify_docs_artifacts` | Docstring/CLI parity, Zensical build, `llms.txt`, and `<= 120 KB` / `<= 14` TOC HTML bounds. |
 | `make check` | `lint` + `test` (`rs-test` + `py-test` + `ts-test`) + `coverage` | Full release verification gate. |
 

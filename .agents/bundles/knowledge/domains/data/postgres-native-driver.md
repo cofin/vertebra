@@ -14,9 +14,9 @@ generated:
   by: flow-setup
   at: "2026-11-12T23:35:00Z"
 verified:
-  - by: agent:flow-executor
-    at: "2026-11-14T01:15:00Z"
-    commit: 8c615b73
+  - by: agent:flow-learn
+    at: "2026-11-14T17:15:00Z"
+    commit: 334dc98d
   - by: agent:flow-setup
     at: "2026-11-12T23:35:00Z"
     commit: 18baadcd
@@ -72,6 +72,15 @@ sources:
   - id: pg-driver-py
     resource: src/py/vertebra/db/adapters/postgres/driver.py
     title: "Public SyncPostgreSQLDriver and AsyncPostgreSQLDriver exports backed by _sync.py and _async.py"
+  - id: pg-core-py
+    resource: src/py/vertebra/db/adapters/postgres/core.py::PostgreSQLCore
+    title: "PostgreSQLCore protocol codecs, validation helpers, and project_query_rows"
+  - id: pg-sync-py
+    resource: src/py/vertebra/db/adapters/postgres/_sync.py::SyncPostgreSQLDriver
+    title: "Synchronous native PostgreSQL driver over SyncPostgresPool"
+  - id: pg-async-py
+    resource: src/py/vertebra/db/adapters/postgres/_async.py::AsyncPostgreSQLDriver
+    title: "Asynchronous native PostgreSQL driver over AsyncPostgresPool and AsyncCompletionQueue"
   - id: pg-binds-py
     resource: src/py/vertebra/db/adapters/postgres/binds.py
     title: "Single-pass lexical bind compiler and immutable parameter normalizer"
@@ -119,7 +128,7 @@ sources:
 
 ## 4. Python Driver Layer (`_sync.py`, `_async.py`, `binds.py`, `options.py`)
 
-- **Sync & Async Drivers ([`_sync.py`](../../../../../src/py/vertebra/db/adapters/postgres/_sync.py), [`_async.py`](../../../../../src/py/vertebra/db/adapters/postgres/_async.py))**: [`driver.py`](../../../../../src/py/vertebra/db/adapters/postgres/driver.py)[^pg-driver-py] re-exports `SyncPostgreSQLDriver` and `AsyncPostgreSQLDriver`, executing directly over `vertebra._postgres` (`SyncPostgresPool` / `AsyncPostgresPool`), `_project_public_row` / `hydrate_rows` projection, shielded rollback/eviction (`anyio.CancelScope(shield=True)`), `SyncPostgresPipeline` / `AsyncPostgresPipeline`, `VTBARROW` `ArrowCursor` + `load_from_arrow`, and `ChangeFeed` hooks.
+- **Sync & Async Drivers ([`_sync.py`](../../../../../src/py/vertebra/db/adapters/postgres/_sync.py)[^pg-sync-py], [`_async.py`](../../../../../src/py/vertebra/db/adapters/postgres/_async.py)[^pg-async-py])**: [`driver.py`](../../../../../src/py/vertebra/db/adapters/postgres/driver.py)[^pg-driver-py] re-exports `SyncPostgreSQLDriver` and `AsyncPostgreSQLDriver`, executing directly over `vertebra._postgres` (`SyncPostgresPool` / `AsyncPostgresPool`), `PostgreSQLCore.project_query_rows` / `_project_public_row` projection (with loose module-level Python alias shims removed from [`core.py`](../../../../../src/py/vertebra/db/adapters/postgres/core.py)[^pg-core-py] in favor of `PostgreSQLCore.*`), shielded rollback/eviction (`anyio.CancelScope(shield=True)`), `SyncPostgresPipeline` / `AsyncPostgresPipeline`, `VTBARROW` `ArrowCursor` + `load_from_arrow`, and `ChangeFeed` hooks.
 - **Single-Pass Lexer & Libpq Options ([`binds.py`](../../../../../src/py/vertebra/db/adapters/postgres/binds.py)[^pg-binds-py], [`options.py`](../../../../../src/py/vertebra/db/adapters/postgres/options.py)[^pg-options-py])**: `compile_postgres_binds` translates `%s`, `%(name)s`, and `$N` placeholders while preserving single/double quotes, `E'...'`, `$tag$...$tag$`, comments, `::` casts, and `?`/`?|`/`?&` JSONB operators; `build_native_client_options` resolves libpq `conninfo`, percent-decoded Unix sockets preserving `+`, multi-host failover lists, and `PGUSER`/`PGDATABASE`/`PGPASSWORD`/`PGHOST`/`PGPORT` precedence.
 
 [^pg-lib-rs]: `src/rs/vertebra-postgres/src/lib.rs` — Standalone `gil_used=false` `vertebra._postgres` PyO3 module registration.
@@ -139,6 +148,9 @@ sources:
 [^pg-supervisor-rs]: `src/rs/vertebra-postgres/src/replication/supervisor.rs::ReplicationSupervisor` — Generation-fenced `ReplicationSupervisor`, `ReplicationEventDelivery` leases, and identity-verified reconnect recovery.
 [^pg-types-py]: `src/py/vertebra/db/adapters/postgres/types.py` — Python `Pg*` value wrappers, `PgUnchangedToast` sentinel, and replication structs.
 [^pg-driver-py]: `src/py/vertebra/db/adapters/postgres/driver.py` — Public `SyncPostgreSQLDriver` and `AsyncPostgreSQLDriver` exports.
+[^pg-core-py]: `src/py/vertebra/db/adapters/postgres/core.py::PostgreSQLCore` — `PostgreSQLCore` protocol codecs, validation helpers, and `project_query_rows`.
+[^pg-sync-py]: `src/py/vertebra/db/adapters/postgres/_sync.py::SyncPostgreSQLDriver` — Synchronous native PostgreSQL driver over `SyncPostgresPool`.
+[^pg-async-py]: `src/py/vertebra/db/adapters/postgres/_async.py::AsyncPostgreSQLDriver` — Asynchronous native PostgreSQL driver over `AsyncPostgresPool` and `AsyncCompletionQueue`.
 [^pg-binds-py]: `src/py/vertebra/db/adapters/postgres/binds.py` — Single-pass lexical bind compiler and immutable parameter normalizer.
 [^pg-options-py]: `src/py/vertebra/db/adapters/postgres/options.py` — Libpq conninfo, Unix socket, multi-host, and `PG*` resolution.
 [^pg-change-stream-py]: `src/py/vertebra/db/adapters/postgres/change_stream.py` — Durable `PostgresChangeSource` with single-flight shielded CAS checkpoints.

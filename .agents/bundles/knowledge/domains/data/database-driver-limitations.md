@@ -13,13 +13,16 @@ generated:
   by: flow/0.28.0
   at: "2026-11-12T01:15:00Z"
 verified:
-- by: agent:flow-executor
-  at: "2026-11-14T01:15:00Z"
-  commit: 8c615b73
+- by: agent:flow-learn
+  at: "2026-11-14T17:15:00Z"
+  commit: 334dc98d
 - by: agent:flow-sync
   at: "2026-11-12T01:15:00Z"
   commit: c8722c76
 sources:
+- id: gcs-secrets
+  resource: src/py/vertebra/storage/_secrets.py::SyncGcsBearerSecretProvider
+  title: Shipped DuckDB GCS OAuth2 bearer secret providers in vertebra.storage
 - id: pg-driver
   resource: src/py/vertebra/db/adapters/postgres/driver.py::SyncPostgreSQLDriver
   title: PostgreSQL drivers re-exported over native _sync and _async engines
@@ -43,7 +46,7 @@ sources:
 - `SyncPostgreSQLDriver` and `AsyncPostgreSQLDriver` (`adapters/postgres/driver.py` re-exporting `_sync` / `_async`) execute natively through `vertebra._postgres` (`vertebra-core[postgres]`) with `$1..$N` dialect compilation; runtime pooler, logical replication slot, and Arrow interface boundaries are detailed in [PostgreSQL Native Driver Limitations](postgres-limitations.md) [^pg-driver] [^pg-stub].
 - `PostgreSQLQueueBackend` probes `vertebra._postgres` (`vertebra-core[postgres]`, extra `postgres`) when no `executor=` is passed and raises `MissingDependencyError` when absent or `ImproperConfigurationError` when present without `executor=`; `OracleQueueBackend` (`oracledb`) likewise requires a caller-supplied executor [^pg-queue].
 - Optional companion driver wheels (`vertebra-postgres`, `vertebra-mysql`, `vertebra-oracle`, `vertebra-mssql`, `vertebra-duckdb`, `vertebra-bigquery`, `vertebra-spanner`) load dynamically via `ensure_module` and fail loud with `MissingDependencyError(install_package="vertebra-core[<extra>]")` when omitted from the active environment; upstream `duckdb` publishes no free-threaded wheel so `[duckdb]` / `dependency-groups.duckdb` benchmark history runs only on GIL builds while `vertebra._duckdb` builds across all supported CPython ABIs.
-- `DuckDBCore` provides only `is_write_statement`; there is no GCS `CREATE SECRET` builder and no bundled GCS bearer-token secret provider. GCS `httpfs` access requires a caller-supplied `DuckDBSecretConfig` (`secret_type="gcs"`) with a static `value` mapping or a sync/async `value_provider` [^duckdb-core] [^duckdb-secret].
+- `DuckDBCore` provides only `is_write_statement` (no SQL `CREATE SECRET` builder); `vertebra.storage.{SyncGcsBearerSecretProvider,AsyncGcsBearerSecretProvider}` provide GCS OAuth2 bearer-token rotation with generation invalidation for caller-supplied `DuckDBSecretConfig(secret_type="gcs", value_provider=...)` declarations (`persistent=True` with `value_provider` or non-positive/boolean `refresh_interval_seconds` fails validation) [^duckdb-core] [^duckdb-secret] [^gcs-secrets].
 <!-- truth: end -->
 
 ## Related Context
@@ -56,3 +59,4 @@ sources:
 [^pg-stub]: `src/py/vertebra/_postgres.pyi` — Native `vertebra._postgres` client, pool, COPY, Arrow, and listener stubs.
 [^duckdb-core]: `src/py/vertebra/db/adapters/duckdb/core.py::DuckDBCore` — `DuckDBCore` write-statement detection.
 [^duckdb-secret]: `src/py/vertebra/db/adapters/duckdb/config.py::DuckDBSecretConfig` — Cloud-agnostic DuckDB `CREATE SECRET` declaration.
+[^gcs-secrets]: `src/py/vertebra/storage/_secrets.py::SyncGcsBearerSecretProvider` — Shipped DuckDB GCS OAuth2 bearer secret providers in `vertebra.storage`.

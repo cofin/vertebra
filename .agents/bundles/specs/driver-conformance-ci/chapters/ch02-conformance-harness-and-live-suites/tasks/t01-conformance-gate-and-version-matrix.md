@@ -50,7 +50,7 @@ Create `src/py/tests/integration/conformance_gate.py` (`ConformanceGate`, `Servi
 
 ## Contracts & Edge Cases
 
-- `ConformanceGate.from_environ`: inactive when `VERTEBRA_CONFORMANCE_ENGINES` is unset/blank; strips whitespace and lowercases tokens; raises `pytest.UsageError` on `"postgres"` (naming `native-postgres-driver` and `VERTEBRA_CONFORMANCE_POSTGRES_REQUIRE_ZERO_SKIPS`) or any unsupported engine.
+- `ConformanceGate.from_environ` (Requires `/flow:revise`): Currently specifies raising `pytest.UsageError` on `"postgres"`, which conflicts with `.github/workflows/ci.yml` (`postgres-conformance` sets `VERTEBRA_CONFORMANCE_ENGINES=postgres`) and `test_driver_conformance.py` on `HEAD`; revise `t01` or `ci.yml` in coordination before executing this task. Unknown engines still raise `pytest.UsageError`; unset/blank env leaves the gate inactive after stripping whitespace and lowercasing tokens.
 - `item_engines(item)`: unions `@pytest.mark.driver_engine("<name>")` args and `callspec.params.values()` string `.engine` attributes; `selects` never deselects unit tests outside `src/py/tests/integration`.
 - `record` & `failures`: flags setup/call `skipped`, `wasxfail` (`xfailed`/`xpassed`), and any requested engine with `0` executed `call`-phase reports; `ServiceVersionMatrix.fixture_name` raises `pytest.UsageError` on unknown `VERTEBRA_CONFORMANCE_<FAMILY>_VERSION`.
 

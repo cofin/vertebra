@@ -71,7 +71,7 @@ sources:
 
 ### 1.1 Problem Statement & Baseline (`18baadcd`)
 
-`src/rs/vertebra-http/src/http3.rs` implements `Http3Config`, `build_quic_server_config`, `serve_http3_endpoint`, and `handle_h3_request` over `quinn 0.11.9`, `h3 0.0.8`, and `h3-quinn 0.0.10` [^http3-rs], and `TlsAcceptor::rustls_config()` in `tls.rs` already exposes the underlying `Arc<rustls::ServerConfig>` for QUIC reuse [^tls-rs]. However:
+`src/rs/vertebra-http/src/http3.rs` implements `Http3Config`, `build_quic_server_config`, `serve_http3_endpoint`, and `handle_h3_request` over `quinn 0.11.12`, `h3 0.0.8`, and `h3-quinn 0.0.10` [^http3-rs], and `TlsAcceptor::rustls_config()` in `tls.rs` already exposes the underlying `Arc<rustls::ServerConfig>` for QUIC reuse [^tls-rs]. However:
 1. `ServerConfig::from_env()` in `config.rs` never parses `VERTEBRA_HTTP3` or QUIC transport knobs [^config-rs].
 2. `server::run_with_listener` (invoked by `main.rs::run_server` via `run_with_collector`) binds only the TCP listener and never spawns `serve_http3_endpoint`, while `response.rs:471` unconditionally injects `Alt-Svc: h3=":<port>"` whenever `state.config.http3.enabled` is true—advertising an unreachable UDP port [^server-rs] [^response-rs].
 3. `src/rs/vertebra-http/src/mcp_bridge.rs` carries dead `McpBridgeConfig` and `McpStdioBridge` structs with zero production callers (`vtb ai mcp bridge` lives in Python `vertebra.agent.mcp.bridge`; Rust ingress only calls `extract_mcp_observability_headers`) [^mcp-bridge-rs].

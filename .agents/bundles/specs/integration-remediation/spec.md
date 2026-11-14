@@ -139,7 +139,7 @@ Every child flow synchronizes its affected `docs/` pages (`zensical` build verif
 ## 6. Current State & Remaining Plan Snapshot
 
 - **Immediate Wave**: `server-runtime-correctness` (`05d88d00`), `gcp-embeddings-and-identity` (`77280bcb`), and `mcp-protocol-completeness` (`539cde99`) are archived.
-- **Post-Driver/Broker Wave**: Once sibling [native-data-platform](../native-data-platform/spec.md) completes `native-postgres-driver`, `broker-pool-sharing`, `native-sqlite-driver`, and `native-redis-driver`, execute `sqlalchemy-and-django-integration`, `sqlspec-adapter-parity`, `queues-tasks-and-channels` -> `spanner-queue-and-rw-transactions`, `http3-and-http-hygiene`, and `strict-typing-hygiene`.
+- **Post-Driver/Broker Wave**: Once sibling [native-data-platform](../native-data-platform/spec.md) completes `broker-pool-sharing`, `native-sqlite-driver`, and `native-redis-driver` (`native-postgres-driver` already complete and archived), execute `sqlalchemy-and-django-integration`, `sqlspec-adapter-parity`, `queues-tasks-and-channels` -> `spanner-queue-and-rw-transactions`, `http3-and-http-hygiene`, and `strict-typing-hygiene`.
 
 [^db-registry]: `src/py/vertebra/db/registry.py::DatabaseRegistry` — Table-driven database driver and dialer registry.
 [^fastpath-core]: `src/py/vertebra/server/_fastpath_core.py` — Shared `FastPathProvider` core across ASGI, WSGI, and native frameworks.

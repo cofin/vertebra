@@ -16,9 +16,9 @@ generated:
   by: flow/0.26.0
   at: '2026-11-05T00:14:04Z'
 verified:
-- by: agent:flow-executor
-  at: '2026-11-14T01:18:00Z'
-  commit: 8c615b73
+- by: agent:flow-learn
+  at: '2026-11-14T17:15:00Z'
+  commit: 334dc98d
 - by: agent:flow-learn
   at: '2026-11-08T18:26:31.591504Z'
   commit: 067fa901
@@ -77,7 +77,7 @@ Required Unix Arrow mappings use `allocate_shm_region` and propagate named-alloc
 
 ## Consequences
 
-Core and optional engine distributions need coordinated versions, artifact builds, wheel-entry checks (`make {duckdb,mysql,mssql}-wheel-check`), and isolated installed-wheel checks (`tools/scripts/_wheel_verify.py` via `make {postgres,oracle,storage,bigquery,spanner,bundler}-wheel-check`). The capsule layout and callback ownership form a cross-extension compatibility seam. Changes must preserve validation, single adoption, failure cleanup, and live-view lifetime; unlinking a Unix SHM name does not unmap active cursor backing.[^src-python-packaging][^src-core-shm][^src-py-arrow-cursor]
+Core and optional engine distributions need coordinated versions, artifact builds, wheel-entry checks (`tools/scripts/_wheel_verify.py` via `make {duckdb,mysql,mssql}-wheel-check`), and isolated installed-wheel checks (`_wheel_verify.py` via `verify_postgres_wheel.py`, `verify_oracle_wheel.py`, and `verify_storage_wheel.py` for `make {postgres,oracle,storage,bigquery,spanner,bundler}-wheel-check`). The capsule layout and callback ownership form a cross-extension compatibility seam. Changes must preserve validation, single adoption, failure cleanup, and live-view lifetime; unlinking a Unix SHM name does not unmap active cursor backing.[^src-python-packaging][^src-core-shm][^src-py-arrow-cursor]
 
 The [extension architecture](../architecture/worker/pyo3-ffi-and-batch-dispatch.md#database--storage-extension-boundaries), [FFI pattern](../patterns/rust/ffi-and-gil-discipline.md#cross-extension-ownership), and [runtime gotchas](../gotchas/pyo3-and-python-runtime.md#cross-extension-arrow-capsules-and-release) define the implementation rules.
 

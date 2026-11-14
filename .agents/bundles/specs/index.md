@@ -1,6 +1,6 @@
 # Active Specifications & Research (`specs/`)
 
-Active specifications and promoted spec-scoped research notes anchored at `main @ 18baadcd`; synthesized documentation lives in [`../knowledge/`](../knowledge/index.md) and bundle activity is logged in [`../log.md`](../log.md).
+Active specifications and promoted spec-scoped research notes anchored at `HEAD @ 334dc98d` (`main @ 14b70b07`); synthesized documentation lives in [`../knowledge/`](../knowledge/index.md) and bundle activity is logged in [`../log.md`](../log.md).
 
 ## 1. Master PRDs (`state: planned`)
 
@@ -9,12 +9,11 @@ Active specifications and promoted spec-scoped research notes anchored at `main 
 
 ## 2. Active Feature Specifications (`state: active`)
 
-- none
+- [`driver-conformance-ci`](driver-conformance-ci/spec.md) — `SyncGcsBearerSecretProvider`/`AsyncGcsBearerSecretProvider` and DuckDB secret rotation (`ch01` complete at `a8ca7b24`/`b3b113d1`/`cae00a18`), Oracle `wait_timeout_seconds` idle liveness, versioned MySQL/MariaDB/MSSQL/Oracle live conformance suites (`ch02` next — revise `t01` `postgres` gate conflict with `ci.yml`), and `bench`-only PyPI `duckdb` isolation ([`4 chapters`](driver-conformance-ci/chapters/index.md), `3/13` tasks complete).
 
 ## 3. Planned Executable Specifications (`state: planned`)
 
 - [`native-adapter-organization`](native-adapter-organization/spec.md) — BigQuery `object_tables.py` and Spanner `mutations.py` module separation plus `DataFusionEngine` vendor-wrapper and unimplemented `DataFusionConfig` `pgwire_fdw` removal (`has_chapters: false`, `4` tasks).
-- [`driver-conformance-ci`](driver-conformance-ci/spec.md) — `SyncGcsBearerSecretProvider`/`AsyncGcsBearerSecretProvider` and DuckDB secret rotation, Oracle `wait_timeout_seconds` idle liveness, versioned MySQL/MariaDB/MSSQL/Oracle live conformance suites with zero-skip CI gates, and `bench`-only PyPI `duckdb` isolation ([`4 chapters`](driver-conformance-ci/chapters/index.md), `13` tasks; depends on `native-postgres-driver`).
 - [`broker-pool-sharing`](broker-pool-sharing/spec.md) — Atomic `ShmOwnerHeader` supervision, `dbrpc` + `VTBARROW` SHM lease execution, cross-`.so` C-ABI `BrokerEngineCapsule`, crash quarantine `ROLLBACK`, neutral `vertebra.db.dbapi` extraction, and SQLAlchemy/SQLSpec shared broker pools ([`8 chapters`](broker-pool-sharing/chapters/index.md), `27` tasks; depends on `native-postgres-driver`; covers [#95](https://github.com/cofin/vertebra/issues/95), [#96](https://github.com/cofin/vertebra/issues/96), [#97](https://github.com/cofin/vertebra/issues/97), [#98](https://github.com/cofin/vertebra/issues/98)).
 - [`native-sqlite-driver`](native-sqlite-driver/spec.md) — Standalone `vertebra-sqlite` (`vertebra._sqlite`) over bundled `rusqlite` with `3.14t`/`3.15t` single-writer + multi-reader WAL pools, SQLite `JSONB`, `InterruptHandle` cancel, `VTBARROW`, delayed-commit pipelines, online backup, and stdlib `sqlite3` removal ([`5 chapters`](native-sqlite-driver/chapters/index.md), `19` tasks; depends on `broker-pool-sharing`).
 - [`native-redis-driver`](native-redis-driver/spec.md) — Standalone `vertebra-redis` (`vertebra._redis`) RESP3 wheel for Redis `7.2+`/`8.0` and Valkey `8.0+`/`9.0` (Cluster, Sentinel, client tracking, GCP Memorystore IAM, Streams, Pub/Sub) plus hoisted `SyncNotificationSource`/`AsyncNotificationSource` split across PostgreSQL, Oracle, Redis, and Valkey ([`8 chapters`](native-redis-driver/chapters/index.md), `28` tasks; depends on `native-postgres-driver`).

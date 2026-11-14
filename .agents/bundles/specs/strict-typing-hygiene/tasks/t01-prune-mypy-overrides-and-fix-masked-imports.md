@@ -45,7 +45,7 @@ sources:
 
 ## Objective & Scope Boundary
 
-Prune the `43+` redundant `ignore_missing_imports = true` entries from `pyproject.toml`, fix any masked broken imports in `src/py/vertebra/extensions/litestar/queues/backend.py`, and add `tools/benchmarks` to `[tool.mypy].files` and `Makefile` Ruff/Mypy commands per [`../spec.md` §2](../spec.md) [^pyproject-mypy] [^makefile-lint] [^litestar-queues-backend]. Out of scope: fixing `tools/benchmarks/**` mypy errors (`t02`) and enabling `src/py/tests` in `mypy` (`t03`).
+Prune the `43+` redundant `ignore_missing_imports = true` entries from `pyproject.toml` (`52` patterns currently configured) and fix any masked broken imports in `src/py/vertebra/extensions/litestar/queues/backend.py` per [`../spec.md` §2](../spec.md) [^pyproject-mypy] [^makefile-lint] [^litestar-queues-backend]. Note: `tools/benchmarks` paths are already added to `[tool.mypy].files` (`pyproject.toml`) and `Makefile` `lint`/`lint-all` at `334dc98d`; verify both stay clean. Out of scope: benchmark unit regression tests (`t02`) and enabling `src/py/tests` in `mypy` (`t03`).
 
 ## Bounded Read Manifest
 
@@ -58,7 +58,7 @@ Prune the `43+` redundant `ignore_missing_imports = true` entries from `pyprojec
 
 - Remove `pydantic.*`, `attrs`, `uvloop`, `starlette*`, `fastapi*`, `flask*`, `litestar*`, `litestar_queues*`, `litestar_security*`, `litestar_autowire*`, `litestar_email*`, `litestar_mcp*`, `litestar_vite*`, `litestar_asyncapi*`, `litestar_htmx*`, `litestar_saq*`, `advanced_alchemy*`, `sqlalchemy*`, `alembic*`, `sqlspec*`, `django*`, and `pytest_databases*` from `[[tool.mypy.overrides]]`.
 - Retain only genuinely untyped C or uninstalled optional modules: `pyarrow`, `pyarrow.*`, `polars`, `polars.*`, `numpy`, `numpy.*`, `rloop`, `winloop`, `fastembed`, `fastembed.*`, `datafusion`, `datafusion.*`, `wasmtime`, `wasmtime.*`, `zstandard`, `zstandard.*`, `spikard`, `spikard.*`, and `concurrent.interpreters`.
-- Remove the stale `from litestar_queues.records import QueuedTaskRecord` import (or align with the post-`queues-tasks-and-channels` `QueueStoreBackend` contract) in `extensions/litestar/queues/backend.py` with zero `# type: ignore` suppressions, and add `tools/benchmarks` to `[tool.mypy].files` and `Makefile` `ruff check`, `ruff format`, and `mypy` lines.
+- Remove the stale `from litestar_queues.records import QueuedTaskRecord` import (or align with the post-`queues-tasks-and-channels` `QueueStoreBackend` contract) in `extensions/litestar/queues/backend.py` with zero `# type: ignore` suppressions (`tools/benchmarks` is already registered in `[tool.mypy].files` and `Makefile` `ruff`/`mypy` targets at `334dc98d`).
 
 ## Test Matrix
 

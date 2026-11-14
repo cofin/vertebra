@@ -13,9 +13,9 @@ generated:
   by: flow/0.26.0
   at: "2026-11-04T04:33:00Z"
 verified:
-  - by: agent:flow-executor
-    at: "2026-11-14T01:18:00Z"
-    commit: 8c615b73
+  - by: agent:flow-learn
+    at: "2026-11-14T17:15:00Z"
+    commit: 334dc98d
   - by: agent:flow-setup
     at: "2026-11-07T03:55:00Z"
     commit: 067fa901
@@ -107,7 +107,7 @@ sources:
 
 The release workflow builds `vertebra-core` plus all nine companion distributions (`vertebra-bundler`, `vertebra-storage`, `vertebra-bigquery`, `vertebra-duckdb`, `vertebra-mssql`, `vertebra-mysql`, `vertebra-oracle`, `vertebra-postgres`, and `vertebra-spanner`) as platform wheels and source distributions. Every companion manifest declares Maturin `exclude` rules blocking `**/py/vertebra/**/*.py`, `**/py/vertebra/**/*.so`, `**/py/vertebra/py.typed`, and sibling `*.pyi` stubs during wheel and sdist builds, while `vertebra-postgres` and `vertebra-oracle` also declare explicit Maturin `include` rules for `vertebra/_postgres.pyi` and `vertebra/_oracle.pyi`. Fresh-environment installs pair `vertebra-core` with extras such as `[bundler]`, `[storage]`, `[bigquery]`, `[duckdb]`, `[mssql]`, `[mysql]`, `[oracle]`, `[postgres]`, or `[spanner]`.
 
-[`tools/scripts/_wheel_verify.py`](../../../../../tools/scripts/_wheel_verify.py)[^src-wheel-verify-py] powers `make postgres-wheel-check` ([`verify_postgres_wheel.py`](../../../../../tools/scripts/verify_postgres_wheel.py)[^src-verify-postgres-wheel-py]), `make oracle-wheel-check`, and `make {storage,bigquery,spanner,bundler}-wheel-check`: it builds `.whl` and `.tar.gz` artifacts independently, audits archive entries, tests shared-library linkage, and installs each wheel alone inside an isolated environment without compiling extensions from sdist or testing combined multi-wheel installs. Meanwhile, `make {duckdb,mysql,mssql}-wheel-check` run `maturin build` plus inline `zipfile` entry checks. Removing an optional wheel leaves core and sibling extensions intact; cross-platform validation runs in the hosted release workflow. [^src-release-yaml][^src-bundler-wheel-manifest][^src-bigquery-wheel-manifest][^src-postgres-wheel-manifest][^src-spanner-wheel-manifest][^src-storage-wheel-manifest]
+[`tools/scripts/_wheel_verify.py`](../../../../../tools/scripts/_wheel_verify.py)[^src-wheel-verify-py] powers `make {duckdb,mysql,mssql}-wheel-check` (building via `maturin build` and checking wheel archive layout/entries, with `--forbid-python-files` on MySQL and SQL Server) as well as `make postgres-wheel-check` ([`verify_postgres_wheel.py`](../../../../../tools/scripts/verify_postgres_wheel.py)[^src-verify-postgres-wheel-py]), `make oracle-wheel-check`, and `make {storage,bigquery,spanner,bundler}-wheel-check` (which install each built wheel and sdist inside an isolated environment). Removing an optional wheel leaves core and sibling extensions intact; cross-platform validation runs in the hosted release workflow. [^src-release-yaml][^src-bundler-wheel-manifest][^src-bigquery-wheel-manifest][^src-postgres-wheel-manifest][^src-spanner-wheel-manifest][^src-storage-wheel-manifest]
 
 Provenance sources: [^src-cli-build-py], [^src-tools-pgo-init-py], [^src-makefile].
 

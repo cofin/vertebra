@@ -51,5 +51,5 @@ Shared catalog: [`false-positive-suppressions.md`](../review-core/references/fal
 
 ```bash
 cargo test --manifest-path src/rs/Cargo.toml -p vertebra-core --test it
-cargo test --manifest-path src/rs/Cargo.toml -p vertebra-core -p vertebra-storage -p vertebra-db
+cargo test --manifest-path src/rs/Cargo.toml -p vertebra-core -p vertebra-storage -p vertebra-db -p vertebra-postgres
 ```

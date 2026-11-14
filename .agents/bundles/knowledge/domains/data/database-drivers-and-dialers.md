@@ -17,9 +17,9 @@ generated:
   by: flow/0.26.0
   at: "2026-11-04T04:33:00Z"
 verified:
-  - by: agent:flow-executor
-    at: "2026-11-14T01:15:00Z"
-    commit: 8c615b73
+  - by: agent:flow-learn
+    at: "2026-11-14T17:15:00Z"
+    commit: 334dc98d
   - by: agent:flow-sync
     at: "2026-11-12T01:15:00Z"
     commit: c8722c76
@@ -45,6 +45,9 @@ sources:
   - id: src-vertebra-db-src-dialer-rs
     resource: src/rs/vertebra-db/src/dialer.rs
     title: Zero-sidecar Cloud SQL and AlloyDB mTLS dialers
+  - id: src-dialer-base-py
+    resource: src/py/vertebra/db/dialer/_base.py
+    title: Shared _BaseGCPDialer, EphemeralCertBundle, and VALID_GCP_IP_TYPES primitives
   - id: src-vertebra-postgres-src-lib-rs
     resource: src/rs/vertebra-postgres/src/lib.rs
     title: Standalone vertebra._postgres free-threaded extension exports
@@ -130,7 +133,7 @@ sources:
 
 - **Transport & Drainers**: [`connection.rs`](../../../../../src/rs/vertebra-db/src/connection.rs)[^src-vertebra-db-src-connection-rs] normalizes TCP, `rustls`, Unix socket, Cloud SQL `:3307`, and AlloyDB `:5433` streams with `is_transient()` / SQLSTATE mapping. [`py_async.rs`](../../../../../src/rs/vertebra-db/src/py_async.rs)[^src-vertebra-db-src-py-async-rs] attaches per-extension `AsyncCompletionQueue` drainers (`_vertebra_{core,bigquery,mysql,mssql,oracle,spanner,duckdb,postgres}_completion_drainer`), converting panics to `TaskPanicError`, binding Python future cancellation to Tokio `AbortHandle` (`spawn_rust_db_task_with_attr_and_future` / `DbTaskCanceller`) or cancel callbacks (`spawn_rust_db_task_with_attr_and_cancel` / `CustomDbTaskCanceller`), and wrapping [`ShmRegion`](../../../../../src/rs/vertebra-core/src/shm.rs)[^src-vertebra-core-src-shm-rs] ownership in `c"vertebra.ShmCapsule"` via `construct_py_arrow_cursor`. [`arrow_shm.rs`](../../../../../src/rs/vertebra-db/src/arrow_shm.rs)[^src-vertebra-db-src-arrow-shm-rs] handles `VTBARROW` IPC framing and `allocate_shm_region`, while `ArrowCursor.release()`, `close()`, `__exit__()`, and `Drop` (`src/rs/vertebra-py/src/db.rs`) trigger `ShmRegion::unlink_now()`.
 - **Missing Dependencies**: [`ensure_module`](../../../../../src/py/vertebra/utils/module_loader.py)[^src-module-loader] raises `MissingDependencyError` defaulting `install_package="vertebra-core[<extra>]"`, enforced by AST scanning in [`test_packaging_and_pgo.py`](../../../../../src/py/tests/unit/build/test_packaging_and_pgo.py)[^src-packaging-extras-gate].
-- **Cloud Dialers (`cloudsql.py`, `alloydb.py`, `dialer.rs`)**: Zero-sidecar async cert refresh (`generateEphemeralCert` `:3307` / `generateClientCertificate` `:5433`), RSA keygen, verified mTLS, and explicit IAM token propagation using pure-Rust dialers and Python TLS/IAM helpers with zero third-party driver packages.
+- **Cloud Dialers (`_base.py`, `cloudsql.py`, `alloydb.py`, `dialer.rs`)**: `_BaseGCPDialer`, `EphemeralCertBundle`, and `VALID_GCP_IP_TYPES` (`dialer/_base.py`) share async cert refresh (`generateEphemeralCert` `:3307` / `generateClientCertificate` `:5433`), RSA keygen, verified TLS 1.3 mTLS, and explicit IAM token propagation with `cloudsql.py`, `alloydb.py`, and pure-Rust dialers (`zero third-party driver packages`) [^src-dialer-base-py].
 
 ## Database Driver Conformance
 
@@ -143,6 +146,7 @@ Driver transaction scopes roll back on `BaseException` (shielding async rollback
 [^src-vertebra-db-src-connection-rs]: `src/rs/vertebra-db/src/connection.rs` — TransportStream, TlsMode, EndpointTarget, and Connection traits.
 [^src-vertebra-db-src-py-async-rs]: `src/rs/vertebra-db/src/py_async.rs` — Per-extension event-loop completion drainer and ShmCapsule bridge.
 [^src-vertebra-db-src-dialer-rs]: `src/rs/vertebra-db/src/dialer.rs` — Zero-sidecar Cloud SQL and AlloyDB mTLS dialers.
+[^src-dialer-base-py]: `src/py/vertebra/db/dialer/_base.py` — Shared `_BaseGCPDialer`, `EphemeralCertBundle`, and `VALID_GCP_IP_TYPES` primitives.
 [^src-vertebra-postgres-src-lib-rs]: `src/rs/vertebra-postgres/src/lib.rs` — Standalone `vertebra._postgres` extension exports.
 [^src-postgres-driver-py]: `src/py/vertebra/db/adapters/postgres/driver.py` — PostgreSQL `SyncPostgreSQLDriver` and `AsyncPostgreSQLDriver` re-exports.
 [^src-vertebra-mysql-src-lib-rs]: `src/rs/vertebra-mysql/src/lib.rs` — Native MySQL and MariaDB binary wire extension crate.

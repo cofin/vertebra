@@ -13,10 +13,10 @@ generated:
   by: flow/0.26.0
   at: "2026-11-04T04:33:00Z"
 verified:
-  - by: agent:flow-executor
-    at: "2026-11-13T22:48:50Z"
-    commit: 480840a3
-  - by: agent:flow-executor
+  - by: agent:flow-learn
+    at: "2026-11-14T17:15:00Z"
+    commit: 334dc98d
+  - by: agent:flow-setup
     at: "2026-11-13T00:25:00Z"
     commit: 18baadcd
   - by: agent:flow-sync
@@ -101,7 +101,7 @@ Vertebra has Rust Criterion microbenchmarks (`src/rs/vertebra-core/benches/`, `s
 | `make postgres-bench` | `cd src/rs && cargo bench -p vertebra-postgres --bench postgres_native --locked`, then `uv run --no-sync --group postgres-bench pytest -m postgres_benchmark` | Native codecs/wire/`PGCOPY`/`pgoutput` Criterion benches plus live `vertebra` vs `psycopg`/`asyncpg` throughput and latency (`schema_version=1`). |
 | `make postgres-bench-check` | `PYTHONPATH="$(CURDIR)/src/py" cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --bench postgres_native --locked` + Ruff/Mypy + `pytest src/py/tests/unit/tools/test_postgres_benchmarks.py` | Offline Criterion test execution, script/benchmark lint and type check, and deterministic comparator threshold unit gate. |
 | `make bench-report` | `uv run --group bench python -m tools.benchmarks report` | Latest run summary (`make bench-diff` compares against previous). |
-| `cargo bench` | `cd src/rs && cargo bench` | Criterion: `spsc`, `mpmc`, `spin_wait`, `router`, `guards`, `ring_throughput`, `codec`, `shm_transport` (`vertebra-core`), `server_throughput` (`vertebra-http`), and `postgres_native` (`vertebra-postgres`)[^src-vertebra-postgres-cargo-toml] [^src-postgres-native-bench-rs]. |
+| `cargo bench` | `cd src/rs && cargo bench` | Criterion: `spsc`, `guards`, `ring_throughput`, `codec`, `shm_transport` (`vertebra-core`), `put_checksum` (`vertebra-storage`), `ssr_render` (`vertebra-bundler`), `server_throughput` (`vertebra-http`), and `postgres_native` (`vertebra-postgres`)[^src-vertebra-postgres-cargo-toml] [^src-postgres-native-bench-rs]. |
 
 `FREETHREADED_TARGETS` require `src/rs/target-ft/release/vertebra-server` and raise `FileNotFoundError` immediately if `make bench-ft` has not built the free-threaded binary.
 
@@ -116,7 +116,7 @@ Vertebra has Rust Criterion microbenchmarks (`src/rs/vertebra-core/benches/`, `s
 
 ## 3. Scheduled Benchmarks (`.github/workflows/benchmark.yml`)
 
-The workflow runs on `workflow_dispatch` (input `full_benchmark`), on published releases, and weekly (`cron: '0 6 * * 1'`). It installs `oha` with `cargo install oha`, runs `make install` and `make build`, then `make bench` (or `make bench-all` when `full_benchmark` is true), uploads `tools/benchmarks/results/` with 90-day retention, and on `main` commits `tools/benchmarks/results/*.duckdb`.
+The workflow runs on `workflow_dispatch` (input `full_benchmark`) and published `release` events. It installs `oha` with `taiki-e/install-action@v2`, runs `uv sync --all-extras --dev`, `make ts-install`, and `make build`, then executes `make bench` (or `make bench-all` when `full_benchmark` is `"true"`) and uploads `tools/benchmarks/results/` via `actions/upload-artifact@v7` with 90-day retention.
 
 ## 4. Profile-Guided Optimization (`tools/pgo/`)
 
