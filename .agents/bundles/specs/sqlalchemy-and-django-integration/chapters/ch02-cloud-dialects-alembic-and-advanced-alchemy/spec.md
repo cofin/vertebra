@@ -133,7 +133,7 @@ Entry-point mappings, optional extra install tables, and Advanced Alchemy `1.12.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-Chapter `ch02-cloud-dialects-alembic-and-advanced-alchemy` is `planned` behind upstream [`../../spec.md`](../../spec.md) prerequisites (`broker-pool-sharing` and `native-sqlite-driver`).
+Chapter `ch02-cloud-dialects-alembic-and-advanced-alchemy` is `planned` behind upstream [`../../spec.md`](../../spec.md) prerequisite `native-sqlite-driver` (`broker-pool-sharing` complete and archived at `28415b3f`).
 
 Fast Chapter Gate (`< 60s` offline):
 

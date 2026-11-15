@@ -16,13 +16,16 @@ plan_revision: 11
 plan_commit: 18baadcd
 state_revision: 7
 current_task: null
-last_verified_checkpoint: 18baadcd
+last_verified_checkpoint: 28415b3f
 created_at: "2026-11-03T03:30:00Z"
-updated_at: "2026-11-12T23:45:00Z"
+updated_at: "2026-11-15T17:48:00Z"
 generated:
   by: flow-plan
   at: "2026-11-12T23:45:00Z"
 verified:
+  - by: agent:flow-archive
+    at: "2026-11-15T17:48:00Z"
+    commit: 28415b3f
   - by: agent:plan-generator
     at: "2026-11-12T23:45:00Z"
     commit: 18baadcd
@@ -45,8 +48,8 @@ sources:
     resource: src/py/vertebra/extensions/sqlspec/adapters.py
     title: "SQLSpec adapter configuration and driver bindings"
   - id: sa-dbapi
-    resource: src/py/vertebra/extensions/sqlalchemy/dialects.py::SyncDBAPIConnection
-    title: "SQLAlchemy DB-API dialect bindings targeted for neutral dbapi extraction"
+    resource: src/py/vertebra/db/dbapi/_sync.py::SyncDBAPIConnection
+    title: "Standalone PEP 249 DB-API connection extracted by broker-pool-sharing pending hardening"
   - id: queue-redis
     resource: src/py/vertebra/framework/queues/redis.py::RedisQueueBackend
     title: "Redis and Valkey queue backends targeted for native wheel cutover"
@@ -79,7 +82,7 @@ Vertebra's value is its Rust runtime and standalone per-engine native wheels ([n
 - **Server Runtime & HTTP/3**: Native `VRSF` stream frames, progressive ASGI/RSGI/native `App` streaming ([#81](https://github.com/cofin/vertebra/issues/81)), fail-loud lifespan startup ([#84](https://github.com/cofin/vertebra/issues/84)), `vertebra.supervisor` exports ([#83](https://github.com/cofin/vertebra/issues/83)), `--worker-only` / `vtb workers run` ([#85](https://github.com/cofin/vertebra/issues/85)), wheel-bundled `vertebra-server` ([#82](https://github.com/cofin/vertebra/issues/82)), standalone `.agents/skills` staging ([#115](https://github.com/cofin/vertebra/issues/115)), and `http3.rs` QUIC listener wiring + `--features http3` CI/binary gates are live [^http3-rs].
 - **Embeddings & Identity**: `VertexEmbedder` posts Generative Language `BatchEmbedContents` to the Vertex host, `GeminiEmbedder.embed_multimodal` sends text descriptors instead of inline media parts, `EmbeddingBroker` shares `asyncio` primitives across loops, `GemmaEmbedder` drops `precision`, and audience-bound OIDC `SyncGcpIdTokenCache` / `AsyncGcpIdTokenCache` ([#113](https://github.com/cofin/vertebra/issues/113), including `authorized_user` ADC) is not yet built.
 - **MCP Completeness**: Trusted `AgentContext` propagation landed in `18baadcd`; guard/confirmation hardening, `Mcp-Param-*` validation, version negotiation with legacy `GET` SSE sessions, `resources/subscribe` ([#112](https://github.com/cofin/vertebra/issues/112)), `capabilities.extensions` skills, MCP Apps UI metadata, Litestar delegation parity, and `vtb ai mcp serve`/`bridge` ([#109](https://github.com/cofin/vertebra/issues/109), [#110](https://github.com/cofin/vertebra/issues/110), [#111](https://github.com/cofin/vertebra/issues/111), [#114](https://github.com/cofin/vertebra/issues/114)) remain in `mcp-protocol-completeness`.
-- **SQLSpec, SQLAlchemy/Django & Queues**: `extensions/sqlspec/adapters.py` bypasses SQLSpec's dispatch contract, sets `%s` instead of `?` on MySQL, uses invalid `sqlglot` dialect strings on Spanner, and lacks 6 engine `DataDictionary` classes plus upstream-base ADK/events/Litestar stores [^sqlspec-adapters]. `extensions/sqlalchemy/dialects.py` opens a second `sqlite3` connection and dispatches via `isinstance` [^sa-dbapi]. Queue backends lack built-in `SyncQueueStore` / `AsyncQueueStore` implementations (`PostgreSQLQueueBackend`, `OracleQueueBackend`, `SpannerQueueBackend` whose `CLAIM_SPANNER_JOBS_SQL` call passes 6 args to 3 parameters without interactive `ReadWrite` transactions, and `RedisQueueBackend` / `ValkeyQueueBackend` still importing `redis.asyncio`) [^queue-redis] [^queue-oracle] [^queue-spanner].
+- **SQLSpec, SQLAlchemy/Django & Queues**: `extensions/sqlspec/adapters.py` bypasses SQLSpec's dispatch contract, sets `%s` instead of `?` on MySQL, uses invalid `sqlglot` dialect strings on Spanner, and lacks 6 engine `DataDictionary` classes plus upstream-base ADK/events/Litestar stores [^sqlspec-adapters]. `broker-pool-sharing` (`28415b3f`) extracted `vertebra.db.dbapi` and removed empty-URL fallback masking on invalid schemes, while `SyncDBAPIConnection` still carries `_sqlite_conn`, default `sqlite+vtb:///:memory:`, and `isinstance` config branching pending `sqlalchemy-and-django-integration` [^sa-dbapi]. Queue backends lack built-in `SyncQueueStore` / `AsyncQueueStore` implementations (`PostgreSQLQueueBackend`, `OracleQueueBackend`, `SpannerQueueBackend` whose `CLAIM_SPANNER_JOBS_SQL` call passes 6 args to 3 parameters without interactive `ReadWrite` transactions, and `RedisQueueBackend` / `ValkeyQueueBackend` still importing `redis.asyncio`) [^queue-redis] [^queue-oracle] [^queue-spanner].
 - **Strict Typing Hygiene ([#59](https://github.com/cofin/vertebra/issues/59))**: `pyproject.toml` carries `43` redundant `ignore_missing_imports = true` overrides masking `from litestar_queues.records import QueuedTaskRecord`, and `tools/benchmarks` plus `src/py/tests` are excluded from `mypy`.
 
 ### 1.2 Non-Goals & Deferred Backlog
@@ -139,12 +142,12 @@ Every child flow synchronizes its affected `docs/` pages (`zensical` build verif
 ## 6. Current State & Remaining Plan Snapshot
 
 - **Immediate Wave**: `server-runtime-correctness` (`05d88d00`), `gcp-embeddings-and-identity` (`93d7fb1f`), `mcp-protocol-completeness` (`54a5103d`), and `http3-and-http-hygiene` (`f277a29b`) are archived.
-- **Post-Driver/Broker Wave**: Once sibling [native-data-platform](../native-data-platform/spec.md) completes `broker-pool-sharing`, `native-sqlite-driver`, and `native-redis-driver` (`native-postgres-driver` and `native-adapter-organization` already complete and archived), execute `sqlalchemy-and-django-integration`, `sqlspec-adapter-parity`, `queues-tasks-and-channels` -> `spanner-queue-and-rw-transactions`, and `strict-typing-hygiene`.
+- **Post-Driver/Broker Wave**: With `broker-pool-sharing`, `native-postgres-driver`, and `native-adapter-organization` complete and archived in sibling [native-data-platform](../native-data-platform/spec.md), remaining upstream gates are `native-sqlite-driver` and `native-redis-driver` ahead of `sqlalchemy-and-django-integration`, `sqlspec-adapter-parity`, `queues-tasks-and-channels` -> `spanner-queue-and-rw-transactions`, and `strict-typing-hygiene`.
 
 [^db-registry]: `src/py/vertebra/db/registry.py::DatabaseRegistry` — Table-driven database driver and dialer registry.
 [^fastpath-core]: `src/py/vertebra/server/_fastpath_core.py` — Shared `FastPathProvider` core across ASGI, WSGI, and native frameworks.
 [^sqlspec-adapters]: `src/py/vertebra/extensions/sqlspec/adapters.py` — SQLSpec adapter configuration and driver bindings.
-[^sa-dbapi]: `src/py/vertebra/extensions/sqlalchemy/dialects.py::SyncDBAPIConnection` — SQLAlchemy DB-API dialect bindings targeted for neutral `dbapi` extraction.
+[^sa-dbapi]: `src/py/vertebra/db/dbapi/_sync.py::SyncDBAPIConnection` — Standalone PEP 249 DB-API connection extracted by broker-pool-sharing pending hardening.
 [^queue-redis]: `src/py/vertebra/framework/queues/redis.py::RedisQueueBackend` — Redis and Valkey queue backends targeted for native wheel cutover.
 [^queue-oracle]: `src/py/vertebra/framework/queues/oracle.py::OracleQueueBackend` — Oracle queue backend targeted for `SyncOracleQueueStore` and `AsyncOracleQueueStore`.
 [^queue-spanner]: `src/py/vertebra/framework/queues/spanner.py::SpannerQueueBackend` — Spanner queue backend requiring interactive `ReadWrite` transactions.

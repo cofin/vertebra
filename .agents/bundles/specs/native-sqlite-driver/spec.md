@@ -15,16 +15,18 @@ chapters:
 current_chapter: ch01-wheel-scaffold-and-isolation
 current_task: native-sqlite-driver:ch01:t01
 parent_prd: native-data-platform
-depends_on_flows:
-- broker-pool-sharing
+depends_on_flows: []
 plan_revision: 1
 plan_commit: 1b191388
 created_at: '2026-11-12T23:45:00Z'
-updated_at: '2026-11-14T23:10:00Z'
+updated_at: '2026-11-15T17:48:00Z'
 generated:
   by: flow/0.30.1
   at: '2026-11-14T23:10:00Z'
 verified:
+- by: agent:flow-archive
+  at: '2026-11-15T17:48:00Z'
+  commit: 28415b3f
 - by: agent:plan-generator
   at: '2026-11-14T23:10:00Z'
   commit: 1b191388
@@ -158,7 +160,7 @@ Both `SyncSQLiteDriver` and `AsyncSQLiteDriver` implement `SyncPipelineCapable` 
 ## 6. Current State & Remaining Plan Snapshot
 
 - **Baseline (`18baadcd`)**: `0/3` chapters and `0/12` tasks completed; frontier at `ch01-wheel-scaffold-and-isolation` (`native-sqlite-driver:ch01:t01`).
-- **Upstream Flow Dependencies**: `broker-pool-sharing`.
+- **Upstream Flow Dependencies**: None (`broker-pool-sharing` complete and archived at `28415b3f`).
 - **Active Invariants**: Zero system `libsqlite3` dependency; `GIL_USED == False`; zero `import sqlite3` in production SQLite driver/dialect modules; reciprocal `.pyi` wheel isolation holds across every extension.
 - **Full `/flow:finish` Gate**: `make sqlite-test && make sqlite-wheel-check && make lint-all && make py-test && make docs && make review-check`
 

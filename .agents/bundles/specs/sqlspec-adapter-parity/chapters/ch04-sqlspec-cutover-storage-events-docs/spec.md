@@ -96,7 +96,7 @@ Updates `docs/usage/extensions.md`, `docs/reference/extensions.md`, [sqlspec-alc
 
 ## 6. Current State & Remaining Plan Snapshot
 
-Chapter `ch04-sqlspec-cutover-storage-events-docs` is `planned` behind [`../../spec.md`](../../spec.md) prerequisites (`broker-pool-sharing`, `native-sqlite-driver`, `native-redis-driver`).
+Chapter `ch04-sqlspec-cutover-storage-events-docs` is `planned` behind [`../../spec.md`](../../spec.md) prerequisites (`native-sqlite-driver` and `native-redis-driver`; `broker-pool-sharing` complete and archived at `28415b3f`).
 
 Fast Chapter Gate (`< 60s` offline):
 

@@ -16,16 +16,18 @@ current_chapter: ch01-dbapi-foundation-and-relational-dialects
 current_task: sqlalchemy-and-django-integration:ch01:t01
 parent_prd: integration-remediation
 depends_on_flows:
-- broker-pool-sharing
 - native-sqlite-driver
 plan_revision: 5
 plan_commit: 1b191388
 created_at: '2026-11-03T03:30:00Z'
-updated_at: '2026-11-14T18:50:00Z'
+updated_at: '2026-11-15T17:48:00Z'
 generated:
   by: flow/0.30.1
   at: '2026-11-14T18:50:00Z'
 verified:
+- by: agent:flow-archive
+  at: '2026-11-15T17:48:00Z'
+  commit: 28415b3f
 - by: agent:plan-generator
   at: '2026-11-14T18:50:00Z'
   commit: 1b191388
@@ -40,8 +42,8 @@ sources:
   resource: src/py/vertebra/extensions/sqlalchemy/dialects.py
   title: Monolithic SQLAlchemy dialect and PEP 249 DB-API module slated for per-engine split
 - id: sa-dbapi
-  resource: src/py/vertebra/extensions/sqlalchemy/dialects.py::SyncDBAPIConnection
-  title: PEP 249 connection with a second sqlite3 connection, default SQLite URL, and isinstance config dispatch
+  resource: src/py/vertebra/db/dbapi/_sync.py::SyncDBAPIConnection
+  title: Standalone PEP 249 connection extracted in broker-pool-sharing still carrying _sqlite_conn, default SQLite URL, raw native exceptions, and isinstance config dispatch
 - id: sa-alembic
   resource: src/py/vertebra/extensions/sqlalchemy/alembic.py
   title: Monolithic Alembic DefaultImpl integration checking concrete config classes
@@ -65,7 +67,7 @@ sources:
 # Specification: SQLAlchemy, Advanced Alchemy, and Django DB Integration
 
 <!-- truth: start -->
-- **Baseline (`18baadcd`)**: `SyncDBAPIConnection` and `AsyncDBAPIConnection` reside in monolithic `extensions/sqlalchemy/dialects.py`, default `url` to `sqlite+vtb:///:memory:`, open a second stdlib `sqlite3` connection (`_sqlite_conn`), and dispatch via `isinstance` against concrete adapter configs [^sa-dialects] [^sa-dbapi] [^fail-loud-baseline].
+- **Baseline (`28415b3f`)**: `SyncDBAPIConnection` and `AsyncDBAPIConnection` live in extracted `vertebra.db.dbapi` (`broker-pool-sharing`), yet still default `url` to `sqlite+vtb:///:memory:`, open a second stdlib `sqlite3` connection (`_sqlite_conn`), leak raw `vertebra._vertebra` errors rather than PEP 249 `dbapi.*Error` classes, and dispatch via `isinstance` against concrete adapter configs [^sa-dialects] [^sa-dbapi] [^fail-loud-baseline].
 - **Target Dialect & Entry-Point Contract**: Split `extensions/sqlalchemy/dialects/<engine>.py` modules expose leading `Sync<Engine>Dialect` / `Async<Engine>Dialect` classes subclassing SQLAlchemy built-ins and `duckdb_engine` / `sqlalchemy_bigquery` / `sqlalchemy_spanner` bases while preserving all `36` `[project.entry-points."sqlalchemy.dialects"]` names (`<engine>+vertebra`, `+vtb`, `+vertebra_async`, `+vtb_async`) [^entry-points].
 - **Target Cache & Advanced Alchemy `1.12.0+` Contract**: `dogpile.cache>=1.3.3` region backends (`vertebra.valkey`, `vertebra.redis`, `vertebra.memory`) wire into `SQLAlchemySyncConfig` / `SQLAlchemyAsyncConfig`, `ZeroCopyServiceMixin`, and `AlembicImpl` autogenerate/DDL parity, deleting `extensions/sqlalchemy/cache.py` and the fake `shm://` scheme [^aa-cache] [^aa-plugin] [^sa-alembic].
 - **Target Django `6.0+` Contract**: `postgresql`, `mysql`, `oracle`, and `sqlite3` subclass Django built-ins over `vertebra.db.dbapi`, `spanner` subclasses `django_spanner.base.DatabaseWrapper` over `vertebra.db.dbapi`, and unsupported `bigquery`/`duckdb`/`mssql` Django DB backends are removed [^django-backends].
@@ -73,10 +75,10 @@ sources:
 
 ## 1. Specification, Context & Provenance
 
-SQLAlchemy and Advanced Alchemy are the primary ORM/query path in Vertebra, alongside native Django `6.0+` database backends. Upstream `broker-pool-sharing:ch04` extracts `src/py/vertebra/db/dbapi/{__init__,_sync,_async}.py`, `extensions/sqlalchemy/async_adapter.py`, and `extensions/sqlalchemy/pool.py`, while `native-sqlite-driver` delivers the Rust-backed SQLite driver.
+SQLAlchemy and Advanced Alchemy are the primary ORM/query path in Vertebra, alongside native Django `6.0+` database backends. Completed upstream `broker-pool-sharing` (`28415b3f`) extracted `src/py/vertebra/db/dbapi/{__init__,_sync,_async}.py`, `extensions/sqlalchemy/async_adapter.py`, and `extensions/sqlalchemy/pool.py`, while `native-sqlite-driver` delivers the Rust-backed SQLite driver.
 
-At `main @ 18baadcd`, three structural defects remain across SQLAlchemy, Advanced Alchemy, and Django [^sa-dbapi] [^sa-alembic] [^django-backends]:
-1. `SyncDBAPIConnection` opens a separate stdlib `sqlite3.connect` handle (`_sqlite_conn`), defaults empty URLs to `sqlite+vtb:///:memory:`, and dispatches autocommit/migration rules via `isinstance` checks on `BigQueryConfig`, `SpannerConfig`, `SQLiteConfig`, `PostgreSQLConfig`, and `MySQLConfig`.
+At `28415b3f`, three structural defects remain across SQLAlchemy, Advanced Alchemy, and Django [^sa-dbapi] [^sa-alembic] [^django-backends]:
+1. `SyncDBAPIConnection` in `db/dbapi/_sync.py` (and `AsyncDBAPIConnection`) still opens a separate stdlib `sqlite3.connect` handle (`_sqlite_conn`), defaults empty URLs to `sqlite+vtb:///:memory:`, leaks raw `vertebra._vertebra` errors before PEP 249 mapping, and checks dialects on concrete config classes (`BigQueryConfig`, `SpannerConfig`, `SQLiteConfig`, `PostgreSQLConfig`, `MySQLConfig`).
 2. Monolithic `dialects.py` (`1,659` lines) and `alembic.py` (`418` lines) mix inline PEP 249 shims with partial hand-rolled cloud/analytical compilers, while `alchemy/cache.py` lacks real `dogpile.cache` backend registration (`dogpile.cache` is absent from `pyproject.toml`) and retains a duplicate `sqlalchemy/cache.py` shim [^aa-cache].
 3. `extensions/django/db/backends/` routes through a generic vendor-dispatching `DatabaseWrapperMixin` and ships hollow stubs for `bigquery`, `duckdb`, and `mssql`, which have no built-in Django backends.
 
@@ -114,11 +116,11 @@ At `main @ 18baadcd`, three structural defects remain across SQLAlchemy, Advance
 ## 6. Current State & Remaining Plan Snapshot
 
 - **Current Frontier**: `state: planned` at `ch01-dbapi-foundation-and-relational-dialects` (`sqlalchemy-and-django-integration:ch01:t01`, `0/12` tasks completed across `3` chapters).
-- **Upstream Flow Gates**: Requires `broker-pool-sharing` (`ch04` extracts `vertebra.db.dbapi`, `async_adapter.py`, and `pool.py`) and `native-sqlite-driver` (native Rust SQLite driver replacing stdlib `sqlite3`).
+- **Upstream Flow Gates**: `broker-pool-sharing` (`28415b3f`) is complete and archived (extracted `vertebra.db.dbapi`, `async_adapter.py`, and `pool.py`); awaits `native-sqlite-driver` (native Rust SQLite driver replacing stdlib `sqlite3`).
 - **Full `/flow:finish` Gate**: `make lint-all && make py-test && make docs`.
 
-[^sa-dialects]: `src/py/vertebra/extensions/sqlalchemy/dialects.py` — Monolithic SQLAlchemy dialect and PEP 249 DB-API module slated for per-engine split.
-[^sa-dbapi]: `src/py/vertebra/extensions/sqlalchemy/dialects.py::SyncDBAPIConnection` — PEP 249 connection with a second sqlite3 connection, default SQLite URL, and isinstance config dispatch.
+[^sa-dialects]: `src/py/vertebra/extensions/sqlalchemy/dialects.py` — Monolithic SQLAlchemy dialect module slated for per-engine split.
+[^sa-dbapi]: `src/py/vertebra/db/dbapi/_sync.py::SyncDBAPIConnection` — Standalone PEP 249 connection with `_sqlite_conn`, default SQLite URL, and unmapped native errors pending hardening.
 [^sa-alembic]: `src/py/vertebra/extensions/sqlalchemy/alembic.py` — Monolithic Alembic DefaultImpl integration checking concrete config classes.
 [^entry-points]: `pyproject.toml` — 36 sqlalchemy.dialects entry points across 9 database engines.
 [^aa-cache]: `src/py/vertebra/extensions/alchemy/cache.py` — Advanced Alchemy cache backend, AsyncCacheManager, and ZeroCopyServiceMixin.

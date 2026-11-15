@@ -220,7 +220,7 @@ Adapter exports and store capabilities are documented in `ch04-sqlspec-cutover-s
 
 ## 6. Current State & Remaining Plan Snapshot
 
-Chapter `ch03-sqlspec-enterprise-and-cloud-adapters` is `planned` behind [`../../spec.md`](../../spec.md) prerequisites (`broker-pool-sharing`, `native-sqlite-driver`, `native-redis-driver`).
+Chapter `ch03-sqlspec-enterprise-and-cloud-adapters` is `planned` behind [`../../spec.md`](../../spec.md) prerequisites (`native-sqlite-driver` and `native-redis-driver`; `broker-pool-sharing` complete and archived at `28415b3f`).
 
 Fast Chapter Gate (`< 60s` offline):
 

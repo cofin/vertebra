@@ -17,13 +17,12 @@ current_chapter: ch01-sqlspec-core-driver-and-artifact-ref
 current_task: sqlspec-adapter-parity:ch01:t01
 parent_prd: integration-remediation
 depends_on_flows:
-- broker-pool-sharing
 - native-sqlite-driver
 - native-redis-driver
 plan_revision: 3
 plan_commit: 1b191388
 created_at: '2026-11-03T03:30:00Z'
-updated_at: '2026-11-14T18:50:00Z'
+updated_at: '2026-11-15T17:52:00Z'
 generated:
   by: flow/0.30.1
   at: '2026-11-14T18:50:00Z'
@@ -31,6 +30,9 @@ verified:
 - by: agent:plan-generator
   at: '2026-11-14T18:50:00Z'
   commit: 1b191388
+- by: agent:flow-archive-realign
+  at: '2026-11-15T17:52:00Z'
+  commit: 28415b3f
 tags:
 - sqlspec
 - adapters
@@ -114,7 +116,7 @@ Primary-source verification against `sqlspec==0.71.1` (MyPyC-compiled) confirms:
 ## 6. Current State & Remaining Plan Snapshot
 
 - **Current Frontier**: `state: planned` at `ch01-sqlspec-core-driver-and-artifact-ref` (`sqlspec-adapter-parity:ch01:t01`, `0/15` tasks completed across `4` chapters; `ch02`–`ch03` are mutually independent after `ch01`).
-- **Upstream Flow Gates**: Requires `broker-pool-sharing` (pooled `Proxy*Driver` and `VTBARROW` lease lifecycles), `native-sqlite-driver`, and `native-redis-driver`.
+- **Upstream Flow Gates**: `broker-pool-sharing` (pooled `Proxy*Driver` and `VTBARROW` lease lifecycles) is complete and archived at `28415b3f`; awaits `native-sqlite-driver` and `native-redis-driver`.
 - **Full `/flow:finish` Gate**: `make lint-all && make py-test && make docs`.
 
 [^pyproject-sqlspec]: `pyproject.toml` — sqlspec floor and optional adk extra.

@@ -41,8 +41,8 @@ sources:
   resource: pyproject.toml
   title: Optional alchemy, django, and dialect extras
 - id: sa-dbapi
-  resource: src/py/vertebra/extensions/sqlalchemy/dialects.py::SyncDBAPIConnection
-  title: Current PEP 249 connection with _sqlite_conn and default URL
+  resource: src/py/vertebra/db/dbapi/_sync.py::SyncDBAPIConnection
+  title: Standalone PEP 249 connection with _sqlite_conn, default URL, and unmapped native errors pending hardening
 - id: db-common
   resource: src/py/vertebra/db/driver/_common.py
   title: BaseDatabaseConfig base contract for all database configs
@@ -55,12 +55,14 @@ sources:
 
 ## Objective & Scope Boundary
 
-Update `pyproject.toml` extras, harden `vertebra.db.dbapi` (`_sync.py` and `_async.py` extracted in `broker-pool-sharing:ch04`), add engine-neutral transaction/migration metadata on `BaseDatabaseConfig`, harden `extensions/sqlalchemy/async_adapter.py`, and extract `SyncEngineAdapter` + `attach_serverless_disconnect_guard` into `extensions/sqlalchemy/engine.py` per [`../spec.md` §2](../spec.md) [^pyproject-deps] [^sa-dbapi] [^db-common] [^sa-dialects]. Out of scope: per-engine dialect modules (`t03`–`t04`, `ch02`).
+Update `pyproject.toml` extras, harden `vertebra.db.dbapi` (`_sync.py` and `_async.py`, extracted in `broker-pool-sharing:ch04` and archived at `28415b3f`), add engine-neutral transaction/migration metadata on `BaseDatabaseConfig`, harden `extensions/sqlalchemy/async_adapter.py`, and extract `SyncEngineAdapter` + `attach_serverless_disconnect_guard` into `extensions/sqlalchemy/engine.py` per [`../spec.md` §2](../spec.md) [^pyproject-deps] [^sa-dbapi] [^db-common] [^sa-dialects]. Out of scope: per-engine dialect modules (`t03`–`t04`, `ch02`).
 
 ## Bounded Read Manifest
 
 - `pyproject.toml` — `[project.optional-dependencies]` (`alchemy`, `django`, optional dialect extras) and `[dependency-groups].dev`.
-- `src/py/vertebra/extensions/sqlalchemy/dialects.py` — `_sqlite_conn`, `url='sqlite+vtb:///:memory:'`, `SyncEngineAdapter`, `attach_serverless_disconnect_guard`, and `AsyncAdapt_dbapi_connection` context.
+- `src/py/vertebra/db/dbapi/{_sync,_async}.py` — `_sqlite_conn`, `url='sqlite+vtb:///:memory:'`, `database=` compatibility parameter, and native exception translation boundary.
+- `src/py/vertebra/extensions/sqlalchemy/dialects.py` — `SyncEngineAdapter`, `attach_serverless_disconnect_guard`, and dialect imports.
+- `src/py/vertebra/extensions/sqlalchemy/async_adapter.py` — greenlet `AsyncAdapt_dbapi_connection` wrapper extracted in `broker-pool-sharing:ch04`.
 - `src/py/vertebra/db/registry.py` — `DatabaseRegistry.parse_url` and driver factory seam.
 - `src/py/vertebra/db/driver/_common.py` — `BaseDatabaseConfig` and canonical `DatabaseError` hierarchy.
 - `src/py/vertebra/extensions/sqlalchemy/alembic.py` — direct migration DSN checks slated to read `effective_direct_dsn`.
@@ -68,13 +70,13 @@ Update `pyproject.toml` extras, harden `vertebra.db.dbapi` (`_sync.py` and `_asy
 ## Contracts & Edge Cases
 
 - Add `dogpile.cache>=1.3.3` to `[project.optional-dependencies].alchemy` and `[dependency-groups].dev`; raise `django>=6.0` on `django`; add optional `sqlalchemy-duckdb`, `sqlalchemy-gcp`, and `django-spanner` extras (never adding an `[all]` extra).
-- Delete `_sqlite_conn`, stdlib `sqlite3` imports, `url='sqlite+vtb:///:memory:'`, and `database=` from `db/dbapi/{_sync,_async}.py`; raise `InterfaceError` on empty/missing URLs; execute SQLite solely via `SyncSQLiteDriver`/`AsyncSQLiteDriver`; forbid importing SQLAlchemy, Django, framework, or engine adapter modules inside `db/dbapi/`.
+- Delete `_sqlite_conn`, stdlib `sqlite3` imports, `url='sqlite+vtb:///:memory:'`, and `database=` from `db/dbapi/{_sync,_async}.py`; raise `InterfaceError` on empty/missing URLs; map native `vertebra._vertebra` exceptions (`DatabaseError`) to PEP 249 `dbapi.*Error` subclasses; execute SQLite solely via `SyncSQLiteDriver`/`AsyncSQLiteDriver`; forbid importing SQLAlchemy, Django, framework, or engine adapter modules inside `db/dbapi/`.
 - Declare `requires_statement_autocommit: ClassVar[bool] = False` and `effective_direct_dsn -> str` on `BaseDatabaseConfig` so `db/dbapi` and Alembic never inspect concrete config `isinstance` checks.
 - Harden `extensions/sqlalchemy/async_adapter.py` (`await_only` greenlet boundary, cancellation cleanup, PEP 249 error propagation) and extract `SyncEngineAdapter` and `attach_serverless_disconnect_guard` into `extensions/sqlalchemy/engine.py`.
 
 ## Test Matrix
 
-- `@pytest.mark.parametrize` verifies empty/missing URLs raise `InterfaceError`, single-connection SQLite `:memory:` round-trips zero stdlib `sqlite3` handles, `requires_statement_autocommit` rejects `autocommit=False` with `NotSupportedError`, and `vertebra.db.dbapi` loads zero upward packages.
+- `@pytest.mark.parametrize` verifies empty/missing URLs raise `InterfaceError`, single-connection SQLite `:memory:` round-trips zero stdlib `sqlite3` handles, native `vertebra._vertebra` exceptions map to PEP 249 `dbapi.*Error`, `requires_statement_autocommit` rejects `autocommit=False` with `NotSupportedError`, and `vertebra.db.dbapi` loads zero upward packages.
 - Async greenlet cancellation and `DatabaseError` -> PEP 249 error propagation pass on `async_adapter.py`, plus `test_optional_driver_wheels.py`.
 
 ## Verification
@@ -92,6 +94,6 @@ uv run --no-sync ruff check src/py/vertebra/db/driver src/py/vertebra/extensions
 - [ ] Zero regressions in the fast verification gate.
 
 [^pyproject-deps]: `pyproject.toml` — Optional alchemy, django, and dialect extras.
-[^sa-dbapi]: `src/py/vertebra/extensions/sqlalchemy/dialects.py::SyncDBAPIConnection` — Current PEP 249 connection with _sqlite_conn and default URL.
+[^sa-dbapi]: `src/py/vertebra/db/dbapi/_sync.py::SyncDBAPIConnection` — Standalone PEP 249 connection with `_sqlite_conn`, default URL, and unmapped native errors pending hardening.
 [^db-common]: `src/py/vertebra/db/driver/_common.py` — BaseDatabaseConfig base contract for all database configs.
 [^sa-dialects]: `src/py/vertebra/extensions/sqlalchemy/dialects.py` — Current SyncEngineAdapter, attach_serverless_disconnect_guard, and greenlet adaptation.

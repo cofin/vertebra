@@ -145,7 +145,7 @@ Updates `docs/usage/extensions.md`, `docs/usage/databases.md`, `docs/reference/e
 
 ## 6. Current State & Remaining Plan Snapshot
 
-Chapter `ch03-django-backends-and-docs` (`t04`) is `planned` behind upstream [`../../spec.md`](../../spec.md) prerequisites (`broker-pool-sharing` and `native-sqlite-driver`).
+Chapter `ch03-django-backends-and-docs` (`t04`) is `planned` behind upstream [`../../spec.md`](../../spec.md) prerequisite `native-sqlite-driver` (`broker-pool-sharing` complete and archived at `28415b3f`).
 
 Fast Chapter Gate (`< 60s` offline):
 
