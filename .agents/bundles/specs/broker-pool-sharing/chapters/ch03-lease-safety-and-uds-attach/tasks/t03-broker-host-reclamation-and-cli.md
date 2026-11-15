@@ -6,7 +6,7 @@ chapter_id: ch03-lease-safety-and-uds-attach
 title: Wire BrokerHost Background Reclaimer and Standalone Broker Daemon Lifecycle
 description: Expose BrokerAttachServer/BrokerAttachClient in PyO3 and implement BrokerHost crash ROLLBACK reclamation and ShutdownReport.
 status: stable
-state: pending
+state: completed
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -76,9 +76,9 @@ make dev && uv run --no-sync python -m mypy.stubtest vertebra._vertebra --concis
 
 ## Acceptance Criteria
 
-- [ ] `BrokerHost` shares one lifecycle across supervisor mode and `vtb broker serve`.
-- [ ] Reclaimed leases never return to the free pool without a clean `ROLLBACK`.
-- [ ] Zero regressions in the fast verification gate.
+- [x] `BrokerHost` shares one lifecycle across supervisor mode and `vtb broker serve`.
+- [x] Reclaimed leases never return to the free pool without a clean `ROLLBACK`.
+- [x] Zero regressions in the fast verification gate.
 
 [^py-broker]: `src/rs/vertebra-py/src/broker.rs::LeaseBroker` — PyO3 LeaseBroker and StatementCache bindings.
 [^vertebra-pyi]: `src/py/vertebra/_vertebra.pyi` — Type stubs for vertebra._vertebra.

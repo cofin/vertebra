@@ -6,7 +6,7 @@ chapter_id: ch03-lease-safety-and-uds-attach
 title: Implement Peer-Credential Authenticated UDS Broker Handshake and FD Passing
 description: Build Unix domain socket SO_PEERCRED/LOCAL_PEERCRED handshake and SCM_RIGHTS SHM file-descriptor passing.
 status: stable
-state: pending
+state: completed
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -69,9 +69,9 @@ cargo test --manifest-path src/rs/Cargo.toml -p vertebra-core --features tls,com
 
 ## Acceptance Criteria
 
-- [ ] Unauthenticated or bad-permission UDS attach attempts never receive the SHM fd.
-- [ ] Secret bytes are redacted in `Debug` and error messages.
-- [ ] Zero regressions in the fast verification gate.
+- [x] Unauthenticated or bad-permission UDS attach attempts never receive the SHM fd.
+- [x] Secret bytes are redacted in `Debug` and error messages.
+- [x] Zero regressions in the fast verification gate.
 
 [^core-shm]: `src/rs/vertebra-core/src/shm.rs::ShmRegion` — Named POSIX shared-memory regions.
 [^shm-it]: `src/rs/vertebra-core/tests/it/shm.rs::stale_region_replaced_on_create_named` — Existing SHM integration test suite.

@@ -6,7 +6,7 @@ chapter_id: ch03-lease-safety-and-uds-attach
 title: Implement Transaction Session Affinity, Streaming Cursors, Broker Metrics, and vtb broker CLI
 description: Pin active transactions to backend sessions, stream multi-batch VTBARROW frames, expose broker telemetry, and wire vtb broker serve CLI commands.
 status: stable
-state: pending
+state: completed
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -77,8 +77,8 @@ uv run --no-sync pytest src/py/tests/unit/extensions/test_shm_broker.py src/py/t
 
 ## Acceptance Criteria
 
-- [ ] Session affinity, `VTBARROW` streaming, `PoolMetrics`, and `vtb broker serve` are wired and type-checked.
-- [ ] Zero regressions in the fast verification gate.
+- [x] Session affinity, `VTBARROW` streaming, `PoolMetrics`, and `vtb broker serve` are wired and type-checked.
+- [x] Zero regressions in the fast verification gate.
 
 [^broker-transport]: `src/py/vertebra/extensions/broker/transport.py::_BaseSHMBrokerTransport` — Python SHM broker transports and lease objects.
 [^broker-plugin]: `src/py/vertebra/extensions/broker/plugin.py::BrokerPlugin` — BrokerPlugin lifecycle and metric snapshot integration.

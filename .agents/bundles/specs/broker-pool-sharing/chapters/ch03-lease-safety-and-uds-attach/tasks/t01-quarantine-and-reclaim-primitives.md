@@ -6,7 +6,7 @@ chapter_id: ch03-lease-safety-and-uds-attach
 title: Implement Lease Quarantine State Machine and Dead-Worker Slot Reclamation
 description: Add Quarantine/Resetting slot states and generation-fenced reclamation in ShmLeaseTable.
 status: stable
-state: pending
+state: completed
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -74,9 +74,9 @@ make dev && cargo test --manifest-path src/rs/Cargo.toml -p vertebra-core --feat
 
 ## Acceptance Criteria
 
-- [ ] Quarantined slots cannot be re-leased before explicit disposal.
-- [ ] `mypy.stubtest vertebra._vertebra` passes.
-- [ ] Zero regressions in the fast verification gate.
+- [x] Quarantined slots cannot be re-leased before explicit disposal.
+- [x] `mypy.stubtest vertebra._vertebra` passes.
+- [x] Zero regressions in the fast verification gate.
 
 [^core-broker]: `src/rs/vertebra-core/src/broker.rs::ShmLeaseTable` — Shared-memory lease table, statement cache, dialect tags, and worker reclamation.
 [^py-broker]: `src/rs/vertebra-py/src/broker.rs::LeaseBroker` — PyO3 LeaseBroker and StatementCache bindings.

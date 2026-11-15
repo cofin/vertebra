@@ -5,7 +5,8 @@ chapter_id: ch03-lease-safety-and-uds-attach
 title: 'Chapter 03: Quarantine Reclamation, Authenticated UDS Broker Attach, Session Affinity, and CLI'
 description: Implement crashed-worker lease quarantine and reclamation, SCM_RIGHTS/peercred UDS broker attach, BrokerHost reclamation loop, transaction session affinity, streaming Arrow cursors, and vtb broker CLI.
 status: stable
-state: planned
+state: completed
+last_reviewed_commit: ae86568f
 planning_status: complete
 planning_quality: standard
 planning_degraded_reason: null
@@ -134,14 +135,14 @@ Security boundary and quarantine semantics are documented in `ch04:t04`.
 
 ## 5. Implementation Plan
 
-- [ ] [t01-quarantine-and-reclaim-primitives.md](tasks/t01-quarantine-and-reclaim-primitives.md) — Add `LeaseState::Quarantined` and generation-fenced reclamation (`quarantine`, `dispose_quarantined`, `reclaim_worker_leases`) in `ShmLeaseTable`.
-- [ ] [t02-uds-authenticated-attach.md](tasks/t02-uds-authenticated-attach.md) — Build Unix domain socket `SO_PEERCRED`/`LOCAL_PEERCRED` handshake and `SCM_RIGHTS` SHM file-descriptor passing.
-- [ ] [t03-broker-host-reclamation-and-cli.md](tasks/t03-broker-host-reclamation-and-cli.md) — Expose UDS attach in `_vertebra` and implement `BrokerHost` reclamation and `ShutdownReport` in `host.py`.
-- [ ] [t04-affinity-streaming-metrics-and-cli.md](tasks/t04-affinity-streaming-metrics-and-cli.md) — Pin active transactions to backend sessions, stream multi-batch `VTBARROW` frames, expose `PoolMetrics`, and wire `vtb broker serve` CLI commands.
+- [x] [ae86568f] [t01-quarantine-and-reclaim-primitives.md](tasks/t01-quarantine-and-reclaim-primitives.md) — Add `LeaseState::Quarantined` and generation-fenced reclamation (`quarantine`, `dispose_quarantined`, `reclaim_worker_leases`) in `ShmLeaseTable`.
+- [x] [ae86568f] [t02-uds-authenticated-attach.md](tasks/t02-uds-authenticated-attach.md) — Build Unix domain socket `SO_PEERCRED`/`LOCAL_PEERCRED` handshake and `SCM_RIGHTS` SHM file-descriptor passing.
+- [x] [ae86568f] [t03-broker-host-reclamation-and-cli.md](tasks/t03-broker-host-reclamation-and-cli.md) — Expose UDS attach in `_vertebra` and implement `BrokerHost` reclamation and `ShutdownReport` in `host.py`.
+- [x] [ae86568f] [t04-affinity-streaming-metrics-and-cli.md](tasks/t04-affinity-streaming-metrics-and-cli.md) — Pin active transactions to backend sessions, stream multi-batch `VTBARROW` frames, expose `PoolMetrics`, and wire `vtb broker serve` CLI commands.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Baseline (`18baadcd`)**: `state: planned`; `0/4` tasks completed.
+- **Completed (`ae86568f`)**: `state: completed`; `4/4` tasks completed and verified (`vertebra-core` unit/it/doc tests, `vertebra-mssql` lib tests, `87` Python pytest tests, `ruff`, `mypy`, `stubtest`, `clippy`, `make review-check`).
 - **Active Invariants**: Quarantined slots count toward pool admission until disposed; attach secrets never appear in `repr`, logs, or metrics.
 - **Fast Chapter Gate (`< 60s`)**: `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-core --features tls,compression,gcp && make dev && uv run --no-sync python -m mypy.stubtest vertebra._vertebra --concise && uv run --no-sync pytest src/py/tests/unit/extensions/test_shm_broker.py src/py/tests/unit/extensions/test_shm_lease_broker.py src/py/tests/unit/extensions/test_broker_transport.py -q`
 

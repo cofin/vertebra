@@ -5,7 +5,7 @@ chapter_id: ch04-python-pooling-sqlspec-sqlalchemy-and-docs
 title: 'Chapter 04: Proxy Drivers, Multi-Process SQLSpec & SQLAlchemy Pool Sharing, and Docs/OKF'
 description: Refactor SQLSpec provider seams and ProxySyncDriver/ProxyAsyncDriver, prove 4-worker single-pool sharing, extract standalone vertebra.db.dbapi and wire SQLAlchemy/Advanced Alchemy broker pooling, and sync docs/OKF.
 status: stable
-state: planned
+state: in_progress
 planning_status: complete
 planning_quality: standard
 planning_degraded_reason: null
